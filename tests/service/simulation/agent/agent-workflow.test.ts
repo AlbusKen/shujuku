@@ -73,6 +73,7 @@ describe('世界推演固定工作流', () => {
     expect(env.calls.slice(1).sort()).toEqual(['chronicler', 'dramatis-keeper', 'undercurrent-analyst']);
     expect(env.calls).not.toContain('guidance-composer');
     expect(result.outcome).toBe('no_change');
+    expect(result.finalProjection).toEqual({ content: null, sourceAgent: 'current-ledger', sourceRevision: 0, deliverable: true });
   });
 
   it('timekeeper 即时保存后，后续派工读取新账本，独立候选在其上预演且不会重放已保存写入', async () => {
@@ -106,6 +107,8 @@ describe('世界推演固定工作流', () => {
     expect(result.ledger).toMatchObject({ revision: 2, clock: { day: 2 } });
     expect(result.ledger.dimensions).toHaveLength(1);
     expect(result.commitCandidate?.acceptedCandidates).toEqual([expect.objectContaining({ candidateId: dimension.candidateId, patch: dimension.patch })]);
+    expect(result.finalProjection.deliverable).toBe(false);
+    expect(result.finalProjection.sourceRevision).toBe(result.ledger.revision);
   });
 
   it('已确认即时写入与终局候选重叠时降级为 rejected，而不抛出工作流异常', async () => {
@@ -158,6 +161,7 @@ describe('世界推演固定工作流', () => {
     });
     expect(env.subagents.run).not.toHaveBeenCalled();
     expect(result).toMatchObject({ outcome: 'no_change', pendingFixes: [] });
+    expect(result.finalProjection).toEqual({ content: null, sourceAgent: 'current-ledger', sourceRevision: ledger.revision, deliverable: true });
   });
 
   it('只有材料快照但 completion 为 legacy_unknown 时不能短路', async () => {
@@ -202,13 +206,19 @@ describe('世界推演固定工作流', () => {
       chronicler: [noChange('chronicler')],
       'guidance-composer': [badGuidance],
     });
+    const fixedWorldbook = { text: '固定世界书全文', sections: [{ address: 'worldbook:entry:设定集:7', start: 0, length: 7, revision: null as null }] };
     const result = await runWorldSimulationWorkflow_ACU({
       identity: env.identity, settings: env.settings, promptContext: env.promptContext, registry: env.registry, tools: env.tools,
       opening: { summary: '开局', focus: '时钟', dispatchChronicler: false, skipModules: [] },
-      subagents: env.subagents,
+      subagents: env.subagents, triggeredWorldbook: fixedWorldbook.text, fixedWorldbook,
     });
     expect(env.calls).toContain('guidance-composer');
+    for (const [input] of env.subagents.run.mock.calls) {
+      expect(input).toMatchObject({ triggeredWorldbook: fixedWorldbook.text, fixedWorldbook });
+      expect(input.fixedWorldbook).toBe(fixedWorldbook);
+    }
     expect(result.outcome).toBe('escalate');
+    expect(result.finalProjection.deliverable).toBe(false);
     expect(result.ledger.clock.day).toBe(2);
     expect(result.ledger.guidance.signals).toEqual([]);
     expect(result.pendingFixes).toEqual(expect.arrayContaining([expect.objectContaining({ module: 'guidance' })]));

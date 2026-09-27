@@ -616,9 +616,29 @@ export const AGENT_SEARCH_SCOPES_ACU = ['story', 'tables', 'modules', 'outline',
 export type AgentSearchScope_ACU = typeof AGENT_SEARCH_SCOPES_ACU[number];
 
 /** 一次 read 工具调用：按地址 token 批量取数。 */
+export interface AgentReadFence_ACU {
+  /** 资料适配器可验证的下边界；未提供时使用适配器合法起点。 */
+  lower?: string | number;
+  /** 资料适配器可验证的上边界；未提供时按请求上下文余量解析。 */
+  upper?: string | number;
+}
+
+/**
+ * 一条资料读取成功时必须能够回溯的围栏证明。
+ * requestedFence 是模型请求的原始边界，resolvedFence 是适配器实际采用的边界。
+ */
+export interface AgentReadFenceProof_ACU {
+  requestedFence?: AgentReadFence_ACU;
+  resolvedFence: AgentReadFence_ACU;
+  stableAddress: string;
+  revision: string | number;
+  completeWithinFence: boolean;
+}
+
 export interface AgentReadCall_ACU {
   kind: 'read';
   reads: string[];
+  requestedFence?: AgentReadFence_ACU;
 }
 
 /** 一次 search 工具调用：grep 式跨域检索。 */
@@ -756,11 +776,11 @@ export interface AgentRunBudget_ACU {
 }
 
 export const DEFAULT_AGENT_RUN_BUDGET_ACU: AgentRunBudget_ACU = {
-  maxIterations: 8,
-  maxDelegations: 6,
+  maxIterations: 4,
+  maxDelegations: 3,
   maxSameAgent: 2,
   maxConcurrent: 3,
-  maxReads: 8,
+  maxReads: 4,
   maxExtraReads: 3,
 };
 

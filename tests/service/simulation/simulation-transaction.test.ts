@@ -9,8 +9,8 @@ function agentForPatch_ACU(patch: Record<string, unknown>): string {
   const keys = Object.keys(patch);
   if (keys.some(key => key === 'clock')) return 'timekeeper';
   if (keys.some(key => key === 'dimensions' || key === 'seeds')) return 'undercurrent-analyst';
-  if (keys.some(key => key === 'actors' || key === 'player' || key === 'rumors')) return 'dramatis-keeper';
-  if (keys.some(key => key === 'chronicle' || key === 'chronicleArchive')) return 'chronicler';
+  if (keys.some(key => key === 'actors' || key === 'player')) return 'dramatis-keeper';
+  if (keys.some(key => key === 'chronicle' || key === 'chronicleArchive' || key === 'rumors')) return 'chronicler';
   if (keys.some(key => key === 'guidance')) return 'guidance-composer';
   throw new Error(`TEST_PATCH_HAS_NO_WRITER:${keys.join(',')}`);
 }
@@ -207,7 +207,10 @@ describe('world simulation transaction', () => {
     const deadOnly = applyWorldSimulationCandidates_ACU(buildEmptyWorldSimulationLedger_ACU(), [candidate({ actors: { upsert: [dead] } })], new Set(['e1']));
     expect(deadOnly.actors).toEqual([]);
     expect(deadOnly.pendingFixes[0].lastError).toMatch(/伴随 rumor/);
-    const next = applyWorldSimulationCandidates_ACU(buildEmptyWorldSimulationLedger_ACU(), [candidate({ actors: { upsert: [dead] }, rumors: { upsert: [rumor] } })], new Set(['e1']));
+    const next = applyWorldSimulationCandidates_ACU(buildEmptyWorldSimulationLedger_ACU(), [
+      candidate({ actors: { upsert: [dead] } }, ['e1'], 'candidate:actor-dead'),
+      candidate({ rumors: { upsert: [rumor] } }, ['e1'], 'candidate:rumor-death'),
+    ], new Set(['e1']));
     expect(next.actors[0].life).toBe('dead');
     expect(next.rumors[0].id).toBe('rumor-death');
     const badRumor = applyWorldSimulationCandidates_ACU(buildEmptyWorldSimulationLedger_ACU(), [candidate({ rumors: { upsert: [{ ...rumor, id: 'rumor-bad', relatedActorIds: [], earliestRevealDay: 1, originDay: 2 }] } })], new Set(['e1']));

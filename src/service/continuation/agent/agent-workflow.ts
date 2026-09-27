@@ -260,12 +260,30 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
     return applied.appliedModules;
   };
 
-  if (input.opening.dispatchWebResearcher) {
-    const web = await runSafe_ACU({
+  // 开局检索与首轮结算并发：两者写集不相交（webRefs vs 结算模块）、互不消费，
+  // 与主会话派工波次同一并发语义；结果落定后仍按「先百科、后结算」的原顺序应用到快照。
+  const openingWeb = input.opening.dispatchWebResearcher
+    ? runSafe_ACU({
       agentName: WEB_NAME_ACU,
       billing: 'opening',
       prompt: `开局要求补充外部设定。焦点：${input.opening.focus}`,
-    });
+    })
+    : null;
+  const maintainerPending = snapshot.pendingFixes.some(item =>
+    (MAINTAINER_MODULES_ACU as readonly string[]).includes(item.module));
+  const runFirstMaintainer = input.hasUnsettledHistory || maintainerPending;
+  const firstMaintainer = runFirstMaintainer
+    ? runSafe_ACU({
+      agentName: MAINTAINER_NAME_ACU,
+      billing: 'pipeline',
+      prompt: maintainerPrompt_ACU(input.opening.focus, snapshot),
+    })
+    : null;
+  const [web, firstMaintainerResult] = await Promise.all([openingWeb, firstMaintainer]);
+  // 并发批次落定后统一回读权威快照：任一方的逐栏写入都不会被另一方的旧快照覆盖。
+  if (input.readCommittedSnapshot) snapshot = input.readCommittedSnapshot();
+
+  if (web) {
     steps.push({ agentName: WEB_NAME_ACU, status: web.ok ? 'ok' : 'failed', summary: web.summary });
     if (web.ok && !web.usedFieldWrites && web.researcher && (web.researcher.items.length || (web.researcher.patches ?? []).length)) {
       const applied = await applyAgentWebRefsDeltaViaSql_ACU(
@@ -279,16 +297,10 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
     }
   }
 
-  const maintainerPending = snapshot.pendingFixes.some(item =>
-    (MAINTAINER_MODULES_ACU as readonly string[]).includes(item.module));
-  if (!input.hasUnsettledHistory && !maintainerPending) {
+  if (!runFirstMaintainer) {
     steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'no_change', summary: '没有未结算正文，也没有待修复的结算模块' });
   } else {
-    let maintainer = await runSafe_ACU({
-      agentName: MAINTAINER_NAME_ACU,
-      billing: 'pipeline',
-      prompt: maintainerPrompt_ACU(input.opening.focus, snapshot),
-    });
+    let maintainer = firstMaintainerResult!;
     let repairAttempts = 0;
     const maxRepairAttempts = Math.max(0, input.settings.workflow.reviseLimit);
     while (true) {

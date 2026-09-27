@@ -13,6 +13,8 @@ import {
   AGENT_STORY_TAIL_FLOORS_DEFAULT_ACU,
   AGENT_STORY_WINDOW_DEFAULT_ACU,
   type AgentModuleSnapshot_ACU,
+  type AgentReadFence_ACU,
+  type AgentReadFenceProof_ACU,
   AGENT_MODULE_FIELD_MATRIX_ACU,
 } from './agent-model';
 import {
@@ -554,25 +556,35 @@ function splitIdSuffix_ACU(token: string, prefix: string): string[] | null {
   return token.slice(prefix.length + 1).split(/[,，]/).map(id => id.trim()).filter(Boolean);
 }
 
-function resolveTableToken_ACU(token: string, context: AgentResolveContext_ACU): { title: string; text: string } {
+function resolveTableToken_ACU(token: string, context: AgentResolveContext_ACU): { title: string; text: string; status?: 'failed' } {
   const body = token.slice(AGENT_TABLE_TOKEN_PREFIX_ACU.length).trim();
   // 末段若形如 a-b 视为行区间，其余部分是表名——表名本身可能含冒号之外的任意字符。
   const lastColon = body.lastIndexOf(':');
   const rangeCandidate = lastColon >= 0 ? parseRowRange_ACU(body.slice(lastColon + 1)) : null;
   const name = rangeCandidate ? body.slice(0, lastColon).trim() : body;
   const title = rangeCandidate ? `表格「${name}」第 ${rangeCandidate.start}-${rangeCandidate.end} 行` : `表格「${name}」`;
+  const sheets = findAgentSheetsByAliases_ACU([name], context.tableData);
+  if (!name || sheets.length !== 1) return { title, text: `表格地址「${token}」无法唯一定位已加载的表格，请核对表格目录。`, status: 'failed' };
+  if (rangeCandidate && (!Number.isSafeInteger(rangeCandidate.start) || !Number.isSafeInteger(rangeCandidate.end)
+    || rangeCandidate.start < 1 || rangeCandidate.end < rangeCandidate.start || rangeCandidate.end > sheets[0].rows.length)) {
+    return { title, text: `表格地址「${token}」行区间无效或超出表格范围（共 ${sheets[0].rows.length} 行），请修正后重读。`, status: 'failed' };
+  }
   return { title, text: renderAgentTableByName_ACU(name, context.tableData, rangeCandidate ?? undefined) };
 }
 
-function resolveWorldbookToken_ACU(token: string, context: AgentResolveContext_ACU): { title: string; text: string } {
+function resolveWorldbookToken_ACU(token: string, context: AgentResolveContext_ACU): { title: string; text: string; status?: 'failed' } {
   const worldbook = context.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false);
   const body = token.slice(AGENT_WORLDBOOK_TOKEN_PREFIX_ACU.length);
   const lastColon = body.lastIndexOf(':');
   if (lastColon <= 0) {
-    return { title: '世界书条目', text: '世界书读取地址不完整：写法为 $WORLDBOOK:书名:uid（逗号分隔多个 uid），地址请从世界书目录复制。' };
+    return { title: '世界书条目', text: '世界书读取地址不完整：写法为 $WORLDBOOK:书名:uid（逗号分隔多个 uid），地址请从世界书目录复制。', status: 'failed' };
   }
   const bookName = body.slice(0, lastColon).trim();
-  const uids = body.slice(lastColon + 1).split(/[,，]/).map(uid => uid.trim()).filter(Boolean);
+  const uids = body.slice(lastColon + 1).split(/[,，]/).map(uid => uid.trim());
+  if (!worldbook.available) return { title: '世界书条目', text: '世界书快照读取失败，不得将其视为没有条目。', status: 'failed' };
+  if (!bookName || uids.some(uid => !uid || !worldbook.entries.some(entry => entry.bookName === bookName && entry.uid === uid))) {
+    return { title: '世界书条目', text: `世界书地址「${token}」未能完整匹配已启用条目，请从世界书目录核对书名与 uid。`, status: 'failed' };
+  }
   return { title: `世界书「${bookName}」条目 ${uids.join('、')}`, text: renderAgentWorldbookEntries_ACU(worldbook, bookName, uids) };
 }
 
@@ -597,20 +609,30 @@ export function resolveAgentReadToken_ACU(token: string, context: AgentResolveCo
   if (normalized.startsWith(AGENT_STORY_RANGE_TOKEN_PREFIX_ACU)) {
     const body = normalized.slice(AGENT_STORY_RANGE_TOKEN_PREFIX_ACU.length).trim();
     const matched = /^(\d+)-(\d+)$/.exec(body);
+    const start = matched ? Number(matched[1]) : NaN;
+    const end = matched ? Number(matched[2]) : NaN;
+    const invalidSyntax = !matched || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end;
+    const floors = Number.isSafeInteger(start) && Number.isSafeInteger(end) && start <= end
+      ? listAgentStoryWindowFloors_ACU(context) : [];
+    const valid = floors.length > 0 && start >= floors[0].index && end <= floors[floors.length - 1].index
+      && floors.some(floor => floor.index >= start && floor.index <= end);
     return {
       title: matched ? `正文楼层 ${matched[1]}-${matched[2]}` : '正文楼层区间',
-      text: matched
-        ? renderAgentStoryRange_ACU(context, matched[1], matched[2])
-        : `楼层区间「${normalized}」不合法：写法为 $STORY_RANGE:起始楼-结束楼。可用楼层见正文目录。`,
+      text: invalidSyntax
+        ? `楼层区间「${normalized}」不合法：写法为 $STORY_RANGE:起始楼-结束楼（两端都是楼层号，起始不大于结束）。可用楼层见正文目录。`
+        : valid
+        ? renderAgentStoryRange_ACU(context, matched![1], matched![2])
+        : `楼层区间「${normalized}」不可完整读取：写法为 $STORY_RANGE:起始楼-结束楼，范围必须落在当前正文可读窗口内。可用楼层见正文目录；更早的剧情脉络请查看事件概览或用 $TABLE:纪要表:行区间 精读。`,
+      ...(!valid ? { status: 'failed' as const } : {}),
     };
   }
 
   if (normalized.startsWith('$FIELD:')) {
     const match = /^\$FIELD:(storyArc|hooks|infoGap|chronology|webRefs|constraints):([^:]+)(?::([^:]+))?$/.exec(normalized);
-    if (!match) return { title: '资料栏目', text: '栏目地址非法：$FIELD:模块:ID[:栏目]。' };
+    if (!match) return { title: '资料栏目', text: '栏目地址非法：$FIELD:模块:ID[:栏目]。', status: 'failed' };
     const [, moduleName, id, field] = match;
     const module = moduleName as keyof typeof AGENT_MODULE_FIELD_MATRIX_ACU;
-    if (field && !AGENT_MODULE_FIELD_MATRIX_ACU[module].fields.includes(field)) return { title: '资料栏目', text: `栏目 ${module}.${field} 不在受控字段矩阵中。` };
+    if (field && !AGENT_MODULE_FIELD_MATRIX_ACU[module].fields.includes(field)) return { title: '资料栏目', text: `栏目 ${module}.${field} 不在受控字段矩阵中。`, status: 'failed' };
     const folded = readAgentModuleFoldState_ACU(context.chat);
     if (folded.salvaged || folded.candidates.some(item => !item.valid)) return { title: '资料栏目读取失败', text: '资料帧校验失败；不得将损坏数据解释为空状态。', status: 'failed' };
     const record = folded.fields.records[module]?.[id];
@@ -669,8 +691,190 @@ export function resolveAgentReadToken_ACU(token: string, context: AgentResolveCo
     case '$TABLE_GLOBAL': return { title, text: renderAgentTableByAliases_ACU('global', context.tableData) };
     case '$TABLE_CHARACTERS': return { title, text: renderAgentTableByAliases_ACU('characters', context.tableData) };
     case '$TABLE_CHRONICLES': return { title, text: renderAgentTableByAliases_ACU('chronicles', context.tableData) };
-    default: return { title, text: `占位符 ${normalized || '(空)'} 不是可读资料接口，本次没有为你提供任何内容。请从各资料目录里复制读取地址。` };
+    default: return { title, text: `占位符 ${normalized || '(空)'} 不是可读资料接口，本次没有为你提供任何内容。请从各资料目录里复制读取地址。`, status: 'failed' };
   }
+}
+
+export interface AgentResolvedRead_ACU {
+  title: string;
+  text: string;
+  status?: 'failed';
+  proof?: AgentReadFenceProof_ACU;
+}
+
+function fingerprintAgentReadText_ACU(text: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `fnv1a:${(hash >>> 0).toString(16).padStart(8, '0')}`;
+}
+
+function readModuleRevisionKey_ACU(token: string): keyof AgentModuleSnapshot_ACU['revisions'] | null {
+  if (token.startsWith('$STORY_ARC') || token.startsWith('$FIELD:storyArc:')) return 'storyArc';
+  if (token.startsWith('$HOOKS_LEDGER') || token.startsWith('$FIELD:hooks:')) return 'hooks';
+  if (token.startsWith('$INFO_GAP') || token.startsWith('$FIELD:infoGap:')) return 'infoGap';
+  if (token.startsWith('$ACTIVE_CONSTRAINTS') || token.startsWith('$FIELD:constraints:')) return 'constraints';
+  if (token.startsWith('$CHRONOLOGY') || token.startsWith('$FIELD:chronology:')) return 'chronology';
+  if (token.startsWith('$WEB_REFS') || token.startsWith('$FIELD:webRefs:')) return 'webRefs';
+  if (token === '$USER_REQUIREMENTS') return 'userRequirements';
+  return null;
+}
+
+function resolvedFenceForReadToken_ACU(token: string, context: AgentResolveContext_ACU): AgentReadFence_ACU {
+  const storyRange = token.startsWith(AGENT_STORY_RANGE_TOKEN_PREFIX_ACU)
+    ? /^(\d+)-(\d+)$/.exec(token.slice(AGENT_STORY_RANGE_TOKEN_PREFIX_ACU.length).trim())
+    : null;
+  if (storyRange) return { lower: Number(storyRange[1]), upper: Number(storyRange[2]) };
+
+  if (token.startsWith(AGENT_TABLE_TOKEN_PREFIX_ACU)) {
+    const body = token.slice(AGENT_TABLE_TOKEN_PREFIX_ACU.length).trim();
+    const lastColon = body.lastIndexOf(':');
+    const range = lastColon >= 0 ? parseRowRange_ACU(body.slice(lastColon + 1)) : null;
+    const name = range ? body.slice(0, lastColon).trim() : body;
+    const sheets = findAgentSheetsByAliases_ACU([name], context.tableData);
+    if (sheets.length === 1) {
+      return range
+        ? { lower: range.start, upper: range.end }
+        : sheets[0].rows.length ? { lower: 1, upper: sheets[0].rows.length } : { lower: 0, upper: 0 };
+    }
+  }
+
+  if (token.startsWith(AGENT_WORLDBOOK_TOKEN_PREFIX_ACU)) {
+    const body = token.slice(AGENT_WORLDBOOK_TOKEN_PREFIX_ACU.length);
+    const lastColon = body.lastIndexOf(':');
+    const uids = lastColon > 0 ? body.slice(lastColon + 1).split(/[,，]/).map(uid => uid.trim()).filter(Boolean) : [];
+    if (uids.length) return { lower: uids[0], upper: uids[uids.length - 1] };
+  }
+
+  for (const prefix of ['$STORY_ARC', '$HOOKS_LEDGER', '$INFO_GAP', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY', '$WEB_REFS'] as const) {
+    const ids = splitIdSuffix_ACU(token, prefix);
+    if (ids !== null) return ids.length ? { lower: ids[0], upper: ids[ids.length - 1] } : { lower: '*', upper: '*' };
+  }
+  return { lower: token, upper: token };
+}
+
+function fenceContains_ACU(resolved: AgentReadFence_ACU, requested?: AgentReadFence_ACU): boolean {
+  if (!requested) return true;
+  const compare = (actual: string | number, boundary: string | number, lower: boolean): boolean => {
+    if (typeof actual !== typeof boundary) return false;
+    if (typeof actual === 'number' && typeof boundary === 'number') return lower ? actual >= boundary : actual <= boundary;
+    if (actual === '*' || boundary === '*') return actual === boundary;
+    const result = String(actual).localeCompare(String(boundary));
+    return lower ? result >= 0 : result <= 0;
+  };
+  if (requested.lower !== undefined && (resolved.lower === undefined || !compare(resolved.lower, requested.lower, true))) return false;
+  if (requested.upper !== undefined && (resolved.upper === undefined || !compare(resolved.upper, requested.upper, false))) return false;
+  return true;
+}
+
+/**
+ * 解析资料并附带可回溯的围栏证明。旧调用方继续使用 resolveAgentReadToken_ACU；
+ * 原生 read 运行时必须使用本函数，不能把“已解析正文”冒充成 proof。
+ */
+export function resolveAgentReadTokenWithProof_ACU(
+  token: string,
+  context: AgentResolveContext_ACU,
+  requestedFence?: AgentReadFence_ACU,
+): AgentResolvedRead_ACU {
+  const resolved = resolveAgentReadToken_ACU(token, context);
+  if (resolved.status === 'failed') return resolved;
+  const stableAddress = String(token ?? '').trim();
+  const resolvedFence = resolvedFenceForReadToken_ACU(stableAddress, context);
+  const completeWithinFence = fenceContains_ACU(resolvedFence, requestedFence);
+  const revisionKey = readModuleRevisionKey_ACU(stableAddress);
+  const revision = revisionKey
+    ? context.moduleSnapshot.revisions[revisionKey]
+    : fingerprintAgentReadText_ACU(resolved.text);
+  const proof: AgentReadFenceProof_ACU = {
+    ...(requestedFence === undefined ? {} : { requestedFence }),
+    resolvedFence,
+    stableAddress,
+    revision,
+    completeWithinFence,
+  };
+  if (!completeWithinFence) {
+    return {
+      title: resolved.title,
+      text: `读取地址「${stableAddress}」的实际范围超出 requestedFence，已拒绝注入。`,
+      status: 'failed',
+      proof,
+    };
+  }
+  return { ...resolved, proof };
+}
+
+/**
+ * 可按前缀收窄的读取地址坐标轴：共 length 个坐标点，addressAt(i) 是恰好覆盖前 i+1 个坐标点的稳定地址，
+ * remainderAfter(i) 是覆盖其余坐标点的稳定地址（i 已是末点时为 null）。
+ */
+export interface AgentReadAddressAxis_ACU {
+  length: number;
+  addressAt: (index: number) => string;
+  remainderAfter: (index: number) => string | null;
+}
+
+/**
+ * 把读取地址映射成整数坐标轴，供 60% 默认上围栏在地址自身坐标系内解析子范围。
+ * 楼层区间与表格行区间是连续整数坐标；世界书 uid 与模块 ID 是字符串坐标，按列表位置映射为长度上界——
+ * token 预算只决定取前几项，从不写进字符串坐标本身。整模块、字段帧和固定资料没有可证明的子范围，
+ * 只有一个坐标点的地址也无可收窄，二者都返回 null（原子地址）。
+ */
+export function resolveAgentReadAddressAxis_ACU(token: string, context: AgentResolveContext_ACU): AgentReadAddressAxis_ACU | null {
+  const normalized = String(token ?? '').trim();
+  if (normalized.startsWith(AGENT_STORY_RANGE_TOKEN_PREFIX_ACU)) {
+    const matched = /^(\d+)-(\d+)$/.exec(normalized.slice(AGENT_STORY_RANGE_TOKEN_PREFIX_ACU.length).trim());
+    if (!matched) return null;
+    const start = Number(matched[1]);
+    const end = Number(matched[2]);
+    const hit = listAgentStoryWindowFloors_ACU(context).filter(floor => floor.index >= start && floor.index <= end);
+    return hit.length > 1 ? {
+      length: hit.length,
+      addressAt: index => `${AGENT_STORY_RANGE_TOKEN_PREFIX_ACU}${start}-${hit[index].index}`,
+      remainderAfter: index => (index + 1 < hit.length ? `${AGENT_STORY_RANGE_TOKEN_PREFIX_ACU}${hit[index + 1].index}-${end}` : null),
+    } : null;
+  }
+  if (normalized.startsWith(AGENT_TABLE_TOKEN_PREFIX_ACU)) {
+    const body = normalized.slice(AGENT_TABLE_TOKEN_PREFIX_ACU.length).trim();
+    const lastColon = body.lastIndexOf(':');
+    const range = lastColon >= 0 ? parseRowRange_ACU(body.slice(lastColon + 1)) : null;
+    const name = range ? body.slice(0, lastColon).trim() : body;
+    const sheets = name ? findAgentSheetsByAliases_ACU([name], context.tableData) : [];
+    if (sheets.length !== 1) return null;
+    const start = range?.start ?? 1;
+    const end = range?.end ?? sheets[0].rows.length;
+    return end > start ? {
+      length: end - start + 1,
+      addressAt: index => `${AGENT_TABLE_TOKEN_PREFIX_ACU}${name}:${start}-${start + index}`,
+      remainderAfter: index => (start + index < end ? `${AGENT_TABLE_TOKEN_PREFIX_ACU}${name}:${start + index + 1}-${end}` : null),
+    } : null;
+  }
+  if (normalized.startsWith(AGENT_WORLDBOOK_TOKEN_PREFIX_ACU)) {
+    const body = normalized.slice(AGENT_WORLDBOOK_TOKEN_PREFIX_ACU.length);
+    const lastColon = body.lastIndexOf(':');
+    if (lastColon <= 0) return null;
+    const bookName = body.slice(0, lastColon).trim();
+    const uids = body.slice(lastColon + 1).split(/[,，]/).map(uid => uid.trim());
+    return uids.length > 1 && uids.every(Boolean)
+      ? {
+        length: uids.length,
+        addressAt: index => `${AGENT_WORLDBOOK_TOKEN_PREFIX_ACU}${bookName}:${uids.slice(0, index + 1).join(',')}`,
+        remainderAfter: index => (index + 1 < uids.length ? `${AGENT_WORLDBOOK_TOKEN_PREFIX_ACU}${bookName}:${uids.slice(index + 1).join(',')}` : null),
+      }
+      : null;
+  }
+  for (const prefix of ['$STORY_ARC', '$HOOKS_LEDGER', '$INFO_GAP', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY', '$WEB_REFS'] as const) {
+    const ids = splitIdSuffix_ACU(normalized, prefix);
+    if (ids !== null) {
+      return ids.length > 1 ? {
+        length: ids.length,
+        addressAt: index => `${prefix}:${ids.slice(0, index + 1).join(',')}`,
+        remainderAfter: index => (index + 1 < ids.length ? `${prefix}:${ids.slice(index + 1).join(',')}` : null),
+      } : null;
+    }
+  }
+  return null;
 }
 
 /**

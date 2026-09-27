@@ -109,6 +109,7 @@ export class WorldSimulationStagePlanner_ACU {
       for (;;) {
         const sent = await executeWorldSimulationFinalRequest_ACU({
           messages: [...rendered.messages, protocolGuard, ...transcript],
+          inputLimitTokens: input.settings.agentHistoryTokenBudget,
           historyBudgetTokens: input.settings.agentHistoryTokenBudget,
           count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
           invoke: messages => this.dependencies.invoke(messages, preset),

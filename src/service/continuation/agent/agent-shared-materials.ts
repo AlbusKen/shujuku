@@ -5,7 +5,7 @@
 import type { ContinuationPromptSegment_ACU, ContinuationSettings_ACU } from '../model';
 import { renderContinuationPrompt_ACU } from '../prompt-template';
 import { AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU } from './agent-defaults';
-import { renderAgentModuleCatalog_ACU, renderAgentReadCatalog_ACU, renderAgentSubagentCatalog_ACU } from './agent-catalog';
+import { getAgentSubagentAccessProfile_ACU, renderAgentModuleCatalog_ACU, renderAgentReadCatalog_ACU, renderAgentSubagentCatalog_ACU } from './agent-catalog';
 import { hasActiveStoryArc_ACU, renderAgentWebRefsCatalog_ACU } from './agent-module-store';
 import { renderAgentTableCatalog_ACU } from './agent-tables';
 import { renderAgentUserRequirements_ACU } from './agent-user-requirements';
@@ -62,24 +62,30 @@ export function renderMainSessionReadAppendix_ACU(messages: readonly AgentConver
   ].join('\n\n');
 }
 
-const KIND_RELATED_TOKENS_ACU: Record<AgentSubagentKind_ACU, readonly string[]> = {
-  arc: ['$STORY_ARC', '$OUTLINE_WINDOW', '$STORY_TAIL', '$STORY_OVERVIEW', '$WORLDBOOK_CATALOG', '$USER_REQUIREMENTS'],
-  maintain: ['$HISTORY_UNSETTLED', '$HOOKS_LEDGER', '$INFO_GAP', '$CHRONOLOGY', '$USER_REQUIREMENTS'],
-  plan: ['$OUTLINE_WINDOW', '$STORY_TAIL', '$STORY_OVERVIEW', '$STORY_ARC', '$HOOKS_LEDGER', '$INFO_GAP', '$USER_REQUIREMENTS'],
-  review: ['$OUTLINE_WINDOW', '$STORY_TAIL', '$STORY_ARC', '$HOOKS_LEDGER', '$ACTIVE_CONSTRAINTS', '$WORLDBOOK_HITS', '$USER_REQUIREMENTS'],
-  research: ['$WEB_REFS', '$WEB_TOOL_CATALOG', '$STORY_TAIL', '$TABLE_CATALOG', '$USER_REQUIREMENTS'],
-  compose: ['$OUTLINE_WINDOW', '$STORY_ARC', '$STORY_TAIL', '$HOOKS_LEDGER', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY', '$USER_REQUIREMENTS'],
-};
-
 export function keptSubagentMaterialTokens_ACU(kind: AgentSubagentKind_ACU, writes: readonly AgentWritableModule_ACU[]): Set<string> {
-  return new Set<string>(['$AGENT_TASK', '$AGENT_WRITE_SCOPE', '$AGENT_READ_MATERIALS', ...KIND_RELATED_TOKENS_ACU[kind], ...writes.map(module => MODULE_TOKEN_ACU[module])]);
+  return new Set<string>(['$AGENT_TASK', '$AGENT_WRITE_SCOPE', '$AGENT_READ_MATERIALS', ...getAgentSubagentAccessProfile_ACU(kind).snapshotTokens, ...writes.map(module => MODULE_TOKEN_ACU[module])]);
 }
+
+/** Only an appendix after the complete fixed worldbook body can be a main-session read. */
+export function findMainSessionReadAppendix_ACU(snapshot: string, worldbookInjection: string): number {
+  const heading = '【本轮语境命中的世界书条目】\n';
+  const at = snapshot.indexOf(heading);
+  if (at >= 0) {
+    const expected = heading + worldbookInjection;
+    if (snapshot.slice(at, at + expected.length) !== expected) throw new Error('AGENT_SNAPSHOT_WORLDBOOK_BOUNDARY_INVALID');
+    const end = at + expected.length;
+    if (end < snapshot.length && !snapshot.startsWith('\n\n', end)) throw new Error('AGENT_SNAPSHOT_WORLDBOOK_BOUNDARY_INVALID');
+    return snapshot.indexOf('\n\n【主会话已调阅】', end);
+  }
+  return snapshot.indexOf('\n\n【主会话已调阅】');
+}
+
 
 /** 子代理任务段已经注入的资料，不再在附带快照里重复。主会话自己的快照不走这里。 */
 export function omitSnapshotSectionsForSubagent_ACU(
   snapshot: string,
   kept: ReadonlySet<string>,
-  options?: { dropTriggeredWorldbook?: boolean },
+  options?: { dropTriggeredWorldbook?: boolean; worldbookInjection?: string },
 ): string {
   const drop = new Set<string>();
   if (options?.dropTriggeredWorldbook) drop.add('【本轮语境命中的世界书条目】');
@@ -97,21 +103,44 @@ export function omitSnapshotSectionsForSubagent_ACU(
   if (kept.has('$WORLDBOOK_HITS')) drop.add('【本轮语境命中的世界书条目】');
   if (kept.has('$WEB_REFS')) drop.add('【百科资料库目录】');
   if (kept.has('$AGENT_READ_CATALOG')) drop.add('【读取地址词汇表】');
-  const appendixAt = snapshot.indexOf('\n\n【主会话已调阅】');
+  const heading = '【本轮语境命中的世界书条目】\n';
+  const at = snapshot.indexOf(heading);
+  const expected = options?.worldbookInjection !== undefined && at >= 0 ? heading + options.worldbookInjection : '';
+  const protectedEnd = expected ? at + expected.length : 0;
+  const appendixAt = options?.worldbookInjection !== undefined
+    ? findMainSessionReadAppendix_ACU(snapshot, options.worldbookInjection)
+    : snapshot.indexOf('\n\n【主会话已调阅】');
   const prefix = appendixAt < 0 ? snapshot : snapshot.slice(0, appendixAt);
+  // The worldbook body may itself contain blank lines and headings resembling snapshot
+  // sections. Protect the exact source-bound body before splitting on blank lines.
+  let protectedPrefix = prefix;
+  let marker = '';
+  if (expected) {
+    const end = protectedEnd;
+    if (end < prefix.length && !prefix.startsWith('\n\n', end)) throw new Error('AGENT_SNAPSHOT_WORLDBOOK_BOUNDARY_INVALID');
+    if (prefix.indexOf(heading, end) >= 0) throw new Error('AGENT_SNAPSHOT_WORLDBOOK_BOUNDARY_INVALID');
+    marker = '\uE000AGENT_WORLDBOOK\uE001';
+    while (prefix.includes(marker)) marker += '\uE001';
+    protectedPrefix = prefix.slice(0, at + heading.length) + marker + prefix.slice(end);
+  }
   const keptBlocks: string[] = [];
   let skipping = false;
-  for (const block of prefix.split(/\n\n/)) {
+  for (const block of protectedPrefix.split(/\n\n/)) {
     const first = block.split('\n')[0].trim();
     const heading = first.startsWith('【') || first.startsWith('以下是用户对任务曾经提过的要求');
     const normalizedHeading = first.match(/^【[^】]+】/)?.[0] ?? first;
     if (heading) skipping = drop.has(first) || drop.has(normalizedHeading);
     if (!skipping) keptBlocks.push(block);
   }
-  if (appendixAt < 0) return keptBlocks.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
+  if (marker) for (let i = 0; i < keptBlocks.length; i += 1) keptBlocks[i] = keptBlocks[i].replace(marker, options!.worldbookInjection!);
+  if (appendixAt < 0) return keptBlocks.join('\n\n');
   const appendix = snapshot.slice(appendixAt + 2);
   const frame = /【调阅项 ("(?:[^"\\]|\\.)*") (\d+)】\n/g;
   const first = frame.exec(appendix);
+  // A malformed length-framed appendix is not a legacy read transcript.
+  if (appendix.includes('【调阅项 ') && (!first || appendix.slice(0, first.index).includes('【调阅项 '))) {
+    throw new Error('AGENT_READ_APPENDIX_FRAME_INVALID');
+  }
   if (first) {
     const entries: string[] = [];
     let next = first;
@@ -119,13 +148,17 @@ export function omitSnapshotSectionsForSubagent_ACU(
       const textStart = next.index + next[0].length;
       const length = Number(next[2]);
       const textEnd = textStart + length;
-      if (!Number.isSafeInteger(length) || textEnd > appendix.length) break;
+      if (!Number.isSafeInteger(length) || textEnd > appendix.length) throw new Error('AGENT_READ_APPENDIX_FRAME_INVALID');
       const address = JSON.parse(next[1]) as string;
       if (!kept.has(address)) entries.push(appendix.slice(next.index, textEnd));
       frame.lastIndex = textEnd;
       next = frame.exec(appendix);
+      // A skipped or damaged frame must not turn the preceding entries into a partial read.
+      if (next ? appendix.slice(textEnd, next.index) !== '\n\n' : textEnd !== appendix.length) {
+        throw new Error('AGENT_READ_APPENDIX_FRAME_INVALID');
+      }
     }
-    const keptPrefix = keptBlocks.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
+    const keptPrefix = keptBlocks.join('\n\n');
     if (!entries.length) return keptPrefix;
     const readHeader = appendix.slice(0, first.index).trim();
     return [keptPrefix, `${readHeader}\n\n${entries.join('\n\n')}`].filter(Boolean).join('\n\n');
@@ -143,7 +176,7 @@ export function omitSnapshotSectionsForSubagent_ACU(
       if (!skipping) keptBlocks.push(block);
     }
   }
-  return keptBlocks.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
+  return keptBlocks.join('\n\n');
 }
 
 export function stripUnownedSubagentPrompt_ACU(

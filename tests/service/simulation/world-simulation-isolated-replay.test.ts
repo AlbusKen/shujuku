@@ -109,6 +109,7 @@ function buildReplay(options: ReplayOptions) {
               summary: options.mode === 'no_change' ? '核验后没有幕后变化' : '锁定钟楼时间推进',
               focus: '世界时钟',
               dispatchChronicler: false,
+              skipModules: ['chronicle', 'rumors'],
             })]),
       ]],
       ['timekeeper', [options.mode === 'no_change'
@@ -147,7 +148,10 @@ function buildReplay(options: ReplayOptions) {
       const response = queue?.shift();
       if (!response) throw new Error(`UNEXPECTED_MODEL_INVOCATION:${role}`);
       invocations.push({ role, response, messages });
-      return response;
+      // Director read is native-only; retain the source script for replay diagnostics.
+      return role === 'world-director' && JSON.parse(response).action === 'read'
+        ? { content: '', toolCalls: [{ id: 'replay-director-read', name: 'read', arguments: JSON.stringify({ reads: ['anchor:message'] }) }] }
+        : response;
     });
     const countTokens = async () => 1;
     const plannedRevision = buildDirectorOwnedStageRevision_ACU({
@@ -295,9 +299,14 @@ describe('T9 世界推演隔离 API replay', () => {
     ]);
     expect(result.result.commitCandidate.acceptedCandidates.map(item => item.agentName)).toEqual(['timekeeper', 'guidance-composer']);
     expect(replay.store.read()).toMatchObject({ ledger: { revision: 1, clock: { day: 2, storyTime: '1h' }, guidance: { signals: [{ text: '远处钟声响起', voice: 'ambient' }] } }, task: { status: 'completed', activeRun: null } });
+    const { buildWorldSimulationProjection_ACU } = await import('../../../src/service/simulation/simulation-projection');
+    expect(result.result.finalProjection).toMatchObject({ sourceAgent: 'guidance-composer', sourceRevision: 1, deliverable: true });
+    expect(result.result.finalProjection?.content).toBe(buildWorldSimulationProjection_ACU(replay.store.read()!.ledger));
+    expect(result.result.finalProjection?.content).toContain('远处钟声响起');
+    expect(replay.chat[0].mes).toContain(result.result.finalProjection?.content);
     expect(replay.commitProjection).toHaveBeenCalledOnce();
     expect(replay.saveChat).toHaveBeenCalledTimes(3);
-    expect(replay.toolRead).toHaveBeenCalledWith('anchor:message');
+    expect(replay.toolRead).toHaveBeenCalledWith('anchor:message', undefined, expect.any(Number));
     expect(replay.toolSearch).not.toHaveBeenCalled();
     expect(replay.invocations.map(item => item.role)).not.toContain('world-stage-planner');
     expect(replay.invocations.map(item => item.role)).not.toContain('chronicler');
@@ -349,6 +358,8 @@ describe('T9 世界推演隔离 API replay', () => {
     const result = await replay.run();
 
     expect(result).toMatchObject({ status: 'completed', result: { outcome: 'no_change', outcomes: [{ status: 'no_change' }, { status: 'no_change' }, { status: 'no_change' }] } });
+    if (!result || result.status !== 'completed' || result.result.outcome !== 'no_change') throw new Error('expected no_change replay');
+    expect(result.result.finalProjection).toEqual({ content: null, sourceAgent: 'current-ledger', sourceRevision: 0, deliverable: true });
     expect(replay.store.read()).toMatchObject({ ledger: { revision: 0 }, task: { status: 'completed', activeRun: null }, stages: [{ status: 'completed' }] });
     expect(replay.commitProjection).not.toHaveBeenCalled();
     expect(replay.saveChat).toHaveBeenCalledTimes(3);
@@ -377,9 +388,11 @@ describe('T9 世界推演隔离 API replay', () => {
     expect(messages.filter(item => item.eventKind === 'run_completed')).toMatchObject([{ title: '世界推演已提交' }]);
     expect(messages.filter(item => item.kind === 'model_agent')).toHaveLength(messages.filter(item => item.kind === 'model_feedback').length);
     const director = replay.invocations.filter(item => item.role === 'world-director');
-    expect(director[1].messages.filter(item => item.content === director[0].response)).toHaveLength(1);
-    expect(readWorldSimulationDirectorHistory_ACU(replay.chat).filter(item => item.content === director[0].response)).toHaveLength(1);
-    expect(readWorldSimulationDirectorHistory_ACU(replay.chat).at(-1)?.content).toContain('prepared');
+    expect(director[1].messages.some(item => 'tool_calls' in item && (item as { tool_calls?: { id: string }[] }).tool_calls?.some(call => call.id === 'replay-director-read'))).toBe(true);
+    expect(readWorldSimulationDirectorHistory_ACU(replay.chat).filter(item => item.role === 'tool' && item.tool_call_id === 'replay-director-read')).toHaveLength(1);
+    expect(readWorldSimulationDirectorHistory_ACU(replay.chat).at(-1)?.content).toContain('"source":"fixed-workflow"');
+    expect(readWorldSimulationDirectorHistory_ACU(replay.chat).at(-1)?.content).not.toContain('prepared');
+    expect(director).toHaveLength(2);
     const duplicate = await replay.runtime.handleAssistantCompletion(createWorldSimulationCompletionIntent_ACU(42, 'chat-replay', '', replay.chat, 1));
     expect(duplicate).toEqual({ status: 'skipped', reason: 'duplicate' });
     expect(replay.commitProjection).toHaveBeenCalledOnce();
@@ -392,7 +405,8 @@ describe('T9 世界推演隔离 API replay', () => {
     expect(result).toMatchObject({ status: 'completed', result: { outcome: 'no_change' } });
     expect(readWorldSimulationConversation_ACU(replay.chat).messages.filter(item => item.eventKind === 'run_completed'))
       .toMatchObject([{ title: '世界推演无变化' }]);
-    expect(readWorldSimulationDirectorHistory_ACU(replay.chat).at(-1)?.content).toContain('prepared');
+    expect(readWorldSimulationDirectorHistory_ACU(replay.chat).at(-1)?.content).toContain('"source":"fixed-workflow"');
+    expect(replay.invocations.filter(item => item.role === 'world-director')).toHaveLength(2);
     expect(await replay.runtime.handleAssistantCompletion(createWorldSimulationCompletionIntent_ACU(42, 'chat-replay', '', replay.chat, 1)))
       .toEqual({ status: 'skipped', reason: 'duplicate' });
     expect(readWorldSimulationConversation_ACU(replay.chat).messages.filter(item => item.eventKind === 'run_completed')).toHaveLength(1);
@@ -407,6 +421,7 @@ describe('T9 世界推演隔离 API replay', () => {
     failed.commitProjection.mockImplementationOnce(async () => { throw new Error('PRIMARY_COMMIT_FAILED'); });
     const result = await failed.run();
     expect(result).toMatchObject({ status: 'failed' });
+    expect(result && 'result' in result ? result.result : undefined).toBeUndefined();
     expect(readWorldSimulationConversation_ACU(failed.chat).messages.filter(item => item.eventKind === 'run_completed')).toHaveLength(0);
     expect(readWorldSimulationSessionLog_ACU('chat-replay').filter(item => item.kind === 'run_completed')).toHaveLength(0);
 

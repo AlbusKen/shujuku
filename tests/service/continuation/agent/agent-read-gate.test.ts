@@ -31,6 +31,8 @@ describe('读取预算解析', () => {
     const broken = resolveAgentReadBudget_ACU(config_ACU({ readTokenBudget: '瞎写', historyTokenBudget: 1000, fallbackTokens: 6000 }));
     expect(broken.effectiveMaxReadTokens).toBe(200);
     expect(broken.effectiveFallbackTokens).toBe(200);
+    expect(resolveAgentReadBudget_ACU(config_ACU({ readTokenBudget: '60garbage%', historyTokenBudget: 1000 })).effectiveMaxReadTokens)
+      .toBe(200);
 
     const capped = resolveAgentReadBudget_ACU(config_ACU({ readTokenBudget: 100, fallbackTokens: 500 }));
     expect(capped.effectiveFallbackTokens).toBe(100);

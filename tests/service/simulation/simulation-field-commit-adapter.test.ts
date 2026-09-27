@@ -556,7 +556,7 @@ describe('world simulation subagent production write loop', () => {
       return responses.shift() as any;
     });
     const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke: invoke as any, countTokens: async () => 1,
-      apiPreset: { resolvePreset: () => ({ resolved: true, apiMode: 'openai' as any, apiConfig: {} as any, tavernProfile: '' }) } });
+      apiPreset: { resolvePreset: () => ({ resolved: true, apiMode: 'openai' as any, apiConfig: { max_tokens: 60000 } as any, tavernProfile: '' }) } });
     const promptContext = { task: {}, history: [], runtimeContext: {}, agentCatalog: [], toolCatalog: [], evidence: [], userGuidance: '',
       worldState: chat[0]._qrf_world_simulation.ledger, anchorMessage: '第二楼', anchorIdentity: input.anchor, worldStagePlan: {},
       worldChronicle: [], worldCandidates: [], worldCollisions: {}, evidenceRegistry: snapshotWorldSimulationEvidenceRegistry_ACU(registry), projectionPreview: {} };
@@ -581,7 +581,7 @@ describe('world simulation subagent production write loop', () => {
       otherRequests.push(messages);
       return JSON.stringify({ status: 'no_change', summary: '新派工', evidenceRefs: [], uncertainties: [] });
     }) as any, countTokens: async () => 1,
-    apiPreset: { resolvePreset: () => ({ resolved: true, apiMode: 'openai' as any, apiConfig: {} as any, tavernProfile: '' }) } });
+    apiPreset: { resolvePreset: () => ({ resolved: true, apiMode: 'openai' as any, apiConfig: { max_tokens: 60000 } as any, tavernProfile: '' }) } });
     await fresh.run({ delegation: { agentName: 'dramatis-keeper', instruction: '核对人物', reads: [] },
       settings, promptContext: promptContext as any, registry, tools, runId: 'next-run', readCurrent: () => foldWorldSimulationLedger_ACU(chat)!.ledger });
     expect(otherRequests[0].some(message => message.role === 'assistant' && message.content.includes(input.sql))).toBe(false);

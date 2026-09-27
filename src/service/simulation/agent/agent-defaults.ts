@@ -1,7 +1,7 @@
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
 import { WORLD_SIMULATION_LEDGER_MODULES_ACU, WORLD_SIMULATION_SCHEMA_VERSION_ACU, formatWorldSimulationLedgerRequiredFields_ACU, formatWorldSimulationLedgerRequiredFieldsLegacy_ACU, type WorldSimulationPromptSegment_ACU } from '../model';
 import { formatWorldSimulationToolAddressHints_ACU, WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from '../world-simulation-agent-tools';
-import { WORLD_SIMULATION_AGENT_CATALOG_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
+import { WORLD_SIMULATION_AGENT_CATALOG_ACU, worldSimulationAgentNativeTools_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
 
 export const WORLD_SIMULATION_PROMPT_VERSION_V8_ACU = 'world-simulation-v8';
 export const WORLD_SIMULATION_PROMPT_VERSION_V9_ACU = 'world-simulation-v9';
@@ -218,7 +218,7 @@ export function applyWorldSimulationNativeToolPrompt_ACU(name: WorldSimulationAg
     );
   const boundary = '现在只执行当前任务。输出必须是协议要求的单个 JSON 对象，不附加 Markdown。';
   if (definition && definition.kind !== 'planner' && next.includes(boundary)) {
-    const tools = definition.kind !== 'director' && definition.writableModules.length ? 'read、search、write_sql' : 'read、search';
+    const tools = worldSimulationAgentNativeTools_ACU(name).join('、');
     const delivery = definition.kind === 'director' ? '决策输出' : '最终交付';
     next = next.replace(boundary, `现在只执行当前任务。${tools} 使用函数调用；${delivery}必须是协议要求的单个 JSON 对象，不附加 Markdown。`);
   }
@@ -297,26 +297,64 @@ function buildRolePrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulatio
   ];
 }
 
+/** V16 发布时的角色描述与授权；历史默认不能从持续演进的目录反推。 */
+const V16_ROLE_DESCRIPTIONS_ACU: Partial<Record<WorldSimulationAgentName_ACU, { description: string; writable: readonly string[] }>> = {
+  'dramatis-keeper': { description: '推演行动者信息边界、玩家位置接触与传闻的幕后演变', writable: ['actors', 'player', 'rumors'] },
+  chronicler: { description: '仅在事件完结或热层编年过长时记录幕后编年并提交归档，不是每轮常规角色', writable: ['chronicle'] },
+};
+
 export function buildV16WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
   return buildRolePrompt_ACU(name).map(segment => {
+    const historical = V16_ROLE_DESCRIPTIONS_ACU[name];
+    if (historical && segment.content.startsWith(worldSimulationSeamMarker_ACU('ROLE_RULES'))) {
+      const current = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name)!;
+      return { ...segment, content: segment.content.replace(current.description, historical.description)
+        .replace(`写入范围：${current.writableModules.join(', ')}`, `写入范围：${historical.writable.join(', ')}`) };
+    }
     if (name === 'world-director' && segment.content.startsWith(worldSimulationSeamMarker_ACU('ROLE_RULES'))) {
       return { ...segment, content: segment.content.replace('没有直接 ledger patch 权限', '没有直接 ledger 写入权限') };
     }
+    if (name === 'world-director' && segment.content.startsWith(worldSimulationSeamMarker_ACU('PROTOCOL'))) {
+      return { ...segment, content: segment.content.replace(
+        'dispatchChronicler 仅在你判断本轮发生必须立即编年的台面下重大事件时为 true；编年与传闻由固定工作流每轮保底派遣 chronicler 维护，不依赖你的判断。pendingFixes 非空时必须在 focus 中写明优先修复的模块。',
+        'dispatchChronicler 仅在事件完结或热层编年过长时为 true。pendingFixes 非空时必须在 focus 中写明优先修复的模块。',
+      ) };
+    }
     if (segment.content.startsWith(worldSimulationSeamMarker_ACU('PROTOCOL')) && ['specialist', 'researcher'].includes(WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name)!.kind)) {
       const definition = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name)!;
-      return { ...segment, content: `${worldSimulationSeamMarker_ACU('PROTOCOL')}\n${worldSimulationSpecialistProtocolInstruction_ACU(name, definition.writableModules, false, true)}` };
+      return { ...segment, content: `${worldSimulationSeamMarker_ACU('PROTOCOL')}\n${worldSimulationSpecialistProtocolInstruction_ACU(name, historical?.writable ?? definition.writableModules, false, true)}` };
     }
     if (!segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW'))) return { ...segment };
+    if (name === 'world-director') return { ...segment, content: segment.content.replace(
+      /工作流按固定顺序自治执行：.*?delegate 只用于/u,
+      '工作流按固定顺序自治执行，中途不要再派 timekeeper、undercurrent-analyst、dramatis-keeper 或 guidance-composer。delegate 只用于',
+    ) };
     if (name === 'dramatis-keeper') {
       return {
         ...segment,
-        content: segment.content.replace('玩家位置按正文地标 upsert player', '玩家位置按正文地标 UPDATE player')
+        content: segment.content.replace('只写入 actors、player。行动者细则', '只写入 actors、player、rumors。行动者细则')
+          .replace('resources/constraints 写可调动资源与行动限制。空间纪律', 'resources/constraints 写可调动资源与行动限制。传闻细则：fact 是传闻内容本体，channels 是传播渠道（市井/商会/官府等），originDay 为事发日，earliestRevealDay 为玩家最早可能得知日且不得早于 originDay。空间纪律')
+          .replace('NPC 死亡 = life:dead + diedAtDay + deathSummary。', 'NPC 死亡 = life:dead + diedAtDay + deathSummary + 同一候选伴生 rumor。')
+          .replace('玩家位置按正文地标 upsert player', '玩家位置按正文地标 UPDATE player')
           + '【幕后人物范围】以与当前剧情人物、地点、组织、暗流直接相关的世界书重要角色为候选：尚未在已发生正文登场的角色，可依据世界书条目与当前证据推演其幕后现状；已在已发生正文登场、但现已离开当前剧情场景的重要角色，也应继续推演其此刻的位置、目标、行动及信息边界。当前场景仍在场的角色不作为幕后角色重复推演。先核对锚点正文、已读历史与 actors/相关 seeds 目录；需要时用 worldbook scope 搜索并 read worldbook:entry:书名:uid 精读，或按证据定位并调阅旧记录。目录、世界书设定不能单独证明角色曾登场或已离场；无法核实时把缺口列入 uncertainties，不能虚构在场状态、行动或角色知识。候选须与当前剧情有可说明的关联，不能扩展为世界书全部人物。',
       };
     }
-    if (name === 'chronicler') return { ...segment, content: segment.content.replace('append 条目', 'INSERT 条目').replace('提交 chronicleArchive', '成对 INSERT chronicle_archive 与 chronicle_overview').replace('目录追加后超过 512 行必须自带 collapseRefs', '目录追加后超过 512 行须按归档规则折叠概览；不得只提交单侧归档写入') };
+    if (name === 'chronicler') {
+      // 冻结版先使用旧描述，再按当时的顺序逐次替换（String.replace 只改首个命中）。
+      const oldWorkflow = segment.content.replace(/只写入 chronicle、rumors，并可成对提交 chronicleArchive 与 chronicleOverview。编年只记录.*?证据不足时直接 no_change 并列缺失项，不要多轮内部 read。/u, '只写入 chronicle，并可提交 chronicleArchive。append 条目可省略 id/at。编年细则：summary 只记录幕后世界线的事实性事件（什么发生了、什么变了），不评价、不复述玩家对话；relatedIds 关联涉及的 seed/actor/rumor id。你不是每轮常规角色：仅当事件完结或热层编年过长时才产出候选。归档职责：热层编年过长或事件已完结时，提交 chronicleArchive 把完结事件归档为总结详情，并在概览目录登记一行（oneLine 句式：「第3日 · 北岭矿洞塌方，三人受伤」）；目录追加后超过 512 行必须自带 collapseRefs。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。');
+      return { ...segment, content: oldWorkflow.replace('append 条目', 'INSERT 条目').replace('提交 chronicleArchive', '成对 INSERT chronicle_archive 与 chronicle_overview').replace('目录追加后超过 512 行必须自带 collapseRefs', '目录追加后超过 512 行须按归档规则折叠概览；不得只提交单侧归档写入') };
+    }
     return { ...segment };
   });
+}
+
+/** V15 导演默认词只与冻结 V16 的职责措辞不同；不能从当前工作流重建。 */
+function buildV15WorldSimulationDirectorPrompt_ACU(): WorldSimulationPromptSegment_ACU[] {
+  return buildV16WorldSimulationAgentPrompt_ACU('world-director').map(segment =>
+    segment.content.startsWith(worldSimulationSeamMarker_ACU('ROLE_RULES'))
+      ? { ...segment, content: segment.content.replace('没有直接 ledger 写入权限', '没有直接 ledger patch 权限') }
+      : segment,
+  );
 }
 
 function v17WorldSimulationContent_ACU(name: WorldSimulationAgentName_ACU, segment: WorldSimulationPromptSegment_ACU): WorldSimulationPromptSegment_ACU {
@@ -545,7 +583,7 @@ export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
     ...(WORLD_SIMULATION_PROMPT_V12_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V12_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V12_FINGERPRINTS_ACU[name] }] : []),
     ...(WORLD_SIMULATION_PROMPT_V13_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V13_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V13_FINGERPRINTS_ACU[name] }] : []),
     ...(WORLD_SIMULATION_PROMPT_V14_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V14_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V14_FINGERPRINTS_ACU[name] }] : []),
-    { version: WORLD_SIMULATION_PROMPT_VERSION_V15_ACU, fingerprint: promptFingerprint_ACU(buildRolePrompt_ACU(name)) },
+    { version: WORLD_SIMULATION_PROMPT_VERSION_V15_ACU, fingerprint: promptFingerprint_ACU(name === 'world-director' ? buildV15WorldSimulationDirectorPrompt_ACU() : buildRolePrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_V16_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V16_FINGERPRINTS_ACU[name]! },
     { version: WORLD_SIMULATION_PROMPT_VERSION_V17_ACU, fingerprint: promptFingerprint_ACU(buildV17WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_V18_ACU, fingerprint: promptFingerprint_ACU(buildV18WorldSimulationAgentPrompt_ACU(name)) },
@@ -572,7 +610,7 @@ export function migrateWorldSimulationAgentPrompts_ACU(current: Record<string, W
       migrated[name] = defaults[name];
       continue;
     }
-    const v15 = buildRolePrompt_ACU(name);
+    const v15 = name === 'world-director' ? buildV15WorldSimulationDirectorPrompt_ACU() : buildRolePrompt_ACU(name);
     const v16 = WORLD_SIMULATION_PROMPT_V16_SEGMENTS_ACU[name];
     const v17 = WORLD_SIMULATION_PROMPT_V17_SEGMENTS_ACU[name];
     const v18 = WORLD_SIMULATION_PROMPT_V18_SEGMENTS_ACU[name];

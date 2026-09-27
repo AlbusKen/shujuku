@@ -1,5 +1,6 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
+import { USER_PREFILL_CONTENT_ACU } from '../../shared/user-prefill.js';
 import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, buildDefaultContinuationWebResearchSettings_ACU, buildDefaultContinuationWorkflowSettings_ACU, CONTINUATION_FINAL_REVIEW_MAX_EXTRA_READS_DEFAULT_ACU, CONTINUATION_FINAL_REVIEW_READ_TOKEN_BUDGET_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_MIN_GENERATION_TOKENS_DEFAULT_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V21_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V24_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V25_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V31_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V32_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V33_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V37_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU, V23_DEFAULT_OUTLINE_ACK_SEGMENT_ACU, V23_DEFAULT_OUTLINE_METHOD_ACK_SEGMENT_ACU, V23_DEFAULT_OUTLINE_PACING_SEGMENT_ACU, V23_DEFAULT_OUTLINE_SYSTEM_SEGMENT_ACU, V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU, V26_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU, V27_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU, V29_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU } from './defaults';
 import { reconcileContinuationEnvelopeCursor_ACU } from './stage-cursor';
 import { AGENT_FINAL_INSTRUCTION_TEMPLATE_ACU, AGENT_HISTORY_READ_RULE_V17_ACU, AGENT_HISTORY_READ_RULE_V18_ACU, AGENT_PROMPT_DEFAULT_LINEAGE_ACU, CONTINUATION_V33_DEFAULT_LINEAGE_ACU, CONTINUATION_V34_DEFAULT_LINEAGE_ACU, CONTINUATION_V35_DEFAULT_LINEAGE_ACU, buildV33ContinuationAgentPrompts_ACU, buildV34ContinuationAgentPrompts_ACU, buildV35ContinuationAgentPrompts_ACU, buildV36ContinuationAgentPrompts_ACU, buildDefaultAgentArcArchitectPrompt_ACU, buildDefaultContinuationAgentPrompts_ACU, currentDefaultMainAgentHistoryGuide_ACU, currentDefaultMainAgentLayoutAnswer_ACU, findAgentPromptSlot_ACU, hashAgentPromptContent_ACU, isV18DefaultMainAgentNonRootSystemSegment_ACU, isV19DefaultMainAgentHistoryGuide_ACU, isV19DefaultMainAgentLayoutAnswer_ACU, isV19DefaultMainAgentRuntimeSegment_ACU, migrateV30DefaultMainAgentContentToV31_ACU, V20_DEFAULT_ARC_ARCHITECT_CONTRACT_ACU, V20_DEFAULT_ARC_ARCHITECT_EPISTEMOLOGY_ACU, V20_DEFAULT_ARC_ARCHITECT_PURPOSE_ACU, V20_DEFAULT_ARC_ARCHITECT_SYSTEM_ACU, V20_DEFAULT_ARC_ARCHITECT_TASK_ACU, V23_MAIN_AGENT_PACING_RULE_ACU, V24_MAIN_AGENT_PACING_RULE_ACU, V25_ARC_ARCHITECT_VOLUME_CAPACITY_CONTRACT_ACU, V26_FINAL_REVIEWER_CHRONOLOGY_RULES_ACU, V26_MAIN_AGENT_CHRONOLOGY_RULE_ACU, V26_MAINTAINER_CHRONOLOGY_CONTRACT_ACU, type AgentPromptSlotKey_ACU } from './agent/agent-defaults';
@@ -417,6 +418,7 @@ function migrateV25AgentPromptsToV26_ACU(raw: unknown): unknown {
   for (const key of ['main', 'maintainer', 'finalReviewer'] as const) {
     const segments = next[key];
     if (!Array.isArray(segments)) continue;
+    if (segments.length < 2) continue;
     const defaultsGroup = defaults[key];
     const insertIndex = defaultsGroup.findIndex(segment => V26_CHRONOLOGY_SEGMENT_CONTENTS_ACU.includes(segment.content));
     if (insertIndex <= 0) continue;
@@ -656,6 +658,52 @@ function migrateV35AgentPromptsToV36_ACU(raw: unknown): unknown {
       changed = true;
       return { ...segment, content: current[role][entry.index].content };
     });
+  }
+  return changed ? next : raw;
+}
+
+/** V36 → V37：只把仍保持默认末段的角色切换到共享 user prefill，保留用户改写、追加段和元数据。 */
+function migrateV36AgentPromptsToV37_ACU(raw: unknown): unknown {
+  if (!isRecord_ACU(raw)) return raw;
+  const previous = buildV36ContinuationAgentPrompts_ACU();
+  const current = buildDefaultContinuationAgentPrompts_ACU();
+  let changed = false;
+  const next = { ...raw };
+  for (const role of Object.keys(previous) as (keyof typeof previous)[]) {
+    if (!Array.isArray(raw[role]) || !previous[role].length) continue;
+    const previousSegments = previous[role];
+    const currentSegments = current[role];
+    const segments = raw[role] as unknown[];
+    const migrated = segments.map((segment, index) => {
+      if (index >= previousSegments.length || !isRecord_ACU(segment) || typeof segment.content !== 'string') return segment;
+      const oldSegment = previousSegments[index];
+      const currentSegment = currentSegments[index];
+      if (!currentSegment || segment.role !== oldSegment.role || segment.content !== oldSegment.content) return segment;
+      changed = true;
+      return { ...segment, role: currentSegment.role, content: currentSegment.content };
+    });
+    const taskIndex = previousSegments.findIndex(segment => segment.content.includes('$AGENT_TASK'));
+    const rawTask = taskIndex >= 0 ? segments[taskIndex] : undefined;
+    const currentPrefill = currentSegments[previousSegments.length];
+    if (role === 'finalReviewer' && taskIndex >= 0 && currentPrefill && isRecord_ACU(rawTask)
+      && rawTask.role === previousSegments[taskIndex].role && rawTask.content === previousSegments[taskIndex].content
+      && !migrated.some(segment => isRecord_ACU(segment) && segment.content === currentPrefill.content)) {
+      migrated.splice(Math.min(previousSegments.length, migrated.length), 0, { ...currentPrefill });
+      changed = true;
+    }
+    const previousTail = previousSegments[previousSegments.length - 1];
+    const currentTail = currentSegments[currentSegments.length - 1];
+    const rawTail = segments[segments.length - 1];
+    const migratedTail = migrated[migrated.length - 1];
+    if (currentTail && isRecord_ACU(rawTail)
+      && promptSegmentEquals_ACU(rawTail, previousTail)
+      && (!isRecord_ACU(migratedTail)
+        || migratedTail.role !== currentTail.role
+        || migratedTail.content !== currentTail.content)) {
+      migrated[migrated.length - 1] = { ...rawTail, role: currentTail.role, content: currentTail.content };
+      changed = true;
+    }
+    next[role] = migrated;
   }
   return changed ? next : raw;
 }
@@ -997,11 +1045,18 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
     promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU;
   }
   if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU) {
-    agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
+    agentPrompts = migrateV36AgentPromptsToV37_ACU(agentPrompts);
     promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V37_ACU;
   }
   if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V37_ACU) {
-    outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
+    if (Array.isArray(outlinePrompt)) {
+      const current = buildDefaultContinuationOutlinePrompt_ACU();
+      const prefill = current[current.length - 1];
+      const currentBase = current.slice(0, -1);
+      const isUnmodifiedDefault = outlinePrompt.length === currentBase.length
+        && outlinePrompt.every((segment, index) => promptSegmentEquals_ACU(segment, currentBase[index]));
+      if (isUnmodifiedDefault && prefill) outlinePrompt = [...outlinePrompt, { ...prefill }];
+    }
     promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU;
   }
 

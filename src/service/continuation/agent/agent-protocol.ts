@@ -36,6 +36,7 @@ import {
   type AgentSubagentName_ACU,
   type AgentWritableModule_ACU,
   type AgentPlannerOutput_ACU,
+  type AgentReadFence_ACU,
   type AgentReviewerOutput_ACU,
   type AgentSearchScope_ACU,
   type AgentStoryArcDeltaItem_ACU,
@@ -61,6 +62,30 @@ function readText_ACU(value: unknown): string {
 function readTextList_ACU(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.map(readText_ACU).filter(Boolean);
+}
+
+function parseAgentReadFence_ACU(value: unknown): AgentReadFence_ACU {
+  if (!isRecord_ACU(value)) failProtocol_ACU('read.requestedFence 必须是对象');
+  if (Object.keys(value).some(key => key !== 'lower' && key !== 'upper')) {
+    failProtocol_ACU('read.requestedFence 只允许 lower / upper');
+  }
+  const readBoundary_ACU = (key: 'lower' | 'upper'): string | number | undefined => {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) return undefined;
+    const boundary = value[key];
+    if (typeof boundary === 'number' && Number.isSafeInteger(boundary)) return boundary;
+    if (typeof boundary === 'string' && boundary.trim()) return boundary.trim();
+    failProtocol_ACU(`read.requestedFence.${key} 必须是非空字符串或安全整数`);
+  };
+  const lower = readBoundary_ACU('lower');
+  const upper = readBoundary_ACU('upper');
+  if (lower === undefined && upper === undefined) failProtocol_ACU('read.requestedFence 至少需要 lower 或 upper');
+  if (typeof lower === 'number' && typeof upper === 'number' && lower > upper) {
+    failProtocol_ACU('read.requestedFence 的 lower 不能大于 upper');
+  }
+  return {
+    ...(lower === undefined ? {} : { lower }),
+    ...(upper === undefined ? {} : { upper }),
+  };
 }
 
 /** 单次解析里最多扫描的顶层配平对象数，防止超长返回里的花括号碎片拖垮解析。 */
@@ -256,7 +281,12 @@ export function parseAgentToolCall_ACU(payload: Record<string, unknown>): AgentT
     const reads = readTextList_ACU(payload.reads);
     if (!reads.length) failProtocol_ACU('read 动作必须提供非空的 reads 数组（资料地址列表）');
     if (reads.length > READ_ADDRESS_LIMIT_ACU) failProtocol_ACU(`一次 read 最多 ${READ_ADDRESS_LIMIT_ACU} 个地址；请拆成多次或先用 search 缩小范围`);
-    return { kind: 'read', reads: [...new Set(reads)] };
+    const requestedFence = payload.requestedFence === undefined ? undefined : parseAgentReadFence_ACU(payload.requestedFence);
+    return {
+      kind: 'read',
+      reads: [...new Set(reads)],
+      ...(requestedFence === undefined ? {} : { requestedFence }),
+    };
   }
   if (action === 'search') {
     const query = readText_ACU(payload.query);

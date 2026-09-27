@@ -69,7 +69,7 @@
           <AcuFormRow v-if="settingsDraft.stageSize === 'custom'" label="最多轮次" hint="1–50 的整数。">
             <AcuInput v-model="settingsDraft.customTurnMax" type="number" :min="1" :max="50" />
           </AcuFormRow>
-          <AcuFormRow label="API 预设（全局默认）" hint="所有 Agent 默认走这个预设；需要给某个 Agent 单独指定时，展开下方「各 Agent 渠道」。">
+          <AcuFormRow label="API 预设（全局默认）" hint="所有 Agent 默认走这个预设；需要给某个 Agent 单独指定时，展开下方「各 Agent 渠道」。需要工具的 Agent 须选择支持原生工具的独立自定义 API；酒馆主 API 无法返回工具调用，连接管理器不传递工具定义。">
             <AcuSelect
               :options="continuationApiPresetOptions"
               :model-value="continuationApiPresetValue"

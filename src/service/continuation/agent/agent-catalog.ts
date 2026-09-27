@@ -2,12 +2,14 @@
  * service/continuation/agent/agent-catalog.ts — 子代理能力目录与资料模块目录
  *
  * 主 Agent 只看到摘要：代理能做什么、何时该用、职责固定写什么。
- * 读集不再有授权概念——所有资料域对主/子代理开放，读多少由 token 门禁管，
- * 因此定义里没有 allowedReads/allowedWrites；写入范围由职责（kind）固定推得。
+ * 子代理种子与工具调阅遵守角色 profile；主 Agent 保留自身的读取权限。
+ * 写入范围由职责（kind）固定推得，读写均须通过运行时校验。
  * 子代理的完整系统提示词不暴露给主 Agent，避免主 Agent 被无关细节淹没。
  */
 
 import { AGENT_FINAL_REVIEWER_NAME_ACU, AGENT_INSTRUCTION_COMPOSER_NAME_ACU, AGENT_OUTLINE_AGENT_NAME_ACU, AGENT_WEB_RESEARCHER_NAME_ACU, type AgentSubagentKind_ACU, type AgentSubagentName_ACU } from './agent-model';
+import type { AgentWritableModule_ACU } from './agent-model';
+import type { AgentNativeToolName_ACU } from '../../ai/native-tool';
 
 export interface AgentSubagentDefinition_ACU {
   name: AgentSubagentName_ACU;
@@ -20,6 +22,77 @@ export interface AgentSubagentDefinition_ACU {
 /** 目录渲染的可选开关：网页检索关闭时，web-researcher 及其资料模块不进主 Agent 视野。 */
 export interface AgentCatalogOptions_ACU {
   webResearchEnabled?: boolean;
+}
+
+/**
+ * 角色化资料访问 profile：快照保留、read 地址授权和原生工具白名单必须从同一份契约派生。
+ * readPrefixes 只描述地址轴前缀；具体正文仍由 resolver 的完整性证明和批次门禁决定。
+ */
+export interface AgentSubagentAccessProfile_ACU {
+  snapshotTokens: readonly string[];
+  readPrefixes: readonly string[];
+  tools: readonly AgentNativeToolName_ACU[];
+  allowSearch: boolean;
+}
+
+export const AGENT_SUBAGENT_ACCESS_PROFILES_ACU: Record<AgentSubagentKind_ACU, AgentSubagentAccessProfile_ACU> = {
+  arc: {
+    snapshotTokens: ['$STORY_ARC', '$OUTLINE_WINDOW', '$STORY_TAIL', '$STORY_OVERVIEW', '$WORLDBOOK_CATALOG', '$USER_REQUIREMENTS'],
+    readPrefixes: ['$STORY_ARC', '$STORY_RANGE', '$TABLE', '$WORLDBOOK'],
+    tools: ['read', 'search'],
+    allowSearch: true,
+  },
+  maintain: {
+    snapshotTokens: ['$HISTORY_UNSETTLED', '$HOOKS_LEDGER', '$INFO_GAP', '$CHRONOLOGY', '$USER_REQUIREMENTS'],
+    readPrefixes: ['$HISTORY_UNSETTLED', '$STORY_RANGE', '$TABLE'],
+    tools: ['read'],
+    allowSearch: false,
+  },
+  plan: {
+    snapshotTokens: ['$OUTLINE_WINDOW', '$STORY_TAIL', '$STORY_OVERVIEW', '$STORY_ARC', '$HOOKS_LEDGER', '$INFO_GAP', '$USER_REQUIREMENTS'],
+    readPrefixes: ['$OUTLINE_WINDOW', '$HISTORY_UNSETTLED', '$STORY_RANGE', '$TABLE', '$STORY_ARC', '$HOOKS_LEDGER', '$INFO_GAP', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY', '$WORLDBOOK'],
+    tools: ['read'],
+    allowSearch: false,
+  },
+  review: {
+    snapshotTokens: ['$OUTLINE_WINDOW', '$STORY_TAIL', '$STORY_ARC', '$HOOKS_LEDGER', '$ACTIVE_CONSTRAINTS', '$WORLDBOOK_HITS', '$USER_REQUIREMENTS'],
+    readPrefixes: ['$OUTLINE_WINDOW', '$STORY_RANGE', '$TABLE', '$STORY_ARC', '$FIELD:storyArc', '$HOOKS_LEDGER', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY', '$WEB_REFS', '$WORLDBOOK'],
+    tools: ['read'],
+    allowSearch: false,
+  },
+  research: {
+    snapshotTokens: ['$WEB_REFS', '$WEB_TOOL_CATALOG', '$STORY_TAIL', '$TABLE_CATALOG', '$USER_REQUIREMENTS'],
+    readPrefixes: ['$STORY_RANGE', '$TABLE', '$STORY_ARC', '$HOOKS_LEDGER', '$INFO_GAP', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY', '$WEB_REFS', '$WORLDBOOK'],
+    tools: ['read', 'search', 'encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read'],
+    allowSearch: true,
+  },
+  compose: {
+    snapshotTokens: ['$OUTLINE_WINDOW', '$STORY_ARC', '$STORY_TAIL', '$HOOKS_LEDGER', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY', '$USER_REQUIREMENTS'],
+    readPrefixes: [],
+    tools: [],
+    allowSearch: false,
+  },
+};
+
+const AGENT_MODULE_READ_PREFIXES_ACU: Record<AgentWritableModule_ACU, readonly string[]> = {
+  storyArc: ['$STORY_ARC', '$FIELD:storyArc'],
+  hooks: ['$HOOKS_LEDGER', '$FIELD:hooks'],
+  infoGap: ['$INFO_GAP', '$FIELD:infoGap'],
+  chronology: ['$CHRONOLOGY', '$FIELD:chronology'],
+  constraints: ['$ACTIVE_CONSTRAINTS', '$FIELD:constraints'],
+  webRefs: ['$WEB_REFS', '$FIELD:webRefs'],
+  userRequirements: ['$USER_REQUIREMENTS'],
+};
+
+export function getAgentSubagentAccessProfile_ACU(kind: AgentSubagentKind_ACU): AgentSubagentAccessProfile_ACU {
+  return AGENT_SUBAGENT_ACCESS_PROFILES_ACU[kind];
+}
+
+export function getAgentSubagentReadPrefixes_ACU(kind: AgentSubagentKind_ACU, writes: readonly AgentWritableModule_ACU[]): string[] {
+  return [...new Set([
+    ...AGENT_SUBAGENT_ACCESS_PROFILES_ACU[kind].readPrefixes,
+    ...writes.flatMap(module => AGENT_MODULE_READ_PREFIXES_ACU[module]),
+  ])];
 }
 
 export interface AgentModuleDefinition_ACU {
@@ -169,8 +242,8 @@ export function renderAgentSubagentCatalog_ACU(options?: AgentCatalogOptions_ACU
       `  职责: ${definition.description}`,
       `  适用时机: ${definition.triggers.join('；')}`,
       definition.kind === 'research'
-        ? '  读取: 除本地资料外还能出网（百科 API、搜索引擎、网页抓取）；派工 prompt 写清要查的作品、人物或设定名，reads 可留空'
-        : '  读取: 全部资料域开放；派工时用 reads 给出种子地址，它还能自己 read/search 补充调阅',
+        ? '  读取: 按角色 profile 调阅本地资料，并能出网（百科 API、搜索引擎、网页抓取）；派工 prompt 写清要查的作品、人物或设定名，reads 可留空'
+        : `  读取: 仅限角色 profile 的自有/强相关地址；派工时用 reads 给出种子地址${getAgentSubagentAccessProfile_ACU(definition.kind).allowSearch ? '，并可用 search 定位' : '，不提供 search 工具'}`,
       `  写入: ${KIND_WRITE_LABELS_ACU[definition.kind]}`,
     ].join('\n'));
   return blocks.join('\n');

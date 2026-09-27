@@ -56,6 +56,9 @@ export async function planAgentHistoryCompaction_ACU(input: AgentHistoryCompacti
   const reserve = clamp(Math.floor(trigger * 0.2), 8000, 24000);
   const targetTokens = Math.max(0, trigger - reserve);
   const beforeTokens = input.preparedMessages ? await measurePrepared_ACU(input.preparedMessages, input.countTokens) : await measure_ACU(input.snapshot, input.fixedPromptTokens, input.countTokens);
+  // preparedMessages 包含会话之外的静态/动态请求开销；压缩前后必须使用同一计量口径。
+  const renderedHistoryTokens = await measure_ACU(input.snapshot, 0, input.countTokens);
+  const fixedTokens = input.preparedMessages ? Math.max(0, beforeTokens - renderedHistoryTokens) : input.fixedPromptTokens;
   if (beforeTokens <= trigger) return unchanged('not_needed', beforeTokens, targetTokens);
   const grouped = groups_ACU(input.snapshot.messages);
   if (grouped.length < 2) return unchanged('incompressible', beforeTokens, targetTokens);
@@ -67,7 +70,7 @@ export async function planAgentHistoryCompaction_ACU(input: AgentHistoryCompacti
   let droppedTurns = 1;
   const currentTokens = async (turns: number): Promise<number> => {
     const candidateSnapshot = { ...input.snapshot, messages: grouped.slice(turns).flat() };
-    return measure_ACU(candidateSnapshot, input.fixedPromptTokens, input.countTokens);
+    return measure_ACU(candidateSnapshot, fixedTokens, input.countTokens);
   };
   while (droppedTurns < maxDropped && (await currentTokens(droppedTurns)) + maxHandoffTokens > targetTokens) droppedTurns += 1;
   const kept = grouped.slice(droppedTurns).flat();
@@ -111,9 +114,9 @@ export async function planAgentHistoryCompaction_ACU(input: AgentHistoryCompacti
     at,
   };
   const candidateSnapshot: AgentConversationSnapshot_ACU = { ...input.snapshot, messages: [handoff, ...kept] };
-  // 候选体量按「骨架开销 + 候选会话渲染」估算：待发消息里的会话区段会被运行时快照折叠改写，
+  // 候选体量按「完整 prepared request 的非会话开销 + 候选会话渲染」估算：待发消息里的会话区段会被运行时快照折叠改写，
   // 不能逐字替换定位；真正的越界防线是压缩提交后对最终请求的重新计量。
-  const afterTokens = await measure_ACU(candidateSnapshot, input.fixedPromptTokens, input.countTokens);
+  const afterTokens = await measure_ACU(candidateSnapshot, fixedTokens, input.countTokens);
   if (afterTokens >= beforeTokens) return unchanged('no_progress', beforeTokens, targetTokens);
   const mark: AgentConversationCompactionMarkV2_ACU = {
     schemaVersion: 2,
@@ -126,7 +129,7 @@ export async function planAgentHistoryCompaction_ACU(input: AgentHistoryCompacti
       sourceThroughId: compactedThroughId,
       beforeTokens,
       afterTokens,
-      fixedPromptTokens: input.fixedPromptTokens,
+      fixedPromptTokens: fixedTokens,
       reportTokens: summary.reportTokens,
       targetTokens,
       triggerTokens: trigger,

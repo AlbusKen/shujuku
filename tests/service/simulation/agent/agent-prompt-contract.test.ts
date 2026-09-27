@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { USER_PREFILL_CONTENT_ACU } from '../../../../src/shared/user-prefill.js';
 import { buildDefaultWorldSimulationSettings_ACU } from '../../../../src/service/simulation/defaults';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU, WORLD_SIMULATION_AGENT_NAMES_ACU, worldSimulationDirectorVisibleCatalog_ACU } from '../../../../src/service/simulation/agent/agent-catalog';
 import { WORLD_SIMULATION_ENGINE_SEAMS_ACU, WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU, WORLD_SIMULATION_PROMPT_VERSION_ACU, WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU, buildDefaultWorldSimulationAgentPrompts_ACU, buildV16WorldSimulationAgentPrompt_ACU, migrateWorldSimulationAgentPrompts_ACU, worldSimulationDirectorProtocolInstruction_ACU, worldSimulationPlannerProtocolInstruction_ACU, worldSimulationReviewerProtocolInstruction_ACU, worldSimulationSeamMarker_ACU, worldSimulationSpecialistProtocolInstruction_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
@@ -96,12 +97,12 @@ describe('世界推演提示词装配契约', () => {
   });
 
   it('提示词 v16 使用受限 SQL，同时保留历史默认指纹与信息渠道纪律', () => {
-    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v19');
-    expect(buildDefaultWorldSimulationSettings_ACU().agentRunBudget).toMatchObject({ maxIterations: 6, maxExtraReads: 1, maxConcurrent: 5 });
+    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v20');
+    expect(buildDefaultWorldSimulationSettings_ACU().agentRunBudget).toMatchObject({ maxIterations: 4, maxExtraReads: 1, maxConcurrent: 5 });
     expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].map(item => item.version)).toEqual([
-      'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6', 'world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12', 'world-simulation-v13', 'world-simulation-v14', 'world-simulation-v15', 'world-simulation-v16', 'world-simulation-v17', 'world-simulation-v18', 'world-simulation-v19',
+      'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6', 'world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12', 'world-simulation-v13', 'world-simulation-v14', 'world-simulation-v15', 'world-simulation-v16', 'world-simulation-v17', 'world-simulation-v18', 'world-simulation-v19', 'world-simulation-v20',
     ]);
-    expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU.timekeeper.map(item => item.version)).toEqual(['world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12', 'world-simulation-v13', 'world-simulation-v14', 'world-simulation-v15', 'world-simulation-v16', 'world-simulation-v17', 'world-simulation-v18', 'world-simulation-v19']);
+    expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU.timekeeper.map(item => item.version)).toEqual(['world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12', 'world-simulation-v13', 'world-simulation-v14', 'world-simulation-v15', 'world-simulation-v16', 'world-simulation-v17', 'world-simulation-v18', 'world-simulation-v19', 'world-simulation-v20']);
     const v8 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v8');
     const v9 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v9');
     const v10 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v10');
@@ -185,19 +186,21 @@ describe('世界推演提示词装配契约', () => {
     expect(dramatis).toContain('region_visits');
     expect(dramatis).toContain('secluded');
     expect(dramatis).toContain('life');
-    expect(dramatis).toContain('rumors');
-    expect(dramatis).toContain('earliest_reveal_day');
+    expect(dramatis).toContain('仅允许修改写入模块：actors | player');
+    expect(dramatis).not.toContain('earliest_reveal_day');
 
     const chronicler = worldSimulationSpecialistProtocolInstruction_ACU(
       'chronicler',
       WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === 'chronicler')!.writableModules,
     );
+    expect(chronicler).toContain('earliest_reveal_day');
     expect(chronicler).toContain('chronicle_archive');
     expect(chronicler).toContain('DELETE 不使用 expected_revision');
     expect(chronicler).toContain('完整编年禁止 UPDATE');
     expect(chronicler).toContain('目录中任一条目都可通过 read 工具按地址调阅详细信息');
     expect(chronicler).toContain('chronicle 的 id/at');
-    expect(chroniclerPrompt).toContain('调用 read 函数');
+    expect(chroniclerPrompt).toContain('read、write_sql 使用函数调用');
+    expect(chroniclerPrompt).not.toContain('read、search、write_sql 使用函数调用');
     expect(chroniclerPrompt).toContain('chronicle 的 id/at');
     expect(chroniclerPrompt).toContain('归档职责');
     expect(chroniclerPrompt).toContain('不是每轮常规角色');
@@ -275,35 +278,21 @@ describe('世界推演提示词装配契约', () => {
     expect(sent).not.toMatch(/"patch"\s*:|玩家位置按正文地标 upsert player/);
   });
 
-  it('v15 存量角色默认词升级到 v16，用户改写的角色段保持原样', () => {
+  it('V16 存量默认词升级到当前版本，用户改写的角色段保持原样', () => {
     const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
-    const legacy = structuredClone(defaults);
-    legacy['world-director'] = legacy['world-director'].map(segment => ({
-      ...segment,
-      content: segment.content.replace('没有直接 ledger 写入权限', '没有直接 ledger patch 权限'),
-    }));
-    legacy['dramatis-keeper'] = legacy['dramatis-keeper'].map(segment => ({
-      ...segment,
-      content: segment.content.startsWith('<WORLD_SIMULATION_ENGINE_SEAM:WORKFLOW>')
-        ? segment.content.split('【幕后人物范围】')[0]
-          .replace('玩家位置按正文地标 UPDATE player', '玩家位置按正文地标 upsert player')
-        : segment.content,
-    }));
-    legacy.chronicler = legacy.chronicler.map(segment => ({
-      ...segment,
-      content: segment.content.startsWith('<WORLD_SIMULATION_ENGINE_SEAM:WORKFLOW>')
-        ? segment.content.replace('INSERT 条目', 'append 条目')
-          .replace('成对 INSERT chronicle_archive 与 chronicle_overview', '提交 chronicleArchive')
-          .replace('目录追加后超过 512 行须按归档规则折叠概览；不得只提交单侧归档写入', '目录追加后超过 512 行必须自带 collapseRefs')
-        : segment.content,
-    }));
+    const legacy = Object.fromEntries(WORLD_SIMULATION_AGENT_NAMES_ACU.map(name => [name, buildV16WorldSimulationAgentPrompt_ACU(name)])) as ReturnType<typeof buildDefaultWorldSimulationAgentPrompts_ACU>;
     const custom = structuredClone(legacy);
     custom['dramatis-keeper'][2].content += '\n用户定制：仅核对北境人物';
+    custom['world-director'][3].enabled = false;
+    const appended = { role: 'user' as const, content: '用户追加规则', enabled: true, deletable: true };
+    custom['dramatis-keeper'].push(appended);
+    const editedRequirements = custom['dramatis-keeper'].find(segment => segment.content.includes('用户定制：仅核对北境人物'))!;
     const migrated = migrateWorldSimulationAgentPrompts_ACU(custom, {});
-    expect(migrated['world-director']).toEqual(defaults['world-director']);
+    expect(migrated['world-director'][3].enabled).toBe(false);
     expect(migrated.chronicler).toEqual(defaults.chronicler);
-    expect(migrated['dramatis-keeper'][2]).toEqual(custom['dramatis-keeper'][2]);
-    expect(migrated['dramatis-keeper'].filter((_segment, index) => index !== 2)).toEqual(defaults['dramatis-keeper'].filter((_segment, index) => index !== 2));
+    expect(migrated['dramatis-keeper'].filter(segment => segment.content.includes('用户定制：仅核对北境人物'))).toEqual([editedRequirements]);
+    expect(migrated['dramatis-keeper'].at(-1)).toEqual(appended);
+    expect(migrated['dramatis-keeper'].find(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('PROTOCOL')))?.content).toEqual(defaults['dramatis-keeper'].find(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('PROTOCOL')))?.content);
     expect(migrateWorldSimulationAgentPrompts_ACU(legacy, {})['dramatis-keeper']).toEqual(defaults['dramatis-keeper']);
   });
 
@@ -387,14 +376,22 @@ describe('V16 → V17 世界推演提示词迁移', () => {
   };
 
   it('V16 旧默认组与修改前冻结的逐槽及整组指纹完全一致', () => {
+    const mismatches: string[] = [];
     for (const name of WORLD_SIMULATION_AGENT_NAMES_ACU) {
       const segments = buildV16WorldSimulationAgentPrompt_ACU(name);
       const toRef = (segment: typeof segments[number]) => ({ role: segment.role, length: segment.content.length, hash: fingerprint(segment.content) });
-      expect(segments.map(toRef), name).toEqual(frozen.simulationV16[name]);
+      const actual = segments.map(toRef);
+      const expected = frozen.simulationV16[name];
+      actual.forEach((segment, index) => {
+        if (JSON.stringify(segment) !== JSON.stringify(expected?.[index])) mismatches.push(`${name}[${index}]: ${JSON.stringify(segment)} != ${JSON.stringify(expected?.[index])}`);
+      });
+      if (actual.length !== expected?.length) mismatches.push(`${name}: segment count ${actual.length} != ${expected?.length}`);
       const serialized = JSON.stringify(segments);
-      expect({ length: serialized.length, hash: fingerprint(serialized) }, name).toEqual(frozen.simulationV16Groups[name]);
+      const group = { length: serialized.length, hash: fingerprint(serialized) };
+      if (JSON.stringify(group) !== JSON.stringify(frozen.simulationV16Groups[name])) mismatches.push(`${name} group: ${JSON.stringify(group)} != ${JSON.stringify(frozen.simulationV16Groups[name])}`);
     }
     expect(Object.keys(frozen.simulationV16).sort()).toEqual([...WORLD_SIMULATION_AGENT_NAMES_ACU].sort());
+    expect(mismatches).toEqual([]);
   });
 
   it('只替换原位旧默认段，保留用户改写、追加段与启用状态', () => {
@@ -426,7 +423,8 @@ describe('V16 → V17 世界推演提示词迁移', () => {
     expect(timekeeper).toContain('field:模块:ID[:栏目]');
     expect(timekeeper).toContain('status=committed');
     expect(timekeeper).toContain('跨工作流只继承可读的已提交账本');
-    expect(defaults.timekeeper.at(-1)?.content.startsWith(worldSimulationSeamMarker_ACU('EXECUTION_BOUNDARY'))).toBe(true);
+    expect(defaults.timekeeper.at(-2)?.content.startsWith(worldSimulationSeamMarker_ACU('EXECUTION_BOUNDARY'))).toBe(true);
+    expect(defaults.timekeeper.at(-1)).toMatchObject({ role: 'user', content: USER_PREFILL_CONTENT_ACU, enabled: true });
     expect(importWorldSimulationPrompts_ACU(exportWorldSimulationPrompts_ACU(defaults))).toEqual(defaults);
     expect(parseWorldSimulationMainAction_ACU(WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU.main).kind).toBe('open_round');
     expect(parseWorldSimulationSpecialistResult_ACU({ status: 'failed', agentName: 'timekeeper', reasonCode: 'MISSING_FIELD', message: '缺栏' }).status).toBe('failed');

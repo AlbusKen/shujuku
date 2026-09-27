@@ -1,6 +1,7 @@
 import { isWorldbookApiAvailable_ACU } from '../../data/gateways/worldbook-gateway';
 import { loadAgentWorldbookSnapshot_ACU, type AgentWorldbookSnapshot_ACU } from '../continuation/agent/agent-worldbook-read';
 import type { WorldSimulationWebResearchSettings_ACU } from './model';
+import type { WorldSimulationRequestedFence_ACU } from './agent/agent-model';
 import { createWorldSimulationToolDependencies_ACU, type WorldSimulationToolContext_ACU, type WorldSimulationToolReadResult_ACU, type WorldSimulationToolSearchResult_ACU } from './world-simulation-agent-tools';
 import { WorldSimulationWebClient_ACU, type WorldSimulationEncyclopediaSource_ACU } from './world-simulation-web-client';
 
@@ -19,14 +20,23 @@ export interface WorldSimulationHostToolContext_ACU extends WorldSimulationToolC
 
 export function createWorldSimulationHostToolDependencies_ACU(context: WorldSimulationHostToolContext_ACU) {
   const client = context.webClient ?? new WorldSimulationWebClient_ACU();
-  const worldbookSnapshot = context.worldbookSnapshot ?? loadAgentWorldbookSnapshot_ACU();
-  const externalRead = async (address: string): Promise<WorldSimulationToolReadResult_ACU> => {
+  // 同一运行内复用快照，但拒绝显式围栏时不能提前启动宿主读取。
+  let snapshotPromise: Promise<AgentWorldbookSnapshot_ACU> | undefined = context.worldbookSnapshot;
+  const worldbookSnapshot = (): Promise<AgentWorldbookSnapshot_ACU> =>
+    snapshotPromise ??= loadAgentWorldbookSnapshot_ACU();
+  const externalRead = async (address: string, requestedFence?: WorldSimulationRequestedFence_ACU): Promise<WorldSimulationToolReadResult_ACU> => {
+    // These adapters expose no stable revision or canonical fence bounds. Reject before accessing
+    // worldbook or remote providers; only a proof-capable externalRead may handle a fenced request.
+    if (requestedFence !== undefined && (address.startsWith('worldbook:entry:')
+      || address.startsWith('encyclopedia:entry:') || address.startsWith('web:url:'))) {
+      return { status: 'failed', summary: 'fence proof unavailable for external address' };
+    }
     if (address.startsWith('worldbook:entry:')) {
       const [bookPart, uidPart, ...rest] = address.slice('worldbook:entry:'.length).split(':');
       const book = decode_ACU(bookPart);
       const uid = decode_ACU(uidPart);
       if (!book || !uid || rest.length) return { status: 'failed', summary: 'invalid worldbook address' };
-      const snapshot = await worldbookSnapshot;
+      const snapshot = await worldbookSnapshot();
       if (!snapshot.available) return { status: 'failed', summary: 'worldbook snapshot unavailable' };
       const entry = snapshot.entries.find(item => item.bookName === book && item.uid === uid);
       return entry ? { status: 'ok', content: entry.content, summary: entry.title, exact: true }
@@ -44,7 +54,10 @@ export function createWorldSimulationHostToolDependencies_ACU(context: WorldSimu
       const url = decode_ACU(address.slice('web:url:'.length)); if (!url) return { status: 'failed', summary: 'invalid web address' };
       const page = await client.webRead(url, context.webResearch); return page.text ? { status: 'ok', content: page.text, summary: url, exact: true, truncated: page.truncated } : { status: page.note === 'empty' ? 'empty' : 'failed', summary: page.note };
     }
-    return { status: 'dependency_unavailable', summary: 'unknown external address' };
+    if (!context.externalRead) return { status: 'dependency_unavailable', summary: 'unknown external address' };
+    return requestedFence === undefined
+      ? context.externalRead(address)
+      : context.externalRead(address, requestedFence);
   };
   const externalSearch = async (query: string, scope: readonly string[], maxResults: number, isRegex: boolean): Promise<WorldSimulationToolSearchResult_ACU> => {
     if (!query.trim()) return { status: 'empty', hits: [], summary: 'empty query' };
@@ -55,7 +68,7 @@ export function createWorldSimulationHostToolDependencies_ACU(context: WorldSimu
     if (selected.has('worldbook')) {
       if (!isWorldbookApiAvailable_ACU()) { sawDependencyUnavailable = true; diagnostics.push('worldbook api unavailable'); }
       else try {
-        const snapshot = await worldbookSnapshot;
+        const snapshot = await worldbookSnapshot();
         if (!snapshot.available) throw new Error('worldbook snapshot unavailable');
         const matcher = isRegex ? new RegExp(query, 'i') : null;
         for (const entry of snapshot.entries) {

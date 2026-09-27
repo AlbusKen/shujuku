@@ -6,7 +6,7 @@ import { WorldSimulationMainLoop_ACU } from '../../../../src/service/simulation/
 import { WorldSimulationRunWriteState_ACU, readWorldSimulationRunWriteProof_ACU } from '../../../../src/service/simulation/simulation-run-write-state';
 import { commitWorldSimulationFieldWrites_ACU } from '../../../../src/service/simulation/simulation-commit-adapter';
 import { foldWorldSimulationLedger_ACU, foldWorldSimulationArchive_ACU, readWorldSimulationLedgerFieldSnapshot_ACU } from '../../../../src/service/simulation/simulation-ledger-fold';
-import { createWorldSimulationToolDependencies_ACU } from '../../../../src/service/simulation/world-simulation-agent-tools';
+import { createWorldSimulationReadRoundState_ACU, createWorldSimulationToolDependencies_ACU } from '../../../../src/service/simulation/world-simulation-agent-tools';
 import { WORLD_SIMULATION_STATE_FIELD_ACU } from '../../../../src/service/simulation/agent/agent-model';
 import { readWorldSimulationRunState_ACU, resetWorldSimulationRunCacheForTests_ACU, saveWorldSimulationRunState_ACU } from '../../../../src/service/simulation/agent/agent-run-cache';
 import { resolveWorldSimulationAnchor_ACU } from '../../../../src/service/simulation/simulation-store';
@@ -15,8 +15,11 @@ import { persistWorldSimulationRunState_ACU } from '../../../../src/service/simu
 import { _set_SillyTavern_API_ACU } from '../../../../src/shared/host-api';
 import { readWorldSimulationSessionLog_ACU, resetWorldSimulationSessionLogForTests_ACU } from '../../../../src/service/simulation/agent/agent-session-log';
 import { createWorldSimulationEvidenceRegistry_ACU, recordWorldSimulationEvidence_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../../../../src/service/simulation/world-simulation-evidence-registry';
+import { bindWorldSimulationFixedWorldbook_ACU } from '../../../../src/service/simulation/agent/agent-shared-materials';
+import { renderAgentWorldbookTriggeredInjection_ACU } from '../../../../src/service/continuation/agent/agent-worldbook-read';
 
-const apiPreset = { resolvePreset: () => ({ resolved: true, apiMode: 'openai' as any, apiConfig: {} as any, tavernProfile: '' }) };
+
+const apiPreset = { resolvePreset: () => ({ resolved: true, apiMode: 'openai' as any, apiConfig: { max_tokens: 60000 } as any, tavernProfile: '' }) };
 const tools = { read: vi.fn(async () => ({ status: 'empty' as const, summary: 'empty' })), search: vi.fn(async () => ({ status: 'empty' as const, hits: [], summary: 'empty' })) };
 const settings = () => ({ ...buildDefaultWorldSimulationSettings_ACU(), agentPrompts: buildDefaultWorldSimulationAgentPrompts_ACU(), agentRunBudget: { maxIterations: 3, maxDelegations: 4, maxSameAgent: 2, maxConcurrent: 2, maxReads: 8, maxExtraReads: 1 } });
 function fixture(runId = 'runtime') {
@@ -32,6 +35,77 @@ describe('世界推演 Agent runtime', () => {
   });
 
   beforeEach(() => { resetWorldSimulationRunCacheForTests_ACU(); resetWorldSimulationSessionLogForTests_ACU(); vi.clearAllMocks(); });
+
+  it('世界书读取失败在导演最终请求中显式标注，合法空快照不伪报失败', async () => {
+    for (const available of [false, true]) {
+      const { registry, promptContext } = fixture(`worldbook-status-${available}`);
+      const invoke = vi.fn(async () => JSON.stringify({ action: 'block', reason: '暂停', unresolved: ['待核实'] }));
+      const subagents = { run: vi.fn(), runReviewer: vi.fn() };
+      const identity = { runId: `worldbook-status-${available}`, chatIdentity: `worldbook-status-${available}`,
+        triggerKind: 'assistant_completed' as const, triggerConversationMessageId: null, anchorMessageId: 1,
+        anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0,
+        taskId: `worldbook-task-${available}`, stageId: 'stage', stageRevision: 1 };
+      const result = await new WorldSimulationMainLoop_ACU({ invoke, subagents, apiPreset, countTokens: async () => 1 })
+        .run({ identity, settings: settings(), promptContext, registry, tools,
+          worldbookSnapshot: Promise.resolve({ available, entries: [] }) });
+      expect(result.outcome).toBe('blocked');
+      const messages = invoke.mock.calls[0][1] as readonly { content: string }[];
+      const snapshot = messages.filter(message => message.content.includes('【本次世界推演最新快照】'));
+      expect(snapshot).toHaveLength(1);
+      expect(snapshot[0].content.includes('【世界书快照读取失败】')).toBe(!available);
+      expect(subagents.run).not.toHaveBeenCalled();
+    }
+  });
+
+
+  it('导演从运行内世界书快照发送逐字命中正文，未命中正文不进入请求', async () => {
+    const { registry, promptContext } = fixture('director-worldbook-source');
+    const entry = { bookName: '设定集', uid: '7', title: '常开', keys: [], constant: true,
+      content: '  世界书全文\n末尾  \n', tokens: 8 };
+    const hidden = { ...entry, uid: '8', title: '未命中', constant: false, keys: ['永不命中'], content: 'PRIVATE_UNTRIGGERED' };
+    const invoke = vi.fn(async () => JSON.stringify({ action: 'block', reason: '完成', unresolved: ['待续'] }));
+    const identity = { runId: 'director-worldbook-source', chatIdentity: 'director-worldbook-source',
+      triggerKind: 'assistant_completed' as const, triggerConversationMessageId: null, anchorMessageId: 1,
+      anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest', baseLedgerRevision: 0,
+      taskId: 'worldbook-source', stageId: 'stage', stageRevision: 1 };
+    await new WorldSimulationMainLoop_ACU({ invoke, subagents: { run: vi.fn(), runReviewer: vi.fn() },
+      apiPreset, countTokens: async () => 1 }).run({ identity, settings: settings(), promptContext, registry, tools,
+      worldbookSnapshot: Promise.resolve({ available: true, entries: [entry, hidden] }) });
+    const messages = invoke.mock.calls[0][1] as readonly { content: string }[];
+    expect(messages.filter(message => message.content.includes(`### 常开（设定集#7）\n${entry.content}`))).toHaveLength(1);
+    expect(messages.every(message => !message.content.includes(hidden.content))).toBe(true);
+  });
+
+  it('普通子代理的本地输入限制非法时在请求前失败', async () => {
+    const { registry, promptContext, runId } = fixture('capacity-invalid');
+    const invoke = vi.fn(async () => JSON.stringify({ status: 'no_change', summary: '不应执行', evidenceRefs: [], uncertainties: [] }));
+    const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
+    await expect(runtime.run({ delegation: { agentName: 'timekeeper', instruction: '核对', reads: [] },
+      settings: { ...settings(), agentHistoryTokenBudget: 0 }, promptContext, registry, tools, runId })).rejects.toThrow();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it('输出 max_tokens 缺省不影响本地输入门禁，超出本地输入限制才拒发', async () => {
+    // 仅整包 prepared payload 计 5000，逐条历史计 1：只触发输入门禁。
+    const countTokens = async (text: string) => (text.startsWith('{"messages"') ? 5000 : 1);
+    const reply = JSON.stringify({ status: 'no_change', summary: '已核对', evidenceRefs: [], uncertainties: [] });
+    const missing = { resolvePreset: () => ({ resolved: true, apiMode: 'openai' as any, apiConfig: {} as any, tavernProfile: '' }) };
+    const missingInvoke = vi.fn(async () => reply);
+    const { registry, promptContext, runId } = fixture('capacity-default');
+    await new WorldSimulationSubagentRuntime_ACU({ invoke: missingInvoke, apiPreset: missing, countTokens }).run({
+      delegation: { agentName: 'timekeeper', instruction: '核对', reads: [] }, settings: settings(), promptContext, registry, tools, runId,
+    });
+    expect(missingInvoke).toHaveBeenCalledTimes(1);
+
+    const limited = vi.fn(async () => reply);
+    const next = fixture('capacity-roomy');
+    await expect(new WorldSimulationSubagentRuntime_ACU({ invoke: limited, apiPreset, countTokens }).run({
+      delegation: { agentName: 'timekeeper', instruction: '核对', reads: [] }, settings: { ...settings(), agentHistoryTokenBudget: 4999 },
+      promptContext: next.promptContext, registry: next.registry, tools, runId: next.runId,
+    })).rejects.toThrow('final-request-token-overflow');
+    expect(limited).not.toHaveBeenCalled();
+  });
+
 
   it('锚定主会话第二次请求见首次 read 原文，重启后不会从展示卡片重复投影', async () => {
     const { registry, promptContext } = fixture('director-history');
@@ -235,7 +309,7 @@ describe('世界推演 Agent runtime', () => {
     expect(fixed).toBeGreaterThanOrEqual(80);
 
     // transcript 5 轮仅 50 个标记、远低于 0.8×预算；但固定段 + transcript 超出预算与越界线。
-    // 旧的 transcript 比例触发线在这里不会压缩，最终门禁只能拒发；按完整请求判定则应压缩后发送。
+    // 压缩旧轮不能保证最终完整请求落在本地输入硬限制以内；超限时必须拒发。
     const budget = Math.floor((fixed + 45) / 1.25);
     const second = fixture('volatile-run');
     const sent: Array<readonly { role: string; content: string }[]> = [];
@@ -243,15 +317,11 @@ describe('世界推演 Agent runtime', () => {
     const invoke = vi.fn(async (_role: string, messages: readonly { role: string; content: string }[]) => {
       sent.push(messages); calls += 1; return calls < 6 ? { content: '', toolCalls: [{ id: `call-volatile-${calls}`, name: 'read', arguments: JSON.stringify({ reads: ['anchor:message'] }) }] } : block;
     });
-    const result = await new WorldSimulationMainLoop_ACU({ invoke, subagents: { run: vi.fn(), runReviewer: vi.fn() }, apiPreset, countTokens: markerCount })
+    await expect(new WorldSimulationMainLoop_ACU({ invoke, subagents: { run: vi.fn(), runReviewer: vi.fn() }, apiPreset, countTokens: markerCount })
       .run({ identity: { ...baseIdentity, runId: 'volatile-run', taskId: 'volatile-task-run' }, settings: { ...runSettings, agentHistoryTokenBudget: budget },
-        promptContext: { ...second.promptContext, userRequirements: pad }, registry: second.registry, tools: paddedTools });
-
-    expect(result.outcome).toBe('blocked');
-    expect(invoke).toHaveBeenCalledTimes(6);
-    expect(sent[4].some(message => message.content.includes('更早世界推演会话交接'))).toBe(false);
-    expect(sent[5].some(message => message.content.includes('更早世界推演会话交接'))).toBe(true);
-    expect(sent[5].filter(message => message.content.includes(receipt))).toHaveLength(4);
+        promptContext: { ...second.promptContext, userRequirements: pad }, registry: second.registry, tools: paddedTools })).rejects.toThrow('final-request-token-overflow');
+    expect(invoke).toHaveBeenCalled();
+    expect(sent.every(messages => messages.reduce((total, message) => total + (message.content.match(/填/g)?.length ?? 0), 0) < budget)).toBe(true);
   });
 
   it('实际导演请求稳定协议在动态用户要求之前，模型历史追加在末位预填充之前', async () => {
@@ -656,6 +726,219 @@ describe('世界推演 Agent runtime', () => {
     expect(invoke).toHaveBeenCalledOnce();
   });
 
+  it('普通代理与审核员的最终请求不继承导演已读全文，保留触发世界书', async () => {
+    const { registry, promptContext, runId } = fixture('role-material-boundary');
+    const directorMaterials = 'DIRECTOR_ONLY_PRIVATE_READ';
+    const triggeredWorldbook = 'TRIGGERED_WORLDBOOK_FULL_TEXT  \n';
+    const sent: Array<{ name: string; body: string; messages: readonly { content: string }[] }> = [];
+    const invoke = vi.fn(async (name: string, messages: readonly { content: string }[]) => {
+      sent.push({ name, body: messages.map(message => message.content).join('\n'), messages });
+      return name === 'causality-reviewer'
+        ? JSON.stringify({ verdict: 'accept', summary: '审核通过', findings: [], acceptedCandidateIds: ['candidate-one'] })
+        : JSON.stringify({ status: 'no_change', summary: '无需变更', evidenceRefs: [], uncertainties: [] });
+    });
+    const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
+    await runtime.run({ delegation: { agentName: 'timekeeper', instruction: '核对时间', reads: [] },
+      settings: settings(), promptContext, registry, tools, runId, directorMaterials, triggeredWorldbook });
+    await runtime.runReviewer({ candidates: [{ candidateId: 'candidate-one', agentName: 'timekeeper',
+      patch: { clock: { days: 1 } }, summary: '时间变化', evidenceRefs: [], uncertainties: [], writableModules: ['clock'] }],
+      settings: settings(), promptContext, registry, tools, directorMaterials, triggeredWorldbook });
+    expect(sent.map(item => item.name)).toEqual(['timekeeper', 'causality-reviewer']);
+    for (const item of sent) {
+      expect(item.messages.some(message => message.content.endsWith(triggeredWorldbook))).toBe(true);
+      const snapshot = item.messages.filter(message => message.content.includes('【本回合运行时数据】'));
+      expect(snapshot).toHaveLength(1);
+      expect(snapshot[0].content).toContain(`锚点正文：${promptContext.anchorMessage}`);
+      expect(snapshot[0].content).toContain('世界状态：');
+      expect(item.body).not.toContain(directorMaterials);
+      expect(item.body).toContain('锚点正文：正文');
+    }
+  });
+
+  it('专家和审核员在调用 invoker 前核对世界书逐字来源及边界，篡改拒发', async () => {
+    const { registry, promptContext, runId } = fixture('bound-worldbook');
+    const entry = { bookName: '设定集', uid: '7', title: '常开', keys: [], constant: true,
+      content: '  完整正文\n末行  \n', tokens: 8 };
+    const triggeredWorldbook = renderAgentWorldbookTriggeredInjection_ACU({ available: true, entries: [entry] }, '');
+    const fixedWorldbook = bindWorldSimulationFixedWorldbook_ACU(triggeredWorldbook, [entry]);
+    const sent: Array<{ name: string; messages: readonly { content: string }[] }> = [];
+    const invoke = vi.fn(async (name: string, messages: readonly { content: string }[]) => {
+      sent.push({ name, messages });
+      return name === 'causality-reviewer'
+        ? JSON.stringify({ verdict: 'accept', summary: '通过', findings: [], acceptedCandidateIds: ['candidate-one'] })
+        : JSON.stringify({ status: 'no_change', summary: '无变更', evidenceRefs: [], uncertainties: [] });
+    });
+    const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
+    const specialist = { delegation: { agentName: 'timekeeper' as const, instruction: '核对', reads: [] },
+      settings: settings(), promptContext, registry, tools, runId, triggeredWorldbook, fixedWorldbook };
+    const reviewer = { candidates: [{ candidateId: 'candidate-one', agentName: 'timekeeper' as const,
+      patch: { clock: { days: 1 } }, summary: '时间变化', evidenceRefs: [], uncertainties: [], writableModules: ['clock'] }],
+      settings: settings(), promptContext, registry, tools, triggeredWorldbook, fixedWorldbook };
+    await runtime.run(specialist);
+    await runtime.runReviewer(reviewer);
+    expect(sent.map(item => item.name)).toEqual(['timekeeper', 'causality-reviewer']);
+    for (const item of sent) {
+      const bodies = item.messages.filter(message => message.content.includes(`### 常开（设定集#7）\n${entry.content}`));
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0].content.endsWith(triggeredWorldbook)).toBe(true);
+    }
+    invoke.mockClear();
+    const tampered = { ...fixedWorldbook, sections: fixedWorldbook.sections.map(section => ({ ...section, start: section.start + 1 })) };
+    await expect(runtime.run({ ...specialist, fixedWorldbook: tampered })).rejects.toThrow('WORLD_SIMULATION_WORLDBOOK_BOUNDARY_UNVERIFIED');
+    await expect(runtime.runReviewer({ ...reviewer, fixedWorldbook: tampered })).rejects.toThrow('WORLD_SIMULATION_WORLDBOOK_BOUNDARY_UNVERIFIED');
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it('普通角色最终渲染消息按职责切片世界状态', async () => {
+    const { registry, promptContext, runId } = fixture('role-ledger-slices');
+    const sent = new Map<string, string>();
+    const invoke = vi.fn(async (name: string, messages: readonly { content: string }[]) => {
+      sent.set(name, messages.map(message => message.content).join('\n'));
+      return JSON.stringify({ status: 'no_change', summary: '无需变更', evidenceRefs: [], uncertainties: [] });
+    });
+    const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
+    for (const agentName of ['timekeeper', 'dramatis-keeper', 'guidance-composer'] as const) {
+      await runtime.run({ delegation: { agentName, instruction: '核对', reads: [] },
+        settings: settings(), promptContext, registry, tools, runId });
+    }
+    const state = (name: string): Record<string, unknown> => {
+      const text = sent.get(name)!;
+      const match = /世界状态：(\{[^\n]*\})\n锚点正文：/.exec(text);
+      expect(match).not.toBeNull();
+      return JSON.parse(match![1]);
+    };
+    expect(state('timekeeper')).toHaveProperty('clock');
+    expect(state('timekeeper')).not.toHaveProperty('player');
+    expect(state('timekeeper').readHint).toContain('仅按当前角色授权');
+    expect(state('dramatis-keeper')).toHaveProperty('player');
+    expect(state('guidance-composer')).toHaveProperty('player');
+  });
+
+
+
+  it('specialist 多个原生 read 失败不泄露正文，修正后仅一次成功', async () => {
+    const { registry, promptContext, runId } = fixture('specialist-read-atomic');
+    const configured = settings();
+    configured.agentRunBudget.maxExtraReads = 3;
+    let damaged = true;
+    const read = vi.fn(async (address: string) => address === 'anchor:message'
+      ? { status: 'ok' as const, content: 'PRIVATE_ANCHOR_TEXT', exact: true }
+      : damaged ? { status: 'ok' as const, content: 'PRIVATE_CUT_TEXT', exact: true, truncated: true }
+        : { status: 'ok' as const, content: 'COMPLETE_DETAIL', exact: true });
+    const pair = { content: '', toolCalls: [
+      ...toolTurn('read', { reads: ['anchor:message'] }, 'atomic-anchor').toolCalls,
+      ...toolTurn('read', { reads: ['summary:current'] }, 'atomic-cut').toolCalls,
+    ] };
+    const replies = [pair, toolTurn('read', { reads: ['anchor:message'] }, 'atomic-retry'),
+      toolTurn('read', { reads: ['summary:current'] }, 'atomic-exhausted'),
+      JSON.stringify({ status: 'no_change', summary: '已核对', evidenceRefs: [], uncertainties: [] })];
+    const sent: Array<readonly { role: string; content: string; tool_call_id?: string }[]> = [];
+    const invoke = vi.fn(async (_role: string, messages: readonly { role: string; content: string; tool_call_id?: string }[]) => {
+      sent.push(messages);
+      if (sent.length === 2) damaged = false;
+      return replies.shift()!;
+    });
+    const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
+    await runtime.run({ delegation: { agentName: 'timekeeper', instruction: '核对', reads: [] },
+      settings: configured, promptContext, registry, tools: { read, search: tools.search }, runId });
+    const receipt = (index: number, id: string) => sent[index].find(message => message.role === 'tool' && message.tool_call_id === id)?.content ?? '';
+    expect(sent[1].filter(message => message.role === 'tool')).toHaveLength(2);
+    expect(receipt(1, 'atomic-anchor') + receipt(1, 'atomic-cut')).not.toContain('PRIVATE_ANCHOR_TEXT');
+    expect(receipt(1, 'atomic-anchor')).toContain('WORLD_SIMULATION_READ_BATCH_FAILED');
+    expect(receipt(2, 'atomic-retry')).toContain('PRIVATE_ANCHOR_TEXT');
+    expect(receipt(3, 'atomic-exhausted')).toContain('read-once-exhausted');
+  });
+
+  it('同角色同轮的不同 runtime 实例共享成功读取额度，不同轮独立', async () => {
+    const { registry, promptContext, runId } = fixture('runtime-round-shared');
+    const readRoundState = createWorldSimulationReadRoundState_ACU();
+    const read = vi.fn(async () => ({ status: 'ok' as const, content: 'FULL_ANCHOR', exact: true }));
+    const run = async (roundId: string) => {
+      const sent: Array<readonly { role: string; content: string; tool_call_id?: string }[]> = [];
+      const invoke = vi.fn(async (_role: string, messages: readonly { role: string; content: string; tool_call_id?: string }[]) => {
+        sent.push(messages);
+        return sent.length === 1
+          ? toolTurn('read', { reads: ['anchor:message'] }, `read-${roundId}`)
+          : JSON.stringify({ status: 'no_change', summary: '已核对', evidenceRefs: [], uncertainties: [] });
+      });
+      const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
+      await runtime.run({ delegation: { agentName: 'timekeeper', instruction: '核对', reads: [] },
+        settings: settings(), promptContext, registry, tools: { read, search: tools.search }, runId,
+        roundId, readRoundState });
+      return sent[1].find(message => message.role === 'tool' && message.tool_call_id === `read-${roundId}`)?.content ?? '';
+    };
+    expect(await run('round-1')).toContain('FULL_ANCHOR');
+    expect(await run('round-1')).toContain('read-once-exhausted');
+    expect(await run('round-2')).toContain('FULL_ANCHOR');
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+
+  it('普通角色混合越权 read 在运行时整批拒绝，修正后不丢失成功额度', async () => {
+    const { registry, promptContext, runId } = fixture('runtime-address-denied');
+    const configured = settings();
+    configured.agentRunBudget.maxExtraReads = 2;
+    const read = vi.fn(async () => ({ status: 'ok' as const, content: 'PRIVATE_ANCHOR', exact: true }));
+    const replies = [
+      toolTurn('read', { reads: ['anchor:message', 'field:actors:actor-1'] }, 'denied-batch'),
+      toolTurn('read', { reads: ['anchor:message'] }, 'allowed-retry'),
+      JSON.stringify({ status: 'no_change', summary: '核对结束', evidenceRefs: [], uncertainties: [] }),
+    ];
+    const sent: Array<readonly { role: string; content: string; tool_call_id?: string }[]> = [];
+    const invoke = vi.fn(async (_role: string, messages: readonly { role: string; content: string; tool_call_id?: string }[]) => {
+      sent.push(messages);
+      return replies.shift()!;
+    });
+    const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
+    await runtime.run({ delegation: { agentName: 'timekeeper', instruction: '核对', reads: [] },
+      settings: configured, promptContext, registry, tools: { read, search: tools.search }, runId,
+      roundId: 'round-address-denied', readRoundState: createWorldSimulationReadRoundState_ACU() });
+    expect(sent[0].some(message => message.content.includes('剩余 read 轮次'))).toBe(true);
+    expect(sent[0].some(message => message.content.includes('剩余 read/search 轮次'))).toBe(false);
+    const denied = sent[1].find(message => message.role === 'tool' && message.tool_call_id === 'denied-batch')?.content ?? '';
+    const allowed = sent[2].find(message => message.role === 'tool' && message.tool_call_id === 'allowed-retry')?.content ?? '';
+    expect(denied).toContain('read-address-unauthorized');
+    expect(denied).not.toContain('PRIVATE_ANCHOR');
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(allowed).toContain('PRIVATE_ANCHOR');
+  });
+
+  it('reviewer 多个原生 read 任一不完整时整批拒绝，修正后只成功一次', async () => {
+    const { registry, promptContext } = fixture('reviewer-read-atomic');
+    const configured = settings();
+    configured.agentRunBudget.maxExtraReads = 3;
+    const candidate = { candidateId: 'review-atomic', agentName: 'timekeeper', patch: { clock: { days: 1 } },
+      summary: '时间候选', evidenceRefs: [], uncertainties: [], writableModules: ['clock'] };
+    let damaged = true;
+    const read = vi.fn(async (address: string) => address === 'anchor:message'
+      ? { status: 'ok' as const, content: 'PRIVATE_REVIEW_ANCHOR', exact: true }
+      : damaged ? { status: 'ok' as const, content: 'CUT', exact: true, truncated: true }
+        : { status: 'ok' as const, content: 'COMPLETE', exact: true });
+    const replies = [{ content: '', toolCalls: [
+      ...toolTurn('read', { reads: ['anchor:message'] }, 'review-first').toolCalls,
+      ...toolTurn('read', { reads: ['summary:current'] }, 'review-cut').toolCalls,
+    ] }, toolTurn('read', { reads: ['anchor:message'] }, 'review-retry'),
+    toolTurn('read', { reads: ['summary:current'] }, 'review-exhausted'),
+    JSON.stringify({ verdict: 'accept', summary: '审核通过', findings: [], acceptedCandidateIds: ['review-atomic'] })];
+    const sent: Array<readonly { role: string; content: string; tool_call_id?: string }[]> = [];
+    const invoke = vi.fn(async (_role: string, messages: readonly { role: string; content: string; tool_call_id?: string }[]) => {
+      sent.push(messages);
+      if (sent.length === 2) damaged = false;
+      return replies.shift()!;
+    });
+    const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
+    await runtime.runReviewer({ candidates: [candidate], settings: configured, promptContext, registry,
+      tools: { read, search: tools.search } });
+    expect(sent[0].some(message => message.content.includes('剩余 read 轮次'))).toBe(true);
+    expect(sent[0].some(message => message.content.includes('剩余 read/search 轮次'))).toBe(false);
+    const receipt = (index: number, id: string) => sent[index].find(message => message.role === 'tool' && message.tool_call_id === id)?.content ?? '';
+    expect(receipt(1, 'review-first') + receipt(1, 'review-cut')).not.toContain('PRIVATE_REVIEW_ANCHOR');
+    expect(receipt(1, 'review-first')).toContain('WORLD_SIMULATION_READ_BATCH_FAILED');
+    expect(receipt(2, 'review-retry')).toContain('PRIVATE_REVIEW_ANCHOR');
+    expect(receipt(3, 'review-exhausted')).toContain('read-once-exhausted');
+  });
+
+
   it('specialist 只能在 catalog 声明的 ledger modules 内产出候选', async () => {
     const { registry, evidence, promptContext, runId } = fixture('specialist');
     const invoke = vi.fn(async () => JSON.stringify({ status: 'candidate', agentName: 'timekeeper', patch: { clock: { days: 1 } }, summary: '时间推进', evidenceRefs: [evidence], uncertainties: [] }));
@@ -668,13 +951,17 @@ describe('世界推演 Agent runtime', () => {
 
   it('specialist 省略绑定身份时由运行时补齐 agentName', async () => {
     const { registry, promptContext, runId } = fixture('specialist-bound-identity');
-    const invoke = vi.fn(async () => JSON.stringify({ status: 'no_change', summary: '无需修改', evidenceRefs: [], uncertainties: [] }));
+    const invoke = vi.fn(async (_role: string, messages: readonly { role: string; content: string }[]) => {
+      expect(messages.some(message => message.content.includes('剩余 read/search 轮次'))).toBe(true);
+      return JSON.stringify({ status: 'no_change', summary: '无需修改', evidenceRefs: [], uncertainties: [] });
+    });
     const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
 
     await expect(runtime.run({
       delegation: { agentName: 'lore-researcher', instruction: '核对行动者信息', reads: [] },
       settings: settings(), promptContext, registry, tools, runId,
     })).resolves.toMatchObject({ agentName: 'lore-researcher', status: 'no_change', summary: '无需修改' });
+    expect(invoke).toHaveBeenCalledOnce();
   });
 
   it('specialist 显式伪造不同身份时仍 fail-closed', async () => {
@@ -704,7 +991,7 @@ describe('世界推演 Agent runtime', () => {
     expect(invoke).toHaveBeenCalledTimes(2);
     expect(tools.read).not.toHaveBeenCalled();
     const last = invoke.mock.calls[1][1] as readonly { role: string; content: string }[];
-    expect(last.find(message => message.role === 'tool' && message.content.includes('read/search 轮次已用尽'))?.content).toContain('read/search 轮次已用尽');
+    expect(last.find(message => message.role === 'tool' && message.content.includes('read 轮次已用尽'))?.content).toContain('read 轮次已用尽');
     expect(last.at(-1)?.role).toBe('user');
   });
 
@@ -1081,6 +1368,43 @@ describe('世界推演 Agent runtime', () => {
     expect(completedCard).toMatchObject({ title: '资料读取完成（1 项）', status: 'done', ok: true });
     expect(completed.filter(item => item.kind === 'tool_read')).toHaveLength(1);
   });
+
+  it('导演同轮多个原生 read 并发执行并按调用 ID 回灌各自结果', async () => {
+    const { registry, promptContext } = fixture('director-parallel-read');
+    const sent: Array<readonly { role: string; content: string; tool_call_id?: string }[]> = [];
+    let started = 0;
+    let release!: () => void;
+    const bothStarted = new Promise<void>(resolve => { release = resolve; });
+    const read = vi.fn(async (address: string) => {
+      started += 1;
+      if (started === 2) release();
+      await bothStarted;
+      return { status: 'ok' as const, content: `正文:${address}`, summary: address };
+    });
+    const invoke = vi.fn(async (_role, messages) => {
+      sent.push(messages);
+      return sent.length === 1 ? {
+        content: '', toolCalls: [
+          { id: 'read-a', name: 'read', arguments: JSON.stringify({ reads: ['anchor:message'] }) },
+          { id: 'read-b', name: 'read', arguments: JSON.stringify({ reads: ['ledger:current'] }) },
+        ],
+      } : JSON.stringify({ action: 'block', reason: '读取完成', unresolved: ['next'] });
+    });
+    const identity = { runId: 'director-parallel-read', chatIdentity: 'director-parallel-read', triggerKind: 'assistant_completed' as const,
+      triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest',
+      baseLedgerRevision: 0, taskId: 'parallel-read', stageId: 'stage', stageRevision: 1 };
+    const pending = new WorldSimulationMainLoop_ACU({ invoke, subagents: { run: vi.fn(), runReviewer: vi.fn() }, apiPreset, countTokens: async () => 1 })
+      .run({ identity, settings: settings(), promptContext, registry, tools: { read, search: tools.search } });
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    await expect(pending).resolves.toMatchObject({ outcome: 'blocked' });
+    const receipts = sent[1].filter(item => item.role === 'tool');
+    expect(receipts).toHaveLength(2);
+    expect(receipts.find(item => item.tool_call_id === 'read-a')?.content).toContain('正文:anchor:message');
+    expect(receipts.find(item => item.tool_call_id === 'read-a')?.content).not.toContain('正文:ledger:current');
+    expect(receipts.find(item => item.tool_call_id === 'read-b')?.content).toContain('正文:ledger:current');
+    expect(receipts.find(item => item.tool_call_id === 'read-b')?.content).not.toContain('正文:anchor:message');
+  });
+
 
   it('reviewer 要求 revise 时返回主循环修正而不是误提交', async () => {
     const { registry, evidence, promptContext } = fixture('review-revise');
@@ -1961,7 +2285,8 @@ describe('世界推演 Agent runtime', () => {
 
     expect(result).toMatchObject({ outcome: 'commit', summary: '取证后提交' });
     expect(subagents.runReviewer).toHaveBeenCalledTimes(2);
-    expect(liveTools.read).toHaveBeenCalledWith('ledger:current');
+    // 默认上围栏：无显式围栏时，以本地 120000 输入限制减去已占用量计算。
+    expect(liveTools.read).toHaveBeenCalledWith('ledger:current', undefined, 71999);
   });
 
   it('原生 tool_calls 的回执以 role=tool 进入下一次请求', async () => {

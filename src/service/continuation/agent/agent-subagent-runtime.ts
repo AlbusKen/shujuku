@@ -6,8 +6,8 @@ import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
  * 子代理拿到材料后还可以自己输出 read / search 工具批次补充调阅，运行时执行工具、
  * 把结果作为 user 消息追加进本次派工的对话，再让它继续，直到交出契约 JSON。
  *
- * 免授权：读集不再做白名单校验——所有资料域对所有子代理开放，读多少由 token 门禁管。
- * 种子读集在注入前记入本次派工自己的门禁账本；种子本身就超预算时整次派工拒回主 Agent。
+ * 提供共享资料时，维护代理只可调阅自身维护范围；其余角色的工具权限由运行时校验。
+ * 种子读集和后续批次分别经过门禁；读取失败时不得把同批其它正文回灌给模型。
  *
  * 只读契约仍由主循环结算；write_sql 通过受控生产端口即时保存并回读。
  */
@@ -24,11 +24,11 @@ import {
   type ContinuationSettings_ACU,
 } from '../model';
 import { AGENT_PREFILLS_ACU, buildDefaultContinuationAgentPrompts_ACU } from './agent-defaults';
-import { keptSubagentMaterialTokens_ACU, omitSnapshotSectionsForSubagent_ACU, renderFallbackAgentSnapshot_ACU, stripUnownedSubagentPrompt_ACU } from './agent-shared-materials';
+import { findMainSessionReadAppendix_ACU, keptSubagentMaterialTokens_ACU, omitSnapshotSectionsForSubagent_ACU, renderFallbackAgentSnapshot_ACU, stripUnownedSubagentPrompt_ACU } from './agent-shared-materials';
 import { agentNativeTools_ACU, nativeToolArguments_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, withNativeToolThinkPrefill_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
 import { hasActiveStoryArc_ACU, readAgentModuleFoldState_ACU, readAgentModuleSnapshot_ACU } from './agent-module-store';
 import type { AgentFieldPage_ACU, AgentModuleFieldReceipt_ACU } from './agent-module-field-commit';
-import { findAgentSubagentDefinition_ACU, renderAgentReadCatalog_ACU, renderAgentWebToolCatalog_ACU, type AgentSubagentDefinition_ACU } from './agent-catalog';
+import { findAgentSubagentDefinition_ACU, getAgentSubagentAccessProfile_ACU, getAgentSubagentReadPrefixes_ACU, renderAgentReadCatalog_ACU, renderAgentWebToolCatalog_ACU, type AgentSubagentDefinition_ACU } from './agent-catalog';
 import { renderAgentUserRequirements_ACU } from './agent-user-requirements';
 import {
   compactAgentProtocolError_ACU,
@@ -46,6 +46,7 @@ import {
   parseAgentReviewerOutput_ACU,
   parseAgentSubagentToolCalls_ACU,
   parseAgentWritableToolCalls_ACU,
+  parseAgentResearcherWorkingNotes_ACU,
   renderAgentContractContinuationRequest_ACU,
   type AgentContractRejection_ACU,
 } from './agent-protocol';
@@ -64,8 +65,13 @@ import {
   renderAgentOutlineWindow_ACU,
   renderAgentUnsettledHistory_ACU,
   resolveAgentReadToken_ACU,
+  resolveAgentReadAddressAxis_ACU,
+  resolveAgentReadTokenWithProof_ACU,
   type AgentResolveContext_ACU,
 } from './agent-placeholder-resolver';
+import { allocateAgentDefaultReadFences_ACU, type AgentDefaultFenceCandidate_ACU } from './agent-default-fence';
+import { measureContinuationFinalRequestCapacity_ACU } from './agent-final-request-gate';
+import { countAgentTokens_ACU, type TokenCounter_ACU } from './agent-token-budget';
 import { buildEmptyAgentWorldbookSnapshot_ACU, renderAgentWorldbookBrowseCatalog_ACU, renderAgentWorldbookTriggeredInjection_ACU } from './agent-worldbook-read';
 import { renderAgentTableCatalog_ACU } from './agent-tables';
 import { runAgentSearch_ACU } from './agent-search';
@@ -87,6 +93,7 @@ import type {
   AgentMaintainerOutput_ACU,
   AgentModuleRevisions_ACU,
   AgentPlannerOutput_ACU,
+  AgentReadFence_ACU,
   AgentResearcherOutput_ACU,
   AgentReviewerOutput_ACU,
   AgentRunBudget_ACU,
@@ -167,8 +174,19 @@ export interface AgentSubagentRunResult_ACU {
   usedFieldWrites?: boolean;
 }
 
+export interface AgentReadRoundState_ACU {
+  successfulReadBatches: Set<string>;
+  pendingReadBatches: Set<string>;
+}
+
+export function createAgentReadRoundState_ACU(): AgentReadRoundState_ACU {
+  return { successfulReadBatches: new Set<string>(), pendingReadBatches: new Set<string>() };
+}
+
 export interface AgentSubagentRunInput_ACU {
   delegation: AgentDelegation_ACU;
+  /** 稳定的工作流轮标识；读取额度按 agentName + roundId 计账。 */
+  roundId: string;
   settings: ContinuationSettings_ACU;
   resolveContext: AgentResolveContext_ACU;
   budget: AgentRunBudget_ACU;
@@ -178,6 +196,8 @@ export interface AgentSubagentRunInput_ACU {
   signal?: AbortSignal | null;
   /** 修正轮只允许维护员触碰仍待修复的模块；首轮不传则使用职责固定写集。 */
   targetModules?: readonly AgentWritableModule_ACU[];
+  /** 同一主会话轮次内由所有同名子代理调用共享的读取额度状态。 */
+  readRoundState?: AgentReadRoundState_ACU;
   writeSql?: (input: { role: AgentSubagentName_ACU; sql: string; resolvePage: (handle: string) => AgentFieldPage_ACU | null; isCurrent?: () => boolean }) => Promise<AgentModuleFieldReceipt_ACU>;
   /** 主会话为本轮备好的世界书全文和已有检索。传入后子代理不能再读这些范围。 */
   sharedMaterials?: string;
@@ -225,6 +245,8 @@ export interface AgentSubagentRuntimeDependencies_ACU {
   webClient?: AgentWebClient_ACU;
   /** 酒馆自身 origin，用于拒绝 web_read 抓自己；缺省取 location.origin。 */
   hostOrigin?: () => string;
+  /** 最终请求容量门禁与默认上围栏的 token 计数器；缺省走宿主分词器。 */
+  countTokens?: TokenCounter_ACU;
 }
 
 const defaultDependencies_ACU: AgentSubagentRuntimeDependencies_ACU = {
@@ -267,20 +289,6 @@ interface ResearcherPageCache_ACU {
  * 输出被截断或个别条目非法时，只索要剩余或修正条目，不整份重来；这两轮不占协议重试额度。
  */
 export const AGENT_CONTRACT_CONTINUATION_ROUNDS_ACU = 2;
-
-/** 维护类子代理固定作用的模块。写入范围由职责决定，不再经派工写集协商。 */
-function ownReadPrefixes_ACU(writes: readonly AgentWritableModule_ACU[]): string[] {
-  const prefixes: Record<AgentWritableModule_ACU, readonly string[]> = {
-    storyArc: ['$STORY_ARC', '$FIELD:storyArc'],
-    hooks: ['$HOOKS_LEDGER', '$FIELD:hooks'],
-    infoGap: ['$INFO_GAP', '$FIELD:infoGap'],
-    chronology: ['$CHRONOLOGY', '$FIELD:chronology'],
-    constraints: ['$ACTIVE_CONSTRAINTS', '$FIELD:constraints'],
-    webRefs: ['$WEB_REFS', '$FIELD:webRefs'],
-    userRequirements: ['$USER_REQUIREMENTS'],
-  };
-  return writes.flatMap(module => [...prefixes[module]]);
-}
 
 function readStaysWithOwner_ACU(key: string, prefixes: readonly string[]): boolean {
   return prefixes.some(prefix => key === prefix || key.startsWith(`${prefix}:`));
@@ -339,11 +347,27 @@ function describeWriteScope_ACU(writes: readonly AgentWritableModule_ACU[]): str
   return `你的职责固定写入：${writes.map(item => labels[item]).join('、')}。职责之外的模块一律不许出现在 delta 里。`;
 }
 
+function agentReadRoundKey_ACU(agentName: string, roundId: string): string {
+  return JSON.stringify([agentName, roundId]);
+}
+
 interface SubagentGate_ACU {
   state: AgentReadGateState_ACU;
   config: AgentReadGateConfig_ACU;
   /** 本次派工已放行的读取地址（含种子）。重复调阅返回一行提示、不重注、不计账。 */
   granted: Set<string>;
+  /** 收窄读取的原始地址 -> 实际已提供的子范围与剩余地址；原地址不能冒充已完整放行。 */
+  narrowed: Map<string, { address: string; remainder?: string }>;
+  /** 普通角色的成功工具读取批次；种子资料与失败批次不占额度。 */
+  successfulReadBatch: boolean;
+  /** 跨同一主会话轮次共享的读取额度键；终审等独立入口可省略。 */
+  readRoundKey?: string;
+  readRoundState?: AgentReadRoundState_ACU;
+  /**
+   * 产生当前工具调用的那次最终请求算出的 60% 默认上围栏预算；只作地址适配器解析默认读取范围的输入。
+   * 同一模型回合内已放行的读取会从中扣除，下一次请求前由容量门禁重新计量。
+   */
+  defaultReadFenceTokens?: number;
 }
 
 interface SubagentMaterial_ACU {
@@ -351,6 +375,8 @@ interface SubagentMaterial_ACU {
   label: string;
   text: string;
   status?: 'failed';
+  /** 本地读取地址的解析结果；未显式提供上围栏的读取据此在批次层按默认上围栏解析范围。 */
+  read?: { title: string; body: string; requestedFence?: AgentReadFence_ACU };
 }
 
 /**
@@ -441,10 +467,19 @@ function resolveResearcherDraft_ACU(draft: ReturnType<typeof parseAgentResearche
 }
 
 /** 把一个读地址解析成材料条目。text 已带分节标题，可直接拼接注入。 */
-function resolveMaterial_ACU(token: string, context: AgentResolveContext_ACU): SubagentMaterial_ACU {
-  const resolved = resolveAgentReadToken_ACU(token, context);
-  return { key: token, label: token, text: `### ${resolved.title}（${token}）\n${resolved.text}`,
-    ...(resolved.status === 'failed' ? { status: 'failed' as const } : {}) };
+function resolveMaterial_ACU(token: string, context: AgentResolveContext_ACU, requestedFence?: AgentReadFence_ACU): SubagentMaterial_ACU {
+  const resolved = resolveAgentReadTokenWithProof_ACU(token, context, requestedFence);
+  const proofMissing = resolved.status !== 'failed'
+    && (!resolved.proof || resolved.proof.stableAddress !== token || resolved.proof.completeWithinFence !== true);
+  const failed = resolved.status === 'failed' || proofMissing;
+  return {
+    key: token,
+    label: token,
+    text: `### ${resolved.title}（${token}）\n${proofMissing ? 'fence-proof-missing' : resolved.text}`,
+    ...(failed
+      ? { status: 'failed' as const }
+      : { read: { title: resolved.title, body: resolved.text, ...(requestedFence === undefined ? {} : { requestedFence }) } }),
+  };
 }
 
 /** 只有定位到合法模块和安全 ID 的领域拒绝路径才可转为权威读取地址。 */
@@ -645,9 +680,12 @@ export class AgentSubagentRuntime_ACU {
     if (!definition) {
       rejectDelegation_ACU(`目录里没有名为 ${input.delegation.agentName} 的子代理`, { agentName: input.delegation.agentName });
     }
+    const accessProfile = getAgentSubagentAccessProfile_ACU(definition.kind);
     const writes = definition.kind === 'maintain' && input.targetModules?.length
       ? [...KIND_FIXED_WRITES_ACU[definition.kind]].filter((module): module is AgentWritableModule_ACU => input.targetModules!.includes(module))
       : [...KIND_FIXED_WRITES_ACU[definition.kind]];
+    const readRoundState = input.readRoundState ?? createAgentReadRoundState_ACU();
+    const readRoundKey = agentReadRoundKey_ACU(definition.name, input.roundId);
     const gate: SubagentGate_ACU = {
       state: createAgentReadGateState_ACU(),
       config: {
@@ -656,10 +694,19 @@ export class AgentSubagentRuntime_ACU {
         fallbackTokens: input.settings.agentReadFallbackTokens,
       },
       granted: new Set(),
+      narrowed: new Map(),
+      successfulReadBatch: false,
+      readRoundKey,
+      readRoundState,
     };
 
-    // 种子读集：免授权，直接解析；注入前整批记入本次派工自己的门禁账本。
+    // 种子与工具读取使用同一角色授权；越权种子整次派工拒绝，不发送 provider 请求。
     const seedTokens = [...new Set(input.delegation.reads.map(raw => String(raw ?? '').trim()).filter(Boolean))];
+    const authorizedReads = getAgentSubagentReadPrefixes_ACU(definition.kind, writes);
+    const unauthorizedSeed = seedTokens.find(token => !readStaysWithOwner_ACU(token, authorizedReads));
+    if (unauthorizedSeed) {
+      rejectDelegation_ACU(`派工种子地址未获 ${definition.name} 授权：${unauthorizedSeed}`, { agentName: definition.name, address: unauthorizedSeed });
+    }
     const seeds = seedTokens.map(token => resolveMaterial_ACU(token, input.resolveContext));
     const failedSeed = seeds.find(seed => seed.status === 'failed');
     if (failedSeed) throw subagentFailed_ACU(`派工种子读取失败：${failedSeed.key}`, false, { address: failedSeed.key, reason: failedSeed.text });
@@ -744,24 +791,37 @@ export class AgentSubagentRuntime_ACU {
     let baseMessages = rendered.messages;
     const presentTokens = new Set([...promptSegments, ...(split.taskTemplate ? [{ content: split.taskTemplate }] : [])].flatMap(segment => segment.content.match(/\$[A-Z][A-Z0-9_]*/g) ?? [] as string[]));
     const renderRequestSnapshot = async (): Promise<string> => {
-      const originalSnapshot = input.mainSnapshot?.trim() ?? '';
-      const mainReadsAt = originalSnapshot.indexOf('\n\n【主会话已调阅】');
+      const originalSnapshot = input.mainSnapshot?.trim() ? input.mainSnapshot : '';
+      const worldbook = input.resolveContext.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false);
+      const worldbookInjection = renderAgentWorldbookTriggeredInjection_ACU(worldbook, buildAgentWorldbookScanText_ACU(input.resolveContext));
+      const mainReadsAt = findMainSessionReadAppendix_ACU(originalSnapshot, worldbookInjection);
       const latestSnapshot = usedFieldWrites
         ? [await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext), ...(mainReadsAt >= 0 ? [originalSnapshot.slice(mainReadsAt + 2)] : [])].join('\n\n')
         : originalSnapshot || await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext);
-      const snapshotText = omitSnapshotSectionsForSubagent_ACU(latestSnapshot, presentTokens, { dropTriggeredWorldbook: definition.kind === 'arc' });
+      const snapshotText = omitSnapshotSectionsForSubagent_ACU(latestSnapshot, presentTokens,
+        { dropTriggeredWorldbook: definition.kind === 'arc', worldbookInjection });
       const taskMaterial = await renderTaskMaterial();
       return [snapshotText, taskMaterial || `【本次派工任务】\n${input.delegation.prompt}`, ...(taskMaterial ? [] : [`【本轮种子资料】\n${materials}`]), definition.promptKey === 'arcArchitect' ? renderStoryArcVolumePlanInstruction_ACU(input.settings) : '', input.sharedMaterials ?? ''].filter(Boolean).join('\n\n');
     };
     // 预算状态随每次请求尾部快照刷新。
-    const ownReads = input.sharedMaterials !== undefined ? ownReadPrefixes_ACU(writes) : null;
+    const allowSearch = accessProfile.allowSearch;
+    const ownReads = authorizedReads;
     if (input.writeSql && writes.length) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: renderMaintenanceSqlGuide_ACU(definition.name) });
-    if (ownReads) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: ownReads.length ? `世界书全文和各资料库已在【本轮已备资料】。不要再读世界书、正文、大纲或做跨库搜索。你只能 read 自己维护的详细资料：${ownReads.join('、')}。` : '世界书全文和各资料库已在【本轮已备资料】。你没有调阅工具，直接根据这些资料交付。' });
+    baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: ownReads.length ? `本角色只可 read 以下自有或强相关地址：${ownReads.join('、')}。${allowSearch ? '世界书检索限已授权范围。' : '不得做本地 search。'}` : '本角色没有本地调阅工具，直接根据已备资料交付。' });
     const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
     // 小循环的追加消息：子代理自己的输出（assistant）与工具结果。原生工具回执使用 role=tool。
     const transcript: Array<{ role: string; content: string; tool_calls?: NonNullable<ReturnType<typeof nativeToolExchange_ACU>[number]['tool_calls']>; tool_call_id?: string }> = [];
     const trailingPrefill = (baseMessages[baseMessages.length - 1]?.role === 'assistant' || baseMessages[baseMessages.length - 1]?.content === USER_PREFILL_CONTENT_ACU) ? baseMessages.pop() : undefined;
     const expandedReads: string[] = [];
+    const researchToolCallIds = new Set<string>();
+    const researchWorkingNotes: string[] = [];
+    const compactResearchTranscript = (): void => {
+      if (!researchWorkingNotes.length) return;
+      for (const message of transcript) {
+        if (message.role !== 'tool' || !message.tool_call_id || !researchToolCallIds.has(message.tool_call_id)) continue;
+        message.content = `【网页工作笔记】\n${researchWorkingNotes.join('\n')}`;
+      }
+    };
     let toolRoundsUsed = 0;
     let writeRoundsUsed = 0;
     const maxWriteRounds = input.writeSql && writes.length ? Math.max(1, input.budget.maxIterations) : 0;
@@ -830,11 +890,9 @@ export class AgentSubagentRuntime_ACU {
       promptCacheEnabled: true,
       // 每次派工的对话全新；命名空间按角色和可用工具稳定划分，不跟随尝试号。
       cacheScope: `sub-${definition.name}`,
-      cacheTools: ['read', 'search', ...(isResearch ? ['encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read'] : []), ...(input.writeSql && writes.length ? ['write_sql', ...writes.map(module => `module:${module}`)] : [])],
-      tools: agentNativeTools_ACU([
-        ...(ownReads ? [...(ownReads.length ? ['read' as const] : []), ...(input.writeSql && writes.length ? ['write_sql' as const] : [])] : (input.writeSql && writes.length ? ['read' as const, 'search' as const, 'write_sql' as const] : ['read' as const, 'search' as const])),
-        ...(isResearch ? ['encyclopedia_search' as const, 'encyclopedia_read' as const, 'web_search' as const, 'web_read' as const] : []),
-      ]),
+      cacheTools: [...accessProfile.tools,
+        ...(input.writeSql && writes.length ? ['write_sql', ...writes.map(module => `module:${module}`)] : [])],
+      tools: agentNativeTools_ACU([...accessProfile.tools, ...(input.writeSql && writes.length ? ['write_sql' as const] : [])]),
       minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU[definition.promptKey],
       onUsage: usage => {
         usageTotal = usageTotal
@@ -936,9 +994,12 @@ export class AgentSubagentRuntime_ACU {
       }
       // 传输错误（502/网络抖动）按设置延时重试；协议/契约拒绝仍走小循环内的对话级立即重试。
       const requestSnapshot = await renderRequestSnapshot();
+      const requestMessages = withNativeToolThinkPrefill_ACU([...baseMessages, ...transcript, { role: 'user', content: `${requestSnapshot}\n\n${renderReadBudgetNote(toolRoundsUsed)}` }, ...(trailingPrefill?.content === USER_PREFILL_CONTENT_ACU ? [trailingPrefill] : [])]);
+      // 容量门禁在传输重试之外：超限是确定性失败，不得被当作传输错误重发。
+      gate.defaultReadFenceTokens = await this.measureFinalRequestCapacity_ACU(requestMessages, input.settings.agentHistoryTokenBudget, callOptions, definition.name);
       const raw = await callContinuationInternalAiWithRetry_ACU(
         () => this.dependencies.callInternalAi(
-          withNativeToolThinkPrefill_ACU([...baseMessages, ...transcript, { role: 'user', content: `${requestSnapshot}\n\n${renderReadBudgetNote(toolRoundsUsed)}` }, ...(trailingPrefill?.content === USER_PREFILL_CONTENT_ACU ? [trailingPrefill] : [])]),
+          requestMessages,
           input.preset,
           identity,
           input.signal,
@@ -962,6 +1023,11 @@ export class AgentSubagentRuntime_ACU {
       let toolCalls: ReturnType<typeof parseAgentWritableToolCalls_ACU>;
       try {
         toolCalls = nativeCalls.length ? nativeToolArguments_ACU(nativeCalls).map(({ call, payload }) => {
+          if (isResearch && ['encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read'].includes(call.name) && payload.notes !== undefined) {
+            const notes = parseAgentResearcherWorkingNotes_ACU(JSON.stringify({ action: call.name, notes: payload.notes }), '');
+            for (const note of notes) if (!researchWorkingNotes.includes(note)) researchWorkingNotes.push(note);
+            compactResearchTranscript();
+          }
           if (call.name === 'write_sql') {
             if (!input.writeSql || !writes.length || typeof payload.sql !== 'string' || !payload.sql.trim()
               || Object.keys(payload).some(key => key !== 'action' && key !== 'sql')) throw new Error('write_sql 未授权或参数非法');
@@ -973,8 +1039,12 @@ export class AgentSubagentRuntime_ACU {
             return parseAgentWebToolCall_ACU(argumentsWithoutNotes);
           }
           if (call.name !== 'read' && call.name !== 'search') throw new Error(`未知工具 ${call.name}`);
+          if (call.name === 'search' && !allowSearch) throw new Error('当前角色未授权本地搜索');
+          if (call.name === 'read' && (definition.kind === 'compose' || (ownReads && !ownReads.length))) throw new Error('当前角色未授权本地读取');
           if (_notes !== undefined && !isResearch) throw new Error('非研究角色不得传 notes');
-          return parseAgentToolCall_ACU(argumentsWithoutNotes);
+          const parsed = parseAgentToolCall_ACU(argumentsWithoutNotes);
+          if (parsed.kind !== call.name) throw new Error('工具名称与动作不一致');
+          return parsed;
         }) : null;
         if (!nativeCalls.length && (input.writeSql && writes.length
           ? parseAgentWritableToolCalls_ACU(protocolText, prefill, isResearch)
@@ -1007,7 +1077,8 @@ export class AgentSubagentRuntime_ACU {
         }
         if (readsAllowed && toolCalls.some(item => item.kind !== 'write_sql')) toolRoundsUsed += 1;
         const perCallResults: string[] = [];
-        for (const call of toolCalls) {
+        for (let index = 0; index < toolCalls.length; index += 1) {
+          const call = toolCalls[index];
           if (call.kind === 'write_sql') {
             if (writeRoundsUsed >= maxWriteRounds) {
               const exhausted = JSON.stringify({ action: 'write_sql', originalSql: call.sql, status: 'rejected', accepted: [], reason: 'write_sql 轮次已用尽',
@@ -1066,7 +1137,20 @@ export class AgentSubagentRuntime_ACU {
               perCallResults.push(denied);
               continue;
             }
-            const result = await this.executeToolCalls_ACU([call], input.resolveContext, gate, expandedReads, ownReads,
+            if (call.kind === 'read' || call.kind === 'search') {
+              const batch: AgentToolCall_ACU[] = [call];
+              while (index + 1 < toolCalls.length) {
+                const next = toolCalls[index + 1];
+                if (next.kind !== 'read' && next.kind !== 'search') break;
+                batch.push(next);
+                index += 1;
+              }
+              const result = await this.executeToolCalls_ACU(batch, input.resolveContext, gate, expandedReads, ownReads, allowSearch, !isResearch && definition.kind !== 'arc',
+                isResearch ? { settings: input.settings, cache: pageCache } : undefined);
+              perCallResults.push(result, ...batch.slice(1).map(() => '本逻辑读取批次已统一结算，结果见首个工具回执。'));
+              continue;
+            }
+            const result = await this.executeToolCalls_ACU([call], input.resolveContext, gate, expandedReads, ownReads, allowSearch, false,
               isResearch ? { settings: input.settings, cache: pageCache } : undefined);
             perCallResults.push(result);
           }
@@ -1074,6 +1158,9 @@ export class AgentSubagentRuntime_ACU {
         const roundNote = maxWriteRounds ? `write_sql 轮次剩余 ${maxWriteRounds - writeRoundsUsed} / ${maxWriteRounds}。` : '';
         const note = renderReadBudgetNote(toolRoundsUsed);
         const results = nativeCalls.map((_, index) => [perCallResults[index] || '工具没有返回内容', roundNote, note].filter(Boolean).join('\n\n'));
+        for (const call of nativeCalls) {
+          if (isResearch && ['encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read'].includes(call.name)) researchToolCallIds.add(call.id);
+        }
         transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, results));
         continue;
       }
@@ -1208,6 +1295,8 @@ export class AgentSubagentRuntime_ACU {
         fallbackTokens: input.settings.agentReadFallbackTokens,
       },
       granted: new Set(),
+      narrowed: new Map(),
+      successfulReadBatch: false,
     };
     const fixedDecision = await gateAgentReadBatch_ACU(evidence.gateItems, gate.state, gate.config, 0);
     if (!fixedDecision.allowed) {
@@ -1255,10 +1344,12 @@ export class AgentSubagentRuntime_ACU {
     // 终审与普通派工同一预算语义：首轮给出上限，每个工具批次后刷新剩余轮次与遥测；注入点必须在尾部预填充之前。
     const reviewPresent = new Set([...reviewSegments, ...(reviewSplit.taskTemplate ? [{ content: reviewSplit.taskTemplate }] : [])].flatMap(segment => segment.content.match(/\$[A-Z][A-Z0-9_]*/g) ?? [] as string[]));
     const renderReviewTail = async (): Promise<string> => {
-      const originalSnapshot = input.mainSnapshot?.trim() ?? '';
-      const mainReadsAt = originalSnapshot.indexOf('\n\n【主会话已调阅】');
+      const originalSnapshot = input.mainSnapshot?.trim() ? input.mainSnapshot : '';
+      const worldbook = input.resolveContext.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false);
+      const worldbookInjection = renderAgentWorldbookTriggeredInjection_ACU(worldbook, buildAgentWorldbookScanText_ACU(input.resolveContext));
+      const mainReadsAt = findMainSessionReadAppendix_ACU(originalSnapshot, worldbookInjection);
       const latestSnapshot = [await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext), ...(mainReadsAt >= 0 ? [originalSnapshot.slice(mainReadsAt + 2)] : [])].join('\n\n');
-      const reviewSnapshot = omitSnapshotSectionsForSubagent_ACU(latestSnapshot, reviewPresent);
+      const reviewSnapshot = omitSnapshotSectionsForSubagent_ACU(latestSnapshot, reviewPresent, { worldbookInjection });
       return [reviewSnapshot, reviewTaskMaterial || `【本次终审任务】\n${input.candidateInstruction}`, ...(reviewTaskMaterial ? [] : [evidence.worldbookEvidence, evidence.supplementalMaterials]), input.sharedMaterials ?? ''].filter(Boolean).join('\n\n');
     };
     let baseMessages = rendered.messages;
@@ -1279,8 +1370,8 @@ export class AgentSubagentRuntime_ACU {
     const callOptions: ContinuationInternalAiCallOptions_ACU = {
       promptCacheEnabled: true,
       cacheScope: 'final-reviewer',
-      cacheTools: ['read', 'search', 'review'],
-      tools: input.sharedMaterials === undefined ? agentNativeTools_ACU(['read', 'search']) : [],
+      cacheTools: [...(input.sharedMaterials === undefined ? ['read'] : []), 'review'],
+      tools: input.sharedMaterials === undefined ? agentNativeTools_ACU(['read']) : [],
       minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU.finalReviewer,
       onUsage: usage => {
         usageTotal = usageTotal
@@ -1301,8 +1392,10 @@ export class AgentSubagentRuntime_ACU {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '终审请求已失效', false));
       }
       const reviewTail = await renderReviewTail();
+      const requestMessages = withNativeToolThinkPrefill_ACU([...baseMessages, ...transcript, { role: 'user', content: `${reviewTail}\n\n${renderReadBudgetNote(toolRoundsUsed)}` }, ...(trailingPrefill?.content === USER_PREFILL_CONTENT_ACU ? [trailingPrefill] : [])]);
+      gate.defaultReadFenceTokens = await this.measureFinalRequestCapacity_ACU(requestMessages, input.settings.agentHistoryTokenBudget, callOptions, AGENT_FINAL_REVIEWER_NAME_ACU);
       const raw = await callContinuationInternalAiWithRetry_ACU(
-        () => this.dependencies.callInternalAi(withNativeToolThinkPrefill_ACU([...baseMessages, ...transcript, { role: 'user', content: `${reviewTail}\n\n${renderReadBudgetNote(toolRoundsUsed)}` }, ...(trailingPrefill?.content === USER_PREFILL_CONTENT_ACU ? [trailingPrefill] : [])]), preset, identity, input.signal, callOptions),
+        () => this.dependencies.callInternalAi(requestMessages, preset, identity, input.signal, callOptions),
         {
           transportRetries: retries,
           retryDelaySeconds: input.settings.retryDelaySeconds,
@@ -1319,7 +1412,12 @@ export class AgentSubagentRuntime_ACU {
       let toolCalls: ReturnType<typeof parseAgentSubagentToolCalls_ACU>;
       try {
         toolCalls = nativeCalls.length
-          ? nativeToolArguments_ACU(nativeCalls).map(({ payload }) => parseAgentToolCall_ACU(payload))
+          ? nativeToolArguments_ACU(nativeCalls).map(({ call, payload }) => {
+            if (call.name !== 'read' || input.sharedMaterials !== undefined) throw new Error('终审未授权该工具');
+            const parsed = parseAgentToolCall_ACU(payload);
+            if (parsed.kind !== 'read') throw new Error('终审只允许 read');
+            return parsed;
+          })
           : parseAgentSubagentToolCalls_ACU(protocolText, prefill);
         if (!nativeCalls.length && toolCalls) {
           protocolRejections += 1;
@@ -1343,8 +1441,9 @@ export class AgentSubagentRuntime_ACU {
           continue;
         }
         toolRoundsUsed += 1;
-        const perCallResults: string[] = [];
-        for (const toolCall of toolCalls) perCallResults.push(await this.executeToolCalls_ACU([toolCall], input.resolveContext, gate, expandedReads, input.sharedMaterials !== undefined ? [] : null));
+        const batchResult = await this.executeToolCalls_ACU(toolCalls, input.resolveContext, gate, expandedReads,
+          input.sharedMaterials !== undefined ? [] : null, false, true);
+        const perCallResults = toolCalls.map((_, index) => index === 0 ? batchResult : '本逻辑读取批次已统一结算，结果见首个工具回执。');
         transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, perCallResults.map(result => `${result}\n\n${renderReadBudgetNote(toolRoundsUsed)}`)));
         continue;
       }
@@ -1375,6 +1474,36 @@ export class AgentSubagentRuntime_ACU {
   }
 
   /**
+   * 最终请求容量门禁：以即将发送的完整消息与原生工具定义计量已占用上下文，
+   * 返回 60% 默认上围栏预算。本地输入限制非法或耗尽时在调用前 fail-closed，
+   * 以不可重试的结构化错误退出（不截断、不摘要、不重发同一超限请求）。
+   */
+  private async measureFinalRequestCapacity_ACU(
+    messages: ReadonlyArray<{ role: string; content: string }>,
+    inputLimitTokens: number,
+    options: ContinuationInternalAiCallOptions_ACU,
+    agentName: string,
+  ): Promise<number> {
+    try {
+      const capacity = await measureContinuationFinalRequestCapacity_ACU({
+        messages,
+        tools: options.tools ?? [],
+        inputLimitTokens,
+        count: this.dependencies.countTokens ?? countAgentTokens_ACU,
+      });
+      return capacity.defaultReadFenceTokens;
+    } catch (error) {
+      const code = error instanceof Error ? error.message : String(error);
+      throw subagentFailed_ACU(`${agentName} 的最终请求超出上下文容量（${code}），请求未发送；资料未截断、未摘要。`, false, {
+        reason: 'context-capacity-exceeded',
+        code,
+        inputLimitTokens,
+        agentName,
+      });
+    }
+  }
+
+  /**
    * 执行子代理的一个工具批次并渲染结果文本。
    * 与主循环同一门禁语义：批内去重与已放行地址拆分、整批过门禁、打回报告直接作为结果回灌。
    */
@@ -1384,6 +1513,8 @@ export class AgentSubagentRuntime_ACU {
     gate: SubagentGate_ACU,
     expandedReads: string[],
     ownReads: readonly string[] | null,
+    allowSearch: boolean,
+    readOnce: boolean,
     research?: { settings: ContinuationSettings_ACU; cache: ResearcherPageCache_ACU },
   ): Promise<string> {
     const fresh: SubagentMaterial_ACU[] = [];
@@ -1402,20 +1533,48 @@ export class AgentSubagentRuntime_ACU {
         webSections.push(await this.executeWebToolCall_ACU(call, research.settings, research.cache, expandedReads));
         continue;
       }
-      if (call.kind === 'search' && ownReads) {
-        refused.push('子代理不能做跨域搜索。请直接使用【本轮已备资料】。');
+      if (call.kind === 'search' && !research && !allowSearch) {
+        refused.push('当前角色未授权本地搜索。');
         continue;
       }
       if (call.kind === 'read') {
         for (const raw of call.reads) {
           const key = String(raw ?? '').trim();
-          if (!key || seenInBatch.has(key)) continue;
-          seenInBatch.add(key);
+          if (!key) continue;
           if (ownReads && !readStaysWithOwner_ACU(key, ownReads)) {
-            refused.push(`${key} 不在你的维护范围。世界书、正文和其它模块已在【本轮已备资料】，不要再读。`);
+            failed.push({
+              key,
+              label: key,
+              text: `${key} 不在当前角色的授权读取范围。请改用 profile 允许的自有或强相关地址；越权地址不会注入正文。`,
+              status: 'failed',
+            });
             continue;
           }
-          if (gate.granted.has(key)) { duplicated.push(key); continue; }
+          if (call.requestedFence) {
+            const material = resolveMaterial_ACU(key, context, call.requestedFence);
+            if (material.status === 'failed') {
+              failed.push(material);
+              continue;
+            }
+            if (seenInBatch.has(key)) continue;
+            seenInBatch.add(key);
+            const narrowed = gate.narrowed.get(key);
+            if (narrowed) {
+              duplicated.push(`原地址「${key}」此前只提供了收窄子范围「${narrowed.address}」的完整正文，未声称原地址已全部注入；未读取部分${narrowed.remainder ? `请改读「${narrowed.remainder}」` : '本次没有剩余范围'}。`);
+              continue;
+            }
+            if (gate.granted.has(key)) { duplicated.push(`地址「${key}」已放行，完整内容见上文，不再重注。`); continue; }
+            fresh.push(material);
+            continue;
+          }
+          if (seenInBatch.has(key)) continue;
+          seenInBatch.add(key);
+          const narrowed = gate.narrowed.get(key);
+          if (narrowed) {
+            duplicated.push(`原地址「${key}」此前只提供了收窄子范围「${narrowed.address}」的完整正文，未声称原地址已全部注入；未读取部分${narrowed.remainder ? `请改读「${narrowed.remainder}」` : '本次没有剩余范围'}。`);
+            continue;
+          }
+          if (gate.granted.has(key)) { duplicated.push(`地址「${key}」已放行，完整内容见上文，不再重注。`); continue; }
           const material = resolveMaterial_ACU(key, context);
           if (material.status === 'failed') failed.push(material);
           else fresh.push(material);
@@ -1431,21 +1590,93 @@ export class AgentSubagentRuntime_ACU {
     }
 
     const sections: string[] = [...refused, ...webSections, ...failed.map(material => JSON.stringify({ action: 'read', address: material.key, status: 'failed', reason: material.text }))];
+    if (failed.length || refused.length) {
+      // 一条本地地址失败时，整个本地读取批次不可提交：不登记成功，也不回灌其它地址的正文。
+      return `【工具结果】\n${sections.join('\n\n')}`;
+    }
     if (duplicated.length) {
-      sections.push(`以下调阅本次派工已放行，完整内容见上文，不再重注：${duplicated.join('、')}。`);
+      sections.push(`以下调阅请求未重复注入：\n${duplicated.join('\n')}`);
     }
     if (fresh.length) {
-      const items: AgentGateItem_ACU[] = fresh.map(material => ({ label: material.label, text: material.text }));
-      const decision = await gateAgentReadBatch_ACU(items, gate.state, gate.config, 0);
-      if (decision.allowed) {
-        gate.state.grantedTokens += decision.batchTokens;
-        for (const material of fresh) {
-          gate.granted.add(material.key);
-          expandedReads.push(material.label);
+      if (readOnce && gate.successfulReadBatch) {
+        sections.push(JSON.stringify({ action: 'read', status: 'rejected', reason: 'read-once-exhausted' }));
+        return `【工具结果】\n${sections.join('\n\n')}`;
+      }
+      const sharedReadRound = readOnce && gate.readRoundKey && gate.readRoundState
+        ? { key: gate.readRoundKey, state: gate.readRoundState }
+        : null;
+      if (sharedReadRound?.state.successfulReadBatches.has(sharedReadRound.key)) {
+        sections.push(JSON.stringify({ action: 'read', status: 'rejected', reason: 'read-once-exhausted' }));
+        return `【工具结果】\n${sections.join('\n\n')}`;
+      }
+      if (sharedReadRound?.state.pendingReadBatches.has(sharedReadRound.key)) {
+        sections.push(JSON.stringify({ action: 'read', status: 'rejected', reason: 'read-in-progress' }));
+        return `【工具结果】\n${sections.join('\n\n')}`;
+      }
+      if (sharedReadRound) sharedReadRound.state.pendingReadBatches.add(sharedReadRound.key);
+      try {
+        const count = this.dependencies.countTokens ?? countAgentTokens_ACU;
+        // 收窄放行的材料额外携带原始地址与剩余范围；登记时不再回查外层 allocation。
+        let admitted: Array<SubagentMaterial_ACU & { narrowedFrom?: string; remainder?: string }> = fresh;
+        let admittedTokens: number | undefined;
+        // 未显式提供上围栏的本地读取：60% 默认上围栏预算经地址适配器解析为可证明的子范围；出网研究不适用。
+        const defaultFenced = research ? [] : fresh.filter(material => material.read && material.read.requestedFence?.upper === undefined);
+        if (defaultFenced.length) {
+          const reservedTokens = (await Promise.all(fresh.filter(material => !defaultFenced.includes(material)).map(material => count(material.text))))
+            .reduce((sum, tokens) => sum + tokens, 0);
+          const allocation = await allocateAgentDefaultReadFences_ACU({
+            candidates: defaultFenced.map((material): AgentDefaultFenceCandidate_ACU => ({
+              key: material.key,
+              title: material.read!.title,
+              text: material.read!.body,
+              ...(material.read!.requestedFence === undefined ? {} : { requestedFence: material.read!.requestedFence }),
+            })),
+            budgetTokens: gate.defaultReadFenceTokens,
+            reservedTokens,
+            axis: key => resolveAgentReadAddressAxis_ACU(key, context),
+            resolve: (address, requestedFence) => resolveAgentReadTokenWithProof_ACU(address, context, requestedFence),
+            count,
+          });
+          if (allocation.status === 'failed') {
+            // 默认范围无法在预算内完整证明：整批不注入、不登记成功，修正地址后可重试。
+            sections.push(...allocation.failures.map(failure => JSON.stringify({
+              action: 'read', address: failure.key, status: 'failed', reason: failure.reason, message: failure.message, ...failure.details,
+            })));
+            return `【工具结果】\n${sections.join('\n\n')}`;
+          }
+          const allocated = new Map(allocation.reads.map(read => [read.key, read]));
+          admitted = fresh.map(material => {
+            const read = allocated.get(material.key);
+            if (!read?.narrowed) return material;
+            return { key: read.address, label: `${read.address}（默认上围栏，原地址 ${material.key}）`, text: `### ${read.title}（${read.address}）\n${read.text}`, narrowedFrom: material.key, ...(read.remainder ? { remainder: read.remainder } : {}) };
+          });
+          admittedTokens = reservedTokens + allocation.reads.reduce((sum, read) => sum + read.tokens, 0);
         }
-        sections.push(...fresh.map(material => material.text));
-      } else {
-        sections.push(decision.report);
+        const items: AgentGateItem_ACU[] = admitted.map(material => ({ label: material.label, text: material.text }));
+        const decision = await gateAgentReadBatch_ACU(items, gate.state, gate.config, 0);
+        if (decision.allowed) {
+          if (readOnce) gate.successfulReadBatch = true;
+          if (sharedReadRound) sharedReadRound.state.successfulReadBatches.add(sharedReadRound.key);
+          gate.state.grantedTokens += decision.batchTokens;
+          for (const material of admitted) {
+            gate.granted.add(material.key);
+            if (material.narrowedFrom) {
+              // 收窄材料的 key 已替换为实际放行子范围地址；原地址登记为“仅收窄提供”，不得冒充完整放行。
+              gate.narrowed.set(material.narrowedFrom, { address: material.key, ...(material.remainder ? { remainder: material.remainder } : {}) });
+            }
+            expandedReads.push(material.label);
+          }
+          sections.push(...admitted.map(material => material.text));
+          if (gate.defaultReadFenceTokens !== undefined) {
+            // 同一模型回合内后续批次只能使用余下的默认上围栏预算；下一次请求前容量门禁会重新计量。
+            const injected = admittedTokens ?? (await Promise.all(admitted.map(material => count(material.text)))).reduce((sum, tokens) => sum + tokens, 0);
+            gate.defaultReadFenceTokens = Math.max(0, Math.floor(gate.defaultReadFenceTokens - injected));
+          }
+        } else {
+          sections.push(decision.report);
+        }
+      } finally {
+        if (sharedReadRound) sharedReadRound.state.pendingReadBatches.delete(sharedReadRound.key);
       }
     } else if (!duplicated.length && !webSections.length && !failed.length) {
       sections.push('本次工具批次没有任何有效的读取地址或搜索请求。请检查 read 的 reads 数组与 search 的 query。');

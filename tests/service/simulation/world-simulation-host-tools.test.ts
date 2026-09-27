@@ -38,13 +38,13 @@ describe('世界推演宿主工具适配器', () => {
   });
 
   it('世界书条目不再精读，关键词搜索带回正文片段', async () => {
-    const { dependencies } = fixture();
-    const refused = await dependencies.read('worldbook:entry:book:1');
+    const { dependencies: unavailable } = fixture();
+    const refused = await unavailable.read('worldbook:entry:book:1');
     expect(refused).toMatchObject({ status: 'failed' });
     expect(refused.summary).toContain('worldbook');
+    // 此测试验证宿主适配器搜索已给定快照；加载器的筛选规则由其自身测试覆盖。
     gateway.available.mockReturnValue(true);
-    gateway.list.mockResolvedValue(['book']);
-    gateway.entries.mockResolvedValue([{ uid: 1, comment: '标题', content: '城里的黑色晶屑会发光' }]);
+    const { dependencies } = fixture({ worldbookSnapshot: Promise.resolve({ available: true, entries: [{ bookName: 'book', uid: '1', title: '标题', keys: [], constant: false, content: '城里的黑色晶屑会发光', tokens: 12 }] }) });
     const result = await dependencies.search('晶屑', ['worldbook'], 5, false);
     expect(result.status).toBe('ok');
     expect(result.hits[0]?.summary).toContain('黑色晶屑');
@@ -56,6 +56,27 @@ describe('世界推演宿主工具适配器', () => {
     const { dependencies, webClient } = fixture({ webResearch: { ...settings, enabled: true, sources: { ...settings.sources, moegirl: false } } });
     expect(await dependencies.read('encyclopedia:entry:moegirl:title')).toMatchObject({ status: 'dependency_unavailable', summary: 'encyclopedia source disabled: moegirl' });
     expect(webClient.readEncyclopedia).not.toHaveBeenCalled();
+  });
+
+  it('无证明的外部显式围栏在 I/O 前拒绝，无围栏研究读取及可证明的外部适配器保持可用', async () => {
+    const externalRead = vi.fn(async (_address: string, fence?: { lower?: string | number; upper?: string | number }) => ({
+      status: 'ok' as const, content: '已验证全文', exact: true,
+      ...(fence ? { requestedFence: JSON.stringify(fence), resolvedFence: JSON.stringify(fence),
+        stableAddress: 'custom:entry', revision: 'rev-1', completeWithinFence: true } : {}),
+    }));
+    const { dependencies, webClient } = fixture({ externalRead });
+    const fence = { lower: 0, upper: 10 };
+    for (const address of ['worldbook:entry:book:1', 'encyclopedia:entry:moegirl:title', 'web:url:https%3A%2F%2Fexample.com']) {
+      expect(await dependencies.read(address, fence)).toMatchObject({ status: 'failed', summary: 'fence proof unavailable for external address' });
+    }
+    expect(gateway.list).not.toHaveBeenCalled();
+    expect(webClient.readEncyclopedia).not.toHaveBeenCalled();
+    expect(webClient.webRead).not.toHaveBeenCalled();
+    expect(externalRead).not.toHaveBeenCalled();
+    webClient.webRead.mockResolvedValueOnce({ text: '网页完整正文', truncated: false, note: '' });
+    expect(await dependencies.read('web:url:https%3A%2F%2Fexample.com')).toMatchObject({ status: 'ok', content: '网页完整正文' });
+    expect(await dependencies.read('custom:entry', fence)).toMatchObject({ status: 'ok', completeWithinFence: true });
+    expect(externalRead).toHaveBeenCalledWith('custom:entry', fence);
   });
 
   it('部分来源不可用但其他来源命中时返回 ok 并保留诊断', async () => {

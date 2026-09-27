@@ -1,5 +1,6 @@
 import { buildDefaultWorldSimulationEnvelope_ACU } from './defaults';
 import type { WorldSimulationAnchorIdentity_ACU, WorldSimulationCommitCandidate_ACU, WorldSimulationMainLoopResult_ACU } from './agent/agent-model';
+import { buildWorldSimulationProjection_ACU } from './simulation-projection';
 import {
   createWorldSimulationError_ACU,
   WorldSimulationValidationError_ACU,
@@ -377,7 +378,13 @@ export class WorldSimulationOrchestrator_ACU {
     await this.dependencies.assertAnchorCurrent(anchor);
     prepared.runWrites?.assertCurrent();
     const completedAt = this.dependencies.now();
+    if (result.outcome === 'commit' && !result.finalProjection
+      && result.commitCandidate.acceptedCandidates.some(candidate => candidate.agentName === 'guidance-composer'
+        && Object.prototype.hasOwnProperty.call(candidate.patch, 'guidance'))) {
+      throw new Error('WORLD_SIMULATION_PROJECTION_AUTHORITY_UNVERIFIED');
+    }
     if (result.outcome === 'commit' || (result.outcome === 'no_change' && prepared.runWrites?.hasConfirmedWrites)) {
+      const guidanceBeforeCommit = this.dependencies.store.read()?.ledger.guidance;
       const commitCandidate: WorldSimulationCommitCandidate_ACU = result.outcome === 'commit' ? result.commitCandidate : {
         runId: identity.runId, taskId: identity.taskId, stageId: identity.stageId,
         stageRevision: identity.stageRevision, baseLedgerRevision: identity.baseLedgerRevision,
@@ -391,8 +398,36 @@ export class WorldSimulationOrchestrator_ACU {
         completedAt,
         timelineId: this.dependencies.allocateId('timeline'),
       });
+      const committedResult = result.outcome === 'commit' ? result : { ...result, outcome: 'commit' as const, commitCandidate };
+      // Only a persisted, completed ledger may supply the deliverable projection. The commit
+      // adapter can filter guidance signals after the workflow's preview was assembled.
+      const authoritative = this.dependencies.store.read();
+      const committedStage = authoritative?.stages.find(stage => stage.stageId === identity.stageId);
+      if (authoritative?.task?.taskId !== identity.taskId || authoritative.task.status !== 'completed'
+        || authoritative.task.activeRun !== null || committedStage?.status !== 'completed'
+        || committedStage.activeRevision !== identity.stageRevision) {
+        throw new Error('WORLD_SIMULATION_PROJECTION_AUTHORITY_UNVERIFIED');
+      }
+      const composerSignalsPersisted = commitCandidate.acceptedCandidates.some(candidate => {
+        if (candidate.agentName !== 'guidance-composer') return false;
+        const guidance = candidate.patch.guidance;
+        return guidance !== null && typeof guidance === 'object' && !Array.isArray(guidance)
+          && Array.isArray((guidance as { signals?: unknown }).signals)
+          && JSON.stringify((guidance as { signals: unknown[] }).signals) === JSON.stringify(authoritative.ledger.guidance.signals);
+      });
+      const committedContent = buildWorldSimulationProjection_ACU(authoritative.ledger);
+      const composerPersisted = composerSignalsPersisted && result.finalProjection?.sourceAgent === 'guidance-composer'
+        && guidanceBeforeCommit !== undefined
+        && JSON.stringify(guidanceBeforeCommit.signals) !== JSON.stringify(authoritative.ledger.guidance.signals)
+        && committedContent !== null && committedContent === result.finalProjection.content;
+      committedResult.finalProjection = {
+        content: committedContent,
+        sourceAgent: composerPersisted ? 'guidance-composer' : 'current-ledger',
+        sourceRevision: authoritative.ledger.revision,
+        deliverable: true,
+      };
       await this.reportCompletion_ACU(identity, committedAnchor || anchor, 'commit', result.summary);
-      return { status: 'completed', identity, result: result.outcome === 'commit' ? result : { ...result, outcome: 'commit', commitCandidate } };
+      return { status: 'completed', identity, result: committedResult };
     }
     await this.dependencies.store.updateAtomically(envelope => {
       assertRunCurrent_ACU(envelope, identity, prepared.runWrites?.currentLedgerRevision);
@@ -409,6 +444,18 @@ export class WorldSimulationOrchestrator_ACU {
         updatedAt: completedAt,
       };
     }, { chatIdentity: identity.chatIdentity, taskId: identity.taskId, stageId: identity.stageId, revision: identity.stageRevision });
+    if (result.outcome === 'no_change') {
+      const authoritative = this.dependencies.store.read();
+      if (authoritative?.task?.taskId !== identity.taskId || authoritative.task.status !== 'completed'
+        || authoritative.task.activeRun !== null
+        || authoritative.ledger.revision !== (result.finalProjection?.sourceRevision ?? identity.baseLedgerRevision)) {
+        throw new Error('WORLD_SIMULATION_PROJECTION_AUTHORITY_UNVERIFIED');
+      }
+      result.finalProjection = {
+        content: buildWorldSimulationProjection_ACU(authoritative.ledger),
+        sourceAgent: 'current-ledger', sourceRevision: authoritative.ledger.revision, deliverable: true,
+      };
+    }
     if (result.outcome === 'no_change') await this.reportCompletion_ACU(identity, anchor, 'no_change', result.summary);
     return { status: 'completed', identity, result };
   }

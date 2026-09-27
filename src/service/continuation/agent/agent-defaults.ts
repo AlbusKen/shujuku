@@ -541,6 +541,13 @@ const FINAL_REVIEWER_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
     enabled: true,
     deletable: true,
   },
+  {
+    role: 'assistant',
+    content: AGENT_PREFILLS_ACU.reviewer,
+    enabled: true,
+    deletable: false,
+    pinned: true,
+  },
 ];
 
 const REVIEWER_PROMPT_ACU: readonly ContinuationPromptSegment_ACU[] = [
@@ -918,7 +925,7 @@ export function buildV33ContinuationAgentPrompts_ACU(): ContinuationAgentPrompts
     mainlinePlanner: buildDefaultAgentMainlinePlannerPrompt_ACU(),
     beatPlanner: buildDefaultAgentBeatPlannerPrompt_ACU(),
     reviewer: buildDefaultAgentReviewerPrompt_ACU(),
-    finalReviewer: buildDefaultAgentFinalReviewerPrompt_ACU(),
+    finalReviewer: buildDefaultAgentFinalReviewerPrompt_ACU().filter(segment => segment.content !== AGENT_PREFILLS_ACU.reviewer),
     webResearcher: buildDefaultAgentWebResearcherPrompt_ACU(),
     instructionComposer: buildDefaultAgentInstructionComposerPrompt_ACU(),
   };
@@ -1092,6 +1099,15 @@ export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPro
   const prompts = applyCurrentContinuationPromptRules_ACU(buildV36ContinuationAgentPrompts_ACU());
   for (const role of Object.keys(prompts) as Array<keyof ContinuationAgentPrompts_ACU>) {
     const segments = prompts[role];
+    if (role === 'finalReviewer' && segments[segments.length - 1]?.content.includes('$AGENT_TASK')) {
+      segments.push({
+        role: 'assistant',
+        content: AGENT_PREFILLS_ACU.reviewer,
+        enabled: true,
+        deletable: false,
+        pinned: true,
+      });
+    }
     segments[segments.length - 1] = { ...segments[segments.length - 1], role: 'user', content: USER_PREFILL_CONTENT_ACU };
     if (role === 'main') {
       const protocol = segments.find(segment => segment.content.includes('【工具：read / search'));

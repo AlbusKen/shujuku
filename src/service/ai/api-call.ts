@@ -10,6 +10,7 @@ import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerReque
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { isTauriTavernHost_ACU } from '../../shared/host-detect';
 import { supportsExplicitOpenAiCacheKey_ACU } from './prompt-cache';
+import { resolveRequestMaxTokens_ACU } from './request-max-tokens';
 import { resolveApiConfigByPreset_ACU, normalizeCustomApiFormat_ACU, normalizePromptPostProcessing_ACU, type ApiPresetApiConfig_ACU, type ApiPresetApiMode_ACU } from '../settings/api-preset-service';
 
 type CustomIncludeBodyRootType_ACU = 'empty' | 'mapping' | 'sequence' | 'scalar' | 'invalid';
@@ -650,9 +651,7 @@ export async function callAIWithResolvedPreset_ACU(
         if (!usage) return;
         try { lifecycle.onUsage(usage); } catch { /* 用量回调异常不允许影响调用主流程。 */ }
     };
-    const presetMaxTokens = resolved.apiConfig.max_tokens ?? resolved.apiConfig.maxTokens ?? 4096;
-    const floor = Number.isFinite(extras?.minOutputTokens) ? Math.max(0, Math.trunc(extras!.minOutputTokens!)) : 0;
-    const maxTokens = Math.max(presetMaxTokens, floor);
+    const maxTokens = resolveRequestMaxTokens_ACU(resolved.apiConfig, extras?.minOutputTokens);
     if (resolved.apiMode === 'tavern') {
         if (!resolved.tavernProfile) throw new Error('该预设为酒馆连接模式但未选择连接预设。');
         const response = await sendConnectionManagerRequestWithProfileSwitch_ACU(resolved.tavernProfile, messages, maxTokens);
@@ -712,10 +711,14 @@ export async function callAIChatTurn_ACU(
         if (!usage) return;
         try { lifecycle.onUsage(usage); } catch { /* 用量回调异常不允许影响调用主流程。 */ }
     };
-    const presetMaxTokens = resolved.apiConfig.max_tokens ?? resolved.apiConfig.maxTokens ?? 4096;
-    const floor = Number.isFinite(extras?.minOutputTokens) ? Math.max(0, Math.trunc(extras!.minOutputTokens!)) : 0;
-    const maxTokens = Math.max(presetMaxTokens, floor);
+    const maxTokens = resolveRequestMaxTokens_ACU(resolved.apiConfig, extras?.minOutputTokens);
+    // 历史里的 tool_calls / tool 回执即使本次未挂 tools，也要求通道原样保留原生协议。
+    const hasNativeToolTraffic = Boolean(extras?.tools?.length)
+        || messages.some(message => message && typeof message === 'object' && (message.role === 'tool' || message.tool_calls));
     if (resolved.apiMode === 'tavern') {
+        // ConnectionManagerRequestService.sendRequest only accepts profile, messages and maxTokens.
+        // Silently dropping tools would make the role's advertised native-tool contract unobservable.
+        if (hasNativeToolTraffic) throw new Error('酒馆连接管理器不支持原生工具调用及回执；请为 Agent 选择支持原生工具的自定义 API。');
         if (!resolved.tavernProfile) throw new Error('该预设为酒馆连接模式但未选择连接预设。');
         const response = await sendConnectionManagerRequestWithProfileSwitch_ACU(resolved.tavernProfile, messages, maxTokens);
         assertNotAborted_ACU(signal);
@@ -724,10 +727,13 @@ export async function callAIChatTurn_ACU(
         return parsed.turn.content || parsed.turn.toolCalls.length ? parsed.turn : { content: typeof response?.content === 'string' ? response.content : '', toolCalls: [] };
     }
     if (resolved.apiConfig.useMainApi) {
+        // generateRaw returns text, not a structured tool-call response. A tools-enabled
+        // agent cannot complete its native function exchange on this channel.
+        if (hasNativeToolTraffic) throw new Error('酒馆主 API 无法保证原生工具调用及回执；请为 Agent 选择支持原生工具的独立自定义 API。');
         lifecycle?.beforeMainApiCall?.();
         let operation: Promise<string>;
         try {
-            operation = generateRaw_ACU({ ordered_prompts: messages, should_stream: settings_ACU.streamingEnabled || false, max_tokens: maxTokens, ...(extras?.tools?.length ? { tools: extras.tools, tool_choice: 'auto' } : {}) });
+            operation = generateRaw_ACU({ ordered_prompts: messages, should_stream: settings_ACU.streamingEnabled || false, max_tokens: maxTokens });
         } finally {
             lifecycle?.afterMainApiCall?.();
         }

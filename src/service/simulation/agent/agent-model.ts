@@ -116,8 +116,12 @@ export interface WorldSimulationUserRequirementsReadResult_ACU {
 export interface WorldSimulationProtocolIssue_ACU { reasonCode: string; path: string; expected: string; actual: unknown; }
 export interface WorldSimulationDelegation_ACU { agentName: string; instruction: string; reads: string[]; }
 export type WorldSimulationTerminalOutcome_ACU = 'commit' | 'no_change' | 'blocked';
+export interface WorldSimulationRequestedFence_ACU {
+  lower?: string | number;
+  upper?: string | number;
+}
 export type WorldSimulationToolCall_ACU =
-  | { kind: 'read'; reads: string[] }
+  | { kind: 'read'; reads: string[]; requestedFence?: WorldSimulationRequestedFence_ACU }
   | { kind: 'search'; query: string; scope: string[]; maxResults: number; isRegex: boolean };
 export type WorldSimulationMainAction_ACU =
   | WorldSimulationToolCall_ACU
@@ -183,9 +187,15 @@ export interface WorldSimulationCommitCandidate_ACU {
   reviewer?: WorldSimulationReviewerResult_ACU;
   collisionReport?: WorldCollisionReport_ACU;
 }
+export interface WorldSimulationFinalProjection_ACU {
+  content: string | null;
+  sourceAgent: 'guidance-composer' | 'current-ledger';
+  sourceRevision: number;
+  deliverable: boolean;
+}
 export type WorldSimulationMainLoopResult_ACU =
-  | { outcome: 'commit'; summary: string; commitCandidate: WorldSimulationCommitCandidate_ACU; outcomes: WorldSimulationSubagentOutcome_ACU[] }
-  | { outcome: 'no_change'; summary: string; outcomes: WorldSimulationSubagentOutcome_ACU[] }
+  | { outcome: 'commit'; summary: string; commitCandidate: WorldSimulationCommitCandidate_ACU; outcomes: WorldSimulationSubagentOutcome_ACU[]; finalProjection?: WorldSimulationFinalProjection_ACU }
+  | { outcome: 'no_change'; summary: string; outcomes: WorldSimulationSubagentOutcome_ACU[]; finalProjection?: WorldSimulationFinalProjection_ACU }
   | { outcome: 'blocked'; summary: string; unresolved: string[]; outcomes: WorldSimulationSubagentOutcome_ACU[] }
 ;
 export interface WorldSimulationHandoffState_ACU { currentGoal: string; effectiveConstraints: string[]; decisions: string[]; completedItems: string[]; pendingItems: string[]; blockers: string[]; continuityFacts: string[]; readKeys: string[]; recentTurns: string[]; }

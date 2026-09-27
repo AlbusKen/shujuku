@@ -219,6 +219,7 @@ export function restoreWorldSimulationRunWrites_ACU(read: () => WorldSimulationR
     const current = read();
     const sameTaskStage = stored?.taskId === identity.taskId && stored.stageId === identity.stageId;
     if (hasPartialWorldSimulationRunWrites_ACU(current) && sameTaskStage) {
+      if (current.ledger.revision !== identity.baseLedgerRevision || stored?.fingerprint !== canonical_ACU(current)) throw new Error('WORLD_SIMULATION_LEDGER_STALE');
       const adoptedWritten: Record<string, string[]> = {};
       for (const [module, records] of Object.entries(current.fields?.records ?? {})) {
         const ids = Object.entries(records ?? {})

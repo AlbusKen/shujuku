@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { ContinuationAgentTurnPlanner_ACU } from '../../../../src/service/continuation/agent/agent-main-loop';
 import { AgentSubagentRuntime_ACU } from '../../../../src/service/continuation/agent/agent-subagent-runtime';
-import { buildEmptyAgentModuleSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-module-store';
+import { _set_SillyTavern_API_ACU } from '../../../../src/shared/host-api';
+import { buildEmptyAgentModuleSnapshot_ACU, readAgentModuleSnapshot_ACU, writeAgentModuleSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-module-store';
+import { DEFAULT_AGENT_RUN_BUDGET_ACU } from '../../../../src/service/continuation/agent/agent-model';
 import { buildEmptyAgentConversation_ACU } from '../../../../src/service/continuation/agent/agent-conversation-store';
 import { buildEmptyAgentWorldbookSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-worldbook-read';
 import { buildDefaultContinuationSettings_ACU } from '../../../../src/service/continuation/defaults';
@@ -11,7 +13,7 @@ import { resetAgentRunCacheForTests_ACU } from '../../../../src/service/continua
 import type { AgentWebClient_ACU, AgentFetchedPage_ACU } from '../../../../src/service/continuation/agent/agent-web-client';
 import type { AgentConversationMessage_ACU, AgentConversationSnapshot_ACU, AgentModuleSnapshot_ACU, ContinuationAgentTurnPlanRequest_ACU } from '../../../../src/service/continuation/agent/agent-model';
 
-const preset_ACU = { presetName: 'p1', source: 'settings' as const, reason: 'test' };
+const preset_ACU = { presetName: 'p1', source: 'settings' as const, reason: 'test', apiMode: 'custom' as const, apiConfig: { useMainApi: false, max_tokens: 60000 }, tavernProfile: '' };
 
 beforeEach(() => { resetAgentSessionLogForTests_ACU(); resetAgentRunCacheForTests_ACU(); });
 
@@ -38,6 +40,17 @@ const runningContext_ACU = () => ({
 });
 
 const page_ACU = (title: string, text: string): AgentFetchedPage_ACU => ({ source: 'moegirl', title, url: `https://zh.moegirl.org.cn/${encodeURIComponent(title)}`, text, status: 'ok', note: '' });
+
+const nativeWebToolTurn_ACU = (
+  name: 'encyclopedia_search' | 'encyclopedia_read',
+  args: Record<string, unknown>,
+  id: string,
+) => ({ content: '', toolCalls: [{ id, name, arguments: JSON.stringify(args) }] });
+
+const nativeWriteSqlTurn_ACU = (sql: string, id: string) => ({
+  content: '',
+  toolCalls: [{ id, name: 'write_sql', arguments: JSON.stringify({ sql }) }],
+});
 
 function fakeWebClient_ACU(log: string[]): AgentWebClient_ACU {
   return {
@@ -67,9 +80,13 @@ function harness_ACU(options: { mainReplies: string[]; subReplies: string[]; ena
   const webLog: string[] = [];
   const written: AgentModuleSnapshot_ACU[] = [];
   const presetRoles: string[] = [];
-  let snapshot = options.snapshot ?? { ...buildEmptyAgentModuleSnapshot_ACU(), settledThroughIndex: 0 };
   let conversation: AgentConversationSnapshot_ACU = buildEmptyAgentConversation_ACU();
   const chat = chat_ACU();
+  _set_SillyTavern_API_ACU({ chat, saveChat: async () => { written.push(readAgentModuleSnapshot_ACU(chat)); } } as any);
+  // SQL 逐栏提交从宿主 chat 帧折叠基线；不能只把种子放在测试的局部变量里。
+  const ready = options.snapshot
+    ? writeAgentModuleSnapshot_ACU(chat, chat.length - 1, options.snapshot).then(() => { written.length = 0; })
+    : Promise.resolve();
 
   const subagentRuntime = new AgentSubagentRuntime_ACU({
     resolveApiPreset: (() => preset_ACU) as any,
@@ -78,13 +95,13 @@ function harness_ACU(options: { mainReplies: string[]; subReplies: string[]; ena
     webClient: fakeWebClient_ACU(webLog),
     hostOrigin: () => 'http://127.0.0.1:8000',
   });
-  const planner = new ContinuationAgentTurnPlanner_ACU({
+  const plannerImpl = new ContinuationAgentTurnPlanner_ACU({
     resolveApiPreset: ((_settings: unknown, role: string) => { presetRoles.push(role); return preset_ACU; }) as any,
     callInternalAi: async messages => { mainCalls.push(messages); return mainReplies.shift() ?? '{"action":"block","reason":"脚本没有更多回复"}'; },
     subagentRuntime,
     readChat: () => chat,
-    readModuleSnapshot: () => snapshot,
-    writeModuleSnapshot: async (_chat, _index, next) => { written.push(next); snapshot = next; },
+    readModuleSnapshot: readAgentModuleSnapshot_ACU,
+    writeModuleSnapshot: writeAgentModuleSnapshot_ACU,
     readConversation: () => conversation,
     appendConversationMessages: async (_chat, prepared: readonly AgentConversationMessage_ACU[]) => {
       const existing = new Set(conversation.messages.map(message => message.id));
@@ -113,26 +130,24 @@ function harness_ACU(options: { mainReplies: string[]; subReplies: string[]; ena
     isInternalRequestCurrent: () => true,
     applyOutline: async () => ({ op: 'create', requiresReview: false, stopped: null, summary: '已创建大纲' }),
   };
-  return { planner, request, mainCalls, subCalls, webLog, written, presetRoles, snapshot: () => snapshot, conversation: () => conversation };
+  const planner = { plan: async (input: ContinuationAgentTurnPlanRequest_ACU) => { await ready; return plannerImpl.plan(input); } };
+  return { planner, request, ready, mainCalls, subCalls, webLog, written, presetRoles, snapshot: () => readAgentModuleSnapshot_ACU(chat), conversation: () => conversation };
 }
 
 const RESEARCH_REPLIES_ACU = [
-  '{"action":"encyclopedia_search","query":"鲁迪乌斯·格雷拉特","sources":["moegirl"]}',
-  '{"action":"encyclopedia_read","source":"moegirl","title":"鲁迪乌斯·格雷拉特"}',
+  nativeWebToolTurn_ACU('encyclopedia_search', { query: '鲁迪乌斯·格雷拉特', sources: ['moegirl'] }, 'call-search-rudy'),
+  nativeWebToolTurn_ACU('encyclopedia_read', { source: 'moegirl', title: '鲁迪乌斯·格雷拉特' }, 'call-read-rudy'),
   '{"summary":"入库 1 条","delta":{"expectedRevisions":{"webRefs":0},"webRefs":[{"action":"upsert","pageRef":"P1","name":"鲁迪乌斯·格雷拉特","brief":"《无职转生》主角，转生的前尼特魔术师。","tags":["人物"],"detail":"身份：布耶纳村贵族长男。能力：帝级土系魔术。"}]}}',
 ];
 
 describe('开场百科检索', () => {
   it('功能开启且新任务资料库为空时，先跑 web-researcher 写入资料库，主 Agent 第一次调用就能在运行时快照里看到预览', async () => {
-    const sqlReply = JSON.stringify({
-      summary: '入库 1 条',
-      sql: "INSERT INTO web_refs (page_ref, name, brief, tags, detail, expected_revision) VALUES ('P1', '鲁迪乌斯·格雷拉特', '《无职转生》主角，转生的前尼特魔术师。', '[\"人物\"]', '身份：布耶纳村贵族长男。能力：帝级土系魔术。', 0);",
-    });
-    const h = harness_ACU({ enabled: true, mainReplies: ['{"action":"block","reason":"测试到此为止"}'], subReplies: [...RESEARCH_REPLIES_ACU.slice(0, 2), sqlReply] });
+    const sqlReply = nativeWriteSqlTurn_ACU("INSERT INTO web_refs (page_ref, name, brief, tags, detail, expected_revision) VALUES ('P1', '鲁迪乌斯·格雷拉特', '《无职转生》主角，转生的前尼特魔术师。', '[\"人物\"]', '身份：布耶纳村贵族长男。能力：帝级土系魔术。', 0);", 'call-write-webref');
+    const h = harness_ACU({ enabled: true, mainReplies: ['{"action":"block","reason":"测试到此为止"}'], subReplies: [...RESEARCH_REPLIES_ACU.slice(0, 2), sqlReply, '{"summary":"入库 1 条","delta":{"webRefs":[]}}'] });
     await expect(h.planner.plan(h.request)).rejects.toBeInstanceOf(Error);
 
-    // 子代理三次调用：搜 → 读 → 契约；出网工具走假客户端。
-    expect(h.subCalls).toHaveLength(3);
+    // 搜 → 读 → 原生 write_sql → 工具回执后的最终契约。
+    expect(h.subCalls).toHaveLength(4);
     expect(h.webLog).toEqual(['search:moegirl:鲁迪乌斯·格雷拉特', 'read:鲁迪乌斯·格雷拉特']);
     expect(h.presetRoles).toContain('webResearcher');
     // 首轮提示词带出网工具说明与开场任务；第二轮工具结果带候选与精读指令；第三轮带页面句柄。
@@ -190,7 +205,7 @@ describe('开场百科检索', () => {
     expect(mainText).toContain('百科资料库为空（网页检索功能未启用）');
     const second = h.mainCalls[1].map(message => message.content).join('\n');
     expect(second).toContain('网页检索功能未启用');
-    expect(second).toContain('派工：已用 0 / 6');
+    expect(second).toContain(`派工：已用 0 / ${DEFAULT_AGENT_RUN_BUDGET_ACU.maxDelegations}`);
   });
 
   it('资料库已有条目或任务已有阶段时不重复开场检索；主 Agent 中途派工按普通派工落库', async () => {
@@ -213,7 +228,7 @@ describe('开场百科检索', () => {
     expect(h.written[0].webRefs).toHaveLength(1);
     const second = h.mainCalls[1].map(message => message.content).join('\n');
     expect(second).toContain('百科资料库：新增/更新 1 条');
-    expect(second).toContain('派工：已用 1 / 6');
+    expect(second).toContain(`派工：已用 1 / ${DEFAULT_AGENT_RUN_BUDGET_ACU.maxDelegations}`);
   });
 
   it('web-researcher 的 SQL DELETE 经派工和领域事务退役已有百科条目', async () => {
@@ -234,7 +249,7 @@ describe('开场百科检索', () => {
         '{"action":"delegate","delegations":[{"agentName":"web-researcher","prompt":"退役失效资料","reads":[]}]}',
         '{"action":"finalize","instruction":"继续推进","summary":"ok"}',
       ],
-      subReplies: [JSON.stringify({ summary: '退役失效资料', sql: "DELETE FROM web_refs WHERE id = 'WR-001' AND reason = '来源失效' AND expected_revision = 0;" })],
+      subReplies: [nativeWriteSqlTurn_ACU("DELETE FROM web_refs WHERE id = 'WR-001' AND reason = '来源失效' AND expected_revision = 0;", 'call-delete-webref')],
     });
     await h.planner.plan(h.request);
     expect(h.written).toHaveLength(1);
@@ -250,14 +265,14 @@ describe('开场百科检索', () => {
     const h = harness_ACU({
       enabled: true, context: runningContext_ACU, snapshot: seeded,
       mainReplies: ['{"action":"delegate","delegations":[{"agentName":"web-researcher","prompt":"更新简介","reads":[]}] }', '{"action":"finalize","instruction":"继续推进","summary":"ok"}'],
-      subReplies: [JSON.stringify({ sql: "UPDATE web_refs SET brief = '更新后的简介' WHERE id = 'WR-001' AND expected_revision = 0;" })],
+      subReplies: [nativeWriteSqlTurn_ACU("UPDATE web_refs SET brief = '更新后的简介' WHERE id = 'WR-001' AND expected_revision = 0;", 'call-update-brief'), '{"summary":"更新简介","delta":{"webRefs":[]}}'],
     });
     await h.planner.plan(h.request);
-    expect(h.subCalls).toHaveLength(1);
+    expect(h.subCalls).toHaveLength(2);
     expect(h.webLog).toEqual([]);
     expect(h.written).toHaveLength(1);
     expect(h.snapshot().webRefs[0]).toMatchObject({ title: '旧资料', url: 'https://example.com/entry', brief: '更新后的简介', fetchedAt: 1 });
-    expect(h.mainCalls[1].map(message => message.content).join('\n')).toContain('逐栏修订 1 条');
+    expect(h.mainCalls[1].map(message => message.content).join('\n')).toContain('逐栏写入已独立保存');
   });
 
   it('SQL UPDATE 换源只接受本次抓取成功的页面句柄', async () => {
@@ -269,8 +284,9 @@ describe('开场百科检索', () => {
       enabled: true, context: runningContext_ACU, snapshot: seeded,
       mainReplies: ['{"action":"delegate","delegations":[{"agentName":"web-researcher","prompt":"换来源","reads":[]}]}', '{"action":"finalize","instruction":"继续推进","summary":"ok"}'],
       subReplies: [
-        '{"action":"encyclopedia_read","source":"moegirl","title":"洛琪希"}',
-        JSON.stringify({ sql: "UPDATE web_refs SET page_ref = 'P1', brief = '家庭教师' WHERE id = 'WR-001' AND expected_revision = 0;" }),
+        nativeWebToolTurn_ACU('encyclopedia_read', { source: 'moegirl', title: '洛琪希' }, 'call-read-roxy'),
+        nativeWriteSqlTurn_ACU("UPDATE web_refs SET page_ref = 'P1', name = '洛琪希', brief = '家庭教师' WHERE id = 'WR-001' AND expected_revision = 0;", 'call-update-source'),
+        '{"summary":"换来源","delta":{"webRefs":[]}}',
       ],
     });
     await h.planner.plan(h.request);
@@ -288,11 +304,11 @@ describe('开场百科检索', () => {
     const h = harness_ACU({
       enabled: true, context: runningContext_ACU, snapshot: seeded,
       mainReplies: ['{"action":"delegate","delegations":[{"agentName":"web-researcher","prompt":"退役失效资料","reads":[]}]}', '{"action":"finalize","instruction":"继续推进","summary":"ok"}'],
-      subReplies: [JSON.stringify({ summary: '退役失效资料', sql: "DELETE FROM web_refs WHERE id = 'WR-001' AND reason = '来源失效' AND expected_revision = 1;" })],
+      subReplies: [nativeWriteSqlTurn_ACU("DELETE FROM web_refs WHERE id = 'WR-001' AND reason = '来源失效' AND expected_revision = 1;", 'call-delete-stale-webref')],
     });
     await h.planner.plan(h.request);
     expect(h.subCalls).toHaveLength(2);
-    expect(h.subCalls[1].map(message => message.content).join('\n')).toContain('web_refs SQL expected_revision 与派工读集 revision 不一致');
+    expect(h.subCalls[1].map(message => message.content).join('\n')).toContain('revision_conflict');
     expect(h.written).toHaveLength(0);
     expect(h.snapshot().webRefs[0]).toMatchObject({ id: 'WR-001', retired: false });
   });
@@ -321,20 +337,22 @@ describe('开场百科检索', () => {
       enabled: true,
       mainReplies: ['{"action":"block","reason":"到此为止"}'],
       subReplies: [
-        '{"action":"encyclopedia_read","source":"moegirl","title":"鲁迪乌斯·格雷拉特"}',
-        '{"action":"encyclopedia_read","source":"moegirl","title":"洛琪希","notes":["P1：鲁迪乌斯是《无职转生》主角，擅长土系魔术。"]}',
+        nativeWebToolTurn_ACU('encyclopedia_read', { source: 'moegirl', title: '鲁迪乌斯·格雷拉特' }, 'call-read-rudy-notes'),
+        nativeWebToolTurn_ACU('encyclopedia_read', { source: 'moegirl', title: '洛琪希', notes: ['P1：鲁迪乌斯是《无职转生》主角，擅长土系魔术。'] }, 'call-read-roxy-notes'),
         '{"summary":"入库两条","delta":{"webRefs":[{"pageRef":"P1","name":"鲁迪乌斯","brief":"主角","detail":"擅长土系魔术。"},{"pageRef":"P2","name":"洛琪希","brief":"教师","detail":"魔术教师。"}]}}',
       ],
     });
     await expect(h.planner.plan(h.request)).rejects.toBeInstanceOf(Error);
 
-    // 第二次调用临时看到 P1 原文；第三次调用只保留 P1 的 notes，同时临时看到 P2 原文。
+    // 第一次网页读取的正文只进入紧接着的第二次请求；处理第二次工具调用时，
+    // P1 正文被压缩为 notes，第三次请求只保留 notes 并临时看到 P2 正文。
+    expect(h.subCalls).toHaveLength(3);
     const second = h.subCalls[1].map(message => message.content).join('\n');
     expect(second).toContain('鲁迪乌斯·格雷拉特，本作主人公。');
     const third = h.subCalls[2].map(message => message.content).join('\n');
     expect(third).toContain('P1：鲁迪乌斯是《无职转生》主角，擅长土系魔术。');
-    expect(third).toContain('【本次临时网页检索结果】');
-    // P1 的网页全文没有进入第三次调用历史；唯一保留的是模型写的 notes。
+    expect(third).toContain('【网页工作笔记】');
+    expect(third).toContain('洛琪希是鲁迪乌斯的家庭教师。');
     expect(third).not.toContain('泥沼：土系魔术，限制敌人行动。');
     expect(h.snapshot().webRefs).toHaveLength(2);
     expect(h.snapshot().webRefs.every(ref => !Object.prototype.hasOwnProperty.call(ref, 'extract'))).toBe(true);

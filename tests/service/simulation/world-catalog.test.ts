@@ -71,8 +71,9 @@ describe('world catalog injection', () => {
     expect(state).not.toContain('chronicleOverview');
     expect(state).not.toContain('arc-mine');
     expect(chronicle).toContain('chronicle:');
-    expect(chronicle).not.toContain('arc-mine');
-    expect(tools).toContain('不要 read worldbook:entry');
+    expect(chronicle).toContain('"archiveRef":"arc-mine"');
+    expect(tools).toContain('未命中条目，用 search');
+    expect(tools).toContain('worldbook:entry:书名:uid');
   });
 
   it('子代理切片含模块在用目录、归档概览与 similar hints', () => {

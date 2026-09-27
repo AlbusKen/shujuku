@@ -22,6 +22,7 @@ const stageText = ref('尚未创建任务');
 const revisionText = ref('');
 const anchorText = ref('第 1 楼 · swipe 1');
 const refresh = vi.fn(() => true);
+const initialize = vi.fn(async () => undefined);
 const send = vi.fn(async () => true);
 const stop = vi.fn(async () => undefined);
 const resume = vi.fn(async () => true);
@@ -43,7 +44,7 @@ const running = computed(() => snapshot.value?.session.running ?? false);
 vi.mock('../../../src/presentation-v2/composables/useWorldSimulationRuntime', () => ({
   useWorldSimulationRuntime: () => ({
     snapshot, ready, busy, error, envelope, task, settings, activeStage, activeRevision, anchor, anchorText, entries, running,
-    statusText, stageText, revisionText, refresh, send, stop, resume, saveSettings, saveUserRequirements, clearData, restorePromptDefault, parsePromptBundle, resyncAfterChatMutation,
+    statusText, stageText, revisionText, refresh, initialize, send, stop, resume, saveSettings, saveUserRequirements, clearData, restorePromptDefault, parsePromptBundle, resyncAfterChatMutation,
   }),
 }));
 vi.mock('../../../src/presentation-v2/composables/useApiPresetSelectOptions', async () => {
@@ -63,6 +64,7 @@ function baseSnapshot(overrides: Record<string, unknown> = {}) {
     envelope: { ...buildDefaultWorldSimulationEnvelope_ACU(), settings: settings.value },
     conversation: { messages: [], nextId: 1, compaction: null, diagnostics: [] },
     materials: { snapshot: null, diagnostics: [], adoptedIndex: null },
+    fieldSnapshot: { records: {} },
     userRequirements: { snapshot: null, diagnostics: [], adoptedIndex: null },
     session: { chatIdentity: 'chat-a', entries: [], running: false },
     anchor: { chatIdentity: 'chat-a', messageIndex: 0, messageId: 7, messageKey: 'number:7', swipeId: '0', contentDigest: 'd' },
@@ -243,7 +245,7 @@ describe('WorldSimulationPage', () => {
     expect(saveSettings).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(900);
     expect(saveSettings).toHaveBeenCalledOnce();
-    expect(saveSettings.mock.calls[0][0]).toMatchObject({ agentHistoryTokenBudget: 90000, agentRunBudget: { maxIterations: 6 } });
+    expect(saveSettings.mock.calls[0][0]).toMatchObject({ agentHistoryTokenBudget: 90000, agentRunBudget: { maxIterations: 4 } });
 
     host.querySelector<HTMLButtonElement>('.acu-select__trigger')!.click();
     await nextTick();
@@ -346,13 +348,15 @@ describe('WorldSimulationPage', () => {
         module: 'actors', candidateId: 'candidate:actors', agentName: 'dramatis-keeper',
         violations: [{ path: '$.patch.actors', message: 'locationRef 必须是对象或 null' }],
         attempts: 2, firstFailedAtDay: 47, lastError: 'locationRef 必须是对象或 null',
+        source: 'transaction_rejected', completion: 'failed', acceptedKeys: [], anchor: null,
+        createdAt: 1, updatedAt: 1,
       }],
     };
     next.envelope.timeline = [{ id: 'run:swept', at: 't1', kind: 'swept', taskId: 'task', message: 'seed-miss' }];
     snapshot.value = next;
     const { host } = await mountPage();
-    expect(host.textContent).not.toContain('待修复');
-    expect(host.textContent).not.toContain('locationRef 必须是对象或 null');
+    expect(host.textContent).toContain('待修复的写入（1 条）');
+    expect(host.textContent).toContain('locationRef 必须是对象或 null');
     expect(host.textContent).toContain('编年对照');
     expect(host.textContent).toContain('错过清单');
     expect(host.textContent).toContain('传闻队列');

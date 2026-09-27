@@ -1,4 +1,6 @@
 import type { WorldSimulationLedgerModule_ACU } from '../model';
+import type { AgentNativeToolName_ACU } from '../../ai/native-tool';
+import { WORLD_RELATED_READONLY_MODULES_ACU } from '../world-catalog';
 
 export const WORLD_SIMULATION_AGENT_NAMES_ACU = [
   'world-director',
@@ -46,6 +48,53 @@ export const WORLD_SIMULATION_AGENT_CATALOG_ACU: readonly WorldSimulationAgentDe
   { name: 'guidance-composer', kind: 'specialist', description: '通读全量账本、锚点正文与玩家信息边界，决定哪些事实以何语态进入台面投影', triggers: ['投影相关字段变化后'], promptKey: 'guidance-composer', apiRole: 'guidance-composer', writableModules: ['guidance'] },
   { name: 'lore-researcher', kind: 'researcher', description: '补充外部公开设定资料支撑幕后推演，不写入世界账本', triggers: ['本地证据不足且允许外部研究'], promptKey: 'lore-researcher', apiRole: 'lore-researcher', writableModules: [] },
 ];
+
+export type WorldSimulationAgentNativeToolName_ACU = Extract<AgentNativeToolName_ACU, 'read' | 'search' | 'write_sql'>;
+
+/**
+ * 角色的 provider 工具白名单。这里是最终 body.tools 的唯一策略来源；
+ * 普通角色不因共享 schema 获得 search，能写入账本的角色才获得 write_sql。
+ */
+export function worldSimulationAgentNativeTools_ACU(
+  name: WorldSimulationAgentName_ACU,
+): readonly WorldSimulationAgentNativeToolName_ACU[] {
+  const definition = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name);
+  if (!definition) throw new Error('WORLD_SIMULATION_AGENT_INVALID');
+  const tools: WorldSimulationAgentNativeToolName_ACU[] = ['read'];
+  if (definition.kind === 'director' || definition.kind === 'researcher') tools.push('search');
+  if (definition.writableModules.length) tools.push('write_sql');
+  return tools;
+}
+
+/** 只接受完整的条目地址；目录提示与派工 reads 均不能提升角色权限。 */
+export function worldSimulationCanReadAddress_ACU(name: WorldSimulationAgentName_ACU, address: string): boolean {
+  const definition = findWorldSimulationAgentDefinition_ACU(name);
+  if (!definition) return false;
+  if (definition.kind === 'director' || definition.kind === 'researcher') return true;
+  if (address === 'anchor:message') return true;
+  if (name === 'causality-reviewer') {
+    return address === 'ledger:current' || address === 'candidates:current'
+      || address === 'stage-plan:current' || address === 'chronicle:current'
+      || /^(?:dimensions|seeds|actors|rumors|chronicle):[^:]+$/.test(address)
+      || /^field:(?:clock|dimensions|seeds|actors|player|rumors|chronicle|guidance):[^:]+(?::[^:]+)?$/.test(address);
+  }
+  if (definition.kind !== 'specialist') return false;
+  if (name === 'guidance-composer') {
+    if (address === 'ledger:current' || address === 'player:current' || address === 'projection:preview') return true;
+  }
+  if (name === 'chronicler' && /^chronicle-archive:[^:]+$/.test(address)) return true;
+  const modules = new Set<string>(definition.writableModules);
+  for (const module of definition.writableModules) {
+    for (const related of WORLD_RELATED_READONLY_MODULES_ACU[module] ?? []) modules.add(related);
+  }
+  if (name === 'guidance-composer') {
+    for (const module of ['clock', 'dimensions', 'seeds', 'actors', 'player', 'rumors', 'chronicle']) modules.add(module);
+  }
+  const item = /^(dimensions|seeds|actors|rumors|chronicle):([^:]+)$/.exec(address);
+  if (item) return modules.has(item[1]);
+  const field = /^field:([a-z]+):([^:]+)(?::([^:]+))?$/.exec(address);
+  return !!field && modules.has(field[1]);
+}
 
 export function findWorldSimulationAgentDefinition_ACU(name: string): WorldSimulationAgentDefinition_ACU | null {
   return WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name) ?? null;

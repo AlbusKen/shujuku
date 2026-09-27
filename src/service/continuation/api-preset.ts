@@ -54,7 +54,7 @@ type AgentApiPresetSettings_ACU = Pick<ContinuationSettings_ACU, 'apiPresetMode'
 
 /**
  * 计算某个角色的生效渠道模式：inherit 回落到全局 apiPresetMode。
- * 波次并发规则据此判定是否需要串行（current 模式走主 API，不支持并发内部请求）。
+ * 波次并发规则不再据此判定串行：并发门禁以解析后的真实渠道为准（酒馆连接或主 API 才串行）。
  * @param settings 续写设置
  * @param role 渠道角色
  * @returns 'current' 或 'fixed'

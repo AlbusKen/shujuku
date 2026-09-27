@@ -5,7 +5,7 @@ import { parseRestrictedSqlDml_ACU, type RestrictedSqlStatement_ACU, type Restri
 import { findUnauthorizedWorldSimulationEvidenceRefs_ACU, type WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
 import { formatWorldSimulationToolAddressHints_ACU, WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from '../world-simulation-agent-tools';
 import { findWorldSimulationAgentDefinition_ACU } from './agent-catalog';
-import type { WorldSimulationMainAction_ACU, WorldSimulationPlannerOutput_ACU, WorldSimulationProtocolIssue_ACU, WorldSimulationReviewerResult_ACU, WorldSimulationSpecialistResult_ACU } from './agent-model';
+import type { WorldSimulationMainAction_ACU, WorldSimulationPlannerOutput_ACU, WorldSimulationProtocolIssue_ACU, WorldSimulationRequestedFence_ACU, WorldSimulationReviewerResult_ACU, WorldSimulationSpecialistResult_ACU } from './agent-model';
 
 const SCAN_LIMIT_ACU = 6;
 const TERMINALS_ACU = ['commit', 'no_change', 'blocked'] as const;
@@ -146,6 +146,25 @@ function authorizedEvidenceRefs_ACU(value: unknown, path: string, required: bool
   return refs;
 }
 
+function parseRequestedFence_ACU(value: unknown, path: string): WorldSimulationRequestedFence_ACU | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord_ACU(value)) fail_ACU('REQUESTED_FENCE_OBJECT', path, 'object with lower or upper', value);
+  const keys = Object.keys(value);
+  if (!keys.length || keys.some(key => key !== 'lower' && key !== 'upper')) fail_ACU('REQUESTED_FENCE_KEYS', path, 'at least one of lower/upper only', value);
+  const parseBound = (bound: unknown, boundPath: string): string | number => {
+    if (typeof bound === 'string' && bound.trim()) return bound.trim();
+    if (typeof bound === 'number' && Number.isSafeInteger(bound)) return bound;
+    fail_ACU('REQUESTED_FENCE_BOUND', boundPath, 'non-empty string or safe integer', bound);
+  };
+  const fence: WorldSimulationRequestedFence_ACU = {};
+  if ('lower' in value) fence.lower = parseBound(value.lower, `${path}.lower`);
+  if ('upper' in value) fence.upper = parseBound(value.upper, `${path}.upper`);
+  if (typeof fence.lower === 'number' && typeof fence.upper === 'number' && fence.lower > fence.upper) {
+    fail_ACU('REQUESTED_FENCE_ORDER', path, 'lower less than or equal to upper', value);
+  }
+  return fence;
+}
+
 const SAFE_TOOL_REQUEST_METADATA_ACU = new Set(['evidenceRef', 'purpose']);
 function normalizeToolRequestMetadata_ACU(value: Record<string, unknown>, action: string): Record<string, unknown> {
   if (action !== 'read' && action !== 'search') return value;
@@ -182,13 +201,13 @@ function normalizeToolAddress_ACU(value: unknown): string {
 function normalizeLegacyToolAction_ACU(value: Record<string, unknown>): Record<string, unknown> {
   if (text_ACU(value.action)) return value;
   const keys = Object.keys(value);
-  const allowed = new Set(['address', 'reads', ...SAFE_TOOL_REQUEST_METADATA_ACU]);
+  const allowed = new Set(['address', 'reads', 'requestedFence', ...SAFE_TOOL_REQUEST_METADATA_ACU]);
   if (keys.some(key => !allowed.has(key))) return value;
   const address = normalizeToolAddress_ACU(value.address);
-  if (address && isAuthorizedToolAddress_ACU(address)) return { action: 'read', reads: [address] };
+  if (address && isAuthorizedToolAddress_ACU(address)) return { action: 'read', reads: [address], ...(value.requestedFence !== undefined ? { requestedFence: value.requestedFence } : {}) };
   if (Array.isArray(value.reads)) {
     const reads = value.reads.map(normalizeToolAddress_ACU).filter(Boolean);
-    if (reads.length === value.reads.length && reads.length > 0 && reads.every(isAuthorizedToolAddress_ACU)) return { action: 'read', reads };
+    if (reads.length === value.reads.length && reads.length > 0 && reads.every(isAuthorizedToolAddress_ACU)) return { action: 'read', reads, ...(value.requestedFence !== undefined ? { requestedFence: value.requestedFence } : {}) };
   }
   return value;
 }
@@ -210,11 +229,12 @@ export function parseWorldSimulationMainAction_ACU(value: unknown, allowDelegate
   const normalizedValue = normalizeLegacyToolAction_ACU(value);
   const action = text_ACU(normalizedValue.action);
   if (action === 'read') {
-    const raw = closedObject_ACU(normalizeReadAction_ACU(normalizedValue), '$', ['action', 'reads']);
+    const raw = closedObject_ACU(normalizeReadAction_ACU(normalizedValue), '$', ['action', 'reads'], ['requestedFence']);
     const reads = requiredList_ACU(raw.reads, '$.reads');
     const invalid = reads.find(address => !isAuthorizedToolAddress_ACU(address));
     if (invalid) fail_ACU('INVALID_TOOL_ADDRESS', '$.reads', formatWorldSimulationToolAddressHints_ACU(), invalid);
-    return { kind: 'read', reads };
+    const requestedFence = parseRequestedFence_ACU(raw.requestedFence, '$.requestedFence');
+    return { kind: 'read', reads, ...(requestedFence ? { requestedFence } : {}) };
   }
   if (action === 'search') {
     const raw = closedObject_ACU(normalizeToolRequestMetadata_ACU(normalizedValue, action), '$', ['action', 'query'], ['scope', 'maxResults', 'isRegex']);

@@ -14,8 +14,8 @@ export function resolveWorldSimulationReadBudget_ACU(config: WorldSimulationRead
   let max = 0;
   let basis: 'fixed' | 'history-budget-percent' = 'history-budget-percent';
   if (typeof config.readTokenBudget === 'number' && Number.isFinite(config.readTokenBudget) && config.readTokenBudget >= 1) { max = Math.floor(config.readTokenBudget); basis = 'fixed'; }
-  else if (typeof config.readTokenBudget === 'string' && /%$/.test(config.readTokenBudget.trim())) {
-    const percent = Number.parseFloat(config.readTokenBudget);
+  else if (typeof config.readTokenBudget === 'string' && /^(?:\d+(?:\.\d+)?|\.\d+)%$/.test(config.readTokenBudget.trim())) {
+    const percent = Number(config.readTokenBudget.trim().slice(0, -1));
     if (percent >= 1 && percent <= 100) max = Math.floor(base * percent / 100);
   }
   if (max < 1) max = Math.floor(base * 0.2);

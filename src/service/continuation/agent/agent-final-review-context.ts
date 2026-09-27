@@ -45,7 +45,7 @@ export function buildAgentFinalReviewEvidence_ACU(input: AgentFinalReviewEvidenc
   const worldbookSeeds = extractAgentFinalReviewWorldbookSeeds_ACU(seedSource);
   const worldbookEvidence = context.worldbook?.available
     ? renderAgentWorldbookTriggeredInjection_ACU(context.worldbook, seedSource)
-    : '世界书当前不可用；涉及人物、能力、地点、组织、种族、社会规则或世界常识的结论必须标注未验证。需要时用 search，scope 设为 ["worldbook"]。';
+    : '世界书当前不可用；涉及人物、能力、地点、组织、种族、社会规则或世界常识的结论必须标注未验证。不要臆测或把读取失败当作空世界书。';
   const supplementalMaterials = [
     `### 本轮用户输入\n${input.currentUserInput || '（本轮没有额外用户输入）'}`,
     `### 长期约束\n${constraints}`,

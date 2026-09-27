@@ -62,7 +62,11 @@ import {
   buildCustomApiRequestBody_ACU,
   isRetryableAiRequestError_ACU,
   normalizeSTNativeProxyBase_ACU,
+  callAIChatTurn_ACU,
 } from '../../../src/service/ai/api-call';
+import { agentNativeTools_ACU } from '../../../src/service/ai/native-tool';
+import { getAgentSubagentAccessProfile_ACU } from '../../../src/service/continuation/agent/agent-catalog';
+import { worldSimulationAgentNativeTools_ACU } from '../../../src/service/simulation/agent/agent-catalog';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -339,6 +343,118 @@ describe('callCustomOpenAI_ACU_Direct', () => {
     mockFetch.mockResolvedValue({ ok: true, json: async () => ({}) });
     const result = await callCustomOpenAI_ACU_Direct([{ role: 'user', content: '测试' }]);
     expect(result).toBe('fetch回复');
+  });
+});
+
+describe('原生工具实际宿主请求体', () => {
+  it('timekeeper 仅携带授权的 read 与 write_sql，工具回执保持 role=tool 与 tool_call_id', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ choices: [{ message: { content: '完成' } }] }) });
+    const messages = [
+      { role: 'assistant', content: '', tool_calls: [{ id: 'call-read-1', type: 'function', function: { name: 'read', arguments: '{"reads":["anchor:message"]}' } }] },
+      { role: 'tool', tool_call_id: 'call-read-1', content: '完整正文' },
+    ];
+    const preset = { apiMode: 'custom' as const, apiConfig: { url: 'https://api.example.com', model: 'gpt-4', max_tokens: 4096, useMainApi: false }, tavernProfile: '' };
+    const result = await callAIChatTurn_ACU(messages, preset, undefined, undefined, {
+      tools: agentNativeTools_ACU(worldSimulationAgentNativeTools_ACU('timekeeper')),
+    });
+    expect(result.content).toBe('完成');
+    expect(mockFetch).toHaveBeenCalledOnce();
+    expect(mockFetch.mock.calls[0][0]).toBe('/api/backends/chat-completions/generate');
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.tools.map((tool: { function: { name: string } }) => tool.function.name)).toEqual(['read', 'write_sql']);
+    expect(body.tools.some((tool: { function: { name: string } }) => tool.function.name === 'search')).toBe(false);
+    expect(body.messages).toEqual(messages);
+    expect(body.custom_prompt_post_processing).toMatch(/tools/);
+  });
+
+  it.each([
+    ['world-director', ['read', 'search']],
+    ['timekeeper', ['read', 'write_sql']],
+    ['causality-reviewer', ['read']],
+    ['guidance-composer', ['read', 'write_sql']],
+    ['lore-researcher', ['read', 'search']],
+  ] as const)('%s 的宿主请求只传对应角色工具白名单', async (name, expectedTools) => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ choices: [{ message: { content: '完成' } }] }) });
+    const preset = { apiMode: 'custom' as const, apiConfig: { url: 'https://api.example.com', model: 'gpt-4', max_tokens: 4096, useMainApi: false }, tavernProfile: '' };
+    await callAIChatTurn_ACU([{ role: 'user', content: '测试' }], preset, undefined, undefined, {
+      tools: agentNativeTools_ACU(worldSimulationAgentNativeTools_ACU(name)),
+    });
+    expect(mockFetch).toHaveBeenCalledOnce();
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.tools.map((tool: { function: { name: string } }) => tool.function.name)).toEqual(expectedTools);
+  });
+
+  it.each([
+    ['arc', ['read', 'search']],
+    ['maintain', ['read']],
+    ['plan', ['read']],
+    ['review', ['read']],
+    ['research', ['read', 'search', 'encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read']],
+    ['compose', []],
+  ] as const)('续写 %s profile 的宿主请求只携带授权工具', async (kind, expectedTools) => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ choices: [{ message: { content: '完成' } }] }) });
+    const preset = { apiMode: 'custom' as const, apiConfig: { url: 'https://api.example.com', model: 'gpt-4', max_tokens: 4096, useMainApi: false }, tavernProfile: '' };
+    await callAIChatTurn_ACU([{ role: 'user', content: '测试' }], preset, undefined, undefined, {
+      tools: agentNativeTools_ACU(getAgentSubagentAccessProfile_ACU(kind).tools),
+    });
+    expect(mockFetch).toHaveBeenCalledOnce();
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect((body.tools ?? []).map((tool: { function: { name: string } }) => tool.function.name)).toEqual(expectedTools);
+  });
+
+  it('酒馆主 API 带原生工具时在 generateRaw 前拒绝，避免丢失 tool_calls', async () => {
+    const preset = { apiMode: 'custom' as const, apiConfig: { max_tokens: 4096, useMainApi: true }, tavernProfile: '' };
+    await expect(callAIChatTurn_ACU([{ role: 'user', content: '测试' }], preset, undefined, undefined, {
+      tools: agentNativeTools_ACU(['read']),
+    })).rejects.toThrow('酒馆主 API 无法保证原生工具调用及回执');
+    expect(mockGenerateRaw).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('主 API 本次无工具定义但历史已有工具回执时同样拒发', async () => {
+    const preset = { apiMode: 'custom' as const, apiConfig: { max_tokens: 4096, useMainApi: true }, tavernProfile: '' };
+    await expect(callAIChatTurn_ACU([{ role: 'tool', tool_call_id: 'read-1', content: '完整正文' }], preset))
+      .rejects.toThrow('酒馆主 API 无法保证原生工具调用及回执');
+    expect(mockGenerateRaw).not.toHaveBeenCalled();
+  });
+
+  it('酒馆主 API 无工具时仍使用 generateRaw', async () => {
+    const preset = { apiMode: 'custom' as const, apiConfig: { max_tokens: 4096, useMainApi: true }, tavernProfile: '' };
+    const messages = [{ role: 'user', content: '测试' }];
+    mockGenerateRaw.mockResolvedValue('直接回复');
+    const result = await callAIChatTurn_ACU(messages, preset);
+    expect(result).toEqual({ content: '直接回复', toolCalls: [] });
+    expect(mockGenerateRaw).toHaveBeenCalledWith({ ordered_prompts: messages, should_stream: false, max_tokens: 4096 });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('Tavern 连接管理器不支持原生工具时在宿主调用前拒绝', async () => {
+    const preset = { apiMode: 'tavern' as const, apiConfig: { max_tokens: 4096 }, tavernProfile: 'default' };
+    await expect(callAIChatTurn_ACU([{ role: 'user', content: '测试' }], preset, undefined, undefined, {
+      tools: agentNativeTools_ACU(['read']),
+    })).rejects.toThrow('酒馆连接管理器不支持原生工具调用及回执');
+    expect(mockSendConnectionManager).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('Tavern 本次无工具定义但历史已有 tool_calls 时同样拒发', async () => {
+    const preset = { apiMode: 'tavern' as const, apiConfig: { max_tokens: 4096 }, tavernProfile: 'default' };
+    await expect(callAIChatTurn_ACU([{
+      role: 'assistant', content: '', tool_calls: [{ id: 'read-1', type: 'function', function: { name: 'read', arguments: '{"reads":["$HOOKS_LEDGER"]}' } }],
+    }], preset)).rejects.toThrow('酒馆连接管理器不支持原生工具调用及回执');
+    expect(mockSendConnectionManager).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('Tavern 不带工具仍按原有连接管理器路径发送', async () => {
+    const preset = { apiMode: 'tavern' as const, apiConfig: { max_tokens: 4096 }, tavernProfile: 'default' };
+    const messages = [{ role: 'user', content: '测试' }];
+    mockGetProfiles.mockReturnValue([{ id: 'default', name: 'default', api: 'openai' }]);
+    mockSendConnectionManager.mockResolvedValue({ result: { choices: [{ message: { content: '直接回复' } }] } });
+    const result = await callAIChatTurn_ACU(messages, preset);
+    expect(result.content).toBe('直接回复');
+    expect(mockSendConnectionManager).toHaveBeenCalledWith('default', messages, 4096);
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 });
 

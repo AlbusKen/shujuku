@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildDefaultWorldSimulationEnvelope_ACU } from '../../../src/service/simulation/defaults';
 import type { WorldSimulationEnvelope_ACU, WorldSimulationStagePlan_ACU, WorldSimulationStageRevision_ACU } from '../../../src/service/simulation/model';
+import type { WorldSimulationMainLoopResult_ACU } from '../../../src/service/simulation/agent/agent-model';
 import { WorldSimulationOrchestrator_ACU, resetWorldSimulationOrchestratorStateForTests_ACU, type WorldSimulationPreparedRun_ACU } from '../../../src/service/simulation/simulation-orchestrator';
 import { beginWorldSimulationSessionRun_ACU, isWorldSimulationSessionRunning_ACU, resetWorldSimulationSessionLogForTests_ACU } from '../../../src/service/simulation/agent/agent-session-log';
 
@@ -85,7 +86,9 @@ describe('WorldSimulationOrchestrator_ACU', () => {
   it('触发后直接冻结 revision 并执行一次，不等待人工确认', async () => {
     const f = fixture();
     const result = await f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' });
-    expect(result).toMatchObject({ status: 'completed', result: { outcome: 'no_change' } });
+    expect(result).toMatchObject({ status: 'completed', result: { outcome: 'no_change', finalProjection: {
+      content: null, sourceAgent: 'current-ledger', sourceRevision: 0, deliverable: true,
+    } } });
     expect(f.execute).toHaveBeenCalledOnce();
     expect(f.getEnvelope().task).toMatchObject({ status: 'completed', activeRun: null });
     expect(f.getEnvelope().stages[0]).toMatchObject({ status: 'completed', activeRevision: 1, revisions: [{ frozen: true }] });
@@ -335,6 +338,138 @@ describe('WorldSimulationOrchestrator_ACU', () => {
   });
 });
 
+describe('world simulation projection provenance', () => {
+  beforeEach(() => resetWorldSimulationOrchestratorStateForTests_ACU());
+
+  it('提交后过滤了 composer 的信号时只交付权威投影，不冒用 composer 来源', async () => {
+    const f = fixture();
+    const { buildWorldSimulationProjection_ACU } = await import('../../../src/service/simulation/simulation-projection');
+    const signal = { voice: 'ambient' as const, text: '钟声', sourceId: 'clock' };
+    const previewContent = buildWorldSimulationProjection_ACU({ ...f.getEnvelope().ledger,
+      guidance: { ...f.getEnvelope().ledger.guidance, signals: [signal] } });
+    const candidate = {
+      candidateId: 'composer-1', agentName: 'guidance-composer', patch: { guidance: { signals: [signal] } },
+      summary: '钟声', evidenceRefs: [], uncertainties: [], writableModules: ['guidance' as const],
+    };
+    const preview = { outcome: 'commit' as const, summary: '提交', outcomes: [],
+      commitCandidate: { runId: 'run-3', taskId: 'task-1', stageId: 'stage-2', stageRevision: 1,
+        baseLedgerRevision: 0, summary: '提交', acceptedCandidates: [candidate], evidenceRefs: [] },
+      finalProjection: { content: previewContent, sourceAgent: 'guidance-composer' as const, sourceRevision: 0, deliverable: false },
+    } satisfies WorldSimulationMainLoopResult_ACU;
+    f.prepare.mockImplementation(async () => ({ revision: revision(), execute: async () => preview }));
+    f.commitProjection.mockImplementation(async () => {
+      const envelope = f.getEnvelope();
+      envelope.ledger = { ...envelope.ledger, revision: 1, guidance: { ...envelope.ledger.guidance, signals: [] } };
+      envelope.task = { ...envelope.task!, status: 'completed', activeRun: null };
+      envelope.stages = envelope.stages.map(stage => ({ ...stage, status: 'completed' }));
+      return undefined;
+    });
+    const result = await f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' });
+    expect(result).toMatchObject({ status: 'completed', result: { outcome: 'commit', finalProjection: {
+      content: null, sourceAgent: 'current-ledger', sourceRevision: 1, deliverable: true,
+    } } });
+  });
+
+  it('候选预览与原有投影相同但 guidance 未写入时不冒用 composer 来源', async () => {
+    const f = fixture();
+    const { buildWorldSimulationProjection_ACU } = await import('../../../src/service/simulation/simulation-projection');
+    const signal = { voice: 'ambient' as const, text: '已有钟声', sourceId: 'clock' };
+    const envelope = f.getEnvelope();
+    envelope.ledger = { ...envelope.ledger, guidance: { ...envelope.ledger.guidance, signals: [signal] } };
+    const preview = buildWorldSimulationProjection_ACU(envelope.ledger);
+    const candidate = {
+      candidateId: 'composer-existing', agentName: 'guidance-composer', patch: { guidance: { signals: [signal] } },
+      summary: '保留原投影', evidenceRefs: [], uncertainties: [], writableModules: ['guidance' as const],
+    };
+    f.prepare.mockImplementation(async () => ({ revision: revision(), execute: async () => ({
+      outcome: 'commit' as const, summary: '提交', outcomes: [],
+      commitCandidate: { runId: 'run-3', taskId: 'task-1', stageId: 'stage-2', stageRevision: 1,
+        baseLedgerRevision: 0, summary: '提交', acceptedCandidates: [candidate], evidenceRefs: [] },
+      finalProjection: { content: preview, sourceAgent: 'guidance-composer' as const, sourceRevision: 0, deliverable: false },
+    }) }));
+    f.commitProjection.mockImplementation(async () => {
+      const current = f.getEnvelope();
+      current.ledger = { ...current.ledger, revision: 1 };
+      current.task = { ...current.task!, status: 'completed', activeRun: null };
+      current.stages = current.stages.map(stage => ({ ...stage, status: 'completed' }));
+      return undefined;
+    });
+    const result = await f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' });
+    expect(result).toMatchObject({ status: 'completed', result: { finalProjection: {
+      content: preview, sourceAgent: 'current-ledger', sourceRevision: 1, deliverable: true,
+    } } });
+  });
+
+  it('投影文字相同但权威信号来源不同，不将结果归因于 composer', async () => {
+    const f = fixture();
+    const { buildWorldSimulationProjection_ACU } = await import('../../../src/service/simulation/simulation-projection');
+    const proposed = { voice: 'ambient' as const, text: '钟声', sourceId: 'clock' };
+    const persisted = { ...proposed, sourceId: 'other' };
+    const base = f.getEnvelope().ledger;
+    const preview = buildWorldSimulationProjection_ACU({ ...base, guidance: { ...base.guidance, signals: [proposed] } });
+    const candidate = {
+      candidateId: 'composer-source', agentName: 'guidance-composer', patch: { guidance: { signals: [proposed] } },
+      summary: '钟声', evidenceRefs: [], uncertainties: [], writableModules: ['guidance'],
+    };
+    f.prepare.mockImplementation(async () => ({ revision: revision(), execute: async () => ({
+      outcome: 'commit' as const, summary: '提交', outcomes: [],
+      commitCandidate: { runId: 'run-3', taskId: 'task-1', stageId: 'stage-2', stageRevision: 1,
+        baseLedgerRevision: 0, summary: '提交', acceptedCandidates: [candidate], evidenceRefs: [] },
+      finalProjection: { content: preview, sourceAgent: 'guidance-composer' as const, sourceRevision: 0, deliverable: false },
+    }) }));
+    f.commitProjection.mockImplementation(async () => {
+      const envelope = f.getEnvelope();
+      envelope.ledger = { ...envelope.ledger, revision: 1, guidance: { ...envelope.ledger.guidance, signals: [persisted] } };
+      envelope.task = { ...envelope.task!, status: 'completed', activeRun: null };
+      envelope.stages = envelope.stages.map(stage => ({ ...stage, status: 'completed' }));
+      return undefined;
+    });
+    const result = await f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' });
+    expect(result).toMatchObject({ status: 'completed', result: { finalProjection: {
+      content: preview, sourceAgent: 'current-ledger', sourceRevision: 1, deliverable: true,
+    } } });
+  });
+
+  it('composer 候选缺少投影预览时在提交前拒绝，且不伪报完成', async () => {
+    const f = fixture();
+    const candidate = {
+      candidateId: 'composer-missing-preview', agentName: 'guidance-composer',
+      patch: { guidance: { signals: [{ voice: 'ambient', text: '钟声', sourceId: 'clock' }] } },
+      summary: '钟声', evidenceRefs: [], uncertainties: [], writableModules: ['guidance'],
+    };
+    f.prepare.mockImplementation(async () => ({ revision: revision(), execute: async () => ({
+      outcome: 'commit' as const, summary: '提交', outcomes: [],
+      commitCandidate: { runId: 'run-3', taskId: 'task-1', stageId: 'stage-2', stageRevision: 1,
+        baseLedgerRevision: 0, summary: '提交', acceptedCandidates: [candidate], evidenceRefs: [] },
+    }) }));
+    const result = await f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' });
+    expect(result).toMatchObject({ status: 'failed', error: { message: 'WORLD_SIMULATION_PROJECTION_AUTHORITY_UNVERIFIED' } });
+    expect(f.commitProjection).not.toHaveBeenCalled();
+    expect(f.getEnvelope().ledger).toBe(f.initialLedger);
+  });
+
+  it('没有 composer 候选的 commit 也从权威账本交付投影', async () => {
+    const f = fixture();
+    f.prepare.mockImplementation(async () => ({ revision: revision(), execute: async () => ({
+      outcome: 'commit' as const, summary: '提交', outcomes: [],
+      commitCandidate: { runId: 'run-3', taskId: 'task-1', stageId: 'stage-2', stageRevision: 1,
+        baseLedgerRevision: 0, summary: '提交', acceptedCandidates: [], evidenceRefs: [] },
+    }) }));
+    f.commitProjection.mockImplementation(async () => {
+      const envelope = f.getEnvelope();
+      envelope.ledger = { ...envelope.ledger, revision: 1 };
+      envelope.task = { ...envelope.task!, status: 'completed', activeRun: null };
+      envelope.stages = envelope.stages.map(stage => ({ ...stage, status: 'completed' }));
+      return undefined;
+    });
+    const result = await f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' });
+    expect(result).toMatchObject({ status: 'completed', result: { outcome: 'commit', finalProjection: {
+      content: null, sourceAgent: 'current-ledger', sourceRevision: 1, deliverable: true,
+    } } });
+    expect(f.commitProjection).toHaveBeenCalledOnce();
+  });
+});
+
 describe('world simulation terminal run write proof', () => {
   beforeEach(() => resetWorldSimulationOrchestratorStateForTests_ACU());
 
@@ -343,6 +478,12 @@ describe('world simulation terminal run write proof', () => {
     const { WorldSimulationRunWriteState_ACU } = await import('../../../src/service/simulation/simulation-run-write-state');
     const proof = new WorldSimulationRunWriteState_ACU(() => ({ ledger: f.getEnvelope().ledger,
       fields: undefined, archive: { schemaVersion: 1, records: {} } }), 0);
+    f.commitProjection.mockImplementation(async () => {
+      const envelope = f.getEnvelope();
+      envelope.task = { ...envelope.task!, status: 'completed', activeRun: null };
+      envelope.stages = envelope.stages.map(stage => ({ ...stage, status: 'completed' }));
+      return undefined;
+    });
     f.prepare.mockImplementation(async () => ({ revision: revision(), runWrites: proof, execute: async () => {
       const next = f.getEnvelope();
       const ledger = { ...next.ledger, revision: 1 };

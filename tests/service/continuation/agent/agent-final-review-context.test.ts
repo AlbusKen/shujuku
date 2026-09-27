@@ -40,7 +40,8 @@ describe('终审世界书证据准备', () => {
     expect(evidence.worldbookSeeds).toContain('晶屑');
     expect(evidence.worldbookEvidence).toContain('旁人不得带离铁门。');
     expect(evidence.worldbookEvidence).toContain('只知道铁门前发生的事。');
-    expect(evidence.worldbookEvidence).toContain('scope 设为 ["worldbook"]');
+    expect(evidence.worldbookEvidence).toContain('当前角色已授权的资料目录和工具');
+    expect(evidence.worldbookEvidence).not.toContain('用 search');
     expect(evidence.fixedReadKeys).not.toContain('$WORLDBOOK:设定集:7');
     expect(evidence.fixedReadKeys).not.toContain('$WORLDBOOK:设定集:9');
     expect(evidence.gateItems.some(item => item.label.includes('预览') && item.text.includes('旁人不得带离铁门。'))).toBe(true);
@@ -84,6 +85,8 @@ describe('终审世界书证据准备', () => {
 
     expect(evidence.worldbookEvidence).toContain('世界书当前不可用');
     expect(evidence.worldbookEvidence).toContain('未验证');
+    expect(evidence.worldbookEvidence).not.toContain('用 search');
+    expect(evidence.worldbookEvidence).toContain('不要臆测');
   });
 
   it('去重并限制检索种子数量', () => {

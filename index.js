@@ -86148,6 +86148,16 @@ $CONTENT
                     description: '按地址读取一条或一批资料的全文。何时使用：提示词里已经给出地址，或 search 命中行右侧有地址，需要正文、表格行、总纲、伏笔、世界书条目或推演账本字段时。预算与授权允许时，同一次回复把所有相互独立的读取地址放入 reads 数组并并发完成，不要分批等待；依赖 search 结果的精读留到下一轮。不要用它搜索未知内容。参数 reads 是非空字符串数组，一次可混用多种地址，例如 ["$STORY_RANGE:3-5","$STORY_ARC:VOL-01"] 或 ["ledger:current","field:seeds:seed-1:title"]。世界书命中全文通常已注入，不要对 $WORLDBOOK:... 反复 read；地址必须从当前提示词的目录或词汇表复制。',
                     parameters: objectSchema_ACU({
                         reads: { type: 'array', items: { type: 'string' }, minItems: 1 },
+                        requestedFence: {
+                            type: 'object',
+                            properties: {
+                                lower: { oneOf: [{ type: 'string' }, { type: 'integer' }] },
+                                upper: { oneOf: [{ type: 'string' }, { type: 'integer' }] },
+                            },
+                            minProperties: 1,
+                            additionalProperties: false,
+                            description: '可选读取上下围栏；未提供的边界由地址适配器或运行时上下文解析。',
+                        },
                     }, ['reads']),
                 },
             },
@@ -86269,7 +86279,7 @@ $CONTENT
             id: `call_${index}_${call.kind}`,
             name: call.kind,
             arguments: JSON.stringify(call.kind === 'read'
-                ? { reads: [...(call.reads ?? [])] }
+                ? { reads: [...(call.reads ?? [])], ...(call.requestedFence !== undefined ? { requestedFence: call.requestedFence } : {}) }
                 : call.kind === 'search'
                     ? { query: call.query ?? '', ...(call.scope ? { scope: [...call.scope] } : {}), ...(call.maxResults !== undefined ? { maxResults: call.maxResults } : {}), ...(call.isRegex ? { isRegex: true } : {}) }
                     : { sql: call.sql ?? '', ...(call.evidenceRefs?.length ? { evidenceRefs: [...call.evidenceRefs] } : {}) }),
@@ -86282,7 +86292,7 @@ $CONTENT
         const args = parseArguments_ACU(call.arguments);
         if (call.name === 'read') {
             const reads = Array.isArray(args.reads) ? args.reads : (typeof args.address === 'string' ? [args.address] : []);
-            return { action: 'read', reads };
+            return { action: 'read', reads, ...(args.requestedFence !== undefined ? { requestedFence: args.requestedFence } : {}) };
         }
         if (call.name === 'search') {
             return {
@@ -86656,6 +86666,15 @@ $CONTENT
         return `acu-v3-${chat}-${role}-${route}-${tools}-${boundary}`;
     }
 
+    // service/ai/request-max-tokens.ts — 请求 max_tokens 的唯一解析点
+    // 发送路径使用此值设置输出 token 上限；max_tokens 不是模型完整上下文窗口容量。
+    /** 预设 max_tokens（兼容历史 maxTokens，缺省 4096）与调用方输出下限取大。 */
+    function resolveRequestMaxTokens_ACU(apiConfig, minOutputTokens) {
+        const presetMaxTokens = apiConfig.max_tokens ?? apiConfig.maxTokens ?? 4096;
+        const floor = Number.isFinite(minOutputTokens) ? Math.max(0, Math.trunc(minOutputTokens)) : 0;
+        return Math.max(presetMaxTokens, floor);
+    }
+
     const CONTINUATION_SCHEMA_VERSION_ACU = 1;
     /**
      * 用户点「继续」即可从当前轮次恢复的停止原因。
@@ -86890,11 +86909,11 @@ $CONTENT
     const AGENT_SEARCH_SCOPES_ACU = ['story', 'tables', 'modules', 'outline', 'worldbook'];
     const AGENT_WEB_TOOL_ACTIONS_ACU = ['encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read'];
     const DEFAULT_AGENT_RUN_BUDGET_ACU = {
-        maxIterations: 8,
-        maxDelegations: 6,
+        maxIterations: 4,
+        maxDelegations: 3,
         maxSameAgent: 2,
         maxConcurrent: 3,
-        maxReads: 8,
+        maxReads: 4,
         maxExtraReads: 3,
     };
     const AGENT_REVIEW_VERDICTS_ACU = ['pass', 'revise', 'block'];
@@ -87406,6 +87425,13 @@ $CONTENT
             enabled: true,
             deletable: true,
         },
+        {
+            role: 'assistant',
+            content: AGENT_PREFILLS_ACU.reviewer,
+            enabled: true,
+            deletable: false,
+            pinned: true,
+        },
     ];
     const REVIEWER_PROMPT_ACU = [
         {
@@ -87721,7 +87747,7 @@ $CONTENT
             mainlinePlanner: buildDefaultAgentMainlinePlannerPrompt_ACU(),
             beatPlanner: buildDefaultAgentBeatPlannerPrompt_ACU(),
             reviewer: buildDefaultAgentReviewerPrompt_ACU(),
-            finalReviewer: buildDefaultAgentFinalReviewerPrompt_ACU(),
+            finalReviewer: buildDefaultAgentFinalReviewerPrompt_ACU().filter(segment => segment.content !== AGENT_PREFILLS_ACU.reviewer),
             webResearcher: buildDefaultAgentWebResearcherPrompt_ACU(),
             instructionComposer: buildDefaultAgentInstructionComposerPrompt_ACU(),
         };
@@ -87882,6 +87908,15 @@ $CONTENT
         const prompts = applyCurrentContinuationPromptRules_ACU(buildV36ContinuationAgentPrompts_ACU());
         for (const role of Object.keys(prompts)) {
             const segments = prompts[role];
+            if (role === 'finalReviewer' && segments[segments.length - 1]?.content.includes('$AGENT_TASK')) {
+                segments.push({
+                    role: 'assistant',
+                    content: AGENT_PREFILLS_ACU.reviewer,
+                    enabled: true,
+                    deletable: false,
+                    pinned: true,
+                });
+            }
             segments[segments.length - 1] = { ...segments[segments.length - 1], role: 'user', content: USER_PREFILL_CONTENT_ACU };
             if (role === 'main') {
                 const protocol = segments.find(segment => segment.content.includes('【工具：read / search'));
@@ -89344,6 +89379,8 @@ $CONTENT
             const segments = next[key];
             if (!Array.isArray(segments))
                 continue;
+            if (segments.length < 2)
+                continue;
             const defaultsGroup = defaults[key];
             const insertIndex = defaultsGroup.findIndex(segment => V26_CHRONOLOGY_SEGMENT_CONTENTS_ACU.includes(segment.content));
             if (insertIndex <= 0)
@@ -89608,6 +89645,55 @@ $CONTENT
                 changed = true;
                 return { ...segment, content: current[role][entry.index].content };
             });
+        }
+        return changed ? next : raw;
+    }
+    /** V36 → V37：只把仍保持默认末段的角色切换到共享 user prefill，保留用户改写、追加段和元数据。 */
+    function migrateV36AgentPromptsToV37_ACU(raw) {
+        if (!isRecord_ACU$m(raw))
+            return raw;
+        const previous = buildV36ContinuationAgentPrompts_ACU();
+        const current = buildDefaultContinuationAgentPrompts_ACU();
+        let changed = false;
+        const next = { ...raw };
+        for (const role of Object.keys(previous)) {
+            if (!Array.isArray(raw[role]) || !previous[role].length)
+                continue;
+            const previousSegments = previous[role];
+            const currentSegments = current[role];
+            const segments = raw[role];
+            const migrated = segments.map((segment, index) => {
+                if (index >= previousSegments.length || !isRecord_ACU$m(segment) || typeof segment.content !== 'string')
+                    return segment;
+                const oldSegment = previousSegments[index];
+                const currentSegment = currentSegments[index];
+                if (!currentSegment || segment.role !== oldSegment.role || segment.content !== oldSegment.content)
+                    return segment;
+                changed = true;
+                return { ...segment, role: currentSegment.role, content: currentSegment.content };
+            });
+            const taskIndex = previousSegments.findIndex(segment => segment.content.includes('$AGENT_TASK'));
+            const rawTask = taskIndex >= 0 ? segments[taskIndex] : undefined;
+            const currentPrefill = currentSegments[previousSegments.length];
+            if (role === 'finalReviewer' && taskIndex >= 0 && currentPrefill && isRecord_ACU$m(rawTask)
+                && rawTask.role === previousSegments[taskIndex].role && rawTask.content === previousSegments[taskIndex].content
+                && !migrated.some(segment => isRecord_ACU$m(segment) && segment.content === currentPrefill.content)) {
+                migrated.splice(Math.min(previousSegments.length, migrated.length), 0, { ...currentPrefill });
+                changed = true;
+            }
+            const previousTail = previousSegments[previousSegments.length - 1];
+            const currentTail = currentSegments[currentSegments.length - 1];
+            const rawTail = segments[segments.length - 1];
+            const migratedTail = migrated[migrated.length - 1];
+            if (currentTail && isRecord_ACU$m(rawTail)
+                && promptSegmentEquals_ACU(rawTail, previousTail)
+                && (!isRecord_ACU$m(migratedTail)
+                    || migratedTail.role !== currentTail.role
+                    || migratedTail.content !== currentTail.content)) {
+                migrated[migrated.length - 1] = { ...rawTail, role: currentTail.role, content: currentTail.content };
+                changed = true;
+            }
+            next[role] = migrated;
         }
         return changed ? next : raw;
     }
@@ -89988,11 +90074,19 @@ $CONTENT
             promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU;
         }
         if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU) {
-            agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
+            agentPrompts = migrateV36AgentPromptsToV37_ACU(agentPrompts);
             promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V37_ACU;
         }
         if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V37_ACU) {
-            outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
+            if (Array.isArray(outlinePrompt)) {
+                const current = buildDefaultContinuationOutlinePrompt_ACU();
+                const prefill = current[current.length - 1];
+                const currentBase = current.slice(0, -1);
+                const isUnmodifiedDefault = outlinePrompt.length === currentBase.length
+                    && outlinePrompt.every((segment, index) => promptSegmentEquals_ACU(segment, currentBase[index]));
+                if (isUnmodifiedDefault && prefill)
+                    outlinePrompt = [...outlinePrompt, { ...prefill }];
+            }
             promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU;
         }
         return {
@@ -90691,8 +90785,8 @@ $CONTENT
             max = Math.floor(config.readTokenBudget);
             basis = 'fixed';
         }
-        else if (typeof config.readTokenBudget === 'string' && /%$/.test(config.readTokenBudget.trim())) {
-            const percent = Number.parseFloat(config.readTokenBudget);
+        else if (typeof config.readTokenBudget === 'string' && /^(?:\d+(?:\.\d+)?|\.\d+)%$/.test(config.readTokenBudget.trim())) {
+            const percent = Number(config.readTokenBudget.trim().slice(0, -1));
             if (percent >= 1 && percent <= 100)
                 max = Math.floor(base * percent / 100);
         }
@@ -90726,6 +90820,14 @@ $CONTENT
         'player:current', 'rumors:current',
         'seeds:', 'actors:', 'rumors:', 'chronicle:', 'dimensions:', 'chronicle-archive:', 'field:',
     ];
+    function formatWorldSimulationToolAddressHints_ACU() {
+        return WORLD_SIMULATION_TOOL_ADDRESSES_ACU
+            .flatMap(address => address === 'field:' ? ['field:<module>:<id>', 'field:<module>:<id>:<field>'] : [address])
+            .join(' | ');
+    }
+    function createWorldSimulationReadRoundState_ACU() {
+        return { successfulReadBatches: new Set(), pendingReadBatches: new Set() };
+    }
     function summary_ACU(value) { return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, 300); }
     function content_ACU(value) { return typeof value === 'string' ? value : JSON.stringify(value ?? null); }
     function ledgerSlice_ACU(ledger, key) {
@@ -90804,7 +90906,7 @@ $CONTENT
             return { found: false };
         };
         return {
-            async read(address) {
+            async read(address, requestedFence, defaultReadFenceTokens) {
                 const localHit = resolveLocal_ACU(address);
                 if (localHit.found) {
                     if (localHit.missing)
@@ -90814,56 +90916,186 @@ $CONTENT
                     const value = content_ACU(localHit.value);
                     return value ? { status: 'ok', content: value, summary: summary_ACU(value), exact: true } : { status: 'empty', summary: 'empty local value', exact: true };
                 }
-                return context.externalRead ? context.externalRead(address) : { status: 'dependency_unavailable', summary: 'external read dependency unavailable' };
+                if (!context.externalRead)
+                    return { status: 'dependency_unavailable', summary: 'external read dependency unavailable' };
+                return context.externalRead(address, requestedFence, defaultReadFenceTokens);
             },
             async search(query, scope, maxResults, isRegex) {
                 return context.externalSearch ? context.externalSearch(query, scope, maxResults, isRegex) : { status: 'dependency_unavailable', hits: [], summary: 'external search dependency unavailable' };
             },
         };
     }
+    function requestedFenceKey_ACU(fence) {
+        if (!fence)
+            return undefined;
+        return JSON.stringify({
+            ...(fence.lower !== undefined ? { lower: fence.lower } : {}),
+            ...(fence.upper !== undefined ? { upper: fence.upper } : {}),
+        });
+    }
+    function resolvedFenceWithinRequest_ACU(resolved, requested) {
+        if (!resolved)
+            return false;
+        let value;
+        try {
+            value = JSON.parse(resolved);
+        }
+        catch {
+            return false;
+        }
+        if (!value || typeof value !== 'object' || Array.isArray(value))
+            return false;
+        const fence = value;
+        if (Object.keys(fence).some(key => key !== 'lower' && key !== 'upper'))
+            return false;
+        for (const bound of ['lower', 'upper']) {
+            const actual = fence[bound];
+            const expected = requested[bound];
+            if (actual === undefined || typeof actual !== 'string' && typeof actual !== 'number')
+                return false;
+            if (expected === undefined)
+                continue;
+            if (typeof actual !== typeof expected)
+                return false;
+            if (typeof expected === 'number') {
+                if (!Number.isSafeInteger(actual) || (bound === 'lower' ? actual < expected : actual > expected))
+                    return false;
+            }
+            else if (actual !== expected)
+                return false;
+        }
+        if (typeof fence.lower === 'number' && typeof fence.upper === 'number' && fence.lower > fence.upper)
+            return false;
+        return true;
+    }
+    function fenceProofInvalid_ACU(proof, address, requestedFence) {
+        const expectedRequestedFence = requestedFenceKey_ACU(requestedFence);
+        const fenceDeclared = proof.requestedFence !== undefined || proof.resolvedFence !== undefined
+            || proof.stableAddress !== undefined || proof.revision !== undefined || proof.completeWithinFence !== undefined;
+        if (!expectedRequestedFence && !fenceDeclared)
+            return false;
+        const baseInvalid = !proof.resolvedFence
+            || proof.stableAddress !== address
+            || !(typeof proof.revision === 'string' && proof.revision.trim() || typeof proof.revision === 'number' && Number.isSafeInteger(proof.revision) && proof.revision >= 0)
+            || proof.completeWithinFence !== true;
+        if (baseInvalid)
+            return true;
+        if (expectedRequestedFence === undefined) {
+            // 默认上围栏由适配器按容量预算解析；代理未显式请求时不要求 requestedFence 回显。
+            return false;
+        }
+        return !proof.requestedFence
+            || proof.requestedFence !== expectedRequestedFence
+            || !resolvedFenceWithinRequest_ACU(proof.resolvedFence, requestedFence);
+    }
     async function runWorldSimulationToolBatch_ACU(input) {
+        // 带门禁的相邻 read 共同构成一次逻辑批次；search 和导演的无门禁调用保持原语义。
+        if (input.gate && input.calls.length > 1 && input.calls.every(call => call.kind === 'read')) {
+            const firstFence = requestedFenceKey_ACU(input.calls[0].requestedFence);
+            if (input.calls.every(call => requestedFenceKey_ACU(call.requestedFence) === firstFence)) {
+                return runWorldSimulationToolBatch_ACU({ ...input, calls: [{ kind: 'read', reads: input.calls.flatMap(call => call.reads), ...(input.calls[0].requestedFence ? { requestedFence: input.calls[0].requestedFence } : {}) }] });
+            }
+            return input.calls.flatMap(call => call.reads.map(address => ({ kind: 'read', address, status: 'failed', summary: 'WORLD_SIMULATION_READ_BATCH_FAILED:multiple-requested-fences' })));
+        }
         const results = [];
         for (const call of input.calls) {
             if (call.kind === 'read') {
+                const round = input.gate?.readRoundState;
+                const key = input.gate?.readRoundKey;
+                if (input.gate?.readOnce && (input.gate.usage.successfulReadBatches || (key && round?.successfulReadBatches.has(key)))) {
+                    return call.reads.map(address => ({ kind: 'read', address, status: 'failed', summary: 'read-once-exhausted' }));
+                }
+                if (input.gate?.readOnce && key && round?.pendingReadBatches.has(key)) {
+                    return call.reads.map(address => ({ kind: 'read', address, status: 'failed', summary: 'read-in-progress' }));
+                }
+                if (input.gate?.readOnce && Boolean(round) !== Boolean(key)) {
+                    return call.reads.map(address => ({ kind: 'read', address, status: 'failed', summary: 'read-round-identity-invalid' }));
+                }
+                if (input.gate?.readOnce && input.gate.canReadAddress) {
+                    const denied = call.reads.find(address => !input.gate.canReadAddress(address));
+                    if (denied !== undefined) {
+                        return call.reads.map(address => ({ kind: 'read', address, status: 'failed',
+                            summary: `WORLD_SIMULATION_READ_BATCH_FAILED:${denied}:read-address-unauthorized` }));
+                    }
+                }
                 if (input.gate && input.gate.usage.readsUsed + call.reads.length > input.gate.maxReads) {
                     for (const address of call.reads) {
-                        const entry = recordWorldSimulationEvidence_ACU(input.registry, { operation: 'read', address, status: 'failed', summary: 'WORLD_SIMULATION_READ_LIMIT_REACHED', exact: false });
-                        results.push({ kind: 'read', address, status: 'failed', summary: entry.summary });
+                        if (input.gate.readOnce) {
+                            results.push({ kind: 'read', address, status: 'failed', summary: 'WORLD_SIMULATION_READ_LIMIT_REACHED' });
+                        }
+                        else {
+                            const entry = recordWorldSimulationEvidence_ACU(input.registry, { operation: 'read', address, status: 'failed', summary: 'WORLD_SIMULATION_READ_LIMIT_REACHED', exact: false });
+                            results.push({ kind: 'read', address, status: 'failed', summary: entry.summary });
+                        }
                     }
                     continue;
                 }
-                const reads = await Promise.all(call.reads.map(async (address) => {
-                    try {
-                        return { address, read: await input.dependencies.read(address) };
-                    }
-                    catch (error) {
-                        return { address, read: { status: 'failed', summary: error instanceof Error ? error.message : String(error) } };
-                    }
-                }));
-                const normalized = reads.map(({ address, read }) => ({
-                    address,
-                    read,
-                    content: typeof read.content === 'string' ? read.content : undefined,
-                }));
-                if (input.gate) {
-                    const decision = await gateWorldSimulationReadBatch_ACU(normalized.flatMap(item => item.content ? [{ label: item.address, text: item.content }] : []), input.gate.state, input.gate.config, input.gate.contextTokens ?? 0, input.gate.count);
-                    if (!decision.allowed) {
-                        for (const { address } of normalized) {
-                            const entry = recordWorldSimulationEvidence_ACU(input.registry, { operation: 'read', address, status: 'failed', summary: decision.report, exact: false });
-                            results.push({ kind: 'read', address, status: 'failed', summary: entry.summary });
+                if (input.gate?.readOnce && round && key)
+                    round.pendingReadBatches.add(key);
+                try {
+                    const defaultReadFenceTokens = call.requestedFence === undefined ? input.gate?.defaultReadFenceTokens : undefined;
+                    const reads = await Promise.all(call.reads.map(async (address) => {
+                        try {
+                            const read = await input.dependencies.read(address, call.requestedFence, defaultReadFenceTokens);
+                            return { address, requestedFence: call.requestedFence, read };
                         }
-                        continue;
+                        catch (error) {
+                            return { address, requestedFence: call.requestedFence, read: { status: 'failed', summary: error instanceof Error ? error.message : String(error) } };
+                        }
+                    }));
+                    const normalized = reads.map(({ address, requestedFence, read }) => ({
+                        address,
+                        requestedFence,
+                        read,
+                        content: typeof read.content === 'string' ? read.content : undefined,
+                    }));
+                    if (input.gate) {
+                        const invalid = input.gate.readOnce && normalized.find(item => {
+                            const proof = item.read;
+                            return proof.truncated || proof.status !== 'ok' || !item.content || proof.exact !== true
+                                || fenceProofInvalid_ACU(proof, item.address, item.requestedFence);
+                        });
+                        if (invalid) {
+                            const proof = invalid.read;
+                            const fenceInvalid = fenceProofInvalid_ACU(proof, invalid.address, invalid.requestedFence);
+                            const reason = invalid.read.truncated ? 'truncated' : invalid.read.status !== 'ok'
+                                ? invalid.read.status : fenceInvalid ? 'fence-proof-invalid' : 'read-completeness-unverified';
+                            return normalized.map(item => ({ kind: 'read', address: item.address, status: 'failed',
+                                summary: `WORLD_SIMULATION_READ_BATCH_FAILED:${invalid.address}:${reason}` }));
+                        }
+                        const decision = await gateWorldSimulationReadBatch_ACU(normalized.flatMap(item => item.content ? [{ label: item.address, text: item.content }] : []), input.gate.state, input.gate.config, input.gate.contextTokens ?? 0, input.gate.count);
+                        if (!decision.allowed) {
+                            for (const { address } of normalized) {
+                                if (input.gate.readOnce) {
+                                    results.push({ kind: 'read', address, status: 'failed', summary: decision.report });
+                                }
+                                else {
+                                    const entry = recordWorldSimulationEvidence_ACU(input.registry, { operation: 'read', address, status: 'failed', summary: decision.report, exact: false });
+                                    results.push({ kind: 'read', address, status: 'failed', summary: entry.summary });
+                                }
+                            }
+                            continue;
+                        }
+                        if (input.gate.readOnce) {
+                            input.gate.usage.successfulReadBatches = 1;
+                            if (round && key)
+                                round.successfulReadBatches.add(key);
+                        }
+                        input.gate.state.grantedTokens += decision.batchTokens;
+                        input.gate.usage.readsUsed += call.reads.length;
                     }
-                    input.gate.state.grantedTokens += decision.batchTokens;
-                    input.gate.usage.readsUsed += call.reads.length;
+                    for (const { address, read, content: normalizedContent } of normalized) {
+                        const status = read.truncated ? 'truncated' : read.status === 'ok' && !normalizedContent ? 'empty' : read.status;
+                        const operation = read.directory ? 'directory' : 'read';
+                        const entry = recordWorldSimulationEvidence_ACU(input.registry, { operation, address, status, summary: summary_ACU(read.summary), exact: operation === 'read' && read.exact === true && !read.truncated });
+                        results.push({ kind: 'read', address, status, content: normalizedContent, summary: entry.summary, evidenceRef: entry.evidenceRef });
+                    }
+                    continue;
                 }
-                for (const { address, read, content: normalizedContent } of normalized) {
-                    const status = read.truncated ? 'truncated' : read.status === 'ok' && !normalizedContent ? 'empty' : read.status;
-                    const operation = read.directory ? 'directory' : 'read';
-                    const entry = recordWorldSimulationEvidence_ACU(input.registry, { operation, address, status, summary: summary_ACU(read.summary), exact: operation === 'read' && read.exact === true && !read.truncated });
-                    results.push({ kind: 'read', address, status, content: normalizedContent, summary: entry.summary, evidenceRef: entry.evidenceRef });
+                finally {
+                    if (input.gate?.readOnce && round && key)
+                        round.pendingReadBatches.delete(key);
                 }
-                continue;
             }
             let search;
             try {
@@ -90886,6 +91118,278 @@ $CONTENT
                 }
         }
         return results;
+    }
+
+    const JACCARD_SIMILAR_THRESHOLD_ACU = 0.7;
+    const SHA1_K_ACU = new Uint32Array([
+        0x5a827999, 0x6ed9eba1, 0x8f1bbcdc, 0xca62c1d6,
+    ]);
+    function rotl_ACU(value, bits) {
+        return (value << bits) | (value >>> (32 - bits));
+    }
+    function sha1Bytes_ACU(input) {
+        const bitLength = input.length * 8;
+        const paddedLength = (((input.length + 9) + 63) >> 6) << 6;
+        const padded = new Uint8Array(paddedLength);
+        padded.set(input);
+        padded[input.length] = 0x80;
+        const view = new DataView(padded.buffer);
+        view.setUint32(paddedLength - 8, Math.floor(bitLength / 0x100000000), false);
+        view.setUint32(paddedLength - 4, bitLength >>> 0, false);
+        let h0 = 0x67452301;
+        let h1 = 0xefcdab89;
+        let h2 = 0x98badcfe;
+        let h3 = 0x10325476;
+        let h4 = 0xc3d2e1f0;
+        const w = new Uint32Array(80);
+        for (let offset = 0; offset < paddedLength; offset += 64) {
+            for (let i = 0; i < 16; i += 1)
+                w[i] = view.getUint32(offset + i * 4, false);
+            for (let i = 16; i < 80; i += 1)
+                w[i] = rotl_ACU(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1) >>> 0;
+            let a = h0;
+            let b = h1;
+            let c = h2;
+            let d = h3;
+            let e = h4;
+            for (let i = 0; i < 80; i += 1) {
+                let f;
+                let k;
+                if (i < 20) {
+                    f = (b & c) | (~b & d);
+                    k = SHA1_K_ACU[0];
+                }
+                else if (i < 40) {
+                    f = b ^ c ^ d;
+                    k = SHA1_K_ACU[1];
+                }
+                else if (i < 60) {
+                    f = (b & c) | (b & d) | (c & d);
+                    k = SHA1_K_ACU[2];
+                }
+                else {
+                    f = b ^ c ^ d;
+                    k = SHA1_K_ACU[3];
+                }
+                const temp = (rotl_ACU(a, 5) + f + e + k + w[i]) >>> 0;
+                e = d;
+                d = c;
+                c = rotl_ACU(b, 30) >>> 0;
+                b = a;
+                a = temp;
+            }
+            h0 = (h0 + a) >>> 0;
+            h1 = (h1 + b) >>> 0;
+            h2 = (h2 + c) >>> 0;
+            h3 = (h3 + d) >>> 0;
+            h4 = (h4 + e) >>> 0;
+        }
+        const digest = new Uint8Array(20);
+        const out = new DataView(digest.buffer);
+        out.setUint32(0, h0, false);
+        out.setUint32(4, h1, false);
+        out.setUint32(8, h2, false);
+        out.setUint32(12, h3, false);
+        out.setUint32(16, h4, false);
+        return digest;
+    }
+    function hex_ACU(bytes) {
+        let result = '';
+        for (const byte of bytes)
+            result += byte.toString(16).padStart(2, '0');
+        return result;
+    }
+    function utf8_ACU(value) {
+        return new TextEncoder().encode(value);
+    }
+    function sha1Hex_ACU(value) {
+        return hex_ACU(sha1Bytes_ACU(utf8_ACU(value)));
+    }
+    /** 去空白、大小写折叠、去标点/符号后的紧凑文本，用于指纹哈希。 */
+    function normalizeEventText_ACU(value) {
+        return value.normalize('NFKC').toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
+    }
+    function eventTokens_ACU(value) {
+        const prepared = value.normalize('NFKC').toLowerCase().replace(/[\p{P}\p{S}]+/gu, ' ');
+        const tokens = new Set();
+        for (const part of prepared.split(/\s+/).filter(Boolean)) {
+            if (/[\u3040-\u30ff\u3400-\u9fff]/.test(part)) {
+                for (const char of part)
+                    tokens.add(char);
+            }
+            else {
+                tokens.add(part);
+            }
+        }
+        return tokens;
+    }
+    function eventFingerprint_ACU(summary, at, relatedIds) {
+        const related = [...relatedIds].map(item => item.trim()).filter(Boolean).sort();
+        return sha1Hex_ACU(`${normalizeEventText_ACU(summary)}${at}${related.join(',')}`);
+    }
+    function fuzzySimilarity_ACU(a, b) {
+        const left = eventTokens_ACU(a);
+        const right = eventTokens_ACU(b);
+        if (!left.size && !right.size)
+            return 1;
+        if (!left.size || !right.size)
+            return 0;
+        let intersection = 0;
+        for (const token of left)
+            if (right.has(token))
+                intersection += 1;
+        return intersection / (left.size + right.size - intersection);
+    }
+
+    function buildArchiveHints_ACU(candidateChronicleEntries, chronicleOverview) {
+        const hints = [];
+        for (const [candidateIndex, candidate] of candidateChronicleEntries.entries()) {
+            const fingerprint = eventFingerprint_ACU(candidate.summary, candidate.at, candidate.relatedIds);
+            const exact = chronicleOverview.find(row => row.fingerprint === fingerprint);
+            if (exact) {
+                hints.push({
+                    candidateIndex,
+                    level: 'exact',
+                    matchedDay: exact.day,
+                    matchedOneLine: exact.oneLine,
+                    matchedArchiveRef: exact.archiveRef,
+                });
+                continue;
+            }
+            let best = null;
+            let bestScore = 0;
+            for (const row of chronicleOverview) {
+                const score = fuzzySimilarity_ACU(candidate.summary, row.oneLine);
+                if (score >= JACCARD_SIMILAR_THRESHOLD_ACU && score > bestScore) {
+                    best = row;
+                    bestScore = score;
+                }
+            }
+            if (best) {
+                hints.push({
+                    candidateIndex,
+                    level: 'similar',
+                    matchedDay: best.day,
+                    matchedOneLine: best.oneLine,
+                    matchedArchiveRef: best.archiveRef,
+                });
+            }
+        }
+        return hints;
+    }
+
+    const WORLD_CATALOG_READ_HINT_ACU = '目录中任一条目可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}；逐栏状态必须使用 field:seeds:{id} 或 field:seeds:{id}:title；归档总结经 chronicle-archive:{archiveRef}）。不得省略 field 地址中的条目 ID。';
+    const WORLD_SUBAGENT_DEDUP_HINT_ACU = '以下目录包含正在生效的资料与已经发生的事情（含已归档总结索引）；若你正要推演的事件与已发生目录中某条实质相同，不要重复推演。';
+    function clip_ACU(value, max = 80) {
+        const text = value.replace(/\s+/g, ' ').trim();
+        return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+    }
+    function row_ACU(id, name, summary, module) {
+        return { id, name, summary: clip_ACU(summary), readAddress: `${module}:${id}` };
+    }
+    function buildInUseWorldCatalog_ACU(ledger) {
+        const activeSeeds = ledger.seeds.filter(seed => seed.status !== 'resolved' && seed.status !== 'retired');
+        const activeRumors = ledger.rumors.filter(rumor => rumor.status === 'latent' || rumor.status === 'ripe');
+        const hot = ledger.chronicle.slice(-WORLD_CHRONICLE_HOT_WINDOW_ACU);
+        return {
+            clock: ledger.clock,
+            player: ledger.player,
+            dimensions: ledger.dimensions.map(item => row_ACU(item.id, item.name, `${item.kind} ${item.value} ${item.trend} ${item.rationale}`, 'dimensions')),
+            seeds: activeSeeds.map(item => row_ACU(item.id, item.title, `${item.status} lv${item.level} ${item.location?.region ?? ''}`, 'seeds')),
+            actors: ledger.actors.map(item => row_ACU(item.id, item.name, `${item.life} ${item.locationRef?.region ?? item.location}`, 'actors')),
+            rumors: activeRumors.map(item => row_ACU(item.id, item.fact, `${item.status} ${item.channels.join(',')}`, 'rumors')),
+            chronicleHot: hot.map(item => ({
+                id: item.id,
+                name: item.at,
+                summary: clip_ACU(item.summary),
+                readAddress: `chronicle:${item.id}`,
+            })),
+            readHint: WORLD_CATALOG_READ_HINT_ACU,
+        };
+    }
+    const WORLD_RELATED_READONLY_MODULES_ACU = {
+        dimensions: ['actors'],
+        seeds: ['actors', 'rumors'],
+        actors: ['seeds', 'dimensions'],
+        rumors: ['seeds'],
+        chronicle: ['seeds', 'actors', 'rumors'],
+    };
+    const WORLD_RELATED_READONLY_HINT_ACU = '关联模块只读目录：仅供对齐引用与一致性核对，禁止写入；目录行含 readAddress，可用 read 工具调阅详情。';
+    function sliceModuleCatalog_ACU(catalog, overview, writableModules) {
+        const writable = new Set(writableModules);
+        // 普通角色的目录不能沿用导演的“任一条目可读”提示，也不能无条件附带玩家状态。
+        const slice = {
+            readHint: '仅按当前角色授权的目录地址调用 read；目录未列出的资料不代表可读取。字段地址必须包含条目 ID。',
+        };
+        if (writableModules.some(module => ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'rumors'].includes(module))) {
+            slice.clock = catalog.clock;
+        }
+        if (writable.has('actors'))
+            slice.player = catalog.player;
+        if (writable.has('dimensions'))
+            slice.dimensions = catalog.dimensions;
+        if (writable.has('seeds'))
+            slice.seeds = catalog.seeds;
+        if (writable.has('actors'))
+            slice.actors = catalog.actors;
+        if (writable.has('rumors'))
+            slice.rumors = catalog.rumors;
+        if (writable.has('chronicle')) {
+            slice.chronicleHot = catalog.chronicleHot;
+            slice.chronicleOverview = overview.map(row => ({
+                day: row.day,
+                oneLine: row.oneLine,
+                archiveRef: row.archiveRef,
+                readAddress: `chronicle-archive:${row.archiveRef}`,
+            }));
+            slice.dedupHint = WORLD_SUBAGENT_DEDUP_HINT_ACU;
+        }
+        const readonlyModules = {};
+        for (const module of writableModules) {
+            for (const related of WORLD_RELATED_READONLY_MODULES_ACU[module] ?? []) {
+                if (writable.has(related) || readonlyModules[related])
+                    continue;
+                readonlyModules[related] = catalog[related];
+            }
+        }
+        if (Object.keys(readonlyModules).length) {
+            slice.relatedReadonly = readonlyModules;
+            slice.relatedHint = WORLD_RELATED_READONLY_HINT_ACU;
+        }
+        return slice;
+    }
+    function summarizeCandidatePatches_ACU(candidates) {
+        return candidates.map(candidate => {
+            const diff = {};
+            for (const [module, patch] of Object.entries(candidate.patch)) {
+                if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+                    diff[module] = 'updated';
+                    continue;
+                }
+                const record = patch;
+                if (Array.isArray(record.upsert))
+                    diff[module] = `upsert+${record.upsert.length}`;
+                else if (Array.isArray(record.append))
+                    diff[module] = `append+${record.append.length}`;
+                else if (module === 'chronicleArchive' && Array.isArray(record.overviewRows))
+                    diff[module] = `archive+${record.overviewRows.length}`;
+                else
+                    diff[module] = `keys:${Object.keys(record).join(',')}`;
+            }
+            return { candidateId: candidate.candidateId, agentName: candidate.agentName, summary: candidate.summary, diff };
+        });
+    }
+    function catalogArchiveHints_ACU(candidates, overview) {
+        const entries = candidates.flatMap(candidate => {
+            const chronicle = candidate.patch.chronicle;
+            if (!chronicle || typeof chronicle !== 'object' || Array.isArray(chronicle))
+                return [];
+            const append = chronicle.append;
+            return Array.isArray(append) ? append : [];
+        }).flatMap(item => typeof item?.summary === 'string' && typeof item.at === 'string'
+            ? [{ summary: item.summary, at: item.at, relatedIds: Array.isArray(item.relatedIds) ? item.relatedIds.filter((id) => typeof id === 'string') : [] }]
+            : []);
+        return buildArchiveHints_ACU(entries, overview);
     }
 
     const WORLD_SIMULATION_AGENT_NAMES_ACU = [
@@ -90918,6 +91422,59 @@ $CONTENT
         { name: 'guidance-composer', kind: 'specialist', description: '通读全量账本、锚点正文与玩家信息边界，决定哪些事实以何语态进入台面投影', triggers: ['投影相关字段变化后'], promptKey: 'guidance-composer', apiRole: 'guidance-composer', writableModules: ['guidance'] },
         { name: 'lore-researcher', kind: 'researcher', description: '补充外部公开设定资料支撑幕后推演，不写入世界账本', triggers: ['本地证据不足且允许外部研究'], promptKey: 'lore-researcher', apiRole: 'lore-researcher', writableModules: [] },
     ];
+    /**
+     * 角色的 provider 工具白名单。这里是最终 body.tools 的唯一策略来源；
+     * 普通角色不因共享 schema 获得 search，能写入账本的角色才获得 write_sql。
+     */
+    function worldSimulationAgentNativeTools_ACU(name) {
+        const definition = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name);
+        if (!definition)
+            throw new Error('WORLD_SIMULATION_AGENT_INVALID');
+        const tools = ['read'];
+        if (definition.kind === 'director' || definition.kind === 'researcher')
+            tools.push('search');
+        if (definition.writableModules.length)
+            tools.push('write_sql');
+        return tools;
+    }
+    /** 只接受完整的条目地址；目录提示与派工 reads 均不能提升角色权限。 */
+    function worldSimulationCanReadAddress_ACU(name, address) {
+        const definition = findWorldSimulationAgentDefinition_ACU(name);
+        if (!definition)
+            return false;
+        if (definition.kind === 'director' || definition.kind === 'researcher')
+            return true;
+        if (address === 'anchor:message')
+            return true;
+        if (name === 'causality-reviewer') {
+            return address === 'ledger:current' || address === 'candidates:current'
+                || address === 'stage-plan:current' || address === 'chronicle:current'
+                || /^(?:dimensions|seeds|actors|rumors|chronicle):[^:]+$/.test(address)
+                || /^field:(?:clock|dimensions|seeds|actors|player|rumors|chronicle|guidance):[^:]+(?::[^:]+)?$/.test(address);
+        }
+        if (definition.kind !== 'specialist')
+            return false;
+        if (name === 'guidance-composer') {
+            if (address === 'ledger:current' || address === 'player:current' || address === 'projection:preview')
+                return true;
+        }
+        if (name === 'chronicler' && /^chronicle-archive:[^:]+$/.test(address))
+            return true;
+        const modules = new Set(definition.writableModules);
+        for (const module of definition.writableModules) {
+            for (const related of WORLD_RELATED_READONLY_MODULES_ACU[module] ?? [])
+                modules.add(related);
+        }
+        if (name === 'guidance-composer') {
+            for (const module of ['clock', 'dimensions', 'seeds', 'actors', 'player', 'rumors', 'chronicle'])
+                modules.add(module);
+        }
+        const item = /^(dimensions|seeds|actors|rumors|chronicle):([^:]+)$/.exec(address);
+        if (item)
+            return modules.has(item[1]);
+        const field = /^field:([a-z]+):([^:]+)(?::([^:]+))?$/.exec(address);
+        return !!field && modules.has(field[1]);
+    }
     function findWorldSimulationAgentDefinition_ACU(name) {
         return WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name) ?? null;
     }
@@ -91112,14 +91669,15 @@ $CONTENT
         let next = content
             .replace('仅输出一个主动作 JSON：read、search、open_round、delegate、finalize 或 block。', 'read 与 search 使用函数调用，不要写成 JSON。决策只输出一个主动作 JSON：open_round、delegate、finalize 或 block。')
             .replace('read 只能包含 action、reads，reads 必须是非空地址数组；search 只能包含 action、query、scope、maxResults、isRegex。', '调用 read 时参数 reads 必须是非空地址数组；调用 search 时参数 query 必填，可选 scope、maxResults、isRegex。不要把 read 或 search 写成 JSON。')
+            .replace(`read 地址只能使用：${WORLD_SIMULATION_TOOL_ADDRESSES_ACU.join(' | ')}。目录中任一条目都可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}，归档总结如 chronicle-archive:{archiveRef}）。`, `read 地址只能使用：${formatWorldSimulationToolAddressHints_ACU()}。字段地址必须包含模块名和条目 ID，例如 field:dimensions:dim-a；不得使用 field:dimensions 这类裸模块地址。目录中任一条目都可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}，归档总结如 chronicle-archive:{archiveRef}）。`)
             .replace('合法示例：{"action":"read","reads":["ledger:current","summary:current"]}', '调阅示例：调用 read 函数，参数 {"reads":["ledger:current","summary:current"]}。')
             .replace('可先用 {"action":"write_sql","sql":"受限 DML","evidenceRefs":["已颁发引用"]} 即时提交职责模块。', '可先调用 write_sql 函数即时提交职责模块，参数 sql 为受限 DML，可选 evidenceRefs 为已颁发引用。')
             .replace('经 write_sql 提交缺栏', '调用 write_sql 函数提交缺栏')
-            .replace('目录中任一条目都可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}，逐栏状态如 field:seeds:{id} 或 field:seeds:{id}:title，归档总结如 chronicle-archive:{archiveRef}）。', '目录中任一条目都可通过调用 read 函数按地址调阅详细信息（在用条目如 seeds:{id}，逐栏状态如 field:seeds:{id} 或 field:seeds:{id}:title，归档总结如 chronicle-archive:{archiveRef}）。参数 reads 是地址数组。')
-            .replace('目录中任一条目都可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}，归档总结如 chronicle-archive:{archiveRef}）。', '目录中任一条目都可通过调用 read 函数按地址调阅详细信息（在用条目如 seeds:{id}，归档总结如 chronicle-archive:{archiveRef}）。参数 reads 是地址数组。');
+            .replace('目录中任一条目都可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}，逐栏状态必须使用 field:seeds:{id} 或 field:seeds:{id}:title，归档总结如 chronicle-archive:{archiveRef}；不得省略条目 ID）。', '目录中任一条目都可通过调用 read 函数按地址调阅详细信息（在用条目如 seeds:{id}，逐栏状态必须使用 field:seeds:{id} 或 field:seeds:{id}:title，归档总结如 chronicle-archive:{archiveRef}；不得省略条目 ID）。参数 reads 是地址数组。')
+            .replace('目录中任一条目都可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}，归档总结如 chronicle-archive:{archiveRef}）。', '目录中任一条目都可通过调用 read 函数按地址调阅详细信息（在用条目如 seeds:{id}，逐栏状态必须使用 field:seeds:{id} 或 field:seeds:{id}:title；归档总结如 chronicle-archive:{archiveRef}；不得省略 field 地址中的条目 ID）。参数 reads 是地址数组。');
         const boundary = '现在只执行当前任务。输出必须是协议要求的单个 JSON 对象，不附加 Markdown。';
         if (definition && definition.kind !== 'planner' && next.includes(boundary)) {
-            const tools = definition.kind !== 'director' && definition.writableModules.length ? 'read、search、write_sql' : 'read、search';
+            const tools = worldSimulationAgentNativeTools_ACU(name).join('、');
             const delivery = definition.kind === 'director' ? '决策输出' : '最终交付';
             next = next.replace(boundary, `现在只执行当前任务。${tools} 使用函数调用；${delivery}必须是协议要求的单个 JSON 对象，不附加 Markdown。`);
         }
@@ -91198,28 +91756,56 @@ $CONTENT
             seam('EXECUTION_BOUNDARY', '现在只执行当前任务。输出必须是协议要求的单个 JSON 对象，不附加 Markdown。'),
         ];
     }
+    /** V16 发布时的角色描述与授权；历史默认不能从持续演进的目录反推。 */
+    const V16_ROLE_DESCRIPTIONS_ACU = {
+        'dramatis-keeper': { description: '推演行动者信息边界、玩家位置接触与传闻的幕后演变', writable: ['actors', 'player', 'rumors'] },
+        chronicler: { description: '仅在事件完结或热层编年过长时记录幕后编年并提交归档，不是每轮常规角色', writable: ['chronicle'] },
+    };
     function buildV16WorldSimulationAgentPrompt_ACU(name) {
         return buildRolePrompt_ACU(name).map(segment => {
+            const historical = V16_ROLE_DESCRIPTIONS_ACU[name];
+            if (historical && segment.content.startsWith(worldSimulationSeamMarker_ACU('ROLE_RULES'))) {
+                const current = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name);
+                return { ...segment, content: segment.content.replace(current.description, historical.description)
+                        .replace(`写入范围：${current.writableModules.join(', ')}`, `写入范围：${historical.writable.join(', ')}`) };
+            }
             if (name === 'world-director' && segment.content.startsWith(worldSimulationSeamMarker_ACU('ROLE_RULES'))) {
                 return { ...segment, content: segment.content.replace('没有直接 ledger patch 权限', '没有直接 ledger 写入权限') };
             }
+            if (name === 'world-director' && segment.content.startsWith(worldSimulationSeamMarker_ACU('PROTOCOL'))) {
+                return { ...segment, content: segment.content.replace('dispatchChronicler 仅在你判断本轮发生必须立即编年的台面下重大事件时为 true；编年与传闻由固定工作流每轮保底派遣 chronicler 维护，不依赖你的判断。pendingFixes 非空时必须在 focus 中写明优先修复的模块。', 'dispatchChronicler 仅在事件完结或热层编年过长时为 true。pendingFixes 非空时必须在 focus 中写明优先修复的模块。') };
+            }
             if (segment.content.startsWith(worldSimulationSeamMarker_ACU('PROTOCOL')) && ['specialist', 'researcher'].includes(WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name).kind)) {
                 const definition = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name);
-                return { ...segment, content: `${worldSimulationSeamMarker_ACU('PROTOCOL')}\n${worldSimulationSpecialistProtocolInstruction_ACU(name, definition.writableModules, false, true)}` };
+                return { ...segment, content: `${worldSimulationSeamMarker_ACU('PROTOCOL')}\n${worldSimulationSpecialistProtocolInstruction_ACU(name, historical?.writable ?? definition.writableModules, false, true)}` };
             }
             if (!segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW')))
                 return { ...segment };
+            if (name === 'world-director')
+                return { ...segment, content: segment.content.replace(/工作流按固定顺序自治执行：.*?delegate 只用于/u, '工作流按固定顺序自治执行，中途不要再派 timekeeper、undercurrent-analyst、dramatis-keeper 或 guidance-composer。delegate 只用于') };
             if (name === 'dramatis-keeper') {
                 return {
                     ...segment,
-                    content: segment.content.replace('玩家位置按正文地标 upsert player', '玩家位置按正文地标 UPDATE player')
+                    content: segment.content.replace('只写入 actors、player。行动者细则', '只写入 actors、player、rumors。行动者细则')
+                        .replace('resources/constraints 写可调动资源与行动限制。空间纪律', 'resources/constraints 写可调动资源与行动限制。传闻细则：fact 是传闻内容本体，channels 是传播渠道（市井/商会/官府等），originDay 为事发日，earliestRevealDay 为玩家最早可能得知日且不得早于 originDay。空间纪律')
+                        .replace('NPC 死亡 = life:dead + diedAtDay + deathSummary。', 'NPC 死亡 = life:dead + diedAtDay + deathSummary + 同一候选伴生 rumor。')
+                        .replace('玩家位置按正文地标 upsert player', '玩家位置按正文地标 UPDATE player')
                         + '【幕后人物范围】以与当前剧情人物、地点、组织、暗流直接相关的世界书重要角色为候选：尚未在已发生正文登场的角色，可依据世界书条目与当前证据推演其幕后现状；已在已发生正文登场、但现已离开当前剧情场景的重要角色，也应继续推演其此刻的位置、目标、行动及信息边界。当前场景仍在场的角色不作为幕后角色重复推演。先核对锚点正文、已读历史与 actors/相关 seeds 目录；需要时用 worldbook scope 搜索并 read worldbook:entry:书名:uid 精读，或按证据定位并调阅旧记录。目录、世界书设定不能单独证明角色曾登场或已离场；无法核实时把缺口列入 uncertainties，不能虚构在场状态、行动或角色知识。候选须与当前剧情有可说明的关联，不能扩展为世界书全部人物。',
                 };
             }
-            if (name === 'chronicler')
-                return { ...segment, content: segment.content.replace('append 条目', 'INSERT 条目').replace('提交 chronicleArchive', '成对 INSERT chronicle_archive 与 chronicle_overview').replace('目录追加后超过 512 行必须自带 collapseRefs', '目录追加后超过 512 行须按归档规则折叠概览；不得只提交单侧归档写入') };
+            if (name === 'chronicler') {
+                // 冻结版先使用旧描述，再按当时的顺序逐次替换（String.replace 只改首个命中）。
+                const oldWorkflow = segment.content.replace(/只写入 chronicle、rumors，并可成对提交 chronicleArchive 与 chronicleOverview。编年只记录.*?证据不足时直接 no_change 并列缺失项，不要多轮内部 read。/u, '只写入 chronicle，并可提交 chronicleArchive。append 条目可省略 id/at。编年细则：summary 只记录幕后世界线的事实性事件（什么发生了、什么变了），不评价、不复述玩家对话；relatedIds 关联涉及的 seed/actor/rumor id。你不是每轮常规角色：仅当事件完结或热层编年过长时才产出候选。归档职责：热层编年过长或事件已完结时，提交 chronicleArchive 把完结事件归档为总结详情，并在概览目录登记一行（oneLine 句式：「第3日 · 北岭矿洞塌方，三人受伤」）；目录追加后超过 512 行必须自带 collapseRefs。证据不足时直接 no_change 并列缺失项，不要多轮内部 read。');
+                return { ...segment, content: oldWorkflow.replace('append 条目', 'INSERT 条目').replace('提交 chronicleArchive', '成对 INSERT chronicle_archive 与 chronicle_overview').replace('目录追加后超过 512 行必须自带 collapseRefs', '目录追加后超过 512 行须按归档规则折叠概览；不得只提交单侧归档写入') };
+            }
             return { ...segment };
         });
+    }
+    /** V15 导演默认词只与冻结 V16 的职责措辞不同；不能从当前工作流重建。 */
+    function buildV15WorldSimulationDirectorPrompt_ACU() {
+        return buildV16WorldSimulationAgentPrompt_ACU('world-director').map(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('ROLE_RULES'))
+            ? { ...segment, content: segment.content.replace('没有直接 ledger 写入权限', '没有直接 ledger patch 权限') }
+            : segment);
     }
     function v17WorldSimulationContent_ACU(name, segment) {
         if (name === 'world-director' && segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW')))
@@ -91419,7 +92005,7 @@ $CONTENT
             ...(WORLD_SIMULATION_PROMPT_V12_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V12_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V12_FINGERPRINTS_ACU[name] }] : []),
             ...(WORLD_SIMULATION_PROMPT_V13_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V13_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V13_FINGERPRINTS_ACU[name] }] : []),
             ...(WORLD_SIMULATION_PROMPT_V14_FINGERPRINTS_ACU[name] ? [{ version: WORLD_SIMULATION_PROMPT_VERSION_V14_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V14_FINGERPRINTS_ACU[name] }] : []),
-            { version: WORLD_SIMULATION_PROMPT_VERSION_V15_ACU, fingerprint: promptFingerprint_ACU(buildRolePrompt_ACU(name)) },
+            { version: WORLD_SIMULATION_PROMPT_VERSION_V15_ACU, fingerprint: promptFingerprint_ACU(name === 'world-director' ? buildV15WorldSimulationDirectorPrompt_ACU() : buildRolePrompt_ACU(name)) },
             { version: WORLD_SIMULATION_PROMPT_VERSION_V16_ACU, fingerprint: WORLD_SIMULATION_PROMPT_V16_FINGERPRINTS_ACU[name] },
             { version: WORLD_SIMULATION_PROMPT_VERSION_V17_ACU, fingerprint: promptFingerprint_ACU(buildV17WorldSimulationAgentPrompt_ACU(name)) },
             { version: WORLD_SIMULATION_PROMPT_VERSION_V18_ACU, fingerprint: promptFingerprint_ACU(buildV18WorldSimulationAgentPrompt_ACU(name)) },
@@ -91444,7 +92030,7 @@ $CONTENT
                 migrated[name] = defaults[name];
                 continue;
             }
-            const v15 = buildRolePrompt_ACU(name);
+            const v15 = name === 'world-director' ? buildV15WorldSimulationDirectorPrompt_ACU() : buildRolePrompt_ACU(name);
             const v16 = WORLD_SIMULATION_PROMPT_V16_SEGMENTS_ACU[name];
             const v17 = WORLD_SIMULATION_PROMPT_V17_SEGMENTS_ACU[name];
             const v18 = WORLD_SIMULATION_PROMPT_V18_SEGMENTS_ACU[name];
@@ -91491,7 +92077,7 @@ $CONTENT
             agentHistoryTokenBudget: 120000,
             agentReadTokenBudget: '20%',
             agentReadFallbackTokens: 6000,
-            agentRunBudget: { maxIterations: 6, maxDelegations: 12, maxSameAgent: 4, maxConcurrent: 5, maxReads: 24, maxExtraReads: 1 },
+            agentRunBudget: { maxIterations: 4, maxDelegations: 6, maxSameAgent: 4, maxConcurrent: 5, maxReads: 24, maxExtraReads: 1 },
             webResearch: { enabled: false, sources: { moegirl: true, wikipediaZh: true, wikipediaEn: false }, searchProvider: 'duckduckgo', searxngBaseUrl: '', pageCharLimit: 4000, blockedDomains: '' },
             apiPresetMode: 'current',
             fixedApiPresetName: '',
@@ -93928,9 +94514,7 @@ $CONTENT
             }
             catch { /* 用量回调异常不允许影响调用主流程。 */ }
         };
-        const presetMaxTokens = resolved.apiConfig.max_tokens ?? resolved.apiConfig.maxTokens ?? 4096;
-        const floor = Number.isFinite(extras?.minOutputTokens) ? Math.max(0, Math.trunc(extras.minOutputTokens)) : 0;
-        const maxTokens = Math.max(presetMaxTokens, floor);
+        const maxTokens = resolveRequestMaxTokens_ACU(resolved.apiConfig, extras?.minOutputTokens);
         if (resolved.apiMode === 'tavern') {
             if (!resolved.tavernProfile)
                 throw new Error('该预设为酒馆连接模式但未选择连接预设。');
@@ -93994,10 +94578,15 @@ $CONTENT
             }
             catch { /* 用量回调异常不允许影响调用主流程。 */ }
         };
-        const presetMaxTokens = resolved.apiConfig.max_tokens ?? resolved.apiConfig.maxTokens ?? 4096;
-        const floor = Number.isFinite(extras?.minOutputTokens) ? Math.max(0, Math.trunc(extras.minOutputTokens)) : 0;
-        const maxTokens = Math.max(presetMaxTokens, floor);
+        const maxTokens = resolveRequestMaxTokens_ACU(resolved.apiConfig, extras?.minOutputTokens);
+        // 历史里的 tool_calls / tool 回执即使本次未挂 tools，也要求通道原样保留原生协议。
+        const hasNativeToolTraffic = Boolean(extras?.tools?.length)
+            || messages.some(message => message && typeof message === 'object' && (message.role === 'tool' || message.tool_calls));
         if (resolved.apiMode === 'tavern') {
+            // ConnectionManagerRequestService.sendRequest only accepts profile, messages and maxTokens.
+            // Silently dropping tools would make the role's advertised native-tool contract unobservable.
+            if (hasNativeToolTraffic)
+                throw new Error('酒馆连接管理器不支持原生工具调用及回执；请为 Agent 选择支持原生工具的自定义 API。');
             if (!resolved.tavernProfile)
                 throw new Error('该预设为酒馆连接模式但未选择连接预设。');
             const response = await sendConnectionManagerRequestWithProfileSwitch_ACU(resolved.tavernProfile, messages, maxTokens);
@@ -94007,10 +94596,14 @@ $CONTENT
             return parsed.turn.content || parsed.turn.toolCalls.length ? parsed.turn : { content: typeof response?.content === 'string' ? response.content : '', toolCalls: [] };
         }
         if (resolved.apiConfig.useMainApi) {
+            // generateRaw returns text, not a structured tool-call response. A tools-enabled
+            // agent cannot complete its native function exchange on this channel.
+            if (hasNativeToolTraffic)
+                throw new Error('酒馆主 API 无法保证原生工具调用及回执；请为 Agent 选择支持原生工具的独立自定义 API。');
             lifecycle?.beforeMainApiCall?.();
             let operation;
             try {
-                operation = generateRaw_ACU({ ordered_prompts: messages, should_stream: settings_ACU.streamingEnabled || false, max_tokens: maxTokens, ...(extras?.tools?.length ? { tools: extras.tools, tool_choice: 'auto' } : {}) });
+                operation = generateRaw_ACU({ ordered_prompts: messages, should_stream: settings_ACU.streamingEnabled || false, max_tokens: maxTokens });
             }
             finally {
                 lifecycle?.afterMainApiCall?.();
@@ -148174,7 +148767,7 @@ Expected function or array of functions, received type ${typeof value}.`
     }
     /**
      * 计算某个角色的生效渠道模式：inherit 回落到全局 apiPresetMode。
-     * 波次并发规则据此判定是否需要串行（current 模式走主 API，不支持并发内部请求）。
+     * 波次并发规则不再据此判定串行：并发门禁以解析后的真实渠道为准（酒馆连接或主 API 才串行）。
      * @param settings 续写设置
      * @param role 渠道角色
      * @returns 'current' 或 'fixed'
@@ -149041,6 +149634,34 @@ Expected function or array of functions, received type ${typeof value}.`
             return [];
         return value.map(readText_ACU).filter(Boolean);
     }
+    function parseAgentReadFence_ACU(value) {
+        if (!isRecord_ACU$g(value))
+            failProtocol_ACU('read.requestedFence 必须是对象');
+        if (Object.keys(value).some(key => key !== 'lower' && key !== 'upper')) {
+            failProtocol_ACU('read.requestedFence 只允许 lower / upper');
+        }
+        const readBoundary_ACU = (key) => {
+            if (!Object.prototype.hasOwnProperty.call(value, key))
+                return undefined;
+            const boundary = value[key];
+            if (typeof boundary === 'number' && Number.isSafeInteger(boundary))
+                return boundary;
+            if (typeof boundary === 'string' && boundary.trim())
+                return boundary.trim();
+            failProtocol_ACU(`read.requestedFence.${key} 必须是非空字符串或安全整数`);
+        };
+        const lower = readBoundary_ACU('lower');
+        const upper = readBoundary_ACU('upper');
+        if (lower === undefined && upper === undefined)
+            failProtocol_ACU('read.requestedFence 至少需要 lower 或 upper');
+        if (typeof lower === 'number' && typeof upper === 'number' && lower > upper) {
+            failProtocol_ACU('read.requestedFence 的 lower 不能大于 upper');
+        }
+        return {
+            ...(lower === undefined ? {} : { lower }),
+            ...(upper === undefined ? {} : { upper }),
+        };
+    }
     /** 单次解析里最多扫描的顶层配平对象数，防止超长返回里的花括号碎片拖垮解析。 */
     const JSON_OBJECT_SCAN_LIMIT_ACU = 6;
     function balancedObjectFrom_ACU(text, start) {
@@ -149251,7 +149872,12 @@ Expected function or array of functions, received type ${typeof value}.`
                 failProtocol_ACU('read 动作必须提供非空的 reads 数组（资料地址列表）');
             if (reads.length > READ_ADDRESS_LIMIT_ACU)
                 failProtocol_ACU(`一次 read 最多 ${READ_ADDRESS_LIMIT_ACU} 个地址；请拆成多次或先用 search 缩小范围`);
-            return { kind: 'read', reads: [...new Set(reads)] };
+            const requestedFence = payload.requestedFence === undefined ? undefined : parseAgentReadFence_ACU(payload.requestedFence);
+            return {
+                kind: 'read',
+                reads: [...new Set(reads)],
+                ...(requestedFence === undefined ? {} : { requestedFence }),
+            };
         }
         if (action === 'search') {
             const query = readText_ACU(payload.query);
@@ -150915,18 +151541,15 @@ Expected function or array of functions, received type ${typeof value}.`
             return true;
         return list.some(item => String(item) === uid);
     }
-    /**
-     * 条目 token 数的跨运行缓存。键含内容长度：同一条目被编辑后长度几乎必变，
-     * 变了即重算；极小概率的等长改写只影响预算估算精度，不影响正确性。
-     */
+    /** 条目 token 数跨运行缓存；等长改写也必须重新计量，不能误用过期的容量估算。 */
     const entryTokenCache_ACU = new Map();
     async function countEntryTokens_ACU(bookName, uid, content) {
-        const key = `${bookName}#${uid}#${content.length}`;
+        const key = JSON.stringify([bookName, uid]);
         const cached = entryTokenCache_ACU.get(key);
-        if (cached !== undefined)
-            return cached;
+        if (cached?.content === content)
+            return cached.tokens;
         const counted = await countAgentTokens_ACU(content);
-        entryTokenCache_ACU.set(key, counted);
+        entryTokenCache_ACU.set(key, { content, tokens: counted });
         return counted;
     }
     /**
@@ -150955,11 +151578,11 @@ Expected function or array of functions, received type ${typeof value}.`
                         continue;
                     const uid = String(raw.uid ?? '').trim();
                     const title = normalizeGeneratedComment_ACU(raw, isolationPrefix);
-                    const content = String(raw.content ?? '').trim();
+                    const content = typeof raw.content === 'string' ? raw.content : '';
                     // 纪要另由快照显示，不在世界书资料域重复暴露。
                     if (isSummaryEntryComment_ACU(title))
                         continue;
-                    if (!uid || !content)
+                    if (!uid || !content.trim())
                         continue;
                     if (!isEntrySelected_ACU(bookName, uid, enabledEntriesMap))
                         continue;
@@ -151078,7 +151701,7 @@ Expected function or array of functions, received type ${typeof value}.`
     }
     /** 总纲与大纲看到的是目录，由它们自己决定读哪一条。 */
     const WORLDBOOK_BROWSE_NOTE_ACU = '这是全部已启用世界书条目的目录，不是命中清单，没有注入条目全文。需要哪一条就按行尾地址 read。也可以用 search，scope 设为 ["worldbook"]，按关键词在世界书域里检索。';
-    const WORLDBOOK_TRIGGERED_NOTE_ACU = '以下是本轮按与剧情推进、填表相同的规则触发的世界书条目全文：常量条目直接纳入；关键词条目会迭代触发，已触发条目的正文可以继续带出别的关键词条目。已注入的条目不必重复 read；需要未命中内容时用 search，scope 设为 ["worldbook"]，按返回地址精读。';
+    const WORLDBOOK_TRIGGERED_NOTE_ACU = '以下是本轮按与剧情推进、填表相同的规则触发的世界书条目全文：常量条目直接纳入；关键词条目会迭代触发，已触发条目的正文可以继续带出别的关键词条目。已注入的条目不必重复 read；未命中的内容仅能通过当前角色已授权的资料目录和工具获取，无法核实时须说明缺口。';
     /** 总纲、大纲使用的已启用目录。不附带命中条目全文。 */
     function renderAgentWorldbookBrowseCatalog_ACU(snapshot) {
         return `${WORLDBOOK_BROWSE_NOTE_ACU}\n${renderAgentWorldbookCatalog_ACU(snapshot)}`;
@@ -151661,6 +152284,13 @@ Expected function or array of functions, received type ${typeof value}.`
         const rangeCandidate = lastColon >= 0 ? parseRowRange_ACU(body.slice(lastColon + 1)) : null;
         const name = rangeCandidate ? body.slice(0, lastColon).trim() : body;
         const title = rangeCandidate ? `表格「${name}」第 ${rangeCandidate.start}-${rangeCandidate.end} 行` : `表格「${name}」`;
+        const sheets = findAgentSheetsByAliases_ACU([name], context.tableData);
+        if (!name || sheets.length !== 1)
+            return { title, text: `表格地址「${token}」无法唯一定位已加载的表格，请核对表格目录。`, status: 'failed' };
+        if (rangeCandidate && (!Number.isSafeInteger(rangeCandidate.start) || !Number.isSafeInteger(rangeCandidate.end)
+            || rangeCandidate.start < 1 || rangeCandidate.end < rangeCandidate.start || rangeCandidate.end > sheets[0].rows.length)) {
+            return { title, text: `表格地址「${token}」行区间无效或超出表格范围（共 ${sheets[0].rows.length} 行），请修正后重读。`, status: 'failed' };
+        }
         return { title, text: renderAgentTableByName_ACU(name, context.tableData, rangeCandidate ?? undefined) };
     }
     function resolveWorldbookToken_ACU(token, context) {
@@ -151668,10 +152298,15 @@ Expected function or array of functions, received type ${typeof value}.`
         const body = token.slice(AGENT_WORLDBOOK_TOKEN_PREFIX_ACU.length);
         const lastColon = body.lastIndexOf(':');
         if (lastColon <= 0) {
-            return { title: '世界书条目', text: '世界书读取地址不完整：写法为 $WORLDBOOK:书名:uid（逗号分隔多个 uid），地址请从世界书目录复制。' };
+            return { title: '世界书条目', text: '世界书读取地址不完整：写法为 $WORLDBOOK:书名:uid（逗号分隔多个 uid），地址请从世界书目录复制。', status: 'failed' };
         }
         const bookName = body.slice(0, lastColon).trim();
-        const uids = body.slice(lastColon + 1).split(/[,，]/).map(uid => uid.trim()).filter(Boolean);
+        const uids = body.slice(lastColon + 1).split(/[,，]/).map(uid => uid.trim());
+        if (!worldbook.available)
+            return { title: '世界书条目', text: '世界书快照读取失败，不得将其视为没有条目。', status: 'failed' };
+        if (!bookName || uids.some(uid => !uid || !worldbook.entries.some(entry => entry.bookName === bookName && entry.uid === uid))) {
+            return { title: '世界书条目', text: `世界书地址「${token}」未能完整匹配已启用条目，请从世界书目录核对书名与 uid。`, status: 'failed' };
+        }
         return { title: `世界书「${bookName}」条目 ${uids.join('、')}`, text: renderAgentWorldbookEntries_ACU(worldbook, bookName, uids) };
     }
     /**
@@ -151697,21 +152332,31 @@ Expected function or array of functions, received type ${typeof value}.`
         if (normalized.startsWith(AGENT_STORY_RANGE_TOKEN_PREFIX_ACU)) {
             const body = normalized.slice(AGENT_STORY_RANGE_TOKEN_PREFIX_ACU.length).trim();
             const matched = /^(\d+)-(\d+)$/.exec(body);
+            const start = matched ? Number(matched[1]) : NaN;
+            const end = matched ? Number(matched[2]) : NaN;
+            const invalidSyntax = !matched || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end;
+            const floors = Number.isSafeInteger(start) && Number.isSafeInteger(end) && start <= end
+                ? listAgentStoryWindowFloors_ACU(context) : [];
+            const valid = floors.length > 0 && start >= floors[0].index && end <= floors[floors.length - 1].index
+                && floors.some(floor => floor.index >= start && floor.index <= end);
             return {
                 title: matched ? `正文楼层 ${matched[1]}-${matched[2]}` : '正文楼层区间',
-                text: matched
-                    ? renderAgentStoryRange_ACU(context, matched[1], matched[2])
-                    : `楼层区间「${normalized}」不合法：写法为 $STORY_RANGE:起始楼-结束楼。可用楼层见正文目录。`,
+                text: invalidSyntax
+                    ? `楼层区间「${normalized}」不合法：写法为 $STORY_RANGE:起始楼-结束楼（两端都是楼层号，起始不大于结束）。可用楼层见正文目录。`
+                    : valid
+                        ? renderAgentStoryRange_ACU(context, matched[1], matched[2])
+                        : `楼层区间「${normalized}」不可完整读取：写法为 $STORY_RANGE:起始楼-结束楼，范围必须落在当前正文可读窗口内。可用楼层见正文目录；更早的剧情脉络请查看事件概览或用 $TABLE:纪要表:行区间 精读。`,
+                ...(!valid ? { status: 'failed' } : {}),
             };
         }
         if (normalized.startsWith('$FIELD:')) {
             const match = /^\$FIELD:(storyArc|hooks|infoGap|chronology|webRefs|constraints):([^:]+)(?::([^:]+))?$/.exec(normalized);
             if (!match)
-                return { title: '资料栏目', text: '栏目地址非法：$FIELD:模块:ID[:栏目]。' };
+                return { title: '资料栏目', text: '栏目地址非法：$FIELD:模块:ID[:栏目]。', status: 'failed' };
             const [, moduleName, id, field] = match;
             const module = moduleName;
             if (field && !AGENT_MODULE_FIELD_MATRIX_ACU[module].fields.includes(field))
-                return { title: '资料栏目', text: `栏目 ${module}.${field} 不在受控字段矩阵中。` };
+                return { title: '资料栏目', text: `栏目 ${module}.${field} 不在受控字段矩阵中。`, status: 'failed' };
             const folded = readAgentModuleFoldState_ACU(context.chat);
             if (folded.salvaged || folded.candidates.some(item => !item.valid))
                 return { title: '资料栏目读取失败', text: '资料帧校验失败；不得将损坏数据解释为空状态。', status: 'failed' };
@@ -151769,8 +152414,180 @@ Expected function or array of functions, received type ${typeof value}.`
             case '$TABLE_GLOBAL': return { title, text: renderAgentTableByAliases_ACU('global', context.tableData) };
             case '$TABLE_CHARACTERS': return { title, text: renderAgentTableByAliases_ACU('characters', context.tableData) };
             case '$TABLE_CHRONICLES': return { title, text: renderAgentTableByAliases_ACU('chronicles', context.tableData) };
-            default: return { title, text: `占位符 ${normalized || '(空)'} 不是可读资料接口，本次没有为你提供任何内容。请从各资料目录里复制读取地址。` };
+            default: return { title, text: `占位符 ${normalized || '(空)'} 不是可读资料接口，本次没有为你提供任何内容。请从各资料目录里复制读取地址。`, status: 'failed' };
         }
+    }
+    function fingerprintAgentReadText_ACU(text) {
+        let hash = 2166136261;
+        for (let index = 0; index < text.length; index += 1) {
+            hash ^= text.charCodeAt(index);
+            hash = Math.imul(hash, 16777619);
+        }
+        return `fnv1a:${(hash >>> 0).toString(16).padStart(8, '0')}`;
+    }
+    function readModuleRevisionKey_ACU(token) {
+        if (token.startsWith('$STORY_ARC') || token.startsWith('$FIELD:storyArc:'))
+            return 'storyArc';
+        if (token.startsWith('$HOOKS_LEDGER') || token.startsWith('$FIELD:hooks:'))
+            return 'hooks';
+        if (token.startsWith('$INFO_GAP') || token.startsWith('$FIELD:infoGap:'))
+            return 'infoGap';
+        if (token.startsWith('$ACTIVE_CONSTRAINTS') || token.startsWith('$FIELD:constraints:'))
+            return 'constraints';
+        if (token.startsWith('$CHRONOLOGY') || token.startsWith('$FIELD:chronology:'))
+            return 'chronology';
+        if (token.startsWith('$WEB_REFS') || token.startsWith('$FIELD:webRefs:'))
+            return 'webRefs';
+        if (token === '$USER_REQUIREMENTS')
+            return 'userRequirements';
+        return null;
+    }
+    function resolvedFenceForReadToken_ACU(token, context) {
+        const storyRange = token.startsWith(AGENT_STORY_RANGE_TOKEN_PREFIX_ACU)
+            ? /^(\d+)-(\d+)$/.exec(token.slice(AGENT_STORY_RANGE_TOKEN_PREFIX_ACU.length).trim())
+            : null;
+        if (storyRange)
+            return { lower: Number(storyRange[1]), upper: Number(storyRange[2]) };
+        if (token.startsWith(AGENT_TABLE_TOKEN_PREFIX_ACU)) {
+            const body = token.slice(AGENT_TABLE_TOKEN_PREFIX_ACU.length).trim();
+            const lastColon = body.lastIndexOf(':');
+            const range = lastColon >= 0 ? parseRowRange_ACU(body.slice(lastColon + 1)) : null;
+            const name = range ? body.slice(0, lastColon).trim() : body;
+            const sheets = findAgentSheetsByAliases_ACU([name], context.tableData);
+            if (sheets.length === 1) {
+                return range
+                    ? { lower: range.start, upper: range.end }
+                    : sheets[0].rows.length ? { lower: 1, upper: sheets[0].rows.length } : { lower: 0, upper: 0 };
+            }
+        }
+        if (token.startsWith(AGENT_WORLDBOOK_TOKEN_PREFIX_ACU)) {
+            const body = token.slice(AGENT_WORLDBOOK_TOKEN_PREFIX_ACU.length);
+            const lastColon = body.lastIndexOf(':');
+            const uids = lastColon > 0 ? body.slice(lastColon + 1).split(/[,，]/).map(uid => uid.trim()).filter(Boolean) : [];
+            if (uids.length)
+                return { lower: uids[0], upper: uids[uids.length - 1] };
+        }
+        for (const prefix of ['$STORY_ARC', '$HOOKS_LEDGER', '$INFO_GAP', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY', '$WEB_REFS']) {
+            const ids = splitIdSuffix_ACU(token, prefix);
+            if (ids !== null)
+                return ids.length ? { lower: ids[0], upper: ids[ids.length - 1] } : { lower: '*', upper: '*' };
+        }
+        return { lower: token, upper: token };
+    }
+    function fenceContains_ACU(resolved, requested) {
+        if (!requested)
+            return true;
+        const compare = (actual, boundary, lower) => {
+            if (typeof actual !== typeof boundary)
+                return false;
+            if (typeof actual === 'number' && typeof boundary === 'number')
+                return lower ? actual >= boundary : actual <= boundary;
+            if (actual === '*' || boundary === '*')
+                return actual === boundary;
+            const result = String(actual).localeCompare(String(boundary));
+            return lower ? result >= 0 : result <= 0;
+        };
+        if (requested.lower !== undefined && (resolved.lower === undefined || !compare(resolved.lower, requested.lower, true)))
+            return false;
+        if (requested.upper !== undefined && (resolved.upper === undefined || !compare(resolved.upper, requested.upper, false)))
+            return false;
+        return true;
+    }
+    /**
+     * 解析资料并附带可回溯的围栏证明。旧调用方继续使用 resolveAgentReadToken_ACU；
+     * 原生 read 运行时必须使用本函数，不能把“已解析正文”冒充成 proof。
+     */
+    function resolveAgentReadTokenWithProof_ACU(token, context, requestedFence) {
+        const resolved = resolveAgentReadToken_ACU(token, context);
+        if (resolved.status === 'failed')
+            return resolved;
+        const stableAddress = String(token ?? '').trim();
+        const resolvedFence = resolvedFenceForReadToken_ACU(stableAddress, context);
+        const completeWithinFence = fenceContains_ACU(resolvedFence, requestedFence);
+        const revisionKey = readModuleRevisionKey_ACU(stableAddress);
+        const revision = revisionKey
+            ? context.moduleSnapshot.revisions[revisionKey]
+            : fingerprintAgentReadText_ACU(resolved.text);
+        const proof = {
+            ...(requestedFence === undefined ? {} : { requestedFence }),
+            resolvedFence,
+            stableAddress,
+            revision,
+            completeWithinFence,
+        };
+        if (!completeWithinFence) {
+            return {
+                title: resolved.title,
+                text: `读取地址「${stableAddress}」的实际范围超出 requestedFence，已拒绝注入。`,
+                status: 'failed',
+                proof,
+            };
+        }
+        return { ...resolved, proof };
+    }
+    /**
+     * 把读取地址映射成整数坐标轴，供 60% 默认上围栏在地址自身坐标系内解析子范围。
+     * 楼层区间与表格行区间是连续整数坐标；世界书 uid 与模块 ID 是字符串坐标，按列表位置映射为长度上界——
+     * token 预算只决定取前几项，从不写进字符串坐标本身。整模块、字段帧和固定资料没有可证明的子范围，
+     * 只有一个坐标点的地址也无可收窄，二者都返回 null（原子地址）。
+     */
+    function resolveAgentReadAddressAxis_ACU(token, context) {
+        const normalized = String(token ?? '').trim();
+        if (normalized.startsWith(AGENT_STORY_RANGE_TOKEN_PREFIX_ACU)) {
+            const matched = /^(\d+)-(\d+)$/.exec(normalized.slice(AGENT_STORY_RANGE_TOKEN_PREFIX_ACU.length).trim());
+            if (!matched)
+                return null;
+            const start = Number(matched[1]);
+            const end = Number(matched[2]);
+            const hit = listAgentStoryWindowFloors_ACU(context).filter(floor => floor.index >= start && floor.index <= end);
+            return hit.length > 1 ? {
+                length: hit.length,
+                addressAt: index => `${AGENT_STORY_RANGE_TOKEN_PREFIX_ACU}${start}-${hit[index].index}`,
+                remainderAfter: index => (index + 1 < hit.length ? `${AGENT_STORY_RANGE_TOKEN_PREFIX_ACU}${hit[index + 1].index}-${end}` : null),
+            } : null;
+        }
+        if (normalized.startsWith(AGENT_TABLE_TOKEN_PREFIX_ACU)) {
+            const body = normalized.slice(AGENT_TABLE_TOKEN_PREFIX_ACU.length).trim();
+            const lastColon = body.lastIndexOf(':');
+            const range = lastColon >= 0 ? parseRowRange_ACU(body.slice(lastColon + 1)) : null;
+            const name = range ? body.slice(0, lastColon).trim() : body;
+            const sheets = name ? findAgentSheetsByAliases_ACU([name], context.tableData) : [];
+            if (sheets.length !== 1)
+                return null;
+            const start = range?.start ?? 1;
+            const end = range?.end ?? sheets[0].rows.length;
+            return end > start ? {
+                length: end - start + 1,
+                addressAt: index => `${AGENT_TABLE_TOKEN_PREFIX_ACU}${name}:${start}-${start + index}`,
+                remainderAfter: index => (start + index < end ? `${AGENT_TABLE_TOKEN_PREFIX_ACU}${name}:${start + index + 1}-${end}` : null),
+            } : null;
+        }
+        if (normalized.startsWith(AGENT_WORLDBOOK_TOKEN_PREFIX_ACU)) {
+            const body = normalized.slice(AGENT_WORLDBOOK_TOKEN_PREFIX_ACU.length);
+            const lastColon = body.lastIndexOf(':');
+            if (lastColon <= 0)
+                return null;
+            const bookName = body.slice(0, lastColon).trim();
+            const uids = body.slice(lastColon + 1).split(/[,，]/).map(uid => uid.trim());
+            return uids.length > 1 && uids.every(Boolean)
+                ? {
+                    length: uids.length,
+                    addressAt: index => `${AGENT_WORLDBOOK_TOKEN_PREFIX_ACU}${bookName}:${uids.slice(0, index + 1).join(',')}`,
+                    remainderAfter: index => (index + 1 < uids.length ? `${AGENT_WORLDBOOK_TOKEN_PREFIX_ACU}${bookName}:${uids.slice(index + 1).join(',')}` : null),
+                }
+                : null;
+        }
+        for (const prefix of ['$STORY_ARC', '$HOOKS_LEDGER', '$INFO_GAP', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY', '$WEB_REFS']) {
+            const ids = splitIdSuffix_ACU(normalized, prefix);
+            if (ids !== null) {
+                return ids.length > 1 ? {
+                    length: ids.length,
+                    addressAt: index => `${prefix}:${ids.slice(0, index + 1).join(',')}`,
+                    remainderAfter: index => (index + 1 < ids.length ? `${prefix}:${ids.slice(index + 1).join(',')}` : null),
+                } : null;
+            }
+        }
+        return null;
     }
     /**
      * 把一批读集 token 渲染成一整块注入材料。
@@ -154547,10 +155364,66 @@ Expected function or array of functions, received type ${typeof value}.`
      * service/continuation/agent/agent-catalog.ts — 子代理能力目录与资料模块目录
      *
      * 主 Agent 只看到摘要：代理能做什么、何时该用、职责固定写什么。
-     * 读集不再有授权概念——所有资料域对主/子代理开放，读多少由 token 门禁管，
-     * 因此定义里没有 allowedReads/allowedWrites；写入范围由职责（kind）固定推得。
+     * 子代理种子与工具调阅遵守角色 profile；主 Agent 保留自身的读取权限。
+     * 写入范围由职责（kind）固定推得，读写均须通过运行时校验。
      * 子代理的完整系统提示词不暴露给主 Agent，避免主 Agent 被无关细节淹没。
      */
+    const AGENT_SUBAGENT_ACCESS_PROFILES_ACU = {
+        arc: {
+            snapshotTokens: ['$STORY_ARC', '$OUTLINE_WINDOW', '$STORY_TAIL', '$STORY_OVERVIEW', '$WORLDBOOK_CATALOG', '$USER_REQUIREMENTS'],
+            readPrefixes: ['$STORY_ARC', '$STORY_RANGE', '$TABLE', '$WORLDBOOK'],
+            tools: ['read', 'search'],
+            allowSearch: true,
+        },
+        maintain: {
+            snapshotTokens: ['$HISTORY_UNSETTLED', '$HOOKS_LEDGER', '$INFO_GAP', '$CHRONOLOGY', '$USER_REQUIREMENTS'],
+            readPrefixes: ['$HISTORY_UNSETTLED', '$STORY_RANGE', '$TABLE'],
+            tools: ['read'],
+            allowSearch: false,
+        },
+        plan: {
+            snapshotTokens: ['$OUTLINE_WINDOW', '$STORY_TAIL', '$STORY_OVERVIEW', '$STORY_ARC', '$HOOKS_LEDGER', '$INFO_GAP', '$USER_REQUIREMENTS'],
+            readPrefixes: ['$OUTLINE_WINDOW', '$HISTORY_UNSETTLED', '$STORY_RANGE', '$TABLE', '$STORY_ARC', '$HOOKS_LEDGER', '$INFO_GAP', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY', '$WORLDBOOK'],
+            tools: ['read'],
+            allowSearch: false,
+        },
+        review: {
+            snapshotTokens: ['$OUTLINE_WINDOW', '$STORY_TAIL', '$STORY_ARC', '$HOOKS_LEDGER', '$ACTIVE_CONSTRAINTS', '$WORLDBOOK_HITS', '$USER_REQUIREMENTS'],
+            readPrefixes: ['$OUTLINE_WINDOW', '$STORY_RANGE', '$TABLE', '$STORY_ARC', '$FIELD:storyArc', '$HOOKS_LEDGER', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY', '$WEB_REFS', '$WORLDBOOK'],
+            tools: ['read'],
+            allowSearch: false,
+        },
+        research: {
+            snapshotTokens: ['$WEB_REFS', '$WEB_TOOL_CATALOG', '$STORY_TAIL', '$TABLE_CATALOG', '$USER_REQUIREMENTS'],
+            readPrefixes: ['$STORY_RANGE', '$TABLE', '$STORY_ARC', '$HOOKS_LEDGER', '$INFO_GAP', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY', '$WEB_REFS', '$WORLDBOOK'],
+            tools: ['read', 'search', 'encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read'],
+            allowSearch: true,
+        },
+        compose: {
+            snapshotTokens: ['$OUTLINE_WINDOW', '$STORY_ARC', '$STORY_TAIL', '$HOOKS_LEDGER', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY', '$USER_REQUIREMENTS'],
+            readPrefixes: [],
+            tools: [],
+            allowSearch: false,
+        },
+    };
+    const AGENT_MODULE_READ_PREFIXES_ACU = {
+        storyArc: ['$STORY_ARC', '$FIELD:storyArc'],
+        hooks: ['$HOOKS_LEDGER', '$FIELD:hooks'],
+        infoGap: ['$INFO_GAP', '$FIELD:infoGap'],
+        chronology: ['$CHRONOLOGY', '$FIELD:chronology'],
+        constraints: ['$ACTIVE_CONSTRAINTS', '$FIELD:constraints'],
+        webRefs: ['$WEB_REFS', '$FIELD:webRefs'],
+        userRequirements: ['$USER_REQUIREMENTS'],
+    };
+    function getAgentSubagentAccessProfile_ACU(kind) {
+        return AGENT_SUBAGENT_ACCESS_PROFILES_ACU[kind];
+    }
+    function getAgentSubagentReadPrefixes_ACU(kind, writes) {
+        return [...new Set([
+                ...AGENT_SUBAGENT_ACCESS_PROFILES_ACU[kind].readPrefixes,
+                ...writes.flatMap(module => AGENT_MODULE_READ_PREFIXES_ACU[module]),
+            ])];
+    }
     /**
      * 终审只允许由 finalize 前的受控运行时入口调用，绝不能出现在主 Agent 的 delegate 目录中。
      */
@@ -154687,8 +155560,8 @@ Expected function or array of functions, received type ${typeof value}.`
             `  职责: ${definition.description}`,
             `  适用时机: ${definition.triggers.join('；')}`,
             definition.kind === 'research'
-                ? '  读取: 除本地资料外还能出网（百科 API、搜索引擎、网页抓取）；派工 prompt 写清要查的作品、人物或设定名，reads 可留空'
-                : '  读取: 全部资料域开放；派工时用 reads 给出种子地址，它还能自己 read/search 补充调阅',
+                ? '  读取: 按角色 profile 调阅本地资料，并能出网（百科 API、搜索引擎、网页抓取）；派工 prompt 写清要查的作品、人物或设定名，reads 可留空'
+                : `  读取: 仅限角色 profile 的自有/强相关地址；派工时用 reads 给出种子地址${getAgentSubagentAccessProfile_ACU(definition.kind).allowSearch ? '，并可用 search 定位' : '，不提供 search 工具'}`,
             `  写入: ${KIND_WRITE_LABELS_ACU[definition.kind]}`,
         ].join('\n'));
         return blocks.join('\n');
@@ -154805,16 +155678,23 @@ Expected function or array of functions, received type ${typeof value}.`
             ...[...latest.values()].map(({ address, text }) => `【调阅项 ${JSON.stringify(address)} ${text.length}】\n${text}`),
         ].join('\n\n');
     }
-    const KIND_RELATED_TOKENS_ACU = {
-        arc: ['$STORY_ARC', '$OUTLINE_WINDOW', '$STORY_TAIL', '$STORY_OVERVIEW', '$WORLDBOOK_CATALOG', '$USER_REQUIREMENTS'],
-        maintain: ['$HISTORY_UNSETTLED', '$HOOKS_LEDGER', '$INFO_GAP', '$CHRONOLOGY', '$USER_REQUIREMENTS'],
-        plan: ['$OUTLINE_WINDOW', '$STORY_TAIL', '$STORY_OVERVIEW', '$STORY_ARC', '$HOOKS_LEDGER', '$INFO_GAP', '$USER_REQUIREMENTS'],
-        review: ['$OUTLINE_WINDOW', '$STORY_TAIL', '$STORY_ARC', '$HOOKS_LEDGER', '$ACTIVE_CONSTRAINTS', '$WORLDBOOK_HITS', '$USER_REQUIREMENTS'],
-        research: ['$WEB_REFS', '$WEB_TOOL_CATALOG', '$STORY_TAIL', '$TABLE_CATALOG', '$USER_REQUIREMENTS'],
-        compose: ['$OUTLINE_WINDOW', '$STORY_ARC', '$STORY_TAIL', '$HOOKS_LEDGER', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY', '$USER_REQUIREMENTS'],
-    };
     function keptSubagentMaterialTokens_ACU(kind, writes) {
-        return new Set(['$AGENT_TASK', '$AGENT_WRITE_SCOPE', '$AGENT_READ_MATERIALS', ...KIND_RELATED_TOKENS_ACU[kind], ...writes.map(module => MODULE_TOKEN_ACU[module])]);
+        return new Set(['$AGENT_TASK', '$AGENT_WRITE_SCOPE', '$AGENT_READ_MATERIALS', ...getAgentSubagentAccessProfile_ACU(kind).snapshotTokens, ...writes.map(module => MODULE_TOKEN_ACU[module])]);
+    }
+    /** Only an appendix after the complete fixed worldbook body can be a main-session read. */
+    function findMainSessionReadAppendix_ACU(snapshot, worldbookInjection) {
+        const heading = '【本轮语境命中的世界书条目】\n';
+        const at = snapshot.indexOf(heading);
+        if (at >= 0) {
+            const expected = heading + worldbookInjection;
+            if (snapshot.slice(at, at + expected.length) !== expected)
+                throw new Error('AGENT_SNAPSHOT_WORLDBOOK_BOUNDARY_INVALID');
+            const end = at + expected.length;
+            if (end < snapshot.length && !snapshot.startsWith('\n\n', end))
+                throw new Error('AGENT_SNAPSHOT_WORLDBOOK_BOUNDARY_INVALID');
+            return snapshot.indexOf('\n\n【主会话已调阅】', end);
+        }
+        return snapshot.indexOf('\n\n【主会话已调阅】');
     }
     /** 子代理任务段已经注入的资料，不再在附带快照里重复。主会话自己的快照不走这里。 */
     function omitSnapshotSectionsForSubagent_ACU(snapshot, kept, options) {
@@ -154843,11 +155723,32 @@ Expected function or array of functions, received type ${typeof value}.`
             drop.add('【百科资料库目录】');
         if (kept.has('$AGENT_READ_CATALOG'))
             drop.add('【读取地址词汇表】');
-        const appendixAt = snapshot.indexOf('\n\n【主会话已调阅】');
+        const heading = '【本轮语境命中的世界书条目】\n';
+        const at = snapshot.indexOf(heading);
+        const expected = options?.worldbookInjection !== undefined && at >= 0 ? heading + options.worldbookInjection : '';
+        const protectedEnd = expected ? at + expected.length : 0;
+        const appendixAt = options?.worldbookInjection !== undefined
+            ? findMainSessionReadAppendix_ACU(snapshot, options.worldbookInjection)
+            : snapshot.indexOf('\n\n【主会话已调阅】');
         const prefix = appendixAt < 0 ? snapshot : snapshot.slice(0, appendixAt);
+        // The worldbook body may itself contain blank lines and headings resembling snapshot
+        // sections. Protect the exact source-bound body before splitting on blank lines.
+        let protectedPrefix = prefix;
+        let marker = '';
+        if (expected) {
+            const end = protectedEnd;
+            if (end < prefix.length && !prefix.startsWith('\n\n', end))
+                throw new Error('AGENT_SNAPSHOT_WORLDBOOK_BOUNDARY_INVALID');
+            if (prefix.indexOf(heading, end) >= 0)
+                throw new Error('AGENT_SNAPSHOT_WORLDBOOK_BOUNDARY_INVALID');
+            marker = '\uE000AGENT_WORLDBOOK\uE001';
+            while (prefix.includes(marker))
+                marker += '\uE001';
+            protectedPrefix = prefix.slice(0, at + heading.length) + marker + prefix.slice(end);
+        }
         const keptBlocks = [];
         let skipping = false;
-        for (const block of prefix.split(/\n\n/)) {
+        for (const block of protectedPrefix.split(/\n\n/)) {
             const first = block.split('\n')[0].trim();
             const heading = first.startsWith('【') || first.startsWith('以下是用户对任务曾经提过的要求');
             const normalizedHeading = first.match(/^【[^】]+】/)?.[0] ?? first;
@@ -154856,11 +155757,18 @@ Expected function or array of functions, received type ${typeof value}.`
             if (!skipping)
                 keptBlocks.push(block);
         }
+        if (marker)
+            for (let i = 0; i < keptBlocks.length; i += 1)
+                keptBlocks[i] = keptBlocks[i].replace(marker, options.worldbookInjection);
         if (appendixAt < 0)
-            return keptBlocks.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
+            return keptBlocks.join('\n\n');
         const appendix = snapshot.slice(appendixAt + 2);
         const frame = /【调阅项 ("(?:[^"\\]|\\.)*") (\d+)】\n/g;
         const first = frame.exec(appendix);
+        // A malformed length-framed appendix is not a legacy read transcript.
+        if (appendix.includes('【调阅项 ') && (!first || appendix.slice(0, first.index).includes('【调阅项 '))) {
+            throw new Error('AGENT_READ_APPENDIX_FRAME_INVALID');
+        }
         if (first) {
             const entries = [];
             let next = first;
@@ -154869,14 +155777,18 @@ Expected function or array of functions, received type ${typeof value}.`
                 const length = Number(next[2]);
                 const textEnd = textStart + length;
                 if (!Number.isSafeInteger(length) || textEnd > appendix.length)
-                    break;
+                    throw new Error('AGENT_READ_APPENDIX_FRAME_INVALID');
                 const address = JSON.parse(next[1]);
                 if (!kept.has(address))
                     entries.push(appendix.slice(next.index, textEnd));
                 frame.lastIndex = textEnd;
                 next = frame.exec(appendix);
+                // A skipped or damaged frame must not turn the preceding entries into a partial read.
+                if (next ? appendix.slice(textEnd, next.index) !== '\n\n' : textEnd !== appendix.length) {
+                    throw new Error('AGENT_READ_APPENDIX_FRAME_INVALID');
+                }
             }
-            const keptPrefix = keptBlocks.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
+            const keptPrefix = keptBlocks.join('\n\n');
             if (!entries.length)
                 return keptPrefix;
             const readHeader = appendix.slice(0, first.index).trim();
@@ -154901,7 +155813,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     keptBlocks.push(block);
             }
         }
-        return keptBlocks.join('\n\n').replace(/\n{3,}/g, '\n\n').trim();
+        return keptBlocks.join('\n\n');
     }
     function stripUnownedSubagentPrompt_ACU(segments, kept) {
         const dropped = new Set(SHARED_PLACEHOLDERS_ACU.filter(token => !kept.has(token)));
@@ -155091,6 +156003,9 @@ Expected function or array of functions, received type ${typeof value}.`
         const reserve = clamp(Math.floor(trigger * 0.2), 8000, 24000);
         const targetTokens = Math.max(0, trigger - reserve);
         const beforeTokens = input.preparedMessages ? await measurePrepared_ACU(input.preparedMessages, input.countTokens) : await measure_ACU$1(input.snapshot, input.fixedPromptTokens, input.countTokens);
+        // preparedMessages 包含会话之外的静态/动态请求开销；压缩前后必须使用同一计量口径。
+        const renderedHistoryTokens = await measure_ACU$1(input.snapshot, 0, input.countTokens);
+        const fixedTokens = input.preparedMessages ? Math.max(0, beforeTokens - renderedHistoryTokens) : input.fixedPromptTokens;
         if (beforeTokens <= trigger)
             return unchanged('not_needed', beforeTokens, targetTokens);
         const grouped = groups_ACU$1(input.snapshot.messages);
@@ -155106,7 +156021,7 @@ Expected function or array of functions, received type ${typeof value}.`
         let droppedTurns = 1;
         const currentTokens = async (turns) => {
             const candidateSnapshot = { ...input.snapshot, messages: grouped.slice(turns).flat() };
-            return measure_ACU$1(candidateSnapshot, input.fixedPromptTokens, input.countTokens);
+            return measure_ACU$1(candidateSnapshot, fixedTokens, input.countTokens);
         };
         while (droppedTurns < maxDropped && (await currentTokens(droppedTurns)) + maxHandoffTokens > targetTokens)
             droppedTurns += 1;
@@ -155155,9 +156070,9 @@ Expected function or array of functions, received type ${typeof value}.`
             at,
         };
         const candidateSnapshot = { ...input.snapshot, messages: [handoff, ...kept] };
-        // 候选体量按「骨架开销 + 候选会话渲染」估算：待发消息里的会话区段会被运行时快照折叠改写，
+        // 候选体量按「完整 prepared request 的非会话开销 + 候选会话渲染」估算：待发消息里的会话区段会被运行时快照折叠改写，
         // 不能逐字替换定位；真正的越界防线是压缩提交后对最终请求的重新计量。
-        const afterTokens = await measure_ACU$1(candidateSnapshot, input.fixedPromptTokens, input.countTokens);
+        const afterTokens = await measure_ACU$1(candidateSnapshot, fixedTokens, input.countTokens);
         if (afterTokens >= beforeTokens)
             return unchanged('no_progress', beforeTokens, targetTokens);
         const mark = {
@@ -155171,7 +156086,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 sourceThroughId: compactedThroughId,
                 beforeTokens,
                 afterTokens,
-                fixedPromptTokens: input.fixedPromptTokens,
+                fixedPromptTokens: fixedTokens,
                 reportTokens: summary.reportTokens,
                 targetTokens,
                 triggerTokens: trigger,
@@ -157289,6 +158204,298 @@ Expected function or array of functions, received type ${typeof value}.`
     }
 
     /**
+     * service/continuation/agent/agent-default-fence.ts — 60% 默认上围栏的范围解析
+     *
+     * 方案契约（fixed-workflow-material-injection-optimization §2.3）：
+     * - 未显式提供 requestedFence 时，默认上围栏预算 =（max_tokens - 最终请求已占用）× 60%，向下取整；
+     * - 预算只是地址适配器的解析输入：适配器在自身坐标系内解析默认读取范围并生成 resolvedFence；
+     * - 预算不是正文截断阈值；resolvedFence 内的正文必须完整、逐字返回；
+     * - 连最小范围都容纳不下时 fail-closed，由批次层整批拒绝且不消耗成功读取额度。
+     *
+     * 本函数只处理连续整数坐标的地址（故事区间、表格行等）。字符串 ID 坐标的地址
+     * 由调用方把 ID 列表长度映射为整数上界后复用；token 预算禁止直接写入字符串坐标。
+     */
+    /**
+     * 在 [lower, naturalUpper] 内二分出预算可容纳的最大上界。
+     * measure(upper) 必须返回完整解析 [lower, upper] 所得正文的 token 数；
+     * 计量单调递增时返回值是最大可容纳范围，非单调时仍保证返回值的实测 token 不超预算。
+     */
+    async function resolveAgentDefaultReadFenceUpper_ACU(input) {
+        if (!Number.isSafeInteger(input.lower) || !Number.isSafeInteger(input.naturalUpper)
+            || input.naturalUpper < input.lower
+            || !Number.isSafeInteger(input.budgetTokens) || input.budgetTokens <= 0) {
+            throw new Error('READ_FENCE_CAPACITY_INVALID');
+        }
+        const probe = async (upper) => {
+            const measured = await input.measure(upper);
+            if (!Number.isFinite(measured) || measured < 0)
+                throw new Error('READ_FENCE_CAPACITY_INVALID');
+            return measured;
+        };
+        let bestTokens = await probe(input.lower);
+        if (bestTokens > input.budgetTokens)
+            return { status: 'exhausted', measuredTokens: bestTokens };
+        let lo = input.lower;
+        let hi = input.naturalUpper;
+        let best = input.lower;
+        while (lo < hi) {
+            const mid = lo + Math.ceil((hi - lo) / 2);
+            const measured = await probe(mid);
+            if (measured <= input.budgetTokens) {
+                best = mid;
+                bestTokens = measured;
+                lo = mid;
+            }
+            else {
+                hi = mid - 1;
+            }
+        }
+        return { status: 'resolved', upper: best, measuredTokens: bestTokens };
+    }
+    class AgentDefaultFenceProofError_ACU extends Error {
+        constructor(failure) {
+            super(failure.message);
+            this.failure = failure;
+        }
+    }
+    /**
+     * 在一个读取批次内分配 60% 默认上围栏预算。
+     *
+     * - 全部候选完整正文加上批次内其他资料（reservedTokens）不超预算时原样放行，不收窄；
+     * - 否则先为原子地址保留完整正文、为可收窄地址保留其最小可证明范围；连这一底线都放不下时整批失败；
+     * - 可收窄地址按请求顺序依次取得「预算 − 已分配 − 后续地址最小范围」内的最大前缀子范围；
+     * - 收窄后的地址重新走地址适配器解析，stableAddress 必须等于收窄地址且 completeWithinFence 成立，
+     *   注入的是该子范围的完整逐字正文，并在正文前如实标注原地址、预算与 resolvedFence。
+     * 任何失败都不返回部分结果，由批次层整批拒绝且不消耗成功读取额度。
+     */
+    async function allocateAgentDefaultReadFences_ACU(input) {
+        const { candidates } = input;
+        if (!candidates.length)
+            return { status: 'resolved', reads: [] };
+        const budget = input.budgetTokens;
+        // 预算为 0 表示同一模型回合内已被前序批次用尽，按 exhausted 报告；缺失或非法才是 unavailable。
+        if (budget === undefined || !Number.isSafeInteger(budget) || budget < 0
+            || !Number.isSafeInteger(input.reservedTokens) || input.reservedTokens < 0) {
+            return {
+                status: 'failed',
+                failures: candidates.map(candidate => ({
+                    key: candidate.key,
+                    reason: 'default-fence-budget-unavailable',
+                    message: `地址「${candidate.key}」未提供上围栏，但本次请求的默认上围栏预算不可用，无法解析默认读取范围；整批未注入、未消耗读取额度。`,
+                    details: { budgetTokens: budget ?? null, reservedTokens: input.reservedTokens },
+                })),
+            };
+        }
+        const measure = async (title, address, text) => {
+            const tokens = await input.count(`### ${title}（${address}）\n${text}`);
+            if (!Number.isFinite(tokens) || tokens < 0)
+                throw new Error('READ_FENCE_CAPACITY_INVALID');
+            return tokens;
+        };
+        const full = await Promise.all(candidates.map(candidate => measure(candidate.title, candidate.key, candidate.text)));
+        const fullRead = (index) => ({
+            key: candidates[index].key,
+            address: candidates[index].key,
+            title: candidates[index].title,
+            text: candidates[index].text,
+            tokens: full[index],
+            narrowed: false,
+        });
+        if (input.reservedTokens + full.reduce((sum, tokens) => sum + tokens, 0) <= budget) {
+            return { status: 'resolved', reads: candidates.map((_, index) => fullRead(index)) };
+        }
+        const axes = candidates.map(candidate => {
+            // 字符串坐标（世界书 uid、模块 ID）按列表位置取前缀，与显式下围栏的字典序语义不一致：
+            // 收窄可能丢掉下围栏指名的条目而证明仍成立，因此带字符串下围栏的地址按原子地址处理。
+            if (typeof candidate.requestedFence?.lower === 'string')
+                return null;
+            const axis = input.axis(candidate.key);
+            return axis && Number.isSafeInteger(axis.length) && axis.length > 1 ? axis : null;
+        });
+        const narrowedCache = new Map();
+        const narrowed = async (index, upper) => {
+            const cacheKey = `${index}:${upper}`;
+            const cached = narrowedCache.get(cacheKey);
+            if (cached)
+                return cached;
+            const candidate = candidates[index];
+            const address = axes[index].addressAt(upper);
+            const resolved = input.resolve(address, candidate.requestedFence);
+            const proof = resolved.proof;
+            if (resolved.status === 'failed' || !proof || proof.stableAddress !== address || proof.completeWithinFence !== true) {
+                throw new AgentDefaultFenceProofError_ACU({
+                    key: candidate.key,
+                    reason: 'default-fence-proof-invalid',
+                    message: `地址「${candidate.key}」按默认上围栏解析出的子范围「${address}」无法证明完整，整批未注入、未消耗读取额度。`,
+                    details: { address, resolvedStatus: resolved.status ?? 'ok', proof: proof ?? null },
+                });
+            }
+            const remainder = axes[index].remainderAfter(upper);
+            const notice = `【默认上围栏】原地址「${candidate.key}」未提供上围栏，按默认上围栏预算 ${budget} tokens 解析为「${address}」（resolvedFence ${JSON.stringify(proof.resolvedFence)}，revision ${proof.revision}）。以下是该围栏内的完整逐字正文，未截断；围栏之外的部分本次未读取、未注入${remainder ? `，需要时请改读「${remainder}」` : ''}。`;
+            const text = `${notice}\n${resolved.text}`;
+            const read = {
+                key: candidate.key,
+                address,
+                title: resolved.title,
+                text,
+                proof,
+                ...(remainder ? { remainder } : {}),
+                tokens: await measure(resolved.title, address, text),
+                narrowed: true,
+            };
+            narrowedCache.set(cacheKey, read);
+            return read;
+        };
+        try {
+            const minimum = await Promise.all(candidates.map(async (_, index) => (axes[index] ? (await narrowed(index, 0)).tokens : full[index])));
+            const floor = input.reservedTokens + minimum.reduce((sum, tokens) => sum + tokens, 0);
+            if (floor > budget) {
+                return {
+                    status: 'failed',
+                    failures: candidates.map((candidate, index) => ({
+                        key: candidate.key,
+                        reason: 'default-fence-exhausted',
+                        message: `地址「${candidate.key}」未提供上围栏：默认上围栏预算 ${budget} tokens，本批其他资料已占 ${input.reservedTokens} tokens，各地址最小可证明范围合计 ${floor - input.reservedTokens} tokens（本地址 ${minimum[index]} tokens${axes[index] ? '' : '，不可再分'}），无法在预算内完整读取。整批未注入、未消耗读取额度；请改读更小的地址范围后重试。`,
+                        details: {
+                            budgetTokens: budget,
+                            reservedTokens: input.reservedTokens,
+                            remainingTokens: Math.max(0, budget - input.reservedTokens),
+                            measuredTokens: minimum[index],
+                            fullTokens: full[index],
+                            narrowable: axes[index] !== null,
+                        },
+                    })),
+                };
+            }
+            let allocated = input.reservedTokens;
+            let laterMinimum = 0;
+            candidates.forEach((_, index) => {
+                if (axes[index])
+                    laterMinimum += minimum[index];
+                else
+                    allocated += full[index];
+            });
+            const reads = [];
+            for (let index = 0; index < candidates.length; index += 1) {
+                const axis = axes[index];
+                if (!axis) {
+                    reads.push(fullRead(index));
+                    continue;
+                }
+                laterMinimum -= minimum[index];
+                const available = Math.floor(budget - allocated - laterMinimum);
+                if (full[index] <= available) {
+                    reads.push(fullRead(index));
+                    allocated += full[index];
+                    continue;
+                }
+                const outcome = available > 0
+                    ? await resolveAgentDefaultReadFenceUpper_ACU({
+                        lower: 0,
+                        naturalUpper: axis.length - 2,
+                        budgetTokens: available,
+                        measure: async (upper) => (await narrowed(index, upper)).tokens,
+                    })
+                    : { status: 'exhausted', measuredTokens: minimum[index] };
+                if (outcome.status === 'exhausted') {
+                    return {
+                        status: 'failed',
+                        failures: [{
+                                key: candidates[index].key,
+                                reason: 'default-fence-exhausted',
+                                message: `地址「${candidates[index].key}」未提供上围栏：默认上围栏预算 ${budget} tokens 分配到本地址时仅余 ${Math.max(0, available)} tokens，最小可证明范围需要 ${outcome.measuredTokens} tokens。整批未注入、未消耗读取额度；请改读更小的地址范围后重试。`,
+                                details: {
+                                    budgetTokens: budget,
+                                    reservedTokens: input.reservedTokens,
+                                    remainingTokens: Math.max(0, available),
+                                    measuredTokens: outcome.measuredTokens,
+                                    fullTokens: full[index],
+                                    narrowable: true,
+                                },
+                            }],
+                    };
+                }
+                const read = await narrowed(index, outcome.upper);
+                reads.push(read);
+                allocated += read.tokens;
+            }
+            return { status: 'resolved', reads };
+        }
+        catch (error) {
+            if (error instanceof AgentDefaultFenceProofError_ACU)
+                return { status: 'failed', failures: [error.failure] };
+            throw error;
+        }
+    }
+
+    async function executeWorldSimulationFinalRequest_ACU(input) {
+        if (!Number.isFinite(input.historyBudgetTokens) || input.historyBudgetTokens <= 0)
+            throw new Error('WORLD_SIMULATION_HISTORY_BUDGET_INVALID');
+        if (!Number.isSafeInteger(input.inputLimitTokens) || input.inputLimitTokens <= 0)
+            throw new Error('READ_FENCE_CAPACITY_INVALID');
+        const limitTokens = Math.floor(input.historyBudgetTokens * WORLD_SIMULATION_HISTORY_EMERGENCY_FACTOR_ACU);
+        let messages = input.messages.map(message => ({ ...message }));
+        let totalTokens = await measureWorldSimulationPrompt_ACU(messages, input.count);
+        let compressed = false;
+        if (totalTokens > limitTokens && input.compress) {
+            messages = (await input.compress(messages)).map(message => ({ ...message }));
+            compressed = true;
+            totalTokens = await measureWorldSimulationPrompt_ACU(messages, input.count);
+        }
+        if (totalTokens > limitTokens)
+            return { status: 'rejected', reason: 'final-request-token-overflow', messages, totalTokens, limitTokens, compressed };
+        const occupied = await measurePreparedReadRequestTokens_ACU(messages, input.tools ?? [], input.count);
+        if (occupied >= input.inputLimitTokens)
+            return { status: 'rejected', reason: 'final-request-token-overflow', messages, totalTokens: occupied, limitTokens: input.inputLimitTokens, compressed };
+        const defaultReadFenceTokens = resolveDefaultReadFenceTokens_ACU(input.inputLimitTokens, occupied);
+        return { status: 'sent', response: await input.invoke(messages), messages, totalTokens, compressed, defaultReadFenceTokens };
+    }
+    /** 统计实际发送的消息与原生工具定义；不允许将未知分词结果视作零占用。 */
+    async function measurePreparedReadRequestTokens_ACU(messages, tools, count) {
+        const payload = JSON.stringify({ messages, ...(tools.length ? { tools, tool_choice: 'auto' } : {}) });
+        if (!payload)
+            throw new Error('READ_FENCE_CAPACITY_INVALID');
+        const measured = await count(payload);
+        if (!Number.isFinite(measured) || measured <= 0)
+            throw new Error('READ_FENCE_CAPACITY_INVALID');
+        return Math.ceil(measured);
+    }
+    /** 默认读取上围栏：以本地输入限制减去最终请求的完整占用量计算。 */
+    function resolveDefaultReadFenceTokens_ACU(inputLimitTokens, occupiedTokens) {
+        if (!Number.isSafeInteger(inputLimitTokens) || inputLimitTokens <= 0 || !Number.isSafeInteger(occupiedTokens) || occupiedTokens < 0) {
+            throw new Error('READ_FENCE_CAPACITY_INVALID');
+        }
+        const available = inputLimitTokens - occupiedTokens;
+        if (available <= 0)
+            throw new Error('READ_FENCE_CAPACITY_EXHAUSTED');
+        const limit = Math.floor(available * 0.6);
+        if (limit <= 0)
+            throw new Error('READ_FENCE_CAPACITY_EXHAUSTED');
+        return limit;
+    }
+
+    /**
+     * service/continuation/agent/agent-final-request-gate.ts — 续写最终请求容量门禁
+     *
+     * 方案契约（fixed-workflow-material-injection-optimization §2.3）：
+     * - 「本次请求已经占用的上下文」以最终装配边界计量：消息、原生工具定义全部计入；
+     * - 默认读取上围栏预算 =（本地输入限制 - 已占用）× 60%，向下取整；
+     * - 本地输入限制非法或耗尽时，在发送前 fail-closed；max_tokens 仅控制输出；
+     * - 返回的 defaultReadFenceTokens 只是地址适配器的解析输入，不是正文截断阈值。
+     *
+     * 计量与 60% 原语复用推演侧 final-request-token-gate，避免两套公式漂移。
+     */
+    /** 在 provider 调用前计量最终请求并解析默认上围栏预算；非法或耗尽时抛错，不发起调用。 */
+    async function measureContinuationFinalRequestCapacity_ACU(input) {
+        if (!Number.isSafeInteger(input.inputLimitTokens) || input.inputLimitTokens <= 0)
+            throw new Error('READ_FENCE_CAPACITY_INVALID');
+        const occupiedTokens = await measurePreparedReadRequestTokens_ACU(input.messages, input.tools ?? [], input.count);
+        if (occupiedTokens >= input.inputLimitTokens)
+            throw new Error('READ_FENCE_CAPACITY_EXHAUSTED');
+        return { occupiedTokens, defaultReadFenceTokens: resolveDefaultReadFenceTokens_ACU(input.inputLimitTokens, occupiedTokens) };
+    }
+
+    /**
      * service/continuation/agent/agent-read-gate.ts — read/search 结果注入前的 Token 门禁
      *
      * 单批次 read/search 注入门禁。每个工具批次独立判定，避免一份过大的读取撑爆上下文；
@@ -157326,8 +158533,8 @@ Expected function or array of functions, received type ${typeof value}.`
             effectiveMaxReadTokens = Math.floor(raw);
             basis = 'fixed';
         }
-        else if (typeof raw === 'string' && raw.trim().endsWith('%')) {
-            const percent = parseFloat(raw.trim());
+        else if (typeof raw === 'string' && /^(?:\d+(?:\.\d+)?|\.\d+)%$/.test(raw.trim())) {
+            const percent = Number(raw.trim().slice(0, -1));
             if (Number.isFinite(percent) && percent >= 1 && percent <= 100) {
                 effectiveMaxReadTokens = Math.floor(percentBase * (percent / 100));
             }
@@ -157891,7 +159098,7 @@ Expected function or array of functions, received type ${typeof value}.`
         const worldbookSeeds = extractAgentFinalReviewWorldbookSeeds_ACU(seedSource);
         const worldbookEvidence = context.worldbook?.available
             ? renderAgentWorldbookTriggeredInjection_ACU(context.worldbook, seedSource)
-            : '世界书当前不可用；涉及人物、能力、地点、组织、种族、社会规则或世界常识的结论必须标注未验证。需要时用 search，scope 设为 ["worldbook"]。';
+            : '世界书当前不可用；涉及人物、能力、地点、组织、种族、社会规则或世界常识的结论必须标注未验证。不要臆测或把读取失败当作空世界书。';
         const supplementalMaterials = [
             `### 本轮用户输入\n${input.currentUserInput || '（本轮没有额外用户输入）'}`,
             `### 长期约束\n${constraints}`,
@@ -157930,6 +159137,9 @@ Expected function or array of functions, received type ${typeof value}.`
         /** 其余子代理（含 arc-architect 的全局校准）给更宽的窗口。 */
         default: 100,
     };
+    function createAgentReadRoundState_ACU() {
+        return { successfulReadBatches: new Set(), pendingReadBatches: new Set() };
+    }
     const defaultDependencies_ACU$1 = {
         callInternalAi: callContinuationInternalAi_ACU,
         resolveApiPreset: resolveContinuationApiPreset_ACU,
@@ -157959,19 +159169,6 @@ Expected function or array of functions, received type ${typeof value}.`
      * 输出被截断或个别条目非法时，只索要剩余或修正条目，不整份重来；这两轮不占协议重试额度。
      */
     const AGENT_CONTRACT_CONTINUATION_ROUNDS_ACU = 2;
-    /** 维护类子代理固定作用的模块。写入范围由职责决定，不再经派工写集协商。 */
-    function ownReadPrefixes_ACU(writes) {
-        const prefixes = {
-            storyArc: ['$STORY_ARC', '$FIELD:storyArc'],
-            hooks: ['$HOOKS_LEDGER', '$FIELD:hooks'],
-            infoGap: ['$INFO_GAP', '$FIELD:infoGap'],
-            chronology: ['$CHRONOLOGY', '$FIELD:chronology'],
-            constraints: ['$ACTIVE_CONSTRAINTS', '$FIELD:constraints'],
-            webRefs: ['$WEB_REFS', '$FIELD:webRefs'],
-            userRequirements: ['$USER_REQUIREMENTS'],
-        };
-        return writes.flatMap(module => [...prefixes[module]]);
-    }
     function readStaysWithOwner_ACU(key, prefixes) {
         return prefixes.some(prefix => key === prefix || key.startsWith(`${prefix}:`));
     }
@@ -158021,6 +159218,9 @@ Expected function or array of functions, received type ${typeof value}.`
             return '你的职责不含写入。你只需返回建议或判词，不要输出 delta。';
         const labels = { hooks: '$HOOKS_LEDGER 伏笔账本', infoGap: '$INFO_GAP 认知与信息差时间线', constraints: '$ACTIVE_CONSTRAINTS 长期约束', storyArc: '$STORY_ARC 故事总纲', chronology: '$CHRONOLOGY 故事年代学账本', webRefs: '$WEB_REFS 百科资料库', userRequirements: '$USER_REQUIREMENTS 用户要求' };
         return `你的职责固定写入：${writes.map(item => labels[item]).join('、')}。职责之外的模块一律不许出现在 delta 里。`;
+    }
+    function agentReadRoundKey_ACU(agentName, roundId) {
+        return JSON.stringify([agentName, roundId]);
     }
     /**
      * 把一条运行时消息插到尾部预填充之前。渲染后的消息序列若以 assistant 预填充收尾，
@@ -158107,10 +159307,19 @@ Expected function or array of functions, received type ${typeof value}.`
         return { summary: draft.summary, expectedRevision: draft.expectedRevision, items, patches };
     }
     /** 把一个读地址解析成材料条目。text 已带分节标题，可直接拼接注入。 */
-    function resolveMaterial_ACU(token, context) {
-        const resolved = resolveAgentReadToken_ACU(token, context);
-        return { key: token, label: token, text: `### ${resolved.title}（${token}）\n${resolved.text}`,
-            ...(resolved.status === 'failed' ? { status: 'failed' } : {}) };
+    function resolveMaterial_ACU(token, context, requestedFence) {
+        const resolved = resolveAgentReadTokenWithProof_ACU(token, context, requestedFence);
+        const proofMissing = resolved.status !== 'failed'
+            && (!resolved.proof || resolved.proof.stableAddress !== token || resolved.proof.completeWithinFence !== true);
+        const failed = resolved.status === 'failed' || proofMissing;
+        return {
+            key: token,
+            label: token,
+            text: `### ${resolved.title}（${token}）\n${proofMissing ? 'fence-proof-missing' : resolved.text}`,
+            ...(failed
+                ? { status: 'failed' }
+                : { read: { title: resolved.title, body: resolved.text, ...(requestedFence === undefined ? {} : { requestedFence }) } }),
+        };
     }
     /** 只有定位到合法模块和安全 ID 的领域拒绝路径才可转为权威读取地址。 */
     function blankMaintainerOutput_ACU(summary) {
@@ -158315,9 +159524,12 @@ Expected function or array of functions, received type ${typeof value}.`
             if (!definition) {
                 rejectDelegation_ACU(`目录里没有名为 ${input.delegation.agentName} 的子代理`, { agentName: input.delegation.agentName });
             }
+            const accessProfile = getAgentSubagentAccessProfile_ACU(definition.kind);
             const writes = definition.kind === 'maintain' && input.targetModules?.length
                 ? [...KIND_FIXED_WRITES_ACU[definition.kind]].filter((module) => input.targetModules.includes(module))
                 : [...KIND_FIXED_WRITES_ACU[definition.kind]];
+            const readRoundState = input.readRoundState ?? createAgentReadRoundState_ACU();
+            const readRoundKey = agentReadRoundKey_ACU(definition.name, input.roundId);
             const gate = {
                 state: createAgentReadGateState_ACU(),
                 config: {
@@ -158326,9 +159538,18 @@ Expected function or array of functions, received type ${typeof value}.`
                     fallbackTokens: input.settings.agentReadFallbackTokens,
                 },
                 granted: new Set(),
+                narrowed: new Map(),
+                successfulReadBatch: false,
+                readRoundKey,
+                readRoundState,
             };
-            // 种子读集：免授权，直接解析；注入前整批记入本次派工自己的门禁账本。
+            // 种子与工具读取使用同一角色授权；越权种子整次派工拒绝，不发送 provider 请求。
             const seedTokens = [...new Set(input.delegation.reads.map(raw => String(raw ?? '').trim()).filter(Boolean))];
+            const authorizedReads = getAgentSubagentReadPrefixes_ACU(definition.kind, writes);
+            const unauthorizedSeed = seedTokens.find(token => !readStaysWithOwner_ACU(token, authorizedReads));
+            if (unauthorizedSeed) {
+                rejectDelegation_ACU(`派工种子地址未获 ${definition.name} 授权：${unauthorizedSeed}`, { agentName: definition.name, address: unauthorizedSeed });
+            }
             const seeds = seedTokens.map(token => resolveMaterial_ACU(token, input.resolveContext));
             const failedSeed = seeds.find(seed => seed.status === 'failed');
             if (failedSeed)
@@ -158411,26 +159632,39 @@ Expected function or array of functions, received type ${typeof value}.`
             let baseMessages = rendered.messages;
             const presentTokens = new Set([...promptSegments, ...(split.taskTemplate ? [{ content: split.taskTemplate }] : [])].flatMap(segment => segment.content.match(/\$[A-Z][A-Z0-9_]*/g) ?? []));
             const renderRequestSnapshot = async () => {
-                const originalSnapshot = input.mainSnapshot?.trim() ?? '';
-                const mainReadsAt = originalSnapshot.indexOf('\n\n【主会话已调阅】');
+                const originalSnapshot = input.mainSnapshot?.trim() ? input.mainSnapshot : '';
+                const worldbook = input.resolveContext.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false);
+                const worldbookInjection = renderAgentWorldbookTriggeredInjection_ACU(worldbook, buildAgentWorldbookScanText_ACU(input.resolveContext));
+                const mainReadsAt = findMainSessionReadAppendix_ACU(originalSnapshot, worldbookInjection);
                 const latestSnapshot = usedFieldWrites
                     ? [await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext), ...(mainReadsAt >= 0 ? [originalSnapshot.slice(mainReadsAt + 2)] : [])].join('\n\n')
                     : originalSnapshot || await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext);
-                const snapshotText = omitSnapshotSectionsForSubagent_ACU(latestSnapshot, presentTokens, { dropTriggeredWorldbook: definition.kind === 'arc' });
+                const snapshotText = omitSnapshotSectionsForSubagent_ACU(latestSnapshot, presentTokens, { dropTriggeredWorldbook: definition.kind === 'arc', worldbookInjection });
                 const taskMaterial = await renderTaskMaterial();
                 return [snapshotText, taskMaterial || `【本次派工任务】\n${input.delegation.prompt}`, ...(taskMaterial ? [] : [`【本轮种子资料】\n${materials}`]), definition.promptKey === 'arcArchitect' ? renderStoryArcVolumePlanInstruction_ACU(input.settings) : '', input.sharedMaterials ?? ''].filter(Boolean).join('\n\n');
             };
             // 预算状态随每次请求尾部快照刷新。
-            const ownReads = input.sharedMaterials !== undefined ? ownReadPrefixes_ACU(writes) : null;
+            const allowSearch = accessProfile.allowSearch;
+            const ownReads = authorizedReads;
             if (input.writeSql && writes.length)
                 baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: renderMaintenanceSqlGuide_ACU(definition.name) });
-            if (ownReads)
-                baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: ownReads.length ? `世界书全文和各资料库已在【本轮已备资料】。不要再读世界书、正文、大纲或做跨库搜索。你只能 read 自己维护的详细资料：${ownReads.join('、')}。` : '世界书全文和各资料库已在【本轮已备资料】。你没有调阅工具，直接根据这些资料交付。' });
+            baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: ownReads.length ? `本角色只可 read 以下自有或强相关地址：${ownReads.join('、')}。${allowSearch ? '世界书检索限已授权范围。' : '不得做本地 search。'}` : '本角色没有本地调阅工具，直接根据已备资料交付。' });
             const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
             // 小循环的追加消息：子代理自己的输出（assistant）与工具结果。原生工具回执使用 role=tool。
             const transcript = [];
             const trailingPrefill = (baseMessages[baseMessages.length - 1]?.role === 'assistant' || baseMessages[baseMessages.length - 1]?.content === USER_PREFILL_CONTENT_ACU) ? baseMessages.pop() : undefined;
             const expandedReads = [];
+            const researchToolCallIds = new Set();
+            const researchWorkingNotes = [];
+            const compactResearchTranscript = () => {
+                if (!researchWorkingNotes.length)
+                    return;
+                for (const message of transcript) {
+                    if (message.role !== 'tool' || !message.tool_call_id || !researchToolCallIds.has(message.tool_call_id))
+                        continue;
+                    message.content = `【网页工作笔记】\n${researchWorkingNotes.join('\n')}`;
+                }
+            };
             let toolRoundsUsed = 0;
             let writeRoundsUsed = 0;
             const maxWriteRounds = input.writeSql && writes.length ? Math.max(1, input.budget.maxIterations) : 0;
@@ -158505,11 +159739,9 @@ Expected function or array of functions, received type ${typeof value}.`
                 promptCacheEnabled: true,
                 // 每次派工的对话全新；命名空间按角色和可用工具稳定划分，不跟随尝试号。
                 cacheScope: `sub-${definition.name}`,
-                cacheTools: ['read', 'search', ...(isResearch ? ['encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read'] : []), ...(input.writeSql && writes.length ? ['write_sql', ...writes.map(module => `module:${module}`)] : [])],
-                tools: agentNativeTools_ACU([
-                    ...(ownReads ? [...(ownReads.length ? ['read'] : []), ...(input.writeSql && writes.length ? ['write_sql'] : [])] : (input.writeSql && writes.length ? ['read', 'search', 'write_sql'] : ['read', 'search'])),
-                    ...(isResearch ? ['encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read'] : []),
-                ]),
+                cacheTools: [...accessProfile.tools,
+                    ...(input.writeSql && writes.length ? ['write_sql', ...writes.map(module => `module:${module}`)] : [])],
+                tools: agentNativeTools_ACU([...accessProfile.tools, ...(input.writeSql && writes.length ? ['write_sql'] : [])]),
                 minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU[definition.promptKey],
                 onUsage: usage => {
                     usageTotal = usageTotal
@@ -158608,7 +159840,10 @@ Expected function or array of functions, received type ${typeof value}.`
                 }
                 // 传输错误（502/网络抖动）按设置延时重试；协议/契约拒绝仍走小循环内的对话级立即重试。
                 const requestSnapshot = await renderRequestSnapshot();
-                const raw = await callContinuationInternalAiWithRetry_ACU(() => this.dependencies.callInternalAi(withNativeToolThinkPrefill_ACU([...baseMessages, ...transcript, { role: 'user', content: `${requestSnapshot}\n\n${renderReadBudgetNote(toolRoundsUsed)}` }, ...(trailingPrefill?.content === USER_PREFILL_CONTENT_ACU ? [trailingPrefill] : [])]), input.preset, identity, input.signal, callOptions), {
+                const requestMessages = withNativeToolThinkPrefill_ACU([...baseMessages, ...transcript, { role: 'user', content: `${requestSnapshot}\n\n${renderReadBudgetNote(toolRoundsUsed)}` }, ...(trailingPrefill?.content === USER_PREFILL_CONTENT_ACU ? [trailingPrefill] : [])]);
+                // 容量门禁在传输重试之外：超限是确定性失败，不得被当作传输错误重发。
+                gate.defaultReadFenceTokens = await this.measureFinalRequestCapacity_ACU(requestMessages, input.settings.agentHistoryTokenBudget, callOptions, definition.name);
+                const raw = await callContinuationInternalAiWithRetry_ACU(() => this.dependencies.callInternalAi(requestMessages, input.preset, identity, input.signal, callOptions), {
                     transportRetries: retries,
                     retryDelaySeconds: input.settings.retryDelaySeconds,
                     isCurrent: () => input.isCurrent(identity) && !input.signal?.aborted,
@@ -158624,6 +159859,13 @@ Expected function or array of functions, received type ${typeof value}.`
                 let toolCalls;
                 try {
                     toolCalls = nativeCalls.length ? nativeToolArguments_ACU(nativeCalls).map(({ call, payload }) => {
+                        if (isResearch && ['encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read'].includes(call.name) && payload.notes !== undefined) {
+                            const notes = parseAgentResearcherWorkingNotes_ACU(JSON.stringify({ action: call.name, notes: payload.notes }), '');
+                            for (const note of notes)
+                                if (!researchWorkingNotes.includes(note))
+                                    researchWorkingNotes.push(note);
+                            compactResearchTranscript();
+                        }
                         if (call.name === 'write_sql') {
                             if (!input.writeSql || !writes.length || typeof payload.sql !== 'string' || !payload.sql.trim()
                                 || Object.keys(payload).some(key => key !== 'action' && key !== 'sql'))
@@ -158638,9 +159880,16 @@ Expected function or array of functions, received type ${typeof value}.`
                         }
                         if (call.name !== 'read' && call.name !== 'search')
                             throw new Error(`未知工具 ${call.name}`);
+                        if (call.name === 'search' && !allowSearch)
+                            throw new Error('当前角色未授权本地搜索');
+                        if (call.name === 'read' && (definition.kind === 'compose' || (ownReads && !ownReads.length)))
+                            throw new Error('当前角色未授权本地读取');
                         if (_notes !== undefined && !isResearch)
                             throw new Error('非研究角色不得传 notes');
-                        return parseAgentToolCall_ACU(argumentsWithoutNotes);
+                        const parsed = parseAgentToolCall_ACU(argumentsWithoutNotes);
+                        if (parsed.kind !== call.name)
+                            throw new Error('工具名称与动作不一致');
+                        return parsed;
                     }) : null;
                     if (!nativeCalls.length && (input.writeSql && writes.length
                         ? parseAgentWritableToolCalls_ACU(protocolText, prefill, isResearch)
@@ -158678,7 +159927,8 @@ Expected function or array of functions, received type ${typeof value}.`
                     if (readsAllowed && toolCalls.some(item => item.kind !== 'write_sql'))
                         toolRoundsUsed += 1;
                     const perCallResults = [];
-                    for (const call of toolCalls) {
+                    for (let index = 0; index < toolCalls.length; index += 1) {
+                        const call = toolCalls[index];
                         if (call.kind === 'write_sql') {
                             if (writeRoundsUsed >= maxWriteRounds) {
                                 const exhausted = JSON.stringify({ action: 'write_sql', originalSql: call.sql, status: 'rejected', accepted: [], reason: 'write_sql 轮次已用尽',
@@ -158743,13 +159993,30 @@ Expected function or array of functions, received type ${typeof value}.`
                                 perCallResults.push(denied);
                                 continue;
                             }
-                            const result = await this.executeToolCalls_ACU([call], input.resolveContext, gate, expandedReads, ownReads, isResearch ? { settings: input.settings, cache: pageCache } : undefined);
+                            if (call.kind === 'read' || call.kind === 'search') {
+                                const batch = [call];
+                                while (index + 1 < toolCalls.length) {
+                                    const next = toolCalls[index + 1];
+                                    if (next.kind !== 'read' && next.kind !== 'search')
+                                        break;
+                                    batch.push(next);
+                                    index += 1;
+                                }
+                                const result = await this.executeToolCalls_ACU(batch, input.resolveContext, gate, expandedReads, ownReads, allowSearch, !isResearch && definition.kind !== 'arc', isResearch ? { settings: input.settings, cache: pageCache } : undefined);
+                                perCallResults.push(result, ...batch.slice(1).map(() => '本逻辑读取批次已统一结算，结果见首个工具回执。'));
+                                continue;
+                            }
+                            const result = await this.executeToolCalls_ACU([call], input.resolveContext, gate, expandedReads, ownReads, allowSearch, false, isResearch ? { settings: input.settings, cache: pageCache } : undefined);
                             perCallResults.push(result);
                         }
                     }
                     const roundNote = maxWriteRounds ? `write_sql 轮次剩余 ${maxWriteRounds - writeRoundsUsed} / ${maxWriteRounds}。` : '';
                     const note = renderReadBudgetNote(toolRoundsUsed);
                     const results = nativeCalls.map((_, index) => [perCallResults[index] || '工具没有返回内容', roundNote, note].filter(Boolean).join('\n\n'));
+                    for (const call of nativeCalls) {
+                        if (isResearch && ['encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read'].includes(call.name))
+                            researchToolCallIds.add(call.id);
+                    }
                     transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, results));
                     continue;
                 }
@@ -158886,6 +160153,8 @@ Expected function or array of functions, received type ${typeof value}.`
                     fallbackTokens: input.settings.agentReadFallbackTokens,
                 },
                 granted: new Set(),
+                narrowed: new Map(),
+                successfulReadBatch: false,
             };
             const fixedDecision = await gateAgentReadBatch_ACU(evidence.gateItems, gate.state, gate.config, 0);
             if (!fixedDecision.allowed) {
@@ -158933,10 +160202,12 @@ Expected function or array of functions, received type ${typeof value}.`
             // 终审与普通派工同一预算语义：首轮给出上限，每个工具批次后刷新剩余轮次与遥测；注入点必须在尾部预填充之前。
             const reviewPresent = new Set([...reviewSegments, ...(reviewSplit.taskTemplate ? [{ content: reviewSplit.taskTemplate }] : [])].flatMap(segment => segment.content.match(/\$[A-Z][A-Z0-9_]*/g) ?? []));
             const renderReviewTail = async () => {
-                const originalSnapshot = input.mainSnapshot?.trim() ?? '';
-                const mainReadsAt = originalSnapshot.indexOf('\n\n【主会话已调阅】');
+                const originalSnapshot = input.mainSnapshot?.trim() ? input.mainSnapshot : '';
+                const worldbook = input.resolveContext.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false);
+                const worldbookInjection = renderAgentWorldbookTriggeredInjection_ACU(worldbook, buildAgentWorldbookScanText_ACU(input.resolveContext));
+                const mainReadsAt = findMainSessionReadAppendix_ACU(originalSnapshot, worldbookInjection);
                 const latestSnapshot = [await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext), ...(mainReadsAt >= 0 ? [originalSnapshot.slice(mainReadsAt + 2)] : [])].join('\n\n');
-                const reviewSnapshot = omitSnapshotSectionsForSubagent_ACU(latestSnapshot, reviewPresent);
+                const reviewSnapshot = omitSnapshotSectionsForSubagent_ACU(latestSnapshot, reviewPresent, { worldbookInjection });
                 return [reviewSnapshot, reviewTaskMaterial || `【本次终审任务】\n${input.candidateInstruction}`, ...(reviewTaskMaterial ? [] : [evidence.worldbookEvidence, evidence.supplementalMaterials]), input.sharedMaterials ?? ''].filter(Boolean).join('\n\n');
             };
             let baseMessages = rendered.messages;
@@ -158955,8 +160226,8 @@ Expected function or array of functions, received type ${typeof value}.`
             const callOptions = {
                 promptCacheEnabled: true,
                 cacheScope: 'final-reviewer',
-                cacheTools: ['read', 'search', 'review'],
-                tools: input.sharedMaterials === undefined ? agentNativeTools_ACU(['read', 'search']) : [],
+                cacheTools: [...(input.sharedMaterials === undefined ? ['read'] : []), 'review'],
+                tools: input.sharedMaterials === undefined ? agentNativeTools_ACU(['read']) : [],
                 minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU.finalReviewer,
                 onUsage: usage => {
                     usageTotal = usageTotal
@@ -158977,7 +160248,9 @@ Expected function or array of functions, received type ${typeof value}.`
                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '终审请求已失效', false));
                 }
                 const reviewTail = await renderReviewTail();
-                const raw = await callContinuationInternalAiWithRetry_ACU(() => this.dependencies.callInternalAi(withNativeToolThinkPrefill_ACU([...baseMessages, ...transcript, { role: 'user', content: `${reviewTail}\n\n${renderReadBudgetNote(toolRoundsUsed)}` }, ...(trailingPrefill?.content === USER_PREFILL_CONTENT_ACU ? [trailingPrefill] : [])]), preset, identity, input.signal, callOptions), {
+                const requestMessages = withNativeToolThinkPrefill_ACU([...baseMessages, ...transcript, { role: 'user', content: `${reviewTail}\n\n${renderReadBudgetNote(toolRoundsUsed)}` }, ...(trailingPrefill?.content === USER_PREFILL_CONTENT_ACU ? [trailingPrefill] : [])]);
+                gate.defaultReadFenceTokens = await this.measureFinalRequestCapacity_ACU(requestMessages, input.settings.agentHistoryTokenBudget, callOptions, AGENT_FINAL_REVIEWER_NAME_ACU);
+                const raw = await callContinuationInternalAiWithRetry_ACU(() => this.dependencies.callInternalAi(requestMessages, preset, identity, input.signal, callOptions), {
                     transportRetries: retries,
                     retryDelaySeconds: input.settings.retryDelaySeconds,
                     isCurrent: () => input.isCurrent(identity) && !input.signal?.aborted,
@@ -158992,7 +160265,14 @@ Expected function or array of functions, received type ${typeof value}.`
                 let toolCalls;
                 try {
                     toolCalls = nativeCalls.length
-                        ? nativeToolArguments_ACU(nativeCalls).map(({ payload }) => parseAgentToolCall_ACU(payload))
+                        ? nativeToolArguments_ACU(nativeCalls).map(({ call, payload }) => {
+                            if (call.name !== 'read' || input.sharedMaterials !== undefined)
+                                throw new Error('终审未授权该工具');
+                            const parsed = parseAgentToolCall_ACU(payload);
+                            if (parsed.kind !== 'read')
+                                throw new Error('终审只允许 read');
+                            return parsed;
+                        })
                         : parseAgentSubagentToolCalls_ACU(protocolText, prefill);
                     if (!nativeCalls.length && toolCalls) {
                         protocolRejections += 1;
@@ -159016,9 +160296,8 @@ Expected function or array of functions, received type ${typeof value}.`
                         continue;
                     }
                     toolRoundsUsed += 1;
-                    const perCallResults = [];
-                    for (const toolCall of toolCalls)
-                        perCallResults.push(await this.executeToolCalls_ACU([toolCall], input.resolveContext, gate, expandedReads, input.sharedMaterials !== undefined ? [] : null));
+                    const batchResult = await this.executeToolCalls_ACU(toolCalls, input.resolveContext, gate, expandedReads, input.sharedMaterials !== undefined ? [] : null, false, true);
+                    const perCallResults = toolCalls.map((_, index) => index === 0 ? batchResult : '本逻辑读取批次已统一结算，结果见首个工具回执。');
                     transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, perCallResults.map(result => `${result}\n\n${renderReadBudgetNote(toolRoundsUsed)}`)));
                     continue;
                 }
@@ -159049,10 +160328,35 @@ Expected function or array of functions, received type ${typeof value}.`
             throw subagentFailed_ACU(`最终审查在 ${maxCalls} 次调用内没有交付契约输出`, false, { lastReason, toolRoundsUsed });
         }
         /**
+         * 最终请求容量门禁：以即将发送的完整消息与原生工具定义计量已占用上下文，
+         * 返回 60% 默认上围栏预算。本地输入限制非法或耗尽时在调用前 fail-closed，
+         * 以不可重试的结构化错误退出（不截断、不摘要、不重发同一超限请求）。
+         */
+        async measureFinalRequestCapacity_ACU(messages, inputLimitTokens, options, agentName) {
+            try {
+                const capacity = await measureContinuationFinalRequestCapacity_ACU({
+                    messages,
+                    tools: options.tools ?? [],
+                    inputLimitTokens,
+                    count: this.dependencies.countTokens ?? countAgentTokens_ACU,
+                });
+                return capacity.defaultReadFenceTokens;
+            }
+            catch (error) {
+                const code = error instanceof Error ? error.message : String(error);
+                throw subagentFailed_ACU(`${agentName} 的最终请求超出上下文容量（${code}），请求未发送；资料未截断、未摘要。`, false, {
+                    reason: 'context-capacity-exceeded',
+                    code,
+                    inputLimitTokens,
+                    agentName,
+                });
+            }
+        }
+        /**
          * 执行子代理的一个工具批次并渲染结果文本。
          * 与主循环同一门禁语义：批内去重与已放行地址拆分、整批过门禁、打回报告直接作为结果回灌。
          */
-        async executeToolCalls_ACU(calls, context, gate, expandedReads, ownReads, research) {
+        async executeToolCalls_ACU(calls, context, gate, expandedReads, ownReads, allowSearch, readOnce, research) {
             const fresh = [];
             const duplicated = [];
             const failed = [];
@@ -159069,22 +160373,55 @@ Expected function or array of functions, received type ${typeof value}.`
                     webSections.push(await this.executeWebToolCall_ACU(call, research.settings, research.cache, expandedReads));
                     continue;
                 }
-                if (call.kind === 'search' && ownReads) {
-                    refused.push('子代理不能做跨域搜索。请直接使用【本轮已备资料】。');
+                if (call.kind === 'search' && !research && !allowSearch) {
+                    refused.push('当前角色未授权本地搜索。');
                     continue;
                 }
                 if (call.kind === 'read') {
                     for (const raw of call.reads) {
                         const key = String(raw ?? '').trim();
-                        if (!key || seenInBatch.has(key))
+                        if (!key)
+                            continue;
+                        if (ownReads && !readStaysWithOwner_ACU(key, ownReads)) {
+                            failed.push({
+                                key,
+                                label: key,
+                                text: `${key} 不在当前角色的授权读取范围。请改用 profile 允许的自有或强相关地址；越权地址不会注入正文。`,
+                                status: 'failed',
+                            });
+                            continue;
+                        }
+                        if (call.requestedFence) {
+                            const material = resolveMaterial_ACU(key, context, call.requestedFence);
+                            if (material.status === 'failed') {
+                                failed.push(material);
+                                continue;
+                            }
+                            if (seenInBatch.has(key))
+                                continue;
+                            seenInBatch.add(key);
+                            const narrowed = gate.narrowed.get(key);
+                            if (narrowed) {
+                                duplicated.push(`原地址「${key}」此前只提供了收窄子范围「${narrowed.address}」的完整正文，未声称原地址已全部注入；未读取部分${narrowed.remainder ? `请改读「${narrowed.remainder}」` : '本次没有剩余范围'}。`);
+                                continue;
+                            }
+                            if (gate.granted.has(key)) {
+                                duplicated.push(`地址「${key}」已放行，完整内容见上文，不再重注。`);
+                                continue;
+                            }
+                            fresh.push(material);
+                            continue;
+                        }
+                        if (seenInBatch.has(key))
                             continue;
                         seenInBatch.add(key);
-                        if (ownReads && !readStaysWithOwner_ACU(key, ownReads)) {
-                            refused.push(`${key} 不在你的维护范围。世界书、正文和其它模块已在【本轮已备资料】，不要再读。`);
+                        const narrowed = gate.narrowed.get(key);
+                        if (narrowed) {
+                            duplicated.push(`原地址「${key}」此前只提供了收窄子范围「${narrowed.address}」的完整正文，未声称原地址已全部注入；未读取部分${narrowed.remainder ? `请改读「${narrowed.remainder}」` : '本次没有剩余范围'}。`);
                             continue;
                         }
                         if (gate.granted.has(key)) {
-                            duplicated.push(key);
+                            duplicated.push(`地址「${key}」已放行，完整内容见上文，不再重注。`);
                             continue;
                         }
                         const material = resolveMaterial_ACU(key, context);
@@ -159107,22 +160444,100 @@ Expected function or array of functions, received type ${typeof value}.`
                 fresh.push({ key, label, text: `### 搜索「${call.query}」\n${runAgentSearch_ACU(call, context)}` });
             }
             const sections = [...refused, ...webSections, ...failed.map(material => JSON.stringify({ action: 'read', address: material.key, status: 'failed', reason: material.text }))];
+            if (failed.length || refused.length) {
+                // 一条本地地址失败时，整个本地读取批次不可提交：不登记成功，也不回灌其它地址的正文。
+                return `【工具结果】\n${sections.join('\n\n')}`;
+            }
             if (duplicated.length) {
-                sections.push(`以下调阅本次派工已放行，完整内容见上文，不再重注：${duplicated.join('、')}。`);
+                sections.push(`以下调阅请求未重复注入：\n${duplicated.join('\n')}`);
             }
             if (fresh.length) {
-                const items = fresh.map(material => ({ label: material.label, text: material.text }));
-                const decision = await gateAgentReadBatch_ACU(items, gate.state, gate.config, 0);
-                if (decision.allowed) {
-                    gate.state.grantedTokens += decision.batchTokens;
-                    for (const material of fresh) {
-                        gate.granted.add(material.key);
-                        expandedReads.push(material.label);
-                    }
-                    sections.push(...fresh.map(material => material.text));
+                if (readOnce && gate.successfulReadBatch) {
+                    sections.push(JSON.stringify({ action: 'read', status: 'rejected', reason: 'read-once-exhausted' }));
+                    return `【工具结果】\n${sections.join('\n\n')}`;
                 }
-                else {
-                    sections.push(decision.report);
+                const sharedReadRound = readOnce && gate.readRoundKey && gate.readRoundState
+                    ? { key: gate.readRoundKey, state: gate.readRoundState }
+                    : null;
+                if (sharedReadRound?.state.successfulReadBatches.has(sharedReadRound.key)) {
+                    sections.push(JSON.stringify({ action: 'read', status: 'rejected', reason: 'read-once-exhausted' }));
+                    return `【工具结果】\n${sections.join('\n\n')}`;
+                }
+                if (sharedReadRound?.state.pendingReadBatches.has(sharedReadRound.key)) {
+                    sections.push(JSON.stringify({ action: 'read', status: 'rejected', reason: 'read-in-progress' }));
+                    return `【工具结果】\n${sections.join('\n\n')}`;
+                }
+                if (sharedReadRound)
+                    sharedReadRound.state.pendingReadBatches.add(sharedReadRound.key);
+                try {
+                    const count = this.dependencies.countTokens ?? countAgentTokens_ACU;
+                    // 收窄放行的材料额外携带原始地址与剩余范围；登记时不再回查外层 allocation。
+                    let admitted = fresh;
+                    let admittedTokens;
+                    // 未显式提供上围栏的本地读取：60% 默认上围栏预算经地址适配器解析为可证明的子范围；出网研究不适用。
+                    const defaultFenced = research ? [] : fresh.filter(material => material.read && material.read.requestedFence?.upper === undefined);
+                    if (defaultFenced.length) {
+                        const reservedTokens = (await Promise.all(fresh.filter(material => !defaultFenced.includes(material)).map(material => count(material.text))))
+                            .reduce((sum, tokens) => sum + tokens, 0);
+                        const allocation = await allocateAgentDefaultReadFences_ACU({
+                            candidates: defaultFenced.map((material) => ({
+                                key: material.key,
+                                title: material.read.title,
+                                text: material.read.body,
+                                ...(material.read.requestedFence === undefined ? {} : { requestedFence: material.read.requestedFence }),
+                            })),
+                            budgetTokens: gate.defaultReadFenceTokens,
+                            reservedTokens,
+                            axis: key => resolveAgentReadAddressAxis_ACU(key, context),
+                            resolve: (address, requestedFence) => resolveAgentReadTokenWithProof_ACU(address, context, requestedFence),
+                            count,
+                        });
+                        if (allocation.status === 'failed') {
+                            // 默认范围无法在预算内完整证明：整批不注入、不登记成功，修正地址后可重试。
+                            sections.push(...allocation.failures.map(failure => JSON.stringify({
+                                action: 'read', address: failure.key, status: 'failed', reason: failure.reason, message: failure.message, ...failure.details,
+                            })));
+                            return `【工具结果】\n${sections.join('\n\n')}`;
+                        }
+                        const allocated = new Map(allocation.reads.map(read => [read.key, read]));
+                        admitted = fresh.map(material => {
+                            const read = allocated.get(material.key);
+                            if (!read?.narrowed)
+                                return material;
+                            return { key: read.address, label: `${read.address}（默认上围栏，原地址 ${material.key}）`, text: `### ${read.title}（${read.address}）\n${read.text}`, narrowedFrom: material.key, ...(read.remainder ? { remainder: read.remainder } : {}) };
+                        });
+                        admittedTokens = reservedTokens + allocation.reads.reduce((sum, read) => sum + read.tokens, 0);
+                    }
+                    const items = admitted.map(material => ({ label: material.label, text: material.text }));
+                    const decision = await gateAgentReadBatch_ACU(items, gate.state, gate.config, 0);
+                    if (decision.allowed) {
+                        if (readOnce)
+                            gate.successfulReadBatch = true;
+                        if (sharedReadRound)
+                            sharedReadRound.state.successfulReadBatches.add(sharedReadRound.key);
+                        gate.state.grantedTokens += decision.batchTokens;
+                        for (const material of admitted) {
+                            gate.granted.add(material.key);
+                            if (material.narrowedFrom) {
+                                // 收窄材料的 key 已替换为实际放行子范围地址；原地址登记为“仅收窄提供”，不得冒充完整放行。
+                                gate.narrowed.set(material.narrowedFrom, { address: material.key, ...(material.remainder ? { remainder: material.remainder } : {}) });
+                            }
+                            expandedReads.push(material.label);
+                        }
+                        sections.push(...admitted.map(material => material.text));
+                        if (gate.defaultReadFenceTokens !== undefined) {
+                            // 同一模型回合内后续批次只能使用余下的默认上围栏预算；下一次请求前容量门禁会重新计量。
+                            const injected = admittedTokens ?? (await Promise.all(admitted.map(material => count(material.text)))).reduce((sum, tokens) => sum + tokens, 0);
+                            gate.defaultReadFenceTokens = Math.max(0, Math.floor(gate.defaultReadFenceTokens - injected));
+                        }
+                    }
+                    else {
+                        sections.push(decision.report);
+                    }
+                }
+                finally {
+                    if (sharedReadRound)
+                        sharedReadRound.state.pendingReadBatches.delete(sharedReadRound.key);
                 }
             }
             else if (!duplicated.length && !webSections.length && !failed.length) {
@@ -159355,28 +160770,40 @@ Expected function or array of functions, received type ${typeof value}.`
             snapshot = applied.snapshot;
             return applied.appliedModules;
         };
-        if (input.opening.dispatchWebResearcher) {
-            const web = await runSafe_ACU({
+        // 开局检索与首轮结算并发：两者写集不相交（webRefs vs 结算模块）、互不消费，
+        // 与主会话派工波次同一并发语义；结果落定后仍按「先百科、后结算」的原顺序应用到快照。
+        const openingWeb = input.opening.dispatchWebResearcher
+            ? runSafe_ACU({
                 agentName: WEB_NAME_ACU,
                 billing: 'opening',
                 prompt: `开局要求补充外部设定。焦点：${input.opening.focus}`,
-            });
+            })
+            : null;
+        const maintainerPending = snapshot.pendingFixes.some(item => MAINTAINER_MODULES_ACU.includes(item.module));
+        const runFirstMaintainer = input.hasUnsettledHistory || maintainerPending;
+        const firstMaintainer = runFirstMaintainer
+            ? runSafe_ACU({
+                agentName: MAINTAINER_NAME_ACU,
+                billing: 'pipeline',
+                prompt: maintainerPrompt_ACU(input.opening.focus, snapshot),
+            })
+            : null;
+        const [web, firstMaintainerResult] = await Promise.all([openingWeb, firstMaintainer]);
+        // 并发批次落定后统一回读权威快照：任一方的逐栏写入都不会被另一方的旧快照覆盖。
+        if (input.readCommittedSnapshot)
+            snapshot = input.readCommittedSnapshot();
+        if (web) {
             steps.push({ agentName: WEB_NAME_ACU, status: web.ok ? 'ok' : 'failed', summary: web.summary });
             if (web.ok && !web.usedFieldWrites && web.researcher && (web.researcher.items.length || (web.researcher.patches ?? []).length)) {
                 const applied = await applyAgentWebRefsDeltaViaSql_ACU(snapshot, web.researcher, web.readRevisions?.webRefs, Date.now(), tolerantOptions_ACU(WEB_NAME_ACU));
                 snapshot = applied.snapshot;
             }
         }
-        const maintainerPending = snapshot.pendingFixes.some(item => MAINTAINER_MODULES_ACU.includes(item.module));
-        if (!input.hasUnsettledHistory && !maintainerPending) {
+        if (!runFirstMaintainer) {
             steps.push({ agentName: MAINTAINER_NAME_ACU, status: 'no_change', summary: '没有未结算正文，也没有待修复的结算模块' });
         }
         else {
-            let maintainer = await runSafe_ACU({
-                agentName: MAINTAINER_NAME_ACU,
-                billing: 'pipeline',
-                prompt: maintainerPrompt_ACU(input.opening.focus, snapshot),
-            });
+            let maintainer = firstMaintainerResult;
             let repairAttempts = 0;
             const maxRepairAttempts = Math.max(0, input.settings.workflow.reviseLimit);
             while (true) {
@@ -159936,7 +161363,8 @@ Expected function or array of functions, received type ${typeof value}.`
      * @param settings 续写设置
      * @param budget 预算配置
      * @returns 并发上限；任一子代理角色的生效渠道为「跟随当前活动 API」时为 1，
-     *          因为主 API 的归因机制不支持并发内部请求
+     *          因为主 API 的归因机制不支持并发内部请求。仅用于预算展示的保守口径；
+     *          派工门禁按本波实际派出渠道的解析结果另行判定。
      */
     function resolveWaveLimit_ACU(settings, budget) {
         const hasCurrentChannel = subagentPresetRoles_ACU(settings).some(role => effectiveAgentApiPresetMode_ACU(settings, role) === 'current');
@@ -160077,6 +161505,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 batchesUsed: 0,
                 gateState: createAgentReadGateState_ACU(),
                 granted: new Set(),
+                narrowed: new Map(),
                 invalidated: new Set(),
             };
             const identitySeed = request.createInternalRequestIdentity(0);
@@ -160153,6 +161582,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 return (value ?? null);
             });
             const session = await this.openConversation_ACU(chat, request, context, conversationTurnKeyOf(), counter, measureOverhead, handoffSemanticAdapter, apiDependencies);
+            const readRoundState = createAgentReadRoundState_ACU();
             snapshot = context.moduleSnapshot;
             if (request.settings.finalReview.enabled) {
                 finalReview = resumedState?.finalReview ?? readFinalReviewStateFromConversation_ACU(session.snapshot(), identitySeed.taskId, session.turnKey) ?? finalReview;
@@ -160213,7 +161643,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 // 受控入口，不消耗主 Agent 的派工额度；失败只记结果不掐断规划。
                 if (this.shouldRunOpeningResearch_ACU(request, context, resumedState !== null)) {
                     const outcomesBefore = ledger.outcomes.length;
-                    snapshot = await this.runOpeningResearch_ACU(request, context, ledger, budget, chat, snapshot, session, apiDependencies);
+                    snapshot = await this.runOpeningResearch_ACU(request, context, ledger, budget, chat, snapshot, session, readRoundState, apiDependencies);
                     await commitOutcomes(outcomesBefore);
                 }
                 // 工具批次（read/search）不消耗决策迭代：读资料是正常成本，不该挤压派工与交付的空间。
@@ -160277,7 +161707,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         const workflowEntry = logAgentSession_ACU({ kind: 'delegation', title: '固定工作流正在执行', detail: action.focus, status: 'running' });
                         let workflow;
                         try {
-                            workflow = await this.runFixedWorkflow_ACU(action, request, context, ledger, budget, chat, session, apiDependencies);
+                            workflow = await this.runFixedWorkflow_ACU(action, request, context, ledger, budget, chat, session, readRoundState, apiDependencies);
                         }
                         catch (error) {
                             updateAgentSession_ACU(workflowEntry, { title: '固定工作流失败', detail: error instanceof Error ? error.message : String(error), ok: false });
@@ -160418,7 +161848,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         await session.flush();
                         failLoop_ACU('CONTINUATION_AGENT_BLOCKED', `主 Agent 阻断本轮：${action.reason}`, { unresolved: action.unresolved });
                     }
-                    const delegationResult = await this.runDelegations(action, request, context, ledger, budget, chat, snapshot, session, apiDependencies, outlineMaintenanceReserveAvailable);
+                    const delegationResult = await this.runDelegations(action, request, context, ledger, budget, chat, snapshot, session, readRoundState, apiDependencies, outlineMaintenanceReserveAvailable);
                     snapshot = delegationResult.snapshot;
                     if (delegationResult.usedOutlineMaintenanceReserve) {
                         outlineMaintenanceReserveUsed = true;
@@ -160428,6 +161858,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     for (const key of toolUsage.granted)
                         toolUsage.invalidated.add(key);
                     toolUsage.granted.clear();
+                    toolUsage.narrowed.clear();
                     await commitOutcomes(outcomesBefore);
                     iteration += 1;
                 }
@@ -160725,6 +162156,21 @@ Expected function or array of functions, received type ${typeof value}.`
                 // 缓存前缀诊断：主 Agent 相邻请求应共享大前缀，服务商缓存 0 命中时用这行定位分歧点。
                 // 必须无条件输出（logDebug/logWarn 默认关闭），确认问题后可降级或移除。
                 console.info('[SP·数据库][缓存诊断][agent-main]', trackAgentPromptDrift_ACU('agent-main', messages));
+                // 本地输入门禁：以完整消息与工具定义计量，得出 60% 默认上围栏预算；max_tokens 仅控制输出。
+                // 放在传输重试之外：超限是确定性失败，不发送、不截断、不重发同一超限请求。
+                try {
+                    const capacity = await measureContinuationFinalRequestCapacity_ACU({
+                        messages,
+                        tools: callOptions.tools ?? [],
+                        inputLimitTokens: budgetTokens,
+                        count: this.dependencies.countTokens ?? countAgentTokens_ACU,
+                    });
+                    toolUsage.defaultReadFenceTokens = capacity.defaultReadFenceTokens;
+                }
+                catch (error) {
+                    const code = error instanceof Error ? error.message : String(error);
+                    throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SNAPSHOT_INVALID', 'agent_loop', `主 Agent 最终请求超出上下文容量（${code}），请求未发送；资料未截断、未摘要。`, false, { reason: 'context-capacity-exceeded', code, inputLimitTokens: budgetTokens }));
+                }
                 // 显式擦除上一次尝试的用量，防止回调未触发时把旧值当成本次调用的用量。
                 callUsage = null;
                 // 传输错误（502/网络抖动）按设置延时重试，不再一次失败就停整条自动链；
@@ -160888,19 +162334,53 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (call.kind === 'read') {
                     for (const raw of call.reads) {
                         const key = String(raw ?? '').trim();
-                        if (!key || seenInBatch.has(key))
+                        if (!key)
                             continue;
-                        seenInBatch.add(key);
-                        if (toolUsage.granted.has(key)) {
-                            duplicated.push(key);
+                        if (call.requestedFence) {
+                            const resolved = resolveAgentReadTokenWithProof_ACU(key, context, call.requestedFence);
+                            const material = { key, label: key, title: resolved.title, text: resolved.text };
+                            const proofMissing = resolved.status !== 'failed'
+                                && (!resolved.proof || resolved.proof.stableAddress !== key || resolved.proof.completeWithinFence !== true);
+                            if (resolved.status === 'failed' || proofMissing) {
+                                failed.push({ ...material, text: resolved.status === 'failed' ? resolved.text : 'fence-proof-missing' });
+                                continue;
+                            }
+                            if (seenInBatch.has(key))
+                                continue;
+                            seenInBatch.add(key);
+                            const narrowed = toolUsage.narrowed.get(key);
+                            if (narrowed) {
+                                duplicated.push(`原地址「${key}」此前只提供了收窄子范围「${narrowed.address}」的完整正文，未声称原地址已全部注入；未读取部分${narrowed.remainder ? `请改读「${narrowed.remainder}」` : '本次没有剩余范围'}。`);
+                                continue;
+                            }
+                            if (toolUsage.granted.has(key)) {
+                                duplicated.push(`地址「${key}」已放行，完整内容见上文，不再重注。`);
+                                continue;
+                            }
+                            fresh.push({ ...material, local: { requestedFence: call.requestedFence } });
                             continue;
                         }
-                        const resolved = resolveAgentReadToken_ACU(key, context);
+                        if (seenInBatch.has(key))
+                            continue;
+                        seenInBatch.add(key);
+                        const narrowed = toolUsage.narrowed.get(key);
+                        if (narrowed) {
+                            duplicated.push(`原地址「${key}」此前只提供了收窄子范围「${narrowed.address}」的完整正文，未声称原地址已全部注入；未读取部分${narrowed.remainder ? `请改读「${narrowed.remainder}」` : '本次没有剩余范围'}。`);
+                            continue;
+                        }
+                        if (toolUsage.granted.has(key)) {
+                            duplicated.push(`地址「${key}」已放行，完整内容见上文，不再重注。`);
+                            continue;
+                        }
+                        const resolved = resolveAgentReadTokenWithProof_ACU(key, context);
                         const material = { key, label: key, title: resolved.title, text: resolved.text };
-                        if (resolved.status === 'failed')
-                            failed.push(material);
+                        const proofMissing = resolved.status !== 'failed'
+                            && (!resolved.proof || resolved.proof.stableAddress !== key || resolved.proof.completeWithinFence !== true);
+                        if (resolved.status === 'failed' || proofMissing) {
+                            failed.push({ ...material, text: resolved.status === 'failed' ? resolved.text : 'fence-proof-missing' });
+                        }
                         else
-                            fresh.push(material);
+                            fresh.push({ ...material, local: {} });
                     }
                     continue;
                 }
@@ -160928,32 +162408,79 @@ Expected function or array of functions, received type ${typeof value}.`
             });
             if (duplicated.length) {
                 owners.push(0);
-                appends.push({ kind: 'tool', text: `以下调阅本轮已放行且内容未变，完整内容见上文，不再重注：${duplicated.join('、')}。`, digest: '重复调阅提示', turnKey: session.turnKey });
+                appends.push({ kind: 'tool', text: `以下调阅请求未重复注入：\n${duplicated.join('\n')}`, digest: '重复调阅提示', turnKey: session.turnKey });
             }
-            if (fresh.length) {
-                const items = fresh.map(material => ({ label: material.label, text: material.text }));
-                const decision = await gateAgentReadBatch_ACU(items, toolUsage.gateState, gateConfig, await measureContextTokens(), counter);
-                if (decision.allowed) {
-                    toolUsage.gateState.grantedTokens += decision.batchTokens;
-                    for (const material of fresh) {
-                        const isLatestSnapshot = toolUsage.invalidated.delete(material.key);
-                        toolUsage.granted.add(material.key);
-                        const latestSnapshotNotice = isLatestSnapshot
-                            ? '\n\n【最新快照】该地址的资料在上次调阅后可能已变化；本条是重新调阅所得的最新快照，较早结果仅代表产生时状态。'
-                            : '';
-                        owners.push(ownerByKey.get(material.key) ?? 0);
-                        appends.push({ kind: 'tool', text: `### ${material.title}（${material.label}）\n${material.text}${latestSnapshotNotice}`, digest: `调阅 ${material.label}`, turnKey: session.turnKey, readKey: material.key });
+            if (!failed.length && fresh.length) {
+                // 未显式提供上围栏的本地读取：60% 默认上围栏预算经地址适配器解析为可证明的子范围，不截断正文。
+                const defaultFenced = fresh.filter(material => material.local && material.local.requestedFence?.upper === undefined);
+                const allocation = defaultFenced.length
+                    ? await allocateAgentDefaultReadFences_ACU({
+                        candidates: defaultFenced.map(material => ({
+                            key: material.key,
+                            title: material.title,
+                            text: material.text,
+                            ...(material.local.requestedFence === undefined ? {} : { requestedFence: material.local.requestedFence }),
+                        })),
+                        budgetTokens: toolUsage.defaultReadFenceTokens,
+                        reservedTokens: (await Promise.all(fresh.filter(material => !defaultFenced.includes(material))
+                            .map(material => counter(`### ${material.title}（${material.label}）\n${material.text}`)))).reduce((sum, tokens) => sum + tokens, 0),
+                        axis: key => resolveAgentReadAddressAxis_ACU(key, context),
+                        resolve: (address, requestedFence) => resolveAgentReadTokenWithProof_ACU(address, context, requestedFence),
+                        count: counter,
+                    })
+                    : { status: 'resolved', reads: [] };
+                if (allocation.status === 'failed') {
+                    // 默认范围无法在预算内完整证明：整批不注入、不登记放行，修正地址后可重试。
+                    for (const failure of allocation.failures) {
+                        owners.push(ownerByKey.get(failure.key) ?? 0);
+                        appends.push({
+                            kind: 'tool',
+                            text: JSON.stringify({ action: 'read', address: failure.key, status: 'failed', reason: failure.reason, message: failure.message, ...failure.details }),
+                            digest: `调阅失败 ${failure.key}`,
+                            turnKey: session.turnKey,
+                        });
                     }
-                    logAgentSession_ACU({
-                        kind: 'tool_read',
-                        title: `迭代 ${iteration} · 调阅 ${fresh.length} 项（约 ${decision.batchTokens} tokens）`,
-                        detail: fresh.map((material, index) => `${material.label}：${decision.itemTokens[index]} tokens`).join('\n'),
-                    });
+                    logAgentSession_ACU({ kind: 'tool_read', title: `迭代 ${iteration} · 默认上围栏范围无法完整读取`, detail: allocation.failures.map(failure => failure.message).join('\n'), ok: false });
                 }
                 else {
-                    owners.push(0);
-                    appends.push({ kind: 'tool', text: decision.report, digest: '读取被门禁打回', turnKey: session.turnKey });
-                    logAgentSession_ACU({ kind: 'tool_read', title: `迭代 ${iteration} · 读取批次被门禁打回（${decision.batchTokens} tokens）`, detail: decision.report, ok: false });
+                    const allocated = new Map(allocation.reads.map(read => [read.key, read]));
+                    // address 是实际注入并登记放行的稳定地址；收窄时它是默认上围栏解析出的子范围地址。
+                    const admitted = fresh.map((material) => {
+                        const read = allocated.get(material.key);
+                        return read?.narrowed
+                            ? { key: material.key, address: read.address, label: read.address, title: read.title, text: read.text, narrowedFrom: material.key, ...(read.remainder ? { remainder: read.remainder } : {}) }
+                            : { ...material, address: material.key };
+                    });
+                    const describe = (material) => (material.narrowedFrom ? `${material.label}（默认上围栏，原地址 ${material.narrowedFrom}）` : material.label);
+                    const items = admitted.map(material => ({ label: material.label, text: material.text }));
+                    const decision = await gateAgentReadBatch_ACU(items, toolUsage.gateState, gateConfig, await measureContextTokens(), counter);
+                    if (decision.allowed) {
+                        toolUsage.gateState.grantedTokens += decision.batchTokens;
+                        for (const material of admitted) {
+                            // 收窄读取是原地址的子范围：原地址若已失效，旧结果中与本范围重叠的部分同样可能过时。
+                            const isLatestSnapshot = toolUsage.invalidated.delete(material.address)
+                                || (material.narrowedFrom !== undefined && toolUsage.invalidated.has(material.narrowedFrom));
+                            toolUsage.granted.add(material.address);
+                            if (material.narrowedFrom) {
+                                toolUsage.narrowed.set(material.narrowedFrom, { address: material.address, ...(material.remainder ? { remainder: material.remainder } : {}) });
+                            }
+                            const latestSnapshotNotice = isLatestSnapshot
+                                ? '\n\n【最新快照】该地址的资料在上次调阅后可能已变化；本条是重新调阅所得的最新快照，较早结果仅代表产生时状态。'
+                                : '';
+                            owners.push(ownerByKey.get(material.key) ?? 0);
+                            appends.push({ kind: 'tool', text: `### ${material.title}（${material.label}）\n${material.text}${latestSnapshotNotice}`, digest: `调阅 ${describe(material)}`, turnKey: session.turnKey, readKey: material.address });
+                        }
+                        logAgentSession_ACU({
+                            kind: 'tool_read',
+                            title: `迭代 ${iteration} · 调阅 ${admitted.length} 项（约 ${decision.batchTokens} tokens）`,
+                            detail: admitted.map((material, index) => `${describe(material)}：${decision.itemTokens[index]} tokens`).join('\n'),
+                        });
+                    }
+                    else {
+                        owners.push(0);
+                        appends.push({ kind: 'tool', text: decision.report, digest: '读取被门禁打回', turnKey: session.turnKey });
+                        logAgentSession_ACU({ kind: 'tool_read', title: `迭代 ${iteration} · 读取批次被门禁打回（${decision.batchTokens} tokens）`, detail: decision.report, ok: false });
+                    }
                 }
             }
             else if (!duplicated.length && !failed.length) {
@@ -161003,7 +162530,7 @@ Expected function or array of functions, received type ${typeof value}.`
          * 固定工作流的结构前置阶段：程序先维护总纲，再确保存在可执行的阶段大纲。
          * 主 Agent 只负责给出 open_round 的焦点，不再直接派工 arc/outline 角色。
          */
-        async prepareFixedWorkflowStructure_ACU(action, request, context, budget, chat, session, apiDependencies) {
+        async prepareFixedWorkflowStructure_ACU(action, request, context, budget, chat, session, readRoundState, apiDependencies) {
             const completedStageNumbers = context.execution.task.stages
                 .filter(stage => stage.status === 'completed')
                 .map(stage => stage.stageNumber);
@@ -161022,6 +162549,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     const preset = this.dependencies.resolveApiPreset(request.settings, 'arcArchitect', 'agent_delegate', apiDependencies);
                     const result = await this.dependencies.subagentRuntime.run({
                         delegation: { agentName: 'arc-architect', prompt: `固定工作流维护故事总纲。焦点：${action.focus}`, reads: [] },
+                        roundId: session.turnKey,
                         settings: request.settings,
                         resolveContext: context,
                         budget,
@@ -161029,6 +162557,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
                         isCurrent: identity => request.isInternalRequestCurrent(identity),
                         signal: request.signal,
+                        readRoundState,
                         writeSql: this.moduleFieldWrite_ACU(chat, context),
                         mainSnapshot: this.subagentTail_ACU(session),
                     });
@@ -161077,8 +162606,8 @@ Expected function or array of functions, received type ${typeof value}.`
             if (!context.execution.turn)
                 failLoop_ACU('CONTINUATION_TASK_STATE_INVALID', '阶段大纲操作完成后仍没有可执行轮次');
         }
-        async runFixedWorkflow_ACU(action, request, context, ledger, budget, chat, session, apiDependencies) {
-            await this.prepareFixedWorkflowStructure_ACU(action, request, context, budget, chat, session, apiDependencies);
+        async runFixedWorkflow_ACU(action, request, context, ledger, budget, chat, session, readRoundState, apiDependencies) {
+            await this.prepareFixedWorkflowStructure_ACU(action, request, context, budget, chat, session, readRoundState, apiDependencies);
             const unsettled = renderAgentUnsettledHistory_ACU(context);
             const mapPayload = (result) => ({
                 ok: result.completion !== 'failed' && result.completion !== 'partial',
@@ -161124,6 +162653,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     const preset = this.dependencies.resolveApiPreset(request.settings, role, 'agent_delegate', apiDependencies);
                     const result = await this.dependencies.subagentRuntime.run({
                         delegation: { agentName: call.agentName, prompt: call.prompt, reads: [] },
+                        roundId: session.turnKey,
                         targetModules: call.targetModules,
                         settings: request.settings,
                         resolveContext: context,
@@ -161132,6 +162662,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
                         isCurrent: identity => request.isInternalRequestCurrent(identity),
                         signal: request.signal,
+                        readRoundState,
                         writeSql: this.moduleFieldWrite_ACU(chat, context),
                         mainSnapshot: this.subagentTail_ACU(session),
                     });
@@ -161146,6 +162677,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     const feedback = call.revisionFeedback ? `\n终审反馈清单（只改这些，不要全量重写）：\n${call.revisionFeedback}` : '';
                     const result = await this.dependencies.subagentRuntime.run({
                         delegation: { agentName: AGENT_INSTRUCTION_COMPOSER_NAME_ACU, prompt: `${call.prompt}${feedback}`, reads: [] },
+                        roundId: session.turnKey,
                         settings: request.settings,
                         resolveContext: { ...context, moduleSnapshot: context.moduleSnapshot },
                         budget,
@@ -161153,6 +162685,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
                         isCurrent: identity => request.isInternalRequestCurrent(identity),
                         signal: request.signal,
+                        readRoundState,
                         mainSnapshot: this.subagentTail_ACU(session),
                     });
                     if (!result.composer?.instruction.trim()) {
@@ -161240,13 +162773,14 @@ Expected function or array of functions, received type ${typeof value}.`
          * 受控地跑一次 web-researcher 并把结果写进资料快照。与普通派工的区别：不占派工额度、
          * 不受波次并发限制、失败不抛——开场检索是锦上添花，网络不通不该让整轮规划失败。
          */
-        async runOpeningResearch_ACU(request, context, ledger, budget, chat, snapshot, session, apiDependencies) {
+        async runOpeningResearch_ACU(request, context, ledger, budget, chat, snapshot, session, readRoundState, apiDependencies) {
             const delegation = { agentName: AGENT_WEB_RESEARCHER_NAME_ACU, prompt: buildOpeningResearchPrompt_ACU(context.originInstruction), reads: [] };
             const entryId = logAgentSession_ACU({ kind: 'delegation', agentName: delegation.agentName, title: '开场百科检索执行中', detail: delegation.prompt, status: 'running' });
             try {
                 const preset = this.dependencies.resolveApiPreset(request.settings, 'webResearcher', 'agent_delegate', apiDependencies);
                 const result = await this.dependencies.subagentRuntime.run({
                     delegation,
+                    roundId: session.turnKey,
                     settings: request.settings,
                     resolveContext: context,
                     budget,
@@ -161254,6 +162788,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
                     isCurrent: identity => request.isInternalRequestCurrent(identity),
                     signal: request.signal,
+                    readRoundState,
                     writeSql: this.moduleFieldWrite_ACU(chat, context),
                     mainSnapshot: this.subagentTail_ACU(session),
                 });
@@ -161316,10 +162851,35 @@ Expected function or array of functions, received type ${typeof value}.`
                 return { snapshot, outcome: { agentName: result.agentName, ok: false, summary: researcher.summary, detail: '', rejectedReason: compactAgentProtocolError_ACU(error) } };
             }
         }
-        async runDelegations(action, request, context, ledger, budget, chat, snapshot, session, apiDependencies, outlineMaintenanceReserveAvailable = false) {
-            const waveLimit = resolveWaveLimit_ACU(request.settings, budget);
+        async runDelegations(action, request, context, ledger, budget, chat, snapshot, session, readRoundState, apiDependencies, outlineMaintenanceReserveAvailable = false) {
             const internalWorkflowDelegations = action.delegations.filter(item => item.agentName === AGENT_OUTLINE_AGENT_NAME_ACU || item.agentName === 'arc-architect');
             const normalDelegations = action.delegations.filter(item => item.agentName !== AGENT_OUTLINE_AGENT_NAME_ACU && item.agentName !== 'arc-architect');
+            // 波次并发门禁按本波实际派出渠道的解析结果判定：只有真实落到酒馆连接（全局
+            // profile 切换串行队列）或主 API（内部请求归因）的渠道才必须串行；fixed 自定义
+            // 渠道恢复并发，与填表分组并发对齐。未派出角色的渠道不拖累本波上限；解析结果
+            // 缓存复用于下方实际派工，同角色不重复解析。
+            const resolvedWavePresetByRole = new Map();
+            const resolveWaveRolePreset = (role) => {
+                if (resolvedWavePresetByRole.has(role))
+                    return resolvedWavePresetByRole.get(role) ?? null;
+                let resolved = null;
+                try {
+                    resolved = this.dependencies.resolveApiPreset(request.settings, role, 'agent_delegate', apiDependencies);
+                }
+                catch { /* 解析 fail-closed：真实原因在派工解析时按原路径报出 */ }
+                resolvedWavePresetByRole.set(role, resolved);
+                return resolved;
+            };
+            const isSerialWaveRole = (role) => {
+                const resolved = resolveWaveRolePreset(role);
+                // 解析失败或形态残缺：并发判定同样 fail-closed 按串行处理。
+                if (!resolved?.apiConfig)
+                    return true;
+                return resolved.apiMode === 'tavern' || resolved.apiConfig.useMainApi === true;
+            };
+            const waveRoles = [...new Set(normalDelegations.map(item => findAgentSubagentDefinition_ACU(item.agentName)?.promptKey ?? 'main'))];
+            const waveHasSerialChannel = waveRoles.some(isSerialWaveRole);
+            const waveLimit = waveHasSerialChannel ? 1 : Math.max(1, budget.maxConcurrent);
             let usedOutlineMaintenanceReserve = false;
             // 未通过预算/波次校验的派工立即记失败条目：这些拒绝是即时判定，没有 running 阶段。
             const rejectImmediately = (agentName, reason) => {
@@ -161355,9 +162915,8 @@ Expected function or array of functions, received type ${typeof value}.`
                     continue;
                 }
                 if (accepted.length >= waveLimit) {
-                    const hasCurrentChannel = subagentPresetRoles_ACU(request.settings).some(role => effectiveAgentApiPresetMode_ACU(request.settings, role) === 'current');
-                    const why = waveLimit === 1 && hasCurrentChannel
-                        ? '当前跟随活动 API，同一波次只能派工 1 个子代理'
+                    const why = waveLimit === 1 && waveHasSerialChannel
+                        ? '存在必须串行的子代理渠道（酒馆连接或主 API），同一波次只能派工 1 个子代理'
                         : `同一波次并发上限为 ${waveLimit} 个`;
                     rejectImmediately(delegation.agentName, `${why}，本次未执行，可在下一次迭代重派`);
                     continue;
@@ -161388,10 +162947,13 @@ Expected function or array of functions, received type ${typeof value}.`
             const settled = await Promise.all(accepted.map(async (delegation) => {
                 try {
                     // 每个子代理按自己的渠道角色解析；渠道解析失败会成为该派工的拒绝结果回喂给主 Agent。
+                    // 波次门禁已解析过的角色直接复用结果；此前解析失败的角色在此按原路径抛出。
                     const definition = findAgentSubagentDefinition_ACU(delegation.agentName);
-                    const delegationPreset = this.dependencies.resolveApiPreset(request.settings, definition?.promptKey ?? 'main', 'agent_delegate', apiDependencies);
+                    const role = definition?.promptKey ?? 'main';
+                    const delegationPreset = resolveWaveRolePreset(role) ?? this.dependencies.resolveApiPreset(request.settings, role, 'agent_delegate', apiDependencies);
                     const result = await this.dependencies.subagentRuntime.run({
                         delegation,
+                        roundId: session.turnKey,
                         settings: request.settings,
                         resolveContext: context,
                         budget,
@@ -161400,6 +162962,7 @@ Expected function or array of functions, received type ${typeof value}.`
                         createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
                         isCurrent: identity => request.isInternalRequestCurrent(identity),
                         signal: request.signal,
+                        readRoundState,
                         writeSql: this.moduleFieldWrite_ACU(chat, context),
                         mainSnapshot: this.subagentTail_ACU(session),
                     });
@@ -163687,127 +165250,6 @@ Expected function or array of functions, received type ${typeof value}.`
         return { value: target[field] };
     }
 
-    const JACCARD_SIMILAR_THRESHOLD_ACU = 0.7;
-    const SHA1_K_ACU = new Uint32Array([
-        0x5a827999, 0x6ed9eba1, 0x8f1bbcdc, 0xca62c1d6,
-    ]);
-    function rotl_ACU(value, bits) {
-        return (value << bits) | (value >>> (32 - bits));
-    }
-    function sha1Bytes_ACU(input) {
-        const bitLength = input.length * 8;
-        const paddedLength = (((input.length + 9) + 63) >> 6) << 6;
-        const padded = new Uint8Array(paddedLength);
-        padded.set(input);
-        padded[input.length] = 0x80;
-        const view = new DataView(padded.buffer);
-        view.setUint32(paddedLength - 8, Math.floor(bitLength / 0x100000000), false);
-        view.setUint32(paddedLength - 4, bitLength >>> 0, false);
-        let h0 = 0x67452301;
-        let h1 = 0xefcdab89;
-        let h2 = 0x98badcfe;
-        let h3 = 0x10325476;
-        let h4 = 0xc3d2e1f0;
-        const w = new Uint32Array(80);
-        for (let offset = 0; offset < paddedLength; offset += 64) {
-            for (let i = 0; i < 16; i += 1)
-                w[i] = view.getUint32(offset + i * 4, false);
-            for (let i = 16; i < 80; i += 1)
-                w[i] = rotl_ACU(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1) >>> 0;
-            let a = h0;
-            let b = h1;
-            let c = h2;
-            let d = h3;
-            let e = h4;
-            for (let i = 0; i < 80; i += 1) {
-                let f;
-                let k;
-                if (i < 20) {
-                    f = (b & c) | (~b & d);
-                    k = SHA1_K_ACU[0];
-                }
-                else if (i < 40) {
-                    f = b ^ c ^ d;
-                    k = SHA1_K_ACU[1];
-                }
-                else if (i < 60) {
-                    f = (b & c) | (b & d) | (c & d);
-                    k = SHA1_K_ACU[2];
-                }
-                else {
-                    f = b ^ c ^ d;
-                    k = SHA1_K_ACU[3];
-                }
-                const temp = (rotl_ACU(a, 5) + f + e + k + w[i]) >>> 0;
-                e = d;
-                d = c;
-                c = rotl_ACU(b, 30) >>> 0;
-                b = a;
-                a = temp;
-            }
-            h0 = (h0 + a) >>> 0;
-            h1 = (h1 + b) >>> 0;
-            h2 = (h2 + c) >>> 0;
-            h3 = (h3 + d) >>> 0;
-            h4 = (h4 + e) >>> 0;
-        }
-        const digest = new Uint8Array(20);
-        const out = new DataView(digest.buffer);
-        out.setUint32(0, h0, false);
-        out.setUint32(4, h1, false);
-        out.setUint32(8, h2, false);
-        out.setUint32(12, h3, false);
-        out.setUint32(16, h4, false);
-        return digest;
-    }
-    function hex_ACU(bytes) {
-        let result = '';
-        for (const byte of bytes)
-            result += byte.toString(16).padStart(2, '0');
-        return result;
-    }
-    function utf8_ACU(value) {
-        return new TextEncoder().encode(value);
-    }
-    function sha1Hex_ACU(value) {
-        return hex_ACU(sha1Bytes_ACU(utf8_ACU(value)));
-    }
-    /** 去空白、大小写折叠、去标点/符号后的紧凑文本，用于指纹哈希。 */
-    function normalizeEventText_ACU(value) {
-        return value.normalize('NFKC').toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
-    }
-    function eventTokens_ACU(value) {
-        const prepared = value.normalize('NFKC').toLowerCase().replace(/[\p{P}\p{S}]+/gu, ' ');
-        const tokens = new Set();
-        for (const part of prepared.split(/\s+/).filter(Boolean)) {
-            if (/[\u3040-\u30ff\u3400-\u9fff]/.test(part)) {
-                for (const char of part)
-                    tokens.add(char);
-            }
-            else {
-                tokens.add(part);
-            }
-        }
-        return tokens;
-    }
-    function eventFingerprint_ACU(summary, at, relatedIds) {
-        const related = [...relatedIds].map(item => item.trim()).filter(Boolean).sort();
-        return sha1Hex_ACU(`${normalizeEventText_ACU(summary)}${at}${related.join(',')}`);
-    }
-    function fuzzySimilarity_ACU(a, b) {
-        const left = eventTokens_ACU(a);
-        const right = eventTokens_ACU(b);
-        if (!left.size && !right.size)
-            return 1;
-        if (!left.size || !right.size)
-            return 0;
-        let intersection = 0;
-        for (const token of left)
-            if (right.has(token))
-                intersection += 1;
-        return intersection / (left.size + right.size - intersection);
-    }
-
     const START_V1_ACU = '<!-- qrf-world-simulation-projection:v1:start -->';
     const END_V1_ACU = '<!-- qrf-world-simulation-projection:v1:end -->';
     const START_ACU = '<!-- qrf-world-simulation-projection:v2:start -->';
@@ -164050,6 +165492,31 @@ Expected function or array of functions, received type ${typeof value}.`
             fail_ACU$3(snapshot ? 'EVIDENCE_REF_UNAUTHORIZED' : 'EVIDENCE_REGISTRY_REQUIRED', path, 'refs registered in current run', unauthorized);
         return refs;
     }
+    function parseRequestedFence_ACU(value, path) {
+        if (value === undefined)
+            return undefined;
+        if (!isRecord_ACU$9(value))
+            fail_ACU$3('REQUESTED_FENCE_OBJECT', path, 'object with lower or upper', value);
+        const keys = Object.keys(value);
+        if (!keys.length || keys.some(key => key !== 'lower' && key !== 'upper'))
+            fail_ACU$3('REQUESTED_FENCE_KEYS', path, 'at least one of lower/upper only', value);
+        const parseBound = (bound, boundPath) => {
+            if (typeof bound === 'string' && bound.trim())
+                return bound.trim();
+            if (typeof bound === 'number' && Number.isSafeInteger(bound))
+                return bound;
+            fail_ACU$3('REQUESTED_FENCE_BOUND', boundPath, 'non-empty string or safe integer', bound);
+        };
+        const fence = {};
+        if ('lower' in value)
+            fence.lower = parseBound(value.lower, `${path}.lower`);
+        if ('upper' in value)
+            fence.upper = parseBound(value.upper, `${path}.upper`);
+        if (typeof fence.lower === 'number' && typeof fence.upper === 'number' && fence.lower > fence.upper) {
+            fail_ACU$3('REQUESTED_FENCE_ORDER', path, 'lower less than or equal to upper', value);
+        }
+        return fence;
+    }
     const SAFE_TOOL_REQUEST_METADATA_ACU = new Set(['evidenceRef', 'purpose']);
     function normalizeToolRequestMetadata_ACU(value, action) {
         if (action !== 'read' && action !== 'search')
@@ -164060,6 +165527,16 @@ Expected function or array of functions, received type ${typeof value}.`
         return normalized;
     }
     function isAuthorizedToolAddress_ACU(address) {
+        if (address.startsWith('field:')) {
+            const match = address.match(/^field:([a-z]+):([^:]+)(?::([^:]+))?$/);
+            if (!match || !Object.prototype.hasOwnProperty.call(WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU, match[1]))
+                return false;
+            const module = match[1];
+            const id = ['clock', 'player', 'guidance'].includes(module) ? WORLD_SIMULATION_SINGLETON_ID_ACU : match[2];
+            if (id !== match[2])
+                return false;
+            return !match[3] || WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU[module].fields.includes(match[3]);
+        }
         return WORLD_SIMULATION_TOOL_ADDRESSES_ACU.some(allowed => allowed.endsWith(':')
             ? address.startsWith(allowed) && address.length > allowed.length
             : address === allowed);
@@ -164077,16 +165554,16 @@ Expected function or array of functions, received type ${typeof value}.`
         if (text_ACU$2(value.action))
             return value;
         const keys = Object.keys(value);
-        const allowed = new Set(['address', 'reads', ...SAFE_TOOL_REQUEST_METADATA_ACU]);
+        const allowed = new Set(['address', 'reads', 'requestedFence', ...SAFE_TOOL_REQUEST_METADATA_ACU]);
         if (keys.some(key => !allowed.has(key)))
             return value;
         const address = normalizeToolAddress_ACU(value.address);
         if (address && isAuthorizedToolAddress_ACU(address))
-            return { action: 'read', reads: [address] };
+            return { action: 'read', reads: [address], ...(value.requestedFence !== undefined ? { requestedFence: value.requestedFence } : {}) };
         if (Array.isArray(value.reads)) {
             const reads = value.reads.map(normalizeToolAddress_ACU).filter(Boolean);
             if (reads.length === value.reads.length && reads.length > 0 && reads.every(isAuthorizedToolAddress_ACU))
-                return { action: 'read', reads };
+                return { action: 'read', reads, ...(value.requestedFence !== undefined ? { requestedFence: value.requestedFence } : {}) };
         }
         return value;
     }
@@ -164110,12 +165587,13 @@ Expected function or array of functions, received type ${typeof value}.`
         const normalizedValue = normalizeLegacyToolAction_ACU(value);
         const action = text_ACU$2(normalizedValue.action);
         if (action === 'read') {
-            const raw = closedObject_ACU(normalizeReadAction_ACU(normalizedValue), '$', ['action', 'reads']);
+            const raw = closedObject_ACU(normalizeReadAction_ACU(normalizedValue), '$', ['action', 'reads'], ['requestedFence']);
             const reads = requiredList_ACU(raw.reads, '$.reads');
             const invalid = reads.find(address => !isAuthorizedToolAddress_ACU(address));
             if (invalid)
-                fail_ACU$3('INVALID_TOOL_ADDRESS', '$.reads', WORLD_SIMULATION_TOOL_ADDRESSES_ACU.join(' | '), invalid);
-            return { kind: 'read', reads };
+                fail_ACU$3('INVALID_TOOL_ADDRESS', '$.reads', formatWorldSimulationToolAddressHints_ACU(), invalid);
+            const requestedFence = parseRequestedFence_ACU(raw.requestedFence, '$.requestedFence');
+            return { kind: 'read', reads, ...(requestedFence ? { requestedFence } : {}) };
         }
         if (action === 'search') {
             const raw = closedObject_ACU(normalizeToolRequestMetadata_ACU(normalizedValue, action), '$', ['action', 'query'], ['scope', 'maxResults', 'isRegex']);
@@ -164731,6 +166209,7 @@ Expected function or array of functions, received type ${typeof value}.`
             `你上一次的输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
             'read 与 search 使用函数调用，不要写成 JSON。推理写在思维链里，闭合后再输出一个决策 JSON。不要 Markdown 围栏，也不要输出 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签。',
             '调用 read 时参数 reads 必须是非空地址数组；调用 search 时参数 query 必填，可选 scope、maxResults、isRegex。不要添加 evidenceRef、purpose 或其他字段。',
+            `字段地址必须使用 ${formatWorldSimulationToolAddressHints_ACU()}；必须包含模块名和条目 ID，例如 field:dimensions:dim-a；不得使用 field:dimensions 这类裸模块地址。`,
             'evidenceRef 由服务端在读取成功后随工具结果颁发；只能在后续 finalize / candidate 的 evidenceRefs 数组中引用，不能由模型在 read/search 请求中生成。',
             'delegate 只能包含 action、delegations；open_round 只能包含 action、summary、focus、dispatchChronicler，skipModules 可选；block 只能包含 action、reason、unresolved。evidenceRefs 只允许出现在 finalize 顶层，其他动作禁止携带。',
             '调阅时调用函数，决策动作格式必须是下面之一：',
@@ -166825,149 +168304,6 @@ Expected function or array of functions, received type ${typeof value}.`
         };
     }
 
-    function buildArchiveHints_ACU(candidateChronicleEntries, chronicleOverview) {
-        const hints = [];
-        for (const [candidateIndex, candidate] of candidateChronicleEntries.entries()) {
-            const fingerprint = eventFingerprint_ACU(candidate.summary, candidate.at, candidate.relatedIds);
-            const exact = chronicleOverview.find(row => row.fingerprint === fingerprint);
-            if (exact) {
-                hints.push({
-                    candidateIndex,
-                    level: 'exact',
-                    matchedDay: exact.day,
-                    matchedOneLine: exact.oneLine,
-                    matchedArchiveRef: exact.archiveRef,
-                });
-                continue;
-            }
-            let best = null;
-            let bestScore = 0;
-            for (const row of chronicleOverview) {
-                const score = fuzzySimilarity_ACU(candidate.summary, row.oneLine);
-                if (score >= JACCARD_SIMILAR_THRESHOLD_ACU && score > bestScore) {
-                    best = row;
-                    bestScore = score;
-                }
-            }
-            if (best) {
-                hints.push({
-                    candidateIndex,
-                    level: 'similar',
-                    matchedDay: best.day,
-                    matchedOneLine: best.oneLine,
-                    matchedArchiveRef: best.archiveRef,
-                });
-            }
-        }
-        return hints;
-    }
-
-    const WORLD_CATALOG_READ_HINT_ACU = '目录中任一条目可通过 read 工具按地址调阅详细信息（在用条目如 seeds:{id}，归档总结经 chronicle-archive:{archiveRef}）。';
-    const WORLD_SUBAGENT_DEDUP_HINT_ACU = '以下目录包含正在生效的资料与已经发生的事情（含已归档总结索引）；若你正要推演的事件与已发生目录中某条实质相同，不要重复推演。';
-    function clip_ACU(value, max = 80) {
-        const text = value.replace(/\s+/g, ' ').trim();
-        return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
-    }
-    function row_ACU(id, name, summary, module) {
-        return { id, name, summary: clip_ACU(summary), readAddress: `${module}:${id}` };
-    }
-    function buildInUseWorldCatalog_ACU(ledger) {
-        const activeSeeds = ledger.seeds.filter(seed => seed.status !== 'resolved' && seed.status !== 'retired');
-        const activeRumors = ledger.rumors.filter(rumor => rumor.status === 'latent' || rumor.status === 'ripe');
-        const hot = ledger.chronicle.slice(-WORLD_CHRONICLE_HOT_WINDOW_ACU);
-        return {
-            clock: ledger.clock,
-            player: ledger.player,
-            dimensions: ledger.dimensions.map(item => row_ACU(item.id, item.name, `${item.kind} ${item.value} ${item.trend} ${item.rationale}`, 'dimensions')),
-            seeds: activeSeeds.map(item => row_ACU(item.id, item.title, `${item.status} lv${item.level} ${item.location?.region ?? ''}`, 'seeds')),
-            actors: ledger.actors.map(item => row_ACU(item.id, item.name, `${item.life} ${item.locationRef?.region ?? item.location}`, 'actors')),
-            rumors: activeRumors.map(item => row_ACU(item.id, item.fact, `${item.status} ${item.channels.join(',')}`, 'rumors')),
-            chronicleHot: hot.map(item => ({
-                id: item.id,
-                name: item.at,
-                summary: clip_ACU(item.summary),
-                readAddress: `chronicle:${item.id}`,
-            })),
-            readHint: WORLD_CATALOG_READ_HINT_ACU,
-        };
-    }
-    const WORLD_RELATED_READONLY_MODULES_ACU = {
-        dimensions: ['actors'],
-        seeds: ['actors', 'rumors'],
-        actors: ['seeds', 'dimensions'],
-        rumors: ['seeds'],
-        chronicle: ['seeds', 'actors', 'rumors'],
-    };
-    const WORLD_RELATED_READONLY_HINT_ACU = '关联模块只读目录：仅供对齐引用与一致性核对，禁止写入；目录行含 readAddress，可用 read 工具调阅详情。';
-    function sliceModuleCatalog_ACU(catalog, overview, writableModules) {
-        const writable = new Set(writableModules);
-        const slice = { readHint: catalog.readHint, clock: catalog.clock, player: catalog.player };
-        if (writable.has('dimensions'))
-            slice.dimensions = catalog.dimensions;
-        if (writable.has('seeds'))
-            slice.seeds = catalog.seeds;
-        if (writable.has('actors'))
-            slice.actors = catalog.actors;
-        if (writable.has('rumors'))
-            slice.rumors = catalog.rumors;
-        if (writable.has('chronicle')) {
-            slice.chronicleHot = catalog.chronicleHot;
-            slice.chronicleOverview = overview.map(row => ({
-                day: row.day,
-                oneLine: row.oneLine,
-                archiveRef: row.archiveRef,
-                readAddress: `chronicle-archive:${row.archiveRef}`,
-            }));
-            slice.dedupHint = WORLD_SUBAGENT_DEDUP_HINT_ACU;
-        }
-        const readonlyModules = {};
-        for (const module of writableModules) {
-            for (const related of WORLD_RELATED_READONLY_MODULES_ACU[module] ?? []) {
-                if (writable.has(related) || readonlyModules[related])
-                    continue;
-                readonlyModules[related] = catalog[related];
-            }
-        }
-        if (Object.keys(readonlyModules).length) {
-            slice.relatedReadonly = readonlyModules;
-            slice.relatedHint = WORLD_RELATED_READONLY_HINT_ACU;
-        }
-        return slice;
-    }
-    function summarizeCandidatePatches_ACU(candidates) {
-        return candidates.map(candidate => {
-            const diff = {};
-            for (const [module, patch] of Object.entries(candidate.patch)) {
-                if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
-                    diff[module] = 'updated';
-                    continue;
-                }
-                const record = patch;
-                if (Array.isArray(record.upsert))
-                    diff[module] = `upsert+${record.upsert.length}`;
-                else if (Array.isArray(record.append))
-                    diff[module] = `append+${record.append.length}`;
-                else if (module === 'chronicleArchive' && Array.isArray(record.overviewRows))
-                    diff[module] = `archive+${record.overviewRows.length}`;
-                else
-                    diff[module] = `keys:${Object.keys(record).join(',')}`;
-            }
-            return { candidateId: candidate.candidateId, agentName: candidate.agentName, summary: candidate.summary, diff };
-        });
-    }
-    function catalogArchiveHints_ACU(candidates, overview) {
-        const entries = candidates.flatMap(candidate => {
-            const chronicle = candidate.patch.chronicle;
-            if (!chronicle || typeof chronicle !== 'object' || Array.isArray(chronicle))
-                return [];
-            const append = chronicle.append;
-            return Array.isArray(append) ? append : [];
-        }).flatMap(item => typeof item?.summary === 'string' && typeof item.at === 'string'
-            ? [{ summary: item.summary, at: item.at, relatedIds: Array.isArray(item.relatedIds) ? item.relatedIds.filter((id) => typeof id === 'string') : [] }]
-            : []);
-        return buildArchiveHints_ACU(entries, overview);
-    }
-
     function serialize_ACU(value) {
         return typeof value === 'string' ? value : JSON.stringify(value ?? null);
     }
@@ -167309,23 +168645,6 @@ Expected function or array of functions, received type ${typeof value}.`
         meta_ACU.delete(anchor.chatIdentity);
     }
 
-    async function executeWorldSimulationFinalRequest_ACU(input) {
-        if (!Number.isFinite(input.historyBudgetTokens) || input.historyBudgetTokens <= 0)
-            throw new Error('WORLD_SIMULATION_HISTORY_BUDGET_INVALID');
-        const limitTokens = Math.floor(input.historyBudgetTokens * WORLD_SIMULATION_HISTORY_EMERGENCY_FACTOR_ACU);
-        let messages = input.messages.map(message => ({ ...message }));
-        let totalTokens = await measureWorldSimulationPrompt_ACU(messages, input.count);
-        let compressed = false;
-        if (totalTokens > limitTokens && input.compress) {
-            messages = (await input.compress(messages)).map(message => ({ ...message }));
-            compressed = true;
-            totalTokens = await measureWorldSimulationPrompt_ACU(messages, input.count);
-        }
-        if (totalTokens > limitTokens)
-            return { status: 'rejected', reason: 'final-request-token-overflow', messages, totalTokens, limitTokens, compressed };
-        return { status: 'sent', response: await input.invoke(messages), messages, totalTokens, compressed };
-    }
-
     const WORKFLOW_AGENTS_ACU = ['timekeeper', 'undercurrent-analyst', 'dramatis-keeper'];
     const PROJECTION_MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'rumors', 'player'];
     const COMPLETE_STATES_ACU = new Set(['complete_changed', 'complete_no_change']);
@@ -167627,10 +168946,13 @@ Expected function or array of functions, received type ${typeof value}.`
                 readCurrent: input.readCurrent,
                 readFieldSnapshot: input.readFieldSnapshot,
                 isCurrent: input.isCurrent,
+                roundId: input.roundId,
+                readRoundState: input.readRoundState,
                 runId: input.identity.runId,
                 candidateSeq: input.candidateSeq,
                 directorMaterials: input.directorMaterials,
                 triggeredWorldbook: input.triggeredWorldbook,
+                fixedWorldbook: input.fixedWorldbook,
             });
         }
         catch (error) {
@@ -167703,11 +169025,14 @@ Expected function or array of functions, received type ${typeof value}.`
                     readCurrent: input.readCurrent,
                     readFieldSnapshot: input.readFieldSnapshot,
                     isCurrent: input.isCurrent,
+                    roundId: input.roundId,
+                    readRoundState: input.readRoundState,
                     writableModules: targetModules,
                     runId: input.identity.runId,
                     candidateSeq: nextSeq(agentName),
                     directorMaterials: input.directorMaterials,
                     triggeredWorldbook: input.triggeredWorldbook,
+                    fixedWorldbook: input.fixedWorldbook,
                 });
                 const restricted = restrictOutcome_ACU(outcome, targetModules);
                 if (restricted.candidate && input.runWrites) {
@@ -167728,6 +169053,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 outcome: 'no_change',
                 summary: '正文指纹未变且所有预期资料模块均已完成，整轮跳过',
                 outcomes,
+                finalProjection: { content: buildWorldSimulationProjection_ACU(base), sourceAgent: 'current-ledger', sourceRevision: base.revision, deliverable: true },
                 pendingFixes: [],
                 escalated: false,
                 ledger: base,
@@ -167795,12 +169121,15 @@ Expected function or array of functions, received type ${typeof value}.`
                 readCurrent: input.readCurrent,
                 readFieldSnapshot: input.readFieldSnapshot,
                 isCurrent: input.isCurrent,
+                roundId: input.roundId,
+                readRoundState: input.readRoundState,
                 subagents: input.subagents,
                 ledger,
                 focus: input.opening.focus,
                 candidateSeq: nextSeq('guidance-composer'),
                 directorMaterials: input.directorMaterials,
                 triggeredWorldbook: input.triggeredWorldbook,
+                fixedWorldbook: input.fixedWorldbook,
             });
             outcomes.push(composer);
             ledger = clearCompletedPending_ACU(await refreshLedger(ledger, accepted), [composer]);
@@ -167825,6 +169154,13 @@ Expected function or array of functions, received type ${typeof value}.`
                 ? `固定工作流已处理 ${accepted.length} 个候选`
                 : '固定工作流没有产生账本变更';
         const evidenceRefs = [...new Set(accepted.flatMap(item => item.evidenceRefs))];
+        const finalProjection = {
+            content: buildWorldSimulationProjection_ACU(ledger),
+            sourceAgent: accepted.some(item => item.agentName === 'guidance-composer' && Object.prototype.hasOwnProperty.call(item.patch, 'guidance'))
+                ? 'guidance-composer' : 'current-ledger',
+            sourceRevision: ledger.revision,
+            deliverable: !escalated && accepted.length === 0,
+        };
         return {
             outcome: escalated ? 'escalate' : accepted.length ? 'commit' : 'no_change',
             summary,
@@ -167832,6 +169168,7 @@ Expected function or array of functions, received type ${typeof value}.`
             pendingFixes: ledger.pendingFixes,
             escalated,
             ledger,
+            finalProjection,
             commitCandidate: {
                 runId: input.identity.runId,
                 taskId: input.identity.taskId,
@@ -167850,7 +169187,7 @@ Expected function or array of functions, received type ${typeof value}.`
     const WORLD_SIMULATION_WORKFLOW_AGENT_ORDER_ACU = WORKFLOW_AGENTS_ACU;
 
     /**
-     * 世界推演子代理保留和本职强相关的占位符。其余主会话快照附在末尾，并去掉已经单独注入的行。
+     * 默认运行时段按角色筛选并置于请求末尾；导演的历史与特殊能力独立保留。
      */
     const RUNTIME_LINE_ACU = [
         ['$WORLD_TASK', '任务：$WORLD_TASK'],
@@ -167884,10 +169221,13 @@ Expected function or array of functions, received type ${typeof value}.`
         return new Set([...COMMON_KEPT_ACU, ...(RELATED_TOKENS_ACU[name] ?? [])]);
     }
     function splitWorldSimulationSubagentPrompt_ACU(segments, name) {
-        const kept = name === 'world-director' ? worldSimulationKeptTokens_ACU(name) : new Set();
+        const kept = worldSimulationKeptTokens_ACU(name);
         const runtimeMarker = worldSimulationSeamMarker_ACU('RUNTIME_CONTEXT');
         const historyMarker = worldSimulationSeamMarker_ACU('HISTORY');
         const defaults = buildDefaultWorldSimulationAgentPrompt_ACU(name);
+        const runtimeDefault_ACU = (content) => name === 'world-director' || name === 'lore-researcher' ? content : content
+            .replace('独立的 read/search 需求在授权及预算许可时同一回复并发调用，不分批等待；只有依赖搜索结果的精读等回执。', '独立的授权 read 地址在同一回复并发调用，不分批等待。')
+            .replace('需要时用 worldbook scope 搜索并 read worldbook:entry:书名:uid 精读，或按证据定位并调阅旧记录。', '需要时仅按本角色授权的资料目录地址精读；无法核实时将缺口列入 uncertainties。');
         const guidanceIndex = defaults.findIndex(segment => segment.content.includes('$WORLD_USER_REQUIREMENTS'));
         const movedGuidanceIndex = name !== 'world-director' && guidanceIndex >= 0
             && segments[guidanceIndex]?.content === defaults[guidanceIndex].content && segments[guidanceIndex]?.enabled
@@ -167899,33 +169239,114 @@ Expected function or array of functions, received type ${typeof value}.`
                 if (segment.content !== defaults[index]?.content)
                     return { ...segment };
                 const present = RUNTIME_LINE_ACU.filter(([token]) => segment.content.includes(token));
-                snapshotLines.push(...present.filter(([token]) => !kept.has(token)).map(([, line]) => line));
-                const stay = present.filter(([token]) => kept.has(token)).map(([, line]) => line);
+                snapshotLines.push(...present.filter(([token]) => name === 'world-director'
+                    ? !kept.has(token) : kept.has(token)).map(([, line]) => line));
+                const stay = name === 'world-director'
+                    ? present.filter(([token]) => kept.has(token)).map(([, line]) => line) : [];
                 return { ...segment, content: [runtimeMarker, ...stay].join('\n') };
             }
             if (segment.content.includes(historyMarker) && segment.content.includes('$WORLD_HISTORY')) {
                 if (segment.content !== defaults[index]?.content)
                     return { ...segment };
-                snapshotLines.push('历史锚点与会话：$WORLD_HISTORY');
-                return { ...segment, content: `${historyMarker}\n主会话历史见末尾快照。` };
+                if (name === 'world-director') {
+                    snapshotLines.push('历史锚点与会话：$WORLD_HISTORY');
+                    return { ...segment, content: `${historyMarker}\n主会话历史见末尾快照。` };
+                }
+                return { ...segment, content: historyMarker };
             }
-            return { ...segment };
+            return segment.content === defaults[index]?.content ? { ...segment, content: runtimeDefault_ACU(segment.content) } : { ...segment };
         });
         const snapshotTemplate = snapshotLines.length
             ? `【本回合运行时数据】\n以下是本角色本次请求的最新完整快照，按这里的实时状态行动。\n${snapshotLines.join('\n')}`
             : '';
         return { segments: next, snapshotTemplate, movedGuidanceIndex };
     }
-    async function renderWorldSimulationSnapshotTemplate_ACU(template, resolvers) {
-        const tokens = [...new Set(template.match(/\$[A-Z][A-Z0-9_]*/g) ?? [])];
-        let text = template;
+    const SNAPSHOT_SOURCE_ACU = {
+        $WORLD_TASK: ['run-state', 'task:current'],
+        $WORLD_HISTORY: ['director-conversation', 'history:current'],
+        $WORLD_RUNTIME_CONTEXT: ['run-state', 'runtime:current'],
+        $WORLD_AGENT_CATALOG: ['agent-catalog', 'agents:current'],
+        $WORLD_TOOL_CATALOG: ['tool-catalog', 'tools:current'],
+        $WORLD_EVIDENCE: ['run-state', 'evidence:current'],
+        $WORLD_USER_GUIDANCE: ['user-input', 'guidance:current'],
+        $WORLD_USER_REQUIREMENTS: ['user-input', 'requirements:current'],
+        $ANCHOR_MESSAGE: ['host-chat', 'anchor:message'],
+        $ANCHOR_IDENTITY: ['host-chat', 'anchor:identity'],
+        // Resolver may return a role-specific catalog or an unverified context fallback, not the entire ledger.
+        $WORLD_STATE: ['resolved-context', '$WORLD_STATE'],
+        $WORLD_CHRONICLE: ['resolved-context', '$WORLD_CHRONICLE'],
+        $WORLD_CANDIDATES: ['run-state', 'candidates:current'],
+        $WORLD_COLLISIONS: ['derived-relevance', 'ledger+anchor:collisions'],
+        $CURRENT_EVIDENCE_REGISTRY: ['evidence-registry', 'registry:current'],
+        $WORLD_STAGE_PLAN: ['stage-plan', 'stage-plan:current'],
+        $PROJECTION_PREVIEW: ['resolved-context', '$PROJECTION_PREVIEW'],
+        $READ_BUDGET: ['runtime-policy', 'read-budget:current'],
+    };
+    async function renderWorldSimulationSnapshotSections_ACU(template, resolvers, revisions = {}) {
+        const pattern = /\$[A-Z][A-Z0-9_]*/g;
+        const tokens = [...new Set(template.match(pattern) ?? [])];
+        // Validate every source before invoking any resolver: a late missing source must not
+        // leave an earlier resolver executed for a snapshot that cannot be sent.
         for (const token of tokens) {
-            const resolve = resolvers[token];
-            if (!resolve)
-                continue;
-            text = text.split(token).join(String(await resolve()));
+            if (!SNAPSHOT_SOURCE_ACU[token]) {
+                throw new Error(`WORLD_SIMULATION_SNAPSHOT_SOURCE_UNMAPPED:${token}`);
+            }
+            if (typeof resolvers[token] !== 'function') {
+                throw new Error(`WORLD_SIMULATION_SNAPSHOT_SOURCE_MISSING:${token}`);
+            }
         }
-        return text.trim();
+        const values = new Map();
+        for (const token of tokens) {
+            const value = await resolvers[token]();
+            if (typeof value !== 'string')
+                throw new Error(`WORLD_SIMULATION_SNAPSHOT_SOURCE_INVALID:${token}`);
+            values.set(token, value);
+        }
+        const sections = [];
+        let text = '';
+        let from = 0;
+        for (const match of template.matchAll(pattern)) {
+            text += template.slice(from, match.index);
+            const key = match[0];
+            const value = values.get(key);
+            const [source, address] = SNAPSHOT_SOURCE_ACU[key];
+            const revision = source === 'world-ledger' ? revisions.ledger : source === 'stage-plan' ? revisions.stage : undefined;
+            sections.push({ key, source, address, revision: Number.isSafeInteger(revision) && revision >= 0 ? revision : null,
+                start: text.length, length: value.length, complete: false });
+            text += value;
+            from = match.index + key.length;
+        }
+        return { text: text + template.slice(from), sections };
+    }
+    /** Verify the exact rendered spans in the actual prepared request before declaring them complete. */
+    function verifyWorldSimulationSnapshotSections_ACU(rendered, messages) {
+        if (!rendered.text || !rendered.sections.length)
+            throw new Error('WORLD_SIMULATION_SNAPSHOT_BOUNDARY_UNVERIFIED');
+        const occurrences = messages.flatMap((message, messageIndex) => {
+            const positions = [];
+            let start = message.content.indexOf(rendered.text);
+            while (start >= 0) {
+                positions.push({ messageIndex, start });
+                start = message.content.indexOf(rendered.text, start + 1);
+            }
+            return positions;
+        });
+        if (occurrences.length !== 1)
+            throw new Error('WORLD_SIMULATION_SNAPSHOT_BOUNDARY_UNVERIFIED');
+        const { messageIndex, start } = occurrences[0];
+        for (const section of rendered.sections) {
+            if (section.start < 0 || section.length < 0 || section.start + section.length > rendered.text.length) {
+                throw new Error('WORLD_SIMULATION_SNAPSHOT_BOUNDARY_UNVERIFIED');
+            }
+            const value = rendered.text.slice(section.start, section.start + section.length);
+            if (messages[messageIndex].content.slice(start + section.start, start + section.start + section.length) !== value) {
+                throw new Error('WORLD_SIMULATION_SNAPSHOT_BOUNDARY_UNVERIFIED');
+            }
+        }
+        return rendered.sections.map(section => ({ ...section, messageIndex, messageStart: start + section.start, complete: true }));
+    }
+    async function renderWorldSimulationSnapshotTemplate_ACU(template, resolvers) {
+        return (await renderWorldSimulationSnapshotSections_ACU(template, resolvers)).text;
     }
     /** 主会话本轮 read/search 的回执。附在子代理快照后面。 */
     function renderWorldSimulationDirectorReads_ACU(transcript) {
@@ -167934,10 +169355,75 @@ Expected function or array of functions, received type ${typeof value}.`
                 return false;
             const text = item.content.trim();
             return text.includes('"kind":"read"') || text.includes('"kind":"search"') || text.includes('worldbook:entry:');
-        }).map(item => item.content.trim());
+        }).map(item => item.content);
         if (!chunks.length)
             return '';
         return ['【主会话已调阅】', '下面是主会话本轮已经读到的全文。不要再对同一地址调用 read。', ...chunks].join('\n\n');
+    }
+    const WORLD_SIMULATION_WORLDBOOK_UNAVAILABLE_ACU = '【世界书快照读取失败】本轮未取得宿主世界书快照；不能将缺失条目视作世界书为空，也不能据此推断设定不存在。需要世界书证据时标记缺口，不得虚构。';
+    function bindWorldSimulationFixedWorldbook_ACU(text, hits) {
+        const sections = [];
+        // The fixed renderer owns the note and the no-hit text; no unmatched prefix/suffix may
+        // masquerade as part of the bound source. Do not trim any entry content.
+        const note = renderAgentWorldbookTriggeredInjection_ACU({ available: true, entries: [] }, '');
+        const prefix = note.slice(0, note.length - '当前没有已启用的世界书条目。'.length);
+        if (hits.length && !text.startsWith(prefix))
+            throw new Error('WORLD_SIMULATION_WORLDBOOK_SOURCE_UNVERIFIED');
+        let cursor = hits.length ? prefix.length : 0;
+        // The renderer groups hits by book; entries from different books can interleave in the source.
+        const byBook = new Map();
+        for (const hit of hits)
+            byBook.set(hit.bookName, [...(byBook.get(hit.bookName) ?? []), hit]);
+        for (const bookHits of byBook.values())
+            for (const hit of bookHits) {
+                const frame = `### ${hit.title}（${hit.bookName}#${hit.uid}）\n${hit.content}`;
+                const separator = sections.length ? '\n\n' : '';
+                const start = cursor + separator.length;
+                if (text.slice(cursor, start) !== separator || text.slice(start, start + frame.length) !== frame) {
+                    throw new Error('WORLD_SIMULATION_WORLDBOOK_SOURCE_UNVERIFIED');
+                }
+                const bodyStart = start + frame.length - hit.content.length;
+                sections.push({ address: `worldbook:entry:${hit.bookName}:${hit.uid}`, start: bodyStart,
+                    length: hit.content.length, revision: null });
+                cursor = bodyStart + hit.content.length;
+            }
+        if (hits.length && cursor !== text.length)
+            throw new Error('WORLD_SIMULATION_WORLDBOOK_SOURCE_UNVERIFIED');
+        if (!hits.length && text && text !== note && text !== `${prefix}本轮没有命中世界书条目。`
+            && text !== WORLD_SIMULATION_WORLDBOOK_UNAVAILABLE_ACU)
+            throw new Error('WORLD_SIMULATION_WORLDBOOK_SOURCE_UNVERIFIED');
+        return { text, sections };
+    }
+    /** Proves the source-bound complete bodies occur in one fixed injection in prepared messages. */
+    function verifyWorldSimulationFixedWorldbook_ACU(fixed, messages) {
+        if (!fixed.text) {
+            if (fixed.sections.length)
+                throw new Error('WORLD_SIMULATION_WORLDBOOK_BOUNDARY_UNVERIFIED');
+            return [];
+        }
+        const matches = messages.flatMap((message, messageIndex) => {
+            const found = [];
+            let at = message.content.indexOf(fixed.text);
+            while (at >= 0) {
+                found.push({ messageIndex, start: at });
+                at = message.content.indexOf(fixed.text, at + 1);
+            }
+            return found;
+        });
+        if (matches.length !== 1)
+            throw new Error('WORLD_SIMULATION_WORLDBOOK_BOUNDARY_UNVERIFIED');
+        const match = matches[0];
+        let cursor = 0;
+        return fixed.sections.map(section => {
+            if (section.start < cursor || section.length <= 0 || section.start + section.length > fixed.text.length
+                || messages[match.messageIndex].content.slice(match.start + section.start, match.start + section.start + section.length)
+                    !== fixed.text.slice(section.start, section.start + section.length)) {
+                throw new Error('WORLD_SIMULATION_WORLDBOOK_BOUNDARY_UNVERIFIED');
+            }
+            cursor = section.start + section.length;
+            return { address: section.address, revision: section.revision, messageIndex: match.messageIndex,
+                start: match.start + section.start, length: section.length, complete: true };
+        });
     }
 
     const clamp_ACU = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -168280,8 +169766,14 @@ Expected function or array of functions, received type ${typeof value}.`
             if (!input.anchor && handoffHint)
                 transcript.unshift(handoffHint);
             const worldbookSnapshot = await (input.worldbookSnapshot ?? loadAgentWorldbookSnapshot_ACU());
-            const triggeredWorldbook = worldbookSnapshot.available && worldbookSnapshot.entries.length
-                ? renderAgentWorldbookTriggeredInjection_ACU(worldbookSnapshot, buildRecentWorldbookScanText_ACU(input.chat ?? getChatArray_ACU())) : '';
+            const worldbookScan = worldbookSnapshot.available && worldbookSnapshot.entries.length
+                ? buildRecentWorldbookScanText_ACU(input.chat ?? getChatArray_ACU()) : '';
+            const triggeredWorldbook = !worldbookSnapshot.available
+                ? WORLD_SIMULATION_WORLDBOOK_UNAVAILABLE_ACU
+                : worldbookSnapshot.entries.length
+                    ? renderAgentWorldbookTriggeredInjection_ACU(worldbookSnapshot, worldbookScan) : '';
+            const fixedWorldbook = bindWorldSimulationFixedWorldbook_ACU(triggeredWorldbook, worldbookSnapshot.available && worldbookSnapshot.entries.length
+                ? selectTriggeredWorldbookEntries_ACU(worldbookSnapshot.entries, worldbookScan) : []);
             let persistedTranscriptLength = input.anchor ? persistedHistory.length : 0;
             const flushDirectorHistory = async () => {
                 if (!input.anchor || transcript.length <= persistedTranscriptLength)
@@ -168305,6 +169797,8 @@ Expected function or array of functions, received type ${typeof value}.`
                 persistedTranscriptLength = transcript.length;
             };
             const director = 'world-director';
+            const roundId = JSON.stringify([input.identity.taskId, input.identity.stageId, input.identity.stageRevision]);
+            const readRoundState = createWorldSimulationReadRoundState_ACU();
             // Director may correct several different mechanical fields in sequence; repeated identical
             // failures remain capped by the repair state's per-fingerprint guard.
             const protocolRepair = createWorldSimulationProtocolRepairState_ACU(2);
@@ -168345,9 +169839,10 @@ Expected function or array of functions, received type ${typeof value}.`
                         promptContext: resultContext_ACU(currentContext(), input.registry, available, outcomes),
                         registry: input.registry,
                         tools: input.tools,
+                        roundId, readRoundState,
                         isCurrent: input.isCurrent,
                         directorMaterials: renderWorldSimulationDirectorReads_ACU(transcript),
-                        triggeredWorldbook,
+                        triggeredWorldbook, fixedWorldbook,
                     }),
                 };
             };
@@ -168537,9 +170032,15 @@ Expected function or array of functions, received type ${typeof value}.`
                     }
                     sent = await executeWorldSimulationFinalRequest_ACU({
                         messages: prepared,
+                        inputLimitTokens: input.settings.agentHistoryTokenBudget,
+                        tools: agentNativeTools_ACU(worldSimulationAgentNativeTools_ACU(director)),
                         historyBudgetTokens: input.settings.agentHistoryTokenBudget,
                         count,
-                        invoke: messages => this.dependencies.invoke(director, messages, preset),
+                        invoke: messages => {
+                            if (fixedWorldbook.text)
+                                verifyWorldSimulationFixedWorldbook_ACU(fixedWorldbook, messages);
+                            return this.dependencies.invoke(director, messages, preset);
+                        },
                     });
                 }
                 catch (error) {
@@ -168609,17 +170110,33 @@ Expected function or array of functions, received type ${typeof value}.`
                     let perCallResults;
                     try {
                         perCallResults = [];
-                        for (const call of calls)
-                            perCallResults.push(await runWorldSimulationToolBatch_ACU({
-                                calls: [call], registry: input.registry, dependencies: input.tools,
+                        for (let index = 0; index < calls.length;) {
+                            const first = calls[index];
+                            let end = index + 1;
+                            if (first.kind === 'read') {
+                                while (end < calls.length && calls[end].kind === 'read')
+                                    end += 1;
+                            }
+                            const group = calls.slice(index, end);
+                            const batch = await runWorldSimulationToolBatch_ACU({
+                                calls: group, registry: input.registry, dependencies: input.tools,
                                 gate: {
                                     state: readGateState,
                                     config: { historyTokenBudget: input.settings.agentHistoryTokenBudget, readTokenBudget: input.settings.agentReadTokenBudget, fallbackTokens: input.settings.agentReadFallbackTokens },
                                     usage: toolUsage,
                                     maxReads: input.settings.agentRunBudget.maxReads,
+                                    ...(sent.defaultReadFenceTokens === undefined ? {} : { defaultReadFenceTokens: sent.defaultReadFenceTokens }),
                                     count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
                                 },
-                            }));
+                            });
+                            let offset = 0;
+                            for (const call of group) {
+                                const size = call.kind === 'read' ? call.reads.length : batch.length;
+                                perCallResults.push(batch.slice(offset, offset + size));
+                                offset += size;
+                            }
+                            index = end;
+                        }
                         const results = perCallResults.flat();
                         const toolOk = results.every(result => result.status === 'ok' || result.status === 'empty');
                         updateWorldSimulationSession_ACU(input.identity.chatIdentity, toolEntryId, {
@@ -168655,6 +170172,7 @@ Expected function or array of functions, received type ${typeof value}.`
                             promptContext: requestContext,
                             registry: input.registry,
                             tools: input.tools,
+                            roundId, readRoundState,
                             writeSql: input.writeSql,
                             readCurrent: input.readCurrent,
                             readFieldSnapshot: input.readFieldSnapshot,
@@ -168670,7 +170188,7 @@ Expected function or array of functions, received type ${typeof value}.`
                             targetModules: input.targetModules,
                             subagents: this.dependencies.subagents,
                             directorMaterials: renderWorldSimulationDirectorReads_ACU(transcript),
-                            triggeredWorldbook,
+                            triggeredWorldbook, fixedWorldbook,
                         });
                     }
                     catch (error) {
@@ -168687,25 +170205,32 @@ Expected function or array of functions, received type ${typeof value}.`
                         status: workflow.outcome === 'escalate' ? 'failed' : 'done',
                     });
                     await persistEntry(workflowEntryId, `workflow-${iteration}`);
-                    const workflowFeedback = JSON.stringify({ outcome: workflow.outcome === 'escalate' ? 'escalate' : 'prepared', pendingFixes: workflow.pendingFixes, agents: workflow.outcomes.map(item => ({ agentName: item.agentName, status: item.status })) });
-                    transcript.push({ role: 'assistant', content: raw || '(empty)' }, {
-                        role: 'user', content: workflow.outcome === 'escalate'
-                            ? `${workflowFeedback}
-${workflow.summary}
-资料维护未合格。请向用户说明缺口，或在用户要求维护资料时 delegate 对应角色。不要再次 open_round 同一批已升级的待修复项。`
-                            : workflowFeedback,
-                    });
-                    await flushDirectorHistory();
                     if (workflow.outcome === 'escalate') {
+                        const workflowFeedback = JSON.stringify({ outcome: 'escalate', pendingFixes: workflow.pendingFixes, agents: workflow.outcomes.map(item => ({ agentName: item.agentName, status: item.status })) });
+                        transcript.push({ role: 'assistant', content: raw || '(empty)' }, {
+                            role: 'user', content: `${workflowFeedback}
+${workflow.summary}
+资料维护未合格。请向用户说明缺口，或在用户要求维护资料时 delegate 对应角色。不要再次 open_round 同一批已升级的待修复项。`,
+                        });
+                        await flushDirectorHistory();
                         workflowEscalation = { summary: workflow.summary, pendingFixes: workflow.pendingFixes };
                         await persist(iteration + 1, workflow.summary);
                         continue;
                     }
+                    // 保存已发生的导演动作及工作流终态，维持锚定历史的成对协议；
+                    // 此回执只用于审计/恢复，不再发给导演请求二次生成。
+                    transcript.push({ role: 'assistant', content: raw || '(empty)' }, {
+                        role: 'user', content: JSON.stringify({ outcome: workflow.outcome,
+                            summary: workflow.summary, source: 'fixed-workflow' }),
+                    });
+                    await flushDirectorHistory();
                     await clearWorldSimulationRunStateAtAnchor_ACU(input.anchor, input.chat);
-                    if (workflow.outcome === 'no_change' || !workflow.commitCandidate) {
-                        return { outcome: 'no_change', summary: workflow.summary, outcomes };
+                    if (workflow.outcome === 'no_change') {
+                        return { outcome: 'no_change', summary: workflow.summary, outcomes, finalProjection: workflow.finalProjection };
                     }
-                    return { outcome: 'commit', summary: workflow.summary, commitCandidate: workflow.commitCandidate, outcomes };
+                    if (!workflow.commitCandidate)
+                        throw new Error('WORLD_SIMULATION_WORKFLOW_COMMIT_CANDIDATE_REQUIRED');
+                    return { outcome: 'commit', summary: workflow.summary, commitCandidate: workflow.commitCandidate, outcomes, finalProjection: workflow.finalProjection };
                 }
                 if (action.kind === 'delegate') {
                     const accepted = [];
@@ -168755,10 +170280,11 @@ ${workflow.summary}
                                 readCurrent: input.readCurrent,
                                 readFieldSnapshot: input.readFieldSnapshot,
                                 isCurrent: input.isCurrent,
+                                roundId, readRoundState,
                                 runId: input.identity.runId,
                                 candidateSeq: nextSeq,
                                 directorMaterials: renderWorldSimulationDirectorReads_ACU(transcript),
-                                triggeredWorldbook,
+                                triggeredWorldbook, fixedWorldbook,
                             });
                         }
                         catch (error) {
@@ -168860,7 +170386,7 @@ ${rejectionText}` : delegationFeedback,
                 try {
                     reviewer = pendingReview?.fingerprint === reviewFingerprint
                         ? await pendingReview.promise
-                        : await this.dependencies.subagents.runReviewer({ candidates: available, settings: input.settings, promptContext: requestContext, registry: input.registry, tools: input.tools, isCurrent: input.isCurrent, directorMaterials: renderWorldSimulationDirectorReads_ACU(transcript), triggeredWorldbook });
+                        : await this.dependencies.subagents.runReviewer({ candidates: available, settings: input.settings, promptContext: requestContext, registry: input.registry, tools: input.tools, roundId, readRoundState, isCurrent: input.isCurrent, directorMaterials: renderWorldSimulationDirectorReads_ACU(transcript), triggeredWorldbook, fixedWorldbook });
                     pendingReview = null;
                     updateWorldSimulationSession_ACU(input.identity.chatIdentity, reviewerEntryId, { title: `因果审核：${reviewer.verdict}`, detail: reviewer.summary, ok: reviewer.verdict !== 'reject', status: reviewer.verdict === 'reject' ? 'failed' : 'done' });
                     await persistEntry(reviewerEntryId, `causality-review-${iteration}`);
@@ -169237,14 +170763,16 @@ ${rejectionText}` : delegationFeedback,
                 });
                 const remainingTokens = Math.max(0, readBudget.effectiveMaxReadTokens - readGateState.grantedTokens);
                 const remainingRounds = Math.max(0, input.settings.agentRunBudget.maxExtraReads - toolRounds);
-                const readBudgetText = `本轮剩余阅读预算：约 ${remainingTokens} tokens（上限 ${readBudget.effectiveMaxReadTokens}，已授予 ${readGateState.grantedTokens}）；剩余 read/search 轮次 ${remainingRounds}/${input.settings.agentRunBudget.maxExtraReads}。`;
+                const readAction = definition.kind === 'researcher' ? 'read/search' : 'read';
+                const readBudgetText = `本轮剩余阅读预算：约 ${remainingTokens} tokens（上限 ${readBudget.effectiveMaxReadTokens}，已授予 ${readGateState.grantedTokens}）；剩余 ${readAction} 轮次 ${remainingRounds}/${input.settings.agentRunBudget.maxExtraReads}。`;
                 const requestContext = { ...context, ...(input.readCurrent ? { worldState: input.readCurrent() } : {}), evidenceRegistry: requestSnapshot, readBudgetText };
                 const resolvers = createWorldSimulationPlaceholderResolvers_ACU(requestContext);
                 const split = splitWorldSimulationSubagentPrompt_ACU(input.settings.agentPrompts[agentName], agentName);
                 const rendered = await renderWorldSimulationPrompt_ACU(split.segments, agentName, resolvers);
-                const snapshotText = split.snapshotTemplate ? await renderWorldSimulationSnapshotTemplate_ACU(split.snapshotTemplate, resolvers) : '';
+                const snapshot = await renderWorldSimulationSnapshotSections_ACU(split.snapshotTemplate, resolvers, isWorldSimulationLedgerContext_ACU(requestContext.worldState) ? { ledger: requestContext.worldState.revision } : {});
+                const snapshotText = snapshot.text;
                 const guidance = split.movedGuidanceIndex >= 0 ? rendered.messages[split.movedGuidanceIndex]?.content : '';
-                const appendix = [snapshotText, guidance, input.triggeredWorldbook?.trim() ?? '', input.directorMaterials?.trim() ?? ''].filter(Boolean).join('\n\n');
+                const appendix = [snapshotText, guidance, input.triggeredWorldbook ?? ''].filter(Boolean).join('\n\n');
                 const protocolGuard = { role: 'system', content: worldSimulationSpecialistRuntimeProtocolInstruction_ACU(agentName, writableModules) };
                 const drafted = [protocolGuard, ...rendered.messages.filter((message, index) => index !== split.movedGuidanceIndex && message.content !== USER_PREFILL_CONTENT_ACU), ...transcript, ...(appendix ? [{ role: 'user', content: appendix }] : []), ...(rendered.messages.some(message => message.content === USER_PREFILL_CONTENT_ACU)
                         ? [{ role: 'user', content: USER_PREFILL_CONTENT_ACU }]
@@ -169252,9 +170780,20 @@ ${rejectionText}` : delegationFeedback,
                 const messages = withNativeToolThinkPrefill_ACU(drafted);
                 const sent = await executeWorldSimulationFinalRequest_ACU({
                     messages,
+                    inputLimitTokens: input.settings.agentHistoryTokenBudget,
+                    tools: agentNativeTools_ACU(worldSimulationAgentNativeTools_ACU(agentName)),
                     historyBudgetTokens: input.settings.agentHistoryTokenBudget,
                     count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
-                    invoke: value => this.dependencies.invoke(agentName, value, preset),
+                    invoke: value => {
+                        if (snapshot.text)
+                            verifyWorldSimulationSnapshotSections_ACU(snapshot, value);
+                        if (input.fixedWorldbook) {
+                            if (input.fixedWorldbook.text !== (input.triggeredWorldbook ?? ''))
+                                throw new Error('WORLD_SIMULATION_WORLDBOOK_SOURCE_UNVERIFIED');
+                            verifyWorldSimulationFixedWorldbook_ACU(input.fixedWorldbook, value);
+                        }
+                        return this.dependencies.invoke(agentName, value, preset);
+                    },
                 });
                 if (input.isCurrent && !input.isCurrent())
                     throw new Error('WORLD_SIMULATION_RUN_STALE');
@@ -169273,7 +170812,12 @@ ${rejectionText}` : delegationFeedback,
                         }
                         if (call.name !== 'read' && call.name !== 'search')
                             throw new Error(`未知工具 ${call.name}`);
-                        return parseWorldSimulationMainAction_ACU(payload, false, requestSnapshot);
+                        if (call.name === 'search' && definition.kind !== 'researcher')
+                            throw new Error('普通子代理未授权 search');
+                        const parsed = parseWorldSimulationMainAction_ACU(payload, false, requestSnapshot);
+                        if (parsed.kind !== call.name)
+                            throw new Error('工具名称与动作不一致');
+                        return parsed;
                     }) : null;
                     if (!nativeCalls.length && parseWorldSimulationSubagentToolCalls_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], requestSnapshot, !!input.writeSql && writableModules.length > 0))
                         throw new Error('工具必须使用原生函数调用');
@@ -169296,7 +170840,8 @@ ${rejectionText}` : delegationFeedback,
                 }
                 if (calls) {
                     const perCall = [];
-                    for (const call of calls) {
+                    for (let index = 0; index < calls.length; index += 1) {
+                        const call = calls[index];
                         const bucket = [];
                         perCall.push(bucket);
                         if (call.kind === 'write_sql') {
@@ -169342,9 +170887,29 @@ ${rejectionText}` : delegationFeedback,
                             }
                         }
                         else if (toolRounds >= input.settings.agentRunBudget.maxExtraReads) {
-                            bucket.push({ action: call.kind, status: 'rejected', reason: 'read/search 轮次已用尽' });
+                            bucket.push({ action: call.kind, status: 'rejected', reason: `${definition.kind === 'researcher' ? 'read/search' : 'read'} 轮次已用尽` });
                         }
                         else {
+                            if (call.kind === 'read') {
+                                const batch = [call];
+                                while (index + 1 < calls.length && calls[index + 1].kind === 'read') {
+                                    batch.push(calls[++index]);
+                                    perCall.push([]);
+                                }
+                                toolRounds += 1;
+                                bucket.push(...await runWorldSimulationToolBatch_ACU({
+                                    calls: batch, registry: input.registry, dependencies: input.tools,
+                                    gate: { state: readGateState,
+                                        config: { historyTokenBudget: input.settings.agentHistoryTokenBudget, readTokenBudget: input.settings.agentReadTokenBudget, fallbackTokens: input.settings.agentReadFallbackTokens },
+                                        usage: toolUsage, maxReads: input.settings.agentRunBudget.maxReads, readOnce: definition.kind !== 'researcher',
+                                        ...(sent.defaultReadFenceTokens === undefined ? {} : { defaultReadFenceTokens: sent.defaultReadFenceTokens }),
+                                        ...(input.readRoundState && input.roundId ? { readRoundState: input.readRoundState,
+                                            readRoundKey: JSON.stringify([agentName, input.roundId]) } : {}),
+                                        canReadAddress: address => worldSimulationCanReadAddress_ACU(agentName, address),
+                                        count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU },
+                                }));
+                                continue;
+                            }
                             toolRounds += 1;
                             bucket.push(...await runWorldSimulationToolBatch_ACU({
                                 calls: [call], registry: input.registry, dependencies: input.tools,
@@ -169417,23 +170982,35 @@ ${rejectionText}` : delegationFeedback,
                     readTokenBudget: input.settings.agentReadTokenBudget,
                     fallbackTokens: input.settings.agentReadFallbackTokens,
                 });
-                const readBudgetText = `本轮剩余阅读预算：约 ${Math.max(0, readBudget.effectiveMaxReadTokens - readGateState.grantedTokens)} tokens；剩余 read/search 轮次 ${Math.max(0, input.settings.agentRunBudget.maxExtraReads - toolRounds)}/${input.settings.agentRunBudget.maxExtraReads}。`;
+                const readBudgetText = `本轮剩余阅读预算：约 ${Math.max(0, readBudget.effectiveMaxReadTokens - readGateState.grantedTokens)} tokens；剩余 read 轮次 ${Math.max(0, input.settings.agentRunBudget.maxExtraReads - toolRounds)}/${input.settings.agentRunBudget.maxExtraReads}。`;
                 const requestContext = { ...context, evidenceRegistry: requestSnapshot, readBudgetText };
                 const resolvers = createWorldSimulationPlaceholderResolvers_ACU(requestContext);
                 const split = splitWorldSimulationSubagentPrompt_ACU(input.settings.agentPrompts[agentName], agentName);
                 const rendered = await renderWorldSimulationPrompt_ACU(split.segments, agentName, resolvers);
-                const snapshotText = split.snapshotTemplate ? await renderWorldSimulationSnapshotTemplate_ACU(split.snapshotTemplate, resolvers) : '';
+                const snapshot = await renderWorldSimulationSnapshotSections_ACU(split.snapshotTemplate, resolvers, isWorldSimulationLedgerContext_ACU(requestContext.worldState) ? { ledger: requestContext.worldState.revision } : {});
+                const snapshotText = snapshot.text;
                 const guidance = split.movedGuidanceIndex >= 0 ? rendered.messages[split.movedGuidanceIndex]?.content : '';
-                const appendix = [snapshotText, guidance, input.triggeredWorldbook?.trim() ?? '', input.directorMaterials?.trim() ?? ''].filter(Boolean).join('\n\n');
+                const appendix = [snapshotText, guidance, input.triggeredWorldbook ?? ''].filter(Boolean).join('\n\n');
                 const protocolGuard = { role: 'system', content: worldSimulationReviewerRuntimeProtocolInstruction_ACU() };
                 const reviewerDraft = [protocolGuard, ...rendered.messages.filter((message, index) => index !== split.movedGuidanceIndex && message.content !== USER_PREFILL_CONTENT_ACU), ...transcript, ...(appendix ? [{ role: 'user', content: appendix }] : []), ...(rendered.messages.some(message => message.content === USER_PREFILL_CONTENT_ACU)
                         ? [{ role: 'user', content: USER_PREFILL_CONTENT_ACU }]
                         : [])];
                 const sent = await executeWorldSimulationFinalRequest_ACU({
                     messages: withNativeToolThinkPrefill_ACU(reviewerDraft),
+                    inputLimitTokens: input.settings.agentHistoryTokenBudget,
+                    tools: agentNativeTools_ACU(worldSimulationAgentNativeTools_ACU(agentName)),
                     historyBudgetTokens: input.settings.agentHistoryTokenBudget,
                     count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
-                    invoke: value => this.dependencies.invoke(agentName, value, preset),
+                    invoke: value => {
+                        if (snapshot.text)
+                            verifyWorldSimulationSnapshotSections_ACU(snapshot, value);
+                        if (input.fixedWorldbook) {
+                            if (input.fixedWorldbook.text !== (input.triggeredWorldbook ?? ''))
+                                throw new Error('WORLD_SIMULATION_WORLDBOOK_SOURCE_UNVERIFIED');
+                            verifyWorldSimulationFixedWorldbook_ACU(input.fixedWorldbook, value);
+                        }
+                        return this.dependencies.invoke(agentName, value, preset);
+                    },
                 });
                 if (input.isCurrent?.() === false)
                     throw new Error('WORLD_SIMULATION_RUN_STALE');
@@ -169445,12 +171022,15 @@ ${rejectionText}` : delegationFeedback,
                 let calls;
                 try {
                     calls = reviewerNative.length ? nativeToolArguments_ACU(reviewerNative).map(({ call, payload }) => {
-                        if (call.name !== 'read' && call.name !== 'search')
+                        if (call.name !== 'read')
                             throw new Error(`reviewer 不允许调用 ${call.name}`);
-                        return parseWorldSimulationMainAction_ACU(payload, false, requestSnapshot);
+                        const parsed = parseWorldSimulationMainAction_ACU(payload, false, requestSnapshot);
+                        if (parsed.kind !== 'read')
+                            throw new Error('reviewer 只允许 read');
+                        return parsed;
                     }) : null;
                     if (!reviewerNative.length && toolCalls_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], requestSnapshot))
-                        throw new Error('read/search 必须使用原生函数调用');
+                        throw new Error('read 必须使用原生函数调用');
                 }
                 catch (error) {
                     if (!reviewerNative.length)
@@ -169461,26 +171041,29 @@ ${rejectionText}` : delegationFeedback,
                 }
                 if (calls) {
                     if (toolRounds >= input.settings.agentRunBudget.maxExtraReads) {
-                        const exhausted = 'reviewer 的 read/search 轮次已用尽，请依据现有候选与证据输出终审 JSON。';
+                        const exhausted = 'reviewer 的 read 轮次已用尽，请依据现有候选与证据输出终审 JSON。';
                         transcript.push(...nativeToolExchange_ACU(reviewerTurn.content, reviewerNative, reviewerNative.map(() => exhausted)));
                         continue;
                     }
                     toolRounds += 1;
-                    const perCallResults = [];
-                    for (const toolCall of calls)
-                        perCallResults.push(await runWorldSimulationToolBatch_ACU({
-                            calls: [toolCall], registry: input.registry, dependencies: input.tools,
-                            gate: {
-                                state: readGateState,
-                                config: { historyTokenBudget: input.settings.agentHistoryTokenBudget, readTokenBudget: input.settings.agentReadTokenBudget, fallbackTokens: input.settings.agentReadFallbackTokens },
-                                usage: toolUsage,
-                                maxReads: input.settings.agentRunBudget.maxReads,
-                                count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
-                            },
-                        }));
+                    const batchResults = await runWorldSimulationToolBatch_ACU({
+                        calls, registry: input.registry, dependencies: input.tools,
+                        gate: {
+                            state: readGateState,
+                            config: { historyTokenBudget: input.settings.agentHistoryTokenBudget, readTokenBudget: input.settings.agentReadTokenBudget, fallbackTokens: input.settings.agentReadFallbackTokens },
+                            usage: toolUsage,
+                            maxReads: input.settings.agentRunBudget.maxReads,
+                            readOnce: true,
+                            ...(sent.defaultReadFenceTokens === undefined ? {} : { defaultReadFenceTokens: sent.defaultReadFenceTokens }),
+                            ...(input.readRoundState && input.roundId ? { readRoundState: input.readRoundState,
+                                readRoundKey: JSON.stringify([agentName, input.roundId]) } : {}),
+                            canReadAddress: address => worldSimulationCanReadAddress_ACU(agentName, address),
+                            count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
+                        },
+                    });
                     if (input.isCurrent?.() === false)
                         throw new Error('WORLD_SIMULATION_RUN_STALE');
-                    transcript.push(...nativeToolExchange_ACU(reviewerTurn.content, reviewerNative, perCallResults.map(toolText_ACU)));
+                    transcript.push(...nativeToolExchange_ACU(reviewerTurn.content, reviewerNative, calls.map((_, index) => index === 0 ? toolText_ACU(batchResults) : '本逻辑读取批次已统一结算，结果见首个工具回执。')));
                     continue;
                 }
                 try {
@@ -170514,6 +172097,8 @@ ${rejectionText}` : delegationFeedback,
             const current = read();
             const sameTaskStage = stored?.taskId === identity.taskId && stored.stageId === identity.stageId;
             if (hasPartialWorldSimulationRunWrites_ACU(current) && sameTaskStage) {
+                if (current.ledger.revision !== identity.baseLedgerRevision || stored?.fingerprint !== canonical_ACU$1(current))
+                    throw new Error('WORLD_SIMULATION_LEDGER_STALE');
                 const adoptedWritten = {};
                 for (const [module, records] of Object.entries(current.fields?.records ?? {})) {
                     const ids = Object.entries(records ?? {})
@@ -171560,7 +173145,13 @@ ${rejectionText}` : delegationFeedback,
             await this.dependencies.assertAnchorCurrent(anchor);
             prepared.runWrites?.assertCurrent();
             const completedAt = this.dependencies.now();
+            if (result.outcome === 'commit' && !result.finalProjection
+                && result.commitCandidate.acceptedCandidates.some(candidate => candidate.agentName === 'guidance-composer'
+                    && Object.prototype.hasOwnProperty.call(candidate.patch, 'guidance'))) {
+                throw new Error('WORLD_SIMULATION_PROJECTION_AUTHORITY_UNVERIFIED');
+            }
             if (result.outcome === 'commit' || (result.outcome === 'no_change' && prepared.runWrites?.hasConfirmedWrites)) {
+                const guidanceBeforeCommit = this.dependencies.store.read()?.ledger.guidance;
                 const commitCandidate = result.outcome === 'commit' ? result.commitCandidate : {
                     runId: identity.runId, taskId: identity.taskId, stageId: identity.stageId,
                     stageRevision: identity.stageRevision, baseLedgerRevision: identity.baseLedgerRevision,
@@ -171574,8 +173165,37 @@ ${rejectionText}` : delegationFeedback,
                     completedAt,
                     timelineId: this.dependencies.allocateId('timeline'),
                 });
+                const committedResult = result.outcome === 'commit' ? result : { ...result, outcome: 'commit', commitCandidate };
+                // Only a persisted, completed ledger may supply the deliverable projection. The commit
+                // adapter can filter guidance signals after the workflow's preview was assembled.
+                const authoritative = this.dependencies.store.read();
+                const committedStage = authoritative?.stages.find(stage => stage.stageId === identity.stageId);
+                if (authoritative?.task?.taskId !== identity.taskId || authoritative.task.status !== 'completed'
+                    || authoritative.task.activeRun !== null || committedStage?.status !== 'completed'
+                    || committedStage.activeRevision !== identity.stageRevision) {
+                    throw new Error('WORLD_SIMULATION_PROJECTION_AUTHORITY_UNVERIFIED');
+                }
+                const composerSignalsPersisted = commitCandidate.acceptedCandidates.some(candidate => {
+                    if (candidate.agentName !== 'guidance-composer')
+                        return false;
+                    const guidance = candidate.patch.guidance;
+                    return guidance !== null && typeof guidance === 'object' && !Array.isArray(guidance)
+                        && Array.isArray(guidance.signals)
+                        && JSON.stringify(guidance.signals) === JSON.stringify(authoritative.ledger.guidance.signals);
+                });
+                const committedContent = buildWorldSimulationProjection_ACU(authoritative.ledger);
+                const composerPersisted = composerSignalsPersisted && result.finalProjection?.sourceAgent === 'guidance-composer'
+                    && guidanceBeforeCommit !== undefined
+                    && JSON.stringify(guidanceBeforeCommit.signals) !== JSON.stringify(authoritative.ledger.guidance.signals)
+                    && committedContent !== null && committedContent === result.finalProjection.content;
+                committedResult.finalProjection = {
+                    content: committedContent,
+                    sourceAgent: composerPersisted ? 'guidance-composer' : 'current-ledger',
+                    sourceRevision: authoritative.ledger.revision,
+                    deliverable: true,
+                };
                 await this.reportCompletion_ACU(identity, committedAnchor || anchor, 'commit', result.summary);
-                return { status: 'completed', identity, result: result.outcome === 'commit' ? result : { ...result, outcome: 'commit', commitCandidate } };
+                return { status: 'completed', identity, result: committedResult };
             }
             await this.dependencies.store.updateAtomically(envelope => {
                 assertRunCurrent_ACU(envelope, identity, prepared.runWrites?.currentLedgerRevision);
@@ -171591,6 +173211,18 @@ ${rejectionText}` : delegationFeedback,
                     updatedAt: completedAt,
                 };
             }, { chatIdentity: identity.chatIdentity, taskId: identity.taskId, stageId: identity.stageId, revision: identity.stageRevision });
+            if (result.outcome === 'no_change') {
+                const authoritative = this.dependencies.store.read();
+                if (authoritative?.task?.taskId !== identity.taskId || authoritative.task.status !== 'completed'
+                    || authoritative.task.activeRun !== null
+                    || authoritative.ledger.revision !== (result.finalProjection?.sourceRevision ?? identity.baseLedgerRevision)) {
+                    throw new Error('WORLD_SIMULATION_PROJECTION_AUTHORITY_UNVERIFIED');
+                }
+                result.finalProjection = {
+                    content: buildWorldSimulationProjection_ACU(authoritative.ledger),
+                    sourceAgent: 'current-ledger', sourceRevision: authoritative.ledger.revision, deliverable: true,
+                };
+            }
             if (result.outcome === 'no_change')
                 await this.reportCompletion_ACU(identity, anchor, 'no_change', result.summary);
             return { status: 'completed', identity, result };
@@ -171714,6 +173346,7 @@ ${rejectionText}` : delegationFeedback,
                 for (;;) {
                     const sent = await executeWorldSimulationFinalRequest_ACU({
                         messages: [...rendered.messages, protocolGuard, ...transcript],
+                        inputLimitTokens: input.settings.agentHistoryTokenBudget,
                         historyBudgetTokens: input.settings.agentHistoryTokenBudget,
                         count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
                         invoke: messages => this.dependencies.invoke(messages, preset),
@@ -171982,15 +173615,23 @@ ${rejectionText}` : delegationFeedback,
             : settings.sources.wikipediaEn;
     function createWorldSimulationHostToolDependencies_ACU(context) {
         const client = context.webClient ?? new WorldSimulationWebClient_ACU();
-        const worldbookSnapshot = context.worldbookSnapshot ?? loadAgentWorldbookSnapshot_ACU();
-        const externalRead = async (address) => {
+        // 同一运行内复用快照，但拒绝显式围栏时不能提前启动宿主读取。
+        let snapshotPromise = context.worldbookSnapshot;
+        const worldbookSnapshot = () => snapshotPromise ?? (snapshotPromise = loadAgentWorldbookSnapshot_ACU());
+        const externalRead = async (address, requestedFence) => {
+            // These adapters expose no stable revision or canonical fence bounds. Reject before accessing
+            // worldbook or remote providers; only a proof-capable externalRead may handle a fenced request.
+            if (requestedFence !== undefined && (address.startsWith('worldbook:entry:')
+                || address.startsWith('encyclopedia:entry:') || address.startsWith('web:url:'))) {
+                return { status: 'failed', summary: 'fence proof unavailable for external address' };
+            }
             if (address.startsWith('worldbook:entry:')) {
                 const [bookPart, uidPart, ...rest] = address.slice('worldbook:entry:'.length).split(':');
                 const book = decode_ACU(bookPart);
                 const uid = decode_ACU(uidPart);
                 if (!book || !uid || rest.length)
                     return { status: 'failed', summary: 'invalid worldbook address' };
-                const snapshot = await worldbookSnapshot;
+                const snapshot = await worldbookSnapshot();
                 if (!snapshot.available)
                     return { status: 'failed', summary: 'worldbook snapshot unavailable' };
                 const entry = snapshot.entries.find(item => item.bookName === book && item.uid === uid);
@@ -172019,7 +173660,11 @@ ${rejectionText}` : delegationFeedback,
                 const page = await client.webRead(url, context.webResearch);
                 return page.text ? { status: 'ok', content: page.text, summary: url, exact: true, truncated: page.truncated } : { status: page.note === 'empty' ? 'empty' : 'failed', summary: page.note };
             }
-            return { status: 'dependency_unavailable', summary: 'unknown external address' };
+            if (!context.externalRead)
+                return { status: 'dependency_unavailable', summary: 'unknown external address' };
+            return requestedFence === undefined
+                ? context.externalRead(address)
+                : context.externalRead(address, requestedFence);
         };
         const externalSearch = async (query, scope, maxResults, isRegex) => {
             if (!query.trim())
@@ -172036,7 +173681,7 @@ ${rejectionText}` : delegationFeedback,
                 }
                 else
                     try {
-                        const snapshot = await worldbookSnapshot;
+                        const snapshot = await worldbookSnapshot();
                         if (!snapshot.available)
                             throw new Error('worldbook snapshot unavailable');
                         const matcher = isRegex ? new RegExp(query, 'i') : null;
@@ -172213,10 +173858,11 @@ ${rejectionText}` : delegationFeedback,
         beginWorldSimulationInternalAiRequest_ACU({ requestId, runId: identity.runId, role });
         try {
             const definition = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === role);
+            const nativeTools = worldSimulationAgentNativeTools_ACU(role);
             const boundary = readWorldSimulationConversation_ACU(getChatArray_ACU()).compaction?.report;
             const promptCacheKey = supportsExplicitOpenAiCacheKey_ACU(preset) ? buildOpenAiPromptCacheKey_ACU({
                 chatIdentity: identity.chatIdentity, role,
-                tools: ['read', 'search', ...(definition?.writableModules.length ? ['write_sql', ...definition.writableModules.map(module => `module:${module}`)] : [])],
+                tools: [...nativeTools, ...(definition?.writableModules.map(module => `module:${module}`) ?? [])],
                 boundary, preset,
             }) : undefined;
             const response = await callAIChatTurn_ACU([...messages], preset, signal, {
@@ -172224,7 +173870,7 @@ ${rejectionText}` : delegationFeedback,
                 afterMainApiCall: () => endWorldSimulationInternalAiMainApiInvocation_ACU(requestId),
             }, {
                 ...(promptCacheKey ? { promptCacheKey } : {}),
-                tools: agentNativeTools_ACU(definition?.writableModules.length ? ['read', 'search', 'write_sql'] : ['read', 'search']),
+                tools: agentNativeTools_ACU(nativeTools),
             });
             if (response.content.trim() || response.toolCalls.length)
                 return response;
@@ -202018,8 +203664,8 @@ ${rejectionText}` : delegationFeedback,
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-page[data-v-dff95bcb] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-dff95bcb] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-dff95bcb] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-dff95bcb] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-dff95bcb] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-dff95bcb] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-dff95bcb] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-dff95bcb] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-dff95bcb] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-dff95bcb] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-dff95bcb] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-continuation-page__groups[data-v-dff95bcb] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-continuation-page__group[data-v-dff95bcb] {\r\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-continuation-page__group[data-v-dff95bcb] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-continuation-page__group[data-v-dff95bcb] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-continuation-page__group[data-v-dff95bcb] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-continuation-page__group[data-v-dff95bcb] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-continuation-page__group .acu-v2-continuation-page__actions[data-v-dff95bcb] { margin-top: 0;\n}\n.acu-v2-continuation-page__subheading[data-v-dff95bcb] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-continuation-page__subheading[data-v-dff95bcb]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-dff95bcb] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-dff95bcb] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-dff95bcb] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-dff95bcb] > * { flex: 1 1 auto;\n}\n.acu-v2-continuation-page__group[data-v-dff95bcb] .acu-disclosure-group__meta { display: none;\n}\n}\r\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-dff95bcb");
-    var ContinuationPage_vue_vue_type_style_index_0_scoped_dff95bcb_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-page[data-v-21045b85] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-21045b85] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-21045b85] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-21045b85] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-21045b85] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-21045b85] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-21045b85] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-21045b85] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-21045b85] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-21045b85] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-21045b85] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-continuation-page__groups[data-v-21045b85] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-continuation-page__group[data-v-21045b85] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-continuation-page__group[data-v-21045b85] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-continuation-page__group[data-v-21045b85] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-continuation-page__group[data-v-21045b85] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-continuation-page__group[data-v-21045b85] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-continuation-page__group .acu-v2-continuation-page__actions[data-v-21045b85] { margin-top: 0;\n}\n.acu-v2-continuation-page__subheading[data-v-21045b85] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-continuation-page__subheading[data-v-21045b85]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-21045b85] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-21045b85] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-21045b85] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-21045b85] > * { flex: 1 1 auto;\n}\n.acu-v2-continuation-page__group[data-v-21045b85] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-21045b85");
+    var ContinuationPage_vue_vue_type_style_index_0_scoped_21045b85_lang = null;
 
     const _hoisted_1$q = { class: "acu-v2-continuation-page" };
     const _hoisted_2$o = {
@@ -202294,7 +203940,7 @@ ${rejectionText}` : delegationFeedback,
 						})) : createCommentVNode("v-if", true),
 						createVNode($setup["AcuFormRow"], {
 							label: "API 预设（全局默认）",
-							hint: "所有 Agent 默认走这个预设；需要给某个 Agent 单独指定时，展开下方「各 Agent 渠道」。"
+							hint: "所有 Agent 默认走这个预设；需要给某个 Agent 单独指定时，展开下方「各 Agent 渠道」。需要工具的 Agent 须选择支持原生工具的独立自定义 API；酒馆主 API 无法返回工具调用，连接管理器不传递工具定义。"
 						}, {
 							default: withCtx(() => [createVNode($setup["AcuSelect"], {
 								options: $setup.continuationApiPresetOptions,
@@ -203059,7 +204705,7 @@ ${rejectionText}` : delegationFeedback,
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$q, [["render", _sfc_render$q], ["__scopeId", "data-v-dff95bcb"]]);
+    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$q, [["render", _sfc_render$q], ["__scopeId", "data-v-21045b85"]]);
 
     /** 页面（.vue）不能直接引用 service 值，角色顺序经此处中转。 */
     const WORLD_SIMULATION_AGENT_ORDER_ACU = WORLD_SIMULATION_AGENT_NAMES_ACU;
@@ -205593,8 +207239,8 @@ ${rejectionText}` : delegationFeedback,
         }
     });
 
-    injectSfcStyle("\n.acu-v2-world-simulation-page[data-v-a8f10ff3] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-world-simulation-page__layout[data-v-a8f10ff3] { align-items: start;\n}\n.acu-v2-world-simulation-page__actions[data-v-a8f10ff3] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-world-simulation-page__actions--start[data-v-a8f10ff3] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-world-simulation-page__file-input[data-v-a8f10ff3] { display: none;\n}\n.acu-v2-world-simulation-page__error[data-v-a8f10ff3] { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__meta[data-v-a8f10ff3] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-a8f10ff3] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-world-simulation-page__toggles[data-v-a8f10ff3] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-world-simulation-page__groups[data-v-a8f10ff3] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-world-simulation-page__group[data-v-a8f10ff3] {\r\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-world-simulation-page__group[data-v-a8f10ff3] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-world-simulation-page__group[data-v-a8f10ff3] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-world-simulation-page__group[data-v-a8f10ff3] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-world-simulation-page__group[data-v-a8f10ff3] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-world-simulation-page__group .acu-v2-world-simulation-page__actions[data-v-a8f10ff3] { margin-top: 0;\n}\n.acu-v2-world-simulation-page__subheading[data-v-a8f10ff3] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-world-simulation-page__subheading[data-v-a8f10ff3]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-world-simulation-page[data-v-a8f10ff3] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-world-simulation-page[data-v-a8f10ff3] { padding: 10px; gap: 12px;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-a8f10ff3] { grid-template-columns: 1fr;\n}\n.acu-v2-world-simulation-page__actions[data-v-a8f10ff3] > * { flex: 1 1 auto;\n}\n.acu-v2-world-simulation-page__group[data-v-a8f10ff3] .acu-disclosure-group__meta { display: none;\n}\n}\r\n", "src/presentation-v2/pages/WorldSimulationPage.vue#style-0-a8f10ff3");
-    var WorldSimulationPage_vue_vue_type_style_index_0_scoped_a8f10ff3_lang = null;
+    injectSfcStyle("\n.acu-v2-world-simulation-page[data-v-9b52bef7] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-world-simulation-page__layout[data-v-9b52bef7] { align-items: start;\n}\n.acu-v2-world-simulation-page__actions[data-v-9b52bef7] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-world-simulation-page__actions--start[data-v-9b52bef7] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-world-simulation-page__file-input[data-v-9b52bef7] { display: none;\n}\n.acu-v2-world-simulation-page__error[data-v-9b52bef7] { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__meta[data-v-9b52bef7] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-9b52bef7] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-world-simulation-page__toggles[data-v-9b52bef7] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-world-simulation-page__groups[data-v-9b52bef7] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-world-simulation-page__group[data-v-9b52bef7] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-world-simulation-page__group[data-v-9b52bef7] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-world-simulation-page__group[data-v-9b52bef7] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-world-simulation-page__group[data-v-9b52bef7] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-world-simulation-page__group[data-v-9b52bef7] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-world-simulation-page__group .acu-v2-world-simulation-page__actions[data-v-9b52bef7] { margin-top: 0;\n}\n.acu-v2-world-simulation-page__subheading[data-v-9b52bef7] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-world-simulation-page__subheading[data-v-9b52bef7]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-world-simulation-page[data-v-9b52bef7] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-world-simulation-page[data-v-9b52bef7] { padding: 10px; gap: 12px;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-9b52bef7] { grid-template-columns: 1fr;\n}\n.acu-v2-world-simulation-page__actions[data-v-9b52bef7] > * { flex: 1 1 auto;\n}\n.acu-v2-world-simulation-page__group[data-v-9b52bef7] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/WorldSimulationPage.vue#style-0-9b52bef7");
+    var WorldSimulationPage_vue_vue_type_style_index_0_scoped_9b52bef7_lang = null;
 
     const _hoisted_1$m = { class: "acu-v2-world-simulation-page" };
     const _hoisted_2$k = {
@@ -205736,7 +207382,7 @@ ${rejectionText}` : delegationFeedback,
 					createBaseVNode("div", _hoisted_5$c, [
 						createVNode($setup["AcuFormRow"], {
 							label: "API 预设（全局默认）",
-							hint: "所有 Agent 默认走这个预设；需要给某个 Agent 单独指定时，展开下方「各 Agent 渠道」。"
+							hint: "所有 Agent 默认走这个预设；需要给某个 Agent 单独指定时，展开下方「各 Agent 渠道」。需要工具的 Agent 须选择支持原生工具的独立自定义 API；酒馆主 API 无法返回工具调用，连接管理器不传递工具定义。"
 						}, {
 							default: withCtx(() => [createVNode($setup["AcuSelect"], {
 								options: $setup.apiPresetOptions,
@@ -206076,7 +207722,7 @@ ${rejectionText}` : delegationFeedback,
 							default: withCtx(() => [_cache[35] || (_cache[35] = createBaseVNode(
 								"p",
 								{ class: "acu-v2-world-simulation-page__meta" },
-								"给不同 Agent 分配不同 API 预设：例如主 Agent 用强模型，审核类子代理用便宜快速的模型。「跟随全局默认」即使用上方的 API 预设。",
+								"给不同 Agent 分配不同 API 预设：例如主 Agent 用强模型，审核类子代理用便宜快速的模型。「跟随全局默认」即使用上方的 API 预设。需要工具的 Agent 须选择支持原生工具的独立自定义 API；酒馆主 API 无法返回工具调用，连接管理器不传递工具定义。",
 								-1
 								/* CACHED */
 							)), createBaseVNode("div", _hoisted_14$6, [(openBlock(true), createElementBlock(
@@ -206275,7 +207921,7 @@ ${rejectionText}` : delegationFeedback,
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var WorldSimulationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-a8f10ff3"]]);
+    var WorldSimulationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-9b52bef7"]]);
 
     /**
      * useImportFlow — 外部导入页业务流编排（阶段 2 / D21.4）

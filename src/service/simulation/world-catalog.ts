@@ -67,7 +67,14 @@ export function sliceModuleCatalog_ACU(
   writableModules: readonly string[],
 ): Record<string, unknown> {
   const writable = new Set(writableModules);
-  const slice: Record<string, unknown> = { readHint: catalog.readHint, clock: catalog.clock, player: catalog.player };
+  // 普通角色的目录不能沿用导演的“任一条目可读”提示，也不能无条件附带玩家状态。
+  const slice: Record<string, unknown> = {
+    readHint: '仅按当前角色授权的目录地址调用 read；目录未列出的资料不代表可读取。字段地址必须包含条目 ID。',
+  };
+  if (writableModules.some(module => ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'rumors'].includes(module))) {
+    slice.clock = catalog.clock;
+  }
+  if (writable.has('actors')) slice.player = catalog.player;
   if (writable.has('dimensions')) slice.dimensions = catalog.dimensions;
   if (writable.has('seeds')) slice.seeds = catalog.seeds;
   if (writable.has('actors')) slice.actors = catalog.actors;

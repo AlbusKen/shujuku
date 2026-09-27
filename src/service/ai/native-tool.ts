@@ -58,6 +58,16 @@ export function agentNativeTools_ACU(names: readonly AgentNativeToolName_ACU[]):
         description: '按地址读取一条或一批资料的全文。何时使用：提示词里已经给出地址，或 search 命中行右侧有地址，需要正文、表格行、总纲、伏笔、世界书条目或推演账本字段时。预算与授权允许时，同一次回复把所有相互独立的读取地址放入 reads 数组并并发完成，不要分批等待；依赖 search 结果的精读留到下一轮。不要用它搜索未知内容。参数 reads 是非空字符串数组，一次可混用多种地址，例如 ["$STORY_RANGE:3-5","$STORY_ARC:VOL-01"] 或 ["ledger:current","field:seeds:seed-1:title"]。世界书命中全文通常已注入，不要对 $WORLDBOOK:... 反复 read；地址必须从当前提示词的目录或词汇表复制。',
         parameters: objectSchema_ACU({
           reads: { type: 'array', items: { type: 'string' }, minItems: 1 },
+          requestedFence: {
+            type: 'object',
+            properties: {
+              lower: { oneOf: [{ type: 'string' }, { type: 'integer' }] },
+              upper: { oneOf: [{ type: 'string' }, { type: 'integer' }] },
+            },
+            minProperties: 1,
+            additionalProperties: false,
+            description: '可选读取上下围栏；未提供的边界由地址适配器或运行时上下文解析。',
+          },
         }, ['reads']),
       },
     },
@@ -173,6 +183,7 @@ export function nativeToolArguments_ACU(calls: readonly AiNativeToolCall_ACU[]):
 export function synthesizeProtocolToolCalls_ACU(calls: readonly {
   kind: string;
   reads?: readonly string[];
+  requestedFence?: { lower?: string | number; upper?: string | number };
   query?: string;
   scope?: readonly string[];
   isRegex?: boolean;
@@ -185,7 +196,7 @@ export function synthesizeProtocolToolCalls_ACU(calls: readonly {
     id: `call_${index}_${call.kind}`,
     name: call.kind,
     arguments: JSON.stringify(call.kind === 'read'
-      ? { reads: [...(call.reads ?? [])] }
+      ? { reads: [...(call.reads ?? [])], ...(call.requestedFence !== undefined ? { requestedFence: call.requestedFence } : {}) }
       : call.kind === 'search'
         ? { query: call.query ?? '', ...(call.scope ? { scope: [...call.scope] } : {}), ...(call.maxResults !== undefined ? { maxResults: call.maxResults } : {}), ...(call.isRegex ? { isRegex: true } : {}) }
         : { sql: call.sql ?? '', ...(call.evidenceRefs?.length ? { evidenceRefs: [...call.evidenceRefs] } : {}) }),
@@ -200,7 +211,7 @@ function protocolRecord_ACU(call: AiNativeToolCall_ACU): Record<string, unknown>
   const args = parseArguments_ACU(call.arguments);
   if (call.name === 'read') {
     const reads = Array.isArray(args.reads) ? args.reads : (typeof args.address === 'string' ? [args.address] : []);
-    return { action: 'read', reads };
+    return { action: 'read', reads, ...(args.requestedFence !== undefined ? { requestedFence: args.requestedFence } : {}) };
   }
   if (call.name === 'search') {
     return {

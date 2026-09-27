@@ -48,7 +48,7 @@
 
       <AcuPanel v-if="settingsDraft" title="推演设置" description="修改后自动保存；任务运行中也可以改，改动会在本轮结束后落盘、下一轮开始时生效。常用项直接可见，其余参数按主题折叠。">
         <div class="acu-v2-world-simulation-page__settings-grid">
-          <AcuFormRow label="API 预设（全局默认）" hint="所有 Agent 默认走这个预设；需要给某个 Agent 单独指定时，展开下方「各 Agent 渠道」。">
+          <AcuFormRow label="API 预设（全局默认）" hint="所有 Agent 默认走这个预设；需要给某个 Agent 单独指定时，展开下方「各 Agent 渠道」。需要工具的 Agent 须选择支持原生工具的独立自定义 API；酒馆主 API 无法返回工具调用，连接管理器不传递工具定义。">
             <AcuSelect
               :options="apiPresetOptions"
               :model-value="apiPresetValue"
@@ -181,7 +181,7 @@
             body-id="acu-world-simulation-group-channels"
             @toggle="toggleGroup('channels')"
           >
-            <p class="acu-v2-world-simulation-page__meta">给不同 Agent 分配不同 API 预设：例如主 Agent 用强模型，审核类子代理用便宜快速的模型。「跟随全局默认」即使用上方的 API 预设。</p>
+            <p class="acu-v2-world-simulation-page__meta">给不同 Agent 分配不同 API 预设：例如主 Agent 用强模型，审核类子代理用便宜快速的模型。「跟随全局默认」即使用上方的 API 预设。需要工具的 Agent 须选择支持原生工具的独立自定义 API；酒馆主 API 无法返回工具调用，连接管理器不传递工具定义。</p>
             <div class="acu-v2-world-simulation-page__settings-grid">
               <AcuFormRow v-for="agentName in agentNames" :key="agentName" :label="agentLabel(agentName)">
                 <AcuSelect

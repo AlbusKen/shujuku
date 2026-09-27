@@ -3,10 +3,12 @@ import { describe, expect, it } from 'vitest';
 import { AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU } from '../../../../src/service/continuation/agent/agent-defaults';
 import {
   buildEmptyAgentWorldbookSnapshot_ACU,
+  renderAgentWorldbookBrowseCatalog_ACU,
   renderAgentWorldbookCatalog_ACU,
   renderAgentWorldbookEntries_ACU,
   renderAgentWorldbookHitBodies_ACU,
   renderAgentWorldbookHits_ACU,
+  renderAgentWorldbookTriggeredInjection_ACU,
   selectTriggeredWorldbookEntries_ACU,
   type AgentWorldbookSnapshot_ACU,
 } from '../../../../src/service/continuation/agent/agent-worldbook-read';
@@ -46,6 +48,14 @@ describe('世界书目录渲染', () => {
     expect(renderAgentWorldbookCatalog_ACU(buildEmptyAgentWorldbookSnapshot_ACU(false))).toContain('目录不可用');
     expect(renderAgentWorldbookCatalog_ACU(buildEmptyAgentWorldbookSnapshot_ACU(true))).toContain('当前没有已启用的世界书条目');
   });
+});
+
+it('共享命中说明不向普通角色承诺 search，总纲目录仍保留检索例外', () => {
+  const injection = renderAgentWorldbookTriggeredInjection_ACU(snapshot_ACU(), '晶屑');
+  expect(injection).toContain('黑色晶屑是禁区核心的碎片。');
+  expect(injection).toContain('当前角色已授权的资料目录和工具');
+  expect(injection).not.toContain('用 search');
+  expect(renderAgentWorldbookBrowseCatalog_ACU(snapshot_ACU())).toContain('用 search');
 });
 
 describe('世界书命中提示', () => {

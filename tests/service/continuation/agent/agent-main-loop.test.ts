@@ -15,7 +15,9 @@ import { readAgentSessionLog_ACU, resetAgentSessionLogForTests_ACU } from '../..
 import { readAgentRunState_ACU, resetAgentRunCacheForTests_ACU } from '../../../../src/service/continuation/agent/agent-run-cache';
 import type { AgentConversationCompactionMark_ACU, AgentConversationCompactionMarkV2_ACU, AgentConversationMessage_ACU, AgentConversationSnapshot_ACU, AgentModuleSnapshot_ACU, AgentOutlineOpResult_ACU, AgentRunBudget_ACU, ContinuationAgentTurnPlanRequest_ACU } from '../../../../src/service/continuation/agent/agent-model';
 
-const preset_ACU = { presetName: 'p1', source: 'settings' as const, reason: 'test' };
+// 解析后渠道形态与生产 resolveContinuationAgentApiPreset_ACU 一致：默认落在 custom 自定义
+// 渠道（波次可并发）；需要串行语义的用例经 serialWaveChannel 切到 tavern 连接。
+const preset_ACU = { presetName: 'p1', source: 'settings' as const, reason: 'test', apiMode: 'custom' as const, apiConfig: { useMainApi: false, max_tokens: 60000 }, tavernProfile: '' };
 
 const nativeToolTurn_ACU = (name: 'read' | 'write_sql', args: Record<string, unknown>, id: string) => ({
   content: '',
@@ -127,6 +129,8 @@ function harness_ACU(options: {
   historyTokenBudget?: number;
   countTokens?: (text: string) => Promise<number>;
   apiPresetMode?: 'current' | 'fixed';
+  /** 为真时渠道解析统一落到 tavern 连接（波次必须串行）；缺省 custom 自定义渠道（可并发）。 */
+  serialWaveChannel?: boolean;
   agentApiPresets?: Partial<Record<'main' | 'outline' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer' | 'finalReviewer', { mode: 'inherit' | 'current' | 'fixed'; presetName: string }>>;
   taskId?: string;
   mutateChat?: (chat: any[]) => void;
@@ -164,7 +168,7 @@ function harness_ACU(options: {
   });
 
   const planner = new ContinuationAgentTurnPlanner_ACU({
-    resolveApiPreset: ((_settings: unknown, role: string) => { presetRoles.push(role); return preset_ACU; }) as any,
+    resolveApiPreset: ((_settings: unknown, role: string) => { presetRoles.push(role); return options.serialWaveChannel ? { ...preset_ACU, apiMode: 'tavern' as const } : preset_ACU; }) as any,
     callInternalAi: async (messages, _preset, identity, _signal, callOptions) => {
       if (identity.source === 'handoff_summary') {
         handoffCalls.push(messages);
@@ -323,7 +327,7 @@ describe('主 Agent 会话记录', () => {
     expect(userIndex).toBeLessThan(findIndex_ACU(first, '开始新的一轮规划'));
   });
 
-  it('只换到下一轮还没结束工作流时，不丢弃也不总结上一轮', async () => {
+  it('换轮但工作流未结束时，超过本地输入限制拒发且保留上一轮', async () => {
     const filler = '守门人'.repeat(400);
     // 会话最后通告的是 turn-2，本次运行的游标是 turn-3：上一轮已结束，正处在轮次边界。
     const h = harness_ACU({
@@ -333,8 +337,8 @@ describe('主 Agent 会话记录', () => {
       mainReplies: ['{"action":"finalize","instruction":"接着写"}'],
       context: nextTurnContext_ACU,
     });
-    await expect(h.planner.plan(h.request)).resolves.toMatchObject({ instruction: '接着写' });
-    expect(h.mainCalls).toHaveLength(1);
+    await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: { details: { reason: 'context-capacity-exceeded' } } });
+    expect(h.mainCalls).toHaveLength(0);
 
     const messages = h.conversation().messages;
     expect(h.handoffCalls).toHaveLength(0);
@@ -376,44 +380,29 @@ describe('主 Agent 会话记录', () => {
     expect(announcement?.text).not.toContain('此前的对话仍然有效');
   });
 
-  it('同一轮内没到两倍只登记，下一轮开始时丢弃上一轮而不是总结', async () => {
+  it('同一轮超过本地输入限制时拒发，不把延后总结当作放行依据', async () => {
     const filler = '守门人'.repeat(400);
     // 最后通告的就是本次运行的游标 turn-2：这一轮还没走完（中断恢复或同游标重跑）。
-    // 填充词计数下总量约 800 tokens（加上正文里的零星出现），预算取 600：超出但没到两倍，
-    // 因此走登记而非越界压缩。登记不等于拒发：否则同一轮永远走不到「下一轮开始」，死锁。
+    // 填充词计数下总量约 800 tokens；虽未到紧急总结线，也不得越过本地输入硬限制。
     const h = harness_ACU({
       conversation: overBudgetConversation_ACU(filler),
       historyTokenBudget: 600,
       countTokens: fillerTokens_ACU,
       mainReplies: ['{"action":"finalize","instruction":"接着写"}'],
     });
-    await expect(h.planner.plan(h.request)).resolves.toMatchObject({ instruction: '接着写' });
-    expect(h.mainCalls).toHaveLength(1);
+    await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: { details: { reason: 'context-capacity-exceeded' } } });
+    expect(h.mainCalls).toHaveLength(0);
 
     const messages = h.conversation().messages;
-    // 历史没有被重塑：既没有交接报告，早期消息也仍在原处，模型看到的也是完整历史。
+    // 拒发不改写历史：既没有交接报告，早期消息也仍在原处。
     expect(messages.some(message => message.kind === 'handoff')).toBe(false);
     expect(messages.some(message => message.text === filler)).toBe(true);
-    expect(h.mainCalls[0].some(message => message.content.includes(filler))).toBe(true);
+
     expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('会话历史已压缩'))).toBe(false);
-    // 阈值到了要如实告诉用户，只是执行时机推迟；同一次运行只通告一次。
+    // 总结通知不能代替最终请求容量检查。
     const deferred = readAgentSessionLog_ACU().filter(entry => entry.title.includes('token 阈值'));
     expect(deferred).toHaveLength(1);
     expect(deferred[0].detail).toContain('不总结');
-
-    // 只是进入下一轮、工作流还没成功交付时，上一轮会话仍留着。
-    const next = harness_ACU({
-      conversation: h.conversation(),
-      historyTokenBudget: 600,
-      countTokens: fillerTokens_ACU,
-      mainReplies: ['{"action":"finalize","instruction":"下一轮"}'],
-      context: nextTurnContext_ACU,
-    });
-    await next.planner.plan(next.request);
-    expect(next.handoffCalls).toHaveLength(0);
-    expect(next.conversation().messages.some(message => message.kind === 'handoff')).toBe(false);
-    expect(next.conversation().messages.some(message => message.text === filler)).toBe(true);
-    expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('会话历史已压缩'))).toBe(false);
   });
 
   it('同一轮内历史涨到预算两倍时提前压缩，避免请求因超长必然失败', async () => {
@@ -433,9 +422,9 @@ describe('主 Agent 会话记录', () => {
     expect(compacted?.detail).toContain('本轮尚未结束');
   });
 
-  it('运行中途工具结果把上下文顶过越界线时先轮内压缩再发送，而不是中止整轮', async () => {
-    // 打开会话时约 500 tokens，预算 600 内；派工结果回灌 800 tokens 后到 1300 以上（越界线 = 600 × 2），
-    // 下一次主请求前必须先把旧轮次压掉，然后照常发送。旧实现在这里直接抛错，自动续写链就此停摆。
+  it('派工报告未进入回执时不凭子代理原始回复虚构超限和压缩', async () => {
+    // 打开会话时约 500 tokens，预算 600 内；只有真正写入会话的回执才影响下一次主请求。
+    // 子代理的原始回复不等于已经被工作流采纳的结果。
     const oldTurnFiller = '守门人旧'.repeat(250);
     const bulkyReport = '守门人新'.repeat(400);
     const h = harness_ACU({
@@ -451,15 +440,14 @@ describe('主 Agent 会话记录', () => {
     await expect(h.planner.plan(h.request)).resolves.toMatchObject({ instruction: '按主线要点写' });
     expect(h.mainCalls).toHaveLength(2);
 
-    // 第一次主请求还看得到旧轮次原文；第二次请求前旧轮次已被浓缩，派工结果作为当前轮内容完整保留。
     expect(h.mainCalls[0].some(message => message.content.includes(oldTurnFiller))).toBe(true);
-    expect(h.mainCalls[1].some(message => message.content.includes(oldTurnFiller))).toBe(false);
-    expect(h.mainCalls[1].some(message => message.content.includes(bulkyReport))).toBe(true);
+    expect(h.mainCalls[1].some(message => message.content.includes(oldTurnFiller))).toBe(true);
+    expect(h.conversation().messages.some(message => message.text.includes(oldTurnFiller))).toBe(true);
+    expect(h.mainCalls[1].some(message => message.content.includes(bulkyReport))).toBe(false);
     expect(h.mainCacheBoundaries[0]).toBeUndefined();
-    expect(h.mainCacheBoundaries[1]).toBe(h.conversation().messages[0].text);
-    expect(h.conversation().messages[0].kind).toBe('handoff');
-    const compacted = readAgentSessionLog_ACU().find(entry => entry.title.includes('会话历史已压缩'));
-    expect(compacted?.detail).toContain('本轮尚未结束');
+    expect(h.mainCacheBoundaries[1]).toBeUndefined();
+    expect(h.handoffCalls).toHaveLength(0);
+    expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('会话历史已压缩'))).toBe(false);
     expect(readAgentSessionLog_ACU().some(entry => entry.kind === 'run_failed')).toBe(false);
   });
 
@@ -1433,9 +1421,10 @@ describe('派工与写集落盘', () => {
     expect(h.mainCalls[1].map(message => message.content).join('\n')).toContain('同一波次并发上限为 1 个');
   });
 
-  it('跟随当前活动 API 时同波次强制串行，预算文本同步宣告上限为 1', async () => {
+  it('子代理渠道必须串行时同波次强制串行，预算文本同步宣告上限为 1', async () => {
     const h = harness_ACU({
       apiPresetMode: 'current',
+      serialWaveChannel: true,
       budget: { maxConcurrent: 3 },
       mainReplies: [
         '{"action":"delegate","delegations":[{"agentName":"mainline-planner","prompt":"主线","reads":["$OUTLINE_WINDOW"]},{"agentName":"beat-planner","prompt":"节拍","reads":["$OUTLINE_WINDOW"]}]}',
@@ -1447,7 +1436,7 @@ describe('派工与写集落盘', () => {
 
     expect(h.subCalls).toHaveLength(1);
     expect(h.mainCalls[0][findIndex_ACU(h.mainCalls[0], '本轮预算状态')].content).toContain('同一波次最多 1 个子代理');
-    expect(h.mainCalls[1].map(message => message.content).join('\n')).toContain('当前跟随活动 API，同一波次只能派工 1 个子代理');
+    expect(h.mainCalls[1].map(message => message.content).join('\n')).toContain('存在必须串行的子代理渠道（酒馆连接或主 API），同一波次只能派工 1 个子代理');
   });
 
   it('全局跟随当前 API 但子代理角色全部固定渠道时，波次恢复并发且按角色解析渠道', async () => {
@@ -1786,4 +1775,107 @@ describe('S11 双模式双楼全链集成', () => {
       _set_SillyTavern_API_ACU(null as any);
     }
   });
+});
+
+describe('主 Agent 最终请求容量门禁与 60% 默认上围栏', () => {
+  const floor_ACU = (index: number) => `主楼${index}独有正文${'丁'.repeat(200)}`;
+  const storyChat_ACU = () => Array.from({ length: 12 }, (_, index) => (index % 2 === 0
+    ? { mes: `用户${index}`, is_user: true }
+    : { mes: floor_ACU(index), is_user: false }));
+  // 仅整包输入 payload 按固定值计量；本组本地输入限制为 60000，输出 max_tokens 不参与围栏。
+  const counter_ACU = (payload: number) => async (text: string) => (text.startsWith('{"messages"') ? payload : text.length);
+  const toolTexts_ACU = (h: Harness_ACU) => h.conversation().messages.filter(message => message.kind === 'tool').map(message => message.text);
+
+  it('最终请求超出容量时不调用 provider，以不可重试的 context-capacity-exceeded 终止', async () => {
+    const h = harness_ACU({ mainReplies: ['{"action":"finalize","instruction":"不应发送"}'], historyTokenBudget: 60000, countTokens: counter_ACU(70000) });
+    const error = await h.planner.plan(h.request).catch(caught => caught);
+    expect(h.mainCalls).toHaveLength(0);
+    expect(error).toBeInstanceOf(ContinuationValidationError_ACU);
+    expect(error.error).toMatchObject({
+      phase: 'agent_loop', retryable: false,
+      details: { reason: 'context-capacity-exceeded', code: 'READ_FENCE_CAPACITY_EXHAUSTED', inputLimitTokens: 60000 },
+    });
+  });
+
+  it('未给上围栏的正文区间按默认上围栏收窄为可证明前缀，注入完整逐字正文并登记收窄地址', async () => {
+    // 本地输入余量的 60% 为 700：容得下 2–3 个 ~210 字楼层，容不下 5 个。
+    const h = harness_ACU({
+      historyTokenBudget: 60000,
+      chat: storyChat_ACU(),
+      countTokens: counter_ACU(58833),
+      mainReplies: [
+        nativeToolTurn_ACU('read', { reads: ['$STORY_RANGE:1-9'] }, 'call-default-fence'),
+        '{"action":"finalize","instruction":"读完了"}',
+      ],
+    });
+    await h.planner.plan(h.request);
+    const receipt = toolTexts_ACU(h).find(text => text.includes('【默认上围栏】')) ?? '';
+    expect(receipt).toContain('原地址「$STORY_RANGE:1-9」');
+    expect(receipt).toContain('默认上围栏预算 700 tokens');
+    const upper = Number(/解析为「\$STORY_RANGE:1-(\d+)」/.exec(receipt)![1]);
+    expect(upper).toBeGreaterThanOrEqual(3);
+    expect(upper).toBeLessThan(9);
+    for (let floor = 1; floor <= 9; floor += 2) {
+      if (floor <= upper) expect(receipt).toContain(floor_ACU(floor));
+      else expect(receipt).not.toContain(floor_ACU(floor));
+    }
+    expect(h.conversation().messages.find(message => message.text === receipt)?.readKey).toBe(`$STORY_RANGE:1-${upper}`);
+    expect(h.mainCalls[1].some(message => message.content.includes(floor_ACU(1)))).toBe(true);
+  });
+
+  it('默认上围栏连最小范围都放不下时整批不注入，改用显式围栏后可完整读取', async () => {
+    // 本地输入余量的 60% 为 115：单个楼层（~210 字）也放不下。
+    const h = harness_ACU({
+      historyTokenBudget: 60000,
+      chat: storyChat_ACU(),
+      countTokens: counter_ACU(59808),
+      mainReplies: [
+        { content: '', toolCalls: [
+          ...nativeToolTurn_ACU('read', { reads: ['$HOOKS_LEDGER'] }, 'call-sibling').toolCalls,
+          ...nativeToolTurn_ACU('read', { reads: ['$STORY_RANGE:1-3'] }, 'call-too-small').toolCalls,
+        ] },
+        nativeToolTurn_ACU('read', { reads: ['$STORY_RANGE:1-3'], requestedFence: { lower: 1, upper: 3 } }, 'call-explicit'),
+        '{"action":"finalize","instruction":"读完了"}',
+      ],
+    });
+    await h.planner.plan(h.request);
+    const failedReceipts = (h.mainCalls[1] as Array<{ role: string; content: string }>).filter(message => message.role === 'tool').map(message => message.content).join('\n');
+    expect(failedReceipts).toContain('default-fence-exhausted');
+    expect(failedReceipts).not.toContain(floor_ACU(1));
+    // 同批的 $HOOKS_LEDGER 也不得注入：整批原子失败。
+    expect(failedReceipts).not.toContain('### 伏笔账本');
+    expect(h.mainCalls[1].map(message => message.content).join('\n')).not.toContain(floor_ACU(3));
+    const retried = h.mainCalls[2].map(message => message.content).join('\n');
+    expect(retried).toContain(floor_ACU(1));
+    expect(retried).toContain(floor_ACU(3));
+    expect(toolTexts_ACU(h).some(text => text.includes('【默认上围栏】'))).toBe(false);
+    expect(h.conversation().messages.some(message => message.kind === 'tool' && message.readKey === '$STORY_RANGE:1-3')).toBe(true);
+  });
+
+  it('重复请求收窄前的原始宽地址时如实提示剩余范围，不重复注入正文', async () => {
+    // 预算 700：第一次宽地址被收窄；第二次重复同一宽地址不得再走分配、不得重注正文。
+    const h = harness_ACU({
+      historyTokenBudget: 60000,
+      chat: storyChat_ACU(),
+      countTokens: counter_ACU(58833),
+      mainReplies: [
+        nativeToolTurn_ACU('read', { reads: ['$STORY_RANGE:1-9'] }, 'call-wide-first'),
+        nativeToolTurn_ACU('read', { reads: ['$STORY_RANGE:1-9'] }, 'call-wide-repeat'),
+        '{"action":"finalize","instruction":"读完了"}',
+      ],
+    });
+    await h.planner.plan(h.request);
+    const first = toolTexts_ACU(h).find(text => text.includes('【默认上围栏】')) ?? '';
+    const upper = Number(/解析为「\$STORY_RANGE:1-(\d+)」/.exec(first)![1]);
+    const repeated = toolTexts_ACU(h).find(text => text.includes('此前只提供了收窄子范围')) ?? '';
+    expect(repeated).toContain(`原地址「$STORY_RANGE:1-9」此前只提供了收窄子范围「$STORY_RANGE:1-${upper}」的完整正文`);
+    expect(repeated).toContain('未声称原地址已全部注入');
+    // 坐标轴只含 AI 楼层（夹具中为奇数下标），剩余范围从 upper 之后的下一个 AI 楼层开始。
+    expect(repeated).toContain(`请改读「$STORY_RANGE:${upper + 2}-9」`);
+    expect(repeated).not.toContain('完整内容已提供');
+    expect(repeated).not.toContain(floor_ACU(1));
+    // 全文只在第一次收窄注入中出现一次；重复请求不消耗新的读取批次。
+    expect(toolTexts_ACU(h).filter(text => text.includes(floor_ACU(1)))).toHaveLength(1);
+  });
+
 });

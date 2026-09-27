@@ -25,14 +25,14 @@ describe('世界推演预算与运行辅助状态', () => {
     expect(decision.report).not.toContain('x'.repeat(20));
   });
 
-  it('最终请求只压缩一次，复测仍超限时模型调用为零', async () => {
+  it('最终请求只压缩一次，复测仍超过本地输入限制时模型调用为零', async () => {
     const invoke = vi.fn().mockResolvedValue('sent');
     const compress = vi.fn(async () => [{ role: 'user', content: 'x'.repeat(126) }]);
     const rejected = await executeWorldSimulationFinalRequest_ACU({
-      messages: [{ role: 'user', content: 'x'.repeat(200) }], historyBudgetTokens: 100,
+      messages: [{ role: 'user', content: 'x'.repeat(200) }], historyBudgetTokens: 100, inputLimitTokens: 125,
       count, compress, invoke,
     });
-    expect(rejected).toMatchObject({ status: 'rejected', totalTokens: 126, limitTokens: 125, compressed: true });
+    expect(rejected).toMatchObject({ status: 'rejected', reason: 'final-request-token-overflow', totalTokens: 126, limitTokens: 125, compressed: true });
     expect(compress).toHaveBeenCalledTimes(1);
     expect(invoke).not.toHaveBeenCalled();
   });

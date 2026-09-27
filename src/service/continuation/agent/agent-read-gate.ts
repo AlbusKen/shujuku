@@ -69,8 +69,8 @@ export function resolveAgentReadBudget_ACU(config: AgentReadGateConfig_ACU): Age
   if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 1) {
     effectiveMaxReadTokens = Math.floor(raw);
     basis = 'fixed';
-  } else if (typeof raw === 'string' && raw.trim().endsWith('%')) {
-    const percent = parseFloat(raw.trim());
+  } else if (typeof raw === 'string' && /^(?:\d+(?:\.\d+)?|\.\d+)%$/.test(raw.trim())) {
+    const percent = Number(raw.trim().slice(0, -1));
     if (Number.isFinite(percent) && percent >= 1 && percent <= 100) {
       effectiveMaxReadTokens = Math.floor(percentBase * (percent / 100));
     }

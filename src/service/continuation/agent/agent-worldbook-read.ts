@@ -64,18 +64,15 @@ function isEntrySelected_ACU(bookName: string, uid: string, enabledEntriesMap: u
   return list.some(item => String(item) === uid);
 }
 
-/**
- * 条目 token 数的跨运行缓存。键含内容长度：同一条目被编辑后长度几乎必变，
- * 变了即重算；极小概率的等长改写只影响预算估算精度，不影响正确性。
- */
-const entryTokenCache_ACU = new Map<string, number>();
+/** 条目 token 数跨运行缓存；等长改写也必须重新计量，不能误用过期的容量估算。 */
+const entryTokenCache_ACU = new Map<string, { content: string; tokens: number }>();
 
 async function countEntryTokens_ACU(bookName: string, uid: string, content: string): Promise<number> {
-  const key = `${bookName}#${uid}#${content.length}`;
+  const key = JSON.stringify([bookName, uid]);
   const cached = entryTokenCache_ACU.get(key);
-  if (cached !== undefined) return cached;
+  if (cached?.content === content) return cached.tokens;
   const counted = await countAgentTokens_ACU(content);
-  entryTokenCache_ACU.set(key, counted);
+  entryTokenCache_ACU.set(key, { content, tokens: counted });
   return counted;
 }
 
@@ -103,10 +100,10 @@ export async function loadAgentWorldbookSnapshot_ACU(): Promise<AgentWorldbookSn
         if (raw.enabled !== true) continue;
         const uid = String(raw.uid ?? '').trim();
         const title = normalizeGeneratedComment_ACU(raw, isolationPrefix);
-        const content = String(raw.content ?? '').trim();
+        const content = typeof raw.content === 'string' ? raw.content : '';
         // 纪要另由快照显示，不在世界书资料域重复暴露。
         if (isSummaryEntryComment_ACU(title)) continue;
-        if (!uid || !content) continue;
+        if (!uid || !content.trim()) continue;
         if (!isEntrySelected_ACU(bookName, uid, enabledEntriesMap)) continue;
         if (isEntryBlocked_ACU(raw)) continue;
         // 纪要索引及其分片由快照单独显示。
@@ -223,7 +220,7 @@ export function renderAgentWorldbookHits_ACU(snapshot: AgentWorldbookSnapshot_AC
 /** 总纲与大纲看到的是目录，由它们自己决定读哪一条。 */
 export const WORLDBOOK_BROWSE_NOTE_ACU = '这是全部已启用世界书条目的目录，不是命中清单，没有注入条目全文。需要哪一条就按行尾地址 read。也可以用 search，scope 设为 ["worldbook"]，按关键词在世界书域里检索。';
 
-const WORLDBOOK_TRIGGERED_NOTE_ACU = '以下是本轮按与剧情推进、填表相同的规则触发的世界书条目全文：常量条目直接纳入；关键词条目会迭代触发，已触发条目的正文可以继续带出别的关键词条目。已注入的条目不必重复 read；需要未命中内容时用 search，scope 设为 ["worldbook"]，按返回地址精读。';
+const WORLDBOOK_TRIGGERED_NOTE_ACU = '以下是本轮按与剧情推进、填表相同的规则触发的世界书条目全文：常量条目直接纳入；关键词条目会迭代触发，已触发条目的正文可以继续带出别的关键词条目。已注入的条目不必重复 read；未命中的内容仅能通过当前角色已授权的资料目录和工具获取，无法核实时须说明缺口。';
 
 /** 总纲、大纲使用的已启用目录。不附带命中条目全文。 */
 export function renderAgentWorldbookBrowseCatalog_ACU(snapshot: AgentWorldbookSnapshot_ACU): string {

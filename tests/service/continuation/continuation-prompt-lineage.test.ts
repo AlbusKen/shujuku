@@ -9,9 +9,10 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { USER_PREFILL_CONTENT_ACU } from '../../../src/shared/user-prefill.js';
 
 import { validateContinuationSettings_ACU } from '../../../src/service/continuation/continuation-store';
-import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU } from '../../../src/service/continuation/defaults';
+import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU } from '../../../src/service/continuation/defaults';
 import {
   AGENT_PROMPT_DEFAULT_LINEAGE_ACU,
   buildV33ContinuationAgentPrompts_ACU,
@@ -83,7 +84,7 @@ describe('默认提示词谱系迁移', () => {
   it.each(labels)('%s 的默认组迁移后与当前默认组逐段一致', label => {
     const loaded = validateContinuationSettings_ACU(historicalSettings_ACU(label));
     const defaults = buildDefaultContinuationSettings_ACU();
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU);
     expect(loaded.outlinePrompt).toEqual(defaults.outlinePrompt);
     for (const role of Object.keys(defaults.agentPrompts) as (keyof typeof defaults.agentPrompts)[]) {
       expect(loaded.agentPrompts[role], `agentPrompts.${role}`).toEqual(defaults.agentPrompts[role]);
@@ -143,7 +144,7 @@ describe('默认提示词谱系迁移', () => {
 
     const loaded = validateContinuationSettings_ACU(settings);
 
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU);
     expect(loaded.agentPrompts.arcArchitect).toEqual(defaults.arcArchitect);
   });
 
@@ -200,7 +201,7 @@ describe('V34 → V35 逐段精确迁移', () => {
     settings.agentPrompts.maintainer.push(appended);
 
     const loaded = validateContinuationSettings_ACU(settings);
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU);
     expect(loaded.agentPrompts.main[mainIndex]).toEqual({ ...defaults.main[mainIndex], enabled: false });
     expect(loaded.agentPrompts.maintainer[customIndex]).toEqual(settings.agentPrompts.maintainer[customIndex]);
     expect(loaded.agentPrompts.maintainer.at(-1)).toEqual(appended);
@@ -222,7 +223,7 @@ describe('V34 → V35 逐段精确迁移', () => {
     expect(main).toContain('使用函数调用');
     expect(main).not.toContain('"action":"read"');
     expect(maintainer).toContain('status=committed');
-    expect(current.main.at(-1)?.content.endsWith(AGENT_PREFILLS_ACU.main)).toBe(true);
+    expect(current.main.at(-1)?.content.endsWith(USER_PREFILL_CONTENT_ACU)).toBe(true);
     expect(parseAgentMainOutput_ACU('{"action":"open_round","focus":"核对真实剧情后结算"}', AGENT_PREFILLS_ACU.main, true).kind).toBe('open_round');
     expect(parseAgentWritableToolCalls_ACU('{"action":"write_sql","sql":"INSERT INTO hooks (id, summary) VALUES (\'H1\', \'伏笔\')"}', AGENT_PREFILLS_ACU.maintainer))
       .toEqual([{ kind: 'write_sql', sql: "INSERT INTO hooks (id, summary) VALUES ('H1', '伏笔')" }]);

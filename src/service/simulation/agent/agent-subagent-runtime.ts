@@ -9,9 +9,9 @@ import type {
 import { resolveWorldSimulationAgentApiPreset_ACU, type WorldSimulationApiPresetDependencies_ACU, type WorldSimulationResolvedApiPreset_ACU } from '../api-preset';
 import type { WorldSimulationEvidenceRegistry_ACU, WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
 import { snapshotWorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
-import { runWorldSimulationToolBatch_ACU, type WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
+import { runWorldSimulationToolBatch_ACU, type WorldSimulationReadRoundState_ACU, type WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
 import type { WorldSimulationFieldCommitReceipt_ACU } from '../simulation-field-commit-adapter';
-import { findWorldSimulationAgentDefinition_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
+import { findWorldSimulationAgentDefinition_ACU, worldSimulationAgentNativeTools_ACU, worldSimulationCanReadAddress_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
 import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, renderWorldSimulationWriteRepair_ACU, worldSimulationReviewerRuntimeProtocolInstruction_ACU, worldSimulationSpecialistRuntimeProtocolInstruction_ACU } from './agent-defaults';
 import type {
   WorldSimulationCandidate_ACU,
@@ -21,14 +21,14 @@ import type {
   WorldSimulationSubagentIssue_ACU,
   WorldSimulationSubagentOutcome_ACU,
 } from './agent-model';
-import { createWorldSimulationPlaceholderResolvers_ACU, type WorldSimulationPlaceholderContext_ACU } from './agent-placeholder-resolver';
+import { createWorldSimulationPlaceholderResolvers_ACU, isWorldSimulationLedgerContext_ACU, type WorldSimulationPlaceholderContext_ACU } from './agent-placeholder-resolver';
 import { createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationSubagentToolCalls_ACU, parseWorldSimulationJsonDraft_ACU, parseWorldSimulationJsonPayload_ACU, parseWorldSimulationMainAction_ACU, parseWorldSimulationMainOutput_ACU, parseWorldSimulationReviewerResult_ACU, parseWorldSimulationSpecialistResult_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationReviewerProtocolRejection_ACU, renderWorldSimulationSpecialistProtocolRejection_ACU } from './agent-protocol';
 import { createWorldSimulationReadGateState_ACU, resolveWorldSimulationReadBudget_ACU } from './agent-read-gate';
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './prompt-template';
-import { renderWorldSimulationSnapshotTemplate_ACU, splitWorldSimulationSubagentPrompt_ACU } from './agent-shared-materials';
+import { renderWorldSimulationSnapshotSections_ACU, splitWorldSimulationSubagentPrompt_ACU, verifyWorldSimulationSnapshotSections_ACU, verifyWorldSimulationFixedWorldbook_ACU, type WorldSimulationFixedWorldbook_ACU } from './agent-shared-materials';
 import { countWorldSimulationTokens_ACU, type WorldSimulationTokenCounter_ACU } from './agent-token-budget';
-import { nativeToolArguments_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, withNativeToolThinkPrefill_ACU, type AiChatTurn_ACU, type AiNativeToolCall_ACU, type AiWireMessage_ACU } from '../../ai/native-tool';
+import { agentNativeTools_ACU, nativeToolArguments_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, withNativeToolThinkPrefill_ACU, type AiChatTurn_ACU, type AiNativeToolCall_ACU, type AiWireMessage_ACU } from '../../ai/native-tool';
 
 export interface WorldSimulationAgentInvoker_ACU { (agentName: WorldSimulationAgentName_ACU, messages: readonly { role: string; content: string }[], preset: WorldSimulationResolvedApiPreset_ACU): Promise<string | AiChatTurn_ACU>; }
 export interface WorldSimulationSubagentRuntimeDependencies_ACU { invoke: WorldSimulationAgentInvoker_ACU; countTokens?: WorldSimulationTokenCounter_ACU; apiPreset?: WorldSimulationApiPresetDependencies_ACU; protocolRetries?: number; }
@@ -39,6 +39,8 @@ export interface WorldSimulationSubagentRunInput_ACU {
   registry: WorldSimulationEvidenceRegistry_ACU;
   tools: WorldSimulationToolDependencies_ACU;
   runId: string;
+  roundId?: string;
+  readRoundState?: WorldSimulationReadRoundState_ACU;
   candidateSeq?: number;
   writableModules?: readonly WorldSimulationLedgerModule_ACU[];
   writeSql?: (input: { role: string; sql: string; evidenceRegistry: WorldSimulationEvidenceRegistrySnapshot_ACU; declaredEvidenceRefs: readonly string[]; allowedModules: readonly WorldSimulationLedgerModule_ACU[]; isCurrent?: () => boolean }) => Promise<WorldSimulationFieldCommitReceipt_ACU>;
@@ -49,8 +51,9 @@ export interface WorldSimulationSubagentRunInput_ACU {
   directorMaterials?: string;
   /** 本轮关键词已触发的世界书全文。导演与各子代理共用，不再自行精读条目。 */
   triggeredWorldbook?: string;
+  fixedWorldbook?: WorldSimulationFixedWorldbook_ACU;
 }
-export interface WorldSimulationReviewInput_ACU { candidates: readonly WorldSimulationCandidate_ACU[]; settings: WorldSimulationSettings_ACU; promptContext: WorldSimulationPlaceholderContext_ACU; registry: WorldSimulationEvidenceRegistry_ACU; tools: WorldSimulationToolDependencies_ACU; isCurrent?: () => boolean; directorMaterials?: string; triggeredWorldbook?: string; }
+export interface WorldSimulationReviewInput_ACU { candidates: readonly WorldSimulationCandidate_ACU[]; settings: WorldSimulationSettings_ACU; promptContext: WorldSimulationPlaceholderContext_ACU; registry: WorldSimulationEvidenceRegistry_ACU; tools: WorldSimulationToolDependencies_ACU; isCurrent?: () => boolean; roundId?: string; readRoundState?: WorldSimulationReadRoundState_ACU; directorMaterials?: string; triggeredWorldbook?: string; fixedWorldbook?: WorldSimulationFixedWorldbook_ACU; }
 
 
 function candidate_ACU(
@@ -361,14 +364,17 @@ export class WorldSimulationSubagentRuntime_ACU {
       });
       const remainingTokens = Math.max(0, readBudget.effectiveMaxReadTokens - readGateState.grantedTokens);
       const remainingRounds = Math.max(0, input.settings.agentRunBudget.maxExtraReads - toolRounds);
-      const readBudgetText = `本轮剩余阅读预算：约 ${remainingTokens} tokens（上限 ${readBudget.effectiveMaxReadTokens}，已授予 ${readGateState.grantedTokens}）；剩余 read/search 轮次 ${remainingRounds}/${input.settings.agentRunBudget.maxExtraReads}。`;
+      const readAction = definition.kind === 'researcher' ? 'read/search' : 'read';
+      const readBudgetText = `本轮剩余阅读预算：约 ${remainingTokens} tokens（上限 ${readBudget.effectiveMaxReadTokens}，已授予 ${readGateState.grantedTokens}）；剩余 ${readAction} 轮次 ${remainingRounds}/${input.settings.agentRunBudget.maxExtraReads}。`;
       const requestContext = { ...context, ...(input.readCurrent ? { worldState: input.readCurrent() } : {}), evidenceRegistry: requestSnapshot, readBudgetText };
       const resolvers = createWorldSimulationPlaceholderResolvers_ACU(requestContext);
       const split = splitWorldSimulationSubagentPrompt_ACU(input.settings.agentPrompts[agentName], agentName);
       const rendered = await renderWorldSimulationPrompt_ACU(split.segments, agentName, resolvers);
-      const snapshotText = split.snapshotTemplate ? await renderWorldSimulationSnapshotTemplate_ACU(split.snapshotTemplate, resolvers) : '';
+      const snapshot = await renderWorldSimulationSnapshotSections_ACU(split.snapshotTemplate, resolvers,
+        isWorldSimulationLedgerContext_ACU(requestContext.worldState) ? { ledger: requestContext.worldState.revision } : {});
+      const snapshotText = snapshot.text;
       const guidance = split.movedGuidanceIndex >= 0 ? rendered.messages[split.movedGuidanceIndex]?.content : '';
-      const appendix = [snapshotText, guidance, input.triggeredWorldbook?.trim() ?? '', input.directorMaterials?.trim() ?? ''].filter(Boolean).join('\n\n');
+      const appendix = [snapshotText, guidance, input.triggeredWorldbook ?? ''].filter(Boolean).join('\n\n');
       const protocolGuard = { role: 'system', content: worldSimulationSpecialistRuntimeProtocolInstruction_ACU(agentName, writableModules) };
       const drafted = [protocolGuard, ...rendered.messages.filter((message, index) => index !== split.movedGuidanceIndex && message.content !== USER_PREFILL_CONTENT_ACU), ...transcript, ...(appendix ? [{ role: 'user', content: appendix }] : []), ...(rendered.messages.some(message => message.content === USER_PREFILL_CONTENT_ACU)
         ? [{ role: 'user', content: USER_PREFILL_CONTENT_ACU }]
@@ -376,9 +382,18 @@ export class WorldSimulationSubagentRuntime_ACU {
       const messages = withNativeToolThinkPrefill_ACU(drafted);
       const sent = await executeWorldSimulationFinalRequest_ACU({
         messages,
+        inputLimitTokens: input.settings.agentHistoryTokenBudget,
+        tools: agentNativeTools_ACU(worldSimulationAgentNativeTools_ACU(agentName)),
         historyBudgetTokens: input.settings.agentHistoryTokenBudget,
         count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
-        invoke: value => this.dependencies.invoke(agentName, value, preset),
+        invoke: value => {
+          if (snapshot.text) verifyWorldSimulationSnapshotSections_ACU(snapshot, value);
+          if (input.fixedWorldbook) {
+            if (input.fixedWorldbook.text !== (input.triggeredWorldbook ?? '')) throw new Error('WORLD_SIMULATION_WORLDBOOK_SOURCE_UNVERIFIED');
+            verifyWorldSimulationFixedWorldbook_ACU(input.fixedWorldbook, value);
+          }
+          return this.dependencies.invoke(agentName, value, preset);
+        },
       });
       if (input.isCurrent && !input.isCurrent()) throw new Error('WORLD_SIMULATION_RUN_STALE');
       if (sent.status === 'rejected') throw new Error(sent.reason);
@@ -393,7 +408,10 @@ export class WorldSimulationSubagentRuntime_ACU {
             return parseWorldSimulationSubagentToolCalls_ACU(JSON.stringify(payload), '', requestSnapshot, true)![0];
           }
           if (call.name !== 'read' && call.name !== 'search') throw new Error(`未知工具 ${call.name}`);
-          return parseWorldSimulationMainAction_ACU(payload, false, requestSnapshot) as Extract<ReturnType<typeof parseWorldSimulationMainAction_ACU>, { kind: 'read' | 'search' }>;
+          if (call.name === 'search' && definition.kind !== 'researcher') throw new Error('普通子代理未授权 search');
+          const parsed = parseWorldSimulationMainAction_ACU(payload, false, requestSnapshot);
+          if (parsed.kind !== call.name) throw new Error('工具名称与动作不一致');
+          return parsed as Extract<ReturnType<typeof parseWorldSimulationMainAction_ACU>, { kind: 'read' | 'search' }>;
         }) : null;
         if (!nativeCalls.length && parseWorldSimulationSubagentToolCalls_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], requestSnapshot, !!input.writeSql && writableModules.length > 0)) throw new Error('工具必须使用原生函数调用');
       } catch (error) {
@@ -410,7 +428,8 @@ export class WorldSimulationSubagentRuntime_ACU {
       }
       if (calls) {
         const perCall: unknown[][] = [];
-        for (const call of calls) {
+        for (let index = 0; index < calls.length; index += 1) {
+          const call = calls[index];
           const bucket: unknown[] = [];
           perCall.push(bucket);
           if (call.kind === 'write_sql') {
@@ -451,8 +470,28 @@ export class WorldSimulationSubagentRuntime_ACU {
               bucket.push({ ...unknown, repair: renderWorldSimulationWriteRepair_ACU(writableModules, unknown) });
             }
           } else if (toolRounds >= input.settings.agentRunBudget.maxExtraReads) {
-            bucket.push({ action: call.kind, status: 'rejected', reason: 'read/search 轮次已用尽' });
+            bucket.push({ action: call.kind, status: 'rejected', reason: `${definition.kind === 'researcher' ? 'read/search' : 'read'} 轮次已用尽` });
           } else {
+            if (call.kind === 'read') {
+              const batch = [call];
+              while (index + 1 < calls.length && calls[index + 1].kind === 'read') {
+                batch.push(calls[++index] as typeof call);
+                perCall.push([]);
+              }
+              toolRounds += 1;
+              bucket.push(...await runWorldSimulationToolBatch_ACU({
+                calls: batch, registry: input.registry, dependencies: input.tools,
+                gate: { state: readGateState,
+                  config: { historyTokenBudget: input.settings.agentHistoryTokenBudget, readTokenBudget: input.settings.agentReadTokenBudget, fallbackTokens: input.settings.agentReadFallbackTokens },
+                  usage: toolUsage, maxReads: input.settings.agentRunBudget.maxReads, readOnce: definition.kind !== 'researcher',
+                  ...(sent.defaultReadFenceTokens === undefined ? {} : { defaultReadFenceTokens: sent.defaultReadFenceTokens }),
+                  ...(input.readRoundState && input.roundId ? { readRoundState: input.readRoundState,
+                    readRoundKey: JSON.stringify([agentName, input.roundId]) } : {}),
+                  canReadAddress: address => worldSimulationCanReadAddress_ACU(agentName, address),
+                  count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU },
+              }));
+              continue;
+            }
             toolRounds += 1;
             bucket.push(...await runWorldSimulationToolBatch_ACU({
               calls: [call], registry: input.registry, dependencies: input.tools,
@@ -533,23 +572,34 @@ export class WorldSimulationSubagentRuntime_ACU {
         readTokenBudget: input.settings.agentReadTokenBudget,
         fallbackTokens: input.settings.agentReadFallbackTokens,
       });
-      const readBudgetText = `本轮剩余阅读预算：约 ${Math.max(0, readBudget.effectiveMaxReadTokens - readGateState.grantedTokens)} tokens；剩余 read/search 轮次 ${Math.max(0, input.settings.agentRunBudget.maxExtraReads - toolRounds)}/${input.settings.agentRunBudget.maxExtraReads}。`;
+      const readBudgetText = `本轮剩余阅读预算：约 ${Math.max(0, readBudget.effectiveMaxReadTokens - readGateState.grantedTokens)} tokens；剩余 read 轮次 ${Math.max(0, input.settings.agentRunBudget.maxExtraReads - toolRounds)}/${input.settings.agentRunBudget.maxExtraReads}。`;
       const requestContext = { ...context, evidenceRegistry: requestSnapshot, readBudgetText };
       const resolvers = createWorldSimulationPlaceholderResolvers_ACU(requestContext);
       const split = splitWorldSimulationSubagentPrompt_ACU(input.settings.agentPrompts[agentName], agentName);
       const rendered = await renderWorldSimulationPrompt_ACU(split.segments, agentName, resolvers);
-      const snapshotText = split.snapshotTemplate ? await renderWorldSimulationSnapshotTemplate_ACU(split.snapshotTemplate, resolvers) : '';
+      const snapshot = await renderWorldSimulationSnapshotSections_ACU(split.snapshotTemplate, resolvers,
+        isWorldSimulationLedgerContext_ACU(requestContext.worldState) ? { ledger: requestContext.worldState.revision } : {});
+      const snapshotText = snapshot.text;
       const guidance = split.movedGuidanceIndex >= 0 ? rendered.messages[split.movedGuidanceIndex]?.content : '';
-      const appendix = [snapshotText, guidance, input.triggeredWorldbook?.trim() ?? '', input.directorMaterials?.trim() ?? ''].filter(Boolean).join('\n\n');
+      const appendix = [snapshotText, guidance, input.triggeredWorldbook ?? ''].filter(Boolean).join('\n\n');
       const protocolGuard = { role: 'system', content: worldSimulationReviewerRuntimeProtocolInstruction_ACU() };
       const reviewerDraft = [protocolGuard, ...rendered.messages.filter((message, index) => index !== split.movedGuidanceIndex && message.content !== USER_PREFILL_CONTENT_ACU), ...transcript, ...(appendix ? [{ role: 'user', content: appendix }] : []), ...(rendered.messages.some(message => message.content === USER_PREFILL_CONTENT_ACU)
         ? [{ role: 'user', content: USER_PREFILL_CONTENT_ACU }]
         : [])];
       const sent = await executeWorldSimulationFinalRequest_ACU({
         messages: withNativeToolThinkPrefill_ACU(reviewerDraft),
+        inputLimitTokens: input.settings.agentHistoryTokenBudget,
+        tools: agentNativeTools_ACU(worldSimulationAgentNativeTools_ACU(agentName)),
         historyBudgetTokens: input.settings.agentHistoryTokenBudget,
         count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
-        invoke: value => this.dependencies.invoke(agentName, value, preset),
+        invoke: value => {
+          if (snapshot.text) verifyWorldSimulationSnapshotSections_ACU(snapshot, value);
+          if (input.fixedWorldbook) {
+            if (input.fixedWorldbook.text !== (input.triggeredWorldbook ?? '')) throw new Error('WORLD_SIMULATION_WORLDBOOK_SOURCE_UNVERIFIED');
+            verifyWorldSimulationFixedWorldbook_ACU(input.fixedWorldbook, value);
+          }
+          return this.dependencies.invoke(agentName, value, preset);
+        },
       });
       if (input.isCurrent?.() === false) throw new Error('WORLD_SIMULATION_RUN_STALE');
       if (sent.status === 'rejected') throw new Error(sent.reason);
@@ -559,10 +609,12 @@ export class WorldSimulationSubagentRuntime_ACU {
       let calls: ReturnType<typeof toolCalls_ACU>;
       try {
         calls = reviewerNative.length ? nativeToolArguments_ACU(reviewerNative).map(({ call, payload }) => {
-          if (call.name !== 'read' && call.name !== 'search') throw new Error(`reviewer 不允许调用 ${call.name}`);
-          return parseWorldSimulationMainAction_ACU(payload, false, requestSnapshot) as Extract<ReturnType<typeof parseWorldSimulationMainAction_ACU>, { kind: 'read' | 'search' }>;
+          if (call.name !== 'read') throw new Error(`reviewer 不允许调用 ${call.name}`);
+          const parsed = parseWorldSimulationMainAction_ACU(payload, false, requestSnapshot);
+          if (parsed.kind !== 'read') throw new Error('reviewer 只允许 read');
+          return parsed as Extract<ReturnType<typeof parseWorldSimulationMainAction_ACU>, { kind: 'read' | 'search' }>;
         }) : null;
-        if (!reviewerNative.length && toolCalls_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], requestSnapshot)) throw new Error('read/search 必须使用原生函数调用');
+        if (!reviewerNative.length && toolCalls_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName], requestSnapshot)) throw new Error('read 必须使用原生函数调用');
       } catch (error) {
         if (!reviewerNative.length) throw error;
         const reason = error instanceof Error ? error.message : String(error);
@@ -571,24 +623,29 @@ export class WorldSimulationSubagentRuntime_ACU {
       }
       if (calls) {
         if (toolRounds >= input.settings.agentRunBudget.maxExtraReads) {
-          const exhausted = 'reviewer 的 read/search 轮次已用尽，请依据现有候选与证据输出终审 JSON。';
+          const exhausted = 'reviewer 的 read 轮次已用尽，请依据现有候选与证据输出终审 JSON。';
           transcript.push(...nativeToolExchange_ACU(reviewerTurn.content, reviewerNative, reviewerNative.map(() => exhausted)));
           continue;
         }
         toolRounds += 1;
-        const perCallResults: Array<Awaited<ReturnType<typeof runWorldSimulationToolBatch_ACU>>> = [];
-        for (const toolCall of calls) perCallResults.push(await runWorldSimulationToolBatch_ACU({
-          calls: [toolCall], registry: input.registry, dependencies: input.tools,
+        const batchResults = await runWorldSimulationToolBatch_ACU({
+          calls, registry: input.registry, dependencies: input.tools,
           gate: {
             state: readGateState,
             config: { historyTokenBudget: input.settings.agentHistoryTokenBudget, readTokenBudget: input.settings.agentReadTokenBudget, fallbackTokens: input.settings.agentReadFallbackTokens },
             usage: toolUsage,
             maxReads: input.settings.agentRunBudget.maxReads,
+            readOnce: true,
+            ...(sent.defaultReadFenceTokens === undefined ? {} : { defaultReadFenceTokens: sent.defaultReadFenceTokens }),
+            ...(input.readRoundState && input.roundId ? { readRoundState: input.readRoundState,
+              readRoundKey: JSON.stringify([agentName, input.roundId]) } : {}),
+            canReadAddress: address => worldSimulationCanReadAddress_ACU(agentName, address),
             count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
           },
-        }));
+        });
         if (input.isCurrent?.() === false) throw new Error('WORLD_SIMULATION_RUN_STALE');
-        transcript.push(...nativeToolExchange_ACU(reviewerTurn.content, reviewerNative, perCallResults.map(toolText_ACU)));
+        transcript.push(...nativeToolExchange_ACU(reviewerTurn.content, reviewerNative,
+          calls.map((_, index) => index === 0 ? toolText_ACU(batchResults) : '本逻辑读取批次已统一结算，结果见首个工具回执。')));
         continue;
       }
       try {

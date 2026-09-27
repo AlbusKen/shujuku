@@ -4,7 +4,7 @@ import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { callAIChatTurn_ACU, callAIWithResolvedPreset_ACU } from '../ai/api-call';
 import { agentNativeTools_ACU, type AiChatTurn_ACU } from '../ai/native-tool';
 import { buildOpenAiPromptCacheKey_ACU, supportsExplicitOpenAiCacheKey_ACU } from '../ai/prompt-cache';
-import { WORLD_SIMULATION_AGENT_CATALOG_ACU, worldSimulationDirectorVisibleCatalog_ACU, type WorldSimulationAgentName_ACU } from './agent/agent-catalog';
+import { WORLD_SIMULATION_AGENT_CATALOG_ACU, worldSimulationAgentNativeTools_ACU, worldSimulationDirectorVisibleCatalog_ACU, type WorldSimulationAgentName_ACU } from './agent/agent-catalog';
 import { appendWorldSimulationSessionEvent_ACU, appendWorldSimulationUserInstruction_ACU, readWorldSimulationConversation_ACU } from './agent/agent-conversation-store';
 import { readLatestWorldSimulationMaterials_ACU, readWorldSimulationLedgerAtAnchor_ACU } from './agent/agent-module-store';
 import { clearWorldSimulationRunState_ACU } from './agent/agent-run-cache';
@@ -73,10 +73,11 @@ async function invokeWorldSimulationAgent_ACU(
   beginWorldSimulationInternalAiRequest_ACU({ requestId, runId: identity.runId, role });
   try {
     const definition = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === role);
+    const nativeTools = worldSimulationAgentNativeTools_ACU(role);
     const boundary = readWorldSimulationConversation_ACU(getChatArray_ACU()).compaction?.report;
     const promptCacheKey = supportsExplicitOpenAiCacheKey_ACU(preset) ? buildOpenAiPromptCacheKey_ACU({
       chatIdentity: identity.chatIdentity, role,
-      tools: ['read', 'search', ...(definition?.writableModules.length ? ['write_sql', ...definition.writableModules.map(module => `module:${module}`)] : [])],
+      tools: [...nativeTools, ...(definition?.writableModules.map(module => `module:${module}`) ?? [])],
       boundary, preset,
     }) : undefined;
     const response = await callAIChatTurn_ACU([...messages], preset, signal, {
@@ -84,7 +85,7 @@ async function invokeWorldSimulationAgent_ACU(
       afterMainApiCall: () => endWorldSimulationInternalAiMainApiInvocation_ACU(requestId),
     }, {
       ...(promptCacheKey ? { promptCacheKey } : {}),
-      tools: agentNativeTools_ACU(definition?.writableModules.length ? ['read', 'search', 'write_sql'] : ['read', 'search']),
+      tools: agentNativeTools_ACU(nativeTools),
     });
     if (response.content.trim() || response.toolCalls.length) return response;
     throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(

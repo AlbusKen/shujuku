@@ -5,9 +5,9 @@ import { applyWorldSimulationCandidatesDetailedViaSql_ACU, preflightWorldSimulat
 import type { WorldSimulationRunWriteState_ACU } from '../simulation-run-write-state';
 import type { WorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
 import { mergeWorldSimulationEvidenceRegistrySnapshot_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
-import { runWorldSimulationToolBatch_ACU, type WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
+import { createWorldSimulationReadRoundState_ACU, runWorldSimulationToolBatch_ACU, type WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
 import { resolveWorldSimulationAgentApiPreset_ACU, type WorldSimulationApiPresetDependencies_ACU } from '../api-preset';
-import { WORLD_SIMULATION_AGENT_CATALOG_ACU } from './agent-catalog';
+import { WORLD_SIMULATION_AGENT_CATALOG_ACU, worldSimulationAgentNativeTools_ACU } from './agent-catalog';
 import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationDirectorRuntimeProtocolInstruction_ACU } from './agent-defaults';
 import type { WorldSimulationCandidate_ACU, WorldSimulationConversationMessage_ACU, WorldSimulationMainLoopResult_ACU, WorldSimulationReviewerResult_ACU, WorldSimulationRunResumeState_ACU, WorldSimulationSubagentOutcome_ACU } from './agent-model';
 import type { WorldSimulationAnchorIdentity_ACU } from './agent-model';
@@ -23,14 +23,14 @@ import { countWorldSimulationTokens_ACU, measureWorldSimulationPrompt_ACU, type 
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './prompt-template';
 import { runWorldSimulationWorkflow_ACU } from './agent-workflow';
-import { renderWorldSimulationDirectorReads_ACU } from './agent-shared-materials';
-import { loadAgentWorldbookSnapshot_ACU, renderAgentWorldbookTriggeredInjection_ACU, type AgentWorldbookSnapshot_ACU } from '../../continuation/agent/agent-worldbook-read';
+import { bindWorldSimulationFixedWorldbook_ACU, renderWorldSimulationDirectorReads_ACU, verifyWorldSimulationFixedWorldbook_ACU, WORLD_SIMULATION_WORLDBOOK_UNAVAILABLE_ACU } from './agent-shared-materials';
+import { loadAgentWorldbookSnapshot_ACU, renderAgentWorldbookTriggeredInjection_ACU, selectTriggeredWorldbookEntries_ACU, type AgentWorldbookSnapshot_ACU } from '../../continuation/agent/agent-worldbook-read';
 import { buildRecentWorldbookScanText_ACU } from '../../continuation/agent/agent-placeholder-resolver';
 import { getChatArray_ACU } from '../../../data/gateways/chat-gateway';
 import { appendWorldSimulationDirectorHistory_ACU, readWorldSimulationDirectorCompactionSource_ACU, readWorldSimulationDirectorHistory_ACU, readWorldSimulationDirectorRunHistory_ACU, writeWorldSimulationConversationCompaction_ACU } from './agent-conversation-store';
 import { planWorldSimulationHistoryCompaction_ACU } from './agent-history-compactor';
 import type { WorldSimulationAgentInvoker_ACU, WorldSimulationSubagentRuntime_ACU } from './agent-subagent-runtime';
-import { isModelExchangeSequence_ACU, nativeToolArguments_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, withNativeToolThinkPrefill_ACU, type AiNativeToolCall_ACU, type AiWireMessage_ACU } from '../../ai/native-tool';
+import { agentNativeTools_ACU, isModelExchangeSequence_ACU, nativeToolArguments_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, withNativeToolThinkPrefill_ACU, type AiNativeToolCall_ACU, type AiWireMessage_ACU } from '../../ai/native-tool';
 
 export interface WorldSimulationMainLoopDependencies_ACU {
   invoke: WorldSimulationAgentInvoker_ACU;
@@ -302,8 +302,15 @@ export class WorldSimulationMainLoop_ACU {
       ? { role: 'user', content: resumedState.handoffSummary } : null;
     if (!input.anchor && handoffHint) transcript.unshift(handoffHint);
     const worldbookSnapshot = await (input.worldbookSnapshot ?? loadAgentWorldbookSnapshot_ACU());
-    const triggeredWorldbook = worldbookSnapshot.available && worldbookSnapshot.entries.length
-      ? renderAgentWorldbookTriggeredInjection_ACU(worldbookSnapshot, buildRecentWorldbookScanText_ACU(input.chat ?? getChatArray_ACU())) : '';
+    const worldbookScan = worldbookSnapshot.available && worldbookSnapshot.entries.length
+      ? buildRecentWorldbookScanText_ACU(input.chat ?? getChatArray_ACU()) : '';
+    const triggeredWorldbook = !worldbookSnapshot.available
+      ? WORLD_SIMULATION_WORLDBOOK_UNAVAILABLE_ACU
+      : worldbookSnapshot.entries.length
+        ? renderAgentWorldbookTriggeredInjection_ACU(worldbookSnapshot, worldbookScan) : '';
+    const fixedWorldbook = bindWorldSimulationFixedWorldbook_ACU(triggeredWorldbook,
+      worldbookSnapshot.available && worldbookSnapshot.entries.length
+        ? selectTriggeredWorldbookEntries_ACU(worldbookSnapshot.entries, worldbookScan) : []);
     let persistedTranscriptLength = input.anchor ? persistedHistory.length : 0;
     const flushDirectorHistory = async (): Promise<void> => {
       if (!input.anchor || transcript.length <= persistedTranscriptLength) return;
@@ -325,6 +332,8 @@ export class WorldSimulationMainLoop_ACU {
       persistedTranscriptLength = transcript.length;
     };
     const director = 'world-director' as const;
+    const roundId = JSON.stringify([input.identity.taskId, input.identity.stageId, input.identity.stageRevision]);
+    const readRoundState = createWorldSimulationReadRoundState_ACU();
     // Director may correct several different mechanical fields in sequence; repeated identical
     // failures remain capped by the repair state's per-fingerprint guard.
     const protocolRepair = createWorldSimulationProtocolRepairState_ACU(2);
@@ -358,9 +367,10 @@ export class WorldSimulationMainLoop_ACU {
           promptContext: resultContext_ACU(currentContext(), input.registry, available, outcomes),
           registry: input.registry,
           tools: input.tools,
+          roundId, readRoundState,
           isCurrent: input.isCurrent,
           directorMaterials: renderWorldSimulationDirectorReads_ACU(transcript),
-          triggeredWorldbook,
+          triggeredWorldbook, fixedWorldbook,
         }),
       };
     };
@@ -562,9 +572,14 @@ export class WorldSimulationMainLoop_ACU {
         }
         sent = await executeWorldSimulationFinalRequest_ACU({
           messages: prepared,
+          inputLimitTokens: input.settings.agentHistoryTokenBudget,
+          tools: agentNativeTools_ACU(worldSimulationAgentNativeTools_ACU(director)),
           historyBudgetTokens: input.settings.agentHistoryTokenBudget,
           count,
-          invoke: messages => this.dependencies.invoke(director, messages, preset),
+          invoke: messages => {
+            if (fixedWorldbook.text) verifyWorldSimulationFixedWorldbook_ACU(fixedWorldbook, messages);
+            return this.dependencies.invoke(director, messages, preset);
+          },
         });
       } catch (error) {
         updateWorldSimulationSession_ACU(input.identity.chatIdentity, mainEntryId, { title: `主 Agent 第 ${iteration} 轮失败`, detail: compact_ACU(error), ok: false, status: 'failed' });
@@ -636,16 +651,32 @@ export class WorldSimulationMainLoop_ACU {
         let perCallResults: Array<Awaited<ReturnType<typeof runWorldSimulationToolBatch_ACU>>>;
         try {
           perCallResults = [];
-          for (const call of calls) perCallResults.push(await runWorldSimulationToolBatch_ACU({
-            calls: [call], registry: input.registry, dependencies: input.tools,
-            gate: {
-              state: readGateState,
-              config: { historyTokenBudget: input.settings.agentHistoryTokenBudget, readTokenBudget: input.settings.agentReadTokenBudget, fallbackTokens: input.settings.agentReadFallbackTokens },
-              usage: toolUsage,
-              maxReads: input.settings.agentRunBudget.maxReads,
-              count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
-            },
-          }));
+          for (let index = 0; index < calls.length;) {
+            const first = calls[index];
+            let end = index + 1;
+            if (first.kind === 'read') {
+              while (end < calls.length && calls[end].kind === 'read') end += 1;
+            }
+            const group = calls.slice(index, end);
+            const batch = await runWorldSimulationToolBatch_ACU({
+              calls: group, registry: input.registry, dependencies: input.tools,
+              gate: {
+                state: readGateState,
+                config: { historyTokenBudget: input.settings.agentHistoryTokenBudget, readTokenBudget: input.settings.agentReadTokenBudget, fallbackTokens: input.settings.agentReadFallbackTokens },
+                usage: toolUsage,
+                maxReads: input.settings.agentRunBudget.maxReads,
+                ...(sent.defaultReadFenceTokens === undefined ? {} : { defaultReadFenceTokens: sent.defaultReadFenceTokens }),
+                count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
+              },
+            });
+            let offset = 0;
+            for (const call of group) {
+              const size = call.kind === 'read' ? call.reads.length : batch.length;
+              perCallResults.push(batch.slice(offset, offset + size));
+              offset += size;
+            }
+            index = end;
+          }
           const results = perCallResults.flat();
           const toolOk = results.every(result => result.status === 'ok' || result.status === 'empty');
           updateWorldSimulationSession_ACU(input.identity.chatIdentity, toolEntryId, {
@@ -681,6 +712,7 @@ export class WorldSimulationMainLoop_ACU {
             promptContext: requestContext,
             registry: input.registry,
             tools: input.tools,
+            roundId, readRoundState,
             writeSql: input.writeSql,
             readCurrent: input.readCurrent,
             readFieldSnapshot: input.readFieldSnapshot,
@@ -696,7 +728,7 @@ export class WorldSimulationMainLoop_ACU {
             targetModules: input.targetModules,
             subagents: this.dependencies.subagents,
             directorMaterials: renderWorldSimulationDirectorReads_ACU(transcript),
-            triggeredWorldbook,
+            triggeredWorldbook, fixedWorldbook,
           });
         } catch (error) {
           updateWorldSimulationSession_ACU(input.identity.chatIdentity, workflowEntryId, { title: '固定工作流失败', detail: compact_ACU(error), ok: false, status: 'failed' });
@@ -711,25 +743,31 @@ export class WorldSimulationMainLoop_ACU {
           status: workflow.outcome === 'escalate' ? 'failed' : 'done',
         });
         await persistEntry(workflowEntryId, `workflow-${iteration}`);
-        const workflowFeedback = JSON.stringify({ outcome: workflow.outcome === 'escalate' ? 'escalate' : 'prepared', pendingFixes: workflow.pendingFixes, agents: workflow.outcomes.map(item => ({ agentName: item.agentName, status: item.status })) });
-        transcript.push({ role: 'assistant', content: raw || '(empty)' }, {
-          role: 'user', content: workflow.outcome === 'escalate'
-            ? `${workflowFeedback}
-${workflow.summary}
-资料维护未合格。请向用户说明缺口，或在用户要求维护资料时 delegate 对应角色。不要再次 open_round 同一批已升级的待修复项。`
-            : workflowFeedback,
-        });
-        await flushDirectorHistory();
         if (workflow.outcome === 'escalate') {
+          const workflowFeedback = JSON.stringify({ outcome: 'escalate', pendingFixes: workflow.pendingFixes, agents: workflow.outcomes.map(item => ({ agentName: item.agentName, status: item.status })) });
+          transcript.push({ role: 'assistant', content: raw || '(empty)' }, {
+            role: 'user', content: `${workflowFeedback}
+${workflow.summary}
+资料维护未合格。请向用户说明缺口，或在用户要求维护资料时 delegate 对应角色。不要再次 open_round 同一批已升级的待修复项。`,
+          });
+          await flushDirectorHistory();
           workflowEscalation = { summary: workflow.summary, pendingFixes: workflow.pendingFixes };
           await persist(iteration + 1, workflow.summary);
           continue;
         }
+        // 保存已发生的导演动作及工作流终态，维持锚定历史的成对协议；
+        // 此回执只用于审计/恢复，不再发给导演请求二次生成。
+        transcript.push({ role: 'assistant', content: raw || '(empty)' }, {
+          role: 'user', content: JSON.stringify({ outcome: workflow.outcome,
+            summary: workflow.summary, source: 'fixed-workflow' }),
+        });
+        await flushDirectorHistory();
         await clearWorldSimulationRunStateAtAnchor_ACU(input.anchor, input.chat);
-        if (workflow.outcome === 'no_change' || !workflow.commitCandidate) {
-          return { outcome: 'no_change', summary: workflow.summary, outcomes };
+        if (workflow.outcome === 'no_change') {
+          return { outcome: 'no_change', summary: workflow.summary, outcomes, finalProjection: workflow.finalProjection };
         }
-        return { outcome: 'commit', summary: workflow.summary, commitCandidate: workflow.commitCandidate, outcomes };
+        if (!workflow.commitCandidate) throw new Error('WORLD_SIMULATION_WORKFLOW_COMMIT_CANDIDATE_REQUIRED');
+        return { outcome: 'commit', summary: workflow.summary, commitCandidate: workflow.commitCandidate, outcomes, finalProjection: workflow.finalProjection };
       }
 
       if (action.kind === 'delegate') {
@@ -787,10 +825,11 @@ ${workflow.summary}
               readCurrent: input.readCurrent,
               readFieldSnapshot: input.readFieldSnapshot,
               isCurrent: input.isCurrent,
+              roundId, readRoundState,
               runId: input.identity.runId,
               candidateSeq: nextSeq,
               directorMaterials: renderWorldSimulationDirectorReads_ACU(transcript),
-              triggeredWorldbook,
+              triggeredWorldbook, fixedWorldbook,
             });
           } catch (error) {
             const issue = compactWorldSimulationProtocolError_ACU(error);
@@ -895,7 +934,7 @@ ${rejectionText}` : delegationFeedback,
       try {
         reviewer = pendingReview?.fingerprint === reviewFingerprint
           ? await pendingReview.promise
-          : await this.dependencies.subagents.runReviewer({ candidates: available, settings: input.settings, promptContext: requestContext, registry: input.registry, tools: input.tools, isCurrent: input.isCurrent, directorMaterials: renderWorldSimulationDirectorReads_ACU(transcript), triggeredWorldbook });
+          : await this.dependencies.subagents.runReviewer({ candidates: available, settings: input.settings, promptContext: requestContext, registry: input.registry, tools: input.tools, roundId, readRoundState, isCurrent: input.isCurrent, directorMaterials: renderWorldSimulationDirectorReads_ACU(transcript), triggeredWorldbook, fixedWorldbook });
         pendingReview = null;
         updateWorldSimulationSession_ACU(input.identity.chatIdentity, reviewerEntryId, { title: `因果审核：${reviewer.verdict}`, detail: reviewer.summary, ok: reviewer.verdict !== 'reject', status: reviewer.verdict === 'reject' ? 'failed' : 'done' });
         await persistEntry(reviewerEntryId, `causality-review-${iteration}`);

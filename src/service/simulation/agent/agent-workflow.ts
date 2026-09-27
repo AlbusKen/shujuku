@@ -13,7 +13,8 @@ import {
 import { applyWorldSimulationCandidatesDetailedViaSql_ACU } from '../simulation-transaction';
 import type { WorldSimulationRunWriteState_ACU } from '../simulation-run-write-state';
 import { snapshotWorldSimulationEvidenceRegistry_ACU, type WorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
-import type { WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
+import type { WorldSimulationReadRoundState_ACU, WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
+import { buildWorldSimulationProjection_ACU } from '../simulation-projection';
 import { findWorldSimulationAgentDefinition_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
 import type {
   WorldSimulationCandidate_ACU,
@@ -23,6 +24,7 @@ import type {
 } from './agent-model';
 import type { WorldSimulationPlaceholderContext_ACU } from './agent-placeholder-resolver';
 import type { WorldSimulationSubagentRuntime_ACU } from './agent-subagent-runtime';
+import type { WorldSimulationFixedWorldbook_ACU } from './agent-shared-materials';
 
 export interface WorldSimulationWorkflowOpening_ACU {
   summary: string;
@@ -37,6 +39,8 @@ export interface WorldSimulationWorkflowInput_ACU {
   promptContext: WorldSimulationPlaceholderContext_ACU;
   registry: WorldSimulationEvidenceRegistry_ACU;
   tools: WorldSimulationToolDependencies_ACU;
+  roundId?: string;
+  readRoundState?: WorldSimulationReadRoundState_ACU;
   writeSql?: import('./agent-subagent-runtime').WorldSimulationSubagentRunInput_ACU['writeSql'];
   readCurrent?: import('./agent-subagent-runtime').WorldSimulationSubagentRunInput_ACU['readCurrent'];
   readFieldSnapshot?: import('./agent-subagent-runtime').WorldSimulationSubagentRunInput_ACU['readFieldSnapshot'];
@@ -49,6 +53,7 @@ export interface WorldSimulationWorkflowInput_ACU {
   subagents: Pick<WorldSimulationSubagentRuntime_ACU, 'run'>;
   directorMaterials?: string;
   triggeredWorldbook?: string;
+  fixedWorldbook?: WorldSimulationFixedWorldbook_ACU;
 }
 
 export interface WorldSimulationWorkflowResult_ACU {
@@ -58,6 +63,13 @@ export interface WorldSimulationWorkflowResult_ACU {
   pendingFixes: WorldSimulationPendingFix_ACU[];
   escalated: boolean;
   ledger: WorldSimulationLedger_ACU;
+  /** Commit 路径仅为候选；提交适配器可能过滤信号，最终交付以提交后的权威账本为准。 */
+  finalProjection: {
+    content: string | null;
+    sourceAgent: 'guidance-composer' | 'current-ledger';
+    sourceRevision: number;
+    deliverable: boolean;
+  };
   commitCandidate?: WorldSimulationCommitCandidate_ACU;
 }
 
@@ -392,6 +404,8 @@ export async function runWorldSimulationGuidanceComposer_ACU(input: {
   promptContext: WorldSimulationPlaceholderContext_ACU;
   registry: WorldSimulationEvidenceRegistry_ACU;
   tools: WorldSimulationToolDependencies_ACU;
+  roundId?: string;
+  readRoundState?: WorldSimulationReadRoundState_ACU;
   writeSql?: import('./agent-subagent-runtime').WorldSimulationSubagentRunInput_ACU['writeSql'];
   readCurrent?: import('./agent-subagent-runtime').WorldSimulationSubagentRunInput_ACU['readCurrent'];
   readFieldSnapshot?: import('./agent-subagent-runtime').WorldSimulationSubagentRunInput_ACU['readFieldSnapshot'];
@@ -399,6 +413,7 @@ export async function runWorldSimulationGuidanceComposer_ACU(input: {
   subagents: Pick<WorldSimulationSubagentRuntime_ACU, 'run'>;
   directorMaterials?: string;
   triggeredWorldbook?: string;
+  fixedWorldbook?: WorldSimulationFixedWorldbook_ACU;
   ledger: WorldSimulationLedger_ACU;
   focus: string;
   candidateSeq: number;
@@ -419,10 +434,13 @@ export async function runWorldSimulationGuidanceComposer_ACU(input: {
       readCurrent: input.readCurrent,
       readFieldSnapshot: input.readFieldSnapshot,
       isCurrent: input.isCurrent,
+      roundId: input.roundId,
+      readRoundState: input.readRoundState,
       runId: input.identity.runId,
       candidateSeq: input.candidateSeq,
       directorMaterials: input.directorMaterials,
       triggeredWorldbook: input.triggeredWorldbook,
+      fixedWorldbook: input.fixedWorldbook,
     });
   } catch (error) {
     return failedOutcome_ACU(agentName, error, 'invoke_failed', ['guidance']);
@@ -493,11 +511,14 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
         readCurrent: input.readCurrent,
         readFieldSnapshot: input.readFieldSnapshot,
         isCurrent: input.isCurrent,
+        roundId: input.roundId,
+        readRoundState: input.readRoundState,
         writableModules: targetModules,
         runId: input.identity.runId,
         candidateSeq: nextSeq(agentName),
         directorMaterials: input.directorMaterials,
         triggeredWorldbook: input.triggeredWorldbook,
+        fixedWorldbook: input.fixedWorldbook,
       });
       const restricted = restrictOutcome_ACU(outcome, targetModules);
       if (restricted.candidate && input.runWrites) {
@@ -523,6 +544,7 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
       outcome: 'no_change',
       summary: '正文指纹未变且所有预期资料模块均已完成，整轮跳过',
       outcomes,
+      finalProjection: { content: buildWorldSimulationProjection_ACU(base), sourceAgent: 'current-ledger', sourceRevision: base.revision, deliverable: true },
       pendingFixes: [],
       escalated: false,
       ledger: base,
@@ -595,12 +617,15 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
       readCurrent: input.readCurrent,
       readFieldSnapshot: input.readFieldSnapshot,
       isCurrent: input.isCurrent,
+      roundId: input.roundId,
+      readRoundState: input.readRoundState,
       subagents: input.subagents,
       ledger,
       focus: input.opening.focus,
       candidateSeq: nextSeq('guidance-composer'),
       directorMaterials: input.directorMaterials,
       triggeredWorldbook: input.triggeredWorldbook,
+      fixedWorldbook: input.fixedWorldbook,
     });
     outcomes.push(composer);
     ledger = clearCompletedPending_ACU(await refreshLedger(ledger, accepted), [composer]);
@@ -627,6 +652,13 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
       ? `固定工作流已处理 ${accepted.length} 个候选`
       : '固定工作流没有产生账本变更';
   const evidenceRefs = [...new Set(accepted.flatMap(item => item.evidenceRefs))];
+  const finalProjection = {
+    content: buildWorldSimulationProjection_ACU(ledger),
+    sourceAgent: accepted.some(item => item.agentName === 'guidance-composer' && Object.prototype.hasOwnProperty.call(item.patch, 'guidance'))
+      ? 'guidance-composer' as const : 'current-ledger' as const,
+    sourceRevision: ledger.revision,
+    deliverable: !escalated && accepted.length === 0,
+  };
   return {
     outcome: escalated ? 'escalate' : accepted.length ? 'commit' : 'no_change',
     summary,
@@ -634,6 +666,7 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
     pendingFixes: ledger.pendingFixes,
     escalated,
     ledger,
+    finalProjection,
     commitCandidate: {
       runId: input.identity.runId,
       taskId: input.identity.taskId,

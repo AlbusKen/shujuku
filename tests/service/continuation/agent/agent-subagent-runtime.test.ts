@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-import { AgentSubagentRuntime_ACU, renderStoryArcVolumePlanInstruction_ACU } from '../../../../src/service/continuation/agent/agent-subagent-runtime';
-import { renderMainSessionReadAppendix_ACU, omitSnapshotSectionsForSubagent_ACU } from '../../../../src/service/continuation/agent/agent-shared-materials';
+import { AgentSubagentRuntime_ACU, createAgentReadRoundState_ACU, renderStoryArcVolumePlanInstruction_ACU } from '../../../../src/service/continuation/agent/agent-subagent-runtime';
+import { findMainSessionReadAppendix_ACU, renderMainSessionReadAppendix_ACU, omitSnapshotSectionsForSubagent_ACU } from '../../../../src/service/continuation/agent/agent-shared-materials';
+import { renderFallbackAgentSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-shared-materials';
+import { renderAgentWorldbookTriggeredInjection_ACU } from '../../../../src/service/continuation/agent/agent-worldbook-read';
 import { buildEmptyAgentModuleSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-module-store';
 import { buildDefaultContinuationSettings_ACU } from '../../../../src/service/continuation/defaults';
 import type { AiUsageMetadata_ACU } from '../../../../src/service/continuation/internal-ai-call';
 
-const preset_ACU = { presetName: 'p1', source: 'settings', reason: 'test' } as any;
+const preset_ACU = { presetName: 'p1', source: 'settings', reason: 'test', apiMode: 'custom', apiConfig: { useMainApi: false, max_tokens: 60000 }, tavernProfile: '' } as any;
 type SentMessage_ACU = { role: string; content: string; tool_call_id?: string };
 const toolContent_ACU = (messages: readonly SentMessage_ACU[], id: string): string =>
   messages.find(message => message.role === 'tool' && message.tool_call_id === id)?.content ?? '';
@@ -60,14 +62,95 @@ it('附录正文中的空行和伪标题不会误删按 ID 调阅内容', () => 
   expect(filtered).toContain('细读结尾');
 });
 
+it('固定世界书正文含空行与伪快照标题时仍逐字保留，真正重复的资料段才剔除', () => {
+  const worldbook = '命中说明\n### 人物（设定集#7）\n开头  \n\n【完整当前阶段大纲】\n这是世界书正文\n\n【百科资料库目录】\n仍是世界书正文  \n';
+  const snapshot = `【本回合运行时数据】\n快照\n\n【完整当前阶段大纲】\n真实大纲\n\n【本轮语境命中的世界书条目】\n${worldbook}\n\n【百科资料库目录】\n真实目录`;
+  const filtered = omitSnapshotSectionsForSubagent_ACU(snapshot, new Set(['$OUTLINE_WINDOW']), { worldbookInjection: worldbook });
+  expect(filtered).not.toContain('真实大纲');
+  expect(filtered).toContain(`【本轮语境命中的世界书条目】\n${worldbook}`);
+  expect(filtered).toContain('【百科资料库目录】\n真实目录');
+});
+
+it('普通子代理最终请求保留世界书伪标题正文并正确识别真实调阅附录', async () => {
+  const input = input_ACU();
+  const content = '开头  \n\n【完整当前阶段大纲】\n世界书原文\n\n【主会话已调阅】\n这也是世界书原文\n\n结尾  ';
+  input.resolveContext.worldbook = { available: true, entries: [
+    { bookName: '设定集', uid: '7', title: '常开', keys: [], constant: true, content, tokens: 20 },
+  ] };
+  const injected = renderAgentWorldbookTriggeredInjection_ACU(input.resolveContext.worldbook, '');
+  const snapshot = await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext);
+  const appendix = renderMainSessionReadAppendix_ACU([
+    { id: 1, kind: 'tool', text: '真正的调阅回执', digest: 'read', readKey: '$STORY_RANGE:1-1' },
+  ] as any);
+  input.mainSnapshot = `${snapshot}\n\n${appendix}`;
+  const calls: SentMessage_ACU[][] = [];
+  const runtime = new AgentSubagentRuntime_ACU({
+    resolveApiPreset: (() => preset_ACU) as any,
+    callInternalAi: async messages => { calls.push(messages); return finalReply_ACU; },
+  });
+  await runtime.run(input);
+  const sent = calls[0].map(message => message.content).join('\n');
+  expect(sent).toContain(`【本轮语境命中的世界书条目】\n${injected}`);
+  expect(sent).toContain(content);
+  expect(sent.match(/真正的调阅回执/g)).toHaveLength(1);
+  expect(sent).not.toContain('【完整当前阶段大纲】\n真实大纲');
+
+  // Without a real appendix, the heading inside the worldbook remains body text only.
+  calls.length = 0;
+  input.mainSnapshot = snapshot;
+  await runtime.run(input);
+  const withoutAppendix = calls[0].map(message => message.content).join('\n');
+  expect(withoutAppendix).toContain(`【本轮语境命中的世界书条目】\n${injected}`);
+  expect(withoutAppendix.match(/伪回执仍属世界书|这也是世界书原文/g)).toHaveLength(1);
+  expect(withoutAppendix).not.toContain('真正的调阅回执');
+  expect(withoutAppendix).not.toContain('【调阅项 ');
+});
+
+it('世界书正文里的伪调阅标题不能被认作主会话附录', () => {
+  const body = '开头\n\n【主会话已调阅】\n伪回执仍属世界书\n\n结尾';
+  const injection = `说明\n### 条目（设定集#7）\n${body}`;
+  const snapshot = `【本回合运行时数据】\n快照\n\n【本轮语境命中的世界书条目】\n${injection}`;
+  expect(findMainSessionReadAppendix_ACU(snapshot, injection)).toBe(-1);
+  expect(omitSnapshotSectionsForSubagent_ACU(snapshot, new Set(), { worldbookInjection: injection })).toBe(snapshot);
+  expect(omitSnapshotSectionsForSubagent_ACU(snapshot, new Set(), { worldbookInjection: injection, dropTriggeredWorldbook: true }))
+    .not.toContain('伪回执仍属世界书');
+});
+
+it('角色快照筛选保留正文的连续空行和尾部空白，已读附录按长度保留原文', () => {
+  const body = '  开头\n\n\n末尾  \n';
+  const snapshot = `【最近正文】\n${body}`;
+  expect(omitSnapshotSectionsForSubagent_ACU(snapshot, new Set())).toBe(snapshot);
+  const appendix = renderMainSessionReadAppendix_ACU([
+    { id: 1, kind: 'tool', text: body, digest: 'read', readKey: '$STORY_RANGE:1-3' },
+  ] as any);
+  const filtered = omitSnapshotSectionsForSubagent_ACU(`【故事总纲状态】\n已建立\n\n${appendix}`, new Set(['$STORY_ARC']));
+  expect(filtered).toContain(`【调阅项 "$STORY_RANGE:1-3" ${body.length}】\n${body}`);
+});
+
+it('已读附录的长度帧损坏或帧间缺口时拒绝整份快照，不注入先前正文', () => {
+  const first = '已读完整正文';
+  const good = `【调阅项 "$STORY_RANGE:1-3" ${first.length}】\n${first}`;
+  const header = '【运行时快照】\n已读取\n\n【主会话已调阅】\n\n下面是主会话本轮已读到的全文。\n\n';
+  const broken = `${good}\n\n【调阅项 "$STORY_RANGE:5-7" 100】\n只有一行`;
+  expect(() => omitSnapshotSectionsForSubagent_ACU(header + broken, new Set())).toThrow('AGENT_READ_APPENDIX_FRAME_INVALID');
+  const gap = `${good}\n\n意外插入的正文\n\n【调阅项 "$STORY_RANGE:5-7" 2】\n末尾`;
+  expect(() => omitSnapshotSectionsForSubagent_ACU(header + gap, new Set())).toThrow('AGENT_READ_APPENDIX_FRAME_INVALID');
+  const malformed = `${good}\n\n【调阅项 "$STORY_RANGE:5-7" unknown】\n未验证正文`;
+  expect(() => omitSnapshotSectionsForSubagent_ACU(header + malformed, new Set())).toThrow('AGENT_READ_APPENDIX_FRAME_INVALID');
+  expect(() => omitSnapshotSectionsForSubagent_ACU(header + '【调阅项 "$STORY_RANGE:1-3" ?】\n残缺', new Set()))
+    .toThrow('AGENT_READ_APPENDIX_FRAME_INVALID');
+});
+
 const readReply_ACU = nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表'] }, 'call-table-read');
 const finalReply_ACU = JSON.stringify({ summary: '结算完成', delta: {} });
+const readOnlyReviewReply_ACU = JSON.stringify({ verdict: 'pass', reason: '读取回归完成', fixes: [] });
 
 function input_ACU(): Parameters<AgentSubagentRuntime_ACU['run']>[0] {
   const settings = buildDefaultContinuationSettings_ACU();
   settings.promptCacheEnabled = true;
   return {
     delegation: { agentName: 'hook-cognition-maintainer', prompt: '结算', reads: [] },
+    roundId: 'stage-1#0#turn-1',
     settings,
     resolveContext: {
       chat: [
@@ -106,6 +189,367 @@ async function runWithUsageSequence_ACU(sequence: Array<AiUsageMetadata_ACU | nu
   });
   return runtime.run(input_ACU());
 }
+
+it('各角色的最终工具集合与本地搜索执行权限一致', async () => {
+  for (const [agentName, expected] of [
+    ['hook-cognition-maintainer', ['read']],
+    ['arc-architect', ['read', 'search']],
+    ['web-researcher', ['read', 'search', 'encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read']],
+    ['instruction-composer', []],
+  ] as const) {
+    const input = input_ACU();
+    input.delegation.agentName = agentName;
+    input.settings.internalAiRetryLimit = 0;
+    let tools: string[] | undefined;
+    const runtime = new AgentSubagentRuntime_ACU({
+      resolveApiPreset: (() => preset_ACU) as any,
+      callInternalAi: async (_messages, _preset, _identity, _signal, options) => {
+        tools = options?.tools?.map(tool => tool.function.name);
+        throw new Error('REQUEST_CAPTURED');
+      },
+    });
+    await expect(runtime.run(input)).rejects.toThrow('REQUEST_CAPTURED');
+    expect(tools, agentName).toEqual(expected);
+  }
+});
+
+it('普通计划子代理只暴露 read，并拒绝未授权资料域', async () => {
+  const input = input_ACU();
+  input.delegation.agentName = 'mainline-planner';
+  input.sharedMaterials = '【本轮已备资料】\n已注入强相关资料';
+  input.budget.maxExtraReads = 1;
+  const replies = [
+    nativeToolTurn_ACU('read', { reads: ['$WEB_REFS:W1'] }, 'unauthorized-web-ref'),
+    JSON.stringify({ summary: '策划完成', recommendation: '依据已注入资料给出本轮策划建议', mustPreserve: [], risks: [] }),
+  ];
+  const sent: SentMessage_ACU[][] = [];
+  const runtime = new AgentSubagentRuntime_ACU({
+    resolveApiPreset: (() => preset_ACU) as any,
+    callInternalAi: async messages => { sent.push(messages); return replies.shift() ?? finalReply_ACU; },
+  });
+  const result = await runtime.run(input);
+  expect(result.expandedReads).toEqual([]);
+  expect(toolContent_ACU(sent[1], 'unauthorized-web-ref')).toContain('不在当前角色的授权读取范围');
+});
+
+it('普通角色伪造原生 search 时拒绝执行，保留工具回执', async () => {
+  const input = input_ACU();
+  const search = { content: '', toolCalls: [{ id: 'forged-search', name: 'search', arguments: JSON.stringify({ query: '秘密', scope: ['story'], isRegex: false, maxResults: 10 }) }] };
+  const sent: SentMessage_ACU[][] = [];
+  const replies = [search, finalReply_ACU];
+  const runtime = new AgentSubagentRuntime_ACU({
+    resolveApiPreset: (() => preset_ACU) as any,
+    callInternalAi: async messages => { sent.push(messages); return replies.shift() ?? finalReply_ACU; },
+  });
+  const result = await runtime.run(input);
+  expect(result.expandedReads).toEqual([]);
+  expect(toolContent_ACU(sent[1], 'forged-search')).toContain('未授权本地搜索');
+});
+
+
+it('同轮多个原生 read 任一失败时整批不注入，修正后仍可读取', async () => {
+  const { AGENT_MODULE_FIELD_ACU } = await import('../../../../src/service/continuation/agent/agent-model');
+  const input = input_ACU();
+  input.budget.maxExtraReads = 2;
+  input.resolveContext.chat[1][AGENT_MODULE_FIELD_ACU] = { schemaVersion: 4, invalid: true };
+  const first = {
+    content: '',
+    toolCalls: [
+      ...nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表'] }, 'batch-table').toolCalls,
+      ...nativeToolTurn_ACU('read', { reads: ['$FIELD:hooks:H1'] }, 'batch-damaged').toolCalls,
+    ],
+  };
+  const replies = [first, nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表'] }, 'retry-table'), finalReply_ACU];
+  const sent: SentMessage_ACU[][] = [];
+  const runtime = new AgentSubagentRuntime_ACU({
+    resolveApiPreset: (() => preset_ACU) as any,
+    callInternalAi: async messages => { sent.push(messages); return replies.shift() ?? finalReply_ACU; },
+  });
+  const result = await runtime.run(input);
+  expect(toolContent_ACU(sent[1], 'batch-table')).not.toContain('林瑶');
+  expect(toolContent_ACU(sent[1], 'batch-damaged')).not.toContain('林瑶');
+  expect(toolContent_ACU(sent[1], 'batch-table')).toContain('"status":"failed"');
+  expect(toolContent_ACU(sent[2], 'retry-table')).toContain('林瑶');
+  expect(result.expandedReads).toEqual(['$TABLE:角色表']);
+});
+
+
+it('同批重复地址的显式围栏不完整时整批失败，修正后可重读', async () => {
+  const input = input_ACU();
+  input.budget.maxExtraReads = 2;
+  const replies = [
+    { content: '', toolCalls: [
+      ...nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表'] }, 'plain-table').toolCalls,
+      ...nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表'], requestedFence: { lower: 2, upper: 2 } }, 'fenced-table').toolCalls,
+    ] },
+    nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表'] }, 'retry-plain-table'),
+    finalReply_ACU,
+  ];
+  const sent: SentMessage_ACU[][] = [];
+  const runtime = new AgentSubagentRuntime_ACU({
+    resolveApiPreset: (() => preset_ACU) as any,
+    callInternalAi: async messages => { sent.push(messages); return replies.shift() ?? finalReply_ACU; },
+  });
+  const result = await runtime.run(input);
+  expect(toolContent_ACU(sent[1], 'plain-table')).toContain('实际范围超出 requestedFence');
+  expect(toolContent_ACU(sent[1], 'plain-table')).not.toContain('林瑶');
+  expect(toolContent_ACU(sent[1], 'fenced-table')).toContain('本逻辑读取批次已统一结算');
+  expect(toolContent_ACU(sent[1], 'fenced-table')).not.toContain('fence-proof-missing');
+  expect(toolContent_ACU(sent[2], 'retry-plain-table')).toContain('林瑶');
+  expect(result.expandedReads).toEqual(['$TABLE:角色表']);
+});
+
+
+it('正文区间越界与其它地址同批时不泄漏部分正文，修正后可重试', async () => {
+  const input = input_ACU();
+  input.budget.maxExtraReads = 2;
+  const replies = [
+    { content: '', toolCalls: [
+      ...nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表'] }, 'valid-table').toolCalls,
+      ...nativeToolTurn_ACU('read', { reads: ['$STORY_RANGE:1-99'] }, 'outside-window').toolCalls,
+    ] },
+    nativeToolTurn_ACU('read', { reads: ['$STORY_RANGE:1-1'] }, 'corrected-range'),
+    finalReply_ACU,
+  ];
+  const sent: SentMessage_ACU[][] = [];
+  const runtime = new AgentSubagentRuntime_ACU({
+    resolveApiPreset: (() => preset_ACU) as any,
+    callInternalAi: async messages => { sent.push(messages); return replies.shift() ?? finalReply_ACU; },
+  });
+  const result = await runtime.run(input);
+  const firstReceipt = toolContent_ACU(sent[1], 'valid-table');
+  expect(firstReceipt).toContain('"status":"failed"');
+  expect(firstReceipt).not.toContain('林瑶');
+  expect(firstReceipt).not.toContain('守门人挡在门后');
+  expect(toolContent_ACU(sent[1], 'outside-window')).not.toContain('守门人挡在门后');
+  expect(toolContent_ACU(sent[2], 'corrected-range')).toContain('守门人挡在门后');
+  expect(result.expandedReads).toEqual(['$STORY_RANGE:1-1']);
+});
+
+it('表格区间越界时整批不注入，修正后可完整读取', async () => {
+  const input = input_ACU();
+  input.budget.maxExtraReads = 2;
+  const replies = [
+    { content: '', toolCalls: [
+      ...nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表'] }, 'valid-table').toolCalls,
+      ...nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表:1-99'] }, 'outside-table').toolCalls,
+    ] },
+    nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表:1-1'] }, 'corrected-table'),
+    finalReply_ACU,
+  ];
+  const sent: SentMessage_ACU[][] = [];
+  const runtime = new AgentSubagentRuntime_ACU({
+    resolveApiPreset: (() => preset_ACU) as any,
+    callInternalAi: async messages => { sent.push(messages); return replies.shift() ?? finalReply_ACU; },
+  });
+  const result = await runtime.run(input);
+  expect(toolContent_ACU(sent[1], 'valid-table')).toContain('"status":"failed"');
+  expect(toolContent_ACU(sent[1], 'valid-table')).not.toContain('林瑶');
+  expect(toolContent_ACU(sent[1], 'outside-table')).not.toContain('林瑶');
+  expect(toolContent_ACU(sent[2], 'corrected-table')).toContain('林瑶');
+  expect(result.expandedReads).toEqual(['$TABLE:角色表:1-1']);
+});
+
+it('世界书部分 UID 缺失使同批读取失败，修正后完整返回', async () => {
+  const input = input_ACU();
+  input.delegation.agentName = 'arc-architect';
+  input.budget.maxExtraReads = 2;
+  input.resolveContext.worldbook = { available: true, entries: [
+    { bookName: '设定', uid: '1', title: '人物', keys: [], constant: false, content: '独有世界书正文', tokens: 8 },
+  ] };
+  const replies = [
+    { content: '', toolCalls: [
+      ...nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表'] }, 'valid-table').toolCalls,
+      ...nativeToolTurn_ACU('read', { reads: ['$WORLDBOOK:设定:1,missing'] }, 'missing-uid').toolCalls,
+    ] },
+    nativeToolTurn_ACU('read', { reads: ['$WORLDBOOK:设定:1'] }, 'valid-worldbook'),
+    readOnlyReviewReply_ACU,
+  ];
+  const sent: SentMessage_ACU[][] = [];
+  const runtime = new AgentSubagentRuntime_ACU({
+    resolveApiPreset: (() => preset_ACU) as any,
+    callInternalAi: async messages => { sent.push(messages); return replies.shift() ?? finalReply_ACU; },
+  });
+  const result = await runtime.run(input);
+  expect(toolContent_ACU(sent[1], 'valid-table')).toContain('"status":"failed"');
+  expect(toolContent_ACU(sent[1], 'valid-table')).not.toContain('林瑶');
+  expect(toolContent_ACU(sent[1], 'missing-uid')).not.toContain('独有世界书正文');
+  expect(toolContent_ACU(sent[2], 'valid-worldbook')).toContain('独有世界书正文');
+  expect(result.expandedReads).toEqual(['$WORLDBOOK:设定:1']);
+});
+
+it('世界书地址含空 UID 时整批拒绝，修正后可完整读取', async () => {
+  const input = input_ACU();
+  input.delegation.agentName = 'arc-architect';
+  input.budget.maxExtraReads = 2;
+  input.resolveContext.worldbook = { available: true, entries: [
+    { bookName: '设定', uid: '1', title: '人物', keys: [], constant: false, content: '独有世界书正文', tokens: 8 },
+  ] };
+  const replies = [
+    { content: '', toolCalls: [
+      ...nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表'] }, 'table-before-empty-uid').toolCalls,
+      ...nativeToolTurn_ACU('read', { reads: ['$WORLDBOOK:设定:1,'] }, 'empty-uid').toolCalls,
+    ] },
+    nativeToolTurn_ACU('read', { reads: ['$WORLDBOOK:设定:1'] }, 'fixed-uid'),
+    readOnlyReviewReply_ACU,
+  ];
+  const sent: SentMessage_ACU[][] = [];
+  const runtime = new AgentSubagentRuntime_ACU({
+    resolveApiPreset: (() => preset_ACU) as any,
+    callInternalAi: async messages => { sent.push(messages); return replies.shift() ?? finalReply_ACU; },
+  });
+  const result = await runtime.run(input);
+  expect(toolContent_ACU(sent[1], 'table-before-empty-uid')).toContain('"status":"failed"');
+  expect(toolContent_ACU(sent[1], 'table-before-empty-uid')).not.toContain('林瑶');
+  expect(toolContent_ACU(sent[1], 'empty-uid')).not.toContain('独有世界书正文');
+  expect(toolContent_ACU(sent[2], 'fixed-uid')).toContain('独有世界书正文');
+  expect(result.expandedReads).toEqual(['$WORLDBOOK:设定:1']);
+});
+
+it('栏目地址非法或字段越权时整批不注入，修正后可读取', async () => {
+  const input = input_ACU();
+  input.delegation.agentName = 'arc-architect';
+  input.budget.maxExtraReads = 3;
+  const replies = [
+    { content: '', toolCalls: [
+      ...nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表'] }, 'table-before-invalid-field').toolCalls,
+      ...nativeToolTurn_ACU('read', { reads: ['$FIELD:storyArc'] }, 'invalid-field-address').toolCalls,
+    ] },
+    { content: '', toolCalls: [
+      ...nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表'] }, 'table-before-unknown-field').toolCalls,
+      ...nativeToolTurn_ACU('read', { reads: ['$FIELD:storyArc:test:unknown'] }, 'unknown-field').toolCalls,
+    ] },
+    nativeToolTurn_ACU('read', { reads: ['$FIELD:storyArc:test'] }, 'corrected-field'),
+    readOnlyReviewReply_ACU,
+  ];
+  const sent: SentMessage_ACU[][] = [];
+  const runtime = new AgentSubagentRuntime_ACU({
+    resolveApiPreset: (() => preset_ACU) as any,
+    callInternalAi: async messages => { sent.push(messages); return replies.shift() ?? finalReply_ACU; },
+  });
+  const result = await runtime.run(input);
+  for (const [index, tableId, fieldId] of [[1, 'table-before-invalid-field', 'invalid-field-address'], [2, 'table-before-unknown-field', 'unknown-field']] as const) {
+    expect(toolContent_ACU(sent[index], tableId)).toContain('"status":"failed"');
+    expect(toolContent_ACU(sent[index], tableId)).not.toContain('林瑶');
+    expect(toolContent_ACU(sent[index], fieldId)).toContain('本逻辑读取批次已统一结算');
+  }
+  expect(toolContent_ACU(sent[3], 'corrected-field')).toContain('"module":"storyArc"');
+  expect(result.expandedReads).toEqual(['$FIELD:storyArc:test']);
+});
+
+it('普通子代理一次成功 read 后不同地址也返回 read-once-exhausted', async () => {
+  const input = input_ACU();
+  input.budget.maxExtraReads = 2;
+  const replies = [
+    nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表'] }, 'first-read'),
+    nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表:1-1'] }, 'second-read'),
+    finalReply_ACU,
+  ];
+  const sent: SentMessage_ACU[][] = [];
+  const runtime = new AgentSubagentRuntime_ACU({
+    resolveApiPreset: (() => preset_ACU) as any,
+    callInternalAi: async messages => { sent.push(messages); return replies.shift() ?? finalReply_ACU; },
+  });
+  const result = await runtime.run(input);
+  expect(toolContent_ACU(sent[2], 'second-read')).toContain('read-once-exhausted');
+  expect(result.expandedReads).toEqual(['$TABLE:角色表']);
+});
+
+it('同一 agentName 与 roundId 的共享状态跨 runtime 只允许一次成功 read', async () => {
+  const sharedReadRound = createAgentReadRoundState_ACU();
+  const sent: SentMessage_ACU[][] = [];
+  const replies = [
+    nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表'] }, 'shared-first-read'),
+    finalReply_ACU,
+    nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表:1-1'] }, 'shared-second-read'),
+    finalReply_ACU,
+  ];
+  const createRuntime = () => new AgentSubagentRuntime_ACU({
+    resolveApiPreset: (() => preset_ACU) as any,
+    callInternalAi: async messages => { sent.push(messages); return replies.shift() ?? finalReply_ACU; },
+  });
+
+  const first = await createRuntime().run({ ...input_ACU(), readRoundState: sharedReadRound });
+  const second = await createRuntime().run({ ...input_ACU(), readRoundState: sharedReadRound });
+  const secondReadResult = sent.flatMap(messages => messages).find(message => message.tool_call_id === 'shared-second-read')?.content ?? '';
+
+  expect(secondReadResult).toContain('read-once-exhausted');
+  expect(first.expandedReads).toEqual(['$TABLE:角色表']);
+  expect(second.expandedReads).toEqual([]);
+  expect(sharedReadRound.successfulReadBatches.size).toBe(1);
+});
+
+it('不同 roundId 的同名子代理不共享成功 read 额度', async () => {
+  const sharedReadRound = createAgentReadRoundState_ACU();
+  const sent: SentMessage_ACU[][] = [];
+  const replies = [
+    nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表'] }, 'round-one-read'),
+    finalReply_ACU,
+    nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表'] }, 'round-two-read'),
+    finalReply_ACU,
+  ];
+  const runtime = new AgentSubagentRuntime_ACU({
+    resolveApiPreset: (() => preset_ACU) as any,
+    callInternalAi: async messages => { sent.push(messages); return replies.shift() ?? finalReply_ACU; },
+  });
+
+  const first = await runtime.run({ ...input_ACU(), readRoundState: sharedReadRound, roundId: 'stage-1#0#turn-1' });
+  const second = await runtime.run({ ...input_ACU(), readRoundState: sharedReadRound, roundId: 'stage-1#0#turn-2' });
+  const secondReadResult = sent.flatMap(messages => messages).find(message => message.tool_call_id === 'round-two-read')?.content ?? '';
+
+  expect(secondReadResult).toContain('林瑶');
+  expect(first.expandedReads).toEqual(['$TABLE:角色表']);
+  expect(second.expandedReads).toEqual(['$TABLE:角色表']);
+  expect(sharedReadRound.successfulReadBatches.size).toBe(2);
+});
+
+it('失败 read 批次不占共享额度，修正后可以成功重试', async () => {
+  const sharedReadRound = createAgentReadRoundState_ACU();
+  const sent: SentMessage_ACU[][] = [];
+  const input = input_ACU();
+  input.budget.maxExtraReads = 2;
+  const replies = [
+    nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表', '$TABLE:不存在'] }, 'failed-read'),
+    nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表'] }, 'corrected-read'),
+    finalReply_ACU,
+  ];
+  const runtime = new AgentSubagentRuntime_ACU({
+    resolveApiPreset: (() => preset_ACU) as any,
+    callInternalAi: async messages => { sent.push(messages); return replies.shift() ?? finalReply_ACU; },
+  });
+
+  const result = await runtime.run({ ...input, readRoundState: sharedReadRound });
+  const failedReadResult = sent.flatMap(messages => messages).find(message => message.tool_call_id === 'failed-read')?.content ?? '';
+  const correctedReadResult = sent.flatMap(messages => messages).find(message => message.tool_call_id === 'corrected-read')?.content ?? '';
+
+  expect(failedReadResult).toContain('"status":"failed"');
+  expect(failedReadResult).not.toContain('林瑶');
+  expect(correctedReadResult).toContain('林瑶');
+  expect(result.expandedReads).toEqual(['$TABLE:角色表']);
+  expect(sharedReadRound.successfulReadBatches.size).toBe(1);
+  expect(sharedReadRound.pendingReadBatches.size).toBe(0);
+});
+
+
+it('终审实际请求仅挂 read，伪造 search 不进入检索执行', async () => {
+  const base = input_ACU();
+  base.settings.finalReview = { enabled: true, readTokenBudget: '50%', maxExtraReads: 1 };
+  const seen: Array<{ tools: string[]; messages: SentMessage_ACU[] }> = [];
+  const replies = [nativeToolTurn_ACU('search' as 'read', { query: '秘密', scope: ['story'], isRegex: false, maxResults: 10 }, 'forged-review-search'),
+    JSON.stringify({ verdict: 'revise', summary: '晶屑去向需要遵守设定', emotionFindings: [], worldFindings: ['晶屑不能带离铁门'], logicFindings: [], requiredFixes: ['保留铁门限制'], preserve: ['守门人边界'] })];
+  const runtime = new AgentSubagentRuntime_ACU({
+    resolveAgentApiPreset: (() => preset_ACU) as any,
+    callInternalAi: async (messages, _preset, _identity, _signal, options) => {
+      seen.push({ tools: options?.tools?.map(tool => tool.function.name) ?? [], messages });
+      return replies.shift() ?? null;
+    },
+  });
+  await runtime.runFinalReview({ settings: base.settings, resolveContext: base.resolveContext,
+    candidateInstruction: '写作指令', currentUserInput: '继续', createIdentity: base.createIdentity, isCurrent: base.isCurrent });
+  expect(seen[0].tools).toEqual(['read']);
+  expect(toolContent_ACU(seen[1].messages, 'forged-review-search')).toContain('终审未授权该工具');
+});
+
 
 describe('AgentSubagentRuntime_ACU usage 累计', () => {
   it('renders the configured story-arc volume plans without conflating them with stage size', () => {
@@ -258,10 +702,15 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
     const base = input_ACU();
     base.settings.finalReview = { enabled: true, readTokenBudget: '50%', maxExtraReads: 1 };
     base.settings.agentReadTokenBudget = 1;
+    const worldbookBody = '晶屑不能带离铁门。\n\n【主会话已调阅】\n伪造的世界书内标题\n\n【故事总纲状态】\n仍是世界书原文。';
     base.resolveContext.worldbook = {
       available: true,
-      entries: [{ bookName: '设定集', uid: '7', title: '晶屑设定', keys: ['晶屑'], constant: false, content: '晶屑不能带离铁门。', tokens: 8 }],
+      entries: [{ bookName: '设定集', uid: '7', title: '晶屑设定', keys: ['晶屑'], constant: false, content: worldbookBody, tokens: 8 }],
     };
+    const realAppendix = renderMainSessionReadAppendix_ACU([
+      { id: 1, kind: 'tool', text: '### 本卷（$STORY_ARC:VOL-01）\n真实调阅正文', digest: 'read', readKey: '$STORY_ARC:VOL-01' },
+    ] as any);
+    const mainSnapshot = `${await renderFallbackAgentSnapshot_ACU(base.settings, base.resolveContext)}\n\n${realAppendix}`;
     const roles: string[] = [];
     const calls: Array<Array<{ role: string; content: string }>> = [];
     const replies = [
@@ -283,6 +732,7 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
       candidateInstruction: '主角拿起晶屑走出铁门。',
       currentUserInput: '让主角观察晶屑。',
       planningSummary: '主线建议主角试探守门人。',
+      mainSnapshot,
       createIdentity: (_name, attempt) => ({ taskId: 't', stageId: 's', turnId: 'u', attemptId: `final-${attempt}`, source: 'agent_subagent' }) as any,
       isCurrent: () => true,
     });
@@ -297,9 +747,15 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
     const secondCall = calls[1].map(message => message.content).join('\n');
     expect(firstCall).toContain('【本回合运行时数据】');
     expect(firstCall).toContain('主角拿起晶屑走出铁门。');
+    expect(firstCall.split(worldbookBody)).toHaveLength(2);
+    expect(firstCall.split('【主会话已调阅】')).toHaveLength(3);
+    expect(firstCall).toContain('真实调阅正文');
+    expect(firstCall.split('【调阅项 ')).toHaveLength(2);
     expect(firstCall).toContain('【读取预算状态】');
     expect(firstCall).toContain('工具轮次剩余 1 / 1');
     expect(secondCall).toContain('角色表');
+    expect(secondCall.split(worldbookBody)).toHaveLength(2);
+    expect(secondCall).toContain('真实调阅正文');
     expect(secondCall).toContain('工具轮次剩余 0 / 1');
   });
 
@@ -702,4 +1158,142 @@ it('原生批量调阅按各项地址去重，保留细读正文中的连续空�
   expect(filtered).toContain(detail);
   expect(filtered).toContain('【调阅项 "$STORY_ARC:VOL-01"');
   expect(filtered).not.toContain('【调阅项 "$STORY_ARC"');
+});
+
+describe('子代理最终请求容量门禁与 60% 默认上围栏', () => {
+  const floor_ACU = (index: number) => `楼层${index}独有正文${'丙'.repeat(200)}`;
+  // 本组把本地输入限制设为 60000；输出 max_tokens 不参与输入围栏。
+  const counter_ACU = (payload: number) => async (text: string) => (text.startsWith('{"messages"') ? payload : text.length);
+  const storyInput_ACU = () => {
+    const input = input_ACU();
+    input.settings.agentHistoryTokenBudget = 60000;
+    input.resolveContext.chat = Array.from({ length: 12 }, (_, index) => (index % 2 === 0
+      ? { mes: `用户${index}`, is_user: true }
+      : { mes: floor_ACU(index), is_user: false }));
+    input.resolveContext.storyWindowFloors = 20;
+    input.settings.internalAiRetryLimit = 0;
+    return input;
+  };
+  const runtime_ACU = (payload: number, replies: unknown[], sent: SentMessage_ACU[][], options: { tools?: string[][] } = {}) => new AgentSubagentRuntime_ACU({
+    resolveApiPreset: (() => preset_ACU) as any,
+    countTokens: counter_ACU(payload),
+    callInternalAi: async (messages, _preset, _identity, _signal, callOptions) => {
+      sent.push(messages);
+      options.tools?.push(callOptions?.tools?.map(tool => tool.function.name) ?? []);
+      return (replies.shift() ?? finalReply_ACU) as any;
+    },
+  });
+
+  it('专项子代理最终请求超出容量时不调用 provider，返回不可重试的 context-capacity-exceeded', async () => {
+    const sent: SentMessage_ACU[][] = [];
+    const error = await runtime_ACU(70000, [], sent).run(storyInput_ACU()).catch(caught => caught);
+    expect(sent).toHaveLength(0);
+    expect(error?.error).toMatchObject({
+      code: 'CONTINUATION_AGENT_SUBAGENT_FAILED', retryable: false,
+      details: { reason: 'context-capacity-exceeded', code: 'READ_FENCE_CAPACITY_EXHAUSTED', inputLimitTokens: 60000, agentName: 'hook-cognition-maintainer' },
+    });
+  });
+
+  it('终审最终请求超出容量时不调用 provider', async () => {
+    const base = storyInput_ACU();
+    base.settings.finalReview = { enabled: true, readTokenBudget: '50%', maxExtraReads: 1 };
+    const sent: SentMessage_ACU[][] = [];
+    const runtime = new AgentSubagentRuntime_ACU({
+      resolveAgentApiPreset: (() => preset_ACU) as any,
+      countTokens: counter_ACU(70000),
+      callInternalAi: async messages => { sent.push(messages); return null; },
+    });
+    const error = await runtime.runFinalReview({ settings: base.settings, resolveContext: base.resolveContext,
+      candidateInstruction: '写作指令', currentUserInput: '继续', createIdentity: base.createIdentity, isCurrent: base.isCurrent }).catch(caught => caught);
+    expect(sent).toHaveLength(0);
+    expect(error?.error?.details).toMatchObject({ reason: 'context-capacity-exceeded', code: 'READ_FENCE_CAPACITY_EXHAUSTED' });
+  });
+
+  it('未给上围栏的正文区间按默认上围栏收窄为可证明前缀，注入该子范围完整逐字正文', async () => {
+    const sent: SentMessage_ACU[][] = [];
+    // 预算 floor(0.6 × (60000 − 58833)) = 700：容得下 2 个 ~210 字楼层加标注，容不下 5 个。
+    const input = storyInput_ACU();
+    const result = await runtime_ACU(58833, [nativeToolTurn_ACU('read', { reads: ['$STORY_RANGE:1-9'] }, 'default-fenced'), finalReply_ACU], sent).run(input);
+    const receipt = toolContent_ACU(sent[1], 'default-fenced');
+    expect(receipt).toContain('【默认上围栏】原地址「$STORY_RANGE:1-9」');
+    expect(receipt).toContain('默认上围栏预算 700 tokens');
+    const address = /解析为「(\$STORY_RANGE:1-(\d+))」/.exec(receipt)!;
+    const upper = Number(address[2]);
+    expect(upper).toBeGreaterThanOrEqual(3);
+    expect(upper).toBeLessThan(9);
+    for (let floor = 1; floor <= 9; floor += 2) {
+      if (floor <= upper) expect(receipt).toContain(floor_ACU(floor));
+      else expect(receipt).not.toContain(floor_ACU(floor));
+    }
+    expect(result.expandedReads).toEqual([`${address[1]}（默认上围栏，原地址 $STORY_RANGE:1-9）`]);
+  });
+
+  it('默认上围栏连最小范围都放不下时整批不注入、不消耗额度，改用显式围栏后可重读', async () => {
+    const sent: SentMessage_ACU[][] = [];
+    const input = storyInput_ACU();
+    input.budget.maxExtraReads = 2;
+    // 预算 floor(0.6 × (60000 − 59808)) = 115：单个楼层（~210 字）也放不下。
+    const replies = [
+      { content: '', toolCalls: [
+        ...nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表'] }, 'table-sibling').toolCalls,
+        ...nativeToolTurn_ACU('read', { reads: ['$STORY_RANGE:1-3'] }, 'too-small').toolCalls,
+      ] },
+      nativeToolTurn_ACU('read', { reads: ['$STORY_RANGE:1-3'], requestedFence: { lower: 1, upper: 3 } }, 'explicit-fence'),
+      finalReply_ACU,
+    ];
+    const result = await runtime_ACU(59808, replies, sent).run(input);
+    const failed = toolContent_ACU(sent[1], 'table-sibling') + toolContent_ACU(sent[1], 'too-small');
+    expect(failed).toContain('default-fence-exhausted');
+    expect(failed).not.toContain('林瑶');
+    expect(failed).not.toContain(floor_ACU(1));
+    const retried = toolContent_ACU(sent[2], 'explicit-fence');
+    expect(retried).not.toContain('read-once-exhausted');
+    expect(retried).toContain(floor_ACU(1));
+    expect(retried).toContain(floor_ACU(3));
+    expect(retried).not.toContain('【默认上围栏】');
+    expect(result.expandedReads).toEqual(['$STORY_RANGE:1-3']);
+  });
+
+  it('每次模型请求前都重新计量容量：工具回执推高占用后第二次请求被拦截', async () => {
+    const sent: SentMessage_ACU[][] = [];
+    const input = storyInput_ACU();
+    let payloadCalls = 0;
+    const runtime = new AgentSubagentRuntime_ACU({
+      resolveApiPreset: (() => preset_ACU) as any,
+      countTokens: async text => (text.startsWith('{"messages"') ? (payloadCalls += 1) === 1 ? 7025 : 60000 : text.length),
+      callInternalAi: async messages => { sent.push(messages); return nativeToolTurn_ACU('read', { reads: ['$STORY_RANGE:1-1'] }, 'first-read') as any; },
+    });
+    const error = await runtime.run(input).catch(caught => caught);
+    expect(sent).toHaveLength(1);
+    expect(payloadCalls).toBe(2);
+    expect(error?.error?.details).toMatchObject({ reason: 'context-capacity-exceeded', code: 'READ_FENCE_CAPACITY_EXHAUSTED' });
+  });
+
+  it('重复请求收窄前的原始宽地址时如实提示剩余范围，不重复注入正文、不重复登记放行', async () => {
+    const sent: SentMessage_ACU[][] = [];
+    const input = storyInput_ACU();
+    input.budget.maxExtraReads = 2;
+    // 预算 700：第一次宽地址被收窄；第二次重复同一宽地址不得再走分配、不得重注正文。
+    const replies = [
+      nativeToolTurn_ACU('read', { reads: ['$STORY_RANGE:1-9'] }, 'wide-first'),
+      nativeToolTurn_ACU('read', { reads: ['$STORY_RANGE:1-9'] }, 'wide-repeat'),
+      finalReply_ACU,
+    ];
+    const result = await runtime_ACU(58833, replies, sent).run(input);
+    const first = toolContent_ACU(sent[1], 'wide-first');
+    const parsed = /解析为「(\$STORY_RANGE:1-(\d+))」/.exec(first)!;
+    const narrowedAddress = parsed[1];
+    const upper = Number(parsed[2]);
+    const repeated = toolContent_ACU(sent[2], 'wide-repeat');
+    expect(repeated).toContain(`原地址「$STORY_RANGE:1-9」此前只提供了收窄子范围「${narrowedAddress}」的完整正文`);
+    expect(repeated).toContain('未声称原地址已全部注入');
+    // 坐标轴只含 AI 楼层（夹具中为奇数下标），剩余范围从 upper 之后的下一个 AI 楼层开始。
+    expect(repeated).toContain(`请改读「$STORY_RANGE:${upper + 2}-9」`);
+    expect(repeated).not.toContain('完整内容已提供');
+    expect(repeated).not.toContain('【默认上围栏】');
+    expect(repeated).not.toContain(floor_ACU(1));
+    // 收窄子范围只登记一次放行；重复请求不产生新的 expandedReads。
+    expect(result.expandedReads).toEqual([`${narrowedAddress}（默认上围栏，原地址 $STORY_RANGE:1-9）`]);
+  });
+
 });
