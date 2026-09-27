@@ -91423,26 +91423,40 @@ $CONTENT
         { name: 'lore-researcher', kind: 'researcher', description: '补充外部公开设定资料支撑幕后推演，不写入世界账本', triggers: ['本地证据不足且允许外部研究'], promptKey: 'lore-researcher', apiRole: 'lore-researcher', writableModules: [] },
     ];
     /**
+     * 推演角色的单一访问契约。快照裁剪、provider tools 与基础读取域均从这里派生；
+     * writableModules 仍由目录定义，用于提交权限和其关联只读模块扩展。
+     */
+    const WORLD_SIMULATION_AGENT_ACCESS_PROFILES_ACU = {
+        'world-director': { snapshotTokens: [], tools: ['read', 'search'], allowSearch: true, readModules: [] },
+        'world-stage-planner': { snapshotTokens: ['$WORLD_COLLISIONS', '$WORLD_STAGE_PLAN'], tools: ['read'], allowSearch: false, readModules: ['clock', 'dimensions', 'seeds', 'actors', 'player', 'rumors', 'chronicle', 'guidance'] },
+        timekeeper: { snapshotTokens: ['$WORLD_STATE'], tools: ['read', 'write_sql'], allowSearch: false, readModules: ['clock'] },
+        'undercurrent-analyst': { snapshotTokens: ['$WORLD_STATE', '$WORLD_COLLISIONS'], tools: ['read', 'write_sql'], allowSearch: false, readModules: ['dimensions', 'seeds', 'clock', 'rumors'] },
+        'dramatis-keeper': { snapshotTokens: ['$WORLD_STATE', '$WORLD_COLLISIONS', '$ANCHOR_IDENTITY'], tools: ['read', 'write_sql'], allowSearch: false, readModules: ['actors', 'player', 'clock', 'dimensions', 'seeds', 'rumors'] },
+        chronicler: { snapshotTokens: ['$WORLD_STATE', '$WORLD_CHRONICLE'], tools: ['read', 'write_sql'], allowSearch: false, readModules: ['chronicle', 'rumors', 'clock', 'actors', 'seeds'] },
+        'causality-reviewer': { snapshotTokens: ['$WORLD_STATE', '$WORLD_CANDIDATES', '$CURRENT_EVIDENCE_REGISTRY', '$WORLD_COLLISIONS'], tools: ['read'], allowSearch: false, readModules: ['clock', 'dimensions', 'seeds', 'actors', 'player', 'rumors', 'chronicle', 'guidance'] },
+        'guidance-composer': { snapshotTokens: ['$WORLD_STATE', '$PROJECTION_PREVIEW', '$WORLD_COLLISIONS'], tools: ['read', 'write_sql'], allowSearch: false, readModules: ['clock', 'dimensions', 'seeds', 'actors', 'player', 'rumors', 'chronicle', 'guidance'] },
+        'lore-researcher': { snapshotTokens: ['$WORLD_TOOL_CATALOG'], tools: ['read', 'search'], allowSearch: true, readModules: [] },
+    };
+    function getWorldSimulationAgentAccessProfile_ACU(name) {
+        const profile = WORLD_SIMULATION_AGENT_ACCESS_PROFILES_ACU[name];
+        if (!profile)
+            throw new Error('WORLD_SIMULATION_AGENT_PROFILE_INVALID');
+        return profile;
+    }
+    /**
      * 角色的 provider 工具白名单。这里是最终 body.tools 的唯一策略来源；
      * 普通角色不因共享 schema 获得 search，能写入账本的角色才获得 write_sql。
      */
     function worldSimulationAgentNativeTools_ACU(name) {
-        const definition = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name);
-        if (!definition)
-            throw new Error('WORLD_SIMULATION_AGENT_INVALID');
-        const tools = ['read'];
-        if (definition.kind === 'director' || definition.kind === 'researcher')
-            tools.push('search');
-        if (definition.writableModules.length)
-            tools.push('write_sql');
-        return tools;
+        return getWorldSimulationAgentAccessProfile_ACU(name).tools;
     }
     /** 只接受完整的条目地址；目录提示与派工 reads 均不能提升角色权限。 */
     function worldSimulationCanReadAddress_ACU(name, address) {
         const definition = findWorldSimulationAgentDefinition_ACU(name);
         if (!definition)
             return false;
-        if (definition.kind === 'director' || definition.kind === 'researcher')
+        const profile = getWorldSimulationAgentAccessProfile_ACU(name);
+        if (profile.allowSearch && (definition.kind === 'director' || definition.kind === 'researcher'))
             return true;
         if (address === 'anchor:message')
             return true;
@@ -91452,7 +91466,7 @@ $CONTENT
                 || /^(?:dimensions|seeds|actors|rumors|chronicle):[^:]+$/.test(address)
                 || /^field:(?:clock|dimensions|seeds|actors|player|rumors|chronicle|guidance):[^:]+(?::[^:]+)?$/.test(address);
         }
-        if (definition.kind !== 'specialist')
+        if (definition.kind !== 'specialist' && definition.kind !== 'planner')
             return false;
         if (name === 'guidance-composer') {
             if (address === 'ledger:current' || address === 'player:current' || address === 'projection:preview')
@@ -91460,7 +91474,7 @@ $CONTENT
         }
         if (name === 'chronicler' && /^chronicle-archive:[^:]+$/.test(address))
             return true;
-        const modules = new Set(definition.writableModules);
+        const modules = new Set([...profile.readModules, ...definition.writableModules]);
         for (const module of definition.writableModules) {
             for (const related of WORLD_RELATED_READONLY_MODULES_ACU[module] ?? [])
                 modules.add(related);
@@ -91469,7 +91483,7 @@ $CONTENT
             for (const module of ['clock', 'dimensions', 'seeds', 'actors', 'player', 'rumors', 'chronicle'])
                 modules.add(module);
         }
-        const item = /^(dimensions|seeds|actors|rumors|chronicle):([^:]+)$/.exec(address);
+        const item = /^(clock|dimensions|seeds|actors|player|rumors|chronicle|guidance):([^:]+)$/.exec(address);
         if (item)
             return modules.has(item[1]);
         const field = /^field:([a-z]+):([^:]+)(?::([^:]+))?$/.exec(address);
@@ -169207,18 +169221,8 @@ Expected function or array of functions, received type ${typeof value}.`
         ['$WORLD_EVIDENCE', '证据：$WORLD_EVIDENCE'],
     ];
     const COMMON_KEPT_ACU = ['$WORLD_TASK', '$WORLD_USER_REQUIREMENTS', '$READ_BUDGET', '$ANCHOR_MESSAGE'];
-    const RELATED_TOKENS_ACU = {
-        timekeeper: ['$WORLD_STATE'],
-        'undercurrent-analyst': ['$WORLD_STATE', '$WORLD_COLLISIONS'],
-        'dramatis-keeper': ['$WORLD_STATE', '$WORLD_COLLISIONS', '$ANCHOR_IDENTITY'],
-        chronicler: ['$WORLD_STATE', '$WORLD_CHRONICLE'],
-        'guidance-composer': ['$WORLD_STATE', '$PROJECTION_PREVIEW', '$WORLD_COLLISIONS'],
-        'causality-reviewer': ['$WORLD_STATE', '$WORLD_CANDIDATES', '$CURRENT_EVIDENCE_REGISTRY', '$WORLD_COLLISIONS'],
-        'lore-researcher': ['$WORLD_TOOL_CATALOG'],
-        'world-stage-planner': ['$WORLD_COLLISIONS', '$WORLD_STAGE_PLAN'],
-    };
     function worldSimulationKeptTokens_ACU(name) {
-        return new Set([...COMMON_KEPT_ACU, ...(RELATED_TOKENS_ACU[name] ?? [])]);
+        return new Set([...COMMON_KEPT_ACU, ...getWorldSimulationAgentAccessProfile_ACU(name).snapshotTokens]);
     }
     function splitWorldSimulationSubagentPrompt_ACU(segments, name) {
         const kept = worldSimulationKeptTokens_ACU(name);

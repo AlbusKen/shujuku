@@ -4,7 +4,7 @@
 
 import type { WorldSimulationPromptSegment_ACU } from '../model';
 import { renderAgentWorldbookTriggeredInjection_ACU, type AgentWorldbookEntryView_ACU } from '../../continuation/agent/agent-worldbook-read';
-import { type WorldSimulationAgentName_ACU } from './agent-catalog';
+import { getWorldSimulationAgentAccessProfile_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
 import { buildDefaultWorldSimulationAgentPrompt_ACU, worldSimulationSeamMarker_ACU, type WorldSimulationPromptPlaceholder_ACU } from './agent-defaults';
 
 const RUNTIME_LINE_ACU: ReadonlyArray<readonly [WorldSimulationPromptPlaceholder_ACU, string]> = [
@@ -27,19 +27,8 @@ const RUNTIME_LINE_ACU: ReadonlyArray<readonly [WorldSimulationPromptPlaceholder
 
 const COMMON_KEPT_ACU = ['$WORLD_TASK', '$WORLD_USER_REQUIREMENTS', '$READ_BUDGET', '$ANCHOR_MESSAGE'] as const;
 
-const RELATED_TOKENS_ACU: Partial<Record<WorldSimulationAgentName_ACU, readonly WorldSimulationPromptPlaceholder_ACU[]>> = {
-  timekeeper: ['$WORLD_STATE'],
-  'undercurrent-analyst': ['$WORLD_STATE', '$WORLD_COLLISIONS'],
-  'dramatis-keeper': ['$WORLD_STATE', '$WORLD_COLLISIONS', '$ANCHOR_IDENTITY'],
-  chronicler: ['$WORLD_STATE', '$WORLD_CHRONICLE'],
-  'guidance-composer': ['$WORLD_STATE', '$PROJECTION_PREVIEW', '$WORLD_COLLISIONS'],
-  'causality-reviewer': ['$WORLD_STATE', '$WORLD_CANDIDATES', '$CURRENT_EVIDENCE_REGISTRY', '$WORLD_COLLISIONS'],
-  'lore-researcher': ['$WORLD_TOOL_CATALOG'],
-  'world-stage-planner': ['$WORLD_COLLISIONS', '$WORLD_STAGE_PLAN'],
-};
-
 export function worldSimulationKeptTokens_ACU(name: WorldSimulationAgentName_ACU): Set<string> {
-  return new Set<string>([...COMMON_KEPT_ACU, ...(RELATED_TOKENS_ACU[name] ?? [])]);
+  return new Set<string>([...COMMON_KEPT_ACU, ...getWorldSimulationAgentAccessProfile_ACU(name).snapshotTokens]);
 }
 
 export function splitWorldSimulationSubagentPrompt_ACU(
