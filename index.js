@@ -91432,11 +91432,11 @@ $CONTENT
         'world-director': { snapshotTokens: [], tools: ['read', 'search'], allowSearch: true, readModules: [] },
         'world-stage-planner': { snapshotTokens: ['$WORLD_COLLISIONS', '$WORLD_STAGE_PLAN'], tools: ['read'], allowSearch: false, readModules: ['clock', 'dimensions', 'seeds', 'actors', 'player', 'rumors', 'chronicle', 'guidance'] },
         timekeeper: { snapshotTokens: ['$WORLD_STATE'], tools: ['read', 'write_sql'], allowSearch: false, readModules: ['clock'] },
-        'undercurrent-analyst': { snapshotTokens: ['$WORLD_STATE', '$WORLD_COLLISIONS'], tools: ['read'], allowSearch: false, readModules: ['clock', 'dimensions', 'seeds', 'actors', 'rumors'] },
-        'dramatis-keeper': { snapshotTokens: ['$WORLD_STATE', '$WORLD_COLLISIONS', '$ANCHOR_IDENTITY'], tools: ['read'], allowSearch: false, readModules: ['clock', 'actors', 'player', 'rumors', 'seeds', 'dimensions'] },
+        'undercurrent-analyst': { snapshotTokens: ['$WORLD_STATE', '$WORLD_COLLISIONS'], tools: ['read', 'write_sql'], allowSearch: false, readModules: ['clock', 'dimensions', 'seeds', 'actors', 'rumors'] },
+        'dramatis-keeper': { snapshotTokens: ['$WORLD_STATE', '$WORLD_COLLISIONS', '$ANCHOR_IDENTITY'], tools: ['read', 'write_sql'], allowSearch: false, readModules: ['clock', 'actors', 'player', 'rumors', 'seeds', 'dimensions'] },
         chronicler: { snapshotTokens: ['$WORLD_STATE', '$WORLD_CHRONICLE'], tools: ['read', 'write_sql'], allowSearch: false, readModules: ['chronicle', 'rumors', 'clock', 'actors', 'seeds'] },
         'causality-reviewer': { snapshotTokens: ['$WORLD_STATE', '$WORLD_CANDIDATES', '$CURRENT_EVIDENCE_REGISTRY', '$WORLD_COLLISIONS'], tools: ['read'], allowSearch: false, readModules: ['clock', 'dimensions', 'seeds', 'actors', 'player', 'rumors', 'chronicle', 'guidance'] },
-        'guidance-composer': { snapshotTokens: ['$WORLD_STATE', '$WORLD_CHRONICLE', '$WORLD_COLLISIONS'], tools: ['read'], allowSearch: false, readModules: ['clock', 'dimensions', 'seeds', 'actors', 'player', 'rumors', 'chronicle', 'guidance'] },
+        'guidance-composer': { snapshotTokens: ['$WORLD_STATE', '$WORLD_CHRONICLE', '$WORLD_COLLISIONS'], tools: ['read', 'write_sql'], allowSearch: false, readModules: ['clock', 'dimensions', 'seeds', 'actors', 'player', 'rumors', 'chronicle', 'guidance'] },
         'lore-researcher': { snapshotTokens: ['$WORLD_TOOL_CATALOG'], tools: ['read', 'search'], allowSearch: true, readModules: [] },
     };
     function getWorldSimulationAgentAccessProfile_ACU(name) {
@@ -91515,7 +91515,8 @@ $CONTENT
     const WORLD_SIMULATION_PROMPT_VERSION_V20_ACU = 'world-simulation-v20';
     const WORLD_SIMULATION_PROMPT_VERSION_V21_ACU = 'world-simulation-v21';
     const WORLD_SIMULATION_PROMPT_VERSION_V22_ACU = 'world-simulation-v22';
-    const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V22_ACU;
+    const WORLD_SIMULATION_PROMPT_VERSION_V23_ACU = 'world-simulation-v23';
+    const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V23_ACU;
     const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'];
     const WORLD_SIMULATION_PROMPT_PLACEHOLDERS_ACU = [
         '$WORLD_TASK', '$WORLD_HISTORY', '$WORLD_RUNTIME_CONTEXT', '$WORLD_AGENT_CATALOG',
@@ -91925,8 +91926,8 @@ $CONTENT
             seam('EXECUTION_BOUNDARY', '现在执行当前任务。闭合思维链后只输出一个 JSON 对象，不附加 Markdown 或解释。'),
             { role: 'user', content: USER_PREFILL_CONTENT_ACU, enabled: true, deletable: true, pinned: false }];
     }
-    /** 新范例只更新当前 one-shot 工作流段；保留 v21 原文以识别存量默认和用户改写。 */
-    function buildOneShotWorldSimulationAgentPrompt_ACU(name) {
+    /** 冻结 v22 原文和示例，迁移时不能用当前生成器反推旧默认。 */
+    function buildV22OneShotWorldSimulationAgentPrompt_ACU(name) {
         const examples = {
             'undercurrent-analyst': [
                 '【推演步骤】先从锚点区分本轮真正经过的时间与回忆，使用共同时间基准对照 clock；再比较已有维度与种子的触发条件、时限、地点和生命周期，找出镜头外可以由现有证据支持的变化；最后仅对变化的行生成 SQL，按本轮基准修订号核对 WHERE，不为填满模块而新增种子。并发的人物角色尚未提交，其猜测不能作为已发生事实。',
@@ -91943,6 +91944,39 @@ $CONTENT
         };
         return buildV21OneShotWorldSimulationAgentPrompt_ACU(name).map(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW'))
             ? { ...segment, content: `${segment.content}\n${examples[name]}` } : segment);
+    }
+    /** 版本冻结入口：v22 的 one-shot 原文和示例，其余角色沿用 v21 默认。 */
+    function buildV22WorldSimulationAgentPrompt_ACU(name) {
+        return ONE_SHOT_ROLES_ACU.includes(name)
+            ? buildV22OneShotWorldSimulationAgentPrompt_ACU(name)
+            : buildV21WorldSimulationAgentPrompt_ACU(name);
+    }
+    /** 新协议只改当前默认，v21/v22 仍保留原文用于存量配置迁移。 */
+    function buildOneShotWorldSimulationAgentPrompt_ACU(name) {
+        return buildV22OneShotWorldSimulationAgentPrompt_ACU(name).map(segment => {
+            let content = segment.content;
+            if (content.startsWith(worldSimulationSeamMarker_ACU('PROTOCOL'))) {
+                content = `${worldSimulationSeamMarker_ACU('PROTOCOL')}\n交付协议见系统消息开头：有可证实的变化调用原生 write_sql，参数仅为 sql；无变化回复 NO_CHANGE，无法完成回复 FAILED: 原因。`;
+            }
+            else if (content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW'))) {
+                content = content.replace('【一次性交付】资料已放在末尾运行时数据里，直接交最终 JSON。仅当目录条目必须精读时调用一次 read；不要调用其他工具。', '【一次性交付】先核对末尾运行资料；必要时调用一次 read 精读目录条目。确认变化后一次调用原生 write_sql，提交完整 SQL 候选；它只作校验和预览，不即时落账。被拒时按回执仅重试一次，仍无法完成就回复 FAILED: 原因。')
+                    .replace('输出一段受限 SQL 放在 JSON 的 sql 字段', '把一段受限 SQL 放进 write_sql 函数的 sql 参数')
+                    .replace('无证据的推断放进 uncertainties。', '不把无证据的推断写进候选；缺少完成任务所必需的证据时回复 FAILED: 原因。')
+                    .replace('没有真实变化交 no_change', '没有可证实变化回复 NO_CHANGE')
+                    .replace('若只是账本记有封锁而没有其获知渠道，则不写 known_facts，把缺口放进 uncertainties。', '若只是账本记有封锁而没有其获知渠道，则不写 known_facts；若仍有独立可证实的位置变化，就只提交该变化，否则回复 NO_CHANGE。')
+                    .replace('最终只交协议 JSON。', '有变化调用 write_sql，不输出候选文本。')
+                    .replace('先看批次一已提交的变更清单', '先看批次一已通过内存预览的变更清单');
+                if (name === 'guidance-composer')
+                    content += '\n批次一的账本仅为本轮内存预览，尚未持久化；本角色可引用输入账本已有条目，但不得引用自己这次 write_sql 新建条目的猜测 ID。最终由工作流按运行基线整组提交。';
+            }
+            else if (content.startsWith(worldSimulationSeamMarker_ACU('ACKNOWLEDGEMENT'))) {
+                content = content.replace('无变化交 no_change', '无变化回复 NO_CHANGE');
+            }
+            else if (content.startsWith(worldSimulationSeamMarker_ACU('EXECUTION_BOUNDARY'))) {
+                content = content.replace('闭合思维链后只输出一个 JSON 对象，不附加 Markdown 或解释。', '闭合思维链后如有变化调用原生 write_sql；无变化回复 NO_CHANGE，失败回复 FAILED: 原因。不输出裸 SQL 或 Markdown。');
+            }
+            return content === segment.content ? segment : { ...segment, content };
+        });
     }
     function buildV20WorldSimulationAgentPrompt_ACU(name) {
         const segments = buildV19WorldSimulationAgentPrompt_ACU(name);
@@ -92130,6 +92164,7 @@ $CONTENT
             { version: WORLD_SIMULATION_PROMPT_VERSION_V19_ACU, fingerprint: promptFingerprint_ACU(buildV19WorldSimulationAgentPrompt_ACU(name)) },
             { version: WORLD_SIMULATION_PROMPT_VERSION_V20_ACU, fingerprint: promptFingerprint_ACU(buildV20WorldSimulationAgentPrompt_ACU(name)) },
             { version: WORLD_SIMULATION_PROMPT_VERSION_V21_ACU, fingerprint: promptFingerprint_ACU(buildV21WorldSimulationAgentPrompt_ACU(name)) },
+            { version: WORLD_SIMULATION_PROMPT_VERSION_V22_ACU, fingerprint: promptFingerprint_ACU(ONE_SHOT_ROLES_ACU.includes(name) ? buildV22OneShotWorldSimulationAgentPrompt_ACU(name) : buildV21WorldSimulationAgentPrompt_ACU(name)) },
             { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildDefaultWorldSimulationAgentPrompt_ACU(name)) },
         ]]));
     function migrateWorldSimulationAgentPrompts_ACU(current, previousDefaults, previousVersion) {
@@ -92143,9 +92178,11 @@ $CONTENT
         for (const { name } of WORLD_SIMULATION_AGENT_CATALOG_ACU) {
             const value = current[name];
             const previous = previousDefaults[name];
-            // v21 one-shot 已是可运行协议；只替换其原封不动的默认段，保留用户改写及附加段。
-            if (previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU && ONE_SHOT_ROLES_ACU.includes(name)) {
-                const old = buildV21OneShotWorldSimulationAgentPrompt_ACU(name);
+            // One-shot 历史默认逐段匹配；用户编辑和追加段原样保留，不用当前生成器重建旧默认。
+            if ((previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V22_ACU) && ONE_SHOT_ROLES_ACU.includes(name)) {
+                const old = previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU
+                    ? buildV21OneShotWorldSimulationAgentPrompt_ACU(name)
+                    : buildV22OneShotWorldSimulationAgentPrompt_ACU(name);
                 if (!value) {
                     migrated[name] = defaults[name];
                 }
@@ -169504,11 +169541,9 @@ Expected function or array of functions, received type ${typeof value}.`
             'guidance-composer': 'chronicle: INSERT summary, related_ids 或 DELETE id, reason；chronicle_archive 只能写 archive_ref, day, summary, fingerprints, related_ids, source_chronicle_ids；chronicle_overview 只能写 fingerprint, day, one_line, archive_ref，二者必须用同一个 archive_ref 成对 INSERT，不能把 summary/related_ids 写入 chronicle_overview。rumors: fact, origin_day, earliest_reveal_day, channels, related_actor_ids, status, revealed_at_day；guidance: 只能 UPDATE signals, excluded_facts（必须带 WHERE expected_revision）。guidance.signals 的 sourceId 只能指向本次输入账本中已经存在的条目 ID、clock 或 player；本候选新 INSERT 的 rumor/chronicle 不能在同一候选中作为 sourceId，不得编造 rumors:1 等地址。',
         };
         return [
-            '【输出协议】推理闭合后只输出一个 JSON 对象，不附加 Markdown、解释或其他字段。',
-            `有改动：{"status":"candidate","agentName":"${name}","sql":"一条或多条受限 SQL","summary":"本轮修改","uncertainties":[]}`,
-            `无改动：{"status":"no_change","agentName":"${name}","summary":"没有需要修改的内容","uncertainties":[]}`,
-            `无法完成：{"status":"failed","agentName":"${name}","reasonCode":"UNRESOLVED","message":"原因"}`,
-            `status 只能是 candidate、no_change、failed；agentName 必须精确为 ${name}。只能写表：${tables.join(' | ')}。`,
+            '【交付协议】有可证实的变更时调用原生 write_sql 函数，参数只填 sql 字段（一条或多条受限 SQL）；工具调用仅生成待验证候选，不即时写入账本；候选通过校验后本角色结束，由两批工作流统一预览与最终提交。不得把 SQL 放入文本 JSON 或输出裸 SQL。',
+            '无改动时只回复 NO_CHANGE，可附简短原因；无法完成时只回复 FAILED: 原因。空文本、任意其他文本与非法工具调用均不能视为无变化。',
+            `只能写表：${tables.join(' | ')}。一次 write_sql 收齐本角色所有变更，不拆成多次写入；失败时按工具回执修正，仅允许一次纠错。`,
             `如需调用 read，参数示例：{"reads":["ledger:current"]}；地址只能使用 ${formatWorldSimulationToolAddressHints_ACU()}。不能把 $.reads、裸模块名或错误路径当作地址；仅目录中实际存在的条目 ID 可用于 seeds:<id> 等条目地址。`,
             'SQL 只允许 INSERT INTO 表 (列) VALUES (字面量)、UPDATE 表 SET 列 = 字面量 WHERE 条件、DELETE FROM 表 WHERE 条件；不得使用 SELECT、函数、子查询或表达式。字符串单引号须转义为两个，列名使用 snake_case。',
             '归档列名必须严格区分：chronicle_archive=(archive_ref, day, summary, fingerprints, related_ids, source_chronicle_ids)；chronicle_overview=(fingerprint, day, one_line, archive_ref)。chronicle_overview 没有 summary 或 related_ids 列。guidance 是单例，只能 UPDATE 且 WHERE 只能带 expected_revision。',
@@ -169634,14 +169669,15 @@ Expected function or array of functions, received type ${typeof value}.`
             const usage = { readsUsed: 0 };
             let reads = 0;
             let repairs = 0;
+            let writeAttempted = false;
             const maxReads = input.settings.agentRunBudget.maxExtraReads > 0 ? 1 : 0;
             const authorized = () => new Set(snapshotWorldSimulationEvidenceRegistry_ACU(input.registry).entries.flatMap(entry => entry.evidenceRef ? [entry.evidenceRef] : []));
             for (let attempt = 0; attempt < 2 + maxReads; attempt++) {
                 if (input.isCurrent?.() === false)
                     throw new Error('WORLD_SIMULATION_RUN_STALE');
                 let locatedIssues = [];
-                const messages = withNativeToolThinkPrefill_ACU([...base, ...transcript, { role: 'user', content: runtime }, ...(prefill ? [{ role: 'user', content: USER_PREFILL_CONTENT_ACU }] : [])]);
-                const requestTools = maxReads && reads === 0 ? ['read'] : [];
+                const messages = withNativeToolThinkPrefill_ACU([...base, { role: 'user', content: runtime }, ...transcript, ...(prefill ? [{ role: 'user', content: USER_PREFILL_CONTENT_ACU }] : [])]);
+                const requestTools = maxReads && reads === 0 ? ['read', 'write_sql'] : ['write_sql'];
                 let sent;
                 try {
                     sent = await executeWorldSimulationFinalRequest_ACU({ messages, inputLimitTokens: input.settings.agentHistoryTokenBudget,
@@ -169668,37 +169704,49 @@ Expected function or array of functions, received type ${typeof value}.`
                 const turn = normalizeAgentModelReply_ACU(sent.response);
                 const raw = typeof sent.response === 'string' ? sent.response : turn.content;
                 try {
+                    let payload;
                     if (turn.toolCalls.length) {
+                        if (turn.toolCalls.some(call => call.name === 'write_sql'))
+                            writeAttempted = true;
                         if (turn.toolCalls.length !== 1)
-                            throw new Error('WORLD_SIMULATION_ONE_SHOT_READ_LIMIT');
-                        const calls = nativeToolArguments_ACU(turn.toolCalls).map(({ call, payload }) => {
-                            if (call.name !== 'read' || reads >= maxReads)
+                            throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_LIMIT');
+                        const [{ call, payload: args }] = nativeToolArguments_ACU(turn.toolCalls);
+                        if (call.name === 'read') {
+                            if (reads >= maxReads || writeAttempted)
                                 throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN');
-                            const parsed = parseWorldSimulationMainAction_ACU(payload, false, snapshotWorldSimulationEvidenceRegistry_ACU(input.registry));
+                            const parsed = parseWorldSimulationMainAction_ACU(args, false, snapshotWorldSimulationEvidenceRegistry_ACU(input.registry));
                             if (parsed.kind !== 'read')
                                 throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN');
-                            return parsed;
-                        });
-                        reads++;
-                        const results = await runWorldSimulationToolBatch_ACU({ calls, registry: input.registry, dependencies: input.tools,
-                            gate: { state: readGateState, config: { historyTokenBudget: input.settings.agentHistoryTokenBudget,
-                                    readTokenBudget: input.settings.agentReadTokenBudget, fallbackTokens: input.settings.agentReadFallbackTokens },
-                                usage, maxReads: input.settings.agentRunBudget.maxReads, readOnce: true,
-                                canReadAddress: address => worldSimulationCanReadAddress_ACU(input.agentName, address),
-                                count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU } });
-                        transcript.push(...nativeToolExchange_ACU(turn.content, turn.toolCalls, turn.toolCalls.map((_, index) => index === 0 ? toolText_ACU(results) : '本批次读取结果见首条回执')));
-                        continue;
+                            reads++;
+                            const results = await runWorldSimulationToolBatch_ACU({ calls: [parsed], registry: input.registry, dependencies: input.tools,
+                                gate: { state: readGateState, config: { historyTokenBudget: input.settings.agentHistoryTokenBudget,
+                                        readTokenBudget: input.settings.agentReadTokenBudget, fallbackTokens: input.settings.agentReadFallbackTokens },
+                                    usage, maxReads: input.settings.agentRunBudget.maxReads, readOnce: true,
+                                    canReadAddress: address => worldSimulationCanReadAddress_ACU(input.agentName, address),
+                                    count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU } });
+                            transcript.push(...nativeToolExchange_ACU(turn.content, turn.toolCalls, [toolText_ACU(results)]));
+                            continue;
+                        }
+                        if (call.name !== 'write_sql' || Object.keys(args).some(key => !['action', 'sql'].includes(key)) || typeof args.sql !== 'string' || !args.sql.trim())
+                            throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN');
+                        payload = { status: 'candidate', sql: args.sql };
                     }
-                    const draft = parseWorldSimulationJsonDraft_ACU(raw, '{', ['status']);
-                    if (draft.truncated)
-                        throw new Error('WORLD_SIMULATION_ONE_SHOT_TRUNCATED');
-                    const normalized = normalizeOneShotSpecialistPayload_ACU(draft.payload, { agentName: input.agentName, writableModules: modules,
+                    else {
+                        const text = raw.trim();
+                        if (/^NO_CHANGE(?:\s*[:：]\s*[^\r\n]+)?$/.test(text) && !writeAttempted)
+                            payload = { status: 'no_change', summary: text };
+                        else if (/^FAILED\s*[:：]\s*[^\r\n]+$/.test(text))
+                            payload = { status: 'failed', reasonCode: 'UNRESOLVED', message: text };
+                        else
+                            throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_REQUIRED');
+                    }
+                    if (payload.status === 'failed')
+                        return failed(payload.message);
+                    const normalized = normalizeOneShotSpecialistPayload_ACU(payload, { agentName: input.agentName, writableModules: modules,
                         givenLedger: input.givenLedger, baseLedgerRevision: input.baseLedgerRevision, anchorEvidenceRef: input.anchorEvidenceRef, authorizedRefs: authorized() });
                     locatedIssues = normalized.issues;
-                    // A wholly rejected SQL payload must not become a generic failed result
-                    // that attributes its one SQL error to every module owned by this role.
-                    if (normalized.issues.length && (repairs === 0 || normalized.payload.status === 'failed'))
-                        throw new Error(normalized.issues.slice(0, 8).map(issue => `${issue.path}: ${issue.message}`).join('；'));
+                    if (normalized.issues.length || (payload.status === 'candidate' && normalized.payload.status !== 'candidate'))
+                        throw new Error(normalized.issues.slice(0, 8).map(issue => `${issue.path}: ${issue.message}`).join('；') || 'WORLD_SIMULATION_ONE_SHOT_SQL_REJECTED');
                     const snapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
                     let outcome;
                     try {
@@ -169708,14 +169756,6 @@ Expected function or array of functions, received type ${typeof value}.`
                         if (normalized.payload.status !== 'candidate')
                             throw error;
                         outcome = salvageCandidateOutcome_ACU(normalized.payload, modules, snapshot, input.runId, input.candidateSeq, false);
-                    }
-                    if (normalized.issues.length) {
-                        outcome.unresolvedIssues = [...(outcome.unresolvedIssues ?? []), ...normalized.issues];
-                        const troubled = new Set(normalized.issues.map(issue => issue.module));
-                        for (const module of troubled)
-                            outcome.moduleCompletion[module] = outcome.candidate && Object.keys(outcome.candidate.patch).some(key => key === module || (module === 'chronicle' && key === 'chronicleArchive')) ? 'partial' : 'failed';
-                        if (outcome.candidate)
-                            outcome.completion = 'partial';
                     }
                     if (outcome.candidate) {
                         // Match the transaction's domain validation before releasing a candidate; do not
@@ -169736,15 +169776,16 @@ Expected function or array of functions, received type ${typeof value}.`
                     return outcome;
                 }
                 catch (error) {
-                    if (repairs++ >= 1)
+                    const lastAttempt = repairs++ >= 1;
+                    if (lastAttempt)
                         return failed(error, 'protocol_failed', locatedIssues);
                     const hint = oneShotRepairHint_ACU(locatedIssues);
                     const reason = error instanceof Error ? error.message : String(error);
-                    const jsonHint = /(?:JSON_NOT_FOUND|EMPTY_RESPONSE|WORLD_SIMULATION_ONE_SHOT_TRUNCATED)/.test(reason)
-                        ? '本次未收到完整可解析的 JSON；不要续写上一段文本或输出思维链、Markdown、SQL 裸文本。请从 { 开始重新给出一个完整 JSON 对象：没有证据支持改动时输出 {"status":"no_change","summary":"无可证实变化"}；有证据支持改动时按系统协议输出 candidate 及 sql；无法完成时输出 failed 及 reasonCode/message。不能将未完成输出当作成功。'
-                        : '';
-                    transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user',
-                        content: `上一次输出未被采纳：${reason}。${jsonHint || (hint ? `${hint} ` : '')}逐一修正以上路径对应的每条记录，保留合法语句，重新输出完整 JSON；仍失败则输出 failed JSON。` });
+                    const feedback = `上一次提交未被采纳：${reason}。${hint} 若确有变化，只重新调用一次 write_sql 并修正拒绝的 SQL；无法完成请回复 FAILED: 原因。不要输出 JSON 或裸 SQL，不得将空回复视为无变化。`;
+                    if (turn.toolCalls.length && turn.toolCalls.every(call => call.id && call.name))
+                        transcript.push(...nativeToolExchange_ACU(turn.content, turn.toolCalls, turn.toolCalls.map(() => feedback)));
+                    else
+                        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: feedback });
                 }
             }
             return failed('WORLD_SIMULATION_ONE_SHOT_CALL_LIMIT');

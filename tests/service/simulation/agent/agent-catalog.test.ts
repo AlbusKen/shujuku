@@ -9,17 +9,19 @@ describe('世界推演角色工具白名单', () => {
     expect(worldSimulationAgentNativeTools_ACU('world-director')).toEqual(['read', 'search']);
     expect(worldSimulationAgentNativeTools_ACU('lore-researcher')).toEqual(['read', 'search']);
     expect(worldSimulationAgentNativeTools_ACU('timekeeper')).toEqual(['read', 'write_sql']);
-    expect(worldSimulationAgentNativeTools_ACU('guidance-composer')).toEqual(['read']);
+    expect(worldSimulationAgentNativeTools_ACU('undercurrent-analyst')).toEqual(['read', 'write_sql']);
+    expect(worldSimulationAgentNativeTools_ACU('dramatis-keeper')).toEqual(['read', 'write_sql']);
+    expect(worldSimulationAgentNativeTools_ACU('guidance-composer')).toEqual(['read', 'write_sql']);
     expect(worldSimulationAgentNativeTools_ACU('causality-reviewer')).toEqual(['read']);
     expect(worldSimulationAgentNativeTools_ACU('world-stage-planner')).toEqual(['read']);
   });
 
-  it('不会让普通角色继承 search，公开角色不提供逐栏写入工具', () => {
+  it('仅资料写入角色获得 write_sql，不让普通角色继承 search', () => {
     for (const definition of WORLD_SIMULATION_AGENT_CATALOG_ACU) {
       const tools = worldSimulationAgentNativeTools_ACU(definition.name);
       expect(tools).toContain('read');
       expect(tools.includes('search')).toBe(definition.name === 'world-director' || definition.name === 'lore-researcher');
-      expect(tools).not.toContain('write_sql');
+      expect(tools.includes('write_sql')).toBe(['undercurrent-analyst', 'dramatis-keeper', 'guidance-composer'].includes(definition.name));
     }
   });
 

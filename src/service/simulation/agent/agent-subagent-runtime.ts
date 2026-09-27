@@ -313,11 +313,9 @@ export function worldSimulationOneShotProtocol_ACU(name: WorldSimulationOneShotR
     'guidance-composer': 'chronicle: INSERT summary, related_ids 或 DELETE id, reason；chronicle_archive 只能写 archive_ref, day, summary, fingerprints, related_ids, source_chronicle_ids；chronicle_overview 只能写 fingerprint, day, one_line, archive_ref，二者必须用同一个 archive_ref 成对 INSERT，不能把 summary/related_ids 写入 chronicle_overview。rumors: fact, origin_day, earliest_reveal_day, channels, related_actor_ids, status, revealed_at_day；guidance: 只能 UPDATE signals, excluded_facts（必须带 WHERE expected_revision）。guidance.signals 的 sourceId 只能指向本次输入账本中已经存在的条目 ID、clock 或 player；本候选新 INSERT 的 rumor/chronicle 不能在同一候选中作为 sourceId，不得编造 rumors:1 等地址。',
   };
   return [
-    '【输出协议】推理闭合后只输出一个 JSON 对象，不附加 Markdown、解释或其他字段。',
-    `有改动：{"status":"candidate","agentName":"${name}","sql":"一条或多条受限 SQL","summary":"本轮修改","uncertainties":[]}`,
-    `无改动：{"status":"no_change","agentName":"${name}","summary":"没有需要修改的内容","uncertainties":[]}`,
-    `无法完成：{"status":"failed","agentName":"${name}","reasonCode":"UNRESOLVED","message":"原因"}`,
-    `status 只能是 candidate、no_change、failed；agentName 必须精确为 ${name}。只能写表：${tables.join(' | ')}。`,
+    '【交付协议】有可证实的变更时调用原生 write_sql 函数，参数只填 sql 字段（一条或多条受限 SQL）；工具调用仅生成待验证候选，不即时写入账本；候选通过校验后本角色结束，由两批工作流统一预览与最终提交。不得把 SQL 放入文本 JSON 或输出裸 SQL。',
+    '无改动时只回复 NO_CHANGE，可附简短原因；无法完成时只回复 FAILED: 原因。空文本、任意其他文本与非法工具调用均不能视为无变化。',
+    `只能写表：${tables.join(' | ')}。一次 write_sql 收齐本角色所有变更，不拆成多次写入；失败时按工具回执修正，仅允许一次纠错。`,
     `如需调用 read，参数示例：{"reads":["ledger:current"]}；地址只能使用 ${formatWorldSimulationToolAddressHints_ACU()}。不能把 $.reads、裸模块名或错误路径当作地址；仅目录中实际存在的条目 ID 可用于 seeds:<id> 等条目地址。`,
     'SQL 只允许 INSERT INTO 表 (列) VALUES (字面量)、UPDATE 表 SET 列 = 字面量 WHERE 条件、DELETE FROM 表 WHERE 条件；不得使用 SELECT、函数、子查询或表达式。字符串单引号须转义为两个，列名使用 snake_case。',
     '归档列名必须严格区分：chronicle_archive=(archive_ref, day, summary, fingerprints, related_ids, source_chronicle_ids)；chronicle_overview=(fingerprint, day, one_line, archive_ref)。chronicle_overview 没有 summary 或 related_ids 列。guidance 是单例，只能 UPDATE 且 WHERE 只能带 expected_revision。',
@@ -431,13 +429,14 @@ export class WorldSimulationSubagentRuntime_ACU {
     const usage = { readsUsed: 0 };
     let reads = 0;
     let repairs = 0;
+    let writeAttempted = false;
     const maxReads = input.settings.agentRunBudget.maxExtraReads > 0 ? 1 : 0;
     const authorized = () => new Set(snapshotWorldSimulationEvidenceRegistry_ACU(input.registry).entries.flatMap(entry => entry.evidenceRef ? [entry.evidenceRef] : []));
     for (let attempt = 0; attempt < 2 + maxReads; attempt++) {
       if (input.isCurrent?.() === false) throw new Error('WORLD_SIMULATION_RUN_STALE');
       let locatedIssues: WorldSimulationSubagentIssue_ACU[] = [];
-      const messages = withNativeToolThinkPrefill_ACU([...base, ...transcript, { role: 'user', content: runtime }, ...(prefill ? [{ role: 'user', content: USER_PREFILL_CONTENT_ACU }] : [])]);
-      const requestTools = maxReads && reads === 0 ? ['read'] as const : [] as const;
+      const messages = withNativeToolThinkPrefill_ACU([...base, { role: 'user', content: runtime }, ...transcript, ...(prefill ? [{ role: 'user', content: USER_PREFILL_CONTENT_ACU }] : [])]);
+      const requestTools = maxReads && reads === 0 ? ['read', 'write_sql'] as const : ['write_sql'] as const;
       let sent: Awaited<ReturnType<typeof executeWorldSimulationFinalRequest_ACU>>;
       try {
         sent = await executeWorldSimulationFinalRequest_ACU({ messages, inputLimitTokens: input.settings.agentHistoryTokenBudget,
@@ -459,44 +458,44 @@ export class WorldSimulationSubagentRuntime_ACU {
       const turn = normalizeAgentModelReply_ACU(sent.response);
       const raw = typeof sent.response === 'string' ? sent.response : turn.content;
       try {
+        let payload: Record<string, unknown>;
         if (turn.toolCalls.length) {
-          if (turn.toolCalls.length !== 1) throw new Error('WORLD_SIMULATION_ONE_SHOT_READ_LIMIT');
-          const calls = nativeToolArguments_ACU(turn.toolCalls).map(({ call, payload }) => {
-            if (call.name !== 'read' || reads >= maxReads) throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN');
-            const parsed = parseWorldSimulationMainAction_ACU(payload, false, snapshotWorldSimulationEvidenceRegistry_ACU(input.registry));
+          if (turn.toolCalls.some(call => call.name === 'write_sql')) writeAttempted = true;
+          if (turn.toolCalls.length !== 1) throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_LIMIT');
+          const [{ call, payload: args }] = nativeToolArguments_ACU(turn.toolCalls);
+          if (call.name === 'read') {
+            if (reads >= maxReads || writeAttempted) throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN');
+            const parsed = parseWorldSimulationMainAction_ACU(args, false, snapshotWorldSimulationEvidenceRegistry_ACU(input.registry));
             if (parsed.kind !== 'read') throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN');
-            return parsed;
-          });
-          reads++;
-          const results = await runWorldSimulationToolBatch_ACU({ calls, registry: input.registry, dependencies: input.tools,
-            gate: { state: readGateState, config: { historyTokenBudget: input.settings.agentHistoryTokenBudget,
-              readTokenBudget: input.settings.agentReadTokenBudget, fallbackTokens: input.settings.agentReadFallbackTokens },
-              usage, maxReads: input.settings.agentRunBudget.maxReads, readOnce: true,
-              canReadAddress: address => worldSimulationCanReadAddress_ACU(input.agentName, address),
-              count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU } });
-          transcript.push(...nativeToolExchange_ACU(turn.content, turn.toolCalls, turn.toolCalls.map((_, index) => index === 0 ? toolText_ACU(results) : '本批次读取结果见首条回执')));
-          continue;
+            reads++;
+            const results = await runWorldSimulationToolBatch_ACU({ calls: [parsed], registry: input.registry, dependencies: input.tools,
+              gate: { state: readGateState, config: { historyTokenBudget: input.settings.agentHistoryTokenBudget,
+                readTokenBudget: input.settings.agentReadTokenBudget, fallbackTokens: input.settings.agentReadFallbackTokens },
+                usage, maxReads: input.settings.agentRunBudget.maxReads, readOnce: true,
+                canReadAddress: address => worldSimulationCanReadAddress_ACU(input.agentName, address),
+                count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU } });
+            transcript.push(...nativeToolExchange_ACU(turn.content, turn.toolCalls, [toolText_ACU(results)]));
+            continue;
+          }
+          if (call.name !== 'write_sql' || Object.keys(args).some(key => !['action', 'sql'].includes(key)) || typeof args.sql !== 'string' || !args.sql.trim()) throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN');
+          payload = { status: 'candidate', sql: args.sql };
+        } else {
+          const text = raw.trim();
+          if (/^NO_CHANGE(?:\s*[:：]\s*[^\r\n]+)?$/.test(text) && !writeAttempted) payload = { status: 'no_change', summary: text };
+          else if (/^FAILED\s*[:：]\s*[^\r\n]+$/.test(text)) payload = { status: 'failed', reasonCode: 'UNRESOLVED', message: text };
+          else throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_REQUIRED');
         }
-        const draft = parseWorldSimulationJsonDraft_ACU(raw, '{', ['status']);
-        if (draft.truncated) throw new Error('WORLD_SIMULATION_ONE_SHOT_TRUNCATED');
-        const normalized = normalizeOneShotSpecialistPayload_ACU(draft.payload, { agentName: input.agentName, writableModules: modules,
+        if (payload.status === 'failed') return failed(payload.message);
+        const normalized = normalizeOneShotSpecialistPayload_ACU(payload, { agentName: input.agentName, writableModules: modules,
           givenLedger: input.givenLedger, baseLedgerRevision: input.baseLedgerRevision, anchorEvidenceRef: input.anchorEvidenceRef, authorizedRefs: authorized() });
         locatedIssues = normalized.issues;
-        // A wholly rejected SQL payload must not become a generic failed result
-        // that attributes its one SQL error to every module owned by this role.
-        if (normalized.issues.length && (repairs === 0 || normalized.payload.status === 'failed')) throw new Error(normalized.issues.slice(0, 8).map(issue => `${issue.path}: ${issue.message}`).join('；'));
+        if (normalized.issues.length || (payload.status === 'candidate' && normalized.payload.status !== 'candidate')) throw new Error(normalized.issues.slice(0, 8).map(issue => `${issue.path}: ${issue.message}`).join('；') || 'WORLD_SIMULATION_ONE_SHOT_SQL_REJECTED');
         const snapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
         let outcome: WorldSimulationSubagentOutcome_ACU;
         try { outcome = outcomeFromSpecialistResult_ACU(parseWorldSimulationSpecialistResult_ACU(normalized.payload, snapshot), modules, input.runId, input.candidateSeq, false); }
         catch (error) {
           if (normalized.payload.status !== 'candidate') throw error;
           outcome = salvageCandidateOutcome_ACU(normalized.payload, modules, snapshot, input.runId, input.candidateSeq, false);
-        }
-        if (normalized.issues.length) {
-          outcome.unresolvedIssues = [...(outcome.unresolvedIssues ?? []), ...normalized.issues];
-          const troubled = new Set(normalized.issues.map(issue => issue.module));
-          for (const module of troubled) outcome.moduleCompletion![module] = outcome.candidate && Object.keys(outcome.candidate.patch).some(key => key === module || (module === 'chronicle' && key === 'chronicleArchive')) ? 'partial' : 'failed';
-          if (outcome.candidate) outcome.completion = 'partial';
         }
         if (outcome.candidate) {
           // Match the transaction's domain validation before releasing a candidate; do not
@@ -518,14 +517,13 @@ export class WorldSimulationSubagentRuntime_ACU {
         }
         return outcome;
       } catch (error) {
-        if (repairs++ >= 1) return failed(error, 'protocol_failed', locatedIssues);
+        const lastAttempt = repairs++ >= 1;
+        if (lastAttempt) return failed(error, 'protocol_failed', locatedIssues);
         const hint = oneShotRepairHint_ACU(locatedIssues);
         const reason = error instanceof Error ? error.message : String(error);
-        const jsonHint = /(?:JSON_NOT_FOUND|EMPTY_RESPONSE|WORLD_SIMULATION_ONE_SHOT_TRUNCATED)/.test(reason)
-          ? '本次未收到完整可解析的 JSON；不要续写上一段文本或输出思维链、Markdown、SQL 裸文本。请从 { 开始重新给出一个完整 JSON 对象：没有证据支持改动时输出 {"status":"no_change","summary":"无可证实变化"}；有证据支持改动时按系统协议输出 candidate 及 sql；无法完成时输出 failed 及 reasonCode/message。不能将未完成输出当作成功。'
-          : '';
-        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user',
-          content: `上一次输出未被采纳：${reason}。${jsonHint || (hint ? `${hint} ` : '')}逐一修正以上路径对应的每条记录，保留合法语句，重新输出完整 JSON；仍失败则输出 failed JSON。` });
+        const feedback = `上一次提交未被采纳：${reason}。${hint} 若确有变化，只重新调用一次 write_sql 并修正拒绝的 SQL；无法完成请回复 FAILED: 原因。不要输出 JSON 或裸 SQL，不得将空回复视为无变化。`;
+        if (turn.toolCalls.length && turn.toolCalls.every(call => call.id && call.name)) transcript.push(...nativeToolExchange_ACU(turn.content, turn.toolCalls, turn.toolCalls.map(() => feedback)));
+        else transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: feedback });
       }
     }
     return failed('WORLD_SIMULATION_ONE_SHOT_CALL_LIMIT');

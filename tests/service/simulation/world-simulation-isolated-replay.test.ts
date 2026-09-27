@@ -143,9 +143,17 @@ function buildReplay(options: ReplayOptions) {
       if (!response) throw new Error(`UNEXPECTED_MODEL_INVOCATION:${role}`);
       invocations.push({ role, response, messages });
       // Director read is native-only; retain the source script for replay diagnostics.
-      return role === 'world-director' && JSON.parse(response).action === 'read'
-        ? { content: '', toolCalls: [{ id: 'replay-director-read', name: 'read', arguments: JSON.stringify({ reads: ['anchor:message'] }) }] }
-        : response;
+      if (role === 'world-director' && JSON.parse(response).action === 'read') {
+        return { content: '', toolCalls: [{ id: 'replay-director-read', name: 'read', arguments: JSON.stringify({ reads: ['anchor:message'] }) }] };
+      }
+      // One-shot roles answer with native write_sql or the NO_CHANGE text state, as a real provider would.
+      if (role === 'undercurrent-analyst' || role === 'dramatis-keeper' || role === 'guidance-composer') {
+        const script = JSON.parse(response) as { status: string; sql?: string };
+        return script.status === 'candidate' && script.sql
+          ? { content: '', toolCalls: [{ id: `replay-${role}-sql`, name: 'write_sql', arguments: JSON.stringify({ sql: script.sql }) }] }
+          : 'NO_CHANGE';
+      }
+      return response;
     });
     const countTokens = async () => 1;
     const plannedRevision = buildDirectorOwnedStageRevision_ACU({

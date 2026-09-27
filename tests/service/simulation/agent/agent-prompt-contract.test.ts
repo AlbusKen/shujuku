@@ -97,11 +97,11 @@ describe('世界推演提示词装配契约', () => {
     expect(reviewerPrompt).toContain(instruction);
   });
 
-  it('提示词 v22 优化一次性交付，同时保留历史默认指纹与信息渠道纪律', () => {
-    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v22');
+  it('提示词 v23 将一次性交付切换为原生 write_sql，同时保留历史默认指纹与信息渠道纪律', () => {
+    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v23');
     expect(buildDefaultWorldSimulationSettings_ACU().agentRunBudget).toMatchObject({ maxIterations: 4, maxExtraReads: 1, maxConcurrent: 5 });
     expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].map(item => item.version)).toEqual([
-      'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6', 'world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12', 'world-simulation-v13', 'world-simulation-v14', 'world-simulation-v15', 'world-simulation-v16', 'world-simulation-v17', 'world-simulation-v18', 'world-simulation-v19', 'world-simulation-v20', 'world-simulation-v21', 'world-simulation-v22',
+      'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6', 'world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12', 'world-simulation-v13', 'world-simulation-v14', 'world-simulation-v15', 'world-simulation-v16', 'world-simulation-v17', 'world-simulation-v18', 'world-simulation-v19', 'world-simulation-v20', 'world-simulation-v21', 'world-simulation-v22', 'world-simulation-v23',
     ]);
     expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['undercurrent-analyst'].at(-1)?.version).toBe(WORLD_SIMULATION_PROMPT_VERSION_ACU);
     const v8 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v8');
@@ -231,7 +231,7 @@ describe('世界推演提示词装配契约', () => {
     const dramatisPrompt = prompts['dramatis-keeper'].map(item => item.content).join('\n');
     expect(dramatisPrompt).toContain('【一次性交付】');
     expect(dramatisPrompt).toContain('只写 actors、player；rumors 只准写人物死亡的伴生传闻');
-    expect(dramatisPrompt).toContain('无变化交 no_change');
+    expect(dramatisPrompt).toContain('无变化回复 NO_CHANGE');
     expect(reviewerPrompt).toContain('审核清单逐项过');
     expect(reviewerPrompt).toContain('仅因事实客观存在、读者知道或账本有记录而赋知');
     expect(reviewerPrompt).toContain('空壳条目按 MISSING_FIELD 打回');
@@ -265,7 +265,7 @@ describe('世界推演提示词装配契约', () => {
     }].map(message => message.content).join('\n');
     expect(sent).toContain('【一次性交付】');
     expect(sent).toContain('只写 actors、player；rumors 只准写人物死亡的伴生传闻');
-    expect(sent).toContain('无变化交 no_change');
+    expect(sent).toContain('无变化回复 NO_CHANGE');
     expect(sent).toContain('UPDATE player');
     expect(sent).toContain('"sql"');
     expect(sent).not.toMatch(/"patch"\s*:|玩家位置按正文地标 upsert player/);

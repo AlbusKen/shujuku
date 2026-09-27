@@ -8,6 +8,9 @@ import { createWorldSimulationEvidenceRegistry_ACU, recordWorldSimulationEvidenc
 import type { WorldSimulationSubagentOutcome_ACU } from '../../../../src/service/simulation/agent/agent-model';
 
 const noChange = (agentName: string): WorldSimulationSubagentOutcome_ACU => ({ agentName, status: 'no_change', summary: '无变化', evidenceRefs: [], uncertainties: [] });
+// 模拟 provider 原生函数调用回包：有变化时 SQL 只能放在 write_sql 的 sql 参数里。
+const sqlTurn = (payload: { sql: string; [key: string]: unknown }, id = 'call-sql') =>
+  ({ content: '', toolCalls: [{ id, name: 'write_sql', arguments: JSON.stringify({ sql: payload.sql }) }] });
 function setup() {
   const ledger = buildEmptyWorldSimulationLedger_ACU();
   const registry = createWorldSimulationEvidenceRegistry_ACU('one-shot-workflow');
@@ -150,7 +153,7 @@ describe('两批一次性世界推演工作流', () => {
     }
   });
 
-  it('一次性运行时对非法 JSON 仅修正一次，合法回复可恢复，持续非法返回失败', async () => {
+  it('一次性运行时对非法回复仅修正一次，原生 write_sql 候选可恢复，持续非法返回失败', async () => {
     const env = setup();
     const registry = createWorldSimulationEvidenceRegistry_ACU('runtime-repair');
     const ref = recordWorldSimulationEvidence_ACU(registry, { operation: 'initial', address: 'anchor:message', status: 'ok', summary: '锚点', exact: true }).evidenceRef!;
@@ -163,18 +166,18 @@ describe('两批一次性世界推演工作流', () => {
       runId: 'runtime-repair', candidateSeq: 1, focus: '锚点', anchorEvidenceRef: ref, givenLedger: env.ledger,
       baseLedgerRevision: env.ledger.revision, injectWorldbook: false };
     const apiPreset = { resolvePreset: () => ({ resolved: true, apiMode: 'openai' as const, apiConfig: { max_tokens: 4096 }, tavernProfile: '' }) };
-    const invoke = vi.fn().mockResolvedValueOnce('not json').mockResolvedValueOnce(JSON.stringify({ status: 'no_change', summary: '无变化' }));
+    const invoke = vi.fn().mockResolvedValueOnce('not json').mockResolvedValueOnce('NO_CHANGE');
     const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
     expect((await runtime.runOneShot(input)).status).toBe('no_change');
     expect(invoke).toHaveBeenCalledTimes(2);
     const empty = vi.fn().mockResolvedValueOnce({ content: '', toolCalls: [] })
-      .mockResolvedValueOnce(JSON.stringify({ status: 'no_change', summary: '无可证实变化' }));
+      .mockResolvedValueOnce('NO_CHANGE: 无可证实变化');
     expect((await new WorldSimulationSubagentRuntime_ACU({ invoke: empty, apiPreset,
       countTokens: async () => 1 }).runOneShot(input)).status).toBe('no_change');
     const jsonFeedback = JSON.stringify(empty.mock.calls[1][1]);
-    expect(jsonFeedback).toContain('完整可解析的 JSON');
-    expect(jsonFeedback).toContain('no_change');
-    expect(jsonFeedback).toContain('不能将未完成输出当作成功');
+    expect(jsonFeedback).toContain('WORLD_SIMULATION_ONE_SHOT_TOOL_REQUIRED');
+    expect(jsonFeedback).toContain('只重新调用一次 write_sql');
+    expect(jsonFeedback).toContain('不得将空回复视为无变化');
     const noJson = vi.fn(async () => ({ content: '', toolCalls: [] }));
     const noJsonResult = await new WorldSimulationSubagentRuntime_ACU({ invoke: noJson, apiPreset,
       countTokens: async () => 1 }).runOneShot(input);
@@ -184,7 +187,7 @@ describe('两批一次性世界推演工作流', () => {
     expect(noJson).toHaveBeenCalledTimes(2);
     const timeAnchor = '昨日出城，今日已过一昼夜；昨日之前的路程不再计入。';
     const withTime = { ...input, promptContext: { ...input.promptContext, anchorMessage: timeAnchor } };
-    const timeInvoke = vi.fn(async () => JSON.stringify({ status: 'no_change', summary: '无可证实变化' }));
+    const timeInvoke = vi.fn(async () => 'NO_CHANGE');
     const timeRuntime = new WorldSimulationSubagentRuntime_ACU({ invoke: timeInvoke, apiPreset,
       countTokens: async () => 1 });
     await Promise.all([timeRuntime.runOneShot(withTime), timeRuntime.runOneShot({ ...withTime, agentName: 'dramatis-keeper' })]);
@@ -203,14 +206,17 @@ describe('两批一次性世界推演工作流', () => {
     expect(failed.status).toBe('failed');
     expect(invalid).toHaveBeenCalledTimes(2);
     const forbidden = vi.fn().mockResolvedValueOnce({ content: '', toolCalls: [{ id: 'write-1', name: 'write_sql', arguments: '{}' }] })
-      .mockResolvedValueOnce(JSON.stringify({ status: 'no_change', summary: '修正完成' }));
-    expect((await new WorldSimulationSubagentRuntime_ACU({ invoke: forbidden, apiPreset, countTokens: async () => 1 }).runOneShot(input)).status).toBe('no_change');
+      .mockResolvedValueOnce('NO_CHANGE');
+    // 非法 write_sql 之后不能用 NO_CHANGE 掩盖；纠错回执以 role=tool 绑定原调用 id。
+    expect((await new WorldSimulationSubagentRuntime_ACU({ invoke: forbidden, apiPreset, countTokens: async () => 1 }).runOneShot(input)).status).toBe('failed');
     expect(forbidden).toHaveBeenCalledTimes(2);
+    expect(forbidden.mock.calls[0][3]).toContain('write_sql');
+    expect((forbidden.mock.calls[1][1] as Array<{ role: string; tool_call_id?: string }>).some(message => message.role === 'tool' && message.tool_call_id === 'write-1')).toBe(true);
     expect(input.tools.read).not.toHaveBeenCalled();
     const previewLedger = { ...env.ledger, revision: env.ledger.revision + 1 };
     const guidanceInput = { ...input, agentName: 'guidance-composer' as const,
       givenLedger: previewLedger, promptContext: { ...input.promptContext, worldState: previewLedger } };
-    const guidanceReply = JSON.stringify({ status: 'candidate', agentName: 'guidance-composer',
+    const guidanceReply = sqlTurn({ agentName: 'guidance-composer',
       sql: "UPDATE guidance SET signals = '[]', excluded_facts = '[]' WHERE expected_revision = 999" });
     const guidanceInvoke = vi.fn(async () => guidanceReply);
     const guidanceResult = await new WorldSimulationSubagentRuntime_ACU({ invoke: guidanceInvoke, apiPreset,
@@ -218,9 +224,9 @@ describe('两批一次性世界推演工作流', () => {
     expect(guidanceResult.status).toBe('candidate');
     expect(guidanceResult.candidate?.patch.guidance).toMatchObject({ expectedRevision: env.ledger.revision });
     expect(guidanceInvoke).toHaveBeenCalledTimes(1);
-    const invalidEnum = JSON.stringify({ status: 'candidate', agentName: 'undercurrent-analyst',
+    const invalidEnum = sqlTurn({ agentName: 'undercurrent-analyst',
       sql: "INSERT INTO dimensions (name, kind, value, trend, rationale) VALUES ('戒备', '政治', 40, 'rising', '盘查加剧'); INSERT INTO seeds (title, visibility) VALUES ('暗流', '公开')" });
-    const correctEnum = JSON.stringify({ status: 'candidate', agentName: 'undercurrent-analyst',
+    const correctEnum = sqlTurn({ agentName: 'undercurrent-analyst',
       sql: "INSERT INTO dimensions (name, kind, value, trend, rationale) VALUES ('戒备', 'pressure', 40, 'rising', '盘查加剧')" });
     const corrected = vi.fn().mockResolvedValueOnce(invalidEnum).mockResolvedValueOnce(correctEnum);
     const correctedOutcome = await new WorldSimulationSubagentRuntime_ACU({ invoke: corrected, apiPreset, countTokens: async () => 1 }).runOneShot(input);
@@ -233,23 +239,23 @@ describe('两批一次性世界推演工作流', () => {
     expect(rejected.summary).toContain('patch.seeds.upsert[0].visibility');
     expect(twiceInvalid).toHaveBeenCalledTimes(2);
     const playerInput = { ...input, agentName: 'dramatis-keeper' as const };
-    const illegalPlayer = JSON.stringify({ status: 'candidate', agentName: 'dramatis-keeper',
+    const illegalPlayer = sqlTurn({ agentName: 'dramatis-keeper',
       sql: "UPDATE player SET location_updated_at_day = 1 WHERE expected_revision = 0" });
-    const playerReplies = vi.fn().mockResolvedValueOnce(illegalPlayer).mockResolvedValueOnce(JSON.stringify({
+    const playerReplies = vi.fn().mockResolvedValueOnce(illegalPlayer).mockResolvedValueOnce(sqlTurn({
       status: 'candidate', agentName: 'dramatis-keeper', sql: "UPDATE player SET contact = 'open' WHERE expected_revision = 0" }));
     expect((await new WorldSimulationSubagentRuntime_ACU({ invoke: playerReplies, apiPreset, countTokens: async () => 1 }).runOneShot(playerInput)).status).toBe('candidate');
     expect(JSON.stringify(playerReplies.mock.calls[1][1])).toContain('SQL_COLUMN_FORBIDDEN');
-    const badSeed = JSON.stringify({ status: 'candidate', agentName: 'undercurrent-analyst',
+    const badSeed = sqlTurn({ agentName: 'undercurrent-analyst',
       sql: "INSERT INTO seeds (title, status, actor_ids) VALUES ('暗流', 'incubating', '[{\"id\":\"actor-1\"}]')" });
-    const fixedSeed = JSON.stringify({ status: 'candidate', agentName: 'undercurrent-analyst',
+    const fixedSeed = sqlTurn({ agentName: 'undercurrent-analyst',
       sql: "INSERT INTO seeds (title, status) VALUES ('暗流', 'incubating')" });
     const seedReplies = vi.fn().mockResolvedValueOnce(badSeed).mockResolvedValueOnce(fixedSeed);
     expect((await new WorldSimulationSubagentRuntime_ACU({ invoke: seedReplies, apiPreset,
       countTokens: async () => 1 }).runOneShot(input)).status).toBe('candidate');
     expect(JSON.stringify(seedReplies.mock.calls[1][1])).toContain('actorIds');
-    const badPlayer = JSON.stringify({ status: 'candidate', agentName: 'dramatis-keeper',
+    const badPlayer = sqlTurn({ agentName: 'dramatis-keeper',
       sql: "UPDATE player SET location = '江南府', contact = 'open'" });
-    const correctedPlayer = JSON.stringify({ status: 'candidate', agentName: 'dramatis-keeper',
+    const correctedPlayer = sqlTurn({ agentName: 'dramatis-keeper',
       sql: "UPDATE player SET location = '{\"region\":\"江南府\"}', contact = 'open' WHERE expected_revision = 0" });
     const playerRepair = vi.fn().mockResolvedValueOnce(badPlayer).mockResolvedValueOnce(correctedPlayer);
     const repaired = await new WorldSimulationSubagentRuntime_ACU({ invoke: playerRepair, apiPreset,
@@ -261,7 +267,7 @@ describe('两批一次性世界推演工作流', () => {
       countTokens: async () => 1 }).runOneShot(playerInput);
     expect(failedPlayer.status).toBe('failed');
     expect(unrepaired).toHaveBeenCalledTimes(2);
-    const badLocation = JSON.stringify({ status: 'candidate', agentName: 'undercurrent-analyst',
+    const badLocation = sqlTurn({ agentName: 'undercurrent-analyst',
       sql: "INSERT INTO seeds (title, status, location) VALUES ('暗流', 'incubating', '江南府')" });
     const locationInvoke = vi.fn(async () => badLocation);
     const locationFailure = await new WorldSimulationSubagentRuntime_ACU({ invoke: locationInvoke, apiPreset,
@@ -270,7 +276,7 @@ describe('两批一次性世界推演工作流', () => {
     expect(locationFailure.unresolvedIssues).toEqual([expect.objectContaining({
       module: 'seeds', path: 'patch.seeds.upsert[0].location', source: 'transaction_rejected',
     })]);
-    const validLocation = JSON.stringify({ status: 'candidate', agentName: 'undercurrent-analyst',
+    const validLocation = sqlTurn({ agentName: 'undercurrent-analyst',
       sql: "INSERT INTO seeds (title, status, location) VALUES ('暗流', 'incubating', '{\"region\":\"江南府\"}')" });
     const locationRepair = vi.fn().mockResolvedValueOnce(badLocation).mockResolvedValueOnce(validLocation);
     expect((await new WorldSimulationSubagentRuntime_ACU({ invoke: locationRepair, apiPreset,
@@ -307,8 +313,8 @@ describe('两批一次性世界推演工作流', () => {
     const apiPreset = { resolvePreset: () => ({ resolved: true, apiMode: 'openai' as const, apiConfig: { max_tokens: 4096 }, tavernProfile: '' }) };
     const sql = (actorIds: string) => [0, 1, 2, 3].map(index =>
       `INSERT INTO seeds (title, status, actor_ids) VALUES ('暗流${index}', 'incubating', '${actorIds}')`).join('; ');
-    const bad = JSON.stringify({ status: 'candidate', sql: sql('[{"id":"actor-1"}]') });
-    const valid = JSON.stringify({ status: 'candidate', sql: [0, 1, 2, 3].map(index =>
+    const bad = sqlTurn({ sql: sql('[{"id":"actor-1"}]') });
+    const valid = sqlTurn({ sql: [0, 1, 2, 3].map(index =>
       `INSERT INTO seeds (title, status) VALUES ('暗流${index}', 'incubating')`).join('; ') });
     const invoke = vi.fn().mockResolvedValueOnce(bad).mockResolvedValueOnce(valid);
     const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
