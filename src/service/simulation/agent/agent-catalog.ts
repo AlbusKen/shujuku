@@ -130,7 +130,7 @@ export function findWorldSimulationAgentDefinition_ACU(name: string): WorldSimul
   return WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name) ?? LEGACY_ROLE_DEFINITIONS_ACU.find(item => item.name === name) ?? null;
 }
 
-/** 主 Agent 可见目录。requirements-maintainer 已退役，当前目录即全部可见角色。 */
+/** 主 Agent 可见目录：仅列出有调用入口的角色；旧配置所需角色仍留在正式目录。 */
 export function worldSimulationDirectorVisibleCatalog_ACU(): readonly WorldSimulationAgentDefinition_ACU[] {
-  return WORLD_SIMULATION_AGENT_CATALOG_ACU;
+  return WORLD_SIMULATION_AGENT_CATALOG_ACU.filter(item => item.name !== 'lore-researcher');
 }

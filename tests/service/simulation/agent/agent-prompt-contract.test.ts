@@ -16,7 +16,8 @@ describe('世界推演提示词装配契约', () => {
     const prompts = validateWorldSimulationAgentPrompts_ACU(buildDefaultWorldSimulationAgentPrompts_ACU());
     expect(Object.keys(prompts)).toEqual([...WORLD_SIMULATION_AGENT_NAMES_ACU]);
     expect(WORLD_SIMULATION_AGENT_CATALOG_ACU).toHaveLength(7);
-    expect(worldSimulationDirectorVisibleCatalog_ACU()).toHaveLength(7);
+    expect(worldSimulationDirectorVisibleCatalog_ACU()).toHaveLength(6);
+    expect(worldSimulationDirectorVisibleCatalog_ACU().some(item => item.name === 'lore-researcher')).toBe(false);
     expect(WORLD_SIMULATION_AGENT_NAMES_ACU).toEqual([
       'world-director', 'world-stage-planner', 'undercurrent-analyst',
       'dramatis-keeper', 'causality-reviewer', 'guidance-composer', 'lore-researcher',

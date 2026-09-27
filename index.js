@@ -91495,9 +91495,9 @@ $CONTENT
     function findWorldSimulationAgentDefinition_ACU(name) {
         return WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name) ?? LEGACY_ROLE_DEFINITIONS_ACU.find(item => item.name === name) ?? null;
     }
-    /** 主 Agent 可见目录。requirements-maintainer 已退役，当前目录即全部可见角色。 */
+    /** 主 Agent 可见目录：仅列出有调用入口的角色；旧配置所需角色仍留在正式目录。 */
     function worldSimulationDirectorVisibleCatalog_ACU() {
-        return WORLD_SIMULATION_AGENT_CATALOG_ACU;
+        return WORLD_SIMULATION_AGENT_CATALOG_ACU.filter(item => item.name !== 'lore-researcher');
     }
 
     const WORLD_SIMULATION_PROMPT_VERSION_V8_ACU = 'world-simulation-v8';
@@ -205629,8 +205629,9 @@ ${rejectionText}` : delegationFeedback,
     }
     var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$q, [["render", _sfc_render$q], ["__scopeId", "data-v-21045b85"]]);
 
-    /** 页面（.vue）不能直接引用 service 值，角色顺序经此处中转。 */
-    const WORLD_SIMULATION_AGENT_ORDER_ACU = WORLD_SIMULATION_AGENT_NAMES_ACU;
+    /** 页面（.vue）不能直接引用 service 值；无真实调用入口的研究员仅保留旧配置迁移，不再暴露为可编辑 Agent。 */
+    const WORLD_SIMULATION_AGENT_ORDER_ACU = WORLD_SIMULATION_AGENT_NAMES_ACU
+        .filter(agentName => agentName !== 'lore-researcher');
     /**
      * 世界推演各 Agent 的中文展示名。会话流、渠道下拉与提示词分组共用同一张表，
      * 内部 agentName 不直接暴露给用户（与智能续写「各 Agent 渠道」的做法一致）。
@@ -208164,8 +208165,8 @@ ${rejectionText}` : delegationFeedback,
         }
     });
 
-    injectSfcStyle("\n.acu-v2-world-simulation-page[data-v-781dc687] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-world-simulation-page__layout[data-v-781dc687] { align-items: start;\n}\n.acu-v2-world-simulation-page__actions[data-v-781dc687] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-world-simulation-page__actions--start[data-v-781dc687] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-world-simulation-page__file-input[data-v-781dc687] { display: none;\n}\n.acu-v2-world-simulation-page__error[data-v-781dc687] { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__meta[data-v-781dc687] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-781dc687] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-world-simulation-page__toggles[data-v-781dc687] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-world-simulation-page__groups[data-v-781dc687] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-world-simulation-page__group[data-v-781dc687] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-world-simulation-page__group[data-v-781dc687] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-world-simulation-page__group[data-v-781dc687] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-world-simulation-page__group[data-v-781dc687] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-world-simulation-page__group[data-v-781dc687] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-world-simulation-page__group .acu-v2-world-simulation-page__actions[data-v-781dc687] { margin-top: 0;\n}\n.acu-v2-world-simulation-page__subheading[data-v-781dc687] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-world-simulation-page__subheading[data-v-781dc687]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-world-simulation-page[data-v-781dc687] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-world-simulation-page[data-v-781dc687] { padding: 10px; gap: 12px;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-781dc687] { grid-template-columns: 1fr;\n}\n.acu-v2-world-simulation-page__actions[data-v-781dc687] > * { flex: 1 1 auto;\n}\n.acu-v2-world-simulation-page__group[data-v-781dc687] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/WorldSimulationPage.vue#style-0-781dc687");
-    var WorldSimulationPage_vue_vue_type_style_index_0_scoped_781dc687_lang = null;
+    injectSfcStyle("\n.acu-v2-world-simulation-page[data-v-a5593147] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-world-simulation-page__layout[data-v-a5593147] { align-items: start;\n}\n.acu-v2-world-simulation-page__actions[data-v-a5593147] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-world-simulation-page__actions--start[data-v-a5593147] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-world-simulation-page__file-input[data-v-a5593147] { display: none;\n}\n.acu-v2-world-simulation-page__error[data-v-a5593147] { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__meta[data-v-a5593147] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-a5593147] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-world-simulation-page__toggles[data-v-a5593147] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-world-simulation-page__groups[data-v-a5593147] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-world-simulation-page__group[data-v-a5593147] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-world-simulation-page__group[data-v-a5593147] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-world-simulation-page__group[data-v-a5593147] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-world-simulation-page__group[data-v-a5593147] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-world-simulation-page__group[data-v-a5593147] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-world-simulation-page__group .acu-v2-world-simulation-page__actions[data-v-a5593147] { margin-top: 0;\n}\n.acu-v2-world-simulation-page__subheading[data-v-a5593147] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-world-simulation-page__subheading[data-v-a5593147]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-world-simulation-page[data-v-a5593147] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-world-simulation-page[data-v-a5593147] { padding: 10px; gap: 12px;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-a5593147] { grid-template-columns: 1fr;\n}\n.acu-v2-world-simulation-page__actions[data-v-a5593147] > * { flex: 1 1 auto;\n}\n.acu-v2-world-simulation-page__group[data-v-a5593147] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/WorldSimulationPage.vue#style-0-a5593147");
+    var WorldSimulationPage_vue_vue_type_style_index_0_scoped_a5593147_lang = null;
 
     const _hoisted_1$m = { class: "acu-v2-world-simulation-page" };
     const _hoisted_2$k = {
@@ -208471,7 +208472,7 @@ ${rejectionText}` : delegationFeedback,
 								_cache[32] || (_cache[32] = createBaseVNode(
 									"p",
 									{ class: "acu-v2-world-simulation-page__meta" },
-									"开启后，主 Agent 在本地证据不足时可派工 lore-researcher 从勾选的百科补充公开设定资料；研究结果只作证据，不直接写入世界账本。",
+									"开启后，主 Agent 在本地证据不足时可直接使用网页检索与百科读取补充公开设定资料；研究结果只作证据，不直接写入世界账本。",
 									-1
 									/* CACHED */
 								)),
@@ -208846,7 +208847,7 @@ ${rejectionText}` : delegationFeedback,
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var WorldSimulationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-781dc687"]]);
+    var WorldSimulationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-a5593147"]]);
 
     /**
      * useImportFlow — 外部导入页业务流编排（阶段 2 / D21.4）

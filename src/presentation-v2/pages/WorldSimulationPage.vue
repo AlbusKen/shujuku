@@ -110,7 +110,7 @@
             body-id="acu-world-simulation-group-web-research"
             @toggle="toggleGroup('webResearch')"
           >
-            <p class="acu-v2-world-simulation-page__meta">开启后，主 Agent 在本地证据不足时可派工 lore-researcher 从勾选的百科补充公开设定资料；研究结果只作证据，不直接写入世界账本。</p>
+            <p class="acu-v2-world-simulation-page__meta">开启后，主 Agent 在本地证据不足时可直接使用网页检索与百科读取补充公开设定资料；研究结果只作证据，不直接写入世界账本。</p>
             <div class="acu-v2-world-simulation-page__toggles">
               <AcuCheckbox v-model="settingsDraft.webResearch.sources.moegirl" label="萌娘百科" />
               <AcuCheckbox v-model="settingsDraft.webResearch.sources.wikipediaZh" label="中文维基百科" />

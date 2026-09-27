@@ -1,7 +1,8 @@
 import { WORLD_SIMULATION_AGENT_NAMES_ACU, type WorldSimulationAgentName_ACU } from '../../service/simulation/agent/agent-catalog';
 
-/** 页面（.vue）不能直接引用 service 值，角色顺序经此处中转。 */
-export const WORLD_SIMULATION_AGENT_ORDER_ACU: readonly WorldSimulationAgentName_ACU[] = WORLD_SIMULATION_AGENT_NAMES_ACU;
+/** 页面（.vue）不能直接引用 service 值；无真实调用入口的研究员仅保留旧配置迁移，不再暴露为可编辑 Agent。 */
+export const WORLD_SIMULATION_AGENT_ORDER_ACU: readonly WorldSimulationAgentName_ACU[] = WORLD_SIMULATION_AGENT_NAMES_ACU
+  .filter(agentName => agentName !== 'lore-researcher');
 
 /**
  * 世界推演各 Agent 的中文展示名。会话流、渠道下拉与提示词分组共用同一张表，
