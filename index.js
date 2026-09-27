@@ -159660,6 +159660,7 @@ Expected function or array of functions, received type ${typeof value}.`
             // 预算状态随每次请求尾部快照刷新。
             const allowSearch = accessProfile.allowSearch;
             const ownReads = authorizedReads;
+            const authorizedToolNames = new Set([...accessProfile.tools, ...(input.writeSql && writes.length ? ['write_sql'] : [])]);
             if (input.writeSql && writes.length)
                 baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: renderMaintenanceSqlGuide_ACU(definition.name) });
             baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: ownReads.length ? `本角色只可 read 以下自有或强相关地址：${ownReads.join('、')}。${allowSearch ? '世界书检索限已授权范围。' : '不得做本地 search。'}` : '本角色没有本地调阅工具，直接根据已备资料交付。' });
@@ -159892,10 +159893,8 @@ Expected function or array of functions, received type ${typeof value}.`
                                 throw new Error(`出网工具 ${call.name} 未授权`);
                             return parseAgentWebToolCall_ACU(argumentsWithoutNotes);
                         }
-                        if (call.name !== 'read' && call.name !== 'search')
-                            throw new Error(`未知工具 ${call.name}`);
-                        if (call.name === 'search' && !allowSearch)
-                            throw new Error('当前角色未授权本地搜索');
+                        if (!authorizedToolNames.has(call.name))
+                            throw new Error(`工具 ${call.name} 未获当前角色 profile 授权`);
                         if (call.name === 'read' && (definition.kind === 'compose' || (ownReads && !ownReads.length)))
                             throw new Error('当前角色未授权本地读取');
                         if (_notes !== undefined && !isResearch)
@@ -169316,7 +169315,7 @@ Expected function or array of functions, received type ${typeof value}.`
             const [source, address] = SNAPSHOT_SOURCE_ACU[key];
             const revision = source === 'world-ledger' ? revisions.ledger : source === 'stage-plan' ? revisions.stage : undefined;
             sections.push({ key, source, address, revision: Number.isSafeInteger(revision) && revision >= 0 ? revision : null,
-                start: text.length, length: value.length, complete: false });
+                start: text.length, length: value.length, completeness: 'pending', complete: false });
             text += value;
             from = match.index + key.length;
         }
@@ -169326,6 +169325,22 @@ Expected function or array of functions, received type ${typeof value}.`
     function verifyWorldSimulationSnapshotSections_ACU(rendered, messages) {
         if (!rendered.text || !rendered.sections.length)
             throw new Error('WORLD_SIMULATION_SNAPSHOT_BOUNDARY_UNVERIFIED');
+        let previousEnd = 0;
+        for (const section of rendered.sections) {
+            const expectedSource = SNAPSHOT_SOURCE_ACU[section.key];
+            const end = section.start + section.length;
+            if (!section.source.trim() || !section.address.trim()
+                || !expectedSource || expectedSource[0] !== section.source || expectedSource[1] !== section.address
+                || section.completeness !== 'pending' || section.complete
+                || (section.revision !== null && (!Number.isSafeInteger(section.revision) || section.revision < 0))
+                || !Number.isSafeInteger(section.start) || !Number.isSafeInteger(section.length)
+                || section.start < 0 || section.length < 0
+                || !Number.isSafeInteger(end) || end > rendered.text.length
+                || section.start < previousEnd) {
+                throw new Error('WORLD_SIMULATION_SNAPSHOT_METADATA_UNVERIFIED');
+            }
+            previousEnd = end;
+        }
         const occurrences = messages.flatMap((message, messageIndex) => {
             const positions = [];
             let start = message.content.indexOf(rendered.text);
@@ -169347,7 +169362,8 @@ Expected function or array of functions, received type ${typeof value}.`
                 throw new Error('WORLD_SIMULATION_SNAPSHOT_BOUNDARY_UNVERIFIED');
             }
         }
-        return rendered.sections.map(section => ({ ...section, messageIndex, messageStart: start + section.start, complete: true }));
+        return rendered.sections.map(section => ({ ...section, messageIndex, messageStart: start + section.start,
+            completeness: 'verified', complete: true }));
     }
     async function renderWorldSimulationSnapshotTemplate_ACU(template, resolvers) {
         return (await renderWorldSimulationSnapshotSections_ACU(template, resolvers)).text;
@@ -169388,7 +169404,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 }
                 const bodyStart = start + frame.length - hit.content.length;
                 sections.push({ address: `worldbook:entry:${hit.bookName}:${hit.uid}`, start: bodyStart,
-                    length: hit.content.length, revision: null });
+                    length: hit.content.length, revision: null, completeness: 'pending' });
                 cursor = bodyStart + hit.content.length;
             }
         if (hits.length && cursor !== text.length)
@@ -169418,15 +169434,27 @@ Expected function or array of functions, received type ${typeof value}.`
             throw new Error('WORLD_SIMULATION_WORLDBOOK_BOUNDARY_UNVERIFIED');
         const match = matches[0];
         let cursor = 0;
+        const addresses = new Set();
         return fixed.sections.map(section => {
-            if (section.start < cursor || section.length <= 0 || section.start + section.length > fixed.text.length
-                || messages[match.messageIndex].content.slice(match.start + section.start, match.start + section.start + section.length)
+            const end = section.start + section.length;
+            if (section.completeness !== 'pending' || !Number.isSafeInteger(section.start) || !Number.isSafeInteger(section.length)
+                || !Number.isSafeInteger(end) || section.start < cursor || section.length <= 0 || end > fixed.text.length
+                || !/^worldbook:entry:[^:]+:[^:]+$/.test(section.address) || section.revision !== null
+                || addresses.has(section.address)) {
+                throw new Error('WORLD_SIMULATION_WORLDBOOK_METADATA_UNVERIFIED');
+            }
+            addresses.add(section.address);
+            const messageStart = match.start + section.start;
+            const messageEnd = messageStart + section.length;
+            if (!Number.isSafeInteger(messageStart) || !Number.isSafeInteger(messageEnd)
+                || messageStart < 0 || messageEnd > messages[match.messageIndex].content.length
+                || messages[match.messageIndex].content.slice(messageStart, messageEnd)
                     !== fixed.text.slice(section.start, section.start + section.length)) {
                 throw new Error('WORLD_SIMULATION_WORLDBOOK_BOUNDARY_UNVERIFIED');
             }
-            cursor = section.start + section.length;
+            cursor = end;
             return { address: section.address, revision: section.revision, messageIndex: match.messageIndex,
-                start: match.start + section.start, length: section.length, complete: true };
+                start: messageStart, length: section.length, completeness: 'verified', complete: true };
         });
     }
 
@@ -170810,14 +170838,12 @@ ${rejectionText}` : delegationFeedback,
                 try {
                     calls = nativeCalls.length ? nativeToolArguments_ACU(nativeCalls).map(({ call, payload }) => {
                         if (call.name === 'write_sql') {
-                            if (!input.writeSql || !writableModules.length || Object.keys(payload).some(key => !['action', 'sql', 'evidenceRefs'].includes(key)))
+                            if (!worldSimulationAgentNativeTools_ACU(agentName).includes('write_sql') || !input.writeSql || !writableModules.length || Object.keys(payload).some(key => !['action', 'sql', 'evidenceRefs'].includes(key)))
                                 throw new Error('write_sql 未授权或参数非法');
                             return parseWorldSimulationSubagentToolCalls_ACU(JSON.stringify(payload), '', requestSnapshot, true)[0];
                         }
-                        if (call.name !== 'read' && call.name !== 'search')
-                            throw new Error(`未知工具 ${call.name}`);
-                        if (call.name === 'search' && definition.kind !== 'researcher')
-                            throw new Error('普通子代理未授权 search');
+                        if (!worldSimulationAgentNativeTools_ACU(agentName).includes(call.name))
+                            throw new Error(`工具 ${call.name} 未获 ${agentName} profile 授权`);
                         const parsed = parseWorldSimulationMainAction_ACU(payload, false, requestSnapshot);
                         if (parsed.kind !== call.name)
                             throw new Error('工具名称与动作不一致');
@@ -171026,8 +171052,8 @@ ${rejectionText}` : delegationFeedback,
                 let calls;
                 try {
                     calls = reviewerNative.length ? nativeToolArguments_ACU(reviewerNative).map(({ call, payload }) => {
-                        if (call.name !== 'read')
-                            throw new Error(`reviewer 不允许调用 ${call.name}`);
+                        if (!worldSimulationAgentNativeTools_ACU(agentName).includes(call.name))
+                            throw new Error(`工具 ${call.name} 未获 ${agentName} profile 授权`);
                         const parsed = parseWorldSimulationMainAction_ACU(payload, false, requestSnapshot);
                         if (parsed.kind !== 'read')
                             throw new Error('reviewer 只允许 read');

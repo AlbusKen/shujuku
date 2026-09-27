@@ -806,6 +806,7 @@ export class AgentSubagentRuntime_ACU {
     // 预算状态随每次请求尾部快照刷新。
     const allowSearch = accessProfile.allowSearch;
     const ownReads = authorizedReads;
+    const authorizedToolNames = new Set<string>([...accessProfile.tools, ...(input.writeSql && writes.length ? ['write_sql'] : [])]);
     if (input.writeSql && writes.length) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: renderMaintenanceSqlGuide_ACU(definition.name) });
     baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: ownReads.length ? `本角色只可 read 以下自有或强相关地址：${ownReads.join('、')}。${allowSearch ? '世界书检索限已授权范围。' : '不得做本地 search。'}` : '本角色没有本地调阅工具，直接根据已备资料交付。' });
     const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
@@ -1038,8 +1039,7 @@ export class AgentSubagentRuntime_ACU {
             if (!isResearch) throw new Error(`出网工具 ${call.name} 未授权`);
             return parseAgentWebToolCall_ACU(argumentsWithoutNotes);
           }
-          if (call.name !== 'read' && call.name !== 'search') throw new Error(`未知工具 ${call.name}`);
-          if (call.name === 'search' && !allowSearch) throw new Error('当前角色未授权本地搜索');
+          if (!authorizedToolNames.has(call.name)) throw new Error(`工具 ${call.name} 未获当前角色 profile 授权`);
           if (call.name === 'read' && (definition.kind === 'compose' || (ownReads && !ownReads.length))) throw new Error('当前角色未授权本地读取');
           if (_notes !== undefined && !isResearch) throw new Error('非研究角色不得传 notes');
           const parsed = parseAgentToolCall_ACU(argumentsWithoutNotes);

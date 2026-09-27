@@ -404,11 +404,10 @@ export class WorldSimulationSubagentRuntime_ACU {
       try {
         calls = nativeCalls.length ? nativeToolArguments_ACU(nativeCalls).map(({ call, payload }) => {
           if (call.name === 'write_sql') {
-            if (!input.writeSql || !writableModules.length || Object.keys(payload).some(key => !['action', 'sql', 'evidenceRefs'].includes(key))) throw new Error('write_sql 未授权或参数非法');
+            if (!worldSimulationAgentNativeTools_ACU(agentName).includes('write_sql') || !input.writeSql || !writableModules.length || Object.keys(payload).some(key => !['action', 'sql', 'evidenceRefs'].includes(key))) throw new Error('write_sql 未授权或参数非法');
             return parseWorldSimulationSubagentToolCalls_ACU(JSON.stringify(payload), '', requestSnapshot, true)![0];
           }
-          if (call.name !== 'read' && call.name !== 'search') throw new Error(`未知工具 ${call.name}`);
-          if (call.name === 'search' && definition.kind !== 'researcher') throw new Error('普通子代理未授权 search');
+          if (!worldSimulationAgentNativeTools_ACU(agentName).includes(call.name as 'read' | 'search')) throw new Error(`工具 ${call.name} 未获 ${agentName} profile 授权`);
           const parsed = parseWorldSimulationMainAction_ACU(payload, false, requestSnapshot);
           if (parsed.kind !== call.name) throw new Error('工具名称与动作不一致');
           return parsed as Extract<ReturnType<typeof parseWorldSimulationMainAction_ACU>, { kind: 'read' | 'search' }>;
@@ -609,7 +608,7 @@ export class WorldSimulationSubagentRuntime_ACU {
       let calls: ReturnType<typeof toolCalls_ACU>;
       try {
         calls = reviewerNative.length ? nativeToolArguments_ACU(reviewerNative).map(({ call, payload }) => {
-          if (call.name !== 'read') throw new Error(`reviewer 不允许调用 ${call.name}`);
+          if (!worldSimulationAgentNativeTools_ACU(agentName).includes(call.name as 'read' | 'search')) throw new Error(`工具 ${call.name} 未获 ${agentName} profile 授权`);
           const parsed = parseWorldSimulationMainAction_ACU(payload, false, requestSnapshot);
           if (parsed.kind !== 'read') throw new Error('reviewer 只允许 read');
           return parsed as Extract<ReturnType<typeof parseWorldSimulationMainAction_ACU>, { kind: 'read' | 'search' }>;

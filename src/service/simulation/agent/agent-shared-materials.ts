@@ -84,6 +84,7 @@ export interface WorldSimulationSnapshotSection_ACU {
   revision: number | null;
   start: number;
   length: number;
+  completeness: 'pending' | 'verified';
   complete: boolean;
 }
 
@@ -142,7 +143,7 @@ export async function renderWorldSimulationSnapshotSections_ACU(
     const [source, address] = SNAPSHOT_SOURCE_ACU[key]!;
     const revision = source === 'world-ledger' ? revisions.ledger : source === 'stage-plan' ? revisions.stage : undefined;
     sections.push({ key, source, address, revision: Number.isSafeInteger(revision) && revision! >= 0 ? revision! : null,
-      start: text.length, length: value.length, complete: false });
+      start: text.length, length: value.length, completeness: 'pending', complete: false });
     text += value;
     from = match.index + key.length;
   }
@@ -160,6 +161,22 @@ export function verifyWorldSimulationSnapshotSections_ACU(
   messages: readonly { content: string }[],
 ): WorldSimulationVerifiedSnapshotSection_ACU[] {
   if (!rendered.text || !rendered.sections.length) throw new Error('WORLD_SIMULATION_SNAPSHOT_BOUNDARY_UNVERIFIED');
+  let previousEnd = 0;
+  for (const section of rendered.sections) {
+    const expectedSource = SNAPSHOT_SOURCE_ACU[section.key];
+    const end = section.start + section.length;
+    if (!section.source.trim() || !section.address.trim()
+      || !expectedSource || expectedSource[0] !== section.source || expectedSource[1] !== section.address
+      || section.completeness !== 'pending' || section.complete
+      || (section.revision !== null && (!Number.isSafeInteger(section.revision) || section.revision < 0))
+      || !Number.isSafeInteger(section.start) || !Number.isSafeInteger(section.length)
+      || section.start < 0 || section.length < 0
+      || !Number.isSafeInteger(end) || end > rendered.text.length
+      || section.start < previousEnd) {
+      throw new Error('WORLD_SIMULATION_SNAPSHOT_METADATA_UNVERIFIED');
+    }
+    previousEnd = end;
+  }
   const occurrences = messages.flatMap((message, messageIndex) => {
     const positions: Array<{ messageIndex: number; start: number }> = [];
     let start = message.content.indexOf(rendered.text);
@@ -180,7 +197,8 @@ export function verifyWorldSimulationSnapshotSections_ACU(
       throw new Error('WORLD_SIMULATION_SNAPSHOT_BOUNDARY_UNVERIFIED');
     }
   }
-  return rendered.sections.map(section => ({ ...section, messageIndex, messageStart: start + section.start, complete: true }));
+  return rendered.sections.map(section => ({ ...section, messageIndex, messageStart: start + section.start,
+    completeness: 'verified', complete: true }));
 }
 
 export async function renderWorldSimulationSnapshotTemplate_ACU(
@@ -207,7 +225,7 @@ export const WORLD_SIMULATION_WORLDBOOK_UNAVAILABLE_ACU =
 /** Source-bound spans of the fixed worldbook injection, measured in UTF-16 code units. */
 export interface WorldSimulationFixedWorldbook_ACU {
   text: string;
-  sections: Array<{ address: string; start: number; length: number; revision: null }>;
+  sections: Array<{ address: string; start: number; length: number; revision: null; completeness: 'pending' | 'verified' }>;
 }
 
 export function bindWorldSimulationFixedWorldbook_ACU(
@@ -233,7 +251,7 @@ export function bindWorldSimulationFixedWorldbook_ACU(
     }
     const bodyStart = start + frame.length - hit.content.length;
     sections.push({ address: `worldbook:entry:${hit.bookName}:${hit.uid}`, start: bodyStart,
-      length: hit.content.length, revision: null });
+      length: hit.content.length, revision: null, completeness: 'pending' });
     cursor = bodyStart + hit.content.length;
   }
   if (hits.length && cursor !== text.length) throw new Error('WORLD_SIMULATION_WORLDBOOK_SOURCE_UNVERIFIED');
@@ -246,7 +264,7 @@ export function bindWorldSimulationFixedWorldbook_ACU(
 export function verifyWorldSimulationFixedWorldbook_ACU(
   fixed: WorldSimulationFixedWorldbook_ACU,
   messages: readonly { content: string }[],
-): Array<{ address: string; revision: null; messageIndex: number; start: number; length: number; complete: true }> {
+): Array<{ address: string; revision: null; messageIndex: number; start: number; length: number; completeness: 'verified'; complete: true }> {
   if (!fixed.text) {
     if (fixed.sections.length) throw new Error('WORLD_SIMULATION_WORLDBOOK_BOUNDARY_UNVERIFIED');
     return [];
@@ -263,14 +281,26 @@ export function verifyWorldSimulationFixedWorldbook_ACU(
   if (matches.length !== 1) throw new Error('WORLD_SIMULATION_WORLDBOOK_BOUNDARY_UNVERIFIED');
   const match = matches[0];
   let cursor = 0;
+  const addresses = new Set<string>();
   return fixed.sections.map(section => {
-    if (section.start < cursor || section.length <= 0 || section.start + section.length > fixed.text.length
-      || messages[match.messageIndex].content.slice(match.start + section.start, match.start + section.start + section.length)
+    const end = section.start + section.length;
+    if (section.completeness !== 'pending' || !Number.isSafeInteger(section.start) || !Number.isSafeInteger(section.length)
+      || !Number.isSafeInteger(end) || section.start < cursor || section.length <= 0 || end > fixed.text.length
+      || !/^worldbook:entry:[^:]+:[^:]+$/.test(section.address) || section.revision !== null
+      || addresses.has(section.address)) {
+      throw new Error('WORLD_SIMULATION_WORLDBOOK_METADATA_UNVERIFIED');
+    }
+    addresses.add(section.address);
+    const messageStart = match.start + section.start;
+    const messageEnd = messageStart + section.length;
+    if (!Number.isSafeInteger(messageStart) || !Number.isSafeInteger(messageEnd)
+      || messageStart < 0 || messageEnd > messages[match.messageIndex].content.length
+      || messages[match.messageIndex].content.slice(messageStart, messageEnd)
         !== fixed.text.slice(section.start, section.start + section.length)) {
       throw new Error('WORLD_SIMULATION_WORLDBOOK_BOUNDARY_UNVERIFIED');
     }
-    cursor = section.start + section.length;
+    cursor = end;
     return { address: section.address, revision: section.revision, messageIndex: match.messageIndex,
-      start: match.start + section.start, length: section.length, complete: true as const };
+      start: messageStart, length: section.length, completeness: 'verified', complete: true as const };
   });
 }
