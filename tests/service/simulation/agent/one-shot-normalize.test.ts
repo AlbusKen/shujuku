@@ -39,4 +39,22 @@ describe('一次性候选 SQL 归一化', () => {
     expect(result.payload.status).toBe('failed');
     expect(result.issues[0].message).toContain('not_found');
   });
+
+  it('仅为本角色无 WHERE 的单例 UPDATE 补运行基线修订号，其他语句不越权', () => {
+    const ctx = { ...context(), agentName: 'dramatis-keeper', writableModules: ['actors', 'player', 'rumors'] as const, baseLedgerRevision: 3 };
+    const result = normalizeOneShotSpecialistPayload_ACU({ status: 'candidate',
+      sql: "UPDATE player SET location = '江南府', contact = 'open'; UPDATE clock SET days = 1; UPDATE player SET contact = 'open' WHERE id = 'forbidden'",
+    }, ctx);
+    expect(result.payload).toMatchObject({ status: 'candidate', patch: { player: { location: '江南府', contact: 'open', expectedRevision: 3 } } });
+    expect(result.issues).toHaveLength(2);
+    expect(result.issues.map(issue => issue.path)).toEqual(['$.sql[1]', '$.sql[2]']);
+  });
+
+  it('非法 actor_ids 不会被静默变成角色 ID 字符串', () => {
+    const result = normalizeOneShotSpecialistPayload_ACU({ status: 'candidate',
+      sql: "INSERT INTO seeds (title, status, actor_ids) VALUES ('暗流', 'incubating', '[{\"id\":\"actor-1\"}]')",
+    }, context());
+    const seed = (result.payload.patch as { seeds: { upsert: Array<{ actorIds: unknown }> } }).seeds.upsert[0];
+    expect(seed.actorIds).toEqual([{ id: 'actor-1' }]);
+  });
 });

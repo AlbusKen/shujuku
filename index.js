@@ -91884,7 +91884,7 @@ $CONTENT
         '【事实来源】已发生事实只认锚点正文；世界书是设定，账本是上一轮结论。无证据的推断放进 uncertainties。',
         '【幕后视角】推演镜头之外的世界，不复述主角的行程、对话或已写在正文里的事件。',
         '【时间规则】世界日从 clock.day 起算，仅加上锚点明确发生的时间推进；回忆和已过去的旅程不重复累加，没有明确推进视为零天。',
-        '【写法】输出一段受限 SQL 放在 JSON 的 sql 字段，多条用分号隔开；字符串里的单引号写成两个单引号，数组对象写成单引号包裹的 JSON。INSERT 新行可省 id，关联新行时须显式给 id。UPDATE/DELETE 按行 id 与 expected_revision，单例 UPDATE 只写 expected_revision。evidence_refs 可省，由程序绑定锚点。',
+        '【写法】输出一段受限 SQL 放在 JSON 的 sql 字段，多条用分号隔开；字符串里的单引号写成两个单引号，数组对象写成单引号包裹的 JSON。字符串数组只能包含字符串 ID：actor_ids = \'["actor-1"]\'；没有关联人物就省略 actor_ids，不能填人物对象、数字、null 或未确认的 ID。INSERT 新行可省 id，关联新行时须显式给 id。UPDATE/DELETE 按行 id 与 expected_revision，单例 UPDATE 必须带 WHERE expected_revision = 运行时单例修订号。evidence_refs 可省，由程序绑定锚点。',
         '【宁缺毋滥】没有真实变化交 no_change，不为凑数修改旧条目。',
     ].join('\n');
     function buildOneShotWorldSimulationAgentPrompt_ACU(name) {
@@ -91898,7 +91898,7 @@ $CONTENT
             'dramatis-keeper': {
                 root: '推演镜头外人物现状、信息边界及玩家位置与接触。',
                 role: '只写 actors、player；rumors 只准写人物死亡的伴生传闻。',
-                workflow: '玩家按锚点当下地点更新 location 和 contact；没有明确变化不写。人物只维护与剧情相关者，每条 known_facts 须由 information_sources 的具体渠道支撑；移动同步 location_ref。本轮最多新增 3 人。人物死亡须同一段 SQL 写 life=dead、died_at_day、death_summary，并 INSERT 一条关联该人物 id、origin_day 与传播渠道的 rumors；不得写其他传闻。',
+                workflow: '玩家按锚点当下地点更新 location 和 contact；没有明确变化不写。player.location 是 JSON 对象字符串，如 \'{"region":"江南府"}\'，不是单独的地名；UPDATE player SET location = \'{"region":"江南府"}\', contact = \'open\' WHERE expected_revision = 0（将 0 换成运行时单例修订号）。人物只维护与剧情相关者，每条 known_facts 须由 information_sources 的具体渠道支撑；移动同步 location_ref。本轮最多新增 3 人。人物死亡须同一段 SQL 写 life=dead、died_at_day、death_summary，并 INSERT 一条关联该人物 id、origin_day 与传播渠道的 rumors；不得写其他传闻。',
                 ack: '只写人物、玩家与死亡伴生传闻；无变化交 no_change。',
             },
             'guidance-composer': {
@@ -166074,11 +166074,39 @@ Expected function or array of functions, received type ${typeof value}.`
         if (payload.status !== 'candidate' || typeof payload.sql !== 'string' || !payload.sql.trim())
             throw new Error('WORLD_SIMULATION_ONE_SHOT_SQL_REQUIRED');
         const parsed = parseRestrictedSqlDmlTolerant_ACU(payload.sql);
-        for (const rejected of parsed.rejected)
-            issue(fallback, `$.sql[${rejected.index}]`, rejected.reason);
+        // Only one-shot may supply the authoritative revision for an otherwise complete
+        // singleton UPDATE. Re-parse through the strict grammar; never accept a second
+        // statement, arbitrary WHERE, or a table outside this role's write scope.
+        const recover = (text) => {
+            const match = text.match(/^UPDATE\s+(clock|player|guidance)\s+SET\s+[\s\S]+$/i);
+            if (!match || /\bWHERE\b/i.test(text) || !ctx.writableModules.includes(match[1].toLowerCase()))
+                return null;
+            try {
+                const statements = parseRestrictedSqlDml_ACU(`${text} WHERE expected_revision = ${ctx.baseLedgerRevision}`);
+                return statements.length === 1 ? statements[0] : null;
+            }
+            catch {
+                return null;
+            }
+        };
+        const rejected = new Map(parsed.rejected.map(item => [item.index, item]));
+        const statements = [];
+        let validIndex = 0;
+        for (let index = 0; index < parsed.rejected.length + parsed.statements.length; index += 1) {
+            const failure = rejected.get(index);
+            if (!failure) {
+                statements.push({ statement: parsed.statements[validIndex++], index });
+                continue;
+            }
+            const recovered = recover(failure.text);
+            if (recovered)
+                statements.push({ statement: recovered, index });
+            else
+                issue(fallback, `$.sql[${index}]`, failure.reason);
+        }
         const patch = {};
         const refs = new Set([ctx.anchorEvidenceRef]);
-        parsed.statements.forEach((original, index) => {
+        statements.forEach(({ statement: original, index }) => {
             const statement = original.kind === 'insert'
                 ? { ...original, values: { ...original.values } }
                 : original.kind === 'update' ? { ...original, values: { ...original.values }, where: { ...original.where } }

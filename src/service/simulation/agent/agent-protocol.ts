@@ -504,10 +504,30 @@ export function normalizeOneShotSpecialistPayload_ACU(payload: Record<string, un
   if (payload.status === 'failed') return { payload: { status: 'failed', agentName: ctx.agentName, reasonCode: payload.reasonCode, message: payload.message }, issues };
   if (payload.status !== 'candidate' || typeof payload.sql !== 'string' || !payload.sql.trim()) throw new Error('WORLD_SIMULATION_ONE_SHOT_SQL_REQUIRED');
   const parsed = parseRestrictedSqlDmlTolerant_ACU(payload.sql);
-  for (const rejected of parsed.rejected) issue(fallback, `$.sql[${rejected.index}]`, rejected.reason);
+  // Only one-shot may supply the authoritative revision for an otherwise complete
+  // singleton UPDATE. Re-parse through the strict grammar; never accept a second
+  // statement, arbitrary WHERE, or a table outside this role's write scope.
+  const recover = (text: string): RestrictedSqlStatement_ACU | null => {
+    const match = text.match(/^UPDATE\s+(clock|player|guidance)\s+SET\s+[\s\S]+$/i);
+    if (!match || /\bWHERE\b/i.test(text) || !ctx.writableModules.includes(match[1].toLowerCase() as typeof fallback)) return null;
+    try {
+      const statements = parseRestrictedSqlDml_ACU(`${text} WHERE expected_revision = ${ctx.baseLedgerRevision}`);
+      return statements.length === 1 ? statements[0] : null;
+    } catch { return null; }
+  };
+  const rejected = new Map(parsed.rejected.map(item => [item.index, item]));
+  const statements: Array<{ statement: RestrictedSqlStatement_ACU; index: number }> = [];
+  let validIndex = 0;
+  for (let index = 0; index < parsed.rejected.length + parsed.statements.length; index += 1) {
+    const failure = rejected.get(index);
+    if (!failure) { statements.push({ statement: parsed.statements[validIndex++], index }); continue; }
+    const recovered = recover(failure.text);
+    if (recovered) statements.push({ statement: recovered, index });
+    else issue(fallback, `$.sql[${index}]`, failure.reason);
+  }
   const patch: Record<string, unknown> = {};
   const refs = new Set([ctx.anchorEvidenceRef]);
-  parsed.statements.forEach((original, index) => {
+  statements.forEach(({ statement: original, index }) => {
     const statement: RestrictedSqlStatement_ACU = original.kind === 'insert'
       ? { ...original, values: { ...original.values } }
       : original.kind === 'update' ? { ...original, values: { ...original.values }, where: { ...original.where } }

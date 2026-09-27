@@ -208,5 +208,27 @@ describe('两批一次性世界推演工作流', () => {
       status: 'candidate', agentName: 'dramatis-keeper', sql: "UPDATE player SET contact = 'open' WHERE expected_revision = 0" }));
     expect((await new WorldSimulationSubagentRuntime_ACU({ invoke: playerReplies, apiPreset, countTokens: async () => 1 }).runOneShot(playerInput)).status).toBe('candidate');
     expect(JSON.stringify(playerReplies.mock.calls[1][1])).toContain('SQL_COLUMN_FORBIDDEN');
+    const badSeed = JSON.stringify({ status: 'candidate', agentName: 'undercurrent-analyst',
+      sql: "INSERT INTO seeds (title, status, actor_ids) VALUES ('暗流', 'incubating', '[{\"id\":\"actor-1\"}]')" });
+    const fixedSeed = JSON.stringify({ status: 'candidate', agentName: 'undercurrent-analyst',
+      sql: "INSERT INTO seeds (title, status) VALUES ('暗流', 'incubating')" });
+    const seedReplies = vi.fn().mockResolvedValueOnce(badSeed).mockResolvedValueOnce(fixedSeed);
+    expect((await new WorldSimulationSubagentRuntime_ACU({ invoke: seedReplies, apiPreset,
+      countTokens: async () => 1 }).runOneShot(input)).status).toBe('candidate');
+    expect(JSON.stringify(seedReplies.mock.calls[1][1])).toContain('actorIds');
+    const badPlayer = JSON.stringify({ status: 'candidate', agentName: 'dramatis-keeper',
+      sql: "UPDATE player SET location = '江南府', contact = 'open'" });
+    const correctedPlayer = JSON.stringify({ status: 'candidate', agentName: 'dramatis-keeper',
+      sql: "UPDATE player SET location = '{\"region\":\"江南府\"}', contact = 'open' WHERE expected_revision = 0" });
+    const playerRepair = vi.fn().mockResolvedValueOnce(badPlayer).mockResolvedValueOnce(correctedPlayer);
+    const repaired = await new WorldSimulationSubagentRuntime_ACU({ invoke: playerRepair, apiPreset,
+      countTokens: async () => 1 }).runOneShot(playerInput);
+    expect(repaired.status).toBe('candidate');
+    expect(JSON.stringify(playerRepair.mock.calls[1][1])).toContain('location');
+    const unrepaired = vi.fn(async () => badPlayer);
+    const failedPlayer = await new WorldSimulationSubagentRuntime_ACU({ invoke: unrepaired, apiPreset,
+      countTokens: async () => 1 }).runOneShot(playerInput);
+    expect(failedPlayer.status).toBe('failed');
+    expect(unrepaired).toHaveBeenCalledTimes(2);
   });
 });
