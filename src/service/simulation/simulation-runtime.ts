@@ -312,6 +312,7 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
               anchor: currentAnchor,
               chat: getChatArray_ACU(),
               resetRunBudget,
+              directOpening: !resumableRevision && !resetRunBudget,
               anchorMaterialsCommitted: readWorldSimulationLedgerAtAnchor_ACU(currentAnchor, getChatArray_ACU()) !== null,
               targetModules,
             }),

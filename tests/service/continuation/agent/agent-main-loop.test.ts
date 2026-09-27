@@ -1060,6 +1060,25 @@ describe('open_round 固定结构工作流', () => {
   const plannerReply_ACU = JSON.stringify({ summary: '主线建议', recommendation: '先观察守门人的回避', mustPreserve: [], risks: [] });
   const composerReply_ACU = JSON.stringify({ instruction: '按阶段大纲先观察守门人的回避。', summary: '完成本轮指令', constraints: { add: [], retire: [] } });
 
+  it('生产新轮次直接运行固定工作流，不请求主 Agent 开局', async () => {
+    const h = harness_ACU({
+      snapshot: snapshotWithArc_ACU(),
+      mainReplies: [],
+      subReplies: [maintainerReply_ACU, plannerReply_ACU, '{"summary":"本轮无节拍操作","recommendation":"no_change"}', composerReply_ACU],
+    });
+    h.request.directOpening = true;
+    const label = vi.fn(async (_focus: string) => undefined);
+    h.request.updateTurnLabel = label;
+
+    const result = await h.planner.plan(h.request);
+
+    expect(result.instruction).toBe('按阶段大纲先观察守门人的回避。');
+    expect(result.attempts).toBe(0);
+    expect(h.mainCalls).toHaveLength(0);
+    expect(label).toHaveBeenCalledWith('试探');
+    expect(h.subCalls).toHaveLength(4);
+  });
+
   it('总纲和阶段大纲都缺失时，open_round 先自动立总纲、再准备大纲并交付指令', async () => {
     const h = harness_ACU({
       snapshot: buildEmptyAgentModuleSnapshot_ACU(),

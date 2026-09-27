@@ -1024,6 +1024,8 @@ export interface ContinuationAgentTurnPlanResult_ACU {
 /** 一次轮次准备所需的全部外部输入。 */
 export interface ContinuationAgentTurnPlanRequest_ACU {
   settings: ContinuationSettings_ACU;
+  /** 生产新轮次直接进入固定工作流；恢复与正文重试不启用。 */
+  directOpening?: boolean;
   /** 宽松执行上下文供应器。大纲操作会改变游标，循环每次迭代都要重新读取。 */
   readContext: () => ContinuationAgentExecutionContext_ACU;
   createInternalRequestIdentity: (attempt: number) => ContinuationInternalAiRequestIdentity_ACU & { source: 'turn_instruction' };

@@ -654,6 +654,8 @@ export class ContinuationAgentTurnPlanner_ACU {
     /** 门禁的 H：主 Agent 当前实际读取的完整上下文（骨架开销 + 实时会话历史）。 */
     const measureContextTokens = async (): Promise<number> =>
       (await measureOverhead()) + await measureAgentPromptTokens_ACU(session.history(), counter);
+    // 页面重载会清空内存 run cache；已通告过的同一轮仍须走恢复路径，不能重复启动工作流。
+    const restartingSameTurn = !!session.turnKey && lastAnnouncedTurnKey_ACU(session.snapshot()) === session.turnKey;
     // 换轮通告只在游标真的变了时追加：同一轮内的中断恢复不重复通告，否则模型会以为又开了一轮。
     if (session.turnKey && lastAnnouncedTurnKey_ACU(session.snapshot()) !== session.turnKey) {
       const visible = session.snapshot().messages;
@@ -727,15 +729,33 @@ export class ContinuationAgentTurnPlanner_ACU {
           && ((iteration < budget.maxIterations && ledger.delegationsUsed < budget.maxDelegations) || outlineMaintenanceReserveAvailable);
         const lifecycle = { outlineMaintenanceReserveAvailable, convergenceOnly: maintenanceConvergenceAvailable };
         await this.ensureRuntimeSnapshot_ACU(request, session, context, ledger, budget, iteration, toolUsage, gateConfig, lifecycle);
-        const round = await this.callMainAgent(request, preset, session, counter, context, ledger, budget, iteration, allowDelegate, toolUsage, gateConfig, lifecycle);
+        // 新运行的开局由固定工作流接管；恢复与终审后的裁决仍交给主 Agent。
+        const directOpening = request.directOpening === true && !resumedState && !restartingSameTurn && iteration === 1 && totalCalls === 1 && !postReviewDecisionAvailable;
+        const openingFocus = context.execution.turn?.goal?.trim() || context.originInstruction.trim() || '本轮续写';
+        const round = directOpening
+          ? {
+              attempts: 0,
+              action: {
+                kind: 'open_round' as const,
+                thought: '新运行直接启动固定工作流',
+                focus: openingFocus,
+                summary: openingFocus,
+                dispatchWebResearcher: false,
+              },
+              usage: undefined,
+              nativeCalls: [],
+            }
+          : await this.callMainAgent(request, preset, session, counter, context, ledger, budget, iteration, allowDelegate, toolUsage, gateConfig, lifecycle);
         snapshot = context.moduleSnapshot;
         totalAttempts += round.attempts;
         const action = round.action;
-        logAgentSession_ACU({
-          kind: 'thought',
-          title: `迭代 ${iteration} · ${describeAgentActionLabel_ACU(action)}${round.usage ? ` · ${formatAgentUsageLabel_ACU(round.usage)}` : ''}`,
-          detail: action.thought,
-        });
+        if (!directOpening) {
+          logAgentSession_ACU({
+            kind: 'thought',
+            title: `迭代 ${iteration} · ${describeAgentActionLabel_ACU(action)}${round.usage ? ` · ${formatAgentUsageLabel_ACU(round.usage)}` : ''}`,
+            detail: action.thought,
+          });
+        }
         const outcomesBefore = ledger.outcomes.length;
 
         if (maintenanceConvergenceAvailable && action.kind !== 'finalize' && action.kind !== 'block' && action.kind !== 'open_round') {

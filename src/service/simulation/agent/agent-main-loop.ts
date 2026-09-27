@@ -54,6 +54,8 @@ export interface WorldSimulationMainLoopInput_ACU {
   anchor?: WorldSimulationAnchorIdentity_ACU;
   chat?: any[];
   resetRunBudget?: boolean;
+  /** 仅由生产新任务入口启用；直接调用或恢复仍可沿用导演循环。 */
+  directOpening?: boolean;
   /** 当前锚点正文已经有结算快照时为 true；pendingFixes 非空时工作流仍会向主会话报告缺口。 */
   anchorMaterialsCommitted?: boolean;
   /** 显式补足入口传入的程序级目标写集。 */
@@ -338,6 +340,7 @@ export class WorldSimulationMainLoop_ACU {
     // failures remain capped by the repair state's per-fingerprint guard.
     const protocolRepair = createWorldSimulationProtocolRepairState_ACU(2);
     let pendingReview: { fingerprint: string; promise: Promise<WorldSimulationReviewerResult_ACU> } | null = null;
+    const workflowEscalationPrefix = 'fixed-workflow-escalation:';
     let workflowEscalation: { summary: string; pendingFixes: WorldSimulationLedger_ACU['pendingFixes'] } | null = null;
     const currentLedger = (): WorldSimulationLedger_ACU => {
       input.runWrites?.assertCurrent();
@@ -346,6 +349,20 @@ export class WorldSimulationMainLoop_ACU {
       if (input.readCurrent && !input.runWrites && (current as WorldSimulationLedger_ACU).revision !== input.identity.baseLedgerRevision) throw new Error('WORLD_SIMULATION_LEDGER_STALE');
       return current as WorldSimulationLedger_ACU;
     };
+    if (resumedState?.reviewerFeedback.startsWith(workflowEscalationPrefix)) {
+      // 工作流预览未必已经写入权威账本；缺口必须随恢复锚点完整保存。
+      let saved: unknown;
+      try {
+        saved = JSON.parse(resumedState.reviewerFeedback.slice(workflowEscalationPrefix.length));
+      } catch {
+        throw new Error('WORLD_SIMULATION_WORKFLOW_ESCALATION_INVALID');
+      }
+      if (!saved || typeof saved !== 'object' || !('summary' in saved) || typeof saved.summary !== 'string'
+        || !('pendingFixes' in saved) || !Array.isArray(saved.pendingFixes)) {
+        throw new Error('WORLD_SIMULATION_WORKFLOW_ESCALATION_INVALID');
+      }
+      workflowEscalation = { summary: saved.summary, pendingFixes: saved.pendingFixes as WorldSimulationLedger_ACU['pendingFixes'] };
+    }
     const currentContext = (): WorldSimulationPlaceholderContext_ACU => ({ ...input.promptContext, worldState: currentLedger() });
     const candidateReviewFingerprint_ACU = (items: readonly WorldSimulationCandidate_ACU[]): string =>
       sha256HexSync_ACU(JSON.stringify([input.runWrites?.confirmedWrites ?? 0, uniqueCandidates_ACU(items).map(item => item.candidateId)]));
@@ -406,7 +423,9 @@ export class WorldSimulationMainLoop_ACU {
         outcomes: outcomes.map(item => ({ agentName: item.agentName, status: item.status, summary: item.summary, fingerprint: fingerprint_ACU(item) })),
         candidateFingerprint: sha256HexSync_ACU(JSON.stringify(unique.map(item => item.candidateId))),
         candidateSummary: unique.map(item => item.summary).join('；').slice(0, 1000),
-        reviewerFeedback,
+        // 升级标记与缺口跨后续 persist 保留；其它拒绝原因留在 transcript。
+        reviewerFeedback: workflowEscalation && !extras.budgetExhausted
+          ? `${workflowEscalationPrefix}${JSON.stringify(workflowEscalation)}` : reviewerFeedback,
         candidates: unique,
         subagentOutcomes: outcomes,
         evidenceSnapshot: snapshotWorldSimulationEvidenceRegistry_ACU(input.registry),
@@ -455,6 +474,63 @@ export class WorldSimulationMainLoop_ACU {
       await persistEntry(blockId, eventKey);
       return { outcome: 'blocked', summary: title, unresolved, outcomes };
     };
+
+    // 新运行不经导演决策门控。仅恢复、用户指令续跑和工作流升级才进入下方主循环。
+    if (input.directOpening === true && !resumedState && !resetRunBudget) {
+      const focus = (typeof input.promptContext.userGuidance === 'string' && input.promptContext.userGuidance.trim())
+        || (typeof input.promptContext.anchorMessage === 'string' && input.promptContext.anchorMessage.trim())
+        || input.identity.stageId;
+      const workflowEntryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, {
+        kind: 'delegation', title: '固定工作流正在执行', detail: focus,
+        agentName: director, status: 'running',
+      });
+      // 工作流可能逐栏持久化；先留下恢复锚点，避免中断后误当作新开局重复派工。
+      await persist(iteration);
+      let workflow: Awaited<ReturnType<typeof runWorldSimulationWorkflow_ACU>>;
+      try {
+        workflow = await runWorldSimulationWorkflow_ACU({
+          identity: input.identity,
+          settings: input.settings,
+          promptContext: resultContext_ACU(currentContext(), input.registry, uniqueCandidates_ACU(candidates), outcomes),
+          registry: input.registry,
+          tools: input.tools,
+          roundId, readRoundState,
+          writeSql: input.writeSql,
+          readCurrent: input.readCurrent,
+          readFieldSnapshot: input.readFieldSnapshot,
+          runWrites: input.runWrites,
+          isCurrent: input.isCurrent,
+          opening: { summary: focus, focus, dispatchChronicler: false, skipModules: [] },
+          anchorMaterialsCommitted: input.anchorMaterialsCommitted === true,
+          targetModules: input.targetModules,
+          subagents: this.dependencies.subagents,
+          directorMaterials: renderWorldSimulationDirectorReads_ACU(transcript),
+          triggeredWorldbook, fixedWorldbook,
+        });
+      } catch (error) {
+        updateWorldSimulationSession_ACU(input.identity.chatIdentity, workflowEntryId, { title: '固定工作流失败', detail: compact_ACU(error), ok: false, status: 'failed' });
+        await persistEntry(workflowEntryId, 'workflow-opening-failed');
+        throw error;
+      }
+      for (const outcome of workflow.outcomes) upsertLatestOutcome_ACU(outcomes, outcome);
+      updateWorldSimulationSession_ACU(input.identity.chatIdentity, workflowEntryId, {
+        title: `固定工作流：${workflow.outcome}`, detail: workflow.summary,
+        ok: workflow.outcome !== 'escalate', status: workflow.outcome === 'escalate' ? 'failed' : 'done',
+      });
+      await persistEntry(workflowEntryId, 'workflow-opening');
+      if (workflow.outcome === 'escalate') {
+        // 主循环接管未解决的缺口；不伪造模型曾输出的 open_round 或工具交换。
+        workflowEscalation = { summary: workflow.summary, pendingFixes: workflow.pendingFixes };
+        await persist(iteration + 1);
+        iteration += 1;
+      } else {
+        await clearWorldSimulationRunStateAtAnchor_ACU(input.anchor, input.chat);
+        clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
+        if (workflow.outcome === 'no_change') return { outcome: 'no_change', summary: workflow.summary, outcomes, finalProjection: workflow.finalProjection };
+        if (!workflow.commitCandidate) throw new Error('WORLD_SIMULATION_WORKFLOW_COMMIT_CANDIDATE_REQUIRED');
+        return { outcome: 'commit', summary: workflow.summary, commitCandidate: workflow.commitCandidate, outcomes, finalProjection: workflow.finalProjection };
+      }
+    }
 
     for (; iteration <= input.settings.agentRunBudget.maxIterations; iteration += 1) {
       await flushDirectorHistory();

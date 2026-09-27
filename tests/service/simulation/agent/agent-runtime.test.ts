@@ -1928,6 +1928,59 @@ describe('世界推演 Agent runtime', () => {
     expect(subagents.runReviewer).not.toHaveBeenCalled();
   });
 
+  it('新任务直进固定工作流，不请求导演作开局决策', async () => {
+    const { registry, evidence, promptContext } = fixture('direct-opening');
+    const chat: any[] = [{ message_id: 1, mes: '正文', swipe_id: 0 }];
+    const saveChat = vi.fn().mockResolvedValue(undefined);
+    _set_SillyTavern_API_ACU({ chat, chatId: 'direct-opening', getCurrentChatId: () => 'direct-opening', saveChat } as any);
+    const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
+    const invoke = vi.fn();
+    const subagents = {
+      run: vi.fn(async ({ delegation }: { delegation: { agentName: string } }) => ({
+        agentName: delegation.agentName,
+        status: 'no_change' as const,
+        summary: '没有变化',
+        evidenceRefs: [evidence],
+        uncertainties: [],
+      })),
+      runReviewer: vi.fn(),
+    };
+    const identity = { runId: 'direct-opening', chatIdentity: anchor.chatIdentity, triggerKind: 'assistant_completed' as const,
+      triggerConversationMessageId: null, anchorMessageId: anchor.messageId, anchorMessageKey: anchor.messageKey, anchorSwipeId: anchor.swipeId,
+      anchorContentDigest: anchor.contentDigest, baseLedgerRevision: 0, taskId: 'direct-task', stageId: 'direct-stage', stageRevision: 1 };
+
+    const result = await new WorldSimulationMainLoop_ACU({ invoke, subagents, apiPreset, countTokens: async () => 1 })
+      .run({ identity, anchor, chat, settings: settings(), promptContext, registry, tools, directOpening: true });
+
+    expect(result.outcome).toBe('no_change');
+    expect(invoke).not.toHaveBeenCalled();
+    expect(subagents.run.mock.calls.map(([call]) => call.delegation.agentName)).toEqual(
+      expect.arrayContaining(['timekeeper', 'undercurrent-analyst', 'dramatis-keeper']));
+    expect(subagents.runReviewer).not.toHaveBeenCalled();
+    expect(readWorldSimulationRunState_ACU(identity.chatIdentity, identity.taskId,
+      `${identity.stageId}#${identity.stageRevision}#${identity.baseLedgerRevision}`)).toBeNull();
+    expect(saveChat).toHaveBeenCalled();
+  });
+
+  it('直进入口恢复已有 run state 时仍由导演接管，不重复执行固定工作流', async () => {
+    const { registry, promptContext } = fixture('direct-opening-resume');
+    const identity = { runId: 'direct-opening-resume', chatIdentity: 'direct-opening-resume', triggerKind: 'assistant_completed' as const,
+      triggerConversationMessageId: null, anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0',
+      anchorContentDigest: 'digest', baseLedgerRevision: 0, taskId: 'resume-task', stageId: 'resume-stage', stageRevision: 1 };
+    saveWorldSimulationRunState_ACU(identity.chatIdentity, {
+      taskId: identity.taskId, cursorKey: `${identity.stageId}#${identity.stageRevision}#${identity.baseLedgerRevision}`,
+      nextIteration: 1, delegationsUsed: 0, perAgent: {}, outcomes: [],
+      candidateFingerprint: '', candidateSummary: '', reviewerFeedback: '',
+    });
+    const invoke = vi.fn(async () => JSON.stringify({ action: 'block', reason: '等待恢复', unresolved: ['用户指令'] }));
+    const subagents = { run: vi.fn(), runReviewer: vi.fn() };
+    const result = await new WorldSimulationMainLoop_ACU({ invoke, subagents, apiPreset, countTokens: async () => 1 })
+      .run({ identity, settings: settings(), promptContext, registry, tools, directOpening: true });
+    expect(result).toMatchObject({ outcome: 'blocked', summary: '等待恢复' });
+    expect(invoke).toHaveBeenCalledOnce();
+    expect(subagents.run).not.toHaveBeenCalled();
+  });
+
   it('整轮派工被预算门禁拦截时当轮显式 block 并写入预算终局', async () => {
     const { registry, promptContext } = fixture('delegation-gate-silent');
     const subagents = { run: vi.fn(), runReviewer: vi.fn() };

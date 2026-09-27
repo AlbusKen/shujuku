@@ -120,6 +120,7 @@ export class StageExecutionEngine_ACU {
     const readContext = () => currentAgentContext_ACU(this.dependencies.readEnvelope());
     const instruction = await this.dependencies.planner.plan({
       settings: initial.envelope.settings,
+      directOpening: !existingAttempt,
       readContext,
       createInternalRequestIdentity: () => {
         const context = readContext();
