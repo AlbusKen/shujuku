@@ -169555,6 +169555,7 @@ Expected function or array of functions, received type ${typeof value}.`
         const requested = input.targetModules ? new Set(input.targetModules) : null;
         const skip = new Set(input.opening.skipModules);
         const expected = new Set();
+        const entries = new Map();
         const roles = ['undercurrent-analyst', 'dramatis-keeper'].filter(role => modulesForAgent_ACU(role).some(module => !skip.has(module) && (!requested || requested.has(module))));
         const call = async (role, ledger, seq, roundChanges) => {
             const targets = modulesForAgent_ACU(role).filter(module => !skip.has(module) && (!requested || requested.has(module)));
@@ -169563,10 +169564,12 @@ Expected function or array of functions, received type ${typeof value}.`
                 throw new Error('WORLD_SIMULATION_RUN_STALE');
             const label = role === 'undercurrent-analyst' ? '批次一：时间与暗流'
                 : role === 'dramatis-keeper' ? '批次一：人物与位置' : '批次二：编年、传闻与投影';
+            const entryKey = `${role}:${seq}`;
             const entryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, {
                 kind: 'delegation', title: `${label}正在执行`, agentName: role, status: 'running',
             });
-            let succeeded = false;
+            entries.set(entryKey, { entryId, label });
+            let state = 'failed';
             try {
                 const outcome = await input.subagents.runOneShot({ agentName: role, settings: input.settings,
                     promptContext: { ...input.promptContext, worldState: ledger }, registry: input.registry,
@@ -169576,8 +169579,9 @@ Expected function or array of functions, received type ${typeof value}.`
                     triggeredWorldbook: seq === 1 ? input.triggeredWorldbook : undefined,
                     fixedWorldbook: seq === 1 ? input.fixedWorldbook : undefined, isCurrent: input.isCurrent });
                 const restricted = restrictOutcome_ACU(outcome, targets);
-                succeeded = restricted.completion !== 'failed' && restricted.completion !== 'partial'
-                    && restricted.status !== 'failed' && restricted.status !== 'blocked';
+                state = restricted.candidate ? 'running'
+                    : restricted.completion !== 'failed' && restricted.completion !== 'partial'
+                        && restricted.status !== 'failed' && restricted.status !== 'blocked' ? 'done' : 'failed';
                 return restricted;
             }
             catch (error) {
@@ -169587,14 +169591,27 @@ Expected function or array of functions, received type ${typeof value}.`
             }
             finally {
                 updateWorldSimulationSession_ACU(input.identity.chatIdentity, entryId, {
-                    title: `${label}${succeeded ? '已返回' : '未完整完成'}`,
-                    ok: succeeded, status: succeeded ? 'done' : 'failed',
+                    title: `${label}${state === 'done' ? '已完成' : state === 'running' ? '待事务校验' : '未完整完成'}`,
+                    ok: state === 'done', status: state,
                 });
             }
+        };
+        const settleCandidate = (outcome, acceptedCandidates, seq) => {
+            if (!outcome.candidate)
+                return;
+            const entry = entries.get(`${outcome.agentName}:${seq}`);
+            if (!entry)
+                return;
+            const ok = acceptedCandidates.some(item => item.candidateId === outcome.candidate?.candidateId);
+            updateWorldSimulationSession_ACU(input.identity.chatIdentity, entry.entryId, {
+                title: `${entry.label}${ok ? '已通过事务校验' : '事务校验失败'}`,
+                ok, status: ok ? 'done' : 'failed',
+            });
         };
         const first = await Promise.all(roles.map(role => call(role, base, 1)));
         outcomes.push(...first);
         const primary = await applyOneShotCandidates_ACU(base, first.flatMap(item => item.candidate ? [item.candidate] : []), authorized, input.settings, anchorMessage);
+        first.forEach(item => settleCandidate(item, primary.accepted, 1));
         outcomes.push(...primary.rejected);
         let ledger = primary.ledger;
         const accepted = [...primary.accepted];
@@ -169624,6 +169641,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 const preview = await applyOneShotCandidates_ACU(base, [...accepted, second.candidate], authorized, input.settings, anchorMessage);
                 ledger = preview.ledger;
                 accepted.splice(0, accepted.length, ...preview.accepted);
+                settleCandidate(second, preview.accepted, 2);
                 outcomes.push(...preview.rejected);
             }
         }
@@ -171236,8 +171254,8 @@ ${rejectionText}` : delegationFeedback,
     function worldSimulationOneShotProtocol_ACU(name, modules) {
         const tables = modules.flatMap(module => module === 'chronicle' ? ['chronicle', 'chronicle_archive', 'chronicle_overview'] : [module]);
         const details = {
-            'undercurrent-analyst': 'clock: UPDATE SET days, story_time, slot; dimensions: name, kind, value, trend, rationale; seeds: title, status, level, catalyst, visibility, location, expires_at_day, missed_outcome, actor_ids, expose_policy, retired_reason。',
-            'dramatis-keeper': 'player: UPDATE SET location, contact; actors: name, interests, location, location_ref, goals, information_sources, known_facts, life, died_at_day, death_summary; rumors 仅死亡伴生: fact, origin_day, earliest_reveal_day, channels, related_actor_ids。',
+            'undercurrent-analyst': 'clock: UPDATE SET days, story_time, slot; dimensions: name, kind, value, trend, rationale，其中 kind 只能是英文原值 pressure 或 growth，trend 只能是 rising、stable、falling；seeds: title, status, level, catalyst, visibility, location, expires_at_day, missed_outcome, actor_ids, expose_policy, retired_reason，其中 visibility 只能是英文原值 hidden、limited、public，status 只能是 established、incubating、active、converging、resolved、retired。枚举不得填写中文解释、组合描述或其他同义词。',
+            'dramatis-keeper': 'player: UPDATE SET location, contact（仅这两列及 evidence_refs，location_updated_at_day 与 region_visits 是内部派生字段，绝对不可写进 SQL）；actors: name, interests, location, location_ref, goals, information_sources, known_facts, life, died_at_day, death_summary; rumors 仅死亡伴生: fact, origin_day, earliest_reveal_day, channels, related_actor_ids。',
             'guidance-composer': 'chronicle: INSERT summary, related_ids 或 DELETE id, reason；chronicle_archive 与 chronicle_overview 成对 INSERT；rumors: fact, origin_day, earliest_reveal_day, channels, related_actor_ids, status, revealed_at_day；guidance: UPDATE SET signals, excluded_facts。',
         };
         return [
@@ -171382,6 +171400,8 @@ ${rejectionText}` : delegationFeedback,
                         throw new Error('WORLD_SIMULATION_ONE_SHOT_TRUNCATED');
                     const normalized = normalizeOneShotSpecialistPayload_ACU(draft.payload, { agentName: input.agentName, writableModules: modules,
                         givenLedger: input.givenLedger, baseLedgerRevision: input.baseLedgerRevision, anchorEvidenceRef: input.anchorEvidenceRef, authorizedRefs: authorized() });
+                    if (normalized.issues.length && repairs === 0)
+                        throw new Error(normalized.issues.slice(0, 8).map(issue => `${issue.path}: ${issue.message}`).join('；'));
                     const snapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
                     let outcome;
                     try {
@@ -171399,6 +171419,19 @@ ${rejectionText}` : delegationFeedback,
                             outcome.moduleCompletion[module] = outcome.candidate && Object.keys(outcome.candidate.patch).some(key => key === module || (module === 'chronicle' && key === 'chronicleArchive')) ? 'partial' : 'failed';
                         if (outcome.candidate)
                             outcome.completion = 'partial';
+                    }
+                    if (outcome.candidate) {
+                        // Match the transaction's domain validation before releasing a candidate; do not
+                        // treat a syntactically valid SQL reply as a successfully applied write. Batch two
+                        // sees a preview ledger, but its singleton revisions must remain bound to the run
+                        // base for the final replay. Adjust only a disposable preflight copy.
+                        const candidate = outcome.candidate;
+                        const previewPatch = Object.fromEntries(Object.entries(candidate.patch).map(([module, value]) => ['clock', 'player', 'guidance'].includes(module) && value && typeof value === 'object'
+                            ? [module, { ...value, expectedRevision: input.givenLedger.revision }]
+                            : [module, value]));
+                        const report = preflightWorldSimulationCandidates_ACU(input.givenLedger, [{ ...candidate, patch: previewPatch }], authorized(), input.settings);
+                        if (report.blocking.length)
+                            throw new Error(report.blocking.slice(0, 8).map(item => `${item.path}: ${item.message}${item.details?.expected ? `；允许 ${item.details.expected}` : ''}`).join('；'));
                     }
                     return outcome;
                 }

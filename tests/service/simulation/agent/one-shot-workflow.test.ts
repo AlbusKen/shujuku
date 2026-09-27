@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { buildDefaultWorldSimulationSettings_ACU, buildEmptyWorldSimulationLedger_ACU } from '../../../../src/service/simulation/defaults';
 import { runWorldSimulationOneShotWorkflow_ACU } from '../../../../src/service/simulation/agent/agent-workflow';
+import { readWorldSimulationSessionLog_ACU, resetWorldSimulationSessionLogForTests_ACU } from '../../../../src/service/simulation/agent/agent-session-log';
 import { WorldSimulationSubagentRuntime_ACU } from '../../../../src/service/simulation/agent/agent-subagent-runtime';
 import { buildDefaultWorldSimulationAgentPrompts_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
 import { createWorldSimulationEvidenceRegistry_ACU, recordWorldSimulationEvidence_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../../../../src/service/simulation/world-simulation-evidence-registry';
@@ -113,6 +114,7 @@ describe('两批一次性世界推演工作流', () => {
 
   it('人物死亡与伴生传闻同候选可落账；遗漏传闻则拒绝该候选而保留另一批次一候选', async () => {
     for (const withRumor of [true, false]) {
+      resetWorldSimulationSessionLogForTests_ACU();
       const env = setup();
       const dead = { id: 'actor-dead', name: '死者', interests: [], location: '', locationRef: null,
         life: 'dead', diedAtDay: 1, deathSummary: '战死', resources: [], goals: [], constraints: [],
@@ -139,6 +141,11 @@ describe('两批一次性世界推演工作流', () => {
       } else {
         expect(result.ledger.actors).toEqual([]);
         expect(result.pendingFixes).toEqual(expect.arrayContaining([expect.objectContaining({ module: 'actors' })]));
+        const entries = readWorldSimulationSessionLog_ACU('one-shot-workflow');
+        expect(entries.find(item => item.agentName === 'dramatis-keeper' && item.kind === 'delegation'))
+          .toMatchObject({ status: 'failed', ok: false, title: expect.stringContaining('事务校验失败') });
+        expect(entries.find(item => item.agentName === 'undercurrent-analyst' && item.kind === 'delegation'))
+          .toMatchObject({ status: 'done', ok: true, title: expect.stringContaining('已通过事务校验') });
       }
     }
   });
@@ -169,5 +176,37 @@ describe('两批一次性世界推演工作流', () => {
     expect((await new WorldSimulationSubagentRuntime_ACU({ invoke: forbidden, apiPreset, countTokens: async () => 1 }).runOneShot(input)).status).toBe('no_change');
     expect(forbidden).toHaveBeenCalledTimes(2);
     expect(input.tools.read).not.toHaveBeenCalled();
+    const previewLedger = { ...env.ledger, revision: env.ledger.revision + 1 };
+    const guidanceInput = { ...input, agentName: 'guidance-composer' as const,
+      givenLedger: previewLedger, promptContext: { ...input.promptContext, worldState: previewLedger } };
+    const guidanceReply = JSON.stringify({ status: 'candidate', agentName: 'guidance-composer',
+      sql: "UPDATE guidance SET signals = '[]', excluded_facts = '[]' WHERE expected_revision = 999" });
+    const guidanceInvoke = vi.fn(async () => guidanceReply);
+    const guidanceResult = await new WorldSimulationSubagentRuntime_ACU({ invoke: guidanceInvoke, apiPreset,
+      countTokens: async () => 1 }).runOneShot(guidanceInput);
+    expect(guidanceResult.status).toBe('candidate');
+    expect(guidanceResult.candidate?.patch.guidance).toMatchObject({ expectedRevision: env.ledger.revision });
+    expect(guidanceInvoke).toHaveBeenCalledTimes(1);
+    const invalidEnum = JSON.stringify({ status: 'candidate', agentName: 'undercurrent-analyst',
+      sql: "INSERT INTO dimensions (name, kind, value, trend, rationale) VALUES ('戒备', '政治', 40, 'rising', '盘查加剧'); INSERT INTO seeds (title, visibility) VALUES ('暗流', '公开')" });
+    const correctEnum = JSON.stringify({ status: 'candidate', agentName: 'undercurrent-analyst',
+      sql: "INSERT INTO dimensions (name, kind, value, trend, rationale) VALUES ('戒备', 'pressure', 40, 'rising', '盘查加剧')" });
+    const corrected = vi.fn().mockResolvedValueOnce(invalidEnum).mockResolvedValueOnce(correctEnum);
+    const correctedOutcome = await new WorldSimulationSubagentRuntime_ACU({ invoke: corrected, apiPreset, countTokens: async () => 1 }).runOneShot(input);
+    expect(correctedOutcome.status).toBe('candidate');
+    expect(corrected).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(corrected.mock.calls[1][1])).toContain('patch.dimensions.upsert[0].kind');
+    const twiceInvalid = vi.fn(async () => invalidEnum);
+    const rejected = await new WorldSimulationSubagentRuntime_ACU({ invoke: twiceInvalid, apiPreset, countTokens: async () => 1 }).runOneShot(input);
+    expect(rejected.status).toBe('failed');
+    expect(rejected.summary).toContain('patch.seeds.upsert[0].visibility');
+    expect(twiceInvalid).toHaveBeenCalledTimes(2);
+    const playerInput = { ...input, agentName: 'dramatis-keeper' as const };
+    const illegalPlayer = JSON.stringify({ status: 'candidate', agentName: 'dramatis-keeper',
+      sql: "UPDATE player SET location_updated_at_day = 1 WHERE expected_revision = 0" });
+    const playerReplies = vi.fn().mockResolvedValueOnce(illegalPlayer).mockResolvedValueOnce(JSON.stringify({
+      status: 'candidate', agentName: 'dramatis-keeper', sql: "UPDATE player SET contact = 'open' WHERE expected_revision = 0" }));
+    expect((await new WorldSimulationSubagentRuntime_ACU({ invoke: playerReplies, apiPreset, countTokens: async () => 1 }).runOneShot(playerInput)).status).toBe('candidate');
+    expect(JSON.stringify(playerReplies.mock.calls[1][1])).toContain('SQL_COLUMN_FORBIDDEN');
   });
 });

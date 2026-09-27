@@ -753,6 +753,7 @@ export async function runWorldSimulationOneShotWorkflow_ACU(
   const requested = input.targetModules ? new Set(input.targetModules) : null;
   const skip = new Set(input.opening.skipModules);
   const expected = new Set<WorldSimulationLedgerModule_ACU>();
+  const entries = new Map<string, { entryId: number; label: string }>();
   const roles = (['undercurrent-analyst', 'dramatis-keeper'] as const).filter(role =>
     modulesForAgent_ACU(role).some(module => !skip.has(module) && (!requested || requested.has(module))));
   const call = async (role: 'undercurrent-analyst' | 'dramatis-keeper' | 'guidance-composer',
@@ -762,10 +763,12 @@ export async function runWorldSimulationOneShotWorkflow_ACU(
     if (input.isCurrent && !input.isCurrent()) throw new Error('WORLD_SIMULATION_RUN_STALE');
     const label = role === 'undercurrent-analyst' ? '批次一：时间与暗流'
       : role === 'dramatis-keeper' ? '批次一：人物与位置' : '批次二：编年、传闻与投影';
+    const entryKey = `${role}:${seq}`;
     const entryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, {
       kind: 'delegation', title: `${label}正在执行`, agentName: role, status: 'running',
     });
-    let succeeded = false;
+    entries.set(entryKey, { entryId, label });
+    let state: 'done' | 'failed' | 'running' = 'failed';
     try {
       const outcome = await input.subagents.runOneShot({ agentName: role, settings: input.settings,
         promptContext: { ...input.promptContext, worldState: ledger }, registry: input.registry,
@@ -775,22 +778,34 @@ export async function runWorldSimulationOneShotWorkflow_ACU(
         triggeredWorldbook: seq === 1 ? input.triggeredWorldbook : undefined,
         fixedWorldbook: seq === 1 ? input.fixedWorldbook : undefined, isCurrent: input.isCurrent });
       const restricted = restrictOutcome_ACU(outcome, targets);
-      succeeded = restricted.completion !== 'failed' && restricted.completion !== 'partial'
-        && restricted.status !== 'failed' && restricted.status !== 'blocked';
+      state = restricted.candidate ? 'running'
+        : restricted.completion !== 'failed' && restricted.completion !== 'partial'
+          && restricted.status !== 'failed' && restricted.status !== 'blocked' ? 'done' : 'failed';
       return restricted;
     } catch (error) {
       if (error instanceof Error && error.message === 'WORLD_SIMULATION_RUN_STALE') throw error;
       return failedOutcome_ACU(role, error, 'invoke_failed', targets);
     } finally {
       updateWorldSimulationSession_ACU(input.identity.chatIdentity, entryId, {
-        title: `${label}${succeeded ? '已返回' : '未完整完成'}`,
-        ok: succeeded, status: succeeded ? 'done' : 'failed',
+        title: `${label}${state === 'done' ? '已完成' : state === 'running' ? '待事务校验' : '未完整完成'}`,
+        ok: state === 'done', status: state,
       });
     }
+  };
+  const settleCandidate = (outcome: WorldSimulationSubagentOutcome_ACU, acceptedCandidates: readonly WorldSimulationCandidate_ACU[], seq: number): void => {
+    if (!outcome.candidate) return;
+    const entry = entries.get(`${outcome.agentName}:${seq}`);
+    if (!entry) return;
+    const ok = acceptedCandidates.some(item => item.candidateId === outcome.candidate?.candidateId);
+    updateWorldSimulationSession_ACU(input.identity.chatIdentity, entry.entryId, {
+      title: `${entry.label}${ok ? '已通过事务校验' : '事务校验失败'}`,
+      ok, status: ok ? 'done' : 'failed',
+    });
   };
   const first = await Promise.all(roles.map(role => call(role, base, 1)));
   outcomes.push(...first);
   const primary = await applyOneShotCandidates_ACU(base, first.flatMap(item => item.candidate ? [item.candidate] : []), authorized, input.settings, anchorMessage);
+  first.forEach(item => settleCandidate(item, primary.accepted, 1));
   outcomes.push(...primary.rejected);
   let ledger = primary.ledger;
   const accepted = [...primary.accepted];
@@ -815,6 +830,7 @@ export async function runWorldSimulationOneShotWorkflow_ACU(
       const preview = await applyOneShotCandidates_ACU(base, [...accepted, second.candidate], authorized, input.settings, anchorMessage);
       ledger = preview.ledger;
       accepted.splice(0, accepted.length, ...preview.accepted);
+      settleCandidate(second, preview.accepted, 2);
       outcomes.push(...preview.rejected);
     }
   }

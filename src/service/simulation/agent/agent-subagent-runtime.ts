@@ -9,6 +9,7 @@ import type {
 } from '../model';
 import { resolveWorldSimulationAgentApiPreset_ACU, type WorldSimulationApiPresetDependencies_ACU, type WorldSimulationResolvedApiPreset_ACU } from '../api-preset';
 import { stripWritingAnnotations_ACU } from '../simulation-projection';
+import { preflightWorldSimulationCandidates_ACU } from '../simulation-transaction';
 import { buildInUseWorldCatalog_ACU } from '../world-catalog';
 import type { WorldSimulationEvidenceRegistry_ACU, WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
 import { snapshotWorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
@@ -305,8 +306,8 @@ function toolText_ACU(results: Awaited<ReturnType<typeof runWorldSimulationToolB
 export function worldSimulationOneShotProtocol_ACU(name: WorldSimulationOneShotRole_ACU, modules: readonly WorldSimulationLedgerModule_ACU[]): string {
   const tables = modules.flatMap(module => module === 'chronicle' ? ['chronicle', 'chronicle_archive', 'chronicle_overview'] : [module]);
   const details: Record<WorldSimulationOneShotRole_ACU, string> = {
-    'undercurrent-analyst': 'clock: UPDATE SET days, story_time, slot; dimensions: name, kind, value, trend, rationale; seeds: title, status, level, catalyst, visibility, location, expires_at_day, missed_outcome, actor_ids, expose_policy, retired_reason。',
-    'dramatis-keeper': 'player: UPDATE SET location, contact; actors: name, interests, location, location_ref, goals, information_sources, known_facts, life, died_at_day, death_summary; rumors 仅死亡伴生: fact, origin_day, earliest_reveal_day, channels, related_actor_ids。',
+    'undercurrent-analyst': 'clock: UPDATE SET days, story_time, slot; dimensions: name, kind, value, trend, rationale，其中 kind 只能是英文原值 pressure 或 growth，trend 只能是 rising、stable、falling；seeds: title, status, level, catalyst, visibility, location, expires_at_day, missed_outcome, actor_ids, expose_policy, retired_reason，其中 visibility 只能是英文原值 hidden、limited、public，status 只能是 established、incubating、active、converging、resolved、retired。枚举不得填写中文解释、组合描述或其他同义词。',
+    'dramatis-keeper': 'player: UPDATE SET location, contact（仅这两列及 evidence_refs，location_updated_at_day 与 region_visits 是内部派生字段，绝对不可写进 SQL）；actors: name, interests, location, location_ref, goals, information_sources, known_facts, life, died_at_day, death_summary; rumors 仅死亡伴生: fact, origin_day, earliest_reveal_day, channels, related_actor_ids。',
     'guidance-composer': 'chronicle: INSERT summary, related_ids 或 DELETE id, reason；chronicle_archive 与 chronicle_overview 成对 INSERT；rumors: fact, origin_day, earliest_reveal_day, channels, related_actor_ids, status, revealed_at_day；guidance: UPDATE SET signals, excluded_facts。',
   };
   return [
@@ -431,6 +432,7 @@ export class WorldSimulationSubagentRuntime_ACU {
         if (draft.truncated) throw new Error('WORLD_SIMULATION_ONE_SHOT_TRUNCATED');
         const normalized = normalizeOneShotSpecialistPayload_ACU(draft.payload, { agentName: input.agentName, writableModules: modules,
           givenLedger: input.givenLedger, baseLedgerRevision: input.baseLedgerRevision, anchorEvidenceRef: input.anchorEvidenceRef, authorizedRefs: authorized() });
+        if (normalized.issues.length && repairs === 0) throw new Error(normalized.issues.slice(0, 8).map(issue => `${issue.path}: ${issue.message}`).join('；'));
         const snapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
         let outcome: WorldSimulationSubagentOutcome_ACU;
         try { outcome = outcomeFromSpecialistResult_ACU(parseWorldSimulationSpecialistResult_ACU(normalized.payload, snapshot), modules, input.runId, input.candidateSeq, false); }
@@ -443,6 +445,20 @@ export class WorldSimulationSubagentRuntime_ACU {
           const troubled = new Set(normalized.issues.map(issue => issue.module));
           for (const module of troubled) outcome.moduleCompletion![module] = outcome.candidate && Object.keys(outcome.candidate.patch).some(key => key === module || (module === 'chronicle' && key === 'chronicleArchive')) ? 'partial' : 'failed';
           if (outcome.candidate) outcome.completion = 'partial';
+        }
+        if (outcome.candidate) {
+          // Match the transaction's domain validation before releasing a candidate; do not
+          // treat a syntactically valid SQL reply as a successfully applied write. Batch two
+          // sees a preview ledger, but its singleton revisions must remain bound to the run
+          // base for the final replay. Adjust only a disposable preflight copy.
+          const candidate = outcome.candidate;
+          const previewPatch = Object.fromEntries(Object.entries(candidate.patch).map(([module, value]) =>
+            ['clock', 'player', 'guidance'].includes(module) && value && typeof value === 'object'
+              ? [module, { ...value, expectedRevision: input.givenLedger.revision }]
+              : [module, value])) as typeof candidate.patch;
+          const report = preflightWorldSimulationCandidates_ACU(input.givenLedger,
+            [{ ...candidate, patch: previewPatch }], authorized(), input.settings);
+          if (report.blocking.length) throw new Error(report.blocking.slice(0, 8).map(item => `${item.path}: ${item.message}${item.details?.expected ? `；允许 ${item.details.expected}` : ''}`).join('；'));
         }
         return outcome;
       } catch (error) {
