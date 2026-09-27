@@ -167,6 +167,37 @@ describe('两批一次性世界推演工作流', () => {
     const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
     expect((await runtime.runOneShot(input)).status).toBe('no_change');
     expect(invoke).toHaveBeenCalledTimes(2);
+    const empty = vi.fn().mockResolvedValueOnce({ content: '', toolCalls: [] })
+      .mockResolvedValueOnce(JSON.stringify({ status: 'no_change', summary: '无可证实变化' }));
+    expect((await new WorldSimulationSubagentRuntime_ACU({ invoke: empty, apiPreset,
+      countTokens: async () => 1 }).runOneShot(input)).status).toBe('no_change');
+    const jsonFeedback = JSON.stringify(empty.mock.calls[1][1]);
+    expect(jsonFeedback).toContain('完整可解析的 JSON');
+    expect(jsonFeedback).toContain('no_change');
+    expect(jsonFeedback).toContain('不能将未完成输出当作成功');
+    const noJson = vi.fn(async () => ({ content: '', toolCalls: [] }));
+    const noJsonResult = await new WorldSimulationSubagentRuntime_ACU({ invoke: noJson, apiPreset,
+      countTokens: async () => 1 }).runOneShot(input);
+    expect(noJsonResult.status).toBe('failed');
+    expect(noJsonResult.candidate).toBeUndefined();
+    expect(noJsonResult.unresolvedIssues).toEqual([]);
+    expect(noJson).toHaveBeenCalledTimes(2);
+    const timeAnchor = '昨日出城，今日已过一昼夜；昨日之前的路程不再计入。';
+    const withTime = { ...input, promptContext: { ...input.promptContext, anchorMessage: timeAnchor } };
+    const timeInvoke = vi.fn(async () => JSON.stringify({ status: 'no_change', summary: '无可证实变化' }));
+    const timeRuntime = new WorldSimulationSubagentRuntime_ACU({ invoke: timeInvoke, apiPreset,
+      countTokens: async () => 1 });
+    await Promise.all([timeRuntime.runOneShot(withTime), timeRuntime.runOneShot({ ...withTime, agentName: 'dramatis-keeper' })]);
+    expect(timeInvoke).toHaveBeenCalledTimes(2);
+    for (const [, messages] of timeInvoke.mock.calls) {
+      const body = JSON.stringify(messages);
+      expect(body).toContain(timeAnchor);
+      expect(body).toContain('共同时间基准');
+      expect(body).toContain('当前已提交日为 1');
+      expect(body).toContain('不把回忆或既已计入的旅程重复累加');
+    }
+    expect(timeInvoke.mock.calls.map(([, messages]) => JSON.stringify(messages).match(/本轮共享的明确经过天数为 (\d+)/)?.[1])).toEqual(['1', '1']);
+    expect(JSON.stringify(timeInvoke.mock.calls[1][1])).toContain('dramatis-keeper 不写 clock');
     const invalid = vi.fn(async () => 'not json');
     const failed = await new WorldSimulationSubagentRuntime_ACU({ invoke: invalid, apiPreset, countTokens: async () => 1 }).runOneShot(input);
     expect(failed.status).toBe('failed');

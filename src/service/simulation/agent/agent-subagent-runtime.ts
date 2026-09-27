@@ -72,6 +72,8 @@ export interface WorldSimulationOneShotInput_ACU {
   anchorEvidenceRef: string;
   givenLedger: WorldSimulationLedger_ACU;
   baseLedgerRevision: number;
+  /** 工作流从同一锚点一次计算的本轮明确经过天数；并发角色共享，不由角色间推断传播。 */
+  elapsedDays?: number;
   roundChanges?: string;
   injectWorldbook: boolean;
   triggeredWorldbook?: string;
@@ -337,6 +339,21 @@ function oneShotRepairHint_ACU(issues: readonly WorldSimulationSubagentIssue_ACU
   return hints.join(' ');
 }
 
+/** 仅识别锚点中可机械确认的整日跨度；不确定时保守返回零，避免把回忆或旧旅程重复计入。 */
+export function inferWorldSimulationElapsedDays_ACU(anchor: string): number {
+  const text = String(anchor ?? '').replace(/\s+/g, '');
+  if (!text) return 0;
+  const arabic = (value: string): number => Number.parseInt(value, 10);
+  const chinese: Record<string, number> = { 一: 1, 两: 2, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
+  const explicit = text.match(/(?:经过|已过|过去|耗时|用了|历时)(\d+|[一两二三四五六七八九十])(?:天|日|昼夜)/);
+  if (explicit) return arabic(explicit[1]) || chinese[explicit[1]] || 0;
+  const repeated = text.match(/(?:连续|一连)(\d+|[一两二三四五六七八九十])(?:天|日|昼夜)/);
+  if (repeated) return arabic(repeated[1]) || chinese[repeated[1]] || 0;
+  if (/(?:一昼夜|一日一夜|一夜一天|过了一夜|隔了一夜)/.test(text)) return 1;
+  if (/(?:昨日|昨天|前日|前天)/.test(text) && /(?:今日|今天|今夜|次日|翌日|第二天|第二日)/.test(text)) return 1;
+  return 0;
+}
+
 export class WorldSimulationSubagentRuntime_ACU {
   constructor(private readonly dependencies: WorldSimulationSubagentRuntimeDependencies_ACU) {}
 
@@ -386,8 +403,12 @@ export class WorldSimulationSubagentRuntime_ACU {
       else if (module in catalog) related[module] = catalog[module as 'dimensions' | 'seeds' | 'actors' | 'rumors'];
     }
     const anchor = typeof input.promptContext.anchorMessage === 'string' ? input.promptContext.anchorMessage : '';
+    const elapsedDays = Number.isInteger(input.elapsedDays) && input.elapsedDays! >= 0
+      ? input.elapsedDays!
+      : inferWorldSimulationElapsedDays_ACU(anchor);
     const runtime = ['【本回合运行时数据】', `本轮焦点：${input.focus}`, `本轮锚点证据引用：${input.anchorEvidenceRef}（evidence_refs 只能用已授权引用）`,
       `世界时钟：day=${input.givenLedger.clock.day} slot=${input.givenLedger.clock.slot} storyTime=${input.givenLedger.clock.storyTime}`,
+      `【共同时间基准】本轮共享的明确经过天数为 ${elapsedDays}（由工作流对同一锚点一次计算；无明确时间流逝即为 0）。当前已提交日为 ${input.givenLedger.clock.day}；不把回忆或既已计入的旅程重复累加。undercurrent-analyst 独占 clock 写入，clock.days 只能表达这一本轮推进量；dramatis-keeper 不写 clock，但人物状态、死亡时间及伴生传闻的演算必须使用本轮共享经过天数。另一并发角色的推断尚未落账，不得当作已提交事实。`,
       `单例修订号：${input.baseLedgerRevision}`, `【你负责的资料（完整行）】${JSON.stringify(own)}`,
       `【关联只读目录】${JSON.stringify(related)}`, `【待修复】${JSON.stringify(input.givenLedger.pendingFixes.filter(fix => modules.includes(fix.module)))}`,
       ...(input.roundChanges ? [`【本轮变更清单】${input.roundChanges}`] : []), `【锚点正文】\n${stripWritingAnnotations_ACU(anchor)}`,
@@ -491,8 +512,12 @@ export class WorldSimulationSubagentRuntime_ACU {
       } catch (error) {
         if (repairs++ >= 1) return failed(error, 'protocol_failed', locatedIssues);
         const hint = oneShotRepairHint_ACU(locatedIssues);
+        const reason = error instanceof Error ? error.message : String(error);
+        const jsonHint = /(?:JSON_NOT_FOUND|EMPTY_RESPONSE|WORLD_SIMULATION_ONE_SHOT_TRUNCATED)/.test(reason)
+          ? '本次未收到完整可解析的 JSON；不要续写上一段文本或输出思维链、Markdown、SQL 裸文本。请从 { 开始重新给出一个完整 JSON 对象：没有证据支持改动时输出 {"status":"no_change","summary":"无可证实变化"}；有证据支持改动时按系统协议输出 candidate 及 sql；无法完成时输出 failed 及 reasonCode/message。不能将未完成输出当作成功。'
+          : '';
         transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user',
-          content: `上一次输出未被采纳：${error instanceof Error ? error.message : String(error)}。${hint ? `${hint} ` : ''}逐一修正以上路径对应的每条记录，保留合法语句，重新输出完整 JSON；仍失败则输出 failed JSON。` });
+          content: `上一次输出未被采纳：${reason}。${jsonHint || (hint ? `${hint} ` : '')}逐一修正以上路径对应的每条记录，保留合法语句，重新输出完整 JSON；仍失败则输出 failed JSON。` });
       }
     }
     return failed('WORLD_SIMULATION_ONE_SHOT_CALL_LIMIT');

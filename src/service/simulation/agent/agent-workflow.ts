@@ -23,7 +23,7 @@ import type {
   WorldSimulationSubagentOutcome_ACU,
 } from './agent-model';
 import type { WorldSimulationPlaceholderContext_ACU } from './agent-placeholder-resolver';
-import type { WorldSimulationSubagentRuntime_ACU } from './agent-subagent-runtime';
+import { inferWorldSimulationElapsedDays_ACU, type WorldSimulationSubagentRuntime_ACU } from './agent-subagent-runtime';
 import type { WorldSimulationFixedWorldbook_ACU } from './agent-shared-materials';
 import { logWorldSimulationSession_ACU, updateWorldSimulationSession_ACU } from './agent-session-log';
 
@@ -746,6 +746,7 @@ export async function runWorldSimulationOneShotWorkflow_ACU(
       finalProjection: { content: buildWorldSimulationProjection_ACU(base), sourceAgent: 'current-ledger', sourceRevision: base.revision, deliverable: true } };
   }
   const anchorMessage = anchorText_ACU(input.promptContext);
+  const elapsedDays = inferWorldSimulationElapsedDays_ACU(anchorMessage);
   const snapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
   const anchorEvidenceRef = snapshot.entries.find(entry => entry.address === 'anchor:message' && entry.evidenceRef)?.evidenceRef;
   if (!anchorEvidenceRef) throw new Error('WORLD_SIMULATION_ANCHOR_EVIDENCE_MISSING');
@@ -774,7 +775,7 @@ export async function runWorldSimulationOneShotWorkflow_ACU(
         promptContext: { ...input.promptContext, worldState: ledger }, registry: input.registry,
         tools: input.tools, runId: input.identity.runId, candidateSeq: seq,
         focus: input.opening.focus, anchorEvidenceRef, givenLedger: ledger,
-        baseLedgerRevision: base.revision, roundChanges, injectWorldbook: seq === 1,
+        baseLedgerRevision: base.revision, elapsedDays, roundChanges, injectWorldbook: seq === 1,
         triggeredWorldbook: seq === 1 ? input.triggeredWorldbook : undefined,
         fixedWorldbook: seq === 1 ? input.fixedWorldbook : undefined, isCurrent: input.isCurrent });
       const restricted = restrictOutcome_ACU(outcome, targets);
