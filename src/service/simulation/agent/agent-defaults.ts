@@ -19,7 +19,8 @@ export const WORLD_SIMULATION_PROMPT_VERSION_V20_ACU = 'world-simulation-v20';
 export const WORLD_SIMULATION_PROMPT_VERSION_V21_ACU = 'world-simulation-v21';
 export const WORLD_SIMULATION_PROMPT_VERSION_V22_ACU = 'world-simulation-v22';
 export const WORLD_SIMULATION_PROMPT_VERSION_V23_ACU = 'world-simulation-v23';
-export const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V23_ACU;
+export const WORLD_SIMULATION_PROMPT_VERSION_V24_ACU = 'world-simulation-v24';
+export const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V24_ACU;
 export const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'] as const;
 export type WorldSimulationEngineSeam_ACU = typeof WORLD_SIMULATION_ENGINE_SEAMS_ACU[number];
 export type WorldSimulationAgentPrompts_ACU = Record<WorldSimulationAgentName_ACU, WorldSimulationPromptSegment_ACU[]>;
@@ -498,8 +499,8 @@ export function buildV22WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgen
 }
 
 
-/** 新协议只改当前默认，v21/v22 仍保留原文用于存量配置迁移。 */
-export function buildOneShotWorldSimulationAgentPrompt_ACU(name: WorldSimulationOneShotRole_ACU): WorldSimulationPromptSegment_ACU[] {
+/** 冻结 v23：原生 write_sql 协议原文，存量配置迁移时逐段匹配。 */
+function buildV23OneShotWorldSimulationAgentPrompt_ACU(name: WorldSimulationOneShotRole_ACU): WorldSimulationPromptSegment_ACU[] {
   return buildV22OneShotWorldSimulationAgentPrompt_ACU(name).map(segment => {
     let content = segment.content;
     if (content.startsWith(worldSimulationSeamMarker_ACU('PROTOCOL'))) {
@@ -517,6 +518,35 @@ export function buildOneShotWorldSimulationAgentPrompt_ACU(name: WorldSimulation
       content = content.replace('无变化交 no_change', '无变化回复 NO_CHANGE');
     } else if (content.startsWith(worldSimulationSeamMarker_ACU('EXECUTION_BOUNDARY'))) {
       content = content.replace('闭合思维链后只输出一个 JSON 对象，不附加 Markdown 或解释。', '闭合思维链后如有变化调用原生 write_sql；无变化回复 NO_CHANGE，失败回复 FAILED: 原因。不输出裸 SQL 或 Markdown。');
+    }
+    return content === segment.content ? segment : { ...segment, content };
+  });
+}
+
+/** v23 的全体角色冻结入口；非一次性角色与 v22 相同。 */
+export function buildV23WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
+  return (ONE_SHOT_ROLES_ACU as readonly string[]).includes(name)
+    ? buildV23OneShotWorldSimulationAgentPrompt_ACU(name as WorldSimulationOneShotRole_ACU)
+    : buildV22WorldSimulationAgentPrompt_ACU(name);
+}
+
+/** v24：非时钟角色在推演第一步先分析本轮时间跨度；批次二直接采用批次一维护的 clock，不再叠加。 */
+export function buildOneShotWorldSimulationAgentPrompt_ACU(name: WorldSimulationOneShotRole_ACU): WorldSimulationPromptSegment_ACU[] {
+  const replacements: Record<WorldSimulationOneShotRole_ACU, Array<[string, string]>> = {
+    'undercurrent-analyst': [],
+    'dramatis-keeper': [['【推演步骤】先从锚点确认玩家当前地点及是否有社交渠道', '【推演步骤】第一步分析本轮经过的时间：以运行时【共同时间基准】的本轮经过天数为准，区分本轮真正经过的时间与回忆、旧旅程；本角色不写 clock，但人物位置、目标进展、信息传播与死亡日都要按这段时间跨度推演。再从锚点确认玩家当前地点及是否有社交渠道']],
+    'guidance-composer': [
+      ['【时间规则】世界日从 clock.day 起算，仅加上锚点明确发生的时间推进；回忆和已过去的旅程不重复累加，没有明确推进视为零天。', '【时间规则】批次一已按锚点维护 clock，本角色输入的 clock.day 就是本轮当前日，直接采用，不再叠加经过天数；回忆和已过去的旅程不重复累加。'],
+      ['【推演步骤】先看批次一已通过内存预览的变更清单', '【推演步骤】第一步分析本轮时间跨度：结合【共同时间基准】与变更清单里的 clock 变化判断本轮经过多久，据此确定编年 day、传闻 origin_day 与 earliest_reveal_day，以及哪些幕后事件在这段时间内已完结、哪些消息已传开。再看批次一已通过内存预览的变更清单'],
+    ],
+  };
+  return buildV23OneShotWorldSimulationAgentPrompt_ACU(name).map(segment => {
+    if (!segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW'))) return segment;
+    let content = segment.content;
+    for (const [from, to] of replacements[name]) {
+      // 锚点缺失说明冻结原文被改动，直接报错而不是静默生成不含时间步骤的默认词。
+      if (!content.includes(from)) throw new Error(`WORLD_SIMULATION_PROMPT_V24_ANCHOR_MISSING:${name}`);
+      content = content.replace(from, to);
     }
     return content === segment.content ? segment : { ...segment, content };
   });
@@ -735,6 +765,7 @@ export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
     { version: WORLD_SIMULATION_PROMPT_VERSION_V20_ACU, fingerprint: promptFingerprint_ACU(buildV20WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_V21_ACU, fingerprint: promptFingerprint_ACU(buildV21WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_V22_ACU, fingerprint: promptFingerprint_ACU((ONE_SHOT_ROLES_ACU as readonly string[]).includes(name) ? buildV22OneShotWorldSimulationAgentPrompt_ACU(name as WorldSimulationOneShotRole_ACU) : buildV21WorldSimulationAgentPrompt_ACU(name)) },
+    { version: WORLD_SIMULATION_PROMPT_VERSION_V23_ACU, fingerprint: promptFingerprint_ACU(buildV23WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildDefaultWorldSimulationAgentPrompt_ACU(name)) },
   ]]),
 ) as unknown as Record<WorldSimulationAgentName_ACU, readonly { version: string; fingerprint: string }[]>;
@@ -757,10 +788,11 @@ export function migrateWorldSimulationAgentPromptsDetailed_ACU(current: Record<s
     const value = current[name];
     const previous = previousDefaults[name];
     // One-shot 历史默认逐段匹配；用户编辑和追加段原样保留，不用当前生成器重建旧默认。
-    if ((previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V22_ACU) && (ONE_SHOT_ROLES_ACU as readonly string[]).includes(name)) {
-      const old = previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU
-        ? buildV21OneShotWorldSimulationAgentPrompt_ACU(name as WorldSimulationOneShotRole_ACU)
-        : buildV22OneShotWorldSimulationAgentPrompt_ACU(name as WorldSimulationOneShotRole_ACU);
+    if ((previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V22_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V23_ACU) && (ONE_SHOT_ROLES_ACU as readonly string[]).includes(name)) {
+      const role = name as WorldSimulationOneShotRole_ACU;
+      const old = previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU ? buildV21OneShotWorldSimulationAgentPrompt_ACU(role)
+        : previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V22_ACU ? buildV22OneShotWorldSimulationAgentPrompt_ACU(role)
+          : buildV23OneShotWorldSimulationAgentPrompt_ACU(role);
       if (!value) {
         migrated[name] = defaults[name];
       } else if (promptFingerprint_ACU(value) === promptFingerprint_ACU(old)) {

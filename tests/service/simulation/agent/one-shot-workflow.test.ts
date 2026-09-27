@@ -224,6 +224,10 @@ describe('两批一次性世界推演工作流', () => {
     expect(guidanceResult.status).toBe('candidate');
     expect(guidanceResult.candidate?.patch.guidance).toMatchObject({ expectedRevision: env.ledger.revision });
     expect(guidanceInvoke).toHaveBeenCalledTimes(1);
+    // 批次二串行读取批次一预览：直接采用已推进的 clock，不再按“已提交日 + 经过天数”叠加。
+    const guidanceSent = JSON.stringify(guidanceInvoke.mock.calls[0][1]);
+    expect(guidanceSent).toContain('不再叠加经过天数');
+    expect(guidanceSent).not.toContain('当前已提交日为');
     const invalidEnum = sqlTurn({ agentName: 'undercurrent-analyst',
       sql: "INSERT INTO dimensions (name, kind, value, trend, rationale) VALUES ('戒备', '政治', 40, 'rising', '盘查加剧'); INSERT INTO seeds (title, visibility) VALUES ('暗流', '公开')" });
     const correctEnum = sqlTurn({ agentName: 'undercurrent-analyst',

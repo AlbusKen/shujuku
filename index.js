@@ -91516,7 +91516,8 @@ $CONTENT
     const WORLD_SIMULATION_PROMPT_VERSION_V21_ACU = 'world-simulation-v21';
     const WORLD_SIMULATION_PROMPT_VERSION_V22_ACU = 'world-simulation-v22';
     const WORLD_SIMULATION_PROMPT_VERSION_V23_ACU = 'world-simulation-v23';
-    const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V23_ACU;
+    const WORLD_SIMULATION_PROMPT_VERSION_V24_ACU = 'world-simulation-v24';
+    const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V24_ACU;
     const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'];
     const WORLD_SIMULATION_PROMPT_PLACEHOLDERS_ACU = [
         '$WORLD_TASK', '$WORLD_HISTORY', '$WORLD_RUNTIME_CONTEXT', '$WORLD_AGENT_CATALOG',
@@ -91951,8 +91952,8 @@ $CONTENT
             ? buildV22OneShotWorldSimulationAgentPrompt_ACU(name)
             : buildV21WorldSimulationAgentPrompt_ACU(name);
     }
-    /** 新协议只改当前默认，v21/v22 仍保留原文用于存量配置迁移。 */
-    function buildOneShotWorldSimulationAgentPrompt_ACU(name) {
+    /** 冻结 v23：原生 write_sql 协议原文，存量配置迁移时逐段匹配。 */
+    function buildV23OneShotWorldSimulationAgentPrompt_ACU(name) {
         return buildV22OneShotWorldSimulationAgentPrompt_ACU(name).map(segment => {
             let content = segment.content;
             if (content.startsWith(worldSimulationSeamMarker_ACU('PROTOCOL'))) {
@@ -91974,6 +91975,35 @@ $CONTENT
             }
             else if (content.startsWith(worldSimulationSeamMarker_ACU('EXECUTION_BOUNDARY'))) {
                 content = content.replace('闭合思维链后只输出一个 JSON 对象，不附加 Markdown 或解释。', '闭合思维链后如有变化调用原生 write_sql；无变化回复 NO_CHANGE，失败回复 FAILED: 原因。不输出裸 SQL 或 Markdown。');
+            }
+            return content === segment.content ? segment : { ...segment, content };
+        });
+    }
+    /** v23 的全体角色冻结入口；非一次性角色与 v22 相同。 */
+    function buildV23WorldSimulationAgentPrompt_ACU(name) {
+        return ONE_SHOT_ROLES_ACU.includes(name)
+            ? buildV23OneShotWorldSimulationAgentPrompt_ACU(name)
+            : buildV22WorldSimulationAgentPrompt_ACU(name);
+    }
+    /** v24：非时钟角色在推演第一步先分析本轮时间跨度；批次二直接采用批次一维护的 clock，不再叠加。 */
+    function buildOneShotWorldSimulationAgentPrompt_ACU(name) {
+        const replacements = {
+            'undercurrent-analyst': [],
+            'dramatis-keeper': [['【推演步骤】先从锚点确认玩家当前地点及是否有社交渠道', '【推演步骤】第一步分析本轮经过的时间：以运行时【共同时间基准】的本轮经过天数为准，区分本轮真正经过的时间与回忆、旧旅程；本角色不写 clock，但人物位置、目标进展、信息传播与死亡日都要按这段时间跨度推演。再从锚点确认玩家当前地点及是否有社交渠道']],
+            'guidance-composer': [
+                ['【时间规则】世界日从 clock.day 起算，仅加上锚点明确发生的时间推进；回忆和已过去的旅程不重复累加，没有明确推进视为零天。', '【时间规则】批次一已按锚点维护 clock，本角色输入的 clock.day 就是本轮当前日，直接采用，不再叠加经过天数；回忆和已过去的旅程不重复累加。'],
+                ['【推演步骤】先看批次一已通过内存预览的变更清单', '【推演步骤】第一步分析本轮时间跨度：结合【共同时间基准】与变更清单里的 clock 变化判断本轮经过多久，据此确定编年 day、传闻 origin_day 与 earliest_reveal_day，以及哪些幕后事件在这段时间内已完结、哪些消息已传开。再看批次一已通过内存预览的变更清单'],
+            ],
+        };
+        return buildV23OneShotWorldSimulationAgentPrompt_ACU(name).map(segment => {
+            if (!segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW')))
+                return segment;
+            let content = segment.content;
+            for (const [from, to] of replacements[name]) {
+                // 锚点缺失说明冻结原文被改动，直接报错而不是静默生成不含时间步骤的默认词。
+                if (!content.includes(from))
+                    throw new Error(`WORLD_SIMULATION_PROMPT_V24_ANCHOR_MISSING:${name}`);
+                content = content.replace(from, to);
             }
             return content === segment.content ? segment : { ...segment, content };
         });
@@ -92165,6 +92195,7 @@ $CONTENT
             { version: WORLD_SIMULATION_PROMPT_VERSION_V20_ACU, fingerprint: promptFingerprint_ACU(buildV20WorldSimulationAgentPrompt_ACU(name)) },
             { version: WORLD_SIMULATION_PROMPT_VERSION_V21_ACU, fingerprint: promptFingerprint_ACU(buildV21WorldSimulationAgentPrompt_ACU(name)) },
             { version: WORLD_SIMULATION_PROMPT_VERSION_V22_ACU, fingerprint: promptFingerprint_ACU(ONE_SHOT_ROLES_ACU.includes(name) ? buildV22OneShotWorldSimulationAgentPrompt_ACU(name) : buildV21WorldSimulationAgentPrompt_ACU(name)) },
+            { version: WORLD_SIMULATION_PROMPT_VERSION_V23_ACU, fingerprint: promptFingerprint_ACU(buildV23WorldSimulationAgentPrompt_ACU(name)) },
             { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildDefaultWorldSimulationAgentPrompt_ACU(name)) },
         ]]));
     function migrateWorldSimulationAgentPrompts_ACU(current, previousDefaults, previousVersion) {
@@ -92179,10 +92210,11 @@ $CONTENT
             const value = current[name];
             const previous = previousDefaults[name];
             // One-shot 历史默认逐段匹配；用户编辑和追加段原样保留，不用当前生成器重建旧默认。
-            if ((previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V22_ACU) && ONE_SHOT_ROLES_ACU.includes(name)) {
-                const old = previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU
-                    ? buildV21OneShotWorldSimulationAgentPrompt_ACU(name)
-                    : buildV22OneShotWorldSimulationAgentPrompt_ACU(name);
+            if ((previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V22_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V23_ACU) && ONE_SHOT_ROLES_ACU.includes(name)) {
+                const role = name;
+                const old = previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU ? buildV21OneShotWorldSimulationAgentPrompt_ACU(role)
+                    : previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V22_ACU ? buildV22OneShotWorldSimulationAgentPrompt_ACU(role)
+                        : buildV23OneShotWorldSimulationAgentPrompt_ACU(role);
                 if (!value) {
                     migrated[name] = defaults[name];
                 }
@@ -169654,7 +169686,10 @@ Expected function or array of functions, received type ${typeof value}.`
                 : inferWorldSimulationElapsedDays_ACU(anchor);
             const runtime = ['【本回合运行时数据】', `本轮焦点：${input.focus}`, `本轮锚点证据引用：${input.anchorEvidenceRef}（evidence_refs 只能用已授权引用）`,
                 `世界时钟：day=${input.givenLedger.clock.day} slot=${input.givenLedger.clock.slot} storyTime=${input.givenLedger.clock.storyTime}`,
-                `【共同时间基准】本轮共享的明确经过天数为 ${elapsedDays}（由工作流对同一锚点一次计算；无明确时间流逝即为 0）。当前已提交日为 ${input.givenLedger.clock.day}；不把回忆或既已计入的旅程重复累加。undercurrent-analyst 独占 clock 写入，clock.days 只能表达这一本轮推进量；dramatis-keeper 不写 clock，但人物状态、死亡时间及伴生传闻的演算必须使用本轮共享经过天数。另一并发角色的推断尚未落账，不得当作已提交事实。`,
+                // 批次二串行接在批次一之后，输入 clock 已包含本轮推进；这里不能再让它叠加经过天数。
+                input.agentName === 'guidance-composer'
+                    ? `【共同时间基准】本轮共享的明确经过天数为 ${elapsedDays}（由工作流对同一锚点一次计算）。批次一已按这段跨度维护 clock，当前日 ${input.givenLedger.clock.day} 已包含本轮推进（本轮内存预览，尚未持久化）；直接采用该日，不再叠加经过天数。编年 day、传闻 origin_day 与 earliest_reveal_day 以当前日为准，并按本轮经过的时间跨度判断哪些幕后事件已完结、哪些消息已传开；不把回忆或既已计入的旅程重复累加。`
+                    : `【共同时间基准】本轮共享的明确经过天数为 ${elapsedDays}（由工作流对同一锚点一次计算；无明确时间流逝即为 0）。当前已提交日为 ${input.givenLedger.clock.day}；不把回忆或既已计入的旅程重复累加。undercurrent-analyst 独占 clock 写入，clock.days 只能表达这一本轮推进量；dramatis-keeper 不写 clock，但人物状态、死亡时间及伴生传闻的演算必须使用本轮共享经过天数。另一并发角色的推断尚未落账，不得当作已提交事实。`,
                 `单例修订号：${input.baseLedgerRevision}`, `【你负责的资料（完整行）】${JSON.stringify(own)}`,
                 `【关联只读目录】${JSON.stringify(related)}`, `【待修复】${JSON.stringify(input.givenLedger.pendingFixes.filter(fix => modules.includes(fix.module)))}`,
                 ...(input.roundChanges ? [`【本轮变更清单】${input.roundChanges}`] : []), `【锚点正文】\n${stripWritingAnnotations_ACU(anchor)}`,
