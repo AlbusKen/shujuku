@@ -6,6 +6,8 @@ import { WorldSimulationSubagentRuntime_ACU } from '../../../../src/service/simu
 import { buildDefaultWorldSimulationAgentPrompts_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
 import { createWorldSimulationEvidenceRegistry_ACU, recordWorldSimulationEvidence_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../../../../src/service/simulation/world-simulation-evidence-registry';
 import type { WorldSimulationSubagentOutcome_ACU } from '../../../../src/service/simulation/agent/agent-model';
+import { USER_PREFILL_CONTENT_ACU } from '../../../../src/shared/user-prefill.js';
+
 
 const noChange = (agentName: string): WorldSimulationSubagentOutcome_ACU => ({ agentName, status: 'no_change', summary: '无变化', evidenceRefs: [], uncertainties: [] });
 // 模拟 provider 原生函数调用回包：有变化时 SQL 只能放在 write_sql 的 sql 参数里。
@@ -213,6 +215,26 @@ describe('两批一次性世界推演工作流', () => {
     expect(forbidden.mock.calls[0][3]).toContain('write_sql');
     expect((forbidden.mock.calls[1][1] as Array<{ role: string; tool_call_id?: string }>).some(message => message.role === 'tool' && message.tool_call_id === 'write-1')).toBe(true);
     expect(input.tools.read).not.toHaveBeenCalled();
+    // 闭合的前置思维链可剥离，外层仍须是严格状态行；未闭合思维链 fail-closed，不能当成无变化。
+    const thinking = vi.fn(async () => '<think>已核对完毕，本轮无可证实变化</think>\nNO_CHANGE');
+    expect((await new WorldSimulationSubagentRuntime_ACU({ invoke: thinking, apiPreset,
+      countTokens: async () => 1 }).runOneShot(input)).status).toBe('no_change');
+    expect(thinking).toHaveBeenCalledTimes(1);
+    const firstRequest = thinking.mock.calls[0][1] as Array<{ role: string; content: unknown }>;
+    expect(firstRequest.some(message => message.content === USER_PREFILL_CONTENT_ACU)).toBe(false);
+    expect(JSON.stringify(firstRequest)).not.toMatch(/reads\\?":\[\\?"ledger:current/);
+    const thinkingFailed = vi.fn(async () => '<think>思考过程</think>\nFAILED: 无法完成');
+    expect((await new WorldSimulationSubagentRuntime_ACU({ invoke: thinkingFailed, apiPreset,
+      countTokens: async () => 1 }).runOneShot(input)).status).toBe('failed');
+    expect(thinkingFailed).toHaveBeenCalledTimes(1);
+    const unclosed = vi.fn(async () => '<think>思考被截断 NO_CHANGE');
+    expect((await new WorldSimulationSubagentRuntime_ACU({ invoke: unclosed, apiPreset,
+      countTokens: async () => 1 }).runOneShot(input)).status).toBe('failed');
+    expect(unclosed).toHaveBeenCalledTimes(2);
+    const trailing = vi.fn(async () => '<think>ok</think>\nNO_CHANGE\n补充解释');
+    expect((await new WorldSimulationSubagentRuntime_ACU({ invoke: trailing, apiPreset,
+      countTokens: async () => 1 }).runOneShot(input)).status).toBe('failed');
+
     const previewLedger = { ...env.ledger, revision: env.ledger.revision + 1 };
     const guidanceInput = { ...input, agentName: 'guidance-composer' as const,
       givenLedger: previewLedger, promptContext: { ...input.promptContext, worldState: previewLedger } };

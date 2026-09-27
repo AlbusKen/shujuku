@@ -314,14 +314,27 @@ export function worldSimulationOneShotProtocol_ACU(name: WorldSimulationOneShotR
   };
   return [
     '【交付协议】有可证实的变更时调用原生 write_sql 函数，参数只填 sql 字段（一条或多条受限 SQL）；工具调用仅生成待验证候选，不即时写入账本；候选通过校验后本角色结束，由两批工作流统一预览与最终提交。不得把 SQL 放入文本 JSON 或输出裸 SQL。',
-    '无改动时只回复 NO_CHANGE，可附简短原因；无法完成时只回复 FAILED: 原因。空文本、任意其他文本与非法工具调用均不能视为无变化。',
+    '无改动时回复 NO_CHANGE，可在同一行附简短原因；无法完成时回复 FAILED: 原因。思考过程若输出须闭合于 <think> 标签中，标签外仅保留状态行；空文本、任意其他文本与非法工具调用均不能视为无变化。',
     `只能写表：${tables.join(' | ')}。一次 write_sql 收齐本角色所有变更，不拆成多次写入；失败时按工具回执修正，仅允许一次纠错。`,
-    `如需调用 read，参数示例：{"reads":["ledger:current"]}；地址只能使用 ${formatWorldSimulationToolAddressHints_ACU()}。不能把 $.reads、裸模块名或错误路径当作地址；仅目录中实际存在的条目 ID 可用于 seeds:<id> 等条目地址。`,
+    '运行时已给出本角色完整行与关联资料；只有目录中出现具体 readAddress 且确需详情时才调用 read，参数 reads 填该地址。目录为空就不要为核对空资料而读取；ledger:current 并非普通角色可读地址。不能把 $.reads、裸模块名或错误路径当作地址。',
     'SQL 只允许 INSERT INTO 表 (列) VALUES (字面量)、UPDATE 表 SET 列 = 字面量 WHERE 条件、DELETE FROM 表 WHERE 条件；不得使用 SELECT、函数、子查询或表达式。字符串单引号须转义为两个，列名使用 snake_case。',
     '归档列名必须严格区分：chronicle_archive=(archive_ref, day, summary, fingerprints, related_ids, source_chronicle_ids)；chronicle_overview=(fingerprint, day, one_line, archive_ref)。chronicle_overview 没有 summary 或 related_ids 列。guidance 是单例，只能 UPDATE 且 WHERE 只能带 expected_revision。',
     'guidance.signals 的 sourceId 只能引用运行时已注入账本中已有的条目 ID，或 clock/player；不能引用本次 SQL 刚 INSERT 的 rumors/chronicle，也不能写 rumors:1、rumors:<数字> 等未出现在账本目录中的伪 ID。',
     details[name],
   ].join('\n');
+}
+
+/** 只接受完整闭合的前置思考块与唯一终态；不把任意自由文本、未闭合思考或 SQL 当成无变化。 */
+function oneShotTextStatus_ACU(raw: string): { status: 'no_change'; summary: string } | { status: 'failed'; message: string } | null {
+  let text = raw.trim();
+  while (text.startsWith('<think>')) {
+    const close = text.indexOf('</think>');
+    if (close < 0) return null;
+    text = text.slice(close + '</think>'.length).trim();
+  }
+  if (/^NO_CHANGE(?:\s*[:：]\s*[^\r\n]+)?$/.test(text)) return { status: 'no_change', summary: text };
+  if (/^FAILED\s*[:：]\s*[^\r\n]+$/.test(text)) return { status: 'failed', message: text };
+  return null;
 }
 
 /** Explain domain rejections without silently inventing entity IDs or changing the patch. */
@@ -430,7 +443,6 @@ export class WorldSimulationSubagentRuntime_ACU {
     const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[input.agentName], input.agentName, resolvers);
     const protocol = worldSimulationOneShotProtocol_ACU(input.agentName, modules);
     const base = [{ role: 'system', content: protocol }, ...rendered.messages.filter(message => message.content !== USER_PREFILL_CONTENT_ACU)];
-    const prefill = rendered.messages.some(message => message.content === USER_PREFILL_CONTENT_ACU);
     const transcript: AiWireMessage_ACU[] = [];
     const readGateState = createWorldSimulationReadGateState_ACU();
     const usage = { readsUsed: 0 };
@@ -442,12 +454,15 @@ export class WorldSimulationSubagentRuntime_ACU {
     for (let attempt = 0; attempt < 2 + maxReads; attempt++) {
       if (input.isCurrent?.() === false) throw new Error('WORLD_SIMULATION_RUN_STALE');
       let locatedIssues: WorldSimulationSubagentIssue_ACU[] = [];
-      const messages = withNativeToolThinkPrefill_ACU([...base, { role: 'user', content: runtime }, ...transcript, ...(prefill ? [{ role: 'user', content: USER_PREFILL_CONTENT_ACU }] : [])]);
+      const messages = withNativeToolThinkPrefill_ACU([...base, { role: 'user', content: runtime }, ...transcript]);
       const requestTools = maxReads && reads === 0 ? ['read', 'write_sql'] as const : ['write_sql'] as const;
       let sent: Awaited<ReturnType<typeof executeWorldSimulationFinalRequest_ACU>>;
       try {
         sent = await executeWorldSimulationFinalRequest_ACU({ messages, inputLimitTokens: input.settings.agentHistoryTokenBudget,
-          tools: agentNativeTools_ACU(requestTools), historyBudgetTokens: input.settings.agentHistoryTokenBudget,
+          tools: agentNativeTools_ACU(requestTools).map(tool => tool.function.name !== 'read' ? tool : {
+            ...tool, function: { ...tool.function,
+              description: '仅精读本轮运行时资料中明确列出的具体 readAddress；没有可精读条目就不要调用。完整行、锚点和世界书已经注入，不要重复读取；ledger:current 对普通角色未授权。reads 必须是实际可读地址数组。' },
+          }), historyBudgetTokens: input.settings.agentHistoryTokenBudget,
           count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
           invoke: value => {
             if (input.injectWorldbook && input.fixedWorldbook) {
@@ -487,9 +502,9 @@ export class WorldSimulationSubagentRuntime_ACU {
           if (call.name !== 'write_sql' || Object.keys(args).some(key => !['action', 'sql'].includes(key)) || typeof args.sql !== 'string' || !args.sql.trim()) throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN');
           payload = { status: 'candidate', sql: args.sql };
         } else {
-          const text = raw.trim();
-          if (/^NO_CHANGE(?:\s*[:：]\s*[^\r\n]+)?$/.test(text) && !writeAttempted) payload = { status: 'no_change', summary: text };
-          else if (/^FAILED\s*[:：]\s*[^\r\n]+$/.test(text)) payload = { status: 'failed', reasonCode: 'UNRESOLVED', message: text };
+          const state = oneShotTextStatus_ACU(raw);
+          if (state?.status === 'no_change' && !writeAttempted) payload = state;
+          else if (state?.status === 'failed') payload = { ...state, reasonCode: 'UNRESOLVED' };
           else throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_REQUIRED');
         }
         if (payload.status === 'failed') return failed(payload.message);

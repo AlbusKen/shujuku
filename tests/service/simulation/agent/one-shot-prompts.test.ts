@@ -30,6 +30,10 @@ describe('一次性资料角色默认提示词', () => {
     expect(protocol).not.toContain('"status":"candidate"');
     expect(protocol).toContain('chronicle_overview=(fingerprint, day, one_line, archive_ref)');
     expect(protocol).toContain('不能写 rumors:1');
+    expect(protocol).not.toContain('"reads":["ledger:current"]');
+    expect(protocol).toContain('ledger:current 并非普通角色可读地址');
+    expect(protocol).toContain('闭合于 <think> 标签中');
+
   });
 
   it('范例解释各角色证据判断与反例，不把示例 ID 当成真实账本条目', () => {
