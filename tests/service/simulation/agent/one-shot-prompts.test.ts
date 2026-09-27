@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildDefaultWorldSimulationAgentPrompts_ACU, migrateWorldSimulationAgentPromptsDetailed_ACU, WORLD_SIMULATION_PROMPT_VERSION_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
+import { worldSimulationOneShotProtocol_ACU } from '../../../../src/service/simulation/agent/agent-subagent-runtime';
 import { validateWorldSimulationPromptSegments_ACU } from '../../../../src/service/simulation/agent/prompt-template';
 import { stripWritingAnnotations_ACU } from '../../../../src/service/simulation/simulation-projection';
 
@@ -16,6 +17,13 @@ describe('一次性资料角色默认提示词', () => {
       expect(body).not.toContain('chronicler');
       expect(body).not.toContain('【输出协议】'); // 协议仅由一次性运行时的首条 system 消息注入。
     }
+    const guidanceBody = prompts['guidance-composer'].map(item => item.content).join('\\n');
+    expect(guidanceBody).toContain('chronicle_overview');
+    expect(guidanceBody).toContain('不能把 summary 或 related_ids 写入 chronicle_overview');
+    expect(guidanceBody).toContain('不能编造 rumors:1 等伪 ID');
+    const protocol = worldSimulationOneShotProtocol_ACU('guidance-composer', ['chronicle', 'rumors', 'guidance']);
+    expect(protocol).toContain('chronicle_overview=(fingerprint, day, one_line, archive_ref)');
+    expect(protocol).toContain('不能写 rumors:1');
   });
 
   it('锚点仅为提示词剥离写作注释，原始文本保持不变', () => {

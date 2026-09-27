@@ -310,7 +310,7 @@ export function worldSimulationOneShotProtocol_ACU(name: WorldSimulationOneShotR
   const details: Record<WorldSimulationOneShotRole_ACU, string> = {
     'undercurrent-analyst': 'clock: UPDATE SET days, story_time, slot; dimensions: name, kind, value, trend, rationale，其中 kind 只能是英文原值 pressure 或 growth，trend 只能是 rising、stable、falling；seeds: title, status, level, catalyst, visibility, location, expires_at_day, missed_outcome, actor_ids, expose_policy, retired_reason。seeds.actor_ids 只能是已存在的 actor.id 字符串数组，例如 actor_ids = \'["actor-1"]\'；没有已确认人物 ID 就省略该列，绝不能写人物对象数组。seeds.location 必须是 JSON 对象字符串，例如 location = \'{"region":"江南府","place":"城外"}\'，只有 region 必填；无确定地点则省略 location，不可填单独地名。其中 visibility 只能是英文原值 hidden、limited、public，status 只能是 established、incubating、active、converging、resolved、retired。枚举不得填写中文解释、组合描述或其他同义词。',
     'dramatis-keeper': 'player: UPDATE SET location, contact（仅这两列及 evidence_refs，location_updated_at_day 与 region_visits 是内部派生字段，绝对不可写进 SQL）；actors: name, interests, location, location_ref, goals, information_sources, known_facts, life, died_at_day, death_summary; rumors 仅死亡伴生: fact, origin_day, earliest_reveal_day, channels, related_actor_ids。',
-    'guidance-composer': 'chronicle: INSERT summary, related_ids 或 DELETE id, reason；chronicle_archive 与 chronicle_overview 成对 INSERT；rumors: fact, origin_day, earliest_reveal_day, channels, related_actor_ids, status, revealed_at_day；guidance: UPDATE SET signals, excluded_facts。',
+    'guidance-composer': 'chronicle: INSERT summary, related_ids 或 DELETE id, reason；chronicle_archive 只能写 archive_ref, day, summary, fingerprints, related_ids, source_chronicle_ids；chronicle_overview 只能写 fingerprint, day, one_line, archive_ref，二者必须用同一个 archive_ref 成对 INSERT，不能把 summary/related_ids 写入 chronicle_overview。rumors: fact, origin_day, earliest_reveal_day, channels, related_actor_ids, status, revealed_at_day；guidance: 只能 UPDATE signals, excluded_facts（必须带 WHERE expected_revision）。guidance.signals 的 sourceId 只能指向本次输入账本中已经存在的条目 ID、clock 或 player；本候选新 INSERT 的 rumor/chronicle 不能在同一候选中作为 sourceId，不得编造 rumors:1 等地址。',
   };
   return [
     '【输出协议】推理闭合后只输出一个 JSON 对象，不附加 Markdown、解释或其他字段。',
@@ -320,6 +320,8 @@ export function worldSimulationOneShotProtocol_ACU(name: WorldSimulationOneShotR
     `status 只能是 candidate、no_change、failed；agentName 必须精确为 ${name}。只能写表：${tables.join(' | ')}。`,
     `如需调用 read，参数示例：{"reads":["ledger:current"]}；地址只能使用 ${formatWorldSimulationToolAddressHints_ACU()}。不能把 $.reads、裸模块名或错误路径当作地址；仅目录中实际存在的条目 ID 可用于 seeds:<id> 等条目地址。`,
     'SQL 只允许 INSERT INTO 表 (列) VALUES (字面量)、UPDATE 表 SET 列 = 字面量 WHERE 条件、DELETE FROM 表 WHERE 条件；不得使用 SELECT、函数、子查询或表达式。字符串单引号须转义为两个，列名使用 snake_case。',
+    '归档列名必须严格区分：chronicle_archive=(archive_ref, day, summary, fingerprints, related_ids, source_chronicle_ids)；chronicle_overview=(fingerprint, day, one_line, archive_ref)。chronicle_overview 没有 summary 或 related_ids 列。guidance 是单例，只能 UPDATE 且 WHERE 只能带 expected_revision。',
+    'guidance.signals 的 sourceId 只能引用运行时已注入账本中已有的条目 ID，或 clock/player；不能引用本次 SQL 刚 INSERT 的 rumors/chronicle，也不能写 rumors:1、rumors:<数字> 等未出现在账本目录中的伪 ID。',
     details[name],
   ].join('\n');
 }
@@ -335,6 +337,12 @@ function oneShotRepairHint_ACU(issues: readonly WorldSimulationSubagentIssue_ACU
   }
   if (issues.some(issue => /(?:^|\.)(?:location|locationRef)$/.test(issue.path) && /必须是对象或 null/.test(issue.message))) {
     hints.push('seeds.location、actors.location_ref 和 player.location 需要 SQL 单引号包裹的 JSON 对象，如 location = \'{"region":"江南府"}\'；不能填裸地名。actors.location 则是地名文本。');
+  }
+  if (issues.some(issue => /(?:sourceId|UNKNOWN_GUIDANCE_SOURCE)/.test(`${issue.path} ${issue.message}`))) {
+    hints.push('guidance.signals.sourceId 只能使用运行时账本中已经存在的条目 ID、clock 或 player；不能引用本次候选刚 INSERT 的 rumors/chronicle，也不能编造 rumors:1 等未出现在目录中的 ID。无法绑定已有来源时删除该 signal，不要把新建条目的猜测 ID 填进去。');
+  }
+  if (issues.some(issue => /SQL_COLUMN_FORBIDDEN|chronicle_overview/.test(issue.message))) {
+    hints.push('归档 SQL 列必须严格使用 chronicle_archive=(archive_ref, day, summary, fingerprints, related_ids, source_chronicle_ids) 与 chronicle_overview=(fingerprint, day, one_line, archive_ref)；chronicle_overview 不允许 summary 或 related_ids。');
   }
   return hints.join(' ');
 }

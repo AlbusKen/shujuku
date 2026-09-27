@@ -91659,10 +91659,12 @@ $CONTENT
             lines.push(historical ? 'INSERT 的 expected_revision 可省略（新建默认 0）；数组模块 UPDATE/DELETE 的 WHERE 必须明确给出当前条目 revision；chronicle DELETE 不使用 expected_revision；clock、player、guidance 单例 UPDATE 使用账本 revision。SQL 仅归一化为领域事务，不是直接数据库执行。'
                 : 'dimensions、seeds、actors、rumors 的 INSERT 必须带 expected_revision = 0（新行），chronicle INSERT 不带 expected_revision；dimensions/seeds/actors/rumors 的 UPDATE/DELETE 在完整条目上使用当前条目 revision；chronicle 仅允许对已保存草稿用 expected_revision=0 UPDATE 缺栏，完整编年禁止 UPDATE，DELETE 不使用 expected_revision；clock、player、guidance 单例 UPDATE 使用账本 revision。evidence_refs 只给 SQL 白名单允许该栏的模块；actors 与 rumors 不写此列。SQL 仅归一化为领域事务，不是直接数据库执行。');
             lines.push('chronicle 的 id/at、chronicle_archive 的 archive_ref、chronicle_overview 的 fingerprint 均可在 INSERT 时省略，由系统编号；不要编造机器字段。');
-            lines.push('枚举归一为：kind pressure|growth；trend rising|stable|falling；visibility hidden|limited|public；life alive|missing|dead；exposePolicy on_collision|gradual|public；value/level 为 0-100 整数；guidance.signals 为 {text, voice: encounter|rumor|ambient, sourceId}。类型宽容：字符串数组可写逗号分隔；整数可写数字字符串。越权模块、伪造 evidenceRef、引用不存在的 id 仍会被拒绝。');
+            lines.push(historical
+                ? '枚举归一为：kind pressure|growth；trend rising|stable|falling；visibility hidden|limited|public；life alive|missing|dead；exposePolicy on_collision|gradual|public；value/level 为 0-100 整数；guidance.signals 为 {text, voice: encounter|rumor|ambient, sourceId}。类型宽容：字符串数组可写逗号分隔；整数可写数字字符串。越权模块、伪造 evidenceRef、引用不存在的 id 仍会被拒绝。'
+                : '枚举归一为：kind pressure|growth；trend rising|stable|falling；visibility hidden|limited|public；life alive|missing|dead；exposePolicy on_collision|gradual|public；value/level 为 0-100 整数；guidance.signals 为 {text, voice: encounter|rumor|ambient, sourceId}。sourceId 只能引用运行时已注入账本中已有的条目 ID、clock 或 player，不能引用同一候选刚 INSERT 的 rumors/chronicle，也不能编造 rumors:1 等不存在的 ID。类型宽容：字符串数组可写逗号分隔；整数可写数字字符串。越权模块、伪造 evidenceRef、引用不存在的 id 仍会被拒绝。');
             if (writableModules.includes('chronicle')) {
                 lines.push(historical ? 'chronicle 仅 INSERT 新事件或 DELETE 已有事件（WHERE id 和非空 reason，不带 expected_revision）；不能 UPDATE。归档须成对 INSERT chronicle_archive 与 chronicle_overview，archive_ref 配对；禁止单独 DELETE 归档，概览折叠只允许随成对归档写集经领域事务处理。目录追加后超过 512 行会被拒绝。'
-                    : 'chronicle 仅 INSERT 新事件、对已保存 partial 草稿按 ID 用 expected_revision=0 UPDATE 缺栏，或 DELETE 已有事件（WHERE id 和非空 reason，不带 expected_revision）；完整条目不能 UPDATE。归档须成对 INSERT chronicle_archive 与 chronicle_overview，archive_ref 配对；禁止单独 DELETE 归档，概览折叠只允许随成对归档写集经领域事务处理。目录追加后超过 512 行会被拒绝。');
+                    : 'chronicle 仅 INSERT 新事件、对已保存 partial 草稿按 ID 用 expected_revision=0 UPDATE 缺栏，或 DELETE 已有事件（WHERE id 和非空 reason，不带 expected_revision）；完整条目不能 UPDATE。归档须成对 INSERT；chronicle_archive 列为 archive_ref、day、summary、fingerprints、related_ids、source_chronicle_ids，chronicle_overview 列为 fingerprint、day、one_line、archive_ref，不能把 summary/related_ids 写入 chronicle_overview；archive_ref 必须配对。禁止单独 DELETE 归档，概览折叠只允许随成对归档写集经领域事务处理。目录追加后超过 512 行会被拒绝。');
             }
             if (writableModules.includes('clock'))
                 lines.push('clock 只允许 UPDATE clock SET days = 非负整数、story_time、slot、evidence_refs WHERE expected_revision = 当前账本 revision；days 是推进量，禁止直接写 day。');
@@ -91673,7 +91675,9 @@ $CONTENT
             if (writableModules.includes('rumors'))
                 lines.push('rumors 的 earliest_reveal_day >= origin_day。同一候选将 actor 转为 life:dead 时必须伴生至少一条 rumors INSERT。');
             if (writableModules.includes('guidance'))
-                lines.push('guidance 使用 UPDATE guidance SET signals = 单引号包裹的 JSON 数组 WHERE expected_revision = 当前账本 revision。signals 每项必须带 sourceId（账本已有条目 id，或合成源 clock / player），text 不超过 80 字。选题纪律：每条 signal 必须是"正文剧情所在位置附近、或与正文强相关、但正文尚未描写"的场外事物；禁止记录、总结或评价正文已发生的事件，不得复述锚点正文原句或账本事实原句。');
+                lines.push(historical
+                    ? 'guidance 使用 UPDATE guidance SET signals = 单引号包裹的 JSON 数组 WHERE expected_revision = 当前账本 revision。signals 每项必须带 sourceId（账本已有条目 id，或合成源 clock / player），text 不超过 80 字。选题纪律：每条 signal 必须是"正文剧情所在位置附近、或与正文强相关、但正文尚未描写"的场外事物；禁止记录、总结或评价正文已发生的事件，不得复述锚点正文原句或账本事实原句。'
+                    : 'guidance 使用 UPDATE guidance SET signals = 单引号包裹的 JSON 数组 WHERE expected_revision = 当前账本 revision。signals 每项必须带 sourceId；sourceId 只能是账本已有条目 id，或合成源 clock/player，不能引用同一候选刚 INSERT 的 rumors/chronicle，也不能编造 rumors:1 等不存在的 ID；无法绑定已有来源时删除该 signal。text 不超过 80 字。选题纪律：每条 signal 必须是"正文剧情所在位置附近、或与正文强相关、但正文尚未描写"的场外事物；禁止记录、总结或评价正文已发生的事件，不得复述锚点正文原句或账本事实原句。');
             lines.push('示例：{"status":"candidate","agentName":"timekeeper","sql":"UPDATE clock SET days = 1, story_time = \'次日\' WHERE expected_revision = 0;","summary":"时间推进","evidenceRefs":["evidence:已颁发引用"],"uncertainties":[]}');
             if (!historical)
                 lines.push(renderWorldSimulationSqlGuide_ACU(writableModules));
@@ -91904,7 +91908,7 @@ $CONTENT
             'guidance-composer': {
                 root: '统合本轮变更，记录幕后完结事件、世界传闻及台面投影。',
                 role: '只写 chronicle（含成对归档）、rumors、guidance；不改批次一的资料。',
-                workflow: '先读本轮变更清单，再处理编年、传闻、投影。编年只记已完结且正文没直接写出的幕后重大事件；归档时 chronicle_archive 与 chronicle_overview 成对 INSERT。传闻只记可传播的外部迹象，earliest_reveal_day 不早于 origin_day。guidance 每轮最多 4 个新信号，encounter 最多 2 个；每条必须贴近当前剧情、正文未写且玩家能察觉，sourceId 指向已有条目或 clock/player，text 不超过 80 字；玩家 secluded 不写 rumor 语态。没有合格新信号不改 guidance。',
+                workflow: '先读本轮变更清单，再处理编年、传闻、投影。编年只记已完结且正文没直接写出的幕后重大事件；归档时 chronicle_archive 与 chronicle_overview 成对 INSERT，前者使用 archive_ref/day/summary/fingerprints/related_ids/source_chronicle_ids，后者只使用 fingerprint/day/one_line/archive_ref，不能把 summary 或 related_ids 写入 chronicle_overview。传闻只记可传播的外部迹象，earliest_reveal_day 不早于 origin_day。guidance 每轮最多 4 个新信号，encounter 最多 2 个；每条必须贴近当前剧情、正文未写且玩家能察觉，sourceId 只能指向输入账本已有条目或 clock/player，不能引用本候选刚 INSERT 的 rumors/chronicle，也不能编造 rumors:1 等伪 ID；每条 text 不超过 80 字；玩家 secluded 不写 rumor 语态。没有合格新信号不改 guidance。',
                 ack: '只写编年、传闻和投影；宁缺毋滥。',
             },
         };
@@ -169454,7 +169458,7 @@ Expected function or array of functions, received type ${typeof value}.`
         const details = {
             'undercurrent-analyst': 'clock: UPDATE SET days, story_time, slot; dimensions: name, kind, value, trend, rationale，其中 kind 只能是英文原值 pressure 或 growth，trend 只能是 rising、stable、falling；seeds: title, status, level, catalyst, visibility, location, expires_at_day, missed_outcome, actor_ids, expose_policy, retired_reason。seeds.actor_ids 只能是已存在的 actor.id 字符串数组，例如 actor_ids = \'["actor-1"]\'；没有已确认人物 ID 就省略该列，绝不能写人物对象数组。seeds.location 必须是 JSON 对象字符串，例如 location = \'{"region":"江南府","place":"城外"}\'，只有 region 必填；无确定地点则省略 location，不可填单独地名。其中 visibility 只能是英文原值 hidden、limited、public，status 只能是 established、incubating、active、converging、resolved、retired。枚举不得填写中文解释、组合描述或其他同义词。',
             'dramatis-keeper': 'player: UPDATE SET location, contact（仅这两列及 evidence_refs，location_updated_at_day 与 region_visits 是内部派生字段，绝对不可写进 SQL）；actors: name, interests, location, location_ref, goals, information_sources, known_facts, life, died_at_day, death_summary; rumors 仅死亡伴生: fact, origin_day, earliest_reveal_day, channels, related_actor_ids。',
-            'guidance-composer': 'chronicle: INSERT summary, related_ids 或 DELETE id, reason；chronicle_archive 与 chronicle_overview 成对 INSERT；rumors: fact, origin_day, earliest_reveal_day, channels, related_actor_ids, status, revealed_at_day；guidance: UPDATE SET signals, excluded_facts。',
+            'guidance-composer': 'chronicle: INSERT summary, related_ids 或 DELETE id, reason；chronicle_archive 只能写 archive_ref, day, summary, fingerprints, related_ids, source_chronicle_ids；chronicle_overview 只能写 fingerprint, day, one_line, archive_ref，二者必须用同一个 archive_ref 成对 INSERT，不能把 summary/related_ids 写入 chronicle_overview。rumors: fact, origin_day, earliest_reveal_day, channels, related_actor_ids, status, revealed_at_day；guidance: 只能 UPDATE signals, excluded_facts（必须带 WHERE expected_revision）。guidance.signals 的 sourceId 只能指向本次输入账本中已经存在的条目 ID、clock 或 player；本候选新 INSERT 的 rumor/chronicle 不能在同一候选中作为 sourceId，不得编造 rumors:1 等地址。',
         };
         return [
             '【输出协议】推理闭合后只输出一个 JSON 对象，不附加 Markdown、解释或其他字段。',
@@ -169464,6 +169468,8 @@ Expected function or array of functions, received type ${typeof value}.`
             `status 只能是 candidate、no_change、failed；agentName 必须精确为 ${name}。只能写表：${tables.join(' | ')}。`,
             `如需调用 read，参数示例：{"reads":["ledger:current"]}；地址只能使用 ${formatWorldSimulationToolAddressHints_ACU()}。不能把 $.reads、裸模块名或错误路径当作地址；仅目录中实际存在的条目 ID 可用于 seeds:<id> 等条目地址。`,
             'SQL 只允许 INSERT INTO 表 (列) VALUES (字面量)、UPDATE 表 SET 列 = 字面量 WHERE 条件、DELETE FROM 表 WHERE 条件；不得使用 SELECT、函数、子查询或表达式。字符串单引号须转义为两个，列名使用 snake_case。',
+            '归档列名必须严格区分：chronicle_archive=(archive_ref, day, summary, fingerprints, related_ids, source_chronicle_ids)；chronicle_overview=(fingerprint, day, one_line, archive_ref)。chronicle_overview 没有 summary 或 related_ids 列。guidance 是单例，只能 UPDATE 且 WHERE 只能带 expected_revision。',
+            'guidance.signals 的 sourceId 只能引用运行时已注入账本中已有的条目 ID，或 clock/player；不能引用本次 SQL 刚 INSERT 的 rumors/chronicle，也不能写 rumors:1、rumors:<数字> 等未出现在账本目录中的伪 ID。',
             details[name],
         ].join('\n');
     }
@@ -169478,6 +169484,12 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         if (issues.some(issue => /(?:^|\.)(?:location|locationRef)$/.test(issue.path) && /必须是对象或 null/.test(issue.message))) {
             hints.push('seeds.location、actors.location_ref 和 player.location 需要 SQL 单引号包裹的 JSON 对象，如 location = \'{"region":"江南府"}\'；不能填裸地名。actors.location 则是地名文本。');
+        }
+        if (issues.some(issue => /(?:sourceId|UNKNOWN_GUIDANCE_SOURCE)/.test(`${issue.path} ${issue.message}`))) {
+            hints.push('guidance.signals.sourceId 只能使用运行时账本中已经存在的条目 ID、clock 或 player；不能引用本次候选刚 INSERT 的 rumors/chronicle，也不能编造 rumors:1 等未出现在目录中的 ID。无法绑定已有来源时删除该 signal，不要把新建条目的猜测 ID 填进去。');
+        }
+        if (issues.some(issue => /SQL_COLUMN_FORBIDDEN|chronicle_overview/.test(issue.message))) {
+            hints.push('归档 SQL 列必须严格使用 chronicle_archive=(archive_ref, day, summary, fingerprints, related_ids, source_chronicle_ids) 与 chronicle_overview=(fingerprint, day, one_line, archive_ref)；chronicle_overview 不允许 summary 或 related_ids。');
         }
         return hints.join(' ');
     }
