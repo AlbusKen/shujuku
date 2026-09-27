@@ -171287,7 +171287,7 @@ ${rejectionText}` : delegationFeedback,
     function worldSimulationOneShotProtocol_ACU(name, modules) {
         const tables = modules.flatMap(module => module === 'chronicle' ? ['chronicle', 'chronicle_archive', 'chronicle_overview'] : [module]);
         const details = {
-            'undercurrent-analyst': 'clock: UPDATE SET days, story_time, slot; dimensions: name, kind, value, trend, rationale，其中 kind 只能是英文原值 pressure 或 growth，trend 只能是 rising、stable、falling；seeds: title, status, level, catalyst, visibility, location, expires_at_day, missed_outcome, actor_ids, expose_policy, retired_reason。seeds.location 必须是 JSON 对象字符串，例如 location = \'{"region":"江南府","place":"城外"}\'，只有 region 必填；无确定地点则省略 location，不可填单独地名。其中 visibility 只能是英文原值 hidden、limited、public，status 只能是 established、incubating、active、converging、resolved、retired。枚举不得填写中文解释、组合描述或其他同义词。',
+            'undercurrent-analyst': 'clock: UPDATE SET days, story_time, slot; dimensions: name, kind, value, trend, rationale，其中 kind 只能是英文原值 pressure 或 growth，trend 只能是 rising、stable、falling；seeds: title, status, level, catalyst, visibility, location, expires_at_day, missed_outcome, actor_ids, expose_policy, retired_reason。seeds.actor_ids 只能是已存在的 actor.id 字符串数组，例如 actor_ids = \'["actor-1"]\'；没有已确认人物 ID 就省略该列，绝不能写人物对象数组。seeds.location 必须是 JSON 对象字符串，例如 location = \'{"region":"江南府","place":"城外"}\'，只有 region 必填；无确定地点则省略 location，不可填单独地名。其中 visibility 只能是英文原值 hidden、limited、public，status 只能是 established、incubating、active、converging、resolved、retired。枚举不得填写中文解释、组合描述或其他同义词。',
             'dramatis-keeper': 'player: UPDATE SET location, contact（仅这两列及 evidence_refs，location_updated_at_day 与 region_visits 是内部派生字段，绝对不可写进 SQL）；actors: name, interests, location, location_ref, goals, information_sources, known_facts, life, died_at_day, death_summary; rumors 仅死亡伴生: fact, origin_day, earliest_reveal_day, channels, related_actor_ids。',
             'guidance-composer': 'chronicle: INSERT summary, related_ids 或 DELETE id, reason；chronicle_archive 与 chronicle_overview 成对 INSERT；rumors: fact, origin_day, earliest_reveal_day, channels, related_actor_ids, status, revealed_at_day；guidance: UPDATE SET signals, excluded_facts。',
         };
@@ -171301,6 +171301,20 @@ ${rejectionText}` : delegationFeedback,
             'SQL 只允许 INSERT INTO 表 (列) VALUES (字面量)、UPDATE 表 SET 列 = 字面量 WHERE 条件、DELETE FROM 表 WHERE 条件；不得使用 SELECT、函数、子查询或表达式。字符串单引号须转义为两个，列名使用 snake_case。',
             details[name],
         ].join('\n');
+    }
+    /** Explain domain rejections without silently inventing entity IDs or changing the patch. */
+    function oneShotRepairHint_ACU(issues) {
+        const hints = [];
+        if (issues.some(issue => /(?:^|\.)actorIds$/.test(issue.path) && issue.module === 'seeds')) {
+            hints.push('seeds.actor_ids 只能写 SQL 单引号包裹的 JSON 字符串 ID 数组，例如 actor_ids = \'["actor-1"]\'；仅能引用当前账本已有的 actor.id。没有可确认的人物 ID 就从每条出错的 INSERT/UPDATE 中省略 actor_ids，不能写人物对象数组、单个对象、数字或 null。');
+        }
+        if (issues.some(issue => /(?:^|\.)(?:interests|resources|goals|constraints|informationSources|knownFacts|channels|relatedActorIds)$/.test(issue.path))) {
+            hints.push('字符串数组列必须写 SQL 单引号包裹的 JSON 字符串数组，例如 channels = \'["市井"]\'；不能写对象数组、数字或 null。涉及人物关联的 ID 必须来自已确认的账本。');
+        }
+        if (issues.some(issue => /(?:^|\.)(?:location|locationRef)$/.test(issue.path) && /必须是对象或 null/.test(issue.message))) {
+            hints.push('seeds.location、actors.location_ref 和 player.location 需要 SQL 单引号包裹的 JSON 对象，如 location = \'{"region":"江南府"}\'；不能填裸地名。actors.location 则是地名文本。');
+        }
+        return hints.join(' ');
     }
     class WorldSimulationSubagentRuntime_ACU {
         constructor(dependencies) {
@@ -171481,7 +171495,9 @@ ${rejectionText}` : delegationFeedback,
                 catch (error) {
                     if (repairs++ >= 1)
                         return failed(error, 'protocol_failed', locatedIssues);
-                    transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `上一次输出未被采纳：${error instanceof Error ? error.message : String(error)}。只修正问题，保留合法语句，重新输出完整 JSON；仍失败则输出 failed JSON。` });
+                    const hint = oneShotRepairHint_ACU(locatedIssues);
+                    transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user',
+                        content: `上一次输出未被采纳：${error instanceof Error ? error.message : String(error)}。${hint ? `${hint} ` : ''}逐一修正以上路径对应的每条记录，保留合法语句，重新输出完整 JSON；仍失败则输出 failed JSON。` });
                 }
             }
             return failed('WORLD_SIMULATION_ONE_SHOT_CALL_LIMIT');

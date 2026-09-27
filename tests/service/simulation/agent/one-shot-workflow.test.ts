@@ -260,4 +260,38 @@ describe('两批一次性世界推演工作流', () => {
     expect(addressWorkflow.pendingFixes).toEqual([]);
     expect(addressWorkflow.summary).toContain('INVALID_TOOL_ADDRESS');
   });
+
+  it('四条种子的 actor_ids 对象数组逐条定位并一次修正；持续非法不落账', async () => {
+    const env = setup();
+    const registry = createWorldSimulationEvidenceRegistry_ACU('actor-ids-repair');
+    const ref = recordWorldSimulationEvidence_ACU(registry, { operation: 'initial', address: 'anchor:message', status: 'ok', summary: '锚点', exact: true }).evidenceRef!;
+    const settings = { ...buildDefaultWorldSimulationSettings_ACU(), agentPrompts: buildDefaultWorldSimulationAgentPrompts_ACU() };
+    const input = { agentName: 'undercurrent-analyst' as const, settings, registry, tools: { read: vi.fn(), search: vi.fn() },
+      promptContext: { task: {}, history: [], runtimeContext: {}, agentCatalog: [], toolCatalog: [], evidence: [], userGuidance: '',
+        worldState: env.ledger, anchorMessage: '锚点正文', anchorIdentity: {}, worldStagePlan: {}, worldChronicle: [], worldCandidates: [],
+        worldCollisions: { playerRegion: null, playerContact: 'open' as const, secludedNote: null, collidedSeeds: [], ripeRumors: [] },
+        evidenceRegistry: snapshotWorldSimulationEvidenceRegistry_ACU(registry), projectionPreview: {} },
+      runId: 'actor-ids-repair', candidateSeq: 1, focus: '锚点', anchorEvidenceRef: ref, givenLedger: env.ledger,
+      baseLedgerRevision: env.ledger.revision, injectWorldbook: false };
+    const apiPreset = { resolvePreset: () => ({ resolved: true, apiMode: 'openai' as const, apiConfig: { max_tokens: 4096 }, tavernProfile: '' }) };
+    const sql = (actorIds: string) => [0, 1, 2, 3].map(index =>
+      `INSERT INTO seeds (title, status, actor_ids) VALUES ('暗流${index}', 'incubating', '${actorIds}')`).join('; ');
+    const bad = JSON.stringify({ status: 'candidate', sql: sql('[{"id":"actor-1"}]') });
+    const valid = JSON.stringify({ status: 'candidate', sql: [0, 1, 2, 3].map(index =>
+      `INSERT INTO seeds (title, status) VALUES ('暗流${index}', 'incubating')`).join('; ') });
+    const invoke = vi.fn().mockResolvedValueOnce(bad).mockResolvedValueOnce(valid);
+    const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
+    const repaired = await runtime.runOneShot(input);
+    expect(repaired.status).toBe('candidate');
+    const rows = (repaired.candidate?.patch.seeds as { upsert: Array<{ actorIds?: unknown }> }).upsert;
+    expect(rows).toHaveLength(4);
+    expect(rows.every(row => row.actorIds === undefined)).toBe(true);
+    const feedback = JSON.stringify(invoke.mock.calls[1][1]);
+    for (let index = 0; index < 4; index++) expect(feedback).toContain(`patch.seeds.upsert[${index}].actorIds`);
+    expect(feedback).toContain('省略 actor_ids');
+    const rejected = await new WorldSimulationSubagentRuntime_ACU({ invoke: vi.fn(async () => bad), apiPreset, countTokens: async () => 1 }).runOneShot(input);
+    expect(rejected.status).toBe('failed');
+    expect(rejected.unresolvedIssues?.map(issue => issue.module)).toEqual(['seeds', 'seeds', 'seeds', 'seeds']);
+    expect(rejected.candidate).toBeUndefined();
+  });
 });
