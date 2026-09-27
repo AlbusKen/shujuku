@@ -17,7 +17,7 @@ import {
 import { WORLD_CHRONICLE_OVERVIEW_CAP_ACU, WORLD_LEDGER_SCHEMA_VERSION_ACU, WorldSimulationValidationError_ACU } from '../../../src/service/simulation/model';
 import { WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU } from '../../../src/service/simulation/agent/agent-model';
 import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
-import { buildV16WorldSimulationAgentPrompt_ACU, buildDefaultWorldSimulationAgentPrompts_ACU } from '../../../src/service/simulation/agent/agent-defaults';
+import { buildV16WorldSimulationAgentPrompt_ACU, buildV21WorldSimulationAgentPrompt_ACU, buildDefaultWorldSimulationAgentPrompts_ACU, WORLD_SIMULATION_PROMPT_VERSION_ACU, WORLD_SIMULATION_PROMPT_VERSION_V21_ACU } from '../../../src/service/simulation/agent/agent-defaults';
 import { WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU } from '../../../src/service/simulation/simulation-ledger-fold';
 
 describe('world simulation envelope store', () => {
@@ -91,6 +91,27 @@ describe('world simulation envelope store', () => {
     expect(loaded.settings.agentPrompts['world-director']).toEqual(buildDefaultWorldSimulationAgentPrompts_ACU()['world-director']);
     expect(chat[0]._qrf_world_simulation.settings.agentPrompts.timekeeper[customIndex]).toEqual(expected);
     expect(chat[0]._qrf_world_simulation.settings.agentPrompts['world-director']).toEqual(old.settings.agentPrompts['world-director']);
+  });
+
+  it('生产读取将 v21 原样 one-shot 工作流升级为范例，同时保留用户改写与持久原文', () => {
+    const old = buildDefaultWorldSimulationEnvelope_ACU();
+    old.settings.promptForceDefaultVersion = WORLD_SIMULATION_PROMPT_VERSION_V21_ACU;
+    for (const role of ['undercurrent-analyst', 'dramatis-keeper', 'guidance-composer'] as const) {
+      old.settings.agentPrompts[role] = buildV21WorldSimulationAgentPrompt_ACU(role);
+    }
+    const customized = old.settings.agentPrompts['dramatis-keeper'];
+    const workflowIndex = customized.findIndex(segment => segment.content.includes('WORLD_SIMULATION_ENGINE_SEAM:WORKFLOW'));
+    customized[workflowIndex].content += '\n用户自定义人物核查规则';
+    const persisted = structuredClone(old);
+    const chat: any[] = [{ _qrf_world_simulation: old }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    const loaded = new FirstFloorWorldSimulationStore_ACU().read()!;
+    const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
+    expect(loaded.settings.promptForceDefaultVersion).toBe(WORLD_SIMULATION_PROMPT_VERSION_ACU);
+    expect(loaded.settings.agentPrompts['undercurrent-analyst']).toEqual(defaults['undercurrent-analyst']);
+    expect(loaded.settings.agentPrompts['guidance-composer']).toEqual(defaults['guidance-composer']);
+    expect(loaded.settings.agentPrompts['dramatis-keeper'][workflowIndex]).toEqual(customized[workflowIndex]);
+    expect(chat[0]._qrf_world_simulation).toEqual(persisted);
   });
 
   it('persists only the independent first-floor field', async () => {

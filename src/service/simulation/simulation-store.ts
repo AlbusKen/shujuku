@@ -392,10 +392,10 @@ function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU
     : validateWorldSimulationAgentPrompts_ACU(raw.agentPrompts, phase);
   const previousPromptVersion = Object.prototype.hasOwnProperty.call(raw, 'promptForceDefaultVersion')
     ? string_ACU(raw.promptForceDefaultVersion, 'settings.promptForceDefaultVersion', phase) : undefined;
-  // v21 is already using the one-shot protocol: preserve user edits on every subsequent read.
+  // v22 prompts are current; earlier one-shot defaults are upgraded without discarding v21 user edits.
   const agentPrompts = previousPromptVersion === WORLD_SIMULATION_PROMPT_VERSION_ACU
     ? validatedPrompts
-    : migrateWorldSimulationAgentPrompts_ACU(validatedPrompts, {});
+    : migrateWorldSimulationAgentPrompts_ACU(validatedPrompts, {}, previousPromptVersion);
   const readBudget = typeof raw.agentReadTokenBudget === 'string'
     ? (/^(?:100|[1-9]?\d)%$/.test(raw.agentReadTokenBudget) ? raw.agentReadTokenBudget : fail_ACU('settings.agentReadTokenBudget 百分比非法', phase))
     : integer_ACU(raw.agentReadTokenBudget, 'settings.agentReadTokenBudget', phase, 1, 1000000);

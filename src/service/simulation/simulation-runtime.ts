@@ -403,10 +403,10 @@ export class WorldSimulationRuntime_ACU {
     // First validate the persisted envelope. Do not announce a migration that failed to save.
     new FirstFloorWorldSimulationStore_ACU().read();
     const previous = raw.settings?.promptForceDefaultVersion;
-    // All pre-v21 profiles are reset on load; the notice must cover older profiles too.
+    // Pre-v21 custom one-shot profiles are reset; v21 edits are preserved by the version-aware migration.
     const forcedRoles = previous !== WORLD_SIMULATION_PROMPT_VERSION_ACU
       ? migrateWorldSimulationAgentPromptsDetailed_ACU(
-        raw.settings.agentPrompts as WorldSimulationAgentPrompts_ACU, {}).forcedRoles
+        raw.settings.agentPrompts as WorldSimulationAgentPrompts_ACU, {}, previous).forcedRoles
       : [];
     await new FirstFloorWorldSimulationStore_ACU().updateAtomically(current => current!, { chatIdentity: identity });
     return forcedRoles;

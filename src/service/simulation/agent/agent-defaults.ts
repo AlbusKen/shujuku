@@ -17,7 +17,8 @@ export const WORLD_SIMULATION_PROMPT_VERSION_V18_ACU = 'world-simulation-v18';
 export const WORLD_SIMULATION_PROMPT_VERSION_V19_ACU = 'world-simulation-v19';
 export const WORLD_SIMULATION_PROMPT_VERSION_V20_ACU = 'world-simulation-v20';
 export const WORLD_SIMULATION_PROMPT_VERSION_V21_ACU = 'world-simulation-v21';
-export const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V21_ACU;
+export const WORLD_SIMULATION_PROMPT_VERSION_V22_ACU = 'world-simulation-v22';
+export const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V22_ACU;
 export const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'] as const;
 export type WorldSimulationEngineSeam_ACU = typeof WORLD_SIMULATION_ENGINE_SEAMS_ACU[number];
 export type WorldSimulationAgentPrompts_ACU = Record<WorldSimulationAgentName_ACU, WorldSimulationPromptSegment_ACU[]>;
@@ -434,7 +435,7 @@ export const ONE_SHOT_SHARED_RULES_ACU = [
   '【宁缺毋滥】没有真实变化交 no_change，不为凑数修改旧条目。',
 ].join('\n');
 
-export function buildOneShotWorldSimulationAgentPrompt_ACU(name: WorldSimulationOneShotRole_ACU): WorldSimulationPromptSegment_ACU[] {
+function buildV21OneShotWorldSimulationAgentPrompt_ACU(name: WorldSimulationOneShotRole_ACU): WorldSimulationPromptSegment_ACU[] {
   const rules: Record<WorldSimulationOneShotRole_ACU, { root: string; role: string; workflow: string; ack: string }> = {
     'undercurrent-analyst': {
       root: '推演世界时钟、世界维度压力和暗流种子的幕后演变。',
@@ -468,6 +469,26 @@ export function buildOneShotWorldSimulationAgentPrompt_ACU(name: WorldSimulation
     { role: 'user', content: USER_PREFILL_CONTENT_ACU, enabled: true, deletable: true, pinned: false }];
 }
 
+/** 新范例只更新当前 one-shot 工作流段；保留 v21 原文以识别存量默认和用户改写。 */
+export function buildOneShotWorldSimulationAgentPrompt_ACU(name: WorldSimulationOneShotRole_ACU): WorldSimulationPromptSegment_ACU[] {
+  const examples: Record<WorldSimulationOneShotRole_ACU, string> = {
+    'undercurrent-analyst': [
+      '【推演步骤】先从锚点区分本轮真正经过的时间与回忆，使用共同时间基准对照 clock；再比较已有维度与种子的触发条件、时限、地点和生命周期，找出镜头外可以由现有证据支持的变化；最后仅对变化的行生成 SQL，按本轮基准修订号核对 WHERE，不为填满模块而新增种子。并发的人物角色尚未提交，其猜测不能作为已发生事实。',
+      '【情境范例（仅演示推演，不是本轮事实）】若已提交 day=12、单例修订号=4，共同经过天数=1，锚点明确写“次日”，已有种子 seed-gate（revision=2）记录守门人离岗会触发禁区盘查，且锚点提供离岗证据：先确认新增的一天尚未入账，再判断盘查压力确实上升；可写 UPDATE clock SET days = 1, story_time = \'第13日\', slot = \'午后\' WHERE expected_revision = 4; UPDATE seeds SET status = \'active\' WHERE id = \'seed-gate\' AND expected_revision = 2;。若锚点只是回忆昨日，则不写 clock；若没有离岗证据，不升级 seed。示例 ID、修订号和时间须以本轮运行数据替换；最终只交协议 JSON。',
+    ].join('\n'),
+    'dramatis-keeper': [
+      '【推演步骤】先从锚点确认玩家当前地点及是否有社交渠道，对照 player 只改真实变化；再逐个核对与本轮剧情相关但已离开镜头的人物，其位置、目标、信息渠道与已知事实能否由已读证据支撑。每条新增 known_fact 都要对应可追溯的 information_source，不能把读者或另一并发角色的推断当成 NPC 的知识；死亡必须与同一候选的伴生传闻一起核对。',
+      '【情境范例（仅演示推演，不是本轮事实）】若锚点确认玩家已抵达江南府客栈、仍可与人交谈，player 旧位置不同且单例修订号=4，可写 UPDATE player SET location = \'{"region":"江南府","place":"客栈"}\', contact = \'open\' WHERE expected_revision = 4;。若已有 actor-guard（revision=2）确实目击城门封锁且原有 information_sources 支持目击，才可更新该人物的 known_facts；若只是账本记有封锁而没有其获知渠道，则不写 known_facts，把缺口放进 uncertainties。示例 ID 与修订号不能照抄，锚点没有玩家位置变化时也不写 player。',
+    ].join('\n'),
+    'guidance-composer': [
+      '【推演步骤】先看批次一已提交的变更清单、当前账本和锚点，区分幕后已完结事件、可传播的外部迹象和玩家附近可感知却未写入正文的事态；只为确有重大幕后完结事件写编年，只为有传播渠道的消息写传闻。再逐条检验投影的贴近性、正文未写和可感知性，绑定输入账本已有 sourceId；本候选新建的传闻或编年不能充当本候选信号来源。',
+      '【情境范例（仅演示推演，不是本轮事实）】若输入账本已有 seed-gate，玩家在江南府城门附近，锚点没有描写城门新挂的禁入木牌，且账本支持该变化，可在单例修订号=4 时写 UPDATE guidance SET signals = \'[{"text":"城门新挂了一块禁入木牌","voice":"encounter","sourceId":"seed-gate"}]\', excluded_facts = \'[]\' WHERE expected_revision = 4;。若只有本候选刚 INSERT 的传闻而输入账本没有 seed-gate，则不能猜测新传闻 ID 来填 sourceId；若锚点已经写了木牌，或玩家无法感知，就不要输出该信号。示例 ID 与修订号仅作语法示范。',
+    ].join('\n'),
+  };
+  return buildV21OneShotWorldSimulationAgentPrompt_ACU(name).map(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW'))
+    ? { ...segment, content: `${segment.content}\n${examples[name]}` } : segment);
+}
+
 export function buildV20WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
   const segments = buildV19WorldSimulationAgentPrompt_ACU(name);
   const protocol = segments.find(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('PROTOCOL')));
@@ -475,11 +496,11 @@ export function buildV20WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgen
   return [...segments, { role: 'user', content: USER_PREFILL_CONTENT_ACU, enabled: true, deletable: true, pinned: false }];
 }
 
-export function buildDefaultWorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
-  if ((ONE_SHOT_ROLES_ACU as readonly string[]).includes(name)) return buildOneShotWorldSimulationAgentPrompt_ACU(name as WorldSimulationOneShotRole_ACU);
+/** 版本冻结入口：不得用当前默认重建 v21 的提示指纹。 */
+export function buildV21WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
+  if ((ONE_SHOT_ROLES_ACU as readonly string[]).includes(name)) return buildV21OneShotWorldSimulationAgentPrompt_ACU(name as WorldSimulationOneShotRole_ACU);
   const segments = buildV20WorldSimulationAgentPrompt_ACU(name);
   if (name !== 'world-director') return segments;
-  // Only the current default changes; historical builders retain their frozen lineage.
   return segments.map(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW'))
     ? { ...segment, content: segment.content
       .replace(/工作流按固定顺序自治执行：先由 timekeeper 建立时间真值，再并发 undercurrent-analyst 与 dramatis-keeper，落账后串行保底调用 chronicler 维护 chronicle 与 rumors，最后按投影变化调用 guidance-composer。/u,
@@ -487,6 +508,11 @@ export function buildDefaultWorldSimulationAgentPrompt_ACU(name: WorldSimulation
       .replace('工作流未合格时按当前 pendingFixes 告知缺口；用户中途要求可在现有身份与预算内改走 read 或单独派工，不对同批缺口再开相同工作流。',
         '工作流未合格且用户本轮没有新指令时，只输出 {"action":"block","reason":"资料维护失败","unresolved":["模块: 原因"]}；逐条列出 pendingFixes，不输出自然语言。') }
     : segment);
+}
+
+export function buildDefaultWorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
+  if ((ONE_SHOT_ROLES_ACU as readonly string[]).includes(name)) return buildOneShotWorldSimulationAgentPrompt_ACU(name as WorldSimulationOneShotRole_ACU);
+  return buildV21WorldSimulationAgentPrompt_ACU(name);
 }
 
 export function buildDefaultWorldSimulationAgentPrompts_ACU(): WorldSimulationAgentPrompts_ACU {
@@ -674,12 +700,13 @@ export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
     { version: WORLD_SIMULATION_PROMPT_VERSION_V18_ACU, fingerprint: promptFingerprint_ACU(buildV18WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_V19_ACU, fingerprint: promptFingerprint_ACU(buildV19WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_V20_ACU, fingerprint: promptFingerprint_ACU(buildV20WorldSimulationAgentPrompt_ACU(name)) },
+    { version: WORLD_SIMULATION_PROMPT_VERSION_V21_ACU, fingerprint: promptFingerprint_ACU(buildV21WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildDefaultWorldSimulationAgentPrompt_ACU(name)) },
   ]]),
 ) as unknown as Record<WorldSimulationAgentName_ACU, readonly { version: string; fingerprint: string }[]>;
 
-export function migrateWorldSimulationAgentPrompts_ACU(current: Record<string, WorldSimulationPromptSegment_ACU[]>, previousDefaults: Record<string, WorldSimulationPromptSegment_ACU[]>): WorldSimulationAgentPrompts_ACU {
-  return migrateWorldSimulationAgentPromptsDetailed_ACU(current, previousDefaults).prompts;
+export function migrateWorldSimulationAgentPrompts_ACU(current: Record<string, WorldSimulationPromptSegment_ACU[]>, previousDefaults: Record<string, WorldSimulationPromptSegment_ACU[]>, previousVersion?: string): WorldSimulationAgentPrompts_ACU {
+  return migrateWorldSimulationAgentPromptsDetailed_ACU(current, previousDefaults, previousVersion).prompts;
 }
 
 export interface WorldSimulationPromptMigration_ACU {
@@ -688,14 +715,29 @@ export interface WorldSimulationPromptMigration_ACU {
 }
 
 /** 报告与迁移共用同一判断；旧调用方仍可只读取提示词映射。 */
-export function migrateWorldSimulationAgentPromptsDetailed_ACU(current: Record<string, WorldSimulationPromptSegment_ACU[]>, previousDefaults: Record<string, WorldSimulationPromptSegment_ACU[]>): WorldSimulationPromptMigration_ACU {
+export function migrateWorldSimulationAgentPromptsDetailed_ACU(current: Record<string, WorldSimulationPromptSegment_ACU[]>, previousDefaults: Record<string, WorldSimulationPromptSegment_ACU[]>, previousVersion?: string): WorldSimulationPromptMigration_ACU {
   const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
   const migrated = {} as WorldSimulationAgentPrompts_ACU;
   const forcedRoles: WorldSimulationAgentName_ACU[] = [];
   for (const { name } of WORLD_SIMULATION_AGENT_CATALOG_ACU) {
     const value = current[name];
     const previous = previousDefaults[name];
-    // 仅旧版本调用此迁移；v21 已升级的用户改写由读取器直接保留。
+    // v21 one-shot 已是可运行协议；只替换其原封不动的默认段，保留用户改写及附加段。
+    if (previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU && (ONE_SHOT_ROLES_ACU as readonly string[]).includes(name)) {
+      const old = buildV21OneShotWorldSimulationAgentPrompt_ACU(name as WorldSimulationOneShotRole_ACU);
+      if (!value) {
+        migrated[name] = defaults[name];
+      } else if (promptFingerprint_ACU(value) === promptFingerprint_ACU(old)) {
+        migrated[name] = defaults[name];
+      } else {
+        migrated[name] = value.map(segment => {
+          const index = old.findIndex(item => JSON.stringify(item) === JSON.stringify(segment));
+          return index < 0 ? { ...segment } : { ...defaults[name][index] };
+        });
+      }
+      continue;
+    }
+    // v20 及更旧的 one-shot 前配置使用原有强制协议升级路径。
     if ((ONE_SHOT_ROLES_ACU as readonly string[]).includes(name)) {
       if (value) {
         const fingerprint = promptFingerprint_ACU(value);

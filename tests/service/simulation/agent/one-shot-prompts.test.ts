@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildDefaultWorldSimulationAgentPrompts_ACU, migrateWorldSimulationAgentPromptsDetailed_ACU, WORLD_SIMULATION_PROMPT_VERSION_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
+import { buildDefaultWorldSimulationAgentPrompts_ACU, buildV21WorldSimulationAgentPrompt_ACU, migrateWorldSimulationAgentPromptsDetailed_ACU, WORLD_SIMULATION_PROMPT_VERSION_ACU, WORLD_SIMULATION_PROMPT_VERSION_V21_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
 import { worldSimulationOneShotProtocol_ACU } from '../../../../src/service/simulation/agent/agent-subagent-runtime';
 import { validateWorldSimulationPromptSegments_ACU } from '../../../../src/service/simulation/agent/prompt-template';
 import { stripWritingAnnotations_ACU } from '../../../../src/service/simulation/simulation-projection';
@@ -16,6 +16,8 @@ describe('一次性资料角色默认提示词', () => {
       expect(body).not.toContain('timekeeper');
       expect(body).not.toContain('chronicler');
       expect(body).not.toContain('【输出协议】'); // 协议仅由一次性运行时的首条 system 消息注入。
+      expect(body).toContain('【推演步骤】');
+      expect(body).toContain('【情境范例（仅演示推演，不是本轮事实）】');
     }
     const guidanceBody = prompts['guidance-composer'].map(item => item.content).join('\\n');
     expect(guidanceBody).toContain('chronicle_overview');
@@ -26,6 +28,35 @@ describe('一次性资料角色默认提示词', () => {
     expect(protocol).toContain('不能写 rumors:1');
   });
 
+  it('范例解释各角色证据判断与反例，不把示例 ID 当成真实账本条目', () => {
+    const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
+    const workflow = (role: typeof roles[number]) => prompts[role].find(segment => segment.content.includes('【推演步骤】'))!.content;
+    expect(workflow('undercurrent-analyst')).toContain('若锚点只是回忆昨日，则不写 clock');
+    expect(workflow('dramatis-keeper')).toContain('没有其获知渠道，则不写 known_facts');
+    expect(workflow('guidance-composer')).toContain('本候选新建的传闻或编年不能充当本候选信号来源');
+    for (const role of roles) {
+      expect(workflow(role)).toContain('expected_revision');
+      expect(workflow(role)).toContain('仅演示推演，不是本轮事实');
+    }
+  });
+
+  it('v21 默认段定向升级，用户改写与追加段、元数据保持原样', () => {
+    const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
+    const previous = Object.fromEntries(roles.map(role => [role, buildV21WorldSimulationAgentPrompt_ACU(role)]));
+    const current = structuredClone(previous);
+    current['dramatis-keeper'][3].content += '\n用户改写工作流：保持人物信息边界';
+    current['guidance-composer'][4].content += '\n用户附加说明';
+    const extra = { role: 'user' as const, content: '用户追加的独立段', enabled: true, deletable: true, pinned: false };
+    current['guidance-composer'].push(extra);
+    const result = migrateWorldSimulationAgentPromptsDetailed_ACU(current, {}, WORLD_SIMULATION_PROMPT_VERSION_V21_ACU);
+    expect(result.forcedRoles).toEqual([]);
+    expect(result.prompts['undercurrent-analyst']).toEqual(defaults['undercurrent-analyst']);
+    expect(result.prompts['dramatis-keeper'][3]).toEqual(current['dramatis-keeper'][3]);
+    expect(result.prompts['guidance-composer'][4]).toEqual(current['guidance-composer'][4]);
+    expect(result.prompts['guidance-composer'].at(-1)).toEqual(extra);
+    expect(result.prompts['guidance-composer'][3]).toEqual(defaults['guidance-composer'][3]);
+  });
+
   it('锚点仅为提示词剥离写作注释，原始文本保持不变', () => {
     const anchor = '正文甲<!-- segment_plan: 内部写作笔记 -->\n\n\n正文乙';
     expect(stripWritingAnnotations_ACU(anchor)).toBe('正文甲\n\n正文乙');
@@ -34,7 +65,7 @@ describe('一次性资料角色默认提示词', () => {
 
   it('旧版角色键及自定义旧协议提示词能归一化到当前版本', () => {
     const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
-    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v21');
+    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v22');
     const custom = structuredClone(defaults) as Record<string, typeof defaults[typeof roles[number]]>;
     custom['undercurrent-analyst'][0].content += '\n旧版自定义逐栏 write_sql';
     custom.timekeeper = structuredClone(defaults['undercurrent-analyst']);
