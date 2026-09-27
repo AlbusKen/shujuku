@@ -1,4 +1,5 @@
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
+import { WORLD_CHRONICLE_HOT_WINDOW_ACU } from '../model';
 import type {
   WorldSimulationLedger_ACU,
   WorldSimulationLedgerFieldSnapshot_ACU,
@@ -7,12 +8,15 @@ import type {
   WorldSimulationSettings_ACU,
 } from '../model';
 import { resolveWorldSimulationAgentApiPreset_ACU, type WorldSimulationApiPresetDependencies_ACU, type WorldSimulationResolvedApiPreset_ACU } from '../api-preset';
+import { stripWritingAnnotations_ACU } from '../simulation-projection';
+import { buildInUseWorldCatalog_ACU } from '../world-catalog';
 import type { WorldSimulationEvidenceRegistry_ACU, WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
 import { snapshotWorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
 import { runWorldSimulationToolBatch_ACU, type WorldSimulationReadRoundState_ACU, type WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
 import type { WorldSimulationFieldCommitReceipt_ACU } from '../simulation-field-commit-adapter';
-import { findWorldSimulationAgentDefinition_ACU, worldSimulationAgentNativeTools_ACU, worldSimulationCanReadAddress_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
-import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, renderWorldSimulationWriteRepair_ACU, worldSimulationReviewerRuntimeProtocolInstruction_ACU, worldSimulationSpecialistRuntimeProtocolInstruction_ACU } from './agent-defaults';
+import { findWorldSimulationAgentDefinition_ACU, getWorldSimulationAgentAccessProfile_ACU, worldSimulationAgentNativeTools_ACU, worldSimulationCanReadAddress_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
+import { buildV20WorldSimulationAgentPrompt_ACU } from './agent-defaults';
+import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, renderWorldSimulationWriteRepair_ACU, worldSimulationReviewerRuntimeProtocolInstruction_ACU, worldSimulationSpecialistRuntimeProtocolInstruction_ACU, type WorldSimulationOneShotRole_ACU } from './agent-defaults';
 import type {
   WorldSimulationCandidate_ACU,
   WorldSimulationDelegation_ACU,
@@ -22,7 +26,7 @@ import type {
   WorldSimulationSubagentOutcome_ACU,
 } from './agent-model';
 import { createWorldSimulationPlaceholderResolvers_ACU, isWorldSimulationLedgerContext_ACU, type WorldSimulationPlaceholderContext_ACU } from './agent-placeholder-resolver';
-import { createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationSubagentToolCalls_ACU, parseWorldSimulationJsonDraft_ACU, parseWorldSimulationJsonPayload_ACU, parseWorldSimulationMainAction_ACU, parseWorldSimulationMainOutput_ACU, parseWorldSimulationReviewerResult_ACU, parseWorldSimulationSpecialistResult_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationReviewerProtocolRejection_ACU, renderWorldSimulationSpecialistProtocolRejection_ACU } from './agent-protocol';
+import { createWorldSimulationProtocolRepairState_ACU, normalizeOneShotSpecialistPayload_ACU, parseWorldSimulationSubagentToolCalls_ACU, parseWorldSimulationJsonDraft_ACU, parseWorldSimulationJsonPayload_ACU, parseWorldSimulationMainAction_ACU, parseWorldSimulationMainOutput_ACU, parseWorldSimulationReviewerResult_ACU, parseWorldSimulationSpecialistResult_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationReviewerProtocolRejection_ACU, renderWorldSimulationSpecialistProtocolRejection_ACU } from './agent-protocol';
 import { createWorldSimulationReadGateState_ACU, resolveWorldSimulationReadBudget_ACU } from './agent-read-gate';
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './prompt-template';
@@ -30,7 +34,7 @@ import { renderWorldSimulationSnapshotSections_ACU, splitWorldSimulationSubagent
 import { countWorldSimulationTokens_ACU, type WorldSimulationTokenCounter_ACU } from './agent-token-budget';
 import { agentNativeTools_ACU, nativeToolArguments_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, withNativeToolThinkPrefill_ACU, type AiChatTurn_ACU, type AiNativeToolCall_ACU, type AiWireMessage_ACU } from '../../ai/native-tool';
 
-export interface WorldSimulationAgentInvoker_ACU { (agentName: WorldSimulationAgentName_ACU, messages: readonly { role: string; content: string }[], preset: WorldSimulationResolvedApiPreset_ACU): Promise<string | AiChatTurn_ACU>; }
+export interface WorldSimulationAgentInvoker_ACU { (agentName: WorldSimulationAgentName_ACU, messages: readonly { role: string; content: string }[], preset: WorldSimulationResolvedApiPreset_ACU, nativeTools?: readonly import('../../ai/native-tool').AgentNativeToolName_ACU[]): Promise<string | AiChatTurn_ACU>; }
 export interface WorldSimulationSubagentRuntimeDependencies_ACU { invoke: WorldSimulationAgentInvoker_ACU; countTokens?: WorldSimulationTokenCounter_ACU; apiPreset?: WorldSimulationApiPresetDependencies_ACU; protocolRetries?: number; }
 export interface WorldSimulationSubagentRunInput_ACU {
   delegation: WorldSimulationDelegation_ACU;
@@ -54,6 +58,25 @@ export interface WorldSimulationSubagentRunInput_ACU {
   fixedWorldbook?: WorldSimulationFixedWorldbook_ACU;
 }
 export interface WorldSimulationReviewInput_ACU { candidates: readonly WorldSimulationCandidate_ACU[]; settings: WorldSimulationSettings_ACU; promptContext: WorldSimulationPlaceholderContext_ACU; registry: WorldSimulationEvidenceRegistry_ACU; tools: WorldSimulationToolDependencies_ACU; isCurrent?: () => boolean; roundId?: string; readRoundState?: WorldSimulationReadRoundState_ACU; directorMaterials?: string; triggeredWorldbook?: string; fixedWorldbook?: WorldSimulationFixedWorldbook_ACU; }
+
+export interface WorldSimulationOneShotInput_ACU {
+  agentName: WorldSimulationOneShotRole_ACU;
+  settings: WorldSimulationSettings_ACU;
+  promptContext: WorldSimulationPlaceholderContext_ACU;
+  registry: WorldSimulationEvidenceRegistry_ACU;
+  tools: WorldSimulationToolDependencies_ACU;
+  runId: string;
+  candidateSeq: number;
+  focus: string;
+  anchorEvidenceRef: string;
+  givenLedger: WorldSimulationLedger_ACU;
+  baseLedgerRevision: number;
+  roundChanges?: string;
+  injectWorldbook: boolean;
+  triggeredWorldbook?: string;
+  fixedWorldbook?: WorldSimulationFixedWorldbook_ACU;
+  isCurrent?: () => boolean;
+}
 
 
 function candidate_ACU(
@@ -191,7 +214,7 @@ function outcomeFromSpecialistResult_ACU(
     : { agentName: result.agentName, status: result.status, summary: result.message, evidenceRefs: [], uncertainties: [], reasonCode: result.reasonCode, completion: 'failed', moduleCompletion, unresolvedIssues, acceptedKeys: [] };
 }
 
-function salvageCandidateOutcome_ACU(
+export function salvageCandidateOutcome_ACU(
   payload: Record<string, unknown>,
   writableModules: readonly WorldSimulationLedgerModule_ACU[],
   snapshot: WorldSimulationEvidenceRegistrySnapshot_ACU,
@@ -278,8 +301,157 @@ function toolText_ACU(results: Awaited<ReturnType<typeof runWorldSimulationToolB
   return JSON.stringify(results.map(item => ({ kind: item.kind, address: item.address, status: item.status, summary: item.summary, evidenceRef: item.evidenceRef, content: item.content })));
 }
 
+/** One protocol per request; the editable PROTOCOL seam only points here. */
+export function worldSimulationOneShotProtocol_ACU(name: WorldSimulationOneShotRole_ACU, modules: readonly WorldSimulationLedgerModule_ACU[]): string {
+  const tables = modules.flatMap(module => module === 'chronicle' ? ['chronicle', 'chronicle_archive', 'chronicle_overview'] : [module]);
+  const details: Record<WorldSimulationOneShotRole_ACU, string> = {
+    'undercurrent-analyst': 'clock: UPDATE SET days, story_time, slot; dimensions: name, kind, value, trend, rationale; seeds: title, status, level, catalyst, visibility, location, expires_at_day, missed_outcome, actor_ids, expose_policy, retired_reason。',
+    'dramatis-keeper': 'player: UPDATE SET location, contact; actors: name, interests, location, location_ref, goals, information_sources, known_facts, life, died_at_day, death_summary; rumors 仅死亡伴生: fact, origin_day, earliest_reveal_day, channels, related_actor_ids。',
+    'guidance-composer': 'chronicle: INSERT summary, related_ids 或 DELETE id, reason；chronicle_archive 与 chronicle_overview 成对 INSERT；rumors: fact, origin_day, earliest_reveal_day, channels, related_actor_ids, status, revealed_at_day；guidance: UPDATE SET signals, excluded_facts。',
+  };
+  return [
+    '【输出协议】推理闭合后只输出一个 JSON 对象，不附加 Markdown、解释或其他字段。',
+    `有改动：{"status":"candidate","agentName":"${name}","sql":"一条或多条受限 SQL","summary":"本轮修改","uncertainties":[]}`,
+    `无改动：{"status":"no_change","agentName":"${name}","summary":"没有需要修改的内容","uncertainties":[]}`,
+    `无法完成：{"status":"failed","agentName":"${name}","reasonCode":"UNRESOLVED","message":"原因"}`,
+    `status 只能是 candidate、no_change、failed；agentName 必须精确为 ${name}。只能写表：${tables.join(' | ')}。`,
+    'SQL 只允许 INSERT INTO 表 (列) VALUES (字面量)、UPDATE 表 SET 列 = 字面量 WHERE 条件、DELETE FROM 表 WHERE 条件；不得使用 SELECT、函数、子查询或表达式。字符串单引号须转义为两个，列名使用 snake_case。',
+    details[name],
+  ].join('\n');
+}
+
 export class WorldSimulationSubagentRuntime_ACU {
   constructor(private readonly dependencies: WorldSimulationSubagentRuntimeDependencies_ACU) {}
+
+  async runOneShot(input: WorldSimulationOneShotInput_ACU): Promise<WorldSimulationSubagentOutcome_ACU> {
+    const definition = findWorldSimulationAgentDefinition_ACU(input.agentName);
+    if (!definition || !['undercurrent-analyst', 'dramatis-keeper', 'guidance-composer'].includes(input.agentName)) throw new Error('WORLD_SIMULATION_ONE_SHOT_AGENT_INVALID');
+    const modules = definition.writableModules;
+    const failed = (error: unknown, source: WorldSimulationPendingFixSource_ACU = 'protocol_failed'): WorldSimulationSubagentOutcome_ACU => {
+      const message = error instanceof Error ? error.message : String(error);
+      return { agentName: input.agentName, status: 'failed', summary: message, reasonCode: 'WORLD_SIMULATION_ONE_SHOT_FAILED',
+        evidenceRefs: [], uncertainties: [], completion: 'failed', acceptedKeys: [],
+        moduleCompletion: Object.fromEntries(modules.map(module => [module, 'failed'])),
+        unresolvedIssues: modules.map(module => ({ module, source, path: `$.patch.${module}`, message })) };
+    };
+    const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, input.agentName, 'agent_delegate', this.dependencies.apiPreset);
+    const catalog = buildInUseWorldCatalog_ACU(input.givenLedger);
+    const own: Record<string, unknown> = {};
+    const omitted: Array<{ id: string; name: string; readAddress: string }> = [];
+    for (const module of modules) {
+      if (module === 'clock' || module === 'player' || module === 'guidance') { own[module] = input.givenLedger[module]; continue; }
+      if (module === 'chronicle') {
+        own.chronicle = input.givenLedger.chronicle.slice(-WORLD_CHRONICLE_HOT_WINDOW_ACU);
+        own.chronicleOverview = input.givenLedger.chronicleOverview;
+        continue;
+      }
+      const rows = [...input.givenLedger[module]];
+      const selected = module === 'seeds'
+        ? input.givenLedger.seeds.filter(row => row.status !== 'resolved' && row.status !== 'retired').slice(0, 30)
+        : module === 'actors'
+          ? [...input.givenLedger.actors].sort((a, b) => Number(b.life === 'alive') - Number(a.life === 'alive') || b.revision - a.revision).slice(0, 30)
+          : module === 'rumors'
+            ? input.givenLedger.rumors.filter(row => row.status !== 'dead').slice(0, 30)
+            : rows;
+      own[module] = selected;
+      const kept = new Set(selected.map(row => row.id));
+      for (const row of rows) if (!kept.has(row.id)) omitted.push({ id: row.id, name: 'name' in row ? String(row.name) : 'title' in row ? String(row.title) : String(row.fact), readAddress: `${module}:${row.id}` });
+    }
+    const related: Record<string, unknown> = { omitted };
+    const profile = getWorldSimulationAgentAccessProfile_ACU(input.agentName);
+    for (const module of profile.readModules) {
+      if (modules.includes(module as WorldSimulationLedgerModule_ACU)) continue;
+      if (module === 'clock' || module === 'player') related[module] = input.givenLedger[module];
+      else if (module === 'chronicle') related[module] = catalog.chronicleHot;
+      else if (module in catalog) related[module] = catalog[module as 'dimensions' | 'seeds' | 'actors' | 'rumors'];
+    }
+    const anchor = typeof input.promptContext.anchorMessage === 'string' ? input.promptContext.anchorMessage : '';
+    const runtime = ['【本回合运行时数据】', `本轮焦点：${input.focus}`, `本轮锚点证据引用：${input.anchorEvidenceRef}（evidence_refs 只能用已授权引用）`,
+      `世界时钟：day=${input.givenLedger.clock.day} slot=${input.givenLedger.clock.slot} storyTime=${input.givenLedger.clock.storyTime}`,
+      `单例修订号：${input.baseLedgerRevision}`, `【你负责的资料（完整行）】${JSON.stringify(own)}`,
+      `【关联只读目录】${JSON.stringify(related)}`, `【待修复】${JSON.stringify(input.givenLedger.pendingFixes.filter(fix => modules.includes(fix.module)))}`,
+      ...(input.roundChanges ? [`【本轮变更清单】${input.roundChanges}`] : []), `【锚点正文】\n${stripWritingAnnotations_ACU(anchor)}`,
+      ...(input.injectWorldbook && input.triggeredWorldbook ? [input.triggeredWorldbook] : [])].join('\n');
+    const resolvers = createWorldSimulationPlaceholderResolvers_ACU({ ...input.promptContext, worldState: input.givenLedger });
+    const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[input.agentName], input.agentName, resolvers);
+    const protocol = worldSimulationOneShotProtocol_ACU(input.agentName, modules);
+    const base = [{ role: 'system', content: protocol }, ...rendered.messages.filter(message => message.content !== USER_PREFILL_CONTENT_ACU)];
+    const prefill = rendered.messages.some(message => message.content === USER_PREFILL_CONTENT_ACU);
+    const transcript: AiWireMessage_ACU[] = [];
+    const readGateState = createWorldSimulationReadGateState_ACU();
+    const usage = { readsUsed: 0 };
+    let reads = 0;
+    let repairs = 0;
+    const maxReads = input.settings.agentRunBudget.maxExtraReads > 0 ? 1 : 0;
+    const authorized = () => new Set(snapshotWorldSimulationEvidenceRegistry_ACU(input.registry).entries.flatMap(entry => entry.evidenceRef ? [entry.evidenceRef] : []));
+    for (let attempt = 0; attempt < 2 + maxReads; attempt++) {
+      if (input.isCurrent?.() === false) throw new Error('WORLD_SIMULATION_RUN_STALE');
+      const messages = withNativeToolThinkPrefill_ACU([...base, ...transcript, { role: 'user', content: runtime }, ...(prefill ? [{ role: 'user', content: USER_PREFILL_CONTENT_ACU }] : [])]);
+      const requestTools = maxReads && reads === 0 ? ['read'] as const : [] as const;
+      let sent: Awaited<ReturnType<typeof executeWorldSimulationFinalRequest_ACU>>;
+      try {
+        sent = await executeWorldSimulationFinalRequest_ACU({ messages, inputLimitTokens: input.settings.agentHistoryTokenBudget,
+          tools: agentNativeTools_ACU(requestTools), historyBudgetTokens: input.settings.agentHistoryTokenBudget,
+          count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
+          invoke: value => {
+            if (input.injectWorldbook && input.fixedWorldbook) {
+              if (input.fixedWorldbook.text !== (input.triggeredWorldbook ?? '')) throw new Error('WORLD_SIMULATION_WORLDBOOK_SOURCE_UNVERIFIED');
+              verifyWorldSimulationFixedWorldbook_ACU(input.fixedWorldbook, value);
+            }
+            return this.dependencies.invoke(input.agentName, value, preset, requestTools);
+          } });
+      } catch (error) {
+        if (input.isCurrent?.() === false) throw new Error('WORLD_SIMULATION_RUN_STALE');
+        return failed(error, 'invoke_failed');
+      }
+      if (input.isCurrent?.() === false) throw new Error('WORLD_SIMULATION_RUN_STALE');
+      if (sent.status === 'rejected') return failed(sent.reason, 'invoke_failed');
+      const turn = normalizeAgentModelReply_ACU(sent.response);
+      const raw = typeof sent.response === 'string' ? sent.response : turn.content;
+      try {
+        if (turn.toolCalls.length) {
+          if (turn.toolCalls.length !== 1) throw new Error('WORLD_SIMULATION_ONE_SHOT_READ_LIMIT');
+          const calls = nativeToolArguments_ACU(turn.toolCalls).map(({ call, payload }) => {
+            if (call.name !== 'read' || reads >= maxReads) throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN');
+            const parsed = parseWorldSimulationMainAction_ACU(payload, false, snapshotWorldSimulationEvidenceRegistry_ACU(input.registry));
+            if (parsed.kind !== 'read') throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN');
+            return parsed;
+          });
+          reads++;
+          const results = await runWorldSimulationToolBatch_ACU({ calls, registry: input.registry, dependencies: input.tools,
+            gate: { state: readGateState, config: { historyTokenBudget: input.settings.agentHistoryTokenBudget,
+              readTokenBudget: input.settings.agentReadTokenBudget, fallbackTokens: input.settings.agentReadFallbackTokens },
+              usage, maxReads: input.settings.agentRunBudget.maxReads, readOnce: true,
+              canReadAddress: address => worldSimulationCanReadAddress_ACU(input.agentName, address),
+              count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU } });
+          transcript.push(...nativeToolExchange_ACU(turn.content, turn.toolCalls, turn.toolCalls.map((_, index) => index === 0 ? toolText_ACU(results) : '本批次读取结果见首条回执')));
+          continue;
+        }
+        const draft = parseWorldSimulationJsonDraft_ACU(raw, '{', ['status']);
+        if (draft.truncated) throw new Error('WORLD_SIMULATION_ONE_SHOT_TRUNCATED');
+        const normalized = normalizeOneShotSpecialistPayload_ACU(draft.payload, { agentName: input.agentName, writableModules: modules,
+          givenLedger: input.givenLedger, baseLedgerRevision: input.baseLedgerRevision, anchorEvidenceRef: input.anchorEvidenceRef, authorizedRefs: authorized() });
+        const snapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
+        let outcome: WorldSimulationSubagentOutcome_ACU;
+        try { outcome = outcomeFromSpecialistResult_ACU(parseWorldSimulationSpecialistResult_ACU(normalized.payload, snapshot), modules, input.runId, input.candidateSeq, false); }
+        catch (error) {
+          if (normalized.payload.status !== 'candidate') throw error;
+          outcome = salvageCandidateOutcome_ACU(normalized.payload, modules, snapshot, input.runId, input.candidateSeq, false);
+        }
+        if (normalized.issues.length) {
+          outcome.unresolvedIssues = [...(outcome.unresolvedIssues ?? []), ...normalized.issues];
+          const troubled = new Set(normalized.issues.map(issue => issue.module));
+          for (const module of troubled) outcome.moduleCompletion![module] = outcome.candidate && Object.keys(outcome.candidate.patch).some(key => key === module || (module === 'chronicle' && key === 'chronicleArchive')) ? 'partial' : 'failed';
+          if (outcome.candidate) outcome.completion = 'partial';
+        }
+        return outcome;
+      } catch (error) {
+        if (repairs++ >= 1) return failed(error);
+        transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `上一次输出未被采纳：${error instanceof Error ? error.message : String(error)}。只修正问题，保留合法语句，重新输出完整 JSON；仍失败则输出 failed JSON。` });
+      }
+    }
+    return failed('WORLD_SIMULATION_ONE_SHOT_CALL_LIMIT');
+  }
 
   async run(input: WorldSimulationSubagentRunInput_ACU): Promise<WorldSimulationSubagentOutcome_ACU> {
     const definition = findWorldSimulationAgentDefinition_ACU(input.delegation.agentName);
@@ -287,6 +459,9 @@ export class WorldSimulationSubagentRuntime_ACU {
       throw new Error('WORLD_SIMULATION_DELEGATION_AGENT_INVALID');
     }
     const agentName = definition.name;
+    // 旧逐栏运行恢复时保留原写入工具；新一次性调用仍仅开放 read。
+    const legacyTools = definition.writableModules.length && !worldSimulationAgentNativeTools_ACU(agentName).includes('write_sql')
+      ? [...worldSimulationAgentNativeTools_ACU(agentName), 'write_sql' as const] : worldSimulationAgentNativeTools_ACU(agentName);
     const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, agentName, 'agent_delegate', this.dependencies.apiPreset);
     const writableModules = definition.writableModules.filter(module => !input.writableModules || input.writableModules.includes(module));
     const context = withTask_ACU(input.promptContext, { instruction: input.delegation.instruction, reads: input.delegation.reads }, undefined, writableModules);
@@ -368,7 +543,14 @@ export class WorldSimulationSubagentRuntime_ACU {
       const readBudgetText = `本轮剩余阅读预算：约 ${remainingTokens} tokens（上限 ${readBudget.effectiveMaxReadTokens}，已授予 ${readGateState.grantedTokens}）；剩余 ${readAction} 轮次 ${remainingRounds}/${input.settings.agentRunBudget.maxExtraReads}。`;
       const requestContext = { ...context, ...(input.readCurrent ? { worldState: input.readCurrent() } : {}), evidenceRegistry: requestSnapshot, readBudgetText };
       const resolvers = createWorldSimulationPlaceholderResolvers_ACU(requestContext);
-      const split = splitWorldSimulationSubagentPrompt_ACU(input.settings.agentPrompts[agentName], agentName);
+      // 旧会话的逐栏恢复必须继续使用 write_sql 协议；v21 的三个默认提示词只供 runOneShot。
+      const legacyPrompt = (['undercurrent-analyst', 'dramatis-keeper', 'guidance-composer'] as readonly string[]).includes(agentName)
+        ? buildV20WorldSimulationAgentPrompt_ACU(agentName)
+        : input.settings.agentPrompts[agentName]
+          ?? (agentName === 'timekeeper' || agentName === 'chronicler'
+            ? buildV20WorldSimulationAgentPrompt_ACU(agentName) : undefined);
+      if (!legacyPrompt) throw new Error(`WORLD_SIMULATION_AGENT_PROMPT_MISSING:${agentName}`);
+      const split = splitWorldSimulationSubagentPrompt_ACU(legacyPrompt, agentName);
       const rendered = await renderWorldSimulationPrompt_ACU(split.segments, agentName, resolvers);
       const snapshot = await renderWorldSimulationSnapshotSections_ACU(split.snapshotTemplate, resolvers,
         isWorldSimulationLedgerContext_ACU(requestContext.worldState) ? { ledger: requestContext.worldState.revision } : {});
@@ -383,7 +565,7 @@ export class WorldSimulationSubagentRuntime_ACU {
       const sent = await executeWorldSimulationFinalRequest_ACU({
         messages,
         inputLimitTokens: input.settings.agentHistoryTokenBudget,
-        tools: agentNativeTools_ACU(worldSimulationAgentNativeTools_ACU(agentName)),
+        tools: agentNativeTools_ACU(legacyTools),
         historyBudgetTokens: input.settings.agentHistoryTokenBudget,
         count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
         invoke: value => {
@@ -392,7 +574,7 @@ export class WorldSimulationSubagentRuntime_ACU {
             if (input.fixedWorldbook.text !== (input.triggeredWorldbook ?? '')) throw new Error('WORLD_SIMULATION_WORLDBOOK_SOURCE_UNVERIFIED');
             verifyWorldSimulationFixedWorldbook_ACU(input.fixedWorldbook, value);
           }
-          return this.dependencies.invoke(agentName, value, preset);
+          return this.dependencies.invoke(agentName, value, preset, legacyTools);
         },
       });
       if (input.isCurrent && !input.isCurrent()) throw new Error('WORLD_SIMULATION_RUN_STALE');
@@ -404,7 +586,7 @@ export class WorldSimulationSubagentRuntime_ACU {
       try {
         calls = nativeCalls.length ? nativeToolArguments_ACU(nativeCalls).map(({ call, payload }) => {
           if (call.name === 'write_sql') {
-            if (!worldSimulationAgentNativeTools_ACU(agentName).includes('write_sql') || !input.writeSql || !writableModules.length || Object.keys(payload).some(key => !['action', 'sql', 'evidenceRefs'].includes(key))) throw new Error('write_sql 未授权或参数非法');
+            if (!legacyTools.includes('write_sql') || !input.writeSql || !writableModules.length || Object.keys(payload).some(key => !['action', 'sql', 'evidenceRefs'].includes(key))) throw new Error('write_sql 未授权或参数非法');
             return parseWorldSimulationSubagentToolCalls_ACU(JSON.stringify(payload), '', requestSnapshot, true)![0];
           }
           if (!worldSimulationAgentNativeTools_ACU(agentName).includes(call.name as 'read' | 'search')) throw new Error(`工具 ${call.name} 未获 ${agentName} profile 授权`);

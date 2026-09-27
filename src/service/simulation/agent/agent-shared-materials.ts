@@ -5,7 +5,7 @@
 import type { WorldSimulationPromptSegment_ACU } from '../model';
 import { renderAgentWorldbookTriggeredInjection_ACU, type AgentWorldbookEntryView_ACU } from '../../continuation/agent/agent-worldbook-read';
 import { getWorldSimulationAgentAccessProfile_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
-import { buildDefaultWorldSimulationAgentPrompt_ACU, worldSimulationSeamMarker_ACU, type WorldSimulationPromptPlaceholder_ACU } from './agent-defaults';
+import { buildDefaultWorldSimulationAgentPrompt_ACU, buildV20WorldSimulationAgentPrompt_ACU, worldSimulationSeamMarker_ACU, type WorldSimulationPromptPlaceholder_ACU } from './agent-defaults';
 
 const RUNTIME_LINE_ACU: ReadonlyArray<readonly [WorldSimulationPromptPlaceholder_ACU, string]> = [
   ['$WORLD_TASK', '任务：$WORLD_TASK'],
@@ -38,7 +38,9 @@ export function splitWorldSimulationSubagentPrompt_ACU(
   const kept = worldSimulationKeptTokens_ACU(name);
   const runtimeMarker = worldSimulationSeamMarker_ACU('RUNTIME_CONTEXT');
   const historyMarker = worldSimulationSeamMarker_ACU('HISTORY');
-  const defaults = buildDefaultWorldSimulationAgentPrompt_ACU(name);
+  // Retired roles have no current defaults, but historical recovery still splits their V20 prompts.
+  const defaults = name === 'timekeeper' || name === 'chronicler'
+    ? buildV20WorldSimulationAgentPrompt_ACU(name) : buildDefaultWorldSimulationAgentPrompt_ACU(name);
   const runtimeDefault_ACU = (content: string): string => name === 'world-director' || name === 'lore-researcher' ? content : content
     .replace('独立的 read/search 需求在授权及预算许可时同一回复并发调用，不分批等待；只有依赖搜索结果的精读等回执。',
       '独立的授权 read 地址在同一回复并发调用，不分批等待。')

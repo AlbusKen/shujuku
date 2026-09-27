@@ -5,21 +5,21 @@ import { buildCustomApiRequestBody_ACU } from '../../../../src/service/ai/api-ca
 
 describe('世界推演角色工具白名单', () => {
   it('按角色目录生成最终 provider 工具集合', () => {
-    expect(() => worldSimulationAgentNativeTools_ACU('unknown' as never)).toThrow('WORLD_SIMULATION_AGENT_INVALID');
+    expect(() => worldSimulationAgentNativeTools_ACU('unknown' as never)).toThrow('WORLD_SIMULATION_AGENT_PROFILE_INVALID');
     expect(worldSimulationAgentNativeTools_ACU('world-director')).toEqual(['read', 'search']);
     expect(worldSimulationAgentNativeTools_ACU('lore-researcher')).toEqual(['read', 'search']);
     expect(worldSimulationAgentNativeTools_ACU('timekeeper')).toEqual(['read', 'write_sql']);
-    expect(worldSimulationAgentNativeTools_ACU('guidance-composer')).toEqual(['read', 'write_sql']);
+    expect(worldSimulationAgentNativeTools_ACU('guidance-composer')).toEqual(['read']);
     expect(worldSimulationAgentNativeTools_ACU('causality-reviewer')).toEqual(['read']);
     expect(worldSimulationAgentNativeTools_ACU('world-stage-planner')).toEqual(['read']);
   });
 
-  it('不会让普通角色继承 search，且 write_sql 只跟随可写模块', () => {
+  it('不会让普通角色继承 search，公开角色不提供逐栏写入工具', () => {
     for (const definition of WORLD_SIMULATION_AGENT_CATALOG_ACU) {
       const tools = worldSimulationAgentNativeTools_ACU(definition.name);
       expect(tools).toContain('read');
       expect(tools.includes('search')).toBe(definition.name === 'world-director' || definition.name === 'lore-researcher');
-      expect(tools.includes('write_sql')).toBe(definition.writableModules.length > 0);
+      expect(tools).not.toContain('write_sql');
     }
   });
 

@@ -165,9 +165,9 @@
             body-id="acu-world-simulation-group-workflow"
             @toggle="toggleGroup('workflow')"
           >
-            <p class="acu-v2-world-simulation-page__meta">固定工作流按时间、暗流、人物的顺序自治执行。这里只改编年热层阈值。提示词仍在下方各角色分组里改。</p>
+            <p class="acu-v2-world-simulation-page__meta">固定工作流批次一并发处理时间暗流与人物位置，批次二按变化处理编年、传闻和投影。这里只改编年热层阈值；提示词仍在下方各角色分组里改。</p>
             <div class="acu-v2-world-simulation-page__settings-grid">
-              <AcuFormRow label="编年热层阈值" hint="热层编年达到这个条数时，本轮会派出编年。范围 1–512。">
+              <AcuFormRow label="编年热层阈值" hint="热层编年达到这个条数时，批次二由编年与投影角色处理归档。范围 1–512。">
                 <AcuInput v-model="settingsDraft.workflow.chroniclerHotThreshold" type="number" :min="1" :max="512" />
               </AcuFormRow>
             </div>

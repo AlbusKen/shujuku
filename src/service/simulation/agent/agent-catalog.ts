@@ -5,16 +5,15 @@ import { WORLD_RELATED_READONLY_MODULES_ACU } from '../world-catalog';
 export const WORLD_SIMULATION_AGENT_NAMES_ACU = [
   'world-director',
   'world-stage-planner',
-  'timekeeper',
   'undercurrent-analyst',
   'dramatis-keeper',
-  'chronicler',
   'causality-reviewer',
   'guidance-composer',
   'lore-researcher',
 ] as const;
 
-export type WorldSimulationAgentName_ACU = typeof WORLD_SIMULATION_AGENT_NAMES_ACU[number];
+/** 退役角色只供旧运行恢复及历史提示词谱系使用，不在公开目录展示。 */
+export type WorldSimulationAgentName_ACU = typeof WORLD_SIMULATION_AGENT_NAMES_ACU[number] | 'timekeeper' | 'chronicler';
 export const WORLD_SIMULATION_RETIRED_AGENT_NAMES_ACU = [
   'world-analyst',
   'macro-dynamics-analyst',
@@ -22,6 +21,8 @@ export const WORLD_SIMULATION_RETIRED_AGENT_NAMES_ACU = [
   'actor-information-analyst',
   'causality-planner',
   'guidance-reviewer',
+  'timekeeper',
+  'chronicler',
 ] as const;
 export type WorldSimulationRetiredAgentName_ACU = typeof WORLD_SIMULATION_RETIRED_AGENT_NAMES_ACU[number];
 export type WorldSimulationAgentKind_ACU = 'director' | 'planner' | 'specialist' | 'reviewer' | 'researcher';
@@ -45,15 +46,18 @@ export interface WorldSimulationAgentDefinition_ACU {
 }
 
 export const WORLD_SIMULATION_AGENT_CATALOG_ACU: readonly WorldSimulationAgentDefinition_ACU[] = [
-  { name: 'world-director', kind: 'director', description: '每轮开局决定焦点与流程参数，并作为用户沟通接口；固定工作流自治执行后中途不再回主会话派工', triggers: ['每轮推演'], promptKey: 'world-director', apiRole: 'world-director', writableModules: [] },
+  { name: 'world-director', kind: 'director', description: '用户沟通接口：用户在推演对话发消息时决定开局焦点或定向维护；自动推演不经过导演', triggers: ['用户消息'], promptKey: 'world-director', apiRole: 'world-director', writableModules: [] },
   { name: 'world-stage-planner', kind: 'planner', description: '兼容展示名：单轮焦点与流程参数已由主会话开局决策吸收，不再独立派工', triggers: ['兼容展示'], promptKey: 'world-stage-planner', apiRole: 'world-stage-planner', writableModules: [] },
-  { name: 'timekeeper', kind: 'specialist', description: '推演世界时钟的幕后推进，产出 clockAdvance 候选', triggers: ['正文出现时间跨度或需要校对时钟'], promptKey: 'timekeeper', apiRole: 'timekeeper', writableModules: ['clock'] },
-  { name: 'undercurrent-analyst', kind: 'specialist', description: '推演维度压力与暗流种子生命周期的幕后演变', triggers: ['维度或暗流需要更新'], promptKey: 'undercurrent-analyst', apiRole: 'undercurrent-analyst', writableModules: ['dimensions', 'seeds'] },
-  { name: 'dramatis-keeper', kind: 'specialist', description: '推演行动者信息边界与玩家位置接触的幕后演变', triggers: ['人物移动、生死或玩家位置变化'], promptKey: 'dramatis-keeper', apiRole: 'dramatis-keeper', writableModules: ['actors', 'player'] },
-  { name: 'chronicler', kind: 'specialist', description: '综合暗流完结、人物结局与错过清扫，记录台面下重大事件并维护世界里正在传播的传闻', triggers: ['每轮编年与传闻维护'], promptKey: 'chronicler', apiRole: 'chronicler', writableModules: ['chronicle', 'rumors'] },
+  { name: 'undercurrent-analyst', kind: 'specialist', description: '推演世界时钟、维度压力与暗流种子生命周期的幕后演变', triggers: ['每轮推演批次一'], promptKey: 'undercurrent-analyst', apiRole: 'undercurrent-analyst', writableModules: ['clock', 'dimensions', 'seeds'] },
+  { name: 'dramatis-keeper', kind: 'specialist', description: '推演行动者信息边界、玩家位置接触与人物死亡伴生传闻', triggers: ['每轮推演批次一'], promptKey: 'dramatis-keeper', apiRole: 'dramatis-keeper', writableModules: ['actors', 'player', 'rumors'] },
   { name: 'causality-reviewer', kind: 'reviewer', description: '审核幕后演变的时间、空间、因果、revision、权限与证据，不写入 guidance', triggers: ['用户路径候选终审'], promptKey: 'causality-reviewer', apiRole: 'causality-reviewer', writableModules: [] },
-  { name: 'guidance-composer', kind: 'specialist', description: '通读全量账本、锚点正文与玩家信息边界，决定哪些事实以何语态进入台面投影', triggers: ['投影相关字段变化后'], promptKey: 'guidance-composer', apiRole: 'guidance-composer', writableModules: ['guidance'] },
+  { name: 'guidance-composer', kind: 'specialist', description: '统合本轮变更：记录幕后编年、维护世界传闻，并决定台面投影', triggers: ['每轮推演批次二'], promptKey: 'guidance-composer', apiRole: 'guidance-composer', writableModules: ['chronicle', 'rumors', 'guidance'] },
   { name: 'lore-researcher', kind: 'researcher', description: '补充外部公开设定资料支撑幕后推演，不写入世界账本', triggers: ['本地证据不足且允许外部研究'], promptKey: 'lore-researcher', apiRole: 'lore-researcher', writableModules: [] },
+];
+
+const LEGACY_ROLE_DEFINITIONS_ACU: readonly WorldSimulationAgentDefinition_ACU[] = [
+  { name: 'timekeeper', kind: 'specialist', description: '推演世界时钟的幕后推进，产出 clockAdvance 候选', triggers: ['旧运行恢复'], promptKey: 'timekeeper', apiRole: 'timekeeper', writableModules: ['clock'] },
+  { name: 'chronicler', kind: 'specialist', description: '综合暗流完结、人物结局与错过清扫，记录台面下重大事件并维护世界里正在传播的传闻', triggers: ['旧运行恢复'], promptKey: 'chronicler', apiRole: 'chronicler', writableModules: ['chronicle', 'rumors'] },
 ];
 
 export type WorldSimulationAgentNativeToolName_ACU = Extract<AgentNativeToolName_ACU, 'read' | 'search' | 'write_sql'>;
@@ -66,11 +70,11 @@ export const WORLD_SIMULATION_AGENT_ACCESS_PROFILES_ACU: Record<WorldSimulationA
   'world-director': { snapshotTokens: [], tools: ['read', 'search'], allowSearch: true, readModules: [] },
   'world-stage-planner': { snapshotTokens: ['$WORLD_COLLISIONS', '$WORLD_STAGE_PLAN'], tools: ['read'], allowSearch: false, readModules: ['clock', 'dimensions', 'seeds', 'actors', 'player', 'rumors', 'chronicle', 'guidance'] },
   timekeeper: { snapshotTokens: ['$WORLD_STATE'], tools: ['read', 'write_sql'], allowSearch: false, readModules: ['clock'] },
-  'undercurrent-analyst': { snapshotTokens: ['$WORLD_STATE', '$WORLD_COLLISIONS'], tools: ['read', 'write_sql'], allowSearch: false, readModules: ['dimensions', 'seeds', 'clock', 'rumors'] },
-  'dramatis-keeper': { snapshotTokens: ['$WORLD_STATE', '$WORLD_COLLISIONS', '$ANCHOR_IDENTITY'], tools: ['read', 'write_sql'], allowSearch: false, readModules: ['actors', 'player', 'clock', 'dimensions', 'seeds', 'rumors'] },
+  'undercurrent-analyst': { snapshotTokens: ['$WORLD_STATE', '$WORLD_COLLISIONS'], tools: ['read'], allowSearch: false, readModules: ['clock', 'dimensions', 'seeds', 'actors', 'rumors'] },
+  'dramatis-keeper': { snapshotTokens: ['$WORLD_STATE', '$WORLD_COLLISIONS', '$ANCHOR_IDENTITY'], tools: ['read'], allowSearch: false, readModules: ['clock', 'actors', 'player', 'rumors', 'seeds', 'dimensions'] },
   chronicler: { snapshotTokens: ['$WORLD_STATE', '$WORLD_CHRONICLE'], tools: ['read', 'write_sql'], allowSearch: false, readModules: ['chronicle', 'rumors', 'clock', 'actors', 'seeds'] },
   'causality-reviewer': { snapshotTokens: ['$WORLD_STATE', '$WORLD_CANDIDATES', '$CURRENT_EVIDENCE_REGISTRY', '$WORLD_COLLISIONS'], tools: ['read'], allowSearch: false, readModules: ['clock', 'dimensions', 'seeds', 'actors', 'player', 'rumors', 'chronicle', 'guidance'] },
-  'guidance-composer': { snapshotTokens: ['$WORLD_STATE', '$PROJECTION_PREVIEW', '$WORLD_COLLISIONS'], tools: ['read', 'write_sql'], allowSearch: false, readModules: ['clock', 'dimensions', 'seeds', 'actors', 'player', 'rumors', 'chronicle', 'guidance'] },
+  'guidance-composer': { snapshotTokens: ['$WORLD_STATE', '$WORLD_CHRONICLE', '$WORLD_COLLISIONS'], tools: ['read'], allowSearch: false, readModules: ['clock', 'dimensions', 'seeds', 'actors', 'player', 'rumors', 'chronicle', 'guidance'] },
   'lore-researcher': { snapshotTokens: ['$WORLD_TOOL_CATALOG'], tools: ['read', 'search'], allowSearch: true, readModules: [] },
 };
 
@@ -107,7 +111,8 @@ export function worldSimulationCanReadAddress_ACU(name: WorldSimulationAgentName
   if (name === 'guidance-composer') {
     if (address === 'ledger:current' || address === 'player:current' || address === 'projection:preview') return true;
   }
-  if (name === 'chronicler' && /^chronicle-archive:[^:]+$/.test(address)) return true;
+  // 旧运行恢复仍允许编年官读取归档；新流程由统合角色接管。
+  if ((name === 'guidance-composer' || name === 'chronicler') && /^chronicle-archive:[^:]+$/.test(address)) return true;
   const modules = new Set<string>([...profile.readModules, ...definition.writableModules]);
   for (const module of definition.writableModules) {
     for (const related of WORLD_RELATED_READONLY_MODULES_ACU[module] ?? []) modules.add(related);
@@ -122,7 +127,7 @@ export function worldSimulationCanReadAddress_ACU(name: WorldSimulationAgentName
 }
 
 export function findWorldSimulationAgentDefinition_ACU(name: string): WorldSimulationAgentDefinition_ACU | null {
-  return WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name) ?? null;
+  return WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === name) ?? LEGACY_ROLE_DEFINITIONS_ACU.find(item => item.name === name) ?? null;
 }
 
 /** 主 Agent 可见目录。requirements-maintainer 已退役，当前目录即全部可见角色。 */

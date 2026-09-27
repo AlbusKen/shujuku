@@ -2,6 +2,7 @@ import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { callAIChatTurn_ACU, callAIWithResolvedPreset_ACU } from '../ai/api-call';
+import { callContinuationInternalAiWithRetry_ACU } from '../continuation/internal-ai-call';
 import { agentNativeTools_ACU, type AiChatTurn_ACU } from '../ai/native-tool';
 import { buildOpenAiPromptCacheKey_ACU, supportsExplicitOpenAiCacheKey_ACU } from '../ai/prompt-cache';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU, worldSimulationAgentNativeTools_ACU, worldSimulationDirectorVisibleCatalog_ACU, type WorldSimulationAgentName_ACU } from './agent/agent-catalog';
@@ -41,7 +42,7 @@ import {
 import { buildDirectorOwnedStageRevision_ACU } from './simulation-stage-planner';
 import { WorldSimulationStageExecutionEngine_ACU } from './simulation-stage-execution-engine';
 import { FirstFloorWorldSimulationStore_ACU, WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU, assertWorldSimulationAnchorCurrent_ACU, resolveCurrentWorldSimulationAnchor_ACU } from './simulation-store';
-import { WORLD_SIMULATION_PROMPT_VERSION_ACU } from './agent/agent-defaults';
+import { WORLD_SIMULATION_PROMPT_VERSION_ACU, WORLD_SIMULATION_PROMPT_VERSION_V20_ACU, migrateWorldSimulationAgentPromptsDetailed_ACU, type WorldSimulationAgentPrompts_ACU } from './agent/agent-defaults';
 import { buildDefaultWorldSimulationEnvelope_ACU } from './defaults';
 import { buildWorldSimulationProjection_ACU } from './simulation-projection';
 import { detectWorldCollisions_ACU } from './world-dynamics';
@@ -62,18 +63,44 @@ const anchorText_ACU = (anchor: WorldSimulationAnchorIdentity_ACU, chat: any[]):
   return typeof message?.mes === 'string' ? message.mes : typeof message?.message === 'string' ? message.message : '';
 };
 
+const WORLD_SIMULATION_TRANSPORT_RETRIES_ACU = 2;
+const WORLD_SIMULATION_RETRY_DELAY_SECONDS_ACU = 3;
+
+function isRetryableWorldSimulationTransportError_ACU(error: unknown): boolean {
+  if (error instanceof WorldSimulationValidationError_ACU) return false;
+  if (error instanceof DOMException && error.name === 'AbortError') return false;
+  if (error instanceof Error && error.name === 'AbortError') return false;
+  if (error instanceof Error && error.message === 'WORLD_SIMULATION_RUN_STALE') return false;
+  return true;
+}
+
 async function invokeWorldSimulationAgent_ACU(
+  ...args: Parameters<typeof invokeWorldSimulationAgentOnce_ACU>
+): Promise<string | AiChatTurn_ACU> {
+  return callContinuationInternalAiWithRetry_ACU(() => {
+    if (args[4].aborted) throw new Error('WORLD_SIMULATION_RUN_STALE');
+    return invokeWorldSimulationAgentOnce_ACU(...args);
+  }, {
+    transportRetries: WORLD_SIMULATION_TRANSPORT_RETRIES_ACU,
+    retryDelaySeconds: WORLD_SIMULATION_RETRY_DELAY_SECONDS_ACU,
+    isRetryable: isRetryableWorldSimulationTransportError_ACU,
+    isCurrent: () => !args[4].aborted,
+  });
+}
+
+async function invokeWorldSimulationAgentOnce_ACU(
   role: WorldSimulationAgentName_ACU,
   messages: readonly { role: string; content: string }[],
   preset: Parameters<typeof callAIWithResolvedPreset_ACU>[1],
   identity: WorldSimulationRunIdentity_ACU,
   signal: AbortSignal,
+  requestedTools?: readonly import('../ai/native-tool').AgentNativeToolName_ACU[],
 ): Promise<string | AiChatTurn_ACU> {
   const requestId = `${identity.runId}:${role}:${++internalRequestSequence_ACU}`;
   beginWorldSimulationInternalAiRequest_ACU({ requestId, runId: identity.runId, role });
   try {
     const definition = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === role);
-    const nativeTools = worldSimulationAgentNativeTools_ACU(role);
+    const nativeTools = requestedTools ?? worldSimulationAgentNativeTools_ACU(role);
     const boundary = readWorldSimulationConversation_ACU(getChatArray_ACU()).compaction?.report;
     const promptCacheKey = supportsExplicitOpenAiCacheKey_ACU(preset) ? buildOpenAiPromptCacheKey_ACU({
       chatIdentity: identity.chatIdentity, role,
@@ -257,8 +284,8 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
         },
         webResearch: envelope.settings.webResearch,
       });
-      const invoke = (role: WorldSimulationAgentName_ACU, messages: readonly { role: string; content: string }[], preset: Parameters<typeof callAIWithResolvedPreset_ACU>[1]) =>
-        invokeWorldSimulationAgent_ACU(role, messages, preset, identity, signal);
+      const invoke = (role: WorldSimulationAgentName_ACU, messages: readonly { role: string; content: string }[], preset: Parameters<typeof callAIWithResolvedPreset_ACU>[1], nativeTools?: readonly import('../ai/native-tool').AgentNativeToolName_ACU[]) =>
+        invokeWorldSimulationAgent_ACU(role, messages, preset, identity, signal, nativeTools);
       const subagents = new WorldSimulationSubagentRuntime_ACU({ invoke });
       const writeSql = (runIdentity: WorldSimulationRunIdentity_ACU) => async (write: Parameters<NonNullable<import('./agent/agent-subagent-runtime').WorldSimulationSubagentRunInput_ACU['writeSql']>>[0]) => {
         if (signal.aborted) throw new Error('WORLD_SIMULATION_RUN_STALE');
@@ -367,17 +394,26 @@ export class WorldSimulationRuntime_ACU {
     private readonly getChat: () => any[] = getChatArray_ACU,
   ) {}
 
-  private async persistPromptMigration_ACU(): Promise<void> {
+  private async persistPromptMigration_ACU(): Promise<string[]> {
     const chat = this.getChat();
     const raw = (chat[0] as Record<string, any> | undefined)?.[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU];
-    if (!raw || raw.settings?.promptForceDefaultVersion === WORLD_SIMULATION_PROMPT_VERSION_ACU) return;
+    if (!raw || raw.settings?.promptForceDefaultVersion === WORLD_SIMULATION_PROMPT_VERSION_ACU) return [];
     const identity = getActiveChatStorageIdentity_ACU(chat);
-    if (!identity || this.orchestrator.isInFlight(identity)) return;
+    if (!identity || this.orchestrator.isInFlight(identity)) return [];
+    // First validate the persisted envelope. Do not announce a migration that failed to save.
+    new FirstFloorWorldSimulationStore_ACU().read();
+    const previous = raw.settings?.promptForceDefaultVersion;
+    // All pre-v21 profiles are reset on load; the notice must cover older profiles too.
+    const forcedRoles = previous !== WORLD_SIMULATION_PROMPT_VERSION_ACU
+      ? migrateWorldSimulationAgentPromptsDetailed_ACU(
+        raw.settings.agentPrompts as WorldSimulationAgentPrompts_ACU, {}).forcedRoles
+      : [];
     await new FirstFloorWorldSimulationStore_ACU().updateAtomically(current => current!, { chatIdentity: identity });
+    return forcedRoles;
   }
 
-  async initialize(): Promise<void> {
-    await this.persistPromptMigration_ACU();
+  async initialize(): Promise<string[]> {
+    return this.persistPromptMigration_ACU();
   }
 
   /** 读取派生视图：重载后残留的 running 以 paused/interrupted 呈现，不落盘。 */

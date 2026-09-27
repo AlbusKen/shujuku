@@ -1,7 +1,7 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
 import { sha256HexSync_ACU } from '../../shared/sha256-sync';
-import { WORLD_SIMULATION_PROMPT_VERSION_ACU, buildDefaultWorldSimulationAgentPrompts_ACU, migrateWorldSimulationAgentPrompts_ACU } from './agent/agent-defaults';
+import { WORLD_SIMULATION_PROMPT_VERSION_ACU, WORLD_SIMULATION_PROMPT_VERSION_V20_ACU, buildDefaultWorldSimulationAgentPrompts_ACU, migrateWorldSimulationAgentPrompts_ACU } from './agent/agent-defaults';
 import { buildDefaultWorldSimulationSettings_ACU } from './defaults';
 import type { WorldChronicleArchiveDetail_ACU, WorldChronicleArchiveSnapshot_ACU, WorldSimulationAnchorIdentity_ACU, WorldSimulationBucket_ACU } from './agent/agent-model';
 import { WORLD_SIMULATION_CHRONICLE_ARCHIVE_SCHEMA_VERSION_ACU } from './agent/agent-model';
@@ -378,8 +378,8 @@ function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU
   if (!isRecord_ACU(raw.agentApiPresets) || !isRecord_ACU(raw.agentPrompts)) fail_ACU('settings 的 Agent 配置必须是对象', phase);
   const agentApiPresets: WorldSimulationEnvelope_ACU['settings']['agentApiPresets'] = {};
   for (const [key, value] of Object.entries(raw.agentApiPresets)) {
-    // requirements-maintainer 已退役。渠道表是自由 Record，不跳过的话加载结果会把该键原样留下，下次保存又写回信封。
-    if (key === 'requirements-maintainer') continue;
+    // 退役角色不再公开配置；旧运行仍由运行时兼容路径处理。
+    if (key === 'requirements-maintainer' || key === 'timekeeper' || key === 'chronicler') continue;
     stableId_ACU(key, `settings.agentApiPresets.${key}`, phase);
     if (!isRecord_ACU(value)) fail_ACU(`settings.agentApiPresets.${key} 必须是对象`, phase);
     exactKeys_ACU(value, ['mode', 'presetName'], [], `settings.agentApiPresets.${key}`, phase);
@@ -392,9 +392,10 @@ function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU
     : validateWorldSimulationAgentPrompts_ACU(raw.agentPrompts, phase);
   const previousPromptVersion = Object.prototype.hasOwnProperty.call(raw, 'promptForceDefaultVersion')
     ? string_ACU(raw.promptForceDefaultVersion, 'settings.promptForceDefaultVersion', phase) : undefined;
+  // v21 is already using the one-shot protocol: preserve user edits on every subsequent read.
   const agentPrompts = previousPromptVersion === WORLD_SIMULATION_PROMPT_VERSION_ACU
-    ? migrateWorldSimulationAgentPrompts_ACU(validatedPrompts, {})
-    : buildDefaultWorldSimulationAgentPrompts_ACU();
+    ? validatedPrompts
+    : migrateWorldSimulationAgentPrompts_ACU(validatedPrompts, {});
   const readBudget = typeof raw.agentReadTokenBudget === 'string'
     ? (/^(?:100|[1-9]?\d)%$/.test(raw.agentReadTokenBudget) ? raw.agentReadTokenBudget : fail_ACU('settings.agentReadTokenBudget 百分比非法', phase))
     : integer_ACU(raw.agentReadTokenBudget, 'settings.agentReadTokenBudget', phase, 1, 1000000);
@@ -727,6 +728,9 @@ export function buildWorldSimulationBucketKey_ACU(anchor: WorldSimulationAnchorI
   return sha256HexSync_ACU([anchor.chatIdentity, anchor.messageKey, anchor.swipeId, anchor.contentDigest].join('\n'));
 }
 
+/** Only the raw content digest is cached; chat and swipe identity remain live. */
+const anchorContentDigests_ACU = new WeakMap<object, { content: string; digest: string }>();
+
 export function resolveWorldSimulationAnchor_ACU(messageIndex: number, chat?: any[]): WorldSimulationAnchorIdentity_ACU {
   const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
   const chatIdentity = getActiveChatStorageIdentity_ACU(messages);
@@ -742,7 +746,9 @@ export function resolveWorldSimulationAnchor_ACU(messageIndex: number, chat?: an
     ? String(message.swipe_id)
     : '0';
   const content = readMessageContent_ACU(message);
-  const contentDigest = sha256HexSync_ACU(content);
+  const cached = anchorContentDigests_ACU.get(message);
+  const contentDigest = cached?.content === content ? cached.digest : sha256HexSync_ACU(content);
+  if (cached?.content !== content) anchorContentDigests_ACU.set(message, { content, digest: contentDigest });
   const messageKey = `${typeof messageId}:${String(messageId)}`;
   return { chatIdentity, messageIndex, messageId, messageKey, swipeId, contentDigest };
 }

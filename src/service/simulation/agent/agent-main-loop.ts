@@ -7,7 +7,7 @@ import type { WorldSimulationEvidenceRegistry_ACU } from '../world-simulation-ev
 import { mergeWorldSimulationEvidenceRegistrySnapshot_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
 import { createWorldSimulationReadRoundState_ACU, runWorldSimulationToolBatch_ACU, type WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
 import { resolveWorldSimulationAgentApiPreset_ACU, type WorldSimulationApiPresetDependencies_ACU } from '../api-preset';
-import { WORLD_SIMULATION_AGENT_CATALOG_ACU, worldSimulationAgentNativeTools_ACU } from './agent-catalog';
+import { findWorldSimulationAgentDefinition_ACU, worldSimulationAgentNativeTools_ACU } from './agent-catalog';
 import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationDirectorRuntimeProtocolInstruction_ACU } from './agent-defaults';
 import type { WorldSimulationCandidate_ACU, WorldSimulationConversationMessage_ACU, WorldSimulationMainLoopResult_ACU, WorldSimulationReviewerResult_ACU, WorldSimulationRunResumeState_ACU, WorldSimulationSubagentOutcome_ACU } from './agent-model';
 import type { WorldSimulationAnchorIdentity_ACU } from './agent-model';
@@ -22,7 +22,7 @@ import { beginWorldSimulationSessionRun_ACU, endWorldSimulationSessionRun_ACU, l
 import { countWorldSimulationTokens_ACU, measureWorldSimulationPrompt_ACU, type WorldSimulationTokenCounter_ACU } from './agent-token-budget';
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './prompt-template';
-import { runWorldSimulationWorkflow_ACU } from './agent-workflow';
+import { runWorldSimulationWorkflow_ACU, runWorldSimulationOneShotWorkflow_ACU } from './agent-workflow';
 import { bindWorldSimulationFixedWorldbook_ACU, renderWorldSimulationDirectorReads_ACU, verifyWorldSimulationFixedWorldbook_ACU, WORLD_SIMULATION_WORLDBOOK_UNAVAILABLE_ACU } from './agent-shared-materials';
 import { loadAgentWorldbookSnapshot_ACU, renderAgentWorldbookTriggeredInjection_ACU, selectTriggeredWorldbookEntries_ACU, type AgentWorldbookSnapshot_ACU } from '../../continuation/agent/agent-worldbook-read';
 import { buildRecentWorldbookScanText_ACU } from '../../continuation/agent/agent-placeholder-resolver';
@@ -34,7 +34,7 @@ import { agentNativeTools_ACU, isModelExchangeSequence_ACU, nativeToolArguments_
 
 export interface WorldSimulationMainLoopDependencies_ACU {
   invoke: WorldSimulationAgentInvoker_ACU;
-  subagents: Pick<WorldSimulationSubagentRuntime_ACU, 'run' | 'runReviewer'>;
+  subagents: Pick<WorldSimulationSubagentRuntime_ACU, 'run' | 'runReviewer' | 'runOneShot'>;
   countTokens?: WorldSimulationTokenCounter_ACU;
   apiPreset?: WorldSimulationApiPresetDependencies_ACU;
 }
@@ -488,7 +488,7 @@ export class WorldSimulationMainLoop_ACU {
       await persist(iteration);
       let workflow: Awaited<ReturnType<typeof runWorldSimulationWorkflow_ACU>>;
       try {
-        workflow = await runWorldSimulationWorkflow_ACU({
+        workflow = await (input.runWrites?.hasConfirmedWrites ? runWorldSimulationWorkflow_ACU : runWorldSimulationOneShotWorkflow_ACU)({
           identity: input.identity,
           settings: input.settings,
           promptContext: resultContext_ACU(currentContext(), input.registry, uniqueCandidates_ACU(candidates), outcomes),
@@ -515,7 +515,7 @@ export class WorldSimulationMainLoop_ACU {
       for (const outcome of workflow.outcomes) upsertLatestOutcome_ACU(outcomes, outcome);
       updateWorldSimulationSession_ACU(input.identity.chatIdentity, workflowEntryId, {
         title: `固定工作流：${workflow.outcome}`, detail: workflow.summary,
-        ok: workflow.outcome !== 'escalate', status: workflow.outcome === 'escalate' ? 'failed' : 'done',
+        ok: workflow.outcome !== 'escalate' && workflow.outcome !== 'blocked', status: workflow.outcome === 'escalate' || workflow.outcome === 'blocked' ? 'failed' : 'done',
       });
       await persistEntry(workflowEntryId, 'workflow-opening');
       if (workflow.outcome === 'escalate') {
@@ -526,6 +526,12 @@ export class WorldSimulationMainLoop_ACU {
       } else {
         await clearWorldSimulationRunStateAtAnchor_ACU(input.anchor, input.chat);
         clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
+        if (workflow.outcome === 'blocked') {
+          const unresolved = workflow.pendingFixes.map(fix => `${fix.module}: ${fix.lastError}`);
+          const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: workflow.summary, detail: unresolved.join('；'), agentName: director, ok: false });
+          await persistEntry(blockId, 'workflow-opening-blocked');
+          return { outcome: 'blocked', summary: workflow.summary, unresolved, outcomes };
+        }
         if (workflow.outcome === 'no_change') return { outcome: 'no_change', summary: workflow.summary, outcomes, finalProjection: workflow.finalProjection };
         if (!workflow.commitCandidate) throw new Error('WORLD_SIMULATION_WORKFLOW_COMMIT_CANDIDATE_REQUIRED');
         return { outcome: 'commit', summary: workflow.summary, commitCandidate: workflow.commitCandidate, outcomes, finalProjection: workflow.finalProjection };
@@ -782,7 +788,7 @@ export class WorldSimulationMainLoop_ACU {
         });
         let workflow: Awaited<ReturnType<typeof runWorldSimulationWorkflow_ACU>>;
         try {
-          workflow = await runWorldSimulationWorkflow_ACU({
+          workflow = await (input.runWrites?.hasConfirmedWrites ? runWorldSimulationWorkflow_ACU : runWorldSimulationOneShotWorkflow_ACU)({
             identity: input.identity,
             settings: input.settings,
             promptContext: requestContext,
@@ -815,8 +821,8 @@ export class WorldSimulationMainLoop_ACU {
         updateWorldSimulationSession_ACU(input.identity.chatIdentity, workflowEntryId, {
           title: `固定工作流：${workflow.outcome}`,
           detail: workflow.summary,
-          ok: workflow.outcome !== 'escalate',
-          status: workflow.outcome === 'escalate' ? 'failed' : 'done',
+          ok: workflow.outcome !== 'escalate' && workflow.outcome !== 'blocked',
+          status: workflow.outcome === 'escalate' || workflow.outcome === 'blocked' ? 'failed' : 'done',
         });
         await persistEntry(workflowEntryId, `workflow-${iteration}`);
         if (workflow.outcome === 'escalate') {
@@ -839,6 +845,13 @@ ${workflow.summary}
         });
         await flushDirectorHistory();
         await clearWorldSimulationRunStateAtAnchor_ACU(input.anchor, input.chat);
+        if (workflow.outcome === 'blocked') {
+          clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
+          const unresolved = workflow.pendingFixes.map(fix => `${fix.module}: ${fix.lastError}`);
+          const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: workflow.summary, detail: unresolved.join('；'), agentName: director, ok: false });
+          await persistEntry(blockId, `workflow-${iteration}-blocked`);
+          return { outcome: 'blocked', summary: workflow.summary, unresolved, outcomes };
+        }
         if (workflow.outcome === 'no_change') {
           return { outcome: 'no_change', summary: workflow.summary, outcomes, finalProjection: workflow.finalProjection };
         }
@@ -851,7 +864,7 @@ ${workflow.summary}
         const rejected = [] as Array<{ agentName: string; reason: string }>;
         const runningEntries = new Map<(typeof action.delegations)[number], number>();
         for (const delegation of action.delegations) {
-          const definition = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === delegation.agentName);
+          const definition = findWorldSimulationAgentDefinition_ACU(delegation.agentName);
           const used = perAgent.get(delegation.agentName) ?? 0;
           const allowedKind = definition
             && (definition.kind === 'specialist' || definition.kind === 'researcher');

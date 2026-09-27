@@ -95,9 +95,6 @@ function buildReplay(options: ReplayOptions) {
       summary: '冻结 assistant 锚点正文',
       exact: true,
     }).evidenceRef!;
-    const clockPatch = {
-      clock: { days: 1, storyTime: '1h', evidenceRefs: [initialEvidence] },
-    };
     const clockSummary = '钟楼事件使世界时间推进一小时';
     const scripts = new Map<WorldSimulationAgentName_ACU, string[]>([
       ['world-director', [
@@ -112,32 +109,29 @@ function buildReplay(options: ReplayOptions) {
               skipModules: ['chronicle', 'rumors'],
             })]),
       ]],
-      ['timekeeper', [options.mode === 'no_change'
+      ['undercurrent-analyst', [options.mode === 'no_change'
         ? JSON.stringify({
             status: 'no_change',
-            agentName: 'timekeeper',
+            agentName: 'undercurrent-analyst',
             summary: '当前证据不足以支持状态变化',
             evidenceRefs: [initialEvidence],
             uncertainties: [],
           })
         : JSON.stringify({
             status: 'candidate',
-            agentName: 'timekeeper',
-            patch: clockPatch,
+            agentName: 'undercurrent-analyst',
+            sql: "UPDATE clock SET days = 1, story_time = '1h' WHERE expected_revision = 0;",
             summary: clockSummary,
             evidenceRefs: [initialEvidence],
             uncertainties: [],
           })]],
-      ['undercurrent-analyst', [JSON.stringify({
-        status: 'no_change', agentName: 'undercurrent-analyst', summary: '暗流没有变化', evidenceRefs: [initialEvidence], uncertainties: [],
-      })]],
       ['dramatis-keeper', [JSON.stringify({
         status: 'no_change', agentName: 'dramatis-keeper', summary: '人物没有变化', evidenceRefs: [initialEvidence], uncertainties: [],
       })]],
       ['guidance-composer', [JSON.stringify({
         status: 'candidate',
         agentName: 'guidance-composer',
-        patch: { guidance: { signals: [{ text: '远处钟声响起', voice: 'ambient', sourceId: 'clock' }] } },
+        sql: `UPDATE guidance SET signals = '${JSON.stringify([{ text: '远处钟声响起', voice: 'ambient', sourceId: 'clock' }])}' WHERE expected_revision = 0;`,
         summary: '远处钟声可以进入投影',
         evidenceRefs: [initialEvidence],
         uncertainties: [],
@@ -292,12 +286,11 @@ describe('T9 世界推演隔离 API replay', () => {
     });
     if (!result || result.status !== 'completed' || result.result.outcome !== 'commit') throw new Error('expected committed replay');
     expect(result.result.outcomes.map(item => [item.agentName, item.status, item.reasonCode])).toEqual([
-      ['timekeeper', 'candidate', undefined],
-      ['undercurrent-analyst', 'no_change', undefined],
+      ['undercurrent-analyst', 'candidate', undefined],
       ['dramatis-keeper', 'no_change', undefined],
       ['guidance-composer', 'candidate', undefined],
     ]);
-    expect(result.result.commitCandidate.acceptedCandidates.map(item => item.agentName)).toEqual(['timekeeper', 'guidance-composer']);
+    expect(result.result.commitCandidate.acceptedCandidates.map(item => item.agentName)).toEqual(['undercurrent-analyst', 'guidance-composer']);
     expect(replay.store.read()).toMatchObject({ ledger: { revision: 1, clock: { day: 2, storyTime: '1h' }, guidance: { signals: [{ text: '远处钟声响起', voice: 'ambient' }] } }, task: { status: 'completed', activeRun: null } });
     const { buildWorldSimulationProjection_ACU } = await import('../../../src/service/simulation/simulation-projection');
     expect(result.result.finalProjection).toMatchObject({ sourceAgent: 'guidance-composer', sourceRevision: 1, deliverable: true });
@@ -357,7 +350,7 @@ describe('T9 世界推演隔离 API replay', () => {
 
     const result = await replay.run();
 
-    expect(result).toMatchObject({ status: 'completed', result: { outcome: 'no_change', outcomes: [{ status: 'no_change' }, { status: 'no_change' }, { status: 'no_change' }] } });
+    expect(result).toMatchObject({ status: 'completed', result: { outcome: 'no_change', outcomes: [{ status: 'no_change' }, { status: 'no_change' }] } });
     if (!result || result.status !== 'completed' || result.result.outcome !== 'no_change') throw new Error('expected no_change replay');
     expect(result.result.finalProjection).toEqual({ content: null, sourceAgent: 'current-ledger', sourceRevision: 0, deliverable: true });
     expect(replay.store.read()).toMatchObject({ ledger: { revision: 0 }, task: { status: 'completed', activeRun: null }, stages: [{ status: 'completed' }] });

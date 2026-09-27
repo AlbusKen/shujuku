@@ -76,8 +76,9 @@ describe('world simulation envelope store', () => {
     expect(() => validateWorldSimulationEnvelope_ACU(outOfRange)).toThrow(WorldSimulationValidationError_ACU);
   });
 
-  it('生产 settings 读取只迁移 V16 旧默认段并保留用户改写', () => {
+  it('生产 settings 读取升级 V16 旧默认段并剔除退役角色，保留持久原文', () => {
     const old = buildDefaultWorldSimulationEnvelope_ACU();
+    old.settings.promptForceDefaultVersion = 'world-simulation-v20';
     old.settings.agentPrompts.timekeeper = buildV16WorldSimulationAgentPrompt_ACU('timekeeper');
     old.settings.agentPrompts['world-director'] = buildV16WorldSimulationAgentPrompt_ACU('world-director');
     const customIndex = old.settings.agentPrompts.timekeeper.findIndex(segment => segment.content.startsWith('<WORLD_SIMULATION_ENGINE_SEAM:WORKFLOW>'));
@@ -86,8 +87,9 @@ describe('world simulation envelope store', () => {
     const chat: any[] = [{ _qrf_world_simulation: old }];
     _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
     const loaded = new FirstFloorWorldSimulationStore_ACU().read()!;
-    expect(loaded.settings.agentPrompts.timekeeper[customIndex]).toEqual(expected);
+    expect(loaded.settings.agentPrompts).not.toHaveProperty('timekeeper');
     expect(loaded.settings.agentPrompts['world-director']).toEqual(buildDefaultWorldSimulationAgentPrompts_ACU()['world-director']);
+    expect(chat[0]._qrf_world_simulation.settings.agentPrompts.timekeeper[customIndex]).toEqual(expected);
     expect(chat[0]._qrf_world_simulation.settings.agentPrompts['world-director']).toEqual(old.settings.agentPrompts['world-director']);
   });
 

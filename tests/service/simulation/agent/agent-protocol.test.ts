@@ -217,18 +217,6 @@ describe('世界推演 Agent 协议', () => {
     expect(director).toContain('block 只能包含 action、reason、unresolved');
   });
 
-  it('默认提示词模板已接线 specialist SQL 契约与 director 字段白名单', () => {
-    const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
-    const specialist = prompts['undercurrent-analyst'].map(segment => segment.content).join('\n');
-    expect(specialist).toContain('INSERT 仍须显式给 expected_revision=0');
-    expect(specialist).toContain('数组行 INSERT 的 id 可省略');
-    expect(specialist).toContain('字段纪律（逐栏 SQL）：dimensions 新行需 name,kind');
-    expect(specialist).toContain('已保存草稿按 missingFields 仅 UPDATE 缺栏');
-    expect(specialist).toContain('INSERT INTO');
-    const director = prompts['world-director'].map(segment => segment.content).join('\n');
-    expect(director).toContain('evidenceRefs 只允许出现在 finalize 顶层');
-    expect(director).toContain('block 只能包含 action、reason、unresolved');
-  });
 
   it('草稿合并只拼接数组和递归对象，标量冲突时 fail-closed', () => {
     expect(mergeWorldSimulationJsonDrafts_ACU(

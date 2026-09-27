@@ -371,7 +371,7 @@ describe('原生工具实际宿主请求体', () => {
     ['world-director', ['read', 'search']],
     ['timekeeper', ['read', 'write_sql']],
     ['causality-reviewer', ['read']],
-    ['guidance-composer', ['read', 'write_sql']],
+    ['guidance-composer', ['read']],
     ['lore-researcher', ['read', 'search']],
   ] as const)('%s 的宿主请求只传对应角色工具白名单', async (name, expectedTools) => {
     mockFetch.mockResolvedValue({ ok: true, json: async () => ({ choices: [{ message: { content: '完成' } }] }) });

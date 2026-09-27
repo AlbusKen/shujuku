@@ -27,6 +27,11 @@ export function buildWorldSimulationProjection_ACU(ledger: WorldSimulationLedger
   return `${START_ACU}\n<与此同时>\n${sections.join('\n')}\n</与此同时>\n${END_ACU}`;
 }
 
+/** Prompt-only view: never use this text for anchor identity or persistent content. */
+export function stripWritingAnnotations_ACU(text: string): string {
+  return String(text ?? '').replace(/<!--[\s\S]*?-->/g, '').replace(/(?:\r?\n){3,}/g, '\n\n');
+}
+
 export function applyWorldSimulationProjection_ACU(content: string, projection: string | null): string {
   const base = String(content ?? '').replace(OWNED_BLOCK_ACU, '').trimEnd();
   return projection ? `${base}${base ? '\n\n' : ''}${projection}` : base;

@@ -519,6 +519,7 @@ export function foldWorldSimulationLedger_ACU(chat: readonly unknown[], throughI
   for (let index = 0; index <= end; index += 1) {
     const message = chat[index];
     if (!isAssistant_ACU(message)) continue;
+    if (!Object.prototype.hasOwnProperty.call(message, WORLD_SIMULATION_STATE_FIELD_ACU)) continue;
     let anchor: WorldSimulationAnchorIdentity_ACU;
     try {
       anchor = resolveWorldSimulationAnchor_ACU(index, chat as any[]);
@@ -591,6 +592,7 @@ export function foldWorldSimulationArchive_ACU(chat: readonly unknown[], through
   for (let index = 0; index <= end; index += 1) {
     const message = chat[index];
     if (!isAssistant_ACU(message)) continue;
+    if (!Object.prototype.hasOwnProperty.call(message, WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU)) continue;
     let anchor: WorldSimulationAnchorIdentity_ACU;
     try {
       anchor = resolveWorldSimulationAnchor_ACU(index, chat as any[]);

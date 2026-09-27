@@ -63,7 +63,7 @@ export function createWorldSimulationPlaceholderResolvers_ACU(
       if (isWorldSimulationLedgerContext_ACU(context.worldState)) {
         const ledger = context.worldState;
         const catalog = buildInUseWorldCatalog_ACU(ledger);
-        const composerView = context.writableModules?.length === 1 && context.writableModules[0] === 'guidance';
+        const composerView = context.writableModules?.includes('guidance');
         if (composerView) {
           return serialize_ACU({
             clock: ledger.clock,

@@ -784,8 +784,8 @@ describe('世界推演 Agent runtime', () => {
     }
     invoke.mockClear();
     const tampered = { ...fixedWorldbook, sections: fixedWorldbook.sections.map(section => ({ ...section, start: section.start + 1 })) };
-    await expect(runtime.run({ ...specialist, fixedWorldbook: tampered })).rejects.toThrow('WORLD_SIMULATION_WORLDBOOK_BOUNDARY_UNVERIFIED');
-    await expect(runtime.runReviewer({ ...reviewer, fixedWorldbook: tampered })).rejects.toThrow('WORLD_SIMULATION_WORLDBOOK_BOUNDARY_UNVERIFIED');
+    await expect(runtime.run({ ...specialist, fixedWorldbook: tampered })).rejects.toThrow('WORLD_SIMULATION_WORLDBOOK_METADATA_UNVERIFIED');
+    await expect(runtime.runReviewer({ ...reviewer, fixedWorldbook: tampered })).rejects.toThrow('WORLD_SIMULATION_WORLDBOOK_METADATA_UNVERIFIED');
     expect(invoke).not.toHaveBeenCalled();
   });
 
@@ -803,7 +803,7 @@ describe('世界推演 Agent runtime', () => {
     }
     const state = (name: string): Record<string, unknown> => {
       const text = sent.get(name)!;
-      const match = /世界状态：(\{[^\n]*\})\n锚点正文：/.exec(text);
+      const match = /世界状态：(?:<UNTRUSTED_WORLD_STATE>\n)?([\s\S]*?)(?:\n<\/UNTRUSTED_WORLD_STATE>)?(?:\n锚点正文：|$)/.exec(text);
       expect(match).not.toBeNull();
       return JSON.parse(match![1]);
     };
@@ -1908,14 +1908,11 @@ describe('世界推演 Agent runtime', () => {
     };
     const subagents = {
       run: vi.fn(async ({ delegation }: { delegation: { agentName: string } }) => {
-        if (delegation.agentName === 'guidance-composer') {
-          return { agentName: 'guidance-composer', status: 'candidate' as const, summary: guidanceCandidate.summary, candidate: guidanceCandidate, evidenceRefs: [evidence], uncertainties: [] };
-        }
-        if (delegation.agentName === 'timekeeper') {
-          return { agentName: candidate.agentName, status: 'candidate' as const, summary: candidate.summary, candidate, evidenceRefs: [evidence], uncertainties: [] };
-        }
-        return { agentName: delegation.agentName, status: 'no_change' as const, summary: '无变化', evidenceRefs: [evidence], uncertainties: [] };
+        return { agentName: delegation.agentName, status: 'no_change' as const, summary: '旧逐栏入口未使用', evidenceRefs: [evidence], uncertainties: [] };
       }),
+      runOneShot: vi.fn(async ({ agentName }: { agentName: string }) => agentName === 'guidance-composer'
+        ? { agentName, status: 'candidate' as const, summary: guidanceCandidate.summary, candidate: guidanceCandidate, evidenceRefs: [evidence], uncertainties: [] }
+        : { agentName, status: 'candidate' as const, summary: candidate.summary, candidate: { ...candidate, agentName, candidateId: 'run-guidance:undercurrent-analyst:1', writableModules: ['clock', 'dimensions', 'seeds'] }, evidenceRefs: [evidence], uncertainties: [] }),
       runReviewer: vi.fn(),
     };
     const loop = new WorldSimulationMainLoop_ACU({ invoke: vi.fn(async () => JSON.stringify({ action: 'open_round', summary: '锁定时钟', focus: '时间推进', dispatchChronicler: false })), subagents, apiPreset, countTokens: async () => 1 });
@@ -1923,7 +1920,7 @@ describe('世界推演 Agent runtime', () => {
     const result = await loop.run({ identity, settings: settings(), promptContext, registry, tools });
     expect(result.outcome).toBe('commit');
     if (result.outcome !== 'commit') throw new Error('expected commit');
-    expect(result.commitCandidate.acceptedCandidates.map(item => item.agentName)).toEqual(['timekeeper', 'guidance-composer']);
+    expect(result.commitCandidate.acceptedCandidates.map(item => item.agentName)).toEqual(['undercurrent-analyst', 'guidance-composer']);
     expect(result.commitCandidate.reviewer).toBeUndefined();
     expect(subagents.runReviewer).not.toHaveBeenCalled();
   });
@@ -1936,8 +1933,9 @@ describe('世界推演 Agent runtime', () => {
     const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
     const invoke = vi.fn();
     const subagents = {
-      run: vi.fn(async ({ delegation }: { delegation: { agentName: string } }) => ({
-        agentName: delegation.agentName,
+      run: vi.fn(),
+      runOneShot: vi.fn(async ({ agentName }: { agentName: string }) => ({
+        agentName,
         status: 'no_change' as const,
         summary: '没有变化',
         evidenceRefs: [evidence],
@@ -1954,8 +1952,10 @@ describe('世界推演 Agent runtime', () => {
 
     expect(result.outcome).toBe('no_change');
     expect(invoke).not.toHaveBeenCalled();
-    expect(subagents.run.mock.calls.map(([call]) => call.delegation.agentName)).toEqual(
-      expect.arrayContaining(['timekeeper', 'undercurrent-analyst', 'dramatis-keeper']));
+    expect(subagents.run).not.toHaveBeenCalled();
+    expect(subagents.runOneShot.mock.calls.map(([call]) => call.agentName)).toEqual(
+      expect.arrayContaining(['undercurrent-analyst', 'dramatis-keeper']));
+    expect(subagents.runOneShot).toHaveBeenCalledTimes(2);
     expect(subagents.runReviewer).not.toHaveBeenCalled();
     expect(readWorldSimulationRunState_ACU(identity.chatIdentity, identity.taskId,
       `${identity.stageId}#${identity.stageRevision}#${identity.baseLedgerRevision}`)).toBeNull();

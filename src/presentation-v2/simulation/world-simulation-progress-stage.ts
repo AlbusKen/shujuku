@@ -4,8 +4,10 @@ export const WORLD_SIMULATION_PROGRESS_LABELS_ACU = {
   survey: '世界线测绘',
   intel: '信息取证',
   backstage: '幕后演算',
+  batchOne: '批次一：时间与暗流 / 人物与位置',
+  batchTwo: '批次二：编年、传闻与投影',
   review: '因果审核',
-  anchor: '现实锚定',
+  anchor: '提交',
   completed: '推演完成',
   interrupted: '推演中断',
 } as const;
@@ -59,7 +61,8 @@ export function deriveWorldSimulationProgressView_ACU(
     return hiddenView_ACU();
   }
 
-  const runningSpecialists = run.filter(item => item.kind === 'delegation' && !isReviewerEntry_ACU(item) && item.status === 'running');
+  const runningSpecialists = run.filter(item => item.kind === 'delegation'
+    && item.agentName !== 'world-director' && !isReviewerEntry_ACU(item) && item.status === 'running');
   const reviewerRunning = run.some(item => isReviewerEntry_ACU(item) && item.status === 'running');
   const lastIsFinalize = last?.kind === 'finalize' || (last?.kind === 'main_action' && /finalize/.test(last.title));
 
@@ -71,6 +74,12 @@ export function deriveWorldSimulationProgressView_ACU(
   }
   if (runningSpecialists.length) {
     const concurrent = runningSpecialists.length;
+    if (runningSpecialists.every(item => item.agentName === 'guidance-composer')) {
+      return { visible: true, phase: 'batchTwo', label: WORLD_SIMULATION_PROGRESS_LABELS_ACU.batchTwo, concurrent, terminal: false };
+    }
+    if (runningSpecialists.every(item => item.agentName === 'undercurrent-analyst' || item.agentName === 'dramatis-keeper')) {
+      return { visible: true, phase: 'batchOne', label: `${WORLD_SIMULATION_PROGRESS_LABELS_ACU.batchOne} · ${concurrent} 路并行`, concurrent, terminal: false };
+    }
     return { visible: true, phase: 'backstage', label: `${WORLD_SIMULATION_PROGRESS_LABELS_ACU.backstage} · ${concurrent} 路并行`, concurrent, terminal: false };
   }
   if (last?.kind === 'stage_plan' || (run.some(item => item.kind === 'stage_plan') && !run.some(item => item.kind === 'main_action' || item.kind === 'tool_read' || item.kind === 'delegation'))) {

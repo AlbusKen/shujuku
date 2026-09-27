@@ -141,12 +141,12 @@ describe('世界推演子代理资料边界', () => {
     const protocol = normal.segments.find(segment => segment.content.includes('ENGINE_SEAM:PROTOCOL'))!.content;
     const workflow = normal.segments.find(segment => segment.content.includes('ENGINE_SEAM:WORKFLOW'))!.content;
     expect(protocol).not.toContain('read/search 需求');
-    expect(protocol).toContain('授权 read 地址');
+    expect(protocol).toContain('输出协议见系统消息开头');
     expect(workflow).not.toContain('worldbook scope 搜索');
     const customized = defaults.map(segment => segment.content.includes('ENGINE_SEAM:WORKFLOW')
       ? { ...segment, content: `${segment.content}\n用户自定义约束` } : segment);
     expect(splitWorldSimulationSubagentPrompt_ACU(customized, 'dramatis-keeper').segments
-      .find(segment => segment.content.includes('ENGINE_SEAM:WORKFLOW'))!.content).toContain('worldbook scope 搜索');
+      .find(segment => segment.content.includes('ENGINE_SEAM:WORKFLOW'))!.content).toBe(`${workflow}\n用户自定义约束`);
     const researcher = splitWorldSimulationSubagentPrompt_ACU(buildDefaultWorldSimulationAgentPrompt_ACU('lore-researcher'), 'lore-researcher');
     expect(researcher.segments.find(segment => segment.content.includes('ENGINE_SEAM:PROTOCOL'))!.content).toContain('read/search 需求');
   });

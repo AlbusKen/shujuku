@@ -116,10 +116,7 @@ function splitStatements_ACU(sql: string): string[] {
   return statements;
 }
 
-export function parseRestrictedSqlDml_ACU(sql: string): RestrictedSqlStatement_ACU[] {
-  const source = String(sql ?? '').replace(/```sql|```/gi, '').trim();
-  if (!source) return [];
-  return splitStatements_ACU(source).map(statement => {
+function parseOneStatement_ACU(statement: string): RestrictedSqlStatement_ACU {
     let match = statement.match(/^INSERT\s+INTO\s+([A-Za-z_][\w]*)\s*\(([^)]+)\)\s*VALUES\s*\(([\s\S]+)\)$/i);
     if (match) {
       const columns = splitSqlList_ACU(match[2]).map(unquoteIdentifier_ACU);
@@ -142,5 +139,53 @@ export function parseRestrictedSqlDml_ACU(sql: string): RestrictedSqlStatement_A
       return { kind: 'delete', table: unquoteIdentifier_ACU(match[1]), where };
     }
     throw new Error(`只允许 INSERT、UPDATE、DELETE：${statement.slice(0, 80)}`);
+}
+
+export function parseRestrictedSqlDml_ACU(sql: string): RestrictedSqlStatement_ACU[] {
+  const source = String(sql ?? '').replace(/```sql|```/gi, '').trim();
+  if (!source) return [];
+  return splitStatements_ACU(source).map(parseOneStatement_ACU);
+}
+
+export interface RestrictedSqlTolerantResult_ACU {
+  statements: RestrictedSqlStatement_ACU[];
+  rejected: Array<{ index: number; text: string; reason: string }>;
+}
+
+/** Only the new one-shot pipeline tolerates independent malformed statements. */
+export function parseRestrictedSqlDmlTolerant_ACU(sql: string): RestrictedSqlTolerantResult_ACU {
+  let source = String(sql ?? '').replace(/```sql|```/gi, '').trim();
+  const scan = (value: string): { parts: string[]; tail: string; open: boolean } => {
+    const parts: string[] = [];
+    let start = 0;
+    let open = false;
+    for (let index = 0; index < value.length; index += 1) {
+      if (value[index] === "'") {
+        if (open && value[index + 1] === "'") { index += 1; continue; }
+        open = !open;
+      } else if (value[index] === ';' && !open) {
+        const part = value.slice(start, index).trim();
+        if (part) parts.push(part);
+        start = index + 1;
+      }
+    }
+    return { parts, tail: value.slice(start).trim(), open };
+  };
+  let scanned = scan(source);
+  if (scanned.open && source.endsWith("'") && !scan(source.slice(0, -1)).open) {
+    source = source.slice(0, -1).trimEnd();
+    scanned = scan(source);
+  }
+  const rejected: RestrictedSqlTolerantResult_ACU['rejected'] = [];
+  const statements: RestrictedSqlStatement_ACU[] = [];
+  const parts = [...scanned.parts, ...(scanned.tail ? [scanned.tail] : [])];
+  parts.forEach((text, index) => {
+    if (scanned.open && index === parts.length - 1) {
+      rejected.push({ index, text, reason: '字符串字面量未闭合' });
+      return;
+    }
+    try { statements.push(parseOneStatement_ACU(text)); }
+    catch (error) { rejected.push({ index, text, reason: error instanceof Error ? error.message : String(error) }); }
   });
+  return { statements, rejected };
 }

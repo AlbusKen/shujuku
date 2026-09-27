@@ -1,7 +1,7 @@
 import { WORLD_GUIDANCE_SIGNAL_MAX_CHARS_ACU, WORLD_GUIDANCE_SIGNAL_VOICES_ACU, WORLD_PLAYER_CONTACTS_ACU, WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU, WORLD_SIMULATION_LEDGER_MODULES_ACU, WORLD_SIMULATION_SCHEMA_VERSION_ACU, WORLD_SIMULATION_SINGLETON_ID_ACU, WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldGuidanceSignal_ACU, type WorldSimulationLedger_ACU, type WorldSimulationStagePlan_ACU } from '../model';
 import { applyWorldSimulationProjection_ACU } from '../simulation-projection';
 import { coerceWorldSimulationEnum_ACU, coerceWorldSimulationInteger_ACU, coerceWorldSimulationStringArray_ACU } from '../simulation-patch-normalize';
-import { parseRestrictedSqlDml_ACU, type RestrictedSqlStatement_ACU, type RestrictedSqlValue_ACU } from '../../shared/restricted-sql-dml';
+import { parseRestrictedSqlDml_ACU, parseRestrictedSqlDmlTolerant_ACU, type RestrictedSqlStatement_ACU, type RestrictedSqlValue_ACU } from '../../shared/restricted-sql-dml';
 import { findUnauthorizedWorldSimulationEvidenceRefs_ACU, type WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
 import { formatWorldSimulationToolAddressHints_ACU, WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from '../world-simulation-agent-tools';
 import { findWorldSimulationAgentDefinition_ACU } from './agent-catalog';
@@ -477,6 +477,106 @@ function worldSimulationSqlPatch_ACU(statements: readonly RestrictedSqlStatement
     }
   }
   return patch;
+}
+
+export interface WorldSimulationOneShotNormalization_ACU {
+  payload: Record<string, unknown>;
+  issues: Array<{ module: typeof WORLD_SIMULATION_LEDGER_MODULES_ACU[number]; source: 'contract_rejected'; path: string; message: string }>;
+}
+
+/** New one-shot protocol only: isolate invalid statements and bind revisions to the run's authoritative base. */
+export function normalizeOneShotSpecialistPayload_ACU(payload: Record<string, unknown>, ctx: {
+  agentName: string;
+  writableModules: readonly (typeof WORLD_SIMULATION_LEDGER_MODULES_ACU[number])[];
+  givenLedger: WorldSimulationLedger_ACU;
+  baseLedgerRevision: number;
+  anchorEvidenceRef: string;
+  authorizedRefs: ReadonlySet<string>;
+}): WorldSimulationOneShotNormalization_ACU {
+  const issues: WorldSimulationOneShotNormalization_ACU['issues'] = [];
+  const fallback = ctx.writableModules[0] ?? 'clock';
+  const issue = (module: typeof fallback, path: string, error: unknown): void => {
+    issues.push({ module, source: 'contract_rejected', path, message: error instanceof Error ? error.message : String(error) });
+  };
+  if (payload.agentName !== undefined && payload.agentName !== ctx.agentName) throw new Error('WORLD_SIMULATION_AGENT_IDENTITY_MISMATCH');
+  const common = { agentName: ctx.agentName, summary: typeof payload.summary === 'string' && payload.summary.trim() ? payload.summary : '本轮资料维护', uncertainties: Array.isArray(payload.uncertainties) ? payload.uncertainties : [] };
+  if (payload.status === 'no_change') return { payload: { ...common, status: 'no_change', evidenceRefs: [ctx.anchorEvidenceRef] }, issues };
+  if (payload.status === 'failed') return { payload: { status: 'failed', agentName: ctx.agentName, reasonCode: payload.reasonCode, message: payload.message }, issues };
+  if (payload.status !== 'candidate' || typeof payload.sql !== 'string' || !payload.sql.trim()) throw new Error('WORLD_SIMULATION_ONE_SHOT_SQL_REQUIRED');
+  const parsed = parseRestrictedSqlDmlTolerant_ACU(payload.sql);
+  for (const rejected of parsed.rejected) issue(fallback, `$.sql[${rejected.index}]`, rejected.reason);
+  const patch: Record<string, unknown> = {};
+  const refs = new Set([ctx.anchorEvidenceRef]);
+  parsed.statements.forEach((original, index) => {
+    const statement: RestrictedSqlStatement_ACU = original.kind === 'insert'
+      ? { ...original, values: { ...original.values } }
+      : original.kind === 'update' ? { ...original, values: { ...original.values }, where: { ...original.where } }
+        : { ...original, where: { ...original.where } };
+    const module = WORLD_SIMULATION_SQL_TABLE_MODULE_ACU[statement.table as keyof typeof WORLD_SIMULATION_SQL_TABLE_MODULE_ACU];
+    const owner = module === 'chronicleArchive' ? 'chronicle' : module;
+    if (!owner || !ctx.writableModules.includes(owner)) {
+      issue(fallback, `$.sql[${index}]`, `SQL_TABLE_FORBIDDEN:${statement.table}`);
+      return;
+    }
+    try {
+      if (['clock', 'player', 'guidance'].includes(owner) && statement.kind === 'update') {
+        // All candidates commit against the same run base, not the batch-two preview revision.
+        statement.where.expected_revision = ctx.baseLedgerRevision;
+      } else if (['dimensions', 'seeds', 'actors', 'rumors'].includes(owner)) {
+        if (statement.kind === 'insert') statement.values.expected_revision = 0;
+        else {
+          const id = statement.where.id;
+          const rows = ctx.givenLedger[owner as 'dimensions' | 'seeds' | 'actors' | 'rumors'];
+          const row = rows.find(item => item.id === id);
+          if (!row) throw new Error(`not_found:${owner}:${String(id ?? '')}`);
+          statement.where.expected_revision = row.revision;
+        }
+      }
+      const single = worldSimulationSqlPatch_ACU([statement]);
+      for (const [key, raw] of Object.entries(single)) {
+        const value = raw as Record<string, unknown>;
+        if (['dimensions', 'seeds', 'actors', 'rumors', 'chronicle', 'chronicleArchive'].includes(key)) {
+          const target = (patch[key] ??= {}) as Record<string, unknown>;
+          for (const [field, items] of Object.entries(value)) {
+            if (Array.isArray(items)) target[field] = [...((target[field] as unknown[] | undefined) ?? []), ...items];
+            else target[field] = items;
+          }
+        } else patch[key] = { ...((patch[key] as Record<string, unknown> | undefined) ?? {}), ...value };
+      }
+    } catch (error) { issue(owner, `$.sql[${index}]`, error); }
+  });
+  const evidenceFields = (value: unknown): void => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) { value.forEach(evidenceFields); return; }
+    const record = value as Record<string, unknown>;
+    if ('evidenceRefs' in record) {
+      const allowed = Array.isArray(record.evidenceRefs) ? record.evidenceRefs.filter((ref): ref is string => typeof ref === 'string' && ctx.authorizedRefs.has(ref)) : [];
+      record.evidenceRefs = allowed.length ? allowed : [ctx.anchorEvidenceRef];
+    }
+    for (const child of Object.values(record)) evidenceFields(child);
+  };
+  evidenceFields(patch);
+  for (const module of ['clock', 'player', 'guidance'] as const) {
+    if (patch[module]) (patch[module] as Record<string, unknown>).evidenceRefs ??= [ctx.anchorEvidenceRef];
+  }
+  for (const module of ['dimensions', 'seeds'] as const) {
+    const rows = (patch[module] as { upsert?: Array<Record<string, unknown>> } | undefined)?.upsert ?? [];
+    rows.forEach(row => { row.evidenceRefs ??= [ctx.anchorEvidenceRef]; });
+  }
+  for (const row of (patch.chronicle as { append?: Array<Record<string, unknown>> } | undefined)?.append ?? []) row.evidenceRefs ??= [ctx.anchorEvidenceRef];
+  const collect = (value: unknown): void => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) { value.forEach(collect); return; }
+    for (const [key, child] of Object.entries(value)) {
+      if (key === 'evidenceRefs' && Array.isArray(child)) child.forEach(ref => { if (typeof ref === 'string') refs.add(ref); });
+      else collect(child);
+    }
+  };
+  collect(patch);
+  return { payload: Object.keys(patch).length
+    ? { ...common, status: 'candidate', patch, evidenceRefs: [...refs] }
+    : issues.length ? { status: 'failed', agentName: ctx.agentName, reasonCode: 'SQL_REJECTED', message: issues.map(item => item.message).join('；') }
+      : { ...common, status: 'no_change', evidenceRefs: [ctx.anchorEvidenceRef] }, issues };
 }
 
 function normalizeSpecialistSql_ACU(value: Record<string, unknown>): Record<string, unknown> {

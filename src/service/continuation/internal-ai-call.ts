@@ -113,6 +113,8 @@ export interface ContinuationInternalAiRetryOptions_ACU {
   retryDelaySeconds: number;
   /** 延时实现。缺省 setTimeout。 */
   wait?: (ms: number) => Promise<void>;
+  /** 调用方的传输错误判定；缺省保持续写的校验与取消边界。 */
+  isRetryable?: (error: unknown) => boolean;
   /** 等待结束后的存活检查：返回 false 表示任务已被停止/换轮，立即抛出原错误不再重试。 */
   isCurrent?: () => boolean;
 }
@@ -156,7 +158,7 @@ export async function callContinuationInternalAiWithRetry_ACU<T>(
       return await invoke();
     } catch (error) {
       lastError = error;
-      if (attempt >= retries || !isRetryableContinuationTransportError_ACU(error)) throw error;
+      if (attempt >= retries || !(options.isRetryable ?? isRetryableContinuationTransportError_ACU)(error)) throw error;
       await wait(Math.max(0, options.retryDelaySeconds) * 1000);
       // 等待期间任务可能已被停止/换轮：先查存活再决定是否重打，不做无谓请求。
       if (options.isCurrent && !options.isCurrent()) throw error;

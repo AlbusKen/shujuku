@@ -25,6 +25,7 @@ import type {
 import type { WorldSimulationPlaceholderContext_ACU } from './agent-placeholder-resolver';
 import type { WorldSimulationSubagentRuntime_ACU } from './agent-subagent-runtime';
 import type { WorldSimulationFixedWorldbook_ACU } from './agent-shared-materials';
+import { logWorldSimulationSession_ACU, updateWorldSimulationSession_ACU } from './agent-session-log';
 
 export interface WorldSimulationWorkflowOpening_ACU {
   summary: string;
@@ -57,7 +58,7 @@ export interface WorldSimulationWorkflowInput_ACU {
 }
 
 export interface WorldSimulationWorkflowResult_ACU {
-  outcome: 'commit' | 'no_change' | 'escalate';
+  outcome: 'commit' | 'no_change' | 'escalate' | 'blocked';
   summary: string;
   outcomes: WorldSimulationSubagentOutcome_ACU[];
   pendingFixes: WorldSimulationPendingFix_ACU[];
@@ -239,6 +240,15 @@ function clearCompletedPending_ACU(
   ledger: WorldSimulationLedger_ACU,
   outcomes: readonly WorldSimulationSubagentOutcome_ACU[],
 ): WorldSimulationLedger_ACU {
+  // 同一轮多个角色可共享模块（rumors）。一方的 no_change 不能抹去另一方
+  // 的事务拒绝或不完整结果；只有本轮该模块全体结果均合格才清历史缺口。
+  const incomplete = new Set<WorldSimulationLedgerModule_ACU>();
+  for (const outcome of outcomes) {
+    for (const issue of outcome.unresolvedIssues ?? []) incomplete.add(issue.module);
+    for (const [module, state] of Object.entries(outcome.moduleCompletion ?? {})) {
+      if (!COMPLETE_STATES_ACU.has(String(state))) incomplete.add(module as WorldSimulationLedgerModule_ACU);
+    }
+  }
   const completed = new Set<WorldSimulationLedgerModule_ACU>();
   for (const outcome of outcomes) {
     const fallbackModules = modulesForAgent_ACU(outcome.agentName);
@@ -251,7 +261,7 @@ function clearCompletedPending_ACU(
     ]));
     for (const [module, state] of Object.entries(moduleCompletion)) {
       const ledgerModule = module as WorldSimulationLedgerModule_ACU;
-      if (COMPLETE_STATES_ACU.has(String(state)) && !touched.has(ledgerModule)) completed.add(ledgerModule);
+      if (COMPLETE_STATES_ACU.has(String(state)) && !touched.has(ledgerModule) && !incomplete.has(ledgerModule)) completed.add(ledgerModule);
     }
   }
   if (!completed.size) return ledger;
@@ -396,6 +406,41 @@ async function applySafely_ACU(
     }
   }
   return { ledger: rolling, accepted: kept, rejected };
+}
+
+/** 新流程只接受能从运行 base 整组重放的完整候选；旧逐栏流程保留原宽容预览。 */
+async function applyOneShotCandidates_ACU(
+  base: WorldSimulationLedger_ACU,
+  candidates: readonly WorldSimulationCandidate_ACU[],
+  authorized: ReadonlySet<string>,
+  settings: WorldSimulationSettings_ACU,
+  anchorMessage: string,
+): Promise<{ ledger: WorldSimulationLedger_ACU; accepted: WorldSimulationCandidate_ACU[]; rejected: WorldSimulationSubagentOutcome_ACU[] }> {
+  let ledger = base;
+  const accepted: WorldSimulationCandidate_ACU[] = [];
+  const rejected: WorldSimulationSubagentOutcome_ACU[] = [];
+  for (const candidate of candidates) {
+    const required = candidateModules_ACU(candidate);
+    try {
+      const batch = [...accepted, candidate];
+      const preview = await applyWorldSimulationCandidatesDetailedViaSql_ACU(
+        base, batch, authorized, settings, { anchorMessage });
+      const batchIds = new Set(batch.map(item => item.candidateId));
+      const incomplete = preview.pendingFixes.filter(fix => batchIds.has(fix.candidateId));
+      const expectedModules = new Set(batch.flatMap(candidateModules_ACU));
+      if (incomplete.length || [...expectedModules].some(module => !preview.appliedModules.includes(module))) {
+        rejected.push(failedOutcome_ACU(candidate.agentName,
+          `整组候选未完整应用：${incomplete.map(fix => `${fix.module}: ${fix.lastError}`).join('；') || [...expectedModules].filter(module => !preview.appliedModules.includes(module)).join('、')}`,
+          'transaction_rejected', required));
+        continue;
+      }
+      ledger = preview.ledger;
+      accepted.push(candidate);
+    } catch (error) {
+      rejected.push(failedOutcome_ACU(candidate.agentName, error, 'transaction_rejected', required));
+    }
+  }
+  return { ledger, accepted, rejected };
 }
 
 export async function runWorldSimulationGuidanceComposer_ACU(input: {
@@ -684,3 +729,110 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
 }
 
 export const WORLD_SIMULATION_WORKFLOW_AGENT_ORDER_ACU = WORKFLOW_AGENTS_ACU;
+
+/** 新任务只在内存预览，最终仍由提交适配器在同一 base 上提交全部候选。 */
+export async function runWorldSimulationOneShotWorkflow_ACU(
+  input: Omit<WorldSimulationWorkflowInput_ACU, 'subagents'> & {
+    subagents: Pick<WorldSimulationSubagentRuntime_ACU, 'runOneShot'>;
+  },
+): Promise<WorldSimulationWorkflowResult_ACU> {
+  if (input.runWrites?.hasConfirmedWrites) throw new Error('WORLD_SIMULATION_ONE_SHOT_LEGACY_WRITES');
+  input.runWrites?.assertCurrent();
+  const base = cloneLedger_ACU(requireLedger_ACU(input.readCurrent?.() ?? input.promptContext.worldState));
+  const outcomes: WorldSimulationSubagentOutcome_ACU[] = [];
+  if (input.anchorMaterialsCommitted && anchorMaterialsComplete_ACU(base)) {
+    return { outcome: 'no_change', summary: '正文指纹未变且资料模块已经完成', outcomes,
+      pendingFixes: [], escalated: false, ledger: base,
+      finalProjection: { content: buildWorldSimulationProjection_ACU(base), sourceAgent: 'current-ledger', sourceRevision: base.revision, deliverable: true } };
+  }
+  const anchorMessage = anchorText_ACU(input.promptContext);
+  const snapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
+  const anchorEvidenceRef = snapshot.entries.find(entry => entry.address === 'anchor:message' && entry.evidenceRef)?.evidenceRef;
+  if (!anchorEvidenceRef) throw new Error('WORLD_SIMULATION_ANCHOR_EVIDENCE_MISSING');
+  const authorized = authorizedRefs_ACU(input.registry);
+  const requested = input.targetModules ? new Set(input.targetModules) : null;
+  const skip = new Set(input.opening.skipModules);
+  const expected = new Set<WorldSimulationLedgerModule_ACU>();
+  const roles = (['undercurrent-analyst', 'dramatis-keeper'] as const).filter(role =>
+    modulesForAgent_ACU(role).some(module => !skip.has(module) && (!requested || requested.has(module))));
+  const call = async (role: 'undercurrent-analyst' | 'dramatis-keeper' | 'guidance-composer',
+    ledger: WorldSimulationLedger_ACU, seq: number, roundChanges?: string): Promise<WorldSimulationSubagentOutcome_ACU> => {
+    const targets = modulesForAgent_ACU(role).filter(module => !skip.has(module) && (!requested || requested.has(module)));
+    targets.forEach(module => expected.add(module));
+    if (input.isCurrent && !input.isCurrent()) throw new Error('WORLD_SIMULATION_RUN_STALE');
+    const label = role === 'undercurrent-analyst' ? '批次一：时间与暗流'
+      : role === 'dramatis-keeper' ? '批次一：人物与位置' : '批次二：编年、传闻与投影';
+    const entryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, {
+      kind: 'delegation', title: `${label}正在执行`, agentName: role, status: 'running',
+    });
+    let succeeded = false;
+    try {
+      const outcome = await input.subagents.runOneShot({ agentName: role, settings: input.settings,
+        promptContext: { ...input.promptContext, worldState: ledger }, registry: input.registry,
+        tools: input.tools, runId: input.identity.runId, candidateSeq: seq,
+        focus: input.opening.focus, anchorEvidenceRef, givenLedger: ledger,
+        baseLedgerRevision: base.revision, roundChanges, injectWorldbook: seq === 1,
+        triggeredWorldbook: seq === 1 ? input.triggeredWorldbook : undefined,
+        fixedWorldbook: seq === 1 ? input.fixedWorldbook : undefined, isCurrent: input.isCurrent });
+      const restricted = restrictOutcome_ACU(outcome, targets);
+      succeeded = restricted.completion !== 'failed' && restricted.completion !== 'partial'
+        && restricted.status !== 'failed' && restricted.status !== 'blocked';
+      return restricted;
+    } catch (error) {
+      if (error instanceof Error && error.message === 'WORLD_SIMULATION_RUN_STALE') throw error;
+      return failedOutcome_ACU(role, error, 'invoke_failed', targets);
+    } finally {
+      updateWorldSimulationSession_ACU(input.identity.chatIdentity, entryId, {
+        title: `${label}${succeeded ? '已返回' : '未完整完成'}`,
+        ok: succeeded, status: succeeded ? 'done' : 'failed',
+      });
+    }
+  };
+  const first = await Promise.all(roles.map(role => call(role, base, 1)));
+  outcomes.push(...first);
+  const primary = await applyOneShotCandidates_ACU(base, first.flatMap(item => item.candidate ? [item.candidate] : []), authorized, input.settings, anchorMessage);
+  outcomes.push(...primary.rejected);
+  let ledger = primary.ledger;
+  const accepted = [...primary.accepted];
+  const changes: string[] = [];
+  if (base.clock.day !== ledger.clock.day || base.clock.storyTime !== ledger.clock.storyTime) changes.push(`clock：第 ${base.clock.day} 日 → 第 ${ledger.clock.day} 日，${ledger.clock.storyTime}`);
+  for (const module of ['dimensions', 'seeds', 'actors', 'rumors'] as const) {
+    const before = new Map(base[module].map(row => [row.id, JSON.stringify(row)]));
+    for (const row of ledger[module]) if (before.get(row.id) !== JSON.stringify(row)) {
+      const title = 'title' in row ? row.title : 'name' in row ? row.name : row.fact;
+      changes.push(`${module} ${row.id}：${title}${'status' in row ? ` (${row.status})` : 'life' in row ? ` (${row.life})` : ''}`);
+    }
+    const after = new Set(ledger[module].map(row => row.id));
+    for (const id of before.keys()) if (!after.has(id)) changes.push(`${module} ${id}：删除`);
+  }
+  if (JSON.stringify(base.player) !== JSON.stringify(ledger.player)) changes.push(`player：${JSON.stringify(ledger.player.location)} / ${ledger.player.contact}`);
+  const pendingSecond = base.pendingFixes.some(fix => ['chronicle', 'rumors', 'guidance'].includes(fix.module));
+  const secondTargets = !requested || ['chronicle', 'rumors', 'guidance'].some(module => requested.has(module as WorldSimulationLedgerModule_ACU));
+  if (secondTargets && (accepted.length > 0 || pendingSecond || ledger.chronicle.length >= input.settings.workflow.chroniclerHotThreshold)) {
+    const second = await call('guidance-composer', ledger, 2, changes.slice(0, 40).join('\n') || '本轮批次一无新增变更');
+    outcomes.push(second);
+    if (second.candidate) {
+      const preview = await applyOneShotCandidates_ACU(base, [...accepted, second.candidate], authorized, input.settings, anchorMessage);
+      ledger = preview.ledger;
+      accepted.splice(0, accepted.length, ...preview.accepted);
+      outcomes.push(...preview.rejected);
+    }
+  }
+  ledger = recordWorkflowIssues_ACU(ledger, outcomes, input.identity);
+  ledger = clearCompletedPending_ACU(ledger, outcomes);
+  const materialCompletion = completionRecord_ACU(base, ledger, outcomes, [...expected], input.identity, input.anchorMaterialsCommitted === true);
+  ledger = { ...ledger, materialCompletion };
+  const blocked = accepted.length === 0 && (ledger.pendingFixes.length > 0 || outcomes.some(item => item.status === 'failed' || item.status === 'blocked'));
+  const summary = blocked ? `资料维护失败：${ledger.pendingFixes.map(fix => `${fix.module}(${fix.lastError})`).join('、')}`
+    : accepted.length ? `固定工作流已处理 ${accepted.length} 个候选` : '固定工作流没有产生账本变更';
+  return { outcome: blocked ? 'blocked' : accepted.length ? 'commit' : 'no_change', summary,
+    outcomes, pendingFixes: ledger.pendingFixes, escalated: false, ledger,
+    finalProjection: { content: buildWorldSimulationProjection_ACU(ledger),
+      sourceAgent: accepted.some(item => item.agentName === 'guidance-composer' && 'guidance' in item.patch) ? 'guidance-composer' : 'current-ledger',
+      sourceRevision: ledger.revision, deliverable: !blocked && accepted.length === 0 },
+    ...(accepted.length ? { commitCandidate: { runId: input.identity.runId, taskId: input.identity.taskId,
+      stageId: input.identity.stageId, stageRevision: input.identity.stageRevision,
+      baseLedgerRevision: input.identity.baseLedgerRevision, summary: input.opening.summary || summary,
+      acceptedCandidates: accepted, evidenceRefs: [...new Set(accepted.flatMap(item => item.evidenceRefs))],
+      pendingFixes: ledger.pendingFixes, materialCompletion, collisionReport: collisionReport_ACU(input.promptContext) } } : {}) };
+}

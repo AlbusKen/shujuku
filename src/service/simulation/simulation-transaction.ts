@@ -606,6 +606,9 @@ export function applyWorldSimulationCandidatesDetailed_ACU(
   const moduleWriters = new Map<WorldSimulationLedgerModule_ACU, { candidateId: string; agentName: string }>();
 
   for (const candidate of candidates) {
+    // chronicle and chronicleArchive share one completion module; a later successful
+    // archive write must not erase this candidate's earlier chronicle rejection.
+    const failedModules = new Set<WorldSimulationLedgerModule_ACU>();
     for (const [module, patch] of orderedPatchEntries_ACU(candidate.patch)) {
       const ledgerModule = pendingModuleOf_ACU(module);
       const snapshot = clone_ACU(next);
@@ -646,13 +649,15 @@ export function applyWorldSimulationCandidatesDetailed_ACU(
             }
           }
           recordPendingFix_ACU(pendingFixes, ledgerModule, candidate.candidateId, candidate.agentName, blocking, next.clock.day);
+          failedModules.add(ledgerModule);
           continue;
         }
-        clearPendingModule_ACU(pendingFixes, ledgerModule);
+        if (!failedModules.has(ledgerModule)) clearPendingModule_ACU(pendingFixes, ledgerModule);
         appliedModules.add(ledgerModule);
         moduleWriters.set(ledgerModule, { candidateId: candidate.candidateId, agentName: candidate.agentName });
       } catch (error) {
         next = snapshot;
+        failedModules.add(ledgerModule);
         recordPendingFix_ACU(
           pendingFixes,
           ledgerModule,
