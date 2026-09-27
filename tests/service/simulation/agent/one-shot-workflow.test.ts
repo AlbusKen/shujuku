@@ -230,5 +230,34 @@ describe('两批一次性世界推演工作流', () => {
       countTokens: async () => 1 }).runOneShot(playerInput);
     expect(failedPlayer.status).toBe('failed');
     expect(unrepaired).toHaveBeenCalledTimes(2);
+    const badLocation = JSON.stringify({ status: 'candidate', agentName: 'undercurrent-analyst',
+      sql: "INSERT INTO seeds (title, status, location) VALUES ('暗流', 'incubating', '江南府')" });
+    const locationInvoke = vi.fn(async () => badLocation);
+    const locationFailure = await new WorldSimulationSubagentRuntime_ACU({ invoke: locationInvoke, apiPreset,
+      countTokens: async () => 1 }).runOneShot(input);
+    expect(locationInvoke).toHaveBeenCalledTimes(2);
+    expect(locationFailure.unresolvedIssues).toEqual([expect.objectContaining({
+      module: 'seeds', path: 'patch.seeds.upsert[0].location', source: 'transaction_rejected',
+    })]);
+    const validLocation = JSON.stringify({ status: 'candidate', agentName: 'undercurrent-analyst',
+      sql: "INSERT INTO seeds (title, status, location) VALUES ('暗流', 'incubating', '{\"region\":\"江南府\"}')" });
+    const locationRepair = vi.fn().mockResolvedValueOnce(badLocation).mockResolvedValueOnce(validLocation);
+    expect((await new WorldSimulationSubagentRuntime_ACU({ invoke: locationRepair, apiPreset,
+      countTokens: async () => 1 }).runOneShot(input)).status).toBe('candidate');
+    expect(JSON.stringify(locationRepair.mock.calls[1][1])).toContain('patch.seeds.upsert[0].location');
+    const addressInvoke = vi.fn(async () => ({ content: '', toolCalls: [{ id: 'read-1', name: 'read', arguments: '{"reads":["$.reads"]}' }] }));
+    const addressFailure = await new WorldSimulationSubagentRuntime_ACU({ invoke: addressInvoke, apiPreset,
+      countTokens: async () => 1 }).runOneShot(playerInput);
+    expect(addressFailure.status).toBe('failed');
+    expect(addressFailure.summary).toContain('INVALID_TOOL_ADDRESS');
+    expect(addressFailure.unresolvedIssues).toEqual([]);
+    expect(playerInput.tools.read).not.toHaveBeenCalled();
+    const locationWorkflow = await env.run(async (call: any) => call.agentName === 'undercurrent-analyst' ? locationFailure : noChange(call.agentName));
+    expect(locationWorkflow.pendingFixes.map(item => item.module)).toEqual(['seeds']);
+    expect(locationWorkflow.summary).toContain('patch.seeds.upsert[0].location');
+    const addressWorkflow = await env.run(async (call: any) => call.agentName === 'dramatis-keeper' ? addressFailure : noChange(call.agentName));
+    expect(addressWorkflow.outcome).toBe('blocked');
+    expect(addressWorkflow.pendingFixes).toEqual([]);
+    expect(addressWorkflow.summary).toContain('INVALID_TOOL_ADDRESS');
   });
 });

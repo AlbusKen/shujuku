@@ -839,7 +839,12 @@ export async function runWorldSimulationOneShotWorkflow_ACU(
   const materialCompletion = completionRecord_ACU(base, ledger, outcomes, [...expected], input.identity, input.anchorMaterialsCommitted === true);
   ledger = { ...ledger, materialCompletion };
   const blocked = accepted.length === 0 && (ledger.pendingFixes.length > 0 || outcomes.some(item => item.status === 'failed' || item.status === 'blocked'));
-  const summary = blocked ? `资料维护失败：${ledger.pendingFixes.map(fix => `${fix.module}(${fix.lastError})`).join('、')}`
+  // Protocol/invocation errors have no attributable ledger module. Report them
+  // without fabricating a pending fix for every module owned by the role.
+  const failures = outcomes.filter(item => (item.status === 'failed' || item.status === 'blocked') && !(item.unresolvedIssues?.length));
+  const reasons = [...ledger.pendingFixes.map(fix => `${fix.module}(${fix.lastError})`),
+    ...failures.map(item => `${item.agentName}(${item.summary})`)];
+  const summary = blocked ? `资料维护失败：${reasons.join('、')}`
     : accepted.length ? `固定工作流已处理 ${accepted.length} 个候选` : '固定工作流没有产生账本变更';
   return { outcome: blocked ? 'blocked' : accepted.length ? 'commit' : 'no_change', summary,
     outcomes, pendingFixes: ledger.pendingFixes, escalated: false, ledger,

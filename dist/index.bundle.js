@@ -169678,7 +169678,12 @@ Expected function or array of functions, received type ${typeof value}.`
         const materialCompletion = completionRecord_ACU(base, ledger, outcomes, [...expected], input.identity, input.anchorMaterialsCommitted === true);
         ledger = { ...ledger, materialCompletion };
         const blocked = accepted.length === 0 && (ledger.pendingFixes.length > 0 || outcomes.some(item => item.status === 'failed' || item.status === 'blocked'));
-        const summary = blocked ? `资料维护失败：${ledger.pendingFixes.map(fix => `${fix.module}(${fix.lastError})`).join('、')}`
+        // Protocol/invocation errors have no attributable ledger module. Report them
+        // without fabricating a pending fix for every module owned by the role.
+        const failures = outcomes.filter(item => (item.status === 'failed' || item.status === 'blocked') && !(item.unresolvedIssues?.length));
+        const reasons = [...ledger.pendingFixes.map(fix => `${fix.module}(${fix.lastError})`),
+            ...failures.map(item => `${item.agentName}(${item.summary})`)];
+        const summary = blocked ? `资料维护失败：${reasons.join('、')}`
             : accepted.length ? `固定工作流已处理 ${accepted.length} 个候选` : '固定工作流没有产生账本变更';
         return { outcome: blocked ? 'blocked' : accepted.length ? 'commit' : 'no_change', summary,
             outcomes, pendingFixes: ledger.pendingFixes, escalated: false, ledger,
@@ -171282,7 +171287,7 @@ ${rejectionText}` : delegationFeedback,
     function worldSimulationOneShotProtocol_ACU(name, modules) {
         const tables = modules.flatMap(module => module === 'chronicle' ? ['chronicle', 'chronicle_archive', 'chronicle_overview'] : [module]);
         const details = {
-            'undercurrent-analyst': 'clock: UPDATE SET days, story_time, slot; dimensions: name, kind, value, trend, rationale，其中 kind 只能是英文原值 pressure 或 growth，trend 只能是 rising、stable、falling；seeds: title, status, level, catalyst, visibility, location, expires_at_day, missed_outcome, actor_ids, expose_policy, retired_reason，其中 visibility 只能是英文原值 hidden、limited、public，status 只能是 established、incubating、active、converging、resolved、retired。枚举不得填写中文解释、组合描述或其他同义词。',
+            'undercurrent-analyst': 'clock: UPDATE SET days, story_time, slot; dimensions: name, kind, value, trend, rationale，其中 kind 只能是英文原值 pressure 或 growth，trend 只能是 rising、stable、falling；seeds: title, status, level, catalyst, visibility, location, expires_at_day, missed_outcome, actor_ids, expose_policy, retired_reason。seeds.location 必须是 JSON 对象字符串，例如 location = \'{"region":"江南府","place":"城外"}\'，只有 region 必填；无确定地点则省略 location，不可填单独地名。其中 visibility 只能是英文原值 hidden、limited、public，status 只能是 established、incubating、active、converging、resolved、retired。枚举不得填写中文解释、组合描述或其他同义词。',
             'dramatis-keeper': 'player: UPDATE SET location, contact（仅这两列及 evidence_refs，location_updated_at_day 与 region_visits 是内部派生字段，绝对不可写进 SQL）；actors: name, interests, location, location_ref, goals, information_sources, known_facts, life, died_at_day, death_summary; rumors 仅死亡伴生: fact, origin_day, earliest_reveal_day, channels, related_actor_ids。',
             'guidance-composer': 'chronicle: INSERT summary, related_ids 或 DELETE id, reason；chronicle_archive 与 chronicle_overview 成对 INSERT；rumors: fact, origin_day, earliest_reveal_day, channels, related_actor_ids, status, revealed_at_day；guidance: UPDATE SET signals, excluded_facts。',
         };
@@ -171292,6 +171297,7 @@ ${rejectionText}` : delegationFeedback,
             `无改动：{"status":"no_change","agentName":"${name}","summary":"没有需要修改的内容","uncertainties":[]}`,
             `无法完成：{"status":"failed","agentName":"${name}","reasonCode":"UNRESOLVED","message":"原因"}`,
             `status 只能是 candidate、no_change、failed；agentName 必须精确为 ${name}。只能写表：${tables.join(' | ')}。`,
+            `如需调用 read，参数示例：{"reads":["ledger:current"]}；地址只能使用 ${formatWorldSimulationToolAddressHints_ACU()}。不能把 $.reads、裸模块名或错误路径当作地址；仅目录中实际存在的条目 ID 可用于 seeds:<id> 等条目地址。`,
             'SQL 只允许 INSERT INTO 表 (列) VALUES (字面量)、UPDATE 表 SET 列 = 字面量 WHERE 条件、DELETE FROM 表 WHERE 条件；不得使用 SELECT、函数、子查询或表达式。字符串单引号须转义为两个，列名使用 snake_case。',
             details[name],
         ].join('\n');
@@ -171305,12 +171311,14 @@ ${rejectionText}` : delegationFeedback,
             if (!definition || !['undercurrent-analyst', 'dramatis-keeper', 'guidance-composer'].includes(input.agentName))
                 throw new Error('WORLD_SIMULATION_ONE_SHOT_AGENT_INVALID');
             const modules = definition.writableModules;
-            const failed = (error, source = 'protocol_failed') => {
+            const failed = (error, source = 'protocol_failed', located = []) => {
                 const message = error instanceof Error ? error.message : String(error);
+                // A protocol/tool error has no ledger module. Preserve it in the summary;
+                // only transaction/SQL issues with a proven owner become pending fixes.
                 return { agentName: input.agentName, status: 'failed', summary: message, reasonCode: 'WORLD_SIMULATION_ONE_SHOT_FAILED',
                     evidenceRefs: [], uncertainties: [], completion: 'failed', acceptedKeys: [],
                     moduleCompletion: Object.fromEntries(modules.map(module => [module, 'failed'])),
-                    unresolvedIssues: modules.map(module => ({ module, source, path: `$.patch.${module}`, message })) };
+                    unresolvedIssues: located };
             };
             const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, input.agentName, 'agent_delegate', this.dependencies.apiPreset);
             const catalog = buildInUseWorldCatalog_ACU(input.givenLedger);
@@ -171374,6 +171382,7 @@ ${rejectionText}` : delegationFeedback,
             for (let attempt = 0; attempt < 2 + maxReads; attempt++) {
                 if (input.isCurrent?.() === false)
                     throw new Error('WORLD_SIMULATION_RUN_STALE');
+                let locatedIssues = [];
                 const messages = withNativeToolThinkPrefill_ACU([...base, ...transcript, { role: 'user', content: runtime }, ...(prefill ? [{ role: 'user', content: USER_PREFILL_CONTENT_ACU }] : [])]);
                 const requestTools = maxReads && reads === 0 ? ['read'] : [];
                 let sent;
@@ -171428,7 +171437,10 @@ ${rejectionText}` : delegationFeedback,
                         throw new Error('WORLD_SIMULATION_ONE_SHOT_TRUNCATED');
                     const normalized = normalizeOneShotSpecialistPayload_ACU(draft.payload, { agentName: input.agentName, writableModules: modules,
                         givenLedger: input.givenLedger, baseLedgerRevision: input.baseLedgerRevision, anchorEvidenceRef: input.anchorEvidenceRef, authorizedRefs: authorized() });
-                    if (normalized.issues.length && repairs === 0)
+                    locatedIssues = normalized.issues;
+                    // A wholly rejected SQL payload must not become a generic failed result
+                    // that attributes its one SQL error to every module owned by this role.
+                    if (normalized.issues.length && (repairs === 0 || normalized.payload.status === 'failed'))
                         throw new Error(normalized.issues.slice(0, 8).map(issue => `${issue.path}: ${issue.message}`).join('；'));
                     const snapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
                     let outcome;
@@ -171458,14 +171470,17 @@ ${rejectionText}` : delegationFeedback,
                             ? [module, { ...value, expectedRevision: input.givenLedger.revision }]
                             : [module, value]));
                         const report = preflightWorldSimulationCandidates_ACU(input.givenLedger, [{ ...candidate, patch: previewPatch }], authorized(), input.settings);
-                        if (report.blocking.length)
+                        if (report.blocking.length) {
+                            locatedIssues = report.blocking.filter(item => modules.includes(item.module))
+                                .map(item => ({ module: item.module, source: 'transaction_rejected', path: item.path, message: item.message }));
                             throw new Error(report.blocking.slice(0, 8).map(item => `${item.path}: ${item.message}${item.details?.expected ? `；允许 ${item.details.expected}` : ''}`).join('；'));
+                        }
                     }
                     return outcome;
                 }
                 catch (error) {
                     if (repairs++ >= 1)
-                        return failed(error);
+                        return failed(error, 'protocol_failed', locatedIssues);
                     transcript.push({ role: 'assistant', content: raw || '(empty)' }, { role: 'user', content: `上一次输出未被采纳：${error instanceof Error ? error.message : String(error)}。只修正问题，保留合法语句，重新输出完整 JSON；仍失败则输出 failed JSON。` });
                 }
             }
