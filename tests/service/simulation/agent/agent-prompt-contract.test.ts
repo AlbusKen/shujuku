@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { WORLD_SIMULATION_PROMPT_VERSION_V25_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
 import { USER_PREFILL_CONTENT_ACU } from '../../../../src/shared/user-prefill.js';
 import { buildDefaultWorldSimulationSettings_ACU } from '../../../../src/service/simulation/defaults';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU, WORLD_SIMULATION_AGENT_NAMES_ACU, findWorldSimulationAgentDefinition_ACU, worldSimulationDirectorVisibleCatalog_ACU } from '../../../../src/service/simulation/agent/agent-catalog';
@@ -97,11 +98,12 @@ describe('世界推演提示词装配契约', () => {
     expect(reviewerPrompt).toContain(instruction);
   });
 
-  it('提示词 v24 让非时钟角色时间先行推演，同时保留历史默认指纹与信息渠道纪律', () => {
-    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v24');
+  it('提示词完整覆盖角色职责，同时保留时间先行、历史默认指纹与信息渠道纪律', () => {
+    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe(WORLD_SIMULATION_PROMPT_VERSION_V25_ACU);
     expect(buildDefaultWorldSimulationSettings_ACU().agentRunBudget).toMatchObject({ maxIterations: 4, maxExtraReads: 1, maxConcurrent: 5 });
     expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].map(item => item.version)).toEqual([
       'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6', 'world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12', 'world-simulation-v13', 'world-simulation-v14', 'world-simulation-v15', 'world-simulation-v16', 'world-simulation-v17', 'world-simulation-v18', 'world-simulation-v19', 'world-simulation-v20', 'world-simulation-v21', 'world-simulation-v22', 'world-simulation-v23', 'world-simulation-v24',
+      WORLD_SIMULATION_PROMPT_VERSION_V25_ACU,
     ]);
     expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['undercurrent-analyst'].at(-1)?.version).toBe(WORLD_SIMULATION_PROMPT_VERSION_ACU);
     const v8 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v8');

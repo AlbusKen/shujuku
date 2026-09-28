@@ -91536,7 +91536,8 @@ $CONTENT
     const WORLD_SIMULATION_PROMPT_VERSION_V22_ACU = 'world-simulation-v22';
     const WORLD_SIMULATION_PROMPT_VERSION_V23_ACU = 'world-simulation-v23';
     const WORLD_SIMULATION_PROMPT_VERSION_V24_ACU = 'world-simulation-v24';
-    const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V24_ACU;
+    const WORLD_SIMULATION_PROMPT_VERSION_V25_ACU = 'world-simulation-v25';
+    const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V25_ACU;
     const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'];
     const WORLD_SIMULATION_PROMPT_PLACEHOLDERS_ACU = [
         '$WORLD_TASK', '$WORLD_HISTORY', '$WORLD_RUNTIME_CONTEXT', '$WORLD_AGENT_CATALOG',
@@ -92005,7 +92006,7 @@ $CONTENT
             : buildV22WorldSimulationAgentPrompt_ACU(name);
     }
     /** v24：非时钟角色在推演第一步先分析本轮时间跨度；批次二直接采用批次一维护的 clock，不再叠加。 */
-    function buildOneShotWorldSimulationAgentPrompt_ACU(name) {
+    function buildV24OneShotWorldSimulationAgentPrompt_ACU(name) {
         const replacements = {
             'undercurrent-analyst': [],
             'dramatis-keeper': [['【推演步骤】先从锚点确认玩家当前地点及是否有社交渠道', '【推演步骤】第一步分析本轮经过的时间：以运行时【共同时间基准】的本轮经过天数为准，区分本轮真正经过的时间与回忆、旧旅程；本角色不写 clock，但人物位置、目标进展、信息传播与死亡日都要按这段时间跨度推演。再从锚点确认玩家当前地点及是否有社交渠道']],
@@ -92025,6 +92026,66 @@ $CONTENT
                 content = content.replace(from, to);
             }
             return content === segment.content ? segment : { ...segment, content };
+        });
+    }
+    /** 冻结旧默认，供 v24 存量配置精确迁移。 */
+    function buildV24WorldSimulationAgentPrompt_ACU(name) {
+        return ONE_SHOT_ROLES_ACU.includes(name)
+            ? buildV24OneShotWorldSimulationAgentPrompt_ACU(name)
+            : buildV23WorldSimulationAgentPrompt_ACU(name);
+    }
+    /** 每项职责独立判定，模块无变化不代表整次派工无变化。 */
+    function oneShotWorkflowV25_ACU(name) {
+        const shared = [
+            '【一次性交付】先通读运行时完整行、关联只读资料、待修复与锚点，再检查每项职责。仅在目录给出具体 readAddress 且需要详情时一次 read 批量精读；空数组不是漏传，也不是跳过该模块初始化判断的理由。',
+            '【覆盖义务】每个负责模块都须得出有依据的变更、核查后无变化、或必要证据不足的结论。焦点决定优先级，不缩减职责；不能处理完最显眼的一两项就提交。全模块核查不等于全模块强制写入。',
+            '【事实与推演】锚点提供本轮观察，账本提供已建立的状态与因果条件，世界书提供设定约束。允许沿已有动机、渠道、催化条件和经过时间推演幕后后果，但不得把可能性当成已经发生的事实。零天也要核查即时影响；多天也不意味着每件事必然升级。并发角色尚未提交的推断不能作为事实。',
+            '【写法】把所有有依据的变化放进同一次原生 write_sql 的 sql 参数，多句用分号分隔。已有行按 id 与 expected_revision，单例按运行时单例修订号；字符串单引号加倍转义，数组对象使用 SQL 单引号包裹的 JSON。数组列是整列替换，保留仍成立的旧内容。只用真实 ID；不把 readAddress 当作条目 ID。候选仅在内存校验与预览，最终由工作流提交。',
+            '【收口自检】逐项对照职责清单与 SQL：应变更的是否遗漏、关联字段是否齐全、旧事实是否误删、证据与时间是否一致、是否越权。只有全部核查且无可证实变化才回复 NO_CHANGE；必要资料缺失或待修复无法完成时回复 FAILED: 原因。宁缺毋滥约束写入，不允许省略核查。',
+        ];
+        const steps = {
+            'undercurrent-analyst': [
+                '【职责清单】clock 时间；dimensions 压力与增长；seeds 存量演进、时限与新增。三者均为本轮必查。',
+                '【推演步骤】第一步分析本轮经过的时间：对照共同时间基准、锚点与旧 clock，区分实际流逝、回忆与已经入账的旅程。仅加上锚点明确发生的时间推进；clock.days 是推进量，不是绝对日。仅本角色写 clock；story_time 沿用原历法，slot 与正文相符，不编造日期。后续以基线日加本轮推进量判断。',
+                '第二步·维度逐项评估：先列出本轮事实影响哪些 pressure/growth，检查每个已有维度的支撑条件是否增强、减弱或维持。维度 value 是 0-100 烈度，trend 为 rising/stable/falling；rationale 写清事实、影响方向与强度依据。不按天数机械加分；空表也要判断是否有可建立的长期压力或增长面，没有依据不建空壳。',
+                '第三步·存量暗流：逐条检查催化条件 catalyst、地点、关联人物、当前状态、visibility 与 expose_policy。只有条件兑现且因果充分才推进 established→incubating→active→converging→resolved/retired，不倒退，不以单纯经过时间强行升级。触发不等于解决，resolved 必须有完结依据；retired 写 retired_reason。level 按影响层级 0-4 评估，知情范围变化才调整 hidden/limited/public。',
+                '第四步·时限与新增：检查 expires_at_day 与当前日，区分到期当日与已超过期限；按既定 missed_outcome 判断错过的后果，不凭到期就宣布成功。临界项优先检查，已由程序处理的不重复制造后果。新种子先查重，填齐 title/status/level/catalyst/visibility/location.region；时限与 missed_outcome 成对维护。本轮最多新建 3 条，活跃超过 30 条时只推进收束。actor_ids 只引用输入账本已确认人物。',
+                '第五步·交叉复核：暗流演进是否反过来影响维度？维度变化是否满足其他种子的已设催化条件？只传播证据支持的直接后果，不循环自证。提交前分别确认 clock、dimensions、seeds 的写或不写结论。',
+                '【情境范例（仅演示推演，不是本轮事实）】假设共同跨度为 1 天，账本有盘查维度和以正式封城令为催化的种子，锚点证实封城令生效：同一次候选包含 clock 推进、种子激活、维度按事实重评，而不是写完 clock 就停止。UPDATE clock SET days = 1 WHERE expected_revision = 4; 中的修订号须替换为运行值；其余行各用自身 revision。若锚点只是回忆昨日，则不写 clock；若盘查维度已反映同一事实，则保留；不存在新隐患就不凑新种子。',
+            ],
+            'dramatis-keeper': [
+                '【职责清单】player 位置与接触；actors 在场及相关场外人物的位置、动机、目标、信息与生死；rumors 仅死亡伴生。每项都要核查。',
+                '【推演步骤】第一步分析本轮经过的时间：使用共同时间基准，区分本轮跨度与回忆、旧旅程。本角色不写 clock；当前演算日为基线日加共享跨度，移动距离、目标进展、消息传播与死亡日均不得超出可支持的时间。',
+                '第二步·玩家：从锚点确定实际 location 与 contact，与旧值分别比较。location 是带 region、可带 place 的 JSON 对象；能接触外界消息用 open，闭关或隔绝用 secluded，不因未描写交谈便认定隔绝。只写变化的 location/contact，location_updated_at_day 与 region_visits 交程序派生。UPDATE player 必须使用运行时单例 expected_revision。',
+                '第三步·人物清点：先核对已建档且在锚点出现的人物，再核对与当前种子、地点、目标、期限关联的场外人物，不只维护玩家身边一人。对每人分别比较 location/location_ref、interests/goals、information_sources/known_facts、life；移动需同步文本地点与结构化地点。场外行动依据已有动机、资源、约束、渠道与可用时间；有意图不等于已完成，没出场不等于失踪或死亡。',
+                '第四步·信息与新增：每条新增 known_facts 都须有具体亲历、目击、听闻、阅读、转述或可验证推断渠道，并检查信息到达时间；读者知道不等于人物知道。数组更新保留仍成立旧知识。新登场且有后续作用的重要人物先查重再建档，本轮最多 3 人；填齐 name/interests/location/goals/information_sources/known_facts，不能凭名字编造秘密目标或知识。',
+                '第五步·生死与伴生传闻：核查 life=alive/missing/dead。死亡须有明确事实或已兑现的充分因果，同一候选写 life、died_at_day、death_summary，并提供关联人物 ID 的死亡伴生 rumors，核对 fact、origin_day、earliest_reveal_day 与真实 channels；不为补齐传闻而捏造目击者。关联或传播依据不足以完成死亡联动时报告失败，不丢掉必需部分。普通传闻留给统合角色。',
+                '第六步·覆盖复核：即使 player 不动也必须核查人物；即使无人死亡也必须核查目标和知识；只改一人时确认其他相关者确无依据变化。',
+                '【情境范例（仅演示推演，不是本轮事实）】玩家抵达客栈，已建档守卫亲历封城，另一名商人已收到封城消息且原目标是当天出城：候选可同时更新 player、守卫知识和商人受阻目标，不能写完 player 即结束。若商人没有其获知渠道，则不写 known_facts，也不编造他已决定改走小路；没有死亡则不写伴生传闻。各已有行使用自身 expected_revision，新人不照抄示例身份。',
+            ],
+            'guidance-composer': [
+                '【职责清单】chronicle 幕后完结事件与成对归档；rumors 新消息与存量核查；guidance 信号选择与旧信号清理。没有投影不等于没有编年或传闻职责。',
+                '【推演步骤】第一步分析本轮时间跨度：结合共同时间基准、输入 clock 与本轮变更清单判断经过多久。输入 clock.day 已含批次一推进，直接采用，不再叠加经过天数。本轮预览尚未持久化，不能把被拒候选当成已发生事实。',
+                '第二步·编年核查：扫描已通过预览的种子收束、错过后果、人物死亡和重大纷争结果；只登记正文未直接写出的重大幕后完结事件。对照热层与概要按事实和关联 ID 去重，同一事件可以合并相关人物与种子，未完结不编造结局。正文已写不重复记账，也不为清理资料伪造登记。',
+                '第三步·归档核查：按注入的热层与目录判断是否有可归档的较早事实，资料不全先读实际地址，不因窗口只展示部分就认定历史不存在。chronicle_archive 与 chronicle_overview 必须以同一 archive_ref 成对 INSERT；前者用 archive_ref/day/summary/fingerprints/related_ids/source_chronicle_ids，后者用 fingerprint/day/one_line/archive_ref，不能把 summary 或 related_ids 写入 chronicle_overview。不得更新完整编年或把正常归档当成删错。',
+                '第四步·传闻核查：逐条比较已有未消亡传闻与本轮可传播的外部变化，核对内容是否重复、传播渠道与时间是否成立。新消息填 fact/origin_day/channels，earliest_reveal_day 不早于 origin_day；channels 应使用真实传播地域名称以匹配玩家 region，不以泛称市井代替地域。世界有秘密不等于已形成传闻，死亡伴生消息已存在就不再新建。新行不抢写 status/revealed_at_day，成熟、采用与过期交程序；检查存量事实性修正时遵守 latent/ripe/revealed/dead 与 revealed_at_day 的一致性。',
+                '第五步·投影逐条筛选：每条必须贴近当前剧情、正文未写且玩家能察觉；sourceId 使用输入账本已有 ID 或 clock/player。本候选新建的传闻或编年不能充当本候选信号来源，不能编造 rumors:1 等伪 ID。encounter 是当场可感知动态，rumor 必须来自玩家地域渠道可达的已有传闻，ambient 是有依据的环境变化；玩家 secluded 不写 rumor 语态。guidance 每轮最多 4 个新信号，encounter 最多 2 个，每条 text 不超过 80 字。',
+                '第六步·旧投影与收口：signals 整列替换，保留仍合格的旧信号，移除过时、已被正文写出或不可达的信号，并核对合并后的数量与重复。excluded_facts 只列有事实依据但不宜展示的内容，不新增秘密。没有合格新信号不改 guidance 的前提是旧信号与排除项也不需修正；需要清理时可提交空 signals。最后分别确认编年、归档、传闻、投影均已核查。',
+                '【情境范例（仅演示推演，不是本轮事实）】输入预览已有种子收束、相关人物死亡及死亡伴生传闻，正文未写该幕后事件；另有已记录且玩家可见的城门告示：候选可同时登记一条去重编年、新建另一条有传播依据的收束消息，并用已有告示来源更新投影，不能只写 guidance。没有归档需求就不归档；新传闻本轮不能当 sourceId；原投影已在正文出现则移除。UPDATE guidance 使用运行时 expected_revision，所有 ID 和日期均取实际输入。',
+            ],
+        };
+        return [...shared, ...steps[name]].join('\n');
+    }
+    /** v25 保持段位稳定，工作流正文由职责清单替换；历史生成器不引用当前规则。 */
+    function buildOneShotWorldSimulationAgentPrompt_ACU(name) {
+        return buildV24OneShotWorldSimulationAgentPrompt_ACU(name).map(segment => {
+            if (segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW'))) {
+                return { ...segment, content: `${worldSimulationSeamMarker_ACU('WORKFLOW')}\n${oneShotWorkflowV25_ACU(name)}` };
+            }
+            if (segment.content.startsWith(worldSimulationSeamMarker_ACU('EXECUTION_BOUNDARY'))) {
+                return { ...segment, content: `${worldSimulationSeamMarker_ACU('EXECUTION_BOUNDARY')}\n现在执行任务。完成全部职责核查和收口自检后，一次调用原生 write_sql 提交所有有依据的变更；无变化回复 NO_CHANGE，无法完成回复 FAILED: 原因。不要输出核查长文、裸 SQL 或 Markdown。` };
+            }
+            return segment;
         });
     }
     function buildV20WorldSimulationAgentPrompt_ACU(name) {
@@ -92215,6 +92276,7 @@ $CONTENT
             { version: WORLD_SIMULATION_PROMPT_VERSION_V21_ACU, fingerprint: promptFingerprint_ACU(buildV21WorldSimulationAgentPrompt_ACU(name)) },
             { version: WORLD_SIMULATION_PROMPT_VERSION_V22_ACU, fingerprint: promptFingerprint_ACU(ONE_SHOT_ROLES_ACU.includes(name) ? buildV22OneShotWorldSimulationAgentPrompt_ACU(name) : buildV21WorldSimulationAgentPrompt_ACU(name)) },
             { version: WORLD_SIMULATION_PROMPT_VERSION_V23_ACU, fingerprint: promptFingerprint_ACU(buildV23WorldSimulationAgentPrompt_ACU(name)) },
+            { version: WORLD_SIMULATION_PROMPT_VERSION_V24_ACU, fingerprint: promptFingerprint_ACU(buildV24WorldSimulationAgentPrompt_ACU(name)) },
             { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildDefaultWorldSimulationAgentPrompt_ACU(name)) },
         ]]));
     function migrateWorldSimulationAgentPrompts_ACU(current, previousDefaults, previousVersion) {
@@ -92229,11 +92291,12 @@ $CONTENT
             const value = current[name];
             const previous = previousDefaults[name];
             // One-shot 历史默认逐段匹配；用户编辑和追加段原样保留，不用当前生成器重建旧默认。
-            if ((previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V22_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V23_ACU) && ONE_SHOT_ROLES_ACU.includes(name)) {
+            if ((previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V22_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V23_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V24_ACU) && ONE_SHOT_ROLES_ACU.includes(name)) {
                 const role = name;
                 const old = previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU ? buildV21OneShotWorldSimulationAgentPrompt_ACU(role)
                     : previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V22_ACU ? buildV22OneShotWorldSimulationAgentPrompt_ACU(role)
-                        : buildV23OneShotWorldSimulationAgentPrompt_ACU(role);
+                        : previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V23_ACU ? buildV23OneShotWorldSimulationAgentPrompt_ACU(role)
+                            : buildV24OneShotWorldSimulationAgentPrompt_ACU(role);
                 if (!value) {
                     migrated[name] = defaults[name];
                 }
@@ -169595,6 +169658,7 @@ Expected function or array of functions, received type ${typeof value}.`
             '【交付协议】有可证实的变更时调用原生 write_sql 函数，参数只填 sql 字段（一条或多条受限 SQL）；工具调用仅生成待验证候选，不即时写入账本；候选通过校验后本角色结束，由两批工作流统一预览与最终提交。不得把 SQL 放入文本 JSON 或输出裸 SQL。',
             '无改动时回复 NO_CHANGE，可在同一行附简短原因；无法完成时回复 FAILED: 原因。思考过程若输出须闭合于 <think> 标签中，标签外仅保留状态行；空文本、任意其他文本与非法工具调用均不能视为无变化。',
             `只能写表：${tables.join(' | ')}。一次 write_sql 收齐本角色所有变更，不拆成多次写入；失败时按工具回执修正，仅允许一次纠错。`,
+            '提交前按提示词【推演步骤】对每个负责模块逐一得出写或不写的结论；多个模块有变化时全部放进同一次 write_sql，不能只维护其中一两个模块就提交。',
             '运行时已给出本角色完整行与关联资料；只有目录中出现具体 readAddress 且确需详情时才调用 read，参数 reads 填该地址。目录为空就不要为核对空资料而读取；ledger:current 并非普通角色可读地址。不能把 $.reads、裸模块名或错误路径当作地址。',
             'SQL 只允许 INSERT INTO 表 (列) VALUES (字面量)、UPDATE 表 SET 列 = 字面量 WHERE 条件、DELETE FROM 表 WHERE 条件；不得使用 SELECT、函数、子查询或表达式。字符串单引号须转义为两个，列名使用 snake_case。',
             '归档列名必须严格区分：chronicle_archive=(archive_ref, day, summary, fingerprints, related_ids, source_chronicle_ids)；chronicle_overview=(fingerprint, day, one_line, archive_ref)。chronicle_overview 没有 summary 或 related_ids 列。guidance 是单例，只能 UPDATE 且 WHERE 只能带 expected_revision。',

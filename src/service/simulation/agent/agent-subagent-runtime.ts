@@ -316,6 +316,8 @@ export function worldSimulationOneShotProtocol_ACU(name: WorldSimulationOneShotR
     '【交付协议】有可证实的变更时调用原生 write_sql 函数，参数只填 sql 字段（一条或多条受限 SQL）；工具调用仅生成待验证候选，不即时写入账本；候选通过校验后本角色结束，由两批工作流统一预览与最终提交。不得把 SQL 放入文本 JSON 或输出裸 SQL。',
     '无改动时回复 NO_CHANGE，可在同一行附简短原因；无法完成时回复 FAILED: 原因。思考过程若输出须闭合于 <think> 标签中，标签外仅保留状态行；空文本、任意其他文本与非法工具调用均不能视为无变化。',
     `只能写表：${tables.join(' | ')}。一次 write_sql 收齐本角色所有变更，不拆成多次写入；失败时按工具回执修正，仅允许一次纠错。`,
+    '提交前按提示词【推演步骤】对每个负责模块逐一得出写或不写的结论；多个模块有变化时全部放进同一次 write_sql，不能只维护其中一两个模块就提交。',
+
     '运行时已给出本角色完整行与关联资料；只有目录中出现具体 readAddress 且确需详情时才调用 read，参数 reads 填该地址。目录为空就不要为核对空资料而读取；ledger:current 并非普通角色可读地址。不能把 $.reads、裸模块名或错误路径当作地址。',
     'SQL 只允许 INSERT INTO 表 (列) VALUES (字面量)、UPDATE 表 SET 列 = 字面量 WHERE 条件、DELETE FROM 表 WHERE 条件；不得使用 SELECT、函数、子查询或表达式。字符串单引号须转义为两个，列名使用 snake_case。',
     '归档列名必须严格区分：chronicle_archive=(archive_ref, day, summary, fingerprints, related_ids, source_chronicle_ids)；chronicle_overview=(fingerprint, day, one_line, archive_ref)。chronicle_overview 没有 summary 或 related_ids 列。guidance 是单例，只能 UPDATE 且 WHERE 只能带 expected_revision。',
