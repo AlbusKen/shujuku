@@ -505,6 +505,12 @@ export class WorldSimulationSubagentRuntime_ACU {
     const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts[input.agentName], input.agentName, resolvers);
     const protocol = worldSimulationOneShotProtocol_ACU(input.agentName, modules);
     const base = [{ role: 'system', content: protocol }, ...rendered.messages.filter(message => message.content !== USER_PREFILL_CONTENT_ACU)];
+    // 末尾预填充是用户在提示词里设置的 user 段，必须按 role: 'user' 原样补回请求末尾，与主 Agent、
+    // legacy specialist、reviewer 三条链路一致。漏掉它，withNativeToolThinkPrefill_ACU 会改追加
+    // assistant <think> 预填充，请求以 model turn 结尾，Gemini 等通道直接 400。
+    const trailingPrefill = rendered.messages.some(message => message.content === USER_PREFILL_CONTENT_ACU)
+      ? [{ role: 'user', content: USER_PREFILL_CONTENT_ACU }]
+      : [];
     const transcript: AiWireMessage_ACU[] = [];
     const readGateState = createWorldSimulationReadGateState_ACU();
     const usage = { readsUsed: 0 };
@@ -522,7 +528,7 @@ export class WorldSimulationSubagentRuntime_ACU {
     for (let attempt = 0; attempt < 2 + maxReads; attempt++) {
       if (input.isCurrent?.() === false) throw new Error('WORLD_SIMULATION_RUN_STALE');
       let locatedIssues: WorldSimulationSubagentIssue_ACU[] = [];
-      const messages = withNativeToolThinkPrefill_ACU([...base, { role: 'user', content: runtime }, ...transcript]);
+      const messages = withNativeToolThinkPrefill_ACU([...base, { role: 'user', content: runtime }, ...transcript, ...trailingPrefill]);
       const requestTools = maxReads && reads === 0 ? ['read', 'write_sql'] as const : ['write_sql'] as const;
       let sent: Awaited<ReturnType<typeof executeWorldSimulationFinalRequest_ACU>>;
       try {

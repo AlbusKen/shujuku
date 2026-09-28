@@ -221,7 +221,11 @@ describe('两批一次性格林推演工作流', () => {
       countTokens: async () => 1 }).runOneShot(input)).status).toBe('no_change');
     expect(thinking).toHaveBeenCalledTimes(1);
     const firstRequest = thinking.mock.calls[0][1] as Array<{ role: string; content: unknown }>;
-    expect(firstRequest.some(message => message.content === USER_PREFILL_CONTENT_ACU)).toBe(false);
+    // 提示词末尾的 user 段按用户设置原样发送：它必须是请求最后一条，且只出现一次；
+    // 不能被换成 assistant <think> 预填充，否则请求以 model turn 结尾，Gemini 会直接 400。
+    expect(firstRequest.at(-1)).toMatchObject({ role: 'user', content: USER_PREFILL_CONTENT_ACU });
+    expect(firstRequest.filter(message => message.content === USER_PREFILL_CONTENT_ACU)).toHaveLength(1);
+    expect(firstRequest.some(message => message.role === 'assistant' && String(message.content).trim() === '<think>')).toBe(false);
     expect(JSON.stringify(firstRequest)).not.toMatch(/reads\\?":\[\\?"ledger:current/);
     const thinkingFailed = vi.fn(async () => '<think>思考过程</think>\nFAILED: 无法完成');
     expect((await new WorldSimulationSubagentRuntime_ACU({ invoke: thinkingFailed, apiPreset,
