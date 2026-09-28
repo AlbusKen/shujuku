@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { buildDefaultWorldSimulationSettings_ACU } from '../../../src/service/simulation/defaults';
 import { evaluateWorldSimulationWebUrl_ACU, WorldSimulationWebClient_ACU } from '../../../src/service/simulation/world-simulation-web-client';
 
-describe('世界推演网页客户端', () => {
+describe('格林推演网页客户端', () => {
   it('拒绝危险 URL 与用户黑名单域', () => {
     expect(evaluateWorldSimulationWebUrl_ACU('not-a-url', '')).toBe('invalid-url');
     expect(evaluateWorldSimulationWebUrl_ACU('file:///etc/passwd', '')).toBe('disallowed-url');

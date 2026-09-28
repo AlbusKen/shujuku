@@ -18,7 +18,7 @@ function bindChat_ACU(chat: any[], getChatId: () => string = () => 'chat-a'): vo
 
 beforeEach(() => _set_SillyTavern_API_ACU(undefined));
 
-describe('世界推演触发适配器', () => {
+describe('格林推演触发适配器', () => {
   it('有界等待后只解析唯一物化 assistant，user/system 不会成为锚点', async () => {
     const chat: any[] = [user(), narrator()];
     bindChat_ACU(chat);

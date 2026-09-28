@@ -1,5 +1,5 @@
 /**
- * service/simulation/simulation-ledger-sql-view.ts — 世界推演账本的 SQL 易失视图
+ * service/simulation/simulation-ledger-sql-view.ts — 格林推演账本的 SQL 易失视图
  *
  * 与续写 agent-module-sql-view 同形态、独立实例：账本六数组模块（dimensions/seeds/
  * actors/chronicle/rumors/chronicleOverview）一模块一表行级维护，clock/player/guidance

@@ -9,7 +9,7 @@ import {
   resetWorldSimulationInternalAiEventsForTests_ACU,
 } from '../../../src/service/simulation/simulation-internal-ai-events';
 
-describe('世界推演内部 AI 事件在途判定', () => {
+describe('格林推演内部 AI 事件在途判定', () => {
   beforeEach(() => resetWorldSimulationInternalAiEventsForTests_ACU());
 
   it('无主 API 活动且无已绑定 seq 时不算在途', () => {

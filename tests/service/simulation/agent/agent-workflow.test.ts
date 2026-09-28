@@ -56,7 +56,7 @@ const noChange = (agentName: string): WorldSimulationSubagentOutcome_ACU => ({
   agentName, status: 'no_change', summary: `${agentName} 无变化`, evidenceRefs: [], uncertainties: [],
 });
 
-describe('世界推演固定工作流', () => {
+describe('格林推演固定工作流', () => {
   it('按 timekeeper、并行暗流与人物、投影决定的顺序执行，全 no_change 不调用投影决定', async () => {
     const env = harness(buildEmptyWorldSimulationLedger_ACU(), {
       timekeeper: [noChange('timekeeper')],

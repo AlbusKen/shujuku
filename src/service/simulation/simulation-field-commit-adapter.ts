@@ -1,4 +1,4 @@
-/** 世界推演逐栏生产提交：SQL 与帧仅作预演，楼层私有字段是保存权威。 */
+/** 格林推演逐栏生产提交：SQL 与帧仅作预演，楼层私有字段是保存权威。 */
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
 import { WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU, WORLD_SIMULATION_RUN_WRITE_FIELD_ACU, WORLD_SIMULATION_STATE_FIELD_ACU,

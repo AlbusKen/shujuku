@@ -5,7 +5,7 @@
         {{ runtime.error.value }}
         <AcuButton size="sm" @click="refreshAll">重新读取</AcuButton>
       </p>
-      <p v-else-if="!runtime.ready.value" class="acu-v2-world-simulation-page__meta">正在读取并验证世界推演快照…</p>
+      <p v-else-if="!runtime.ready.value" class="acu-v2-world-simulation-page__meta">正在读取并验证格林推演快照…</p>
       <WorldSimulationChat
         v-else
         :task="runtime.task.value"
@@ -26,7 +26,7 @@
 
     <!-- 会话独占整宽，资料与设置并列在其下：会话是主操作面，资料与设置是查阅面。 -->
     <AcuPanelGrid class="acu-v2-world-simulation-page__layout">
-      <AcuPanel title="已有资料" description="当前分支的用户要求、世界账本、编年对照、错过清单、传闻队列、候选轨迹、投影预览与读取诊断；用户要求可在资料区手动修正，账本只由 Agent 经审核后写入。一键清空只丢任务、会话记录与楼层资料快照，不动正文。">
+      <AcuPanel title="已有资料" description="当前分支的用户要求、账本总览、幕后纪要、错过清单、风声、候选轨迹、场外信号与读取诊断；用户要求可在资料区手动修正，账本只由 Agent 经审核后写入。一键清空只丢任务、会话记录与楼层资料快照，不动正文。">
         <WorldSimulationMaterialsPanel
           v-if="runtime.ready.value && runtime.snapshot.value"
           :save-requirements="runtime.saveUserRequirements"
@@ -43,7 +43,7 @@
           @refresh="refreshAll"
           @clear="clearData"
         />
-        <p v-else class="acu-v2-world-simulation-page__meta">当前没有可显示的世界推演资料。</p>
+        <p v-else class="acu-v2-world-simulation-page__meta">当前没有可显示的格林推演资料。</p>
       </AcuPanel>
 
       <AcuPanel v-if="settingsDraft" title="推演设置" description="修改后自动保存；任务运行中也可以改，改动会在本轮结束后落盘、下一轮开始时生效。常用项直接可见，其余参数按主题折叠。">
@@ -140,9 +140,9 @@
             body-id="acu-world-simulation-group-dynamics"
             @toggle="toggleGroup('dynamics')"
           >
-            <p class="acu-v2-world-simulation-page__meta">控制传闻时效、时钟推进上限、碰撞兑现与过期清扫；改动在下一轮推演生效。</p>
+            <p class="acu-v2-world-simulation-page__meta">控制风声时效、时序推进上限、碰撞兑现与过期清扫；改动在下一轮推演生效。</p>
             <div class="acu-v2-world-simulation-page__settings-grid">
-              <AcuFormRow label="传闻等待上限（世界日）" hint="传闻进入待命后，等待玩家命中渠道的世界日上限。范围 1–3650。">
+              <AcuFormRow label="风声等待上限（天）" hint="风声进入待命后，等待玩家命中传播渠道的天数上限。范围 1–3650。">
                 <AcuInput v-model="settingsDraft.dynamics.rumorTTLDays" type="number" :min="1" :max="3650" />
               </AcuFormRow>
               <AcuFormRow label="单次时钟推进上限（世界日）" hint="一次提交允许推进的天数；超过则必须附带证据。范围 0–3650。">
@@ -153,7 +153,7 @@
               </AcuFormRow>
             </div>
             <div class="acu-v2-world-simulation-page__toggles">
-              <AcuCheckbox v-model="settingsDraft.dynamics.missedSweepEnabled" label="启用过期清扫（关闭后过期暗流不会自动记为错过）" />
+              <AcuCheckbox v-model="settingsDraft.dynamics.missedSweepEnabled" label="启用过期清扫（关闭后过期伏线不会自动记为错过）" />
             </div>
           </AcuDisclosureGroup>
 
@@ -165,9 +165,9 @@
             body-id="acu-world-simulation-group-workflow"
             @toggle="toggleGroup('workflow')"
           >
-            <p class="acu-v2-world-simulation-page__meta">固定工作流批次一并发处理时间暗流与人物位置，批次二按变化处理编年、传闻和投影。这里只改编年热层阈值；提示词仍在下方各角色分组里改。</p>
+            <p class="acu-v2-world-simulation-page__meta">固定工作流批次一并发处理时序、局势刻度与伏线，以及人物谱；批次二按变化处理幕后纪要、风声与场外信号。这里只改纪要热层阈值；提示词仍在下方各角色分组里改。</p>
             <div class="acu-v2-world-simulation-page__settings-grid">
-              <AcuFormRow label="编年热层阈值" hint="热层编年达到这个条数时，批次二由编年与投影角色处理归档。范围 1–512。">
+              <AcuFormRow label="纪要热层阈值" hint="热层纪要达到这个条数时，批次二由纪要角色处理归档。范围 1–512。">
                 <AcuInput v-model="settingsDraft.workflow.chroniclerHotThreshold" type="number" :min="1" :max="512" />
               </AcuFormRow>
             </div>
@@ -243,7 +243,7 @@
         >
           <h4 class="acu-v2-world-simulation-page__subheading">引擎 seam 段</h4>
           <p class="acu-v2-world-simulation-page__meta">每个角色的提示词由固定顺序的 ROOT、ROLE_RULES、PROTOCOL、WORKFLOW、HISTORY、RUNTIME_CONTEXT、ACKNOWLEDGEMENT、EXECUTION_BOUNDARY 八段引擎 seam 与一段可编辑的用户要求段组成。seam 段的角色与顺序由引擎锁定，只能改内容不能删除或移动；可编辑段必须唯一且包含 $WORLD_USER_REQUIREMENTS 或 $WORLD_USER_GUIDANCE。</p>
-          <h4 class="acu-v2-world-simulation-page__subheading">世界推演占位符</h4>
+          <h4 class="acu-v2-world-simulation-page__subheading">格林推演占位符</h4>
           <p class="acu-v2-world-simulation-page__meta">运行装配占位符：$WORLD_TASK（当前任务）、$WORLD_HISTORY（楼层锚定的 Agent 会话历史）、$WORLD_RUNTIME_CONTEXT（触发种类、指令与基准账本 revision）、$WORLD_AGENT_CATALOG（可派工角色与职责）、$WORLD_TOOL_CATALOG（read/search 地址词汇表）、$WORLD_EVIDENCE（已授权证据条目）、$WORLD_USER_REQUIREMENTS（用户累计要求，默认注入）、$WORLD_USER_GUIDANCE（用户本轮指令，自定义段仍可用）。世界领域占位符：$WORLD_STATE（当前世界账本）、$ANCHOR_MESSAGE（冻结 assistant 楼层正文）、$ANCHOR_IDENTITY（楼层 / swipe / 正文摘要身份）、$WORLD_STAGE_PLAN（本轮阶段计划）、$WORLD_CHRONICLE（宏观编年）、$WORLD_CANDIDATES（本轮候选摘要）、$CURRENT_EVIDENCE_REGISTRY（证据注册表快照）、$PROJECTION_PREVIEW（〈与此同时〉投影预览）。所有动态内容都以转义后的 UNTRUSTED_* 区块注入，只有提示词里实际出现的占位符才会被解析；未知占位符会在保存时被拒绝。</p>
         </AcuDisclosureGroup>
       </div>
@@ -331,7 +331,7 @@ const agentChannelOptions = computed(() => [
   ...apiPresetOptions.value,
 ]);
 
-/** 世界推演的渠道映射以「键不存在」表示跟随全局默认，与 settings validator 的闭合契约一致。 */
+/** 格林推演的渠道映射以「键不存在」表示跟随全局默认，与 settings validator 的闭合契约一致。 */
 function agentChannelValue(agentName: WorldSimulationAgentName_ACU): string {
   const choice = settingsDraft.value?.agentApiPresets[agentName];
   if (!choice) return INHERIT_CHANNEL_VALUE;
@@ -401,7 +401,7 @@ function cloneSettings(settings: WorldSimulationSettings_ACU): WorldSimulationSe
 /** 首次发送（即将创建任务）前的高 RPM 风险确认：5 秒倒计时结束前只能取消。 */
 async function confirmFirstSendRpmWarning(): Promise<boolean> {
   return dialog.confirm({
-    title: '开始世界推演前请确认',
+    title: '开始格林推演前请确认',
     message: '本功能单次请求占用的 Token 不多，但 Agent 会连续发起大量请求，需要 API 支持很高的 RPM（每分钟请求数）。开启「自动推演」后每次正文生成完成都会再跑一轮。',
     dangerMessage: '禁止使用任何公益站，除非它明确表示允许 coding（本功能的请求模式与 coding 类似）。违规使用可能导致账号被封禁。',
     confirmLabel: '我已了解，开始',
@@ -455,7 +455,7 @@ function presetExists(presetName: string): boolean {
 }
 
 function normalizeSettingsDraft(): WorldSimulationSettings_ACU {
-  if (!settingsDraft.value) throw new Error('世界推演设置尚未加载');
+  if (!settingsDraft.value) throw new Error('格林推演设置尚未加载');
   const source = settingsDraft.value;
   const normalized: WorldSimulationSettings_ACU = {
     ...cloneSettings(source),
@@ -479,7 +479,7 @@ function normalizeSettingsDraft(): WorldSimulationSettings_ACU {
       blockedDomains: String(source.webResearch.blockedDomains ?? ''),
     },
     dynamics: {
-      rumorTTLDays: requiredRangeInteger(source.dynamics.rumorTTLDays, '传闻等待上限', 1, 3650),
+      rumorTTLDays: requiredRangeInteger(source.dynamics.rumorTTLDays, '风声等待上限', 1, 3650),
       maxClockAdvanceDays: requiredRangeInteger(source.dynamics.maxClockAdvanceDays, '单次时钟推进上限', 0, 3650),
       collisionEnforcement: source.dynamics.collisionEnforcement === 'relaxed' ? 'relaxed' : source.dynamics.collisionEnforcement === 'strict' ? 'strict' : (() => { throw new Error('碰撞兑现策略必须是严格或宽松'); })(),
       missedSweepEnabled: typeof source.dynamics.missedSweepEnabled === 'boolean' ? source.dynamics.missedSweepEnabled : (() => { throw new Error('过期清扫开关无效'); })(),
@@ -533,7 +533,7 @@ async function saveSettingsNow(): Promise<void> {
     apiStore.refreshFromSettings();
     candidate = normalizeSettingsDraft();
   } catch (error) {
-    settingsError.value = error instanceof Error ? error.message : '世界推演设置无效';
+    settingsError.value = error instanceof Error ? error.message : '格林推演设置无效';
     return;
   }
   const outcome = await runtime.saveSettings(candidate);
@@ -542,7 +542,7 @@ async function saveSettingsNow(): Promise<void> {
     settingsNotice.value = '';
   } else if (outcome === 'busy') {
     // Agent 正在运行，改动不能丢：告知用户并排队等本轮结束后落盘。
-    settingsNotice.value = '设置已修改：世界推演正在运行，将在本轮结束后自动保存并于下一轮生效。';
+    settingsNotice.value = '设置已修改：格林推演正在运行，将在本轮结束后自动保存并于下一轮生效。';
     scheduleSettingsSave();
   }
 }

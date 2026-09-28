@@ -64,7 +64,7 @@ beforeEach(() => {
   mockStore._clear();
 });
 
-describe('世界推演总开关的 profile 保存兼容', () => {
+describe('格林推演总开关的 profile 保存兼容', () => {
   it('保留显式开启和关闭，缺失时不凭空写入开启', () => {
     expect(sanitizeSettingsForProfileSave_ACU({ worldSimulationPageEnabled: true }).worldSimulationPageEnabled).toBe(true);
     expect(sanitizeSettingsForProfileSave_ACU({ worldSimulationPageEnabled: false }).worldSimulationPageEnabled).toBe(false);

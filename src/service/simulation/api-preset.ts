@@ -14,12 +14,12 @@ function fail_ACU(phase: WorldSimulationErrorPhase_ACU, code: 'WORLD_SIMULATION_
 export function resolveWorldSimulationApiPreset_ACU(settings: Pick<Settings_ACU, 'apiPresetMode' | 'fixedApiPresetName'>, phase: WorldSimulationErrorPhase_ACU, dependencies: WorldSimulationApiPresetDependencies_ACU = defaults_ACU): WorldSimulationResolvedApiPreset_ACU {
   if (settings.apiPresetMode === 'fixed') {
     const presetName = settings.fixedApiPresetName.trim();
-    if (!presetName) fail_ACU(phase, 'WORLD_SIMULATION_API_PRESET_MISSING', '固定世界推演 API 预设不能为空');
+    if (!presetName) fail_ACU(phase, 'WORLD_SIMULATION_API_PRESET_MISSING', '固定格林推演 API 预设不能为空');
     const resolved = dependencies.resolvePreset(presetName);
-    if (!resolved.resolved) fail_ACU(phase, 'WORLD_SIMULATION_API_PRESET_MISSING', '世界推演 API 预设不存在或已失效');
+    if (!resolved.resolved) fail_ACU(phase, 'WORLD_SIMULATION_API_PRESET_MISSING', '格林推演 API 预设不存在或已失效');
     return { ...resolved, presetName, source: 'fixed', reason: 'fixed_preset' };
   }
-  if (settings.apiPresetMode !== 'current') fail_ACU(phase, 'WORLD_SIMULATION_CONFIG_INVALID', '世界推演 API 预设模式非法');
+  if (settings.apiPresetMode !== 'current') fail_ACU(phase, 'WORLD_SIMULATION_CONFIG_INVALID', '格林推演 API 预设模式非法');
   const resolved = dependencies.resolvePreset('');
   return { ...resolved, presetName: '', source: 'current', reason: 'current_configuration' };
 }

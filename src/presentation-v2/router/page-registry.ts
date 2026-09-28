@@ -51,7 +51,7 @@ export const ACU_V2_PAGE_REGISTRY: readonly AcuV2Page[] = Object.freeze([
 
   // 功能
   { id: 'continuation', title: '智能续写', group: 'feature', component: markRaw(ContinuationPage), featureGate: FEATURE_GATE_CONTINUATION },
-  { id: 'world-simulation', title: '世界推演', group: 'feature', component: markRaw(WorldSimulationPage), featureGate: FEATURE_GATE_WORLD_SIMULATION },
+  { id: 'world-simulation', title: '格林推演', group: 'feature', component: markRaw(WorldSimulationPage), featureGate: FEATURE_GATE_WORLD_SIMULATION },
   { id: 'import', title: '外部导入', group: 'feature', component: markRaw(ImportPage), featureGate: FEATURE_GATE_IMPORT },
   { id: 'vector-index', title: '交火模式', group: 'feature', component: markRaw(VectorIndexPage), featureGate: FEATURE_GATE_VECTOR_INDEX },
   {

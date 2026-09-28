@@ -590,7 +590,7 @@ export function applyWorldSimulationCandidatesDetailed_ACU(
       if (!declared.has(ref) || !authorizedEvidenceRefs.has(ref)) fail_ACU('patch 使用了未由候选声明并授权的 evidenceRef', { candidateId: candidate.candidateId, evidenceRef: ref });
     }
     const definition = findWorldSimulationAgentDefinition_ACU(candidate.agentName);
-    if (!definition) fail_ACU('候选 Agent 不在世界推演角色目录中', { candidateId: candidate.candidateId, agentName: candidate.agentName });
+    if (!definition) fail_ACU('候选 Agent 不在格林推演角色目录中', { candidateId: candidate.candidateId, agentName: candidate.agentName });
     const writable = new Set<string>(definition.writableModules);
     const forgedPermissions = candidate.writableModules.filter(module => !writable.has(module));
     if (forgedPermissions.length) fail_ACU('候选声明了角色目录未授权的写入模块', { candidateId: candidate.candidateId, forgedPermissions });
@@ -896,7 +896,7 @@ export function preflightWorldSimulationCandidates_ACU(
     }
     const definition = findWorldSimulationAgentDefinition_ACU(candidate.agentName);
     if (!definition) {
-      push('', '$.agentName', `候选 Agent 不在世界推演角色目录中: ${candidate.agentName}`);
+      push('', '$.agentName', `候选 Agent 不在格林推演角色目录中: ${candidate.agentName}`);
       continue;
     }
     const writable = new Set<string>(definition.writableModules);

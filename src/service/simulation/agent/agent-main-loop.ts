@@ -404,7 +404,7 @@ export class WorldSimulationMainLoop_ACU {
       });
     };
     const runEntryId = beginWorldSimulationSessionRun_ACU(
-      input.identity.chatIdentity, '世界推演 Agent 运行',
+      input.identity.chatIdentity, '格林推演 Agent 运行',
       resetRunBudget ? `用户指令续跑，预算窗口重置（保留 ${candidates.length} 个候选）` : budgetExhausted ? `预算窗口重置，从第 1 轮继续（保留 ${candidates.length} 个候选）` : resumedState ? `从第 ${iteration} 次迭代恢复` : `stage=${input.identity.stageId}`,
       !!resumedState,
     );
@@ -576,7 +576,7 @@ export class WorldSimulationMainLoop_ACU {
         );
         const fixed = [{ role: 'system', content: worldSimulationDirectorRuntimeProtocolInstruction_ACU() }, ...rendered.messages.filter(message => message.content !== USER_PREFILL_CONTENT_ACU)];
         const snapshotText = [
-          '【本次世界推演最新快照】',
+          '【本次格林推演最新快照】',
           ...(triggeredWorldbook ? [triggeredWorldbook] : []),
           ...(requestContext.userRequirements ? [`用户要求：${requestContext.userRequirements}`] : []),
           `本次任务：${JSON.stringify(requestContext.task ?? null)}`,
@@ -1101,7 +1101,7 @@ ${rejectionText}` : delegationFeedback,
     return blockOnBudget_ACU(
       input.settings.agentRunBudget.maxIterations,
       'iteration budget exhausted',
-      '世界推演主循环迭代预算耗尽',
+      '格林推演主循环迭代预算耗尽',
       `maxIterations=${input.settings.agentRunBudget.maxIterations}`,
       ['iteration budget exhausted'],
       'block-iteration-budget',

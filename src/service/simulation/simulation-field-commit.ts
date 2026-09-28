@@ -1,4 +1,4 @@
-/** 世界推演 write_sql 逐栏规划；草稿只进入分栏帧，绝不伪装成账本条目。 */
+/** 格林推演 write_sql 逐栏规划；草稿只进入分栏帧，绝不伪装成账本条目。 */
 import {
   WORLD_PLAYER_CONTACTS_ACU, WORLD_GUIDANCE_SIGNAL_VOICES_ACU, WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU,
   WORLD_SIMULATION_SINGLETON_ID_ACU, type WorldSimulationLedger_ACU, type WorldSimulationLedgerFieldSnapshot_ACU,

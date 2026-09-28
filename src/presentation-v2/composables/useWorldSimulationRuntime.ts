@@ -30,7 +30,7 @@ const TASK_STATUS_LABELS_ACU: Record<WorldSimulationTaskStatus_ACU, string> = {
 
 function errorMessage_ACU(error: unknown): string {
   if (error instanceof WorldSimulationValidationError_ACU) return error.error.message;
-  return error instanceof Error ? error.message : '世界推演操作失败';
+  return error instanceof Error ? error.message : '格林推演操作失败';
 }
 
 /** 严格读取失败时给 UI 的结构化文案：保留错误码，用户能据此判断是数据损坏还是聊天不可用。 */
@@ -107,7 +107,7 @@ export function useWorldSimulationRuntime() {
       const forcedRoles = await runtime.initialize();
       refresh();
       if (forcedRoles.length) {
-        toast.info(`世界推演 v21 已重置 ${forcedRoles.length} 个自定义资料角色的提示词；旧版逐栏写入协议不适用于新流程。`);
+        toast.info(`格林推演 v21 已重置 ${forcedRoles.length} 个自定义资料角色的提示词；旧版逐栏写入协议不适用于新流程。`);
       }
     } catch (cause) {
       toast.error(errorMessage_ACU(cause), { muteable: false });
@@ -206,18 +206,18 @@ export function useWorldSimulationRuntime() {
    */
   function reportSendOutcome_ACU(result: WorldSimulationOrchestratorResult_ACU | null): boolean {
     if (!result) {
-      toast.error('当前聊天没有 assistant 楼层，世界推演无法确定写入锚点。', { muteable: false });
+      toast.error('当前聊天没有 assistant 楼层，格林推演无法确定写入锚点。', { muteable: false });
       return false;
     }
     if (result.status === 'skipped') {
       if (result.reason === 'duplicate') toast.info('该楼层已有一次推演在处理这条指令。');
-      else if (result.reason === 'busy') toast.error('世界推演正在运行，请先停止再发送。', { muteable: false });
+      else if (result.reason === 'busy') toast.error('格林推演正在运行，请先停止再发送。', { muteable: false });
       else if (result.reason === 'disabled') toast.info('自动触发已关闭。');
       else toast.info('推演已排队，将在当前运行结束后开始。');
       return false;
     }
     if (result.status === 'cancelled') {
-      toast.info('本次世界推演已停止，发送新指令即可从中断处继续。');
+      toast.info('本次格林推演已停止，发送新指令即可从中断处继续。');
       return true;
     }
     if (result.status === 'failed') {
@@ -259,7 +259,7 @@ export function useWorldSimulationRuntime() {
   }
 
   /**
-   * 保存世界推演设置。
+   * 保存格林推演设置。
    * 运行中编排器以 retryable 的 REVISION_CONFLICT 拒绝写入——这不是错误而是时机问题，
    * 返回 'busy' 让页面静默排队重试，而不是弹错误吐司把用户的改动丢掉。
    * @returns 'saved' 已落盘；'busy' 暂时写不进（稍后重试）；'failed' 校验或持久化失败（已吐司）
@@ -305,7 +305,7 @@ export function useWorldSimulationRuntime() {
     try {
       const outcome = await runtime.clearData();
       refresh();
-      toast.success(`已清空世界推演任务、账本、会话记录与 ${outcome.clearedFloors} 个楼层的资料快照，正文未改动。`);
+      toast.success(`已清空格林推演任务、账本、会话记录与 ${outcome.clearedFloors} 个楼层的资料快照，正文未改动。`);
       return true;
     } catch (cause) {
       toast.error(errorMessage_ACU(cause), { muteable: false });

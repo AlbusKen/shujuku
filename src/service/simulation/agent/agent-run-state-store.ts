@@ -215,7 +215,7 @@ function state_ACU(raw: unknown, path: string): WorldSimulationRunResumeState_AC
 }
 
 export function validateWorldSimulationRunStateRecord_ACU(raw: unknown): WorldSimulationRunStateRecord_ACU {
-  if (!record_ACU(raw)) reject_ACU('世界推演 run 恢复状态必须是对象');
+  if (!record_ACU(raw)) reject_ACU('格林推演 run 恢复状态必须是对象');
   const allowed = new Set(['schemaVersion', 'taskId', 'cursorKey', 'updatedAt', 'state']);
   for (const key of ['schemaVersion', 'taskId', 'cursorKey', 'updatedAt', 'state']) {
     if (!Object.prototype.hasOwnProperty.call(raw, key)) reject_ACU(`run 恢复状态缺少字段：${key}`, { path: key });

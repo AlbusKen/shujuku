@@ -28,7 +28,7 @@ function entry(overrides: Partial<WorldSimulationSessionEntry_ACU> = {}): WorldS
     id: 1,
     at: 1,
     kind: 'run_started',
-    title: '世界推演 Agent 运行',
+    title: '格林推演 Agent 运行',
     detail: '',
     agentName: 'world-director',
     ok: true,
@@ -99,7 +99,7 @@ describe('WorldSimulationProgressCard', () => {
     runtimeState.running!.value = false;
     runtimeState.entries!.value = [
       entry({ id: 1, kind: 'run_started' }),
-      entry({ id: 2, kind: 'run_completed', title: '世界推演完成' }),
+      entry({ id: 2, kind: 'run_completed', title: '格林推演完成' }),
     ];
     await nextTick();
     expect(document.body.querySelector('.acu-world-sim-progress')?.textContent).toContain('推演完成');

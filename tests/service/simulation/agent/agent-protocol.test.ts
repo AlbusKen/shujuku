@@ -23,7 +23,7 @@ import {
 
 const plan = { schemaVersion: 1, title: '阶段一', objective: '推进世界', impactScope: ['北境'], factsToVerify: [], plannedTools: [], plannedSpecialists: [], expectedLedgerChanges: ['clock'], convergenceConditions: ['事实闭合'], blockingConditions: [], completedSteps: [], nextStep: '执行' };
 
-describe('世界推演 Agent 协议', () => {
+describe('格林推演 Agent 协议', () => {
   it('提取配平 JSON，并兼容 reasoning、围栏、额外文本和预填充续写', () => {
     expect(extractFirstWorldSimulationJsonObject_ACU('说明 {"action":"block","reason":"缺证据","unresolved":["时间"]} 尾注')).toContain('"action":"block"');
     const full = parseWorldSimulationJsonPayload_ACU('<think>内部思考</think>```json\n{"action":"read","reads":["$WORLD"]}\n```', '', ['action']);
@@ -304,7 +304,7 @@ describe('世界推演 Agent 协议', () => {
   });
 });
 
-describe('世界推演逐栏 SQL 意图', () => {
+describe('格林推演逐栏 SQL 意图', () => {
   it('非法栏目逐栏拒绝且保留合法栏目，陈旧 revision 交给提交器校验', () => {
     const result = parseWorldSimulationSqlFieldWrites_ACU("UPDATE actors SET goals = '[\"寻找线索\"]', made_up = 'x' WHERE id = 'actor-1' AND expected_revision = 2", 'dramatis-keeper');
     expect(result.intents).toMatchObject([{ module: 'actors', id: 'actor-1', expectedRevision: 2, fields: { goals: ['寻找线索'] } }]);

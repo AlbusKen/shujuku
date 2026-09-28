@@ -261,8 +261,8 @@ export const dashboardCopy = {
       description: "手动功能。代替你自动发送提示词，AI 根据内容持续续写。",
     },
     worldSimulation: {
-      label: "世界推演",
-      description: "审计世界账本、阶段计划与证据，并在确认后把安全 guidance 投影到正文。",
+      label: "格林推演",
+      description: "审计推演账本、阶段计划与证据，并在确认后把可感知的场外信号写进正文。",
     },
     externalImport: {
       label: "外部导入",

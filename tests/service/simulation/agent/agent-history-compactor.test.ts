@@ -14,7 +14,7 @@ function view(oldSize = 150000, recentSize = 10000) {
   ] };
 }
 
-describe('世界推演 handoff 与非破坏压缩', () => {
+describe('格林推演 handoff 与非破坏压缩', () => {
   it('语义 adapter 失败时显式降级并保留确定性事实', async () => {
     const result = await summarizeWorldSimulationHandoff_ACU({ previous: null, messages: [{ id: 1, kind: 'agent', text: '旧决策', digest: '旧决策', turnKey: 't1', at: 1, readKey: '$OLD' }], maxTokens: 2000, countTokens: count, semanticAdapter: { summarize: async () => { throw new Error('bad'); } } });
     expect(result).toMatchObject({ degraded: true, degradationReason: 'semantic_summary_failed' });

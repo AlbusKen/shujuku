@@ -116,7 +116,7 @@ async function invokeWorldSimulationAgentOnce_ACU(
     });
     if (response.content.trim() || response.toolCalls.length) return response;
     throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(
-      'WORLD_SIMULATION_AGENT_PROTOCOL_INVALID', 'agent_loop', '世界推演 Agent 返回空响应', false, { role },
+      'WORLD_SIMULATION_AGENT_PROTOCOL_INVALID', 'agent_loop', '格林推演 Agent 返回空响应', false, { role },
     ));
   } finally {
     settleWorldSimulationInternalAiRequest_ACU(requestId);
@@ -192,7 +192,7 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
         anchor: currentAnchor, runId: identity.runId, taskId: identity.taskId,
         stageId: identity.stageId, stageRevision: identity.stageRevision,
         eventKey: `run-completed-${outcome}`,
-        event: { kind: 'run_completed', title: outcome === 'commit' ? '世界推演已提交' : '世界推演无变化', detail: summary, agentName: 'world-director' },
+        event: { kind: 'run_completed', title: outcome === 'commit' ? '格林推演已提交' : '格林推演无变化', detail: summary, agentName: 'world-director' },
       }, chat);
     },
     appendUserMessage: async ({ identity, anchor, text, idempotent }) => {
@@ -375,7 +375,7 @@ export const WORLD_SIMULATION_STOP_REASON_LABELS_ACU: Record<string, string> = {
   cancelled: '已取消',
 };
 
-/** 世界推演写在各楼层上的非权威分桶字段：会话 segment、材料快照、账本状态快照、run 恢复状态。 */
+/** 格林推演写在各楼层上的非权威分桶字段：会话 segment、材料快照、账本状态快照、run 恢复状态。 */
 const WORLD_SIMULATION_FLOOR_FIELDS_ACU = [
   WORLD_SIMULATION_STATE_FIELD_ACU,
   WORLD_SIMULATION_MATERIALS_FIELD_ACU,
@@ -466,11 +466,11 @@ export class WorldSimulationRuntime_ACU {
     await this.persistPromptMigration_ACU();
     const resolved = await resolveWorldSimulationAssistantCompletion_ACU(intent, { getChat: this.getChat, delay: ms => new Promise(resolve => setTimeout(resolve, ms)) });
     if (resolved.kind !== 'resolved') {
-      logWarn_ACU(`世界推演自动触发跳过：锚点解析失败（${resolved.reason}）`);
+      logWarn_ACU(`格林推演自动触发跳过：锚点解析失败（${resolved.reason}）`);
       return null;
     }
     const outcome = await this.orchestrator.start({ triggerKind: 'assistant_completed', anchor: resolved.anchor, instruction: '根据最新 assistant 正文推进世界状态' });
-    if (outcome.status === 'skipped') logDebug_ACU(`世界推演自动触发跳过：orchestrator skipped（${outcome.reason}）`);
+    if (outcome.status === 'skipped') logDebug_ACU(`格林推演自动触发跳过：orchestrator skipped（${outcome.reason}）`);
     return outcome;
   }
 
@@ -521,12 +521,12 @@ export class WorldSimulationRuntime_ACU {
     const chatIdentity = getActiveChatStorageIdentity_ACU(chat);
     if (!chatIdentity) {
       throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(
-        'WORLD_SIMULATION_CHAT_UNAVAILABLE', 'persist', '当前聊天不可用，无法保存世界推演设置', false,
+        'WORLD_SIMULATION_CHAT_UNAVAILABLE', 'persist', '当前聊天不可用，无法保存格林推演设置', false,
       ));
     }
     if (this.orchestrator.isInFlight(chatIdentity)) {
       throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(
-        'WORLD_SIMULATION_REVISION_CONFLICT', 'persist', '世界推演正在运行，设置将在本轮结束后自动保存', true,
+        'WORLD_SIMULATION_REVISION_CONFLICT', 'persist', '格林推演正在运行，设置将在本轮结束后自动保存', true,
       ));
     }
     await new FirstFloorWorldSimulationStore_ACU().updateAtomically(envelope => ({
@@ -550,12 +550,12 @@ export class WorldSimulationRuntime_ACU {
     const chatIdentity = getActiveChatStorageIdentity_ACU(chat);
     if (!chatIdentity) {
       throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(
-        'WORLD_SIMULATION_CHAT_UNAVAILABLE', 'persist', '当前聊天不可用，无法清空世界推演数据', false,
+        'WORLD_SIMULATION_CHAT_UNAVAILABLE', 'persist', '当前聊天不可用，无法清空格林推演数据', false,
       ));
     }
     if (this.orchestrator.isInFlight(chatIdentity)) {
       throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(
-        'WORLD_SIMULATION_REVISION_CONFLICT', 'persist', '世界推演正在运行，请先停止再清空', false,
+        'WORLD_SIMULATION_REVISION_CONFLICT', 'persist', '格林推演正在运行，请先停止再清空', false,
       ));
     }
     const store = new FirstFloorWorldSimulationStore_ACU();
@@ -586,7 +586,7 @@ export class WorldSimulationRuntime_ACU {
       } catch (error) {
         for (const snapshot of snapshots) snapshot.message[snapshot.key] = snapshot.value;
         throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(
-          'WORLD_SIMULATION_PERSIST_FAILED', 'persist', '清空楼层世界推演字段保存失败，已还原', false,
+          'WORLD_SIMULATION_PERSIST_FAILED', 'persist', '清空楼层格林推演字段保存失败，已还原', false,
           { message: error instanceof Error ? error.message : String(error) },
         ));
       }

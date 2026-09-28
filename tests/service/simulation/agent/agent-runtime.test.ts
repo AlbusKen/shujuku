@@ -29,7 +29,7 @@ function fixture(runId = 'runtime') {
   return { registry, evidence, promptContext, runId };
 }
 
-describe('世界推演 Agent runtime', () => {
+describe('格林推演 Agent runtime', () => {
   const toolTurn = (name: 'read' | 'write_sql', args: Record<string, unknown>, id: string) => ({
     content: '', toolCalls: [{ id, name, arguments: JSON.stringify(args) }],
   });
@@ -50,7 +50,7 @@ describe('世界推演 Agent runtime', () => {
           worldbookSnapshot: Promise.resolve({ available, entries: [] }) });
       expect(result.outcome).toBe('blocked');
       const messages = invoke.mock.calls[0][1] as readonly { content: string }[];
-      const snapshot = messages.filter(message => message.content.includes('【本次世界推演最新快照】'));
+      const snapshot = messages.filter(message => message.content.includes('【本次格林推演最新快照】'));
       expect(snapshot).toHaveLength(1);
       expect(snapshot[0].content.includes('【世界书快照读取失败】')).toBe(!available);
       expect(subagents.run).not.toHaveBeenCalled();
@@ -181,7 +181,7 @@ describe('世界推演 Agent runtime', () => {
     await run();
     const sent = invoke.mock.calls[0][1] as readonly { role: string; content: string }[];
     expect(sent.some(item => item.content === oldRead || item.content === oldReceipt)).toBe(false);
-    expect(sent.filter(item => item.content.includes('更早世界推演会话交接'))).toHaveLength(1);
+    expect(sent.filter(item => item.content.includes('更早格林推演会话交接'))).toHaveLength(1);
     for (let index = 0; index < 4; index += 1) {
       expect(sent.filter(item => item.content === `RECENT_ACTION_${index}`)).toHaveLength(1);
       expect(sent.filter(item => item.content === `RECENT_RECEIPT_${index}`)).toHaveLength(1);
@@ -1793,7 +1793,7 @@ describe('世界推演 Agent runtime', () => {
     // 第一段：仅做一次读取即耗尽迭代预算，形成 'iteration budget exhausted' 恢复标记。
     const firstLoop = new WorldSimulationMainLoop_ACU({ invoke: vi.fn(async () => ({ content: '', toolCalls: [{ id: 'call-budget-clock', name: 'read', arguments: JSON.stringify({ reads: ['$CLOCK'] }) }] })), subagents, apiPreset, countTokens: async () => 1 });
     await expect(firstLoop.run({ identity, settings: runSettings, promptContext, registry, tools, anchor, chat }))
-      .resolves.toMatchObject({ outcome: 'blocked', summary: '世界推演主循环迭代预算耗尽' });
+      .resolves.toMatchObject({ outcome: 'blocked', summary: '格林推演主循环迭代预算耗尽' });
     const exhausted = readWorldSimulationRunState_ACU(identity.chatIdentity, identity.taskId, `${identity.stageId}#${identity.stageRevision}#${identity.baseLedgerRevision}`);
     expect(exhausted).toMatchObject({ budgetExhausted: true, reviewerFeedback: 'iteration budget exhausted' });
     expect(exhausted?.handoffSummary).toContain('交接');
@@ -2192,7 +2192,7 @@ describe('世界推演 Agent runtime', () => {
         perAgent: { 'timekeeper': 4 }, outcomes: [], candidateFingerprint: 'c', candidateSummary: candidate.summary,
         reviewerFeedback: extras.reviewerFeedback, candidates: [candidate],
         ...(extras.budgetExhausted ? { budgetExhausted: true } : {}),
-        handoffSummary: '【更早世界推演会话交接】\n- 预置摘要',
+        handoffSummary: '【更早格林推演会话交接】\n- 预置摘要',
       });
       const subagents = {
         run: vi.fn(),
@@ -2360,8 +2360,8 @@ describe('世界推演 Agent runtime', () => {
       tools: { read: vi.fn(async () => ({ status: 'ok' as const, content: '山雨将至', summary: '正文' })), search: tools.search },
     });
     expect(result).toMatchObject({ outcome: 'blocked' });
-    expect(sent[0]?.some(message => message.role === 'user' && message.content.includes('本次世界推演最新快照'))).toBe(true);
-    expect(sent[1]?.some(message => message.role === 'user' && message.content.includes('本次世界推演最新快照'))).toBe(true);
+    expect(sent[0]?.some(message => message.role === 'user' && message.content.includes('本次格林推演最新快照'))).toBe(true);
+    expect(sent[1]?.some(message => message.role === 'user' && message.content.includes('本次格林推演最新快照'))).toBe(true);
     expect(sent[1]?.some(message => message.role === 'tool' && message.tool_call_id === 'call-rain' && message.content.includes('山雨将至'))).toBe(true);
   });
 

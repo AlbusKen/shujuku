@@ -10,7 +10,7 @@ function entry(overrides: Partial<WorldSimulationSessionEntry_ACU> = {}): WorldS
     id: 1,
     at: 1,
     kind: 'run_started',
-    title: '世界推演 Agent 运行',
+    title: '格林推演 Agent 运行',
     detail: '',
     agentName: 'world-director',
     ok: true,
@@ -85,7 +85,7 @@ describe('deriveWorldSimulationProgressView_ACU', () => {
   it('未运行且终态为完成/中断时短暂可见', () => {
     expect(deriveWorldSimulationProgressView_ACU([
       entry({ id: 1, kind: 'run_started' }),
-      entry({ id: 2, kind: 'run_completed', title: '世界推演完成' }),
+      entry({ id: 2, kind: 'run_completed', title: '格林推演完成' }),
     ], false)).toMatchObject({
       visible: true,
       phase: 'completed',

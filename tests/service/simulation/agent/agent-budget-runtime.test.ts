@@ -10,7 +10,7 @@ const view = { messages: [{ id: 1, kind: 'turn' as const, text: 'x'.repeat(80), 
 
 beforeEach(() => { resetWorldSimulationRunCacheForTests_ACU(); resetWorldSimulationSessionLogForTests_ACU(); });
 
-describe('世界推演预算与运行辅助状态', () => {
+describe('格林推演预算与运行辅助状态', () => {
   it('记忆化计数并在轮内普通越界时延迟、紧急越界时立即压缩', async () => {
     const raw = vi.fn(count); const cached = createWorldSimulationTokenCounter_ACU(raw);
     expect(await cached('abc')).toBe(3); expect(await cached('abc')).toBe(3); expect(raw).toHaveBeenCalledTimes(1);

@@ -18,7 +18,7 @@
         <span class="acu-world-sim-progress__pulse" />
       </button>
       <div v-if="!collapsed" class="acu-world-sim-progress__body">
-        <p class="acu-world-sim-progress__kicker">世界推演</p>
+        <p class="acu-world-sim-progress__kicker">格林推演</p>
         <p class="acu-world-sim-progress__label">{{ view.label }}</p>
       </div>
     </div>

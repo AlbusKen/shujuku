@@ -6,7 +6,7 @@ function staleError(details?: Record<string, unknown>): WorldSimulationError_ACU
   return {
     code: 'WORLD_SIMULATION_ANCHOR_STALE',
     phase: 'anchor',
-    message: '世界推演冻结锚点已变化，拒绝继续写入',
+    message: '格林推演冻结锚点已变化，拒绝继续写入',
     retryable: false,
     ...(details ? { details } : {}),
   };

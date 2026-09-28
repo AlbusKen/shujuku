@@ -16,7 +16,7 @@
     </div>
 
     <p v-if="clearPending" class="acu-v2-ws-materials__confirm">
-      清空会删除当前世界推演任务、世界账本、主 Agent 的会话记录与各楼层上的资料快照（账本状态、候选与运行恢复状态）。
+      清空会删除当前格林推演任务、世界账本、主 Agent 的会话记录与各楼层上的资料快照（账本状态、候选与运行恢复状态）。
       小说正文楼层与已写进正文的〈与此同时〉段不受影响，清空后下一次正文完成或发送指令会从空账本重新推演。
       <span class="acu-v2-ws-materials__confirm-actions">
         <AcuButton variant="danger" :loading="busy" @click="confirmClear">确认清空</AcuButton>
@@ -37,7 +37,7 @@
       </p>
       <p v-else class="acu-v2-ws-materials__meta">当前没有基线，也没有楼层增量。首次提交后会把账本增量写到冻结的 assistant 楼层。</p>
 
-      <p v-if="!ledger || !ledgerGroups.some(group => group.items.length)" class="acu-v2-ws-materials__empty">世界账本还是空的。发送一条指令或等待正文生成完成后，主 Agent 会开始取证并建立维度、暗流与行动者。</p>
+      <p v-if="!ledger || !ledgerGroups.some(group => group.items.length)" class="acu-v2-ws-materials__empty">账本还是空的。发送一条指令或等待正文生成完成后，首轮会建立局势刻度、伏线与人物谱。</p>
       <details v-for="group in ledgerGroups" :key="group.key" class="acu-v2-ws-materials__block" open>
         <summary>{{ group.label }} · {{ group.items.length }} 条</summary>
         <p v-if="!group.items.length" class="acu-v2-ws-materials__empty">暂无记录。</p>
@@ -109,19 +109,19 @@
       </div>
     </template>
 
-    <!-- 投影预览：将写入正文的〈与此同时〉段与可感知信号 -->
+    <!-- 场外信号预览：将写入正文的〈与此同时〉段与可感知信号 -->
     <template v-else-if="activeTab === 'projection'">
-      <p class="acu-v2-ws-materials__meta">Projection preview：按当前账本渲染的〈与此同时〉投影，提交时会写进冻结 assistant 楼层的正文；只呈现角色可通过合理渠道感知的世界信号。</p>
+      <p class="acu-v2-ws-materials__meta">按当前账本渲染的〈与此同时〉段，提交时会写进冻结 assistant 楼层的正文；只呈现角色可通过合理渠道感知的场外信号。</p>
       <details class="acu-v2-ws-materials__block" open>
-        <summary>可感知信号 · {{ ledger?.guidance.signals.length ?? 0 }} 条</summary>
-        <p v-if="!ledger?.guidance.signals.length" class="acu-v2-ws-materials__empty">当前没有可投影信号。</p>
+        <summary>场外信号 · {{ ledger?.guidance.signals.length ?? 0 }} 条</summary>
+        <p v-if="!ledger?.guidance.signals.length" class="acu-v2-ws-materials__empty">当前没有场外信号。</p>
         <ul v-else class="acu-v2-ws-materials__list"><li v-for="(signal, index) in ledger.guidance.signals" :key="signal.sourceId || String(index)">{{ signal.text }}</li></ul>
       </details>
-      <pre class="acu-v2-ws-materials__projection">{{ projectionPreview || '当前没有系统投影。' }}</pre>
+      <pre class="acu-v2-ws-materials__projection">{{ projectionPreview || '当前没有〈与此同时〉段。' }}</pre>
     </template>
 
     <template v-else-if="activeTab === 'chronicle'">
-      <p v-if="!chronicleRows.length" class="acu-v2-ws-materials__empty">编年还是空的。提交后会按发生日与玩家得知日对照。</p>
+      <p v-if="!chronicleRows.length" class="acu-v2-ws-materials__empty">幕后纪要还是空的。提交后会按发生日与玩家得知日对照。</p>
       <div v-else class="acu-v2-ws-materials__cards">
         <article v-for="row in chronicleRows" :key="row.id" class="acu-v2-ws-materials__card">
           <p class="acu-v2-ws-materials__card-head"><strong>{{ row.summary }}</strong></p>
@@ -132,7 +132,7 @@
     </template>
 
     <template v-else-if="activeTab === 'missed'">
-      <p v-if="!missedItems.length" class="acu-v2-ws-materials__empty">当前没有错过的暗流或过期清扫记录。</p>
+      <p v-if="!missedItems.length" class="acu-v2-ws-materials__empty">当前没有错过的伏线或过期清扫记录。</p>
       <div v-else class="acu-v2-ws-materials__cards">
         <article v-for="item in missedItems" :key="`${item.source}:${item.id}`" class="acu-v2-ws-materials__card">
           <p class="acu-v2-ws-materials__card-head"><strong>{{ item.title }}</strong><span class="acu-v2-ws-materials__badge">{{ item.source === 'timeline' ? '清扫' : '错过' }}</span></p>
@@ -143,7 +143,7 @@
     </template>
 
     <template v-else-if="activeTab === 'rumors'">
-      <p v-if="!rumorQueue" class="acu-v2-ws-materials__empty">当前没有可展示的传闻队列。</p>
+      <p v-if="!rumorQueue" class="acu-v2-ws-materials__empty">当前没有可展示的风声。</p>
       <template v-else>
         <p class="acu-v2-ws-materials__meta">接触状态：{{ CONTACT_LABELS[rumorQueue.contact] ?? rumorQueue.contact }} · 当前位置：{{ rumorQueue.playerRegion || '未知' }}</p>
         <details v-for="group in rumorQueueGroups" :key="group.key" class="acu-v2-ws-materials__block" open>
@@ -220,13 +220,13 @@ const emit = defineEmits<{
 }>();
 
 const TABS = [
-  { id: 'state', label: '世界状态' },
+  { id: 'state', label: '账本总览' },
   { id: 'userRequirements', label: '用户要求' },
   { id: 'candidates', label: '候选轨迹' },
-  { id: 'chronicle', label: '编年对照' },
+  { id: 'chronicle', label: '幕后纪要' },
   { id: 'missed', label: '错过清单' },
-  { id: 'rumors', label: '传闻队列' },
-  { id: 'projection', label: '投影预览' },
+  { id: 'rumors', label: '风声' },
+  { id: 'projection', label: '场外信号' },
   { id: 'diagnostics', label: '读取诊断' },
 ] as const;
 
@@ -336,7 +336,7 @@ const ledgerGroups = computed<Array<{ key: string; label: string; items: LedgerC
   if (!ledger) return [];
   return [
     {
-      key: 'dimensions', label: '世界维度',
+      key: 'dimensions', label: '局势刻度',
       items: ledger.dimensions.map(item => ({
         id: item.id, title: item.name,
         badge: `${DIMENSION_KIND_LABELS[item.kind] ?? item.kind} ${item.value} · ${TREND_LABELS[item.trend] ?? item.trend}`,
@@ -345,16 +345,16 @@ const ledgerGroups = computed<Array<{ key: string; label: string; items: LedgerC
       })),
     },
     {
-      key: 'seeds', label: '暗流种子',
+      key: 'seeds', label: '伏线',
       items: ledger.seeds.map(item => ({
         id: item.id, title: item.title,
         badge: `${SEED_STATUS_LABELS[item.status] ?? item.status} · L${item.level} · ${VISIBILITY_LABELS[item.visibility] ?? item.visibility}`,
         detail: item.catalyst || '暂无催化条件',
-        meta: `${item.actorIds.length ? `关联行动者 ${item.actorIds.join('、')} · ` : ''}revision ${item.revision}${item.retiredReason ? ` · 退役原因：${item.retiredReason}` : ''}`,
+        meta: `${item.actorIds.length ? `关联人物 ${item.actorIds.join('、')} · ` : ''}revision ${item.revision}${item.retiredReason ? ` · 退场原因：${item.retiredReason}` : ''}`,
       })),
     },
     {
-      key: 'actors', label: '行动者',
+      key: 'actors', label: '人物谱',
       items: ledger.actors.map(item => ({
         id: item.id, title: item.name,
         badge: VISIBILITY_LABELS[item.visibility] ?? item.visibility,
@@ -363,7 +363,7 @@ const ledgerGroups = computed<Array<{ key: string; label: string; items: LedgerC
       })),
     },
     {
-      key: 'chronicle', label: '世界编年',
+      key: 'chronicle', label: '幕后纪要',
       items: ledger.chronicle.map(item => ({
         id: item.id, title: item.at, detail: item.summary,
         meta: `${item.relatedIds.length ? `关联 ${item.relatedIds.join('、')} · ` : ''}证据 ${item.evidenceRefs.join(', ') || '无'}`,
@@ -383,8 +383,8 @@ const FIELD_STATUS_LABELS: Record<string, string> = {
   legacy_unknown: '旧账本条目',
 };
 const LEDGER_MODULE_LABELS: Record<WorldSimulationLedgerModule_ACU, string> = {
-  clock: '世界时钟', dimensions: '世界维度', seeds: '暗流种子', actors: '行动者',
-  chronicle: '世界编年', guidance: '指导信号', rumors: '传闻', player: '玩家状态',
+  clock: '时序', dimensions: '局势刻度', seeds: '伏线', actors: '人物谱',
+  chronicle: '幕后纪要', guidance: '场外信号', rumors: '风声', player: '玩家状态',
 };
 
 /** 账本分栏记录按模块分组：只取栏目名与修订身份，不取字段值。 */

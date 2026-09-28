@@ -1,7 +1,7 @@
 ﻿<template>
   <div ref="feedElement" class="acu-v2-session-feed">
     <p v-if="!entries.length" class="acu-v2-session-feed__empty">
-      还没有运行记录。发送一条补充后，世界推演主 Agent 的取证、派工、候选审核与提交过程会实时显示在这里。
+      还没有运行记录。发送一条补充后，格林推演主 Agent 的取证、派工、候选审核与提交过程会实时显示在这里。
     </p>
     <button v-if="hiddenCount > 0" type="button" class="acu-v2-session-feed__fold" @click="expandOlder">
       已折叠 {{ hiddenCount }} 条更早消息 · 点击展开更早的 {{ nextExpandCount }} 条
@@ -59,7 +59,7 @@
       </div>
     </template>
     <div v-if="running" class="acu-v2-session-feed__running">
-      <span class="acu-v2-session-feed__pulse" />世界推演 Agent 正在工作…
+      <span class="acu-v2-session-feed__pulse" />格林推演 Agent 正在工作…
     </div>
   </div>
 </template>

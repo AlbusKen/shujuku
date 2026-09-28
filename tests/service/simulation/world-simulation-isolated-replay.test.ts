@@ -1,4 +1,4 @@
-// T9 世界推演隔离 API replay：禁止真实网络与模型费用。
+// T9 格林推演隔离 API replay：禁止真实网络与模型费用。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildDefaultWorldSimulationEnvelope_ACU } from '../../../src/service/simulation/defaults';
 import { WorldSimulationRuntime_ACU } from '../../../src/service/simulation/simulation-runtime';
@@ -235,7 +235,7 @@ function buildReplay(options: ReplayOptions) {
     ...(options.anchored ? { persistCompletion: async ({ identity, anchor, outcome, summary }) => {
       await appendWorldSimulationSessionEvent_ACU({ anchor, runId: identity.runId, taskId: identity.taskId,
         stageId: identity.stageId, stageRevision: identity.stageRevision, eventKey: `run-completed-${outcome}`,
-        event: { kind: 'run_completed', title: outcome === 'commit' ? '世界推演已提交' : '世界推演无变化', detail: summary, agentName: 'world-director' } }, chat);
+        event: { kind: 'run_completed', title: outcome === 'commit' ? '格林推演已提交' : '格林推演无变化', detail: summary, agentName: 'world-director' } }, chat);
     } } : {}),
   });
   const runtime = new WorldSimulationRuntime_ACU(orchestrator, () => chat);
@@ -263,7 +263,7 @@ function buildReplay(options: ReplayOptions) {
   };
 }
 
-describe('T9 世界推演隔离 API replay', () => {
+describe('T9 格林推演隔离 API replay', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetWorldSimulationRunCacheForTests_ACU();
@@ -366,7 +366,7 @@ describe('T9 世界推演隔离 API replay', () => {
     expect(replay.saveChat).toHaveBeenCalledTimes(3);
     expect(readWorldSimulationSessionLog_ACU('chat-replay')).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: 'main_action', title: '主 Agent 动作：open_round', ok: true }),
-      expect.objectContaining({ kind: 'run_completed', title: '世界推演无变化', ok: true }),
+      expect.objectContaining({ kind: 'run_completed', title: '格林推演无变化', ok: true }),
     ]));
   });
 
@@ -386,7 +386,7 @@ describe('T9 世界推演隔离 API replay', () => {
     const currentAnchor = resolveWorldSimulationAnchor_ACU(0, replay.chat);
     expect(currentAnchor.contentDigest).not.toBe(replay.initialAnchor.contentDigest);
     const messages = readWorldSimulationConversation_ACU(replay.chat).messages;
-    expect(messages.filter(item => item.eventKind === 'run_completed')).toMatchObject([{ title: '世界推演已提交' }]);
+    expect(messages.filter(item => item.eventKind === 'run_completed')).toMatchObject([{ title: '格林推演已提交' }]);
     expect(messages.filter(item => item.kind === 'model_agent')).toHaveLength(messages.filter(item => item.kind === 'model_feedback').length);
     const director = replay.invocations.filter(item => item.role === 'world-director');
     expect(director[1].messages.some(item => 'tool_calls' in item && (item as { tool_calls?: { id: string }[] }).tool_calls?.some(call => call.id === 'replay-director-read'))).toBe(true);
@@ -405,7 +405,7 @@ describe('T9 世界推演隔离 API replay', () => {
     const result = await replay.run();
     expect(result).toMatchObject({ status: 'completed', result: { outcome: 'no_change' } });
     expect(readWorldSimulationConversation_ACU(replay.chat).messages.filter(item => item.eventKind === 'run_completed'))
-      .toMatchObject([{ title: '世界推演无变化' }]);
+      .toMatchObject([{ title: '格林推演无变化' }]);
     expect(readWorldSimulationDirectorHistory_ACU(replay.chat).at(-1)?.content).toContain('"source":"fixed-workflow"');
     expect(replay.invocations.filter(item => item.role === 'world-director')).toHaveLength(2);
     expect(await replay.runtime.handleAssistantCompletion(createWorldSimulationCompletionIntent_ACU(42, 'chat-replay', '', replay.chat, 1)))

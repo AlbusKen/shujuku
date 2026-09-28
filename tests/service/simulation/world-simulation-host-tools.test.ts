@@ -29,7 +29,7 @@ function fixture(overrides: Record<string, unknown> = {}) {
   return { dependencies: createWorldSimulationHostToolDependencies_ACU(context), webClient, context };
 }
 
-describe('世界推演宿主工具适配器', () => {
+describe('格林推演宿主工具适配器', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     gateway.available.mockReturnValue(false);

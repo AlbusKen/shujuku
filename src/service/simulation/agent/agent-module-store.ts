@@ -30,7 +30,7 @@ function validateEvidenceRefs_ACU(value: unknown): string[] {
 }
 
 export function validateWorldSimulationMaterialsSnapshot_ACU(raw: unknown): WorldSimulationMaterialsSnapshot_ACU {
-  if (!isRecord_ACU(raw)) reject_ACU('世界推演材料快照必须是对象');
+  if (!isRecord_ACU(raw)) reject_ACU('格林推演材料快照必须是对象');
   const allowed = new Set(['schemaVersion', 'ledgerRevision', 'ledger', 'evidenceRefs', 'updatedAt']);
   for (const key of allowed) if (!Object.prototype.hasOwnProperty.call(raw, key)) reject_ACU(`材料快照缺少字段：${key}`);
   for (const key of Object.keys(raw)) if (!allowed.has(key)) reject_ACU(`材料快照存在未知字段：${key}`);

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { projectWorldSimulationSessionFromConversation_ACU } from '../../../src/presentation-v2/composables/useWorldSimulationRuntime';
 
-describe('世界推演会话回灌投影', () => {
+describe('格林推演会话回灌投影', () => {
   it('优先使用持久事件元数据并保留状态、角色与时间', () => {
     const projected = projectWorldSimulationSessionFromConversation_ACU([{
       id: 9,
@@ -11,7 +11,7 @@ describe('世界推演会话回灌投影', () => {
       turnKey: 'run-1:completed',
       at: 1234,
       eventKind: 'run_completed',
-      title: '世界推演完成',
+      title: '格林推演完成',
       status: 'done',
       agentName: 'world-director',
       ok: true,
@@ -19,7 +19,7 @@ describe('世界推演会话回灌投影', () => {
 
     expect(projected).toEqual([{
       kind: 'run_completed',
-      title: '世界推演完成',
+      title: '格林推演完成',
       detail: '候选已通过审核',
       status: 'done',
       agentName: 'world-director',

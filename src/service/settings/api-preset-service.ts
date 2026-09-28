@@ -348,7 +348,7 @@ function persistCascadedEnvelopes_ACU(): void {
     logWarn_ACU('[API预设] 续写信封引用已更新到当前聊天内存，但聊天保存失败。', error);
   });
   void persistCurrentWorldSimulationEnvelope_ACU().catch(error => {
-    logWarn_ACU('[API预设] 世界推演信封引用已更新到当前聊天内存，但聊天保存失败。', error);
+    logWarn_ACU('[API预设] 格林推演信封引用已更新到当前聊天内存，但聊天保存失败。', error);
   });
 }
 

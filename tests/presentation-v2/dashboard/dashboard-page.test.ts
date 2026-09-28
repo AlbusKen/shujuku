@@ -749,7 +749,7 @@ describe("DashboardPage", () => {
       document.querySelector(".acu-v2-dashboard-page")?.textContent || "";
     expect(text).toContain("剧情推进");
     expect(text).toContain("智能续写");
-    expect(text).toContain("世界推演");
+    expect(text).toContain("格林推演");
     expect(text).toContain("外部导入");
     expect(text).toContain("交火模式");
     expect(text).toContain("存储模式");
@@ -926,7 +926,7 @@ describe("DashboardPage", () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it("高级设置承载功能页开关，世界推演默认关闭并随切换控制一级页可见性", async () => {
+  it("高级设置承载功能页开关，格林推演默认关闭并随切换控制一级页可见性", async () => {
     const { mount, settings, saveSettings } = await mountDashboardPage();
 
     const segmentedButtons = Array.from(
@@ -943,7 +943,7 @@ describe("DashboardPage", () => {
       document.querySelector(".acu-v2-dashboard-page")?.textContent || "";
     expect(text).toContain("剧情推进");
     expect(text).toContain("智能续写");
-    expect(text).toContain("世界推演");
+    expect(text).toContain("格林推演");
     expect(text).toContain("外部导入");
     expect(text).toContain("交火模式");
     expect(text).toContain("正文替换");
@@ -956,7 +956,7 @@ describe("DashboardPage", () => {
     ).toContain("智能续写");
     expect(
       document.querySelector(".acu-v2-sidebar")?.textContent || "",
-    ).not.toContain("世界推演");
+    ).not.toContain("格林推演");
     expect(
       document.querySelector(".acu-v2-sidebar")?.textContent || "",
     ).toContain("外部导入");
@@ -996,7 +996,7 @@ describe("DashboardPage", () => {
     expect(settings.externalImportPageEnabled).toBe(false);
     text = document.querySelector(".acu-v2-sidebar")?.textContent || "";
     expect(text).not.toContain("智能续写");
-    expect(text).toContain("世界推演");
+    expect(text).toContain("格林推演");
     expect(text).not.toContain("外部导入");
     expect(worldSimulationToggle.getAttribute("aria-checked")).toBe("true");
     expect(saveSettings).toHaveBeenCalled();
@@ -1009,7 +1009,7 @@ describe("DashboardPage", () => {
     expect(worldSimulationToggle.getAttribute("aria-checked")).toBe("false");
     text = document.querySelector(".acu-v2-sidebar")?.textContent || "";
     expect(text).not.toContain("功能");
-    expect(text).not.toContain("世界推演");
+    expect(text).not.toContain("格林推演");
 
     plotToggle.click();
     vectorToggle.click();

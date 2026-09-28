@@ -13,7 +13,7 @@ const context = () => {
 };
 const plan = { schemaVersion: 1 as const, title: '阶段', objective: '推进世界', impactScope: ['world'], factsToVerify: [], plannedTools: [], plannedSpecialists: [], expectedLedgerChanges: ['clock' as const], convergenceConditions: ['完成'], blockingConditions: [], completedSteps: [], nextStep: '执行' };
 
-describe('世界推演阶段 runtime', () => {
+describe('格林推演阶段 runtime', () => {
   afterEach(() => { resetWorldSimulationSessionLogForTests_ACU(); });
   it('新建 run 使用确定性 director-owned 阶段计划且不含 chronicler', () => {
     const revision = buildDirectorOwnedStageRevision_ACU({

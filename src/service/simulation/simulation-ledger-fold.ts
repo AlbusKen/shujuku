@@ -1,5 +1,5 @@
 /**
- * service/simulation/simulation-ledger-fold.ts — 世界推演账本的楼层增量折叠
+ * service/simulation/simulation-ledger-fold.ts — 格林推演账本的楼层增量折叠
  *
  * STATE 分桶的当前 swipe 条目从全量账本改为 checkpoint + delta。
  * 读取按楼层顺序叠加；首楼 envelope.ledger 只是可重建缓存。
@@ -847,7 +847,7 @@ export function assertSingleActiveSimulationCheckpoint_ACU(chat: readonly unknow
     const value = entryValue_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU, anchor);
     const active = (isLedgerFrame_ACU(value) && !!value.checkpoint) || isLedgerValue_ACU(value);
     if (!active) continue;
-    if (seen !== null) return `世界推演账本存在多个活跃基线：楼层 ${seen} 与 ${index}`;
+    if (seen !== null) return `格林推演账本存在多个活跃基线：楼层 ${seen} 与 ${index}`;
     seen = index;
   }
   return null;

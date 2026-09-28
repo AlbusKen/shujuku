@@ -63,7 +63,7 @@ function deterministic_ACU(previous: WorldSimulationHandoffState_ACU | null, mes
 export function renderWorldSimulationHandoff_ACU(state: WorldSimulationHandoffState_ACU, degradationReason = ''): string {
   const sections: Array<[string, string[]]> = [['当前目标', state.currentGoal ? [state.currentGoal] : []], ['有效约束', state.effectiveConstraints], ['已执行决策', state.decisions], ['已完成', state.completedItems], ['待办', state.pendingItems], ['阻塞', state.blockers], ['连续性事实', state.continuityFacts], ['资料地址', state.readKeys], ['近期轮次', state.recentTurns]];
   const body = sections.filter(([, items]) => items.length).map(([title, items]) => `【${title}】\n${items.map(item => `- ${item}`).join('\n')}`).join('\n');
-  return `${degradationReason ? `【摘要降级】${degradationReason}\n` : ''}【更早世界推演会话交接】\n${body || '没有可保留的早期事项。'}`;
+  return `${degradationReason ? `【摘要降级】${degradationReason}\n` : ''}【更早格林推演会话交接】\n${body || '没有可保留的早期事项。'}`;
 }
 
 export async function summarizeWorldSimulationHandoff_ACU(input: { previous: WorldSimulationHandoffState_ACU | null; messages: readonly WorldSimulationConversationMessage_ACU[]; maxTokens: number; countTokens: WorldSimulationTokenCounter_ACU; semanticAdapter?: WorldSimulationHandoffSemanticAdapter_ACU }): Promise<{ state: WorldSimulationHandoffState_ACU; report: string; reportTokens: number; degraded: boolean; degradationReason?: string }> {

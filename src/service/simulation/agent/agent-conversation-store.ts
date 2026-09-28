@@ -342,7 +342,7 @@ export function readWorldSimulationDirectorCompactionSource_ACU(chat?: any[]): {
   fingerprint: string;
 } {
   const { segments, diagnostics } = collectSegments_ACU(chat);
-  if (diagnostics.length) reject_ACU('世界推演主会话历史楼层损坏', { diagnostics });
+  if (diagnostics.length) reject_ACU('格林推演主会话历史楼层损坏', { diagnostics });
   const all = segments.flatMap(segment => segment.messages);
   const compaction = segments.flatMap(segment => segment.compaction ? [segment.compaction] : [])
     .sort((left, right) => right.compactedThroughId - left.compactedThroughId)[0] ?? null;
@@ -376,7 +376,7 @@ export function readWorldSimulationDirectorHistory_ACU(chat?: any[]): Array<{ ro
 /** Only the current run's model turns are used when migrating an old run-state transcript. */
 export function readWorldSimulationDirectorRunHistory_ACU(runId: string, chat?: any[], afterId = 0): Array<{ role: 'assistant' | 'user' | 'tool'; content: string; tool_calls?: ReturnType<typeof toOpenAiToolCalls_ACU>; tool_call_id?: string }> {
   const { segments, diagnostics } = collectSegments_ACU(chat);
-  if (diagnostics.length) reject_ACU('世界推演主会话历史楼层损坏', { diagnostics });
+  if (diagnostics.length) reject_ACU('格林推演主会话历史楼层损坏', { diagnostics });
   return segments.filter(segment => segment.runId === runId).flatMap(segment => segment.messages.filter(message => message.id > afterId).flatMap((message): Array<{ role: 'assistant' | 'user' | 'tool'; content: string; tool_calls?: ReturnType<typeof toOpenAiToolCalls_ACU>; tool_call_id?: string }> => {
     if (message.kind === 'model_agent') return [{ role: 'assistant' as const, content: message.text, ...(message.toolCalls?.length ? { tool_calls: toOpenAiToolCalls_ACU(message.toolCalls) } : {}) }];
     if (message.toolCallId) return [{ role: 'tool' as const, tool_call_id: message.toolCallId, content: message.text }];

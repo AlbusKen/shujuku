@@ -75,7 +75,7 @@ describe('router-store · pageRegistry 基线', () => {
       ['agent', 'Agent', 'config'],
       ['api', 'API', 'config'],
       ['continuation', '智能续写', 'feature'],
-      ['world-simulation', '世界推演', 'feature'],
+      ['world-simulation', '格林推演', 'feature'],
       ['import', '外部导入', 'feature'],
       ['vector-index', '交火模式', 'feature'],
       ['content-replace', '正文替换', 'feature'],
@@ -213,7 +213,7 @@ describe('router-store · 高手模式可见性', () => {
     expect(state.settings_ACU.contentOptimizationSettings?.enabled).toBe(true);
   });
 
-  it('高手模式世界推演默认隐藏：overview=1 / config=5 / feature=2 / tool=2 / developer=0', async () => {
+  it('高手模式格林推演默认隐藏：overview=1 / config=5 / feature=2 / tool=2 / developer=0', async () => {
     persistAdvancedMode();
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
@@ -226,7 +226,7 @@ describe('router-store · 高手模式可见性', () => {
     expect(r.visiblePagesByGroup.developer.length).toBe(0); // 默认 developerOptionsEnabled=false
   });
 
-  it('已有配置显式开启世界推演时初始化显示页面，关闭门禁后隐藏', async () => {
+  it('已有配置显式开启格林推演时初始化显示页面，关闭门禁后隐藏', async () => {
     persistAdvancedMode();
     const m = await freshImport();
     const state = await import('../../../src/service/runtime/state-manager');
@@ -242,7 +242,7 @@ describe('router-store · 高手模式可见性', () => {
     expect(r.activePageId).toBe('dashboard');
   });
 
-  it('智能续写、世界推演、外部导入、交火模式都关闭时功能分组为空', async () => {
+  it('智能续写、格林推演、外部导入、交火模式都关闭时功能分组为空', async () => {
     persistAdvancedMode();
     const m = await freshImport();
     const state = await import('../../../src/service/runtime/state-manager');
@@ -353,7 +353,7 @@ describe('router-store · 切页 + 持久化', () => {
     expect(persisted.router.bootPending).toBe(true);
   });
 
-  it('剧情推进、智能续写、世界推演、外部导入与交火模式按功能开关控制一级页可见性', async () => {
+  it('剧情推进、智能续写、格林推演、外部导入与交火模式按功能开关控制一级页可见性', async () => {
     persistAdvancedMode();
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());

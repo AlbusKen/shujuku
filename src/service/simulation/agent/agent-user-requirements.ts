@@ -1,5 +1,5 @@
 /**
- * service/simulation/agent/agent-user-requirements.ts — 世界推演用户要求资料区
+ * service/simulation/agent/agent-user-requirements.ts — 格林推演用户要求资料区
  *
  * 独立持久化字段 `_qrf_world_user_requirements`，与材料快照 / 账本分桶隔离。
  * AI 维护子代理已退役：清单由用户在资料面板手动维护；本文件负责空快照回退、

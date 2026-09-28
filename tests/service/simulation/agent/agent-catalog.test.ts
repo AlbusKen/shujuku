@@ -3,7 +3,7 @@ import { WORLD_SIMULATION_AGENT_CATALOG_ACU, worldSimulationAgentNativeTools_ACU
 import { agentNativeTools_ACU } from '../../../../src/service/ai/native-tool';
 import { buildCustomApiRequestBody_ACU } from '../../../../src/service/ai/api-call';
 
-describe('世界推演角色工具白名单', () => {
+describe('格林推演角色工具白名单', () => {
   it('按角色目录生成最终 provider 工具集合', () => {
     expect(() => worldSimulationAgentNativeTools_ACU('unknown' as never)).toThrow('WORLD_SIMULATION_AGENT_PROFILE_INVALID');
     expect(worldSimulationAgentNativeTools_ACU('world-director')).toEqual(['read', 'search']);

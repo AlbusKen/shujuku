@@ -468,7 +468,7 @@ export   function mainInitialize_ACU() {
                 }
                 const simulationInternalRequest = consumeWorldSimulationInternalAiGenerationEnded_ACU(generationContext?.seq);
                 if (simulationInternalRequest) {
-                  logDebug_ACU(`ACU 忽略世界推演内部 ${simulationInternalRequest.role} GENERATION_ENDED: ${simulationInternalRequest.requestId}`);
+                  logDebug_ACU(`ACU 忽略格林推演内部 ${simulationInternalRequest.role} GENERATION_ENDED: ${simulationInternalRequest.requestId}`);
                   return;
                 }
                 const continuationBridge = getContinuationHostGenerationBridge_ACU();
@@ -510,7 +510,7 @@ export   function mainInitialize_ACU() {
                   : undefined;
                 // [触发修复] generationContext 缺失（60s TTL 过期或共享栈被其他生成错配弹走）不再静默跳过：
                 // 与自动填表门控语义对齐（shouldProcessAutoTableUpdateForGenerationEnded_ACU 对 null 上下文放行），
-                // 只在确证 dryRun/quiet/自动触发生成，或世界推演内部调用仍在途（本次上下文可能已被内部事件错配消费）时放弃。
+                // 只在确证 dryRun/quiet/自动触发生成，或格林推演内部调用仍在途（本次上下文可能已被内部事件错配消费）时放弃。
                 const simulationInternalInFlight = hasWorldSimulationInternalAiInflight_ACU();
                 const simulationContextBlocked = !!generationContext && (generationContext.dryRun || quietLike || automaticTrigger);
                 // 仪表盘开关同时门控后台自动触发；缺失配置按关闭处理，不影响其他正文完成管线。
@@ -522,10 +522,10 @@ export   function mainInitialize_ACU() {
                     generationContext?.seq,
                   );
                   void getWorldSimulationRuntime_ACU().handleAssistantCompletion(simulationIntent).catch(error => {
-                    logWarn_ACU(`世界推演自动触发失败：${error instanceof Error ? error.message : String(error)}`);
+                    logWarn_ACU(`格林推演自动触发失败：${error instanceof Error ? error.message : String(error)}`);
                   });
                 } else {
-                  logDebug_ACU(`世界推演自动触发跳过：${settings_ACU.worldSimulationPageEnabled !== true ? 'feature_disabled' : eventMessageId === undefined ? 'no_event_message_id' : simulationInternalInFlight ? 'internal_inflight' : 'quiet_or_background_generation'}`);
+                  logDebug_ACU(`格林推演自动触发跳过：${settings_ACU.worldSimulationPageEnabled !== true ? 'feature_disabled' : eventMessageId === undefined ? 'no_event_message_id' : simulationInternalInFlight ? 'internal_inflight' : 'quiet_or_background_generation'}`);
                 }
                 if (shouldProcessAutoTableUpdateForGenerationEnded_ACU(generationContext)) {
                   handleNewMessageDebounced_ACU('GENERATION_ENDED', autoFillIntent);

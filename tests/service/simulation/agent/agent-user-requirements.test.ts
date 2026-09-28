@@ -15,7 +15,7 @@ import { resolveWorldSimulationAnchor_ACU } from '../../../../src/service/simula
 import { WorldSimulationValidationError_ACU } from '../../../../src/service/simulation/model';
 import { _set_SillyTavern_API_ACU } from '../../../../src/shared/host-api';
 
-describe('世界推演用户要求资料区', () => {
+describe('格林推演用户要求资料区', () => {
   beforeEach(() => {
     _set_SillyTavern_API_ACU(undefined);
   });

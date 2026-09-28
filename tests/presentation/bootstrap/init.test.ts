@@ -272,7 +272,7 @@ describe('mainInitialize_ACU world simulation generation isolation', () => {
     expect(m.handleNewMessage).toHaveBeenCalledTimes(3);
   });
 
-  it('普通最终 assistant 正文构造冻结意图并派发一次世界推演', async () => {
+  it('普通最终 assistant 正文构造冻结意图并派发一次格林推演', async () => {
     m.settings.worldSimulationPageEnabled = true;
     m.currentChatKey = 'chat-a';
     m.api.chat = [{ is_user: true, mes: 'user' }, { is_user: false, mes: 'assistant', message_id: 42 }];
@@ -286,7 +286,7 @@ describe('mainInitialize_ACU world simulation generation isolation', () => {
     expect(m.handleSimulationCompletion).toHaveBeenCalledWith(expect.objectContaining({ eventMessageId: 42, chatKey: 'chat-a' }));
   });
 
-  it('quiet、dryRun 与 automatic_trigger 不派发世界推演', async () => {
+  it('quiet、dryRun 与 automatic_trigger 不派发格林推演', async () => {
     m.settings.worldSimulationPageEnabled = true;
     m.currentChatKey = 'chat-a';
     m.api.chat = [{ is_user: false, mes: 'assistant', message_id: 42 }];

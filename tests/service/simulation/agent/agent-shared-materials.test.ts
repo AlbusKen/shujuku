@@ -3,7 +3,7 @@ import { buildDefaultWorldSimulationAgentPrompt_ACU } from '../../../../src/serv
 import { splitWorldSimulationSubagentPrompt_ACU, renderWorldSimulationDirectorReads_ACU, renderWorldSimulationSnapshotTemplate_ACU, renderWorldSimulationSnapshotSections_ACU, verifyWorldSimulationSnapshotSections_ACU, bindWorldSimulationFixedWorldbook_ACU, verifyWorldSimulationFixedWorldbook_ACU, WORLD_SIMULATION_WORLDBOOK_UNAVAILABLE_ACU } from '../../../../src/service/simulation/agent/agent-shared-materials';
 import { renderAgentWorldbookTriggeredInjection_ACU } from '../../../../src/service/continuation/agent/agent-worldbook-read';
 
-describe('世界推演子代理资料边界', () => {
+describe('格林推演子代理资料边界', () => {
   it('时间官动态快照只包含角色相关资料与锚点，不重复保留在稳定提示段', () => {
     const split = splitWorldSimulationSubagentPrompt_ACU(buildDefaultWorldSimulationAgentPrompt_ACU('timekeeper'), 'timekeeper');
     const runtime = split.segments.find(segment => segment.content.includes('RUNTIME_CONTEXT'))!.content;

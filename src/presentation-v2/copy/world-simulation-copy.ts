@@ -5,7 +5,7 @@ export const WORLD_SIMULATION_AGENT_ORDER_ACU: readonly WorldSimulationAgentName
   .filter(agentName => agentName !== 'lore-researcher');
 
 /**
- * 世界推演各 Agent 的中文展示名。会话流、渠道下拉与提示词分组共用同一张表，
+ * 格林推演各 Agent 的中文展示名。会话流、渠道下拉与提示词分组共用同一张表，
  * 内部 agentName 不直接暴露给用户（与智能续写「各 Agent 渠道」的做法一致）。
  * 退役角色保留展示名，避免旧会话卡片回退成英文内部名。
  */
@@ -13,14 +13,14 @@ export const WORLD_SIMULATION_AGENT_DISPLAY_LABELS_ACU: Record<string, string> =
   'world-director': '主 Agent',
   'world-stage-planner': '阶段规划',
   'timekeeper': '旧角色：时计',
-  'undercurrent-analyst': '暗流与时钟',
-  'dramatis-keeper': '人物档案',
-  'chronicler': '旧角色：编年',
+  'undercurrent-analyst': '时序与伏线',
+  'dramatis-keeper': '人物谱',
+  'chronicler': '旧角色：纪要',
   'causality-reviewer': '因果审核',
-  'guidance-composer': '编年与投影',
+  'guidance-composer': '纪要、风声与场外信号',
   'lore-researcher': '设定研究',
   'requirements-maintainer': '用户要求维护',
-  'world-analyst': '世界推演',
+  'world-analyst': '格林推演',
 };
 
 export function worldSimulationAgentLabel_ACU(agentName: string): string {

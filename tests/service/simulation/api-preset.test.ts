@@ -6,7 +6,7 @@ const apiConfig = { url: 'https://example.invalid', apiKey: '', model: 'test', u
 const dependencies = (resolved = true) => ({ resolvePreset: vi.fn((name: string) => ({ resolved, apiMode: 'custom' as const, apiConfig: { ...apiConfig, model: name || 'current' }, tavernProfile: '' })) });
 const settings = { apiPresetMode: 'fixed' as const, fixedApiPresetName: 'global', agentApiPresets: { reviewer: { mode: 'fixed' as const, presetName: 'review' }, planner: { mode: 'current' as const, presetName: '' } } };
 
-describe('世界推演 API preset', () => {
+describe('格林推演 API preset', () => {
   it('角色配置覆盖全局配置，缺失角色继承全局', () => {
     const deps = dependencies();
     expect(resolveWorldSimulationAgentApiPreset_ACU(settings, 'reviewer', 'agent_delegate', deps)).toMatchObject({ presetName: 'review', source: 'fixed' });

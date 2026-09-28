@@ -169,7 +169,7 @@ export function collectDanglingApiPresetReferences_ACU(): DanglingReferenceItem_
   const simulationSettings = simulationRaw && typeof simulationRaw === 'object' && !Array.isArray(simulationRaw)
     ? (simulationRaw as { settings?: { fixedApiPresetName?: string; agentApiPresets?: Record<string, { presetName?: string }> } }).settings ?? null
     : null;
-  collectFromSimulationSettings_ACU(items, existing, simulationSettings, '世界推演（当前聊天）', 'simulation');
+  collectFromSimulationSettings_ACU(items, existing, simulationSettings, '格林推演（当前聊天）', 'simulation');
   return items;
 }
 
@@ -277,7 +277,7 @@ export async function clearDanglingReference_ACU(item: DanglingReferenceItem_ACU
     try {
       await persistCurrentWorldSimulationEnvelope_ACU();
     } catch (error) {
-      logWarn_ACU('[引用审计] 世界推演信封清除已写入内存，但聊天保存失败。', error);
+      logWarn_ACU('[引用审计] 格林推演信封清除已写入内存，但聊天保存失败。', error);
     }
     return { ok: true };
   }

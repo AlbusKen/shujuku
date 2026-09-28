@@ -56,14 +56,14 @@ describe('WorldSimulationSessionFeed', () => {
   it('主流程完成事件仍使用高层级卡片', () => {
     const el = mountFeed([entry_ACU({
       kind: 'run_completed',
-      title: '世界推演完成',
+      title: '格林推演完成',
       detail: '候选已通过审核',
       ok: true,
       status: 'done',
     })]);
 
     expect(el.querySelector('.acu-v2-session-feed__card--run_completed')).not.toBeNull();
-    expect(el.textContent).toContain('世界推演完成');
+    expect(el.textContent).toContain('格林推演完成');
   });
 
   it('派工卡片用中文角色名展示，未知 agentName 回退原名', () => {
@@ -74,7 +74,7 @@ describe('WorldSimulationSessionFeed', () => {
     ]);
     const badges = Array.from(el.querySelectorAll('.acu-v2-session-feed__badge')).map(item => item.textContent?.trim());
 
-    expect(badges).toEqual(['世界推演', '阶段规划', 'custom-agent']);
+    expect(badges).toEqual(['格林推演', '阶段规划', 'custom-agent']);
     expect(el.textContent).not.toContain('world-analyst');
   });
 });

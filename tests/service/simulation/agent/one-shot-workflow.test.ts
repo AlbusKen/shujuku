@@ -32,7 +32,7 @@ function setup() {
   return { ledger, ref, run };
 }
 
-describe('两批一次性世界推演工作流', () => {
+describe('两批一次性格林推演工作流', () => {
   it('第一批同一轮并发启动，全部无变化时不运行第二批', async () => {
     const env = setup();
     const entered: string[] = [];

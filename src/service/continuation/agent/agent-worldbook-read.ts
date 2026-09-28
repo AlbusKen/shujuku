@@ -236,7 +236,7 @@ export function renderAgentWorldbookTriggeredInjection_ACU(snapshot: AgentWorldb
   return `${WORLDBOOK_TRIGGERED_NOTE_ACU}\n${renderAgentWorldbookHitBodies_ACU(snapshot, scanText)}`;
 }
 
-/** 世界推演整轮共用的触发注入。世界书不可用或没有已启用条目时不追加空段。 */
+/** 格林推演整轮共用的触发注入。世界书不可用或没有已启用条目时不追加空段。 */
 export async function loadTriggeredWorldbookInjection_ACU(scanText: string): Promise<string> {
   const snapshot = await loadAgentWorldbookSnapshot_ACU();
   if (!snapshot.available || !snapshot.entries.length) return '';

@@ -11,7 +11,7 @@ function longTranscript(rounds = 5) {
   return transcript;
 }
 
-describe('世界推演 transcript 常态压缩', () => {
+describe('格林推演 transcript 常态压缩', () => {
   it('超过 historyBudget×0.8 且不少于 5 轮时压缩最老段，保留最近 4 轮', async () => {
     const original = longTranscript(5);
     const result = await compactWorldSimulationTranscriptIfNeeded_ACU({

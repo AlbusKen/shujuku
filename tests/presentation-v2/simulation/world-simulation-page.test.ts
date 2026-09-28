@@ -162,8 +162,8 @@ describe('WorldSimulationPage', () => {
     // 旧版把整个工作区塞进 2 列网格的单个格子里；现在会话面板直接是页面子级，内部不再嵌套第二层面板。
     expect(children[0].classList.contains('acu-panel')).toBe(true);
     expect(children[0].querySelectorAll('.acu-panel').length).toBe(0);
-    expect(host.textContent).not.toContain('世界推演 Agent 会话');
-    expect(button(host, '保存世界推演设置')).toBeUndefined();
+    expect(host.textContent).not.toContain('格林推演 Agent 会话');
+    expect(button(host, '保存格林推演设置')).toBeUndefined();
     expect(host.textContent).toContain('锚点 第 1 楼 · swipe 1');
   });
 
@@ -298,8 +298,8 @@ describe('WorldSimulationPage', () => {
     const channelGroup = groups.find(group => group.textContent?.includes('各 Agent 渠道'))!;
     channelGroup.querySelector<HTMLButtonElement>('.acu-disclosure-group__header')!.click();
     await nextTick();
-    expect(channelGroup.textContent).toContain('暗流与时钟');
-    expect(channelGroup.textContent).toContain('编年与投影');
+    expect(channelGroup.textContent).toContain('时序与伏线');
+    expect(channelGroup.textContent).toContain('纪要、风声与场外信号');
     expect(channelGroup.textContent).not.toContain('旧角色：时计');
     expect(channelGroup.textContent).not.toContain('设定研究');
     const topLevelLabels = Array.from(host.querySelectorAll<HTMLElement>('.acu-form-row__label'))
@@ -309,14 +309,14 @@ describe('WorldSimulationPage', () => {
     expect(topLevelLabels).not.toContain('主 Agent 迭代上限');
   });
 
-  it('资料面板：投影预览页签渲染 runtime 提供的 projection preview，一键清空需确认后才调用 clearData', async () => {
+  it('资料面板：场外信号页签渲染 runtime 提供的 projection preview，一键清空需确认后才调用 clearData', async () => {
     snapshot.value = baseSnapshot({ projectionPreview: '<!-- projection-test -->北境压力上升' });
     const { host } = await mountPage();
-    expect(host.textContent).toContain('世界状态');
+    expect(host.textContent).toContain('账本总览');
     expect(host.textContent).not.toContain('待修复');
-    button(host, '投影预览')!.click();
+    button(host, '场外信号')!.click();
     await nextTick();
-    expect(host.textContent).toContain('Projection preview');
+    expect(host.textContent).toContain('按当前账本渲染的〈与此同时〉段');
     expect(host.textContent).toContain('北境压力上升');
 
     button(host, '一键清空')!.click();
@@ -328,7 +328,7 @@ describe('WorldSimulationPage', () => {
     expect(clearData).toHaveBeenCalledTimes(1);
   });
 
-  it('资料面板：编年对照、错过清单与传闻队列按账本只读展示', async () => {
+  it('资料面板：幕后纪要、错过清单与风声按账本只读展示', async () => {
     const next = baseSnapshot();
     next.envelope.ledger = {
       ...next.envelope.ledger,
@@ -357,11 +357,11 @@ describe('WorldSimulationPage', () => {
     const { host } = await mountPage();
     expect(host.textContent).toContain('待修复的写入（1 条）');
     expect(host.textContent).toContain('locationRef 必须是对象或 null');
-    expect(host.textContent).toContain('编年对照');
+    expect(host.textContent).toContain('幕后纪要');
     expect(host.textContent).toContain('错过清单');
-    expect(host.textContent).toContain('传闻队列');
+    expect(host.textContent).toContain('风声');
 
-    button(host, '编年对照')!.click();
+    button(host, '幕后纪要')!.click();
     await nextTick();
     expect(host.textContent).toContain('铁匠死于北岭');
     expect(host.textContent).toContain('滞后 35 天');
@@ -371,7 +371,7 @@ describe('WorldSimulationPage', () => {
     expect(host.textContent).toContain('矿洞塌了');
     expect(host.textContent).toContain('seed-miss');
 
-    button(host, '传闻队列')!.click();
+    button(host, '风声')!.click();
     await nextTick();
     expect(host.textContent).toContain('接触状态：开放');
     expect(host.textContent).toContain('铁匠死在北岭');
@@ -387,14 +387,14 @@ describe('WorldSimulationPage', () => {
     await nextTick();
     const ttlInput = Array.from(host.querySelectorAll<HTMLInputElement>('input.acu-input[type="number"]')).find(input => {
       const label = input.closest('.acu-form-row')?.querySelector('.acu-form-row__label')?.textContent?.trim();
-      return label === '传闻等待上限（世界日）';
+      return label === '风声等待上限（天）';
     })!;
     ttlInput.value = '0';
     ttlInput.dispatchEvent(new Event('input', { bubbles: true }));
     await nextTick();
     await vi.advanceTimersByTimeAsync(900);
     expect(saveSettings).not.toHaveBeenCalled();
-    expect(host.textContent).toContain('传闻等待上限 必须是 1 到 3650 之间的整数');
+    expect(host.textContent).toContain('风声等待上限 必须是 1 到 3650 之间的整数');
   });
 
   it('锚点 stale 时在状态横幅下渲染 expected/actual 差异；非该错误不渲染', async () => {
@@ -404,7 +404,7 @@ describe('WorldSimulationPage', () => {
     next.envelope.lastError = {
       code: 'WORLD_SIMULATION_ANCHOR_STALE',
       phase: 'anchor',
-      message: '世界推演冻结锚点已变化，拒绝继续写入',
+      message: '格林推演冻结锚点已变化，拒绝继续写入',
       retryable: false,
       details: {
         expected: { chatIdentity: 'chat-a', messageKey: 'number:7', swipeId: '0', contentDigest: 'aaaaaaaaaaaabbbb' },
@@ -412,13 +412,13 @@ describe('WorldSimulationPage', () => {
       },
     };
     snapshot.value = next;
-    statusText.value = '已失败 · 最近错误：世界推演冻结锚点已变化，拒绝继续写入';
+    statusText.value = '已失败 · 最近错误：格林推演冻结锚点已变化，拒绝继续写入';
     const { host } = await mountPage();
     const diff = host.querySelector('.acu-v2-agent-chat__anchor-diff');
     expect(diff).not.toBeNull();
     expect(diff?.textContent).toContain('swipeId expected=0 actual=1');
     expect(diff?.textContent).toContain('contentDigest expected=aaaaaaaaaaaa actual=cccccccccccc');
-    expect(host.textContent).toContain('已失败 · 最近错误：世界推演冻结锚点已变化，拒绝继续写入');
+    expect(host.textContent).toContain('已失败 · 最近错误：格林推演冻结锚点已变化，拒绝继续写入');
 
     next.envelope.lastError = {
       code: 'WORLD_SIMULATION_CHAT_CHANGED',

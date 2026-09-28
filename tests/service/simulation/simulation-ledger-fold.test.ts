@@ -15,7 +15,7 @@ function assistant(mes: string, swipeId = 0) {
   return { is_user: false, message_id: mes, mes, swipe_id: swipeId };
 }
 
-describe('世界推演账本折叠', () => {
+describe('格林推演账本折叠', () => {
   it('提交 delta 叠加后等于新账本，删掉锚点楼后回到基线', () => {
     const chat = [{}, assistant('第一楼'), assistant('第二楼')];
     const envelope = buildDefaultWorldSimulationEnvelope_ACU();
@@ -107,7 +107,7 @@ describe('世界推演账本折叠', () => {
   });
 });
 
-describe('世界推演逐栏写入与分栏视图', () => {
+describe('格林推演逐栏写入与分栏视图', () => {
   function committedChat(): { chat: ReturnType<typeof assistant>[]; ledger: WorldSimulationLedger_ACU } {
     const chat = [{}, assistant('第一楼')];
     const before = buildDefaultWorldSimulationEnvelope_ACU().ledger;

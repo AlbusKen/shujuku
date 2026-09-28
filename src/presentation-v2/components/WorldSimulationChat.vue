@@ -79,7 +79,7 @@ const statusTone = computed(() => {
 
 const placeholder = computed(() => {
   if (!props.task) return '描述你希望世界侧推进、保留或撤销的方向，发送后主 Agent 会创建任务并开始规划...';
-  if (props.task.status === 'running' || props.task.status === 'drafting' || props.running) return '世界推演 Agent 正在工作。点「停止」可打断；要接着做就打字再发送。';
+  if (props.task.status === 'running' || props.task.status === 'drafting' || props.running) return '格林推演 Agent 正在工作。点「停止」可打断；要接着做就打字再发送。';
   return '继续和主 Agent 对话，写好后再发送...';
 });
 

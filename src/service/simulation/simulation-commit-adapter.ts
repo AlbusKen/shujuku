@@ -425,7 +425,7 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<WorldSimul
     // 宿主监听器若原地改写已保存对象，不能把自己的旧快照覆盖其新状态并声称补偿成功。
     if (saveAttempted && (!stillActive || !currentFieldsIntact() || !originalFields.every(field =>
       JSON.stringify(field.value) === field.content))) {
-      reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '世界推演保存期间状态已变化，无法安全补偿', {
+      reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '格林推演保存期间状态已变化，无法安全补偿', {
         message: error instanceof Error ? error.message : String(error), recovery: 'unavailable',
       });
     }
@@ -434,20 +434,20 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<WorldSimul
       try {
         await saveChatToHostStrict_ACU();
       } catch (rollbackError) {
-        reject_ACU('WORLD_SIMULATION_PERSIST_FAILED', '世界推演联合提交与补偿保存均失败', {
+        reject_ACU('WORLD_SIMULATION_PERSIST_FAILED', '格林推演联合提交与补偿保存均失败', {
           primaryMessage: error instanceof Error ? error.message : String(error),
           rollbackMessage: rollbackError instanceof Error ? rollbackError.message : String(rollbackError), recovery: 'failed',
         });
       }
       if (getChatArray_ACU() !== chat || getActiveChatStorageIdentity_ACU(chat) !== input.identity.chatIdentity
         || !fieldsIntact(originalFields)) {
-        reject_ACU('WORLD_SIMULATION_PERSIST_FAILED', '世界推演补偿保存后状态已变化，无法确认恢复', {
+        reject_ACU('WORLD_SIMULATION_PERSIST_FAILED', '格林推演补偿保存后状态已变化，无法确认恢复', {
           message: error instanceof Error ? error.message : String(error), recovery: 'unavailable',
         });
       }
     }
     if (error instanceof WorldSimulationValidationError_ACU) throw error;
-    reject_ACU('WORLD_SIMULATION_PERSIST_FAILED', '世界推演联合提交失败，内存快照已恢复', {
+    reject_ACU('WORLD_SIMULATION_PERSIST_FAILED', '格林推演联合提交失败，内存快照已恢复', {
       message: error instanceof Error ? error.message : String(error),
       ...(saveAttempted ? { recovery: 'saved' } : {}),
     });
@@ -468,7 +468,7 @@ export function commitWorldSimulationProjection_ACU(input: CommitInput_ACU): Pro
 
 export type WorldSimulationCommitInput_ACU = CommitInput_ACU;
 
-/** 世界推演逐栏写入和最终投影提交共享队列，防止旧账本覆盖即时写入。 */
+/** 格林推演逐栏写入和最终投影提交共享队列，防止旧账本覆盖即时写入。 */
 export function commitWorldSimulationFieldWrites_ACU(input: WorldSimulationFieldCommitInput_ACU): Promise<WorldSimulationFieldCommitReceipt_ACU> {
   const key = input.identity.chatIdentity;
   const previous = tailsByChat_ACU.get(key) ?? Promise.resolve();

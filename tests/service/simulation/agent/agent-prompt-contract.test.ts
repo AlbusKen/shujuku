@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { WORLD_SIMULATION_PROMPT_VERSION_V25_ACU, WORLD_SIMULATION_PROMPT_VERSION_V26_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
+import { WORLD_SIMULATION_PROMPT_VERSION_V25_ACU, WORLD_SIMULATION_PROMPT_VERSION_V26_ACU, WORLD_SIMULATION_PROMPT_VERSION_V27_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
 import { USER_PREFILL_CONTENT_ACU } from '../../../../src/shared/user-prefill.js';
 import { buildDefaultWorldSimulationSettings_ACU } from '../../../../src/service/simulation/defaults';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU, WORLD_SIMULATION_AGENT_NAMES_ACU, findWorldSimulationAgentDefinition_ACU, worldSimulationDirectorVisibleCatalog_ACU } from '../../../../src/service/simulation/agent/agent-catalog';
@@ -12,7 +12,7 @@ import { parseWorldSimulationMainAction_ACU, parseWorldSimulationPlannerOutput_A
 import { exportWorldSimulationPrompts_ACU, importWorldSimulationPrompts_ACU, renderWorldSimulationPrompt_ACU, validateWorldSimulationAgentPrompts_ACU, validateWorldSimulationPromptSegments_ACU } from '../../../../src/service/simulation/agent/prompt-template';
 import { createWorldSimulationEvidenceRegistry_ACU, recordWorldSimulationEvidence_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../../../../src/service/simulation/world-simulation-evidence-registry';
 
-describe('世界推演提示词装配契约', () => {
+describe('格林推演提示词装配契约', () => {
   it('装配七个现役角色、主 Agent 不派遣退役角色，以及唯一有序固定 seam', () => {
     const prompts = validateWorldSimulationAgentPrompts_ACU(buildDefaultWorldSimulationAgentPrompts_ACU());
     expect(Object.keys(prompts)).toEqual([...WORLD_SIMULATION_AGENT_NAMES_ACU]);
@@ -99,12 +99,13 @@ describe('世界推演提示词装配契约', () => {
   });
 
   it('提示词完整覆盖角色职责，同时保留时间先行、历史默认指纹与信息渠道纪律', () => {
-    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe(WORLD_SIMULATION_PROMPT_VERSION_V26_ACU);
+    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe(WORLD_SIMULATION_PROMPT_VERSION_V27_ACU);
     expect(buildDefaultWorldSimulationSettings_ACU().agentRunBudget).toMatchObject({ maxIterations: 4, maxExtraReads: 1, maxConcurrent: 5 });
     expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].map(item => item.version)).toEqual([
       'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6', 'world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12', 'world-simulation-v13', 'world-simulation-v14', 'world-simulation-v15', 'world-simulation-v16', 'world-simulation-v17', 'world-simulation-v18', 'world-simulation-v19', 'world-simulation-v20', 'world-simulation-v21', 'world-simulation-v22', 'world-simulation-v23', 'world-simulation-v24',
       WORLD_SIMULATION_PROMPT_VERSION_V25_ACU,
       WORLD_SIMULATION_PROMPT_VERSION_V26_ACU,
+      WORLD_SIMULATION_PROMPT_VERSION_V27_ACU,
     ]);
     expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['undercurrent-analyst'].at(-1)?.version).toBe(WORLD_SIMULATION_PROMPT_VERSION_ACU);
     const v8 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v8');
@@ -178,7 +179,7 @@ describe('世界推演提示词装配契约', () => {
       WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === 'undercurrent-analyst')!.writableModules,
     );
     expect(undercurrent).toContain('exposePolicy');
-    expect(undercurrentPrompt).toContain('【一次性交付】');
+    expect(undercurrentPrompt).toContain('【交付方式】');
     expect(undercurrentPrompt).toContain('clock、dimensions、seeds');
     expect(undercurrentPrompt).not.toContain('调用 write_sql 函数');
 
@@ -213,8 +214,8 @@ describe('世界推演提示词装配契约', () => {
     const composerPrompt = prompts['guidance-composer'].map(item => item.content).join('\n');
     expect(composerPrompt).toContain('sourceId');
     expect(composerPrompt).toContain('80');
-    expect(composerPrompt).toContain('贴近当前剧情、正文未写且玩家能察觉');
-    expect(composerPrompt).toContain('没有合格新信号不改 guidance');
+    expect(composerPrompt).toContain('正文没写过');
+    expect(composerPrompt).toContain('需要清理时可以提交空 signals');
     expect(composerPrompt).not.toContain('禁止把正文已发生事件做记录、总结或评价');
     const composerInstruction = worldSimulationSpecialistProtocolInstruction_ACU(
       'guidance-composer',
@@ -222,18 +223,17 @@ describe('世界推演提示词装配契约', () => {
     );
     expect(composerInstruction).toContain('选题纪律');
     expect(composerInstruction).toContain('正文剧情所在位置附近、或与正文强相关、但正文尚未描写');
-    expect(composerPrompt).toContain('guidance 每轮最多 4 个新信号，encounter 最多 2 个');
-    expect(composerPrompt).toContain('宁缺毋滥');
-    expect(composerPrompt).toContain('玩家 secluded 不写 rumor 语态');
+    expect(composerPrompt).toContain('每轮新信号最多 4 条，encounter 最多 2 条');
+    expect(composerPrompt).toContain('玩家 secluded 时不写 rumor');
     expect(directorPrompt).toContain('focus 写法');
     expect(directorPrompt).toContain('禁止「更新世界动态」这类空泛套话');
     expect(timekeeperPrompt).toContain('时间判定细则');
     expect(timekeeperPrompt).toContain('正文无时间流逝证据时 days=0');
-    expect(undercurrentPrompt).toContain('维度 value 是 0-100 烈度，trend 为 rising/stable/falling');
+    expect(undercurrentPrompt).toContain('value 0-100 表示当下烈度，trend 写 rising/stable/falling');
     expect(undercurrentPrompt).toContain('catalyst');
     const dramatisPrompt = prompts['dramatis-keeper'].map(item => item.content).join('\n');
-    expect(dramatisPrompt).toContain('【一次性交付】');
-    expect(dramatisPrompt).toContain('只写 actors、player；rumors 只准写人物死亡的伴生传闻');
+    expect(dramatisPrompt).toContain('【交付方式】');
+    expect(dramatisPrompt).toContain('只写 actors、player；rumors 只写人物死亡的伴生风声');
     expect(dramatisPrompt).toContain('无变化回复 NO_CHANGE');
     expect(reviewerPrompt).toContain('审核清单逐项过');
     expect(reviewerPrompt).toContain('仅因事实客观存在、读者知道或账本有记录而赋知');
@@ -266,8 +266,8 @@ describe('世界推演提示词装配契约', () => {
       role: 'system',
       content: worldSimulationSpecialistProtocolInstruction_ACU('dramatis-keeper', ['actors', 'player', 'rumors']),
     }].map(message => message.content).join('\n');
-    expect(sent).toContain('【一次性交付】');
-    expect(sent).toContain('只写 actors、player；rumors 只准写人物死亡的伴生传闻');
+    expect(sent).toContain('【交付方式】');
+    expect(sent).toContain('只写 actors、player；rumors 只写人物死亡的伴生风声');
     expect(sent).toContain('无变化回复 NO_CHANGE');
     expect(sent).toContain('UPDATE player');
     expect(sent).toContain('"sql"');
@@ -357,7 +357,7 @@ describe('世界推演提示词装配契约', () => {
 
 });
 
-describe('V16 → V17 世界推演提示词迁移', () => {
+describe('V16 → V17 格林推演提示词迁移', () => {
   const frozen = JSON.parse(readFileSync(fileURLToPath(new URL('../../../fixtures/prompt-lineage-v34-v16.json', import.meta.url)), 'utf8')) as {
     simulationV16: Record<string, Array<{ role: string; length: number; hash: string }>>;
     simulationV16Groups: Record<string, { length: number; hash: string }>;

@@ -4,7 +4,7 @@ import { createWorldSimulationEvidenceRegistry_ACU, snapshotWorldSimulationEvide
 import { createWorldSimulationReadGateState_ACU } from '../../../src/service/simulation/agent/agent-read-gate';
 import { worldSimulationCanReadAddress_ACU } from '../../../src/service/simulation/agent/agent-catalog';
 
-describe('世界推演工具与 EvidenceRegistry', () => {
+describe('格林推演工具与 EvidenceRegistry', () => {
   it('只有成功、精确且未截断的 read 产生 evidenceRef', async () => {
     const registry = createWorldSimulationEvidenceRegistry_ACU('tools');
     const dependencies = createWorldSimulationToolDependencies_ACU({

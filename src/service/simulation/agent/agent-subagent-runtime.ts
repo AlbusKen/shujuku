@@ -344,6 +344,17 @@ function oneShotTables_ACU(modules: readonly WorldSimulationLedgerModule_ACU[]):
   return modules.flatMap(module => module === 'chronicle' ? ['chronicle', 'chronicle_archive', 'chronicle_overview'] : [module]);
 }
 
+/**
+ * 首轮与空模块标记：空账本时子代理容易把“没有旧条目可改”当成无变化。
+ * 这里只陈述事实，建账要求在提示词【首轮建账】里。
+ */
+export function oneShotBootstrapNotice_ACU(baseRevision: number, modules: readonly WorldSimulationLedgerModule_ACU[], ledger: WorldSimulationLedger_ACU): string[] {
+  const empty = modules.filter(module => Array.isArray(ledger[module]) && !(ledger[module] as unknown[]).length);
+  if (baseRevision === 0) return [`【首轮建账】账本尚未建立（基线修订号 0）。按提示词【首轮建账】依据世界书与锚点为你负责的模块建立初始条目；空表不是无变化的理由。${empty.length ? `当前为空的负责模块：${empty.join('、')}。` : ''}`];
+  if (empty.length) return [`【空模块】你负责的 ${empty.join('、')} 当前为空。按提示词【首轮建账】检查世界书与锚点能否建档，空表不是无变化的理由。`];
+  return [];
+}
+
 /** 与解析器同源的可写列清单，提示词与纠错回执不再各自手写列名。 */
 function oneShotColumnWhitelist_ACU(tables: readonly string[]): string {
   return tables.map(table => `${table}(${worldSimulationSqlWritableColumns_ACU(table).join(', ')})`).join('；');
@@ -448,13 +459,14 @@ export class WorldSimulationSubagentRuntime_ACU {
       ? input.elapsedDays!
       : inferWorldSimulationElapsedDays_ACU(anchor);
     const runtime = ['【本回合运行时数据】', `本轮焦点：${input.focus}`, `本轮锚点证据引用：${input.anchorEvidenceRef}（evidence_refs 只能用已授权引用）`,
-      `世界时钟：day=${input.givenLedger.clock.day} slot=${input.givenLedger.clock.slot} storyTime=${input.givenLedger.clock.storyTime}`,
+      `时序：day=${input.givenLedger.clock.day} slot=${input.givenLedger.clock.slot} storyTime=${input.givenLedger.clock.storyTime}`,
+      ...oneShotBootstrapNotice_ACU(input.baseLedgerRevision, modules, input.givenLedger),
       // 批次二串行接在批次一之后，输入 clock 已包含本轮推进；这里不能再让它叠加经过天数。
       input.agentName === 'guidance-composer'
-        ? `【共同时间基准】本轮共享的明确经过天数为 ${elapsedDays}（由工作流对同一锚点一次计算）。批次一已按这段跨度维护 clock，当前日 ${input.givenLedger.clock.day} 已包含本轮推进（本轮内存预览，尚未持久化）；直接采用该日，不再叠加经过天数。编年 day、传闻 origin_day 与 earliest_reveal_day 以当前日为准，并按本轮经过的时间跨度判断哪些幕后事件已完结、哪些消息已传开；不把回忆或既已计入的旅程重复累加。`
+        ? `【共同时间基准】本轮共享的明确经过天数为 ${elapsedDays}（由工作流对同一锚点一次计算）。批次一已按这段跨度维护 clock，当前日 ${input.givenLedger.clock.day} 已包含本轮推进（本轮内存预览，尚未持久化）；直接采用该日，不再叠加经过天数。幕后纪要 day、风声 origin_day 与 earliest_reveal_day 以当前日为准，并按本轮经过的时间跨度判断哪些幕后事件已完结、哪些消息已传开；不把回忆或既已计入的旅程重复累加。`
         : `【共同时间基准】本轮共享的明确经过天数为 ${elapsedDays}（由工作流对同一锚点一次计算；无明确时间流逝即为 0）。当前已提交日为 ${input.givenLedger.clock.day}；不把回忆或既已计入的旅程重复累加。undercurrent-analyst 独占 clock 写入，clock.days 只能表达这一本轮推进量；dramatis-keeper 不写 clock，但人物状态、死亡时间及伴生传闻的演算必须使用本轮共享经过天数。另一并发角色的推断尚未落账，不得当作已提交事实。`,
       `单例修订号：${input.baseLedgerRevision}（clock/player/guidance 的 UPDATE 写 WHERE expected_revision = ${input.baseLedgerRevision}；数组行用各自 revision 字段）`, `【你负责的资料（完整行）】${JSON.stringify(own)}`,
-      `【关联只读资料】维度与传闻为完整行；种子与人物为浓缩目录，需细节时按 readAddress 调用 read。${JSON.stringify(related)}`, `【待修复】${JSON.stringify(input.givenLedger.pendingFixes.filter(fix => modules.includes(fix.module)))}`,
+      `【关联只读资料】局势刻度与风声为完整行；伏线与人物谱为浓缩目录，需细节时按 readAddress 调用 read。${JSON.stringify(related)}`, `【待修复】${JSON.stringify(input.givenLedger.pendingFixes.filter(fix => modules.includes(fix.module)))}`,
       ...(input.roundChanges ? [`【本轮变更清单】${input.roundChanges}`] : []), `【锚点正文】\n${stripWritingAnnotations_ACU(anchor)}`,
       ...(input.injectWorldbook && input.triggeredWorldbook ? [input.triggeredWorldbook] : [])].join('\n');
     const resolvers = createWorldSimulationPlaceholderResolvers_ACU({ ...input.promptContext, worldState: input.givenLedger });

@@ -328,7 +328,7 @@ describe('WorldSimulationOrchestrator_ACU', () => {
 
   it('异常失败终局强制关闭会话流 running 标记，UI 停止按钮不再卡死', async () => {
     resetWorldSimulationSessionLogForTests_ACU();
-    beginWorldSimulationSessionRun_ACU('chat-a', '世界推演 Agent 运行');
+    beginWorldSimulationSessionRun_ACU('chat-a', '格林推演 Agent 运行');
     expect(isWorldSimulationSessionRunning_ACU('chat-a')).toBe(true);
     const f = fixture({ prepare: async () => ({ revision: revision(), execute: async () => { throw new Error('WORLD_SIMULATION_AGENT_PROTOCOL_INVALID'); } }) });
     await expect(f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' }))

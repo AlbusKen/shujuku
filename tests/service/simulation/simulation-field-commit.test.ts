@@ -58,7 +58,7 @@ describe('推演提示中的 SQL 范例与逐栏提交契约', () => {
   });
 });
 
-describe('世界推演逐栏领域规划', () => {
+describe('格林推演逐栏领域规划', () => {
   it('缺必填栏目保留 partial；同批后续 UPDATE 补齐才提升完整条目', () => {
     const first = plan("INSERT INTO dimensions (id, name, expected_revision) VALUES ('dim-a', '风暴', 0)", 'undercurrent-analyst');
     expect(first.ledger.dimensions).toEqual([]);
@@ -132,7 +132,7 @@ describe('世界推演逐栏领域规划', () => {
   });
 });
 
-describe('世界推演逐栏批次边界', () => {
+describe('格林推演逐栏批次边界', () => {
   it('旧完整条目无变化写入不推进账本与条目 revision', () => {
     const ledger = buildEmptyWorldSimulationLedger_ACU();
     ledger.dimensions = [{ id: 'dim-a', name: '风暴', kind: 'pressure', value: 10, trend: 'rising', rationale: '海风', evidenceRefs: [], revision: 1 }];

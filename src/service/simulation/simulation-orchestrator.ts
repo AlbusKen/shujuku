@@ -63,7 +63,7 @@ export const WORLD_SIMULATION_STOP_REASON_SUPERSEDED_ACU = 'superseded';
 
 const placeholderPlan_ACU: WorldSimulationStagePlan_ACU = {
   schemaVersion: 1,
-  title: '准备世界推演',
+  title: '准备格林推演',
   objective: '生成阶段计划',
   impactScope: [],
   factsToVerify: [],
@@ -331,7 +331,7 @@ export class WorldSimulationOrchestrator_ACU {
     summary: string,
   ): Promise<void> {
     logWorldSimulationSession_ACU(identity.chatIdentity, {
-      kind: 'run_completed', title: outcome === 'commit' ? '世界推演已提交' : '世界推演无变化', detail: summary, agentName: 'world-director',
+      kind: 'run_completed', title: outcome === 'commit' ? '格林推演已提交' : '格林推演无变化', detail: summary, agentName: 'world-director',
     });
     try {
       await this.dependencies.persistCompletion?.({ identity, anchor, outcome, summary });

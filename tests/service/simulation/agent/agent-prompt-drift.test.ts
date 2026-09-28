@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { compareWorldSimulationPromptMessages_ACU, resetWorldSimulationPromptDrift_ACU, trackWorldSimulationPromptDrift_ACU } from '../../../../src/service/simulation/agent/agent-prompt-drift';
 
-describe('世界推演提示词漂移诊断', () => {
+describe('格林推演提示词漂移诊断', () => {
   beforeEach(() => resetWorldSimulationPromptDrift_ACU());
 
   it('区分基线、相同提示词和首个漂移消息', () => {

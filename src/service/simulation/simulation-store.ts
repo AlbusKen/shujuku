@@ -541,7 +541,7 @@ function validatePlan_ACU(raw: unknown, path: string, phase: WorldSimulationErro
 }
 
 export function validateWorldSimulationEnvelope_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU = 'load'): WorldSimulationEnvelope_ACU {
-  if (!isRecord_ACU(raw)) fail_ACU('世界推演状态必须是对象', phase);
+  if (!isRecord_ACU(raw)) fail_ACU('格林推演状态必须是对象', phase);
   exactKeys_ACU(raw, ['schemaVersion', 'settings', 'task', 'stages', 'activeStageId', 'timeline', 'lastError', 'ledger', 'updatedAt'], [], 'envelope', phase);
   if (raw.schemaVersion !== WORLD_SIMULATION_SCHEMA_VERSION_ACU) fail_ACU('envelope.schemaVersion 必须为 1', phase);
   if (!Array.isArray(raw.stages)) fail_ACU('stages 必须是数组', phase);
@@ -698,10 +698,10 @@ export class FirstFloorWorldSimulationStore_ACU {
       const stillActive = getChatArray_ACU() === context.chat && getChatArray_ACU()[0] === context.firstMessage && getActiveChatStorageIdentity_ACU(context.chat) === context.chatIdentity;
       if (saveAttempted && stillActive) {
         try { await saveChatToHostStrict_ACU(); }
-        catch (rollbackError) { reject_ACU('WORLD_SIMULATION_PERSIST_FAILED', 'persist', '世界推演状态保存与回滚均失败', { primaryMessage: error instanceof Error ? error.message : String(error), rollbackMessage: rollbackError instanceof Error ? rollbackError.message : String(rollbackError) }); }
+        catch (rollbackError) { reject_ACU('WORLD_SIMULATION_PERSIST_FAILED', 'persist', '格林推演状态保存与回滚均失败', { primaryMessage: error instanceof Error ? error.message : String(error), rollbackMessage: rollbackError instanceof Error ? rollbackError.message : String(rollbackError) }); }
       }
       if (error instanceof WorldSimulationValidationError_ACU) throw error;
-      reject_ACU('WORLD_SIMULATION_PERSIST_FAILED', 'persist', '世界推演状态保存失败', { message: error instanceof Error ? error.message : String(error) });
+      reject_ACU('WORLD_SIMULATION_PERSIST_FAILED', 'persist', '格林推演状态保存失败', { message: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -738,7 +738,7 @@ export function resolveWorldSimulationAnchor_ACU(messageIndex: number, chat?: an
     ? messages[messageIndex]
     : null;
   if (!chatIdentity || !message || !isAssistantMessage_ACU(message)) {
-    reject_ACU('WORLD_SIMULATION_ANCHOR_INVALID', 'anchor', '世界推演锚点必须是当前聊天中的 assistant 楼层', { messageIndex });
+    reject_ACU('WORLD_SIMULATION_ANCHOR_INVALID', 'anchor', '格林推演锚点必须是当前聊天中的 assistant 楼层', { messageIndex });
   }
   const rawMessageId = message.message_id;
   const messageId = typeof rawMessageId === 'string' || typeof rawMessageId === 'number' ? rawMessageId : messageIndex;
@@ -759,7 +759,7 @@ export function assertWorldSimulationAnchorCurrent_ACU(anchor: WorldSimulationAn
     || current.messageKey !== anchor.messageKey
     || current.swipeId !== anchor.swipeId
     || current.contentDigest !== anchor.contentDigest) {
-    reject_ACU('WORLD_SIMULATION_ANCHOR_STALE', 'anchor', '世界推演冻结锚点已变化，拒绝继续写入', {
+    reject_ACU('WORLD_SIMULATION_ANCHOR_STALE', 'anchor', '格林推演冻结锚点已变化，拒绝继续写入', {
       expected: anchor,
       actual: current,
     });
@@ -772,7 +772,7 @@ export function resolveCurrentWorldSimulationAnchor_ACU(anchor: WorldSimulationA
   const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
   const chatIdentity = getActiveChatStorageIdentity_ACU(messages);
   if (!chatIdentity) {
-    reject_ACU('WORLD_SIMULATION_ANCHOR_INVALID', 'anchor', '世界推演锚点必须是当前聊天中的 assistant 楼层', { messageIndex: anchor.messageIndex });
+    reject_ACU('WORLD_SIMULATION_ANCHOR_INVALID', 'anchor', '格林推演锚点必须是当前聊天中的 assistant 楼层', { messageIndex: anchor.messageIndex });
   }
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index];
@@ -785,7 +785,7 @@ export function resolveCurrentWorldSimulationAnchor_ACU(anchor: WorldSimulationA
       return current;
     }
   }
-  reject_ACU('WORLD_SIMULATION_ANCHOR_STALE', 'anchor', '世界推演冻结锚点已变化，拒绝继续写入', { expected: anchor });
+  reject_ACU('WORLD_SIMULATION_ANCHOR_STALE', 'anchor', '格林推演冻结锚点已变化，拒绝继续写入', { expected: anchor });
 }
 
 export function readWorldSimulationBucketEntry_ACU<T>(
