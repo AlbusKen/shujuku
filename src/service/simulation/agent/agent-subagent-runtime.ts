@@ -29,6 +29,7 @@ import type {
 import { createWorldSimulationPlaceholderResolvers_ACU, isWorldSimulationLedgerContext_ACU, type WorldSimulationPlaceholderContext_ACU } from './agent-placeholder-resolver';
 import { createWorldSimulationProtocolRepairState_ACU, normalizeOneShotSpecialistPayload_ACU, worldSimulationSqlWritableColumns_ACU, parseWorldSimulationSubagentToolCalls_ACU, parseWorldSimulationJsonDraft_ACU, parseWorldSimulationJsonPayload_ACU, parseWorldSimulationMainAction_ACU, parseWorldSimulationMainOutput_ACU, parseWorldSimulationReviewerResult_ACU, parseWorldSimulationSpecialistResult_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationReviewerProtocolRejection_ACU, renderWorldSimulationSpecialistProtocolRejection_ACU } from './agent-protocol';
 import { createWorldSimulationReadGateState_ACU, resolveWorldSimulationReadBudget_ACU } from './agent-read-gate';
+import { logWorldSimulationSession_ACU } from './agent-session-log';
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './prompt-template';
 import { renderWorldSimulationSnapshotSections_ACU, splitWorldSimulationSubagentPrompt_ACU, verifyWorldSimulationSnapshotSections_ACU, verifyWorldSimulationFixedWorldbook_ACU, type WorldSimulationFixedWorldbook_ACU } from './agent-shared-materials';
@@ -79,6 +80,11 @@ export interface WorldSimulationOneShotInput_ACU {
   triggeredWorldbook?: string;
   fixedWorldbook?: WorldSimulationFixedWorldbook_ACU;
   isCurrent?: () => boolean;
+  /**
+   * 会话流分区。与智能续写主循环同一做法：子代理的读取与被拒提交也要进会话流，
+   * 否则用户只看到派工卡片，看不到这一轮实际读了什么、提交了什么、被拒在哪。
+   */
+  sessionChatIdentity?: string;
 }
 
 
@@ -484,6 +490,10 @@ export class WorldSimulationSubagentRuntime_ACU {
     let writeAttempted = false;
     const maxReads = input.settings.agentRunBudget.maxExtraReads > 0 ? 1 : 0;
     const authorized = () => new Set(snapshotWorldSimulationEvidenceRegistry_ACU(input.registry).entries.flatMap(entry => entry.evidenceRef ? [entry.evidenceRef] : []));
+    const sessionId = input.sessionChatIdentity?.trim();
+    const logSession = (entry: { kind: 'tool_read' | 'protocol_retry'; title: string; detail: string; ok: boolean }): void => {
+      if (sessionId) logWorldSimulationSession_ACU(sessionId, { ...entry, agentName: input.agentName });
+    };
     for (let attempt = 0; attempt < 2 + maxReads; attempt++) {
       if (input.isCurrent?.() === false) throw new Error('WORLD_SIMULATION_RUN_STALE');
       let locatedIssues: WorldSimulationSubagentIssue_ACU[] = [];
@@ -492,10 +502,16 @@ export class WorldSimulationSubagentRuntime_ACU {
       let sent: Awaited<ReturnType<typeof executeWorldSimulationFinalRequest_ACU>>;
       try {
         sent = await executeWorldSimulationFinalRequest_ACU({ messages, inputLimitTokens: input.settings.agentHistoryTokenBudget,
-          tools: agentNativeTools_ACU(requestTools).map(tool => tool.function.name !== 'read' ? tool : {
-            ...tool, function: { ...tool.function,
-              description: '仅精读本轮运行时资料中明确列出的具体 readAddress；没有可精读条目就不要调用。完整行、锚点和世界书已经注入，不要重复读取；ledger:current 对普通角色未授权。reads 必须是实际可读地址数组。' },
-          }), historyBudgetTokens: input.settings.agentHistoryTokenBudget,
+          // 声明必须与本路径的校验一致：write_sql 在 one-shot 只收 sql，证据引用由程序按锚点绑定。
+          // 共享目录里宣传 evidenceRefs 会让模型照着填，再被“多余参数”拒掉。
+          tools: agentNativeTools_ACU(requestTools).map(tool => tool.function.name === 'read'
+            ? { ...tool, function: { ...tool.function,
+              description: '仅精读本轮运行时资料中明确列出的具体 readAddress；没有可精读条目就不要调用。完整行、锚点和世界书已经注入，不要重复读取；ledger:current 对普通角色未授权。reads 必须是实际可读地址数组。' } }
+            : tool.function.name === 'write_sql'
+              ? { ...tool, function: { ...tool.function,
+                description: '把本角色本轮全部变更一次写入你负责的表。参数只有 sql：一条或多条用分号隔开的 INSERT/UPDATE/DELETE，字符串用英文半角单引号，正文里的单引号写成两个。证据引用由程序按锚点绑定，不要自己传 evidenceRefs。没有可证实变化就不要调用本工具。',
+                parameters: { type: 'object', properties: { sql: { type: 'string' } }, required: ['sql'], additionalProperties: false } } }
+              : tool), historyBudgetTokens: input.settings.agentHistoryTokenBudget,
           count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
           invoke: value => {
             if (input.injectWorldbook && input.fixedWorldbook) {
@@ -532,10 +548,14 @@ export class WorldSimulationSubagentRuntime_ACU {
                 canReadAddress: address => worldSimulationCanReadAddress_ACU(input.agentName, address),
                 count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU } });
             transcript.push(...nativeToolExchange_ACU(turn.content, turn.toolCalls, [toolText_ACU(results)]));
+            logSession({ kind: 'tool_read', title: `读取资料（${results.length} 项）`,
+              detail: results.map(item => `${item.address} ${item.status}${item.summary ? `：${item.summary}` : ''}`).join('；'),
+              ok: results.every(item => item.status === 'ok' || item.status === 'empty') });
             continue;
           }
           if (call.name !== 'write_sql') throw new Error(`WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN: 只允许 read 或 write_sql，收到 ${call.name}`);
-          const extra = Object.keys(args).filter(key => !['action', 'sql'].includes(key));
+          // evidenceRefs 是共享工具目录的历史参数：这里按锚点自行绑定证据，收到就忽略，不判失败。
+          const extra = Object.keys(args).filter(key => !['action', 'sql', 'evidenceRefs'].includes(key));
           if (extra.length) throw new Error(`WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN: write_sql 只接受 sql 参数，多余参数 ${extra.join(', ')}`);
           if (typeof args.sql !== 'string' || !args.sql.trim()) throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN: write_sql 的 sql 参数必须是非空字符串');
           payload = { status: 'candidate', sql: args.sql };
@@ -579,6 +599,10 @@ export class WorldSimulationSubagentRuntime_ACU {
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         const lastAttempt = repairs++ >= 1;
+        const submitted = turn.toolCalls.map(call => `${call.name} ${call.arguments}`).join('；') || raw;
+        logSession({ kind: 'protocol_retry', ok: false,
+          title: lastAttempt ? '提交被拒，纠错次数已用完' : '提交被拒，已回执纠错',
+          detail: `${reason}${submitted ? `｜模型提交：${submitted.slice(0, 900)}` : ''}` });
         if (lastAttempt) return failed(error, 'protocol_failed', locatedIssues);
         const hint = oneShotRepairHint_ACU(locatedIssues, oneShotTables_ACU(modules));
         const feedback = `上一次提交未被采纳：${reason}。${hint} 若确有变化，只重新调用一次 write_sql 并修正拒绝的 SQL；无法完成请回复 FAILED: 原因。不要输出 JSON 或裸 SQL，不得将空回复视为无变化。`;

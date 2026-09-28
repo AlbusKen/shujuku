@@ -170001,6 +170001,11 @@ Expected function or array of functions, received type ${typeof value}.`
             let writeAttempted = false;
             const maxReads = input.settings.agentRunBudget.maxExtraReads > 0 ? 1 : 0;
             const authorized = () => new Set(snapshotWorldSimulationEvidenceRegistry_ACU(input.registry).entries.flatMap(entry => entry.evidenceRef ? [entry.evidenceRef] : []));
+            const sessionId = input.sessionChatIdentity?.trim();
+            const logSession = (entry) => {
+                if (sessionId)
+                    logWorldSimulationSession_ACU(sessionId, { ...entry, agentName: input.agentName });
+            };
             for (let attempt = 0; attempt < 2 + maxReads; attempt++) {
                 if (input.isCurrent?.() === false)
                     throw new Error('WORLD_SIMULATION_RUN_STALE');
@@ -170010,10 +170015,16 @@ Expected function or array of functions, received type ${typeof value}.`
                 let sent;
                 try {
                     sent = await executeWorldSimulationFinalRequest_ACU({ messages, inputLimitTokens: input.settings.agentHistoryTokenBudget,
-                        tools: agentNativeTools_ACU(requestTools).map(tool => tool.function.name !== 'read' ? tool : {
-                            ...tool, function: { ...tool.function,
-                                description: '仅精读本轮运行时资料中明确列出的具体 readAddress；没有可精读条目就不要调用。完整行、锚点和世界书已经注入，不要重复读取；ledger:current 对普通角色未授权。reads 必须是实际可读地址数组。' },
-                        }), historyBudgetTokens: input.settings.agentHistoryTokenBudget,
+                        // 声明必须与本路径的校验一致：write_sql 在 one-shot 只收 sql，证据引用由程序按锚点绑定。
+                        // 共享目录里宣传 evidenceRefs 会让模型照着填，再被“多余参数”拒掉。
+                        tools: agentNativeTools_ACU(requestTools).map(tool => tool.function.name === 'read'
+                            ? { ...tool, function: { ...tool.function,
+                                    description: '仅精读本轮运行时资料中明确列出的具体 readAddress；没有可精读条目就不要调用。完整行、锚点和世界书已经注入，不要重复读取；ledger:current 对普通角色未授权。reads 必须是实际可读地址数组。' } }
+                            : tool.function.name === 'write_sql'
+                                ? { ...tool, function: { ...tool.function,
+                                        description: '把本角色本轮全部变更一次写入你负责的表。参数只有 sql：一条或多条用分号隔开的 INSERT/UPDATE/DELETE，字符串用英文半角单引号，正文里的单引号写成两个。证据引用由程序按锚点绑定，不要自己传 evidenceRefs。没有可证实变化就不要调用本工具。',
+                                        parameters: { type: 'object', properties: { sql: { type: 'string' } }, required: ['sql'], additionalProperties: false } } }
+                                : tool), historyBudgetTokens: input.settings.agentHistoryTokenBudget,
                         count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
                         invoke: value => {
                             if (input.injectWorldbook && input.fixedWorldbook) {
@@ -170060,11 +170071,15 @@ Expected function or array of functions, received type ${typeof value}.`
                                     canReadAddress: address => worldSimulationCanReadAddress_ACU(input.agentName, address),
                                     count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU } });
                             transcript.push(...nativeToolExchange_ACU(turn.content, turn.toolCalls, [toolText_ACU(results)]));
+                            logSession({ kind: 'tool_read', title: `读取资料（${results.length} 项）`,
+                                detail: results.map(item => `${item.address} ${item.status}${item.summary ? `：${item.summary}` : ''}`).join('；'),
+                                ok: results.every(item => item.status === 'ok' || item.status === 'empty') });
                             continue;
                         }
                         if (call.name !== 'write_sql')
                             throw new Error(`WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN: 只允许 read 或 write_sql，收到 ${call.name}`);
-                        const extra = Object.keys(args).filter(key => !['action', 'sql'].includes(key));
+                        // evidenceRefs 是共享工具目录的历史参数：这里按锚点自行绑定证据，收到就忽略，不判失败。
+                        const extra = Object.keys(args).filter(key => !['action', 'sql', 'evidenceRefs'].includes(key));
                         if (extra.length)
                             throw new Error(`WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN: write_sql 只接受 sql 参数，多余参数 ${extra.join(', ')}`);
                         if (typeof args.sql !== 'string' || !args.sql.trim())
@@ -170118,6 +170133,10 @@ Expected function or array of functions, received type ${typeof value}.`
                 catch (error) {
                     const reason = error instanceof Error ? error.message : String(error);
                     const lastAttempt = repairs++ >= 1;
+                    const submitted = turn.toolCalls.map(call => `${call.name} ${call.arguments}`).join('；') || raw;
+                    logSession({ kind: 'protocol_retry', ok: false,
+                        title: lastAttempt ? '提交被拒，纠错次数已用完' : '提交被拒，已回执纠错',
+                        detail: `${reason}${submitted ? `｜模型提交：${submitted.slice(0, 900)}` : ''}` });
                     if (lastAttempt)
                         return failed(error, 'protocol_failed', locatedIssues);
                     const hint = oneShotRepairHint_ACU(locatedIssues, oneShotTables_ACU(modules));
@@ -171186,6 +171205,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     tools: input.tools, runId: input.identity.runId, candidateSeq: seq,
                     focus: input.opening.focus, anchorEvidenceRef, givenLedger: ledger,
                     baseLedgerRevision: base.revision, elapsedDays, roundChanges, injectWorldbook: seq === 1,
+                    sessionChatIdentity: input.identity.chatIdentity,
                     triggeredWorldbook: seq === 1 ? input.triggeredWorldbook : undefined,
                     fixedWorldbook: seq === 1 ? input.fixedWorldbook : undefined, isCurrent: input.isCurrent });
                 const restricted = restrictOutcome_ACU(outcome, targets);

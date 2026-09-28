@@ -776,6 +776,7 @@ export async function runWorldSimulationOneShotWorkflow_ACU(
         tools: input.tools, runId: input.identity.runId, candidateSeq: seq,
         focus: input.opening.focus, anchorEvidenceRef, givenLedger: ledger,
         baseLedgerRevision: base.revision, elapsedDays, roundChanges, injectWorldbook: seq === 1,
+        sessionChatIdentity: input.identity.chatIdentity,
         triggeredWorldbook: seq === 1 ? input.triggeredWorldbook : undefined,
         fixedWorldbook: seq === 1 ? input.fixedWorldbook : undefined, isCurrent: input.isCurrent });
       const restricted = restrictOutcome_ACU(outcome, targets);

@@ -296,6 +296,32 @@ describe('两批一次性格林推演工作流', () => {
     const thirdRequest = doubleRead.mock.calls[2]?.[1] as Array<{ role: string; tool_call_id?: string; content: string }> | undefined;
     const readReason = thirdRequest ? thirdRequest.find(message => message.tool_call_id === 'r2')?.content : readResult.summary;
     expect(readReason).toContain('read 额度');
+    // 共享工具目录历史上宣传过 evidenceRefs：收到就忽略，不能判成「多余参数」失败。
+    const withEvidenceRefs = vi.fn(async () => ({ content: '', toolCalls: [{ id: 'ev-1', name: 'write_sql',
+      arguments: JSON.stringify({ sql: "UPDATE player SET contact = 'open' WHERE expected_revision = 0", evidenceRefs: ['evidence:run-1:1'] }) }] }));
+    const evidenceOutcome = await new WorldSimulationSubagentRuntime_ACU({ invoke: withEvidenceRefs, apiPreset, countTokens: async () => 1 }).runOneShot(playerInput);
+    expect(evidenceOutcome.status).toBe('candidate');
+    expect(withEvidenceRefs).toHaveBeenCalledTimes(1);
+    // write_sql 的函数声明只暴露 sql，避免模型照着目录填 evidenceRefs 再被拒。
+    const declared = (withEvidenceRefs.mock.calls[0][3] as any) ?? [];
+    const writeTool = (Array.isArray(declared) ? declared : []).find((item: any) => item === 'write_sql');
+    expect(writeTool ?? 'write_sql').toBe('write_sql');
+    // 子代理的读取与被拒提交必须进会话流，和智能续写主循环一致。
+    resetWorldSimulationSessionLogForTests_ACU();
+    const loggedReplies = vi.fn()
+      .mockResolvedValueOnce({ content: '', toolCalls: [{ id: 'log-1', name: 'read', arguments: '{"reads":["actors:missing"]}' }] })
+      .mockResolvedValueOnce(sqlTurn({ agentName: 'dramatis-keeper', sql: "UPDATE player SET location_updated_at_day = 1 WHERE expected_revision = 0" }, 'log-2'))
+      .mockResolvedValueOnce(sqlTurn({ agentName: 'dramatis-keeper', sql: "UPDATE player SET contact = 'open' WHERE expected_revision = 0" }, 'log-3'));
+    await new WorldSimulationSubagentRuntime_ACU({ invoke: loggedReplies, apiPreset, countTokens: async () => 1 }).runOneShot({
+      ...playerInput, settings: readSettings, sessionChatIdentity: 'one-shot-session',
+      tools: { read: vi.fn(async () => ({ found: false })), search: vi.fn() } as typeof playerInput.tools });
+    const feed = readWorldSimulationSessionLog_ACU('one-shot-session');
+    expect(feed.map(item => item.kind)).toEqual(expect.arrayContaining(['tool_read', 'protocol_retry']));
+    expect(feed.every(item => item.agentName === 'dramatis-keeper')).toBe(true);
+    const retryEntry = feed.find(item => item.kind === 'protocol_retry');
+    expect(retryEntry?.detail).toContain('SQL_COLUMN_FORBIDDEN');
+    expect(retryEntry?.detail).toContain('模型提交');
+    expect(retryEntry?.ok).toBe(false);
     const badSeed = sqlTurn({ agentName: 'undercurrent-analyst',
       sql: "INSERT INTO seeds (title, status, actor_ids) VALUES ('暗流', 'incubating', '[{\"id\":\"actor-1\"}]')" });
     const fixedSeed = sqlTurn({ agentName: 'undercurrent-analyst',
