@@ -487,6 +487,8 @@ export class WorldSimulationSubagentRuntime_ACU {
     const usage = { readsUsed: 0 };
     let reads = 0;
     let repairs = 0;
+    // 首轮算出的部分候选兜底：纠错轮整批失效时，仍落账首轮已合法的语句，而不是一起丢掉。
+    let salvaged: WorldSimulationSubagentOutcome_ACU | null = null;
     let writeAttempted = false;
     const maxReads = input.settings.agentRunBudget.maxExtraReads > 0 ? 1 : 0;
     const authorized = () => new Set(snapshotWorldSimulationEvidenceRegistry_ACU(input.registry).entries.flatMap(entry => entry.evidenceRef ? [entry.evidenceRef] : []));
@@ -570,13 +572,11 @@ export class WorldSimulationSubagentRuntime_ACU {
           givenLedger: input.givenLedger, baseLedgerRevision: input.baseLedgerRevision, anchorEvidenceRef: input.anchorEvidenceRef, authorizedRefs: authorized() });
         locatedIssues = normalized.issues;
         // 与智能续写同样宽容：合法语句已被逐条隔离出来，不能因为个别语句非法就整批丢弃。
-        // 先回执一次让模型补齐被拒部分；纠错轮后仍有残余时落账可用部分，剩余作为
-        // unresolvedIssues 进入 pendingFixes，由下一轮继续录入。
+        // 完全没有可用语句才直接要纠错；有可用语句时先把部分候选算出来，再决定是回执还是落账。
         const usablePatch = normalized.payload.status === 'candidate';
-        if (normalized.issues.length && (!usablePatch || repairs < 1)) {
+        if (!usablePatch && (normalized.issues.length || payload.status === 'candidate')) {
           throw new Error(normalized.issues.slice(0, 8).map(issue => `${issue.path}: ${issue.message}`).join('；') || 'WORLD_SIMULATION_ONE_SHOT_SQL_REJECTED');
         }
-        if (!usablePatch && payload.status === 'candidate') throw new Error('WORLD_SIMULATION_ONE_SHOT_SQL_REJECTED');
         const snapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
         let outcome: WorldSimulationSubagentOutcome_ACU;
         try { outcome = outcomeFromSpecialistResult_ACU(parseWorldSimulationSpecialistResult_ACU(normalized.payload, snapshot), modules, input.runId, input.candidateSeq, false); }
@@ -604,16 +604,23 @@ export class WorldSimulationSubagentRuntime_ACU {
         }
         if (!locatedIssues.length) return outcome;
         // 部分落账：摘要写明残余，下一轮按 pendingFixes 补齐。
-        return { ...outcome, unresolvedIssues: locatedIssues,
+        const partial: WorldSimulationSubagentOutcome_ACU = { ...outcome, unresolvedIssues: locatedIssues,
           summary: `${outcome.summary}（另有 ${locatedIssues.length} 条语句未采纳，留待下一轮补录）` };
+        // 首轮仍回执一次，给模型改对整批的机会；这份候选留作兜底，纠错轮整批失效时不再退回全失败。
+        if (repairs < 1) {
+          salvaged = partial;
+          throw new Error(locatedIssues.slice(0, 8).map(issue => `${issue.path}: ${issue.message}`).join('；') || 'WORLD_SIMULATION_ONE_SHOT_SQL_REJECTED');
+        }
+        return partial;
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         const lastAttempt = repairs++ >= 1;
         const submitted = turn.toolCalls.map(call => `${call.name} ${call.arguments}`).join('；') || raw;
         logSession({ kind: 'protocol_retry', ok: false,
-          title: lastAttempt ? '提交被拒，纠错次数已用完' : '提交被拒，已回执纠错',
+          title: lastAttempt ? (salvaged ? '纠错未成功，落账首轮已合法的部分' : '提交被拒，纠错次数已用完') : '提交被拒，已回执纠错',
           detail: `${reason}${submitted ? `｜模型提交：${submitted.slice(0, 900)}` : ''}` });
-        if (lastAttempt) return failed(error, 'protocol_failed', locatedIssues);
+        // 纠错轮整批失效时优先交出首轮兜底候选，剩余语句仍作为待修复留给下一轮。
+        if (lastAttempt) return salvaged ?? failed(error, 'protocol_failed', locatedIssues);
         const hint = oneShotRepairHint_ACU(locatedIssues, oneShotTables_ACU(modules));
         const feedback = `上一次提交未被采纳：${reason}。${hint} 若确有变化，只重新调用一次 write_sql 并修正拒绝的 SQL；无法完成请回复 FAILED: 原因。不要输出 JSON 或裸 SQL，不得将空回复视为无变化。`;
         if (turn.toolCalls.length && turn.toolCalls.every(call => call.id && call.name)) transcript.push(...nativeToolExchange_ACU(turn.content, turn.toolCalls, turn.toolCalls.map(() => feedback)));

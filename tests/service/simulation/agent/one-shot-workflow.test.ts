@@ -333,6 +333,16 @@ describe('两批一次性格林推演工作流', () => {
     expect(partial.summary).toContain('留待下一轮补录');
     expect(partial.unresolvedIssues?.length).toBe(1);
     expect(JSON.stringify(partial.unresolvedIssues)).toContain('SQL_COLUMN_FORBIDDEN');
+    // 首轮已有合法语句、纠错轮整批失效时，落账首轮那部分，不退回全失败。
+    const salvageReplies = vi.fn()
+      .mockResolvedValueOnce({ content: '', toolCalls: [{ id: 'sal-1', name: 'write_sql', arguments: JSON.stringify({ sql: mixedSql }) }] })
+      .mockResolvedValueOnce({ content: '', toolCalls: [{ id: 'sal-2', name: 'write_sql', arguments: JSON.stringify({ sql: "UPDATE player SET region_visits = '[]' WHERE expected_revision = 0" }) }] });
+    const salvaged = await new WorldSimulationSubagentRuntime_ACU({ invoke: salvageReplies, apiPreset, countTokens: async () => 1 }).runOneShot(playerInput);
+    expect(salvageReplies).toHaveBeenCalledTimes(2);
+    expect(salvaged.status).toBe('candidate');
+    expect(salvaged.candidate?.patch.player).toMatchObject({ contact: 'open' });
+    expect(salvaged.summary).toContain('留待下一轮补录');
+    expect(salvaged.unresolvedIssues?.length).toBe(1);
     // 全部语句非法时仍然失败，不能凭空产出候选。
     const allBad = vi.fn(async () => ({ content: '', toolCalls: [{ id: 'bad-1', name: 'write_sql', arguments: JSON.stringify({ sql: "UPDATE player SET location_updated_at_day = 1 WHERE expected_revision = 0" }) }] }));
     const allBadOutcome = await new WorldSimulationSubagentRuntime_ACU({ invoke: allBad, apiPreset, countTokens: async () => 1 }).runOneShot(playerInput);
