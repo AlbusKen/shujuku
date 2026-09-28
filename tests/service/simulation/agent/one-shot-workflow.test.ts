@@ -274,6 +274,28 @@ describe('两批一次性世界推演工作流', () => {
     // 越列回执须带出该表合法列，纠错轮才能改对而非再猜一次。
     expect(JSON.stringify(playerReplies.mock.calls[1][1])).toContain('player(location, contact, evidence_refs)');
     expect(JSON.stringify(playerReplies.mock.calls[1][1])).toContain('whitelisted column: location, contact');
+    // actors.location 写成 JSON 时，纠错回执须以 role=tool 绑定原调用，并指明改用 location_ref。
+    const actorJson = { content: '', toolCalls: [{ id: 'actor-sql-1', name: 'write_sql', arguments: JSON.stringify({ sql: "INSERT INTO actors (name, interests, location, goals, information_sources, known_facts) VALUES ('陈默', '[\"查案\"]', '{\"region\":\"上阳城\"}', '[\"查明鬼船\"]', '[\"亲历\"]', '[\"奉命南下\"]')" }) }] };
+    const actorFixed = { content: '', toolCalls: [{ id: 'actor-sql-2', name: 'write_sql', arguments: JSON.stringify({ sql: "INSERT INTO actors (name, interests, location, location_ref, goals, information_sources, known_facts) VALUES ('陈默', '[\"查案\"]', '上阳城·大理寺', '{\"region\":\"上阳城\"}', '[\"查明鬼船\"]', '[\"亲历\"]', '[\"奉命南下\"]')" }) }] };
+    const actorReplies = vi.fn().mockResolvedValueOnce(actorJson).mockResolvedValueOnce(actorFixed);
+    expect((await new WorldSimulationSubagentRuntime_ACU({ invoke: actorReplies, apiPreset, countTokens: async () => 1 }).runOneShot(playerInput)).status).toBe('candidate');
+    const actorRetry = actorReplies.mock.calls[1][1] as Array<{ role: string; tool_call_id?: string; content: string }>;
+    const actorReceipt = actorRetry.find(message => message.role === 'tool' && message.tool_call_id === 'actor-sql-1');
+    expect(actorReceipt?.content).toContain('actors.location 是地名纯文本');
+    expect(actorRetry.some(message => message.role === 'user' && message.content.startsWith('上一次提交未被采纳'))).toBe(false);
+    // read 超额的拒绝原因可辨认，不再只有裸错误码。
+    const doubleRead = vi.fn()
+      .mockResolvedValueOnce({ content: '', toolCalls: [{ id: 'r1', name: 'read', arguments: '{"reads":["actors:missing"]}' }] })
+      .mockResolvedValueOnce({ content: '', toolCalls: [{ id: 'r2', name: 'read', arguments: '{"reads":["actors:missing"]}' }] })
+      .mockResolvedValueOnce('NO_CHANGE');
+    const readSettings = { ...settings, agentRunBudget: { ...settings.agentRunBudget, maxExtraReads: 1 } };
+    // 独立的 read 桩，避免污染后续“从未读取”的断言。
+    const isolatedTools = { read: vi.fn(async () => ({ found: false })), search: vi.fn() };
+    const readResult = await new WorldSimulationSubagentRuntime_ACU({ invoke: doubleRead, apiPreset, countTokens: async () => 1 }).runOneShot({ ...playerInput, settings: readSettings, tools: isolatedTools as typeof playerInput.tools });
+    // 额度拒绝可能以 role=tool 回执给模型，也可能在纠错次数用完时成为失败摘要；两处都必须带出可辨认的原因。
+    const thirdRequest = doubleRead.mock.calls[2]?.[1] as Array<{ role: string; tool_call_id?: string; content: string }> | undefined;
+    const readReason = thirdRequest ? thirdRequest.find(message => message.tool_call_id === 'r2')?.content : readResult.summary;
+    expect(readReason).toContain('read 额度');
     const badSeed = sqlTurn({ agentName: 'undercurrent-analyst',
       sql: "INSERT INTO seeds (title, status, actor_ids) VALUES ('暗流', 'incubating', '[{\"id\":\"actor-1\"}]')" });
     const fixedSeed = sqlTurn({ agentName: 'undercurrent-analyst',

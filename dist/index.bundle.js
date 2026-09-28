@@ -169747,6 +169747,9 @@ Expected function or array of functions, received type ${typeof value}.`
         if (issues.some(issue => /(?:^|\.)(?:location|locationRef)$/.test(issue.path) && /必须是对象或 null/.test(issue.message))) {
             hints.push('seeds.location、actors.location_ref 和 player.location 需要 SQL 单引号包裹的 JSON 对象，如 location = \'{"region":"江南府"}\'；不能填裸地名。actors.location 则是地名文本。');
         }
+        if (issues.some(issue => /actors\.upsert\[\d+\]\.location$/.test(issue.path) && /必须是字符串/.test(issue.message))) {
+            hints.push('actors.location 是地名纯文本，只能写 location = \'江南府·客栈\' 这样的字符串，不能写 JSON；结构化地点改写到 location_ref = \'{"region":"江南府","place":"客栈"}\'。');
+        }
         if (issues.some(issue => /(?:sourceId|UNKNOWN_GUIDANCE_SOURCE)/.test(`${issue.path} ${issue.message}`))) {
             hints.push('guidance.signals.sourceId 只能使用运行时账本中已经存在的条目 ID、clock 或 player；不能引用本次候选刚 INSERT 的 rumors/chronicle，也不能编造 rumors:1 等未出现在目录中的 ID。无法绑定已有来源时删除该 signal，不要把新建条目的猜测 ID 填进去。');
         }
@@ -169910,11 +169913,14 @@ Expected function or array of functions, received type ${typeof value}.`
                             throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_LIMIT');
                         const [{ call, payload: args }] = nativeToolArguments_ACU(turn.toolCalls);
                         if (call.name === 'read') {
-                            if (reads >= maxReads || writeAttempted)
-                                throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN');
+                            // 分开说明拒绝原因，纠错轮与会话流都能看出是哪条规则。
+                            if (writeAttempted)
+                                throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN: 已提交过 write_sql，之后不能再 read');
+                            if (reads >= maxReads)
+                                throw new Error(`WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN: 本轮 read 额度（${maxReads} 次）已用完，只能调用 write_sql 或回复 NO_CHANGE/FAILED`);
                             const parsed = parseWorldSimulationMainAction_ACU(args, false, snapshotWorldSimulationEvidenceRegistry_ACU(input.registry));
                             if (parsed.kind !== 'read')
-                                throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN');
+                                throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN: read 参数只能是 {"reads":["具体地址"]}');
                             reads++;
                             const results = await runWorldSimulationToolBatch_ACU({ calls: [parsed], registry: input.registry, dependencies: input.tools,
                                 gate: { state: readGateState, config: { historyTokenBudget: input.settings.agentHistoryTokenBudget,
@@ -169925,8 +169931,13 @@ Expected function or array of functions, received type ${typeof value}.`
                             transcript.push(...nativeToolExchange_ACU(turn.content, turn.toolCalls, [toolText_ACU(results)]));
                             continue;
                         }
-                        if (call.name !== 'write_sql' || Object.keys(args).some(key => !['action', 'sql'].includes(key)) || typeof args.sql !== 'string' || !args.sql.trim())
-                            throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN');
+                        if (call.name !== 'write_sql')
+                            throw new Error(`WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN: 只允许 read 或 write_sql，收到 ${call.name}`);
+                        const extra = Object.keys(args).filter(key => !['action', 'sql'].includes(key));
+                        if (extra.length)
+                            throw new Error(`WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN: write_sql 只接受 sql 参数，多余参数 ${extra.join(', ')}`);
+                        if (typeof args.sql !== 'string' || !args.sql.trim())
+                            throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN: write_sql 的 sql 参数必须是非空字符串');
                         payload = { status: 'candidate', sql: args.sql };
                     }
                     else {
@@ -169974,11 +169985,11 @@ Expected function or array of functions, received type ${typeof value}.`
                     return outcome;
                 }
                 catch (error) {
+                    const reason = error instanceof Error ? error.message : String(error);
                     const lastAttempt = repairs++ >= 1;
                     if (lastAttempt)
                         return failed(error, 'protocol_failed', locatedIssues);
                     const hint = oneShotRepairHint_ACU(locatedIssues, oneShotTables_ACU(modules));
-                    const reason = error instanceof Error ? error.message : String(error);
                     const feedback = `上一次提交未被采纳：${reason}。${hint} 若确有变化，只重新调用一次 write_sql 并修正拒绝的 SQL；无法完成请回复 FAILED: 原因。不要输出 JSON 或裸 SQL，不得将空回复视为无变化。`;
                     if (turn.toolCalls.length && turn.toolCalls.every(call => call.id && call.name))
                         transcript.push(...nativeToolExchange_ACU(turn.content, turn.toolCalls, turn.toolCalls.map(() => feedback)));
