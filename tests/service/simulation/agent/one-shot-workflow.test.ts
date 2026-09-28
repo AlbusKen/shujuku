@@ -302,6 +302,17 @@ describe('两批一次性格林推演工作流', () => {
     const evidenceOutcome = await new WorldSimulationSubagentRuntime_ACU({ invoke: withEvidenceRefs, apiPreset, countTokens: async () => 1 }).runOneShot(playerInput);
     expect(evidenceOutcome.status).toBe('candidate');
     expect(withEvidenceRefs).toHaveBeenCalledTimes(1);
+    // 首轮建账只写了 clock：合法语句照常落账，仍空着的必建模块记为待修复留给下一轮，不额外消耗模型调用。
+    const clockOnly = vi.fn(async () => ({ content: '', toolCalls: [{ id: 'cov-1', name: 'write_sql',
+      arguments: JSON.stringify({ sql: "UPDATE clock SET days = 1 WHERE expected_revision = 0" }) }] }));
+    const coverage = await new WorldSimulationSubagentRuntime_ACU({ invoke: clockOnly, apiPreset, countTokens: async () => 1 }).runOneShot(input);
+    expect(clockOnly).toHaveBeenCalledTimes(1);
+    expect(coverage.status).toBe('candidate');
+    expect(coverage.candidate?.patch.clock).toBeDefined();
+    expect(coverage.summary).toContain('留待下一轮补录');
+    expect(coverage.unresolvedIssues?.map(item => item.module).sort()).toEqual(['dimensions', 'seeds']);
+    expect(JSON.stringify(coverage.unresolvedIssues)).toContain('首轮建账未覆盖');
+
     // write_sql 的函数声明只暴露 sql，避免模型照着目录填 evidenceRefs 再被拒。
     const declared = (withEvidenceRefs.mock.calls[0][3] as any) ?? [];
     const writeTool = (Array.isArray(declared) ? declared : []).find((item: any) => item === 'write_sql');
@@ -331,8 +342,9 @@ describe('两批一次性格林推演工作流', () => {
     expect(partial.status).toBe('candidate');
     expect(partial.candidate?.patch.player).toMatchObject({ contact: 'open' });
     expect(partial.summary).toContain('留待下一轮补录');
-    expect(partial.unresolvedIssues?.length).toBe(1);
     expect(JSON.stringify(partial.unresolvedIssues)).toContain('SQL_COLUMN_FORBIDDEN');
+    // 残余包含被拒的 SQL，以及首轮建账尚未覆盖的 actors。
+    expect(partial.unresolvedIssues?.map(item => item.module).sort()).toEqual(['actors', 'player']);
     // 首轮已有合法语句、纠错轮整批失效时，落账首轮那部分，不退回全失败。
     const salvageReplies = vi.fn()
       .mockResolvedValueOnce({ content: '', toolCalls: [{ id: 'sal-1', name: 'write_sql', arguments: JSON.stringify({ sql: mixedSql }) }] })
@@ -342,7 +354,7 @@ describe('两批一次性格林推演工作流', () => {
     expect(salvaged.status).toBe('candidate');
     expect(salvaged.candidate?.patch.player).toMatchObject({ contact: 'open' });
     expect(salvaged.summary).toContain('留待下一轮补录');
-    expect(salvaged.unresolvedIssues?.length).toBe(1);
+    expect(salvaged.unresolvedIssues?.map(item => item.module).sort()).toEqual(['actors', 'player']);
     // 全部语句非法时仍然失败，不能凭空产出候选。
     const allBad = vi.fn(async () => ({ content: '', toolCalls: [{ id: 'bad-1', name: 'write_sql', arguments: JSON.stringify({ sql: "UPDATE player SET location_updated_at_day = 1 WHERE expected_revision = 0" }) }] }));
     const allBadOutcome = await new WorldSimulationSubagentRuntime_ACU({ invoke: allBad, apiPreset, countTokens: async () => 1 }).runOneShot(playerInput);

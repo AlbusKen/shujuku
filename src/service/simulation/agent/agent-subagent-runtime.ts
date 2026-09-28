@@ -361,6 +361,29 @@ export function oneShotBootstrapNotice_ACU(baseRevision: number, modules: readon
   return [];
 }
 
+/**
+ * 建账轮的覆盖检查。参考智能续写的 missingFields 回执：只写了其中一个模块就交付时，
+ * 要明确点出仍然空着的模块再要一轮，而不是把「只写了 clock」当成整批完成。
+ * 只看本来为空的数组模块；clock/player/guidance 是单例，没有「建档」语义。
+ */
+const ONE_SHOT_BOOTSTRAP_MODULES_ACU: readonly WorldSimulationLedgerModule_ACU[] = ['dimensions', 'seeds', 'actors'];
+
+export function oneShotUncoveredModules_ACU(
+  modules: readonly WorldSimulationLedgerModule_ACU[],
+  ledger: WorldSimulationLedger_ACU,
+  patch: Record<string, unknown>,
+  baseRevision: number,
+): WorldSimulationLedgerModule_ACU[] {
+  // 仅首轮建账要求覆盖，且只覆盖必须建档的模块：纪要与风声按提示词本就允许没有素材。
+  if (baseRevision !== 0) return [];
+  return modules.filter(module => {
+    if (!ONE_SHOT_BOOTSTRAP_MODULES_ACU.includes(module)) return false;
+    if (!Array.isArray(ledger[module]) || (ledger[module] as unknown[]).length) return false;
+    const written = patch[module] as { upsert?: unknown[]; append?: unknown[] } | undefined;
+    return !written || !((written.upsert?.length ?? 0) + (written.append?.length ?? 0));
+  });
+}
+
 /** 与解析器同源的可写列清单，提示词与纠错回执不再各自手写列名。 */
 function oneShotColumnWhitelist_ACU(tables: readonly string[]): string {
   return tables.map(table => `${table}(${worldSimulationSqlWritableColumns_ACU(table).join(', ')})`).join('；');
@@ -602,16 +625,28 @@ export class WorldSimulationSubagentRuntime_ACU {
             throw new Error(report.blocking.slice(0, 8).map(item => `${item.path}: ${item.message}${item.details?.expected ? `；允许 ${item.details.expected}` : ''}`).join('；'));
           }
         }
-        if (!locatedIssues.length) return outcome;
-        // 部分落账：摘要写明残余，下一轮按 pendingFixes 补齐。
-        const partial: WorldSimulationSubagentOutcome_ACU = { ...outcome, unresolvedIssues: locatedIssues,
-          summary: `${outcome.summary}（另有 ${locatedIssues.length} 条语句未采纳，留待下一轮补录）` };
-        // 首轮仍回执一次，给模型改对整批的机会；这份候选留作兜底，纠错轮整批失效时不再退回全失败。
+        // 首轮建账只覆盖了部分模块时，记为待修复而不是再烧一轮模型调用。
+        // 与智能续写的 missingFields 回执同义：已接受的先落账，缺的模块由下一轮按 pendingFixes 补齐。
+        const uncovered = outcome.candidate
+          ? oneShotUncoveredModules_ACU(modules, input.givenLedger, outcome.candidate.patch as Record<string, unknown>, input.baseLedgerRevision)
+          : [];
+        const residual: WorldSimulationSubagentIssue_ACU[] = [...locatedIssues,
+          ...uncovered.map(module => ({ module, source: 'contract_rejected' as const, path: module,
+            message: `首轮建账未覆盖 ${module}，该模块仍为空；下一轮须依据世界书与锚点补上初始条目` }))];
+        // 先算出这一轮可交付的候选：有残余就带上 unresolvedIssues，供跨轮兜底与下一轮补录。
+        const deliverable: WorldSimulationSubagentOutcome_ACU = residual.length
+          ? { ...outcome, unresolvedIssues: residual,
+            summary: `${outcome.summary}（另有 ${residual.length} 项未完成，留待下一轮补录）` }
+          : outcome;
+        // 跨轮保留残余更少的一份：纠错轮整批失效时，不把上一轮已合法的语句丢掉。
+        if (!salvaged || (deliverable.unresolvedIssues?.length ?? 0) <= (salvaged.unresolvedIssues?.length ?? 0)) salvaged = deliverable;
+        // 覆盖缺口本身不再要一轮：SQL 全部合法时直接交付，缺的模块以待修复形式留给下一轮。
+        if (!locatedIssues.length) return deliverable;
+        // 首轮仍回执一次，给模型改对整批的机会；salvaged 已记下这份候选。
         if (repairs < 1) {
-          salvaged = partial;
           throw new Error(locatedIssues.slice(0, 8).map(issue => `${issue.path}: ${issue.message}`).join('；') || 'WORLD_SIMULATION_ONE_SHOT_SQL_REJECTED');
         }
-        return partial;
+        return salvaged ?? deliverable;
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         const lastAttempt = repairs++ >= 1;
