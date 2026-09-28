@@ -149941,7 +149941,21 @@ Expected function or array of functions, received type ${typeof value}.`
             return Number(value);
         if (/^'(?:[^']|'')*'$/.test(value))
             return value.slice(1, -1).replace(/''/g, "'");
-        throw new Error(`SQL 值只允许字符串、数字或 NULL：${value}`);
+        const lookalike = /[\u2018\u2019\uFF07\u200B-\u200D\uFEFF]|\\'/.test(value) ? '（字符串须用英文半角单引号 \' 包裹，不能用 ‘’、＇、\\\' 或零宽字符）' : '';
+        throw new Error(`SQL 值只允许字符串、数字或 NULL：${value}${lookalike}`);
+    }
+    /**
+     * 模型偶尔用弯引号、全角引号、反斜杠转义或夹带零宽字符包裹字符串，界面上与英文单引号几乎无法区分。
+     * 只在一条语句按原文解析失败后使用：零宽字符与 \' 总是可安全改写；弯/全角引号仅在该语句完全没有英文单引号时才当作定界符。
+     */
+    function normalizeSqlQuoteLookalikes_ACU(text) {
+        let next = text.replace(/[\u200B-\u200D\uFEFF]/g, '');
+        // 全部单引号都带反斜杠时，\' 是被误用的定界符；否则是字符串内的转义，改成 SQL 的两个单引号。
+        const bare = next.replace(/\\'/g, '').includes("'");
+        next = next.replace(/\\'/g, bare ? "''" : "'");
+        if (!next.includes("'"))
+            next = next.replace(/[\u2018\u2019\uFF07]/g, "'");
+        return next;
     }
     function splitSqlAssignments_ACU(raw, mode) {
         const result = [];
@@ -150081,6 +150095,15 @@ Expected function or array of functions, received type ${typeof value}.`
             source = source.slice(0, -1).trimEnd();
             scanned = scan(source);
         }
+        // 引号不配平时，常见原因是正文里的 \' 转义或近似引号；归一后能配平才采用，否则保留原文按原规则报错。
+        if (scanned.open) {
+            const normalized = normalizeSqlQuoteLookalikes_ACU(source);
+            const rescanned = scan(normalized);
+            if (normalized !== source && !rescanned.open) {
+                source = normalized;
+                scanned = rescanned;
+            }
+        }
         const rejected = [];
         const statements = [];
         const parts = [...scanned.parts, ...(scanned.tail ? [scanned.tail] : [])];
@@ -150093,6 +150116,14 @@ Expected function or array of functions, received type ${typeof value}.`
                 statements.push(parseOneStatement_ACU(text));
             }
             catch (error) {
+                const normalized = normalizeSqlQuoteLookalikes_ACU(text);
+                if (normalized !== text) {
+                    try {
+                        statements.push(parseOneStatement_ACU(normalized));
+                        return;
+                    }
+                    catch { /* 归一后仍非法，报告原始错误 */ }
+                }
                 rejected.push({ index, text, reason: error instanceof Error ? error.message : String(error) });
             }
         });
@@ -169848,6 +169879,9 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         if (issues.some(issue => /(?:sourceId|UNKNOWN_GUIDANCE_SOURCE)/.test(`${issue.path} ${issue.message}`))) {
             hints.push('guidance.signals.sourceId 只能使用运行时账本中已经存在的条目 ID、clock 或 player；不能引用本次候选刚 INSERT 的 rumors/chronicle，也不能编造 rumors:1 等未出现在目录中的 ID。无法绑定已有来源时删除该 signal，不要把新建条目的猜测 ID 填进去。');
+        }
+        if (issues.some(issue => /SQL 值只允许字符串、数字或 NULL/.test(issue.message))) {
+            hints.push('字符串值必须用英文半角单引号 \' 包裹，例如 visibility = \'public\'、evidence_refs 可直接省略；不能用中文弯引号 ‘’、全角 ＇、反斜杠 \\\' 或夹带零宽字符，正文里的单引号写成两个 \'\'。');
         }
         if (issues.some(issue => /SQL_COLUMN_FORBIDDEN/.test(issue.message))) {
             hints.push(`被拒的列不在该表白名单内，删掉该列或换成白名单列，不要改名重试：${oneShotColumnWhitelist_ACU(tables)}。修订号只写在 WHERE expected_revision，不写进 SET 或 INSERT 列。`);

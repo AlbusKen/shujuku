@@ -378,6 +378,9 @@ function oneShotRepairHint_ACU(issues: readonly WorldSimulationSubagentIssue_ACU
   if (issues.some(issue => /(?:sourceId|UNKNOWN_GUIDANCE_SOURCE)/.test(`${issue.path} ${issue.message}`))) {
     hints.push('guidance.signals.sourceId 只能使用运行时账本中已经存在的条目 ID、clock 或 player；不能引用本次候选刚 INSERT 的 rumors/chronicle，也不能编造 rumors:1 等未出现在目录中的 ID。无法绑定已有来源时删除该 signal，不要把新建条目的猜测 ID 填进去。');
   }
+  if (issues.some(issue => /SQL 值只允许字符串、数字或 NULL/.test(issue.message))) {
+    hints.push('字符串值必须用英文半角单引号 \' 包裹，例如 visibility = \'public\'、evidence_refs 可直接省略；不能用中文弯引号 ‘’、全角 ＇、反斜杠 \\\' 或夹带零宽字符，正文里的单引号写成两个 \'\'。');
+  }
   if (issues.some(issue => /SQL_COLUMN_FORBIDDEN/.test(issue.message))) {
     hints.push(`被拒的列不在该表白名单内，删掉该列或换成白名单列，不要改名重试：${oneShotColumnWhitelist_ACU(tables)}。修订号只写在 WHERE expected_revision，不写进 SET 或 INSERT 列。`);
   }

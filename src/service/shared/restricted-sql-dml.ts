@@ -50,7 +50,21 @@ function parseValue_ACU(raw: string): RestrictedSqlValue_ACU {
   if (/^null$/i.test(value)) return null;
   if (/^-?\d+(?:\.\d+)?$/.test(value) && Number.isFinite(Number(value))) return Number(value);
   if (/^'(?:[^']|'')*'$/.test(value)) return value.slice(1, -1).replace(/''/g, "'");
-  throw new Error(`SQL 值只允许字符串、数字或 NULL：${value}`);
+  const lookalike = /[\u2018\u2019\uFF07\u200B-\u200D\uFEFF]|\\'/.test(value) ? '（字符串须用英文半角单引号 \' 包裹，不能用 ‘’、＇、\\\' 或零宽字符）' : '';
+  throw new Error(`SQL 值只允许字符串、数字或 NULL：${value}${lookalike}`);
+}
+
+/**
+ * 模型偶尔用弯引号、全角引号、反斜杠转义或夹带零宽字符包裹字符串，界面上与英文单引号几乎无法区分。
+ * 只在一条语句按原文解析失败后使用：零宽字符与 \' 总是可安全改写；弯/全角引号仅在该语句完全没有英文单引号时才当作定界符。
+ */
+export function normalizeSqlQuoteLookalikes_ACU(text: string): string {
+  let next = text.replace(/[\u200B-\u200D\uFEFF]/g, '');
+  // 全部单引号都带反斜杠时，\' 是被误用的定界符；否则是字符串内的转义，改成 SQL 的两个单引号。
+  const bare = next.replace(/\\'/g, '').includes("'");
+  next = next.replace(/\\'/g, bare ? "''" : "'");
+  if (!next.includes("'")) next = next.replace(/[\u2018\u2019\uFF07]/g, "'");
+  return next;
 }
 
 function splitSqlAssignments_ACU(raw: string, mode: 'comma' | 'and'): string[] {
@@ -176,6 +190,15 @@ export function parseRestrictedSqlDmlTolerant_ACU(sql: string): RestrictedSqlTol
     source = source.slice(0, -1).trimEnd();
     scanned = scan(source);
   }
+  // 引号不配平时，常见原因是正文里的 \' 转义或近似引号；归一后能配平才采用，否则保留原文按原规则报错。
+  if (scanned.open) {
+    const normalized = normalizeSqlQuoteLookalikes_ACU(source);
+    const rescanned = scan(normalized);
+    if (normalized !== source && !rescanned.open) {
+      source = normalized;
+      scanned = rescanned;
+    }
+  }
   const rejected: RestrictedSqlTolerantResult_ACU['rejected'] = [];
   const statements: RestrictedSqlStatement_ACU[] = [];
   const parts = [...scanned.parts, ...(scanned.tail ? [scanned.tail] : [])];
@@ -185,7 +208,13 @@ export function parseRestrictedSqlDmlTolerant_ACU(sql: string): RestrictedSqlTol
       return;
     }
     try { statements.push(parseOneStatement_ACU(text)); }
-    catch (error) { rejected.push({ index, text, reason: error instanceof Error ? error.message : String(error) }); }
+    catch (error) {
+      const normalized = normalizeSqlQuoteLookalikes_ACU(text);
+      if (normalized !== text) {
+        try { statements.push(parseOneStatement_ACU(normalized)); return; } catch { /* 归一后仍非法，报告原始错误 */ }
+      }
+      rejected.push({ index, text, reason: error instanceof Error ? error.message : String(error) });
+    }
   });
   return { statements, rejected };
 }
