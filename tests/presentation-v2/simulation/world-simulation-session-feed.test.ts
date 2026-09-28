@@ -48,9 +48,16 @@ describe('WorldSimulationSessionFeed', () => {
 
     expect(details).not.toBeNull();
     expect(details!.open).toBe(false);
-    expect(details!.querySelector('summary')?.textContent).toContain('已自动修正一次模型输出');
+    // 折叠行必须显示服务层写明的这一次被拒在哪，不能用固定文案盖掉标题。
+    expect(details!.querySelector('summary')?.textContent).toContain('主 Agent 协议修正');
     expect(details!.textContent).toContain('UNKNOWN_FIELD $.reads[0].evidenceRef');
     expect(el.querySelector('.acu-v2-session-feed__card--protocol_retry')).toBeNull();
+  });
+
+  it('协议修正没有标题时回退为通用提示', () => {
+    const el = mountFeed([entry_ACU({ title: '' })]);
+    const details = el.querySelector<HTMLDetailsElement>('.acu-v2-session-feed__protocol');
+    expect(details!.querySelector('summary')?.textContent).toContain('已自动修正一次模型输出');
   });
 
   it('主流程完成事件仍使用高层级卡片', () => {

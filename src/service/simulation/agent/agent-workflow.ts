@@ -762,8 +762,8 @@ export async function runWorldSimulationOneShotWorkflow_ACU(
     const targets = modulesForAgent_ACU(role).filter(module => !skip.has(module) && (!requested || requested.has(module)));
     targets.forEach(module => expected.add(module));
     if (input.isCurrent && !input.isCurrent()) throw new Error('WORLD_SIMULATION_RUN_STALE');
-    const label = role === 'undercurrent-analyst' ? '批次一：时间与暗流'
-      : role === 'dramatis-keeper' ? '批次一：人物与位置' : '批次二：编年、传闻与投影';
+    const label = role === 'undercurrent-analyst' ? '批次一：时序与伏线'
+      : role === 'dramatis-keeper' ? '批次一：人物谱' : '批次二：纪要、风声与场外信号';
     const entryKey = `${role}:${seq}`;
     const entryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, {
       kind: 'delegation', title: `${label}正在执行`, agentName: role, status: 'running',

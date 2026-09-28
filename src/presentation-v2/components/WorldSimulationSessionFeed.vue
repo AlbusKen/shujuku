@@ -25,10 +25,11 @@
       <!-- 内部过程：协议修正默认收敛为单行提示，避免与主流程卡片并列。 -->
       <details v-else-if="entry.kind === 'protocol_retry'" class="acu-v2-session-feed__protocol">
         <summary class="acu-v2-session-feed__protocol-summary">
-          <span>已自动修正一次模型输出</span>
+          <!-- 标题由服务层写明这一次被拒在哪；折叠行不能用固定文案盖掉它。 -->
+          <span>{{ entry.title || '已自动修正一次模型输出' }}</span>
           <span class="acu-v2-session-feed__time">{{ formatTime(entry.at) }}</span>
         </summary>
-        <p v-if="entry.detail" class="acu-v2-session-feed__protocol-detail">{{ entry.title }}：{{ entry.detail }}</p>
+        <p v-if="entry.detail" class="acu-v2-session-feed__protocol-detail">{{ entry.detail }}</p>
       </details>
 
       <!-- 思考条目：弱化渲染，像 coding agent 的推理气泡 -->
