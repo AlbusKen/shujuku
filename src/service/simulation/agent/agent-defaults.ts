@@ -21,7 +21,8 @@ export const WORLD_SIMULATION_PROMPT_VERSION_V22_ACU = 'world-simulation-v22';
 export const WORLD_SIMULATION_PROMPT_VERSION_V23_ACU = 'world-simulation-v23';
 export const WORLD_SIMULATION_PROMPT_VERSION_V24_ACU = 'world-simulation-v24';
 export const WORLD_SIMULATION_PROMPT_VERSION_V25_ACU = 'world-simulation-v25';
-export const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V25_ACU;
+export const WORLD_SIMULATION_PROMPT_VERSION_V26_ACU = 'world-simulation-v26';
+export const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V26_ACU;
 export const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'] as const;
 export type WorldSimulationEngineSeam_ACU = typeof WORLD_SIMULATION_ENGINE_SEAMS_ACU[number];
 export type WorldSimulationAgentPrompts_ACU = Record<WorldSimulationAgentName_ACU, WorldSimulationPromptSegment_ACU[]>;
@@ -603,8 +604,8 @@ function oneShotWorkflowV25_ACU(name: WorldSimulationOneShotRole_ACU): string {
   return [...shared, ...steps[name]].join('\n');
 }
 
-/** v25 保持段位稳定，工作流正文由职责清单替换；历史生成器不引用当前规则。 */
-export function buildOneShotWorldSimulationAgentPrompt_ACU(name: WorldSimulationOneShotRole_ACU): WorldSimulationPromptSegment_ACU[] {
+/** 冻结 v25：职责清单版；存量配置迁移时逐段匹配，不用当前生成器反推。 */
+function buildV25OneShotWorldSimulationAgentPrompt_ACU(name: WorldSimulationOneShotRole_ACU): WorldSimulationPromptSegment_ACU[] {
   return buildV24OneShotWorldSimulationAgentPrompt_ACU(name).map(segment => {
     if (segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW'))) {
       return { ...segment, content: `${worldSimulationSeamMarker_ACU('WORKFLOW')}\n${oneShotWorkflowV25_ACU(name)}` };
@@ -613,6 +614,43 @@ export function buildOneShotWorldSimulationAgentPrompt_ACU(name: WorldSimulation
       return { ...segment, content: `${worldSimulationSeamMarker_ACU('EXECUTION_BOUNDARY')}\n现在执行任务。完成全部职责核查和收口自检后，一次调用原生 write_sql 提交所有有依据的变更；无变化回复 NO_CHANGE，无法完成回复 FAILED: 原因。不要输出核查长文、裸 SQL 或 Markdown。` };
     }
     return segment;
+  });
+}
+
+/** v25 的全体角色冻结入口；非一次性角色与 v24 相同。 */
+export function buildV25WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
+  return (ONE_SHOT_ROLES_ACU as readonly string[]).includes(name)
+    ? buildV25OneShotWorldSimulationAgentPrompt_ACU(name as WorldSimulationOneShotRole_ACU)
+    : buildV24WorldSimulationAgentPrompt_ACU(name);
+}
+
+/** v26：列名与修订号写法具体到 SQL，消除 v25 概括措辞导致的 day/revision/visibility 越列，以及把无变化误报为 FAILED。 */
+export function buildOneShotWorldSimulationAgentPrompt_ACU(name: WorldSimulationOneShotRole_ACU): WorldSimulationPromptSegment_ACU[] {
+  const shared: Array<[string, string]> = [
+    ['已有行按 id 与 expected_revision，单例按运行时单例修订号；',
+      '已有数组行 UPDATE/DELETE 写 WHERE id = \'行 id\' AND expected_revision = 该行 JSON 里 revision 字段的值；clock/player/guidance 单例 UPDATE 写 WHERE expected_revision = 运行时数据中的“单例修订号”，漏写时由程序按该值补齐，不能因此回复 FAILED。列名只能取系统消息【可写列白名单】中本角色各表的列；revision、day、location_updated_at_day、region_visits 等是只读或派生字段，不能出现在 SET 或 INSERT 列里，修订号只出现在 WHERE。'],
+    ['只有全部核查且无可证实变化才回复 NO_CHANGE；必要资料缺失或待修复无法完成时回复 FAILED: 原因。',
+      '全部核查后各模块都无可证实变化时必须回复 NO_CHANGE，不要把“无需写入”说成失败；只有确有需要写入的变化、却因资料缺失或待修复无法写成合法 SQL 时才回复 FAILED: 原因。'],
+  ];
+  const role: Record<WorldSimulationOneShotRole_ACU, Array<[string, string]>> = {
+    'undercurrent-analyst': [['UPDATE clock SET days = 1 WHERE expected_revision = 4; 中的修订号须替换为运行值；其余行各用自身 revision。',
+      'SQL 形如 UPDATE clock SET days = 1, story_time = \'第13日\', slot = \'午后\' WHERE expected_revision = 4;（clock 只写推进量 days，没有 day 列）UPDATE seeds SET status = \'active\' WHERE id = \'seed-gate\' AND expected_revision = 2;（2 是该行 revision 字段的值，SET 中不写 revision）UPDATE dimensions SET value = 55, trend = \'rising\', rationale = \'封城令生效后盘查明显收紧\' WHERE id = \'dim-guard\' AND expected_revision = 3;（dimensions 没有 visibility 列）。ID 与修订号须替换为运行值。']],
+    'dramatis-keeper': [
+      ['UPDATE player 必须使用运行时单例 expected_revision。',
+        'SQL 形如 UPDATE player SET location = \'{"region":"江南府","place":"客栈"}\', contact = \'open\' WHERE expected_revision = 运行时“单例修订号”。player 旧值与锚点一致时不写 player，这属于无变化，不是失败。'],
+      ['各已有行使用自身 expected_revision，', '已有人物行写 WHERE id = \'行 id\' AND expected_revision = 该行 revision 值，'],
+    ],
+    'guidance-composer': [['UPDATE guidance 使用运行时 expected_revision，', 'UPDATE guidance 写 WHERE expected_revision = 运行时“单例修订号”，']],
+  };
+  return buildV25OneShotWorldSimulationAgentPrompt_ACU(name).map(segment => {
+    if (!segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW'))) return segment;
+    let content = segment.content;
+    for (const [from, to] of [...shared, ...role[name]]) {
+      // 冻结原文被改动时直接报错，避免静默生成缺少列名约束的默认词。
+      if (!content.includes(from)) throw new Error(`WORLD_SIMULATION_PROMPT_V26_ANCHOR_MISSING:${name}`);
+      content = content.replace(from, to);
+    }
+    return { ...segment, content };
   });
 }
 
@@ -831,6 +869,7 @@ export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
     { version: WORLD_SIMULATION_PROMPT_VERSION_V22_ACU, fingerprint: promptFingerprint_ACU((ONE_SHOT_ROLES_ACU as readonly string[]).includes(name) ? buildV22OneShotWorldSimulationAgentPrompt_ACU(name as WorldSimulationOneShotRole_ACU) : buildV21WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_V23_ACU, fingerprint: promptFingerprint_ACU(buildV23WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_V24_ACU, fingerprint: promptFingerprint_ACU(buildV24WorldSimulationAgentPrompt_ACU(name)) },
+    { version: WORLD_SIMULATION_PROMPT_VERSION_V25_ACU, fingerprint: promptFingerprint_ACU(buildV25WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildDefaultWorldSimulationAgentPrompt_ACU(name)) },
   ]]),
 ) as unknown as Record<WorldSimulationAgentName_ACU, readonly { version: string; fingerprint: string }[]>;
@@ -853,12 +892,13 @@ export function migrateWorldSimulationAgentPromptsDetailed_ACU(current: Record<s
     const value = current[name];
     const previous = previousDefaults[name];
     // One-shot 历史默认逐段匹配；用户编辑和追加段原样保留，不用当前生成器重建旧默认。
-    if ((previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V22_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V23_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V24_ACU) && (ONE_SHOT_ROLES_ACU as readonly string[]).includes(name)) {
+    if ((previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V22_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V23_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V24_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V25_ACU) && (ONE_SHOT_ROLES_ACU as readonly string[]).includes(name)) {
       const role = name as WorldSimulationOneShotRole_ACU;
       const old = previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU ? buildV21OneShotWorldSimulationAgentPrompt_ACU(role)
         : previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V22_ACU ? buildV22OneShotWorldSimulationAgentPrompt_ACU(role)
           : previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V23_ACU ? buildV23OneShotWorldSimulationAgentPrompt_ACU(role)
-            : buildV24OneShotWorldSimulationAgentPrompt_ACU(role);
+            : previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V24_ACU ? buildV24OneShotWorldSimulationAgentPrompt_ACU(role)
+              : buildV25OneShotWorldSimulationAgentPrompt_ACU(role);
       if (!value) {
         migrated[name] = defaults[name];
       } else if (promptFingerprint_ACU(value) === promptFingerprint_ACU(old)) {

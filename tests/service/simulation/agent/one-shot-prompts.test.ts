@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildDefaultWorldSimulationAgentPrompts_ACU, buildV21WorldSimulationAgentPrompt_ACU, buildV22WorldSimulationAgentPrompt_ACU, buildV23WorldSimulationAgentPrompt_ACU, buildV24WorldSimulationAgentPrompt_ACU, migrateWorldSimulationAgentPromptsDetailed_ACU, WORLD_SIMULATION_PROMPT_VERSION_ACU, WORLD_SIMULATION_PROMPT_VERSION_V21_ACU, WORLD_SIMULATION_PROMPT_VERSION_V22_ACU, WORLD_SIMULATION_PROMPT_VERSION_V23_ACU, WORLD_SIMULATION_PROMPT_VERSION_V24_ACU, WORLD_SIMULATION_PROMPT_VERSION_V25_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
+import { buildDefaultWorldSimulationAgentPrompts_ACU, buildV21WorldSimulationAgentPrompt_ACU, buildV22WorldSimulationAgentPrompt_ACU, buildV23WorldSimulationAgentPrompt_ACU, buildV24WorldSimulationAgentPrompt_ACU, buildV25WorldSimulationAgentPrompt_ACU, migrateWorldSimulationAgentPromptsDetailed_ACU, WORLD_SIMULATION_PROMPT_VERSION_ACU, WORLD_SIMULATION_PROMPT_VERSION_V21_ACU, WORLD_SIMULATION_PROMPT_VERSION_V22_ACU, WORLD_SIMULATION_PROMPT_VERSION_V23_ACU, WORLD_SIMULATION_PROMPT_VERSION_V24_ACU, WORLD_SIMULATION_PROMPT_VERSION_V25_ACU, WORLD_SIMULATION_PROMPT_VERSION_V26_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
 import { worldSimulationOneShotProtocol_ACU } from '../../../../src/service/simulation/agent/agent-subagent-runtime';
 import { validateWorldSimulationPromptSegments_ACU } from '../../../../src/service/simulation/agent/prompt-template';
 import { stripWritingAnnotations_ACU } from '../../../../src/service/simulation/simulation-projection';
@@ -37,7 +37,27 @@ describe('一次性资料角色默认提示词', () => {
     expect(protocol).not.toContain('"reads":["ledger:current"]');
     expect(protocol).toContain('ledger:current 并非普通角色可读地址');
     expect(protocol).toContain('闭合于 <think> 标签中');
+    expect(protocol).toContain('【可写列白名单】');
+    expect(protocol).toContain('guidance(signals, excluded_facts, evidence_refs)');
+    const clockProtocol = worldSimulationOneShotProtocol_ACU('undercurrent-analyst', ['clock', 'dimensions', 'seeds']);
+    expect(clockProtocol).toContain('clock(days, story_time, slot, evidence_refs)');
+    expect(clockProtocol).not.toMatch(/clock\([^)]*\bday\b/);
+    expect(clockProtocol).not.toMatch(/dimensions\([^)]*visibility/);
+  });
 
+  it('v26 把列名与修订号写法落到具体 SQL，无变化不再被说成失败', () => {
+    const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
+    const workflow = (role: typeof roles[number]) => prompts[role].find(segment => segment.content.includes('【推演步骤】'))!.content;
+    for (const role of roles) {
+      expect(workflow(role)).toContain('【可写列白名单】');
+      expect(workflow(role)).toContain('修订号只出现在 WHERE');
+      expect(workflow(role)).toContain('不要把“无需写入”说成失败');
+      expect(workflow(role)).not.toContain('其余行各用自身 revision');
+    }
+    expect(workflow('undercurrent-analyst')).toContain('clock 只写推进量 days，没有 day 列');
+    expect(workflow('undercurrent-analyst')).toContain('dimensions 没有 visibility 列');
+    expect(workflow('dramatis-keeper')).toContain('WHERE expected_revision = 运行时“单例修订号”');
+    expect(workflow('dramatis-keeper')).toContain('这属于无变化，不是失败');
   });
 
   it('范例解释各角色证据判断与反例，不把示例 ID 当成真实账本条目', () => {
@@ -103,6 +123,7 @@ describe('一次性资料角色默认提示词', () => {
   it.each([
     [WORLD_SIMULATION_PROMPT_VERSION_V23_ACU, buildV23WorldSimulationAgentPrompt_ACU],
     [WORLD_SIMULATION_PROMPT_VERSION_V24_ACU, buildV24WorldSimulationAgentPrompt_ACU],
+    [WORLD_SIMULATION_PROMPT_VERSION_V25_ACU, buildV25WorldSimulationAgentPrompt_ACU],
   ] as const)('%s 默认段升级为完整职责核查，用户修改与附加段不被覆盖', (version, buildPrevious) => {
     const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
     const previous = Object.fromEntries(roles.map(role => [role, buildPrevious(role)]));
@@ -137,7 +158,7 @@ describe('一次性资料角色默认提示词', () => {
 
   it('旧版角色键及自定义旧协议提示词能归一化到当前版本', () => {
     const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
-    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe(WORLD_SIMULATION_PROMPT_VERSION_V25_ACU);
+    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe(WORLD_SIMULATION_PROMPT_VERSION_V26_ACU);
     const custom = structuredClone(defaults) as Record<string, typeof defaults[typeof roles[number]]>;
     custom['undercurrent-analyst'][0].content += '\n旧版自定义逐栏 write_sql';
     custom.timekeeper = structuredClone(defaults['undercurrent-analyst']);

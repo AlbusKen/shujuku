@@ -27,7 +27,7 @@ import type {
   WorldSimulationSubagentOutcome_ACU,
 } from './agent-model';
 import { createWorldSimulationPlaceholderResolvers_ACU, isWorldSimulationLedgerContext_ACU, type WorldSimulationPlaceholderContext_ACU } from './agent-placeholder-resolver';
-import { createWorldSimulationProtocolRepairState_ACU, normalizeOneShotSpecialistPayload_ACU, parseWorldSimulationSubagentToolCalls_ACU, parseWorldSimulationJsonDraft_ACU, parseWorldSimulationJsonPayload_ACU, parseWorldSimulationMainAction_ACU, parseWorldSimulationMainOutput_ACU, parseWorldSimulationReviewerResult_ACU, parseWorldSimulationSpecialistResult_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationReviewerProtocolRejection_ACU, renderWorldSimulationSpecialistProtocolRejection_ACU } from './agent-protocol';
+import { createWorldSimulationProtocolRepairState_ACU, normalizeOneShotSpecialistPayload_ACU, worldSimulationSqlWritableColumns_ACU, parseWorldSimulationSubagentToolCalls_ACU, parseWorldSimulationJsonDraft_ACU, parseWorldSimulationJsonPayload_ACU, parseWorldSimulationMainAction_ACU, parseWorldSimulationMainOutput_ACU, parseWorldSimulationReviewerResult_ACU, parseWorldSimulationSpecialistResult_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationReviewerProtocolRejection_ACU, renderWorldSimulationSpecialistProtocolRejection_ACU } from './agent-protocol';
 import { createWorldSimulationReadGateState_ACU, resolveWorldSimulationReadBudget_ACU } from './agent-read-gate';
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './prompt-template';
@@ -306,7 +306,7 @@ function toolText_ACU(results: Awaited<ReturnType<typeof runWorldSimulationToolB
 
 /** One protocol per request; the editable PROTOCOL seam only points here. */
 export function worldSimulationOneShotProtocol_ACU(name: WorldSimulationOneShotRole_ACU, modules: readonly WorldSimulationLedgerModule_ACU[]): string {
-  const tables = modules.flatMap(module => module === 'chronicle' ? ['chronicle', 'chronicle_archive', 'chronicle_overview'] : [module]);
+  const tables = oneShotTables_ACU(modules);
   const details: Record<WorldSimulationOneShotRole_ACU, string> = {
     'undercurrent-analyst': 'clock: UPDATE SET days, story_time, slot; dimensions: name, kind, value, trend, rationale，其中 kind 只能是英文原值 pressure 或 growth，trend 只能是 rising、stable、falling；seeds: title, status, level, catalyst, visibility, location, expires_at_day, missed_outcome, actor_ids, expose_policy, retired_reason。seeds.actor_ids 只能是已存在的 actor.id 字符串数组，例如 actor_ids = \'["actor-1"]\'；没有已确认人物 ID 就省略该列，绝不能写人物对象数组。seeds.location 必须是 JSON 对象字符串，例如 location = \'{"region":"江南府","place":"城外"}\'，只有 region 必填；无确定地点则省略 location，不可填单独地名。其中 visibility 只能是英文原值 hidden、limited、public，status 只能是 established、incubating、active、converging、resolved、retired。枚举不得填写中文解释、组合描述或其他同义词。',
     'dramatis-keeper': 'player: UPDATE SET location, contact（仅这两列及 evidence_refs，location_updated_at_day 与 region_visits 是内部派生字段，绝对不可写进 SQL）；actors: name, interests, location, location_ref, goals, information_sources, known_facts, life, died_at_day, death_summary; rumors 仅死亡伴生: fact, origin_day, earliest_reveal_day, channels, related_actor_ids。',
@@ -316,8 +316,8 @@ export function worldSimulationOneShotProtocol_ACU(name: WorldSimulationOneShotR
     '【交付协议】有可证实的变更时调用原生 write_sql 函数，参数只填 sql 字段（一条或多条受限 SQL）；工具调用仅生成待验证候选，不即时写入账本；候选通过校验后本角色结束，由两批工作流统一预览与最终提交。不得把 SQL 放入文本 JSON 或输出裸 SQL。',
     '无改动时回复 NO_CHANGE，可在同一行附简短原因；无法完成时回复 FAILED: 原因。思考过程若输出须闭合于 <think> 标签中，标签外仅保留状态行；空文本、任意其他文本与非法工具调用均不能视为无变化。',
     `只能写表：${tables.join(' | ')}。一次 write_sql 收齐本角色所有变更，不拆成多次写入；失败时按工具回执修正，仅允许一次纠错。`,
+    `【可写列白名单】${oneShotColumnWhitelist_ACU(tables)}。SET 与 INSERT 只能用这些列；revision、day 等行字段只读，修订号只写在 WHERE expected_revision = 值 中：数组行用该行 revision 字段的值，clock/player/guidance 单例用运行时“单例修订号”。`,
     '提交前按提示词【推演步骤】对每个负责模块逐一得出写或不写的结论；多个模块有变化时全部放进同一次 write_sql，不能只维护其中一两个模块就提交。',
-
     '运行时已给出本角色完整行与关联资料；只有目录中出现具体 readAddress 且确需详情时才调用 read，参数 reads 填该地址。目录为空就不要为核对空资料而读取；ledger:current 并非普通角色可读地址。不能把 $.reads、裸模块名或错误路径当作地址。',
     'SQL 只允许 INSERT INTO 表 (列) VALUES (字面量)、UPDATE 表 SET 列 = 字面量 WHERE 条件、DELETE FROM 表 WHERE 条件；不得使用 SELECT、函数、子查询或表达式。字符串单引号须转义为两个，列名使用 snake_case。',
     '归档列名必须严格区分：chronicle_archive=(archive_ref, day, summary, fingerprints, related_ids, source_chronicle_ids)；chronicle_overview=(fingerprint, day, one_line, archive_ref)。chronicle_overview 没有 summary 或 related_ids 列。guidance 是单例，只能 UPDATE 且 WHERE 只能带 expected_revision。',
@@ -339,8 +339,18 @@ function oneShotTextStatus_ACU(raw: string): { status: 'no_change'; summary: str
   return null;
 }
 
+/** 角色可写模块展开为 SQL 表；编年同时开放成对归档表。 */
+function oneShotTables_ACU(modules: readonly WorldSimulationLedgerModule_ACU[]): string[] {
+  return modules.flatMap(module => module === 'chronicle' ? ['chronicle', 'chronicle_archive', 'chronicle_overview'] : [module]);
+}
+
+/** 与解析器同源的可写列清单，提示词与纠错回执不再各自手写列名。 */
+function oneShotColumnWhitelist_ACU(tables: readonly string[]): string {
+  return tables.map(table => `${table}(${worldSimulationSqlWritableColumns_ACU(table).join(', ')})`).join('；');
+}
+
 /** Explain domain rejections without silently inventing entity IDs or changing the patch. */
-function oneShotRepairHint_ACU(issues: readonly WorldSimulationSubagentIssue_ACU[]): string {
+function oneShotRepairHint_ACU(issues: readonly WorldSimulationSubagentIssue_ACU[], tables: readonly string[]): string {
   const hints: string[] = [];
   if (issues.some(issue => /(?:^|\.)actorIds$/.test(issue.path) && issue.module === 'seeds')) {
     hints.push('seeds.actor_ids 只能写 SQL 单引号包裹的 JSON 字符串 ID 数组，例如 actor_ids = \'["actor-1"]\'；仅能引用当前账本已有的 actor.id。没有可确认的人物 ID 就从每条出错的 INSERT/UPDATE 中省略 actor_ids，不能写人物对象数组、单个对象、数字或 null。');
@@ -354,7 +364,10 @@ function oneShotRepairHint_ACU(issues: readonly WorldSimulationSubagentIssue_ACU
   if (issues.some(issue => /(?:sourceId|UNKNOWN_GUIDANCE_SOURCE)/.test(`${issue.path} ${issue.message}`))) {
     hints.push('guidance.signals.sourceId 只能使用运行时账本中已经存在的条目 ID、clock 或 player；不能引用本次候选刚 INSERT 的 rumors/chronicle，也不能编造 rumors:1 等未出现在目录中的 ID。无法绑定已有来源时删除该 signal，不要把新建条目的猜测 ID 填进去。');
   }
-  if (issues.some(issue => /SQL_COLUMN_FORBIDDEN|chronicle_overview/.test(issue.message))) {
+  if (issues.some(issue => /SQL_COLUMN_FORBIDDEN/.test(issue.message))) {
+    hints.push(`被拒的列不在该表白名单内，删掉该列或换成白名单列，不要改名重试：${oneShotColumnWhitelist_ACU(tables)}。修订号只写在 WHERE expected_revision，不写进 SET 或 INSERT 列。`);
+  }
+  if (issues.some(issue => /chronicle_overview|chronicle_archive/.test(issue.message))) {
     hints.push('归档 SQL 列必须严格使用 chronicle_archive=(archive_ref, day, summary, fingerprints, related_ids, source_chronicle_ids) 与 chronicle_overview=(fingerprint, day, one_line, archive_ref)；chronicle_overview 不允许 summary 或 related_ids。');
   }
   return hints.join(' ');
@@ -437,7 +450,7 @@ export class WorldSimulationSubagentRuntime_ACU {
       input.agentName === 'guidance-composer'
         ? `【共同时间基准】本轮共享的明确经过天数为 ${elapsedDays}（由工作流对同一锚点一次计算）。批次一已按这段跨度维护 clock，当前日 ${input.givenLedger.clock.day} 已包含本轮推进（本轮内存预览，尚未持久化）；直接采用该日，不再叠加经过天数。编年 day、传闻 origin_day 与 earliest_reveal_day 以当前日为准，并按本轮经过的时间跨度判断哪些幕后事件已完结、哪些消息已传开；不把回忆或既已计入的旅程重复累加。`
         : `【共同时间基准】本轮共享的明确经过天数为 ${elapsedDays}（由工作流对同一锚点一次计算；无明确时间流逝即为 0）。当前已提交日为 ${input.givenLedger.clock.day}；不把回忆或既已计入的旅程重复累加。undercurrent-analyst 独占 clock 写入，clock.days 只能表达这一本轮推进量；dramatis-keeper 不写 clock，但人物状态、死亡时间及伴生传闻的演算必须使用本轮共享经过天数。另一并发角色的推断尚未落账，不得当作已提交事实。`,
-      `单例修订号：${input.baseLedgerRevision}`, `【你负责的资料（完整行）】${JSON.stringify(own)}`,
+      `单例修订号：${input.baseLedgerRevision}（clock/player/guidance 的 UPDATE 写 WHERE expected_revision = ${input.baseLedgerRevision}；数组行用各自 revision 字段）`, `【你负责的资料（完整行）】${JSON.stringify(own)}`,
       `【关联只读资料】维度与传闻为完整行；种子与人物为浓缩目录，需细节时按 readAddress 调用 read。${JSON.stringify(related)}`, `【待修复】${JSON.stringify(input.givenLedger.pendingFixes.filter(fix => modules.includes(fix.module)))}`,
       ...(input.roundChanges ? [`【本轮变更清单】${input.roundChanges}`] : []), `【锚点正文】\n${stripWritingAnnotations_ACU(anchor)}`,
       ...(input.injectWorldbook && input.triggeredWorldbook ? [input.triggeredWorldbook] : [])].join('\n');
@@ -543,7 +556,7 @@ export class WorldSimulationSubagentRuntime_ACU {
       } catch (error) {
         const lastAttempt = repairs++ >= 1;
         if (lastAttempt) return failed(error, 'protocol_failed', locatedIssues);
-        const hint = oneShotRepairHint_ACU(locatedIssues);
+        const hint = oneShotRepairHint_ACU(locatedIssues, oneShotTables_ACU(modules));
         const reason = error instanceof Error ? error.message : String(error);
         const feedback = `上一次提交未被采纳：${reason}。${hint} 若确有变化，只重新调用一次 write_sql 并修正拒绝的 SQL；无法完成请回复 FAILED: 原因。不要输出 JSON 或裸 SQL，不得将空回复视为无变化。`;
         if (turn.toolCalls.length && turn.toolCalls.every(call => call.id && call.name)) transcript.push(...nativeToolExchange_ACU(turn.content, turn.toolCalls, turn.toolCalls.map(() => feedback)));

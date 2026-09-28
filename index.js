@@ -91537,7 +91537,8 @@ $CONTENT
     const WORLD_SIMULATION_PROMPT_VERSION_V23_ACU = 'world-simulation-v23';
     const WORLD_SIMULATION_PROMPT_VERSION_V24_ACU = 'world-simulation-v24';
     const WORLD_SIMULATION_PROMPT_VERSION_V25_ACU = 'world-simulation-v25';
-    const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V25_ACU;
+    const WORLD_SIMULATION_PROMPT_VERSION_V26_ACU = 'world-simulation-v26';
+    const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V26_ACU;
     const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'];
     const WORLD_SIMULATION_PROMPT_PLACEHOLDERS_ACU = [
         '$WORLD_TASK', '$WORLD_HISTORY', '$WORLD_RUNTIME_CONTEXT', '$WORLD_AGENT_CATALOG',
@@ -92076,8 +92077,8 @@ $CONTENT
         };
         return [...shared, ...steps[name]].join('\n');
     }
-    /** v25 保持段位稳定，工作流正文由职责清单替换；历史生成器不引用当前规则。 */
-    function buildOneShotWorldSimulationAgentPrompt_ACU(name) {
+    /** 冻结 v25：职责清单版；存量配置迁移时逐段匹配，不用当前生成器反推。 */
+    function buildV25OneShotWorldSimulationAgentPrompt_ACU(name) {
         return buildV24OneShotWorldSimulationAgentPrompt_ACU(name).map(segment => {
             if (segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW'))) {
                 return { ...segment, content: `${worldSimulationSeamMarker_ACU('WORKFLOW')}\n${oneShotWorkflowV25_ACU(name)}` };
@@ -92086,6 +92087,43 @@ $CONTENT
                 return { ...segment, content: `${worldSimulationSeamMarker_ACU('EXECUTION_BOUNDARY')}\n现在执行任务。完成全部职责核查和收口自检后，一次调用原生 write_sql 提交所有有依据的变更；无变化回复 NO_CHANGE，无法完成回复 FAILED: 原因。不要输出核查长文、裸 SQL 或 Markdown。` };
             }
             return segment;
+        });
+    }
+    /** v25 的全体角色冻结入口；非一次性角色与 v24 相同。 */
+    function buildV25WorldSimulationAgentPrompt_ACU(name) {
+        return ONE_SHOT_ROLES_ACU.includes(name)
+            ? buildV25OneShotWorldSimulationAgentPrompt_ACU(name)
+            : buildV24WorldSimulationAgentPrompt_ACU(name);
+    }
+    /** v26：列名与修订号写法具体到 SQL，消除 v25 概括措辞导致的 day/revision/visibility 越列，以及把无变化误报为 FAILED。 */
+    function buildOneShotWorldSimulationAgentPrompt_ACU(name) {
+        const shared = [
+            ['已有行按 id 与 expected_revision，单例按运行时单例修订号；',
+                '已有数组行 UPDATE/DELETE 写 WHERE id = \'行 id\' AND expected_revision = 该行 JSON 里 revision 字段的值；clock/player/guidance 单例 UPDATE 写 WHERE expected_revision = 运行时数据中的“单例修订号”，漏写时由程序按该值补齐，不能因此回复 FAILED。列名只能取系统消息【可写列白名单】中本角色各表的列；revision、day、location_updated_at_day、region_visits 等是只读或派生字段，不能出现在 SET 或 INSERT 列里，修订号只出现在 WHERE。'],
+            ['只有全部核查且无可证实变化才回复 NO_CHANGE；必要资料缺失或待修复无法完成时回复 FAILED: 原因。',
+                '全部核查后各模块都无可证实变化时必须回复 NO_CHANGE，不要把“无需写入”说成失败；只有确有需要写入的变化、却因资料缺失或待修复无法写成合法 SQL 时才回复 FAILED: 原因。'],
+        ];
+        const role = {
+            'undercurrent-analyst': [['UPDATE clock SET days = 1 WHERE expected_revision = 4; 中的修订号须替换为运行值；其余行各用自身 revision。',
+                    'SQL 形如 UPDATE clock SET days = 1, story_time = \'第13日\', slot = \'午后\' WHERE expected_revision = 4;（clock 只写推进量 days，没有 day 列）UPDATE seeds SET status = \'active\' WHERE id = \'seed-gate\' AND expected_revision = 2;（2 是该行 revision 字段的值，SET 中不写 revision）UPDATE dimensions SET value = 55, trend = \'rising\', rationale = \'封城令生效后盘查明显收紧\' WHERE id = \'dim-guard\' AND expected_revision = 3;（dimensions 没有 visibility 列）。ID 与修订号须替换为运行值。']],
+            'dramatis-keeper': [
+                ['UPDATE player 必须使用运行时单例 expected_revision。',
+                    'SQL 形如 UPDATE player SET location = \'{"region":"江南府","place":"客栈"}\', contact = \'open\' WHERE expected_revision = 运行时“单例修订号”。player 旧值与锚点一致时不写 player，这属于无变化，不是失败。'],
+                ['各已有行使用自身 expected_revision，', '已有人物行写 WHERE id = \'行 id\' AND expected_revision = 该行 revision 值，'],
+            ],
+            'guidance-composer': [['UPDATE guidance 使用运行时 expected_revision，', 'UPDATE guidance 写 WHERE expected_revision = 运行时“单例修订号”，']],
+        };
+        return buildV25OneShotWorldSimulationAgentPrompt_ACU(name).map(segment => {
+            if (!segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW')))
+                return segment;
+            let content = segment.content;
+            for (const [from, to] of [...shared, ...role[name]]) {
+                // 冻结原文被改动时直接报错，避免静默生成缺少列名约束的默认词。
+                if (!content.includes(from))
+                    throw new Error(`WORLD_SIMULATION_PROMPT_V26_ANCHOR_MISSING:${name}`);
+                content = content.replace(from, to);
+            }
+            return { ...segment, content };
         });
     }
     function buildV20WorldSimulationAgentPrompt_ACU(name) {
@@ -92277,6 +92315,7 @@ $CONTENT
             { version: WORLD_SIMULATION_PROMPT_VERSION_V22_ACU, fingerprint: promptFingerprint_ACU(ONE_SHOT_ROLES_ACU.includes(name) ? buildV22OneShotWorldSimulationAgentPrompt_ACU(name) : buildV21WorldSimulationAgentPrompt_ACU(name)) },
             { version: WORLD_SIMULATION_PROMPT_VERSION_V23_ACU, fingerprint: promptFingerprint_ACU(buildV23WorldSimulationAgentPrompt_ACU(name)) },
             { version: WORLD_SIMULATION_PROMPT_VERSION_V24_ACU, fingerprint: promptFingerprint_ACU(buildV24WorldSimulationAgentPrompt_ACU(name)) },
+            { version: WORLD_SIMULATION_PROMPT_VERSION_V25_ACU, fingerprint: promptFingerprint_ACU(buildV25WorldSimulationAgentPrompt_ACU(name)) },
             { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildDefaultWorldSimulationAgentPrompt_ACU(name)) },
         ]]));
     function migrateWorldSimulationAgentPrompts_ACU(current, previousDefaults, previousVersion) {
@@ -92291,12 +92330,13 @@ $CONTENT
             const value = current[name];
             const previous = previousDefaults[name];
             // One-shot 历史默认逐段匹配；用户编辑和追加段原样保留，不用当前生成器重建旧默认。
-            if ((previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V22_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V23_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V24_ACU) && ONE_SHOT_ROLES_ACU.includes(name)) {
+            if ((previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V22_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V23_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V24_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V25_ACU) && ONE_SHOT_ROLES_ACU.includes(name)) {
                 const role = name;
                 const old = previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU ? buildV21OneShotWorldSimulationAgentPrompt_ACU(role)
                     : previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V22_ACU ? buildV22OneShotWorldSimulationAgentPrompt_ACU(role)
                         : previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V23_ACU ? buildV23OneShotWorldSimulationAgentPrompt_ACU(role)
-                            : buildV24OneShotWorldSimulationAgentPrompt_ACU(role);
+                            : previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V24_ACU ? buildV24OneShotWorldSimulationAgentPrompt_ACU(role)
+                                : buildV25OneShotWorldSimulationAgentPrompt_ACU(role);
                 if (!value) {
                     migrated[name] = defaults[name];
                 }
@@ -166119,6 +166159,10 @@ Expected function or array of functions, received type ${typeof value}.`
         chronicle_archive: new Set(['archive_ref', 'day', 'summary', 'fingerprints', 'related_ids', 'source_chronicle_ids']),
         chronicle_overview: new Set(['fingerprint', 'day', 'one_line', 'archive_ref']),
     };
+    /** 可写列清单供提示词与拒绝回执共用；expected_revision 只作 WHERE 条件，不列为可写列。 */
+    function worldSimulationSqlWritableColumns_ACU(table) {
+        return [...(WORLD_SIMULATION_SQL_COLUMNS_ACU[table] ?? [])].filter(column => column !== 'expected_revision');
+    }
     function simulationSqlColumnName_ACU(value) {
         return value.replace(/_([a-z])/g, (_match, letter) => letter.toUpperCase());
     }
@@ -166150,8 +166194,9 @@ Expected function or array of functions, received type ${typeof value}.`
             fail_ACU$3('SQL_TABLE_FORBIDDEN', '$.sql', 'whitelisted table', table);
         const result = {};
         for (const [column, value] of Object.entries(values)) {
+            // 回执带出该表合法列，纠错轮才有依据改正，而不是再猜一次列名。
             if (!allowed.has(column))
-                fail_ACU$3('SQL_COLUMN_FORBIDDEN', `$.sql.${table}.${column}`, 'whitelisted column', column);
+                fail_ACU$3('SQL_COLUMN_FORBIDDEN', `$.sql.${table}.${column}`, `whitelisted column: ${[...allowed].join(', ')}`, column);
             if (!omitted.includes(column))
                 result[simulationSqlColumnName_ACU(column)] = simulationSqlValue_ACU(value);
         }
@@ -169648,7 +169693,7 @@ Expected function or array of functions, received type ${typeof value}.`
     }
     /** One protocol per request; the editable PROTOCOL seam only points here. */
     function worldSimulationOneShotProtocol_ACU(name, modules) {
-        const tables = modules.flatMap(module => module === 'chronicle' ? ['chronicle', 'chronicle_archive', 'chronicle_overview'] : [module]);
+        const tables = oneShotTables_ACU(modules);
         const details = {
             'undercurrent-analyst': 'clock: UPDATE SET days, story_time, slot; dimensions: name, kind, value, trend, rationale，其中 kind 只能是英文原值 pressure 或 growth，trend 只能是 rising、stable、falling；seeds: title, status, level, catalyst, visibility, location, expires_at_day, missed_outcome, actor_ids, expose_policy, retired_reason。seeds.actor_ids 只能是已存在的 actor.id 字符串数组，例如 actor_ids = \'["actor-1"]\'；没有已确认人物 ID 就省略该列，绝不能写人物对象数组。seeds.location 必须是 JSON 对象字符串，例如 location = \'{"region":"江南府","place":"城外"}\'，只有 region 必填；无确定地点则省略 location，不可填单独地名。其中 visibility 只能是英文原值 hidden、limited、public，status 只能是 established、incubating、active、converging、resolved、retired。枚举不得填写中文解释、组合描述或其他同义词。',
             'dramatis-keeper': 'player: UPDATE SET location, contact（仅这两列及 evidence_refs，location_updated_at_day 与 region_visits 是内部派生字段，绝对不可写进 SQL）；actors: name, interests, location, location_ref, goals, information_sources, known_facts, life, died_at_day, death_summary; rumors 仅死亡伴生: fact, origin_day, earliest_reveal_day, channels, related_actor_ids。',
@@ -169658,6 +169703,7 @@ Expected function or array of functions, received type ${typeof value}.`
             '【交付协议】有可证实的变更时调用原生 write_sql 函数，参数只填 sql 字段（一条或多条受限 SQL）；工具调用仅生成待验证候选，不即时写入账本；候选通过校验后本角色结束，由两批工作流统一预览与最终提交。不得把 SQL 放入文本 JSON 或输出裸 SQL。',
             '无改动时回复 NO_CHANGE，可在同一行附简短原因；无法完成时回复 FAILED: 原因。思考过程若输出须闭合于 <think> 标签中，标签外仅保留状态行；空文本、任意其他文本与非法工具调用均不能视为无变化。',
             `只能写表：${tables.join(' | ')}。一次 write_sql 收齐本角色所有变更，不拆成多次写入；失败时按工具回执修正，仅允许一次纠错。`,
+            `【可写列白名单】${oneShotColumnWhitelist_ACU(tables)}。SET 与 INSERT 只能用这些列；revision、day 等行字段只读，修订号只写在 WHERE expected_revision = 值 中：数组行用该行 revision 字段的值，clock/player/guidance 单例用运行时“单例修订号”。`,
             '提交前按提示词【推演步骤】对每个负责模块逐一得出写或不写的结论；多个模块有变化时全部放进同一次 write_sql，不能只维护其中一两个模块就提交。',
             '运行时已给出本角色完整行与关联资料；只有目录中出现具体 readAddress 且确需详情时才调用 read，参数 reads 填该地址。目录为空就不要为核对空资料而读取；ledger:current 并非普通角色可读地址。不能把 $.reads、裸模块名或错误路径当作地址。',
             'SQL 只允许 INSERT INTO 表 (列) VALUES (字面量)、UPDATE 表 SET 列 = 字面量 WHERE 条件、DELETE FROM 表 WHERE 条件；不得使用 SELECT、函数、子查询或表达式。字符串单引号须转义为两个，列名使用 snake_case。',
@@ -169681,8 +169727,16 @@ Expected function or array of functions, received type ${typeof value}.`
             return { status: 'failed', message: text };
         return null;
     }
+    /** 角色可写模块展开为 SQL 表；编年同时开放成对归档表。 */
+    function oneShotTables_ACU(modules) {
+        return modules.flatMap(module => module === 'chronicle' ? ['chronicle', 'chronicle_archive', 'chronicle_overview'] : [module]);
+    }
+    /** 与解析器同源的可写列清单，提示词与纠错回执不再各自手写列名。 */
+    function oneShotColumnWhitelist_ACU(tables) {
+        return tables.map(table => `${table}(${worldSimulationSqlWritableColumns_ACU(table).join(', ')})`).join('；');
+    }
     /** Explain domain rejections without silently inventing entity IDs or changing the patch. */
-    function oneShotRepairHint_ACU(issues) {
+    function oneShotRepairHint_ACU(issues, tables) {
         const hints = [];
         if (issues.some(issue => /(?:^|\.)actorIds$/.test(issue.path) && issue.module === 'seeds')) {
             hints.push('seeds.actor_ids 只能写 SQL 单引号包裹的 JSON 字符串 ID 数组，例如 actor_ids = \'["actor-1"]\'；仅能引用当前账本已有的 actor.id。没有可确认的人物 ID 就从每条出错的 INSERT/UPDATE 中省略 actor_ids，不能写人物对象数组、单个对象、数字或 null。');
@@ -169696,7 +169750,10 @@ Expected function or array of functions, received type ${typeof value}.`
         if (issues.some(issue => /(?:sourceId|UNKNOWN_GUIDANCE_SOURCE)/.test(`${issue.path} ${issue.message}`))) {
             hints.push('guidance.signals.sourceId 只能使用运行时账本中已经存在的条目 ID、clock 或 player；不能引用本次候选刚 INSERT 的 rumors/chronicle，也不能编造 rumors:1 等未出现在目录中的 ID。无法绑定已有来源时删除该 signal，不要把新建条目的猜测 ID 填进去。');
         }
-        if (issues.some(issue => /SQL_COLUMN_FORBIDDEN|chronicle_overview/.test(issue.message))) {
+        if (issues.some(issue => /SQL_COLUMN_FORBIDDEN/.test(issue.message))) {
+            hints.push(`被拒的列不在该表白名单内，删掉该列或换成白名单列，不要改名重试：${oneShotColumnWhitelist_ACU(tables)}。修订号只写在 WHERE expected_revision，不写进 SET 或 INSERT 列。`);
+        }
+        if (issues.some(issue => /chronicle_overview|chronicle_archive/.test(issue.message))) {
             hints.push('归档 SQL 列必须严格使用 chronicle_archive=(archive_ref, day, summary, fingerprints, related_ids, source_chronicle_ids) 与 chronicle_overview=(fingerprint, day, one_line, archive_ref)；chronicle_overview 不允许 summary 或 related_ids。');
         }
         return hints.join(' ');
@@ -169794,7 +169851,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 input.agentName === 'guidance-composer'
                     ? `【共同时间基准】本轮共享的明确经过天数为 ${elapsedDays}（由工作流对同一锚点一次计算）。批次一已按这段跨度维护 clock，当前日 ${input.givenLedger.clock.day} 已包含本轮推进（本轮内存预览，尚未持久化）；直接采用该日，不再叠加经过天数。编年 day、传闻 origin_day 与 earliest_reveal_day 以当前日为准，并按本轮经过的时间跨度判断哪些幕后事件已完结、哪些消息已传开；不把回忆或既已计入的旅程重复累加。`
                     : `【共同时间基准】本轮共享的明确经过天数为 ${elapsedDays}（由工作流对同一锚点一次计算；无明确时间流逝即为 0）。当前已提交日为 ${input.givenLedger.clock.day}；不把回忆或既已计入的旅程重复累加。undercurrent-analyst 独占 clock 写入，clock.days 只能表达这一本轮推进量；dramatis-keeper 不写 clock，但人物状态、死亡时间及伴生传闻的演算必须使用本轮共享经过天数。另一并发角色的推断尚未落账，不得当作已提交事实。`,
-                `单例修订号：${input.baseLedgerRevision}`, `【你负责的资料（完整行）】${JSON.stringify(own)}`,
+                `单例修订号：${input.baseLedgerRevision}（clock/player/guidance 的 UPDATE 写 WHERE expected_revision = ${input.baseLedgerRevision}；数组行用各自 revision 字段）`, `【你负责的资料（完整行）】${JSON.stringify(own)}`,
                 `【关联只读资料】维度与传闻为完整行；种子与人物为浓缩目录，需细节时按 readAddress 调用 read。${JSON.stringify(related)}`, `【待修复】${JSON.stringify(input.givenLedger.pendingFixes.filter(fix => modules.includes(fix.module)))}`,
                 ...(input.roundChanges ? [`【本轮变更清单】${input.roundChanges}`] : []), `【锚点正文】\n${stripWritingAnnotations_ACU(anchor)}`,
                 ...(input.injectWorldbook && input.triggeredWorldbook ? [input.triggeredWorldbook] : [])].join('\n');
@@ -169920,7 +169977,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     const lastAttempt = repairs++ >= 1;
                     if (lastAttempt)
                         return failed(error, 'protocol_failed', locatedIssues);
-                    const hint = oneShotRepairHint_ACU(locatedIssues);
+                    const hint = oneShotRepairHint_ACU(locatedIssues, oneShotTables_ACU(modules));
                     const reason = error instanceof Error ? error.message : String(error);
                     const feedback = `上一次提交未被采纳：${reason}。${hint} 若确有变化，只重新调用一次 write_sql 并修正拒绝的 SQL；无法完成请回复 FAILED: 原因。不要输出 JSON 或裸 SQL，不得将空回复视为无变化。`;
                     if (turn.toolCalls.length && turn.toolCalls.every(call => call.id && call.name))

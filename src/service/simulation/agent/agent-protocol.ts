@@ -362,6 +362,11 @@ const WORLD_SIMULATION_SQL_COLUMNS_ACU: Readonly<Record<string, ReadonlySet<stri
   chronicle_overview: new Set(['fingerprint', 'day', 'one_line', 'archive_ref']),
 };
 
+/** 可写列清单供提示词与拒绝回执共用；expected_revision 只作 WHERE 条件，不列为可写列。 */
+export function worldSimulationSqlWritableColumns_ACU(table: string): readonly string[] {
+  return [...(WORLD_SIMULATION_SQL_COLUMNS_ACU[table] ?? [])].filter(column => column !== 'expected_revision');
+}
+
 function simulationSqlColumnName_ACU(value: string): string {
   return value.replace(/_([a-z])/g, (_match, letter: string) => letter.toUpperCase());
 }
@@ -388,7 +393,8 @@ function simulationSqlRecord_ACU(table: string, values: Record<string, Restricte
   if (!allowed) fail_ACU('SQL_TABLE_FORBIDDEN', '$.sql', 'whitelisted table', table);
   const result: Record<string, unknown> = {};
   for (const [column, value] of Object.entries(values)) {
-    if (!allowed.has(column)) fail_ACU('SQL_COLUMN_FORBIDDEN', `$.sql.${table}.${column}`, 'whitelisted column', column);
+    // 回执带出该表合法列，纠错轮才有依据改正，而不是再猜一次列名。
+    if (!allowed.has(column)) fail_ACU('SQL_COLUMN_FORBIDDEN', `$.sql.${table}.${column}`, `whitelisted column: ${[...allowed].join(', ')}`, column);
     if (!omitted.includes(column)) result[simulationSqlColumnName_ACU(column)] = simulationSqlValue_ACU(value);
   }
   return result;

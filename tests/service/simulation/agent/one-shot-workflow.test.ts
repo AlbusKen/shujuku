@@ -271,6 +271,9 @@ describe('两批一次性世界推演工作流', () => {
       status: 'candidate', agentName: 'dramatis-keeper', sql: "UPDATE player SET contact = 'open' WHERE expected_revision = 0" }));
     expect((await new WorldSimulationSubagentRuntime_ACU({ invoke: playerReplies, apiPreset, countTokens: async () => 1 }).runOneShot(playerInput)).status).toBe('candidate');
     expect(JSON.stringify(playerReplies.mock.calls[1][1])).toContain('SQL_COLUMN_FORBIDDEN');
+    // 越列回执须带出该表合法列，纠错轮才能改对而非再猜一次。
+    expect(JSON.stringify(playerReplies.mock.calls[1][1])).toContain('player(location, contact, evidence_refs)');
+    expect(JSON.stringify(playerReplies.mock.calls[1][1])).toContain('whitelisted column: location, contact');
     const badSeed = sqlTurn({ agentName: 'undercurrent-analyst',
       sql: "INSERT INTO seeds (title, status, actor_ids) VALUES ('暗流', 'incubating', '[{\"id\":\"actor-1\"}]')" });
     const fixedSeed = sqlTurn({ agentName: 'undercurrent-analyst',
