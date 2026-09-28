@@ -569,7 +569,14 @@ export class WorldSimulationSubagentRuntime_ACU {
         const normalized = normalizeOneShotSpecialistPayload_ACU(payload, { agentName: input.agentName, writableModules: modules,
           givenLedger: input.givenLedger, baseLedgerRevision: input.baseLedgerRevision, anchorEvidenceRef: input.anchorEvidenceRef, authorizedRefs: authorized() });
         locatedIssues = normalized.issues;
-        if (normalized.issues.length || (payload.status === 'candidate' && normalized.payload.status !== 'candidate')) throw new Error(normalized.issues.slice(0, 8).map(issue => `${issue.path}: ${issue.message}`).join('；') || 'WORLD_SIMULATION_ONE_SHOT_SQL_REJECTED');
+        // 与智能续写同样宽容：合法语句已被逐条隔离出来，不能因为个别语句非法就整批丢弃。
+        // 先回执一次让模型补齐被拒部分；纠错轮后仍有残余时落账可用部分，剩余作为
+        // unresolvedIssues 进入 pendingFixes，由下一轮继续录入。
+        const usablePatch = normalized.payload.status === 'candidate';
+        if (normalized.issues.length && (!usablePatch || repairs < 1)) {
+          throw new Error(normalized.issues.slice(0, 8).map(issue => `${issue.path}: ${issue.message}`).join('；') || 'WORLD_SIMULATION_ONE_SHOT_SQL_REJECTED');
+        }
+        if (!usablePatch && payload.status === 'candidate') throw new Error('WORLD_SIMULATION_ONE_SHOT_SQL_REJECTED');
         const snapshot = snapshotWorldSimulationEvidenceRegistry_ACU(input.registry);
         let outcome: WorldSimulationSubagentOutcome_ACU;
         try { outcome = outcomeFromSpecialistResult_ACU(parseWorldSimulationSpecialistResult_ACU(normalized.payload, snapshot), modules, input.runId, input.candidateSeq, false); }
@@ -595,7 +602,10 @@ export class WorldSimulationSubagentRuntime_ACU {
             throw new Error(report.blocking.slice(0, 8).map(item => `${item.path}: ${item.message}${item.details?.expected ? `；允许 ${item.details.expected}` : ''}`).join('；'));
           }
         }
-        return outcome;
+        if (!locatedIssues.length) return outcome;
+        // 部分落账：摘要写明残余，下一轮按 pendingFixes 补齐。
+        return { ...outcome, unresolvedIssues: locatedIssues,
+          summary: `${outcome.summary}（另有 ${locatedIssues.length} 条语句未采纳，留待下一轮补录）` };
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         const lastAttempt = repairs++ >= 1;

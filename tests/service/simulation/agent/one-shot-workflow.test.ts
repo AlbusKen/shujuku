@@ -322,6 +322,22 @@ describe('两批一次性格林推演工作流', () => {
     expect(retryEntry?.detail).toContain('SQL_COLUMN_FORBIDDEN');
     expect(retryEntry?.detail).toContain('模型提交');
     expect(retryEntry?.ok).toBe(false);
+    // 宽容格式：合法语句先落账，非法语句在回执一轮后仍未修好时留给下一轮补录，不整批丢弃。
+    const mixedSql = "UPDATE player SET contact = 'open' WHERE expected_revision = 0; UPDATE player SET location_updated_at_day = 1 WHERE expected_revision = 0";
+    const mixedReplies = vi.fn(async () => ({ content: '', toolCalls: [{ id: 'mix-1', name: 'write_sql', arguments: JSON.stringify({ sql: mixedSql }) }] }));
+    const partial = await new WorldSimulationSubagentRuntime_ACU({ invoke: mixedReplies, apiPreset, countTokens: async () => 1 }).runOneShot(playerInput);
+    // 第一轮先回执要求修正，第二轮仍未修好才部分落账。
+    expect(mixedReplies).toHaveBeenCalledTimes(2);
+    expect(partial.status).toBe('candidate');
+    expect(partial.candidate?.patch.player).toMatchObject({ contact: 'open' });
+    expect(partial.summary).toContain('留待下一轮补录');
+    expect(partial.unresolvedIssues?.length).toBe(1);
+    expect(JSON.stringify(partial.unresolvedIssues)).toContain('SQL_COLUMN_FORBIDDEN');
+    // 全部语句非法时仍然失败，不能凭空产出候选。
+    const allBad = vi.fn(async () => ({ content: '', toolCalls: [{ id: 'bad-1', name: 'write_sql', arguments: JSON.stringify({ sql: "UPDATE player SET location_updated_at_day = 1 WHERE expected_revision = 0" }) }] }));
+    const allBadOutcome = await new WorldSimulationSubagentRuntime_ACU({ invoke: allBad, apiPreset, countTokens: async () => 1 }).runOneShot(playerInput);
+    expect(allBadOutcome.status).toBe('failed');
+    expect(allBad).toHaveBeenCalledTimes(2);
     const badSeed = sqlTurn({ agentName: 'undercurrent-analyst',
       sql: "INSERT INTO seeds (title, status, actor_ids) VALUES ('暗流', 'incubating', '[{\"id\":\"actor-1\"}]')" });
     const fixedSeed = sqlTurn({ agentName: 'undercurrent-analyst',

@@ -67,6 +67,33 @@ export function normalizeSqlQuoteLookalikes_ACU(text: string): string {
   return next;
 }
 
+/**
+ * 模型偶尔多写一个右括号（VALUES (...)) 或给 JSON 值又套一层括号），症状是最后一个值里残留 ')'。
+ * 只在按原文解析失败后使用：仅当引号外的右括号多于左括号时，从尾部逐个去掉多余的右括号。
+ */
+export function normalizeSqlParenBalance_ACU(text: string): string {
+  let depth = 0;
+  let surplus = 0;
+  let quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === "'") {
+      if (quoted && text[index + 1] === "'") { index += 1; continue; }
+      quoted = !quoted;
+      continue;
+    }
+    if (quoted) continue;
+    if (char === '(') depth += 1;
+    else if (char === ')') { if (depth > 0) depth -= 1; else surplus += 1; }
+  }
+  let result = text.trimEnd();
+  while (surplus > 0 && result.endsWith(')')) {
+    result = result.slice(0, -1).trimEnd();
+    surplus -= 1;
+  }
+  return result;
+}
+
 function splitSqlAssignments_ACU(raw: string, mode: 'comma' | 'and'): string[] {
   const result: string[] = [];
   let start = 0;
@@ -209,9 +236,12 @@ export function parseRestrictedSqlDmlTolerant_ACU(sql: string): RestrictedSqlTol
     }
     try { statements.push(parseOneStatement_ACU(text)); }
     catch (error) {
-      const normalized = normalizeSqlQuoteLookalikes_ACU(text);
-      if (normalized !== text) {
-        try { statements.push(parseOneStatement_ACU(normalized)); return; } catch { /* 归一后仍非法，报告原始错误 */ }
+      // 逐个尝试可安全改写的形状：引号近似字符、尾部多余右括号，以及两者叠加。
+      const quoteFixed = normalizeSqlQuoteLookalikes_ACU(text);
+      const variants = [quoteFixed, normalizeSqlParenBalance_ACU(text), normalizeSqlParenBalance_ACU(quoteFixed)];
+      for (const variant of variants) {
+        if (variant === text) continue;
+        try { statements.push(parseOneStatement_ACU(variant)); return; } catch { /* 换下一种改写 */ }
       }
       rejected.push({ index, text, reason: error instanceof Error ? error.message : String(error) });
     }

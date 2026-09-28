@@ -31,6 +31,30 @@ describe('受限 SQL 引号近似字符容错（仅一次性容错路径）', ()
     expect(result.statements[0]).toMatchObject({ values: { known_facts: '["他说\u2018封城了\u2019"]' } });
   });
 
+  it('尾部多出的右括号被去掉后按原语句解析', () => {
+    const result = parseRestrictedSqlDmlTolerant_ACU("INSERT INTO actors (name, known_facts) VALUES ('掌柜', '[\"城门已封\"]'))");
+    expect(result.rejected).toEqual([]);
+    expect(result.statements[0]).toMatchObject({ kind: 'insert', table: 'actors', values: { name: '掌柜', known_facts: '[\"城门已封\"]' } });
+  });
+
+  it('引号近似字符与多余右括号叠加时一并恢复', () => {
+    const result = parseRestrictedSqlDmlTolerant_ACU("INSERT INTO actors (name, known_facts) VALUES (\u2018\u638c\u67dc\u2019, \u2018[\"\u57ce\u95e8\u5df2\u5c01\"]\u2019))");
+    expect(result.rejected).toEqual([]);
+    expect(result.statements[0]).toMatchObject({ kind: 'insert', values: { name: '\u638c\u67dc', known_facts: '[\"\u57ce\u95e8\u5df2\u5c01\"]' } });
+  });
+
+  it('多余右括号出现在语句中段时不猜测删改，保留原报错', () => {
+    const result = parseRestrictedSqlDmlTolerant_ACU("UPDATE clock SET days = 0, evidence_refs = '[]') WHERE expected_revision = 0");
+    expect(result.statements).toEqual([]);
+    expect(result.rejected).toHaveLength(1);
+  });
+
+  it('括号缺失而非多余时不改写，保留原报错', () => {
+    const result = parseRestrictedSqlDmlTolerant_ACU("INSERT INTO actors (name) VALUES ('掌柜'");
+    expect(result.statements).toEqual([]);
+    expect(result.rejected).toHaveLength(1);
+  });
+
   it('严格解析路径不做归一，错误信息指明引号问题', () => {
     expect(() => parseRestrictedSqlDml_ACU("INSERT INTO actors (name) VALUES (\u2018a\u2019)")).toThrow(/英文半角单引号/);
   });
