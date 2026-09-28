@@ -573,7 +573,9 @@ describe('world simulation subagent production write loop', () => {
     if (!firstReceiptMessage) throw new Error('未找到 call-write-1 的原生工具回执');
     const firstReceipt = JSON.parse(firstReceiptMessage.content).results[0];
     expect(firstReceipt).toMatchObject({ status: 'committed', accepted: [expect.objectContaining({ field: 'name' })], ledgerRevision: 0 });
-    expect(requests[1].at(-3)!.content).toContain('write_sql');
+    // v28 段落数与 movedGuidanceIndex 变化后尾部布局不再固定，按语义定位上一轮的 write_sql 调用，不用负索引。
+    const writeTurn = requests[1].find(message => message.role === 'assistant' && JSON.stringify(message).includes('write_sql'));
+    expect(writeTurn).toBeTruthy();
     expect(requests[1].at(-1)).toMatchObject({ role: 'user', content: expect.stringContaining('<thinking>') });
     expect(requests[2].some(message => message.content.includes('\"ledgerRevision\":1'))).toBe(true);
     const otherRequests: Array<readonly { role: string; content: string }[]> = [];

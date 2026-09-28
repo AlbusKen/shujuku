@@ -2,7 +2,16 @@ import { WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, typ
 import { WORLD_SIMULATION_AGENT_NAMES_ACU, WORLD_SIMULATION_RETIRED_AGENT_NAMES_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
 import { WORLD_SIMULATION_ENGINE_SEAMS_ACU, WORLD_SIMULATION_PROMPT_PLACEHOLDERS_ACU, buildDefaultWorldSimulationAgentPrompt_ACU, buildDefaultWorldSimulationAgentPrompts_ACU, worldSimulationSeamMarker_ACU, type WorldSimulationAgentPrompts_ACU, type WorldSimulationEngineSeam_ACU, type WorldSimulationPromptPlaceholder_ACU } from './agent-defaults';
 
-const SEAM_ROLES_ACU: Record<WorldSimulationEngineSeam_ACU, string> = { ROOT: 'system', ROLE_RULES: 'system', PROTOCOL: 'system', WORKFLOW: 'system', HISTORY: 'user', RUNTIME_CONTEXT: 'user', ACKNOWLEDGEMENT: 'assistant', EXECUTION_BOUNDARY: 'user' };
+/**
+ * 每个 seam 允许的消息身份。v28 把运行逻辑从 system 搬进「user 提问 + assistant 自述」，
+ * WORKFLOW 因此同时允许 system（v21-v27 历史默认）与 user（v28 问答首问）；
+ * 其余 seam 仍是唯一身份，避免装配链路无法判断段落用途。
+ */
+const SEAM_ROLES_ACU: Record<WorldSimulationEngineSeam_ACU, readonly string[]> = {
+  ROOT: ['system'], ROLE_RULES: ['system'], PROTOCOL: ['system'], WORKFLOW: ['system', 'user'],
+  HISTORY: ['user'], RUNTIME_CONTEXT: ['user'], ACKNOWLEDGEMENT: ['assistant'], EXECUTION_BOUNDARY: ['user'],
+};
+
 const PLACEHOLDER_PATTERN_ACU = /\$[A-Z][A-Z0-9_]*/g;
 type PlaceholderResolver_ACU = () => string | Promise<string>;
 function fail_ACU(message: string, details?: Record<string, unknown>, phase: WorldSimulationErrorPhase_ACU = 'load'): never {
@@ -18,6 +27,7 @@ export function validateWorldSimulationPromptSegments_ACU(value: unknown, agentN
     if (!['system', 'user', 'assistant'].includes(String(raw.role)) || typeof raw.content !== 'string' || !raw.content.trim()) fail_ACU('提示词段角色或内容非法', { agentName, index }, phase);
     if (typeof raw.enabled !== 'boolean' || typeof raw.deletable !== 'boolean' || typeof raw.pinned !== 'boolean') fail_ACU('提示词段开关非法', { agentName, index }, phase);
     return { role: raw.role as string, content: raw.content, enabled: raw.enabled, deletable: raw.deletable, pinned: raw.pinned };
+
   });
   let cursor = -1;
   for (const seam of WORLD_SIMULATION_ENGINE_SEAMS_ACU) {
@@ -25,7 +35,7 @@ export function validateWorldSimulationPromptSegments_ACU(value: unknown, agentN
     const matches = result.map((segment, index) => segment.content.includes(marker) ? index : -1).filter(index => index >= 0);
     if (matches.length !== 1 || matches[0] <= cursor) fail_ACU('engine seam 缺失、重复或错序', { agentName, seam }, phase);
     const segment = result[matches[0]];
-    if (segment.role !== SEAM_ROLES_ACU[seam] || !segment.enabled || segment.deletable || !segment.pinned) fail_ACU('engine seam 属性非法', { agentName, seam }, phase);
+    if (!SEAM_ROLES_ACU[seam].includes(segment.role) || !segment.enabled || segment.deletable || !segment.pinned) fail_ACU('engine seam 属性非法', { agentName, seam }, phase);
     cursor = matches[0];
   }
   const guidance = result.filter(segment => segment.content.includes('$WORLD_USER_REQUIREMENTS') || segment.content.includes('$WORLD_USER_GUIDANCE'));

@@ -29,7 +29,7 @@ import type {
 import { createWorldSimulationPlaceholderResolvers_ACU, isWorldSimulationLedgerContext_ACU, type WorldSimulationPlaceholderContext_ACU } from './agent-placeholder-resolver';
 import { createWorldSimulationProtocolRepairState_ACU, normalizeOneShotSpecialistPayload_ACU, worldSimulationSqlWritableColumns_ACU, parseWorldSimulationSubagentToolCalls_ACU, parseWorldSimulationJsonDraft_ACU, parseWorldSimulationJsonPayload_ACU, parseWorldSimulationMainAction_ACU, parseWorldSimulationMainOutput_ACU, parseWorldSimulationReviewerResult_ACU, parseWorldSimulationSpecialistResult_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationReviewerProtocolRejection_ACU, renderWorldSimulationSpecialistProtocolRejection_ACU } from './agent-protocol';
 import { createWorldSimulationReadGateState_ACU, resolveWorldSimulationReadBudget_ACU } from './agent-read-gate';
-import { logWorldSimulationSession_ACU } from './agent-session-log';
+import { logWorldSimulationSession_ACU, updateWorldSimulationSession_ACU } from './agent-session-log';
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './prompt-template';
 import { renderWorldSimulationSnapshotSections_ACU, splitWorldSimulationSubagentPrompt_ACU, verifyWorldSimulationSnapshotSections_ACU, verifyWorldSimulationFixedWorldbook_ACU, type WorldSimulationFixedWorldbook_ACU } from './agent-shared-materials';
@@ -522,12 +522,16 @@ export class WorldSimulationSubagentRuntime_ACU {
     const maxReads = input.settings.agentRunBudget.maxExtraReads > 0 ? 1 : 0;
     const authorized = () => new Set(snapshotWorldSimulationEvidenceRegistry_ACU(input.registry).entries.flatMap(entry => entry.evidenceRef ? [entry.evidenceRef] : []));
     const sessionId = input.sessionChatIdentity?.trim();
-    const logSession = (entry: { kind: 'tool_read' | 'protocol_retry'; title: string; detail: string; ok: boolean }): void => {
-      if (sessionId) logWorldSimulationSession_ACU(sessionId, { ...entry, agentName: input.agentName });
+    const logSession = (entry: { kind: 'tool_read' | 'protocol_retry' | 'write_sql'; title: string; detail: string; ok: boolean; status?: 'running' | 'done' | 'failed' }): number | null =>
+      sessionId ? logWorldSimulationSession_ACU(sessionId, { ...entry, agentName: input.agentName }) : null;
+    const updateSession = (id: number | null, patch: { title?: string; detail?: string; ok?: boolean; status?: 'running' | 'done' | 'failed' }): void => {
+      if (sessionId && id !== null) updateWorldSimulationSession_ACU(sessionId, id, patch);
     };
     for (let attempt = 0; attempt < 2 + maxReads; attempt++) {
       if (input.isCurrent?.() === false) throw new Error('WORLD_SIMULATION_RUN_STALE');
       let locatedIssues: WorldSimulationSubagentIssue_ACU[] = [];
+      // 本次尝试提交的 SQL 在会话流里的条目 id；成败都回写到同一条，避免内容与结论分家。
+      let writeEntryId: number | null = null;
       const messages = withNativeToolThinkPrefill_ACU([...base, { role: 'user', content: runtime }, ...transcript, ...trailingPrefill]);
       const requestTools = maxReads && reads === 0 ? ['read', 'write_sql'] as const : ['write_sql'] as const;
       let sent: Awaited<ReturnType<typeof executeWorldSimulationFinalRequest_ACU>>;
@@ -590,6 +594,9 @@ export class WorldSimulationSubagentRuntime_ACU {
           if (extra.length) throw new Error(`WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN: write_sql 只接受 sql 参数，多余参数 ${extra.join(', ')}`);
           if (typeof args.sql !== 'string' || !args.sql.trim()) throw new Error('WORLD_SIMULATION_ONE_SHOT_TOOL_FORBIDDEN: write_sql 的 sql 参数必须是非空字符串');
           payload = { status: 'candidate', sql: args.sql };
+          // 提交的 SQL 原文进会话历史：用户要能看到这一轮究竟写了什么，而不只是成功或失败。
+          writeEntryId = logSession({ kind: 'write_sql', ok: true, status: 'running',
+            title: `提交 SQL（${args.sql.split(';').filter(part => part.trim()).length} 条语句）`, detail: args.sql });
         } else {
           const state = oneShotTextStatus_ACU(raw);
           if (state?.status === 'no_change' && !writeAttempted) payload = state;
@@ -647,16 +654,24 @@ export class WorldSimulationSubagentRuntime_ACU {
         // 跨轮保留残余更少的一份：纠错轮整批失效时，不把上一轮已合法的语句丢掉。
         if (!salvaged || (deliverable.unresolvedIssues?.length ?? 0) <= (salvaged.unresolvedIssues?.length ?? 0)) salvaged = deliverable;
         // 覆盖缺口本身不再要一轮：SQL 全部合法时直接交付，缺的模块以待修复形式留给下一轮。
-        if (!locatedIssues.length) return deliverable;
+        if (!locatedIssues.length) {
+          updateSession(writeEntryId, { ok: true, status: 'done',
+            title: residual.length ? `已通过校验，另有 ${residual.length} 项留待下一轮` : '已通过校验' });
+          return deliverable;
+        }
         // 首轮仍回执一次，给模型改对整批的机会；salvaged 已记下这份候选。
         if (repairs < 1) {
           throw new Error(locatedIssues.slice(0, 8).map(issue => `${issue.path}: ${issue.message}`).join('；') || 'WORLD_SIMULATION_ONE_SHOT_SQL_REJECTED');
         }
+        updateSession(writeEntryId, { ok: true, status: 'done', title: `部分采纳，另有 ${residual.length} 项留待下一轮` });
         return salvaged ?? deliverable;
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         const lastAttempt = repairs++ >= 1;
-        const submitted = turn.toolCalls.map(call => `${call.name} ${call.arguments}`).join('；') || raw;
+        // SQL 原文已由 write_sql 条目完整保留；只有没有工具调用（纯文本回复）时才在这里附原文片段。
+        const submitted = writeEntryId === null ? (turn.toolCalls.map(call => `${call.name} ${call.arguments}`).join('；') || raw) : '';
+        updateSession(writeEntryId, { ok: false, status: 'failed',
+          title: lastAttempt ? '提交被拒，纠错次数已用完' : '提交被拒，已回执纠错' });
         logSession({ kind: 'protocol_retry', ok: false,
           title: lastAttempt ? (salvaged ? '纠错未成功，落账首轮已合法的部分' : '提交被拒，纠错次数已用完') : '提交被拒，已回执纠错',
           detail: `${reason}${submitted ? `｜模型提交：${submitted.slice(0, 900)}` : ''}` });

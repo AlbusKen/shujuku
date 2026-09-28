@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { WORLD_SIMULATION_PROMPT_VERSION_V25_ACU, WORLD_SIMULATION_PROMPT_VERSION_V26_ACU, WORLD_SIMULATION_PROMPT_VERSION_V27_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
+import { WORLD_SIMULATION_PROMPT_VERSION_V25_ACU, WORLD_SIMULATION_PROMPT_VERSION_V26_ACU, WORLD_SIMULATION_PROMPT_VERSION_V27_ACU, WORLD_SIMULATION_PROMPT_VERSION_V28_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
 import { USER_PREFILL_CONTENT_ACU } from '../../../../src/shared/user-prefill.js';
 import { buildDefaultWorldSimulationSettings_ACU } from '../../../../src/service/simulation/defaults';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU, WORLD_SIMULATION_AGENT_NAMES_ACU, findWorldSimulationAgentDefinition_ACU, worldSimulationDirectorVisibleCatalog_ACU } from '../../../../src/service/simulation/agent/agent-catalog';
@@ -99,13 +99,14 @@ describe('格林推演提示词装配契约', () => {
   });
 
   it('提示词完整覆盖角色职责，同时保留时间先行、历史默认指纹与信息渠道纪律', () => {
-    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe(WORLD_SIMULATION_PROMPT_VERSION_V27_ACU);
+    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe(WORLD_SIMULATION_PROMPT_VERSION_V28_ACU);
     expect(buildDefaultWorldSimulationSettings_ACU().agentRunBudget).toMatchObject({ maxIterations: 4, maxExtraReads: 1, maxConcurrent: 5 });
     expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].map(item => item.version)).toEqual([
       'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6', 'world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12', 'world-simulation-v13', 'world-simulation-v14', 'world-simulation-v15', 'world-simulation-v16', 'world-simulation-v17', 'world-simulation-v18', 'world-simulation-v19', 'world-simulation-v20', 'world-simulation-v21', 'world-simulation-v22', 'world-simulation-v23', 'world-simulation-v24',
       WORLD_SIMULATION_PROMPT_VERSION_V25_ACU,
       WORLD_SIMULATION_PROMPT_VERSION_V26_ACU,
       WORLD_SIMULATION_PROMPT_VERSION_V27_ACU,
+      WORLD_SIMULATION_PROMPT_VERSION_V28_ACU,
     ]);
     expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['undercurrent-analyst'].at(-1)?.version).toBe(WORLD_SIMULATION_PROMPT_VERSION_ACU);
     const v8 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v8');
@@ -179,7 +180,8 @@ describe('格林推演提示词装配契约', () => {
       WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === 'undercurrent-analyst')!.writableModules,
     );
     expect(undercurrent).toContain('exposePolicy');
-    expect(undercurrentPrompt).toContain('【交付方式】');
+    // v28 的交付纪律改由 assistant 自述承载，不再是 system 段的【交付方式】标记。
+    expect(undercurrentPrompt).toContain('同一次 write_sql');
     expect(undercurrentPrompt).toContain('clock、dimensions、seeds');
     expect(undercurrentPrompt).not.toContain('调用 write_sql 函数');
 
@@ -232,7 +234,7 @@ describe('格林推演提示词装配契约', () => {
     expect(undercurrentPrompt).toContain('value 0-100 表示当下烈度，trend 写 rising/stable/falling');
     expect(undercurrentPrompt).toContain('catalyst');
     const dramatisPrompt = prompts['dramatis-keeper'].map(item => item.content).join('\n');
-    expect(dramatisPrompt).toContain('【交付方式】');
+    expect(dramatisPrompt).toContain('同一次 write_sql');
     expect(dramatisPrompt).toContain('只写 actors、player；rumors 只写人物死亡的伴生风声');
     expect(dramatisPrompt).toContain('无变化回复 NO_CHANGE');
     expect(reviewerPrompt).toContain('审核清单逐项过');
@@ -266,7 +268,7 @@ describe('格林推演提示词装配契约', () => {
       role: 'system',
       content: worldSimulationSpecialistProtocolInstruction_ACU('dramatis-keeper', ['actors', 'player', 'rumors']),
     }].map(message => message.content).join('\n');
-    expect(sent).toContain('【交付方式】');
+    expect(sent).toContain('同一次 write_sql');
     expect(sent).toContain('只写 actors、player；rumors 只写人物死亡的伴生风声');
     expect(sent).toContain('无变化回复 NO_CHANGE');
     expect(sent).toContain('UPDATE player');

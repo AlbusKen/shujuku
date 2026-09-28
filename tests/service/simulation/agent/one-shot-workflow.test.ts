@@ -331,11 +331,18 @@ describe('两批一次性格林推演工作流', () => {
       ...playerInput, settings: readSettings, sessionChatIdentity: 'one-shot-session',
       tools: { read: vi.fn(async () => ({ found: false })), search: vi.fn() } as typeof playerInput.tools });
     const feed = readWorldSimulationSessionLog_ACU('one-shot-session');
-    expect(feed.map(item => item.kind)).toEqual(expect.arrayContaining(['tool_read', 'protocol_retry']));
+    expect(feed.map(item => item.kind)).toEqual(expect.arrayContaining(['tool_read', 'write_sql', 'protocol_retry']));
     expect(feed.every(item => item.agentName === 'dramatis-keeper')).toBe(true);
+    // 提交的 SQL 原文由 write_sql 条目完整承载；被拒的那条回写为失败，成功的那条标已通过校验。
+    const writeEntries = feed.filter(item => item.kind === 'write_sql');
+    expect(writeEntries).toHaveLength(2);
+    expect(writeEntries[0].detail).toContain("UPDATE player SET location_updated_at_day = 1");
+    expect(writeEntries[0].ok).toBe(false);
+    expect(writeEntries[0].title).toContain('提交被拒');
+    expect(writeEntries[1].detail).toContain("UPDATE player SET contact = 'open'");
+    expect(writeEntries[1].ok).toBe(true);
     const retryEntry = feed.find(item => item.kind === 'protocol_retry');
     expect(retryEntry?.detail).toContain('SQL_COLUMN_FORBIDDEN');
-    expect(retryEntry?.detail).toContain('模型提交');
     expect(retryEntry?.ok).toBe(false);
     // 宽容格式：合法语句先落账，非法语句在回执一轮后仍未修好时留给下一轮补录，不整批丢弃。
     const mixedSql = "UPDATE player SET contact = 'open' WHERE expected_revision = 0; UPDATE player SET location_updated_at_day = 1 WHERE expected_revision = 0";

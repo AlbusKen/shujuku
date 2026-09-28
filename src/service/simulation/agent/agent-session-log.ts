@@ -1,4 +1,4 @@
-export const WORLD_SIMULATION_SESSION_EVENT_KINDS_ACU = ['run_started', 'run_resumed', 'user_message', 'thought', 'main_action', 'protocol_retry', 'tool_read', 'delegation', 'stage_plan', 'handoff', 'finalize', 'block', 'run_failed', 'run_completed'] as const;
+export const WORLD_SIMULATION_SESSION_EVENT_KINDS_ACU = ['run_started', 'run_resumed', 'user_message', 'thought', 'main_action', 'protocol_retry', 'tool_read', 'write_sql', 'delegation', 'stage_plan', 'handoff', 'finalize', 'block', 'run_failed', 'run_completed'] as const;
 export type WorldSimulationSessionEventKind_ACU = typeof WORLD_SIMULATION_SESSION_EVENT_KINDS_ACU[number];
 export type WorldSimulationSessionStatus_ACU = 'running' | 'done' | 'failed';
 export interface WorldSimulationSessionEntry_ACU { id: number; at: number; kind: WorldSimulationSessionEventKind_ACU; title: string; detail: string; agentName: string; ok: boolean; status: WorldSimulationSessionStatus_ACU; }
@@ -11,6 +11,8 @@ interface WorldSimulationSessionPartition_ACU {
 }
 const partitions_ACU = new Map<string, WorldSimulationSessionPartition_ACU>();
 const clean_ACU = (value: unknown, limit: number) => { const text = String(value ?? '').replace(/[\r\n]+/g, ' ').trim(); return text.length <= limit ? text : `${text.slice(0, limit)}…`; };
+/** 写入条目的 detail 是整批 SQL 原文，2000 字会把多语句批次截断；仍低于楼层 8000 字上限。 */
+const detailLimit_ACU = (kind: WorldSimulationSessionEventKind_ACU): number => kind === 'write_sql' ? 6000 : 2000;
 function partition_ACU(chatIdentity: string): WorldSimulationSessionPartition_ACU {
   const key = chatIdentity.trim();
   if (!key) throw new Error('WORLD_SIMULATION_SESSION_CHAT_IDENTITY_REQUIRED');
@@ -31,7 +33,7 @@ export function logWorldSimulationSession_ACU(chatIdentity: string, input: World
   const ok = input.ok !== false;
   const id = partition.nextId++;
   const at = typeof input.at === 'number' && Number.isFinite(input.at) && input.at >= 0 ? input.at : Date.now();
-  partition.entries.push({ id, at, kind: input.kind, title: clean_ACU(input.title, 300), detail: clean_ACU(input.detail, 2000), agentName: clean_ACU(input.agentName, 128), ok, status: input.status ?? (ok ? 'done' : 'failed') });
+  partition.entries.push({ id, at, kind: input.kind, title: clean_ACU(input.title, 300), detail: clean_ACU(input.detail, detailLimit_ACU(input.kind)), agentName: clean_ACU(input.agentName, 128), ok, status: input.status ?? (ok ? 'done' : 'failed') });
   if (partition.entries.length > 300) partition.entries = partition.entries.slice(-300);
   if (['run_completed', 'run_failed', 'block'].includes(input.kind)) partition.running = false;
   notify_ACU(partition); return id;
@@ -40,7 +42,7 @@ export function updateWorldSimulationSession_ACU(chatIdentity: string, id: numbe
   const partition = partition_ACU(chatIdentity);
   const entry = partition.entries.find(item => item.id === id); if (!entry) return;
   if (patch.title !== undefined) entry.title = clean_ACU(patch.title, 300);
-  if (patch.detail !== undefined) entry.detail = clean_ACU(patch.detail, 2000);
+  if (patch.detail !== undefined) entry.detail = clean_ACU(patch.detail, detailLimit_ACU(entry.kind));
   if (patch.ok !== undefined) entry.ok = patch.ok;
   entry.status = patch.status ?? (patch.ok === undefined ? entry.status : patch.ok ? 'done' : 'failed'); notify_ACU(partition);
 }

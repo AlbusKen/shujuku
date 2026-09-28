@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { buildDefaultWorldSimulationAgentPrompts_ACU, buildV21WorldSimulationAgentPrompt_ACU, buildV22WorldSimulationAgentPrompt_ACU, buildV23WorldSimulationAgentPrompt_ACU, buildV24WorldSimulationAgentPrompt_ACU, buildV25WorldSimulationAgentPrompt_ACU, buildV26WorldSimulationAgentPrompt_ACU, migrateWorldSimulationAgentPromptsDetailed_ACU, WORLD_SIMULATION_PROMPT_VERSION_ACU, WORLD_SIMULATION_PROMPT_VERSION_V21_ACU, WORLD_SIMULATION_PROMPT_VERSION_V22_ACU, WORLD_SIMULATION_PROMPT_VERSION_V23_ACU, WORLD_SIMULATION_PROMPT_VERSION_V24_ACU, WORLD_SIMULATION_PROMPT_VERSION_V25_ACU, WORLD_SIMULATION_PROMPT_VERSION_V26_ACU, WORLD_SIMULATION_PROMPT_VERSION_V27_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
+import { buildDefaultWorldSimulationAgentPrompts_ACU, buildV21WorldSimulationAgentPrompt_ACU, buildV22WorldSimulationAgentPrompt_ACU, buildV23WorldSimulationAgentPrompt_ACU, buildV24WorldSimulationAgentPrompt_ACU, buildV25WorldSimulationAgentPrompt_ACU, buildV26WorldSimulationAgentPrompt_ACU, buildV27WorldSimulationAgentPrompt_ACU, migrateWorldSimulationAgentPromptsDetailed_ACU, WORLD_SIMULATION_PROMPT_VERSION_ACU, WORLD_SIMULATION_PROMPT_VERSION_V21_ACU, WORLD_SIMULATION_PROMPT_VERSION_V22_ACU, WORLD_SIMULATION_PROMPT_VERSION_V23_ACU, WORLD_SIMULATION_PROMPT_VERSION_V24_ACU, WORLD_SIMULATION_PROMPT_VERSION_V25_ACU, WORLD_SIMULATION_PROMPT_VERSION_V26_ACU, WORLD_SIMULATION_PROMPT_VERSION_V27_ACU, WORLD_SIMULATION_PROMPT_VERSION_V28_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
 import { oneShotBootstrapNotice_ACU, worldSimulationOneShotProtocol_ACU } from '../../../../src/service/simulation/agent/agent-subagent-runtime';
 import { validateWorldSimulationPromptSegments_ACU } from '../../../../src/service/simulation/agent/prompt-template';
 import { stripWritingAnnotations_ACU } from '../../../../src/service/simulation/simulation-projection';
 
 const roles = ['undercurrent-analyst', 'dramatis-keeper', 'guidance-composer'] as const;
+/** v28 把运行逻辑拆进多组问答，推演细则不再集中在单个 WORKFLOW 段，断言按整份提示词检查。 */
+const fullBody = (segments: readonly { content: string }[]): string => segments.map(item => item.content).join('\n');
 
 describe('一次性资料角色默认提示词', () => {
   it('三个角色的 seam 均合法，变更通过原生工具交候选', () => {
@@ -18,12 +20,10 @@ describe('一次性资料角色默认提示词', () => {
       expect(body).not.toContain('【输出协议】');
       expect(body).not.toContain('最终只交协议 JSON');
       expect(body).not.toContain('交 no_change');
-      expect(body).toContain('【推演步骤】');
-      expect(body).toContain('【职责清单】');
-      expect(body).toContain('【覆盖义务】');
-      expect(body).toContain('【收口自检】');
-      expect(body).toContain('全模块核查不等于全模块强制写入');
-      expect(body).toContain('【情境范例（仅演示推演，不是本轮事实）】');
+      // v28 的运行逻辑以问答自述承载：system 只剩身份、边界与协议。
+      expect(body).toContain('我每轮都要查三项');
+      expect(body).toContain('提交前我逐项对照职责清单');
+      expect(body).toContain('同一次 write_sql');
     }
     const guidanceBody = prompts['guidance-composer'].map(item => item.content).join('\\n');
     expect(guidanceBody).toContain('chronicle_overview');
@@ -45,71 +45,93 @@ describe('一次性资料角色默认提示词', () => {
     expect(clockProtocol).not.toMatch(/dimensions\([^)]*visibility/);
   });
 
-  it('v26 把列名与修订号写法落到具体 SQL，无变化不再被说成失败', () => {
+  it('v28 写法纪律落到具体 SQL，无变化不再被说成失败', () => {
     const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
-    const workflow = (role: typeof roles[number]) => prompts[role].find(segment => segment.content.includes('【推演步骤】'))!.content;
+    const workflow = (role: typeof roles[number]) => fullBody(prompts[role]);
     for (const role of roles) {
       expect(workflow(role)).toContain('【可写列白名单】');
-      expect(workflow(role)).toContain('修订号只出现在 WHERE');
-      expect(workflow(role)).toContain('不要把“无需写入”说成失败');
+      expect(workflow(role)).toContain('INSERT 新行不写 revision 或 expected_revision');
       expect(workflow(role)).not.toContain('其余行各用自身 revision');
     }
-    expect(workflow('undercurrent-analyst')).toContain('clock 只写推进量 days，没有 day 列');
-    expect(workflow('undercurrent-analyst')).toContain('dimensions 没有 visibility 列');
+    expect(workflow('undercurrent-analyst')).toContain('clock.days 是本轮推进量，不是绝对日');
     expect(workflow('dramatis-keeper')).toContain('WHERE expected_revision = 运行时“单例修订号”');
     expect(workflow('dramatis-keeper')).toContain('这属于无变化，不是失败');
   });
 
-  it('范例解释各角色证据判断与反例，不把示例 ID 当成真实账本条目', () => {
+  it('各角色自述里写明证据判断与反例', () => {
     const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
-    const workflow = (role: typeof roles[number]) => prompts[role].find(segment => segment.content.includes('【推演步骤】'))!.content;
-    expect(workflow('undercurrent-analyst')).toContain('若锚点只是回忆昨日，则不写 clock');
-    expect(workflow('dramatis-keeper')).toContain('没有获知封城的渠道，就不给他写这条认知');
-    expect(workflow('guidance-composer')).toContain('本候选新建的风声或纪要不能充当本候选信号来源');
+    const workflow = (role: typeof roles[number]) => fullBody(prompts[role]);
+    expect(workflow('undercurrent-analyst')).toContain('没有明确推进就不写 clock');
+    expect(workflow('dramatis-keeper')).toContain('答不上就不写，宁可让他继续误判');
+    expect(workflow('guidance-composer')).toContain('本候选新建的风声或纪要不能当来源');
     for (const role of roles) {
       expect(workflow(role)).toContain('expected_revision');
-      expect(workflow(role)).toContain('仅演示推演，不是本轮事实');
+      expect(workflow(role)).toContain('“可能发生”绝不写成“已经发生”');
     }
   });
 
-  it('三个角色分别覆盖所有职责并在单次交付前交叉复核，冻结的 v24/v26 正文不被 v27 改写', () => {
+  it('三个角色分别覆盖所有职责并在单次交付前交叉复核，冻结的 v24/v26/v27 正文不被 v28 改写', () => {
     const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
     const checks = {
-      'undercurrent-analyst': ['clock 时序', 'dimensions 局势刻度', 'seeds 伏线', '第二步·局势刻度', '第三步·存量伏线', '第四步·期限', '第五步·埋设新伏线', '第六步·交叉复核'],
-      'dramatis-keeper': ['player 玩家所在', 'actors 人物谱', 'rumors 仅死亡伴生', '第二步·玩家', '第三步·点名', '第四步·在册人物', '第五步·认知边界', '第六步·生死'],
-      'guidance-composer': ['chronicle 幕后纪要', 'rumors 风声', 'guidance 场外信号', '第二步·幕后纪要', '第三步·归档', '第四步·风声', '第五步·场外信号选题', '第六步·旧信号清理'],
+      'undercurrent-analyst': ['clock 时序', 'dimensions 局势刻度', 'seeds 伏线', '局势刻度：', '存量伏线：', '期限：', '埋新线：', '交叉复核：'],
+      'dramatis-keeper': ['player 玩家所在与对外联络', 'actors 人物谱', '死亡伴生风声', '玩家：', '点名：', '在册人物逐个更新：', '认知边界：', '生死：'],
+      'guidance-composer': ['chronicle 幕后纪要与成对归档', 'rumors 风声', 'guidance 场外信号', '幕后纪要：', '归档：', '风声：', '场外信号选题：', '旧信号清理：'],
     } as const;
     for (const role of roles) {
-      const workflow = prompts[role].find(segment => segment.content.includes('【推演步骤】'))!.content;
+      const workflow = fullBody(prompts[role]);
       for (const check of checks[role]) expect(workflow).toContain(check);
-      expect(workflow).toContain('同一次原生 write_sql');
+      expect(workflow).toContain('同一次 write_sql');
       const old = buildV24WorldSimulationAgentPrompt_ACU(role);
       expect(old.find(segment => segment.content.includes('【推演步骤】'))!.content).not.toContain('【职责清单】');
-      expect(old.find(segment => segment.content.includes('【推演步骤】'))!.content).not.toBe(workflow);
       const v26 = buildV26WorldSimulationAgentPrompt_ACU(role).find(segment => segment.content.includes('【推演步骤】'))!.content;
       expect(v26).not.toContain('【首轮建账】');
-      expect(v26).not.toBe(workflow);
+      // v27 仍是集中在 WORKFLOW 段的旧结构，v28 已改为问答组。
+      const v27 = buildV27WorldSimulationAgentPrompt_ACU(role);
+      expect(v27.find(segment => segment.content.includes('【推演步骤】'))!.content).toContain('【首轮建账】');
+      expect(fullBody(v27)).not.toBe(workflow);
     }
   });
 
-  it('v27 各角色写明首轮建账，去掉新建条数硬上限，且只用格林推演自己的术语', () => {
+  it('v28 各角色写明首轮建账，去掉新建条数硬上限，且只用格林推演自己的术语', () => {
     const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
     for (const role of roles) {
-      const body = prompts[role].map(item => item.content).join('\n');
-      expect(body).toContain('【首轮建账】');
-      expect(body).toContain('空表不是“无变化”的理由');
+      const body = fullBody(prompts[role]);
+      expect(body).toContain('首轮建账：');
       expect(body).toContain('格林推演系统');
       expect(body).not.toMatch(/暗流|种子|行动者|编年|传闻|投影|世界推演/);
       expect(body).not.toContain('本轮最多新建 3 条');
       expect(body).not.toContain('本轮最多新增 3 人');
       expect(body).toContain('INSERT 新行不写 revision 或 expected_revision');
     }
-    const dramatis = prompts['dramatis-keeper'].map(item => item.content).join('\n');
+    const dramatis = fullBody(prompts['dramatis-keeper']);
     expect(dramatis).toContain('锚点里的具名人物全部建档');
-    expect(dramatis).toContain('未建档的，只要不是一次性路人，本轮就建档');
-    const undercurrent = prompts['undercurrent-analyst'].map(item => item.content).join('\n');
-    expect(undercurrent).toContain('埋设 3-6 条伏线');
+    expect(dramatis).toContain('只要不是一次性路人，本轮就建档');
+    const undercurrent = fullBody(prompts['undercurrent-analyst']);
+    expect(undercurrent).toContain('埋 3-6 条伏线');
     expect(undercurrent).toContain('提炼 2-5 个局势刻度');
+  });
+
+  it('v28 结构：system 只讲身份与任务，运行逻辑由多组 user 提问与 assistant 自述承载', () => {
+    const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
+    for (const role of roles) {
+      const segments = prompts[role];
+      expect(() => validateWorldSimulationPromptSegments_ACU(segments, role)).not.toThrow();
+      // system 段只有身份、写入边界、交付协议与用户要求占位，不再承载推演细则。
+      const systems = segments.filter(item => item.role === 'system');
+      expect(systems).toHaveLength(4);
+      for (const item of systems) expect(item.content).not.toContain('我每轮都要查三项');
+      // 至少 3 组问答，且每个 assistant 自述都紧跟在一个 user 提问之后。
+      const pairs = segments.filter((item, index) => item.role === 'assistant' && segments[index - 1]?.role === 'user');
+      expect(pairs.length).toBeGreaterThanOrEqual(3);
+      expect(segments.filter(item => item.role === 'assistant').length).toBe(pairs.length);
+      // 角色专属那一组问答在共享问答之间，确保角色细则也以自述出现。
+      expect(pairs.some(item => item.content.includes('我每轮都要查三项'))).toBe(true);
+    }
+    const dramatis = fullBody(prompts['dramatis-keeper']);
+    // 人物当前行动与预计耗时必须有明确写法，且认知必须有渠道。
+    expect(dramatis).toContain('「正在做的事·预计多久」');
+    expect(dramatis).toContain('读者知道的不等于人物知道');
+    expect(fullBody(prompts['undercurrent-analyst'])).toContain('正文往哪走，我的推演就往哪走');
   });
 
   it('运行时对空账本与空模块给出首轮建账标记，非空时不打扰', () => {
@@ -157,6 +179,7 @@ describe('一次性资料角色默认提示词', () => {
     [WORLD_SIMULATION_PROMPT_VERSION_V24_ACU, buildV24WorldSimulationAgentPrompt_ACU],
     [WORLD_SIMULATION_PROMPT_VERSION_V25_ACU, buildV25WorldSimulationAgentPrompt_ACU],
     [WORLD_SIMULATION_PROMPT_VERSION_V26_ACU, buildV26WorldSimulationAgentPrompt_ACU],
+    [WORLD_SIMULATION_PROMPT_VERSION_V27_ACU, buildV27WorldSimulationAgentPrompt_ACU],
   ] as const)('%s 默认段升级为完整职责核查，用户修改与附加段不被覆盖', (version, buildPrevious) => {
     const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
     const previous = Object.fromEntries(roles.map(role => [role, buildPrevious(role)]));
@@ -172,15 +195,13 @@ describe('一次性资料角色默认提示词', () => {
     expect(result.prompts['guidance-composer'].at(-1)).toEqual(current['guidance-composer'].at(-1));
   });
 
-  it('非时钟角色推演第一步先分析本轮时间跨度，批次二直接采用批次一维护的 clock', () => {
+  it('非时钟角色先算本轮时间跨度，批次二直接采用批次一维护的 clock', () => {
     const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
-    const workflow = (role: typeof roles[number]) => prompts[role].find(segment => segment.content.includes('【推演步骤】'))!.content;
-    expect(workflow('dramatis-keeper')).toContain('【推演步骤】第一步·时间跨度');
+    const workflow = (role: typeof roles[number]) => fullBody(prompts[role]);
+    expect(workflow('dramatis-keeper')).toContain('本轮的时间跨度怎么算');
     expect(workflow('dramatis-keeper')).toContain('本角色不写 clock');
-    expect(workflow('guidance-composer')).toContain('【推演步骤】第一步·时间');
     expect(workflow('guidance-composer')).toContain('不再叠加经过天数');
-    expect(workflow('guidance-composer')).not.toContain('仅加上锚点明确发生的时间推进');
-    expect(workflow('undercurrent-analyst')).toContain('仅加上锚点明确发生的时间推进');
+    expect(workflow('undercurrent-analyst')).toContain('只算锚点里明确发生的推进');
   });
 
   it('锚点仅为提示词剥离写作注释，原始文本保持不变', () => {
@@ -191,7 +212,7 @@ describe('一次性资料角色默认提示词', () => {
 
   it('旧版角色键及自定义旧协议提示词能归一化到当前版本', () => {
     const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
-    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe(WORLD_SIMULATION_PROMPT_VERSION_V27_ACU);
+    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe(WORLD_SIMULATION_PROMPT_VERSION_V28_ACU);
     const custom = structuredClone(defaults) as Record<string, typeof defaults[typeof roles[number]]>;
     custom['undercurrent-analyst'][0].content += '\n旧版自定义逐栏 write_sql';
     custom.timekeeper = structuredClone(defaults['undercurrent-analyst']);

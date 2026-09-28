@@ -103,6 +103,7 @@ const KIND_LABELS: Record<WorldSimulationSessionEntry_ACU['kind'], string> = {
   main_action: '主 Agent',
   protocol_retry: '重试',
   tool_read: '取证',
+  write_sql: '写入',
   delegation: '子代理',
   stage_plan: '阶段计划',
   handoff: '交接',
@@ -114,7 +115,7 @@ const KIND_LABELS: Record<WorldSimulationSessionEntry_ACU['kind'], string> = {
 
 /** 会话流展示沿用「各 Agent 渠道」里的中文角色名，内部 agentName 不直接暴露给用户（与 ContinuationSessionFeed 同构）。 */
 function kindLabel(entry: WorldSimulationSessionEntry_ACU): string {
-  if ((entry.kind === 'delegation' || entry.kind === 'stage_plan') && entry.agentName) {
+  if ((entry.kind === 'delegation' || entry.kind === 'stage_plan' || entry.kind === 'write_sql') && entry.agentName) {
     return worldSimulationAgentLabel_ACU(entry.agentName);
   }
   return KIND_LABELS[entry.kind];
@@ -185,7 +186,7 @@ watch(() => props.entries.length, async (length, previous) => {
 
 /* 工具调用卡片 */
 .acu-v2-session-feed__card { border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 8px; background: var(--acu-bg-2); animation: acu-v2-session-feed-in 0.18s ease-out; overflow: hidden; }
-.acu-v2-session-feed__card--delegation, .acu-v2-session-feed__card--stage_plan, .acu-v2-session-feed__card--tool_read { margin-left: 16px; }
+.acu-v2-session-feed__card--delegation, .acu-v2-session-feed__card--stage_plan, .acu-v2-session-feed__card--tool_read, .acu-v2-session-feed__card--write_sql { margin-left: 16px; }
 .acu-v2-session-feed__card--finalize, .acu-v2-session-feed__card--run_completed { border-left: 3px solid color-mix(in srgb, var(--acu-success, #4fa36c) 75%, transparent); background: color-mix(in srgb, var(--acu-success, #4fa36c) 7%, var(--acu-bg-2)); }
 .acu-v2-session-feed__card--failed { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent); background: color-mix(in srgb, var(--acu-danger, #d65b5b) 6%, var(--acu-bg-2)); }
 .acu-v2-session-feed__card--running { border-left: 3px solid color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent); }
@@ -212,7 +213,7 @@ watch(() => props.entries.length, async (length, previous) => {
 @media (max-width: 640px) {
   .acu-v2-session-feed { max-height: 62vh; padding: 8px; }
   .acu-v2-session-feed__protocol { margin-left: 8px; }
-  .acu-v2-session-feed__card--delegation, .acu-v2-session-feed__card--stage_plan, .acu-v2-session-feed__card--tool_read { margin-left: 8px; }
+  .acu-v2-session-feed__card--delegation, .acu-v2-session-feed__card--stage_plan, .acu-v2-session-feed__card--tool_read, .acu-v2-session-feed__card--write_sql { margin-left: 8px; }
   .acu-v2-session-feed__card-head { padding: 7px 8px; gap: 6px; }
   .acu-v2-session-feed__preview { padding: 0 8px 7px 12px; }
   .acu-v2-session-feed__detail { padding: 0 8px 8px 12px; }
