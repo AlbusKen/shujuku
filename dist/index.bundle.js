@@ -159459,7 +159459,67 @@ Expected function or array of functions, received type ${typeof value}.`
         return applied;
     }
 
+    const START_V1_ACU = '<!-- qrf-world-simulation-projection:v1:start -->';
+    const END_V1_ACU = '<!-- qrf-world-simulation-projection:v1:end -->';
+    const START_ACU = '<!-- qrf-world-simulation-projection:v2:start -->';
+    const END_ACU = '<!-- qrf-world-simulation-projection:v2:end -->';
+    const escape_ACU = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const OWNED_BLOCK_ACU = new RegExp(`(?:\\r?\\n)*(?:${escape_ACU(START_V1_ACU)}[\\s\\S]*?${escape_ACU(END_V1_ACU)}|${escape_ACU(START_ACU)}[\\s\\S]*?${escape_ACU(END_ACU)})(?:\\r?\\n)*`, 'g');
+    const SECTION_ORDER_ACU = ['encounter', 'rumor', 'ambient'];
+    const SECTION_LABELS_ACU = {
+        encounter: '【此地此刻】',
+        rumor: '【风闻轶事】',
+        ambient: '【世界暗流】',
+    };
+    function buildWorldSimulationProjection_ACU(ledger) {
+        const grouped = { encounter: [], rumor: [], ambient: [] };
+        for (const signal of ledger.guidance.signals) {
+            const text = signal.text.trim();
+            if (text)
+                grouped[signal.voice].push(text);
+        }
+        const sections = SECTION_ORDER_ACU.flatMap(voice => {
+            const items = grouped[voice];
+            return items.length ? [`${SECTION_LABELS_ACU[voice]}\n${items.map(item => `- ${item}`).join('\n')}`] : [];
+        });
+        if (!sections.length)
+            return null;
+        return `${START_ACU}\n<与此同时>\n${sections.join('\n')}\n</与此同时>\n${END_ACU}`;
+    }
+    /** Prompt-only view: never use this text for anchor identity or persistent content. */
+    function stripWritingAnnotations_ACU(text) {
+        return String(text ?? '').replace(/<!--[\s\S]*?-->/g, '').replace(/(?:\r?\n){3,}/g, '\n\n');
+    }
+    function applyWorldSimulationProjection_ACU(content, projection) {
+        const base = String(content ?? '').replace(OWNED_BLOCK_ACU, '').trimEnd();
+        return projection ? `${base}${base ? '\n\n' : ''}${projection}` : base;
+    }
+    function readWorldSimulationMessageContent_ACU(message) {
+        return typeof message.mes === 'string' ? message.mes : typeof message.message === 'string' ? message.message : '';
+    }
+    function writeWorldSimulationActiveSwipeContent_ACU(message, content) {
+        if (typeof message.mes === 'string' || typeof message.message !== 'string')
+            message.mes = content;
+        else
+            message.message = content;
+        const swipeId = typeof message.swipe_id === 'number' && Number.isInteger(message.swipe_id) && message.swipe_id >= 0 ? message.swipe_id : 0;
+        if (Array.isArray(message.swipes)) {
+            if (swipeId >= message.swipes.length)
+                throw new Error('WORLD_SIMULATION_ACTIVE_SWIPE_INVALID');
+            message.swipes[swipeId] = content;
+        }
+    }
+    const WORLD_SIMULATION_PROJECTION_MARKERS_ACU = { start: START_ACU, end: END_ACU };
+
     /** 续写子代理逐栏 SQL：楼层帧是权威，SQLite 只负责复算。 */
+    /**
+     * 派工目标正文的比对口径：剥掉格林推演写入的「与此同时」投影块再比。
+     * 推演会在续写运行中把投影块追加进同一 AI 楼层的正文，那不是正文模型产出的内容变化；
+     * 按原文逐字比对会让首次保存之后的每次提交都被判为「目标楼层已变化」。
+     */
+    function dispatchContent_ACU(value) {
+        return typeof value === 'string' ? applyWorldSimulationProjection_ACU(value, null) : value;
+    }
     const ROLE_MODULES_ACU = {
         'arc-architect': ['storyArc'],
         'hook-cognition-maintainer': ['hooks', 'infoGap', 'chronology'],
@@ -159881,7 +159941,7 @@ Expected function or array of functions, received type ${typeof value}.`
         const run = prior.catch(() => { }).then(async () => {
             const dispatchTargetCurrent = () => !input.dispatchTarget || (input.chat[input.targetIndex] === input.dispatchTarget.message
                 && readMessageSwipeId_ACU(input.chat[input.targetIndex]) === input.dispatchTarget.swipeId
-                && input.chat[input.targetIndex]?.mes === input.dispatchTarget.content);
+                && dispatchContent_ACU(input.chat[input.targetIndex]?.mes) === dispatchContent_ACU(input.dispatchTarget.content));
             const isCurrent = () => (input.isCurrent?.() ?? true) && dispatchTargetCurrent();
             const parsed = parseAgentModuleSqlFieldWrites_ACU(input.sql, input.role);
             const folded = readAgentModuleFoldState_ACU(input.chat);
@@ -161725,7 +161785,8 @@ Expected function or array of functions, received type ${typeof value}.`
                                 if (!input.isCurrent(identity) || input.signal?.aborted)
                                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '写入回执已失效', false));
                                 recordWriteReceipt(receipt);
-                                const rejectedPaths = receipt.rejected.map(item => item.path).join('；');
+                                // 路径之外必须带上原因：只显示 host / chat 时用户无从判断是租约失效、宿主保存失败还是字段非法。
+                                const rejectedPaths = receipt.rejected.map(item => item.reason ? `${item.path}（${item.reason}）` : item.path).join('；');
                                 updateAgentSession_ACU(writeEntryId, {
                                     ok: receipt.status === 'committed',
                                     status: receipt.status === 'committed' ? 'done' : 'failed',
@@ -167057,58 +167118,6 @@ Expected function or array of functions, received type ${typeof value}.`
             return { problem: notes.find(note => note.severity === 'blocking')?.message ?? `${path}.${field} 不允许写入` };
         return { value: target[field] };
     }
-
-    const START_V1_ACU = '<!-- qrf-world-simulation-projection:v1:start -->';
-    const END_V1_ACU = '<!-- qrf-world-simulation-projection:v1:end -->';
-    const START_ACU = '<!-- qrf-world-simulation-projection:v2:start -->';
-    const END_ACU = '<!-- qrf-world-simulation-projection:v2:end -->';
-    const escape_ACU = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const OWNED_BLOCK_ACU = new RegExp(`(?:\\r?\\n)*(?:${escape_ACU(START_V1_ACU)}[\\s\\S]*?${escape_ACU(END_V1_ACU)}|${escape_ACU(START_ACU)}[\\s\\S]*?${escape_ACU(END_ACU)})(?:\\r?\\n)*`, 'g');
-    const SECTION_ORDER_ACU = ['encounter', 'rumor', 'ambient'];
-    const SECTION_LABELS_ACU = {
-        encounter: '【此地此刻】',
-        rumor: '【风闻轶事】',
-        ambient: '【世界暗流】',
-    };
-    function buildWorldSimulationProjection_ACU(ledger) {
-        const grouped = { encounter: [], rumor: [], ambient: [] };
-        for (const signal of ledger.guidance.signals) {
-            const text = signal.text.trim();
-            if (text)
-                grouped[signal.voice].push(text);
-        }
-        const sections = SECTION_ORDER_ACU.flatMap(voice => {
-            const items = grouped[voice];
-            return items.length ? [`${SECTION_LABELS_ACU[voice]}\n${items.map(item => `- ${item}`).join('\n')}`] : [];
-        });
-        if (!sections.length)
-            return null;
-        return `${START_ACU}\n<与此同时>\n${sections.join('\n')}\n</与此同时>\n${END_ACU}`;
-    }
-    /** Prompt-only view: never use this text for anchor identity or persistent content. */
-    function stripWritingAnnotations_ACU(text) {
-        return String(text ?? '').replace(/<!--[\s\S]*?-->/g, '').replace(/(?:\r?\n){3,}/g, '\n\n');
-    }
-    function applyWorldSimulationProjection_ACU(content, projection) {
-        const base = String(content ?? '').replace(OWNED_BLOCK_ACU, '').trimEnd();
-        return projection ? `${base}${base ? '\n\n' : ''}${projection}` : base;
-    }
-    function readWorldSimulationMessageContent_ACU(message) {
-        return typeof message.mes === 'string' ? message.mes : typeof message.message === 'string' ? message.message : '';
-    }
-    function writeWorldSimulationActiveSwipeContent_ACU(message, content) {
-        if (typeof message.mes === 'string' || typeof message.message !== 'string')
-            message.mes = content;
-        else
-            message.message = content;
-        const swipeId = typeof message.swipe_id === 'number' && Number.isInteger(message.swipe_id) && message.swipe_id >= 0 ? message.swipe_id : 0;
-        if (Array.isArray(message.swipes)) {
-            if (swipeId >= message.swipes.length)
-                throw new Error('WORLD_SIMULATION_ACTIVE_SWIPE_INVALID');
-            message.swipes[swipeId] = content;
-        }
-    }
-    const WORLD_SIMULATION_PROJECTION_MARKERS_ACU = { start: START_ACU, end: END_ACU };
 
     const SCAN_LIMIT_ACU = 6;
     const TERMINALS_ACU = ['commit', 'no_change', 'blocked'];

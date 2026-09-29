@@ -14,6 +14,16 @@ import { agentModuleFrameDeps_ACU, captureAgentModuleCommitBaseline_ACU, readAge
 import { parseAgentModuleSqlFieldWrites_ACU, type AgentModuleSqlFieldIntent_ACU, type AgentModuleSqlFieldRejection_ACU } from './agent-protocol';
 import { applyAgentModuleDelta_ACU, applyAgentWebRefsDelta_ACU, nextAgentWebRefId_ACU } from './agent-transaction';
 import { agentStoryEvidenceFloorIndexes_ACU } from './agent-placeholder-resolver';
+import { applyWorldSimulationProjection_ACU } from '../../simulation/simulation-projection';
+
+/**
+ * 派工目标正文的比对口径：剥掉格林推演写入的「与此同时」投影块再比。
+ * 推演会在续写运行中把投影块追加进同一 AI 楼层的正文，那不是正文模型产出的内容变化；
+ * 按原文逐字比对会让首次保存之后的每次提交都被判为「目标楼层已变化」。
+ */
+function dispatchContent_ACU(value: unknown): unknown {
+  return typeof value === 'string' ? applyWorldSimulationProjection_ACU(value, null) : value;
+}
 
 type Module_ACU = 'hooks' | 'infoGap' | 'storyArc' | 'chronology' | 'webRefs';
 const ROLE_MODULES_ACU: Readonly<Partial<Record<AgentSubagentName_ACU, readonly AgentWritableModule_ACU[]>>> = {
@@ -399,7 +409,7 @@ export function commitAgentModuleFieldWrites_ACU(input: {
   const run = prior.catch(() => {}).then(async (): Promise<AgentModuleFieldReceipt_ACU> => {
     const dispatchTargetCurrent = () => !input.dispatchTarget || (input.chat[input.targetIndex] === input.dispatchTarget.message
       && readMessageSwipeId_ACU(input.chat[input.targetIndex]) === input.dispatchTarget.swipeId
-      && input.chat[input.targetIndex]?.mes === input.dispatchTarget.content);
+      && dispatchContent_ACU(input.chat[input.targetIndex]?.mes) === dispatchContent_ACU(input.dispatchTarget.content));
     const isCurrent = () => (input.isCurrent?.() ?? true) && dispatchTargetCurrent();
     const parsed = parseAgentModuleSqlFieldWrites_ACU(input.sql, input.role);
     const folded = readAgentModuleFoldState_ACU(input.chat);

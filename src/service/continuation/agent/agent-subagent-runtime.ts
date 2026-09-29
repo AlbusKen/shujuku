@@ -1104,7 +1104,8 @@ export class AgentSubagentRuntime_ACU {
               } });
               if (!input.isCurrent(identity) || input.signal?.aborted) throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '写入回执已失效', false));
               recordWriteReceipt(receipt);
-              const rejectedPaths = receipt.rejected.map(item => item.path).join('；');
+              // 路径之外必须带上原因：只显示 host / chat 时用户无从判断是租约失效、宿主保存失败还是字段非法。
+              const rejectedPaths = receipt.rejected.map(item => item.reason ? `${item.path}（${item.reason}）` : item.path).join('；');
               updateAgentSession_ACU(writeEntryId, {
                 ok: receipt.status === 'committed',
                 status: receipt.status === 'committed' ? 'done' : 'failed',
