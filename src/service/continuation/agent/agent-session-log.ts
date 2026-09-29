@@ -14,6 +14,7 @@ export type AgentSessionEventKind_ACU =
   | 'main_action'
   | 'protocol_retry'
   | 'tool_read'
+  | 'write_sql'
   | 'delegation'
   | 'outline_op'
   | 'handoff'
@@ -58,6 +59,13 @@ const SESSION_ENTRY_LIMIT_ACU = 300;
 /** 单条 detail 的字符上限。会话流展示要点，不承载完整提示词或正文。 */
 const SESSION_DETAIL_LIMIT_ACU = 2000;
 
+/** write_sql 的 detail 是整批 SQL 原文与回执，2000 字会把多语句批次截断，单独放宽。 */
+const SESSION_SQL_DETAIL_LIMIT_ACU = 6000;
+
+function detailLimit_ACU(kind: AgentSessionEventKind_ACU): number {
+  return kind === 'write_sql' ? SESSION_SQL_DETAIL_LIMIT_ACU : SESSION_DETAIL_LIMIT_ACU;
+}
+
 let entries_ACU: AgentSessionEntry_ACU[] = [];
 let nextId_ACU = 1;
 let running_ACU = false;
@@ -69,9 +77,10 @@ function notify_ACU(): void {
   }
 }
 
-function truncateDetail_ACU(text: string): string {
-  if (text.length <= SESSION_DETAIL_LIMIT_ACU) return text;
-  return `${text.slice(0, SESSION_DETAIL_LIMIT_ACU)}\n（内容过长，已截断）`;
+function truncateDetail_ACU(text: string, kind: AgentSessionEventKind_ACU): string {
+  const limit = detailLimit_ACU(kind);
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit)}\n（内容过长，已截断）`;
 }
 
 /**
@@ -102,7 +111,7 @@ export function logAgentSession_ACU(input: AgentSessionEventInput_ACU): number {
     at: Date.now(),
     kind: input.kind,
     title: input.title,
-    detail: truncateDetail_ACU(String(input.detail ?? '')),
+    detail: truncateDetail_ACU(String(input.detail ?? ''), input.kind),
     agentName: String(input.agentName ?? ''),
     ok,
     status: input.status ?? (ok ? 'done' : 'failed'),
@@ -122,7 +131,7 @@ export function updateAgentSession_ACU(id: number, patch: AgentSessionEntryPatch
   const entry = entries_ACU.find(item => item.id === id);
   if (!entry) return;
   if (patch.title !== undefined) entry.title = patch.title;
-  if (patch.detail !== undefined) entry.detail = truncateDetail_ACU(String(patch.detail));
+  if (patch.detail !== undefined) entry.detail = truncateDetail_ACU(String(patch.detail), entry.kind);
   if (patch.ok !== undefined) entry.ok = patch.ok;
   if (patch.status !== undefined) entry.status = patch.status;
   else if (patch.ok !== undefined) entry.status = patch.ok ? 'done' : 'failed';
@@ -163,7 +172,7 @@ export function hydrateAgentSessionLog_ACU(items: readonly AgentSessionEventInpu
       at: Date.now(),
       kind: item.kind,
       title: item.title,
-      detail: truncateDetail_ACU(String(item.detail ?? '')),
+      detail: truncateDetail_ACU(String(item.detail ?? ''), item.kind),
       agentName: String(item.agentName ?? ''),
       ok,
       status: item.status ?? (ok ? 'done' : 'failed'),

@@ -51,6 +51,26 @@ describe('Agent 会话日志', () => {
     expect(last.detail.length).toBeLessThan(2100);
     expect(last.detail).toContain('已截断');
   });
+  it('write_sql 的 detail 上限单独放宽，其它 kind 仍按 2000 截断', () => {
+    beginAgentSessionRun_ACU('运行');
+    // SQL 原文按 2000 截断会把多语句批次切断，write_sql 单独放宽到 6000。
+    logAgentSession_ACU({ kind: 'write_sql', title: '提交 SQL', detail: 'S'.repeat(5000) });
+    const sqlEntry = readAgentSessionLog_ACU().at(-1)!;
+    expect(sqlEntry.detail).toHaveLength(5000);
+    expect(sqlEntry.detail).not.toContain('已截断');
+    // 超过放宽后的上限仍然截断，不允许无界增长。
+    logAgentSession_ACU({ kind: 'write_sql', title: '提交 SQL', detail: 'S'.repeat(7000) });
+    expect(readAgentSessionLog_ACU().at(-1)!.detail).toContain('已截断');
+    // 其它 kind 不受影响。
+    logAgentSession_ACU({ kind: 'main_action', title: '长内容', detail: '长'.repeat(3000) });
+    expect(readAgentSessionLog_ACU().at(-1)!.detail).toContain('已截断');
+    // 原地更新按条目自身 kind 判定上限，不会把已写入的 SQL 原文再截短。
+    const id = logAgentSession_ACU({ kind: 'write_sql', title: '提交 SQL', detail: 'x' });
+    updateAgentSession_ACU(id, { detail: 'S'.repeat(5000) });
+    expect(readAgentSessionLog_ACU().find(entry => entry.id === id)!.detail).toHaveLength(5000);
+  });
+
+
 
   it('恢复运行时保留既有条目并追加 run_resumed 分隔', () => {
     beginAgentSessionRun_ACU('第 1 阶段 · 第 2/9 轮');

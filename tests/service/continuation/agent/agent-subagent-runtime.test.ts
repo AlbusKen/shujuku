@@ -243,7 +243,8 @@ it('普通角色伪造原生 search 时拒绝执行，保留工具回执', async
   });
   const result = await runtime.run(input);
   expect(result.expandedReads).toEqual([]);
-  expect(toolContent_ACU(sent[1], 'forged-search')).toContain('未授权本地搜索');
+  // 原生工具调用统一由 profile 授权表拦下；「未授权本地搜索」只出现在旧 JSON 文本协议路径。
+  expect(toolContent_ACU(sent[1], 'forged-search')).toContain('未获当前角色 profile 授权');
 });
 
 
@@ -892,6 +893,47 @@ describe('子代理逐栏工具会话', () => {
       expect(result.acceptedKeys).toContain('hooks:H1:summary');
     } finally { _set_SillyTavern_API_ACU(null as any); }
   });
+  it('提交的 SQL 原文进会话流，宿主异常时同一条目回写为失败', async () => {
+    const { vi } = await import('vitest');
+    const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');
+    const { commitAgentModuleFieldWrites_ACU } = await import('../../../../src/service/continuation/agent/agent-module-field-commit');
+    const { readAgentSessionLog_ACU, resetAgentSessionLogForTests_ACU } = await import('../../../../src/service/continuation/agent/agent-session-log');
+    const sql = "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '信件', 0)";
+
+    // 真实提交：SQL 原文必须进会话流，用户才能看到这一轮究竟写了什么。
+    resetAgentSessionLogForTests_ACU();
+    const input = input_ACU();
+    const chat = input.resolveContext.chat;
+    _set_SillyTavern_API_ACU({ chat, saveChat: vi.fn().mockResolvedValue(undefined) } as any);
+    const replies = [nativeToolTurn_ACU('write_sql', { sql }, 'call-log-write'), finalReply_ACU];
+    input.writeSql = ({ role, sql: statement, isCurrent }) => commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role, sql: statement, isCurrent });
+    try {
+      await new AgentSubagentRuntime_ACU({ resolveApiPreset: (() => preset_ACU) as any,
+        callInternalAi: async () => replies.shift() ?? finalReply_ACU }).run(input);
+      const entry = readAgentSessionLog_ACU().find(item => item.kind === 'write_sql');
+      expect(entry).toBeTruthy();
+      expect(entry!.detail).toContain(sql);
+      expect(entry!.agentName).not.toBe('');
+      expect(entry!.status).not.toBe('running');
+    } finally { _set_SillyTavern_API_ACU(null as any); }
+
+    // 宿主异常：同一条目回写为失败并带上原因，不能只剩一个 running 条目悬着。
+    resetAgentSessionLogForTests_ACU();
+    const failing = input_ACU();
+    _set_SillyTavern_API_ACU({ chat: failing.resolveContext.chat, saveChat: vi.fn().mockResolvedValue(undefined) } as any);
+    failing.writeSql = async () => { throw new Error('宿主保存通道异常'); };
+    const failingReplies = [nativeToolTurn_ACU('write_sql', { sql }, 'call-log-write-failed'), finalReply_ACU];
+    try {
+      await new AgentSubagentRuntime_ACU({ resolveApiPreset: (() => preset_ACU) as any,
+        callInternalAi: async () => failingReplies.shift() ?? finalReply_ACU }).run(failing);
+      const entry = readAgentSessionLog_ACU().find(item => item.kind === 'write_sql');
+      expect(entry).toMatchObject({ ok: false, status: 'failed' });
+      expect(entry!.detail).toContain(sql);
+      expect(entry!.detail).toContain('宿主保存通道异常');
+    } finally { _set_SillyTavern_API_ACU(null as any); }
+  });
+
+
 
   it('无效 write_sql 动作只回灌协议拒绝，修正后才进入生产保存', async () => {
     const { vi } = await import('vitest');

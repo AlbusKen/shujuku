@@ -30,7 +30,7 @@ describe('格林推演提示词装配契约', () => {
     }
   });
 
-  it('转义动态材料、拒绝缺失 resolver 与非法 seam', async () => {
+  it('转义动态材料、拒绝缺失 resolver；段落顺序与增删自由，仅保留字段与用户要求段约束', async () => {
     const prompt = buildDefaultWorldSimulationAgentPrompts_ACU()['world-director'];
     const registry = createWorldSimulationEvidenceRegistry_ACU('prompt');
     const snapshot = snapshotWorldSimulationEvidenceRegistry_ACU(registry);
@@ -42,7 +42,13 @@ describe('格林推演提示词装配契约', () => {
     expect(rendered.messages.map(item => item.content).join('\n')).not.toMatch(/\$[A-Z][A-Z0-9_]*/);
     expect(resolvers['$WORLD_COLLISIONS']()).toBe(JSON.stringify(worldCollisions));
     await expect(renderWorldSimulationPrompt_ACU(prompt, 'world-director', {})).rejects.toThrow(/resolver/);
-    expect(() => validateWorldSimulationAgentPrompts_ACU({ ...buildDefaultWorldSimulationAgentPrompts_ACU(), 'world-director': prompt.slice(1) })).toThrow(/seam/);
+    // seam 强约束已移除：段落顺序、数量与增删都交给使用者，删掉首段不再报错。
+    expect(() => validateWorldSimulationAgentPrompts_ACU({ ...buildDefaultWorldSimulationAgentPrompts_ACU(), 'world-director': prompt.slice(1) })).not.toThrow();
+    // 调换顺序同样合法。
+    expect(() => validateWorldSimulationAgentPrompts_ACU({ ...buildDefaultWorldSimulationAgentPrompts_ACU(), 'world-director': [...prompt].reverse() })).not.toThrow();
+    // 仍然拦住的两条：段字段非法、用户要求段不唯一。
+    expect(() => validateWorldSimulationAgentPrompts_ACU({ ...buildDefaultWorldSimulationAgentPrompts_ACU(), 'world-director': [{ role: 'system', content: '', enabled: true, deletable: true, pinned: false }] })).toThrow();
+    expect(() => validateWorldSimulationAgentPrompts_ACU({ ...buildDefaultWorldSimulationAgentPrompts_ACU(), 'world-director': [...prompt, prompt.find(item => item.content.includes('$WORLD_USER_REQUIREMENTS'))!] })).toThrow(/用户要求/);
   });
 
   it('导入导出、恢复默认迁移与协议示例闭合', () => {

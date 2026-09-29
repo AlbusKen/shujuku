@@ -24,6 +24,7 @@ import {
   type ContinuationSettings_ACU,
 } from '../model';
 import { AGENT_PREFILLS_ACU, buildDefaultContinuationAgentPrompts_ACU } from './agent-defaults';
+import { logAgentSession_ACU, updateAgentSession_ACU } from './agent-session-log';
 import { findMainSessionReadAppendix_ACU, keptSubagentMaterialTokens_ACU, omitSnapshotSectionsForSubagent_ACU, renderFallbackAgentSnapshot_ACU, stripUnownedSubagentPrompt_ACU } from './agent-shared-materials';
 import { agentNativeTools_ACU, nativeToolArguments_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, withNativeToolThinkPrefill_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
 import { hasActiveStoryArc_ACU, readAgentModuleFoldState_ACU, readAgentModuleSnapshot_ACU } from './agent-module-store';
@@ -1088,6 +1089,10 @@ export class AgentSubagentRuntime_ACU {
             }
             writeRoundsUsed += 1;
             writeAttempted = true;
+            // 提交的 SQL 原文进会话流：用户要能看到这一轮究竟写了什么，而不只是成功或失败。
+            // 同一条目在通过、被拒、宿主异常三种结局下回写，避免内容与结论分家。
+            const writeEntryId = logAgentSession_ACU({ kind: 'write_sql', agentName: definition.name, status: 'running',
+              title: `提交 SQL（${call.sql.split(';').filter(part => part.trim()).length} 条语句）`, detail: call.sql });
             if (!input.isCurrent(identity) || input.signal?.aborted) {
               throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '写入请求已失效', false));
             }
@@ -1099,6 +1104,13 @@ export class AgentSubagentRuntime_ACU {
               } });
               if (!input.isCurrent(identity) || input.signal?.aborted) throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '写入回执已失效', false));
               recordWriteReceipt(receipt);
+              const rejectedPaths = receipt.rejected.map(item => item.path).join('；');
+              updateAgentSession_ACU(writeEntryId, {
+                ok: receipt.status === 'committed',
+                status: receipt.status === 'committed' ? 'done' : 'failed',
+                title: receipt.status === 'committed' ? `已保存 ${receipt.accepted.length} 栏` : '提交被拒',
+                ...(rejectedPaths ? { detail: `${call.sql}\n未采纳：${rejectedPaths}` } : {}),
+              });
               if (receipt.status === 'committed') {
                 committedWriteObserved = true;
                 usedFieldWrites = true;
@@ -1123,6 +1135,8 @@ export class AgentSubagentRuntime_ACU {
             } catch (error) {
               if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE') throw error;
               writeStateUnknown = true;
+              updateAgentSession_ACU(writeEntryId, { ok: false, status: 'failed', title: '提交失败，保存状态无法确认',
+                detail: `${call.sql}\n失败原因：${compactAgentProtocolError_ACU(error)}` });
               writeProblems.set('host', { module: writes[0], source: 'invoke_failed', path: 'host', message: compactAgentProtocolError_ACU(error) });
               const unknownResult = `${JSON.stringify({ action: 'write_sql', originalSql: call.sql, status: 'rejected', accepted: [],
                 rejected: [{ path: 'host', reason: compactAgentProtocolError_ACU(error) }], partials: null, revisions: null,

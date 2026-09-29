@@ -93079,14 +93079,10 @@ $CONTENT
     const WORLD_SIMULATION_MESSAGE_KINDS_ACU = ['user', 'agent', 'tool', 'runtime', 'turn', 'handoff', 'model_agent', 'model_feedback'];
 
     /**
-     * 每个 seam 允许的消息身份。v28 把运行逻辑从 system 搬进「user 提问 + assistant 自述」，
-     * WORKFLOW 因此同时允许 system（v21-v27 历史默认）与 user（v28 问答首问）；
-     * 其余 seam 仍是唯一身份，避免装配链路无法判断段落用途。
+     * 段落校验只管字段与占位符，不再强制 seam 必须存在、唯一、按序、固定身份或 pinned。
+     * 与智能续写同一口径：段落的顺序、数量与增删都交给使用者，改提示词结构不必先改校验。
+     * seam 标记文本仍留在默认段里，装配链路与迁移谱系按它定位段落用途。
      */
-    const SEAM_ROLES_ACU = {
-        ROOT: ['system'], ROLE_RULES: ['system'], PROTOCOL: ['system'], WORKFLOW: ['system', 'user'],
-        HISTORY: ['user'], RUNTIME_CONTEXT: ['user'], ACKNOWLEDGEMENT: ['assistant'], EXECUTION_BOUNDARY: ['user'],
-    };
     const PLACEHOLDER_PATTERN_ACU = /\$[A-Z][A-Z0-9_]*/g;
     function fail_ACU$7(message, details, phase = 'load') {
         throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU('WORLD_SIMULATION_CONFIG_INVALID', phase, message, false, details));
@@ -93106,17 +93102,6 @@ $CONTENT
                 fail_ACU$7('提示词段开关非法', { agentName, index }, phase);
             return { role: raw.role, content: raw.content, enabled: raw.enabled, deletable: raw.deletable, pinned: raw.pinned };
         });
-        let cursor = -1;
-        for (const seam of WORLD_SIMULATION_ENGINE_SEAMS_ACU) {
-            const marker = worldSimulationSeamMarker_ACU(seam);
-            const matches = result.map((segment, index) => segment.content.includes(marker) ? index : -1).filter(index => index >= 0);
-            if (matches.length !== 1 || matches[0] <= cursor)
-                fail_ACU$7('engine seam 缺失、重复或错序', { agentName, seam }, phase);
-            const segment = result[matches[0]];
-            if (!SEAM_ROLES_ACU[seam].includes(segment.role) || !segment.enabled || segment.deletable || !segment.pinned)
-                fail_ACU$7('engine seam 属性非法', { agentName, seam }, phase);
-            cursor = matches[0];
-        }
         const guidance = result.filter(segment => segment.content.includes('$WORLD_USER_REQUIREMENTS') || segment.content.includes('$WORLD_USER_GUIDANCE'));
         if (guidance.length !== 1 || !guidance[0].enabled || !guidance[0].deletable || guidance[0].pinned)
             fail_ACU$7('用户要求/guidance 段必须唯一、启用且可编辑', { agentName }, phase);
@@ -128706,8 +128691,12 @@ $CONTENT
         const swipeId = message.swipe_id;
         return typeof swipeId === 'number' && Number.isInteger(swipeId) && swipeId >= 0 ? String(swipeId) : '0';
     }
+    /**
+     * AI 楼层判定统一委托给唯一权威实现。此处原本只判 !is_user，没有排除 narrator 系统旁白，
+     * 会把旁白当成 AI 楼层写入 checkpoint / delta（调用点：折叠重定位、首基线落点、提交目标校验）。
+     */
     function isAiMessage_ACU(message) {
-        return isRecord_ACU$j(message) && message.is_user !== true;
+        return isRecord_ACU$j(message) && isAiMessage_ACU$1(message);
     }
     function latestAiIndex_ACU(chat) {
         for (let index = chat.length - 1; index >= 0; index -= 1) {
@@ -155115,6 +155104,11 @@ Expected function or array of functions, received type ${typeof value}.`
     const SESSION_ENTRY_LIMIT_ACU = 300;
     /** 单条 detail 的字符上限。会话流展示要点，不承载完整提示词或正文。 */
     const SESSION_DETAIL_LIMIT_ACU = 2000;
+    /** write_sql 的 detail 是整批 SQL 原文与回执，2000 字会把多语句批次截断，单独放宽。 */
+    const SESSION_SQL_DETAIL_LIMIT_ACU = 6000;
+    function detailLimit_ACU$1(kind) {
+        return kind === 'write_sql' ? SESSION_SQL_DETAIL_LIMIT_ACU : SESSION_DETAIL_LIMIT_ACU;
+    }
     let entries_ACU = [];
     let nextId_ACU = 1;
     let running_ACU = false;
@@ -155127,10 +155121,11 @@ Expected function or array of functions, received type ${typeof value}.`
             catch { /* 订阅者异常不允许影响续写循环。 */ }
         }
     }
-    function truncateDetail_ACU(text) {
-        if (text.length <= SESSION_DETAIL_LIMIT_ACU)
+    function truncateDetail_ACU(text, kind) {
+        const limit = detailLimit_ACU$1(kind);
+        if (text.length <= limit)
             return text;
-        return `${text.slice(0, SESSION_DETAIL_LIMIT_ACU)}\n（内容过长，已截断）`;
+        return `${text.slice(0, limit)}\n（内容过长，已截断）`;
     }
     /**
      * 开始一次新的运行。
@@ -155159,7 +155154,7 @@ Expected function or array of functions, received type ${typeof value}.`
             at: Date.now(),
             kind: input.kind,
             title: input.title,
-            detail: truncateDetail_ACU(String(input.detail ?? '')),
+            detail: truncateDetail_ACU(String(input.detail ?? ''), input.kind),
             agentName: String(input.agentName ?? ''),
             ok,
             status: input.status ?? (ok ? 'done' : 'failed'),
@@ -155183,7 +155178,7 @@ Expected function or array of functions, received type ${typeof value}.`
         if (patch.title !== undefined)
             entry.title = patch.title;
         if (patch.detail !== undefined)
-            entry.detail = truncateDetail_ACU(String(patch.detail));
+            entry.detail = truncateDetail_ACU(String(patch.detail), entry.kind);
         if (patch.ok !== undefined)
             entry.ok = patch.ok;
         if (patch.status !== undefined)
@@ -155225,7 +155220,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 at: Date.now(),
                 kind: item.kind,
                 title: item.title,
-                detail: truncateDetail_ACU(String(item.detail ?? '')),
+                detail: truncateDetail_ACU(String(item.detail ?? ''), item.kind),
                 agentName: String(item.agentName ?? ''),
                 ok,
                 status: item.status ?? (ok ? 'done' : 'failed'),
@@ -161160,6 +161155,10 @@ Expected function or array of functions, received type ${typeof value}.`
                             }
                             writeRoundsUsed += 1;
                             writeAttempted = true;
+                            // 提交的 SQL 原文进会话流：用户要能看到这一轮究竟写了什么，而不只是成功或失败。
+                            // 同一条目在通过、被拒、宿主异常三种结局下回写，避免内容与结论分家。
+                            const writeEntryId = logAgentSession_ACU({ kind: 'write_sql', agentName: definition.name, status: 'running',
+                                title: `提交 SQL（${call.sql.split(';').filter(part => part.trim()).length} 条语句）`, detail: call.sql });
                             if (!input.isCurrent(identity) || input.signal?.aborted) {
                                 throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '写入请求已失效', false));
                             }
@@ -161172,6 +161171,13 @@ Expected function or array of functions, received type ${typeof value}.`
                                 if (!input.isCurrent(identity) || input.signal?.aborted)
                                     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '写入回执已失效', false));
                                 recordWriteReceipt(receipt);
+                                const rejectedPaths = receipt.rejected.map(item => item.path).join('；');
+                                updateAgentSession_ACU(writeEntryId, {
+                                    ok: receipt.status === 'committed',
+                                    status: receipt.status === 'committed' ? 'done' : 'failed',
+                                    title: receipt.status === 'committed' ? `已保存 ${receipt.accepted.length} 栏` : '提交被拒',
+                                    ...(rejectedPaths ? { detail: `${call.sql}\n未采纳：${rejectedPaths}` } : {}),
+                                });
                                 if (receipt.status === 'committed') {
                                     committedWriteObserved = true;
                                     usedFieldWrites = true;
@@ -161200,6 +161206,8 @@ Expected function or array of functions, received type ${typeof value}.`
                                 if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE')
                                     throw error;
                                 writeStateUnknown = true;
+                                updateAgentSession_ACU(writeEntryId, { ok: false, status: 'failed', title: '提交失败，保存状态无法确认',
+                                    detail: `${call.sql}\n失败原因：${compactAgentProtocolError_ACU(error)}` });
                                 writeProblems.set('host', { module: writes[0], source: 'invoke_failed', path: 'host', message: compactAgentProtocolError_ACU(error) });
                                 const unknownResult = `${JSON.stringify({ action: 'write_sql', originalSql: call.sql, status: 'rejected', accepted: [],
                                 rejected: [{ path: 'host', reason: compactAgentProtocolError_ACU(error) }], partials: null, revisions: null,

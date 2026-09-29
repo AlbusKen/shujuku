@@ -24,6 +24,7 @@ import {
   type AgentModuleFieldValue_ACU,
   type AgentModuleFieldWrite_ACU,
 } from './agent-model';
+import { isAiMessage_ACU as isAiMessageAuthoritative_ACU } from '../../runtime/message-handler';
 
 export interface AgentModuleFrameDeps_ACU {
   validateSnapshot: (raw: unknown) => AgentModuleSnapshot_ACU | null;
@@ -133,9 +134,14 @@ export function readMessageSwipeId_ACU(message: unknown): string {
   return typeof swipeId === 'number' && Number.isInteger(swipeId) && swipeId >= 0 ? String(swipeId) : '0';
 }
 
+/**
+ * AI 楼层判定统一委托给唯一权威实现。此处原本只判 !is_user，没有排除 narrator 系统旁白，
+ * 会把旁白当成 AI 楼层写入 checkpoint / delta（调用点：折叠重定位、首基线落点、提交目标校验）。
+ */
 function isAiMessage_ACU(message: unknown): boolean {
-  return isRecord_ACU(message) && message.is_user !== true;
+  return isRecord_ACU(message) && isAiMessageAuthoritative_ACU(message);
 }
+
 
 function latestAiIndex_ACU(chat: readonly unknown[]): number {
   for (let index = chat.length - 1; index >= 0; index -= 1) {
