@@ -40,3 +40,6 @@ tsc-out*.txt
 vitest-*.txt
 temp_*.txt
 backups/pr8-review/
+
+# 本地导入的世界书/角色数据
+/_WNE-Core (1).json
