@@ -358,8 +358,9 @@ const ledgerGroups = computed<Array<{ key: string; label: string; items: LedgerC
       items: ledger.actors.map(item => ({
         id: item.id, title: item.name,
         badge: VISIBILITY_LABELS[item.visibility] ?? item.visibility,
-        detail: `位置：${item.location || '未知'} · 目标：${item.goals.join('、') || '无'}`,
-        meta: `利益：${item.interests.join('、') || '无'} · 已知：${item.knownFacts.join('、') || '无'}`,
+        // 正在做什么与预计耗时是本轮推演最需要看到的，放在首行；认知只作背景，压到次要行。
+        detail: `在做：${item.goals.join('；') || '无'} · 位置：${item.location || '未知'}`,
+        meta: `关注：${item.interests.join('、') || '无'} · 认知：${item.knownFacts.join('、') || '无'}`,
       })),
     },
     {

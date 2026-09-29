@@ -74,7 +74,8 @@ describe('一次性资料角色默认提示词', () => {
     const prompts = buildDefaultWorldSimulationAgentPrompts_ACU();
     const checks = {
       'undercurrent-analyst': ['clock 时序', 'dimensions 局势刻度', 'seeds 伏线', '局势刻度：', '存量伏线：', '期限：', '埋新线：', '交叉复核：'],
-      'dramatis-keeper': ['player 玩家所在与对外联络', 'actors 人物谱', '死亡伴生风声', '玩家：', '点名：', '在册人物逐个更新：', '认知边界：', '生死：'],
+      'dramatis-keeper': ['player 玩家所在与对外联络', 'actors 人物谱', '死亡伴生风声', '玩家：', '点名：', '在册人物逐个更新：', '认知：', '生死：'],
+
       'guidance-composer': ['chronicle 幕后纪要与成对归档', 'rumors 风声', 'guidance 场外信号', '幕后纪要：', '归档：', '风声：', '场外信号选题：', '旧信号清理：'],
     } as const;
     for (const role of roles) {

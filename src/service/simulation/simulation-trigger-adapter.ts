@@ -88,7 +88,15 @@ export async function resolveWorldSimulationAssistantCompletion_ACU(
     if (result.kind === 'invalid_intent') return { kind: 'blocked', reason: 'invalid_intent' };
     if (attempt < maxRetries) await (dependencies.delay ?? defaults_ACU.delay)(retryDelay);
   }
-  return { kind: 'blocked', reason: 'not_materialized' };
+  // 原地重新生成不新增楼层：捕获长度与 AI 数都没变，intent 的候选区间必然为空；宿主若同时换掉
+  // message_id，事件携带的旧 id 也命中不了，于是上面每一轮都只能拿到 pending_materialization。
+  // 这种情形下回退到当前最新 assistant 楼层，让重新生成后的正文能接着推演；若它其实就是上一轮
+  // 已结算的同一楼层，orchestrator 会按锚点四元组判重跳过，不会重复跑。
+  const settled = dependencies.getChat();
+  if (getActiveChatStorageIdentity_ACU(settled) !== chatIdentity) return { kind: 'blocked', reason: 'chat_changed' };
+  const latest = resolveLatestWorldSimulationAssistant_ACU(settled);
+  if (latest.kind !== 'resolved') return { kind: 'blocked', reason: 'not_materialized' };
+  return waitForWorldSimulationAnchorSettle_ACU(latest.anchor.messageIndex, chatIdentity, dependencies);
 }
 export function resolveLatestWorldSimulationAssistant_ACU(chat: any[]): WorldSimulationTriggerResolution_ACU {
   for (let index = chat.length - 1; index >= 0; index -= 1) {

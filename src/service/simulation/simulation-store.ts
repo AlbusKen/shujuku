@@ -720,8 +720,17 @@ function readMessageContent_ACU(message: Record<string, unknown>): string {
   return typeof message.mes === 'string' ? message.mes : typeof message.message === 'string' ? message.message : '';
 }
 
+/**
+ * 锚点楼层判定必须与挑选最新 AI 楼层的 isAiMessage_ACU 完全一致，否则会出现
+ * 「选中一层、随即被拒」：那边按宿主语义只排除 narrator 旁白，这里却额外拒绝
+ * is_system。宿主用 is_system 标记「不进提示词」，与 role 无关，于是被隐藏的
+ * AI 楼层选得出来却解析不了，抛 WORLD_SIMULATION_ANCHOR_INVALID。
+ * 宿主语义：assistant <=> !is_user 且 extra?.type !== 'narrator'。
+ */
 function isAssistantMessage_ACU(message: Record<string, unknown>): boolean {
-  return message.is_user !== true && message.is_system !== true;
+  if (message.is_user === true) return false;
+  const extra = message.extra;
+  return !(isRecord_ACU(extra) && extra.type === 'narrator');
 }
 
 export function buildWorldSimulationBucketKey_ACU(anchor: WorldSimulationAnchorIdentity_ACU): string {
