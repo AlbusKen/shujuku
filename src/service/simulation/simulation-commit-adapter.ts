@@ -6,7 +6,7 @@ import {
   sweepWorldLedger_ACU,
 } from './world-dynamics';
 
-import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
+import { getChatArray_ACU, refreshMessageBlock_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
 import { sha256HexSync_ACU } from '../../shared/sha256-sync';
 import {
@@ -364,11 +364,15 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<WorldSimul
   const messages = [...chat];
   const originalFields = snapshots.map(({ target, key, existed, value }) => ({ target, key, existed, value,
     content: JSON.stringify(value) }));
-  const messagesIntact = (): boolean => chat.length === messages.length && messages.every((message, index) => chat[index] === message);
+  // 只要求提交开始时的楼层前缀原样保留：生成途中宿主在尾部追加的新楼层不改变触发楼层身份，
+  // 投影仍写回触发本次运行的楼层；前缀内删楼、换楼或插楼仍视为冲突。
+  const messagesIntact = (): boolean => chat.length >= messages.length && messages.every((message, index) => chat[index] === message);
   const fieldsIntact = (fields: Array<Omit<(typeof originalFields)[number], 'value'>>): boolean => messagesIntact() && fields.every(field =>
     Object.prototype.hasOwnProperty.call(field.target, field.key) === field.existed
     && JSON.stringify(field.target[field.key]) === field.content);
   let saveAttempted = false;
+  /** 保存与回读均通过后才赋值；仅用于请求宿主重渲染触发楼层。 */
+  let refreshIndex: number | null = null;
   let stagedFields: Array<Omit<(typeof originalFields)[number], 'value'>> | null = null;
   const currentFieldsIntact = (): boolean => stagedFields !== null && fieldsIntact(stagedFields);
   try {
@@ -408,7 +412,7 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<WorldSimul
     if (getChatArray_ACU() !== chat || getActiveChatStorageIdentity_ACU(chat) !== input.identity.chatIdentity) {
       reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '宿主保存后聊天上下文已变化');
     }
-    resolveCurrentWorldSimulationAnchor_ACU(persistedAnchor, chat);
+    refreshIndex = resolveCurrentWorldSimulationAnchor_ACU(persistedAnchor, chat).messageIndex;
     if (!currentFieldsIntact()) reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '宿主保存期间提交字段已变化');
     if (hasPartialWorldSimulationRunWrites_ACU(projectedView)) {
       const persistedProof = readWorldSimulationRunWriteProof_ACU(persistedAnchor, chat);
@@ -452,6 +456,8 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<WorldSimul
       ...(saveAttempted ? { recovery: 'saved' } : {}),
     });
   }
+  // 联合保存已成功：让宿主重渲染触发楼层，使〈与此同时〉段即时可见。
+  if (refreshIndex !== null) refreshMessageBlock_ACU(refreshIndex);
   return persistedAnchor;
 }
 

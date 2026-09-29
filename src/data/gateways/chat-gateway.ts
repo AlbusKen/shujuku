@@ -220,3 +220,22 @@ export function emitMessageUpdated_ACU(messageIndex: number): void {
         SillyTavern_API_ACU.eventSource.emit('MESSAGE_UPDATED', messageIndex);
     }
 }
+
+
+/**
+ * 请求宿主重渲染指定楼层；updateMessageBlock 不可用或抛错时降级为 MESSAGE_UPDATED 事件。
+ * 仅做界面刷新，失败不影响已持久化的数据。
+ * @param messageIndex 需要重渲染的消息下标
+ */
+export function refreshMessageBlock_ACU(messageIndex: number): void {
+    const message = SillyTavern_API_ACU?.chat?.[messageIndex];
+    try {
+        if (message && typeof SillyTavern_API_ACU?.updateMessageBlock === 'function') {
+            SillyTavern_API_ACU.updateMessageBlock(messageIndex, message, { rerenderMessage: true });
+            return;
+        }
+    } catch (error: any) {
+        logWarn_ACU(`[ChatGateway] updateMessageBlock 失败，降级为 MESSAGE_UPDATED：${error?.message || error}`);
+    }
+    emitMessageUpdated_ACU(messageIndex);
+}

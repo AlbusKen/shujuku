@@ -57,12 +57,13 @@ const noChange = (agentName: string): WorldSimulationSubagentOutcome_ACU => ({
 });
 
 describe('格林推演固定工作流', () => {
-  it('按 timekeeper、并行暗流与人物、投影决定的顺序执行，全 no_change 不调用投影决定', async () => {
+  it('按 timekeeper、并行暗流与人物、投影决定的顺序执行，全 no_change 时仍调用投影决定重新分析', async () => {
     const env = harness(buildEmptyWorldSimulationLedger_ACU(), {
       timekeeper: [noChange('timekeeper')],
       'undercurrent-analyst': [noChange('undercurrent-analyst')],
       'dramatis-keeper': [noChange('dramatis-keeper')],
       chronicler: [noChange('chronicler')],
+      'guidance-composer': [noChange('guidance-composer')],
     });
     const result = await runWorldSimulationWorkflow_ACU({
       identity: env.identity, settings: env.settings, promptContext: env.promptContext, registry: env.registry, tools: env.tools,
@@ -70,8 +71,8 @@ describe('格林推演固定工作流', () => {
       subagents: env.subagents,
     });
     expect(env.calls[0]).toBe('timekeeper');
-    expect(env.calls.slice(1).sort()).toEqual(['chronicler', 'dramatis-keeper', 'undercurrent-analyst']);
-    expect(env.calls).not.toContain('guidance-composer');
+    expect(env.calls.slice(1).sort()).toEqual(['chronicler', 'dramatis-keeper', 'guidance-composer', 'undercurrent-analyst']);
+    expect(env.calls.at(-1)).toBe('guidance-composer');
     expect(result.outcome).toBe('no_change');
     expect(result.finalProjection).toEqual({ content: null, sourceAgent: 'current-ledger', sourceRevision: 0, deliverable: true });
   });
@@ -171,6 +172,7 @@ describe('格林推演固定工作流', () => {
       'undercurrent-analyst': [noChange('undercurrent-analyst')],
       'dramatis-keeper': [noChange('dramatis-keeper')],
       chronicler: [noChange('chronicler')],
+      'guidance-composer': [noChange('guidance-composer')],
     });
     const result = await runWorldSimulationWorkflow_ACU({
       identity: env.identity, settings: env.settings, promptContext: env.promptContext, registry: env.registry, tools: env.tools,

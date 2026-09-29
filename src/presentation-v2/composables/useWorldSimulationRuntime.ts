@@ -49,7 +49,9 @@ export function projectWorldSimulationSessionFromConversation_ACU(
   messages: WorldSimulationUiSnapshot_ACU['conversation']['messages'],
 ): WorldSimulationSessionInput_ACU[] {
   return messages
-    .filter(message => message.kind !== 'handoff' && message.kind !== 'model_agent' && message.kind !== 'model_feedback')
+    // 工具回执（带 toolCallId）按 tool 身份展示，与智能续写一致；导演动作与纯文本反馈仍不上会话流。
+    .filter(message => message.kind !== 'handoff' && message.kind !== 'model_agent'
+      && (message.kind !== 'model_feedback' || !!message.toolCallId))
     .map(message => {
       const persistedKind = typeof message.eventKind === 'string'
         && (WORLD_SIMULATION_SESSION_EVENT_KINDS_ACU as readonly string[]).includes(message.eventKind)

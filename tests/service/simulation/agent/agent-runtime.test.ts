@@ -1934,13 +1934,17 @@ describe('格林推演 Agent runtime', () => {
     const invoke = vi.fn();
     const subagents = {
       run: vi.fn(),
-      runOneShot: vi.fn(async ({ agentName }: { agentName: string }) => ({
-        agentName,
-        status: 'no_change' as const,
-        summary: '没有变化',
-        evidenceRefs: [evidence],
-        uncertainties: [],
-      })),
+      runOneShot: vi.fn(async ({ agentName, baseLedgerRevision }: { agentName: string; baseLedgerRevision: number }) => agentName === 'guidance-composer'
+        ? {
+          agentName, status: 'candidate' as const, summary: '投影钟声', evidenceRefs: [evidence], uncertainties: [],
+          candidate: { candidateId: 'direct-guidance', agentName,
+            patch: { guidance: { signals: [{ text: '远处传来钟声', voice: 'ambient', sourceId: 'clock' }],
+              expectedRevision: baseLedgerRevision, evidenceRefs: [evidence] } },
+            summary: '投影钟声', evidenceRefs: [evidence], uncertainties: [], writableModules: ['guidance'] },
+        }
+        : {
+          agentName, status: 'no_change' as const, summary: '没有变化', evidenceRefs: [evidence], uncertainties: [],
+        }),
       runReviewer: vi.fn(),
     };
     const identity = { runId: 'direct-opening', chatIdentity: anchor.chatIdentity, triggerKind: 'assistant_completed' as const,
@@ -1950,12 +1954,12 @@ describe('格林推演 Agent runtime', () => {
     const result = await new WorldSimulationMainLoop_ACU({ invoke, subagents, apiPreset, countTokens: async () => 1 })
       .run({ identity, anchor, chat, settings: settings(), promptContext, registry, tools, directOpening: true });
 
-    expect(result.outcome).toBe('no_change');
+    expect(result.outcome).toBe('commit');
     expect(invoke).not.toHaveBeenCalled();
     expect(subagents.run).not.toHaveBeenCalled();
     expect(subagents.runOneShot.mock.calls.map(([call]) => call.agentName)).toEqual(
-      expect.arrayContaining(['undercurrent-analyst', 'dramatis-keeper']));
-    expect(subagents.runOneShot).toHaveBeenCalledTimes(2);
+      expect.arrayContaining(['undercurrent-analyst', 'dramatis-keeper', 'guidance-composer']));
+    expect(subagents.runOneShot).toHaveBeenCalledTimes(3);
     expect(subagents.runReviewer).not.toHaveBeenCalled();
     expect(readWorldSimulationRunState_ACU(identity.chatIdentity, identity.taskId,
       `${identity.stageId}#${identity.stageRevision}#${identity.baseLedgerRevision}`)).toBeNull();

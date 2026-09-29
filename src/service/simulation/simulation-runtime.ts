@@ -133,7 +133,8 @@ function buildPromptContext_ACU(input: {
   chat: any[];
 }): WorldSimulationPlaceholderContext_ACU {
   const history = readWorldSimulationConversation_ACU(input.chat);
-  const visibleHistory = { ...history, messages: history.messages.filter(item => item.kind !== 'model_agent' && item.kind !== 'model_feedback') };
+  const visibleHistory = { ...history, messages: history.messages.filter(item => item.kind !== 'model_agent' && item.kind !== 'model_feedback'
+    && !(item.kind === 'tool' && item.toolCallId)) };
   return {
     task: input.envelope.task,
     history: visibleHistory,

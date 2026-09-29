@@ -15,6 +15,7 @@ import type { WorldSimulationRunWriteState_ACU } from '../simulation-run-write-s
 import { snapshotWorldSimulationEvidenceRegistry_ACU, type WorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
 import type { WorldSimulationReadRoundState_ACU, WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
 import { buildWorldSimulationProjection_ACU } from '../simulation-projection';
+import { assertCollisionFulfillment_ACU } from '../world-dynamics';
 import { findWorldSimulationAgentDefinition_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
 import type {
   WorldSimulationCandidate_ACU,
@@ -75,7 +76,8 @@ export interface WorldSimulationWorkflowResult_ACU {
 }
 
 const WORKFLOW_AGENTS_ACU = ['timekeeper', 'undercurrent-analyst', 'dramatis-keeper'] as const;
-const PROJECTION_MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'rumors', 'player'] as const;
+/** 场外信号未提交、为空或 strict 碰撞未兑现时，回灌 guidance-composer 的定向修正次数上限。 */
+export const WORLD_SIMULATION_PROJECTION_CORRECTION_ATTEMPTS_ACU = 2;
 const COMPLETE_STATES_ACU = new Set(['complete_changed', 'complete_no_change']);
 
 function cloneLedger_ACU(ledger: WorldSimulationLedger_ACU): WorldSimulationLedger_ACU {
@@ -596,7 +598,6 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
     };
   }
 
-  const projectionBefore = worldSimulationProjectionFingerprint_ACU(base);
   const primaryTargets = new Map<WorldSimulationAgentName_ACU, WorldSimulationLedgerModule_ACU[]>();
   for (const agentName of WORKFLOW_AGENTS_ACU) {
     const targets = modulesForAgent_ACU(agentName).filter(module =>
@@ -646,10 +647,8 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
     }
   }
 
-  const projectionChanged = worldSimulationProjectionFingerprint_ACU(ledger) !== projectionBefore;
-  const substantive = accepted.some(item => Object.keys(item.patch).some(key => (PROJECTION_MODULES_ACU as readonly string[]).includes(key)))
-    || (input.runWrites?.hasConfirmedWrites && projectionChanged);
-  if (substantive && projectionChanged && (!requestedTargets || requestedTargets.has('guidance'))
+  // 〈与此同时〉每轮必写：不再以本轮是否有投影相关变更为门控，composer 每轮依据最新正文重新分析。
+  if ((!requestedTargets || requestedTargets.has('guidance'))
     && !agentSkipped_ACU('guidance-composer', skipModules)) {
     expectedModules.add('guidance');
     const composer = await runWorldSimulationGuidanceComposer_ACU({
@@ -758,12 +757,16 @@ export async function runWorldSimulationOneShotWorkflow_ACU(
   const roles = (['undercurrent-analyst', 'dramatis-keeper'] as const).filter(role =>
     modulesForAgent_ACU(role).some(module => !skip.has(module) && (!requested || requested.has(module))));
   const call = async (role: 'undercurrent-analyst' | 'dramatis-keeper' | 'guidance-composer',
-    ledger: WorldSimulationLedger_ACU, seq: number, roundChanges?: string): Promise<WorldSimulationSubagentOutcome_ACU> => {
-    const targets = modulesForAgent_ACU(role).filter(module => !skip.has(module) && (!requested || requested.has(module)));
+    ledger: WorldSimulationLedger_ACU, seq: number, roundChanges?: string,
+    targetOverride?: readonly WorldSimulationLedgerModule_ACU[]): Promise<WorldSimulationSubagentOutcome_ACU> => {
+    const targets = targetOverride
+      ? [...targetOverride]
+      : modulesForAgent_ACU(role).filter(module => !skip.has(module) && (!requested || requested.has(module)));
     targets.forEach(module => expected.add(module));
     if (input.isCurrent && !input.isCurrent()) throw new Error('WORLD_SIMULATION_RUN_STALE');
     const label = role === 'undercurrent-analyst' ? '批次一：时序与伏线'
-      : role === 'dramatis-keeper' ? '批次一：人物谱' : '批次二：纪要、风声与场外信号';
+      : role === 'dramatis-keeper' ? '批次一：人物谱'
+        : seq > 2 ? `碰撞修正：场外信号（第 ${seq - 2} 次）` : '批次二：纪要、风声与场外信号';
     const entryKey = `${role}:${seq}`;
     const entryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, {
       kind: 'delegation', title: `${label}正在执行`, agentName: role, status: 'running',
@@ -823,10 +826,17 @@ export async function runWorldSimulationOneShotWorkflow_ACU(
     for (const id of before.keys()) if (!after.has(id)) changes.push(`${module} ${id}：删除`);
   }
   if (JSON.stringify(base.player) !== JSON.stringify(ledger.player)) changes.push(`player：${JSON.stringify(ledger.player.location)} / ${ledger.player.contact}`);
-  const pendingSecond = base.pendingFixes.some(fix => ['chronicle', 'rumors', 'guidance'].includes(fix.module));
   const secondTargets = !requested || ['chronicle', 'rumors', 'guidance'].some(module => requested.has(module as WorldSimulationLedgerModule_ACU));
-  if (secondTargets && (accepted.length > 0 || pendingSecond || ledger.chronicle.length >= input.settings.workflow.chroniclerHotThreshold)) {
-    const second = await call('guidance-composer', ledger, 2, changes.slice(0, 40).join('\n') || '本轮批次一无新增变更');
+  const roundChangesText = changes.slice(0, 40).join('\n') || '本轮批次一无新增变更';
+  const guidanceWritable = !skip.has('guidance') && (!requested || requested.has('guidance'));
+  // 〈与此同时〉每轮必写：批次二不再以批次一有无变更为门控，每轮都依据最新正文重新分析场外信号。
+  const projectionDirective = '【本轮场外信号要求】每轮都必须依据本轮锚点正文与最新账本重新分析场外信号：signals 整列替换，至少 1 条，跟随剧情位置与人物变化更新；删去已被正文写出、过时或不可达的旧信号；即使批次一无变更也必须提交 guidance，不得以无变化跳过。';
+  let lastRejection = '';
+  // composer 调用本身失败（运行时已做过协议修正）时不再追加修正轮；只对偷懒无变化、事务拒绝、空信号与碰撞未兑现回灌。
+  let composerFailed = false;
+  if (secondTargets) {
+    const second = await call('guidance-composer', ledger, 2,
+      guidanceWritable ? `${roundChangesText}\n${projectionDirective}` : roundChangesText);
     outcomes.push(second);
     if (second.candidate) {
       const preview = await applyOneShotCandidates_ACU(base, [...accepted, second.candidate], authorized, input.settings, anchorMessage);
@@ -834,6 +844,58 @@ export async function runWorldSimulationOneShotWorkflow_ACU(
       accepted.splice(0, accepted.length, ...preview.accepted);
       settleCandidate(second, preview.accepted, 2);
       outcomes.push(...preview.rejected);
+      lastRejection = preview.rejected.map(item => item.summary).join('；');
+    } else {
+      lastRejection = second.summary;
+      composerFailed = second.status === 'failed' || second.status === 'blocked';
+    }
+  }
+  // 程序层兜底：guidance 未提交/为空，或 strict 碰撞后验（与提交管线同源）未兑现时，
+  // 把具体原因回灌唯一有 guidance 写权的 composer，有上限地定向修正；修正候选只写 guidance。
+  const collisionReport = collisionReport_ACU(input.promptContext);
+  const strictCollision = !!collisionReport && input.settings.dynamics.collisionEnforcement === 'strict';
+  const projectionViolations = (): string[] => {
+    const issues: string[] = [];
+    const submitted = accepted.some(item => item.agentName === 'guidance-composer' && Object.prototype.hasOwnProperty.call(item.patch, 'guidance'));
+    if (!submitted) issues.push('本轮没有通过事务校验的 guidance：每轮必须重新分析并整列提交 signals');
+    else if (!ledger.guidance.signals.length) issues.push('本轮 guidance.signals 为空：至少需要 1 条贴合当前剧情的场外信号');
+    if (strictCollision) issues.push(...assertCollisionFulfillment_ACU(collisionReport!, ledger.guidance, ledger));
+    return issues;
+  };
+  if (secondTargets && guidanceWritable && !composerFailed) {
+    let violations = projectionViolations();
+    for (let attempt = 1; violations.length && attempt <= WORLD_SIMULATION_PROJECTION_CORRECTION_ATTEMPTS_ACU; attempt += 1) {
+      const seq = 2 + attempt;
+      const feedback = [
+        roundChangesText,
+        projectionDirective,
+        `【场外信号未通过·第 ${attempt} 次修正】${violations.join('；')}`,
+        lastRejection ? `【上次提交未通过的原因】${lastRejection}` : '',
+        '只修正 guidance：按上述原因整列提交 signals；列出的碰撞种子各补一条 voice=encounter 且 sourceId 等于该种子 ID 的信号；移除泄露 latent/dead 传闻的信号。不要改纪要与风声。',
+      ].filter(Boolean).join('\n');
+      const fix = await call('guidance-composer', ledger, seq, feedback, ['guidance']);
+      outcomes.push(fix);
+      if (!fix.candidate) {
+        lastRejection = fix.summary;
+        if (fix.status === 'failed' || fix.status === 'blocked') break;
+        continue;
+      }
+      const fixId = fix.candidate.candidateId;
+      const preview = await applyOneShotCandidates_ACU(base, [...accepted, fix.candidate], authorized, input.settings, anchorMessage);
+      settleCandidate(fix, preview.accepted, seq);
+      outcomes.push(...preview.rejected);
+      if (!preview.accepted.some(item => item.candidateId === fixId)) {
+        lastRejection = preview.rejected.map(item => item.summary).join('；');
+        continue;
+      }
+      ledger = preview.ledger;
+      accepted.splice(0, accepted.length, ...preview.accepted);
+      lastRejection = '';
+      violations = projectionViolations();
+    }
+    // 修正耗尽：以 guidance 模块级缺口显式落账，不伪装成无变化。
+    if (violations.length) {
+      outcomes.push(failedOutcome_ACU('guidance-composer', `场外信号修正耗尽：${violations.join('；')}`, 'protocol_failed', ['guidance']));
     }
   }
   ledger = recordWorkflowIssues_ACU(ledger, outcomes, input.identity);

@@ -346,7 +346,9 @@ export function readWorldSimulationDirectorCompactionSource_ACU(chat?: any[]): {
   const all = segments.flatMap(segment => segment.messages);
   const compaction = segments.flatMap(segment => segment.compaction ? [segment.compaction] : [])
     .sort((left, right) => right.compactedThroughId - left.compactedThroughId)[0] ?? null;
+  // 工具回执以 tool 身份持久化（与智能续写一致）；只有带 toolCallId 的 tool 消息是模型轮次，会话卡片不是。
   const visible = all.filter(message => message.kind === 'model_agent' || message.kind === 'model_feedback'
+    || (message.kind === 'tool' && !!message.toolCallId)
     || (message.kind === 'user' && !message.eventKind));
   const projected = visible.filter(message => message.id > (compaction?.compactedThroughId ?? 0));
   return {
@@ -398,6 +400,7 @@ export async function appendWorldSimulationDirectorHistory_ACU(input: {
   if (!isModelExchangeSequence_ACU(input.messages)) {
     reject_ACU('主会话动作与反馈必须成对保存');
   }
+  const toolNames = new Map(input.messages.flatMap(item => (item.tool_calls ?? []).map(call => [call.id, call.function.name] as const)));
   return serializeConversationWrite_ACU(input.anchor.chatIdentity, () => {
     const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
     if (messages !== getChatArray_ACU()) reject_ACU('主会话锚点聊天已经切换');
@@ -412,8 +415,9 @@ export async function appendWorldSimulationDirectorHistory_ACU(input: {
       stageId: input.stageId,
       stageRevision: input.stageRevision,
       appends: input.messages.map(item => ({
-        kind: item.role === 'assistant' ? 'model_agent' as const : 'model_feedback' as const,
+        kind: item.role === 'assistant' ? 'model_agent' as const : item.role === 'tool' ? 'tool' as const : 'model_feedback' as const,
         text: item.content,
+        ...(item.role === 'tool' ? { digest: toolNames.get(item.tool_call_id ?? '') ?? 'tool' } : {}),
         ...(item.tool_call_id ? { toolCallId: item.tool_call_id } : {}),
         ...(item.tool_calls?.length ? { toolCalls: item.tool_calls.map(call => ({ id: call.id, name: call.function.name, arguments: call.function.arguments })) } : {}),
       })),
@@ -427,12 +431,17 @@ function truncateText_ACU(text: string): string {
     : `${text.slice(0, TEXT_LIMIT_ACU)}\n（本条内容超出 ${TEXT_LIMIT_ACU} 字上限，已截断）`;
 }
 
+/** 模型轮次（导演动作、反馈、带 toolCallId 的工具回执）必须保真，不参与展示截断。 */
+function isModelTurnKind_ACU(item: { kind: string; toolCallId?: string }): boolean {
+  return item.kind === 'model_agent' || item.kind === 'model_feedback' || (item.kind === 'tool' && !!item.toolCallId);
+}
+
 function conversationAppendFingerprint_ACU(
-  items: readonly { kind: string; text: string; digest?: string; turnKey?: string }[],
+  items: readonly { kind: string; text: string; digest?: string; turnKey?: string; toolCallId?: string }[],
 ): string {
   return sha256HexSync_ACU(JSON.stringify(items.map(item => [
     item.kind,
-    item.kind === 'model_agent' || item.kind === 'model_feedback' ? String(item.text ?? '') : truncateText_ACU(String(item.text ?? '')),
+    isModelTurnKind_ACU(item) ? String(item.text ?? '') : truncateText_ACU(String(item.text ?? '')),
     String(item.digest ?? ''),
     String(item.turnKey ?? ''),
   ])));
@@ -509,7 +518,7 @@ async function appendWorldSimulationConversationSegmentUnlocked_ACU(
     const message: WorldSimulationConversationMessage_ACU = {
       id: nextId++,
       kind: item.kind,
-      text: item.kind === 'model_agent' || item.kind === 'model_feedback'
+      text: isModelTurnKind_ACU(item)
         ? String(item.text)
         : truncateText_ACU(String(item.text)),
       digest: String(item.digest ?? ''),

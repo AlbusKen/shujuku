@@ -20,7 +20,7 @@ function groups_ACU(messages: readonly WorldSimulationConversationMessage_ACU[])
       current = [];
     }
     current.push(message);
-    if (message.kind === 'model_feedback') {
+    if (isFeedback_ACU(message)) {
       groups.push(current);
       current = [];
     }
@@ -30,10 +30,15 @@ function groups_ACU(messages: readonly WorldSimulationConversationMessage_ACU[])
 }
 
 function closed_ACU(group: readonly WorldSimulationConversationMessage_ACU[]): boolean {
-  if (group.some(item => item.kind === 'model_agent' || item.kind === 'model_feedback')) {
-    return group.length === 2 && group[0].kind === 'model_agent' && group[1].kind === 'model_feedback';
+  if (group.some(item => item.kind === 'model_agent' || isFeedback_ACU(item))) {
+    return group.length === 2 && group[0].kind === 'model_agent' && isFeedback_ACU(group[1]);
   }
   return group.every(item => item.kind === 'user' && !item.eventKind);
+}
+
+/** 导演反馈：旧数据的 model_feedback，或以 tool 身份持久化的工具回执。 */
+function isFeedback_ACU(message: WorldSimulationConversationMessage_ACU): boolean {
+  return message.kind === 'model_feedback' || (message.kind === 'tool' && !!message.toolCallId);
 }
 
 /** 与 readWorldSimulationDirectorHistory_ACU 同一投影：模型可见楼层消息 → 请求消息。 */

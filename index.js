@@ -5405,6 +5405,24 @@ $CONTENT
             SillyTavern_API_ACU.eventSource.emit('MESSAGE_UPDATED', messageIndex);
         }
     }
+    /**
+     * 请求宿主重渲染指定楼层；updateMessageBlock 不可用或抛错时降级为 MESSAGE_UPDATED 事件。
+     * 仅做界面刷新，失败不影响已持久化的数据。
+     * @param messageIndex 需要重渲染的消息下标
+     */
+    function refreshMessageBlock_ACU(messageIndex) {
+        const message = SillyTavern_API_ACU?.chat?.[messageIndex];
+        try {
+            if (message && typeof SillyTavern_API_ACU?.updateMessageBlock === 'function') {
+                SillyTavern_API_ACU.updateMessageBlock(messageIndex, message, { rerenderMessage: true });
+                return;
+            }
+        }
+        catch (error) {
+            logWarn_ACU(`[ChatGateway] updateMessageBlock 失败，降级为 MESSAGE_UPDATED：${error?.message || error}`);
+        }
+        emitMessageUpdated_ACU(messageIndex);
+    }
 
     /**
      * service/worldbook/injection-engine-config.ts — 放置配置常量与默认值
@@ -166200,7 +166218,9 @@ Expected function or array of functions, received type ${typeof value}.`
         const all = segments.flatMap(segment => segment.messages);
         const compaction = segments.flatMap(segment => segment.compaction ? [segment.compaction] : [])
             .sort((left, right) => right.compactedThroughId - left.compactedThroughId)[0] ?? null;
+        // 工具回执以 tool 身份持久化（与智能续写一致）；只有带 toolCallId 的 tool 消息是模型轮次，会话卡片不是。
         const visible = all.filter(message => message.kind === 'model_agent' || message.kind === 'model_feedback'
+            || (message.kind === 'tool' && !!message.toolCallId)
             || (message.kind === 'user' && !message.eventKind));
         const projected = visible.filter(message => message.id > (compaction?.compactedThroughId ?? 0));
         return {
@@ -166248,6 +166268,7 @@ Expected function or array of functions, received type ${typeof value}.`
         if (!isModelExchangeSequence_ACU(input.messages)) {
             reject_ACU$4('主会话动作与反馈必须成对保存');
         }
+        const toolNames = new Map(input.messages.flatMap(item => (item.tool_calls ?? []).map(call => [call.id, call.function.name])));
         return serializeConversationWrite_ACU(input.anchor.chatIdentity, () => {
             const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
             if (messages !== getChatArray_ACU())
@@ -166263,8 +166284,9 @@ Expected function or array of functions, received type ${typeof value}.`
                 stageId: input.stageId,
                 stageRevision: input.stageRevision,
                 appends: input.messages.map(item => ({
-                    kind: item.role === 'assistant' ? 'model_agent' : 'model_feedback',
+                    kind: item.role === 'assistant' ? 'model_agent' : item.role === 'tool' ? 'tool' : 'model_feedback',
                     text: item.content,
+                    ...(item.role === 'tool' ? { digest: toolNames.get(item.tool_call_id ?? '') ?? 'tool' } : {}),
                     ...(item.tool_call_id ? { toolCallId: item.tool_call_id } : {}),
                     ...(item.tool_calls?.length ? { toolCalls: item.tool_calls.map(call => ({ id: call.id, name: call.function.name, arguments: call.function.arguments })) } : {}),
                 })),
@@ -166276,10 +166298,14 @@ Expected function or array of functions, received type ${typeof value}.`
             ? text
             : `${text.slice(0, TEXT_LIMIT_ACU)}\n（本条内容超出 ${TEXT_LIMIT_ACU} 字上限，已截断）`;
     }
+    /** 模型轮次（导演动作、反馈、带 toolCallId 的工具回执）必须保真，不参与展示截断。 */
+    function isModelTurnKind_ACU(item) {
+        return item.kind === 'model_agent' || item.kind === 'model_feedback' || (item.kind === 'tool' && !!item.toolCallId);
+    }
     function conversationAppendFingerprint_ACU(items) {
         return sha256HexSync_ACU(JSON.stringify(items.map(item => [
             item.kind,
-            item.kind === 'model_agent' || item.kind === 'model_feedback' ? String(item.text ?? '') : truncateText_ACU(String(item.text ?? '')),
+            isModelTurnKind_ACU(item) ? String(item.text ?? '') : truncateText_ACU(String(item.text ?? '')),
             String(item.digest ?? ''),
             String(item.turnKey ?? ''),
         ])));
@@ -166331,7 +166357,7 @@ Expected function or array of functions, received type ${typeof value}.`
             const message = {
                 id: nextId++,
                 kind: item.kind,
-                text: item.kind === 'model_agent' || item.kind === 'model_feedback'
+                text: isModelTurnKind_ACU(item)
                     ? String(item.text)
                     : truncateText_ACU(String(item.text)),
                 digest: String(item.digest ?? ''),
@@ -170626,6 +170652,148 @@ Expected function or array of functions, received type ${typeof value}.`
         meta_ACU.delete(anchor.chatIdentity);
     }
 
+    function clone_ACU$5(value) { return JSON.parse(JSON.stringify(value)); }
+    function region_ACU(value) {
+        if (!value)
+            return null;
+        const region = normalizeWorldRegionName_ACU(value);
+        return region || null;
+    }
+    function playerRegion_ACU(ledger) { return region_ACU(ledger.player.location?.region); }
+    function maintainWorldPlayer_ACU(ledger, previous) {
+        const next = clone_ACU$5(ledger);
+        const previousRegion = region_ACU(previous.location?.region);
+        const nextRegion = playerRegion_ACU(next);
+        next.player.locationUpdatedAtDay = nextRegion !== previousRegion ? next.clock.day : previous.locationUpdatedAtDay;
+        next.player.regionVisits = clone_ACU$5(previous.regionVisits);
+        if (next.player.contact === 'open' && nextRegion && !next.player.regionVisits.some(item => item.region === nextRegion && item.day === next.clock.day)) {
+            next.player.regionVisits.push({ region: nextRegion, day: next.clock.day });
+            if (next.player.regionVisits.length > WORLD_PLAYER_REGION_VISITS_CAP_ACU)
+                next.player.regionVisits.splice(0, next.player.regionVisits.length - WORLD_PLAYER_REGION_VISITS_CAP_ACU);
+        }
+        return next;
+    }
+    function sweepWorldLedger_ACU(ledger, settings) {
+        if (!settings.dynamics.missedSweepEnabled)
+            return { ledger: clone_ACU$5(ledger), sweptSeedIds: [], deadRumorIds: [], chronicleAppended: 0 };
+        const next = clone_ACU$5(ledger);
+        const sweptSeedIds = [];
+        const deadRumorIds = [];
+        const day = next.clock.day;
+        for (const seed of next.seeds) {
+            if (seed.expiresAtDay === null || seed.expiresAtDay >= day || seed.status === 'resolved' || seed.status === 'retired')
+                continue;
+            seed.status = 'retired';
+            seed.retiredReason = 'missed';
+            seed.revision += 1;
+            next.chronicle.push({ id: `sweep:${seed.id}:${day}`, at: next.clock.storyTime, summary: `[错过] ${seed.missedOutcome ?? ''}`, relatedIds: [seed.id], evidenceRefs: [] });
+            sweptSeedIds.push(seed.id);
+        }
+        for (const rumor of next.rumors) {
+            if (rumor.status !== 'latent' || day - rumor.earliestRevealDay <= settings.dynamics.rumorTTLDays)
+                continue;
+            rumor.status = 'dead';
+            rumor.revision += 1;
+            deadRumorIds.push(rumor.id);
+        }
+        return { ledger: next, sweptSeedIds, deadRumorIds, chronicleAppended: sweptSeedIds.length };
+    }
+    function filterUnreachableRumorSignals_ACU(guidance, ledger) {
+        const playerRegion = playerRegion_ACU(ledger);
+        const rumors = new Map(ledger.rumors.map(item => [item.id, item]));
+        const strippedRumorIds = [];
+        const signals = guidance.signals.filter(signal => {
+            if (signal.voice !== 'rumor')
+                return true;
+            const rumor = signal.sourceId ? rumors.get(signal.sourceId) : undefined;
+            const reachable = ledger.player.contact === 'open' && playerRegion !== null && !!rumor && rumor.channels.some(channel => region_ACU(channel) === playerRegion);
+            if (reachable)
+                return true;
+            if (signal.sourceId)
+                strippedRumorIds.push(signal.sourceId);
+            return false;
+        });
+        return { guidance: { ...clone_ACU$5(guidance), signals }, strippedRumorIds };
+    }
+    function refreshWorldRumors_ACU(ledger, adoptedRumorIds, settings) {
+        const next = clone_ACU$5(ledger);
+        const adopted = new Set(adoptedRumorIds);
+        const ttl = settings.dynamics.rumorTTLDays;
+        const day = next.clock.day;
+        for (const rumor of next.rumors) {
+            let status = rumor.status;
+            if (status === 'latent' && day >= rumor.earliestRevealDay)
+                status = 'ripe';
+            if (status === 'ripe') {
+                if (adopted.has(rumor.id)) {
+                    rumor.revealedAtDay = day;
+                    status = 'revealed';
+                }
+                else {
+                    const visitedChannel = rumor.channels.some(channel => {
+                        const region = region_ACU(channel);
+                        return !!region && next.player.regionVisits.some(visit => visit.region === region && visit.day >= rumor.earliestRevealDay);
+                    });
+                    if ((visitedChannel && day - rumor.earliestRevealDay > ttl) || day - rumor.originDay > ttl * 2)
+                        status = 'dead';
+                }
+            }
+            if (status !== rumor.status) {
+                rumor.status = status;
+                rumor.revision += 1;
+            }
+        }
+        return next;
+    }
+    function detectWorldCollisions_ACU(ledger) {
+        const playerRegion = playerRegion_ACU(ledger);
+        const playerContact = ledger.player.contact;
+        const secluded = playerContact === 'secluded';
+        const collidedSeeds = playerRegion
+            ? ledger.seeds.filter(seed => {
+                const seedRegion = region_ACU(seed.location?.region);
+                return !!seedRegion && seedRegion === playerRegion
+                    && (seed.status === 'active' || seed.status === 'converging')
+                    && (seed.expiresAtDay === null || seed.expiresAtDay >= ledger.clock.day);
+            }).map(seed => seed.id)
+            : [];
+        const ripeRumors = secluded || !playerRegion
+            ? []
+            : ledger.rumors.filter(rumor => rumor.status === 'ripe' && rumor.channels.some(channel => region_ACU(channel) === playerRegion)).map(rumor => rumor.id);
+        return {
+            playerRegion,
+            playerContact,
+            secludedNote: secluded ? '闭关/隔绝中，传闻渠道不可用' : null,
+            collidedSeeds,
+            ripeRumors,
+        };
+    }
+    function normalizeFact_ACU(value) {
+        return value.trim().replace(/\s+/g, ' ').toLowerCase();
+    }
+    function assertCollisionFulfillment_ACU(report, guidance, ledger) {
+        const violations = [];
+        const seeds = new Map(ledger.seeds.map(item => [item.id, item]));
+        for (const seedId of report.collidedSeeds) {
+            const seed = seeds.get(seedId);
+            if (!seed || seed.exposePolicy !== 'on_collision')
+                continue;
+            if (!guidance.signals.some(signal => signal.voice === 'encounter' && signal.sourceId === seedId)) {
+                violations.push(`碰撞种子 ${seedId} 缺少 encounter 信号`);
+            }
+        }
+        const blocked = ledger.rumors.filter(item => item.status === 'latent' || item.status === 'dead');
+        for (const signal of guidance.signals) {
+            for (const rumor of blocked) {
+                const fact = normalizeFact_ACU(rumor.fact);
+                if (signal.sourceId === rumor.id || (fact && normalizeFact_ACU(signal.text).includes(fact))) {
+                    violations.push(`信号泄露了 ${rumor.status} 传闻 ${rumor.id}`);
+                }
+            }
+        }
+        return violations;
+    }
+
     /**
      * 默认运行时段按角色筛选并置于请求末尾；导演的历史与特殊能力独立保留。
      */
@@ -171937,7 +172105,8 @@ Expected function or array of functions, received type ${typeof value}.`
     }
 
     const WORKFLOW_AGENTS_ACU = ['timekeeper', 'undercurrent-analyst', 'dramatis-keeper'];
-    const PROJECTION_MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'rumors', 'player'];
+    /** 场外信号未提交、为空或 strict 碰撞未兑现时，回灌 guidance-composer 的定向修正次数上限。 */
+    const WORLD_SIMULATION_PROJECTION_CORRECTION_ATTEMPTS_ACU = 2;
     const COMPLETE_STATES_ACU = new Set(['complete_changed', 'complete_no_change']);
     function cloneLedger_ACU(ledger) {
         return JSON.parse(JSON.stringify(ledger));
@@ -172387,7 +172556,6 @@ Expected function or array of functions, received type ${typeof value}.`
                 ledger: base,
             };
         }
-        const projectionBefore = worldSimulationProjectionFingerprint_ACU(base);
         const primaryTargets = new Map();
         for (const agentName of WORKFLOW_AGENTS_ACU) {
             const targets = modulesForAgent_ACU(agentName).filter(module => !skipModules.has(module) && (!requestedTargets || requestedTargets.has(module)));
@@ -172433,10 +172601,8 @@ Expected function or array of functions, received type ${typeof value}.`
                 ledger = recordWorkflowIssues_ACU(ledger, [chronicler], input.identity);
             }
         }
-        const projectionChanged = worldSimulationProjectionFingerprint_ACU(ledger) !== projectionBefore;
-        const substantive = accepted.some(item => Object.keys(item.patch).some(key => PROJECTION_MODULES_ACU.includes(key)))
-            || (input.runWrites?.hasConfirmedWrites && projectionChanged);
-        if (substantive && projectionChanged && (!requestedTargets || requestedTargets.has('guidance'))
+        // 〈与此同时〉每轮必写：不再以本轮是否有投影相关变更为门控，composer 每轮依据最新正文重新分析。
+        if ((!requestedTargets || requestedTargets.has('guidance'))
             && !agentSkipped_ACU('guidance-composer', skipModules)) {
             expectedModules.add('guidance');
             const composer = await runWorldSimulationGuidanceComposer_ACU({
@@ -172537,13 +172703,16 @@ Expected function or array of functions, received type ${typeof value}.`
         const expected = new Set();
         const entries = new Map();
         const roles = ['undercurrent-analyst', 'dramatis-keeper'].filter(role => modulesForAgent_ACU(role).some(module => !skip.has(module) && (!requested || requested.has(module))));
-        const call = async (role, ledger, seq, roundChanges) => {
-            const targets = modulesForAgent_ACU(role).filter(module => !skip.has(module) && (!requested || requested.has(module)));
+        const call = async (role, ledger, seq, roundChanges, targetOverride) => {
+            const targets = targetOverride
+                ? [...targetOverride]
+                : modulesForAgent_ACU(role).filter(module => !skip.has(module) && (!requested || requested.has(module)));
             targets.forEach(module => expected.add(module));
             if (input.isCurrent && !input.isCurrent())
                 throw new Error('WORLD_SIMULATION_RUN_STALE');
             const label = role === 'undercurrent-analyst' ? '批次一：时序与伏线'
-                : role === 'dramatis-keeper' ? '批次一：人物谱' : '批次二：纪要、风声与场外信号';
+                : role === 'dramatis-keeper' ? '批次一：人物谱'
+                    : seq > 2 ? `碰撞修正：场外信号（第 ${seq - 2} 次）` : '批次二：纪要、风声与场外信号';
             const entryKey = `${role}:${seq}`;
             const entryId = logWorldSimulationSession_ACU(input.identity.chatIdentity, {
                 kind: 'delegation', title: `${label}正在执行`, agentName: role, status: 'running',
@@ -172613,10 +172782,16 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         if (JSON.stringify(base.player) !== JSON.stringify(ledger.player))
             changes.push(`player：${JSON.stringify(ledger.player.location)} / ${ledger.player.contact}`);
-        const pendingSecond = base.pendingFixes.some(fix => ['chronicle', 'rumors', 'guidance'].includes(fix.module));
         const secondTargets = !requested || ['chronicle', 'rumors', 'guidance'].some(module => requested.has(module));
-        if (secondTargets && (accepted.length > 0 || pendingSecond || ledger.chronicle.length >= input.settings.workflow.chroniclerHotThreshold)) {
-            const second = await call('guidance-composer', ledger, 2, changes.slice(0, 40).join('\n') || '本轮批次一无新增变更');
+        const roundChangesText = changes.slice(0, 40).join('\n') || '本轮批次一无新增变更';
+        const guidanceWritable = !skip.has('guidance') && (!requested || requested.has('guidance'));
+        // 〈与此同时〉每轮必写：批次二不再以批次一有无变更为门控，每轮都依据最新正文重新分析场外信号。
+        const projectionDirective = '【本轮场外信号要求】每轮都必须依据本轮锚点正文与最新账本重新分析场外信号：signals 整列替换，至少 1 条，跟随剧情位置与人物变化更新；删去已被正文写出、过时或不可达的旧信号；即使批次一无变更也必须提交 guidance，不得以无变化跳过。';
+        let lastRejection = '';
+        // composer 调用本身失败（运行时已做过协议修正）时不再追加修正轮；只对偷懒无变化、事务拒绝、空信号与碰撞未兑现回灌。
+        let composerFailed = false;
+        if (secondTargets) {
+            const second = await call('guidance-composer', ledger, 2, guidanceWritable ? `${roundChangesText}\n${projectionDirective}` : roundChangesText);
             outcomes.push(second);
             if (second.candidate) {
                 const preview = await applyOneShotCandidates_ACU(base, [...accepted, second.candidate], authorized, input.settings, anchorMessage);
@@ -172624,6 +172799,63 @@ Expected function or array of functions, received type ${typeof value}.`
                 accepted.splice(0, accepted.length, ...preview.accepted);
                 settleCandidate(second, preview.accepted, 2);
                 outcomes.push(...preview.rejected);
+                lastRejection = preview.rejected.map(item => item.summary).join('；');
+            }
+            else {
+                lastRejection = second.summary;
+                composerFailed = second.status === 'failed' || second.status === 'blocked';
+            }
+        }
+        // 程序层兜底：guidance 未提交/为空，或 strict 碰撞后验（与提交管线同源）未兑现时，
+        // 把具体原因回灌唯一有 guidance 写权的 composer，有上限地定向修正；修正候选只写 guidance。
+        const collisionReport = collisionReport_ACU(input.promptContext);
+        const strictCollision = !!collisionReport && input.settings.dynamics.collisionEnforcement === 'strict';
+        const projectionViolations = () => {
+            const issues = [];
+            const submitted = accepted.some(item => item.agentName === 'guidance-composer' && Object.prototype.hasOwnProperty.call(item.patch, 'guidance'));
+            if (!submitted)
+                issues.push('本轮没有通过事务校验的 guidance：每轮必须重新分析并整列提交 signals');
+            else if (!ledger.guidance.signals.length)
+                issues.push('本轮 guidance.signals 为空：至少需要 1 条贴合当前剧情的场外信号');
+            if (strictCollision)
+                issues.push(...assertCollisionFulfillment_ACU(collisionReport, ledger.guidance, ledger));
+            return issues;
+        };
+        if (secondTargets && guidanceWritable && !composerFailed) {
+            let violations = projectionViolations();
+            for (let attempt = 1; violations.length && attempt <= WORLD_SIMULATION_PROJECTION_CORRECTION_ATTEMPTS_ACU; attempt += 1) {
+                const seq = 2 + attempt;
+                const feedback = [
+                    roundChangesText,
+                    projectionDirective,
+                    `【场外信号未通过·第 ${attempt} 次修正】${violations.join('；')}`,
+                    lastRejection ? `【上次提交未通过的原因】${lastRejection}` : '',
+                    '只修正 guidance：按上述原因整列提交 signals；列出的碰撞种子各补一条 voice=encounter 且 sourceId 等于该种子 ID 的信号；移除泄露 latent/dead 传闻的信号。不要改纪要与风声。',
+                ].filter(Boolean).join('\n');
+                const fix = await call('guidance-composer', ledger, seq, feedback, ['guidance']);
+                outcomes.push(fix);
+                if (!fix.candidate) {
+                    lastRejection = fix.summary;
+                    if (fix.status === 'failed' || fix.status === 'blocked')
+                        break;
+                    continue;
+                }
+                const fixId = fix.candidate.candidateId;
+                const preview = await applyOneShotCandidates_ACU(base, [...accepted, fix.candidate], authorized, input.settings, anchorMessage);
+                settleCandidate(fix, preview.accepted, seq);
+                outcomes.push(...preview.rejected);
+                if (!preview.accepted.some(item => item.candidateId === fixId)) {
+                    lastRejection = preview.rejected.map(item => item.summary).join('；');
+                    continue;
+                }
+                ledger = preview.ledger;
+                accepted.splice(0, accepted.length, ...preview.accepted);
+                lastRejection = '';
+                violations = projectionViolations();
+            }
+            // 修正耗尽：以 guidance 模块级缺口显式落账，不伪装成无变化。
+            if (violations.length) {
+                outcomes.push(failedOutcome_ACU('guidance-composer', `场外信号修正耗尽：${violations.join('；')}`, 'protocol_failed', ['guidance']));
             }
         }
         ledger = recordWorkflowIssues_ACU(ledger, outcomes, input.identity);
@@ -172666,7 +172898,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 current = [];
             }
             current.push(message);
-            if (message.kind === 'model_feedback') {
+            if (isFeedback_ACU(message)) {
                 groups.push(current);
                 current = [];
             }
@@ -172676,10 +172908,14 @@ Expected function or array of functions, received type ${typeof value}.`
         return groups;
     }
     function closed_ACU(group) {
-        if (group.some(item => item.kind === 'model_agent' || item.kind === 'model_feedback')) {
-            return group.length === 2 && group[0].kind === 'model_agent' && group[1].kind === 'model_feedback';
+        if (group.some(item => item.kind === 'model_agent' || isFeedback_ACU(item))) {
+            return group.length === 2 && group[0].kind === 'model_agent' && isFeedback_ACU(group[1]);
         }
         return group.every(item => item.kind === 'user' && !item.eventKind);
+    }
+    /** 导演反馈：旧数据的 model_feedback，或以 tool 身份持久化的工具回执。 */
+    function isFeedback_ACU(message) {
+        return message.kind === 'model_feedback' || (message.kind === 'tool' && !!message.toolCallId);
     }
     /** 与 readWorldSimulationDirectorHistory_ACU 同一投影：模型可见楼层消息 → 请求消息。 */
     function renderView_ACU(messages) {
@@ -173932,148 +174168,6 @@ ${rejectionText}` : delegationFeedback,
             reject_ACU$1('用户要求必须是字符串数组，例如 ["不要提前揭底牌","继续用第一人称"]；空串或非字符串条目会整份拒绝', undefined, 'persist');
         }
         return writeWorldSimulationUserRequirementsSnapshot_ACU(resolved, normalized, messages);
-    }
-
-    function clone_ACU$5(value) { return JSON.parse(JSON.stringify(value)); }
-    function region_ACU(value) {
-        if (!value)
-            return null;
-        const region = normalizeWorldRegionName_ACU(value);
-        return region || null;
-    }
-    function playerRegion_ACU(ledger) { return region_ACU(ledger.player.location?.region); }
-    function maintainWorldPlayer_ACU(ledger, previous) {
-        const next = clone_ACU$5(ledger);
-        const previousRegion = region_ACU(previous.location?.region);
-        const nextRegion = playerRegion_ACU(next);
-        next.player.locationUpdatedAtDay = nextRegion !== previousRegion ? next.clock.day : previous.locationUpdatedAtDay;
-        next.player.regionVisits = clone_ACU$5(previous.regionVisits);
-        if (next.player.contact === 'open' && nextRegion && !next.player.regionVisits.some(item => item.region === nextRegion && item.day === next.clock.day)) {
-            next.player.regionVisits.push({ region: nextRegion, day: next.clock.day });
-            if (next.player.regionVisits.length > WORLD_PLAYER_REGION_VISITS_CAP_ACU)
-                next.player.regionVisits.splice(0, next.player.regionVisits.length - WORLD_PLAYER_REGION_VISITS_CAP_ACU);
-        }
-        return next;
-    }
-    function sweepWorldLedger_ACU(ledger, settings) {
-        if (!settings.dynamics.missedSweepEnabled)
-            return { ledger: clone_ACU$5(ledger), sweptSeedIds: [], deadRumorIds: [], chronicleAppended: 0 };
-        const next = clone_ACU$5(ledger);
-        const sweptSeedIds = [];
-        const deadRumorIds = [];
-        const day = next.clock.day;
-        for (const seed of next.seeds) {
-            if (seed.expiresAtDay === null || seed.expiresAtDay >= day || seed.status === 'resolved' || seed.status === 'retired')
-                continue;
-            seed.status = 'retired';
-            seed.retiredReason = 'missed';
-            seed.revision += 1;
-            next.chronicle.push({ id: `sweep:${seed.id}:${day}`, at: next.clock.storyTime, summary: `[错过] ${seed.missedOutcome ?? ''}`, relatedIds: [seed.id], evidenceRefs: [] });
-            sweptSeedIds.push(seed.id);
-        }
-        for (const rumor of next.rumors) {
-            if (rumor.status !== 'latent' || day - rumor.earliestRevealDay <= settings.dynamics.rumorTTLDays)
-                continue;
-            rumor.status = 'dead';
-            rumor.revision += 1;
-            deadRumorIds.push(rumor.id);
-        }
-        return { ledger: next, sweptSeedIds, deadRumorIds, chronicleAppended: sweptSeedIds.length };
-    }
-    function filterUnreachableRumorSignals_ACU(guidance, ledger) {
-        const playerRegion = playerRegion_ACU(ledger);
-        const rumors = new Map(ledger.rumors.map(item => [item.id, item]));
-        const strippedRumorIds = [];
-        const signals = guidance.signals.filter(signal => {
-            if (signal.voice !== 'rumor')
-                return true;
-            const rumor = signal.sourceId ? rumors.get(signal.sourceId) : undefined;
-            const reachable = ledger.player.contact === 'open' && playerRegion !== null && !!rumor && rumor.channels.some(channel => region_ACU(channel) === playerRegion);
-            if (reachable)
-                return true;
-            if (signal.sourceId)
-                strippedRumorIds.push(signal.sourceId);
-            return false;
-        });
-        return { guidance: { ...clone_ACU$5(guidance), signals }, strippedRumorIds };
-    }
-    function refreshWorldRumors_ACU(ledger, adoptedRumorIds, settings) {
-        const next = clone_ACU$5(ledger);
-        const adopted = new Set(adoptedRumorIds);
-        const ttl = settings.dynamics.rumorTTLDays;
-        const day = next.clock.day;
-        for (const rumor of next.rumors) {
-            let status = rumor.status;
-            if (status === 'latent' && day >= rumor.earliestRevealDay)
-                status = 'ripe';
-            if (status === 'ripe') {
-                if (adopted.has(rumor.id)) {
-                    rumor.revealedAtDay = day;
-                    status = 'revealed';
-                }
-                else {
-                    const visitedChannel = rumor.channels.some(channel => {
-                        const region = region_ACU(channel);
-                        return !!region && next.player.regionVisits.some(visit => visit.region === region && visit.day >= rumor.earliestRevealDay);
-                    });
-                    if ((visitedChannel && day - rumor.earliestRevealDay > ttl) || day - rumor.originDay > ttl * 2)
-                        status = 'dead';
-                }
-            }
-            if (status !== rumor.status) {
-                rumor.status = status;
-                rumor.revision += 1;
-            }
-        }
-        return next;
-    }
-    function detectWorldCollisions_ACU(ledger) {
-        const playerRegion = playerRegion_ACU(ledger);
-        const playerContact = ledger.player.contact;
-        const secluded = playerContact === 'secluded';
-        const collidedSeeds = playerRegion
-            ? ledger.seeds.filter(seed => {
-                const seedRegion = region_ACU(seed.location?.region);
-                return !!seedRegion && seedRegion === playerRegion
-                    && (seed.status === 'active' || seed.status === 'converging')
-                    && (seed.expiresAtDay === null || seed.expiresAtDay >= ledger.clock.day);
-            }).map(seed => seed.id)
-            : [];
-        const ripeRumors = secluded || !playerRegion
-            ? []
-            : ledger.rumors.filter(rumor => rumor.status === 'ripe' && rumor.channels.some(channel => region_ACU(channel) === playerRegion)).map(rumor => rumor.id);
-        return {
-            playerRegion,
-            playerContact,
-            secludedNote: secluded ? '闭关/隔绝中，传闻渠道不可用' : null,
-            collidedSeeds,
-            ripeRumors,
-        };
-    }
-    function normalizeFact_ACU(value) {
-        return value.trim().replace(/\s+/g, ' ').toLowerCase();
-    }
-    function assertCollisionFulfillment_ACU(report, guidance, ledger) {
-        const violations = [];
-        const seeds = new Map(ledger.seeds.map(item => [item.id, item]));
-        for (const seedId of report.collidedSeeds) {
-            const seed = seeds.get(seedId);
-            if (!seed || seed.exposePolicy !== 'on_collision')
-                continue;
-            if (!guidance.signals.some(signal => signal.voice === 'encounter' && signal.sourceId === seedId)) {
-                violations.push(`碰撞种子 ${seedId} 缺少 encounter 信号`);
-            }
-        }
-        const blocked = ledger.rumors.filter(item => item.status === 'latent' || item.status === 'dead');
-        for (const signal of guidance.signals) {
-            for (const rumor of blocked) {
-                const fact = normalizeFact_ACU(rumor.fact);
-                if (signal.sourceId === rumor.id || (fact && normalizeFact_ACU(signal.text).includes(fact))) {
-                    violations.push(`信号泄露了 ${rumor.status} 传闻 ${rumor.id}`);
-                }
-            }
-        }
-        return violations;
     }
 
     function clone_ACU$4(value) { return JSON.parse(JSON.stringify(value)); }
@@ -175407,10 +175501,14 @@ ${rejectionText}` : delegationFeedback,
         const messages = [...chat];
         const originalFields = snapshots.map(({ target, key, existed, value }) => ({ target, key, existed, value,
             content: JSON.stringify(value) }));
-        const messagesIntact = () => chat.length === messages.length && messages.every((message, index) => chat[index] === message);
+        // 只要求提交开始时的楼层前缀原样保留：生成途中宿主在尾部追加的新楼层不改变触发楼层身份，
+        // 投影仍写回触发本次运行的楼层；前缀内删楼、换楼或插楼仍视为冲突。
+        const messagesIntact = () => chat.length >= messages.length && messages.every((message, index) => chat[index] === message);
         const fieldsIntact = (fields) => messagesIntact() && fields.every(field => Object.prototype.hasOwnProperty.call(field.target, field.key) === field.existed
             && JSON.stringify(field.target[field.key]) === field.content);
         let saveAttempted = false;
+        /** 保存与回读均通过后才赋值；仅用于请求宿主重渲染触发楼层。 */
+        let refreshIndex = null;
         let stagedFields = null;
         const currentFieldsIntact = () => stagedFields !== null && fieldsIntact(stagedFields);
         try {
@@ -175451,7 +175549,7 @@ ${rejectionText}` : delegationFeedback,
             if (getChatArray_ACU() !== chat || getActiveChatStorageIdentity_ACU(chat) !== input.identity.chatIdentity) {
                 reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '宿主保存后聊天上下文已变化');
             }
-            resolveCurrentWorldSimulationAnchor_ACU(persistedAnchor, chat);
+            refreshIndex = resolveCurrentWorldSimulationAnchor_ACU(persistedAnchor, chat).messageIndex;
             if (!currentFieldsIntact())
                 reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '宿主保存期间提交字段已变化');
             if (hasPartialWorldSimulationRunWrites_ACU(projectedView)) {
@@ -175500,6 +175598,9 @@ ${rejectionText}` : delegationFeedback,
                 ...(saveAttempted ? { recovery: 'saved' } : {}),
             });
         }
+        // 联合保存已成功：让宿主重渲染触发楼层，使〈与此同时〉段即时可见。
+        if (refreshIndex !== null)
+            refreshMessageBlock_ACU(refreshIndex);
         return persistedAnchor;
     }
     function commitWorldSimulationProjection_ACU(input) {
@@ -176600,7 +176701,8 @@ ${rejectionText}` : delegationFeedback,
     }
     function buildPromptContext_ACU(input) {
         const history = readWorldSimulationConversation_ACU(input.chat);
-        const visibleHistory = { ...history, messages: history.messages.filter(item => item.kind !== 'model_agent' && item.kind !== 'model_feedback') };
+        const visibleHistory = { ...history, messages: history.messages.filter(item => item.kind !== 'model_agent' && item.kind !== 'model_feedback'
+                && !(item.kind === 'tool' && item.toolCallId)) };
         return {
             task: input.envelope.task,
             history: visibleHistory,
@@ -209192,7 +209294,9 @@ ${rejectionText}` : delegationFeedback,
      */
     function projectWorldSimulationSessionFromConversation_ACU(messages) {
         return messages
-            .filter(message => message.kind !== 'handoff' && message.kind !== 'model_agent' && message.kind !== 'model_feedback')
+            // 工具回执（带 toolCallId）按 tool 身份展示，与智能续写一致；导演动作与纯文本反馈仍不上会话流。
+            .filter(message => message.kind !== 'handoff' && message.kind !== 'model_agent'
+            && (message.kind !== 'model_feedback' || !!message.toolCallId))
             .map(message => {
             const persistedKind = typeof message.eventKind === 'string'
                 && WORLD_SIMULATION_SESSION_EVENT_KINDS_ACU.includes(message.eventKind)

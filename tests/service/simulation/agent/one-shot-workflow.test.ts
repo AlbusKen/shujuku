@@ -33,20 +33,29 @@ function setup() {
 }
 
 describe('两批一次性格林推演工作流', () => {
-  it('第一批同一轮并发启动，全部无变化时不运行第二批', async () => {
+  it('第一批同一轮并发启动，全部无变化时仍运行第二批并提交场外信号', async () => {
     const env = setup();
     const entered: string[] = [];
     const waits: Array<() => void> = [];
     const runOneShot = vi.fn((input: any) => new Promise<WorldSimulationSubagentOutcome_ACU>(resolve => {
       entered.push(input.agentName);
+      if (input.agentName === 'guidance-composer') {
+        resolve({ agentName: input.agentName, status: 'candidate', summary: '投影钟声', evidenceRefs: [env.ref], uncertainties: [],
+          candidate: { candidateId: 'guidance-2', agentName: input.agentName,
+            patch: { guidance: { signals: [{ text: '远处传来钟声', voice: 'ambient', sourceId: 'clock' }],
+              expectedRevision: input.baseLedgerRevision, evidenceRefs: [env.ref] } },
+            summary: '投影钟声', evidenceRefs: [env.ref], uncertainties: [], writableModules: ['guidance'] } } as WorldSimulationSubagentOutcome_ACU);
+        return;
+      }
       waits.push(() => resolve(noChange(input.agentName)));
     }));
     const pending = env.run(runOneShot);
     expect(entered).toEqual(['undercurrent-analyst', 'dramatis-keeper']);
     waits.forEach(release => release());
     const result = await pending;
-    expect(result.outcome).toBe('no_change');
-    expect(runOneShot).toHaveBeenCalledTimes(2);
+    expect(entered).toEqual(['undercurrent-analyst', 'dramatis-keeper', 'guidance-composer']);
+    expect(result.outcome).toBe('commit');
+    expect(result.commitCandidate?.acceptedCandidates.map(item => item.candidateId)).toEqual(['guidance-2']);
   });
 
   it('全部派工失败时阻断而不升级导演', async () => {
@@ -56,7 +65,7 @@ describe('两批一次性格林推演工作流', () => {
     expect(result.outcome).toBe('blocked');
     expect(result.escalated).toBe(false);
     expect(result.commitCandidate).toBeUndefined();
-    expect(runOneShot).toHaveBeenCalledTimes(2);
+    expect(runOneShot).toHaveBeenCalledTimes(3);
   });
 
   it('第二批等待并发的第一批结束，按相同 base 重放并保留被接受的候选', async () => {
@@ -84,7 +93,8 @@ describe('两批一次性格林推演工作流', () => {
     expect(entered).toHaveLength(2);
     release[1]();
     const result = await pending;
-    expect(entered).toEqual(['undercurrent-analyst', 'dramatis-keeper', 'guidance-composer']);
+    expect(entered.slice(0, 3)).toEqual(['undercurrent-analyst', 'dramatis-keeper', 'guidance-composer']);
+    expect(entered.filter(name => name === 'guidance-composer')).toHaveLength(3);
     expect(result.outcome).toBe('commit');
     expect(result.commitCandidate?.acceptedCandidates.map(item => item.candidateId)).toEqual([clock.candidateId]);
   });
@@ -416,11 +426,13 @@ describe('两批一次性格林推演工作流', () => {
     expect(addressFailure.unresolvedIssues).toEqual([]);
     expect(playerInput.tools.read).not.toHaveBeenCalled();
     const locationWorkflow = await env.run(async (call: any) => call.agentName === 'undercurrent-analyst' ? locationFailure : noChange(call.agentName));
-    expect(locationWorkflow.pendingFixes.map(item => item.module)).toEqual(['seeds']);
+    // 场外信号每轮必写：composer 持续无变化时修正轮耗尽，guidance 以模块缺口显式落账。
+    expect(locationWorkflow.pendingFixes.map(item => item.module)).toEqual(['seeds', 'guidance']);
     expect(locationWorkflow.summary).toContain('patch.seeds.upsert[0].location');
     const addressWorkflow = await env.run(async (call: any) => call.agentName === 'dramatis-keeper' ? addressFailure : noChange(call.agentName));
     expect(addressWorkflow.outcome).toBe('blocked');
-    expect(addressWorkflow.pendingFixes).toEqual([]);
+    // 协议错误不伪造模块缺口；只有未提交的场外信号记为 guidance 缺口。
+    expect(addressWorkflow.pendingFixes.map(item => item.module)).toEqual(['guidance']);
     expect(addressWorkflow.summary).toContain('INVALID_TOOL_ADDRESS');
   });
 

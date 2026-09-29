@@ -336,7 +336,7 @@ describe('T9 格林推演隔离 API replay', () => {
     expect(replay.saveChat).toHaveBeenCalledTimes(4);
   });
 
-  it('末楼为 user 时，手动入口向上冻结最近 assistant 且 no_change 不进入 strict commit', async () => {
+  it('末楼为 user 时，手动入口向上冻结最近 assistant，批次一无变化仍提交本轮场外信号', async () => {
     const replay = buildReplay({ mode: 'no_change', entry: 'agent', trailingUser: true });
 
     const result = await replay.run();
@@ -344,29 +344,30 @@ describe('T9 格林推演隔离 API replay', () => {
     expect(result).toMatchObject({
       status: 'completed',
       identity: { triggerKind: 'agent_chat_message', anchorMessageId: 42, anchorMessageKey: 'number:42', anchorContentDigest: replay.initialAnchor.contentDigest },
-      result: { outcome: 'no_change' },
+      result: { outcome: 'commit' },
     });
     expect(replay.chat[1]).toMatchObject({ is_user: true, message_id: 43, mes: '继续观察钟楼。' });
     expect(readWorldSimulationConversation_ACU(replay.chat).messages).toMatchObject([{ kind: 'user', text: '手动推进钟楼世界状态' }]);
-    expect(replay.store.read()).toMatchObject({ ledger: { revision: 0 }, task: { status: 'completed', activeRun: null }, timeline: expect.arrayContaining([expect.objectContaining({ kind: 'no_change' })]) });
-    expect(replay.commitProjection).not.toHaveBeenCalled();
-    expect(replay.saveChat).toHaveBeenCalledTimes(4);
+    expect(replay.store.read()).toMatchObject({ ledger: { revision: 1, guidance: { signals: [{ text: '远处钟声响起', voice: 'ambient' }] } }, task: { status: 'completed', activeRun: null } });
+    expect(replay.chat[0].mes).toContain('远处钟声响起');
+    expect(replay.commitProjection).toHaveBeenCalledOnce();
   });
 
-  it('有授权证据且全部派工均为 no_change 时零 strict commit 收敛', async () => {
+  it('有授权证据且批次一全部 no_change 时仍提交本轮场外信号', async () => {
     const replay = buildReplay({ mode: 'no_change', entry: 'assistant' });
 
     const result = await replay.run();
 
-    expect(result).toMatchObject({ status: 'completed', result: { outcome: 'no_change', outcomes: [{ status: 'no_change' }, { status: 'no_change' }] } });
-    if (!result || result.status !== 'completed' || result.result.outcome !== 'no_change') throw new Error('expected no_change replay');
-    expect(result.result.finalProjection).toEqual({ content: null, sourceAgent: 'current-ledger', sourceRevision: 0, deliverable: true });
-    expect(replay.store.read()).toMatchObject({ ledger: { revision: 0 }, task: { status: 'completed', activeRun: null }, stages: [{ status: 'completed' }] });
-    expect(replay.commitProjection).not.toHaveBeenCalled();
-    expect(replay.saveChat).toHaveBeenCalledTimes(3);
+    expect(result).toMatchObject({ status: 'completed', result: { outcome: 'commit', outcomes: [{ status: 'no_change' }, { status: 'no_change' }, { status: 'candidate' }] } });
+    if (!result || result.status !== 'completed' || result.result.outcome !== 'commit') throw new Error('expected committed replay');
+    expect(result.result.finalProjection).toMatchObject({ sourceAgent: 'guidance-composer', sourceRevision: 1, deliverable: true });
+    expect(result.result.finalProjection?.content).toContain('远处钟声响起');
+    expect(replay.chat[0].mes).toContain('远处钟声响起');
+    expect(replay.store.read()).toMatchObject({ ledger: { revision: 1 }, task: { status: 'completed', activeRun: null }, stages: [{ status: 'completed' }] });
+    expect(replay.commitProjection).toHaveBeenCalledOnce();
     expect(readWorldSimulationSessionLog_ACU('chat-replay')).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: 'main_action', title: '主 Agent 动作：open_round', ok: true }),
-      expect.objectContaining({ kind: 'run_completed', title: '格林推演无变化', ok: true }),
+      expect.objectContaining({ kind: 'run_completed', title: '格林推演已提交', ok: true }),
     ]));
   });
 
@@ -387,7 +388,9 @@ describe('T9 格林推演隔离 API replay', () => {
     expect(currentAnchor.contentDigest).not.toBe(replay.initialAnchor.contentDigest);
     const messages = readWorldSimulationConversation_ACU(replay.chat).messages;
     expect(messages.filter(item => item.eventKind === 'run_completed')).toMatchObject([{ title: '格林推演已提交' }]);
-    expect(messages.filter(item => item.kind === 'model_agent')).toHaveLength(messages.filter(item => item.kind === 'model_feedback').length);
+    // 导演工具回执以 tool 身份（带 toolCallId）持久化，与智能续写一致；其余反馈仍是 model_feedback。
+    expect(messages.filter(item => item.kind === 'model_agent')).toHaveLength(messages.filter(item => item.kind === 'model_feedback' || (item.kind === 'tool' && !!item.toolCallId)).length);
+    expect(messages.filter(item => item.kind === 'tool' && item.toolCallId === 'replay-director-read')).toHaveLength(1);
     const director = replay.invocations.filter(item => item.role === 'world-director');
     expect(director[1].messages.some(item => 'tool_calls' in item && (item as { tool_calls?: { id: string }[] }).tool_calls?.some(call => call.id === 'replay-director-read'))).toBe(true);
     expect(readWorldSimulationDirectorHistory_ACU(replay.chat).filter(item => item.role === 'tool' && item.tool_call_id === 'replay-director-read')).toHaveLength(1);
@@ -400,12 +403,12 @@ describe('T9 格林推演隔离 API replay', () => {
     expect(readWorldSimulationConversation_ACU(replay.chat).messages.filter(item => item.eventKind === 'run_completed')).toHaveLength(1);
   });
 
-  it('锚定导演 no_change 权威保存后仅有一次完成通告，blocked 不伪装完成', async () => {
+  it('锚定导演批次一无变化时仍提交场外信号并仅有一次完成通告，blocked 不伪装完成', async () => {
     const replay = buildReplay({ mode: 'no_change', entry: 'assistant', anchored: true });
     const result = await replay.run();
-    expect(result).toMatchObject({ status: 'completed', result: { outcome: 'no_change' } });
+    expect(result).toMatchObject({ status: 'completed', result: { outcome: 'commit' } });
     expect(readWorldSimulationConversation_ACU(replay.chat).messages.filter(item => item.eventKind === 'run_completed'))
-      .toMatchObject([{ title: '格林推演无变化' }]);
+      .toMatchObject([{ title: '格林推演已提交' }]);
     expect(readWorldSimulationDirectorHistory_ACU(replay.chat).at(-1)?.content).toContain('"source":"fixed-workflow"');
     expect(replay.invocations.filter(item => item.role === 'world-director')).toHaveLength(2);
     expect(await replay.runtime.handleAssistantCompletion(createWorldSimulationCompletionIntent_ACU(42, 'chat-replay', '', replay.chat, 1)))
