@@ -1149,9 +1149,79 @@ const V39_MAIN_AGENT_SELF_NARRATION_ACU: ReadonlyArray<{ after: string; answer: 
  * 当前默认组：在 V38 之上把主 Agent 的三段单向指令补成「user 指令 + assistant 自述」。
  * 自述段一律插在对应指令段之后、末尾预填充段之前，保持预填充始终是最后一条消息。
  */
-export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+export function buildV39ContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
   const prompts = buildV38ContinuationAgentPrompts_ACU();
   return { ...prompts, main: withV39MainAgentSelfNarration_ACU(prompts.main) };
+}
+
+/**
+ * V40 子代理自述：只补仍缺问答的角色。arcArchitect 的卷级容量契约、maintainer 的时间结算契约、
+ * finalReviewer 的时间一致性规则原本都是单向 user 指令；instructionComposer 除 system 与任务段外
+ * 没有任何问答，因此在 system 之后补一组「user 提问 + assistant 自述」。
+ * 其余角色已各有认识论与输出契约两组问答，不重复补。
+ * 自述起始文本避开 AGENT_PROMPT_SLOT_LOCATORS_ACU 全部前缀，不含占位符与 $AGENT_TASK，
+ * 且全部插在任务段之前——任务段会被装配器整体移到请求末尾。
+ */
+const V40_ROLE_SELF_NARRATION_ACU: Partial<Record<keyof ContinuationAgentPrompts_ACU, ReadonlyArray<{ after: string; ask?: string; answer: string }>>> = {
+  arcArchitect: [{
+    after: '【卷级容量、时间与长期经营契约】',
+    answer: '卷级契约我这样执行：写卷时给齐 narrativeRole、targetStageRange、targetTimeSpan、progressCeiling，以及至少一条 sustainingThreads 与至少一条 payoffTargets；总纲级条目不带这些卷级字段。\ntargetStageRange 只是容量锚：按单轮约 800–1200 字、每阶段 6–10 轮估算，用来检查每卷有没有足够的阶段承载它的结构职责；我不据此承诺固定字数、章节数或章回数，也不只列卷标题了事。\nprogressCeiling 写清本卷主线最多走到哪里，阶段大纲不得越过它；sustainingThreads 只放跨阶段持续经营的关系、利益、认知或生活线；payoffTargets 只引用本卷要兑现的既有期待。\n把卷标记为 done 时，我在 completionState 里逐条原文引用每条 payoffTargets 并给出兑现证据，逐条原文引用每条 sustainingThreads 并说明已完成、转入后续卷还是明确终止；实际阶段数偏离 targetStageRange 时在 completionRationale 说明原因。改卷只写要改的字段，其余保持原值。',
+  }],
+  maintainer: [{
+    after: '【故事年代学账本现状】',
+    answer: '时间结算我这样做：时间事实只从真实正文里取，大纲的 timeAdvance / timeAnchor 只是计划，运行时的任务时间线也不是小说内部时间。\n正文里出现可证实的时间变化，我用受限 SQL 结算进 chronology：新增用 INSERT，修改已有条目用 UPDATE 并在 WHERE 带上 id 与当前 expected_revision，作废用 DELETE 并写明理由与当前 expected_revision。evidence_indexes 用单引号包裹的 JSON 数组，只引用真实已结算的正文楼层，不能为空，也不能引用尚未结算的楼层。\n正文只说「数日后」就标 approximate，完全无法判断就标 unknown，绝不伪造精确日期。没有可证实的时间变化时我不写 chronology；漏写不等于删除。',
+  }],
+  finalReviewer: [{
+    after: '【故事时间一致性审查】',
+    answer: '时间一致性我这样审：时间问题以年代学账本和最近正文为准，大纲里的时间字段只是计划；账本为空时只按最近正文判断，不虚构时间事实。\n我逐项核对候选指导与既有时间事实是否相容：伤势恢复速度、训练生产与经营周期、旅行距离与耗时、季节天气、角色年龄与关系熟悉度。\n候选指导安排数日、数周、数月或数年的跳跃时，必须同时有新的相对时间锚、至少两项可感知变化，以及上一个紧迫问题为何允许被跨过的连续性桥梁；缺一项就判 revise。用摘要跳过此前已承诺的关键场景、选择或兑现同样判 revise。时间仍连续时，我不凭空要求跳跃。',
+  }],
+  instructionComposer: [{
+    after: '你是写作指令编排代理 instruction-composer。',
+    ask: '交付前说清楚你怎么写这份写作指令：先核对什么，策划建议冲突时怎么取舍，什么情况下只做增量修订？',
+    answer: '写指令之前，我先通读伏笔账本、信息差、故事年代学，以及本轮的结算与策划回执，不只看目录摘要。\n我核对策划建议之间、建议与本轮节奏、建议与已结算硬事实或长期约束之间有没有冲突；有冲突就采用更保守的一方，并在 summary 里写明取舍，绝不把互相矛盾的建议拼进同一份指令。\ninstruction 按骨架字段写全，不塞入子代理目录、读取地址、内部预算或任何过程信息；伏笔与信息差操作只来自策划建议或既有账本，不即兴发挥。长期偏好用 constraints 增量登记：add 只写本轮新增，retire 精确引用要废除条目的 id 或原文。\n任务标明是增量修订时，我只按反馈清单改动对应句子，保留反馈要求留下的内容，不整篇重写。',
+  }],
+};
+
+/** V39 默认组按角色缓存，用于判断目标段是否仍是未改写的默认正文。 */
+const v40PristineRoles_ACU = new Map<keyof ContinuationAgentPrompts_ACU, ContinuationPromptSegment_ACU[]>();
+function v40PristineRoleSegments_ACU(role: keyof ContinuationAgentPrompts_ACU): ContinuationPromptSegment_ACU[] {
+  let cached = v40PristineRoles_ACU.get(role);
+  if (!cached) {
+    cached = buildV39ContinuationAgentPrompts_ACU()[role];
+    v40PristineRoles_ACU.set(role, cached);
+  }
+  return cached;
+}
+
+/** 当前默认组：V39 之上为缺问答的子代理补自述段。 */
+export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+  const prompts = buildV39ContinuationAgentPrompts_ACU();
+  const next = { ...prompts };
+  for (const role of Object.keys(prompts) as Array<keyof ContinuationAgentPrompts_ACU>) {
+    next[role] = withV40RoleSelfNarration_ACU(role, prompts[role]);
+  }
+  return next;
+}
+
+/**
+ * 按目标段为指定角色插入问答。与 V39 同一纪律：目标段必须与 V39 默认正文逐字相同才补，
+ * 用户改写或删掉的段不补；已插入过的不重复。
+ */
+export function withV40RoleSelfNarration_ACU(role: keyof ContinuationAgentPrompts_ACU, segments: readonly ContinuationPromptSegment_ACU[]): ContinuationPromptSegment_ACU[] {
+  const turns = V40_ROLE_SELF_NARRATION_ACU[role];
+  if (!turns?.length) return segments.map(segment => ({ ...segment }));
+  const pristine = v40PristineRoleSegments_ACU(role);
+  const result: ContinuationPromptSegment_ACU[] = [];
+  for (const segment of segments) {
+    result.push({ ...segment });
+    const turn = turns.find(item => segment.content.startsWith(item.after));
+    if (!turn) continue;
+    if (pristine.find(item => item.content.startsWith(turn.after))?.content !== segment.content) continue;
+    if (segments.some(item => item.role === 'assistant' && item.content === turn.answer)) continue;
+    if (turn.ask) result.push({ role: 'user', content: turn.ask, enabled: true, deletable: true, pinned: false });
+    result.push({ role: 'assistant', content: turn.answer, enabled: true, deletable: true, pinned: false });
+  }
+  return result;
 }
 
 /** V38 默认主 Agent 段的缓存。判断「用户是否改写过目标段」必须拿它比，而不是拿原始常量比：
