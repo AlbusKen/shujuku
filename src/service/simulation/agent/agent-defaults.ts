@@ -820,7 +820,8 @@ export function buildV28OneShotWorldSimulationAgentPrompt_ACU(name: WorldSimulat
     turn('user', item.ask),
     turn('assistant', item.answer),
     ...rest.slice(1).flatMap(pair => [turn('user', pair.ask), turn('assistant', pair.answer)]),
-    seam('HISTORY', 'user', '（本角色不使用会话历史。）'),
+    // 这里不再放 HISTORY 段：一次性角色本来就不读会话历史，v21-v27 留下的那句占位说明
+    // 既不注入 $WORLD_HISTORY 也不参与装配，只是白占一条 user 消息。
     seam('RUNTIME_CONTEXT', 'user', '锚点正文、你负责的资料、关联只读资料与本轮世界书都由运行时注入在末尾消息里，直接按那份数据推演。'),
     seam('ACKNOWLEDGEMENT', 'assistant', `已理解：${item.ack}`),
     seam('EXECUTION_BOUNDARY', 'user', '现在执行任务。按上面自述的顺序走完全部职责核查与收口自检，然后一次调用原生 write_sql 提交所有有依据的变更；逐项核对后确无变化回复 NO_CHANGE，确需写入却无法写成合法 SQL 时回复 FAILED: 原因。不输出核查长文、裸 SQL 或 Markdown。'),
@@ -1069,6 +1070,20 @@ export interface WorldSimulationPromptMigration_ACU {
 }
 
 /** 报告与迁移共用同一判断；旧调用方仍可只读取提示词映射。 */
+/**
+ * 一次性默认段的对齐键：优先按 seam 标记，其次识别用户要求段与末尾预填充段。
+ * 历史默认与当前默认的段数可以不同（v28 起不再有 HISTORY 段），所以迁移必须按语义对齐，
+ * 不能按下标对齐。
+ */
+function oneShotSegmentKey_ACU(segment: WorldSimulationPromptSegment_ACU): string | null {
+  for (const seam of WORLD_SIMULATION_ENGINE_SEAMS_ACU) {
+    if (segment.content.startsWith(worldSimulationSeamMarker_ACU(seam))) return `seam:${seam}`;
+  }
+  if (segment.content.includes('$WORLD_USER_REQUIREMENTS')) return 'guidance';
+  if (segment.content === USER_PREFILL_CONTENT_ACU) return 'prefill';
+  return null;
+}
+
 export function migrateWorldSimulationAgentPromptsDetailed_ACU(current: Record<string, WorldSimulationPromptSegment_ACU[]>, previousDefaults: Record<string, WorldSimulationPromptSegment_ACU[]>, previousVersion?: string): WorldSimulationPromptMigration_ACU {
   const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
   const migrated = {} as WorldSimulationAgentPrompts_ACU;
@@ -1091,9 +1106,16 @@ export function migrateWorldSimulationAgentPromptsDetailed_ACU(current: Record<s
       } else if (promptFingerprint_ACU(value) === promptFingerprint_ACU(old)) {
         migrated[name] = defaults[name];
       } else {
-        migrated[name] = value.map(segment => {
+        // 按 seam 语义对齐而不是按下标：v28 删掉了 HISTORY 段，段数与 v21-v27 不再一致，
+        // 继续按下标会把 HISTORY 之后的段整体串位，末段还会退化成空对象。
+        migrated[name] = value.flatMap(segment => {
           const index = old.findIndex(item => JSON.stringify(item) === JSON.stringify(segment));
-          return index < 0 ? { ...segment } : { ...defaults[name][index] };
+          if (index < 0) return [{ ...segment }];
+          const key = oneShotSegmentKey_ACU(old[index]);
+          if (!key) return [{ ...segment }];
+          const replacement = defaults[name].find(item => oneShotSegmentKey_ACU(item) === key);
+          // 当前默认已经没有这一段（HISTORY）：整段丢弃，不做错位替换。
+          return replacement ? [{ ...replacement }] : [];
         });
       }
       continue;

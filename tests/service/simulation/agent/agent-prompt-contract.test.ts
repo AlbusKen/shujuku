@@ -13,7 +13,7 @@ import { exportWorldSimulationPrompts_ACU, importWorldSimulationPrompts_ACU, ren
 import { createWorldSimulationEvidenceRegistry_ACU, recordWorldSimulationEvidence_ACU, snapshotWorldSimulationEvidenceRegistry_ACU } from '../../../../src/service/simulation/world-simulation-evidence-registry';
 
 describe('格林推演提示词装配契约', () => {
-  it('装配七个现役角色、主 Agent 不派遣退役角色，以及唯一有序固定 seam', () => {
+  it('装配七个现役角色、主 Agent 不派遣退役角色；seam 仍唯一升序，一次性角色不再带 HISTORY', () => {
     const prompts = validateWorldSimulationAgentPrompts_ACU(buildDefaultWorldSimulationAgentPrompts_ACU());
     expect(Object.keys(prompts)).toEqual([...WORLD_SIMULATION_AGENT_NAMES_ACU]);
     expect(WORLD_SIMULATION_AGENT_CATALOG_ACU).toHaveLength(7);
@@ -23,10 +23,17 @@ describe('格林推演提示词装配契约', () => {
       'world-director', 'world-stage-planner', 'undercurrent-analyst',
       'dramatis-keeper', 'causality-reviewer', 'guidance-composer', 'lore-researcher',
     ]);
-    for (const segments of Object.values(prompts)) {
-      const positions = WORLD_SIMULATION_ENGINE_SEAMS_ACU.map(seam => segments.findIndex(segment => segment.content.includes(worldSimulationSeamMarker_ACU(seam))));
+    for (const [name, segments] of Object.entries(prompts)) {
+      const positions = WORLD_SIMULATION_ENGINE_SEAMS_ACU
+        .map(seam => segments.findIndex(segment => segment.content.includes(worldSimulationSeamMarker_ACU(seam))))
+        .filter(index => index >= 0);
+      // 出现过的 seam 仍按枚举顺序升序且互不重复；段数与是否齐全不再强制。
       expect(positions).toEqual([...positions].sort((a, b) => a - b));
-      expect(new Set(positions).size).toBe(8);
+      expect(new Set(positions).size).toBe(positions.length);
+      // 一次性角色不读会话历史，HISTORY 段已移除；其余角色仍保留全部 8 个 seam。
+      const oneShot = ['undercurrent-analyst', 'dramatis-keeper', 'guidance-composer'].includes(name);
+      expect(positions).toHaveLength(oneShot ? 7 : 8);
+      expect(segments.some(segment => segment.content.includes(worldSimulationSeamMarker_ACU('HISTORY')))).toBe(!oneShot);
     }
   });
 

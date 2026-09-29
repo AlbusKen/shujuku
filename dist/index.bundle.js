@@ -88339,8 +88339,11 @@ $CONTENT
             finalReviewer: appendCurrentDefaultRule_ACU(prompts.finalReviewer, CONTINUATION_CURRENT_FINAL_REVIEW_RULES_ACU),
         };
     }
-    /** 仅替换每个 Agent 默认组的最后一段；V36 默认组保留供历史迁移使用。 */
-    function buildDefaultContinuationAgentPrompts_ACU() {
+    /**
+     * V38 冻结入口：仅替换每个 Agent 默认组的最后一段；V36 默认组保留供历史迁移使用。
+     * V39 起在其结果上追加主 Agent 自述段，因此这里必须保持原样，供 V36→V37 与 V38→V39 迁移对照。
+     */
+    function buildV38ContinuationAgentPrompts_ACU() {
         const prompts = applyCurrentContinuationPromptRules_ACU(buildV36ContinuationAgentPrompts_ACU());
         for (const role of Object.keys(prompts)) {
             const segments = prompts[role];
@@ -88366,6 +88369,62 @@ $CONTENT
                 protocol.content += '\n独立 read/search 在授权和预算内于同一回复并发调用，不拆批等待；搜索结果决定的精读等回执后再读。逐栏写入只认真实回执中的已存栏目，缺栏只补缺失项。';
         }
         return prompts;
+    }
+    /**
+     * V39 主 Agent 自述段：把文本协议、子代理规则、故事时间这三段单向 user 指令补成问答。
+     * 键是被追加的目标段起始文本，值是紧跟其后的 assistant 自述。
+     * 自述的起始文本刻意避开 AGENT_PROMPT_SLOT_LOCATORS_ACU 的全部前缀，也不含 $AGENT_TASK，
+     * 否则会被槽位定位误命中、把后续规则追加到错误的段上。
+     */
+    const V39_MAIN_AGENT_SELF_NARRATION_ACU = [
+        {
+            after: '【文本协议规范】',
+            answer: '协议我复述一遍确认：每个动作都是一个完整的 JSON 对象，JSON 之外最多留一点思路梳理，动作本身绝不散落在对象外面。\n工具动作 read / search 可以并发：需要多份资料时我把多个工具对象写进同一次输出，一批执行、结果一起回来，绝不一轮只读一份白耗迭代；工具对象不与决策动作混在同一次输出。批次被门禁打回时我按报告缩小目标重试，不原样重发。\n决策动作一次只表达一个：delegate 并行派工并附种子地址；open_round 写明本轮焦点后交给固定工作流；finalize 只确认 instruction-composer 本轮写出的那一版，并按骨架字段组织、控制在基准上限内、不塞入占位符名、代理名、模块名、读取地址与任何内部过程；block 只在关键资料缺失或硬事实冲突无法裁决时使用。',
+        },
+        {
+            after: '【子代理使用规则】',
+            answer: '结构维护的分工我复述一遍：总纲与阶段大纲都由程序的固定工作流维护，我只在 open_round 的 focus 里写明本轮焦点与我看到的偏差，不自己去动这两样。真实剧情与总纲或阶段大纲出现目标、节奏或结构偏差时，我把偏差写进 focus 交给程序处理，绝不在大纲已明显失效时绕过 open_round 硬交付。\n结算、策划、条件审查与写作指令同样归固定工作流：我输出 open_round 之后由运行时按序执行。伏笔账本与信息差只有结算代理能写，我自己读过正文不等于已结算。\n派工公开子代理时，prompt 写清它要完成什么以及不许做什么，资料只写地址进 reads，不把内容抄进 prompt。结果回来先审核再采用：与正文、已调阅资料或本轮 pacing 冲突就带着具体意见重派；到了派工上限仍不合规就舍弃冲突部分，按已验证资料与 pacing 收敛。\nfinalize 前我核对关键事实：涉及位置、持有物、关系、能力就按地址调阅表格，涉及世界观设定就按命中提示或目录调阅世界书条目，不凭大纲或记忆断言。',
+        },
+        {
+            after: '【故事时间与年代学账本】',
+            answer: '故事时间我这样处理：年代学账本记的是已发生正文结算出的时间事实，由 hook-cognition-maintainer 在结算未结算正文时维护；大纲轮次上的 time 与 anchor 只是计划，不能当成已经发生。\n本轮计划的 time 是 days / weeks / months / years 时，我在 instruction 里必须同时写明新的相对时间锚、至少两项可感知变化（季节天气、伤势、衣着环境、关系熟悉度、资源经营、社会状态等），以及上一个紧迫问题为何允许被跨过的连续性桥梁；绝不用摘要跳过此前已承诺的关键场景、选择或兑现。\n指导涉及伤势恢复、训练或经营周期、旅途耗时、季节变化这类时间敏感内容时，我先 read 年代学账本核对累计时间，不凭大纲或记忆断言。',
+        },
+    ];
+    /**
+     * 当前默认组：在 V38 之上把主 Agent 的三段单向指令补成「user 指令 + assistant 自述」。
+     * 自述段一律插在对应指令段之后、末尾预填充段之前，保持预填充始终是最后一条消息。
+     */
+    function buildDefaultContinuationAgentPrompts_ACU() {
+        const prompts = buildV38ContinuationAgentPrompts_ACU();
+        return { ...prompts, main: withV39MainAgentSelfNarration_ACU(prompts.main) };
+    }
+    /** V38 默认主 Agent 段的缓存。判断「用户是否改写过目标段」必须拿它比，而不是拿原始常量比：
+     *  V34/V35 改写过子代理段，V38 还会给文本协议段追加并发规则，与常量原文并不相等。 */
+    let v39PristineMain_ACU = null;
+    function v39PristineMainSegments_ACU() {
+        if (!v39PristineMain_ACU)
+            v39PristineMain_ACU = buildV38ContinuationAgentPrompts_ACU().main;
+        return v39PristineMain_ACU;
+    }
+    /**
+     * 按目标段插入自述段。只在目标段仍与 V38 默认正文逐字相同时补：用户改写过该段说明他自己定了
+     * 口径，再追加一段官方自述等于往用户的定制里塞默认内容。已插入过的不重复，目标段缺失则跳过。
+     */
+    function withV39MainAgentSelfNarration_ACU(segments) {
+        const pristine = v39PristineMainSegments_ACU();
+        const result = [];
+        for (const segment of segments) {
+            result.push({ ...segment });
+            const narration = V39_MAIN_AGENT_SELF_NARRATION_ACU.find(item => segment.content.startsWith(item.after));
+            if (!narration)
+                continue;
+            if (pristine.find(item => item.content.startsWith(narration.after))?.content !== segment.content)
+                continue;
+            if (segments.some(item => item.role === 'assistant' && item.content === narration.answer))
+                continue;
+            result.push({ role: 'assistant', content: narration.answer, enabled: true, deletable: true, pinned: false });
+        }
+        return result;
     }
 
     /** 酒馆正文短于该 token 数视为截断或出错，触发与报错同构的自动重试。0 表示关闭。 */
@@ -88578,6 +88637,8 @@ $CONTENT
     const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V37_ACU = 'spv4.5-continuation-user-prefill-v37';
     /** V37 漏掉独立存放的 outlinePrompt；只对它补一次默认末段。 */
     const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU = 'spv4.6-continuation-outline-user-prefill-v38';
+    /** 主 Agent 的文本协议、子代理规则与故事时间三段单向指令各补一段 assistant 自述，改成问答。 */
+    const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V39_ACU = 'spv4.7-continuation-main-agent-qa-v39';
     /**
      * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
      * 更小的值会退化成固定节拍，正是这一版要消灭的东西。
@@ -88660,7 +88721,7 @@ $CONTENT
             agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
             outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
             agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU,
+            promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V39_ACU,
         };
     }
     function normalizeOptionalInteger_ACU(value, fallback, minimum, field) {
@@ -90089,7 +90150,9 @@ $CONTENT
         if (!isRecord_ACU$m(raw))
             return raw;
         const previous = buildV36ContinuationAgentPrompts_ACU();
-        const current = buildDefaultContinuationAgentPrompts_ACU();
+        // 按下标逐段映射，必须对齐段数与旧版一致的 V38 组；V39 的自述段由 V38→V39 单独补，
+        // 否则插入点之后的下标整体错位，会把 $HISTORY_ANCHOR 段顶掉。
+        const current = buildV38ContinuationAgentPrompts_ACU();
         let changed = false;
         const next = { ...raw };
         for (const role of Object.keys(previous)) {
@@ -90132,6 +90195,20 @@ $CONTENT
             next[role] = migrated;
         }
         return changed ? next : raw;
+    }
+    /**
+     * V38 → V39：主 Agent 的文本协议、子代理规则与故事时间三段单向指令各补一段 assistant 自述。
+     * 按目标段起始文本插入，用户删掉的段不补、已经补过的不重复；其余角色与用户改写一律不动。
+     */
+    function migrateV38AgentPromptsToV39_ACU(raw) {
+        if (!isRecord_ACU$m(raw) || !Array.isArray(raw.main))
+            return raw;
+        const segments = raw.main;
+        // 结构可疑时整段放过：迁移不该把损坏的存量配置改成另一种损坏。
+        if (!segments.every(segment => isRecord_ACU$m(segment) && typeof segment.content === 'string'))
+            return raw;
+        const migrated = withV39MainAgentSelfNarration_ACU(segments);
+        return migrated.length === segments.length ? raw : { ...raw, main: migrated };
     }
     function migrateV27AgentPromptsToV28_ACU(raw) {
         if (!isRecord_ACU$m(raw))
@@ -90446,7 +90523,8 @@ $CONTENT
             && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU
             && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU
             && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V37_ACU
-            && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU) {
+            && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU
+            && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V39_ACU) {
             outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
             agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
             promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU;
@@ -90524,6 +90602,10 @@ $CONTENT
                     outlinePrompt = [...outlinePrompt, { ...prefill }];
             }
             promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU;
+        }
+        if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU) {
+            agentPrompts = migrateV38AgentPromptsToV39_ACU(agentPrompts);
+            promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V39_ACU;
         }
         return {
             stageSize: raw.stageSize, customTurnMin, customTurnMax,
@@ -92717,7 +92799,8 @@ $CONTENT
             turn('user', item.ask),
             turn('assistant', item.answer),
             ...rest.slice(1).flatMap(pair => [turn('user', pair.ask), turn('assistant', pair.answer)]),
-            seam('HISTORY', 'user', '（本角色不使用会话历史。）'),
+            // 这里不再放 HISTORY 段：一次性角色本来就不读会话历史，v21-v27 留下的那句占位说明
+            // 既不注入 $WORLD_HISTORY 也不参与装配，只是白占一条 user 消息。
             seam('RUNTIME_CONTEXT', 'user', '锚点正文、你负责的资料、关联只读资料与本轮世界书都由运行时注入在末尾消息里，直接按那份数据推演。'),
             seam('ACKNOWLEDGEMENT', 'assistant', `已理解：${item.ack}`),
             seam('EXECUTION_BOUNDARY', 'user', '现在执行任务。按上面自述的顺序走完全部职责核查与收口自检，然后一次调用原生 write_sql 提交所有有依据的变更；逐项核对后确无变化回复 NO_CHANGE，确需写入却无法写成合法 SQL 时回复 FAILED: 原因。不输出核查长文、裸 SQL 或 Markdown。'),
@@ -92928,6 +93011,22 @@ $CONTENT
         return migrateWorldSimulationAgentPromptsDetailed_ACU(current, previousDefaults, previousVersion).prompts;
     }
     /** 报告与迁移共用同一判断；旧调用方仍可只读取提示词映射。 */
+    /**
+     * 一次性默认段的对齐键：优先按 seam 标记，其次识别用户要求段与末尾预填充段。
+     * 历史默认与当前默认的段数可以不同（v28 起不再有 HISTORY 段），所以迁移必须按语义对齐，
+     * 不能按下标对齐。
+     */
+    function oneShotSegmentKey_ACU(segment) {
+        for (const seam of WORLD_SIMULATION_ENGINE_SEAMS_ACU) {
+            if (segment.content.startsWith(worldSimulationSeamMarker_ACU(seam)))
+                return `seam:${seam}`;
+        }
+        if (segment.content.includes('$WORLD_USER_REQUIREMENTS'))
+            return 'guidance';
+        if (segment.content === USER_PREFILL_CONTENT_ACU)
+            return 'prefill';
+        return null;
+    }
     function migrateWorldSimulationAgentPromptsDetailed_ACU(current, previousDefaults, previousVersion) {
         const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
         const migrated = {};
@@ -92952,9 +93051,18 @@ $CONTENT
                     migrated[name] = defaults[name];
                 }
                 else {
-                    migrated[name] = value.map(segment => {
+                    // 按 seam 语义对齐而不是按下标：v28 删掉了 HISTORY 段，段数与 v21-v27 不再一致，
+                    // 继续按下标会把 HISTORY 之后的段整体串位，末段还会退化成空对象。
+                    migrated[name] = value.flatMap(segment => {
                         const index = old.findIndex(item => JSON.stringify(item) === JSON.stringify(segment));
-                        return index < 0 ? { ...segment } : { ...defaults[name][index] };
+                        if (index < 0)
+                            return [{ ...segment }];
+                        const key = oneShotSegmentKey_ACU(old[index]);
+                        if (!key)
+                            return [{ ...segment }];
+                        const replacement = defaults[name].find(item => oneShotSegmentKey_ACU(item) === key);
+                        // 当前默认已经没有这一段（HISTORY）：整段丢弃，不做错位替换。
+                        return replacement ? [{ ...replacement }] : [];
                     });
                 }
                 continue;
@@ -165054,7 +165162,9 @@ Expected function or array of functions, received type ${typeof value}.`
         else {
             const first = getChatArray_ACU()?.[0];
             const raw = first?.[CONTINUATION_FIRST_FLOOR_FIELD_ACU];
-            if (raw && raw.settings?.promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU) {
+            // 与当前默认版本比，而不是写死某个版本号：写死会让每次加新版本后都漏改这里，
+            // 已是最新版的信封也被判定为需迁移，白写一次盘。
+            if (raw && raw.settings?.promptForceDefaultVersion !== buildDefaultContinuationSettings_ACU().promptForceDefaultVersion) {
                 await store.updatePersistedAtomically(current => current ? { ...current, settings: validateContinuationSettings_ACU(current.settings) } : existing);
             }
         }

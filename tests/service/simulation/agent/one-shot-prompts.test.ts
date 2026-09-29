@@ -7,6 +7,12 @@ import { stripWritingAnnotations_ACU } from '../../../../src/service/simulation/
 const roles = ['undercurrent-analyst', 'dramatis-keeper', 'guidance-composer'] as const;
 /** v28 把运行逻辑拆进多组问答，推演细则不再集中在单个 WORKFLOW 段，断言按整份提示词检查。 */
 const fullBody = (segments: readonly { content: string }[]): string => segments.map(item => item.content).join('\n');
+/**
+ * 按 seam 标记取段。v28 的段序与段数都与 v21-v27 不同（guidance 前移、WORKFLOW 变成问答首问、
+ * HISTORY 已删除），迁移结果只能按语义定位，不能再按下标比对。
+ */
+const bySeam = (segments: readonly { content: string }[], seam: string) =>
+  segments.find(item => item.content.startsWith(`<WORLD_SIMULATION_ENGINE_SEAM:${seam}>`));
 
 describe('一次性资料角色默认提示词', () => {
   it('三个角色的 seam 均合法，变更通过原生工具交候选', () => {
@@ -158,7 +164,10 @@ describe('一次性资料角色默认提示词', () => {
     expect(result.prompts['dramatis-keeper'][3]).toEqual(current['dramatis-keeper'][3]);
     expect(result.prompts['guidance-composer'][4]).toEqual(current['guidance-composer'][4]);
     expect(result.prompts['guidance-composer'].at(-1)).toEqual(extra);
-    expect(result.prompts['guidance-composer'][3]).toEqual(defaults['guidance-composer'][3]);
+    // 未改写的默认段升级到 v28 同 seam 段；HISTORY 在 v28 已删除，迁移后不应残留。
+    expect(bySeam(result.prompts['guidance-composer'], 'WORKFLOW')).toEqual(bySeam(defaults['guidance-composer'], 'WORKFLOW'));
+    expect(bySeam(result.prompts['guidance-composer'], 'HISTORY')).toBeUndefined();
+    expect(bySeam(result.prompts['dramatis-keeper'], 'HISTORY')).toBeUndefined();
   });
 
   it('v22 默认段升级工具协议，用户修改与附加段不被覆盖', () => {
@@ -172,7 +181,8 @@ describe('一次性资料角色默认提示词', () => {
     expect(result.prompts['undercurrent-analyst']).toEqual(defaults['undercurrent-analyst']);
     expect(result.prompts['dramatis-keeper'][4]).toEqual(current['dramatis-keeper'][4]);
     expect(result.prompts['guidance-composer'].at(-1)).toEqual(current['guidance-composer'].at(-1));
-    expect(result.prompts['guidance-composer'][3]).toEqual(defaults['guidance-composer'][3]);
+    expect(bySeam(result.prompts['guidance-composer'], 'WORKFLOW')).toEqual(bySeam(defaults['guidance-composer'], 'WORKFLOW'));
+    expect(bySeam(result.prompts['guidance-composer'], 'HISTORY')).toBeUndefined();
   });
 
   it.each([
@@ -190,9 +200,11 @@ describe('一次性资料角色默认提示词', () => {
     const result = migrateWorldSimulationAgentPromptsDetailed_ACU(current, {}, version);
     expect(result.forcedRoles).toEqual([]);
     expect(result.prompts['undercurrent-analyst']).toEqual(defaults['undercurrent-analyst']);
-    expect(result.prompts['dramatis-keeper'][3]).toEqual(defaults['dramatis-keeper'][3]);
+    expect(bySeam(result.prompts['dramatis-keeper'], 'WORKFLOW')).toEqual(bySeam(defaults['dramatis-keeper'], 'WORKFLOW'));
     expect(result.prompts['dramatis-keeper'][4]).toEqual(current['dramatis-keeper'][4]);
-    expect(result.prompts['guidance-composer'][3]).toEqual(defaults['guidance-composer'][3]);
+    expect(bySeam(result.prompts['guidance-composer'], 'WORKFLOW')).toEqual(bySeam(defaults['guidance-composer'], 'WORKFLOW'));
+    // 各历史版本迁移后都不再带 HISTORY 段。
+    for (const role of roles) expect(bySeam(result.prompts[role], 'HISTORY')).toBeUndefined();
     expect(result.prompts['guidance-composer'].at(-1)).toEqual(current['guidance-composer'].at(-1));
   });
 
