@@ -1395,11 +1395,14 @@ export async function collectGroupFillResponse_ACU(
                 metrics: { sheetCount: Array.isArray(job.targetSheetKeys) ? job.targetSheetKeys.length : 0 },
             });
             let aiResponse: string;
+            let submittedViaTool = false;
             try {
                 aiResponse = await callCustomOpenAI_ACU(dynamicContent, effectiveAbortController, {
                     ...(job.requestOptions || {}),
                     tableData: job.baseSnapshot,
                     targetSheetKeys: job.targetSheetKeys,
+                    // 工具提交不含正文思考，回复长度阈值只约束正文提取兜底。
+                    onTableFillToolSubmitted: () => { submittedViaTool = true; },
                 });
                 aiWaitSpan.end({ success: true });
             } catch (error) {
@@ -1411,7 +1414,7 @@ export async function collectGroupFillResponse_ACU(
             }
 
             const minReplyLength = settings_ACU.autoUpdateTokenThreshold || 0;
-            if (aiResponse && minReplyLength > 0 && aiResponse.length < minReplyLength) {
+            if (aiResponse && !submittedViaTool && minReplyLength > 0 && aiResponse.length < minReplyLength) {
                 throw new ModelOutputRetryError_ACU(`AI回复过短 (${aiResponse.length} 字符)，低于阈值 (${minReplyLength} 字符)`);
             }
             let normalizedAiResponse = aiResponse;

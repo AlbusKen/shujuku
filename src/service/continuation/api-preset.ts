@@ -1,4 +1,5 @@
 import { resolveApiConfigByPreset_ACU, type ApiPresetApiConfig_ACU, type ApiPresetApiMode_ACU } from '../settings/api-preset-service';
+import { withLiveCurrentChannel_ACU } from '../settings/live-current-channel';
 import {
   ContinuationValidationError_ACU,
   createContinuationError_ACU,
@@ -47,7 +48,14 @@ export function resolveContinuationApiPreset_ACU(settings: Pick<ContinuationSett
     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_CONFIG_MISSING', phase, '智能续写 API 预设模式非法', false));
   }
   const resolved = dependencies.resolvePreset('');
-  return { presetName: '', source: 'current', reason: 'current_configuration', apiMode: resolved.apiMode, apiConfig: resolved.apiConfig, tavernProfile: resolved.tavernProfile };
+  // 当前配置模式下渠道必须在发请求时回读：run/波次级缓存 + 全局写入替换引用会让定值永久陈旧。
+  return withLiveCurrentChannel_ACU(
+    { presetName: '', source: 'current', reason: 'current_configuration', apiMode: resolved.apiMode, apiConfig: resolved.apiConfig, tavernProfile: resolved.tavernProfile },
+    () => {
+      const current = dependencies.resolvePreset('');
+      return { apiMode: current.apiMode, apiConfig: current.apiConfig, tavernProfile: current.tavernProfile };
+    },
+  );
 }
 
 type AgentApiPresetSettings_ACU = Pick<ContinuationSettings_ACU, 'apiPresetMode' | 'fixedApiPresetName'> & Partial<Pick<ContinuationSettings_ACU, 'agentApiPresets'>>;

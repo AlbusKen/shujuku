@@ -243,6 +243,7 @@ export let settings_ACU: any = {
     currentTemplatePresetName: '',
     tableTemplateDefaultsRefreshVersion: '',
     tableFillPromptForceDefaultVersion: '',
+    tableFillToolPromptUpgradeVersion: '',
     templateAssistantPromptForceDefaultVersion: '',
     strictJsonTableFillForceDisableVersion: '',
     tableContextExtractTags: '',

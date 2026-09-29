@@ -7,6 +7,8 @@ import { readFetchChatTurn_ACU, chatTurnFromJson_ACU, type AiChatTurn_ACU, type 
 export type { AiUsageMetadata_ACU };
 import { settings_ACU } from '../runtime/state-manager';
 import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, getHostRequestHeaders_ACU, getConnectionManagerProfiles_ACU, triggerSlash_ACU } from '../../data/gateways/ai-gateway';
+import { pristineFetch_ACU } from '../../data/gateways/pristine-fetch';
+import { isConnectionProfileChatCompletion_ACU, isMainApiChatCompletionAvailable_ACU, readMainApiChatCompletionRouting_ACU, sendMainApiChatCompletionRequest_ACU } from '../../data/gateways/ai-gateway';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { isTauriTavernHost_ACU } from '../../shared/host-detect';
 import { supportsExplicitOpenAiCacheKey_ACU } from './prompt-cache';
@@ -148,7 +150,7 @@ function normalizeExcludeBodyParamsForSillyTavern_ACU(raw: any): string {
   return keys.map((key: string) => `- ${key}`).join('\n');
 }
 
-function preserveNativeToolPostProcessing_ACU(value: string, hasNativeToolTraffic: boolean): string {
+export function preserveNativeToolPostProcessing_ACU(value: string, hasNativeToolTraffic: boolean): string {
   if (!hasNativeToolTraffic) return value;
   if (value === 'merge') return 'merge_tools';
   if (value === 'semi') return 'semi_tools';
@@ -604,7 +606,7 @@ let tavernProfileCallTail_ACU: Promise<unknown> = Promise.resolve();
  * @param maxTokens 最大输出 token
  * @returns 宿主返回的原始响应
  */
-async function sendConnectionManagerRequestWithProfileSwitch_ACU(profileId: string, messages: any[], maxTokens: number): Promise<any> {
+async function sendConnectionManagerRequestWithProfileSwitch_ACU(profileId: string, messages: any[], maxTokens: number, custom?: Record<string, unknown>, overridePayload?: Record<string, unknown>): Promise<any> {
     const run = async (): Promise<any> => {
         const targetProfile = getConnectionManagerProfiles_ACU().find(profile => profile.id === profileId);
         if (!targetProfile) throw new Error(`无法找到 ID 为 "${profileId}" 的连接预设。`);
@@ -616,7 +618,10 @@ async function sendConnectionManagerRequestWithProfileSwitch_ACU(profileId: stri
             if (needSwitch) {
                 await triggerSlash_ACU(`/profile await=true "${targetProfileName.replace(/"/g, '\\"')}"`);
             }
-            return await sendConnectionManagerRequest_ACU(profileId, messages, maxTokens);
+            // 未带扩展参数时保持三参调用，普通文本请求的宿主调用形态不变。
+            return custom === undefined && overridePayload === undefined
+                ? await sendConnectionManagerRequest_ACU(profileId, messages, maxTokens)
+                : await sendConnectionManagerRequest_ACU(profileId, messages, maxTokens, custom, overridePayload);
         } finally {
             if (needSwitch) {
                 try {
@@ -679,7 +684,9 @@ export async function callAIWithResolvedPreset_ACU(
     if (!resolved.apiConfig.url || !resolved.apiConfig.model) {
         throw new Error('自定义 API 的 URL 或模型未配置。');
     }
-    const response = await fetch('/api/backends/chat-completions/generate', {
+    // 内部续写/推演请求绕过第三方脚本对生成端点的 fetch 包装：脚本注入的传输函数
+    // 会与本链路的原生工具协议互相污染（见 data/gateways/pristine-fetch.ts）。
+    const response = await pristineFetch_ACU('/api/backends/chat-completions/generate', {
         method: 'POST',
         headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
         body: JSON.stringify(buildCustomApiRequestBody_ACU(messages, resolved.apiConfig, {
@@ -694,6 +701,25 @@ export async function callAIWithResolvedPreset_ACU(
     if (!response.ok) throw new AgentApiHttpError_ACU(response.status, `API 请求失败: ${response.status}`);
     const content = await handleApiResponse_ACU(response, signal, lifecycle?.onUsage);
     return typeof content === 'string' && content.trim() ? content.trim() : null;
+}
+
+/**
+ * 经宿主通道（酒馆连接 / 主连接）携带原生工具时的请求体覆盖字段。
+ * Agent 需要在多工具与最终文本之间自选，tool_choice 用 auto；
+ * strict/merge/semi/single 后处理会剥掉 tool_calls 与 tool 回执，改用对应 *_tools 变体。
+ * @param tools 本次挂载的工具；可为空（仅历史含工具回执时）
+ * @param rawPostProcessing 通道原本的提示词后处理值
+ * @returns overridePayload
+ */
+function buildHostNativeToolOverridePayload_ACU(tools: readonly AiNativeToolDefinition_ACU[] | undefined, rawPostProcessing: string): Record<string, unknown> {
+    const payload: Record<string, unknown> = {};
+    if (tools?.length) {
+        payload.tools = tools;
+        payload.tool_choice = 'auto';
+    }
+    const toolPostProcessing = preserveNativeToolPostProcessing_ACU(rawPostProcessing, true);
+    if (toolPostProcessing !== rawPostProcessing) payload.custom_prompt_post_processing = toolPostProcessing;
+    return payload;
 }
 
 /** 与 callAIWithResolvedPreset_ACU 同一条渠道，但保留原生 tool_calls。 */
@@ -716,20 +742,42 @@ export async function callAIChatTurn_ACU(
     const hasNativeToolTraffic = Boolean(extras?.tools?.length)
         || messages.some(message => message && typeof message === 'object' && (message.role === 'tool' || message.tool_calls));
     if (resolved.apiMode === 'tavern') {
-        // ConnectionManagerRequestService.sendRequest only accepts profile, messages and maxTokens.
-        // Silently dropping tools would make the role's advertised native-tool contract unobservable.
-        if (hasNativeToolTraffic) throw new Error('酒馆连接管理器不支持原生工具调用及回执；请为 Agent 选择支持原生工具的自定义 API。');
+        // 宿主 sendRequest(profileId, prompt, maxTokens, custom, overridePayload)：Chat Completion 预设可经
+        // overridePayload 携带工具，extractData:false 取回含 tool_calls 的原始响应；Text Completion 预设无法承载，fail-closed。
+        let toolCustom: Record<string, unknown> | undefined;
+        let toolOverridePayload: Record<string, unknown> | undefined;
+        if (hasNativeToolTraffic) {
+            const profile = getConnectionManagerProfiles_ACU().find(item => item.id === resolved.tavernProfile);
+            if (!profile || !isConnectionProfileChatCompletion_ACU(profile)) {
+                throw new Error('酒馆连接管理器不支持原生工具调用及回执：所选连接预设不是 Chat Completion 类型；请改用 Chat Completion 连接预设或自定义 API。');
+            }
+            toolOverridePayload = buildHostNativeToolOverridePayload_ACU(extras?.tools, String(profile['prompt-post-processing'] ?? ''));
+            toolCustom = { extractData: false, signal: signal ?? null };
+        }
         if (!resolved.tavernProfile) throw new Error('该预设为酒馆连接模式但未选择连接预设。');
-        const response = await sendConnectionManagerRequestWithProfileSwitch_ACU(resolved.tavernProfile, messages, maxTokens);
+        const response = await sendConnectionManagerRequestWithProfileSwitch_ACU(resolved.tavernProfile, messages, maxTokens, toolCustom, toolOverridePayload);
         assertNotAborted_ACU(signal);
         const parsed = chatTurnFromJson_ACU(response?.result ?? response);
         reportUsage(parsed.usage ?? response?.result?.usage);
         return parsed.turn.content || parsed.turn.toolCalls.length ? parsed.turn : { content: typeof response?.content === 'string' ? response.content : '', toolCalls: [] };
     }
     if (resolved.apiConfig.useMainApi) {
-        // generateRaw returns text, not a structured tool-call response. A tools-enabled
-        // agent cannot complete its native function exchange on this channel.
-        if (hasNativeToolTraffic) throw new Error('酒馆主 API 无法保证原生工具调用及回执；请为 Agent 选择支持原生工具的独立自定义 API。');
+        if (hasNativeToolTraffic) {
+            // generateRaw 只返回文本；工具流量改按主连接设置直接走宿主 ChatCompletionService 取回原始 tool_calls。
+            if (!isMainApiChatCompletionAvailable_ACU()) {
+                throw new Error('酒馆主 API 无法保证原生工具调用及回执：当前主连接不是 Chat Completion；请切换为 Chat Completion 连接或为 Agent 选择自定义 API。');
+            }
+            const routing = readMainApiChatCompletionRouting_ACU();
+            const overridePayload = { ...buildHostNativeToolOverridePayload_ACU(extras?.tools, routing.postProcessing), max_tokens: maxTokens };
+            const wireMessages = messages.map(message => (
+                message && typeof message === 'object' && typeof message.role === 'string' ? { ...message, role: message.role.toLowerCase() } : message
+            ));
+            const raw = await sendMainApiChatCompletionRequest_ACU(wireMessages, overridePayload, signal);
+            assertNotAborted_ACU(signal);
+            const parsed = chatTurnFromJson_ACU(raw);
+            reportUsage(parsed.usage ?? raw?.usage);
+            return parsed.turn;
+        }
         lifecycle?.beforeMainApiCall?.();
         let operation: Promise<string>;
         try {
@@ -742,7 +790,8 @@ export async function callAIChatTurn_ACU(
         return { content: typeof response === 'string' ? response.trim() : '', toolCalls: [] };
     }
     if (!resolved.apiConfig.url || !resolved.apiConfig.model) throw new Error('自定义 API 的 URL 或模型未配置。');
-    const response = await fetch('/api/backends/chat-completions/generate', {
+    // 同上：原生工具通道尤其不能被脚本改写请求体与响应流。
+    const response = await pristineFetch_ACU('/api/backends/chat-completions/generate', {
         method: 'POST',
         headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
         body: JSON.stringify(buildCustomApiRequestBody_ACU(messages, resolved.apiConfig, {

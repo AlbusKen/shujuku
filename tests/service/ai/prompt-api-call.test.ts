@@ -104,6 +104,12 @@ vi.mock('../../../src/data/gateways/ai-gateway', () => ({
   triggerSlash_ACU: mockTriggerSlash,
   getConnectionManagerProfiles_ACU: mockGetConnectionManagerProfiles,
   getHostRequestHeaders_ACU: mockGetHostRequestHeaders,
+  // 原有酒馆连接用例断言三参调用，默认视为不可携带工具的配置。
+  isConnectionProfileChatCompletion_ACU: vi.fn(() => false),
+  // 原有主 API 用例断言 generateRaw 路径，默认视为主连接不可携带工具。
+  isMainApiChatCompletionAvailable_ACU: vi.fn(() => false),
+  readMainApiChatCompletionRouting_ACU: vi.fn(() => ({ source: '', postProcessing: '' })),
+  sendMainApiChatCompletionRequest_ACU: vi.fn(),
 }));
 
 vi.mock('../../../src/shared/utils', () => ({

@@ -14,6 +14,12 @@ import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var
 import { DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU } from '../../../shared/defaults-json.js';
 import { isSqliteMode } from '../../table/storage-mode';
 import { buildStrictJsonTableFillResponseFormatForData_ACU, cloneStrictPromptSegments_ACU } from './strict-json-table-fill';
+import { preserveNativeToolPostProcessing_ACU } from '../api-call';
+import { isConnectionProfileChatCompletion_ACU, isMainApiChatCompletionAvailable_ACU, readMainApiChatCompletionRouting_ACU, sendMainApiChatCompletionRequest_ACU } from '../../../data/gateways/ai-gateway';
+import { pristineFetch_ACU } from '../../../data/gateways/pristine-fetch';
+import { chatTurnFromJson_ACU, readFetchChatTurn_ACU, type AiChatTurn_ACU } from '../native-tool';
+import { buildTableFillNativeTools_ACU, degradeTableFillPromptSegmentsToBodyFormat_ACU, resolveTableFillToolTurn_ACU } from './table-fill-tools';
+
 
 /**
  * The request reached a provider successfully, but its body contained no
@@ -90,6 +96,25 @@ export class RetryableAiResponseError_ACU extends Error {
         promptSegments = charCardPromptSetting;
     } else if (typeof charCardPromptSetting === 'string') {
         promptSegments = [{ role: 'USER', content: charCardPromptSetting }];
+    }
+
+    // 判定本次请求实际能否携带填表原生工具：Text Completion 连接与 generateRaw 回退取不回 tool_calls。
+    const tableFillToolChannelAvailable = (() => {
+        if (strictJsonFillEnabled) return false;
+        if (effectiveApiMode === 'tavern') {
+            const profile = getConnectionManagerProfiles_ACU().find(p => p.id === effectiveTavernProfile);
+            return !!profile && isConnectionProfileChatCompletion_ACU(profile);
+        }
+        if (effectiveApiConfig.useMainApi) {
+            if (!forceDirectApi) return isMainApiChatCompletionAvailable_ACU();
+            return !!(effectiveApiConfig.url && effectiveApiConfig.model);
+        }
+        return true;
+    })();
+    if (!strictJsonFillEnabled && !tableFillToolChannelAvailable) {
+        // 通道带不了工具：工具版默认主段降级为正文 <tableEdit> 格式，避免提示词要求调用不存在的工具。
+        promptSegments = degradeTableFillPromptSegmentsToBodyFormat_ACU(promptSegments, sqliteMode);
+        logDebug_ACU('[填表] 当前通道无法携带原生工具，降级使用正文 <tableEdit> 格式提示词。');
     }
 
     let userInfoContent_Table = '';
@@ -206,6 +231,19 @@ export class RetryableAiResponseError_ACU extends Error {
             logWarn_ACU('[严格JSON填表] response_format schema 构建失败，本次请求不附加：', error);
         }
     }
+    // 正文提取模式挂填表原生工具；严格 JSON 模式已有 response_format 约束，不叠加工具。
+    // 自定义直连、Chat Completion 酒馆连接与 Chat Completion 主连接都挂工具；其余通道已降级为正文格式提示词。
+    const tableFillTools = (strictJsonFillEnabled || !tableFillToolChannelAvailable) ? [] : buildTableFillNativeTools_ACU(sqliteMode);
+    const finalizeTableFillTurn = (turn: AiChatTurn_ACU): string => {
+        const resolved = resolveTableFillToolTurn_ACU(turn, sqliteMode);
+        // 项目未开启 strictNullChecks 时布尔判别联合不收窄，显式取 error 分支。
+        if (!resolved.ok) throw new RetryableAiResponseError_ACU((resolved as { ok: false; error: string }).error);
+        if (resolved.viaTool) options?.onTableFillToolSubmitted?.();
+        const text = resolved.text.trim();
+        if (!text) throw new RetryableAiResponseError_ACU();
+        return text;
+    };
+
 
     logDebug_ACU('Final messages array being sent to API:', messages);
     logDebug_ACU(`使用API预设: ${effectiveTableApiPreset || '当前配置'}, 模式: ${effectiveApiMode}`);
@@ -226,6 +264,8 @@ export class RetryableAiResponseError_ACU extends Error {
         let originalProfile = '';
         let responsePromise;
         let rawResult;
+        let useTavernTools = false;
+
 
         try {
             if (!skipProfileSwitch) {
@@ -255,11 +295,27 @@ export class RetryableAiResponseError_ACU extends Error {
             
             logDebug_ACU(`ACU: 通过酒馆连接预设 (ID: ${profileId}, Name: ${targetProfileName}) 发送请求...`);
 
-            responsePromise = sendConnectionManagerRequest_ACU(
-                profileId, 
-                messages, 
-                effectiveApiConfig.max_tokens ?? effectiveApiConfig.maxTokens ?? 4096
-            );
+            const tavernMaxTokens = effectiveApiConfig.max_tokens ?? effectiveApiConfig.maxTokens ?? 4096;
+            useTavernTools = tableFillTools.length > 0 && isConnectionProfileChatCompletion_ACU(targetProfile);
+            if (useTavernTools) {
+                // 酒馆连接可经 overridePayload 把原生工具并入 Chat Completion 请求体，extractData:false 取回含 tool_calls 的原始响应。
+                // 指定工具的 tool_choice 同时让预设脚本的抗截断拦截器放行（调用方已强制工具选择时它不接管）；
+                // Claude 源后端把 tool_choice 包成 { type }，只接受字符串，故回退 auto。
+                const overridePayload: Record<string, unknown> = {
+                    tools: tableFillTools,
+                    tool_choice: String(targetProfile.api || '') === 'claude'
+                        ? 'auto'
+                        : { type: 'function', function: { name: tableFillTools[0].function.name } },
+                };
+                // strict/merge/semi/single 后处理会剥掉 tool_calls，与自定义通道同规则改用 *_tools 变体。
+                const rawPostProcessing = String(targetProfile['prompt-post-processing'] ?? '');
+                const toolPostProcessing = preserveNativeToolPostProcessing_ACU(rawPostProcessing, true);
+                if (toolPostProcessing !== rawPostProcessing) overridePayload.custom_prompt_post_processing = toolPostProcessing;
+                responsePromise = sendConnectionManagerRequest_ACU(profileId, messages, tavernMaxTokens, { extractData: false, signal: abortSignal }, overridePayload);
+            } else {
+                responsePromise = sendConnectionManagerRequest_ACU(profileId, messages, tavernMaxTokens);
+            }
+
 
             rawResult = await responsePromise;
 
@@ -295,6 +351,11 @@ export class RetryableAiResponseError_ACU extends Error {
             }
         }
 
+        if (useTavernTools) {
+            // extractData:false 返回宿主原始响应；兼容带 { ok, result } 包装的形态。
+            return finalizeTableFillTurn(chatTurnFromJson_ACU(rawResult?.result ?? rawResult).turn);
+        }
+
         if (rawResult && rawResult.ok && rawResult.result?.choices?.[0]?.message?.content) {
             return rawResult.result.choices[0].message.content.trim();
         } else if (rawResult && typeof rawResult.content === 'string') {
@@ -306,6 +367,23 @@ export class RetryableAiResponseError_ACU extends Error {
 
     } else {
         if (effectiveApiConfig.useMainApi && !forceDirectApi) {
+            if (tableFillTools.length && isMainApiChatCompletionAvailable_ACU()) {
+                // generateRaw 只返回文本、取不回 tool_calls；带工具时按主连接设置直接走宿主 ChatCompletionService。
+                // 工具选择与后处理规则与酒馆连接路径一致：指定工具的 tool_choice 让预设脚本拦截器放行，
+                // Claude 源后端只接受字符串 tool_choice，回退 auto。
+                logDebug_ACU('ACU: 通过酒馆主连接（Chat Completion）发送带原生工具的填表请求...');
+                const routing = readMainApiChatCompletionRouting_ACU();
+                const mainOverridePayload: Record<string, unknown> = {
+                    tools: tableFillTools,
+                    tool_choice: routing.source === 'claude'
+                        ? 'auto'
+                        : { type: 'function', function: { name: tableFillTools[0].function.name } },
+                };
+                const mainToolPostProcessing = preserveNativeToolPostProcessing_ACU(routing.postProcessing, true);
+                if (mainToolPostProcessing !== routing.postProcessing) mainOverridePayload.custom_prompt_post_processing = mainToolPostProcessing;
+                const rawMainResult = await sendMainApiChatCompletionRequest_ACU(messages, mainOverridePayload, abortSignal);
+                return finalizeTableFillTurn(chatTurnFromJson_ACU(rawMainResult).turn);
+            }
             logDebug_ACU('ACU: 通过酒馆主API发送请求（流式传输）...');
             if (strictJsonResponseFormat) {
                 logDebug_ACU('[严格JSON填表] 主 API（generateRaw）路径无请求体扩展通道，response_format 未附加，仅靠提示词约束。');
@@ -351,24 +429,31 @@ export class RetryableAiResponseError_ACU extends Error {
             const body = JSON.stringify(buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, {
                 stripModelPrefix: false,
                 responseFormat: strictJsonResponseFormat,
+                ...(tableFillTools.length ? { tools: tableFillTools } : {}),
             }));
             if (strictJsonResponseFormat) {
                 logDebug_ACU('[严格JSON填表] 已在请求体附加 json_schema response_format。');
             }
-            
+
             logDebug_ACU('ACU: 调用新的后端生成API:', generateUrl, 'Model:', effectiveApiConfig.model);
-            const response = await fetch(generateUrl, { method: 'POST', headers, body, signal: abortSignal });
-            
+            // 填表内部请求绕过第三方脚本对生成端点的 fetch 包装（见 data/gateways/pristine-fetch.ts）。
+            const response = await pristineFetch_ACU(generateUrl, { method: 'POST', headers, body, signal: abortSignal });
+
             if (!response.ok) {
               const errTxt = await response.text();
               throw new Error(`API请求失败: ${response.status} ${errTxt}`);
             }
-            
+
+            if (tableFillTools.length) {
+                const { turn } = await readFetchChatTurn_ACU(response, settings_ACU.streamingEnabled || false, abortSignal);
+                return finalizeTableFillTurn(turn);
+            }
             const content = await handleApiResponse_ACU(response, abortSignal);
             if (content) {
                 return content.trim();
             }
             throw new RetryableAiResponseError_ACU();
+
         }
         }
     } finally {

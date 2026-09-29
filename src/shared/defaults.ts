@@ -212,6 +212,9 @@ export const USER_PREFILL_VECTOR_FORCE_DEFAULT_VERSION_ACU = 'spv9.3-user-prefil
 export const TEMPLATE_ASSISTANT_PROMPT_FORCE_DEFAULT_VERSION_ACU = 'spv8.9.4-force-default-template-assistant-prompt';
 // 一次性关闭严格 JSON 填表：旧版本可能已保留显式开启状态；迁移完成后，用户仍可在高级设置中自行重新开启。
 export const STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU = 'spv8.9.3-force-disable-strict-json-table-fill';
+// 填表默认提示词改为只用 table_edit / table_sql 工具提交的一次性升级：仅替换主段完整命中历史默认的提示词，用户改写保留。
+export const TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU = 'spv9.4.1-table-fill-tool-only-prompt';
+
 
 
 // --- 交火模式纪要索引全局默认配置（独立于世界书配置，跟随数据库全局设置） ---

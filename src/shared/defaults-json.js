@@ -134,6 +134,91 @@ DELETE FROM table_name WHERE row_id = 2;
     return { ...segment };
   });
 
+  // --- [填表原生工具] 默认提示词只通过 table_edit / table_sql 工具提交表格修改 ---
+  // 正文 <tableEdit> 提取仅保留为代码侧兜底，不再写进提示词：两套输出格式并存会让模型混淆。
+  function findTableFillMainSegment_ACU(segments) {
+    return segments.find(segment => segment.mainSlot === 'A' || segment.isMain);
+  }
+
+  /** 取旧默认 <thought> 中的分析步骤与纪要规则，工具化后原样沿用。 */
+  function extractTableFillAnalysisSteps_ACU(content) {
+    const start = content.indexOf('<thought>');
+    const end = content.indexOf('</thought>', start);
+    if (start < 0 || end < 0) return '';
+    return content.slice(start + '<thought>'.length, end).trim();
+  }
+
+  function buildTableFillToolOutputSection_ACU(content, toolSection) {
+    return `## 输出格式（严格执行）
+
+先在正文中完成分析，可写在 <thought></thought> 内：
+${extractTableFillAnalysisSteps_ACU(content)}
+
+${toolSection}
+
+`;
+  }
+
+  const TABLE_EDIT_TOOL_SECTION_ACU = `分析完成后，必须调用 table_edit 工具一次性提交本轮全部表格修改：
+- commands 参数逐行填写一条指令，只允许以下三种：
+insertRow(表格ID, {"0":"字段0值","1":"字段1值","2":"字段2值"})
+updateRow(表格ID, 行号, {"0":"字段0值","1":"字段1值","2":"字段2值"})
+deleteRow(表格ID, 行号)
+- 本轮没有任何修改时，commands 填空字符串。
+- 表格修改只能通过 table_edit 工具提交，正文里不要再写任何表格修改指令。`;
+
+  const TABLE_SQL_TOOL_SECTION_ACU = `分析完成后，必须调用 table_sql 工具一次性提交本轮全部表格修改：
+- sql 参数填写完整 SQL 脚本，只允许 INSERT / UPDATE / DELETE，例如：
+INSERT INTO table_name (col1, col2) VALUES ('值1', '值2');
+UPDATE table_name SET col1 = '新值' WHERE row_id = 1;
+DELETE FROM table_name WHERE row_id = 2;
+- 本轮没有任何修改时，sql 填空字符串。
+- 表格修改只能通过 table_sql 工具提交，正文里不要再写任何 SQL。`;
+
+  function buildTableEditToolPrompt_ACU(content) {
+    let next = replaceSection_ACU(content, '## 输出格式（严格执行）', '## 关键规则', buildTableFillToolOutputSection_ACU(content, TABLE_EDIT_TOOL_SECTION_ACU));
+    next = next.replace('5. 使用insertRow添加新行，updateRow更新已有行，deleteRow删除行', '5. 通过 table_edit 工具提交修改：insertRow 添加新行，updateRow 更新已有行，deleteRow 删除行');
+    next = next.replace('## 格式要点', '## commands 指令格式要点');
+    return next.replace('现在开始按此格式执行填表任务。', '现在开始分析，并调用 table_edit 工具提交本轮填表结果。');
+  }
+
+  function buildTableSqlToolPrompt_ACU(content) {
+    const next = replaceSection_ACU(content, '## 输出格式（严格执行）', '## 关键规则', buildTableFillToolOutputSection_ACU(content, TABLE_SQL_TOOL_SECTION_ACU));
+    return next.replace('现在开始按此格式执行填表任务。', '现在开始分析，并调用 table_sql 工具提交本轮填表结果。');
+  }
+
+  // 本轮开发中出现过的「正文格式 + 工具优先」中间默认，仅用于迁移识别，不再作为默认。
+  const INTERMEDIATE_TABLE_EDIT_GUIDANCE_ACU = `【工具提交（优先）】
+如果本次请求提供了 table_edit 工具，必须调用 table_edit 一次性提交本轮全部表格修改：commands 参数逐行填写与下方 <tableEdit> 内格式完全相同的 insertRow / updateRow / deleteRow 指令；本轮没有任何修改时 commands 填空字符串。调用工具后，正文中不要再输出 <tableEdit>。
+如果本次请求没有提供该工具，则按下方格式在正文中输出。
+
+`;
+  const INTERMEDIATE_TABLE_SQL_GUIDANCE_ACU = `【工具提交（优先）】
+如果本次请求提供了 table_sql 工具，必须调用 table_sql 一次性提交本轮全部表格修改：sql 参数填写与下方 <tableEdit> 内格式完全相同的完整 SQL 脚本（每条语句以分号结尾、换行分隔）；本轮没有任何修改时 sql 填空字符串。调用工具后，正文中不要再输出 <tableEdit>。
+如果本次请求没有提供该工具，则按下方格式在正文中输出。
+
+`;
+  function injectIntermediateGuidance_ACU(content, guidance) {
+    const marker = '## 输出格式（严格执行）\n\n';
+    const index = content.indexOf(marker);
+    if (index < 0) return content;
+    const at = index + marker.length;
+    return `${content.slice(0, at)}${guidance}${content.slice(at)}`;
+  }
+
+  const legacyNativeMain_ACU = findTableFillMainSegment_ACU(DEFAULT_CHAR_CARD_PROMPT_ACU).content;
+  const legacySqlMain_ACU = findTableFillMainSegment_ACU(DEFAULT_CHAR_CARD_PROMPT_SQL_ACU).content;
+
+  /** 历史主段默认正文：[0] 为工具化前的旧默认，其后为中间默认。仅用于一次性迁移识别「用户未改动的默认」。 */
+  export const TABLE_FILL_MAIN_PROMPT_HISTORY_ACU = Object.freeze({
+    native: Object.freeze([legacyNativeMain_ACU, injectIntermediateGuidance_ACU(legacyNativeMain_ACU, INTERMEDIATE_TABLE_EDIT_GUIDANCE_ACU)]),
+    sql: Object.freeze([legacySqlMain_ACU, injectIntermediateGuidance_ACU(legacySqlMain_ACU, INTERMEDIATE_TABLE_SQL_GUIDANCE_ACU)]),
+  });
+  findTableFillMainSegment_ACU(DEFAULT_CHAR_CARD_PROMPT_ACU).content = buildTableEditToolPrompt_ACU(legacyNativeMain_ACU);
+  findTableFillMainSegment_ACU(DEFAULT_CHAR_CARD_PROMPT_SQL_ACU).content = buildTableSqlToolPrompt_ACU(legacySqlMain_ACU);
+
+
+
   function replaceSection_ACU(content, startMarker, endMarker, replacement) {
     const start = content.indexOf(startMarker);
     const end = content.indexOf(endMarker, start + startMarker.length);
@@ -223,7 +308,8 @@ sql 必须是字符串，内容是按下文 DDL、Note 和 SQL 编写原则生�
     if (segment.mainSlot === 'A' || segment.isMain) {
       return {
         ...segment,
-        content: buildStrictJsonNativePrompt_ACU(segment.content)
+        // 严格 JSON 默认从工具化前的旧主段派生，保持其内容与历史版本逐字一致。
+        content: buildStrictJsonNativePrompt_ACU(TABLE_FILL_MAIN_PROMPT_HISTORY_ACU.native[0])
       };
     }
     if (segment.isMain2) return { ...segment };
@@ -237,7 +323,7 @@ sql 必须是字符串，内容是按下文 DDL、Note 和 SQL 编写原则生�
     if (segment.mainSlot === 'A' || segment.isMain) {
       return {
         ...segment,
-        content: buildStrictJsonSqlPrompt_ACU(segment.content)
+        content: buildStrictJsonSqlPrompt_ACU(TABLE_FILL_MAIN_PROMPT_HISTORY_ACU.sql[0])
       };
     }
     if (segment.isMain2) return { ...segment };

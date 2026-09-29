@@ -10,6 +10,8 @@ import { STORAGE_KEY_ALL_SETTINGS_ACU, STORAGE_KEY_CUSTOM_TEMPLATE_ACU, normaliz
 import { DEFAULT_BUILTIN_PLOT_PRESETS_ACU, DEFAULT_CHAR_CARD_PROMPT_ACU, DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU, DEFAULT_MERGE_SUMMARY_PROMPT_ACU, DEFAULT_PLOT_SETTINGS_ACU, DEFAULT_PLOT_PROMPT_GROUP_ACU, DEFAULT_TABLE_TEMPLATE_ACU, ORIGINAL_DEFAULT_TABLE_TEMPLATE_ACU, TABLE_TEMPLATE_ACU, _set_TABLE_TEMPLATE_ACU } from '../../shared/defaults-json.js';
 import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU, STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU, SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU, TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU, USER_PREFILL_PROFILE_FORCE_DEFAULT_VERSION_ACU, USER_PREFILL_VECTOR_FORCE_DEFAULT_VERSION_ACU, TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU, TEMPLATE_ASSISTANT_PROMPT_FORCE_DEFAULT_VERSION_ACU, VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU, VECTOR_MEMORY_LEGACY_MIN_SCORE_DEFAULTS_ACU, VECTOR_MEMORY_RECALL_PARAM_KEYS_ACU, VECTOR_MEMORY_RECALL_PARAMS_FORCE_OVERRIDE_VERSION_ACU, VECTOR_MEMORY_SOURCE_TEXT_UPGRADE_VERSION_ACU, buildDefaultAgentWorldbookControl_ACU, buildDefaultAgentWorldbookPromptTemplates_ACU, buildDefaultPlotWorldbookConfig_ACU, buildDefaultContentOptimizationPromptGroup_ACU, defaultWorldbookConfig_ACU, defaultVectorMemoryConfig_ACU } from '../../shared/defaults';
 import { addDataIsolationHistory_ACU, ensureProfileExists_ACU, normalizeDataIsolationHistory_ACU } from '../../data/repositories/isolation-repo';
+import { TABLE_FILL_MAIN_PROMPT_HISTORY_ACU } from '../../shared/defaults-json.js';
+import { TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU } from '../../shared/defaults';
 import { globalMeta_ACU, loadGlobalMeta_ACU, readProfileSettingsFromStorage_ACU, readProfileTemplateFromStorage_ACU, sanitizeSettingsForProfileSave_ACU, saveGlobalMeta_ACU, writeProfileSettingsToStorage_ACU, writeProfileTemplateToStorage_ACU } from '../../data/repositories/profile-repo';
 import { getCurrentTemplatePresetName_ACU, normalizeTemplatePresetSelectionValue_ACU } from '../../shared/template-preset-utils';
 import { persistSettingsToStorage_ACU } from '../../data/storage/config-storage';
@@ -772,6 +774,7 @@ export   function loadSettings_ACU() {
       refreshDefaultTableTemplateOnce_ACU(activeCode);
       forceDisableStrictJsonTableFillOnce_ACU();
       forceDefaultTableFillPromptsOnce_ACU();
+      upgradeTableFillToolPromptOnce_ACU();
       forceUserPrefillProfilePromptsOnce_ACU();
       forceDefaultTemplateAssistantPromptOnce_ACU();
 
@@ -975,6 +978,46 @@ function forceDefaultTableFillPromptsOnce_ACU() {
       }
   }
 
+/**
+ * [spv9.4] 填表默认提示词工具化（table_edit / table_sql）的一次性升级。
+ * 仅当 charCardPrompt 主段（mainSlot A / isMain）正文与任一历史原生或 SQL 默认逐字相同时，
+ * 替换为对应的新默认主段；用户改写过的主段与其余段、段元数据原样保留。
+ * 保存失败时回滚内存且不写 marker，下次加载重试。
+ */
+function upgradeTableFillToolPromptOnce_ACU() {
+      if (!settings_ACU || typeof settings_ACU !== 'object') return;
+      if (settings_ACU.tableFillToolPromptUpgradeVersion === TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU) return;
+      const previousPrompt = settings_ACU.charCardPrompt;
+      const previousVersion = settings_ACU.tableFillToolPromptUpgradeVersion;
+      try {
+          if (Array.isArray(previousPrompt)) {
+              const findMain = (segments: any[]) => segments.find((segment: any) => segment
+                  && (String(segment.mainSlot || '').toUpperCase() === 'A' || segment.isMain));
+              const main = findMain(previousPrompt);
+              const content = typeof main?.content === 'string' ? main.content : null;
+              const history = TABLE_FILL_MAIN_PROMPT_HISTORY_ACU as { native: readonly string[]; sql: readonly string[] };
+              const target = content !== null && history.native.includes(content)
+                  ? DEFAULT_CHAR_CARD_PROMPT_ACU
+                  : content !== null && history.sql.includes(content)
+                      ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU
+                      : null;
+              const targetContent = target ? findMain(target as any[])?.content : null;
+              if (typeof targetContent === 'string' && targetContent !== content) {
+                  settings_ACU.charCardPrompt = previousPrompt.map((segment: any) => (
+                      segment === main ? { ...segment, content: targetContent } : segment
+                  ));
+              }
+          }
+          settings_ACU.tableFillToolPromptUpgradeVersion = TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU;
+          saveSettings_ACU();
+          logDebug_ACU(`[填表提示词] 工具化默认提示词一次性升级完成: ${TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU}`);
+      } catch (error) {
+          settings_ACU.charCardPrompt = previousPrompt;
+          settings_ACU.tableFillToolPromptUpgradeVersion = previousVersion;
+          logWarn_ACU('[填表提示词] 工具化默认提示词升级未保存，下一次加载重试:', error);
+      }
+  }
+
 function forceUserPrefillProfilePromptsOnce_ACU() {
       if (!settings_ACU || typeof settings_ACU !== 'object') return;
       if (settings_ACU.userPrefillProfileForceDefaultVersion === USER_PREFILL_PROFILE_FORCE_DEFAULT_VERSION_ACU) return;
@@ -1067,6 +1110,7 @@ export   function buildDefaultSettings_ACU() {
           currentTemplatePresetName: '', // [模板预设] 当前模板预设名，空表示默认预设
           tableTemplateDefaultsRefreshVersion: '', // [模板预设] 默认表格模板一次性刷新版本
           tableFillPromptForceDefaultVersion: '', // [填表提示词] 一次性强制恢复默认提示词版本
+          tableFillToolPromptUpgradeVersion: '', // [填表提示词] 工具化默认提示词一次性升级版本
           templateAssistantPromptForceDefaultVersion: '', // [AI 改表助手] 一次性强制恢复默认提示词版本
           strictJsonTableFillForceDisableVersion: '', // [填表功能] 一次性关闭严格 JSON 填表版本
           // [填表功能] 正文标签提取，从上下文中提取指定标签的内容发送给AI，User回复不受影响

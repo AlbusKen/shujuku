@@ -67,11 +67,129 @@ export async function sendConnectionManagerRequest_ACU(
     profileId: string,
     messages: any[],
     maxTokens: number,
+    custom?: Record<string, unknown>,
+    overridePayload?: Record<string, unknown>,
 ): Promise<any> {
     if (!isConnectionManagerAvailable_ACU()) {
         throw new Error('ConnectionManagerRequestService 不可用。请检查酒馆版本或连接管理器配置。');
     }
-    return await SillyTavern_API_ACU.ConnectionManagerRequestService.sendRequest(profileId, messages, maxTokens);
+    const service = SillyTavern_API_ACU.ConnectionManagerRequestService;
+    // 未传扩展参数时保持三参调用，旧调用方的请求形态不变。
+    if (custom === undefined && overridePayload === undefined) {
+        return await service.sendRequest(profileId, messages, maxTokens);
+    }
+    // 宿主 sendRequest(profileId, prompt, maxTokens, custom, overridePayload)：
+    // custom 与默认参数合并（如 extractData:false 返回原始响应）；
+    // overridePayload 展开进 Chat Completion 请求体（如 tools、tool_choice）。
+    return await service.sendRequest(profileId, messages, maxTokens, custom ?? {}, overridePayload ?? {});
+}
+
+/**
+ * 判断连接配置是否为 Chat Completion 类型（只有这类配置的请求体能携带原生工具）。
+ * 与宿主 ConnectionManagerRequestService.validateProfile 同源：CONNECT_API_MAP[api].selected === 'openai'。
+ * 映射表不可用或无法识别时返回 false，调用方回退到不挂工具的正文路径。
+ * @param profile 连接配置对象
+ * @returns 是否可携带原生工具
+ */
+export function isConnectionProfileChatCompletion_ACU(profile: any): boolean {
+    try {
+        const map = (SillyTavern_API_ACU as any)?.CONNECT_API_MAP;
+        const entry = map && profile?.api ? map[profile.api] : null;
+        return !!entry && entry.selected === 'openai' && !!entry.source;
+    } catch {
+        return false;
+    }
+}
+
+/** 这些来源在宿主 sendOpenAIRequest 中才会带上反向代理（openai.js 同名判断）。 */
+const MAIN_API_REVERSE_PROXY_SOURCES_ACU = new Set(['claude', 'openai', 'mistralai', 'makersuite', 'vertexai', 'deepseek', 'xai']);
+
+/**
+ * 判断酒馆主连接当前是否为 Chat Completion（只有这类连接能携带原生工具并取回 tool_calls）。
+ * TavernHelper.generateRaw 只返回文本，带工具的请求必须改走宿主 ChatCompletionService。
+ * @returns 可用时为 true
+ */
+export function isMainApiChatCompletionAvailable_ACU(): boolean {
+    try {
+        const st: any = SillyTavern_API_ACU;
+        return !!st && st.mainApi === 'openai'
+            && !!st.chatCompletionSettings
+            && typeof st.ChatCompletionService?.processRequest === 'function';
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * 读取主连接的来源与提示词后处理，供调用方按工具规则改写后处理变体。
+ * @returns 来源标识与后处理值；不可用时均为空串
+ */
+export function readMainApiChatCompletionRouting_ACU(): { source: string; postProcessing: string } {
+    try {
+        const oai: any = (SillyTavern_API_ACU as any)?.chatCompletionSettings;
+        return { source: String(oai?.chat_completion_source || ''), postProcessing: String(oai?.custom_prompt_post_processing ?? '') };
+    } catch {
+        return { source: '', postProcessing: '' };
+    }
+}
+
+function finiteOrUndefined_ACU(value: unknown): number | undefined {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : undefined;
+}
+
+/**
+ * 按酒馆主连接当前设置发送一次 Chat Completion 请求，并返回宿主原始响应（含 tool_calls）。
+ * 字段取值对齐宿主 sendOpenAIRequest 的 generate_data；overridePayload 最后展开（tools、tool_choice 等）。
+ * @param messages 已归一 role 的消息序列
+ * @param overridePayload 并入请求体的覆盖字段
+ * @param signal 中止信号
+ * @returns 宿主返回的原始 JSON
+ */
+export async function sendMainApiChatCompletionRequest_ACU(
+    messages: any[],
+    overridePayload: Record<string, unknown>,
+    signal?: AbortSignal | null,
+): Promise<any> {
+    if (!isMainApiChatCompletionAvailable_ACU()) {
+        throw new Error('酒馆主 API 当前不是 Chat Completion 连接，无法携带原生工具。');
+    }
+    const st: any = SillyTavern_API_ACU;
+    const oai: any = st.chatCompletionSettings;
+    const source = String(oai.chat_completion_source || '');
+    const request: Record<string, unknown> = {
+        stream: false,
+        messages,
+        model: typeof st.getChatCompletionModel === 'function' ? st.getChatCompletionModel() : undefined,
+        chat_completion_source: source,
+        max_tokens: finiteOrUndefined_ACU(oai.openai_max_tokens),
+        temperature: finiteOrUndefined_ACU(oai.temp_openai),
+        top_p: finiteOrUndefined_ACU(oai.top_p_openai),
+        custom_prompt_post_processing: oai.custom_prompt_post_processing,
+    };
+    if (oai.reverse_proxy && MAIN_API_REVERSE_PROXY_SOURCES_ACU.has(source)) {
+        request.reverse_proxy = oai.reverse_proxy;
+        request.proxy_password = oai.proxy_password;
+    }
+    if (source === 'custom') {
+        request.custom_url = oai.custom_url;
+        request.custom_include_body = oai.custom_include_body;
+        request.custom_exclude_body = oai.custom_exclude_body;
+        request.custom_include_headers = oai.custom_include_headers;
+    }
+    if (source === 'claude') request.claude_use_sysprompt = oai.claude_use_sysprompt;
+    if (source === 'makersuite' || source === 'vertexai') request.use_makersuite_sysprompt = oai.use_makersuite_sysprompt;
+    if (source === 'vertexai') {
+        request.vertexai_auth_mode = oai.vertexai_auth_mode;
+        request.vertexai_region = oai.vertexai_region;
+        request.vertexai_express_project_id = oai.vertexai_express_project_id;
+    }
+    if (source === 'azure_openai') {
+        request.azure_base_url = oai.azure_base_url;
+        request.azure_deployment_name = oai.azure_deployment_name;
+        request.azure_api_version = oai.azure_api_version;
+    }
+    return await st.ChatCompletionService.processRequest({ ...request, ...overridePayload }, {}, false, signal ?? null);
 }
 
 /**

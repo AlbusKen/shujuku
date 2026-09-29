@@ -1399,6 +1399,81 @@ DELETE FROM table_name WHERE row_id = 2;
         }
         return { ...segment };
     });
+    // --- [填表原生工具] 默认提示词只通过 table_edit / table_sql 工具提交表格修改 ---
+    // 正文 <tableEdit> 提取仅保留为代码侧兜底，不再写进提示词：两套输出格式并存会让模型混淆。
+    function findTableFillMainSegment_ACU(segments) {
+        return segments.find(segment => segment.mainSlot === 'A' || segment.isMain);
+    }
+    /** 取旧默认 <thought> 中的分析步骤与纪要规则，工具化后原样沿用。 */
+    function extractTableFillAnalysisSteps_ACU(content) {
+        const start = content.indexOf('<thought>');
+        const end = content.indexOf('</thought>', start);
+        if (start < 0 || end < 0)
+            return '';
+        return content.slice(start + '<thought>'.length, end).trim();
+    }
+    function buildTableFillToolOutputSection_ACU(content, toolSection) {
+        return `## 输出格式（严格执行）
+
+先在正文中完成分析，可写在 <thought></thought> 内：
+${extractTableFillAnalysisSteps_ACU(content)}
+
+${toolSection}
+
+`;
+    }
+    const TABLE_EDIT_TOOL_SECTION_ACU = `分析完成后，必须调用 table_edit 工具一次性提交本轮全部表格修改：
+- commands 参数逐行填写一条指令，只允许以下三种：
+insertRow(表格ID, {"0":"字段0值","1":"字段1值","2":"字段2值"})
+updateRow(表格ID, 行号, {"0":"字段0值","1":"字段1值","2":"字段2值"})
+deleteRow(表格ID, 行号)
+- 本轮没有任何修改时，commands 填空字符串。
+- 表格修改只能通过 table_edit 工具提交，正文里不要再写任何表格修改指令。`;
+    const TABLE_SQL_TOOL_SECTION_ACU = `分析完成后，必须调用 table_sql 工具一次性提交本轮全部表格修改：
+- sql 参数填写完整 SQL 脚本，只允许 INSERT / UPDATE / DELETE，例如：
+INSERT INTO table_name (col1, col2) VALUES ('值1', '值2');
+UPDATE table_name SET col1 = '新值' WHERE row_id = 1;
+DELETE FROM table_name WHERE row_id = 2;
+- 本轮没有任何修改时，sql 填空字符串。
+- 表格修改只能通过 table_sql 工具提交，正文里不要再写任何 SQL。`;
+    function buildTableEditToolPrompt_ACU(content) {
+        let next = replaceSection_ACU(content, '## 输出格式（严格执行）', '## 关键规则', buildTableFillToolOutputSection_ACU(content, TABLE_EDIT_TOOL_SECTION_ACU));
+        next = next.replace('5. 使用insertRow添加新行，updateRow更新已有行，deleteRow删除行', '5. 通过 table_edit 工具提交修改：insertRow 添加新行，updateRow 更新已有行，deleteRow 删除行');
+        next = next.replace('## 格式要点', '## commands 指令格式要点');
+        return next.replace('现在开始按此格式执行填表任务。', '现在开始分析，并调用 table_edit 工具提交本轮填表结果。');
+    }
+    function buildTableSqlToolPrompt_ACU(content) {
+        const next = replaceSection_ACU(content, '## 输出格式（严格执行）', '## 关键规则', buildTableFillToolOutputSection_ACU(content, TABLE_SQL_TOOL_SECTION_ACU));
+        return next.replace('现在开始按此格式执行填表任务。', '现在开始分析，并调用 table_sql 工具提交本轮填表结果。');
+    }
+    // 本轮开发中出现过的「正文格式 + 工具优先」中间默认，仅用于迁移识别，不再作为默认。
+    const INTERMEDIATE_TABLE_EDIT_GUIDANCE_ACU = `【工具提交（优先）】
+如果本次请求提供了 table_edit 工具，必须调用 table_edit 一次性提交本轮全部表格修改：commands 参数逐行填写与下方 <tableEdit> 内格式完全相同的 insertRow / updateRow / deleteRow 指令；本轮没有任何修改时 commands 填空字符串。调用工具后，正文中不要再输出 <tableEdit>。
+如果本次请求没有提供该工具，则按下方格式在正文中输出。
+
+`;
+    const INTERMEDIATE_TABLE_SQL_GUIDANCE_ACU = `【工具提交（优先）】
+如果本次请求提供了 table_sql 工具，必须调用 table_sql 一次性提交本轮全部表格修改：sql 参数填写与下方 <tableEdit> 内格式完全相同的完整 SQL 脚本（每条语句以分号结尾、换行分隔）；本轮没有任何修改时 sql 填空字符串。调用工具后，正文中不要再输出 <tableEdit>。
+如果本次请求没有提供该工具，则按下方格式在正文中输出。
+
+`;
+    function injectIntermediateGuidance_ACU(content, guidance) {
+        const marker = '## 输出格式（严格执行）\n\n';
+        const index = content.indexOf(marker);
+        if (index < 0)
+            return content;
+        const at = index + marker.length;
+        return `${content.slice(0, at)}${guidance}${content.slice(at)}`;
+    }
+    const legacyNativeMain_ACU = findTableFillMainSegment_ACU(DEFAULT_CHAR_CARD_PROMPT_ACU).content;
+    const legacySqlMain_ACU = findTableFillMainSegment_ACU(DEFAULT_CHAR_CARD_PROMPT_SQL_ACU).content;
+    /** 历史主段默认正文：[0] 为工具化前的旧默认，其后为中间默认。仅用于一次性迁移识别「用户未改动的默认」。 */
+    const TABLE_FILL_MAIN_PROMPT_HISTORY_ACU = Object.freeze({
+        native: Object.freeze([legacyNativeMain_ACU, injectIntermediateGuidance_ACU(legacyNativeMain_ACU, INTERMEDIATE_TABLE_EDIT_GUIDANCE_ACU)]),
+        sql: Object.freeze([legacySqlMain_ACU, injectIntermediateGuidance_ACU(legacySqlMain_ACU, INTERMEDIATE_TABLE_SQL_GUIDANCE_ACU)]),
+    });
+    findTableFillMainSegment_ACU(DEFAULT_CHAR_CARD_PROMPT_ACU).content = buildTableEditToolPrompt_ACU(legacyNativeMain_ACU);
+    findTableFillMainSegment_ACU(DEFAULT_CHAR_CARD_PROMPT_SQL_ACU).content = buildTableSqlToolPrompt_ACU(legacySqlMain_ACU);
     function replaceSection_ACU(content, startMarker, endMarker, replacement) {
         const start = content.indexOf(startMarker);
         const end = content.indexOf(endMarker, start + startMarker.length);
@@ -1486,7 +1561,8 @@ sql 必须是字符串，内容是按下文 DDL、Note 和 SQL 编写原则生�
         if (segment.mainSlot === 'A' || segment.isMain) {
             return {
                 ...segment,
-                content: buildStrictJsonNativePrompt_ACU(segment.content)
+                // 严格 JSON 默认从工具化前的旧主段派生，保持其内容与历史版本逐字一致。
+                content: buildStrictJsonNativePrompt_ACU(TABLE_FILL_MAIN_PROMPT_HISTORY_ACU.native[0])
             };
         }
         if (segment.isMain2)
@@ -1500,7 +1576,7 @@ sql 必须是字符串，内容是按下文 DDL、Note 和 SQL 编写原则生�
         if (segment.mainSlot === 'A' || segment.isMain) {
             return {
                 ...segment,
-                content: buildStrictJsonSqlPrompt_ACU(segment.content)
+                content: buildStrictJsonSqlPrompt_ACU(TABLE_FILL_MAIN_PROMPT_HISTORY_ACU.sql[0])
             };
         }
         if (segment.isMain2)
@@ -4073,6 +4149,8 @@ $CONTENT
     const TEMPLATE_ASSISTANT_PROMPT_FORCE_DEFAULT_VERSION_ACU = 'spv8.9.4-force-default-template-assistant-prompt';
     // 一次性关闭严格 JSON 填表：旧版本可能已保留显式开启状态；迁移完成后，用户仍可在高级设置中自行重新开启。
     const STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU = 'spv8.9.3-force-disable-strict-json-table-fill';
+    // 填表默认提示词改为只用 table_edit / table_sql 工具提交的一次性升级：仅替换主段完整命中历史默认的提示词，用户改写保留。
+    const TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU = 'spv9.4.1-table-fill-tool-only-prompt';
     // --- 交火模式纪要索引全局默认配置（独立于世界书配置，跟随数据库全局设置） ---
     const defaultVectorMemoryConfig_ACU = {
         enabled: false,
@@ -4718,11 +4796,122 @@ $CONTENT
      * @returns API 响应结果
      * @throws 如果 ConnectionManagerRequestService 不可用
      */
-    async function sendConnectionManagerRequest_ACU(profileId, messages, maxTokens) {
+    async function sendConnectionManagerRequest_ACU(profileId, messages, maxTokens, custom, overridePayload) {
         if (!isConnectionManagerAvailable_ACU()) {
             throw new Error('ConnectionManagerRequestService 不可用。请检查酒馆版本或连接管理器配置。');
         }
-        return await SillyTavern_API_ACU.ConnectionManagerRequestService.sendRequest(profileId, messages, maxTokens);
+        const service = SillyTavern_API_ACU.ConnectionManagerRequestService;
+        // 未传扩展参数时保持三参调用，旧调用方的请求形态不变。
+        if (custom === undefined && overridePayload === undefined) {
+            return await service.sendRequest(profileId, messages, maxTokens);
+        }
+        // 宿主 sendRequest(profileId, prompt, maxTokens, custom, overridePayload)：
+        // custom 与默认参数合并（如 extractData:false 返回原始响应）；
+        // overridePayload 展开进 Chat Completion 请求体（如 tools、tool_choice）。
+        return await service.sendRequest(profileId, messages, maxTokens, custom ?? {}, overridePayload ?? {});
+    }
+    /**
+     * 判断连接配置是否为 Chat Completion 类型（只有这类配置的请求体能携带原生工具）。
+     * 与宿主 ConnectionManagerRequestService.validateProfile 同源：CONNECT_API_MAP[api].selected === 'openai'。
+     * 映射表不可用或无法识别时返回 false，调用方回退到不挂工具的正文路径。
+     * @param profile 连接配置对象
+     * @returns 是否可携带原生工具
+     */
+    function isConnectionProfileChatCompletion_ACU(profile) {
+        try {
+            const map = SillyTavern_API_ACU?.CONNECT_API_MAP;
+            const entry = map && profile?.api ? map[profile.api] : null;
+            return !!entry && entry.selected === 'openai' && !!entry.source;
+        }
+        catch {
+            return false;
+        }
+    }
+    /** 这些来源在宿主 sendOpenAIRequest 中才会带上反向代理（openai.js 同名判断）。 */
+    const MAIN_API_REVERSE_PROXY_SOURCES_ACU = new Set(['claude', 'openai', 'mistralai', 'makersuite', 'vertexai', 'deepseek', 'xai']);
+    /**
+     * 判断酒馆主连接当前是否为 Chat Completion（只有这类连接能携带原生工具并取回 tool_calls）。
+     * TavernHelper.generateRaw 只返回文本，带工具的请求必须改走宿主 ChatCompletionService。
+     * @returns 可用时为 true
+     */
+    function isMainApiChatCompletionAvailable_ACU() {
+        try {
+            const st = SillyTavern_API_ACU;
+            return !!st && st.mainApi === 'openai'
+                && !!st.chatCompletionSettings
+                && typeof st.ChatCompletionService?.processRequest === 'function';
+        }
+        catch {
+            return false;
+        }
+    }
+    /**
+     * 读取主连接的来源与提示词后处理，供调用方按工具规则改写后处理变体。
+     * @returns 来源标识与后处理值；不可用时均为空串
+     */
+    function readMainApiChatCompletionRouting_ACU() {
+        try {
+            const oai = SillyTavern_API_ACU?.chatCompletionSettings;
+            return { source: String(oai?.chat_completion_source || ''), postProcessing: String(oai?.custom_prompt_post_processing ?? '') };
+        }
+        catch {
+            return { source: '', postProcessing: '' };
+        }
+    }
+    function finiteOrUndefined_ACU(value) {
+        const numeric = Number(value);
+        return Number.isFinite(numeric) ? numeric : undefined;
+    }
+    /**
+     * 按酒馆主连接当前设置发送一次 Chat Completion 请求，并返回宿主原始响应（含 tool_calls）。
+     * 字段取值对齐宿主 sendOpenAIRequest 的 generate_data；overridePayload 最后展开（tools、tool_choice 等）。
+     * @param messages 已归一 role 的消息序列
+     * @param overridePayload 并入请求体的覆盖字段
+     * @param signal 中止信号
+     * @returns 宿主返回的原始 JSON
+     */
+    async function sendMainApiChatCompletionRequest_ACU(messages, overridePayload, signal) {
+        if (!isMainApiChatCompletionAvailable_ACU()) {
+            throw new Error('酒馆主 API 当前不是 Chat Completion 连接，无法携带原生工具。');
+        }
+        const st = SillyTavern_API_ACU;
+        const oai = st.chatCompletionSettings;
+        const source = String(oai.chat_completion_source || '');
+        const request = {
+            stream: false,
+            messages,
+            model: typeof st.getChatCompletionModel === 'function' ? st.getChatCompletionModel() : undefined,
+            chat_completion_source: source,
+            max_tokens: finiteOrUndefined_ACU(oai.openai_max_tokens),
+            temperature: finiteOrUndefined_ACU(oai.temp_openai),
+            top_p: finiteOrUndefined_ACU(oai.top_p_openai),
+            custom_prompt_post_processing: oai.custom_prompt_post_processing,
+        };
+        if (oai.reverse_proxy && MAIN_API_REVERSE_PROXY_SOURCES_ACU.has(source)) {
+            request.reverse_proxy = oai.reverse_proxy;
+            request.proxy_password = oai.proxy_password;
+        }
+        if (source === 'custom') {
+            request.custom_url = oai.custom_url;
+            request.custom_include_body = oai.custom_include_body;
+            request.custom_exclude_body = oai.custom_exclude_body;
+            request.custom_include_headers = oai.custom_include_headers;
+        }
+        if (source === 'claude')
+            request.claude_use_sysprompt = oai.claude_use_sysprompt;
+        if (source === 'makersuite' || source === 'vertexai')
+            request.use_makersuite_sysprompt = oai.use_makersuite_sysprompt;
+        if (source === 'vertexai') {
+            request.vertexai_auth_mode = oai.vertexai_auth_mode;
+            request.vertexai_region = oai.vertexai_region;
+            request.vertexai_express_project_id = oai.vertexai_express_project_id;
+        }
+        if (source === 'azure_openai') {
+            request.azure_base_url = oai.azure_base_url;
+            request.azure_deployment_name = oai.azure_deployment_name;
+            request.azure_api_version = oai.azure_api_version;
+        }
+        return await st.ChatCompletionService.processRequest({ ...request, ...overridePayload }, {}, false, signal ?? null);
     }
     /**
      * 触发斜杠命令
@@ -85626,511 +85815,62 @@ $CONTENT
         return resolveGeneratedEntriesForTable_ACU(allEntries, tableName, tableData);
     }
 
-    /**
-     * service/ai/prompt-builder/prompt-api-call.ts
-     * AI API 调用 — prompt 组装 + API 调用 + 流式/非流式响应处理
-     * 从 prompt-builder.ts 拆出（L195-L501 + L1519-L1604）
-     */
-    /**
-     * The request reached a provider successfully, but its body contained no
-     * usable model output. This is retryable without treating configuration,
-     * authentication, or transport failures as model-output failures.
-     */
-    class RetryableAiResponseError_ACU extends Error {
-        constructor(message = 'API响应格式不正确或内容为空。') {
-            super(message);
-            this.code = 'empty_or_invalid_api_response';
-            this.name = 'RetryableAiResponseError';
-        }
-    }
-    function normalizeRoleForApi_ACU(role) {
-        const ru = String(role || '').toUpperCase();
-        const rl = String(role || '').toLowerCase();
-        if (ru === 'AI' || ru === 'ASSISTANT' || rl === 'assistant')
-            return 'assistant';
-        if (ru === 'SYSTEM' || rl === 'system')
-            return 'system';
-        if (ru === 'USER' || rl === 'user')
-            return 'user';
-        return 'user';
-    }
-    const STRICT_JSON_PROMPT_LEGACY_TOKEN_DENYLIST_ACU = [
-        'insertRow',
-        'updateRow',
-        'deleteRow',
-        'tableId',
-        'rowIndex',
+    // data/gateways/pristine-fetch.ts — 绕过宿主页面第三方脚本对 fetch 的包装
+    //
+    // 酒馆预设脚本（例如 Kemini 伴生面板）会 patch `window.parent ?? window` 的 fetch，
+    // 命中 /api/backends/*/generate 后改写请求体并重写响应流（注入自己的"传输函数"工具）。
+    // 智能续写与格林推演的内部请求打同一个端点且自带原生工具协议，被改写后会与脚本
+    // 注入的工具互相污染。这里按拦截器自己登记的原始实现剥离包装链，让这两条链路拿到
+    // 未被改写的 fetch；宿主正文生成不经过本模块，脚本对聊天的效果不受影响。
+    /** 已知拦截器在 wrapper 上登记原函数的标记键，形如 wrapper[MARKER] = { original }。 */
+    const KNOWN_FETCH_PATCH_MARKERS_ACU = [
+        '__keminiAntiTruncation__',
+        '__keminiFetchInterceptor__',
     ];
-    function warnIfStrictJsonPromptPolluted_ACU(messages) {
-        const hits = new Set();
-        messages.forEach((message) => {
-            const content = String(message?.content || '');
-            STRICT_JSON_PROMPT_LEGACY_TOKEN_DENYLIST_ACU.forEach((token) => {
-                if (content.includes(token))
-                    hits.add(token);
-            });
-        });
-        if (hits.size > 0) {
-            logWarn_ACU(`[严格JSON填表] strict prompt 中检测到 legacy 协议关键词污染：${Array.from(hits).join(', ')}`);
+    /** 包装链深度上限，防御环形引用与异常长的链条。 */
+    const MAX_UNWRAP_DEPTH_ACU = 16;
+    /** 读取 wrapper 登记的原始实现；不是已知包装时返回 null。 */
+    function readRegisteredOriginal_ACU(candidate) {
+        if (typeof candidate !== 'function')
+            return null;
+        for (const marker of KNOWN_FETCH_PATCH_MARKERS_ACU) {
+            // 收窄后的 Function 没有字符串索引签名，按 TS 要求经 unknown 中转再读标记槽。
+            const slot = candidate[marker];
+            if (!slot || typeof slot !== 'object')
+                continue;
+            const original = slot.original;
+            if (typeof original === 'function')
+                return original;
         }
-    }
-    async function callCustomOpenAI_ACU(dynamicContent, abortController = null, options = null) {
-        const localAbortController = abortController || new AbortController();
-        _set_currentAbortController_ACU(localAbortController);
-        trackAbortController_ACU(localAbortController);
-        const abortSignal = localAbortController.signal;
-        const skipProfileSwitch = !!options?.skipProfileSwitch;
-        const forceDirectApi = !!options?.forceDirectApi;
-        const effectiveTableApiPreset = options?.tableApiPreset !== undefined
-            ? String(options.tableApiPreset)
-            : (settings_ACU.tableApiPreset || '');
-        const apiPresetConfig = getApiConfigByPreset_ACU(effectiveTableApiPreset);
-        requireResolvedApiPreset_ACU(effectiveTableApiPreset, apiPresetConfig);
-        const effectiveApiMode = apiPresetConfig.apiMode;
-        const effectiveApiConfig = apiPresetConfig.apiConfig;
-        const effectiveTavernProfile = apiPresetConfig.tavernProfile;
-        const messages = [];
-        const strictJsonFillEnabled = settings_ACU.strictJsonTableFillEnabled === true;
-        const sqliteMode = isSqliteMode();
-        const charCardPromptSetting = strictJsonFillEnabled
-            ? (sqliteMode
-                ? cloneStrictPromptSegments_ACU(settings_ACU.strictJsonSqlCharCardPrompt, DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU)
-                : cloneStrictPromptSegments_ACU(settings_ACU.strictJsonCharCardPrompt, DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU))
-            : settings_ACU.charCardPrompt;
-        let promptSegments = [];
-        if (Array.isArray(charCardPromptSetting)) {
-            promptSegments = charCardPromptSetting;
-        }
-        else if (typeof charCardPromptSetting === 'string') {
-            promptSegments = [{ role: 'USER', content: charCardPromptSetting }];
-        }
-        let userInfoContent_Table = '';
-        try {
-            userInfoContent_Table = getPersonaDescription_ACU();
-            logDebug_ACU(`[填表] $U (persona_description) 获取结果: ${userInfoContent_Table ? '成功' : '为空'}`);
-        }
-        catch (e) {
-            logWarn_ACU('[填表] 获取用户设定描述时出错:', e);
-            userInfoContent_Table = '';
-        }
-        let charInfoContent_Table = '';
-        try {
-            charInfoContent_Table = getCharDescription_ACU();
-            logDebug_ACU(`[填表] $C (char_description) 获取结果: ${charInfoContent_Table ? '成功，长度=' + charInfoContent_Table.length : '为空'}`);
-        }
-        catch (e) {
-            logWarn_ACU('[填表] 获取角色描述时出错:', e);
-            charInfoContent_Table = '';
-        }
-        const lastPlotContent = getPlotFromHistory_ACU();
-        logDebug_ACU('[填表] $6 上轮规划数据:', lastPlotContent ? `长度=${lastPlotContent.length}` : '(空)');
-        const tableExcludeTags = (settings_ACU.tableContextExcludeTags || '').trim();
-        const tableExcludeRules = normalizeExcludeRules_ACU(settings_ACU.tableContextExcludeRules, tableExcludeTags);
-        const filterTableInjectedContent = (value, placeholderKey = '') => {
-            const text = value !== undefined && value !== null ? String(value) : '';
-            if (!['$0', '$1', '$4', '$6', '$8', '$9', '$U', '$C'].includes(placeholderKey))
-                return text;
-            return applyExcludeRulesToText_ACU(text, { excludeRules: tableExcludeRules, excludeTags: tableExcludeTags });
-        };
-        for (const segment of promptSegments) {
-            let finalContent = segment.content;
-            finalContent = finalContent.replace('$0', filterTableInjectedContent(dynamicContent.tableDataText, '$0'));
-            finalContent = finalContent.replace('$1', filterTableInjectedContent(dynamicContent.messagesText, '$1'));
-            finalContent = finalContent.replace('$4', filterTableInjectedContent(dynamicContent.worldbookContent, '$4'));
-            finalContent = finalContent.replace(/\$6/g, filterTableInjectedContent(lastPlotContent || '', '$6'));
-            finalContent = finalContent.replace('$8', filterTableInjectedContent(dynamicContent.manualExtraHint || '', '$8'));
-            finalContent = finalContent.replace(/\$9/g, filterTableInjectedContent(dynamicContent.worldbookDatabaseExcludedContent || '', '$9'));
-            finalContent = finalContent.replace(/\$U/g, filterTableInjectedContent(userInfoContent_Table, '$U'));
-            finalContent = finalContent.replace(/\$C/g, filterTableInjectedContent(charInfoContent_Table, '$C'));
-            if (typeof dynamicContent?.resolveTableWorldbookContent === 'function') {
-                const tableTokens = [];
-                const seenTableTokens = new Set();
-                for (const match of finalContent.matchAll(/\{\{([^{}]+)\}\}/g)) {
-                    const raw = String(match[0] || '');
-                    if (!raw || seenTableTokens.has(raw))
-                        continue;
-                    seenTableTokens.add(raw);
-                    tableTokens.push({ raw, tableName: String(match[1] || '') });
-                }
-                for (const token of tableTokens) {
-                    try {
-                        const resolvedContent = await dynamicContent.resolveTableWorldbookContent(token.tableName);
-                        if (typeof resolvedContent === 'string') {
-                            finalContent = finalContent.split(token.raw).join(resolvedContent);
-                        }
-                    }
-                    catch (error) {
-                        logWarn_ACU(`[填表] 无法解析表名占位符 "${token.tableName}"，保留原 token。`, error);
-                    }
-                }
-            }
-            if (typeof globalThis.EjsTemplate?.evalTemplate === 'function') {
-                try {
-                    finalContent = await globalThis.EjsTemplate.evalTemplate(finalContent);
-                    logDebug_ACU('[填表] 已通过 st-prompt-template 处理提示词');
-                }
-                catch (e) {
-                    logWarn_ACU('[填表] st-prompt-template 处理失败，使用原始内容:', e);
-                }
-            }
-            finalContent = parseRandomTags_ACU(finalContent);
-            finalContent = replaceRandomVariables_ACU(finalContent);
-            // [P4] {[db...]}/{[sql...]} 值替换（SQLite 模式下，在 <if> 之前执行）
-            finalContent = replaceDbSqlVariables(finalContent);
-            if (settings_ACU.promptTemplateSettings?.enabled !== false) {
-                // 填表条件必须与本次 $1 实际读取的 AI 上下文一致，不能越过批次边界读取聊天最新层。
-                const conditionalSeedContent = typeof dynamicContent?.conditionalSeedContent === 'string'
-                    ? dynamicContent.conditionalSeedContent
-                    : getLatestAIMessageContent_ACU();
-                const templateContext = {
-                    seedContent: conditionalSeedContent,
-                    allTablesJson: currentJsonTableData_ACU,
-                    plotContent: lastPlotContent || ''
-                };
-                finalContent = parseIfBlocksInContent_ACU(finalContent, templateContext, 0);
-            }
-            messages.push({ role: normalizeRoleForApi_ACU(segment.role), content: finalContent });
-        }
-        if (strictJsonFillEnabled) {
-            warnIfStrictJsonPromptPolluted_ACU(messages);
-        }
-        // 严格 JSON 填表：构建 json_schema response_format，让支持 structured outputs 的后端
-        // 在协议层强制输出结构，而不是只靠提示词软约束。
-        // 仅自定义 chat-completions 直连路径能携带（经 custom_include_body 合并进上游请求体）；
-        // tavern 连接预设与主 API（generateRaw）无请求体扩展通道，维持提示词约束。
-        // 后端不支持 response_format 时，用户可在 excludeBodyParams 中填 response_format 剔除。
-        let strictJsonResponseFormat;
-        if (strictJsonFillEnabled) {
-            try {
-                strictJsonResponseFormat = buildStrictJsonTableFillResponseFormatForData_ACU(sqliteMode, options?.tableData, options?.targetSheetKeys).responseFormat;
-            }
-            catch (error) {
-                // schema 构建失败不阻断填表：回退到纯提示词约束。
-                logWarn_ACU('[严格JSON填表] response_format schema 构建失败，本次请求不附加：', error);
-            }
-        }
-        logDebug_ACU('Final messages array being sent to API:', messages);
-        logDebug_ACU(`使用API预设: ${effectiveTableApiPreset || '当前配置'}, 模式: ${effectiveApiMode}`);
-        try {
-            if (effectiveApiMode === 'tavern') {
-                if (strictJsonResponseFormat) {
-                    logDebug_ACU('[严格JSON填表] 酒馆连接预设路径无请求体扩展通道，response_format 未附加，仅靠提示词约束。');
-                }
-                const profileId = effectiveTavernProfile;
-                if (!profileId) {
-                    throw new Error('未选择酒馆连接预设。');
-                }
-                if (skipProfileSwitch) {
-                    logDebug_ACU('ACU: 并发模式启用，跳过酒馆预设切换。');
-                }
-                let originalProfile = '';
-                let responsePromise;
-                let rawResult;
-                try {
-                    if (!skipProfileSwitch) {
-                        originalProfile = await triggerSlash_ACU('/profile');
-                    }
-                    const targetProfile = getConnectionManagerProfiles_ACU().find(p => p.id === profileId);
-                    if (!targetProfile) {
-                        throw new Error(`无法找到ID为 "${profileId}" 的连接预设。`);
-                    }
-                    if (!targetProfile.api) {
-                        throw new Error(`预设 "${targetProfile.name || targetProfile.id}" 没有配置API。`);
-                    }
-                    if (!targetProfile.preset) {
-                        throw new Error(`预设 "${targetProfile.name || targetProfile.id}" 没有选择预设。`);
-                    }
-                    const targetProfileName = targetProfile.name || targetProfile.id;
-                    if (!skipProfileSwitch) {
-                        const currentProfile = await triggerSlash_ACU('/profile');
-                        if (currentProfile !== targetProfileName) {
-                            const escapedProfileName = targetProfileName.replace(/"/g, '\\"');
-                            await triggerSlash_ACU(`/profile await=true "${escapedProfileName}"`);
-                        }
-                    }
-                    logDebug_ACU(`ACU: 通过酒馆连接预设 (ID: ${profileId}, Name: ${targetProfileName}) 发送请求...`);
-                    responsePromise = sendConnectionManagerRequest_ACU(profileId, messages, effectiveApiConfig.max_tokens ?? effectiveApiConfig.maxTokens ?? 4096);
-                    rawResult = await responsePromise;
-                }
-                catch (error) {
-                    logError_ACU(`ACU: 调用酒馆连接预设时出错:`, error);
-                    try {
-                        if (originalProfile && !skipProfileSwitch) {
-                            const currentProfileAfterCall = await triggerSlash_ACU('/profile');
-                            if (originalProfile !== currentProfileAfterCall) {
-                                const escapedOriginalProfile = originalProfile.replace(/"/g, '\\"');
-                                await triggerSlash_ACU(`/profile await=true "${escapedOriginalProfile}"`);
-                                logDebug_ACU(`ACU: 已恢复原酒馆连接预设: "${originalProfile}"`);
-                            }
-                        }
-                    }
-                    catch (restoreError) {
-                        logError_ACU(`ACU: 恢复原预设时出错:`, restoreError);
-                    }
-                    throw new Error(`API请求失败 (酒馆预设): ${error.message}`);
-                }
-                finally {
-                    if (rawResult !== undefined) {
-                        try {
-                            if (!skipProfileSwitch) {
-                                const currentProfileAfterCall = await triggerSlash_ACU('/profile');
-                                if (originalProfile && originalProfile !== currentProfileAfterCall) {
-                                    const escapedOriginalProfile = originalProfile.replace(/"/g, '\\"');
-                                    await triggerSlash_ACU(`/profile await=true "${escapedOriginalProfile}"`);
-                                    logDebug_ACU(`ACU: 已恢复原酒馆连接预设: "${originalProfile}"`);
-                                }
-                            }
-                        }
-                        catch (restoreError) {
-                            logError_ACU(`ACU: 恢复原预设时出错:`, restoreError);
-                        }
-                    }
-                }
-                if (rawResult && rawResult.ok && rawResult.result?.choices?.[0]?.message?.content) {
-                    return rawResult.result.choices[0].message.content.trim();
-                }
-                else if (rawResult && typeof rawResult.content === 'string') {
-                    return rawResult.content.trim();
-                }
-                else {
-                    const errorMsg = rawResult?.error || JSON.stringify(rawResult);
-                    throw new Error(`酒馆预设API调用返回无效响应: ${errorMsg}`);
-                }
-            }
-            else {
-                if (effectiveApiConfig.useMainApi && !forceDirectApi) {
-                    logDebug_ACU('ACU: 通过酒馆主API发送请求（流式传输）...');
-                    if (strictJsonResponseFormat) {
-                        logDebug_ACU('[严格JSON填表] 主 API（generateRaw）路径无请求体扩展通道，response_format 未附加，仅靠提示词约束。');
-                    }
-                    if (!isGenerateRawAvailable_ACU()) {
-                        throw new Error('TavernHelper.generateRaw 函数不存在。请检查酒馆版本。');
-                    }
-                    const response = await generateRaw_ACU({
-                        ordered_prompts: messages,
-                        should_stream: settings_ACU.streamingEnabled || false,
-                    });
-                    if (typeof response !== 'string') {
-                        throw new Error('主API调用未返回预期的文本响应。');
-                    }
-                    return response.trim();
-                }
-                else {
-                    if (forceDirectApi && effectiveApiConfig.useMainApi) {
-                        if (effectiveApiConfig.url && effectiveApiConfig.model) {
-                            logDebug_ACU('ACU: 并发模式启用，强制使用独立API路径。');
-                        }
-                        else {
-                            logWarn_ACU('ACU: 并发模式要求独立API，但URL或模型未配置，回退主API。');
-                            if (!isGenerateRawAvailable_ACU()) {
-                                throw new Error('TavernHelper.generateRaw 函数不存在。请检查酒馆版本。');
-                            }
-                            const response = await generateRaw_ACU({
-                                ordered_prompts: messages,
-                                should_stream: settings_ACU.streamingEnabled || false,
-                            });
-                            if (typeof response !== 'string') {
-                                throw new Error('主API调用未返回预期的文本响应。');
-                            }
-                            return response.trim();
-                        }
-                    }
-                    if (!effectiveApiConfig.url || !effectiveApiConfig.model) {
-                        throw new Error('自定义API的URL或模型未配置。');
-                    }
-                    const generateUrl = `/api/backends/chat-completions/generate`;
-                    const headers = { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' };
-                    const body = JSON.stringify(buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, {
-                        stripModelPrefix: false,
-                        responseFormat: strictJsonResponseFormat,
-                    }));
-                    if (strictJsonResponseFormat) {
-                        logDebug_ACU('[严格JSON填表] 已在请求体附加 json_schema response_format。');
-                    }
-                    logDebug_ACU('ACU: 调用新的后端生成API:', generateUrl, 'Model:', effectiveApiConfig.model);
-                    const response = await fetch(generateUrl, { method: 'POST', headers, body, signal: abortSignal });
-                    if (!response.ok) {
-                        const errTxt = await response.text();
-                        throw new Error(`API请求失败: ${response.status} ${errTxt}`);
-                    }
-                    const content = await handleApiResponse_ACU(response, abortSignal);
-                    if (content) {
-                        return content.trim();
-                    }
-                    throw new RetryableAiResponseError_ACU();
-                }
-            }
-        }
-        finally {
-            untrackAbortController_ACU(localAbortController);
-            if (currentAbortController_ACU === localAbortController) {
-                _set_currentAbortController_ACU(null);
-            }
-        }
-    }
-    function toUsageCount_ACU(value) {
-        return typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value) && value >= 0
-            ? value
-            : undefined;
-    }
-    function firstUsageCount_ACU(...values) {
-        for (const value of values) {
-            const count = toUsageCount_ACU(value);
-            if (count !== undefined)
-                return count;
-        }
-        return undefined;
-    }
-    /** 后出现的已定义字段覆盖先前值；缺失字段不得擦除已经报告的计数。 */
-    function mergeAiUsageMetadata_ACU(current, incoming) {
-        if (!incoming)
-            return current;
-        const merged = current ? { ...current } : {};
-        if (incoming.promptTokens !== undefined)
-            merged.promptTokens = incoming.promptTokens;
-        if (incoming.completionTokens !== undefined)
-            merged.completionTokens = incoming.completionTokens;
-        if (incoming.cachedTokens !== undefined)
-            merged.cachedTokens = incoming.cachedTokens;
-        if (incoming.cacheWriteTokens !== undefined)
-            merged.cacheWriteTokens = incoming.cacheWriteTokens;
-        return merged;
-    }
-    /** 同一响应中先合并 usage，再由 usageMetadata 的已定义字段覆盖。 */
-    function extractResponseUsageMetadata_ACU(raw) {
-        return mergeAiUsageMetadata_ACU(extractAiUsageMetadata_ACU(raw?.usage), extractAiUsageMetadata_ACU(raw?.usageMetadata));
+        return null;
     }
     /**
-     * 从 OpenAI、Anthropic、DeepSeek 或 Gemini 兼容 usage 对象提取统一用量。
-     * 只接受非负有限整数；字段缺失或非法时保持未报告，显式 0 会被保留。
-     * @param raw 响应里的 usage 或 usageMetadata 对象
-     * @returns 统一用量；raw 不含任何有效计数时返回 null
+     * 解析当前未被已知拦截器包装的 fetch。
+     * 每次调用都重新剥离：脚本可能在本模块加载之后才安装，缓存会让屏蔽静默失效。
+     * @returns 剥离后的 fetch；无法识别包装时返回当前全局 fetch，不阻断请求
      */
-    function extractAiUsageMetadata_ACU(raw) {
-        if (!raw || typeof raw !== 'object')
-            return null;
-        const promptTokens = firstUsageCount_ACU(raw.prompt_tokens, raw.input_tokens, raw.promptTokenCount);
-        const completionTokens = firstUsageCount_ACU(raw.completion_tokens, raw.output_tokens, raw.candidatesTokenCount);
-        const cachedTokens = firstUsageCount_ACU(raw.prompt_tokens_details?.cached_tokens, raw.input_tokens_details?.cached_tokens, raw.cache_read_input_tokens, raw.prompt_cache_hit_tokens, raw.cachedContentTokenCount);
-        const cacheWriteTokens = firstUsageCount_ACU(raw.cache_creation_input_tokens, raw.cache_write_input_tokens, raw.cache_write_tokens);
-        const usage = {};
-        if (promptTokens !== undefined)
-            usage.promptTokens = promptTokens;
-        if (completionTokens !== undefined)
-            usage.completionTokens = completionTokens;
-        if (cachedTokens !== undefined)
-            usage.cachedTokens = cachedTokens;
-        if (cacheWriteTokens !== undefined)
-            usage.cacheWriteTokens = cacheWriteTokens;
-        return Object.keys(usage).length ? usage : null;
+    function resolvePristineFetch_ACU() {
+        let current = globalThis.fetch;
+        for (let depth = 0; depth < MAX_UNWRAP_DEPTH_ACU; depth += 1) {
+            const original = readRegisteredOriginal_ACU(current);
+            if (!original || original === current)
+                break;
+            current = original;
+        }
+        return (typeof current === 'function' ? current : globalThis.fetch);
     }
-    async function streamToText_ACU(response, signal = null, onUsage) {
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let fullContent = '';
-        let buffer = '';
-        // usage 出现在流末尾的独立 chunk（choices 为空数组），需开启 stream_options.include_usage 才会下发。
-        let capturedUsage = null;
-        try {
-            while (true) {
-                if (signal?.aborted) {
-                    throw new Error('Request aborted');
-                }
-                const { done, value } = await reader.read();
-                if (done)
-                    break;
-                buffer += decoder.decode(value, { stream: true });
-                const lines = buffer.split('\n');
-                buffer = lines.pop() || '';
-                for (const line of lines) {
-                    if (line.startsWith('data: ')) {
-                        const data = line.slice(6);
-                        if (data === '[DONE]')
-                            continue;
-                        try {
-                            const json = JSON.parse(data);
-                            const content = json?.choices?.[0]?.delta?.content;
-                            if (content) {
-                                fullContent += content;
-                            }
-                            // Anthropic SSE 分支（接口协议=claude_messages 时后端原样透传 Anthropic 流，不归一化）：
-                            // content_block_delta(text_delta).delta.text 拼内容；message_stop 视为流结束（等价 [DONE]）。
-                            if (json?.type === 'content_block_delta' && json?.delta?.type === 'text_delta' && typeof json?.delta?.text === 'string') {
-                                fullContent += json.delta.text;
-                            }
-                            // Gemini SSE 分支（接口协议=gemini_interactions 时后端原样透传 generateContent 流）：
-                            // candidates[0].content.parts[].text 拼接（跳过 thought 段）；流结束由连接关闭界定。
-                            const geminiParts = json?.candidates?.[0]?.content?.parts;
-                            if (Array.isArray(geminiParts)) {
-                                for (const part of geminiParts) {
-                                    if (part && typeof part.text === 'string' && part.thought !== true) {
-                                        fullContent += part.text;
-                                    }
-                                }
-                            }
-                            const usage = extractResponseUsageMetadata_ACU(json);
-                            capturedUsage = mergeAiUsageMetadata_ACU(capturedUsage, usage);
-                        }
-                        catch (e) {
-                            // 忽略解析错误
-                        }
-                    }
-                }
-            }
-        }
-        finally {
-            reader.releaseLock();
-        }
-        if (capturedUsage && onUsage) {
-            try {
-                onUsage(capturedUsage);
-            }
-            catch { /* 用量回调异常不允许影响响应主流程。 */ }
-        }
-        return fullContent;
-    }
-    async function parseNonStreamResponse_ACU(response, onUsage) {
-        try {
-            const data = await response.json();
-            const usage = extractResponseUsageMetadata_ACU(data);
-            if (usage && onUsage) {
-                try {
-                    onUsage(usage);
-                }
-                catch { /* 用量回调异常不允许影响响应主流程。 */ }
-            }
-            if (data?.choices?.[0]?.message?.content) {
-                return data.choices[0].message.content;
-            }
-            if (data?.content) {
-                return data.content;
-            }
-            if (typeof data === 'string') {
-                return data;
-            }
-            logError_ACU('[parseNonStreamResponse] Unknown response format:', data);
-            return null;
-        }
-        catch (e) {
-            logError_ACU('[parseNonStreamResponse] Failed to parse response:', e);
-            return null;
-        }
-    }
-    async function handleApiResponse_ACU(response, signal = null, onUsage) {
-        if (settings_ACU.streamingEnabled) {
-            return await streamToText_ACU(response, signal, onUsage);
-        }
-        else {
-            return await parseNonStreamResponse_ACU(response, onUsage);
-        }
-    }
-
     /**
-     * service/ai/prompt-builder/index.ts
-     * AI prompt-builder 入口 — re-export 所有公共 API
-     * 保持与原 prompt-builder.ts 完全相同的公共接口
+     * 以剥离后的 fetch 发起请求，绕过第三方脚本对生成端点的改写。
+     * 显式绑定 globalThis：拦截器调用原函数时也传 `this ?? target`，裸调在部分宿主下
+     * 会丢失 realm 绑定。
+     * @param input 请求地址或 Request
+     * @param init 请求参数
+     * @returns 宿主返回的原始响应
      */
-    // AI 输入准备
+    function pristineFetch_ACU(input, init) {
+        const send = resolvePristineFetch_ACU();
+        return send.call(globalThis, input, init);
+    }
 
     const objectSchema_ACU = (properties, required) => ({
         type: 'object',
@@ -86590,6 +86330,702 @@ $CONTENT
         }
         return { turn: finishChatTurn_ACU(state), usage: state.usage };
     }
+
+    // service/ai/prompt-builder/table-fill-tools.ts — 填表原生工具（正文提取模式）
+    //
+    // 原生存储模式提供 table_edit，SQLite 模式提供 table_sql。工具参数与 <tableEdit> 块内
+    // 的正文格式完全一致，调用结果在请求出口被合成为 <tableEdit> 块，下游解析、校验与重试
+    // 链路不感知工具化；模型未调用工具时保留正文原样，作为兜底走既有正文提取。
+    const TABLE_EDIT_TOOL_NAME_ACU = 'table_edit';
+    const TABLE_SQL_TOOL_NAME_ACU = 'table_sql';
+    const TABLE_EDIT_TOOL_ACU = {
+        type: 'function',
+        function: {
+            name: TABLE_EDIT_TOOL_NAME_ACU,
+            description: '一次性提交本轮全部表格修改。commands 逐行填写 insertRow / updateRow / deleteRow 指令，格式与 <tableEdit> 块内完全相同；本轮没有修改时填空字符串。',
+            parameters: {
+                type: 'object',
+                properties: {
+                    commands: { type: 'string', description: '每行一条 insertRow(表格ID, {...}) / updateRow(表格ID, 行号, {...}) / deleteRow(表格ID, 行号) 指令。' },
+                },
+                required: ['commands'],
+                additionalProperties: false,
+            },
+        },
+    };
+    const TABLE_SQL_TOOL_ACU = {
+        type: 'function',
+        function: {
+            name: TABLE_SQL_TOOL_NAME_ACU,
+            description: '一次性提交本轮全部表格修改。sql 填写完整 SQL 脚本（INSERT / UPDATE / DELETE，每条以分号结尾），格式与 <tableEdit> 块内完全相同；本轮没有修改时填空字符串。',
+            parameters: {
+                type: 'object',
+                properties: {
+                    sql: { type: 'string', description: '完整 SQL 脚本，多条语句换行分隔。' },
+                },
+                required: ['sql'],
+                additionalProperties: false,
+            },
+        },
+    };
+    /**
+     * 按存储模式返回本次填表请求挂载的工具。
+     * @param sqlite 是否为 SQLite 存储模式
+     * @returns 仅含一个工具的定义数组
+     */
+    function buildTableFillNativeTools_ACU(sqlite) {
+        return [sqlite ? TABLE_SQL_TOOL_ACU : TABLE_EDIT_TOOL_ACU];
+    }
+    function isTableFillMainSegment_ACU(segment) {
+        return !!segment && (String(segment.mainSlot || '').toUpperCase() === 'A' || !!segment.isMain);
+    }
+    /**
+     * 通道无法携带填表工具时，把「当前工具版默认主段」降级为对应的正文 <tableEdit> 格式默认主段。
+     * 只替换逐字命中工具版默认的主段；用户改写过的主段与其余段原样保留。
+     * @param segments 本次请求的提示词段
+     * @param sqlite 是否为 SQLite 存储模式
+     * @returns 降级后的提示词段（新数组，不改写入参）
+     */
+    function degradeTableFillPromptSegmentsToBodyFormat_ACU(segments, sqlite) {
+        if (!Array.isArray(segments))
+            return segments;
+        const defaults = (sqlite ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU : DEFAULT_CHAR_CARD_PROMPT_ACU);
+        const toolDefault = defaults.find(isTableFillMainSegment_ACU)?.content;
+        const history = TABLE_FILL_MAIN_PROMPT_HISTORY_ACU;
+        const bodyFormat = (sqlite ? history.sql : history.native)[0];
+        if (typeof toolDefault !== 'string' || typeof bodyFormat !== 'string')
+            return segments;
+        return segments.map(segment => (isTableFillMainSegment_ACU(segment) && segment.content === toolDefault
+            ? { ...segment, content: bodyFormat }
+            : segment));
+    }
+    /**
+     * 把一次模型回复（正文 + 原生工具调用）归一为正文提取链可消费的文本。
+     * - 命中本模式工具：参数合成为 <tableEdit> 块；正文里残留的 <tableEdit> 块被剔除，
+     *   避免下游「首对 / 末对」取块规则取到与工具不一致的内容。
+     * - 未调用工具：原样返回正文，走既有正文提取兜底。
+     * - 工具参数不是合法 JSON 或缺少字段：返回 ok=false，由调用方按可重试模型输出错误处理。
+     * @param turn 模型回复
+     * @param sqlite 是否为 SQLite 存储模式
+     * @returns 归一结果；正文与工具均为空时 text 为空串
+     */
+    function resolveTableFillToolTurn_ACU(turn, sqlite) {
+        const toolName = sqlite ? TABLE_SQL_TOOL_NAME_ACU : TABLE_EDIT_TOOL_NAME_ACU;
+        const argName = sqlite ? 'sql' : 'commands';
+        const content = typeof turn?.content === 'string' ? turn.content : '';
+        const calls = (Array.isArray(turn?.toolCalls) ? turn.toolCalls : []).filter(call => call?.name === toolName);
+        if (calls.length === 0)
+            return { ok: true, text: content, viaTool: false };
+        const parts = [];
+        for (const call of calls) {
+            let parsed;
+            try {
+                parsed = JSON.parse(call.arguments || '{}');
+            }
+            catch {
+                return { ok: false, error: `${toolName} 工具参数不是合法 JSON，请重新调用并确保参数完整。` };
+            }
+            const value = parsed && typeof parsed === 'object' ? parsed[argName] : undefined;
+            if (typeof value !== 'string')
+                return { ok: false, error: `${toolName} 工具参数缺少字符串字段 ${argName}。` };
+            if (value.trim())
+                parts.push(value.trim());
+        }
+        const residual = content.replace(/<tableEdit>[\s\S]*?<\/tableEdit>/gi, '').trim();
+        const block = `<tableEdit>\n${parts.join('\n')}\n</tableEdit>`;
+        return { ok: true, text: residual ? `${residual}\n${block}` : block, viaTool: true };
+    }
+
+    /**
+     * service/ai/prompt-builder/prompt-api-call.ts
+     * AI API 调用 — prompt 组装 + API 调用 + 流式/非流式响应处理
+     * 从 prompt-builder.ts 拆出（L195-L501 + L1519-L1604）
+     */
+    /**
+     * The request reached a provider successfully, but its body contained no
+     * usable model output. This is retryable without treating configuration,
+     * authentication, or transport failures as model-output failures.
+     */
+    class RetryableAiResponseError_ACU extends Error {
+        constructor(message = 'API响应格式不正确或内容为空。') {
+            super(message);
+            this.code = 'empty_or_invalid_api_response';
+            this.name = 'RetryableAiResponseError';
+        }
+    }
+    function normalizeRoleForApi_ACU(role) {
+        const ru = String(role || '').toUpperCase();
+        const rl = String(role || '').toLowerCase();
+        if (ru === 'AI' || ru === 'ASSISTANT' || rl === 'assistant')
+            return 'assistant';
+        if (ru === 'SYSTEM' || rl === 'system')
+            return 'system';
+        if (ru === 'USER' || rl === 'user')
+            return 'user';
+        return 'user';
+    }
+    const STRICT_JSON_PROMPT_LEGACY_TOKEN_DENYLIST_ACU = [
+        'insertRow',
+        'updateRow',
+        'deleteRow',
+        'tableId',
+        'rowIndex',
+    ];
+    function warnIfStrictJsonPromptPolluted_ACU(messages) {
+        const hits = new Set();
+        messages.forEach((message) => {
+            const content = String(message?.content || '');
+            STRICT_JSON_PROMPT_LEGACY_TOKEN_DENYLIST_ACU.forEach((token) => {
+                if (content.includes(token))
+                    hits.add(token);
+            });
+        });
+        if (hits.size > 0) {
+            logWarn_ACU(`[严格JSON填表] strict prompt 中检测到 legacy 协议关键词污染：${Array.from(hits).join(', ')}`);
+        }
+    }
+    async function callCustomOpenAI_ACU(dynamicContent, abortController = null, options = null) {
+        const localAbortController = abortController || new AbortController();
+        _set_currentAbortController_ACU(localAbortController);
+        trackAbortController_ACU(localAbortController);
+        const abortSignal = localAbortController.signal;
+        const skipProfileSwitch = !!options?.skipProfileSwitch;
+        const forceDirectApi = !!options?.forceDirectApi;
+        const effectiveTableApiPreset = options?.tableApiPreset !== undefined
+            ? String(options.tableApiPreset)
+            : (settings_ACU.tableApiPreset || '');
+        const apiPresetConfig = getApiConfigByPreset_ACU(effectiveTableApiPreset);
+        requireResolvedApiPreset_ACU(effectiveTableApiPreset, apiPresetConfig);
+        const effectiveApiMode = apiPresetConfig.apiMode;
+        const effectiveApiConfig = apiPresetConfig.apiConfig;
+        const effectiveTavernProfile = apiPresetConfig.tavernProfile;
+        const messages = [];
+        const strictJsonFillEnabled = settings_ACU.strictJsonTableFillEnabled === true;
+        const sqliteMode = isSqliteMode();
+        const charCardPromptSetting = strictJsonFillEnabled
+            ? (sqliteMode
+                ? cloneStrictPromptSegments_ACU(settings_ACU.strictJsonSqlCharCardPrompt, DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU)
+                : cloneStrictPromptSegments_ACU(settings_ACU.strictJsonCharCardPrompt, DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU))
+            : settings_ACU.charCardPrompt;
+        let promptSegments = [];
+        if (Array.isArray(charCardPromptSetting)) {
+            promptSegments = charCardPromptSetting;
+        }
+        else if (typeof charCardPromptSetting === 'string') {
+            promptSegments = [{ role: 'USER', content: charCardPromptSetting }];
+        }
+        // 判定本次请求实际能否携带填表原生工具：Text Completion 连接与 generateRaw 回退取不回 tool_calls。
+        const tableFillToolChannelAvailable = (() => {
+            if (strictJsonFillEnabled)
+                return false;
+            if (effectiveApiMode === 'tavern') {
+                const profile = getConnectionManagerProfiles_ACU().find(p => p.id === effectiveTavernProfile);
+                return !!profile && isConnectionProfileChatCompletion_ACU(profile);
+            }
+            if (effectiveApiConfig.useMainApi) {
+                if (!forceDirectApi)
+                    return isMainApiChatCompletionAvailable_ACU();
+                return !!(effectiveApiConfig.url && effectiveApiConfig.model);
+            }
+            return true;
+        })();
+        if (!strictJsonFillEnabled && !tableFillToolChannelAvailable) {
+            // 通道带不了工具：工具版默认主段降级为正文 <tableEdit> 格式，避免提示词要求调用不存在的工具。
+            promptSegments = degradeTableFillPromptSegmentsToBodyFormat_ACU(promptSegments, sqliteMode);
+            logDebug_ACU('[填表] 当前通道无法携带原生工具，降级使用正文 <tableEdit> 格式提示词。');
+        }
+        let userInfoContent_Table = '';
+        try {
+            userInfoContent_Table = getPersonaDescription_ACU();
+            logDebug_ACU(`[填表] $U (persona_description) 获取结果: ${userInfoContent_Table ? '成功' : '为空'}`);
+        }
+        catch (e) {
+            logWarn_ACU('[填表] 获取用户设定描述时出错:', e);
+            userInfoContent_Table = '';
+        }
+        let charInfoContent_Table = '';
+        try {
+            charInfoContent_Table = getCharDescription_ACU();
+            logDebug_ACU(`[填表] $C (char_description) 获取结果: ${charInfoContent_Table ? '成功，长度=' + charInfoContent_Table.length : '为空'}`);
+        }
+        catch (e) {
+            logWarn_ACU('[填表] 获取角色描述时出错:', e);
+            charInfoContent_Table = '';
+        }
+        const lastPlotContent = getPlotFromHistory_ACU();
+        logDebug_ACU('[填表] $6 上轮规划数据:', lastPlotContent ? `长度=${lastPlotContent.length}` : '(空)');
+        const tableExcludeTags = (settings_ACU.tableContextExcludeTags || '').trim();
+        const tableExcludeRules = normalizeExcludeRules_ACU(settings_ACU.tableContextExcludeRules, tableExcludeTags);
+        const filterTableInjectedContent = (value, placeholderKey = '') => {
+            const text = value !== undefined && value !== null ? String(value) : '';
+            if (!['$0', '$1', '$4', '$6', '$8', '$9', '$U', '$C'].includes(placeholderKey))
+                return text;
+            return applyExcludeRulesToText_ACU(text, { excludeRules: tableExcludeRules, excludeTags: tableExcludeTags });
+        };
+        for (const segment of promptSegments) {
+            let finalContent = segment.content;
+            finalContent = finalContent.replace('$0', filterTableInjectedContent(dynamicContent.tableDataText, '$0'));
+            finalContent = finalContent.replace('$1', filterTableInjectedContent(dynamicContent.messagesText, '$1'));
+            finalContent = finalContent.replace('$4', filterTableInjectedContent(dynamicContent.worldbookContent, '$4'));
+            finalContent = finalContent.replace(/\$6/g, filterTableInjectedContent(lastPlotContent || '', '$6'));
+            finalContent = finalContent.replace('$8', filterTableInjectedContent(dynamicContent.manualExtraHint || '', '$8'));
+            finalContent = finalContent.replace(/\$9/g, filterTableInjectedContent(dynamicContent.worldbookDatabaseExcludedContent || '', '$9'));
+            finalContent = finalContent.replace(/\$U/g, filterTableInjectedContent(userInfoContent_Table, '$U'));
+            finalContent = finalContent.replace(/\$C/g, filterTableInjectedContent(charInfoContent_Table, '$C'));
+            if (typeof dynamicContent?.resolveTableWorldbookContent === 'function') {
+                const tableTokens = [];
+                const seenTableTokens = new Set();
+                for (const match of finalContent.matchAll(/\{\{([^{}]+)\}\}/g)) {
+                    const raw = String(match[0] || '');
+                    if (!raw || seenTableTokens.has(raw))
+                        continue;
+                    seenTableTokens.add(raw);
+                    tableTokens.push({ raw, tableName: String(match[1] || '') });
+                }
+                for (const token of tableTokens) {
+                    try {
+                        const resolvedContent = await dynamicContent.resolveTableWorldbookContent(token.tableName);
+                        if (typeof resolvedContent === 'string') {
+                            finalContent = finalContent.split(token.raw).join(resolvedContent);
+                        }
+                    }
+                    catch (error) {
+                        logWarn_ACU(`[填表] 无法解析表名占位符 "${token.tableName}"，保留原 token。`, error);
+                    }
+                }
+            }
+            if (typeof globalThis.EjsTemplate?.evalTemplate === 'function') {
+                try {
+                    finalContent = await globalThis.EjsTemplate.evalTemplate(finalContent);
+                    logDebug_ACU('[填表] 已通过 st-prompt-template 处理提示词');
+                }
+                catch (e) {
+                    logWarn_ACU('[填表] st-prompt-template 处理失败，使用原始内容:', e);
+                }
+            }
+            finalContent = parseRandomTags_ACU(finalContent);
+            finalContent = replaceRandomVariables_ACU(finalContent);
+            // [P4] {[db...]}/{[sql...]} 值替换（SQLite 模式下，在 <if> 之前执行）
+            finalContent = replaceDbSqlVariables(finalContent);
+            if (settings_ACU.promptTemplateSettings?.enabled !== false) {
+                // 填表条件必须与本次 $1 实际读取的 AI 上下文一致，不能越过批次边界读取聊天最新层。
+                const conditionalSeedContent = typeof dynamicContent?.conditionalSeedContent === 'string'
+                    ? dynamicContent.conditionalSeedContent
+                    : getLatestAIMessageContent_ACU();
+                const templateContext = {
+                    seedContent: conditionalSeedContent,
+                    allTablesJson: currentJsonTableData_ACU,
+                    plotContent: lastPlotContent || ''
+                };
+                finalContent = parseIfBlocksInContent_ACU(finalContent, templateContext, 0);
+            }
+            messages.push({ role: normalizeRoleForApi_ACU(segment.role), content: finalContent });
+        }
+        if (strictJsonFillEnabled) {
+            warnIfStrictJsonPromptPolluted_ACU(messages);
+        }
+        // 严格 JSON 填表：构建 json_schema response_format，让支持 structured outputs 的后端
+        // 在协议层强制输出结构，而不是只靠提示词软约束。
+        // 仅自定义 chat-completions 直连路径能携带（经 custom_include_body 合并进上游请求体）；
+        // tavern 连接预设与主 API（generateRaw）无请求体扩展通道，维持提示词约束。
+        // 后端不支持 response_format 时，用户可在 excludeBodyParams 中填 response_format 剔除。
+        let strictJsonResponseFormat;
+        if (strictJsonFillEnabled) {
+            try {
+                strictJsonResponseFormat = buildStrictJsonTableFillResponseFormatForData_ACU(sqliteMode, options?.tableData, options?.targetSheetKeys).responseFormat;
+            }
+            catch (error) {
+                // schema 构建失败不阻断填表：回退到纯提示词约束。
+                logWarn_ACU('[严格JSON填表] response_format schema 构建失败，本次请求不附加：', error);
+            }
+        }
+        // 正文提取模式挂填表原生工具；严格 JSON 模式已有 response_format 约束，不叠加工具。
+        // 自定义直连、Chat Completion 酒馆连接与 Chat Completion 主连接都挂工具；其余通道已降级为正文格式提示词。
+        const tableFillTools = (strictJsonFillEnabled || !tableFillToolChannelAvailable) ? [] : buildTableFillNativeTools_ACU(sqliteMode);
+        const finalizeTableFillTurn = (turn) => {
+            const resolved = resolveTableFillToolTurn_ACU(turn, sqliteMode);
+            // 项目未开启 strictNullChecks 时布尔判别联合不收窄，显式取 error 分支。
+            if (!resolved.ok)
+                throw new RetryableAiResponseError_ACU(resolved.error);
+            if (resolved.viaTool)
+                options?.onTableFillToolSubmitted?.();
+            const text = resolved.text.trim();
+            if (!text)
+                throw new RetryableAiResponseError_ACU();
+            return text;
+        };
+        logDebug_ACU('Final messages array being sent to API:', messages);
+        logDebug_ACU(`使用API预设: ${effectiveTableApiPreset || '当前配置'}, 模式: ${effectiveApiMode}`);
+        try {
+            if (effectiveApiMode === 'tavern') {
+                if (strictJsonResponseFormat) {
+                    logDebug_ACU('[严格JSON填表] 酒馆连接预设路径无请求体扩展通道，response_format 未附加，仅靠提示词约束。');
+                }
+                const profileId = effectiveTavernProfile;
+                if (!profileId) {
+                    throw new Error('未选择酒馆连接预设。');
+                }
+                if (skipProfileSwitch) {
+                    logDebug_ACU('ACU: 并发模式启用，跳过酒馆预设切换。');
+                }
+                let originalProfile = '';
+                let responsePromise;
+                let rawResult;
+                let useTavernTools = false;
+                try {
+                    if (!skipProfileSwitch) {
+                        originalProfile = await triggerSlash_ACU('/profile');
+                    }
+                    const targetProfile = getConnectionManagerProfiles_ACU().find(p => p.id === profileId);
+                    if (!targetProfile) {
+                        throw new Error(`无法找到ID为 "${profileId}" 的连接预设。`);
+                    }
+                    if (!targetProfile.api) {
+                        throw new Error(`预设 "${targetProfile.name || targetProfile.id}" 没有配置API。`);
+                    }
+                    if (!targetProfile.preset) {
+                        throw new Error(`预设 "${targetProfile.name || targetProfile.id}" 没有选择预设。`);
+                    }
+                    const targetProfileName = targetProfile.name || targetProfile.id;
+                    if (!skipProfileSwitch) {
+                        const currentProfile = await triggerSlash_ACU('/profile');
+                        if (currentProfile !== targetProfileName) {
+                            const escapedProfileName = targetProfileName.replace(/"/g, '\\"');
+                            await triggerSlash_ACU(`/profile await=true "${escapedProfileName}"`);
+                        }
+                    }
+                    logDebug_ACU(`ACU: 通过酒馆连接预设 (ID: ${profileId}, Name: ${targetProfileName}) 发送请求...`);
+                    const tavernMaxTokens = effectiveApiConfig.max_tokens ?? effectiveApiConfig.maxTokens ?? 4096;
+                    useTavernTools = tableFillTools.length > 0 && isConnectionProfileChatCompletion_ACU(targetProfile);
+                    if (useTavernTools) {
+                        // 酒馆连接可经 overridePayload 把原生工具并入 Chat Completion 请求体，extractData:false 取回含 tool_calls 的原始响应。
+                        // 指定工具的 tool_choice 同时让预设脚本的抗截断拦截器放行（调用方已强制工具选择时它不接管）；
+                        // Claude 源后端把 tool_choice 包成 { type }，只接受字符串，故回退 auto。
+                        const overridePayload = {
+                            tools: tableFillTools,
+                            tool_choice: String(targetProfile.api || '') === 'claude'
+                                ? 'auto'
+                                : { type: 'function', function: { name: tableFillTools[0].function.name } },
+                        };
+                        // strict/merge/semi/single 后处理会剥掉 tool_calls，与自定义通道同规则改用 *_tools 变体。
+                        const rawPostProcessing = String(targetProfile['prompt-post-processing'] ?? '');
+                        const toolPostProcessing = preserveNativeToolPostProcessing_ACU(rawPostProcessing, true);
+                        if (toolPostProcessing !== rawPostProcessing)
+                            overridePayload.custom_prompt_post_processing = toolPostProcessing;
+                        responsePromise = sendConnectionManagerRequest_ACU(profileId, messages, tavernMaxTokens, { extractData: false, signal: abortSignal }, overridePayload);
+                    }
+                    else {
+                        responsePromise = sendConnectionManagerRequest_ACU(profileId, messages, tavernMaxTokens);
+                    }
+                    rawResult = await responsePromise;
+                }
+                catch (error) {
+                    logError_ACU(`ACU: 调用酒馆连接预设时出错:`, error);
+                    try {
+                        if (originalProfile && !skipProfileSwitch) {
+                            const currentProfileAfterCall = await triggerSlash_ACU('/profile');
+                            if (originalProfile !== currentProfileAfterCall) {
+                                const escapedOriginalProfile = originalProfile.replace(/"/g, '\\"');
+                                await triggerSlash_ACU(`/profile await=true "${escapedOriginalProfile}"`);
+                                logDebug_ACU(`ACU: 已恢复原酒馆连接预设: "${originalProfile}"`);
+                            }
+                        }
+                    }
+                    catch (restoreError) {
+                        logError_ACU(`ACU: 恢复原预设时出错:`, restoreError);
+                    }
+                    throw new Error(`API请求失败 (酒馆预设): ${error.message}`);
+                }
+                finally {
+                    if (rawResult !== undefined) {
+                        try {
+                            if (!skipProfileSwitch) {
+                                const currentProfileAfterCall = await triggerSlash_ACU('/profile');
+                                if (originalProfile && originalProfile !== currentProfileAfterCall) {
+                                    const escapedOriginalProfile = originalProfile.replace(/"/g, '\\"');
+                                    await triggerSlash_ACU(`/profile await=true "${escapedOriginalProfile}"`);
+                                    logDebug_ACU(`ACU: 已恢复原酒馆连接预设: "${originalProfile}"`);
+                                }
+                            }
+                        }
+                        catch (restoreError) {
+                            logError_ACU(`ACU: 恢复原预设时出错:`, restoreError);
+                        }
+                    }
+                }
+                if (useTavernTools) {
+                    // extractData:false 返回宿主原始响应；兼容带 { ok, result } 包装的形态。
+                    return finalizeTableFillTurn(chatTurnFromJson_ACU(rawResult?.result ?? rawResult).turn);
+                }
+                if (rawResult && rawResult.ok && rawResult.result?.choices?.[0]?.message?.content) {
+                    return rawResult.result.choices[0].message.content.trim();
+                }
+                else if (rawResult && typeof rawResult.content === 'string') {
+                    return rawResult.content.trim();
+                }
+                else {
+                    const errorMsg = rawResult?.error || JSON.stringify(rawResult);
+                    throw new Error(`酒馆预设API调用返回无效响应: ${errorMsg}`);
+                }
+            }
+            else {
+                if (effectiveApiConfig.useMainApi && !forceDirectApi) {
+                    if (tableFillTools.length && isMainApiChatCompletionAvailable_ACU()) {
+                        // generateRaw 只返回文本、取不回 tool_calls；带工具时按主连接设置直接走宿主 ChatCompletionService。
+                        // 工具选择与后处理规则与酒馆连接路径一致：指定工具的 tool_choice 让预设脚本拦截器放行，
+                        // Claude 源后端只接受字符串 tool_choice，回退 auto。
+                        logDebug_ACU('ACU: 通过酒馆主连接（Chat Completion）发送带原生工具的填表请求...');
+                        const routing = readMainApiChatCompletionRouting_ACU();
+                        const mainOverridePayload = {
+                            tools: tableFillTools,
+                            tool_choice: routing.source === 'claude'
+                                ? 'auto'
+                                : { type: 'function', function: { name: tableFillTools[0].function.name } },
+                        };
+                        const mainToolPostProcessing = preserveNativeToolPostProcessing_ACU(routing.postProcessing, true);
+                        if (mainToolPostProcessing !== routing.postProcessing)
+                            mainOverridePayload.custom_prompt_post_processing = mainToolPostProcessing;
+                        const rawMainResult = await sendMainApiChatCompletionRequest_ACU(messages, mainOverridePayload, abortSignal);
+                        return finalizeTableFillTurn(chatTurnFromJson_ACU(rawMainResult).turn);
+                    }
+                    logDebug_ACU('ACU: 通过酒馆主API发送请求（流式传输）...');
+                    if (strictJsonResponseFormat) {
+                        logDebug_ACU('[严格JSON填表] 主 API（generateRaw）路径无请求体扩展通道，response_format 未附加，仅靠提示词约束。');
+                    }
+                    if (!isGenerateRawAvailable_ACU()) {
+                        throw new Error('TavernHelper.generateRaw 函数不存在。请检查酒馆版本。');
+                    }
+                    const response = await generateRaw_ACU({
+                        ordered_prompts: messages,
+                        should_stream: settings_ACU.streamingEnabled || false,
+                    });
+                    if (typeof response !== 'string') {
+                        throw new Error('主API调用未返回预期的文本响应。');
+                    }
+                    return response.trim();
+                }
+                else {
+                    if (forceDirectApi && effectiveApiConfig.useMainApi) {
+                        if (effectiveApiConfig.url && effectiveApiConfig.model) {
+                            logDebug_ACU('ACU: 并发模式启用，强制使用独立API路径。');
+                        }
+                        else {
+                            logWarn_ACU('ACU: 并发模式要求独立API，但URL或模型未配置，回退主API。');
+                            if (!isGenerateRawAvailable_ACU()) {
+                                throw new Error('TavernHelper.generateRaw 函数不存在。请检查酒馆版本。');
+                            }
+                            const response = await generateRaw_ACU({
+                                ordered_prompts: messages,
+                                should_stream: settings_ACU.streamingEnabled || false,
+                            });
+                            if (typeof response !== 'string') {
+                                throw new Error('主API调用未返回预期的文本响应。');
+                            }
+                            return response.trim();
+                        }
+                    }
+                    if (!effectiveApiConfig.url || !effectiveApiConfig.model) {
+                        throw new Error('自定义API的URL或模型未配置。');
+                    }
+                    const generateUrl = `/api/backends/chat-completions/generate`;
+                    const headers = { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' };
+                    const body = JSON.stringify(buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, {
+                        stripModelPrefix: false,
+                        responseFormat: strictJsonResponseFormat,
+                        ...(tableFillTools.length ? { tools: tableFillTools } : {}),
+                    }));
+                    if (strictJsonResponseFormat) {
+                        logDebug_ACU('[严格JSON填表] 已在请求体附加 json_schema response_format。');
+                    }
+                    logDebug_ACU('ACU: 调用新的后端生成API:', generateUrl, 'Model:', effectiveApiConfig.model);
+                    // 填表内部请求绕过第三方脚本对生成端点的 fetch 包装（见 data/gateways/pristine-fetch.ts）。
+                    const response = await pristineFetch_ACU(generateUrl, { method: 'POST', headers, body, signal: abortSignal });
+                    if (!response.ok) {
+                        const errTxt = await response.text();
+                        throw new Error(`API请求失败: ${response.status} ${errTxt}`);
+                    }
+                    if (tableFillTools.length) {
+                        const { turn } = await readFetchChatTurn_ACU(response, settings_ACU.streamingEnabled || false, abortSignal);
+                        return finalizeTableFillTurn(turn);
+                    }
+                    const content = await handleApiResponse_ACU(response, abortSignal);
+                    if (content) {
+                        return content.trim();
+                    }
+                    throw new RetryableAiResponseError_ACU();
+                }
+            }
+        }
+        finally {
+            untrackAbortController_ACU(localAbortController);
+            if (currentAbortController_ACU === localAbortController) {
+                _set_currentAbortController_ACU(null);
+            }
+        }
+    }
+    function toUsageCount_ACU(value) {
+        return typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value) && value >= 0
+            ? value
+            : undefined;
+    }
+    function firstUsageCount_ACU(...values) {
+        for (const value of values) {
+            const count = toUsageCount_ACU(value);
+            if (count !== undefined)
+                return count;
+        }
+        return undefined;
+    }
+    /** 后出现的已定义字段覆盖先前值；缺失字段不得擦除已经报告的计数。 */
+    function mergeAiUsageMetadata_ACU(current, incoming) {
+        if (!incoming)
+            return current;
+        const merged = current ? { ...current } : {};
+        if (incoming.promptTokens !== undefined)
+            merged.promptTokens = incoming.promptTokens;
+        if (incoming.completionTokens !== undefined)
+            merged.completionTokens = incoming.completionTokens;
+        if (incoming.cachedTokens !== undefined)
+            merged.cachedTokens = incoming.cachedTokens;
+        if (incoming.cacheWriteTokens !== undefined)
+            merged.cacheWriteTokens = incoming.cacheWriteTokens;
+        return merged;
+    }
+    /** 同一响应中先合并 usage，再由 usageMetadata 的已定义字段覆盖。 */
+    function extractResponseUsageMetadata_ACU(raw) {
+        return mergeAiUsageMetadata_ACU(extractAiUsageMetadata_ACU(raw?.usage), extractAiUsageMetadata_ACU(raw?.usageMetadata));
+    }
+    /**
+     * 从 OpenAI、Anthropic、DeepSeek 或 Gemini 兼容 usage 对象提取统一用量。
+     * 只接受非负有限整数；字段缺失或非法时保持未报告，显式 0 会被保留。
+     * @param raw 响应里的 usage 或 usageMetadata 对象
+     * @returns 统一用量；raw 不含任何有效计数时返回 null
+     */
+    function extractAiUsageMetadata_ACU(raw) {
+        if (!raw || typeof raw !== 'object')
+            return null;
+        const promptTokens = firstUsageCount_ACU(raw.prompt_tokens, raw.input_tokens, raw.promptTokenCount);
+        const completionTokens = firstUsageCount_ACU(raw.completion_tokens, raw.output_tokens, raw.candidatesTokenCount);
+        const cachedTokens = firstUsageCount_ACU(raw.prompt_tokens_details?.cached_tokens, raw.input_tokens_details?.cached_tokens, raw.cache_read_input_tokens, raw.prompt_cache_hit_tokens, raw.cachedContentTokenCount);
+        const cacheWriteTokens = firstUsageCount_ACU(raw.cache_creation_input_tokens, raw.cache_write_input_tokens, raw.cache_write_tokens);
+        const usage = {};
+        if (promptTokens !== undefined)
+            usage.promptTokens = promptTokens;
+        if (completionTokens !== undefined)
+            usage.completionTokens = completionTokens;
+        if (cachedTokens !== undefined)
+            usage.cachedTokens = cachedTokens;
+        if (cacheWriteTokens !== undefined)
+            usage.cacheWriteTokens = cacheWriteTokens;
+        return Object.keys(usage).length ? usage : null;
+    }
+    async function streamToText_ACU(response, signal = null, onUsage) {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let fullContent = '';
+        let buffer = '';
+        // usage 出现在流末尾的独立 chunk（choices 为空数组），需开启 stream_options.include_usage 才会下发。
+        let capturedUsage = null;
+        try {
+            while (true) {
+                if (signal?.aborted) {
+                    throw new Error('Request aborted');
+                }
+                const { done, value } = await reader.read();
+                if (done)
+                    break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        const data = line.slice(6);
+                        if (data === '[DONE]')
+                            continue;
+                        try {
+                            const json = JSON.parse(data);
+                            const content = json?.choices?.[0]?.delta?.content;
+                            if (content) {
+                                fullContent += content;
+                            }
+                            // Anthropic SSE 分支（接口协议=claude_messages 时后端原样透传 Anthropic 流，不归一化）：
+                            // content_block_delta(text_delta).delta.text 拼内容；message_stop 视为流结束（等价 [DONE]）。
+                            if (json?.type === 'content_block_delta' && json?.delta?.type === 'text_delta' && typeof json?.delta?.text === 'string') {
+                                fullContent += json.delta.text;
+                            }
+                            // Gemini SSE 分支（接口协议=gemini_interactions 时后端原样透传 generateContent 流）：
+                            // candidates[0].content.parts[].text 拼接（跳过 thought 段）；流结束由连接关闭界定。
+                            const geminiParts = json?.candidates?.[0]?.content?.parts;
+                            if (Array.isArray(geminiParts)) {
+                                for (const part of geminiParts) {
+                                    if (part && typeof part.text === 'string' && part.thought !== true) {
+                                        fullContent += part.text;
+                                    }
+                                }
+                            }
+                            const usage = extractResponseUsageMetadata_ACU(json);
+                            capturedUsage = mergeAiUsageMetadata_ACU(capturedUsage, usage);
+                        }
+                        catch (e) {
+                            // 忽略解析错误
+                        }
+                    }
+                }
+            }
+        }
+        finally {
+            reader.releaseLock();
+        }
+        if (capturedUsage && onUsage) {
+            try {
+                onUsage(capturedUsage);
+            }
+            catch { /* 用量回调异常不允许影响响应主流程。 */ }
+        }
+        return fullContent;
+    }
+    async function parseNonStreamResponse_ACU(response, onUsage) {
+        try {
+            const data = await response.json();
+            const usage = extractResponseUsageMetadata_ACU(data);
+            if (usage && onUsage) {
+                try {
+                    onUsage(usage);
+                }
+                catch { /* 用量回调异常不允许影响响应主流程。 */ }
+            }
+            if (data?.choices?.[0]?.message?.content) {
+                return data.choices[0].message.content;
+            }
+            if (data?.content) {
+                return data.content;
+            }
+            if (typeof data === 'string') {
+                return data;
+            }
+            logError_ACU('[parseNonStreamResponse] Unknown response format:', data);
+            return null;
+        }
+        catch (e) {
+            logError_ACU('[parseNonStreamResponse] Failed to parse response:', e);
+            return null;
+        }
+    }
+    async function handleApiResponse_ACU(response, signal = null, onUsage) {
+        if (settings_ACU.streamingEnabled) {
+            return await streamToText_ACU(response, signal, onUsage);
+        }
+        else {
+            return await parseNonStreamResponse_ACU(response, onUsage);
+        }
+    }
+
+    /**
+     * service/ai/prompt-builder/index.ts
+     * AI prompt-builder 入口 — re-export 所有公共 API
+     * 保持与原 prompt-builder.ts 完全相同的公共接口
+     */
+    // AI 输入准备
 
     /**
      * shared/host-detect.ts — 宿主后端形态检测
@@ -95007,7 +95443,7 @@ $CONTENT
      * @param maxTokens 最大输出 token
      * @returns 宿主返回的原始响应
      */
-    async function sendConnectionManagerRequestWithProfileSwitch_ACU(profileId, messages, maxTokens) {
+    async function sendConnectionManagerRequestWithProfileSwitch_ACU(profileId, messages, maxTokens, custom, overridePayload) {
         const run = async () => {
             const targetProfile = getConnectionManagerProfiles_ACU().find(profile => profile.id === profileId);
             if (!targetProfile)
@@ -95021,7 +95457,10 @@ $CONTENT
                 if (needSwitch) {
                     await triggerSlash_ACU(`/profile await=true "${targetProfileName.replace(/"/g, '\\"')}"`);
                 }
-                return await sendConnectionManagerRequest_ACU(profileId, messages, maxTokens);
+                // 未带扩展参数时保持三参调用，普通文本请求的宿主调用形态不变。
+                return custom === undefined && overridePayload === undefined
+                    ? await sendConnectionManagerRequest_ACU(profileId, messages, maxTokens)
+                    : await sendConnectionManagerRequest_ACU(profileId, messages, maxTokens, custom, overridePayload);
             }
             finally {
                 if (needSwitch) {
@@ -95088,7 +95527,9 @@ $CONTENT
         if (!resolved.apiConfig.url || !resolved.apiConfig.model) {
             throw new Error('自定义 API 的 URL 或模型未配置。');
         }
-        const response = await fetch('/api/backends/chat-completions/generate', {
+        // 内部续写/推演请求绕过第三方脚本对生成端点的 fetch 包装：脚本注入的传输函数
+        // 会与本链路的原生工具协议互相污染（见 data/gateways/pristine-fetch.ts）。
+        const response = await pristineFetch_ACU('/api/backends/chat-completions/generate', {
             method: 'POST',
             headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
             body: JSON.stringify(buildCustomApiRequestBody_ACU(messages, resolved.apiConfig, {
@@ -95104,6 +95545,25 @@ $CONTENT
             throw new AgentApiHttpError_ACU(response.status, `API 请求失败: ${response.status}`);
         const content = await handleApiResponse_ACU(response, signal, lifecycle?.onUsage);
         return typeof content === 'string' && content.trim() ? content.trim() : null;
+    }
+    /**
+     * 经宿主通道（酒馆连接 / 主连接）携带原生工具时的请求体覆盖字段。
+     * Agent 需要在多工具与最终文本之间自选，tool_choice 用 auto；
+     * strict/merge/semi/single 后处理会剥掉 tool_calls 与 tool 回执，改用对应 *_tools 变体。
+     * @param tools 本次挂载的工具；可为空（仅历史含工具回执时）
+     * @param rawPostProcessing 通道原本的提示词后处理值
+     * @returns overridePayload
+     */
+    function buildHostNativeToolOverridePayload_ACU(tools, rawPostProcessing) {
+        const payload = {};
+        if (tools?.length) {
+            payload.tools = tools;
+            payload.tool_choice = 'auto';
+        }
+        const toolPostProcessing = preserveNativeToolPostProcessing_ACU(rawPostProcessing, true);
+        if (toolPostProcessing !== rawPostProcessing)
+            payload.custom_prompt_post_processing = toolPostProcessing;
+        return payload;
     }
     /** 与 callAIWithResolvedPreset_ACU 同一条渠道，但保留原生 tool_calls。 */
     async function callAIChatTurn_ACU(messages, resolved, signal, lifecycle, extras) {
@@ -95125,23 +95585,41 @@ $CONTENT
         const hasNativeToolTraffic = Boolean(extras?.tools?.length)
             || messages.some(message => message && typeof message === 'object' && (message.role === 'tool' || message.tool_calls));
         if (resolved.apiMode === 'tavern') {
-            // ConnectionManagerRequestService.sendRequest only accepts profile, messages and maxTokens.
-            // Silently dropping tools would make the role's advertised native-tool contract unobservable.
-            if (hasNativeToolTraffic)
-                throw new Error('酒馆连接管理器不支持原生工具调用及回执；请为 Agent 选择支持原生工具的自定义 API。');
+            // 宿主 sendRequest(profileId, prompt, maxTokens, custom, overridePayload)：Chat Completion 预设可经
+            // overridePayload 携带工具，extractData:false 取回含 tool_calls 的原始响应；Text Completion 预设无法承载，fail-closed。
+            let toolCustom;
+            let toolOverridePayload;
+            if (hasNativeToolTraffic) {
+                const profile = getConnectionManagerProfiles_ACU().find(item => item.id === resolved.tavernProfile);
+                if (!profile || !isConnectionProfileChatCompletion_ACU(profile)) {
+                    throw new Error('酒馆连接管理器不支持原生工具调用及回执：所选连接预设不是 Chat Completion 类型；请改用 Chat Completion 连接预设或自定义 API。');
+                }
+                toolOverridePayload = buildHostNativeToolOverridePayload_ACU(extras?.tools, String(profile['prompt-post-processing'] ?? ''));
+                toolCustom = { extractData: false, signal: signal ?? null };
+            }
             if (!resolved.tavernProfile)
                 throw new Error('该预设为酒馆连接模式但未选择连接预设。');
-            const response = await sendConnectionManagerRequestWithProfileSwitch_ACU(resolved.tavernProfile, messages, maxTokens);
+            const response = await sendConnectionManagerRequestWithProfileSwitch_ACU(resolved.tavernProfile, messages, maxTokens, toolCustom, toolOverridePayload);
             assertNotAborted_ACU(signal);
             const parsed = chatTurnFromJson_ACU(response?.result ?? response);
             reportUsage(parsed.usage ?? response?.result?.usage);
             return parsed.turn.content || parsed.turn.toolCalls.length ? parsed.turn : { content: typeof response?.content === 'string' ? response.content : '', toolCalls: [] };
         }
         if (resolved.apiConfig.useMainApi) {
-            // generateRaw returns text, not a structured tool-call response. A tools-enabled
-            // agent cannot complete its native function exchange on this channel.
-            if (hasNativeToolTraffic)
-                throw new Error('酒馆主 API 无法保证原生工具调用及回执；请为 Agent 选择支持原生工具的独立自定义 API。');
+            if (hasNativeToolTraffic) {
+                // generateRaw 只返回文本；工具流量改按主连接设置直接走宿主 ChatCompletionService 取回原始 tool_calls。
+                if (!isMainApiChatCompletionAvailable_ACU()) {
+                    throw new Error('酒馆主 API 无法保证原生工具调用及回执：当前主连接不是 Chat Completion；请切换为 Chat Completion 连接或为 Agent 选择自定义 API。');
+                }
+                const routing = readMainApiChatCompletionRouting_ACU();
+                const overridePayload = { ...buildHostNativeToolOverridePayload_ACU(extras?.tools, routing.postProcessing), max_tokens: maxTokens };
+                const wireMessages = messages.map(message => (message && typeof message === 'object' && typeof message.role === 'string' ? { ...message, role: message.role.toLowerCase() } : message));
+                const raw = await sendMainApiChatCompletionRequest_ACU(wireMessages, overridePayload, signal);
+                assertNotAborted_ACU(signal);
+                const parsed = chatTurnFromJson_ACU(raw);
+                reportUsage(parsed.usage ?? raw?.usage);
+                return parsed.turn;
+            }
             lifecycle?.beforeMainApiCall?.();
             let operation;
             try {
@@ -95156,7 +95634,8 @@ $CONTENT
         }
         if (!resolved.apiConfig.url || !resolved.apiConfig.model)
             throw new Error('自定义 API 的 URL 或模型未配置。');
-        const response = await fetch('/api/backends/chat-completions/generate', {
+        // 同上：原生工具通道尤其不能被脚本改写请求体与响应流。
+        const response = await pristineFetch_ACU('/api/backends/chat-completions/generate', {
             method: 'POST',
             headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
             body: JSON.stringify(buildCustomApiRequestBody_ACU(messages, resolved.apiConfig, {
@@ -105767,6 +106246,7 @@ $CONTENT
         currentTemplatePresetName: '',
         tableTemplateDefaultsRefreshVersion: '',
         tableFillPromptForceDefaultVersion: '',
+        tableFillToolPromptUpgradeVersion: '',
         templateAssistantPromptForceDefaultVersion: '',
         strictJsonTableFillForceDisableVersion: '',
         tableContextExtractTags: '',
@@ -106942,6 +107422,7 @@ $CONTENT
         refreshDefaultTableTemplateOnce_ACU(activeCode);
         forceDisableStrictJsonTableFillOnce_ACU();
         forceDefaultTableFillPromptsOnce_ACU();
+        upgradeTableFillToolPromptOnce_ACU();
         forceUserPrefillProfilePromptsOnce_ACU();
         forceDefaultTemplateAssistantPromptOnce_ACU();
         if (shouldPersistSettingsAfterLoad_ACU) {
@@ -107146,6 +107627,46 @@ $CONTENT
             logWarn_ACU('[填表提示词] 一次性强制恢复默认提示词失败:', error);
         }
     }
+    /**
+     * [spv9.4] 填表默认提示词工具化（table_edit / table_sql）的一次性升级。
+     * 仅当 charCardPrompt 主段（mainSlot A / isMain）正文与任一历史原生或 SQL 默认逐字相同时，
+     * 替换为对应的新默认主段；用户改写过的主段与其余段、段元数据原样保留。
+     * 保存失败时回滚内存且不写 marker，下次加载重试。
+     */
+    function upgradeTableFillToolPromptOnce_ACU() {
+        if (!settings_ACU || typeof settings_ACU !== 'object')
+            return;
+        if (settings_ACU.tableFillToolPromptUpgradeVersion === TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU)
+            return;
+        const previousPrompt = settings_ACU.charCardPrompt;
+        const previousVersion = settings_ACU.tableFillToolPromptUpgradeVersion;
+        try {
+            if (Array.isArray(previousPrompt)) {
+                const findMain = (segments) => segments.find((segment) => segment
+                    && (String(segment.mainSlot || '').toUpperCase() === 'A' || segment.isMain));
+                const main = findMain(previousPrompt);
+                const content = typeof main?.content === 'string' ? main.content : null;
+                const history = TABLE_FILL_MAIN_PROMPT_HISTORY_ACU;
+                const target = content !== null && history.native.includes(content)
+                    ? DEFAULT_CHAR_CARD_PROMPT_ACU
+                    : content !== null && history.sql.includes(content)
+                        ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU
+                        : null;
+                const targetContent = target ? findMain(target)?.content : null;
+                if (typeof targetContent === 'string' && targetContent !== content) {
+                    settings_ACU.charCardPrompt = previousPrompt.map((segment) => (segment === main ? { ...segment, content: targetContent } : segment));
+                }
+            }
+            settings_ACU.tableFillToolPromptUpgradeVersion = TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU;
+            saveSettings_ACU();
+            logDebug_ACU(`[填表提示词] 工具化默认提示词一次性升级完成: ${TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU}`);
+        }
+        catch (error) {
+            settings_ACU.charCardPrompt = previousPrompt;
+            settings_ACU.tableFillToolPromptUpgradeVersion = previousVersion;
+            logWarn_ACU('[填表提示词] 工具化默认提示词升级未保存，下一次加载重试:', error);
+        }
+    }
     function forceUserPrefillProfilePromptsOnce_ACU() {
         if (!settings_ACU || typeof settings_ACU !== 'object')
             return;
@@ -107238,6 +107759,7 @@ $CONTENT
             currentTemplatePresetName: '', // [模板预设] 当前模板预设名，空表示默认预设
             tableTemplateDefaultsRefreshVersion: '', // [模板预设] 默认表格模板一次性刷新版本
             tableFillPromptForceDefaultVersion: '', // [填表提示词] 一次性强制恢复默认提示词版本
+            tableFillToolPromptUpgradeVersion: '', // [填表提示词] 工具化默认提示词一次性升级版本
             templateAssistantPromptForceDefaultVersion: '', // [AI 改表助手] 一次性强制恢复默认提示词版本
             strictJsonTableFillForceDisableVersion: '', // [填表功能] 一次性关闭严格 JSON 填表版本
             // [填表功能] 正文标签提取，从上下文中提取指定标签的内容发送给AI，User回复不受影响
@@ -119649,11 +120171,14 @@ $CONTENT
                     metrics: { sheetCount: Array.isArray(job.targetSheetKeys) ? job.targetSheetKeys.length : 0 },
                 });
                 let aiResponse;
+                let submittedViaTool = false;
                 try {
                     aiResponse = await callCustomOpenAI_ACU(dynamicContent, effectiveAbortController, {
                         ...(job.requestOptions || {}),
                         tableData: job.baseSnapshot,
                         targetSheetKeys: job.targetSheetKeys,
+                        // 工具提交不含正文思考，回复长度阈值只约束正文提取兜底。
+                        onTableFillToolSubmitted: () => { submittedViaTool = true; },
                     });
                     aiWaitSpan.end({ success: true });
                 }
@@ -119665,7 +120190,7 @@ $CONTENT
                     return { job, success: false, attempt, aborted: true };
                 }
                 const minReplyLength = settings_ACU.autoUpdateTokenThreshold || 0;
-                if (aiResponse && minReplyLength > 0 && aiResponse.length < minReplyLength) {
+                if (aiResponse && !submittedViaTool && minReplyLength > 0 && aiResponse.length < minReplyLength) {
                     throw new ModelOutputRetryError_ACU(`AI回复过短 (${aiResponse.length} 字符)，低于阈值 (${minReplyLength} 字符)`);
                 }
                 let normalizedAiResponse = aiResponse;
@@ -149289,6 +149814,35 @@ Expected function or array of functions, received type ${typeof value}.`
         throw lastError;
     }
 
+    // service/settings/live-current-channel.ts — 「当前全局 API」的活引用解析
+    //
+    // 全局渠道的每一条写入路径都是替换引用而非就地改属性
+    // （api-preset-service.ts 的 reconcileApiBindingForCurrentChat_ACU /
+    // setActivePresetForCurrentChat_ACU / saveApiPreset_ACU / deleteApiPreset_ACU /
+    // restoreApiFields_ACU 均为 settings_ACU.apiConfig = clone(...)）。
+    //
+    // 智能续写与格林推演在一次 run/派工开始时解析一次渠道并整轮复用该对象，
+    // 因此按值/按引用拷出的 apiMode/apiConfig/tavernProfile 会永久指向被替换掉的旧对象，
+    // 表现为「全局 API 改了但这两个功能不跟随」。
+    //
+    // 这里让 source='current' 的解析结果在属性访问时回读权威配置，
+    // 使取值时机推进到真正发请求的那一刻；source='fixed' 仍按值固定，
+    // 因为用户显式钉住的预设不应随当前配置漂移。
+    /**
+     * 把渠道三字段改写为访问时回读的活引用，其余字段（presetName/source/reason）保持定值。
+     * 字段保持 enumerable，序列化与 toMatchObject 断言行为与普通对象一致。
+     * @param base 已解析的完整结果，用于承载 presetName/source/reason 等定值字段
+     * @param readCurrent 回读当前权威渠道配置；每次属性访问都会调用
+     * @returns 与入参同形的对象，但渠道三字段始终反映最新的当前配置
+     */
+    function withLiveCurrentChannel_ACU(base, readCurrent) {
+        return Object.defineProperties({ ...base }, {
+            apiMode: { enumerable: true, configurable: true, get: () => readCurrent().apiMode },
+            apiConfig: { enumerable: true, configurable: true, get: () => readCurrent().apiConfig },
+            tavernProfile: { enumerable: true, configurable: true, get: () => readCurrent().tavernProfile },
+        });
+    }
+
     const defaultDependencies_ACU$5 = {
         resolvePreset: resolveApiConfigByPreset_ACU,
     };
@@ -149309,7 +149863,11 @@ Expected function or array of functions, received type ${typeof value}.`
             throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_CONFIG_MISSING', phase, '智能续写 API 预设模式非法', false));
         }
         const resolved = dependencies.resolvePreset('');
-        return { presetName: '', source: 'current', reason: 'current_configuration', apiMode: resolved.apiMode, apiConfig: resolved.apiConfig, tavernProfile: resolved.tavernProfile };
+        // 当前配置模式下渠道必须在发请求时回读：run/波次级缓存 + 全局写入替换引用会让定值永久陈旧。
+        return withLiveCurrentChannel_ACU({ presetName: '', source: 'current', reason: 'current_configuration', apiMode: resolved.apiMode, apiConfig: resolved.apiConfig, tavernProfile: resolved.tavernProfile }, () => {
+            const current = dependencies.resolvePreset('');
+            return { apiMode: current.apiMode, apiConfig: current.apiConfig, tavernProfile: current.tavernProfile };
+        });
     }
     /**
      * 计算某个角色的生效渠道模式：inherit 回落到全局 apiPresetMode。
@@ -168966,12 +169524,16 @@ Expected function or array of functions, received type ${typeof value}.`
             const resolved = dependencies.resolvePreset(presetName);
             if (!resolved.resolved)
                 fail_ACU$1(phase, 'WORLD_SIMULATION_API_PRESET_MISSING', '格林推演 API 预设不存在或已失效');
-            return { ...resolved, presetName, source: 'fixed', reason: 'fixed_preset' };
+            return { presetName, source: 'fixed', reason: 'fixed_preset', apiMode: resolved.apiMode, apiConfig: resolved.apiConfig, tavernProfile: resolved.tavernProfile };
         }
         if (settings.apiPresetMode !== 'current')
             fail_ACU$1(phase, 'WORLD_SIMULATION_CONFIG_INVALID', '格林推演 API 预设模式非法');
         const resolved = dependencies.resolvePreset('');
-        return { ...resolved, presetName: '', source: 'current', reason: 'current_configuration' };
+        // 当前配置模式下渠道必须在发请求时回读：run 级捕获 + 全局写入替换引用会让定值永久陈旧。
+        return withLiveCurrentChannel_ACU({ presetName: '', source: 'current', reason: 'current_configuration', apiMode: resolved.apiMode, apiConfig: resolved.apiConfig, tavernProfile: resolved.tavernProfile }, () => {
+            const current = dependencies.resolvePreset('');
+            return { apiMode: current.apiMode, apiConfig: current.apiConfig, tavernProfile: current.tavernProfile };
+        });
     }
     function effectiveWorldSimulationAgentApiPresetMode_ACU(settings, role) {
         return settings.agentApiPresets[role]?.mode ?? settings.apiPresetMode;
@@ -205256,8 +205818,8 @@ ${rejectionText}` : delegationFeedback,
         }
     });
 
-    injectSfcStyle("\n.acu-v2-continuation-page[data-v-21045b85] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-21045b85] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-21045b85] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-21045b85] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-21045b85] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-21045b85] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-21045b85] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-21045b85] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-21045b85] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-21045b85] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-21045b85] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-continuation-page__groups[data-v-21045b85] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-continuation-page__group[data-v-21045b85] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-continuation-page__group[data-v-21045b85] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-continuation-page__group[data-v-21045b85] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-continuation-page__group[data-v-21045b85] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-continuation-page__group[data-v-21045b85] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-continuation-page__group .acu-v2-continuation-page__actions[data-v-21045b85] { margin-top: 0;\n}\n.acu-v2-continuation-page__subheading[data-v-21045b85] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-continuation-page__subheading[data-v-21045b85]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-21045b85] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-21045b85] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-21045b85] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-21045b85] > * { flex: 1 1 auto;\n}\n.acu-v2-continuation-page__group[data-v-21045b85] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-21045b85");
-    var ContinuationPage_vue_vue_type_style_index_0_scoped_21045b85_lang = null;
+    injectSfcStyle("\n.acu-v2-continuation-page[data-v-92c2555f] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-92c2555f] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-92c2555f] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-92c2555f] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-92c2555f] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-92c2555f] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-92c2555f] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-92c2555f] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-92c2555f] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-92c2555f] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-92c2555f] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-continuation-page__groups[data-v-92c2555f] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-continuation-page__group[data-v-92c2555f] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-continuation-page__group[data-v-92c2555f] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-continuation-page__group[data-v-92c2555f] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-continuation-page__group[data-v-92c2555f] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-continuation-page__group[data-v-92c2555f] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-continuation-page__group .acu-v2-continuation-page__actions[data-v-92c2555f] { margin-top: 0;\n}\n.acu-v2-continuation-page__subheading[data-v-92c2555f] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-continuation-page__subheading[data-v-92c2555f]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-92c2555f] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-92c2555f] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-92c2555f] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-92c2555f] > * { flex: 1 1 auto;\n}\n.acu-v2-continuation-page__group[data-v-92c2555f] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-92c2555f");
+    var ContinuationPage_vue_vue_type_style_index_0_scoped_92c2555f_lang = null;
 
     const _hoisted_1$q = { class: "acu-v2-continuation-page" };
     const _hoisted_2$o = {
@@ -205532,7 +206094,7 @@ ${rejectionText}` : delegationFeedback,
 						})) : createCommentVNode("v-if", true),
 						createVNode($setup["AcuFormRow"], {
 							label: "API 预设（全局默认）",
-							hint: "所有 Agent 默认走这个预设；需要给某个 Agent 单独指定时，展开下方「各 Agent 渠道」。需要工具的 Agent 须选择支持原生工具的独立自定义 API；酒馆主 API 无法返回工具调用，连接管理器不传递工具定义。"
+							hint: "所有 Agent 默认走这个预设；需要给某个 Agent 单独指定时，展开下方「各 Agent 渠道」。需要工具的 Agent 须使用 Chat Completion 类连接：自定义 API、Chat Completion 酒馆连接预设或 Chat Completion 主连接均可；Text Completion 连接无法返回工具调用。"
 						}, {
 							default: withCtx(() => [createVNode($setup["AcuSelect"], {
 								options: $setup.continuationApiPresetOptions,
@@ -206297,7 +206859,7 @@ ${rejectionText}` : delegationFeedback,
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$q, [["render", _sfc_render$q], ["__scopeId", "data-v-21045b85"]]);
+    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$q, [["render", _sfc_render$q], ["__scopeId", "data-v-92c2555f"]]);
 
     /** 页面（.vue）不能直接引用 service 值；无真实调用入口的研究员仅保留旧配置迁移，不再暴露为可编辑 Agent。 */
     const WORLD_SIMULATION_AGENT_ORDER_ACU = WORLD_SIMULATION_AGENT_NAMES_ACU
@@ -208841,8 +209403,8 @@ ${rejectionText}` : delegationFeedback,
         }
     });
 
-    injectSfcStyle("\n.acu-v2-world-simulation-page[data-v-67b691f3] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-world-simulation-page__layout[data-v-67b691f3] { align-items: start;\n}\n.acu-v2-world-simulation-page__actions[data-v-67b691f3] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-world-simulation-page__actions--start[data-v-67b691f3] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-world-simulation-page__file-input[data-v-67b691f3] { display: none;\n}\n.acu-v2-world-simulation-page__error[data-v-67b691f3] { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__meta[data-v-67b691f3] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-67b691f3] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-world-simulation-page__toggles[data-v-67b691f3] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-world-simulation-page__groups[data-v-67b691f3] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-world-simulation-page__group[data-v-67b691f3] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-world-simulation-page__group[data-v-67b691f3] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-world-simulation-page__group[data-v-67b691f3] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-world-simulation-page__group[data-v-67b691f3] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-world-simulation-page__group[data-v-67b691f3] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-world-simulation-page__group .acu-v2-world-simulation-page__actions[data-v-67b691f3] { margin-top: 0;\n}\n.acu-v2-world-simulation-page__subheading[data-v-67b691f3] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-world-simulation-page__subheading[data-v-67b691f3]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-world-simulation-page[data-v-67b691f3] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-world-simulation-page[data-v-67b691f3] { padding: 10px; gap: 12px;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-67b691f3] { grid-template-columns: 1fr;\n}\n.acu-v2-world-simulation-page__actions[data-v-67b691f3] > * { flex: 1 1 auto;\n}\n.acu-v2-world-simulation-page__group[data-v-67b691f3] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/WorldSimulationPage.vue#style-0-67b691f3");
-    var WorldSimulationPage_vue_vue_type_style_index_0_scoped_67b691f3_lang = null;
+    injectSfcStyle("\n.acu-v2-world-simulation-page[data-v-194e8248] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-world-simulation-page__layout[data-v-194e8248] { align-items: start;\n}\n.acu-v2-world-simulation-page__actions[data-v-194e8248] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-world-simulation-page__actions--start[data-v-194e8248] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-world-simulation-page__file-input[data-v-194e8248] { display: none;\n}\n.acu-v2-world-simulation-page__error[data-v-194e8248] { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__meta[data-v-194e8248] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-194e8248] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-world-simulation-page__toggles[data-v-194e8248] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-world-simulation-page__groups[data-v-194e8248] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-world-simulation-page__group[data-v-194e8248] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-world-simulation-page__group[data-v-194e8248] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-world-simulation-page__group[data-v-194e8248] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-world-simulation-page__group[data-v-194e8248] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-world-simulation-page__group[data-v-194e8248] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-world-simulation-page__group .acu-v2-world-simulation-page__actions[data-v-194e8248] { margin-top: 0;\n}\n.acu-v2-world-simulation-page__subheading[data-v-194e8248] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-world-simulation-page__subheading[data-v-194e8248]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-world-simulation-page[data-v-194e8248] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-world-simulation-page[data-v-194e8248] { padding: 10px; gap: 12px;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-194e8248] { grid-template-columns: 1fr;\n}\n.acu-v2-world-simulation-page__actions[data-v-194e8248] > * { flex: 1 1 auto;\n}\n.acu-v2-world-simulation-page__group[data-v-194e8248] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/WorldSimulationPage.vue#style-0-194e8248");
+    var WorldSimulationPage_vue_vue_type_style_index_0_scoped_194e8248_lang = null;
 
     const _hoisted_1$m = { class: "acu-v2-world-simulation-page" };
     const _hoisted_2$k = {
@@ -208984,7 +209546,7 @@ ${rejectionText}` : delegationFeedback,
 					createBaseVNode("div", _hoisted_5$c, [
 						createVNode($setup["AcuFormRow"], {
 							label: "API 预设（全局默认）",
-							hint: "所有 Agent 默认走这个预设；需要给某个 Agent 单独指定时，展开下方「各 Agent 渠道」。需要工具的 Agent 须选择支持原生工具的独立自定义 API；酒馆主 API 无法返回工具调用，连接管理器不传递工具定义。"
+							hint: "所有 Agent 默认走这个预设；需要给某个 Agent 单独指定时，展开下方「各 Agent 渠道」。需要工具的 Agent 须使用 Chat Completion 类连接：自定义 API、Chat Completion 酒馆连接预设或 Chat Completion 主连接均可；Text Completion 连接无法返回工具调用。"
 						}, {
 							default: withCtx(() => [createVNode($setup["AcuSelect"], {
 								options: $setup.apiPresetOptions,
@@ -209324,7 +209886,7 @@ ${rejectionText}` : delegationFeedback,
 							default: withCtx(() => [_cache[35] || (_cache[35] = createBaseVNode(
 								"p",
 								{ class: "acu-v2-world-simulation-page__meta" },
-								"给不同 Agent 分配不同 API 预设：例如主 Agent 用强模型，审核类子代理用便宜快速的模型。「跟随全局默认」即使用上方的 API 预设。需要工具的 Agent 须选择支持原生工具的独立自定义 API；酒馆主 API 无法返回工具调用，连接管理器不传递工具定义。",
+								"给不同 Agent 分配不同 API 预设：例如主 Agent 用强模型，审核类子代理用便宜快速的模型。「跟随全局默认」即使用上方的 API 预设。需要工具的 Agent 须使用 Chat Completion 类连接：自定义 API、Chat Completion 酒馆连接预设或 Chat Completion 主连接均可；Text Completion 连接无法返回工具调用。",
 								-1
 								/* CACHED */
 							)), createBaseVNode("div", _hoisted_14$6, [(openBlock(true), createElementBlock(
@@ -209523,7 +210085,7 @@ ${rejectionText}` : delegationFeedback,
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var WorldSimulationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-67b691f3"]]);
+    var WorldSimulationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-194e8248"]]);
 
     /**
      * useImportFlow — 外部导入页业务流编排（阶段 2 / D21.4）
