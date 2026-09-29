@@ -4,10 +4,11 @@ import { USER_PREFILL_CONTENT_ACU } from '../../../../src/shared/user-prefill.js
 import {
   buildDefaultContinuationAgentPrompts_ACU,
   buildV39ContinuationAgentPrompts_ACU,
+  buildV40ContinuationAgentPrompts_ACU,
   withV40RoleSelfNarration_ACU,
 } from '../../../../src/service/continuation/agent/agent-defaults';
 import { validateContinuationSettings_ACU } from '../../../../src/service/continuation/continuation-store';
-import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V39_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V40_ACU } from '../../../../src/service/continuation/defaults';
+import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V39_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V41_ACU } from '../../../../src/service/continuation/defaults';
 
 const TARGETS_ACU = [
   ['arcArchitect', '【卷级容量、时间与长期经营契约】'],
@@ -18,9 +19,11 @@ const TARGETS_ACU = [
 
 describe('V40 子代理自述段', () => {
   const defaults = buildDefaultContinuationAgentPrompts_ACU();
+  // 段位与「不重复补段」断言针对 V40 冻结组；V41 又在任务段前加了执行流程问答。
+  const v40 = buildV40ContinuationAgentPrompts_ACU();
 
   it.each(TARGETS_ACU)('%s 的目标段后紧跟自述，且全部位于任务段与预填充之前', (role, anchor) => {
-    const segments = defaults[role];
+    const segments = v40[role];
     const target = segments.findIndex(segment => segment.content.startsWith(anchor));
     expect(target).toBeGreaterThanOrEqual(0);
     const task = segments.findIndex(segment => segment.content.includes('$AGENT_TASK'));
@@ -33,7 +36,7 @@ describe('V40 子代理自述段', () => {
   });
 
   it('instructionComposer 补的是一组完整问答，提问在前、自述在后', () => {
-    const segments = defaults.instructionComposer;
+    const segments = v40.instructionComposer;
     expect(segments[1].role).toBe('user');
     expect(segments[2].role).toBe('assistant');
     expect(segments[1].content).not.toContain('$');
@@ -42,7 +45,7 @@ describe('V40 子代理自述段', () => {
   it('其余已有问答的角色不重复补段', () => {
     const previous = buildV39ContinuationAgentPrompts_ACU();
     for (const role of ['main', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'webResearcher'] as const) {
-      expect(defaults[role]).toEqual(previous[role]);
+      expect(v40[role]).toEqual(previous[role]);
     }
   });
 
@@ -62,7 +65,7 @@ describe('V40 子代理自述段', () => {
     const custom = [{ role: 'user', content: '用户自定义终审提示词', enabled: true, deletable: true }];
     settings.agentPrompts.finalReviewer = custom;
     const loaded = validateContinuationSettings_ACU(settings);
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V40_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V41_ACU);
     expect(loaded.agentPrompts.arcArchitect).toEqual(defaults.arcArchitect);
     expect(loaded.agentPrompts.maintainer).toEqual(defaults.maintainer);
     expect(loaded.agentPrompts.instructionComposer).toEqual(defaults.instructionComposer);
