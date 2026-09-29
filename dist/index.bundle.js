@@ -4745,6 +4745,63 @@ $CONTENT
         return merged;
     }
 
+    // data/gateways/pristine-fetch.ts — 绕过宿主页面第三方脚本对 fetch 的包装
+    //
+    // 酒馆预设脚本（例如 Kemini 伴生面板）会 patch `window.parent ?? window` 的 fetch，
+    // 命中 /api/backends/*/generate 后改写请求体并重写响应流（注入自己的"传输函数"工具）。
+    // 智能续写与格林推演的内部请求打同一个端点且自带原生工具协议，被改写后会与脚本
+    // 注入的工具互相污染。这里按拦截器自己登记的原始实现剥离包装链，让这两条链路拿到
+    // 未被改写的 fetch；宿主正文生成不经过本模块，脚本对聊天的效果不受影响。
+    /** 已知拦截器在 wrapper 上登记原函数的标记键，形如 wrapper[MARKER] = { original }。 */
+    const KNOWN_FETCH_PATCH_MARKERS_ACU = [
+        '__keminiAntiTruncation__',
+        '__keminiFetchInterceptor__',
+    ];
+    /** 包装链深度上限，防御环形引用与异常长的链条。 */
+    const MAX_UNWRAP_DEPTH_ACU = 16;
+    /** 读取 wrapper 登记的原始实现；不是已知包装时返回 null。 */
+    function readRegisteredOriginal_ACU(candidate) {
+        if (typeof candidate !== 'function')
+            return null;
+        for (const marker of KNOWN_FETCH_PATCH_MARKERS_ACU) {
+            // 收窄后的 Function 没有字符串索引签名，按 TS 要求经 unknown 中转再读标记槽。
+            const slot = candidate[marker];
+            if (!slot || typeof slot !== 'object')
+                continue;
+            const original = slot.original;
+            if (typeof original === 'function')
+                return original;
+        }
+        return null;
+    }
+    /**
+     * 解析当前未被已知拦截器包装的 fetch。
+     * 每次调用都重新剥离：脚本可能在本模块加载之后才安装，缓存会让屏蔽静默失效。
+     * @returns 剥离后的 fetch；无法识别包装时返回当前全局 fetch，不阻断请求
+     */
+    function resolvePristineFetch_ACU() {
+        let current = globalThis.fetch;
+        for (let depth = 0; depth < MAX_UNWRAP_DEPTH_ACU; depth += 1) {
+            const original = readRegisteredOriginal_ACU(current);
+            if (!original || original === current)
+                break;
+            current = original;
+        }
+        return (typeof current === 'function' ? current : globalThis.fetch);
+    }
+    /**
+     * 以剥离后的 fetch 发起请求，绕过第三方脚本对生成端点的改写。
+     * 显式绑定 globalThis：拦截器调用原函数时也传 `this ?? target`，裸调在部分宿主下
+     * 会丢失 realm 绑定。
+     * @param input 请求地址或 Request
+     * @param init 请求参数
+     * @returns 宿主返回的原始响应
+     */
+    function pristineFetch_ACU(input, init) {
+        const send = resolvePristineFetch_ACU();
+        return send.call(globalThis, input, init);
+    }
+
     /**
      * data/gateways/ai-gateway.ts — AI 调用网关
      *
@@ -4831,15 +4888,14 @@ $CONTENT
     const MAIN_API_REVERSE_PROXY_SOURCES_ACU = new Set(['claude', 'openai', 'mistralai', 'makersuite', 'vertexai', 'deepseek', 'xai']);
     /**
      * 判断酒馆主连接当前是否为 Chat Completion（只有这类连接能携带原生工具并取回 tool_calls）。
-     * TavernHelper.generateRaw 只返回文本，带工具的请求必须改走宿主 ChatCompletionService。
+     * TavernHelper.generateRaw 只返回文本，且宿主请求服务经被第三方脚本包装的全局 fetch 发送；
+     * Chat Completion 主连接的内部请求由本网关组装请求体后直发生成端点。
      * @returns 可用时为 true
      */
     function isMainApiChatCompletionAvailable_ACU() {
         try {
             const st = SillyTavern_API_ACU;
-            return !!st && st.mainApi === 'openai'
-                && !!st.chatCompletionSettings
-                && typeof st.ChatCompletionService?.processRequest === 'function';
+            return !!st && st.mainApi === 'openai' && !!st.chatCompletionSettings;
         }
         catch {
             return false;
@@ -4911,7 +4967,101 @@ $CONTENT
             request.azure_deployment_name = oai.azure_deployment_name;
             request.azure_api_version = oai.azure_api_version;
         }
-        return await st.ChatCompletionService.processRequest({ ...request, ...overridePayload }, {}, false, signal ?? null);
+        return await postChatCompletionDirect_ACU({ ...request, ...overridePayload }, signal);
+    }
+    const CHAT_COMPLETION_GENERATE_URL_ACU = '/api/backends/chat-completions/generate';
+    /**
+     * 把组装好的 Chat Completion 请求体直发宿主生成端点，返回原始 JSON（含 tool_calls）。
+     * 宿主 ConnectionManagerRequestService / ChatCompletionService 内部经全局 fetch 发送，
+     * 会被第三方脚本的生成端点拦截器改写请求体与响应；这里经 pristineFetch 绕过包装。
+     * 请求体归一沿用宿主纯函数 ChatCompletionService.createRequestData（不发请求、无副作用）。
+     * @param payload 请求体字段
+     * @param signal 中止信号
+     * @returns 生成端点返回的原始 JSON
+     */
+    async function postChatCompletionDirect_ACU(payload, signal) {
+        const service = SillyTavern_API_ACU?.ChatCompletionService;
+        const data = typeof service?.createRequestData === 'function' ? service.createRequestData.call(service, payload) : { ...payload };
+        const response = await pristineFetch_ACU(CHAT_COMPLETION_GENERATE_URL_ACU, {
+            method: 'POST',
+            headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
+            cache: 'no-cache',
+            body: JSON.stringify({ ...data, stream: false }),
+            signal: signal ?? undefined,
+        });
+        const text = await response.text();
+        let json = null;
+        try {
+            json = text ? JSON.parse(text) : null;
+        }
+        catch {
+            throw new Error(`生成端点返回了无法解析的响应（HTTP ${response.status}）。`);
+        }
+        if (!response.ok || json?.error) {
+            const detail = json?.error?.message || (typeof json?.error === 'string' ? json.error : '') || text.slice(0, 300);
+            throw new Error(`API 请求失败: HTTP ${response.status}${detail ? ` ${detail}` : ''}`);
+        }
+        return json;
+    }
+    /**
+     * 解析连接预设引用的反向代理。宿主代理列表是 openai.js 模块变量，未暴露到 context：
+     * 优先读 chatCompletionSettings.proxies；预设正是当前激活连接时，读主连接已应用的代理。
+     * 两者都读不到时 fail-closed，避免把请求静默发往默认端点。
+     */
+    function resolveProfileProxy_ACU(profile) {
+        const name = String(profile?.proxy || '');
+        if (!name || name === 'None')
+            return {};
+        const st = SillyTavern_API_ACU;
+        const oai = st?.chatCompletionSettings;
+        const list = Array.isArray(oai?.proxies) ? oai.proxies : [];
+        const hit = list.find((preset) => preset?.name === name);
+        if (hit)
+            return { url: hit.url || undefined, password: hit.password || undefined };
+        if (st?.extensionSettings?.connectionManager?.selectedProfile === profile?.id) {
+            return { url: oai?.reverse_proxy || undefined, password: oai?.proxy_password || undefined };
+        }
+        throw new Error(`连接预设 "${profile?.name || profile?.id}" 使用反向代理 "${name}"，但当前无法读取该代理配置；请让该预设处于激活状态后重试，或改用自定义 API。`);
+    }
+    /**
+     * 按连接预设组装 Chat Completion 请求体并直发生成端点（字段对齐宿主 shared.js 的 sendRequest）。
+     * 密钥由后端按当前激活连接读取，调用方需保证目标预设已激活。
+     * @param profile 连接预设（须为 Chat Completion 类型）
+     * @param messages 已归一 role 的消息序列
+     * @param maxTokens 最大输出 token
+     * @param overridePayload 并入请求体的覆盖字段（tools、tool_choice 等）
+     * @param signal 中止信号
+     * @returns 生成端点返回的原始 JSON
+     */
+    async function sendProfileChatCompletionRequest_ACU(profile, messages, maxTokens, overridePayload, signal) {
+        const st = SillyTavern_API_ACU;
+        const entry = profile?.api ? st?.CONNECT_API_MAP?.[profile.api] : null;
+        if (!entry || entry.selected !== 'openai' || !entry.source) {
+            throw new Error(`连接预设 "${profile?.name || profile?.id}" 不是 Chat Completion 类型。`);
+        }
+        const proxy = resolveProfileProxy_ACU(profile);
+        let presetPayload = {};
+        try {
+            const preset = profile.preset ? st.getPresetManager?.('openai')?.getCompletionPresetByName?.(profile.preset) : null;
+            if (preset && typeof st.ChatCompletionService?.presetToGeneratePayload === 'function') {
+                presetPayload = st.ChatCompletionService.presetToGeneratePayload(preset, {}) || {};
+            }
+        }
+        catch (error) {
+            logWarn_ACU('[AIGateway] 读取连接预设的生成参数失败，按默认参数发送:', error);
+        }
+        return await postChatCompletionDirect_ACU({
+            ...presetPayload,
+            messages,
+            max_tokens: maxTokens,
+            model: profile.model,
+            chat_completion_source: entry.source,
+            custom_url: profile['api-url'],
+            reverse_proxy: proxy.url,
+            proxy_password: proxy.password,
+            custom_prompt_post_processing: profile['prompt-post-processing'],
+            ...overridePayload,
+        }, signal);
     }
     /**
      * 触发斜杠命令
@@ -85815,63 +85965,6 @@ $CONTENT
         return resolveGeneratedEntriesForTable_ACU(allEntries, tableName, tableData);
     }
 
-    // data/gateways/pristine-fetch.ts — 绕过宿主页面第三方脚本对 fetch 的包装
-    //
-    // 酒馆预设脚本（例如 Kemini 伴生面板）会 patch `window.parent ?? window` 的 fetch，
-    // 命中 /api/backends/*/generate 后改写请求体并重写响应流（注入自己的"传输函数"工具）。
-    // 智能续写与格林推演的内部请求打同一个端点且自带原生工具协议，被改写后会与脚本
-    // 注入的工具互相污染。这里按拦截器自己登记的原始实现剥离包装链，让这两条链路拿到
-    // 未被改写的 fetch；宿主正文生成不经过本模块，脚本对聊天的效果不受影响。
-    /** 已知拦截器在 wrapper 上登记原函数的标记键，形如 wrapper[MARKER] = { original }。 */
-    const KNOWN_FETCH_PATCH_MARKERS_ACU = [
-        '__keminiAntiTruncation__',
-        '__keminiFetchInterceptor__',
-    ];
-    /** 包装链深度上限，防御环形引用与异常长的链条。 */
-    const MAX_UNWRAP_DEPTH_ACU = 16;
-    /** 读取 wrapper 登记的原始实现；不是已知包装时返回 null。 */
-    function readRegisteredOriginal_ACU(candidate) {
-        if (typeof candidate !== 'function')
-            return null;
-        for (const marker of KNOWN_FETCH_PATCH_MARKERS_ACU) {
-            // 收窄后的 Function 没有字符串索引签名，按 TS 要求经 unknown 中转再读标记槽。
-            const slot = candidate[marker];
-            if (!slot || typeof slot !== 'object')
-                continue;
-            const original = slot.original;
-            if (typeof original === 'function')
-                return original;
-        }
-        return null;
-    }
-    /**
-     * 解析当前未被已知拦截器包装的 fetch。
-     * 每次调用都重新剥离：脚本可能在本模块加载之后才安装，缓存会让屏蔽静默失效。
-     * @returns 剥离后的 fetch；无法识别包装时返回当前全局 fetch，不阻断请求
-     */
-    function resolvePristineFetch_ACU() {
-        let current = globalThis.fetch;
-        for (let depth = 0; depth < MAX_UNWRAP_DEPTH_ACU; depth += 1) {
-            const original = readRegisteredOriginal_ACU(current);
-            if (!original || original === current)
-                break;
-            current = original;
-        }
-        return (typeof current === 'function' ? current : globalThis.fetch);
-    }
-    /**
-     * 以剥离后的 fetch 发起请求，绕过第三方脚本对生成端点的改写。
-     * 显式绑定 globalThis：拦截器调用原函数时也传 `this ?? target`，裸调在部分宿主下
-     * 会丢失 realm 绑定。
-     * @param input 请求地址或 Request
-     * @param init 请求参数
-     * @returns 宿主返回的原始响应
-     */
-    function pristineFetch_ACU(input, init) {
-        const send = resolvePristineFetch_ACU();
-        return send.call(globalThis, input, init);
-    }
-
     const objectSchema_ACU = (properties, required) => ({
         type: 'object',
         properties,
@@ -86672,6 +86765,7 @@ $CONTENT
                 let responsePromise;
                 let rawResult;
                 let useTavernTools = false;
+                let useTavernDirectText = false;
                 try {
                     if (!skipProfileSwitch) {
                         originalProfile = await triggerSlash_ACU('/profile');
@@ -86698,7 +86792,7 @@ $CONTENT
                     const tavernMaxTokens = effectiveApiConfig.max_tokens ?? effectiveApiConfig.maxTokens ?? 4096;
                     useTavernTools = tableFillTools.length > 0 && isConnectionProfileChatCompletion_ACU(targetProfile);
                     if (useTavernTools) {
-                        // 酒馆连接可经 overridePayload 把原生工具并入 Chat Completion 请求体，extractData:false 取回含 tool_calls 的原始响应。
+                        // Chat Completion 酒馆连接由本插件组装请求体直发生成端点，不经宿主被第三方脚本包装的全局 fetch。
                         // 指定工具的 tool_choice 同时让预设脚本的抗截断拦截器放行（调用方已强制工具选择时它不接管）；
                         // Claude 源后端把 tool_choice 包成 { type }，只接受字符串，故回退 auto。
                         const overridePayload = {
@@ -86712,7 +86806,12 @@ $CONTENT
                         const toolPostProcessing = preserveNativeToolPostProcessing_ACU(rawPostProcessing, true);
                         if (toolPostProcessing !== rawPostProcessing)
                             overridePayload.custom_prompt_post_processing = toolPostProcessing;
-                        responsePromise = sendConnectionManagerRequest_ACU(profileId, messages, tavernMaxTokens, { extractData: false, signal: abortSignal }, overridePayload);
+                        responsePromise = sendProfileChatCompletionRequest_ACU(targetProfile, messages, tavernMaxTokens, overridePayload, abortSignal);
+                    }
+                    else if (isConnectionProfileChatCompletion_ACU(targetProfile)) {
+                        // 不挂工具的 Chat Completion 预设同样直发生成端点，避开第三方脚本对宿主 fetch 的请求改写。
+                        useTavernDirectText = true;
+                        responsePromise = sendProfileChatCompletionRequest_ACU(targetProfile, messages, tavernMaxTokens, {}, abortSignal);
                     }
                     else {
                         responsePromise = sendConnectionManagerRequest_ACU(profileId, messages, tavernMaxTokens);
@@ -86757,6 +86856,12 @@ $CONTENT
                     // extractData:false 返回宿主原始响应；兼容带 { ok, result } 包装的形态。
                     return finalizeTableFillTurn(chatTurnFromJson_ACU(rawResult?.result ?? rawResult).turn);
                 }
+                if (useTavernDirectText) {
+                    const directContent = chatTurnFromJson_ACU(rawResult).turn.content;
+                    if (directContent && directContent.trim())
+                        return directContent.trim();
+                    throw new RetryableAiResponseError_ACU();
+                }
                 if (rawResult && rawResult.ok && rawResult.result?.choices?.[0]?.message?.content) {
                     return rawResult.result.choices[0].message.content.trim();
                 }
@@ -86771,7 +86876,7 @@ $CONTENT
             else {
                 if (effectiveApiConfig.useMainApi && !forceDirectApi) {
                     if (tableFillTools.length && isMainApiChatCompletionAvailable_ACU()) {
-                        // generateRaw 只返回文本、取不回 tool_calls；带工具时按主连接设置直接走宿主 ChatCompletionService。
+                        // generateRaw 只返回文本、取不回 tool_calls；带工具时按主连接设置组装请求体直发生成端点。
                         // 工具选择与后处理规则与酒馆连接路径一致：指定工具的 tool_choice 让预设脚本拦截器放行，
                         // Claude 源后端只接受字符串 tool_choice，回退 auto。
                         logDebug_ACU('ACU: 通过酒馆主连接（Chat Completion）发送带原生工具的填表请求...');
@@ -86789,6 +86894,13 @@ $CONTENT
                         return finalizeTableFillTurn(chatTurnFromJson_ACU(rawMainResult).turn);
                     }
                     logDebug_ACU('ACU: 通过酒馆主API发送请求（流式传输）...');
+                    if (isMainApiChatCompletionAvailable_ACU()) {
+                        // 不挂工具的 Chat Completion 主连接同样直发生成端点，避开 generateRaw 经过的第三方脚本 fetch 包装。
+                        const directMainText = await callMainApiChatCompletionText_ACU(messages, abortSignal);
+                        if (directMainText)
+                            return directMainText;
+                        throw new RetryableAiResponseError_ACU();
+                    }
                     if (strictJsonResponseFormat) {
                         logDebug_ACU('[严格JSON填表] 主 API（generateRaw）路径无请求体扩展通道，response_format 未附加，仅靠提示词约束。');
                     }
@@ -86811,6 +86923,12 @@ $CONTENT
                         }
                         else {
                             logWarn_ACU('ACU: 并发模式要求独立API，但URL或模型未配置，回退主API。');
+                            if (isMainApiChatCompletionAvailable_ACU()) {
+                                const directFallbackText = await callMainApiChatCompletionText_ACU(messages, abortSignal);
+                                if (directFallbackText)
+                                    return directFallbackText;
+                                throw new RetryableAiResponseError_ACU();
+                            }
                             if (!isGenerateRawAvailable_ACU()) {
                                 throw new Error('TavernHelper.generateRaw 函数不存在。请检查酒馆版本。');
                             }
@@ -95535,6 +95653,10 @@ $CONTENT
         const effectiveApiConfig = apiPresetConfig.apiConfig || settings_ACU.apiConfig || {};
         logDebug_ACU(`[剧情推进] 任务级API调用，预设: ${effectivePresetName || '当前配置'}, 模式: ${effectiveApiMode}`);
         if (effectiveApiMode === 'tavern' || effectiveApiConfig.useMainApi) {
+            if (isMainApiChatCompletionAvailable_ACU()) {
+                // Chat Completion 主连接直发生成端点，避开 generateRaw 经过的第三方脚本 fetch 包装。
+                return await callMainApiChatCompletionText_ACU(messages, abortSignal);
+            }
             logDebug_ACU('[剧情推进] 通过酒馆主API发送请求（流式传输）...');
             if (!isGenerateRawAvailable_ACU()) {
                 throw new Error('TavernHelper.generateRaw 函数不存在。请检查酒馆版本。');
@@ -95553,7 +95675,7 @@ $CONTENT
                 throw new Error('自定义API的URL或模型未配置。');
             }
             const requestBody = buildCustomApiRequestBody_ACU(messages, effectiveApiConfig);
-            const response = await fetch('/api/backends/chat-completions/generate', {
+            const response = await pristineFetch_ACU('/api/backends/chat-completions/generate', {
                 method: 'POST',
                 headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
                 body: JSON.stringify(requestBody),
@@ -95580,6 +95702,10 @@ $CONTENT
         logDebug_ACU(`[剧情推进] 使用API预设: ${settings_ACU.plotApiPreset || '当前配置'}, 模式: ${effectiveApiMode}`);
         if (effectiveApiMode === 'tavern' || effectiveApiConfig.useMainApi) {
             // 使用主API或酒馆预设（流式传输）
+            if (isMainApiChatCompletionAvailable_ACU()) {
+                // Chat Completion 主连接直发生成端点，避开 generateRaw 经过的第三方脚本 fetch 包装。
+                return await callMainApiChatCompletionText_ACU(messages, abortSignal);
+            }
             logDebug_ACU('[剧情推进] 通过酒馆主API发送请求（流式传输）...');
             if (!isGenerateRawAvailable_ACU()) {
                 throw new Error('TavernHelper.generateRaw 函数不存在。请检查酒馆版本。');
@@ -95599,7 +95725,7 @@ $CONTENT
                 throw new Error('自定义API的URL或模型未配置。');
             }
             const requestBody = buildCustomApiRequestBody_ACU(messages, effectiveApiConfig);
-            const response = await fetch('/api/backends/chat-completions/generate', {
+            const response = await pristineFetch_ACU('/api/backends/chat-completions/generate', {
                 method: 'POST',
                 headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
                 body: JSON.stringify(requestBody),
@@ -95644,7 +95770,7 @@ $CONTENT
             }
             else {
                 const requestBody = buildCustomApiRequestBody_ACU(messages, settings_ACU.apiConfig, { stripModelPrefix: false });
-                const res = await fetch('/api/backends/chat-completions/generate', { method: 'POST', headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody) });
+                const res = await pristineFetch_ACU('/api/backends/chat-completions/generate', { method: 'POST', headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody) });
                 // 根据streamingEnabled设置选择响应处理方式
                 const content = await handleApiResponse_ACU(res);
                 return content;
@@ -95673,6 +95799,14 @@ $CONTENT
         logDebug_ACU(`[callAIWithPreset] 调用 AI，消息数=${messages.length}，预设=${presetName || '当前配置'}，模式=${effectiveApiMode}`);
         if (effectiveApiMode === 'tavern') {
             const profileId = effectiveTavernProfile || settings_ACU.tavernProfile;
+            const directProfile = getConnectionManagerProfiles_ACU().find(item => item.id === profileId);
+            if (directProfile && isConnectionProfileChatCompletion_ACU(directProfile)) {
+                // Chat Completion 预设直发生成端点：宿主连接管理器经被第三方脚本包装的全局 fetch 发送。
+                const raw = await runWithTavernProfile_ACU(profileId, target => sendProfileChatCompletionRequest_ACU(target, toWireMessages_ACU(messages), maxTokens, {}, signal));
+                assertNotAborted_ACU(signal);
+                const directContent = chatTurnFromJson_ACU(raw).turn.content;
+                return directContent ? directContent : null;
+            }
             const response = await sendConnectionManagerRequest_ACU(profileId, messages, maxTokens);
             assertNotAborted_ACU(signal);
             if (response?.result?.choices?.[0]?.message?.content) {
@@ -95685,6 +95819,11 @@ $CONTENT
             return null;
         }
         if (effectiveApiConfig.useMainApi) {
+            if (isMainApiChatCompletionAvailable_ACU()) {
+                // Chat Completion 主连接直发生成端点，避开 generateRaw 经过的第三方脚本 fetch 包装。
+                const directText = await callMainApiChatCompletionText_ACU(messages, signal, maxTokens);
+                return directText || null;
+            }
             if (!isGenerateRawAvailable_ACU()) {
                 throw new Error('TavernHelper.generateRaw 函数不存在。请检查酒馆版本。');
             }
@@ -95700,7 +95839,7 @@ $CONTENT
             throw new Error('自定义API的URL或模型未配置。');
         }
         const body = JSON.stringify(buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, { maxTokens, stripModelPrefix: false }));
-        const res = await fetch('/api/backends/chat-completions/generate', {
+        const res = await pristineFetch_ACU('/api/backends/chat-completions/generate', {
             method: 'POST',
             headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
             body,
@@ -95723,7 +95862,7 @@ $CONTENT
      * @param maxTokens 最大输出 token
      * @returns 宿主返回的原始响应
      */
-    async function sendConnectionManagerRequestWithProfileSwitch_ACU(profileId, messages, maxTokens, custom, overridePayload) {
+    async function runWithTavernProfile_ACU(profileId, action) {
         const run = async () => {
             const targetProfile = getConnectionManagerProfiles_ACU().find(profile => profile.id === profileId);
             if (!targetProfile)
@@ -95737,10 +95876,7 @@ $CONTENT
                 if (needSwitch) {
                     await triggerSlash_ACU(`/profile await=true "${targetProfileName.replace(/"/g, '\\"')}"`);
                 }
-                // 未带扩展参数时保持三参调用，普通文本请求的宿主调用形态不变。
-                return custom === undefined && overridePayload === undefined
-                    ? await sendConnectionManagerRequest_ACU(profileId, messages, maxTokens)
-                    : await sendConnectionManagerRequest_ACU(profileId, messages, maxTokens, custom, overridePayload);
+                return await action(targetProfile);
             }
             finally {
                 if (needSwitch) {
@@ -95779,7 +95915,16 @@ $CONTENT
         if (resolved.apiMode === 'tavern') {
             if (!resolved.tavernProfile)
                 throw new Error('该预设为酒馆连接模式但未选择连接预设。');
-            const response = await sendConnectionManagerRequestWithProfileSwitch_ACU(resolved.tavernProfile, messages, maxTokens);
+            const profile = getConnectionManagerProfiles_ACU().find(item => item.id === resolved.tavernProfile);
+            if (profile && isConnectionProfileChatCompletion_ACU(profile)) {
+                // 宿主连接管理器经被第三方脚本包装的全局 fetch 发送；Chat Completion 预设改为直发生成端点。
+                const raw = await runWithTavernProfile_ACU(resolved.tavernProfile, target => sendProfileChatCompletionRequest_ACU(target, toWireMessages_ACU(messages), maxTokens, {}, signal));
+                assertNotAborted_ACU(signal);
+                const parsed = chatTurnFromJson_ACU(raw);
+                reportUsage(parsed.usage ?? raw?.usage);
+                return parsed.turn.content ? parsed.turn.content.trim() : null;
+            }
+            const response = await runWithTavernProfile_ACU(resolved.tavernProfile, () => sendConnectionManagerRequest_ACU(resolved.tavernProfile, messages, maxTokens));
             assertNotAborted_ACU(signal);
             reportUsage(response?.result?.usage);
             if (typeof response?.result?.choices?.[0]?.message?.content === 'string')
@@ -95789,6 +95934,14 @@ $CONTENT
             return null;
         }
         if (resolved.apiConfig.useMainApi) {
+            if (isMainApiChatCompletionAvailable_ACU()) {
+                // Chat Completion 主连接直发生成端点，避开 generateRaw 经过的脚本 fetch 包装。
+                const raw = await sendMainApiChatCompletionRequest_ACU(toWireMessages_ACU(messages), { max_tokens: maxTokens }, signal);
+                assertNotAborted_ACU(signal);
+                const parsed = chatTurnFromJson_ACU(raw);
+                reportUsage(parsed.usage ?? raw?.usage);
+                return parsed.turn.content ? parsed.turn.content.trim() : null;
+            }
             lifecycle?.beforeMainApiCall?.();
             let operation;
             try {
@@ -95845,6 +95998,25 @@ $CONTENT
             payload.custom_prompt_post_processing = toolPostProcessing;
         return payload;
     }
+    /** 直发生成端点前把 role 归一为小写；其余字段（tool_calls、tool_call_id）原样保留。 */
+    function toWireMessages_ACU(messages) {
+        return messages.map(message => (message && typeof message === 'object' && typeof message.role === 'string' ? { ...message, role: message.role.toLowerCase() } : message));
+    }
+    /**
+     * Chat Completion 主连接的纯文本请求直发生成端点。
+     * generateRaw 经宿主 sendOpenAIRequest 调用被第三方脚本包装的全局 fetch，会被注入额外工具与控制提示词并改写响应；
+     * 直发路径不触发宿主生成事件，调用方不得再为其登记 GENERATION_ENDED 忽略计数。
+     * @param messages 消息序列
+     * @param signal 中止信号
+     * @param maxTokens 最大输出 token；省略时沿用主连接设置
+     * @returns 去首尾空白的回复正文，可能为空串
+     */
+    async function callMainApiChatCompletionText_ACU(messages, signal, maxTokens) {
+        const raw = await sendMainApiChatCompletionRequest_ACU(toWireMessages_ACU(messages), maxTokens === undefined ? {} : { max_tokens: maxTokens }, signal);
+        assertNotAborted_ACU(signal);
+        const content = chatTurnFromJson_ACU(raw).turn.content;
+        return typeof content === 'string' ? content.trim() : '';
+    }
     /** 与 callAIWithResolvedPreset_ACU 同一条渠道，但保留原生 tool_calls。 */
     async function callAIChatTurn_ACU(messages, resolved, signal, lifecycle, extras) {
         if (!Array.isArray(messages) || messages.length === 0)
@@ -95865,40 +96037,46 @@ $CONTENT
         const hasNativeToolTraffic = Boolean(extras?.tools?.length)
             || messages.some(message => message && typeof message === 'object' && (message.role === 'tool' || message.tool_calls));
         if (resolved.apiMode === 'tavern') {
-            // 宿主 sendRequest(profileId, prompt, maxTokens, custom, overridePayload)：Chat Completion 预设可经
-            // overridePayload 携带工具，extractData:false 取回含 tool_calls 的原始响应；Text Completion 预设无法承载，fail-closed。
-            let toolCustom;
-            let toolOverridePayload;
+            // Chat Completion 预设由本插件组装请求体直发生成端点：宿主连接管理器经被第三方脚本包装的
+            // 全局 fetch 发送，会被注入额外工具与控制提示词并改写响应。Text Completion 预设无法承载工具，fail-closed。
+            const profile = getConnectionManagerProfiles_ACU().find(item => item.id === resolved.tavernProfile);
+            if (profile && isConnectionProfileChatCompletion_ACU(profile)) {
+                const overridePayload = hasNativeToolTraffic
+                    ? buildHostNativeToolOverridePayload_ACU(extras?.tools, String(profile['prompt-post-processing'] ?? ''))
+                    : {};
+                const raw = await runWithTavernProfile_ACU(resolved.tavernProfile, target => sendProfileChatCompletionRequest_ACU(target, toWireMessages_ACU(messages), maxTokens, overridePayload, signal));
+                assertNotAborted_ACU(signal);
+                const parsed = chatTurnFromJson_ACU(raw);
+                reportUsage(parsed.usage ?? raw?.usage);
+                return parsed.turn;
+            }
             if (hasNativeToolTraffic) {
-                const profile = getConnectionManagerProfiles_ACU().find(item => item.id === resolved.tavernProfile);
-                if (!profile || !isConnectionProfileChatCompletion_ACU(profile)) {
-                    throw new Error('酒馆连接管理器不支持原生工具调用及回执：所选连接预设不是 Chat Completion 类型；请改用 Chat Completion 连接预设或自定义 API。');
-                }
-                toolOverridePayload = buildHostNativeToolOverridePayload_ACU(extras?.tools, String(profile['prompt-post-processing'] ?? ''));
-                toolCustom = { extractData: false, signal: signal ?? null };
+                throw new Error('酒馆连接管理器不支持原生工具调用及回执：所选连接预设不是 Chat Completion 类型；请改用 Chat Completion 连接预设或自定义 API。');
             }
             if (!resolved.tavernProfile)
                 throw new Error('该预设为酒馆连接模式但未选择连接预设。');
-            const response = await sendConnectionManagerRequestWithProfileSwitch_ACU(resolved.tavernProfile, messages, maxTokens, toolCustom, toolOverridePayload);
+            const response = await runWithTavernProfile_ACU(resolved.tavernProfile, () => sendConnectionManagerRequest_ACU(resolved.tavernProfile, messages, maxTokens));
             assertNotAborted_ACU(signal);
             const parsed = chatTurnFromJson_ACU(response?.result ?? response);
             reportUsage(parsed.usage ?? response?.result?.usage);
             return parsed.turn.content || parsed.turn.toolCalls.length ? parsed.turn : { content: typeof response?.content === 'string' ? response.content : '', toolCalls: [] };
         }
         if (resolved.apiConfig.useMainApi) {
-            if (hasNativeToolTraffic) {
-                // generateRaw 只返回文本；工具流量改按主连接设置直接走宿主 ChatCompletionService 取回原始 tool_calls。
-                if (!isMainApiChatCompletionAvailable_ACU()) {
-                    throw new Error('酒馆主 API 无法保证原生工具调用及回执：当前主连接不是 Chat Completion；请切换为 Chat Completion 连接或为 Agent 选择自定义 API。');
-                }
+            if (isMainApiChatCompletionAvailable_ACU()) {
+                // generateRaw 只返回文本且经被包装的全局 fetch；Chat Completion 主连接按其设置直发生成端点。
                 const routing = readMainApiChatCompletionRouting_ACU();
-                const overridePayload = { ...buildHostNativeToolOverridePayload_ACU(extras?.tools, routing.postProcessing), max_tokens: maxTokens };
-                const wireMessages = messages.map(message => (message && typeof message === 'object' && typeof message.role === 'string' ? { ...message, role: message.role.toLowerCase() } : message));
-                const raw = await sendMainApiChatCompletionRequest_ACU(wireMessages, overridePayload, signal);
+                const overridePayload = {
+                    ...(hasNativeToolTraffic ? buildHostNativeToolOverridePayload_ACU(extras?.tools, routing.postProcessing) : {}),
+                    max_tokens: maxTokens,
+                };
+                const raw = await sendMainApiChatCompletionRequest_ACU(toWireMessages_ACU(messages), overridePayload, signal);
                 assertNotAborted_ACU(signal);
                 const parsed = chatTurnFromJson_ACU(raw);
                 reportUsage(parsed.usage ?? raw?.usage);
                 return parsed.turn;
+            }
+            if (hasNativeToolTraffic) {
+                throw new Error('酒馆主 API 无法保证原生工具调用及回执：当前主连接不是 Chat Completion；请切换为 Chat Completion 连接或为 Agent 选择自定义 API。');
             }
             lifecycle?.beforeMainApiCall?.();
             let operation;
@@ -99494,11 +99672,6 @@ $CONTENT
         }
     }
 
-    /**
-     * service/runtime/plot-runtime/plot-task-engine.ts
-     * 剧情推进 — Task 执行引擎（排序/分组/上下文构建/单任务执行/运行时调度）+ 世界书内容获取
-     * 从 helpers-plot-runtime.ts 拆出（L532-L1023 + L1513-L1618）
-     */
     const CHARACTER_LOREBOOK_RETRY_DELAY_MS_ACU = 300;
     class CharacterLorebookScopeChangedError_ACU extends Error {
         constructor() {
@@ -99570,7 +99743,8 @@ $CONTENT
             const apiPresetConfig = getApiConfigByPreset_ACU(effectivePreset) || {};
             const effectiveApiMode = apiPresetConfig.apiMode ?? settings_ACU.apiMode;
             const effectiveApiConfig = apiPresetConfig.apiConfig || settings_ACU.apiConfig || {};
-            return effectiveApiMode !== 'tavern' && !!effectiveApiConfig.useMainApi;
+            // Chat Completion 主连接直发生成端点，不触发宿主 GENERATION_ENDED，不能登记忽略计数。
+            return effectiveApiMode !== 'tavern' && !!effectiveApiConfig.useMainApi && !isMainApiChatCompletionAvailable_ACU();
         }
         catch (e) {
             return settings_ACU.apiMode !== 'tavern' && !!settings_ACU.useMainApi;
@@ -108938,7 +109112,7 @@ $CONTENT
                             : '';
                     }
                     else {
-                        const res = await fetch(`/api/backends/chat-completions/generate`, {
+                        const res = await pristineFetch_ACU(`/api/backends/chat-completions/generate`, {
                             method: 'POST',
                             headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
                             body: JSON.stringify(buildCustomApiRequestBody_ACU(finalMessages, settings_ACU.apiConfig, { stripModelPrefix: false }))

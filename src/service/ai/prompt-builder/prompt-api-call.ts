@@ -14,8 +14,8 @@ import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var
 import { DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU } from '../../../shared/defaults-json.js';
 import { isSqliteMode } from '../../table/storage-mode';
 import { buildStrictJsonTableFillResponseFormatForData_ACU, cloneStrictPromptSegments_ACU } from './strict-json-table-fill';
-import { preserveNativeToolPostProcessing_ACU } from '../api-call';
-import { isConnectionProfileChatCompletion_ACU, isMainApiChatCompletionAvailable_ACU, readMainApiChatCompletionRouting_ACU, sendMainApiChatCompletionRequest_ACU } from '../../../data/gateways/ai-gateway';
+import { preserveNativeToolPostProcessing_ACU, callMainApiChatCompletionText_ACU } from '../api-call';
+import { isConnectionProfileChatCompletion_ACU, isMainApiChatCompletionAvailable_ACU, readMainApiChatCompletionRouting_ACU, sendMainApiChatCompletionRequest_ACU, sendProfileChatCompletionRequest_ACU } from '../../../data/gateways/ai-gateway';
 import { pristineFetch_ACU } from '../../../data/gateways/pristine-fetch';
 import { chatTurnFromJson_ACU, readFetchChatTurn_ACU, type AiChatTurn_ACU } from '../native-tool';
 import { buildTableFillNativeTools_ACU, degradeTableFillPromptSegmentsToBodyFormat_ACU, resolveTableFillToolTurn_ACU } from './table-fill-tools';
@@ -265,6 +265,7 @@ export class RetryableAiResponseError_ACU extends Error {
         let responsePromise;
         let rawResult;
         let useTavernTools = false;
+        let useTavernDirectText = false;
 
 
         try {
@@ -298,7 +299,7 @@ export class RetryableAiResponseError_ACU extends Error {
             const tavernMaxTokens = effectiveApiConfig.max_tokens ?? effectiveApiConfig.maxTokens ?? 4096;
             useTavernTools = tableFillTools.length > 0 && isConnectionProfileChatCompletion_ACU(targetProfile);
             if (useTavernTools) {
-                // 酒馆连接可经 overridePayload 把原生工具并入 Chat Completion 请求体，extractData:false 取回含 tool_calls 的原始响应。
+                // Chat Completion 酒馆连接由本插件组装请求体直发生成端点，不经宿主被第三方脚本包装的全局 fetch。
                 // 指定工具的 tool_choice 同时让预设脚本的抗截断拦截器放行（调用方已强制工具选择时它不接管）；
                 // Claude 源后端把 tool_choice 包成 { type }，只接受字符串，故回退 auto。
                 const overridePayload: Record<string, unknown> = {
@@ -311,7 +312,11 @@ export class RetryableAiResponseError_ACU extends Error {
                 const rawPostProcessing = String(targetProfile['prompt-post-processing'] ?? '');
                 const toolPostProcessing = preserveNativeToolPostProcessing_ACU(rawPostProcessing, true);
                 if (toolPostProcessing !== rawPostProcessing) overridePayload.custom_prompt_post_processing = toolPostProcessing;
-                responsePromise = sendConnectionManagerRequest_ACU(profileId, messages, tavernMaxTokens, { extractData: false, signal: abortSignal }, overridePayload);
+                responsePromise = sendProfileChatCompletionRequest_ACU(targetProfile, messages, tavernMaxTokens, overridePayload, abortSignal);
+            } else if (isConnectionProfileChatCompletion_ACU(targetProfile)) {
+                // 不挂工具的 Chat Completion 预设同样直发生成端点，避开第三方脚本对宿主 fetch 的请求改写。
+                useTavernDirectText = true;
+                responsePromise = sendProfileChatCompletionRequest_ACU(targetProfile, messages, tavernMaxTokens, {}, abortSignal);
             } else {
                 responsePromise = sendConnectionManagerRequest_ACU(profileId, messages, tavernMaxTokens);
             }
@@ -355,6 +360,11 @@ export class RetryableAiResponseError_ACU extends Error {
             // extractData:false 返回宿主原始响应；兼容带 { ok, result } 包装的形态。
             return finalizeTableFillTurn(chatTurnFromJson_ACU(rawResult?.result ?? rawResult).turn);
         }
+        if (useTavernDirectText) {
+            const directContent = chatTurnFromJson_ACU(rawResult).turn.content;
+            if (directContent && directContent.trim()) return directContent.trim();
+            throw new RetryableAiResponseError_ACU();
+        }
 
         if (rawResult && rawResult.ok && rawResult.result?.choices?.[0]?.message?.content) {
             return rawResult.result.choices[0].message.content.trim();
@@ -368,7 +378,7 @@ export class RetryableAiResponseError_ACU extends Error {
     } else {
         if (effectiveApiConfig.useMainApi && !forceDirectApi) {
             if (tableFillTools.length && isMainApiChatCompletionAvailable_ACU()) {
-                // generateRaw 只返回文本、取不回 tool_calls；带工具时按主连接设置直接走宿主 ChatCompletionService。
+                // generateRaw 只返回文本、取不回 tool_calls；带工具时按主连接设置组装请求体直发生成端点。
                 // 工具选择与后处理规则与酒馆连接路径一致：指定工具的 tool_choice 让预设脚本拦截器放行，
                 // Claude 源后端只接受字符串 tool_choice，回退 auto。
                 logDebug_ACU('ACU: 通过酒馆主连接（Chat Completion）发送带原生工具的填表请求...');
@@ -385,6 +395,12 @@ export class RetryableAiResponseError_ACU extends Error {
                 return finalizeTableFillTurn(chatTurnFromJson_ACU(rawMainResult).turn);
             }
             logDebug_ACU('ACU: 通过酒馆主API发送请求（流式传输）...');
+            if (isMainApiChatCompletionAvailable_ACU()) {
+                // 不挂工具的 Chat Completion 主连接同样直发生成端点，避开 generateRaw 经过的第三方脚本 fetch 包装。
+                const directMainText = await callMainApiChatCompletionText_ACU(messages, abortSignal);
+                if (directMainText) return directMainText;
+                throw new RetryableAiResponseError_ACU();
+            }
             if (strictJsonResponseFormat) {
                 logDebug_ACU('[严格JSON填表] 主 API（generateRaw）路径无请求体扩展通道，response_format 未附加，仅靠提示词约束。');
             }
@@ -406,6 +422,11 @@ export class RetryableAiResponseError_ACU extends Error {
                     logDebug_ACU('ACU: 并发模式启用，强制使用独立API路径。');
                 } else {
                     logWarn_ACU('ACU: 并发模式要求独立API，但URL或模型未配置，回退主API。');
+                    if (isMainApiChatCompletionAvailable_ACU()) {
+                        const directFallbackText = await callMainApiChatCompletionText_ACU(messages, abortSignal);
+                        if (directFallbackText) return directFallbackText;
+                        throw new RetryableAiResponseError_ACU();
+                    }
                     if (!isGenerateRawAvailable_ACU()) {
                         throw new Error('TavernHelper.generateRaw 函数不存在。请检查酒馆版本。');
                     }

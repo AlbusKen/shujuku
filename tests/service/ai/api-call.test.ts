@@ -43,6 +43,7 @@ vi.mock('../../../src/data/gateways/ai-gateway', () => ({
   isMainApiChatCompletionAvailable_ACU: vi.fn(() => false),
   readMainApiChatCompletionRouting_ACU: vi.fn(() => ({ source: '', postProcessing: '' })),
   sendMainApiChatCompletionRequest_ACU: vi.fn(),
+  sendProfileChatCompletionRequest_ACU: vi.fn(),
 }));
 
 vi.mock('../../../src/shared/utils', () => ({

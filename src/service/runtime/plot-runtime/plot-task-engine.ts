@@ -1,3 +1,5 @@
+import { isMainApiChatCompletionAvailable_ACU } from '../../../data/gateways/ai-gateway';
+
 /**
  * service/runtime/plot-runtime/plot-task-engine.ts
  * 剧情推进 — Task 执行引擎（排序/分组/上下文构建/单任务执行/运行时调度）+ 世界书内容获取
@@ -116,7 +118,8 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       const apiPresetConfig: any = getApiConfigByPreset_ACU(effectivePreset) || {};
       const effectiveApiMode = apiPresetConfig.apiMode ?? settings_ACU.apiMode;
       const effectiveApiConfig = apiPresetConfig.apiConfig || settings_ACU.apiConfig || {};
-      return effectiveApiMode !== 'tavern' && !!effectiveApiConfig.useMainApi;
+      // Chat Completion 主连接直发生成端点，不触发宿主 GENERATION_ENDED，不能登记忽略计数。
+      return effectiveApiMode !== 'tavern' && !!effectiveApiConfig.useMainApi && !isMainApiChatCompletionAvailable_ACU();
     } catch (e) {
       return settings_ACU.apiMode !== 'tavern' && !!settings_ACU.useMainApi;
     }

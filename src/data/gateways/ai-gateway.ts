@@ -10,6 +10,7 @@
 
 import { TavernHelper_API_ACU, SillyTavern_API_ACU } from '../../shared/host-api';
 import { logWarn_ACU } from '../../shared/utils';
+import { pristineFetch_ACU } from './pristine-fetch';
 
 // ═══ 可用性检查 ═══
 
@@ -106,15 +107,14 @@ const MAIN_API_REVERSE_PROXY_SOURCES_ACU = new Set(['claude', 'openai', 'mistral
 
 /**
  * 判断酒馆主连接当前是否为 Chat Completion（只有这类连接能携带原生工具并取回 tool_calls）。
- * TavernHelper.generateRaw 只返回文本，带工具的请求必须改走宿主 ChatCompletionService。
+ * TavernHelper.generateRaw 只返回文本，且宿主请求服务经被第三方脚本包装的全局 fetch 发送；
+ * Chat Completion 主连接的内部请求由本网关组装请求体后直发生成端点。
  * @returns 可用时为 true
  */
 export function isMainApiChatCompletionAvailable_ACU(): boolean {
     try {
         const st: any = SillyTavern_API_ACU;
-        return !!st && st.mainApi === 'openai'
-            && !!st.chatCompletionSettings
-            && typeof st.ChatCompletionService?.processRequest === 'function';
+        return !!st && st.mainApi === 'openai' && !!st.chatCompletionSettings;
     } catch {
         return false;
     }
@@ -189,7 +189,107 @@ export async function sendMainApiChatCompletionRequest_ACU(
         request.azure_deployment_name = oai.azure_deployment_name;
         request.azure_api_version = oai.azure_api_version;
     }
-    return await st.ChatCompletionService.processRequest({ ...request, ...overridePayload }, {}, false, signal ?? null);
+    return await postChatCompletionDirect_ACU({ ...request, ...overridePayload }, signal);
+}
+
+const CHAT_COMPLETION_GENERATE_URL_ACU = '/api/backends/chat-completions/generate';
+
+/**
+ * 把组装好的 Chat Completion 请求体直发宿主生成端点，返回原始 JSON（含 tool_calls）。
+ * 宿主 ConnectionManagerRequestService / ChatCompletionService 内部经全局 fetch 发送，
+ * 会被第三方脚本的生成端点拦截器改写请求体与响应；这里经 pristineFetch 绕过包装。
+ * 请求体归一沿用宿主纯函数 ChatCompletionService.createRequestData（不发请求、无副作用）。
+ * @param payload 请求体字段
+ * @param signal 中止信号
+ * @returns 生成端点返回的原始 JSON
+ */
+export async function postChatCompletionDirect_ACU(payload: Record<string, unknown>, signal?: AbortSignal | null): Promise<any> {
+    const service: any = (SillyTavern_API_ACU as any)?.ChatCompletionService;
+    const data = typeof service?.createRequestData === 'function' ? service.createRequestData.call(service, payload) : { ...payload };
+    const response = await pristineFetch_ACU(CHAT_COMPLETION_GENERATE_URL_ACU, {
+        method: 'POST',
+        headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
+        cache: 'no-cache',
+        body: JSON.stringify({ ...data, stream: false }),
+        signal: signal ?? undefined,
+    });
+    const text = await response.text();
+    let json: any = null;
+    try {
+        json = text ? JSON.parse(text) : null;
+    } catch {
+        throw new Error(`生成端点返回了无法解析的响应（HTTP ${response.status}）。`);
+    }
+    if (!response.ok || json?.error) {
+        const detail = json?.error?.message || (typeof json?.error === 'string' ? json.error : '') || text.slice(0, 300);
+        throw new Error(`API 请求失败: HTTP ${response.status}${detail ? ` ${detail}` : ''}`);
+    }
+    return json;
+}
+
+/**
+ * 解析连接预设引用的反向代理。宿主代理列表是 openai.js 模块变量，未暴露到 context：
+ * 优先读 chatCompletionSettings.proxies；预设正是当前激活连接时，读主连接已应用的代理。
+ * 两者都读不到时 fail-closed，避免把请求静默发往默认端点。
+ */
+function resolveProfileProxy_ACU(profile: any): { url?: string; password?: string } {
+    const name = String(profile?.proxy || '');
+    if (!name || name === 'None') return {};
+    const st: any = SillyTavern_API_ACU;
+    const oai: any = st?.chatCompletionSettings;
+    const list = Array.isArray(oai?.proxies) ? oai.proxies : [];
+    const hit = list.find((preset: any) => preset?.name === name);
+    if (hit) return { url: hit.url || undefined, password: hit.password || undefined };
+    if (st?.extensionSettings?.connectionManager?.selectedProfile === profile?.id) {
+        return { url: oai?.reverse_proxy || undefined, password: oai?.proxy_password || undefined };
+    }
+    throw new Error(`连接预设 "${profile?.name || profile?.id}" 使用反向代理 "${name}"，但当前无法读取该代理配置；请让该预设处于激活状态后重试，或改用自定义 API。`);
+}
+
+/**
+ * 按连接预设组装 Chat Completion 请求体并直发生成端点（字段对齐宿主 shared.js 的 sendRequest）。
+ * 密钥由后端按当前激活连接读取，调用方需保证目标预设已激活。
+ * @param profile 连接预设（须为 Chat Completion 类型）
+ * @param messages 已归一 role 的消息序列
+ * @param maxTokens 最大输出 token
+ * @param overridePayload 并入请求体的覆盖字段（tools、tool_choice 等）
+ * @param signal 中止信号
+ * @returns 生成端点返回的原始 JSON
+ */
+export async function sendProfileChatCompletionRequest_ACU(
+    profile: any,
+    messages: any[],
+    maxTokens: number,
+    overridePayload: Record<string, unknown>,
+    signal?: AbortSignal | null,
+): Promise<any> {
+    const st: any = SillyTavern_API_ACU;
+    const entry = profile?.api ? st?.CONNECT_API_MAP?.[profile.api] : null;
+    if (!entry || entry.selected !== 'openai' || !entry.source) {
+        throw new Error(`连接预设 "${profile?.name || profile?.id}" 不是 Chat Completion 类型。`);
+    }
+    const proxy = resolveProfileProxy_ACU(profile);
+    let presetPayload: Record<string, unknown> = {};
+    try {
+        const preset = profile.preset ? st.getPresetManager?.('openai')?.getCompletionPresetByName?.(profile.preset) : null;
+        if (preset && typeof st.ChatCompletionService?.presetToGeneratePayload === 'function') {
+            presetPayload = st.ChatCompletionService.presetToGeneratePayload(preset, {}) || {};
+        }
+    } catch (error) {
+        logWarn_ACU('[AIGateway] 读取连接预设的生成参数失败，按默认参数发送:', error);
+    }
+    return await postChatCompletionDirect_ACU({
+        ...presetPayload,
+        messages,
+        max_tokens: maxTokens,
+        model: profile.model,
+        chat_completion_source: entry.source,
+        custom_url: profile['api-url'],
+        reverse_proxy: proxy.url,
+        proxy_password: proxy.password,
+        custom_prompt_post_processing: profile['prompt-post-processing'],
+        ...overridePayload,
+    }, signal);
 }
 
 /**

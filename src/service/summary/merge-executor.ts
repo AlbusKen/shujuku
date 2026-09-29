@@ -16,6 +16,7 @@
 import { DEFAULT_CHAR_CARD_PROMPT_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_ACU } from '../../shared/defaults-json.js';
 import { isSqliteMode } from '../table/storage-mode';
 import { sendConnectionManagerRequest_ACU, generateRaw_ACU, getHostRequestHeaders_ACU } from '../ai/ai-service';
+import { pristineFetch_ACU } from '../../data/gateways/pristine-fetch';
 import { extractTableEditInner_ACU, handleApiResponse_ACU } from '../ai/prompt-builder';
 import { buildCustomApiRequestBody_ACU } from '../ai/api-call';
 import { currentJsonTableData_ACU, settings_ACU, isAutoUpdatingCard_ACU, _set_isAutoUpdatingCard_ACU, _set_wasStoppedByUser_ACU } from '../runtime/state-manager';
@@ -142,7 +143,7 @@ export async function executeMergeBatches_ACU(
                     if (settings_ACU.apiConfig.useMainApi) {
                         aiResponseText = await generateRaw_ACU({ ordered_prompts: finalMessages, should_stream: settings_ACU.streamingEnabled || false });
                     } else {
-                        const res = await fetch(`/api/backends/chat-completions/generate`, {
+                        const res = await pristineFetch_ACU(`/api/backends/chat-completions/generate`, {
                             method: 'POST',
                             headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
                             body: JSON.stringify(buildCustomApiRequestBody_ACU(finalMessages, settings_ACU.apiConfig, { stripModelPrefix: false }))

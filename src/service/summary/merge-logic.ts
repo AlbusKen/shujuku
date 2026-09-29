@@ -23,6 +23,7 @@ import { currentJsonTableData_ACU, settings_ACU } from '../runtime/state-manager
 import { sendConnectionManagerRequest_ACU, isGenerateRawAvailable_ACU, generateRaw_ACU } from '../../data/gateways/ai-gateway';
 import { getLastMessageIndex_ACU } from '../../data/gateways/chat-gateway';
 import { getHostRequestHeaders_ACU } from '../../data/gateways/ai-gateway';
+import { pristineFetch_ACU } from '../../data/gateways/pristine-fetch';
 import { updateReadableLorebookEntry_ACU } from '../worldbook/pipeline';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { runTableUpdateCommit_ACU } from '../table/table-update-commit';
@@ -228,7 +229,7 @@ export async function executeAutoMergeBatch_ACU(
                         ? await generateRaw_ACU({ ordered_prompts: finalMessages, should_stream: settings_ACU.streamingEnabled || false })
                         : '';
                 } else {
-                    const res = await fetch(`/api/backends/chat-completions/generate`, {
+                    const res = await pristineFetch_ACU(`/api/backends/chat-completions/generate`, {
                         method: 'POST',
                         headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
                         body: JSON.stringify(buildCustomApiRequestBody_ACU(finalMessages, settings_ACU.apiConfig, { stripModelPrefix: false }))
