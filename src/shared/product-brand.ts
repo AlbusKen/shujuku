@@ -5,4 +5,6 @@
  */
 export const ACU_PRODUCT_NAME_ACU = '龙血玄黄·数据库';
 export const ACU_PRODUCT_SHORT_NAME_ACU = '奶·数据库';
+/** 侧栏左上角、移动端抽屉与扩展菜单入口使用的展示名。 */
+export const ACU_PRODUCT_DISPLAY_NAME_ACU = `${ACU_PRODUCT_SHORT_NAME_ACU} I`;
 export const ACU_PRODUCT_VERSION_ACU: string = (globalThis as any).__ACU_BUILD_VERSION__ || 'dev';

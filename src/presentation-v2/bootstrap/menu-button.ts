@@ -5,7 +5,7 @@
  * 依赖 host document 解析（D15.1），因此也只在 host document 上注册按钮。
  */
 import { logDebug_ACU, logError_ACU } from '../../shared/utils';
-import { ACU_PRODUCT_SHORT_NAME_ACU } from '../../shared/product-brand';
+import { ACU_PRODUCT_DISPLAY_NAME_ACU } from '../../shared/product-brand';
 import { getAcuHostDocument, getAcuHostWindow, getAcuHostSource } from './host-document';
 import { openAcuV2App } from './mount';
 
@@ -50,9 +50,9 @@ function attemptInsert(retry: number): void {
     `<div class="extension_container interactable" id="${MENU_CONTAINER_ID}" tabindex="0"></div>`;
   const itemHtml =
     `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID}" ` +
-    `title="打开 ${ACU_PRODUCT_SHORT_NAME_ACU}">` +
+    `title="打开 ${ACU_PRODUCT_DISPLAY_NAME_ACU}">` +
     `<div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div>` +
-    `<span>${ACU_PRODUCT_SHORT_NAME_ACU}</span>` +
+    `<span>${ACU_PRODUCT_DISPLAY_NAME_ACU}</span>` +
     `</div>`;
   const $container = $(containerHtml);
   const $item = $(itemHtml);

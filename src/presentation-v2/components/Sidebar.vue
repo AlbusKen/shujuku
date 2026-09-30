@@ -1,34 +1,21 @@
 <template>
   <nav :class="['acu-v2-sidebar', `acu-v2-sidebar--${variant}`]" aria-label="一级页导航">
     <div class="acu-v2-sidebar__brand">
-      <svg
+      <img
         class="acu-v2-sidebar__brand-mark"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="1.6"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
-        focusable="false"
+        :src="brandImages[uiMode.tier]"
         :data-tier="uiMode.tier"
-      >
-        <path d="M9.2 3.7 8.2 1.8M14.8 3.7l1-1.9" />
-        <ellipse cx="12" cy="6" rx="7" ry="2.5" />
-        <path d="M5 6v12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5V6" />
-        <path v-if="brandLevel === 2" d="M5 12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5" />
-        <template v-else-if="brandLevel === 3">
-          <path d="M5 10c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5" />
-          <path d="M5 14c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5" />
-        </template>
-      </svg>
+        alt=""
+        aria-hidden="true"
+        draggable="false"
+      />
       <span class="acu-v2-sidebar__brand-copy">
         <button
           type="button"
           class="acu-v2-sidebar__brand-title"
-          :aria-label="`${productShortName}（连续点击五次打开功能档位设置）`"
+          :aria-label="`${productDisplayName}（连续点击五次打开功能档位设置）`"
           @click="onBrandTitleClick"
-        >{{ productShortName }}</button>
+        >{{ productDisplayName }}</button>
         <span class="acu-v2-sidebar__brand-tag">{{ uiMode.modeLabel }}</span>
       </span>
     </div>
@@ -59,8 +46,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from 'vue';
-import { ACU_PRODUCT_SHORT_NAME_ACU } from '../../shared/product-brand';
+import { onBeforeUnmount, ref } from 'vue';
+import lightBrandImage from '../assets/brand-modes/light.png';
+import mediumBrandImage from '../assets/brand-modes/medium.png';
+import highBrandImage from '../assets/brand-modes/high.png';
+import { ACU_PRODUCT_DISPLAY_NAME_ACU } from '../../shared/product-brand';
 import { acuClearTimeout, acuSetTimeout, type AcuTimerHandle } from '../bootstrap/host-env';
 import { useDialogStore } from '../stores/dialog-store';
 import { useRouterStore } from '../stores/router-store';
@@ -83,10 +73,13 @@ const emit = defineEmits<{
 const router = useRouterStore();
 const uiMode = useUiModeStore();
 const dialogStore = useDialogStore();
-const productShortName = ACU_PRODUCT_SHORT_NAME_ACU;
-// 线条标识随档位增加分层：轻量无分层、进阶一道、高级两道。
-const BRAND_TIER_LEVEL: Record<AcuUiTier, number> = { low: 1, medium: 2, high: 3 };
-const brandLevel = computed(() => BRAND_TIER_LEVEL[uiMode.tier] ?? 1);
+const productDisplayName = ACU_PRODUCT_DISPLAY_NAME_ACU;
+// 左上角奶龙头像随功能档位切换。
+const brandImages: Record<AcuUiTier, string> = {
+  low: lightBrandImage,
+  medium: mediumBrandImage,
+  high: highBrandImage,
+};
 const brandClickCount = ref(0);
 let brandClickTimer: AcuTimerHandle | undefined;
 
@@ -199,11 +192,15 @@ function setActivePage(pageId: string): void {
 }
 
 .acu-v2-sidebar__brand-mark {
-  width: 28px;
-  height: 28px;
-  flex: 0 0 28px;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
   display: block;
-  color: var(--acu-accent);
+  /* 圆形裁切，不加底色与边框，避免源图残留底框在圆角方框里露出弧线。 */
+  border-radius: 50%;
+  object-fit: cover;
+  object-position: center;
+  user-select: none;
 }
 
 .acu-v2-sidebar__brand-copy {
