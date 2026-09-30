@@ -8,6 +8,7 @@
 import type { AcuV2Theme } from './theme-types';
 import { TOKEN_VAR_MAP } from './theme-types';
 import { getAcuHostDocument } from '../bootstrap/host-document';
+import { buildLineIconCss } from './line-icons';
 
 export const THEME_STYLE_NODE_ID = 'acu-v2-theme';
 export const APP_ROOT_ID = 'acu-app-v2';
@@ -62,7 +63,8 @@ ${lines.join('\n')}
 #${APP_ROOT_ID} :is(.fa, .fas, .far, .fab, .fa-solid, .fa-regular, .fa-brands, [class^="fa-"], [class*=" fa-"]) {
   color: var(--acu-icon-color, currentColor) !important;
 }
-`;
+
+${buildLineIconCss(APP_ROOT_ID)}`;
 }
 
 export function applyTheme(theme: AcuV2Theme): void {
