@@ -10,10 +10,9 @@ const panelGridPages = [
   'DataMgmtPage.vue',
   'DashboardPage.vue',
   'DeveloperPage.vue',
+  'FillModePage.vue',
   'FormFillPage.vue',
   'ImportPage.vue',
-  'PlotPage.vue',
-  'TablePage.vue',
   'WorldSimulationPage.vue',
 ];
 

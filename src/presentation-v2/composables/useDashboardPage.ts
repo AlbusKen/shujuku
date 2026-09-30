@@ -15,10 +15,9 @@ import {
 } from "../../service/runtime/state-manager";
 import {
   saveSettings_ACU,
-  setGlobalPlotEnabled_ACU,
   setZeroTkOccupyMode_ACU,
 } from "../../service/settings/settings-service";
-import { isVectorPipelineEnabledForCurrentChat_ACU } from "../../service/fill-mode/fill-mode-gate";
+import { isVectorModeExplicitlySelected_ACU } from "../../service/fill-mode/fill-mode-gate";
 import { getCurrentStorageMode } from "../../service/table/storage-mode";
 import { resolveTableHistoryStateFromChat_ACU } from "../../service/table/table-history";
 import { switchStorageMode } from "../../service/table/table-storage-strategy";
@@ -58,7 +57,6 @@ import {
 } from "../stores/content-replace-gate";
 import { dashboardCopy } from "../copy/dashboard-copy";
 import { useToastStore } from "../stores/toast-store";
-import { useApiPresetStore } from "../stores/api-preset-store";
 import { useDevOptions } from "./useDevOptions";
 
 type MessageKind = "info" | "success" | "warning" | "error";
@@ -630,8 +628,8 @@ function buildSqlTemplateHealthItem(
 }
 
 function buildVectorHealthItem(): DashboardHealthItem {
-  // 向量服务是否需要就绪由当前填表模式推导（向量表格 / 交火模式），不再读取已退役的仪表盘交火开关。
-  const enabled = isVectorPipelineEnabledForCurrentChat_ACU();
+  // 只有显式选择向量表格 / 交火模式时才需要向量服务；经典与 LLM 模式不提示。
+  const enabled = isVectorModeExplicitlySelected_ACU();
   if (!enabled) {
     return makeHealthItem({
       key: "vector",
@@ -655,7 +653,7 @@ function buildVectorHealthItem(): DashboardHealthItem {
         summary: dashboardCopy.vectorHealth.incompleteSummary(readableErrors),
         action: {
           label: dashboardCopy.vectorHealth.configureAction,
-          pageId: "form-fill",
+          pageId: "fill-mode",
         },
       });
     }
@@ -677,7 +675,7 @@ function buildVectorHealthItem(): DashboardHealthItem {
       ),
       action: {
         label: dashboardCopy.vectorHealth.configureAction,
-        pageId: "form-fill",
+        pageId: "fill-mode",
       },
     });
   }
@@ -913,16 +911,7 @@ export function useDashboardPage(): DashboardPageState {
   /** 基础设置 — 同一聊天里时不时开关的功能。 */
   const basicToggles = computed<DashboardToggleItem[]>(() => {
     void dataRefreshTick.value;
-    const flightMode = getCurrentFlightModeState_ACU();
-    const hasActiveChat = hasActiveChatContext(chatFileIdentifier.value);
     return [
-      {
-        key: "flightMode",
-        label: dashboardCopy.toggles.flightMode.label,
-        description: dashboardCopy.toggles.flightMode.description,
-        value: flightMode.enabled,
-        disabled: !hasActiveChat,
-      },
       {
         key: "autoUpdateEnabled",
         label: dashboardCopy.toggles.autoUpdate.label,
@@ -941,12 +930,6 @@ export function useDashboardPage(): DashboardPageState {
         description: dashboardCopy.toggles.zeroTk.description,
         value: settings_ACU.zeroTkOccupyModeDefault === true,
       },
-      {
-        key: "streamingEnabled",
-        label: dashboardCopy.toggles.streaming.label,
-        description: dashboardCopy.toggles.streaming.description,
-        value: settings_ACU.streamingEnabled === true,
-      },
     ];
   });
 
@@ -954,12 +937,6 @@ export function useDashboardPage(): DashboardPageState {
   const advancedToggles = computed<DashboardToggleItem[]>(() => {
     void dataRefreshTick.value;
     const items: DashboardToggleItem[] = [
-      {
-        key: "plotEnabled",
-        label: dashboardCopy.toggles.plot.label,
-        description: dashboardCopy.toggles.plot.description,
-        value: settings_ACU.plotSettings?.enabled === true,
-      },
       {
         key: "continuationPageEnabled",
         label: dashboardCopy.toggles.continuation.label,
@@ -1077,21 +1054,7 @@ export function useDashboardPage(): DashboardPageState {
   }
 
   function setToggle(key: string, value: boolean): void {
-    if (key === "plotEnabled") {
-      const next = !!value;
-      try {
-        setGlobalPlotEnabled_ACU(next);
-      } catch {
-        if (
-          !settings_ACU.plotSettings ||
-          typeof settings_ACU.plotSettings !== "object"
-        ) {
-          settings_ACU.plotSettings = {};
-        }
-        settings_ACU.plotSettings.enabled = next;
-      }
-      saveSettings_ACU();
-    } else if (key === "zeroTkOccupyModeDefault") {
+    if (key === "zeroTkOccupyModeDefault") {
       setZeroTkOccupyMode_ACU(!!value);
     } else if (key === "developerOptionsEnabled") {
       setDeveloperOptionsEnabled(!!value);
@@ -1105,15 +1068,9 @@ export function useDashboardPage(): DashboardPageState {
     } else if (key === "contentReplaceEnabled") {
       setContentReplaceEnabledBySettings(!!value);
       saveSettings_ACU();
-    } else if (
-      key === "autoUpdateEnabled" ||
-      key === "toastMuteEnabled" ||
-      key === "streamingEnabled"
-    ) {
+    } else if (key === "autoUpdateEnabled" || key === "toastMuteEnabled") {
       if (key === "autoUpdateEnabled") {
         setAutoUpdateEnabled_ACU(!!value);
-      } else if (key === "streamingEnabled") {
-        useApiPresetStore().setStreamingEnabled(!!value);
       } else {
         settings_ACU[key] = !!value;
         saveSettings_ACU();

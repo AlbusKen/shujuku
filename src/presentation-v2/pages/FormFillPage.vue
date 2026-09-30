@@ -2,10 +2,10 @@
   <section class="acu-v2-form-fill-page">
     <AcuMobilePanelNav :items="panelNavItems" />
 
+    <!-- 运行状态与自动更新 -->
     <AcuPanelGrid class="acu-v2-form-fill-page__grid">
       <AcuPanel
         id="form-fill-status-panel"
-        class="acu-v2-form-fill-page__panel--status"
         :title="formFillCopy.panels.status.title"
         :description="formFillCopy.panels.status.description"
       >
@@ -77,80 +77,18 @@
         </div>
       </AcuPanel>
 
-      <AcuPanel
-        id="form-fill-mode-panel"
-        class="acu-v2-form-fill-page__panel--mode"
-        title="填表模式"
-        :description="fillModeDescriptions[formFillMode.selectedMode]"
-      >
-        <AcuFormRow label="当前填表模式" hint="从下拉菜单中选择一种模式。每种模式的参数独立保存，切换模式不会覆盖其它模式，也不会改变功能档位。">
-          <AcuSelect
-            :options="FORM_FILL_MODE_OPTIONS"
-            :model-value="formFillMode.selectedMode"
-            @update:model-value="selectFillMode"
-          />
-        </AcuFormRow>
+      <FormFillUpdateSettingsPanel id="form-fill-update-panel" />
+    </AcuPanelGrid>
 
-        <AcuMessage v-if="formFillMode.saveError" kind="error">
-          {{ formFillMode.saveError }}
-        </AcuMessage>
-
-        <template v-if="formFillMode.selectedMode === 'classic'">
-          <AcuFormRow label="最近纪要表条数" hint="同时控制界面显示与经典模式提示词中的近期纪要条数，默认 15 条。">
-            <AcuInput
-              type="number"
-              :min="1"
-              :max="200"
-              :step="1"
-              :model-value="formFillMode.profiles.classic.recentChronicleRows"
-              @change="formFillMode.setClassicRecentChronicleRows($event)"
-            />
-          </AcuFormRow>
-        </template>
-
-        <template v-if="formFillMode.selectedMode === 'vector'">
-          <AcuFormRow label="保留相关纪要条数" hint="按 rerank 结果从上到下保留的纪要条数；embedding 与 rerank 服务在下方「Embedding / Rerank」面板配置。">
-            <AcuInput
-              type="number"
-              :min="1"
-              :max="1000"
-              :step="1"
-              :model-value="formFillMode.profiles.vector.resultCount"
-              @change="formFillMode.setVectorResultCount($event)"
-            />
-          </AcuFormRow>
-        </template>
-
-        <template v-if="formFillMode.selectedMode === 'llm'">
-          <AcuFormRow label="LLM / continuation API 预设" hint="选择后仅用于逻辑召回模式；留空时跟随当前 API。">
-            <AcuSelect
-              :options="apiPresetSelectOptions"
-              :model-value="formFillMode.profiles.llm.apiPresetName"
-              :placeholder="followActiveApiLabel"
-              @update:model-value="formFillMode.setLlmApiPresetName($event)"
-            />
-          </AcuFormRow>
-        </template>
-
-      </AcuPanel>
-
-      <FormFillUpdateSettingsPanel
-        id="form-fill-update-panel"
-        class="acu-v2-form-fill-page__panel--update"
-      />
-
-      <TableTemplatePresetPanel
-        id="form-fill-template-panel"
-        class="acu-v2-form-fill-page__panel--template"
-      />
-
+    <!-- 手动填表与模板 -->
+    <AcuPanelGrid class="acu-v2-form-fill-page__grid">
       <AcuPanel
         id="form-fill-manual-panel"
         class="acu-v2-form-fill-page__panel--manual"
         :title="formFillCopy.panels.manual.title"
         :description="formFillCopy.panels.manual.description"
       >
-        <div class="acu-v2-form-fill-page__manual-number-grid">
+        <div class="acu-v2-form-fill-page__number-grid">
           <AcuFormRow
             label="手动处理最近 N 层"
             hint="从可用 AI 回复中取最近 N 层执行手动填表。"
@@ -194,19 +132,18 @@
           @select-none="manualUpdate.selectNoManualTables"
         />
 
-        <div class="acu-v2-form-fill-page__manual-extra">
-          <AcuFormRow
-            label="本次填表附加要求"
-            hint="留空时不会给本次手动填表追加额外要求。"
-          >
-            <AcuTextarea
-              :model-value="manualUpdate.manualExtraHint.value"
-              :rows="4"
-              placeholder="仅用于本次手动填表..."
-              @update:model-value="manualUpdate.manualExtraHint.value = $event"
-            />
-          </AcuFormRow>
-        </div>
+        <AcuFormRow
+          class="acu-v2-form-fill-page__manual-extra"
+          label="本次填表附加要求"
+          hint="留空时不会给本次手动填表追加额外要求。"
+        >
+          <AcuTextarea
+            :model-value="manualUpdate.manualExtraHint.value"
+            :rows="4"
+            placeholder="仅用于本次手动填表..."
+            @update:model-value="manualUpdate.manualExtraHint.value = $event"
+          />
+        </AcuFormRow>
 
         <AcuMessage v-if="manualUpdate.vectorIndexWarning.value" kind="warning">
           交火模式纪要索引启用时不建议手动更新表格；特殊场景下仍可点击执行。
@@ -250,18 +187,160 @@
           </AcuButton>
         </div>
       </AcuPanel>
+
+      <TableTemplatePresetPanel id="form-fill-template-panel" />
     </AcuPanelGrid>
 
-    <FormFillVectorPanels
-      v-if="vectorPanelMode"
-      :mode="vectorPanelMode"
+    <!-- 填表规则 -->
+    <AcuPanelGrid class="acu-v2-form-fill-page__grid">
+      <div class="acu-v2-form-fill-page__col">
+        <AcuPanel
+          id="form-fill-prompt-panel"
+          :title="formFillCopy.panels.prompt.title"
+          :description="formFillCopy.panels.prompt.description"
+        >
+          <template #actions>
+            <AcuBadge :variant="promptTemplateBadgeVariant">{{
+              promptTemplateBadgeLabel
+            }}</AcuBadge>
+          </template>
+
+          <AcuMessage
+            v-if="!promptSlotSummary.hasA || !promptSlotSummary.hasB"
+            kind="warning"
+          >
+            填表提示词缺少必要主插槽，建议在编辑器里载入默认提示词后保存。
+          </AcuMessage>
+
+          <div class="acu-v2-form-fill-page__actions">
+            <AcuButton variant="primary" @click="promptDrawerOpen = true">
+              编辑提示词
+            </AcuButton>
+          </div>
+        </AcuPanel>
+
+        <AcuPanel
+          id="form-fill-filter-panel"
+          :title="formFillCopy.panels.filter.title"
+          :description="formFillCopy.panels.filter.description"
+        >
+          <div class="acu-v2-form-fill-page__filter">
+            <AcuFormRow
+              label="丢弃纯越权 SQL 语句"
+              hint="默认开启。仅丢弃可证明只影响非目标表的独立 SQL；跨目标表或无法归属的语句仍会拒绝并重试。"
+            >
+              <AcuToggle
+                :model-value="settings.discardUnauthorizedTableEditsEnabled.value"
+                aria-label="丢弃纯越权 SQL 语句"
+                data-acu-setting-key="discardUnauthorizedTableEditsEnabled"
+                @update:model-value="settings.setDiscardUnauthorizedTableEditsEnabled($event)"
+              />
+            </AcuFormRow>
+
+            <AcuFormRow
+              label="仅识别最后一对 &lt;tableEdit&gt; 标签"
+              hint="默认开启，用于忽略前面思维链或草稿里的旧指令。"
+            >
+              <AcuToggle
+                :model-value="settings.tableEditLastPairOnly.value"
+                aria-label="仅识别最后一对 tableEdit 标签"
+                data-acu-setting-key="tableEditLastPairOnly"
+                @update:model-value="settings.setTableEditLastPairOnly($event)"
+              />
+            </AcuFormRow>
+
+            <AcuRulePairList
+              label="提取规则"
+              :model-value="settings.extractRules.value"
+              start-placeholder="提取开始边界"
+              end-placeholder="提取结束边界"
+              add-label="添加提取规则"
+              @update:model-value="settings.setExtractRules($event)"
+            />
+
+            <AcuRulePairList
+              label="排除规则"
+              :model-value="settings.excludeRules.value"
+              start-placeholder="排除开始边界"
+              end-placeholder="排除结束边界"
+              add-label="添加排除规则"
+              @update:model-value="settings.setExcludeRules($event)"
+            />
+          </div>
+        </AcuPanel>
+      </div>
+
+      <div class="acu-v2-form-fill-page__col">
+        <AcuPanel
+          id="form-fill-injection-target-panel"
+          :title="tableCopy.panels.injectionTarget.title"
+          :description="tableCopy.panels.injectionTarget.description"
+        >
+          <DanglingReferenceBanner scope="worldbook" />
+          <WorldbookSelector
+            :model-value="injectionTarget.selectorValue.value"
+            :names="injectionWb.names.value"
+            :char-primary="injectionWb.charPrimary.value"
+            :status="injectionWb.status.value"
+            :error="injectionWb.error.value"
+            show-character-option
+            character-option-label="角色卡绑定世界书"
+            filterable
+            @update:model-value="onInjectionTargetChange($event)"
+          />
+          <p class="acu-v2-form-fill-page__hint">
+            目前已选: <strong>{{ injectionTargetLabel }}</strong>
+          </p>
+        </AcuPanel>
+
+        <AcuPanel
+          id="form-fill-entries-panel"
+          :title="tableCopy.panels.entries.title"
+          :description="tableCopy.panels.entries.description"
+        >
+          <WorldbookEntryPickerBody
+            :source="entriesSource.source.value"
+            :selected-names="entriesSource.manualSelection.value"
+            :names="entriesWb.names.value"
+            :selector-status="entriesWb.status.value"
+            :selector-error="entriesWb.error.value"
+            :current-label="entriesSourceLabel"
+            v-model:filter="entryFilter"
+            :groups="entries.groups.value"
+            :loading="entries.status.value === 'loading'"
+            :empty-text="entryEmptyText"
+            @update:source="onEntriesSourceChange($event)"
+            @toggle-book="onEntriesManualBookToggle"
+            @select-all="entries.selectAll()"
+            @deselect-all="entries.deselectAll()"
+            @toggle="(bookName: string, uid: number, checked: boolean) => entries.toggleEntry(bookName, uid, checked)"
+            @toggle-group="entries.toggleGroupExpanded($event)"
+          />
+        </AcuPanel>
+      </div>
+    </AcuPanelGrid>
+
+    <FormFillPromptDrawer
+      :is-open="promptDrawerOpen"
+      :segments="settings.promptSegments.value"
+      :dirty="settings.promptDirty.value"
+      :message="promptMessage"
+      @close="promptDrawerOpen = false"
+      @save="settings.savePrompt"
+      @reset="settings.resetPrompt"
+      @import-file="settings.importPromptFile($event)"
+      @export="settings.exportPrompt"
+      @add="settings.addPromptSegment($event)"
+      @delete="settings.deletePromptSegment($event)"
+      @update="updatePromptSegment"
     />
   </section>
 </template>
 
+
 <script setup lang="ts">
-import { computed, onMounted, watch } from "vue";
-import AcuBadge from "../components/_lib/AcuBadge.vue";
+import { computed, onMounted, ref, watch } from "vue";
+import AcuBadge, { type AcuBadgeVariant } from "../components/_lib/AcuBadge.vue";
 import AcuButton from "../components/_lib/AcuButton.vue";
 import AcuFormRow from "../components/_lib/AcuFormRow.vue";
 import AcuInput from "../components/_lib/AcuInput.vue";
@@ -269,78 +348,151 @@ import AcuMessage from "../components/_lib/AcuMessage.vue";
 import AcuMobilePanelNav from "../components/_lib/AcuMobilePanelNav.vue";
 import AcuPanel from "../components/_lib/AcuPanel.vue";
 import AcuPanelGrid from "../components/_lib/AcuPanelGrid.vue";
-import AcuSelect from "../components/_lib/AcuSelect.vue";
+import AcuRulePairList from "../components/_lib/AcuRulePairList.vue";
 import AcuText from "../components/_lib/AcuText.vue";
 import AcuTextarea from "../components/_lib/AcuTextarea.vue";
-import FormFillVectorPanels from "../components/FormFillVectorPanels.vue";
+import AcuToggle from "../components/_lib/AcuToggle.vue";
+import DanglingReferenceBanner from "../components/DanglingReferenceBanner.vue";
+import FormFillPromptDrawer from "../components/FormFillPromptDrawer.vue";
 import FormFillUpdateSettingsPanel from "../components/FormFillUpdateSettingsPanel.vue";
-import TableTemplatePresetPanel from "../components/TableTemplatePresetPanel.vue";
 import TableSelector from "../components/TableSelector.vue";
-import { useApiPresetSelectOptions } from "../composables/useApiPresetSelectOptions";
+import TableTemplatePresetPanel from "../components/TableTemplatePresetPanel.vue";
+import WorldbookEntryPickerBody from "../components/WorldbookEntryPickerBody.vue";
+import WorldbookSelector from "../components/WorldbookSelector.vue";
 import { useChatChangedTick } from "../composables/useChatChangedListener";
-import { useTemplateRuntimeChangeTick } from "../composables/useTemplateRuntimeChangeListener";
 import { useDashboardPage } from "../composables/useDashboardPage";
+import { useFormFillInjectionTarget } from "../composables/useFormFillInjectionTarget";
+import {
+  useFormFillSettings,
+  type FormFillPromptSegment,
+} from "../composables/useFormFillSettings";
+import { useFormFillWorldbookConfig } from "../composables/useFormFillWorldbookConfig";
+import { useFormFillWorldbookEntries } from "../composables/useFormFillWorldbookEntries";
 import { useManualUpdate } from "../composables/useManualUpdate";
+import { useTemplateRuntimeChangeTick } from "../composables/useTemplateRuntimeChangeListener";
+import { useUiCloseGuard } from "../composables/useUiCloseGuard";
+import { useWorldbookSelector } from "../composables/useWorldbookSelector";
 import { formFillCopy } from "../copy/form-fill-copy";
 import { tableCopy } from "../copy/table-copy";
-import { vectorIndexCopy } from "../copy/vector-index-copy";
-import {
-  FORM_FILL_MODE_OPTIONS,
-  useFormFillModeStore,
-  type FillMode,
-} from "../stores/form-fill-mode-store";
+import { useDialogStore } from "../stores/dialog-store";
+
+type WorldbookSource = "character" | "manual";
 
 const dashboard = useDashboardPage();
 const manualUpdate = useManualUpdate();
-const formFillMode = useFormFillModeStore();
-const { followActiveApiLabel, apiPresetSelectOptions } = useApiPresetSelectOptions();
-const fillModeDescriptions: Record<FillMode, string> = {
-  classic: "经典表格：沿用稳定的经典填表流程，是新安装的默认模式。",
-  vector: "向量表格：只用 embedding 与 rerank 选出相关纪要，不生成关键词，也不执行剧情推进或混合召回。",
-  llm: "LLM 逻辑召回：由 LLM 先读纪要概览与目录，再按信息缺口精读具体纪要区间。",
-  crossfire: "交火模式：关键词、向量、混合召回与 rerank 的完整流程；全部参数与索引维护在下方面板。",
-};
-/** 向量表格与交火模式需要向量服务与索引维护面板；其余模式不渲染。 */
-const vectorPanelMode = computed<"vector" | "crossfire" | null>(() => {
-  const mode = formFillMode.selectedMode;
-  return mode === "vector" || mode === "crossfire" ? mode : null;
-});
-const panelNavItems = computed(() => {
-  const items = [
-    { id: "form-fill-status-panel", label: formFillCopy.nav.status },
-    { id: "form-fill-mode-panel", label: "填表模式" },
-    { id: "form-fill-update-panel", label: formFillCopy.nav.update },
-    { id: "form-fill-manual-panel", label: formFillCopy.nav.manual },
-    { id: "form-fill-template-panel", label: tableCopy.panels.templatePreset.title },
-  ];
-  if (vectorPanelMode.value === "crossfire") {
-    items.push(
-      { id: "vector-index-status-panel", label: vectorIndexCopy.nav.status },
-      { id: "vector-index-keyword-panel", label: vectorIndexCopy.nav.keyword },
-      { id: "vector-index-api-panel", label: vectorIndexCopy.nav.api },
-      { id: "vector-index-prompt-panel", label: vectorIndexCopy.nav.prompt },
-      { id: "vector-index-recall-panel", label: vectorIndexCopy.nav.recall },
-      { id: "vector-index-archive-panel", label: vectorIndexCopy.nav.archive },
-    );
-  } else if (vectorPanelMode.value === "vector") {
-    items.push(
-      { id: "vector-index-status-panel", label: vectorIndexCopy.nav.status },
-      { id: "vector-index-api-panel", label: vectorIndexCopy.nav.api },
-      { id: "vector-index-archive-panel", label: vectorIndexCopy.nav.archive },
-    );
-  }
-  return items;
-});
+const dialogStore = useDialogStore();
+const settings = useFormFillSettings();
+const injectionTarget = useFormFillInjectionTarget();
+const entriesSource = useFormFillWorldbookConfig();
+const entries = useFormFillWorldbookEntries();
+const injectionWb = useWorldbookSelector();
+const entriesWb = useWorldbookSelector();
+const entryFilter = ref("");
+const injectionTargetLabel = ref("");
+const entriesSourceLabel = ref("");
+const entryEmptyText = ref(tableCopy.worldbook.emptyDefault);
+const promptDrawerOpen = ref(false);
 
-function selectFillMode(value: string): void {
-  if (value === "classic" || value === "vector" || value === "llm" || value === "crossfire") {
-    formFillMode.selectMode(value);
+const panelNavItems = [
+  { id: "form-fill-status-panel", label: formFillCopy.nav.status },
+  { id: "form-fill-update-panel", label: formFillCopy.nav.update },
+  { id: "form-fill-manual-panel", label: formFillCopy.nav.manual },
+  { id: "form-fill-template-panel", label: tableCopy.panels.templatePreset.title },
+  { id: "form-fill-prompt-panel", label: formFillCopy.nav.prompt },
+  { id: "form-fill-filter-panel", label: formFillCopy.nav.filter },
+  { id: "form-fill-injection-target-panel", label: tableCopy.panels.injectionTarget.title },
+  { id: "form-fill-entries-panel", label: tableCopy.panels.entries.title },
+];
+
+const promptSlotSummary = computed(() => ({
+  hasA: settings.promptSegments.value.some(
+    (segment) => segment.mainSlot === "A" || segment.isMain === true,
+  ),
+  hasB: settings.promptSegments.value.some(
+    (segment) => segment.mainSlot === "B" || segment.isMain2 === true,
+  ),
+}));
+const promptTemplateBadgeLabel = computed(() =>
+  settings.promptTemplateMode.value === "default"
+    ? "使用默认提示词"
+    : "已自定义提示词",
+);
+const promptTemplateBadgeVariant = computed<AcuBadgeVariant>(() =>
+  settings.promptTemplateMode.value === "default" ? "neutral" : "accent",
+);
+const promptMessage = computed(() =>
+  settings.message.value?.scope === "prompt" ? settings.message.value : null,
+);
+
+async function refreshInjectionLabel(): Promise<void> {
+  injectionTargetLabel.value = await injectionTarget.describeTarget();
+}
+
+function confirmPromptClose(): boolean | Promise<boolean> {
+  if (!promptDrawerOpen.value || !settings.promptDirty.value) return true;
+  return dialogStore.confirm({
+    title: "关闭新 UI",
+    message: "你有未保存的填表提示词修改，确定要关闭新 UI 吗？",
+    confirmLabel: "关闭新 UI",
+    confirmVariant: "danger",
+  });
+}
+
+function updatePromptSegment(
+  index: number,
+  patch: Partial<FormFillPromptSegment>,
+): void {
+  settings.updatePromptSegment(index, patch);
+}
+
+async function refreshEntriesGroups(): Promise<void> {
+  const names = await entriesSource.resolveBookNames();
+  entryEmptyText.value = resolveEntryEmptyText(names);
+  await entries.loadEntries(names);
+  if (entriesSource.source.value === "character") {
+    const charPrimary = entriesWb.charPrimary.value;
+    entriesSourceLabel.value = charPrimary
+      ? `角色卡所有世界书 · 主册 ${charPrimary}`
+      : "角色卡所有世界书";
+  } else {
+    const manualNames = entriesSource.manualSelection.value;
+    entriesSourceLabel.value = manualNames.length ? manualNames.join("、") : "（未选择）";
   }
+}
+
+function resolveEntryEmptyText(names: string[]): string {
+  if (entriesSource.source.value === "character" && names.length === 0) {
+    return tableCopy.worldbook.emptyCharacter;
+  }
+  if (entriesSource.source.value === "manual" && entriesSource.manualSelection.value.length === 0) {
+    return tableCopy.worldbook.emptyManual;
+  }
+  return tableCopy.worldbook.emptyDefault;
+}
+
+function onEntriesSourceChange(value: WorldbookSource): void {
+  entriesSource.setSource(value);
+  void refreshEntriesGroups();
+}
+
+function onEntriesManualBookToggle(name: string, checked: boolean): void {
+  entriesSource.toggleManualBook(name, checked);
+  void refreshEntriesGroups();
+}
+
+async function onInjectionTargetChange(value: string): Promise<void> {
+  await injectionTarget.onSelectorChange(value);
+  await refreshInjectionLabel();
 }
 
 async function refreshAll(): Promise<void> {
   manualUpdate.refresh();
+  settings.refresh();
+  injectionTarget.refreshFromSettings();
+  entriesSource.refreshFromSettings();
   await dashboard.refresh();
+  await Promise.all([injectionWb.refresh(), entriesWb.refresh()]);
+  await Promise.all([refreshInjectionLabel(), refreshEntriesGroups()]);
 }
 
 onMounted(() => {
@@ -352,55 +504,35 @@ watch(useChatChangedTick(), () => {
 watch(useTemplateRuntimeChangeTick(), () => {
   void refreshAll();
 });
+useUiCloseGuard(confirmPromptClose);
 </script>
 
 <style scoped>
 .acu-v2-form-fill-page {
   min-height: 100%;
   min-width: 0;
-  padding: 20px;
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: var(--acu-page-gap, 14px);
 }
 
-.acu-v2-form-fill-page__grid {
-  grid-template-areas:
-    "status mode"
-    "update template"
-    "manual template";
+.acu-v2-form-fill-page__col {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--acu-panel-grid-gap, 16px);
 }
 
-.acu-v2-form-fill-page__panel--status {
-  grid-area: status;
-}
-
-.acu-v2-form-fill-page__panel--update {
-  grid-area: update;
-}
-
-.acu-v2-form-fill-page__panel--mode {
-  grid-area: mode;
-}
-
-.acu-v2-form-fill-page__panel--template {
-  grid-area: template;
-}
-
-.acu-v2-form-fill-page__panel--manual {
-  grid-area: manual;
-}
-
-.acu-v2-form-fill-page__manual-number-grid {
+.acu-v2-form-fill-page__number-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
 
-.acu-v2-form-fill-page__mode-number-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+.acu-v2-form-fill-page__filter {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
 .acu-v2-form-fill-page__status-line {
@@ -418,17 +550,6 @@ watch(useTemplateRuntimeChangeTick(), () => {
 
 .acu-v2-form-fill-page__checkpoint-label {
   color: var(--acu-accent);
-}
-
-.acu-v2-form-fill-page__manual-extra {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.acu-v2-form-fill-page__checkpoint-risk {
-  color: var(--acu-danger);
-  font-weight: 700;
 }
 
 .acu-v2-form-fill-page__table-wrap {
@@ -476,6 +597,17 @@ watch(useTemplateRuntimeChangeTick(), () => {
   color: var(--acu-text-3) !important;
 }
 
+.acu-v2-form-fill-page__hint {
+  margin: 0;
+  font-size: var(--acu-font-size-body, 12px);
+  color: var(--acu-text-3);
+}
+
+.acu-v2-form-fill-page__hint strong {
+  color: var(--acu-text-1);
+  font-weight: 500;
+}
+
 .acu-v2-form-fill-page__actions {
   display: flex;
   justify-content: flex-end;
@@ -485,24 +617,7 @@ watch(useTemplateRuntimeChangeTick(), () => {
 }
 
 @media (max-width: 860px) {
-  .acu-v2-form-fill-page {
-    padding: 14px;
-  }
-
-  .acu-v2-form-fill-page__grid {
-    grid-template-areas:
-      "status"
-      "mode"
-      "update"
-      "manual"
-      "template";
-  }
-
-  .acu-v2-form-fill-page__manual-number-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .acu-v2-form-fill-page__mode-number-grid {
+  .acu-v2-form-fill-page__number-grid {
     grid-template-columns: 1fr;
   }
 }

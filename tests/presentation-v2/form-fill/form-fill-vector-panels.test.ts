@@ -1,5 +1,5 @@
 /**
- * FormFillVectorPanels 集成 — 填表工作台交火模式分支的向量面板骨架与立即构建动作
+ * FormFillVectorPanels 集成 — 填表模式页交火模式分支的向量面板骨架与立即构建动作
  *
  * @vitest-environment jsdom
  */
@@ -74,7 +74,7 @@ async function mountVectorIndexPage(opts: {
   document.head.innerHTML = '';
   localStorage.setItem(STORAGE_KEY, JSON.stringify({
     uiTierV2: { tier: 'high' },
-    router: { activePageId: 'form-fill' },
+    router: { activePageId: 'fill-mode' },
     ...(opts.devOptions ? { devOptions: opts.devOptions } : {}),
   }));
 
@@ -304,9 +304,9 @@ describe('VectorIndexPage', () => {
       .find(panel => panel.querySelector('.acu-panel__title')?.textContent?.includes('关键词生成提示词'))!;
     expect(promptPanel.querySelector('.acu-panel__actions .acu-badge')?.textContent).toContain('使用默认提示词');
     expect(promptPanel.querySelector('.acu-v2-vector-index-page__prompt-overview')).toBeNull();
-    const mobileNavItems = Array.from(document.querySelectorAll('.acu-v2-form-fill-page .acu-mobile-panel-nav__item'))
+    const mobileNavItems = Array.from(document.querySelectorAll('.acu-v2-fill-mode-page .acu-mobile-panel-nav__item'))
       .map(item => item.textContent?.trim());
-    expect(mobileNavItems).toEqual(['表格状态', '填表模式', '自动更新', '手动填表', '表格模板预设', '索引状态', '关键词', '向量服务', '提示词', '召回参数', '归档分块']);
+    expect(mobileNavItems).toEqual(['填表模式', '模式对比', '索引状态', '关键词', '向量服务', '提示词', '召回参数', '归档分块', '剧情推进']);
 
     mount.__resetAcuV2MountForTests();
   });
@@ -325,7 +325,7 @@ describe('VectorIndexPage', () => {
       content: typeof segment.content === 'string' ? segment.content.trim() : segment.content,
     }));
 
-    useRouterStore().setActivePage('form-fill');
+    useRouterStore().setActivePage('fill-mode');
     await nextTick();
 
     const textAfterReturn = document.querySelector('.acu-v2-vector-index-page')?.textContent || '';
@@ -349,9 +349,9 @@ describe('VectorIndexPage', () => {
     expect(text).not.toContain('折叠阈值 K');
     expect(text).not.toContain('V2 写入闸门');
     expect(document.querySelector('.acu-v2-vector-index-page__scope-allowlist')).toBeNull();
-    const mobileNavItems = Array.from(document.querySelectorAll('.acu-v2-form-fill-page .acu-mobile-panel-nav__item'))
+    const mobileNavItems = Array.from(document.querySelectorAll('.acu-v2-fill-mode-page .acu-mobile-panel-nav__item'))
       .map(item => item.textContent?.trim());
-    expect(mobileNavItems.slice(-6)).toEqual(['索引状态', '关键词', '向量服务', '提示词', '召回参数', '归档分块']);
+    expect(mobileNavItems.slice(2, 8)).toEqual(['索引状态', '关键词', '向量服务', '提示词', '召回参数', '归档分块']);
 
     mount.__resetAcuV2MountForTests();
   });
@@ -374,7 +374,7 @@ describe('VectorIndexPage', () => {
 
     expect(document.querySelector('.acu-v2-vector-index-page .acu-page-header')).toBeNull();
     const globalTitle = document.querySelector('.acu-v2-app__page-title');
-    expect(globalTitle?.textContent?.trim()).toBe('填表工作台');
+    expect(globalTitle?.textContent?.trim()).toBe('填表模式');
 
     mount.__resetAcuV2MountForTests();
   });

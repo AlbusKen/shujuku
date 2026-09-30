@@ -47,7 +47,6 @@ export let $apiConfigSectionToggle_ACU: JQRef,
   $statusMessageSpan_ACU: JQRef,
   $cardUpdateStatusDisplay_ACU: JQRef,
   $useMainApiCheckbox_ACU: JQRef,
-  $streamingEnabledCheckbox_ACU: JQRef,
   $manualExtraHintCheckbox_ACU: JQRef,
   $skipUpdateFloorsInput_ACU: JQRef,
   $saveSkipUpdateFloorsButton_ACU: JQRef,
@@ -102,7 +101,6 @@ export function _assignUIPlaceholders_ACU(map: Record<string, JQRef>) {
   if (map.$statusMessageSpan_ACU !== undefined) $statusMessageSpan_ACU = map.$statusMessageSpan_ACU;
   if (map.$cardUpdateStatusDisplay_ACU !== undefined) $cardUpdateStatusDisplay_ACU = map.$cardUpdateStatusDisplay_ACU;
   if (map.$useMainApiCheckbox_ACU !== undefined) $useMainApiCheckbox_ACU = map.$useMainApiCheckbox_ACU;
-  if (map.$streamingEnabledCheckbox_ACU !== undefined) $streamingEnabledCheckbox_ACU = map.$streamingEnabledCheckbox_ACU;
   if (map.$manualExtraHintCheckbox_ACU !== undefined) $manualExtraHintCheckbox_ACU = map.$manualExtraHintCheckbox_ACU;
   if (map.$skipUpdateFloorsInput_ACU !== undefined) $skipUpdateFloorsInput_ACU = map.$skipUpdateFloorsInput_ACU;
   if (map.$saveSkipUpdateFloorsButton_ACU !== undefined) $saveSkipUpdateFloorsButton_ACU = map.$saveSkipUpdateFloorsButton_ACU;

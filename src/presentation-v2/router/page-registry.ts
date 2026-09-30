@@ -2,7 +2,7 @@
  * page-registry — 一级页静态注册表（plan §4.1 + §D24）
  *
  * 页面 id 保持稳定；退役页面通过路由别名兼容。可见性依赖运行时状态
- * 的页通过 uiTier / requiresSqlite / featureGate / visibleWhen 表达，由 router store
+ * 的页通过 minUiTier / requiresSqlite / featureGate / visibleWhen 表达，由 router store
  * 在请求 visiblePages 时计算。
  */
 import { markRaw } from 'vue';
@@ -10,10 +10,9 @@ import type { AcuV2Page } from './page-types';
 
 
 import DashboardPage from '../pages/DashboardPage.vue';
+import FillModePage from '../pages/FillModePage.vue';
 import FormFillPage from '../pages/FormFillPage.vue';
-import TablePage from '../pages/TablePage.vue';
 import ApiPage from '../pages/ApiPage.vue';
-import PlotPage from '../pages/PlotPage.vue';
 import AgentPage from '../pages/AgentPage.vue';
 import ContinuationPage from '../pages/ContinuationPage.vue';
 import WorldSimulationPage from '../pages/WorldSimulationPage.vue';
@@ -23,15 +22,16 @@ import ContentReplacePage from '../pages/ContentReplacePage.vue';
 import AdvancedToolsPage from '../pages/AdvancedToolsPage.vue';
 import DeveloperPage from '../pages/DeveloperPage.vue';
 import { dashboardCopy } from '../copy/dashboard-copy';
+import { fillModeCopy } from '../copy/fill-mode-copy';
 import { useDevOptionsStore } from '../stores/dev-options-store';
 
 /** 正文替换页对应的 feature gate key；页面可见性由仪表盘常驻的正文替换启用开关控制。 */
 export const FEATURE_GATE_CONTENT_REPLACE = 'content-replace';
-export const FEATURE_GATE_PLOT = 'plot';
 export const FEATURE_GATE_CONTINUATION = 'continuation';
 export const FEATURE_GATE_WORLD_SIMULATION = 'world-simulation';
 export const FEATURE_GATE_IMPORT = 'import';
 export const ACU_V2_FORM_FILL_PAGE_ID = 'form-fill';
+export const ACU_V2_FILL_MODE_PAGE_ID = 'fill-mode';
 
 export const ACU_V2_PAGE_REGISTRY: readonly AcuV2Page[] = Object.freeze([
 
@@ -39,9 +39,8 @@ export const ACU_V2_PAGE_REGISTRY: readonly AcuV2Page[] = Object.freeze([
   { id: 'dashboard', title: dashboardCopy.pageTitle, group: 'overview', component: markRaw(DashboardPage) },
 
   // 配置
+  { id: ACU_V2_FILL_MODE_PAGE_ID, title: fillModeCopy.pageTitle, group: 'config', component: markRaw(FillModePage) },
   { id: ACU_V2_FORM_FILL_PAGE_ID, title: '填表工作台', group: 'config', component: markRaw(FormFillPage) },
-  { id: 'table', title: '填表规则', group: 'config', component: markRaw(TablePage), minUiTier: 'medium' },
-  { id: 'plot', title: '剧情推进', group: 'config', component: markRaw(PlotPage), minUiTier: 'medium', featureGate: FEATURE_GATE_PLOT },
   { id: 'agent', title: 'Agent', group: 'config', component: markRaw(AgentPage), minUiTier: 'medium' },
   { id: 'api', title: 'API', group: 'config', component: markRaw(ApiPage) },
 

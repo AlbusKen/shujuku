@@ -429,7 +429,7 @@ const RULES: HintRule[] = [
     steps: [
       '到「填表工作台」的「Embedding / Rerank」面板检查 Embedding / Rerank 的接口地址、密钥和模型名，确认服务商支持该接口。',
       SEE_PREVIOUS_LOG,
-      '可先在填表工作台把填表模式切到经典表格或 LLM 逻辑召回，不影响填表等基础功能。',
+      '可先在填表模式页切到经典表格模式或LLM模型逻辑召回模式，不影响填表等基础功能。',
     ],
   },
   {

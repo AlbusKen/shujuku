@@ -1,5 +1,5 @@
 /**
- * TablePage 集成 — 标签筛选 + 填表提示词 + 注入目标 + 附加世界书条目
+ * 填表工作台 · 填表规则集成 — 标签筛选 + 填表提示词 + 写入目标 + 附加世界书条目
  *
  * @vitest-environment jsdom
  */
@@ -27,6 +27,8 @@ function createSettings() {
     tableContextExcludeTags: '',
     tableContextExcludeRules: [{ start: '<think>', end: '</think>' }],
     storageMode: 'native',
+    // 真实存量设置已由 useDashboardPage 归一化为启用，避免挂载期补写干扰保存次数断言。
+    promptTemplateSettings: { enabled: true },
     charCardPrompt: [
       { role: 'SYSTEM', content: '系统段', deletable: true },
       { role: 'USER', content: '主任务', mainSlot: 'A', isMain: true, deletable: false },
@@ -62,6 +64,14 @@ async function mountTablePage(opts: {
   }));
   vi.doMock('../../../src/service/runtime/state-manager', () => ({
     settings_ACU: settings,
+    currentChatFileIdentifier_ACU: 'chat-table',
+    currentJsonTableData_ACU: null,
+    getCurrentIsolationKey_ACU: () => '',
+    coreApisAreReady_ACU: true,
+    _set_manualExtraHint_ACU: vi.fn(),
+    abortAllActiveRequests_ACU: vi.fn(),
+    _set_wasStoppedByUser_ACU: vi.fn(),
+    _set_isAutoUpdatingCard_ACU: vi.fn(),
   }));
   vi.doMock('../../../src/service/settings/settings-service', () => ({
     saveSettings_ACU: saveSettings,
@@ -87,10 +97,16 @@ async function mountTablePage(opts: {
         { value: 'global:global-A', label: 'global-A（全局预设）', meta: '2 张表' },
         { value: 'snapshot:chat-A', label: 'chat-A（当前聊天快照）', meta: '3 张表' },
       ]),
+      chatArchiveItems: ref([]),
+      runtimeTemplateItem: ref(null),
+      runtimeDiffersFromLibrary: ref(false),
+      runtimeTemplateAvailable: ref(false),
+      chatSnapshotDiffersFromLibrary: ref(false),
       refresh,
       selectGlobalPreset,
       selectChatPreset,
       importPresetForCurrentChat,
+      restoreArchivedChatTemplate: vi.fn(async () => {}),
       exportTemplate: tplExportTemplate,
     };
     },
@@ -242,41 +258,39 @@ beforeEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('TablePage', () => {
+describe('填表工作台 · 填表规则', () => {
   it('注入目标面板挂载世界书失效引用标记', () => {
-    const source = readFileSync('src/presentation-v2/pages/TablePage.vue', 'utf8');
+    const source = readFileSync('src/presentation-v2/pages/FormFillPage.vue', 'utf8');
     expect(source).toContain('<DanglingReferenceBanner scope="worldbook" />');
-    expect(source).toContain("import DanglingReferenceBanner from '../components/DanglingReferenceBanner.vue'");
+    expect(source).toContain('import DanglingReferenceBanner from "../components/DanglingReferenceBanner.vue"');
   });
 
-  it('左右分栏：左列含附加世界书条目与提示词，右列含标签筛选与注入目标', async () => {
+  it('规则组左右分栏：左列含提示词与标签筛选，右列含写入目标与附加世界书条目', async () => {
     const { mount } = await mountTablePage();
 
-    const page = document.querySelector('.acu-v2-table-page');
+    const page = document.querySelector('.acu-v2-form-fill-page');
     expect(page).not.toBeNull();
     const text = page!.textContent || '';
-    expect(document.querySelector('.acu-v2-app__page-title')?.textContent || '').toContain('填表规则');
+    expect(document.querySelector('.acu-v2-app__page-title')?.textContent || '').toContain('填表工作台');
     expect(text).toContain('标签筛选');
     expect(text).toContain('填表提示词');
     expect(text).toContain('写入目标世界书');
     expect(text).toContain('附加世界书条目');
-    expect(text).not.toContain('表格模板预设');
-    expect(text).not.toContain('打开可视化表格编辑器');
     expect(text).not.toContain('表格工具');
-    expect(page!.querySelector('.acu-v2-table-page__tool-card')).toBeNull();
+    expect(page!.querySelector('.acu-v2-form-fill-page__tool-card')).toBeNull();
     expect(text).not.toContain('立即构建交火纪要索引');
     expect(text).not.toContain('Embedding / Rerank');
     expect(Array.from(page!.querySelectorAll('button')).some(b => b.textContent?.trim() === '刷新')).toBe(false);
     expect(page!.querySelector('[data-acu-toggle-key="strictJsonTableFillEnabled"]')).toBeNull();
 
-    const cols = page!.querySelectorAll('.acu-v2-table-page__col');
+    const cols = page!.querySelectorAll('.acu-v2-form-fill-page__col');
     expect(cols.length).toBe(2);
-    const panelTitles = Array.from(page!.querySelectorAll('.acu-panel .acu-panel__title'))
+    const panelTitles = Array.from(page!.querySelectorAll('.acu-v2-form-fill-page__col .acu-panel .acu-panel__title'))
       .map(title => (title.textContent || '').trim());
-    expect(panelTitles).toEqual(['附加世界书条目', '填表提示词', '标签筛选', '写入目标世界书']);
+    expect(panelTitles).toEqual(['填表提示词', '标签筛选', '写入目标世界书', '附加世界书条目']);
     const mobileNavItems = Array.from(page!.querySelectorAll('.acu-mobile-panel-nav__item'))
       .map(item => (item.textContent || '').trim());
-    expect(mobileNavItems).toEqual(['附加世界书条目', '提示词', '标签筛选', '写入目标世界书']);
+    expect(mobileNavItems.slice(-4)).toEqual(['提示词', '标签筛选', '写入目标世界书', '附加世界书条目']);
 
     mount.__resetAcuV2MountForTests();
   });
@@ -317,7 +331,7 @@ describe('TablePage', () => {
   it('每个面板都渲染常驻说明信息条', async () => {
     const { mount } = await mountTablePage();
 
-    const panels = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-table-page .acu-panel'));
+    const panels = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-form-fill-page .acu-panel'));
     expect(panels.length).toBeGreaterThan(0);
     for (const panel of panels) {
       expect(panel.querySelector('.acu-panel__description-region .acu-info-banner')).not.toBeNull();
@@ -329,8 +343,8 @@ describe('TablePage', () => {
   it('注入目标在未解析角色卡世界书时仍显示角色卡绑定世界书默认选项', async () => {
     const { mount } = await mountTablePage({ injectionCharPrimary: null });
 
-    const page = document.querySelector('.acu-v2-table-page') as HTMLElement;
-    const injectionPanel = page.querySelector<HTMLElement>('#table-injection-target-panel')!;
+    const page = document.querySelector('.acu-v2-form-fill-page') as HTMLElement;
+    const injectionPanel = page.querySelector<HTMLElement>('#form-fill-injection-target-panel')!;
     const trigger = injectionPanel.querySelector<HTMLButtonElement>('.acu-select__trigger');
     expect(trigger).not.toBeNull();
     expect(trigger!.textContent).toContain('角色卡绑定世界书');
@@ -349,8 +363,8 @@ describe('TablePage', () => {
   it('附加世界书条目手动模式可以多选世界书', async () => {
     const { mount } = await mountTablePage();
 
-    const page = document.querySelector('.acu-v2-table-page') as HTMLElement;
-    const entriesPanel = page.querySelector<HTMLElement>('#table-entries-panel')!;
+    const page = document.querySelector('.acu-v2-form-fill-page') as HTMLElement;
+    const entriesPanel = page.querySelector<HTMLElement>('#form-fill-entries-panel')!;
     const manualButton = Array.from(entriesPanel.querySelectorAll<HTMLButtonElement>('.acu-segmented__item'))
       .find(button => button.textContent?.trim() === '手动选择')!;
     manualButton.click();
@@ -374,8 +388,8 @@ describe('TablePage', () => {
   it('切换注入目标世界书后立即刷新目前已选提示', async () => {
     const { mount, injectionTargetChange, describeInjectionTarget } = await mountTablePage();
 
-    const page = document.querySelector('.acu-v2-table-page') as HTMLElement;
-    const injectionPanel = page.querySelector<HTMLElement>('#table-injection-target-panel')!;
+    const page = document.querySelector('.acu-v2-form-fill-page') as HTMLElement;
+    const injectionPanel = page.querySelector<HTMLElement>('#form-fill-injection-target-panel')!;
     expect(injectionPanel.textContent).toContain('目前已选: 角色卡绑定世界书 · CharBookT');
 
     const trigger = injectionPanel.querySelector<HTMLButtonElement>('.acu-select__trigger')!;

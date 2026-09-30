@@ -13,7 +13,7 @@ import { renderExcludeRuleRows_ACU } from './optimization-ui';
 import { populateInjectionTargetSelector_ACU, updateWorldbookSourceView_ACU } from './worldbook-selector';
 import { updateApiModeView_ACU, updateApiStatusDisplay_ACU, updateCustomApiInputsState_ACU } from '../triggers/settings-ui-sync';
 import { jQuery_API_ACU } from '../dom-utils';
-import { $popupInstance_ACU, $statusMessageSpan_ACU, $manualUpdateCardButton_ACU, $customApiUrlInput_ACU, $customApiKeyInput_ACU, $maxTokensInput_ACU, $temperatureInput_ACU, $customApiModelInput_ACU, $customApiModelSelect_ACU, $charCardPromptSegmentsContainer_ACU, $autoUpdateThresholdInput_ACU, $autoUpdateFrequencyInput_ACU, $autoUpdateTokenThresholdInput_ACU, $updateBatchSizeInput_ACU, $maxConcurrentGroupsInput_ACU, $skipUpdateFloorsInput_ACU, $retainRecentLayersInput_ACU, $autoUpdateEnabledCheckbox_ACU, $standardizedTableFillEnabledCheckbox_ACU, $toastMuteEnabledCheckbox_ACU, $promptTemplateEnabledCheckbox_ACU, $tableEditLastPairOnlyCheckbox_ACU, $tableMaxRetriesInput_ACU, $useMainApiCheckbox_ACU, $streamingEnabledCheckbox_ACU, $manualTableSelector_ACU, $importTableSelector_ACU, _assignUIPlaceholders_ACU } from '../state/ui-refs';
+import { $popupInstance_ACU, $statusMessageSpan_ACU, $manualUpdateCardButton_ACU, $customApiUrlInput_ACU, $customApiKeyInput_ACU, $maxTokensInput_ACU, $temperatureInput_ACU, $customApiModelInput_ACU, $customApiModelSelect_ACU, $charCardPromptSegmentsContainer_ACU, $autoUpdateThresholdInput_ACU, $autoUpdateFrequencyInput_ACU, $autoUpdateTokenThresholdInput_ACU, $updateBatchSizeInput_ACU, $maxConcurrentGroupsInput_ACU, $skipUpdateFloorsInput_ACU, $retainRecentLayersInput_ACU, $autoUpdateEnabledCheckbox_ACU, $standardizedTableFillEnabledCheckbox_ACU, $toastMuteEnabledCheckbox_ACU, $promptTemplateEnabledCheckbox_ACU, $tableEditLastPairOnlyCheckbox_ACU, $tableMaxRetriesInput_ACU, $useMainApiCheckbox_ACU, $manualTableSelector_ACU, $importTableSelector_ACU, _assignUIPlaceholders_ACU } from '../state/ui-refs';
 // status-display.ts — 对应源文件有跨文件依赖，保留在原位
 
   // [T172] 可视化编辑器刷新通知（从 service/worldbook/pipeline.ts 提取）
@@ -212,7 +212,6 @@ import { $popupInstance_ACU, $statusMessageSpan_ACU, $manualUpdateCardButton_ACU
               : '使用前请先配置好 Embedding 模型以及可选 Rerank 模型；开启后会在纪要表填写完成时立即归档外置概要列向量索引，达到门槛后发送前覆盖原概要索引条目。');
       }
       if ($useMainApiCheckbox_ACU) { $useMainApiCheckbox_ACU.prop('checked', s.apiConfig.useMainApi); if (typeof updateCustomApiInputsState_ACU === 'function') updateCustomApiInputsState_ACU(); }
-      if ($streamingEnabledCheckbox_ACU) $streamingEnabledCheckbox_ACU.prop('checked', s.streamingEnabled || false);
       if ($manualTableSelector_ACU && typeof renderManualTableSelector_ACU === 'function') renderManualTableSelector_ACU();
       if ($importTableSelector_ACU && typeof renderImportTableSelector_ACU === 'function') renderImportTableSelector_ACU();
       $popupInstance_ACU.find(`input[name="${SCRIPT_ID_PREFIX_ACU}-api-mode"][value="${s.apiMode}"]`).prop('checked', true);

@@ -53,6 +53,17 @@ export function getVectorPipelinePlanForCurrentChat_ACU(): VectorPipelinePlan_AC
 }
 
 /**
+ * UI 展示用：当前显式选择的填表模式是否使用向量召回。
+ * 只看用户保存过的 selectedMode，不吃旧交火全局开关与经典模式的临时回退，
+ * 避免经典模式下仍把向量服务标成必需项。
+ */
+export function isVectorModeExplicitlySelected_ACU(): boolean {
+  const { preferences, source } = readFillModePreferences_ACU();
+  if (source === 'default') return false;
+  return preferences.selectedMode === 'vector' || preferences.selectedMode === 'crossfire';
+}
+
+/**
  * 当前聊天是否运行向量管线（向量表格或交火）。
  * 推导失败时回退旧交火开关并记录诊断，保持升级前行为，不静默关闭已有交火。
  */

@@ -43,18 +43,18 @@ afterEach(() => {
 });
 
 describe('router-store · pageRegistry 基线', () => {
-  it('注册表恰好 13 项，分布于 5 分组', async () => {
+  it('注册表恰好 12 项，分布于 5 分组', async () => {
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
-    expect(r.pageRegistry.length).toBe(13);
+    expect(r.pageRegistry.length).toBe(12);
     const byGroup = r.pageRegistry.reduce<Record<string, number>>((acc, p) => {
       acc[p.group] = (acc[p.group] || 0) + 1;
       return acc;
     }, {});
     expect(byGroup).toEqual({
       overview: 1,
-      config: 5,
+      config: 4,
       feature: 4,
       tool: 2,
       developer: 1,
@@ -69,9 +69,8 @@ describe('router-store · pageRegistry 基线', () => {
     expect(r.pageRegistry.map(p => [p.id, p.title, p.group])).toEqual([
 
       ['dashboard', '仪表盘', 'overview'],
+      ['fill-mode', '填表模式', 'config'],
       ['form-fill', '填表工作台', 'config'],
-      ['table', '填表规则', 'config'],
-      ['plot', '剧情推进', 'config'],
       ['agent', 'Agent', 'config'],
       ['api', 'API', 'config'],
       ['continuation', '智能续写', 'feature'],
@@ -91,7 +90,7 @@ describe('router-store · 基础模式默认可见性', () => {
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
     expect(r.activePageId).toBe('form-fill');
-    expect(r.visiblePages.map(p => p.id)).toEqual(['dashboard', 'form-fill', 'api']);
+    expect(r.visiblePages.map(p => p.id)).toEqual(['dashboard', 'fill-mode', 'form-fill', 'api']);
     expect(r.visiblePagesByGroup.overview.map(p => p.id)).toEqual(['dashboard']);
   });
 
@@ -99,7 +98,7 @@ describe('router-store · 基础模式默认可见性', () => {
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
-    r.setActivePage('table');
+    r.setActivePage('agent');
     expect(r.activePageId).toBe('form-fill');
     r.setActivePage('api');
     expect(r.activePageId).toBe('api');
@@ -214,13 +213,13 @@ describe('router-store · 高手模式可见性', () => {
     expect(state.settings_ACU.contentOptimizationSettings?.enabled).toBe(true);
   });
 
-  it('高手模式格林推演默认隐藏：overview=1 / config=5 / feature=2 / tool=2 / developer=0', async () => {
+  it('高手模式格林推演默认隐藏：overview=1 / config=4 / feature=2 / tool=2 / developer=0', async () => {
     persistAdvancedMode();
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
     expect(r.visiblePagesByGroup.overview.length).toBe(1);
-    expect(r.visiblePagesByGroup.config.length).toBe(5);
+    expect(r.visiblePagesByGroup.config.length).toBe(4);
     expect(r.visiblePagesByGroup.feature.length).toBe(2);
     expect(r.visiblePages.map(p => p.id)).not.toContain('world-simulation');
     expect(r.visiblePagesByGroup.tool.length).toBe(2); // 数据管理 + 高级工具
@@ -297,7 +296,7 @@ describe('router-store · 切页 + 持久化', () => {
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
     expect(r.activePageId).toBe('form-fill');
-    expect(r.visiblePages.map(p => p.id)).toEqual(['dashboard', 'form-fill', 'api']);
+    expect(r.visiblePages.map(p => p.id)).toEqual(['dashboard', 'fill-mode', 'form-fill', 'api']);
   });
 
   it('高手模式未持久化路由时默认页是 dashboard', async () => {
@@ -309,11 +308,26 @@ describe('router-store · 切页 + 持久化', () => {
   });
 
   it('localStorage 中已有合法 id 时使用持久化值', async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ uiTierV2: { tier: 'high' }, router: { activePageId: 'agent' } }));
+    const m = await freshImport();
+    m.pinia.setActivePinia(m.pinia.createPinia());
+    const r = m.router.useRouterStore();
+    expect(r.activePageId).toBe('agent');
+  });
+
+  it('退役页面路由别名：plot / vector-index 进入填表模式，table 进入填表工作台', async () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ uiTierV2: { tier: 'high' }, router: { activePageId: 'plot' } }));
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
-    expect(r.activePageId).toBe('plot');
+    expect(r.activePageId).toBe('fill-mode');
+    r.setActivePage('table');
+    expect(r.activePageId).toBe('form-fill');
+    r.setActivePage('vector-index');
+    expect(r.activePageId).toBe('fill-mode');
+    const ids = r.pageRegistry.map(p => p.id);
+    expect(ids).not.toContain('plot');
+    expect(ids).not.toContain('table');
   });
 
   it('旧 SQL 控制台持久化路由会迁移到高级工具', async () => {
@@ -362,18 +376,13 @@ describe('router-store · 切页 + 持久化', () => {
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
 
-    expect(r.visiblePagesByGroup.config.map(p => p.id)).toContain('plot');
+    expect(r.visiblePagesByGroup.config.map(p => p.id)).not.toContain('plot');
     expect(r.visiblePagesByGroup.feature.map(p => p.id)[0]).toBe('continuation');
     expect(r.visiblePagesByGroup.feature.map(p => p.id)).not.toContain('world-simulation');
     r.setFeatureGate(m.registry.FEATURE_GATE_WORLD_SIMULATION, true);
     expect(r.visiblePagesByGroup.feature.map(p => p.id)).toContain('world-simulation');
     expect(r.visiblePagesByGroup.feature.map(p => p.id)).toContain('import');
     expect(r.visiblePages.map(p => p.id)).not.toContain('vector-index');
-
-    r.setFeatureGate(m.registry.FEATURE_GATE_PLOT, false);
-    expect(r.visiblePages.map(p => p.id)).not.toContain('plot');
-    r.setActivePage('plot');
-    expect(r.activePageId).toBe('dashboard');
 
     r.setFeatureGate(m.registry.FEATURE_GATE_CONTINUATION, false);
     r.setFeatureGate(m.registry.FEATURE_GATE_WORLD_SIMULATION, false);
@@ -447,7 +456,7 @@ describe('router-store · 崩溃哨兵', () => {
   });
 
   it('markBootComplete 仅在 generation 匹配时清除 bootPending', async () => {
-    persistAdvancedMode('plot');
+    persistAdvancedMode('agent');
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
@@ -457,7 +466,7 @@ describe('router-store · 崩溃哨兵', () => {
     r.markBootComplete(generation);
     const persisted = JSON.parse(localStorage.getItem(STORAGE_KEY)!).router;
     expect(persisted.bootPending).toBe(false);
-    expect(persisted.activePageId).toBe('plot');
+    expect(persisted.activePageId).toBe('agent');
   });
 
   it('armBootPending 递增 generation，过期 complete 不能清掉新哨兵', async () => {

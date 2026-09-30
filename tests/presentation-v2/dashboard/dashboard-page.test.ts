@@ -245,6 +245,7 @@ async function mountDashboardPage(
     return {
       ...actual,
       isVectorPipelineEnabledForCurrentChat_ACU: () => options.vectorPipelineEnabled === true,
+      isVectorModeExplicitlySelected_ACU: () => options.vectorPipelineEnabled === true,
     };
   });
   vi.doMock("../../../src/service/ai/ai-service", () => ({
@@ -388,7 +389,7 @@ describe("DashboardPage", () => {
     expect(text).toContain("高级设置");
     expect(text).toContain("自动更新");
     expect(text).toContain("静默提示框");
-    expect(text).toContain("开启流式输出");
+    expect(text).not.toContain("开启流式输出");
     expect(text).toContain("0TK 占用模式");
 
     const visibleToggleKeys = Array.from(
@@ -397,11 +398,9 @@ describe("DashboardPage", () => {
       ),
     ).map((button) => button.dataset.acuToggleKey);
     expect(visibleToggleKeys).toEqual([
-      "flightMode",
       "autoUpdateEnabled",
       "toastMuteEnabled",
       "zeroTkOccupyModeDefault",
-      "streamingEnabled",
     ]);
 
     // 默认在基础设置视图下，高级字段不可见
@@ -702,20 +701,15 @@ describe("DashboardPage", () => {
     expect(text).not.toContain("embeddingModel");
     expect(text).not.toContain(`服务${"地址"}`);
     expect(text).not.toContain(`模型${"名称"}`);
-    expect(text).toContain("前往填表工作台");
+    expect(text).toContain("前往填表模式");
 
     mount.__resetAcuV2MountForTests();
   });
 
-  it("飞行模式开关调用会话级入口，并在失败时展示可见错误", async () => {
-    const { mount, enableFlightMode } = await mountDashboardPage();
-    const toggle = document.querySelector('button[data-acu-toggle-key="flightMode"]') as HTMLButtonElement;
-
-    expect(toggle).not.toBeNull();
-    toggle.click();
-    await new Promise((r) => setTimeout(r, 0));
-    expect(enableFlightMode).toHaveBeenCalledOnce();
-    expect(document.body.textContent || "").toContain("已开启当前会话的飞行模式。");
+  it("仪表盘不再提供飞行模式开关", async () => {
+    const { mount } = await mountDashboardPage();
+    expect(document.querySelector('button[data-acu-toggle-key="flightMode"]')).toBeNull();
+    expect(document.querySelector(".acu-v2-dashboard-page")?.textContent || "").not.toContain("飞行模式");
 
     mount.__resetAcuV2MountForTests();
   });
@@ -754,7 +748,7 @@ describe("DashboardPage", () => {
 
     const text =
       document.querySelector(".acu-v2-dashboard-page")?.textContent || "";
-    expect(text).toContain("剧情推进");
+    expect(document.querySelector('button[data-acu-toggle-key="plotEnabled"]')).toBeNull();
     expect(text).toContain("智能续写");
     expect(text).toContain("格林推演");
     expect(text).toContain("外部导入");
@@ -775,7 +769,6 @@ describe("DashboardPage", () => {
       ),
     ).map((button) => button.dataset.acuToggleKey);
     expect(visibleToggleKeys).toEqual([
-      "plotEnabled",
       "continuationPageEnabled",
       "worldSimulationPageEnabled",
       "externalImportPageEnabled",
@@ -810,20 +803,9 @@ describe("DashboardPage", () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it("修改流式输出开关会保存 settings", async () => {
-    const { mount, settings, saveSettings } = await mountDashboardPage();
-
-    const toggle = document.querySelector(
-      'button[data-acu-toggle-key="streamingEnabled"]',
-    ) as HTMLButtonElement;
-    expect(toggle).not.toBeNull();
-    expect(toggle.getAttribute("aria-checked")).toBe("false");
-    toggle.click();
-    await new Promise((r) => setTimeout(r, 0));
-
-    expect(settings.streamingEnabled).toBe(true);
-    expect(toggle.getAttribute("aria-checked")).toBe("true");
-    expect(saveSettings).toHaveBeenCalled();
+  it("仪表盘不再渲染流式输出开关", async () => {
+    const { mount } = await mountDashboardPage();
+    expect(document.querySelector('button[data-acu-toggle-key="streamingEnabled"]')).toBeNull();
 
     mount.__resetAcuV2MountForTests();
   });
@@ -947,7 +929,7 @@ describe("DashboardPage", () => {
 
     let text =
       document.querySelector(".acu-v2-dashboard-page")?.textContent || "";
-    expect(text).toContain("剧情推进");
+    expect(text).not.toContain("剧情推进");
     expect(text).toContain("智能续写");
     expect(text).toContain("格林推演");
     expect(text).toContain("外部导入");
@@ -969,9 +951,6 @@ describe("DashboardPage", () => {
       document.querySelector(".acu-v2-sidebar")?.textContent || "",
     ).not.toContain("交火模式");
 
-    const plotToggle = document.querySelector(
-      'button[data-acu-toggle-key="plotEnabled"]',
-    ) as HTMLButtonElement;
     const continuationToggle = document.querySelector(
       'button[data-acu-toggle-key="continuationPageEnabled"]',
     ) as HTMLButtonElement;
@@ -981,7 +960,7 @@ describe("DashboardPage", () => {
     const importToggle = document.querySelector(
       'button[data-acu-toggle-key="externalImportPageEnabled"]',
     ) as HTMLButtonElement;
-    expect(plotToggle).not.toBeNull();
+    expect(document.querySelector('button[data-acu-toggle-key="plotEnabled"]')).toBeNull();
     expect(continuationToggle).not.toBeNull();
     expect(worldSimulationToggle).not.toBeNull();
     expect(importToggle).not.toBeNull();
@@ -1011,13 +990,6 @@ describe("DashboardPage", () => {
     text = document.querySelector(".acu-v2-sidebar")?.textContent || "";
     expect(text).not.toContain("功能");
     expect(text).not.toContain("格林推演");
-
-    plotToggle.click();
-    await Promise.resolve();
-
-    expect(settings.plotSettings.enabled).toBe(true);
-    text = document.querySelector(".acu-v2-sidebar")?.textContent || "";
-    expect(text).toContain("剧情推进");
 
     mount.__resetAcuV2MountForTests();
   });
@@ -1051,7 +1023,6 @@ describe("DashboardPage", () => {
       ),
     ).map((button) => button.dataset.acuToggleKey);
     expect(visibleToggleKeys).toEqual([
-      "plotEnabled",
       "continuationPageEnabled",
       "worldSimulationPageEnabled",
       "externalImportPageEnabled",

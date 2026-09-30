@@ -150,6 +150,7 @@ vi.mock('../../../src/shared/defaults', () => ({
   TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU: 'test-table-fill-tool-prompt-upgrade',
   TEMPLATE_ASSISTANT_PROMPT_FORCE_DEFAULT_VERSION_ACU: 'test-template-assistant-prompt-force-default',
   STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU: 'test-strict-json-force-disable',
+  STREAMING_FORCE_DISABLE_VERSION_ACU: 'test-streaming-force-disable',
   VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU: 'spv3.6.3-keyword-prompt-content-based-refresh',
   VECTOR_MEMORY_SOURCE_TEXT_UPGRADE_VERSION_ACU: 'spv9.2-chronicle-source-text',
   VECTOR_MEMORY_LEGACY_MIN_SCORE_DEFAULTS_ACU: [0.45],

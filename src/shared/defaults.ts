@@ -214,6 +214,9 @@ export const TEMPLATE_ASSISTANT_PROMPT_FORCE_DEFAULT_VERSION_ACU = 'spv8.9.4-for
 export const STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU = 'spv8.9.3-force-disable-strict-json-table-fill';
 // 填表默认提示词改为只用 table_edit / table_sql 工具提交的一次性升级：仅替换主段完整命中历史默认的提示词，用户改写保留。
 export const TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU = 'spv9.4.1-table-fill-tool-only-prompt';
+// 一次性强制关闭流式传输：UI 开关已移除，底层能力保留。
+// 执行后写入 marker 不再重复；同时清理 API 预设 apiConfig 内可能残留的同名字段。
+export const STREAMING_FORCE_DISABLE_VERSION_ACU = 'spv9.5-force-disable-streaming';
 
 
 

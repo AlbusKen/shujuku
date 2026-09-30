@@ -35,11 +35,6 @@ export function generateApiTabHTML(): string {
                                 <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-use-main-api-checkbox">
                                 <label for="${SCRIPT_ID_PREFIX_ACU}-use-main-api-checkbox">使用主API (直接使用酒馆当前API和模型)</label>
                             </div>
-                             <div class="checkbox-group">
-                                <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-streaming-enabled-checkbox">
-                                <label for="${SCRIPT_ID_PREFIX_ACU}-streaming-enabled-checkbox">启用流式传输 (Streaming)</label>
-                            </div>
-                            <small class="notes">开启后，所有AI调用将使用流式传输，可减少首字节响应时间。默认关闭。</small>
                             <div id="${SCRIPT_ID_PREFIX_ACU}-custom-api-fields">
                                 <p class="notes" style="color: var(--acu-warning);"><b>安全提示:</b> API密钥将保存在浏览器本地存储中。</p>
                                 <label for="${SCRIPT_ID_PREFIX_ACU}-api-url">API基础URL:</label>

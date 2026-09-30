@@ -326,20 +326,19 @@ describe('FormFillPage', () => {
     expect(text).not.toContain('并发策略');
     expect(text).not.toContain('历史数据保留');
     expect(text).not.toContain('沿用当前自定义参数');
-    expect(text).not.toContain('标签筛选');
     expect(text).not.toContain('内容过滤');
     expect(text).not.toContain('填表触发条件');
     expect(document.getElementById('form-fill-trigger-panel')).toBeNull();
     expect(text).not.toContain('高级数值');
     expect(text).not.toContain('填表注入目标世界书');
     expect(text).not.toContain('填表附加世界书条目');
-    expect(text).not.toContain('注入目标世界书');
-    expect(text).not.toContain('附加世界书条目');
-    expect(text).not.toContain('填表提示词');
-    expect(text).not.toContain('已自定义提示词');
+    // 填表规则已并入填表工作台：提示词、标签筛选、写入目标与附加条目常驻本页。
+    expect(text).toContain('填表提示词');
+    expect(text).toContain('编辑提示词');
+    expect(text).toContain('标签筛选');
+    expect(text).toContain('附加世界书条目');
     expect(text).not.toContain('段落数量');
     expect(text).not.toContain('保存状态');
-    expect(text).not.toContain('编辑提示词');
     expect(text).toContain('手动填表');
     expect(text).toContain('填表 API 预设');
     expect(text).toContain('本次填表附加要求');
@@ -354,10 +353,13 @@ describe('FormFillPage', () => {
     expect(page!.querySelector('.acu-prompt-segs')).toBeNull();
     const panelTitles = Array.from(page!.querySelectorAll('.acu-v2-form-fill-page__grid > .acu-panel .acu-panel__title'))
       .map(title => (title.textContent || '').trim());
-    expect(panelTitles).toEqual(['表格状态', '填表模式', '自动更新设置', '表格模板预设', '手动填表']);
+    expect(panelTitles).toEqual(['表格状态', '自动更新设置', '手动填表', '表格模板预设']);
+    const ruleTitles = Array.from(page!.querySelectorAll('.acu-v2-form-fill-page__col .acu-panel__title'))
+      .map(title => (title.textContent || '').trim());
+    expect(ruleTitles).toEqual(['填表提示词', '标签筛选', '写入目标世界书', '附加世界书条目']);
     const mobileNavItems = Array.from(page!.querySelectorAll('.acu-mobile-panel-nav__item'))
       .map(item => (item.textContent || '').trim());
-    expect(mobileNavItems).toEqual(['表格状态', '填表模式', '自动更新', '手动填表', '表格模板预设']);
+    expect(mobileNavItems).toEqual(['表格状态', '自动更新', '手动填表', '表格模板预设', '提示词', '标签筛选', '写入目标世界书', '附加世界书条目']);
     expect(document.getElementById('form-fill-update-panel')).not.toBeNull();
     expect(page!.querySelector('.acu-v2-form-fill-page__panel--manual')).not.toBeNull();
 
@@ -365,7 +367,7 @@ describe('FormFillPage', () => {
   });
 
   it('标签筛选里的 tableEdit 解析开关会保存设置', async () => {
-    const { mount, settings, saveSettings } = await mountFormFillPage(createSettings(), 'table');
+    const { mount, settings, saveSettings } = await mountFormFillPage(createSettings(), 'form-fill');
 
     const toggle = document.querySelector(
       'button[data-acu-setting-key="tableEditLastPairOnly"]',
@@ -567,7 +569,7 @@ describe('FormFillPage', () => {
   });
 
   it('打开提示词抽屉时不显示其他面板的保存消息', async () => {
-    const { mount } = await mountFormFillPage(createSettings(), 'table');
+    const { mount } = await mountFormFillPage(createSettings(), 'form-fill');
 
     const toggle = document.querySelector(
       'button[data-acu-setting-key="tableEditLastPairOnly"]',
@@ -588,7 +590,7 @@ describe('FormFillPage', () => {
   });
 
   it('添加排除规则会写入结构化规则', async () => {
-    const { mount, settings, saveSettings } = await mountFormFillPage(createSettings(), 'table');
+    const { mount, settings, saveSettings } = await mountFormFillPage(createSettings(), 'form-fill');
 
     const excludePanel = Array.from(document.querySelectorAll('.acu-panel'))
       .find(panel => (panel.textContent || '').includes('排除规则')) as HTMLElement;
@@ -628,7 +630,7 @@ describe('FormFillPage', () => {
   });
 
   it('提示词编辑器只在侧抽屉中出现，保存后写回 charCardPrompt', async () => {
-    const { mount, settings, saveSettings } = await mountFormFillPage(createSettings(), 'table');
+    const { mount, settings, saveSettings } = await mountFormFillPage(createSettings(), 'form-fill');
 
     expect(document.querySelector('.acu-v2-table-page .acu-prompt-segs')).toBeNull();
     const openButton = Array.from(document.querySelectorAll('button'))
@@ -657,7 +659,7 @@ describe('FormFillPage', () => {
   });
 
   it('关闭有未保存修改的提示词抽屉会确认', async () => {
-    const { mount } = await mountFormFillPage(createSettings(), 'table');
+    const { mount } = await mountFormFillPage(createSettings(), 'form-fill');
 
     const openButton = Array.from(document.querySelectorAll('button'))
       .find(btn => btn.textContent?.includes('编辑提示词')) as HTMLButtonElement;
@@ -682,7 +684,7 @@ describe('FormFillPage', () => {
   });
 
   it('提示词抽屉有未保存修改时关闭整个 UI 会确认', async () => {
-    const { mount } = await mountFormFillPage(createSettings(), 'table');
+    const { mount } = await mountFormFillPage(createSettings(), 'form-fill');
 
     const openButton = Array.from(document.querySelectorAll('button'))
       .find(btn => btn.textContent?.includes('编辑提示词')) as HTMLButtonElement;

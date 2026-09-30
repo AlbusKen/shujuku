@@ -11,7 +11,7 @@ import { DEFAULT_BUILTIN_PLOT_PRESETS_ACU, DEFAULT_CHAR_CARD_PROMPT_ACU, DEFAULT
 import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU, STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU, SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU, TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU, USER_PREFILL_PROFILE_FORCE_DEFAULT_VERSION_ACU, USER_PREFILL_VECTOR_FORCE_DEFAULT_VERSION_ACU, TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU, TEMPLATE_ASSISTANT_PROMPT_FORCE_DEFAULT_VERSION_ACU, VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU, VECTOR_MEMORY_LEGACY_MIN_SCORE_DEFAULTS_ACU, VECTOR_MEMORY_RECALL_PARAM_KEYS_ACU, VECTOR_MEMORY_RECALL_PARAMS_FORCE_OVERRIDE_VERSION_ACU, VECTOR_MEMORY_SOURCE_TEXT_UPGRADE_VERSION_ACU, buildDefaultAgentWorldbookControl_ACU, buildDefaultAgentWorldbookPromptTemplates_ACU, buildDefaultPlotWorldbookConfig_ACU, buildDefaultContentOptimizationPromptGroup_ACU, defaultWorldbookConfig_ACU, defaultVectorMemoryConfig_ACU } from '../../shared/defaults';
 import { addDataIsolationHistory_ACU, ensureProfileExists_ACU, normalizeDataIsolationHistory_ACU } from '../../data/repositories/isolation-repo';
 import { TABLE_FILL_MAIN_PROMPT_HISTORY_ACU } from '../../shared/defaults-json.js';
-import { TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU } from '../../shared/defaults';
+import { STREAMING_FORCE_DISABLE_VERSION_ACU, TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU } from '../../shared/defaults';
 import { globalMeta_ACU, loadGlobalMeta_ACU, readProfileSettingsFromStorage_ACU, readProfileTemplateFromStorage_ACU, sanitizeSettingsForProfileSave_ACU, saveGlobalMeta_ACU, writeProfileSettingsToStorage_ACU, writeProfileTemplateToStorage_ACU } from '../../data/repositories/profile-repo';
 import { getCurrentTemplatePresetName_ACU, normalizeTemplatePresetSelectionValue_ACU } from '../../shared/template-preset-utils';
 import { persistSettingsToStorage_ACU } from '../../data/storage/config-storage';
@@ -777,6 +777,7 @@ export   function loadSettings_ACU() {
       upgradeTableFillToolPromptOnce_ACU();
       forceUserPrefillProfilePromptsOnce_ACU();
       forceDefaultTemplateAssistantPromptOnce_ACU();
+      forceDisableStreamingOnce_ACU();
 
       if (shouldPersistSettingsAfterLoad_ACU) {
           saveGlobalMeta_ACU();
@@ -1068,6 +1069,42 @@ function forceDefaultTemplateAssistantPromptOnce_ACU() {
           logDebug_ACU(`[AI 改表助手] 已一次性恢复内置默认提示词并记录版本: ${TEMPLATE_ASSISTANT_PROMPT_FORCE_DEFAULT_VERSION_ACU}`);
       } catch (error) {
           logWarn_ACU('[AI 改表助手] 一次性恢复默认提示词失败:', error);
+      }
+  }
+
+/**
+ * 一次性强制关闭流式传输。UI 开关已移除，底层能力与字段保留；
+ * 同时清理各 API 预设 apiConfig 内可能残留的同名字段，避免历史值继续生效。
+ * marker 写入后不再执行。
+ */
+function forceDisableStreamingOnce_ACU() {
+      if (!settings_ACU || typeof settings_ACU !== 'object') return;
+      if (settings_ACU.streamingForceDisableVersion === STREAMING_FORCE_DISABLE_VERSION_ACU) return;
+      const previousStreaming = settings_ACU.streamingEnabled;
+      const previousVersion = settings_ACU.streamingForceDisableVersion;
+      const restorePresets: Array<{ config: Record<string, any>; value: unknown; had: boolean }> = [];
+      try {
+          settings_ACU.streamingEnabled = false;
+          if (Array.isArray(settings_ACU.apiPresets)) {
+              for (const preset of settings_ACU.apiPresets) {
+                  const config = preset?.apiConfig;
+                  if (!config || typeof config !== 'object' || Array.isArray(config)) continue;
+                  const had = Object.prototype.hasOwnProperty.call(config, 'streamingEnabled');
+                  if (!had) continue;
+                  restorePresets.push({ config, value: config.streamingEnabled, had });
+                  delete config.streamingEnabled;
+              }
+          }
+          settings_ACU.streamingForceDisableVersion = STREAMING_FORCE_DISABLE_VERSION_ACU;
+          saveSettings_ACU();
+          logDebug_ACU(`[流式传输] 已一次性强制关闭并记录版本: ${STREAMING_FORCE_DISABLE_VERSION_ACU}`);
+      } catch (error) {
+          settings_ACU.streamingEnabled = previousStreaming;
+          settings_ACU.streamingForceDisableVersion = previousVersion;
+          for (const item of restorePresets) {
+              if (item.had) item.config.streamingEnabled = item.value;
+          }
+          logWarn_ACU('[流式传输] 一次性强制关闭未保存，下一次加载重试:', error);
       }
   }
 

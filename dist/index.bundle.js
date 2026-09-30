@@ -4151,6 +4151,9 @@ $CONTENT
     const STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU = 'spv8.9.3-force-disable-strict-json-table-fill';
     // 填表默认提示词改为只用 table_edit / table_sql 工具提交的一次性升级：仅替换主段完整命中历史默认的提示词，用户改写保留。
     const TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU = 'spv9.4.1-table-fill-tool-only-prompt';
+    // 一次性强制关闭流式传输：UI 开关已移除，底层能力保留。
+    // 执行后写入 marker 不再重复；同时清理 API 预设 apiConfig 内可能残留的同名字段。
+    const STREAMING_FORCE_DISABLE_VERSION_ACU = 'spv9.5-force-disable-streaming';
     // --- 交火模式纪要索引全局默认配置（独立于世界书配置，跟随数据库全局设置） ---
     const defaultVectorMemoryConfig_ACU = {
         enabled: false,
@@ -106695,6 +106698,17 @@ $CONTENT
         }).vectorPipeline;
     }
     /**
+     * UI 展示用：当前显式选择的填表模式是否使用向量召回。
+     * 只看用户保存过的 selectedMode，不吃旧交火全局开关与经典模式的临时回退，
+     * 避免经典模式下仍把向量服务标成必需项。
+     */
+    function isVectorModeExplicitlySelected_ACU() {
+        const { preferences, source } = readFillModePreferences_ACU();
+        if (source === 'default')
+            return false;
+        return preferences.selectedMode === 'vector' || preferences.selectedMode === 'crossfire';
+    }
+    /**
      * 当前聊天是否运行向量管线（向量表格或交火）。
      * 推导失败时回退旧交火开关并记录诊断，保持升级前行为，不静默关闭已有交火。
      */
@@ -108274,6 +108288,7 @@ $CONTENT
         upgradeTableFillToolPromptOnce_ACU();
         forceUserPrefillProfilePromptsOnce_ACU();
         forceDefaultTemplateAssistantPromptOnce_ACU();
+        forceDisableStreamingOnce_ACU();
         if (shouldPersistSettingsAfterLoad_ACU) {
             saveGlobalMeta_ACU();
             persistSettingsToStorage_ACU(settings_ACU, activeCode);
@@ -108568,6 +108583,47 @@ $CONTENT
         }
         catch (error) {
             logWarn_ACU('[AI 改表助手] 一次性恢复默认提示词失败:', error);
+        }
+    }
+    /**
+     * 一次性强制关闭流式传输。UI 开关已移除，底层能力与字段保留；
+     * 同时清理各 API 预设 apiConfig 内可能残留的同名字段，避免历史值继续生效。
+     * marker 写入后不再执行。
+     */
+    function forceDisableStreamingOnce_ACU() {
+        if (!settings_ACU || typeof settings_ACU !== 'object')
+            return;
+        if (settings_ACU.streamingForceDisableVersion === STREAMING_FORCE_DISABLE_VERSION_ACU)
+            return;
+        const previousStreaming = settings_ACU.streamingEnabled;
+        const previousVersion = settings_ACU.streamingForceDisableVersion;
+        const restorePresets = [];
+        try {
+            settings_ACU.streamingEnabled = false;
+            if (Array.isArray(settings_ACU.apiPresets)) {
+                for (const preset of settings_ACU.apiPresets) {
+                    const config = preset?.apiConfig;
+                    if (!config || typeof config !== 'object' || Array.isArray(config))
+                        continue;
+                    const had = Object.prototype.hasOwnProperty.call(config, 'streamingEnabled');
+                    if (!had)
+                        continue;
+                    restorePresets.push({ config, value: config.streamingEnabled, had });
+                    delete config.streamingEnabled;
+                }
+            }
+            settings_ACU.streamingForceDisableVersion = STREAMING_FORCE_DISABLE_VERSION_ACU;
+            saveSettings_ACU();
+            logDebug_ACU(`[流式传输] 已一次性强制关闭并记录版本: ${STREAMING_FORCE_DISABLE_VERSION_ACU}`);
+        }
+        catch (error) {
+            settings_ACU.streamingEnabled = previousStreaming;
+            settings_ACU.streamingForceDisableVersion = previousVersion;
+            for (const item of restorePresets) {
+                if (item.had)
+                    item.config.streamingEnabled = item.value;
+            }
+            logWarn_ACU('[流式传输] 一次性强制关闭未保存，下一次加载重试:', error);
         }
     }
     function buildDefaultSettings_ACU() {
@@ -113718,7 +113774,7 @@ $CONTENT
      * 仅 presentation 层内部使用。
      */
     let $popupInstance_ACU = null;
-    let $apiConfigSectionToggle_ACU, $apiConfigAreaDiv_ACU, $customApiUrlInput_ACU, $customApiKeyInput_ACU, $customApiModelInput_ACU, $customApiModelSelect_ACU, $maxTokensInput_ACU, $temperatureInput_ACU, $loadModelsButton_ACU, $saveApiConfigButton_ACU, $clearApiConfigButton_ACU, $apiStatusDisplay_ACU, $charCardPromptToggle_ACU, $charCardPromptAreaDiv_ACU, $charCardPromptSegmentsContainer_ACU, $saveCharCardPromptButton_ACU, $resetCharCardPromptButton_ACU, $plotPromptSegmentsContainer_ACU, $plotTaskListContainer_ACU, $autoUpdateThresholdInput_ACU, $saveAutoUpdateThresholdButton_ACU, $autoUpdateTokenThresholdInput_ACU, $saveAutoUpdateTokenThresholdButton_ACU, $autoUpdateFrequencyInput_ACU, $saveAutoUpdateFrequencyButton_ACU, $updateBatchSizeInput_ACU, $saveUpdateBatchSizeButton_ACU, $maxConcurrentGroupsInput_ACU, $autoUpdateEnabledCheckbox_ACU, $standardizedTableFillEnabledCheckbox_ACU, $toastMuteEnabledCheckbox_ACU, $promptTemplateEnabledCheckbox_ACU, $tableEditLastPairOnlyCheckbox_ACU, $tableMaxRetriesInput_ACU, $manualUpdateCardButton_ACU, $statusMessageSpan_ACU, $cardUpdateStatusDisplay_ACU, $useMainApiCheckbox_ACU, $streamingEnabledCheckbox_ACU, $manualExtraHintCheckbox_ACU, $skipUpdateFloorsInput_ACU, $saveSkipUpdateFloorsButton_ACU, $retainRecentLayersInput_ACU, $saveRetainRecentLayersButton_ACU, $manualTableSelector_ACU, $manualTableSelectAll_ACU, $manualTableSelectNone_ACU, $importTableSelector_ACU, $importTableSelectAll_ACU, $importTableSelectNone_ACU;
+    let $apiConfigSectionToggle_ACU, $apiConfigAreaDiv_ACU, $customApiUrlInput_ACU, $customApiKeyInput_ACU, $customApiModelInput_ACU, $customApiModelSelect_ACU, $maxTokensInput_ACU, $temperatureInput_ACU, $loadModelsButton_ACU, $saveApiConfigButton_ACU, $clearApiConfigButton_ACU, $apiStatusDisplay_ACU, $charCardPromptToggle_ACU, $charCardPromptAreaDiv_ACU, $charCardPromptSegmentsContainer_ACU, $saveCharCardPromptButton_ACU, $resetCharCardPromptButton_ACU, $plotPromptSegmentsContainer_ACU, $plotTaskListContainer_ACU, $autoUpdateThresholdInput_ACU, $saveAutoUpdateThresholdButton_ACU, $autoUpdateTokenThresholdInput_ACU, $saveAutoUpdateTokenThresholdButton_ACU, $autoUpdateFrequencyInput_ACU, $saveAutoUpdateFrequencyButton_ACU, $updateBatchSizeInput_ACU, $saveUpdateBatchSizeButton_ACU, $maxConcurrentGroupsInput_ACU, $autoUpdateEnabledCheckbox_ACU, $standardizedTableFillEnabledCheckbox_ACU, $toastMuteEnabledCheckbox_ACU, $promptTemplateEnabledCheckbox_ACU, $tableEditLastPairOnlyCheckbox_ACU, $tableMaxRetriesInput_ACU, $manualUpdateCardButton_ACU, $statusMessageSpan_ACU, $cardUpdateStatusDisplay_ACU, $useMainApiCheckbox_ACU, $manualExtraHintCheckbox_ACU, $skipUpdateFloorsInput_ACU, $saveSkipUpdateFloorsButton_ACU, $retainRecentLayersInput_ACU, $saveRetainRecentLayersButton_ACU, $manualTableSelector_ACU, $manualTableSelectAll_ACU, $manualTableSelectNone_ACU, $importTableSelector_ACU, $importTableSelectAll_ACU, $importTableSelectNone_ACU;
     function _set_$popupInstance_ACU(v) { $popupInstance_ACU = v; }
     // 批量赋值 UI placeholder 变量（popup-bindings 初始化时一次性调用）
     function _assignUIPlaceholders_ACU(map) {
@@ -113798,8 +113854,6 @@ $CONTENT
             $cardUpdateStatusDisplay_ACU = map.$cardUpdateStatusDisplay_ACU;
         if (map.$useMainApiCheckbox_ACU !== undefined)
             $useMainApiCheckbox_ACU = map.$useMainApiCheckbox_ACU;
-        if (map.$streamingEnabledCheckbox_ACU !== undefined)
-            $streamingEnabledCheckbox_ACU = map.$streamingEnabledCheckbox_ACU;
         if (map.$manualExtraHintCheckbox_ACU !== undefined)
             $manualExtraHintCheckbox_ACU = map.$manualExtraHintCheckbox_ACU;
         if (map.$skipUpdateFloorsInput_ACU !== undefined)
@@ -126892,8 +126946,6 @@ $CONTENT
             if (typeof updateCustomApiInputsState_ACU === 'function')
                 updateCustomApiInputsState_ACU();
         }
-        if ($streamingEnabledCheckbox_ACU)
-            $streamingEnabledCheckbox_ACU.prop('checked', s.streamingEnabled || false);
         if ($manualTableSelector_ACU && typeof renderManualTableSelector_ACU === 'function')
             renderManualTableSelector_ACU();
         if ($importTableSelector_ACU && typeof renderImportTableSelector_ACU === 'function')
@@ -187479,7 +187531,7 @@ ${rejectionText}` : delegationFeedback,
         },
         vectorHealth: {
             title: "交火向量",
-            configureAction: "前往填表工作台",
+            configureAction: "前往填表模式",
             disabledBadge: "未启用",
             disabledSummary: "当前填表模式不使用向量召回，无需配置向量服务。",
             incompleteBadge: "配置不完整",
@@ -187528,23 +187580,6 @@ ${rejectionText}` : delegationFeedback,
             pendingInitial: "待初始",
         },
         toggles: {
-            flightMode: {
-                label: "飞行模式",
-                description: "仅对当前会话生效。开启后抑制剧情推进，并在大总结新增时隐藏已归纳纪要。",
-                enableFailed: "飞行模式未开启",
-                enabled: "已开启当前会话的飞行模式。",
-                disableTitle: "关闭飞行模式",
-                disableMessage: "关闭后，当前会话的隐藏纪要会恢复可见。",
-                disableDanger: "将跨全部历史永久删除「大总结」表及其内容；此操作不可逆。",
-                confirmDisable: "关闭并永久删除",
-                disableFailed: "飞行模式未关闭",
-                disabled: "已关闭飞行模式，并已永久删除大总结表。",
-                templateScopeChangedTitle: "检测到模板已修改",
-                templateScopeChangedMessage: "飞行模式启用后，此会话的表格模板已被修改。继续关闭会按启用前归档模板恢复，并覆盖这些模板修改。",
-                templateScopeChangedDanger: "关闭飞行模式会跨全部历史永久删除「大总结」表及其内容；此操作不可逆。",
-                confirmDisableLabel: "仍要关闭并删除",
-                disabledNoChat: "请先加载一个聊天会话。",
-            },
             autoUpdate: {
                 label: "自动更新",
                 description: "默认开启。关闭后需手动更新表。仅推荐在测试或自由发挥时关闭。",
@@ -187553,17 +187588,9 @@ ${rejectionText}` : delegationFeedback,
                 label: "静默提示框",
                 description: "默认关闭。开启后仅保留填表、规划等核心提示，其他浮窗通知不再弹出。",
             },
-            streaming: {
-                label: "开启流式输出",
-                description: "开启后，支持流式的文本生成会边生成边返回；关闭后会等完整结果返回。",
-            },
             zeroTk: {
                 label: "0TK 占用模式",
                 description: "默认开启。开启后纪要概览不占用上下文。",
-            },
-            plot: {
-                label: "剧情推进",
-                description: "默认开启。详情前往对应页面；默认仅召回记忆，进阶版含剧情规划。仅推荐在测试或自由发挥时关闭。",
             },
             continuation: {
                 label: "智能续写",
@@ -187636,8 +187663,8 @@ ${rejectionText}` : delegationFeedback,
     };
     const _hoisted_7$t = { class: "acu-dashboard-storage-mode__body" };
     const _hoisted_8$s = { class: "acu-dashboard-storage-mode__card-head" };
-    const _hoisted_9$o = { class: "acu-dashboard-storage-mode__name" };
-    const _hoisted_10$l = { class: "acu-dashboard-storage-mode__badge" };
+    const _hoisted_9$n = { class: "acu-dashboard-storage-mode__name" };
+    const _hoisted_10$k = { class: "acu-dashboard-storage-mode__badge" };
     const _hoisted_11$k = { class: "acu-dashboard-storage-mode__desc" };
     function _sfc_render$15(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", {
@@ -187687,13 +187714,13 @@ ${rejectionText}` : delegationFeedback,
 						/* CLASS */
 					)]), createBaseVNode("span", _hoisted_7$t, [createBaseVNode("span", _hoisted_8$s, [createBaseVNode(
 						"span",
-						_hoisted_9$o,
+						_hoisted_9$n,
 						toDisplayString(option.label),
 						1
 						/* TEXT */
 					), createBaseVNode(
 						"span",
-						_hoisted_10$l,
+						_hoisted_10$k,
 						toDisplayString(option.badge),
 						1
 						/* TEXT */
@@ -190479,8 +190506,8 @@ ${rejectionText}` : delegationFeedback,
         });
     }
     function buildVectorHealthItem() {
-        // 向量服务是否需要就绪由当前填表模式推导（向量表格 / 交火模式），不再读取已退役的仪表盘交火开关。
-        const enabled = isVectorPipelineEnabledForCurrentChat_ACU();
+        // 只有显式选择向量表格 / 交火模式时才需要向量服务；经典与 LLM 模式不提示。
+        const enabled = isVectorModeExplicitlySelected_ACU();
         if (!enabled) {
             return makeHealthItem({
                 key: "vector",
@@ -190502,7 +190529,7 @@ ${rejectionText}` : delegationFeedback,
                     summary: dashboardCopy.vectorHealth.incompleteSummary(readableErrors),
                     action: {
                         label: dashboardCopy.vectorHealth.configureAction,
-                        pageId: "form-fill",
+                        pageId: "fill-mode",
                     },
                 });
             }
@@ -190523,7 +190550,7 @@ ${rejectionText}` : delegationFeedback,
                 summary: dashboardCopy.vectorHealth.readFailedSummary(error?.message || dashboardCopy.vectorHealth.readFailedFallback),
                 action: {
                     label: dashboardCopy.vectorHealth.configureAction,
-                    pageId: "form-fill",
+                    pageId: "fill-mode",
                 },
             });
         }
@@ -190710,16 +190737,7 @@ ${rejectionText}` : delegationFeedback,
         /** 基础设置 — 同一聊天里时不时开关的功能。 */
         const basicToggles = computed(() => {
             void dataRefreshTick.value;
-            const flightMode = getCurrentFlightModeState_ACU();
-            const hasActiveChat = hasActiveChatContext(chatFileIdentifier.value);
             return [
-                {
-                    key: "flightMode",
-                    label: dashboardCopy.toggles.flightMode.label,
-                    description: dashboardCopy.toggles.flightMode.description,
-                    value: flightMode.enabled,
-                    disabled: !hasActiveChat,
-                },
                 {
                     key: "autoUpdateEnabled",
                     label: dashboardCopy.toggles.autoUpdate.label,
@@ -190738,24 +190756,12 @@ ${rejectionText}` : delegationFeedback,
                     description: dashboardCopy.toggles.zeroTk.description,
                     value: settings_ACU.zeroTkOccupyModeDefault === true,
                 },
-                {
-                    key: "streamingEnabled",
-                    label: dashboardCopy.toggles.streaming.label,
-                    description: dashboardCopy.toggles.streaming.description,
-                    value: settings_ACU.streamingEnabled === true,
-                },
             ];
         });
         /** 高级设置 — 配置后基本不动；动了出问题是正常的。 */
         const advancedToggles = computed(() => {
             void dataRefreshTick.value;
             const items = [
-                {
-                    key: "plotEnabled",
-                    label: dashboardCopy.toggles.plot.label,
-                    description: dashboardCopy.toggles.plot.description,
-                    value: settings_ACU.plotSettings?.enabled === true,
-                },
                 {
                     key: "continuationPageEnabled",
                     label: dashboardCopy.toggles.continuation.label,
@@ -190857,21 +190863,7 @@ ${rejectionText}` : delegationFeedback,
             }
         }
         function setToggle(key, value) {
-            if (key === "plotEnabled") {
-                const next = !!value;
-                try {
-                    setGlobalPlotEnabled_ACU(next);
-                }
-                catch {
-                    if (!settings_ACU.plotSettings ||
-                        typeof settings_ACU.plotSettings !== "object") {
-                        settings_ACU.plotSettings = {};
-                    }
-                    settings_ACU.plotSettings.enabled = next;
-                }
-                saveSettings_ACU();
-            }
-            else if (key === "zeroTkOccupyModeDefault") {
+            if (key === "zeroTkOccupyModeDefault") {
                 setZeroTkOccupyMode_ACU(!!value);
             }
             else if (key === "developerOptionsEnabled") {
@@ -190887,14 +190879,9 @@ ${rejectionText}` : delegationFeedback,
                 setContentReplaceEnabledBySettings(!!value);
                 saveSettings_ACU();
             }
-            else if (key === "autoUpdateEnabled" ||
-                key === "toastMuteEnabled" ||
-                key === "streamingEnabled") {
+            else if (key === "autoUpdateEnabled" || key === "toastMuteEnabled") {
                 if (key === "autoUpdateEnabled") {
                     setAutoUpdateEnabled_ACU(!!value);
-                }
-                else if (key === "streamingEnabled") {
-                    useApiPresetStore().setStreamingEnabled(!!value);
                 }
                 else {
                     settings_ACU[key] = !!value;
@@ -191033,7 +191020,6 @@ ${rejectionText}` : delegationFeedback,
         setup(__props, { expose: __expose }) {
             __expose();
             const dashboard = useDashboardPage();
-            const plotStore = usePlotPresetStore();
             const routerStore = useRouterStore();
             const dialogStore = useDialogStore();
             const toastStore = useToastStore();
@@ -191048,7 +191034,6 @@ ${rejectionText}` : delegationFeedback,
              * 只裁剪渲染；featureGate 同步仍基于完整列表，避免隐藏开关后已开启的页面状态被改写。
              */
             const ADVANCED_TOGGLE_MIN_TIER = {
-                plotEnabled: "medium",
                 continuationPageEnabled: "medium",
                 externalImportPageEnabled: "medium",
                 worldSimulationPageEnabled: "high",
@@ -191063,14 +191048,12 @@ ${rejectionText}` : delegationFeedback,
             const showAdvancedGroup = computed(() => visibleAdvancedToggles.value.length > 0 || showStorageMode.value);
             const effectiveGroup = computed(() => showAdvancedGroup.value ? activeGroup.value : "basic");
             async function refreshAll() {
-                plotStore.refreshFromSettings();
                 await dashboard.refresh();
                 routerStore.setSqliteMode(dashboard.storageMode.value === "sqlite");
                 syncFeaturePageGates();
             }
             function syncFeaturePageGates() {
                 routerStore.syncFeatureGate(FEATURE_GATE_CONTENT_REPLACE, dashboard.contentReplaceGateEnabled.value);
-                routerStore.syncFeatureGate(FEATURE_GATE_PLOT, plotStore.enabled === true);
                 routerStore.syncFeatureGate(FEATURE_GATE_CONTINUATION, dashboard.advancedToggles.value.some((item) => item.key === "continuationPageEnabled" && item.value));
                 routerStore.syncFeatureGate(FEATURE_GATE_WORLD_SIMULATION, dashboard.advancedToggles.value.some((item) => item.key === "worldSimulationPageEnabled" && item.value));
                 routerStore.syncFeatureGate(FEATURE_GATE_IMPORT, dashboard.advancedToggles.value.some((item) => item.key === "externalImportPageEnabled" && item.value));
@@ -191079,56 +191062,7 @@ ${rejectionText}` : delegationFeedback,
                 routerStore.setActivePage(pageId);
             }
             async function handleToggleChange(key, value) {
-                if (key === "flightMode") {
-                    if (!value) {
-                        const confirmed = await dialogStore.confirm({
-                            title: dashboardCopy.toggles.flightMode.disableTitle,
-                            message: dashboardCopy.toggles.flightMode.disableMessage,
-                            dangerMessage: dashboardCopy.toggles.flightMode.disableDanger,
-                            confirmLabel: dashboardCopy.toggles.flightMode.confirmDisable,
-                            confirmVariant: "danger",
-                        });
-                        if (!confirmed)
-                            return;
-                    }
-                    const result = await dashboard.setFlightMode(value);
-                    if (result.ok) {
-                        toastStore.success(value
-                            ? dashboardCopy.toggles.flightMode.enabled
-                            : dashboardCopy.toggles.flightMode.disabled, { muteable: false });
-                        return;
-                    }
-                    if (result.reason === "template_scope_changed") {
-                        const confirmed = await dialogStore.confirm({
-                            title: dashboardCopy.toggles.flightMode.templateScopeChangedTitle,
-                            message: dashboardCopy.toggles.flightMode.templateScopeChangedMessage,
-                            dangerMessage: dashboardCopy.toggles.flightMode.templateScopeChangedDanger,
-                            confirmLabel: dashboardCopy.toggles.flightMode.confirmDisableLabel,
-                            confirmVariant: "danger",
-                        });
-                        if (!confirmed)
-                            return;
-                        const confirmedResult = await dashboard.setFlightMode(false, {
-                            confirmTemplateScopeChange: true,
-                        });
-                        if (confirmedResult.ok) {
-                            toastStore.success(dashboardCopy.toggles.flightMode.disabled, { muteable: false });
-                        }
-                        else {
-                            toastStore.error(confirmedResult.error || dashboardCopy.toggles.flightMode.disableFailed, { muteable: false });
-                        }
-                        return;
-                    }
-                    if (result.reason === "too_many_visible_chronicle_rows") {
-                        toastStore.error(`飞行模式未开启：当前有 ${result.visibleChronicleRowCount ?? 0} 条可见纪要，最多允许 15 条。`, { muteable: false });
-                        return;
-                    }
-                    toastStore.error(result.error || (value ? dashboardCopy.toggles.flightMode.enableFailed : dashboardCopy.toggles.flightMode.disableFailed), { muteable: false });
-                    return;
-                }
                 dashboard.setToggle(key, value);
-                if (key === "plotEnabled")
-                    plotStore.refreshFromSettings();
                 syncFeaturePageGates();
             }
             async function handleStorageModeChange(value) {
@@ -191144,14 +191078,14 @@ ${rejectionText}` : delegationFeedback,
             watch(useTemplateRuntimeChangeTick(), () => {
                 void refreshAll();
             });
-            const __returned__ = { dashboard, plotStore, routerStore, dialogStore, toastStore, uiMode, activeGroup, groupOptions, ADVANCED_TOGGLE_MIN_TIER, tierAllows, visibleAdvancedToggles, showStorageMode, showAdvancedGroup, effectiveGroup, refreshAll, syncFeaturePageGates, goToHealthAction, handleToggleChange, handleStorageModeChange, AcuBadge, AcuButton, AcuMessage, AcuPanel, AcuPanelGrid, AcuSegmentedControl, DashboardStorageModeSection, ToggleRow, get dashboardCopy() { return dashboardCopy; } };
+            const __returned__ = { dashboard, routerStore, dialogStore, toastStore, uiMode, activeGroup, groupOptions, ADVANCED_TOGGLE_MIN_TIER, tierAllows, visibleAdvancedToggles, showStorageMode, showAdvancedGroup, effectiveGroup, refreshAll, syncFeaturePageGates, goToHealthAction, handleToggleChange, handleStorageModeChange, AcuBadge, AcuButton, AcuMessage, AcuPanel, AcuPanelGrid, AcuSegmentedControl, DashboardStorageModeSection, ToggleRow, get dashboardCopy() { return dashboardCopy; } };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-dashboard-page[data-v-f18d07b4] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-dashboard-page__toggle-list[data-v-f18d07b4] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n  margin-top: 14px;\n}\n.acu-v2-dashboard-page__health-list[data-v-f18d07b4] {\n  display: flex;\n  flex-direction: column;\n  gap: 10px;\n  min-width: 0;\n}\n.acu-v2-dashboard-page__health-item[data-v-f18d07b4] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: 30px minmax(0, 1fr) max-content;\n  column-gap: 10px;\n  row-gap: 8px;\n  align-items: center;\n  padding: 10px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md);\n  background: var(--acu-bg-1);\n  transition:\n    border-color 0.15s ease,\n    background 0.15s ease;\n}\n.acu-v2-dashboard-page__health-item--error[data-v-f18d07b4] {\n  border-color: color-mix(in srgb, var(--acu-danger) 38%, var(--acu-border));\n}\n.acu-v2-dashboard-page__health-icon[data-v-f18d07b4] {\n  width: 30px;\n  height: 30px;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-2);\n  color: var(--acu-text-2);\n}\n.acu-v2-dashboard-page__health-item--ok .acu-v2-dashboard-page__health-icon[data-v-f18d07b4] {\n  color: var(--acu-success);\n  background: color-mix(in srgb, var(--acu-success) 10%, transparent);\n}\n.acu-v2-dashboard-page__health-item--warning\n  .acu-v2-dashboard-page__health-icon[data-v-f18d07b4] {\n  color: var(--acu-warning);\n  background: color-mix(in srgb, var(--acu-warning) 12%, transparent);\n}\n.acu-v2-dashboard-page__health-item--error .acu-v2-dashboard-page__health-icon[data-v-f18d07b4] {\n  color: var(--acu-danger);\n  background: color-mix(in srgb, var(--acu-danger) 12%, transparent);\n}\n.acu-v2-dashboard-page__health-body[data-v-f18d07b4] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n}\n.acu-v2-dashboard-page__health-heading[data-v-f18d07b4] {\n  min-width: 0;\n}\n.acu-v2-dashboard-page__health-heading strong[data-v-f18d07b4] {\n  min-width: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 650;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-dashboard-page__health-body p[data-v-f18d07b4] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-dashboard-page__health-side[data-v-f18d07b4] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  align-items: flex-end;\n  gap: 8px;\n  justify-self: end;\n}\n.acu-v2-dashboard-page__health-action[data-v-f18d07b4] {\n  white-space: nowrap;\n}\n@media (max-width: 860px) {\n.acu-v2-dashboard-page[data-v-f18d07b4] {\n    padding: 14px;\n}\n.acu-v2-dashboard-page__health-item[data-v-f18d07b4] {\n    grid-template-columns: 30px minmax(0, 1fr);\n    align-items: center;\n}\n.acu-v2-dashboard-page__health-side[data-v-f18d07b4] {\n    grid-column: 2;\n    align-items: flex-start;\n    justify-self: start;\n    flex-direction: row;\n    flex-wrap: wrap;\n}\n.acu-v2-dashboard-page__health-action[data-v-f18d07b4] {\n    justify-self: start;\n}\n}\n", "src/presentation-v2/pages/DashboardPage.vue#style-0-f18d07b4");
-    var DashboardPage_vue_vue_type_style_index_0_scoped_f18d07b4_lang = null;
+    injectSfcStyle("\n.acu-v2-dashboard-page[data-v-5ee408c0] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-dashboard-page__toggle-list[data-v-5ee408c0] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n  margin-top: 14px;\n}\n.acu-v2-dashboard-page__health-list[data-v-5ee408c0] {\n  display: flex;\n  flex-direction: column;\n  gap: 10px;\n  min-width: 0;\n}\n.acu-v2-dashboard-page__health-item[data-v-5ee408c0] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: 30px minmax(0, 1fr) max-content;\n  column-gap: 10px;\n  row-gap: 8px;\n  align-items: center;\n  padding: 10px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md);\n  background: var(--acu-bg-1);\n  transition:\n    border-color 0.15s ease,\n    background 0.15s ease;\n}\n.acu-v2-dashboard-page__health-item--error[data-v-5ee408c0] {\n  border-color: color-mix(in srgb, var(--acu-danger) 38%, var(--acu-border));\n}\n.acu-v2-dashboard-page__health-icon[data-v-5ee408c0] {\n  width: 30px;\n  height: 30px;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-2);\n  color: var(--acu-text-2);\n}\n.acu-v2-dashboard-page__health-item--ok .acu-v2-dashboard-page__health-icon[data-v-5ee408c0] {\n  color: var(--acu-success);\n  background: color-mix(in srgb, var(--acu-success) 10%, transparent);\n}\n.acu-v2-dashboard-page__health-item--warning\n  .acu-v2-dashboard-page__health-icon[data-v-5ee408c0] {\n  color: var(--acu-warning);\n  background: color-mix(in srgb, var(--acu-warning) 12%, transparent);\n}\n.acu-v2-dashboard-page__health-item--error .acu-v2-dashboard-page__health-icon[data-v-5ee408c0] {\n  color: var(--acu-danger);\n  background: color-mix(in srgb, var(--acu-danger) 12%, transparent);\n}\n.acu-v2-dashboard-page__health-body[data-v-5ee408c0] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n}\n.acu-v2-dashboard-page__health-heading[data-v-5ee408c0] {\n  min-width: 0;\n}\n.acu-v2-dashboard-page__health-heading strong[data-v-5ee408c0] {\n  min-width: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 650;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-dashboard-page__health-body p[data-v-5ee408c0] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-dashboard-page__health-side[data-v-5ee408c0] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  align-items: flex-end;\n  gap: 8px;\n  justify-self: end;\n}\n.acu-v2-dashboard-page__health-action[data-v-5ee408c0] {\n  white-space: nowrap;\n}\n@media (max-width: 860px) {\n.acu-v2-dashboard-page[data-v-5ee408c0] {\n    padding: 14px;\n}\n.acu-v2-dashboard-page__health-item[data-v-5ee408c0] {\n    grid-template-columns: 30px minmax(0, 1fr);\n    align-items: center;\n}\n.acu-v2-dashboard-page__health-side[data-v-5ee408c0] {\n    grid-column: 2;\n    align-items: flex-start;\n    justify-self: start;\n    flex-direction: row;\n    flex-wrap: wrap;\n}\n.acu-v2-dashboard-page__health-action[data-v-5ee408c0] {\n    justify-self: start;\n}\n}\n", "src/presentation-v2/pages/DashboardPage.vue#style-0-5ee408c0");
+    var DashboardPage_vue_vue_type_style_index_0_scoped_5ee408c0_lang = null;
 
     const _hoisted_1$10 = { class: "acu-v2-dashboard-page" };
     const _hoisted_2$W = { class: "acu-v2-dashboard-page__health-list" };
@@ -191305,7 +191239,7 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	})]);
     }
-    var DashboardPage = /*#__PURE__*/ _export_sfc(_sfc_main$12, [["render", _sfc_render$12], ["__scopeId", "data-v-f18d07b4"]]);
+    var DashboardPage = /*#__PURE__*/ _export_sfc(_sfc_main$12, [["render", _sfc_render$12], ["__scopeId", "data-v-5ee408c0"]]);
 
     var _sfc_main$11 = /*@__PURE__*/ defineComponent({
         __name: 'AcuFormRow',
@@ -191710,33 +191644,204 @@ ${rejectionText}` : delegationFeedback,
     var AcuSelect = /*#__PURE__*/ _export_sfc(_sfc_main$$, [["render", _sfc_render$$], ["__scopeId", "data-v-9a5ee02f"]]);
 
     var _sfc_main$_ = /*@__PURE__*/ defineComponent({
-        __name: 'AcuText',
+        __name: 'AcuStatsList',
         props: {
-            as: { default: 'p' },
-            variant: { default: 'meta' }
+            items: {},
+            mono: { type: Boolean, default: false }
         },
         setup(__props, { expose: __expose }) {
             __expose();
-            const props = __props;
-            const variantClass = computed(() => `acu-text--${props.variant}`);
-            const __returned__ = { props, variantClass };
+            const __returned__ = {};
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-text[data-v-7abe2621] {\r\n  margin: 0;\r\n  min-width: 0;\n}\n.acu-text--caption[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: var(--acu-line-height-caption, 1.5);\r\n  color: var(--acu-text-3);\n}\n.acu-text--meta[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  color: var(--acu-text-3);\n}\n.acu-text--hint[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-readable, 1.55);\r\n  color: var(--acu-text-3);\n}\n.acu-text--status-line[data-v-7abe2621] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 8px;\r\n  flex-wrap: wrap;\r\n  min-height: 22px;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  color: var(--acu-text-3);\n}\n.acu-text--empty[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  line-height: var(--acu-line-height-readable, 1.55);\r\n  color: var(--acu-text-3);\r\n  text-align: center;\n}\n.acu-text--error[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  color: var(--acu-danger);\n}\n.acu-text--section-label[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-section-title, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  font-weight: 600;\r\n  color: var(--acu-text-2);\n}\n.acu-text--list-title[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-list-title, 13px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  font-weight: 500;\r\n  color: var(--acu-text-1);\n}\n[data-v-7abe2621] .acu-text__value {\r\n  color: var(--acu-text-1);\r\n  font-weight: 500;\n}\r\n", "src/presentation-v2/components/_lib/AcuText.vue#style-0-7abe2621");
-    var AcuText_vue_vue_type_style_index_0_scoped_7abe2621_lang = null;
+    injectSfcStyle("\n.acu-stats[data-v-249ee71c] {\r\n  margin: 0;\r\n  padding: 2px 0 0;\r\n  background: transparent;\r\n  border-radius: 0;\r\n  display: grid; grid-template-columns: repeat(2, 1fr); gap: 0 16px;\n}\n.acu-stats__item[data-v-249ee71c] {\r\n  min-width: 0;\r\n  padding: 8px 0;\r\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n}\n.acu-stats dt[data-v-249ee71c] {\r\n  margin: 0 0 2px; font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3);\n}\n.acu-stats dd[data-v-249ee71c] {\r\n  margin: 0; font-size: var(--acu-font-size-body, 12px); color: var(--acu-text-1); word-break: break-all;\n}\n.acu-stats--mono code[data-v-249ee71c] {\r\n  display: inline-block; max-width: 100%;\r\n  font-family: var(--acu-font-mono); font-size: var(--acu-font-size-body, 12px);\r\n  background: transparent; color: var(--acu-text-1);\r\n  padding: 0; border-radius: 0;\n}\n@media (max-width: 720px) {\n.acu-stats[data-v-249ee71c] { grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuStatsList.vue#style-0-249ee71c");
+    var AcuStatsList_vue_vue_type_style_index_0_scoped_249ee71c_lang = null;
 
+    const _hoisted_1$Y = { key: 0 };
     function _sfc_render$_(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createBlock(resolveDynamicComponent($props.as), { class: normalizeClass(["acu-text", $setup.variantClass]) }, {
-		default: withCtx(() => [renderSlot(_ctx.$slots, "default", {}, undefined, true)]),
-		_: 3
-	}, 8, ["class"]);
+	return openBlock(), createElementBlock(
+		"dl",
+		{ class: normalizeClass(["acu-stats", { "acu-stats--mono": $props.mono }]) },
+		[(openBlock(true), createElementBlock(
+			Fragment,
+			null,
+			renderList($props.items, (item) => {
+				return openBlock(), createElementBlock("div", {
+					key: item.label,
+					class: "acu-stats__item"
+				}, [createBaseVNode(
+					"dt",
+					null,
+					toDisplayString(item.label),
+					1
+					/* TEXT */
+				), createBaseVNode("dd", null, [renderSlot(_ctx.$slots, item.key ?? item.label, { item }, () => [$props.mono ? (openBlock(), createElementBlock(
+					"code",
+					_hoisted_1$Y,
+					toDisplayString(item.value ?? "—"),
+					1
+					/* TEXT */
+				)) : (openBlock(), createElementBlock(
+					Fragment,
+					{ key: 1 },
+					[createTextVNode(
+						toDisplayString(item.value ?? "—"),
+						1
+						/* TEXT */
+					)],
+					64
+					/* STABLE_FRAGMENT */
+				))], true)])]);
+			}),
+			128
+			/* KEYED_FRAGMENT */
+		))],
+		2
+		/* CLASS */
+	);
     }
-    var AcuText = /*#__PURE__*/ _export_sfc(_sfc_main$_, [["render", _sfc_render$_], ["__scopeId", "data-v-7abe2621"]]);
+    var AcuStatsList = /*#__PURE__*/ _export_sfc(_sfc_main$_, [["render", _sfc_render$_], ["__scopeId", "data-v-249ee71c"]]);
 
+    const DRAWER_LEAVE_MS = 150;
     var _sfc_main$Z = /*@__PURE__*/ defineComponent({
+        __name: 'AcuDrawer',
+        props: {
+            isOpen: { type: Boolean },
+            title: {},
+            showBack: { type: Boolean, default: false },
+            width: { default: 'var(--acu-drawer-width, 480px)' },
+            beforeClose: { type: Function, default: undefined }
+        },
+        emits: ["close", "back"],
+        setup(__props, { expose: __expose, emit: __emit }) {
+            __expose();
+            const props = __props;
+            const emit = __emit;
+            const resolvedWidth = computed(() => props.width);
+            const isRendered = ref(false);
+            const isClosing = ref(false);
+            const closeGuardPending = ref(false);
+            let closeTimer;
+            watch(() => props.isOpen, (open) => {
+                if (open)
+                    showDrawer();
+                else
+                    hideDrawer();
+            }, { immediate: true });
+            onBeforeUnmount(clearCloseTimer);
+            async function guard() {
+                if (!props.beforeClose)
+                    return true;
+                const result = props.beforeClose();
+                return result instanceof Promise ? result : result;
+            }
+            async function requestClose() {
+                if (isClosing.value || closeGuardPending.value)
+                    return;
+                closeGuardPending.value = true;
+                try {
+                    if (await guard())
+                        emit('close');
+                }
+                finally {
+                    closeGuardPending.value = false;
+                }
+            }
+            async function requestBack() {
+                if (isClosing.value || closeGuardPending.value)
+                    return;
+                closeGuardPending.value = true;
+                try {
+                    if (await guard())
+                        emit('back');
+                }
+                finally {
+                    closeGuardPending.value = false;
+                }
+            }
+            function showDrawer() {
+                clearCloseTimer();
+                isRendered.value = true;
+                isClosing.value = false;
+            }
+            function hideDrawer() {
+                if (!isRendered.value)
+                    return;
+                isClosing.value = true;
+                clearCloseTimer();
+                closeTimer = acuSetTimeout(() => {
+                    isRendered.value = false;
+                    isClosing.value = false;
+                    closeTimer = undefined;
+                }, DRAWER_LEAVE_MS);
+            }
+            function clearCloseTimer() {
+                if (closeTimer === undefined)
+                    return;
+                acuClearTimeout(closeTimer);
+                closeTimer = undefined;
+            }
+            const __returned__ = { props, emit, resolvedWidth, isRendered, isClosing, closeGuardPending, DRAWER_LEAVE_MS, get closeTimer() { return closeTimer; }, set closeTimer(v) { closeTimer = v; }, guard, requestClose, requestBack, showDrawer, hideDrawer, clearCloseTimer, AcuIconButton };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-v2-drawer-layer[data-v-882382df] {\r\n  position: fixed; top: 0; right: 0; bottom: 0; left: 0; inset: 0; z-index: 9200;\r\n  width: 100%; width: 100vw; width: 100dvw;\r\n  height: 100%; height: 100vh; height: 100dvh;\r\n  display: flex; justify-content: flex-end;\r\n  padding: var(--acu-safe-top, 0px) var(--acu-safe-right, 0px) var(--acu-safe-bottom, 0px) var(--acu-safe-left, 0px);\r\n  background: rgba(0, 0, 0, 0.38);\r\n  overflow: hidden;\r\n  animation: acu-drawer-layer-in-882382df 0.18s ease-out both;\n}\n.acu-v2-drawer-layer.is-closing[data-v-882382df] {\r\n  pointer-events: none;\r\n  animation: acu-drawer-layer-out-882382df 0.15s ease-in both;\n}\n.acu-v2-drawer[data-v-882382df] {\r\n  max-width: 100%;\r\n  height: 100%; max-height: 100%;\r\n  display: flex; flex-direction: column;\r\n  background: var(--acu-bg-1);\r\n  border-left: 0;\r\n  box-shadow: var(--acu-shadow);\r\n  min-width: 0; min-height: 0;\r\n  overflow: hidden;\r\n  animation: acu-drawer-panel-in-882382df 0.18s ease-out both;\n}\n.acu-v2-drawer-layer.is-closing .acu-v2-drawer[data-v-882382df] {\r\n  animation: acu-drawer-panel-out-882382df 0.15s ease-in both;\n}\n@supports (max-height: 100dvh) {\n.acu-v2-drawer[data-v-882382df] { max-height: 100%;\n}\n}\n.acu-v2-drawer__header[data-v-882382df] {\r\n  flex: 0 0 auto;\r\n  display: flex; align-items: center; justify-content: space-between;\r\n  min-width: 0;\r\n  gap: var(--acu-panel-gap, 12px); padding: var(--acu-page-gap, 14px) var(--acu-panel-padding, 16px);\r\n  border-bottom: 0;\n}\n.acu-v2-drawer__header-left[data-v-882382df] { display: flex; align-items: center; gap: var(--acu-space-250, 10px); min-width: 0;\n}\n.acu-v2-drawer__header h3[data-v-882382df] { margin: 0; min-width: 0; font-size: var(--acu-font-size-panel-title, 15px); overflow-wrap: anywhere;\n}\n.acu-v2-drawer__body[data-v-882382df] {\r\n  flex: 1; min-height: 0;\r\n  min-width: 0; overflow-y: auto; overflow-x: hidden; padding: var(--acu-panel-padding, 16px);\r\n  display: flex; flex-direction: column; gap: var(--acu-page-gap, 14px);\n}\n@keyframes acu-drawer-layer-in-882382df {\nfrom { opacity: 0;\n}\nto { opacity: 1;\n}\n}\n@keyframes acu-drawer-panel-in-882382df {\nfrom { transform: translateX(100%);\n}\nto { transform: translateX(0);\n}\n}\n@keyframes acu-drawer-layer-out-882382df {\nfrom { opacity: 1;\n}\nto { opacity: 0;\n}\n}\n@keyframes acu-drawer-panel-out-882382df {\nfrom { transform: translateX(0);\n}\nto { transform: translateX(100%);\n}\n}\n@media (max-width: 860px) {\n.acu-v2-drawer[data-v-882382df] { width: 100vw !important; max-width: 100vw; border-left: 0;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuDrawer.vue#style-0-882382df");
+    var AcuDrawer_vue_vue_type_style_index_0_scoped_882382df_lang = null;
+
+    const _hoisted_1$X = { class: "acu-v2-drawer__header" };
+    const _hoisted_2$S = { class: "acu-v2-drawer__header-left" };
+    const _hoisted_3$J = { class: "acu-v2-drawer__body" };
+    function _sfc_render$Z(_ctx, _cache, $props, $setup, $data, $options) {
+	return $setup.isRendered ? (openBlock(), createElementBlock(
+		"div",
+		{
+			key: 0,
+			class: normalizeClass(["acu-v2-drawer-layer", { "is-closing": $setup.isClosing }]),
+			onClick: withModifiers($setup.requestClose, ["self"]),
+			onPointerdown: withModifiers($setup.requestClose, ["self"]),
+			onTouchstart: withModifiers($setup.requestClose, ["self"])
+		},
+		[createBaseVNode(
+			"aside",
+			{
+				class: "acu-v2-drawer",
+				style: normalizeStyle({ width: $setup.resolvedWidth }),
+				"aria-modal": "true",
+				role: "dialog",
+				onClick: _cache[0] || (_cache[0] = withModifiers(() => {}, ["stop"]))
+			},
+			[createBaseVNode("header", _hoisted_1$X, [createBaseVNode("div", _hoisted_2$S, [$props.showBack ? (openBlock(), createBlock($setup["AcuIconButton"], {
+				key: 0,
+				icon: "fa-solid fa-arrow-left",
+				title: "返回",
+				onClick: $setup.requestBack
+			})) : createCommentVNode("v-if", true), createBaseVNode(
+				"h3",
+				null,
+				toDisplayString($props.title),
+				1
+				/* TEXT */
+			)]), createVNode($setup["AcuIconButton"], {
+				icon: "fa-solid fa-xmark",
+				"aria-label": "关闭",
+				title: "关闭",
+				onClick: $setup.requestClose
+			})]), createBaseVNode("div", _hoisted_3$J, [renderSlot(_ctx.$slots, "default", {}, undefined, true)])],
+			4
+			/* STYLE */
+		)],
+		34
+		/* CLASS, NEED_HYDRATION */
+	)) : createCommentVNode("v-if", true);
+    }
+    var AcuDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$Z, [["render", _sfc_render$Z], ["__scopeId", "data-v-882382df"]]);
+
+    var _sfc_main$Y = /*@__PURE__*/ defineComponent({
         __name: 'AcuTextarea',
         props: {
             id: { default: undefined },
@@ -191876,14 +191981,14 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-textarea[data-v-263eda0c] {\n  appearance: none !important;\n  -webkit-appearance: none !important;\n  display: block !important;\n  width: 100% !important;\n  min-width: 0 !important;\n  box-sizing: border-box !important;\n  margin: 0 !important;\n  padding: var(--acu-space-2, 8px) var(--acu-space-250, 10px) !important;\n  border: 0 !important;\n  border-radius: var(--acu-radius-sm) !important;\n  background: var(--acu-bg-2) !important;\n  color: var(--acu-text-1) !important;\n  font: inherit !important;\n  font-size: var(--acu-font-size-body, 12px) !important;\n  line-height: 1.45 !important;\n  letter-spacing: 0 !important;\n  text-align: start !important;\n  resize: none !important;\n  outline: none !important;\n  box-shadow: none !important;\n  caret-color: var(--acu-text-1);\n  -webkit-tap-highlight-color: transparent;\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-textarea--auto-resize[data-v-263eda0c] {\n  overflow-x: hidden !important;\n  overflow-y: auto;\n}\n.acu-textarea[data-v-263eda0c]:hover:not(:disabled) {\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2) !important;\n}\n.acu-textarea[data-v-263eda0c]:focus {\n  outline: none !important;\n  box-shadow: 0 0 0 2px var(--acu-accent-glow) !important;\n}\n.acu-textarea[data-v-263eda0c]:disabled {\n  opacity: 0.5; cursor: not-allowed;\n}\n", "src/presentation-v2/components/_lib/AcuTextarea.vue#style-0-263eda0c");
     var AcuTextarea_vue_vue_type_style_index_0_scoped_263eda0c_lang = null;
 
-    const _hoisted_1$Y = [
+    const _hoisted_1$W = [
 	"id",
 	"value",
 	"placeholder",
 	"rows",
 	"disabled"
     ];
-    function _sfc_render$Z(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$Y(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("textarea", {
 		ref: "textareaRef",
 		id: $props.id,
@@ -191895,207 +192000,9 @@ ${rejectionText}` : delegationFeedback,
 		onInput: $setup.onInput,
 		onFocus: $setup.onFocus,
 		onBlur: $setup.onBlur
-	}, null, 42, _hoisted_1$Y);
+	}, null, 42, _hoisted_1$W);
     }
-    var AcuTextarea = /*#__PURE__*/ _export_sfc(_sfc_main$Z, [["render", _sfc_render$Z], ["__scopeId", "data-v-263eda0c"]]);
-
-    var _sfc_main$Y = /*@__PURE__*/ defineComponent({
-        __name: 'AcuStatsList',
-        props: {
-            items: {},
-            mono: { type: Boolean, default: false }
-        },
-        setup(__props, { expose: __expose }) {
-            __expose();
-            const __returned__ = {};
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
-        }
-    });
-
-    injectSfcStyle("\n.acu-stats[data-v-249ee71c] {\r\n  margin: 0;\r\n  padding: 2px 0 0;\r\n  background: transparent;\r\n  border-radius: 0;\r\n  display: grid; grid-template-columns: repeat(2, 1fr); gap: 0 16px;\n}\n.acu-stats__item[data-v-249ee71c] {\r\n  min-width: 0;\r\n  padding: 8px 0;\r\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n}\n.acu-stats dt[data-v-249ee71c] {\r\n  margin: 0 0 2px; font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3);\n}\n.acu-stats dd[data-v-249ee71c] {\r\n  margin: 0; font-size: var(--acu-font-size-body, 12px); color: var(--acu-text-1); word-break: break-all;\n}\n.acu-stats--mono code[data-v-249ee71c] {\r\n  display: inline-block; max-width: 100%;\r\n  font-family: var(--acu-font-mono); font-size: var(--acu-font-size-body, 12px);\r\n  background: transparent; color: var(--acu-text-1);\r\n  padding: 0; border-radius: 0;\n}\n@media (max-width: 720px) {\n.acu-stats[data-v-249ee71c] { grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuStatsList.vue#style-0-249ee71c");
-    var AcuStatsList_vue_vue_type_style_index_0_scoped_249ee71c_lang = null;
-
-    const _hoisted_1$X = { key: 0 };
-    function _sfc_render$Y(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock(
-		"dl",
-		{ class: normalizeClass(["acu-stats", { "acu-stats--mono": $props.mono }]) },
-		[(openBlock(true), createElementBlock(
-			Fragment,
-			null,
-			renderList($props.items, (item) => {
-				return openBlock(), createElementBlock("div", {
-					key: item.label,
-					class: "acu-stats__item"
-				}, [createBaseVNode(
-					"dt",
-					null,
-					toDisplayString(item.label),
-					1
-					/* TEXT */
-				), createBaseVNode("dd", null, [renderSlot(_ctx.$slots, item.key ?? item.label, { item }, () => [$props.mono ? (openBlock(), createElementBlock(
-					"code",
-					_hoisted_1$X,
-					toDisplayString(item.value ?? "—"),
-					1
-					/* TEXT */
-				)) : (openBlock(), createElementBlock(
-					Fragment,
-					{ key: 1 },
-					[createTextVNode(
-						toDisplayString(item.value ?? "—"),
-						1
-						/* TEXT */
-					)],
-					64
-					/* STABLE_FRAGMENT */
-				))], true)])]);
-			}),
-			128
-			/* KEYED_FRAGMENT */
-		))],
-		2
-		/* CLASS */
-	);
-    }
-    var AcuStatsList = /*#__PURE__*/ _export_sfc(_sfc_main$Y, [["render", _sfc_render$Y], ["__scopeId", "data-v-249ee71c"]]);
-
-    const DRAWER_LEAVE_MS = 150;
-    var _sfc_main$X = /*@__PURE__*/ defineComponent({
-        __name: 'AcuDrawer',
-        props: {
-            isOpen: { type: Boolean },
-            title: {},
-            showBack: { type: Boolean, default: false },
-            width: { default: 'var(--acu-drawer-width, 480px)' },
-            beforeClose: { type: Function, default: undefined }
-        },
-        emits: ["close", "back"],
-        setup(__props, { expose: __expose, emit: __emit }) {
-            __expose();
-            const props = __props;
-            const emit = __emit;
-            const resolvedWidth = computed(() => props.width);
-            const isRendered = ref(false);
-            const isClosing = ref(false);
-            const closeGuardPending = ref(false);
-            let closeTimer;
-            watch(() => props.isOpen, (open) => {
-                if (open)
-                    showDrawer();
-                else
-                    hideDrawer();
-            }, { immediate: true });
-            onBeforeUnmount(clearCloseTimer);
-            async function guard() {
-                if (!props.beforeClose)
-                    return true;
-                const result = props.beforeClose();
-                return result instanceof Promise ? result : result;
-            }
-            async function requestClose() {
-                if (isClosing.value || closeGuardPending.value)
-                    return;
-                closeGuardPending.value = true;
-                try {
-                    if (await guard())
-                        emit('close');
-                }
-                finally {
-                    closeGuardPending.value = false;
-                }
-            }
-            async function requestBack() {
-                if (isClosing.value || closeGuardPending.value)
-                    return;
-                closeGuardPending.value = true;
-                try {
-                    if (await guard())
-                        emit('back');
-                }
-                finally {
-                    closeGuardPending.value = false;
-                }
-            }
-            function showDrawer() {
-                clearCloseTimer();
-                isRendered.value = true;
-                isClosing.value = false;
-            }
-            function hideDrawer() {
-                if (!isRendered.value)
-                    return;
-                isClosing.value = true;
-                clearCloseTimer();
-                closeTimer = acuSetTimeout(() => {
-                    isRendered.value = false;
-                    isClosing.value = false;
-                    closeTimer = undefined;
-                }, DRAWER_LEAVE_MS);
-            }
-            function clearCloseTimer() {
-                if (closeTimer === undefined)
-                    return;
-                acuClearTimeout(closeTimer);
-                closeTimer = undefined;
-            }
-            const __returned__ = { props, emit, resolvedWidth, isRendered, isClosing, closeGuardPending, DRAWER_LEAVE_MS, get closeTimer() { return closeTimer; }, set closeTimer(v) { closeTimer = v; }, guard, requestClose, requestBack, showDrawer, hideDrawer, clearCloseTimer, AcuIconButton };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
-        }
-    });
-
-    injectSfcStyle("\n.acu-v2-drawer-layer[data-v-882382df] {\r\n  position: fixed; top: 0; right: 0; bottom: 0; left: 0; inset: 0; z-index: 9200;\r\n  width: 100%; width: 100vw; width: 100dvw;\r\n  height: 100%; height: 100vh; height: 100dvh;\r\n  display: flex; justify-content: flex-end;\r\n  padding: var(--acu-safe-top, 0px) var(--acu-safe-right, 0px) var(--acu-safe-bottom, 0px) var(--acu-safe-left, 0px);\r\n  background: rgba(0, 0, 0, 0.38);\r\n  overflow: hidden;\r\n  animation: acu-drawer-layer-in-882382df 0.18s ease-out both;\n}\n.acu-v2-drawer-layer.is-closing[data-v-882382df] {\r\n  pointer-events: none;\r\n  animation: acu-drawer-layer-out-882382df 0.15s ease-in both;\n}\n.acu-v2-drawer[data-v-882382df] {\r\n  max-width: 100%;\r\n  height: 100%; max-height: 100%;\r\n  display: flex; flex-direction: column;\r\n  background: var(--acu-bg-1);\r\n  border-left: 0;\r\n  box-shadow: var(--acu-shadow);\r\n  min-width: 0; min-height: 0;\r\n  overflow: hidden;\r\n  animation: acu-drawer-panel-in-882382df 0.18s ease-out both;\n}\n.acu-v2-drawer-layer.is-closing .acu-v2-drawer[data-v-882382df] {\r\n  animation: acu-drawer-panel-out-882382df 0.15s ease-in both;\n}\n@supports (max-height: 100dvh) {\n.acu-v2-drawer[data-v-882382df] { max-height: 100%;\n}\n}\n.acu-v2-drawer__header[data-v-882382df] {\r\n  flex: 0 0 auto;\r\n  display: flex; align-items: center; justify-content: space-between;\r\n  min-width: 0;\r\n  gap: var(--acu-panel-gap, 12px); padding: var(--acu-page-gap, 14px) var(--acu-panel-padding, 16px);\r\n  border-bottom: 0;\n}\n.acu-v2-drawer__header-left[data-v-882382df] { display: flex; align-items: center; gap: var(--acu-space-250, 10px); min-width: 0;\n}\n.acu-v2-drawer__header h3[data-v-882382df] { margin: 0; min-width: 0; font-size: var(--acu-font-size-panel-title, 15px); overflow-wrap: anywhere;\n}\n.acu-v2-drawer__body[data-v-882382df] {\r\n  flex: 1; min-height: 0;\r\n  min-width: 0; overflow-y: auto; overflow-x: hidden; padding: var(--acu-panel-padding, 16px);\r\n  display: flex; flex-direction: column; gap: var(--acu-page-gap, 14px);\n}\n@keyframes acu-drawer-layer-in-882382df {\nfrom { opacity: 0;\n}\nto { opacity: 1;\n}\n}\n@keyframes acu-drawer-panel-in-882382df {\nfrom { transform: translateX(100%);\n}\nto { transform: translateX(0);\n}\n}\n@keyframes acu-drawer-layer-out-882382df {\nfrom { opacity: 1;\n}\nto { opacity: 0;\n}\n}\n@keyframes acu-drawer-panel-out-882382df {\nfrom { transform: translateX(0);\n}\nto { transform: translateX(100%);\n}\n}\n@media (max-width: 860px) {\n.acu-v2-drawer[data-v-882382df] { width: 100vw !important; max-width: 100vw; border-left: 0;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuDrawer.vue#style-0-882382df");
-    var AcuDrawer_vue_vue_type_style_index_0_scoped_882382df_lang = null;
-
-    const _hoisted_1$W = { class: "acu-v2-drawer__header" };
-    const _hoisted_2$S = { class: "acu-v2-drawer__header-left" };
-    const _hoisted_3$J = { class: "acu-v2-drawer__body" };
-    function _sfc_render$X(_ctx, _cache, $props, $setup, $data, $options) {
-	return $setup.isRendered ? (openBlock(), createElementBlock(
-		"div",
-		{
-			key: 0,
-			class: normalizeClass(["acu-v2-drawer-layer", { "is-closing": $setup.isClosing }]),
-			onClick: withModifiers($setup.requestClose, ["self"]),
-			onPointerdown: withModifiers($setup.requestClose, ["self"]),
-			onTouchstart: withModifiers($setup.requestClose, ["self"])
-		},
-		[createBaseVNode(
-			"aside",
-			{
-				class: "acu-v2-drawer",
-				style: normalizeStyle({ width: $setup.resolvedWidth }),
-				"aria-modal": "true",
-				role: "dialog",
-				onClick: _cache[0] || (_cache[0] = withModifiers(() => {}, ["stop"]))
-			},
-			[createBaseVNode("header", _hoisted_1$W, [createBaseVNode("div", _hoisted_2$S, [$props.showBack ? (openBlock(), createBlock($setup["AcuIconButton"], {
-				key: 0,
-				icon: "fa-solid fa-arrow-left",
-				title: "返回",
-				onClick: $setup.requestBack
-			})) : createCommentVNode("v-if", true), createBaseVNode(
-				"h3",
-				null,
-				toDisplayString($props.title),
-				1
-				/* TEXT */
-			)]), createVNode($setup["AcuIconButton"], {
-				icon: "fa-solid fa-xmark",
-				"aria-label": "关闭",
-				title: "关闭",
-				onClick: $setup.requestClose
-			})]), createBaseVNode("div", _hoisted_3$J, [renderSlot(_ctx.$slots, "default", {}, undefined, true)])],
-			4
-			/* STYLE */
-		)],
-		34
-		/* CLASS, NEED_HYDRATION */
-	)) : createCommentVNode("v-if", true);
-    }
-    var AcuDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$X, [["render", _sfc_render$X], ["__scopeId", "data-v-882382df"]]);
+    var AcuTextarea = /*#__PURE__*/ _export_sfc(_sfc_main$Y, [["render", _sfc_render$Y], ["__scopeId", "data-v-263eda0c"]]);
 
     const DEFAULT_ROLE_OPTIONS = [
         { value: 'SYSTEM', label: 'SYSTEM' },
@@ -192107,7 +192014,7 @@ ${rejectionText}` : delegationFeedback,
         { value: 'A', label: '主插槽 A' },
         { value: 'B', label: '主插槽 B' },
     ];
-    var _sfc_main$W = /*@__PURE__*/ defineComponent({
+    var _sfc_main$X = /*@__PURE__*/ defineComponent({
         __name: 'AcuPromptSegments',
         props: {
             segments: {},
@@ -192147,7 +192054,7 @@ ${rejectionText}` : delegationFeedback,
 	class: "acu-prompt-segs__empty"
     };
     const _hoisted_8$r = { class: "acu-prompt-segs__add" };
-    function _sfc_render$W(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$X(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("div", _hoisted_1$V, [
 		createBaseVNode("div", _hoisted_2$R, [createVNode($setup["AcuButton"], {
 			size: "sm",
@@ -192290,9 +192197,9 @@ ${rejectionText}` : delegationFeedback,
 		})])
 	]);
     }
-    var AcuPromptSegments = /*#__PURE__*/ _export_sfc(_sfc_main$W, [["render", _sfc_render$W], ["__scopeId", "data-v-cf81b9bc"]]);
+    var AcuPromptSegments = /*#__PURE__*/ _export_sfc(_sfc_main$X, [["render", _sfc_render$X], ["__scopeId", "data-v-cf81b9bc"]]);
 
-    var _sfc_main$V = /*@__PURE__*/ defineComponent({
+    var _sfc_main$W = /*@__PURE__*/ defineComponent({
         __name: 'VectorIndexPromptDrawer',
         props: {
             isOpen: { type: Boolean },
@@ -192332,7 +192239,7 @@ ${rejectionText}` : delegationFeedback,
 
     const _hoisted_1$U = { class: "acu-vector-prompt-drawer__toolbar" };
     const _hoisted_2$Q = { class: "acu-vector-prompt-drawer__actions" };
-    function _sfc_render$V(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$W(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
 		"is-open": $props.isOpen,
 		title: "编辑关键词生成提示词",
@@ -192396,7 +192303,7 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	}, 8, ["is-open"]);
     }
-    var VectorIndexPromptDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$V, [["render", _sfc_render$V], ["__scopeId", "data-v-75f9cd80"]]);
+    var VectorIndexPromptDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$W, [["render", _sfc_render$W], ["__scopeId", "data-v-75f9cd80"]]);
 
     function formatFollowActiveApiLabel(activePresetName) {
         const name = String(activePresetName || '').trim();
@@ -193120,7 +193027,7 @@ ${rejectionText}` : delegationFeedback,
     const SHOW_LEGACY_VECTOR_MAINTENANCE_UI = false;
     const CROSSFIRE_FLOW_HINT = '发送前流程：关键词生成（可关闭）→ 用户输入与关键词合并 embedding → "概览 + 纪要正文"向量与 BM25 混合召回（可关闭）→ 可选 Rerank（按纪要正文分批精排，候选不多于 TopK 时跳过）→ 按纪要表原顺序覆盖原概要索引条目。';
     const VECTOR_FLOW_HINT = '发送前流程：用户输入直接 embedding 召回 → Rerank 精排并按「保留相关纪要条数」截取 → 按纪要表原顺序覆盖原概要索引条目。向量表格不生成关键词、不做混合召回；Rerank 未配置或失败时本轮召回判定失败，不会静默退回 embedding 排序。';
-    var _sfc_main$U = /*@__PURE__*/ defineComponent({
+    var _sfc_main$V = /*@__PURE__*/ defineComponent({
         __name: 'FormFillVectorPanels',
         props: {
             mode: {}
@@ -193216,16 +193123,16 @@ ${rejectionText}` : delegationFeedback,
     const _hoisted_6$t = { class: "acu-v2-vector-index-page__panel-stack" };
     const _hoisted_7$q = { class: "acu-v2-vector-api-form__section" };
     const _hoisted_8$q = { class: "acu-v2-vector-api-form__section" };
-    const _hoisted_9$n = { class: "acu-v2-vector-api-form__actions" };
-    const _hoisted_10$k = { class: "acu-v2-vector-index-page__prompt-actions" };
+    const _hoisted_9$m = { class: "acu-v2-vector-api-form__actions" };
+    const _hoisted_10$j = { class: "acu-v2-vector-index-page__prompt-actions" };
     const _hoisted_11$j = { class: "acu-v2-vector-index-page__number-grid" };
-    const _hoisted_12$f = { class: "acu-v2-vector-index-page__number-grid" };
-    const _hoisted_13$d = ["value"];
-    const _hoisted_14$d = {
+    const _hoisted_12$g = { class: "acu-v2-vector-index-page__number-grid" };
+    const _hoisted_13$e = ["value"];
+    const _hoisted_14$e = {
 	key: 1,
 	"aria-hidden": "true"
     };
-    function _sfc_render$U(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$V(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("div", _hoisted_1$T, [
 		createVNode($setup["AcuPanelGrid"], { class: "acu-v2-vector-index-page__main-grid" }, {
 			default: withCtx(() => [createBaseVNode("div", _hoisted_2$P, [createVNode($setup["AcuPanel"], {
@@ -193526,7 +193433,7 @@ ${rejectionText}` : delegationFeedback,
 							))]),
 							_: 1
 						})) : createCommentVNode("v-if", true),
-						createBaseVNode("div", _hoisted_9$n, [createVNode($setup["AcuButton"], {
+						createBaseVNode("div", _hoisted_9$m, [createVNode($setup["AcuButton"], {
 							variant: "primary",
 							"native-type": "submit"
 						}, {
@@ -193566,7 +193473,7 @@ ${rejectionText}` : delegationFeedback,
 						/* CACHED */
 					)])]),
 					_: 1
-				})) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_10$k, [createVNode($setup["AcuButton"], {
+				})) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_10$j, [createVNode($setup["AcuButton"], {
 					variant: "primary",
 					onClick: _cache[12] || (_cache[12] = ($event) => $setup.promptDrawerOpen = true)
 				}, {
@@ -193689,7 +193596,7 @@ ${rejectionText}` : delegationFeedback,
 					description: $setup.vectorIndexCopy.panels.archive.description
 				}, {
 					default: withCtx(() => [
-						createBaseVNode("div", _hoisted_12$f, [
+						createBaseVNode("div", _hoisted_12$g, [
 							createVNode($setup["AcuFormRow"], {
 								label: "按句切分纪要正文",
 								hint: "默认关闭：每行一个向量（概览 + 纪要正文整体），索引体积只随行数增长。开启后按下方句数切分正文，召回更细但分片成倍增加；改动后需重建索引。"
@@ -193805,13 +193712,13 @@ ${rejectionText}` : delegationFeedback,
 								spellcheck: "false",
 								placeholder: "每行一个 scope fingerprint",
 								onChange: _cache[27] || (_cache[27] = ($event) => $setup.vector.setV2WriteScopeAllowlist($event.target.value))
-							}, null, 40, _hoisted_13$d)]),
+							}, null, 40, _hoisted_13$e)]),
 							_: 1
 						})) : createCommentVNode("v-if", true)
 					]),
 					_: 1
 				}, 8, ["title", "description"]),
-				!$setup.isCrossfire ? (openBlock(), createElementBlock("div", _hoisted_14$d)) : createCommentVNode("v-if", true)
+				!$setup.isCrossfire ? (openBlock(), createElementBlock("div", _hoisted_14$e)) : createCommentVNode("v-if", true)
 			]),
 			_: 1
 		}),
@@ -193837,7 +193744,4523 @@ ${rejectionText}` : delegationFeedback,
 		])
 	]);
     }
-    var FormFillVectorPanels = /*#__PURE__*/ _export_sfc(_sfc_main$U, [["render", _sfc_render$U], ["__scopeId", "data-v-7fe482db"]]);
+    var FormFillVectorPanels = /*#__PURE__*/ _export_sfc(_sfc_main$V, [["render", _sfc_render$V], ["__scopeId", "data-v-7fe482db"]]);
+
+    /**
+     * usePlotTaskEditing — 抽屉 edit 视图内的任务列表 + 当前任务编辑（D23.3）
+     *
+     * 一次只编辑一个 preset 的 plotTasks 数组；操作的是抽屉内的 draft（不是 settings_ACU），
+     * 直到外层的 management 调 savePreset 才落地。
+     */
+    function normalizeRoleString(role) {
+        const r = String(role || '').trim();
+        return r || 'USER';
+    }
+    function ensureMainSlotIntegrity(segments) {
+        // mainSlot 'A' / 'B' 各最多一个；首次 hits-only。多余的转为空 mainSlot。
+        const seenA = { v: false };
+        const seenB = { v: false };
+        for (const seg of segments) {
+            const slot = String(seg?.mainSlot || '').toUpperCase();
+            if (slot === 'A') {
+                if (seenA.v)
+                    seg.mainSlot = '';
+                else
+                    seenA.v = true;
+            }
+            else if (slot === 'B') {
+                if (seenB.v)
+                    seg.mainSlot = '';
+                else
+                    seenB.v = true;
+            }
+        }
+        return segments;
+    }
+    function cloneSegments(group) {
+        if (!Array.isArray(group))
+            return [];
+        return ensureMainSlotIntegrity(group.map((seg) => ({
+            role: normalizeRoleString(seg?.role),
+            content: typeof seg?.content === 'string' ? seg.content : '',
+            deletable: seg?.deletable !== false,
+            mainSlot: String(seg?.mainSlot || '').toUpperCase() === 'A'
+                ? 'A'
+                : String(seg?.mainSlot || '').toUpperCase() === 'B'
+                    ? 'B'
+                    : '',
+            isMain: !!seg?.isMain,
+            isMain2: !!seg?.isMain2,
+        })));
+    }
+    function cloneStringArray(value) {
+        if (!Array.isArray(value))
+            return [];
+        return value
+            .map(item => String(item ?? '').trim())
+            .filter((item, index, array) => item && array.indexOf(item) === index);
+    }
+    function cloneAgentControl(value) {
+        const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+        const control = {
+            enabled: source.enabled === true,
+            selectable: source.selectable !== false,
+            defaultSelected: source.defaultSelected === true,
+            allowSequential: source.allowSequential !== false,
+            allowParallel: source.allowParallel !== false,
+            dependsOnTaskIds: cloneStringArray(source.dependsOnTaskIds),
+            blocksTaskIds: cloneStringArray(source.blocksTaskIds),
+        };
+        if (Number.isFinite(source.preferredStage) && Number(source.preferredStage) > 0)
+            control.preferredStage = Math.trunc(Number(source.preferredStage));
+        if (Number.isFinite(source.preferredOrder) && Number(source.preferredOrder) >= 0)
+            control.preferredOrder = Math.trunc(Number(source.preferredOrder));
+        return control;
+    }
+    function taskFromRaw(raw, index = 0) {
+        const normalized = normalizePlotTask_ACU(raw, { index });
+        return {
+            id: String(normalized.id || `plotTask${index + 1}`),
+            name: String(normalized.name || `剧情任务${index + 1}`),
+            enabled: normalized.enabled !== false,
+            promptGroup: cloneSegments(normalized.promptGroup),
+            extractTags: typeof normalized.extractTags === 'string' ? normalized.extractTags : '',
+            extractInjectTags: typeof normalized.extractInjectTags === 'string' ? normalized.extractInjectTags : '',
+            finalDirectiveTemplate: typeof normalized.finalDirectiveTemplate === 'string' ? normalized.finalDirectiveTemplate : '',
+            minLength: Number.isFinite(normalized.minLength) ? Number(normalized.minLength) : 0,
+            maxRetries: Number.isFinite(normalized.maxRetries) ? Number(normalized.maxRetries) : 3,
+            mergeStrategy: String(normalized.mergeStrategy || 'append'),
+            stage: Number.isFinite(normalized.stage) ? Number(normalized.stage) : 1,
+            order: Number.isFinite(normalized.order) ? Number(normalized.order) : index,
+            description: typeof normalized.description === 'string' ? normalized.description : '',
+            triggerWhen: typeof normalized.triggerWhen === 'string' ? normalized.triggerWhen : '',
+            agentControl: cloneAgentControl(normalized.agentControl),
+        };
+    }
+    function tasksFromRaw(rawList) {
+        const normalized = normalizePlotTasks_ACU({ plotTasks: rawList });
+        return normalized.map((t, i) => taskFromRaw(t, i));
+    }
+    function makeDefaultTask(index) {
+        return {
+            id: `plotTask${Date.now()}`,
+            name: `剧情任务${index + 1}`,
+            enabled: true,
+            promptGroup: cloneSegments(buildDefaultPlotPromptGroup_ACU()),
+            extractTags: '',
+            extractInjectTags: '',
+            finalDirectiveTemplate: '',
+            minLength: 0,
+            maxRetries: 3,
+            mergeStrategy: 'append',
+            stage: 1,
+            order: index,
+            description: '',
+            triggerWhen: '',
+            agentControl: {
+                enabled: false,
+                selectable: true,
+                defaultSelected: false,
+                allowSequential: true,
+                allowParallel: true,
+                dependsOnTaskIds: [],
+                blocksTaskIds: [],
+            },
+        };
+    }
+    function usePlotTaskEditing() {
+        const tasks = ref([]);
+        const currentTaskId = ref('');
+        const finalDirective = ref('');
+        const currentTask = computed(() => tasks.value.find(t => t.id === currentTaskId.value) || null);
+        function loadFromRaw(rawTasks, rawFinalDirective) {
+            const list = tasksFromRaw(Array.isArray(rawTasks) ? rawTasks : []);
+            if (list.length === 0)
+                list.push(makeDefaultTask(0));
+            tasks.value = list;
+            currentTaskId.value = list[0].id;
+            finalDirective.value = String(rawFinalDirective || '');
+        }
+        function selectTask(taskId) {
+            if (tasks.value.some(t => t.id === taskId))
+                currentTaskId.value = taskId;
+        }
+        function addTask() {
+            const next = makeDefaultTask(tasks.value.length);
+            tasks.value = [...tasks.value, next];
+            currentTaskId.value = next.id;
+        }
+        function deleteCurrentTask() {
+            if (tasks.value.length <= 1)
+                return;
+            const idx = tasks.value.findIndex(t => t.id === currentTaskId.value);
+            if (idx < 0)
+                return;
+            const copy = tasks.value.slice();
+            copy.splice(idx, 1);
+            tasks.value = copy;
+            currentTaskId.value = copy[Math.max(0, idx - 1)].id;
+        }
+        function moveCurrent(delta) {
+            const idx = tasks.value.findIndex(t => t.id === currentTaskId.value);
+            if (idx < 0)
+                return;
+            const target = idx + delta;
+            if (target < 0 || target >= tasks.value.length)
+                return;
+            const copy = tasks.value.slice();
+            [copy[idx], copy[target]] = [copy[target], copy[idx]];
+            tasks.value = copy;
+        }
+        function patchCurrent(patch) {
+            const idx = tasks.value.findIndex(t => t.id === currentTaskId.value);
+            if (idx < 0)
+                return;
+            const copy = tasks.value.slice();
+            copy[idx] = { ...copy[idx], ...patch };
+            tasks.value = copy;
+        }
+        // ── Prompt segments ──
+        function addSegment(position) {
+            if (!currentTask.value)
+                return;
+            const newSeg = {
+                role: 'USER',
+                content: '',
+                deletable: true,
+                mainSlot: '',
+            };
+            const segments = currentTask.value.promptGroup.slice();
+            if (position === 'top')
+                segments.unshift(newSeg);
+            else
+                segments.push(newSeg);
+            patchCurrent({ promptGroup: segments });
+        }
+        function deleteSegment(index) {
+            if (!currentTask.value)
+                return;
+            const segments = currentTask.value.promptGroup.slice();
+            if (index < 0 || index >= segments.length)
+                return;
+            if (segments[index].deletable === false)
+                return;
+            segments.splice(index, 1);
+            patchCurrent({ promptGroup: segments });
+        }
+        function moveSegment(index, delta) {
+            if (!currentTask.value)
+                return;
+            const segments = currentTask.value.promptGroup.slice();
+            const target = index + delta;
+            if (index < 0 || index >= segments.length || target < 0 || target >= segments.length)
+                return;
+            [segments[index], segments[target]] = [segments[target], segments[index]];
+            patchCurrent({ promptGroup: ensureMainSlotIntegrity(segments) });
+        }
+        function updateSegment(index, patch) {
+            if (!currentTask.value)
+                return;
+            const segments = currentTask.value.promptGroup.slice();
+            if (index < 0 || index >= segments.length)
+                return;
+            segments[index] = { ...segments[index], ...patch };
+            if (patch.mainSlot === 'A' || patch.mainSlot === 'B') {
+                // 取消其他段相同 slot
+                for (let i = 0; i < segments.length; i++) {
+                    if (i === index)
+                        continue;
+                    if (segments[i].mainSlot === patch.mainSlot)
+                        segments[i] = { ...segments[i], mainSlot: '' };
+                }
+            }
+            patchCurrent({ promptGroup: ensureMainSlotIntegrity(segments) });
+        }
+        /** 序列化整套 tasks + finalDirective，写回到 preset.raw 上。 */
+        function serializeIntoPresetRaw(rawPreset) {
+            const out = { ...rawPreset };
+            out.plotTasks = tasks.value.map((t, i) => ({
+                id: t.id,
+                name: t.name,
+                enabled: t.enabled,
+                promptGroup: t.promptGroup.map(seg => ({
+                    role: seg.role,
+                    content: seg.content,
+                    deletable: seg.deletable !== false,
+                    ...(seg.mainSlot ? { mainSlot: seg.mainSlot } : {}),
+                    ...(seg.mainSlot === 'A' ? { isMain: true } : {}),
+                    ...(seg.mainSlot === 'B' ? { isMain2: true } : {}),
+                })),
+                extractTags: t.extractTags,
+                extractInjectTags: t.extractInjectTags,
+                finalDirectiveTemplate: t.finalDirectiveTemplate,
+                minLength: t.minLength,
+                maxRetries: t.maxRetries,
+                mergeStrategy: t.mergeStrategy,
+                stage: t.stage,
+                order: i,
+                description: t.description,
+                triggerWhen: t.triggerWhen,
+                agentControl: {
+                    ...t.agentControl,
+                    dependsOnTaskIds: cloneStringArray(t.agentControl?.dependsOnTaskIds),
+                    blocksTaskIds: cloneStringArray(t.agentControl?.blocksTaskIds),
+                    ...(Number.isFinite(t.agentControl?.preferredStage) ? { preferredStage: Math.trunc(Number(t.agentControl.preferredStage)) } : {}),
+                    ...(Number.isFinite(t.agentControl?.preferredOrder) ? { preferredOrder: Math.trunc(Number(t.agentControl.preferredOrder)) } : {}),
+                },
+            }));
+            out.finalSystemDirective = finalDirective.value;
+            return out;
+        }
+        return {
+            tasks,
+            currentTaskId,
+            currentTask,
+            finalDirective,
+            loadFromRaw,
+            selectTask,
+            addTask,
+            deleteCurrentTask,
+            moveCurrent,
+            patchCurrent,
+            addSegment,
+            deleteSegment,
+            moveSegment,
+            updateSegment,
+            serializeIntoPresetRaw,
+        };
+    }
+
+    /**
+     * usePlotPresetManagement — 剧情推进抽屉的状态机（D23.3）
+     *
+     * 与 useApiPresetManagement 形态一致：drawerView = closed/manage/create/edit。
+     * edit 视图内嵌 usePlotTaskEditing，drawer 关闭时丢弃 draft。
+     */
+    const DEFAULT_NEW_PRESET_NAME = '新预设';
+    function emptyDraftMeta() {
+        return { name: '', taskApiPreset: '' };
+    }
+    function emptyContextRules() {
+        return { extractRules: [], excludeRules: [] };
+    }
+    function coercePlotRate(field, value) {
+        const n = Number(value);
+        return Number.isFinite(n) ? n : getDefaultPlotRateValueForV2(field);
+    }
+    function readDraftRates(raw) {
+        return PLOT_RATE_FIELDS.reduce((acc, field) => {
+            acc[field] = coercePlotRate(field, raw?.[field]);
+            return acc;
+        }, {});
+    }
+    function writeDraftRates(raw, rates) {
+        for (const field of PLOT_RATE_FIELDS) {
+            raw[field] = coercePlotRate(field, rates[field]);
+        }
+    }
+    function emptyDraftRates() {
+        return readDraftRates(null);
+    }
+    function defaultRawPreset() {
+        return getDefaultPlotPresetRawForV2();
+    }
+    function uniquePresetName$1(baseName, names) {
+        const normalizedBase = String(baseName || '').trim();
+        if (!normalizedBase)
+            return '';
+        const usedNames = new Set(names.map(name => String(name || '').trim()).filter(Boolean));
+        if (!usedNames.has(normalizedBase))
+            return normalizedBase;
+        for (let i = 2; i <= 99; i += 1) {
+            const candidate = `${normalizedBase} (${i})`;
+            if (!usedNames.has(candidate))
+                return candidate;
+        }
+        return `${normalizedBase} (${Date.now()})`;
+    }
+    function normalizeRulePairs(rules, legacyTags, kind) {
+        const normalized = kind === 'extract'
+            ? normalizeExtractRules_ACU(rules, String(legacyTags || ''))
+            : normalizeExcludeRules_ACU(rules, String(legacyTags || ''));
+        return normalized.map((rule) => ({
+            start: String(rule.start || ''),
+            end: String(rule.end || ''),
+        }));
+    }
+    function coerceRulePairs$2(rules) {
+        return Array.isArray(rules)
+            ? rules.map((rule) => ({
+                start: String(rule?.start || ''),
+                end: String(rule?.end || ''),
+            }))
+            : [];
+    }
+    function rulesForSave(rules, kind) {
+        return normalizeRulePairs(rules, '', kind);
+    }
+    function usePlotPresetManagement() {
+        const store = usePlotPresetStore();
+        const dialogStore = useDialogStore();
+        const toast = useToastStore();
+        const taskEditing = usePlotTaskEditing();
+        const drawerView = ref('closed');
+        const originalName = ref('');
+        const draftMeta = reactive(emptyDraftMeta());
+        const contextRules = reactive(emptyContextRules());
+        const draftRates = reactive(emptyDraftRates());
+        const draftRaw = ref(defaultRawPreset());
+        const error = ref('');
+        const initialSnapshot = ref('');
+        const isDrawerOpen = computed(() => drawerView.value !== 'closed');
+        const title = computed(() => {
+            switch (drawerView.value) {
+                case 'manage':
+                    return '管理剧情推进预设';
+                case 'edit':
+                    return '编辑剧情推进预设';
+                case 'create':
+                    return '从默认新建剧情推进预设';
+                default:
+                    return '';
+            }
+        });
+        const isDirty = computed(() => {
+            if (drawerView.value !== 'create' && drawerView.value !== 'edit')
+                return false;
+            return takeCurrentSnapshot() !== initialSnapshot.value;
+        });
+        const presetMeta = computed(() => store.presets.map(p => ({
+            name: p.name,
+            taskCount: Array.isArray(p.raw?.plotTasks) ? p.raw.plotTasks.length : 0,
+        })));
+        function takeCurrentSnapshot() {
+            return JSON.stringify({
+                meta: draftMeta,
+                contextRules,
+                rates: draftRates,
+                tasks: taskEditing.tasks.value,
+                directive: taskEditing.finalDirective.value,
+            });
+        }
+        function saveSnapshot() {
+            initialSnapshot.value = takeCurrentSnapshot();
+        }
+        function confirmIfDirty() {
+            if (!isDirty.value)
+                return true;
+            return dialogStore.confirm({
+                title: '退出预设编辑',
+                message: '你有未保存的修改，确定要退出吗？',
+                confirmLabel: '退出',
+                confirmVariant: 'danger',
+            });
+        }
+        function resetDraft() {
+            Object.assign(draftMeta, emptyDraftMeta());
+            Object.assign(contextRules, emptyContextRules());
+            Object.assign(draftRates, emptyDraftRates());
+            draftRaw.value = defaultRawPreset();
+            originalName.value = '';
+            error.value = '';
+            taskEditing.tasks.value = [];
+            taskEditing.currentTaskId.value = '';
+            taskEditing.finalDirective.value = '';
+            initialSnapshot.value = '';
+        }
+        function openManage() {
+            error.value = '';
+            drawerView.value = 'manage';
+        }
+        function openCreate() {
+            resetDraft();
+            const raw = defaultRawPreset();
+            draftMeta.name = uniquePresetName$1(DEFAULT_NEW_PRESET_NAME, store.presets.map(p => p.name));
+            draftRaw.value = raw;
+            contextRules.extractRules = normalizeRulePairs(raw.contextExtractRules, raw.contextExtractTags || '', 'extract');
+            contextRules.excludeRules = normalizeRulePairs(raw.contextExcludeRules, raw.contextExcludeTags || '', 'exclude');
+            Object.assign(draftRates, readDraftRates(raw));
+            taskEditing.loadFromRaw(raw.plotTasks || [], raw.finalSystemDirective || '');
+            error.value = '';
+            drawerView.value = 'create';
+            saveSnapshot();
+        }
+        function openEdit(presetName) {
+            const target = store.presets.find(p => p.name === presetName);
+            if (!target)
+                return;
+            resetDraft();
+            originalName.value = target.name;
+            draftMeta.name = target.name;
+            draftMeta.taskApiPreset = '';
+            draftRaw.value = JSON.parse(JSON.stringify(target.raw || {}));
+            contextRules.extractRules = normalizeRulePairs(target.raw?.contextExtractRules, target.raw?.contextExtractTags || '', 'extract');
+            contextRules.excludeRules = normalizeRulePairs(target.raw?.contextExcludeRules, target.raw?.contextExcludeTags || '', 'exclude');
+            Object.assign(draftRates, readDraftRates(target.raw || null));
+            taskEditing.loadFromRaw(target.raw?.plotTasks || [], target.raw?.finalSystemDirective || '');
+            error.value = '';
+            drawerView.value = 'edit';
+            saveSnapshot();
+        }
+        /** "编辑当前预设"按钮：打开抽屉并直接进入 edit 视图。 */
+        function openEditCurrent() {
+            const active = store.activePreset;
+            if (!active) {
+                openCreate();
+                return true;
+            }
+            openEdit(active.name);
+            return true;
+        }
+        function closeDrawer() {
+            drawerView.value = 'closed';
+            resetDraft();
+        }
+        function backToManage() {
+            error.value = '';
+            drawerView.value = 'manage';
+        }
+        function validate() {
+            const name = String(draftMeta.name || '').trim();
+            if (!name) {
+                error.value = '预设名称不能为空。';
+                return false;
+            }
+            if (taskEditing.tasks.value.length === 0) {
+                error.value = '至少需要一个任务。';
+                return false;
+            }
+            error.value = '';
+            return true;
+        }
+        function setContextExtractRules(rules) {
+            contextRules.extractRules = coerceRulePairs$2(rules);
+        }
+        function setContextExcludeRules(rules) {
+            contextRules.excludeRules = coerceRulePairs$2(rules);
+        }
+        function setDraftRate(field, value) {
+            draftRates[field] = coercePlotRate(field, value);
+        }
+        function saveDraft() {
+            if (!validate())
+                return false;
+            const merged = taskEditing.serializeIntoPresetRaw(draftRaw.value || {});
+            merged.name = String(draftMeta.name || '').trim();
+            merged.contextExtractRules = rulesForSave(contextRules.extractRules, 'extract');
+            merged.contextExcludeRules = rulesForSave(contextRules.excludeRules, 'exclude');
+            writeDraftRates(merged, draftRates);
+            delete merged.contextExtractTags;
+            delete merged.contextExcludeTags;
+            const ok = store.savePreset({ name: merged.name, raw: merged }, originalName.value);
+            if (!ok) {
+                error.value = '预设保存失败。';
+                return false;
+            }
+            drawerView.value = 'manage';
+            resetDraft();
+            toast.success('剧情推进预设已保存。');
+            return true;
+        }
+        function deletePreset(name) {
+            return store.deletePreset(name);
+        }
+        function importFromJsonText(text) {
+            const result = store.importPresetFromJson(text);
+            if (!result) {
+                error.value = '导入失败：JSON 无效或缺少 name 字段。';
+                return false;
+            }
+            if (!store.setActivePresetForCurrentChat(result)) {
+                error.value = '已保存到预设库，但无法切换为当前聊天预设。可在下拉框手动选择。';
+                return false;
+            }
+            toast.success('剧情推进预设 JSON 已导入。', { muteable: false });
+            return true;
+        }
+        function exportPresetAsText(name) {
+            return store.exportPresetAsJson(name);
+        }
+        return {
+            drawerView,
+            isDrawerOpen,
+            isDirty,
+            title,
+            error,
+            originalName,
+            draftMeta,
+            draftRaw,
+            contextRules,
+            draftRates,
+            presetMeta,
+            taskEditing,
+            setContextExtractRules,
+            setContextExcludeRules,
+            setDraftRate,
+            openManage,
+            openCreate,
+            openEdit,
+            openEditCurrent,
+            confirmIfDirty,
+            closeDrawer,
+            backToManage,
+            saveDraft,
+            deletePreset,
+            importFromJsonText,
+            exportPresetAsText,
+        };
+    }
+
+    const plotCopy = {
+        panels: {
+            preset: {
+                title: "剧情推进预设",
+                description: "下拉框切换当前的预设，星标设为全局默认。点击按钮，可导入新预设、管理全部预设。内置默认预设无法修改，请使用「从默认新建」。预设包含多个独立任务，支持并发或串行。",
+            },
+            worldbook: {
+                title: "剧情推进世界书",
+                description: "剧情推进参考的世界书条目。默认跟随角色卡主世界书，也可手动指定。Agent 模式会在运行时过滤提示词模板中的世界书条目，由 Agent 决策剧情、填表与正文通道的放行条目。",
+            },
+        },
+        worldbook: {
+            emptyDefault: "所选世界书中无可显示的条目。",
+            emptyCharacter: "未解析到角色卡世界书。打开聊天后会显示条目；也可手动选择一本。",
+            emptyManual: "请先选择一本世界书。",
+        },
+        agentControl: {
+            title: "Agent 世界书总控",
+            description: "切换 Agent 世界书模式；Agent 模式会在剧情推进时接管世界书条目的放行与过滤，清理并初始化会恢复快照并关闭 Agent 模式。",
+            modes: { disabled: "关闭", passive: "仅观察", agent: "Agent 接管" },
+            modeChanged: {
+                disabled: "Agent 世界书模式已关闭。",
+                passive: "Agent 世界书已切换为仅观察模式。",
+                agent: "Agent 世界书已切换为接管模式。",
+            },
+            status: {
+                inactive: "运行时过滤未启用",
+                active: () => "运行时过滤已启用",
+            },
+            config: {
+                status: (state) => {
+                    if (state.source === "worldbook" && state.bookName)
+                        return `配置保存在世界书：${state.bookName}`;
+                    if (state.source === "legacy_settings") {
+                        return state.writableBookName
+                            ? `正在使用旧全局配置；下次保存会写入世界书：${state.writableBookName}`
+                            : "正在使用旧全局配置；当前未找到可写世界书，无法保存为卡级配置。";
+                    }
+                    if (state.writableBookName)
+                        return `当前使用默认配置；保存后写入世界书：${state.writableBookName}`;
+                    return "当前使用默认配置；未找到可写世界书，无法保存卡级 Agent 配置。";
+                },
+                saveFailed: (reason) => reason === "no_config_host_book"
+                    ? "未找到可写世界书，卡级 Agent 配置未保存。"
+                    : `卡级 Agent 配置保存失败：${reason || "未知原因"}`,
+            },
+            apiPresets: {
+                decisionLabel: "Agent 决策 API",
+                decisionHint: "用于 Agent 判断世界书条目是否应启用；留空则使用当前 API 配置。",
+                skillLabel: "Agent Skill 化 API",
+                skillHint: "用于一键生成世界书 Skill 元数据；留空则使用当前 API 配置。",
+                followCurrentLabel: "使用当前 API 配置",
+            },
+            restore: {
+                button: "清理并初始化",
+                confirm: {
+                    title: "清理并初始化 Agent 世界书状态",
+                    message: "将先按快照恢复被 Agent 改写的世界书条目状态，关闭 Agent 模式，然后删除 Agent 快照/设置内部条目。下次使用时会重新初始化。",
+                    confirmLabel: "确认清理并初始化",
+                    cancelLabel: "取消",
+                },
+                success: () => "已清理并初始化 Agent 世界书状态；Agent 模式已关闭，下次使用时会重新初始化。",
+                noop: "没有需要恢复的 Agent 快照或内部状态；Agent 模式已关闭。",
+                error: "清理并初始化 Agent 世界书状态失败",
+                reasons: {
+                    runtime_filter_only: "当前使用运行时过滤机制，没有需要恢复的世界书条目状态；Agent 模式已关闭。",
+                    legacy_artifacts_cleaned: "已清理 Agent 内部条目与旧版本残留状态；Agent 模式已关闭。",
+                    native_worldbook_trigger_restored: "已按快照恢复被 Agent 改写的世界书条目状态，并关闭 Agent 模式。",
+                    native_worldbook_trigger_restore_failed: "部分世界书条目恢复失败，已保留 Agent 快照以避免永久丢失；Agent 模式已关闭。",
+                    native_worldbook_trigger_restore_skipped: "部分世界书条目存在冲突，已保留 Agent 快照以避免永久丢失；Agent 模式已关闭。",
+                    no_active_snapshot: "没有可恢复的 Agent 快照；Agent 模式已关闭。",
+                },
+            },
+            skillify: {
+                button: "一键 Skill 化",
+                confirm: {
+                    title: "一键生成 Skill 元数据",
+                    message: "将调用配置的 Agent Skill API，为当前世界书范围内可处理条目生成描述与触发时机。已有 Skill 元数据的条目会自动跳过，无论这些数据来自 AI 生成还是用户手动编辑。",
+                    confirmLabel: "开始生成",
+                    cancelLabel: "取消",
+                },
+                success: (updated, skipped) => `Skill 化完成：更新 ${updated} 条，跳过 ${skipped} 条。`,
+                partial: (updated, skipped, failed) => `Skill 化部分完成：更新 ${updated} 条，跳过 ${skipped} 条，失败 ${failed} 条。`,
+                noSelection: "请先勾选要 Skill 化的世界书条目。",
+                noCandidates: "当前范围没有可 Skill 化的世界书条目。",
+                error: "一键 Skill 化失败",
+            },
+            clearSkillMeta: {
+                button: "清除 Skill 化",
+                confirm: {
+                    title: "清除世界书 Skill 元数据",
+                    message: "将删除当前 Agent 世界书范围内条目的 Skill 元数据块。此操作不会恢复接管状态，也不会删除世界书条目正文或 Agent 配置条目。",
+                    confirmLabel: "确认清除",
+                    cancelLabel: "取消",
+                },
+                success: (cleared) => `已清除 ${cleared} 条世界书 Skill 元数据。`,
+                partial: (cleared, skipped, failed) => `Skill 元数据清除部分完成：清除 ${cleared} 条，跳过 ${skipped} 条，失败 ${failed} 条。`,
+                noop: "当前 Agent 世界书范围内没有可清除的 Skill 元数据。",
+                error: "清除 Skill 元数据失败",
+            },
+            advanced: {
+                button: "Agent 高级设置",
+                title: "Agent 世界书高级设置",
+                description: "编辑 Agent 决策、Skill 化提示词模板，并控制上下文层数、候选数量上限与各自独立的调用并发。",
+            },
+            decisionSettings: {
+                title: "Agent 决策执行参数",
+                description: "将当前接管条目分片后并发分析。请求数和最坏重试数会随并发数放大，别把 API 当免费算力池。",
+                concurrency: {
+                    label: "Agent 决策并发数",
+                    hint: "默认 1，页面不设固定上限；实际并发不会超过可分析的条目数。条目按实际非空分片并发分析，绿灯最小与最大 TK 预算都会精确拆分并交给各分片辅助选择；合并后仍按完整最大预算做安全校验。",
+                },
+            },
+            skillifySettings: {
+                title: "Skill 化执行参数",
+                description: "控制一键 Skill 化的执行行为。并发数越高，请求压力越大；别把 API 当成无限吞吐的黑洞。",
+                maxConcurrency: {
+                    label: "Skill 化 API 并发数",
+                    hint: "一键 Skill 化同时调用 Agent Skill API 的条目数量。默认 3，页面不设固定上限；实际并发不会超过待处理条目数。",
+                },
+            },
+            executionMode: {
+                label: "Agent 与剧情推进执行方式",
+                hint: "串行模式保持 Agent 接管剧情任务与剧情世界书绿灯；并发模式下 Agent 不决定哪些剧情任务生效，剧情任务也按非 Agent 模式读取世界书，只保留正文绿灯判断。",
+                options: {
+                    sequential: "串行接管",
+                    concurrent: "并发旁路",
+                },
+            },
+            contextSettings: {
+                title: "上下文参数",
+                description: "这些参数会影响 Agent 决策、世界书 Skill 化和剧情世界书扫描。页面不设固定上限；过大的候选数、上下文、重试次数或预算会放大 API 消耗，并可能超过模型与服务能力。",
+                resetButton: "恢复默认上下文参数",
+                resetSuccess: "已恢复默认上下文参数。",
+                fields: {
+                    decisionRecentContextCharLimit: {
+                        label: "最近上下文层数",
+                        hint: "进入 Agent 决策提示词的最近对话层数；1 层 = 1 条 AI 回复 + 其上方 1 条用户输入。剧情推进记录保存在用户楼层，会随对应上下文一起传入。",
+                    },
+                    decisionWorldbookCandidateLimit: {
+                        label: "决策世界书候选数",
+                        hint: "进入 Agent 决策提示词的世界书候选条目最大数量。候选只包含条目名称、关键词、描述和触发时机，不再携带正文预览。",
+                    },
+                    skillifyMaxEntries: {
+                        label: "Skill 化最大条目数",
+                        hint: "一键 Skill 化单次最多处理的世界书条目数量。",
+                    },
+                    plotWorldbookScanMessageLimit: {
+                        label: "剧情世界书扫描消息数",
+                        hint: "剧情推进读取世界书内容时回看的聊天消息数量；未显式保存旧配置时仍回退原 contextTurnCount。",
+                    },
+                    agentAiMaxRetries: {
+                        label: "Agent AI 最大尝试次数",
+                        hint: "Agent 决策与一键 Skill 化的公共 AI 调用尝试次数。设置过高会放大请求量，不会让烂提示词自动变聪明。",
+                    },
+                    greenlightMinTkBudget: {
+                        label: "绿灯最小 TK 预算",
+                        hint: "Agent 选择绿灯条目时的目标下限。并发决策时按实际非空分片数精确拆分，用于提示各分片不要选得过少；不会为了凑下限强塞无关条目。",
+                    },
+                    greenlightMaxTkBudget: {
+                        label: "绿灯最大 TK 预算",
+                        hint: "Agent 每个通道、每个剧情任务可选择的绿灯条目 TK 上限。并发决策时按实际非空分片数精确拆分并直接交给各分片辅助选择；合并后仍按完整上限做安全校验。",
+                    },
+                },
+            },
+            prompts: {
+                title: "提示词模板",
+                description: "可使用 {{agent.*}} 与 {{agent.skillify.*}} 占位符。未知占位符会原样保留，写错了模型不会替你变聪明。",
+                scopeHint: "编辑仅修改本次草稿。保存到当前世界书只更新当前配置；保存为全局模板只更新全局模板，不会改写当前世界书。",
+                unsavedChanges: "提示词草稿存在未保存修改。关闭将放弃这些修改。",
+                scopeChanged: "底层 Agent 配置已发生变化，当前草稿可能属于旧角色或旧世界书。为防止误写，保存已锁定；请关闭并放弃草稿后重新打开。",
+                loadingNotReady: "Agent 世界书配置仍在加载，请稍候。加载完成前不会接受编辑或保存。",
+                loadFailed: "Agent 世界书配置读取失败。为避免默认值覆盖已保存配置，编辑与保存已锁定。",
+                retryLoad: "重新读取配置",
+                saveCurrent: "保存到当前世界书",
+                saveCurrentSuccess: "已保存到当前世界书。",
+                saveAsGlobal: "保存为全局模板",
+                saveAsGlobalSuccess: "已保存到全局模板，当前世界书未变更。",
+                decisionTitle: "Agent 决策提示词",
+                decisionReset: "载入内置默认决策提示词",
+                decisionResetSuccess: "已载入内置默认决策提示词；点击保存后才会写入选定作用域。",
+                skillifyTitle: "Agent Skill 化提示词",
+                skillifyReset: "载入内置默认 Skill 化提示词",
+                skillifyResetSuccess: "已载入内置默认 Skill 化提示词；点击保存后才会写入选定作用域。",
+                emptyText: "暂无提示词段。",
+            },
+        },
+    };
+
+    var _sfc_main$U = /*@__PURE__*/ defineComponent({
+        __name: 'AcuPresetDropdown',
+        props: {
+            items: {},
+            modelValue: {},
+            defaultName: {},
+            emptyText: { default: '暂无预设' },
+            placeholder: { default: '未选择' },
+            disabled: { type: Boolean, default: false },
+            showDefaultAction: { type: Boolean, default: true }
+        },
+        emits: ["update:modelValue", "set-default"],
+        setup(__props, { expose: __expose, emit: __emit }) {
+            __expose();
+            const props = __props;
+            const emit = __emit;
+            const open = ref(false);
+            const rootRef = ref(null);
+            const selectedLabel = computed(() => {
+                const item = props.items.find(i => itemValue(i) === props.modelValue);
+                return item ? itemLabel(item) : props.placeholder;
+            });
+            function itemValue(item) {
+                return item.value ?? item.name ?? '';
+            }
+            function itemLabel(item) {
+                return item.label ?? item.name ?? item.value ?? '';
+            }
+            function toggleOpen() {
+                if (props.disabled)
+                    return;
+                open.value = !open.value;
+            }
+            function selectItem(value) {
+                if (props.disabled)
+                    return;
+                emit('update:modelValue', value);
+                open.value = false;
+            }
+            function onClickOutside(e) {
+                if (rootRef.value && !rootRef.value.contains(e.target)) {
+                    open.value = false;
+                }
+            }
+            let hostDoc = null;
+            onMounted(() => {
+                hostDoc = getAcuHostDocument();
+                hostDoc.addEventListener('mousedown', onClickOutside);
+            });
+            onBeforeUnmount(() => {
+                hostDoc?.removeEventListener('mousedown', onClickOutside);
+            });
+            const __returned__ = { props, emit, open, rootRef, selectedLabel, itemValue, itemLabel, toggleOpen, selectItem, onClickOutside, get hostDoc() { return hostDoc; }, set hostDoc(v) { hostDoc = v; } };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-preset-dd[data-v-da92b393] { position: relative; flex: 1; min-width: 0;\n}\n.acu-preset-dd__trigger[data-v-da92b393] {\r\n  display: flex; align-items: center; gap: var(--acu-space-2, 8px); width: 100%;\r\n  min-height: var(--acu-control-height-md, 32px); padding: var(--acu-control-padding-y-md, 6px) var(--acu-control-padding-x-md, 9px);\r\n  background: var(--acu-bg-2); border: 0;\r\n  border-radius: var(--acu-radius-sm); color: var(--acu-text-1);\r\n  font: inherit; font-size: var(--acu-font-size-body, 12px); cursor: pointer;\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-preset-dd__trigger[data-v-da92b393]:hover {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2);\n}\n.acu-preset-dd__trigger[data-v-da92b393]:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-preset-dd__trigger[data-v-da92b393]:disabled { opacity: 0.5; cursor: not-allowed;\n}\n.acu-preset-dd--disabled[data-v-da92b393] { pointer-events: none; opacity: 0.5;\n}\n.acu-preset-dd__label[data-v-da92b393] { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;\n}\n.acu-preset-dd__caret[data-v-da92b393] { font-size: var(--acu-font-size-micro, 10px); --acu-icon-color: var(--acu-text-3); color: var(--acu-text-3); transition: transform 0.15s ease;\n}\n.acu-preset-dd__caret--open[data-v-da92b393] { transform: rotate(180deg);\n}\n.acu-preset-dd__menu[data-v-da92b393] {\r\n  position: absolute; top: calc(100% + var(--acu-space-1, 4px)); left: 0; right: 0; z-index: 100;\r\n  margin: 0; padding: var(--acu-space-1, 4px) 0; list-style: none;\r\n  background: var(--acu-bg-1); border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-sm); box-shadow: var(--acu-shadow);\r\n  max-height: var(--acu-menu-max-height, 240px); overflow-y: auto;\n}\n.acu-preset-dd__item[data-v-da92b393] {\r\n  display: flex; align-items: center; gap: var(--acu-space-2, 8px);\r\n  padding: var(--acu-space-2, 8px) var(--acu-space-3, 12px); cursor: pointer; font-size: var(--acu-font-size-body-lg, 13px);\r\n  color: var(--acu-text-2); transition: background 0.1s ease;\n}\n.acu-preset-dd__item[data-v-da92b393]:hover { background: var(--acu-hover-overlay); color: var(--acu-text-1);\n}\n.acu-preset-dd__item--active[data-v-da92b393] { color: var(--acu-on-accent); background: var(--acu-accent);\n}\n.acu-preset-dd__item-name[data-v-da92b393] { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500;\n}\n.acu-preset-dd__item-meta[data-v-da92b393] { font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3); white-space: nowrap;\n}\n.acu-preset-dd__star[data-v-da92b393] {\r\n  width: var(--acu-menu-action-size, 24px); height: var(--acu-menu-action-size, 24px); display: flex; align-items: center; justify-content: center;\r\n  border: 0; background: transparent; color: var(--acu-text-3); cursor: pointer;\r\n  border-radius: var(--acu-radius-sm); font-size: var(--acu-font-size-body, 12px); transition: color 0.15s ease;\n}\n.acu-preset-dd__star[data-v-da92b393]:hover { color: var(--acu-text-1); background: var(--acu-hover-overlay);\n}\n.acu-preset-dd__star--active[data-v-da92b393] { color: var(--acu-text-1);\n}\n.acu-preset-dd__item--active .acu-preset-dd__item-meta[data-v-da92b393],\r\n.acu-preset-dd__item--active .acu-preset-dd__star[data-v-da92b393],\r\n.acu-preset-dd__item--active .acu-preset-dd__check[data-v-da92b393] { --acu-icon-color: var(--acu-on-accent); color: var(--acu-on-accent);\n}\n.acu-preset-dd__check[data-v-da92b393] { font-size: var(--acu-font-size-caption, 11px); --acu-icon-color: var(--acu-text-1); color: var(--acu-text-1);\n}\n.acu-preset-dd__empty[data-v-da92b393] { padding: var(--acu-space-3, 12px); text-align: center; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\r\n", "src/presentation-v2/components/_lib/AcuPresetDropdown.vue#style-0-da92b393");
+    var AcuPresetDropdown_vue_vue_type_style_index_0_scoped_da92b393_lang = null;
+
+    const _hoisted_1$S = ["disabled"];
+    const _hoisted_2$O = { class: "acu-preset-dd__label" };
+    const _hoisted_3$G = {
+	key: 0,
+	class: "acu-preset-dd__menu"
+    };
+    const _hoisted_4$A = ["onClick"];
+    const _hoisted_5$t = { class: "acu-preset-dd__item-name" };
+    const _hoisted_6$s = {
+	key: 0,
+	class: "acu-preset-dd__item-meta"
+    };
+    const _hoisted_7$p = ["title", "onClick"];
+    const _hoisted_8$p = {
+	key: 2,
+	class: "fa-solid fa-check acu-preset-dd__check"
+    };
+    const _hoisted_9$l = {
+	key: 0,
+	class: "acu-preset-dd__empty"
+    };
+    function _sfc_render$U(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock(
+		"div",
+		{
+			class: normalizeClass(["acu-preset-dd", { "acu-preset-dd--disabled": $props.disabled }]),
+			ref: "rootRef"
+		},
+		[createBaseVNode("button", {
+			type: "button",
+			class: "acu-preset-dd__trigger",
+			disabled: $props.disabled,
+			onClick: $setup.toggleOpen
+		}, [createBaseVNode(
+			"span",
+			_hoisted_2$O,
+			toDisplayString($setup.selectedLabel),
+			1
+			/* TEXT */
+		), createBaseVNode(
+			"i",
+			{ class: normalizeClass(["fa-solid fa-chevron-down acu-preset-dd__caret", { "acu-preset-dd__caret--open": $setup.open }]) },
+			null,
+			2
+			/* CLASS */
+		)], 8, _hoisted_1$S), $setup.open ? (openBlock(), createElementBlock("ul", _hoisted_3$G, [(openBlock(true), createElementBlock(
+			Fragment,
+			null,
+			renderList($props.items, (item) => {
+				return openBlock(), createElementBlock("li", {
+					key: $setup.itemValue(item),
+					class: normalizeClass(["acu-preset-dd__item", { "acu-preset-dd__item--active": $setup.itemValue(item) === $props.modelValue }]),
+					onClick: ($event) => $setup.selectItem($setup.itemValue(item))
+				}, [
+					createBaseVNode(
+						"span",
+						_hoisted_5$t,
+						toDisplayString($setup.itemLabel(item)),
+						1
+						/* TEXT */
+					),
+					item.meta ? (openBlock(), createElementBlock(
+						"span",
+						_hoisted_6$s,
+						toDisplayString(item.meta),
+						1
+						/* TEXT */
+					)) : createCommentVNode("v-if", true),
+					$props.showDefaultAction ? (openBlock(), createElementBlock("button", {
+						key: 1,
+						type: "button",
+						class: normalizeClass(["acu-preset-dd__star", { "acu-preset-dd__star--active": $setup.itemValue(item) === $props.defaultName }]),
+						title: $setup.itemValue(item) === $props.defaultName ? "全局默认" : "设为全局默认",
+						onClick: withModifiers(($event) => _ctx.$emit("set-default", $setup.itemValue(item)), ["stop"])
+					}, [createBaseVNode(
+						"i",
+						{ class: normalizeClass($setup.itemValue(item) === $props.defaultName ? "fa-solid fa-star" : "fa-regular fa-star") },
+						null,
+						2
+						/* CLASS */
+					)], 10, _hoisted_7$p)) : createCommentVNode("v-if", true),
+					$setup.itemValue(item) === $props.modelValue ? (openBlock(), createElementBlock("i", _hoisted_8$p)) : createCommentVNode("v-if", true)
+				], 10, _hoisted_4$A);
+			}),
+			128
+			/* KEYED_FRAGMENT */
+		)), !$props.items.length ? (openBlock(), createElementBlock(
+			"li",
+			_hoisted_9$l,
+			toDisplayString($props.emptyText),
+			1
+			/* TEXT */
+		)) : createCommentVNode("v-if", true)])) : createCommentVNode("v-if", true)],
+		2
+		/* CLASS */
+	);
+    }
+    var AcuPresetDropdown = /*#__PURE__*/ _export_sfc(_sfc_main$U, [["render", _sfc_render$U], ["__scopeId", "data-v-da92b393"]]);
+
+    var _sfc_main$T = /*@__PURE__*/ defineComponent({
+        __name: 'AcuText',
+        props: {
+            as: { default: 'p' },
+            variant: { default: 'meta' }
+        },
+        setup(__props, { expose: __expose }) {
+            __expose();
+            const props = __props;
+            const variantClass = computed(() => `acu-text--${props.variant}`);
+            const __returned__ = { props, variantClass };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-text[data-v-7abe2621] {\r\n  margin: 0;\r\n  min-width: 0;\n}\n.acu-text--caption[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: var(--acu-line-height-caption, 1.5);\r\n  color: var(--acu-text-3);\n}\n.acu-text--meta[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  color: var(--acu-text-3);\n}\n.acu-text--hint[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-readable, 1.55);\r\n  color: var(--acu-text-3);\n}\n.acu-text--status-line[data-v-7abe2621] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 8px;\r\n  flex-wrap: wrap;\r\n  min-height: 22px;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  color: var(--acu-text-3);\n}\n.acu-text--empty[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  line-height: var(--acu-line-height-readable, 1.55);\r\n  color: var(--acu-text-3);\r\n  text-align: center;\n}\n.acu-text--error[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  color: var(--acu-danger);\n}\n.acu-text--section-label[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-section-title, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  font-weight: 600;\r\n  color: var(--acu-text-2);\n}\n.acu-text--list-title[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-list-title, 13px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  font-weight: 500;\r\n  color: var(--acu-text-1);\n}\n[data-v-7abe2621] .acu-text__value {\r\n  color: var(--acu-text-1);\r\n  font-weight: 500;\n}\r\n", "src/presentation-v2/components/_lib/AcuText.vue#style-0-7abe2621");
+    var AcuText_vue_vue_type_style_index_0_scoped_7abe2621_lang = null;
+
+    function _sfc_render$T(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createBlock(resolveDynamicComponent($props.as), { class: normalizeClass(["acu-text", $setup.variantClass]) }, {
+		default: withCtx(() => [renderSlot(_ctx.$slots, "default", {}, undefined, true)]),
+		_: 3
+	}, 8, ["class"]);
+    }
+    var AcuText = /*#__PURE__*/ _export_sfc(_sfc_main$T, [["render", _sfc_render$T], ["__scopeId", "data-v-7abe2621"]]);
+
+    var _sfc_main$S = /*@__PURE__*/ defineComponent({
+        __name: 'AcuDisclosureGroup',
+        props: {
+            label: { default: '' },
+            meta: { default: '' },
+            expanded: { type: Boolean },
+            bodyId: { default: '' },
+            bodyMode: { default: 'show' },
+            bodyMaxHeight: { default: '' },
+            rootClass: { default: '' },
+            headerClass: { default: '' },
+            bodyClass: { default: '' },
+            chevronClass: { default: '' },
+            chevronOpenClass: { default: '' },
+            labelClass: { default: '' },
+            metaClass: { default: '' }
+        },
+        emits: ["toggle"],
+        setup(__props, { expose: __expose }) {
+            __expose();
+            const props = __props;
+            // 裁切只在高度动画进行中需要（useAcuHeightTransition 会在 beforeEnter/beforeLeave 临时设 hidden）。
+            // 静止状态必须放开 overflow，否则 body 里的浮层（AcuSelect 下拉菜单等）会被折叠容器切掉。
+            // 指定了 bodyMaxHeight 的组是滚动容器，保持 overflow-y: auto。
+            const bodyStyle = computed(() => ({
+                maxHeight: props.bodyMaxHeight || undefined,
+                overflowY: props.bodyMaxHeight ? 'auto' : 'visible',
+                overflowX: props.bodyMaxHeight ? 'hidden' : 'visible',
+            }));
+            const heightTransition = useAcuHeightTransition({
+                restoreOverflow(el) {
+                    el.style.overflowY = props.bodyMaxHeight ? 'auto' : 'visible';
+                    el.style.overflowX = props.bodyMaxHeight ? 'hidden' : 'visible';
+                },
+            });
+            function beforeEnter(el) {
+                heightTransition.beforeEnter(el);
+            }
+            function enter(el, done) {
+                heightTransition.enter(el, done);
+            }
+            function afterEnter(el) {
+                const body = el;
+                body.removeAttribute('aria-hidden');
+                body.removeAttribute('inert');
+                heightTransition.afterEnter(el);
+            }
+            function beforeLeave(el) {
+                const body = el;
+                body.setAttribute('aria-hidden', 'true');
+                body.setAttribute('inert', '');
+                heightTransition.beforeLeave(el);
+            }
+            function leave(el, done) {
+                heightTransition.leave(el, done);
+            }
+            function afterLeave(el) {
+                heightTransition.afterLeave(el);
+            }
+            function cleanupTransition(el) {
+                heightTransition.cleanupTransition(el);
+            }
+            const __returned__ = { props, bodyStyle, heightTransition, beforeEnter, enter, afterEnter, beforeLeave, leave, afterLeave, cleanupTransition };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-disclosure-group[data-v-73a020fe] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 0;\r\n  /* 根节点不裁切：折叠动画的裁切由 body 的内联 overflow 承担，静止时下拉菜单等浮层需要溢出到组外。 */\r\n  overflow: visible;\r\n  border-radius: var(--acu-radius-md);\r\n  background: transparent;\n}\n.acu-disclosure-group__header[data-v-73a020fe] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 8px;\r\n  width: 100%;\r\n  min-height: 34px;\r\n  appearance: none;\r\n  border: 0;\r\n  /* 头部自己收圆角：根节点已不再用 overflow: hidden 帮它裁掉悬停底色。 */\r\n  border-radius: var(--acu-radius-md);\r\n  padding: 7px 10px;\r\n  background: transparent;\r\n  color: var(--acu-text-2);\r\n  font: inherit;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.35;\r\n  text-align: left;\r\n  cursor: pointer;\r\n  user-select: none;\r\n  transition: background-color 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-disclosure-group__header[data-v-73a020fe]:hover {\r\n  background: var(--acu-hover-overlay);\n}\n.acu-disclosure-group--expanded .acu-disclosure-group__header[data-v-73a020fe] {\r\n  border-bottom-left-radius: 0;\r\n  border-bottom-right-radius: 0;\n}\n.acu-disclosure-group__header[data-v-73a020fe]:focus-visible {\r\n  outline: none;\r\n  box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-disclosure-group__chevron[data-v-73a020fe] {\r\n  flex: 0 0 10px;\r\n  width: 10px;\r\n  font-size: var(--acu-font-size-micro, 10px);\r\n  --acu-icon-color: var(--acu-text-3);\r\n  color: var(--acu-text-3);\r\n  transition: transform 0.15s ease;\n}\n.acu-disclosure-group__chevron--open[data-v-73a020fe] {\r\n  transform: rotate(90deg);\n}\n.acu-disclosure-group__label[data-v-73a020fe] {\r\n  flex: 1;\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\r\n  font-weight: 500;\r\n  color: var(--acu-text-2);\n}\n.acu-disclosure-group__meta[data-v-73a020fe] {\r\n  flex-shrink: 0;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-text-3);\r\n  font-variant-numeric: tabular-nums;\r\n  white-space: nowrap;\n}\n.acu-disclosure-group__body[data-v-73a020fe] {\r\n  box-sizing: border-box;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\r\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 18%, transparent);\r\n  padding: 8px;\r\n  opacity: 1;\r\n  transform: translateY(0);\n}\r\n", "src/presentation-v2/components/_lib/AcuDisclosureGroup.vue#style-0-73a020fe");
+    var AcuDisclosureGroup_vue_vue_type_style_index_0_scoped_73a020fe_lang = null;
+
+    const _hoisted_1$R = ["aria-expanded", "aria-controls"];
+    const _hoisted_2$N = [
+	"id",
+	"aria-hidden",
+	"inert"
+    ];
+    function _sfc_render$S(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock(
+		"div",
+		{ class: normalizeClass(["acu-disclosure-group", [$props.rootClass, { "acu-disclosure-group--expanded": $props.expanded }]]) },
+		[createBaseVNode("button", {
+			type: "button",
+			class: normalizeClass(["acu-disclosure-group__header", $props.headerClass]),
+			"aria-expanded": $props.expanded,
+			"aria-controls": $props.bodyId || undefined,
+			onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("toggle"))
+		}, [
+			createBaseVNode(
+				"i",
+				{
+					class: normalizeClass(["fa-solid fa-chevron-right acu-disclosure-group__chevron", [$props.chevronClass, {
+						"acu-disclosure-group__chevron--open": $props.expanded,
+						[$props.chevronOpenClass]: $props.expanded && $props.chevronOpenClass
+					}]]),
+					"aria-hidden": "true"
+				},
+				null,
+				2
+				/* CLASS */
+			),
+			createBaseVNode(
+				"span",
+				{ class: normalizeClass(["acu-disclosure-group__label", $props.labelClass]) },
+				[renderSlot(_ctx.$slots, "label", {}, () => [createTextVNode(
+					toDisplayString($props.label),
+					1
+					/* TEXT */
+				)], true)],
+				2
+				/* CLASS */
+			),
+			_ctx.$slots.meta || $props.meta ? (openBlock(), createElementBlock(
+				"span",
+				{
+					key: 0,
+					class: normalizeClass(["acu-disclosure-group__meta", $props.metaClass])
+				},
+				[renderSlot(_ctx.$slots, "meta", {}, () => [createTextVNode(
+					toDisplayString($props.meta),
+					1
+					/* TEXT */
+				)], true)],
+				2
+				/* CLASS */
+			)) : createCommentVNode("v-if", true)
+		], 10, _hoisted_1$R), createVNode(Transition, {
+			css: false,
+			onBeforeEnter: $setup.beforeEnter,
+			onEnter: $setup.enter,
+			onAfterEnter: $setup.afterEnter,
+			onEnterCancelled: $setup.cleanupTransition,
+			onBeforeLeave: $setup.beforeLeave,
+			onLeave: $setup.leave,
+			onAfterLeave: $setup.afterLeave,
+			onLeaveCancelled: $setup.cleanupTransition
+		}, {
+			default: withCtx(() => [$props.bodyMode === "show" || $props.expanded ? withDirectives((openBlock(), createElementBlock("div", {
+				key: 0,
+				id: $props.bodyId || undefined,
+				class: normalizeClass(["acu-disclosure-group__body", $props.bodyClass]),
+				style: normalizeStyle($setup.bodyStyle),
+				"aria-hidden": !$props.expanded ? "true" : undefined,
+				inert: !$props.expanded ? true : undefined
+			}, [renderSlot(_ctx.$slots, "default", {}, undefined, true)], 14, _hoisted_2$N)), [[vShow, $props.expanded]]) : createCommentVNode("v-if", true)]),
+			_: 3
+		})],
+		2
+		/* CLASS */
+	);
+    }
+    var AcuDisclosureGroup = /*#__PURE__*/ _export_sfc(_sfc_main$S, [["render", _sfc_render$S], ["__scopeId", "data-v-73a020fe"]]);
+
+    var _sfc_main$R = /*@__PURE__*/ defineComponent({
+        __name: 'AcuRulePairList',
+        props: {
+            modelValue: {},
+            label: { default: '' },
+            startPlaceholder: { default: '开始词' },
+            endPlaceholder: { default: '结束词' },
+            addLabel: { default: '添加规则' }
+        },
+        emits: ["update:modelValue"],
+        setup(__props, { expose: __expose, emit: __emit }) {
+            __expose();
+            const props = __props;
+            const emit = __emit;
+            // 默认始终折叠（包括空规则）。规则编辑是低频操作，折叠态减少视觉噪声；
+            // 空状态用户点 header 展开后即可见添加按钮。不持久化：MainArea / 抽屉重挂载
+            // 时该 ref 自然回到折叠态（D25）。
+            const expanded = ref(false);
+            const ruleCountText = computed(() => props.modelValue.length === 0 ? '暂无' : `${props.modelValue.length} 条`);
+            function toggle() {
+                expanded.value = !expanded.value;
+            }
+            function clone() {
+                return props.modelValue.map(r => ({ ...r }));
+            }
+            function add() {
+                if (props.label && !expanded.value)
+                    expanded.value = true;
+                const next = clone();
+                next.push({ start: '', end: '' });
+                emit('update:modelValue', next);
+            }
+            function remove(index) {
+                const next = clone();
+                next.splice(index, 1);
+                emit('update:modelValue', next);
+            }
+            function updateField(index, field, value) {
+                const next = clone();
+                next[index] = { ...next[index], [field]: value };
+                emit('update:modelValue', next);
+            }
+            const __returned__ = { props, emit, expanded, ruleCountText, toggle, clone, add, remove, updateField, AcuButton, AcuDisclosureGroup, AcuIconButton, AcuInput };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-rule-pair-list--standalone[data-v-c9426b22] {\r\n  display: flex; flex-direction: column; gap: 6px;\n}\n.acu-rule-pair-list__body[data-v-c9426b22] {\r\n  display: flex; flex-direction: column; gap: 6px;\n}\n.acu-rule-pair-list--standalone .acu-rule-pair-list__body[data-v-c9426b22] {\r\n  /* 老接口：未提供 label 时直接展示，无外层 padding */\r\n  border-top: 0;\r\n  padding: 0;\n}\n.acu-rule-pair-list__row[data-v-c9426b22] {\r\n  display: flex; align-items: center; gap: 6px;\n}\n.acu-rule-pair-list__field[data-v-c9426b22] { flex: 1; min-width: 0;\n}\n.acu-rule-pair-list__sep[data-v-c9426b22] {\r\n  flex-shrink: 0; font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3);\n}\n.acu-rule-pair-list__empty[data-v-c9426b22] {\r\n  padding: 8px; text-align: center;\r\n  color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-rule-pair-list__add[data-v-c9426b22] {\r\n  align-self: flex-start;\n}\r\n", "src/presentation-v2/components/_lib/AcuRulePairList.vue#style-0-c9426b22");
+    var AcuRulePairList_vue_vue_type_style_index_0_scoped_c9426b22_lang = null;
+
+    const _hoisted_1$Q = {
+	key: 0,
+	class: "acu-rule-pair-list__empty"
+    };
+    const _hoisted_2$M = {
+	key: 1,
+	class: "acu-rule-pair-list acu-rule-pair-list--standalone"
+    };
+    const _hoisted_3$F = { class: "acu-rule-pair-list__body" };
+    const _hoisted_4$z = {
+	key: 0,
+	class: "acu-rule-pair-list__empty"
+    };
+    function _sfc_render$R(_ctx, _cache, $props, $setup, $data, $options) {
+	return $props.label ? (openBlock(), createBlock($setup["AcuDisclosureGroup"], {
+		key: 0,
+		"root-class": "acu-rule-pair-list",
+		"header-class": "acu-rule-pair-list__header",
+		"body-class": "acu-rule-pair-list__body",
+		"chevron-class": "acu-rule-pair-list__chevron",
+		"chevron-open-class": "acu-rule-pair-list__chevron--open",
+		"label-class": "acu-rule-pair-list__label",
+		"meta-class": "acu-rule-pair-list__count",
+		label: $props.label,
+		meta: $setup.ruleCountText,
+		expanded: $setup.expanded,
+		"body-mode": "show",
+		onToggle: $setup.toggle
+	}, {
+		default: withCtx(() => [
+			(openBlock(true), createElementBlock(
+				Fragment,
+				null,
+				renderList($props.modelValue, (rule, index) => {
+					return openBlock(), createElementBlock("div", {
+						key: index,
+						class: "acu-rule-pair-list__row"
+					}, [
+						createVNode($setup["AcuInput"], {
+							"model-value": rule.start,
+							type: "text",
+							placeholder: $props.startPlaceholder,
+							class: "acu-rule-pair-list__field",
+							"onUpdate:modelValue": ($event) => $setup.updateField(index, "start", $event)
+						}, null, 8, [
+							"model-value",
+							"placeholder",
+							"onUpdate:modelValue"
+						]),
+						_cache[0] || (_cache[0] = createBaseVNode(
+							"span",
+							{ class: "acu-rule-pair-list__sep" },
+							"→",
+							-1
+							/* CACHED */
+						)),
+						createVNode($setup["AcuInput"], {
+							"model-value": rule.end,
+							type: "text",
+							placeholder: $props.endPlaceholder,
+							class: "acu-rule-pair-list__field",
+							"onUpdate:modelValue": ($event) => $setup.updateField(index, "end", $event)
+						}, null, 8, [
+							"model-value",
+							"placeholder",
+							"onUpdate:modelValue"
+						]),
+						createVNode($setup["AcuIconButton"], {
+							icon: "fa-solid fa-trash-can",
+							variant: "danger",
+							size: "sm",
+							title: "删除此规则",
+							onClick: ($event) => $setup.remove(index)
+						}, null, 8, ["onClick"])
+					]);
+				}),
+				128
+				/* KEYED_FRAGMENT */
+			)),
+			!$props.modelValue.length ? (openBlock(), createElementBlock("div", _hoisted_1$Q, " 暂无规则，点击下方按钮添加。 ")) : createCommentVNode("v-if", true),
+			createVNode($setup["AcuButton"], {
+				size: "sm",
+				class: "acu-rule-pair-list__add",
+				onClick: $setup.add
+			}, {
+				default: withCtx(() => [_cache[1] || (_cache[1] = createBaseVNode(
+					"i",
+					{ class: "fa-solid fa-plus" },
+					null,
+					-1
+					/* CACHED */
+				)), createTextVNode(
+					" " + toDisplayString($props.addLabel),
+					1
+					/* TEXT */
+				)]),
+				_: 1
+			})
+		]),
+		_: 1
+	}, 8, [
+		"label",
+		"meta",
+		"expanded"
+	])) : (openBlock(), createElementBlock("div", _hoisted_2$M, [createBaseVNode("div", _hoisted_3$F, [
+		(openBlock(true), createElementBlock(
+			Fragment,
+			null,
+			renderList($props.modelValue, (rule, index) => {
+				return openBlock(), createElementBlock("div", {
+					key: index,
+					class: "acu-rule-pair-list__row"
+				}, [
+					createVNode($setup["AcuInput"], {
+						"model-value": rule.start,
+						type: "text",
+						placeholder: $props.startPlaceholder,
+						class: "acu-rule-pair-list__field",
+						"onUpdate:modelValue": ($event) => $setup.updateField(index, "start", $event)
+					}, null, 8, [
+						"model-value",
+						"placeholder",
+						"onUpdate:modelValue"
+					]),
+					_cache[2] || (_cache[2] = createBaseVNode(
+						"span",
+						{ class: "acu-rule-pair-list__sep" },
+						"→",
+						-1
+						/* CACHED */
+					)),
+					createVNode($setup["AcuInput"], {
+						"model-value": rule.end,
+						type: "text",
+						placeholder: $props.endPlaceholder,
+						class: "acu-rule-pair-list__field",
+						"onUpdate:modelValue": ($event) => $setup.updateField(index, "end", $event)
+					}, null, 8, [
+						"model-value",
+						"placeholder",
+						"onUpdate:modelValue"
+					]),
+					createVNode($setup["AcuIconButton"], {
+						icon: "fa-solid fa-trash-can",
+						variant: "danger",
+						size: "sm",
+						title: "删除此规则",
+						onClick: ($event) => $setup.remove(index)
+					}, null, 8, ["onClick"])
+				]);
+			}),
+			128
+			/* KEYED_FRAGMENT */
+		)),
+		!$props.modelValue.length ? (openBlock(), createElementBlock("div", _hoisted_4$z, " 暂无规则，点击下方按钮添加。 ")) : createCommentVNode("v-if", true),
+		createVNode($setup["AcuButton"], {
+			size: "sm",
+			class: "acu-rule-pair-list__add",
+			onClick: $setup.add
+		}, {
+			default: withCtx(() => [_cache[3] || (_cache[3] = createBaseVNode(
+				"i",
+				{ class: "fa-solid fa-plus" },
+				null,
+				-1
+				/* CACHED */
+			)), createTextVNode(
+				" " + toDisplayString($props.addLabel),
+				1
+				/* TEXT */
+			)]),
+			_: 1
+		})
+	])]));
+    }
+    var AcuRulePairList = /*#__PURE__*/ _export_sfc(_sfc_main$R, [["render", _sfc_render$R], ["__scopeId", "data-v-c9426b22"]]);
+
+    var _sfc_main$Q = /*@__PURE__*/ defineComponent({
+        __name: 'PlotMatchReplaceFields',
+        props: {
+            rateMain: {},
+            ratePersonal: {},
+            rateErotic: {},
+            rateCuckold: {},
+            recallCount: {}
+        },
+        emits: ["update-rate"],
+        setup(__props, { expose: __expose, emit: __emit }) {
+            __expose();
+            const emit = __emit;
+            function emitRate(field, value) {
+                emit("update-rate", field, value);
+            }
+            const __returned__ = { emit, emitRate, AcuFormRow, AcuInput, AcuText };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-v2-plot-match-fields[data-v-8649d835] {\r\n  margin: 0;\r\n  padding: 0 0 14px;\r\n  border: 0;\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\r\n  min-width: 0;\n}\n.acu-v2-plot-match-fields legend[data-v-8649d835] {\r\n  padding: 0;\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-section-title, 12px);\r\n  font-weight: 600;\n}\n.acu-v2-plot-match-fields__grid[data-v-8649d835] {\r\n  display: grid;\r\n  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));\r\n  gap: 10px;\n}\r\n", "src/presentation-v2/components/PlotMatchReplaceFields.vue#style-0-8649d835");
+    var PlotMatchReplaceFields_vue_vue_type_style_index_0_scoped_8649d835_lang = null;
+
+    const _hoisted_1$P = { class: "acu-v2-plot-match-fields" };
+    const _hoisted_2$L = { class: "acu-v2-plot-match-fields__grid" };
+    function _sfc_render$Q(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("fieldset", _hoisted_1$P, [
+		_cache[6] || (_cache[6] = createBaseVNode(
+			"legend",
+			null,
+			"匹配替换（进阶）",
+			-1
+			/* CACHED */
+		)),
+		createVNode($setup["AcuText"], {
+			variant: "hint",
+			class: "acu-v2-plot-match-fields__hint"
+		}, {
+			default: withCtx(() => [..._cache[5] || (_cache[5] = [createTextVNode(
+				" 替换提示词占位符（sulv1~4、zhaohui），随当前剧情推进预设保存；导出 JSON 时默认值会自动省略。 ",
+				-1
+				/* CACHED */
+			)])]),
+			_: 1
+		}),
+		createBaseVNode("div", _hoisted_2$L, [
+			createVNode($setup["AcuFormRow"], { label: "sulv1" }, {
+				default: withCtx(() => [createVNode($setup["AcuInput"], {
+					type: "number",
+					step: .05,
+					"model-value": $props.rateMain,
+					onChange: _cache[0] || (_cache[0] = ($event) => $setup.emitRate("rateMain", Number($event)))
+				}, null, 8, ["model-value"])]),
+				_: 1
+			}),
+			createVNode($setup["AcuFormRow"], { label: "sulv2" }, {
+				default: withCtx(() => [createVNode($setup["AcuInput"], {
+					type: "number",
+					step: .05,
+					"model-value": $props.ratePersonal,
+					onChange: _cache[1] || (_cache[1] = ($event) => $setup.emitRate("ratePersonal", Number($event)))
+				}, null, 8, ["model-value"])]),
+				_: 1
+			}),
+			createVNode($setup["AcuFormRow"], { label: "sulv3" }, {
+				default: withCtx(() => [createVNode($setup["AcuInput"], {
+					type: "number",
+					step: .05,
+					"model-value": $props.rateErotic,
+					onChange: _cache[2] || (_cache[2] = ($event) => $setup.emitRate("rateErotic", Number($event)))
+				}, null, 8, ["model-value"])]),
+				_: 1
+			}),
+			createVNode($setup["AcuFormRow"], { label: "sulv4" }, {
+				default: withCtx(() => [createVNode($setup["AcuInput"], {
+					type: "number",
+					step: .05,
+					"model-value": $props.rateCuckold,
+					onChange: _cache[3] || (_cache[3] = ($event) => $setup.emitRate("rateCuckold", Number($event)))
+				}, null, 8, ["model-value"])]),
+				_: 1
+			}),
+			createVNode($setup["AcuFormRow"], { label: "zhaohui" }, {
+				default: withCtx(() => [createVNode($setup["AcuInput"], {
+					type: "number",
+					step: 1,
+					min: 1,
+					"model-value": $props.recallCount,
+					onChange: _cache[4] || (_cache[4] = ($event) => $setup.emitRate("recallCount", Math.round(Number($event))))
+				}, null, 8, ["model-value"])]),
+				_: 1
+			})
+		])
+	]);
+    }
+    var PlotMatchReplaceFields = /*#__PURE__*/ _export_sfc(_sfc_main$Q, [["render", _sfc_render$Q], ["__scopeId", "data-v-8649d835"]]);
+
+    var _sfc_main$P = /*@__PURE__*/ defineComponent({
+        __name: 'PlotPromptSegments',
+        props: {
+            segments: {}
+        },
+        emits: ["add", "delete", "move", "update"],
+        setup(__props, { expose: __expose }) {
+            __expose();
+            const __returned__ = { AcuPromptSegments };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    function _sfc_render$P(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createBlock($setup["AcuPromptSegments"], {
+		segments: $props.segments,
+		"show-slot": true,
+		"allow-move": true,
+		rows: 6,
+		"empty-text": "当前任务还没有提示词段。点击下方按钮添加第一段。",
+		onAdd: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("add", $event)),
+		onDelete: _cache[1] || (_cache[1] = ($event) => _ctx.$emit("delete", $event)),
+		onMove: _cache[2] || (_cache[2] = (index, delta) => _ctx.$emit("move", index, delta)),
+		onUpdate: _cache[3] || (_cache[3] = (i, p) => _ctx.$emit("update", i, p))
+	}, null, 8, ["segments"]);
+    }
+    var PlotPromptSegments = /*#__PURE__*/ _export_sfc(_sfc_main$P, [["render", _sfc_render$P]]);
+
+    var _sfc_main$O = /*@__PURE__*/ defineComponent({
+        __name: 'PlotTaskEditor',
+        props: {
+            task: {},
+            apiPresetOptions: {},
+            taskApiOverride: {}
+        },
+        emits: ["patch", "task-api-override", "segment-add", "segment-delete", "segment-move", "segment-update"],
+        setup(__props, { expose: __expose, emit: __emit }) {
+            __expose();
+            const props = __props;
+            const emit = __emit;
+            const taskApiSelectOptions = computed(() => [
+                { value: "", label: "继承剧情推进 API 预设" },
+                ...props.apiPresetOptions.map((o) => ({ value: o.name, label: o.name })),
+            ]);
+            function patch(value) {
+                emit("patch", value);
+            }
+            function patchAgentControl(patchValue) {
+                if (!props.task)
+                    return;
+                patch({
+                    agentControl: {
+                        ...props.task.agentControl,
+                        ...patchValue,
+                    },
+                });
+            }
+            function parseTaskIdList(value) {
+                return String(value ?? "")
+                    .split(/[，,\n]/g)
+                    .map(item => item.trim())
+                    .filter((item, index, array) => item && array.indexOf(item) === index);
+            }
+            function formatTaskIdList(value) {
+                return Array.isArray(value) ? value.join(", ") : "";
+            }
+            function parseOptionalPositiveInteger(value) {
+                if (value === "" || value === null || value === undefined)
+                    return undefined;
+                const n = Number(value);
+                if (!Number.isFinite(n))
+                    return undefined;
+                const normalized = Math.trunc(n);
+                return normalized > 0 ? normalized : undefined;
+            }
+            function parseOptionalNonNegativeInteger(value) {
+                if (value === "" || value === null || value === undefined)
+                    return undefined;
+                const n = Number(value);
+                if (!Number.isFinite(n))
+                    return undefined;
+                const normalized = Math.trunc(n);
+                return normalized >= 0 ? normalized : undefined;
+            }
+            const __returned__ = { props, emit, taskApiSelectOptions, patch, patchAgentControl, parseTaskIdList, formatTaskIdList, parseOptionalPositiveInteger, parseOptionalNonNegativeInteger, AcuFormRow, AcuInput, AcuSelect, AcuTextarea, AcuToggle, PlotPromptSegments };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-v2-plot-task-editor[data-v-7b343fef] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\r\n  min-width: 0;\n}\n.acu-v2-plot-task-editor__section[data-v-7b343fef] {\r\n  margin: 0;\r\n  padding: 0 0 14px;\r\n  border: 0;\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\r\n  min-width: 0;\n}\n.acu-v2-plot-task-editor__section[data-v-7b343fef]:last-of-type {\r\n  padding-bottom: 0;\r\n  border-bottom: 0;\n}\n.acu-v2-plot-task-editor__section legend[data-v-7b343fef] {\r\n  padding: 0;\r\n  font-size: var(--acu-font-size-section-title, 12px);\r\n  font-weight: 600;\r\n  color: var(--acu-text-2);\n}\n.acu-v2-plot-task-editor__grid[data-v-7b343fef] {\r\n  display: grid;\r\n  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));\r\n  gap: 10px;\n}\n.acu-v2-plot-task-editor__grid--wide[data-v-7b343fef] {\r\n  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));\n}\n.acu-v2-plot-task-editor__toggles[data-v-7b343fef] {\r\n  display: grid;\r\n  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));\r\n  gap: 8px 12px;\r\n  padding: 8px 0;\r\n  min-width: 0;\n}\n.acu-v2-plot-task-editor__toggles[data-v-7b343fef] .acu-toggle {\r\n  align-items: flex-start;\r\n  width: 100%;\r\n  min-width: 0;\r\n  min-height: var(--acu-control-height-sm, 26px);\n}\n.acu-v2-plot-task-editor__toggles[data-v-7b343fef] .acu-toggle__label {\r\n  min-width: 0;\r\n  white-space: normal;\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  overflow-wrap: anywhere;\n}\n.acu-v2-plot-task-editor__hint[data-v-7b343fef] {\r\n  margin: 0;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-text-3);\r\n  line-height: var(--acu-line-height-caption, 1.5);\n}\n.acu-v2-plot-task-editor__empty[data-v-7b343fef] {\r\n  padding: 18px 0;\r\n  border: 0;\r\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  text-align: center;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\r\n", "src/presentation-v2/components/PlotTaskEditor.vue#style-0-7b343fef");
+    var PlotTaskEditor_vue_vue_type_style_index_0_scoped_7b343fef_lang = null;
+
+    const _hoisted_1$O = {
+	key: 0,
+	class: "acu-v2-plot-task-editor"
+    };
+    const _hoisted_2$K = { class: "acu-v2-plot-task-editor__section" };
+    const _hoisted_3$E = { class: "acu-v2-plot-task-editor__grid" };
+    const _hoisted_4$y = { class: "acu-v2-plot-task-editor__grid" };
+    const _hoisted_5$s = { class: "acu-v2-plot-task-editor__section" };
+    const _hoisted_6$r = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
+    const _hoisted_7$o = { class: "acu-v2-plot-task-editor__toggles" };
+    const _hoisted_8$o = { class: "acu-v2-plot-task-editor__grid" };
+    const _hoisted_9$k = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
+    const _hoisted_10$i = { class: "acu-v2-plot-task-editor__section" };
+    const _hoisted_11$i = { class: "acu-v2-plot-task-editor__section" };
+    const _hoisted_12$f = {
+	key: 1,
+	class: "acu-v2-plot-task-editor__empty"
+    };
+    function _sfc_render$O(_ctx, _cache, $props, $setup, $data, $options) {
+	return $props.task ? (openBlock(), createElementBlock("div", _hoisted_1$O, [
+		createBaseVNode("fieldset", _hoisted_2$K, [
+			_cache[23] || (_cache[23] = createBaseVNode(
+				"legend",
+				null,
+				"基本字段",
+				-1
+				/* CACHED */
+			)),
+			createBaseVNode("div", _hoisted_3$E, [
+				createVNode($setup["AcuFormRow"], { label: "任务名称" }, {
+					default: withCtx(() => [createVNode($setup["AcuInput"], {
+						type: "text",
+						"model-value": $props.task.name,
+						placeholder: "例如：记忆召回任务",
+						onChange: _cache[0] || (_cache[0] = ($event) => $setup.patch({ name: String($event) }))
+					}, null, 8, ["model-value"])]),
+					_: 1
+				}),
+				createVNode($setup["AcuFormRow"], {
+					label: "阶段号",
+					hint: "同阶段并发，跨阶段串行"
+				}, {
+					default: withCtx(() => [createVNode($setup["AcuInput"], {
+						type: "number",
+						min: 1,
+						step: 1,
+						"model-value": $props.task.stage,
+						onChange: _cache[1] || (_cache[1] = ($event) => $setup.patch({ stage: Math.max(1, Math.round(Number($event))) }))
+					}, null, 8, ["model-value"])]),
+					_: 1
+				}),
+				createVNode($setup["AcuFormRow"], { label: "最大重试" }, {
+					default: withCtx(() => [createVNode($setup["AcuInput"], {
+						type: "number",
+						min: 1,
+						step: 1,
+						"model-value": $props.task.maxRetries,
+						onChange: _cache[2] || (_cache[2] = ($event) => $setup.patch({ maxRetries: Math.max(1, Math.round(Number($event))) }))
+					}, null, 8, ["model-value"])]),
+					_: 1
+				}),
+				createVNode($setup["AcuFormRow"], { label: "启用任务" }, {
+					default: withCtx(() => [createVNode($setup["AcuToggle"], {
+						"model-value": $props.task.enabled,
+						label: $props.task.enabled ? "已启用" : "已禁用",
+						"onUpdate:modelValue": _cache[3] || (_cache[3] = ($event) => $setup.patch({ enabled: $event }))
+					}, null, 8, ["model-value", "label"])]),
+					_: 1
+				})
+			]),
+			createBaseVNode("div", _hoisted_4$y, [
+				createVNode($setup["AcuFormRow"], {
+					label: "标签摘取",
+					hint: "例如 recall,supplement，仅作用于本任务"
+				}, {
+					default: withCtx(() => [createVNode($setup["AcuInput"], {
+						type: "text",
+						"model-value": $props.task.extractTags,
+						onChange: _cache[4] || (_cache[4] = ($event) => $setup.patch({ extractTags: String($event) }))
+					}, null, 8, ["model-value"])]),
+					_: 1
+				}),
+				createVNode($setup["AcuFormRow"], {
+					label: "提取写入标签",
+					hint: "优先级高于标签摘取；留空不追加"
+				}, {
+					default: withCtx(() => [createVNode($setup["AcuInput"], {
+						type: "text",
+						"model-value": $props.task.extractInjectTags,
+						onChange: _cache[5] || (_cache[5] = ($event) => $setup.patch({ extractInjectTags: String($event) }))
+					}, null, 8, ["model-value"])]),
+					_: 1
+				}),
+				createVNode($setup["AcuFormRow"], {
+					label: "最小回复长度",
+					hint: "少于此长度自动重试"
+				}, {
+					default: withCtx(() => [createVNode($setup["AcuInput"], {
+						type: "number",
+						min: 0,
+						step: 10,
+						"model-value": $props.task.minLength,
+						onChange: _cache[6] || (_cache[6] = ($event) => $setup.patch({ minLength: Math.max(0, Math.round(Number($event))) }))
+					}, null, 8, ["model-value"])]),
+					_: 1
+				})
+			])
+		]),
+		createBaseVNode("fieldset", _hoisted_5$s, [
+			_cache[24] || (_cache[24] = createBaseVNode(
+				"legend",
+				null,
+				"Agent 任务控制",
+				-1
+				/* CACHED */
+			)),
+			_cache[25] || (_cache[25] = createBaseVNode(
+				"p",
+				{ class: "acu-v2-plot-task-editor__hint" },
+				" 描述和触发条件会作为 agent模式判断任务是否执行、是否串联以及先后顺序的依据。全部留空且未启用 Agent 控制时，仍按原启用状态、阶段号和顺序执行。 ",
+				-1
+				/* CACHED */
+			)),
+			createBaseVNode("div", _hoisted_6$r, [createVNode($setup["AcuFormRow"], {
+				label: "任务描述",
+				hint: "说明这个推进任务负责什么。留空时不参与 Agent Skill 判断。"
+			}, {
+				default: withCtx(() => [createVNode($setup["AcuTextarea"], {
+					"model-value": $props.task.description,
+					rows: 2,
+					"max-rows": 6,
+					"auto-resize": "",
+					placeholder: "例如：从长期记忆中选择与当前剧情最相关的事件。",
+					"onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => $setup.patch({ description: $event }))
+				}, null, 8, ["model-value"])]),
+				_: 1
+			}), createVNode($setup["AcuFormRow"], {
+				label: "触发条件",
+				hint: "说明什么情况下应执行该任务。留空时保持原逻辑。"
+			}, {
+				default: withCtx(() => [createVNode($setup["AcuTextarea"], {
+					"model-value": $props.task.triggerWhen,
+					rows: 2,
+					"max-rows": 6,
+					"auto-resize": "",
+					placeholder: "例如：用户输入涉及旧事件、承诺、人物关系变化或未解决伏笔时触发。",
+					"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.patch({ triggerWhen: $event }))
+				}, null, 8, ["model-value"])]),
+				_: 1
+			})]),
+			createBaseVNode("div", _hoisted_7$o, [
+				createVNode($setup["AcuToggle"], {
+					"model-value": $props.task.agentControl.enabled,
+					label: $props.task.agentControl.enabled ? "Agent 可控制此任务" : "Agent 不控制此任务",
+					"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.patchAgentControl({ enabled: $event }))
+				}, null, 8, ["model-value", "label"]),
+				createVNode($setup["AcuToggle"], {
+					"model-value": $props.task.agentControl.selectable,
+					label: "允许 Agent 选择/跳过",
+					"onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => $setup.patchAgentControl({ selectable: $event }))
+				}, null, 8, ["model-value"]),
+				createVNode($setup["AcuToggle"], {
+					"model-value": $props.task.agentControl.defaultSelected,
+					label: "Agent 无决策时默认选中",
+					"onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => $setup.patchAgentControl({ defaultSelected: $event }))
+				}, null, 8, ["model-value"]),
+				createVNode($setup["AcuToggle"], {
+					"model-value": $props.task.agentControl.allowSequential,
+					label: "允许串联",
+					"onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => $setup.patchAgentControl({ allowSequential: $event }))
+				}, null, 8, ["model-value"]),
+				createVNode($setup["AcuToggle"], {
+					"model-value": $props.task.agentControl.allowParallel,
+					label: "允许并行",
+					"onUpdate:modelValue": _cache[13] || (_cache[13] = ($event) => $setup.patchAgentControl({ allowParallel: $event }))
+				}, null, 8, ["model-value"])
+			]),
+			createBaseVNode("div", _hoisted_8$o, [createVNode($setup["AcuFormRow"], {
+				label: "偏好阶段",
+				hint: "Agent 排序参考；留空则不指定。"
+			}, {
+				default: withCtx(() => [createVNode($setup["AcuInput"], {
+					type: "number",
+					min: 1,
+					step: 1,
+					"model-value": $props.task.agentControl.preferredStage ?? "",
+					onChange: _cache[14] || (_cache[14] = ($event) => $setup.patchAgentControl({ preferredStage: $setup.parseOptionalPositiveInteger($event) }))
+				}, null, 8, ["model-value"])]),
+				_: 1
+			}), createVNode($setup["AcuFormRow"], {
+				label: "偏好顺序",
+				hint: "阶段内排序参考；留空则不指定。"
+			}, {
+				default: withCtx(() => [createVNode($setup["AcuInput"], {
+					type: "number",
+					min: 0,
+					step: 1,
+					"model-value": $props.task.agentControl.preferredOrder ?? "",
+					onChange: _cache[15] || (_cache[15] = ($event) => $setup.patchAgentControl({ preferredOrder: $setup.parseOptionalNonNegativeInteger($event) }))
+				}, null, 8, ["model-value"])]),
+				_: 1
+			})]),
+			createBaseVNode("div", _hoisted_9$k, [createVNode($setup["AcuFormRow"], {
+				label: "依赖任务 ID",
+				hint: "逗号分隔。Agent 排序时应先执行这些任务；非法或循环依赖会在运行时校验。"
+			}, {
+				default: withCtx(() => [createVNode($setup["AcuInput"], {
+					type: "text",
+					"model-value": $setup.formatTaskIdList($props.task.agentControl.dependsOnTaskIds),
+					placeholder: "例如：recallTask, summaryTask",
+					onChange: _cache[16] || (_cache[16] = ($event) => $setup.patchAgentControl({ dependsOnTaskIds: $setup.parseTaskIdList($event) }))
+				}, null, 8, ["model-value"])]),
+				_: 1
+			}), createVNode($setup["AcuFormRow"], {
+				label: "阻塞任务 ID",
+				hint: "逗号分隔。用于提示 Agent 此任务与哪些任务不应同时执行。"
+			}, {
+				default: withCtx(() => [createVNode($setup["AcuInput"], {
+					type: "text",
+					"model-value": $setup.formatTaskIdList($props.task.agentControl.blocksTaskIds),
+					placeholder: "例如：legacyRecallTask",
+					onChange: _cache[17] || (_cache[17] = ($event) => $setup.patchAgentControl({ blocksTaskIds: $setup.parseTaskIdList($event) }))
+				}, null, 8, ["model-value"])]),
+				_: 1
+			})])
+		]),
+		createBaseVNode("fieldset", _hoisted_10$i, [_cache[26] || (_cache[26] = createBaseVNode(
+			"legend",
+			null,
+			"当前任务使用的 API",
+			-1
+			/* CACHED */
+		)), createVNode($setup["AcuFormRow"], {
+			label: "API 预设",
+			hint: "单独为当前任务选择API预设，默认继承剧情推进页。优先级：任务 > 剧情推进页 > 活动 API。全局保存，不写入预设。"
+		}, {
+			default: withCtx(() => [createVNode($setup["AcuSelect"], {
+				options: $setup.taskApiSelectOptions,
+				"model-value": $props.taskApiOverride,
+				placeholder: "继承剧情推进 API 预设",
+				"onUpdate:modelValue": _cache[18] || (_cache[18] = ($event) => _ctx.$emit("task-api-override", $event))
+			}, null, 8, ["options", "model-value"])]),
+			_: 1
+		})]),
+		createBaseVNode("fieldset", _hoisted_11$i, [_cache[27] || (_cache[27] = createBaseVNode(
+			"legend",
+			null,
+			"提示词段（promptGroup）",
+			-1
+			/* CACHED */
+		)), createVNode($setup["PlotPromptSegments"], {
+			segments: $props.task.promptGroup,
+			onAdd: _cache[19] || (_cache[19] = ($event) => _ctx.$emit("segment-add", $event)),
+			onDelete: _cache[20] || (_cache[20] = ($event) => _ctx.$emit("segment-delete", $event)),
+			onMove: _cache[21] || (_cache[21] = (index, delta) => _ctx.$emit("segment-move", index, delta)),
+			onUpdate: _cache[22] || (_cache[22] = (index, patch) => _ctx.$emit("segment-update", index, patch))
+		}, null, 8, ["segments"])])
+	])) : (openBlock(), createElementBlock("div", _hoisted_12$f, " 请在上方选择一个任务进行编辑。 "));
+    }
+    var PlotTaskEditor = /*#__PURE__*/ _export_sfc(_sfc_main$O, [["render", _sfc_render$O], ["__scopeId", "data-v-7b343fef"]]);
+
+    var _sfc_main$N = /*@__PURE__*/ defineComponent({
+        __name: 'PlotTaskList',
+        props: {
+            tasks: {},
+            currentTaskId: {}
+        },
+        emits: ["add", "select", "move", "delete"],
+        setup(__props, { expose: __expose }) {
+            __expose();
+            const props = __props;
+            function canMove(delta) {
+                const idx = props.tasks.findIndex(t => t.id === props.currentTaskId);
+                if (idx < 0)
+                    return false;
+                const target = idx + delta;
+                return target >= 0 && target < props.tasks.length;
+            }
+            const __returned__ = { props, canMove, AcuIconButton };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-v2-plot-tasks[data-v-ee3c6f4c] {\r\n  margin: 0; padding: 0 0 14px;\r\n  border: 0; border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  display: flex; flex-direction: column; gap: 10px;\r\n  min-width: 0;\n}\n.acu-v2-plot-tasks > legend[data-v-ee3c6f4c] {\r\n  padding: 0;\r\n  font-size: var(--acu-font-size-section-title, 12px); font-weight: 600; color: var(--acu-text-2);\r\n  display: flex; align-items: center; gap: 10px;\n}\n.acu-v2-plot-tasks__toolbar[data-v-ee3c6f4c] { display: inline-flex; gap: 4px;\n}\n.acu-v2-plot-tasks__cards[data-v-ee3c6f4c] {\r\n  display: flex; gap: 8px;\r\n  min-width: 0;\r\n  overflow-x: auto;\n}\n.acu-v2-plot-tasks__card[data-v-ee3c6f4c] {\r\n  flex: 0 0 140px;\r\n  min-height: 100px;\r\n  display: flex; flex-direction: column; gap: 6px;\r\n  padding: 10px 12px;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-2);\r\n  border: 0;\r\n  color: inherit;\r\n  cursor: pointer;\r\n  font: inherit;\r\n  text-align: left;\r\n  transition: box-shadow 0.15s ease, color 0.15s ease, opacity 0.15s ease;\n}\n.acu-v2-plot-tasks__card[data-v-ee3c6f4c]:hover,\r\n.acu-v2-plot-tasks__card[data-v-ee3c6f4c]:focus-visible {\r\n  box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\r\n  outline: none;\n}\n.acu-v2-plot-tasks__card--active[data-v-ee3c6f4c] {\r\n  background: var(--acu-accent);\r\n  color: var(--acu-on-accent);\n}\n.acu-v2-plot-tasks__card--disabled[data-v-ee3c6f4c] {\r\n  opacity: 0.5;\n}\n.acu-v2-plot-tasks__card--disabled.acu-v2-plot-tasks__card--active[data-v-ee3c6f4c] {\r\n  opacity: 0.7;\n}\n.acu-v2-plot-tasks__card--disabled .acu-v2-plot-tasks__name[data-v-ee3c6f4c] {\r\n  text-decoration: line-through;\n}\n.acu-v2-plot-tasks__name[data-v-ee3c6f4c] {\r\n  font-size: var(--acu-font-size-list-title, 13px); color: var(--acu-text-1); font-weight: 500;\r\n  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\n}\n.acu-v2-plot-tasks__card--active .acu-v2-plot-tasks__name[data-v-ee3c6f4c],\r\n.acu-v2-plot-tasks__card--active .acu-v2-plot-tasks__stage[data-v-ee3c6f4c],\r\n.acu-v2-plot-tasks__card--active .acu-v2-plot-tasks__seg-count[data-v-ee3c6f4c],\r\n.acu-v2-plot-tasks__card--active .acu-v2-plot-tasks__disabled-label[data-v-ee3c6f4c] {\r\n  color: var(--acu-on-accent);\n}\n.acu-v2-plot-tasks__stage[data-v-ee3c6f4c] {\r\n  font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3);\r\n  font-family: var(--acu-font-mono);\n}\n.acu-v2-plot-tasks__seg-count[data-v-ee3c6f4c] {\r\n  font-size: var(--acu-font-size-micro, 10px); color: var(--acu-text-3);\r\n  margin-top: auto;\n}\n.acu-v2-plot-tasks__disabled-label[data-v-ee3c6f4c] {\r\n  font-size: var(--acu-font-size-micro, 10px); color: var(--acu-warning);\r\n  font-weight: 500;\n}\n.acu-v2-plot-tasks__empty[data-v-ee3c6f4c] {\r\n  padding: 16px 12px; text-align: center;\r\n  color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\r\n  flex: 1;\n}\r\n", "src/presentation-v2/components/PlotTaskList.vue#style-0-ee3c6f4c");
+    var PlotTaskList_vue_vue_type_style_index_0_scoped_ee3c6f4c_lang = null;
+
+    const _hoisted_1$N = { class: "acu-v2-plot-tasks" };
+    const _hoisted_2$J = { class: "acu-v2-plot-tasks__toolbar" };
+    const _hoisted_3$D = { class: "acu-v2-plot-tasks__cards" };
+    const _hoisted_4$x = ["onClick"];
+    const _hoisted_5$r = { class: "acu-v2-plot-tasks__name" };
+    const _hoisted_6$q = {
+	class: "acu-v2-plot-tasks__stage",
+	title: "阶段号 — 同阶段并发，跨阶段串行"
+    };
+    const _hoisted_7$n = { class: "acu-v2-plot-tasks__seg-count" };
+    const _hoisted_8$n = {
+	key: 0,
+	class: "acu-v2-plot-tasks__disabled-label"
+    };
+    const _hoisted_9$j = {
+	key: 0,
+	class: "acu-v2-plot-tasks__empty"
+    };
+    function _sfc_render$N(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("fieldset", _hoisted_1$N, [createBaseVNode("legend", null, [_cache[4] || (_cache[4] = createBaseVNode(
+		"span",
+		null,
+		"剧情任务列表",
+		-1
+		/* CACHED */
+	)), createBaseVNode("span", _hoisted_2$J, [
+		createVNode($setup["AcuIconButton"], {
+			icon: "fa-solid fa-arrow-left",
+			size: "sm",
+			disabled: !$setup.canMove(-1),
+			title: "左移",
+			onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("move", -1))
+		}, null, 8, ["disabled"]),
+		createVNode($setup["AcuIconButton"], {
+			icon: "fa-solid fa-arrow-right",
+			size: "sm",
+			disabled: !$setup.canMove(1),
+			title: "右移",
+			onClick: _cache[1] || (_cache[1] = ($event) => _ctx.$emit("move", 1))
+		}, null, 8, ["disabled"]),
+		createVNode($setup["AcuIconButton"], {
+			icon: "fa-solid fa-trash-can",
+			size: "sm",
+			variant: "danger",
+			disabled: $props.tasks.length <= 1,
+			title: "删除当前任务",
+			onClick: _cache[2] || (_cache[2] = ($event) => _ctx.$emit("delete"))
+		}, null, 8, ["disabled"]),
+		createVNode($setup["AcuIconButton"], {
+			icon: "fa-solid fa-plus",
+			size: "sm",
+			variant: "accent",
+			title: "新增任务",
+			onClick: _cache[3] || (_cache[3] = ($event) => _ctx.$emit("add"))
+		})
+	])]), createBaseVNode("div", _hoisted_3$D, [(openBlock(true), createElementBlock(
+		Fragment,
+		null,
+		renderList($props.tasks, (task) => {
+			return openBlock(), createElementBlock("button", {
+				key: task.id,
+				type: "button",
+				class: normalizeClass(["acu-v2-plot-tasks__card", {
+					"acu-v2-plot-tasks__card--active": task.id === $props.currentTaskId,
+					"acu-v2-plot-tasks__card--disabled": !task.enabled
+				}]),
+				onClick: ($event) => _ctx.$emit("select", task.id)
+			}, [
+				createBaseVNode(
+					"span",
+					_hoisted_5$r,
+					toDisplayString(task.name),
+					1
+					/* TEXT */
+				),
+				createBaseVNode(
+					"span",
+					_hoisted_6$q,
+					"阶段 " + toDisplayString(task.stage),
+					1
+					/* TEXT */
+				),
+				createBaseVNode(
+					"span",
+					_hoisted_7$n,
+					toDisplayString(task.promptGroup.length) + " 段",
+					1
+					/* TEXT */
+				),
+				!task.enabled ? (openBlock(), createElementBlock("span", _hoisted_8$n, "已禁用")) : createCommentVNode("v-if", true)
+			], 10, _hoisted_4$x);
+		}),
+		128
+		/* KEYED_FRAGMENT */
+	)), !$props.tasks.length ? (openBlock(), createElementBlock("div", _hoisted_9$j, "暂无任务，点击右上 + 新增。")) : createCommentVNode("v-if", true)])]);
+    }
+    var PlotTaskList = /*#__PURE__*/ _export_sfc(_sfc_main$N, [["render", _sfc_render$N], ["__scopeId", "data-v-ee3c6f4c"]]);
+
+    var _sfc_main$M = /*@__PURE__*/ defineComponent({
+        __name: 'PlotPresetDrawer',
+        props: {
+            isOpen: { type: Boolean },
+            view: {},
+            title: {},
+            error: {},
+            draftMeta: {},
+            contextRules: {},
+            presetMeta: {},
+            defaultPresetName: {},
+            apiPresetOptions: {},
+            taskEditing: {},
+            currentTaskApiOverride: {},
+            showAdvancedRates: { type: Boolean },
+            rates: {},
+            beforeClose: { type: Function }
+        },
+        emits: ["close", "back", "open-create", "open-edit", "set-default", "delete", "export", "save", "update-name", "update-context-extract-rules", "update-context-exclude-rules", "update-task-api-override", "update-rate"],
+        setup(__props, { expose: __expose, emit: __emit }) {
+            __expose();
+            const props = __props;
+            const emit = __emit;
+            function onTaskApiOverride(value) {
+                emit("update-task-api-override", value);
+            }
+            const __returned__ = { props, emit, onTaskApiOverride, AcuButton, AcuDrawer, AcuFormRow, AcuIconButton, AcuInput, AcuRulePairList, AcuText, AcuTextarea, PlotMatchReplaceFields, PlotTaskEditor, PlotTaskList };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-v2-plot-drawer__create-btn[data-v-47605d60] {\r\n  width: 100%;\n}\n.acu-v2-plot-drawer__empty[data-v-47605d60] {\r\n  margin-top: 20px;\n}\n.acu-v2-plot-drawer__actions[data-v-47605d60] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  flex-wrap: wrap;\r\n  padding-top: 12px;\r\n  margin-top: 12px;\n}\r\n\r\n/* manage list */\n.acu-v2-manage-list[data-v-47605d60] {\r\n  list-style: none;\r\n  margin: 0;\r\n  padding: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-v2-manage-item[data-v-47605d60] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 10px;\r\n  padding: 10px 12px;\r\n  border: 0;\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\n}\n.acu-v2-manage-item[data-v-47605d60]:last-child {\r\n  border-bottom: 0;\n}\n.acu-v2-manage-item__info[data-v-47605d60] {\r\n  flex: 1;\r\n  min-width: 0;\n}\n.acu-v2-manage-item__name[data-v-47605d60] {\r\n  display: block;\r\n  font-size: var(--acu-font-size-list-title, 13px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  font-weight: 500;\r\n  color: var(--acu-text-1);\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-v2-manage-item__meta[data-v-47605d60] {\r\n  display: block;\r\n  margin-top: 2px;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: var(--acu-line-height-caption, 1.5);\r\n  color: var(--acu-text-3);\n}\n.acu-v2-manage-item__actions[data-v-47605d60] {\r\n  display: flex;\r\n  gap: 4px;\n}\r\n\r\n/* form */\n.acu-v2-form[data-v-47605d60] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 14px;\n}\n.acu-v2-form__section[data-v-47605d60] {\r\n  min-width: 0;\r\n  margin: 0;\r\n  padding: 0 0 14px;\r\n  border: 0;\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\n}\n.acu-v2-form__section[data-v-47605d60]:last-of-type {\r\n  padding-bottom: 0;\r\n  border-bottom: 0;\n}\n.acu-v2-form__section legend[data-v-47605d60] {\r\n  padding: 0;\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-section-title, 12px);\r\n  font-weight: 600;\n}\n.acu-v2-plot-drawer__rules[data-v-47605d60] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\r\n  min-width: 0;\n}\n.acu-v2-error[data-v-47605d60] {\r\n  padding: 8px 10px;\r\n  background: color-mix(in srgb, var(--acu-danger) 10%, transparent);\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\n}\r\n", "src/presentation-v2/components/PlotPresetDrawer.vue#style-0-47605d60");
+    var PlotPresetDrawer_vue_vue_type_style_index_0_scoped_47605d60_lang = null;
+
+    const _hoisted_1$M = {
+	key: 0,
+	class: "acu-v2-manage-list"
+    };
+    const _hoisted_2$I = { class: "acu-v2-manage-item__info" };
+    const _hoisted_3$C = { class: "acu-v2-manage-item__actions" };
+    const _hoisted_4$w = { class: "acu-v2-form__section" };
+    const _hoisted_5$q = { class: "acu-v2-form__section" };
+    const _hoisted_6$p = { class: "acu-v2-plot-drawer__rules" };
+    const _hoisted_7$m = { class: "acu-v2-form__section" };
+    const _hoisted_8$m = { class: "acu-v2-plot-drawer__actions" };
+    function _sfc_render$M(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createBlock($setup["AcuDrawer"], {
+		"is-open": $props.isOpen,
+		title: $props.title,
+		"show-back": $props.view === "create" || $props.view === "edit",
+		"before-close": $props.beforeClose,
+		width: "720px",
+		onClose: _cache[15] || (_cache[15] = ($event) => _ctx.$emit("close")),
+		onBack: _cache[16] || (_cache[16] = ($event) => _ctx.$emit("back"))
+	}, {
+		default: withCtx(() => [createCommentVNode(" MANAGE "), $props.view === "manage" ? (openBlock(), createElementBlock(
+			Fragment,
+			{ key: 0 },
+			[createVNode($setup["AcuButton"], {
+				variant: "primary",
+				class: "acu-v2-plot-drawer__create-btn",
+				onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("open-create"))
+			}, {
+				default: withCtx(() => [..._cache[17] || (_cache[17] = [createBaseVNode(
+					"i",
+					{ class: "fa-solid fa-plus" },
+					null,
+					-1
+					/* CACHED */
+				), createTextVNode(
+					" 从默认新建 ",
+					-1
+					/* CACHED */
+				)])]),
+				_: 1
+			}), $props.presetMeta.length ? (openBlock(), createElementBlock("ul", _hoisted_1$M, [(openBlock(true), createElementBlock(
+				Fragment,
+				null,
+				renderList($props.presetMeta, (meta) => {
+					return openBlock(), createElementBlock("li", {
+						key: meta.name,
+						class: "acu-v2-manage-item"
+					}, [createBaseVNode("div", _hoisted_2$I, [createVNode(
+						$setup["AcuText"],
+						{
+							as: "span",
+							variant: "list-title",
+							class: "acu-v2-manage-item__name"
+						},
+						{
+							default: withCtx(() => [createTextVNode(
+								toDisplayString(meta.name),
+								1
+								/* TEXT */
+							)]),
+							_: 2
+						},
+						1024
+						/* DYNAMIC_SLOTS */
+					), createVNode(
+						$setup["AcuText"],
+						{
+							as: "span",
+							variant: "caption",
+							class: "acu-v2-manage-item__meta"
+						},
+						{
+							default: withCtx(() => [createTextVNode(
+								" 共 " + toDisplayString(meta.taskCount) + " 个任务 ",
+								1
+								/* TEXT */
+							), meta.name === $props.defaultPresetName ? (openBlock(), createElementBlock(
+								Fragment,
+								{ key: 0 },
+								[createTextVNode(" · 全局默认")],
+								64
+								/* STABLE_FRAGMENT */
+							)) : createCommentVNode("v-if", true)]),
+							_: 2
+						},
+						1024
+						/* DYNAMIC_SLOTS */
+					)]), createBaseVNode("div", _hoisted_3$C, [
+						createVNode($setup["AcuIconButton"], {
+							icon: meta.name === $props.defaultPresetName ? "fa-solid fa-star" : "fa-regular fa-star",
+							title: "设为全局默认",
+							variant: meta.name === $props.defaultPresetName ? "accent" : "default",
+							onClick: ($event) => _ctx.$emit("set-default", meta.name)
+						}, null, 8, [
+							"icon",
+							"variant",
+							"onClick"
+						]),
+						createVNode($setup["AcuIconButton"], {
+							icon: "fa-solid fa-upload",
+							title: "导出 JSON",
+							onClick: ($event) => _ctx.$emit("export", meta.name)
+						}, null, 8, ["onClick"]),
+						createVNode($setup["AcuIconButton"], {
+							icon: "fa-solid fa-pen",
+							title: "编辑",
+							onClick: ($event) => _ctx.$emit("open-edit", meta.name)
+						}, null, 8, ["onClick"]),
+						createVNode($setup["AcuIconButton"], {
+							icon: "fa-solid fa-trash-can",
+							variant: "danger",
+							title: "删除",
+							onClick: ($event) => _ctx.$emit("delete", meta.name)
+						}, null, 8, ["onClick"])
+					])]);
+				}),
+				128
+				/* KEYED_FRAGMENT */
+			))])) : (openBlock(), createBlock($setup["AcuText"], {
+				key: 1,
+				variant: "empty",
+				class: "acu-v2-plot-drawer__empty"
+			}, {
+				default: withCtx(() => [..._cache[18] || (_cache[18] = [createTextVNode(
+					"暂无预设，点击上方按钮从默认新建或导入。",
+					-1
+					/* CACHED */
+				)])]),
+				_: 1
+			}))],
+			64
+			/* STABLE_FRAGMENT */
+		)) : (openBlock(), createElementBlock(
+			Fragment,
+			{ key: 1 },
+			[createCommentVNode(" CREATE / EDIT "), createBaseVNode(
+				"form",
+				{
+					class: "acu-v2-form",
+					onSubmit: _cache[14] || (_cache[14] = withModifiers(($event) => _ctx.$emit("save"), ["prevent"]))
+				},
+				[
+					createBaseVNode("fieldset", _hoisted_4$w, [_cache[19] || (_cache[19] = createBaseVNode(
+						"legend",
+						null,
+						"基础信息",
+						-1
+						/* CACHED */
+					)), createVNode($setup["AcuFormRow"], { label: "预设名称" }, {
+						default: withCtx(() => [createVNode($setup["AcuInput"], {
+							type: "text",
+							"model-value": $props.draftMeta.name,
+							autocomplete: "off",
+							"onUpdate:modelValue": _cache[1] || (_cache[1] = ($event) => _ctx.$emit("update-name", String($event)))
+						}, null, 8, ["model-value"])]),
+						_: 1
+					})]),
+					createBaseVNode("fieldset", _hoisted_5$q, [
+						_cache[21] || (_cache[21] = createBaseVNode(
+							"legend",
+							null,
+							"标签筛选",
+							-1
+							/* CACHED */
+						)),
+						createVNode($setup["AcuText"], {
+							variant: "hint",
+							class: "acu-v2-form__hint"
+						}, {
+							default: withCtx(() => [..._cache[20] || (_cache[20] = [createTextVNode(
+								" 专属于当前预设，随预设保存。按标签提取内容，提升推进准确性。提取仅保留指定范围，排除移除指定范围。 ",
+								-1
+								/* CACHED */
+							)])]),
+							_: 1
+						}),
+						createBaseVNode("div", _hoisted_6$p, [createVNode($setup["AcuRulePairList"], {
+							label: "提取规则",
+							"model-value": $props.contextRules.extractRules,
+							"start-placeholder": "提取开始边界",
+							"end-placeholder": "提取结束边界",
+							"add-label": "添加提取规则",
+							"onUpdate:modelValue": _cache[2] || (_cache[2] = ($event) => _ctx.$emit("update-context-extract-rules", $event))
+						}, null, 8, ["model-value"]), createVNode($setup["AcuRulePairList"], {
+							label: "排除规则",
+							"model-value": $props.contextRules.excludeRules,
+							"start-placeholder": "排除开始边界",
+							"end-placeholder": "排除结束边界",
+							"add-label": "添加排除规则",
+							"onUpdate:modelValue": _cache[3] || (_cache[3] = ($event) => _ctx.$emit("update-context-exclude-rules", $event))
+						}, null, 8, ["model-value"])])
+					]),
+					$props.showAdvancedRates ? (openBlock(), createBlock($setup["PlotMatchReplaceFields"], {
+						key: 0,
+						"rate-main": $props.rates.rateMain,
+						"rate-personal": $props.rates.ratePersonal,
+						"rate-erotic": $props.rates.rateErotic,
+						"rate-cuckold": $props.rates.rateCuckold,
+						"recall-count": $props.rates.recallCount,
+						onUpdateRate: _cache[4] || (_cache[4] = (field, value) => _ctx.$emit("update-rate", field, value))
+					}, null, 8, [
+						"rate-main",
+						"rate-personal",
+						"rate-erotic",
+						"rate-cuckold",
+						"recall-count"
+					])) : createCommentVNode("v-if", true),
+					createVNode($setup["PlotTaskList"], {
+						tasks: $props.taskEditing.tasks.value,
+						"current-task-id": $props.taskEditing.currentTaskId.value,
+						onAdd: $props.taskEditing.addTask,
+						onSelect: _cache[5] || (_cache[5] = ($event) => $props.taskEditing.selectTask($event)),
+						onMove: _cache[6] || (_cache[6] = ($event) => $props.taskEditing.moveCurrent($event)),
+						onDelete: $props.taskEditing.deleteCurrentTask
+					}, null, 8, [
+						"tasks",
+						"current-task-id",
+						"onAdd",
+						"onDelete"
+					]),
+					createVNode($setup["PlotTaskEditor"], {
+						task: $props.taskEditing.currentTask.value,
+						"api-preset-options": $props.apiPresetOptions,
+						"task-api-override": $props.currentTaskApiOverride,
+						onPatch: _cache[7] || (_cache[7] = ($event) => $props.taskEditing.patchCurrent($event)),
+						onTaskApiOverride: $setup.onTaskApiOverride,
+						onSegmentAdd: _cache[8] || (_cache[8] = ($event) => $props.taskEditing.addSegment($event)),
+						onSegmentDelete: _cache[9] || (_cache[9] = ($event) => $props.taskEditing.deleteSegment($event)),
+						onSegmentMove: _cache[10] || (_cache[10] = (index, delta) => $props.taskEditing.moveSegment(index, delta)),
+						onSegmentUpdate: _cache[11] || (_cache[11] = (index, p) => $props.taskEditing.updateSegment(index, p))
+					}, null, 8, [
+						"task",
+						"api-preset-options",
+						"task-api-override"
+					]),
+					createBaseVNode("fieldset", _hoisted_7$m, [_cache[22] || (_cache[22] = createBaseVNode(
+						"legend",
+						null,
+						"最终注入指令",
+						-1
+						/* CACHED */
+					)), createVNode($setup["AcuTextarea"], {
+						"model-value": $props.taskEditing.finalDirective.value,
+						rows: 3,
+						placeholder: "该指令不会发给规划 AI；只在主 AI 生成时注入",
+						"onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => $props.taskEditing.finalDirective.value = $event)
+					}, null, 8, ["model-value"])]),
+					$props.error ? (openBlock(), createBlock($setup["AcuText"], {
+						key: 1,
+						variant: "error",
+						class: "acu-v2-error",
+						role: "alert"
+					}, {
+						default: withCtx(() => [createTextVNode(
+							toDisplayString($props.error),
+							1
+							/* TEXT */
+						)]),
+						_: 1
+					})) : createCommentVNode("v-if", true),
+					createBaseVNode("footer", _hoisted_8$m, [createVNode($setup["AcuButton"], { onClick: _cache[13] || (_cache[13] = ($event) => _ctx.$emit("back")) }, {
+						default: withCtx(() => [..._cache[23] || (_cache[23] = [createTextVNode(
+							"关闭",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					}), createVNode($setup["AcuButton"], {
+						variant: "primary",
+						"native-type": "submit"
+					}, {
+						default: withCtx(() => [..._cache[24] || (_cache[24] = [createTextVNode(
+							"保存预设",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					})])
+				],
+				32
+				/* NEED_HYDRATION */
+			)],
+			2112
+			/* STABLE_FRAGMENT, DEV_ROOT_FRAGMENT */
+		))]),
+		_: 1
+	}, 8, [
+		"is-open",
+		"title",
+		"show-back",
+		"before-close"
+	]);
+    }
+    var PlotPresetDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$M, [["render", _sfc_render$M], ["__scopeId", "data-v-47605d60"]]);
+
+    var _sfc_main$L = /*@__PURE__*/ defineComponent({
+        __name: 'PlotPresetPanel',
+        props: {
+            showEdit: { type: Boolean, default: true },
+            showApiPreset: { type: Boolean, default: true }
+        },
+        setup(__props, { expose: __expose }) {
+            __expose();
+            const store = usePlotPresetStore();
+            const dialogStore = useDialogStore();
+            const toast = useToastStore();
+            const { apiStore, followActiveApiLabel, apiPresetSelectOptions: pageApiSelectOptions, } = useApiPresetSelectOptions();
+            const management = usePlotPresetManagement();
+            const devOptions = useDevOptions();
+            const presetDropdownItems = computed(() => [
+                {
+                    value: "",
+                    label: "默认预设",
+                    meta: `${store.defaultPresetTaskCount} 个任务`,
+                },
+                ...store.presets.map((p) => ({
+                    value: p.name,
+                    label: p.name,
+                    meta: `${Array.isArray(p.raw?.plotTasks) ? p.raw.plotTasks.length : 0} 个任务`,
+                })),
+            ]);
+            const apiPresetOptions = computed(() => apiStore.presets.map((p) => ({ name: p.name })));
+            const currentTaskApiOverride = computed(() => {
+                const taskId = management.taskEditing.currentTaskId.value;
+                if (!taskId)
+                    return "";
+                return store.taskApiOverrides[taskId] || "";
+            });
+            useUiCloseGuard(() => {
+                if (!management.isDrawerOpen.value)
+                    return true;
+                return management.confirmIfDirty();
+            });
+            function onTaskApiOverride(value) {
+                const taskId = management.taskEditing.currentTaskId.value;
+                if (!taskId)
+                    return;
+                store.setTaskApiOverride(taskId, value);
+            }
+            async function onDelete(name) {
+                const confirmed = await dialogStore.confirm({
+                    title: "删除剧情推进预设",
+                    message: `删除剧情推进预设"${name}"？`,
+                    confirmLabel: "删除预设",
+                    confirmVariant: "danger",
+                });
+                if (!confirmed)
+                    return;
+                management.deletePreset(name);
+            }
+            function onExport(name) {
+                const text = management.exportPresetAsText(name);
+                if (!text)
+                    return;
+                try {
+                    const blob = new Blob([text], { type: "application/json" });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = `${name}.plot-preset.json`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                    toast.success("剧情推进预设 JSON 已导出。");
+                }
+                catch {
+                    toast.error("剧情推进预设 JSON 导出失败。");
+                }
+            }
+            async function onImportFile(file) {
+                try {
+                    const text = await file.text();
+                    management.importFromJsonText(text);
+                }
+                catch {
+                    /* ignore */
+                }
+            }
+            function refreshAll() {
+                store.refreshFromSettings();
+                apiStore.refreshFromSettings();
+            }
+            onMounted(refreshAll);
+            watch(useChatChangedTick(), refreshAll);
+            const __returned__ = { store, dialogStore, toast, apiStore, followActiveApiLabel, pageApiSelectOptions, management, devOptions, presetDropdownItems, apiPresetOptions, currentTaskApiOverride, onTaskApiOverride, onDelete, onExport, onImportFile, refreshAll, get plotCopy() { return plotCopy; }, AcuBadge, AcuFileButton, AcuFormRow, AcuIconButton, AcuPanel, AcuPresetDropdown, AcuSelect, AcuText, PlotPresetDrawer };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-plot-preset-panel__status-line[data-v-021e572f] {\r\n  margin: 0 0 10px;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-plot-preset-panel__select-row[data-v-021e572f] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) repeat(3, max-content);\r\n  gap: 6px;\r\n  align-items: stretch;\r\n  margin-bottom: 12px;\r\n  min-width: 0;\n}\r\n", "src/presentation-v2/components/PlotPresetPanel.vue#style-0-021e572f");
+    var PlotPresetPanel_vue_vue_type_style_index_0_scoped_021e572f_lang = null;
+
+    const _hoisted_1$L = { class: "acu-text__value" };
+    const _hoisted_2$H = { class: "acu-text__value" };
+    const _hoisted_3$B = { class: "acu-plot-preset-panel__select-row" };
+    function _sfc_render$L(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createBlock($setup["AcuPanel"], {
+		title: $setup.plotCopy.panels.preset.title,
+		description: $setup.plotCopy.panels.preset.description
+	}, {
+		actions: withCtx(() => [!$setup.store.hasPresets ? (openBlock(), createBlock($setup["AcuBadge"], {
+			key: 0,
+			variant: "neutral"
+		}, {
+			default: withCtx(() => [..._cache[6] || (_cache[6] = [createTextVNode(
+				"使用默认预设",
+				-1
+				/* CACHED */
+			)])]),
+			_: 1
+		})) : createCommentVNode("v-if", true)]),
+		default: withCtx(() => [
+			createVNode($setup["AcuText"], {
+				variant: "status-line",
+				class: "acu-plot-preset-panel__status-line acu-v2-plot-page__status-line"
+			}, {
+				default: withCtx(() => [
+					_cache[10] || (_cache[10] = createTextVNode(
+						" 当前聊天: ",
+						-1
+						/* CACHED */
+					)),
+					createBaseVNode(
+						"strong",
+						_hoisted_1$L,
+						toDisplayString($setup.store.activePresetName || "默认预设"),
+						1
+						/* TEXT */
+					),
+					$setup.store.defaultPresetName ? (openBlock(), createElementBlock(
+						Fragment,
+						{ key: 0 },
+						[_cache[7] || (_cache[7] = createTextVNode(
+							" · 全局默认: ",
+							-1
+							/* CACHED */
+						)), createBaseVNode(
+							"strong",
+							_hoisted_2$H,
+							toDisplayString($setup.store.defaultPresetName),
+							1
+							/* TEXT */
+						)],
+						64
+						/* STABLE_FRAGMENT */
+					)) : (openBlock(), createElementBlock(
+						Fragment,
+						{ key: 1 },
+						[_cache[8] || (_cache[8] = createTextVNode(
+							" · 全局默认: ",
+							-1
+							/* CACHED */
+						)), _cache[9] || (_cache[9] = createBaseVNode(
+							"strong",
+							{ class: "acu-text__value" },
+							"默认预设",
+							-1
+							/* CACHED */
+						))],
+						64
+						/* STABLE_FRAGMENT */
+					)),
+					createVNode($setup["AcuBadge"], { variant: $setup.store.isChatOverridden ? "accent" : "neutral" }, {
+						default: withCtx(() => [createTextVNode(
+							toDisplayString($setup.store.isChatOverridden ? "已覆盖" : "跟随全局"),
+							1
+							/* TEXT */
+						)]),
+						_: 1
+					}, 8, ["variant"])
+				]),
+				_: 1
+			}),
+			createBaseVNode("div", _hoisted_3$B, [
+				createVNode($setup["AcuPresetDropdown"], {
+					items: $setup.presetDropdownItems,
+					"model-value": $setup.store.activePresetName,
+					"default-name": $setup.store.defaultPresetName,
+					"onUpdate:modelValue": _cache[0] || (_cache[0] = ($event) => $setup.store.setActivePresetForCurrentChat($event)),
+					onSetDefault: _cache[1] || (_cache[1] = ($event) => $setup.store.setDefaultPreset($event))
+				}, null, 8, [
+					"items",
+					"model-value",
+					"default-name"
+				]),
+				$props.showEdit ? (openBlock(), createBlock($setup["AcuIconButton"], {
+					key: 0,
+					icon: "fa-solid fa-pen",
+					title: $setup.store.activePreset ? "编辑当前预设" : "从默认新建预设",
+					onClick: $setup.management.openEditCurrent
+				}, null, 8, ["title", "onClick"])) : createCommentVNode("v-if", true),
+				createVNode($setup["AcuFileButton"], {
+					"icon-only": "",
+					title: "导入预设 JSON",
+					accept: "application/json,.json",
+					onFile: $setup.onImportFile
+				}, {
+					default: withCtx(() => [..._cache[11] || (_cache[11] = [createBaseVNode(
+						"i",
+						{ class: "fa-solid fa-download" },
+						null,
+						-1
+						/* CACHED */
+					)])]),
+					_: 1
+				}),
+				createVNode($setup["AcuIconButton"], {
+					icon: "fa-solid fa-gear",
+					title: "管理预设",
+					onClick: $setup.management.openManage
+				}, null, 8, ["onClick"])
+			]),
+			$props.showApiPreset ? (openBlock(), createBlock($setup["AcuFormRow"], {
+				key: 0,
+				label: "剧情推进 API 预设",
+				hint: "默认使用当前的API，选择后仅影响剧情推进功能。"
+			}, {
+				default: withCtx(() => [createVNode($setup["AcuSelect"], {
+					options: $setup.pageApiSelectOptions,
+					"model-value": $setup.store.pageApiPresetName,
+					placeholder: $setup.followActiveApiLabel,
+					"onUpdate:modelValue": _cache[2] || (_cache[2] = ($event) => $setup.store.setPageApiPreset($event))
+				}, null, 8, [
+					"options",
+					"model-value",
+					"placeholder"
+				])]),
+				_: 1
+			})) : createCommentVNode("v-if", true),
+			createVNode($setup["PlotPresetDrawer"], {
+				"is-open": $setup.management.isDrawerOpen.value,
+				view: $setup.management.drawerView.value,
+				title: $setup.management.title.value,
+				error: $setup.management.error.value,
+				"draft-meta": $setup.management.draftMeta,
+				"context-rules": $setup.management.contextRules,
+				"preset-meta": $setup.management.presetMeta.value,
+				"default-preset-name": $setup.store.defaultPresetName,
+				"api-preset-options": $setup.apiPresetOptions,
+				"task-editing": $setup.management.taskEditing,
+				"current-task-api-override": $setup.currentTaskApiOverride,
+				"show-advanced-rates": $setup.devOptions.plotAdvanced.value,
+				rates: $setup.management.draftRates,
+				"before-close": () => $setup.management.confirmIfDirty(),
+				onClose: $setup.management.closeDrawer,
+				onBack: $setup.management.backToManage,
+				onOpenCreate: $setup.management.openCreate,
+				onOpenEdit: _cache[3] || (_cache[3] = ($event) => $setup.management.openEdit($event)),
+				onSetDefault: _cache[4] || (_cache[4] = ($event) => $setup.store.setDefaultPreset($event)),
+				onDelete: $setup.onDelete,
+				onExport: $setup.onExport,
+				onSave: $setup.management.saveDraft,
+				onUpdateName: _cache[5] || (_cache[5] = ($event) => $setup.management.draftMeta.name = $event),
+				onUpdateContextExtractRules: $setup.management.setContextExtractRules,
+				onUpdateContextExcludeRules: $setup.management.setContextExcludeRules,
+				onUpdateTaskApiOverride: $setup.onTaskApiOverride,
+				onUpdateRate: $setup.management.setDraftRate
+			}, null, 8, [
+				"is-open",
+				"view",
+				"title",
+				"error",
+				"draft-meta",
+				"context-rules",
+				"preset-meta",
+				"default-preset-name",
+				"api-preset-options",
+				"task-editing",
+				"current-task-api-override",
+				"show-advanced-rates",
+				"rates",
+				"before-close",
+				"onClose",
+				"onBack",
+				"onOpenCreate",
+				"onSave",
+				"onUpdateContextExtractRules",
+				"onUpdateContextExcludeRules",
+				"onUpdateRate"
+			])
+		]),
+		_: 1
+	}, 8, ["title", "description"]);
+    }
+    var PlotPresetPanel = /*#__PURE__*/ _export_sfc(_sfc_main$L, [["render", _sfc_render$L], ["__scopeId", "data-v-021e572f"]]);
+
+    var _sfc_main$K = /*@__PURE__*/ defineComponent({
+        __name: 'WorldbookSourcePicker',
+        props: {
+            source: {},
+            selectedNames: {},
+            names: {},
+            status: {},
+            error: {},
+            filterable: { type: Boolean, default: true }
+        },
+        emits: ["update:source", "toggle-book"],
+        setup(__props, { expose: __expose, emit: __emit }) {
+            __expose();
+            const props = __props;
+            const emit = __emit;
+            const filter = ref('');
+            const sourceOptions = [
+                { value: 'character', label: '跟随角色卡' },
+                { value: 'manual', label: '手动选择' },
+            ];
+            const selectedSet = computed(() => new Set(props.selectedNames.filter(Boolean)));
+            const filteredNames = computed(() => {
+                const f = filter.value.trim().toLowerCase();
+                if (!f)
+                    return props.names;
+                return props.names.filter(name => name.toLowerCase().includes(f));
+            });
+            function onSourceChange(value) {
+                emit('update:source', value === 'manual' ? 'manual' : 'character');
+            }
+            const __returned__ = { props, emit, filter, sourceOptions, selectedSet, filteredNames, onSourceChange, AcuFormRow, AcuInput, AcuSegmentedControl, AcuText };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-v2-wb-source-picker[data-v-3bd327f1] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\r\n  min-width: 0;\n}\n.acu-v2-wb-source-picker__list[data-v-3bd327f1] {\r\n  min-width: 0;\r\n  max-height: 180px;\r\n  overflow-y: auto;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 8px;\r\n  padding: 8px;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-2);\n}\n.acu-v2-wb-source-picker__list--disabled[data-v-3bd327f1] {\r\n  opacity: 0.65;\n}\n.acu-v2-wb-source-picker__item[data-v-3bd327f1] {\r\n  width: 100%;\r\n  min-width: 0;\r\n  min-height: 32px;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: 10px;\r\n  margin: 0;\r\n  padding: 7px 9px;\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: transparent;\r\n  color: var(--acu-text-2);\r\n  font: inherit;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.4;\r\n  text-align: left;\r\n  cursor: pointer;\r\n  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-v2-wb-source-picker__item[data-v-3bd327f1]:hover:not(:disabled) {\r\n  background: var(--acu-hover-overlay);\r\n  color: var(--acu-text-1);\n}\n.acu-v2-wb-source-picker__item[data-v-3bd327f1]:disabled {\r\n  cursor: not-allowed;\n}\n.acu-v2-wb-source-picker__item[data-v-3bd327f1]:focus-visible {\r\n  outline: none;\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-v2-wb-source-picker__item--selected[data-v-3bd327f1] {\r\n  background: color-mix(in srgb, var(--acu-accent) 14%, transparent);\r\n  color: var(--acu-text-1);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-accent) 42%, transparent);\n}\n.acu-v2-wb-source-picker__item--selected[data-v-3bd327f1]:hover:not(:disabled) {\r\n  background: color-mix(in srgb, var(--acu-accent) 20%, transparent);\r\n  color: var(--acu-text-1);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-accent) 54%, transparent);\n}\n.acu-v2-wb-source-picker__item-label[data-v-3bd327f1] {\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-v2-wb-source-picker__item-check[data-v-3bd327f1] {\r\n  flex-shrink: 0;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-accent);\r\n  opacity: 0;\r\n  transform: scale(0.86);\r\n  transition: opacity 0.15s ease, transform 0.15s ease;\n}\n.acu-v2-wb-source-picker__item--selected .acu-v2-wb-source-picker__item-check[data-v-3bd327f1] {\r\n  opacity: 1;\r\n  transform: scale(1);\n}\n.acu-v2-wb-source-picker__empty[data-v-3bd327f1] {\r\n  padding: 8px 2px;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  text-align: center;\n}\n.acu-v2-wb-source-picker__error[data-v-3bd327f1] {\r\n  margin: 0;\n}\r\n", "src/presentation-v2/components/WorldbookSourcePicker.vue#style-0-3bd327f1");
+    var WorldbookSourcePicker_vue_vue_type_style_index_0_scoped_3bd327f1_lang = null;
+
+    const _hoisted_1$K = { class: "acu-v2-wb-source-picker" };
+    const _hoisted_2$G = [
+	"aria-checked",
+	"disabled",
+	"onClick"
+    ];
+    const _hoisted_3$A = { class: "acu-v2-wb-source-picker__item-label" };
+    const _hoisted_4$v = {
+	key: 0,
+	class: "acu-v2-wb-source-picker__empty"
+    };
+    function _sfc_render$K(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$K, [
+		createVNode($setup["AcuFormRow"], { label: "来源" }, {
+			default: withCtx(() => [createVNode($setup["AcuSegmentedControl"], {
+				"model-value": $props.source,
+				options: $setup.sourceOptions,
+				"aria-label": "世界书来源",
+				"onUpdate:modelValue": $setup.onSourceChange
+			}, null, 8, ["model-value"])]),
+			_: 1
+		}),
+		$props.source === "manual" ? (openBlock(), createElementBlock(
+			Fragment,
+			{ key: 0 },
+			[$props.filterable ? (openBlock(), createBlock($setup["AcuFormRow"], {
+				key: 0,
+				label: "筛选"
+			}, {
+				default: withCtx(() => [createVNode($setup["AcuInput"], {
+					modelValue: $setup.filter,
+					"onUpdate:modelValue": _cache[0] || (_cache[0] = ($event) => $setup.filter = $event),
+					type: "text",
+					placeholder: "筛选世界书..."
+				}, null, 8, ["modelValue"])]),
+				_: 1
+			})) : createCommentVNode("v-if", true), createBaseVNode(
+				"div",
+				{ class: normalizeClass(["acu-v2-wb-source-picker__list", { "acu-v2-wb-source-picker__list--disabled": $props.status === "loading" }]) },
+				[(openBlock(true), createElementBlock(
+					Fragment,
+					null,
+					renderList($setup.filteredNames, (name) => {
+						return openBlock(), createElementBlock("button", {
+							key: name,
+							type: "button",
+							class: normalizeClass(["acu-v2-wb-source-picker__item", { "acu-v2-wb-source-picker__item--selected": $setup.selectedSet.has(name) }]),
+							role: "checkbox",
+							"aria-checked": $setup.selectedSet.has(name) ? "true" : "false",
+							disabled: $props.status === "loading",
+							onClick: ($event) => _ctx.$emit("toggle-book", name, !$setup.selectedSet.has(name))
+						}, [createBaseVNode(
+							"span",
+							_hoisted_3$A,
+							toDisplayString(name),
+							1
+							/* TEXT */
+						), _cache[1] || (_cache[1] = createBaseVNode(
+							"i",
+							{
+								class: "fa-solid fa-check acu-v2-wb-source-picker__item-check",
+								"aria-hidden": "true"
+							},
+							null,
+							-1
+							/* CACHED */
+						))], 10, _hoisted_2$G);
+					}),
+					128
+					/* KEYED_FRAGMENT */
+				)), !$setup.filteredNames.length ? (openBlock(), createElementBlock(
+					"div",
+					_hoisted_4$v,
+					toDisplayString($props.status === "loading" ? "正在加载世界书..." : "无可选世界书"),
+					1
+					/* TEXT */
+				)) : createCommentVNode("v-if", true)],
+				2
+				/* CLASS */
+			)],
+			64
+			/* STABLE_FRAGMENT */
+		)) : createCommentVNode("v-if", true),
+		$props.status === "error" ? (openBlock(), createBlock($setup["AcuText"], {
+			key: 1,
+			variant: "error",
+			class: "acu-v2-wb-source-picker__error"
+		}, {
+			default: withCtx(() => [createTextVNode(
+				toDisplayString($props.error || "加载失败"),
+				1
+				/* TEXT */
+			)]),
+			_: 1
+		})) : createCommentVNode("v-if", true)
+	]);
+    }
+    var WorldbookSourcePicker = /*#__PURE__*/ _export_sfc(_sfc_main$K, [["render", _sfc_render$K], ["__scopeId", "data-v-3bd327f1"]]);
+
+    var _sfc_main$J = /*@__PURE__*/ defineComponent({
+        __name: 'WorldbookEntryList',
+        props: {
+            groups: {},
+            filter: {},
+            loading: { type: Boolean },
+            status: { default: 'success' },
+            error: { default: '' },
+            emptyText: { default: '所选世界书中无可显示的条目。' },
+            showEntryToggle: { type: Boolean, default: true },
+            showSkillifyControls: { type: Boolean, default: true },
+            showAgentTakeoverState: { type: Boolean, default: true },
+            showSkillEditor: { type: Boolean, default: true }
+        },
+        emits: ["toggle", "toggle-skillify", "toggle-group", "save-skill", "delete-skill"],
+        setup(__props, { expose: __expose, emit: __emit }) {
+            __expose();
+            const props = __props;
+            const emit = __emit;
+            const skillEditorOpen = reactive({});
+            const skillDrafts = reactive({});
+            const filteredGroups = computed(() => {
+                const q = props.filter.trim().toLowerCase();
+                if (!q)
+                    return props.groups;
+                return props.groups
+                    .map(g => {
+                    const bookMatch = g.bookName.toLowerCase().includes(q);
+                    if (bookMatch)
+                        return g;
+                    const filtered = g.entries.filter(e => e.label.toLowerCase().includes(q) || e.bookName.toLowerCase().includes(q));
+                    if (filtered.length === 0)
+                        return null;
+                    return { ...g, entries: filtered, expanded: true };
+                })
+                    .filter((g) => g !== null);
+            });
+            function formatGroupMeta(group) {
+                const checkedCount = props.showEntryToggle ? group.entries.filter(entry => entry.checked).length : null;
+                const skillCount = group.entries.filter(entry => entry.hasSkill).length;
+                const controlledCount = group.entries.filter(entry => entry.agentTakeoverState === 'taken_over' || entry.agentTakeoverState === 'final_greenlight').length;
+                const suffix = [
+                    props.showSkillifyControls && skillCount > 0 ? `Skill ${skillCount}` : '',
+                    props.showAgentTakeoverState && controlledCount > 0 ? `接管 ${controlledCount}` : '',
+                ].filter(Boolean).join(' · ');
+                const prefix = checkedCount === null ? `${group.entries.length} 条` : `${checkedCount}/${group.entries.length} 条`;
+                return suffix ? `${prefix} · ${suffix}` : prefix;
+            }
+            function formatAgentTakeoverState(entry) {
+                if (entry.agentTakeoverState === 'initial_disabled')
+                    return '原本关闭';
+                if (entry.isConstant && entry.agentTakeoverState === 'native')
+                    return '';
+                if (entry.agentTakeoverState === 'native')
+                    return '原生逻辑';
+                if (entry.agentTakeoverState === 'skill_ready')
+                    return '可接管';
+                if (entry.agentTakeoverState === 'taken_over')
+                    return 'Agent 接管';
+                if (entry.agentTakeoverState === 'final_greenlight')
+                    return '正文放行';
+                return '';
+            }
+            function onToggle(bookName, uid, checked) {
+                emit('toggle', bookName, uid, checked);
+            }
+            function getEntryKey(entry) {
+                return `${entry.bookName}::${entry.uid}`;
+            }
+            function buildSkillDraft(entry) {
+                return {
+                    description: entry.skillMeta?.description ?? '',
+                    triggerWhen: entry.skillMeta?.triggerWhen ?? '',
+                };
+            }
+            function getSkillDraft(entry) {
+                const key = getEntryKey(entry);
+                if (!skillDrafts[key])
+                    skillDrafts[key] = buildSkillDraft(entry);
+                return skillDrafts[key];
+            }
+            function patchSkillDraft(entry, patch) {
+                const key = getEntryKey(entry);
+                skillDrafts[key] = { ...getSkillDraft(entry), ...patch };
+            }
+            function isSkillEditorOpen(entry) {
+                return !!skillEditorOpen[getEntryKey(entry)];
+            }
+            function toggleSkillEditor(entry) {
+                const key = getEntryKey(entry);
+                skillEditorOpen[key] = !skillEditorOpen[key];
+                if (skillEditorOpen[key])
+                    skillDrafts[key] = buildSkillDraft(entry);
+            }
+            function saveSkill(entry) {
+                emit('save-skill', entry.bookName, entry.uid, { ...getSkillDraft(entry) });
+            }
+            const __returned__ = { props, emit, skillEditorOpen, skillDrafts, filteredGroups, formatGroupMeta, formatAgentTakeoverState, onToggle, getEntryKey, buildSkillDraft, getSkillDraft, patchSkillDraft, isSkillEditorOpen, toggleSkillEditor, saveSkill, AcuButton, AcuCheckbox, AcuDisclosureGroup, AcuTextarea };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-v2-wb-entries[data-v-c56bd63a] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-v2-wb-entries__status[data-v-c56bd63a] {\r\n  padding: 8px 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-wb-entries__status--error[data-v-c56bd63a] { color: var(--acu-danger);\n}\n.acu-v2-wb-entry-item[data-v-c56bd63a] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) auto;\r\n  gap: 6px 8px;\r\n  align-items: center;\r\n  padding: 3px 10px;\r\n  transition: background 0.08s ease;\n}\n.acu-v2-wb-entry-item[data-v-c56bd63a]:hover { background: var(--acu-hover-overlay);\n}\n.acu-v2-wb-entry-item--disabled[data-v-c56bd63a] {\r\n  opacity: 0.5;\n}\n.acu-v2-wb-entry-item__actions[data-v-c56bd63a] {\r\n  display: inline-flex;\r\n  align-items: center;\r\n  gap: 6px;\n}\n.acu-v2-wb-entry-item__label[data-v-c56bd63a] {\r\n  min-width: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  overflow-wrap: anywhere;\r\n  display: -webkit-box;\r\n  -webkit-line-clamp: 2;\r\n  -webkit-box-orient: vertical;\r\n  overflow: hidden;\n}\r\n\r\n/* 剧情页 / 填表页走 AcuCheckbox 分支；:deep 把夹断锁在本列表内，避免改动全局组件 */\n.acu-v2-wb-entry-item[data-v-c56bd63a] .acu-checkbox__label {\r\n  min-width: 0;\r\n  overflow-wrap: anywhere;\r\n  display: -webkit-box;\r\n  -webkit-line-clamp: 2;\r\n  -webkit-box-orient: vertical;\r\n  overflow: hidden;\n}\n.acu-v2-wb-entry-item__skill-badge[data-v-c56bd63a] {\r\n  border-radius: 999px;\r\n  padding: 1px 6px;\r\n  background: color-mix(in srgb, var(--acu-accent) 14%, transparent);\r\n  color: var(--acu-accent);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-v2-wb-entry-item__state-badge[data-v-c56bd63a] {\r\n  border-radius: 999px;\r\n  padding: 1px 6px;\r\n  background: color-mix(in srgb, var(--acu-warning) 14%, transparent);\r\n  color: var(--acu-warning);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-v2-wb-entry-skill[data-v-c56bd63a] {\r\n  grid-column: 1 / -1;\r\n  display: grid;\r\n  gap: 8px;\r\n  margin: 4px 0 6px 24px;\r\n  padding: 8px;\r\n  border: 1px solid var(--acu-border-1);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-1);\n}\n.acu-v2-wb-entry-skill__actions[data-v-c56bd63a] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  flex-wrap: wrap;\n}\n@media (max-width: 640px) {\n.acu-v2-wb-entry-item[data-v-c56bd63a] {\r\n    grid-template-columns: 1fr;\n}\n.acu-v2-wb-entry-item__actions[data-v-c56bd63a] {\r\n    justify-content: flex-start;\r\n    padding-left: 24px;\n}\n.acu-v2-wb-entry-skill[data-v-c56bd63a] {\r\n    margin-left: 0;\n}\n}\r\n", "src/presentation-v2/components/WorldbookEntryList.vue#style-0-c56bd63a");
+    var WorldbookEntryList_vue_vue_type_style_index_0_scoped_c56bd63a_lang = null;
+
+    const _hoisted_1$J = { class: "acu-v2-wb-entries" };
+    const _hoisted_2$F = {
+	key: 0,
+	class: "acu-v2-wb-entries__status"
+    };
+    const _hoisted_3$z = {
+	key: 1,
+	class: "acu-v2-wb-entries__status acu-v2-wb-entries__status--error",
+	role: "alert"
+    };
+    const _hoisted_4$u = {
+	key: 2,
+	class: "acu-v2-wb-entries__status"
+    };
+    const _hoisted_5$p = ["title"];
+    const _hoisted_6$o = {
+	key: 2,
+	class: "acu-v2-wb-entry-item__actions"
+    };
+    const _hoisted_7$l = {
+	key: 0,
+	class: "acu-v2-wb-entry-item__skill-badge"
+    };
+    const _hoisted_8$l = {
+	key: 1,
+	class: "acu-v2-wb-entry-item__state-badge"
+    };
+    const _hoisted_9$i = {
+	key: 2,
+	class: "acu-v2-wb-entry-item__state-badge"
+    };
+    const _hoisted_10$h = {
+	key: 3,
+	class: "acu-v2-wb-entry-skill"
+    };
+    const _hoisted_11$h = { class: "acu-v2-wb-entry-skill__actions" };
+    function _sfc_render$J(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$J, [$props.loading ? (openBlock(), createElementBlock("div", _hoisted_2$F, "正在加载条目...")) : $props.status === "error" ? (openBlock(), createElementBlock(
+		"div",
+		_hoisted_3$z,
+		toDisplayString($props.error || "加载条目失败"),
+		1
+		/* TEXT */
+	)) : $props.groups.length === 0 ? (openBlock(), createElementBlock(
+		"div",
+		_hoisted_4$u,
+		toDisplayString($props.emptyText),
+		1
+		/* TEXT */
+	)) : (openBlock(true), createElementBlock(
+		Fragment,
+		{ key: 3 },
+		renderList($setup.filteredGroups, (group, index) => {
+			return openBlock(), createBlock($setup["AcuDisclosureGroup"], {
+				key: group.bookName,
+				"root-class": "acu-v2-wb-entry-group",
+				"header-class": "acu-v2-wb-entry-group__header",
+				"body-class": "acu-v2-wb-entry-group__body",
+				"chevron-class": "acu-v2-wb-entry-group__chevron",
+				"label-class": "acu-v2-wb-entry-group__name",
+				"meta-class": "acu-v2-wb-entry-group__meta",
+				label: group.bookName,
+				meta: $setup.formatGroupMeta(group),
+				expanded: group.expanded,
+				"body-id": `acu-v2-wb-entry-group-${index}`,
+				"body-mode": "if",
+				"body-max-height": "280px",
+				onToggle: ($event) => _ctx.$emit("toggle-group", group.bookName)
+			}, {
+				default: withCtx(() => [(openBlock(true), createElementBlock(
+					Fragment,
+					null,
+					renderList(group.entries, (entry) => {
+						return openBlock(), createElementBlock(
+							"div",
+							{
+								key: `${group.bookName}-${entry.uid}`,
+								class: normalizeClass(["acu-v2-wb-entry-item", { "acu-v2-wb-entry-item--disabled": entry.disabled }])
+							},
+							[
+								$props.showEntryToggle ? (openBlock(), createBlock($setup["AcuCheckbox"], {
+									key: 0,
+									"model-value": entry.checked,
+									label: entry.label,
+									title: entry.label,
+									disabled: entry.disabled,
+									"onUpdate:modelValue": ($event) => $setup.onToggle(entry.bookName, entry.uid, $event)
+								}, null, 8, [
+									"model-value",
+									"label",
+									"title",
+									"disabled",
+									"onUpdate:modelValue"
+								])) : (openBlock(), createElementBlock("div", {
+									key: 1,
+									class: "acu-v2-wb-entry-item__label",
+									title: entry.label
+								}, toDisplayString(entry.label), 9, _hoisted_5$p)),
+								$props.showSkillifyControls || entry.isConstant || $props.showAgentTakeoverState && $setup.formatAgentTakeoverState(entry) ? (openBlock(), createElementBlock("div", _hoisted_6$o, [
+									$props.showSkillifyControls && entry.skillMeta ? (openBlock(), createElementBlock("span", _hoisted_7$l, "Skill")) : createCommentVNode("v-if", true),
+									entry.isConstant ? (openBlock(), createElementBlock("span", _hoisted_8$l, "常量")) : createCommentVNode("v-if", true),
+									$props.showAgentTakeoverState && $setup.formatAgentTakeoverState(entry) ? (openBlock(), createElementBlock(
+										"span",
+										_hoisted_9$i,
+										toDisplayString($setup.formatAgentTakeoverState(entry)),
+										1
+										/* TEXT */
+									)) : createCommentVNode("v-if", true),
+									$props.showSkillifyControls ? (openBlock(), createBlock($setup["AcuCheckbox"], {
+										key: 3,
+										"model-value": entry.skillifySelected,
+										label: "Skill 化",
+										disabled: entry.disabled || !entry.skillifySelectable,
+										"onUpdate:modelValue": ($event) => _ctx.$emit("toggle-skillify", entry.bookName, entry.uid, $event)
+									}, null, 8, [
+										"model-value",
+										"disabled",
+										"onUpdate:modelValue"
+									])) : createCommentVNode("v-if", true),
+									$props.showSkillifyControls && $props.showSkillEditor ? (openBlock(), createBlock($setup["AcuButton"], {
+										key: 4,
+										size: "sm",
+										onClick: ($event) => $setup.toggleSkillEditor(entry)
+									}, {
+										default: withCtx(() => [createTextVNode(
+											toDisplayString($setup.isSkillEditorOpen(entry) ? "收起 Skill" : "编辑 Skill"),
+											1
+											/* TEXT */
+										)]),
+										_: 2
+									}, 1032, ["onClick"])) : createCommentVNode("v-if", true)
+								])) : createCommentVNode("v-if", true),
+								$props.showSkillEditor && $setup.isSkillEditorOpen(entry) ? (openBlock(), createElementBlock("div", _hoisted_10$h, [
+									createVNode($setup["AcuTextarea"], {
+										"model-value": $setup.getSkillDraft(entry).description,
+										label: "Skill 描述",
+										placeholder: "描述该世界书条目的用途，留空则不写入 Skill 元数据。",
+										rows: 2,
+										"max-rows": 6,
+										"auto-resize": "",
+										"onUpdate:modelValue": ($event) => $setup.patchSkillDraft(entry, { description: String($event) })
+									}, null, 8, ["model-value", "onUpdate:modelValue"]),
+									createVNode($setup["AcuTextarea"], {
+										"model-value": $setup.getSkillDraft(entry).triggerWhen,
+										label: "触发时机",
+										placeholder: "说明 Agent 何时应选择该条目，留空则不写入 Skill 元数据。",
+										rows: 2,
+										"max-rows": 6,
+										"auto-resize": "",
+										"onUpdate:modelValue": ($event) => $setup.patchSkillDraft(entry, { triggerWhen: String($event) })
+									}, null, 8, ["model-value", "onUpdate:modelValue"]),
+									createBaseVNode("div", _hoisted_11$h, [createVNode($setup["AcuButton"], {
+										size: "sm",
+										variant: "primary",
+										onClick: ($event) => $setup.saveSkill(entry)
+									}, {
+										default: withCtx(() => [..._cache[0] || (_cache[0] = [createTextVNode(
+											"保存 Skill",
+											-1
+											/* CACHED */
+										)])]),
+										_: 1
+									}, 8, ["onClick"]), createVNode($setup["AcuButton"], {
+										size: "sm",
+										variant: "danger",
+										onClick: ($event) => _ctx.$emit("delete-skill", entry.bookName, entry.uid)
+									}, {
+										default: withCtx(() => [..._cache[1] || (_cache[1] = [createTextVNode(
+											"删除 Skill",
+											-1
+											/* CACHED */
+										)])]),
+										_: 1
+									}, 8, ["onClick"])])
+								])) : createCommentVNode("v-if", true)
+							],
+							2
+							/* CLASS */
+						);
+					}),
+					128
+					/* KEYED_FRAGMENT */
+				))]),
+				_: 2
+			}, 1032, [
+				"label",
+				"meta",
+				"expanded",
+				"body-id",
+				"onToggle"
+			]);
+		}),
+		128
+		/* KEYED_FRAGMENT */
+	))]);
+    }
+    var WorldbookEntryList = /*#__PURE__*/ _export_sfc(_sfc_main$J, [["render", _sfc_render$J], ["__scopeId", "data-v-c56bd63a"]]);
+
+    var _sfc_main$I = /*@__PURE__*/ defineComponent({
+        __name: 'WorldbookEntryToolbar',
+        props: {
+            filter: {},
+            showEntrySelectionControls: { type: Boolean, default: true },
+            showSkillifyControls: { type: Boolean, default: false }
+        },
+        emits: ["update:filter", "select-all", "deselect-all", "skillify-select-all", "skillify-deselect-all", "skillify-selected"],
+        setup(__props, { expose: __expose }) {
+            __expose();
+            const __returned__ = { AcuButton, AcuFormRow, AcuInput };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-v2-wb-entry-toolbar[data-v-7cc3dea8] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 6px;\r\n  margin-top: 10px;\r\n  padding-top: 10px;\r\n  flex-wrap: wrap;\n}\n.acu-v2-wb-entry-toolbar__filter[data-v-7cc3dea8] {\r\n  flex: 1;\r\n  min-width: 160px;\n}\r\n", "src/presentation-v2/components/WorldbookEntryToolbar.vue#style-0-7cc3dea8");
+    var WorldbookEntryToolbar_vue_vue_type_style_index_0_scoped_7cc3dea8_lang = null;
+
+    const _hoisted_1$I = { class: "acu-v2-wb-entry-toolbar" };
+    function _sfc_render$I(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$I, [
+		$props.showEntrySelectionControls ? (openBlock(), createElementBlock(
+			Fragment,
+			{ key: 0 },
+			[createVNode($setup["AcuButton"], { onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("select-all")) }, {
+				default: withCtx(() => [..._cache[6] || (_cache[6] = [createTextVNode(
+					"全选",
+					-1
+					/* CACHED */
+				)])]),
+				_: 1
+			}), createVNode($setup["AcuButton"], { onClick: _cache[1] || (_cache[1] = ($event) => _ctx.$emit("deselect-all")) }, {
+				default: withCtx(() => [..._cache[7] || (_cache[7] = [createTextVNode(
+					"全不选",
+					-1
+					/* CACHED */
+				)])]),
+				_: 1
+			})],
+			64
+			/* STABLE_FRAGMENT */
+		)) : createCommentVNode("v-if", true),
+		$props.showSkillifyControls ? (openBlock(), createElementBlock(
+			Fragment,
+			{ key: 1 },
+			[
+				createVNode($setup["AcuButton"], { onClick: _cache[2] || (_cache[2] = ($event) => _ctx.$emit("skillify-select-all")) }, {
+					default: withCtx(() => [..._cache[8] || (_cache[8] = [createTextVNode(
+						"Skill 全选",
+						-1
+						/* CACHED */
+					)])]),
+					_: 1
+				}),
+				createVNode($setup["AcuButton"], { onClick: _cache[3] || (_cache[3] = ($event) => _ctx.$emit("skillify-deselect-all")) }, {
+					default: withCtx(() => [..._cache[9] || (_cache[9] = [createTextVNode(
+						"Skill 全不选",
+						-1
+						/* CACHED */
+					)])]),
+					_: 1
+				}),
+				createVNode($setup["AcuButton"], {
+					variant: "primary",
+					onClick: _cache[4] || (_cache[4] = ($event) => _ctx.$emit("skillify-selected"))
+				}, {
+					default: withCtx(() => [..._cache[10] || (_cache[10] = [createTextVNode(
+						"对所选 Skill 化",
+						-1
+						/* CACHED */
+					)])]),
+					_: 1
+				})
+			],
+			64
+			/* STABLE_FRAGMENT */
+		)) : createCommentVNode("v-if", true),
+		createVNode($setup["AcuFormRow"], { class: "acu-v2-wb-entry-toolbar__filter" }, {
+			default: withCtx(() => [createVNode($setup["AcuInput"], {
+				"model-value": $props.filter,
+				type: "text",
+				placeholder: "搜索条目...",
+				"onUpdate:modelValue": _cache[5] || (_cache[5] = ($event) => _ctx.$emit("update:filter", String($event)))
+			}, null, 8, ["model-value"])]),
+			_: 1
+		})
+	]);
+    }
+    var WorldbookEntryToolbar = /*#__PURE__*/ _export_sfc(_sfc_main$I, [["render", _sfc_render$I], ["__scopeId", "data-v-7cc3dea8"]]);
+
+    var _sfc_main$H = /*@__PURE__*/ defineComponent({
+        __name: 'WorldbookEntryPickerBody',
+        props: {
+            source: {},
+            selectedNames: {},
+            names: {},
+            selectorStatus: {},
+            selectorError: {},
+            currentLabel: {},
+            filter: {},
+            groups: {},
+            loading: { type: Boolean },
+            entryStatus: { default: 'success' },
+            entryError: { default: '' },
+            emptyText: { default: '所选世界书中无可显示的条目。' },
+            filterable: { type: Boolean, default: true }
+        },
+        emits: ["update:source", "toggle-book", "update:filter", "select-all", "deselect-all", "toggle", "toggle-group"],
+        setup(__props, { expose: __expose }) {
+            __expose();
+            const __returned__ = { WorldbookSourcePicker, WorldbookEntryList, WorldbookEntryToolbar };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-v2-wb-entry-picker[data-v-648a8ff3] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\r\n  min-width: 0;\n}\n.acu-v2-wb-entry-picker__hint[data-v-648a8ff3] {\r\n  margin: 0;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-text-3);\n}\n.acu-v2-wb-entry-picker__hint strong[data-v-648a8ff3] {\r\n  color: var(--acu-text-1);\r\n  font-weight: 500;\n}\r\n\r\n\r\n", "src/presentation-v2/components/WorldbookEntryPickerBody.vue#style-0-648a8ff3");
+    var WorldbookEntryPickerBody_vue_vue_type_style_index_0_scoped_648a8ff3_lang = null;
+
+    const _hoisted_1$H = { class: "acu-v2-wb-entry-picker" };
+    const _hoisted_2$E = { class: "acu-v2-wb-entry-picker__hint" };
+    function _sfc_render$H(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$H, [
+		createVNode($setup["WorldbookSourcePicker"], {
+			source: $props.source,
+			"selected-names": $props.selectedNames,
+			names: $props.names,
+			status: $props.selectorStatus,
+			error: $props.selectorError,
+			filterable: $props.filterable,
+			"onUpdate:source": _cache[0] || (_cache[0] = ($event) => _ctx.$emit("update:source", $event)),
+			onToggleBook: _cache[1] || (_cache[1] = (name, checked) => _ctx.$emit("toggle-book", name, checked))
+		}, null, 8, [
+			"source",
+			"selected-names",
+			"names",
+			"status",
+			"error",
+			"filterable"
+		]),
+		createBaseVNode("p", _hoisted_2$E, [_cache[7] || (_cache[7] = createTextVNode(
+			" 目前已选: ",
+			-1
+			/* CACHED */
+		)), createBaseVNode(
+			"strong",
+			null,
+			toDisplayString($props.currentLabel),
+			1
+			/* TEXT */
+		)]),
+		createVNode($setup["WorldbookEntryToolbar"], {
+			filter: $props.filter,
+			"show-skillify-controls": false,
+			"onUpdate:filter": _cache[2] || (_cache[2] = ($event) => _ctx.$emit("update:filter", $event)),
+			onSelectAll: _cache[3] || (_cache[3] = ($event) => _ctx.$emit("select-all")),
+			onDeselectAll: _cache[4] || (_cache[4] = ($event) => _ctx.$emit("deselect-all"))
+		}, null, 8, ["filter"]),
+		createVNode($setup["WorldbookEntryList"], {
+			groups: $props.groups,
+			filter: $props.filter,
+			loading: $props.loading,
+			status: $props.entryStatus,
+			error: $props.entryError,
+			"empty-text": $props.emptyText,
+			"show-skillify-controls": false,
+			"show-agent-takeover-state": false,
+			"show-skill-editor": false,
+			onToggle: _cache[5] || (_cache[5] = (bookName, uid, checked) => _ctx.$emit("toggle", bookName, uid, checked)),
+			onToggleGroup: _cache[6] || (_cache[6] = ($event) => _ctx.$emit("toggle-group", $event))
+		}, null, 8, [
+			"groups",
+			"filter",
+			"loading",
+			"status",
+			"error",
+			"empty-text"
+		])
+	]);
+    }
+    var WorldbookEntryPickerBody = /*#__PURE__*/ _export_sfc(_sfc_main$H, [["render", _sfc_render$H], ["__scopeId", "data-v-648a8ff3"]]);
+
+    /**
+     * useWorldbookSelector — D8 业务组件配套数据层（阶段 2 / D21.3）
+     *
+     * 列出宿主全部世界书 + 当前角色卡主世界书。`.vue` 不直接 import service。
+     */
+    function useWorldbookSelector() {
+        const names = shallowRef([]);
+        const charPrimary = ref(null);
+        const status = ref('idle');
+        const error = ref('');
+        async function refresh() {
+            status.value = 'loading';
+            error.value = '';
+            try {
+                const [list, primary] = await Promise.all([
+                    getWorldbookNames_ACU().catch(() => []),
+                    getCurrentCharPrimaryLorebook_ACU().catch(() => null),
+                ]);
+                names.value = Array.isArray(list) ? list.slice() : [];
+                charPrimary.value = typeof primary === 'string' && primary ? primary : null;
+                status.value = 'success';
+            }
+            catch (e) {
+                logError_ACU('[ACU-V2] useWorldbookSelector refresh failed', e);
+                error.value = e?.message ?? '世界书列表加载失败';
+                status.value = 'error';
+            }
+        }
+        return { names, charPrimary, status, error, refresh };
+    }
+
+    /**
+     * usePlotWorldbookConfig — 剧情推进世界书配置（D23.1）
+     *
+     * settings_ACU.plotSettings.plotWorldbookConfig 形如：
+     *   { source: 'character'|'manual', manualSelection: string[], enabledEntries: {...} }
+     *
+     * 手动模式支持多本世界书，按 manualSelection 的数组顺序持久化。
+     */
+    function ensureConfig() {
+        if (!settings_ACU.plotSettings || typeof settings_ACU.plotSettings !== 'object') {
+            settings_ACU.plotSettings = {};
+        }
+        const plot = settings_ACU.plotSettings;
+        if (!plot.plotWorldbookConfig || typeof plot.plotWorldbookConfig !== 'object') {
+            plot.plotWorldbookConfig = { source: 'character', manualSelection: [], enabledEntries: {} };
+        }
+        const cfg = plot.plotWorldbookConfig;
+        if (cfg.source !== 'manual')
+            cfg.source = 'character';
+        if (!Array.isArray(cfg.manualSelection))
+            cfg.manualSelection = [];
+        if (!cfg.enabledEntries || typeof cfg.enabledEntries !== 'object')
+            cfg.enabledEntries = {};
+        return cfg;
+    }
+    function normalizeSelection$1(names) {
+        if (!Array.isArray(names))
+            return [];
+        const result = [];
+        for (const name of names) {
+            const trimmed = String(name || '').trim();
+            if (trimmed && !result.includes(trimmed))
+                result.push(trimmed);
+        }
+        return result;
+    }
+    function usePlotWorldbookConfig() {
+        // 用 ref 复制响应式快照（settings_ACU 不是 Vue reactive）
+        const source = ref('character');
+        const manualSelection = ref([]);
+        const manualBook = computed(() => manualSelection.value[0] || '');
+        function refreshFromSettings() {
+            const cfg = ensureConfig();
+            cfg.manualSelection = normalizeSelection$1(cfg.manualSelection);
+            source.value = cfg.source;
+            manualSelection.value = [...cfg.manualSelection];
+        }
+        function setSource(next) {
+            const cfg = ensureConfig();
+            cfg.source = next;
+            source.value = next;
+            saveSettings_ACU();
+        }
+        function setManualSelection(names) {
+            const cfg = ensureConfig();
+            const next = normalizeSelection$1(names);
+            cfg.source = 'manual';
+            cfg.manualSelection = next;
+            source.value = 'manual';
+            manualSelection.value = [...next];
+            saveSettings_ACU();
+        }
+        function toggleManualBook(name, checked) {
+            const trimmed = String(name || '').trim();
+            if (!trimmed)
+                return;
+            const current = normalizeSelection$1(manualSelection.value);
+            const next = checked
+                ? (current.includes(trimmed) ? current : [...current, trimmed])
+                : current.filter(item => item !== trimmed);
+            setManualSelection(next);
+        }
+        async function resolveBookNames() {
+            const cfg = ensureConfig();
+            if (cfg.source === 'manual') {
+                return normalizeSelection$1(cfg.manualSelection);
+            }
+            const binding = await getCurrentCharacterWorldbookBinding_ACU();
+            return binding.orderedNames;
+        }
+        return {
+            source,
+            manualSelection,
+            manualBook,
+            refreshFromSettings,
+            setSource,
+            setManualSelection,
+            toggleManualBook,
+            resolveBookNames,
+        };
+    }
+
+    const PAGE_BLOCKED_KEYWORDS_ACU = [
+        '规则', '思维链', 'cot', 'MVU', 'mvu', '变量', '状态',
+        'Status', 'Rule', 'rule', '检定', '判断', '叙事', '文风',
+        'InitVar', '格式',
+    ];
+    function buildWorldbookSnapshotEntryIndexByBook_ACU(snapshot) {
+        const result = new Map();
+        if (snapshot.active !== true)
+            return result;
+        for (const [bookName, entries] of Object.entries(snapshot.books || {})) {
+            if (!Array.isArray(entries))
+                continue;
+            const entriesByUid = new Map(entries
+                .filter((entry) => !!entry
+                && entry.takeoverStatus !== 'pending'
+                && String(entry.uid ?? '') !== '')
+                .map(entry => [String(entry.uid), entry]));
+            if (entriesByUid.size > 0)
+                result.set(bookName, entriesByUid);
+        }
+        return result;
+    }
+    function getWorldbookSnapshotEntryForDisplay_ACU(snapshotEntryIndexByBook, bookName, entry) {
+        return snapshotEntryIndexByBook.get(bookName)?.get(String(entry?.uid));
+    }
+    function buildWorldbookEntryDisplayView_ACU(entry, snapshotEntry) {
+        const enabled = snapshotEntry ? snapshotEntry.previousEnabled : entry?.enabled !== false;
+        const type = snapshotEntry?.previousType ?? String(entry?.type || '');
+        const keys = snapshotEntry?.previousKeys ?? (Array.isArray(entry?.keys)
+            ? entry.keys
+            : (entry?.key ? [entry.key] : []));
+        return {
+            enabled,
+            type,
+            keys,
+            isConstant: type.trim().toLowerCase() === 'constant',
+            disabled: !enabled,
+        };
+    }
+    function isWorldbookEntryVisibleForPageUI_ACU(bookName, entry, snapshotEntryIndexByBook) {
+        if (getWorldbookSnapshotEntryForDisplay_ACU(snapshotEntryIndexByBook, bookName, entry))
+            return true;
+        const comment = String(entry?.comment || entry?.name || '');
+        const commentWithoutIsolationPrefix = comment.replace(/^ACU-\[[^\]]+\]-/, '');
+        if (!commentWithoutIsolationPrefix.trim().startsWith('外部导入-')) {
+            const normalized = commentWithoutIsolationPrefix.replace(/^外部导入-(?:[^-]+-)?/, '');
+            if (normalized.startsWith('TavernDB-ACU-OutlineTable')
+                || normalized.startsWith('TavernDB-ACU-')
+                || normalized.startsWith('重要人物条目')
+                || normalized.startsWith('总结条目')
+                || normalized.startsWith('小总结条目'))
+                return false;
+        }
+        return !PAGE_BLOCKED_KEYWORDS_ACU.some(keyword => comment.includes(keyword));
+    }
+    function resolveWorldbookEntryTakeoverState_ACU(entry, hasSkill, snapshotEntry) {
+        if (snapshotEntry) {
+            return entry?.enabled !== false && String(entry?.type || '').trim().toLowerCase() === 'constant'
+                ? 'final_greenlight'
+                : 'taken_over';
+        }
+        if (entry?.enabled === false)
+            return 'initial_disabled';
+        return hasSkill ? 'skill_ready' : 'native';
+    }
+
+    /**
+     * usePlotWorldbookEntries — 剧情推进世界书条目级启用/禁用
+     *
+     * 从 service 层加载条目列表，过滤掉数据库生成条目和屏蔽词条目，
+     * 暴露 reactive 分组列表 + selectAll / deselectAll / toggleEntry，
+     * 持久化到 plotWorldbookConfig.enabledEntries。
+     */
+    function buildWorldbookEntryLabel_ACU(entry) {
+        return buildWorldbookEntryDisplayLabel_ACU(String(entry?.comment || entry?.name || ''), entry?.uid);
+    }
+    function ensurePlotWorldbookConfig() {
+        if (!settings_ACU.plotSettings || typeof settings_ACU.plotSettings !== 'object') {
+            settings_ACU.plotSettings = {};
+        }
+        const plot = settings_ACU.plotSettings;
+        if (!plot.plotWorldbookConfig || typeof plot.plotWorldbookConfig !== 'object') {
+            plot.plotWorldbookConfig = { source: 'character', manualSelection: [], enabledEntries: {} };
+        }
+        const cfg = plot.plotWorldbookConfig;
+        if (!cfg.enabledEntries || typeof cfg.enabledEntries !== 'object') {
+            cfg.enabledEntries = {};
+        }
+        return cfg;
+    }
+    function usePlotWorldbookEntries() {
+        const groups = shallowRef([]);
+        const status = ref('idle');
+        const error = ref('');
+        async function loadEntries(bookNames) {
+            const unique = [...new Set(bookNames.filter(Boolean))];
+            if (unique.length === 0) {
+                groups.value = [];
+                status.value = 'success';
+                return;
+            }
+            status.value = 'loading';
+            error.value = '';
+            try {
+                const cfg = ensurePlotWorldbookConfig();
+                const snapshot = await refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU();
+                const entriesMap = await getLorebookEntriesByNames_ACU(unique);
+                const snapshotEntryIndexByBook = buildWorldbookSnapshotEntryIndexByBook_ACU(snapshot);
+                let settingsChanged = false;
+                const result = [];
+                for (const bookName of unique) {
+                    const bookEntries = Array.isArray(entriesMap[bookName]) ? entriesMap[bookName] : [];
+                    const visibleBookEntries = bookEntries.filter((entry) => isWorldbookEntryVisibleForPageUI_ACU(bookName, entry, snapshotEntryIndexByBook));
+                    const visibleUidSet = new Set(visibleBookEntries.map((entry) => String(entry?.uid)));
+                    if (typeof cfg.enabledEntries[bookName] === 'undefined') {
+                        cfg.enabledEntries[bookName] = visibleBookEntries
+                            .filter((entry) => buildWorldbookEntryDisplayView_ACU(entry, getWorldbookSnapshotEntryForDisplay_ACU(snapshotEntryIndexByBook, bookName, entry)).enabled)
+                            .map((entry) => entry.uid);
+                        settingsChanged = true;
+                    }
+                    else if (Array.isArray(cfg.enabledEntries[bookName])) {
+                        const cleanedEnabledEntries = cfg.enabledEntries[bookName]
+                            .filter((uid) => visibleUidSet.has(String(uid)));
+                        if (cleanedEnabledEntries.length !== cfg.enabledEntries[bookName].length) {
+                            cfg.enabledEntries[bookName] = cleanedEnabledEntries;
+                            settingsChanged = true;
+                        }
+                    }
+                    const enabledList = Array.isArray(cfg.enabledEntries[bookName])
+                        ? cfg.enabledEntries[bookName]
+                        : [];
+                    const buildItems = (entries) => entries.map((entry) => {
+                        const comment = String(entry?.comment || entry?.name || '');
+                        const skillMeta = parseWorldbookSkillMetaFromComment_ACU(comment);
+                        const snapshotEntry = getWorldbookSnapshotEntryForDisplay_ACU(snapshotEntryIndexByBook, bookName, entry);
+                        const displayView = buildWorldbookEntryDisplayView_ACU(entry, snapshotEntry);
+                        return {
+                            uid: entry.uid,
+                            bookName,
+                            label: buildWorldbookEntryLabel_ACU(entry),
+                            comment,
+                            skillMeta,
+                            hasSkill: !!skillMeta,
+                            agentTakeoverState: resolveWorldbookEntryTakeoverState_ACU(entry, !!skillMeta, snapshotEntry),
+                            checked: enabledList.includes(entry.uid),
+                            skillifySelected: false,
+                            skillifySelectable: false,
+                            isConstant: displayView.isConstant,
+                            disabled: displayView.disabled,
+                        };
+                    });
+                    const visible = buildItems(visibleBookEntries);
+                    if (visible.length > 0) {
+                        result.push({ bookName, entries: visible, expanded: false });
+                    }
+                }
+                if (settingsChanged)
+                    saveSettings_ACU();
+                groups.value = result;
+                status.value = 'success';
+            }
+            catch (e) {
+                logError_ACU('[ACU-V2] usePlotWorldbookEntries loadEntries failed', e);
+                error.value = e?.message ?? '加载条目失败';
+                status.value = 'error';
+            }
+        }
+        function reportLoadFailure() {
+            error.value = '加载角色世界书失败';
+            status.value = 'error';
+        }
+        function toggleEntry(bookName, uid, checked) {
+            const cfg = ensurePlotWorldbookConfig();
+            if (!Array.isArray(cfg.enabledEntries[bookName])) {
+                cfg.enabledEntries[bookName] = [];
+            }
+            const list = cfg.enabledEntries[bookName];
+            const idx = list.indexOf(uid);
+            if (checked && idx === -1)
+                list.push(uid);
+            else if (!checked && idx !== -1)
+                list.splice(idx, 1);
+            saveSettings_ACU();
+            groups.value = groups.value.map(g => {
+                if (g.bookName !== bookName)
+                    return g;
+                return {
+                    ...g,
+                    entries: g.entries.map(e => e.uid === uid ? { ...e, checked } : e),
+                };
+            });
+        }
+        function selectAll() {
+            const cfg = ensurePlotWorldbookConfig();
+            for (const group of groups.value) {
+                cfg.enabledEntries[group.bookName] = group.entries
+                    .filter(e => !e.disabled)
+                    .map(e => e.uid);
+            }
+            saveSettings_ACU();
+            groups.value = groups.value.map(g => ({
+                ...g,
+                entries: g.entries.map(e => ({ ...e, checked: !e.disabled })),
+            }));
+        }
+        function deselectAll() {
+            const cfg = ensurePlotWorldbookConfig();
+            for (const group of groups.value) {
+                cfg.enabledEntries[group.bookName] = [];
+            }
+            saveSettings_ACU();
+            groups.value = groups.value.map(g => ({
+                ...g,
+                entries: g.entries.map(e => ({ ...e, checked: false })),
+            }));
+        }
+        function toggleGroupExpanded(bookName) {
+            groups.value = groups.value.map(g => {
+                if (g.bookName !== bookName)
+                    return g;
+                return { ...g, expanded: !g.expanded };
+            });
+        }
+        return {
+            groups,
+            status,
+            error,
+            loadEntries,
+            reportLoadFailure,
+            toggleEntry,
+            selectAll,
+            deselectAll,
+            toggleGroupExpanded,
+        };
+    }
+
+    const FILL_MODE_INTROS = {
+        classic: {
+            label: '经典表格模式',
+            summary: '沿用稳定的经典填表流程，把纪要交给大总结逐步归纳，是新安装的默认模式。',
+            pros: '快速无感，不需要额外配置，也不会增加请求次数。',
+            cons: '大总结可能会压缩部分细节。',
+        },
+        vector: {
+            label: '向量表格模式',
+            summary: '用 embedding 与 rerank 直接选出与当前情节相关的纪要，不生成关键词，也不做混合召回。',
+            pros: '快速无感，不额外增加正文生成前的 LLM 调用。',
+            cons: '需要单独配置向量参数；向量的语义匹配不如 LLM 召回的逻辑匹配精准。',
+        },
+        llm: {
+            label: 'LLM模型逻辑召回模式',
+            summary: '由 LLM 先读纪要概览与目录，再按信息缺口精读具体纪要区间。',
+            pros: '无可比拟的精准。',
+            cons: '需要在每次正文生成前额外调用一次 LLM 进行记忆分析。',
+        },
+        crossfire: {
+            label: '交火模式',
+            summary: '关键词生成、向量与 BM25 混合召回、rerank 精排，再交给 LLM 做逻辑分析的完整流程。',
+            pros: '完全结合向量模式与 LLM 召回的优点。',
+            cons: '需要配置向量参数，并且保留正文生成前的额外 LLM 调用。',
+        },
+    };
+    const fillModeCopy = {
+        pageTitle: '填表模式',
+        nav: {
+            mode: '填表模式',
+            plot: '剧情推进',
+        },
+        panels: {
+            mode: {
+                title: '填表模式',
+                description: '选择数据库如何为本次正文生成召回记忆。每种模式的参数独立保存，切换模式不会覆盖其它模式，也不会改变功能档位。',
+            },
+            intro: {
+                title: '模式对比',
+                description: '四种模式的适用场景与代价。拿不定主意时保持经典表格模式即可。',
+            },
+            plot: {
+                title: '剧情推进',
+                description: 'LLM模型逻辑召回模式与交火模式依赖剧情推进在正文生成前分析记忆。关闭后这两种模式只保留表格召回，不再执行剧情规划。',
+                enableLabel: '启用剧情推进',
+                enableHint: '关闭后不再在正文生成前额外调用 LLM；当前模式的其余召回行为不变。',
+            },
+            worldbook: {
+                title: '剧情推进世界书',
+                description: '选择剧情推进分析时读取的世界书条目。',
+            },
+        },
+    };
+
+    var _sfc_main$G = /*@__PURE__*/ defineComponent({
+        __name: 'FormFillPlotPanels',
+        setup(__props, { expose: __expose }) {
+            __expose();
+            const plotStore = usePlotPresetStore();
+            const worldbook = useWorldbookSelector();
+            const plotWorldbook = usePlotWorldbookConfig();
+            const wbEntries = usePlotWorldbookEntries();
+            const entryFilter = ref('');
+            const entryEmptyText = ref(plotCopy.worldbook.emptyDefault);
+            async function refreshWorldbookEntries() {
+                let names;
+                try {
+                    names = await plotWorldbook.resolveBookNames();
+                }
+                catch {
+                    wbEntries.reportLoadFailure();
+                    return;
+                }
+                entryEmptyText.value = resolveEntryEmptyText(names);
+                await wbEntries.loadEntries(names);
+            }
+            function resolveEntryEmptyText(names) {
+                if (plotWorldbook.source.value === 'character' && names.length === 0) {
+                    return plotCopy.worldbook.emptyCharacter;
+                }
+                if (plotWorldbook.source.value === 'manual' && plotWorldbook.manualSelection.value.length === 0) {
+                    return plotCopy.worldbook.emptyManual;
+                }
+                return plotCopy.worldbook.emptyDefault;
+            }
+            function onWorldbookSourceChange(value) {
+                plotWorldbook.setSource(value);
+                void refreshWorldbookEntries();
+            }
+            function onManualWorldbookToggle(name, checked) {
+                plotWorldbook.toggleManualBook(name, checked);
+                void refreshWorldbookEntries();
+            }
+            const currentWorldbookLabel = computed(() => {
+                if (plotWorldbook.source.value === 'character') {
+                    return worldbook.charPrimary.value
+                        ? `角色卡所有世界书 · 主册 ${worldbook.charPrimary.value}`
+                        : '角色卡所有世界书';
+                }
+                const names = plotWorldbook.manualSelection.value;
+                return names.length ? names.join('、') : '（未选择）';
+            });
+            async function refreshAll() {
+                plotStore.refreshFromSettings();
+                plotWorldbook.refreshFromSettings();
+                await worldbook.refresh();
+                await refreshWorldbookEntries();
+            }
+            onMounted(() => { void refreshAll(); });
+            watch(useChatChangedTick(), () => { void refreshAll(); });
+            const __returned__ = { plotStore, worldbook, plotWorldbook, wbEntries, entryFilter, entryEmptyText, refreshWorldbookEntries, resolveEntryEmptyText, onWorldbookSourceChange, onManualWorldbookToggle, currentWorldbookLabel, refreshAll, AcuFormRow, AcuPanel, AcuToggle, PlotPresetPanel, WorldbookEntryPickerBody, get fillModeCopy() { return fillModeCopy; } };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-v2-fill-mode-plot[data-v-0a403963] {\n  min-width: 0;\n  display: contents;\n}\n", "src/presentation-v2/components/FormFillPlotPanels.vue#style-0-0a403963");
+    var FormFillPlotPanels_vue_vue_type_style_index_0_scoped_0a403963_lang = null;
+
+    const _hoisted_1$G = { class: "acu-v2-fill-mode-plot" };
+    function _sfc_render$G(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$G, [createVNode($setup["AcuPanel"], {
+		id: "fill-mode-plot-panel",
+		title: $setup.fillModeCopy.panels.plot.title,
+		description: $setup.fillModeCopy.panels.plot.description
+	}, {
+		default: withCtx(() => [createVNode($setup["AcuFormRow"], {
+			label: $setup.fillModeCopy.panels.plot.enableLabel,
+			hint: $setup.fillModeCopy.panels.plot.enableHint
+		}, {
+			default: withCtx(() => [createVNode($setup["AcuToggle"], {
+				"model-value": $setup.plotStore.enabled,
+				"data-acu-plot-enabled-toggle": "1",
+				"onUpdate:modelValue": _cache[0] || (_cache[0] = ($event) => $setup.plotStore.setEnabled($event))
+			}, null, 8, ["model-value"])]),
+			_: 1
+		}, 8, ["label", "hint"])]),
+		_: 1
+	}, 8, ["title", "description"]), $setup.plotStore.enabled ? (openBlock(), createElementBlock(
+		Fragment,
+		{ key: 0 },
+		[createVNode($setup["PlotPresetPanel"]), createVNode($setup["AcuPanel"], {
+			id: "fill-mode-plot-worldbook-panel",
+			title: $setup.fillModeCopy.panels.worldbook.title,
+			description: $setup.fillModeCopy.panels.worldbook.description
+		}, {
+			default: withCtx(() => [createVNode($setup["WorldbookEntryPickerBody"], {
+				source: $setup.plotWorldbook.source.value,
+				"selected-names": $setup.plotWorldbook.manualSelection.value,
+				names: $setup.worldbook.names.value,
+				"selector-status": $setup.worldbook.status.value,
+				"selector-error": $setup.worldbook.error.value,
+				"current-label": $setup.currentWorldbookLabel,
+				filter: $setup.entryFilter,
+				"onUpdate:filter": _cache[1] || (_cache[1] = ($event) => $setup.entryFilter = $event),
+				groups: $setup.wbEntries.groups.value,
+				loading: $setup.wbEntries.status.value === "loading",
+				"entry-status": $setup.wbEntries.status.value,
+				"entry-error": $setup.wbEntries.error.value,
+				"empty-text": $setup.entryEmptyText,
+				"onUpdate:source": _cache[2] || (_cache[2] = ($event) => $setup.onWorldbookSourceChange($event)),
+				onToggleBook: $setup.onManualWorldbookToggle,
+				onSelectAll: _cache[3] || (_cache[3] = ($event) => $setup.wbEntries.selectAll()),
+				onDeselectAll: _cache[4] || (_cache[4] = ($event) => $setup.wbEntries.deselectAll()),
+				onToggle: _cache[5] || (_cache[5] = (bookName, uid, checked) => $setup.wbEntries.toggleEntry(bookName, uid, checked)),
+				onToggleGroup: _cache[6] || (_cache[6] = ($event) => $setup.wbEntries.toggleGroupExpanded($event))
+			}, null, 8, [
+				"source",
+				"selected-names",
+				"names",
+				"selector-status",
+				"selector-error",
+				"current-label",
+				"filter",
+				"groups",
+				"loading",
+				"entry-status",
+				"entry-error",
+				"empty-text"
+			])]),
+			_: 1
+		}, 8, ["title", "description"])],
+		64
+		/* STABLE_FRAGMENT */
+	)) : createCommentVNode("v-if", true)]);
+    }
+    var FormFillPlotPanels = /*#__PURE__*/ _export_sfc(_sfc_main$G, [["render", _sfc_render$G], ["__scopeId", "data-v-0a403963"]]);
+
+    /**
+     * form-fill-mode-store — 填表工作台的模式选择视图。
+     *
+     * 模式与经典/向量/LLM 参数的权威来源是 globalMeta.formFillPreferencesGlobal（service 层）。
+     * 交火参数由填表工作台的交火面板经 useVectorIndexConfig 读写 vectorMemoryConfigGlobal。
+     * 本 store 只做读写代理，不另存副本；保存失败时回读权威存储并暴露 saveError。
+     */
+    function clampInteger(value, fallback, min, max) {
+        const parsed = Number(value);
+        if (!Number.isFinite(parsed))
+            return fallback;
+        return Math.min(max, Math.max(min, Math.floor(parsed)));
+    }
+    function readState() {
+        const { preferences } = readFillModePreferences_ACU();
+        return {
+            selectedMode: preferences.selectedMode,
+            profiles: {
+                classic: { ...preferences.classic },
+                vector: { ...preferences.vector },
+                llm: { ...preferences.llm },
+            },
+            saveError: null,
+        };
+    }
+    const useFormFillModeStore = defineStore('acu-v2-form-fill-mode', {
+        state: () => readState(),
+        actions: {
+            selectMode(mode) {
+                if (mode === this.selectedMode)
+                    return;
+                this.selectedMode = mode;
+                this.persistPreferences();
+            },
+            setClassicRecentChronicleRows(value) {
+                this.profiles.classic.recentChronicleRows = clampInteger(value, 15, 1, 200);
+                this.persistPreferences();
+            },
+            setVectorResultCount(value) {
+                this.profiles.vector.resultCount = clampInteger(value, 200, 1, 1000);
+                this.persistPreferences();
+            },
+            setLlmApiPresetName(value) {
+                this.profiles.llm.apiPresetName = String(value || '').trim();
+                this.persistPreferences();
+            },
+            persistPreferences() {
+                const result = saveFillModePreferences_ACU({
+                    schemaVersion: 1,
+                    selectedMode: this.selectedMode,
+                    classic: { ...this.profiles.classic },
+                    vector: { ...this.profiles.vector },
+                    llm: { ...this.profiles.llm },
+                });
+                if (!('error' in result)) {
+                    this.saveError = null;
+                    return;
+                }
+                const next = readState();
+                this.selectedMode = next.selectedMode;
+                this.profiles = next.profiles;
+                this.saveError = result.error;
+            },
+            refresh() {
+                const next = readState();
+                this.selectedMode = next.selectedMode;
+                this.profiles = next.profiles;
+            },
+        },
+    });
+    const FORM_FILL_MODE_OPTIONS = [
+        { value: 'classic', label: '经典表格模式' },
+        { value: 'vector', label: '向量表格模式' },
+        { value: 'llm', label: 'LLM模型逻辑召回模式' },
+        { value: 'crossfire', label: '交火模式' },
+    ];
+
+    var _sfc_main$F = /*@__PURE__*/ defineComponent({
+        __name: 'FillModePage',
+        setup(__props, { expose: __expose }) {
+            __expose();
+            const formFillMode = useFormFillModeStore();
+            const { followActiveApiLabel, apiPresetSelectOptions } = useApiPresetSelectOptions();
+            const MODE_ORDER = ["classic", "vector", "llm", "crossfire"];
+            const modeIntroList = MODE_ORDER.map((mode) => ({ mode, ...FILL_MODE_INTROS[mode] }));
+            const currentIntro = computed(() => FILL_MODE_INTROS[formFillMode.selectedMode]);
+            /** 向量表格与交火模式需要向量服务与索引维护面板。 */
+            const vectorPanelMode = computed(() => {
+                const mode = formFillMode.selectedMode;
+                return mode === "vector" || mode === "crossfire" ? mode : null;
+            });
+            /** LLM 逻辑召回与交火模式依赖剧情推进在正文生成前分析记忆。 */
+            const showPlotPanels = computed(() => formFillMode.selectedMode === "llm" || formFillMode.selectedMode === "crossfire");
+            const panelNavItems = computed(() => {
+                const items = [
+                    { id: "fill-mode-select-panel", label: fillModeCopy.nav.mode },
+                    { id: "fill-mode-intro-panel", label: fillModeCopy.panels.intro.title },
+                ];
+                if (vectorPanelMode.value === "crossfire") {
+                    items.push({ id: "vector-index-status-panel", label: vectorIndexCopy.nav.status }, { id: "vector-index-keyword-panel", label: vectorIndexCopy.nav.keyword }, { id: "vector-index-api-panel", label: vectorIndexCopy.nav.api }, { id: "vector-index-prompt-panel", label: vectorIndexCopy.nav.prompt }, { id: "vector-index-recall-panel", label: vectorIndexCopy.nav.recall }, { id: "vector-index-archive-panel", label: vectorIndexCopy.nav.archive });
+                }
+                else if (vectorPanelMode.value === "vector") {
+                    items.push({ id: "vector-index-status-panel", label: vectorIndexCopy.nav.status }, { id: "vector-index-api-panel", label: vectorIndexCopy.nav.api }, { id: "vector-index-archive-panel", label: vectorIndexCopy.nav.archive });
+                }
+                if (showPlotPanels.value) {
+                    items.push({ id: "fill-mode-plot-panel", label: fillModeCopy.nav.plot });
+                }
+                return items;
+            });
+            function selectFillMode(value) {
+                if (value === "classic" || value === "vector" || value === "llm" || value === "crossfire") {
+                    formFillMode.selectMode(value);
+                }
+            }
+            const __returned__ = { formFillMode, followActiveApiLabel, apiPresetSelectOptions, MODE_ORDER, modeIntroList, currentIntro, vectorPanelMode, showPlotPanels, panelNavItems, selectFillMode, AcuBadge, AcuFormRow, AcuInput, AcuMessage, AcuMobilePanelNav, AcuPanel, AcuPanelGrid, AcuSelect, FormFillVectorPanels, FormFillPlotPanels, get fillModeCopy() { return fillModeCopy; }, get FORM_FILL_MODE_OPTIONS() { return FORM_FILL_MODE_OPTIONS; } };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-v2-fill-mode-page[data-v-ff660b79] {\n  min-height: 100%;\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: var(--acu-page-gap, 14px);\n}\n.acu-v2-fill-mode-page__intro-list[data-v-ff660b79] {\n  margin: 0;\n  padding: 0;\n  list-style: none;\n  display: flex;\n  flex-direction: column;\n  gap: var(--acu-space-1, 4px);\n  min-width: 0;\n}\n.acu-v2-fill-mode-page__intro-item[data-v-ff660b79] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: var(--acu-space-075, 3px);\n  padding: var(--acu-space-250, 10px);\n  border: 0;\n  border-radius: var(--acu-radius-sm);\n  background: transparent;\n}\n.acu-v2-fill-mode-page__intro-item--active[data-v-ff660b79] {\n  background: var(--acu-bg-2);\n}\n.acu-v2-fill-mode-page__intro-head[data-v-ff660b79] {\n  min-width: 0;\n  display: flex;\n  align-items: center;\n  gap: var(--acu-space-2, 8px);\n}\n.acu-v2-fill-mode-page__intro-name[data-v-ff660b79] {\n  min-width: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 650;\n}\n.acu-v2-fill-mode-page__intro-summary[data-v-ff660b79] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-fill-mode-page__intro-line[data-v-ff660b79] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.55;\n}\n.acu-v2-fill-mode-page__intro-tag[data-v-ff660b79] {\n  margin-right: var(--acu-space-150, 6px);\n  font-weight: 650;\n}\n.acu-v2-fill-mode-page__intro-tag--pro[data-v-ff660b79] {\n  color: var(--acu-success);\n}\n.acu-v2-fill-mode-page__intro-tag--con[data-v-ff660b79] {\n  color: var(--acu-warning);\n}\n", "src/presentation-v2/pages/FillModePage.vue#style-0-ff660b79");
+    var FillModePage_vue_vue_type_style_index_0_scoped_ff660b79_lang = null;
+
+    const _hoisted_1$F = { class: "acu-v2-fill-mode-page" };
+    const _hoisted_2$D = { class: "acu-v2-fill-mode-page__intro-list" };
+    const _hoisted_3$y = ["data-acu-fill-mode-intro"];
+    const _hoisted_4$t = { class: "acu-v2-fill-mode-page__intro-head" };
+    const _hoisted_5$o = { class: "acu-v2-fill-mode-page__intro-name" };
+    const _hoisted_6$n = { class: "acu-v2-fill-mode-page__intro-summary" };
+    const _hoisted_7$k = { class: "acu-v2-fill-mode-page__intro-line" };
+    const _hoisted_8$k = { class: "acu-v2-fill-mode-page__intro-line" };
+    function _sfc_render$F(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$F, [
+		createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }, null, 8, ["items"]),
+		createVNode($setup["AcuPanelGrid"], { class: "acu-v2-fill-mode-page__grid" }, {
+			default: withCtx(() => [createVNode($setup["AcuPanel"], {
+				id: "fill-mode-select-panel",
+				title: $setup.fillModeCopy.panels.mode.title,
+				description: $setup.fillModeCopy.panels.mode.description
+			}, {
+				actions: withCtx(() => [createVNode($setup["AcuBadge"], { variant: "accent" }, {
+					default: withCtx(() => [createTextVNode(
+						toDisplayString($setup.currentIntro.label),
+						1
+						/* TEXT */
+					)]),
+					_: 1
+				})]),
+				default: withCtx(() => [
+					createVNode($setup["AcuFormRow"], {
+						label: "当前填表模式",
+						hint: "每种模式的参数独立保存，切换模式不会覆盖其它模式。"
+					}, {
+						default: withCtx(() => [createVNode($setup["AcuSelect"], {
+							options: $setup.FORM_FILL_MODE_OPTIONS,
+							"model-value": $setup.formFillMode.selectedMode,
+							"onUpdate:modelValue": $setup.selectFillMode
+						}, null, 8, ["options", "model-value"])]),
+						_: 1
+					}),
+					$setup.formFillMode.saveError ? (openBlock(), createBlock($setup["AcuMessage"], {
+						key: 0,
+						kind: "error"
+					}, {
+						default: withCtx(() => [createTextVNode(
+							toDisplayString($setup.formFillMode.saveError),
+							1
+							/* TEXT */
+						)]),
+						_: 1
+					})) : createCommentVNode("v-if", true),
+					$setup.formFillMode.selectedMode === "classic" ? (openBlock(), createBlock($setup["AcuFormRow"], {
+						key: 1,
+						label: "最近纪要表条数",
+						hint: "同时控制界面显示与经典模式提示词中的近期纪要条数，默认 15 条。"
+					}, {
+						default: withCtx(() => [createVNode($setup["AcuInput"], {
+							type: "number",
+							min: 1,
+							max: 200,
+							step: 1,
+							"model-value": $setup.formFillMode.profiles.classic.recentChronicleRows,
+							onChange: _cache[0] || (_cache[0] = ($event) => $setup.formFillMode.setClassicRecentChronicleRows($event))
+						}, null, 8, ["model-value"])]),
+						_: 1
+					})) : createCommentVNode("v-if", true),
+					$setup.formFillMode.selectedMode === "vector" ? (openBlock(), createBlock($setup["AcuFormRow"], {
+						key: 2,
+						label: "保留相关纪要条数",
+						hint: "按 rerank 结果从上到下保留的纪要条数；embedding 与 rerank 服务在下方「Embedding / Rerank」面板配置。"
+					}, {
+						default: withCtx(() => [createVNode($setup["AcuInput"], {
+							type: "number",
+							min: 1,
+							max: 1e3,
+							step: 1,
+							"model-value": $setup.formFillMode.profiles.vector.resultCount,
+							onChange: _cache[1] || (_cache[1] = ($event) => $setup.formFillMode.setVectorResultCount($event))
+						}, null, 8, ["model-value"])]),
+						_: 1
+					})) : createCommentVNode("v-if", true),
+					$setup.formFillMode.selectedMode === "llm" ? (openBlock(), createBlock($setup["AcuFormRow"], {
+						key: 3,
+						label: "LLM / continuation API 预设",
+						hint: "选择后仅用于逻辑召回模式；留空时跟随当前 API。"
+					}, {
+						default: withCtx(() => [createVNode($setup["AcuSelect"], {
+							options: $setup.apiPresetSelectOptions,
+							"model-value": $setup.formFillMode.profiles.llm.apiPresetName,
+							placeholder: $setup.followActiveApiLabel,
+							"onUpdate:modelValue": _cache[2] || (_cache[2] = ($event) => $setup.formFillMode.setLlmApiPresetName($event))
+						}, null, 8, [
+							"options",
+							"model-value",
+							"placeholder"
+						])]),
+						_: 1
+					})) : createCommentVNode("v-if", true)
+				]),
+				_: 1
+			}, 8, ["title", "description"]), createVNode($setup["AcuPanel"], {
+				id: "fill-mode-intro-panel",
+				title: $setup.fillModeCopy.panels.intro.title,
+				description: $setup.fillModeCopy.panels.intro.description
+			}, {
+				default: withCtx(() => [createBaseVNode("ul", _hoisted_2$D, [(openBlock(true), createElementBlock(
+					Fragment,
+					null,
+					renderList($setup.modeIntroList, (item) => {
+						return openBlock(), createElementBlock("li", {
+							key: item.mode,
+							class: normalizeClass(["acu-v2-fill-mode-page__intro-item", { "acu-v2-fill-mode-page__intro-item--active": item.mode === $setup.formFillMode.selectedMode }]),
+							"data-acu-fill-mode-intro": item.mode
+						}, [
+							createBaseVNode("div", _hoisted_4$t, [createBaseVNode(
+								"span",
+								_hoisted_5$o,
+								toDisplayString(item.label),
+								1
+								/* TEXT */
+							), item.mode === $setup.formFillMode.selectedMode ? (openBlock(), createBlock($setup["AcuBadge"], {
+								key: 0,
+								variant: "accent"
+							}, {
+								default: withCtx(() => [..._cache[3] || (_cache[3] = [createTextVNode(
+									"当前",
+									-1
+									/* CACHED */
+								)])]),
+								_: 1
+							})) : createCommentVNode("v-if", true)]),
+							createBaseVNode(
+								"p",
+								_hoisted_6$n,
+								toDisplayString(item.summary),
+								1
+								/* TEXT */
+							),
+							createBaseVNode("p", _hoisted_7$k, [_cache[4] || (_cache[4] = createBaseVNode(
+								"span",
+								{ class: "acu-v2-fill-mode-page__intro-tag acu-v2-fill-mode-page__intro-tag--pro" },
+								"优点",
+								-1
+								/* CACHED */
+							)), createTextVNode(
+								" " + toDisplayString(item.pros),
+								1
+								/* TEXT */
+							)]),
+							createBaseVNode("p", _hoisted_8$k, [_cache[5] || (_cache[5] = createBaseVNode(
+								"span",
+								{ class: "acu-v2-fill-mode-page__intro-tag acu-v2-fill-mode-page__intro-tag--con" },
+								"缺点",
+								-1
+								/* CACHED */
+							)), createTextVNode(
+								" " + toDisplayString(item.cons),
+								1
+								/* TEXT */
+							)])
+						], 10, _hoisted_3$y);
+					}),
+					128
+					/* KEYED_FRAGMENT */
+				))])]),
+				_: 1
+			}, 8, ["title", "description"])]),
+			_: 1
+		}),
+		$setup.vectorPanelMode ? (openBlock(), createBlock($setup["FormFillVectorPanels"], {
+			key: 0,
+			mode: $setup.vectorPanelMode
+		}, null, 8, ["mode"])) : createCommentVNode("v-if", true),
+		$setup.showPlotPanels ? (openBlock(), createBlock($setup["AcuPanelGrid"], {
+			key: 1,
+			class: "acu-v2-fill-mode-page__plot-grid"
+		}, {
+			default: withCtx(() => [createVNode($setup["FormFillPlotPanels"])]),
+			_: 1
+		})) : createCommentVNode("v-if", true)
+	]);
+    }
+    var FillModePage = /*#__PURE__*/ _export_sfc(_sfc_main$F, [["render", _sfc_render$F], ["__scopeId", "data-v-ff660b79"]]);
+
+    /**
+     * service/settings/dangling-reference-audit-service.ts
+     *
+     * 只读校验 API 预设 / 世界书名称引用是否仍指向现存对象。
+     * 审计路径不得改写持久化字段；清除必须由用户显式触发。
+     */
+    const CONTINUATION_ROLE_LABELS_ACU = {
+        main: '主 Agent',
+        outline: '大纲子代理',
+        arcArchitect: '故事总纲子代理',
+        maintainer: '伏笔维护子代理',
+        mainlinePlanner: '主线策划子代理',
+        beatPlanner: '节拍策划子代理',
+        reviewer: '连续性审查子代理',
+        finalReviewer: '发送前终审子代理',
+        webResearcher: '网页检索子代理',
+    };
+    function clone$2(value) {
+        return JSON.parse(JSON.stringify(value ?? null));
+    }
+    function existingPresetNames_ACU() {
+        ensureApiSettingsShape_ACU();
+        return new Set((settings_ACU.apiPresets || []).map((preset) => String(preset?.name || '').trim()).filter(Boolean));
+    }
+    function isDanglingPresetName_ACU(name, existing) {
+        const normalized = String(name || '').trim();
+        if (!normalized)
+            return null;
+        return existing.has(normalized) ? null : normalized;
+    }
+    function pushPresetRef(items, existing, name, id, label, clearKey) {
+        const dangling = isDanglingPresetName_ACU(name, existing);
+        if (!dangling)
+            return;
+        items.push({ id, kind: 'api_preset', label, name: dangling, clearKey });
+    }
+    function readKeywordApiPreset_ACU() {
+        const holder = globalMeta_ACU?.vectorMemoryConfigGlobal && typeof globalMeta_ACU.vectorMemoryConfigGlobal === 'object'
+            ? globalMeta_ACU.vectorMemoryConfigGlobal
+            : settings_ACU.vectorMemoryConfig;
+        return typeof holder?.keywordApiPreset === 'string' ? holder.keywordApiPreset : '';
+    }
+    function readContinuationGlobalSettings_ACU() {
+        const raw = settings_ACU[CONTINUATION_GLOBAL_SETTINGS_KEY_ACU];
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+            return null;
+        return raw;
+    }
+    function collectFromContinuationSettings_ACU(items, existing, settings, sourceLabel, keyPrefix) {
+        if (!settings)
+            return;
+        pushPresetRef(items, existing, settings.fixedApiPresetName, `${keyPrefix}-fixed`, `${sourceLabel}固定 API 预设`, `${keyPrefix}_fixed`);
+        const presets = settings.agentApiPresets;
+        if (!presets || typeof presets !== 'object')
+            return;
+        for (const role of CONTINUATION_AGENT_API_PRESET_ROLES_ACU) {
+            const choice = presets[role];
+            if (!choice)
+                continue;
+            const roleLabel = CONTINUATION_ROLE_LABELS_ACU[role] || role;
+            pushPresetRef(items, existing, choice.presetName, `${keyPrefix}-agent-${role}`, `${sourceLabel}${roleLabel}渠道`, `${keyPrefix}_agent:${role}`);
+        }
+    }
+    function collectFromSimulationSettings_ACU(items, existing, settings, sourceLabel, keyPrefix) {
+        if (!settings)
+            return;
+        pushPresetRef(items, existing, settings.fixedApiPresetName, `${keyPrefix}-fixed`, `${sourceLabel}固定 API 预设`, `${keyPrefix}_fixed`);
+        const presets = settings.agentApiPresets;
+        if (!presets || typeof presets !== 'object')
+            return;
+        for (const [role, choice] of Object.entries(presets)) {
+            if (!choice)
+                continue;
+            pushPresetRef(items, existing, choice.presetName, `${keyPrefix}-agent-${role}`, `${sourceLabel}Agent「${role}」渠道`, `${keyPrefix}_agent:${role}`);
+        }
+    }
+    function peekFirstFloorField_ACU(field) {
+        try {
+            const chat = getChatArray_ACU();
+            const first = Array.isArray(chat) && chat[0] && typeof chat[0] === 'object' ? chat[0] : null;
+            return first?.[field];
+        }
+        catch {
+            return undefined;
+        }
+    }
+    function collectDanglingApiPresetReferences_ACU() {
+        const existing = existingPresetNames_ACU();
+        const items = [];
+        pushPresetRef(items, existing, settings_ACU.tableApiPreset, 'table', '填表 API 预设', 'table');
+        pushPresetRef(items, existing, settings_ACU.plotApiPreset, 'plot', '剧情推进 API 预设', 'plot');
+        pushPresetRef(items, existing, settings_ACU.contentOptimizationSettings?.apiPreset, 'optimization', '正文优化 API 预设', 'optimization');
+        pushPresetRef(items, existing, readKeywordApiPreset_ACU(), 'vector-keyword', '向量关键词 API 预设', 'vector_keyword');
+        const tableOverrides = settings_ACU.tableApiPresetOverridesByName;
+        if (tableOverrides && typeof tableOverrides === 'object') {
+            for (const [sheetName, presetName] of Object.entries(tableOverrides)) {
+                pushPresetRef(items, existing, presetName, `table-override-${sheetName}`, `表格「${sheetName}」API 预设`, `table_override:${sheetName}`);
+            }
+        }
+        const plotOverrides = settings_ACU.plotTaskApiPresetOverridesById;
+        if (plotOverrides && typeof plotOverrides === 'object') {
+            for (const [taskId, presetName] of Object.entries(plotOverrides)) {
+                pushPresetRef(items, existing, presetName, `plot-task-${taskId}`, `剧情任务「${taskId}」API 预设`, `plot_task:${taskId}`);
+            }
+        }
+        collectFromContinuationSettings_ACU(items, existing, readContinuationGlobalSettings_ACU(), '智能续写（全局副本）', 'continuation_global');
+        const continuationRaw = peekFirstFloorField_ACU(CONTINUATION_FIRST_FLOOR_FIELD_ACU);
+        const continuationSettings = continuationRaw && typeof continuationRaw === 'object' && !Array.isArray(continuationRaw)
+            ? continuationRaw.settings ?? null
+            : null;
+        collectFromContinuationSettings_ACU(items, existing, continuationSettings, '智能续写（当前聊天）', 'continuation');
+        const simulationRaw = peekFirstFloorField_ACU(WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU);
+        const simulationSettings = simulationRaw && typeof simulationRaw === 'object' && !Array.isArray(simulationRaw)
+            ? simulationRaw.settings ?? null
+            : null;
+        collectFromSimulationSettings_ACU(items, existing, simulationSettings, '格林推演（当前聊天）', 'simulation');
+        return items;
+    }
+    async function collectDanglingWorldbookReferences_ACU() {
+        const target = String(getCurrentWorldbookConfig_ACU()?.injectionTarget || '').trim();
+        if (!target || target === 'character')
+            return [];
+        try {
+            const books = await listLorebooks_ACU({ forceRefresh: true });
+            if (resolveLorebookNameFromList_ACU(target, books))
+                return [];
+            return [{
+                    id: 'injection-target',
+                    kind: 'worldbook',
+                    label: '填表写入目标世界书',
+                    name: target,
+                    clearKey: 'worldbook_injection',
+                }];
+        }
+        catch (error) {
+            logWarn_ACU('[引用审计] 读取世界书名单失败，本次不标记注入目标。', error);
+            return [];
+        }
+    }
+    async function collectDanglingReferences_ACU() {
+        const worldbook = await collectDanglingWorldbookReferences_ACU();
+        return [...collectDanglingApiPresetReferences_ACU(), ...worldbook];
+    }
+    function clearContinuationField_ACU(settings, clearKey) {
+        if (clearKey.endsWith('_fixed') || clearKey === 'continuation_fixed' || clearKey === 'continuation_global_fixed') {
+            return { ...settings, apiPresetMode: 'current', fixedApiPresetName: '' };
+        }
+        const agentPrefix = clearKey.includes('_agent:') ? clearKey.slice(clearKey.indexOf('_agent:') + '_agent:'.length) : '';
+        if (!agentPrefix || !settings.agentApiPresets?.[agentPrefix])
+            return settings;
+        return {
+            ...settings,
+            agentApiPresets: {
+                ...settings.agentApiPresets,
+                [agentPrefix]: { mode: 'current', presetName: '' },
+            },
+        };
+    }
+    async function clearDanglingReference_ACU(item) {
+        const key = String(item.clearKey || '');
+        if (key === 'table' || key === 'plot' || key === 'optimization' || key === 'vector_keyword') {
+            const result = setFeatureApiPreset_ACU(key === 'vector_keyword' ? 'vector_keyword' : key, '');
+            return { ok: result.ok, message: result.message };
+        }
+        if (key.startsWith('plot_task:')) {
+            const taskId = key.slice('plot_task:'.length);
+            const result = setFeatureApiPreset_ACU('plot_task', '', { taskId });
+            return { ok: result.ok, message: result.message };
+        }
+        if (key.startsWith('table_override:')) {
+            const sheetName = key.slice('table_override:'.length);
+            if (!settings_ACU.tableApiPresetOverridesByName || typeof settings_ACU.tableApiPresetOverridesByName !== 'object') {
+                return { ok: true };
+            }
+            const snapshot = clone$2(settings_ACU.tableApiPresetOverridesByName);
+            delete settings_ACU.tableApiPresetOverridesByName[sheetName];
+            const saveResult = saveSettings_ACU();
+            if (!saveResult.saved) {
+                settings_ACU.tableApiPresetOverridesByName = snapshot;
+                return { ok: false, message: saveResult.warning || saveResult.error || '保存失败，已回滚。' };
+            }
+            return { ok: true };
+        }
+        if (key.startsWith('continuation')) {
+            if (key.startsWith('continuation_global')) {
+                const globalSettings = readContinuationGlobalSettings_ACU();
+                if (globalSettings) {
+                    const next = clearContinuationField_ACU(globalSettings, key);
+                    settings_ACU[CONTINUATION_GLOBAL_SETTINGS_KEY_ACU] = next;
+                    const saveResult = saveSettings_ACU();
+                    if (!saveResult.saved) {
+                        settings_ACU[CONTINUATION_GLOBAL_SETTINGS_KEY_ACU] = globalSettings;
+                        return { ok: false, message: saveResult.warning || saveResult.error || '保存失败，已回滚。' };
+                    }
+                }
+            }
+            else {
+                mutateCurrentContinuationApiPresetSettings_ACU(settings => clearContinuationField_ACU(settings, key));
+                try {
+                    await persistCurrentContinuationEnvelope_ACU();
+                }
+                catch (error) {
+                    logWarn_ACU('[引用审计] 续写信封清除已写入内存，但聊天保存失败。', error);
+                }
+            }
+            return { ok: true };
+        }
+        if (key.startsWith('simulation')) {
+            mutateCurrentWorldSimulationApiPresetSettings_ACU(settings => {
+                if (key === 'simulation_fixed') {
+                    return { ...settings, apiPresetMode: 'current', fixedApiPresetName: '' };
+                }
+                const role = key.startsWith('simulation_agent:') ? key.slice('simulation_agent:'.length) : '';
+                if (!role || !settings.agentApiPresets?.[role])
+                    return settings;
+                return {
+                    ...settings,
+                    agentApiPresets: {
+                        ...settings.agentApiPresets,
+                        [role]: { mode: 'current', presetName: '' },
+                    },
+                };
+            });
+            try {
+                await persistCurrentWorldSimulationEnvelope_ACU();
+            }
+            catch (error) {
+                logWarn_ACU('[引用审计] 格林推演信封清除已写入内存，但聊天保存失败。', error);
+            }
+            return { ok: true };
+        }
+        if (key === 'worldbook_injection') {
+            const cfg = getCurrentWorldbookConfig_ACU();
+            const previous = cfg.injectionTarget;
+            cfg.injectionTarget = 'character';
+            const saveResult = saveSettings_ACU();
+            if (!saveResult.saved) {
+                cfg.injectionTarget = previous;
+                return { ok: false, message: saveResult.warning || saveResult.error || '保存失败，已回滚。' };
+            }
+            return { ok: true };
+        }
+        return { ok: false, message: '未知的失效引用，无法清除。' };
+    }
+
+    function useDanglingReferenceAudit(scope) {
+        const items = ref([]);
+        const loading = ref(false);
+        const clearingId = ref('');
+        const error = ref('');
+        async function refresh() {
+            loading.value = true;
+            error.value = '';
+            try {
+                items.value = scope === 'api'
+                    ? collectDanglingApiPresetReferences_ACU()
+                    : await collectDanglingWorldbookReferences_ACU();
+            }
+            catch (caught) {
+                error.value = caught instanceof Error ? caught.message : '校验失效引用失败';
+                items.value = [];
+            }
+            finally {
+                loading.value = false;
+            }
+        }
+        async function clear(item) {
+            clearingId.value = item.id;
+            error.value = '';
+            try {
+                const result = await clearDanglingReference_ACU(item);
+                if (!result.ok) {
+                    error.value = result.message || '清除失败';
+                    return;
+                }
+                await refresh();
+            }
+            catch (caught) {
+                error.value = caught instanceof Error ? caught.message : '清除失败';
+            }
+            finally {
+                clearingId.value = '';
+            }
+        }
+        onMounted(() => {
+            void refresh();
+        });
+        return {
+            items,
+            loading,
+            clearingId,
+            error,
+            refresh,
+            clear,
+        };
+    }
+
+    var _sfc_main$E = /*@__PURE__*/ defineComponent({
+        __name: 'DanglingReferenceBanner',
+        props: {
+            scope: {}
+        },
+        setup(__props, { expose: __expose }) {
+            __expose();
+            const props = __props;
+            const audit = useDanglingReferenceAudit(props.scope);
+            const kindLabel = computed(() => (props.scope === 'worldbook' ? '世界书' : 'API 预设'));
+            const __returned__ = { props, audit, kindLabel, AcuButton, AcuMessage };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-dangling-reference-banner__intro[data-v-f872c8ba],\r\n.acu-dangling-reference-banner__error[data-v-f872c8ba] {\r\n  margin: 0 0 8px;\n}\n.acu-dangling-reference-banner__list[data-v-f872c8ba] {\r\n  margin: 0;\r\n  padding: 0;\r\n  list-style: none;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 8px;\n}\n.acu-dangling-reference-banner__item[data-v-f872c8ba] {\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: 12px;\n}\r\n", "src/presentation-v2/components/DanglingReferenceBanner.vue#style-0-f872c8ba");
+    var DanglingReferenceBanner_vue_vue_type_style_index_0_scoped_f872c8ba_lang = null;
+
+    const _hoisted_1$E = {
+	key: 0,
+	class: "acu-dangling-reference-banner__error"
+    };
+    const _hoisted_2$C = { class: "acu-dangling-reference-banner__intro" };
+    const _hoisted_3$x = { class: "acu-dangling-reference-banner__list" };
+    function _sfc_render$E(_ctx, _cache, $props, $setup, $data, $options) {
+	return $setup.audit.items.value.length || $setup.audit.error.value ? (openBlock(), createBlock($setup["AcuMessage"], {
+		key: 0,
+		kind: "warning"
+	}, {
+		default: withCtx(() => [
+			$setup.audit.error.value ? (openBlock(), createElementBlock(
+				"p",
+				_hoisted_1$E,
+				toDisplayString($setup.audit.error.value),
+				1
+				/* TEXT */
+			)) : createCommentVNode("v-if", true),
+			createBaseVNode(
+				"p",
+				_hoisted_2$C,
+				" 下列引用指向已不存在的" + toDisplayString($setup.kindLabel) + "，不会自动改写已保存的设置。可一键清除后重新选择。 ",
+				1
+				/* TEXT */
+			),
+			createBaseVNode("ul", _hoisted_3$x, [(openBlock(true), createElementBlock(
+				Fragment,
+				null,
+				renderList($setup.audit.items.value, (item) => {
+					return openBlock(), createElementBlock("li", {
+						key: item.id,
+						class: "acu-dangling-reference-banner__item"
+					}, [createBaseVNode(
+						"span",
+						null,
+						toDisplayString(item.label) + "「" + toDisplayString(item.name) + "」已不存在 ",
+						1
+						/* TEXT */
+					), createVNode($setup["AcuButton"], {
+						size: "sm",
+						disabled: $setup.audit.clearingId.value === item.id,
+						onClick: ($event) => $setup.audit.clear(item)
+					}, {
+						default: withCtx(() => [..._cache[0] || (_cache[0] = [createTextVNode(
+							" 清除引用 ",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					}, 8, ["disabled", "onClick"])]);
+				}),
+				128
+				/* KEYED_FRAGMENT */
+			))])
+		]),
+		_: 1
+	})) : createCommentVNode("v-if", true);
+    }
+    var DanglingReferenceBanner = /*#__PURE__*/ _export_sfc(_sfc_main$E, [["render", _sfc_render$E], ["__scopeId", "data-v-f872c8ba"]]);
+
+    var _sfc_main$D = /*@__PURE__*/ defineComponent({
+        __name: 'FormFillPromptDrawer',
+        props: {
+            isOpen: { type: Boolean },
+            segments: {},
+            dirty: { type: Boolean },
+            message: {}
+        },
+        emits: ["close", "save", "reset", "import-file", "export", "add", "delete", "update"],
+        setup(__props, { expose: __expose, emit: __emit }) {
+            __expose();
+            const props = __props;
+            const emit = __emit;
+            const dialogStore = useDialogStore();
+            async function confirmIfDirty() {
+                if (!props.dirty)
+                    return true;
+                return dialogStore.confirm({
+                    title: '关闭提示词编辑器',
+                    message: '你有未保存的填表提示词修改，确定要关闭吗？',
+                    confirmLabel: '关闭',
+                    confirmVariant: 'danger',
+                });
+            }
+            async function requestClose() {
+                if (await confirmIfDirty())
+                    emit('close');
+            }
+            const __returned__ = { props, emit, dialogStore, confirmIfDirty, requestClose, AcuButton, AcuDrawer, AcuFileButton, AcuMessage, AcuPromptSegments };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-form-fill-prompt-drawer__toolbar[data-v-2d4e260e] {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\n}\n.acu-form-fill-prompt-drawer__actions[data-v-2d4e260e] {\r\n  position: sticky;\r\n  bottom: -16px;\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  padding: 12px 0 0;\r\n  background: var(--acu-bg-1);\n}\r\n", "src/presentation-v2/components/FormFillPromptDrawer.vue#style-0-2d4e260e");
+    var FormFillPromptDrawer_vue_vue_type_style_index_0_scoped_2d4e260e_lang = null;
+
+    const _hoisted_1$D = { class: "acu-form-fill-prompt-drawer__toolbar" };
+    const _hoisted_2$B = { class: "acu-form-fill-prompt-drawer__actions" };
+    function _sfc_render$D(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createBlock($setup["AcuDrawer"], {
+		"is-open": $props.isOpen,
+		title: "编辑填表提示词",
+		width: "720px",
+		"before-close": $setup.confirmIfDirty,
+		onClose: _cache[7] || (_cache[7] = ($event) => $setup.emit("close"))
+	}, {
+		default: withCtx(() => [
+			$props.message ? (openBlock(), createBlock($setup["AcuMessage"], {
+				key: 0,
+				kind: $props.message.kind
+			}, {
+				default: withCtx(() => [createTextVNode(
+					toDisplayString($props.message.text),
+					1
+					/* TEXT */
+				)]),
+				_: 1
+			}, 8, ["kind"])) : createCommentVNode("v-if", true),
+			createBaseVNode("div", _hoisted_1$D, [
+				createVNode($setup["AcuFileButton"], {
+					size: "sm",
+					accept: "application/json,.json",
+					onFile: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("import-file", $event))
+				}, {
+					default: withCtx(() => [..._cache[8] || (_cache[8] = [createBaseVNode(
+						"i",
+						{ class: "fa-solid fa-download" },
+						null,
+						-1
+						/* CACHED */
+					), createTextVNode(
+						" 导入 JSON ",
+						-1
+						/* CACHED */
+					)])]),
+					_: 1
+				}),
+				createVNode($setup["AcuButton"], {
+					size: "sm",
+					onClick: _cache[1] || (_cache[1] = ($event) => _ctx.$emit("export"))
+				}, {
+					default: withCtx(() => [..._cache[9] || (_cache[9] = [createBaseVNode(
+						"i",
+						{ class: "fa-solid fa-upload" },
+						null,
+						-1
+						/* CACHED */
+					), createTextVNode(
+						" 导出 JSON ",
+						-1
+						/* CACHED */
+					)])]),
+					_: 1
+				}),
+				createVNode($setup["AcuButton"], {
+					size: "sm",
+					onClick: _cache[2] || (_cache[2] = ($event) => _ctx.$emit("reset"))
+				}, {
+					default: withCtx(() => [..._cache[10] || (_cache[10] = [createTextVNode(
+						"载入默认提示词",
+						-1
+						/* CACHED */
+					)])]),
+					_: 1
+				})
+			]),
+			createVNode($setup["AcuPromptSegments"], {
+				segments: $props.segments,
+				rows: 8,
+				onAdd: _cache[3] || (_cache[3] = ($event) => _ctx.$emit("add", $event)),
+				onDelete: _cache[4] || (_cache[4] = ($event) => _ctx.$emit("delete", $event)),
+				onUpdate: _cache[5] || (_cache[5] = (index, patch) => _ctx.$emit("update", index, patch))
+			}, null, 8, ["segments"]),
+			createBaseVNode("footer", _hoisted_2$B, [createVNode($setup["AcuButton"], { onClick: $setup.requestClose }, {
+				default: withCtx(() => [..._cache[11] || (_cache[11] = [createTextVNode(
+					"关闭",
+					-1
+					/* CACHED */
+				)])]),
+				_: 1
+			}), createVNode($setup["AcuButton"], {
+				variant: "primary",
+				disabled: !$props.dirty,
+				onClick: _cache[6] || (_cache[6] = ($event) => _ctx.$emit("save"))
+			}, {
+				default: withCtx(() => [..._cache[12] || (_cache[12] = [createTextVNode(
+					"保存提示词",
+					-1
+					/* CACHED */
+				)])]),
+				_: 1
+			}, 8, ["disabled"])])
+		]),
+		_: 1
+	}, 8, ["is-open"]);
+    }
+    var FormFillPromptDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$D, [["render", _sfc_render$D], ["__scopeId", "data-v-2d4e260e"]]);
 
     const NUMBER_FIELD_META = [
         {
@@ -193907,7 +198330,7 @@ ${rejectionText}` : delegationFeedback,
         autoUpdateTokenThreshold: DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU,
         tableMaxRetries: 3,
     };
-    function clone$2(value) {
+    function clone$1(value) {
         return JSON.parse(JSON.stringify(value ?? null));
     }
     function normalizeNumber(key, value) {
@@ -193927,7 +198350,7 @@ ${rejectionText}` : delegationFeedback,
             end: String(rule.end || ""),
         }));
     }
-    function coerceRulePairs$2(rules) {
+    function coerceRulePairs$1(rules) {
         return Array.isArray(rules)
             ? rules.map((rule) => ({
                 start: String(rule?.start ?? ""),
@@ -194125,7 +198548,7 @@ ${rejectionText}` : delegationFeedback,
             message.value = null;
         }
         function setExtractRules(rules) {
-            extractRules.value = coerceRulePairs$2(rules);
+            extractRules.value = coerceRulePairs$1(rules);
             const result = setTableContextRules_ACU("extract", normalizeRules(extractRules.value, "", "extract"));
             if (!result.ok) {
                 message.value = { kind: "error", text: result.message || "规则保存失败。", scope: "settings" };
@@ -194134,7 +198557,7 @@ ${rejectionText}` : delegationFeedback,
             message.value = null;
         }
         function setExcludeRules(rules) {
-            excludeRules.value = coerceRulePairs$2(rules);
+            excludeRules.value = coerceRulePairs$1(rules);
             const result = setTableContextRules_ACU("exclude", normalizeRules(excludeRules.value, "", "exclude"));
             if (!result.ok) {
                 message.value = { kind: "error", text: result.message || "规则保存失败。", scope: "settings" };
@@ -194205,13 +198628,13 @@ ${rejectionText}` : delegationFeedback,
             const key = currentPromptSettingKey();
             let result;
             if (key === "charCardPrompt") {
-                result = setCharCardPrompt_ACU(clone$2(prepared));
+                result = setCharCardPrompt_ACU(clone$1(prepared));
             }
             else {
                 // strictJson 提示词：写入对应字段，保存失败回滚。
                 const field = key;
                 const snapshot = settings_ACU[field];
-                settings_ACU[field] = clone$2(prepared);
+                settings_ACU[field] = clone$1(prepared);
                 const saveResult = saveSettings_ACU();
                 if (!saveResult.saved) {
                     settings_ACU[field] = snapshot;
@@ -194349,160 +198772,7 @@ ${rejectionText}` : delegationFeedback,
         },
     };
 
-    var _sfc_main$T = /*@__PURE__*/ defineComponent({
-        __name: 'AcuDisclosureGroup',
-        props: {
-            label: { default: '' },
-            meta: { default: '' },
-            expanded: { type: Boolean },
-            bodyId: { default: '' },
-            bodyMode: { default: 'show' },
-            bodyMaxHeight: { default: '' },
-            rootClass: { default: '' },
-            headerClass: { default: '' },
-            bodyClass: { default: '' },
-            chevronClass: { default: '' },
-            chevronOpenClass: { default: '' },
-            labelClass: { default: '' },
-            metaClass: { default: '' }
-        },
-        emits: ["toggle"],
-        setup(__props, { expose: __expose }) {
-            __expose();
-            const props = __props;
-            // 裁切只在高度动画进行中需要（useAcuHeightTransition 会在 beforeEnter/beforeLeave 临时设 hidden）。
-            // 静止状态必须放开 overflow，否则 body 里的浮层（AcuSelect 下拉菜单等）会被折叠容器切掉。
-            // 指定了 bodyMaxHeight 的组是滚动容器，保持 overflow-y: auto。
-            const bodyStyle = computed(() => ({
-                maxHeight: props.bodyMaxHeight || undefined,
-                overflowY: props.bodyMaxHeight ? 'auto' : 'visible',
-                overflowX: props.bodyMaxHeight ? 'hidden' : 'visible',
-            }));
-            const heightTransition = useAcuHeightTransition({
-                restoreOverflow(el) {
-                    el.style.overflowY = props.bodyMaxHeight ? 'auto' : 'visible';
-                    el.style.overflowX = props.bodyMaxHeight ? 'hidden' : 'visible';
-                },
-            });
-            function beforeEnter(el) {
-                heightTransition.beforeEnter(el);
-            }
-            function enter(el, done) {
-                heightTransition.enter(el, done);
-            }
-            function afterEnter(el) {
-                const body = el;
-                body.removeAttribute('aria-hidden');
-                body.removeAttribute('inert');
-                heightTransition.afterEnter(el);
-            }
-            function beforeLeave(el) {
-                const body = el;
-                body.setAttribute('aria-hidden', 'true');
-                body.setAttribute('inert', '');
-                heightTransition.beforeLeave(el);
-            }
-            function leave(el, done) {
-                heightTransition.leave(el, done);
-            }
-            function afterLeave(el) {
-                heightTransition.afterLeave(el);
-            }
-            function cleanupTransition(el) {
-                heightTransition.cleanupTransition(el);
-            }
-            const __returned__ = { props, bodyStyle, heightTransition, beforeEnter, enter, afterEnter, beforeLeave, leave, afterLeave, cleanupTransition };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
-        }
-    });
-
-    injectSfcStyle("\n.acu-disclosure-group[data-v-73a020fe] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 0;\r\n  /* 根节点不裁切：折叠动画的裁切由 body 的内联 overflow 承担，静止时下拉菜单等浮层需要溢出到组外。 */\r\n  overflow: visible;\r\n  border-radius: var(--acu-radius-md);\r\n  background: transparent;\n}\n.acu-disclosure-group__header[data-v-73a020fe] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 8px;\r\n  width: 100%;\r\n  min-height: 34px;\r\n  appearance: none;\r\n  border: 0;\r\n  /* 头部自己收圆角：根节点已不再用 overflow: hidden 帮它裁掉悬停底色。 */\r\n  border-radius: var(--acu-radius-md);\r\n  padding: 7px 10px;\r\n  background: transparent;\r\n  color: var(--acu-text-2);\r\n  font: inherit;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.35;\r\n  text-align: left;\r\n  cursor: pointer;\r\n  user-select: none;\r\n  transition: background-color 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-disclosure-group__header[data-v-73a020fe]:hover {\r\n  background: var(--acu-hover-overlay);\n}\n.acu-disclosure-group--expanded .acu-disclosure-group__header[data-v-73a020fe] {\r\n  border-bottom-left-radius: 0;\r\n  border-bottom-right-radius: 0;\n}\n.acu-disclosure-group__header[data-v-73a020fe]:focus-visible {\r\n  outline: none;\r\n  box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-disclosure-group__chevron[data-v-73a020fe] {\r\n  flex: 0 0 10px;\r\n  width: 10px;\r\n  font-size: var(--acu-font-size-micro, 10px);\r\n  --acu-icon-color: var(--acu-text-3);\r\n  color: var(--acu-text-3);\r\n  transition: transform 0.15s ease;\n}\n.acu-disclosure-group__chevron--open[data-v-73a020fe] {\r\n  transform: rotate(90deg);\n}\n.acu-disclosure-group__label[data-v-73a020fe] {\r\n  flex: 1;\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\r\n  font-weight: 500;\r\n  color: var(--acu-text-2);\n}\n.acu-disclosure-group__meta[data-v-73a020fe] {\r\n  flex-shrink: 0;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-text-3);\r\n  font-variant-numeric: tabular-nums;\r\n  white-space: nowrap;\n}\n.acu-disclosure-group__body[data-v-73a020fe] {\r\n  box-sizing: border-box;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\r\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 18%, transparent);\r\n  padding: 8px;\r\n  opacity: 1;\r\n  transform: translateY(0);\n}\r\n", "src/presentation-v2/components/_lib/AcuDisclosureGroup.vue#style-0-73a020fe");
-    var AcuDisclosureGroup_vue_vue_type_style_index_0_scoped_73a020fe_lang = null;
-
-    const _hoisted_1$S = ["aria-expanded", "aria-controls"];
-    const _hoisted_2$O = [
-	"id",
-	"aria-hidden",
-	"inert"
-    ];
-    function _sfc_render$T(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock(
-		"div",
-		{ class: normalizeClass(["acu-disclosure-group", [$props.rootClass, { "acu-disclosure-group--expanded": $props.expanded }]]) },
-		[createBaseVNode("button", {
-			type: "button",
-			class: normalizeClass(["acu-disclosure-group__header", $props.headerClass]),
-			"aria-expanded": $props.expanded,
-			"aria-controls": $props.bodyId || undefined,
-			onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("toggle"))
-		}, [
-			createBaseVNode(
-				"i",
-				{
-					class: normalizeClass(["fa-solid fa-chevron-right acu-disclosure-group__chevron", [$props.chevronClass, {
-						"acu-disclosure-group__chevron--open": $props.expanded,
-						[$props.chevronOpenClass]: $props.expanded && $props.chevronOpenClass
-					}]]),
-					"aria-hidden": "true"
-				},
-				null,
-				2
-				/* CLASS */
-			),
-			createBaseVNode(
-				"span",
-				{ class: normalizeClass(["acu-disclosure-group__label", $props.labelClass]) },
-				[renderSlot(_ctx.$slots, "label", {}, () => [createTextVNode(
-					toDisplayString($props.label),
-					1
-					/* TEXT */
-				)], true)],
-				2
-				/* CLASS */
-			),
-			_ctx.$slots.meta || $props.meta ? (openBlock(), createElementBlock(
-				"span",
-				{
-					key: 0,
-					class: normalizeClass(["acu-disclosure-group__meta", $props.metaClass])
-				},
-				[renderSlot(_ctx.$slots, "meta", {}, () => [createTextVNode(
-					toDisplayString($props.meta),
-					1
-					/* TEXT */
-				)], true)],
-				2
-				/* CLASS */
-			)) : createCommentVNode("v-if", true)
-		], 10, _hoisted_1$S), createVNode(Transition, {
-			css: false,
-			onBeforeEnter: $setup.beforeEnter,
-			onEnter: $setup.enter,
-			onAfterEnter: $setup.afterEnter,
-			onEnterCancelled: $setup.cleanupTransition,
-			onBeforeLeave: $setup.beforeLeave,
-			onLeave: $setup.leave,
-			onAfterLeave: $setup.afterLeave,
-			onLeaveCancelled: $setup.cleanupTransition
-		}, {
-			default: withCtx(() => [$props.bodyMode === "show" || $props.expanded ? withDirectives((openBlock(), createElementBlock("div", {
-				key: 0,
-				id: $props.bodyId || undefined,
-				class: normalizeClass(["acu-disclosure-group__body", $props.bodyClass]),
-				style: normalizeStyle($setup.bodyStyle),
-				"aria-hidden": !$props.expanded ? "true" : undefined,
-				inert: !$props.expanded ? true : undefined
-			}, [renderSlot(_ctx.$slots, "default", {}, undefined, true)], 14, _hoisted_2$O)), [[vShow, $props.expanded]]) : createCommentVNode("v-if", true)]),
-			_: 3
-		})],
-		2
-		/* CLASS */
-	);
-    }
-    var AcuDisclosureGroup = /*#__PURE__*/ _export_sfc(_sfc_main$T, [["render", _sfc_render$T], ["__scopeId", "data-v-73a020fe"]]);
-
-    var _sfc_main$S = /*@__PURE__*/ defineComponent({
+    var _sfc_main$C = /*@__PURE__*/ defineComponent({
         __name: 'FormFillUpdateSettingsPanel',
         props: {
             showAdvanced: { type: Boolean, default: true }
@@ -194587,15 +198857,15 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-form-fill-update-settings-panel__settings-groups[data-v-eaa556c7] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 14px;\n}\n.acu-form-fill-update-settings-panel__setting-group[data-v-eaa556c7] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\n}\n.acu-form-fill-update-settings-panel__setting-group\r\n  + .acu-form-fill-update-settings-panel__setting-group[data-v-eaa556c7] {\r\n  padding-top: 14px;\r\n  border-top: 1px solid var(--acu-border-2);\n}\n.acu-form-fill-update-settings-panel__advanced[data-v-eaa556c7] {\r\n  border: 0;\r\n  background: transparent;\n}\n.acu-form-fill-update-settings-panel__number-grid[data-v-eaa556c7] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 10px;\n}\n@media (max-width: 560px) {\n.acu-form-fill-update-settings-panel__number-grid[data-v-eaa556c7] {\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/components/FormFillUpdateSettingsPanel.vue#style-0-eaa556c7");
     var FormFillUpdateSettingsPanel_vue_vue_type_style_index_0_scoped_eaa556c7_lang = null;
 
-    const _hoisted_1$R = { class: "acu-form-fill-update-settings-panel__settings-groups" };
-    const _hoisted_2$N = { class: "acu-form-fill-update-settings-panel__setting-group" };
-    const _hoisted_3$G = { class: "acu-form-fill-update-settings-panel__number-grid" };
-    function _sfc_render$S(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$C = { class: "acu-form-fill-update-settings-panel__settings-groups" };
+    const _hoisted_2$A = { class: "acu-form-fill-update-settings-panel__setting-group" };
+    const _hoisted_3$w = { class: "acu-form-fill-update-settings-panel__number-grid" };
+    function _sfc_render$C(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		title: $setup.formFillCopy.panels.update.title,
 		description: $setup.formFillCopy.panels.update.description
 	}, {
-		default: withCtx(() => [createBaseVNode("div", _hoisted_1$R, [createBaseVNode("section", _hoisted_2$N, [
+		default: withCtx(() => [createBaseVNode("div", _hoisted_1$C, [createBaseVNode("section", _hoisted_2$A, [
 			createVNode($setup["AcuFormRow"], {
 				label: "填表 API 预设",
 				hint: "默认使用当前 API，选择后仅影响填表功能。"
@@ -194644,7 +198914,7 @@ ${rejectionText}` : delegationFeedback,
 			"body-mode": "if",
 			onToggle: _cache[1] || (_cache[1] = ($event) => $setup.advancedExpanded = !$setup.advancedExpanded)
 		}, {
-			default: withCtx(() => [createBaseVNode("div", _hoisted_3$G, [(openBlock(true), createElementBlock(
+			default: withCtx(() => [createBaseVNode("div", _hoisted_3$w, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.advancedFields, (field) => {
@@ -194676,169 +198946,130 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	}, 8, ["title", "description"]);
     }
-    var FormFillUpdateSettingsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$S, [["render", _sfc_render$S], ["__scopeId", "data-v-eaa556c7"]]);
+    var FormFillUpdateSettingsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$C, [["render", _sfc_render$C], ["__scopeId", "data-v-eaa556c7"]]);
 
-    var _sfc_main$R = /*@__PURE__*/ defineComponent({
-        __name: 'AcuPresetDropdown',
+    var _sfc_main$B = /*@__PURE__*/ defineComponent({
+        __name: 'TableSelector',
         props: {
-            items: {},
-            modelValue: {},
-            defaultName: {},
-            emptyText: { default: '暂无预设' },
-            placeholder: { default: '未选择' },
-            disabled: { type: Boolean, default: false },
-            showDefaultAction: { type: Boolean, default: true }
+            sheetKeys: {},
+            selectedKeys: {},
+            sheetNames: {},
+            emptyText: {},
+            disabled: { type: Boolean }
         },
-        emits: ["update:modelValue", "set-default"],
+        emits: ["update:selectedKeys", "select-all", "select-none"],
         setup(__props, { expose: __expose, emit: __emit }) {
             __expose();
             const props = __props;
             const emit = __emit;
-            const open = ref(false);
-            const rootRef = ref(null);
-            const selectedLabel = computed(() => {
-                const item = props.items.find(i => itemValue(i) === props.modelValue);
-                return item ? itemLabel(item) : props.placeholder;
-            });
-            function itemValue(item) {
-                return item.value ?? item.name ?? '';
+            const selectedSet = computed(() => new Set(props.selectedKeys));
+            const emptyText = computed(() => props.emptyText || '尚无可选表格。');
+            function nameFor(key) {
+                return props.sheetNames?.[key] || key;
             }
-            function itemLabel(item) {
-                return item.label ?? item.name ?? item.value ?? '';
+            function toggle(key, checked) {
+                const set = new Set(props.selectedKeys);
+                if (checked)
+                    set.add(key);
+                else
+                    set.delete(key);
+                // preserve original order
+                const ordered = props.sheetKeys.filter(k => set.has(k));
+                emit('update:selectedKeys', ordered);
             }
-            function toggleOpen() {
-                if (props.disabled)
-                    return;
-                open.value = !open.value;
-            }
-            function selectItem(value) {
-                if (props.disabled)
-                    return;
-                emit('update:modelValue', value);
-                open.value = false;
-            }
-            function onClickOutside(e) {
-                if (rootRef.value && !rootRef.value.contains(e.target)) {
-                    open.value = false;
-                }
-            }
-            let hostDoc = null;
-            onMounted(() => {
-                hostDoc = getAcuHostDocument();
-                hostDoc.addEventListener('mousedown', onClickOutside);
-            });
-            onBeforeUnmount(() => {
-                hostDoc?.removeEventListener('mousedown', onClickOutside);
-            });
-            const __returned__ = { props, emit, open, rootRef, selectedLabel, itemValue, itemLabel, toggleOpen, selectItem, onClickOutside, get hostDoc() { return hostDoc; }, set hostDoc(v) { hostDoc = v; } };
+            const __returned__ = { props, emit, selectedSet, emptyText, nameFor, toggle, AcuButton, AcuCheckbox };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-preset-dd[data-v-da92b393] { position: relative; flex: 1; min-width: 0;\n}\n.acu-preset-dd__trigger[data-v-da92b393] {\r\n  display: flex; align-items: center; gap: var(--acu-space-2, 8px); width: 100%;\r\n  min-height: var(--acu-control-height-md, 32px); padding: var(--acu-control-padding-y-md, 6px) var(--acu-control-padding-x-md, 9px);\r\n  background: var(--acu-bg-2); border: 0;\r\n  border-radius: var(--acu-radius-sm); color: var(--acu-text-1);\r\n  font: inherit; font-size: var(--acu-font-size-body, 12px); cursor: pointer;\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-preset-dd__trigger[data-v-da92b393]:hover {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2);\n}\n.acu-preset-dd__trigger[data-v-da92b393]:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-preset-dd__trigger[data-v-da92b393]:disabled { opacity: 0.5; cursor: not-allowed;\n}\n.acu-preset-dd--disabled[data-v-da92b393] { pointer-events: none; opacity: 0.5;\n}\n.acu-preset-dd__label[data-v-da92b393] { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;\n}\n.acu-preset-dd__caret[data-v-da92b393] { font-size: var(--acu-font-size-micro, 10px); --acu-icon-color: var(--acu-text-3); color: var(--acu-text-3); transition: transform 0.15s ease;\n}\n.acu-preset-dd__caret--open[data-v-da92b393] { transform: rotate(180deg);\n}\n.acu-preset-dd__menu[data-v-da92b393] {\r\n  position: absolute; top: calc(100% + var(--acu-space-1, 4px)); left: 0; right: 0; z-index: 100;\r\n  margin: 0; padding: var(--acu-space-1, 4px) 0; list-style: none;\r\n  background: var(--acu-bg-1); border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-sm); box-shadow: var(--acu-shadow);\r\n  max-height: var(--acu-menu-max-height, 240px); overflow-y: auto;\n}\n.acu-preset-dd__item[data-v-da92b393] {\r\n  display: flex; align-items: center; gap: var(--acu-space-2, 8px);\r\n  padding: var(--acu-space-2, 8px) var(--acu-space-3, 12px); cursor: pointer; font-size: var(--acu-font-size-body-lg, 13px);\r\n  color: var(--acu-text-2); transition: background 0.1s ease;\n}\n.acu-preset-dd__item[data-v-da92b393]:hover { background: var(--acu-hover-overlay); color: var(--acu-text-1);\n}\n.acu-preset-dd__item--active[data-v-da92b393] { color: var(--acu-on-accent); background: var(--acu-accent);\n}\n.acu-preset-dd__item-name[data-v-da92b393] { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500;\n}\n.acu-preset-dd__item-meta[data-v-da92b393] { font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3); white-space: nowrap;\n}\n.acu-preset-dd__star[data-v-da92b393] {\r\n  width: var(--acu-menu-action-size, 24px); height: var(--acu-menu-action-size, 24px); display: flex; align-items: center; justify-content: center;\r\n  border: 0; background: transparent; color: var(--acu-text-3); cursor: pointer;\r\n  border-radius: var(--acu-radius-sm); font-size: var(--acu-font-size-body, 12px); transition: color 0.15s ease;\n}\n.acu-preset-dd__star[data-v-da92b393]:hover { color: var(--acu-text-1); background: var(--acu-hover-overlay);\n}\n.acu-preset-dd__star--active[data-v-da92b393] { color: var(--acu-text-1);\n}\n.acu-preset-dd__item--active .acu-preset-dd__item-meta[data-v-da92b393],\r\n.acu-preset-dd__item--active .acu-preset-dd__star[data-v-da92b393],\r\n.acu-preset-dd__item--active .acu-preset-dd__check[data-v-da92b393] { --acu-icon-color: var(--acu-on-accent); color: var(--acu-on-accent);\n}\n.acu-preset-dd__check[data-v-da92b393] { font-size: var(--acu-font-size-caption, 11px); --acu-icon-color: var(--acu-text-1); color: var(--acu-text-1);\n}\n.acu-preset-dd__empty[data-v-da92b393] { padding: var(--acu-space-3, 12px); text-align: center; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\r\n", "src/presentation-v2/components/_lib/AcuPresetDropdown.vue#style-0-da92b393");
-    var AcuPresetDropdown_vue_vue_type_style_index_0_scoped_da92b393_lang = null;
+    injectSfcStyle("\n.acu-v2-table-selector[data-v-d188b9fa] { display: flex; flex-direction: column; gap: 8px; min-width: 0;\n}\n.acu-v2-table-selector__empty[data-v-d188b9fa] {\r\n  padding: 10px 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\r\n  border: 0;\r\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\n}\n.acu-v2-table-selector__actions[data-v-d188b9fa] { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;\n}\n.acu-v2-table-selector__count[data-v-d188b9fa] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-table-selector__grid[data-v-d188b9fa] {\r\n  display: grid; gap: 6px;\r\n  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));\r\n  max-height: 240px; overflow: auto;\r\n  padding: 0;\r\n  border: 0; border-radius: 0;\r\n  background: transparent;\n}\n.acu-v2-table-selector__item[data-v-d188b9fa] {\r\n  padding: 8px 10px;\r\n  border: 0; border-radius: var(--acu-radius-sm);\r\n  background: transparent; min-width: 0;\n}\r\n", "src/presentation-v2/components/TableSelector.vue#style-0-d188b9fa");
+    var TableSelector_vue_vue_type_style_index_0_scoped_d188b9fa_lang = null;
 
-    const _hoisted_1$Q = ["disabled"];
-    const _hoisted_2$M = { class: "acu-preset-dd__label" };
-    const _hoisted_3$F = {
+    const _hoisted_1$B = { class: "acu-v2-table-selector" };
+    const _hoisted_2$z = {
 	key: 0,
-	class: "acu-preset-dd__menu"
+	class: "acu-v2-table-selector__empty"
     };
-    const _hoisted_4$A = ["onClick"];
-    const _hoisted_5$t = { class: "acu-preset-dd__item-name" };
-    const _hoisted_6$s = {
+    const _hoisted_3$v = { class: "acu-v2-table-selector__actions" };
+    const _hoisted_4$s = { class: "acu-v2-table-selector__count" };
+    const _hoisted_5$n = {
 	key: 0,
-	class: "acu-preset-dd__item-meta"
+	class: "acu-v2-table-selector__readonly-hint"
     };
-    const _hoisted_7$p = ["title", "onClick"];
-    const _hoisted_8$p = {
-	key: 2,
-	class: "fa-solid fa-check acu-preset-dd__check"
-    };
-    const _hoisted_9$m = {
-	key: 0,
-	class: "acu-preset-dd__empty"
-    };
-    function _sfc_render$R(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock(
+    const _hoisted_6$m = { class: "acu-v2-table-selector__grid" };
+    function _sfc_render$B(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$B, [!$props.sheetKeys.length ? (openBlock(), createElementBlock(
 		"div",
-		{
-			class: normalizeClass(["acu-preset-dd", { "acu-preset-dd--disabled": $props.disabled }]),
-			ref: "rootRef"
-		},
-		[createBaseVNode("button", {
-			type: "button",
-			class: "acu-preset-dd__trigger",
-			disabled: $props.disabled,
-			onClick: $setup.toggleOpen
-		}, [createBaseVNode(
-			"span",
-			_hoisted_2$M,
-			toDisplayString($setup.selectedLabel),
-			1
-			/* TEXT */
-		), createBaseVNode(
-			"i",
-			{ class: normalizeClass(["fa-solid fa-chevron-down acu-preset-dd__caret", { "acu-preset-dd__caret--open": $setup.open }]) },
-			null,
-			2
-			/* CLASS */
-		)], 8, _hoisted_1$Q), $setup.open ? (openBlock(), createElementBlock("ul", _hoisted_3$F, [(openBlock(true), createElementBlock(
+		_hoisted_2$z,
+		toDisplayString($setup.emptyText),
+		1
+		/* TEXT */
+	)) : (openBlock(), createElementBlock(
+		Fragment,
+		{ key: 1 },
+		[createBaseVNode("div", _hoisted_3$v, [
+			createVNode($setup["AcuButton"], {
+				size: "sm",
+				disabled: $props.disabled,
+				onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("select-all"))
+			}, {
+				default: withCtx(() => [..._cache[2] || (_cache[2] = [createTextVNode(
+					"全选",
+					-1
+					/* CACHED */
+				)])]),
+				_: 1
+			}, 8, ["disabled"]),
+			createVNode($setup["AcuButton"], {
+				size: "sm",
+				disabled: $props.disabled,
+				onClick: _cache[1] || (_cache[1] = ($event) => _ctx.$emit("select-none"))
+			}, {
+				default: withCtx(() => [..._cache[3] || (_cache[3] = [createTextVNode(
+					"全不选",
+					-1
+					/* CACHED */
+				)])]),
+				_: 1
+			}, 8, ["disabled"]),
+			createBaseVNode(
+				"span",
+				_hoisted_4$s,
+				"已选 " + toDisplayString($props.selectedKeys.length) + " / " + toDisplayString($props.sheetKeys.length),
+				1
+				/* TEXT */
+			),
+			$props.disabled ? (openBlock(), createElementBlock("span", _hoisted_5$n, "仅展示模板：数据库运行时未加载，暂不可选择执行目标")) : createCommentVNode("v-if", true)
+		]), createBaseVNode("div", _hoisted_6$m, [(openBlock(true), createElementBlock(
 			Fragment,
 			null,
-			renderList($props.items, (item) => {
-				return openBlock(), createElementBlock("li", {
-					key: $setup.itemValue(item),
-					class: normalizeClass(["acu-preset-dd__item", { "acu-preset-dd__item--active": $setup.itemValue(item) === $props.modelValue }]),
-					onClick: ($event) => $setup.selectItem($setup.itemValue(item))
-				}, [
-					createBaseVNode(
-						"span",
-						_hoisted_5$t,
-						toDisplayString($setup.itemLabel(item)),
-						1
-						/* TEXT */
-					),
-					item.meta ? (openBlock(), createElementBlock(
-						"span",
-						_hoisted_6$s,
-						toDisplayString(item.meta),
-						1
-						/* TEXT */
-					)) : createCommentVNode("v-if", true),
-					$props.showDefaultAction ? (openBlock(), createElementBlock("button", {
-						key: 1,
-						type: "button",
-						class: normalizeClass(["acu-preset-dd__star", { "acu-preset-dd__star--active": $setup.itemValue(item) === $props.defaultName }]),
-						title: $setup.itemValue(item) === $props.defaultName ? "全局默认" : "设为全局默认",
-						onClick: withModifiers(($event) => _ctx.$emit("set-default", $setup.itemValue(item)), ["stop"])
-					}, [createBaseVNode(
-						"i",
-						{ class: normalizeClass($setup.itemValue(item) === $props.defaultName ? "fa-solid fa-star" : "fa-regular fa-star") },
-						null,
-						2
-						/* CLASS */
-					)], 10, _hoisted_7$p)) : createCommentVNode("v-if", true),
-					$setup.itemValue(item) === $props.modelValue ? (openBlock(), createElementBlock("i", _hoisted_8$p)) : createCommentVNode("v-if", true)
-				], 10, _hoisted_4$A);
+			renderList($props.sheetKeys, (key) => {
+				return openBlock(), createElementBlock("div", {
+					key,
+					class: "acu-v2-table-selector__item"
+				}, [createVNode($setup["AcuCheckbox"], {
+					"model-value": $setup.selectedSet.has(key),
+					disabled: $props.disabled,
+					label: $setup.nameFor(key),
+					"onUpdate:modelValue": ($event) => $setup.toggle(key, $event)
+				}, null, 8, [
+					"model-value",
+					"disabled",
+					"label",
+					"onUpdate:modelValue"
+				])]);
 			}),
 			128
 			/* KEYED_FRAGMENT */
-		)), !$props.items.length ? (openBlock(), createElementBlock(
-			"li",
-			_hoisted_9$m,
-			toDisplayString($props.emptyText),
-			1
-			/* TEXT */
-		)) : createCommentVNode("v-if", true)])) : createCommentVNode("v-if", true)],
-		2
-		/* CLASS */
-	);
+		))])],
+		64
+		/* STABLE_FRAGMENT */
+	))]);
     }
-    var AcuPresetDropdown = /*#__PURE__*/ _export_sfc(_sfc_main$R, [["render", _sfc_render$R], ["__scopeId", "data-v-da92b393"]]);
+    var TableSelector = /*#__PURE__*/ _export_sfc(_sfc_main$B, [["render", _sfc_render$B], ["__scopeId", "data-v-d188b9fa"]]);
 
-    var _sfc_main$Q = /*@__PURE__*/ defineComponent({
+    var _sfc_main$A = /*@__PURE__*/ defineComponent({
         __name: 'TablePresetDrawer',
         props: {
             isOpen: { type: Boolean },
@@ -194860,14 +199091,14 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-table-drawer__top-actions[data-v-c3883113] {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\n}\n.acu-v2-manage-list[data-v-c3883113] {\r\n  list-style: none;\r\n  margin: 0;\r\n  padding: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-v2-manage-item[data-v-c3883113] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 10px;\r\n  padding: 10px 12px;\r\n  border: 0;\r\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\n}\n.acu-v2-manage-item[data-v-c3883113]:last-child {\r\n  border-bottom: 0;\n}\n.acu-v2-manage-item__info[data-v-c3883113] {\r\n  flex: 1;\r\n  min-width: 0;\n}\n.acu-v2-manage-item__name[data-v-c3883113] {\r\n  display: block;\r\n  font-size: var(--acu-font-size-list-title, 13px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  font-weight: 500;\r\n  color: var(--acu-text-1);\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-v2-manage-item__meta[data-v-c3883113] {\r\n  display: block;\r\n  margin-top: 2px;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: var(--acu-line-height-caption, 1.5);\r\n  color: var(--acu-text-3);\n}\n.acu-v2-manage-item__actions[data-v-c3883113] {\r\n  display: flex;\r\n  gap: 4px;\n}\n.acu-v2-table-drawer__empty[data-v-c3883113] {\r\n  margin: 12px 0;\n}\r\n\r\n", "src/presentation-v2/components/TablePresetDrawer.vue#style-0-c3883113");
     var TablePresetDrawer_vue_vue_type_style_index_0_scoped_c3883113_lang = null;
 
-    const _hoisted_1$P = { class: "acu-v2-table-drawer__top-actions" };
-    const _hoisted_2$L = {
+    const _hoisted_1$A = { class: "acu-v2-table-drawer__top-actions" };
+    const _hoisted_2$y = {
 	key: 1,
 	class: "acu-v2-manage-list"
     };
-    const _hoisted_3$E = { class: "acu-v2-manage-item__info" };
-    const _hoisted_4$z = { class: "acu-v2-manage-item__actions" };
-    function _sfc_render$Q(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_3$u = { class: "acu-v2-manage-item__info" };
+    const _hoisted_4$r = { class: "acu-v2-manage-item__actions" };
+    function _sfc_render$A(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
 		"is-open": $props.isOpen,
 		title: $props.title,
@@ -194886,7 +199117,7 @@ ${rejectionText}` : delegationFeedback,
 				)]),
 				_: 1
 			}, 8, ["kind"])) : createCommentVNode("v-if", true),
-			createBaseVNode("div", _hoisted_1$P, [createVNode($setup["AcuButton"], {
+			createBaseVNode("div", _hoisted_1$A, [createVNode($setup["AcuButton"], {
 				variant: "primary",
 				disabled: $props.busy,
 				onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("create-blank"))
@@ -194904,14 +199135,14 @@ ${rejectionText}` : delegationFeedback,
 				)])]),
 				_: 1
 			}, 8, ["disabled"])]),
-			$props.presetMeta.length ? (openBlock(), createElementBlock("ul", _hoisted_2$L, [(openBlock(true), createElementBlock(
+			$props.presetMeta.length ? (openBlock(), createElementBlock("ul", _hoisted_2$y, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($props.presetMeta, (meta) => {
 					return openBlock(), createElementBlock("li", {
 						key: meta.name,
 						class: "acu-v2-manage-item"
-					}, [createBaseVNode("div", _hoisted_3$E, [createVNode(
+					}, [createBaseVNode("div", _hoisted_3$u, [createVNode(
 						$setup["AcuText"],
 						{
 							as: "span",
@@ -194963,7 +199194,7 @@ ${rejectionText}` : delegationFeedback,
 						},
 						1024
 						/* DYNAMIC_SLOTS */
-					)]), createBaseVNode("div", _hoisted_4$z, [meta.kind === "runtime" ? (openBlock(), createElementBlock(
+					)]), createBaseVNode("div", _hoisted_4$r, [meta.kind === "runtime" ? (openBlock(), createElementBlock(
 						Fragment,
 						{ key: 0 },
 						[createCommentVNode(" 只读 runtime 项：仅导出，不渲染 star/rename/edit/delete "), createVNode($setup["AcuIconButton"], {
@@ -195049,7 +199280,7 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	}, 8, ["is-open", "title"]);
     }
-    var TablePresetDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$Q, [["render", _sfc_render$Q], ["__scopeId", "data-v-c3883113"]]);
+    var TablePresetDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$A, [["render", _sfc_render$A], ["__scopeId", "data-v-c3883113"]]);
 
     function buildTemplateRecoveryConfirmMessage_ACU(action, error) {
         const actionText = action === 'save-template' ? '保存这次聊天模板修改' : '切换并保存当前聊天模板';
@@ -196200,7 +200431,7 @@ ${rejectionText}` : delegationFeedback,
         },
     };
 
-    var _sfc_main$P = /*@__PURE__*/ defineComponent({
+    var _sfc_main$z = /*@__PURE__*/ defineComponent({
         __name: 'TableTemplatePresetPanel',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -196222,11 +200453,11 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-table-template-panel__status-line[data-v-626071ec] {\r\n  margin: 0 0 10px;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-table-template-panel__preset-row[data-v-626071ec] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) repeat(4, max-content);\r\n  gap: 6px;\r\n  align-items: stretch;\r\n  min-width: 0;\n}\n.acu-table-template-panel__action-area[data-v-626071ec] {\r\n  margin-top: 10px;\n}\n.acu-table-template-panel__visualizer-button[data-v-626071ec] {\r\n  width: 100%;\n}\r\n\r\n", "src/presentation-v2/components/TableTemplatePresetPanel.vue#style-0-626071ec");
     var TableTemplatePresetPanel_vue_vue_type_style_index_0_scoped_626071ec_lang = null;
 
-    const _hoisted_1$O = { class: "acu-text__value" };
-    const _hoisted_2$K = { class: "acu-text__value" };
-    const _hoisted_3$D = { class: "acu-table-template-panel__preset-row" };
-    const _hoisted_4$y = { class: "acu-table-template-panel__action-area" };
-    function _sfc_render$P(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$z = { class: "acu-text__value" };
+    const _hoisted_2$x = { class: "acu-text__value" };
+    const _hoisted_3$t = { class: "acu-table-template-panel__preset-row" };
+    const _hoisted_4$q = { class: "acu-table-template-panel__action-area" };
+    function _sfc_render$z(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		title: $setup.tableCopy.panels.templatePreset.title,
 		description: $setup.tableCopy.panels.templatePreset.description
@@ -196266,7 +200497,7 @@ ${rejectionText}` : delegationFeedback,
 					)),
 					createBaseVNode(
 						"strong",
-						_hoisted_1$O,
+						_hoisted_1$z,
 						toDisplayString($setup.templates.selectedChatPresetLabel.value),
 						1
 						/* TEXT */
@@ -196280,7 +200511,7 @@ ${rejectionText}` : delegationFeedback,
 							/* CACHED */
 						)), createBaseVNode(
 							"strong",
-							_hoisted_2$K,
+							_hoisted_2$x,
 							toDisplayString($setup.templates.selectedGlobalPreset.value),
 							1
 							/* TEXT */
@@ -196315,7 +200546,7 @@ ${rejectionText}` : delegationFeedback,
 				]),
 				_: 1
 			}),
-			createBaseVNode("div", _hoisted_3$D, [
+			createBaseVNode("div", _hoisted_3$t, [
 				createVNode($setup["AcuPresetDropdown"], {
 					items: $setup.templates.chatPresetItems.value,
 					"model-value": $setup.templates.selectedChatPreset.value,
@@ -196372,7 +200603,7 @@ ${rejectionText}` : delegationFeedback,
 					onClick: $setup.management.openManage
 				}, null, 8, ["disabled", "onClick"])
 			]),
-			createBaseVNode("div", _hoisted_4$y, [createVNode($setup["AcuButton"], {
+			createBaseVNode("div", _hoisted_4$q, [createVNode($setup["AcuButton"], {
 				variant: "primary",
 				class: "acu-table-template-panel__visualizer-button",
 				title: "打开可视化表格编辑器",
@@ -196420,128 +200651,448 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	}, 8, ["title", "description"]);
     }
-    var TableTemplatePresetPanel = /*#__PURE__*/ _export_sfc(_sfc_main$P, [["render", _sfc_render$P], ["__scopeId", "data-v-626071ec"]]);
+    var TableTemplatePresetPanel = /*#__PURE__*/ _export_sfc(_sfc_main$z, [["render", _sfc_render$z], ["__scopeId", "data-v-626071ec"]]);
 
-    var _sfc_main$O = /*@__PURE__*/ defineComponent({
-        __name: 'TableSelector',
+    var _sfc_main$y = /*@__PURE__*/ defineComponent({
+        __name: 'WorldbookSelector',
         props: {
-            sheetKeys: {},
-            selectedKeys: {},
-            sheetNames: {},
-            emptyText: {},
-            disabled: { type: Boolean }
+            modelValue: {},
+            names: {},
+            charPrimary: {},
+            status: {},
+            error: {},
+            filterable: { type: Boolean },
+            showCharacterOption: { type: Boolean },
+            characterOptionLabel: {},
+            characterFallbackLabel: {}
         },
-        emits: ["update:selectedKeys", "select-all", "select-none"],
-        setup(__props, { expose: __expose, emit: __emit }) {
+        emits: ["update:modelValue"],
+        setup(__props, { expose: __expose }) {
             __expose();
             const props = __props;
-            const emit = __emit;
-            const selectedSet = computed(() => new Set(props.selectedKeys));
-            const emptyText = computed(() => props.emptyText || '尚无可选表格。');
-            function nameFor(key) {
-                return props.sheetNames?.[key] || key;
-            }
-            function toggle(key, checked) {
-                const set = new Set(props.selectedKeys);
-                if (checked)
-                    set.add(key);
-                else
-                    set.delete(key);
-                // preserve original order
-                const ordered = props.sheetKeys.filter(k => set.has(k));
-                emit('update:selectedKeys', ordered);
-            }
-            const __returned__ = { props, emit, selectedSet, emptyText, nameFor, toggle, AcuButton, AcuCheckbox };
+            const filter = ref('');
+            const filteredNames = computed(() => {
+                const list = props.names;
+                const f = filter.value.trim().toLowerCase();
+                if (!f)
+                    return list;
+                return list.filter(name => name.toLowerCase().includes(f));
+            });
+            const worldbookOptions = computed(() => {
+                const result = [];
+                if (props.charPrimary || props.showCharacterOption) {
+                    const label = props.characterOptionLabel
+                        || (props.charPrimary ? `当前角色卡主世界书 · ${props.charPrimary}` : props.characterFallbackLabel || '当前角色卡主世界书');
+                    result.push({ value: 'character', label });
+                }
+                for (const name of filteredNames.value) {
+                    result.push({ value: name, label: name });
+                }
+                return result;
+            });
+            const __returned__ = { props, filter, filteredNames, worldbookOptions, AcuFormRow, AcuInput, AcuSelect, AcuText };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-table-selector[data-v-d188b9fa] { display: flex; flex-direction: column; gap: 8px; min-width: 0;\n}\n.acu-v2-table-selector__empty[data-v-d188b9fa] {\r\n  padding: 10px 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\r\n  border: 0;\r\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\n}\n.acu-v2-table-selector__actions[data-v-d188b9fa] { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;\n}\n.acu-v2-table-selector__count[data-v-d188b9fa] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-table-selector__grid[data-v-d188b9fa] {\r\n  display: grid; gap: 6px;\r\n  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));\r\n  max-height: 240px; overflow: auto;\r\n  padding: 0;\r\n  border: 0; border-radius: 0;\r\n  background: transparent;\n}\n.acu-v2-table-selector__item[data-v-d188b9fa] {\r\n  padding: 8px 10px;\r\n  border: 0; border-radius: var(--acu-radius-sm);\r\n  background: transparent; min-width: 0;\n}\r\n", "src/presentation-v2/components/TableSelector.vue#style-0-d188b9fa");
-    var TableSelector_vue_vue_type_style_index_0_scoped_d188b9fa_lang = null;
+    injectSfcStyle("\n.acu-v2-wb-selector[data-v-3ed3b837] { display: flex; flex-direction: column; gap: 10px; min-width: 0;\n}\r\n", "src/presentation-v2/components/WorldbookSelector.vue#style-0-3ed3b837");
+    var WorldbookSelector_vue_vue_type_style_index_0_scoped_3ed3b837_lang = null;
 
-    const _hoisted_1$N = { class: "acu-v2-table-selector" };
-    const _hoisted_2$J = {
-	key: 0,
-	class: "acu-v2-table-selector__empty"
-    };
-    const _hoisted_3$C = { class: "acu-v2-table-selector__actions" };
-    const _hoisted_4$x = { class: "acu-v2-table-selector__count" };
-    const _hoisted_5$s = {
-	key: 0,
-	class: "acu-v2-table-selector__readonly-hint"
-    };
-    const _hoisted_6$r = { class: "acu-v2-table-selector__grid" };
-    function _sfc_render$O(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$N, [!$props.sheetKeys.length ? (openBlock(), createElementBlock(
-		"div",
-		_hoisted_2$J,
-		toDisplayString($setup.emptyText),
-		1
-		/* TEXT */
-	)) : (openBlock(), createElementBlock(
-		Fragment,
-		{ key: 1 },
-		[createBaseVNode("div", _hoisted_3$C, [
-			createVNode($setup["AcuButton"], {
-				size: "sm",
-				disabled: $props.disabled,
-				onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("select-all"))
-			}, {
-				default: withCtx(() => [..._cache[2] || (_cache[2] = [createTextVNode(
-					"全选",
-					-1
-					/* CACHED */
-				)])]),
-				_: 1
-			}, 8, ["disabled"]),
-			createVNode($setup["AcuButton"], {
-				size: "sm",
-				disabled: $props.disabled,
-				onClick: _cache[1] || (_cache[1] = ($event) => _ctx.$emit("select-none"))
-			}, {
-				default: withCtx(() => [..._cache[3] || (_cache[3] = [createTextVNode(
-					"全不选",
-					-1
-					/* CACHED */
-				)])]),
-				_: 1
-			}, 8, ["disabled"]),
-			createBaseVNode(
-				"span",
-				_hoisted_4$x,
-				"已选 " + toDisplayString($props.selectedKeys.length) + " / " + toDisplayString($props.sheetKeys.length),
+    const _hoisted_1$y = { class: "acu-v2-wb-selector" };
+    function _sfc_render$y(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$y, [
+		$props.filterable ? (openBlock(), createBlock($setup["AcuFormRow"], {
+			key: 0,
+			label: "筛选"
+		}, {
+			default: withCtx(() => [createVNode($setup["AcuInput"], {
+				modelValue: $setup.filter,
+				"onUpdate:modelValue": _cache[0] || (_cache[0] = ($event) => $setup.filter = $event),
+				type: "text",
+				placeholder: "筛选世界书..."
+			}, null, 8, ["modelValue"])]),
+			_: 1
+		})) : createCommentVNode("v-if", true),
+		createVNode($setup["AcuFormRow"], { label: "目标世界书" }, {
+			default: withCtx(() => [createVNode($setup["AcuSelect"], {
+				options: $setup.worldbookOptions,
+				"model-value": $props.modelValue,
+				disabled: $props.status === "loading",
+				placeholder: "未选择",
+				"onUpdate:modelValue": _cache[1] || (_cache[1] = ($event) => _ctx.$emit("update:modelValue", $event))
+			}, null, 8, [
+				"options",
+				"model-value",
+				"disabled"
+			])]),
+			_: 1
+		}),
+		$props.status === "error" ? (openBlock(), createBlock($setup["AcuText"], {
+			key: 1,
+			variant: "error",
+			class: "acu-v2-wb-selector__error"
+		}, {
+			default: withCtx(() => [createTextVNode(
+				toDisplayString($props.error || "加载失败"),
 				1
 				/* TEXT */
-			),
-			$props.disabled ? (openBlock(), createElementBlock("span", _hoisted_5$s, "仅展示模板：数据库运行时未加载，暂不可选择执行目标")) : createCommentVNode("v-if", true)
-		]), createBaseVNode("div", _hoisted_6$r, [(openBlock(true), createElementBlock(
-			Fragment,
-			null,
-			renderList($props.sheetKeys, (key) => {
-				return openBlock(), createElementBlock("div", {
-					key,
-					class: "acu-v2-table-selector__item"
-				}, [createVNode($setup["AcuCheckbox"], {
-					"model-value": $setup.selectedSet.has(key),
-					disabled: $props.disabled,
-					label: $setup.nameFor(key),
-					"onUpdate:modelValue": ($event) => $setup.toggle(key, $event)
-				}, null, 8, [
-					"model-value",
-					"disabled",
-					"label",
-					"onUpdate:modelValue"
-				])]);
-			}),
-			128
-			/* KEYED_FRAGMENT */
-		))])],
-		64
-		/* STABLE_FRAGMENT */
-	))]);
+			)]),
+			_: 1
+		})) : createCommentVNode("v-if", true)
+	]);
     }
-    var TableSelector = /*#__PURE__*/ _export_sfc(_sfc_main$O, [["render", _sfc_render$O], ["__scopeId", "data-v-d188b9fa"]]);
+    var WorldbookSelector = /*#__PURE__*/ _export_sfc(_sfc_main$y, [["render", _sfc_render$y], ["__scopeId", "data-v-3ed3b837"]]);
+
+    /**
+     * useFormFillInjectionTarget — 填表"注入目标世界书"（Component A，§4.2）
+     *
+     * 管理 worldbookConfig.injectionTarget。值为：
+     *   - 'character'（写入角色卡主世界书；默认）
+     *   - 一个具体的世界书名（写入指定世界书）
+     *
+     * 这个 target 是写入侧（填好的表内容会写到这本书的条目里），
+     * 与 Component B 的 source/enabledEntries（提示词附带条目）相互独立。
+     */
+    const CLEANUP_SETTLE_DELAY_MS = 300;
+    function normalizeTarget(value) {
+        const trimmed = String(value || '').trim();
+        return trimmed || 'character';
+    }
+    async function waitForCleanupSettle() {
+        await new Promise(resolve => setTimeout(resolve, CLEANUP_SETTLE_DELAY_MS));
+    }
+    async function resolveLorebookName(targetSetting) {
+        if (targetSetting === 'character') {
+            return await getCurrentCharPrimaryLorebook_ACU();
+        }
+        return targetSetting || null;
+    }
+    function useFormFillInjectionTarget() {
+        const target = ref('character');
+        const switching = ref(false);
+        const toast = useToastStore();
+        function refreshFromSettings() {
+            const cfg = getCurrentWorldbookConfig_ACU();
+            target.value = normalizeTarget(cfg?.injectionTarget);
+        }
+        function setTarget(value) {
+            const cfg = getCurrentWorldbookConfig_ACU();
+            cfg.injectionTarget = normalizeTarget(value);
+            target.value = cfg.injectionTarget;
+            saveSettings_ACU();
+        }
+        async function switchTarget(value) {
+            const cfg = getCurrentWorldbookConfig_ACU();
+            const oldTargetSetting = normalizeTarget(cfg.injectionTarget);
+            const newTargetSetting = normalizeTarget(value);
+            if (oldTargetSetting === newTargetSetting)
+                return;
+            switching.value = true;
+            try {
+                const oldLorebookName = await resolveLorebookName(oldTargetSetting);
+                if (oldLorebookName) {
+                    toast.info(`正在从旧目标 [${oldLorebookName}] 中清除条目...`, { muteable: false });
+                    try {
+                        await deleteAllGeneratedEntries_ACU$1(oldLorebookName);
+                        await waitForCleanupSettle();
+                    }
+                    catch (e) {
+                        logError_ACU(`Failed to clean up old target ${oldLorebookName}:`, e);
+                    }
+                }
+                else {
+                    logWarn_ACU('Old lorebook name could not be determined, skipping cleanup.');
+                }
+                cfg.injectionTarget = newTargetSetting;
+                target.value = newTargetSetting;
+                saveSettings_ACU();
+                logDebug_ACU(`Injection target changed from "${oldTargetSetting}" to "${newTargetSetting}" for char ${currentChatFileIdentifier_ACU}.`);
+                if (currentJsonTableData_ACU) {
+                    toast.info('正在向新目标注入条目...', { muteable: false });
+                    await updateReadableLorebookEntry_ACU(true);
+                    toast.success('数据注入目标已成功切换！', { muteable: false });
+                }
+                else {
+                    toast.warning('数据注入目标已更新，但当前无数据可注入。', { muteable: false });
+                }
+            }
+            finally {
+                switching.value = false;
+            }
+        }
+        /** WorldbookSelector 用的 modelValue：'character' 或 bookName。 */
+        const selectorValue = computed(() => target.value || 'character');
+        async function onSelectorChange(value) {
+            await switchTarget(value);
+        }
+        /** 文案：当前注入目标的人类可读名。 */
+        async function describeTarget() {
+            if (target.value === 'character') {
+                try {
+                    const charLorebooks = await getCharLorebooks_ACU({ type: 'all' });
+                    return charLorebooks.primary
+                        ? `角色卡绑定世界书 · ${charLorebooks.primary}`
+                        : '角色卡绑定世界书（当前未解析到角色卡）';
+                }
+                catch {
+                    return '角色卡绑定世界书';
+                }
+            }
+            return target.value || '（未选择）';
+        }
+        return {
+            target,
+            switching,
+            selectorValue,
+            refreshFromSettings,
+            setTarget,
+            switchTarget,
+            onSelectorChange,
+            describeTarget,
+        };
+    }
+
+    /**
+     * useFormFillWorldbookConfig — 填表"附加世界书条目"来源（Component B，§4.2）
+     *
+     * 操作 worldbookConfig.source / worldbookConfig.manualSelection。
+     * 决定填表 AI 提示词附带的条目从哪本书来。
+     *   - source='character'：跟随角色卡的所有世界书（primary + additional）
+     *   - source='manual'：手动指定多本世界书（manualSelection）
+     *
+     * 与 useFormFillInjectionTarget（写入侧）相互独立。
+     */
+    function normalizeSelection(names) {
+        if (!Array.isArray(names))
+            return [];
+        const result = [];
+        for (const name of names) {
+            const trimmed = String(name || '').trim();
+            if (trimmed && !result.includes(trimmed))
+                result.push(trimmed);
+        }
+        return result;
+    }
+    function useFormFillWorldbookConfig() {
+        const source = ref('character');
+        const manualSelection = ref([]);
+        const manualBook = computed(() => manualSelection.value[0] || '');
+        function refreshFromSettings() {
+            const cfg = getCurrentWorldbookConfig_ACU();
+            source.value = cfg.source === 'manual' ? 'manual' : 'character';
+            cfg.manualSelection = normalizeSelection(cfg.manualSelection);
+            manualSelection.value = [...cfg.manualSelection];
+        }
+        function setSource(next) {
+            const cfg = getCurrentWorldbookConfig_ACU();
+            cfg.source = next;
+            source.value = next;
+            saveSettings_ACU();
+        }
+        function setManualSelection(names) {
+            const cfg = getCurrentWorldbookConfig_ACU();
+            const next = normalizeSelection(names);
+            cfg.source = 'manual';
+            cfg.manualSelection = next;
+            source.value = 'manual';
+            manualSelection.value = [...next];
+            saveSettings_ACU();
+        }
+        function toggleManualBook(name, checked) {
+            const trimmed = String(name || '').trim();
+            if (!trimmed)
+                return;
+            const current = normalizeSelection(manualSelection.value);
+            const next = checked
+                ? (current.includes(trimmed) ? current : [...current, trimmed])
+                : current.filter(item => item !== trimmed);
+            setManualSelection(next);
+        }
+        async function resolveBookNames() {
+            const cfg = getCurrentWorldbookConfig_ACU();
+            if (cfg.source === 'manual') {
+                return normalizeSelection(cfg.manualSelection);
+            }
+            const names = [];
+            try {
+                const charLorebooks = await getCharLorebooks_ACU({ type: 'all' });
+                if (charLorebooks.primary)
+                    names.push(charLorebooks.primary);
+                if (charLorebooks.additional?.length)
+                    names.push(...charLorebooks.additional);
+            }
+            catch { /* empty */ }
+            return [...new Set(names.filter(Boolean))];
+        }
+        return {
+            source,
+            manualSelection,
+            manualBook,
+            refreshFromSettings,
+            setSource,
+            setManualSelection,
+            toggleManualBook,
+            resolveBookNames,
+        };
+    }
+
+    /**
+     * useFormFillWorldbookEntries — 填表"附加世界书条目"启用/禁用（Component B，§4.2）
+     *
+     * 操作 worldbookConfig.enabledEntries（每张书 → uid[] 列表）。
+     * 与 usePlotWorldbookEntries 形态一致，仅作用域不同：
+     *   - usePlot…：plotSettings.plotWorldbookConfig.enabledEntries（剧情推进）
+     *   - 本文件：worldbookConfig.enabledEntries（填表 / 提示词附带）
+     *
+     * 同样过滤掉数据库生成条目和包含屏蔽关键词的条目，避免误开关。
+     */
+    function ensureEnabledEntries() {
+        const cfg = getCurrentWorldbookConfig_ACU();
+        if (!cfg.enabledEntries || typeof cfg.enabledEntries !== 'object') {
+            cfg.enabledEntries = {};
+        }
+        return cfg.enabledEntries;
+    }
+    function useFormFillWorldbookEntries() {
+        const groups = shallowRef([]);
+        const status = ref('idle');
+        const error = ref('');
+        async function loadEntries(bookNames) {
+            const unique = [...new Set(bookNames.filter(Boolean))];
+            if (unique.length === 0) {
+                groups.value = [];
+                status.value = 'success';
+                return;
+            }
+            status.value = 'loading';
+            error.value = '';
+            try {
+                const enabledEntries = ensureEnabledEntries();
+                const snapshot = await refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU();
+                const entriesMap = await getLorebookEntriesByNames_ACU(unique);
+                const snapshotEntryIndexByBook = buildWorldbookSnapshotEntryIndexByBook_ACU(snapshot);
+                let settingsChanged = false;
+                const result = [];
+                for (const bookName of unique) {
+                    const bookEntries = Array.isArray(entriesMap[bookName]) ? entriesMap[bookName] : [];
+                    const visibleBookEntries = bookEntries.filter((entry) => isWorldbookEntryVisibleForPageUI_ACU(bookName, entry, snapshotEntryIndexByBook));
+                    const visibleUidSet = new Set(visibleBookEntries.map((entry) => String(entry?.uid)));
+                    if (typeof enabledEntries[bookName] === 'undefined') {
+                        enabledEntries[bookName] = visibleBookEntries
+                            .filter((entry) => buildWorldbookEntryDisplayView_ACU(entry, getWorldbookSnapshotEntryForDisplay_ACU(snapshotEntryIndexByBook, bookName, entry)).enabled)
+                            .map((entry) => entry.uid);
+                        settingsChanged = true;
+                    }
+                    else if (Array.isArray(enabledEntries[bookName])) {
+                        const cleanedEnabledEntries = enabledEntries[bookName]
+                            .filter((uid) => visibleUidSet.has(String(uid)));
+                        if (cleanedEnabledEntries.length !== enabledEntries[bookName].length) {
+                            enabledEntries[bookName] = cleanedEnabledEntries;
+                            settingsChanged = true;
+                        }
+                    }
+                    const enabledList = Array.isArray(enabledEntries[bookName])
+                        ? enabledEntries[bookName]
+                        : [];
+                    const visible = visibleBookEntries.map((entry) => {
+                        const comment = String(entry?.comment || entry?.name || '');
+                        const skillMeta = parseWorldbookSkillMetaFromComment_ACU(comment);
+                        const snapshotEntry = getWorldbookSnapshotEntryForDisplay_ACU(snapshotEntryIndexByBook, bookName, entry);
+                        const displayView = buildWorldbookEntryDisplayView_ACU(entry, snapshotEntry);
+                        return {
+                            uid: entry.uid,
+                            bookName,
+                            label: buildWorldbookEntryDisplayLabel_ACU(comment, entry.uid),
+                            comment,
+                            skillMeta,
+                            hasSkill: !!skillMeta,
+                            agentTakeoverState: resolveWorldbookEntryTakeoverState_ACU(entry, !!skillMeta, snapshotEntry),
+                            checked: enabledList.includes(entry.uid),
+                            skillifySelected: false,
+                            skillifySelectable: false,
+                            isConstant: displayView.isConstant,
+                            disabled: displayView.disabled,
+                        };
+                    });
+                    if (visible.length > 0) {
+                        result.push({ bookName, entries: visible, expanded: false });
+                    }
+                }
+                if (settingsChanged)
+                    saveSettings_ACU();
+                groups.value = result;
+                status.value = 'success';
+            }
+            catch (e) {
+                logError_ACU('[ACU-V2] useFormFillWorldbookEntries loadEntries failed', e);
+                error.value = e?.message ?? '加载条目失败';
+                status.value = 'error';
+            }
+        }
+        function toggleEntry(bookName, uid, checked) {
+            const enabledEntries = ensureEnabledEntries();
+            if (!Array.isArray(enabledEntries[bookName])) {
+                enabledEntries[bookName] = [];
+            }
+            const list = enabledEntries[bookName];
+            const idx = list.indexOf(uid);
+            if (checked && idx === -1)
+                list.push(uid);
+            else if (!checked && idx !== -1)
+                list.splice(idx, 1);
+            saveSettings_ACU();
+            groups.value = groups.value.map(g => {
+                if (g.bookName !== bookName)
+                    return g;
+                return {
+                    ...g,
+                    entries: g.entries.map(e => e.uid === uid ? { ...e, checked } : e),
+                };
+            });
+        }
+        function selectAll() {
+            const enabledEntries = ensureEnabledEntries();
+            for (const group of groups.value) {
+                enabledEntries[group.bookName] = group.entries
+                    .filter(e => !e.disabled)
+                    .map(e => e.uid);
+            }
+            saveSettings_ACU();
+            groups.value = groups.value.map(g => ({
+                ...g,
+                entries: g.entries.map(e => ({ ...e, checked: !e.disabled })),
+            }));
+        }
+        function deselectAll() {
+            const enabledEntries = ensureEnabledEntries();
+            for (const group of groups.value) {
+                enabledEntries[group.bookName] = [];
+            }
+            saveSettings_ACU();
+            groups.value = groups.value.map(g => ({
+                ...g,
+                entries: g.entries.map(e => ({ ...e, checked: false })),
+            }));
+        }
+        function toggleGroupExpanded(bookName) {
+            groups.value = groups.value.map(g => {
+                if (g.bookName !== bookName)
+                    return g;
+                return { ...g, expanded: !g.expanded };
+            });
+        }
+        return {
+            groups,
+            status,
+            error,
+            loadEntries,
+            toggleEntry,
+            selectAll,
+            deselectAll,
+            toggleGroupExpanded,
+        };
+    }
 
     /** 宿主世界书 API 挂起时确认弹窗不能被无限期拖住，超过该时长即降级为提示文案。 */
     const INJECTION_TARGET_RESOLVE_TIMEOUT_MS = 1500;
@@ -197156,2440 +201707,12 @@ ${rejectionText}` : delegationFeedback,
         };
     }
 
-    /**
-     * form-fill-mode-store — 填表工作台的模式选择视图。
-     *
-     * 模式与经典/向量/LLM 参数的权威来源是 globalMeta.formFillPreferencesGlobal（service 层）。
-     * 交火参数由填表工作台的交火面板经 useVectorIndexConfig 读写 vectorMemoryConfigGlobal。
-     * 本 store 只做读写代理，不另存副本；保存失败时回读权威存储并暴露 saveError。
-     */
-    function clampInteger(value, fallback, min, max) {
-        const parsed = Number(value);
-        if (!Number.isFinite(parsed))
-            return fallback;
-        return Math.min(max, Math.max(min, Math.floor(parsed)));
-    }
-    function readState() {
-        const { preferences } = readFillModePreferences_ACU();
-        return {
-            selectedMode: preferences.selectedMode,
-            profiles: {
-                classic: { ...preferences.classic },
-                vector: { ...preferences.vector },
-                llm: { ...preferences.llm },
-            },
-            saveError: null,
-        };
-    }
-    const useFormFillModeStore = defineStore('acu-v2-form-fill-mode', {
-        state: () => readState(),
-        actions: {
-            selectMode(mode) {
-                if (mode === this.selectedMode)
-                    return;
-                this.selectedMode = mode;
-                this.persistPreferences();
-            },
-            setClassicRecentChronicleRows(value) {
-                this.profiles.classic.recentChronicleRows = clampInteger(value, 15, 1, 200);
-                this.persistPreferences();
-            },
-            setVectorResultCount(value) {
-                this.profiles.vector.resultCount = clampInteger(value, 200, 1, 1000);
-                this.persistPreferences();
-            },
-            setLlmApiPresetName(value) {
-                this.profiles.llm.apiPresetName = String(value || '').trim();
-                this.persistPreferences();
-            },
-            persistPreferences() {
-                const result = saveFillModePreferences_ACU({
-                    schemaVersion: 1,
-                    selectedMode: this.selectedMode,
-                    classic: { ...this.profiles.classic },
-                    vector: { ...this.profiles.vector },
-                    llm: { ...this.profiles.llm },
-                });
-                if (!('error' in result)) {
-                    this.saveError = null;
-                    return;
-                }
-                const next = readState();
-                this.selectedMode = next.selectedMode;
-                this.profiles = next.profiles;
-                this.saveError = result.error;
-            },
-            refresh() {
-                const next = readState();
-                this.selectedMode = next.selectedMode;
-                this.profiles = next.profiles;
-            },
-        },
-    });
-    const FORM_FILL_MODE_OPTIONS = [
-        { value: 'classic', label: '经典表格' },
-        { value: 'vector', label: '向量表格' },
-        { value: 'llm', label: 'LLM 逻辑召回' },
-        { value: 'crossfire', label: '交火模式' },
-    ];
-
-    var _sfc_main$N = /*@__PURE__*/ defineComponent({
+    var _sfc_main$x = /*@__PURE__*/ defineComponent({
         __name: 'FormFillPage',
         setup(__props, { expose: __expose }) {
             __expose();
             const dashboard = useDashboardPage();
             const manualUpdate = useManualUpdate();
-            const formFillMode = useFormFillModeStore();
-            const { followActiveApiLabel, apiPresetSelectOptions } = useApiPresetSelectOptions();
-            const fillModeDescriptions = {
-                classic: "经典表格：沿用稳定的经典填表流程，是新安装的默认模式。",
-                vector: "向量表格：只用 embedding 与 rerank 选出相关纪要，不生成关键词，也不执行剧情推进或混合召回。",
-                llm: "LLM 逻辑召回：由 LLM 先读纪要概览与目录，再按信息缺口精读具体纪要区间。",
-                crossfire: "交火模式：关键词、向量、混合召回与 rerank 的完整流程；全部参数与索引维护在下方面板。",
-            };
-            /** 向量表格与交火模式需要向量服务与索引维护面板；其余模式不渲染。 */
-            const vectorPanelMode = computed(() => {
-                const mode = formFillMode.selectedMode;
-                return mode === "vector" || mode === "crossfire" ? mode : null;
-            });
-            const panelNavItems = computed(() => {
-                const items = [
-                    { id: "form-fill-status-panel", label: formFillCopy.nav.status },
-                    { id: "form-fill-mode-panel", label: "填表模式" },
-                    { id: "form-fill-update-panel", label: formFillCopy.nav.update },
-                    { id: "form-fill-manual-panel", label: formFillCopy.nav.manual },
-                    { id: "form-fill-template-panel", label: tableCopy.panels.templatePreset.title },
-                ];
-                if (vectorPanelMode.value === "crossfire") {
-                    items.push({ id: "vector-index-status-panel", label: vectorIndexCopy.nav.status }, { id: "vector-index-keyword-panel", label: vectorIndexCopy.nav.keyword }, { id: "vector-index-api-panel", label: vectorIndexCopy.nav.api }, { id: "vector-index-prompt-panel", label: vectorIndexCopy.nav.prompt }, { id: "vector-index-recall-panel", label: vectorIndexCopy.nav.recall }, { id: "vector-index-archive-panel", label: vectorIndexCopy.nav.archive });
-                }
-                else if (vectorPanelMode.value === "vector") {
-                    items.push({ id: "vector-index-status-panel", label: vectorIndexCopy.nav.status }, { id: "vector-index-api-panel", label: vectorIndexCopy.nav.api }, { id: "vector-index-archive-panel", label: vectorIndexCopy.nav.archive });
-                }
-                return items;
-            });
-            function selectFillMode(value) {
-                if (value === "classic" || value === "vector" || value === "llm" || value === "crossfire") {
-                    formFillMode.selectMode(value);
-                }
-            }
-            async function refreshAll() {
-                manualUpdate.refresh();
-                await dashboard.refresh();
-            }
-            onMounted(() => {
-                void refreshAll();
-            });
-            watch(useChatChangedTick(), () => {
-                void refreshAll();
-            });
-            watch(useTemplateRuntimeChangeTick(), () => {
-                void refreshAll();
-            });
-            const __returned__ = { dashboard, manualUpdate, formFillMode, followActiveApiLabel, apiPresetSelectOptions, fillModeDescriptions, vectorPanelMode, panelNavItems, selectFillMode, refreshAll, AcuBadge, AcuButton, AcuFormRow, AcuInput, AcuMessage, AcuMobilePanelNav, AcuPanel, AcuPanelGrid, AcuSelect, AcuText, AcuTextarea, FormFillVectorPanels, FormFillUpdateSettingsPanel, TableTemplatePresetPanel, TableSelector, get formFillCopy() { return formFillCopy; }, get FORM_FILL_MODE_OPTIONS() { return FORM_FILL_MODE_OPTIONS; } };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
-        }
-    });
-
-    injectSfcStyle("\n.acu-v2-form-fill-page[data-v-f3ecfe06] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-form-fill-page__grid[data-v-f3ecfe06] {\n  grid-template-areas:\n    \"status mode\"\n    \"update template\"\n    \"manual template\";\n}\n.acu-v2-form-fill-page__panel--status[data-v-f3ecfe06] {\n  grid-area: status;\n}\n.acu-v2-form-fill-page__panel--update[data-v-f3ecfe06] {\n  grid-area: update;\n}\n.acu-v2-form-fill-page__panel--mode[data-v-f3ecfe06] {\n  grid-area: mode;\n}\n.acu-v2-form-fill-page__panel--template[data-v-f3ecfe06] {\n  grid-area: template;\n}\n.acu-v2-form-fill-page__panel--manual[data-v-f3ecfe06] {\n  grid-area: manual;\n}\n.acu-v2-form-fill-page__manual-number-grid[data-v-f3ecfe06] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 10px;\n}\n.acu-v2-form-fill-page__mode-number-grid[data-v-f3ecfe06] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 10px;\n}\n.acu-v2-form-fill-page__status-line[data-v-f3ecfe06] {\n  margin: 0 0 10px;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-v2-form-fill-page__status-chat[data-v-f3ecfe06] {\n  max-width: min(42ch, 100%);\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-form-fill-page__checkpoint-label[data-v-f3ecfe06] {\n  color: var(--acu-accent);\n}\n.acu-v2-form-fill-page__manual-extra[data-v-f3ecfe06] {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n}\n.acu-v2-form-fill-page__checkpoint-risk[data-v-f3ecfe06] {\n  color: var(--acu-danger);\n  font-weight: 700;\n}\n.acu-v2-form-fill-page__table-wrap[data-v-f3ecfe06] {\n  min-width: 0;\n  overflow: auto;\n  border: 0;\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-0);\n}\n.acu-v2-form-fill-page__status-table[data-v-f3ecfe06] {\n  width: 100%;\n  border-collapse: collapse;\n  min-width: 560px;\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-form-fill-page__status-table th[data-v-f3ecfe06],\n.acu-v2-form-fill-page__status-table td[data-v-f3ecfe06] {\n  padding: 8px 10px;\n  border-bottom: 1px solid var(--acu-border-2);\n  text-align: left;\n}\n.acu-v2-form-fill-page__status-table th[data-v-f3ecfe06] {\n  color: var(--acu-text-3);\n  font-weight: 600;\n  background: var(--acu-bg-1);\n}\n.acu-v2-form-fill-page__status-table td[data-v-f3ecfe06] {\n  color: var(--acu-text-2);\n}\n.acu-v2-form-fill-page__status-table tr:last-child td[data-v-f3ecfe06] {\n  border-bottom: 0;\n}\n.acu-v2-form-fill-page__status-row--ready td[data-v-f3ecfe06] {\n  color: var(--acu-text-1);\n}\n.acu-v2-form-fill-page__empty[data-v-f3ecfe06] {\n  text-align: center !important;\n  color: var(--acu-text-3) !important;\n}\n.acu-v2-form-fill-page__actions[data-v-f3ecfe06] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-form-fill-page[data-v-f3ecfe06] {\n    padding: 14px;\n}\n.acu-v2-form-fill-page__grid[data-v-f3ecfe06] {\n    grid-template-areas:\n      \"status\"\n      \"mode\"\n      \"update\"\n      \"manual\"\n      \"template\";\n}\n.acu-v2-form-fill-page__manual-number-grid[data-v-f3ecfe06] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-form-fill-page__mode-number-grid[data-v-f3ecfe06] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/FormFillPage.vue#style-0-f3ecfe06");
-    var FormFillPage_vue_vue_type_style_index_0_scoped_f3ecfe06_lang = null;
-
-    const _hoisted_1$M = { class: "acu-v2-form-fill-page" };
-    const _hoisted_2$I = ["title"];
-    const _hoisted_3$B = { class: "acu-text__value" };
-    const _hoisted_4$w = { class: "acu-text__value acu-v2-form-fill-page__checkpoint-label" };
-    const _hoisted_5$r = { class: "acu-v2-form-fill-page__table-wrap" };
-    const _hoisted_6$q = { class: "acu-v2-form-fill-page__status-table" };
-    const _hoisted_7$o = { key: 0 };
-    const _hoisted_8$o = { key: 1 };
-    const _hoisted_9$l = { class: "acu-v2-form-fill-page__manual-number-grid" };
-    const _hoisted_10$j = { class: "acu-v2-form-fill-page__manual-extra" };
-    const _hoisted_11$i = { class: "acu-v2-form-fill-page__actions" };
-    function _sfc_render$N(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$M, [
-		createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }, null, 8, ["items"]),
-		createVNode($setup["AcuPanelGrid"], { class: "acu-v2-form-fill-page__grid" }, {
-			default: withCtx(() => [
-				createVNode($setup["AcuPanel"], {
-					id: "form-fill-status-panel",
-					class: "acu-v2-form-fill-page__panel--status",
-					title: $setup.formFillCopy.panels.status.title,
-					description: $setup.formFillCopy.panels.status.description
-				}, {
-					default: withCtx(() => [
-						createVNode($setup["AcuText"], {
-							variant: "status-line",
-							class: "acu-v2-form-fill-page__status-line",
-							"aria-label": "表格状态概览"
-						}, {
-							default: withCtx(() => [
-								_cache[7] || (_cache[7] = createTextVNode(
-									" 当前聊天: ",
-									-1
-									/* CACHED */
-								)),
-								createBaseVNode("strong", {
-									class: "acu-text__value acu-v2-form-fill-page__status-chat",
-									title: $setup.dashboard.chatFileIdentifier.value || "未初始化"
-								}, toDisplayString($setup.dashboard.chatFileIdentifier.value || "未初始化"), 9, _hoisted_2$I),
-								_cache[8] || (_cache[8] = createTextVNode(
-									" · AI回复累计层数: ",
-									-1
-									/* CACHED */
-								)),
-								createBaseVNode(
-									"strong",
-									_hoisted_3$B,
-									toDisplayString($setup.dashboard.aiMessageCount.value),
-									1
-									/* TEXT */
-								),
-								_cache[9] || (_cache[9] = createTextVNode(
-									" · 当前 full checkpoint: ",
-									-1
-									/* CACHED */
-								)),
-								createBaseVNode(
-									"strong",
-									_hoisted_4$w,
-									toDisplayString($setup.manualUpdate.checkpointFloorsLabel.value),
-									1
-									/* TEXT */
-								)
-							]),
-							_: 1
-						}),
-						createVNode($setup["AcuMessage"], { kind: "info" }, {
-							default: withCtx(() => [createTextVNode(
-								" 按当前手动填表设置，预计处理范围：" + toDisplayString($setup.manualUpdate.manualRefillRangeLabel.value) + "。 ",
-								1
-								/* TEXT */
-							)]),
-							_: 1
-						}),
-						!$setup.dashboard.hasTables.value ? (openBlock(), createBlock($setup["AcuMessage"], {
-							key: 0,
-							kind: "info"
-						}, {
-							default: withCtx(() => [..._cache[10] || (_cache[10] = [createTextVNode(
-								" 当前尚未加载数据库表格。 ",
-								-1
-								/* CACHED */
-							)])]),
-							_: 1
-						})) : createCommentVNode("v-if", true),
-						createBaseVNode("div", _hoisted_5$r, [createBaseVNode("table", _hoisted_6$q, [_cache[13] || (_cache[13] = createBaseVNode(
-							"thead",
-							null,
-							[createBaseVNode("tr", null, [
-								createBaseVNode("th", null, "表格"),
-								createBaseVNode("th", null, "频率"),
-								createBaseVNode("th", null, "未记录"),
-								createBaseVNode("th", null, "上次更新"),
-								createBaseVNode("th", null, "下次触发")
-							])],
-							-1
-							/* CACHED */
-						)), createBaseVNode("tbody", null, [!$setup.dashboard.tableRows.value.length ? (openBlock(), createElementBlock("tr", _hoisted_7$o, [..._cache[11] || (_cache[11] = [createBaseVNode(
-							"td",
-							{
-								colspan: "5",
-								class: "acu-v2-form-fill-page__empty"
-							},
-							" 暂无数据 ",
-							-1
-							/* CACHED */
-						)])])) : createCommentVNode("v-if", true), (openBlock(true), createElementBlock(
-							Fragment,
-							null,
-							renderList($setup.dashboard.tableRows.value, (row) => {
-								return openBlock(), createElementBlock(
-									"tr",
-									{
-										key: row.key,
-										class: normalizeClass({ "acu-v2-form-fill-page__status-row--ready": row.ready })
-									},
-									[
-										createBaseVNode(
-											"td",
-											null,
-											toDisplayString(row.name),
-											1
-											/* TEXT */
-										),
-										createBaseVNode(
-											"td",
-											null,
-											toDisplayString(row.frequencyLabel),
-											1
-											/* TEXT */
-										),
-										createBaseVNode(
-											"td",
-											null,
-											toDisplayString(row.unrecordedLabel),
-											1
-											/* TEXT */
-										),
-										createBaseVNode(
-											"td",
-											null,
-											toDisplayString(row.lastUpdatedLabel),
-											1
-											/* TEXT */
-										),
-										createBaseVNode("td", null, [row.ready ? (openBlock(), createBlock($setup["AcuBadge"], {
-											key: 0,
-											variant: "success"
-										}, {
-											default: withCtx(() => [..._cache[12] || (_cache[12] = [createTextVNode(
-												"就绪",
-												-1
-												/* CACHED */
-											)])]),
-											_: 1
-										})) : (openBlock(), createElementBlock(
-											"span",
-											_hoisted_8$o,
-											toDisplayString(row.nextTriggerLabel),
-											1
-											/* TEXT */
-										))])
-									],
-									2
-									/* CLASS */
-								);
-							}),
-							128
-							/* KEYED_FRAGMENT */
-						))])])])
-					]),
-					_: 1
-				}, 8, ["title", "description"]),
-				createVNode($setup["AcuPanel"], {
-					id: "form-fill-mode-panel",
-					class: "acu-v2-form-fill-page__panel--mode",
-					title: "填表模式",
-					description: $setup.fillModeDescriptions[$setup.formFillMode.selectedMode]
-				}, {
-					default: withCtx(() => [
-						createVNode($setup["AcuFormRow"], {
-							label: "当前填表模式",
-							hint: "从下拉菜单中选择一种模式。每种模式的参数独立保存，切换模式不会覆盖其它模式，也不会改变功能档位。"
-						}, {
-							default: withCtx(() => [createVNode($setup["AcuSelect"], {
-								options: $setup.FORM_FILL_MODE_OPTIONS,
-								"model-value": $setup.formFillMode.selectedMode,
-								"onUpdate:modelValue": $setup.selectFillMode
-							}, null, 8, ["options", "model-value"])]),
-							_: 1
-						}),
-						$setup.formFillMode.saveError ? (openBlock(), createBlock($setup["AcuMessage"], {
-							key: 0,
-							kind: "error"
-						}, {
-							default: withCtx(() => [createTextVNode(
-								toDisplayString($setup.formFillMode.saveError),
-								1
-								/* TEXT */
-							)]),
-							_: 1
-						})) : createCommentVNode("v-if", true),
-						$setup.formFillMode.selectedMode === "classic" ? (openBlock(), createBlock($setup["AcuFormRow"], {
-							key: 1,
-							label: "最近纪要表条数",
-							hint: "同时控制界面显示与经典模式提示词中的近期纪要条数，默认 15 条。"
-						}, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								type: "number",
-								min: 1,
-								max: 200,
-								step: 1,
-								"model-value": $setup.formFillMode.profiles.classic.recentChronicleRows,
-								onChange: _cache[0] || (_cache[0] = ($event) => $setup.formFillMode.setClassicRecentChronicleRows($event))
-							}, null, 8, ["model-value"])]),
-							_: 1
-						})) : createCommentVNode("v-if", true),
-						$setup.formFillMode.selectedMode === "vector" ? (openBlock(), createBlock($setup["AcuFormRow"], {
-							key: 2,
-							label: "保留相关纪要条数",
-							hint: "按 rerank 结果从上到下保留的纪要条数；embedding 与 rerank 服务在下方「Embedding / Rerank」面板配置。"
-						}, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								type: "number",
-								min: 1,
-								max: 1e3,
-								step: 1,
-								"model-value": $setup.formFillMode.profiles.vector.resultCount,
-								onChange: _cache[1] || (_cache[1] = ($event) => $setup.formFillMode.setVectorResultCount($event))
-							}, null, 8, ["model-value"])]),
-							_: 1
-						})) : createCommentVNode("v-if", true),
-						$setup.formFillMode.selectedMode === "llm" ? (openBlock(), createBlock($setup["AcuFormRow"], {
-							key: 3,
-							label: "LLM / continuation API 预设",
-							hint: "选择后仅用于逻辑召回模式；留空时跟随当前 API。"
-						}, {
-							default: withCtx(() => [createVNode($setup["AcuSelect"], {
-								options: $setup.apiPresetSelectOptions,
-								"model-value": $setup.formFillMode.profiles.llm.apiPresetName,
-								placeholder: $setup.followActiveApiLabel,
-								"onUpdate:modelValue": _cache[2] || (_cache[2] = ($event) => $setup.formFillMode.setLlmApiPresetName($event))
-							}, null, 8, [
-								"options",
-								"model-value",
-								"placeholder"
-							])]),
-							_: 1
-						})) : createCommentVNode("v-if", true)
-					]),
-					_: 1
-				}, 8, ["description"]),
-				createVNode($setup["FormFillUpdateSettingsPanel"], {
-					id: "form-fill-update-panel",
-					class: "acu-v2-form-fill-page__panel--update"
-				}),
-				createVNode($setup["TableTemplatePresetPanel"], {
-					id: "form-fill-template-panel",
-					class: "acu-v2-form-fill-page__panel--template"
-				}),
-				createVNode($setup["AcuPanel"], {
-					id: "form-fill-manual-panel",
-					class: "acu-v2-form-fill-page__panel--manual",
-					title: $setup.formFillCopy.panels.manual.title,
-					description: $setup.formFillCopy.panels.manual.description
-				}, {
-					default: withCtx(() => [
-						createBaseVNode("div", _hoisted_9$l, [createVNode($setup["AcuFormRow"], {
-							label: "手动处理最近 N 层",
-							hint: "从可用 AI 回复中取最近 N 层执行手动填表。"
-						}, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								type: "number",
-								min: 0,
-								step: 1,
-								"model-value": $setup.manualUpdate.manualContextDepth.value,
-								onChange: _cache[3] || (_cache[3] = ($event) => $setup.manualUpdate.setManualContextDepth($event))
-							}, null, 8, ["model-value"])]),
-							_: 1
-						}), createVNode($setup["AcuFormRow"], {
-							label: "每 N 层合并为一次填表",
-							hint: "把多少层 AI 回复压缩成一次填表请求。"
-						}, {
-							default: withCtx(() => [createVNode($setup["AcuInput"], {
-								type: "number",
-								min: 1,
-								step: 1,
-								"model-value": $setup.manualUpdate.manualBatchSize.value,
-								onChange: _cache[4] || (_cache[4] = ($event) => $setup.manualUpdate.setManualBatchSize($event))
-							}, null, 8, ["model-value"])]),
-							_: 1
-						})]),
-						createVNode($setup["AcuMessage"], { kind: "info" }, {
-							default: withCtx(() => [createTextVNode(
-								" 当前 full checkpoint：" + toDisplayString($setup.manualUpdate.checkpointFloorsLabel.value) + "；按当前设置预计处理范围：" + toDisplayString($setup.manualUpdate.manualRefillRangeLabel.value) + "。 选中表：" + toDisplayString($setup.manualUpdate.selectedSheetSummary.value) + "。 ",
-								1
-								/* TEXT */
-							)]),
-							_: 1
-						}),
-						createVNode($setup["TableSelector"], {
-							"sheet-keys": $setup.manualUpdate.sheetKeys.value,
-							"selected-keys": $setup.manualUpdate.selectedManualTableKeys.value,
-							"sheet-names": $setup.manualUpdate.sheetNames.value,
-							disabled: !$setup.manualUpdate.runtimeReady.value,
-							"empty-text": "当前没有可手动填表的表格。",
-							"onUpdate:selectedKeys": _cache[5] || (_cache[5] = ($event) => $setup.manualUpdate.setManualSelectedKeys($event)),
-							onSelectAll: $setup.manualUpdate.selectAllManualTables,
-							onSelectNone: $setup.manualUpdate.selectNoManualTables
-						}, null, 8, [
-							"sheet-keys",
-							"selected-keys",
-							"sheet-names",
-							"disabled",
-							"onSelectAll",
-							"onSelectNone"
-						]),
-						createBaseVNode("div", _hoisted_10$j, [createVNode($setup["AcuFormRow"], {
-							label: "本次填表附加要求",
-							hint: "留空时不会给本次手动填表追加额外要求。"
-						}, {
-							default: withCtx(() => [createVNode($setup["AcuTextarea"], {
-								"model-value": $setup.manualUpdate.manualExtraHint.value,
-								rows: 4,
-								placeholder: "仅用于本次手动填表...",
-								"onUpdate:modelValue": _cache[6] || (_cache[6] = ($event) => $setup.manualUpdate.manualExtraHint.value = $event)
-							}, null, 8, ["model-value"])]),
-							_: 1
-						})]),
-						$setup.manualUpdate.vectorIndexWarning.value ? (openBlock(), createBlock($setup["AcuMessage"], {
-							key: 0,
-							kind: "warning"
-						}, {
-							default: withCtx(() => [..._cache[14] || (_cache[14] = [createTextVNode(
-								" 交火模式纪要索引启用时不建议手动更新表格；特殊场景下仍可点击执行。 ",
-								-1
-								/* CACHED */
-							)])]),
-							_: 1
-						})) : createCommentVNode("v-if", true),
-						createVNode($setup["AcuMessage"], { kind: "info" }, {
-							default: withCtx(() => [createTextVNode(
-								toDisplayString($setup.formFillCopy.panels.manual.catchUpBoundary),
-								1
-								/* TEXT */
-							)]),
-							_: 1
-						}),
-						createBaseVNode("div", _hoisted_11$i, [createVNode($setup["AcuButton"], {
-							variant: "secondary",
-							disabled: $setup.manualUpdate.manualUpdateBusy.value || $setup.manualUpdate.catchUpBusy.value || !$setup.manualUpdate.selectedManualTableKeys.value.length,
-							onClick: $setup.manualUpdate.runManualCatchUp
-						}, {
-							default: withCtx(() => [createTextVNode(
-								toDisplayString($setup.manualUpdate.catchUpBusy.value ? $setup.formFillCopy.panels.manual.catchUpBusyLabel : $setup.formFillCopy.panels.manual.catchUpLabel),
-								1
-								/* TEXT */
-							)]),
-							_: 1
-						}, 8, ["disabled", "onClick"]), createVNode($setup["AcuButton"], {
-							variant: "primary",
-							disabled: $setup.manualUpdate.manualUpdateBusy.value || $setup.manualUpdate.catchUpBusy.value || !$setup.manualUpdate.selectedManualTableKeys.value.length,
-							onClick: $setup.manualUpdate.runManualUpdate
-						}, {
-							default: withCtx(() => [createTextVNode(
-								toDisplayString($setup.manualUpdate.manualUpdateBusy.value ? "填表中..." : $setup.manualUpdate.vectorIndexWarning.value ? "交火索引已启用" : $setup.formFillCopy.panels.manual.runLabel),
-								1
-								/* TEXT */
-							)]),
-							_: 1
-						}, 8, ["disabled", "onClick"])])
-					]),
-					_: 1
-				}, 8, ["title", "description"])
-			]),
-			_: 1
-		}),
-		$setup.vectorPanelMode ? (openBlock(), createBlock($setup["FormFillVectorPanels"], {
-			key: 0,
-			mode: $setup.vectorPanelMode
-		}, null, 8, ["mode"])) : createCommentVNode("v-if", true)
-	]);
-    }
-    var FormFillPage = /*#__PURE__*/ _export_sfc(_sfc_main$N, [["render", _sfc_render$N], ["__scopeId", "data-v-f3ecfe06"]]);
-
-    var _sfc_main$M = /*@__PURE__*/ defineComponent({
-        __name: 'AcuRulePairList',
-        props: {
-            modelValue: {},
-            label: { default: '' },
-            startPlaceholder: { default: '开始词' },
-            endPlaceholder: { default: '结束词' },
-            addLabel: { default: '添加规则' }
-        },
-        emits: ["update:modelValue"],
-        setup(__props, { expose: __expose, emit: __emit }) {
-            __expose();
-            const props = __props;
-            const emit = __emit;
-            // 默认始终折叠（包括空规则）。规则编辑是低频操作，折叠态减少视觉噪声；
-            // 空状态用户点 header 展开后即可见添加按钮。不持久化：MainArea / 抽屉重挂载
-            // 时该 ref 自然回到折叠态（D25）。
-            const expanded = ref(false);
-            const ruleCountText = computed(() => props.modelValue.length === 0 ? '暂无' : `${props.modelValue.length} 条`);
-            function toggle() {
-                expanded.value = !expanded.value;
-            }
-            function clone() {
-                return props.modelValue.map(r => ({ ...r }));
-            }
-            function add() {
-                if (props.label && !expanded.value)
-                    expanded.value = true;
-                const next = clone();
-                next.push({ start: '', end: '' });
-                emit('update:modelValue', next);
-            }
-            function remove(index) {
-                const next = clone();
-                next.splice(index, 1);
-                emit('update:modelValue', next);
-            }
-            function updateField(index, field, value) {
-                const next = clone();
-                next[index] = { ...next[index], [field]: value };
-                emit('update:modelValue', next);
-            }
-            const __returned__ = { props, emit, expanded, ruleCountText, toggle, clone, add, remove, updateField, AcuButton, AcuDisclosureGroup, AcuIconButton, AcuInput };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
-        }
-    });
-
-    injectSfcStyle("\n.acu-rule-pair-list--standalone[data-v-c9426b22] {\r\n  display: flex; flex-direction: column; gap: 6px;\n}\n.acu-rule-pair-list__body[data-v-c9426b22] {\r\n  display: flex; flex-direction: column; gap: 6px;\n}\n.acu-rule-pair-list--standalone .acu-rule-pair-list__body[data-v-c9426b22] {\r\n  /* 老接口：未提供 label 时直接展示，无外层 padding */\r\n  border-top: 0;\r\n  padding: 0;\n}\n.acu-rule-pair-list__row[data-v-c9426b22] {\r\n  display: flex; align-items: center; gap: 6px;\n}\n.acu-rule-pair-list__field[data-v-c9426b22] { flex: 1; min-width: 0;\n}\n.acu-rule-pair-list__sep[data-v-c9426b22] {\r\n  flex-shrink: 0; font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3);\n}\n.acu-rule-pair-list__empty[data-v-c9426b22] {\r\n  padding: 8px; text-align: center;\r\n  color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-rule-pair-list__add[data-v-c9426b22] {\r\n  align-self: flex-start;\n}\r\n", "src/presentation-v2/components/_lib/AcuRulePairList.vue#style-0-c9426b22");
-    var AcuRulePairList_vue_vue_type_style_index_0_scoped_c9426b22_lang = null;
-
-    const _hoisted_1$L = {
-	key: 0,
-	class: "acu-rule-pair-list__empty"
-    };
-    const _hoisted_2$H = {
-	key: 1,
-	class: "acu-rule-pair-list acu-rule-pair-list--standalone"
-    };
-    const _hoisted_3$A = { class: "acu-rule-pair-list__body" };
-    const _hoisted_4$v = {
-	key: 0,
-	class: "acu-rule-pair-list__empty"
-    };
-    function _sfc_render$M(_ctx, _cache, $props, $setup, $data, $options) {
-	return $props.label ? (openBlock(), createBlock($setup["AcuDisclosureGroup"], {
-		key: 0,
-		"root-class": "acu-rule-pair-list",
-		"header-class": "acu-rule-pair-list__header",
-		"body-class": "acu-rule-pair-list__body",
-		"chevron-class": "acu-rule-pair-list__chevron",
-		"chevron-open-class": "acu-rule-pair-list__chevron--open",
-		"label-class": "acu-rule-pair-list__label",
-		"meta-class": "acu-rule-pair-list__count",
-		label: $props.label,
-		meta: $setup.ruleCountText,
-		expanded: $setup.expanded,
-		"body-mode": "show",
-		onToggle: $setup.toggle
-	}, {
-		default: withCtx(() => [
-			(openBlock(true), createElementBlock(
-				Fragment,
-				null,
-				renderList($props.modelValue, (rule, index) => {
-					return openBlock(), createElementBlock("div", {
-						key: index,
-						class: "acu-rule-pair-list__row"
-					}, [
-						createVNode($setup["AcuInput"], {
-							"model-value": rule.start,
-							type: "text",
-							placeholder: $props.startPlaceholder,
-							class: "acu-rule-pair-list__field",
-							"onUpdate:modelValue": ($event) => $setup.updateField(index, "start", $event)
-						}, null, 8, [
-							"model-value",
-							"placeholder",
-							"onUpdate:modelValue"
-						]),
-						_cache[0] || (_cache[0] = createBaseVNode(
-							"span",
-							{ class: "acu-rule-pair-list__sep" },
-							"→",
-							-1
-							/* CACHED */
-						)),
-						createVNode($setup["AcuInput"], {
-							"model-value": rule.end,
-							type: "text",
-							placeholder: $props.endPlaceholder,
-							class: "acu-rule-pair-list__field",
-							"onUpdate:modelValue": ($event) => $setup.updateField(index, "end", $event)
-						}, null, 8, [
-							"model-value",
-							"placeholder",
-							"onUpdate:modelValue"
-						]),
-						createVNode($setup["AcuIconButton"], {
-							icon: "fa-solid fa-trash-can",
-							variant: "danger",
-							size: "sm",
-							title: "删除此规则",
-							onClick: ($event) => $setup.remove(index)
-						}, null, 8, ["onClick"])
-					]);
-				}),
-				128
-				/* KEYED_FRAGMENT */
-			)),
-			!$props.modelValue.length ? (openBlock(), createElementBlock("div", _hoisted_1$L, " 暂无规则，点击下方按钮添加。 ")) : createCommentVNode("v-if", true),
-			createVNode($setup["AcuButton"], {
-				size: "sm",
-				class: "acu-rule-pair-list__add",
-				onClick: $setup.add
-			}, {
-				default: withCtx(() => [_cache[1] || (_cache[1] = createBaseVNode(
-					"i",
-					{ class: "fa-solid fa-plus" },
-					null,
-					-1
-					/* CACHED */
-				)), createTextVNode(
-					" " + toDisplayString($props.addLabel),
-					1
-					/* TEXT */
-				)]),
-				_: 1
-			})
-		]),
-		_: 1
-	}, 8, [
-		"label",
-		"meta",
-		"expanded"
-	])) : (openBlock(), createElementBlock("div", _hoisted_2$H, [createBaseVNode("div", _hoisted_3$A, [
-		(openBlock(true), createElementBlock(
-			Fragment,
-			null,
-			renderList($props.modelValue, (rule, index) => {
-				return openBlock(), createElementBlock("div", {
-					key: index,
-					class: "acu-rule-pair-list__row"
-				}, [
-					createVNode($setup["AcuInput"], {
-						"model-value": rule.start,
-						type: "text",
-						placeholder: $props.startPlaceholder,
-						class: "acu-rule-pair-list__field",
-						"onUpdate:modelValue": ($event) => $setup.updateField(index, "start", $event)
-					}, null, 8, [
-						"model-value",
-						"placeholder",
-						"onUpdate:modelValue"
-					]),
-					_cache[2] || (_cache[2] = createBaseVNode(
-						"span",
-						{ class: "acu-rule-pair-list__sep" },
-						"→",
-						-1
-						/* CACHED */
-					)),
-					createVNode($setup["AcuInput"], {
-						"model-value": rule.end,
-						type: "text",
-						placeholder: $props.endPlaceholder,
-						class: "acu-rule-pair-list__field",
-						"onUpdate:modelValue": ($event) => $setup.updateField(index, "end", $event)
-					}, null, 8, [
-						"model-value",
-						"placeholder",
-						"onUpdate:modelValue"
-					]),
-					createVNode($setup["AcuIconButton"], {
-						icon: "fa-solid fa-trash-can",
-						variant: "danger",
-						size: "sm",
-						title: "删除此规则",
-						onClick: ($event) => $setup.remove(index)
-					}, null, 8, ["onClick"])
-				]);
-			}),
-			128
-			/* KEYED_FRAGMENT */
-		)),
-		!$props.modelValue.length ? (openBlock(), createElementBlock("div", _hoisted_4$v, " 暂无规则，点击下方按钮添加。 ")) : createCommentVNode("v-if", true),
-		createVNode($setup["AcuButton"], {
-			size: "sm",
-			class: "acu-rule-pair-list__add",
-			onClick: $setup.add
-		}, {
-			default: withCtx(() => [_cache[3] || (_cache[3] = createBaseVNode(
-				"i",
-				{ class: "fa-solid fa-plus" },
-				null,
-				-1
-				/* CACHED */
-			)), createTextVNode(
-				" " + toDisplayString($props.addLabel),
-				1
-				/* TEXT */
-			)]),
-			_: 1
-		})
-	])]));
-    }
-    var AcuRulePairList = /*#__PURE__*/ _export_sfc(_sfc_main$M, [["render", _sfc_render$M], ["__scopeId", "data-v-c9426b22"]]);
-
-    var _sfc_main$L = /*@__PURE__*/ defineComponent({
-        __name: 'FormFillPromptDrawer',
-        props: {
-            isOpen: { type: Boolean },
-            segments: {},
-            dirty: { type: Boolean },
-            message: {}
-        },
-        emits: ["close", "save", "reset", "import-file", "export", "add", "delete", "update"],
-        setup(__props, { expose: __expose, emit: __emit }) {
-            __expose();
-            const props = __props;
-            const emit = __emit;
-            const dialogStore = useDialogStore();
-            async function confirmIfDirty() {
-                if (!props.dirty)
-                    return true;
-                return dialogStore.confirm({
-                    title: '关闭提示词编辑器',
-                    message: '你有未保存的填表提示词修改，确定要关闭吗？',
-                    confirmLabel: '关闭',
-                    confirmVariant: 'danger',
-                });
-            }
-            async function requestClose() {
-                if (await confirmIfDirty())
-                    emit('close');
-            }
-            const __returned__ = { props, emit, dialogStore, confirmIfDirty, requestClose, AcuButton, AcuDrawer, AcuFileButton, AcuMessage, AcuPromptSegments };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
-        }
-    });
-
-    injectSfcStyle("\n.acu-form-fill-prompt-drawer__toolbar[data-v-2d4e260e] {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\n}\n.acu-form-fill-prompt-drawer__actions[data-v-2d4e260e] {\r\n  position: sticky;\r\n  bottom: -16px;\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  padding: 12px 0 0;\r\n  background: var(--acu-bg-1);\n}\r\n", "src/presentation-v2/components/FormFillPromptDrawer.vue#style-0-2d4e260e");
-    var FormFillPromptDrawer_vue_vue_type_style_index_0_scoped_2d4e260e_lang = null;
-
-    const _hoisted_1$K = { class: "acu-form-fill-prompt-drawer__toolbar" };
-    const _hoisted_2$G = { class: "acu-form-fill-prompt-drawer__actions" };
-    function _sfc_render$L(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createBlock($setup["AcuDrawer"], {
-		"is-open": $props.isOpen,
-		title: "编辑填表提示词",
-		width: "720px",
-		"before-close": $setup.confirmIfDirty,
-		onClose: _cache[7] || (_cache[7] = ($event) => $setup.emit("close"))
-	}, {
-		default: withCtx(() => [
-			$props.message ? (openBlock(), createBlock($setup["AcuMessage"], {
-				key: 0,
-				kind: $props.message.kind
-			}, {
-				default: withCtx(() => [createTextVNode(
-					toDisplayString($props.message.text),
-					1
-					/* TEXT */
-				)]),
-				_: 1
-			}, 8, ["kind"])) : createCommentVNode("v-if", true),
-			createBaseVNode("div", _hoisted_1$K, [
-				createVNode($setup["AcuFileButton"], {
-					size: "sm",
-					accept: "application/json,.json",
-					onFile: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("import-file", $event))
-				}, {
-					default: withCtx(() => [..._cache[8] || (_cache[8] = [createBaseVNode(
-						"i",
-						{ class: "fa-solid fa-download" },
-						null,
-						-1
-						/* CACHED */
-					), createTextVNode(
-						" 导入 JSON ",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				}),
-				createVNode($setup["AcuButton"], {
-					size: "sm",
-					onClick: _cache[1] || (_cache[1] = ($event) => _ctx.$emit("export"))
-				}, {
-					default: withCtx(() => [..._cache[9] || (_cache[9] = [createBaseVNode(
-						"i",
-						{ class: "fa-solid fa-upload" },
-						null,
-						-1
-						/* CACHED */
-					), createTextVNode(
-						" 导出 JSON ",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				}),
-				createVNode($setup["AcuButton"], {
-					size: "sm",
-					onClick: _cache[2] || (_cache[2] = ($event) => _ctx.$emit("reset"))
-				}, {
-					default: withCtx(() => [..._cache[10] || (_cache[10] = [createTextVNode(
-						"载入默认提示词",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				})
-			]),
-			createVNode($setup["AcuPromptSegments"], {
-				segments: $props.segments,
-				rows: 8,
-				onAdd: _cache[3] || (_cache[3] = ($event) => _ctx.$emit("add", $event)),
-				onDelete: _cache[4] || (_cache[4] = ($event) => _ctx.$emit("delete", $event)),
-				onUpdate: _cache[5] || (_cache[5] = (index, patch) => _ctx.$emit("update", index, patch))
-			}, null, 8, ["segments"]),
-			createBaseVNode("footer", _hoisted_2$G, [createVNode($setup["AcuButton"], { onClick: $setup.requestClose }, {
-				default: withCtx(() => [..._cache[11] || (_cache[11] = [createTextVNode(
-					"关闭",
-					-1
-					/* CACHED */
-				)])]),
-				_: 1
-			}), createVNode($setup["AcuButton"], {
-				variant: "primary",
-				disabled: !$props.dirty,
-				onClick: _cache[6] || (_cache[6] = ($event) => _ctx.$emit("save"))
-			}, {
-				default: withCtx(() => [..._cache[12] || (_cache[12] = [createTextVNode(
-					"保存提示词",
-					-1
-					/* CACHED */
-				)])]),
-				_: 1
-			}, 8, ["disabled"])])
-		]),
-		_: 1
-	}, 8, ["is-open"]);
-    }
-    var FormFillPromptDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$L, [["render", _sfc_render$L], ["__scopeId", "data-v-2d4e260e"]]);
-
-    /**
-     * service/settings/dangling-reference-audit-service.ts
-     *
-     * 只读校验 API 预设 / 世界书名称引用是否仍指向现存对象。
-     * 审计路径不得改写持久化字段；清除必须由用户显式触发。
-     */
-    const CONTINUATION_ROLE_LABELS_ACU = {
-        main: '主 Agent',
-        outline: '大纲子代理',
-        arcArchitect: '故事总纲子代理',
-        maintainer: '伏笔维护子代理',
-        mainlinePlanner: '主线策划子代理',
-        beatPlanner: '节拍策划子代理',
-        reviewer: '连续性审查子代理',
-        finalReviewer: '发送前终审子代理',
-        webResearcher: '网页检索子代理',
-    };
-    function clone$1(value) {
-        return JSON.parse(JSON.stringify(value ?? null));
-    }
-    function existingPresetNames_ACU() {
-        ensureApiSettingsShape_ACU();
-        return new Set((settings_ACU.apiPresets || []).map((preset) => String(preset?.name || '').trim()).filter(Boolean));
-    }
-    function isDanglingPresetName_ACU(name, existing) {
-        const normalized = String(name || '').trim();
-        if (!normalized)
-            return null;
-        return existing.has(normalized) ? null : normalized;
-    }
-    function pushPresetRef(items, existing, name, id, label, clearKey) {
-        const dangling = isDanglingPresetName_ACU(name, existing);
-        if (!dangling)
-            return;
-        items.push({ id, kind: 'api_preset', label, name: dangling, clearKey });
-    }
-    function readKeywordApiPreset_ACU() {
-        const holder = globalMeta_ACU?.vectorMemoryConfigGlobal && typeof globalMeta_ACU.vectorMemoryConfigGlobal === 'object'
-            ? globalMeta_ACU.vectorMemoryConfigGlobal
-            : settings_ACU.vectorMemoryConfig;
-        return typeof holder?.keywordApiPreset === 'string' ? holder.keywordApiPreset : '';
-    }
-    function readContinuationGlobalSettings_ACU() {
-        const raw = settings_ACU[CONTINUATION_GLOBAL_SETTINGS_KEY_ACU];
-        if (!raw || typeof raw !== 'object' || Array.isArray(raw))
-            return null;
-        return raw;
-    }
-    function collectFromContinuationSettings_ACU(items, existing, settings, sourceLabel, keyPrefix) {
-        if (!settings)
-            return;
-        pushPresetRef(items, existing, settings.fixedApiPresetName, `${keyPrefix}-fixed`, `${sourceLabel}固定 API 预设`, `${keyPrefix}_fixed`);
-        const presets = settings.agentApiPresets;
-        if (!presets || typeof presets !== 'object')
-            return;
-        for (const role of CONTINUATION_AGENT_API_PRESET_ROLES_ACU) {
-            const choice = presets[role];
-            if (!choice)
-                continue;
-            const roleLabel = CONTINUATION_ROLE_LABELS_ACU[role] || role;
-            pushPresetRef(items, existing, choice.presetName, `${keyPrefix}-agent-${role}`, `${sourceLabel}${roleLabel}渠道`, `${keyPrefix}_agent:${role}`);
-        }
-    }
-    function collectFromSimulationSettings_ACU(items, existing, settings, sourceLabel, keyPrefix) {
-        if (!settings)
-            return;
-        pushPresetRef(items, existing, settings.fixedApiPresetName, `${keyPrefix}-fixed`, `${sourceLabel}固定 API 预设`, `${keyPrefix}_fixed`);
-        const presets = settings.agentApiPresets;
-        if (!presets || typeof presets !== 'object')
-            return;
-        for (const [role, choice] of Object.entries(presets)) {
-            if (!choice)
-                continue;
-            pushPresetRef(items, existing, choice.presetName, `${keyPrefix}-agent-${role}`, `${sourceLabel}Agent「${role}」渠道`, `${keyPrefix}_agent:${role}`);
-        }
-    }
-    function peekFirstFloorField_ACU(field) {
-        try {
-            const chat = getChatArray_ACU();
-            const first = Array.isArray(chat) && chat[0] && typeof chat[0] === 'object' ? chat[0] : null;
-            return first?.[field];
-        }
-        catch {
-            return undefined;
-        }
-    }
-    function collectDanglingApiPresetReferences_ACU() {
-        const existing = existingPresetNames_ACU();
-        const items = [];
-        pushPresetRef(items, existing, settings_ACU.tableApiPreset, 'table', '填表 API 预设', 'table');
-        pushPresetRef(items, existing, settings_ACU.plotApiPreset, 'plot', '剧情推进 API 预设', 'plot');
-        pushPresetRef(items, existing, settings_ACU.contentOptimizationSettings?.apiPreset, 'optimization', '正文优化 API 预设', 'optimization');
-        pushPresetRef(items, existing, readKeywordApiPreset_ACU(), 'vector-keyword', '向量关键词 API 预设', 'vector_keyword');
-        const tableOverrides = settings_ACU.tableApiPresetOverridesByName;
-        if (tableOverrides && typeof tableOverrides === 'object') {
-            for (const [sheetName, presetName] of Object.entries(tableOverrides)) {
-                pushPresetRef(items, existing, presetName, `table-override-${sheetName}`, `表格「${sheetName}」API 预设`, `table_override:${sheetName}`);
-            }
-        }
-        const plotOverrides = settings_ACU.plotTaskApiPresetOverridesById;
-        if (plotOverrides && typeof plotOverrides === 'object') {
-            for (const [taskId, presetName] of Object.entries(plotOverrides)) {
-                pushPresetRef(items, existing, presetName, `plot-task-${taskId}`, `剧情任务「${taskId}」API 预设`, `plot_task:${taskId}`);
-            }
-        }
-        collectFromContinuationSettings_ACU(items, existing, readContinuationGlobalSettings_ACU(), '智能续写（全局副本）', 'continuation_global');
-        const continuationRaw = peekFirstFloorField_ACU(CONTINUATION_FIRST_FLOOR_FIELD_ACU);
-        const continuationSettings = continuationRaw && typeof continuationRaw === 'object' && !Array.isArray(continuationRaw)
-            ? continuationRaw.settings ?? null
-            : null;
-        collectFromContinuationSettings_ACU(items, existing, continuationSettings, '智能续写（当前聊天）', 'continuation');
-        const simulationRaw = peekFirstFloorField_ACU(WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU);
-        const simulationSettings = simulationRaw && typeof simulationRaw === 'object' && !Array.isArray(simulationRaw)
-            ? simulationRaw.settings ?? null
-            : null;
-        collectFromSimulationSettings_ACU(items, existing, simulationSettings, '格林推演（当前聊天）', 'simulation');
-        return items;
-    }
-    async function collectDanglingWorldbookReferences_ACU() {
-        const target = String(getCurrentWorldbookConfig_ACU()?.injectionTarget || '').trim();
-        if (!target || target === 'character')
-            return [];
-        try {
-            const books = await listLorebooks_ACU({ forceRefresh: true });
-            if (resolveLorebookNameFromList_ACU(target, books))
-                return [];
-            return [{
-                    id: 'injection-target',
-                    kind: 'worldbook',
-                    label: '填表写入目标世界书',
-                    name: target,
-                    clearKey: 'worldbook_injection',
-                }];
-        }
-        catch (error) {
-            logWarn_ACU('[引用审计] 读取世界书名单失败，本次不标记注入目标。', error);
-            return [];
-        }
-    }
-    async function collectDanglingReferences_ACU() {
-        const worldbook = await collectDanglingWorldbookReferences_ACU();
-        return [...collectDanglingApiPresetReferences_ACU(), ...worldbook];
-    }
-    function clearContinuationField_ACU(settings, clearKey) {
-        if (clearKey.endsWith('_fixed') || clearKey === 'continuation_fixed' || clearKey === 'continuation_global_fixed') {
-            return { ...settings, apiPresetMode: 'current', fixedApiPresetName: '' };
-        }
-        const agentPrefix = clearKey.includes('_agent:') ? clearKey.slice(clearKey.indexOf('_agent:') + '_agent:'.length) : '';
-        if (!agentPrefix || !settings.agentApiPresets?.[agentPrefix])
-            return settings;
-        return {
-            ...settings,
-            agentApiPresets: {
-                ...settings.agentApiPresets,
-                [agentPrefix]: { mode: 'current', presetName: '' },
-            },
-        };
-    }
-    async function clearDanglingReference_ACU(item) {
-        const key = String(item.clearKey || '');
-        if (key === 'table' || key === 'plot' || key === 'optimization' || key === 'vector_keyword') {
-            const result = setFeatureApiPreset_ACU(key === 'vector_keyword' ? 'vector_keyword' : key, '');
-            return { ok: result.ok, message: result.message };
-        }
-        if (key.startsWith('plot_task:')) {
-            const taskId = key.slice('plot_task:'.length);
-            const result = setFeatureApiPreset_ACU('plot_task', '', { taskId });
-            return { ok: result.ok, message: result.message };
-        }
-        if (key.startsWith('table_override:')) {
-            const sheetName = key.slice('table_override:'.length);
-            if (!settings_ACU.tableApiPresetOverridesByName || typeof settings_ACU.tableApiPresetOverridesByName !== 'object') {
-                return { ok: true };
-            }
-            const snapshot = clone$1(settings_ACU.tableApiPresetOverridesByName);
-            delete settings_ACU.tableApiPresetOverridesByName[sheetName];
-            const saveResult = saveSettings_ACU();
-            if (!saveResult.saved) {
-                settings_ACU.tableApiPresetOverridesByName = snapshot;
-                return { ok: false, message: saveResult.warning || saveResult.error || '保存失败，已回滚。' };
-            }
-            return { ok: true };
-        }
-        if (key.startsWith('continuation')) {
-            if (key.startsWith('continuation_global')) {
-                const globalSettings = readContinuationGlobalSettings_ACU();
-                if (globalSettings) {
-                    const next = clearContinuationField_ACU(globalSettings, key);
-                    settings_ACU[CONTINUATION_GLOBAL_SETTINGS_KEY_ACU] = next;
-                    const saveResult = saveSettings_ACU();
-                    if (!saveResult.saved) {
-                        settings_ACU[CONTINUATION_GLOBAL_SETTINGS_KEY_ACU] = globalSettings;
-                        return { ok: false, message: saveResult.warning || saveResult.error || '保存失败，已回滚。' };
-                    }
-                }
-            }
-            else {
-                mutateCurrentContinuationApiPresetSettings_ACU(settings => clearContinuationField_ACU(settings, key));
-                try {
-                    await persistCurrentContinuationEnvelope_ACU();
-                }
-                catch (error) {
-                    logWarn_ACU('[引用审计] 续写信封清除已写入内存，但聊天保存失败。', error);
-                }
-            }
-            return { ok: true };
-        }
-        if (key.startsWith('simulation')) {
-            mutateCurrentWorldSimulationApiPresetSettings_ACU(settings => {
-                if (key === 'simulation_fixed') {
-                    return { ...settings, apiPresetMode: 'current', fixedApiPresetName: '' };
-                }
-                const role = key.startsWith('simulation_agent:') ? key.slice('simulation_agent:'.length) : '';
-                if (!role || !settings.agentApiPresets?.[role])
-                    return settings;
-                return {
-                    ...settings,
-                    agentApiPresets: {
-                        ...settings.agentApiPresets,
-                        [role]: { mode: 'current', presetName: '' },
-                    },
-                };
-            });
-            try {
-                await persistCurrentWorldSimulationEnvelope_ACU();
-            }
-            catch (error) {
-                logWarn_ACU('[引用审计] 格林推演信封清除已写入内存，但聊天保存失败。', error);
-            }
-            return { ok: true };
-        }
-        if (key === 'worldbook_injection') {
-            const cfg = getCurrentWorldbookConfig_ACU();
-            const previous = cfg.injectionTarget;
-            cfg.injectionTarget = 'character';
-            const saveResult = saveSettings_ACU();
-            if (!saveResult.saved) {
-                cfg.injectionTarget = previous;
-                return { ok: false, message: saveResult.warning || saveResult.error || '保存失败，已回滚。' };
-            }
-            return { ok: true };
-        }
-        return { ok: false, message: '未知的失效引用，无法清除。' };
-    }
-
-    function useDanglingReferenceAudit(scope) {
-        const items = ref([]);
-        const loading = ref(false);
-        const clearingId = ref('');
-        const error = ref('');
-        async function refresh() {
-            loading.value = true;
-            error.value = '';
-            try {
-                items.value = scope === 'api'
-                    ? collectDanglingApiPresetReferences_ACU()
-                    : await collectDanglingWorldbookReferences_ACU();
-            }
-            catch (caught) {
-                error.value = caught instanceof Error ? caught.message : '校验失效引用失败';
-                items.value = [];
-            }
-            finally {
-                loading.value = false;
-            }
-        }
-        async function clear(item) {
-            clearingId.value = item.id;
-            error.value = '';
-            try {
-                const result = await clearDanglingReference_ACU(item);
-                if (!result.ok) {
-                    error.value = result.message || '清除失败';
-                    return;
-                }
-                await refresh();
-            }
-            catch (caught) {
-                error.value = caught instanceof Error ? caught.message : '清除失败';
-            }
-            finally {
-                clearingId.value = '';
-            }
-        }
-        onMounted(() => {
-            void refresh();
-        });
-        return {
-            items,
-            loading,
-            clearingId,
-            error,
-            refresh,
-            clear,
-        };
-    }
-
-    var _sfc_main$K = /*@__PURE__*/ defineComponent({
-        __name: 'DanglingReferenceBanner',
-        props: {
-            scope: {}
-        },
-        setup(__props, { expose: __expose }) {
-            __expose();
-            const props = __props;
-            const audit = useDanglingReferenceAudit(props.scope);
-            const kindLabel = computed(() => (props.scope === 'worldbook' ? '世界书' : 'API 预设'));
-            const __returned__ = { props, audit, kindLabel, AcuButton, AcuMessage };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
-        }
-    });
-
-    injectSfcStyle("\n.acu-dangling-reference-banner__intro[data-v-f872c8ba],\r\n.acu-dangling-reference-banner__error[data-v-f872c8ba] {\r\n  margin: 0 0 8px;\n}\n.acu-dangling-reference-banner__list[data-v-f872c8ba] {\r\n  margin: 0;\r\n  padding: 0;\r\n  list-style: none;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 8px;\n}\n.acu-dangling-reference-banner__item[data-v-f872c8ba] {\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: 12px;\n}\r\n", "src/presentation-v2/components/DanglingReferenceBanner.vue#style-0-f872c8ba");
-    var DanglingReferenceBanner_vue_vue_type_style_index_0_scoped_f872c8ba_lang = null;
-
-    const _hoisted_1$J = {
-	key: 0,
-	class: "acu-dangling-reference-banner__error"
-    };
-    const _hoisted_2$F = { class: "acu-dangling-reference-banner__intro" };
-    const _hoisted_3$z = { class: "acu-dangling-reference-banner__list" };
-    function _sfc_render$K(_ctx, _cache, $props, $setup, $data, $options) {
-	return $setup.audit.items.value.length || $setup.audit.error.value ? (openBlock(), createBlock($setup["AcuMessage"], {
-		key: 0,
-		kind: "warning"
-	}, {
-		default: withCtx(() => [
-			$setup.audit.error.value ? (openBlock(), createElementBlock(
-				"p",
-				_hoisted_1$J,
-				toDisplayString($setup.audit.error.value),
-				1
-				/* TEXT */
-			)) : createCommentVNode("v-if", true),
-			createBaseVNode(
-				"p",
-				_hoisted_2$F,
-				" 下列引用指向已不存在的" + toDisplayString($setup.kindLabel) + "，不会自动改写已保存的设置。可一键清除后重新选择。 ",
-				1
-				/* TEXT */
-			),
-			createBaseVNode("ul", _hoisted_3$z, [(openBlock(true), createElementBlock(
-				Fragment,
-				null,
-				renderList($setup.audit.items.value, (item) => {
-					return openBlock(), createElementBlock("li", {
-						key: item.id,
-						class: "acu-dangling-reference-banner__item"
-					}, [createBaseVNode(
-						"span",
-						null,
-						toDisplayString(item.label) + "「" + toDisplayString(item.name) + "」已不存在 ",
-						1
-						/* TEXT */
-					), createVNode($setup["AcuButton"], {
-						size: "sm",
-						disabled: $setup.audit.clearingId.value === item.id,
-						onClick: ($event) => $setup.audit.clear(item)
-					}, {
-						default: withCtx(() => [..._cache[0] || (_cache[0] = [createTextVNode(
-							" 清除引用 ",
-							-1
-							/* CACHED */
-						)])]),
-						_: 1
-					}, 8, ["disabled", "onClick"])]);
-				}),
-				128
-				/* KEYED_FRAGMENT */
-			))])
-		]),
-		_: 1
-	})) : createCommentVNode("v-if", true);
-    }
-    var DanglingReferenceBanner = /*#__PURE__*/ _export_sfc(_sfc_main$K, [["render", _sfc_render$K], ["__scopeId", "data-v-f872c8ba"]]);
-
-    var _sfc_main$J = /*@__PURE__*/ defineComponent({
-        __name: 'WorldbookSelector',
-        props: {
-            modelValue: {},
-            names: {},
-            charPrimary: {},
-            status: {},
-            error: {},
-            filterable: { type: Boolean },
-            showCharacterOption: { type: Boolean },
-            characterOptionLabel: {},
-            characterFallbackLabel: {}
-        },
-        emits: ["update:modelValue"],
-        setup(__props, { expose: __expose }) {
-            __expose();
-            const props = __props;
-            const filter = ref('');
-            const filteredNames = computed(() => {
-                const list = props.names;
-                const f = filter.value.trim().toLowerCase();
-                if (!f)
-                    return list;
-                return list.filter(name => name.toLowerCase().includes(f));
-            });
-            const worldbookOptions = computed(() => {
-                const result = [];
-                if (props.charPrimary || props.showCharacterOption) {
-                    const label = props.characterOptionLabel
-                        || (props.charPrimary ? `当前角色卡主世界书 · ${props.charPrimary}` : props.characterFallbackLabel || '当前角色卡主世界书');
-                    result.push({ value: 'character', label });
-                }
-                for (const name of filteredNames.value) {
-                    result.push({ value: name, label: name });
-                }
-                return result;
-            });
-            const __returned__ = { props, filter, filteredNames, worldbookOptions, AcuFormRow, AcuInput, AcuSelect, AcuText };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
-        }
-    });
-
-    injectSfcStyle("\n.acu-v2-wb-selector[data-v-3ed3b837] { display: flex; flex-direction: column; gap: 10px; min-width: 0;\n}\r\n", "src/presentation-v2/components/WorldbookSelector.vue#style-0-3ed3b837");
-    var WorldbookSelector_vue_vue_type_style_index_0_scoped_3ed3b837_lang = null;
-
-    const _hoisted_1$I = { class: "acu-v2-wb-selector" };
-    function _sfc_render$J(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$I, [
-		$props.filterable ? (openBlock(), createBlock($setup["AcuFormRow"], {
-			key: 0,
-			label: "筛选"
-		}, {
-			default: withCtx(() => [createVNode($setup["AcuInput"], {
-				modelValue: $setup.filter,
-				"onUpdate:modelValue": _cache[0] || (_cache[0] = ($event) => $setup.filter = $event),
-				type: "text",
-				placeholder: "筛选世界书..."
-			}, null, 8, ["modelValue"])]),
-			_: 1
-		})) : createCommentVNode("v-if", true),
-		createVNode($setup["AcuFormRow"], { label: "目标世界书" }, {
-			default: withCtx(() => [createVNode($setup["AcuSelect"], {
-				options: $setup.worldbookOptions,
-				"model-value": $props.modelValue,
-				disabled: $props.status === "loading",
-				placeholder: "未选择",
-				"onUpdate:modelValue": _cache[1] || (_cache[1] = ($event) => _ctx.$emit("update:modelValue", $event))
-			}, null, 8, [
-				"options",
-				"model-value",
-				"disabled"
-			])]),
-			_: 1
-		}),
-		$props.status === "error" ? (openBlock(), createBlock($setup["AcuText"], {
-			key: 1,
-			variant: "error",
-			class: "acu-v2-wb-selector__error"
-		}, {
-			default: withCtx(() => [createTextVNode(
-				toDisplayString($props.error || "加载失败"),
-				1
-				/* TEXT */
-			)]),
-			_: 1
-		})) : createCommentVNode("v-if", true)
-	]);
-    }
-    var WorldbookSelector = /*#__PURE__*/ _export_sfc(_sfc_main$J, [["render", _sfc_render$J], ["__scopeId", "data-v-3ed3b837"]]);
-
-    var _sfc_main$I = /*@__PURE__*/ defineComponent({
-        __name: 'WorldbookSourcePicker',
-        props: {
-            source: {},
-            selectedNames: {},
-            names: {},
-            status: {},
-            error: {},
-            filterable: { type: Boolean, default: true }
-        },
-        emits: ["update:source", "toggle-book"],
-        setup(__props, { expose: __expose, emit: __emit }) {
-            __expose();
-            const props = __props;
-            const emit = __emit;
-            const filter = ref('');
-            const sourceOptions = [
-                { value: 'character', label: '跟随角色卡' },
-                { value: 'manual', label: '手动选择' },
-            ];
-            const selectedSet = computed(() => new Set(props.selectedNames.filter(Boolean)));
-            const filteredNames = computed(() => {
-                const f = filter.value.trim().toLowerCase();
-                if (!f)
-                    return props.names;
-                return props.names.filter(name => name.toLowerCase().includes(f));
-            });
-            function onSourceChange(value) {
-                emit('update:source', value === 'manual' ? 'manual' : 'character');
-            }
-            const __returned__ = { props, emit, filter, sourceOptions, selectedSet, filteredNames, onSourceChange, AcuFormRow, AcuInput, AcuSegmentedControl, AcuText };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
-        }
-    });
-
-    injectSfcStyle("\n.acu-v2-wb-source-picker[data-v-3bd327f1] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\r\n  min-width: 0;\n}\n.acu-v2-wb-source-picker__list[data-v-3bd327f1] {\r\n  min-width: 0;\r\n  max-height: 180px;\r\n  overflow-y: auto;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 8px;\r\n  padding: 8px;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-2);\n}\n.acu-v2-wb-source-picker__list--disabled[data-v-3bd327f1] {\r\n  opacity: 0.65;\n}\n.acu-v2-wb-source-picker__item[data-v-3bd327f1] {\r\n  width: 100%;\r\n  min-width: 0;\r\n  min-height: 32px;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: 10px;\r\n  margin: 0;\r\n  padding: 7px 9px;\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: transparent;\r\n  color: var(--acu-text-2);\r\n  font: inherit;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.4;\r\n  text-align: left;\r\n  cursor: pointer;\r\n  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-v2-wb-source-picker__item[data-v-3bd327f1]:hover:not(:disabled) {\r\n  background: var(--acu-hover-overlay);\r\n  color: var(--acu-text-1);\n}\n.acu-v2-wb-source-picker__item[data-v-3bd327f1]:disabled {\r\n  cursor: not-allowed;\n}\n.acu-v2-wb-source-picker__item[data-v-3bd327f1]:focus-visible {\r\n  outline: none;\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-v2-wb-source-picker__item--selected[data-v-3bd327f1] {\r\n  background: color-mix(in srgb, var(--acu-accent) 14%, transparent);\r\n  color: var(--acu-text-1);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-accent) 42%, transparent);\n}\n.acu-v2-wb-source-picker__item--selected[data-v-3bd327f1]:hover:not(:disabled) {\r\n  background: color-mix(in srgb, var(--acu-accent) 20%, transparent);\r\n  color: var(--acu-text-1);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-accent) 54%, transparent);\n}\n.acu-v2-wb-source-picker__item-label[data-v-3bd327f1] {\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-v2-wb-source-picker__item-check[data-v-3bd327f1] {\r\n  flex-shrink: 0;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-accent);\r\n  opacity: 0;\r\n  transform: scale(0.86);\r\n  transition: opacity 0.15s ease, transform 0.15s ease;\n}\n.acu-v2-wb-source-picker__item--selected .acu-v2-wb-source-picker__item-check[data-v-3bd327f1] {\r\n  opacity: 1;\r\n  transform: scale(1);\n}\n.acu-v2-wb-source-picker__empty[data-v-3bd327f1] {\r\n  padding: 8px 2px;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  text-align: center;\n}\n.acu-v2-wb-source-picker__error[data-v-3bd327f1] {\r\n  margin: 0;\n}\r\n", "src/presentation-v2/components/WorldbookSourcePicker.vue#style-0-3bd327f1");
-    var WorldbookSourcePicker_vue_vue_type_style_index_0_scoped_3bd327f1_lang = null;
-
-    const _hoisted_1$H = { class: "acu-v2-wb-source-picker" };
-    const _hoisted_2$E = [
-	"aria-checked",
-	"disabled",
-	"onClick"
-    ];
-    const _hoisted_3$y = { class: "acu-v2-wb-source-picker__item-label" };
-    const _hoisted_4$u = {
-	key: 0,
-	class: "acu-v2-wb-source-picker__empty"
-    };
-    function _sfc_render$I(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$H, [
-		createVNode($setup["AcuFormRow"], { label: "来源" }, {
-			default: withCtx(() => [createVNode($setup["AcuSegmentedControl"], {
-				"model-value": $props.source,
-				options: $setup.sourceOptions,
-				"aria-label": "世界书来源",
-				"onUpdate:modelValue": $setup.onSourceChange
-			}, null, 8, ["model-value"])]),
-			_: 1
-		}),
-		$props.source === "manual" ? (openBlock(), createElementBlock(
-			Fragment,
-			{ key: 0 },
-			[$props.filterable ? (openBlock(), createBlock($setup["AcuFormRow"], {
-				key: 0,
-				label: "筛选"
-			}, {
-				default: withCtx(() => [createVNode($setup["AcuInput"], {
-					modelValue: $setup.filter,
-					"onUpdate:modelValue": _cache[0] || (_cache[0] = ($event) => $setup.filter = $event),
-					type: "text",
-					placeholder: "筛选世界书..."
-				}, null, 8, ["modelValue"])]),
-				_: 1
-			})) : createCommentVNode("v-if", true), createBaseVNode(
-				"div",
-				{ class: normalizeClass(["acu-v2-wb-source-picker__list", { "acu-v2-wb-source-picker__list--disabled": $props.status === "loading" }]) },
-				[(openBlock(true), createElementBlock(
-					Fragment,
-					null,
-					renderList($setup.filteredNames, (name) => {
-						return openBlock(), createElementBlock("button", {
-							key: name,
-							type: "button",
-							class: normalizeClass(["acu-v2-wb-source-picker__item", { "acu-v2-wb-source-picker__item--selected": $setup.selectedSet.has(name) }]),
-							role: "checkbox",
-							"aria-checked": $setup.selectedSet.has(name) ? "true" : "false",
-							disabled: $props.status === "loading",
-							onClick: ($event) => _ctx.$emit("toggle-book", name, !$setup.selectedSet.has(name))
-						}, [createBaseVNode(
-							"span",
-							_hoisted_3$y,
-							toDisplayString(name),
-							1
-							/* TEXT */
-						), _cache[1] || (_cache[1] = createBaseVNode(
-							"i",
-							{
-								class: "fa-solid fa-check acu-v2-wb-source-picker__item-check",
-								"aria-hidden": "true"
-							},
-							null,
-							-1
-							/* CACHED */
-						))], 10, _hoisted_2$E);
-					}),
-					128
-					/* KEYED_FRAGMENT */
-				)), !$setup.filteredNames.length ? (openBlock(), createElementBlock(
-					"div",
-					_hoisted_4$u,
-					toDisplayString($props.status === "loading" ? "正在加载世界书..." : "无可选世界书"),
-					1
-					/* TEXT */
-				)) : createCommentVNode("v-if", true)],
-				2
-				/* CLASS */
-			)],
-			64
-			/* STABLE_FRAGMENT */
-		)) : createCommentVNode("v-if", true),
-		$props.status === "error" ? (openBlock(), createBlock($setup["AcuText"], {
-			key: 1,
-			variant: "error",
-			class: "acu-v2-wb-source-picker__error"
-		}, {
-			default: withCtx(() => [createTextVNode(
-				toDisplayString($props.error || "加载失败"),
-				1
-				/* TEXT */
-			)]),
-			_: 1
-		})) : createCommentVNode("v-if", true)
-	]);
-    }
-    var WorldbookSourcePicker = /*#__PURE__*/ _export_sfc(_sfc_main$I, [["render", _sfc_render$I], ["__scopeId", "data-v-3bd327f1"]]);
-
-    var _sfc_main$H = /*@__PURE__*/ defineComponent({
-        __name: 'WorldbookEntryList',
-        props: {
-            groups: {},
-            filter: {},
-            loading: { type: Boolean },
-            status: { default: 'success' },
-            error: { default: '' },
-            emptyText: { default: '所选世界书中无可显示的条目。' },
-            showEntryToggle: { type: Boolean, default: true },
-            showSkillifyControls: { type: Boolean, default: true },
-            showAgentTakeoverState: { type: Boolean, default: true },
-            showSkillEditor: { type: Boolean, default: true }
-        },
-        emits: ["toggle", "toggle-skillify", "toggle-group", "save-skill", "delete-skill"],
-        setup(__props, { expose: __expose, emit: __emit }) {
-            __expose();
-            const props = __props;
-            const emit = __emit;
-            const skillEditorOpen = reactive({});
-            const skillDrafts = reactive({});
-            const filteredGroups = computed(() => {
-                const q = props.filter.trim().toLowerCase();
-                if (!q)
-                    return props.groups;
-                return props.groups
-                    .map(g => {
-                    const bookMatch = g.bookName.toLowerCase().includes(q);
-                    if (bookMatch)
-                        return g;
-                    const filtered = g.entries.filter(e => e.label.toLowerCase().includes(q) || e.bookName.toLowerCase().includes(q));
-                    if (filtered.length === 0)
-                        return null;
-                    return { ...g, entries: filtered, expanded: true };
-                })
-                    .filter((g) => g !== null);
-            });
-            function formatGroupMeta(group) {
-                const checkedCount = props.showEntryToggle ? group.entries.filter(entry => entry.checked).length : null;
-                const skillCount = group.entries.filter(entry => entry.hasSkill).length;
-                const controlledCount = group.entries.filter(entry => entry.agentTakeoverState === 'taken_over' || entry.agentTakeoverState === 'final_greenlight').length;
-                const suffix = [
-                    props.showSkillifyControls && skillCount > 0 ? `Skill ${skillCount}` : '',
-                    props.showAgentTakeoverState && controlledCount > 0 ? `接管 ${controlledCount}` : '',
-                ].filter(Boolean).join(' · ');
-                const prefix = checkedCount === null ? `${group.entries.length} 条` : `${checkedCount}/${group.entries.length} 条`;
-                return suffix ? `${prefix} · ${suffix}` : prefix;
-            }
-            function formatAgentTakeoverState(entry) {
-                if (entry.agentTakeoverState === 'initial_disabled')
-                    return '原本关闭';
-                if (entry.isConstant && entry.agentTakeoverState === 'native')
-                    return '';
-                if (entry.agentTakeoverState === 'native')
-                    return '原生逻辑';
-                if (entry.agentTakeoverState === 'skill_ready')
-                    return '可接管';
-                if (entry.agentTakeoverState === 'taken_over')
-                    return 'Agent 接管';
-                if (entry.agentTakeoverState === 'final_greenlight')
-                    return '正文放行';
-                return '';
-            }
-            function onToggle(bookName, uid, checked) {
-                emit('toggle', bookName, uid, checked);
-            }
-            function getEntryKey(entry) {
-                return `${entry.bookName}::${entry.uid}`;
-            }
-            function buildSkillDraft(entry) {
-                return {
-                    description: entry.skillMeta?.description ?? '',
-                    triggerWhen: entry.skillMeta?.triggerWhen ?? '',
-                };
-            }
-            function getSkillDraft(entry) {
-                const key = getEntryKey(entry);
-                if (!skillDrafts[key])
-                    skillDrafts[key] = buildSkillDraft(entry);
-                return skillDrafts[key];
-            }
-            function patchSkillDraft(entry, patch) {
-                const key = getEntryKey(entry);
-                skillDrafts[key] = { ...getSkillDraft(entry), ...patch };
-            }
-            function isSkillEditorOpen(entry) {
-                return !!skillEditorOpen[getEntryKey(entry)];
-            }
-            function toggleSkillEditor(entry) {
-                const key = getEntryKey(entry);
-                skillEditorOpen[key] = !skillEditorOpen[key];
-                if (skillEditorOpen[key])
-                    skillDrafts[key] = buildSkillDraft(entry);
-            }
-            function saveSkill(entry) {
-                emit('save-skill', entry.bookName, entry.uid, { ...getSkillDraft(entry) });
-            }
-            const __returned__ = { props, emit, skillEditorOpen, skillDrafts, filteredGroups, formatGroupMeta, formatAgentTakeoverState, onToggle, getEntryKey, buildSkillDraft, getSkillDraft, patchSkillDraft, isSkillEditorOpen, toggleSkillEditor, saveSkill, AcuButton, AcuCheckbox, AcuDisclosureGroup, AcuTextarea };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
-        }
-    });
-
-    injectSfcStyle("\n.acu-v2-wb-entries[data-v-c56bd63a] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-v2-wb-entries__status[data-v-c56bd63a] {\r\n  padding: 8px 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-wb-entries__status--error[data-v-c56bd63a] { color: var(--acu-danger);\n}\n.acu-v2-wb-entry-item[data-v-c56bd63a] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) auto;\r\n  gap: 6px 8px;\r\n  align-items: center;\r\n  padding: 3px 10px;\r\n  transition: background 0.08s ease;\n}\n.acu-v2-wb-entry-item[data-v-c56bd63a]:hover { background: var(--acu-hover-overlay);\n}\n.acu-v2-wb-entry-item--disabled[data-v-c56bd63a] {\r\n  opacity: 0.5;\n}\n.acu-v2-wb-entry-item__actions[data-v-c56bd63a] {\r\n  display: inline-flex;\r\n  align-items: center;\r\n  gap: 6px;\n}\n.acu-v2-wb-entry-item__label[data-v-c56bd63a] {\r\n  min-width: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  overflow-wrap: anywhere;\r\n  display: -webkit-box;\r\n  -webkit-line-clamp: 2;\r\n  -webkit-box-orient: vertical;\r\n  overflow: hidden;\n}\r\n\r\n/* 剧情页 / 填表页走 AcuCheckbox 分支；:deep 把夹断锁在本列表内，避免改动全局组件 */\n.acu-v2-wb-entry-item[data-v-c56bd63a] .acu-checkbox__label {\r\n  min-width: 0;\r\n  overflow-wrap: anywhere;\r\n  display: -webkit-box;\r\n  -webkit-line-clamp: 2;\r\n  -webkit-box-orient: vertical;\r\n  overflow: hidden;\n}\n.acu-v2-wb-entry-item__skill-badge[data-v-c56bd63a] {\r\n  border-radius: 999px;\r\n  padding: 1px 6px;\r\n  background: color-mix(in srgb, var(--acu-accent) 14%, transparent);\r\n  color: var(--acu-accent);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-v2-wb-entry-item__state-badge[data-v-c56bd63a] {\r\n  border-radius: 999px;\r\n  padding: 1px 6px;\r\n  background: color-mix(in srgb, var(--acu-warning) 14%, transparent);\r\n  color: var(--acu-warning);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-v2-wb-entry-skill[data-v-c56bd63a] {\r\n  grid-column: 1 / -1;\r\n  display: grid;\r\n  gap: 8px;\r\n  margin: 4px 0 6px 24px;\r\n  padding: 8px;\r\n  border: 1px solid var(--acu-border-1);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-1);\n}\n.acu-v2-wb-entry-skill__actions[data-v-c56bd63a] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  flex-wrap: wrap;\n}\n@media (max-width: 640px) {\n.acu-v2-wb-entry-item[data-v-c56bd63a] {\r\n    grid-template-columns: 1fr;\n}\n.acu-v2-wb-entry-item__actions[data-v-c56bd63a] {\r\n    justify-content: flex-start;\r\n    padding-left: 24px;\n}\n.acu-v2-wb-entry-skill[data-v-c56bd63a] {\r\n    margin-left: 0;\n}\n}\r\n", "src/presentation-v2/components/WorldbookEntryList.vue#style-0-c56bd63a");
-    var WorldbookEntryList_vue_vue_type_style_index_0_scoped_c56bd63a_lang = null;
-
-    const _hoisted_1$G = { class: "acu-v2-wb-entries" };
-    const _hoisted_2$D = {
-	key: 0,
-	class: "acu-v2-wb-entries__status"
-    };
-    const _hoisted_3$x = {
-	key: 1,
-	class: "acu-v2-wb-entries__status acu-v2-wb-entries__status--error",
-	role: "alert"
-    };
-    const _hoisted_4$t = {
-	key: 2,
-	class: "acu-v2-wb-entries__status"
-    };
-    const _hoisted_5$q = ["title"];
-    const _hoisted_6$p = {
-	key: 2,
-	class: "acu-v2-wb-entry-item__actions"
-    };
-    const _hoisted_7$n = {
-	key: 0,
-	class: "acu-v2-wb-entry-item__skill-badge"
-    };
-    const _hoisted_8$n = {
-	key: 1,
-	class: "acu-v2-wb-entry-item__state-badge"
-    };
-    const _hoisted_9$k = {
-	key: 2,
-	class: "acu-v2-wb-entry-item__state-badge"
-    };
-    const _hoisted_10$i = {
-	key: 3,
-	class: "acu-v2-wb-entry-skill"
-    };
-    const _hoisted_11$h = { class: "acu-v2-wb-entry-skill__actions" };
-    function _sfc_render$H(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$G, [$props.loading ? (openBlock(), createElementBlock("div", _hoisted_2$D, "正在加载条目...")) : $props.status === "error" ? (openBlock(), createElementBlock(
-		"div",
-		_hoisted_3$x,
-		toDisplayString($props.error || "加载条目失败"),
-		1
-		/* TEXT */
-	)) : $props.groups.length === 0 ? (openBlock(), createElementBlock(
-		"div",
-		_hoisted_4$t,
-		toDisplayString($props.emptyText),
-		1
-		/* TEXT */
-	)) : (openBlock(true), createElementBlock(
-		Fragment,
-		{ key: 3 },
-		renderList($setup.filteredGroups, (group, index) => {
-			return openBlock(), createBlock($setup["AcuDisclosureGroup"], {
-				key: group.bookName,
-				"root-class": "acu-v2-wb-entry-group",
-				"header-class": "acu-v2-wb-entry-group__header",
-				"body-class": "acu-v2-wb-entry-group__body",
-				"chevron-class": "acu-v2-wb-entry-group__chevron",
-				"label-class": "acu-v2-wb-entry-group__name",
-				"meta-class": "acu-v2-wb-entry-group__meta",
-				label: group.bookName,
-				meta: $setup.formatGroupMeta(group),
-				expanded: group.expanded,
-				"body-id": `acu-v2-wb-entry-group-${index}`,
-				"body-mode": "if",
-				"body-max-height": "280px",
-				onToggle: ($event) => _ctx.$emit("toggle-group", group.bookName)
-			}, {
-				default: withCtx(() => [(openBlock(true), createElementBlock(
-					Fragment,
-					null,
-					renderList(group.entries, (entry) => {
-						return openBlock(), createElementBlock(
-							"div",
-							{
-								key: `${group.bookName}-${entry.uid}`,
-								class: normalizeClass(["acu-v2-wb-entry-item", { "acu-v2-wb-entry-item--disabled": entry.disabled }])
-							},
-							[
-								$props.showEntryToggle ? (openBlock(), createBlock($setup["AcuCheckbox"], {
-									key: 0,
-									"model-value": entry.checked,
-									label: entry.label,
-									title: entry.label,
-									disabled: entry.disabled,
-									"onUpdate:modelValue": ($event) => $setup.onToggle(entry.bookName, entry.uid, $event)
-								}, null, 8, [
-									"model-value",
-									"label",
-									"title",
-									"disabled",
-									"onUpdate:modelValue"
-								])) : (openBlock(), createElementBlock("div", {
-									key: 1,
-									class: "acu-v2-wb-entry-item__label",
-									title: entry.label
-								}, toDisplayString(entry.label), 9, _hoisted_5$q)),
-								$props.showSkillifyControls || entry.isConstant || $props.showAgentTakeoverState && $setup.formatAgentTakeoverState(entry) ? (openBlock(), createElementBlock("div", _hoisted_6$p, [
-									$props.showSkillifyControls && entry.skillMeta ? (openBlock(), createElementBlock("span", _hoisted_7$n, "Skill")) : createCommentVNode("v-if", true),
-									entry.isConstant ? (openBlock(), createElementBlock("span", _hoisted_8$n, "常量")) : createCommentVNode("v-if", true),
-									$props.showAgentTakeoverState && $setup.formatAgentTakeoverState(entry) ? (openBlock(), createElementBlock(
-										"span",
-										_hoisted_9$k,
-										toDisplayString($setup.formatAgentTakeoverState(entry)),
-										1
-										/* TEXT */
-									)) : createCommentVNode("v-if", true),
-									$props.showSkillifyControls ? (openBlock(), createBlock($setup["AcuCheckbox"], {
-										key: 3,
-										"model-value": entry.skillifySelected,
-										label: "Skill 化",
-										disabled: entry.disabled || !entry.skillifySelectable,
-										"onUpdate:modelValue": ($event) => _ctx.$emit("toggle-skillify", entry.bookName, entry.uid, $event)
-									}, null, 8, [
-										"model-value",
-										"disabled",
-										"onUpdate:modelValue"
-									])) : createCommentVNode("v-if", true),
-									$props.showSkillifyControls && $props.showSkillEditor ? (openBlock(), createBlock($setup["AcuButton"], {
-										key: 4,
-										size: "sm",
-										onClick: ($event) => $setup.toggleSkillEditor(entry)
-									}, {
-										default: withCtx(() => [createTextVNode(
-											toDisplayString($setup.isSkillEditorOpen(entry) ? "收起 Skill" : "编辑 Skill"),
-											1
-											/* TEXT */
-										)]),
-										_: 2
-									}, 1032, ["onClick"])) : createCommentVNode("v-if", true)
-								])) : createCommentVNode("v-if", true),
-								$props.showSkillEditor && $setup.isSkillEditorOpen(entry) ? (openBlock(), createElementBlock("div", _hoisted_10$i, [
-									createVNode($setup["AcuTextarea"], {
-										"model-value": $setup.getSkillDraft(entry).description,
-										label: "Skill 描述",
-										placeholder: "描述该世界书条目的用途，留空则不写入 Skill 元数据。",
-										rows: 2,
-										"max-rows": 6,
-										"auto-resize": "",
-										"onUpdate:modelValue": ($event) => $setup.patchSkillDraft(entry, { description: String($event) })
-									}, null, 8, ["model-value", "onUpdate:modelValue"]),
-									createVNode($setup["AcuTextarea"], {
-										"model-value": $setup.getSkillDraft(entry).triggerWhen,
-										label: "触发时机",
-										placeholder: "说明 Agent 何时应选择该条目，留空则不写入 Skill 元数据。",
-										rows: 2,
-										"max-rows": 6,
-										"auto-resize": "",
-										"onUpdate:modelValue": ($event) => $setup.patchSkillDraft(entry, { triggerWhen: String($event) })
-									}, null, 8, ["model-value", "onUpdate:modelValue"]),
-									createBaseVNode("div", _hoisted_11$h, [createVNode($setup["AcuButton"], {
-										size: "sm",
-										variant: "primary",
-										onClick: ($event) => $setup.saveSkill(entry)
-									}, {
-										default: withCtx(() => [..._cache[0] || (_cache[0] = [createTextVNode(
-											"保存 Skill",
-											-1
-											/* CACHED */
-										)])]),
-										_: 1
-									}, 8, ["onClick"]), createVNode($setup["AcuButton"], {
-										size: "sm",
-										variant: "danger",
-										onClick: ($event) => _ctx.$emit("delete-skill", entry.bookName, entry.uid)
-									}, {
-										default: withCtx(() => [..._cache[1] || (_cache[1] = [createTextVNode(
-											"删除 Skill",
-											-1
-											/* CACHED */
-										)])]),
-										_: 1
-									}, 8, ["onClick"])])
-								])) : createCommentVNode("v-if", true)
-							],
-							2
-							/* CLASS */
-						);
-					}),
-					128
-					/* KEYED_FRAGMENT */
-				))]),
-				_: 2
-			}, 1032, [
-				"label",
-				"meta",
-				"expanded",
-				"body-id",
-				"onToggle"
-			]);
-		}),
-		128
-		/* KEYED_FRAGMENT */
-	))]);
-    }
-    var WorldbookEntryList = /*#__PURE__*/ _export_sfc(_sfc_main$H, [["render", _sfc_render$H], ["__scopeId", "data-v-c56bd63a"]]);
-
-    var _sfc_main$G = /*@__PURE__*/ defineComponent({
-        __name: 'WorldbookEntryToolbar',
-        props: {
-            filter: {},
-            showEntrySelectionControls: { type: Boolean, default: true },
-            showSkillifyControls: { type: Boolean, default: false }
-        },
-        emits: ["update:filter", "select-all", "deselect-all", "skillify-select-all", "skillify-deselect-all", "skillify-selected"],
-        setup(__props, { expose: __expose }) {
-            __expose();
-            const __returned__ = { AcuButton, AcuFormRow, AcuInput };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
-        }
-    });
-
-    injectSfcStyle("\n.acu-v2-wb-entry-toolbar[data-v-7cc3dea8] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 6px;\r\n  margin-top: 10px;\r\n  padding-top: 10px;\r\n  flex-wrap: wrap;\n}\n.acu-v2-wb-entry-toolbar__filter[data-v-7cc3dea8] {\r\n  flex: 1;\r\n  min-width: 160px;\n}\r\n", "src/presentation-v2/components/WorldbookEntryToolbar.vue#style-0-7cc3dea8");
-    var WorldbookEntryToolbar_vue_vue_type_style_index_0_scoped_7cc3dea8_lang = null;
-
-    const _hoisted_1$F = { class: "acu-v2-wb-entry-toolbar" };
-    function _sfc_render$G(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$F, [
-		$props.showEntrySelectionControls ? (openBlock(), createElementBlock(
-			Fragment,
-			{ key: 0 },
-			[createVNode($setup["AcuButton"], { onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("select-all")) }, {
-				default: withCtx(() => [..._cache[6] || (_cache[6] = [createTextVNode(
-					"全选",
-					-1
-					/* CACHED */
-				)])]),
-				_: 1
-			}), createVNode($setup["AcuButton"], { onClick: _cache[1] || (_cache[1] = ($event) => _ctx.$emit("deselect-all")) }, {
-				default: withCtx(() => [..._cache[7] || (_cache[7] = [createTextVNode(
-					"全不选",
-					-1
-					/* CACHED */
-				)])]),
-				_: 1
-			})],
-			64
-			/* STABLE_FRAGMENT */
-		)) : createCommentVNode("v-if", true),
-		$props.showSkillifyControls ? (openBlock(), createElementBlock(
-			Fragment,
-			{ key: 1 },
-			[
-				createVNode($setup["AcuButton"], { onClick: _cache[2] || (_cache[2] = ($event) => _ctx.$emit("skillify-select-all")) }, {
-					default: withCtx(() => [..._cache[8] || (_cache[8] = [createTextVNode(
-						"Skill 全选",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				}),
-				createVNode($setup["AcuButton"], { onClick: _cache[3] || (_cache[3] = ($event) => _ctx.$emit("skillify-deselect-all")) }, {
-					default: withCtx(() => [..._cache[9] || (_cache[9] = [createTextVNode(
-						"Skill 全不选",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				}),
-				createVNode($setup["AcuButton"], {
-					variant: "primary",
-					onClick: _cache[4] || (_cache[4] = ($event) => _ctx.$emit("skillify-selected"))
-				}, {
-					default: withCtx(() => [..._cache[10] || (_cache[10] = [createTextVNode(
-						"对所选 Skill 化",
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				})
-			],
-			64
-			/* STABLE_FRAGMENT */
-		)) : createCommentVNode("v-if", true),
-		createVNode($setup["AcuFormRow"], { class: "acu-v2-wb-entry-toolbar__filter" }, {
-			default: withCtx(() => [createVNode($setup["AcuInput"], {
-				"model-value": $props.filter,
-				type: "text",
-				placeholder: "搜索条目...",
-				"onUpdate:modelValue": _cache[5] || (_cache[5] = ($event) => _ctx.$emit("update:filter", String($event)))
-			}, null, 8, ["model-value"])]),
-			_: 1
-		})
-	]);
-    }
-    var WorldbookEntryToolbar = /*#__PURE__*/ _export_sfc(_sfc_main$G, [["render", _sfc_render$G], ["__scopeId", "data-v-7cc3dea8"]]);
-
-    var _sfc_main$F = /*@__PURE__*/ defineComponent({
-        __name: 'WorldbookEntryPickerBody',
-        props: {
-            source: {},
-            selectedNames: {},
-            names: {},
-            selectorStatus: {},
-            selectorError: {},
-            currentLabel: {},
-            filter: {},
-            groups: {},
-            loading: { type: Boolean },
-            entryStatus: { default: 'success' },
-            entryError: { default: '' },
-            emptyText: { default: '所选世界书中无可显示的条目。' },
-            filterable: { type: Boolean, default: true }
-        },
-        emits: ["update:source", "toggle-book", "update:filter", "select-all", "deselect-all", "toggle", "toggle-group"],
-        setup(__props, { expose: __expose }) {
-            __expose();
-            const __returned__ = { WorldbookSourcePicker, WorldbookEntryList, WorldbookEntryToolbar };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
-        }
-    });
-
-    injectSfcStyle("\n.acu-v2-wb-entry-picker[data-v-648a8ff3] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\r\n  min-width: 0;\n}\n.acu-v2-wb-entry-picker__hint[data-v-648a8ff3] {\r\n  margin: 0;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-text-3);\n}\n.acu-v2-wb-entry-picker__hint strong[data-v-648a8ff3] {\r\n  color: var(--acu-text-1);\r\n  font-weight: 500;\n}\r\n\r\n\r\n", "src/presentation-v2/components/WorldbookEntryPickerBody.vue#style-0-648a8ff3");
-    var WorldbookEntryPickerBody_vue_vue_type_style_index_0_scoped_648a8ff3_lang = null;
-
-    const _hoisted_1$E = { class: "acu-v2-wb-entry-picker" };
-    const _hoisted_2$C = { class: "acu-v2-wb-entry-picker__hint" };
-    function _sfc_render$F(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$E, [
-		createVNode($setup["WorldbookSourcePicker"], {
-			source: $props.source,
-			"selected-names": $props.selectedNames,
-			names: $props.names,
-			status: $props.selectorStatus,
-			error: $props.selectorError,
-			filterable: $props.filterable,
-			"onUpdate:source": _cache[0] || (_cache[0] = ($event) => _ctx.$emit("update:source", $event)),
-			onToggleBook: _cache[1] || (_cache[1] = (name, checked) => _ctx.$emit("toggle-book", name, checked))
-		}, null, 8, [
-			"source",
-			"selected-names",
-			"names",
-			"status",
-			"error",
-			"filterable"
-		]),
-		createBaseVNode("p", _hoisted_2$C, [_cache[7] || (_cache[7] = createTextVNode(
-			" 目前已选: ",
-			-1
-			/* CACHED */
-		)), createBaseVNode(
-			"strong",
-			null,
-			toDisplayString($props.currentLabel),
-			1
-			/* TEXT */
-		)]),
-		createVNode($setup["WorldbookEntryToolbar"], {
-			filter: $props.filter,
-			"show-skillify-controls": false,
-			"onUpdate:filter": _cache[2] || (_cache[2] = ($event) => _ctx.$emit("update:filter", $event)),
-			onSelectAll: _cache[3] || (_cache[3] = ($event) => _ctx.$emit("select-all")),
-			onDeselectAll: _cache[4] || (_cache[4] = ($event) => _ctx.$emit("deselect-all"))
-		}, null, 8, ["filter"]),
-		createVNode($setup["WorldbookEntryList"], {
-			groups: $props.groups,
-			filter: $props.filter,
-			loading: $props.loading,
-			status: $props.entryStatus,
-			error: $props.entryError,
-			"empty-text": $props.emptyText,
-			"show-skillify-controls": false,
-			"show-agent-takeover-state": false,
-			"show-skill-editor": false,
-			onToggle: _cache[5] || (_cache[5] = (bookName, uid, checked) => _ctx.$emit("toggle", bookName, uid, checked)),
-			onToggleGroup: _cache[6] || (_cache[6] = ($event) => _ctx.$emit("toggle-group", $event))
-		}, null, 8, [
-			"groups",
-			"filter",
-			"loading",
-			"status",
-			"error",
-			"empty-text"
-		])
-	]);
-    }
-    var WorldbookEntryPickerBody = /*#__PURE__*/ _export_sfc(_sfc_main$F, [["render", _sfc_render$F], ["__scopeId", "data-v-648a8ff3"]]);
-
-    /**
-     * useFormFillInjectionTarget — 填表"注入目标世界书"（Component A，§4.2）
-     *
-     * 管理 worldbookConfig.injectionTarget。值为：
-     *   - 'character'（写入角色卡主世界书；默认）
-     *   - 一个具体的世界书名（写入指定世界书）
-     *
-     * 这个 target 是写入侧（填好的表内容会写到这本书的条目里），
-     * 与 Component B 的 source/enabledEntries（提示词附带条目）相互独立。
-     */
-    const CLEANUP_SETTLE_DELAY_MS = 300;
-    function normalizeTarget(value) {
-        const trimmed = String(value || '').trim();
-        return trimmed || 'character';
-    }
-    async function waitForCleanupSettle() {
-        await new Promise(resolve => setTimeout(resolve, CLEANUP_SETTLE_DELAY_MS));
-    }
-    async function resolveLorebookName(targetSetting) {
-        if (targetSetting === 'character') {
-            return await getCurrentCharPrimaryLorebook_ACU();
-        }
-        return targetSetting || null;
-    }
-    function useFormFillInjectionTarget() {
-        const target = ref('character');
-        const switching = ref(false);
-        const toast = useToastStore();
-        function refreshFromSettings() {
-            const cfg = getCurrentWorldbookConfig_ACU();
-            target.value = normalizeTarget(cfg?.injectionTarget);
-        }
-        function setTarget(value) {
-            const cfg = getCurrentWorldbookConfig_ACU();
-            cfg.injectionTarget = normalizeTarget(value);
-            target.value = cfg.injectionTarget;
-            saveSettings_ACU();
-        }
-        async function switchTarget(value) {
-            const cfg = getCurrentWorldbookConfig_ACU();
-            const oldTargetSetting = normalizeTarget(cfg.injectionTarget);
-            const newTargetSetting = normalizeTarget(value);
-            if (oldTargetSetting === newTargetSetting)
-                return;
-            switching.value = true;
-            try {
-                const oldLorebookName = await resolveLorebookName(oldTargetSetting);
-                if (oldLorebookName) {
-                    toast.info(`正在从旧目标 [${oldLorebookName}] 中清除条目...`, { muteable: false });
-                    try {
-                        await deleteAllGeneratedEntries_ACU$1(oldLorebookName);
-                        await waitForCleanupSettle();
-                    }
-                    catch (e) {
-                        logError_ACU(`Failed to clean up old target ${oldLorebookName}:`, e);
-                    }
-                }
-                else {
-                    logWarn_ACU('Old lorebook name could not be determined, skipping cleanup.');
-                }
-                cfg.injectionTarget = newTargetSetting;
-                target.value = newTargetSetting;
-                saveSettings_ACU();
-                logDebug_ACU(`Injection target changed from "${oldTargetSetting}" to "${newTargetSetting}" for char ${currentChatFileIdentifier_ACU}.`);
-                if (currentJsonTableData_ACU) {
-                    toast.info('正在向新目标注入条目...', { muteable: false });
-                    await updateReadableLorebookEntry_ACU(true);
-                    toast.success('数据注入目标已成功切换！', { muteable: false });
-                }
-                else {
-                    toast.warning('数据注入目标已更新，但当前无数据可注入。', { muteable: false });
-                }
-            }
-            finally {
-                switching.value = false;
-            }
-        }
-        /** WorldbookSelector 用的 modelValue：'character' 或 bookName。 */
-        const selectorValue = computed(() => target.value || 'character');
-        async function onSelectorChange(value) {
-            await switchTarget(value);
-        }
-        /** 文案：当前注入目标的人类可读名。 */
-        async function describeTarget() {
-            if (target.value === 'character') {
-                try {
-                    const charLorebooks = await getCharLorebooks_ACU({ type: 'all' });
-                    return charLorebooks.primary
-                        ? `角色卡绑定世界书 · ${charLorebooks.primary}`
-                        : '角色卡绑定世界书（当前未解析到角色卡）';
-                }
-                catch {
-                    return '角色卡绑定世界书';
-                }
-            }
-            return target.value || '（未选择）';
-        }
-        return {
-            target,
-            switching,
-            selectorValue,
-            refreshFromSettings,
-            setTarget,
-            switchTarget,
-            onSelectorChange,
-            describeTarget,
-        };
-    }
-
-    /**
-     * useFormFillWorldbookConfig — 填表"附加世界书条目"来源（Component B，§4.2）
-     *
-     * 操作 worldbookConfig.source / worldbookConfig.manualSelection。
-     * 决定填表 AI 提示词附带的条目从哪本书来。
-     *   - source='character'：跟随角色卡的所有世界书（primary + additional）
-     *   - source='manual'：手动指定多本世界书（manualSelection）
-     *
-     * 与 useFormFillInjectionTarget（写入侧）相互独立。
-     */
-    function normalizeSelection$1(names) {
-        if (!Array.isArray(names))
-            return [];
-        const result = [];
-        for (const name of names) {
-            const trimmed = String(name || '').trim();
-            if (trimmed && !result.includes(trimmed))
-                result.push(trimmed);
-        }
-        return result;
-    }
-    function useFormFillWorldbookConfig() {
-        const source = ref('character');
-        const manualSelection = ref([]);
-        const manualBook = computed(() => manualSelection.value[0] || '');
-        function refreshFromSettings() {
-            const cfg = getCurrentWorldbookConfig_ACU();
-            source.value = cfg.source === 'manual' ? 'manual' : 'character';
-            cfg.manualSelection = normalizeSelection$1(cfg.manualSelection);
-            manualSelection.value = [...cfg.manualSelection];
-        }
-        function setSource(next) {
-            const cfg = getCurrentWorldbookConfig_ACU();
-            cfg.source = next;
-            source.value = next;
-            saveSettings_ACU();
-        }
-        function setManualSelection(names) {
-            const cfg = getCurrentWorldbookConfig_ACU();
-            const next = normalizeSelection$1(names);
-            cfg.source = 'manual';
-            cfg.manualSelection = next;
-            source.value = 'manual';
-            manualSelection.value = [...next];
-            saveSettings_ACU();
-        }
-        function toggleManualBook(name, checked) {
-            const trimmed = String(name || '').trim();
-            if (!trimmed)
-                return;
-            const current = normalizeSelection$1(manualSelection.value);
-            const next = checked
-                ? (current.includes(trimmed) ? current : [...current, trimmed])
-                : current.filter(item => item !== trimmed);
-            setManualSelection(next);
-        }
-        async function resolveBookNames() {
-            const cfg = getCurrentWorldbookConfig_ACU();
-            if (cfg.source === 'manual') {
-                return normalizeSelection$1(cfg.manualSelection);
-            }
-            const names = [];
-            try {
-                const charLorebooks = await getCharLorebooks_ACU({ type: 'all' });
-                if (charLorebooks.primary)
-                    names.push(charLorebooks.primary);
-                if (charLorebooks.additional?.length)
-                    names.push(...charLorebooks.additional);
-            }
-            catch { /* empty */ }
-            return [...new Set(names.filter(Boolean))];
-        }
-        return {
-            source,
-            manualSelection,
-            manualBook,
-            refreshFromSettings,
-            setSource,
-            setManualSelection,
-            toggleManualBook,
-            resolveBookNames,
-        };
-    }
-
-    const PAGE_BLOCKED_KEYWORDS_ACU = [
-        '规则', '思维链', 'cot', 'MVU', 'mvu', '变量', '状态',
-        'Status', 'Rule', 'rule', '检定', '判断', '叙事', '文风',
-        'InitVar', '格式',
-    ];
-    function buildWorldbookSnapshotEntryIndexByBook_ACU(snapshot) {
-        const result = new Map();
-        if (snapshot.active !== true)
-            return result;
-        for (const [bookName, entries] of Object.entries(snapshot.books || {})) {
-            if (!Array.isArray(entries))
-                continue;
-            const entriesByUid = new Map(entries
-                .filter((entry) => !!entry
-                && entry.takeoverStatus !== 'pending'
-                && String(entry.uid ?? '') !== '')
-                .map(entry => [String(entry.uid), entry]));
-            if (entriesByUid.size > 0)
-                result.set(bookName, entriesByUid);
-        }
-        return result;
-    }
-    function getWorldbookSnapshotEntryForDisplay_ACU(snapshotEntryIndexByBook, bookName, entry) {
-        return snapshotEntryIndexByBook.get(bookName)?.get(String(entry?.uid));
-    }
-    function buildWorldbookEntryDisplayView_ACU(entry, snapshotEntry) {
-        const enabled = snapshotEntry ? snapshotEntry.previousEnabled : entry?.enabled !== false;
-        const type = snapshotEntry?.previousType ?? String(entry?.type || '');
-        const keys = snapshotEntry?.previousKeys ?? (Array.isArray(entry?.keys)
-            ? entry.keys
-            : (entry?.key ? [entry.key] : []));
-        return {
-            enabled,
-            type,
-            keys,
-            isConstant: type.trim().toLowerCase() === 'constant',
-            disabled: !enabled,
-        };
-    }
-    function isWorldbookEntryVisibleForPageUI_ACU(bookName, entry, snapshotEntryIndexByBook) {
-        if (getWorldbookSnapshotEntryForDisplay_ACU(snapshotEntryIndexByBook, bookName, entry))
-            return true;
-        const comment = String(entry?.comment || entry?.name || '');
-        const commentWithoutIsolationPrefix = comment.replace(/^ACU-\[[^\]]+\]-/, '');
-        if (!commentWithoutIsolationPrefix.trim().startsWith('外部导入-')) {
-            const normalized = commentWithoutIsolationPrefix.replace(/^外部导入-(?:[^-]+-)?/, '');
-            if (normalized.startsWith('TavernDB-ACU-OutlineTable')
-                || normalized.startsWith('TavernDB-ACU-')
-                || normalized.startsWith('重要人物条目')
-                || normalized.startsWith('总结条目')
-                || normalized.startsWith('小总结条目'))
-                return false;
-        }
-        return !PAGE_BLOCKED_KEYWORDS_ACU.some(keyword => comment.includes(keyword));
-    }
-    function resolveWorldbookEntryTakeoverState_ACU(entry, hasSkill, snapshotEntry) {
-        if (snapshotEntry) {
-            return entry?.enabled !== false && String(entry?.type || '').trim().toLowerCase() === 'constant'
-                ? 'final_greenlight'
-                : 'taken_over';
-        }
-        if (entry?.enabled === false)
-            return 'initial_disabled';
-        return hasSkill ? 'skill_ready' : 'native';
-    }
-
-    /**
-     * useFormFillWorldbookEntries — 填表"附加世界书条目"启用/禁用（Component B，§4.2）
-     *
-     * 操作 worldbookConfig.enabledEntries（每张书 → uid[] 列表）。
-     * 与 usePlotWorldbookEntries 形态一致，仅作用域不同：
-     *   - usePlot…：plotSettings.plotWorldbookConfig.enabledEntries（剧情推进）
-     *   - 本文件：worldbookConfig.enabledEntries（填表 / 提示词附带）
-     *
-     * 同样过滤掉数据库生成条目和包含屏蔽关键词的条目，避免误开关。
-     */
-    function ensureEnabledEntries() {
-        const cfg = getCurrentWorldbookConfig_ACU();
-        if (!cfg.enabledEntries || typeof cfg.enabledEntries !== 'object') {
-            cfg.enabledEntries = {};
-        }
-        return cfg.enabledEntries;
-    }
-    function useFormFillWorldbookEntries() {
-        const groups = shallowRef([]);
-        const status = ref('idle');
-        const error = ref('');
-        async function loadEntries(bookNames) {
-            const unique = [...new Set(bookNames.filter(Boolean))];
-            if (unique.length === 0) {
-                groups.value = [];
-                status.value = 'success';
-                return;
-            }
-            status.value = 'loading';
-            error.value = '';
-            try {
-                const enabledEntries = ensureEnabledEntries();
-                const snapshot = await refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU();
-                const entriesMap = await getLorebookEntriesByNames_ACU(unique);
-                const snapshotEntryIndexByBook = buildWorldbookSnapshotEntryIndexByBook_ACU(snapshot);
-                let settingsChanged = false;
-                const result = [];
-                for (const bookName of unique) {
-                    const bookEntries = Array.isArray(entriesMap[bookName]) ? entriesMap[bookName] : [];
-                    const visibleBookEntries = bookEntries.filter((entry) => isWorldbookEntryVisibleForPageUI_ACU(bookName, entry, snapshotEntryIndexByBook));
-                    const visibleUidSet = new Set(visibleBookEntries.map((entry) => String(entry?.uid)));
-                    if (typeof enabledEntries[bookName] === 'undefined') {
-                        enabledEntries[bookName] = visibleBookEntries
-                            .filter((entry) => buildWorldbookEntryDisplayView_ACU(entry, getWorldbookSnapshotEntryForDisplay_ACU(snapshotEntryIndexByBook, bookName, entry)).enabled)
-                            .map((entry) => entry.uid);
-                        settingsChanged = true;
-                    }
-                    else if (Array.isArray(enabledEntries[bookName])) {
-                        const cleanedEnabledEntries = enabledEntries[bookName]
-                            .filter((uid) => visibleUidSet.has(String(uid)));
-                        if (cleanedEnabledEntries.length !== enabledEntries[bookName].length) {
-                            enabledEntries[bookName] = cleanedEnabledEntries;
-                            settingsChanged = true;
-                        }
-                    }
-                    const enabledList = Array.isArray(enabledEntries[bookName])
-                        ? enabledEntries[bookName]
-                        : [];
-                    const visible = visibleBookEntries.map((entry) => {
-                        const comment = String(entry?.comment || entry?.name || '');
-                        const skillMeta = parseWorldbookSkillMetaFromComment_ACU(comment);
-                        const snapshotEntry = getWorldbookSnapshotEntryForDisplay_ACU(snapshotEntryIndexByBook, bookName, entry);
-                        const displayView = buildWorldbookEntryDisplayView_ACU(entry, snapshotEntry);
-                        return {
-                            uid: entry.uid,
-                            bookName,
-                            label: buildWorldbookEntryDisplayLabel_ACU(comment, entry.uid),
-                            comment,
-                            skillMeta,
-                            hasSkill: !!skillMeta,
-                            agentTakeoverState: resolveWorldbookEntryTakeoverState_ACU(entry, !!skillMeta, snapshotEntry),
-                            checked: enabledList.includes(entry.uid),
-                            skillifySelected: false,
-                            skillifySelectable: false,
-                            isConstant: displayView.isConstant,
-                            disabled: displayView.disabled,
-                        };
-                    });
-                    if (visible.length > 0) {
-                        result.push({ bookName, entries: visible, expanded: false });
-                    }
-                }
-                if (settingsChanged)
-                    saveSettings_ACU();
-                groups.value = result;
-                status.value = 'success';
-            }
-            catch (e) {
-                logError_ACU('[ACU-V2] useFormFillWorldbookEntries loadEntries failed', e);
-                error.value = e?.message ?? '加载条目失败';
-                status.value = 'error';
-            }
-        }
-        function toggleEntry(bookName, uid, checked) {
-            const enabledEntries = ensureEnabledEntries();
-            if (!Array.isArray(enabledEntries[bookName])) {
-                enabledEntries[bookName] = [];
-            }
-            const list = enabledEntries[bookName];
-            const idx = list.indexOf(uid);
-            if (checked && idx === -1)
-                list.push(uid);
-            else if (!checked && idx !== -1)
-                list.splice(idx, 1);
-            saveSettings_ACU();
-            groups.value = groups.value.map(g => {
-                if (g.bookName !== bookName)
-                    return g;
-                return {
-                    ...g,
-                    entries: g.entries.map(e => e.uid === uid ? { ...e, checked } : e),
-                };
-            });
-        }
-        function selectAll() {
-            const enabledEntries = ensureEnabledEntries();
-            for (const group of groups.value) {
-                enabledEntries[group.bookName] = group.entries
-                    .filter(e => !e.disabled)
-                    .map(e => e.uid);
-            }
-            saveSettings_ACU();
-            groups.value = groups.value.map(g => ({
-                ...g,
-                entries: g.entries.map(e => ({ ...e, checked: !e.disabled })),
-            }));
-        }
-        function deselectAll() {
-            const enabledEntries = ensureEnabledEntries();
-            for (const group of groups.value) {
-                enabledEntries[group.bookName] = [];
-            }
-            saveSettings_ACU();
-            groups.value = groups.value.map(g => ({
-                ...g,
-                entries: g.entries.map(e => ({ ...e, checked: false })),
-            }));
-        }
-        function toggleGroupExpanded(bookName) {
-            groups.value = groups.value.map(g => {
-                if (g.bookName !== bookName)
-                    return g;
-                return { ...g, expanded: !g.expanded };
-            });
-        }
-        return {
-            groups,
-            status,
-            error,
-            loadEntries,
-            toggleEntry,
-            selectAll,
-            deselectAll,
-            toggleGroupExpanded,
-        };
-    }
-
-    /**
-     * useWorldbookSelector — D8 业务组件配套数据层（阶段 2 / D21.3）
-     *
-     * 列出宿主全部世界书 + 当前角色卡主世界书。`.vue` 不直接 import service。
-     */
-    function useWorldbookSelector() {
-        const names = shallowRef([]);
-        const charPrimary = ref(null);
-        const status = ref('idle');
-        const error = ref('');
-        async function refresh() {
-            status.value = 'loading';
-            error.value = '';
-            try {
-                const [list, primary] = await Promise.all([
-                    getWorldbookNames_ACU().catch(() => []),
-                    getCurrentCharPrimaryLorebook_ACU().catch(() => null),
-                ]);
-                names.value = Array.isArray(list) ? list.slice() : [];
-                charPrimary.value = typeof primary === 'string' && primary ? primary : null;
-                status.value = 'success';
-            }
-            catch (e) {
-                logError_ACU('[ACU-V2] useWorldbookSelector refresh failed', e);
-                error.value = e?.message ?? '世界书列表加载失败';
-                status.value = 'error';
-            }
-        }
-        return { names, charPrimary, status, error, refresh };
-    }
-
-    var _sfc_main$E = /*@__PURE__*/ defineComponent({
-        __name: 'TablePage',
-        setup(__props, { expose: __expose }) {
-            __expose();
             const dialogStore = useDialogStore();
             const settings = useFormFillSettings();
             const injectionTarget = useFormFillInjectionTarget();
@@ -199597,26 +201720,30 @@ ${rejectionText}` : delegationFeedback,
             const entries = useFormFillWorldbookEntries();
             const injectionWb = useWorldbookSelector();
             const entriesWb = useWorldbookSelector();
-            const entryFilter = ref('');
-            const injectionTargetLabel = ref('');
-            const entriesSourceLabel = ref('');
+            const entryFilter = ref("");
+            const injectionTargetLabel = ref("");
+            const entriesSourceLabel = ref("");
             const entryEmptyText = ref(tableCopy.worldbook.emptyDefault);
             const promptDrawerOpen = ref(false);
             const panelNavItems = [
-                { id: 'table-entries-panel', label: tableCopy.panels.entries.title },
-                { id: 'table-prompt-panel', label: formFillCopy.nav.prompt },
-                { id: 'table-filter-panel', label: formFillCopy.nav.filter },
-                { id: 'table-injection-target-panel', label: tableCopy.panels.injectionTarget.title },
+                { id: "form-fill-status-panel", label: formFillCopy.nav.status },
+                { id: "form-fill-update-panel", label: formFillCopy.nav.update },
+                { id: "form-fill-manual-panel", label: formFillCopy.nav.manual },
+                { id: "form-fill-template-panel", label: tableCopy.panels.templatePreset.title },
+                { id: "form-fill-prompt-panel", label: formFillCopy.nav.prompt },
+                { id: "form-fill-filter-panel", label: formFillCopy.nav.filter },
+                { id: "form-fill-injection-target-panel", label: tableCopy.panels.injectionTarget.title },
+                { id: "form-fill-entries-panel", label: tableCopy.panels.entries.title },
             ];
             const promptSlotSummary = computed(() => ({
-                hasA: settings.promptSegments.value.some((segment) => segment.mainSlot === 'A' || segment.isMain === true),
-                hasB: settings.promptSegments.value.some((segment) => segment.mainSlot === 'B' || segment.isMain2 === true),
+                hasA: settings.promptSegments.value.some((segment) => segment.mainSlot === "A" || segment.isMain === true),
+                hasB: settings.promptSegments.value.some((segment) => segment.mainSlot === "B" || segment.isMain2 === true),
             }));
-            const promptTemplateBadgeLabel = computed(() => settings.promptTemplateMode.value === 'default'
-                ? '使用默认提示词'
-                : '已自定义提示词');
-            const promptTemplateBadgeVariant = computed(() => settings.promptTemplateMode.value === 'default' ? 'neutral' : 'accent');
-            const promptMessage = computed(() => settings.message.value?.scope === 'prompt' ? settings.message.value : null);
+            const promptTemplateBadgeLabel = computed(() => settings.promptTemplateMode.value === "default"
+                ? "使用默认提示词"
+                : "已自定义提示词");
+            const promptTemplateBadgeVariant = computed(() => settings.promptTemplateMode.value === "default" ? "neutral" : "accent");
+            const promptMessage = computed(() => settings.message.value?.scope === "prompt" ? settings.message.value : null);
             async function refreshInjectionLabel() {
                 injectionTargetLabel.value = await injectionTarget.describeTarget();
             }
@@ -199624,10 +201751,10 @@ ${rejectionText}` : delegationFeedback,
                 if (!promptDrawerOpen.value || !settings.promptDirty.value)
                     return true;
                 return dialogStore.confirm({
-                    title: '关闭新 UI',
-                    message: '你有未保存的填表提示词修改，确定要关闭新 UI 吗？',
-                    confirmLabel: '关闭新 UI',
-                    confirmVariant: 'danger',
+                    title: "关闭新 UI",
+                    message: "你有未保存的填表提示词修改，确定要关闭新 UI 吗？",
+                    confirmLabel: "关闭新 UI",
+                    confirmVariant: "danger",
                 });
             }
             function updatePromptSegment(index, patch) {
@@ -199637,22 +201764,22 @@ ${rejectionText}` : delegationFeedback,
                 const names = await entriesSource.resolveBookNames();
                 entryEmptyText.value = resolveEntryEmptyText(names);
                 await entries.loadEntries(names);
-                if (entriesSource.source.value === 'character') {
+                if (entriesSource.source.value === "character") {
                     const charPrimary = entriesWb.charPrimary.value;
                     entriesSourceLabel.value = charPrimary
                         ? `角色卡所有世界书 · 主册 ${charPrimary}`
-                        : '角色卡所有世界书';
+                        : "角色卡所有世界书";
                 }
                 else {
-                    const names = entriesSource.manualSelection.value;
-                    entriesSourceLabel.value = names.length ? names.join('、') : '（未选择）';
+                    const manualNames = entriesSource.manualSelection.value;
+                    entriesSourceLabel.value = manualNames.length ? manualNames.join("、") : "（未选择）";
                 }
             }
             function resolveEntryEmptyText(names) {
-                if (entriesSource.source.value === 'character' && names.length === 0) {
+                if (entriesSource.source.value === "character" && names.length === 0) {
                     return tableCopy.worldbook.emptyCharacter;
                 }
-                if (entriesSource.source.value === 'manual' && entriesSource.manualSelection.value.length === 0) {
+                if (entriesSource.source.value === "manual" && entriesSource.manualSelection.value.length === 0) {
                     return tableCopy.worldbook.emptyManual;
                 }
                 return tableCopy.worldbook.emptyDefault;
@@ -199670,82 +201797,333 @@ ${rejectionText}` : delegationFeedback,
                 await refreshInjectionLabel();
             }
             async function refreshAll() {
+                manualUpdate.refresh();
                 settings.refresh();
                 injectionTarget.refreshFromSettings();
                 entriesSource.refreshFromSettings();
-                await Promise.all([
-                    injectionWb.refresh(),
-                    entriesWb.refresh(),
-                ]);
-                await Promise.all([
-                    refreshInjectionLabel(),
-                    refreshEntriesGroups(),
-                ]);
+                await dashboard.refresh();
+                await Promise.all([injectionWb.refresh(), entriesWb.refresh()]);
+                await Promise.all([refreshInjectionLabel(), refreshEntriesGroups()]);
             }
-            onMounted(() => { void refreshAll(); });
-            watch(useChatChangedTick(), () => { void refreshAll(); });
+            onMounted(() => {
+                void refreshAll();
+            });
+            watch(useChatChangedTick(), () => {
+                void refreshAll();
+            });
+            watch(useTemplateRuntimeChangeTick(), () => {
+                void refreshAll();
+            });
             useUiCloseGuard(confirmPromptClose);
-            const __returned__ = { dialogStore, settings, injectionTarget, entriesSource, entries, injectionWb, entriesWb, entryFilter, injectionTargetLabel, entriesSourceLabel, entryEmptyText, promptDrawerOpen, panelNavItems, promptSlotSummary, promptTemplateBadgeLabel, promptTemplateBadgeVariant, promptMessage, refreshInjectionLabel, confirmPromptClose, updatePromptSegment, refreshEntriesGroups, resolveEntryEmptyText, onEntriesSourceChange, onEntriesManualBookToggle, onInjectionTargetChange, refreshAll, AcuBadge, AcuButton, AcuMessage, AcuMobilePanelNav, AcuPanel, AcuPanelGrid, AcuRulePairList, AcuToggle, FormFillPromptDrawer, DanglingReferenceBanner, WorldbookSelector, WorldbookEntryPickerBody, get formFillCopy() { return formFillCopy; }, get tableCopy() { return tableCopy; } };
+            const __returned__ = { dashboard, manualUpdate, dialogStore, settings, injectionTarget, entriesSource, entries, injectionWb, entriesWb, entryFilter, injectionTargetLabel, entriesSourceLabel, entryEmptyText, promptDrawerOpen, panelNavItems, promptSlotSummary, promptTemplateBadgeLabel, promptTemplateBadgeVariant, promptMessage, refreshInjectionLabel, confirmPromptClose, updatePromptSegment, refreshEntriesGroups, resolveEntryEmptyText, onEntriesSourceChange, onEntriesManualBookToggle, onInjectionTargetChange, refreshAll, AcuBadge, AcuButton, AcuFormRow, AcuInput, AcuMessage, AcuMobilePanelNav, AcuPanel, AcuPanelGrid, AcuRulePairList, AcuText, AcuTextarea, AcuToggle, DanglingReferenceBanner, FormFillPromptDrawer, FormFillUpdateSettingsPanel, TableSelector, TableTemplatePresetPanel, WorldbookEntryPickerBody, WorldbookSelector, get formFillCopy() { return formFillCopy; }, get tableCopy() { return tableCopy; } };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-table-page[data-v-3a5a27b9] {\r\n  min-height: 100%;\r\n  min-width: 0;\r\n  padding: 20px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 18px;\n}\n.acu-v2-table-page__col[data-v-3a5a27b9] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 16px;\r\n  min-width: 0;\n}\n.acu-v2-table-page__filter[data-v-3a5a27b9] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 14px;\n}\n.acu-v2-table-page__toggle-row[data-v-3a5a27b9] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 4px;\n}\n.acu-v2-table-page__toggle-head[data-v-3a5a27b9] {\r\n  min-width: 0;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: 12px;\n}\n.acu-v2-table-page__toggle-label[data-v-3a5a27b9] {\r\n  min-width: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  font-weight: 500;\r\n  line-height: 1.35;\n}\n.acu-v2-table-page__toggle-desc[data-v-3a5a27b9] {\r\n  margin: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-v2-table-page__actions[data-v-3a5a27b9] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n.acu-v2-table-page__status-line[data-v-3a5a27b9] {\r\n  margin: 0 0 10px;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  color: var(--acu-text-3);\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 8px;\r\n  flex-wrap: wrap;\n}\n.acu-v2-table-page__status-line strong[data-v-3a5a27b9] {\r\n  color: var(--acu-text-1);\r\n  font-weight: 500;\n}\n.acu-v2-table-page__preset-row[data-v-3a5a27b9] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) repeat(3, max-content);\r\n  gap: 6px;\r\n  align-items: stretch;\r\n  min-width: 0;\n}\n.acu-v2-table-page__badge[data-v-3a5a27b9] {\r\n  display: inline-flex;\r\n  align-items: center;\r\n  padding: 2px 8px;\r\n  border-radius: var(--acu-radius-sm);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  font-weight: 500;\n}\n.acu-v2-table-page__badge--inherit[data-v-3a5a27b9] {\r\n  background: color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  color: var(--acu-text-2);\n}\n.acu-v2-table-page__badge--override[data-v-3a5a27b9] {\r\n  background: var(--acu-accent);\r\n  color: var(--acu-on-accent);\n}\n.acu-v2-table-page__hint[data-v-3a5a27b9] {\r\n  margin: 0;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  color: var(--acu-text-3);\n}\n.acu-v2-table-page__hint strong[data-v-3a5a27b9] {\r\n  color: var(--acu-text-1);\r\n  font-weight: 500;\n}\n@media (max-width: 860px) {\n.acu-v2-table-page[data-v-3a5a27b9] {\r\n    padding: 14px;\n}\n}\r\n", "src/presentation-v2/pages/TablePage.vue#style-0-3a5a27b9");
-    var TablePage_vue_vue_type_style_index_0_scoped_3a5a27b9_lang = null;
+    injectSfcStyle("\n.acu-v2-form-fill-page[data-v-53623365] {\n  min-height: 100%;\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: var(--acu-page-gap, 14px);\n}\n.acu-v2-form-fill-page__col[data-v-53623365] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: var(--acu-panel-grid-gap, 16px);\n}\n.acu-v2-form-fill-page__number-grid[data-v-53623365] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 10px;\n}\n.acu-v2-form-fill-page__filter[data-v-53623365] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n.acu-v2-form-fill-page__status-line[data-v-53623365] {\n  margin: 0 0 10px;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-v2-form-fill-page__status-chat[data-v-53623365] {\n  max-width: min(42ch, 100%);\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-form-fill-page__checkpoint-label[data-v-53623365] {\n  color: var(--acu-accent);\n}\n.acu-v2-form-fill-page__table-wrap[data-v-53623365] {\n  min-width: 0;\n  overflow: auto;\n  border: 0;\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-0);\n}\n.acu-v2-form-fill-page__status-table[data-v-53623365] {\n  width: 100%;\n  border-collapse: collapse;\n  min-width: 560px;\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-form-fill-page__status-table th[data-v-53623365],\n.acu-v2-form-fill-page__status-table td[data-v-53623365] {\n  padding: 8px 10px;\n  border-bottom: 1px solid var(--acu-border-2);\n  text-align: left;\n}\n.acu-v2-form-fill-page__status-table th[data-v-53623365] {\n  color: var(--acu-text-3);\n  font-weight: 600;\n  background: var(--acu-bg-1);\n}\n.acu-v2-form-fill-page__status-table td[data-v-53623365] {\n  color: var(--acu-text-2);\n}\n.acu-v2-form-fill-page__status-table tr:last-child td[data-v-53623365] {\n  border-bottom: 0;\n}\n.acu-v2-form-fill-page__status-row--ready td[data-v-53623365] {\n  color: var(--acu-text-1);\n}\n.acu-v2-form-fill-page__empty[data-v-53623365] {\n  text-align: center !important;\n  color: var(--acu-text-3) !important;\n}\n.acu-v2-form-fill-page__hint[data-v-53623365] {\n  margin: 0;\n  font-size: var(--acu-font-size-body, 12px);\n  color: var(--acu-text-3);\n}\n.acu-v2-form-fill-page__hint strong[data-v-53623365] {\n  color: var(--acu-text-1);\n  font-weight: 500;\n}\n.acu-v2-form-fill-page__actions[data-v-53623365] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-form-fill-page__number-grid[data-v-53623365] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/FormFillPage.vue#style-0-53623365");
+    var FormFillPage_vue_vue_type_style_index_0_scoped_53623365_lang = null;
 
-    const _hoisted_1$D = { class: "acu-v2-table-page" };
-    const _hoisted_2$B = { class: "acu-v2-table-page__col" };
-    const _hoisted_3$w = { class: "acu-v2-table-page__actions" };
-    const _hoisted_4$s = { class: "acu-v2-table-page__col" };
-    const _hoisted_5$p = { class: "acu-v2-table-page__filter" };
-    const _hoisted_6$o = { class: "acu-v2-table-page__toggle-row" };
-    const _hoisted_7$m = { class: "acu-v2-table-page__toggle-head" };
-    const _hoisted_8$m = { class: "acu-v2-table-page__toggle-row" };
-    const _hoisted_9$j = { class: "acu-v2-table-page__toggle-head" };
-    const _hoisted_10$h = { class: "acu-v2-table-page__hint" };
-    function _sfc_render$E(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$D, [
+    const _hoisted_1$x = { class: "acu-v2-form-fill-page" };
+    const _hoisted_2$w = ["title"];
+    const _hoisted_3$s = { class: "acu-text__value" };
+    const _hoisted_4$p = { class: "acu-text__value acu-v2-form-fill-page__checkpoint-label" };
+    const _hoisted_5$m = { class: "acu-v2-form-fill-page__table-wrap" };
+    const _hoisted_6$l = { class: "acu-v2-form-fill-page__status-table" };
+    const _hoisted_7$j = { key: 0 };
+    const _hoisted_8$j = { key: 1 };
+    const _hoisted_9$h = { class: "acu-v2-form-fill-page__number-grid" };
+    const _hoisted_10$g = { class: "acu-v2-form-fill-page__actions" };
+    const _hoisted_11$g = { class: "acu-v2-form-fill-page__col" };
+    const _hoisted_12$e = { class: "acu-v2-form-fill-page__actions" };
+    const _hoisted_13$d = { class: "acu-v2-form-fill-page__filter" };
+    const _hoisted_14$d = { class: "acu-v2-form-fill-page__col" };
+    const _hoisted_15$d = { class: "acu-v2-form-fill-page__hint" };
+    function _sfc_render$x(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$x, [
 		createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }),
-		createVNode($setup["AcuPanelGrid"], { class: "acu-v2-table-page__grid" }, {
-			default: withCtx(() => [createBaseVNode("div", _hoisted_2$B, [createVNode($setup["AcuPanel"], {
-				id: "table-entries-panel",
-				title: $setup.tableCopy.panels.entries.title,
-				description: $setup.tableCopy.panels.entries.description
+		createCommentVNode(" 运行状态与自动更新 "),
+		createVNode($setup["AcuPanelGrid"], { class: "acu-v2-form-fill-page__grid" }, {
+			default: withCtx(() => [createVNode($setup["AcuPanel"], {
+				id: "form-fill-status-panel",
+				title: $setup.formFillCopy.panels.status.title,
+				description: $setup.formFillCopy.panels.status.description
 			}, {
-				default: withCtx(() => [createVNode($setup["WorldbookEntryPickerBody"], {
-					source: $setup.entriesSource.source.value,
-					"selected-names": $setup.entriesSource.manualSelection.value,
-					names: $setup.entriesWb.names.value,
-					"selector-status": $setup.entriesWb.status.value,
-					"selector-error": $setup.entriesWb.error.value,
-					"current-label": $setup.entriesSourceLabel,
-					filter: $setup.entryFilter,
-					"onUpdate:filter": _cache[0] || (_cache[0] = ($event) => $setup.entryFilter = $event),
-					groups: $setup.entries.groups.value,
-					loading: $setup.entries.status.value === "loading",
-					"empty-text": $setup.entryEmptyText,
-					"onUpdate:source": _cache[1] || (_cache[1] = ($event) => $setup.onEntriesSourceChange($event)),
-					onToggleBook: $setup.onEntriesManualBookToggle,
-					onSelectAll: _cache[2] || (_cache[2] = ($event) => $setup.entries.selectAll()),
-					onDeselectAll: _cache[3] || (_cache[3] = ($event) => $setup.entries.deselectAll()),
-					onToggle: _cache[4] || (_cache[4] = (bookName, uid, checked) => $setup.entries.toggleEntry(bookName, uid, checked)),
-					onToggleGroup: _cache[5] || (_cache[5] = ($event) => $setup.entries.toggleGroupExpanded($event))
-				}, null, 8, [
-					"source",
-					"selected-names",
-					"names",
-					"selector-status",
-					"selector-error",
-					"current-label",
-					"filter",
-					"groups",
-					"loading",
-					"empty-text"
-				])]),
+				default: withCtx(() => [
+					createVNode($setup["AcuText"], {
+						variant: "status-line",
+						class: "acu-v2-form-fill-page__status-line",
+						"aria-label": "表格状态概览"
+					}, {
+						default: withCtx(() => [
+							_cache[20] || (_cache[20] = createTextVNode(
+								" 当前聊天: ",
+								-1
+								/* CACHED */
+							)),
+							createBaseVNode("strong", {
+								class: "acu-text__value acu-v2-form-fill-page__status-chat",
+								title: $setup.dashboard.chatFileIdentifier.value || "未初始化"
+							}, toDisplayString($setup.dashboard.chatFileIdentifier.value || "未初始化"), 9, _hoisted_2$w),
+							_cache[21] || (_cache[21] = createTextVNode(
+								" · AI回复累计层数: ",
+								-1
+								/* CACHED */
+							)),
+							createBaseVNode(
+								"strong",
+								_hoisted_3$s,
+								toDisplayString($setup.dashboard.aiMessageCount.value),
+								1
+								/* TEXT */
+							),
+							_cache[22] || (_cache[22] = createTextVNode(
+								" · 当前 full checkpoint: ",
+								-1
+								/* CACHED */
+							)),
+							createBaseVNode(
+								"strong",
+								_hoisted_4$p,
+								toDisplayString($setup.manualUpdate.checkpointFloorsLabel.value),
+								1
+								/* TEXT */
+							)
+						]),
+						_: 1
+					}),
+					createVNode($setup["AcuMessage"], { kind: "info" }, {
+						default: withCtx(() => [createTextVNode(
+							" 按当前手动填表设置，预计处理范围：" + toDisplayString($setup.manualUpdate.manualRefillRangeLabel.value) + "。 ",
+							1
+							/* TEXT */
+						)]),
+						_: 1
+					}),
+					!$setup.dashboard.hasTables.value ? (openBlock(), createBlock($setup["AcuMessage"], {
+						key: 0,
+						kind: "info"
+					}, {
+						default: withCtx(() => [..._cache[23] || (_cache[23] = [createTextVNode(
+							" 当前尚未加载数据库表格。 ",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					})) : createCommentVNode("v-if", true),
+					createBaseVNode("div", _hoisted_5$m, [createBaseVNode("table", _hoisted_6$l, [_cache[26] || (_cache[26] = createBaseVNode(
+						"thead",
+						null,
+						[createBaseVNode("tr", null, [
+							createBaseVNode("th", null, "表格"),
+							createBaseVNode("th", null, "频率"),
+							createBaseVNode("th", null, "未记录"),
+							createBaseVNode("th", null, "上次更新"),
+							createBaseVNode("th", null, "下次触发")
+						])],
+						-1
+						/* CACHED */
+					)), createBaseVNode("tbody", null, [!$setup.dashboard.tableRows.value.length ? (openBlock(), createElementBlock("tr", _hoisted_7$j, [..._cache[24] || (_cache[24] = [createBaseVNode(
+						"td",
+						{
+							colspan: "5",
+							class: "acu-v2-form-fill-page__empty"
+						},
+						" 暂无数据 ",
+						-1
+						/* CACHED */
+					)])])) : createCommentVNode("v-if", true), (openBlock(true), createElementBlock(
+						Fragment,
+						null,
+						renderList($setup.dashboard.tableRows.value, (row) => {
+							return openBlock(), createElementBlock(
+								"tr",
+								{
+									key: row.key,
+									class: normalizeClass({ "acu-v2-form-fill-page__status-row--ready": row.ready })
+								},
+								[
+									createBaseVNode(
+										"td",
+										null,
+										toDisplayString(row.name),
+										1
+										/* TEXT */
+									),
+									createBaseVNode(
+										"td",
+										null,
+										toDisplayString(row.frequencyLabel),
+										1
+										/* TEXT */
+									),
+									createBaseVNode(
+										"td",
+										null,
+										toDisplayString(row.unrecordedLabel),
+										1
+										/* TEXT */
+									),
+									createBaseVNode(
+										"td",
+										null,
+										toDisplayString(row.lastUpdatedLabel),
+										1
+										/* TEXT */
+									),
+									createBaseVNode("td", null, [row.ready ? (openBlock(), createBlock($setup["AcuBadge"], {
+										key: 0,
+										variant: "success"
+									}, {
+										default: withCtx(() => [..._cache[25] || (_cache[25] = [createTextVNode(
+											"就绪",
+											-1
+											/* CACHED */
+										)])]),
+										_: 1
+									})) : (openBlock(), createElementBlock(
+										"span",
+										_hoisted_8$j,
+										toDisplayString(row.nextTriggerLabel),
+										1
+										/* TEXT */
+									))])
+								],
+								2
+								/* CLASS */
+							);
+						}),
+						128
+						/* KEYED_FRAGMENT */
+					))])])])
+				]),
 				_: 1
-			}, 8, ["title", "description"]), createVNode($setup["AcuPanel"], {
-				id: "table-prompt-panel",
+			}, 8, ["title", "description"]), createVNode($setup["FormFillUpdateSettingsPanel"], { id: "form-fill-update-panel" })]),
+			_: 1
+		}),
+		createCommentVNode(" 手动填表与模板 "),
+		createVNode($setup["AcuPanelGrid"], { class: "acu-v2-form-fill-page__grid" }, {
+			default: withCtx(() => [createVNode($setup["AcuPanel"], {
+				id: "form-fill-manual-panel",
+				class: "acu-v2-form-fill-page__panel--manual",
+				title: $setup.formFillCopy.panels.manual.title,
+				description: $setup.formFillCopy.panels.manual.description
+			}, {
+				default: withCtx(() => [
+					createBaseVNode("div", _hoisted_9$h, [createVNode($setup["AcuFormRow"], {
+						label: "手动处理最近 N 层",
+						hint: "从可用 AI 回复中取最近 N 层执行手动填表。"
+					}, {
+						default: withCtx(() => [createVNode($setup["AcuInput"], {
+							type: "number",
+							min: 0,
+							step: 1,
+							"model-value": $setup.manualUpdate.manualContextDepth.value,
+							onChange: _cache[0] || (_cache[0] = ($event) => $setup.manualUpdate.setManualContextDepth($event))
+						}, null, 8, ["model-value"])]),
+						_: 1
+					}), createVNode($setup["AcuFormRow"], {
+						label: "每 N 层合并为一次填表",
+						hint: "把多少层 AI 回复压缩成一次填表请求。"
+					}, {
+						default: withCtx(() => [createVNode($setup["AcuInput"], {
+							type: "number",
+							min: 1,
+							step: 1,
+							"model-value": $setup.manualUpdate.manualBatchSize.value,
+							onChange: _cache[1] || (_cache[1] = ($event) => $setup.manualUpdate.setManualBatchSize($event))
+						}, null, 8, ["model-value"])]),
+						_: 1
+					})]),
+					createVNode($setup["AcuMessage"], { kind: "info" }, {
+						default: withCtx(() => [createTextVNode(
+							" 当前 full checkpoint：" + toDisplayString($setup.manualUpdate.checkpointFloorsLabel.value) + "；按当前设置预计处理范围：" + toDisplayString($setup.manualUpdate.manualRefillRangeLabel.value) + "。 选中表：" + toDisplayString($setup.manualUpdate.selectedSheetSummary.value) + "。 ",
+							1
+							/* TEXT */
+						)]),
+						_: 1
+					}),
+					createVNode($setup["TableSelector"], {
+						"sheet-keys": $setup.manualUpdate.sheetKeys.value,
+						"selected-keys": $setup.manualUpdate.selectedManualTableKeys.value,
+						"sheet-names": $setup.manualUpdate.sheetNames.value,
+						disabled: !$setup.manualUpdate.runtimeReady.value,
+						"empty-text": "当前没有可手动填表的表格。",
+						"onUpdate:selectedKeys": _cache[2] || (_cache[2] = ($event) => $setup.manualUpdate.setManualSelectedKeys($event)),
+						onSelectAll: $setup.manualUpdate.selectAllManualTables,
+						onSelectNone: $setup.manualUpdate.selectNoManualTables
+					}, null, 8, [
+						"sheet-keys",
+						"selected-keys",
+						"sheet-names",
+						"disabled",
+						"onSelectAll",
+						"onSelectNone"
+					]),
+					createVNode($setup["AcuFormRow"], {
+						class: "acu-v2-form-fill-page__manual-extra",
+						label: "本次填表附加要求",
+						hint: "留空时不会给本次手动填表追加额外要求。"
+					}, {
+						default: withCtx(() => [createVNode($setup["AcuTextarea"], {
+							"model-value": $setup.manualUpdate.manualExtraHint.value,
+							rows: 4,
+							placeholder: "仅用于本次手动填表...",
+							"onUpdate:modelValue": _cache[3] || (_cache[3] = ($event) => $setup.manualUpdate.manualExtraHint.value = $event)
+						}, null, 8, ["model-value"])]),
+						_: 1
+					}),
+					$setup.manualUpdate.vectorIndexWarning.value ? (openBlock(), createBlock($setup["AcuMessage"], {
+						key: 0,
+						kind: "warning"
+					}, {
+						default: withCtx(() => [..._cache[27] || (_cache[27] = [createTextVNode(
+							" 交火模式纪要索引启用时不建议手动更新表格；特殊场景下仍可点击执行。 ",
+							-1
+							/* CACHED */
+						)])]),
+						_: 1
+					})) : createCommentVNode("v-if", true),
+					createVNode($setup["AcuMessage"], { kind: "info" }, {
+						default: withCtx(() => [createTextVNode(
+							toDisplayString($setup.formFillCopy.panels.manual.catchUpBoundary),
+							1
+							/* TEXT */
+						)]),
+						_: 1
+					}),
+					createBaseVNode("div", _hoisted_10$g, [createVNode($setup["AcuButton"], {
+						variant: "secondary",
+						disabled: $setup.manualUpdate.manualUpdateBusy.value || $setup.manualUpdate.catchUpBusy.value || !$setup.manualUpdate.selectedManualTableKeys.value.length,
+						onClick: $setup.manualUpdate.runManualCatchUp
+					}, {
+						default: withCtx(() => [createTextVNode(
+							toDisplayString($setup.manualUpdate.catchUpBusy.value ? $setup.formFillCopy.panels.manual.catchUpBusyLabel : $setup.formFillCopy.panels.manual.catchUpLabel),
+							1
+							/* TEXT */
+						)]),
+						_: 1
+					}, 8, ["disabled", "onClick"]), createVNode($setup["AcuButton"], {
+						variant: "primary",
+						disabled: $setup.manualUpdate.manualUpdateBusy.value || $setup.manualUpdate.catchUpBusy.value || !$setup.manualUpdate.selectedManualTableKeys.value.length,
+						onClick: $setup.manualUpdate.runManualUpdate
+					}, {
+						default: withCtx(() => [createTextVNode(
+							toDisplayString($setup.manualUpdate.manualUpdateBusy.value ? "填表中..." : $setup.manualUpdate.vectorIndexWarning.value ? "交火索引已启用" : $setup.formFillCopy.panels.manual.runLabel),
+							1
+							/* TEXT */
+						)]),
+						_: 1
+					}, 8, ["disabled", "onClick"])])
+				]),
+				_: 1
+			}, 8, ["title", "description"]), createVNode($setup["TableTemplatePresetPanel"], { id: "form-fill-template-panel" })]),
+			_: 1
+		}),
+		createCommentVNode(" 填表规则 "),
+		createVNode($setup["AcuPanelGrid"], { class: "acu-v2-form-fill-page__grid" }, {
+			default: withCtx(() => [createBaseVNode("div", _hoisted_11$g, [createVNode($setup["AcuPanel"], {
+				id: "form-fill-prompt-panel",
 				title: $setup.formFillCopy.panels.prompt.title,
 				description: $setup.formFillCopy.panels.prompt.description
 			}, {
@@ -199761,17 +202139,17 @@ ${rejectionText}` : delegationFeedback,
 					key: 0,
 					kind: "warning"
 				}, {
-					default: withCtx(() => [..._cache[16] || (_cache[16] = [createTextVNode(
+					default: withCtx(() => [..._cache[28] || (_cache[28] = [createTextVNode(
 						" 填表提示词缺少必要主插槽，建议在编辑器里载入默认提示词后保存。 ",
 						-1
 						/* CACHED */
 					)])]),
 					_: 1
-				})) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_3$w, [createVNode($setup["AcuButton"], {
+				})) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_12$e, [createVNode($setup["AcuButton"], {
 					variant: "primary",
-					onClick: _cache[6] || (_cache[6] = ($event) => $setup.promptDrawerOpen = true)
+					onClick: _cache[4] || (_cache[4] = ($event) => $setup.promptDrawerOpen = true)
 				}, {
-					default: withCtx(() => [..._cache[17] || (_cache[17] = [createTextVNode(
+					default: withCtx(() => [..._cache[29] || (_cache[29] = [createTextVNode(
 						" 编辑提示词 ",
 						-1
 						/* CACHED */
@@ -199779,55 +202157,43 @@ ${rejectionText}` : delegationFeedback,
 					_: 1
 				})])]),
 				_: 1
-			}, 8, ["title", "description"])]), createBaseVNode("div", _hoisted_4$s, [createVNode($setup["AcuPanel"], {
-				id: "table-filter-panel",
+			}, 8, ["title", "description"]), createVNode($setup["AcuPanel"], {
+				id: "form-fill-filter-panel",
 				title: $setup.formFillCopy.panels.filter.title,
 				description: $setup.formFillCopy.panels.filter.description
 			}, {
-				default: withCtx(() => [createBaseVNode("div", _hoisted_5$p, [
-					createBaseVNode("div", _hoisted_6$o, [createBaseVNode("div", _hoisted_7$m, [_cache[18] || (_cache[18] = createBaseVNode(
-						"span",
-						{ class: "acu-v2-table-page__toggle-label" },
-						" 丢弃纯越权 SQL 语句 ",
-						-1
-						/* CACHED */
-					)), createVNode($setup["AcuToggle"], {
-						"model-value": $setup.settings.discardUnauthorizedTableEditsEnabled.value,
-						"aria-label": "丢弃纯越权 SQL 语句",
-						"data-acu-setting-key": "discardUnauthorizedTableEditsEnabled",
-						"onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => $setup.settings.setDiscardUnauthorizedTableEditsEnabled($event))
-					}, null, 8, ["model-value"])]), _cache[19] || (_cache[19] = createBaseVNode(
-						"p",
-						{ class: "acu-v2-table-page__toggle-desc" },
-						" 默认开启。仅丢弃可证明只影响非目标表的独立 SQL；跨目标表或无法归属的语句仍会拒绝并重试。 ",
-						-1
-						/* CACHED */
-					))]),
-					createBaseVNode("div", _hoisted_8$m, [createBaseVNode("div", _hoisted_9$j, [_cache[20] || (_cache[20] = createBaseVNode(
-						"span",
-						{ class: "acu-v2-table-page__toggle-label" },
-						" 仅识别最后一对 <tableEdit> 标签 ",
-						-1
-						/* CACHED */
-					)), createVNode($setup["AcuToggle"], {
-						"model-value": $setup.settings.tableEditLastPairOnly.value,
-						"aria-label": "仅识别最后一对 tableEdit 标签",
-						"data-acu-setting-key": "tableEditLastPairOnly",
-						"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.settings.setTableEditLastPairOnly($event))
-					}, null, 8, ["model-value"])]), _cache[21] || (_cache[21] = createBaseVNode(
-						"p",
-						{ class: "acu-v2-table-page__toggle-desc" },
-						" 默认开启，用于忽略前面思维链或草稿里的旧指令。 ",
-						-1
-						/* CACHED */
-					))]),
+				default: withCtx(() => [createBaseVNode("div", _hoisted_13$d, [
+					createVNode($setup["AcuFormRow"], {
+						label: "丢弃纯越权 SQL 语句",
+						hint: "默认开启。仅丢弃可证明只影响非目标表的独立 SQL；跨目标表或无法归属的语句仍会拒绝并重试。"
+					}, {
+						default: withCtx(() => [createVNode($setup["AcuToggle"], {
+							"model-value": $setup.settings.discardUnauthorizedTableEditsEnabled.value,
+							"aria-label": "丢弃纯越权 SQL 语句",
+							"data-acu-setting-key": "discardUnauthorizedTableEditsEnabled",
+							"onUpdate:modelValue": _cache[5] || (_cache[5] = ($event) => $setup.settings.setDiscardUnauthorizedTableEditsEnabled($event))
+						}, null, 8, ["model-value"])]),
+						_: 1
+					}),
+					createVNode($setup["AcuFormRow"], {
+						label: "仅识别最后一对 <tableEdit> 标签",
+						hint: "默认开启，用于忽略前面思维链或草稿里的旧指令。"
+					}, {
+						default: withCtx(() => [createVNode($setup["AcuToggle"], {
+							"model-value": $setup.settings.tableEditLastPairOnly.value,
+							"aria-label": "仅识别最后一对 tableEdit 标签",
+							"data-acu-setting-key": "tableEditLastPairOnly",
+							"onUpdate:modelValue": _cache[6] || (_cache[6] = ($event) => $setup.settings.setTableEditLastPairOnly($event))
+						}, null, 8, ["model-value"])]),
+						_: 1
+					}),
 					createVNode($setup["AcuRulePairList"], {
 						label: "提取规则",
 						"model-value": $setup.settings.extractRules.value,
 						"start-placeholder": "提取开始边界",
 						"end-placeholder": "提取结束边界",
 						"add-label": "添加提取规则",
-						"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.settings.setExtractRules($event))
+						"onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => $setup.settings.setExtractRules($event))
 					}, null, 8, ["model-value"]),
 					createVNode($setup["AcuRulePairList"], {
 						label: "排除规则",
@@ -199835,12 +202201,12 @@ ${rejectionText}` : delegationFeedback,
 						"start-placeholder": "排除开始边界",
 						"end-placeholder": "排除结束边界",
 						"add-label": "添加排除规则",
-						"onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => $setup.settings.setExcludeRules($event))
+						"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.settings.setExcludeRules($event))
 					}, null, 8, ["model-value"])
 				])]),
 				_: 1
-			}, 8, ["title", "description"]), createVNode($setup["AcuPanel"], {
-				id: "table-injection-target-panel",
+			}, 8, ["title", "description"])]), createBaseVNode("div", _hoisted_14$d, [createVNode($setup["AcuPanel"], {
+				id: "form-fill-injection-target-panel",
 				title: $setup.tableCopy.panels.injectionTarget.title,
 				description: $setup.tableCopy.panels.injectionTarget.description
 			}, {
@@ -199855,7 +202221,7 @@ ${rejectionText}` : delegationFeedback,
 						"show-character-option": "",
 						"character-option-label": "角色卡绑定世界书",
 						filterable: "",
-						"onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => $setup.onInjectionTargetChange($event))
+						"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.onInjectionTargetChange($event))
 					}, null, 8, [
 						"model-value",
 						"names",
@@ -199863,7 +202229,7 @@ ${rejectionText}` : delegationFeedback,
 						"status",
 						"error"
 					]),
-					createBaseVNode("p", _hoisted_10$h, [_cache[22] || (_cache[22] = createTextVNode(
+					createBaseVNode("p", _hoisted_15$d, [_cache[30] || (_cache[30] = createTextVNode(
 						" 目前已选: ",
 						-1
 						/* CACHED */
@@ -199876,6 +202242,42 @@ ${rejectionText}` : delegationFeedback,
 					)])
 				]),
 				_: 1
+			}, 8, ["title", "description"]), createVNode($setup["AcuPanel"], {
+				id: "form-fill-entries-panel",
+				title: $setup.tableCopy.panels.entries.title,
+				description: $setup.tableCopy.panels.entries.description
+			}, {
+				default: withCtx(() => [createVNode($setup["WorldbookEntryPickerBody"], {
+					source: $setup.entriesSource.source.value,
+					"selected-names": $setup.entriesSource.manualSelection.value,
+					names: $setup.entriesWb.names.value,
+					"selector-status": $setup.entriesWb.status.value,
+					"selector-error": $setup.entriesWb.error.value,
+					"current-label": $setup.entriesSourceLabel,
+					filter: $setup.entryFilter,
+					"onUpdate:filter": _cache[10] || (_cache[10] = ($event) => $setup.entryFilter = $event),
+					groups: $setup.entries.groups.value,
+					loading: $setup.entries.status.value === "loading",
+					"empty-text": $setup.entryEmptyText,
+					"onUpdate:source": _cache[11] || (_cache[11] = ($event) => $setup.onEntriesSourceChange($event)),
+					onToggleBook: $setup.onEntriesManualBookToggle,
+					onSelectAll: _cache[12] || (_cache[12] = ($event) => $setup.entries.selectAll()),
+					onDeselectAll: _cache[13] || (_cache[13] = ($event) => $setup.entries.deselectAll()),
+					onToggle: _cache[14] || (_cache[14] = (bookName, uid, checked) => $setup.entries.toggleEntry(bookName, uid, checked)),
+					onToggleGroup: _cache[15] || (_cache[15] = ($event) => $setup.entries.toggleGroupExpanded($event))
+				}, null, 8, [
+					"source",
+					"selected-names",
+					"names",
+					"selector-status",
+					"selector-error",
+					"current-label",
+					"filter",
+					"groups",
+					"loading",
+					"empty-text"
+				])]),
+				_: 1
 			}, 8, ["title", "description"])])]),
 			_: 1
 		}),
@@ -199884,13 +202286,13 @@ ${rejectionText}` : delegationFeedback,
 			segments: $setup.settings.promptSegments.value,
 			dirty: $setup.settings.promptDirty.value,
 			message: $setup.promptMessage,
-			onClose: _cache[12] || (_cache[12] = ($event) => $setup.promptDrawerOpen = false),
+			onClose: _cache[16] || (_cache[16] = ($event) => $setup.promptDrawerOpen = false),
 			onSave: $setup.settings.savePrompt,
 			onReset: $setup.settings.resetPrompt,
-			onImportFile: _cache[13] || (_cache[13] = ($event) => $setup.settings.importPromptFile($event)),
+			onImportFile: _cache[17] || (_cache[17] = ($event) => $setup.settings.importPromptFile($event)),
 			onExport: $setup.settings.exportPrompt,
-			onAdd: _cache[14] || (_cache[14] = ($event) => $setup.settings.addPromptSegment($event)),
-			onDelete: _cache[15] || (_cache[15] = ($event) => $setup.settings.deletePromptSegment($event)),
+			onAdd: _cache[18] || (_cache[18] = ($event) => $setup.settings.addPromptSegment($event)),
+			onDelete: _cache[19] || (_cache[19] = ($event) => $setup.settings.deletePromptSegment($event)),
 			onUpdate: $setup.updatePromptSegment
 		}, null, 8, [
 			"is-open",
@@ -199903,7 +202305,7 @@ ${rejectionText}` : delegationFeedback,
 		])
 	]);
     }
-    var TablePage = /*#__PURE__*/ _export_sfc(_sfc_main$E, [["render", _sfc_render$E], ["__scopeId", "data-v-3a5a27b9"]]);
+    var FormFillPage = /*#__PURE__*/ _export_sfc(_sfc_main$x, [["render", _sfc_render$x], ["__scopeId", "data-v-53623365"]]);
 
     function connectionModeFromDraft(draft) {
         if (draft.apiMode === 'tavern')
@@ -199992,7 +202394,7 @@ ${rejectionText}` : delegationFeedback,
         },
     };
 
-    var _sfc_main$D = /*@__PURE__*/ defineComponent({
+    var _sfc_main$w = /*@__PURE__*/ defineComponent({
         __name: 'ApiConfigPanel',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -200193,28 +202595,28 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-api-config-panel__select-row[data-v-154ad041] {\r\n  min-width: 0;\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) max-content max-content;\r\n  gap: 6px;\r\n  align-items: stretch;\n}\n.acu-api-config-panel__editor[data-v-154ad041] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 14px;\n}\n.acu-api-config-panel__editor-section[data-v-154ad041] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\n}\n.acu-api-config-panel__inline-action[data-v-154ad041] {\r\n  display: flex;\r\n  align-items: center;\r\n  flex-wrap: wrap;\r\n  gap: 10px;\n}\n.acu-api-config-panel__two-col[data-v-154ad041] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 10px;\n}\n.acu-api-config-panel__muted[data-v-154ad041] {\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-api-config-panel__danger[data-v-154ad041] {\r\n  color: var(--acu-danger);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-api-config-panel__actions[data-v-154ad041] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\n}\r\n", "src/presentation-v2/components/ApiConfigPanel.vue#style-0-154ad041");
     var ApiConfigPanel_vue_vue_type_style_index_0_scoped_154ad041_lang = null;
 
-    const _hoisted_1$C = { class: "acu-api-config-panel__select-row" };
-    const _hoisted_2$A = { class: "acu-api-config-panel__editor-section" };
-    const _hoisted_3$v = { class: "acu-api-config-panel__inline-action" };
-    const _hoisted_4$r = {
+    const _hoisted_1$w = { class: "acu-api-config-panel__select-row" };
+    const _hoisted_2$v = { class: "acu-api-config-panel__editor-section" };
+    const _hoisted_3$r = { class: "acu-api-config-panel__inline-action" };
+    const _hoisted_4$o = {
 	key: 0,
 	class: "acu-api-config-panel__muted"
     };
-    const _hoisted_5$o = {
+    const _hoisted_5$l = {
 	key: 1,
 	class: "acu-api-config-panel__danger"
     };
-    const _hoisted_6$n = { class: "acu-api-config-panel__inline-action" };
-    const _hoisted_7$l = {
+    const _hoisted_6$k = { class: "acu-api-config-panel__inline-action" };
+    const _hoisted_7$i = {
 	key: 0,
 	class: "acu-api-config-panel__two-col"
     };
-    const _hoisted_8$l = {
+    const _hoisted_8$i = {
 	key: 1,
 	class: "acu-api-config-panel__editor-section"
     };
-    const _hoisted_9$i = { class: "acu-api-config-panel__actions" };
-    function _sfc_render$D(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_9$g = { class: "acu-api-config-panel__actions" };
+    function _sfc_render$w(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		title: $setup.apiCopy.panels.preset.title,
 		description: $setup.apiCopy.panels.preset.description
@@ -200235,7 +202637,7 @@ ${rejectionText}` : delegationFeedback,
 				label: "当前 API 预设",
 				hint: "星标表示新聊天默认使用的预设。"
 			}, {
-				default: withCtx(() => [createBaseVNode("div", _hoisted_1$C, [
+				default: withCtx(() => [createBaseVNode("div", _hoisted_1$w, [
 					createVNode($setup["AcuPresetDropdown"], {
 						items: $setup.presetDropdownItems,
 						"model-value": $setup.store.activePresetName,
@@ -200282,7 +202684,7 @@ ${rejectionText}` : delegationFeedback,
 						}, null, 8, ["modelValue"])]),
 						_: 1
 					}),
-					createBaseVNode("div", _hoisted_2$A, [
+					createBaseVNode("div", _hoisted_2$v, [
 						createVNode($setup["AcuFormRow"], { label: "连接方式" }, {
 							default: withCtx(() => [createVNode($setup["AcuSegmentedControl"], {
 								options: $setup.connectionModeOptions,
@@ -200333,16 +202735,16 @@ ${rejectionText}` : delegationFeedback,
 									}, null, 8, ["modelValue"])]),
 									_: 1
 								}),
-								createBaseVNode("div", _hoisted_3$v, [createVNode($setup["AcuButton"], { onClick: $setup.loadModelsForActive }, {
+								createBaseVNode("div", _hoisted_3$r, [createVNode($setup["AcuButton"], { onClick: $setup.loadModelsForActive }, {
 									default: withCtx(() => [..._cache[15] || (_cache[15] = [createTextVNode(
 										"加载模型",
 										-1
 										/* CACHED */
 									)])]),
 									_: 1
-								}), $setup.store.modelLoadStatus === "loading" ? (openBlock(), createElementBlock("span", _hoisted_4$r, "加载中...")) : $setup.store.modelLoadStatus === "error" ? (openBlock(), createElementBlock(
+								}), $setup.store.modelLoadStatus === "loading" ? (openBlock(), createElementBlock("span", _hoisted_4$o, "加载中...")) : $setup.store.modelLoadStatus === "error" ? (openBlock(), createElementBlock(
 									"span",
-									_hoisted_5$o,
+									_hoisted_5$l,
 									toDisplayString($setup.store.modelLoadError),
 									1
 									/* TEXT */
@@ -200374,7 +202776,7 @@ ${rejectionText}` : delegationFeedback,
 									"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.activeDraft.tavernProfile = $event)
 								}, null, 8, ["options", "model-value"])]),
 								_: 1
-							}), createBaseVNode("div", _hoisted_6$n, [createVNode($setup["AcuButton"], { onClick: $setup.store.refreshTavernProfiles }, {
+							}), createBaseVNode("div", _hoisted_6$k, [createVNode($setup["AcuButton"], { onClick: $setup.store.refreshTavernProfiles }, {
 								default: withCtx(() => [..._cache[16] || (_cache[16] = [createTextVNode(
 									"刷新列表",
 									-1
@@ -200386,7 +202788,7 @@ ${rejectionText}` : delegationFeedback,
 							/* STABLE_FRAGMENT */
 						)) : createCommentVNode("v-if", true)
 					]),
-					$setup.activeConnectionMode === "custom" ? (openBlock(), createElementBlock("div", _hoisted_7$l, [createVNode($setup["AcuFormRow"], { label: "最大回复长度" }, {
+					$setup.activeConnectionMode === "custom" ? (openBlock(), createElementBlock("div", _hoisted_7$i, [createVNode($setup["AcuFormRow"], { label: "最大回复长度" }, {
 						default: withCtx(() => [createVNode($setup["AcuInput"], {
 							modelValue: $setup.activeDraft.max_tokens,
 							"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.activeDraft.max_tokens = $event),
@@ -200406,7 +202808,7 @@ ${rejectionText}` : delegationFeedback,
 						}, null, 8, ["modelValue"])]),
 						_: 1
 					})])) : createCommentVNode("v-if", true),
-					$setup.activeConnectionMode === "custom" ? (openBlock(), createElementBlock("div", _hoisted_8$l, [
+					$setup.activeConnectionMode === "custom" ? (openBlock(), createElementBlock("div", _hoisted_8$i, [
 						createVNode($setup["AcuFormRow"], {
 							label: "附加主体参数",
 							hint: "SillyTavern custom_include_body，填写 YAML object，会合并到最终模型请求体。"
@@ -200467,7 +202869,7 @@ ${rejectionText}` : delegationFeedback,
 						)]),
 						_: 1
 					})) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_9$i, [createVNode($setup["AcuButton"], {
+					createBaseVNode("div", _hoisted_9$g, [createVNode($setup["AcuButton"], {
 						disabled: !$setup.activeDraftDirty,
 						onClick: $setup.syncActiveDraft
 					}, {
@@ -200507,9 +202909,9 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	}, 8, ["title", "description"]);
     }
-    var ApiConfigPanel = /*#__PURE__*/ _export_sfc(_sfc_main$D, [["render", _sfc_render$D], ["__scopeId", "data-v-154ad041"]]);
+    var ApiConfigPanel = /*#__PURE__*/ _export_sfc(_sfc_main$w, [["render", _sfc_render$w], ["__scopeId", "data-v-154ad041"]]);
 
-    var _sfc_main$C = /*@__PURE__*/ defineComponent({
+    var _sfc_main$v = /*@__PURE__*/ defineComponent({
         __name: 'ApiPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -200522,11 +202924,11 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-api-page[data-v-3ac7d1d0] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-api-page__spacer[data-v-3ac7d1d0] {\n  min-width: 0;\n}\n.acu-v2-api-page__col[data-v-3ac7d1d0] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n@media (max-width: 860px) {\n.acu-v2-api-page[data-v-3ac7d1d0] {\n    padding: 14px;\n}\n.acu-v2-api-page__spacer[data-v-3ac7d1d0] {\n    display: none;\n}\n}\n", "src/presentation-v2/pages/ApiPage.vue#style-0-3ac7d1d0");
     var ApiPage_vue_vue_type_style_index_0_scoped_3ac7d1d0_lang = null;
 
-    const _hoisted_1$B = { class: "acu-v2-api-page" };
-    const _hoisted_2$z = { class: "acu-v2-api-page__col" };
-    function _sfc_render$C(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$B, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-api-page__grid" }, {
-		default: withCtx(() => [createBaseVNode("div", _hoisted_2$z, [createVNode($setup["DanglingReferenceBanner"], { scope: "api" }), createVNode($setup["ApiConfigPanel"])]), _cache[0] || (_cache[0] = createBaseVNode(
+    const _hoisted_1$v = { class: "acu-v2-api-page" };
+    const _hoisted_2$u = { class: "acu-v2-api-page__col" };
+    function _sfc_render$v(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$v, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-api-page__grid" }, {
+		default: withCtx(() => [createBaseVNode("div", _hoisted_2$u, [createVNode($setup["DanglingReferenceBanner"], { scope: "api" }), createVNode($setup["ApiConfigPanel"])]), _cache[0] || (_cache[0] = createBaseVNode(
 			"div",
 			{
 				class: "acu-v2-api-page__spacer",
@@ -200539,2340 +202941,7 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	})]);
     }
-    var ApiPage = /*#__PURE__*/ _export_sfc(_sfc_main$C, [["render", _sfc_render$C], ["__scopeId", "data-v-3ac7d1d0"]]);
-
-    /**
-     * usePlotTaskEditing — 抽屉 edit 视图内的任务列表 + 当前任务编辑（D23.3）
-     *
-     * 一次只编辑一个 preset 的 plotTasks 数组；操作的是抽屉内的 draft（不是 settings_ACU），
-     * 直到外层的 management 调 savePreset 才落地。
-     */
-    function normalizeRoleString(role) {
-        const r = String(role || '').trim();
-        return r || 'USER';
-    }
-    function ensureMainSlotIntegrity(segments) {
-        // mainSlot 'A' / 'B' 各最多一个；首次 hits-only。多余的转为空 mainSlot。
-        const seenA = { v: false };
-        const seenB = { v: false };
-        for (const seg of segments) {
-            const slot = String(seg?.mainSlot || '').toUpperCase();
-            if (slot === 'A') {
-                if (seenA.v)
-                    seg.mainSlot = '';
-                else
-                    seenA.v = true;
-            }
-            else if (slot === 'B') {
-                if (seenB.v)
-                    seg.mainSlot = '';
-                else
-                    seenB.v = true;
-            }
-        }
-        return segments;
-    }
-    function cloneSegments(group) {
-        if (!Array.isArray(group))
-            return [];
-        return ensureMainSlotIntegrity(group.map((seg) => ({
-            role: normalizeRoleString(seg?.role),
-            content: typeof seg?.content === 'string' ? seg.content : '',
-            deletable: seg?.deletable !== false,
-            mainSlot: String(seg?.mainSlot || '').toUpperCase() === 'A'
-                ? 'A'
-                : String(seg?.mainSlot || '').toUpperCase() === 'B'
-                    ? 'B'
-                    : '',
-            isMain: !!seg?.isMain,
-            isMain2: !!seg?.isMain2,
-        })));
-    }
-    function cloneStringArray(value) {
-        if (!Array.isArray(value))
-            return [];
-        return value
-            .map(item => String(item ?? '').trim())
-            .filter((item, index, array) => item && array.indexOf(item) === index);
-    }
-    function cloneAgentControl(value) {
-        const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
-        const control = {
-            enabled: source.enabled === true,
-            selectable: source.selectable !== false,
-            defaultSelected: source.defaultSelected === true,
-            allowSequential: source.allowSequential !== false,
-            allowParallel: source.allowParallel !== false,
-            dependsOnTaskIds: cloneStringArray(source.dependsOnTaskIds),
-            blocksTaskIds: cloneStringArray(source.blocksTaskIds),
-        };
-        if (Number.isFinite(source.preferredStage) && Number(source.preferredStage) > 0)
-            control.preferredStage = Math.trunc(Number(source.preferredStage));
-        if (Number.isFinite(source.preferredOrder) && Number(source.preferredOrder) >= 0)
-            control.preferredOrder = Math.trunc(Number(source.preferredOrder));
-        return control;
-    }
-    function taskFromRaw(raw, index = 0) {
-        const normalized = normalizePlotTask_ACU(raw, { index });
-        return {
-            id: String(normalized.id || `plotTask${index + 1}`),
-            name: String(normalized.name || `剧情任务${index + 1}`),
-            enabled: normalized.enabled !== false,
-            promptGroup: cloneSegments(normalized.promptGroup),
-            extractTags: typeof normalized.extractTags === 'string' ? normalized.extractTags : '',
-            extractInjectTags: typeof normalized.extractInjectTags === 'string' ? normalized.extractInjectTags : '',
-            finalDirectiveTemplate: typeof normalized.finalDirectiveTemplate === 'string' ? normalized.finalDirectiveTemplate : '',
-            minLength: Number.isFinite(normalized.minLength) ? Number(normalized.minLength) : 0,
-            maxRetries: Number.isFinite(normalized.maxRetries) ? Number(normalized.maxRetries) : 3,
-            mergeStrategy: String(normalized.mergeStrategy || 'append'),
-            stage: Number.isFinite(normalized.stage) ? Number(normalized.stage) : 1,
-            order: Number.isFinite(normalized.order) ? Number(normalized.order) : index,
-            description: typeof normalized.description === 'string' ? normalized.description : '',
-            triggerWhen: typeof normalized.triggerWhen === 'string' ? normalized.triggerWhen : '',
-            agentControl: cloneAgentControl(normalized.agentControl),
-        };
-    }
-    function tasksFromRaw(rawList) {
-        const normalized = normalizePlotTasks_ACU({ plotTasks: rawList });
-        return normalized.map((t, i) => taskFromRaw(t, i));
-    }
-    function makeDefaultTask(index) {
-        return {
-            id: `plotTask${Date.now()}`,
-            name: `剧情任务${index + 1}`,
-            enabled: true,
-            promptGroup: cloneSegments(buildDefaultPlotPromptGroup_ACU()),
-            extractTags: '',
-            extractInjectTags: '',
-            finalDirectiveTemplate: '',
-            minLength: 0,
-            maxRetries: 3,
-            mergeStrategy: 'append',
-            stage: 1,
-            order: index,
-            description: '',
-            triggerWhen: '',
-            agentControl: {
-                enabled: false,
-                selectable: true,
-                defaultSelected: false,
-                allowSequential: true,
-                allowParallel: true,
-                dependsOnTaskIds: [],
-                blocksTaskIds: [],
-            },
-        };
-    }
-    function usePlotTaskEditing() {
-        const tasks = ref([]);
-        const currentTaskId = ref('');
-        const finalDirective = ref('');
-        const currentTask = computed(() => tasks.value.find(t => t.id === currentTaskId.value) || null);
-        function loadFromRaw(rawTasks, rawFinalDirective) {
-            const list = tasksFromRaw(Array.isArray(rawTasks) ? rawTasks : []);
-            if (list.length === 0)
-                list.push(makeDefaultTask(0));
-            tasks.value = list;
-            currentTaskId.value = list[0].id;
-            finalDirective.value = String(rawFinalDirective || '');
-        }
-        function selectTask(taskId) {
-            if (tasks.value.some(t => t.id === taskId))
-                currentTaskId.value = taskId;
-        }
-        function addTask() {
-            const next = makeDefaultTask(tasks.value.length);
-            tasks.value = [...tasks.value, next];
-            currentTaskId.value = next.id;
-        }
-        function deleteCurrentTask() {
-            if (tasks.value.length <= 1)
-                return;
-            const idx = tasks.value.findIndex(t => t.id === currentTaskId.value);
-            if (idx < 0)
-                return;
-            const copy = tasks.value.slice();
-            copy.splice(idx, 1);
-            tasks.value = copy;
-            currentTaskId.value = copy[Math.max(0, idx - 1)].id;
-        }
-        function moveCurrent(delta) {
-            const idx = tasks.value.findIndex(t => t.id === currentTaskId.value);
-            if (idx < 0)
-                return;
-            const target = idx + delta;
-            if (target < 0 || target >= tasks.value.length)
-                return;
-            const copy = tasks.value.slice();
-            [copy[idx], copy[target]] = [copy[target], copy[idx]];
-            tasks.value = copy;
-        }
-        function patchCurrent(patch) {
-            const idx = tasks.value.findIndex(t => t.id === currentTaskId.value);
-            if (idx < 0)
-                return;
-            const copy = tasks.value.slice();
-            copy[idx] = { ...copy[idx], ...patch };
-            tasks.value = copy;
-        }
-        // ── Prompt segments ──
-        function addSegment(position) {
-            if (!currentTask.value)
-                return;
-            const newSeg = {
-                role: 'USER',
-                content: '',
-                deletable: true,
-                mainSlot: '',
-            };
-            const segments = currentTask.value.promptGroup.slice();
-            if (position === 'top')
-                segments.unshift(newSeg);
-            else
-                segments.push(newSeg);
-            patchCurrent({ promptGroup: segments });
-        }
-        function deleteSegment(index) {
-            if (!currentTask.value)
-                return;
-            const segments = currentTask.value.promptGroup.slice();
-            if (index < 0 || index >= segments.length)
-                return;
-            if (segments[index].deletable === false)
-                return;
-            segments.splice(index, 1);
-            patchCurrent({ promptGroup: segments });
-        }
-        function moveSegment(index, delta) {
-            if (!currentTask.value)
-                return;
-            const segments = currentTask.value.promptGroup.slice();
-            const target = index + delta;
-            if (index < 0 || index >= segments.length || target < 0 || target >= segments.length)
-                return;
-            [segments[index], segments[target]] = [segments[target], segments[index]];
-            patchCurrent({ promptGroup: ensureMainSlotIntegrity(segments) });
-        }
-        function updateSegment(index, patch) {
-            if (!currentTask.value)
-                return;
-            const segments = currentTask.value.promptGroup.slice();
-            if (index < 0 || index >= segments.length)
-                return;
-            segments[index] = { ...segments[index], ...patch };
-            if (patch.mainSlot === 'A' || patch.mainSlot === 'B') {
-                // 取消其他段相同 slot
-                for (let i = 0; i < segments.length; i++) {
-                    if (i === index)
-                        continue;
-                    if (segments[i].mainSlot === patch.mainSlot)
-                        segments[i] = { ...segments[i], mainSlot: '' };
-                }
-            }
-            patchCurrent({ promptGroup: ensureMainSlotIntegrity(segments) });
-        }
-        /** 序列化整套 tasks + finalDirective，写回到 preset.raw 上。 */
-        function serializeIntoPresetRaw(rawPreset) {
-            const out = { ...rawPreset };
-            out.plotTasks = tasks.value.map((t, i) => ({
-                id: t.id,
-                name: t.name,
-                enabled: t.enabled,
-                promptGroup: t.promptGroup.map(seg => ({
-                    role: seg.role,
-                    content: seg.content,
-                    deletable: seg.deletable !== false,
-                    ...(seg.mainSlot ? { mainSlot: seg.mainSlot } : {}),
-                    ...(seg.mainSlot === 'A' ? { isMain: true } : {}),
-                    ...(seg.mainSlot === 'B' ? { isMain2: true } : {}),
-                })),
-                extractTags: t.extractTags,
-                extractInjectTags: t.extractInjectTags,
-                finalDirectiveTemplate: t.finalDirectiveTemplate,
-                minLength: t.minLength,
-                maxRetries: t.maxRetries,
-                mergeStrategy: t.mergeStrategy,
-                stage: t.stage,
-                order: i,
-                description: t.description,
-                triggerWhen: t.triggerWhen,
-                agentControl: {
-                    ...t.agentControl,
-                    dependsOnTaskIds: cloneStringArray(t.agentControl?.dependsOnTaskIds),
-                    blocksTaskIds: cloneStringArray(t.agentControl?.blocksTaskIds),
-                    ...(Number.isFinite(t.agentControl?.preferredStage) ? { preferredStage: Math.trunc(Number(t.agentControl.preferredStage)) } : {}),
-                    ...(Number.isFinite(t.agentControl?.preferredOrder) ? { preferredOrder: Math.trunc(Number(t.agentControl.preferredOrder)) } : {}),
-                },
-            }));
-            out.finalSystemDirective = finalDirective.value;
-            return out;
-        }
-        return {
-            tasks,
-            currentTaskId,
-            currentTask,
-            finalDirective,
-            loadFromRaw,
-            selectTask,
-            addTask,
-            deleteCurrentTask,
-            moveCurrent,
-            patchCurrent,
-            addSegment,
-            deleteSegment,
-            moveSegment,
-            updateSegment,
-            serializeIntoPresetRaw,
-        };
-    }
-
-    /**
-     * usePlotPresetManagement — 剧情推进抽屉的状态机（D23.3）
-     *
-     * 与 useApiPresetManagement 形态一致：drawerView = closed/manage/create/edit。
-     * edit 视图内嵌 usePlotTaskEditing，drawer 关闭时丢弃 draft。
-     */
-    const DEFAULT_NEW_PRESET_NAME = '新预设';
-    function emptyDraftMeta() {
-        return { name: '', taskApiPreset: '' };
-    }
-    function emptyContextRules() {
-        return { extractRules: [], excludeRules: [] };
-    }
-    function coercePlotRate(field, value) {
-        const n = Number(value);
-        return Number.isFinite(n) ? n : getDefaultPlotRateValueForV2(field);
-    }
-    function readDraftRates(raw) {
-        return PLOT_RATE_FIELDS.reduce((acc, field) => {
-            acc[field] = coercePlotRate(field, raw?.[field]);
-            return acc;
-        }, {});
-    }
-    function writeDraftRates(raw, rates) {
-        for (const field of PLOT_RATE_FIELDS) {
-            raw[field] = coercePlotRate(field, rates[field]);
-        }
-    }
-    function emptyDraftRates() {
-        return readDraftRates(null);
-    }
-    function defaultRawPreset() {
-        return getDefaultPlotPresetRawForV2();
-    }
-    function uniquePresetName$1(baseName, names) {
-        const normalizedBase = String(baseName || '').trim();
-        if (!normalizedBase)
-            return '';
-        const usedNames = new Set(names.map(name => String(name || '').trim()).filter(Boolean));
-        if (!usedNames.has(normalizedBase))
-            return normalizedBase;
-        for (let i = 2; i <= 99; i += 1) {
-            const candidate = `${normalizedBase} (${i})`;
-            if (!usedNames.has(candidate))
-                return candidate;
-        }
-        return `${normalizedBase} (${Date.now()})`;
-    }
-    function normalizeRulePairs(rules, legacyTags, kind) {
-        const normalized = kind === 'extract'
-            ? normalizeExtractRules_ACU(rules, String(legacyTags || ''))
-            : normalizeExcludeRules_ACU(rules, String(legacyTags || ''));
-        return normalized.map((rule) => ({
-            start: String(rule.start || ''),
-            end: String(rule.end || ''),
-        }));
-    }
-    function coerceRulePairs$1(rules) {
-        return Array.isArray(rules)
-            ? rules.map((rule) => ({
-                start: String(rule?.start || ''),
-                end: String(rule?.end || ''),
-            }))
-            : [];
-    }
-    function rulesForSave(rules, kind) {
-        return normalizeRulePairs(rules, '', kind);
-    }
-    function usePlotPresetManagement() {
-        const store = usePlotPresetStore();
-        const dialogStore = useDialogStore();
-        const toast = useToastStore();
-        const taskEditing = usePlotTaskEditing();
-        const drawerView = ref('closed');
-        const originalName = ref('');
-        const draftMeta = reactive(emptyDraftMeta());
-        const contextRules = reactive(emptyContextRules());
-        const draftRates = reactive(emptyDraftRates());
-        const draftRaw = ref(defaultRawPreset());
-        const error = ref('');
-        const initialSnapshot = ref('');
-        const isDrawerOpen = computed(() => drawerView.value !== 'closed');
-        const title = computed(() => {
-            switch (drawerView.value) {
-                case 'manage':
-                    return '管理剧情推进预设';
-                case 'edit':
-                    return '编辑剧情推进预设';
-                case 'create':
-                    return '从默认新建剧情推进预设';
-                default:
-                    return '';
-            }
-        });
-        const isDirty = computed(() => {
-            if (drawerView.value !== 'create' && drawerView.value !== 'edit')
-                return false;
-            return takeCurrentSnapshot() !== initialSnapshot.value;
-        });
-        const presetMeta = computed(() => store.presets.map(p => ({
-            name: p.name,
-            taskCount: Array.isArray(p.raw?.plotTasks) ? p.raw.plotTasks.length : 0,
-        })));
-        function takeCurrentSnapshot() {
-            return JSON.stringify({
-                meta: draftMeta,
-                contextRules,
-                rates: draftRates,
-                tasks: taskEditing.tasks.value,
-                directive: taskEditing.finalDirective.value,
-            });
-        }
-        function saveSnapshot() {
-            initialSnapshot.value = takeCurrentSnapshot();
-        }
-        function confirmIfDirty() {
-            if (!isDirty.value)
-                return true;
-            return dialogStore.confirm({
-                title: '退出预设编辑',
-                message: '你有未保存的修改，确定要退出吗？',
-                confirmLabel: '退出',
-                confirmVariant: 'danger',
-            });
-        }
-        function resetDraft() {
-            Object.assign(draftMeta, emptyDraftMeta());
-            Object.assign(contextRules, emptyContextRules());
-            Object.assign(draftRates, emptyDraftRates());
-            draftRaw.value = defaultRawPreset();
-            originalName.value = '';
-            error.value = '';
-            taskEditing.tasks.value = [];
-            taskEditing.currentTaskId.value = '';
-            taskEditing.finalDirective.value = '';
-            initialSnapshot.value = '';
-        }
-        function openManage() {
-            error.value = '';
-            drawerView.value = 'manage';
-        }
-        function openCreate() {
-            resetDraft();
-            const raw = defaultRawPreset();
-            draftMeta.name = uniquePresetName$1(DEFAULT_NEW_PRESET_NAME, store.presets.map(p => p.name));
-            draftRaw.value = raw;
-            contextRules.extractRules = normalizeRulePairs(raw.contextExtractRules, raw.contextExtractTags || '', 'extract');
-            contextRules.excludeRules = normalizeRulePairs(raw.contextExcludeRules, raw.contextExcludeTags || '', 'exclude');
-            Object.assign(draftRates, readDraftRates(raw));
-            taskEditing.loadFromRaw(raw.plotTasks || [], raw.finalSystemDirective || '');
-            error.value = '';
-            drawerView.value = 'create';
-            saveSnapshot();
-        }
-        function openEdit(presetName) {
-            const target = store.presets.find(p => p.name === presetName);
-            if (!target)
-                return;
-            resetDraft();
-            originalName.value = target.name;
-            draftMeta.name = target.name;
-            draftMeta.taskApiPreset = '';
-            draftRaw.value = JSON.parse(JSON.stringify(target.raw || {}));
-            contextRules.extractRules = normalizeRulePairs(target.raw?.contextExtractRules, target.raw?.contextExtractTags || '', 'extract');
-            contextRules.excludeRules = normalizeRulePairs(target.raw?.contextExcludeRules, target.raw?.contextExcludeTags || '', 'exclude');
-            Object.assign(draftRates, readDraftRates(target.raw || null));
-            taskEditing.loadFromRaw(target.raw?.plotTasks || [], target.raw?.finalSystemDirective || '');
-            error.value = '';
-            drawerView.value = 'edit';
-            saveSnapshot();
-        }
-        /** "编辑当前预设"按钮：打开抽屉并直接进入 edit 视图。 */
-        function openEditCurrent() {
-            const active = store.activePreset;
-            if (!active) {
-                openCreate();
-                return true;
-            }
-            openEdit(active.name);
-            return true;
-        }
-        function closeDrawer() {
-            drawerView.value = 'closed';
-            resetDraft();
-        }
-        function backToManage() {
-            error.value = '';
-            drawerView.value = 'manage';
-        }
-        function validate() {
-            const name = String(draftMeta.name || '').trim();
-            if (!name) {
-                error.value = '预设名称不能为空。';
-                return false;
-            }
-            if (taskEditing.tasks.value.length === 0) {
-                error.value = '至少需要一个任务。';
-                return false;
-            }
-            error.value = '';
-            return true;
-        }
-        function setContextExtractRules(rules) {
-            contextRules.extractRules = coerceRulePairs$1(rules);
-        }
-        function setContextExcludeRules(rules) {
-            contextRules.excludeRules = coerceRulePairs$1(rules);
-        }
-        function setDraftRate(field, value) {
-            draftRates[field] = coercePlotRate(field, value);
-        }
-        function saveDraft() {
-            if (!validate())
-                return false;
-            const merged = taskEditing.serializeIntoPresetRaw(draftRaw.value || {});
-            merged.name = String(draftMeta.name || '').trim();
-            merged.contextExtractRules = rulesForSave(contextRules.extractRules, 'extract');
-            merged.contextExcludeRules = rulesForSave(contextRules.excludeRules, 'exclude');
-            writeDraftRates(merged, draftRates);
-            delete merged.contextExtractTags;
-            delete merged.contextExcludeTags;
-            const ok = store.savePreset({ name: merged.name, raw: merged }, originalName.value);
-            if (!ok) {
-                error.value = '预设保存失败。';
-                return false;
-            }
-            drawerView.value = 'manage';
-            resetDraft();
-            toast.success('剧情推进预设已保存。');
-            return true;
-        }
-        function deletePreset(name) {
-            return store.deletePreset(name);
-        }
-        function importFromJsonText(text) {
-            const result = store.importPresetFromJson(text);
-            if (!result) {
-                error.value = '导入失败：JSON 无效或缺少 name 字段。';
-                return false;
-            }
-            if (!store.setActivePresetForCurrentChat(result)) {
-                error.value = '已保存到预设库，但无法切换为当前聊天预设。可在下拉框手动选择。';
-                return false;
-            }
-            toast.success('剧情推进预设 JSON 已导入。', { muteable: false });
-            return true;
-        }
-        function exportPresetAsText(name) {
-            return store.exportPresetAsJson(name);
-        }
-        return {
-            drawerView,
-            isDrawerOpen,
-            isDirty,
-            title,
-            error,
-            originalName,
-            draftMeta,
-            draftRaw,
-            contextRules,
-            draftRates,
-            presetMeta,
-            taskEditing,
-            setContextExtractRules,
-            setContextExcludeRules,
-            setDraftRate,
-            openManage,
-            openCreate,
-            openEdit,
-            openEditCurrent,
-            confirmIfDirty,
-            closeDrawer,
-            backToManage,
-            saveDraft,
-            deletePreset,
-            importFromJsonText,
-            exportPresetAsText,
-        };
-    }
-
-    const plotCopy = {
-        panels: {
-            preset: {
-                title: "剧情推进预设",
-                description: "下拉框切换当前的预设，星标设为全局默认。点击按钮，可导入新预设、管理全部预设。内置默认预设无法修改，请使用「从默认新建」。预设包含多个独立任务，支持并发或串行。",
-            },
-            worldbook: {
-                title: "剧情推进世界书",
-                description: "剧情推进参考的世界书条目。默认跟随角色卡主世界书，也可手动指定。Agent 模式会在运行时过滤提示词模板中的世界书条目，由 Agent 决策剧情、填表与正文通道的放行条目。",
-            },
-        },
-        worldbook: {
-            emptyDefault: "所选世界书中无可显示的条目。",
-            emptyCharacter: "未解析到角色卡世界书。打开聊天后会显示条目；也可手动选择一本。",
-            emptyManual: "请先选择一本世界书。",
-        },
-        agentControl: {
-            title: "Agent 世界书总控",
-            description: "切换 Agent 世界书模式；Agent 模式会在剧情推进时接管世界书条目的放行与过滤，清理并初始化会恢复快照并关闭 Agent 模式。",
-            modes: { disabled: "关闭", passive: "仅观察", agent: "Agent 接管" },
-            modeChanged: {
-                disabled: "Agent 世界书模式已关闭。",
-                passive: "Agent 世界书已切换为仅观察模式。",
-                agent: "Agent 世界书已切换为接管模式。",
-            },
-            status: {
-                inactive: "运行时过滤未启用",
-                active: () => "运行时过滤已启用",
-            },
-            config: {
-                status: (state) => {
-                    if (state.source === "worldbook" && state.bookName)
-                        return `配置保存在世界书：${state.bookName}`;
-                    if (state.source === "legacy_settings") {
-                        return state.writableBookName
-                            ? `正在使用旧全局配置；下次保存会写入世界书：${state.writableBookName}`
-                            : "正在使用旧全局配置；当前未找到可写世界书，无法保存为卡级配置。";
-                    }
-                    if (state.writableBookName)
-                        return `当前使用默认配置；保存后写入世界书：${state.writableBookName}`;
-                    return "当前使用默认配置；未找到可写世界书，无法保存卡级 Agent 配置。";
-                },
-                saveFailed: (reason) => reason === "no_config_host_book"
-                    ? "未找到可写世界书，卡级 Agent 配置未保存。"
-                    : `卡级 Agent 配置保存失败：${reason || "未知原因"}`,
-            },
-            apiPresets: {
-                decisionLabel: "Agent 决策 API",
-                decisionHint: "用于 Agent 判断世界书条目是否应启用；留空则使用当前 API 配置。",
-                skillLabel: "Agent Skill 化 API",
-                skillHint: "用于一键生成世界书 Skill 元数据；留空则使用当前 API 配置。",
-                followCurrentLabel: "使用当前 API 配置",
-            },
-            restore: {
-                button: "清理并初始化",
-                confirm: {
-                    title: "清理并初始化 Agent 世界书状态",
-                    message: "将先按快照恢复被 Agent 改写的世界书条目状态，关闭 Agent 模式，然后删除 Agent 快照/设置内部条目。下次使用时会重新初始化。",
-                    confirmLabel: "确认清理并初始化",
-                    cancelLabel: "取消",
-                },
-                success: () => "已清理并初始化 Agent 世界书状态；Agent 模式已关闭，下次使用时会重新初始化。",
-                noop: "没有需要恢复的 Agent 快照或内部状态；Agent 模式已关闭。",
-                error: "清理并初始化 Agent 世界书状态失败",
-                reasons: {
-                    runtime_filter_only: "当前使用运行时过滤机制，没有需要恢复的世界书条目状态；Agent 模式已关闭。",
-                    legacy_artifacts_cleaned: "已清理 Agent 内部条目与旧版本残留状态；Agent 模式已关闭。",
-                    native_worldbook_trigger_restored: "已按快照恢复被 Agent 改写的世界书条目状态，并关闭 Agent 模式。",
-                    native_worldbook_trigger_restore_failed: "部分世界书条目恢复失败，已保留 Agent 快照以避免永久丢失；Agent 模式已关闭。",
-                    native_worldbook_trigger_restore_skipped: "部分世界书条目存在冲突，已保留 Agent 快照以避免永久丢失；Agent 模式已关闭。",
-                    no_active_snapshot: "没有可恢复的 Agent 快照；Agent 模式已关闭。",
-                },
-            },
-            skillify: {
-                button: "一键 Skill 化",
-                confirm: {
-                    title: "一键生成 Skill 元数据",
-                    message: "将调用配置的 Agent Skill API，为当前世界书范围内可处理条目生成描述与触发时机。已有 Skill 元数据的条目会自动跳过，无论这些数据来自 AI 生成还是用户手动编辑。",
-                    confirmLabel: "开始生成",
-                    cancelLabel: "取消",
-                },
-                success: (updated, skipped) => `Skill 化完成：更新 ${updated} 条，跳过 ${skipped} 条。`,
-                partial: (updated, skipped, failed) => `Skill 化部分完成：更新 ${updated} 条，跳过 ${skipped} 条，失败 ${failed} 条。`,
-                noSelection: "请先勾选要 Skill 化的世界书条目。",
-                noCandidates: "当前范围没有可 Skill 化的世界书条目。",
-                error: "一键 Skill 化失败",
-            },
-            clearSkillMeta: {
-                button: "清除 Skill 化",
-                confirm: {
-                    title: "清除世界书 Skill 元数据",
-                    message: "将删除当前 Agent 世界书范围内条目的 Skill 元数据块。此操作不会恢复接管状态，也不会删除世界书条目正文或 Agent 配置条目。",
-                    confirmLabel: "确认清除",
-                    cancelLabel: "取消",
-                },
-                success: (cleared) => `已清除 ${cleared} 条世界书 Skill 元数据。`,
-                partial: (cleared, skipped, failed) => `Skill 元数据清除部分完成：清除 ${cleared} 条，跳过 ${skipped} 条，失败 ${failed} 条。`,
-                noop: "当前 Agent 世界书范围内没有可清除的 Skill 元数据。",
-                error: "清除 Skill 元数据失败",
-            },
-            advanced: {
-                button: "Agent 高级设置",
-                title: "Agent 世界书高级设置",
-                description: "编辑 Agent 决策、Skill 化提示词模板，并控制上下文层数、候选数量上限与各自独立的调用并发。",
-            },
-            decisionSettings: {
-                title: "Agent 决策执行参数",
-                description: "将当前接管条目分片后并发分析。请求数和最坏重试数会随并发数放大，别把 API 当免费算力池。",
-                concurrency: {
-                    label: "Agent 决策并发数",
-                    hint: "默认 1，页面不设固定上限；实际并发不会超过可分析的条目数。条目按实际非空分片并发分析，绿灯最小与最大 TK 预算都会精确拆分并交给各分片辅助选择；合并后仍按完整最大预算做安全校验。",
-                },
-            },
-            skillifySettings: {
-                title: "Skill 化执行参数",
-                description: "控制一键 Skill 化的执行行为。并发数越高，请求压力越大；别把 API 当成无限吞吐的黑洞。",
-                maxConcurrency: {
-                    label: "Skill 化 API 并发数",
-                    hint: "一键 Skill 化同时调用 Agent Skill API 的条目数量。默认 3，页面不设固定上限；实际并发不会超过待处理条目数。",
-                },
-            },
-            executionMode: {
-                label: "Agent 与剧情推进执行方式",
-                hint: "串行模式保持 Agent 接管剧情任务与剧情世界书绿灯；并发模式下 Agent 不决定哪些剧情任务生效，剧情任务也按非 Agent 模式读取世界书，只保留正文绿灯判断。",
-                options: {
-                    sequential: "串行接管",
-                    concurrent: "并发旁路",
-                },
-            },
-            contextSettings: {
-                title: "上下文参数",
-                description: "这些参数会影响 Agent 决策、世界书 Skill 化和剧情世界书扫描。页面不设固定上限；过大的候选数、上下文、重试次数或预算会放大 API 消耗，并可能超过模型与服务能力。",
-                resetButton: "恢复默认上下文参数",
-                resetSuccess: "已恢复默认上下文参数。",
-                fields: {
-                    decisionRecentContextCharLimit: {
-                        label: "最近上下文层数",
-                        hint: "进入 Agent 决策提示词的最近对话层数；1 层 = 1 条 AI 回复 + 其上方 1 条用户输入。剧情推进记录保存在用户楼层，会随对应上下文一起传入。",
-                    },
-                    decisionWorldbookCandidateLimit: {
-                        label: "决策世界书候选数",
-                        hint: "进入 Agent 决策提示词的世界书候选条目最大数量。候选只包含条目名称、关键词、描述和触发时机，不再携带正文预览。",
-                    },
-                    skillifyMaxEntries: {
-                        label: "Skill 化最大条目数",
-                        hint: "一键 Skill 化单次最多处理的世界书条目数量。",
-                    },
-                    plotWorldbookScanMessageLimit: {
-                        label: "剧情世界书扫描消息数",
-                        hint: "剧情推进读取世界书内容时回看的聊天消息数量；未显式保存旧配置时仍回退原 contextTurnCount。",
-                    },
-                    agentAiMaxRetries: {
-                        label: "Agent AI 最大尝试次数",
-                        hint: "Agent 决策与一键 Skill 化的公共 AI 调用尝试次数。设置过高会放大请求量，不会让烂提示词自动变聪明。",
-                    },
-                    greenlightMinTkBudget: {
-                        label: "绿灯最小 TK 预算",
-                        hint: "Agent 选择绿灯条目时的目标下限。并发决策时按实际非空分片数精确拆分，用于提示各分片不要选得过少；不会为了凑下限强塞无关条目。",
-                    },
-                    greenlightMaxTkBudget: {
-                        label: "绿灯最大 TK 预算",
-                        hint: "Agent 每个通道、每个剧情任务可选择的绿灯条目 TK 上限。并发决策时按实际非空分片数精确拆分并直接交给各分片辅助选择；合并后仍按完整上限做安全校验。",
-                    },
-                },
-            },
-            prompts: {
-                title: "提示词模板",
-                description: "可使用 {{agent.*}} 与 {{agent.skillify.*}} 占位符。未知占位符会原样保留，写错了模型不会替你变聪明。",
-                scopeHint: "编辑仅修改本次草稿。保存到当前世界书只更新当前配置；保存为全局模板只更新全局模板，不会改写当前世界书。",
-                unsavedChanges: "提示词草稿存在未保存修改。关闭将放弃这些修改。",
-                scopeChanged: "底层 Agent 配置已发生变化，当前草稿可能属于旧角色或旧世界书。为防止误写，保存已锁定；请关闭并放弃草稿后重新打开。",
-                loadingNotReady: "Agent 世界书配置仍在加载，请稍候。加载完成前不会接受编辑或保存。",
-                loadFailed: "Agent 世界书配置读取失败。为避免默认值覆盖已保存配置，编辑与保存已锁定。",
-                retryLoad: "重新读取配置",
-                saveCurrent: "保存到当前世界书",
-                saveCurrentSuccess: "已保存到当前世界书。",
-                saveAsGlobal: "保存为全局模板",
-                saveAsGlobalSuccess: "已保存到全局模板，当前世界书未变更。",
-                decisionTitle: "Agent 决策提示词",
-                decisionReset: "载入内置默认决策提示词",
-                decisionResetSuccess: "已载入内置默认决策提示词；点击保存后才会写入选定作用域。",
-                skillifyTitle: "Agent Skill 化提示词",
-                skillifyReset: "载入内置默认 Skill 化提示词",
-                skillifyResetSuccess: "已载入内置默认 Skill 化提示词；点击保存后才会写入选定作用域。",
-                emptyText: "暂无提示词段。",
-            },
-        },
-    };
-
-    var _sfc_main$B = /*@__PURE__*/ defineComponent({
-        __name: 'PlotMatchReplaceFields',
-        props: {
-            rateMain: {},
-            ratePersonal: {},
-            rateErotic: {},
-            rateCuckold: {},
-            recallCount: {}
-        },
-        emits: ["update-rate"],
-        setup(__props, { expose: __expose, emit: __emit }) {
-            __expose();
-            const emit = __emit;
-            function emitRate(field, value) {
-                emit("update-rate", field, value);
-            }
-            const __returned__ = { emit, emitRate, AcuFormRow, AcuInput, AcuText };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
-        }
-    });
-
-    injectSfcStyle("\n.acu-v2-plot-match-fields[data-v-8649d835] {\r\n  margin: 0;\r\n  padding: 0 0 14px;\r\n  border: 0;\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\r\n  min-width: 0;\n}\n.acu-v2-plot-match-fields legend[data-v-8649d835] {\r\n  padding: 0;\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-section-title, 12px);\r\n  font-weight: 600;\n}\n.acu-v2-plot-match-fields__grid[data-v-8649d835] {\r\n  display: grid;\r\n  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));\r\n  gap: 10px;\n}\r\n", "src/presentation-v2/components/PlotMatchReplaceFields.vue#style-0-8649d835");
-    var PlotMatchReplaceFields_vue_vue_type_style_index_0_scoped_8649d835_lang = null;
-
-    const _hoisted_1$A = { class: "acu-v2-plot-match-fields" };
-    const _hoisted_2$y = { class: "acu-v2-plot-match-fields__grid" };
-    function _sfc_render$B(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("fieldset", _hoisted_1$A, [
-		_cache[6] || (_cache[6] = createBaseVNode(
-			"legend",
-			null,
-			"匹配替换（进阶）",
-			-1
-			/* CACHED */
-		)),
-		createVNode($setup["AcuText"], {
-			variant: "hint",
-			class: "acu-v2-plot-match-fields__hint"
-		}, {
-			default: withCtx(() => [..._cache[5] || (_cache[5] = [createTextVNode(
-				" 替换提示词占位符（sulv1~4、zhaohui），随当前剧情推进预设保存；导出 JSON 时默认值会自动省略。 ",
-				-1
-				/* CACHED */
-			)])]),
-			_: 1
-		}),
-		createBaseVNode("div", _hoisted_2$y, [
-			createVNode($setup["AcuFormRow"], { label: "sulv1" }, {
-				default: withCtx(() => [createVNode($setup["AcuInput"], {
-					type: "number",
-					step: .05,
-					"model-value": $props.rateMain,
-					onChange: _cache[0] || (_cache[0] = ($event) => $setup.emitRate("rateMain", Number($event)))
-				}, null, 8, ["model-value"])]),
-				_: 1
-			}),
-			createVNode($setup["AcuFormRow"], { label: "sulv2" }, {
-				default: withCtx(() => [createVNode($setup["AcuInput"], {
-					type: "number",
-					step: .05,
-					"model-value": $props.ratePersonal,
-					onChange: _cache[1] || (_cache[1] = ($event) => $setup.emitRate("ratePersonal", Number($event)))
-				}, null, 8, ["model-value"])]),
-				_: 1
-			}),
-			createVNode($setup["AcuFormRow"], { label: "sulv3" }, {
-				default: withCtx(() => [createVNode($setup["AcuInput"], {
-					type: "number",
-					step: .05,
-					"model-value": $props.rateErotic,
-					onChange: _cache[2] || (_cache[2] = ($event) => $setup.emitRate("rateErotic", Number($event)))
-				}, null, 8, ["model-value"])]),
-				_: 1
-			}),
-			createVNode($setup["AcuFormRow"], { label: "sulv4" }, {
-				default: withCtx(() => [createVNode($setup["AcuInput"], {
-					type: "number",
-					step: .05,
-					"model-value": $props.rateCuckold,
-					onChange: _cache[3] || (_cache[3] = ($event) => $setup.emitRate("rateCuckold", Number($event)))
-				}, null, 8, ["model-value"])]),
-				_: 1
-			}),
-			createVNode($setup["AcuFormRow"], { label: "zhaohui" }, {
-				default: withCtx(() => [createVNode($setup["AcuInput"], {
-					type: "number",
-					step: 1,
-					min: 1,
-					"model-value": $props.recallCount,
-					onChange: _cache[4] || (_cache[4] = ($event) => $setup.emitRate("recallCount", Math.round(Number($event))))
-				}, null, 8, ["model-value"])]),
-				_: 1
-			})
-		])
-	]);
-    }
-    var PlotMatchReplaceFields = /*#__PURE__*/ _export_sfc(_sfc_main$B, [["render", _sfc_render$B], ["__scopeId", "data-v-8649d835"]]);
-
-    var _sfc_main$A = /*@__PURE__*/ defineComponent({
-        __name: 'PlotPromptSegments',
-        props: {
-            segments: {}
-        },
-        emits: ["add", "delete", "move", "update"],
-        setup(__props, { expose: __expose }) {
-            __expose();
-            const __returned__ = { AcuPromptSegments };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
-        }
-    });
-
-    function _sfc_render$A(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createBlock($setup["AcuPromptSegments"], {
-		segments: $props.segments,
-		"show-slot": true,
-		"allow-move": true,
-		rows: 6,
-		"empty-text": "当前任务还没有提示词段。点击下方按钮添加第一段。",
-		onAdd: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("add", $event)),
-		onDelete: _cache[1] || (_cache[1] = ($event) => _ctx.$emit("delete", $event)),
-		onMove: _cache[2] || (_cache[2] = (index, delta) => _ctx.$emit("move", index, delta)),
-		onUpdate: _cache[3] || (_cache[3] = (i, p) => _ctx.$emit("update", i, p))
-	}, null, 8, ["segments"]);
-    }
-    var PlotPromptSegments = /*#__PURE__*/ _export_sfc(_sfc_main$A, [["render", _sfc_render$A]]);
-
-    var _sfc_main$z = /*@__PURE__*/ defineComponent({
-        __name: 'PlotTaskEditor',
-        props: {
-            task: {},
-            apiPresetOptions: {},
-            taskApiOverride: {}
-        },
-        emits: ["patch", "task-api-override", "segment-add", "segment-delete", "segment-move", "segment-update"],
-        setup(__props, { expose: __expose, emit: __emit }) {
-            __expose();
-            const props = __props;
-            const emit = __emit;
-            const taskApiSelectOptions = computed(() => [
-                { value: "", label: "继承剧情推进 API 预设" },
-                ...props.apiPresetOptions.map((o) => ({ value: o.name, label: o.name })),
-            ]);
-            function patch(value) {
-                emit("patch", value);
-            }
-            function patchAgentControl(patchValue) {
-                if (!props.task)
-                    return;
-                patch({
-                    agentControl: {
-                        ...props.task.agentControl,
-                        ...patchValue,
-                    },
-                });
-            }
-            function parseTaskIdList(value) {
-                return String(value ?? "")
-                    .split(/[，,\n]/g)
-                    .map(item => item.trim())
-                    .filter((item, index, array) => item && array.indexOf(item) === index);
-            }
-            function formatTaskIdList(value) {
-                return Array.isArray(value) ? value.join(", ") : "";
-            }
-            function parseOptionalPositiveInteger(value) {
-                if (value === "" || value === null || value === undefined)
-                    return undefined;
-                const n = Number(value);
-                if (!Number.isFinite(n))
-                    return undefined;
-                const normalized = Math.trunc(n);
-                return normalized > 0 ? normalized : undefined;
-            }
-            function parseOptionalNonNegativeInteger(value) {
-                if (value === "" || value === null || value === undefined)
-                    return undefined;
-                const n = Number(value);
-                if (!Number.isFinite(n))
-                    return undefined;
-                const normalized = Math.trunc(n);
-                return normalized >= 0 ? normalized : undefined;
-            }
-            const __returned__ = { props, emit, taskApiSelectOptions, patch, patchAgentControl, parseTaskIdList, formatTaskIdList, parseOptionalPositiveInteger, parseOptionalNonNegativeInteger, AcuFormRow, AcuInput, AcuSelect, AcuTextarea, AcuToggle, PlotPromptSegments };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
-        }
-    });
-
-    injectSfcStyle("\n.acu-v2-plot-task-editor[data-v-7b343fef] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\r\n  min-width: 0;\n}\n.acu-v2-plot-task-editor__section[data-v-7b343fef] {\r\n  margin: 0;\r\n  padding: 0 0 14px;\r\n  border: 0;\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\r\n  min-width: 0;\n}\n.acu-v2-plot-task-editor__section[data-v-7b343fef]:last-of-type {\r\n  padding-bottom: 0;\r\n  border-bottom: 0;\n}\n.acu-v2-plot-task-editor__section legend[data-v-7b343fef] {\r\n  padding: 0;\r\n  font-size: var(--acu-font-size-section-title, 12px);\r\n  font-weight: 600;\r\n  color: var(--acu-text-2);\n}\n.acu-v2-plot-task-editor__grid[data-v-7b343fef] {\r\n  display: grid;\r\n  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));\r\n  gap: 10px;\n}\n.acu-v2-plot-task-editor__grid--wide[data-v-7b343fef] {\r\n  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));\n}\n.acu-v2-plot-task-editor__toggles[data-v-7b343fef] {\r\n  display: grid;\r\n  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));\r\n  gap: 8px 12px;\r\n  padding: 8px 0;\r\n  min-width: 0;\n}\n.acu-v2-plot-task-editor__toggles[data-v-7b343fef] .acu-toggle {\r\n  align-items: flex-start;\r\n  width: 100%;\r\n  min-width: 0;\r\n  min-height: var(--acu-control-height-sm, 26px);\n}\n.acu-v2-plot-task-editor__toggles[data-v-7b343fef] .acu-toggle__label {\r\n  min-width: 0;\r\n  white-space: normal;\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  overflow-wrap: anywhere;\n}\n.acu-v2-plot-task-editor__hint[data-v-7b343fef] {\r\n  margin: 0;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-text-3);\r\n  line-height: var(--acu-line-height-caption, 1.5);\n}\n.acu-v2-plot-task-editor__empty[data-v-7b343fef] {\r\n  padding: 18px 0;\r\n  border: 0;\r\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  text-align: center;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\r\n", "src/presentation-v2/components/PlotTaskEditor.vue#style-0-7b343fef");
-    var PlotTaskEditor_vue_vue_type_style_index_0_scoped_7b343fef_lang = null;
-
-    const _hoisted_1$z = {
-	key: 0,
-	class: "acu-v2-plot-task-editor"
-    };
-    const _hoisted_2$x = { class: "acu-v2-plot-task-editor__section" };
-    const _hoisted_3$u = { class: "acu-v2-plot-task-editor__grid" };
-    const _hoisted_4$q = { class: "acu-v2-plot-task-editor__grid" };
-    const _hoisted_5$n = { class: "acu-v2-plot-task-editor__section" };
-    const _hoisted_6$m = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
-    const _hoisted_7$k = { class: "acu-v2-plot-task-editor__toggles" };
-    const _hoisted_8$k = { class: "acu-v2-plot-task-editor__grid" };
-    const _hoisted_9$h = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
-    const _hoisted_10$g = { class: "acu-v2-plot-task-editor__section" };
-    const _hoisted_11$g = { class: "acu-v2-plot-task-editor__section" };
-    const _hoisted_12$e = {
-	key: 1,
-	class: "acu-v2-plot-task-editor__empty"
-    };
-    function _sfc_render$z(_ctx, _cache, $props, $setup, $data, $options) {
-	return $props.task ? (openBlock(), createElementBlock("div", _hoisted_1$z, [
-		createBaseVNode("fieldset", _hoisted_2$x, [
-			_cache[23] || (_cache[23] = createBaseVNode(
-				"legend",
-				null,
-				"基本字段",
-				-1
-				/* CACHED */
-			)),
-			createBaseVNode("div", _hoisted_3$u, [
-				createVNode($setup["AcuFormRow"], { label: "任务名称" }, {
-					default: withCtx(() => [createVNode($setup["AcuInput"], {
-						type: "text",
-						"model-value": $props.task.name,
-						placeholder: "例如：记忆召回任务",
-						onChange: _cache[0] || (_cache[0] = ($event) => $setup.patch({ name: String($event) }))
-					}, null, 8, ["model-value"])]),
-					_: 1
-				}),
-				createVNode($setup["AcuFormRow"], {
-					label: "阶段号",
-					hint: "同阶段并发，跨阶段串行"
-				}, {
-					default: withCtx(() => [createVNode($setup["AcuInput"], {
-						type: "number",
-						min: 1,
-						step: 1,
-						"model-value": $props.task.stage,
-						onChange: _cache[1] || (_cache[1] = ($event) => $setup.patch({ stage: Math.max(1, Math.round(Number($event))) }))
-					}, null, 8, ["model-value"])]),
-					_: 1
-				}),
-				createVNode($setup["AcuFormRow"], { label: "最大重试" }, {
-					default: withCtx(() => [createVNode($setup["AcuInput"], {
-						type: "number",
-						min: 1,
-						step: 1,
-						"model-value": $props.task.maxRetries,
-						onChange: _cache[2] || (_cache[2] = ($event) => $setup.patch({ maxRetries: Math.max(1, Math.round(Number($event))) }))
-					}, null, 8, ["model-value"])]),
-					_: 1
-				}),
-				createVNode($setup["AcuFormRow"], { label: "启用任务" }, {
-					default: withCtx(() => [createVNode($setup["AcuToggle"], {
-						"model-value": $props.task.enabled,
-						label: $props.task.enabled ? "已启用" : "已禁用",
-						"onUpdate:modelValue": _cache[3] || (_cache[3] = ($event) => $setup.patch({ enabled: $event }))
-					}, null, 8, ["model-value", "label"])]),
-					_: 1
-				})
-			]),
-			createBaseVNode("div", _hoisted_4$q, [
-				createVNode($setup["AcuFormRow"], {
-					label: "标签摘取",
-					hint: "例如 recall,supplement，仅作用于本任务"
-				}, {
-					default: withCtx(() => [createVNode($setup["AcuInput"], {
-						type: "text",
-						"model-value": $props.task.extractTags,
-						onChange: _cache[4] || (_cache[4] = ($event) => $setup.patch({ extractTags: String($event) }))
-					}, null, 8, ["model-value"])]),
-					_: 1
-				}),
-				createVNode($setup["AcuFormRow"], {
-					label: "提取写入标签",
-					hint: "优先级高于标签摘取；留空不追加"
-				}, {
-					default: withCtx(() => [createVNode($setup["AcuInput"], {
-						type: "text",
-						"model-value": $props.task.extractInjectTags,
-						onChange: _cache[5] || (_cache[5] = ($event) => $setup.patch({ extractInjectTags: String($event) }))
-					}, null, 8, ["model-value"])]),
-					_: 1
-				}),
-				createVNode($setup["AcuFormRow"], {
-					label: "最小回复长度",
-					hint: "少于此长度自动重试"
-				}, {
-					default: withCtx(() => [createVNode($setup["AcuInput"], {
-						type: "number",
-						min: 0,
-						step: 10,
-						"model-value": $props.task.minLength,
-						onChange: _cache[6] || (_cache[6] = ($event) => $setup.patch({ minLength: Math.max(0, Math.round(Number($event))) }))
-					}, null, 8, ["model-value"])]),
-					_: 1
-				})
-			])
-		]),
-		createBaseVNode("fieldset", _hoisted_5$n, [
-			_cache[24] || (_cache[24] = createBaseVNode(
-				"legend",
-				null,
-				"Agent 任务控制",
-				-1
-				/* CACHED */
-			)),
-			_cache[25] || (_cache[25] = createBaseVNode(
-				"p",
-				{ class: "acu-v2-plot-task-editor__hint" },
-				" 描述和触发条件会作为 agent模式判断任务是否执行、是否串联以及先后顺序的依据。全部留空且未启用 Agent 控制时，仍按原启用状态、阶段号和顺序执行。 ",
-				-1
-				/* CACHED */
-			)),
-			createBaseVNode("div", _hoisted_6$m, [createVNode($setup["AcuFormRow"], {
-				label: "任务描述",
-				hint: "说明这个推进任务负责什么。留空时不参与 Agent Skill 判断。"
-			}, {
-				default: withCtx(() => [createVNode($setup["AcuTextarea"], {
-					"model-value": $props.task.description,
-					rows: 2,
-					"max-rows": 6,
-					"auto-resize": "",
-					placeholder: "例如：从长期记忆中选择与当前剧情最相关的事件。",
-					"onUpdate:modelValue": _cache[7] || (_cache[7] = ($event) => $setup.patch({ description: $event }))
-				}, null, 8, ["model-value"])]),
-				_: 1
-			}), createVNode($setup["AcuFormRow"], {
-				label: "触发条件",
-				hint: "说明什么情况下应执行该任务。留空时保持原逻辑。"
-			}, {
-				default: withCtx(() => [createVNode($setup["AcuTextarea"], {
-					"model-value": $props.task.triggerWhen,
-					rows: 2,
-					"max-rows": 6,
-					"auto-resize": "",
-					placeholder: "例如：用户输入涉及旧事件、承诺、人物关系变化或未解决伏笔时触发。",
-					"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.patch({ triggerWhen: $event }))
-				}, null, 8, ["model-value"])]),
-				_: 1
-			})]),
-			createBaseVNode("div", _hoisted_7$k, [
-				createVNode($setup["AcuToggle"], {
-					"model-value": $props.task.agentControl.enabled,
-					label: $props.task.agentControl.enabled ? "Agent 可控制此任务" : "Agent 不控制此任务",
-					"onUpdate:modelValue": _cache[9] || (_cache[9] = ($event) => $setup.patchAgentControl({ enabled: $event }))
-				}, null, 8, ["model-value", "label"]),
-				createVNode($setup["AcuToggle"], {
-					"model-value": $props.task.agentControl.selectable,
-					label: "允许 Agent 选择/跳过",
-					"onUpdate:modelValue": _cache[10] || (_cache[10] = ($event) => $setup.patchAgentControl({ selectable: $event }))
-				}, null, 8, ["model-value"]),
-				createVNode($setup["AcuToggle"], {
-					"model-value": $props.task.agentControl.defaultSelected,
-					label: "Agent 无决策时默认选中",
-					"onUpdate:modelValue": _cache[11] || (_cache[11] = ($event) => $setup.patchAgentControl({ defaultSelected: $event }))
-				}, null, 8, ["model-value"]),
-				createVNode($setup["AcuToggle"], {
-					"model-value": $props.task.agentControl.allowSequential,
-					label: "允许串联",
-					"onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => $setup.patchAgentControl({ allowSequential: $event }))
-				}, null, 8, ["model-value"]),
-				createVNode($setup["AcuToggle"], {
-					"model-value": $props.task.agentControl.allowParallel,
-					label: "允许并行",
-					"onUpdate:modelValue": _cache[13] || (_cache[13] = ($event) => $setup.patchAgentControl({ allowParallel: $event }))
-				}, null, 8, ["model-value"])
-			]),
-			createBaseVNode("div", _hoisted_8$k, [createVNode($setup["AcuFormRow"], {
-				label: "偏好阶段",
-				hint: "Agent 排序参考；留空则不指定。"
-			}, {
-				default: withCtx(() => [createVNode($setup["AcuInput"], {
-					type: "number",
-					min: 1,
-					step: 1,
-					"model-value": $props.task.agentControl.preferredStage ?? "",
-					onChange: _cache[14] || (_cache[14] = ($event) => $setup.patchAgentControl({ preferredStage: $setup.parseOptionalPositiveInteger($event) }))
-				}, null, 8, ["model-value"])]),
-				_: 1
-			}), createVNode($setup["AcuFormRow"], {
-				label: "偏好顺序",
-				hint: "阶段内排序参考；留空则不指定。"
-			}, {
-				default: withCtx(() => [createVNode($setup["AcuInput"], {
-					type: "number",
-					min: 0,
-					step: 1,
-					"model-value": $props.task.agentControl.preferredOrder ?? "",
-					onChange: _cache[15] || (_cache[15] = ($event) => $setup.patchAgentControl({ preferredOrder: $setup.parseOptionalNonNegativeInteger($event) }))
-				}, null, 8, ["model-value"])]),
-				_: 1
-			})]),
-			createBaseVNode("div", _hoisted_9$h, [createVNode($setup["AcuFormRow"], {
-				label: "依赖任务 ID",
-				hint: "逗号分隔。Agent 排序时应先执行这些任务；非法或循环依赖会在运行时校验。"
-			}, {
-				default: withCtx(() => [createVNode($setup["AcuInput"], {
-					type: "text",
-					"model-value": $setup.formatTaskIdList($props.task.agentControl.dependsOnTaskIds),
-					placeholder: "例如：recallTask, summaryTask",
-					onChange: _cache[16] || (_cache[16] = ($event) => $setup.patchAgentControl({ dependsOnTaskIds: $setup.parseTaskIdList($event) }))
-				}, null, 8, ["model-value"])]),
-				_: 1
-			}), createVNode($setup["AcuFormRow"], {
-				label: "阻塞任务 ID",
-				hint: "逗号分隔。用于提示 Agent 此任务与哪些任务不应同时执行。"
-			}, {
-				default: withCtx(() => [createVNode($setup["AcuInput"], {
-					type: "text",
-					"model-value": $setup.formatTaskIdList($props.task.agentControl.blocksTaskIds),
-					placeholder: "例如：legacyRecallTask",
-					onChange: _cache[17] || (_cache[17] = ($event) => $setup.patchAgentControl({ blocksTaskIds: $setup.parseTaskIdList($event) }))
-				}, null, 8, ["model-value"])]),
-				_: 1
-			})])
-		]),
-		createBaseVNode("fieldset", _hoisted_10$g, [_cache[26] || (_cache[26] = createBaseVNode(
-			"legend",
-			null,
-			"当前任务使用的 API",
-			-1
-			/* CACHED */
-		)), createVNode($setup["AcuFormRow"], {
-			label: "API 预设",
-			hint: "单独为当前任务选择API预设，默认继承剧情推进页。优先级：任务 > 剧情推进页 > 活动 API。全局保存，不写入预设。"
-		}, {
-			default: withCtx(() => [createVNode($setup["AcuSelect"], {
-				options: $setup.taskApiSelectOptions,
-				"model-value": $props.taskApiOverride,
-				placeholder: "继承剧情推进 API 预设",
-				"onUpdate:modelValue": _cache[18] || (_cache[18] = ($event) => _ctx.$emit("task-api-override", $event))
-			}, null, 8, ["options", "model-value"])]),
-			_: 1
-		})]),
-		createBaseVNode("fieldset", _hoisted_11$g, [_cache[27] || (_cache[27] = createBaseVNode(
-			"legend",
-			null,
-			"提示词段（promptGroup）",
-			-1
-			/* CACHED */
-		)), createVNode($setup["PlotPromptSegments"], {
-			segments: $props.task.promptGroup,
-			onAdd: _cache[19] || (_cache[19] = ($event) => _ctx.$emit("segment-add", $event)),
-			onDelete: _cache[20] || (_cache[20] = ($event) => _ctx.$emit("segment-delete", $event)),
-			onMove: _cache[21] || (_cache[21] = (index, delta) => _ctx.$emit("segment-move", index, delta)),
-			onUpdate: _cache[22] || (_cache[22] = (index, patch) => _ctx.$emit("segment-update", index, patch))
-		}, null, 8, ["segments"])])
-	])) : (openBlock(), createElementBlock("div", _hoisted_12$e, " 请在上方选择一个任务进行编辑。 "));
-    }
-    var PlotTaskEditor = /*#__PURE__*/ _export_sfc(_sfc_main$z, [["render", _sfc_render$z], ["__scopeId", "data-v-7b343fef"]]);
-
-    var _sfc_main$y = /*@__PURE__*/ defineComponent({
-        __name: 'PlotTaskList',
-        props: {
-            tasks: {},
-            currentTaskId: {}
-        },
-        emits: ["add", "select", "move", "delete"],
-        setup(__props, { expose: __expose }) {
-            __expose();
-            const props = __props;
-            function canMove(delta) {
-                const idx = props.tasks.findIndex(t => t.id === props.currentTaskId);
-                if (idx < 0)
-                    return false;
-                const target = idx + delta;
-                return target >= 0 && target < props.tasks.length;
-            }
-            const __returned__ = { props, canMove, AcuIconButton };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
-        }
-    });
-
-    injectSfcStyle("\n.acu-v2-plot-tasks[data-v-ee3c6f4c] {\r\n  margin: 0; padding: 0 0 14px;\r\n  border: 0; border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  display: flex; flex-direction: column; gap: 10px;\r\n  min-width: 0;\n}\n.acu-v2-plot-tasks > legend[data-v-ee3c6f4c] {\r\n  padding: 0;\r\n  font-size: var(--acu-font-size-section-title, 12px); font-weight: 600; color: var(--acu-text-2);\r\n  display: flex; align-items: center; gap: 10px;\n}\n.acu-v2-plot-tasks__toolbar[data-v-ee3c6f4c] { display: inline-flex; gap: 4px;\n}\n.acu-v2-plot-tasks__cards[data-v-ee3c6f4c] {\r\n  display: flex; gap: 8px;\r\n  min-width: 0;\r\n  overflow-x: auto;\n}\n.acu-v2-plot-tasks__card[data-v-ee3c6f4c] {\r\n  flex: 0 0 140px;\r\n  min-height: 100px;\r\n  display: flex; flex-direction: column; gap: 6px;\r\n  padding: 10px 12px;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-2);\r\n  border: 0;\r\n  color: inherit;\r\n  cursor: pointer;\r\n  font: inherit;\r\n  text-align: left;\r\n  transition: box-shadow 0.15s ease, color 0.15s ease, opacity 0.15s ease;\n}\n.acu-v2-plot-tasks__card[data-v-ee3c6f4c]:hover,\r\n.acu-v2-plot-tasks__card[data-v-ee3c6f4c]:focus-visible {\r\n  box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\r\n  outline: none;\n}\n.acu-v2-plot-tasks__card--active[data-v-ee3c6f4c] {\r\n  background: var(--acu-accent);\r\n  color: var(--acu-on-accent);\n}\n.acu-v2-plot-tasks__card--disabled[data-v-ee3c6f4c] {\r\n  opacity: 0.5;\n}\n.acu-v2-plot-tasks__card--disabled.acu-v2-plot-tasks__card--active[data-v-ee3c6f4c] {\r\n  opacity: 0.7;\n}\n.acu-v2-plot-tasks__card--disabled .acu-v2-plot-tasks__name[data-v-ee3c6f4c] {\r\n  text-decoration: line-through;\n}\n.acu-v2-plot-tasks__name[data-v-ee3c6f4c] {\r\n  font-size: var(--acu-font-size-list-title, 13px); color: var(--acu-text-1); font-weight: 500;\r\n  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\n}\n.acu-v2-plot-tasks__card--active .acu-v2-plot-tasks__name[data-v-ee3c6f4c],\r\n.acu-v2-plot-tasks__card--active .acu-v2-plot-tasks__stage[data-v-ee3c6f4c],\r\n.acu-v2-plot-tasks__card--active .acu-v2-plot-tasks__seg-count[data-v-ee3c6f4c],\r\n.acu-v2-plot-tasks__card--active .acu-v2-plot-tasks__disabled-label[data-v-ee3c6f4c] {\r\n  color: var(--acu-on-accent);\n}\n.acu-v2-plot-tasks__stage[data-v-ee3c6f4c] {\r\n  font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3);\r\n  font-family: var(--acu-font-mono);\n}\n.acu-v2-plot-tasks__seg-count[data-v-ee3c6f4c] {\r\n  font-size: var(--acu-font-size-micro, 10px); color: var(--acu-text-3);\r\n  margin-top: auto;\n}\n.acu-v2-plot-tasks__disabled-label[data-v-ee3c6f4c] {\r\n  font-size: var(--acu-font-size-micro, 10px); color: var(--acu-warning);\r\n  font-weight: 500;\n}\n.acu-v2-plot-tasks__empty[data-v-ee3c6f4c] {\r\n  padding: 16px 12px; text-align: center;\r\n  color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\r\n  flex: 1;\n}\r\n", "src/presentation-v2/components/PlotTaskList.vue#style-0-ee3c6f4c");
-    var PlotTaskList_vue_vue_type_style_index_0_scoped_ee3c6f4c_lang = null;
-
-    const _hoisted_1$y = { class: "acu-v2-plot-tasks" };
-    const _hoisted_2$w = { class: "acu-v2-plot-tasks__toolbar" };
-    const _hoisted_3$t = { class: "acu-v2-plot-tasks__cards" };
-    const _hoisted_4$p = ["onClick"];
-    const _hoisted_5$m = { class: "acu-v2-plot-tasks__name" };
-    const _hoisted_6$l = {
-	class: "acu-v2-plot-tasks__stage",
-	title: "阶段号 — 同阶段并发，跨阶段串行"
-    };
-    const _hoisted_7$j = { class: "acu-v2-plot-tasks__seg-count" };
-    const _hoisted_8$j = {
-	key: 0,
-	class: "acu-v2-plot-tasks__disabled-label"
-    };
-    const _hoisted_9$g = {
-	key: 0,
-	class: "acu-v2-plot-tasks__empty"
-    };
-    function _sfc_render$y(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("fieldset", _hoisted_1$y, [createBaseVNode("legend", null, [_cache[4] || (_cache[4] = createBaseVNode(
-		"span",
-		null,
-		"剧情任务列表",
-		-1
-		/* CACHED */
-	)), createBaseVNode("span", _hoisted_2$w, [
-		createVNode($setup["AcuIconButton"], {
-			icon: "fa-solid fa-arrow-left",
-			size: "sm",
-			disabled: !$setup.canMove(-1),
-			title: "左移",
-			onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("move", -1))
-		}, null, 8, ["disabled"]),
-		createVNode($setup["AcuIconButton"], {
-			icon: "fa-solid fa-arrow-right",
-			size: "sm",
-			disabled: !$setup.canMove(1),
-			title: "右移",
-			onClick: _cache[1] || (_cache[1] = ($event) => _ctx.$emit("move", 1))
-		}, null, 8, ["disabled"]),
-		createVNode($setup["AcuIconButton"], {
-			icon: "fa-solid fa-trash-can",
-			size: "sm",
-			variant: "danger",
-			disabled: $props.tasks.length <= 1,
-			title: "删除当前任务",
-			onClick: _cache[2] || (_cache[2] = ($event) => _ctx.$emit("delete"))
-		}, null, 8, ["disabled"]),
-		createVNode($setup["AcuIconButton"], {
-			icon: "fa-solid fa-plus",
-			size: "sm",
-			variant: "accent",
-			title: "新增任务",
-			onClick: _cache[3] || (_cache[3] = ($event) => _ctx.$emit("add"))
-		})
-	])]), createBaseVNode("div", _hoisted_3$t, [(openBlock(true), createElementBlock(
-		Fragment,
-		null,
-		renderList($props.tasks, (task) => {
-			return openBlock(), createElementBlock("button", {
-				key: task.id,
-				type: "button",
-				class: normalizeClass(["acu-v2-plot-tasks__card", {
-					"acu-v2-plot-tasks__card--active": task.id === $props.currentTaskId,
-					"acu-v2-plot-tasks__card--disabled": !task.enabled
-				}]),
-				onClick: ($event) => _ctx.$emit("select", task.id)
-			}, [
-				createBaseVNode(
-					"span",
-					_hoisted_5$m,
-					toDisplayString(task.name),
-					1
-					/* TEXT */
-				),
-				createBaseVNode(
-					"span",
-					_hoisted_6$l,
-					"阶段 " + toDisplayString(task.stage),
-					1
-					/* TEXT */
-				),
-				createBaseVNode(
-					"span",
-					_hoisted_7$j,
-					toDisplayString(task.promptGroup.length) + " 段",
-					1
-					/* TEXT */
-				),
-				!task.enabled ? (openBlock(), createElementBlock("span", _hoisted_8$j, "已禁用")) : createCommentVNode("v-if", true)
-			], 10, _hoisted_4$p);
-		}),
-		128
-		/* KEYED_FRAGMENT */
-	)), !$props.tasks.length ? (openBlock(), createElementBlock("div", _hoisted_9$g, "暂无任务，点击右上 + 新增。")) : createCommentVNode("v-if", true)])]);
-    }
-    var PlotTaskList = /*#__PURE__*/ _export_sfc(_sfc_main$y, [["render", _sfc_render$y], ["__scopeId", "data-v-ee3c6f4c"]]);
-
-    var _sfc_main$x = /*@__PURE__*/ defineComponent({
-        __name: 'PlotPresetDrawer',
-        props: {
-            isOpen: { type: Boolean },
-            view: {},
-            title: {},
-            error: {},
-            draftMeta: {},
-            contextRules: {},
-            presetMeta: {},
-            defaultPresetName: {},
-            apiPresetOptions: {},
-            taskEditing: {},
-            currentTaskApiOverride: {},
-            showAdvancedRates: { type: Boolean },
-            rates: {},
-            beforeClose: { type: Function }
-        },
-        emits: ["close", "back", "open-create", "open-edit", "set-default", "delete", "export", "save", "update-name", "update-context-extract-rules", "update-context-exclude-rules", "update-task-api-override", "update-rate"],
-        setup(__props, { expose: __expose, emit: __emit }) {
-            __expose();
-            const props = __props;
-            const emit = __emit;
-            function onTaskApiOverride(value) {
-                emit("update-task-api-override", value);
-            }
-            const __returned__ = { props, emit, onTaskApiOverride, AcuButton, AcuDrawer, AcuFormRow, AcuIconButton, AcuInput, AcuRulePairList, AcuText, AcuTextarea, PlotMatchReplaceFields, PlotTaskEditor, PlotTaskList };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
-        }
-    });
-
-    injectSfcStyle("\n.acu-v2-plot-drawer__create-btn[data-v-47605d60] {\r\n  width: 100%;\n}\n.acu-v2-plot-drawer__empty[data-v-47605d60] {\r\n  margin-top: 20px;\n}\n.acu-v2-plot-drawer__actions[data-v-47605d60] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  flex-wrap: wrap;\r\n  padding-top: 12px;\r\n  margin-top: 12px;\n}\r\n\r\n/* manage list */\n.acu-v2-manage-list[data-v-47605d60] {\r\n  list-style: none;\r\n  margin: 0;\r\n  padding: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-v2-manage-item[data-v-47605d60] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 10px;\r\n  padding: 10px 12px;\r\n  border: 0;\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\n}\n.acu-v2-manage-item[data-v-47605d60]:last-child {\r\n  border-bottom: 0;\n}\n.acu-v2-manage-item__info[data-v-47605d60] {\r\n  flex: 1;\r\n  min-width: 0;\n}\n.acu-v2-manage-item__name[data-v-47605d60] {\r\n  display: block;\r\n  font-size: var(--acu-font-size-list-title, 13px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  font-weight: 500;\r\n  color: var(--acu-text-1);\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-v2-manage-item__meta[data-v-47605d60] {\r\n  display: block;\r\n  margin-top: 2px;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: var(--acu-line-height-caption, 1.5);\r\n  color: var(--acu-text-3);\n}\n.acu-v2-manage-item__actions[data-v-47605d60] {\r\n  display: flex;\r\n  gap: 4px;\n}\r\n\r\n/* form */\n.acu-v2-form[data-v-47605d60] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 14px;\n}\n.acu-v2-form__section[data-v-47605d60] {\r\n  min-width: 0;\r\n  margin: 0;\r\n  padding: 0 0 14px;\r\n  border: 0;\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\n}\n.acu-v2-form__section[data-v-47605d60]:last-of-type {\r\n  padding-bottom: 0;\r\n  border-bottom: 0;\n}\n.acu-v2-form__section legend[data-v-47605d60] {\r\n  padding: 0;\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-section-title, 12px);\r\n  font-weight: 600;\n}\n.acu-v2-plot-drawer__rules[data-v-47605d60] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\r\n  min-width: 0;\n}\n.acu-v2-error[data-v-47605d60] {\r\n  padding: 8px 10px;\r\n  background: color-mix(in srgb, var(--acu-danger) 10%, transparent);\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\n}\r\n", "src/presentation-v2/components/PlotPresetDrawer.vue#style-0-47605d60");
-    var PlotPresetDrawer_vue_vue_type_style_index_0_scoped_47605d60_lang = null;
-
-    const _hoisted_1$x = {
-	key: 0,
-	class: "acu-v2-manage-list"
-    };
-    const _hoisted_2$v = { class: "acu-v2-manage-item__info" };
-    const _hoisted_3$s = { class: "acu-v2-manage-item__actions" };
-    const _hoisted_4$o = { class: "acu-v2-form__section" };
-    const _hoisted_5$l = { class: "acu-v2-form__section" };
-    const _hoisted_6$k = { class: "acu-v2-plot-drawer__rules" };
-    const _hoisted_7$i = { class: "acu-v2-form__section" };
-    const _hoisted_8$i = { class: "acu-v2-plot-drawer__actions" };
-    function _sfc_render$x(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createBlock($setup["AcuDrawer"], {
-		"is-open": $props.isOpen,
-		title: $props.title,
-		"show-back": $props.view === "create" || $props.view === "edit",
-		"before-close": $props.beforeClose,
-		width: "720px",
-		onClose: _cache[15] || (_cache[15] = ($event) => _ctx.$emit("close")),
-		onBack: _cache[16] || (_cache[16] = ($event) => _ctx.$emit("back"))
-	}, {
-		default: withCtx(() => [createCommentVNode(" MANAGE "), $props.view === "manage" ? (openBlock(), createElementBlock(
-			Fragment,
-			{ key: 0 },
-			[createVNode($setup["AcuButton"], {
-				variant: "primary",
-				class: "acu-v2-plot-drawer__create-btn",
-				onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("open-create"))
-			}, {
-				default: withCtx(() => [..._cache[17] || (_cache[17] = [createBaseVNode(
-					"i",
-					{ class: "fa-solid fa-plus" },
-					null,
-					-1
-					/* CACHED */
-				), createTextVNode(
-					" 从默认新建 ",
-					-1
-					/* CACHED */
-				)])]),
-				_: 1
-			}), $props.presetMeta.length ? (openBlock(), createElementBlock("ul", _hoisted_1$x, [(openBlock(true), createElementBlock(
-				Fragment,
-				null,
-				renderList($props.presetMeta, (meta) => {
-					return openBlock(), createElementBlock("li", {
-						key: meta.name,
-						class: "acu-v2-manage-item"
-					}, [createBaseVNode("div", _hoisted_2$v, [createVNode(
-						$setup["AcuText"],
-						{
-							as: "span",
-							variant: "list-title",
-							class: "acu-v2-manage-item__name"
-						},
-						{
-							default: withCtx(() => [createTextVNode(
-								toDisplayString(meta.name),
-								1
-								/* TEXT */
-							)]),
-							_: 2
-						},
-						1024
-						/* DYNAMIC_SLOTS */
-					), createVNode(
-						$setup["AcuText"],
-						{
-							as: "span",
-							variant: "caption",
-							class: "acu-v2-manage-item__meta"
-						},
-						{
-							default: withCtx(() => [createTextVNode(
-								" 共 " + toDisplayString(meta.taskCount) + " 个任务 ",
-								1
-								/* TEXT */
-							), meta.name === $props.defaultPresetName ? (openBlock(), createElementBlock(
-								Fragment,
-								{ key: 0 },
-								[createTextVNode(" · 全局默认")],
-								64
-								/* STABLE_FRAGMENT */
-							)) : createCommentVNode("v-if", true)]),
-							_: 2
-						},
-						1024
-						/* DYNAMIC_SLOTS */
-					)]), createBaseVNode("div", _hoisted_3$s, [
-						createVNode($setup["AcuIconButton"], {
-							icon: meta.name === $props.defaultPresetName ? "fa-solid fa-star" : "fa-regular fa-star",
-							title: "设为全局默认",
-							variant: meta.name === $props.defaultPresetName ? "accent" : "default",
-							onClick: ($event) => _ctx.$emit("set-default", meta.name)
-						}, null, 8, [
-							"icon",
-							"variant",
-							"onClick"
-						]),
-						createVNode($setup["AcuIconButton"], {
-							icon: "fa-solid fa-upload",
-							title: "导出 JSON",
-							onClick: ($event) => _ctx.$emit("export", meta.name)
-						}, null, 8, ["onClick"]),
-						createVNode($setup["AcuIconButton"], {
-							icon: "fa-solid fa-pen",
-							title: "编辑",
-							onClick: ($event) => _ctx.$emit("open-edit", meta.name)
-						}, null, 8, ["onClick"]),
-						createVNode($setup["AcuIconButton"], {
-							icon: "fa-solid fa-trash-can",
-							variant: "danger",
-							title: "删除",
-							onClick: ($event) => _ctx.$emit("delete", meta.name)
-						}, null, 8, ["onClick"])
-					])]);
-				}),
-				128
-				/* KEYED_FRAGMENT */
-			))])) : (openBlock(), createBlock($setup["AcuText"], {
-				key: 1,
-				variant: "empty",
-				class: "acu-v2-plot-drawer__empty"
-			}, {
-				default: withCtx(() => [..._cache[18] || (_cache[18] = [createTextVNode(
-					"暂无预设，点击上方按钮从默认新建或导入。",
-					-1
-					/* CACHED */
-				)])]),
-				_: 1
-			}))],
-			64
-			/* STABLE_FRAGMENT */
-		)) : (openBlock(), createElementBlock(
-			Fragment,
-			{ key: 1 },
-			[createCommentVNode(" CREATE / EDIT "), createBaseVNode(
-				"form",
-				{
-					class: "acu-v2-form",
-					onSubmit: _cache[14] || (_cache[14] = withModifiers(($event) => _ctx.$emit("save"), ["prevent"]))
-				},
-				[
-					createBaseVNode("fieldset", _hoisted_4$o, [_cache[19] || (_cache[19] = createBaseVNode(
-						"legend",
-						null,
-						"基础信息",
-						-1
-						/* CACHED */
-					)), createVNode($setup["AcuFormRow"], { label: "预设名称" }, {
-						default: withCtx(() => [createVNode($setup["AcuInput"], {
-							type: "text",
-							"model-value": $props.draftMeta.name,
-							autocomplete: "off",
-							"onUpdate:modelValue": _cache[1] || (_cache[1] = ($event) => _ctx.$emit("update-name", String($event)))
-						}, null, 8, ["model-value"])]),
-						_: 1
-					})]),
-					createBaseVNode("fieldset", _hoisted_5$l, [
-						_cache[21] || (_cache[21] = createBaseVNode(
-							"legend",
-							null,
-							"标签筛选",
-							-1
-							/* CACHED */
-						)),
-						createVNode($setup["AcuText"], {
-							variant: "hint",
-							class: "acu-v2-form__hint"
-						}, {
-							default: withCtx(() => [..._cache[20] || (_cache[20] = [createTextVNode(
-								" 专属于当前预设，随预设保存。按标签提取内容，提升推进准确性。提取仅保留指定范围，排除移除指定范围。 ",
-								-1
-								/* CACHED */
-							)])]),
-							_: 1
-						}),
-						createBaseVNode("div", _hoisted_6$k, [createVNode($setup["AcuRulePairList"], {
-							label: "提取规则",
-							"model-value": $props.contextRules.extractRules,
-							"start-placeholder": "提取开始边界",
-							"end-placeholder": "提取结束边界",
-							"add-label": "添加提取规则",
-							"onUpdate:modelValue": _cache[2] || (_cache[2] = ($event) => _ctx.$emit("update-context-extract-rules", $event))
-						}, null, 8, ["model-value"]), createVNode($setup["AcuRulePairList"], {
-							label: "排除规则",
-							"model-value": $props.contextRules.excludeRules,
-							"start-placeholder": "排除开始边界",
-							"end-placeholder": "排除结束边界",
-							"add-label": "添加排除规则",
-							"onUpdate:modelValue": _cache[3] || (_cache[3] = ($event) => _ctx.$emit("update-context-exclude-rules", $event))
-						}, null, 8, ["model-value"])])
-					]),
-					$props.showAdvancedRates ? (openBlock(), createBlock($setup["PlotMatchReplaceFields"], {
-						key: 0,
-						"rate-main": $props.rates.rateMain,
-						"rate-personal": $props.rates.ratePersonal,
-						"rate-erotic": $props.rates.rateErotic,
-						"rate-cuckold": $props.rates.rateCuckold,
-						"recall-count": $props.rates.recallCount,
-						onUpdateRate: _cache[4] || (_cache[4] = (field, value) => _ctx.$emit("update-rate", field, value))
-					}, null, 8, [
-						"rate-main",
-						"rate-personal",
-						"rate-erotic",
-						"rate-cuckold",
-						"recall-count"
-					])) : createCommentVNode("v-if", true),
-					createVNode($setup["PlotTaskList"], {
-						tasks: $props.taskEditing.tasks.value,
-						"current-task-id": $props.taskEditing.currentTaskId.value,
-						onAdd: $props.taskEditing.addTask,
-						onSelect: _cache[5] || (_cache[5] = ($event) => $props.taskEditing.selectTask($event)),
-						onMove: _cache[6] || (_cache[6] = ($event) => $props.taskEditing.moveCurrent($event)),
-						onDelete: $props.taskEditing.deleteCurrentTask
-					}, null, 8, [
-						"tasks",
-						"current-task-id",
-						"onAdd",
-						"onDelete"
-					]),
-					createVNode($setup["PlotTaskEditor"], {
-						task: $props.taskEditing.currentTask.value,
-						"api-preset-options": $props.apiPresetOptions,
-						"task-api-override": $props.currentTaskApiOverride,
-						onPatch: _cache[7] || (_cache[7] = ($event) => $props.taskEditing.patchCurrent($event)),
-						onTaskApiOverride: $setup.onTaskApiOverride,
-						onSegmentAdd: _cache[8] || (_cache[8] = ($event) => $props.taskEditing.addSegment($event)),
-						onSegmentDelete: _cache[9] || (_cache[9] = ($event) => $props.taskEditing.deleteSegment($event)),
-						onSegmentMove: _cache[10] || (_cache[10] = (index, delta) => $props.taskEditing.moveSegment(index, delta)),
-						onSegmentUpdate: _cache[11] || (_cache[11] = (index, p) => $props.taskEditing.updateSegment(index, p))
-					}, null, 8, [
-						"task",
-						"api-preset-options",
-						"task-api-override"
-					]),
-					createBaseVNode("fieldset", _hoisted_7$i, [_cache[22] || (_cache[22] = createBaseVNode(
-						"legend",
-						null,
-						"最终注入指令",
-						-1
-						/* CACHED */
-					)), createVNode($setup["AcuTextarea"], {
-						"model-value": $props.taskEditing.finalDirective.value,
-						rows: 3,
-						placeholder: "该指令不会发给规划 AI；只在主 AI 生成时注入",
-						"onUpdate:modelValue": _cache[12] || (_cache[12] = ($event) => $props.taskEditing.finalDirective.value = $event)
-					}, null, 8, ["model-value"])]),
-					$props.error ? (openBlock(), createBlock($setup["AcuText"], {
-						key: 1,
-						variant: "error",
-						class: "acu-v2-error",
-						role: "alert"
-					}, {
-						default: withCtx(() => [createTextVNode(
-							toDisplayString($props.error),
-							1
-							/* TEXT */
-						)]),
-						_: 1
-					})) : createCommentVNode("v-if", true),
-					createBaseVNode("footer", _hoisted_8$i, [createVNode($setup["AcuButton"], { onClick: _cache[13] || (_cache[13] = ($event) => _ctx.$emit("back")) }, {
-						default: withCtx(() => [..._cache[23] || (_cache[23] = [createTextVNode(
-							"关闭",
-							-1
-							/* CACHED */
-						)])]),
-						_: 1
-					}), createVNode($setup["AcuButton"], {
-						variant: "primary",
-						"native-type": "submit"
-					}, {
-						default: withCtx(() => [..._cache[24] || (_cache[24] = [createTextVNode(
-							"保存预设",
-							-1
-							/* CACHED */
-						)])]),
-						_: 1
-					})])
-				],
-				32
-				/* NEED_HYDRATION */
-			)],
-			2112
-			/* STABLE_FRAGMENT, DEV_ROOT_FRAGMENT */
-		))]),
-		_: 1
-	}, 8, [
-		"is-open",
-		"title",
-		"show-back",
-		"before-close"
-	]);
-    }
-    var PlotPresetDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$x, [["render", _sfc_render$x], ["__scopeId", "data-v-47605d60"]]);
-
-    var _sfc_main$w = /*@__PURE__*/ defineComponent({
-        __name: 'PlotPresetPanel',
-        props: {
-            showEdit: { type: Boolean, default: true },
-            showApiPreset: { type: Boolean, default: true }
-        },
-        setup(__props, { expose: __expose }) {
-            __expose();
-            const store = usePlotPresetStore();
-            const dialogStore = useDialogStore();
-            const toast = useToastStore();
-            const { apiStore, followActiveApiLabel, apiPresetSelectOptions: pageApiSelectOptions, } = useApiPresetSelectOptions();
-            const management = usePlotPresetManagement();
-            const devOptions = useDevOptions();
-            const presetDropdownItems = computed(() => [
-                {
-                    value: "",
-                    label: "默认预设",
-                    meta: `${store.defaultPresetTaskCount} 个任务`,
-                },
-                ...store.presets.map((p) => ({
-                    value: p.name,
-                    label: p.name,
-                    meta: `${Array.isArray(p.raw?.plotTasks) ? p.raw.plotTasks.length : 0} 个任务`,
-                })),
-            ]);
-            const apiPresetOptions = computed(() => apiStore.presets.map((p) => ({ name: p.name })));
-            const currentTaskApiOverride = computed(() => {
-                const taskId = management.taskEditing.currentTaskId.value;
-                if (!taskId)
-                    return "";
-                return store.taskApiOverrides[taskId] || "";
-            });
-            useUiCloseGuard(() => {
-                if (!management.isDrawerOpen.value)
-                    return true;
-                return management.confirmIfDirty();
-            });
-            function onTaskApiOverride(value) {
-                const taskId = management.taskEditing.currentTaskId.value;
-                if (!taskId)
-                    return;
-                store.setTaskApiOverride(taskId, value);
-            }
-            async function onDelete(name) {
-                const confirmed = await dialogStore.confirm({
-                    title: "删除剧情推进预设",
-                    message: `删除剧情推进预设"${name}"？`,
-                    confirmLabel: "删除预设",
-                    confirmVariant: "danger",
-                });
-                if (!confirmed)
-                    return;
-                management.deletePreset(name);
-            }
-            function onExport(name) {
-                const text = management.exportPresetAsText(name);
-                if (!text)
-                    return;
-                try {
-                    const blob = new Blob([text], { type: "application/json" });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement("a");
-                    a.href = url;
-                    a.download = `${name}.plot-preset.json`;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
-                    toast.success("剧情推进预设 JSON 已导出。");
-                }
-                catch {
-                    toast.error("剧情推进预设 JSON 导出失败。");
-                }
-            }
-            async function onImportFile(file) {
-                try {
-                    const text = await file.text();
-                    management.importFromJsonText(text);
-                }
-                catch {
-                    /* ignore */
-                }
-            }
-            function refreshAll() {
-                store.refreshFromSettings();
-                apiStore.refreshFromSettings();
-            }
-            onMounted(refreshAll);
-            watch(useChatChangedTick(), refreshAll);
-            const __returned__ = { store, dialogStore, toast, apiStore, followActiveApiLabel, pageApiSelectOptions, management, devOptions, presetDropdownItems, apiPresetOptions, currentTaskApiOverride, onTaskApiOverride, onDelete, onExport, onImportFile, refreshAll, get plotCopy() { return plotCopy; }, AcuBadge, AcuFileButton, AcuFormRow, AcuIconButton, AcuPanel, AcuPresetDropdown, AcuSelect, AcuText, PlotPresetDrawer };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
-        }
-    });
-
-    injectSfcStyle("\n.acu-plot-preset-panel__status-line[data-v-021e572f] {\r\n  margin: 0 0 10px;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-plot-preset-panel__select-row[data-v-021e572f] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) repeat(3, max-content);\r\n  gap: 6px;\r\n  align-items: stretch;\r\n  margin-bottom: 12px;\r\n  min-width: 0;\n}\r\n", "src/presentation-v2/components/PlotPresetPanel.vue#style-0-021e572f");
-    var PlotPresetPanel_vue_vue_type_style_index_0_scoped_021e572f_lang = null;
-
-    const _hoisted_1$w = { class: "acu-text__value" };
-    const _hoisted_2$u = { class: "acu-text__value" };
-    const _hoisted_3$r = { class: "acu-plot-preset-panel__select-row" };
-    function _sfc_render$w(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createBlock($setup["AcuPanel"], {
-		title: $setup.plotCopy.panels.preset.title,
-		description: $setup.plotCopy.panels.preset.description
-	}, {
-		actions: withCtx(() => [!$setup.store.hasPresets ? (openBlock(), createBlock($setup["AcuBadge"], {
-			key: 0,
-			variant: "neutral"
-		}, {
-			default: withCtx(() => [..._cache[6] || (_cache[6] = [createTextVNode(
-				"使用默认预设",
-				-1
-				/* CACHED */
-			)])]),
-			_: 1
-		})) : createCommentVNode("v-if", true)]),
-		default: withCtx(() => [
-			createVNode($setup["AcuText"], {
-				variant: "status-line",
-				class: "acu-plot-preset-panel__status-line acu-v2-plot-page__status-line"
-			}, {
-				default: withCtx(() => [
-					_cache[10] || (_cache[10] = createTextVNode(
-						" 当前聊天: ",
-						-1
-						/* CACHED */
-					)),
-					createBaseVNode(
-						"strong",
-						_hoisted_1$w,
-						toDisplayString($setup.store.activePresetName || "默认预设"),
-						1
-						/* TEXT */
-					),
-					$setup.store.defaultPresetName ? (openBlock(), createElementBlock(
-						Fragment,
-						{ key: 0 },
-						[_cache[7] || (_cache[7] = createTextVNode(
-							" · 全局默认: ",
-							-1
-							/* CACHED */
-						)), createBaseVNode(
-							"strong",
-							_hoisted_2$u,
-							toDisplayString($setup.store.defaultPresetName),
-							1
-							/* TEXT */
-						)],
-						64
-						/* STABLE_FRAGMENT */
-					)) : (openBlock(), createElementBlock(
-						Fragment,
-						{ key: 1 },
-						[_cache[8] || (_cache[8] = createTextVNode(
-							" · 全局默认: ",
-							-1
-							/* CACHED */
-						)), _cache[9] || (_cache[9] = createBaseVNode(
-							"strong",
-							{ class: "acu-text__value" },
-							"默认预设",
-							-1
-							/* CACHED */
-						))],
-						64
-						/* STABLE_FRAGMENT */
-					)),
-					createVNode($setup["AcuBadge"], { variant: $setup.store.isChatOverridden ? "accent" : "neutral" }, {
-						default: withCtx(() => [createTextVNode(
-							toDisplayString($setup.store.isChatOverridden ? "已覆盖" : "跟随全局"),
-							1
-							/* TEXT */
-						)]),
-						_: 1
-					}, 8, ["variant"])
-				]),
-				_: 1
-			}),
-			createBaseVNode("div", _hoisted_3$r, [
-				createVNode($setup["AcuPresetDropdown"], {
-					items: $setup.presetDropdownItems,
-					"model-value": $setup.store.activePresetName,
-					"default-name": $setup.store.defaultPresetName,
-					"onUpdate:modelValue": _cache[0] || (_cache[0] = ($event) => $setup.store.setActivePresetForCurrentChat($event)),
-					onSetDefault: _cache[1] || (_cache[1] = ($event) => $setup.store.setDefaultPreset($event))
-				}, null, 8, [
-					"items",
-					"model-value",
-					"default-name"
-				]),
-				$props.showEdit ? (openBlock(), createBlock($setup["AcuIconButton"], {
-					key: 0,
-					icon: "fa-solid fa-pen",
-					title: $setup.store.activePreset ? "编辑当前预设" : "从默认新建预设",
-					onClick: $setup.management.openEditCurrent
-				}, null, 8, ["title", "onClick"])) : createCommentVNode("v-if", true),
-				createVNode($setup["AcuFileButton"], {
-					"icon-only": "",
-					title: "导入预设 JSON",
-					accept: "application/json,.json",
-					onFile: $setup.onImportFile
-				}, {
-					default: withCtx(() => [..._cache[11] || (_cache[11] = [createBaseVNode(
-						"i",
-						{ class: "fa-solid fa-download" },
-						null,
-						-1
-						/* CACHED */
-					)])]),
-					_: 1
-				}),
-				createVNode($setup["AcuIconButton"], {
-					icon: "fa-solid fa-gear",
-					title: "管理预设",
-					onClick: $setup.management.openManage
-				}, null, 8, ["onClick"])
-			]),
-			$props.showApiPreset ? (openBlock(), createBlock($setup["AcuFormRow"], {
-				key: 0,
-				label: "剧情推进 API 预设",
-				hint: "默认使用当前的API，选择后仅影响剧情推进功能。"
-			}, {
-				default: withCtx(() => [createVNode($setup["AcuSelect"], {
-					options: $setup.pageApiSelectOptions,
-					"model-value": $setup.store.pageApiPresetName,
-					placeholder: $setup.followActiveApiLabel,
-					"onUpdate:modelValue": _cache[2] || (_cache[2] = ($event) => $setup.store.setPageApiPreset($event))
-				}, null, 8, [
-					"options",
-					"model-value",
-					"placeholder"
-				])]),
-				_: 1
-			})) : createCommentVNode("v-if", true),
-			createVNode($setup["PlotPresetDrawer"], {
-				"is-open": $setup.management.isDrawerOpen.value,
-				view: $setup.management.drawerView.value,
-				title: $setup.management.title.value,
-				error: $setup.management.error.value,
-				"draft-meta": $setup.management.draftMeta,
-				"context-rules": $setup.management.contextRules,
-				"preset-meta": $setup.management.presetMeta.value,
-				"default-preset-name": $setup.store.defaultPresetName,
-				"api-preset-options": $setup.apiPresetOptions,
-				"task-editing": $setup.management.taskEditing,
-				"current-task-api-override": $setup.currentTaskApiOverride,
-				"show-advanced-rates": $setup.devOptions.plotAdvanced.value,
-				rates: $setup.management.draftRates,
-				"before-close": () => $setup.management.confirmIfDirty(),
-				onClose: $setup.management.closeDrawer,
-				onBack: $setup.management.backToManage,
-				onOpenCreate: $setup.management.openCreate,
-				onOpenEdit: _cache[3] || (_cache[3] = ($event) => $setup.management.openEdit($event)),
-				onSetDefault: _cache[4] || (_cache[4] = ($event) => $setup.store.setDefaultPreset($event)),
-				onDelete: $setup.onDelete,
-				onExport: $setup.onExport,
-				onSave: $setup.management.saveDraft,
-				onUpdateName: _cache[5] || (_cache[5] = ($event) => $setup.management.draftMeta.name = $event),
-				onUpdateContextExtractRules: $setup.management.setContextExtractRules,
-				onUpdateContextExcludeRules: $setup.management.setContextExcludeRules,
-				onUpdateTaskApiOverride: $setup.onTaskApiOverride,
-				onUpdateRate: $setup.management.setDraftRate
-			}, null, 8, [
-				"is-open",
-				"view",
-				"title",
-				"error",
-				"draft-meta",
-				"context-rules",
-				"preset-meta",
-				"default-preset-name",
-				"api-preset-options",
-				"task-editing",
-				"current-task-api-override",
-				"show-advanced-rates",
-				"rates",
-				"before-close",
-				"onClose",
-				"onBack",
-				"onOpenCreate",
-				"onSave",
-				"onUpdateContextExtractRules",
-				"onUpdateContextExcludeRules",
-				"onUpdateRate"
-			])
-		]),
-		_: 1
-	}, 8, ["title", "description"]);
-    }
-    var PlotPresetPanel = /*#__PURE__*/ _export_sfc(_sfc_main$w, [["render", _sfc_render$w], ["__scopeId", "data-v-021e572f"]]);
-
-    /**
-     * usePlotWorldbookConfig — 剧情推进世界书配置（D23.1）
-     *
-     * settings_ACU.plotSettings.plotWorldbookConfig 形如：
-     *   { source: 'character'|'manual', manualSelection: string[], enabledEntries: {...} }
-     *
-     * 手动模式支持多本世界书，按 manualSelection 的数组顺序持久化。
-     */
-    function ensureConfig() {
-        if (!settings_ACU.plotSettings || typeof settings_ACU.plotSettings !== 'object') {
-            settings_ACU.plotSettings = {};
-        }
-        const plot = settings_ACU.plotSettings;
-        if (!plot.plotWorldbookConfig || typeof plot.plotWorldbookConfig !== 'object') {
-            plot.plotWorldbookConfig = { source: 'character', manualSelection: [], enabledEntries: {} };
-        }
-        const cfg = plot.plotWorldbookConfig;
-        if (cfg.source !== 'manual')
-            cfg.source = 'character';
-        if (!Array.isArray(cfg.manualSelection))
-            cfg.manualSelection = [];
-        if (!cfg.enabledEntries || typeof cfg.enabledEntries !== 'object')
-            cfg.enabledEntries = {};
-        return cfg;
-    }
-    function normalizeSelection(names) {
-        if (!Array.isArray(names))
-            return [];
-        const result = [];
-        for (const name of names) {
-            const trimmed = String(name || '').trim();
-            if (trimmed && !result.includes(trimmed))
-                result.push(trimmed);
-        }
-        return result;
-    }
-    function usePlotWorldbookConfig() {
-        // 用 ref 复制响应式快照（settings_ACU 不是 Vue reactive）
-        const source = ref('character');
-        const manualSelection = ref([]);
-        const manualBook = computed(() => manualSelection.value[0] || '');
-        function refreshFromSettings() {
-            const cfg = ensureConfig();
-            cfg.manualSelection = normalizeSelection(cfg.manualSelection);
-            source.value = cfg.source;
-            manualSelection.value = [...cfg.manualSelection];
-        }
-        function setSource(next) {
-            const cfg = ensureConfig();
-            cfg.source = next;
-            source.value = next;
-            saveSettings_ACU();
-        }
-        function setManualSelection(names) {
-            const cfg = ensureConfig();
-            const next = normalizeSelection(names);
-            cfg.source = 'manual';
-            cfg.manualSelection = next;
-            source.value = 'manual';
-            manualSelection.value = [...next];
-            saveSettings_ACU();
-        }
-        function toggleManualBook(name, checked) {
-            const trimmed = String(name || '').trim();
-            if (!trimmed)
-                return;
-            const current = normalizeSelection(manualSelection.value);
-            const next = checked
-                ? (current.includes(trimmed) ? current : [...current, trimmed])
-                : current.filter(item => item !== trimmed);
-            setManualSelection(next);
-        }
-        async function resolveBookNames() {
-            const cfg = ensureConfig();
-            if (cfg.source === 'manual') {
-                return normalizeSelection(cfg.manualSelection);
-            }
-            const binding = await getCurrentCharacterWorldbookBinding_ACU();
-            return binding.orderedNames;
-        }
-        return {
-            source,
-            manualSelection,
-            manualBook,
-            refreshFromSettings,
-            setSource,
-            setManualSelection,
-            toggleManualBook,
-            resolveBookNames,
-        };
-    }
-
-    /**
-     * usePlotWorldbookEntries — 剧情推进世界书条目级启用/禁用
-     *
-     * 从 service 层加载条目列表，过滤掉数据库生成条目和屏蔽词条目，
-     * 暴露 reactive 分组列表 + selectAll / deselectAll / toggleEntry，
-     * 持久化到 plotWorldbookConfig.enabledEntries。
-     */
-    function buildWorldbookEntryLabel_ACU(entry) {
-        return buildWorldbookEntryDisplayLabel_ACU(String(entry?.comment || entry?.name || ''), entry?.uid);
-    }
-    function ensurePlotWorldbookConfig() {
-        if (!settings_ACU.plotSettings || typeof settings_ACU.plotSettings !== 'object') {
-            settings_ACU.plotSettings = {};
-        }
-        const plot = settings_ACU.plotSettings;
-        if (!plot.plotWorldbookConfig || typeof plot.plotWorldbookConfig !== 'object') {
-            plot.plotWorldbookConfig = { source: 'character', manualSelection: [], enabledEntries: {} };
-        }
-        const cfg = plot.plotWorldbookConfig;
-        if (!cfg.enabledEntries || typeof cfg.enabledEntries !== 'object') {
-            cfg.enabledEntries = {};
-        }
-        return cfg;
-    }
-    function usePlotWorldbookEntries() {
-        const groups = shallowRef([]);
-        const status = ref('idle');
-        const error = ref('');
-        async function loadEntries(bookNames) {
-            const unique = [...new Set(bookNames.filter(Boolean))];
-            if (unique.length === 0) {
-                groups.value = [];
-                status.value = 'success';
-                return;
-            }
-            status.value = 'loading';
-            error.value = '';
-            try {
-                const cfg = ensurePlotWorldbookConfig();
-                const snapshot = await refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU();
-                const entriesMap = await getLorebookEntriesByNames_ACU(unique);
-                const snapshotEntryIndexByBook = buildWorldbookSnapshotEntryIndexByBook_ACU(snapshot);
-                let settingsChanged = false;
-                const result = [];
-                for (const bookName of unique) {
-                    const bookEntries = Array.isArray(entriesMap[bookName]) ? entriesMap[bookName] : [];
-                    const visibleBookEntries = bookEntries.filter((entry) => isWorldbookEntryVisibleForPageUI_ACU(bookName, entry, snapshotEntryIndexByBook));
-                    const visibleUidSet = new Set(visibleBookEntries.map((entry) => String(entry?.uid)));
-                    if (typeof cfg.enabledEntries[bookName] === 'undefined') {
-                        cfg.enabledEntries[bookName] = visibleBookEntries
-                            .filter((entry) => buildWorldbookEntryDisplayView_ACU(entry, getWorldbookSnapshotEntryForDisplay_ACU(snapshotEntryIndexByBook, bookName, entry)).enabled)
-                            .map((entry) => entry.uid);
-                        settingsChanged = true;
-                    }
-                    else if (Array.isArray(cfg.enabledEntries[bookName])) {
-                        const cleanedEnabledEntries = cfg.enabledEntries[bookName]
-                            .filter((uid) => visibleUidSet.has(String(uid)));
-                        if (cleanedEnabledEntries.length !== cfg.enabledEntries[bookName].length) {
-                            cfg.enabledEntries[bookName] = cleanedEnabledEntries;
-                            settingsChanged = true;
-                        }
-                    }
-                    const enabledList = Array.isArray(cfg.enabledEntries[bookName])
-                        ? cfg.enabledEntries[bookName]
-                        : [];
-                    const buildItems = (entries) => entries.map((entry) => {
-                        const comment = String(entry?.comment || entry?.name || '');
-                        const skillMeta = parseWorldbookSkillMetaFromComment_ACU(comment);
-                        const snapshotEntry = getWorldbookSnapshotEntryForDisplay_ACU(snapshotEntryIndexByBook, bookName, entry);
-                        const displayView = buildWorldbookEntryDisplayView_ACU(entry, snapshotEntry);
-                        return {
-                            uid: entry.uid,
-                            bookName,
-                            label: buildWorldbookEntryLabel_ACU(entry),
-                            comment,
-                            skillMeta,
-                            hasSkill: !!skillMeta,
-                            agentTakeoverState: resolveWorldbookEntryTakeoverState_ACU(entry, !!skillMeta, snapshotEntry),
-                            checked: enabledList.includes(entry.uid),
-                            skillifySelected: false,
-                            skillifySelectable: false,
-                            isConstant: displayView.isConstant,
-                            disabled: displayView.disabled,
-                        };
-                    });
-                    const visible = buildItems(visibleBookEntries);
-                    if (visible.length > 0) {
-                        result.push({ bookName, entries: visible, expanded: false });
-                    }
-                }
-                if (settingsChanged)
-                    saveSettings_ACU();
-                groups.value = result;
-                status.value = 'success';
-            }
-            catch (e) {
-                logError_ACU('[ACU-V2] usePlotWorldbookEntries loadEntries failed', e);
-                error.value = e?.message ?? '加载条目失败';
-                status.value = 'error';
-            }
-        }
-        function reportLoadFailure() {
-            error.value = '加载角色世界书失败';
-            status.value = 'error';
-        }
-        function toggleEntry(bookName, uid, checked) {
-            const cfg = ensurePlotWorldbookConfig();
-            if (!Array.isArray(cfg.enabledEntries[bookName])) {
-                cfg.enabledEntries[bookName] = [];
-            }
-            const list = cfg.enabledEntries[bookName];
-            const idx = list.indexOf(uid);
-            if (checked && idx === -1)
-                list.push(uid);
-            else if (!checked && idx !== -1)
-                list.splice(idx, 1);
-            saveSettings_ACU();
-            groups.value = groups.value.map(g => {
-                if (g.bookName !== bookName)
-                    return g;
-                return {
-                    ...g,
-                    entries: g.entries.map(e => e.uid === uid ? { ...e, checked } : e),
-                };
-            });
-        }
-        function selectAll() {
-            const cfg = ensurePlotWorldbookConfig();
-            for (const group of groups.value) {
-                cfg.enabledEntries[group.bookName] = group.entries
-                    .filter(e => !e.disabled)
-                    .map(e => e.uid);
-            }
-            saveSettings_ACU();
-            groups.value = groups.value.map(g => ({
-                ...g,
-                entries: g.entries.map(e => ({ ...e, checked: !e.disabled })),
-            }));
-        }
-        function deselectAll() {
-            const cfg = ensurePlotWorldbookConfig();
-            for (const group of groups.value) {
-                cfg.enabledEntries[group.bookName] = [];
-            }
-            saveSettings_ACU();
-            groups.value = groups.value.map(g => ({
-                ...g,
-                entries: g.entries.map(e => ({ ...e, checked: false })),
-            }));
-        }
-        function toggleGroupExpanded(bookName) {
-            groups.value = groups.value.map(g => {
-                if (g.bookName !== bookName)
-                    return g;
-                return { ...g, expanded: !g.expanded };
-            });
-        }
-        return {
-            groups,
-            status,
-            error,
-            loadEntries,
-            reportLoadFailure,
-            toggleEntry,
-            selectAll,
-            deselectAll,
-            toggleGroupExpanded,
-        };
-    }
-
-    var _sfc_main$v = /*@__PURE__*/ defineComponent({
-        __name: 'PlotPage',
-        setup(__props, { expose: __expose }) {
-            __expose();
-            const worldbook = useWorldbookSelector();
-            const plotWorldbook = usePlotWorldbookConfig();
-            const wbEntries = usePlotWorldbookEntries();
-            const entryFilter = ref('');
-            const entryEmptyText = ref(plotCopy.worldbook.emptyDefault);
-            async function refreshWorldbookEntries() {
-                let names;
-                try {
-                    names = await plotWorldbook.resolveBookNames();
-                }
-                catch {
-                    wbEntries.reportLoadFailure();
-                    return;
-                }
-                entryEmptyText.value = resolveEntryEmptyText(names);
-                await wbEntries.loadEntries(names);
-            }
-            function resolveEntryEmptyText(names) {
-                if (plotWorldbook.source.value === 'character' && names.length === 0) {
-                    return plotCopy.worldbook.emptyCharacter;
-                }
-                if (plotWorldbook.source.value === 'manual' && plotWorldbook.manualSelection.value.length === 0) {
-                    return plotCopy.worldbook.emptyManual;
-                }
-                return plotCopy.worldbook.emptyDefault;
-            }
-            function onWorldbookSourceChange(value) {
-                plotWorldbook.setSource(value);
-                void refreshWorldbookEntries();
-            }
-            function onManualWorldbookToggle(name, checked) {
-                plotWorldbook.toggleManualBook(name, checked);
-                void refreshWorldbookEntries();
-            }
-            const currentWorldbookLabel = computed(() => {
-                if (plotWorldbook.source.value === 'character') {
-                    return worldbook.charPrimary.value
-                        ? `角色卡所有世界书 · 主册 ${worldbook.charPrimary.value}`
-                        : '角色卡所有世界书';
-                }
-                const names = plotWorldbook.manualSelection.value;
-                return names.length ? names.join('、') : '（未选择）';
-            });
-            async function refreshAll() {
-                plotWorldbook.refreshFromSettings();
-                await worldbook.refresh();
-                await refreshWorldbookEntries();
-            }
-            onMounted(() => { void refreshAll(); });
-            watch(useChatChangedTick(), () => { void refreshAll(); });
-            const __returned__ = { worldbook, plotWorldbook, wbEntries, entryFilter, entryEmptyText, refreshWorldbookEntries, resolveEntryEmptyText, onWorldbookSourceChange, onManualWorldbookToggle, currentWorldbookLabel, refreshAll, AcuPanel, AcuPanelGrid, PlotPresetPanel, WorldbookEntryPickerBody, get plotCopy() { return plotCopy; } };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
-        }
-    });
-
-    injectSfcStyle("\n.acu-v2-plot-page[data-v-1dff2b19] { min-height: 100%; min-width: 0; padding: 20px; display: flex; flex-direction: column; gap: 18px;\n}\n@media (max-width: 860px) {\n.acu-v2-plot-page[data-v-1dff2b19] { padding: 14px;\n}\n}\r\n", "src/presentation-v2/pages/PlotPage.vue#style-0-1dff2b19");
-    var PlotPage_vue_vue_type_style_index_0_scoped_1dff2b19_lang = null;
-
-    const _hoisted_1$v = { class: "acu-v2-plot-page" };
-    function _sfc_render$v(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$v, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-plot-page__grid" }, {
-		default: withCtx(() => [
-			createVNode($setup["PlotPresetPanel"]),
-			createCommentVNode(" 世界书选择 "),
-			createVNode($setup["AcuPanel"], {
-				title: $setup.plotCopy.panels.worldbook.title,
-				description: $setup.plotCopy.panels.worldbook.description
-			}, {
-				default: withCtx(() => [createVNode($setup["WorldbookEntryPickerBody"], {
-					source: $setup.plotWorldbook.source.value,
-					"selected-names": $setup.plotWorldbook.manualSelection.value,
-					names: $setup.worldbook.names.value,
-					"selector-status": $setup.worldbook.status.value,
-					"selector-error": $setup.worldbook.error.value,
-					"current-label": $setup.currentWorldbookLabel,
-					filter: $setup.entryFilter,
-					"onUpdate:filter": _cache[0] || (_cache[0] = ($event) => $setup.entryFilter = $event),
-					groups: $setup.wbEntries.groups.value,
-					loading: $setup.wbEntries.status.value === "loading",
-					"entry-status": $setup.wbEntries.status.value,
-					"entry-error": $setup.wbEntries.error.value,
-					"empty-text": $setup.entryEmptyText,
-					"onUpdate:source": _cache[1] || (_cache[1] = ($event) => $setup.onWorldbookSourceChange($event)),
-					onToggleBook: $setup.onManualWorldbookToggle,
-					onSelectAll: _cache[2] || (_cache[2] = ($event) => $setup.wbEntries.selectAll()),
-					onDeselectAll: _cache[3] || (_cache[3] = ($event) => $setup.wbEntries.deselectAll()),
-					onToggle: _cache[4] || (_cache[4] = (bookName, uid, checked) => $setup.wbEntries.toggleEntry(bookName, uid, checked)),
-					onToggleGroup: _cache[5] || (_cache[5] = ($event) => $setup.wbEntries.toggleGroupExpanded($event))
-				}, null, 8, [
-					"source",
-					"selected-names",
-					"names",
-					"selector-status",
-					"selector-error",
-					"current-label",
-					"filter",
-					"groups",
-					"loading",
-					"entry-status",
-					"entry-error",
-					"empty-text"
-				])]),
-				_: 1
-			}, 8, ["title", "description"])
-		]),
-		_: 1
-	})]);
-    }
-    var PlotPage = /*#__PURE__*/ _export_sfc(_sfc_main$v, [["render", _sfc_render$v], ["__scopeId", "data-v-1dff2b19"]]);
+    var ApiPage = /*#__PURE__*/ _export_sfc(_sfc_main$v, [["render", _sfc_render$v], ["__scopeId", "data-v-3ac7d1d0"]]);
 
     var _sfc_main$u = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookAgentAdvancedPanel',
@@ -218505,7 +218574,7 @@ ${rejectionText}` : delegationFeedback,
             steps: [
                 '到「填表工作台」的「Embedding / Rerank」面板检查 Embedding / Rerank 的接口地址、密钥和模型名，确认服务商支持该接口。',
                 SEE_PREVIOUS_LOG,
-                '可先在填表工作台把填表模式切到经典表格或 LLM 逻辑召回，不影响填表等基础功能。',
+                '可先在填表模式页切到经典表格模式或LLM模型逻辑召回模式，不影响填表等基础功能。',
             ],
         },
         {
@@ -219611,23 +219680,22 @@ ${rejectionText}` : delegationFeedback,
      * page-registry — 一级页静态注册表（plan §4.1 + §D24）
      *
      * 页面 id 保持稳定；退役页面通过路由别名兼容。可见性依赖运行时状态
-     * 的页通过 uiTier / requiresSqlite / featureGate / visibleWhen 表达，由 router store
+     * 的页通过 minUiTier / requiresSqlite / featureGate / visibleWhen 表达，由 router store
      * 在请求 visiblePages 时计算。
      */
     /** 正文替换页对应的 feature gate key；页面可见性由仪表盘常驻的正文替换启用开关控制。 */
     const FEATURE_GATE_CONTENT_REPLACE = 'content-replace';
-    const FEATURE_GATE_PLOT = 'plot';
     const FEATURE_GATE_CONTINUATION = 'continuation';
     const FEATURE_GATE_WORLD_SIMULATION = 'world-simulation';
     const FEATURE_GATE_IMPORT = 'import';
     const ACU_V2_FORM_FILL_PAGE_ID = 'form-fill';
+    const ACU_V2_FILL_MODE_PAGE_ID = 'fill-mode';
     const ACU_V2_PAGE_REGISTRY = Object.freeze([
         // 概览
         { id: 'dashboard', title: dashboardCopy.pageTitle, group: 'overview', component: markRaw(DashboardPage) },
         // 配置
+        { id: ACU_V2_FILL_MODE_PAGE_ID, title: fillModeCopy.pageTitle, group: 'config', component: markRaw(FillModePage) },
         { id: ACU_V2_FORM_FILL_PAGE_ID, title: '填表工作台', group: 'config', component: markRaw(FormFillPage) },
-        { id: 'table', title: '填表规则', group: 'config', component: markRaw(TablePage), minUiTier: 'medium' },
-        { id: 'plot', title: '剧情推进', group: 'config', component: markRaw(PlotPage), minUiTier: 'medium', featureGate: FEATURE_GATE_PLOT },
         { id: 'agent', title: 'Agent', group: 'config', component: markRaw(AgentPage), minUiTier: 'medium' },
         { id: 'api', title: 'API', group: 'config', component: markRaw(ApiPage) },
         // 功能
@@ -219680,7 +219748,11 @@ ${rejectionText}` : delegationFeedback,
     const LEGACY_PAGE_ID_ALIASES = {
         'basic-config': ACU_V2_FORM_FILL_PAGE_ID,
         // 交火模式独立页已退役，全部参数并入填表工作台的交火模式分支。
-        'vector-index': ACU_V2_FORM_FILL_PAGE_ID,
+        'vector-index': ACU_V2_FILL_MODE_PAGE_ID,
+        // 剧情推进独立页已退役，面板并入填表模式页的 LLM / 交火分支。
+        'plot': ACU_V2_FILL_MODE_PAGE_ID,
+        // 填表规则已并入填表工作台。
+        'table': ACU_V2_FORM_FILL_PAGE_ID,
         'sql-console': 'advanced-tools',
         'log-viewer': 'advanced-tools',
     };
@@ -219696,7 +219768,6 @@ ${rejectionText}` : delegationFeedback,
     function readInitialFeatureGates() {
         return {
             [FEATURE_GATE_CONTENT_REPLACE]: syncContentReplaceAvailability(),
-            [FEATURE_GATE_PLOT]: settings_ACU?.plotSettings?.enabled === true,
             [FEATURE_GATE_CONTINUATION]: settings_ACU?.continuationPageEnabled !== false,
             [FEATURE_GATE_WORLD_SIMULATION]: settings_ACU?.worldSimulationPageEnabled === true,
             [FEATURE_GATE_IMPORT]: settings_ACU?.externalImportPageEnabled !== false,
