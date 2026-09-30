@@ -509,7 +509,7 @@ export function usePlotWorldbookAgentControl() {
     busy.value = 'skillify';
     let progressToastId: string | null = null;
     try {
-      const progressOptions = { durationMs: 0, muteable: false, dismissible: false };
+      const progressOptions = { durationMs: 0, muteable: false, dismissible: false, feature: 'Skill 化' };
       const formatProgressText = (event: AgentSkillifyProgressEvent_ACU): string => {
         if (event.phase === 'collecting') return '正在扫描当前世界书范围内可 Skill 化的条目...';
         if (event.phase === 'processing') return `正在 Skill 化世界书条目：0/${event.total}`;

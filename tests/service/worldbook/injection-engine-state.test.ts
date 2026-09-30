@@ -24,7 +24,7 @@ const {
   mockListLorebooks,
   mockResolveLorebookNameFromList,
   mockResetPlotAgentWorldbookSessionSnapshot,
-  mockToastrWarning,
+  mockNoticeWarning,
 } = vi.hoisted(() => ({
   mockSettings: {
     dataIsolationEnabled: false,
@@ -91,7 +91,7 @@ const {
     return matches.length === 1 ? String(matches[0]) : null;
   }),
   mockResetPlotAgentWorldbookSessionSnapshot: vi.fn(),
-  mockToastrWarning: vi.fn(),
+  mockNoticeWarning: vi.fn(),
 }));
 
 vi.mock('../../../src/service/settings/settings-readers', () => ({
@@ -168,6 +168,10 @@ vi.mock('../../../src/service/agent/agent-worldbook-takeover', () => ({
   resetPlotAgentWorldbookSessionSnapshot_ACU: mockResetPlotAgentWorldbookSessionSnapshot,
 }));
 
+vi.mock('../../../src/shared/notice-hub', () => ({
+  notify_ACU: (kind: string, text: string) => kind === 'warning' ? mockNoticeWarning(text) : null,
+}));
+
 import {
   resetScriptStateForNewChat_ACU,
   getInjectionTargetLorebook_ACU,
@@ -175,12 +179,10 @@ import {
   purgeSheetKeysFromChatHistoryHard_ACU,
   resetMissingInjectionTargetWarningsForTests_ACU,
 } from '../../../src/service/worldbook/injection-engine-state';
-import { _set_toastr_API_ACU } from '../../../src/shared/host-api';
 
 beforeEach(() => {
   vi.clearAllMocks();
   resetMissingInjectionTargetWarningsForTests_ACU();
-  _set_toastr_API_ACU({ warning: mockToastrWarning } as any);
   mockGetCurrentWorldbookConfig.mockReturnValue({ injectionTarget: 'character' });
   mockGwGetCurrentCharPrimaryLorebook.mockResolvedValue('primary-lorebook');
   mockGetCurrentCharacterWorldbookBinding.mockResolvedValue({
@@ -271,7 +273,7 @@ describe('getInjectionTargetLorebook_ACU', () => {
     expect(result).toBeNull();
     expect(mockListLorebooks).not.toHaveBeenCalled();
     expect(mockLogWarn).not.toHaveBeenCalled();
-    expect(mockToastrWarning).not.toHaveBeenCalled();
+    expect(mockNoticeWarning).not.toHaveBeenCalled();
   });
 
   it('名单未命中时 forceRefresh 重试一次，第二次命中则成功且不告警', async () => {
@@ -284,7 +286,7 @@ describe('getInjectionTargetLorebook_ACU', () => {
     expect(mockListLorebooks.mock.calls[0]).toEqual([]);
     expect(mockListLorebooks.mock.calls[1]).toEqual([{ forceRefresh: true }]);
     expect(mockLogWarn).not.toHaveBeenCalled();
-    expect(mockToastrWarning).not.toHaveBeenCalled();
+    expect(mockNoticeWarning).not.toHaveBeenCalled();
   });
 
   it('刷新后仍缺失时按名称去重告警一次，不阻断；恢复后再缺失可再告警', async () => {
@@ -294,8 +296,8 @@ describe('getInjectionTargetLorebook_ACU', () => {
     expect(await getInjectionTargetLorebook_ACU()).toBeNull();
     expect(await getInjectionTargetLorebook_ACU()).toBeNull();
     expect(mockLogWarn).toHaveBeenCalledTimes(1);
-    expect(mockToastrWarning).toHaveBeenCalledTimes(1);
-    expect(mockToastrWarning.mock.calls[0][0]).toContain('失踪书');
+    expect(mockNoticeWarning).toHaveBeenCalledTimes(1);
+    expect(mockNoticeWarning.mock.calls[0][0]).toContain('失踪书');
 
     mockListLorebooks.mockResolvedValue(['失踪书']);
     expect(await getInjectionTargetLorebook_ACU()).toBe('失踪书');
@@ -303,7 +305,7 @@ describe('getInjectionTargetLorebook_ACU', () => {
     mockListLorebooks.mockResolvedValue(['其他书']);
     expect(await getInjectionTargetLorebook_ACU()).toBeNull();
     expect(mockLogWarn).toHaveBeenCalledTimes(2);
-    expect(mockToastrWarning).toHaveBeenCalledTimes(2);
+    expect(mockNoticeWarning).toHaveBeenCalledTimes(2);
   });
 });
 

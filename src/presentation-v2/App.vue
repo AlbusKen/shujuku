@@ -1,6 +1,6 @@
 <template>
   <div class="acu-v2-app">
-    <WorldSimulationProgressCard />
+    <DeskPetLayer />
     <div v-show="rootShell.isOpen" class="acu-v2-app__shell">
       <div class="acu-v2-app__body">
         <Sidebar v-if="!visualizer.isActive" class="acu-v2-app__desktop-sidebar" />
@@ -132,7 +132,6 @@
       </div>
 
       <AcuDialogHost />
-      <AcuToastViewport />
     </div>
 
   </div>
@@ -144,10 +143,9 @@ import AcuDialogHost from "./components/_lib/AcuDialogHost.vue";
 import AcuFileButton from "./components/_lib/AcuFileButton.vue";
 import AcuIconButton from "./components/_lib/AcuIconButton.vue";
 import AcuSegmentedControl from "./components/_lib/AcuSegmentedControl.vue";
-import AcuToastViewport from "./components/_lib/AcuToastViewport.vue";
+import DeskPetLayer from "./components/DeskPetLayer.vue";
 import MainArea from "./components/MainArea.vue";
 import Sidebar from "./components/Sidebar.vue";
-import WorldSimulationProgressCard from "./components/WorldSimulationProgressCard.vue";
 import { useChatChangedListener } from "./composables/useChatChangedListener";
 import { useTemplateRuntimeChangeListener } from "./composables/useTemplateRuntimeChangeListener";
 import { useDevOptions } from "./composables/useDevOptions";
@@ -320,9 +318,6 @@ watch(() => devOptions.developerOptionsEnabled.value, () => {
 
 onMounted(() => router.ensureActiveVisible());
 watch(() => uiMode.mode, () => router.ensureActiveVisible());
-watch(() => rootShell.isOpen, (isOpen) => {
-  if (!isOpen) toastStore.clear();
-});
 
 function openMobileNav(): void {
   clearMobileNavCloseTimer();

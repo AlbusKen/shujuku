@@ -6,14 +6,13 @@ import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
 import { CHAT_SHEET_GUIDE_FIELD_ACU } from '../../data/storage/chat-history';
 import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, generationGate_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentChatFileIdentifier_ACU, _set_allChatMessages_ACU, _set_currentJsonTableData_ACU, _set_independentTableStates_ACU, _set_lastTotalAiMessages_ACU } from '../runtime/state-manager';
 import { getLorebookEntries_ACU, deleteLorebookEntries_ACU, getCurrentCharacterWorldbookBinding_ACU, getCurrentCharPrimaryLorebook_ACU as gwGetCurrentCharPrimaryLorebook_ACU, listLorebooks_ACU, resolveLorebookNameFromList_ACU } from '../../data/gateways/worldbook-gateway';
-import { toastr_API_ACU } from '../../shared/host-api';
+import { notify_ACU } from '../../shared/notice-hub';
 import { getChatArray_ACU, saveChatToHost_ACU } from '../../data/gateways/chat-gateway';
 import { applyPlotWorldbookSelectionForCurrentCharacter_ACU, applyTemplateScopeForCurrentChat_ACU, loadSettings_ACU, saveSettings_ACU } from '../settings/settings-service';
 import { getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { loadAllChatMessages_ACU } from './pipeline';
 import { cleanChatName_ACU, getChatFirstLayerMessage_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { getImportStablePrefix_ACU } from '../../shared/constants';
-import { ACU_PRODUCT_NAME_ACU } from '../../shared/product-brand';
 
 import { purgeSheetKeysFromMessage_ACU } from '../../data/repositories/chat-message-data-repo';
 import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
@@ -147,9 +146,9 @@ import { resetPlotAgentWorldbookSessionSnapshot_ACU } from '../agent/agent-world
     const message = `注入目标世界书「${name}」不存在，本次注入已跳过。请在设置中重新选择。`;
     logWarn_ACU(`[Worldbook] ${message}`);
     try {
-      toastr_API_ACU?.warning?.(message, ACU_PRODUCT_NAME_ACU, { timeOut: 8000 });
+      notify_ACU('warning', message);
     } catch {
-      // toast 不可用时只保留日志
+      // 通知不可用时只保留日志
     }
   }
 

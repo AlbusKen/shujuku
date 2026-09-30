@@ -10,11 +10,10 @@ import { ACU_TOAST_CATEGORY_ACU } from '../../shared/constants';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 // re-export 从 service 层搬迁的业务逻辑函数，保持外部调用方兼容
 export { saveCurrentDataForTable_ACU } from '../../service/chat/chat-service';
-import { toastr_API_ACU } from '../../shared/host-api';
 import { $statusMessageSpan_ACU } from '../state/ui-refs';
 import { topLevelWindow_ACU } from '../../shared/env';
-import { renderStopButton_ACU } from '../../shared/html-helpers';
-import { bindTableFillStopButton_ACU, resetManualUpdateButton_ACU, shouldShowVectorMemoryManualUpdateWarning_ACU, syncManualUpdateButtonAvailability_ACU } from '../components/status-display';
+import { beginNoticeTask_ACU, type NoticeTaskHandle_ACU } from '../../shared/notice-hub';
+import { resetManualUpdateButton_ACU, shouldShowVectorMemoryManualUpdateWarning_ACU, syncManualUpdateButtonAvailability_ACU } from '../components/status-display';
 import { updateCardUpdateStatusDisplay_ACU } from '../components/update-status-display';
 import { collectManualExtraHint_ACU } from './settings-ui-sync';
 import { refreshMergedDataAndNotifyWithUI_ACU } from '../components/pipeline-ui-helpers';
@@ -137,26 +136,38 @@ function buildProgressMessage(event: CardUpdateProgressEvent): string {
     }
 }
 
-function updateLoadingToastMessage(loadingToast: any, message: string) {
-    if (!loadingToast || !toastr_API_ACU) return;
-    loadingToast.find('.acu-toast-progress-message').text(message);
-}
-
-function clearLoadingToast(loadingToast: any) {
-    if (loadingToast && toastr_API_ACU) {
-        toastr_API_ACU.clear(loadingToast);
-    }
+/**
+ * 登记一个可停止的填表进度任务。停止只作用于填表：标记用户终止、中断在途请求并复位填表状态。
+ */
+function beginTableFillTask(feature: string, detail: string): NoticeTaskHandle_ACU {
+    const task: NoticeTaskHandle_ACU = beginNoticeTask_ACU(feature, {
+        detail,
+        action: {
+            label: '终止',
+            variant: 'danger',
+            run: () => {
+                syncManualUpdateButtonAvailability_ACU();
+                _set_wasStoppedByUser_ACU(true);
+                abortAllActiveRequests_ACU();
+                _set_isAutoUpdatingCard_ACU(false);
+                updateStatusText('填表任务已终止，正在停止当前任务与后续批次...', false);
+                task.update('填表任务已终止，正在停止当前任务与后续批次...', { action: null });
+                showToastr_ACU('warning', '填表任务已由用户终止，当前任务与后续批次将立即停止。');
+            },
+        },
+    });
+    return task;
 }
 
 /**
  * 根据 service 层返回的进度事件更新 UI
  * presentation 层自己决定"怎么展示"
  */
-function handleProgressEvent(event: CardUpdateProgressEvent, isSilentMode: boolean, loadingToast?: any) {
+function handleProgressEvent(event: CardUpdateProgressEvent, isSilentMode: boolean, progressTask?: NoticeTaskHandle_ACU | null) {
     if (isSilentMode) return;
     const message = buildProgressMessage(event);
     updateStatusText(message, false);
-    updateLoadingToastMessage(loadingToast, message);
+    progressTask?.update(message);
 
     switch (event.phase) {
         case 'complete':
@@ -193,37 +204,17 @@ export async function proceedWithCardUpdate_ACU(
 ): Promise<CardUpdateResult> {
     logDebug_ACU(`[更新流程] proceedWithCardUpdate: 消息数=${messagesToUse.length}, 模式=${updateMode}, 静默=${isSilentMode}, 目标表=${targetSheetKeys?.join(',') || '全部'}`);
     const localAbortController = new AbortController();
-    let loadingToast: any = null;
-    const stopButtonId = `acu-stop-update-btn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    let progressTask: NoticeTaskHandle_ACU | null = null;
 
     // UI：通知填表开始
     if (!isSilentMode) {
         notifyTableFillStart();
 
-        // UI：显示加载 toast（带停止按钮）
-        const stopButtonHtml = renderStopButton_ACU(stopButtonId, '终止');
+        // UI：登记可停止的填表进度任务
         const initialMessage = progressContext
             ? `${buildBatchProgressLabel(progressContext)}：${batchToastMessage || '正在填表，请稍候...'}`
             : (batchToastMessage || '正在填表，请稍候...');
-        const toastMessage = `<div><span class="acu-toast-progress-message">${initialMessage}</span>${stopButtonHtml}</div>`;
-        loadingToast = showToastr_ACU('info', toastMessage, {
-            timeOut: 0,
-            extendedTimeOut: 0,
-            tapToDismiss: false,
-            acuToastCategory: ACU_TOAST_CATEGORY_ACU.MANUAL_TABLE,
-            onShown: function () {
-                if (typeof bindTableFillStopButton_ACU === 'function') {
-                    bindTableFillStopButton_ACU(stopButtonId, () => {
-                        _set_wasStoppedByUser_ACU(true);
-                        abortAllActiveRequests_ACU();
-                        _set_isAutoUpdatingCard_ACU(false);
-                        updateStatusText('填表任务已终止，正在停止当前任务与后续批次...', false);
-                        updateLoadingToastMessage(loadingToast, '填表任务已终止，正在停止当前任务与后续批次...');
-                        showToastr_ACU('warning', '填表任务已由用户终止，当前任务与后续批次将立即停止。');
-                    });
-                }
-            }
-        });
+        progressTask = beginTableFillTask(isImportMode ? '外部导入' : '填表', initialMessage);
     }
 
     try {
@@ -238,7 +229,7 @@ export async function proceedWithCardUpdate_ACU(
             requestOptions,
             localAbortController,
             progressContext,
-            (event) => handleProgressEvent(event, isSilentMode, loadingToast)
+            (event) => handleProgressEvent(event, isSilentMode, progressTask)
         );
 
         // UI：根据返回值决定后续 UI 操作
@@ -253,10 +244,8 @@ export async function proceedWithCardUpdate_ACU(
 
         return result;
     } finally {
-        // UI：清除加载 toast
-        if (loadingToast && toastr_API_ACU) {
-            toastr_API_ACU.clear(loadingToast);
-        }
+        // UI：结束进度任务
+        progressTask?.end();
     }
 }
 
@@ -296,7 +285,7 @@ export async function processUpdates_ACU(indicesToUpdate: number[], mode = 'auto
  */
 export async function handleManualUpdate_ACU() {
     logDebug_ACU('[更新流程] handleManualUpdate: 开始手动更新');
-    let manualProgressToast: any = null;
+    let manualProgressTask: NoticeTaskHandle_ACU | null = null;
     try {
         if (shouldShowVectorMemoryManualUpdateWarning_ACU()) {
             syncManualUpdateButtonAvailability_ACU();
@@ -341,26 +330,7 @@ export async function handleManualUpdate_ACU() {
         // 调用 service 层，启用事务式手动重填（兼容沿用 clearBeforeUpdate 参数名）
         _set_wasStoppedByUser_ACU(false);
         notifyTableFillStart();
-        const stopButtonId = `acu-stop-manual-update-btn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const stopButtonHtml = renderStopButton_ACU(stopButtonId, '终止');
-        manualProgressToast = showToastr_ACU('info', `<div><span class="acu-toast-progress-message">手动填表开始。</span>${stopButtonHtml}</div>`, {
-            timeOut: 0,
-            extendedTimeOut: 0,
-            tapToDismiss: false,
-            acuToastCategory: ACU_TOAST_CATEGORY_ACU.MANUAL_TABLE,
-            onShown: function () {
-                if (typeof bindTableFillStopButton_ACU === 'function') {
-                    bindTableFillStopButton_ACU(stopButtonId, () => {
-                        _set_wasStoppedByUser_ACU(true);
-                        abortAllActiveRequests_ACU();
-                        _set_isAutoUpdatingCard_ACU(false);
-                        updateStatusText('填表任务已终止，正在停止当前任务与后续批次...', false);
-                        updateLoadingToastMessage(manualProgressToast, '填表任务已终止，正在停止当前任务与后续批次...');
-                        showToastr_ACU('warning', '填表任务已由用户终止，当前任务与后续批次将立即停止。');
-                    });
-                }
-            },
-        });
+        manualProgressTask = beginTableFillTask('手动填表', '手动填表开始。');
 
         const result = await orchestrateManualUpdate_ACU(
             targetKeys,
@@ -375,15 +345,15 @@ export async function handleManualUpdate_ACU() {
             // [新增] 传入用户确认后的预清空选项
             {
                 clearBeforeUpdate: true,
-                onProgress: event => handleProgressEvent(event, false, manualProgressToast),
+                onProgress: event => handleProgressEvent(event, false, manualProgressTask),
                 // 注意：legacy 入口未传 executionSnapshot，不启用确认期 TOCTOU 快照防护
                 // （该防护由 V2 UI useManualUpdate 在确认前建立快照并传入 service）。
                 // 刻意保持兼容，不把可选参数改为必填。
             }
         );
 
-        clearLoadingToast(manualProgressToast);
-        manualProgressToast = null;
+        manualProgressTask?.end();
+        manualProgressTask = null;
 
         // UI：根据返回值显示 toast
         if (result.success) {
@@ -402,7 +372,7 @@ export async function handleManualUpdate_ACU() {
             showToastr_ACU(isWarning ? 'warning' : 'error', result.error);
         }
     } finally {
-        clearLoadingToast(manualProgressToast);
+        manualProgressTask?.end();
         // UI：重置手动更新按钮
         if (typeof resetManualUpdateButton_ACU === 'function') resetManualUpdateButton_ACU();
     }

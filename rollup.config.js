@@ -12,6 +12,7 @@ import replace from '@rollup/plugin-replace';
 import vuePlugin from 'unplugin-vue/rollup';
 import sfcStyleInjector from './src/presentation-v2/build/rollup-sfc-style-injector.js';
 import vueScriptTranspiler from './src/presentation-v2/build/rollup-vue-script-transpiler.js';
+import inlineImageAssets from './src/presentation-v2/build/rollup-inline-image-assets.js';
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
@@ -86,18 +87,6 @@ function createReplacePlugin() {
       __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: 'false',
     },
   });
-}
-
-function inlineImageAssets() {
-  return {
-    name: 'acu-inline-image-assets',
-    load(id) {
-      if (!/\.(png|jpe?g)$/i.test(id)) return null;
-      const mime = /\.png$/i.test(id) ? 'image/png' : 'image/jpeg';
-      const base64 = readFileSync(id).toString('base64');
-      return `export default ${JSON.stringify(`data:${mime};base64,${base64}`)};`;
-    },
-  };
 }
 
 const sharedPlugins = [

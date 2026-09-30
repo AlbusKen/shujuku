@@ -36,6 +36,9 @@ import { useToastStore, type ToastOptions } from '../stores/toast-store';
 
 export type ImportMessageKind = 'info' | 'success' | 'warning' | 'error';
 
+/** 气泡与桌宠里显示的功能名。 */
+const IMPORT_TASK_FEATURE = '外部导入';
+
 export interface UseImportFlow {
   splitFile(file: File): Promise<void>;
   clearStaging(): Promise<void>;
@@ -119,6 +122,7 @@ export function useImportFlow(): UseImportFlow {
       durationMs: 0,
       muteable: false,
       dismissible: false,
+      feature: IMPORT_TASK_FEATURE,
       action: abortRequested
         ? undefined
         : {
@@ -149,12 +153,14 @@ export function useImportFlow(): UseImportFlow {
         durationMs: 0,
         muteable: false,
         dismissible: false,
+        feature: IMPORT_TASK_FEATURE,
       });
     } else {
       toast.warning(text, {
         durationMs: 0,
         muteable: false,
         dismissible: false,
+        feature: IMPORT_TASK_FEATURE,
       });
     }
   }

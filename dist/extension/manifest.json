@@ -1,12 +1,12 @@
 {
-    "display_name": "SP·数据库 9.2.4",
+    "display_name": "龙血玄黄·数据库 1.0.0",
     "loading_order": 200,
     "requires": [],
     "optional": [],
     "js": "index.js",
     "css": "",
     "author": "Cline (AI Assisted)",
-    "version": "9.2.4",
+    "version": "1.0.0",
     "homePage": "",
     "auto_update": false
 }

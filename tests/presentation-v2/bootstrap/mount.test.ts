@@ -177,28 +177,31 @@ describe('mount — 当前文档场景', () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it('toast layer is teleported to the app root instead of staying inside the shell', async () => {
+  it('notice bubble is teleported outside the app root so it stays visible when the shell is closed', async () => {
     const { mount } = await freshImport();
     await mount.openAcuV2App();
 
     const pinia = mount.getAcuV2PiniaForBridge();
     expect(pinia).not.toBeNull();
     const { useToastStore } = await import('../../../src/presentation-v2/stores/toast-store');
-    useToastStore(pinia!).info('手动填表开始。', { durationMs: 0, muteable: false });
+    useToastStore(pinia!).info('手动填表开始。', { durationMs: 0, muteable: false, feature: '手动填表' });
+    await nextTick();
     await nextTick();
 
     const root = document.getElementById(ROOT_ID);
     const shell = document.querySelector<HTMLElement>('.acu-v2-app__shell');
-    const viewport = document.querySelector<HTMLElement>('.acu-toast-viewport');
-    const list = document.querySelector<HTMLElement>('.acu-toast-viewport__list');
+    const bubble = document.querySelector<HTMLElement>('.acu-notice-bubble');
 
     expect(root).not.toBeNull();
     expect(shell).not.toBeNull();
-    expect(viewport).not.toBeNull();
-    expect(list).not.toBeNull();
-    expect(viewport!.parentElement).toBe(root);
-    expect(shell!.contains(viewport!)).toBe(false);
-    expect(viewport!.style.zIndex).toBe('9410');
+    expect(bubble).not.toBeNull();
+    expect(root!.contains(bubble!)).toBe(false);
+    expect(shell!.contains(bubble!)).toBe(false);
+    expect(bubble!.textContent).toContain('手动填表开始。');
+
+    mount.closeAcuV2App();
+    await nextTick();
+    expect(document.querySelector('.acu-notice-bubble')).not.toBeNull();
 
     mount.__resetAcuV2MountForTests();
   });

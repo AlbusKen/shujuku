@@ -3570,7 +3570,8 @@ export async function processUpdatesBatch_ACU(
 
         const chatHistory = getChatArray_ACU();
         const isAutoUpdateMode = mode && mode.startsWith('auto');
-        const isSilentMode = !!(isAutoUpdateMode && settings_ACU.toastMuteEnabled);
+        // 静默模式只决定通知是否显示（由 notice-hub 判定），不再关闭进度回调与任务登记。
+        const isSilentMode = false;
         // 此处刻意不接 replayEvidence：本循环每批 maxMessageIndex = 本批 saveTarget
         // 严格递增，evidence 复用要求 boundary 完全相同（v2-replay-session.ts），命中率恒为 0，
         // 而 replay 仍会为写回 evidence 多付一次全表深克隆 —— 纯亏。跨批复用属阶段 G2

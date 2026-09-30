@@ -228,10 +228,11 @@ export function useVectorIndexConfig() {
   }
 
   function notifyProgress(text: string): void {
-    if (progressToastId && toast.update(progressToastId, 'info', text, { durationMs: 0, muteable: false })) {
+    const progressOptions = { durationMs: 0, muteable: false, feature: '交火索引' };
+    if (progressToastId && toast.update(progressToastId, 'info', text, progressOptions)) {
       return;
     }
-    progressToastId = toast.info(text, { durationMs: 0, muteable: false });
+    progressToastId = toast.info(text, progressOptions);
   }
 
   function readFromConfig(): void {

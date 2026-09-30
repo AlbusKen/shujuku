@@ -1,5 +1,11 @@
 import { defineStore } from "pinia";
-import { settings_ACU } from "../../service/runtime/state-manager";
+import {
+  beginNoticeTask_ACU,
+  isNoticeHubSilent_ACU,
+  notify_ACU,
+  type NoticeAction_ACU,
+  type NoticeTaskHandle_ACU,
+} from "../../shared/notice-hub";
 import { acuClearTimeout, acuSetTimeout, type AcuTimerHandle } from "../bootstrap/host-env";
 
 export type ToastKind = "info" | "success" | "warning" | "error";
@@ -25,9 +31,13 @@ export interface ToastOptions {
   durationMs?: number;
   dismissible?: boolean;
   action?: ToastAction;
-  /** Set false for execution-chain or important results that bypass "静默提示框". */
+  /** 旧「静默提示框」豁免标记；静默模式改由 notice-hub 统一判定后不再生效，保留仅为兼容调用方。 */
   muteable?: boolean;
   maxItems?: number;
+  /** durationMs 为 0 的常驻提示会登记为进行中任务；feature 是气泡里显示的功能名。 */
+  feature?: string;
+  /** 常驻提示是否代表正在干活（驱动桌宠工作动画）；待处理类提示传 false。默认 true。 */
+  busy?: boolean;
 }
 
 const DEFAULT_DURATION_BY_KIND: Record<ToastKind, number> = {
@@ -38,27 +48,16 @@ const DEFAULT_DURATION_BY_KIND: Record<ToastKind, number> = {
 };
 
 const DEFAULT_MAX_ITEMS = 4;
+const DEFAULT_TASK_FEATURE = "任务";
 
 let nextToastId = 1;
 const dismissTimers = new Map<string, AcuTimerHandle>();
+/** durationMs 为 0 的提示对应的 notice-hub 任务句柄。 */
+const taskHandles = new Map<string, NoticeTaskHandle_ACU>();
 let nextClearVersion = 0;
 
 function makeToastId(): string {
   return `toast-${nextToastId++}`;
-}
-
-function isToastMuteEnabled(): boolean {
-  try {
-    return settings_ACU?.toastMuteEnabled === true;
-  } catch {
-    return false;
-  }
-}
-
-function shouldMuteToast(kind: ToastKind, options: ToastOptions): boolean {
-  if (!isToastMuteEnabled()) return false;
-  if (options.muteable === false || options.action) return false;
-  return kind === "info" || kind === "success";
 }
 
 function clearDismissTimer(id: string): void {
@@ -66,6 +65,13 @@ function clearDismissTimer(id: string): void {
   if (timer === undefined) return;
   acuClearTimeout(timer);
   dismissTimers.delete(id);
+}
+
+function endTask(id: string, outcome?: { kind: ToastKind; text: string }): void {
+  const handle = taskHandles.get(id);
+  if (!handle) return;
+  taskHandles.delete(id);
+  handle.end(outcome);
 }
 
 function resolveDuration(kind: ToastKind, options: ToastOptions): number {
@@ -82,10 +88,13 @@ export const useToastStore = defineStore("acu-v2-toast", {
   actions: {
     notify(kind: ToastKind, text: string, options: ToastOptions = {}): string | null {
       const normalizedText = String(text || "").trim();
-      if (!normalizedText || shouldMuteToast(kind, options)) return null;
+      if (!normalizedText) return null;
+
+      const durationMs = resolveDuration(kind, options);
+      // 静默模式丢弃一次性通知；常驻进度仍登记为任务（只是不显示），调用方可继续更新。
+      if (durationMs > 0 && isNoticeHubSilent_ACU()) return null;
 
       const id = makeToastId();
-      const durationMs = resolveDuration(kind, options);
       const item: ToastItem = {
         id,
         kind,
@@ -97,6 +106,7 @@ export const useToastStore = defineStore("acu-v2-toast", {
       };
 
       this.items.push(item);
+      this.forwardToHub(item, options);
       this.pruneToMax(options.maxItems ?? DEFAULT_MAX_ITEMS);
       if (this.items.some((current) => current.id === id) && durationMs > 0) {
         dismissTimers.set(id, acuSetTimeout(() => this.dismiss(id), durationMs));
@@ -117,6 +127,7 @@ export const useToastStore = defineStore("acu-v2-toast", {
     },
     dismiss(id: string): void {
       clearDismissTimer(id);
+      endTask(id);
       this.items = this.items.filter((item) => item.id !== id);
     },
     update(id: string, kind: ToastKind, text: string, options: ToastOptions = {}): boolean {
@@ -131,6 +142,7 @@ export const useToastStore = defineStore("acu-v2-toast", {
       item.durationMs = resolveDuration(kind, options);
       item.dismissible = options.dismissible !== false;
       item.action = options.action;
+      this.forwardToHub(item, options);
       if (item.durationMs > 0) {
         dismissTimers.set(id, acuSetTimeout(() => this.dismiss(id), item.durationMs));
       }
@@ -139,6 +151,7 @@ export const useToastStore = defineStore("acu-v2-toast", {
     clear(): void {
       for (const item of this.items) {
         clearDismissTimer(item.id);
+        endTask(item.id);
       }
       this.items = [];
       this.clearVersion = ++nextClearVersion;
@@ -149,8 +162,50 @@ export const useToastStore = defineStore("acu-v2-toast", {
       const removed = this.items.slice(0, this.items.length - max);
       for (const item of removed) {
         clearDismissTimer(item.id);
+        endTask(item.id);
       }
       this.items = this.items.slice(this.items.length - max);
+    },
+    /**
+     * 把 store 条目同步到 notice-hub：常驻条目（durationMs 0）对应一个任务，
+     * 一次性条目发布为消息；常驻条目更新为一次性文本时结束任务并带出结果消息。
+     */
+    forwardToHub(item: ToastItem, options: ToastOptions): void {
+      const id = item.id;
+      const action = item.action ? this.toHubAction(id, item.action) : null;
+      const existing = taskHandles.get(id);
+      if (item.durationMs === 0) {
+        const patch = {
+          kind: item.kind,
+          action,
+          busy: options.busy !== false,
+          dismissible: options.dismissible === true,
+        };
+        if (existing && !existing.ended) {
+          existing.update(item.text, patch);
+          return;
+        }
+        taskHandles.set(id, beginNoticeTask_ACU(options.feature || DEFAULT_TASK_FEATURE, {
+          detail: item.text,
+          ...patch,
+        }));
+        return;
+      }
+      if (existing) {
+        endTask(id, { kind: item.kind, text: item.text });
+        return;
+      }
+      notify_ACU(item.kind, item.text, action ? { actions: [action] } : {});
+    },
+    toHubAction(id: string, action: ToastAction): NoticeAction_ACU {
+      return {
+        label: action.label,
+        variant: action.variant,
+        run: async () => {
+          await action.onClick();
+          if (action.dismissOnClick !== false) this.dismiss(id);
+        },
+      };
     },
   },
 });
@@ -161,6 +216,10 @@ export function __resetToastStoreForTests(): void {
     acuClearTimeout(timer);
   }
   dismissTimers.clear();
+  for (const handle of taskHandles.values()) {
+    handle.end();
+  }
+  taskHandles.clear();
   nextToastId = 1;
   nextClearVersion = 0;
 }

@@ -5,12 +5,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 async function importTrigger() {
   vi.resetModules();
   const showCustomConfirm_ACU = vi.fn();
-  const showToastr_ACU = vi.fn(() => ({ find: vi.fn(() => ({ text: vi.fn() })) }));
+  const showToastr_ACU = vi.fn(() => null);
   const orchestrateManualUpdate_ACU = vi.fn();
   const processUpdatesBatch_ACU = vi.fn();
   const executeCardUpdateCore_ACU = vi.fn();
   const resetManualUpdateButton_ACU = vi.fn();
-  const clear = vi.fn();
 
   vi.doMock('../../../src/service/runtime/state-manager', () => ({
     settings_ACU: { manualUpdateContextDepth: 3, skipUpdateFloors: 0 },
@@ -31,12 +30,9 @@ async function importTrigger() {
   vi.doMock('../../../src/presentation/theme/custom-confirm', () => ({ showCustomConfirm_ACU }));
   vi.doMock('../../../src/shared/constants', () => ({ ACU_TOAST_CATEGORY_ACU: { MANUAL_TABLE: 'manual' } }));
   vi.doMock('../../../src/shared/utils', () => ({ logDebug_ACU: vi.fn(), logError_ACU: vi.fn(), logWarn_ACU: vi.fn() }));
-  vi.doMock('../../../src/shared/host-api', () => ({ toastr_API_ACU: { clear } }));
   vi.doMock('../../../src/presentation/state/ui-refs', () => ({ $statusMessageSpan_ACU: null }));
   vi.doMock('../../../src/shared/env', () => ({ topLevelWindow_ACU: { AutoCardUpdaterAPI: { _notifyTableFillStart: vi.fn(), _notifyTableUpdate: vi.fn() } } }));
-  vi.doMock('../../../src/shared/html-helpers', () => ({ renderStopButton_ACU: vi.fn(() => '<button>stop</button>') }));
   vi.doMock('../../../src/presentation/components/status-display', () => ({
-    bindTableFillStopButton_ACU: vi.fn(),
     resetManualUpdateButton_ACU,
     shouldShowVectorMemoryManualUpdateWarning_ACU: vi.fn(() => false),
     syncManualUpdateButtonAvailability_ACU: vi.fn(),
@@ -64,7 +60,6 @@ async function importTrigger() {
     orchestrateManualUpdate_ACU,
     processUpdatesBatch_ACU,
     executeCardUpdateCore_ACU,
-    clear,
     resetManualUpdateButton_ACU,
   };
 }

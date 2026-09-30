@@ -62,6 +62,17 @@ function createSettings() {
   } as any;
 }
 
+/** 通知不再有常驻列表视口（改由单气泡轮播），断言直接读 toast-store 的当前条目。 */
+let activeToastStore: any = null;
+
+function toastTexts(kind: string): string[] {
+  return (activeToastStore?.items || []).filter((item: any) => item.kind === kind).map((item: any) => item.text);
+}
+
+function toastText(kind: string): string {
+  return toastTexts(kind).join('\n');
+}
+
 async function mountDataMgmtPage(chatFileIdentifier = 'chat-data', initialMixedDecision: any = null, sqliteMode = false, pendingReload = false) {
   vi.resetModules();
   document.body.innerHTML = '';
@@ -285,6 +296,8 @@ async function mountDataMgmtPage(chatFileIdentifier = 'chat-data', initialMixedD
   }));
   const mount = await import('../../../src/presentation-v2/bootstrap/mount');
   await mount.openAcuV2App();
+  const { useToastStore } = await import('../../../src/presentation-v2/stores/toast-store');
+  activeToastStore = useToastStore(mount.getAcuV2PiniaForBridge()!);
   await new Promise(r => setTimeout(r, 0));
 
   return {
@@ -459,7 +472,7 @@ describe('DataMgmtPage', () => {
     expect(cleanupLegacyIsolation).toHaveBeenCalledOnce();
     expect(settings.dataIsolationCode).toBe('');
     expect(settings.dataIsolationEnabled).toBe(false);
-    expect(document.querySelector('.acu-v2-toast--success')?.textContent).toContain('已清理 2 个旧隔离标签');
+    expect(toastText('success')).toContain('已清理 2 个旧隔离标签');
 
     mount.__resetAcuV2MountForTests();
   });
@@ -545,7 +558,7 @@ describe('DataMgmtPage', () => {
     await new Promise(r => setTimeout(r, 0));
     await new Promise(r => setTimeout(r, 0));
 
-    expect(document.querySelector('.acu-v2-toast--error')?.textContent).toContain('当前聊天记录为空');
+    expect(toastText('error')).toContain('当前聊天记录为空');
     expect(document.body.textContent || '').not.toContain('已删除所有本地数据');
 
     mount.__resetAcuV2MountForTests();
@@ -566,7 +579,7 @@ describe('DataMgmtPage', () => {
     await new Promise(r => setTimeout(r, 0));
     await new Promise(r => setTimeout(r, 0));
 
-    expect(document.querySelector('.acu-v2-toast--warning')?.textContent).toContain('本地数据已全部硬清空');
+    expect(toastText('warning')).toContain('本地数据已全部硬清空');
     expect(document.body.textContent || '').toContain('世界书清理失败');
 
     mount.__resetAcuV2MountForTests();
@@ -713,7 +726,7 @@ describe('DataMgmtPage', () => {
     await new Promise(r => setTimeout(r, 0));
     await new Promise(r => setTimeout(r, 0));
 
-    expect(document.querySelector('.acu-v2-toast--warning')?.textContent).toContain('为避免误删已中止');
+    expect(toastText('warning')).toContain('为避免误删已中止');
     expect(document.body.textContent || '').not.toContain('已删除所有本地数据');
 
     mount.__resetAcuV2MountForTests();
@@ -925,7 +938,7 @@ describe('DataMgmtPage', () => {
     input!.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise(r => setTimeout(r, 0));
     await clickDialogButton('恢复 Checkpoint');
-    expect(document.querySelector('.acu-v2-toast--success')?.textContent).toContain('实际存储：native');
+    expect(toastText('success')).toContain('实际存储：native');
 
     restoreCheckpoint.mockResolvedValueOnce({
       success: true, restoredMessageIndex: 1, derivedRefreshWarnings: ['世界书刷新失败'], cleanupWarnings: ['向量 manifest 清理失败'],
@@ -936,11 +949,11 @@ describe('DataMgmtPage', () => {
     partialInput!.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise(r => setTimeout(r, 0));
     await clickDialogButton('恢复 Checkpoint');
-    expect(document.querySelector('.acu-v2-toast--warning')?.textContent).toContain('部分成功');
-    expect(document.querySelector('.acu-v2-toast--warning')?.textContent).toContain('运行时数据不一致');
-    expect(document.querySelector('.acu-v2-toast--warning')?.textContent).toContain('聊天模板快照不一致');
-    expect(document.querySelector('.acu-v2-toast--warning')?.textContent).toContain('派生刷新：世界书刷新失败');
-    expect(document.querySelector('.acu-v2-toast--warning')?.textContent).toContain('清理：向量 manifest 清理失败');
+    expect(toastText('warning')).toContain('部分成功');
+    expect(toastText('warning')).toContain('运行时数据不一致');
+    expect(toastText('warning')).toContain('聊天模板快照不一致');
+    expect(toastText('warning')).toContain('派生刷新：世界书刷新失败');
+    expect(toastText('warning')).toContain('清理：向量 manifest 清理失败');
 
     settings.storageMode = 'sqlite';
     restoreCheckpoint.mockResolvedValueOnce({
@@ -952,8 +965,8 @@ describe('DataMgmtPage', () => {
     fallbackInput!.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise(r => setTimeout(r, 0));
     await clickDialogButton('恢复 Checkpoint');
-    const warningToasts = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-toast--warning'));
-    expect(warningToasts.at(-1)?.textContent).toContain('目标设置为 SQLite，实际存储 fallback 为 native');
+    const warningToasts = toastTexts('warning');
+    expect(warningToasts.at(-1)).toContain('目标设置为 SQLite，实际存储 fallback 为 native');
 
     restoreCheckpoint.mockResolvedValueOnce({ success: true, restoredMessageIndex: 1 });
     const missingConditionInput = Array.from(document.querySelectorAll<HTMLInputElement>('.acu-v2-data-mgmt-page__checkpoint-section input[type="file"]'))[0];
@@ -961,8 +974,8 @@ describe('DataMgmtPage', () => {
     missingConditionInput!.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise(r => setTimeout(r, 0));
     await clickDialogButton('恢复 Checkpoint');
-    const finalWarningToasts = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-toast--warning'));
-    expect(finalWarningToasts.at(-1)?.textContent).toContain('恢复后置条件缺失');
+    const finalWarningToasts = toastTexts('warning');
+    expect(finalWarningToasts.at(-1)).toContain('恢复后置条件缺失');
 
     restoreCheckpoint.mockResolvedValueOnce({ success: false, error: 'strict failed' });
     const failedInput = Array.from(document.querySelectorAll<HTMLInputElement>('.acu-v2-data-mgmt-page__checkpoint-section input[type="file"]'))[0];
@@ -970,7 +983,7 @@ describe('DataMgmtPage', () => {
     failedInput!.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise(r => setTimeout(r, 0));
     await clickDialogButton('恢复 Checkpoint');
-    expect(document.querySelector('.acu-v2-toast--error')?.textContent).toContain('恢复 Checkpoint 失败：strict failed');
+    expect(toastText('error')).toContain('恢复 Checkpoint 失败：strict failed');
 
     mount.__resetAcuV2MountForTests();
   });
@@ -1124,7 +1137,7 @@ describe('DataMgmtPage', () => {
     await clickDialogButton('保留 V2');
 
     expect(commitMixedDecision).toHaveBeenCalledWith('decision-test', 'keep_v2');
-    expect(document.querySelector('.acu-v2-toast--warning')?.textContent).toContain('数据已保存，但后置校验失败：reload failed');
+    expect(toastText('warning')).toContain('数据已保存，但后置校验失败：reload failed');
     mount.__resetAcuV2MountForTests();
   });
 

@@ -220,10 +220,15 @@ export const dashboardCopy = {
       description:
         "默认开启。关闭后需手动更新表。仅推荐在测试或自由发挥时关闭。",
     },
-    toastMute: {
-      label: "静默提示框",
+    silentMode: {
+      label: "静默模式",
       description:
-        "默认关闭。开启后仅保留填表、规划等核心提示，其他浮窗通知不再弹出。",
+        "默认关闭。开启后不再弹出任何通知气泡（包括报错与进度），确认框和输入框照常出现；报错仍会写入日志。",
+    },
+    desktopPet: {
+      label: "桌面宠物",
+      description:
+        "默认开启。桌宠干活时会流口水，通知以气泡出现在它身边，可拖动摆放；关闭后气泡回到右上角。",
     },
     zeroTk: {
       label: "0TK 占用模式",

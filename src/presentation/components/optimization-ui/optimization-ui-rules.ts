@@ -6,7 +6,6 @@ import { activePlotEditorSettings_ACU, buildDefaultPlotPromptGroup_ACU, currentE
 import { showToastr_ACU } from '../../theme/toast';
 import { getChatArray_ACU, saveChatToHost_ACU, setChatMessages_ACU, emitMessageUpdated_ACU } from '../../../service/chat/chat-service';
 import { jQuery_API_ACU } from '../../dom-utils';
-import { toastr_API_ACU } from '../../../shared/host-api';
 import { $popupInstance_ACU } from '../../state/ui-refs';
 import { buildChatPlotScopeStateFromSettings_ACU, clearCurrentChatPlotScopeState_ACU, getCurrentChatPlotScopeState_ACU, sanitizePlotSettingsSnapshotForChat_ACU, setCurrentChatPlotScopeState_ACU } from '../../../service/template/chat-scope';
 import { escapeHtml_ACU } from '../../../shared/html-helpers';

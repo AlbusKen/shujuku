@@ -1,12 +1,12 @@
 /**
  * presentation/components/summary-vector-index-ui.ts — 交火模式纪要索引 UI 层封装
  *
- * 负责：交火发送前召回过程的进度 toast 与结果提示。
+ * 负责：交火发送前召回过程的进度任务与结果提示。
  * 不负责：关键词生成、向量召回、rerank、世界书覆盖等业务逻辑。
  */
-import { toastr_API_ACU } from '../../shared/host-api';
 import { ACU_TOAST_CATEGORY_ACU } from '../../shared/constants';
 import { logDebug_ACU } from '../../shared/utils';
+import { beginNoticeTask_ACU } from '../../shared/notice-hub';
 import { processSummaryVectorIndexBeforeGeneration_ACU, type SummaryVectorIndexRuntimeResult_ACU } from '../../service/vector/summary-vector-index-runtime';
 import { useToastStore } from '../../presentation-v2/stores/toast-store';
 import { rebuildCurrentSummaryVectorIndexNow_ACU } from '../../service/vector/summary-vector-index-rebuild-service';
@@ -22,11 +22,8 @@ const SUMMARY_VECTOR_REBUILD_REQUIRED_REASONS_ACU = new Set([
 ]);
 
 const SUMMARY_VECTOR_SCHEME_REBUILD_CONFIRM_ACU = '向量方案已优化，需要重建';
-
-function clearToastElement_ACU($toast: JQuery<HTMLElement> | null) {
-  try { if ($toast) toastr_API_ACU?.clear?.($toast); } catch (e) {}
-  try { if ($toast && $toast.closest) $toast.closest('.toast').remove(); } catch (e) {}
-}
+const SUMMARY_VECTOR_INDEX_FEATURE_ACU = '交火索引';
+const SUMMARY_VECTOR_RECALL_FEATURE_ACU = '交火召回';
 
 function shouldShowSummaryVectorResultToast_ACU(result: SummaryVectorIndexRuntimeResult_ACU): boolean {
   if (!result || result.skipped) return false;
@@ -55,16 +52,9 @@ export function shouldRebuildSummaryVectorIndexWithUI_ACU(reason: string | undef
   return SUMMARY_VECTOR_REBUILD_REQUIRED_REASONS_ACU.has(String(reason || ''));
 }
 
-/** 复用“立即构建交火纪要索引”的普通业务链路，并提供阻塞式进度提示。 */
+/** 复用“立即构建交火纪要索引”的普通业务链路，并登记进度任务。 */
 export async function rebuildCurrentSummaryVectorIndexWithUI_ACU(): Promise<SummaryVectorIndexArchiveResult_ACU> {
-  const $toast = showToastr_ACU('info', '正在重建交火索引快照...', {
-    timeOut: 0,
-    extendedTimeOut: 0,
-    tapToDismiss: false,
-    closeButton: false,
-    progressBar: false,
-    acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLANNING,
-  });
+  const task = beginNoticeTask_ACU(SUMMARY_VECTOR_INDEX_FEATURE_ACU, { detail: '正在重建交火索引快照...' });
   try {
     const result = await rebuildCurrentSummaryVectorIndexNow_ACU();
     if (result.success && !result.skipped) {
@@ -84,7 +74,7 @@ export async function rebuildCurrentSummaryVectorIndexWithUI_ACU(): Promise<Summ
     showToastr_ACU('error', `交火索引快照重建失败：${error?.message || '未知错误'}`);
     throw error;
   } finally {
-    clearToastElement_ACU($toast);
+    task.end();
   }
 }
 
@@ -110,9 +100,8 @@ export async function rebuildOutdatedSummaryVectorIndexInBackground_ACU(): Promi
 
   backgroundSourceTextRebuildInFlight_ACU = true;
   const rowCount = Array.isArray(state.rows) ? state.rows.filter(row => row?.status !== 'removed').length : 0;
-  const $toast = showToastr_ACU('info', `交火索引源文本已升级为"概览 + 纪要正文"，正在后台重建当前聊天的索引（${rowCount} 行）…`, {
-    timeOut: 8000,
-    acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLANNING,
+  const task = beginNoticeTask_ACU(SUMMARY_VECTOR_INDEX_FEATURE_ACU, {
+    detail: `交火索引源文本已升级为"概览 + 纪要正文"，正在后台重建当前聊天的索引（${rowCount} 行）…`,
   });
   try {
     const result = await rebuildCurrentSummaryVectorIndexNow_ACU();
@@ -129,32 +118,19 @@ export async function rebuildOutdatedSummaryVectorIndexInBackground_ACU(): Promi
     logDebug_ACU(`[交火模式纪要索引] 旧源文本索引后台重建失败，发送时将走自愈重建兜底：${error instanceof Error ? error.message : String(error)}`);
     return true;
   } finally {
-    clearToastElement_ACU($toast);
+    task.end();
     backgroundSourceTextRebuildInFlight_ACU = false;
   }
 }
 
 /**
- * 包装交火发送前处理，显示“正在召回记忆”进度提示。
+ * 包装交火发送前处理，登记“正在召回记忆”进度任务。
  */
 export async function processSummaryVectorIndexBeforeGenerationWithUI_ACU(
   options: { userInput?: string; source?: string } = {},
 ): Promise<SummaryVectorIndexRuntimeResult_ACU> {
-  const toastMsg = `
-      <div style="display: flex; align-items: center; justify-content: space-between;">
-          <span class="toastr-message" style="margin-right: 10px;">正在召回交火记忆并重排纪要索引，请稍后...</span>
-      </div>
-  `;
-
-  const $toast = showToastr_ACU('info', toastMsg, {
-    timeOut: 0,
-    extendedTimeOut: 0,
-    escapeHtml: false,
-    tapToDismiss: false,
-    closeButton: false,
-    progressBar: false,
-    toastClass: 'toast acu-toast acu-toast--info',
-    acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLANNING,
+  const task = beginNoticeTask_ACU(SUMMARY_VECTOR_RECALL_FEATURE_ACU, {
+    detail: '正在召回交火记忆并重排纪要索引，请稍后...',
   });
 
   let result: SummaryVectorIndexRuntimeResult_ACU;
@@ -173,7 +149,7 @@ export async function processSummaryVectorIndexBeforeGenerationWithUI_ACU(
       logDebug_ACU(`[交火模式纪要索引] UI 包装完成：success=${result?.success === true}, skipped=${result?.skipped === true}, reason=${result?.reason || 'none'}`);
     }
   } finally {
-    clearToastElement_ACU($toast);
+    task.end();
   }
 
   if (shouldRebuildSummaryVectorIndexWithUI_ACU(result.reason)) {

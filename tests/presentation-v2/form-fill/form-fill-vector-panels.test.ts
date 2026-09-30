@@ -575,7 +575,13 @@ describe('VectorIndexPage', () => {
     await nextTick();
 
     expect(alertSpy).not.toHaveBeenCalled();
-    expect(document.querySelector('.acu-v2-toast--warning')?.textContent || '')
+    // 通知改由单气泡轮播，断言直接读 toast-store 的当前条目。
+    const { useToastStore } = await import('../../../src/presentation-v2/stores/toast-store');
+    const warningText = useToastStore(mount.getAcuV2PiniaForBridge()!).items
+      .filter(item => item.kind === 'warning')
+      .map(item => item.text)
+      .join('\n');
+    expect(warningText)
       .toContain('固定写入必须是正整数，已重置为默认值 50。');
     expect(config.recentFixedInjectCount).toBe(50);
     expect(input!.value).toBe('50');

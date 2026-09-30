@@ -18,7 +18,7 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   NEW_MESSAGE_DEBOUNCE_DELAY_ACU: 500, abortAllActiveRequests_ACU: vi.fn(),
   allChatMessages_ACU: [{ is_user: true }, { is_user: false }], coreApisAreReady_ACU: true,
   currentJsonTableData_ACU: { sheet_0: {} }, getCurrentIsolationKey_ACU: vi.fn(() => ''),
-  lastTotalAiMessages_ACU: 1, settings_ACU: { autoUpdateEnabled: true, maxConcurrentGroups: 1, toastMuteEnabled: true },
+  lastTotalAiMessages_ACU: 1, settings_ACU: { autoUpdateEnabled: true, maxConcurrentGroups: 1, silentModeEnabled: true },
   _set_coreApisAreReady_ACU: vi.fn(), _set_lastTotalAiMessages_ACU: vi.fn(),
   _set_manualExtraHint_ACU: vi.fn(), _set_wasStoppedByUser_ACU: vi.fn(),
 }));

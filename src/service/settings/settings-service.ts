@@ -27,6 +27,7 @@ import { reconcileApiBindingForCurrentChat_ACU } from './api-preset-service';
 import { getCurrentChatTemplateScopeState_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, migrateLegacyTemplateScopeForCurrentChat_ACU, normalizeTemplateScopeIsolationKey_ACU, sanitizeChatSheetsObject_ACU, sanitizeTemplateSnapshotForChat_ACU } from '../template/chat-scope';
 import { safeJsonParse_ACU } from '../../shared/json-helpers';
 import { deepMerge_ACU, ensureSheetOrderNumbers_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
+import { notifyNoticeSettingsChanged_ACU } from '../../shared/notice-hub';
 import { normalizeEditablePromptSegments_ACU } from '../agent/agent-prompt-template';
 
 export type SaveSettingsResult_ACU = {
@@ -799,6 +800,8 @@ export   function loadSettings_ACU() {
           logDebug_ACU(`[API绑定] 已把当前聊天绑定投影到运行配置: ${bound.presetName}`);
       }
       logDebug_ACU('Settings loaded:', settings_ACU);
+      // 静默模式与桌宠开关/位置随设置加载而变，通知气泡与桌宠重读。
+      notifyNoticeSettingsChanged_ACU();
   }
 
   // loadSettingsAndRefreshUI_ACU 已搬到 presentation/components/settings-ui-helpers.ts
@@ -1140,7 +1143,10 @@ export   function buildDefaultSettings_ACU() {
           maxConcurrentGroups: 1,
           autoUpdateEnabled: true,
           standardizedTableFillEnabled: true, // [新增] 规范填表功能
-          toastMuteEnabled: false,
+          toastMuteEnabled: false, // 旧「静默提示框」，已由 silentModeEnabled 取代，只保留不再读取
+          silentModeEnabled: false, // [静默模式] 开启后不显示任何通知气泡（确认框/输入框不受影响）
+          desktopPetEnabled: true, // [桌宠] 通知气泡锚定桌宠；关闭后气泡回到原通知位置
+          // [桌宠] desktopPetPosition（按视口比例 {x,y}）刻意不放默认值：deepMerge 遇到 null 默认值会把已保存对象并成 {}。
           // [剧情推进] 设置
           plotSettings: JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU)),
           plotPresetBindings: {}, // [剧情推进] 按聊天记录绑定剧情推进预设

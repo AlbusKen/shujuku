@@ -3,12 +3,13 @@
  */
 import { DEFAULT_CHAR_CARD_PROMPT_ACU } from '../../../shared/defaults-json.js';
 import { AUTO_UPDATE_FLOOR_INCREASE_DELAY_ACU } from '../../../shared/defaults';
-import { bindTableFillStopButton_ACU } from '../../components/status-display';
+import { syncManualUpdateButtonAvailability_ACU } from '../../components/status-display';
+import { beginNoticeTask_ACU, type NoticeTaskHandle_ACU } from '../../../shared/notice-hub';
 import { updateCardUpdateStatusDisplay_ACU } from '../../components/update-status-display';
 import { getCharCardPromptFromUI_ACU, isAutoUpdatingCard_ACU, renderPromptSegments_ACU, wasStoppedByUser_ACU, _set_isAutoUpdatingCard_ACU } from '../../components/plot-editors';
 import { showToastr_ACU } from '../../theme/toast';
 import { ACU_TOAST_CATEGORY_ACU } from '../../../shared/constants';
-import { SillyTavern_API_ACU, TavernHelper_API_ACU, toastr_API_ACU, _set_SillyTavern_API_ACU, _set_TavernHelper_API_ACU, _set_jQuery_API_ACU, _set_toastr_API_ACU } from '../../../shared/host-api';
+import { SillyTavern_API_ACU, TavernHelper_API_ACU, _set_SillyTavern_API_ACU, _set_TavernHelper_API_ACU, _set_jQuery_API_ACU, _set_toastr_API_ACU } from '../../../shared/host-api';
 import { jQuery_API_ACU } from '../../dom-utils';
 import { getChatArray_ACU, saveChatToHost_ACU } from '../../../service/chat/chat-service';
 import { getConnectionManagerProfiles_ACU } from '../../../service/ai/ai-service';
@@ -63,17 +64,6 @@ function buildAutoUpdateProgressMessage_ACU(event: CardUpdateProgressEvent): str
     }
 }
 
-function updateAutoUpdateToastMessage_ACU(loadingToast: any, message: string) {
-    if (!loadingToast || !toastr_API_ACU) return;
-    loadingToast.find('.acu-toast-progress-message').text(message);
-}
-
-function clearAutoUpdateToast_ACU(loadingToast: any) {
-    if (loadingToast && toastr_API_ACU) {
-        toastr_API_ACU.clear(loadingToast);
-    }
-}
-
 async function refreshRuntimeDataAndNotifyAfterAutoUpdate_ACU(): Promise<void> {
     const data = getStorageProvider().getCurrentData() || currentJsonTableData_ACU;
     if (data) {
@@ -84,9 +74,9 @@ async function refreshRuntimeDataAndNotifyAfterAutoUpdate_ACU(): Promise<void> {
     } catch (_) {}
 }
 
-function handleAutoGroupedProgressEvent_ACU(event: CardUpdateProgressEvent, loadingToast?: any) {
+function handleAutoGroupedProgressEvent_ACU(event: CardUpdateProgressEvent, progressTask?: NoticeTaskHandle_ACU | null) {
     const message = buildAutoUpdateProgressMessage_ACU(event);
-    updateAutoUpdateToastMessage_ACU(loadingToast, message);
+    progressTask?.update(message);
 
     switch (event.phase) {
         case 'complete':
@@ -194,29 +184,24 @@ let pendingAutoUpdatePerformanceContext_ACU: { runId?: string; parentSpanId?: st
     }
 
     const autoGroupedAbortController = new AbortController();
-    let autoProgressToast: any = null;
-    if (useGroupedAutoUpdates && !settings_ACU.toastMuteEnabled) {
-        const stopButtonId = `acu-stop-auto-update-btn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const stopButtonHtml = renderStopButton_ACU(stopButtonId, '终止');
-        const initialMessage = '自动填表正在准备，请稍候...';
-        const toastMessage = `<div><span class="acu-toast-progress-message">${initialMessage}</span>${stopButtonHtml}</div>`;
-        autoProgressToast = showToastr_ACU('info', toastMessage, {
-            timeOut: 0,
-            extendedTimeOut: 0,
-            tapToDismiss: false,
-            acuToastCategory: ACU_TOAST_CATEGORY_ACU.MANUAL_TABLE,
-            onShown: function () {
-                if (typeof bindTableFillStopButton_ACU === 'function') {
-                    bindTableFillStopButton_ACU(stopButtonId, () => {
-                        _set_wasStoppedByUser_ACU(true);
-                        autoGroupedAbortController.abort();
-                        abortAllActiveRequests_ACU();
-                        _set_isAutoUpdatingCard_ACU(false);
-                        updateAutoUpdateToastMessage_ACU(autoProgressToast, '填表任务已终止，正在停止当前任务与后续批次...');
-                        showToastr_ACU('warning', '填表任务已由用户终止，当前任务与后续批次将立即停止。');
-                    });
-                }
-            }
+    // 进度任务不受静默模式影响：静默只决定气泡是否显示，任务登记照常驱动桌宠。
+    let autoProgressTask: NoticeTaskHandle_ACU | null = null;
+    if (useGroupedAutoUpdates) {
+        autoProgressTask = beginNoticeTask_ACU('自动填表', {
+            detail: '自动填表正在准备，请稍候...',
+            action: {
+                label: '终止',
+                variant: 'danger',
+                run: () => {
+                    syncManualUpdateButtonAvailability_ACU();
+                    _set_wasStoppedByUser_ACU(true);
+                    autoGroupedAbortController.abort();
+                    abortAllActiveRequests_ACU();
+                    _set_isAutoUpdatingCard_ACU(false);
+                    autoProgressTask?.update('填表任务已终止，正在停止当前任务与后续批次...', { action: null });
+                    showToastr_ACU('warning', '填表任务已由用户终止，当前任务与后续批次将立即停止。');
+                },
+            },
         });
     }
 
@@ -238,7 +223,7 @@ let pendingAutoUpdatePerformanceContext_ACU: { runId?: string; parentSpanId?: st
                                 abortController: autoGroupedAbortController,
                                 onProgress: event => {
                                     upstreamProgress?.(event);
-                                    handleAutoGroupedProgressEvent_ACU(event, autoProgressToast);
+                                    handleAutoGroupedProgressEvent_ACU(event, autoProgressTask);
                                 },
                             });
                         },
@@ -263,7 +248,7 @@ let pendingAutoUpdatePerformanceContext_ACU: { runId?: string; parentSpanId?: st
                         abortController: autoGroupedAbortController,
                         onProgress: event => {
                             upstreamProgress?.(event);
-                            handleAutoGroupedProgressEvent_ACU(event, autoProgressToast);
+                            handleAutoGroupedProgressEvent_ACU(event, autoProgressTask);
                         },
                     });
                 },
@@ -274,7 +259,7 @@ let pendingAutoUpdatePerformanceContext_ACU: { runId?: string; parentSpanId?: st
             { runId: performanceContext?.runId || performanceSpan.id, parentSpanId: performanceSpan.id },
         );
     } finally {
-        clearAutoUpdateToast_ACU(autoProgressToast);
+        autoProgressTask?.end();
     }
 
     // UI：根据返回值显示结果

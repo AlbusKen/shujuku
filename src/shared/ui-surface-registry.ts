@@ -1,4 +1,4 @@
-import { topLevelWindow_ACU } from './env';
+import { notify_ACU } from './notice-hub';
 
 export interface UiToastAction_ACU {
     label: string;
@@ -32,7 +32,7 @@ export function getUiSurface_ACU(): UiSurfaceHandlers_ACU | null {
 
 /**
  * 统一 toast 入口：优先走已注册 UI surface 的 showToast；未注册或抛错时
- * 回退宿主 toastr；两者都不可用时静默（调用方自行负责日志）。绝不抛错。
+ * 直接交给通知汇流口（浮动气泡）。绝不抛错。
  */
 export function showUiSurfaceToast_ACU(payload: UiToastPayload_ACU): void {
     try {
@@ -42,17 +42,14 @@ export function showUiSurfaceToast_ACU(payload: UiToastPayload_ACU): void {
             return;
         }
     } catch (_) {
-        // 已注册 handler 抛错时继续尝试宿主 toastr。
+        // 已注册 handler 抛错时继续走汇流口。
     }
     try {
-        const toastr = (topLevelWindow_ACU as any)?.toastr;
-        if (toastr && typeof toastr[payload.kind] === 'function') {
-            toastr[payload.kind](payload.text, undefined, payload.action
-                ? { onclick: () => { void payload.action!.onClick(); } }
-                : undefined);
-        }
+        notify_ACU(payload.kind, payload.text, payload.action
+            ? { actions: [{ label: payload.action.label, run: payload.action.onClick }] }
+            : {});
     } catch (_) {
-        // 宿主 toastr 不可用：静默，不让提示通道反过来破坏调用方流程。
+        // 提示通道不可用：静默，不让提示通道反过来破坏调用方流程。
     }
 }
 

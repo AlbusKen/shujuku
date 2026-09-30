@@ -157,6 +157,9 @@ vi.mock('../../../src/shared/defaults', () => ({
   VECTOR_MEMORY_RECALL_PARAMS_FORCE_OVERRIDE_VERSION_ACU: 'spv9.2-recall-params-force-override',
   VECTOR_MEMORY_RECALL_PARAM_KEYS_ACU: ['summaryIndexKeywordMinRows', 'topK', 'minScore', 'recallCandidateLimit', 'bm25CandidateLimit', 'recentFixedInjectCount', 'rerankBatchSize'],
   SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU: 'spv3.6.10-v2-writer-force-enable',
+  USER_PREFILL_PROFILE_FORCE_DEFAULT_VERSION_ACU: 'test-user-prefill-profile-force-default',
+  USER_PREFILL_VECTOR_FORCE_DEFAULT_VERSION_ACU: 'test-user-prefill-vector-force-default',
+
   defaultWorldbookConfig_ACU: {
     zeroTkOccupyMode: false,
     outlineEntryEnabled: true,

@@ -9,7 +9,6 @@ import { getChatArray_ACU, saveChatToHost_ACU, setChatMessages_ACU, emitMessageU
 // re-export 从 service 层搬迁的业务逻辑函数，保持外部调用方兼容
 export { replaceChatMessage_ACU, getOriginalContent_ACU } from '../../../service/chat/chat-service';
 import { jQuery_API_ACU } from '../../dom-utils';
-import { toastr_API_ACU } from '../../../shared/host-api';
 import { currentChatFileIdentifier_ACU, settings_ACU } from '../../../service/runtime/state-manager';
 import { $popupInstance_ACU } from '../../state/ui-refs';
 import { saveSettingsAndNotify_ACU } from '../settings-ui-helpers';

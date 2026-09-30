@@ -5428,6 +5428,276 @@ $CONTENT
     }
 
     /**
+     * shared/notice-hub.ts — 通知与进行中任务的统一汇流口
+     *
+     * 无框架依赖：V1 showToastr_ACU、V2 toast-store、ui-surface 与 service 层都把
+     * 用户可见提示汇到这里，由 presentation-v2 的浮动气泡与桌宠订阅快照后呈现。
+     *
+     * - 一次性消息（notice）进入先进先出队列，由气泡按时间片逐条取出播放；
+     * - 进行中任务（task）在结束前一直登记，气泡循环复播，桌宠据此切换工作状态；
+     * - 静默模式只丢弃消息、隐藏任务气泡，任务登记照常进行（桌宠仍会干活）。
+     *
+     * 订阅者异常被就地吞掉：提示通道绝不允许反过来破坏调用方业务流程。
+     */
+    /** 同文案去重窗口，沿用旧 toast 的 1.2 秒。 */
+    const DEDUPE_WINDOW_MS_ACU = 1200;
+    /** 待播消息上限；溢出丢最旧的并留日志。 */
+    const NOTICE_QUEUE_LIMIT_ACU = 20;
+    const MAX_TEXT_LENGTH_ACU = 600;
+    let config_ACU = {};
+    let notices_ACU = [];
+    let tasks_ACU = [];
+    let version_ACU = 0;
+    let settingsVersion_ACU = 0;
+    let nextId_ACU$1 = 1;
+    let snapshot_ACU = null;
+    const dedupe_ACU = new Map();
+    const listeners_ACU$2 = new Set();
+    function emit_ACU() {
+        version_ACU += 1;
+        snapshot_ACU = null;
+        for (const listener of [...listeners_ACU$2]) {
+            try {
+                listener();
+            }
+            catch { /* 订阅者异常不允许影响调用方。 */ }
+        }
+    }
+    function decodeEntities_ACU(text) {
+        return text
+            .replace(/&nbsp;/gi, ' ')
+            .replace(/&lt;/gi, '<')
+            .replace(/&gt;/gi, '>')
+            .replace(/&quot;/gi, '"')
+            .replace(/&#39;|&apos;/gi, "'")
+            .replace(/&amp;/gi, '&');
+    }
+    /**
+     * 把旧通知里的 HTML 片段压成纯文本：丢掉内嵌按钮（改由结构化 action 表达），
+     * 换行类标签转成换行，其余标签剥掉。
+     */
+    function toNoticePlainText_ACU(raw) {
+        const text = String(raw ?? '')
+            .replace(/<button\b[\s\S]*?<\/button>/gi, ' ')
+            .replace(/<(style|script)\b[\s\S]*?<\/\1>/gi, ' ')
+            .replace(/<br\s*\/?>/gi, '\n')
+            .replace(/<\/(div|p|li)>/gi, '\n')
+            .replace(/<[^>]*>/g, '');
+        const normalized = decodeEntities_ACU(text)
+            .split('\n')
+            .map(line => line.replace(/\s+/g, ' ').trim())
+            .filter(Boolean)
+            .join('\n');
+        return normalized.length > MAX_TEXT_LENGTH_ACU ? `${normalized.slice(0, MAX_TEXT_LENGTH_ACU)}…` : normalized;
+    }
+    function makeId_ACU(prefix) {
+        return `${prefix}-${nextId_ACU$1++}`;
+    }
+    function configureNoticeHub_ACU(next) {
+        config_ACU = { ...config_ACU, ...next };
+        notifyNoticeSettingsChanged_ACU();
+    }
+    function isNoticeHubSilent_ACU() {
+        try {
+            return config_ACU.isSilent?.() === true;
+        }
+        catch {
+            return false;
+        }
+    }
+    /** 设置被加载或修改后调用，让气泡与桌宠重读静默、桌宠开关与位置。 */
+    function notifyNoticeSettingsChanged_ACU() {
+        settingsVersion_ACU += 1;
+        emit_ACU();
+    }
+    /**
+     * 发布一条一次性消息。
+     * @returns 消息 id；空文本、静默或去重命中时返回 null
+     */
+    function notify_ACU$2(kind, rawText, options = {}) {
+        const text = toNoticePlainText_ACU(rawText);
+        if (!text)
+            return null;
+        const title = toNoticePlainText_ACU(options.title || '');
+        if (isNoticeHubSilent_ACU()) {
+            logDebug_ACU(`[静默模式] 已丢弃通知(${kind})：${title ? `${title} · ` : ''}${text}`);
+            return null;
+        }
+        const now = Date.now();
+        const key = `${kind}|${title}|${text.slice(0, 120)}`;
+        const last = dedupe_ACU.get(key) || 0;
+        if (now - last < DEDUPE_WINDOW_MS_ACU)
+            return null;
+        dedupe_ACU.set(key, now);
+        if (dedupe_ACU.size > 200) {
+            for (const [entryKey, at] of dedupe_ACU) {
+                if (now - at >= DEDUPE_WINDOW_MS_ACU)
+                    dedupe_ACU.delete(entryKey);
+            }
+        }
+        const notice = {
+            id: makeId_ACU('notice'),
+            kind,
+            title,
+            text,
+            createdAt: now,
+            actions: Array.isArray(options.actions) ? options.actions.filter(action => action && action.label) : [],
+        };
+        notices_ACU = [...notices_ACU, notice];
+        if (notices_ACU.length > NOTICE_QUEUE_LIMIT_ACU) {
+            const dropped = notices_ACU.slice(0, notices_ACU.length - NOTICE_QUEUE_LIMIT_ACU);
+            notices_ACU = notices_ACU.slice(-NOTICE_QUEUE_LIMIT_ACU);
+            for (const item of dropped)
+                logDebug_ACU(`[通知] 待播队列已满，丢弃最旧通知：${item.text}`);
+        }
+        emit_ACU();
+        return notice.id;
+    }
+    /** 气泡取出下一条待播消息（出队）。 */
+    function shiftNotice_ACU() {
+        if (!notices_ACU.length)
+            return null;
+        const [head, ...rest] = notices_ACU;
+        notices_ACU = rest;
+        emit_ACU();
+        return head;
+    }
+    /** 丢弃全部待播消息（静默模式开启时由气泡调用）。 */
+    function clearNotices_ACU() {
+        if (!notices_ACU.length)
+            return;
+        notices_ACU = [];
+        emit_ACU();
+    }
+    function patchTask_ACU(id, patch) {
+        let changed = false;
+        tasks_ACU = tasks_ACU.map(task => {
+            if (task.id !== id)
+                return task;
+            changed = true;
+            return { ...task, ...patch };
+        });
+        if (changed)
+            emit_ACU();
+    }
+    function removeTask_ACU(id) {
+        const before = tasks_ACU.length;
+        tasks_ACU = tasks_ACU.filter(task => task.id !== id);
+        if (tasks_ACU.length === before)
+            return false;
+        emit_ACU();
+        return true;
+    }
+    /**
+     * 登记一个进行中任务。静默模式下同样登记，只是不在气泡里显示。
+     * @param feature 功能名
+     */
+    function beginNoticeTask_ACU(feature, options = {}) {
+        const id = makeId_ACU('task');
+        let ended = false;
+        tasks_ACU = [...tasks_ACU, {
+                id,
+                feature: String(feature || '任务'),
+                detail: toNoticePlainText_ACU(options.detail || ''),
+                kind: options.kind || 'info',
+                startedAt: Date.now(),
+                busy: options.busy !== false,
+                dismissible: options.dismissible === true,
+                action: options.action || null,
+            }];
+        emit_ACU();
+        return {
+            id,
+            get ended() {
+                return ended || !tasks_ACU.some(task => task.id === id);
+            },
+            update(detail, patch = {}) {
+                if (ended)
+                    return;
+                const next = { detail: toNoticePlainText_ACU(detail) };
+                if (patch.kind)
+                    next.kind = patch.kind;
+                if (typeof patch.busy === 'boolean')
+                    next.busy = patch.busy;
+                if (typeof patch.dismissible === 'boolean')
+                    next.dismissible = patch.dismissible;
+                if (patch.action !== undefined)
+                    next.action = patch.action;
+                patchTask_ACU(id, next);
+            },
+            setAction(action) {
+                if (ended)
+                    return;
+                patchTask_ACU(id, { action });
+            },
+            end(outcome) {
+                if (ended)
+                    return;
+                ended = true;
+                removeTask_ACU(id);
+                if (outcome?.text)
+                    notify_ACU$2(outcome.kind, outcome.text, { title: outcome.title });
+            },
+        };
+    }
+    /** 用户在气泡上关闭一个可关闭的任务。 */
+    function dismissNoticeTask_ACU(id) {
+        const task = tasks_ACU.find(item => item.id === id);
+        if (!task || !task.dismissible)
+            return;
+        removeTask_ACU(id);
+    }
+    /** 执行任务上的操作按钮（停止、重试等）；异常只记日志。 */
+    async function runNoticeTaskAction_ACU(id) {
+        const task = tasks_ACU.find(item => item.id === id);
+        const action = task?.action;
+        if (!action)
+            return;
+        try {
+            await action.run();
+        }
+        catch (error) {
+            logDebug_ACU(`[通知] 任务「${task?.feature}」操作失败：${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+    /** 执行一次性消息上的操作按钮；异常只记日志。 */
+    async function runNoticeAction_ACU(action) {
+        try {
+            await action.run();
+        }
+        catch (error) {
+            logDebug_ACU(`[通知] 操作「${action.label}」失败：${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+    function getNoticeHubSnapshot_ACU() {
+        if (!snapshot_ACU) {
+            snapshot_ACU = {
+                version: version_ACU,
+                settingsVersion: settingsVersion_ACU,
+                notices: notices_ACU,
+                tasks: tasks_ACU,
+            };
+        }
+        return snapshot_ACU;
+    }
+    function subscribeNoticeHub_ACU(listener) {
+        listeners_ACU$2.add(listener);
+        return () => { listeners_ACU$2.delete(listener); };
+    }
+    /** 仅供测试：清空全部状态与配置。 */
+    function __resetNoticeHubForTests_ACU() {
+        config_ACU = {};
+        notices_ACU = [];
+        tasks_ACU = [];
+        version_ACU = 0;
+        settingsVersion_ACU = 0;
+        nextId_ACU$1 = 1;
+        snapshot_ACU = null;
+        dedupe_ACU.clear();
+        listeners_ACU$2.clear();
+    }
+
+    /**
      * service/worldbook/injection-engine-config.ts — 放置配置常量与默认值
      * 从 injection-engine.ts 拆出
      */
@@ -103331,17 +103601,6 @@ $CONTENT
     }
 
     /**
-     * product-brand — 产品品牌的单一来源。
-     * 版本号由 Rollup replace 在构建时从 package.json 注入（globalThis.__ACU_BUILD_VERSION__），
-     * 未经构建的运行环境（如单元测试）回退为 'dev'，避免在源码中维护第二份版本号。
-     */
-    const ACU_PRODUCT_NAME_ACU = '龙血玄黄·数据库';
-    const ACU_PRODUCT_SHORT_NAME_ACU = '奶·数据库';
-    /** 侧栏左上角、移动端抽屉与扩展菜单入口使用的展示名。 */
-    const ACU_PRODUCT_DISPLAY_NAME_ACU = `${ACU_PRODUCT_SHORT_NAME_ACU} I`;
-    const ACU_PRODUCT_VERSION_ACU = "1.0.0" || 'dev';
-
-    /**
      * service/worldbook/injection-engine-state.ts — 状态重置、目标获取、隔离前缀、条目清理、聊天历史清理
      * 从 injection-engine.ts 拆出
      */
@@ -103451,10 +103710,10 @@ $CONTENT
         const message = `注入目标世界书「${name}」不存在，本次注入已跳过。请在设置中重新选择。`;
         logWarn_ACU(`[Worldbook] ${message}`);
         try {
-            toastr_API_ACU?.warning?.(message, ACU_PRODUCT_NAME_ACU, { timeOut: 8000 });
+            notify_ACU$2('warning', message);
         }
         catch {
-            // toast 不可用时只保留日志
+            // 通知不可用时只保留日志
         }
     }
     async function resolveExistingLorebookName_ACU(requestedName) {
@@ -107469,6 +107728,8 @@ $CONTENT
         autoUpdateEnabled: true,
         standardizedTableFillEnabled: true,
         toastMuteEnabled: false,
+        silentModeEnabled: false,
+        desktopPetEnabled: true,
         plotSettings: JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU)),
         plotPresetBindings: {},
         currentTemplatePresetName: '',
@@ -107518,6 +107779,8 @@ $CONTENT
         },
         characterSettings: {},
     };
+    // 静默模式判定交给通知汇流口；读取 live binding，settings_ACU 被整体替换后仍生效。
+    configureNoticeHub_ACU({ isSilent: () => settings_ACU?.silentModeEnabled === true });
     /**
      * 当前聊天的隔离槽位键。
      *
@@ -108672,6 +108935,8 @@ $CONTENT
             logDebug_ACU(`[API绑定] 已把当前聊天绑定投影到运行配置: ${bound.presetName}`);
         }
         logDebug_ACU('Settings loaded:', settings_ACU);
+        // 静默模式与桌宠开关/位置随设置加载而变，通知气泡与桌宠重读。
+        notifyNoticeSettingsChanged_ACU();
     }
     // loadSettingsAndRefreshUI_ACU 已搬到 presentation/components/settings-ui-helpers.ts
     function loadTemplateFromStorage_ACU(codeOverride = null) {
@@ -109022,7 +109287,10 @@ $CONTENT
             maxConcurrentGroups: 1,
             autoUpdateEnabled: true,
             standardizedTableFillEnabled: true, // [新增] 规范填表功能
-            toastMuteEnabled: false,
+            toastMuteEnabled: false, // 旧「静默提示框」，已由 silentModeEnabled 取代，只保留不再读取
+            silentModeEnabled: false, // [静默模式] 开启后不显示任何通知气泡（确认框/输入框不受影响）
+            desktopPetEnabled: true, // [桌宠] 通知气泡锚定桌宠；关闭后气泡回到原通知位置
+            // [桌宠] desktopPetPosition（按视口比例 {x,y}）刻意不放默认值：deepMerge 遇到 null 默认值会把已保存对象并成 {}。
             // [剧情推进] 设置
             plotSettings: JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU)),
             plotPresetBindings: {}, // [剧情推进] 按聊天记录绑定剧情推进预设
@@ -113670,291 +113938,47 @@ $CONTENT
         return aliases;
     }
 
-    // toast.ts — presentation 层 toast 通知（含主题样式注入+消息过滤+去重）
-    // 核心逻辑原位于 service/runtime/toast-service.ts，已搬回 presentation 层
-    // toast 相关状态
+    /**
+     * product-brand — 产品品牌的单一来源。
+     * 版本号由 Rollup replace 在构建时从 package.json 注入（globalThis.__ACU_BUILD_VERSION__），
+     * 未经构建的运行环境（如单元测试）回退为 'dev'，避免在源码中维护第二份版本号。
+     */
+    const ACU_PRODUCT_NAME_ACU = '龙血玄黄·数据库';
+    const ACU_PRODUCT_SHORT_NAME_ACU = '奶·数据库';
+    /** 侧栏左上角、移动端抽屉与扩展菜单入口使用的展示名。 */
+    const ACU_PRODUCT_DISPLAY_NAME_ACU = `${ACU_PRODUCT_SHORT_NAME_ACU} I`;
+    const ACU_PRODUCT_VERSION_ACU = "1.0.0" || 'dev';
+
+    // toast.ts — presentation 层通知入口（V1 调用方兼容壳）
+    // 通知不再交给宿主 toastr：统一转发到 shared/notice-hub，由浮动气泡呈现。
+    // 进行中的进度提示请改用 beginNoticeTask_ACU；本函数只处理一次性消息。
     const ACU_TOAST_TITLE_ACU = ACU_PRODUCT_NAME_ACU;
-    const _acuToastDedup_ACU = new Map(); // key -> ts
-    let _acuToastStyleInjected_ACU = false;
-    function _set__acuToastStyleInjected_ACU(v) { _acuToastStyleInjected_ACU = v; }
-    function ensureAcuToastStylesInjected_ACU() {
-        if (_acuToastStyleInjected_ACU)
-            return;
-        try {
-            const doc = topLevelWindow_ACU?.document || document;
-            const styleId = `${SCRIPT_ID_PREFIX_ACU}-acu-toast-style`;
-            if (doc.getElementById(styleId)) {
-                _acuToastStyleInjected_ACU = true;
-                return;
-            }
-            const style = doc.createElement('style');
-            style.id = styleId;
-            style.textContent = `
-      /* ACU Toast Theme — 使用新主题系统的变量 */
-      #toast-container .acu-toast.toast {
-        --toast-accent: var(--acu-accent, #2563eb);
-        --toast-bg: var(--acu-bg-1, #ffffff);
-        --toast-text: var(--acu-text-1, #1a2332);
-        --toast-border: var(--acu-border, #e0e4ea);
-        --toast-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-      }
-      .acu-toast.toast {
-        font-family: var(--toast-font) !important;
-        font-weight: 500 !important;
-        font-size: 14px !important;
-        letter-spacing: 0.2px;
-        --acu-toast-accent: var(--toast-accent);
-        background: var(--toast-bg) !important;
-        color: var(--toast-text) !important;
-        border: 1px solid var(--toast-border) !important;
-        border-radius: 8px !important;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.08) !important;
-        padding: 12px 14px 12px 50px !important;
-        width: min(420px, calc(100vw - 24px)) !important;
-        opacity: 1 !important;
-        backdrop-filter: none;
-        -webkit-backdrop-filter: none;
-        position: relative !important;
-        overflow: hidden !important;
-        border-left: 3px solid var(--toast-accent) !important;
-      }
-      #toast-container .acu-toast.toast,
-      #toast-container .acu-toast.toast.toast-success,
-      #toast-container .acu-toast.toast.toast-info,
-      #toast-container .acu-toast.toast.toast-warning,
-      #toast-container .acu-toast.toast.toast-error {
-        background: var(--toast-bg) !important;
-        opacity: 1 !important;
-      }
-      #toast-container .acu-toast.toast .toast-title,
-      #toast-container .acu-toast.toast .toast-message {
-        background: transparent !important;
-      }
-      .acu-toast.toast,
-      .acu-toast.toast.toast-success,
-      .acu-toast.toast.toast-info,
-      .acu-toast.toast.toast-warning,
-      .acu-toast.toast.toast-error {
-        background: var(--toast-bg) !important;
-        background-repeat: repeat !important;
-        background-position: 0 0 !important;
-      }
-      #toast-container .acu-toast.toast::before {
-        content: "i" !important;
-        position: absolute;
-        left: 10px;
-        top: 50%;
-        transform: translateY(-50%);
-        width: 26px;
-        height: 26px;
-        border-radius: 2px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-weight: 400;
-        font-size: 14px;
-        font-family: var(--toast-font);
-        color: var(--toast-bg);
-        background: var(--toast-accent);
-        border: none;
-        box-shadow: none;
-      }
-      #toast-container .acu-toast.acu-toast--success::before { content: "达" !important; }
-      #toast-container .acu-toast.acu-toast--info::before { content: "知" !important; }
-      #toast-container .acu-toast.acu-toast--warning::before { content: "警" !important; }
-      #toast-container .acu-toast.acu-toast--error::before { content: "误" !important; }
-      .acu-toast.acu-toast--success { --acu-toast-accent: #5a8a5a; }
-      .acu-toast.acu-toast--info { --acu-toast-accent: #8a6b5e; }
-      .acu-toast.acu-toast--warning { --acu-toast-accent: #b08a5a; }
-      .acu-toast.acu-toast--error { --acu-toast-accent: #8a5a5a; }
-      .acu-toast.toast .toast-title {
-        font-weight: 650 !important;
-        letter-spacing: 0.4px;
-        margin-bottom: 4px !important;
-        opacity: 1;
-        text-shadow: none;
-        font-family: var(--toast-font);
-      }
-      .acu-toast.toast .toast-message {
-        line-height: 1.55;
-        color: var(--toast-text) !important;
-        text-shadow: none;
-        font-family: var(--toast-font);
-        font-weight: 500 !important;
-        font-size: 13px !important;
-      }
-      .acu-toast.toast .toast-close-button {
-        color: var(--toast-text) !important;
-        text-shadow: none !important;
-        opacity: 0.6 !important;
-        font-size: 18px;
-        right: 8px;
-        top: 8px;
-      }
-      .acu-toast.toast .toast-close-button:hover {
-        opacity: 1 !important;
-      }
-      .acu-toast.toast .toast-progress {
-        background: var(--toast-accent) !important;
-      }
-      .acu-toast.acu-toast--success { border-color: rgba(90,138,90,0.5) !important; }
-      .acu-toast.acu-toast--info { border-color: rgba(138,107,94,0.5) !important; }
-      .acu-toast.acu-toast--warning { border-color: rgba(176,138,90,0.5) !important; }
-      .acu-toast.acu-toast--error { border-color: rgba(138,90,90,0.5) !important; }
-      .acu-toast .qrf-abort-btn {
-        padding: 4px 12px !important;
-        border-radius: 1px !important;
-        border: 1px solid var(--toast-accent) !important;
-        background: transparent !important;
-        color: var(--toast-text) !important;
-        font-weight: 600 !important;
-        font-family: var(--toast-font) !important;
-        cursor: pointer !important;
-        font-size: 0.85em;
-        box-shadow: none !important;
-      }
-      .acu-toast .qrf-abort-btn:hover {
-        background: var(--toast-accent) !important;
-        color: var(--toast-bg) !important;
-      }
-      @media (max-width: 520px) {
-        #toast-container .acu-toast.toast {
-          width: min(320px, calc(100vw - 16px)) !important;
-          padding: 10px 12px 10px 42px !important;
-        }
-        #toast-container .acu-toast.toast::before {
-          left: 9px;
-          width: 22px;
-          height: 22px;
-          font-size: 12px;
-        }
-        .acu-toast.toast .toast-title {
-          font-size: 13px !important;
-          margin-bottom: 3px !important;
-        }
-        .acu-toast.toast .toast-message {
-          font-size: 12px !important;
-          line-height: 1.45 !important;
-        }
-        .acu-toast.toast .toast-close-button {
-          font-size: 16px;
-          right: 6px;
-          top: 6px;
-        }
-        .acu-toast .qrf-abort-btn {
-          padding: 3px 10px !important;
-          font-size: 12px !important;
-        }
-      }
-    `;
-            doc.head.appendChild(style);
-            _acuToastStyleInjected_ACU = true;
-        }
-        catch (e) {
-            _acuToastStyleInjected_ACU = true;
-        }
+    const NOTICE_KINDS_ACU = new Set(['info', 'success', 'warning', 'error']);
+    function normalizeNoticeKind_ACU(type) {
+        const kind = String(type || '').toLowerCase();
+        return NOTICE_KINDS_ACU.has(kind) ? kind : 'info';
     }
-    function _acuNormalizeToastArgs_ACU(type, message, titleOrOptions = {}, maybeOptions = {}) {
-        let title = ACU_TOAST_TITLE_ACU;
+    /**
+     * 发布一次性通知。
+     * 兼容旧签名 `(type, message, title?, options?)` 与 `(type, message, options?)`；
+     * 旧 toastr 选项（timeOut、onShown 等）不再生效，可传 `acuActions` 附带结构化按钮。
+     * @returns 恒为 null——不再有可供调用方操作的 toast 句柄
+     */
+    function showToastr_ACU(type, message, titleOrOptions = {}, maybeOptions = {}) {
+        let title = '';
         let options = {};
         if (typeof titleOrOptions === 'string') {
-            title = titleOrOptions || title;
+            title = titleOrOptions;
             options = (maybeOptions && typeof maybeOptions === 'object') ? maybeOptions : {};
         }
         else {
             options = (titleOrOptions && typeof titleOrOptions === 'object') ? titleOrOptions : {};
         }
-        const defaultTimeOut = type === 'success' ? 2500 :
-            type === 'info' ? 2500 :
-                type === 'warning' ? 3500 :
-                    type === 'error' ? 5000 : 2500;
-        const isNarrow = (() => {
-            try {
-                const w = (topLevelWindow_ACU && typeof topLevelWindow_ACU.innerWidth === 'number')
-                    ? topLevelWindow_ACU.innerWidth
-                    : window.innerWidth;
-                return w <= 520;
-            }
-            catch (e) {
-                return false;
-            }
-        })();
-        const finalOptions = {
-            escapeHtml: false,
-            closeButton: true,
-            progressBar: true,
-            newestOnTop: true,
-            timeOut: defaultTimeOut,
-            extendedTimeOut: 1000,
-            tapToDismiss: true,
-            toastClass: `toast acu-toast acu-toast--${type}`,
-            positionClass: isNarrow ? 'toast-top-center' : 'toast-top-right',
-            ...options,
-        };
-        return { title, finalOptions };
-    }
-    function _acuShouldShowToast_ACU(type, title, message, options = {}) {
-        try {
-            if (!settings_ACU?.toastMuteEnabled)
-                return true;
-            if (String(type).toLowerCase() === 'error')
-                return true;
-            const cat = options?.acuToastCategory || null;
-            const allow = new Set([
-                ACU_TOAST_CATEGORY_ACU.ERROR,
-                ACU_TOAST_CATEGORY_ACU.TABLE_OK,
-                ACU_TOAST_CATEGORY_ACU.PLAN_OK,
-                ACU_TOAST_CATEGORY_ACU.PLANNING,
-                ACU_TOAST_CATEGORY_ACU.MANUAL_TABLE,
-                ACU_TOAST_CATEGORY_ACU.MERGE_TABLE,
-                ACU_TOAST_CATEGORY_ACU.IMPORT,
-            ]);
-            if (cat && allow.has(cat))
-                return true;
-            try {
-                const raw = `${title || ''}\n${message || ''}`;
-                const text = String(raw)
-                    .replace(/<[^>]*>/g, '')
-                    .replace(/\s+/g, ' ')
-                    .toLowerCase();
-                const t = String(type).toLowerCase();
-                const has = (s) => text.includes(String(s).toLowerCase());
-                if (has('正在规划'))
-                    return true;
-                if (t === 'success' && (has('填表') || has('规划')))
-                    return true;
-                if (t === 'success' && (has('更新') && has('成功')))
-                    return true;
-                const allowKeywords = ['手动填表', '手动更新', '合并', '外部导入', '导入', '注入'];
-                if (allowKeywords.some(k => has(k)))
-                    return true;
-            }
-            catch (e) { }
-            return false;
-        }
-        catch (e) {
-            return true;
-        }
-    }
-    function showToastr_ACU(type, message, titleOrOptions = {}, maybeOptions = {}) {
-        if (!toastr_API_ACU) {
-            logDebug_ACU(`Toastr (${type}): ${message}`);
-            return null;
-        }
-        ensureAcuToastStylesInjected_ACU();
-        const { title, finalOptions } = _acuNormalizeToastArgs_ACU(type, message, titleOrOptions, maybeOptions);
-        if (!_acuShouldShowToast_ACU(type, title, message, finalOptions))
-            return null;
-        try {
-            const key = `${type}|${title}|${String(message).replace(/<[^>]*>/g, '').slice(0, 120)}`;
-            const now = Date.now();
-            const last = _acuToastDedup_ACU.get(key) || 0;
-            if (now - last < 1200)
-                return null;
-            _acuToastDedup_ACU.set(key, now);
-        }
-        catch (e) { }
-        return toastr_API_ACU[type]?.(message, title, finalOptions) ?? null;
+        if (title === ACU_TOAST_TITLE_ACU)
+            title = '';
+        const actions = Array.isArray(options.acuActions) ? options.acuActions : [];
+        notify_ACU$2(normalizeNoticeKind_ACU(type), message, { title, actions });
+        return null;
     }
 
     /**
@@ -116922,106 +116946,56 @@ $CONTENT
         }
     }
 
-    // --- [正文优化] 构建默认提示词组 ---
-    function showOptimizationOverlay_ACU(message = '正在优化正文...') {
-        // 移除已存在的遮罩
-        hideOptimizationOverlay_ACU();
-        const overlayHtml = `
-      <div id="acu-optimization-overlay" style="
-        position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background: rgba(0, 0, 0, 0.7);
-        backdrop-filter: blur(4px);
-        -webkit-backdrop-filter: blur(4px);
-        z-index: 99999;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        flex-direction: column;
-        gap: 16px;
-      ">
-        <div style="
-          width: 50px;
-          height: 50px;
-          border: 3px solid rgba(255, 255, 255, 0.3);
-          border-top-color: #7bb7ff;
-          border-radius: 50%;
-          animation: acu-spin 1s linear infinite;
-        "></div>
-        <div style="
-          color: rgba(255, 255, 255, 0.9);
-          font-size: 16px;
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-        ">${message}</div>
-        <button id="acu-optimization-overlay-cancel" style="
-          padding: 10px 18px;
-          border: 1px solid rgba(255, 193, 7, 0.7);
-          background: transparent;
-          color: #ffc107;
-          border-radius: 6px;
-          cursor: pointer;
-          font-size: 14px;
-        ">取消优化</button>
-      </div>
-      <style>
-        @keyframes acu-spin {
-          to { transform: rotate(360deg); }
+    /**
+     * 正文优化进度：原全屏遮罩与进度提示框合并为一个可取消的气泡任务。
+     * 同一时刻只有一个正文优化任务；重复调用只更新进度文本。
+     * @param {string} message - 提示消息
+     */
+    function showOptimizationTask_ACU(message) {
+        const current = optimizationProgressToast_ACU;
+        if (current && !current.ended) {
+            current.update(message);
+            return;
         }
-      </style>
-    `;
-        jQuery_API_ACU('body').append(overlayHtml);
-        jQuery_API_ACU('#acu-optimization-overlay-cancel').off('click.acu_opt_cancel').on('click.acu_opt_cancel', function (e) {
-            e.preventDefault();
-            e.stopPropagation();
-            const cancelResult = cancelContentOptimization_ACU('正文优化已取消。');
-            if (cancelResult.cancelled)
-                showToastr_ACU('warning', cancelResult.reason);
-            hideOptimizationOverlay_ACU();
-            hideOptimizationProgressToast_ACU();
+        const task = beginNoticeTask_ACU('正文优化', {
+            detail: message,
+            action: {
+                label: '取消优化',
+                variant: 'danger',
+                run: () => {
+                    const cancelResult = cancelContentOptimization_ACU('正文优化已取消。');
+                    if (cancelResult.cancelled)
+                        showToastr_ACU('warning', cancelResult.reason);
+                    hideOptimizationProgressToast_ACU();
+                },
+            },
         });
+        _set_optimizationProgressToast_ACU(task);
+    }
+    /** 无感替换模式的进度入口；遮罩已退役，与普通模式共用同一个气泡任务。 */
+    function showOptimizationOverlay_ACU(message = '正在优化正文...') {
+        showOptimizationTask_ACU(message);
     }
     /**
-     * 显示正文优化进度提示框（无遮罩模式）
+     * 显示正文优化进度任务（非无感替换模式）
      * @param {string} message - 提示消息
      */
     function showOptimizationProgressToast_ACU(message = '正在进行正文优化...') {
-        hideOptimizationProgressToast_ACU();
-        const stopButtonHtml = renderStopButton_ACU('acu-opt-stop-btn', '取消优化');
-        _set_optimizationProgressToast_ACU(showToastr_ACU('info', `<div>${message}${stopButtonHtml}</div>`, {
-            timeOut: 0,
-            extendedTimeOut: 0,
-            tapToDismiss: false,
-            onShown: function () {
-                jQuery_API_ACU('#acu-opt-stop-btn').off('click.acu_opt_cancel').on('click.acu_opt_cancel', function (e) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    const cancelResult2 = cancelContentOptimization_ACU('正文优化已取消。');
-                    if (cancelResult2.cancelled)
-                        showToastr_ACU('warning', cancelResult2.reason);
-                    hideOptimizationOverlay_ACU();
-                    hideOptimizationProgressToast_ACU();
-                    jQuery_API_ACU(this).closest('.toast').remove();
-                });
-            }
-        }));
+        showOptimizationTask_ACU(message);
     }
     /**
-     * 隐藏正文优化进度提示框
+     * 结束正文优化进度任务
      */
     function hideOptimizationProgressToast_ACU() {
-        if (optimizationProgressToast_ACU && toastr_API_ACU) {
-            toastr_API_ACU.clear(optimizationProgressToast_ACU);
-        }
+        const current = optimizationProgressToast_ACU;
+        current?.end?.();
         _set_optimizationProgressToast_ACU(null);
     }
     /**
-     * 隐藏无感替换遮罩
+     * 结束正文优化进度任务（原无感替换遮罩入口）
      */
     function hideOptimizationOverlay_ACU() {
-        jQuery_API_ACU('#acu-optimization-overlay').remove();
+        hideOptimizationProgressToast_ACU();
     }
     /**
      * 替换酒馆消息内容
@@ -117314,24 +117288,13 @@ $CONTENT
      */
     function showOptimizationDiff_ACU(messageIndex, result) {
         const message = `正文替换完成，共 ${result.optimizations.length} 处改进`;
-        const reoptButtonHtml = renderReoptButton_ACU();
-        const html = result.summary
-            ? `<div>${message}${reoptButtonHtml}<br><small style="opacity:0.7">${result.summary}</small></div>`
-            : `<div>${message}${reoptButtonHtml}</div>`;
-        const toast = showToastr_ACU('success', html, {
-            timeOut: 10000,
-            extendedTimeOut: 3000,
-            tapToDismiss: false,
-            onShown: function () {
-                jQuery_API_ACU('#acu-opt-toast-reoptimize').off('click.acu_reopt').on('click.acu_reopt', async function (e) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    jQuery_API_ACU(this).prop('disabled', true).text('优化中...');
-                    if (toast && toastr_API_ACU)
-                        toastr_API_ACU.clear(toast);
-                    await reoptimizeMessage_ACU(messageIndex);
-                });
-            }
+        showToastr_ACU('success', result.summary ? `${message}\n${result.summary}` : message, {
+            acuActions: [{
+                    label: '重新优化',
+                    run: async () => {
+                        await reoptimizeMessage_ACU(messageIndex);
+                    },
+                }],
         });
     }
     /**
@@ -119417,7 +119380,7 @@ $CONTENT
     }
     /**
      * 统一 toast 入口：优先走已注册 UI surface 的 showToast；未注册或抛错时
-     * 回退宿主 toastr；两者都不可用时静默（调用方自行负责日志）。绝不抛错。
+     * 直接交给通知汇流口（浮动气泡）。绝不抛错。
      */
     function showUiSurfaceToast_ACU(payload) {
         try {
@@ -119428,18 +119391,15 @@ $CONTENT
             }
         }
         catch (_) {
-            // 已注册 handler 抛错时继续尝试宿主 toastr。
+            // 已注册 handler 抛错时继续走汇流口。
         }
         try {
-            const toastr = topLevelWindow_ACU?.toastr;
-            if (toastr && typeof toastr[payload.kind] === 'function') {
-                toastr[payload.kind](payload.text, undefined, payload.action
-                    ? { onclick: () => { void payload.action.onClick(); } }
-                    : undefined);
-            }
+            notify_ACU$2(payload.kind, payload.text, payload.action
+                ? { actions: [{ label: payload.action.label, run: payload.action.onClick }] }
+                : {});
         }
         catch (_) {
-            // 宿主 toastr 不可用：静默，不让提示通道反过来破坏调用方流程。
+            // 提示通道不可用：静默，不让提示通道反过来破坏调用方流程。
         }
     }
     function resetUiSurfaceRegistryForTests_ACU() {
@@ -123353,7 +123313,8 @@ $CONTENT
             logDebug_ACU(`[${mode}] Processing ${indicesToUpdate.length} updates in ${batches.length} batches of size ${batchSize} (${isSummaryMode ? '总结表模式' : '标准表模式'}). Target Sheets: ${targetSheetKeys ? targetSheetKeys.length : 'All'}`);
             const chatHistory = getChatArray_ACU();
             const isAutoUpdateMode = mode && mode.startsWith('auto');
-            const isSilentMode = !!(isAutoUpdateMode && settings_ACU.toastMuteEnabled);
+            // 静默模式只决定通知是否显示（由 notice-hub 判定），不再关闭进度回调与任务登记。
+            const isSilentMode = false;
             // 此处刻意不接 replayEvidence：本循环每批 maxMessageIndex = 本批 saveTarget
             // 严格递增，evidence 复用要求 boundary 完全相同（v2-replay-session.ts），命中率恒为 0，
             // 而 replay 仍会为写回 evidence 多付一次全表深克隆 —— 纯亏。跨批复用属阶段 G2
@@ -125178,16 +125139,6 @@ $CONTENT
                 return `${batchLabel}：正在处理...`;
         }
     }
-    function updateAutoUpdateToastMessage_ACU(loadingToast, message) {
-        if (!loadingToast || !toastr_API_ACU)
-            return;
-        loadingToast.find('.acu-toast-progress-message').text(message);
-    }
-    function clearAutoUpdateToast_ACU(loadingToast) {
-        if (loadingToast && toastr_API_ACU) {
-            toastr_API_ACU.clear(loadingToast);
-        }
-    }
     async function refreshRuntimeDataAndNotifyAfterAutoUpdate_ACU() {
         const data = getStorageProvider().getCurrentData() || currentJsonTableData_ACU;
         if (data) {
@@ -125198,9 +125149,9 @@ $CONTENT
         }
         catch (_) { }
     }
-    function handleAutoGroupedProgressEvent_ACU(event, loadingToast) {
+    function handleAutoGroupedProgressEvent_ACU(event, progressTask) {
         const message = buildAutoUpdateProgressMessage_ACU(event);
-        updateAutoUpdateToastMessage_ACU(loadingToast, message);
+        progressTask?.update(message);
         switch (event.phase) {
             case 'complete':
                 if (typeof updateCardUpdateStatusDisplay_ACU === 'function')
@@ -125280,29 +125231,24 @@ $CONTENT
                 showToastr_ACU('info', `检测到 ${plan.tablesToUpdate.length} 个表格需要更新，将并发处理 ${totalGroups} 组。`);
             }
             const autoGroupedAbortController = new AbortController();
-            let autoProgressToast = null;
-            if (useGroupedAutoUpdates && !settings_ACU.toastMuteEnabled) {
-                const stopButtonId = `acu-stop-auto-update-btn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-                const stopButtonHtml = renderStopButton_ACU(stopButtonId, '终止');
-                const initialMessage = '自动填表正在准备，请稍候...';
-                const toastMessage = `<div><span class="acu-toast-progress-message">${initialMessage}</span>${stopButtonHtml}</div>`;
-                autoProgressToast = showToastr_ACU('info', toastMessage, {
-                    timeOut: 0,
-                    extendedTimeOut: 0,
-                    tapToDismiss: false,
-                    acuToastCategory: ACU_TOAST_CATEGORY_ACU.MANUAL_TABLE,
-                    onShown: function () {
-                        if (typeof bindTableFillStopButton_ACU === 'function') {
-                            bindTableFillStopButton_ACU(stopButtonId, () => {
-                                _set_wasStoppedByUser_ACU(true);
-                                autoGroupedAbortController.abort();
-                                abortAllActiveRequests_ACU();
-                                _set_isAutoUpdatingCard_ACU(false);
-                                updateAutoUpdateToastMessage_ACU(autoProgressToast, '填表任务已终止，正在停止当前任务与后续批次...');
-                                showToastr_ACU('warning', '填表任务已由用户终止，当前任务与后续批次将立即停止。');
-                            });
-                        }
-                    }
+            // 进度任务不受静默模式影响：静默只决定气泡是否显示，任务登记照常驱动桌宠。
+            let autoProgressTask = null;
+            if (useGroupedAutoUpdates) {
+                autoProgressTask = beginNoticeTask_ACU('自动填表', {
+                    detail: '自动填表正在准备，请稍候...',
+                    action: {
+                        label: '终止',
+                        variant: 'danger',
+                        run: () => {
+                            syncManualUpdateButtonAvailability_ACU();
+                            _set_wasStoppedByUser_ACU(true);
+                            autoGroupedAbortController.abort();
+                            abortAllActiveRequests_ACU();
+                            _set_isAutoUpdatingCard_ACU(false);
+                            autoProgressTask?.update('填表任务已终止，正在停止当前任务与后续批次...', { action: null });
+                            showToastr_ACU('warning', '填表任务已由用户终止，当前任务与后续批次将立即停止。');
+                        },
+                    },
                 });
             }
             // 调用 service 层执行更新计划，传入纯业务操作委托（不含 UI 操作）
@@ -125319,7 +125265,7 @@ $CONTENT
                                     abortController: autoGroupedAbortController,
                                     onProgress: event => {
                                         upstreamProgress?.(event);
-                                        handleAutoGroupedProgressEvent_ACU(event, autoProgressToast);
+                                        handleAutoGroupedProgressEvent_ACU(event, autoProgressTask);
                                     },
                                 });
                             },
@@ -125344,7 +125290,7 @@ $CONTENT
                             abortController: autoGroupedAbortController,
                             onProgress: event => {
                                 upstreamProgress?.(event);
-                                handleAutoGroupedProgressEvent_ACU(event, autoProgressToast);
+                                handleAutoGroupedProgressEvent_ACU(event, autoProgressTask);
                             },
                         });
                     },
@@ -125354,7 +125300,7 @@ $CONTENT
                 }, { runId: performanceContext?.runId || performanceSpan.id, parentSpanId: performanceSpan.id });
             }
             finally {
-                clearAutoUpdateToast_ACU(autoProgressToast);
+                autoProgressTask?.end();
             }
             // UI：根据返回值显示结果
             if (result.failedGroups > 0) {
@@ -128242,26 +128188,38 @@ $CONTENT
                 return `${batchLabel}：正在处理...`;
         }
     }
-    function updateLoadingToastMessage(loadingToast, message) {
-        if (!loadingToast || !toastr_API_ACU)
-            return;
-        loadingToast.find('.acu-toast-progress-message').text(message);
-    }
-    function clearLoadingToast(loadingToast) {
-        if (loadingToast && toastr_API_ACU) {
-            toastr_API_ACU.clear(loadingToast);
-        }
+    /**
+     * 登记一个可停止的填表进度任务。停止只作用于填表：标记用户终止、中断在途请求并复位填表状态。
+     */
+    function beginTableFillTask(feature, detail) {
+        const task = beginNoticeTask_ACU(feature, {
+            detail,
+            action: {
+                label: '终止',
+                variant: 'danger',
+                run: () => {
+                    syncManualUpdateButtonAvailability_ACU();
+                    _set_wasStoppedByUser_ACU(true);
+                    abortAllActiveRequests_ACU();
+                    _set_isAutoUpdatingCard_ACU(false);
+                    updateStatusText('填表任务已终止，正在停止当前任务与后续批次...', false);
+                    task.update('填表任务已终止，正在停止当前任务与后续批次...', { action: null });
+                    showToastr_ACU('warning', '填表任务已由用户终止，当前任务与后续批次将立即停止。');
+                },
+            },
+        });
+        return task;
     }
     /**
      * 根据 service 层返回的进度事件更新 UI
      * presentation 层自己决定"怎么展示"
      */
-    function handleProgressEvent(event, isSilentMode, loadingToast) {
+    function handleProgressEvent(event, isSilentMode, progressTask) {
         if (isSilentMode)
             return;
         const message = buildProgressMessage(event);
         updateStatusText(message, false);
-        updateLoadingToastMessage(loadingToast, message);
+        progressTask?.update(message);
         switch (event.phase) {
             case 'complete':
                 updateStatusDisplay();
@@ -128284,39 +128242,19 @@ $CONTENT
     async function proceedWithCardUpdate_ACU(messagesToUse, batchToastMessage = '正在填表，请稍候...', saveTargetIndex = -1, isImportMode = false, updateMode = 'standard', isSilentMode = false, targetSheetKeys = null, requestOptions = null, progressContext = null, showFinalErrorToast = true) {
         logDebug_ACU(`[更新流程] proceedWithCardUpdate: 消息数=${messagesToUse.length}, 模式=${updateMode}, 静默=${isSilentMode}, 目标表=${targetSheetKeys?.join(',') || '全部'}`);
         const localAbortController = new AbortController();
-        let loadingToast = null;
-        const stopButtonId = `acu-stop-update-btn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        let progressTask = null;
         // UI：通知填表开始
         if (!isSilentMode) {
             notifyTableFillStart();
-            // UI：显示加载 toast（带停止按钮）
-            const stopButtonHtml = renderStopButton_ACU(stopButtonId, '终止');
+            // UI：登记可停止的填表进度任务
             const initialMessage = progressContext
                 ? `${buildBatchProgressLabel(progressContext)}：${batchToastMessage || '正在填表，请稍候...'}`
                 : (batchToastMessage || '正在填表，请稍候...');
-            const toastMessage = `<div><span class="acu-toast-progress-message">${initialMessage}</span>${stopButtonHtml}</div>`;
-            loadingToast = showToastr_ACU('info', toastMessage, {
-                timeOut: 0,
-                extendedTimeOut: 0,
-                tapToDismiss: false,
-                acuToastCategory: ACU_TOAST_CATEGORY_ACU.MANUAL_TABLE,
-                onShown: function () {
-                    if (typeof bindTableFillStopButton_ACU === 'function') {
-                        bindTableFillStopButton_ACU(stopButtonId, () => {
-                            _set_wasStoppedByUser_ACU(true);
-                            abortAllActiveRequests_ACU();
-                            _set_isAutoUpdatingCard_ACU(false);
-                            updateStatusText('填表任务已终止，正在停止当前任务与后续批次...', false);
-                            updateLoadingToastMessage(loadingToast, '填表任务已终止，正在停止当前任务与后续批次...');
-                            showToastr_ACU('warning', '填表任务已由用户终止，当前任务与后续批次将立即停止。');
-                        });
-                    }
-                }
-            });
+            progressTask = beginTableFillTask(isImportMode ? '外部导入' : '填表', initialMessage);
         }
         try {
             // 调用 service 层，传入进度回调（只接收纯数据事件）
-            const result = await executeCardUpdateCore_ACU(messagesToUse, saveTargetIndex, isImportMode, updateMode, isSilentMode, targetSheetKeys, requestOptions, localAbortController, progressContext, (event) => handleProgressEvent(event, isSilentMode, loadingToast));
+            const result = await executeCardUpdateCore_ACU(messagesToUse, saveTargetIndex, isImportMode, updateMode, isSilentMode, targetSheetKeys, requestOptions, localAbortController, progressContext, (event) => handleProgressEvent(event, isSilentMode, progressTask));
             // UI：根据返回值决定后续 UI 操作
             if (result.success && !isSilentMode) {
                 setTimeout(() => {
@@ -128330,10 +128268,8 @@ $CONTENT
             return result;
         }
         finally {
-            // UI：清除加载 toast
-            if (loadingToast && toastr_API_ACU) {
-                toastr_API_ACU.clear(loadingToast);
-            }
+            // UI：结束进度任务
+            progressTask?.end();
         }
     }
     /**
@@ -128357,7 +128293,7 @@ $CONTENT
      */
     async function handleManualUpdate_ACU() {
         logDebug_ACU('[更新流程] handleManualUpdate: 开始手动更新');
-        let manualProgressToast = null;
+        let manualProgressTask = null;
         try {
             if (shouldShowVectorMemoryManualUpdateWarning_ACU()) {
                 syncManualUpdateButtonAvailability_ACU();
@@ -128392,26 +128328,7 @@ $CONTENT
             // 调用 service 层，启用事务式手动重填（兼容沿用 clearBeforeUpdate 参数名）
             _set_wasStoppedByUser_ACU(false);
             notifyTableFillStart();
-            const stopButtonId = `acu-stop-manual-update-btn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-            const stopButtonHtml = renderStopButton_ACU(stopButtonId, '终止');
-            manualProgressToast = showToastr_ACU('info', `<div><span class="acu-toast-progress-message">手动填表开始。</span>${stopButtonHtml}</div>`, {
-                timeOut: 0,
-                extendedTimeOut: 0,
-                tapToDismiss: false,
-                acuToastCategory: ACU_TOAST_CATEGORY_ACU.MANUAL_TABLE,
-                onShown: function () {
-                    if (typeof bindTableFillStopButton_ACU === 'function') {
-                        bindTableFillStopButton_ACU(stopButtonId, () => {
-                            _set_wasStoppedByUser_ACU(true);
-                            abortAllActiveRequests_ACU();
-                            _set_isAutoUpdatingCard_ACU(false);
-                            updateStatusText('填表任务已终止，正在停止当前任务与后续批次...', false);
-                            updateLoadingToastMessage(manualProgressToast, '填表任务已终止，正在停止当前任务与后续批次...');
-                            showToastr_ACU('warning', '填表任务已由用户终止，当前任务与后续批次将立即停止。');
-                        });
-                    }
-                },
-            });
+            manualProgressTask = beginTableFillTask('手动填表', '手动填表开始。');
             const result = await orchestrateManualUpdate_ACU(targetKeys, 
             // processBatch 回调保留给兼容路径；当前手动填表主路径由 service grouped helper 执行。
             async (indices, batchMode, batchOptions) => {
@@ -128424,13 +128341,13 @@ $CONTENT
             // [新增] 传入用户确认后的预清空选项
             {
                 clearBeforeUpdate: true,
-                onProgress: event => handleProgressEvent(event, false, manualProgressToast),
+                onProgress: event => handleProgressEvent(event, false, manualProgressTask),
                 // 注意：legacy 入口未传 executionSnapshot，不启用确认期 TOCTOU 快照防护
                 // （该防护由 V2 UI useManualUpdate 在确认前建立快照并传入 service）。
                 // 刻意保持兼容，不把可选参数改为必填。
             });
-            clearLoadingToast(manualProgressToast);
-            manualProgressToast = null;
+            manualProgressTask?.end();
+            manualProgressTask = null;
             // UI：根据返回值显示 toast
             if (result.success) {
                 showToastr_ACU(result.checkpointWarning ? 'warning' : 'success', result.checkpointWarning ? `手动更新完成，但 AI 楼层保留边界 checkpoint 建立失败：${result.checkpointWarning}` : '手动更新完成！');
@@ -128449,7 +128366,7 @@ $CONTENT
             }
         }
         finally {
-            clearLoadingToast(manualProgressToast);
+            manualProgressTask?.end();
             // UI：重置手动更新按钮
             if (typeof resetManualUpdateButton_ACU === 'function')
                 resetManualUpdateButton_ACU();
@@ -133029,7 +132946,7 @@ $CONTENT
 
     /**
      * presentation/components/plot-planning-ui.ts — 剧情规划 UI 层封装
-     * 负责：进度 toast、中止按钮事件绑定、根据 service 层结果弹 toast 通知
+     * 负责：规划进度任务（含中止）、根据 service 层结果弹通知
      */
     /**
      * 在 presentation 层调用 runOptimizationLogic_ACU 并处理所有 UI 反馈。
@@ -133040,66 +132957,33 @@ $CONTENT
      *   - { aborted: true, manual: true, restoreText: string }: 用户中止
      */
     async function runOptimizationLogicWithUI_ACU(userMessage, options = {}) {
-        // 1. 创建带中止按钮的进度 toast
-        const toastMsg = `
-      <div style="display: flex; align-items: center; justify-content: space-between;">
-          <span class="toastr-message" style="margin-right: 10px;">正在读取过往的记忆并分析，请稍后...</span>
-          <button class="qrf-abort-btn">终止</button>
-      </div>
-  `;
-        const $toast = showToastr_ACU('info', toastMsg, {
-            timeOut: 0,
-            extendedTimeOut: 0,
-            escapeHtml: false,
-            tapToDismiss: false,
-            closeButton: false,
-            progressBar: false,
-            toastClass: 'toast acu-toast acu-toast--info',
-            acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLANNING,
-        });
-        // 2. 绑定中止按钮事件
-        setTimeout(() => {
-            const $abortBtn = ($toast && $toast.find) ? $toast.find('.qrf-abort-btn') : null;
-            if ($abortBtn && $abortBtn.length > 0) {
-                $abortBtn.off('click').on('click', function (e) {
-                    e.preventDefault();
-                    e.stopPropagation();
+        // 1. 登记带中止按钮的规划任务；中止只作用于本次规划
+        const task = beginNoticeTask_ACU('剧情规划', {
+            detail: '正在读取过往的记忆并分析，请稍后...',
+            action: {
+                label: '终止',
+                variant: 'danger',
+                run: () => {
                     logDebug_ACU('[剧情推进] 用户点击了中止按钮。');
                     if (abortController_ACU) {
                         abortController_ACU.abort();
                         logDebug_ACU('[剧情推进] 用户手动中止了规划任务。');
                     }
-                    try {
-                        if ($toast)
-                            toastr_API_ACU.clear($toast);
-                    }
-                    catch (e) { }
-                    // DOM 级兜底：确保 toast 元素被彻底移除，防止 toastr.clear 不生效
-                    try {
-                        if ($toast && $toast.closest)
-                            $toast.closest('.toast').remove();
-                    }
-                    catch (e) { }
                     _set_isProcessing_Plot_ACU(false);
-                    setTimeout(() => {
-                        showToastr_ACU('info', '规划任务已被用户中止。', { acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLANNING });
-                    }, 500);
-                });
-                logDebug_ACU('[剧情推进] 中止按钮事件已绑定。');
-            }
-            else {
-                logWarn_ACU('[剧情推进] 未找到中止按钮元素。');
-            }
-        }, 200);
-        // 3. 调用 service 层纯函数
-        const result = await runOptimizationLogic_ACU(userMessage, options);
-        // 4. 清除进度 toast
+                    task.end({ kind: 'info', text: '规划任务已被用户中止。' });
+                },
+            },
+        });
+        // 2. 调用 service 层纯函数
+        let result;
         try {
-            if ($toast)
-                toastr_API_ACU.clear($toast);
+            result = await runOptimizationLogic_ACU(userMessage, options);
         }
-        catch (e) { }
-        // 5. 根据结果做 UI 通知
+        finally {
+            // 3. 结束进度任务
+            task.end();
+        }
+        // 4. 根据结果做 UI 通知
         if (!result) {
             return null;
         }
@@ -150111,26 +149995,14 @@ Expected function or array of functions, received type ${typeof value}.`
         error: 5000,
     };
     const DEFAULT_MAX_ITEMS = 4;
+    const DEFAULT_TASK_FEATURE = "任务";
     let nextToastId = 1;
     const dismissTimers = new Map();
+    /** durationMs 为 0 的提示对应的 notice-hub 任务句柄。 */
+    const taskHandles = new Map();
     let nextClearVersion = 0;
     function makeToastId() {
         return `toast-${nextToastId++}`;
-    }
-    function isToastMuteEnabled() {
-        try {
-            return settings_ACU?.toastMuteEnabled === true;
-        }
-        catch {
-            return false;
-        }
-    }
-    function shouldMuteToast(kind, options) {
-        if (!isToastMuteEnabled())
-            return false;
-        if (options.muteable === false || options.action)
-            return false;
-        return kind === "info" || kind === "success";
     }
     function clearDismissTimer(id) {
         const timer = dismissTimers.get(id);
@@ -150138,6 +150010,13 @@ Expected function or array of functions, received type ${typeof value}.`
             return;
         acuClearTimeout(timer);
         dismissTimers.delete(id);
+    }
+    function endTask(id, outcome) {
+        const handle = taskHandles.get(id);
+        if (!handle)
+            return;
+        taskHandles.delete(id);
+        handle.end(outcome);
     }
     function resolveDuration(kind, options) {
         return typeof options.durationMs === "number"
@@ -150152,10 +150031,13 @@ Expected function or array of functions, received type ${typeof value}.`
         actions: {
             notify(kind, text, options = {}) {
                 const normalizedText = String(text || "").trim();
-                if (!normalizedText || shouldMuteToast(kind, options))
+                if (!normalizedText)
+                    return null;
+                const durationMs = resolveDuration(kind, options);
+                // 静默模式丢弃一次性通知；常驻进度仍登记为任务（只是不显示），调用方可继续更新。
+                if (durationMs > 0 && isNoticeHubSilent_ACU())
                     return null;
                 const id = makeToastId();
-                const durationMs = resolveDuration(kind, options);
                 const item = {
                     id,
                     kind,
@@ -150166,6 +150048,7 @@ Expected function or array of functions, received type ${typeof value}.`
                     action: options.action,
                 };
                 this.items.push(item);
+                this.forwardToHub(item, options);
                 this.pruneToMax(options.maxItems ?? DEFAULT_MAX_ITEMS);
                 if (this.items.some((current) => current.id === id) && durationMs > 0) {
                     dismissTimers.set(id, acuSetTimeout(() => this.dismiss(id), durationMs));
@@ -150186,6 +150069,7 @@ Expected function or array of functions, received type ${typeof value}.`
             },
             dismiss(id) {
                 clearDismissTimer(id);
+                endTask(id);
                 this.items = this.items.filter((item) => item.id !== id);
             },
             update(id, kind, text, options = {}) {
@@ -150201,6 +150085,7 @@ Expected function or array of functions, received type ${typeof value}.`
                 item.durationMs = resolveDuration(kind, options);
                 item.dismissible = options.dismissible !== false;
                 item.action = options.action;
+                this.forwardToHub(item, options);
                 if (item.durationMs > 0) {
                     dismissTimers.set(id, acuSetTimeout(() => this.dismiss(id), item.durationMs));
                 }
@@ -150209,6 +150094,7 @@ Expected function or array of functions, received type ${typeof value}.`
             clear() {
                 for (const item of this.items) {
                     clearDismissTimer(item.id);
+                    endTask(item.id);
                 }
                 this.items = [];
                 this.clearVersion = ++nextClearVersion;
@@ -150220,8 +150106,51 @@ Expected function or array of functions, received type ${typeof value}.`
                 const removed = this.items.slice(0, this.items.length - max);
                 for (const item of removed) {
                     clearDismissTimer(item.id);
+                    endTask(item.id);
                 }
                 this.items = this.items.slice(this.items.length - max);
+            },
+            /**
+             * 把 store 条目同步到 notice-hub：常驻条目（durationMs 0）对应一个任务，
+             * 一次性条目发布为消息；常驻条目更新为一次性文本时结束任务并带出结果消息。
+             */
+            forwardToHub(item, options) {
+                const id = item.id;
+                const action = item.action ? this.toHubAction(id, item.action) : null;
+                const existing = taskHandles.get(id);
+                if (item.durationMs === 0) {
+                    const patch = {
+                        kind: item.kind,
+                        action,
+                        busy: options.busy !== false,
+                        dismissible: options.dismissible === true,
+                    };
+                    if (existing && !existing.ended) {
+                        existing.update(item.text, patch);
+                        return;
+                    }
+                    taskHandles.set(id, beginNoticeTask_ACU(options.feature || DEFAULT_TASK_FEATURE, {
+                        detail: item.text,
+                        ...patch,
+                    }));
+                    return;
+                }
+                if (existing) {
+                    endTask(id, { kind: item.kind, text: item.text });
+                    return;
+                }
+                notify_ACU$2(item.kind, item.text, action ? { actions: [action] } : {});
+            },
+            toHubAction(id, action) {
+                return {
+                    label: action.label,
+                    variant: action.variant,
+                    run: async () => {
+                        await action.onClick();
+                        if (action.dismissOnClick !== false)
+                            this.dismiss(id);
+                    },
+                };
             },
         },
     });
@@ -150231,6 +150160,10 @@ Expected function or array of functions, received type ${typeof value}.`
             acuClearTimeout(timer);
         }
         dismissTimers.clear();
+        for (const handle of taskHandles.values()) {
+            handle.end();
+        }
+        taskHandles.clear();
         nextToastId = 1;
         nextClearVersion = 0;
     }
@@ -150238,7 +150171,7 @@ Expected function or array of functions, received type ${typeof value}.`
     /**
      * presentation/components/summary-vector-index-ui.ts — 交火模式纪要索引 UI 层封装
      *
-     * 负责：交火发送前召回过程的进度 toast 与结果提示。
+     * 负责：交火发送前召回过程的进度任务与结果提示。
      * 不负责：关键词生成、向量召回、rerank、世界书覆盖等业务逻辑。
      */
     const SUMMARY_VECTOR_REBUILD_REQUIRED_REASONS_ACU = new Set([
@@ -150246,18 +150179,8 @@ Expected function or array of functions, received type ${typeof value}.`
         'embedding_identity_changed_rebuild_required',
     ]);
     const SUMMARY_VECTOR_SCHEME_REBUILD_CONFIRM_ACU = '向量方案已优化，需要重建';
-    function clearToastElement_ACU($toast) {
-        try {
-            if ($toast)
-                toastr_API_ACU?.clear?.($toast);
-        }
-        catch (e) { }
-        try {
-            if ($toast && $toast.closest)
-                $toast.closest('.toast').remove();
-        }
-        catch (e) { }
-    }
+    const SUMMARY_VECTOR_INDEX_FEATURE_ACU = '交火索引';
+    const SUMMARY_VECTOR_RECALL_FEATURE_ACU = '交火召回';
     function shouldShowSummaryVectorResultToast_ACU(result) {
         if (!result || result.skipped)
             return false;
@@ -150283,16 +150206,9 @@ Expected function or array of functions, received type ${typeof value}.`
     function shouldRebuildSummaryVectorIndexWithUI_ACU(reason) {
         return SUMMARY_VECTOR_REBUILD_REQUIRED_REASONS_ACU.has(String(reason || ''));
     }
-    /** 复用“立即构建交火纪要索引”的普通业务链路，并提供阻塞式进度提示。 */
+    /** 复用“立即构建交火纪要索引”的普通业务链路，并登记进度任务。 */
     async function rebuildCurrentSummaryVectorIndexWithUI_ACU() {
-        const $toast = showToastr_ACU('info', '正在重建交火索引快照...', {
-            timeOut: 0,
-            extendedTimeOut: 0,
-            tapToDismiss: false,
-            closeButton: false,
-            progressBar: false,
-            acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLANNING,
-        });
+        const task = beginNoticeTask_ACU(SUMMARY_VECTOR_INDEX_FEATURE_ACU, { detail: '正在重建交火索引快照...' });
         try {
             const result = await rebuildCurrentSummaryVectorIndexNow_ACU();
             if (result.success && !result.skipped) {
@@ -150310,7 +150226,7 @@ Expected function or array of functions, received type ${typeof value}.`
             throw error;
         }
         finally {
-            clearToastElement_ACU($toast);
+            task.end();
         }
     }
     let backgroundSourceTextRebuildInFlight_ACU = false;
@@ -150336,9 +150252,8 @@ Expected function or array of functions, received type ${typeof value}.`
         }
         backgroundSourceTextRebuildInFlight_ACU = true;
         const rowCount = Array.isArray(state.rows) ? state.rows.filter(row => row?.status !== 'removed').length : 0;
-        const $toast = showToastr_ACU('info', `交火索引源文本已升级为"概览 + 纪要正文"，正在后台重建当前聊天的索引（${rowCount} 行）…`, {
-            timeOut: 8000,
-            acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLANNING,
+        const task = beginNoticeTask_ACU(SUMMARY_VECTOR_INDEX_FEATURE_ACU, {
+            detail: `交火索引源文本已升级为"概览 + 纪要正文"，正在后台重建当前聊天的索引（${rowCount} 行）…`,
         });
         try {
             const result = await rebuildCurrentSummaryVectorIndexNow_ACU();
@@ -150358,28 +150273,16 @@ Expected function or array of functions, received type ${typeof value}.`
             return true;
         }
         finally {
-            clearToastElement_ACU($toast);
+            task.end();
             backgroundSourceTextRebuildInFlight_ACU = false;
         }
     }
     /**
-     * 包装交火发送前处理，显示“正在召回记忆”进度提示。
+     * 包装交火发送前处理，登记“正在召回记忆”进度任务。
      */
     async function processSummaryVectorIndexBeforeGenerationWithUI_ACU(options = {}) {
-        const toastMsg = `
-      <div style="display: flex; align-items: center; justify-content: space-between;">
-          <span class="toastr-message" style="margin-right: 10px;">正在召回交火记忆并重排纪要索引，请稍后...</span>
-      </div>
-  `;
-        const $toast = showToastr_ACU('info', toastMsg, {
-            timeOut: 0,
-            extendedTimeOut: 0,
-            escapeHtml: false,
-            tapToDismiss: false,
-            closeButton: false,
-            progressBar: false,
-            toastClass: 'toast acu-toast acu-toast--info',
-            acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLANNING,
+        const task = beginNoticeTask_ACU(SUMMARY_VECTOR_RECALL_FEATURE_ACU, {
+            detail: '正在召回交火记忆并重排纪要索引，请稍后...',
         });
         let result;
         try {
@@ -150395,7 +150298,7 @@ Expected function or array of functions, received type ${typeof value}.`
             }
         }
         finally {
-            clearToastElement_ACU($toast);
+            task.end();
         }
         if (shouldRebuildSummaryVectorIndexWithUI_ACU(result.reason)) {
             const confirmed = typeof window !== 'undefined' && typeof window.confirm === 'function'
@@ -186834,7 +186737,7 @@ ${rejectionText}` : delegationFeedback,
         },
     });
 
-    var _sfc_main$1i = /*@__PURE__*/ defineComponent({
+    var _sfc_main$1j = /*@__PURE__*/ defineComponent({
         __name: 'AcuBadge',
         props: {
             variant: { default: 'neutral' }
@@ -186860,7 +186763,7 @@ ${rejectionText}` : delegationFeedback,
       return target;
     };
 
-    function _sfc_render$1i(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$1j(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"span",
 		{ class: normalizeClass(["acu-badge", $setup.variantClass]) },
@@ -186869,9 +186772,9 @@ ${rejectionText}` : delegationFeedback,
 		/* CLASS */
 	);
     }
-    var AcuBadge = /*#__PURE__*/ _export_sfc(_sfc_main$1i, [["render", _sfc_render$1i], ["__scopeId", "data-v-925544ff"]]);
+    var AcuBadge = /*#__PURE__*/ _export_sfc(_sfc_main$1j, [["render", _sfc_render$1j], ["__scopeId", "data-v-925544ff"]]);
 
-    var _sfc_main$1h = /*@__PURE__*/ defineComponent({
+    var _sfc_main$1i = /*@__PURE__*/ defineComponent({
         __name: 'AcuButton',
         props: {
             variant: { default: 'default' },
@@ -186897,7 +186800,7 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-btn[data-v-0ac61136] {\r\n  font: inherit;\r\n  border: 0;\r\n  background: var(--acu-bg-2);\r\n  color: var(--acu-text-1);\r\n  border-radius: var(--acu-radius-sm);\r\n  cursor: pointer;\r\n  display: inline-flex; align-items: center; justify-content: center; gap: var(--acu-space-150, 6px);\r\n  min-width: 0; max-width: 100%; box-sizing: border-box; overflow-wrap: anywhere;\r\n  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;\n}\n.acu-btn--md[data-v-0ac61136] { min-height: var(--acu-button-height-md, 32px); padding: var(--acu-control-padding-y-md, 6px) var(--acu-control-padding-x-md, 9px); font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-btn--sm[data-v-0ac61136] { min-height: var(--acu-button-height-sm, 28px); padding: var(--acu-space-1, 4px) var(--acu-space-250, 10px); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-btn--block[data-v-0ac61136] { width: 100%; min-width: 0;\n}\n.acu-btn--icon-only[data-v-0ac61136] { min-width: var(--acu-button-height-md, 32px); padding: var(--acu-control-padding-y-md, 6px) var(--acu-space-2, 8px);\n}\n.acu-btn--icon-only.acu-btn--sm[data-v-0ac61136] { min-width: var(--acu-button-height-sm, 28px); padding: var(--acu-space-1, 4px) var(--acu-space-2, 8px);\n}\n.acu-btn[data-v-0ac61136]:hover:not(:disabled) {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2);\n}\n.acu-btn[data-v-0ac61136]:disabled { opacity: 0.5; cursor: not-allowed;\n}\n.acu-btn--primary[data-v-0ac61136] {\r\n  background: var(--acu-accent);\r\n  color: var(--acu-on-accent);\r\n  font-weight: 500;\r\n  box-shadow: none;\n}\n.acu-btn--primary[data-v-0ac61136]:hover:not(:disabled) {\r\n  background: var(--acu-accent-2);\r\n  box-shadow: none;\n}\n.acu-btn--danger[data-v-0ac61136] {\r\n  background: color-mix(in srgb, var(--acu-danger) 10%, transparent);\r\n  color: var(--acu-danger);\n}\n.acu-btn--danger[data-v-0ac61136]:hover:not(:disabled) {\r\n  background: color-mix(in srgb, var(--acu-danger) 18%, transparent);\n}\n.acu-btn[data-v-0ac61136]:focus-visible {\r\n  outline: none;\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-btn--loading[data-v-0ac61136] { cursor: wait;\n}\n.acu-btn__spinner[data-v-0ac61136] { font-size: 0.85em;\n}\r\n", "src/presentation-v2/components/_lib/AcuButton.vue#style-0-0ac61136");
     var AcuButton_vue_vue_type_style_index_0_scoped_0ac61136_lang = null;
 
-    const _hoisted_1$1c = [
+    const _hoisted_1$1d = [
 	"type",
 	"disabled",
 	"title"
@@ -186906,7 +186809,7 @@ ${rejectionText}` : delegationFeedback,
 	key: 0,
 	class: "fa-solid fa-spinner fa-spin acu-btn__spinner"
     };
-    function _sfc_render$1h(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$1i(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("button", {
 		type: $props.nativeType,
 		disabled: $props.disabled || $props.loading,
@@ -186921,11 +186824,11 @@ ${rejectionText}` : delegationFeedback,
 			}
 		]]),
 		onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("click", $event))
-	}, [$props.loading ? (openBlock(), createElementBlock("i", _hoisted_2$14)) : createCommentVNode("v-if", true), !$props.loading ? renderSlot(_ctx.$slots, "default", { key: 1 }, undefined, true) : renderSlot(_ctx.$slots, "loading-text", { key: 2 }, undefined, true)], 10, _hoisted_1$1c);
+	}, [$props.loading ? (openBlock(), createElementBlock("i", _hoisted_2$14)) : createCommentVNode("v-if", true), !$props.loading ? renderSlot(_ctx.$slots, "default", { key: 1 }, undefined, true) : renderSlot(_ctx.$slots, "loading-text", { key: 2 }, undefined, true)], 10, _hoisted_1$1d);
     }
-    var AcuButton = /*#__PURE__*/ _export_sfc(_sfc_main$1h, [["render", _sfc_render$1h], ["__scopeId", "data-v-0ac61136"]]);
+    var AcuButton = /*#__PURE__*/ _export_sfc(_sfc_main$1i, [["render", _sfc_render$1i], ["__scopeId", "data-v-0ac61136"]]);
 
-    var _sfc_main$1g = /*@__PURE__*/ defineComponent({
+    var _sfc_main$1h = /*@__PURE__*/ defineComponent({
         ...{ inheritAttrs: false },
         __name: 'AcuCheckbox',
         props: {
@@ -186952,12 +186855,12 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-checkbox[data-v-8a9ddddb] {\r\n  display: inline-flex; align-items: flex-start; gap: var(--acu-space-175, 7px);\r\n  padding: 0; border: 0; background: transparent;\r\n  font: inherit; font-size: var(--acu-font-size-body, 12px); color: var(--acu-text-2);\r\n  cursor: pointer; user-select: none;\r\n  line-height: 1.5; text-align: left;\n}\n.acu-checkbox--disabled[data-v-8a9ddddb] { opacity: 0.5; cursor: not-allowed;\n}\n.acu-checkbox__box[data-v-8a9ddddb] {\r\n  flex-shrink: 0;\r\n  width: var(--acu-checkbox-size, 16px); height: var(--acu-checkbox-size, 16px); margin-top: var(--acu-space-025, 1px);\r\n  display: flex; align-items: center; justify-content: center;\r\n  border: 0;\r\n  border-radius: var(--acu-space-075, 3px);\r\n  background: var(--acu-bg-2);\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-checkbox--checked .acu-checkbox__box[data-v-8a9ddddb] {\r\n  background: var(--acu-accent);\n}\n.acu-checkbox__icon[data-v-8a9ddddb] {\r\n  display: block;\r\n  width: var(--acu-checkbox-icon-size, 12px); height: var(--acu-checkbox-icon-size, 12px);\r\n  color: #fff;\r\n  fill: none;\r\n  stroke: currentColor;\r\n  stroke-width: 2.15;\r\n  stroke-linecap: round;\r\n  stroke-linejoin: round;\r\n  opacity: 0;\r\n  transform: scale(0.82);\r\n  transition: opacity 0.15s ease, transform 0.15s ease;\n}\n.acu-checkbox--checked .acu-checkbox__icon[data-v-8a9ddddb] {\r\n  opacity: 1;\r\n  transform: scale(1);\n}\n.acu-checkbox__label[data-v-8a9ddddb] { min-width: 0;\n}\n.acu-checkbox:hover:not(:disabled) .acu-checkbox__box[data-v-8a9ddddb] {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2);\n}\n.acu-checkbox--checked:hover:not(:disabled) .acu-checkbox__box[data-v-8a9ddddb] {\r\n  background: var(--acu-accent-2);\n}\n.acu-checkbox[data-v-8a9ddddb]:focus-visible {\r\n  outline: none;\n}\n.acu-checkbox:focus-visible .acu-checkbox__box[data-v-8a9ddddb] {\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\r\n", "src/presentation-v2/components/_lib/AcuCheckbox.vue#style-0-8a9ddddb");
     var AcuCheckbox_vue_vue_type_style_index_0_scoped_8a9ddddb_lang = null;
 
-    const _hoisted_1$1b = ["aria-checked", "disabled"];
+    const _hoisted_1$1c = ["aria-checked", "disabled"];
     const _hoisted_2$13 = {
 	key: 0,
 	class: "acu-checkbox__label"
     };
-    function _sfc_render$1g(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$1h(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("button", mergeProps({
 		type: "button",
 		class: ["acu-checkbox", {
@@ -186986,11 +186889,11 @@ ${rejectionText}` : delegationFeedback,
 		toDisplayString($props.label),
 		1
 		/* TEXT */
-	)) : renderSlot(_ctx.$slots, "default", { key: 1 }, undefined, true)], 16, _hoisted_1$1b);
+	)) : renderSlot(_ctx.$slots, "default", { key: 1 }, undefined, true)], 16, _hoisted_1$1c);
     }
-    var AcuCheckbox = /*#__PURE__*/ _export_sfc(_sfc_main$1g, [["render", _sfc_render$1g], ["__scopeId", "data-v-8a9ddddb"]]);
+    var AcuCheckbox = /*#__PURE__*/ _export_sfc(_sfc_main$1h, [["render", _sfc_render$1h], ["__scopeId", "data-v-8a9ddddb"]]);
 
-    var _sfc_main$1f = /*@__PURE__*/ defineComponent({
+    var _sfc_main$1g = /*@__PURE__*/ defineComponent({
         __name: 'AcuInput',
         props: {
             modelValue: {},
@@ -187044,7 +186947,7 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-input-shell[data-v-41a82ceb] {\r\n  position: relative;\r\n  display: block;\r\n  width: 100%;\r\n  min-width: 0;\n}\n.acu-input[data-v-41a82ceb] {\r\n  width: 100%; box-sizing: border-box;\r\n  border: 0 !important;\r\n  border-radius: var(--acu-radius-sm) !important;\r\n  background: var(--acu-bg-2) !important;\r\n  color: var(--acu-text-1) !important;\r\n  font: inherit !important;\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-input--md[data-v-41a82ceb] { min-height: var(--acu-control-height-md, 32px); padding: var(--acu-control-padding-y-md, 6px) var(--acu-control-padding-x-md, 9px) !important; font-size: var(--acu-font-size-body, 12px) !important;\n}\n.acu-input--sm[data-v-41a82ceb] { min-height: var(--acu-control-height-sm, 26px); padding: var(--acu-control-padding-y-sm, 3px) var(--acu-control-padding-x-sm, 7px) !important; font-size: var(--acu-font-size-caption, 11px) !important;\n}\n.acu-input-shell--number .acu-input--md[data-v-41a82ceb] { padding-right: calc(var(--acu-control-padding-x-md, 9px) + var(--acu-space-5, 20px)) !important;\n}\n.acu-input-shell--number .acu-input--sm[data-v-41a82ceb] { padding-right: calc(var(--acu-control-padding-x-sm, 7px) + var(--acu-space-450, 18px)) !important;\n}\n.acu-input[data-v-41a82ceb]:hover:not(:disabled) {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2) !important;\n}\n.acu-input[data-v-41a82ceb]:focus {\r\n  outline: none;\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow) !important;\n}\n.acu-input[data-v-41a82ceb]:disabled,\r\n.acu-input--disabled[data-v-41a82ceb] { opacity: 0.5; cursor: not-allowed;\n}\n.acu-input[type=\"number\"][data-v-41a82ceb] {\r\n  -moz-appearance: textfield;\r\n  font-variant-numeric: tabular-nums;\n}\n.acu-input[type=\"number\"][data-v-41a82ceb]::-webkit-inner-spin-button,\r\n.acu-input[type=\"number\"][data-v-41a82ceb]::-webkit-outer-spin-button {\r\n  -webkit-appearance: none; margin: 0;\n}\n.acu-input__number-indicator[data-v-41a82ceb] {\r\n  position: absolute;\r\n  top: 50%;\r\n  right: var(--acu-control-padding-x-md, 9px);\r\n  width: var(--acu-icon-inline-sm, 10px);\r\n  display: flex;\r\n  flex-direction: column;\r\n  align-items: center;\r\n  justify-content: center;\r\n  gap: var(--acu-space-050, 2px);\r\n  color: var(--acu-text-3);\r\n  pointer-events: none;\r\n  transform: translateY(-50%);\r\n  opacity: 0.8;\n}\n.acu-input-shell--sm .acu-input__number-indicator[data-v-41a82ceb] {\r\n  right: var(--acu-control-padding-x-sm, 7px);\r\n  width: var(--acu-space-2, 8px);\r\n  gap: var(--acu-space-025, 1px);\n}\n.acu-input__number-caret[data-v-41a82ceb] {\r\n  width: 0;\r\n  height: 0;\r\n  border-left: var(--acu-space-1, 4px) solid transparent;\r\n  border-right: var(--acu-space-1, 4px) solid transparent;\n}\n.acu-input__number-caret--up[data-v-41a82ceb] { border-bottom: var(--acu-space-1, 4px) solid currentColor;\n}\n.acu-input__number-caret--down[data-v-41a82ceb] { border-top: var(--acu-space-1, 4px) solid currentColor;\n}\n.acu-input-shell--sm .acu-input__number-caret[data-v-41a82ceb] {\r\n  border-left-width: var(--acu-space-075, 3px);\r\n  border-right-width: var(--acu-space-075, 3px);\n}\n.acu-input-shell--sm .acu-input__number-caret--up[data-v-41a82ceb] { border-bottom-width: var(--acu-space-075, 3px);\n}\n.acu-input-shell--sm .acu-input__number-caret--down[data-v-41a82ceb] { border-top-width: var(--acu-space-075, 3px);\n}\r\n", "src/presentation-v2/components/_lib/AcuInput.vue#style-0-41a82ceb");
     var AcuInput_vue_vue_type_style_index_0_scoped_41a82ceb_lang = null;
 
-    const _hoisted_1$1a = [
+    const _hoisted_1$1b = [
 	"type",
 	"value",
 	"placeholder",
@@ -187059,7 +186962,7 @@ ${rejectionText}` : delegationFeedback,
 	class: "acu-input__number-indicator",
 	"aria-hidden": "true"
     };
-    function _sfc_render$1f(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$1g(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"span",
 		{ class: normalizeClass(["acu-input-shell", [
@@ -187080,7 +186983,7 @@ ${rejectionText}` : delegationFeedback,
 			onInput: $setup.onInput,
 			onChange: $setup.onChangeEvent,
 			onWheel: $setup.onWheel
-		}, null, 42, _hoisted_1$1a), $props.type === "number" ? (openBlock(), createElementBlock("span", _hoisted_2$12, [..._cache[0] || (_cache[0] = [createBaseVNode(
+		}, null, 42, _hoisted_1$1b), $props.type === "number" ? (openBlock(), createElementBlock("span", _hoisted_2$12, [..._cache[0] || (_cache[0] = [createBaseVNode(
 			"span",
 			{ class: "acu-input__number-caret acu-input__number-caret--up" },
 			null,
@@ -187097,11 +187000,11 @@ ${rejectionText}` : delegationFeedback,
 		/* CLASS */
 	);
     }
-    var AcuInput = /*#__PURE__*/ _export_sfc(_sfc_main$1f, [["render", _sfc_render$1f], ["__scopeId", "data-v-41a82ceb"]]);
+    var AcuInput = /*#__PURE__*/ _export_sfc(_sfc_main$1g, [["render", _sfc_render$1g], ["__scopeId", "data-v-41a82ceb"]]);
 
     const DIALOG_LEAVE_MS = 160;
     const titleId = "acu-dialog-title";
-    var _sfc_main$1e = /*@__PURE__*/ defineComponent({
+    var _sfc_main$1f = /*@__PURE__*/ defineComponent({
         __name: 'AcuDialogHost',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -187144,13 +187047,13 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-dialog-layer[data-v-ce5fba79] {\r\n  position: fixed;\r\n  inset: 0;\r\n  z-index: 9600;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  width: 100vw;\r\n  width: 100dvw;\r\n  height: 100vh;\r\n  height: 100dvh;\r\n  padding:\r\n    calc(var(--acu-dialog-edge-gap, 18px) + var(--acu-safe-top, 0px))\r\n    calc(var(--acu-dialog-edge-gap, 18px) + var(--acu-safe-right, 0px))\r\n    calc(var(--acu-dialog-edge-gap, 18px) + var(--acu-safe-bottom, 0px))\r\n    calc(var(--acu-dialog-edge-gap, 18px) + var(--acu-safe-left, 0px));\r\n  background: rgba(0, 0, 0, 0.52);\r\n  pointer-events: auto;\r\n  animation: acu-dialog-layer-in-ce5fba79 0.16s ease-out both;\n}\n.acu-dialog-layer.is-closing[data-v-ce5fba79] {\r\n  pointer-events: none;\r\n  animation: acu-dialog-layer-out-ce5fba79 0.16s ease-in both;\n}\n.acu-dialog[data-v-ce5fba79] {\r\n  width: min(var(--acu-dialog-width, 440px), 100%);\r\n  max-height: min(var(--acu-dialog-max-height, 560px), calc(100vh - var(--acu-dialog-edge-gap, 18px) - var(--acu-dialog-edge-gap, 18px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px)));\r\n  max-height: min(var(--acu-dialog-max-height, 560px), calc(100dvh - var(--acu-dialog-edge-gap, 18px) - var(--acu-dialog-edge-gap, 18px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px)));\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: var(--acu-page-gap, 14px);\r\n  padding: var(--acu-panel-padding, 16px);\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-md);\r\n  background: var(--acu-bg-1);\r\n  color: var(--acu-text-1);\r\n  box-shadow: var(--acu-shadow);\r\n  overflow: auto;\r\n  animation: acu-dialog-panel-in-ce5fba79 0.16s ease-out both;\n}\n.acu-dialog__header[data-v-ce5fba79] {\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: var(--acu-panel-gap, 12px);\n}\n.acu-dialog__header h2[data-v-ce5fba79] {\r\n  min-width: 0;\r\n  margin: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-panel-title, 15px);\r\n  line-height: 1.35;\r\n  font-weight: 700;\n}\n.acu-dialog__message[data-v-ce5fba79] {\r\n  margin: 0;\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.55;\r\n  white-space: pre-wrap;\n}\n.acu-dialog__danger-message[data-v-ce5fba79] {\r\n  margin: 0;\r\n  padding: var(--acu-space-2, 8px) var(--acu-space-250, 10px);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-danger) 10%, transparent);\r\n  color: var(--acu-danger);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  font-weight: 700;\r\n  line-height: 1.55;\r\n  white-space: pre-wrap;\n}\n.acu-dialog__field[data-v-ce5fba79] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: var(--acu-space-150, 6px);\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.4;\n}\n.acu-dialog__checklist[data-v-ce5fba79] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: var(--acu-space-250, 10px);\r\n  min-width: 0;\r\n  padding: var(--acu-space-250, 10px);\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-bg-2) 74%, transparent);\n}\n.acu-dialog__checklist[data-v-ce5fba79] .acu-checkbox {\r\n  width: 100%;\n}\n.acu-dialog__check-option[data-v-ce5fba79] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: var(--acu-space-050, 2px);\r\n  min-width: 0;\n}\n.acu-dialog__check-label[data-v-ce5fba79] {\r\n  color: var(--acu-text-1);\r\n  font-weight: 600;\n}\n.acu-dialog__check-description[data-v-ce5fba79] {\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.45;\n}\n.acu-dialog__actions[data-v-ce5fba79] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: var(--acu-space-2, 8px);\r\n  flex-wrap: wrap;\r\n  padding-top: var(--acu-space-050, 2px);\n}\n.acu-dialog__actions--stacked[data-v-ce5fba79] .acu-btn {\r\n  flex: 1 1 var(--acu-dialog-choice-min-width, 128px);\n}\n.acu-dialog-layer.is-closing .acu-dialog[data-v-ce5fba79] {\r\n  animation: acu-dialog-panel-out-ce5fba79 0.16s ease-in both;\n}\n@keyframes acu-dialog-layer-in-ce5fba79 {\nfrom { opacity: 0;\n}\nto { opacity: 1;\n}\n}\n@keyframes acu-dialog-layer-out-ce5fba79 {\nfrom { opacity: 1;\n}\nto { opacity: 0;\n}\n}\n@keyframes acu-dialog-panel-in-ce5fba79 {\nfrom {\r\n    opacity: 0;\r\n    transform: translateY(6px);\n}\nto {\r\n    opacity: 1;\r\n    transform: translateY(0);\n}\n}\n@keyframes acu-dialog-panel-out-ce5fba79 {\nfrom {\r\n    opacity: 1;\r\n    transform: translateY(0);\n}\nto {\r\n    opacity: 0;\r\n    transform: translateY(6px);\n}\n}\n@media (max-width: 520px) {\n.acu-dialog-layer[data-v-ce5fba79] {\r\n    align-items: flex-end;\r\n    padding:\r\n      calc(var(--acu-dialog-edge-gap-compact, 12px) + var(--acu-safe-top, 0px))\r\n      calc(var(--acu-dialog-edge-gap-compact, 12px) + var(--acu-safe-right, 0px))\r\n      calc(var(--acu-dialog-edge-gap-compact, 12px) + var(--acu-safe-bottom, 0px))\r\n      calc(var(--acu-dialog-edge-gap-compact, 12px) + var(--acu-safe-left, 0px));\n}\n.acu-dialog[data-v-ce5fba79] {\r\n    width: 100%;\r\n    max-height: calc(100vh - var(--acu-dialog-edge-gap-compact, 12px) - var(--acu-dialog-edge-gap-compact, 12px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px));\r\n    max-height: calc(100dvh - var(--acu-dialog-edge-gap-compact, 12px) - var(--acu-dialog-edge-gap-compact, 12px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px));\n}\n.acu-dialog__actions[data-v-ce5fba79],\r\n  .acu-dialog__actions--stacked[data-v-ce5fba79] {\r\n    display: grid;\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuDialogHost.vue#style-0-ce5fba79");
     var AcuDialogHost_vue_vue_type_style_index_0_scoped_ce5fba79_lang = null;
 
-    const _hoisted_1$19 = { class: "acu-dialog__header" };
+    const _hoisted_1$1a = { class: "acu-dialog__header" };
     const _hoisted_2$11 = { class: "acu-dialog__message" };
-    const _hoisted_3$T = {
+    const _hoisted_3$S = {
 	key: 0,
 	class: "acu-dialog__danger-message"
     };
-    const _hoisted_4$J = {
+    const _hoisted_4$I = {
 	key: 1,
 	class: "acu-dialog__field"
     };
@@ -187158,13 +187061,13 @@ ${rejectionText}` : delegationFeedback,
 	key: 2,
 	class: "acu-dialog__checklist"
     };
-    const _hoisted_6$x = { class: "acu-dialog__check-option" };
-    const _hoisted_7$v = { class: "acu-dialog__check-label" };
+    const _hoisted_6$y = { class: "acu-dialog__check-option" };
+    const _hoisted_7$w = { class: "acu-dialog__check-label" };
     const _hoisted_8$t = {
 	key: 0,
 	class: "acu-dialog__check-description"
     };
-    function _sfc_render$1e(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$1f(_ctx, _cache, $props, $setup, $data, $options) {
 	return $setup.portalTarget ? (openBlock(), createBlock(Teleport, {
 		key: 0,
 		to: $setup.portalTarget
@@ -187183,7 +187086,7 @@ ${rejectionText}` : delegationFeedback,
 			"aria-labelledby": $setup.titleId,
 			onClick: _cache[3] || (_cache[3] = withModifiers(() => {}, ["stop"]))
 		}, [
-			createBaseVNode("header", _hoisted_1$19, [createBaseVNode(
+			createBaseVNode("header", _hoisted_1$1a, [createBaseVNode(
 				"h2",
 				{ id: $setup.titleId },
 				toDisplayString($setup.renderedDialog.title),
@@ -187209,12 +187112,12 @@ ${rejectionText}` : delegationFeedback,
 			),
 			$setup.renderedDialog.dangerMessage ? (openBlock(), createElementBlock(
 				"p",
-				_hoisted_3$T,
+				_hoisted_3$S,
 				toDisplayString($setup.renderedDialog.dangerMessage),
 				1
 				/* TEXT */
 			)) : createCommentVNode("v-if", true),
-			$setup.renderedDialog.kind === "prompt" ? (openBlock(), createElementBlock("label", _hoisted_4$J, [createBaseVNode(
+			$setup.renderedDialog.kind === "prompt" ? (openBlock(), createElementBlock("label", _hoisted_4$I, [createBaseVNode(
 				"span",
 				null,
 				toDisplayString($setup.renderedDialog.label),
@@ -187237,9 +187140,9 @@ ${rejectionText}` : delegationFeedback,
 						disabled: option.disabled,
 						"onUpdate:modelValue": ($event) => $setup.dialog.setCheckedValue(option.value, $event)
 					}, {
-						default: withCtx(() => [createBaseVNode("span", _hoisted_6$x, [createBaseVNode(
+						default: withCtx(() => [createBaseVNode("span", _hoisted_6$y, [createBaseVNode(
 							"span",
-							_hoisted_7$v,
+							_hoisted_7$w,
 							toDisplayString(option.label),
 							1
 							/* TEXT */
@@ -187331,9 +187234,9 @@ ${rejectionText}` : delegationFeedback,
 		/* CLASS */
 	)) : createCommentVNode("v-if", true)], 8, ["to"])) : createCommentVNode("v-if", true);
     }
-    var AcuDialogHost = /*#__PURE__*/ _export_sfc(_sfc_main$1e, [["render", _sfc_render$1e], ["__scopeId", "data-v-ce5fba79"]]);
+    var AcuDialogHost = /*#__PURE__*/ _export_sfc(_sfc_main$1f, [["render", _sfc_render$1f], ["__scopeId", "data-v-ce5fba79"]]);
 
-    var _sfc_main$1d = /*@__PURE__*/ defineComponent({
+    var _sfc_main$1e = /*@__PURE__*/ defineComponent({
         __name: 'AcuFileButton',
         props: {
             accept: { default: undefined },
@@ -187381,8 +187284,8 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-file-button[data-v-7b70c7ef] { display: inline-flex;\n}\n.acu-file-button--block[data-v-7b70c7ef] { width: 100%; min-width: 0;\n}\n.acu-file-button__input[data-v-7b70c7ef] { display: none;\n}\n.acu-file-button__button--icon-only-default[data-v-7b70c7ef] {\r\n  background: transparent;\r\n  color: var(--acu-text-2);\n}\n.acu-file-button__button--icon-only-default[data-v-7b70c7ef]:hover:not(:disabled) {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2);\r\n  color: var(--acu-text-1);\n}\n.acu-file-button__button--icon-only-default.acu-file-button__button--md[data-v-7b70c7ef] {\r\n  width: var(--acu-icon-button-size-md, 32px);\r\n  min-width: var(--acu-icon-button-size-md, 32px);\n}\n.acu-file-button__button--icon-only-default.acu-file-button__button--sm[data-v-7b70c7ef] {\r\n  width: var(--acu-icon-button-size-sm, 22px);\r\n  min-width: var(--acu-icon-button-size-sm, 22px);\r\n  min-height: var(--acu-icon-button-size-sm, 22px);\r\n  padding: var(--acu-space-1, 4px);\r\n  font-size: var(--acu-font-size-micro, 10px);\n}\r\n", "src/presentation-v2/components/_lib/AcuFileButton.vue#style-0-7b70c7ef");
     var AcuFileButton_vue_vue_type_style_index_0_scoped_7b70c7ef_lang = null;
 
-    const _hoisted_1$18 = ["accept"];
-    function _sfc_render$1d(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$19 = ["accept"];
+    function _sfc_render$1e(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"span",
 		{ class: normalizeClass(["acu-file-button", { "acu-file-button--block": $props.block }]) },
@@ -187398,14 +187301,14 @@ ${rejectionText}` : delegationFeedback,
 			accept: $props.accept,
 			class: "acu-file-button__input",
 			onChange: $setup.onChange
-		}, null, 40, _hoisted_1$18)],
+		}, null, 40, _hoisted_1$19)],
 		2
 		/* CLASS */
 	);
     }
-    var AcuFileButton = /*#__PURE__*/ _export_sfc(_sfc_main$1d, [["render", _sfc_render$1d], ["__scopeId", "data-v-7b70c7ef"]]);
+    var AcuFileButton = /*#__PURE__*/ _export_sfc(_sfc_main$1e, [["render", _sfc_render$1e], ["__scopeId", "data-v-7b70c7ef"]]);
 
-    var _sfc_main$1c = /*@__PURE__*/ defineComponent({
+    var _sfc_main$1d = /*@__PURE__*/ defineComponent({
         __name: 'AcuIconButton',
         props: {
             icon: {},
@@ -187427,12 +187330,12 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-icon-btn[data-v-70b36214] {\r\n  --acu-icon-btn-size: var(--acu-icon-button-size-md, 32px);\r\n  --acu-icon-btn-font-size: var(--acu-icon-inline-md, 13px);\r\n  appearance: none !important;\r\n  -webkit-appearance: none !important;\r\n  flex: 0 0 auto;\r\n  display: inline-flex !important;\r\n  align-items: center !important;\r\n  justify-content: center !important;\r\n  width: var(--acu-icon-btn-size) !important;\r\n  min-width: var(--acu-icon-btn-size) !important;\r\n  max-width: var(--acu-icon-btn-size) !important;\r\n  height: var(--acu-icon-btn-size) !important;\r\n  min-height: var(--acu-icon-btn-size) !important;\r\n  max-height: var(--acu-icon-btn-size) !important;\r\n  box-sizing: border-box !important;\r\n  margin: 0 !important;\r\n  padding: 0 !important;\r\n  border: 0 !important;\r\n  background: transparent !important;\r\n  color: var(--acu-text-2) !important;\r\n  border-radius: var(--acu-radius-sm) !important;\r\n  cursor: pointer;\r\n  font: inherit !important;\r\n  font-size: var(--acu-icon-btn-font-size) !important;\r\n  line-height: 1 !important;\r\n  text-align: center !important;\r\n  vertical-align: middle !important;\r\n  box-shadow: none !important;\r\n  outline: none !important;\r\n  -webkit-tap-highlight-color: transparent;\r\n  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;\n}\n.acu-icon-btn > i[data-v-70b36214] {\r\n  flex: 0 0 auto !important;\r\n  display: inline-block !important;\r\n  width: 1em !important;\r\n  min-width: 1em !important;\r\n  height: 1em !important;\r\n  min-height: 1em !important;\r\n  color: inherit !important;\r\n  font-size: inherit !important;\r\n  line-height: 1 !important;\r\n  text-align: center !important;\r\n  vertical-align: -0.125em !important;\n}\n.acu-icon-btn > i[data-v-70b36214]::before {\r\n  display: block !important;\r\n  width: 1em !important;\r\n  height: 1em !important;\r\n  color: inherit !important;\r\n  font-size: inherit !important;\r\n  line-height: 1 !important;\n}\n.acu-icon-btn--md[data-v-70b36214] {\r\n  --acu-icon-btn-size: var(--acu-icon-button-size-md, 32px);\r\n  --acu-icon-btn-font-size: var(--acu-icon-inline-md, 13px);\n}\n.acu-icon-btn--sm[data-v-70b36214] {\r\n  --acu-icon-btn-size: var(--acu-icon-button-size-sm, 22px);\r\n  --acu-icon-btn-font-size: var(--acu-icon-inline-sm, 10px);\r\n  background: var(--acu-bg-2) !important;\n}\n.acu-icon-btn--default[data-v-70b36214]:hover:not(:disabled) {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2) !important;\r\n  color: var(--acu-text-1) !important;\n}\n.acu-icon-btn--danger[data-v-70b36214]:hover:not(:disabled) {\r\n  color: var(--acu-danger) !important;\r\n  background: color-mix(in srgb, var(--acu-danger) 12%, transparent) !important;\n}\n.acu-icon-btn--accent[data-v-70b36214] {\r\n  background: var(--acu-bg-2) !important;\r\n  color: var(--acu-text-1) !important;\n}\n.acu-icon-btn--accent[data-v-70b36214]:hover:not(:disabled) {\r\n  background: var(--acu-accent-glow) !important; color: var(--acu-accent) !important;\n}\n.acu-icon-btn[data-v-70b36214]:focus-visible {\r\n  outline: none !important;\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow) !important;\n}\n.acu-icon-btn[data-v-70b36214]:disabled { opacity: 0.4; cursor: not-allowed;\n}\r\n", "src/presentation-v2/components/_lib/AcuIconButton.vue#style-0-70b36214");
     var AcuIconButton_vue_vue_type_style_index_0_scoped_70b36214_lang = null;
 
-    const _hoisted_1$17 = [
+    const _hoisted_1$18 = [
 	"disabled",
 	"title",
 	"aria-label"
     ];
-    function _sfc_render$1c(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$1d(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("button", {
 		type: "button",
 		disabled: $props.disabled,
@@ -187446,11 +187349,11 @@ ${rejectionText}` : delegationFeedback,
 		null,
 		2
 		/* CLASS */
-	)], 10, _hoisted_1$17);
+	)], 10, _hoisted_1$18);
     }
-    var AcuIconButton = /*#__PURE__*/ _export_sfc(_sfc_main$1c, [["render", _sfc_render$1c], ["__scopeId", "data-v-70b36214"]]);
+    var AcuIconButton = /*#__PURE__*/ _export_sfc(_sfc_main$1d, [["render", _sfc_render$1d], ["__scopeId", "data-v-70b36214"]]);
 
-    var _sfc_main$1b = /*@__PURE__*/ defineComponent({
+    var _sfc_main$1c = /*@__PURE__*/ defineComponent({
         __name: 'AcuSegmentedControl',
         props: {
             options: {},
@@ -187498,14 +187401,14 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-segmented[data-v-e3d985dd] {\r\n  position: relative;\r\n  display: grid;\r\n  grid-auto-flow: column;\r\n  grid-auto-columns: minmax(0, 1fr);\r\n  min-width: 0;\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-2);\r\n  padding: var(--acu-space-075, 3px);\r\n  overflow: hidden;\n}\n.acu-segmented--disabled[data-v-e3d985dd] {\r\n  opacity: 0.55;\n}\n.acu-segmented__thumb[data-v-e3d985dd] {\r\n  position: absolute;\r\n  inset: var(--acu-space-075, 3px) auto var(--acu-space-075, 3px) var(--acu-space-075, 3px);\r\n  width: calc((100% - var(--acu-space-150, 6px)) / var(--acu-segment-count));\r\n  border-radius: calc(var(--acu-radius-sm) - var(--acu-space-050, 2px));\r\n  background: var(--acu-accent);\r\n  transform: translateX(calc(var(--acu-segment-index) * 100%));\r\n  transition: transform 0.16s ease, background 0.16s ease;\r\n  pointer-events: none;\n}\n.acu-segmented__item[data-v-e3d985dd] {\r\n  position: relative;\r\n  min-width: 0;\r\n  margin: 0;\r\n  border: 0;\r\n  background: transparent;\r\n  color: var(--acu-text-2);\r\n  font: inherit;\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  cursor: pointer;\r\n  display: inline-flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  gap: var(--acu-space-150, 6px);\r\n  transition: background 0.15s ease, color 0.15s ease;\r\n  z-index: 1;\n}\n.acu-segmented__item[data-v-e3d985dd]:not(.acu-segmented__item--active):hover:not(:disabled) {\r\n  background: var(--acu-hover-overlay);\r\n  color: var(--acu-text-1);\n}\n.acu-segmented__item[data-v-e3d985dd]:disabled {\r\n  cursor: not-allowed;\r\n  color: var(--acu-text-3);\n}\n.acu-segmented__item--active[data-v-e3d985dd] {\r\n  color: var(--acu-on-accent);\n}\n.acu-segmented__item[data-v-e3d985dd]:focus-visible {\r\n  outline: none;\n}\n.acu-segmented__item[data-v-e3d985dd]:focus-visible::before {\r\n  content: '';\r\n  position: absolute;\r\n  inset: var(--acu-space-050, 2px);\r\n  border-radius: var(--acu-radius-sm);\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\r\n  pointer-events: none;\r\n  z-index: 2;\n}\n.acu-segmented--md .acu-segmented__item[data-v-e3d985dd] {\r\n  min-height: var(--acu-segment-height-md, 30px);\r\n  padding: 0 var(--acu-space-2, 8px);\r\n  border-radius: calc(var(--acu-radius-sm) - var(--acu-space-050, 2px));\n}\n.acu-segmented--sm .acu-segmented__item[data-v-e3d985dd] {\r\n  min-height: var(--acu-segment-height-sm, 24px);\r\n  padding: 0 var(--acu-space-175, 7px);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  border-radius: calc(var(--acu-radius-sm) - var(--acu-space-050, 2px));\n}\n.acu-segmented__label[data-v-e3d985dd] {\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\r\n", "src/presentation-v2/components/_lib/AcuSegmentedControl.vue#style-0-e3d985dd");
     var AcuSegmentedControl_vue_vue_type_style_index_0_scoped_e3d985dd_lang = null;
 
-    const _hoisted_1$16 = ["aria-label"];
+    const _hoisted_1$17 = ["aria-label"];
     const _hoisted_2$10 = [
 	"aria-checked",
 	"disabled",
 	"onClick"
     ];
-    const _hoisted_3$S = { class: "acu-segmented__label" };
-    function _sfc_render$1b(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_3$R = { class: "acu-segmented__label" };
+    function _sfc_render$1c(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("div", {
 		class: normalizeClass(["acu-segmented", [`acu-segmented--${$props.size}`, { "acu-segmented--disabled": $props.disabled }]]),
 		role: "radiogroup",
@@ -187540,7 +187443,7 @@ ${rejectionText}` : delegationFeedback,
 				]
 			}, [createBaseVNode(
 				"span",
-				_hoisted_3$S,
+				_hoisted_3$R,
 				toDisplayString(opt.label),
 				1
 				/* TEXT */
@@ -187548,1049 +187451,469 @@ ${rejectionText}` : delegationFeedback,
 		}),
 		128
 		/* KEYED_FRAGMENT */
-	))], 14, _hoisted_1$16);
+	))], 14, _hoisted_1$17);
     }
-    var AcuSegmentedControl = /*#__PURE__*/ _export_sfc(_sfc_main$1b, [["render", _sfc_render$1b], ["__scopeId", "data-v-e3d985dd"]]);
+    var AcuSegmentedControl = /*#__PURE__*/ _export_sfc(_sfc_main$1c, [["render", _sfc_render$1c], ["__scopeId", "data-v-e3d985dd"]]);
 
-    const TOAST_LEAVE_MS = 160;
-    const DEFAULT_VISIBLE_TOAST_LIMIT = 4;
-    var _sfc_main$1a = /*@__PURE__*/ defineComponent({
-        __name: 'AcuToastViewport',
-        setup(__props, { expose: __expose }) {
-            __expose();
-            const toast = useToastStore();
-            const portalTarget = ref(null);
-            const renderedItems = ref([]);
-            const leaveTimers = new Map();
-            let observedClearVersion = toast.clearVersion;
-            function iconForKind(kind) {
-                if (kind === "success")
-                    return "fa-solid fa-check";
-                if (kind === "warning")
-                    return "fa-solid fa-triangle-exclamation";
-                if (kind === "error")
-                    return "fa-solid fa-circle-exclamation";
-                return "fa-solid fa-circle-info";
-            }
-            function cancelLeaveTimer(id) {
-                const timer = leaveTimers.get(id);
-                if (timer === undefined)
-                    return;
-                acuClearTimeout(timer);
-                leaveTimers.delete(id);
-            }
-            async function runAction(item) {
-                const action = item.action;
-                if (!action)
-                    return;
-                await action.onClick();
-                if (action.dismissOnClick !== false) {
-                    toast.dismiss(item.id);
-                }
-            }
-            onMounted(() => {
-                const doc = getAcuHostDocument();
-                portalTarget.value = doc.getElementById("acu-app-v2") ?? doc.body;
-            });
-            onBeforeUnmount(() => {
-                for (const timer of leaveTimers.values()) {
-                    acuClearTimeout(timer);
-                }
-                leaveTimers.clear();
-            });
-            watch(() => [toast.items, toast.clearVersion], ([items, clearVersion]) => {
-                if (clearVersion !== observedClearVersion) {
-                    observedClearVersion = clearVersion;
-                    for (const timer of leaveTimers.values()) {
-                        acuClearTimeout(timer);
-                    }
-                    leaveTimers.clear();
-                    renderedItems.value = [];
-                    return;
-                }
-                const nextById = new Map(items.map((item) => [item.id, item]));
-                const currentById = new Map(renderedItems.value.map((entry) => [entry.item.id, entry]));
-                const nextRendered = [];
-                const renderedLimit = Math.max(items.length, DEFAULT_VISIBLE_TOAST_LIMIT);
-                for (const item of items) {
-                    const existing = currentById.get(item.id);
-                    if (existing) {
-                        cancelLeaveTimer(item.id);
-                        existing.item = item;
-                        existing.isClosing = false;
-                        nextRendered.push(existing);
-                    }
-                    else {
-                        nextRendered.push({ item, isClosing: false });
-                    }
-                }
-                for (const entry of renderedItems.value) {
-                    if (nextById.has(entry.item.id))
-                        continue;
-                    if (nextRendered.length >= renderedLimit) {
-                        cancelLeaveTimer(entry.item.id);
-                        continue;
-                    }
-                    if (!entry.isClosing) {
-                        entry.isClosing = true;
-                        leaveTimers.set(entry.item.id, acuSetTimeout(() => {
-                            renderedItems.value = renderedItems.value.filter((current) => current.item.id !== entry.item.id);
-                            leaveTimers.delete(entry.item.id);
-                        }, TOAST_LEAVE_MS));
-                    }
-                    nextRendered.push(entry);
-                }
-                renderedItems.value = nextRendered;
-            }, { immediate: true, deep: true });
-            const __returned__ = { TOAST_LEAVE_MS, DEFAULT_VISIBLE_TOAST_LIMIT, toast, portalTarget, renderedItems, leaveTimers, get observedClearVersion() { return observedClearVersion; }, set observedClearVersion(v) { observedClearVersion = v; }, iconForKind, cancelLeaveTimer, runAction, AcuButton, AcuIconButton };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
+    /**
+     * 桌宠冷笑话库：由项目根目录 冷笑话.txt 按空行切分内置。
+     * 针对受保护群体（民族、性取向）的贬损条目未收录。
+     */
+    const deskPetJokes = [
+        "为什么每次跳水比赛，运动员都会用很慢的速度跳第二遍？",
+        "小明爷爷生病了，难受得一直叫唤，小明问：爸爸的爸爸叫什么？",
+        "“你们出差期间导师给发补助了吗？”\n工科学生：“啥是补助？”\n文科学生：“啥是出差？”\n漩涡鸣人：“啥是给！”",
+        "“明天公司团建，你不来可说不过去了！”\n“不过去了。”",
+        "医生开方之后，王老汉从2型糖尿病变成了√2型糖尿病。",
+        "我向老师求婚，结果老师要见我家长，我是不是成功了？",
+        "“消防的问题都可以来问我！”消防通道。",
+        "我永远叫不醒一个装睡的人，但王警官说户口本写不下那么长。",
+        "金箍棒离开悟空，大小便不能自理。",
+        "我发现了几乎所有比赛的黑幕，总决赛他们总是让亚军去打冠军，这样肯定要输呀！",
+        "好人有好报，我是庸人，可以给我一个庸报吗？",
+        "上联：美术老师登上历史舞台发表政治演讲造成大量生物发生物理死亡。\n下联：上海校长签下重庆协定背刺湖南英雄落得小别四川煎熬台湾余生。",
+        "“听说你摔倒的姿势和别人不一样，能摔给我看看吗？”\n我：“ok”",
+        "“好大儿！”北京人在床上夸赞对象。",
+        "报案人说死者10:00被发现时就没有温度了，死者家属提出异议。\n因为温度只有高和低，不应该“没有”。",
+        "“发现舍友偷我内裤怎么办？”\n“我觉得你最好跟他谈谈。”\n一天后。\n“谢谢，已经谈上了。”",
+        "如果让全世界所有的麦当劳员工手拉手站成一行，那你就只能自己动手做麦辣鸡腿堡了。",
+        "养老院夏令营：别让你家老头输在终点线。",
+        "“早。”我对蝙蝠夫妇说。\n“苗。”他俩回应道。",
+        "水能导电，为什么不直接用长江输电？",
+        "冷知识：从商朝到战国仅仅经过两周。",
+        "怎么还没到地库？你这个忘摁负一的家伙！",
+        "人工增雨是人工降雨。",
+        "（有难）1=（支援）8",
+        "“兄弟，你好香。”\n“你也是。”\n这段对话使用了互闻的手法。",
+        "“这下好了”往往是指这下坏了。",
+        "小孩说：“我要吃卤肉饭！”食人族家长没办法，只好去抓山东人。",
+        "夫人不想要生孩子，食人族酋长只好把小孩蒸熟再端给她。",
+        "“死去活来。”殡仪馆的工作人员解释什么时候有活儿干。",
+        "毕业照也叫师生人面像。",
+        "比祖宗功绩算是一种牌位赛。",
+        "汽车人犯错了它妈妈会揪它的后视镜吗？",
+        "世界一直在仇穷，却发明了仇富这个词。",
+        "我是时间的主人，因为我经常抽时间。",
+        "五常里，美国法国特别支持性别转变，而中俄则没那么支持。\n那英呢？\n那英最烦装逼的人。",
+        "云就是喜欢跟风。",
+        "太阳让那么多行星围着它转，应该称得上是海王星。",
+        "既然丁克的意思是一辈子都不要小孩，那么丁克是一种谥号，只有死后才能追封。",
+        "小时候一直想过开挂的人生，努力半辈子后成功了一半，开上了半挂。",
+        "院长吃了麻婆豆腐之后，当场被麻婆砍了二十多刀。",
+        "小明背井离乡，乡里人再也没能喝上一口井水。心狠手辣的小明舔了自己的手竟被辣哭了。",
+        "既然监狱里全是罪犯，王警官为什么不去监狱里抓人？王警官在驾校将无证驾驶团伙一网打尽。",
+        "慢着，这屎里有毒。",
+        "被门夹过的核桃还能补脑吗？",
+        "吃了增加智商的药以后发现自己被骗了，真有用啊！",
+        "小明在野外遭遇凶猛野人，现已加入肯德基豪华午餐。",
+        "谁能想到，这名年仅16岁的少女四年前只是一名年仅12岁的少女！",
+        "每次在大街上洗澡都感觉有人在偷窥我。",
+        "“很抱歉，我没能挽回他的生命。”医生一边这样说着一边来了一个后空翻，“不过没事，我已经给他整活了。”",
+        "王老汉问儿子要不要叫外卖，儿子说好呀。然后王老汉就带着儿子去派出所改名了。",
+        "公交司机终于在众人的指责中将座位让给了老太太。",
+        "便秘后陈医生给我开了一个疗程的电钻。",
+        "主持人的幽默把大家都逗乐了，一时间灵堂里变成了欢乐的海洋。",
+        "用打蛋器顶在乞丐肚子上转了十五分钟后他终于忍不住了，对我说道：你打发要饭的呢？",
+        "老大让我埋好地雷后用脚猛踩几下说是为了土地平整不易发现。",
+        "西瓜的味道真的跟西瓜汁一模一样，简直是西瓜汁平替，我愿称之为固体西瓜汁。",
+        "公鸡是鸭子吗？",
+        "白骨精头疼是看骨科还是脑科？",
+        "地球上有70%的海洋和30%的陆地，那么剩下的30%海洋和70%的陆地去哪了？",
+        "喝奶茶，用吸管喝的是下面的水，为什么少的是上面的水？",
+        "过年福字要倒着贴，为什么不生产倒过来的福字呢？",
+        "既然快递要3天才到，为什么不把所有的快递都提前3天发？",
+        "为什么每条隧道上面都压着一座山？",
+        "根据《史记》记载，荆轲刺秦王未成使得秦王大怒，那么如果成功了的话秦王会大喜吗？",
+        "为啥长寿的碰巧都是老年人？",
+        "变形金刚寂寞了会上网约车吗？",
+        "《出师表》第一句就提到了先帝，为什么刘禅不重用先帝？",
+        "胎儿在三个月时才长出指纹，那两个月的胎儿犯罪岂不很难抓到？",
+        "不知道你们发现没，夏天真的比冬天热好多。",
+        "睡觉是谁发明的？也太舒服了吧！",
+        "我们可以把氧化还原反应叫做电子竞技。",
+        "这世上真的有龙！我在某地就被一条龙服务过。",
+        "我家老鼠生病了，我给它喂了老鼠药，希望它早日康复。",
+        "弱酸的本质是酸，弱碱的本质是碱，由此可推弱智的本质是智，弱智吧日常就是智慧日常，在座各位都是智人。",
+        "通过标记重捕法诸葛亮发现巴蜀地区盛产孟获。",
+        "为什么我的银行卡在高压锅里煮了一晚上，还是冻结状态。",
+        "生活小妙招：在野外迷路如何使用手表辨别方向。手握手表，松手使其自然落体，手表坠落的方向就是下方。",
+        "三个半小时=一个半小时=三十分钟。",
+        "“觉得iPhone不值这个价格怎么办？”“ |iPhone| ”",
+        "年轻人体质真的越来越差了，没有一个90后活过30岁。注：该贴发布于2010年。",
+        "非牛顿流体吃肚子里，是不是一用力就便秘，一放松就窜稀。",
+        "虎毒不食子，专家建议野外遇到老虎可跪下认爹。",
+        "我觉得白雪公主之所以命运坎坷主要原因是因为身边的小人太多。",
+        "在发现我没有道德后，对方放弃了道德绑架。",
+        "前几天去医院体检了，好开心，只花了200块钱就检查出六个病来。",
+        "有目的地的人生才会迷路，我只是来世界散步。",
+        "我的贫穷已经完全突破了我的想象，成为了现实。",
+        "毕业一年，经过我的不懈努力，如今的积蓄已经足够自己下半辈子不吃不喝了。",
+        "生活将我反复捶打，肉质竟变得劲道可口。",
+        "退一万步讲，你听不见。",
+        "很多人说的看不到未来其实是看到了未来。",
+        "钱一直不在我钱包里，这何尝不是一种财富自由。",
+        "我租下了世界直到我将死去的那天。",
+        "有没有一种可能，情敌其实不是敌人，而是同好。",
+        "燕子叽叽喳喳叫个不停，“咏春？”叶问。",
+        "工人罢工后就成为了人。",
+        "要断章取义。——节选自《不要断章取义》",
+        "明知山有虎，不去明知山。",
+        "只有小孩子才说喝茶，成人用品。",
+        "“丢死人了！”王老汉一边喊着一边把尸体扔下了楼。",
+        "哪吒闹海讲了一个来龙去脉的故事。",
+        "动物园里的大象被气死了，矛头直指气象局。",
+        "小明嫌自己的丁丁短，于是苦练拉丁舞。",
+        "小兰和新一结婚后，侦探事务所毛利率大幅下降。",
+        "古代人中国病了有中医治，法国人只有法医，好可怜啊。",
+        "生鱼片是死鱼片。等红灯也是等绿灯。咖啡因来自咖啡果。坐电梯是站电梯。救火就是灭火。红萝卜说白了就是白萝卜。蜂蜜也是一种花生酱。太极就是巧克力。老头哭了是因为老头乐坏了。凶我的反义词是吉他。大学生活要大学生死。饮水机是吐水机，人才是真正的饮水机。",
+        "“爷是真的服了。”医院里，王爷爷面对医生对按时服药的质疑如是说道。",
+        "你一旦多活了一天，你就少活了一天。",
+        "？是碎了一半的电灯泡。",
+        "古代人上交粮食来抵徭役也是一种麦当劳。",
+        "答题卡这个名字太不吉利了，建议改成答题顺。",
+        "河南人给中评相当于给好评。",
+        "夏侯惇看刑天——一眼看不到头。",
+        "委婉骂人：带你入坑地球ol的女性玩家退游了。",
+        "孩子睡觉老是踢被子，还好我及时发现打断了腿，不然肯定感冒。",
+        "人是铁饭是钢，食人族酋长望着逃走的俘虏恨铁不成钢。",
+        "“明年二战。” 1938年考研结束后一名考生说道。",
+        "欢迎来到嬴政直播间！下面要推荐的这些书非，常，火！很多小伙伴都入坑了！",
+        "一男童惨遭食人魔毒手，丧尽天良的凶手竟忘记放葱。",
+        "“我的法力不比如来佛差，你是怎么逃出我的手掌心的？”耶稣不解地问孙悟空。",
+        "人死后会变成星星，那么商鞅也是一种五星上将。",
+        "刽子手在离刑场100米的地方对囚犯说：“前方100米掉头。”",
+        "地下赌马是不是也叫私密马赛？",
+        "小明在自助餐厅倒果汁时遭人暗杀，只因他汁倒得太多了。",
+        "什么地方阴气最重？钢琴和邮箱，因为钢琴住了几个妖，邮箱住了几个魔。",
+        "猪为了不被做成东坡肉，毅然跳出了苏轼圈。",
+        "匹诺曹对着路人大吼：“为什么要说我姓匹奇怪！我姓匹很正常啊！”",
+        "皇帝感叹道：“孤的胜，你们都看在眼里；孤的败。”然后就退朝了。",
+        "人是复杂的？二笔而已。",
+        "开关是灯的日出日落，日出日落是灯的开关。",
+        "路上飘的垃圾袋装着没人要的风。",
+        "所有的桥都是温暖的，因为它们让河流不再难过。",
+        "暴雨中前进，伞是倒划天空的船。",
+        "捡到一束光，日落时还给太阳。",
+        "怀念过去是不是在时间的长河里刻舟求剑？展望未来是不是在前行的道路上望梅止渴?",
+        "聋哑人的美甲是他们的口红。",
+    ];
+    /** 随机取一条笑话；传入上一条可避免连续重复。 */
+    function pickDeskPetJoke(previous, random = Math.random) {
+        if (deskPetJokes.length === 0)
+            return "";
+        for (let attempt = 0; attempt < 4; attempt++) {
+            const joke = deskPetJokes[Math.floor(random() * deskPetJokes.length) % deskPetJokes.length];
+            if (joke !== previous || deskPetJokes.length === 1)
+                return joke;
         }
-    });
+        return deskPetJokes[0];
+    }
 
-    injectSfcStyle("\n.acu-toast-viewport[data-v-9146b9ef] {\r\n  position: fixed;\r\n  top: 0;\r\n  right: 0;\r\n  bottom: 0;\r\n  left: 0;\r\n  inset: 0;\r\n  z-index: 9410;\r\n  box-sizing: border-box;\r\n  width: 100%;\r\n  width: 100vw;\r\n  width: 100dvw;\r\n  min-height: 100%;\r\n  min-height: 100vh;\r\n  min-height: 100dvh;\r\n  overflow: hidden;\r\n  color: var(--acu-text-1);\r\n  font-family: var(--acu-font-ui);\r\n  font-size: var(--acu-font-size-body);\r\n  pointer-events: none;\n}\n.acu-toast-viewport[data-v-9146b9ef],\r\n.acu-toast-viewport[data-v-9146b9ef] * {\r\n  box-sizing: border-box;\n}\n.acu-toast-viewport__list[data-v-9146b9ef] {\r\n  position: absolute;\r\n  top: calc(var(--acu-toast-top, 62px) + var(--acu-safe-top, 0px));\r\n  right: calc(var(--acu-toast-edge-gap, 18px) + var(--acu-safe-right, 0px));\r\n  bottom: auto;\r\n  width: min(var(--acu-toast-width, 360px), calc(100% - var(--acu-toast-edge-gap, 18px) - var(--acu-toast-edge-gap, 18px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\r\n  max-height: calc(100% - var(--acu-toast-top, 62px) - var(--acu-toast-edge-gap, 18px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px));\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: var(--acu-space-2, 8px);\r\n  margin: 0;\r\n  padding: 0;\r\n  overflow: visible;\r\n  list-style: none;\n}\n.acu-v2-toast[data-v-9146b9ef] {\r\n  --acu-toast-tone: var(--acu-accent);\r\n  position: relative;\r\n  min-width: 0;\r\n  display: grid;\r\n  grid-template-columns: var(--acu-control-height-sm, 26px) minmax(0, 1fr) auto auto;\r\n  align-items: center;\r\n  gap: var(--acu-space-2, 8px);\r\n  padding: var(--acu-space-250, 10px) var(--acu-space-3, 12px);\r\n  overflow: hidden;\r\n  border: 1px solid color-mix(in srgb, var(--acu-toast-tone) 22%, var(--acu-border-2));\r\n  border-radius: var(--acu-radius-md);\r\n  background:\r\n    linear-gradient(\r\n      90deg,\r\n      color-mix(in srgb, var(--acu-toast-tone) 7%, transparent),\r\n      transparent 48%\r\n    ),\r\n    color-mix(in srgb, var(--acu-bg-1) 97%, var(--acu-text-1) 3%);\r\n  box-shadow:\r\n    0 18px 46px rgba(0, 0, 0, 0.18),\r\n    0 4px 16px rgba(0, 0, 0, 0.12),\r\n    inset 0 1px 0 color-mix(in srgb, var(--acu-text-1) 8%, transparent);\r\n  color: var(--acu-text-1);\r\n  pointer-events: auto;\r\n  animation: acu-toast-in-9146b9ef 0.16s ease-out both;\n}\n.acu-v2-toast--success[data-v-9146b9ef] {\r\n  --acu-toast-tone: var(--acu-success);\n}\n.acu-v2-toast--warning[data-v-9146b9ef] {\r\n  --acu-toast-tone: var(--acu-warning);\n}\n.acu-v2-toast--error[data-v-9146b9ef] {\r\n  --acu-toast-tone: var(--acu-danger);\n}\n.acu-v2-toast.is-closing[data-v-9146b9ef] {\r\n  pointer-events: none;\r\n  animation: acu-toast-out-9146b9ef 0.16s ease-in both;\n}\n.acu-v2-toast__icon[data-v-9146b9ef] {\r\n  --acu-icon-color: var(--acu-toast-tone);\r\n  min-width: 0;\r\n  width: var(--acu-control-height-sm, 26px);\r\n  height: var(--acu-control-height-sm, 26px);\r\n  display: inline-flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-toast-tone) 13%, transparent);\r\n  color: var(--acu-toast-tone);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  line-height: 1;\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-toast-tone) 18%, transparent);\n}\n.acu-v2-toast__text[data-v-9146b9ef] {\r\n  min-width: 0;\r\n  margin: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.45;\r\n  overflow-wrap: anywhere;\n}\n.acu-v2-toast__action[data-v-9146b9ef] {\r\n  white-space: nowrap;\n}\n.acu-v2-toast__dismiss[data-v-9146b9ef] {\r\n  flex: 0 0 auto;\n}\n@keyframes acu-toast-in-9146b9ef {\nfrom {\r\n    opacity: 0;\r\n    transform: translateY(-6px);\n}\nto {\r\n    opacity: 1;\r\n    transform: translateY(0);\n}\n}\n@keyframes acu-toast-out-9146b9ef {\nfrom {\r\n    opacity: 1;\r\n    transform: translateY(0);\n}\nto {\r\n    opacity: 0;\r\n    transform: translateY(-6px);\n}\n}\n@media (max-width: 640px) {\n.acu-toast-viewport__list[data-v-9146b9ef] {\r\n    top: calc(var(--acu-toast-top-compact, 58px) + var(--acu-safe-top, 0px));\r\n    right: auto;\r\n    bottom: auto;\r\n    left: calc(50% + (var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)) / 2);\r\n    width: clamp(var(--acu-menu-min-width, 240px), 70vw, calc(100% - var(--acu-toast-edge-gap-compact, 12px) - var(--acu-toast-edge-gap-compact, 12px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\r\n    max-height: calc(100% - var(--acu-toast-top-compact, 58px) - var(--acu-toast-edge-gap-compact, 12px) - var(--acu-safe-top, 0px) - var(--acu-safe-bottom, 0px));\r\n    transform: translateX(-50%);\n}\n.acu-v2-toast[data-v-9146b9ef] {\r\n    grid-template-columns: var(--acu-icon-button-size-sm, 22px) minmax(0, 1fr) auto;\r\n    gap: var(--acu-space-175, 7px);\r\n    padding: var(--acu-space-2, 8px) var(--acu-space-225, 9px);\n}\n.acu-v2-toast__icon[data-v-9146b9ef] {\r\n    width: var(--acu-icon-button-size-sm, 22px);\r\n    height: var(--acu-icon-button-size-sm, 22px);\r\n    font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-toast__text[data-v-9146b9ef] {\r\n    font-size: var(--acu-font-size-caption, 11px);\r\n    line-height: 1.4;\n}\n.acu-v2-toast__action[data-v-9146b9ef] {\r\n    grid-column: 2 / 4;\r\n    justify-self: start;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuToastViewport.vue#style-0-9146b9ef");
-    var AcuToastViewport_vue_vue_type_style_index_0_scoped_9146b9ef_lang = null;
-
-    const _hoisted_1$15 = {
-	key: 0,
-	class: "acu-toast-viewport",
-	role: "status",
-	"aria-label": "通知",
-	style: { zIndex: 9410 }
+    /**
+     * 桌宠任务气泡的状态词：似是而非的短词，后面再接真实进度。
+     * 按功能分组；未识别的功能落到 generic。
+     */
+    const deskPetStatusWords = {
+        table: ["翻账本", "对表格", "抄小本本", "数格子", "描边框", "誊写中", "对账中", "补漏项", "排行列", "盖戳"],
+        plan: ["掐指", "摆沙盘", "看星象", "推演中", "琢磨", "画路线", "扔骰子", "排兵布阵"],
+        polish: ["抛光", "捋句子", "修边角", "润色中", "挑错字", "磨字眼", "顺语气", "打蜡"],
+        continuation: ["构思", "打腹稿", "咬笔头", "憋大招", "起承转合", "续墨中", "想下文", "铺伏笔"],
+        simulation: ["推沙盘", "算因果", "拨时钟", "看天下", "摇签筒", "牵线头", "观棋中", "排因缘"],
+        import: ["嚼书页", "切块", "翻页中", "啃目录", "拆包裹", "吞文字", "分装中", "码书脊"],
+        index: ["翻旧账", "找线头", "对暗号", "嗅线索", "理卷宗", "串珠子", "查底档", "扫书架"],
+        skill: ["贴标签", "归档", "分门别类", "写说明书", "装盒子", "编号中", "理抽屉", "做卡片"],
+        generic: ["忙活中", "发功", "嘀咕", "搬砖", "埋头苦干", "转圈圈", "冒热气", "咕噜咕噜"],
     };
-    const _hoisted_2$$ = { class: "acu-toast-viewport__list" };
-    const _hoisted_3$R = ["role"];
-    const _hoisted_4$I = {
-	class: "acu-v2-toast__icon",
-	"aria-hidden": "true"
-    };
-    const _hoisted_5$A = { class: "acu-v2-toast__text" };
-    function _sfc_render$1a(_ctx, _cache, $props, $setup, $data, $options) {
-	return $setup.portalTarget ? (openBlock(), createBlock(Teleport, {
-		key: 0,
-		to: $setup.portalTarget
-	}, [$setup.renderedItems.length ? (openBlock(), createElementBlock("div", _hoisted_1$15, [createBaseVNode("ol", _hoisted_2$$, [(openBlock(true), createElementBlock(
-		Fragment,
-		null,
-		renderList($setup.renderedItems, (entry) => {
-			return openBlock(), createElementBlock("li", {
-				key: entry.item.id,
-				class: normalizeClass([
-					"acu-v2-toast",
-					`acu-v2-toast--${entry.item.kind}`,
-					{ "is-closing": entry.isClosing }
-				]),
-				role: entry.item.kind === "error" ? "alert" : "status"
-			}, [
-				createBaseVNode("span", _hoisted_4$I, [createBaseVNode(
-					"i",
-					{ class: normalizeClass($setup.iconForKind(entry.item.kind)) },
-					null,
-					2
-					/* CLASS */
-				)]),
-				createBaseVNode(
-					"p",
-					_hoisted_5$A,
-					toDisplayString(entry.item.text),
-					1
-					/* TEXT */
-				),
-				entry.item.action ? (openBlock(), createBlock($setup["AcuButton"], {
-					key: 0,
-					class: "acu-v2-toast__action",
-					size: "sm",
-					variant: entry.item.action.variant || "default",
-					onClick: ($event) => $setup.runAction(entry.item)
-				}, {
-					default: withCtx(() => [createTextVNode(
-						toDisplayString(entry.item.action.label),
-						1
-						/* TEXT */
-					)]),
-					_: 2
-				}, 1032, ["variant", "onClick"])) : createCommentVNode("v-if", true),
-				entry.item.dismissible ? (openBlock(), createBlock($setup["AcuIconButton"], {
-					key: 1,
-					class: "acu-v2-toast__dismiss",
-					icon: "fa-solid fa-xmark",
-					size: "sm",
-					title: "关闭通知",
-					onClick: ($event) => $setup.toast.dismiss(entry.item.id)
-				}, null, 8, ["onClick"])) : createCommentVNode("v-if", true)
-			], 10, _hoisted_3$R);
-		}),
-		128
-		/* KEYED_FRAGMENT */
-	))])])) : createCommentVNode("v-if", true)], 8, ["to"])) : createCommentVNode("v-if", true);
+    const FEATURE_GROUP_RULES = [
+        [/填表|追平/, "table"],
+        [/规划/, "plan"],
+        [/优化/, "polish"],
+        [/续写/, "continuation"],
+        [/推演/, "simulation"],
+        [/导入/, "import"],
+        [/交火|索引|召回/, "index"],
+        [/skill/i, "skill"],
+    ];
+    function resolveDeskPetStatusGroup(feature) {
+        const text = String(feature || "");
+        for (const [pattern, group] of FEATURE_GROUP_RULES) {
+            if (pattern.test(text))
+                return group;
+        }
+        return "generic";
     }
-    var AcuToastViewport = /*#__PURE__*/ _export_sfc(_sfc_main$1a, [["render", _sfc_render$1a], ["__scopeId", "data-v-9146b9ef"]]);
-
-    var _sfc_main$19 = /*@__PURE__*/ defineComponent({
-        __name: 'AcuMessage',
-        props: {
-            kind: { default: 'info' },
-            visible: { type: Boolean, default: true }
-        },
-        setup(__props, { expose: __expose }) {
-            __expose();
-            const props = __props;
-            const visible = computed(() => props.visible);
-            const __returned__ = { props, visible };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
-        }
-    });
-
-    injectSfcStyle("\n.acu-message[data-v-9bfe58b8] {\r\n  padding: 8px 0 8px 10px;\r\n  border-radius: 0;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  border: 0;\r\n  border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 28%, transparent);\r\n  line-height: 1.5;\r\n  background: transparent;\r\n  color: var(--acu-text-2);\n}\n.acu-message--info[data-v-9bfe58b8] {\r\n  border-left-color: color-mix(in srgb, var(--acu-text-3) 28%, transparent);\n}\n.acu-message--success[data-v-9bfe58b8] {\r\n  border-left-color: var(--acu-success);\n}\n.acu-message--warning[data-v-9bfe58b8] {\r\n  border-left-color: var(--acu-warning);\n}\n.acu-message--error[data-v-9bfe58b8] {\r\n  border-left-color: var(--acu-danger);\n}\r\n", "src/presentation-v2/components/_lib/AcuMessage.vue#style-0-9bfe58b8");
-    var AcuMessage_vue_vue_type_style_index_0_scoped_9bfe58b8_lang = null;
-
-    function _sfc_render$19(_ctx, _cache, $props, $setup, $data, $options) {
-	return $setup.visible ? (openBlock(), createElementBlock(
-		"div",
-		{
-			key: 0,
-			class: normalizeClass(["acu-message", `acu-message--${$props.kind}`]),
-			role: "status"
-		},
-		[renderSlot(_ctx.$slots, "default", {}, undefined, true)],
-		2
-		/* CLASS */
-	)) : createCommentVNode("v-if", true);
+    /** 为某个功能随机挑一个状态词。 */
+    function pickDeskPetStatusWord(feature, random = Math.random) {
+        const words = deskPetStatusWords[resolveDeskPetStatusGroup(feature)];
+        return words[Math.floor(random() * words.length) % words.length];
     }
-    var AcuMessage = /*#__PURE__*/ _export_sfc(_sfc_main$19, [["render", _sfc_render$19], ["__scopeId", "data-v-9bfe58b8"]]);
 
-    var _sfc_main$18 = /*@__PURE__*/ defineComponent({
-        __name: 'AcuInfoBanner',
-        props: {
-            text: { default: '' },
-            tone: { default: 'info' },
-            icon: { default: undefined }
-        },
-        setup(__props, { expose: __expose }) {
-            __expose();
-            const props = __props;
-            const iconClass = computed(() => {
-                if (props.icon)
-                    return props.icon;
-                return '';
-            });
-            const __returned__ = { props, iconClass };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
+    /**
+     * useNoticeCarousel — 单气泡轮播调度
+     *
+     * 时间片固定 5 秒：待播消息先进先出、播完出队；进行中任务循环复播。
+     * 每播满 2 片消息/任务插 1 片冷笑话；无消息无任务时空闲，每 5 分钟冒 1 条笑话。
+     * 静默模式或页面隐藏时不播放（静默时清空待播消息）。单一计时器驱动。
+     */
+    const NOTICE_SLIDE_MS = 5000;
+    const NOTICE_IDLE_JOKE_MS = 5 * 60 * 1000;
+    const NOTICE_SLIDES_PER_JOKE = 2;
+    /** 悬停后恢复计时时至少保留的展示时间，给用户移开鼠标后的余量。 */
+    const RESUME_MIN_MS = 1500;
+    function useNoticeCarousel(hubState, tasks) {
+        const slide = ref(null);
+        const actionBusy = ref(false);
+        const pageHidden = ref(false);
+        let slideTimer;
+        let idleTimer;
+        let slideStartedAt = 0;
+        let pausedRemaining = null;
+        let slidesSinceJoke = 0;
+        let lastTaskId = null;
+        let lastJoke = "";
+        let nextKey = 1;
+        const active = computed(() => !hubState.silent.value && !pageHidden.value);
+        const currentTask = computed(() => {
+            const current = slide.value;
+            if (!current || current.type !== "task")
+                return null;
+            return tasks.value.find(task => task.id === current.taskId) ?? null;
+        });
+        function clearSlideTimer() {
+            if (slideTimer === undefined)
+                return;
+            acuClearTimeout(slideTimer);
+            slideTimer = undefined;
         }
-    });
-
-    injectSfcStyle("\n.acu-info-banner[data-v-5b9a5d77] {\r\n  display: flex;\r\n  align-items: flex-start;\r\n  gap: var(--acu-space-250, 10px);\r\n  padding: var(--acu-space-225, 9px) var(--acu-space-250, 10px);\r\n  border-radius: var(--acu-radius-sm);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  line-height: 1.55;\r\n  background: color-mix(in srgb, var(--acu-text-3) 12%, transparent);\r\n  color: var(--acu-text-2);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-text-3) 18%, transparent);\r\n  min-width: 0;\n}\n.acu-info-banner__icon[data-v-5b9a5d77] {\r\n  flex-shrink: 0;\r\n  margin-top: var(--acu-space-050, 2px);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  line-height: 1.55;\n}\n.acu-info-banner__content[data-v-5b9a5d77] {\r\n  min-width: 0;\r\n  width: 100%;\r\n  word-wrap: break-word;\r\n  overflow-wrap: anywhere;\n}\n.acu-info-banner--info[data-v-5b9a5d77] {\r\n  background: color-mix(in srgb, var(--acu-text-3) 12%, transparent);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-text-3) 18%, transparent);\n}\n.acu-info-banner--info .acu-info-banner__icon[data-v-5b9a5d77] {\r\n  --acu-icon-color: var(--acu-text-3);\r\n  color: var(--acu-text-3);\n}\n.acu-info-banner--tip[data-v-5b9a5d77] {\r\n  background: color-mix(in srgb, var(--acu-accent) 10%, transparent);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-accent) 18%, transparent);\n}\n.acu-info-banner--tip .acu-info-banner__icon[data-v-5b9a5d77] {\r\n  --acu-icon-color: var(--acu-accent);\r\n  color: var(--acu-accent);\n}\n.acu-info-banner--warning[data-v-5b9a5d77] {\r\n  background: color-mix(in srgb, var(--acu-warning) 10%, transparent);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-warning) 20%, transparent);\n}\n.acu-info-banner--warning .acu-info-banner__icon[data-v-5b9a5d77] {\r\n  --acu-icon-color: var(--acu-warning);\r\n  color: var(--acu-warning);\n}\r\n", "src/presentation-v2/components/_lib/AcuInfoBanner.vue#style-0-5b9a5d77");
-    var AcuInfoBanner_vue_vue_type_style_index_0_scoped_5b9a5d77_lang = null;
-
-    const _hoisted_1$14 = { class: "acu-info-banner__content" };
-    function _sfc_render$18(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock(
-		"div",
-		{
-			class: normalizeClass(["acu-info-banner", `acu-info-banner--${$props.tone}`]),
-			role: "note"
-		},
-		[$setup.iconClass ? (openBlock(), createElementBlock(
-			"i",
-			{
-				key: 0,
-				class: normalizeClass(["acu-info-banner__icon", $setup.iconClass]),
-				"aria-hidden": "true"
-			},
-			null,
-			2
-			/* CLASS */
-		)) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_1$14, [renderSlot(_ctx.$slots, "default", {}, () => [createTextVNode(
-			toDisplayString($props.text),
-			1
-			/* TEXT */
-		)], true)])],
-		2
-		/* CLASS */
-	);
-    }
-    var AcuInfoBanner = /*#__PURE__*/ _export_sfc(_sfc_main$18, [["render", _sfc_render$18], ["__scopeId", "data-v-5b9a5d77"]]);
-
-    const MIN_DURATION_MS = 100;
-    const MAX_DURATION_MS = 200;
-    const MS_PER_PIXEL = 0.45;
-    const transitionTimers = new WeakMap();
-    function useAcuHeightTransition(options = {}) {
-        const collapsedTransform = options.collapsedTransform ?? 'translateY(-2px)';
-        const expandedTransform = options.expandedTransform ?? 'translateY(0)';
-        function prefersReducedMotion() {
-            return acuMatchesMedia('(prefers-reduced-motion: reduce)');
+        function clearIdleTimer() {
+            if (idleTimer === undefined)
+                return;
+            acuClearTimeout(idleTimer);
+            idleTimer = undefined;
         }
-        function scheduleFrame(callback) {
-            acuRequestAnimationFrame(callback);
+        function hasContent() {
+            return hubState.snapshot.value.notices.length > 0 || tasks.value.length > 0;
         }
-        function clearTransitionTimer(el) {
-            const timer = transitionTimers.get(el);
-            if (timer !== undefined) {
-                acuClearTimeout(timer);
-                transitionTimers.delete(el);
-            }
+        function nextTask() {
+            const list = tasks.value;
+            if (!list.length)
+                return null;
+            const lastIndex = lastTaskId ? list.findIndex(task => task.id === lastTaskId) : -1;
+            return list[(lastIndex + 1) % list.length];
         }
-        function restoreOverflow(el) {
-            if (options.restoreOverflow) {
-                options.restoreOverflow(el);
+        function show(next) {
+            clearSlideTimer();
+            clearIdleTimer();
+            actionBusy.value = false;
+            pausedRemaining = null;
+            slide.value = next;
+            slideStartedAt = Date.now();
+            slideTimer = acuSetTimeout(advance, NOTICE_SLIDE_MS);
+        }
+        function showJoke() {
+            lastJoke = pickDeskPetJoke(lastJoke);
+            if (!lastJoke)
+                return;
+            show({ type: "joke", key: `joke-${nextKey++}`, text: lastJoke });
+        }
+        function armIdle() {
+            clearIdleTimer();
+            if (!active.value)
+                return;
+            idleTimer = acuSetTimeout(() => {
+                idleTimer = undefined;
+                if (slide.value === null && active.value)
+                    showJoke();
+            }, NOTICE_IDLE_JOKE_MS);
+        }
+        function goIdle() {
+            clearSlideTimer();
+            slide.value = null;
+            slidesSinceJoke = 0;
+            armIdle();
+        }
+        function advance() {
+            clearSlideTimer();
+            if (!active.value) {
+                slide.value = null;
                 return;
             }
-            el.style.overflowY = 'hidden';
-            el.style.overflowX = 'hidden';
-        }
-        function cleanupTransition(el) {
-            const body = el;
-            clearTransitionTimer(body);
-            body.style.transition = '';
-            body.style.height = '';
-            body.style.opacity = '';
-            body.style.transform = '';
-            body.style.willChange = '';
-            restoreOverflow(body);
-        }
-        function getBorderHeight(el) {
-            const style = acuGetComputedStyle(el);
-            return (parseFloat(style.borderTopWidth) || 0) + (parseFloat(style.borderBottomWidth) || 0);
-        }
-        function getExpandedHeight(el) {
-            const contentHeight = el.scrollHeight + getBorderHeight(el);
-            const maxHeight = acuGetComputedStyle(el).maxHeight;
-            const parsedMax = Number.parseFloat(maxHeight);
-            if (Number.isFinite(parsedMax) && parsedMax > 0) {
-                return Math.min(contentHeight, parsedMax);
-            }
-            return contentHeight;
-        }
-        function durationForHeight(height) {
-            if (prefersReducedMotion())
-                return 1;
-            return Math.min(MAX_DURATION_MS, Math.max(MIN_DURATION_MS, Math.round(height * MS_PER_PIXEL)));
-        }
-        function runHeightTransition(el, targetHeight, direction, done) {
-            clearTransitionTimer(el);
-            const currentHeight = parseFloat(el.style.height) || el.getBoundingClientRect().height || getExpandedHeight(el);
-            const duration = durationForHeight(direction === 'enter' ? targetHeight : currentHeight);
-            const easing = direction === 'enter' ? 'ease-out' : 'ease-in';
-            if (prefersReducedMotion()) {
-                el.style.height = direction === 'enter' ? `${targetHeight}px` : '0px';
-                el.style.opacity = direction === 'enter' ? '1' : '0';
-                done();
+            if (slidesSinceJoke >= NOTICE_SLIDES_PER_JOKE && hasContent()) {
+                slidesSinceJoke = 0;
+                showJoke();
                 return;
             }
-            el.style.willChange = 'height, opacity, transform';
-            el.style.transition = `height ${duration}ms ${easing}, opacity ${Math.min(duration, 120)}ms ${easing}, transform ${duration}ms ${easing}`;
-            scheduleFrame(() => {
-                el.style.height = `${targetHeight}px`;
-                el.style.opacity = direction === 'enter' ? '1' : '0';
-                el.style.transform = direction === 'enter' ? expandedTransform : collapsedTransform;
-            });
-            const finish = () => {
-                clearTransitionTimer(el);
-                el.removeEventListener('transitionend', onEnd);
-                done();
-            };
-            const onEnd = (event) => {
-                if (event.target === el && event.propertyName === 'height')
-                    finish();
-            };
-            el.addEventListener('transitionend', onEnd);
-            transitionTimers.set(el, acuSetTimeout(finish, duration + 60));
+            const notice = shiftNotice_ACU();
+            if (notice) {
+                slidesSinceJoke += 1;
+                show({ type: "notice", key: notice.id, notice });
+                return;
+            }
+            const task = nextTask();
+            if (task) {
+                slidesSinceJoke += 1;
+                lastTaskId = task.id;
+                show({ type: "task", key: `${task.id}-${nextKey++}`, taskId: task.id, word: pickDeskPetStatusWord(task.feature) });
+                return;
+            }
+            goIdle();
         }
-        function beforeEnter(el) {
-            const body = el;
-            clearTransitionTimer(body);
-            body.style.height = '0px';
-            body.style.opacity = '0';
-            body.style.transform = collapsedTransform;
-            body.style.overflowY = 'hidden';
-            body.style.overflowX = 'hidden';
+        function skip() {
+            advance();
         }
-        function enter(el, done) {
-            runHeightTransition(el, getExpandedHeight(el), 'enter', done);
+        function pause() {
+            if (slideTimer === undefined)
+                return;
+            pausedRemaining = Math.max(0, NOTICE_SLIDE_MS - (Date.now() - slideStartedAt));
+            clearSlideTimer();
         }
-        function afterEnter(el) {
-            cleanupTransition(el);
+        function resume() {
+            if (pausedRemaining === null || !slide.value)
+                return;
+            const remaining = Math.max(pausedRemaining, RESUME_MIN_MS);
+            pausedRemaining = null;
+            slideStartedAt = Date.now() - (NOTICE_SLIDE_MS - remaining);
+            slideTimer = acuSetTimeout(advance, remaining);
         }
-        function beforeLeave(el) {
-            const body = el;
-            clearTransitionTimer(body);
-            body.style.height = `${body.getBoundingClientRect().height || getExpandedHeight(body)}px`;
-            body.style.opacity = '1';
-            body.style.transform = expandedTransform;
-            body.style.overflowY = 'hidden';
-            body.style.overflowX = 'hidden';
+        async function runNoticeAction(action) {
+            if (actionBusy.value)
+                return;
+            actionBusy.value = true;
+            try {
+                await runNoticeAction_ACU(action);
+            }
+            finally {
+                actionBusy.value = false;
+            }
+            advance();
         }
-        function leave(el, done) {
-            runHeightTransition(el, 0, 'leave', done);
+        async function runTaskAction() {
+            const task = currentTask.value;
+            if (!task?.action || actionBusy.value)
+                return;
+            actionBusy.value = true;
+            try {
+                await task.action.run();
+            }
+            catch {
+                // 动作自身负责提示；这里只保证按钮状态复位。
+            }
+            finally {
+                actionBusy.value = false;
+            }
         }
-        function afterLeave(el) {
-            cleanupTransition(el);
+        function dismissTask() {
+            const task = currentTask.value;
+            if (!task?.dismissible)
+                return;
+            dismissNoticeTask_ACU(task.id);
+            advance();
         }
-        return {
-            beforeEnter,
-            enter,
-            afterEnter,
-            beforeLeave,
-            leave,
-            afterLeave,
-            cleanupTransition,
+        // 新内容到达时从空闲唤醒。
+        watch(() => [hubState.snapshot.value.notices.length, tasks.value.length], () => {
+            if (active.value && slide.value === null && hasContent())
+                advance();
+        });
+        // 当前任务片对应的任务结束时立即切走，不留空气泡。
+        watch(() => slide.value?.type === "task" && !currentTask.value, (taskGone) => {
+            if (taskGone)
+                advance();
+        });
+        watch(active, (isActive) => {
+            if (!isActive) {
+                clearSlideTimer();
+                clearIdleTimer();
+                slide.value = null;
+                if (hubState.silent.value)
+                    clearNotices_ACU();
+                return;
+            }
+            advance();
+        }, { immediate: true });
+        const doc = getAcuHostDocument();
+        const onVisibilityChange = () => {
+            pageHidden.value = doc.hidden === true;
         };
-    }
-
-    var _sfc_main$17 = /*@__PURE__*/ defineComponent({
-        __name: 'AcuPanel',
-        props: {
-            title: { default: undefined },
-            description: { default: undefined },
-            descriptionTone: { default: 'info' }
-        },
-        emits: ["description-toggle"],
-        setup(__props, { expose: __expose, emit: __emit }) {
-            __expose();
-            const props = __props;
-            const slots = useSlots();
-            const descriptionOpen = ref(false);
-            const descriptionId = useId();
-            const hasDescriptionSlot = typeof slots.description === 'function';
-            const hasDescription = computed(() => Boolean(props.description) || hasDescriptionSlot);
-            const descriptionTransition = useAcuHeightTransition({
-                collapsedTransform: 'none',
-                expandedTransform: 'none',
+        onVisibilityChange();
+        doc.addEventListener("visibilitychange", onVisibilityChange);
+        if (getCurrentScope()) {
+            onScopeDispose(() => {
+                doc.removeEventListener("visibilitychange", onVisibilityChange);
+                clearSlideTimer();
+                clearIdleTimer();
             });
-            const emit = __emit;
-            function toggleDescription() {
-                descriptionOpen.value = !descriptionOpen.value;
-                emit('description-toggle', descriptionOpen.value);
-            }
-            function beforeDescriptionEnter(el) {
-                descriptionTransition.beforeEnter(el);
-            }
-            function descriptionEnter(el, done) {
-                descriptionTransition.enter(el, done);
-            }
-            function afterDescriptionEnter(el) {
-                descriptionTransition.afterEnter(el);
-            }
-            function beforeDescriptionLeave(el) {
-                descriptionTransition.beforeLeave(el);
-            }
-            function descriptionLeave(el, done) {
-                descriptionTransition.leave(el, done);
-            }
-            function afterDescriptionLeave(el) {
-                descriptionTransition.afterLeave(el);
-            }
-            function cleanupDescriptionTransition(el) {
-                descriptionTransition.cleanupTransition(el);
-            }
-            const __returned__ = { props, slots, descriptionOpen, descriptionId, hasDescriptionSlot, hasDescription, descriptionTransition, emit, toggleDescription, beforeDescriptionEnter, descriptionEnter, afterDescriptionEnter, beforeDescriptionLeave, descriptionLeave, afterDescriptionLeave, cleanupDescriptionTransition, AcuIconButton, AcuInfoBanner };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
         }
-    });
-
-    injectSfcStyle("\n.acu-panel[data-v-c4139d23] {\r\n  min-width: 0; padding: var(--acu-panel-padding, 16px);\r\n  background: var(--acu-bg-1);\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-md);\r\n  display: flex; flex-direction: column; gap: 0;\r\n  height: 100%;\n}\n.acu-panel__header[data-v-c4139d23] {\r\n  display: flex; align-items: center; justify-content: space-between;\r\n  gap: var(--acu-panel-gap, 12px); margin-bottom: var(--acu-panel-gap, 12px);\r\n  min-height: var(--acu-control-height-md, 32px);\r\n  transition: margin-bottom 0.15s ease;\n}\n.acu-panel__header--description-open[data-v-c4139d23] {\r\n  margin-bottom: var(--acu-space-2, 8px);\n}\n.acu-panel__title[data-v-c4139d23] {\r\n  margin: 0;\r\n  min-width: 0;\r\n  flex: 1 1 auto;\r\n  font-size: var(--acu-font-size-panel-title, 15px);\r\n  line-height: 1.3;\r\n  color: var(--acu-text-1);\n}\n.acu-panel__header-right[data-v-c4139d23] {\r\n  margin-left: auto;\r\n  display: flex;\r\n  align-items: center;\r\n  gap: var(--acu-space-2, 8px);\r\n  flex-shrink: 0;\n}\n.acu-panel__actions[data-v-c4139d23] { display: flex; align-items: center; gap: var(--acu-space-2, 8px); flex-shrink: 0;\n}\n.acu-panel__description-button[data-v-c4139d23] {\r\n  width: var(--acu-button-height-sm, 28px);\r\n  height: var(--acu-button-height-sm, 28px);\r\n  display: inline-flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: transparent;\r\n  color: var(--acu-text-3);\r\n  cursor: pointer;\r\n  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;\n}\n.acu-panel__description-button[data-v-c4139d23]:hover {\r\n  background: var(--acu-bg-2);\r\n  color: var(--acu-text-1);\n}\n.acu-panel__description-button--open[data-v-c4139d23] {\r\n  background: color-mix(in srgb, var(--acu-text-3) 12%, transparent);\r\n  color: var(--acu-text-1);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-text-3) 18%, transparent);\n}\n.acu-panel__description-button[data-v-c4139d23]:focus-visible {\r\n  outline: none;\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-panel__body[data-v-c4139d23] { display: flex; flex-direction: column; gap: var(--acu-panel-gap, 12px); min-width: 0; flex: 1 1 auto;\n}\n.acu-panel__description-region[data-v-c4139d23] {\r\n  min-width: 0;\r\n  overflow: hidden;\n}\n.acu-panel__description-region-inner[data-v-c4139d23] {\r\n  padding-bottom: var(--acu-panel-gap, 12px);\r\n  overflow: hidden;\n}\r\n", "src/presentation-v2/components/_lib/AcuPanel.vue#style-0-c4139d23");
-    var AcuPanel_vue_vue_type_style_index_0_scoped_c4139d23_lang = null;
-
-    const _hoisted_1$13 = { class: "acu-panel" };
-    const _hoisted_2$_ = {
-	key: 0,
-	class: "acu-panel__title"
-    };
-    const _hoisted_3$Q = {
-	key: 1,
-	class: "acu-panel__header-right"
-    };
-    const _hoisted_4$H = {
-	key: 0,
-	class: "acu-panel__actions"
-    };
-    const _hoisted_5$z = ["id", "aria-hidden"];
-    const _hoisted_6$w = { class: "acu-panel__description-region-inner" };
-    const _hoisted_7$u = { class: "acu-panel__body" };
-    function _sfc_render$17(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$13, [
-		$props.title || _ctx.$slots.title || _ctx.$slots.actions || $setup.hasDescription ? (openBlock(), createElementBlock(
-			"header",
-			{
-				key: 0,
-				class: normalizeClass(["acu-panel__header", { "acu-panel__header--description-open": $setup.descriptionOpen }])
-			},
-			[$props.title || _ctx.$slots.title ? (openBlock(), createElementBlock("h3", _hoisted_2$_, [renderSlot(_ctx.$slots, "title", {}, () => [createTextVNode(
-				toDisplayString($props.title),
-				1
-				/* TEXT */
-			)], true)])) : createCommentVNode("v-if", true), _ctx.$slots.actions || $setup.hasDescription ? (openBlock(), createElementBlock("div", _hoisted_3$Q, [_ctx.$slots.actions ? (openBlock(), createElementBlock("div", _hoisted_4$H, [renderSlot(_ctx.$slots, "actions", {}, undefined, true)])) : createCommentVNode("v-if", true), $setup.hasDescription ? (openBlock(), createBlock($setup["AcuIconButton"], {
-				key: 1,
-				class: normalizeClass(["acu-panel__description-button", { "acu-panel__description-button--open": $setup.descriptionOpen }]),
-				icon: "fa-solid fa-circle-info",
-				"aria-expanded": $setup.descriptionOpen,
-				"aria-controls": $setup.descriptionId,
-				title: $setup.descriptionOpen ? "收起说明" : "展开说明",
-				"aria-label": $setup.descriptionOpen ? "收起说明" : "展开说明",
-				onClick: $setup.toggleDescription
-			}, null, 8, [
-				"class",
-				"aria-expanded",
-				"aria-controls",
-				"title",
-				"aria-label"
-			])) : createCommentVNode("v-if", true)])) : createCommentVNode("v-if", true)],
-			2
-			/* CLASS */
-		)) : createCommentVNode("v-if", true),
-		createVNode(Transition, {
-			css: false,
-			onBeforeEnter: $setup.beforeDescriptionEnter,
-			onEnter: $setup.descriptionEnter,
-			onAfterEnter: $setup.afterDescriptionEnter,
-			onEnterCancelled: $setup.cleanupDescriptionTransition,
-			onBeforeLeave: $setup.beforeDescriptionLeave,
-			onLeave: $setup.descriptionLeave,
-			onAfterLeave: $setup.afterDescriptionLeave,
-			onLeaveCancelled: $setup.cleanupDescriptionTransition
-		}, {
-			default: withCtx(() => [$setup.hasDescription ? withDirectives((openBlock(), createElementBlock("div", {
-				key: 0,
-				id: $setup.descriptionId,
-				class: "acu-panel__description-region",
-				"aria-hidden": !$setup.descriptionOpen
-			}, [createBaseVNode("div", _hoisted_6$w, [createVNode($setup["AcuInfoBanner"], {
-				class: "acu-panel__description-banner",
-				tone: $props.descriptionTone
-			}, {
-				default: withCtx(() => [renderSlot(_ctx.$slots, "description", {}, () => [createTextVNode(
-					toDisplayString($props.description),
-					1
-					/* TEXT */
-				)], true)]),
-				_: 3
-			}, 8, ["tone"])])], 8, _hoisted_5$z)), [[vShow, $setup.descriptionOpen]]) : createCommentVNode("v-if", true)]),
-			_: 3
-		}),
-		createBaseVNode("div", _hoisted_7$u, [renderSlot(_ctx.$slots, "default", {}, undefined, true)])
-	]);
+        return { slide, currentTask, actionBusy, skip, pause, resume, runNoticeAction, runTaskAction, dismissTask };
     }
-    var AcuPanel = /*#__PURE__*/ _export_sfc(_sfc_main$17, [["render", _sfc_render$17], ["__scopeId", "data-v-c4139d23"]]);
 
-    var _sfc_main$16 = /*@__PURE__*/ defineComponent({
-        __name: 'AcuPanelGrid',
-        props: {
-            columns: { default: 2 },
-            collapseAt: { default: 'md' }
-        },
-        setup(__props, { expose: __expose }) {
-            __expose();
-            const props = __props;
-            const gridStyle = computed(() => ({
-                '--acu-panel-grid-columns': String(Math.max(1, Math.floor(props.columns))),
-            }));
-            const __returned__ = { props, gridStyle };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
-        }
-    });
-
-    injectSfcStyle("\n.acu-panel-grid[data-v-b00ea74c] {\r\n  min-width: 0;\r\n  display: grid;\r\n  grid-template-columns: repeat(var(--acu-panel-grid-columns), minmax(0, 1fr));\r\n  gap: var(--acu-panel-grid-gap, 16px);\r\n  align-items: stretch;\n}\n.acu-panel-grid[data-v-b00ea74c] >  * {\r\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-panel-grid--collapse-md[data-v-b00ea74c] {\r\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 1080px) {\n.acu-panel-grid--collapse-lg[data-v-b00ea74c] {\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuPanelGrid.vue#style-0-b00ea74c");
-    var AcuPanelGrid_vue_vue_type_style_index_0_scoped_b00ea74c_lang = null;
-
-    function _sfc_render$16(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock(
-		"div",
-		{
-			class: normalizeClass(["acu-panel-grid", `acu-panel-grid--collapse-${$props.collapseAt}`]),
-			style: normalizeStyle($setup.gridStyle)
-		},
-		[renderSlot(_ctx.$slots, "default", {}, undefined, true)],
-		6
-		/* CLASS, STYLE */
-	);
-    }
-    var AcuPanelGrid = /*#__PURE__*/ _export_sfc(_sfc_main$16, [["render", _sfc_render$16], ["__scopeId", "data-v-b00ea74c"]]);
-
-    const dashboardCopy = {
-        pageTitle: "仪表盘",
-        panels: {
-            healthTitle: "运行概览",
-            healthDescription: "这里显示当前聊天和已开启功能的状态。只有标为“需要处理”的项目才会影响使用；未启用或待准备通常不需要操作。",
-            togglesTitle: "开关",
-            togglesDescription: "基础设置：当前聊天中可随时开关的功能。高级设置：调整后可能影响数据库运行，请谨慎修改。",
-        },
-        groups: {
-            ariaLabel: "开关分组切换",
-            basic: "基础设置",
-            advanced: "高级设置",
-        },
-        developerToggle: {
-            label: "启用开发者选项",
-            description: "默认关闭。显示开发者页面，不推荐无经验用户启用。",
-        },
-        storage: {
-            sectionLabel: "存储模式",
-            description: "选择表格数据的保存方式。切换会重置填表提示词。填表异常时，可切回原模式检查。",
-            modeLabel(mode) {
-                return mode === "sqlite" ? "SQLite" : "原生 JSON";
-            },
-            optionDescription: {
-                native: "兼容性高，适合基础表格。",
-                sqlite: "准确率高，适合复杂表格与多表关联。",
-            },
-            switchLabel(mode) {
-                return mode === "sqlite" ? "SQL" : "原生";
-            },
-            badge(mode) {
-                return mode === "native" ? "兼容性最佳" : "适合复杂表";
-            },
-            switched(mode) {
-                return `已切换到 ${dashboardCopy.storage.modeLabel(mode)} 模式。`;
-            },
-            switchFailed: "存储模式切换失败。",
-        },
-        api: {
-            title: "API",
-            action: "配置 API",
-            unavailableBadge: "不可用",
-            unavailableSummary: "插件还没有拿到酒馆侧运行接口，当前 API 状态无法确认。",
-            unconfiguredBadge: "未配置",
-            configuredBadge: "已配置",
-            tavernPresetLabel(name) {
-                return `酒馆连接预设 ${name}`;
-            },
-            tavernPresetMissingLabel: "酒馆连接预设",
-            tavernPresetMissingIssue: "未选择酒馆连接预设",
-            mainApiLabel: "酒馆主 API",
-            customApiLabel: "自定义 API",
-            endpointField: "端点",
-            modelField: "模型",
-            missingIssue(fields) {
-                return `缺少${fields}`;
-            },
-            namedPresetNotReady(name, issue) {
-                return `API 页当前预设 "${name}" 还不能发起请求：${issue}。`;
-            },
-            noUsablePreset(issue) {
-                return `API 页当前没有可用预设，当前连接配置也不完整：${issue}。`;
-            },
-            namedPresetReady(name, statusLabel) {
-                return `API 页当前预设 "${name}" 已配置，使用${statusLabel}。`;
-            },
-            configReadyWithoutPreset(statusLabel) {
-                return `当前连接配置已配置，使用${statusLabel}，但还没有选中 API 预设。`;
-            },
-        },
-        tableHealth: {
-            title: "表格更新",
-            noChatBadge: "未加载聊天",
-            noChatSummary: "当前没有加载 SillyTavern 聊天，暂时无法读取对应数据库表格或计算自动更新楼层。",
-            notLoadedBadge: "待准备",
-            notLoadedSummary(totalAi) {
-                return `当前聊天还没有加载数据库表格。第一次填表或初始化后，这里会自动显示更新状态；当前已有 ${totalAi} 条 AI 回复。`;
-            },
-            updateSettingsAction: "查看填表工作台",
-            statusAction: "查看表格状态",
-            overdueBadge: "待更新",
-            dueRowsDetail(count) {
-                return `${count} 张表已到触发点但最后更新楼层没有前进`;
-            },
-            initialDueRowsDetail(count) {
-                return `${count} 张表满足首次更新条件但尚未记录过更新`;
-            },
-            maxOverdueDetail(count) {
-                return `最大积压 ${count} 层`;
-            },
-            overdueSummary(issueCount, detail) {
-                return detail
-                    ? `${issueCount} 张表已经满足自动更新条件，后续填表或手动检查时会继续处理：${detail}。`
-                    : `${issueCount} 张表已经满足自动更新条件，后续填表或手动检查时会继续处理。`;
-            },
-            okBadge: "正常",
-            okSummary(activeCount, totalAi, disabledCount) {
-                return activeCount
-                    ? `当前 ${activeCount} 张自动更新表没有积压；已有 ${totalAi} 条 AI 回复${disabledCount ? `，另有 ${disabledCount} 张表不参与自动更新` : ""}。`
-                    : `当前没有参与自动更新的表；已有 ${totalAi} 条 AI 回复。`;
-            },
-        },
-        sqlHealth: {
-            title: "SQL 模式",
-            action: "查看表格模板",
-            tableNameSamples(visibleNames, totalCount) {
-                return totalCount > 3
-                    ? `${visibleNames} 等 ${totalCount} 张表`
-                    : visibleNames;
-            },
-            noChatBadge: "未加载聊天",
-            noChatSummary(sqlEnabled) {
-                return sqlEnabled
-                    ? "当前没有加载 SillyTavern 聊天，暂时无法检查当前聊天的表格模板是否适配。"
-                    : "当前没有加载 SillyTavern 聊天，暂时无法检查当前聊天的表格模板是否适配。";
-            },
-            pendingBadge: "待检查",
-            disabledBadge: "未启用",
-            noTemplatesSummary(sqlEnabled) {
-                return sqlEnabled
-                    ? "当前存储模式是 SQLite，还没有加载表格模板。第一次填表前，请确认模板已经补好 SQL 表结构信息。"
-                    : "当前存储模式是原生 JSON，还没有加载表格模板。继续使用原生 JSON 时无需处理 SQL 模板信息。";
-            },
-            looksSqlBadge: "开发者提示",
-            looksSqlSummary(ddlCount, total) {
-                return `当前存储模式是原生 JSON，开发者检查发现 ${ddlCount}/${total} 张表包含 SQL 结构信息。若要使用 SQLite，请在高级设置里选择“SQLite”；继续使用原生 JSON 时通常无需处理。`;
-            },
-            nativeModeBadge: "原生 JSON",
-            nativeModeSummary(total) {
-                return `当前存储模式是原生 JSON，已加载 ${total} 张表。模板中的 SQL 信息不会影响原生 JSON 模式运行；需要切换 SQLite 时再检查模板。`;
-            },
-            nativeMatchBadge: "模板适配",
-            nativeMatchSummary(total) {
-                return `当前存储模式是原生 JSON，当前 ${total} 张表也都是普通表格模板，模式与模板适配。`;
-            },
-            missingDdlBadge: "模板未适配",
-            missingDdlSummary(count, total, names) {
-                return `当前存储模式是 SQLite，但 ${count}/${total} 张表还不是完整的 SQL 模板：${names}。这些表可能无法正确保存到 SQLite，请到“表格模板”补齐 SQL 表结构信息，或切回原生 JSON。`;
-            },
-            invalidDdlBadge: "模板不适配",
-            invalidDdlSummary(count, total, names) {
-                return `当前存储模式是 SQLite，但 ${count}/${total} 张表的 SQL 表结构信息与表头不一致：${names}。这可能导致数据写入失败，请先校准模板。`;
-            },
-            templateMatchBadge: "模板适配",
-            templateMatchSummary(total) {
-                return `当前存储模式是 SQLite，当前 ${total} 张表都是适配 SQL 的表格模板，表结构也与表头一致。`;
-            },
-        },
-        vectorHealth: {
-            title: "交火向量",
-            configureAction: "前往填表模式",
-            disabledBadge: "未启用",
-            disabledSummary: "当前填表模式不使用向量召回，无需配置向量服务。",
-            incompleteBadge: "配置不完整",
-            incompleteSummary(errors) {
-                return errors.length
-                    ? `当前填表模式需要向量服务，但它还不能正常使用：${errors.join("；")}。`
-                    : "当前填表模式需要向量服务，但它还不能正常使用。";
-            },
-            configuredBadge: "已配置",
-            configuredSummary: "当前填表模式使用向量召回，必填的向量化服务已经配置完整。",
-            readFailedBadge: "读取失败",
-            readFailedSummary(message) {
-                return `交火向量配置读取失败：${message}。`;
-            },
-            readFailedFallback: "请到填表工作台重新检查向量服务配置",
-            missingEmbeddingEndpoint: "缺少“向量化URL”",
-            missingEmbeddingModel: "缺少“向量化模型名”",
-            rerankPairRequired: "“重排URL”和“重排模型名”需要同时填写，或者同时留空",
-        },
-        logs: {
-            title: "运行日志",
-            action: "查看运行日志",
-            noErrorBadge: "无报错",
-            noErrorSummary(warnCount, showDeveloperDiagnostics = false) {
-                return showDeveloperDiagnostics && warnCount
-                    ? `本次前端会话没有记录到 Error 级别日志；开发者模式下可见 ${warnCount} 条 Warn。`
-                    : "本次前端会话没有记录到 Error 级别日志。";
-            },
-            errorBadge(errorCount) {
-                return `${errorCount} 条报错`;
-            },
-            errorSummary(reason, errorCount, warnCount, tag) {
-                return `${reason}本次前端会话累计 ${errorCount} 条 Error、${warnCount} 条 Warn，最近一条来自 ${tag}。`;
-            },
-            apiIssue: "最近日志指向 API 配置或连接问题，填表请求可能没有成功发出。",
-            outputFormatIssue: "最近日志指向填表输出格式问题，模型返回内容可能没有被识别为有效表格修改。",
-            commandParseIssue: "最近日志指向填表指令解析问题，部分修改可能没有应用。",
-            sqlIssue: "最近日志指向 SQL 或表结构问题，请检查表格模板、列名和 SQL 填表提示词。",
-            saveIssue: "最近日志指向保存失败，表格可能生成了修改但没有写回聊天记录。",
-            genericError: "运行日志中有报错，请去高级工具查看具体内容。",
-            genericWarning: "运行日志中有警告，请去高级工具确认是否需要处理。",
-        },
-        tableStatus: {
-            none: "无",
-            notInitialized: "未初始",
-            pendingInitial: "待初始",
-        },
-        toggles: {
-            autoUpdate: {
-                label: "自动更新",
-                description: "默认开启。关闭后需手动更新表。仅推荐在测试或自由发挥时关闭。",
-            },
-            toastMute: {
-                label: "静默提示框",
-                description: "默认关闭。开启后仅保留填表、规划等核心提示，其他浮窗通知不再弹出。",
-            },
-            zeroTk: {
-                label: "0TK 占用模式",
-                description: "默认开启。开启后纪要概览不占用上下文。",
-            },
-            continuation: {
-                label: "智能续写",
-                description: "手动功能。代替你自动发送提示词，AI 根据内容持续续写。",
-            },
-            worldSimulation: {
-                label: "格林推演",
-                description: "审计推演账本、阶段计划与证据，并在确认后把可感知的场外信号写进正文。",
-            },
-            externalImport: {
-                label: "外部导入",
-                description: "手动功能。将 TXT 小说快速转为未精修的世界书条目，方便制作角色卡。",
-            },
-            contentReplace: {
-                label: "正文替换",
-                description: "默认关闭。开启后每轮正文生成后会自动检查并优化 AI 回复的正文内容。",
-            },
-        },
-        templatePreset: {
-            defaultName: "默认预设",
-            globalScope: "全局",
-            readFailed: "读取失败",
-        },
+    const WORLD_SIMULATION_PROGRESS_LABELS_ACU = {
+        survey: '世界线测绘',
+        intel: '信息取证',
+        backstage: '幕后演算',
+        batchOne: '批次一：时序与伏线 / 人物谱',
+        batchTwo: '批次二：纪要、风声与场外信号',
+        review: '因果审核',
+        anchor: '提交',
+        completed: '推演完成',
+        interrupted: '推演中断',
     };
-
-    var _sfc_main$15 = /*@__PURE__*/ defineComponent({
-        __name: 'DashboardStorageModeSection',
-        props: {
-            options: {},
-            modelValue: {}
-        },
-        emits: ["update:modelValue"],
-        setup(__props, { expose: __expose, emit: __emit }) {
-            __expose();
-            const props = __props;
-            const emit = __emit;
-            const switchOptions = computed(() => props.options.map((option) => ({
-                value: option.value,
-                label: dashboardCopy.storage.switchLabel(option.value),
-            })));
-            const decoratedOptions = computed(() => props.options.map((option) => ({
-                ...option,
-                iconClass: option.value === "sqlite"
-                    ? "fa-solid fa-database"
-                    : "fa-regular fa-file-lines",
-                badge: dashboardCopy.storage.badge(option.value),
-            })));
-            function select(value) {
-                if (value === props.modelValue)
-                    return;
-                emit("update:modelValue", value);
+    function isReviewerEntry_ACU(entry) {
+        return entry.agentName === 'causality-reviewer';
+    }
+    function currentRunEntries_ACU(entries) {
+        let start = 0;
+        for (let index = entries.length - 1; index >= 0; index -= 1) {
+            if (entries[index].kind === 'run_started' || entries[index].kind === 'run_resumed') {
+                start = index;
+                break;
             }
-            const __returned__ = { props, emit, switchOptions, decoratedOptions, select, AcuSegmentedControl, get dashboardCopy() { return dashboardCopy; } };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
         }
-    });
-
-    injectSfcStyle("\n.acu-dashboard-storage-mode[data-v-12a63c98] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-dashboard-storage-mode__head[data-v-12a63c98] {\r\n  min-width: 0;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: 12px;\n}\n.acu-dashboard-storage-mode__label[data-v-12a63c98] {\r\n  min-width: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  font-weight: 500;\n}\n.acu-dashboard-storage-mode__desc-main[data-v-12a63c98] {\r\n  margin: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-dashboard-storage-mode__switch[data-v-12a63c98] {\r\n  flex: 0 0 auto;\r\n  width: 92px;\n}\n.acu-dashboard-storage-mode__cards[data-v-12a63c98] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 4px;\r\n  margin-top: 4px;\n}\n.acu-dashboard-storage-mode__card[data-v-12a63c98] {\r\n  position: relative;\r\n  min-width: 0;\r\n  padding: 5px 0 5px 8px;\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: transparent;\r\n  display: grid;\r\n  grid-template-columns: 26px minmax(0, 1fr);\r\n  gap: 8px;\r\n  align-items: center;\r\n  transition:\r\n    background 0.15s ease,\r\n    box-shadow 0.15s ease;\n}\n.acu-dashboard-storage-mode__card--active[data-v-12a63c98] {\r\n  background: color-mix(in srgb, var(--acu-accent) 8%, transparent);\r\n  box-shadow:\r\n    inset 0 0 0 1px\r\n    color-mix(in srgb, var(--acu-accent) 30%, transparent);\n}\n.acu-dashboard-storage-mode__icon[data-v-12a63c98] {\r\n  width: 26px;\r\n  height: 26px;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: transparent;\r\n  color: var(--acu-text-3);\r\n  display: inline-flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  font-size: 15px;\n}\n.acu-dashboard-storage-mode__card--active .acu-dashboard-storage-mode__icon[data-v-12a63c98] {\r\n  color: var(--acu-accent);\r\n  background: transparent;\n}\n.acu-dashboard-storage-mode__body[data-v-12a63c98] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 4px;\n}\n.acu-dashboard-storage-mode__card-head[data-v-12a63c98] {\r\n  min-width: 0;\r\n  display: flex;\r\n  align-items: center;\r\n  flex-wrap: wrap;\r\n  gap: 6px;\n}\n.acu-dashboard-storage-mode__name[data-v-12a63c98] {\r\n  min-width: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  font-weight: 600;\r\n  line-height: 1.25;\n}\n.acu-dashboard-storage-mode__badge[data-v-12a63c98] {\r\n  display: inline-flex;\r\n  align-items: center;\r\n  min-height: 18px;\r\n  padding: 1px 6px;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-micro, 10px);\r\n  line-height: 1.2;\r\n  white-space: nowrap;\n}\n.acu-dashboard-storage-mode__card--active .acu-dashboard-storage-mode__badge[data-v-12a63c98] {\r\n  background: color-mix(in srgb, var(--acu-accent) 16%, transparent);\r\n  color: var(--acu-accent);\n}\n.acu-dashboard-storage-mode__desc[data-v-12a63c98] {\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n@media (max-width: 640px) {\n.acu-dashboard-storage-mode__head[data-v-12a63c98] {\r\n    align-items: center;\n}\n.acu-dashboard-storage-mode__switch[data-v-12a63c98] {\r\n    width: 88px;\n}\n.acu-dashboard-storage-mode__card[data-v-12a63c98] {\r\n    grid-template-columns: minmax(0, 1fr);\n}\n.acu-dashboard-storage-mode__icon[data-v-12a63c98] {\r\n    display: none;\n}\n}\r\n", "src/presentation-v2/components/DashboardStorageModeSection.vue#style-0-12a63c98");
-    var DashboardStorageModeSection_vue_vue_type_style_index_0_scoped_12a63c98_lang = null;
-
-    const _hoisted_1$12 = ["aria-label"];
-    const _hoisted_2$Z = { class: "acu-dashboard-storage-mode__head" };
-    const _hoisted_3$P = { class: "acu-dashboard-storage-mode__label" };
-    const _hoisted_4$G = { class: "acu-dashboard-storage-mode__desc-main" };
-    const _hoisted_5$y = { class: "acu-dashboard-storage-mode__cards" };
-    const _hoisted_6$v = {
-	class: "acu-dashboard-storage-mode__icon",
-	"aria-hidden": "true"
-    };
-    const _hoisted_7$t = { class: "acu-dashboard-storage-mode__body" };
-    const _hoisted_8$s = { class: "acu-dashboard-storage-mode__card-head" };
-    const _hoisted_9$n = { class: "acu-dashboard-storage-mode__name" };
-    const _hoisted_10$k = { class: "acu-dashboard-storage-mode__badge" };
-    const _hoisted_11$k = { class: "acu-dashboard-storage-mode__desc" };
-    function _sfc_render$15(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", {
-		class: "acu-dashboard-storage-mode",
-		"aria-label": $setup.dashboardCopy.storage.sectionLabel
-	}, [
-		createBaseVNode("div", _hoisted_2$Z, [createBaseVNode(
-			"span",
-			_hoisted_3$P,
-			toDisplayString($setup.dashboardCopy.storage.sectionLabel),
-			1
-			/* TEXT */
-		), createVNode($setup["AcuSegmentedControl"], {
-			class: "acu-dashboard-storage-mode__switch",
-			"aria-label": $setup.dashboardCopy.storage.sectionLabel,
-			options: $setup.switchOptions,
-			"model-value": $props.modelValue,
-			size: "sm",
-			"onUpdate:modelValue": $setup.select
-		}, null, 8, [
-			"aria-label",
-			"options",
-			"model-value"
-		])]),
-		createBaseVNode(
-			"p",
-			_hoisted_4$G,
-			toDisplayString($setup.dashboardCopy.storage.description),
-			1
-			/* TEXT */
-		),
-		createBaseVNode("div", _hoisted_5$y, [(openBlock(true), createElementBlock(
-			Fragment,
-			null,
-			renderList($setup.decoratedOptions, (option) => {
-				return openBlock(), createElementBlock(
-					"article",
-					{
-						key: option.value,
-						class: normalizeClass(["acu-dashboard-storage-mode__card", { "acu-dashboard-storage-mode__card--active": option.value === $props.modelValue }])
-					},
-					[createBaseVNode("span", _hoisted_6$v, [createBaseVNode(
-						"i",
-						{ class: normalizeClass(option.iconClass) },
-						null,
-						2
-						/* CLASS */
-					)]), createBaseVNode("span", _hoisted_7$t, [createBaseVNode("span", _hoisted_8$s, [createBaseVNode(
-						"span",
-						_hoisted_9$n,
-						toDisplayString(option.label),
-						1
-						/* TEXT */
-					), createBaseVNode(
-						"span",
-						_hoisted_10$k,
-						toDisplayString(option.badge),
-						1
-						/* TEXT */
-					)]), createBaseVNode(
-						"span",
-						_hoisted_11$k,
-						toDisplayString(option.description),
-						1
-						/* TEXT */
-					)])],
-					2
-					/* CLASS */
-				);
-			}),
-			128
-			/* KEYED_FRAGMENT */
-		))])
-	], 8, _hoisted_1$12);
+        return entries.slice(start);
     }
-    var DashboardStorageModeSection = /*#__PURE__*/ _export_sfc(_sfc_main$15, [["render", _sfc_render$15], ["__scopeId", "data-v-12a63c98"]]);
-
-    var _sfc_main$14 = /*@__PURE__*/ defineComponent({
-        ...{ inheritAttrs: false },
-        __name: 'AcuToggle',
-        props: {
-            modelValue: { type: Boolean },
-            label: { default: undefined },
-            disabled: { type: Boolean, default: false }
-        },
-        emits: ["update:modelValue"],
-        setup(__props, { expose: __expose, emit: __emit }) {
-            __expose();
-            const props = __props;
-            const emit = __emit;
-            function onClick() {
-                if (props.disabled)
-                    return;
-                emit('update:modelValue', !props.modelValue);
+    function hiddenView_ACU() {
+        return { visible: false, phase: null, label: '', concurrent: 0, terminal: false };
+    }
+    /**
+     * 从最近一次 run 的 session entries 推导浮卡阶段。不读 patch 正文，不暴露角色内部名。
+     * 无独立 stage_plan 时跳过「世界线测绘」。
+     */
+    function deriveWorldSimulationProgressView_ACU(entries, running) {
+        const run = currentRunEntries_ACU(entries);
+        const last = run[run.length - 1];
+        if (!running) {
+            if (last?.kind === 'run_completed') {
+                return { visible: true, phase: 'completed', label: WORLD_SIMULATION_PROGRESS_LABELS_ACU.completed, concurrent: 0, terminal: true };
             }
-            const __returned__ = { props, emit, onClick };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
+            if (last?.kind === 'run_failed' || last?.kind === 'block') {
+                return { visible: true, phase: 'interrupted', label: WORLD_SIMULATION_PROGRESS_LABELS_ACU.interrupted, concurrent: 0, terminal: true };
+            }
+            return hiddenView_ACU();
         }
-    });
-
-    injectSfcStyle("\n.acu-toggle[data-v-61c4c790] {\r\n  display: inline-flex; align-items: center; gap: var(--acu-space-2, 8px);\r\n  flex: 0 0 auto;\r\n  padding: 0; border: 0; background: transparent;\r\n  font: inherit; font-size: var(--acu-font-size-body, 12px); color: var(--acu-text-2);\r\n  cursor: pointer; user-select: none;\n}\n.acu-toggle--disabled[data-v-61c4c790] { opacity: 0.5; cursor: not-allowed;\n}\n.acu-toggle__track[data-v-61c4c790] {\r\n  position: relative; flex-shrink: 0;\r\n  width: var(--acu-toggle-width, 36px); height: var(--acu-toggle-height, 20px);\r\n  background: var(--acu-bg-2);\r\n  border: 0;\r\n  border-radius: var(--acu-toggle-radius, 10px);\r\n  transition: background 0.2s ease, box-shadow 0.2s ease;\n}\n.acu-toggle--on .acu-toggle__track[data-v-61c4c790] {\r\n  background: var(--acu-accent);\n}\n.acu-toggle__thumb[data-v-61c4c790] {\r\n  position: absolute; top: var(--acu-space-050, 2px); left: var(--acu-space-050, 2px);\r\n  width: var(--acu-toggle-thumb-size, 16px); height: var(--acu-toggle-thumb-size, 16px);\r\n  background: #fff;\r\n  border-radius: 50%;\r\n  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);\r\n  transition: transform 0.2s ease;\n}\n.acu-toggle--on .acu-toggle__thumb[data-v-61c4c790] {\r\n  transform: translateX(var(--acu-toggle-thumb-shift, 16px));\n}\n.acu-toggle__label[data-v-61c4c790] { white-space: nowrap;\n}\n.acu-toggle:hover:not(.acu-toggle--disabled) .acu-toggle__track[data-v-61c4c790] {\r\n  box-shadow: inset 0 0 0 1px var(--acu-border-2);\n}\n.acu-toggle:focus-visible .acu-toggle__track[data-v-61c4c790] {\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\r\n", "src/presentation-v2/components/_lib/AcuToggle.vue#style-0-61c4c790");
-    var AcuToggle_vue_vue_type_style_index_0_scoped_61c4c790_lang = null;
-
-    const _hoisted_1$11 = ["aria-checked", "disabled"];
-    const _hoisted_2$Y = {
-	key: 0,
-	class: "acu-toggle__label"
-    };
-    function _sfc_render$14(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("button", mergeProps({
-		type: "button",
-		class: ["acu-toggle", {
-			"acu-toggle--disabled": $props.disabled,
-			"acu-toggle--on": $props.modelValue
-		}],
-		role: "switch",
-		"aria-checked": $props.modelValue ? "true" : "false",
-		disabled: $props.disabled
-	}, _ctx.$attrs, { onClick: $setup.onClick }), [_cache[0] || (_cache[0] = createBaseVNode(
-		"span",
-		{
-			class: "acu-toggle__track",
-			"aria-hidden": "true"
-		},
-		[createBaseVNode("span", { class: "acu-toggle__thumb" })],
-		-1
-		/* CACHED */
-	)), $props.label ? (openBlock(), createElementBlock(
-		"span",
-		_hoisted_2$Y,
-		toDisplayString($props.label),
-		1
-		/* TEXT */
-	)) : renderSlot(_ctx.$slots, "default", { key: 1 }, undefined, true)], 16, _hoisted_1$11);
-    }
-    var AcuToggle = /*#__PURE__*/ _export_sfc(_sfc_main$14, [["render", _sfc_render$14], ["__scopeId", "data-v-61c4c790"]]);
-
-    var _sfc_main$13 = /*@__PURE__*/ defineComponent({
-        __name: 'DashboardToggleRow',
-        props: {
-            item: {}
-        },
-        emits: ["change"],
-        setup(__props, { expose: __expose }) {
-            __expose();
-            /**
-             * 仪表盘"开关面板"专用的开关行：标题 + 右侧 toggle + 下方常驻描述。
-             *
-             * 这是仪表盘内的局部布局，不放进 _lib/，因为还没看到第二个消费者；按 D21.7
-             * "两次出现 + 接口稳定才抽"的阈值。当其他面板（例如未来的开发者一级页）出现
-             * 同形态需求时再提升到 _lib/AcuToggleRow.vue。
-             */
-            const __returned__ = { AcuToggle };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
+        const runningSpecialists = run.filter(item => item.kind === 'delegation'
+            && item.agentName !== 'world-director' && !isReviewerEntry_ACU(item) && item.status === 'running');
+        const reviewerRunning = run.some(item => isReviewerEntry_ACU(item) && item.status === 'running');
+        const lastIsFinalize = last?.kind === 'finalize' || (last?.kind === 'main_action' && /finalize/.test(last.title));
+        if (lastIsFinalize) {
+            return { visible: true, phase: 'anchor', label: WORLD_SIMULATION_PROGRESS_LABELS_ACU.anchor, concurrent: 0, terminal: false };
         }
-    });
-
-    injectSfcStyle("\n.acu-dashboard-toggle-row[data-v-b8c9bc26] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 4px;\n}\n.acu-dashboard-toggle-row__head[data-v-b8c9bc26] {\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: 12px;\n}\n.acu-dashboard-toggle-row__label[data-v-b8c9bc26] {\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  font-weight: 500;\r\n  color: var(--acu-text-1);\r\n  min-width: 0;\n}\n.acu-dashboard-toggle-row__desc[data-v-b8c9bc26] {\r\n  margin: 0;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\r\n  color: var(--acu-text-3);\n}\r\n", "src/presentation-v2/components/DashboardToggleRow.vue#style-0-b8c9bc26");
-    var DashboardToggleRow_vue_vue_type_style_index_0_scoped_b8c9bc26_lang = null;
-
-    const _hoisted_1$10 = { class: "acu-dashboard-toggle-row" };
-    const _hoisted_2$X = { class: "acu-dashboard-toggle-row__head" };
-    const _hoisted_3$O = { class: "acu-dashboard-toggle-row__label" };
-    const _hoisted_4$F = {
-	key: 0,
-	class: "acu-dashboard-toggle-row__desc"
-    };
-    function _sfc_render$13(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$10, [createBaseVNode("div", _hoisted_2$X, [createBaseVNode(
-		"span",
-		_hoisted_3$O,
-		toDisplayString($props.item.label),
-		1
-		/* TEXT */
-	), createVNode($setup["AcuToggle"], {
-		"model-value": $props.item.value,
-		"aria-label": $props.item.label,
-		"data-acu-toggle-key": $props.item.key,
-		disabled: $props.item.disabled === true,
-		"onUpdate:modelValue": _cache[0] || (_cache[0] = ($event) => _ctx.$emit("change", $event))
-	}, null, 8, [
-		"model-value",
-		"aria-label",
-		"data-acu-toggle-key",
-		"disabled"
-	])]), $props.item.description ? (openBlock(), createElementBlock(
-		"p",
-		_hoisted_4$F,
-		toDisplayString($props.item.description),
-		1
-		/* TEXT */
-	)) : createCommentVNode("v-if", true)]);
+        if (reviewerRunning || (last && isReviewerEntry_ACU(last))) {
+            return { visible: true, phase: 'review', label: WORLD_SIMULATION_PROGRESS_LABELS_ACU.review, concurrent: 0, terminal: false };
+        }
+        if (runningSpecialists.length) {
+            const concurrent = runningSpecialists.length;
+            if (runningSpecialists.every(item => item.agentName === 'guidance-composer')) {
+                return { visible: true, phase: 'batchTwo', label: WORLD_SIMULATION_PROGRESS_LABELS_ACU.batchTwo, concurrent, terminal: false };
+            }
+            if (runningSpecialists.every(item => item.agentName === 'undercurrent-analyst' || item.agentName === 'dramatis-keeper')) {
+                return { visible: true, phase: 'batchOne', label: `${WORLD_SIMULATION_PROGRESS_LABELS_ACU.batchOne} · ${concurrent} 路并行`, concurrent, terminal: false };
+            }
+            return { visible: true, phase: 'backstage', label: `${WORLD_SIMULATION_PROGRESS_LABELS_ACU.backstage} · ${concurrent} 路并行`, concurrent, terminal: false };
+        }
+        if (last?.kind === 'stage_plan' || (run.some(item => item.kind === 'stage_plan') && !run.some(item => item.kind === 'main_action' || item.kind === 'tool_read' || item.kind === 'delegation'))) {
+            return { visible: true, phase: 'survey', label: WORLD_SIMULATION_PROGRESS_LABELS_ACU.survey, concurrent: 0, terminal: false };
+        }
+        return { visible: true, phase: 'intel', label: WORLD_SIMULATION_PROGRESS_LABELS_ACU.intel, concurrent: 0, terminal: false };
     }
-    var ToggleRow = /*#__PURE__*/ _export_sfc(_sfc_main$13, [["render", _sfc_render$13], ["__scopeId", "data-v-b8c9bc26"]]);
 
     /**
      * api-preset-store — API 页状态边界（阶段 1 / D17，阶段 B 重构）
@@ -189501,6 +188824,1911 @@ ${rejectionText}` : delegationFeedback,
             catch { /* ignore */ }
         });
     }
+
+    const TASK_STATUS_LABELS_ACU = {
+        drafting: '运行中',
+        running: '运行中',
+        stopping_after_inflight: '正在停止',
+        paused: '已暂停',
+        completed: '已完成',
+        failed: '已失败',
+        abandoned: '已中止',
+    };
+    function errorMessage_ACU$2(error) {
+        if (error instanceof WorldSimulationValidationError_ACU)
+            return error.error.message;
+        return error instanceof Error ? error.message : '格林推演操作失败';
+    }
+    /** 严格读取失败时给 UI 的结构化文案：保留错误码，用户能据此判断是数据损坏还是聊天不可用。 */
+    function structuredErrorMessage_ACU(error) {
+        if (error instanceof WorldSimulationValidationError_ACU)
+            return `${error.error.code}: ${error.error.message}`;
+        return errorMessage_ACU$2(error);
+    }
+    /**
+     * 把楼层锚定的持久会话消息投影为会话流条目。
+     *
+     * 会话流是展示通道，持久会话是模型通道，两者字段不同源：这里只做单向投影，
+     * 让页面重载后仍能看到既往对话，而不是把持久会话当成 UI 状态直接渲染。
+     */
+    function projectWorldSimulationSessionFromConversation_ACU(messages) {
+        return messages
+            // 工具回执（带 toolCallId）按 tool 身份展示，与智能续写一致；导演动作与纯文本反馈仍不上会话流。
+            .filter(message => message.kind !== 'handoff' && message.kind !== 'model_agent'
+            && (message.kind !== 'model_feedback' || !!message.toolCallId))
+            .map(message => {
+            const persistedKind = typeof message.eventKind === 'string'
+                && WORLD_SIMULATION_SESSION_EVENT_KINDS_ACU.includes(message.eventKind)
+                ? message.eventKind
+                : null;
+            const fallbackKind = message.kind === 'user'
+                ? 'user_message'
+                : message.kind === 'turn'
+                    ? 'run_started'
+                    : message.kind === 'agent'
+                        ? 'main_action'
+                        : message.kind === 'runtime'
+                            ? 'thought'
+                            : 'tool_read';
+            return {
+                kind: persistedKind ?? fallbackKind,
+                title: message.title || message.digest || (message.kind === 'user' ? '你的消息' : '历史会话'),
+                detail: message.text,
+                agentName: message.agentName,
+                ok: message.ok,
+                status: message.status,
+                at: message.at,
+            };
+        });
+    }
+    function useWorldSimulationRuntime() {
+        const toast = useToastStore();
+        const runtime = getWorldSimulationRuntime_ACU();
+        const snapshot = ref(null);
+        const ready = ref(false);
+        const busy = ref(false);
+        /** 仅表示"快照严格读取失败"；动作失败走吐司，不遮蔽会话区。 */
+        const error = ref('');
+        // 无信封聊天的展示兜底：用户还没保存过任何设置时，页面显示内置默认值。
+        const fallbackSettings = buildDefaultWorldSimulationSettings_ACU();
+        let subscribedChatIdentity = null;
+        let unsubscribeSession = null;
+        let activeAction = null;
+        /**
+         * 从持久会话回灌会话流历史（与 useContinuationSession.hydrate 同语义）：
+         * 会话流是内存态，脚本重载后为空；持久会话锚定在楼层上，是权威历史。
+         * 只在会话流为空且 Agent 未在运行时回灌，避免覆盖实时通道与运行标记。
+         */
+        function hydrateSessionFromConversation(next) {
+            const chatIdentity = next.session.chatIdentity;
+            if (!chatIdentity || next.session.entries.length || isWorldSimulationSessionRunning_ACU(chatIdentity))
+                return;
+            const projected = projectWorldSimulationSessionFromConversation_ACU(next.conversation.messages);
+            if (projected.length)
+                hydrateWorldSimulationSessionLog_ACU(chatIdentity, projected);
+        }
+        async function initialize() {
+            try {
+                const forcedRoles = await runtime.initialize();
+                refresh();
+                if (forcedRoles.length) {
+                    toast.info(`格林推演 v21 已重置 ${forcedRoles.length} 个自定义资料角色的提示词；旧版逐栏写入协议不适用于新流程。`);
+                }
+            }
+            catch (cause) {
+                toast.error(errorMessage_ACU$2(cause), { muteable: false });
+                refresh();
+            }
+        }
+        function refresh() {
+            try {
+                const next = runtime.readUiSnapshot();
+                snapshot.value = next;
+                error.value = '';
+                ready.value = true;
+                hydrateSessionFromConversation(next);
+                if (next.session.chatIdentity !== subscribedChatIdentity) {
+                    unsubscribeSession?.();
+                    subscribedChatIdentity = next.session.chatIdentity;
+                    unsubscribeSession = subscribedChatIdentity
+                        ? subscribeWorldSimulationSessionLog_ACU(subscribedChatIdentity, () => { if (ready.value)
+                            refresh(); })
+                        : null;
+                }
+                // 回灌会追加条目，重读一次让 entries 与内存日志一致。
+                if (next.session.chatIdentity && !next.session.entries.length) {
+                    const entries = readWorldSimulationSessionLog_ACU(next.session.chatIdentity);
+                    if (entries.length)
+                        snapshot.value = { ...next, session: { ...next.session, entries } };
+                }
+                return true;
+            }
+            catch (cause) {
+                snapshot.value = null;
+                error.value = structuredErrorMessage_ACU(cause);
+                ready.value = false;
+                return false;
+            }
+        }
+        /**
+         * 执行一次动作并刷新快照。允许后来的动作顶替在途动作（发送即打断），
+         * 只有仍是当前动作的那次结算才把 busy 复位。
+         */
+        function run_ACU(action) {
+            busy.value = true;
+            const completion = Promise.resolve()
+                .then(action)
+                .catch(cause => {
+                toast.error(errorMessage_ACU$2(cause), { muteable: false });
+                return false;
+            })
+                .finally(() => {
+                refresh();
+                if (activeAction === completion) {
+                    busy.value = false;
+                    activeAction = null;
+                }
+            });
+            activeAction = completion;
+            return completion;
+        }
+        const envelope = computed(() => snapshot.value?.envelope ?? null);
+        const task = computed(() => envelope.value?.task ?? null);
+        const settings = computed(() => envelope.value?.settings ?? fallbackSettings);
+        const activeStage = computed(() => {
+            const current = envelope.value;
+            return current?.stages.find(stage => stage.stageId === current.activeStageId) ?? null;
+        });
+        const activeRevision = computed(() => activeStage.value?.revisions.find(item => item.revision === activeStage.value?.activeRevision) ?? null);
+        const anchor = computed(() => snapshot.value?.anchor ?? null);
+        const entries = computed(() => snapshot.value?.session.entries ?? []);
+        const running = computed(() => snapshot.value?.session.running ?? false);
+        // 停止原因与最近错误直接并入状态文案，用户不用再翻别处找原因（与智能续写 statusText 同构）。
+        const statusText = computed(() => {
+            const current = task.value;
+            if (!current)
+                return '尚未创建任务';
+            const parts = [TASK_STATUS_LABELS_ACU[current.status] ?? current.status];
+            if (current.stopReason && ['paused', 'completed', 'failed', 'abandoned'].includes(current.status)) {
+                parts.push(WORLD_SIMULATION_STOP_REASON_LABELS_ACU[current.stopReason] ?? current.stopReason);
+            }
+            const lastError = envelope.value?.lastError;
+            if (lastError && ['paused', 'failed'].includes(current.status))
+                parts.push(`最近错误：${lastError.message}`);
+            return parts.join(' · ');
+        });
+        const stageText = computed(() => {
+            if (!task.value)
+                return '尚未创建任务';
+            return activeStage.value ? `第 ${activeStage.value.stageNumber} 阶段` : '计划待创建';
+        });
+        const revisionText = computed(() => (activeRevision.value ? `revision ${activeRevision.value.revision}` : ''));
+        const anchorText = computed(() => {
+            const current = anchor.value;
+            return current ? `第 ${current.messageIndex + 1} 楼 · swipe ${Number(current.swipeId) + 1}` : '';
+        });
+        /**
+         * 把编排器结果翻译成用户反馈。
+         * @returns 用户消息是否已被接收（决定页面是否清空草稿）
+         */
+        function reportSendOutcome_ACU(result) {
+            if (!result) {
+                toast.error('当前聊天没有 assistant 楼层，格林推演无法确定写入锚点。', { muteable: false });
+                return false;
+            }
+            if (result.status === 'skipped') {
+                if (result.reason === 'duplicate')
+                    toast.info('该楼层已有一次推演在处理这条指令。');
+                else if (result.reason === 'busy')
+                    toast.error('格林推演正在运行，请先停止再发送。', { muteable: false });
+                else if (result.reason === 'disabled')
+                    toast.info('自动触发已关闭。');
+                else
+                    toast.info('推演已排队，将在当前运行结束后开始。');
+                return false;
+            }
+            if (result.status === 'cancelled') {
+                toast.info('本次格林推演已停止，发送新指令即可从中断处继续。');
+                return true;
+            }
+            if (result.status === 'failed') {
+                toast.error(result.error.message, { muteable: false });
+                return false;
+            }
+            return true;
+        }
+        /**
+         * 在 Agent 会话里以用户身份发言。运行中会先打断当前 run；暂停中的同锚点 run 会带着这句话恢复；
+         * 锚点已是新楼层时新建运行。分派逻辑在 runtime.sendAgentMessage，这里只负责反馈。
+         */
+        function send(text) {
+            if (!text.trim())
+                return Promise.resolve(false);
+            return run_ACU(async () => reportSendOutcome_ACU(await runtime.sendAgentMessage(text)));
+        }
+        /**
+         * 停止在途运行。刻意不经 busy 闸：busy 恰好在运行期间为 true，走闸会把停止吞掉。
+         * 先在会话流留痕并清掉 running 标记（按钮立刻切回发送），再等待编排器把任务落为 paused/manual。
+         */
+        async function stop() {
+            const chatIdentity = snapshot.value?.session.chatIdentity ?? null;
+            if (chatIdentity && isWorldSimulationSessionRunning_ACU(chatIdentity)) {
+                logWorldSimulationSession_ACU(chatIdentity, { kind: 'run_failed', title: '已停止', detail: '用户停止', ok: false });
+            }
+            try {
+                await runtime.stop();
+            }
+            catch (cause) {
+                toast.error(errorMessage_ACU$2(cause), { muteable: false });
+            }
+            finally {
+                refresh();
+            }
+        }
+        function resume() {
+            return run_ACU(async () => reportSendOutcome_ACU(await runtime.resume()));
+        }
+        /**
+         * 保存格林推演设置。
+         * 运行中编排器以 retryable 的 REVISION_CONFLICT 拒绝写入——这不是错误而是时机问题，
+         * 返回 'busy' 让页面静默排队重试，而不是弹错误吐司把用户的改动丢掉。
+         * @returns 'saved' 已落盘；'busy' 暂时写不进（稍后重试）；'failed' 校验或持久化失败（已吐司）
+         */
+        async function saveSettings(next) {
+            if (runtime.isInFlight())
+                return 'busy';
+            try {
+                await runtime.saveSettings(JSON.parse(JSON.stringify(next)));
+                refresh();
+                return 'saved';
+            }
+            catch (cause) {
+                if (cause instanceof WorldSimulationValidationError_ACU && cause.error.code === 'WORLD_SIMULATION_REVISION_CONFLICT' && cause.error.retryable)
+                    return 'busy';
+                toast.error(errorMessage_ACU$2(cause), { muteable: false });
+                refresh();
+                return 'failed';
+            }
+        }
+        async function saveUserRequirements(requirements) {
+            if (busy.value)
+                return false;
+            busy.value = true;
+            try {
+                await runtime.saveUserRequirements(requirements);
+                refresh();
+                toast.success('已保存用户要求。');
+                return true;
+            }
+            catch (cause) {
+                toast.error(errorMessage_ACU$2(cause), { muteable: false });
+                refresh();
+                return false;
+            }
+            finally {
+                busy.value = false;
+            }
+        }
+        /**
+         * 一键清空：丢弃任务、账本、会话记录与各楼层资料快照，正文与已写入正文的 <与此同时> 段不动。
+         * @returns 是否清空成功
+         */
+        async function clearData() {
+            if (busy.value)
+                return false;
+            busy.value = true;
+            try {
+                const outcome = await runtime.clearData();
+                refresh();
+                toast.success(`已清空格林推演任务、账本、会话记录与 ${outcome.clearedFloors} 个楼层的资料快照，正文未改动。`);
+                return true;
+            }
+            catch (cause) {
+                toast.error(errorMessage_ACU$2(cause), { muteable: false });
+                refresh();
+                return false;
+            }
+            finally {
+                busy.value = false;
+            }
+        }
+        /**
+         * 把某个角色的提示词恢复成内置默认值。恢复本身不落盘，由设置面板既有的保存链路决定何时写入。
+         */
+        function restorePromptDefault(current, agentName) {
+            return restoreWorldSimulationPromptDefault_ACU(current, agentName);
+        }
+        /**
+         * 解析并校验导入的提示词 JSON 包。结构：{ agentPrompts: { 各角色: 段数组 } }。
+         * 任何一组校验失败（角色缺失、seam 缺失、未知占位符）即整体拒绝，绝不产生半套导入。
+         */
+        function parsePromptBundle(text) {
+            let raw;
+            try {
+                raw = JSON.parse(text);
+            }
+            catch {
+                throw new Error('导入文件不是合法的 JSON。');
+            }
+            if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+                throw new Error('提示词 JSON 必须是对象（含 agentPrompts）。');
+            const agentRaw = raw.agentPrompts;
+            if (!agentRaw || typeof agentRaw !== 'object' || Array.isArray(agentRaw))
+                throw new Error('提示词 JSON 缺少 agentPrompts 对象。');
+            try {
+                return validateWorldSimulationAgentPrompts_ACU(agentRaw, 'load');
+            }
+            catch (cause) {
+                throw new Error(`提示词校验失败：${errorMessage_ACU$2(cause)}`);
+            }
+        }
+        /**
+         * 当前聊天内楼层被删除 / swipe 后调用。持久会话按楼层分段存储，删楼即回退；
+         * 但会话流是内存日志，不重灌就会一直显示已被删掉那几楼上的记录。
+         * 运行标记保留——楼层变动时 Agent 循环可能仍在跑，不能把「停止」切回「发送」。
+         */
+        function resyncAfterChatMutation() {
+            if (subscribedChatIdentity)
+                clearWorldSimulationSessionLog_ACU(subscribedChatIdentity, { keepRunning: true });
+            refresh();
+            const chatIdentity = snapshot.value?.session.chatIdentity ?? null;
+            if (chatIdentity && readWorldSimulationSessionLog_ACU(chatIdentity).length) {
+                logWorldSimulationSession_ACU(chatIdentity, {
+                    kind: 'thought',
+                    title: '楼层已变化，会话已按现存楼层重新加载',
+                    detail: '被删除或重新生成的楼层上的推演记录已随楼层一起回退；账本与锚点也按仍存在的正文楼层重算。',
+                });
+            }
+        }
+        if (getCurrentScope())
+            onScopeDispose(() => unsubscribeSession?.());
+        return {
+            snapshot,
+            ready,
+            busy,
+            error,
+            envelope,
+            task,
+            settings,
+            activeStage,
+            activeRevision,
+            anchor,
+            anchorText,
+            entries,
+            running,
+            statusText,
+            stageText,
+            revisionText,
+            refresh,
+            initialize,
+            send,
+            stop,
+            resume,
+            saveSettings,
+            saveUserRequirements,
+            clearData,
+            restorePromptDefault,
+            parsePromptBundle,
+            resyncAfterChatMutation,
+        };
+    }
+
+    /**
+     * useTaskActivity — 汇总「正在干活」的任务，供桌宠动作与通知气泡共用。
+     *
+     * 任务来源：
+     * - notice-hub 登记的任务（V1 填表/规划/优化/索引、V2 store 常驻进度）；
+     * - 自带运行状态的功能：智能续写（Agent 会话运行标记）与格林推演（会话运行标记）。
+     *   这两类不改 service，只把既有响应式信号合成同一形状的任务。
+     */
+    /** 读取已保存的桌宠位置；未保存或数据无效时返回 null（使用默认右下角）。 */
+    function readDeskPetPositionRatio() {
+        const saved = settings_ACU?.desktopPetPosition;
+        if (!saved || typeof saved !== "object")
+            return null;
+        const x = Number(saved.x);
+        const y = Number(saved.y);
+        if (!Number.isFinite(x) || !Number.isFinite(y))
+            return null;
+        return { x: Math.min(Math.max(x, 0), 1), y: Math.min(Math.max(y, 0), 1) };
+    }
+    /** 保存桌宠位置到独立设置字段（走 saveSettings_ACU，不写 localStorage）。 */
+    function saveDeskPetPositionRatio(ratio) {
+        settings_ACU.desktopPetPosition = {
+            x: Number(ratio.x.toFixed(4)),
+            y: Number(ratio.y.toFixed(4)),
+        };
+        saveSettings_ACU();
+    }
+    /** notice-hub 快照的响应式镜像。 */
+    function useNoticeHubState() {
+        const snapshot = shallowRef(getNoticeHubSnapshot_ACU());
+        const unsubscribe = subscribeNoticeHub_ACU(() => {
+            snapshot.value = getNoticeHubSnapshot_ACU();
+        });
+        if (getCurrentScope())
+            onScopeDispose(unsubscribe);
+        const silent = computed(() => {
+            void snapshot.value.settingsVersion;
+            return isNoticeHubSilent_ACU();
+        });
+        const petEnabled = computed(() => {
+            void snapshot.value.settingsVersion;
+            try {
+                return settings_ACU?.desktopPetEnabled !== false;
+            }
+            catch {
+                return true;
+            }
+        });
+        return { snapshot, silent, petEnabled };
+    }
+    function errorText(cause) {
+        return cause instanceof Error ? cause.message : String(cause ?? "未知错误");
+    }
+    /** 智能续写：以 Agent 会话运行标记为准，停止动作与续写页的停止按钮同序。 */
+    function useContinuationSignal() {
+        const running = ref(false);
+        const detail = ref("");
+        function sync() {
+            running.value = isAgentSessionRunning_ACU();
+            if (!running.value) {
+                detail.value = "";
+                return;
+            }
+            const entries = readAgentSessionLog_ACU();
+            let latest = entries[entries.length - 1];
+            for (let index = entries.length - 1; index >= 0; index--) {
+                if (entries[index].status === "running") {
+                    latest = entries[index];
+                    break;
+                }
+            }
+            detail.value = latest?.title || "";
+        }
+        async function stop() {
+            if (isAgentSessionRunning_ACU()) {
+                logAgentSession_ACU({ kind: "run_failed", title: "已停止", detail: "用户停止", ok: false });
+            }
+            const runtime = getContinuationRuntime_ACU();
+            try {
+                await runtime.orchestrator.stopTask();
+            }
+            catch (cause) {
+                notify_ACU$2("error", errorText(cause));
+            }
+            finally {
+                try {
+                    runtime.bridge.stopHostGeneration();
+                }
+                catch {
+                    // 宿主 API 不可用时仍保留已落盘的停止态。
+                }
+            }
+        }
+        sync();
+        const unsubscribe = subscribeAgentSessionLog_ACU(sync);
+        if (getCurrentScope())
+            onScopeDispose(unsubscribe);
+        return computed(() => running.value
+            ? {
+                id: "signal-continuation",
+                feature: "智能续写",
+                detail: detail.value,
+                kind: "info",
+                busy: true,
+                dismissible: false,
+                action: { label: "停止", variant: "danger", run: stop },
+            }
+            : null);
+    }
+    /** 格林推演：沿用浮动进度卡的运行态与阶段文案，停止走 runtime 既有入口。 */
+    function useWorldSimulationSignal() {
+        const runtime = useWorldSimulationRuntime();
+        const view = computed(() => deriveWorldSimulationProgressView_ACU(runtime.entries.value, runtime.running.value));
+        runtime.refresh();
+        watch(useChatChangedTick(), () => {
+            runtime.refresh();
+        });
+        // 原浮动进度卡会在结束后短暂显示终态；并入气泡后改为一条结果消息。
+        watch(runtime.running, (running, wasRunning) => {
+            if (running || !wasRunning || !view.value.terminal)
+                return;
+            notify_ACU$2(view.value.phase === "completed" ? "success" : "warning", view.value.label, { title: "格林推演" });
+        });
+        return computed(() => runtime.running.value
+            ? {
+                id: "signal-world-simulation",
+                feature: "格林推演",
+                detail: view.value.label,
+                kind: "info",
+                busy: true,
+                dismissible: false,
+                action: { label: "停止", variant: "danger", run: () => runtime.stop() },
+            }
+            : null);
+    }
+    function useTaskActivity(hubState) {
+        const continuation = useContinuationSignal();
+        const worldSimulation = useWorldSimulationSignal();
+        const tasks = computed(() => {
+            const fromHub = hubState.snapshot.value.tasks.map(task => ({
+                id: task.id,
+                feature: task.feature,
+                detail: task.detail,
+                kind: task.kind,
+                busy: task.busy,
+                dismissible: task.dismissible,
+                action: task.action
+                    ? { label: task.action.label, variant: task.action.variant, run: () => runNoticeTaskAction_ACU(task.id) }
+                    : null,
+            }));
+            const signals = [continuation.value, worldSimulation.value].filter((task) => !!task);
+            return [...fromHub, ...signals];
+        });
+        const busy = computed(() => tasks.value.some(task => task.busy));
+        return { tasks, busy };
+    }
+
+    var idleImage = "data:image/png;base64,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";
+
+    var workingImage = "data:image/png;base64,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";
+
+    const DRAG_THRESHOLD_PX = 6;
+    const EDGE_MARGIN_PX = 8;
+    const NARROW_VIEWPORT_PX = 640;
+    /** 默认位置离底边的距离，避开宿主底部输入栏。 */
+    const DEFAULT_BOTTOM_GAP_PX = 120;
+    var _sfc_main$1b = /*@__PURE__*/ defineComponent({
+        __name: 'DeskPet',
+        props: {
+            busy: { type: Boolean },
+            settingsVersion: {}
+        },
+        emits: ["rect"],
+        setup(__props, { expose: __expose, emit: __emit }) {
+            __expose();
+            const props = __props;
+            const emit = __emit;
+            const petEl = ref(null);
+            const viewport = ref(readViewport());
+            const left = ref(0);
+            const top = ref(0);
+            const dragging = ref(false);
+            let pointerId = null;
+            let dragStart = { x: 0, y: 0, left: 0, top: 0 };
+            let pendingPosition = null;
+            let frameHandle;
+            const size = computed(() => (viewport.value.width <= NARROW_VIEWPORT_PX ? 64 : 88));
+            const petStyle = computed(() => ({
+                width: `${size.value}px`,
+                height: `${size.value}px`,
+                transform: `translate3d(${left.value}px, ${top.value}px, 0)`,
+            }));
+            function readViewport() {
+                const win = getAcuHostWindow();
+                return {
+                    width: win.innerWidth || win.document?.documentElement?.clientWidth || 0,
+                    height: win.innerHeight || win.document?.documentElement?.clientHeight || 0,
+                };
+            }
+            function clampPosition(nextLeft, nextTop) {
+                const maxLeft = Math.max(EDGE_MARGIN_PX, viewport.value.width - size.value - EDGE_MARGIN_PX);
+                const maxTop = Math.max(EDGE_MARGIN_PX, viewport.value.height - size.value - EDGE_MARGIN_PX);
+                return {
+                    left: Math.min(Math.max(EDGE_MARGIN_PX, nextLeft), maxLeft),
+                    top: Math.min(Math.max(EDGE_MARGIN_PX, nextTop), maxTop),
+                };
+            }
+            function usableSpan(total) {
+                return Math.max(1, total - size.value - EDGE_MARGIN_PX * 2);
+            }
+            /** 按已保存比例（或默认右下角）落位，并夹进当前视口。 */
+            function applySavedPosition() {
+                const ratio = readDeskPetPositionRatio();
+                const next = ratio
+                    ? clampPosition(EDGE_MARGIN_PX + ratio.x * usableSpan(viewport.value.width), EDGE_MARGIN_PX + ratio.y * usableSpan(viewport.value.height))
+                    : clampPosition(viewport.value.width - size.value - 16, viewport.value.height - size.value - DEFAULT_BOTTOM_GAP_PX);
+                left.value = next.left;
+                top.value = next.top;
+                emitRect();
+            }
+            function persistPosition() {
+                saveDeskPetPositionRatio({
+                    x: (left.value - EDGE_MARGIN_PX) / usableSpan(viewport.value.width),
+                    y: (top.value - EDGE_MARGIN_PX) / usableSpan(viewport.value.height),
+                });
+            }
+            function emitRect() {
+                emit("rect", { x: left.value, y: top.value, width: size.value, height: size.value });
+            }
+            function flushPendingPosition() {
+                frameHandle = undefined;
+                if (!pendingPosition)
+                    return;
+                left.value = pendingPosition.left;
+                top.value = pendingPosition.top;
+                pendingPosition = null;
+                emitRect();
+            }
+            function onPointerDown(event) {
+                if (event.pointerType === "mouse" && event.button !== 0)
+                    return;
+                pointerId = event.pointerId;
+                dragStart = { x: event.clientX, y: event.clientY, left: left.value, top: top.value };
+                dragging.value = false;
+                try {
+                    petEl.value?.setPointerCapture(event.pointerId);
+                }
+                catch {
+                    // 部分 WebView 不支持指针捕获；仍可在元素范围内拖动。
+                }
+            }
+            function onPointerMove(event) {
+                if (pointerId !== event.pointerId)
+                    return;
+                const dx = event.clientX - dragStart.x;
+                const dy = event.clientY - dragStart.y;
+                if (!dragging.value && Math.hypot(dx, dy) < DRAG_THRESHOLD_PX)
+                    return;
+                dragging.value = true;
+                event.preventDefault();
+                pendingPosition = clampPosition(dragStart.left + dx, dragStart.top + dy);
+                if (frameHandle === undefined)
+                    frameHandle = acuRequestAnimationFrame(flushPendingPosition);
+            }
+            function onPointerUp(event) {
+                if (pointerId !== event.pointerId)
+                    return;
+                pointerId = null;
+                try {
+                    petEl.value?.releasePointerCapture(event.pointerId);
+                }
+                catch {
+                    // 捕获已随指针结束自动释放。
+                }
+                if (!dragging.value)
+                    return;
+                if (frameHandle !== undefined) {
+                    acuCancelAnimationFrame(frameHandle);
+                    frameHandle = undefined;
+                }
+                flushPendingPosition();
+                dragging.value = false;
+                persistPosition();
+            }
+            function onResize() {
+                viewport.value = readViewport();
+                if (!dragging.value)
+                    applySavedPosition();
+            }
+            watch(() => props.settingsVersion, () => {
+                if (!dragging.value)
+                    applySavedPosition();
+            });
+            onMounted(() => {
+                viewport.value = readViewport();
+                applySavedPosition();
+                getAcuHostWindow().addEventListener("resize", onResize);
+            });
+            onBeforeUnmount(() => {
+                getAcuHostWindow().removeEventListener("resize", onResize);
+                if (frameHandle !== undefined)
+                    acuCancelAnimationFrame(frameHandle);
+            });
+            const __returned__ = { props, emit, DRAG_THRESHOLD_PX, EDGE_MARGIN_PX, NARROW_VIEWPORT_PX, DEFAULT_BOTTOM_GAP_PX, petEl, viewport, left, top, dragging, get pointerId() { return pointerId; }, set pointerId(v) { pointerId = v; }, get dragStart() { return dragStart; }, set dragStart(v) { dragStart = v; }, get pendingPosition() { return pendingPosition; }, set pendingPosition(v) { pendingPosition = v; }, get frameHandle() { return frameHandle; }, set frameHandle(v) { frameHandle = v; }, size, petStyle, readViewport, clampPosition, usableSpan, applySavedPosition, persistPosition, emitRect, flushPendingPosition, onPointerDown, onPointerMove, onPointerUp, onResize, get idleImage() { return idleImage; }, get workingImage() { return workingImage; } };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-desk-pet[data-v-885797fc] {\n  position: fixed;\n  top: 0;\n  left: 0;\n  z-index: 9410;\n  display: block;\n  cursor: grab;\n  touch-action: none;\n  user-select: none;\n  -webkit-user-select: none;\n  -webkit-tap-highlight-color: transparent;\n  pointer-events: auto;\n  will-change: transform;\n}\n.acu-desk-pet.is-dragging[data-v-885797fc] {\n  cursor: grabbing;\n}\n.acu-desk-pet__img[data-v-885797fc] {\n  display: block;\n  width: 100%;\n  height: 100%;\n  object-fit: contain;\n  pointer-events: none;\n  filter: drop-shadow(0 4px 6px rgba(60, 40, 0, 0.28));\n  transform-origin: 50% 100%;\n  animation: acu-desk-pet-breathe-885797fc 3.6s ease-in-out infinite;\n}\n.acu-desk-pet.is-busy .acu-desk-pet__img[data-v-885797fc] {\n  animation: acu-desk-pet-sway-885797fc 1.4s ease-in-out infinite;\n}\n.acu-desk-pet.is-dragging .acu-desk-pet__img[data-v-885797fc] {\n  animation: none;\n  transform: scale(1.06);\n}\n@keyframes acu-desk-pet-breathe-885797fc {\n0%,\n  100% {\n    transform: scale(1, 1);\n}\n50% {\n    transform: scale(1.015, 0.975);\n}\n}\n@keyframes acu-desk-pet-sway-885797fc {\n0%,\n  100% {\n    transform: rotate(-3deg) translateY(0);\n}\n50% {\n    transform: rotate(3deg) translateY(-2px);\n}\n}\n@media (prefers-reduced-motion: reduce) {\n.acu-desk-pet__img[data-v-885797fc],\n  .acu-desk-pet.is-busy .acu-desk-pet__img[data-v-885797fc] {\n    animation: none;\n}\n}\n", "src/presentation-v2/components/DeskPet.vue#style-0-885797fc");
+    var DeskPet_vue_vue_type_style_index_0_scoped_885797fc_lang = null;
+
+    const _hoisted_1$16 = ["aria-label", "title"];
+    const _hoisted_2$$ = ["src"];
+    function _sfc_render$1b(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", {
+		ref: "petEl",
+		class: normalizeClass(["acu-desk-pet", {
+			"is-busy": $props.busy,
+			"is-dragging": $setup.dragging
+		}]),
+		style: normalizeStyle($setup.petStyle),
+		role: "img",
+		"aria-label": $props.busy ? "桌宠：干活中" : "桌宠：发呆中",
+		title: $props.busy ? "干活中…（可拖动）" : "发呆中（可拖动）",
+		onPointerdown: $setup.onPointerDown,
+		onPointermove: $setup.onPointerMove,
+		onPointerup: $setup.onPointerUp,
+		onPointercancel: $setup.onPointerUp
+	}, [createBaseVNode("img", {
+		class: "acu-desk-pet__img",
+		src: $props.busy ? $setup.workingImage : $setup.idleImage,
+		alt: "",
+		draggable: "false"
+	}, null, 8, _hoisted_2$$)], 46, _hoisted_1$16);
+    }
+    var DeskPet = /*#__PURE__*/ _export_sfc(_sfc_main$1b, [["render", _sfc_render$1b], ["__scopeId", "data-v-885797fc"]]);
+
+    const BUBBLE_GAP_PX = 12;
+    const VIEWPORT_MARGIN_PX = 8;
+    var _sfc_main$1a = /*@__PURE__*/ defineComponent({
+        __name: 'NoticeBubble',
+        props: {
+            slide: {},
+            task: {},
+            anchor: {},
+            viewportWidth: {},
+            viewportHeight: {},
+            actionBusy: { type: Boolean }
+        },
+        emits: ["pause", "resume", "skip", "notice-action", "task-action", "dismiss-task"],
+        setup(__props, { expose: __expose, emit: __emit }) {
+            __expose();
+            const props = __props;
+            const emit = __emit;
+            const bubbleEl = ref(null);
+            const bubbleSize = ref({ width: 0, height: 0 });
+            const measured = computed(() => bubbleSize.value.width > 0 && bubbleSize.value.height > 0);
+            let resizeObserver = null;
+            const tone = computed(() => {
+                const current = props.slide;
+                if (!current)
+                    return "info";
+                if (current.type === "joke")
+                    return "joke";
+                if (current.type === "notice")
+                    return current.notice.kind;
+                return props.task?.kind || "info";
+            });
+            const heading = computed(() => {
+                const current = props.slide;
+                if (!current)
+                    return "";
+                if (current.type === "joke")
+                    return "冷笑话";
+                if (current.type === "notice")
+                    return current.notice.title;
+                return props.task ? `${props.task.feature} · ${current.word}…` : "";
+            });
+            const bodyText = computed(() => {
+                const current = props.slide;
+                if (!current)
+                    return "";
+                if (current.type === "joke")
+                    return current.text;
+                if (current.type === "notice")
+                    return current.notice.text;
+                return props.task?.detail || "";
+            });
+            const actionButtons = computed(() => {
+                const current = props.slide;
+                if (!current)
+                    return [];
+                if (current.type === "notice") {
+                    return current.notice.actions.map(action => ({
+                        label: action.label,
+                        variant: action.variant,
+                        run: () => emit("notice-action", action),
+                    }));
+                }
+                if (current.type === "task" && props.task?.action) {
+                    return [{ label: props.task.action.label, variant: props.task.action.variant, run: () => emit("task-action") }];
+                }
+                return [];
+            });
+            /** 任务片只有可关闭任务才显示关闭；消息与笑话的关闭即跳到下一条。 */
+            const closable = computed(() => props.slide?.type !== "task" || props.task?.dismissible === true);
+            function onClose() {
+                if (props.slide?.type === "task")
+                    emit("dismiss-task");
+                else
+                    emit("skip");
+            }
+            /** 贴桌宠摆放：优先上方，放不下翻到下方，再不行放左右两侧，最后夹进视口。 */
+            const placement = computed(() => {
+                const anchor = props.anchor;
+                const { width, height } = bubbleSize.value;
+                const vw = props.viewportWidth;
+                const vh = props.viewportHeight;
+                const clampX = (x) => Math.min(Math.max(VIEWPORT_MARGIN_PX, x), Math.max(VIEWPORT_MARGIN_PX, vw - width - VIEWPORT_MARGIN_PX));
+                const clampY = (y) => Math.min(Math.max(VIEWPORT_MARGIN_PX, y), Math.max(VIEWPORT_MARGIN_PX, vh - height - VIEWPORT_MARGIN_PX));
+                if (!anchor)
+                    return { side: "above", left: 0, top: 0 };
+                const centerX = anchor.x + anchor.width / 2;
+                const centerY = anchor.y + anchor.height / 2;
+                const above = anchor.y - height - BUBBLE_GAP_PX;
+                if (above >= VIEWPORT_MARGIN_PX)
+                    return { side: "above", left: clampX(centerX - width / 2), top: above };
+                const below = anchor.y + anchor.height + BUBBLE_GAP_PX;
+                if (below + height <= vh - VIEWPORT_MARGIN_PX)
+                    return { side: "below", left: clampX(centerX - width / 2), top: below };
+                const leftSide = anchor.x - width - BUBBLE_GAP_PX;
+                if (leftSide >= VIEWPORT_MARGIN_PX)
+                    return { side: "left", left: leftSide, top: clampY(centerY - height / 2) };
+                return { side: "right", left: clampX(anchor.x + anchor.width + BUBBLE_GAP_PX), top: clampY(centerY - height / 2) };
+            });
+            const bubbleStyle = computed(() => {
+                if (!props.anchor)
+                    return {};
+                return { transform: `translate3d(${Math.round(placement.value.left)}px, ${Math.round(placement.value.top)}px, 0)` };
+            });
+            /** 尾巴指向桌宠中心，夹在气泡边缘内。 */
+            const tailStyle = computed(() => {
+                const anchor = props.anchor;
+                if (!anchor)
+                    return {};
+                const { width, height } = bubbleSize.value;
+                const { side, left, top } = placement.value;
+                if (side === "above" || side === "below") {
+                    const offset = Math.min(Math.max(anchor.x + anchor.width / 2 - left, 16), Math.max(16, width - 16));
+                    return { left: `${offset}px` };
+                }
+                const offset = Math.min(Math.max(anchor.y + anchor.height / 2 - top, 14), Math.max(14, height - 14));
+                return { top: `${offset}px` };
+            });
+            function measure() {
+                const el = bubbleEl.value;
+                if (!el)
+                    return;
+                bubbleSize.value = { width: el.offsetWidth, height: el.offsetHeight };
+            }
+            watch(bubbleEl, (el, previous) => {
+                if (previous && resizeObserver)
+                    resizeObserver.unobserve(previous);
+                if (!el) {
+                    bubbleSize.value = { width: 0, height: 0 };
+                    return;
+                }
+                const Observer = el.ownerDocument.defaultView?.ResizeObserver;
+                if (Observer && !resizeObserver)
+                    resizeObserver = new Observer(() => measure());
+                resizeObserver?.observe(el);
+                measure();
+            }, { flush: "post" });
+            watch(() => [props.slide?.key, bodyText.value, heading.value], () => {
+                void nextTick(measure);
+            }, { flush: "post" });
+            onBeforeUnmount(() => {
+                resizeObserver?.disconnect();
+                resizeObserver = null;
+            });
+            const __returned__ = { props, emit, BUBBLE_GAP_PX, VIEWPORT_MARGIN_PX, bubbleEl, bubbleSize, measured, get resizeObserver() { return resizeObserver; }, set resizeObserver(v) { resizeObserver = v; }, tone, heading, bodyText, actionButtons, closable, onClose, placement, bubbleStyle, tailStyle, measure };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-notice-bubble[data-v-b1f38882] {\n  --bubble-bg: #fffaf0;\n  --bubble-text: #3d3122;\n  --bubble-muted: #7a6a52;\n  --bubble-border: #e9cf8a;\n  --bubble-tone: #d4a93a;\n  position: fixed;\n  z-index: 9410;\n  box-sizing: border-box;\n  display: flex;\n  align-items: flex-start;\n  gap: 8px;\n  width: max-content;\n  min-width: 160px;\n  max-width: min(320px, calc(100vw - 16px));\n  padding: 9px 10px 9px 12px;\n  border: 1px solid var(--bubble-border);\n  border-left: 3px solid var(--bubble-tone);\n  border-radius: 12px;\n  background: var(--bubble-bg);\n  color: var(--bubble-text);\n  box-shadow: 0 10px 28px rgba(70, 50, 10, 0.18), 0 2px 6px rgba(70, 50, 10, 0.12);\n  font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;\n  font-size: 12px;\n  line-height: 1.5;\n  pointer-events: auto;\n  animation: acu-notice-bubble-in-b1f38882 0.18s ease-out both;\n}\n.acu-notice-bubble[data-v-b1f38882] *,\n.acu-notice-bubble[data-v-b1f38882] *::before,\n.acu-notice-bubble[data-v-b1f38882] *::after {\n  box-sizing: border-box;\n}\n.acu-notice-bubble.is-anchored[data-v-b1f38882] {\n  top: 0;\n  left: 0;\n}\n.acu-notice-bubble.is-measuring[data-v-b1f38882] {\n  visibility: hidden;\n}\n.acu-notice-bubble.is-docked[data-v-b1f38882] {\n  top: calc(62px + env(safe-area-inset-top, 0px));\n  right: calc(18px + env(safe-area-inset-right, 0px));\n  max-width: min(360px, calc(100vw - 36px));\n}\n.acu-notice-bubble--success[data-v-b1f38882] {\n  --bubble-tone: #6f9a4d;\n}\n.acu-notice-bubble--warning[data-v-b1f38882] {\n  --bubble-tone: #d08a2c;\n}\n.acu-notice-bubble--error[data-v-b1f38882] {\n  --bubble-tone: #c2503a;\n}\n.acu-notice-bubble--joke[data-v-b1f38882] {\n  --bubble-tone: #e6b93c;\n  --bubble-bg: #fff6d8;\n}\n.acu-notice-bubble__body[data-v-b1f38882] {\n  flex: 1 1 auto;\n  min-width: 0;\n}\n.acu-notice-bubble__heading[data-v-b1f38882] {\n  margin: 0 0 2px;\n  color: var(--bubble-tone);\n  font-size: 11px;\n  font-weight: 700;\n  letter-spacing: 0.2px;\n}\n.acu-notice-bubble--joke .acu-notice-bubble__heading[data-v-b1f38882] {\n  color: #a47a12;\n}\n.acu-notice-bubble__text[data-v-b1f38882] {\n  margin: 0;\n  color: var(--bubble-text);\n  white-space: pre-line;\n  overflow-wrap: anywhere;\n}\n.acu-notice-bubble__tools[data-v-b1f38882] {\n  display: flex;\n  flex: 0 0 auto;\n  align-items: center;\n  gap: 4px;\n}\n.acu-notice-bubble__action[data-v-b1f38882] {\n  appearance: none;\n  padding: 3px 9px;\n  border: 1px solid var(--bubble-tone);\n  border-radius: 999px;\n  background: transparent;\n  color: var(--bubble-text);\n  font: inherit;\n  font-size: 11px;\n  font-weight: 600;\n  white-space: nowrap;\n  cursor: pointer;\n}\n.acu-notice-bubble__action.is-danger[data-v-b1f38882] {\n  border-color: #c2503a;\n  color: #a33d29;\n}\n.acu-notice-bubble__action[data-v-b1f38882]:hover:not(:disabled) {\n  background: var(--bubble-tone);\n  color: #fffaf0;\n}\n.acu-notice-bubble__action.is-danger[data-v-b1f38882]:hover:not(:disabled) {\n  background: #c2503a;\n}\n.acu-notice-bubble__action[data-v-b1f38882]:disabled {\n  opacity: 0.55;\n  cursor: default;\n}\n.acu-notice-bubble__close[data-v-b1f38882] {\n  appearance: none;\n  width: 20px;\n  height: 20px;\n  padding: 0;\n  border: 0;\n  border-radius: 50%;\n  background: transparent;\n  color: var(--bubble-muted);\n  font-size: 15px;\n  line-height: 20px;\n  cursor: pointer;\n}\n.acu-notice-bubble__close[data-v-b1f38882]:hover {\n  background: rgba(120, 90, 30, 0.12);\n  color: var(--bubble-text);\n}\n.acu-notice-bubble__tail[data-v-b1f38882] {\n  position: absolute;\n  width: 12px;\n  height: 12px;\n  background: var(--bubble-bg);\n  border: 1px solid var(--bubble-border);\n  transform: rotate(45deg);\n}\n.acu-notice-bubble.is-above .acu-notice-bubble__tail[data-v-b1f38882] {\n  bottom: -7px;\n  margin-left: -6px;\n  border-top: 0;\n  border-left: 0;\n}\n.acu-notice-bubble.is-below .acu-notice-bubble__tail[data-v-b1f38882] {\n  top: -7px;\n  margin-left: -6px;\n  border-right: 0;\n  border-bottom: 0;\n}\n.acu-notice-bubble.is-left .acu-notice-bubble__tail[data-v-b1f38882] {\n  right: -7px;\n  margin-top: -6px;\n  border-bottom: 0;\n  border-left: 0;\n}\n.acu-notice-bubble.is-right .acu-notice-bubble__tail[data-v-b1f38882] {\n  left: -7px;\n  margin-top: -6px;\n  border-top: 0;\n  border-right: 0;\n}\n@keyframes acu-notice-bubble-in-b1f38882 {\nfrom {\n    opacity: 0;\n}\nto {\n    opacity: 1;\n}\n}\n@media (max-width: 640px) {\n.acu-notice-bubble.is-docked[data-v-b1f38882] {\n    top: calc(58px + env(safe-area-inset-top, 0px));\n    right: auto;\n    left: 50%;\n    width: min(88vw, 360px);\n    max-width: calc(100vw - 24px);\n    transform: translateX(-50%);\n}\n}\n@media (prefers-reduced-motion: reduce) {\n.acu-notice-bubble[data-v-b1f38882] {\n    animation: none;\n}\n}\n", "src/presentation-v2/components/NoticeBubble.vue#style-0-b1f38882");
+    var NoticeBubble_vue_vue_type_style_index_0_scoped_b1f38882_lang = null;
+
+    const _hoisted_1$15 = ["role"];
+    const _hoisted_2$_ = { class: "acu-notice-bubble__body" };
+    const _hoisted_3$Q = {
+	key: 0,
+	class: "acu-notice-bubble__heading"
+    };
+    const _hoisted_4$H = {
+	key: 1,
+	class: "acu-notice-bubble__text"
+    };
+    const _hoisted_5$A = {
+	key: 0,
+	class: "acu-notice-bubble__tools"
+    };
+    const _hoisted_6$x = ["disabled", "onClick"];
+    const _hoisted_7$v = ["title", "aria-label"];
+    function _sfc_render$1a(_ctx, _cache, $props, $setup, $data, $options) {
+	return $props.slide ? (openBlock(), createElementBlock("div", {
+		key: 0,
+		ref: "bubbleEl",
+		class: normalizeClass(["acu-notice-bubble", [
+			`acu-notice-bubble--${$setup.tone}`,
+			$props.anchor ? `is-anchored is-${$setup.placement.side}` : "is-docked",
+			{ "is-measuring": $props.anchor && !$setup.measured }
+		]]),
+		style: normalizeStyle($setup.bubbleStyle),
+		role: $setup.tone === "error" ? "alert" : "status",
+		"aria-live": "polite",
+		onPointerenter: _cache[0] || (_cache[0] = ($event) => $setup.emit("pause")),
+		onPointerleave: _cache[1] || (_cache[1] = ($event) => $setup.emit("resume"))
+	}, [
+		createBaseVNode("div", _hoisted_2$_, [$setup.heading ? (openBlock(), createElementBlock(
+			"p",
+			_hoisted_3$Q,
+			toDisplayString($setup.heading),
+			1
+			/* TEXT */
+		)) : createCommentVNode("v-if", true), $setup.bodyText ? (openBlock(), createElementBlock(
+			"p",
+			_hoisted_4$H,
+			toDisplayString($setup.bodyText),
+			1
+			/* TEXT */
+		)) : createCommentVNode("v-if", true)]),
+		$setup.actionButtons.length || $setup.closable ? (openBlock(), createElementBlock("div", _hoisted_5$A, [(openBlock(true), createElementBlock(
+			Fragment,
+			null,
+			renderList($setup.actionButtons, (button) => {
+				return openBlock(), createElementBlock("button", {
+					key: button.label,
+					type: "button",
+					class: normalizeClass(["acu-notice-bubble__action", { "is-danger": button.variant === "danger" }]),
+					disabled: $props.actionBusy,
+					onClick: button.run
+				}, toDisplayString(button.label), 11, _hoisted_6$x);
+			}),
+			128
+			/* KEYED_FRAGMENT */
+		)), $setup.closable ? (openBlock(), createElementBlock("button", {
+			key: 0,
+			type: "button",
+			class: "acu-notice-bubble__close",
+			title: $props.slide.type === "task" ? "关闭提示" : "下一条",
+			"aria-label": $props.slide.type === "task" ? "关闭提示" : "下一条",
+			onClick: $setup.onClose
+		}, " × ", 8, _hoisted_7$v)) : createCommentVNode("v-if", true)])) : createCommentVNode("v-if", true),
+		$props.anchor ? (openBlock(), createElementBlock(
+			"span",
+			{
+				key: 1,
+				class: "acu-notice-bubble__tail",
+				style: normalizeStyle($setup.tailStyle),
+				"aria-hidden": "true"
+			},
+			null,
+			4
+			/* STYLE */
+		)) : createCommentVNode("v-if", true)
+	], 46, _hoisted_1$15)) : createCommentVNode("v-if", true);
+    }
+    var NoticeBubble = /*#__PURE__*/ _export_sfc(_sfc_main$1a, [["render", _sfc_render$1a], ["__scopeId", "data-v-b1f38882"]]);
+
+    var _sfc_main$19 = /*@__PURE__*/ defineComponent({
+        __name: 'DeskPetLayer',
+        setup(__props, { expose: __expose }) {
+            __expose();
+            /**
+             * 桌宠与统一浮动气泡的宿主：挂在设置外壳之外、传送到宿主 body，
+             * 设置面板关闭时同样可见。通知、进度任务与冷笑话都经这里的单一气泡轮播。
+             */
+            const hubState = useNoticeHubState();
+            const activity = useTaskActivity(hubState);
+            const carousel = useNoticeCarousel(hubState, activity.tasks);
+            const portalTarget = ref(null);
+            const petRect = ref(null);
+            const viewport = ref({ width: 0, height: 0 });
+            function readViewport() {
+                const win = getAcuHostWindow();
+                viewport.value = { width: win.innerWidth || 0, height: win.innerHeight || 0 };
+            }
+            onMounted(() => {
+                portalTarget.value = getAcuHostDocument().body;
+                readViewport();
+                getAcuHostWindow().addEventListener("resize", readViewport);
+            });
+            onBeforeUnmount(() => {
+                getAcuHostWindow().removeEventListener("resize", readViewport);
+            });
+            const __returned__ = { hubState, activity, carousel, portalTarget, petRect, viewport, readViewport, DeskPet, NoticeBubble };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-desk-pet-layer[data-v-d88e5f3d] {\n  display: contents;\n}\n", "src/presentation-v2/components/DeskPetLayer.vue#style-0-d88e5f3d");
+    var DeskPetLayer_vue_vue_type_style_index_0_scoped_d88e5f3d_lang = null;
+
+    const _hoisted_1$14 = { class: "acu-desk-pet-layer" };
+    function _sfc_render$19(_ctx, _cache, $props, $setup, $data, $options) {
+	return $setup.portalTarget ? (openBlock(), createBlock(Teleport, {
+		key: 0,
+		to: $setup.portalTarget
+	}, [createBaseVNode("div", _hoisted_1$14, [$setup.hubState.petEnabled.value ? (openBlock(), createBlock($setup["DeskPet"], {
+		key: 0,
+		busy: $setup.activity.busy.value,
+		"settings-version": $setup.hubState.snapshot.value.settingsVersion,
+		onRect: _cache[0] || (_cache[0] = ($event) => $setup.petRect = $event)
+	}, null, 8, ["busy", "settings-version"])) : createCommentVNode("v-if", true), createVNode($setup["NoticeBubble"], {
+		slide: $setup.carousel.slide.value,
+		task: $setup.carousel.currentTask.value,
+		anchor: $setup.hubState.petEnabled.value ? $setup.petRect : null,
+		"viewport-width": $setup.viewport.width,
+		"viewport-height": $setup.viewport.height,
+		"action-busy": $setup.carousel.actionBusy.value,
+		onPause: $setup.carousel.pause,
+		onResume: $setup.carousel.resume,
+		onSkip: $setup.carousel.skip,
+		onNoticeAction: $setup.carousel.runNoticeAction,
+		onTaskAction: $setup.carousel.runTaskAction,
+		onDismissTask: $setup.carousel.dismissTask
+	}, null, 8, [
+		"slide",
+		"task",
+		"anchor",
+		"viewport-width",
+		"viewport-height",
+		"action-busy",
+		"onPause",
+		"onResume",
+		"onSkip",
+		"onNoticeAction",
+		"onTaskAction",
+		"onDismissTask"
+	])])], 8, ["to"])) : createCommentVNode("v-if", true);
+    }
+    var DeskPetLayer = /*#__PURE__*/ _export_sfc(_sfc_main$19, [["render", _sfc_render$19], ["__scopeId", "data-v-d88e5f3d"]]);
+
+    var _sfc_main$18 = /*@__PURE__*/ defineComponent({
+        __name: 'AcuMessage',
+        props: {
+            kind: { default: 'info' },
+            visible: { type: Boolean, default: true }
+        },
+        setup(__props, { expose: __expose }) {
+            __expose();
+            const props = __props;
+            const visible = computed(() => props.visible);
+            const __returned__ = { props, visible };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-message[data-v-9bfe58b8] {\r\n  padding: 8px 0 8px 10px;\r\n  border-radius: 0;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  border: 0;\r\n  border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 28%, transparent);\r\n  line-height: 1.5;\r\n  background: transparent;\r\n  color: var(--acu-text-2);\n}\n.acu-message--info[data-v-9bfe58b8] {\r\n  border-left-color: color-mix(in srgb, var(--acu-text-3) 28%, transparent);\n}\n.acu-message--success[data-v-9bfe58b8] {\r\n  border-left-color: var(--acu-success);\n}\n.acu-message--warning[data-v-9bfe58b8] {\r\n  border-left-color: var(--acu-warning);\n}\n.acu-message--error[data-v-9bfe58b8] {\r\n  border-left-color: var(--acu-danger);\n}\r\n", "src/presentation-v2/components/_lib/AcuMessage.vue#style-0-9bfe58b8");
+    var AcuMessage_vue_vue_type_style_index_0_scoped_9bfe58b8_lang = null;
+
+    function _sfc_render$18(_ctx, _cache, $props, $setup, $data, $options) {
+	return $setup.visible ? (openBlock(), createElementBlock(
+		"div",
+		{
+			key: 0,
+			class: normalizeClass(["acu-message", `acu-message--${$props.kind}`]),
+			role: "status"
+		},
+		[renderSlot(_ctx.$slots, "default", {}, undefined, true)],
+		2
+		/* CLASS */
+	)) : createCommentVNode("v-if", true);
+    }
+    var AcuMessage = /*#__PURE__*/ _export_sfc(_sfc_main$18, [["render", _sfc_render$18], ["__scopeId", "data-v-9bfe58b8"]]);
+
+    var _sfc_main$17 = /*@__PURE__*/ defineComponent({
+        __name: 'AcuInfoBanner',
+        props: {
+            text: { default: '' },
+            tone: { default: 'info' },
+            icon: { default: undefined }
+        },
+        setup(__props, { expose: __expose }) {
+            __expose();
+            const props = __props;
+            const iconClass = computed(() => {
+                if (props.icon)
+                    return props.icon;
+                return '';
+            });
+            const __returned__ = { props, iconClass };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-info-banner[data-v-5b9a5d77] {\r\n  display: flex;\r\n  align-items: flex-start;\r\n  gap: var(--acu-space-250, 10px);\r\n  padding: var(--acu-space-225, 9px) var(--acu-space-250, 10px);\r\n  border-radius: var(--acu-radius-sm);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  line-height: 1.55;\r\n  background: color-mix(in srgb, var(--acu-text-3) 12%, transparent);\r\n  color: var(--acu-text-2);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-text-3) 18%, transparent);\r\n  min-width: 0;\n}\n.acu-info-banner__icon[data-v-5b9a5d77] {\r\n  flex-shrink: 0;\r\n  margin-top: var(--acu-space-050, 2px);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  line-height: 1.55;\n}\n.acu-info-banner__content[data-v-5b9a5d77] {\r\n  min-width: 0;\r\n  width: 100%;\r\n  word-wrap: break-word;\r\n  overflow-wrap: anywhere;\n}\n.acu-info-banner--info[data-v-5b9a5d77] {\r\n  background: color-mix(in srgb, var(--acu-text-3) 12%, transparent);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-text-3) 18%, transparent);\n}\n.acu-info-banner--info .acu-info-banner__icon[data-v-5b9a5d77] {\r\n  --acu-icon-color: var(--acu-text-3);\r\n  color: var(--acu-text-3);\n}\n.acu-info-banner--tip[data-v-5b9a5d77] {\r\n  background: color-mix(in srgb, var(--acu-accent) 10%, transparent);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-accent) 18%, transparent);\n}\n.acu-info-banner--tip .acu-info-banner__icon[data-v-5b9a5d77] {\r\n  --acu-icon-color: var(--acu-accent);\r\n  color: var(--acu-accent);\n}\n.acu-info-banner--warning[data-v-5b9a5d77] {\r\n  background: color-mix(in srgb, var(--acu-warning) 10%, transparent);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-warning) 20%, transparent);\n}\n.acu-info-banner--warning .acu-info-banner__icon[data-v-5b9a5d77] {\r\n  --acu-icon-color: var(--acu-warning);\r\n  color: var(--acu-warning);\n}\r\n", "src/presentation-v2/components/_lib/AcuInfoBanner.vue#style-0-5b9a5d77");
+    var AcuInfoBanner_vue_vue_type_style_index_0_scoped_5b9a5d77_lang = null;
+
+    const _hoisted_1$13 = { class: "acu-info-banner__content" };
+    function _sfc_render$17(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock(
+		"div",
+		{
+			class: normalizeClass(["acu-info-banner", `acu-info-banner--${$props.tone}`]),
+			role: "note"
+		},
+		[$setup.iconClass ? (openBlock(), createElementBlock(
+			"i",
+			{
+				key: 0,
+				class: normalizeClass(["acu-info-banner__icon", $setup.iconClass]),
+				"aria-hidden": "true"
+			},
+			null,
+			2
+			/* CLASS */
+		)) : createCommentVNode("v-if", true), createBaseVNode("div", _hoisted_1$13, [renderSlot(_ctx.$slots, "default", {}, () => [createTextVNode(
+			toDisplayString($props.text),
+			1
+			/* TEXT */
+		)], true)])],
+		2
+		/* CLASS */
+	);
+    }
+    var AcuInfoBanner = /*#__PURE__*/ _export_sfc(_sfc_main$17, [["render", _sfc_render$17], ["__scopeId", "data-v-5b9a5d77"]]);
+
+    const MIN_DURATION_MS = 100;
+    const MAX_DURATION_MS = 200;
+    const MS_PER_PIXEL = 0.45;
+    const transitionTimers = new WeakMap();
+    function useAcuHeightTransition(options = {}) {
+        const collapsedTransform = options.collapsedTransform ?? 'translateY(-2px)';
+        const expandedTransform = options.expandedTransform ?? 'translateY(0)';
+        function prefersReducedMotion() {
+            return acuMatchesMedia('(prefers-reduced-motion: reduce)');
+        }
+        function scheduleFrame(callback) {
+            acuRequestAnimationFrame(callback);
+        }
+        function clearTransitionTimer(el) {
+            const timer = transitionTimers.get(el);
+            if (timer !== undefined) {
+                acuClearTimeout(timer);
+                transitionTimers.delete(el);
+            }
+        }
+        function restoreOverflow(el) {
+            if (options.restoreOverflow) {
+                options.restoreOverflow(el);
+                return;
+            }
+            el.style.overflowY = 'hidden';
+            el.style.overflowX = 'hidden';
+        }
+        function cleanupTransition(el) {
+            const body = el;
+            clearTransitionTimer(body);
+            body.style.transition = '';
+            body.style.height = '';
+            body.style.opacity = '';
+            body.style.transform = '';
+            body.style.willChange = '';
+            restoreOverflow(body);
+        }
+        function getBorderHeight(el) {
+            const style = acuGetComputedStyle(el);
+            return (parseFloat(style.borderTopWidth) || 0) + (parseFloat(style.borderBottomWidth) || 0);
+        }
+        function getExpandedHeight(el) {
+            const contentHeight = el.scrollHeight + getBorderHeight(el);
+            const maxHeight = acuGetComputedStyle(el).maxHeight;
+            const parsedMax = Number.parseFloat(maxHeight);
+            if (Number.isFinite(parsedMax) && parsedMax > 0) {
+                return Math.min(contentHeight, parsedMax);
+            }
+            return contentHeight;
+        }
+        function durationForHeight(height) {
+            if (prefersReducedMotion())
+                return 1;
+            return Math.min(MAX_DURATION_MS, Math.max(MIN_DURATION_MS, Math.round(height * MS_PER_PIXEL)));
+        }
+        function runHeightTransition(el, targetHeight, direction, done) {
+            clearTransitionTimer(el);
+            const currentHeight = parseFloat(el.style.height) || el.getBoundingClientRect().height || getExpandedHeight(el);
+            const duration = durationForHeight(direction === 'enter' ? targetHeight : currentHeight);
+            const easing = direction === 'enter' ? 'ease-out' : 'ease-in';
+            if (prefersReducedMotion()) {
+                el.style.height = direction === 'enter' ? `${targetHeight}px` : '0px';
+                el.style.opacity = direction === 'enter' ? '1' : '0';
+                done();
+                return;
+            }
+            el.style.willChange = 'height, opacity, transform';
+            el.style.transition = `height ${duration}ms ${easing}, opacity ${Math.min(duration, 120)}ms ${easing}, transform ${duration}ms ${easing}`;
+            scheduleFrame(() => {
+                el.style.height = `${targetHeight}px`;
+                el.style.opacity = direction === 'enter' ? '1' : '0';
+                el.style.transform = direction === 'enter' ? expandedTransform : collapsedTransform;
+            });
+            const finish = () => {
+                clearTransitionTimer(el);
+                el.removeEventListener('transitionend', onEnd);
+                done();
+            };
+            const onEnd = (event) => {
+                if (event.target === el && event.propertyName === 'height')
+                    finish();
+            };
+            el.addEventListener('transitionend', onEnd);
+            transitionTimers.set(el, acuSetTimeout(finish, duration + 60));
+        }
+        function beforeEnter(el) {
+            const body = el;
+            clearTransitionTimer(body);
+            body.style.height = '0px';
+            body.style.opacity = '0';
+            body.style.transform = collapsedTransform;
+            body.style.overflowY = 'hidden';
+            body.style.overflowX = 'hidden';
+        }
+        function enter(el, done) {
+            runHeightTransition(el, getExpandedHeight(el), 'enter', done);
+        }
+        function afterEnter(el) {
+            cleanupTransition(el);
+        }
+        function beforeLeave(el) {
+            const body = el;
+            clearTransitionTimer(body);
+            body.style.height = `${body.getBoundingClientRect().height || getExpandedHeight(body)}px`;
+            body.style.opacity = '1';
+            body.style.transform = expandedTransform;
+            body.style.overflowY = 'hidden';
+            body.style.overflowX = 'hidden';
+        }
+        function leave(el, done) {
+            runHeightTransition(el, 0, 'leave', done);
+        }
+        function afterLeave(el) {
+            cleanupTransition(el);
+        }
+        return {
+            beforeEnter,
+            enter,
+            afterEnter,
+            beforeLeave,
+            leave,
+            afterLeave,
+            cleanupTransition,
+        };
+    }
+
+    var _sfc_main$16 = /*@__PURE__*/ defineComponent({
+        __name: 'AcuPanel',
+        props: {
+            title: { default: undefined },
+            description: { default: undefined },
+            descriptionTone: { default: 'info' }
+        },
+        emits: ["description-toggle"],
+        setup(__props, { expose: __expose, emit: __emit }) {
+            __expose();
+            const props = __props;
+            const slots = useSlots();
+            const descriptionOpen = ref(false);
+            const descriptionId = useId();
+            const hasDescriptionSlot = typeof slots.description === 'function';
+            const hasDescription = computed(() => Boolean(props.description) || hasDescriptionSlot);
+            const descriptionTransition = useAcuHeightTransition({
+                collapsedTransform: 'none',
+                expandedTransform: 'none',
+            });
+            const emit = __emit;
+            function toggleDescription() {
+                descriptionOpen.value = !descriptionOpen.value;
+                emit('description-toggle', descriptionOpen.value);
+            }
+            function beforeDescriptionEnter(el) {
+                descriptionTransition.beforeEnter(el);
+            }
+            function descriptionEnter(el, done) {
+                descriptionTransition.enter(el, done);
+            }
+            function afterDescriptionEnter(el) {
+                descriptionTransition.afterEnter(el);
+            }
+            function beforeDescriptionLeave(el) {
+                descriptionTransition.beforeLeave(el);
+            }
+            function descriptionLeave(el, done) {
+                descriptionTransition.leave(el, done);
+            }
+            function afterDescriptionLeave(el) {
+                descriptionTransition.afterLeave(el);
+            }
+            function cleanupDescriptionTransition(el) {
+                descriptionTransition.cleanupTransition(el);
+            }
+            const __returned__ = { props, slots, descriptionOpen, descriptionId, hasDescriptionSlot, hasDescription, descriptionTransition, emit, toggleDescription, beforeDescriptionEnter, descriptionEnter, afterDescriptionEnter, beforeDescriptionLeave, descriptionLeave, afterDescriptionLeave, cleanupDescriptionTransition, AcuIconButton, AcuInfoBanner };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-panel[data-v-c4139d23] {\r\n  min-width: 0; padding: var(--acu-panel-padding, 16px);\r\n  background: var(--acu-bg-1);\r\n  border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-md);\r\n  display: flex; flex-direction: column; gap: 0;\r\n  height: 100%;\n}\n.acu-panel__header[data-v-c4139d23] {\r\n  display: flex; align-items: center; justify-content: space-between;\r\n  gap: var(--acu-panel-gap, 12px); margin-bottom: var(--acu-panel-gap, 12px);\r\n  min-height: var(--acu-control-height-md, 32px);\r\n  transition: margin-bottom 0.15s ease;\n}\n.acu-panel__header--description-open[data-v-c4139d23] {\r\n  margin-bottom: var(--acu-space-2, 8px);\n}\n.acu-panel__title[data-v-c4139d23] {\r\n  margin: 0;\r\n  min-width: 0;\r\n  flex: 1 1 auto;\r\n  font-size: var(--acu-font-size-panel-title, 15px);\r\n  line-height: 1.3;\r\n  color: var(--acu-text-1);\n}\n.acu-panel__header-right[data-v-c4139d23] {\r\n  margin-left: auto;\r\n  display: flex;\r\n  align-items: center;\r\n  gap: var(--acu-space-2, 8px);\r\n  flex-shrink: 0;\n}\n.acu-panel__actions[data-v-c4139d23] { display: flex; align-items: center; gap: var(--acu-space-2, 8px); flex-shrink: 0;\n}\n.acu-panel__description-button[data-v-c4139d23] {\r\n  width: var(--acu-button-height-sm, 28px);\r\n  height: var(--acu-button-height-sm, 28px);\r\n  display: inline-flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: transparent;\r\n  color: var(--acu-text-3);\r\n  cursor: pointer;\r\n  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;\n}\n.acu-panel__description-button[data-v-c4139d23]:hover {\r\n  background: var(--acu-bg-2);\r\n  color: var(--acu-text-1);\n}\n.acu-panel__description-button--open[data-v-c4139d23] {\r\n  background: color-mix(in srgb, var(--acu-text-3) 12%, transparent);\r\n  color: var(--acu-text-1);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-text-3) 18%, transparent);\n}\n.acu-panel__description-button[data-v-c4139d23]:focus-visible {\r\n  outline: none;\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-panel__body[data-v-c4139d23] { display: flex; flex-direction: column; gap: var(--acu-panel-gap, 12px); min-width: 0; flex: 1 1 auto;\n}\n.acu-panel__description-region[data-v-c4139d23] {\r\n  min-width: 0;\r\n  overflow: hidden;\n}\n.acu-panel__description-region-inner[data-v-c4139d23] {\r\n  padding-bottom: var(--acu-panel-gap, 12px);\r\n  overflow: hidden;\n}\r\n", "src/presentation-v2/components/_lib/AcuPanel.vue#style-0-c4139d23");
+    var AcuPanel_vue_vue_type_style_index_0_scoped_c4139d23_lang = null;
+
+    const _hoisted_1$12 = { class: "acu-panel" };
+    const _hoisted_2$Z = {
+	key: 0,
+	class: "acu-panel__title"
+    };
+    const _hoisted_3$P = {
+	key: 1,
+	class: "acu-panel__header-right"
+    };
+    const _hoisted_4$G = {
+	key: 0,
+	class: "acu-panel__actions"
+    };
+    const _hoisted_5$z = ["id", "aria-hidden"];
+    const _hoisted_6$w = { class: "acu-panel__description-region-inner" };
+    const _hoisted_7$u = { class: "acu-panel__body" };
+    function _sfc_render$16(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$12, [
+		$props.title || _ctx.$slots.title || _ctx.$slots.actions || $setup.hasDescription ? (openBlock(), createElementBlock(
+			"header",
+			{
+				key: 0,
+				class: normalizeClass(["acu-panel__header", { "acu-panel__header--description-open": $setup.descriptionOpen }])
+			},
+			[$props.title || _ctx.$slots.title ? (openBlock(), createElementBlock("h3", _hoisted_2$Z, [renderSlot(_ctx.$slots, "title", {}, () => [createTextVNode(
+				toDisplayString($props.title),
+				1
+				/* TEXT */
+			)], true)])) : createCommentVNode("v-if", true), _ctx.$slots.actions || $setup.hasDescription ? (openBlock(), createElementBlock("div", _hoisted_3$P, [_ctx.$slots.actions ? (openBlock(), createElementBlock("div", _hoisted_4$G, [renderSlot(_ctx.$slots, "actions", {}, undefined, true)])) : createCommentVNode("v-if", true), $setup.hasDescription ? (openBlock(), createBlock($setup["AcuIconButton"], {
+				key: 1,
+				class: normalizeClass(["acu-panel__description-button", { "acu-panel__description-button--open": $setup.descriptionOpen }]),
+				icon: "fa-solid fa-circle-info",
+				"aria-expanded": $setup.descriptionOpen,
+				"aria-controls": $setup.descriptionId,
+				title: $setup.descriptionOpen ? "收起说明" : "展开说明",
+				"aria-label": $setup.descriptionOpen ? "收起说明" : "展开说明",
+				onClick: $setup.toggleDescription
+			}, null, 8, [
+				"class",
+				"aria-expanded",
+				"aria-controls",
+				"title",
+				"aria-label"
+			])) : createCommentVNode("v-if", true)])) : createCommentVNode("v-if", true)],
+			2
+			/* CLASS */
+		)) : createCommentVNode("v-if", true),
+		createVNode(Transition, {
+			css: false,
+			onBeforeEnter: $setup.beforeDescriptionEnter,
+			onEnter: $setup.descriptionEnter,
+			onAfterEnter: $setup.afterDescriptionEnter,
+			onEnterCancelled: $setup.cleanupDescriptionTransition,
+			onBeforeLeave: $setup.beforeDescriptionLeave,
+			onLeave: $setup.descriptionLeave,
+			onAfterLeave: $setup.afterDescriptionLeave,
+			onLeaveCancelled: $setup.cleanupDescriptionTransition
+		}, {
+			default: withCtx(() => [$setup.hasDescription ? withDirectives((openBlock(), createElementBlock("div", {
+				key: 0,
+				id: $setup.descriptionId,
+				class: "acu-panel__description-region",
+				"aria-hidden": !$setup.descriptionOpen
+			}, [createBaseVNode("div", _hoisted_6$w, [createVNode($setup["AcuInfoBanner"], {
+				class: "acu-panel__description-banner",
+				tone: $props.descriptionTone
+			}, {
+				default: withCtx(() => [renderSlot(_ctx.$slots, "description", {}, () => [createTextVNode(
+					toDisplayString($props.description),
+					1
+					/* TEXT */
+				)], true)]),
+				_: 3
+			}, 8, ["tone"])])], 8, _hoisted_5$z)), [[vShow, $setup.descriptionOpen]]) : createCommentVNode("v-if", true)]),
+			_: 3
+		}),
+		createBaseVNode("div", _hoisted_7$u, [renderSlot(_ctx.$slots, "default", {}, undefined, true)])
+	]);
+    }
+    var AcuPanel = /*#__PURE__*/ _export_sfc(_sfc_main$16, [["render", _sfc_render$16], ["__scopeId", "data-v-c4139d23"]]);
+
+    var _sfc_main$15 = /*@__PURE__*/ defineComponent({
+        __name: 'AcuPanelGrid',
+        props: {
+            columns: { default: 2 },
+            collapseAt: { default: 'md' }
+        },
+        setup(__props, { expose: __expose }) {
+            __expose();
+            const props = __props;
+            const gridStyle = computed(() => ({
+                '--acu-panel-grid-columns': String(Math.max(1, Math.floor(props.columns))),
+            }));
+            const __returned__ = { props, gridStyle };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-panel-grid[data-v-b00ea74c] {\r\n  min-width: 0;\r\n  display: grid;\r\n  grid-template-columns: repeat(var(--acu-panel-grid-columns), minmax(0, 1fr));\r\n  gap: var(--acu-panel-grid-gap, 16px);\r\n  align-items: stretch;\n}\n.acu-panel-grid[data-v-b00ea74c] >  * {\r\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-panel-grid--collapse-md[data-v-b00ea74c] {\r\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 1080px) {\n.acu-panel-grid--collapse-lg[data-v-b00ea74c] {\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuPanelGrid.vue#style-0-b00ea74c");
+    var AcuPanelGrid_vue_vue_type_style_index_0_scoped_b00ea74c_lang = null;
+
+    function _sfc_render$15(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock(
+		"div",
+		{
+			class: normalizeClass(["acu-panel-grid", `acu-panel-grid--collapse-${$props.collapseAt}`]),
+			style: normalizeStyle($setup.gridStyle)
+		},
+		[renderSlot(_ctx.$slots, "default", {}, undefined, true)],
+		6
+		/* CLASS, STYLE */
+	);
+    }
+    var AcuPanelGrid = /*#__PURE__*/ _export_sfc(_sfc_main$15, [["render", _sfc_render$15], ["__scopeId", "data-v-b00ea74c"]]);
+
+    const dashboardCopy = {
+        pageTitle: "仪表盘",
+        panels: {
+            healthTitle: "运行概览",
+            healthDescription: "这里显示当前聊天和已开启功能的状态。只有标为“需要处理”的项目才会影响使用；未启用或待准备通常不需要操作。",
+            togglesTitle: "开关",
+            togglesDescription: "基础设置：当前聊天中可随时开关的功能。高级设置：调整后可能影响数据库运行，请谨慎修改。",
+        },
+        groups: {
+            ariaLabel: "开关分组切换",
+            basic: "基础设置",
+            advanced: "高级设置",
+        },
+        developerToggle: {
+            label: "启用开发者选项",
+            description: "默认关闭。显示开发者页面，不推荐无经验用户启用。",
+        },
+        storage: {
+            sectionLabel: "存储模式",
+            description: "选择表格数据的保存方式。切换会重置填表提示词。填表异常时，可切回原模式检查。",
+            modeLabel(mode) {
+                return mode === "sqlite" ? "SQLite" : "原生 JSON";
+            },
+            optionDescription: {
+                native: "兼容性高，适合基础表格。",
+                sqlite: "准确率高，适合复杂表格与多表关联。",
+            },
+            switchLabel(mode) {
+                return mode === "sqlite" ? "SQL" : "原生";
+            },
+            badge(mode) {
+                return mode === "native" ? "兼容性最佳" : "适合复杂表";
+            },
+            switched(mode) {
+                return `已切换到 ${dashboardCopy.storage.modeLabel(mode)} 模式。`;
+            },
+            switchFailed: "存储模式切换失败。",
+        },
+        api: {
+            title: "API",
+            action: "配置 API",
+            unavailableBadge: "不可用",
+            unavailableSummary: "插件还没有拿到酒馆侧运行接口，当前 API 状态无法确认。",
+            unconfiguredBadge: "未配置",
+            configuredBadge: "已配置",
+            tavernPresetLabel(name) {
+                return `酒馆连接预设 ${name}`;
+            },
+            tavernPresetMissingLabel: "酒馆连接预设",
+            tavernPresetMissingIssue: "未选择酒馆连接预设",
+            mainApiLabel: "酒馆主 API",
+            customApiLabel: "自定义 API",
+            endpointField: "端点",
+            modelField: "模型",
+            missingIssue(fields) {
+                return `缺少${fields}`;
+            },
+            namedPresetNotReady(name, issue) {
+                return `API 页当前预设 "${name}" 还不能发起请求：${issue}。`;
+            },
+            noUsablePreset(issue) {
+                return `API 页当前没有可用预设，当前连接配置也不完整：${issue}。`;
+            },
+            namedPresetReady(name, statusLabel) {
+                return `API 页当前预设 "${name}" 已配置，使用${statusLabel}。`;
+            },
+            configReadyWithoutPreset(statusLabel) {
+                return `当前连接配置已配置，使用${statusLabel}，但还没有选中 API 预设。`;
+            },
+        },
+        tableHealth: {
+            title: "表格更新",
+            noChatBadge: "未加载聊天",
+            noChatSummary: "当前没有加载 SillyTavern 聊天，暂时无法读取对应数据库表格或计算自动更新楼层。",
+            notLoadedBadge: "待准备",
+            notLoadedSummary(totalAi) {
+                return `当前聊天还没有加载数据库表格。第一次填表或初始化后，这里会自动显示更新状态；当前已有 ${totalAi} 条 AI 回复。`;
+            },
+            updateSettingsAction: "查看填表工作台",
+            statusAction: "查看表格状态",
+            overdueBadge: "待更新",
+            dueRowsDetail(count) {
+                return `${count} 张表已到触发点但最后更新楼层没有前进`;
+            },
+            initialDueRowsDetail(count) {
+                return `${count} 张表满足首次更新条件但尚未记录过更新`;
+            },
+            maxOverdueDetail(count) {
+                return `最大积压 ${count} 层`;
+            },
+            overdueSummary(issueCount, detail) {
+                return detail
+                    ? `${issueCount} 张表已经满足自动更新条件，后续填表或手动检查时会继续处理：${detail}。`
+                    : `${issueCount} 张表已经满足自动更新条件，后续填表或手动检查时会继续处理。`;
+            },
+            okBadge: "正常",
+            okSummary(activeCount, totalAi, disabledCount) {
+                return activeCount
+                    ? `当前 ${activeCount} 张自动更新表没有积压；已有 ${totalAi} 条 AI 回复${disabledCount ? `，另有 ${disabledCount} 张表不参与自动更新` : ""}。`
+                    : `当前没有参与自动更新的表；已有 ${totalAi} 条 AI 回复。`;
+            },
+        },
+        sqlHealth: {
+            title: "SQL 模式",
+            action: "查看表格模板",
+            tableNameSamples(visibleNames, totalCount) {
+                return totalCount > 3
+                    ? `${visibleNames} 等 ${totalCount} 张表`
+                    : visibleNames;
+            },
+            noChatBadge: "未加载聊天",
+            noChatSummary(sqlEnabled) {
+                return sqlEnabled
+                    ? "当前没有加载 SillyTavern 聊天，暂时无法检查当前聊天的表格模板是否适配。"
+                    : "当前没有加载 SillyTavern 聊天，暂时无法检查当前聊天的表格模板是否适配。";
+            },
+            pendingBadge: "待检查",
+            disabledBadge: "未启用",
+            noTemplatesSummary(sqlEnabled) {
+                return sqlEnabled
+                    ? "当前存储模式是 SQLite，还没有加载表格模板。第一次填表前，请确认模板已经补好 SQL 表结构信息。"
+                    : "当前存储模式是原生 JSON，还没有加载表格模板。继续使用原生 JSON 时无需处理 SQL 模板信息。";
+            },
+            looksSqlBadge: "开发者提示",
+            looksSqlSummary(ddlCount, total) {
+                return `当前存储模式是原生 JSON，开发者检查发现 ${ddlCount}/${total} 张表包含 SQL 结构信息。若要使用 SQLite，请在高级设置里选择“SQLite”；继续使用原生 JSON 时通常无需处理。`;
+            },
+            nativeModeBadge: "原生 JSON",
+            nativeModeSummary(total) {
+                return `当前存储模式是原生 JSON，已加载 ${total} 张表。模板中的 SQL 信息不会影响原生 JSON 模式运行；需要切换 SQLite 时再检查模板。`;
+            },
+            nativeMatchBadge: "模板适配",
+            nativeMatchSummary(total) {
+                return `当前存储模式是原生 JSON，当前 ${total} 张表也都是普通表格模板，模式与模板适配。`;
+            },
+            missingDdlBadge: "模板未适配",
+            missingDdlSummary(count, total, names) {
+                return `当前存储模式是 SQLite，但 ${count}/${total} 张表还不是完整的 SQL 模板：${names}。这些表可能无法正确保存到 SQLite，请到“表格模板”补齐 SQL 表结构信息，或切回原生 JSON。`;
+            },
+            invalidDdlBadge: "模板不适配",
+            invalidDdlSummary(count, total, names) {
+                return `当前存储模式是 SQLite，但 ${count}/${total} 张表的 SQL 表结构信息与表头不一致：${names}。这可能导致数据写入失败，请先校准模板。`;
+            },
+            templateMatchBadge: "模板适配",
+            templateMatchSummary(total) {
+                return `当前存储模式是 SQLite，当前 ${total} 张表都是适配 SQL 的表格模板，表结构也与表头一致。`;
+            },
+        },
+        vectorHealth: {
+            title: "交火向量",
+            configureAction: "前往填表模式",
+            disabledBadge: "未启用",
+            disabledSummary: "当前填表模式不使用向量召回，无需配置向量服务。",
+            incompleteBadge: "配置不完整",
+            incompleteSummary(errors) {
+                return errors.length
+                    ? `当前填表模式需要向量服务，但它还不能正常使用：${errors.join("；")}。`
+                    : "当前填表模式需要向量服务，但它还不能正常使用。";
+            },
+            configuredBadge: "已配置",
+            configuredSummary: "当前填表模式使用向量召回，必填的向量化服务已经配置完整。",
+            readFailedBadge: "读取失败",
+            readFailedSummary(message) {
+                return `交火向量配置读取失败：${message}。`;
+            },
+            readFailedFallback: "请到填表工作台重新检查向量服务配置",
+            missingEmbeddingEndpoint: "缺少“向量化URL”",
+            missingEmbeddingModel: "缺少“向量化模型名”",
+            rerankPairRequired: "“重排URL”和“重排模型名”需要同时填写，或者同时留空",
+        },
+        logs: {
+            title: "运行日志",
+            action: "查看运行日志",
+            noErrorBadge: "无报错",
+            noErrorSummary(warnCount, showDeveloperDiagnostics = false) {
+                return showDeveloperDiagnostics && warnCount
+                    ? `本次前端会话没有记录到 Error 级别日志；开发者模式下可见 ${warnCount} 条 Warn。`
+                    : "本次前端会话没有记录到 Error 级别日志。";
+            },
+            errorBadge(errorCount) {
+                return `${errorCount} 条报错`;
+            },
+            errorSummary(reason, errorCount, warnCount, tag) {
+                return `${reason}本次前端会话累计 ${errorCount} 条 Error、${warnCount} 条 Warn，最近一条来自 ${tag}。`;
+            },
+            apiIssue: "最近日志指向 API 配置或连接问题，填表请求可能没有成功发出。",
+            outputFormatIssue: "最近日志指向填表输出格式问题，模型返回内容可能没有被识别为有效表格修改。",
+            commandParseIssue: "最近日志指向填表指令解析问题，部分修改可能没有应用。",
+            sqlIssue: "最近日志指向 SQL 或表结构问题，请检查表格模板、列名和 SQL 填表提示词。",
+            saveIssue: "最近日志指向保存失败，表格可能生成了修改但没有写回聊天记录。",
+            genericError: "运行日志中有报错，请去高级工具查看具体内容。",
+            genericWarning: "运行日志中有警告，请去高级工具确认是否需要处理。",
+        },
+        tableStatus: {
+            none: "无",
+            notInitialized: "未初始",
+            pendingInitial: "待初始",
+        },
+        toggles: {
+            autoUpdate: {
+                label: "自动更新",
+                description: "默认开启。关闭后需手动更新表。仅推荐在测试或自由发挥时关闭。",
+            },
+            silentMode: {
+                label: "静默模式",
+                description: "默认关闭。开启后不再弹出任何通知气泡（包括报错与进度），确认框和输入框照常出现；报错仍会写入日志。",
+            },
+            desktopPet: {
+                label: "桌面宠物",
+                description: "默认开启。桌宠干活时会流口水，通知以气泡出现在它身边，可拖动摆放；关闭后气泡回到右上角。",
+            },
+            zeroTk: {
+                label: "0TK 占用模式",
+                description: "默认开启。开启后纪要概览不占用上下文。",
+            },
+            continuation: {
+                label: "智能续写",
+                description: "手动功能。代替你自动发送提示词，AI 根据内容持续续写。",
+            },
+            worldSimulation: {
+                label: "格林推演",
+                description: "审计推演账本、阶段计划与证据，并在确认后把可感知的场外信号写进正文。",
+            },
+            externalImport: {
+                label: "外部导入",
+                description: "手动功能。将 TXT 小说快速转为未精修的世界书条目，方便制作角色卡。",
+            },
+            contentReplace: {
+                label: "正文替换",
+                description: "默认关闭。开启后每轮正文生成后会自动检查并优化 AI 回复的正文内容。",
+            },
+        },
+        templatePreset: {
+            defaultName: "默认预设",
+            globalScope: "全局",
+            readFailed: "读取失败",
+        },
+    };
+
+    var _sfc_main$14 = /*@__PURE__*/ defineComponent({
+        __name: 'DashboardStorageModeSection',
+        props: {
+            options: {},
+            modelValue: {}
+        },
+        emits: ["update:modelValue"],
+        setup(__props, { expose: __expose, emit: __emit }) {
+            __expose();
+            const props = __props;
+            const emit = __emit;
+            const switchOptions = computed(() => props.options.map((option) => ({
+                value: option.value,
+                label: dashboardCopy.storage.switchLabel(option.value),
+            })));
+            const decoratedOptions = computed(() => props.options.map((option) => ({
+                ...option,
+                iconClass: option.value === "sqlite"
+                    ? "fa-solid fa-database"
+                    : "fa-regular fa-file-lines",
+                badge: dashboardCopy.storage.badge(option.value),
+            })));
+            function select(value) {
+                if (value === props.modelValue)
+                    return;
+                emit("update:modelValue", value);
+            }
+            const __returned__ = { props, emit, switchOptions, decoratedOptions, select, AcuSegmentedControl, get dashboardCopy() { return dashboardCopy; } };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-dashboard-storage-mode[data-v-12a63c98] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-dashboard-storage-mode__head[data-v-12a63c98] {\r\n  min-width: 0;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: 12px;\n}\n.acu-dashboard-storage-mode__label[data-v-12a63c98] {\r\n  min-width: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  font-weight: 500;\n}\n.acu-dashboard-storage-mode__desc-main[data-v-12a63c98] {\r\n  margin: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-dashboard-storage-mode__switch[data-v-12a63c98] {\r\n  flex: 0 0 auto;\r\n  width: 92px;\n}\n.acu-dashboard-storage-mode__cards[data-v-12a63c98] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 4px;\r\n  margin-top: 4px;\n}\n.acu-dashboard-storage-mode__card[data-v-12a63c98] {\r\n  position: relative;\r\n  min-width: 0;\r\n  padding: 5px 0 5px 8px;\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: transparent;\r\n  display: grid;\r\n  grid-template-columns: 26px minmax(0, 1fr);\r\n  gap: 8px;\r\n  align-items: center;\r\n  transition:\r\n    background 0.15s ease,\r\n    box-shadow 0.15s ease;\n}\n.acu-dashboard-storage-mode__card--active[data-v-12a63c98] {\r\n  background: color-mix(in srgb, var(--acu-accent) 8%, transparent);\r\n  box-shadow:\r\n    inset 0 0 0 1px\r\n    color-mix(in srgb, var(--acu-accent) 30%, transparent);\n}\n.acu-dashboard-storage-mode__icon[data-v-12a63c98] {\r\n  width: 26px;\r\n  height: 26px;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: transparent;\r\n  color: var(--acu-text-3);\r\n  display: inline-flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  font-size: 15px;\n}\n.acu-dashboard-storage-mode__card--active .acu-dashboard-storage-mode__icon[data-v-12a63c98] {\r\n  color: var(--acu-accent);\r\n  background: transparent;\n}\n.acu-dashboard-storage-mode__body[data-v-12a63c98] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 4px;\n}\n.acu-dashboard-storage-mode__card-head[data-v-12a63c98] {\r\n  min-width: 0;\r\n  display: flex;\r\n  align-items: center;\r\n  flex-wrap: wrap;\r\n  gap: 6px;\n}\n.acu-dashboard-storage-mode__name[data-v-12a63c98] {\r\n  min-width: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  font-weight: 600;\r\n  line-height: 1.25;\n}\n.acu-dashboard-storage-mode__badge[data-v-12a63c98] {\r\n  display: inline-flex;\r\n  align-items: center;\r\n  min-height: 18px;\r\n  padding: 1px 6px;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-micro, 10px);\r\n  line-height: 1.2;\r\n  white-space: nowrap;\n}\n.acu-dashboard-storage-mode__card--active .acu-dashboard-storage-mode__badge[data-v-12a63c98] {\r\n  background: color-mix(in srgb, var(--acu-accent) 16%, transparent);\r\n  color: var(--acu-accent);\n}\n.acu-dashboard-storage-mode__desc[data-v-12a63c98] {\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n@media (max-width: 640px) {\n.acu-dashboard-storage-mode__head[data-v-12a63c98] {\r\n    align-items: center;\n}\n.acu-dashboard-storage-mode__switch[data-v-12a63c98] {\r\n    width: 88px;\n}\n.acu-dashboard-storage-mode__card[data-v-12a63c98] {\r\n    grid-template-columns: minmax(0, 1fr);\n}\n.acu-dashboard-storage-mode__icon[data-v-12a63c98] {\r\n    display: none;\n}\n}\r\n", "src/presentation-v2/components/DashboardStorageModeSection.vue#style-0-12a63c98");
+    var DashboardStorageModeSection_vue_vue_type_style_index_0_scoped_12a63c98_lang = null;
+
+    const _hoisted_1$11 = ["aria-label"];
+    const _hoisted_2$Y = { class: "acu-dashboard-storage-mode__head" };
+    const _hoisted_3$O = { class: "acu-dashboard-storage-mode__label" };
+    const _hoisted_4$F = { class: "acu-dashboard-storage-mode__desc-main" };
+    const _hoisted_5$y = { class: "acu-dashboard-storage-mode__cards" };
+    const _hoisted_6$v = {
+	class: "acu-dashboard-storage-mode__icon",
+	"aria-hidden": "true"
+    };
+    const _hoisted_7$t = { class: "acu-dashboard-storage-mode__body" };
+    const _hoisted_8$s = { class: "acu-dashboard-storage-mode__card-head" };
+    const _hoisted_9$n = { class: "acu-dashboard-storage-mode__name" };
+    const _hoisted_10$k = { class: "acu-dashboard-storage-mode__badge" };
+    const _hoisted_11$k = { class: "acu-dashboard-storage-mode__desc" };
+    function _sfc_render$14(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", {
+		class: "acu-dashboard-storage-mode",
+		"aria-label": $setup.dashboardCopy.storage.sectionLabel
+	}, [
+		createBaseVNode("div", _hoisted_2$Y, [createBaseVNode(
+			"span",
+			_hoisted_3$O,
+			toDisplayString($setup.dashboardCopy.storage.sectionLabel),
+			1
+			/* TEXT */
+		), createVNode($setup["AcuSegmentedControl"], {
+			class: "acu-dashboard-storage-mode__switch",
+			"aria-label": $setup.dashboardCopy.storage.sectionLabel,
+			options: $setup.switchOptions,
+			"model-value": $props.modelValue,
+			size: "sm",
+			"onUpdate:modelValue": $setup.select
+		}, null, 8, [
+			"aria-label",
+			"options",
+			"model-value"
+		])]),
+		createBaseVNode(
+			"p",
+			_hoisted_4$F,
+			toDisplayString($setup.dashboardCopy.storage.description),
+			1
+			/* TEXT */
+		),
+		createBaseVNode("div", _hoisted_5$y, [(openBlock(true), createElementBlock(
+			Fragment,
+			null,
+			renderList($setup.decoratedOptions, (option) => {
+				return openBlock(), createElementBlock(
+					"article",
+					{
+						key: option.value,
+						class: normalizeClass(["acu-dashboard-storage-mode__card", { "acu-dashboard-storage-mode__card--active": option.value === $props.modelValue }])
+					},
+					[createBaseVNode("span", _hoisted_6$v, [createBaseVNode(
+						"i",
+						{ class: normalizeClass(option.iconClass) },
+						null,
+						2
+						/* CLASS */
+					)]), createBaseVNode("span", _hoisted_7$t, [createBaseVNode("span", _hoisted_8$s, [createBaseVNode(
+						"span",
+						_hoisted_9$n,
+						toDisplayString(option.label),
+						1
+						/* TEXT */
+					), createBaseVNode(
+						"span",
+						_hoisted_10$k,
+						toDisplayString(option.badge),
+						1
+						/* TEXT */
+					)]), createBaseVNode(
+						"span",
+						_hoisted_11$k,
+						toDisplayString(option.description),
+						1
+						/* TEXT */
+					)])],
+					2
+					/* CLASS */
+				);
+			}),
+			128
+			/* KEYED_FRAGMENT */
+		))])
+	], 8, _hoisted_1$11);
+    }
+    var DashboardStorageModeSection = /*#__PURE__*/ _export_sfc(_sfc_main$14, [["render", _sfc_render$14], ["__scopeId", "data-v-12a63c98"]]);
+
+    var _sfc_main$13 = /*@__PURE__*/ defineComponent({
+        ...{ inheritAttrs: false },
+        __name: 'AcuToggle',
+        props: {
+            modelValue: { type: Boolean },
+            label: { default: undefined },
+            disabled: { type: Boolean, default: false }
+        },
+        emits: ["update:modelValue"],
+        setup(__props, { expose: __expose, emit: __emit }) {
+            __expose();
+            const props = __props;
+            const emit = __emit;
+            function onClick() {
+                if (props.disabled)
+                    return;
+                emit('update:modelValue', !props.modelValue);
+            }
+            const __returned__ = { props, emit, onClick };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-toggle[data-v-61c4c790] {\r\n  display: inline-flex; align-items: center; gap: var(--acu-space-2, 8px);\r\n  flex: 0 0 auto;\r\n  padding: 0; border: 0; background: transparent;\r\n  font: inherit; font-size: var(--acu-font-size-body, 12px); color: var(--acu-text-2);\r\n  cursor: pointer; user-select: none;\n}\n.acu-toggle--disabled[data-v-61c4c790] { opacity: 0.5; cursor: not-allowed;\n}\n.acu-toggle__track[data-v-61c4c790] {\r\n  position: relative; flex-shrink: 0;\r\n  width: var(--acu-toggle-width, 36px); height: var(--acu-toggle-height, 20px);\r\n  background: var(--acu-bg-2);\r\n  border: 0;\r\n  border-radius: var(--acu-toggle-radius, 10px);\r\n  transition: background 0.2s ease, box-shadow 0.2s ease;\n}\n.acu-toggle--on .acu-toggle__track[data-v-61c4c790] {\r\n  background: var(--acu-accent);\n}\n.acu-toggle__thumb[data-v-61c4c790] {\r\n  position: absolute; top: var(--acu-space-050, 2px); left: var(--acu-space-050, 2px);\r\n  width: var(--acu-toggle-thumb-size, 16px); height: var(--acu-toggle-thumb-size, 16px);\r\n  background: #fff;\r\n  border-radius: 50%;\r\n  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);\r\n  transition: transform 0.2s ease;\n}\n.acu-toggle--on .acu-toggle__thumb[data-v-61c4c790] {\r\n  transform: translateX(var(--acu-toggle-thumb-shift, 16px));\n}\n.acu-toggle__label[data-v-61c4c790] { white-space: nowrap;\n}\n.acu-toggle:hover:not(.acu-toggle--disabled) .acu-toggle__track[data-v-61c4c790] {\r\n  box-shadow: inset 0 0 0 1px var(--acu-border-2);\n}\n.acu-toggle:focus-visible .acu-toggle__track[data-v-61c4c790] {\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\r\n", "src/presentation-v2/components/_lib/AcuToggle.vue#style-0-61c4c790");
+    var AcuToggle_vue_vue_type_style_index_0_scoped_61c4c790_lang = null;
+
+    const _hoisted_1$10 = ["aria-checked", "disabled"];
+    const _hoisted_2$X = {
+	key: 0,
+	class: "acu-toggle__label"
+    };
+    function _sfc_render$13(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("button", mergeProps({
+		type: "button",
+		class: ["acu-toggle", {
+			"acu-toggle--disabled": $props.disabled,
+			"acu-toggle--on": $props.modelValue
+		}],
+		role: "switch",
+		"aria-checked": $props.modelValue ? "true" : "false",
+		disabled: $props.disabled
+	}, _ctx.$attrs, { onClick: $setup.onClick }), [_cache[0] || (_cache[0] = createBaseVNode(
+		"span",
+		{
+			class: "acu-toggle__track",
+			"aria-hidden": "true"
+		},
+		[createBaseVNode("span", { class: "acu-toggle__thumb" })],
+		-1
+		/* CACHED */
+	)), $props.label ? (openBlock(), createElementBlock(
+		"span",
+		_hoisted_2$X,
+		toDisplayString($props.label),
+		1
+		/* TEXT */
+	)) : renderSlot(_ctx.$slots, "default", { key: 1 }, undefined, true)], 16, _hoisted_1$10);
+    }
+    var AcuToggle = /*#__PURE__*/ _export_sfc(_sfc_main$13, [["render", _sfc_render$13], ["__scopeId", "data-v-61c4c790"]]);
+
+    var _sfc_main$12 = /*@__PURE__*/ defineComponent({
+        __name: 'DashboardToggleRow',
+        props: {
+            item: {}
+        },
+        emits: ["change"],
+        setup(__props, { expose: __expose }) {
+            __expose();
+            /**
+             * 仪表盘"开关面板"专用的开关行：标题 + 右侧 toggle + 下方常驻描述。
+             *
+             * 这是仪表盘内的局部布局，不放进 _lib/，因为还没看到第二个消费者；按 D21.7
+             * "两次出现 + 接口稳定才抽"的阈值。当其他面板（例如未来的开发者一级页）出现
+             * 同形态需求时再提升到 _lib/AcuToggleRow.vue。
+             */
+            const __returned__ = { AcuToggle };
+            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
+            return __returned__;
+        }
+    });
+
+    injectSfcStyle("\n.acu-dashboard-toggle-row[data-v-b8c9bc26] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 4px;\n}\n.acu-dashboard-toggle-row__head[data-v-b8c9bc26] {\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: 12px;\n}\n.acu-dashboard-toggle-row__label[data-v-b8c9bc26] {\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  font-weight: 500;\r\n  color: var(--acu-text-1);\r\n  min-width: 0;\n}\n.acu-dashboard-toggle-row__desc[data-v-b8c9bc26] {\r\n  margin: 0;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\r\n  color: var(--acu-text-3);\n}\r\n", "src/presentation-v2/components/DashboardToggleRow.vue#style-0-b8c9bc26");
+    var DashboardToggleRow_vue_vue_type_style_index_0_scoped_b8c9bc26_lang = null;
+
+    const _hoisted_1$$ = { class: "acu-dashboard-toggle-row" };
+    const _hoisted_2$W = { class: "acu-dashboard-toggle-row__head" };
+    const _hoisted_3$N = { class: "acu-dashboard-toggle-row__label" };
+    const _hoisted_4$E = {
+	key: 0,
+	class: "acu-dashboard-toggle-row__desc"
+    };
+    function _sfc_render$12(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$$, [createBaseVNode("div", _hoisted_2$W, [createBaseVNode(
+		"span",
+		_hoisted_3$N,
+		toDisplayString($props.item.label),
+		1
+		/* TEXT */
+	), createVNode($setup["AcuToggle"], {
+		"model-value": $props.item.value,
+		"aria-label": $props.item.label,
+		"data-acu-toggle-key": $props.item.key,
+		disabled: $props.item.disabled === true,
+		"onUpdate:modelValue": _cache[0] || (_cache[0] = ($event) => _ctx.$emit("change", $event))
+	}, null, 8, [
+		"model-value",
+		"aria-label",
+		"data-acu-toggle-key",
+		"disabled"
+	])]), $props.item.description ? (openBlock(), createElementBlock(
+		"p",
+		_hoisted_4$E,
+		toDisplayString($props.item.description),
+		1
+		/* TEXT */
+	)) : createCommentVNode("v-if", true)]);
+    }
+    var ToggleRow = /*#__PURE__*/ _export_sfc(_sfc_main$12, [["render", _sfc_render$12], ["__scopeId", "data-v-b8c9bc26"]]);
 
     /**
      * root-shell-store — 顶层外壳状态（开关、挂载次数）
@@ -191475,10 +192703,16 @@ ${rejectionText}` : delegationFeedback,
                     value: settings_ACU.autoUpdateEnabled !== false,
                 },
                 {
-                    key: "toastMuteEnabled",
-                    label: dashboardCopy.toggles.toastMute.label,
-                    description: dashboardCopy.toggles.toastMute.description,
-                    value: settings_ACU.toastMuteEnabled === true,
+                    key: "silentModeEnabled",
+                    label: dashboardCopy.toggles.silentMode.label,
+                    description: dashboardCopy.toggles.silentMode.description,
+                    value: settings_ACU.silentModeEnabled === true,
+                },
+                {
+                    key: "desktopPetEnabled",
+                    label: dashboardCopy.toggles.desktopPet.label,
+                    description: dashboardCopy.toggles.desktopPet.description,
+                    value: settings_ACU.desktopPetEnabled !== false,
                 },
                 {
                     key: "zeroTkOccupyModeDefault",
@@ -191592,14 +192826,13 @@ ${rejectionText}` : delegationFeedback,
                 setContentReplaceEnabledBySettings(!!value);
                 saveSettings_ACU();
             }
-            else if (key === "autoUpdateEnabled" || key === "toastMuteEnabled") {
-                if (key === "autoUpdateEnabled") {
-                    setAutoUpdateEnabled_ACU(!!value);
-                }
-                else {
-                    settings_ACU[key] = !!value;
-                    saveSettings_ACU();
-                }
+            else if (key === "autoUpdateEnabled") {
+                setAutoUpdateEnabled_ACU(!!value);
+            }
+            else if (key === "silentModeEnabled" || key === "desktopPetEnabled") {
+                settings_ACU[key] = !!value;
+                saveSettings_ACU();
+                notifyNoticeSettingsChanged_ACU();
             }
             dataRefreshTick.value++;
             dataRefreshTick.value++;
@@ -191727,7 +192960,7 @@ ${rejectionText}` : delegationFeedback,
         },
     });
 
-    var _sfc_main$12 = /*@__PURE__*/ defineComponent({
+    var _sfc_main$11 = /*@__PURE__*/ defineComponent({
         __name: 'DashboardPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -191799,23 +193032,23 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-dashboard-page[data-v-5ee408c0] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-dashboard-page__toggle-list[data-v-5ee408c0] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n  margin-top: 14px;\n}\n.acu-v2-dashboard-page__health-list[data-v-5ee408c0] {\n  display: flex;\n  flex-direction: column;\n  gap: 10px;\n  min-width: 0;\n}\n.acu-v2-dashboard-page__health-item[data-v-5ee408c0] {\n  min-width: 0;\n  display: grid;\n  grid-template-columns: 30px minmax(0, 1fr) max-content;\n  column-gap: 10px;\n  row-gap: 8px;\n  align-items: center;\n  padding: 10px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md);\n  background: var(--acu-bg-1);\n  transition:\n    border-color 0.15s ease,\n    background 0.15s ease;\n}\n.acu-v2-dashboard-page__health-item--error[data-v-5ee408c0] {\n  border-color: color-mix(in srgb, var(--acu-danger) 38%, var(--acu-border));\n}\n.acu-v2-dashboard-page__health-icon[data-v-5ee408c0] {\n  width: 30px;\n  height: 30px;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-2);\n  color: var(--acu-text-2);\n}\n.acu-v2-dashboard-page__health-item--ok .acu-v2-dashboard-page__health-icon[data-v-5ee408c0] {\n  color: var(--acu-success);\n  background: color-mix(in srgb, var(--acu-success) 10%, transparent);\n}\n.acu-v2-dashboard-page__health-item--warning\n  .acu-v2-dashboard-page__health-icon[data-v-5ee408c0] {\n  color: var(--acu-warning);\n  background: color-mix(in srgb, var(--acu-warning) 12%, transparent);\n}\n.acu-v2-dashboard-page__health-item--error .acu-v2-dashboard-page__health-icon[data-v-5ee408c0] {\n  color: var(--acu-danger);\n  background: color-mix(in srgb, var(--acu-danger) 12%, transparent);\n}\n.acu-v2-dashboard-page__health-body[data-v-5ee408c0] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n}\n.acu-v2-dashboard-page__health-heading[data-v-5ee408c0] {\n  min-width: 0;\n}\n.acu-v2-dashboard-page__health-heading strong[data-v-5ee408c0] {\n  min-width: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 650;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-dashboard-page__health-body p[data-v-5ee408c0] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-dashboard-page__health-side[data-v-5ee408c0] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  align-items: flex-end;\n  gap: 8px;\n  justify-self: end;\n}\n.acu-v2-dashboard-page__health-action[data-v-5ee408c0] {\n  white-space: nowrap;\n}\n@media (max-width: 860px) {\n.acu-v2-dashboard-page[data-v-5ee408c0] {\n    padding: 14px;\n}\n.acu-v2-dashboard-page__health-item[data-v-5ee408c0] {\n    grid-template-columns: 30px minmax(0, 1fr);\n    align-items: center;\n}\n.acu-v2-dashboard-page__health-side[data-v-5ee408c0] {\n    grid-column: 2;\n    align-items: flex-start;\n    justify-self: start;\n    flex-direction: row;\n    flex-wrap: wrap;\n}\n.acu-v2-dashboard-page__health-action[data-v-5ee408c0] {\n    justify-self: start;\n}\n}\n", "src/presentation-v2/pages/DashboardPage.vue#style-0-5ee408c0");
     var DashboardPage_vue_vue_type_style_index_0_scoped_5ee408c0_lang = null;
 
-    const _hoisted_1$$ = { class: "acu-v2-dashboard-page" };
-    const _hoisted_2$W = { class: "acu-v2-dashboard-page__health-list" };
-    const _hoisted_3$N = {
+    const _hoisted_1$_ = { class: "acu-v2-dashboard-page" };
+    const _hoisted_2$V = { class: "acu-v2-dashboard-page__health-list" };
+    const _hoisted_3$M = {
 	class: "acu-v2-dashboard-page__health-icon",
 	"aria-hidden": "true"
     };
-    const _hoisted_4$E = { class: "acu-v2-dashboard-page__health-body" };
+    const _hoisted_4$D = { class: "acu-v2-dashboard-page__health-body" };
     const _hoisted_5$x = { class: "acu-v2-dashboard-page__health-heading" };
     const _hoisted_6$u = { class: "acu-v2-dashboard-page__health-side" };
     const _hoisted_7$s = ["data-acu-toggle-group"];
-    function _sfc_render$12(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$$, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-dashboard-page__grid" }, {
+    function _sfc_render$11(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$_, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-dashboard-page__grid" }, {
 		default: withCtx(() => [createVNode($setup["AcuPanel"], {
 			title: $setup.dashboardCopy.panels.healthTitle,
 			description: $setup.dashboardCopy.panels.healthDescription
 		}, {
-			default: withCtx(() => [createBaseVNode("div", _hoisted_2$W, [(openBlock(true), createElementBlock(
+			default: withCtx(() => [createBaseVNode("div", _hoisted_2$V, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.dashboard.healthItems.value, (item) => {
@@ -191826,14 +193059,14 @@ ${rejectionText}` : delegationFeedback,
 							class: normalizeClass(["acu-v2-dashboard-page__health-item", `acu-v2-dashboard-page__health-item--${item.kind}`])
 						},
 						[
-							createBaseVNode("div", _hoisted_3$N, [createBaseVNode(
+							createBaseVNode("div", _hoisted_3$M, [createBaseVNode(
 								"i",
 								{ class: normalizeClass(item.iconClass) },
 								null,
 								2
 								/* CLASS */
 							)]),
-							createBaseVNode("div", _hoisted_4$E, [createBaseVNode("div", _hoisted_5$x, [createBaseVNode(
+							createBaseVNode("div", _hoisted_4$D, [createBaseVNode("div", _hoisted_5$x, [createBaseVNode(
 								"strong",
 								null,
 								toDisplayString(item.title),
@@ -191951,9 +193184,9 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	})]);
     }
-    var DashboardPage = /*#__PURE__*/ _export_sfc(_sfc_main$12, [["render", _sfc_render$12], ["__scopeId", "data-v-5ee408c0"]]);
+    var DashboardPage = /*#__PURE__*/ _export_sfc(_sfc_main$11, [["render", _sfc_render$11], ["__scopeId", "data-v-5ee408c0"]]);
 
-    var _sfc_main$11 = /*@__PURE__*/ defineComponent({
+    var _sfc_main$10 = /*@__PURE__*/ defineComponent({
         __name: 'AcuFormRow',
         props: {
             label: {},
@@ -191970,20 +193203,20 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-form-row[data-v-16cf0b7e] {\r\n  display: flex; flex-direction: column; gap: var(--acu-space-125, 5px);\r\n  color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\r\n  min-width: 0;\n}\n.acu-form-row__label[data-v-16cf0b7e] { font-weight: 500;\n}\n.acu-form-row__hint[data-v-16cf0b7e] { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); line-height: var(--acu-line-height-caption, 1.5);\n}\n.acu-form-row[data-v-16cf0b7e] input[type=\"text\"],\r\n.acu-form-row[data-v-16cf0b7e] input[type=\"password\"],\r\n.acu-form-row[data-v-16cf0b7e] input[type=\"number\"],\r\n.acu-form-row[data-v-16cf0b7e] select,\r\n.acu-form-row[data-v-16cf0b7e] textarea {\r\n  min-width: 0; min-height: var(--acu-control-height-md, 32px); padding: var(--acu-control-padding-y-md, 6px) var(--acu-control-padding-x-md, 9px);\r\n  border: 0 !important;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-2) !important;\r\n  color: var(--acu-text-1) !important;\r\n  font: inherit;\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-form-row[data-v-16cf0b7e] textarea {\r\n  min-height: unset;\r\n  resize: none;\n}\n.acu-form-row[data-v-16cf0b7e] select {\r\n  appearance: none;\r\n  -webkit-appearance: none;\r\n  padding-right: var(--acu-space-7, 28px);\r\n  background-image: url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%236b7280' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E\") !important;\r\n  background-repeat: no-repeat !important;\r\n  background-position: right var(--acu-control-padding-x-md, 9px) center !important;\r\n  background-size: var(--acu-space-250, 10px) var(--acu-space-150, 6px) !important;\r\n  cursor: pointer;\n}\n.acu-form-row[data-v-16cf0b7e] input:focus,\r\n.acu-form-row[data-v-16cf0b7e] select:focus,\r\n.acu-form-row[data-v-16cf0b7e] textarea:focus {\r\n  outline: none;\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\r\n", "src/presentation-v2/components/_lib/AcuFormRow.vue#style-0-16cf0b7e");
     var AcuFormRow_vue_vue_type_style_index_0_scoped_16cf0b7e_lang = null;
 
-    const _hoisted_1$_ = { class: "acu-form-row" };
-    const _hoisted_2$V = {
+    const _hoisted_1$Z = { class: "acu-form-row" };
+    const _hoisted_2$U = {
 	key: 0,
 	class: "acu-form-row__label"
     };
-    const _hoisted_3$M = {
+    const _hoisted_3$L = {
 	key: 1,
 	class: "acu-form-row__hint"
     };
-    function _sfc_render$11(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$_, [
+    function _sfc_render$10(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$Z, [
 		$props.label ? (openBlock(), createElementBlock(
 			"span",
-			_hoisted_2$V,
+			_hoisted_2$U,
 			toDisplayString($props.label),
 			1
 			/* TEXT */
@@ -191991,16 +193224,16 @@ ${rejectionText}` : delegationFeedback,
 		renderSlot(_ctx.$slots, "default", {}, undefined, true),
 		$props.hint ? (openBlock(), createElementBlock(
 			"span",
-			_hoisted_3$M,
+			_hoisted_3$L,
 			toDisplayString($props.hint),
 			1
 			/* TEXT */
 		)) : createCommentVNode("v-if", true)
 	]);
     }
-    var AcuFormRow = /*#__PURE__*/ _export_sfc(_sfc_main$11, [["render", _sfc_render$11], ["__scopeId", "data-v-16cf0b7e"]]);
+    var AcuFormRow = /*#__PURE__*/ _export_sfc(_sfc_main$10, [["render", _sfc_render$10], ["__scopeId", "data-v-16cf0b7e"]]);
 
-    var _sfc_main$10 = /*@__PURE__*/ defineComponent({
+    var _sfc_main$$ = /*@__PURE__*/ defineComponent({
         __name: 'AcuMobilePanelNav',
         props: {
             items: {}
@@ -192181,24 +193414,24 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-mobile-panel-nav[data-v-614843e5] {\r\n  display: none;\n}\n@media (max-width: 860px) {\n.acu-mobile-panel-nav[data-v-614843e5] {\r\n    position: sticky;\r\n    top: 0;\r\n    z-index: 30;\r\n    display: block;\r\n    margin: -20px -20px 4px;\r\n    padding: 0;\r\n    border-top: 0;\r\n    border-bottom: 1px solid var(--acu-border-2);\r\n    background: color-mix(in srgb, var(--acu-bg-0) 94%, transparent);\r\n    backdrop-filter: blur(10px);\r\n    -webkit-backdrop-filter: blur(10px);\n}\n.acu-mobile-panel-nav[data-v-614843e5]::before,\r\n  .acu-mobile-panel-nav[data-v-614843e5]::after {\r\n    content: \"\";\r\n    position: absolute;\r\n    top: 0;\r\n    bottom: 1px;\r\n    z-index: 2;\r\n    width: 22px;\r\n    pointer-events: none;\n}\n.acu-mobile-panel-nav[data-v-614843e5]::before {\r\n    left: 0;\r\n    background: linear-gradient(to right, var(--acu-bg-0), transparent);\n}\n.acu-mobile-panel-nav[data-v-614843e5]::after {\r\n    right: 0;\r\n    background: linear-gradient(to left, var(--acu-bg-0), transparent);\n}\n.acu-mobile-panel-nav__track[data-v-614843e5] {\r\n    min-width: 0;\r\n    display: flex;\r\n    gap: 0;\r\n    overflow-x: auto;\r\n    overscroll-behavior-x: contain;\r\n    scroll-padding-inline: 18px;\r\n    scrollbar-width: none;\r\n    padding: 0 18px;\r\n    border: 0;\r\n    border-radius: 0;\r\n    background: transparent;\n}\n.acu-mobile-panel-nav__track[data-v-614843e5]::-webkit-scrollbar {\r\n    display: none;\n}\n.acu-mobile-panel-nav__item[data-v-614843e5] {\r\n    flex: 0 0 auto;\r\n    position: relative;\r\n    min-width: 84px;\r\n    min-height: 44px;\r\n    max-width: none;\r\n    padding: 0 12px;\r\n    border: 0;\r\n    border-radius: 0;\r\n    background: transparent;\r\n    color: var(--acu-text-3);\r\n    font: inherit;\r\n    font-size: var(--acu-font-size-body, 12px);\r\n    font-weight: 650;\r\n    line-height: 1.2;\r\n    white-space: nowrap;\r\n    overflow: hidden;\r\n    text-overflow: ellipsis;\r\n    cursor: pointer;\r\n    transition:\r\n      background 0.15s ease,\r\n      border-color 0.15s ease,\r\n      color 0.15s ease,\r\n      box-shadow 0.15s ease;\n}\n.acu-mobile-panel-nav__item[data-v-614843e5]:hover {\r\n    background: var(--acu-hover-overlay);\r\n    color: var(--acu-text-1);\n}\n.acu-mobile-panel-nav__item[data-v-614843e5]::after {\r\n    content: \"\";\r\n    position: absolute;\r\n    right: 12px;\r\n    bottom: 0;\r\n    left: 12px;\r\n    height: 2px;\r\n    border-radius: 2px 2px 0 0;\r\n    background: transparent;\r\n    transition: background 0.15s ease, opacity 0.15s ease;\n}\n.acu-mobile-panel-nav__item.is-active[data-v-614843e5] {\r\n    background: transparent;\r\n    color: var(--acu-text-1);\r\n    box-shadow: none;\n}\n.acu-mobile-panel-nav__item.is-active[data-v-614843e5]::after {\r\n    background: var(--acu-accent);\n}\n.acu-mobile-panel-nav__item[data-v-614843e5]:focus-visible {\r\n    outline: none;\r\n    box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-mobile-panel-nav__item.is-active[data-v-614843e5]:focus-visible {\r\n    box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\n}\n}\n@media (max-width: 720px) {\n.acu-mobile-panel-nav[data-v-614843e5] {\r\n    margin: -14px -14px 4px;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuMobilePanelNav.vue#style-0-614843e5");
     var AcuMobilePanelNav_vue_vue_type_style_index_0_scoped_614843e5_lang = null;
 
-    const _hoisted_1$Z = {
+    const _hoisted_1$Y = {
 	ref: "rootRef",
 	class: "acu-mobile-panel-nav",
 	"aria-label": "页面板块"
     };
-    const _hoisted_2$U = {
+    const _hoisted_2$T = {
 	ref: "trackRef",
 	class: "acu-mobile-panel-nav__track",
 	role: "list"
     };
-    const _hoisted_3$L = ["aria-current", "onClick"];
-    function _sfc_render$10(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_3$K = ["aria-current", "onClick"];
+    function _sfc_render$$(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"nav",
-		_hoisted_1$Z,
+		_hoisted_1$Y,
 		[createBaseVNode(
 			"div",
-			_hoisted_2$U,
+			_hoisted_2$T,
 			[(openBlock(true), createElementBlock(
 				Fragment,
 				null,
@@ -192209,7 +193442,7 @@ ${rejectionText}` : delegationFeedback,
 						class: normalizeClass(["acu-mobile-panel-nav__item", { "is-active": item.id === $setup.activeId }]),
 						"aria-current": item.id === $setup.activeId ? "location" : undefined,
 						onClick: ($event) => $setup.scrollToPanel(item.id)
-					}, toDisplayString(item.label), 11, _hoisted_3$L);
+					}, toDisplayString(item.label), 11, _hoisted_3$K);
 				}),
 				128
 				/* KEYED_FRAGMENT */
@@ -192221,9 +193454,9 @@ ${rejectionText}` : delegationFeedback,
 		/* NEED_PATCH */
 	);
     }
-    var AcuMobilePanelNav = /*#__PURE__*/ _export_sfc(_sfc_main$10, [["render", _sfc_render$10], ["__scopeId", "data-v-614843e5"]]);
+    var AcuMobilePanelNav = /*#__PURE__*/ _export_sfc(_sfc_main$$, [["render", _sfc_render$$], ["__scopeId", "data-v-614843e5"]]);
 
-    var _sfc_main$$ = /*@__PURE__*/ defineComponent({
+    var _sfc_main$_ = /*@__PURE__*/ defineComponent({
         __name: 'AcuPresetDropdown',
         props: {
             items: {},
@@ -192286,13 +193519,13 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-preset-dd[data-v-265c1560] { position: relative; flex: 1; min-width: 0;\n}\n.acu-preset-dd__trigger[data-v-265c1560] {\r\n  display: flex; align-items: center; gap: var(--acu-space-2, 8px); width: 100%;\r\n  min-height: var(--acu-control-height-md, 32px); padding: var(--acu-control-padding-y-md, 6px) var(--acu-control-padding-x-md, 9px);\r\n  background: var(--acu-bg-2); border: 0;\r\n  border-radius: var(--acu-radius-sm); color: var(--acu-text-1);\r\n  font: inherit; font-size: var(--acu-font-size-body, 12px); cursor: pointer;\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-preset-dd__trigger[data-v-265c1560]:hover {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2);\n}\n.acu-preset-dd__trigger[data-v-265c1560]:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-preset-dd__trigger[data-v-265c1560]:disabled { opacity: 0.5; cursor: not-allowed;\n}\n.acu-preset-dd--disabled[data-v-265c1560] { pointer-events: none; opacity: 0.5;\n}\n.acu-preset-dd__label[data-v-265c1560] { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;\n}\n.acu-preset-dd__caret[data-v-265c1560] { font-size: var(--acu-font-size-micro, 10px); --acu-icon-color: var(--acu-text-3); color: var(--acu-text-3); transition: transform 0.15s ease;\n}\n.acu-preset-dd__caret--open[data-v-265c1560] { transform: rotate(180deg);\n}\n.acu-preset-dd__menu[data-v-265c1560] {\r\n  position: absolute; top: calc(100% + var(--acu-space-1, 4px)); left: 0; right: 0; z-index: 100;\r\n  margin: 0; padding: var(--acu-space-1, 4px) 0; list-style: none;\r\n  background: var(--acu-bg-1); border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-sm); box-shadow: var(--acu-shadow);\r\n  max-height: var(--acu-menu-max-height, 240px); overflow-y: auto;\n}\n.acu-preset-dd__item[data-v-265c1560] {\r\n  display: flex; align-items: center; gap: var(--acu-space-2, 8px);\r\n  padding: var(--acu-space-2, 8px) var(--acu-space-3, 12px); cursor: pointer; font-size: var(--acu-font-size-body-lg, 13px);\r\n  color: var(--acu-text-2); transition: background 0.1s ease;\n}\n.acu-preset-dd__item[data-v-265c1560]:hover { background: var(--acu-hover-overlay); color: var(--acu-text-1);\n}\n.acu-preset-dd__item--active[data-v-265c1560] { color: var(--acu-on-accent); background: var(--acu-accent);\n}\n.acu-preset-dd__item-name[data-v-265c1560] { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500;\n}\n.acu-preset-dd__item-meta[data-v-265c1560] { font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3); white-space: nowrap;\n}\n.acu-preset-dd__star[data-v-265c1560] {\r\n  width: var(--acu-menu-action-size, 24px); height: var(--acu-menu-action-size, 24px); display: flex; align-items: center; justify-content: center;\r\n  border: 0; background: transparent; color: var(--acu-text-3); cursor: pointer;\r\n  border-radius: var(--acu-radius-sm); font-size: var(--acu-font-size-body, 12px); transition: color 0.15s ease;\n}\n.acu-preset-dd__star[data-v-265c1560]:hover { color: var(--acu-text-1); background: var(--acu-hover-overlay);\n}\n.acu-preset-dd__star--active[data-v-265c1560] { color: var(--acu-text-1);\n}\n.acu-preset-dd__item--active .acu-preset-dd__item-meta[data-v-265c1560],\r\n.acu-preset-dd__item--active .acu-preset-dd__star[data-v-265c1560],\r\n.acu-preset-dd__item--active .acu-preset-dd__check[data-v-265c1560] { --acu-icon-color: var(--acu-on-accent); color: var(--acu-on-accent);\n}\n.acu-preset-dd__check[data-v-265c1560] { font-size: var(--acu-font-size-caption, 11px); --acu-icon-color: var(--acu-text-1); color: var(--acu-text-1);\n}\n.acu-preset-dd__empty[data-v-265c1560] { padding: var(--acu-space-3, 12px); text-align: center; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\r\n", "src/presentation-v2/components/_lib/AcuPresetDropdown.vue#style-0-265c1560");
     var AcuPresetDropdown_vue_vue_type_style_index_0_scoped_265c1560_lang = null;
 
-    const _hoisted_1$Y = ["disabled"];
-    const _hoisted_2$T = { class: "acu-preset-dd__label" };
-    const _hoisted_3$K = {
+    const _hoisted_1$X = ["disabled"];
+    const _hoisted_2$S = { class: "acu-preset-dd__label" };
+    const _hoisted_3$J = {
 	key: 0,
 	class: "acu-preset-dd__menu"
     };
-    const _hoisted_4$D = ["onClick"];
+    const _hoisted_4$C = ["onClick"];
     const _hoisted_5$w = { class: "acu-preset-dd__item-name" };
     const _hoisted_6$t = {
 	key: 0,
@@ -192311,7 +193544,7 @@ ${rejectionText}` : delegationFeedback,
 	key: 0,
 	class: "acu-preset-dd__empty"
     };
-    function _sfc_render$$(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$_(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"div",
 		{
@@ -192325,7 +193558,7 @@ ${rejectionText}` : delegationFeedback,
 			onClick: $setup.toggleOpen
 		}, [createBaseVNode(
 			"span",
-			_hoisted_2$T,
+			_hoisted_2$S,
 			toDisplayString($setup.selectedLabel),
 			1
 			/* TEXT */
@@ -192335,7 +193568,7 @@ ${rejectionText}` : delegationFeedback,
 			null,
 			2
 			/* CLASS */
-		)], 8, _hoisted_1$Y), $setup.open ? (openBlock(), createElementBlock("ul", _hoisted_3$K, [(openBlock(true), createElementBlock(
+		)], 8, _hoisted_1$X), $setup.open ? (openBlock(), createElementBlock("ul", _hoisted_3$J, [(openBlock(true), createElementBlock(
 			Fragment,
 			null,
 			renderList($props.items, (item) => {
@@ -192373,7 +193606,7 @@ ${rejectionText}` : delegationFeedback,
 						/* CLASS */
 					)], 10, _hoisted_7$r)) : createCommentVNode("v-if", true),
 					$setup.itemValue(item) === $props.modelValue ? (openBlock(), createElementBlock("i", _hoisted_8$r)) : createCommentVNode("v-if", true)
-				], 10, _hoisted_4$D);
+				], 10, _hoisted_4$C);
 			}),
 			128
 			/* KEYED_FRAGMENT */
@@ -192388,9 +193621,9 @@ ${rejectionText}` : delegationFeedback,
 		/* CLASS */
 	);
     }
-    var AcuPresetDropdown = /*#__PURE__*/ _export_sfc(_sfc_main$$, [["render", _sfc_render$$], ["__scopeId", "data-v-265c1560"]]);
+    var AcuPresetDropdown = /*#__PURE__*/ _export_sfc(_sfc_main$_, [["render", _sfc_render$_], ["__scopeId", "data-v-265c1560"]]);
 
-    var _sfc_main$_ = /*@__PURE__*/ defineComponent({
+    var _sfc_main$Z = /*@__PURE__*/ defineComponent({
         __name: 'AcuSelect',
         props: {
             options: {},
@@ -192454,21 +193687,21 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-select[data-v-9a5ee02f] {\r\n  position: relative;\r\n  display: block;\r\n  width: 100%;\r\n  min-width: 0;\r\n  max-width: 100%;\r\n  box-sizing: border-box;\r\n  margin: 0 !important;\r\n  padding: 0 !important;\r\n  border: 0 !important;\r\n  outline: 0 !important;\r\n  background: transparent !important;\r\n  box-shadow: none !important;\n}\n.acu-select__trigger[data-v-9a5ee02f] {\r\n  display: flex; align-items: center; gap: var(--acu-space-2, 8px); width: 100%;\r\n  min-width: 0; max-width: 100%; box-sizing: border-box;\r\n  min-height: var(--acu-control-height-md, 32px); padding: var(--acu-control-padding-y-md, 6px) var(--acu-control-padding-x-md, 9px);\r\n  margin: 0 !important;\r\n  background: var(--acu-bg-2) !important; border: 0 !important;\r\n  border-radius: var(--acu-radius-sm); color: var(--acu-text-1);\r\n  font: inherit; font-size: var(--acu-font-size-body, 12px); cursor: pointer;\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\r\n  box-shadow: none;\n}\n.acu-select__trigger[data-v-9a5ee02f]:hover {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2) !important;\n}\n.acu-select__trigger[data-v-9a5ee02f]:focus { outline: none !important;\n}\n.acu-select__trigger[data-v-9a5ee02f]:focus:not(:focus-visible) { box-shadow: none !important;\n}\n.acu-select__trigger[data-v-9a5ee02f]:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-select__trigger[data-v-9a5ee02f]:disabled { opacity: 0.5; cursor: not-allowed;\n}\n.acu-select__label[data-v-9a5ee02f] {\r\n  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;\n}\n.acu-select__label--placeholder[data-v-9a5ee02f] { color: var(--acu-text-3);\n}\n.acu-select__caret[data-v-9a5ee02f] { font-size: var(--acu-font-size-micro, 10px); --acu-icon-color: var(--acu-text-3); color: var(--acu-text-3); transition: transform 0.15s ease; flex-shrink: 0;\n}\n.acu-select__caret--open[data-v-9a5ee02f] { transform: rotate(180deg);\n}\n.acu-select__menu[data-v-9a5ee02f] {\r\n  position: absolute; top: calc(100% + var(--acu-space-1, 4px)); left: 0; right: 0; z-index: 100;\r\n  margin: 0; padding: var(--acu-space-1, 4px) 0; list-style: none;\r\n  background: var(--acu-bg-1); border: 1px solid var(--acu-border);\r\n  border-radius: var(--acu-radius-sm); box-shadow: var(--acu-shadow);\r\n  min-width: 0; max-width: 100%; box-sizing: border-box;\r\n  max-height: var(--acu-menu-max-height, 240px); overflow-y: auto;\n}\n.acu-select__group[data-v-9a5ee02f] {\r\n  padding: var(--acu-space-2, 8px) var(--acu-space-3, 12px) var(--acu-space-1, 4px);\r\n  font-size: var(--acu-font-size-micro, 10px);\r\n  font-weight: 600;\r\n  letter-spacing: 0.04em;\r\n  color: var(--acu-text-3);\r\n  user-select: none;\r\n  pointer-events: none;\n}\n.acu-select__item[data-v-9a5ee02f] {\r\n  padding: var(--acu-space-2, 8px) var(--acu-space-3, 12px); cursor: pointer; font-size: var(--acu-font-size-body-lg, 13px);\r\n  color: var(--acu-text-2); transition: background 0.1s ease;\r\n  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\n}\n.acu-select__item[data-v-9a5ee02f]:hover { background: var(--acu-hover-overlay); color: var(--acu-text-1);\n}\n.acu-select__item--active[data-v-9a5ee02f] { color: var(--acu-on-accent); background: var(--acu-accent);\n}\n.acu-select__empty[data-v-9a5ee02f] { padding: var(--acu-space-3, 12px); text-align: center; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\r\n\r\n/* ── sm variant ── */\n.acu-select--sm .acu-select__trigger[data-v-9a5ee02f] { min-height: var(--acu-control-height-sm, 26px); padding: var(--acu-control-padding-y-sm, 3px) var(--acu-control-padding-x-sm, 7px); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-select--sm .acu-select__item[data-v-9a5ee02f] { padding: var(--acu-space-150, 6px) var(--acu-space-250, 10px); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-select--disabled[data-v-9a5ee02f] { pointer-events: none; opacity: 0.5;\n}\r\n", "src/presentation-v2/components/_lib/AcuSelect.vue#style-0-9a5ee02f");
     var AcuSelect_vue_vue_type_style_index_0_scoped_9a5ee02f_lang = null;
 
-    const _hoisted_1$X = ["disabled"];
-    const _hoisted_2$S = {
+    const _hoisted_1$W = ["disabled"];
+    const _hoisted_2$R = {
 	key: 0,
 	class: "acu-select__menu"
     };
-    const _hoisted_3$J = {
+    const _hoisted_3$I = {
 	key: 0,
 	class: "acu-select__group"
     };
-    const _hoisted_4$C = ["onClick"];
+    const _hoisted_4$B = ["onClick"];
     const _hoisted_5$v = {
 	key: 0,
 	class: "acu-select__empty"
     };
-    function _sfc_render$_(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$Z(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"div",
 		{
@@ -192492,7 +193725,7 @@ ${rejectionText}` : delegationFeedback,
 			null,
 			2
 			/* CLASS */
-		)], 8, _hoisted_1$X), $setup.open ? (openBlock(), createElementBlock("ul", _hoisted_2$S, [(openBlock(true), createElementBlock(
+		)], 8, _hoisted_1$W), $setup.open ? (openBlock(), createElementBlock("ul", _hoisted_2$R, [(openBlock(true), createElementBlock(
 			Fragment,
 			null,
 			renderList($setup.groupedOptions, (entry) => {
@@ -192501,14 +193734,14 @@ ${rejectionText}` : delegationFeedback,
 					{ key: entry.key },
 					[entry.group !== null ? (openBlock(), createElementBlock(
 						"li",
-						_hoisted_3$J,
+						_hoisted_3$I,
 						toDisplayString(entry.group),
 						1
 						/* TEXT */
 					)) : createCommentVNode("v-if", true), createBaseVNode("li", {
 						class: normalizeClass(["acu-select__item", { "acu-select__item--active": entry.opt.value === $props.modelValue }]),
 						onClick: ($event) => $setup.select(entry.opt.value)
-					}, toDisplayString(entry.opt.label), 11, _hoisted_4$C)],
+					}, toDisplayString(entry.opt.label), 11, _hoisted_4$B)],
 					64
 					/* STABLE_FRAGMENT */
 				);
@@ -192520,9 +193753,9 @@ ${rejectionText}` : delegationFeedback,
 		/* CLASS */
 	);
     }
-    var AcuSelect = /*#__PURE__*/ _export_sfc(_sfc_main$_, [["render", _sfc_render$_], ["__scopeId", "data-v-9a5ee02f"]]);
+    var AcuSelect = /*#__PURE__*/ _export_sfc(_sfc_main$Z, [["render", _sfc_render$Z], ["__scopeId", "data-v-9a5ee02f"]]);
 
-    var _sfc_main$Z = /*@__PURE__*/ defineComponent({
+    var _sfc_main$Y = /*@__PURE__*/ defineComponent({
         __name: 'AcuStatsList',
         props: {
             items: {},
@@ -192539,8 +193772,8 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-stats[data-v-249ee71c] {\r\n  margin: 0;\r\n  padding: 2px 0 0;\r\n  background: transparent;\r\n  border-radius: 0;\r\n  display: grid; grid-template-columns: repeat(2, 1fr); gap: 0 16px;\n}\n.acu-stats__item[data-v-249ee71c] {\r\n  min-width: 0;\r\n  padding: 8px 0;\r\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n}\n.acu-stats dt[data-v-249ee71c] {\r\n  margin: 0 0 2px; font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3);\n}\n.acu-stats dd[data-v-249ee71c] {\r\n  margin: 0; font-size: var(--acu-font-size-body, 12px); color: var(--acu-text-1); word-break: break-all;\n}\n.acu-stats--mono code[data-v-249ee71c] {\r\n  display: inline-block; max-width: 100%;\r\n  font-family: var(--acu-font-mono); font-size: var(--acu-font-size-body, 12px);\r\n  background: transparent; color: var(--acu-text-1);\r\n  padding: 0; border-radius: 0;\n}\n@media (max-width: 720px) {\n.acu-stats[data-v-249ee71c] { grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuStatsList.vue#style-0-249ee71c");
     var AcuStatsList_vue_vue_type_style_index_0_scoped_249ee71c_lang = null;
 
-    const _hoisted_1$W = { key: 0 };
-    function _sfc_render$Z(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$V = { key: 0 };
+    function _sfc_render$Y(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"dl",
 		{ class: normalizeClass(["acu-stats", { "acu-stats--mono": $props.mono }]) },
@@ -192559,7 +193792,7 @@ ${rejectionText}` : delegationFeedback,
 					/* TEXT */
 				), createBaseVNode("dd", null, [renderSlot(_ctx.$slots, item.key ?? item.label, { item }, () => [$props.mono ? (openBlock(), createElementBlock(
 					"code",
-					_hoisted_1$W,
+					_hoisted_1$V,
 					toDisplayString(item.value ?? "—"),
 					1
 					/* TEXT */
@@ -192582,10 +193815,10 @@ ${rejectionText}` : delegationFeedback,
 		/* CLASS */
 	);
     }
-    var AcuStatsList = /*#__PURE__*/ _export_sfc(_sfc_main$Z, [["render", _sfc_render$Z], ["__scopeId", "data-v-249ee71c"]]);
+    var AcuStatsList = /*#__PURE__*/ _export_sfc(_sfc_main$Y, [["render", _sfc_render$Y], ["__scopeId", "data-v-249ee71c"]]);
 
     const DRAWER_LEAVE_MS = 150;
-    var _sfc_main$Y = /*@__PURE__*/ defineComponent({
+    var _sfc_main$X = /*@__PURE__*/ defineComponent({
         __name: 'AcuDrawer',
         props: {
             isOpen: { type: Boolean },
@@ -192672,10 +193905,10 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-drawer-layer[data-v-882382df] {\r\n  position: fixed; top: 0; right: 0; bottom: 0; left: 0; inset: 0; z-index: 9200;\r\n  width: 100%; width: 100vw; width: 100dvw;\r\n  height: 100%; height: 100vh; height: 100dvh;\r\n  display: flex; justify-content: flex-end;\r\n  padding: var(--acu-safe-top, 0px) var(--acu-safe-right, 0px) var(--acu-safe-bottom, 0px) var(--acu-safe-left, 0px);\r\n  background: rgba(0, 0, 0, 0.38);\r\n  overflow: hidden;\r\n  animation: acu-drawer-layer-in-882382df 0.18s ease-out both;\n}\n.acu-v2-drawer-layer.is-closing[data-v-882382df] {\r\n  pointer-events: none;\r\n  animation: acu-drawer-layer-out-882382df 0.15s ease-in both;\n}\n.acu-v2-drawer[data-v-882382df] {\r\n  max-width: 100%;\r\n  height: 100%; max-height: 100%;\r\n  display: flex; flex-direction: column;\r\n  background: var(--acu-bg-1);\r\n  border-left: 0;\r\n  box-shadow: var(--acu-shadow);\r\n  min-width: 0; min-height: 0;\r\n  overflow: hidden;\r\n  animation: acu-drawer-panel-in-882382df 0.18s ease-out both;\n}\n.acu-v2-drawer-layer.is-closing .acu-v2-drawer[data-v-882382df] {\r\n  animation: acu-drawer-panel-out-882382df 0.15s ease-in both;\n}\n@supports (max-height: 100dvh) {\n.acu-v2-drawer[data-v-882382df] { max-height: 100%;\n}\n}\n.acu-v2-drawer__header[data-v-882382df] {\r\n  flex: 0 0 auto;\r\n  display: flex; align-items: center; justify-content: space-between;\r\n  min-width: 0;\r\n  gap: var(--acu-panel-gap, 12px); padding: var(--acu-page-gap, 14px) var(--acu-panel-padding, 16px);\r\n  border-bottom: 0;\n}\n.acu-v2-drawer__header-left[data-v-882382df] { display: flex; align-items: center; gap: var(--acu-space-250, 10px); min-width: 0;\n}\n.acu-v2-drawer__header h3[data-v-882382df] { margin: 0; min-width: 0; font-size: var(--acu-font-size-panel-title, 15px); overflow-wrap: anywhere;\n}\n.acu-v2-drawer__body[data-v-882382df] {\r\n  flex: 1; min-height: 0;\r\n  min-width: 0; overflow-y: auto; overflow-x: hidden; padding: var(--acu-panel-padding, 16px);\r\n  display: flex; flex-direction: column; gap: var(--acu-page-gap, 14px);\n}\n@keyframes acu-drawer-layer-in-882382df {\nfrom { opacity: 0;\n}\nto { opacity: 1;\n}\n}\n@keyframes acu-drawer-panel-in-882382df {\nfrom { transform: translateX(100%);\n}\nto { transform: translateX(0);\n}\n}\n@keyframes acu-drawer-layer-out-882382df {\nfrom { opacity: 1;\n}\nto { opacity: 0;\n}\n}\n@keyframes acu-drawer-panel-out-882382df {\nfrom { transform: translateX(0);\n}\nto { transform: translateX(100%);\n}\n}\n@media (max-width: 860px) {\n.acu-v2-drawer[data-v-882382df] { width: 100vw !important; max-width: 100vw; border-left: 0;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuDrawer.vue#style-0-882382df");
     var AcuDrawer_vue_vue_type_style_index_0_scoped_882382df_lang = null;
 
-    const _hoisted_1$V = { class: "acu-v2-drawer__header" };
-    const _hoisted_2$R = { class: "acu-v2-drawer__header-left" };
-    const _hoisted_3$I = { class: "acu-v2-drawer__body" };
-    function _sfc_render$Y(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$U = { class: "acu-v2-drawer__header" };
+    const _hoisted_2$Q = { class: "acu-v2-drawer__header-left" };
+    const _hoisted_3$H = { class: "acu-v2-drawer__body" };
+    function _sfc_render$X(_ctx, _cache, $props, $setup, $data, $options) {
 	return $setup.isRendered ? (openBlock(), createElementBlock(
 		"div",
 		{
@@ -192694,7 +193927,7 @@ ${rejectionText}` : delegationFeedback,
 				role: "dialog",
 				onClick: _cache[0] || (_cache[0] = withModifiers(() => {}, ["stop"]))
 			},
-			[createBaseVNode("header", _hoisted_1$V, [createBaseVNode("div", _hoisted_2$R, [$props.showBack ? (openBlock(), createBlock($setup["AcuIconButton"], {
+			[createBaseVNode("header", _hoisted_1$U, [createBaseVNode("div", _hoisted_2$Q, [$props.showBack ? (openBlock(), createBlock($setup["AcuIconButton"], {
 				key: 0,
 				icon: "fa-solid fa-arrow-left",
 				title: "返回",
@@ -192710,7 +193943,7 @@ ${rejectionText}` : delegationFeedback,
 				"aria-label": "关闭",
 				title: "关闭",
 				onClick: $setup.requestClose
-			})]), createBaseVNode("div", _hoisted_3$I, [renderSlot(_ctx.$slots, "default", {}, undefined, true)])],
+			})]), createBaseVNode("div", _hoisted_3$H, [renderSlot(_ctx.$slots, "default", {}, undefined, true)])],
 			4
 			/* STYLE */
 		)],
@@ -192718,9 +193951,9 @@ ${rejectionText}` : delegationFeedback,
 		/* CLASS, NEED_HYDRATION */
 	)) : createCommentVNode("v-if", true);
     }
-    var AcuDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$Y, [["render", _sfc_render$Y], ["__scopeId", "data-v-882382df"]]);
+    var AcuDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$X, [["render", _sfc_render$X], ["__scopeId", "data-v-882382df"]]);
 
-    var _sfc_main$X = /*@__PURE__*/ defineComponent({
+    var _sfc_main$W = /*@__PURE__*/ defineComponent({
         __name: 'AcuTextarea',
         props: {
             id: { default: undefined },
@@ -192860,14 +194093,14 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-textarea[data-v-263eda0c] {\n  appearance: none !important;\n  -webkit-appearance: none !important;\n  display: block !important;\n  width: 100% !important;\n  min-width: 0 !important;\n  box-sizing: border-box !important;\n  margin: 0 !important;\n  padding: var(--acu-space-2, 8px) var(--acu-space-250, 10px) !important;\n  border: 0 !important;\n  border-radius: var(--acu-radius-sm) !important;\n  background: var(--acu-bg-2) !important;\n  color: var(--acu-text-1) !important;\n  font: inherit !important;\n  font-size: var(--acu-font-size-body, 12px) !important;\n  line-height: 1.45 !important;\n  letter-spacing: 0 !important;\n  text-align: start !important;\n  resize: none !important;\n  outline: none !important;\n  box-shadow: none !important;\n  caret-color: var(--acu-text-1);\n  -webkit-tap-highlight-color: transparent;\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-textarea--auto-resize[data-v-263eda0c] {\n  overflow-x: hidden !important;\n  overflow-y: auto;\n}\n.acu-textarea[data-v-263eda0c]:hover:not(:disabled) {\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), var(--acu-bg-2) !important;\n}\n.acu-textarea[data-v-263eda0c]:focus {\n  outline: none !important;\n  box-shadow: 0 0 0 2px var(--acu-accent-glow) !important;\n}\n.acu-textarea[data-v-263eda0c]:disabled {\n  opacity: 0.5; cursor: not-allowed;\n}\n", "src/presentation-v2/components/_lib/AcuTextarea.vue#style-0-263eda0c");
     var AcuTextarea_vue_vue_type_style_index_0_scoped_263eda0c_lang = null;
 
-    const _hoisted_1$U = [
+    const _hoisted_1$T = [
 	"id",
 	"value",
 	"placeholder",
 	"rows",
 	"disabled"
     ];
-    function _sfc_render$X(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$W(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("textarea", {
 		ref: "textareaRef",
 		id: $props.id,
@@ -192879,9 +194112,9 @@ ${rejectionText}` : delegationFeedback,
 		onInput: $setup.onInput,
 		onFocus: $setup.onFocus,
 		onBlur: $setup.onBlur
-	}, null, 42, _hoisted_1$U);
+	}, null, 42, _hoisted_1$T);
     }
-    var AcuTextarea = /*#__PURE__*/ _export_sfc(_sfc_main$X, [["render", _sfc_render$X], ["__scopeId", "data-v-263eda0c"]]);
+    var AcuTextarea = /*#__PURE__*/ _export_sfc(_sfc_main$W, [["render", _sfc_render$W], ["__scopeId", "data-v-263eda0c"]]);
 
     const DEFAULT_ROLE_OPTIONS = [
         { value: 'SYSTEM', label: 'SYSTEM' },
@@ -192893,7 +194126,7 @@ ${rejectionText}` : delegationFeedback,
         { value: 'A', label: '主插槽 A' },
         { value: 'B', label: '主插槽 B' },
     ];
-    var _sfc_main$W = /*@__PURE__*/ defineComponent({
+    var _sfc_main$V = /*@__PURE__*/ defineComponent({
         __name: 'AcuPromptSegments',
         props: {
             segments: {},
@@ -192922,10 +194155,10 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-prompt-segs[data-v-cf81b9bc] { display: flex; flex-direction: column; gap: 10px; min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__add[data-v-cf81b9bc] { display: flex; justify-content: center; min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__add-btn[data-v-cf81b9bc] { max-width: 100%; white-space: normal;\n}\n.acu-prompt-segs__list[data-v-cf81b9bc] {\r\n  list-style: none; margin: 0; padding: 0;\r\n  display: flex; flex-direction: column; gap: 10px; min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__item[data-v-cf81b9bc] {\r\n  border: 0; border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent; padding: 0 0 12px;\r\n  display: flex; flex-direction: column; gap: 8px;\r\n  min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__item[data-v-cf81b9bc]:last-child {\r\n  padding-bottom: 0;\r\n  border-bottom: 0;\n}\n.acu-prompt-segs__item-head[data-v-cf81b9bc] {\r\n  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; max-width: 100%;\n}\n.acu-prompt-segs__index[data-v-cf81b9bc] {\r\n  font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3);\r\n  min-width: 26px;\r\n  font-family: var(--acu-font-mono);\n}\n.acu-prompt-segs__role[data-v-cf81b9bc] { flex: 1 1 110px; min-width: 0; max-width: 180px;\n}\n.acu-prompt-segs__slot[data-v-cf81b9bc] { flex: 1 1 120px; min-width: 0; max-width: 200px;\n}\n.acu-prompt-segs__actions[data-v-cf81b9bc] {\r\n  margin-left: auto;\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 6px;\r\n  flex-wrap: wrap;\r\n  min-width: 0;\n}\n.acu-prompt-segs[data-v-cf81b9bc] .acu-textarea,\r\n.acu-prompt-segs[data-v-cf81b9bc] textarea {\r\n  width: 100%;\r\n  min-width: 0;\r\n  max-width: 100%;\r\n  box-sizing: border-box;\n}\n.acu-prompt-segs__empty[data-v-cf81b9bc] {\r\n  padding: 10px 0; text-align: center;\r\n  color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\r\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  overflow-wrap: anywhere;\n}\n@media (max-width: 480px) {\n.acu-prompt-segs__item-head[data-v-cf81b9bc] { align-items: stretch;\n}\n.acu-prompt-segs__index[data-v-cf81b9bc] { flex: 0 0 100%;\n}\n.acu-prompt-segs__role[data-v-cf81b9bc],\r\n  .acu-prompt-segs__slot[data-v-cf81b9bc] { flex-basis: 100%; max-width: 100%;\n}\n.acu-prompt-segs__actions[data-v-cf81b9bc] { width: 100%; margin-left: 0; justify-content: flex-end;\n}\n}\r\n", "src/presentation-v2/components/_lib/AcuPromptSegments.vue#style-0-cf81b9bc");
     var AcuPromptSegments_vue_vue_type_style_index_0_scoped_cf81b9bc_lang = null;
 
-    const _hoisted_1$T = { class: "acu-prompt-segs" };
-    const _hoisted_2$Q = { class: "acu-prompt-segs__add" };
-    const _hoisted_3$H = { class: "acu-prompt-segs__list" };
-    const _hoisted_4$B = { class: "acu-prompt-segs__item-head" };
+    const _hoisted_1$S = { class: "acu-prompt-segs" };
+    const _hoisted_2$P = { class: "acu-prompt-segs__add" };
+    const _hoisted_3$G = { class: "acu-prompt-segs__list" };
+    const _hoisted_4$A = { class: "acu-prompt-segs__item-head" };
     const _hoisted_5$u = { class: "acu-prompt-segs__index" };
     const _hoisted_6$s = { class: "acu-prompt-segs__actions" };
     const _hoisted_7$q = {
@@ -192933,9 +194166,9 @@ ${rejectionText}` : delegationFeedback,
 	class: "acu-prompt-segs__empty"
     };
     const _hoisted_8$q = { class: "acu-prompt-segs__add" };
-    function _sfc_render$W(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$T, [
-		createBaseVNode("div", _hoisted_2$Q, [createVNode($setup["AcuButton"], {
+    function _sfc_render$V(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$S, [
+		createBaseVNode("div", _hoisted_2$P, [createVNode($setup["AcuButton"], {
 			size: "sm",
 			class: "acu-prompt-segs__add-btn",
 			onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("add", "top"))
@@ -192953,14 +194186,14 @@ ${rejectionText}` : delegationFeedback,
 			)])]),
 			_: 1
 		})]),
-		createBaseVNode("ol", _hoisted_3$H, [(openBlock(true), createElementBlock(
+		createBaseVNode("ol", _hoisted_3$G, [(openBlock(true), createElementBlock(
 			Fragment,
 			null,
 			renderList($props.segments, (seg, index) => {
 				return openBlock(), createElementBlock("li", {
 					key: index,
 					class: "acu-prompt-segs__item"
-				}, [createBaseVNode("header", _hoisted_4$B, [
+				}, [createBaseVNode("header", _hoisted_4$A, [
 					createBaseVNode(
 						"span",
 						_hoisted_5$u,
@@ -193076,9 +194309,9 @@ ${rejectionText}` : delegationFeedback,
 		})])
 	]);
     }
-    var AcuPromptSegments = /*#__PURE__*/ _export_sfc(_sfc_main$W, [["render", _sfc_render$W], ["__scopeId", "data-v-cf81b9bc"]]);
+    var AcuPromptSegments = /*#__PURE__*/ _export_sfc(_sfc_main$V, [["render", _sfc_render$V], ["__scopeId", "data-v-cf81b9bc"]]);
 
-    var _sfc_main$V = /*@__PURE__*/ defineComponent({
+    var _sfc_main$U = /*@__PURE__*/ defineComponent({
         __name: 'VectorIndexPromptDrawer',
         props: {
             isOpen: { type: Boolean },
@@ -193116,9 +194349,9 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-vector-prompt-drawer__toolbar[data-v-75f9cd80] {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\n}\n.acu-vector-prompt-drawer__actions[data-v-75f9cd80] {\r\n  position: sticky;\r\n  bottom: -16px;\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  padding: 12px 0 0;\r\n  background: var(--acu-bg-1);\n}\r\n", "src/presentation-v2/components/VectorIndexPromptDrawer.vue#style-0-75f9cd80");
     var VectorIndexPromptDrawer_vue_vue_type_style_index_0_scoped_75f9cd80_lang = null;
 
-    const _hoisted_1$S = { class: "acu-vector-prompt-drawer__toolbar" };
-    const _hoisted_2$P = { class: "acu-vector-prompt-drawer__actions" };
-    function _sfc_render$V(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$R = { class: "acu-vector-prompt-drawer__toolbar" };
+    const _hoisted_2$O = { class: "acu-vector-prompt-drawer__actions" };
+    function _sfc_render$U(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
 		"is-open": $props.isOpen,
 		title: "编辑关键词生成提示词",
@@ -193138,7 +194371,7 @@ ${rejectionText}` : delegationFeedback,
 				)]),
 				_: 1
 			}, 8, ["kind"])) : createCommentVNode("v-if", true),
-			createBaseVNode("div", _hoisted_1$S, [createVNode($setup["AcuButton"], {
+			createBaseVNode("div", _hoisted_1$R, [createVNode($setup["AcuButton"], {
 				size: "sm",
 				onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("reset"))
 			}, {
@@ -193159,7 +194392,7 @@ ${rejectionText}` : delegationFeedback,
 				onDelete: _cache[2] || (_cache[2] = ($event) => _ctx.$emit("delete", $event)),
 				onUpdate: _cache[3] || (_cache[3] = (index, patch) => _ctx.$emit("update", index, patch))
 			}, null, 8, ["segments", "role-options"]),
-			createBaseVNode("footer", _hoisted_2$P, [createVNode($setup["AcuButton"], { onClick: $setup.requestClose }, {
+			createBaseVNode("footer", _hoisted_2$O, [createVNode($setup["AcuButton"], { onClick: $setup.requestClose }, {
 				default: withCtx(() => [..._cache[7] || (_cache[7] = [createTextVNode(
 					"关闭",
 					-1
@@ -193182,7 +194415,7 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	}, 8, ["is-open"]);
     }
-    var VectorIndexPromptDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$V, [["render", _sfc_render$V], ["__scopeId", "data-v-75f9cd80"]]);
+    var VectorIndexPromptDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$U, [["render", _sfc_render$U], ["__scopeId", "data-v-75f9cd80"]]);
 
     function formatFollowActiveApiLabel(activePresetName) {
         const name = String(activePresetName || '').trim();
@@ -193445,10 +194678,11 @@ ${rejectionText}` : delegationFeedback,
             toast[kind](text, options);
         }
         function notifyProgress(text) {
-            if (progressToastId && toast.update(progressToastId, 'info', text, { durationMs: 0, muteable: false })) {
+            const progressOptions = { durationMs: 0, muteable: false, feature: '交火索引' };
+            if (progressToastId && toast.update(progressToastId, 'info', text, progressOptions)) {
                 return;
             }
-            progressToastId = toast.info(text, { durationMs: 0, muteable: false });
+            progressToastId = toast.info(text, progressOptions);
         }
         function readFromConfig() {
             const config = getCurrentVectorMemoryConfig_ACU();
@@ -193906,7 +195140,7 @@ ${rejectionText}` : delegationFeedback,
     const SHOW_LEGACY_VECTOR_MAINTENANCE_UI = false;
     const CROSSFIRE_FLOW_HINT = '发送前流程：关键词生成（可关闭）→ 用户输入与关键词合并 embedding → "概览 + 纪要正文"向量与 BM25 混合召回（可关闭）→ 可选 Rerank（按纪要正文分批精排，候选不多于 TopK 时跳过）→ 按纪要表原顺序覆盖原概要索引条目。';
     const VECTOR_FLOW_HINT = '发送前流程：用户输入直接 embedding 召回 → Rerank 精排并按「保留相关纪要条数」截取 → 按纪要表原顺序覆盖原概要索引条目。向量表格不生成关键词、不做混合召回；Rerank 未配置或失败时本轮召回判定失败，不会静默退回 embedding 排序。';
-    var _sfc_main$U = /*@__PURE__*/ defineComponent({
+    var _sfc_main$T = /*@__PURE__*/ defineComponent({
         __name: 'FormFillVectorPanels',
         props: {
             mode: {}
@@ -193994,10 +195228,10 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-vector-index-page[data-v-7fe482db] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: var(--acu-page-gap, 14px);\n}\n.acu-v2-vector-index-page__panel-stack[data-v-7fe482db] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-vector-index-page__number-grid[data-v-7fe482db] {\n  display: grid;\n  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));\n  gap: 10px;\n}\n.acu-v2-vector-api-form[data-v-7fe482db] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n.acu-v2-vector-api-form__section[data-v-7fe482db] {\n  min-width: 0;\n  margin: 0;\n  padding: 0 0 18px;\n  border: 0;\n  border-bottom: 1px solid\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\n  border-radius: 0;\n  background: transparent;\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-vector-api-form__section[data-v-7fe482db]:last-of-type {\n  padding-bottom: 0;\n  border-bottom: 0;\n}\n.acu-v2-vector-api-form__section + .acu-v2-vector-api-form__section[data-v-7fe482db] {\n  padding-top: 2px;\n}\n.acu-v2-vector-api-form__section legend[data-v-7fe482db] {\n  width: 100%;\n  margin: 0 0 2px;\n  padding: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body, 12px);\n  font-weight: 700;\n  line-height: 1.35;\n}\n.acu-v2-vector-api-form__actions[data-v-7fe482db] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__hint[data-v-7fe482db] {\n  margin: 0;\n  font-size: var(--acu-font-size-body, 12px);\n  color: var(--acu-text-3);\n  line-height: 1.55;\n}\n.acu-v2-vector-index-page__maintenance-spacer[data-v-7fe482db] {\n  flex: 1 1 auto;\n  min-height: 0;\n}\n.acu-v2-vector-index-page__actions[data-v-7fe482db] {\n  display: flex;\n  justify-content: flex-end;\n  flex-wrap: wrap;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-vector-index-page__prompt-actions[data-v-7fe482db] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-vector-api-form__instruction-textarea[data-v-7fe482db] {\n  width: 100%;\n  min-height: 60px;\n  padding: 6px 8px;\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n  border-radius: 4px;\n  background: var(--acu-bg-2, transparent);\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.5;\n  resize: vertical;\n}\n.acu-v2-vector-index-page__scope-allowlist[data-v-7fe482db] {\n  width: 100%;\n  min-height: 72px;\n  padding: 6px 8px;\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n  border-radius: 4px;\n  background: var(--acu-bg-2, transparent);\n  color: var(--acu-text-1);\n  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\n  font-size: var(--acu-font-size-small, 11px);\n  line-height: 1.5;\n  resize: vertical;\n}\n", "src/presentation-v2/components/FormFillVectorPanels.vue#style-0-7fe482db");
     var FormFillVectorPanels_vue_vue_type_style_index_0_scoped_7fe482db_lang = null;
 
-    const _hoisted_1$R = { class: "acu-v2-vector-index-page" };
-    const _hoisted_2$O = { class: "acu-v2-vector-index-page__panel-stack" };
-    const _hoisted_3$G = { class: "acu-v2-vector-index-page__hint" };
-    const _hoisted_4$A = { class: "acu-v2-vector-index-page__actions" };
+    const _hoisted_1$Q = { class: "acu-v2-vector-index-page" };
+    const _hoisted_2$N = { class: "acu-v2-vector-index-page__panel-stack" };
+    const _hoisted_3$F = { class: "acu-v2-vector-index-page__hint" };
+    const _hoisted_4$z = { class: "acu-v2-vector-index-page__actions" };
     const _hoisted_5$t = { class: "acu-v2-vector-index-page__number-grid" };
     const _hoisted_6$r = { class: "acu-v2-vector-index-page__panel-stack" };
     const _hoisted_7$p = { class: "acu-v2-vector-api-form__section" };
@@ -194011,10 +195245,10 @@ ${rejectionText}` : delegationFeedback,
 	key: 1,
 	"aria-hidden": "true"
     };
-    function _sfc_render$U(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$R, [
+    function _sfc_render$T(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$Q, [
 		createVNode($setup["AcuPanelGrid"], { class: "acu-v2-vector-index-page__main-grid" }, {
-			default: withCtx(() => [createBaseVNode("div", _hoisted_2$O, [createVNode($setup["AcuPanel"], {
+			default: withCtx(() => [createBaseVNode("div", _hoisted_2$N, [createVNode($setup["AcuPanel"], {
 				id: "vector-index-status-panel",
 				title: $setup.vectorIndexCopy.panels.status.title,
 				description: $setup.vectorIndexCopy.panels.status.description
@@ -194031,7 +195265,7 @@ ${rejectionText}` : delegationFeedback,
 					createVNode($setup["AcuStatsList"], { items: $setup.vector.statusStatsItems.value }, null, 8, ["items"]),
 					createBaseVNode(
 						"p",
-						_hoisted_3$G,
+						_hoisted_3$F,
 						toDisplayString($setup.isCrossfire ? $setup.CROSSFIRE_FLOW_HINT : $setup.VECTOR_FLOW_HINT),
 						1
 						/* TEXT */
@@ -194046,7 +195280,7 @@ ${rejectionText}` : delegationFeedback,
 						-1
 						/* CACHED */
 					)),
-					createBaseVNode("div", _hoisted_4$A, [
+					createBaseVNode("div", _hoisted_4$z, [
 						createVNode($setup["AcuButton"], {
 							variant: "primary",
 							disabled: $setup.vector.buildBusy.value || $setup.vector.maintenanceBusy.value,
@@ -194623,9 +195857,9 @@ ${rejectionText}` : delegationFeedback,
 		])
 	]);
     }
-    var FormFillVectorPanels = /*#__PURE__*/ _export_sfc(_sfc_main$U, [["render", _sfc_render$U], ["__scopeId", "data-v-7fe482db"]]);
+    var FormFillVectorPanels = /*#__PURE__*/ _export_sfc(_sfc_main$T, [["render", _sfc_render$T], ["__scopeId", "data-v-7fe482db"]]);
 
-    var _sfc_main$T = /*@__PURE__*/ defineComponent({
+    var _sfc_main$S = /*@__PURE__*/ defineComponent({
         __name: 'AcuText',
         props: {
             as: { default: 'p' },
@@ -194644,15 +195878,15 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-text[data-v-7abe2621] {\r\n  margin: 0;\r\n  min-width: 0;\n}\n.acu-text--caption[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: var(--acu-line-height-caption, 1.5);\r\n  color: var(--acu-text-3);\n}\n.acu-text--meta[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  color: var(--acu-text-3);\n}\n.acu-text--hint[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-readable, 1.55);\r\n  color: var(--acu-text-3);\n}\n.acu-text--status-line[data-v-7abe2621] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 8px;\r\n  flex-wrap: wrap;\r\n  min-height: 22px;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  color: var(--acu-text-3);\n}\n.acu-text--empty[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  line-height: var(--acu-line-height-readable, 1.55);\r\n  color: var(--acu-text-3);\r\n  text-align: center;\n}\n.acu-text--error[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  color: var(--acu-danger);\n}\n.acu-text--section-label[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-section-title, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  font-weight: 600;\r\n  color: var(--acu-text-2);\n}\n.acu-text--list-title[data-v-7abe2621] {\r\n  font-size: var(--acu-font-size-list-title, 13px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  font-weight: 500;\r\n  color: var(--acu-text-1);\n}\n[data-v-7abe2621] .acu-text__value {\r\n  color: var(--acu-text-1);\r\n  font-weight: 500;\n}\r\n", "src/presentation-v2/components/_lib/AcuText.vue#style-0-7abe2621");
     var AcuText_vue_vue_type_style_index_0_scoped_7abe2621_lang = null;
 
-    function _sfc_render$T(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$S(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock(resolveDynamicComponent($props.as), { class: normalizeClass(["acu-text", $setup.variantClass]) }, {
 		default: withCtx(() => [renderSlot(_ctx.$slots, "default", {}, undefined, true)]),
 		_: 3
 	}, 8, ["class"]);
     }
-    var AcuText = /*#__PURE__*/ _export_sfc(_sfc_main$T, [["render", _sfc_render$T], ["__scopeId", "data-v-7abe2621"]]);
+    var AcuText = /*#__PURE__*/ _export_sfc(_sfc_main$S, [["render", _sfc_render$S], ["__scopeId", "data-v-7abe2621"]]);
 
-    var _sfc_main$S = /*@__PURE__*/ defineComponent({
+    var _sfc_main$R = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookSourcePicker',
         props: {
             source: {},
@@ -194691,19 +195925,19 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-wb-source-picker[data-v-3bd327f1] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\r\n  min-width: 0;\n}\n.acu-v2-wb-source-picker__list[data-v-3bd327f1] {\r\n  min-width: 0;\r\n  max-height: 180px;\r\n  overflow-y: auto;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 8px;\r\n  padding: 8px;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-2);\n}\n.acu-v2-wb-source-picker__list--disabled[data-v-3bd327f1] {\r\n  opacity: 0.65;\n}\n.acu-v2-wb-source-picker__item[data-v-3bd327f1] {\r\n  width: 100%;\r\n  min-width: 0;\r\n  min-height: 32px;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: 10px;\r\n  margin: 0;\r\n  padding: 7px 9px;\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: transparent;\r\n  color: var(--acu-text-2);\r\n  font: inherit;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.4;\r\n  text-align: left;\r\n  cursor: pointer;\r\n  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-v2-wb-source-picker__item[data-v-3bd327f1]:hover:not(:disabled) {\r\n  background: var(--acu-hover-overlay);\r\n  color: var(--acu-text-1);\n}\n.acu-v2-wb-source-picker__item[data-v-3bd327f1]:disabled {\r\n  cursor: not-allowed;\n}\n.acu-v2-wb-source-picker__item[data-v-3bd327f1]:focus-visible {\r\n  outline: none;\r\n  box-shadow: 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-v2-wb-source-picker__item--selected[data-v-3bd327f1] {\r\n  background: color-mix(in srgb, var(--acu-accent) 14%, transparent);\r\n  color: var(--acu-text-1);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-accent) 42%, transparent);\n}\n.acu-v2-wb-source-picker__item--selected[data-v-3bd327f1]:hover:not(:disabled) {\r\n  background: color-mix(in srgb, var(--acu-accent) 20%, transparent);\r\n  color: var(--acu-text-1);\r\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-accent) 54%, transparent);\n}\n.acu-v2-wb-source-picker__item-label[data-v-3bd327f1] {\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-v2-wb-source-picker__item-check[data-v-3bd327f1] {\r\n  flex-shrink: 0;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-accent);\r\n  opacity: 0;\r\n  transform: scale(0.86);\r\n  transition: opacity 0.15s ease, transform 0.15s ease;\n}\n.acu-v2-wb-source-picker__item--selected .acu-v2-wb-source-picker__item-check[data-v-3bd327f1] {\r\n  opacity: 1;\r\n  transform: scale(1);\n}\n.acu-v2-wb-source-picker__empty[data-v-3bd327f1] {\r\n  padding: 8px 2px;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  text-align: center;\n}\n.acu-v2-wb-source-picker__error[data-v-3bd327f1] {\r\n  margin: 0;\n}\r\n", "src/presentation-v2/components/WorldbookSourcePicker.vue#style-0-3bd327f1");
     var WorldbookSourcePicker_vue_vue_type_style_index_0_scoped_3bd327f1_lang = null;
 
-    const _hoisted_1$Q = { class: "acu-v2-wb-source-picker" };
-    const _hoisted_2$N = [
+    const _hoisted_1$P = { class: "acu-v2-wb-source-picker" };
+    const _hoisted_2$M = [
 	"aria-checked",
 	"disabled",
 	"onClick"
     ];
-    const _hoisted_3$F = { class: "acu-v2-wb-source-picker__item-label" };
-    const _hoisted_4$z = {
+    const _hoisted_3$E = { class: "acu-v2-wb-source-picker__item-label" };
+    const _hoisted_4$y = {
 	key: 0,
 	class: "acu-v2-wb-source-picker__empty"
     };
-    function _sfc_render$S(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$Q, [
+    function _sfc_render$R(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$P, [
 		createVNode($setup["AcuFormRow"], { label: "来源" }, {
 			default: withCtx(() => [createVNode($setup["AcuSegmentedControl"], {
 				"model-value": $props.source,
@@ -194744,7 +195978,7 @@ ${rejectionText}` : delegationFeedback,
 							onClick: ($event) => _ctx.$emit("toggle-book", name, !$setup.selectedSet.has(name))
 						}, [createBaseVNode(
 							"span",
-							_hoisted_3$F,
+							_hoisted_3$E,
 							toDisplayString(name),
 							1
 							/* TEXT */
@@ -194757,13 +195991,13 @@ ${rejectionText}` : delegationFeedback,
 							null,
 							-1
 							/* CACHED */
-						))], 10, _hoisted_2$N);
+						))], 10, _hoisted_2$M);
 					}),
 					128
 					/* KEYED_FRAGMENT */
 				)), !$setup.filteredNames.length ? (openBlock(), createElementBlock(
 					"div",
-					_hoisted_4$z,
+					_hoisted_4$y,
 					toDisplayString($props.status === "loading" ? "正在加载世界书..." : "无可选世界书"),
 					1
 					/* TEXT */
@@ -194788,9 +196022,9 @@ ${rejectionText}` : delegationFeedback,
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var WorldbookSourcePicker = /*#__PURE__*/ _export_sfc(_sfc_main$S, [["render", _sfc_render$S], ["__scopeId", "data-v-3bd327f1"]]);
+    var WorldbookSourcePicker = /*#__PURE__*/ _export_sfc(_sfc_main$R, [["render", _sfc_render$R], ["__scopeId", "data-v-3bd327f1"]]);
 
-    var _sfc_main$R = /*@__PURE__*/ defineComponent({
+    var _sfc_main$Q = /*@__PURE__*/ defineComponent({
         __name: 'AcuDisclosureGroup',
         props: {
             label: { default: '' },
@@ -194861,13 +196095,13 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-disclosure-group[data-v-73a020fe] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 0;\r\n  /* 根节点不裁切：折叠动画的裁切由 body 的内联 overflow 承担，静止时下拉菜单等浮层需要溢出到组外。 */\r\n  overflow: visible;\r\n  border-radius: var(--acu-radius-md);\r\n  background: transparent;\n}\n.acu-disclosure-group__header[data-v-73a020fe] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 8px;\r\n  width: 100%;\r\n  min-height: 34px;\r\n  appearance: none;\r\n  border: 0;\r\n  /* 头部自己收圆角：根节点已不再用 overflow: hidden 帮它裁掉悬停底色。 */\r\n  border-radius: var(--acu-radius-md);\r\n  padding: 7px 10px;\r\n  background: transparent;\r\n  color: var(--acu-text-2);\r\n  font: inherit;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.35;\r\n  text-align: left;\r\n  cursor: pointer;\r\n  user-select: none;\r\n  transition: background-color 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-disclosure-group__header[data-v-73a020fe]:hover {\r\n  background: var(--acu-hover-overlay);\n}\n.acu-disclosure-group--expanded .acu-disclosure-group__header[data-v-73a020fe] {\r\n  border-bottom-left-radius: 0;\r\n  border-bottom-right-radius: 0;\n}\n.acu-disclosure-group__header[data-v-73a020fe]:focus-visible {\r\n  outline: none;\r\n  box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-disclosure-group__chevron[data-v-73a020fe] {\r\n  flex: 0 0 10px;\r\n  width: 10px;\r\n  font-size: var(--acu-font-size-micro, 10px);\r\n  --acu-icon-color: var(--acu-text-3);\r\n  color: var(--acu-text-3);\r\n  transition: transform 0.15s ease;\n}\n.acu-disclosure-group__chevron--open[data-v-73a020fe] {\r\n  transform: rotate(90deg);\n}\n.acu-disclosure-group__label[data-v-73a020fe] {\r\n  flex: 1;\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\r\n  font-weight: 500;\r\n  color: var(--acu-text-2);\n}\n.acu-disclosure-group__meta[data-v-73a020fe] {\r\n  flex-shrink: 0;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-text-3);\r\n  font-variant-numeric: tabular-nums;\r\n  white-space: nowrap;\n}\n.acu-disclosure-group__body[data-v-73a020fe] {\r\n  box-sizing: border-box;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\r\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 18%, transparent);\r\n  padding: 8px;\r\n  opacity: 1;\r\n  transform: translateY(0);\n}\r\n", "src/presentation-v2/components/_lib/AcuDisclosureGroup.vue#style-0-73a020fe");
     var AcuDisclosureGroup_vue_vue_type_style_index_0_scoped_73a020fe_lang = null;
 
-    const _hoisted_1$P = ["aria-expanded", "aria-controls"];
-    const _hoisted_2$M = [
+    const _hoisted_1$O = ["aria-expanded", "aria-controls"];
+    const _hoisted_2$L = [
 	"id",
 	"aria-hidden",
 	"inert"
     ];
-    function _sfc_render$R(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$Q(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"div",
 		{ class: normalizeClass(["acu-disclosure-group", [$props.rootClass, { "acu-disclosure-group--expanded": $props.expanded }]]) },
@@ -194916,7 +196150,7 @@ ${rejectionText}` : delegationFeedback,
 				2
 				/* CLASS */
 			)) : createCommentVNode("v-if", true)
-		], 10, _hoisted_1$P), createVNode(Transition, {
+		], 10, _hoisted_1$O), createVNode(Transition, {
 			css: false,
 			onBeforeEnter: $setup.beforeEnter,
 			onEnter: $setup.enter,
@@ -194934,16 +196168,16 @@ ${rejectionText}` : delegationFeedback,
 				style: normalizeStyle($setup.bodyStyle),
 				"aria-hidden": !$props.expanded ? "true" : undefined,
 				inert: !$props.expanded ? true : undefined
-			}, [renderSlot(_ctx.$slots, "default", {}, undefined, true)], 14, _hoisted_2$M)), [[vShow, $props.expanded]]) : createCommentVNode("v-if", true)]),
+			}, [renderSlot(_ctx.$slots, "default", {}, undefined, true)], 14, _hoisted_2$L)), [[vShow, $props.expanded]]) : createCommentVNode("v-if", true)]),
 			_: 3
 		})],
 		2
 		/* CLASS */
 	);
     }
-    var AcuDisclosureGroup = /*#__PURE__*/ _export_sfc(_sfc_main$R, [["render", _sfc_render$R], ["__scopeId", "data-v-73a020fe"]]);
+    var AcuDisclosureGroup = /*#__PURE__*/ _export_sfc(_sfc_main$Q, [["render", _sfc_render$Q], ["__scopeId", "data-v-73a020fe"]]);
 
-    var _sfc_main$Q = /*@__PURE__*/ defineComponent({
+    var _sfc_main$P = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookEntryList',
         props: {
             groups: {},
@@ -195049,17 +196283,17 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-wb-entries[data-v-c56bd63a] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-v2-wb-entries__status[data-v-c56bd63a] {\r\n  padding: 8px 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-wb-entries__status--error[data-v-c56bd63a] { color: var(--acu-danger);\n}\n.acu-v2-wb-entry-item[data-v-c56bd63a] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) auto;\r\n  gap: 6px 8px;\r\n  align-items: center;\r\n  padding: 3px 10px;\r\n  transition: background 0.08s ease;\n}\n.acu-v2-wb-entry-item[data-v-c56bd63a]:hover { background: var(--acu-hover-overlay);\n}\n.acu-v2-wb-entry-item--disabled[data-v-c56bd63a] {\r\n  opacity: 0.5;\n}\n.acu-v2-wb-entry-item__actions[data-v-c56bd63a] {\r\n  display: inline-flex;\r\n  align-items: center;\r\n  gap: 6px;\n}\n.acu-v2-wb-entry-item__label[data-v-c56bd63a] {\r\n  min-width: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  overflow-wrap: anywhere;\r\n  display: -webkit-box;\r\n  -webkit-line-clamp: 2;\r\n  -webkit-box-orient: vertical;\r\n  overflow: hidden;\n}\r\n\r\n/* 剧情页 / 填表页走 AcuCheckbox 分支；:deep 把夹断锁在本列表内，避免改动全局组件 */\n.acu-v2-wb-entry-item[data-v-c56bd63a] .acu-checkbox__label {\r\n  min-width: 0;\r\n  overflow-wrap: anywhere;\r\n  display: -webkit-box;\r\n  -webkit-line-clamp: 2;\r\n  -webkit-box-orient: vertical;\r\n  overflow: hidden;\n}\n.acu-v2-wb-entry-item__skill-badge[data-v-c56bd63a] {\r\n  border-radius: 999px;\r\n  padding: 1px 6px;\r\n  background: color-mix(in srgb, var(--acu-accent) 14%, transparent);\r\n  color: var(--acu-accent);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-v2-wb-entry-item__state-badge[data-v-c56bd63a] {\r\n  border-radius: 999px;\r\n  padding: 1px 6px;\r\n  background: color-mix(in srgb, var(--acu-warning) 14%, transparent);\r\n  color: var(--acu-warning);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-v2-wb-entry-skill[data-v-c56bd63a] {\r\n  grid-column: 1 / -1;\r\n  display: grid;\r\n  gap: 8px;\r\n  margin: 4px 0 6px 24px;\r\n  padding: 8px;\r\n  border: 1px solid var(--acu-border-1);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-1);\n}\n.acu-v2-wb-entry-skill__actions[data-v-c56bd63a] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  flex-wrap: wrap;\n}\n@media (max-width: 640px) {\n.acu-v2-wb-entry-item[data-v-c56bd63a] {\r\n    grid-template-columns: 1fr;\n}\n.acu-v2-wb-entry-item__actions[data-v-c56bd63a] {\r\n    justify-content: flex-start;\r\n    padding-left: 24px;\n}\n.acu-v2-wb-entry-skill[data-v-c56bd63a] {\r\n    margin-left: 0;\n}\n}\r\n", "src/presentation-v2/components/WorldbookEntryList.vue#style-0-c56bd63a");
     var WorldbookEntryList_vue_vue_type_style_index_0_scoped_c56bd63a_lang = null;
 
-    const _hoisted_1$O = { class: "acu-v2-wb-entries" };
-    const _hoisted_2$L = {
+    const _hoisted_1$N = { class: "acu-v2-wb-entries" };
+    const _hoisted_2$K = {
 	key: 0,
 	class: "acu-v2-wb-entries__status"
     };
-    const _hoisted_3$E = {
+    const _hoisted_3$D = {
 	key: 1,
 	class: "acu-v2-wb-entries__status acu-v2-wb-entries__status--error",
 	role: "alert"
     };
-    const _hoisted_4$y = {
+    const _hoisted_4$x = {
 	key: 2,
 	class: "acu-v2-wb-entries__status"
     };
@@ -195085,16 +196319,16 @@ ${rejectionText}` : delegationFeedback,
 	class: "acu-v2-wb-entry-skill"
     };
     const _hoisted_11$i = { class: "acu-v2-wb-entry-skill__actions" };
-    function _sfc_render$Q(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$O, [$props.loading ? (openBlock(), createElementBlock("div", _hoisted_2$L, "正在加载条目...")) : $props.status === "error" ? (openBlock(), createElementBlock(
+    function _sfc_render$P(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$N, [$props.loading ? (openBlock(), createElementBlock("div", _hoisted_2$K, "正在加载条目...")) : $props.status === "error" ? (openBlock(), createElementBlock(
 		"div",
-		_hoisted_3$E,
+		_hoisted_3$D,
 		toDisplayString($props.error || "加载条目失败"),
 		1
 		/* TEXT */
 	)) : $props.groups.length === 0 ? (openBlock(), createElementBlock(
 		"div",
-		_hoisted_4$y,
+		_hoisted_4$x,
 		toDisplayString($props.emptyText),
 		1
 		/* TEXT */
@@ -195245,9 +196479,9 @@ ${rejectionText}` : delegationFeedback,
 		/* KEYED_FRAGMENT */
 	))]);
     }
-    var WorldbookEntryList = /*#__PURE__*/ _export_sfc(_sfc_main$Q, [["render", _sfc_render$Q], ["__scopeId", "data-v-c56bd63a"]]);
+    var WorldbookEntryList = /*#__PURE__*/ _export_sfc(_sfc_main$P, [["render", _sfc_render$P], ["__scopeId", "data-v-c56bd63a"]]);
 
-    var _sfc_main$P = /*@__PURE__*/ defineComponent({
+    var _sfc_main$O = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookEntryToolbar',
         props: {
             filter: {},
@@ -195266,9 +196500,9 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-wb-entry-toolbar[data-v-7cc3dea8] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 6px;\r\n  margin-top: 10px;\r\n  padding-top: 10px;\r\n  flex-wrap: wrap;\n}\n.acu-v2-wb-entry-toolbar__filter[data-v-7cc3dea8] {\r\n  flex: 1;\r\n  min-width: 160px;\n}\r\n", "src/presentation-v2/components/WorldbookEntryToolbar.vue#style-0-7cc3dea8");
     var WorldbookEntryToolbar_vue_vue_type_style_index_0_scoped_7cc3dea8_lang = null;
 
-    const _hoisted_1$N = { class: "acu-v2-wb-entry-toolbar" };
-    function _sfc_render$P(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$N, [
+    const _hoisted_1$M = { class: "acu-v2-wb-entry-toolbar" };
+    function _sfc_render$O(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$M, [
 		$props.showEntrySelectionControls ? (openBlock(), createElementBlock(
 			Fragment,
 			{ key: 0 },
@@ -195336,9 +196570,9 @@ ${rejectionText}` : delegationFeedback,
 		})
 	]);
     }
-    var WorldbookEntryToolbar = /*#__PURE__*/ _export_sfc(_sfc_main$P, [["render", _sfc_render$P], ["__scopeId", "data-v-7cc3dea8"]]);
+    var WorldbookEntryToolbar = /*#__PURE__*/ _export_sfc(_sfc_main$O, [["render", _sfc_render$O], ["__scopeId", "data-v-7cc3dea8"]]);
 
-    var _sfc_main$O = /*@__PURE__*/ defineComponent({
+    var _sfc_main$N = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookEntryPickerBody',
         props: {
             source: {},
@@ -195367,10 +196601,10 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-wb-entry-picker[data-v-648a8ff3] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\r\n  min-width: 0;\n}\n.acu-v2-wb-entry-picker__hint[data-v-648a8ff3] {\r\n  margin: 0;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-text-3);\n}\n.acu-v2-wb-entry-picker__hint strong[data-v-648a8ff3] {\r\n  color: var(--acu-text-1);\r\n  font-weight: 500;\n}\r\n\r\n\r\n", "src/presentation-v2/components/WorldbookEntryPickerBody.vue#style-0-648a8ff3");
     var WorldbookEntryPickerBody_vue_vue_type_style_index_0_scoped_648a8ff3_lang = null;
 
-    const _hoisted_1$M = { class: "acu-v2-wb-entry-picker" };
-    const _hoisted_2$K = { class: "acu-v2-wb-entry-picker__hint" };
-    function _sfc_render$O(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$M, [
+    const _hoisted_1$L = { class: "acu-v2-wb-entry-picker" };
+    const _hoisted_2$J = { class: "acu-v2-wb-entry-picker__hint" };
+    function _sfc_render$N(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$L, [
 		createVNode($setup["WorldbookSourcePicker"], {
 			source: $props.source,
 			"selected-names": $props.selectedNames,
@@ -195388,7 +196622,7 @@ ${rejectionText}` : delegationFeedback,
 			"error",
 			"filterable"
 		]),
-		createBaseVNode("p", _hoisted_2$K, [_cache[7] || (_cache[7] = createTextVNode(
+		createBaseVNode("p", _hoisted_2$J, [_cache[7] || (_cache[7] = createTextVNode(
 			" 目前已选: ",
 			-1
 			/* CACHED */
@@ -195428,7 +196662,7 @@ ${rejectionText}` : delegationFeedback,
 		])
 	]);
     }
-    var WorldbookEntryPickerBody = /*#__PURE__*/ _export_sfc(_sfc_main$O, [["render", _sfc_render$O], ["__scopeId", "data-v-648a8ff3"]]);
+    var WorldbookEntryPickerBody = /*#__PURE__*/ _export_sfc(_sfc_main$N, [["render", _sfc_render$N], ["__scopeId", "data-v-648a8ff3"]]);
 
     /**
      * useWorldbookSelector — D8 业务组件配套数据层（阶段 2 / D21.3）
@@ -196064,7 +197298,7 @@ ${rejectionText}` : delegationFeedback,
         },
     };
 
-    var _sfc_main$N = /*@__PURE__*/ defineComponent({
+    var _sfc_main$M = /*@__PURE__*/ defineComponent({
         __name: 'FormFillPlotPanels',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -196128,7 +197362,7 @@ ${rejectionText}` : delegationFeedback,
         }
     });
 
-    function _sfc_render$N(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$M(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		id: "fill-mode-plot-worldbook-panel",
 		class: "acu-v2-fill-mode-plot",
@@ -196172,7 +197406,7 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	}, 8, ["title", "description"]);
     }
-    var FormFillPlotPanels = /*#__PURE__*/ _export_sfc(_sfc_main$N, [["render", _sfc_render$N]]);
+    var FormFillPlotPanels = /*#__PURE__*/ _export_sfc(_sfc_main$M, [["render", _sfc_render$M]]);
 
     /**
      * usePlotTaskEditing — 抽屉 edit 视图内的任务列表 + 当前任务编辑（D23.3）
@@ -196739,7 +197973,7 @@ ${rejectionText}` : delegationFeedback,
         };
     }
 
-    var _sfc_main$M = /*@__PURE__*/ defineComponent({
+    var _sfc_main$L = /*@__PURE__*/ defineComponent({
         __name: 'AcuRulePairList',
         props: {
             modelValue: {},
@@ -196790,20 +198024,20 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-rule-pair-list--standalone[data-v-c9426b22] {\r\n  display: flex; flex-direction: column; gap: 6px;\n}\n.acu-rule-pair-list__body[data-v-c9426b22] {\r\n  display: flex; flex-direction: column; gap: 6px;\n}\n.acu-rule-pair-list--standalone .acu-rule-pair-list__body[data-v-c9426b22] {\r\n  /* 老接口：未提供 label 时直接展示，无外层 padding */\r\n  border-top: 0;\r\n  padding: 0;\n}\n.acu-rule-pair-list__row[data-v-c9426b22] {\r\n  display: flex; align-items: center; gap: 6px;\n}\n.acu-rule-pair-list__field[data-v-c9426b22] { flex: 1; min-width: 0;\n}\n.acu-rule-pair-list__sep[data-v-c9426b22] {\r\n  flex-shrink: 0; font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3);\n}\n.acu-rule-pair-list__empty[data-v-c9426b22] {\r\n  padding: 8px; text-align: center;\r\n  color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-rule-pair-list__add[data-v-c9426b22] {\r\n  align-self: flex-start;\n}\r\n", "src/presentation-v2/components/_lib/AcuRulePairList.vue#style-0-c9426b22");
     var AcuRulePairList_vue_vue_type_style_index_0_scoped_c9426b22_lang = null;
 
-    const _hoisted_1$L = {
+    const _hoisted_1$K = {
 	key: 0,
 	class: "acu-rule-pair-list__empty"
     };
-    const _hoisted_2$J = {
+    const _hoisted_2$I = {
 	key: 1,
 	class: "acu-rule-pair-list acu-rule-pair-list--standalone"
     };
-    const _hoisted_3$D = { class: "acu-rule-pair-list__body" };
-    const _hoisted_4$x = {
+    const _hoisted_3$C = { class: "acu-rule-pair-list__body" };
+    const _hoisted_4$w = {
 	key: 0,
 	class: "acu-rule-pair-list__empty"
     };
-    function _sfc_render$M(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$L(_ctx, _cache, $props, $setup, $data, $options) {
 	return $props.label ? (openBlock(), createBlock($setup["AcuDisclosureGroup"], {
 		key: 0,
 		"root-class": "acu-rule-pair-list",
@@ -196869,7 +198103,7 @@ ${rejectionText}` : delegationFeedback,
 				128
 				/* KEYED_FRAGMENT */
 			)),
-			!$props.modelValue.length ? (openBlock(), createElementBlock("div", _hoisted_1$L, " 暂无规则，点击下方按钮添加。 ")) : createCommentVNode("v-if", true),
+			!$props.modelValue.length ? (openBlock(), createElementBlock("div", _hoisted_1$K, " 暂无规则，点击下方按钮添加。 ")) : createCommentVNode("v-if", true),
 			createVNode($setup["AcuButton"], {
 				size: "sm",
 				class: "acu-rule-pair-list__add",
@@ -196894,7 +198128,7 @@ ${rejectionText}` : delegationFeedback,
 		"label",
 		"meta",
 		"expanded"
-	])) : (openBlock(), createElementBlock("div", _hoisted_2$J, [createBaseVNode("div", _hoisted_3$D, [
+	])) : (openBlock(), createElementBlock("div", _hoisted_2$I, [createBaseVNode("div", _hoisted_3$C, [
 		(openBlock(true), createElementBlock(
 			Fragment,
 			null,
@@ -196944,7 +198178,7 @@ ${rejectionText}` : delegationFeedback,
 			128
 			/* KEYED_FRAGMENT */
 		)),
-		!$props.modelValue.length ? (openBlock(), createElementBlock("div", _hoisted_4$x, " 暂无规则，点击下方按钮添加。 ")) : createCommentVNode("v-if", true),
+		!$props.modelValue.length ? (openBlock(), createElementBlock("div", _hoisted_4$w, " 暂无规则，点击下方按钮添加。 ")) : createCommentVNode("v-if", true),
 		createVNode($setup["AcuButton"], {
 			size: "sm",
 			class: "acu-rule-pair-list__add",
@@ -196965,9 +198199,9 @@ ${rejectionText}` : delegationFeedback,
 		})
 	])]));
     }
-    var AcuRulePairList = /*#__PURE__*/ _export_sfc(_sfc_main$M, [["render", _sfc_render$M], ["__scopeId", "data-v-c9426b22"]]);
+    var AcuRulePairList = /*#__PURE__*/ _export_sfc(_sfc_main$L, [["render", _sfc_render$L], ["__scopeId", "data-v-c9426b22"]]);
 
-    var _sfc_main$L = /*@__PURE__*/ defineComponent({
+    var _sfc_main$K = /*@__PURE__*/ defineComponent({
         __name: 'PlotMatchReplaceFields',
         props: {
             rateMain: {},
@@ -196992,10 +198226,10 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-plot-match-fields[data-v-8649d835] {\r\n  margin: 0;\r\n  padding: 0 0 14px;\r\n  border: 0;\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\r\n  min-width: 0;\n}\n.acu-v2-plot-match-fields legend[data-v-8649d835] {\r\n  padding: 0;\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-section-title, 12px);\r\n  font-weight: 600;\n}\n.acu-v2-plot-match-fields__grid[data-v-8649d835] {\r\n  display: grid;\r\n  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));\r\n  gap: 10px;\n}\r\n", "src/presentation-v2/components/PlotMatchReplaceFields.vue#style-0-8649d835");
     var PlotMatchReplaceFields_vue_vue_type_style_index_0_scoped_8649d835_lang = null;
 
-    const _hoisted_1$K = { class: "acu-v2-plot-match-fields" };
-    const _hoisted_2$I = { class: "acu-v2-plot-match-fields__grid" };
-    function _sfc_render$L(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("fieldset", _hoisted_1$K, [
+    const _hoisted_1$J = { class: "acu-v2-plot-match-fields" };
+    const _hoisted_2$H = { class: "acu-v2-plot-match-fields__grid" };
+    function _sfc_render$K(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("fieldset", _hoisted_1$J, [
 		_cache[6] || (_cache[6] = createBaseVNode(
 			"legend",
 			null,
@@ -197014,7 +198248,7 @@ ${rejectionText}` : delegationFeedback,
 			)])]),
 			_: 1
 		}),
-		createBaseVNode("div", _hoisted_2$I, [
+		createBaseVNode("div", _hoisted_2$H, [
 			createVNode($setup["AcuFormRow"], { label: "sulv1" }, {
 				default: withCtx(() => [createVNode($setup["AcuInput"], {
 					type: "number",
@@ -197064,9 +198298,9 @@ ${rejectionText}` : delegationFeedback,
 		])
 	]);
     }
-    var PlotMatchReplaceFields = /*#__PURE__*/ _export_sfc(_sfc_main$L, [["render", _sfc_render$L], ["__scopeId", "data-v-8649d835"]]);
+    var PlotMatchReplaceFields = /*#__PURE__*/ _export_sfc(_sfc_main$K, [["render", _sfc_render$K], ["__scopeId", "data-v-8649d835"]]);
 
-    var _sfc_main$K = /*@__PURE__*/ defineComponent({
+    var _sfc_main$J = /*@__PURE__*/ defineComponent({
         __name: 'PlotPromptSegments',
         props: {
             segments: {}
@@ -197080,7 +198314,7 @@ ${rejectionText}` : delegationFeedback,
         }
     });
 
-    function _sfc_render$K(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$J(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPromptSegments"], {
 		segments: $props.segments,
 		"show-slot": true,
@@ -197093,9 +198327,9 @@ ${rejectionText}` : delegationFeedback,
 		onUpdate: _cache[3] || (_cache[3] = (i, p) => _ctx.$emit("update", i, p))
 	}, null, 8, ["segments"]);
     }
-    var PlotPromptSegments = /*#__PURE__*/ _export_sfc(_sfc_main$K, [["render", _sfc_render$K]]);
+    var PlotPromptSegments = /*#__PURE__*/ _export_sfc(_sfc_main$J, [["render", _sfc_render$J]]);
 
-    var _sfc_main$J = /*@__PURE__*/ defineComponent({
+    var _sfc_main$I = /*@__PURE__*/ defineComponent({
         __name: 'PlotTaskEditor',
         props: {
             task: {},
@@ -197160,13 +198394,13 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-plot-task-editor[data-v-7b343fef] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\r\n  min-width: 0;\n}\n.acu-v2-plot-task-editor__section[data-v-7b343fef] {\r\n  margin: 0;\r\n  padding: 0 0 14px;\r\n  border: 0;\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\r\n  min-width: 0;\n}\n.acu-v2-plot-task-editor__section[data-v-7b343fef]:last-of-type {\r\n  padding-bottom: 0;\r\n  border-bottom: 0;\n}\n.acu-v2-plot-task-editor__section legend[data-v-7b343fef] {\r\n  padding: 0;\r\n  font-size: var(--acu-font-size-section-title, 12px);\r\n  font-weight: 600;\r\n  color: var(--acu-text-2);\n}\n.acu-v2-plot-task-editor__grid[data-v-7b343fef] {\r\n  display: grid;\r\n  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));\r\n  gap: 10px;\n}\n.acu-v2-plot-task-editor__grid--wide[data-v-7b343fef] {\r\n  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));\n}\n.acu-v2-plot-task-editor__toggles[data-v-7b343fef] {\r\n  display: grid;\r\n  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));\r\n  gap: 8px 12px;\r\n  padding: 8px 0;\r\n  min-width: 0;\n}\n.acu-v2-plot-task-editor__toggles[data-v-7b343fef] .acu-toggle {\r\n  align-items: flex-start;\r\n  width: 100%;\r\n  min-width: 0;\r\n  min-height: var(--acu-control-height-sm, 26px);\n}\n.acu-v2-plot-task-editor__toggles[data-v-7b343fef] .acu-toggle__label {\r\n  min-width: 0;\r\n  white-space: normal;\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  overflow-wrap: anywhere;\n}\n.acu-v2-plot-task-editor__hint[data-v-7b343fef] {\r\n  margin: 0;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-text-3);\r\n  line-height: var(--acu-line-height-caption, 1.5);\n}\n.acu-v2-plot-task-editor__empty[data-v-7b343fef] {\r\n  padding: 18px 0;\r\n  border: 0;\r\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  text-align: center;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\r\n", "src/presentation-v2/components/PlotTaskEditor.vue#style-0-7b343fef");
     var PlotTaskEditor_vue_vue_type_style_index_0_scoped_7b343fef_lang = null;
 
-    const _hoisted_1$J = {
+    const _hoisted_1$I = {
 	key: 0,
 	class: "acu-v2-plot-task-editor"
     };
-    const _hoisted_2$H = { class: "acu-v2-plot-task-editor__section" };
-    const _hoisted_3$C = { class: "acu-v2-plot-task-editor__grid" };
-    const _hoisted_4$w = { class: "acu-v2-plot-task-editor__grid" };
+    const _hoisted_2$G = { class: "acu-v2-plot-task-editor__section" };
+    const _hoisted_3$B = { class: "acu-v2-plot-task-editor__grid" };
+    const _hoisted_4$v = { class: "acu-v2-plot-task-editor__grid" };
     const _hoisted_5$r = { class: "acu-v2-plot-task-editor__section" };
     const _hoisted_6$p = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
     const _hoisted_7$n = { class: "acu-v2-plot-task-editor__toggles" };
@@ -197178,9 +198412,9 @@ ${rejectionText}` : delegationFeedback,
 	key: 1,
 	class: "acu-v2-plot-task-editor__empty"
     };
-    function _sfc_render$J(_ctx, _cache, $props, $setup, $data, $options) {
-	return $props.task ? (openBlock(), createElementBlock("div", _hoisted_1$J, [
-		createBaseVNode("fieldset", _hoisted_2$H, [
+    function _sfc_render$I(_ctx, _cache, $props, $setup, $data, $options) {
+	return $props.task ? (openBlock(), createElementBlock("div", _hoisted_1$I, [
+		createBaseVNode("fieldset", _hoisted_2$G, [
 			_cache[23] || (_cache[23] = createBaseVNode(
 				"legend",
 				null,
@@ -197188,7 +198422,7 @@ ${rejectionText}` : delegationFeedback,
 				-1
 				/* CACHED */
 			)),
-			createBaseVNode("div", _hoisted_3$C, [
+			createBaseVNode("div", _hoisted_3$B, [
 				createVNode($setup["AcuFormRow"], { label: "任务名称" }, {
 					default: withCtx(() => [createVNode($setup["AcuInput"], {
 						type: "text",
@@ -197230,7 +198464,7 @@ ${rejectionText}` : delegationFeedback,
 					_: 1
 				})
 			]),
-			createBaseVNode("div", _hoisted_4$w, [
+			createBaseVNode("div", _hoisted_4$v, [
 				createVNode($setup["AcuFormRow"], {
 					label: "标签摘取",
 					hint: "例如 recall,supplement，仅作用于本任务"
@@ -197419,9 +198653,9 @@ ${rejectionText}` : delegationFeedback,
 		}, null, 8, ["segments"])])
 	])) : (openBlock(), createElementBlock("div", _hoisted_12$f, " 请在上方选择一个任务进行编辑。 "));
     }
-    var PlotTaskEditor = /*#__PURE__*/ _export_sfc(_sfc_main$J, [["render", _sfc_render$J], ["__scopeId", "data-v-7b343fef"]]);
+    var PlotTaskEditor = /*#__PURE__*/ _export_sfc(_sfc_main$I, [["render", _sfc_render$I], ["__scopeId", "data-v-7b343fef"]]);
 
-    var _sfc_main$I = /*@__PURE__*/ defineComponent({
+    var _sfc_main$H = /*@__PURE__*/ defineComponent({
         __name: 'PlotTaskList',
         props: {
             tasks: {},
@@ -197447,10 +198681,10 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-plot-tasks[data-v-ee3c6f4c] {\r\n  margin: 0; padding: 0 0 14px;\r\n  border: 0; border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  display: flex; flex-direction: column; gap: 10px;\r\n  min-width: 0;\n}\n.acu-v2-plot-tasks > legend[data-v-ee3c6f4c] {\r\n  padding: 0;\r\n  font-size: var(--acu-font-size-section-title, 12px); font-weight: 600; color: var(--acu-text-2);\r\n  display: flex; align-items: center; gap: 10px;\n}\n.acu-v2-plot-tasks__toolbar[data-v-ee3c6f4c] { display: inline-flex; gap: 4px;\n}\n.acu-v2-plot-tasks__cards[data-v-ee3c6f4c] {\r\n  display: flex; gap: 8px;\r\n  min-width: 0;\r\n  overflow-x: auto;\n}\n.acu-v2-plot-tasks__card[data-v-ee3c6f4c] {\r\n  flex: 0 0 140px;\r\n  min-height: 100px;\r\n  display: flex; flex-direction: column; gap: 6px;\r\n  padding: 10px 12px;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-2);\r\n  border: 0;\r\n  color: inherit;\r\n  cursor: pointer;\r\n  font: inherit;\r\n  text-align: left;\r\n  transition: box-shadow 0.15s ease, color 0.15s ease, opacity 0.15s ease;\n}\n.acu-v2-plot-tasks__card[data-v-ee3c6f4c]:hover,\r\n.acu-v2-plot-tasks__card[data-v-ee3c6f4c]:focus-visible {\r\n  box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\r\n  outline: none;\n}\n.acu-v2-plot-tasks__card--active[data-v-ee3c6f4c] {\r\n  background: var(--acu-accent);\r\n  color: var(--acu-on-accent);\n}\n.acu-v2-plot-tasks__card--disabled[data-v-ee3c6f4c] {\r\n  opacity: 0.5;\n}\n.acu-v2-plot-tasks__card--disabled.acu-v2-plot-tasks__card--active[data-v-ee3c6f4c] {\r\n  opacity: 0.7;\n}\n.acu-v2-plot-tasks__card--disabled .acu-v2-plot-tasks__name[data-v-ee3c6f4c] {\r\n  text-decoration: line-through;\n}\n.acu-v2-plot-tasks__name[data-v-ee3c6f4c] {\r\n  font-size: var(--acu-font-size-list-title, 13px); color: var(--acu-text-1); font-weight: 500;\r\n  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\n}\n.acu-v2-plot-tasks__card--active .acu-v2-plot-tasks__name[data-v-ee3c6f4c],\r\n.acu-v2-plot-tasks__card--active .acu-v2-plot-tasks__stage[data-v-ee3c6f4c],\r\n.acu-v2-plot-tasks__card--active .acu-v2-plot-tasks__seg-count[data-v-ee3c6f4c],\r\n.acu-v2-plot-tasks__card--active .acu-v2-plot-tasks__disabled-label[data-v-ee3c6f4c] {\r\n  color: var(--acu-on-accent);\n}\n.acu-v2-plot-tasks__stage[data-v-ee3c6f4c] {\r\n  font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3);\r\n  font-family: var(--acu-font-mono);\n}\n.acu-v2-plot-tasks__seg-count[data-v-ee3c6f4c] {\r\n  font-size: var(--acu-font-size-micro, 10px); color: var(--acu-text-3);\r\n  margin-top: auto;\n}\n.acu-v2-plot-tasks__disabled-label[data-v-ee3c6f4c] {\r\n  font-size: var(--acu-font-size-micro, 10px); color: var(--acu-warning);\r\n  font-weight: 500;\n}\n.acu-v2-plot-tasks__empty[data-v-ee3c6f4c] {\r\n  padding: 16px 12px; text-align: center;\r\n  color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\r\n  flex: 1;\n}\r\n", "src/presentation-v2/components/PlotTaskList.vue#style-0-ee3c6f4c");
     var PlotTaskList_vue_vue_type_style_index_0_scoped_ee3c6f4c_lang = null;
 
-    const _hoisted_1$I = { class: "acu-v2-plot-tasks" };
-    const _hoisted_2$G = { class: "acu-v2-plot-tasks__toolbar" };
-    const _hoisted_3$B = { class: "acu-v2-plot-tasks__cards" };
-    const _hoisted_4$v = ["onClick"];
+    const _hoisted_1$H = { class: "acu-v2-plot-tasks" };
+    const _hoisted_2$F = { class: "acu-v2-plot-tasks__toolbar" };
+    const _hoisted_3$A = { class: "acu-v2-plot-tasks__cards" };
+    const _hoisted_4$u = ["onClick"];
     const _hoisted_5$q = { class: "acu-v2-plot-tasks__name" };
     const _hoisted_6$o = {
 	class: "acu-v2-plot-tasks__stage",
@@ -197465,14 +198699,14 @@ ${rejectionText}` : delegationFeedback,
 	key: 0,
 	class: "acu-v2-plot-tasks__empty"
     };
-    function _sfc_render$I(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("fieldset", _hoisted_1$I, [createBaseVNode("legend", null, [_cache[4] || (_cache[4] = createBaseVNode(
+    function _sfc_render$H(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("fieldset", _hoisted_1$H, [createBaseVNode("legend", null, [_cache[4] || (_cache[4] = createBaseVNode(
 		"span",
 		null,
 		"剧情任务列表",
 		-1
 		/* CACHED */
-	)), createBaseVNode("span", _hoisted_2$G, [
+	)), createBaseVNode("span", _hoisted_2$F, [
 		createVNode($setup["AcuIconButton"], {
 			icon: "fa-solid fa-arrow-left",
 			size: "sm",
@@ -197502,7 +198736,7 @@ ${rejectionText}` : delegationFeedback,
 			title: "新增任务",
 			onClick: _cache[3] || (_cache[3] = ($event) => _ctx.$emit("add"))
 		})
-	])]), createBaseVNode("div", _hoisted_3$B, [(openBlock(true), createElementBlock(
+	])]), createBaseVNode("div", _hoisted_3$A, [(openBlock(true), createElementBlock(
 		Fragment,
 		null,
 		renderList($props.tasks, (task) => {
@@ -197537,15 +198771,15 @@ ${rejectionText}` : delegationFeedback,
 					/* TEXT */
 				),
 				!task.enabled ? (openBlock(), createElementBlock("span", _hoisted_8$m, "已禁用")) : createCommentVNode("v-if", true)
-			], 10, _hoisted_4$v);
+			], 10, _hoisted_4$u);
 		}),
 		128
 		/* KEYED_FRAGMENT */
 	)), !$props.tasks.length ? (openBlock(), createElementBlock("div", _hoisted_9$i, "暂无任务，点击右上 + 新增。")) : createCommentVNode("v-if", true)])]);
     }
-    var PlotTaskList = /*#__PURE__*/ _export_sfc(_sfc_main$I, [["render", _sfc_render$I], ["__scopeId", "data-v-ee3c6f4c"]]);
+    var PlotTaskList = /*#__PURE__*/ _export_sfc(_sfc_main$H, [["render", _sfc_render$H], ["__scopeId", "data-v-ee3c6f4c"]]);
 
-    var _sfc_main$H = /*@__PURE__*/ defineComponent({
+    var _sfc_main$G = /*@__PURE__*/ defineComponent({
         __name: 'PlotPresetDrawer',
         props: {
             isOpen: { type: Boolean },
@@ -197580,18 +198814,18 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-plot-drawer__create-btn[data-v-47605d60] {\r\n  width: 100%;\n}\n.acu-v2-plot-drawer__empty[data-v-47605d60] {\r\n  margin-top: 20px;\n}\n.acu-v2-plot-drawer__actions[data-v-47605d60] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  flex-wrap: wrap;\r\n  padding-top: 12px;\r\n  margin-top: 12px;\n}\r\n\r\n/* manage list */\n.acu-v2-manage-list[data-v-47605d60] {\r\n  list-style: none;\r\n  margin: 0;\r\n  padding: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-v2-manage-item[data-v-47605d60] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 10px;\r\n  padding: 10px 12px;\r\n  border: 0;\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\n}\n.acu-v2-manage-item[data-v-47605d60]:last-child {\r\n  border-bottom: 0;\n}\n.acu-v2-manage-item__info[data-v-47605d60] {\r\n  flex: 1;\r\n  min-width: 0;\n}\n.acu-v2-manage-item__name[data-v-47605d60] {\r\n  display: block;\r\n  font-size: var(--acu-font-size-list-title, 13px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  font-weight: 500;\r\n  color: var(--acu-text-1);\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-v2-manage-item__meta[data-v-47605d60] {\r\n  display: block;\r\n  margin-top: 2px;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: var(--acu-line-height-caption, 1.5);\r\n  color: var(--acu-text-3);\n}\n.acu-v2-manage-item__actions[data-v-47605d60] {\r\n  display: flex;\r\n  gap: 4px;\n}\r\n\r\n/* form */\n.acu-v2-form[data-v-47605d60] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 14px;\n}\n.acu-v2-form__section[data-v-47605d60] {\r\n  min-width: 0;\r\n  margin: 0;\r\n  padding: 0 0 14px;\r\n  border: 0;\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\n}\n.acu-v2-form__section[data-v-47605d60]:last-of-type {\r\n  padding-bottom: 0;\r\n  border-bottom: 0;\n}\n.acu-v2-form__section legend[data-v-47605d60] {\r\n  padding: 0;\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-section-title, 12px);\r\n  font-weight: 600;\n}\n.acu-v2-plot-drawer__rules[data-v-47605d60] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 12px;\r\n  min-width: 0;\n}\n.acu-v2-error[data-v-47605d60] {\r\n  padding: 8px 10px;\r\n  background: color-mix(in srgb, var(--acu-danger) 10%, transparent);\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\n}\r\n", "src/presentation-v2/components/PlotPresetDrawer.vue#style-0-47605d60");
     var PlotPresetDrawer_vue_vue_type_style_index_0_scoped_47605d60_lang = null;
 
-    const _hoisted_1$H = {
+    const _hoisted_1$G = {
 	key: 0,
 	class: "acu-v2-manage-list"
     };
-    const _hoisted_2$F = { class: "acu-v2-manage-item__info" };
-    const _hoisted_3$A = { class: "acu-v2-manage-item__actions" };
-    const _hoisted_4$u = { class: "acu-v2-form__section" };
+    const _hoisted_2$E = { class: "acu-v2-manage-item__info" };
+    const _hoisted_3$z = { class: "acu-v2-manage-item__actions" };
+    const _hoisted_4$t = { class: "acu-v2-form__section" };
     const _hoisted_5$p = { class: "acu-v2-form__section" };
     const _hoisted_6$n = { class: "acu-v2-plot-drawer__rules" };
     const _hoisted_7$l = { class: "acu-v2-form__section" };
     const _hoisted_8$l = { class: "acu-v2-plot-drawer__actions" };
-    function _sfc_render$H(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$G(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
 		"is-open": $props.isOpen,
 		title: $props.title,
@@ -197621,14 +198855,14 @@ ${rejectionText}` : delegationFeedback,
 					/* CACHED */
 				)])]),
 				_: 1
-			}), $props.presetMeta.length ? (openBlock(), createElementBlock("ul", _hoisted_1$H, [(openBlock(true), createElementBlock(
+			}), $props.presetMeta.length ? (openBlock(), createElementBlock("ul", _hoisted_1$G, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($props.presetMeta, (meta) => {
 					return openBlock(), createElementBlock("li", {
 						key: meta.name,
 						class: "acu-v2-manage-item"
-					}, [createBaseVNode("div", _hoisted_2$F, [createVNode(
+					}, [createBaseVNode("div", _hoisted_2$E, [createVNode(
 						$setup["AcuText"],
 						{
 							as: "span",
@@ -197668,7 +198902,7 @@ ${rejectionText}` : delegationFeedback,
 						},
 						1024
 						/* DYNAMIC_SLOTS */
-					)]), createBaseVNode("div", _hoisted_3$A, [
+					)]), createBaseVNode("div", _hoisted_3$z, [
 						createVNode($setup["AcuIconButton"], {
 							icon: meta.name === $props.defaultPresetName ? "fa-solid fa-star" : "fa-regular fa-star",
 							title: "设为全局默认",
@@ -197723,7 +198957,7 @@ ${rejectionText}` : delegationFeedback,
 					onSubmit: _cache[14] || (_cache[14] = withModifiers(($event) => _ctx.$emit("save"), ["prevent"]))
 				},
 				[
-					createBaseVNode("fieldset", _hoisted_4$u, [_cache[19] || (_cache[19] = createBaseVNode(
+					createBaseVNode("fieldset", _hoisted_4$t, [_cache[19] || (_cache[19] = createBaseVNode(
 						"legend",
 						null,
 						"基础信息",
@@ -197874,9 +199108,9 @@ ${rejectionText}` : delegationFeedback,
 		"before-close"
 	]);
     }
-    var PlotPresetDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$H, [["render", _sfc_render$H], ["__scopeId", "data-v-47605d60"]]);
+    var PlotPresetDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$G, [["render", _sfc_render$G], ["__scopeId", "data-v-47605d60"]]);
 
-    var _sfc_main$G = /*@__PURE__*/ defineComponent({
+    var _sfc_main$F = /*@__PURE__*/ defineComponent({
         __name: 'PlotPresetPanel',
         props: {
             showEdit: { type: Boolean, default: true },
@@ -197975,10 +199209,10 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-plot-preset-panel__status-line[data-v-021e572f] {\r\n  margin: 0 0 10px;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-plot-preset-panel__select-row[data-v-021e572f] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) repeat(3, max-content);\r\n  gap: 6px;\r\n  align-items: stretch;\r\n  margin-bottom: 12px;\r\n  min-width: 0;\n}\r\n", "src/presentation-v2/components/PlotPresetPanel.vue#style-0-021e572f");
     var PlotPresetPanel_vue_vue_type_style_index_0_scoped_021e572f_lang = null;
 
-    const _hoisted_1$G = { class: "acu-text__value" };
-    const _hoisted_2$E = { class: "acu-text__value" };
-    const _hoisted_3$z = { class: "acu-plot-preset-panel__select-row" };
-    function _sfc_render$G(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$F = { class: "acu-text__value" };
+    const _hoisted_2$D = { class: "acu-text__value" };
+    const _hoisted_3$y = { class: "acu-plot-preset-panel__select-row" };
+    function _sfc_render$F(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		title: $setup.plotCopy.panels.preset.title,
 		description: $setup.plotCopy.panels.preset.description
@@ -198007,7 +199241,7 @@ ${rejectionText}` : delegationFeedback,
 					)),
 					createBaseVNode(
 						"strong",
-						_hoisted_1$G,
+						_hoisted_1$F,
 						toDisplayString($setup.store.activePresetName || "默认预设"),
 						1
 						/* TEXT */
@@ -198021,7 +199255,7 @@ ${rejectionText}` : delegationFeedback,
 							/* CACHED */
 						)), createBaseVNode(
 							"strong",
-							_hoisted_2$E,
+							_hoisted_2$D,
 							toDisplayString($setup.store.defaultPresetName),
 							1
 							/* TEXT */
@@ -198056,7 +199290,7 @@ ${rejectionText}` : delegationFeedback,
 				]),
 				_: 1
 			}),
-			createBaseVNode("div", _hoisted_3$z, [
+			createBaseVNode("div", _hoisted_3$y, [
 				createVNode($setup["AcuPresetDropdown"], {
 					items: $setup.presetDropdownItems,
 					"model-value": $setup.store.activePresetName,
@@ -198167,7 +199401,7 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	}, 8, ["title", "description"]);
     }
-    var PlotPresetPanel = /*#__PURE__*/ _export_sfc(_sfc_main$G, [["render", _sfc_render$G], ["__scopeId", "data-v-021e572f"]]);
+    var PlotPresetPanel = /*#__PURE__*/ _export_sfc(_sfc_main$F, [["render", _sfc_render$F], ["__scopeId", "data-v-021e572f"]]);
 
     /**
      * form-fill-mode-store — 填表模式页的视图状态。
@@ -198261,7 +199495,7 @@ ${rejectionText}` : delegationFeedback,
         { value: 'crossfire', label: '交火模式' },
     ];
 
-    var _sfc_main$F = /*@__PURE__*/ defineComponent({
+    var _sfc_main$E = /*@__PURE__*/ defineComponent({
         __name: 'FillModePage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -198343,13 +199577,13 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-fill-mode-page[data-v-b2524720] {\n  min-height: 100%;\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: var(--acu-page-gap, 14px);\n}\n.acu-v2-fill-mode-page__intro[data-v-b2524720] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: var(--acu-space-075, 3px);\n  margin: 0 0 var(--acu-space-3, 12px);\n}\n.acu-v2-fill-mode-page__intro-summary[data-v-b2524720] {\n  margin: 0;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-fill-mode-page__intro-line[data-v-b2524720] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.55;\n}\n.acu-v2-fill-mode-page__intro-tag[data-v-b2524720] {\n  margin-right: var(--acu-space-150, 6px);\n  font-weight: 650;\n}\n.acu-v2-fill-mode-page__intro-tag--pro[data-v-b2524720] {\n  color: var(--acu-success);\n}\n.acu-v2-fill-mode-page__intro-tag--con[data-v-b2524720] {\n  color: var(--acu-warning);\n}\n", "src/presentation-v2/pages/FillModePage.vue#style-0-b2524720");
     var FillModePage_vue_vue_type_style_index_0_scoped_b2524720_lang = null;
 
-    const _hoisted_1$F = { class: "acu-v2-fill-mode-page" };
-    const _hoisted_2$D = ["data-acu-fill-mode-intro"];
-    const _hoisted_3$y = { class: "acu-v2-fill-mode-page__intro-summary" };
-    const _hoisted_4$t = { class: "acu-v2-fill-mode-page__intro-line" };
+    const _hoisted_1$E = { class: "acu-v2-fill-mode-page" };
+    const _hoisted_2$C = ["data-acu-fill-mode-intro"];
+    const _hoisted_3$x = { class: "acu-v2-fill-mode-page__intro-summary" };
+    const _hoisted_4$s = { class: "acu-v2-fill-mode-page__intro-line" };
     const _hoisted_5$o = { class: "acu-v2-fill-mode-page__intro-line" };
-    function _sfc_render$F(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$F, [
+    function _sfc_render$E(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$E, [
 		createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }, null, 8, ["items"]),
 		createVNode($setup["AcuPanelGrid"], {
 			class: "acu-v2-fill-mode-page__grid",
@@ -198391,12 +199625,12 @@ ${rejectionText}` : delegationFeedback,
 					}, [
 						createBaseVNode(
 							"p",
-							_hoisted_3$y,
+							_hoisted_3$x,
 							toDisplayString($setup.currentIntro.summary),
 							1
 							/* TEXT */
 						),
-						createBaseVNode("p", _hoisted_4$t, [_cache[4] || (_cache[4] = createBaseVNode(
+						createBaseVNode("p", _hoisted_4$s, [_cache[4] || (_cache[4] = createBaseVNode(
 							"span",
 							{ class: "acu-v2-fill-mode-page__intro-tag acu-v2-fill-mode-page__intro-tag--pro" },
 							"优点",
@@ -198418,7 +199652,7 @@ ${rejectionText}` : delegationFeedback,
 							1
 							/* TEXT */
 						)])
-					], 8, _hoisted_2$D),
+					], 8, _hoisted_2$C),
 					$setup.formFillMode.saveError ? (openBlock(), createBlock($setup["AcuMessage"], {
 						key: 0,
 						kind: "error"
@@ -198506,7 +199740,7 @@ ${rejectionText}` : delegationFeedback,
 		}, null, 8, ["mode"])) : createCommentVNode("v-if", true)
 	]);
     }
-    var FillModePage = /*#__PURE__*/ _export_sfc(_sfc_main$F, [["render", _sfc_render$F], ["__scopeId", "data-v-b2524720"]]);
+    var FillModePage = /*#__PURE__*/ _export_sfc(_sfc_main$E, [["render", _sfc_render$E], ["__scopeId", "data-v-b2524720"]]);
 
     /**
      * service/settings/dangling-reference-audit-service.ts
@@ -198805,7 +200039,7 @@ ${rejectionText}` : delegationFeedback,
         };
     }
 
-    var _sfc_main$E = /*@__PURE__*/ defineComponent({
+    var _sfc_main$D = /*@__PURE__*/ defineComponent({
         __name: 'DanglingReferenceBanner',
         props: {
             scope: {}
@@ -198824,13 +200058,13 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-dangling-reference-banner__intro[data-v-f872c8ba],\r\n.acu-dangling-reference-banner__error[data-v-f872c8ba] {\r\n  margin: 0 0 8px;\n}\n.acu-dangling-reference-banner__list[data-v-f872c8ba] {\r\n  margin: 0;\r\n  padding: 0;\r\n  list-style: none;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 8px;\n}\n.acu-dangling-reference-banner__item[data-v-f872c8ba] {\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: 12px;\n}\r\n", "src/presentation-v2/components/DanglingReferenceBanner.vue#style-0-f872c8ba");
     var DanglingReferenceBanner_vue_vue_type_style_index_0_scoped_f872c8ba_lang = null;
 
-    const _hoisted_1$E = {
+    const _hoisted_1$D = {
 	key: 0,
 	class: "acu-dangling-reference-banner__error"
     };
-    const _hoisted_2$C = { class: "acu-dangling-reference-banner__intro" };
-    const _hoisted_3$x = { class: "acu-dangling-reference-banner__list" };
-    function _sfc_render$E(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_2$B = { class: "acu-dangling-reference-banner__intro" };
+    const _hoisted_3$w = { class: "acu-dangling-reference-banner__list" };
+    function _sfc_render$D(_ctx, _cache, $props, $setup, $data, $options) {
 	return $setup.audit.items.value.length || $setup.audit.error.value ? (openBlock(), createBlock($setup["AcuMessage"], {
 		key: 0,
 		kind: "warning"
@@ -198838,19 +200072,19 @@ ${rejectionText}` : delegationFeedback,
 		default: withCtx(() => [
 			$setup.audit.error.value ? (openBlock(), createElementBlock(
 				"p",
-				_hoisted_1$E,
+				_hoisted_1$D,
 				toDisplayString($setup.audit.error.value),
 				1
 				/* TEXT */
 			)) : createCommentVNode("v-if", true),
 			createBaseVNode(
 				"p",
-				_hoisted_2$C,
+				_hoisted_2$B,
 				" 下列引用指向已不存在的" + toDisplayString($setup.kindLabel) + "，不会自动改写已保存的设置。可一键清除后重新选择。 ",
 				1
 				/* TEXT */
 			),
-			createBaseVNode("ul", _hoisted_3$x, [(openBlock(true), createElementBlock(
+			createBaseVNode("ul", _hoisted_3$w, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.audit.items.value, (item) => {
@@ -198883,9 +200117,9 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	})) : createCommentVNode("v-if", true);
     }
-    var DanglingReferenceBanner = /*#__PURE__*/ _export_sfc(_sfc_main$E, [["render", _sfc_render$E], ["__scopeId", "data-v-f872c8ba"]]);
+    var DanglingReferenceBanner = /*#__PURE__*/ _export_sfc(_sfc_main$D, [["render", _sfc_render$D], ["__scopeId", "data-v-f872c8ba"]]);
 
-    var _sfc_main$D = /*@__PURE__*/ defineComponent({
+    var _sfc_main$C = /*@__PURE__*/ defineComponent({
         __name: 'FormFillPromptDrawer',
         props: {
             isOpen: { type: Boolean },
@@ -198922,9 +200156,9 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-form-fill-prompt-drawer__toolbar[data-v-2d4e260e] {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\n}\n.acu-form-fill-prompt-drawer__actions[data-v-2d4e260e] {\r\n  position: sticky;\r\n  bottom: -16px;\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  padding: 12px 0 0;\r\n  background: var(--acu-bg-1);\n}\r\n", "src/presentation-v2/components/FormFillPromptDrawer.vue#style-0-2d4e260e");
     var FormFillPromptDrawer_vue_vue_type_style_index_0_scoped_2d4e260e_lang = null;
 
-    const _hoisted_1$D = { class: "acu-form-fill-prompt-drawer__toolbar" };
-    const _hoisted_2$B = { class: "acu-form-fill-prompt-drawer__actions" };
-    function _sfc_render$D(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$C = { class: "acu-form-fill-prompt-drawer__toolbar" };
+    const _hoisted_2$A = { class: "acu-form-fill-prompt-drawer__actions" };
+    function _sfc_render$C(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
 		"is-open": $props.isOpen,
 		title: "编辑填表提示词",
@@ -198944,7 +200178,7 @@ ${rejectionText}` : delegationFeedback,
 				)]),
 				_: 1
 			}, 8, ["kind"])) : createCommentVNode("v-if", true),
-			createBaseVNode("div", _hoisted_1$D, [
+			createBaseVNode("div", _hoisted_1$C, [
 				createVNode($setup["AcuFileButton"], {
 					size: "sm",
 					accept: "application/json,.json",
@@ -198999,7 +200233,7 @@ ${rejectionText}` : delegationFeedback,
 				onDelete: _cache[4] || (_cache[4] = ($event) => _ctx.$emit("delete", $event)),
 				onUpdate: _cache[5] || (_cache[5] = (index, patch) => _ctx.$emit("update", index, patch))
 			}, null, 8, ["segments"]),
-			createBaseVNode("footer", _hoisted_2$B, [createVNode($setup["AcuButton"], { onClick: $setup.requestClose }, {
+			createBaseVNode("footer", _hoisted_2$A, [createVNode($setup["AcuButton"], { onClick: $setup.requestClose }, {
 				default: withCtx(() => [..._cache[11] || (_cache[11] = [createTextVNode(
 					"关闭",
 					-1
@@ -199022,7 +200256,7 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	}, 8, ["is-open"]);
     }
-    var FormFillPromptDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$D, [["render", _sfc_render$D], ["__scopeId", "data-v-2d4e260e"]]);
+    var FormFillPromptDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$C, [["render", _sfc_render$C], ["__scopeId", "data-v-2d4e260e"]]);
 
     const NUMBER_FIELD_META = [
         {
@@ -199534,7 +200768,7 @@ ${rejectionText}` : delegationFeedback,
         },
     };
 
-    var _sfc_main$C = /*@__PURE__*/ defineComponent({
+    var _sfc_main$B = /*@__PURE__*/ defineComponent({
         __name: 'FormFillUpdateSettingsPanel',
         props: {
             showAdvanced: { type: Boolean, default: true }
@@ -199619,15 +200853,15 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-form-fill-update-settings-panel__settings-groups[data-v-eaa556c7] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 14px;\n}\n.acu-form-fill-update-settings-panel__setting-group[data-v-eaa556c7] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\n}\n.acu-form-fill-update-settings-panel__setting-group\r\n  + .acu-form-fill-update-settings-panel__setting-group[data-v-eaa556c7] {\r\n  padding-top: 14px;\r\n  border-top: 1px solid var(--acu-border-2);\n}\n.acu-form-fill-update-settings-panel__advanced[data-v-eaa556c7] {\r\n  border: 0;\r\n  background: transparent;\n}\n.acu-form-fill-update-settings-panel__number-grid[data-v-eaa556c7] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 10px;\n}\n@media (max-width: 560px) {\n.acu-form-fill-update-settings-panel__number-grid[data-v-eaa556c7] {\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/components/FormFillUpdateSettingsPanel.vue#style-0-eaa556c7");
     var FormFillUpdateSettingsPanel_vue_vue_type_style_index_0_scoped_eaa556c7_lang = null;
 
-    const _hoisted_1$C = { class: "acu-form-fill-update-settings-panel__settings-groups" };
-    const _hoisted_2$A = { class: "acu-form-fill-update-settings-panel__setting-group" };
-    const _hoisted_3$w = { class: "acu-form-fill-update-settings-panel__number-grid" };
-    function _sfc_render$C(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$B = { class: "acu-form-fill-update-settings-panel__settings-groups" };
+    const _hoisted_2$z = { class: "acu-form-fill-update-settings-panel__setting-group" };
+    const _hoisted_3$v = { class: "acu-form-fill-update-settings-panel__number-grid" };
+    function _sfc_render$B(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		title: $setup.formFillCopy.panels.update.title,
 		description: $setup.formFillCopy.panels.update.description
 	}, {
-		default: withCtx(() => [createBaseVNode("div", _hoisted_1$C, [createBaseVNode("section", _hoisted_2$A, [
+		default: withCtx(() => [createBaseVNode("div", _hoisted_1$B, [createBaseVNode("section", _hoisted_2$z, [
 			createVNode($setup["AcuFormRow"], {
 				label: "填表 API 预设",
 				hint: "默认使用当前 API，选择后仅影响填表功能。"
@@ -199676,7 +200910,7 @@ ${rejectionText}` : delegationFeedback,
 			"body-mode": "if",
 			onToggle: _cache[1] || (_cache[1] = ($event) => $setup.advancedExpanded = !$setup.advancedExpanded)
 		}, {
-			default: withCtx(() => [createBaseVNode("div", _hoisted_3$w, [(openBlock(true), createElementBlock(
+			default: withCtx(() => [createBaseVNode("div", _hoisted_3$v, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($setup.advancedFields, (field) => {
@@ -199708,9 +200942,9 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	}, 8, ["title", "description"]);
     }
-    var FormFillUpdateSettingsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$C, [["render", _sfc_render$C], ["__scopeId", "data-v-eaa556c7"]]);
+    var FormFillUpdateSettingsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$B, [["render", _sfc_render$B], ["__scopeId", "data-v-eaa556c7"]]);
 
-    var _sfc_main$B = /*@__PURE__*/ defineComponent({
+    var _sfc_main$A = /*@__PURE__*/ defineComponent({
         __name: 'TableSelector',
         props: {
             sheetKeys: {},
@@ -199748,29 +200982,29 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-table-selector[data-v-d188b9fa] { display: flex; flex-direction: column; gap: 8px; min-width: 0;\n}\n.acu-v2-table-selector__empty[data-v-d188b9fa] {\r\n  padding: 10px 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\r\n  border: 0;\r\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\n}\n.acu-v2-table-selector__actions[data-v-d188b9fa] { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;\n}\n.acu-v2-table-selector__count[data-v-d188b9fa] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-table-selector__grid[data-v-d188b9fa] {\r\n  display: grid; gap: 6px;\r\n  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));\r\n  max-height: 240px; overflow: auto;\r\n  padding: 0;\r\n  border: 0; border-radius: 0;\r\n  background: transparent;\n}\n.acu-v2-table-selector__item[data-v-d188b9fa] {\r\n  padding: 8px 10px;\r\n  border: 0; border-radius: var(--acu-radius-sm);\r\n  background: transparent; min-width: 0;\n}\r\n", "src/presentation-v2/components/TableSelector.vue#style-0-d188b9fa");
     var TableSelector_vue_vue_type_style_index_0_scoped_d188b9fa_lang = null;
 
-    const _hoisted_1$B = { class: "acu-v2-table-selector" };
-    const _hoisted_2$z = {
+    const _hoisted_1$A = { class: "acu-v2-table-selector" };
+    const _hoisted_2$y = {
 	key: 0,
 	class: "acu-v2-table-selector__empty"
     };
-    const _hoisted_3$v = { class: "acu-v2-table-selector__actions" };
-    const _hoisted_4$s = { class: "acu-v2-table-selector__count" };
+    const _hoisted_3$u = { class: "acu-v2-table-selector__actions" };
+    const _hoisted_4$r = { class: "acu-v2-table-selector__count" };
     const _hoisted_5$n = {
 	key: 0,
 	class: "acu-v2-table-selector__readonly-hint"
     };
     const _hoisted_6$m = { class: "acu-v2-table-selector__grid" };
-    function _sfc_render$B(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$B, [!$props.sheetKeys.length ? (openBlock(), createElementBlock(
+    function _sfc_render$A(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$A, [!$props.sheetKeys.length ? (openBlock(), createElementBlock(
 		"div",
-		_hoisted_2$z,
+		_hoisted_2$y,
 		toDisplayString($setup.emptyText),
 		1
 		/* TEXT */
 	)) : (openBlock(), createElementBlock(
 		Fragment,
 		{ key: 1 },
-		[createBaseVNode("div", _hoisted_3$v, [
+		[createBaseVNode("div", _hoisted_3$u, [
 			createVNode($setup["AcuButton"], {
 				size: "sm",
 				disabled: $props.disabled,
@@ -199797,7 +201031,7 @@ ${rejectionText}` : delegationFeedback,
 			}, 8, ["disabled"]),
 			createBaseVNode(
 				"span",
-				_hoisted_4$s,
+				_hoisted_4$r,
 				"已选 " + toDisplayString($props.selectedKeys.length) + " / " + toDisplayString($props.sheetKeys.length),
 				1
 				/* TEXT */
@@ -199829,9 +201063,9 @@ ${rejectionText}` : delegationFeedback,
 		/* STABLE_FRAGMENT */
 	))]);
     }
-    var TableSelector = /*#__PURE__*/ _export_sfc(_sfc_main$B, [["render", _sfc_render$B], ["__scopeId", "data-v-d188b9fa"]]);
+    var TableSelector = /*#__PURE__*/ _export_sfc(_sfc_main$A, [["render", _sfc_render$A], ["__scopeId", "data-v-d188b9fa"]]);
 
-    var _sfc_main$A = /*@__PURE__*/ defineComponent({
+    var _sfc_main$z = /*@__PURE__*/ defineComponent({
         __name: 'TablePresetDrawer',
         props: {
             isOpen: { type: Boolean },
@@ -199853,14 +201087,14 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-table-drawer__top-actions[data-v-c3883113] {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\n}\n.acu-v2-manage-list[data-v-c3883113] {\r\n  list-style: none;\r\n  margin: 0;\r\n  padding: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-v2-manage-item[data-v-c3883113] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 10px;\r\n  padding: 10px 12px;\r\n  border: 0;\r\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\n}\n.acu-v2-manage-item[data-v-c3883113]:last-child {\r\n  border-bottom: 0;\n}\n.acu-v2-manage-item__info[data-v-c3883113] {\r\n  flex: 1;\r\n  min-width: 0;\n}\n.acu-v2-manage-item__name[data-v-c3883113] {\r\n  display: block;\r\n  font-size: var(--acu-font-size-list-title, 13px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  font-weight: 500;\r\n  color: var(--acu-text-1);\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-v2-manage-item__meta[data-v-c3883113] {\r\n  display: block;\r\n  margin-top: 2px;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: var(--acu-line-height-caption, 1.5);\r\n  color: var(--acu-text-3);\n}\n.acu-v2-manage-item__actions[data-v-c3883113] {\r\n  display: flex;\r\n  gap: 4px;\n}\n.acu-v2-table-drawer__empty[data-v-c3883113] {\r\n  margin: 12px 0;\n}\r\n\r\n", "src/presentation-v2/components/TablePresetDrawer.vue#style-0-c3883113");
     var TablePresetDrawer_vue_vue_type_style_index_0_scoped_c3883113_lang = null;
 
-    const _hoisted_1$A = { class: "acu-v2-table-drawer__top-actions" };
-    const _hoisted_2$y = {
+    const _hoisted_1$z = { class: "acu-v2-table-drawer__top-actions" };
+    const _hoisted_2$x = {
 	key: 1,
 	class: "acu-v2-manage-list"
     };
-    const _hoisted_3$u = { class: "acu-v2-manage-item__info" };
-    const _hoisted_4$r = { class: "acu-v2-manage-item__actions" };
-    function _sfc_render$A(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_3$t = { class: "acu-v2-manage-item__info" };
+    const _hoisted_4$q = { class: "acu-v2-manage-item__actions" };
+    function _sfc_render$z(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
 		"is-open": $props.isOpen,
 		title: $props.title,
@@ -199879,7 +201113,7 @@ ${rejectionText}` : delegationFeedback,
 				)]),
 				_: 1
 			}, 8, ["kind"])) : createCommentVNode("v-if", true),
-			createBaseVNode("div", _hoisted_1$A, [createVNode($setup["AcuButton"], {
+			createBaseVNode("div", _hoisted_1$z, [createVNode($setup["AcuButton"], {
 				variant: "primary",
 				disabled: $props.busy,
 				onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("create-blank"))
@@ -199897,14 +201131,14 @@ ${rejectionText}` : delegationFeedback,
 				)])]),
 				_: 1
 			}, 8, ["disabled"])]),
-			$props.presetMeta.length ? (openBlock(), createElementBlock("ul", _hoisted_2$y, [(openBlock(true), createElementBlock(
+			$props.presetMeta.length ? (openBlock(), createElementBlock("ul", _hoisted_2$x, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($props.presetMeta, (meta) => {
 					return openBlock(), createElementBlock("li", {
 						key: meta.name,
 						class: "acu-v2-manage-item"
-					}, [createBaseVNode("div", _hoisted_3$u, [createVNode(
+					}, [createBaseVNode("div", _hoisted_3$t, [createVNode(
 						$setup["AcuText"],
 						{
 							as: "span",
@@ -199956,7 +201190,7 @@ ${rejectionText}` : delegationFeedback,
 						},
 						1024
 						/* DYNAMIC_SLOTS */
-					)]), createBaseVNode("div", _hoisted_4$r, [meta.kind === "runtime" ? (openBlock(), createElementBlock(
+					)]), createBaseVNode("div", _hoisted_4$q, [meta.kind === "runtime" ? (openBlock(), createElementBlock(
 						Fragment,
 						{ key: 0 },
 						[createCommentVNode(" 只读 runtime 项：仅导出，不渲染 star/rename/edit/delete "), createVNode($setup["AcuIconButton"], {
@@ -200042,7 +201276,7 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	}, 8, ["is-open", "title"]);
     }
-    var TablePresetDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$A, [["render", _sfc_render$A], ["__scopeId", "data-v-c3883113"]]);
+    var TablePresetDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$z, [["render", _sfc_render$z], ["__scopeId", "data-v-c3883113"]]);
 
     function buildTemplateRecoveryConfirmMessage_ACU(action, error) {
         const actionText = action === 'save-template' ? '保存这次聊天模板修改' : '切换并保存当前聊天模板';
@@ -201193,7 +202427,7 @@ ${rejectionText}` : delegationFeedback,
         },
     };
 
-    var _sfc_main$z = /*@__PURE__*/ defineComponent({
+    var _sfc_main$y = /*@__PURE__*/ defineComponent({
         __name: 'TableTemplatePresetPanel',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -201215,11 +202449,11 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-table-template-panel__status-line[data-v-626071ec] {\r\n  margin: 0 0 10px;\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-table-template-panel__preset-row[data-v-626071ec] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) repeat(4, max-content);\r\n  gap: 6px;\r\n  align-items: stretch;\r\n  min-width: 0;\n}\n.acu-table-template-panel__action-area[data-v-626071ec] {\r\n  margin-top: 10px;\n}\n.acu-table-template-panel__visualizer-button[data-v-626071ec] {\r\n  width: 100%;\n}\r\n\r\n", "src/presentation-v2/components/TableTemplatePresetPanel.vue#style-0-626071ec");
     var TableTemplatePresetPanel_vue_vue_type_style_index_0_scoped_626071ec_lang = null;
 
-    const _hoisted_1$z = { class: "acu-text__value" };
-    const _hoisted_2$x = { class: "acu-text__value" };
-    const _hoisted_3$t = { class: "acu-table-template-panel__preset-row" };
-    const _hoisted_4$q = { class: "acu-table-template-panel__action-area" };
-    function _sfc_render$z(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$y = { class: "acu-text__value" };
+    const _hoisted_2$w = { class: "acu-text__value" };
+    const _hoisted_3$s = { class: "acu-table-template-panel__preset-row" };
+    const _hoisted_4$p = { class: "acu-table-template-panel__action-area" };
+    function _sfc_render$y(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		title: $setup.tableCopy.panels.templatePreset.title,
 		description: $setup.tableCopy.panels.templatePreset.description
@@ -201259,7 +202493,7 @@ ${rejectionText}` : delegationFeedback,
 					)),
 					createBaseVNode(
 						"strong",
-						_hoisted_1$z,
+						_hoisted_1$y,
 						toDisplayString($setup.templates.selectedChatPresetLabel.value),
 						1
 						/* TEXT */
@@ -201273,7 +202507,7 @@ ${rejectionText}` : delegationFeedback,
 							/* CACHED */
 						)), createBaseVNode(
 							"strong",
-							_hoisted_2$x,
+							_hoisted_2$w,
 							toDisplayString($setup.templates.selectedGlobalPreset.value),
 							1
 							/* TEXT */
@@ -201308,7 +202542,7 @@ ${rejectionText}` : delegationFeedback,
 				]),
 				_: 1
 			}),
-			createBaseVNode("div", _hoisted_3$t, [
+			createBaseVNode("div", _hoisted_3$s, [
 				createVNode($setup["AcuPresetDropdown"], {
 					items: $setup.templates.chatPresetItems.value,
 					"model-value": $setup.templates.selectedChatPreset.value,
@@ -201365,7 +202599,7 @@ ${rejectionText}` : delegationFeedback,
 					onClick: $setup.management.openManage
 				}, null, 8, ["disabled", "onClick"])
 			]),
-			createBaseVNode("div", _hoisted_4$q, [createVNode($setup["AcuButton"], {
+			createBaseVNode("div", _hoisted_4$p, [createVNode($setup["AcuButton"], {
 				variant: "primary",
 				class: "acu-table-template-panel__visualizer-button",
 				title: "打开可视化表格编辑器",
@@ -201413,9 +202647,9 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	}, 8, ["title", "description"]);
     }
-    var TableTemplatePresetPanel = /*#__PURE__*/ _export_sfc(_sfc_main$z, [["render", _sfc_render$z], ["__scopeId", "data-v-626071ec"]]);
+    var TableTemplatePresetPanel = /*#__PURE__*/ _export_sfc(_sfc_main$y, [["render", _sfc_render$y], ["__scopeId", "data-v-626071ec"]]);
 
-    var _sfc_main$y = /*@__PURE__*/ defineComponent({
+    var _sfc_main$x = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookSelector',
         props: {
             modelValue: {},
@@ -201461,9 +202695,9 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-wb-selector[data-v-3ed3b837] { display: flex; flex-direction: column; gap: 10px; min-width: 0;\n}\r\n", "src/presentation-v2/components/WorldbookSelector.vue#style-0-3ed3b837");
     var WorldbookSelector_vue_vue_type_style_index_0_scoped_3ed3b837_lang = null;
 
-    const _hoisted_1$y = { class: "acu-v2-wb-selector" };
-    function _sfc_render$y(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$y, [
+    const _hoisted_1$x = { class: "acu-v2-wb-selector" };
+    function _sfc_render$x(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$x, [
 		$props.filterable ? (openBlock(), createBlock($setup["AcuFormRow"], {
 			key: 0,
 			label: "筛选"
@@ -201504,7 +202738,7 @@ ${rejectionText}` : delegationFeedback,
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var WorldbookSelector = /*#__PURE__*/ _export_sfc(_sfc_main$y, [["render", _sfc_render$y], ["__scopeId", "data-v-3ed3b837"]]);
+    var WorldbookSelector = /*#__PURE__*/ _export_sfc(_sfc_main$x, [["render", _sfc_render$x], ["__scopeId", "data-v-3ed3b837"]]);
 
     /**
      * useFormFillInjectionTarget — 填表"注入目标世界书"（Component A，§4.2）
@@ -201856,6 +203090,9 @@ ${rejectionText}` : delegationFeedback,
         };
     }
 
+    /** 气泡与桌宠里显示的功能名。 */
+    const MANUAL_UPDATE_TASK_FEATURE = '手动填表';
+    const CATCH_UP_TASK_FEATURE = '手动追平';
     /** 宿主世界书 API 挂起时确认弹窗不能被无限期拖住，超过该时长即降级为提示文案。 */
     const INJECTION_TARGET_RESOLVE_TIMEOUT_MS = 1500;
     const RESOLVE_TIMEOUT = Symbol('injection-target-resolve-timeout');
@@ -202027,13 +203264,15 @@ ${rejectionText}` : delegationFeedback,
         let abortRequested = false;
         let catchUpAbortController = null;
         function progressToastOptions(onAbort = requestAbort) {
-            const abortDisabled = onAbort === requestCatchUpAbort
+            const isCatchUp = onAbort === requestCatchUpAbort;
+            const abortDisabled = isCatchUp
                 ? catchUpAbortController?.signal.aborted === true
                 : abortRequested;
             return {
                 durationMs: 0,
                 muteable: false,
                 dismissible: false,
+                feature: isCatchUp ? CATCH_UP_TASK_FEATURE : MANUAL_UPDATE_TASK_FEATURE,
                 action: abortDisabled
                     ? undefined
                     : {
@@ -202072,6 +203311,7 @@ ${rejectionText}` : delegationFeedback,
                     durationMs: 0,
                     muteable: false,
                     dismissible: false,
+                    feature: MANUAL_UPDATE_TASK_FEATURE,
                 });
             }
             else {
@@ -202079,6 +203319,7 @@ ${rejectionText}` : delegationFeedback,
                     durationMs: 0,
                     muteable: false,
                     dismissible: false,
+                    feature: MANUAL_UPDATE_TASK_FEATURE,
                 });
             }
         }
@@ -202087,11 +203328,12 @@ ${rejectionText}` : delegationFeedback,
                 return;
             catchUpAbortController.abort();
             const text = '手动追平已终止，正在等待当前安全边界收敛...';
+            const options = { durationMs: 0, muteable: false, dismissible: false, feature: CATCH_UP_TASK_FEATURE };
             if (progressToastId) {
-                toast.update(progressToastId, 'warning', text, { durationMs: 0, muteable: false, dismissible: false });
+                toast.update(progressToastId, 'warning', text, options);
             }
             else {
-                toast.warning(text, { durationMs: 0, muteable: false, dismissible: false });
+                toast.warning(text, options);
             }
         }
         const sheetKeys = computed(() => {
@@ -202345,6 +203587,9 @@ ${rejectionText}` : delegationFeedback,
                 durationMs: 0,
                 muteable: false,
                 dismissible: true,
+                feature: CATCH_UP_TASK_FEATURE,
+                // 待用户重试的常驻提示，不代表正在干活。
+                busy: false,
                 action: {
                     label: '仅同步重试',
                     dismissOnClick: false,
@@ -202479,7 +203724,7 @@ ${rejectionText}` : delegationFeedback,
         };
     }
 
-    var _sfc_main$x = /*@__PURE__*/ defineComponent({
+    var _sfc_main$w = /*@__PURE__*/ defineComponent({
         __name: 'FormFillPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -202596,10 +203841,10 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-form-fill-page[data-v-53623365] {\n  min-height: 100%;\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: var(--acu-page-gap, 14px);\n}\n.acu-v2-form-fill-page__col[data-v-53623365] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: var(--acu-panel-grid-gap, 16px);\n}\n.acu-v2-form-fill-page__number-grid[data-v-53623365] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 10px;\n}\n.acu-v2-form-fill-page__filter[data-v-53623365] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n.acu-v2-form-fill-page__status-line[data-v-53623365] {\n  margin: 0 0 10px;\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: var(--acu-line-height-body, 1.45);\n}\n.acu-v2-form-fill-page__status-chat[data-v-53623365] {\n  max-width: min(42ch, 100%);\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-form-fill-page__checkpoint-label[data-v-53623365] {\n  color: var(--acu-accent);\n}\n.acu-v2-form-fill-page__table-wrap[data-v-53623365] {\n  min-width: 0;\n  overflow: auto;\n  border: 0;\n  border-radius: var(--acu-radius-sm);\n  background: var(--acu-bg-0);\n}\n.acu-v2-form-fill-page__status-table[data-v-53623365] {\n  width: 100%;\n  border-collapse: collapse;\n  min-width: 560px;\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-form-fill-page__status-table th[data-v-53623365],\n.acu-v2-form-fill-page__status-table td[data-v-53623365] {\n  padding: 8px 10px;\n  border-bottom: 1px solid var(--acu-border-2);\n  text-align: left;\n}\n.acu-v2-form-fill-page__status-table th[data-v-53623365] {\n  color: var(--acu-text-3);\n  font-weight: 600;\n  background: var(--acu-bg-1);\n}\n.acu-v2-form-fill-page__status-table td[data-v-53623365] {\n  color: var(--acu-text-2);\n}\n.acu-v2-form-fill-page__status-table tr:last-child td[data-v-53623365] {\n  border-bottom: 0;\n}\n.acu-v2-form-fill-page__status-row--ready td[data-v-53623365] {\n  color: var(--acu-text-1);\n}\n.acu-v2-form-fill-page__empty[data-v-53623365] {\n  text-align: center !important;\n  color: var(--acu-text-3) !important;\n}\n.acu-v2-form-fill-page__hint[data-v-53623365] {\n  margin: 0;\n  font-size: var(--acu-font-size-body, 12px);\n  color: var(--acu-text-3);\n}\n.acu-v2-form-fill-page__hint strong[data-v-53623365] {\n  color: var(--acu-text-1);\n  font-weight: 500;\n}\n.acu-v2-form-fill-page__actions[data-v-53623365] {\n  display: flex;\n  justify-content: flex-end;\n  gap: 8px;\n  padding-top: 12px;\n  margin-top: 4px;\n}\n@media (max-width: 860px) {\n.acu-v2-form-fill-page__number-grid[data-v-53623365] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/FormFillPage.vue#style-0-53623365");
     var FormFillPage_vue_vue_type_style_index_0_scoped_53623365_lang = null;
 
-    const _hoisted_1$x = { class: "acu-v2-form-fill-page" };
-    const _hoisted_2$w = ["title"];
-    const _hoisted_3$s = { class: "acu-text__value" };
-    const _hoisted_4$p = { class: "acu-text__value acu-v2-form-fill-page__checkpoint-label" };
+    const _hoisted_1$w = { class: "acu-v2-form-fill-page" };
+    const _hoisted_2$v = ["title"];
+    const _hoisted_3$r = { class: "acu-text__value" };
+    const _hoisted_4$o = { class: "acu-text__value acu-v2-form-fill-page__checkpoint-label" };
     const _hoisted_5$m = { class: "acu-v2-form-fill-page__table-wrap" };
     const _hoisted_6$l = { class: "acu-v2-form-fill-page__status-table" };
     const _hoisted_7$k = { key: 0 };
@@ -202611,8 +203856,8 @@ ${rejectionText}` : delegationFeedback,
     const _hoisted_13$d = { class: "acu-v2-form-fill-page__filter" };
     const _hoisted_14$d = { class: "acu-v2-form-fill-page__col" };
     const _hoisted_15$d = { class: "acu-v2-form-fill-page__hint" };
-    function _sfc_render$x(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$x, [
+    function _sfc_render$w(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$w, [
 		createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }),
 		createCommentVNode(" 运行状态与自动更新 "),
 		createVNode($setup["AcuPanelGrid"], { class: "acu-v2-form-fill-page__grid" }, {
@@ -202636,7 +203881,7 @@ ${rejectionText}` : delegationFeedback,
 							createBaseVNode("strong", {
 								class: "acu-text__value acu-v2-form-fill-page__status-chat",
 								title: $setup.dashboard.chatFileIdentifier.value || "未初始化"
-							}, toDisplayString($setup.dashboard.chatFileIdentifier.value || "未初始化"), 9, _hoisted_2$w),
+							}, toDisplayString($setup.dashboard.chatFileIdentifier.value || "未初始化"), 9, _hoisted_2$v),
 							_cache[21] || (_cache[21] = createTextVNode(
 								" · AI回复累计层数: ",
 								-1
@@ -202644,7 +203889,7 @@ ${rejectionText}` : delegationFeedback,
 							)),
 							createBaseVNode(
 								"strong",
-								_hoisted_3$s,
+								_hoisted_3$r,
 								toDisplayString($setup.dashboard.aiMessageCount.value),
 								1
 								/* TEXT */
@@ -202656,7 +203901,7 @@ ${rejectionText}` : delegationFeedback,
 							)),
 							createBaseVNode(
 								"strong",
-								_hoisted_4$p,
+								_hoisted_4$o,
 								toDisplayString($setup.manualUpdate.checkpointFloorsLabel.value),
 								1
 								/* TEXT */
@@ -203077,7 +204322,7 @@ ${rejectionText}` : delegationFeedback,
 		])
 	]);
     }
-    var FormFillPage = /*#__PURE__*/ _export_sfc(_sfc_main$x, [["render", _sfc_render$x], ["__scopeId", "data-v-53623365"]]);
+    var FormFillPage = /*#__PURE__*/ _export_sfc(_sfc_main$w, [["render", _sfc_render$w], ["__scopeId", "data-v-53623365"]]);
 
     function connectionModeFromDraft(draft) {
         if (draft.apiMode === 'tavern')
@@ -203166,7 +204411,7 @@ ${rejectionText}` : delegationFeedback,
         },
     };
 
-    var _sfc_main$w = /*@__PURE__*/ defineComponent({
+    var _sfc_main$v = /*@__PURE__*/ defineComponent({
         __name: 'ApiConfigPanel',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -203367,10 +204612,10 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-api-config-panel__select-row[data-v-154ad041] {\r\n  min-width: 0;\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) max-content max-content;\r\n  gap: 6px;\r\n  align-items: stretch;\n}\n.acu-api-config-panel__editor[data-v-154ad041] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 14px;\n}\n.acu-api-config-panel__editor-section[data-v-154ad041] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\n}\n.acu-api-config-panel__inline-action[data-v-154ad041] {\r\n  display: flex;\r\n  align-items: center;\r\n  flex-wrap: wrap;\r\n  gap: 10px;\n}\n.acu-api-config-panel__two-col[data-v-154ad041] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 10px;\n}\n.acu-api-config-panel__muted[data-v-154ad041] {\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-api-config-panel__danger[data-v-154ad041] {\r\n  color: var(--acu-danger);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-api-config-panel__actions[data-v-154ad041] {\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\n}\r\n", "src/presentation-v2/components/ApiConfigPanel.vue#style-0-154ad041");
     var ApiConfigPanel_vue_vue_type_style_index_0_scoped_154ad041_lang = null;
 
-    const _hoisted_1$w = { class: "acu-api-config-panel__select-row" };
-    const _hoisted_2$v = { class: "acu-api-config-panel__editor-section" };
-    const _hoisted_3$r = { class: "acu-api-config-panel__inline-action" };
-    const _hoisted_4$o = {
+    const _hoisted_1$v = { class: "acu-api-config-panel__select-row" };
+    const _hoisted_2$u = { class: "acu-api-config-panel__editor-section" };
+    const _hoisted_3$q = { class: "acu-api-config-panel__inline-action" };
+    const _hoisted_4$n = {
 	key: 0,
 	class: "acu-api-config-panel__muted"
     };
@@ -203388,7 +204633,7 @@ ${rejectionText}` : delegationFeedback,
 	class: "acu-api-config-panel__editor-section"
     };
     const _hoisted_9$g = { class: "acu-api-config-panel__actions" };
-    function _sfc_render$w(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$v(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		title: $setup.apiCopy.panels.preset.title,
 		description: $setup.apiCopy.panels.preset.description
@@ -203409,7 +204654,7 @@ ${rejectionText}` : delegationFeedback,
 				label: "当前 API 预设",
 				hint: "星标表示新聊天默认使用的预设。"
 			}, {
-				default: withCtx(() => [createBaseVNode("div", _hoisted_1$w, [
+				default: withCtx(() => [createBaseVNode("div", _hoisted_1$v, [
 					createVNode($setup["AcuPresetDropdown"], {
 						items: $setup.presetDropdownItems,
 						"model-value": $setup.store.activePresetName,
@@ -203456,7 +204701,7 @@ ${rejectionText}` : delegationFeedback,
 						}, null, 8, ["modelValue"])]),
 						_: 1
 					}),
-					createBaseVNode("div", _hoisted_2$v, [
+					createBaseVNode("div", _hoisted_2$u, [
 						createVNode($setup["AcuFormRow"], { label: "连接方式" }, {
 							default: withCtx(() => [createVNode($setup["AcuSegmentedControl"], {
 								options: $setup.connectionModeOptions,
@@ -203507,14 +204752,14 @@ ${rejectionText}` : delegationFeedback,
 									}, null, 8, ["modelValue"])]),
 									_: 1
 								}),
-								createBaseVNode("div", _hoisted_3$r, [createVNode($setup["AcuButton"], { onClick: $setup.loadModelsForActive }, {
+								createBaseVNode("div", _hoisted_3$q, [createVNode($setup["AcuButton"], { onClick: $setup.loadModelsForActive }, {
 									default: withCtx(() => [..._cache[15] || (_cache[15] = [createTextVNode(
 										"加载模型",
 										-1
 										/* CACHED */
 									)])]),
 									_: 1
-								}), $setup.store.modelLoadStatus === "loading" ? (openBlock(), createElementBlock("span", _hoisted_4$o, "加载中...")) : $setup.store.modelLoadStatus === "error" ? (openBlock(), createElementBlock(
+								}), $setup.store.modelLoadStatus === "loading" ? (openBlock(), createElementBlock("span", _hoisted_4$n, "加载中...")) : $setup.store.modelLoadStatus === "error" ? (openBlock(), createElementBlock(
 									"span",
 									_hoisted_5$l,
 									toDisplayString($setup.store.modelLoadError),
@@ -203681,9 +204926,9 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	}, 8, ["title", "description"]);
     }
-    var ApiConfigPanel = /*#__PURE__*/ _export_sfc(_sfc_main$w, [["render", _sfc_render$w], ["__scopeId", "data-v-154ad041"]]);
+    var ApiConfigPanel = /*#__PURE__*/ _export_sfc(_sfc_main$v, [["render", _sfc_render$v], ["__scopeId", "data-v-154ad041"]]);
 
-    var _sfc_main$v = /*@__PURE__*/ defineComponent({
+    var _sfc_main$u = /*@__PURE__*/ defineComponent({
         __name: 'ApiPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -203696,11 +204941,11 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-api-page[data-v-3ac7d1d0] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-api-page__spacer[data-v-3ac7d1d0] {\n  min-width: 0;\n}\n.acu-v2-api-page__col[data-v-3ac7d1d0] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n@media (max-width: 860px) {\n.acu-v2-api-page[data-v-3ac7d1d0] {\n    padding: 14px;\n}\n.acu-v2-api-page__spacer[data-v-3ac7d1d0] {\n    display: none;\n}\n}\n", "src/presentation-v2/pages/ApiPage.vue#style-0-3ac7d1d0");
     var ApiPage_vue_vue_type_style_index_0_scoped_3ac7d1d0_lang = null;
 
-    const _hoisted_1$v = { class: "acu-v2-api-page" };
-    const _hoisted_2$u = { class: "acu-v2-api-page__col" };
-    function _sfc_render$v(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$v, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-api-page__grid" }, {
-		default: withCtx(() => [createBaseVNode("div", _hoisted_2$u, [createVNode($setup["DanglingReferenceBanner"], { scope: "api" }), createVNode($setup["ApiConfigPanel"])]), _cache[0] || (_cache[0] = createBaseVNode(
+    const _hoisted_1$u = { class: "acu-v2-api-page" };
+    const _hoisted_2$t = { class: "acu-v2-api-page__col" };
+    function _sfc_render$u(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$u, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-api-page__grid" }, {
+		default: withCtx(() => [createBaseVNode("div", _hoisted_2$t, [createVNode($setup["DanglingReferenceBanner"], { scope: "api" }), createVNode($setup["ApiConfigPanel"])]), _cache[0] || (_cache[0] = createBaseVNode(
 			"div",
 			{
 				class: "acu-v2-api-page__spacer",
@@ -203713,9 +204958,9 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	})]);
     }
-    var ApiPage = /*#__PURE__*/ _export_sfc(_sfc_main$v, [["render", _sfc_render$v], ["__scopeId", "data-v-3ac7d1d0"]]);
+    var ApiPage = /*#__PURE__*/ _export_sfc(_sfc_main$u, [["render", _sfc_render$u], ["__scopeId", "data-v-3ac7d1d0"]]);
 
-    var _sfc_main$u = /*@__PURE__*/ defineComponent({
+    var _sfc_main$t = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookAgentAdvancedPanel',
         props: {
             open: { type: Boolean },
@@ -203905,10 +205150,10 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-agent-advanced[data-v-ac5b42ed] { display: flex; flex-direction: column; gap: 16px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__section[data-v-ac5b42ed] { display: flex; flex-direction: column; gap: 12px; min-width: 0; max-width: 100%; padding: 12px; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2);\n}\n.acu-agent-advanced__section-head[data-v-ac5b42ed] { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__section-head > div[data-v-ac5b42ed] { min-width: 0;\n}\n.acu-agent-advanced__section-head h4[data-v-ac5b42ed],\r\n.acu-agent-advanced__prompt-head h5[data-v-ac5b42ed] { margin: 0; min-width: 0; color: var(--acu-text-1); overflow-wrap: anywhere;\n}\n.acu-agent-advanced__section-head p[data-v-ac5b42ed] { margin: 4px 0 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); line-height: 1.5; overflow-wrap: anywhere;\n}\n.acu-agent-advanced__grid[data-v-ac5b42ed] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; min-width: 0; max-width: 100%;\n}\n.acu-agent-advanced__prompt-head[data-v-ac5b42ed] { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; max-width: 100%; margin-top: 4px;\n}\n.acu-agent-advanced[data-v-ac5b42ed] .acu-form-row,\r\n.acu-agent-advanced[data-v-ac5b42ed] .acu-form-row__control,\r\n.acu-agent-advanced[data-v-ac5b42ed] .acu-input,\r\n.acu-agent-advanced[data-v-ac5b42ed] .acu-segmented,\r\n.acu-agent-advanced[data-v-ac5b42ed] .acu-prompt-segs {\r\n  min-width: 0;\r\n  max-width: 100%;\n}\n@media (max-width: 720px) {\n.acu-agent-advanced[data-v-ac5b42ed] { gap: 12px;\n}\n.acu-agent-advanced__section[data-v-ac5b42ed] { gap: 10px; padding: 10px;\n}\n.acu-agent-advanced__grid[data-v-ac5b42ed] { grid-template-columns: minmax(0, 1fr);\n}\n.acu-agent-advanced__section-head[data-v-ac5b42ed],\r\n  .acu-agent-advanced__prompt-head[data-v-ac5b42ed] { flex-direction: column; align-items: stretch;\n}\n}\n@media (max-width: 420px) {\n.acu-agent-advanced__section[data-v-ac5b42ed] { padding: 8px;\n}\n}\r\n", "src/presentation-v2/components/WorldbookAgentAdvancedPanel.vue#style-0-ac5b42ed");
     var WorldbookAgentAdvancedPanel_vue_vue_type_style_index_0_scoped_ac5b42ed_lang = null;
 
-    const _hoisted_1$u = { class: "acu-agent-advanced" };
-    const _hoisted_2$t = { class: "acu-agent-advanced__section" };
-    const _hoisted_3$q = { class: "acu-agent-advanced__section-head" };
-    const _hoisted_4$n = { class: "acu-agent-advanced__section" };
+    const _hoisted_1$t = { class: "acu-agent-advanced" };
+    const _hoisted_2$s = { class: "acu-agent-advanced__section" };
+    const _hoisted_3$p = { class: "acu-agent-advanced__section-head" };
+    const _hoisted_4$m = { class: "acu-agent-advanced__section" };
     const _hoisted_5$k = { class: "acu-agent-advanced__section-head" };
     const _hoisted_6$j = { class: "acu-agent-advanced__grid" };
     const _hoisted_7$i = { class: "acu-agent-advanced__section" };
@@ -203923,7 +205168,7 @@ ${rejectionText}` : delegationFeedback,
     const _hoisted_16$c = { class: "acu-agent-advanced__prompt-actions" };
     const _hoisted_17$b = { class: "acu-agent-advanced__prompt-head" };
     const _hoisted_18$b = { class: "acu-agent-advanced__prompt-head" };
-    function _sfc_render$u(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$t(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
 		"is-open": $props.open,
 		title: $setup.plotCopy.agentControl.advanced.title,
@@ -203931,7 +205176,7 @@ ${rejectionText}` : delegationFeedback,
 		"before-close": $setup.confirmClose,
 		onClose: _cache[10] || (_cache[10] = ($event) => _ctx.$emit("close"))
 	}, {
-		default: withCtx(() => [createBaseVNode("div", _hoisted_1$u, [
+		default: withCtx(() => [createBaseVNode("div", _hoisted_1$t, [
 			createVNode($setup["AcuMessage"], { kind: "info" }, {
 				default: withCtx(() => [createTextVNode(
 					toDisplayString($setup.plotCopy.agentControl.advanced.description),
@@ -203940,7 +205185,7 @@ ${rejectionText}` : delegationFeedback,
 				)]),
 				_: 1
 			}),
-			createBaseVNode("section", _hoisted_2$t, [createBaseVNode("header", _hoisted_3$q, [createBaseVNode("div", null, [createBaseVNode(
+			createBaseVNode("section", _hoisted_2$s, [createBaseVNode("header", _hoisted_3$p, [createBaseVNode("div", null, [createBaseVNode(
 				"h4",
 				null,
 				toDisplayString($setup.plotCopy.agentControl.executionMode.label),
@@ -203960,7 +205205,7 @@ ${rejectionText}` : delegationFeedback,
 				disabled: !$setup.agentControl.isReady.value,
 				"onUpdate:modelValue": $setup.onExecutionModeChange
 			}, null, 8, ["model-value", "disabled"])]),
-			createBaseVNode("section", _hoisted_4$n, [createBaseVNode("header", _hoisted_5$k, [createBaseVNode("div", null, [createBaseVNode(
+			createBaseVNode("section", _hoisted_4$m, [createBaseVNode("header", _hoisted_5$k, [createBaseVNode("div", null, [createBaseVNode(
 				"h4",
 				null,
 				toDisplayString($setup.plotCopy.agentControl.contextSettings.title),
@@ -204230,9 +205475,9 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	}, 8, ["is-open", "title"]);
     }
-    var WorldbookAgentAdvancedPanel = /*#__PURE__*/ _export_sfc(_sfc_main$u, [["render", _sfc_render$u], ["__scopeId", "data-v-ac5b42ed"]]);
+    var WorldbookAgentAdvancedPanel = /*#__PURE__*/ _export_sfc(_sfc_main$t, [["render", _sfc_render$t], ["__scopeId", "data-v-ac5b42ed"]]);
 
-    var _sfc_main$t = /*@__PURE__*/ defineComponent({
+    var _sfc_main$s = /*@__PURE__*/ defineComponent({
         __name: 'WorldbookAgentControlBar',
         props: {
             agentControl: {}
@@ -204278,25 +205523,25 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-agent-wb-control[data-v-63b91c21] { display: flex; flex-direction: column; gap: 10px; min-width: 0; max-width: 100%; box-sizing: border-box; padding: 10px; border-radius: var(--acu-radius-sm); background: var(--acu-bg-2);\n}\n.acu-v2-agent-wb-control__head[data-v-63b91c21] { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; min-width: 0; max-width: 100%;\n}\n.acu-v2-agent-wb-control__title[data-v-63b91c21] { font-size: var(--acu-font-size-body-lg, 13px); font-weight: 600; color: var(--acu-text-1);\n}\n.acu-v2-agent-wb-control__desc[data-v-63b91c21] { margin: 3px 0 0; font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3); line-height: 1.5;\n}\n.acu-v2-agent-wb-control__body[data-v-63b91c21] { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-width: 0; max-width: 100%;\n}\n.acu-v2-agent-wb-control__config-source[data-v-63b91c21] { flex: 1 1 100%; min-width: 0; margin: 0; font-size: var(--acu-font-size-caption, 11px); color: var(--acu-text-3); line-height: 1.5; overflow-wrap: anywhere;\n}\n.acu-v2-agent-wb-control__api-selects[data-v-63b91c21] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; flex: 1 1 380px; min-width: 0; max-width: 100%;\n}\n.acu-v2-agent-wb-control__actions[data-v-63b91c21] { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; max-width: 100%;\n}\n@media (max-width: 720px) {\n.acu-v2-agent-wb-control__api-selects[data-v-63b91c21] { flex-basis: 100%; grid-template-columns: minmax(0, 1fr);\n}\n}\n@media (max-width: 480px) {\n.acu-v2-agent-wb-control__actions[data-v-63b91c21] { width: 100%;\n}\n.acu-v2-agent-wb-control__actions[data-v-63b91c21] .acu-btn { flex: 1 1 100%;\n}\n}\r\n", "src/presentation-v2/components/WorldbookAgentControlBar.vue#style-0-63b91c21");
     var WorldbookAgentControlBar_vue_vue_type_style_index_0_scoped_63b91c21_lang = null;
 
-    const _hoisted_1$t = { class: "acu-v2-agent-wb-control" };
-    const _hoisted_2$s = { class: "acu-v2-agent-wb-control__head" };
-    const _hoisted_3$p = { class: "acu-v2-agent-wb-control__title" };
-    const _hoisted_4$m = { class: "acu-v2-agent-wb-control__desc" };
+    const _hoisted_1$s = { class: "acu-v2-agent-wb-control" };
+    const _hoisted_2$r = { class: "acu-v2-agent-wb-control__head" };
+    const _hoisted_3$o = { class: "acu-v2-agent-wb-control__title" };
+    const _hoisted_4$l = { class: "acu-v2-agent-wb-control__desc" };
     const _hoisted_5$j = { class: "acu-v2-agent-wb-control__body" };
     const _hoisted_6$i = { class: "acu-v2-agent-wb-control__config-source" };
     const _hoisted_7$h = { class: "acu-v2-agent-wb-control__api-selects" };
     const _hoisted_8$h = { class: "acu-v2-agent-wb-control__actions" };
-    function _sfc_render$t(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$t, [
-		createBaseVNode("div", _hoisted_2$s, [createBaseVNode("div", null, [createBaseVNode(
+    function _sfc_render$s(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$s, [
+		createBaseVNode("div", _hoisted_2$r, [createBaseVNode("div", null, [createBaseVNode(
 			"div",
-			_hoisted_3$p,
+			_hoisted_3$o,
 			toDisplayString($setup.plotCopy.agentControl.title),
 			1
 			/* TEXT */
 		), createBaseVNode(
 			"p",
-			_hoisted_4$m,
+			_hoisted_4$l,
 			toDisplayString($setup.plotCopy.agentControl.description),
 			1
 			/* TEXT */
@@ -204422,7 +205667,7 @@ ${rejectionText}` : delegationFeedback,
 		}, null, 8, ["open", "agent-control"])
 	]);
     }
-    var WorldbookAgentControlBar = /*#__PURE__*/ _export_sfc(_sfc_main$t, [["render", _sfc_render$t], ["__scopeId", "data-v-63b91c21"]]);
+    var WorldbookAgentControlBar = /*#__PURE__*/ _export_sfc(_sfc_main$s, [["render", _sfc_render$s], ["__scopeId", "data-v-63b91c21"]]);
 
     function getEntryLabel_ACU(entry) {
         return buildWorldbookEntryDisplayLabel_ACU(String(entry?.comment || entry?.name || ''), entry?.uid);
@@ -205037,7 +206282,7 @@ ${rejectionText}` : delegationFeedback,
             busy.value = 'skillify';
             let progressToastId = null;
             try {
-                const progressOptions = { durationMs: 0, muteable: false, dismissible: false };
+                const progressOptions = { durationMs: 0, muteable: false, dismissible: false, feature: 'Skill 化' };
                 const formatProgressText = (event) => {
                     if (event.phase === 'collecting')
                         return '正在扫描当前世界书范围内可 Skill 化的条目...';
@@ -205238,7 +206483,7 @@ ${rejectionText}` : delegationFeedback,
         };
     }
 
-    var _sfc_main$s = /*@__PURE__*/ defineComponent({
+    var _sfc_main$r = /*@__PURE__*/ defineComponent({
         __name: 'AgentPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -205313,10 +206558,10 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-agent-page[data-v-55803a2d] { min-height: 100%; min-width: 0; padding: 20px; display: flex; flex-direction: column; gap: 18px;\n}\n.acu-v2-agent-page__hint[data-v-55803a2d] { margin: 12px 0 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-agent-page__hint strong[data-v-55803a2d] { color: var(--acu-text-1); font-weight: 500;\n}\n@media (max-width: 860px) {\n.acu-v2-agent-page[data-v-55803a2d] { padding: 14px;\n}\n}\r\n", "src/presentation-v2/pages/AgentPage.vue#style-0-55803a2d");
     var AgentPage_vue_vue_type_style_index_0_scoped_55803a2d_lang = null;
 
-    const _hoisted_1$s = { class: "acu-v2-agent-page" };
-    const _hoisted_2$r = { class: "acu-v2-agent-page__hint" };
-    function _sfc_render$s(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$s, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-agent-page__grid" }, {
+    const _hoisted_1$r = { class: "acu-v2-agent-page" };
+    const _hoisted_2$q = { class: "acu-v2-agent-page__hint" };
+    function _sfc_render$r(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$r, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-agent-page__grid" }, {
 		default: withCtx(() => [createVNode($setup["AcuPanel"], {
 			title: "Agent 世界书",
 			description: "独立管理 Agent 的世界书范围、Skill 元数据和接管状态。"
@@ -205341,7 +206586,7 @@ ${rejectionText}` : delegationFeedback,
 					"status",
 					"error"
 				]),
-				createBaseVNode("p", _hoisted_2$r, [_cache[5] || (_cache[5] = createTextVNode(
+				createBaseVNode("p", _hoisted_2$q, [_cache[5] || (_cache[5] = createTextVNode(
 					"当前范围: ",
 					-1
 					/* CACHED */
@@ -205396,10 +206641,10 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	})]);
     }
-    var AgentPage = /*#__PURE__*/ _export_sfc(_sfc_main$s, [["render", _sfc_render$s], ["__scopeId", "data-v-55803a2d"]]);
+    var AgentPage = /*#__PURE__*/ _export_sfc(_sfc_main$r, [["render", _sfc_render$r], ["__scopeId", "data-v-55803a2d"]]);
 
     const FOLD_VISIBLE_STEP_ACU$1 = 40;
-    var _sfc_main$r = /*@__PURE__*/ defineComponent({
+    var _sfc_main$q = /*@__PURE__*/ defineComponent({
         __name: 'ContinuationSessionFeed',
         props: {
             entries: {},
@@ -205493,19 +206738,19 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\r\n/* 纵向列表必须用 flex 列而不是 grid：容器带 max-height 时 grid 会把行压缩到最小贡献，\r\n   而卡片（overflow: hidden）的最小贡献是 0——条目会被纵向压扁成一条条细线。\r\n   flex 列 + 子项 flex: none 保证每个条目始终保持内容高度，超出部分滚动。 */\n.acu-v2-session-feed[data-v-d22ceff8] { display: flex; flex-direction: column; gap: 6px; max-height: 460px; overflow-y: auto; padding: 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--acu-bg-2) 60%, transparent);\n}\n.acu-v2-session-feed[data-v-d22ceff8] > * { flex: 0 0 auto;\n}\n.acu-v2-session-feed__empty[data-v-d22ceff8] { margin: 0; padding: 18px 8px; color: var(--acu-text-3); text-align: center; font-size: var(--acu-font-size-body, 12px);\n}\r\n\r\n/* 折叠横幅：置于列表顶部，提示还有多少更早消息被折叠 */\n.acu-v2-session-feed__fold[data-v-d22ceff8] { padding: 6px 10px; border: 1px dashed color-mix(in srgb, var(--acu-text-3) 40%, transparent); border-radius: 8px; background: transparent; color: var(--acu-text-3); font: inherit; font-size: var(--acu-font-size-caption, 11px); cursor: pointer; text-align: center;\n}\n.acu-v2-session-feed__fold[data-v-d22ceff8]:hover { color: var(--acu-text-2); border-color: color-mix(in srgb, var(--acu-text-3) 60%, transparent);\n}\r\n\r\n/* 运行分隔条 */\n.acu-v2-session-feed__run-divider[data-v-d22ceff8] { display: flex; align-items: center; gap: 8px; padding: 4px 2px; margin-top: 4px;\n}\n.acu-v2-session-feed__run-divider[data-v-d22ceff8]::after { content: ''; flex: 1; height: 1px; background: color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n}\n.acu-v2-session-feed__run-divider-badge[data-v-d22ceff8] { flex: none; padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 18%, transparent); color: var(--acu-primary, #5b8def); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__run-divider-title[data-v-d22ceff8] { color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\r\n\r\n/* 用户消息气泡 */\n.acu-v2-session-feed__user[data-v-d22ceff8] { display: flex; justify-content: flex-end; padding: 4px 2px;\n}\n.acu-v2-session-feed__user-bubble[data-v-d22ceff8] { max-width: 82%; padding: 7px 11px; border-radius: 10px 10px 2px 10px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 16%, var(--acu-bg-2)); border: 1px solid color-mix(in srgb, var(--acu-primary, #5b8def) 28%, transparent);\n}\n.acu-v2-session-feed__user-text[data-v-d22ceff8] { margin: 0; color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-session-feed__user-bubble .acu-v2-session-feed__time[data-v-d22ceff8] { display: block; margin: 3px 0 0; text-align: right;\n}\r\n\r\n/* 思考条目 */\n.acu-v2-session-feed__thought[data-v-d22ceff8] { padding: 2px 4px 2px 10px; border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent);\n}\n.acu-v2-session-feed__thought-label[data-v-d22ceff8] { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__thought-text[data-v-d22ceff8] { margin: 2px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-style: italic; white-space: pre-wrap; word-break: break-word;\n}\r\n\r\n/* 工具调用卡片 */\n.acu-v2-session-feed__card[data-v-d22ceff8] { border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 8px; background: var(--acu-bg-2); animation: acu-v2-session-feed-in-d22ceff8 0.18s ease-out; overflow: hidden;\n}\n.acu-v2-session-feed__card--delegation[data-v-d22ceff8], .acu-v2-session-feed__card--outline_op[data-v-d22ceff8], .acu-v2-session-feed__card--protocol_retry[data-v-d22ceff8] { margin-left: 16px;\n}\n.acu-v2-session-feed__card--finalize[data-v-d22ceff8], .acu-v2-session-feed__card--run_completed[data-v-d22ceff8] { border-left: 3px solid color-mix(in srgb, var(--acu-success, #4fa36c) 75%, transparent); background: color-mix(in srgb, var(--acu-success, #4fa36c) 7%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--failed[data-v-d22ceff8] { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent); background: color-mix(in srgb, var(--acu-danger, #d65b5b) 6%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--running[data-v-d22ceff8] { border-left: 3px solid color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent);\n}\r\n/* 交接报告：琥珀色标出「AI 可见性边界」，与成功/失败/进行中的语义色区分 */\n.acu-v2-session-feed__card--handoff[data-v-d22ceff8] { border-left: 3px solid color-mix(in srgb, #c9963e 75%, transparent); background: color-mix(in srgb, #c9963e 7%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card-head[data-v-d22ceff8] { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border: none; background: transparent; cursor: pointer; text-align: left; font: inherit; color: inherit;\n}\n.acu-v2-session-feed__status[data-v-d22ceff8] { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; font-size: 10px;\n}\n.acu-v2-session-feed__status--done[data-v-d22ceff8] { background: color-mix(in srgb, var(--acu-success, #4fa36c) 20%, transparent); color: var(--acu-success, #4fa36c);\n}\n.acu-v2-session-feed__status--failed[data-v-d22ceff8] { background: color-mix(in srgb, var(--acu-danger, #d65b5b) 20%, transparent); color: var(--acu-danger, #d65b5b);\n}\n.acu-v2-session-feed__status--running[data-v-d22ceff8] { background: transparent;\n}\n.acu-v2-session-feed__spinner[data-v-d22ceff8] { width: 12px; height: 12px; border: 2px solid color-mix(in srgb, var(--acu-primary, #5b8def) 30%, transparent); border-top-color: var(--acu-primary, #5b8def); border-radius: 50%; animation: acu-v2-session-feed-spin-d22ceff8 0.8s linear infinite;\n}\n.acu-v2-session-feed__badge[data-v-d22ceff8] { flex: none; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__title[data-v-d22ceff8] { color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\n}\n.acu-v2-session-feed__time[data-v-d22ceff8] { margin-left: auto; flex: none; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__chevron[data-v-d22ceff8] { flex: none; color: var(--acu-text-3); font-size: 10px; transition: transform 0.15s ease;\n}\n.acu-v2-session-feed__chevron--open[data-v-d22ceff8] { transform: rotate(180deg);\n}\n.acu-v2-session-feed__preview[data-v-d22ceff8] { margin: 0; padding: 0 10px 7px 34px; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;\n}\n.acu-v2-session-feed__detail[data-v-d22ceff8] { margin: 0; padding: 0 10px 8px 34px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-session-feed__running[data-v-d22ceff8] { display: flex; align-items: center; gap: 8px; padding: 6px 10px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-session-feed__pulse[data-v-d22ceff8] { width: 8px; height: 8px; border-radius: 50%; background: var(--acu-primary, #5b8def); animation: acu-v2-session-feed-pulse-d22ceff8 1.1s ease-in-out infinite;\n}\r\n/* 手机窄屏：高度跟随视口而不是固定 460px；层级缩进与详情缩进收窄，\r\n   横向空间留给正文；用户气泡放宽到近整行。 */\n@media (max-width: 640px) {\n.acu-v2-session-feed[data-v-d22ceff8] { max-height: 62vh; padding: 8px;\n}\n.acu-v2-session-feed__card--delegation[data-v-d22ceff8], .acu-v2-session-feed__card--outline_op[data-v-d22ceff8], .acu-v2-session-feed__card--protocol_retry[data-v-d22ceff8] { margin-left: 8px;\n}\n.acu-v2-session-feed__card-head[data-v-d22ceff8] { padding: 7px 8px; gap: 6px;\n}\n.acu-v2-session-feed__preview[data-v-d22ceff8] { padding: 0 8px 7px 12px;\n}\n.acu-v2-session-feed__detail[data-v-d22ceff8] { padding: 0 8px 8px 12px;\n}\n.acu-v2-session-feed__user-bubble[data-v-d22ceff8] { max-width: 94%;\n}\n}\n@keyframes acu-v2-session-feed-in-d22ceff8 {\nfrom { opacity: 0; transform: translateY(4px);\n}\nto { opacity: 1; transform: none;\n}\n}\n@keyframes acu-v2-session-feed-pulse-d22ceff8 {\n0%, 100% { opacity: 0.35;\n}\n50% { opacity: 1;\n}\n}\n@keyframes acu-v2-session-feed-spin-d22ceff8 {\nto { transform: rotate(360deg);\n}\n}\r\n", "src/presentation-v2/components/ContinuationSessionFeed.vue#style-0-d22ceff8");
     var ContinuationSessionFeed_vue_vue_type_style_index_0_scoped_d22ceff8_lang = null;
 
-    const _hoisted_1$r = {
+    const _hoisted_1$q = {
 	ref: "feedElement",
 	class: "acu-v2-session-feed"
     };
-    const _hoisted_2$q = {
+    const _hoisted_2$p = {
 	key: 0,
 	class: "acu-v2-session-feed__empty"
     };
-    const _hoisted_3$o = {
+    const _hoisted_3$n = {
 	key: 0,
 	class: "acu-v2-session-feed__run-divider"
     };
-    const _hoisted_4$l = { class: "acu-v2-session-feed__run-divider-badge" };
+    const _hoisted_4$k = { class: "acu-v2-session-feed__run-divider-badge" };
     const _hoisted_5$i = { class: "acu-v2-session-feed__run-divider-title" };
     const _hoisted_6$h = { class: "acu-v2-session-feed__time" };
     const _hoisted_7$g = { class: "acu-v2-session-feed__user" };
@@ -205535,12 +206780,12 @@ ${rejectionText}` : delegationFeedback,
 	key: 2,
 	class: "acu-v2-session-feed__running"
     };
-    function _sfc_render$r(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$q(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"div",
-		_hoisted_1$r,
+		_hoisted_1$q,
 		[
-			!$props.entries.length ? (openBlock(), createElementBlock("p", _hoisted_2$q, " 还没有运行记录。发送一条指令后，主 Agent 的思考、派工、大纲操作与交付过程会实时显示在这里。 ")) : createCommentVNode("v-if", true),
+			!$props.entries.length ? (openBlock(), createElementBlock("p", _hoisted_2$p, " 还没有运行记录。发送一条指令后，主 Agent 的思考、派工、大纲操作与交付过程会实时显示在这里。 ")) : createCommentVNode("v-if", true),
 			$setup.hiddenCount > 0 ? (openBlock(), createElementBlock(
 				"button",
 				{
@@ -205560,10 +206805,10 @@ ${rejectionText}` : delegationFeedback,
 					return openBlock(), createElementBlock(
 						Fragment,
 						{ key: entry.id },
-						[createCommentVNode(" 运行分隔条：一次运行（或恢复）的起点 "), entry.kind === "run_started" || entry.kind === "run_resumed" ? (openBlock(), createElementBlock("div", _hoisted_3$o, [
+						[createCommentVNode(" 运行分隔条：一次运行（或恢复）的起点 "), entry.kind === "run_started" || entry.kind === "run_resumed" ? (openBlock(), createElementBlock("div", _hoisted_3$n, [
 							createBaseVNode(
 								"span",
-								_hoisted_4$l,
+								_hoisted_4$k,
 								toDisplayString(entry.kind === "run_resumed" ? "恢复运行" : "开始运行"),
 								1
 								/* TEXT */
@@ -205723,9 +206968,9 @@ ${rejectionText}` : delegationFeedback,
 		/* NEED_PATCH */
 	);
     }
-    var ContinuationSessionFeed = /*#__PURE__*/ _export_sfc(_sfc_main$r, [["render", _sfc_render$r], ["__scopeId", "data-v-d22ceff8"]]);
+    var ContinuationSessionFeed = /*#__PURE__*/ _export_sfc(_sfc_main$q, [["render", _sfc_render$q], ["__scopeId", "data-v-d22ceff8"]]);
 
-    var _sfc_main$q = /*@__PURE__*/ defineComponent({
+    var _sfc_main$p = /*@__PURE__*/ defineComponent({
         __name: 'ContinuationChat',
         props: {
             task: {},
@@ -205808,10 +207053,10 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-continuation-chat[data-v-e97ab1a7] { display: grid; gap: 10px;\n}\n.acu-v2-continuation-chat__status[data-v-e97ab1a7] { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-continuation-chat__badge[data-v-e97ab1a7] { padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2);\n}\n.acu-v2-continuation-chat__badge--running[data-v-e97ab1a7] { background: color-mix(in srgb, var(--acu-primary, #5b8def) 20%, transparent); color: var(--acu-primary, #5b8def);\n}\n.acu-v2-continuation-chat__badge--failed[data-v-e97ab1a7] { background: color-mix(in srgb, var(--acu-danger, #d65b5b) 18%, transparent); color: var(--acu-danger, #d65b5b);\n}\n.acu-v2-continuation-chat__status-item[data-v-e97ab1a7] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-chat__notice[data-v-e97ab1a7] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-chat__composer[data-v-e97ab1a7] { display: grid; gap: 8px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 8px; background: var(--acu-bg-2);\n}\n.acu-v2-continuation-chat__input[data-v-e97ab1a7] { width: 100%; box-sizing: border-box; resize: vertical; min-height: 62px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent); border-radius: 6px; background: var(--acu-bg-1, var(--acu-bg-2)); color: var(--acu-text-1); font: inherit; font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-v2-continuation-chat__input[data-v-e97ab1a7]:focus { outline: none; border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent);\n}\n.acu-v2-continuation-chat__composer-actions[data-v-e97ab1a7] { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-continuation-chat__hint[data-v-e97ab1a7] { margin-right: auto; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\r\n\r\n/* 手机窄屏：快捷键提示没有意义直接隐藏；按钮均分整行方便点按；\r\n   输入框字号提到 16px，避免 iOS Safari 聚焦时自动放大页面。 */\n@media (max-width: 640px) {\n.acu-v2-continuation-chat__hint[data-v-e97ab1a7] { display: none;\n}\n.acu-v2-continuation-chat__composer-actions[data-v-e97ab1a7] > * { flex: 1 1 auto;\n}\n.acu-v2-continuation-chat__input[data-v-e97ab1a7] { font-size: 16px; min-height: 56px;\n}\n.acu-v2-continuation-chat__composer[data-v-e97ab1a7] { padding: 8px;\n}\n}\r\n", "src/presentation-v2/components/ContinuationChat.vue#style-0-e97ab1a7");
     var ContinuationChat_vue_vue_type_style_index_0_scoped_e97ab1a7_lang = null;
 
-    const _hoisted_1$q = { class: "acu-v2-continuation-chat" };
-    const _hoisted_2$p = { class: "acu-v2-continuation-chat__status" };
-    const _hoisted_3$n = { class: "acu-v2-continuation-chat__status-item" };
-    const _hoisted_4$k = { class: "acu-v2-continuation-chat__status-item" };
+    const _hoisted_1$p = { class: "acu-v2-continuation-chat" };
+    const _hoisted_2$o = { class: "acu-v2-continuation-chat__status" };
+    const _hoisted_3$m = { class: "acu-v2-continuation-chat__status-item" };
+    const _hoisted_4$j = { class: "acu-v2-continuation-chat__status-item" };
     const _hoisted_5$h = {
 	key: 0,
 	class: "acu-v2-continuation-chat__status-item"
@@ -205825,9 +207070,9 @@ ${rejectionText}` : delegationFeedback,
     const _hoisted_9$d = ["value", "placeholder"];
     const _hoisted_10$d = { class: "acu-v2-continuation-chat__composer-actions" };
     const _hoisted_11$d = { class: "acu-v2-continuation-chat__hint" };
-    function _sfc_render$q(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$q, [
-		createBaseVNode("div", _hoisted_2$p, [
+    function _sfc_render$p(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$p, [
+		createBaseVNode("div", _hoisted_2$o, [
 			createBaseVNode(
 				"span",
 				{ class: normalizeClass(["acu-v2-continuation-chat__badge", `acu-v2-continuation-chat__badge--${$setup.statusTone}`]) },
@@ -205837,14 +207082,14 @@ ${rejectionText}` : delegationFeedback,
 			),
 			createBaseVNode(
 				"span",
-				_hoisted_3$n,
+				_hoisted_3$m,
 				toDisplayString($props.stageText),
 				1
 				/* TEXT */
 			),
 			createBaseVNode(
 				"span",
-				_hoisted_4$k,
+				_hoisted_4$j,
 				"已完成 " + toDisplayString($props.completedTurns) + " / " + toDisplayString($props.totalTurns) + " 轮",
 				1
 				/* TEXT */
@@ -205914,9 +207159,9 @@ ${rejectionText}` : delegationFeedback,
 		}, 8, ["disabled"]))])])
 	]);
     }
-    var ContinuationChat = /*#__PURE__*/ _export_sfc(_sfc_main$q, [["render", _sfc_render$q], ["__scopeId", "data-v-e97ab1a7"]]);
+    var ContinuationChat = /*#__PURE__*/ _export_sfc(_sfc_main$p, [["render", _sfc_render$p], ["__scopeId", "data-v-e97ab1a7"]]);
 
-    var _sfc_main$p = /*@__PURE__*/ defineComponent({
+    var _sfc_main$o = /*@__PURE__*/ defineComponent({
         __name: 'UserRequirementsEditor',
         props: {
             items: {},
@@ -205948,19 +207193,19 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-requirements-editor[data-v-3b2e4eb2] { display: grid; gap: 10px;\n}\n.acu-requirements-editor__hint[data-v-3b2e4eb2] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-requirements-editor__row[data-v-3b2e4eb2] { display: grid; gap: 6px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px;\n}\n.acu-requirements-editor__row label[data-v-3b2e4eb2] { color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-requirements-editor__row button[data-v-3b2e4eb2] { justify-self: end;\n}\n.acu-requirements-editor__actions[data-v-3b2e4eb2] { display: flex; flex-wrap: wrap; align-items: center; gap: 8px;\n}\n.acu-requirements-editor__spacer[data-v-3b2e4eb2] { flex: 1;\n}\n.acu-requirements-editor__error[data-v-3b2e4eb2] { margin: 0; color: var(--acu-danger, #d65b5b); font-size: var(--acu-font-size-body, 12px);\n}\n", "src/presentation-v2/components/UserRequirementsEditor.vue#style-0-3b2e4eb2");
     var UserRequirementsEditor_vue_vue_type_style_index_0_scoped_3b2e4eb2_lang = null;
 
-    const _hoisted_1$p = {
+    const _hoisted_1$o = {
 	class: "acu-requirements-editor",
 	"aria-label": "用户要求编辑"
     };
-    const _hoisted_2$o = ["for"];
-    const _hoisted_3$m = { class: "acu-requirements-editor__actions" };
-    const _hoisted_4$j = {
+    const _hoisted_2$n = ["for"];
+    const _hoisted_3$l = { class: "acu-requirements-editor__actions" };
+    const _hoisted_4$i = {
 	key: 0,
 	role: "alert",
 	class: "acu-requirements-editor__error"
     };
-    function _sfc_render$p(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$p, [
+    function _sfc_render$o(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$o, [
 		_cache[8] || (_cache[8] = createBaseVNode(
 			"p",
 			{ class: "acu-requirements-editor__hint" },
@@ -205976,7 +207221,7 @@ ${rejectionText}` : delegationFeedback,
 					key: index,
 					class: "acu-requirements-editor__row"
 				}, [
-					createBaseVNode("label", { for: `acu-requirement-${$props.editorId}-${index}` }, "要求 " + toDisplayString(index + 1), 9, _hoisted_2$o),
+					createBaseVNode("label", { for: `acu-requirement-${$props.editorId}-${index}` }, "要求 " + toDisplayString(index + 1), 9, _hoisted_2$n),
 					createVNode($setup["AcuTextarea"], {
 						id: `acu-requirement-${$props.editorId}-${index}`,
 						"model-value": item,
@@ -206008,7 +207253,7 @@ ${rejectionText}` : delegationFeedback,
 			128
 			/* KEYED_FRAGMENT */
 		)),
-		createBaseVNode("div", _hoisted_3$m, [
+		createBaseVNode("div", _hoisted_3$l, [
 			createVNode($setup["AcuButton"], {
 				disabled: $props.disabled || $props.saving,
 				onClick: _cache[0] || (_cache[0] = ($event) => $setup.emit("update:items", [...$props.items, ""]))
@@ -206054,14 +207299,14 @@ ${rejectionText}` : delegationFeedback,
 		]),
 		$props.error ? (openBlock(), createElementBlock(
 			"p",
-			_hoisted_4$j,
+			_hoisted_4$i,
 			toDisplayString($props.error),
 			1
 			/* TEXT */
 		)) : createCommentVNode("v-if", true)
 	]);
     }
-    var UserRequirementsEditor = /*#__PURE__*/ _export_sfc(_sfc_main$p, [["render", _sfc_render$p], ["__scopeId", "data-v-3b2e4eb2"]]);
+    var UserRequirementsEditor = /*#__PURE__*/ _export_sfc(_sfc_main$o, [["render", _sfc_render$o], ["__scopeId", "data-v-3b2e4eb2"]]);
 
     /** 用户可分模块编辑的资料。schemaVersion / settledThroughIndex 等运行时字段不进草稿。 */
     const CONTINUATION_MATERIAL_MODULES_ACU = ['hooks', 'infoGap', 'constraints', 'storyArc', 'chronology', 'webRefs', 'userRequirements'];
@@ -206074,7 +207319,7 @@ ${rejectionText}` : delegationFeedback,
         webRefs: '百科资料库',
         userRequirements: '用户要求',
     };
-    function errorMessage_ACU$2(error) {
+    function errorMessage_ACU$1(error) {
         if (error instanceof ContinuationValidationError_ACU)
             return error.error.message;
         return error instanceof Error ? error.message : '资料操作失败';
@@ -206145,7 +207390,7 @@ ${rejectionText}` : delegationFeedback,
                 fieldSnapshot.value = { records: {} };
                 for (const module of CONTINUATION_MATERIAL_MODULES_ACU)
                     modules[module] = emptyModuleState_ACU();
-                loadError.value = errorMessage_ACU$2(caught);
+                loadError.value = errorMessage_ACU$1(caught);
             }
         }
         function updateDraft(module, value) {
@@ -206184,7 +207429,7 @@ ${rejectionText}` : delegationFeedback,
                 return true;
             }
             catch (caught) {
-                state.error = errorMessage_ACU$2(caught);
+                state.error = errorMessage_ACU$1(caught);
                 return false;
             }
             finally {
@@ -206194,7 +207439,7 @@ ${rejectionText}` : delegationFeedback,
         return { snapshot, loadError, diagnostics, fieldSnapshot, modules, reload, save, discard, updateDraft };
     }
 
-    var _sfc_main$o = /*@__PURE__*/ defineComponent({
+    var _sfc_main$n = /*@__PURE__*/ defineComponent({
         __name: 'ContinuationMaterialsPanel',
         props: {
             task: {},
@@ -206410,10 +207655,10 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-continuation-materials[data-v-55feabc6] { display: grid; gap: 12px;\n}\n.acu-v2-continuation-materials__tabs[data-v-55feabc6] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-continuation-materials__tab[data-v-55feabc6] { padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 999px; background: transparent; color: var(--acu-text-2); cursor: pointer; font: inherit; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__tab--active[data-v-55feabc6] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); background: color-mix(in srgb, var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__tab-actions[data-v-55feabc6] { display: flex; gap: 6px; margin-left: auto;\n}\n.acu-v2-continuation-materials__confirm[data-v-55feabc6] { margin: 0; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 40%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--acu-danger, #d65b5b) 7%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__confirm-actions[data-v-55feabc6] { display: inline-flex; gap: 6px; margin-left: 8px; vertical-align: middle;\n}\n.acu-v2-continuation-materials__outline[data-v-55feabc6] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__empty[data-v-55feabc6] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__meta[data-v-55feabc6] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__error[data-v-55feabc6] { margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__actions[data-v-55feabc6] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-continuation-materials__block[data-v-55feabc6] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 6px; display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__block > summary[data-v-55feabc6] { cursor: pointer; color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__block--current[data-v-55feabc6] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 45%, transparent);\n}\n.acu-v2-continuation-materials__list[data-v-55feabc6] { display: flex; flex-direction: column; gap: 6px; padding-left: 22px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__outline-summary[data-v-55feabc6], .acu-v2-continuation-materials__outline-node[data-v-55feabc6] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 6px; display: grid; gap: 5px;\n}\n.acu-v2-continuation-materials__outline-heading[data-v-55feabc6] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__outline-nodes[data-v-55feabc6] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__turns[data-v-55feabc6] { display: grid; gap: 5px; margin: 0; padding-left: 22px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__turns > li[data-v-55feabc6] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-continuation-materials__turn--done[data-v-55feabc6] { color: var(--acu-text-3);\n}\n.acu-v2-continuation-materials__turn--current[data-v-55feabc6] { padding: 5px 7px; margin-left: -7px; border-radius: 4px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-continuation-materials__turn--planned[data-v-55feabc6] { color: var(--acu-text-2);\n}\n.acu-v2-continuation-materials__cards[data-v-55feabc6] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__card[data-v-55feabc6] { padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 6px; display: grid; gap: 4px;\n}\n.acu-v2-continuation-materials__card--failed[data-v-55feabc6] { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent);\n}\n.acu-v2-continuation-materials__card--retired[data-v-55feabc6] { opacity: 0.55;\n}\n.acu-v2-continuation-materials__card > summary.acu-v2-continuation-materials__card-head[data-v-55feabc6] { cursor: pointer; list-style: none;\n}\n.acu-v2-continuation-materials__card-meta a[data-v-55feabc6] { color: inherit; word-break: break-all;\n}\n.acu-v2-continuation-materials__card-head[data-v-55feabc6] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__card-body[data-v-55feabc6] { margin: 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__card-meta[data-v-55feabc6] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-materials__badge[data-v-55feabc6] { padding: 1px 8px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); color: var(--acu-text-2); font-size: 11px;\n}\n.acu-v2-continuation-materials__badge--primary[data-v-55feabc6] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); color: var(--acu-text-1); background: color-mix(in srgb, var(--acu-primary, #5b8def) 12%, transparent);\n}\n.acu-v2-continuation-materials__badge--muted[data-v-55feabc6] { opacity: 0.8;\n}\n.acu-v2-continuation-materials__json[data-v-55feabc6] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__json > summary[data-v-55feabc6] { cursor: pointer; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-materials__history[data-v-55feabc6] { display: grid; gap: 8px;\n}\n.acu-v2-continuation-materials__history-revision[data-v-55feabc6] { padding: 8px; border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 28%, transparent);\n}\n\n/* 手机窄屏：刷新/清空按钮换到独立一行靠右，避免和页签挤成两行半。 */\n@media (max-width: 640px) {\n.acu-v2-continuation-materials__tab-actions[data-v-55feabc6] { margin-left: 0; width: 100%; justify-content: flex-end;\n}\n.acu-v2-continuation-materials__confirm-actions[data-v-55feabc6] { display: flex; margin: 8px 0 0;\n}\n}\n", "src/presentation-v2/components/ContinuationMaterialsPanel.vue#style-0-55feabc6");
     var ContinuationMaterialsPanel_vue_vue_type_style_index_0_scoped_55feabc6_lang = null;
 
-    const _hoisted_1$o = { class: "acu-v2-continuation-materials" };
-    const _hoisted_2$n = { class: "acu-v2-continuation-materials__tabs" };
-    const _hoisted_3$l = ["onClick"];
-    const _hoisted_4$i = { class: "acu-v2-continuation-materials__tab-actions" };
+    const _hoisted_1$n = { class: "acu-v2-continuation-materials" };
+    const _hoisted_2$m = { class: "acu-v2-continuation-materials__tabs" };
+    const _hoisted_3$k = ["onClick"];
+    const _hoisted_4$h = { class: "acu-v2-continuation-materials__tab-actions" };
     const _hoisted_5$g = {
 	key: 0,
 	class: "acu-v2-continuation-materials__confirm"
@@ -206734,9 +207979,9 @@ ${rejectionText}` : delegationFeedback,
 	class: "acu-v2-continuation-materials__error"
     };
     const _hoisted_146 = { class: "acu-v2-continuation-materials__actions" };
-    function _sfc_render$o(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$o, [
-		createBaseVNode("div", _hoisted_2$n, [(openBlock(), createElementBlock(
+    function _sfc_render$n(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$n, [
+		createBaseVNode("div", _hoisted_2$m, [(openBlock(), createElementBlock(
 			Fragment,
 			null,
 			renderList($setup.TABS, (tab) => {
@@ -206745,11 +207990,11 @@ ${rejectionText}` : delegationFeedback,
 					type: "button",
 					class: normalizeClass(["acu-v2-continuation-materials__tab", { "acu-v2-continuation-materials__tab--active": $setup.activeTab === tab.id }]),
 					onClick: ($event) => $setup.activeTab = tab.id
-				}, toDisplayString(tab.label), 11, _hoisted_3$l);
+				}, toDisplayString(tab.label), 11, _hoisted_3$k);
 			}),
 			64
 			/* STABLE_FRAGMENT */
-		)), createBaseVNode("div", _hoisted_4$i, [createVNode($setup["AcuButton"], {
+		)), createBaseVNode("div", _hoisted_4$h, [createVNode($setup["AcuButton"], {
 			loading: $props.busy,
 			onClick: _cache[0] || (_cache[0] = ($event) => $setup.reload())
 		}, {
@@ -208344,7 +209589,7 @@ ${rejectionText}` : delegationFeedback,
 		)) : createCommentVNode("v-if", true)
 	]);
     }
-    var ContinuationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$o, [["render", _sfc_render$o], ["__scopeId", "data-v-55feabc6"]]);
+    var ContinuationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$n, [["render", _sfc_render$n], ["__scopeId", "data-v-55feabc6"]]);
 
     /** 连续高压轮上限的可配置上界。页面是 .vue，不能直接 import 服务层常量，由本组合式函数中转。 */
     const CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_UI_ACU = CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU;
@@ -208362,7 +209607,7 @@ ${rejectionText}` : delegationFeedback,
         chat_changed: '聊天已切换',
         completed: '任务完成',
     };
-    function errorMessage_ACU$1(error) {
+    function errorMessage_ACU(error) {
         if (error instanceof ContinuationValidationError_ACU)
             return error.error.message;
         return error instanceof Error ? error.message : '智能续写操作失败';
@@ -208394,7 +209639,7 @@ ${rejectionText}` : delegationFeedback,
             }
             catch (error) {
                 envelope.value = null;
-                toast.error(errorMessage_ACU$1(error), { muteable: false });
+                toast.error(errorMessage_ACU(error), { muteable: false });
             }
         }
         async function initialize() {
@@ -208404,7 +209649,7 @@ ${rejectionText}` : delegationFeedback,
             const currentInitialization = runtime.initialize()
                 .then(() => refresh())
                 .catch(error => {
-                toast.error(errorMessage_ACU$1(error), { muteable: false });
+                toast.error(errorMessage_ACU(error), { muteable: false });
                 refresh();
             })
                 .finally(() => {
@@ -208460,7 +209705,7 @@ ${rejectionText}` : delegationFeedback,
                     toast.info(error.error.message);
                 }
                 else {
-                    toast.error(errorMessage_ACU$1(error), { muteable: false });
+                    toast.error(errorMessage_ACU(error), { muteable: false });
                 }
                 refresh();
                 return false;
@@ -208545,7 +209790,7 @@ ${rejectionText}` : delegationFeedback,
                 if (stopEpoch !== epochAtStart)
                     return true;
                 let startFailure = '';
-                const started = await run_ACU(() => runtime.orchestrator.continueTask(), actionBeforeMessage !== null, true, error => { startFailure = errorMessage_ACU$1(error); });
+                const started = await run_ACU(() => runtime.orchestrator.continueTask(), actionBeforeMessage !== null, true, error => { startFailure = errorMessage_ACU(error); });
                 if (!started) {
                     // 启动失败的原因已由编排器落成 lastError（或就是被拒的异常本身）；只说「失败」用户没法判断下一步。
                     const reason = startFailure || task.value?.lastError?.message || (busy.value ? '另一项续写操作正在执行' : '');
@@ -208554,7 +209799,7 @@ ${rejectionText}` : delegationFeedback,
                 return true;
             }
             catch (error) {
-                toast.error(errorMessage_ACU$1(error), { muteable: false });
+                toast.error(errorMessage_ACU(error), { muteable: false });
                 refresh();
                 return false;
             }
@@ -208579,7 +209824,7 @@ ${rejectionText}` : delegationFeedback,
                 envelope.value = result.envelope;
             }
             catch (error) {
-                toast.error(errorMessage_ACU$1(error), { muteable: false });
+                toast.error(errorMessage_ACU(error), { muteable: false });
             }
             finally {
                 try {
@@ -208629,7 +209874,7 @@ ${rejectionText}` : delegationFeedback,
             catch (error) {
                 if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_OPERATION_BUSY')
                     return 'busy';
-                toast.error(errorMessage_ACU$1(error), { muteable: false });
+                toast.error(errorMessage_ACU(error), { muteable: false });
                 refresh();
                 return 'failed';
             }
@@ -208686,7 +209931,7 @@ ${rejectionText}` : delegationFeedback,
                 return { outlinePrompt, agentPrompts };
             }
             catch (error) {
-                throw new Error(`提示词校验失败：${errorMessage_ACU$1(error)}`);
+                throw new Error(`提示词校验失败：${errorMessage_ACU(error)}`);
             }
         }
         async function saveActiveOutline(outline) {
@@ -208708,7 +209953,7 @@ ${rejectionText}` : delegationFeedback,
                 return true;
             }
             catch (error) {
-                toast.error(errorMessage_ACU$1(error), { muteable: false });
+                toast.error(errorMessage_ACU(error), { muteable: false });
                 refresh();
                 return false;
             }
@@ -208864,7 +210109,7 @@ ${rejectionText}` : delegationFeedback,
 
     const INHERIT_CHANNEL_VALUE$1 = '__inherit__';
     const MATERIALS_AUTO_REFRESH_DEBOUNCE_MS = 400;
-    var _sfc_main$n = /*@__PURE__*/ defineComponent({
+    var _sfc_main$m = /*@__PURE__*/ defineComponent({
         __name: 'ContinuationPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -209494,13 +210739,13 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-continuation-page[data-v-92c2555f] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-continuation-page__layout[data-v-92c2555f] { align-items: start;\n}\n.acu-v2-continuation-page__actions[data-v-92c2555f] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-continuation-page__actions--start[data-v-92c2555f] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-continuation-page__file-input[data-v-92c2555f] { display: none;\n}\n.acu-v2-continuation-page__error[data-v-92c2555f] { color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__meta[data-v-92c2555f] { color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-continuation-page__settings-grid[data-v-92c2555f] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-continuation-page__settings-grid label[data-v-92c2555f] { display: grid; gap: 5px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-continuation-page__settings-grid select[data-v-92c2555f] { min-height: 30px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent); border-radius: 4px; background: var(--acu-bg-2); color: var(--acu-text-1);\n}\n.acu-v2-continuation-page__toggles[data-v-92c2555f] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-continuation-page__groups[data-v-92c2555f] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-continuation-page__group[data-v-92c2555f] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-continuation-page__group[data-v-92c2555f] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-continuation-page__group[data-v-92c2555f] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-continuation-page__group[data-v-92c2555f] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-continuation-page__group[data-v-92c2555f] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-continuation-page__group .acu-v2-continuation-page__actions[data-v-92c2555f] { margin-top: 0;\n}\n.acu-v2-continuation-page__subheading[data-v-92c2555f] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-continuation-page__subheading[data-v-92c2555f]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-continuation-page[data-v-92c2555f] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-continuation-page[data-v-92c2555f] { padding: 10px; gap: 12px;\n}\n.acu-v2-continuation-page__settings-grid[data-v-92c2555f] { grid-template-columns: 1fr;\n}\n.acu-v2-continuation-page__actions[data-v-92c2555f] > * { flex: 1 1 auto;\n}\n.acu-v2-continuation-page__group[data-v-92c2555f] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/ContinuationPage.vue#style-0-92c2555f");
     var ContinuationPage_vue_vue_type_style_index_0_scoped_92c2555f_lang = null;
 
-    const _hoisted_1$n = { class: "acu-v2-continuation-page" };
-    const _hoisted_2$m = {
+    const _hoisted_1$m = { class: "acu-v2-continuation-page" };
+    const _hoisted_2$l = {
 	key: 0,
 	class: "acu-v2-continuation-page__error"
     };
-    const _hoisted_3$k = { class: "acu-v2-continuation-page__actions" };
-    const _hoisted_4$h = { class: "acu-v2-continuation-page__settings-grid" };
+    const _hoisted_3$j = { class: "acu-v2-continuation-page__actions" };
+    const _hoisted_4$g = { class: "acu-v2-continuation-page__settings-grid" };
     const _hoisted_5$f = { class: "acu-v2-continuation-page__toggles" };
     const _hoisted_6$e = { class: "acu-v2-continuation-page__groups" };
     const _hoisted_7$d = { class: "acu-v2-continuation-page__meta" };
@@ -209539,8 +210784,8 @@ ${rejectionText}` : delegationFeedback,
 	key: 2,
 	class: "acu-v2-continuation-page__error"
     };
-    function _sfc_render$n(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$n, [
+    function _sfc_render$m(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$m, [
 		createVNode($setup["AcuPanel"], {
 			title: "Agent 会话",
 			description: "像和 coding agent 对话一样使用：随时输入、随时打断。主 Agent 按需派工子代理并管理大纲，最终正文仍由酒馆模型生成。"
@@ -209591,12 +210836,12 @@ ${rejectionText}` : delegationFeedback,
 				}, null, 8, ["model-value"]),
 				$setup.outlineDraftError ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_2$m,
+					_hoisted_2$l,
 					toDisplayString($setup.outlineDraftError),
 					1
 					/* TEXT */
 				)) : createCommentVNode("v-if", true),
-				createBaseVNode("div", _hoisted_3$k, [createVNode($setup["AcuButton"], {
+				createBaseVNode("div", _hoisted_3$j, [createVNode($setup["AcuButton"], {
 					variant: "primary",
 					loading: $setup.runtime.busy.value,
 					onClick: $setup.acceptOutlineDraft
@@ -209638,7 +210883,7 @@ ${rejectionText}` : delegationFeedback,
 				description: "修改后自动保存；任务运行中也可以改，改动会在本轮空档落盘、下一轮开始时生效。常用项直接可见，其余参数按主题折叠，默认值已能满足大多数场景。"
 			}, {
 				default: withCtx(() => [
-					createBaseVNode("div", _hoisted_4$h, [
+					createBaseVNode("div", _hoisted_4$g, [
 						createVNode($setup["AcuFormRow"], {
 							label: "阶段规模",
 							hint: "一个阶段规划多少轮正文；轮数越多，单个大纲覆盖的剧情越长。"
@@ -210532,7 +211777,7 @@ ${rejectionText}` : delegationFeedback,
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$n, [["render", _sfc_render$n], ["__scopeId", "data-v-92c2555f"]]);
+    var ContinuationPage = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-92c2555f"]]);
 
     /** 页面（.vue）不能直接引用 service 值；无真实调用入口的研究员仅保留旧配置迁移，不再暴露为可编辑 Agent。 */
     const WORLD_SIMULATION_AGENT_ORDER_ACU = WORLD_SIMULATION_AGENT_NAMES_ACU
@@ -210560,7 +211805,7 @@ ${rejectionText}` : delegationFeedback,
     }
 
     const FOLD_VISIBLE_STEP_ACU = 40;
-    var _sfc_main$m = /*@__PURE__*/ defineComponent({
+    var _sfc_main$l = /*@__PURE__*/ defineComponent({
         __name: 'WorldSimulationSessionFeed',
         props: {
             entries: {},
@@ -210645,19 +211890,19 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n/* 与 ContinuationSessionFeed 保持同一份样式：纵向列表用 flex 列而不是 grid（容器带 max-height 时\n   grid 会把行压缩到最小贡献，卡片会被纵向压扁成一条条细线）；flex 列 + 子项 flex:none 保证\n   每个条目保持内容高度，超出部分滚动。 */\n.acu-v2-session-feed[data-v-899be23b] { display: flex; flex-direction: column; gap: 6px; max-height: 460px; overflow-y: auto; padding: 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--acu-bg-2) 60%, transparent);\n}\n.acu-v2-session-feed[data-v-899be23b] > * { flex: 0 0 auto;\n}\n.acu-v2-session-feed__empty[data-v-899be23b] { margin: 0; padding: 18px 8px; color: var(--acu-text-3); text-align: center; font-size: var(--acu-font-size-body, 12px);\n}\n\n/* 折叠横幅：置于列表顶部，提示还有多少更早消息被折叠 */\n.acu-v2-session-feed__fold[data-v-899be23b] { padding: 6px 10px; border: 1px dashed color-mix(in srgb, var(--acu-text-3) 40%, transparent); border-radius: 8px; background: transparent; color: var(--acu-text-3); font: inherit; font-size: var(--acu-font-size-caption, 11px); cursor: pointer; text-align: center;\n}\n.acu-v2-session-feed__fold[data-v-899be23b]:hover { color: var(--acu-text-2); border-color: color-mix(in srgb, var(--acu-text-3) 60%, transparent);\n}\n\n/* 运行分隔条 */\n.acu-v2-session-feed__run-divider[data-v-899be23b] { display: flex; align-items: center; gap: 8px; padding: 4px 2px; margin-top: 4px;\n}\n.acu-v2-session-feed__run-divider[data-v-899be23b]::after { content: ''; flex: 1; height: 1px; background: color-mix(in srgb, var(--acu-text-3) 24%, transparent);\n}\n.acu-v2-session-feed__run-divider-badge[data-v-899be23b] { flex: none; padding:1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 18%, transparent); color: var(--acu-primary, #5b8def); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__run-divider-title[data-v-899be23b] { color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n\n/* 用户消息气泡 */\n.acu-v2-session-feed__user[data-v-899be23b] { display: flex; justify-content: flex-end; padding: 4px 2px;\n}\n.acu-v2-session-feed__user-bubble[data-v-899be23b] { max-width: 82%; padding: 7px 11px; border-radius: 10px 10px 2px 10px; background: color-mix(in srgb, var(--acu-primary, #5b8def) 16%, var(--acu-bg-2)); border: 1px solid color-mix(in srgb, var(--acu-primary, #5b8def) 28%, transparent);\n}\n.acu-v2-session-feed__user-text[data-v-899be23b] { margin: 0; color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-session-feed__user-bubble .acu-v2-session-feed__time[data-v-899be23b] { display: block; margin: 3px 0 0; text-align: right;\n}\n\n/* 思考条目 */\n.acu-v2-session-feed__thought[data-v-899be23b] { padding: 2px 4px 2px 10px; border-left: 2px solid color-mix(in srgb, var(--acu-text-3) 30%, transparent);\n}\n.acu-v2-session-feed__thought-label[data-v-899be23b] { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__thought-text[data-v-899be23b] { margin: 2px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-style: italic; white-space: pre-wrap; word-break: break-word;\n}\n\n/* 协议修正是内部恢复信息，默认只保留一行弱提示；用户主动展开时才显示诊断片段。 */\n.acu-v2-session-feed__protocol[data-v-899be23b] { margin-left: 16px; padding: 3px 8px; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__protocol-summary[data-v-899be23b] { display: flex; align-items: center; gap: 8px; cursor: pointer; list-style-position: inside;\n}\n.acu-v2-session-feed__protocol-detail[data-v-899be23b] { margin: 4px 0 0 16px; color: var(--acu-text-3); white-space: pre-wrap; word-break: break-word;\n}\n\n/* 工具调用卡片 */\n.acu-v2-session-feed__card[data-v-899be23b] { border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 8px; background: var(--acu-bg-2); animation: acu-v2-session-feed-in-899be23b 0.18s ease-out; overflow: hidden;\n}\n.acu-v2-session-feed__card--delegation[data-v-899be23b], .acu-v2-session-feed__card--stage_plan[data-v-899be23b], .acu-v2-session-feed__card--tool_read[data-v-899be23b], .acu-v2-session-feed__card--write_sql[data-v-899be23b] { margin-left: 16px;\n}\n.acu-v2-session-feed__card--finalize[data-v-899be23b], .acu-v2-session-feed__card--run_completed[data-v-899be23b] { border-left: 3px solid color-mix(in srgb, var(--acu-success, #4fa36c) 75%, transparent); background: color-mix(in srgb, var(--acu-success, #4fa36c) 7%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--failed[data-v-899be23b] { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent); background: color-mix(in srgb, var(--acu-danger, #d65b5b) 6%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card--running[data-v-899be23b] { border-left: 3px solid color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent);\n}\n/* 交接报告：琥珀色标出「AI 可见性边界」，与成功/失败/进行中的语义色区分 */\n.acu-v2-session-feed__card--handoff[data-v-899be23b] { border-left: 3px solid color-mix(in srgb, #c9963e 75%, transparent); background: color-mix(in srgb, #c9963e 7%, var(--acu-bg-2));\n}\n.acu-v2-session-feed__card-head[data-v-899be23b] { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border: none; background: transparent; cursor: pointer; text-align: left; font: inherit; color: inherit;\n}\n.acu-v2-session-feed__status[data-v-899be23b] { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; font-size: 10px;\n}\n.acu-v2-session-feed__status--done[data-v-899be23b] { background: color-mix(in srgb, var(--acu-success, #4fa36c) 20%, transparent); color: var(--acu-success, #4fa36c);\n}\n.acu-v2-session-feed__status--failed[data-v-899be23b] { background: color-mix(in srgb, var(--acu-danger, #d65b5b) 20%, transparent); color: var(--acu-danger, #d65b5b);\n}\n.acu-v2-session-feed__status--running[data-v-899be23b] { background: transparent;\n}\n.acu-v2-session-feed__spinner[data-v-899be23b] { width: 12px; height: 12px; border: 2px solid color-mix(in srgb, var(--acu-primary, #5b8def) 30%, transparent); border-top-color: var(--acu-primary, #5b8def); border-radius: 50%; animation: acu-v2-session-feed-spin-899be23b 0.8s linear infinite;\n}\n.acu-v2-session-feed__badge[data-v-899be23b] { flex: none; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__title[data-v-899be23b] { color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;\n}\n.acu-v2-session-feed__time[data-v-899be23b] { margin-left: auto; flex: none; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-session-feed__chevron[data-v-899be23b] { flex: none; color: var(--acu-text-3); font-size: 10px; transition: transform 0.15s ease;\n}\n.acu-v2-session-feed__chevron--open[data-v-899be23b] { transform: rotate(180deg);\n}\n.acu-v2-session-feed__preview[data-v-899be23b] { margin: 0; padding: 0 10px 7px 34px; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;\n}\n.acu-v2-session-feed__detail[data-v-899be23b] { margin: 0; padding: 0 10px 8px 34px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-session-feed__running[data-v-899be23b] { display: flex; align-items: center; gap: 8px; padding: 6px 10px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-session-feed__pulse[data-v-899be23b] { width: 8px; height: 8px; border-radius: 50%; background: var(--acu-primary, #5b8def); animation: acu-v2-session-feed-pulse-899be23b 1.1s ease-in-out infinite;\n}\n/* 手机窄屏：高度跟随视口而不是固定 460px；层级缩进与详情缩进收窄，\n   横向空间留给正文；用户气泡放宽到近整行。 */\n@media (max-width: 640px) {\n.acu-v2-session-feed[data-v-899be23b] { max-height: 62vh; padding: 8px;\n}\n.acu-v2-session-feed__protocol[data-v-899be23b] { margin-left: 8px;\n}\n.acu-v2-session-feed__card--delegation[data-v-899be23b], .acu-v2-session-feed__card--stage_plan[data-v-899be23b], .acu-v2-session-feed__card--tool_read[data-v-899be23b], .acu-v2-session-feed__card--write_sql[data-v-899be23b] { margin-left: 8px;\n}\n.acu-v2-session-feed__card-head[data-v-899be23b] { padding: 7px 8px; gap: 6px;\n}\n.acu-v2-session-feed__preview[data-v-899be23b] { padding: 0 8px 7px 12px;\n}\n.acu-v2-session-feed__detail[data-v-899be23b] { padding: 0 8px 8px 12px;\n}\n.acu-v2-session-feed__user-bubble[data-v-899be23b] { max-width: 94%;\n}\n}\n@keyframes acu-v2-session-feed-in-899be23b {\nfrom { opacity: 0; transform: translateY(4px);\n}\nto { opacity: 1; transform: none;\n}\n}\n@keyframes acu-v2-session-feed-pulse-899be23b {\n0%, 100% { opacity: 0.35;\n}\n50% { opacity: 1;\n}\n}\n@keyframes acu-v2-session-feed-spin-899be23b {\nto { transform: rotate(360deg);\n}\n}\n", "src/presentation-v2/components/WorldSimulationSessionFeed.vue#style-0-899be23b");
     var WorldSimulationSessionFeed_vue_vue_type_style_index_0_scoped_899be23b_lang = null;
 
-    const _hoisted_1$m = {
+    const _hoisted_1$l = {
 	ref: "feedElement",
 	class: "acu-v2-session-feed"
     };
-    const _hoisted_2$l = {
+    const _hoisted_2$k = {
 	key: 0,
 	class: "acu-v2-session-feed__empty"
     };
-    const _hoisted_3$j = {
+    const _hoisted_3$i = {
 	key: 0,
 	class: "acu-v2-session-feed__run-divider"
     };
-    const _hoisted_4$g = { class: "acu-v2-session-feed__run-divider-badge" };
+    const _hoisted_4$f = { class: "acu-v2-session-feed__run-divider-badge" };
     const _hoisted_5$e = { class: "acu-v2-session-feed__run-divider-title" };
     const _hoisted_6$d = { class: "acu-v2-session-feed__time" };
     const _hoisted_7$c = { class: "acu-v2-session-feed__user" };
@@ -210694,12 +211939,12 @@ ${rejectionText}` : delegationFeedback,
 	key: 2,
 	class: "acu-v2-session-feed__running"
     };
-    function _sfc_render$m(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$l(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"div",
-		_hoisted_1$m,
+		_hoisted_1$l,
 		[
-			!$props.entries.length ? (openBlock(), createElementBlock("p", _hoisted_2$l, " 还没有运行记录。发送一条补充后，格林推演主 Agent 的取证、派工、候选审核与提交过程会实时显示在这里。 ")) : createCommentVNode("v-if", true),
+			!$props.entries.length ? (openBlock(), createElementBlock("p", _hoisted_2$k, " 还没有运行记录。发送一条补充后，格林推演主 Agent 的取证、派工、候选审核与提交过程会实时显示在这里。 ")) : createCommentVNode("v-if", true),
 			$setup.hiddenCount > 0 ? (openBlock(), createElementBlock(
 				"button",
 				{
@@ -210719,10 +211964,10 @@ ${rejectionText}` : delegationFeedback,
 					return openBlock(), createElementBlock(
 						Fragment,
 						{ key: entry.id },
-						[createCommentVNode(" 运行分隔条：一次运行（或恢复）的起点 "), entry.kind === "run_started" || entry.kind === "run_resumed" ? (openBlock(), createElementBlock("div", _hoisted_3$j, [
+						[createCommentVNode(" 运行分隔条：一次运行（或恢复）的起点 "), entry.kind === "run_started" || entry.kind === "run_resumed" ? (openBlock(), createElementBlock("div", _hoisted_3$i, [
 							createBaseVNode(
 								"span",
-								_hoisted_4$g,
+								_hoisted_4$f,
 								toDisplayString(entry.kind === "run_resumed" ? "恢复运行" : "开始运行"),
 								1
 								/* TEXT */
@@ -210910,7 +212155,7 @@ ${rejectionText}` : delegationFeedback,
 		/* NEED_PATCH */
 	);
     }
-    var WorldSimulationSessionFeed = /*#__PURE__*/ _export_sfc(_sfc_main$m, [["render", _sfc_render$m], ["__scopeId", "data-v-899be23b"]]);
+    var WorldSimulationSessionFeed = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-899be23b"]]);
 
     const ANCHOR_DIFF_FIELDS_ACU = ['chatIdentity', 'messageKey', 'swipeId', 'contentDigest'];
     const DIGEST_DISPLAY_CHARS_ACU = 12;
@@ -210945,7 +212190,7 @@ ${rejectionText}` : delegationFeedback,
         return parts.length ? `锚点差异：${parts.join('；')}` : '';
     }
 
-    var _sfc_main$l = /*@__PURE__*/ defineComponent({
+    var _sfc_main$k = /*@__PURE__*/ defineComponent({
         __name: 'WorldSimulationChat',
         props: {
             task: {},
@@ -211021,10 +212266,10 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n/* 与 ContinuationChat 保持同一份样式：状态行、会话流、通知与 composer 全部同构。 */\n.acu-v2-agent-chat[data-v-c4ca1628] { display: grid; gap: 10px;\n}\n.acu-v2-agent-chat__status[data-v-c4ca1628] { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-agent-chat__badge[data-v-c4ca1628] { padding: 1px 8px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2);\n}\n.acu-v2-agent-chat__badge--running[data-v-c4ca1628] { background: color-mix(in srgb, var(--acu-primary, #5b8def) 20%, transparent); color: var(--acu-primary, #5b8def);\n}\n.acu-v2-agent-chat__badge--failed[data-v-c4ca1628] { background: color-mix(in srgb, var(--acu-danger, #d65b5b) 18%, transparent); color: var(--acu-danger, #d65b5b);\n}\n.acu-v2-agent-chat__status-item[data-v-c4ca1628] { color: var(--acu-text-3);\n}\n.acu-v2-agent-chat__notice[data-v-c4ca1628] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-agent-chat__anchor-diff[data-v-c4ca1628] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); white-space: pre-wrap;\n}\n.acu-v2-agent-chat__composer[data-v-c4ca1628] { display: grid; gap: 8px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 8px; background: var(--acu-bg-2);\n}\n.acu-v2-agent-chat__input[data-v-c4ca1628] { width: 100%; box-sizing: border-box; resize: vertical; min-height: 62px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent); border-radius: 6px; background: var(--acu-bg-1, var(--acu-bg-2)); color: var(--acu-text-1); font: inherit; font-size: var(--acu-font-size-body-lg, 13px);\n}\n.acu-v2-agent-chat__input[data-v-c4ca1628]:focus { outline: none; border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent);\n}\n.acu-v2-agent-chat__composer-actions[data-v-c4ca1628] { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-agent-chat__hint[data-v-c4ca1628] { margin-right: auto; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n\n/* 手机窄屏：快捷键提示没有意义直接隐藏；按钮均分整行方便点按；\n   输入框字号提到 16px，避免 iOS Safari 聚焦时自动放大页面。 */\n@media (max-width: 640px) {\n.acu-v2-agent-chat__hint[data-v-c4ca1628] { display: none;\n}\n.acu-v2-agent-chat__composer-actions[data-v-c4ca1628] > * { flex: 1 1 auto;\n}\n.acu-v2-agent-chat__input[data-v-c4ca1628] { font-size: 16px; min-height: 56px;\n}\n.acu-v2-agent-chat__composer[data-v-c4ca1628] { padding: 8px;\n}\n}\n", "src/presentation-v2/components/WorldSimulationChat.vue#style-0-c4ca1628");
     var WorldSimulationChat_vue_vue_type_style_index_0_scoped_c4ca1628_lang = null;
 
-    const _hoisted_1$l = { class: "acu-v2-agent-chat" };
-    const _hoisted_2$k = { class: "acu-v2-agent-chat__status" };
-    const _hoisted_3$i = { class: "acu-v2-agent-chat__status-item" };
-    const _hoisted_4$f = {
+    const _hoisted_1$k = { class: "acu-v2-agent-chat" };
+    const _hoisted_2$j = { class: "acu-v2-agent-chat__status" };
+    const _hoisted_3$h = { class: "acu-v2-agent-chat__status-item" };
+    const _hoisted_4$e = {
 	key: 0,
 	class: "acu-v2-agent-chat__status-item"
     };
@@ -211044,9 +212289,9 @@ ${rejectionText}` : delegationFeedback,
     const _hoisted_9$9 = ["value", "placeholder"];
     const _hoisted_10$9 = { class: "acu-v2-agent-chat__composer-actions" };
     const _hoisted_11$9 = { class: "acu-v2-agent-chat__hint" };
-    function _sfc_render$l(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$l, [
-		createBaseVNode("div", _hoisted_2$k, [
+    function _sfc_render$k(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$k, [
+		createBaseVNode("div", _hoisted_2$j, [
 			createBaseVNode(
 				"span",
 				{ class: normalizeClass(["acu-v2-agent-chat__badge", `acu-v2-agent-chat__badge--${$setup.statusTone}`]) },
@@ -211056,14 +212301,14 @@ ${rejectionText}` : delegationFeedback,
 			),
 			createBaseVNode(
 				"span",
-				_hoisted_3$i,
+				_hoisted_3$h,
 				toDisplayString($props.stageText),
 				1
 				/* TEXT */
 			),
 			$props.revisionText ? (openBlock(), createElementBlock(
 				"span",
-				_hoisted_4$f,
+				_hoisted_4$e,
 				"计划 " + toDisplayString($props.revisionText),
 				1
 				/* TEXT */
@@ -211134,7 +212379,7 @@ ${rejectionText}` : delegationFeedback,
 		}, 8, ["disabled"]))])])
 	]);
     }
-    var WorldSimulationChat = /*#__PURE__*/ _export_sfc(_sfc_main$l, [["render", _sfc_render$l], ["__scopeId", "data-v-c4ca1628"]]);
+    var WorldSimulationChat = /*#__PURE__*/ _export_sfc(_sfc_main$k, [["render", _sfc_render$k], ["__scopeId", "data-v-c4ca1628"]]);
 
     function parseDay_ACU(value) {
         const sweep = /^sweep:[^:]+:(\d+)$/.exec(value);
@@ -211202,7 +212447,7 @@ ${rejectionText}` : delegationFeedback,
         };
     }
 
-    var _sfc_main$k = /*@__PURE__*/ defineComponent({
+    var _sfc_main$j = /*@__PURE__*/ defineComponent({
         __name: 'WorldSimulationMaterialsPanel',
         props: {
             conversation: {},
@@ -211482,10 +212727,10 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n/* 与 ContinuationMaterialsPanel 保持同一套视觉语言：页签行、概览块、卡片、诊断列表。 */\n.acu-v2-ws-materials[data-v-a8e5e47e] { display: grid; gap: 12px;\n}\n.acu-v2-ws-materials__tabs[data-v-a8e5e47e] { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;\n}\n.acu-v2-ws-materials__tab[data-v-a8e5e47e] { padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 22%, transparent); border-radius: 999px; background: transparent; color: var(--acu-text-2); cursor: pointer; font: inherit; font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__tab--active[data-v-a8e5e47e] { border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 55%, transparent); background: color-mix(in srgb,var(--acu-primary, #5b8def) 14%, transparent); color: var(--acu-text-1);\n}\n.acu-v2-ws-materials__tab-actions[data-v-a8e5e47e] { display: flex; gap: 6px; margin-left: auto;\n}\n.acu-v2-ws-materials__confirm[data-v-a8e5e47e] { display: grid; gap: 8px; margin: 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 45%, transparent); border-radius: 7px; background: color-mix(in srgb, var(--acu-danger, #d65b5b) 8%, var(--acu-bg-2)); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__confirm-actions[data-v-a8e5e47e] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-ws-materials__overview[data-v-a8e5e47e] { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px;\n}\n.acu-v2-ws-materials__overview > div[data-v-a8e5e47e] { display: grid; gap: 5px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__overview strong[data-v-a8e5e47e] { color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__overview span[data-v-a8e5e47e] { color: var(--acu-text-3); font-size: 12px;\n}\n.acu-v2-ws-materials__block[data-v-a8e5e47e] { padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; display: grid; gap: 8px;\n}\n.acu-v2-ws-materials__block > summary[data-v-a8e5e47e] { cursor: pointer; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__cards[data-v-a8e5e47e] { display: grid; gap: 8px;\n}\n.acu-v2-ws-materials__card[data-v-a8e5e47e] { display: grid; gap: 4px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 16%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__card--failed[data-v-a8e5e47e] { border-left: 3px solid color-mix(in srgb, var(--acu-danger, #d65b5b) 75%, transparent);\n}\n.acu-v2-ws-materials__card-head[data-v-a8e5e47e] { margin: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__card-head span[data-v-a8e5e47e] { color: var(--acu-text-3); font-size: 11px;\n}\n.acu-v2-ws-materials__badge[data-v-a8e5e47e] { padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-ws-materials__card-body[data-v-a8e5e47e] { margin: 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__card-meta[data-v-a8e5e47e] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__meta[data-v-a8e5e47e] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-ws-materials__empty[data-v-a8e5e47e] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__error[data-v-a8e5e47e] { margin: 0; color: var(--acu-danger, #d65b5b); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__json[data-v-a8e5e47e] { display: grid; gap: 8px; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px;\n}\n.acu-v2-ws-materials__json > summary[data-v-a8e5e47e] { cursor: pointer; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__actions[data-v-a8e5e47e] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px;\n}\n.acu-v2-ws-materials__list[data-v-a8e5e47e] { margin: 0; padding-left: 18px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-ws-materials__timeline[data-v-a8e5e47e] { display: grid; gap: 4px;\n}\n.acu-v2-ws-materials__timeline > summary[data-v-a8e5e47e] { cursor: pointer; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-ws-materials__projection[data-v-a8e5e47e] { max-height: 320px; overflow: auto; margin: 0; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; background: var(--acu-bg-2); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word;\n}\n.acu-v2-ws-materials__diagnostics[data-v-a8e5e47e] { margin: 0; padding: 10px 10px 10px 28px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px);\n}\n@media (max-width: 640px) {\n.acu-v2-ws-materials__overview[data-v-a8e5e47e] { grid-template-columns: 1fr;\n}\n.acu-v2-ws-materials__tab-actions[data-v-a8e5e47e] { width: 100%; margin-left: 0;\n}\n.acu-v2-ws-materials__tab-actions[data-v-a8e5e47e] > * { flex: 1 1 auto;\n}\n}\n", "src/presentation-v2/components/WorldSimulationMaterialsPanel.vue#style-0-a8e5e47e");
     var WorldSimulationMaterialsPanel_vue_vue_type_style_index_0_scoped_a8e5e47e_lang = null;
 
-    const _hoisted_1$k = { class: "acu-v2-ws-materials" };
-    const _hoisted_2$j = { class: "acu-v2-ws-materials__tabs" };
-    const _hoisted_3$h = ["onClick"];
-    const _hoisted_4$e = { class: "acu-v2-ws-materials__tab-actions" };
+    const _hoisted_1$j = { class: "acu-v2-ws-materials" };
+    const _hoisted_2$i = { class: "acu-v2-ws-materials__tabs" };
+    const _hoisted_3$g = ["onClick"];
+    const _hoisted_4$d = { class: "acu-v2-ws-materials__tab-actions" };
     const _hoisted_5$c = {
 	key: 0,
 	class: "acu-v2-ws-materials__confirm"
@@ -211636,9 +212881,9 @@ ${rejectionText}` : delegationFeedback,
 	key: 2,
 	class: "acu-v2-ws-materials__empty"
     };
-    function _sfc_render$k(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1$k, [
-		createBaseVNode("div", _hoisted_2$j, [(openBlock(), createElementBlock(
+    function _sfc_render$j(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("div", _hoisted_1$j, [
+		createBaseVNode("div", _hoisted_2$i, [(openBlock(), createElementBlock(
 			Fragment,
 			null,
 			renderList($setup.TABS, (tab) => {
@@ -211647,11 +212892,11 @@ ${rejectionText}` : delegationFeedback,
 					type: "button",
 					class: normalizeClass(["acu-v2-ws-materials__tab", { "acu-v2-ws-materials__tab--active": $setup.activeTab === tab.id }]),
 					onClick: ($event) => $setup.activeTab = tab.id
-				}, toDisplayString(tab.label), 11, _hoisted_3$h);
+				}, toDisplayString(tab.label), 11, _hoisted_3$g);
 			}),
 			64
 			/* STABLE_FRAGMENT */
-		)), createBaseVNode("div", _hoisted_4$e, [createVNode($setup["AcuButton"], {
+		)), createBaseVNode("div", _hoisted_4$d, [createVNode($setup["AcuButton"], {
 			loading: $props.busy,
 			onClick: _cache[0] || (_cache[0] = ($event) => $setup.emit("refresh"))
 		}, {
@@ -212330,398 +213575,10 @@ ${rejectionText}` : delegationFeedback,
 		)) : createCommentVNode("v-if", true)
 	]);
     }
-    var WorldSimulationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$k, [["render", _sfc_render$k], ["__scopeId", "data-v-a8e5e47e"]]);
-
-    const TASK_STATUS_LABELS_ACU = {
-        drafting: '运行中',
-        running: '运行中',
-        stopping_after_inflight: '正在停止',
-        paused: '已暂停',
-        completed: '已完成',
-        failed: '已失败',
-        abandoned: '已中止',
-    };
-    function errorMessage_ACU(error) {
-        if (error instanceof WorldSimulationValidationError_ACU)
-            return error.error.message;
-        return error instanceof Error ? error.message : '格林推演操作失败';
-    }
-    /** 严格读取失败时给 UI 的结构化文案：保留错误码，用户能据此判断是数据损坏还是聊天不可用。 */
-    function structuredErrorMessage_ACU(error) {
-        if (error instanceof WorldSimulationValidationError_ACU)
-            return `${error.error.code}: ${error.error.message}`;
-        return errorMessage_ACU(error);
-    }
-    /**
-     * 把楼层锚定的持久会话消息投影为会话流条目。
-     *
-     * 会话流是展示通道，持久会话是模型通道，两者字段不同源：这里只做单向投影，
-     * 让页面重载后仍能看到既往对话，而不是把持久会话当成 UI 状态直接渲染。
-     */
-    function projectWorldSimulationSessionFromConversation_ACU(messages) {
-        return messages
-            // 工具回执（带 toolCallId）按 tool 身份展示，与智能续写一致；导演动作与纯文本反馈仍不上会话流。
-            .filter(message => message.kind !== 'handoff' && message.kind !== 'model_agent'
-            && (message.kind !== 'model_feedback' || !!message.toolCallId))
-            .map(message => {
-            const persistedKind = typeof message.eventKind === 'string'
-                && WORLD_SIMULATION_SESSION_EVENT_KINDS_ACU.includes(message.eventKind)
-                ? message.eventKind
-                : null;
-            const fallbackKind = message.kind === 'user'
-                ? 'user_message'
-                : message.kind === 'turn'
-                    ? 'run_started'
-                    : message.kind === 'agent'
-                        ? 'main_action'
-                        : message.kind === 'runtime'
-                            ? 'thought'
-                            : 'tool_read';
-            return {
-                kind: persistedKind ?? fallbackKind,
-                title: message.title || message.digest || (message.kind === 'user' ? '你的消息' : '历史会话'),
-                detail: message.text,
-                agentName: message.agentName,
-                ok: message.ok,
-                status: message.status,
-                at: message.at,
-            };
-        });
-    }
-    function useWorldSimulationRuntime() {
-        const toast = useToastStore();
-        const runtime = getWorldSimulationRuntime_ACU();
-        const snapshot = ref(null);
-        const ready = ref(false);
-        const busy = ref(false);
-        /** 仅表示"快照严格读取失败"；动作失败走吐司，不遮蔽会话区。 */
-        const error = ref('');
-        // 无信封聊天的展示兜底：用户还没保存过任何设置时，页面显示内置默认值。
-        const fallbackSettings = buildDefaultWorldSimulationSettings_ACU();
-        let subscribedChatIdentity = null;
-        let unsubscribeSession = null;
-        let activeAction = null;
-        /**
-         * 从持久会话回灌会话流历史（与 useContinuationSession.hydrate 同语义）：
-         * 会话流是内存态，脚本重载后为空；持久会话锚定在楼层上，是权威历史。
-         * 只在会话流为空且 Agent 未在运行时回灌，避免覆盖实时通道与运行标记。
-         */
-        function hydrateSessionFromConversation(next) {
-            const chatIdentity = next.session.chatIdentity;
-            if (!chatIdentity || next.session.entries.length || isWorldSimulationSessionRunning_ACU(chatIdentity))
-                return;
-            const projected = projectWorldSimulationSessionFromConversation_ACU(next.conversation.messages);
-            if (projected.length)
-                hydrateWorldSimulationSessionLog_ACU(chatIdentity, projected);
-        }
-        async function initialize() {
-            try {
-                const forcedRoles = await runtime.initialize();
-                refresh();
-                if (forcedRoles.length) {
-                    toast.info(`格林推演 v21 已重置 ${forcedRoles.length} 个自定义资料角色的提示词；旧版逐栏写入协议不适用于新流程。`);
-                }
-            }
-            catch (cause) {
-                toast.error(errorMessage_ACU(cause), { muteable: false });
-                refresh();
-            }
-        }
-        function refresh() {
-            try {
-                const next = runtime.readUiSnapshot();
-                snapshot.value = next;
-                error.value = '';
-                ready.value = true;
-                hydrateSessionFromConversation(next);
-                if (next.session.chatIdentity !== subscribedChatIdentity) {
-                    unsubscribeSession?.();
-                    subscribedChatIdentity = next.session.chatIdentity;
-                    unsubscribeSession = subscribedChatIdentity
-                        ? subscribeWorldSimulationSessionLog_ACU(subscribedChatIdentity, () => { if (ready.value)
-                            refresh(); })
-                        : null;
-                }
-                // 回灌会追加条目，重读一次让 entries 与内存日志一致。
-                if (next.session.chatIdentity && !next.session.entries.length) {
-                    const entries = readWorldSimulationSessionLog_ACU(next.session.chatIdentity);
-                    if (entries.length)
-                        snapshot.value = { ...next, session: { ...next.session, entries } };
-                }
-                return true;
-            }
-            catch (cause) {
-                snapshot.value = null;
-                error.value = structuredErrorMessage_ACU(cause);
-                ready.value = false;
-                return false;
-            }
-        }
-        /**
-         * 执行一次动作并刷新快照。允许后来的动作顶替在途动作（发送即打断），
-         * 只有仍是当前动作的那次结算才把 busy 复位。
-         */
-        function run_ACU(action) {
-            busy.value = true;
-            const completion = Promise.resolve()
-                .then(action)
-                .catch(cause => {
-                toast.error(errorMessage_ACU(cause), { muteable: false });
-                return false;
-            })
-                .finally(() => {
-                refresh();
-                if (activeAction === completion) {
-                    busy.value = false;
-                    activeAction = null;
-                }
-            });
-            activeAction = completion;
-            return completion;
-        }
-        const envelope = computed(() => snapshot.value?.envelope ?? null);
-        const task = computed(() => envelope.value?.task ?? null);
-        const settings = computed(() => envelope.value?.settings ?? fallbackSettings);
-        const activeStage = computed(() => {
-            const current = envelope.value;
-            return current?.stages.find(stage => stage.stageId === current.activeStageId) ?? null;
-        });
-        const activeRevision = computed(() => activeStage.value?.revisions.find(item => item.revision === activeStage.value?.activeRevision) ?? null);
-        const anchor = computed(() => snapshot.value?.anchor ?? null);
-        const entries = computed(() => snapshot.value?.session.entries ?? []);
-        const running = computed(() => snapshot.value?.session.running ?? false);
-        // 停止原因与最近错误直接并入状态文案，用户不用再翻别处找原因（与智能续写 statusText 同构）。
-        const statusText = computed(() => {
-            const current = task.value;
-            if (!current)
-                return '尚未创建任务';
-            const parts = [TASK_STATUS_LABELS_ACU[current.status] ?? current.status];
-            if (current.stopReason && ['paused', 'completed', 'failed', 'abandoned'].includes(current.status)) {
-                parts.push(WORLD_SIMULATION_STOP_REASON_LABELS_ACU[current.stopReason] ?? current.stopReason);
-            }
-            const lastError = envelope.value?.lastError;
-            if (lastError && ['paused', 'failed'].includes(current.status))
-                parts.push(`最近错误：${lastError.message}`);
-            return parts.join(' · ');
-        });
-        const stageText = computed(() => {
-            if (!task.value)
-                return '尚未创建任务';
-            return activeStage.value ? `第 ${activeStage.value.stageNumber} 阶段` : '计划待创建';
-        });
-        const revisionText = computed(() => (activeRevision.value ? `revision ${activeRevision.value.revision}` : ''));
-        const anchorText = computed(() => {
-            const current = anchor.value;
-            return current ? `第 ${current.messageIndex + 1} 楼 · swipe ${Number(current.swipeId) + 1}` : '';
-        });
-        /**
-         * 把编排器结果翻译成用户反馈。
-         * @returns 用户消息是否已被接收（决定页面是否清空草稿）
-         */
-        function reportSendOutcome_ACU(result) {
-            if (!result) {
-                toast.error('当前聊天没有 assistant 楼层，格林推演无法确定写入锚点。', { muteable: false });
-                return false;
-            }
-            if (result.status === 'skipped') {
-                if (result.reason === 'duplicate')
-                    toast.info('该楼层已有一次推演在处理这条指令。');
-                else if (result.reason === 'busy')
-                    toast.error('格林推演正在运行，请先停止再发送。', { muteable: false });
-                else if (result.reason === 'disabled')
-                    toast.info('自动触发已关闭。');
-                else
-                    toast.info('推演已排队，将在当前运行结束后开始。');
-                return false;
-            }
-            if (result.status === 'cancelled') {
-                toast.info('本次格林推演已停止，发送新指令即可从中断处继续。');
-                return true;
-            }
-            if (result.status === 'failed') {
-                toast.error(result.error.message, { muteable: false });
-                return false;
-            }
-            return true;
-        }
-        /**
-         * 在 Agent 会话里以用户身份发言。运行中会先打断当前 run；暂停中的同锚点 run 会带着这句话恢复；
-         * 锚点已是新楼层时新建运行。分派逻辑在 runtime.sendAgentMessage，这里只负责反馈。
-         */
-        function send(text) {
-            if (!text.trim())
-                return Promise.resolve(false);
-            return run_ACU(async () => reportSendOutcome_ACU(await runtime.sendAgentMessage(text)));
-        }
-        /**
-         * 停止在途运行。刻意不经 busy 闸：busy 恰好在运行期间为 true，走闸会把停止吞掉。
-         * 先在会话流留痕并清掉 running 标记（按钮立刻切回发送），再等待编排器把任务落为 paused/manual。
-         */
-        async function stop() {
-            const chatIdentity = snapshot.value?.session.chatIdentity ?? null;
-            if (chatIdentity && isWorldSimulationSessionRunning_ACU(chatIdentity)) {
-                logWorldSimulationSession_ACU(chatIdentity, { kind: 'run_failed', title: '已停止', detail: '用户停止', ok: false });
-            }
-            try {
-                await runtime.stop();
-            }
-            catch (cause) {
-                toast.error(errorMessage_ACU(cause), { muteable: false });
-            }
-            finally {
-                refresh();
-            }
-        }
-        function resume() {
-            return run_ACU(async () => reportSendOutcome_ACU(await runtime.resume()));
-        }
-        /**
-         * 保存格林推演设置。
-         * 运行中编排器以 retryable 的 REVISION_CONFLICT 拒绝写入——这不是错误而是时机问题，
-         * 返回 'busy' 让页面静默排队重试，而不是弹错误吐司把用户的改动丢掉。
-         * @returns 'saved' 已落盘；'busy' 暂时写不进（稍后重试）；'failed' 校验或持久化失败（已吐司）
-         */
-        async function saveSettings(next) {
-            if (runtime.isInFlight())
-                return 'busy';
-            try {
-                await runtime.saveSettings(JSON.parse(JSON.stringify(next)));
-                refresh();
-                return 'saved';
-            }
-            catch (cause) {
-                if (cause instanceof WorldSimulationValidationError_ACU && cause.error.code === 'WORLD_SIMULATION_REVISION_CONFLICT' && cause.error.retryable)
-                    return 'busy';
-                toast.error(errorMessage_ACU(cause), { muteable: false });
-                refresh();
-                return 'failed';
-            }
-        }
-        async function saveUserRequirements(requirements) {
-            if (busy.value)
-                return false;
-            busy.value = true;
-            try {
-                await runtime.saveUserRequirements(requirements);
-                refresh();
-                toast.success('已保存用户要求。');
-                return true;
-            }
-            catch (cause) {
-                toast.error(errorMessage_ACU(cause), { muteable: false });
-                refresh();
-                return false;
-            }
-            finally {
-                busy.value = false;
-            }
-        }
-        /**
-         * 一键清空：丢弃任务、账本、会话记录与各楼层资料快照，正文与已写入正文的 <与此同时> 段不动。
-         * @returns 是否清空成功
-         */
-        async function clearData() {
-            if (busy.value)
-                return false;
-            busy.value = true;
-            try {
-                const outcome = await runtime.clearData();
-                refresh();
-                toast.success(`已清空格林推演任务、账本、会话记录与 ${outcome.clearedFloors} 个楼层的资料快照，正文未改动。`);
-                return true;
-            }
-            catch (cause) {
-                toast.error(errorMessage_ACU(cause), { muteable: false });
-                refresh();
-                return false;
-            }
-            finally {
-                busy.value = false;
-            }
-        }
-        /**
-         * 把某个角色的提示词恢复成内置默认值。恢复本身不落盘，由设置面板既有的保存链路决定何时写入。
-         */
-        function restorePromptDefault(current, agentName) {
-            return restoreWorldSimulationPromptDefault_ACU(current, agentName);
-        }
-        /**
-         * 解析并校验导入的提示词 JSON 包。结构：{ agentPrompts: { 各角色: 段数组 } }。
-         * 任何一组校验失败（角色缺失、seam 缺失、未知占位符）即整体拒绝，绝不产生半套导入。
-         */
-        function parsePromptBundle(text) {
-            let raw;
-            try {
-                raw = JSON.parse(text);
-            }
-            catch {
-                throw new Error('导入文件不是合法的 JSON。');
-            }
-            if (!raw || typeof raw !== 'object' || Array.isArray(raw))
-                throw new Error('提示词 JSON 必须是对象（含 agentPrompts）。');
-            const agentRaw = raw.agentPrompts;
-            if (!agentRaw || typeof agentRaw !== 'object' || Array.isArray(agentRaw))
-                throw new Error('提示词 JSON 缺少 agentPrompts 对象。');
-            try {
-                return validateWorldSimulationAgentPrompts_ACU(agentRaw, 'load');
-            }
-            catch (cause) {
-                throw new Error(`提示词校验失败：${errorMessage_ACU(cause)}`);
-            }
-        }
-        /**
-         * 当前聊天内楼层被删除 / swipe 后调用。持久会话按楼层分段存储，删楼即回退；
-         * 但会话流是内存日志，不重灌就会一直显示已被删掉那几楼上的记录。
-         * 运行标记保留——楼层变动时 Agent 循环可能仍在跑，不能把「停止」切回「发送」。
-         */
-        function resyncAfterChatMutation() {
-            if (subscribedChatIdentity)
-                clearWorldSimulationSessionLog_ACU(subscribedChatIdentity, { keepRunning: true });
-            refresh();
-            const chatIdentity = snapshot.value?.session.chatIdentity ?? null;
-            if (chatIdentity && readWorldSimulationSessionLog_ACU(chatIdentity).length) {
-                logWorldSimulationSession_ACU(chatIdentity, {
-                    kind: 'thought',
-                    title: '楼层已变化，会话已按现存楼层重新加载',
-                    detail: '被删除或重新生成的楼层上的推演记录已随楼层一起回退；账本与锚点也按仍存在的正文楼层重算。',
-                });
-            }
-        }
-        if (getCurrentScope())
-            onScopeDispose(() => unsubscribeSession?.());
-        return {
-            snapshot,
-            ready,
-            busy,
-            error,
-            envelope,
-            task,
-            settings,
-            activeStage,
-            activeRevision,
-            anchor,
-            anchorText,
-            entries,
-            running,
-            statusText,
-            stageText,
-            revisionText,
-            refresh,
-            initialize,
-            send,
-            stop,
-            resume,
-            saveSettings,
-            saveUserRequirements,
-            clearData,
-            restorePromptDefault,
-            parsePromptBundle,
-            resyncAfterChatMutation,
-        };
-    }
+    var WorldSimulationMaterialsPanel = /*#__PURE__*/ _export_sfc(_sfc_main$j, [["render", _sfc_render$j], ["__scopeId", "data-v-a8e5e47e"]]);
 
     const INHERIT_CHANNEL_VALUE = '__inherit__';
-    var _sfc_main$j = /*@__PURE__*/ defineComponent({
+    var _sfc_main$i = /*@__PURE__*/ defineComponent({
         __name: 'WorldSimulationPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -213149,16 +214006,16 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-world-simulation-page[data-v-194e8248] { min-height: 100%; padding: 20px; display: grid; gap: 18px;\n}\n.acu-v2-world-simulation-page__layout[data-v-194e8248] { align-items: start;\n}\n.acu-v2-world-simulation-page__actions[data-v-194e8248] { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px;\n}\n.acu-v2-world-simulation-page__actions--start[data-v-194e8248] { justify-content: flex-start; margin-top: 0; margin-bottom: 12px;\n}\n.acu-v2-world-simulation-page__file-input[data-v-194e8248] { display: none;\n}\n.acu-v2-world-simulation-page__error[data-v-194e8248] { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__meta[data-v-194e8248] { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-194e8248] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start;\n}\n.acu-v2-world-simulation-page__toggles[data-v-194e8248] { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0;\n}\n.acu-v2-world-simulation-page__groups[data-v-194e8248] { display: flex; flex-direction: column; gap: 8px; margin-top: 4px;\n}\n.acu-v2-world-simulation-page__group[data-v-194e8248] {\n  border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-world-simulation-page__group[data-v-194e8248] .acu-disclosure-group__header { border-radius: var(--acu-radius-sm);\n}\n.acu-v2-world-simulation-page__group[data-v-194e8248] .acu-disclosure-group--expanded .acu-disclosure-group__header { border-bottom-left-radius: 0; border-bottom-right-radius: 0;\n}\n.acu-v2-world-simulation-page__group[data-v-194e8248] .acu-disclosure-group__body { gap: 12px; padding: 12px;\n}\n.acu-v2-world-simulation-page__group[data-v-194e8248] .acu-disclosure-group__meta { max-width: 55%; overflow: hidden; text-overflow: ellipsis;\n}\n.acu-v2-world-simulation-page__group .acu-v2-world-simulation-page__actions[data-v-194e8248] { margin-top: 0;\n}\n.acu-v2-world-simulation-page__subheading[data-v-194e8248] { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600;\n}\n.acu-v2-world-simulation-page__subheading[data-v-194e8248]:first-child { margin-top: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-world-simulation-page[data-v-194e8248] { padding: 14px;\n}\n}\n@media (max-width: 640px) {\n.acu-v2-world-simulation-page[data-v-194e8248] { padding: 10px; gap: 12px;\n}\n.acu-v2-world-simulation-page__settings-grid[data-v-194e8248] { grid-template-columns: 1fr;\n}\n.acu-v2-world-simulation-page__actions[data-v-194e8248] > * { flex: 1 1 auto;\n}\n.acu-v2-world-simulation-page__group[data-v-194e8248] .acu-disclosure-group__meta { display: none;\n}\n}\n", "src/presentation-v2/pages/WorldSimulationPage.vue#style-0-194e8248");
     var WorldSimulationPage_vue_vue_type_style_index_0_scoped_194e8248_lang = null;
 
-    const _hoisted_1$j = { class: "acu-v2-world-simulation-page" };
-    const _hoisted_2$i = {
+    const _hoisted_1$i = { class: "acu-v2-world-simulation-page" };
+    const _hoisted_2$h = {
 	key: 0,
 	class: "acu-v2-world-simulation-page__error"
     };
-    const _hoisted_3$g = {
+    const _hoisted_3$f = {
 	key: 1,
 	class: "acu-v2-world-simulation-page__meta"
     };
-    const _hoisted_4$d = {
+    const _hoisted_4$c = {
 	key: 1,
 	class: "acu-v2-world-simulation-page__meta"
     };
@@ -213195,13 +214052,13 @@ ${rejectionText}` : delegationFeedback,
 	key: 2,
 	class: "acu-v2-world-simulation-page__error"
     };
-    function _sfc_render$j(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$j, [
+    function _sfc_render$i(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$i, [
 		createVNode($setup["AcuPanel"], {
 			title: "Agent 会话",
 			description: "像和 coding agent 对话一样使用：随时输入、随时打断。主 Agent 按需派工子代理取证与改写，最终账本经审核后严格写入任务开始时冻结的 assistant 楼层；正文生成完成后也会自动推演一次。"
 		}, {
-			default: withCtx(() => [$setup.runtime.error.value ? (openBlock(), createElementBlock("p", _hoisted_2$i, [createTextVNode(
+			default: withCtx(() => [$setup.runtime.error.value ? (openBlock(), createElementBlock("p", _hoisted_2$h, [createTextVNode(
 				toDisplayString($setup.runtime.error.value) + " ",
 				1
 				/* TEXT */
@@ -213215,7 +214072,7 @@ ${rejectionText}` : delegationFeedback,
 					/* CACHED */
 				)])]),
 				_: 1
-			})])) : !$setup.runtime.ready.value ? (openBlock(), createElementBlock("p", _hoisted_3$g, "正在读取并验证格林推演快照…")) : (openBlock(), createBlock($setup["WorldSimulationChat"], {
+			})])) : !$setup.runtime.ready.value ? (openBlock(), createElementBlock("p", _hoisted_3$f, "正在读取并验证格林推演快照…")) : (openBlock(), createBlock($setup["WorldSimulationChat"], {
 				key: 2,
 				task: $setup.runtime.task.value,
 				"last-error": $setup.runtime.envelope.value?.lastError ?? null,
@@ -213278,7 +214135,7 @@ ${rejectionText}` : delegationFeedback,
 					"projection-preview",
 					"busy",
 					"timeline"
-				])) : (openBlock(), createElementBlock("p", _hoisted_4$d, "当前没有可显示的格林推演资料。"))]),
+				])) : (openBlock(), createElementBlock("p", _hoisted_4$c, "当前没有可显示的格林推演资料。"))]),
 				_: 1
 			}), $setup.settingsDraft ? (openBlock(), createBlock($setup["AcuPanel"], {
 				key: 0,
@@ -213828,7 +214685,7 @@ ${rejectionText}` : delegationFeedback,
 		})) : createCommentVNode("v-if", true)
 	]);
     }
-    var WorldSimulationPage = /*#__PURE__*/ _export_sfc(_sfc_main$j, [["render", _sfc_render$j], ["__scopeId", "data-v-194e8248"]]);
+    var WorldSimulationPage = /*#__PURE__*/ _export_sfc(_sfc_main$i, [["render", _sfc_render$i], ["__scopeId", "data-v-194e8248"]]);
 
     /**
      * useImportFlow — 外部导入页业务流编排（阶段 2 / D21.4）
@@ -213837,6 +214694,8 @@ ${rejectionText}` : delegationFeedback,
      * AI 注入循环使用 service/table/update-orchestrator 的纯业务入口接通，
      * v2 代码不跨进旧 presentation/。
      */
+    /** 气泡与桌宠里显示的功能名。 */
+    const IMPORT_TASK_FEATURE = '外部导入';
     function progressLabel(event) {
         const prefix = event.currentBatch && event.totalBatches
             ? `分块 ${event.currentBatch}/${event.totalBatches}：`
@@ -213909,6 +214768,7 @@ ${rejectionText}` : delegationFeedback,
                 durationMs: 0,
                 muteable: false,
                 dismissible: false,
+                feature: IMPORT_TASK_FEATURE,
                 action: abortRequested
                     ? undefined
                     : {
@@ -213938,6 +214798,7 @@ ${rejectionText}` : delegationFeedback,
                     durationMs: 0,
                     muteable: false,
                     dismissible: false,
+                    feature: IMPORT_TASK_FEATURE,
                 });
             }
             else {
@@ -213945,6 +214806,7 @@ ${rejectionText}` : delegationFeedback,
                     durationMs: 0,
                     muteable: false,
                     dismissible: false,
+                    feature: IMPORT_TASK_FEATURE,
                 });
             }
         }
@@ -214220,7 +215082,7 @@ ${rejectionText}` : delegationFeedback,
         },
     };
 
-    var _sfc_main$i = /*@__PURE__*/ defineComponent({
+    var _sfc_main$h = /*@__PURE__*/ defineComponent({
         __name: 'ImportPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -214284,10 +215146,10 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-import-page[data-v-edb6577d] {\r\n  min-height: 100%;\r\n  min-width: 0;\r\n  padding: 20px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 18px;\n}\n.acu-v2-import-page__action-grid[data-v-edb6577d] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 8px;\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n.acu-v2-import-page__action-grid[data-v-edb6577d] .acu-file-button,\r\n.acu-v2-import-page__action-grid[data-v-edb6577d] .acu-btn {\r\n  width: 100%;\r\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-import-page[data-v-edb6577d] {\r\n    padding: 14px;\n}\n}\n@media (max-width: 560px) {\n.acu-v2-import-page__action-grid[data-v-edb6577d] {\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/pages/ImportPage.vue#style-0-edb6577d");
     var ImportPage_vue_vue_type_style_index_0_scoped_edb6577d_lang = null;
 
-    const _hoisted_1$i = { class: "acu-v2-import-page" };
-    const _hoisted_2$h = { class: "acu-v2-import-page__action-grid" };
-    function _sfc_render$i(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$i, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-import-page__grid" }, {
+    const _hoisted_1$h = { class: "acu-v2-import-page" };
+    const _hoisted_2$g = { class: "acu-v2-import-page__action-grid" };
+    function _sfc_render$h(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$h, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-import-page__grid" }, {
 		default: withCtx(() => [
 			createVNode($setup["AcuPanel"], {
 				title: $setup.importCopy.panels.worldbookTarget.title,
@@ -214365,7 +215227,7 @@ ${rejectionText}` : delegationFeedback,
 						/* TEXT */
 					)]),
 					_: 1
-				}, 8, ["kind"]), createBaseVNode("div", _hoisted_2$h, [
+				}, 8, ["kind"]), createBaseVNode("div", _hoisted_2$g, [
 					createVNode($setup["AcuFileButton"], {
 						variant: "primary",
 						block: "",
@@ -214430,7 +215292,7 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	})]);
     }
-    var ImportPage = /*#__PURE__*/ _export_sfc(_sfc_main$i, [["render", _sfc_render$i], ["__scopeId", "data-v-edb6577d"]]);
+    var ImportPage = /*#__PURE__*/ _export_sfc(_sfc_main$h, [["render", _sfc_render$h], ["__scopeId", "data-v-edb6577d"]]);
 
     const dataMgmtCopy = {
         panels: {
@@ -216160,7 +217022,7 @@ ${rejectionText}` : delegationFeedback,
      * 的隔离逻辑不受影响。
      */
     const SHOW_LEGACY_DATA_MGMT_UI = false;
-    var _sfc_main$h = /*@__PURE__*/ defineComponent({
+    var _sfc_main$g = /*@__PURE__*/ defineComponent({
         __name: 'DataMgmtPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -216490,10 +217352,10 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-data-mgmt-page[data-v-c5f075be] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-data-mgmt-page__panel-stack[data-v-c5f075be] {\n  min-width: 0;\n  display: flex;\n  flex-direction: column;\n  gap: 16px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-c5f075be] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__form-stack[data-v-c5f075be] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n}\n.acu-v2-data-mgmt-page__meta[data-v-c5f075be] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-body, 12px);\n  line-height: 1.55;\n}\n.acu-v2-data-mgmt-page__cleanup-section[data-v-c5f075be] {\n  display: flex;\n  flex-direction: column;\n  gap: 12px;\n  min-width: 0;\n}\n.acu-v2-data-mgmt-page__sheet-filter[data-v-c5f075be] {\n  display: flex;\n  flex-direction: column;\n  gap: 8px;\n  padding: 10px 12px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md, 8px);\n  background: var(--acu-bg-1);\n}\n.acu-v2-data-mgmt-page__sheet-filter-head[data-v-c5f075be] {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__sheet-filter-title[data-v-c5f075be] {\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body, 12px);\n  font-weight: 600;\n}\n.acu-v2-data-mgmt-page__sheet-filter-clear[data-v-c5f075be] {\n  padding: 0;\n  border: 0;\n  background: transparent;\n  color: var(--acu-accent);\n  font: inherit;\n  font-size: var(--acu-font-size-body, 12px);\n  cursor: pointer;\n}\n.acu-v2-data-mgmt-page__sheet-filter-clear[data-v-c5f075be]:disabled {\n  opacity: 0.5;\n  cursor: not-allowed;\n}\n.acu-v2-data-mgmt-page__sheet-filter-list[data-v-c5f075be] {\n  display: grid;\n  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));\n  gap: 6px 12px;\n}\n.acu-v2-data-mgmt-page__cleanup-section\n  + .acu-v2-data-mgmt-page__cleanup-section[data-v-c5f075be] {\n  margin-top: 4px;\n  padding-top: 14px;\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-data-mgmt-page__section-title[data-v-c5f075be] {\n  margin: 0;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  font-weight: 600;\n  line-height: 1.35;\n}\n.acu-v2-data-mgmt-page__history[data-v-c5f075be] {\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__history[data-v-c5f075be] .acu-disclosure-group__header {\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-data-mgmt-page__history-list[data-v-c5f075be] {\n  display: flex;\n  flex-direction: column;\n  gap: 6px;\n}\n.acu-v2-data-mgmt-page__history-item[data-v-c5f075be] {\n  display: grid;\n  grid-template-columns: minmax(0, 1fr) auto;\n  gap: 8px;\n  align-items: center;\n}\n.acu-v2-data-mgmt-page__history-fill[data-v-c5f075be] {\n  width: 100%;\n  min-width: 0;\n  justify-content: flex-start;\n}\n.acu-v2-data-mgmt-page__history-code[data-v-c5f075be] {\n  flex: 1;\n  min-width: 0;\n  overflow: hidden;\n  text-align: left;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__history-current[data-v-c5f075be] {\n  flex-shrink: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__history-empty[data-v-c5f075be] {\n  margin: 0;\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  line-height: 1.5;\n}\n.acu-v2-data-mgmt-page__actions[data-v-c5f075be] {\n  display: flex;\n  flex-wrap: wrap;\n  gap: 8px;\n  justify-content: flex-end;\n}\n.acu-v2-data-mgmt-page__actions[data-v-c5f075be],\n.acu-v2-data-mgmt-page__command-grid[data-v-c5f075be] {\n  padding-top: 12px;\n  margin-top: 4px;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-c5f075be] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n}\n.acu-v2-data-mgmt-page__command-grid--cleanup[data-v-c5f075be] {\n  margin-top: 12px;\n}\n.acu-v2-data-mgmt-page__checkpoint-section[data-v-c5f075be] {\n  margin-top: 16px;\n  padding-top: 16px;\n  border-top: 1px solid var(--acu-border, rgba(255, 255, 255, 0.12));\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-c5f075be] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin: 12px 0 0;\n}\n.acu-v2-data-mgmt-page__runtime-health > div[data-v-c5f075be] {\n  min-width: 0;\n  padding: 8px;\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-bg-2) 72%, transparent);\n}\n.acu-v2-data-mgmt-page__runtime-health dt[data-v-c5f075be] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-data-mgmt-page__runtime-health dd[data-v-c5f075be] {\n  margin: 4px 0 0;\n  overflow-wrap: anywhere;\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-mono, Consolas, Menlo, monospace);\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-c5f075be] {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));\n  gap: 8px;\n  margin-top: 10px;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-c5f075be] .acu-file-button,\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-c5f075be] .acu-btn { width: 100%; min-width: 0;\n}\n.acu-v2-data-mgmt-page__command-grid[data-v-c5f075be] .acu-file-button,\n.acu-v2-data-mgmt-page__command-grid[data-v-c5f075be] .acu-btn {\n  width: 100%;\n  min-width: 0;\n}\n@media (max-width: 860px) {\n.acu-v2-data-mgmt-page[data-v-c5f075be] {\n    padding: 14px;\n}\n.acu-v2-data-mgmt-page__form-grid[data-v-c5f075be] {\n    grid-template-columns: 1fr;\n}\n}\n@media (max-width: 560px) {\n.acu-v2-data-mgmt-page__command-grid[data-v-c5f075be] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__checkpoint-actions[data-v-c5f075be] {\n    grid-template-columns: 1fr;\n}\n.acu-v2-data-mgmt-page__runtime-health[data-v-c5f075be] {\n    grid-template-columns: 1fr;\n}\n}\n", "src/presentation-v2/pages/DataMgmtPage.vue#style-0-c5f075be");
     var DataMgmtPage_vue_vue_type_style_index_0_scoped_c5f075be_lang = null;
 
-    const _hoisted_1$h = { class: "acu-v2-data-mgmt-page" };
-    const _hoisted_2$g = { class: "acu-v2-data-mgmt-page__panel-stack" };
-    const _hoisted_3$f = { class: "acu-v2-data-mgmt-page__form-stack" };
-    const _hoisted_4$c = {
+    const _hoisted_1$g = { class: "acu-v2-data-mgmt-page" };
+    const _hoisted_2$f = { class: "acu-v2-data-mgmt-page__panel-stack" };
+    const _hoisted_3$e = { class: "acu-v2-data-mgmt-page__form-stack" };
+    const _hoisted_4$b = {
 	key: 0,
 	class: "acu-v2-data-mgmt-page__history-list"
     };
@@ -216584,8 +217446,8 @@ ${rejectionText}` : delegationFeedback,
     const _hoisted_38 = { class: "acu-v2-data-mgmt-page__meta" };
     const _hoisted_39 = { class: "acu-v2-data-mgmt-page__command-grid acu-v2-data-mgmt-page__command-grid--cleanup" };
     const _hoisted_40 = { class: "acu-v2-data-mgmt-page__meta" };
-    function _sfc_render$h(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$h, [$setup.flow.message.value ? (openBlock(), createBlock($setup["AcuMessage"], {
+    function _sfc_render$g(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$g, [$setup.flow.message.value ? (openBlock(), createBlock($setup["AcuMessage"], {
 		key: 0,
 		kind: $setup.flow.message.value.kind
 	}, {
@@ -216596,12 +217458,12 @@ ${rejectionText}` : delegationFeedback,
 		)]),
 		_: 1
 	}, 8, ["kind"])) : createCommentVNode("v-if", true), createVNode($setup["AcuPanelGrid"], { class: "acu-v2-data-mgmt-page__layout" }, {
-		default: withCtx(() => [createBaseVNode("div", _hoisted_2$g, [$setup.SHOW_LEGACY_DATA_MGMT_UI ? (openBlock(), createBlock($setup["AcuPanel"], {
+		default: withCtx(() => [createBaseVNode("div", _hoisted_2$f, [$setup.SHOW_LEGACY_DATA_MGMT_UI ? (openBlock(), createBlock($setup["AcuPanel"], {
 			key: 0,
 			title: $setup.dataMgmtCopy.panels.isolation.title,
 			description: $setup.dataMgmtCopy.panels.isolation.description
 		}, {
-			default: withCtx(() => [createBaseVNode("div", _hoisted_3$f, [createVNode($setup["AcuFormRow"], {
+			default: withCtx(() => [createBaseVNode("div", _hoisted_3$e, [createVNode($setup["AcuFormRow"], {
 				label: "标识代码",
 				hint: $setup.isolationCodeHint
 			}, {
@@ -216621,7 +217483,7 @@ ${rejectionText}` : delegationFeedback,
 				"body-mode": "if",
 				onToggle: _cache[1] || (_cache[1] = ($event) => $setup.historyExpanded = !$setup.historyExpanded)
 			}, {
-				default: withCtx(() => [$setup.flow.isolationHistory.value.length ? (openBlock(), createElementBlock("div", _hoisted_4$c, [(openBlock(true), createElementBlock(
+				default: withCtx(() => [$setup.flow.isolationHistory.value.length ? (openBlock(), createElementBlock("div", _hoisted_4$b, [(openBlock(true), createElementBlock(
 					Fragment,
 					null,
 					renderList($setup.flow.isolationHistory.value, (code) => {
@@ -217360,9 +218222,9 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	})]);
     }
-    var DataMgmtPage = /*#__PURE__*/ _export_sfc(_sfc_main$h, [["render", _sfc_render$h], ["__scopeId", "data-v-c5f075be"]]);
+    var DataMgmtPage = /*#__PURE__*/ _export_sfc(_sfc_main$g, [["render", _sfc_render$g], ["__scopeId", "data-v-c5f075be"]]);
 
-    var _sfc_main$g = /*@__PURE__*/ defineComponent({
+    var _sfc_main$f = /*@__PURE__*/ defineComponent({
         __name: 'ContentReplacePresetDrawer',
         props: {
             isOpen: { type: Boolean },
@@ -217381,14 +218243,14 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-content-replace-preset-drawer__top-actions[data-v-6492496d] {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\n}\n.acu-content-replace-preset-drawer__empty[data-v-6492496d] {\r\n  margin: 12px 0;\n}\n.acu-v2-manage-list[data-v-6492496d] {\r\n  list-style: none;\r\n  margin: 0;\r\n  padding: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 6px;\n}\n.acu-v2-manage-item[data-v-6492496d] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 10px;\r\n  padding: 10px 12px;\r\n  border: 0;\r\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\n}\n.acu-v2-manage-item[data-v-6492496d]:last-child {\r\n  border-bottom: 0;\n}\n.acu-v2-manage-item__info[data-v-6492496d] {\r\n  flex: 1;\r\n  min-width: 0;\n}\n.acu-v2-manage-item__name[data-v-6492496d] {\r\n  display: block;\r\n  font-size: var(--acu-font-size-list-title, 13px);\r\n  line-height: var(--acu-line-height-body, 1.45);\r\n  font-weight: 500;\r\n  color: var(--acu-text-1);\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-v2-manage-item__meta[data-v-6492496d] {\r\n  display: block;\r\n  margin-top: 2px;\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: var(--acu-line-height-caption, 1.5);\r\n  color: var(--acu-text-3);\n}\n.acu-v2-manage-item__actions[data-v-6492496d] {\r\n  display: flex;\r\n  gap: 4px;\n}\r\n", "src/presentation-v2/components/ContentReplacePresetDrawer.vue#style-0-6492496d");
     var ContentReplacePresetDrawer_vue_vue_type_style_index_0_scoped_6492496d_lang = null;
 
-    const _hoisted_1$g = { class: "acu-content-replace-preset-drawer__top-actions" };
-    const _hoisted_2$f = {
+    const _hoisted_1$f = { class: "acu-content-replace-preset-drawer__top-actions" };
+    const _hoisted_2$e = {
 	key: 1,
 	class: "acu-v2-manage-list"
     };
-    const _hoisted_3$e = { class: "acu-v2-manage-item__info" };
-    const _hoisted_4$b = { class: "acu-v2-manage-item__actions" };
-    function _sfc_render$g(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_3$d = { class: "acu-v2-manage-item__info" };
+    const _hoisted_4$a = { class: "acu-v2-manage-item__actions" };
+    function _sfc_render$f(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
 		"is-open": $props.isOpen,
 		title: "管理正文替换预设",
@@ -217407,7 +218269,7 @@ ${rejectionText}` : delegationFeedback,
 				)]),
 				_: 1
 			}, 8, ["kind"])) : createCommentVNode("v-if", true),
-			createBaseVNode("div", _hoisted_1$g, [createVNode($setup["AcuButton"], {
+			createBaseVNode("div", _hoisted_1$f, [createVNode($setup["AcuButton"], {
 				variant: "primary",
 				class: "acu-content-replace-preset-drawer__create-btn",
 				onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("create-from-default"))
@@ -217425,14 +218287,14 @@ ${rejectionText}` : delegationFeedback,
 				)])]),
 				_: 1
 			})]),
-			$props.presets.length ? (openBlock(), createElementBlock("ul", _hoisted_2$f, [(openBlock(true), createElementBlock(
+			$props.presets.length ? (openBlock(), createElementBlock("ul", _hoisted_2$e, [(openBlock(true), createElementBlock(
 				Fragment,
 				null,
 				renderList($props.presets, (preset) => {
 					return openBlock(), createElementBlock("li", {
 						key: preset.name,
 						class: "acu-v2-manage-item"
-					}, [createBaseVNode("div", _hoisted_3$e, [createVNode(
+					}, [createBaseVNode("div", _hoisted_3$d, [createVNode(
 						$setup["AcuText"],
 						{
 							as: "span",
@@ -217466,7 +218328,7 @@ ${rejectionText}` : delegationFeedback,
 						},
 						1024
 						/* DYNAMIC_SLOTS */
-					)]), createBaseVNode("div", _hoisted_4$b, [
+					)]), createBaseVNode("div", _hoisted_4$a, [
 						createVNode($setup["AcuIconButton"], {
 							icon: "fa-solid fa-upload",
 							title: "导出 JSON",
@@ -217519,9 +218381,9 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	}, 8, ["is-open"]);
     }
-    var ContentReplacePresetDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$g, [["render", _sfc_render$g], ["__scopeId", "data-v-6492496d"]]);
+    var ContentReplacePresetDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$f, [["render", _sfc_render$f], ["__scopeId", "data-v-6492496d"]]);
 
-    var _sfc_main$f = /*@__PURE__*/ defineComponent({
+    var _sfc_main$e = /*@__PURE__*/ defineComponent({
         __name: 'ContentReplacePromptDrawer',
         props: {
             isOpen: { type: Boolean },
@@ -217558,10 +218420,10 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-content-replace-prompt-drawer__meta[data-v-c737de28] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 6px;\r\n  flex-wrap: wrap;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-content-replace-prompt-drawer__meta code[data-v-c737de28] {\r\n  padding: 2px 5px;\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: var(--acu-bg-2);\r\n  color: var(--acu-text-2);\r\n  font-family: var(--acu-font-mono);\r\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-content-replace-prompt-drawer__toolbar[data-v-c737de28] {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\n}\n.acu-content-replace-prompt-drawer__actions[data-v-c737de28] {\r\n  position: sticky;\r\n  bottom: -16px;\r\n  display: flex;\r\n  justify-content: flex-end;\r\n  gap: 8px;\r\n  padding: 12px 0 0;\r\n  background: var(--acu-bg-1);\n}\r\n", "src/presentation-v2/components/ContentReplacePromptDrawer.vue#style-0-c737de28");
     var ContentReplacePromptDrawer_vue_vue_type_style_index_0_scoped_c737de28_lang = null;
 
-    const _hoisted_1$f = { class: "acu-content-replace-prompt-drawer__meta" };
-    const _hoisted_2$e = { class: "acu-content-replace-prompt-drawer__toolbar" };
-    const _hoisted_3$d = { class: "acu-content-replace-prompt-drawer__actions" };
-    function _sfc_render$f(_ctx, _cache, $props, $setup, $data, $options) {
+    const _hoisted_1$e = { class: "acu-content-replace-prompt-drawer__meta" };
+    const _hoisted_2$d = { class: "acu-content-replace-prompt-drawer__toolbar" };
+    const _hoisted_3$c = { class: "acu-content-replace-prompt-drawer__actions" };
+    function _sfc_render$e(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
 		"is-open": $props.isOpen,
 		title: "编辑正文替换提示词",
@@ -217581,7 +218443,7 @@ ${rejectionText}` : delegationFeedback,
 				)]),
 				_: 1
 			}, 8, ["kind"])) : createCommentVNode("v-if", true),
-			createBaseVNode("div", _hoisted_1$f, [
+			createBaseVNode("div", _hoisted_1$e, [
 				createBaseVNode(
 					"span",
 					null,
@@ -217646,7 +218508,7 @@ ${rejectionText}` : delegationFeedback,
 					/* CACHED */
 				))
 			]),
-			createBaseVNode("div", _hoisted_2$e, [createVNode($setup["AcuButton"], {
+			createBaseVNode("div", _hoisted_2$d, [createVNode($setup["AcuButton"], {
 				size: "sm",
 				onClick: _cache[0] || (_cache[0] = ($event) => _ctx.$emit("reset"))
 			}, {
@@ -217666,7 +218528,7 @@ ${rejectionText}` : delegationFeedback,
 				onDelete: _cache[2] || (_cache[2] = ($event) => _ctx.$emit("delete", $event)),
 				onUpdate: _cache[3] || (_cache[3] = (index, patch) => _ctx.$emit("update", index, patch))
 			}, null, 8, ["segments"]),
-			createBaseVNode("footer", _hoisted_3$d, [createVNode($setup["AcuButton"], { onClick: $setup.requestClose }, {
+			createBaseVNode("footer", _hoisted_3$c, [createVNode($setup["AcuButton"], { onClick: $setup.requestClose }, {
 				default: withCtx(() => [..._cache[15] || (_cache[15] = [createTextVNode(
 					"关闭",
 					-1
@@ -217689,7 +218551,7 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	}, 8, ["is-open"]);
     }
-    var ContentReplacePromptDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$f, [["render", _sfc_render$f], ["__scopeId", "data-v-c737de28"]]);
+    var ContentReplacePromptDrawer = /*#__PURE__*/ _export_sfc(_sfc_main$e, [["render", _sfc_render$e], ["__scopeId", "data-v-c737de28"]]);
 
     const contentReplaceCopy = {
         nav: {
@@ -218316,7 +219178,7 @@ ${rejectionText}` : delegationFeedback,
         },
     });
 
-    var _sfc_main$e = /*@__PURE__*/ defineComponent({
+    var _sfc_main$d = /*@__PURE__*/ defineComponent({
         __name: 'ContentReplacePage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -218462,10 +219324,10 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-content-replace-page[data-v-db464554] {\r\n  min-height: 100%;\r\n  min-width: 0;\r\n  padding: 20px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 18px;\n}\n.acu-v2-content-replace-page__mini-status span[data-v-db464554] {\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.5;\n}\n.acu-v2-content-replace-page__number-grid[data-v-db464554],\r\n.acu-v2-content-replace-page__form-grid[data-v-db464554] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 12px;\n}\n.acu-v2-content-replace-page__choice-list[data-v-db464554],\r\n.acu-v2-content-replace-page__rule-stack[data-v-db464554] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\n}\n.acu-v2-content-replace-page__mini-status[data-v-db464554] {\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: space-between;\r\n  gap: 10px;\r\n  padding: 8px 0;\r\n  border: 0;\r\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\n}\n.acu-v2-content-replace-page__mini-status strong[data-v-db464554] {\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  font-family: var(--acu-font-mono);\n}\n.acu-v2-content-replace-page__status-line[data-v-db464554] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: 8px;\r\n  flex-wrap: wrap;\r\n  margin: 0 0 10px;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-content-replace-page__status-line strong[data-v-db464554] {\r\n  min-width: 0;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  font-family: var(--acu-font-mono);\n}\n.acu-v2-content-replace-page__badge[data-v-db464554] {\r\n  display: inline-flex;\r\n  align-items: center;\r\n  padding: 1px 8px;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-text-3) 16%, transparent);\r\n  color: var(--acu-text-2);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  font-weight: 500;\n}\n.acu-v2-content-replace-page__select-row[data-v-db464554] {\r\n  display: grid;\r\n  grid-template-columns: minmax(0, 1fr) repeat(3, max-content);\r\n  gap: 6px;\r\n  align-items: stretch;\r\n  min-width: 0;\n}\n.acu-v2-content-replace-page__actions[data-v-db464554] {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\r\n  justify-content: flex-end;\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n.acu-v2-content-replace-page__test-output[data-v-db464554] {\r\n  margin: 0;\r\n  max-height: 280px;\r\n  overflow: auto;\r\n  padding: 10px 0;\r\n  border: 0;\r\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-bottom: 1px solid\r\n    color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\r\n  color: var(--acu-text-2);\r\n  font-family: var(--acu-font-mono);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  line-height: 1.55;\r\n  white-space: pre-wrap;\r\n  word-break: break-word;\n}\n@media (max-width: 860px) {\n.acu-v2-content-replace-page[data-v-db464554] {\r\n    padding: 14px;\n}\n.acu-v2-content-replace-page__number-grid[data-v-db464554],\r\n  .acu-v2-content-replace-page__form-grid[data-v-db464554] {\r\n    grid-template-columns: 1fr;\n}\n}\r\n", "src/presentation-v2/pages/ContentReplacePage.vue#style-0-db464554");
     var ContentReplacePage_vue_vue_type_style_index_0_scoped_db464554_lang = null;
 
-    const _hoisted_1$e = { class: "acu-v2-content-replace-page" };
-    const _hoisted_2$d = { class: "acu-v2-content-replace-page__number-grid" };
-    const _hoisted_3$c = { class: "acu-v2-content-replace-page__choice-list" };
-    const _hoisted_4$a = { class: "acu-v2-content-replace-page__mini-status" };
+    const _hoisted_1$d = { class: "acu-v2-content-replace-page" };
+    const _hoisted_2$c = { class: "acu-v2-content-replace-page__number-grid" };
+    const _hoisted_3$b = { class: "acu-v2-content-replace-page__choice-list" };
+    const _hoisted_4$9 = { class: "acu-v2-content-replace-page__mini-status" };
     const _hoisted_5$9 = { class: "acu-v2-content-replace-page__actions" };
     const _hoisted_6$8 = { class: "acu-v2-content-replace-page__status-line" };
     const _hoisted_7$7 = { class: "acu-v2-content-replace-page__badge" };
@@ -218477,8 +219339,8 @@ ${rejectionText}` : delegationFeedback,
 	key: 0,
 	class: "acu-v2-content-replace-page__test-output"
     };
-    function _sfc_render$e(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$e, [
+    function _sfc_render$d(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$d, [
 		createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }),
 		$setup.store.message ? (openBlock(), createBlock($setup["AcuMessage"], {
 			key: 0,
@@ -218513,7 +219375,7 @@ ${rejectionText}` : delegationFeedback,
 							"placeholder"
 						])]),
 						_: 1
-					}), createBaseVNode("div", _hoisted_2$d, [
+					}), createBaseVNode("div", _hoisted_2$c, [
 						createVNode($setup["AcuFormRow"], {
 							label: "最小正文长度",
 							hint: "低于此值跳过优化。"
@@ -218578,7 +219440,7 @@ ${rejectionText}` : delegationFeedback,
 					description: $setup.contentReplaceCopy.panels.mode.description
 				}, {
 					default: withCtx(() => [
-						createBaseVNode("div", _hoisted_3$c, [
+						createBaseVNode("div", _hoisted_3$b, [
 							createVNode($setup["AcuCheckbox"], {
 								"model-value": $setup.store.seamlessMode,
 								label: "无感替换模式",
@@ -218600,7 +219462,7 @@ ${rejectionText}` : delegationFeedback,
 								"onUpdate:modelValue": _cache[8] || (_cache[8] = ($event) => $setup.store.setBoolean("parallelMode", $event))
 							}, null, 8, ["model-value"])
 						]),
-						createBaseVNode("div", _hoisted_4$a, [_cache[18] || (_cache[18] = createBaseVNode(
+						createBaseVNode("div", _hoisted_4$9, [_cache[18] || (_cache[18] = createBaseVNode(
 							"span",
 							null,
 							"最近可重新优化",
@@ -218847,7 +219709,7 @@ ${rejectionText}` : delegationFeedback,
 		])
 	]);
     }
-    var ContentReplacePage = /*#__PURE__*/ _export_sfc(_sfc_main$e, [["render", _sfc_render$e], ["__scopeId", "data-v-db464554"]]);
+    var ContentReplacePage = /*#__PURE__*/ _export_sfc(_sfc_main$d, [["render", _sfc_render$d], ["__scopeId", "data-v-db464554"]]);
 
     /**
      * useSqlConsole — SQL 控制台业务流编排
@@ -219777,7 +220639,7 @@ ${rejectionText}` : delegationFeedback,
         },
     };
 
-    var _sfc_main$d = /*@__PURE__*/ defineComponent({
+    var _sfc_main$c = /*@__PURE__*/ defineComponent({
         __name: 'AdvancedToolsPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -219853,13 +220715,13 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-advanced-tools-page[data-v-99648c07] {\r\n  min-height: 100%;\r\n  min-width: 0;\r\n  padding: 20px;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 18px;\n}\n.acu-v2-advanced-tools-page__sql-panel[data-v-99648c07],\r\n.acu-v2-advanced-tools-page__log-panel[data-v-99648c07] {\r\n  min-width: 0;\n}\n.acu-v2-advanced-tools-page__quick-actions[data-v-99648c07],\r\n.acu-v2-advanced-tools-page__log-actions[data-v-99648c07] {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\r\n  align-items: center;\n}\n.acu-v2-advanced-tools-page__sql-textarea[data-v-99648c07] {\r\n  font-family: var(--acu-font-mono);\r\n  min-height: 210px;\r\n  white-space: pre;\n}\n.acu-v2-advanced-tools-page__sql-actions[data-v-99648c07] {\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 8px;\r\n  align-items: center;\r\n  justify-content: flex-end;\r\n  padding-top: 12px;\r\n  margin-top: 4px;\n}\n.acu-v2-advanced-tools-page__sql-status[data-v-99648c07] {\r\n  margin-left: auto;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.5;\n}\n.acu-v2-advanced-tools-page__sql-status--success[data-v-99648c07] {\r\n  color: var(--acu-success);\n}\n.acu-v2-advanced-tools-page__sql-status--warning[data-v-99648c07] {\r\n  color: var(--acu-warning);\n}\n.acu-v2-advanced-tools-page__sql-status--error[data-v-99648c07] {\r\n  color: var(--acu-danger);\n}\n.acu-v2-advanced-tools-page__sql-result-section[data-v-99648c07],\r\n.acu-v2-advanced-tools-page__sql-history-section[data-v-99648c07] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 10px;\n}\n.acu-v2-advanced-tools-page__sql-history-section[data-v-99648c07] {\r\n  padding-top: 12px;\r\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\n}\n.acu-v2-advanced-tools-page__section-title[data-v-99648c07] {\r\n  margin: 0;\r\n  color: var(--acu-text-1);\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  font-weight: 600;\r\n  line-height: 1.35;\n}\n.acu-v2-advanced-tools-page__empty[data-v-99648c07] {\r\n  min-height: 96px;\r\n  display: flex;\r\n  align-items: center;\r\n  justify-content: center;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  text-align: center;\r\n  border: 0;\r\n  border-top: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-bottom: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: 0;\r\n  background: transparent;\n}\n.acu-v2-advanced-tools-page__empty--compact[data-v-99648c07] {\r\n  min-height: 72px;\n}\n.acu-v2-advanced-tools-page__empty--log[data-v-99648c07] {\r\n  min-height: 180px;\r\n  border: 0;\n}\n.acu-v2-advanced-tools-page__sql-table-wrap[data-v-99648c07] {\r\n  max-height: 330px;\r\n  overflow: auto;\r\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: transparent;\n}\n.acu-v2-advanced-tools-page__sql-result-table[data-v-99648c07] {\r\n  width: 100%;\r\n  border-collapse: collapse;\r\n  font-family: var(--acu-font-mono);\r\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-advanced-tools-page__sql-result-table th[data-v-99648c07],\r\n.acu-v2-advanced-tools-page__sql-result-table td[data-v-99648c07] {\r\n  max-width: 300px;\r\n  padding: 7px 10px;\r\n  border-bottom: 1px solid var(--acu-border-2);\r\n  text-align: left;\r\n  white-space: nowrap;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\n}\n.acu-v2-advanced-tools-page__sql-result-table th[data-v-99648c07] {\r\n  position: sticky;\r\n  top: 0;\r\n  z-index: 1;\r\n  background: var(--acu-bg-1);\r\n  color: var(--acu-text-1);\r\n  font-weight: 600;\n}\n.acu-v2-advanced-tools-page__sql-result-table tbody tr[data-v-99648c07]:nth-child(even) {\r\n  background: color-mix(in srgb, var(--acu-text-3) 5%, transparent);\n}\n.acu-v2-advanced-tools-page__cell-null[data-v-99648c07],\r\n.acu-v2-advanced-tools-page__empty-cell[data-v-99648c07] {\r\n  color: var(--acu-text-3);\r\n  font-style: italic;\n}\n.acu-v2-advanced-tools-page__sql-result-meta[data-v-99648c07] {\r\n  margin: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  text-align: right;\n}\n.acu-v2-advanced-tools-page__sql-error[data-v-99648c07] {\r\n  margin: 0;\r\n  min-height: 96px;\r\n  padding: 12px;\r\n  border: 0;\r\n  border-radius: var(--acu-radius-sm);\r\n  background: color-mix(in srgb, var(--acu-danger) 8%, transparent);\r\n  color: var(--acu-danger);\r\n  white-space: pre-wrap;\r\n  word-break: break-word;\r\n  font-family: var(--acu-font-mono);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.55;\n}\n.acu-v2-advanced-tools-page__filter-grid[data-v-99648c07] {\r\n  display: grid;\r\n  grid-template-columns: repeat(2, minmax(0, 1fr));\r\n  gap: 12px;\r\n  align-items: stretch;\n}\n.acu-v2-advanced-tools-page__keyword-row[data-v-99648c07] {\r\n  grid-column: 1 / -1;\n}\n.acu-v2-advanced-tools-page__log-control-row[data-v-99648c07] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  gap: 8px;\r\n  min-width: 0;\n}\n.acu-v2-advanced-tools-page__log-control-main[data-v-99648c07] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 10px 14px;\r\n  align-items: center;\r\n  justify-content: space-between;\n}\n.acu-v2-advanced-tools-page__toggles[data-v-99648c07] {\r\n  width: max-content;\r\n  max-width: 100%;\r\n  display: grid;\r\n  grid-template-columns: max-content max-content;\r\n  gap: 10px 18px;\r\n  align-items: center;\r\n  justify-content: flex-start;\n}\n.acu-v2-advanced-tools-page__toggles[data-v-99648c07] .acu-toggle {\r\n  width: max-content;\r\n  max-width: none;\r\n  min-width: max-content;\r\n  white-space: nowrap;\n}\n.acu-v2-advanced-tools-page__toggles[data-v-99648c07] .acu-toggle__label {\r\n  white-space: nowrap;\n}\n.acu-v2-advanced-tools-page__hint[data-v-99648c07] {\r\n  max-width: 100%;\r\n  margin: 0;\r\n  color: var(--acu-text-3);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.55;\r\n  overflow-wrap: anywhere;\n}\n.acu-v2-advanced-tools-page__sql-history-list[data-v-99648c07],\r\n.acu-v2-advanced-tools-page__log-list[data-v-99648c07] {\r\n  overflow: auto;\r\n  border: 1px solid color-mix(in srgb, var(--acu-text-3) 14%, transparent);\r\n  border-radius: var(--acu-radius-sm);\r\n  background: transparent;\n}\n.acu-v2-advanced-tools-page__sql-history-list[data-v-99648c07] {\r\n  max-height: 230px;\n}\n.acu-v2-advanced-tools-page__log-list[data-v-99648c07] {\r\n  min-height: 360px;\r\n  max-height: 58vh;\n}\n.acu-v2-advanced-tools-page__sql-history-item[data-v-99648c07],\r\n.acu-v2-advanced-tools-page__log-row[data-v-99648c07] {\r\n  min-width: 0;\r\n  display: grid;\r\n  gap: 8px;\r\n  align-items: baseline;\r\n  padding: 7px 10px;\r\n  border-bottom: 1px solid var(--acu-border-2);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.55;\n}\n.acu-v2-advanced-tools-page__sql-history-item.acu-btn[data-v-99648c07] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  align-items: stretch;\r\n  gap: 6px;\r\n  padding-block: 9px;\r\n  border: 0;\r\n  border-bottom: 1px solid var(--acu-border-2);\r\n  background: transparent;\r\n  color: inherit;\r\n  cursor: pointer;\r\n  font: inherit;\r\n  text-align: left;\r\n  transition: background 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-v2-advanced-tools-page__log-row[data-v-99648c07] {\r\n  display: flex;\r\n  flex-direction: column;\r\n  align-items: stretch;\r\n  gap: 6px;\r\n  padding-block: 9px;\n}\n.acu-v2-advanced-tools-page__log-meta[data-v-99648c07] {\r\n  min-width: 0;\r\n  display: flex;\r\n  flex-wrap: wrap;\r\n  gap: 6px 8px;\r\n  align-items: center;\n}\n.acu-v2-advanced-tools-page__sql-history-meta[data-v-99648c07] {\r\n  flex-wrap: nowrap;\n}\n.acu-v2-advanced-tools-page__sql-history-item[data-v-99648c07]:last-child,\r\n.acu-v2-advanced-tools-page__log-row[data-v-99648c07]:last-child {\r\n  border-bottom: 0;\n}\n.acu-v2-advanced-tools-page__sql-history-item--failure[data-v-99648c07],\r\n.acu-v2-advanced-tools-page__log-row--error[data-v-99648c07] {\r\n  background: color-mix(in srgb, var(--acu-danger) 7%, transparent);\n}\n.acu-v2-advanced-tools-page__log-row--warn[data-v-99648c07] {\r\n  background: color-mix(in srgb, var(--acu-warning) 6%, transparent);\n}\n.acu-v2-advanced-tools-page__sql-history-item.acu-btn[data-v-99648c07]:hover {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), transparent;\n}\n.acu-v2-advanced-tools-page__sql-history-item.acu-btn[data-v-99648c07]:focus-visible {\r\n  background: linear-gradient(var(--acu-hover-overlay), var(--acu-hover-overlay)), transparent;\r\n  box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\r\n  outline: none;\n}\n.acu-v2-advanced-tools-page__log-time[data-v-99648c07],\r\n.acu-v2-advanced-tools-page__log-tag[data-v-99648c07],\r\n.acu-v2-advanced-tools-page__log-message[data-v-99648c07] {\r\n  min-width: 0;\r\n  font-family: var(--acu-font-mono);\n}\n.acu-v2-advanced-tools-page__log-time[data-v-99648c07] {\r\n  color: var(--acu-text-3);\r\n  white-space: nowrap;\n}\n.acu-v2-advanced-tools-page__log-tag[data-v-99648c07] {\r\n  flex: 1 1 180px;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\r\n  color: var(--acu-text-2);\n}\n.acu-v2-advanced-tools-page__log-message[data-v-99648c07] {\r\n  margin: 0;\r\n  color: var(--acu-text-1);\r\n  white-space: pre-wrap;\r\n  word-break: break-word;\r\n  background: transparent;\n}\n.acu-v2-advanced-tools-page__log-body[data-v-99648c07] {\r\n  display: block;\r\n  width: 100%;\n}\n.acu-v2-advanced-tools-page__log-hint[data-v-99648c07] {\r\n  min-width: 0;\r\n  margin-top: 2px;\r\n  border-left: 2px solid color-mix(in srgb, var(--acu-warning) 70%, transparent);\r\n  border-radius: 0 var(--acu-radius-sm) var(--acu-radius-sm) 0;\r\n  background: color-mix(in srgb, var(--acu-warning) 6%, var(--acu-bg-1));\r\n  font-family: var(--acu-font-sans, inherit);\r\n  font-size: var(--acu-font-size-body, 12px);\r\n  line-height: 1.55;\n}\n.acu-v2-advanced-tools-page__log-hint-summary[data-v-99648c07] {\r\n  display: flex;\r\n  align-items: baseline;\r\n  gap: 6px;\r\n  padding: 6px 10px;\r\n  color: var(--acu-text-2);\r\n  cursor: pointer;\r\n  list-style: none;\r\n  user-select: none;\n}\n.acu-v2-advanced-tools-page__log-hint-summary[data-v-99648c07]::-webkit-details-marker {\r\n  display: none;\n}\n.acu-v2-advanced-tools-page__log-hint-summary[data-v-99648c07]:hover {\r\n  background: var(--acu-hover-overlay);\n}\n.acu-v2-advanced-tools-page__log-hint-summary[data-v-99648c07]:focus-visible {\r\n  outline: none;\r\n  box-shadow: inset 0 0 0 2px var(--acu-accent-glow);\n}\n.acu-v2-advanced-tools-page__log-hint-icon[data-v-99648c07] {\r\n  flex: 0 0 auto;\r\n  color: var(--acu-warning);\r\n  font-size: var(--acu-font-size-caption, 11px);\n}\n.acu-v2-advanced-tools-page__log-hint-text[data-v-99648c07] {\r\n  flex: 1 1 auto;\r\n  min-width: 0;\r\n  overflow-wrap: anywhere;\n}\n.acu-v2-advanced-tools-page__log-hint-toggle[data-v-99648c07] {\r\n  flex: 0 0 auto;\r\n  color: var(--acu-accent);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  white-space: nowrap;\n}\n.acu-v2-advanced-tools-page__log-hint-toggle[data-v-99648c07]::after {\r\n  content: ' ▾';\n}\n.acu-v2-advanced-tools-page__log-hint[open] .acu-v2-advanced-tools-page__log-hint-toggle[data-v-99648c07]::after {\r\n  content: ' ▴';\n}\n.acu-v2-advanced-tools-page__log-hint-steps[data-v-99648c07] {\r\n  margin: 0;\r\n  padding: 2px 10px 8px 30px;\r\n  color: var(--acu-text-2);\n}\n.acu-v2-advanced-tools-page__log-hint-steps li[data-v-99648c07] {\r\n  margin: 2px 0;\r\n  overflow-wrap: anywhere;\n}\n@media (max-width: 1080px) {\n.acu-v2-advanced-tools-page[data-v-99648c07] {\r\n    padding: 14px;\n}\n.acu-v2-advanced-tools-page__sql-actions[data-v-99648c07] {\r\n    justify-content: stretch;\n}\n.acu-v2-advanced-tools-page__sql-status[data-v-99648c07] {\r\n    width: 100%;\r\n    margin-left: 0;\r\n    text-align: right;\n}\n.acu-v2-advanced-tools-page__filter-grid[data-v-99648c07] {\r\n    grid-template-columns: 1fr;\n}\n.acu-v2-advanced-tools-page__log-control-main[data-v-99648c07] {\r\n    align-items: stretch;\r\n    flex-direction: column;\r\n    justify-content: flex-start;\n}\n.acu-v2-advanced-tools-page__toggles[data-v-99648c07] {\r\n    align-self: flex-start;\n}\n.acu-v2-advanced-tools-page__sql-history-item[data-v-99648c07],\r\n  .acu-v2-advanced-tools-page__log-row[data-v-99648c07] {\r\n    padding-inline: 9px;\n}\n}\r\n", "src/presentation-v2/pages/AdvancedToolsPage.vue#style-0-99648c07");
     var AdvancedToolsPage_vue_vue_type_style_index_0_scoped_99648c07_lang = null;
 
-    const _hoisted_1$d = { class: "acu-v2-advanced-tools-page" };
-    const _hoisted_2$c = {
+    const _hoisted_1$c = { class: "acu-v2-advanced-tools-page" };
+    const _hoisted_2$b = {
 	class: "acu-v2-advanced-tools-page__quick-actions",
 	"aria-label": "SQL 快捷操作"
     };
-    const _hoisted_3$b = { class: "acu-v2-advanced-tools-page__sql-actions" };
-    const _hoisted_4$9 = {
+    const _hoisted_3$a = { class: "acu-v2-advanced-tools-page__sql-actions" };
+    const _hoisted_4$8 = {
 	class: "acu-v2-advanced-tools-page__sql-result-section",
 	"aria-label": "SQL 执行结果"
     };
@@ -219915,8 +220777,8 @@ ${rejectionText}` : delegationFeedback,
     const _hoisted_31 = { class: "acu-v2-advanced-tools-page__log-hint-summary" };
     const _hoisted_32 = { class: "acu-v2-advanced-tools-page__log-hint-text" };
     const _hoisted_33 = { class: "acu-v2-advanced-tools-page__log-hint-steps" };
-    function _sfc_render$d(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$d, [createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }), createVNode($setup["AcuPanelGrid"], {
+    function _sfc_render$c(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$c, [createVNode($setup["AcuMobilePanelNav"], { items: $setup.panelNavItems }), createVNode($setup["AcuPanelGrid"], {
 		class: "acu-v2-advanced-tools-page__tools-grid",
 		"collapse-at": "lg"
 	}, {
@@ -219935,7 +220797,7 @@ ${rejectionText}` : delegationFeedback,
 				_: 1
 			}, 8, ["variant"])]),
 			default: withCtx(() => [
-				createBaseVNode("div", _hoisted_2$c, [createVNode($setup["AcuButton"], {
+				createBaseVNode("div", _hoisted_2$b, [createVNode($setup["AcuButton"], {
 					size: "sm",
 					disabled: !!$setup.sqlFlow.busyAction.value,
 					onClick: $setup.sqlFlow.showTables
@@ -219985,7 +220847,7 @@ ${rejectionText}` : delegationFeedback,
 					}, null, 8, ["model-value"])]),
 					_: 1
 				}),
-				createBaseVNode("div", _hoisted_3$b, [
+				createBaseVNode("div", _hoisted_3$a, [
 					createVNode($setup["AcuButton"], {
 						variant: "primary",
 						loading: $setup.sqlFlow.busyAction.value === "execute",
@@ -220034,7 +220896,7 @@ ${rejectionText}` : delegationFeedback,
 						/* TEXT, CLASS */
 					)
 				]),
-				createBaseVNode("section", _hoisted_4$9, [_cache[9] || (_cache[9] = createBaseVNode(
+				createBaseVNode("section", _hoisted_4$8, [_cache[9] || (_cache[9] = createBaseVNode(
 					"h4",
 					{ class: "acu-v2-advanced-tools-page__section-title" },
 					"结果",
@@ -220397,7 +221259,7 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	})]);
     }
-    var AdvancedToolsPage = /*#__PURE__*/ _export_sfc(_sfc_main$d, [["render", _sfc_render$d], ["__scopeId", "data-v-99648c07"]]);
+    var AdvancedToolsPage = /*#__PURE__*/ _export_sfc(_sfc_main$c, [["render", _sfc_render$c], ["__scopeId", "data-v-99648c07"]]);
 
     const developerCopy = {
         panels: {
@@ -220412,7 +221274,7 @@ ${rejectionText}` : delegationFeedback,
         },
     };
 
-    var _sfc_main$c = /*@__PURE__*/ defineComponent({
+    var _sfc_main$b = /*@__PURE__*/ defineComponent({
         __name: 'DeveloperPage',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -220456,17 +221318,17 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-developer-page[data-v-07a27fde] {\n  min-height: 100%;\n  min-width: 0;\n  padding: 20px;\n  display: flex;\n  flex-direction: column;\n  gap: 18px;\n}\n.acu-v2-developer-page__toggle-list[data-v-07a27fde] {\n  display: flex;\n  flex-direction: column;\n  gap: 14px;\n}\n@media (max-width: 860px) {\n.acu-v2-developer-page[data-v-07a27fde] {\n    padding: 14px;\n}\n}\n", "src/presentation-v2/pages/DeveloperPage.vue#style-0-07a27fde");
     var DeveloperPage_vue_vue_type_style_index_0_scoped_07a27fde_lang = null;
 
-    const _hoisted_1$c = { class: "acu-v2-developer-page" };
-    const _hoisted_2$b = { class: "acu-v2-developer-page__toggle-list" };
-    const _hoisted_3$a = { class: "acu-v2-developer-page__toggle-list" };
-    function _sfc_render$c(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("section", _hoisted_1$c, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-developer-page__grid" }, {
+    const _hoisted_1$b = { class: "acu-v2-developer-page" };
+    const _hoisted_2$a = { class: "acu-v2-developer-page__toggle-list" };
+    const _hoisted_3$9 = { class: "acu-v2-developer-page__toggle-list" };
+    function _sfc_render$b(_ctx, _cache, $props, $setup, $data, $options) {
+	return openBlock(), createElementBlock("section", _hoisted_1$b, [createVNode($setup["AcuPanelGrid"], { class: "acu-v2-developer-page__grid" }, {
 		default: withCtx(() => [
 			createVNode($setup["AcuPanel"], {
 				title: $setup.developerCopy.panels.gatedFields.title,
 				description: $setup.developerCopy.panels.gatedFields.description
 			}, {
-				default: withCtx(() => [createBaseVNode("div", _hoisted_2$b, [(openBlock(true), createElementBlock(
+				default: withCtx(() => [createBaseVNode("div", _hoisted_2$a, [(openBlock(true), createElementBlock(
 					Fragment,
 					null,
 					renderList($setup.toggles, (item) => {
@@ -220485,7 +221347,7 @@ ${rejectionText}` : delegationFeedback,
 				title: "填表高级选项",
 				description: "仅在需要严格约束模型填表响应时开启。开启后将切换到隔离提示词和严格 JSON 解析链路。"
 			}, {
-				default: withCtx(() => [createBaseVNode("div", _hoisted_3$a, [createVNode($setup["ToggleRow"], {
+				default: withCtx(() => [createBaseVNode("div", _hoisted_3$9, [createVNode($setup["ToggleRow"], {
 					item: $setup.strictJsonTableFillToggle,
 					onChange: _cache[0] || (_cache[0] = ($event) => $setup.settings.setStrictJsonTableFillEnabled($event))
 				}, null, 8, ["item"])])]),
@@ -220514,7 +221376,7 @@ ${rejectionText}` : delegationFeedback,
 		_: 1
 	})]);
     }
-    var DeveloperPage = /*#__PURE__*/ _export_sfc(_sfc_main$c, [["render", _sfc_render$c], ["__scopeId", "data-v-07a27fde"]]);
+    var DeveloperPage = /*#__PURE__*/ _export_sfc(_sfc_main$b, [["render", _sfc_render$b], ["__scopeId", "data-v-07a27fde"]]);
 
     /**
      * page-registry — 一级页静态注册表（plan §4.1 + §D24）
@@ -220758,7 +221620,7 @@ ${rejectionText}` : delegationFeedback,
         });
     }
 
-    var _sfc_main$b = /*@__PURE__*/ defineComponent({
+    var _sfc_main$a = /*@__PURE__*/ defineComponent({
         __name: 'MainArea',
         setup(__props, { expose: __expose }) {
             __expose();
@@ -220795,25 +221657,25 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-main[data-v-5d638ca6] {\n  flex: 1 1 auto;\n  min-width: 0;\n  min-height: 0;\n  overflow: auto;\n  scrollbar-gutter: stable;\n  background: var(--acu-bg-0);\n  color: var(--acu-text-1);\n}\n.acu-v2-main[data-v-5d638ca6] .acu-v2-dashboard-page,\n.acu-v2-main[data-v-5d638ca6] .acu-v2-advanced-tools-page,\n.acu-v2-main[data-v-5d638ca6] .acu-v2-form-fill-page,\n.acu-v2-main[data-v-5d638ca6] .acu-v2-api-page,\n.acu-v2-main[data-v-5d638ca6] .acu-v2-import-page,\n.acu-v2-main[data-v-5d638ca6] .acu-v2-continuation-page,\n.acu-v2-main[data-v-5d638ca6] .acu-v2-content-replace-page,\n.acu-v2-main[data-v-5d638ca6] .acu-v2-data-mgmt-page,\n.acu-v2-main[data-v-5d638ca6] .acu-v2-developer-page,\n.acu-v2-main[data-v-5d638ca6] .acu-v2-plot-page,\n.acu-v2-main[data-v-5d638ca6] .acu-v2-table-page {\n  padding: var(--acu-page-padding, 20px);\n  gap: var(--acu-page-gap, 14px);\n}\n.acu-v2-main__empty[data-v-5d638ca6] {\n  padding: var(--acu-space-6, 24px);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  color: var(--acu-text-3);\n}\n@media (max-width: 720px) {\n.acu-v2-main[data-v-5d638ca6] .acu-v2-dashboard-page,\n  .acu-v2-main[data-v-5d638ca6] .acu-v2-advanced-tools-page,\n  .acu-v2-main[data-v-5d638ca6] .acu-v2-form-fill-page,\n  .acu-v2-main[data-v-5d638ca6] .acu-v2-api-page,\n  .acu-v2-main[data-v-5d638ca6] .acu-v2-import-page,\n  .acu-v2-main[data-v-5d638ca6] .acu-v2-continuation-page,\n  .acu-v2-main[data-v-5d638ca6] .acu-v2-content-replace-page,\n  .acu-v2-main[data-v-5d638ca6] .acu-v2-data-mgmt-page,\n  .acu-v2-main[data-v-5d638ca6] .acu-v2-developer-page,\n  .acu-v2-main[data-v-5d638ca6] .acu-v2-plot-page,\n  .acu-v2-main[data-v-5d638ca6] .acu-v2-table-page {\n    padding: var(--acu-page-padding-compact, 14px);\n}\n}\n", "src/presentation-v2/components/MainArea.vue#style-0-5d638ca6");
     var MainArea_vue_vue_type_style_index_0_scoped_5d638ca6_lang = null;
 
-    const _hoisted_1$b = {
+    const _hoisted_1$a = {
 	ref: "containerRef",
 	class: "acu-v2-main",
 	"data-acu-main": ""
     };
-    const _hoisted_2$a = {
+    const _hoisted_2$9 = {
 	key: 1,
 	class: "acu-v2-main__empty"
     };
-    function _sfc_render$b(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$a(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"main",
-		_hoisted_1$b,
-		[$setup.router.activePage ? (openBlock(), createBlock(resolveDynamicComponent($setup.router.activePage.component), { key: `${$setup.router.activePageId}:${$setup.shell.openRefreshTick}` })) : (openBlock(), createElementBlock("p", _hoisted_2$a, "没有可显示的页面（路由 store 异常）"))],
+		_hoisted_1$a,
+		[$setup.router.activePage ? (openBlock(), createBlock(resolveDynamicComponent($setup.router.activePage.component), { key: `${$setup.router.activePageId}:${$setup.shell.openRefreshTick}` })) : (openBlock(), createElementBlock("p", _hoisted_2$9, "没有可显示的页面（路由 store 异常）"))],
 		512
 		/* NEED_PATCH */
 	);
     }
-    var MainArea = /*#__PURE__*/ _export_sfc(_sfc_main$b, [["render", _sfc_render$b], ["__scopeId", "data-v-5d638ca6"]]);
+    var MainArea = /*#__PURE__*/ _export_sfc(_sfc_main$a, [["render", _sfc_render$a], ["__scopeId", "data-v-5d638ca6"]]);
 
     var lightBrandImage = "data:image/png;base64,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";
 
@@ -220822,7 +221684,7 @@ ${rejectionText}` : delegationFeedback,
     var highBrandImage = "data:image/png;base64,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";
 
     const HIGH_TIER_PHRASE = '开启高级功能';
-    var _sfc_main$a = /*@__PURE__*/ defineComponent({
+    var _sfc_main$9 = /*@__PURE__*/ defineComponent({
         __name: 'Sidebar',
         props: {
             variant: { default: 'desktop' }
@@ -220925,10 +221787,10 @@ ${rejectionText}` : delegationFeedback,
     injectSfcStyle("\n.acu-v2-sidebar[data-v-5dafbd20] {\r\n  min-width: 0;\r\n  min-height: 0;\r\n  background: var(--acu-sidebar-bg);\r\n  padding: var(--acu-space-6, 24px) var(--acu-space-3, 12px) var(--acu-panel-padding, 16px);\r\n  overflow-y: auto;\n}\n.acu-v2-sidebar--desktop[data-v-5dafbd20] {\r\n  width: var(--acu-sidebar-width, 220px);\r\n  flex: 0 0 var(--acu-sidebar-width, 220px);\r\n  border-right: 1px solid var(--acu-border-2);\n}\n.acu-v2-sidebar--drawer[data-v-5dafbd20] {\r\n  width: 100%;\r\n  flex: 1 1 auto;\n}\n.acu-v2-sidebar__brand[data-v-5dafbd20] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: var(--acu-space-250, 10px);\r\n  padding: var(--acu-space-1, 4px) var(--acu-space-1, 4px) var(--acu-space-5, 20px);\r\n  margin-bottom: var(--acu-page-gap, 14px);\n}\n.acu-v2-sidebar__brand-mark[data-v-5dafbd20] {\r\n  width: 34px;\r\n  height: 34px;\r\n  flex: 0 0 34px;\r\n  display: block;\r\n  /* 圆形裁切，不加底色与边框，避免源图残留底框在圆角方框里露出弧线。 */\r\n  border-radius: 50%;\r\n  object-fit: cover;\r\n  object-position: center;\r\n  user-select: none;\n}\n.acu-v2-sidebar__brand-copy[data-v-5dafbd20] {\r\n  min-width: 0;\r\n  display: block;\n}\n.acu-v2-sidebar__brand-title[data-v-5dafbd20] {\r\n  appearance: none;\r\n  display: block;\r\n  width: 100%;\r\n  padding: 0;\r\n  border: 0;\r\n  background: transparent;\r\n  text-align: left;\r\n  font-size: var(--acu-font-size-panel-title, 15px);\r\n  line-height: 1.25;\r\n  font-weight: 700;\r\n  color: var(--acu-text-1);\r\n  cursor: pointer;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-v2-sidebar__brand-title[data-v-5dafbd20]:hover,\r\n.acu-v2-sidebar__brand-title[data-v-5dafbd20]:focus-visible {\r\n  color: var(--acu-accent);\n}\n.acu-v2-sidebar__brand-tag[data-v-5dafbd20] {\r\n  display: block;\r\n  margin-top: var(--acu-space-075, 3px);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-text-3);\n}\n.acu-v2-sidebar__group[data-v-5dafbd20] {\r\n  margin-bottom: var(--acu-panel-gap, 12px);\n}\n.acu-v2-sidebar__group-title[data-v-5dafbd20] {\r\n  padding: var(--acu-space-175, 7px) var(--acu-space-3, 12px) var(--acu-space-150, 6px);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  font-weight: 600;\r\n  letter-spacing: 0.06em;\r\n  color: var(--acu-text-3);\r\n  text-transform: uppercase;\n}\n.acu-v2-sidebar__item[data-v-5dafbd20] {\r\n  display: block;\r\n  width: 100%;\r\n  padding: var(--acu-space-250, 10px) var(--acu-space-3, 12px);\r\n  border: 0;\r\n  background: transparent;\r\n  text-align: left;\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  color: var(--acu-text-2);\r\n  cursor: pointer;\r\n  border-radius: var(--acu-radius-sm);\r\n  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-v2-sidebar__item[data-v-5dafbd20]:not(.acu-v2-sidebar__item--active):hover {\r\n  background: var(--acu-hover-overlay);\r\n  color: var(--acu-text-1);\n}\n.acu-v2-sidebar__item--active[data-v-5dafbd20] {\r\n  background: var(--acu-accent);\r\n  color: var(--acu-on-accent);\r\n  font-weight: 600;\n}\r\n", "src/presentation-v2/components/Sidebar.vue#style-0-5dafbd20");
     var Sidebar_vue_vue_type_style_index_0_scoped_5dafbd20_lang = null;
 
-    const _hoisted_1$a = { class: "acu-v2-sidebar__brand" };
-    const _hoisted_2$9 = ["src", "data-tier"];
-    const _hoisted_3$9 = { class: "acu-v2-sidebar__brand-copy" };
-    const _hoisted_4$8 = ["aria-label"];
+    const _hoisted_1$9 = { class: "acu-v2-sidebar__brand" };
+    const _hoisted_2$8 = ["src", "data-tier"];
+    const _hoisted_3$8 = { class: "acu-v2-sidebar__brand-copy" };
+    const _hoisted_4$7 = ["aria-label"];
     const _hoisted_5$7 = { class: "acu-v2-sidebar__brand-tag" };
     const _hoisted_6$6 = {
 	key: 0,
@@ -220940,26 +221802,26 @@ ${rejectionText}` : delegationFeedback,
 	"data-page-id",
 	"onClick"
     ];
-    function _sfc_render$a(_ctx, _cache, $props, $setup, $data, $options) {
+    function _sfc_render$9(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock(
 		"nav",
 		{
 			class: normalizeClass(["acu-v2-sidebar", `acu-v2-sidebar--${$props.variant}`]),
 			"aria-label": "一级页导航"
 		},
-		[createBaseVNode("div", _hoisted_1$a, [createBaseVNode("img", {
+		[createBaseVNode("div", _hoisted_1$9, [createBaseVNode("img", {
 			class: "acu-v2-sidebar__brand-mark",
 			src: $setup.brandImages[$setup.uiMode.tier],
 			"data-tier": $setup.uiMode.tier,
 			alt: "",
 			"aria-hidden": "true",
 			draggable: "false"
-		}, null, 8, _hoisted_2$9), createBaseVNode("span", _hoisted_3$9, [createBaseVNode("button", {
+		}, null, 8, _hoisted_2$8), createBaseVNode("span", _hoisted_3$8, [createBaseVNode("button", {
 			type: "button",
 			class: "acu-v2-sidebar__brand-title",
 			"aria-label": `${$setup.productDisplayName}（连续点击五次打开功能档位设置）`,
 			onClick: $setup.onBrandTitleClick
-		}, toDisplayString($setup.productDisplayName), 9, _hoisted_4$8), createBaseVNode(
+		}, toDisplayString($setup.productDisplayName), 9, _hoisted_4$7), createBaseVNode(
 			"span",
 			_hoisted_5$7,
 			toDisplayString($setup.uiMode.modeLabel),
@@ -221005,179 +221867,7 @@ ${rejectionText}` : delegationFeedback,
 		/* CLASS */
 	);
     }
-    var Sidebar = /*#__PURE__*/ _export_sfc(_sfc_main$a, [["render", _sfc_render$a], ["__scopeId", "data-v-5dafbd20"]]);
-
-    const WORLD_SIMULATION_PROGRESS_LABELS_ACU = {
-        survey: '世界线测绘',
-        intel: '信息取证',
-        backstage: '幕后演算',
-        batchOne: '批次一：时序与伏线 / 人物谱',
-        batchTwo: '批次二：纪要、风声与场外信号',
-        review: '因果审核',
-        anchor: '提交',
-        completed: '推演完成',
-        interrupted: '推演中断',
-    };
-    function isReviewerEntry_ACU(entry) {
-        return entry.agentName === 'causality-reviewer';
-    }
-    function currentRunEntries_ACU(entries) {
-        let start = 0;
-        for (let index = entries.length - 1; index >= 0; index -= 1) {
-            if (entries[index].kind === 'run_started' || entries[index].kind === 'run_resumed') {
-                start = index;
-                break;
-            }
-        }
-        return entries.slice(start);
-    }
-    function hiddenView_ACU() {
-        return { visible: false, phase: null, label: '', concurrent: 0, terminal: false };
-    }
-    /**
-     * 从最近一次 run 的 session entries 推导浮卡阶段。不读 patch 正文，不暴露角色内部名。
-     * 无独立 stage_plan 时跳过「世界线测绘」。
-     */
-    function deriveWorldSimulationProgressView_ACU(entries, running) {
-        const run = currentRunEntries_ACU(entries);
-        const last = run[run.length - 1];
-        if (!running) {
-            if (last?.kind === 'run_completed') {
-                return { visible: true, phase: 'completed', label: WORLD_SIMULATION_PROGRESS_LABELS_ACU.completed, concurrent: 0, terminal: true };
-            }
-            if (last?.kind === 'run_failed' || last?.kind === 'block') {
-                return { visible: true, phase: 'interrupted', label: WORLD_SIMULATION_PROGRESS_LABELS_ACU.interrupted, concurrent: 0, terminal: true };
-            }
-            return hiddenView_ACU();
-        }
-        const runningSpecialists = run.filter(item => item.kind === 'delegation'
-            && item.agentName !== 'world-director' && !isReviewerEntry_ACU(item) && item.status === 'running');
-        const reviewerRunning = run.some(item => isReviewerEntry_ACU(item) && item.status === 'running');
-        const lastIsFinalize = last?.kind === 'finalize' || (last?.kind === 'main_action' && /finalize/.test(last.title));
-        if (lastIsFinalize) {
-            return { visible: true, phase: 'anchor', label: WORLD_SIMULATION_PROGRESS_LABELS_ACU.anchor, concurrent: 0, terminal: false };
-        }
-        if (reviewerRunning || (last && isReviewerEntry_ACU(last))) {
-            return { visible: true, phase: 'review', label: WORLD_SIMULATION_PROGRESS_LABELS_ACU.review, concurrent: 0, terminal: false };
-        }
-        if (runningSpecialists.length) {
-            const concurrent = runningSpecialists.length;
-            if (runningSpecialists.every(item => item.agentName === 'guidance-composer')) {
-                return { visible: true, phase: 'batchTwo', label: WORLD_SIMULATION_PROGRESS_LABELS_ACU.batchTwo, concurrent, terminal: false };
-            }
-            if (runningSpecialists.every(item => item.agentName === 'undercurrent-analyst' || item.agentName === 'dramatis-keeper')) {
-                return { visible: true, phase: 'batchOne', label: `${WORLD_SIMULATION_PROGRESS_LABELS_ACU.batchOne} · ${concurrent} 路并行`, concurrent, terminal: false };
-            }
-            return { visible: true, phase: 'backstage', label: `${WORLD_SIMULATION_PROGRESS_LABELS_ACU.backstage} · ${concurrent} 路并行`, concurrent, terminal: false };
-        }
-        if (last?.kind === 'stage_plan' || (run.some(item => item.kind === 'stage_plan') && !run.some(item => item.kind === 'main_action' || item.kind === 'tool_read' || item.kind === 'delegation'))) {
-            return { visible: true, phase: 'survey', label: WORLD_SIMULATION_PROGRESS_LABELS_ACU.survey, concurrent: 0, terminal: false };
-        }
-        return { visible: true, phase: 'intel', label: WORLD_SIMULATION_PROGRESS_LABELS_ACU.intel, concurrent: 0, terminal: false };
-    }
-
-    const NARROW_COLLAPSE_PX = 640;
-    const TERMINAL_HOLD_MS = 2400;
-    var _sfc_main$9 = /*@__PURE__*/ defineComponent({
-        __name: 'WorldSimulationProgressCard',
-        setup(__props, { expose: __expose }) {
-            __expose();
-            const runtime = useWorldSimulationRuntime();
-            const portalTarget = ref(null);
-            const collapsed = ref(false);
-            const dismissed = ref(false);
-            let hideTimer;
-            const view = computed(() => deriveWorldSimulationProgressView_ACU(runtime.entries.value, runtime.running.value));
-            const cardVisible = computed(() => view.value.visible && !dismissed.value);
-            function clearHideTimer() {
-                if (hideTimer === undefined)
-                    return;
-                acuClearTimeout(hideTimer);
-                hideTimer = undefined;
-            }
-            onMounted(() => {
-                const doc = getAcuHostDocument();
-                portalTarget.value = doc.body;
-                collapsed.value = (doc.defaultView?.innerWidth ?? 0) > 0 && (doc.defaultView?.innerWidth ?? 0) <= NARROW_COLLAPSE_PX;
-                runtime.refresh();
-            });
-            onBeforeUnmount(() => {
-                clearHideTimer();
-            });
-            watch(useChatChangedTick(), () => {
-                runtime.refresh();
-            });
-            watch(() => [view.value.terminal, runtime.running.value], ([terminal, running]) => {
-                clearHideTimer();
-                if (running) {
-                    dismissed.value = false;
-                    return;
-                }
-                if (!terminal) {
-                    dismissed.value = false;
-                    return;
-                }
-                hideTimer = acuSetTimeout(() => {
-                    dismissed.value = true;
-                    hideTimer = undefined;
-                }, TERMINAL_HOLD_MS);
-            });
-            const __returned__ = { NARROW_COLLAPSE_PX, TERMINAL_HOLD_MS, runtime, portalTarget, collapsed, dismissed, get hideTimer() { return hideTimer; }, set hideTimer(v) { hideTimer = v; }, view, cardVisible, clearHideTimer };
-            Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
-            return __returned__;
-        }
-    });
-
-    injectSfcStyle("\n.acu-world-sim-progress[data-v-57cab6e2] {\n  position: fixed;\n  right: max(16px, var(--acu-safe-right, 0px));\n  bottom: max(88px, calc(var(--acu-safe-bottom, 0px) + 72px));\n  display: flex;\n  align-items: center;\n  gap: 10px;\n  max-width: min(280px, calc(100vw - 32px));\n  padding: 10px 12px 10px 10px;\n  border: 1px solid color-mix(in srgb, var(--acu-border, #3a4150) 80%, transparent);\n  border-radius: 18px;\n  background: color-mix(in srgb, var(--acu-bg-1, #161b22) 92%, transparent);\n  box-shadow: 0 10px 28px color-mix(in srgb, #000 42%, transparent);\n  color: var(--acu-text-1, #e8edf5);\n  font-family: var(--acu-font-ui, inherit);\n  pointer-events: auto;\n}\n.acu-world-sim-progress.is-collapsed[data-v-57cab6e2] {\n  padding: 8px;\n  border-radius: 999px;\n}\n.acu-world-sim-progress.is-terminal[data-v-57cab6e2] {\n  border-color: color-mix(in srgb, var(--acu-success, #4fa36c) 45%, transparent);\n}\n.acu-world-sim-progress__dot[data-v-57cab6e2] {\n  flex: none;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n  width: 28px;\n  height: 28px;\n  border: 0;\n  border-radius: 999px;\n  background: color-mix(in srgb, var(--acu-primary, #5b8def) 18%, transparent);\n  cursor: pointer;\n}\n.acu-world-sim-progress__pulse[data-v-57cab6e2] {\n  width: 10px;\n  height: 10px;\n  border-radius: 50%;\n  background: var(--acu-primary, #5b8def);\n  animation: acu-world-sim-progress-pulse-57cab6e2 1.2s ease-in-out infinite;\n}\n.acu-world-sim-progress.is-terminal .acu-world-sim-progress__pulse[data-v-57cab6e2] {\n  background: var(--acu-success, #4fa36c);\n  animation: none;\n}\n.acu-world-sim-progress__body[data-v-57cab6e2] {\n  min-width: 0;\n}\n.acu-world-sim-progress__kicker[data-v-57cab6e2] {\n  margin: 0;\n  color: var(--acu-text-3, #8b95a7);\n  font-size: 10px;\n  letter-spacing: 0.08em;\n  text-transform: uppercase;\n}\n.acu-world-sim-progress__label[data-v-57cab6e2] {\n  margin: 2px 0 0;\n  color: var(--acu-text-1, #e8edf5);\n  font-size: 13px;\n  font-weight: 600;\n  line-height: 1.3;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n@keyframes acu-world-sim-progress-pulse-57cab6e2 {\n0%, 100% { opacity: 0.35; transform: scale(0.92);\n}\n50% { opacity: 1; transform: scale(1);\n}\n}\n@media (max-width: 640px) {\n.acu-world-sim-progress[data-v-57cab6e2] {\n    right: 12px;\n    bottom: max(76px, calc(var(--acu-safe-bottom, 0px) + 64px));\n}\n}\n", "src/presentation-v2/components/WorldSimulationProgressCard.vue#style-0-57cab6e2");
-    var WorldSimulationProgressCard_vue_vue_type_style_index_0_scoped_57cab6e2_lang = null;
-
-    const _hoisted_1$9 = ["aria-label"];
-    const _hoisted_2$8 = ["title", "aria-expanded"];
-    const _hoisted_3$8 = {
-	key: 0,
-	class: "acu-world-sim-progress__body"
-    };
-    const _hoisted_4$7 = { class: "acu-world-sim-progress__label" };
-    function _sfc_render$9(_ctx, _cache, $props, $setup, $data, $options) {
-	return $setup.portalTarget ? (openBlock(), createBlock(Teleport, {
-		key: 0,
-		to: $setup.portalTarget
-	}, [$setup.cardVisible ? (openBlock(), createElementBlock("div", {
-		key: 0,
-		class: normalizeClass(["acu-world-sim-progress", {
-			"is-collapsed": $setup.collapsed,
-			"is-terminal": $setup.view.terminal
-		}]),
-		role: "status",
-		"aria-label": $setup.view.label,
-		style: { zIndex: 8500 }
-	}, [createBaseVNode("button", {
-		type: "button",
-		class: "acu-world-sim-progress__dot",
-		title: $setup.collapsed ? $setup.view.label : "折叠为圆点",
-		"aria-expanded": String(!$setup.collapsed),
-		onClick: _cache[0] || (_cache[0] = ($event) => $setup.collapsed = !$setup.collapsed)
-	}, [..._cache[1] || (_cache[1] = [createBaseVNode(
-		"span",
-		{ class: "acu-world-sim-progress__pulse" },
-		null,
-		-1
-		/* CACHED */
-	)])], 8, _hoisted_2$8), !$setup.collapsed ? (openBlock(), createElementBlock("div", _hoisted_3$8, [_cache[2] || (_cache[2] = createBaseVNode(
-		"p",
-		{ class: "acu-world-sim-progress__kicker" },
-		"格林推演",
-		-1
-		/* CACHED */
-	)), createBaseVNode(
-		"p",
-		_hoisted_4$7,
-		toDisplayString($setup.view.label),
-		1
-		/* TEXT */
-	)])) : createCommentVNode("v-if", true)], 10, _hoisted_1$9)) : createCommentVNode("v-if", true)], 8, ["to"])) : createCommentVNode("v-if", true);
-    }
-    var WorldSimulationProgressCard = /*#__PURE__*/ _export_sfc(_sfc_main$9, [["render", _sfc_render$9], ["__scopeId", "data-v-57cab6e2"]]);
+    var Sidebar = /*#__PURE__*/ _export_sfc(_sfc_main$9, [["render", _sfc_render$9], ["__scopeId", "data-v-5dafbd20"]]);
 
     const THEME_DEFAULT_LIGHT = {
         id: "default-light",
@@ -230540,10 +231230,6 @@ ${rejectionText}` : delegationFeedback,
             });
             onMounted(() => router.ensureActiveVisible());
             watch(() => uiMode.mode, () => router.ensureActiveVisible());
-            watch(() => rootShell.isOpen, (isOpen) => {
-                if (!isOpen)
-                    toastStore.clear();
-            });
             function openMobileNav() {
                 clearMobileNavCloseTimer();
                 isMobileNavOpen.value = true;
@@ -230611,14 +231297,14 @@ ${rejectionText}` : delegationFeedback,
                 acuClearTimeout(mobileNavCloseTimer);
                 mobileNavCloseTimer = undefined;
             }
-            const __returned__ = { emit, rootShell, router, dialogStore, appearanceStore, themeStore, toastStore, uiMode, visualizer, isMobileNavOpen, isMobileNavRendered, isMobileNavClosing, isThemeMenuOpen, isThemeMenuRendered, isThemeMenuClosing, THEME_MENU_LEAVE_MS, MOBILE_NAV_LEAVE_MS, mobileNavDrawerStyle, get themeMenuCloseTimer() { return themeMenuCloseTimer; }, set themeMenuCloseTimer(v) { themeMenuCloseTimer = v; }, get mobileNavCloseTimer() { return mobileNavCloseTimer; }, set mobileNavCloseTimer(v) { mobileNavCloseTimer = v; }, shellTitle, uiScaleOptions, toggleThemeMenu, selectTheme, setUiScale, readFileText, importThemeFile, exportTheme, deleteTheme, sanitizeFilename, downloadJson, onDocPointer, devOptions, openMobileNav, closeMobileNav, closeApp, openThemeMenu, closeThemeMenu, clearThemeMenuCloseTimer, clearMobileNavCloseTimer, AcuDialogHost, AcuFileButton, AcuIconButton, AcuSegmentedControl, AcuToastViewport, MainArea, Sidebar, WorldSimulationProgressCard, get isCustomThemeId() { return isCustomThemeId; }, VisualizerSurface };
+            const __returned__ = { emit, rootShell, router, dialogStore, appearanceStore, themeStore, toastStore, uiMode, visualizer, isMobileNavOpen, isMobileNavRendered, isMobileNavClosing, isThemeMenuOpen, isThemeMenuRendered, isThemeMenuClosing, THEME_MENU_LEAVE_MS, MOBILE_NAV_LEAVE_MS, mobileNavDrawerStyle, get themeMenuCloseTimer() { return themeMenuCloseTimer; }, set themeMenuCloseTimer(v) { themeMenuCloseTimer = v; }, get mobileNavCloseTimer() { return mobileNavCloseTimer; }, set mobileNavCloseTimer(v) { mobileNavCloseTimer = v; }, shellTitle, uiScaleOptions, toggleThemeMenu, selectTheme, setUiScale, readFileText, importThemeFile, exportTheme, deleteTheme, sanitizeFilename, downloadJson, onDocPointer, devOptions, openMobileNav, closeMobileNav, closeApp, openThemeMenu, closeThemeMenu, clearThemeMenuCloseTimer, clearMobileNavCloseTimer, AcuDialogHost, AcuFileButton, AcuIconButton, AcuSegmentedControl, DeskPetLayer, MainArea, Sidebar, get isCustomThemeId() { return isCustomThemeId; }, VisualizerSurface };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n#acu-app-v2 {\n  --acu-safe-top: max(env(safe-area-inset-top, 0px), var(--acu-native-safe-top, 0px));\n  --acu-safe-right: max(env(safe-area-inset-right, 0px), var(--acu-native-safe-right, 0px));\n  --acu-safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--acu-native-safe-bottom, 0px));\n  --acu-safe-left: max(env(safe-area-inset-left, 0px), var(--acu-native-safe-left, 0px));\n  box-sizing: border-box;\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-ui);\n  font-size: var(--acu-font-size-body, 12px);\n}\n#acu-app-v2,#acu-app-v2 * {\n  box-sizing: border-box;\n}\n#acu-app-v2 button {\n  appearance: none;\n  -webkit-appearance: none;\n  -webkit-tap-highlight-color: transparent;\n}\n#acu-app-v2 button:focus:not(:focus-visible) {\n  outline: none;\n  box-shadow: none;\n}\n.acu-v2-app[data-v-9600e1a3] {\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-ui);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-app__shell[data-v-9600e1a3] {\n  position: fixed;\n  top: 0;\n  right: 0;\n  bottom: 0;\n  left: 0;\n  inset: 0;\n  z-index: 9000;\n  width: 100%;\n  width: 100vw;\n  width: 100dvw;\n  height: 100%;\n  height: 100vh;\n  height: 100dvh;\n  min-width: 0;\n  min-height: 0;\n  display: flex;\n  flex-direction: column;\n  padding: var(--acu-safe-top) var(--acu-safe-right) var(--acu-safe-bottom) var(--acu-safe-left);\n  overflow: hidden;\n  background: var(--acu-bg-0);\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-ui);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-app__header[data-v-9600e1a3] {\n  position: relative;\n  z-index: 40;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  min-height: var(--acu-shell-header-height, 50px);\n  padding:\n    var(--acu-space-2, 8px)\n    var(--acu-space-3, 12px)\n    var(--acu-space-2, 8px)\n    var(--acu-space-5, 20px);\n  background: var(--acu-bg-0);\n  border-bottom: 1px solid var(--acu-border-2);\n  flex: 0 0 auto;\n}\n.acu-v2-app__header-left[data-v-9600e1a3] {\n  display: flex;\n  align-items: center;\n  min-width: 0;\n  gap: var(--acu-space-2, 8px);\n  flex: 1 1 auto;\n}\n.acu-v2-app__menu[data-v-9600e1a3] {\n  display: none;\n  flex: 0 0 auto;\n  font-size: var(--acu-font-size-body-lg, 13px);\n  background: transparent;\n  color: var(--acu-text-2);\n  box-shadow: none;\n}\n.acu-v2-app__menu[data-v-9600e1a3]:hover:not(:disabled) {\n  background: transparent;\n  color: var(--acu-text-1);\n}\n.acu-v2-app__page-title[data-v-9600e1a3] {\n  min-width: 0;\n  margin: 0;\n  overflow: hidden;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-page-title, 22px);\n  font-weight: 700;\n  line-height: 1.2;\n  letter-spacing: 0;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-app__close[data-v-9600e1a3] {\n  width: var(--acu-shell-header-action-size, 30px);\n  height: var(--acu-shell-header-action-size, 30px);\n  border: 0;\n  background: transparent;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-page-title, 22px);\n  line-height: 1;\n  cursor: pointer;\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-app__close[data-v-9600e1a3]:hover {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-v2-app__body[data-v-9600e1a3] {\n  flex: 1 1 auto;\n  display: flex;\n  min-width: 0;\n  min-height: 0;\n  overflow: hidden;\n}\n.acu-v2-app__content[data-v-9600e1a3] {\n  flex: 1 1 auto;\n  display: flex;\n  flex-direction: column;\n  min-width: 0;\n  min-height: 0;\n  overflow: hidden;\n}\n.acu-v2-app__mobile-nav-layer[data-v-9600e1a3] {\n  position: fixed;\n  top: 0;\n  right: 0;\n  bottom: 0;\n  left: 0;\n  inset: 0;\n  width: 100%;\n  width: 100vw;\n  width: 100dvw;\n  height: 100%;\n  height: 100vh;\n  height: 100dvh;\n  min-height: 100vh;\n  min-height: 100dvh;\n  z-index: 9300;\n  display: none;\n  align-items: stretch;\n  justify-content: flex-start;\n  padding: var(--acu-safe-top) var(--acu-safe-right) var(--acu-safe-bottom) var(--acu-safe-left);\n  overflow: hidden;\n  background: rgba(0, 0, 0, 0.58);\n  pointer-events: auto;\n  overscroll-behavior: contain;\n  animation: mobile-nav-layer-in-9600e1a3 0.18s ease-out both;\n}\n.acu-v2-app__mobile-nav-layer.is-closing[data-v-9600e1a3] {\n  pointer-events: auto;\n  animation: mobile-nav-layer-out-9600e1a3 0.15s ease-in both;\n}\n.acu-v2-app__mobile-nav[data-v-9600e1a3] {\n  width: var(--acu-mobile-nav-width, 360px);\n  max-width: calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\n  height: 100%;\n  max-height: 100%;\n  min-width: 0;\n  min-height: 0;\n  align-self: stretch;\n  flex: 0 1 var(--acu-mobile-nav-width, 360px);\n  display: flex;\n  flex-direction: column;\n  background: var(--acu-sidebar-bg);\n  border-right: 0;\n  box-shadow: var(--acu-shadow);\n  overflow: hidden;\n  pointer-events: auto;\n  animation: mobile-nav-drawer-in-9600e1a3 0.18s ease-out both;\n}\n.acu-v2-app__mobile-nav-layer.is-closing .acu-v2-app__mobile-nav[data-v-9600e1a3] {\n  animation: mobile-nav-drawer-out-9600e1a3 0.15s ease-in both;\n}\n@supports (width: min(1px, 100%)) {\n.acu-v2-app__mobile-nav[data-v-9600e1a3] {\n    width: min(var(--acu-mobile-nav-width, 360px), calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\n    flex: 0 0 min(var(--acu-mobile-nav-width, 360px), calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\n}\n}\n@supports (width: 100dvw) {\n.acu-v2-app__mobile-nav[data-v-9600e1a3] {\n    max-width: calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\n}\n}\n@supports (height: 100dvh) {\n.acu-v2-app__mobile-nav[data-v-9600e1a3] {\n    height: 100%;\n    max-height: 100%;\n}\n}\n\n/* ── Theme switcher ── */\n.acu-v2-app__header-right[data-v-9600e1a3] {\n  display: flex;\n  align-items: center;\n  gap: var(--acu-space-1, 4px);\n  flex: 0 0 auto;\n}\n.acu-v2-app__theme-switcher[data-v-9600e1a3] {\n  position: relative;\n}\n.acu-v2-app__theme-btn[data-v-9600e1a3] {\n  width: var(--acu-shell-header-action-size, 30px);\n  height: var(--acu-shell-header-action-size, 30px);\n  border: 0;\n  background: transparent;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  cursor: pointer;\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-app__theme-btn[data-v-9600e1a3]:hover {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-v2-app__theme-menu[data-v-9600e1a3] {\n  position: absolute;\n  top: calc(100% + var(--acu-menu-offset, 6px));\n  right: 0;\n  z-index: 10;\n  margin: 0;\n  padding: var(--acu-menu-padding, 4px);\n  width: min(var(--acu-menu-width, 300px), calc(100vw - var(--acu-mobile-nav-edge-gap, 24px)));\n  min-width: min(var(--acu-menu-min-width, 240px), calc(100vw - var(--acu-mobile-nav-edge-gap, 24px)));\n  background: var(--acu-bg-1);\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md);\n  box-shadow: var(--acu-shadow);\n  animation: theme-menu-in-9600e1a3 0.12s ease-out both;\n}\n.acu-v2-app__theme-menu.is-closing[data-v-9600e1a3] {\n  pointer-events: none;\n  animation: theme-menu-out-9600e1a3 0.12s ease-in both;\n}\n.acu-v2-app__appearance-section[data-v-9600e1a3] {\n  min-width: 0;\n}\n.acu-v2-app__appearance-section + .acu-v2-app__appearance-section[data-v-9600e1a3] {\n  margin-top: var(--acu-menu-section-gap, 8px);\n  padding-top: var(--acu-menu-section-gap, 8px);\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-app__appearance-section-title[data-v-9600e1a3] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  font-weight: 700;\n  letter-spacing: 0;\n}\n.acu-v2-app__theme-list[data-v-9600e1a3] {\n  list-style: none;\n  margin: var(--acu-space-1, 4px) 0 0;\n  padding: 0;\n}\n.acu-v2-app__theme-option[data-v-9600e1a3] {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: var(--acu-space-2, 8px);\n  padding: var(--acu-menu-option-padding-y, 7px) var(--acu-menu-option-padding-x, 10px);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  color: var(--acu-text-2);\n  border-radius: var(--acu-radius-sm);\n  cursor: pointer;\n  user-select: none;\n}\n.acu-v2-app__theme-option[data-v-9600e1a3]:hover {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-v2-app__theme-option.is-active[data-v-9600e1a3] {\n  color: var(--acu-on-accent);\n  background: var(--acu-accent);\n  font-weight: 600;\n}\n.acu-v2-app__theme-option-main[data-v-9600e1a3] {\n  display: flex;\n  align-items: center;\n  gap: var(--acu-space-2, 8px);\n  min-width: 0;\n  flex: 1 1 auto;\n}\n.acu-v2-app__theme-name[data-v-9600e1a3] {\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-app__theme-tag[data-v-9600e1a3] {\n  flex: 0 0 auto;\n  padding: var(--acu-space-025, 1px) var(--acu-space-125, 5px);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-accent) 12%, transparent);\n  color: var(--acu-accent);\n  font-size: var(--acu-font-size-micro, 10px);\n  font-weight: 600;\n}\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-tag[data-v-9600e1a3] {\n  background: color-mix(in srgb, var(--acu-on-accent) 18%, transparent);\n  color: var(--acu-on-accent);\n}\n.acu-v2-app__theme-tools[data-v-9600e1a3] {\n  display: inline-flex;\n  align-items: center;\n  gap: var(--acu-space-1, 4px);\n  flex: 0 0 auto;\n  opacity: 0.72;\n}\n.acu-v2-app__theme-tools[data-v-9600e1a3] .acu-icon-btn {\n  background: transparent;\n  color: inherit;\n}\n.acu-v2-app__theme-tools[data-v-9600e1a3] .acu-icon-btn:hover:not(:disabled) {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-tools[data-v-9600e1a3] .acu-icon-btn:hover:not(:disabled) {\n  background: color-mix(in srgb, var(--acu-on-accent) 18%, transparent);\n  color: var(--acu-on-accent);\n}\n.acu-v2-app__theme-tools[data-v-9600e1a3] .acu-icon-btn--danger:hover:not(:disabled) {\n  background: color-mix(in srgb, var(--acu-danger) 12%, transparent);\n  color: var(--acu-danger);\n}\n.acu-v2-app__theme-option:hover .acu-v2-app__theme-tools[data-v-9600e1a3],\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-tools[data-v-9600e1a3] {\n  opacity: 1;\n}\n.acu-v2-app__theme-swatch[data-v-9600e1a3] {\n  display: block;\n  width: var(--acu-menu-swatch-size, 18px);\n  height: var(--acu-menu-swatch-size, 18px);\n  border-radius: 999px;\n  flex: 0 0 var(--acu-menu-swatch-size, 18px);\n  background: linear-gradient(\n    135deg,\n    var(--acu-theme-swatch-bg) 0 56%,\n    var(--acu-theme-swatch-accent) 56% 100%\n  );\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-border-2) 72%, transparent);\n}\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-swatch[data-v-9600e1a3] {\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-on-accent) 62%, transparent);\n}\n.acu-v2-app__theme-menu-footer[data-v-9600e1a3] {\n  display: flex;\n  justify-content: stretch;\n  margin-top: var(--acu-space-1, 4px);\n  padding:\n    var(--acu-menu-option-padding-y, 7px)\n    var(--acu-space-150, 6px)\n    var(--acu-space-1, 4px);\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-app__theme-menu-footer[data-v-9600e1a3] .acu-file-button,\n.acu-v2-app__theme-menu-footer[data-v-9600e1a3] .acu-btn {\n  width: 100%;\n}\n.acu-v2-app__scale-heading[data-v-9600e1a3] {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: var(--acu-space-2, 8px);\n  margin-bottom: var(--acu-space-175, 7px);\n}\n.acu-v2-app__scale-current[data-v-9600e1a3] {\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-caption, 11px);\n  font-weight: 600;\n}\n.acu-v2-app__scale-control[data-v-9600e1a3] {\n  width: 100%;\n}\n@keyframes theme-menu-in-9600e1a3 {\nfrom {\n    opacity: 0;\n    transform: translateY(-4px);\n}\nto {\n    opacity: 1;\n    transform: translateY(0);\n}\n}\n@keyframes theme-menu-out-9600e1a3 {\nfrom {\n    opacity: 1;\n    transform: translateY(0);\n}\nto {\n    opacity: 0;\n    transform: translateY(-4px);\n}\n}\n@keyframes mobile-nav-layer-in-9600e1a3 {\nfrom { opacity: 0;\n}\nto { opacity: 1;\n}\n}\n@keyframes mobile-nav-drawer-in-9600e1a3 {\nfrom { transform: translateX(-100%);\n}\nto { transform: translateX(0);\n}\n}\n@keyframes mobile-nav-layer-out-9600e1a3 {\nfrom { opacity: 1;\n}\nto { opacity: 0;\n}\n}\n@keyframes mobile-nav-drawer-out-9600e1a3 {\nfrom { transform: translateX(0);\n}\nto { transform: translateX(-100%);\n}\n}\n@media (max-width: 720px) {\n.acu-v2-app__header[data-v-9600e1a3] {\n    min-height: var(--acu-shell-header-height-compact, 48px);\n    padding: var(--acu-space-2, 8px) var(--acu-space-250, 10px);\n}\n.acu-v2-app__header-left[data-v-9600e1a3] {\n    gap: var(--acu-space-150, 6px);\n}\n.acu-v2-app__menu[data-v-9600e1a3] {\n    display: inline-flex;\n}\n.acu-v2-app__page-title[data-v-9600e1a3] {\n    font-size: var(--acu-font-size-page-title-compact, 18px);\n}\n.acu-v2-app__desktop-sidebar[data-v-9600e1a3] {\n    display: none;\n}\n.acu-v2-app__mobile-nav-layer[data-v-9600e1a3] {\n    display: flex;\n}\n}\n", "src/presentation-v2/App.vue#style-0-9600e1a3");
-    var App_vue_vue_type_style_index_0_scoped_9600e1a3_lang = null;
+    injectSfcStyle("\n#acu-app-v2 {\n  --acu-safe-top: max(env(safe-area-inset-top, 0px), var(--acu-native-safe-top, 0px));\n  --acu-safe-right: max(env(safe-area-inset-right, 0px), var(--acu-native-safe-right, 0px));\n  --acu-safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--acu-native-safe-bottom, 0px));\n  --acu-safe-left: max(env(safe-area-inset-left, 0px), var(--acu-native-safe-left, 0px));\n  box-sizing: border-box;\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-ui);\n  font-size: var(--acu-font-size-body, 12px);\n}\n#acu-app-v2,#acu-app-v2 * {\n  box-sizing: border-box;\n}\n#acu-app-v2 button {\n  appearance: none;\n  -webkit-appearance: none;\n  -webkit-tap-highlight-color: transparent;\n}\n#acu-app-v2 button:focus:not(:focus-visible) {\n  outline: none;\n  box-shadow: none;\n}\n.acu-v2-app[data-v-eb2ccabb] {\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-ui);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-app__shell[data-v-eb2ccabb] {\n  position: fixed;\n  top: 0;\n  right: 0;\n  bottom: 0;\n  left: 0;\n  inset: 0;\n  z-index: 9000;\n  width: 100%;\n  width: 100vw;\n  width: 100dvw;\n  height: 100%;\n  height: 100vh;\n  height: 100dvh;\n  min-width: 0;\n  min-height: 0;\n  display: flex;\n  flex-direction: column;\n  padding: var(--acu-safe-top) var(--acu-safe-right) var(--acu-safe-bottom) var(--acu-safe-left);\n  overflow: hidden;\n  background: var(--acu-bg-0);\n  color: var(--acu-text-1);\n  font-family: var(--acu-font-ui);\n  font-size: var(--acu-font-size-body, 12px);\n}\n.acu-v2-app__header[data-v-eb2ccabb] {\n  position: relative;\n  z-index: 40;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  min-height: var(--acu-shell-header-height, 50px);\n  padding:\n    var(--acu-space-2, 8px)\n    var(--acu-space-3, 12px)\n    var(--acu-space-2, 8px)\n    var(--acu-space-5, 20px);\n  background: var(--acu-bg-0);\n  border-bottom: 1px solid var(--acu-border-2);\n  flex: 0 0 auto;\n}\n.acu-v2-app__header-left[data-v-eb2ccabb] {\n  display: flex;\n  align-items: center;\n  min-width: 0;\n  gap: var(--acu-space-2, 8px);\n  flex: 1 1 auto;\n}\n.acu-v2-app__menu[data-v-eb2ccabb] {\n  display: none;\n  flex: 0 0 auto;\n  font-size: var(--acu-font-size-body-lg, 13px);\n  background: transparent;\n  color: var(--acu-text-2);\n  box-shadow: none;\n}\n.acu-v2-app__menu[data-v-eb2ccabb]:hover:not(:disabled) {\n  background: transparent;\n  color: var(--acu-text-1);\n}\n.acu-v2-app__page-title[data-v-eb2ccabb] {\n  min-width: 0;\n  margin: 0;\n  overflow: hidden;\n  color: var(--acu-text-1);\n  font-size: var(--acu-font-size-page-title, 22px);\n  font-weight: 700;\n  line-height: 1.2;\n  letter-spacing: 0;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-app__close[data-v-eb2ccabb] {\n  width: var(--acu-shell-header-action-size, 30px);\n  height: var(--acu-shell-header-action-size, 30px);\n  border: 0;\n  background: transparent;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-page-title, 22px);\n  line-height: 1;\n  cursor: pointer;\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-app__close[data-v-eb2ccabb]:hover {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-v2-app__body[data-v-eb2ccabb] {\n  flex: 1 1 auto;\n  display: flex;\n  min-width: 0;\n  min-height: 0;\n  overflow: hidden;\n}\n.acu-v2-app__content[data-v-eb2ccabb] {\n  flex: 1 1 auto;\n  display: flex;\n  flex-direction: column;\n  min-width: 0;\n  min-height: 0;\n  overflow: hidden;\n}\n.acu-v2-app__mobile-nav-layer[data-v-eb2ccabb] {\n  position: fixed;\n  top: 0;\n  right: 0;\n  bottom: 0;\n  left: 0;\n  inset: 0;\n  width: 100%;\n  width: 100vw;\n  width: 100dvw;\n  height: 100%;\n  height: 100vh;\n  height: 100dvh;\n  min-height: 100vh;\n  min-height: 100dvh;\n  z-index: 9300;\n  display: none;\n  align-items: stretch;\n  justify-content: flex-start;\n  padding: var(--acu-safe-top) var(--acu-safe-right) var(--acu-safe-bottom) var(--acu-safe-left);\n  overflow: hidden;\n  background: rgba(0, 0, 0, 0.58);\n  pointer-events: auto;\n  overscroll-behavior: contain;\n  animation: mobile-nav-layer-in-eb2ccabb 0.18s ease-out both;\n}\n.acu-v2-app__mobile-nav-layer.is-closing[data-v-eb2ccabb] {\n  pointer-events: auto;\n  animation: mobile-nav-layer-out-eb2ccabb 0.15s ease-in both;\n}\n.acu-v2-app__mobile-nav[data-v-eb2ccabb] {\n  width: var(--acu-mobile-nav-width, 360px);\n  max-width: calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\n  height: 100%;\n  max-height: 100%;\n  min-width: 0;\n  min-height: 0;\n  align-self: stretch;\n  flex: 0 1 var(--acu-mobile-nav-width, 360px);\n  display: flex;\n  flex-direction: column;\n  background: var(--acu-sidebar-bg);\n  border-right: 0;\n  box-shadow: var(--acu-shadow);\n  overflow: hidden;\n  pointer-events: auto;\n  animation: mobile-nav-drawer-in-eb2ccabb 0.18s ease-out both;\n}\n.acu-v2-app__mobile-nav-layer.is-closing .acu-v2-app__mobile-nav[data-v-eb2ccabb] {\n  animation: mobile-nav-drawer-out-eb2ccabb 0.15s ease-in both;\n}\n@supports (width: min(1px, 100%)) {\n.acu-v2-app__mobile-nav[data-v-eb2ccabb] {\n    width: min(var(--acu-mobile-nav-width, 360px), calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\n    flex: 0 0 min(var(--acu-mobile-nav-width, 360px), calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px)));\n}\n}\n@supports (width: 100dvw) {\n.acu-v2-app__mobile-nav[data-v-eb2ccabb] {\n    max-width: calc(100% - var(--acu-mobile-nav-edge-gap, 24px) - var(--acu-safe-left, 0px) - var(--acu-safe-right, 0px));\n}\n}\n@supports (height: 100dvh) {\n.acu-v2-app__mobile-nav[data-v-eb2ccabb] {\n    height: 100%;\n    max-height: 100%;\n}\n}\n\n/* ── Theme switcher ── */\n.acu-v2-app__header-right[data-v-eb2ccabb] {\n  display: flex;\n  align-items: center;\n  gap: var(--acu-space-1, 4px);\n  flex: 0 0 auto;\n}\n.acu-v2-app__theme-switcher[data-v-eb2ccabb] {\n  position: relative;\n}\n.acu-v2-app__theme-btn[data-v-eb2ccabb] {\n  width: var(--acu-shell-header-action-size, 30px);\n  height: var(--acu-shell-header-action-size, 30px);\n  border: 0;\n  background: transparent;\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  cursor: pointer;\n  border-radius: var(--acu-radius-sm);\n}\n.acu-v2-app__theme-btn[data-v-eb2ccabb]:hover {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-v2-app__theme-menu[data-v-eb2ccabb] {\n  position: absolute;\n  top: calc(100% + var(--acu-menu-offset, 6px));\n  right: 0;\n  z-index: 10;\n  margin: 0;\n  padding: var(--acu-menu-padding, 4px);\n  width: min(var(--acu-menu-width, 300px), calc(100vw - var(--acu-mobile-nav-edge-gap, 24px)));\n  min-width: min(var(--acu-menu-min-width, 240px), calc(100vw - var(--acu-mobile-nav-edge-gap, 24px)));\n  background: var(--acu-bg-1);\n  border: 1px solid var(--acu-border);\n  border-radius: var(--acu-radius-md);\n  box-shadow: var(--acu-shadow);\n  animation: theme-menu-in-eb2ccabb 0.12s ease-out both;\n}\n.acu-v2-app__theme-menu.is-closing[data-v-eb2ccabb] {\n  pointer-events: none;\n  animation: theme-menu-out-eb2ccabb 0.12s ease-in both;\n}\n.acu-v2-app__appearance-section[data-v-eb2ccabb] {\n  min-width: 0;\n}\n.acu-v2-app__appearance-section + .acu-v2-app__appearance-section[data-v-eb2ccabb] {\n  margin-top: var(--acu-menu-section-gap, 8px);\n  padding-top: var(--acu-menu-section-gap, 8px);\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-app__appearance-section-title[data-v-eb2ccabb] {\n  color: var(--acu-text-3);\n  font-size: var(--acu-font-size-caption, 11px);\n  font-weight: 700;\n  letter-spacing: 0;\n}\n.acu-v2-app__theme-list[data-v-eb2ccabb] {\n  list-style: none;\n  margin: var(--acu-space-1, 4px) 0 0;\n  padding: 0;\n}\n.acu-v2-app__theme-option[data-v-eb2ccabb] {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: var(--acu-space-2, 8px);\n  padding: var(--acu-menu-option-padding-y, 7px) var(--acu-menu-option-padding-x, 10px);\n  font-size: var(--acu-font-size-body-lg, 13px);\n  color: var(--acu-text-2);\n  border-radius: var(--acu-radius-sm);\n  cursor: pointer;\n  user-select: none;\n}\n.acu-v2-app__theme-option[data-v-eb2ccabb]:hover {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-v2-app__theme-option.is-active[data-v-eb2ccabb] {\n  color: var(--acu-on-accent);\n  background: var(--acu-accent);\n  font-weight: 600;\n}\n.acu-v2-app__theme-option-main[data-v-eb2ccabb] {\n  display: flex;\n  align-items: center;\n  gap: var(--acu-space-2, 8px);\n  min-width: 0;\n  flex: 1 1 auto;\n}\n.acu-v2-app__theme-name[data-v-eb2ccabb] {\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n.acu-v2-app__theme-tag[data-v-eb2ccabb] {\n  flex: 0 0 auto;\n  padding: var(--acu-space-025, 1px) var(--acu-space-125, 5px);\n  border-radius: var(--acu-radius-sm);\n  background: color-mix(in srgb, var(--acu-accent) 12%, transparent);\n  color: var(--acu-accent);\n  font-size: var(--acu-font-size-micro, 10px);\n  font-weight: 600;\n}\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-tag[data-v-eb2ccabb] {\n  background: color-mix(in srgb, var(--acu-on-accent) 18%, transparent);\n  color: var(--acu-on-accent);\n}\n.acu-v2-app__theme-tools[data-v-eb2ccabb] {\n  display: inline-flex;\n  align-items: center;\n  gap: var(--acu-space-1, 4px);\n  flex: 0 0 auto;\n  opacity: 0.72;\n}\n.acu-v2-app__theme-tools[data-v-eb2ccabb] .acu-icon-btn {\n  background: transparent;\n  color: inherit;\n}\n.acu-v2-app__theme-tools[data-v-eb2ccabb] .acu-icon-btn:hover:not(:disabled) {\n  background: var(--acu-hover-overlay);\n  color: var(--acu-text-1);\n}\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-tools[data-v-eb2ccabb] .acu-icon-btn:hover:not(:disabled) {\n  background: color-mix(in srgb, var(--acu-on-accent) 18%, transparent);\n  color: var(--acu-on-accent);\n}\n.acu-v2-app__theme-tools[data-v-eb2ccabb] .acu-icon-btn--danger:hover:not(:disabled) {\n  background: color-mix(in srgb, var(--acu-danger) 12%, transparent);\n  color: var(--acu-danger);\n}\n.acu-v2-app__theme-option:hover .acu-v2-app__theme-tools[data-v-eb2ccabb],\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-tools[data-v-eb2ccabb] {\n  opacity: 1;\n}\n.acu-v2-app__theme-swatch[data-v-eb2ccabb] {\n  display: block;\n  width: var(--acu-menu-swatch-size, 18px);\n  height: var(--acu-menu-swatch-size, 18px);\n  border-radius: 999px;\n  flex: 0 0 var(--acu-menu-swatch-size, 18px);\n  background: linear-gradient(\n    135deg,\n    var(--acu-theme-swatch-bg) 0 56%,\n    var(--acu-theme-swatch-accent) 56% 100%\n  );\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-border-2) 72%, transparent);\n}\n.acu-v2-app__theme-option.is-active .acu-v2-app__theme-swatch[data-v-eb2ccabb] {\n  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acu-on-accent) 62%, transparent);\n}\n.acu-v2-app__theme-menu-footer[data-v-eb2ccabb] {\n  display: flex;\n  justify-content: stretch;\n  margin-top: var(--acu-space-1, 4px);\n  padding:\n    var(--acu-menu-option-padding-y, 7px)\n    var(--acu-space-150, 6px)\n    var(--acu-space-1, 4px);\n  border-top: 1px solid var(--acu-border);\n}\n.acu-v2-app__theme-menu-footer[data-v-eb2ccabb] .acu-file-button,\n.acu-v2-app__theme-menu-footer[data-v-eb2ccabb] .acu-btn {\n  width: 100%;\n}\n.acu-v2-app__scale-heading[data-v-eb2ccabb] {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: var(--acu-space-2, 8px);\n  margin-bottom: var(--acu-space-175, 7px);\n}\n.acu-v2-app__scale-current[data-v-eb2ccabb] {\n  color: var(--acu-text-2);\n  font-size: var(--acu-font-size-caption, 11px);\n  font-weight: 600;\n}\n.acu-v2-app__scale-control[data-v-eb2ccabb] {\n  width: 100%;\n}\n@keyframes theme-menu-in-eb2ccabb {\nfrom {\n    opacity: 0;\n    transform: translateY(-4px);\n}\nto {\n    opacity: 1;\n    transform: translateY(0);\n}\n}\n@keyframes theme-menu-out-eb2ccabb {\nfrom {\n    opacity: 1;\n    transform: translateY(0);\n}\nto {\n    opacity: 0;\n    transform: translateY(-4px);\n}\n}\n@keyframes mobile-nav-layer-in-eb2ccabb {\nfrom { opacity: 0;\n}\nto { opacity: 1;\n}\n}\n@keyframes mobile-nav-drawer-in-eb2ccabb {\nfrom { transform: translateX(-100%);\n}\nto { transform: translateX(0);\n}\n}\n@keyframes mobile-nav-layer-out-eb2ccabb {\nfrom { opacity: 1;\n}\nto { opacity: 0;\n}\n}\n@keyframes mobile-nav-drawer-out-eb2ccabb {\nfrom { transform: translateX(0);\n}\nto { transform: translateX(-100%);\n}\n}\n@media (max-width: 720px) {\n.acu-v2-app__header[data-v-eb2ccabb] {\n    min-height: var(--acu-shell-header-height-compact, 48px);\n    padding: var(--acu-space-2, 8px) var(--acu-space-250, 10px);\n}\n.acu-v2-app__header-left[data-v-eb2ccabb] {\n    gap: var(--acu-space-150, 6px);\n}\n.acu-v2-app__menu[data-v-eb2ccabb] {\n    display: inline-flex;\n}\n.acu-v2-app__page-title[data-v-eb2ccabb] {\n    font-size: var(--acu-font-size-page-title-compact, 18px);\n}\n.acu-v2-app__desktop-sidebar[data-v-eb2ccabb] {\n    display: none;\n}\n.acu-v2-app__mobile-nav-layer[data-v-eb2ccabb] {\n    display: flex;\n}\n}\n", "src/presentation-v2/App.vue#style-0-eb2ccabb");
+    var App_vue_vue_type_style_index_0_scoped_eb2ccabb_lang = null;
 
     const _hoisted_1 = { class: "acu-v2-app" };
     const _hoisted_2 = { class: "acu-v2-app__shell" };
@@ -230656,7 +231342,7 @@ ${rejectionText}` : delegationFeedback,
     const _hoisted_18 = { class: "acu-v2-app__scale-heading" };
     const _hoisted_19 = { class: "acu-v2-app__scale-current" };
     function _sfc_render(_ctx, _cache, $props, $setup, $data, $options) {
-	return openBlock(), createElementBlock("div", _hoisted_1, [createVNode($setup["WorldSimulationProgressCard"]), withDirectives(createBaseVNode(
+	return openBlock(), createElementBlock("div", _hoisted_1, [createVNode($setup["DeskPetLayer"]), withDirectives(createBaseVNode(
 		"div",
 		_hoisted_2,
 		[
@@ -230829,14 +231515,13 @@ ${rejectionText}` : delegationFeedback,
 				2
 				/* CLASS */
 			)) : createCommentVNode("v-if", true),
-			createVNode($setup["AcuDialogHost"]),
-			createVNode($setup["AcuToastViewport"])
+			createVNode($setup["AcuDialogHost"])
 		],
 		512
 		/* NEED_PATCH */
 	), [[vShow, $setup.rootShell.isOpen]])]);
     }
-    var App = /*#__PURE__*/ _export_sfc(_sfc_main, [["render", _sfc_render], ["__scopeId", "data-v-9600e1a3"]]);
+    var App = /*#__PURE__*/ _export_sfc(_sfc_main, [["render", _sfc_render], ["__scopeId", "data-v-eb2ccabb"]]);
 
     /**
      * line-icons — V2 界面的线条图标（自绘，24×24，1.8 描边，圆角端点）。
@@ -231420,45 +232105,18 @@ ${buildLineIconCss(APP_ROOT_ID)}`;
      * 注册"打开新 UI"菜单按钮；点击时惰性挂载 Vue 应用。
      */
     /**
-     * showToast 实现：V2 shell 已挂载且打开时走 Pinia toast-store（可携带
-     * "打开数据管理"等 action）；否则回退宿主 toastr；再不可用只记日志。
-     * 绝不抛错——toast 通道不允许反向破坏调用方（加载/合并）流程。
+     * showToast 实现：统一交给通知汇流口，由常驻浮动气泡呈现（设置面板关闭时同样可见），
+     * 可携带"打开数据管理"等 action。绝不抛错——提示通道不允许反向破坏调用方（加载/合并）流程。
      */
     function showAcuV2Toast_ACU(payload) {
         try {
-            const pinia = getAcuV2PiniaForBridge();
-            if (pinia) {
-                const shell = useRootShellStore(pinia);
-                if (shell.isOpen) {
-                    useToastStore(pinia).notify(payload.kind, payload.text, {
-                        muteable: false,
-                        ...(payload.action ? {
-                            action: {
-                                label: payload.action.label,
-                                onClick: payload.action.onClick,
-                            },
-                        } : {}),
-                    });
-                    return;
-                }
-            }
+            notify_ACU$2(payload.kind, payload.text, payload.action
+                ? { actions: [{ label: payload.action.label, run: payload.action.onClick }] }
+                : {});
         }
         catch (error) {
-            logWarn_ACU('[ACU-V2] toast-store 通道不可用，回退宿主 toastr:', error);
+            logWarn_ACU(`[ACU toast:${payload.kind}] ${payload.text}`, error);
         }
-        try {
-            const toastr = topLevelWindow_ACU?.toastr;
-            if (toastr && typeof toastr[payload.kind] === 'function') {
-                toastr[payload.kind](payload.text, undefined, payload.action
-                    ? { onclick: () => { void payload.action.onClick(); } }
-                    : undefined);
-                return;
-            }
-        }
-        catch (_) {
-            // 宿主 toastr 不可用时落到下方日志。
-        }
-        logWarn_ACU(`[ACU toast:${payload.kind}] ${payload.text}`);
     }
     function bootstrapAcuV2() {
         registerUiSurface_ACU({

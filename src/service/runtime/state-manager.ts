@@ -22,6 +22,7 @@ import { DEFAULT_CHAR_CARD_PROMPT_ACU, DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU,
 import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU } from '../../shared/defaults';
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
+import { configureNoticeHub_ACU } from '../../shared/notice-hub';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
 import { isVectorPipelineEnabledForCurrentChat_ACU } from '../fill-mode/fill-mode-gate';
 
@@ -238,6 +239,8 @@ export let settings_ACU: any = {
     autoUpdateEnabled: true,
     standardizedTableFillEnabled: true,
     toastMuteEnabled: false,
+    silentModeEnabled: false,
+    desktopPetEnabled: true,
     plotSettings: JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU)),
     plotPresetBindings: {},
     currentTemplatePresetName: '',
@@ -287,6 +290,9 @@ export let settings_ACU: any = {
     },
     characterSettings: {},
 };
+
+// 静默模式判定交给通知汇流口；读取 live binding，settings_ACU 被整体替换后仍生效。
+configureNoticeHub_ACU({ isSilent: () => settings_ACU?.silentModeEnabled === true });
 
 /**
  * 当前聊天的隔离槽位键。

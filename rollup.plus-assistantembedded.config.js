@@ -5,6 +5,7 @@ import replace from '@rollup/plugin-replace';
 import vuePlugin from 'unplugin-vue/rollup';
 import sfcStyleInjector from './src/presentation-v2/build/rollup-sfc-style-injector.js';
 import vueScriptTranspiler from './src/presentation-v2/build/rollup-vue-script-transpiler.js';
+import inlineImageAssets from './src/presentation-v2/build/rollup-inline-image-assets.js';
 import { copyFileSync, mkdirSync, readFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
@@ -91,6 +92,7 @@ const config = {
     createVuePlugin(),
     vueScriptTranspiler(),
     sfcStyleInjector(),
+    inlineImageAssets(),
     nodeResolve({
       browser: true,
       preferBuiltins: false,

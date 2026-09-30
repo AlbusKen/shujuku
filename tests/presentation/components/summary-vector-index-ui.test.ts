@@ -6,8 +6,8 @@ const h = vi.hoisted(() => ({
   rebuild: vi.fn(),
   toast: vi.fn(),
   toastError: vi.fn(),
-  clear: vi.fn(),
-  remove: vi.fn(),
+  beginTask: vi.fn(),
+  taskEnd: vi.fn(),
   snapshot: null as any,
   outdated: false,
   configValid: true,
@@ -16,7 +16,7 @@ const h = vi.hoisted(() => ({
 
 function deferred<T>() { let resolve!: (value: T) => void; let reject!: (reason?: unknown) => void; const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; }); return { promise, resolve, reject }; }
 
-vi.mock('../../../src/shared/host-api', () => ({ toastr_API_ACU: { clear: h.clear } }));
+vi.mock('../../../src/shared/notice-hub', () => ({ beginNoticeTask_ACU: (...args: any[]) => h.beginTask(...args) }));
 vi.mock('../../../src/shared/constants', () => ({ ACU_TOAST_CATEGORY_ACU: { PLANNING: 'planning', PLAN_OK: 'plan_ok' } }));
 vi.mock('../../../src/shared/utils', () => ({ logDebug_ACU: vi.fn() }));
 vi.mock('../../../src/service/vector/summary-vector-index-runtime', () => ({
@@ -54,23 +54,22 @@ import {
 describe('summary vector index UI recovery', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    h.toast.mockReturnValue({ closest: () => ({ remove: h.remove }) });
+    h.beginTask.mockImplementation(() => ({ update: vi.fn(), end: h.taskEnd }));
     vi.stubGlobal('confirm', vi.fn(() => true));
     h.process.mockResolvedValue({ success: false, skipped: true, reason: 'legacy_vector_scheme_rebuild_required' });
     h.rebuild.mockResolvedValue({ success: true, skipped: false, indexedRowCount: 6, chunkCount: 3, errors: [] });
   });
 
-  it('失效指针删除后弹出进度提示并走立即构建的普通重建入口', async () => {
+  it('失效指针删除后登记进度任务并走立即构建的普通重建入口', async () => {
     await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput: '继续', source: 'test' });
 
     expect(h.rebuild).toHaveBeenCalledTimes(1);
-    expect(h.toast).toHaveBeenCalledWith('info', '正在重建交火索引快照...', expect.objectContaining({ timeOut: 0 }));
+    expect(h.beginTask).toHaveBeenCalledWith('交火索引', { detail: '正在重建交火索引快照...' });
     expect(h.toast).toHaveBeenCalledWith('success', '交火索引快照重建完成：6 行，3 个 chunks。', expect.any(Object));
-    expect(h.clear).toHaveBeenCalledTimes(2);
-    expect(h.remove).toHaveBeenCalledTimes(2);
+    expect(h.taskEnd).toHaveBeenCalledTimes(2);
   });
 
-  it('重建进行中保留进度提示，失败后清理提示且不阻断原始生成', async () => {
+  it('重建进行中保留进度任务，失败后结束任务且不阻断原始生成', async () => {
     const pending = deferred<any>();
     h.rebuild.mockReturnValue(pending.promise);
 
@@ -79,14 +78,12 @@ describe('summary vector index UI recovery', () => {
     await Promise.resolve();
 
     expect(h.rebuild).toHaveBeenCalledTimes(1);
-    expect(h.clear).toHaveBeenCalledTimes(1);
-    expect(h.remove).toHaveBeenCalledTimes(1);
+    expect(h.taskEnd).toHaveBeenCalledTimes(1);
 
     pending.reject(new Error('rebuild failed'));
     await expect(operation).resolves.toMatchObject({ reason: 'legacy_vector_scheme_rebuild_required' });
     expect(h.toast).toHaveBeenCalledWith('error', '交火索引快照重建失败：rebuild failed');
-    expect(h.clear).toHaveBeenCalledTimes(2);
-    expect(h.remove).toHaveBeenCalledTimes(2);
+    expect(h.taskEnd).toHaveBeenCalledTimes(2);
   });
 
 
@@ -168,7 +165,7 @@ describe('summary vector index UI recovery', () => {
 describe('rebuildOutdatedSummaryVectorIndexInBackground_ACU', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    h.toast.mockReturnValue({ closest: () => ({ remove: h.remove }) });
+    h.beginTask.mockImplementation(() => ({ update: vi.fn(), end: h.taskEnd }));
     h.rebuild.mockResolvedValue({ success: true, skipped: false, indexedRowCount: 120, chunkCount: 120, errors: [] });
     h.globalMeta = { summaryVectorIndexModeGlobal: true };
     h.configValid = true;
@@ -187,8 +184,9 @@ describe('rebuildOutdatedSummaryVectorIndexInBackground_ACU', () => {
 
     expect(triggered).toBe(true);
     expect(h.rebuild).toHaveBeenCalledTimes(1);
-    expect(h.toast).toHaveBeenCalledWith('info', expect.stringContaining('概览 + 纪要正文'), expect.any(Object));
-    expect(h.toast.mock.calls[0][1]).toContain('（2 行）');
+    expect(h.beginTask).toHaveBeenCalledWith('交火索引', { detail: expect.stringContaining('概览 + 纪要正文') });
+    expect(h.beginTask.mock.calls[0][1].detail).toContain('（2 行）');
+    expect(h.taskEnd).toHaveBeenCalledTimes(1);
     expect(h.toast).toHaveBeenCalledWith('success', expect.stringContaining('120 行'), '交火索引升级完成', expect.any(Object));
   });
 

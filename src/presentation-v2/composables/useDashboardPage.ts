@@ -38,6 +38,7 @@ import {
   DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU,
 } from "../../shared/defaults-json.js";
 import { getAllLogs, subscribe, type LogEntry } from "../../shared/log-buffer";
+import { notifyNoticeSettingsChanged_ACU } from "../../shared/notice-hub";
 import type { StorageMode } from "../../shared/table-storage-provider";
 import {
   logError_ACU,
@@ -913,10 +914,16 @@ export function useDashboardPage(): DashboardPageState {
         value: settings_ACU.autoUpdateEnabled !== false,
       },
       {
-        key: "toastMuteEnabled",
-        label: dashboardCopy.toggles.toastMute.label,
-        description: dashboardCopy.toggles.toastMute.description,
-        value: settings_ACU.toastMuteEnabled === true,
+        key: "silentModeEnabled",
+        label: dashboardCopy.toggles.silentMode.label,
+        description: dashboardCopy.toggles.silentMode.description,
+        value: settings_ACU.silentModeEnabled === true,
+      },
+      {
+        key: "desktopPetEnabled",
+        label: dashboardCopy.toggles.desktopPet.label,
+        description: dashboardCopy.toggles.desktopPet.description,
+        value: settings_ACU.desktopPetEnabled !== false,
       },
       {
         key: "zeroTkOccupyModeDefault",
@@ -1043,13 +1050,12 @@ export function useDashboardPage(): DashboardPageState {
     } else if (key === "contentReplaceEnabled") {
       setContentReplaceEnabledBySettings(!!value);
       saveSettings_ACU();
-    } else if (key === "autoUpdateEnabled" || key === "toastMuteEnabled") {
-      if (key === "autoUpdateEnabled") {
-        setAutoUpdateEnabled_ACU(!!value);
-      } else {
-        settings_ACU[key] = !!value;
-        saveSettings_ACU();
-      }
+    } else if (key === "autoUpdateEnabled") {
+      setAutoUpdateEnabled_ACU(!!value);
+    } else if (key === "silentModeEnabled" || key === "desktopPetEnabled") {
+      settings_ACU[key] = !!value;
+      saveSettings_ACU();
+      notifyNoticeSettingsChanged_ACU();
     }
     dataRefreshTick.value++;
     dataRefreshTick.value++;

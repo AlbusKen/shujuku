@@ -1,1 +1,17 @@
+.gitattributes whitespace=cr-at-eol
 *.sh text eol=lf
+*.ts whitespace=cr-at-eol
+*.mts whitespace=cr-at-eol
+*.cts whitespace=cr-at-eol
+*.vue whitespace=cr-at-eol
+*.js whitespace=cr-at-eol
+*.mjs whitespace=cr-at-eol
+*.cjs whitespace=cr-at-eol
+*.json whitespace=cr-at-eol
+*.md whitespace=cr-at-eol
+*.yml whitespace=cr-at-eol
+*.yaml whitespace=cr-at-eol
+*.ps1 whitespace=cr-at-eol
+# 构建产物由 rollup 生成，含固有行尾空白与 space-before-tab，不参与 whitespace 检查
+dist/** whitespace=-trailing-space,-space-before-tab
+index.js whitespace=-trailing-space,-space-before-tab

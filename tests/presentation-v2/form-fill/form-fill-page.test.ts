@@ -301,6 +301,22 @@ async function clickDialogButton(label: string): Promise<void> {
   await new Promise(r => setTimeout(r, 0));
 }
 
+/** 通知不再有常驻列表视口（改由单气泡轮播），断言直接读 toast-store 的当前条目。 */
+async function toastStoreOf(mount: any) {
+  const { useToastStore } = await import('../../../src/presentation-v2/stores/toast-store');
+  return useToastStore(mount.getAcuV2PiniaForBridge()!);
+}
+
+async function readToastText(mount: any): Promise<string> {
+  return (await toastStoreOf(mount)).items.map(item => item.text).join('\n');
+}
+
+async function clickToastAction(mount: any, label: string): Promise<void> {
+  const item = (await toastStoreOf(mount)).items.find(entry => entry.action?.label.includes(label));
+  expect(item).toBeDefined();
+  await item!.action!.onClick();
+}
+
 describe('FormFillPage', () => {
   it('渲染填表工作台的状态、自动更新、表格模板与手动填表面板', async () => {
     const { mount } = await mountFormFillPage();
@@ -849,7 +865,7 @@ describe('FormFillPage · 手动填表面板', () => {
     expect(dialogText).not.toContain('第二次破坏性确认');
     expect(dialogText).toContain('确认并继续');
     expect(dialogText).not.toContain('直接填表');
-    expect(document.querySelector('.acu-toast-viewport')?.textContent || '')
+    expect(await readToastText(mount))
       .not.toContain('手动填表开始');
     expect(orchestrate).not.toHaveBeenCalled();
 
@@ -939,7 +955,7 @@ describe('FormFillPage · 手动填表面板', () => {
     await clickDialogButton('确认并继续');
     await new Promise(r => setTimeout(r, 0));
 
-    const toastText = document.querySelector('.acu-toast-viewport')?.textContent || '';
+    const toastText = await readToastText(mount);
     expect(toastText).toContain('批次 1/1 · 正在生成第 1/20 组手动填表结果...');
     expect(toastText).not.toContain('调用 AI (1/20)');
     expect(button.textContent || '').toContain('填表中...');
@@ -976,7 +992,7 @@ describe('FormFillPage · 手动填表面板', () => {
     await clickDialogButton('确认并继续');
     await new Promise(r => setTimeout(r, 0));
 
-    expect(document.querySelector('.acu-toast-viewport')?.textContent || '')
+    expect(await readToastText(mount))
       .toContain('批次 2/4 · 调用 AI（第 2/3 次尝试）');
 
     releaseOrchestrate();
@@ -1003,17 +1019,14 @@ describe('FormFillPage · 手动填表面板', () => {
     await clickDialogButton('确认并继续');
     await new Promise(r => setTimeout(r, 0));
 
-    const stopButton = Array.from(document.querySelectorAll<HTMLButtonElement>('.acu-v2-toast__action'))
-      .find(btn => btn.textContent?.includes('终止'));
-    expect(stopButton).toBeDefined();
-    stopButton!.click();
+    await clickToastAction(mount, '终止');
     await Promise.resolve();
 
     expect(setWasStoppedByUser).toHaveBeenCalledWith(false);
     expect(setWasStoppedByUser).toHaveBeenCalledWith(true);
     expect(abortAllActiveRequests).toHaveBeenCalledTimes(1);
     expect(setIsAutoUpdatingCard).toHaveBeenCalledWith(false);
-    expect(document.querySelector('.acu-toast-viewport')?.textContent || '').toContain('手动填表已终止');
+    expect(await readToastText(mount)).toContain('手动填表已终止');
 
     releaseOrchestrate();
     await new Promise(r => setTimeout(r, 0));
@@ -1093,7 +1106,7 @@ describe('FormFillPage · 手动填表面板', () => {
     await new Promise(r => setTimeout(r, 0));
 
     expect(document.querySelector('.acu-dialog-layer')).toBeNull();
-    expect(document.querySelector('.acu-toast-viewport')?.textContent || '').toContain('所选表已追平');
+    expect(await readToastText(mount)).toContain('所选表已追平');
     expect(orchestrateCatchUp).not.toHaveBeenCalled();
     expect(refreshMergedData).not.toHaveBeenCalled();
 
@@ -1122,9 +1135,7 @@ describe('FormFillPage · 手动填表面板', () => {
     expect(capturedController?.signal.aborted).toBe(false);
     expect(manualButton.disabled).toBe(true);
 
-    const stopButton = Array.from(document.querySelectorAll<HTMLButtonElement>('.acu-v2-toast__action'))
-      .find(btn => btn.textContent?.includes('终止'))!;
-    stopButton.click();
+    await clickToastAction(mount, '终止');
     await Promise.resolve();
 
     expect(capturedController?.signal.aborted).toBe(true);
@@ -1135,7 +1146,7 @@ describe('FormFillPage · 手动填表面板', () => {
 
     releaseCatchUp();
     await new Promise(r => setTimeout(r, 0));
-    expect(document.querySelector('.acu-toast-viewport')?.textContent || '').toContain('已保留 1 个已提交 bucket');
+    expect(await readToastText(mount)).toContain('已保留 1 个已提交 bucket');
 
     mount.__resetAcuV2MountForTests();
   });
@@ -1156,7 +1167,7 @@ describe('FormFillPage · 手动填表面板', () => {
     await clickDialogButton('确认追平');
     await new Promise(r => setTimeout(r, 0));
 
-    const toastText = document.querySelector('.acu-toast-viewport')?.textContent || '';
+    const toastText = await readToastText(mount);
     expect(toastText).toContain('手动追平数据已提交，但完成状态记录失败');
     expect(toastText).toContain('strict save failed');
 
@@ -1179,7 +1190,7 @@ describe('FormFillPage · 手动填表面板', () => {
     await clickDialogButton('确认追平');
     await new Promise(r => setTimeout(r, 0));
 
-    const toastText = document.querySelector('.acu-toast-viewport')?.textContent || '';
+    const toastText = await readToastText(mount);
     expect(toastText).toContain('持久化完整性校验失败');
     expect(toastText).toContain('已回载聊天中的已保存数据');
     expect(toastText).toContain('V2 replay 未恢复所选表');
@@ -1203,7 +1214,7 @@ describe('FormFillPage · 手动填表面板', () => {
     await clickDialogButton('确认追平');
     await new Promise(r => setTimeout(r, 0));
 
-    expect(document.querySelector('.acu-toast-viewport')?.textContent || '').toContain('请先执行 V2 恢复诊断');
+    expect(await readToastText(mount)).toContain('请先执行 V2 恢复诊断');
 
     mount.__resetAcuV2MountForTests();
   });
@@ -1218,15 +1229,13 @@ describe('FormFillPage · 手动填表面板', () => {
     await clickDialogButton('确认追平');
     await new Promise(r => setTimeout(r, 0));
 
-    expect(document.querySelector('.acu-toast-viewport')?.textContent || '').toContain('世界书同步待重试');
-    const retryButton = Array.from(document.querySelectorAll<HTMLButtonElement>('.acu-v2-toast__action'))
-      .find(btn => btn.textContent?.includes('仅同步重试'))!;
-    retryButton.click();
+    expect(await readToastText(mount)).toContain('世界书同步待重试');
+    await clickToastAction(mount, '仅同步重试');
     await new Promise(r => setTimeout(r, 0));
 
     expect(refreshMergedData).toHaveBeenCalledTimes(1);
     expect(orchestrateCatchUp).toHaveBeenCalledTimes(1);
-    expect(document.querySelector('.acu-toast-viewport')?.textContent || '').toContain('没有再次调用 AI');
+    expect(await readToastText(mount)).toContain('没有再次调用 AI');
 
     mount.__resetAcuV2MountForTests();
   });

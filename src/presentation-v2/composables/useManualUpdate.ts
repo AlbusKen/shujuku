@@ -34,6 +34,10 @@ import { useToastStore } from '../stores/toast-store';
 
 type MessageKind = 'info' | 'success' | 'warning' | 'error';
 
+/** 气泡与桌宠里显示的功能名。 */
+const MANUAL_UPDATE_TASK_FEATURE = '手动填表';
+const CATCH_UP_TASK_FEATURE = '手动追平';
+
 /** 宿主世界书 API 挂起时确认弹窗不能被无限期拖住，超过该时长即降级为提示文案。 */
 const INJECTION_TARGET_RESOLVE_TIMEOUT_MS = 1500;
 const RESOLVE_TIMEOUT: unique symbol = Symbol('injection-target-resolve-timeout');
@@ -234,13 +238,15 @@ export function useManualUpdate(): ManualUpdateState {
   let catchUpAbortController: AbortController | null = null;
 
   function progressToastOptions(onAbort: () => void = requestAbort) {
-    const abortDisabled = onAbort === requestCatchUpAbort
+    const isCatchUp = onAbort === requestCatchUpAbort;
+    const abortDisabled = isCatchUp
       ? catchUpAbortController?.signal.aborted === true
       : abortRequested;
     return {
       durationMs: 0,
       muteable: false,
       dismissible: false,
+      feature: isCatchUp ? CATCH_UP_TASK_FEATURE : MANUAL_UPDATE_TASK_FEATURE,
       action: abortDisabled
         ? undefined
         : {
@@ -281,12 +287,14 @@ export function useManualUpdate(): ManualUpdateState {
         durationMs: 0,
         muteable: false,
         dismissible: false,
+        feature: MANUAL_UPDATE_TASK_FEATURE,
       });
     } else {
       toast.warning('手动填表已终止，正在停止当前任务与后续批次...', {
         durationMs: 0,
         muteable: false,
         dismissible: false,
+        feature: MANUAL_UPDATE_TASK_FEATURE,
       });
     }
   }
@@ -295,10 +303,11 @@ export function useManualUpdate(): ManualUpdateState {
     if (!catchUpAbortController || catchUpAbortController.signal.aborted) return;
     catchUpAbortController.abort();
     const text = '手动追平已终止，正在等待当前安全边界收敛...';
+    const options = { durationMs: 0, muteable: false, dismissible: false, feature: CATCH_UP_TASK_FEATURE };
     if (progressToastId) {
-      toast.update(progressToastId, 'warning', text, { durationMs: 0, muteable: false, dismissible: false });
+      toast.update(progressToastId, 'warning', text, options);
     } else {
-      toast.warning(text, { durationMs: 0, muteable: false, dismissible: false });
+      toast.warning(text, options);
     }
   }
 
@@ -587,6 +596,9 @@ export function useManualUpdate(): ManualUpdateState {
       durationMs: 0,
       muteable: false,
       dismissible: true,
+      feature: CATCH_UP_TASK_FEATURE,
+      // 待用户重试的常驻提示，不代表正在干活。
+      busy: false,
       action: {
         label: '仅同步重试',
         dismissOnClick: false,

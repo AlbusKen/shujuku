@@ -1,12 +1,12 @@
 /**
- * toast-store - v2 scoped toast queue and mute rules.
+ * toast-store - v2 scoped toast queue forwarded to notice-hub.
  *
  * @vitest-environment jsdom
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 function createSettings() {
-  return { toastMuteEnabled: false } as any;
+  return { silentModeEnabled: false } as any;
 }
 
 async function freshStore(settings = createSettings()) {
@@ -119,30 +119,26 @@ describe("toast-store", () => {
     expect(store.items).toHaveLength(0);
   });
 
-  it("静默提示框只抑制普通 info / success", async () => {
-    const settings = createSettings();
-    settings.toastMuteEnabled = true;
-    const { store } = await freshStore(settings);
+  it("静默模式丢弃一次性通知，常驻进度仍登记为任务", async () => {
+    const { store } = await freshStore();
+    const hub = await import("../../../src/shared/notice-hub");
+    hub.configureNoticeHub_ACU({ isSilent: () => true });
 
-    expect(store.success("已保存", { durationMs: 0 })).toBeNull();
-    expect(store.info("已导出", { durationMs: 0 })).toBeNull();
-    expect(store.warning("需要处理", { durationMs: 0 })).toBeTruthy();
-    expect(store.error("操作失败", { durationMs: 0 })).toBeTruthy();
+    expect(store.success("已保存")).toBeNull();
+    expect(store.error("操作失败")).toBeNull();
     expect(
-      store.success("执行完成", { durationMs: 0, muteable: false }),
-    ).toBeTruthy();
-    expect(
-      store.info("可查看日志", {
-        durationMs: 0,
+      store.warning("需要处理", {
+        muteable: false,
         action: { label: "查看", onClick: vi.fn() },
       }),
-    ).toBeTruthy();
+    ).toBeNull();
+    const progressId = store.info("正在处理", { durationMs: 0, feature: "外部导入" });
+    expect(progressId).toBeTruthy();
 
-    expect(store.items.map((item) => item.text)).toEqual([
-      "需要处理",
-      "操作失败",
-      "执行完成",
-      "可查看日志",
+    expect(store.items.map((item) => item.text)).toEqual(["正在处理"]);
+    expect(hub.getNoticeHubSnapshot_ACU().notices).toHaveLength(0);
+    expect(hub.getNoticeHubSnapshot_ACU().tasks).toEqual([
+      expect.objectContaining({ feature: "外部导入", detail: "正在处理", busy: true }),
     ]);
   });
 });

@@ -1,13 +1,13 @@
 /**
  * presentation/components/plot-planning-ui.ts — 剧情规划 UI 层封装
- * 负责：进度 toast、中止按钮事件绑定、根据 service 层结果弹 toast 通知
+ * 负责：规划进度任务（含中止）、根据 service 层结果弹通知
  */
 import { showToastr_ACU } from '../theme/toast';
-import { toastr_API_ACU } from '../../shared/host-api';
+import { beginNoticeTask_ACU } from '../../shared/notice-hub';
 import { abortController_ACU, _set_isProcessing_Plot_ACU } from '../../service/runtime/state-manager';
 import { ACU_TOAST_CATEGORY_ACU } from '../../shared/constants';
 import { runOptimizationLogic_ACU } from '../../service/runtime/helpers-remaining';
-import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
+import { logDebug_ACU } from '../../shared/utils';
 
 /**
  * 在 presentation 层调用 runOptimizationLogic_ACU 并处理所有 UI 反馈。
@@ -18,65 +18,34 @@ import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
  *   - { aborted: true, manual: true, restoreText: string }: 用户中止
  */
 export async function runOptimizationLogicWithUI_ACU(userMessage: any, options: any = {}) {
-  // 1. 创建带中止按钮的进度 toast
-  const toastMsg = `
-      <div style="display: flex; align-items: center; justify-content: space-between;">
-          <span class="toastr-message" style="margin-right: 10px;">正在读取过往的记忆并分析，请稍后...</span>
-          <button class="qrf-abort-btn">终止</button>
-      </div>
-  `;
-
-  const $toast = showToastr_ACU('info', toastMsg, {
-    timeOut: 0,
-    extendedTimeOut: 0,
-    escapeHtml: false,
-    tapToDismiss: false,
-    closeButton: false,
-    progressBar: false,
-    toastClass: 'toast acu-toast acu-toast--info',
-    acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLANNING,
-  });
-
-  // 2. 绑定中止按钮事件
-  setTimeout(() => {
-    const $abortBtn = ($toast && $toast.find) ? $toast.find('.qrf-abort-btn') : null;
-    if ($abortBtn && $abortBtn.length > 0) {
-      $abortBtn.off('click').on('click', function(e) {
-        e.preventDefault();
-        e.stopPropagation();
+  // 1. 登记带中止按钮的规划任务；中止只作用于本次规划
+  const task = beginNoticeTask_ACU('剧情规划', {
+    detail: '正在读取过往的记忆并分析，请稍后...',
+    action: {
+      label: '终止',
+      variant: 'danger',
+      run: () => {
         logDebug_ACU('[剧情推进] 用户点击了中止按钮。');
-
         if (abortController_ACU) {
           abortController_ACU.abort();
           logDebug_ACU('[剧情推进] 用户手动中止了规划任务。');
         }
-
-        try {
-          if ($toast) toastr_API_ACU.clear($toast);
-        } catch (e) {}
-        // DOM 级兜底：确保 toast 元素被彻底移除，防止 toastr.clear 不生效
-        try {
-          if ($toast && $toast.closest) $toast.closest('.toast').remove();
-        } catch (e) {}
         _set_isProcessing_Plot_ACU(false);
+        task.end({ kind: 'info', text: '规划任务已被用户中止。' });
+      },
+    },
+  });
 
-        setTimeout(() => {
-          showToastr_ACU('info', '规划任务已被用户中止。', { acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLANNING });
-        }, 500);
-      });
-      logDebug_ACU('[剧情推进] 中止按钮事件已绑定。');
-    } else {
-      logWarn_ACU('[剧情推进] 未找到中止按钮元素。');
-    }
-  }, 200);
+  // 2. 调用 service 层纯函数
+  let result: Awaited<ReturnType<typeof runOptimizationLogic_ACU>>;
+  try {
+    result = await runOptimizationLogic_ACU(userMessage, options);
+  } finally {
+    // 3. 结束进度任务
+    task.end();
+  }
 
-  // 3. 调用 service 层纯函数
-  const result = await runOptimizationLogic_ACU(userMessage, options);
-
-  // 4. 清除进度 toast
-  try { if ($toast) toastr_API_ACU.clear($toast); } catch (e) {}
-
-  // 5. 根据结果做 UI 通知
+  // 4. 根据结果做 UI 通知
   if (!result) {
     return null;
   }

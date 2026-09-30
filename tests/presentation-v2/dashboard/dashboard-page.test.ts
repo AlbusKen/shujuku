@@ -388,7 +388,8 @@ describe("DashboardPage", () => {
     expect(text).not.toContain("功能开关");
     expect(text).toContain("高级设置");
     expect(text).toContain("自动更新");
-    expect(text).toContain("静默提示框");
+    expect(text).toContain("静默模式");
+    expect(text).toContain("桌面宠物");
     expect(text).not.toContain("开启流式输出");
     expect(text).toContain("0TK 占用模式");
 
@@ -399,7 +400,8 @@ describe("DashboardPage", () => {
     ).map((button) => button.dataset.acuToggleKey);
     expect(visibleToggleKeys).toEqual([
       "autoUpdateEnabled",
-      "toastMuteEnabled",
+      "silentModeEnabled",
+      "desktopPetEnabled",
       "zeroTkOccupyModeDefault",
     ]);
 
@@ -859,7 +861,7 @@ describe("DashboardPage", () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it("关闭 v2 后清空 toast，重开不显示旧通知", async () => {
+  it("关闭 v2 后通知气泡仍在面板外可见", async () => {
     const { mount } = await mountDashboardPage();
 
     const segmentedButtons = Array.from(
@@ -875,15 +877,11 @@ describe("DashboardPage", () => {
     );
     storageButtons[1].click();
     await new Promise((r) => setTimeout(r, 0));
-    expect(document.body.textContent || "").toContain("已切换到 SQLite 模式。");
+    expect(document.querySelector(".acu-notice-bubble")?.textContent || "").toContain("已切换到 SQLite 模式。");
 
     document.querySelector<HTMLButtonElement>(".acu-v2-app__close")!.click();
     await new Promise((r) => setTimeout(r, 0));
-    expect(document.body.textContent || "").not.toContain("已切换到 SQLite 模式。");
-
-    await mount.openAcuV2App();
-    await new Promise((r) => setTimeout(r, 0));
-    expect(document.body.textContent || "").not.toContain("已切换到 SQLite 模式。");
+    expect(document.querySelector(".acu-notice-bubble")?.textContent || "").toContain("已切换到 SQLite 模式。");
 
     mount.__resetAcuV2MountForTests();
   });

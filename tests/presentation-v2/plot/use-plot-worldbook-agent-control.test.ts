@@ -200,6 +200,7 @@ describe('usePlotWorldbookAgentControl', () => {
       durationMs: 0,
       muteable: false,
       dismissible: false,
+      feature: 'Skill 化',
     });
     expect(toast.update).toHaveBeenCalledWith(
       'progress-1',
