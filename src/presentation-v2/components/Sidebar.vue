@@ -196,9 +196,9 @@ function setActivePage(pageId: string): void {
   height: 34px;
   flex: 0 0 34px;
   display: block;
-  /* 圆形裁切，不加底色与边框，避免源图残留底框在圆角方框里露出弧线。 */
-  border-radius: 50%;
-  object-fit: cover;
+  /* 方形展示完整奶龙，透明底 PNG 与侧栏底色自然融合，仅保留小微圆角。 */
+  border-radius: var(--acu-radius-sm, 6px);
+  object-fit: contain;
   object-position: center;
   user-select: none;
 }
