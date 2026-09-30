@@ -187158,7 +187158,7 @@ ${rejectionText}` : delegationFeedback,
     };
     const _hoisted_6$x = { class: "acu-dialog__check-option" };
     const _hoisted_7$v = { class: "acu-dialog__check-label" };
-    const _hoisted_8$s = {
+    const _hoisted_8$t = {
 	key: 0,
 	class: "acu-dialog__check-description"
     };
@@ -187243,7 +187243,7 @@ ${rejectionText}` : delegationFeedback,
 							/* TEXT */
 						), option.description ? (openBlock(), createElementBlock(
 							"span",
-							_hoisted_8$s,
+							_hoisted_8$t,
 							toDisplayString(option.description),
 							1
 							/* TEXT */
@@ -188390,8 +188390,8 @@ ${rejectionText}` : delegationFeedback,
 	"aria-hidden": "true"
     };
     const _hoisted_7$t = { class: "acu-dashboard-storage-mode__body" };
-    const _hoisted_8$r = { class: "acu-dashboard-storage-mode__card-head" };
-    const _hoisted_9$n = { class: "acu-dashboard-storage-mode__name" };
+    const _hoisted_8$s = { class: "acu-dashboard-storage-mode__card-head" };
+    const _hoisted_9$o = { class: "acu-dashboard-storage-mode__name" };
     const _hoisted_10$k = { class: "acu-dashboard-storage-mode__badge" };
     const _hoisted_11$k = { class: "acu-dashboard-storage-mode__desc" };
     function _sfc_render$15(_ctx, _cache, $props, $setup, $data, $options) {
@@ -188440,9 +188440,9 @@ ${rejectionText}` : delegationFeedback,
 						null,
 						2
 						/* CLASS */
-					)]), createBaseVNode("span", _hoisted_7$t, [createBaseVNode("span", _hoisted_8$r, [createBaseVNode(
+					)]), createBaseVNode("span", _hoisted_7$t, [createBaseVNode("span", _hoisted_8$s, [createBaseVNode(
 						"span",
-						_hoisted_9$n,
+						_hoisted_9$o,
 						toDisplayString(option.label),
 						1
 						/* TEXT */
@@ -192301,11 +192301,11 @@ ${rejectionText}` : delegationFeedback,
 	"aria-label",
 	"onClick"
     ];
-    const _hoisted_8$q = {
+    const _hoisted_8$r = {
 	key: 2,
 	class: "fa-solid fa-check acu-preset-dd__check"
     };
-    const _hoisted_9$m = {
+    const _hoisted_9$n = {
 	key: 0,
 	class: "acu-preset-dd__empty"
     };
@@ -192370,14 +192370,14 @@ ${rejectionText}` : delegationFeedback,
 						2
 						/* CLASS */
 					)], 10, _hoisted_7$r)) : createCommentVNode("v-if", true),
-					$setup.itemValue(item) === $props.modelValue ? (openBlock(), createElementBlock("i", _hoisted_8$q)) : createCommentVNode("v-if", true)
+					$setup.itemValue(item) === $props.modelValue ? (openBlock(), createElementBlock("i", _hoisted_8$r)) : createCommentVNode("v-if", true)
 				], 10, _hoisted_4$D);
 			}),
 			128
 			/* KEYED_FRAGMENT */
 		)), !$props.items.length ? (openBlock(), createElementBlock(
 			"li",
-			_hoisted_9$m,
+			_hoisted_9$n,
 			toDisplayString($props.emptyText),
 			1
 			/* TEXT */
@@ -192930,7 +192930,7 @@ ${rejectionText}` : delegationFeedback,
 	key: 0,
 	class: "acu-prompt-segs__empty"
     };
-    const _hoisted_8$p = { class: "acu-prompt-segs__add" };
+    const _hoisted_8$q = { class: "acu-prompt-segs__add" };
     function _sfc_render$W(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("div", _hoisted_1$T, [
 		createBaseVNode("div", _hoisted_2$Q, [createVNode($setup["AcuButton"], {
@@ -193054,7 +193054,7 @@ ${rejectionText}` : delegationFeedback,
 			1
 			/* TEXT */
 		)) : createCommentVNode("v-if", true)]),
-		createBaseVNode("div", _hoisted_8$p, [createVNode($setup["AcuButton"], {
+		createBaseVNode("div", _hoisted_8$q, [createVNode($setup["AcuButton"], {
 			size: "sm",
 			class: "acu-prompt-segs__add-btn",
 			onClick: _cache[1] || (_cache[1] = ($event) => _ctx.$emit("add", "bottom"))
@@ -193999,8 +193999,8 @@ ${rejectionText}` : delegationFeedback,
     const _hoisted_5$t = { class: "acu-v2-vector-index-page__number-grid" };
     const _hoisted_6$r = { class: "acu-v2-vector-index-page__panel-stack" };
     const _hoisted_7$p = { class: "acu-v2-vector-api-form__section" };
-    const _hoisted_8$o = { class: "acu-v2-vector-api-form__section" };
-    const _hoisted_9$l = { class: "acu-v2-vector-api-form__actions" };
+    const _hoisted_8$p = { class: "acu-v2-vector-api-form__section" };
+    const _hoisted_9$m = { class: "acu-v2-vector-api-form__actions" };
     const _hoisted_10$j = { class: "acu-v2-vector-index-page__prompt-actions" };
     const _hoisted_11$j = { class: "acu-v2-vector-index-page__number-grid" };
     const _hoisted_12$g = { class: "acu-v2-vector-index-page__number-grid" };
@@ -194217,7 +194217,7 @@ ${rejectionText}` : delegationFeedback,
 								_: 1
 							})
 						]),
-						createBaseVNode("fieldset", _hoisted_8$o, [
+						createBaseVNode("fieldset", _hoisted_8$p, [
 							_cache[38] || (_cache[38] = createBaseVNode(
 								"legend",
 								null,
@@ -194310,7 +194310,7 @@ ${rejectionText}` : delegationFeedback,
 							))]),
 							_: 1
 						})) : createCommentVNode("v-if", true),
-						createBaseVNode("div", _hoisted_9$l, [createVNode($setup["AcuButton"], {
+						createBaseVNode("div", _hoisted_9$m, [createVNode($setup["AcuButton"], {
 							variant: "primary",
 							"native-type": "submit"
 						}, {
@@ -195070,11 +195070,11 @@ ${rejectionText}` : delegationFeedback,
 	key: 0,
 	class: "acu-v2-wb-entry-item__skill-badge"
     };
-    const _hoisted_8$n = {
+    const _hoisted_8$o = {
 	key: 1,
 	class: "acu-v2-wb-entry-item__state-badge"
     };
-    const _hoisted_9$k = {
+    const _hoisted_9$l = {
 	key: 2,
 	class: "acu-v2-wb-entry-item__state-badge"
     };
@@ -195147,10 +195147,10 @@ ${rejectionText}` : delegationFeedback,
 								}, toDisplayString(entry.label), 9, _hoisted_5$s)),
 								$props.showSkillifyControls || entry.isConstant || $props.showAgentTakeoverState && $setup.formatAgentTakeoverState(entry) ? (openBlock(), createElementBlock("div", _hoisted_6$q, [
 									$props.showSkillifyControls && entry.skillMeta ? (openBlock(), createElementBlock("span", _hoisted_7$o, "Skill")) : createCommentVNode("v-if", true),
-									entry.isConstant ? (openBlock(), createElementBlock("span", _hoisted_8$n, "常量")) : createCommentVNode("v-if", true),
+									entry.isConstant ? (openBlock(), createElementBlock("span", _hoisted_8$o, "常量")) : createCommentVNode("v-if", true),
 									$props.showAgentTakeoverState && $setup.formatAgentTakeoverState(entry) ? (openBlock(), createElementBlock(
 										"span",
-										_hoisted_9$k,
+										_hoisted_9$l,
 										toDisplayString($setup.formatAgentTakeoverState(entry)),
 										1
 										/* TEXT */
@@ -197168,8 +197168,8 @@ ${rejectionText}` : delegationFeedback,
     const _hoisted_5$r = { class: "acu-v2-plot-task-editor__section" };
     const _hoisted_6$p = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
     const _hoisted_7$n = { class: "acu-v2-plot-task-editor__toggles" };
-    const _hoisted_8$m = { class: "acu-v2-plot-task-editor__grid" };
-    const _hoisted_9$j = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
+    const _hoisted_8$n = { class: "acu-v2-plot-task-editor__grid" };
+    const _hoisted_9$k = { class: "acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide" };
     const _hoisted_10$h = { class: "acu-v2-plot-task-editor__section" };
     const _hoisted_11$h = { class: "acu-v2-plot-task-editor__section" };
     const _hoisted_12$f = {
@@ -197335,7 +197335,7 @@ ${rejectionText}` : delegationFeedback,
 					"onUpdate:modelValue": _cache[13] || (_cache[13] = ($event) => $setup.patchAgentControl({ allowParallel: $event }))
 				}, null, 8, ["model-value"])
 			]),
-			createBaseVNode("div", _hoisted_8$m, [createVNode($setup["AcuFormRow"], {
+			createBaseVNode("div", _hoisted_8$n, [createVNode($setup["AcuFormRow"], {
 				label: "偏好阶段",
 				hint: "Agent 排序参考；留空则不指定。"
 			}, {
@@ -197360,7 +197360,7 @@ ${rejectionText}` : delegationFeedback,
 				}, null, 8, ["model-value"])]),
 				_: 1
 			})]),
-			createBaseVNode("div", _hoisted_9$j, [createVNode($setup["AcuFormRow"], {
+			createBaseVNode("div", _hoisted_9$k, [createVNode($setup["AcuFormRow"], {
 				label: "依赖任务 ID",
 				hint: "逗号分隔。Agent 排序时应先执行这些任务；非法或循环依赖会在运行时校验。"
 			}, {
@@ -197455,11 +197455,11 @@ ${rejectionText}` : delegationFeedback,
 	title: "阶段号 — 同阶段并发，跨阶段串行"
     };
     const _hoisted_7$m = { class: "acu-v2-plot-tasks__seg-count" };
-    const _hoisted_8$l = {
+    const _hoisted_8$m = {
 	key: 0,
 	class: "acu-v2-plot-tasks__disabled-label"
     };
-    const _hoisted_9$i = {
+    const _hoisted_9$j = {
 	key: 0,
 	class: "acu-v2-plot-tasks__empty"
     };
@@ -197534,12 +197534,12 @@ ${rejectionText}` : delegationFeedback,
 					1
 					/* TEXT */
 				),
-				!task.enabled ? (openBlock(), createElementBlock("span", _hoisted_8$l, "已禁用")) : createCommentVNode("v-if", true)
+				!task.enabled ? (openBlock(), createElementBlock("span", _hoisted_8$m, "已禁用")) : createCommentVNode("v-if", true)
 			], 10, _hoisted_4$v);
 		}),
 		128
 		/* KEYED_FRAGMENT */
-	)), !$props.tasks.length ? (openBlock(), createElementBlock("div", _hoisted_9$i, "暂无任务，点击右上 + 新增。")) : createCommentVNode("v-if", true)])]);
+	)), !$props.tasks.length ? (openBlock(), createElementBlock("div", _hoisted_9$j, "暂无任务，点击右上 + 新增。")) : createCommentVNode("v-if", true)])]);
     }
     var PlotTaskList = /*#__PURE__*/ _export_sfc(_sfc_main$I, [["render", _sfc_render$I], ["__scopeId", "data-v-ee3c6f4c"]]);
 
@@ -197588,7 +197588,7 @@ ${rejectionText}` : delegationFeedback,
     const _hoisted_5$p = { class: "acu-v2-form__section" };
     const _hoisted_6$n = { class: "acu-v2-plot-drawer__rules" };
     const _hoisted_7$l = { class: "acu-v2-form__section" };
-    const _hoisted_8$k = { class: "acu-v2-plot-drawer__actions" };
+    const _hoisted_8$l = { class: "acu-v2-plot-drawer__actions" };
     function _sfc_render$H(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuDrawer"], {
 		"is-open": $props.isOpen,
@@ -197839,7 +197839,7 @@ ${rejectionText}` : delegationFeedback,
 						)]),
 						_: 1
 					})) : createCommentVNode("v-if", true),
-					createBaseVNode("footer", _hoisted_8$k, [createVNode($setup["AcuButton"], { onClick: _cache[13] || (_cache[13] = ($event) => _ctx.$emit("back")) }, {
+					createBaseVNode("footer", _hoisted_8$l, [createVNode($setup["AcuButton"], { onClick: _cache[13] || (_cache[13] = ($event) => _ctx.$emit("back")) }, {
 						default: withCtx(() => [..._cache[23] || (_cache[23] = [createTextVNode(
 							"关闭",
 							-1
@@ -202601,8 +202601,8 @@ ${rejectionText}` : delegationFeedback,
     const _hoisted_5$m = { class: "acu-v2-form-fill-page__table-wrap" };
     const _hoisted_6$l = { class: "acu-v2-form-fill-page__status-table" };
     const _hoisted_7$k = { key: 0 };
-    const _hoisted_8$j = { key: 1 };
-    const _hoisted_9$h = { class: "acu-v2-form-fill-page__number-grid" };
+    const _hoisted_8$k = { key: 1 };
+    const _hoisted_9$i = { class: "acu-v2-form-fill-page__number-grid" };
     const _hoisted_10$g = { class: "acu-v2-form-fill-page__actions" };
     const _hoisted_11$g = { class: "acu-v2-form-fill-page__col" };
     const _hoisted_12$e = { class: "acu-v2-form-fill-page__actions" };
@@ -202753,7 +202753,7 @@ ${rejectionText}` : delegationFeedback,
 										_: 1
 									})) : (openBlock(), createElementBlock(
 										"span",
-										_hoisted_8$j,
+										_hoisted_8$k,
 										toDisplayString(row.nextTriggerLabel),
 										1
 										/* TEXT */
@@ -202780,7 +202780,7 @@ ${rejectionText}` : delegationFeedback,
 				description: $setup.formFillCopy.panels.manual.description
 			}, {
 				default: withCtx(() => [
-					createBaseVNode("div", _hoisted_9$h, [createVNode($setup["AcuFormRow"], {
+					createBaseVNode("div", _hoisted_9$i, [createVNode($setup["AcuFormRow"], {
 						label: "手动处理最近 N 层",
 						hint: "从可用 AI 回复中取最近 N 层执行手动填表。"
 					}, {
@@ -203381,11 +203381,11 @@ ${rejectionText}` : delegationFeedback,
 	key: 0,
 	class: "acu-api-config-panel__two-col"
     };
-    const _hoisted_8$i = {
+    const _hoisted_8$j = {
 	key: 1,
 	class: "acu-api-config-panel__editor-section"
     };
-    const _hoisted_9$g = { class: "acu-api-config-panel__actions" };
+    const _hoisted_9$h = { class: "acu-api-config-panel__actions" };
     function _sfc_render$w(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createBlock($setup["AcuPanel"], {
 		title: $setup.apiCopy.panels.preset.title,
@@ -203578,7 +203578,7 @@ ${rejectionText}` : delegationFeedback,
 						}, null, 8, ["modelValue"])]),
 						_: 1
 					})])) : createCommentVNode("v-if", true),
-					$setup.activeConnectionMode === "custom" ? (openBlock(), createElementBlock("div", _hoisted_8$i, [
+					$setup.activeConnectionMode === "custom" ? (openBlock(), createElementBlock("div", _hoisted_8$j, [
 						createVNode($setup["AcuFormRow"], {
 							label: "附加主体参数",
 							hint: "SillyTavern custom_include_body，填写 YAML object，会合并到最终模型请求体。"
@@ -203639,7 +203639,7 @@ ${rejectionText}` : delegationFeedback,
 						)]),
 						_: 1
 					})) : createCommentVNode("v-if", true),
-					createBaseVNode("div", _hoisted_9$g, [createVNode($setup["AcuButton"], {
+					createBaseVNode("div", _hoisted_9$h, [createVNode($setup["AcuButton"], {
 						disabled: !$setup.activeDraftDirty,
 						onClick: $setup.syncActiveDraft
 					}, {
@@ -203910,8 +203910,8 @@ ${rejectionText}` : delegationFeedback,
     const _hoisted_5$k = { class: "acu-agent-advanced__section-head" };
     const _hoisted_6$j = { class: "acu-agent-advanced__grid" };
     const _hoisted_7$i = { class: "acu-agent-advanced__section" };
-    const _hoisted_8$h = { class: "acu-agent-advanced__section-head" };
-    const _hoisted_9$f = { class: "acu-agent-advanced__grid" };
+    const _hoisted_8$i = { class: "acu-agent-advanced__section-head" };
+    const _hoisted_9$g = { class: "acu-agent-advanced__grid" };
     const _hoisted_10$f = { class: "acu-agent-advanced__section" };
     const _hoisted_11$f = { class: "acu-agent-advanced__section-head" };
     const _hoisted_12$d = { class: "acu-agent-advanced__grid" };
@@ -204011,7 +204011,7 @@ ${rejectionText}` : delegationFeedback,
 				128
 				/* KEYED_FRAGMENT */
 			))])]),
-			createBaseVNode("section", _hoisted_7$i, [createBaseVNode("header", _hoisted_8$h, [createBaseVNode("div", null, [createBaseVNode(
+			createBaseVNode("section", _hoisted_7$i, [createBaseVNode("header", _hoisted_8$i, [createBaseVNode("div", null, [createBaseVNode(
 				"h4",
 				null,
 				toDisplayString($setup.plotCopy.agentControl.decisionSettings.title),
@@ -204023,7 +204023,7 @@ ${rejectionText}` : delegationFeedback,
 				toDisplayString($setup.plotCopy.agentControl.decisionSettings.description),
 				1
 				/* TEXT */
-			)])]), createBaseVNode("div", _hoisted_9$f, [createVNode($setup["AcuFormRow"], {
+			)])]), createBaseVNode("div", _hoisted_9$g, [createVNode($setup["AcuFormRow"], {
 				label: $setup.plotCopy.agentControl.decisionSettings.concurrency.label,
 				hint: $setup.plotCopy.agentControl.decisionSettings.concurrency.hint
 			}, {
@@ -204283,7 +204283,7 @@ ${rejectionText}` : delegationFeedback,
     const _hoisted_5$j = { class: "acu-v2-agent-wb-control__body" };
     const _hoisted_6$i = { class: "acu-v2-agent-wb-control__config-source" };
     const _hoisted_7$h = { class: "acu-v2-agent-wb-control__api-selects" };
-    const _hoisted_8$g = { class: "acu-v2-agent-wb-control__actions" };
+    const _hoisted_8$h = { class: "acu-v2-agent-wb-control__actions" };
     function _sfc_render$t(_ctx, _cache, $props, $setup, $data, $options) {
 	return openBlock(), createElementBlock("section", _hoisted_1$t, [
 		createBaseVNode("div", _hoisted_2$s, [createBaseVNode("div", null, [createBaseVNode(
@@ -204356,7 +204356,7 @@ ${rejectionText}` : delegationFeedback,
 				])]),
 				_: 1
 			}, 8, ["label", "hint"])]),
-			createBaseVNode("div", _hoisted_8$g, [
+			createBaseVNode("div", _hoisted_8$h, [
 				createVNode($setup["AcuButton"], {
 					size: "sm",
 					onClick: _cache[0] || (_cache[0] = ($event) => $setup.advancedOpen = true)
@@ -205507,8 +205507,8 @@ ${rejectionText}` : delegationFeedback,
     const _hoisted_5$i = { class: "acu-v2-session-feed__run-divider-title" };
     const _hoisted_6$h = { class: "acu-v2-session-feed__time" };
     const _hoisted_7$g = { class: "acu-v2-session-feed__user" };
-    const _hoisted_8$f = { class: "acu-v2-session-feed__user-bubble" };
-    const _hoisted_9$e = { class: "acu-v2-session-feed__user-text" };
+    const _hoisted_8$g = { class: "acu-v2-session-feed__user-bubble" };
+    const _hoisted_9$f = { class: "acu-v2-session-feed__user-text" };
     const _hoisted_10$e = { class: "acu-v2-session-feed__time" };
     const _hoisted_11$e = { class: "acu-v2-session-feed__thought" };
     const _hoisted_12$c = { class: "acu-v2-session-feed__thought-label" };
@@ -205583,9 +205583,9 @@ ${rejectionText}` : delegationFeedback,
 						])) : entry.kind === "user_message" ? (openBlock(), createElementBlock(
 							Fragment,
 							{ key: 1 },
-							[createCommentVNode(" 用户消息：右对齐气泡，和 coding agent 的对话界面一致 "), createBaseVNode("div", _hoisted_7$g, [createBaseVNode("div", _hoisted_8$f, [createBaseVNode(
+							[createCommentVNode(" 用户消息：右对齐气泡，和 coding agent 的对话界面一致 "), createBaseVNode("div", _hoisted_7$g, [createBaseVNode("div", _hoisted_8$g, [createBaseVNode(
 								"p",
-								_hoisted_9$e,
+								_hoisted_9$f,
 								toDisplayString(entry.detail || entry.title),
 								1
 								/* TEXT */
@@ -205819,8 +205819,8 @@ ${rejectionText}` : delegationFeedback,
 	key: 0,
 	class: "acu-v2-continuation-chat__notice"
     };
-    const _hoisted_8$e = { class: "acu-v2-continuation-chat__composer" };
-    const _hoisted_9$d = ["value", "placeholder"];
+    const _hoisted_8$f = { class: "acu-v2-continuation-chat__composer" };
+    const _hoisted_9$e = ["value", "placeholder"];
     const _hoisted_10$d = { class: "acu-v2-continuation-chat__composer-actions" };
     const _hoisted_11$d = { class: "acu-v2-continuation-chat__hint" };
     function _sfc_render$q(_ctx, _cache, $props, $setup, $data, $options) {
@@ -205873,14 +205873,14 @@ ${rejectionText}` : delegationFeedback,
 			1
 			/* TEXT */
 		)) : createCommentVNode("v-if", true),
-		createBaseVNode("div", _hoisted_8$e, [createBaseVNode("textarea", {
+		createBaseVNode("div", _hoisted_8$f, [createBaseVNode("textarea", {
 			class: "acu-v2-continuation-chat__input",
 			value: $props.draft,
 			rows: 3,
 			placeholder: $setup.placeholder,
 			onInput: $setup.onInput,
 			onKeydown: $setup.onKeydown
-		}, null, 40, _hoisted_9$d), createBaseVNode("div", _hoisted_10$d, [createBaseVNode(
+		}, null, 40, _hoisted_9$e), createBaseVNode("div", _hoisted_10$d, [createBaseVNode(
 			"span",
 			_hoisted_11$d,
 			toDisplayString($setup.inFlight ? "进行中可点停止" : "Ctrl / ⌘ + Enter 发送"),
@@ -206421,11 +206421,11 @@ ${rejectionText}` : delegationFeedback,
 	key: 0,
 	class: "acu-v2-continuation-materials__empty"
     };
-    const _hoisted_8$d = {
+    const _hoisted_8$e = {
 	key: 0,
 	class: "acu-v2-continuation-materials__outline"
     };
-    const _hoisted_9$c = { class: "acu-v2-continuation-materials__meta" };
+    const _hoisted_9$d = { class: "acu-v2-continuation-materials__meta" };
     const _hoisted_10$c = { class: "acu-v2-continuation-materials__outline-summary" };
     const _hoisted_11$c = { class: "acu-v2-continuation-materials__outline-heading" };
     const _hoisted_12$b = { class: "acu-v2-continuation-materials__badge acu-v2-continuation-materials__badge--primary" };
@@ -206799,10 +206799,10 @@ ${rejectionText}` : delegationFeedback,
 			[!$props.task ? (openBlock(), createElementBlock("p", _hoisted_7$e, "还没有续写任务，也就没有阶段大纲。")) : (openBlock(), createElementBlock(
 				Fragment,
 				{ key: 1 },
-				[$props.activeRevision && $props.activeStage ? (openBlock(), createElementBlock("div", _hoisted_8$d, [
+				[$props.activeRevision && $props.activeStage ? (openBlock(), createElementBlock("div", _hoisted_8$e, [
 					createBaseVNode(
 						"p",
-						_hoisted_9$c,
+						_hoisted_9$d,
 						" 当前：第 " + toDisplayString($props.activeStage?.stageNumber) + " 阶段 · revision " + toDisplayString($props.activeRevision.revision) + " · 已完成 " + toDisplayString($props.activeStage?.completedTurns ?? 0) + " 轮。 已完成轮次与正在执行的轮次不可删除或替换，总轮数必须留在阶段规模范围内。 ",
 						1
 						/* TEXT */
@@ -209502,8 +209502,8 @@ ${rejectionText}` : delegationFeedback,
     const _hoisted_5$f = { class: "acu-v2-continuation-page__toggles" };
     const _hoisted_6$e = { class: "acu-v2-continuation-page__groups" };
     const _hoisted_7$d = { class: "acu-v2-continuation-page__meta" };
-    const _hoisted_8$c = { class: "acu-v2-continuation-page__settings-grid" };
-    const _hoisted_9$b = { class: "acu-v2-continuation-page__settings-grid" };
+    const _hoisted_8$d = { class: "acu-v2-continuation-page__settings-grid" };
+    const _hoisted_9$c = { class: "acu-v2-continuation-page__settings-grid" };
     const _hoisted_10$b = { class: "acu-v2-continuation-page__settings-grid" };
     const _hoisted_11$b = { class: "acu-v2-continuation-page__settings-grid" };
     const _hoisted_12$a = { class: "acu-v2-continuation-page__settings-grid" };
@@ -209824,7 +209824,7 @@ ${rejectionText}` : delegationFeedback,
 								toDisplayString($setup.continuationCopy.workflow.description),
 								1
 								/* TEXT */
-							), createBaseVNode("div", _hoisted_8$c, [createVNode($setup["AcuFormRow"], {
+							), createBaseVNode("div", _hoisted_8$d, [createVNode($setup["AcuFormRow"], {
 								label: "终审打回上限",
 								hint: "instruction-composer 按反馈清单增量修订的次数。范围 1–10。"
 							}, {
@@ -209851,7 +209851,7 @@ ${rejectionText}` : delegationFeedback,
 							"body-id": "acu-continuation-group-run",
 							onToggle: _cache[21] || (_cache[21] = ($event) => $setup.toggleGroup("run"))
 						}, {
-							default: withCtx(() => [createBaseVNode("div", _hoisted_9$b, [
+							default: withCtx(() => [createBaseVNode("div", _hoisted_9$c, [
 								createVNode($setup["AcuFormRow"], {
 									label: "自动阶段上限",
 									hint: "连续自动推进多少个阶段后暂停，等待你确认。"
@@ -210659,8 +210659,8 @@ ${rejectionText}` : delegationFeedback,
     const _hoisted_5$e = { class: "acu-v2-session-feed__run-divider-title" };
     const _hoisted_6$d = { class: "acu-v2-session-feed__time" };
     const _hoisted_7$c = { class: "acu-v2-session-feed__user" };
-    const _hoisted_8$b = { class: "acu-v2-session-feed__user-bubble" };
-    const _hoisted_9$a = { class: "acu-v2-session-feed__user-text" };
+    const _hoisted_8$c = { class: "acu-v2-session-feed__user-bubble" };
+    const _hoisted_9$b = { class: "acu-v2-session-feed__user-text" };
     const _hoisted_10$a = { class: "acu-v2-session-feed__time" };
     const _hoisted_11$a = { class: "acu-v2-session-feed__protocol" };
     const _hoisted_12$9 = { class: "acu-v2-session-feed__protocol-summary" };
@@ -210742,9 +210742,9 @@ ${rejectionText}` : delegationFeedback,
 						])) : entry.kind === "user_message" ? (openBlock(), createElementBlock(
 							Fragment,
 							{ key: 1 },
-							[createCommentVNode(" 用户消息：右对齐气泡，和 coding agent 的对话界面一致 "), createBaseVNode("div", _hoisted_7$c, [createBaseVNode("div", _hoisted_8$b, [createBaseVNode(
+							[createCommentVNode(" 用户消息：右对齐气泡，和 coding agent 的对话界面一致 "), createBaseVNode("div", _hoisted_7$c, [createBaseVNode("div", _hoisted_8$c, [createBaseVNode(
 								"p",
-								_hoisted_9$a,
+								_hoisted_9$b,
 								toDisplayString(entry.detail || entry.title),
 								1
 								/* TEXT */
@@ -211038,8 +211038,8 @@ ${rejectionText}` : delegationFeedback,
 	key: 1,
 	class: "acu-v2-agent-chat__notice"
     };
-    const _hoisted_8$a = { class: "acu-v2-agent-chat__composer" };
-    const _hoisted_9$9 = ["value", "placeholder"];
+    const _hoisted_8$b = { class: "acu-v2-agent-chat__composer" };
+    const _hoisted_9$a = ["value", "placeholder"];
     const _hoisted_10$9 = { class: "acu-v2-agent-chat__composer-actions" };
     const _hoisted_11$9 = { class: "acu-v2-agent-chat__hint" };
     function _sfc_render$l(_ctx, _cache, $props, $setup, $data, $options) {
@@ -211093,14 +211093,14 @@ ${rejectionText}` : delegationFeedback,
 			1
 			/* TEXT */
 		)) : createCommentVNode("v-if", true),
-		createBaseVNode("div", _hoisted_8$a, [createBaseVNode("textarea", {
+		createBaseVNode("div", _hoisted_8$b, [createBaseVNode("textarea", {
 			class: "acu-v2-agent-chat__input",
 			value: $props.draft,
 			rows: 3,
 			placeholder: $setup.placeholder,
 			onInput: $setup.onInput,
 			onKeydown: $setup.onKeydown
-		}, null, 40, _hoisted_9$9), createBaseVNode("div", _hoisted_10$9, [createBaseVNode(
+		}, null, 40, _hoisted_9$a), createBaseVNode("div", _hoisted_10$9, [createBaseVNode(
 			"span",
 			_hoisted_11$9,
 			toDisplayString($setup.inFlight ? "进行中可点停止" : "Ctrl / ⌘ + Enter 发送"),
@@ -211490,11 +211490,11 @@ ${rejectionText}` : delegationFeedback,
     };
     const _hoisted_6$b = { class: "acu-v2-ws-materials__confirm-actions" };
     const _hoisted_7$a = { class: "acu-v2-ws-materials__overview" };
-    const _hoisted_8$9 = {
+    const _hoisted_8$a = {
 	key: 0,
 	class: "acu-v2-ws-materials__meta"
     };
-    const _hoisted_9$8 = {
+    const _hoisted_9$9 = {
 	key: 1,
 	class: "acu-v2-ws-materials__meta"
     };
@@ -211764,11 +211764,11 @@ ${rejectionText}` : delegationFeedback,
 				]),
 				$props.materials.snapshot ? (openBlock(), createElementBlock(
 					"p",
-					_hoisted_8$9,
+					_hoisted_8$a,
 					" 资料从最近基线折叠；删除楼层后随该楼增量一并回退。 基线楼层 " + toDisplayString($props.materials.checkpointIndex ?? "无") + " · 已折叠 delta " + toDisplayString($props.materials.foldedDeltaCount ?? 0) + " 条 · revision " + toDisplayString($props.materials.snapshot.ledgerRevision) + " · 证据引用 " + toDisplayString($props.materials.snapshot.evidenceRefs.length) + " 条。 ",
 					1
 					/* TEXT */
-				)) : (openBlock(), createElementBlock("p", _hoisted_9$8, "当前没有基线，也没有楼层增量。首次提交后会把账本增量写到冻结的 assistant 楼层。")),
+				)) : (openBlock(), createElementBlock("p", _hoisted_9$9, "当前没有基线，也没有楼层增量。首次提交后会把账本增量写到冻结的 assistant 楼层。")),
 				!$props.ledger || !$setup.ledgerGroups.some((group) => group.items.length) ? (openBlock(), createElementBlock("p", _hoisted_10$8, "账本还是空的。发送一条指令或等待正文生成完成后，首轮会建立局势刻度、伏线与人物谱。")) : createCommentVNode("v-if", true),
 				$setup.archivedNote ? (openBlock(), createElementBlock(
 					"p",
@@ -213163,8 +213163,8 @@ ${rejectionText}` : delegationFeedback,
     const _hoisted_5$b = { class: "acu-v2-world-simulation-page__settings-grid" };
     const _hoisted_6$a = { class: "acu-v2-world-simulation-page__toggles" };
     const _hoisted_7$9 = { class: "acu-v2-world-simulation-page__groups" };
-    const _hoisted_8$8 = { class: "acu-v2-world-simulation-page__settings-grid" };
-    const _hoisted_9$7 = { class: "acu-v2-world-simulation-page__toggles" };
+    const _hoisted_8$9 = { class: "acu-v2-world-simulation-page__settings-grid" };
+    const _hoisted_9$8 = { class: "acu-v2-world-simulation-page__toggles" };
     const _hoisted_10$7 = { class: "acu-v2-world-simulation-page__settings-grid" };
     const _hoisted_11$7 = { class: "acu-v2-world-simulation-page__settings-grid" };
     const _hoisted_12$7 = { class: "acu-v2-world-simulation-page__toggles" };
@@ -213357,7 +213357,7 @@ ${rejectionText}` : delegationFeedback,
 							"body-id": "acu-world-simulation-group-budget",
 							onToggle: _cache[12] || (_cache[12] = ($event) => $setup.toggleGroup("budget"))
 						}, {
-							default: withCtx(() => [createBaseVNode("div", _hoisted_8$8, [
+							default: withCtx(() => [createBaseVNode("div", _hoisted_8$9, [
 								createVNode($setup["AcuFormRow"], {
 									label: "主 Agent 迭代上限",
 									hint: "一次推演内主 Agent 最多做多少次决策（取证/派工/收敛各算一次）。范围 1–100。"
@@ -213455,7 +213455,7 @@ ${rejectionText}` : delegationFeedback,
 									-1
 									/* CACHED */
 								)),
-								createBaseVNode("div", _hoisted_9$7, [
+								createBaseVNode("div", _hoisted_9$8, [
 									createVNode($setup["AcuCheckbox"], {
 										modelValue: $setup.settingsDraft.webResearch.sources.moegirl,
 										"onUpdate:modelValue": _cache[13] || (_cache[13] = ($event) => $setup.settingsDraft.webResearch.sources.moegirl = $event),
@@ -216504,8 +216504,8 @@ ${rejectionText}` : delegationFeedback,
 	key: 1,
 	class: "acu-v2-data-mgmt-page__history-empty"
     };
-    const _hoisted_8$7 = { class: "acu-v2-data-mgmt-page__actions" };
-    const _hoisted_9$6 = {
+    const _hoisted_8$8 = { class: "acu-v2-data-mgmt-page__actions" };
+    const _hoisted_9$7 = {
 	key: 0,
 	class: "acu-v2-data-mgmt-page__command-grid"
     };
@@ -216663,7 +216663,7 @@ ${rejectionText}` : delegationFeedback,
 					/* KEYED_FRAGMENT */
 				))])) : (openBlock(), createElementBlock("p", _hoisted_7$8, " 暂无历史标识。 "))]),
 				_: 1
-			}, 8, ["meta", "expanded"])]), createBaseVNode("div", _hoisted_8$7, [createVNode($setup["AcuButton"], {
+			}, 8, ["meta", "expanded"])]), createBaseVNode("div", _hoisted_8$8, [createVNode($setup["AcuButton"], {
 				disabled: $setup.runtimeDiagnostic.busy.value,
 				loading: $setup.flow.busyAction.value === "delete-isolation-entries",
 				onClick: $setup.onDeleteCurrentIsolationEntries
@@ -216693,7 +216693,7 @@ ${rejectionText}` : delegationFeedback,
 			description: $setup.dataMgmtCopy.panels.backup.description
 		}, {
 			default: withCtx(() => [
-				$setup.SHOW_LEGACY_DATA_MGMT_UI ? (openBlock(), createElementBlock("div", _hoisted_9$6, [
+				$setup.SHOW_LEGACY_DATA_MGMT_UI ? (openBlock(), createElementBlock("div", _hoisted_9$7, [
 					createVNode($setup["AcuFileButton"], {
 						variant: "primary",
 						block: "",
@@ -218467,8 +218467,8 @@ ${rejectionText}` : delegationFeedback,
     const _hoisted_5$9 = { class: "acu-v2-content-replace-page__actions" };
     const _hoisted_6$8 = { class: "acu-v2-content-replace-page__status-line" };
     const _hoisted_7$7 = { class: "acu-v2-content-replace-page__badge" };
-    const _hoisted_8$6 = { class: "acu-v2-content-replace-page__select-row" };
-    const _hoisted_9$5 = { class: "acu-v2-content-replace-page__form-grid" };
+    const _hoisted_8$7 = { class: "acu-v2-content-replace-page__select-row" };
+    const _hoisted_9$6 = { class: "acu-v2-content-replace-page__form-grid" };
     const _hoisted_10$5 = { class: "acu-v2-content-replace-page__rule-stack" };
     const _hoisted_11$5 = { class: "acu-v2-content-replace-page__actions" };
     const _hoisted_12$5 = {
@@ -218671,7 +218671,7 @@ ${rejectionText}` : delegationFeedback,
 								/* TEXT */
 							)
 						]),
-						createBaseVNode("div", _hoisted_8$6, [
+						createBaseVNode("div", _hoisted_8$7, [
 							createVNode($setup["AcuPresetDropdown"], {
 								items: $setup.presetDropdownItems,
 								"model-value": $setup.store.selectedPresetName,
@@ -218728,7 +218728,7 @@ ${rejectionText}` : delegationFeedback,
 					title: $setup.contentReplaceCopy.panels.filter.title,
 					description: $setup.contentReplaceCopy.panels.filter.description
 				}, {
-					default: withCtx(() => [createBaseVNode("div", _hoisted_9$5, [createVNode($setup["AcuFormRow"], {
+					default: withCtx(() => [createBaseVNode("div", _hoisted_9$6, [createVNode($setup["AcuFormRow"], {
 						label: "提取标签",
 						hint: "多个标签逗号分隔，留空不提取。"
 					}, {
@@ -219870,8 +219870,8 @@ ${rejectionText}` : delegationFeedback,
 	class: "acu-v2-advanced-tools-page__sql-error"
     };
     const _hoisted_7$6 = { class: "acu-v2-advanced-tools-page__sql-table-wrap" };
-    const _hoisted_8$5 = { class: "acu-v2-advanced-tools-page__sql-result-table" };
-    const _hoisted_9$4 = { key: 0 };
+    const _hoisted_8$6 = { class: "acu-v2-advanced-tools-page__sql-result-table" };
+    const _hoisted_9$5 = { key: 0 };
     const _hoisted_10$4 = ["colspan"];
     const _hoisted_11$4 = { class: "acu-v2-advanced-tools-page__sql-result-meta" };
     const _hoisted_12$4 = {
@@ -220057,7 +220057,7 @@ ${rejectionText}` : delegationFeedback,
 				)) : (openBlock(), createElementBlock(
 					Fragment,
 					{ key: 3 },
-					[createBaseVNode("div", _hoisted_7$6, [createBaseVNode("table", _hoisted_8$5, [createBaseVNode("thead", null, [createBaseVNode("tr", null, [(openBlock(true), createElementBlock(
+					[createBaseVNode("div", _hoisted_7$6, [createBaseVNode("table", _hoisted_8$6, [createBaseVNode("thead", null, [createBaseVNode("tr", null, [(openBlock(true), createElementBlock(
 						Fragment,
 						null,
 						renderList($setup.sqlFlow.result.value.columns, (column) => {
@@ -220071,7 +220071,7 @@ ${rejectionText}` : delegationFeedback,
 						}),
 						128
 						/* KEYED_FRAGMENT */
-					))])]), createBaseVNode("tbody", null, [!$setup.sqlFlow.result.value.values.length ? (openBlock(), createElementBlock("tr", _hoisted_9$4, [createBaseVNode("td", {
+					))])]), createBaseVNode("tbody", null, [!$setup.sqlFlow.result.value.values.length ? (openBlock(), createElementBlock("tr", _hoisted_9$5, [createBaseVNode("td", {
 						colspan: Math.max($setup.sqlFlow.result.value.columns.length, 1),
 						class: "acu-v2-advanced-tools-page__empty-cell"
 					}, " 查询成功，没有返回行 ", 8, _hoisted_10$4)])) : createCommentVNode("v-if", true), (openBlock(true), createElementBlock(
@@ -220813,12 +220813,6 @@ ${rejectionText}` : delegationFeedback,
     }
     var MainArea = /*#__PURE__*/ _export_sfc(_sfc_main$b, [["render", _sfc_render$b], ["__scopeId", "data-v-5d638ca6"]]);
 
-    var lightBrandImage = "data:image/png;base64,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";
-
-    var mediumBrandImage = "data:image/png;base64,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";
-
-    var highBrandImage = "data:image/jpeg;base64,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";
-
     const HIGH_TIER_PHRASE = '开启高级功能';
     var _sfc_main$a = /*@__PURE__*/ defineComponent({
         __name: 'Sidebar',
@@ -220832,11 +220826,10 @@ ${rejectionText}` : delegationFeedback,
             const router = useRouterStore();
             const uiMode = useUiModeStore();
             const dialogStore = useDialogStore();
-            const brandImages = {
-                low: lightBrandImage,
-                medium: mediumBrandImage,
-                high: highBrandImage,
-            };
+            const productShortName = ACU_PRODUCT_SHORT_NAME_ACU;
+            // 线条标识随档位增加分层：轻量无分层、进阶一道、高级两道。
+            const BRAND_TIER_LEVEL = { low: 1, medium: 2, high: 3 };
+            const brandLevel = computed(() => BRAND_TIER_LEVEL[uiMode.tier] ?? 1);
             const brandClickCount = ref(0);
             let brandClickTimer;
             const TIER_ORDER = ['low', 'medium', 'high'];
@@ -220912,25 +220905,30 @@ ${rejectionText}` : delegationFeedback,
                 router.setActivePage(pageId);
                 emit('navigate');
             }
-            const __returned__ = { emit, router, uiMode, dialogStore, brandImages, brandClickCount, get brandClickTimer() { return brandClickTimer; }, set brandClickTimer(v) { brandClickTimer = v; }, HIGH_TIER_PHRASE, TIER_ORDER, tierDescriptions, resetBrandClickSequence, onBrandTitleClick, openTierDialog, setActivePage };
+            const __returned__ = { emit, router, uiMode, dialogStore, productShortName, BRAND_TIER_LEVEL, brandLevel, brandClickCount, get brandClickTimer() { return brandClickTimer; }, set brandClickTimer(v) { brandClickTimer = v; }, HIGH_TIER_PHRASE, TIER_ORDER, tierDescriptions, resetBrandClickSequence, onBrandTitleClick, openTierDialog, setActivePage };
             Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });
             return __returned__;
         }
     });
 
-    injectSfcStyle("\n.acu-v2-sidebar[data-v-86a6daa8] {\r\n  min-width: 0;\r\n  min-height: 0;\r\n  background: var(--acu-sidebar-bg);\r\n  padding: var(--acu-space-6, 24px) var(--acu-space-3, 12px) var(--acu-panel-padding, 16px);\r\n  overflow-y: auto;\n}\n.acu-v2-sidebar--desktop[data-v-86a6daa8] {\r\n  width: var(--acu-sidebar-width, 220px);\r\n  flex: 0 0 var(--acu-sidebar-width, 220px);\r\n  border-right: 1px solid var(--acu-border-2);\n}\n.acu-v2-sidebar--drawer[data-v-86a6daa8] {\r\n  width: 100%;\r\n  flex: 1 1 auto;\n}\n.acu-v2-sidebar__brand[data-v-86a6daa8] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: var(--acu-space-250, 10px);\r\n  padding: var(--acu-space-1, 4px) var(--acu-space-1, 4px) var(--acu-space-5, 20px);\r\n  margin-bottom: var(--acu-page-gap, 14px);\n}\n.acu-v2-sidebar__brand-mark[data-v-86a6daa8] {\r\n  width: var(--acu-space-850, 34px);\r\n  height: var(--acu-space-850, 34px);\r\n  flex: 0 0 var(--acu-space-850, 34px);\r\n  display: block;\r\n  object-fit: cover;\r\n  border-radius: var(--acu-radius-md);\r\n  background: var(--acu-bg-2);\n}\n.acu-v2-sidebar__brand-copy[data-v-86a6daa8] {\r\n  min-width: 0;\r\n  display: block;\n}\n.acu-v2-sidebar__brand-title[data-v-86a6daa8] {\r\n  appearance: none;\r\n  display: block;\r\n  width: 100%;\r\n  padding: 0;\r\n  border: 0;\r\n  background: transparent;\r\n  text-align: left;\r\n  font-size: var(--acu-font-size-panel-title, 15px);\r\n  line-height: 1.25;\r\n  font-weight: 700;\r\n  color: var(--acu-text-1);\r\n  cursor: pointer;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-v2-sidebar__brand-title[data-v-86a6daa8]:hover,\r\n.acu-v2-sidebar__brand-title[data-v-86a6daa8]:focus-visible {\r\n  color: var(--acu-accent);\n}\n.acu-v2-sidebar__brand-tag[data-v-86a6daa8] {\r\n  display: block;\r\n  margin-top: var(--acu-space-075, 3px);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-text-3);\n}\n.acu-v2-sidebar__group[data-v-86a6daa8] {\r\n  margin-bottom: var(--acu-panel-gap, 12px);\n}\n.acu-v2-sidebar__group-title[data-v-86a6daa8] {\r\n  padding: var(--acu-space-175, 7px) var(--acu-space-3, 12px) var(--acu-space-150, 6px);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  font-weight: 600;\r\n  letter-spacing: 0.06em;\r\n  color: var(--acu-text-3);\r\n  text-transform: uppercase;\n}\n.acu-v2-sidebar__item[data-v-86a6daa8] {\r\n  display: block;\r\n  width: 100%;\r\n  padding: var(--acu-space-250, 10px) var(--acu-space-3, 12px);\r\n  border: 0;\r\n  background: transparent;\r\n  text-align: left;\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  color: var(--acu-text-2);\r\n  cursor: pointer;\r\n  border-radius: var(--acu-radius-sm);\r\n  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-v2-sidebar__item[data-v-86a6daa8]:not(.acu-v2-sidebar__item--active):hover {\r\n  background: var(--acu-hover-overlay);\r\n  color: var(--acu-text-1);\n}\n.acu-v2-sidebar__item--active[data-v-86a6daa8] {\r\n  background: var(--acu-accent);\r\n  color: var(--acu-on-accent);\r\n  font-weight: 600;\n}\r\n", "src/presentation-v2/components/Sidebar.vue#style-0-86a6daa8");
-    var Sidebar_vue_vue_type_style_index_0_scoped_86a6daa8_lang = null;
+    injectSfcStyle("\n.acu-v2-sidebar[data-v-65885b69] {\r\n  min-width: 0;\r\n  min-height: 0;\r\n  background: var(--acu-sidebar-bg);\r\n  padding: var(--acu-space-6, 24px) var(--acu-space-3, 12px) var(--acu-panel-padding, 16px);\r\n  overflow-y: auto;\n}\n.acu-v2-sidebar--desktop[data-v-65885b69] {\r\n  width: var(--acu-sidebar-width, 220px);\r\n  flex: 0 0 var(--acu-sidebar-width, 220px);\r\n  border-right: 1px solid var(--acu-border-2);\n}\n.acu-v2-sidebar--drawer[data-v-65885b69] {\r\n  width: 100%;\r\n  flex: 1 1 auto;\n}\n.acu-v2-sidebar__brand[data-v-65885b69] {\r\n  display: flex;\r\n  align-items: center;\r\n  gap: var(--acu-space-250, 10px);\r\n  padding: var(--acu-space-1, 4px) var(--acu-space-1, 4px) var(--acu-space-5, 20px);\r\n  margin-bottom: var(--acu-page-gap, 14px);\n}\n.acu-v2-sidebar__brand-mark[data-v-65885b69] {\r\n  width: 28px;\r\n  height: 28px;\r\n  flex: 0 0 28px;\r\n  display: block;\r\n  color: var(--acu-accent);\n}\n.acu-v2-sidebar__brand-copy[data-v-65885b69] {\r\n  min-width: 0;\r\n  display: block;\n}\n.acu-v2-sidebar__brand-title[data-v-65885b69] {\r\n  appearance: none;\r\n  display: block;\r\n  width: 100%;\r\n  padding: 0;\r\n  border: 0;\r\n  background: transparent;\r\n  text-align: left;\r\n  font-size: var(--acu-font-size-panel-title, 15px);\r\n  line-height: 1.25;\r\n  font-weight: 700;\r\n  color: var(--acu-text-1);\r\n  cursor: pointer;\r\n  overflow: hidden;\r\n  text-overflow: ellipsis;\r\n  white-space: nowrap;\n}\n.acu-v2-sidebar__brand-title[data-v-65885b69]:hover,\r\n.acu-v2-sidebar__brand-title[data-v-65885b69]:focus-visible {\r\n  color: var(--acu-accent);\n}\n.acu-v2-sidebar__brand-tag[data-v-65885b69] {\r\n  display: block;\r\n  margin-top: var(--acu-space-075, 3px);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  color: var(--acu-text-3);\n}\n.acu-v2-sidebar__group[data-v-65885b69] {\r\n  margin-bottom: var(--acu-panel-gap, 12px);\n}\n.acu-v2-sidebar__group-title[data-v-65885b69] {\r\n  padding: var(--acu-space-175, 7px) var(--acu-space-3, 12px) var(--acu-space-150, 6px);\r\n  font-size: var(--acu-font-size-caption, 11px);\r\n  font-weight: 600;\r\n  letter-spacing: 0.06em;\r\n  color: var(--acu-text-3);\r\n  text-transform: uppercase;\n}\n.acu-v2-sidebar__item[data-v-65885b69] {\r\n  display: block;\r\n  width: 100%;\r\n  padding: var(--acu-space-250, 10px) var(--acu-space-3, 12px);\r\n  border: 0;\r\n  background: transparent;\r\n  text-align: left;\r\n  font-size: var(--acu-font-size-body-lg, 13px);\r\n  color: var(--acu-text-2);\r\n  cursor: pointer;\r\n  border-radius: var(--acu-radius-sm);\r\n  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;\n}\n.acu-v2-sidebar__item[data-v-65885b69]:not(.acu-v2-sidebar__item--active):hover {\r\n  background: var(--acu-hover-overlay);\r\n  color: var(--acu-text-1);\n}\n.acu-v2-sidebar__item--active[data-v-65885b69] {\r\n  background: var(--acu-accent);\r\n  color: var(--acu-on-accent);\r\n  font-weight: 600;\n}\r\n", "src/presentation-v2/components/Sidebar.vue#style-0-65885b69");
+    var Sidebar_vue_vue_type_style_index_0_scoped_65885b69_lang = null;
 
     const _hoisted_1$a = { class: "acu-v2-sidebar__brand" };
-    const _hoisted_2$9 = ["src"];
-    const _hoisted_3$9 = { class: "acu-v2-sidebar__brand-copy" };
-    const _hoisted_4$8 = { class: "acu-v2-sidebar__brand-tag" };
-    const _hoisted_5$7 = {
+    const _hoisted_2$9 = ["data-tier"];
+    const _hoisted_3$9 = {
+	key: 0,
+	d: "M5 12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5"
+    };
+    const _hoisted_4$8 = { class: "acu-v2-sidebar__brand-copy" };
+    const _hoisted_5$7 = ["aria-label"];
+    const _hoisted_6$6 = { class: "acu-v2-sidebar__brand-tag" };
+    const _hoisted_7$5 = {
 	key: 0,
 	class: "acu-v2-sidebar__group"
     };
-    const _hoisted_6$6 = { class: "acu-v2-sidebar__group-title" };
-    const _hoisted_7$5 = [
+    const _hoisted_8$5 = { class: "acu-v2-sidebar__group-title" };
+    const _hoisted_9$4 = [
 	"aria-current",
 	"data-page-id",
 	"onClick"
@@ -220942,19 +220940,71 @@ ${rejectionText}` : delegationFeedback,
 			class: normalizeClass(["acu-v2-sidebar", `acu-v2-sidebar--${$props.variant}`]),
 			"aria-label": "一级页导航"
 		},
-		[createBaseVNode("div", _hoisted_1$a, [createBaseVNode("img", {
+		[createBaseVNode("div", _hoisted_1$a, [(openBlock(), createElementBlock("svg", {
 			class: "acu-v2-sidebar__brand-mark",
-			src: $setup.brandImages[$setup.uiMode.tier],
-			alt: "",
-			"aria-hidden": "true"
-		}, null, 8, _hoisted_2$9), createBaseVNode("span", _hoisted_3$9, [createBaseVNode("button", {
+			viewBox: "0 0 24 24",
+			fill: "none",
+			stroke: "currentColor",
+			"stroke-width": "1.6",
+			"stroke-linecap": "round",
+			"stroke-linejoin": "round",
+			"aria-hidden": "true",
+			focusable: "false",
+			"data-tier": $setup.uiMode.tier
+		}, [
+			_cache[2] || (_cache[2] = createBaseVNode(
+				"path",
+				{ d: "M9.2 3.7 8.2 1.8M14.8 3.7l1-1.9" },
+				null,
+				-1
+				/* CACHED */
+			)),
+			_cache[3] || (_cache[3] = createBaseVNode(
+				"ellipse",
+				{
+					cx: "12",
+					cy: "6",
+					rx: "7",
+					ry: "2.5"
+				},
+				null,
+				-1
+				/* CACHED */
+			)),
+			_cache[4] || (_cache[4] = createBaseVNode(
+				"path",
+				{ d: "M5 6v12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5V6" },
+				null,
+				-1
+				/* CACHED */
+			)),
+			$setup.brandLevel === 2 ? (openBlock(), createElementBlock("path", _hoisted_3$9)) : $setup.brandLevel === 3 ? (openBlock(), createElementBlock(
+				Fragment,
+				{ key: 1 },
+				[_cache[0] || (_cache[0] = createBaseVNode(
+					"path",
+					{ d: "M5 10c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5" },
+					null,
+					-1
+					/* CACHED */
+				)), _cache[1] || (_cache[1] = createBaseVNode(
+					"path",
+					{ d: "M5 14c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5" },
+					null,
+					-1
+					/* CACHED */
+				))],
+				64
+				/* STABLE_FRAGMENT */
+			)) : createCommentVNode("v-if", true)
+		], 8, _hoisted_2$9)), createBaseVNode("span", _hoisted_4$8, [createBaseVNode("button", {
 			type: "button",
 			class: "acu-v2-sidebar__brand-title",
-			"aria-label": "龙血玄黄·数据库（连续点击五次打开功能档位设置）",
+			"aria-label": `${$setup.productShortName}（连续点击五次打开功能档位设置）`,
 			onClick: $setup.onBrandTitleClick
-		}, "龙血玄黄·数据库"), createBaseVNode(
+		}, toDisplayString($setup.productShortName), 9, _hoisted_5$7), createBaseVNode(
 			"span",
-			_hoisted_4$8,
+			_hoisted_6$6,
 			toDisplayString($setup.uiMode.modeLabel),
 			1
 			/* TEXT */
@@ -220965,9 +221015,9 @@ ${rejectionText}` : delegationFeedback,
 				return openBlock(), createElementBlock(
 					Fragment,
 					{ key: group.id },
-					[($setup.router.visiblePagesByGroup[group.id] || []).length ? (openBlock(), createElementBlock("div", _hoisted_5$7, [createBaseVNode(
+					[($setup.router.visiblePagesByGroup[group.id] || []).length ? (openBlock(), createElementBlock("div", _hoisted_7$5, [createBaseVNode(
 						"div",
-						_hoisted_6$6,
+						_hoisted_8$5,
 						toDisplayString(group.title),
 						1
 						/* TEXT */
@@ -220982,7 +221032,7 @@ ${rejectionText}` : delegationFeedback,
 								"aria-current": page.id === $setup.router.activePageId ? "page" : undefined,
 								"data-page-id": page.id,
 								onClick: ($event) => $setup.setActivePage(page.id)
-							}, toDisplayString(page.title), 11, _hoisted_7$5);
+							}, toDisplayString(page.title), 11, _hoisted_9$4);
 						}),
 						128
 						/* KEYED_FRAGMENT */
@@ -220998,7 +221048,7 @@ ${rejectionText}` : delegationFeedback,
 		/* CLASS */
 	);
     }
-    var Sidebar = /*#__PURE__*/ _export_sfc(_sfc_main$a, [["render", _sfc_render$a], ["__scopeId", "data-v-86a6daa8"]]);
+    var Sidebar = /*#__PURE__*/ _export_sfc(_sfc_main$a, [["render", _sfc_render$a], ["__scopeId", "data-v-65885b69"]]);
 
     const WORLD_SIMULATION_PROGRESS_LABELS_ACU = {
         survey: '世界线测绘',
@@ -221297,29 +221347,30 @@ ${rejectionText}` : delegationFeedback,
         name: "奶龙配色",
         colorScheme: "dark",
         tokens: {
-            bg0: "#171925",
-            bg1: "#202334",
-            bg2: "#2D3044",
-            sidebarBg: "#1C1E2C",
-            hoverOverlay: "rgba(255, 227, 122, 0.12)",
-            border: "rgba(255, 242, 181, 0.10)",
-            border2: "rgba(255, 242, 181, 0.16)",
-            text1: "#FFF6D2",
-            text2: "#F5E9B5",
-            text3: "#C7BD91",
-            accent: "#FFE37A",
-            accent2: "#F7C95B",
-            onAccent: "#302A1A",
-            accentGlow: "rgba(255, 227, 122, 0.28)",
-            success: "#A7D59D",
-            warning: "#FFB86B",
-            danger: "#F28C8C",
+            // 中性炭灰底 + 暖灰文字，奶油黄只用于强调位；边框压到近乎不可见，保持扁平。
+            bg0: "#16171A",
+            bg1: "#1C1D21",
+            bg2: "#25262B",
+            sidebarBg: "#131417",
+            hoverOverlay: "rgba(255, 255, 255, 0.05)",
+            border: "rgba(255, 255, 255, 0.05)",
+            border2: "rgba(255, 255, 255, 0.07)",
+            text1: "#EDEBE6",
+            text2: "#B4B1AA",
+            text3: "#807D77",
+            accent: "#EFD37A",
+            accent2: "#E2C160",
+            onAccent: "#1A1812",
+            accentGlow: "rgba(239, 211, 122, 0.18)",
+            success: "#93BE8C",
+            warning: "#DDAA6B",
+            danger: "#DE837C",
             fontUi: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
             fontMono: 'Consolas, Menlo, Monaco, "Courier New", monospace',
-            radiusLg: "18px",
-            radiusMd: "16px",
-            radiusSm: "12px",
-            shadow: "0 18px 48px rgba(4, 5, 13, 0.42)",
+            radiusLg: "8px",
+            radiusMd: "8px",
+            radiusSm: "6px",
+            shadow: "0 16px 40px rgba(0, 0, 0, 0.32)",
         },
     };
     const ACU_V2_BUILTIN_THEMES = [
@@ -231280,9 +231331,9 @@ ${lines.join('\n')}
         }
         const containerHtml = `<div class="extension_container interactable" id="${MENU_CONTAINER_ID}" tabindex="0"></div>`;
         const itemHtml = `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID}" ` +
-            `title="打开 ${ACU_PRODUCT_NAME_ACU}">` +
+            `title="打开 ${ACU_PRODUCT_SHORT_NAME_ACU}">` +
             `<div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div>` +
-            `<span>${ACU_PRODUCT_NAME_ACU}</span>` +
+            `<span>${ACU_PRODUCT_SHORT_NAME_ACU}</span>` +
             `</div>`;
         const $container = $(containerHtml);
         const $item = $(itemHtml);

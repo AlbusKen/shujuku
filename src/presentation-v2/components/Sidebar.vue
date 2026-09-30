@@ -1,19 +1,34 @@
 <template>
   <nav :class="['acu-v2-sidebar', `acu-v2-sidebar--${variant}`]" aria-label="一级页导航">
     <div class="acu-v2-sidebar__brand">
-      <img
+      <svg
         class="acu-v2-sidebar__brand-mark"
-        :src="brandImages[uiMode.tier]"
-        alt=""
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.6"
+        stroke-linecap="round"
+        stroke-linejoin="round"
         aria-hidden="true"
-      />
+        focusable="false"
+        :data-tier="uiMode.tier"
+      >
+        <path d="M9.2 3.7 8.2 1.8M14.8 3.7l1-1.9" />
+        <ellipse cx="12" cy="6" rx="7" ry="2.5" />
+        <path d="M5 6v12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5V6" />
+        <path v-if="brandLevel === 2" d="M5 12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5" />
+        <template v-else-if="brandLevel === 3">
+          <path d="M5 10c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5" />
+          <path d="M5 14c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5" />
+        </template>
+      </svg>
       <span class="acu-v2-sidebar__brand-copy">
         <button
           type="button"
           class="acu-v2-sidebar__brand-title"
-          aria-label="龙血玄黄·数据库（连续点击五次打开功能档位设置）"
+          :aria-label="`${productShortName}（连续点击五次打开功能档位设置）`"
           @click="onBrandTitleClick"
-        >龙血玄黄·数据库</button>
+        >{{ productShortName }}</button>
         <span class="acu-v2-sidebar__brand-tag">{{ uiMode.modeLabel }}</span>
       </span>
     </div>
@@ -44,10 +59,8 @@
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, ref } from 'vue';
-import lightBrandImage from '../assets/brand-modes/light.png';
-import mediumBrandImage from '../assets/brand-modes/medium.png';
-import highBrandImage from '../assets/brand-modes/high.jpg';
+import { computed, onBeforeUnmount, ref } from 'vue';
+import { ACU_PRODUCT_SHORT_NAME_ACU } from '../../shared/product-brand';
 import { acuClearTimeout, acuSetTimeout, type AcuTimerHandle } from '../bootstrap/host-env';
 import { useDialogStore } from '../stores/dialog-store';
 import { useRouterStore } from '../stores/router-store';
@@ -70,11 +83,10 @@ const emit = defineEmits<{
 const router = useRouterStore();
 const uiMode = useUiModeStore();
 const dialogStore = useDialogStore();
-const brandImages: Record<AcuUiTier, string> = {
-  low: lightBrandImage,
-  medium: mediumBrandImage,
-  high: highBrandImage,
-};
+const productShortName = ACU_PRODUCT_SHORT_NAME_ACU;
+// 线条标识随档位增加分层：轻量无分层、进阶一道、高级两道。
+const BRAND_TIER_LEVEL: Record<AcuUiTier, number> = { low: 1, medium: 2, high: 3 };
+const brandLevel = computed(() => BRAND_TIER_LEVEL[uiMode.tier] ?? 1);
 const brandClickCount = ref(0);
 let brandClickTimer: AcuTimerHandle | undefined;
 
@@ -187,13 +199,11 @@ function setActivePage(pageId: string): void {
 }
 
 .acu-v2-sidebar__brand-mark {
-  width: var(--acu-space-850, 34px);
-  height: var(--acu-space-850, 34px);
-  flex: 0 0 var(--acu-space-850, 34px);
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
   display: block;
-  object-fit: cover;
-  border-radius: var(--acu-radius-md);
-  background: var(--acu-bg-2);
+  color: var(--acu-accent);
 }
 
 .acu-v2-sidebar__brand-copy {
