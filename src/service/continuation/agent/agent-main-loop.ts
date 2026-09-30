@@ -85,7 +85,7 @@ import {
 } from './agent-placeholder-resolver';
 import { allocateAgentDefaultReadFences_ACU } from './agent-default-fence';
 import { measureContinuationFinalRequestCapacity_ACU } from './agent-final-request-gate';
-import { buildEmptyAgentWorldbookSnapshot_ACU, loadAgentWorldbookSnapshot_ACU, renderAgentWorldbookTriggeredInjection_ACU, type AgentWorldbookSnapshot_ACU } from './agent-worldbook-read';
+import { buildEmptyAgentWorldbookSnapshot_ACU, loadContinuationWorldbookSnapshot_ACU, renderAgentWorldbookTriggeredInjection_ACU, type AgentWorldbookSnapshot_ACU } from './agent-worldbook-read';
 import { runAgentSearch_ACU } from './agent-search';
 import {
   createAgentReadGateState_ACU,
@@ -167,7 +167,7 @@ const defaultDependencies_ACU: ContinuationAgentTurnPlannerDependencies_ACU = {
   readCompactionMark: readActiveAgentConversationCompactionMark_ACU,
   appendConversationMessages: appendPreparedAgentConversationMessages_ACU,
   writeCompactionMark: writeAgentConversationCompactionMark_ACU,
-  loadWorldbook: loadAgentWorldbookSnapshot_ACU,
+  loadWorldbook: loadContinuationWorldbookSnapshot_ACU,
   budget: DEFAULT_AGENT_RUN_BUDGET_ACU,
 };
 

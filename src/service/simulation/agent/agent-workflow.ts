@@ -830,7 +830,8 @@ export async function runWorldSimulationOneShotWorkflow_ACU(
   const roundChangesText = changes.slice(0, 40).join('\n') || '本轮批次一无新增变更';
   const guidanceWritable = !skip.has('guidance') && (!requested || requested.has('guidance'));
   // 〈与此同时〉每轮必写：批次二不再以批次一有无变更为门控，每轮都依据最新正文重新分析场外信号。
-  const projectionDirective = '【本轮场外信号要求】每轮都必须依据本轮锚点正文与最新账本重新分析场外信号：signals 整列替换，至少 1 条，跟随剧情位置与人物变化更新；删去已被正文写出、过时或不可达的旧信号；即使批次一无变更也必须提交 guidance，不得以无变化跳过。';
+  // 场外信号是写给后续剧情的引导提示，不是正文补写；大变局时逐轮牵引。
+  const projectionDirective = '【本轮场外信号要求】每轮都必须依据本轮锚点正文与最新账本重新判断：剧情视角下一步快要碰到账本里的哪些事、世界大势正把故事往哪里推，并写成给后续剧情的引导提示，不写景物或旁白式的补充描写。signals 整列替换，至少 1 条，跟随剧情位置与人物变化更新；存在大变局时至少一条 ambient 指向它，并在上一轮基础上推进一步；删去已被正文写出、过时或不可达的旧信号；即使批次一无变更也必须提交 guidance，不得以无变化跳过。';
   let lastRejection = '';
   // composer 调用本身失败（运行时已做过协议修正）时不再追加修正轮；只对偷懒无变化、事务拒绝、空信号与碰撞未兑现回灌。
   let composerFailed = false;

@@ -37,6 +37,10 @@ vi.mock('../../../src/service/vector/vector-memory-config', () => ({
 vi.mock('../../../src/data/repositories/profile-repo', () => ({
   get globalMeta_ACU() { return h.globalMeta; },
 }));
+// 门控由填表模式统一推导；本测试只关心 UI 恢复链路，沿用旧交火开关语义。
+vi.mock('../../../src/service/fill-mode/fill-mode-gate', () => ({
+  isVectorPipelineEnabledForCurrentChat_ACU: () => h.globalMeta?.summaryVectorIndexModeGlobal === true,
+}));
 vi.mock('../../../src/presentation/theme/toast', () => ({ showToastr_ACU: h.toast }));
 vi.mock('../../../src/presentation-v2/stores/toast-store', () => ({
   useToastStore: () => ({ error: h.toastError }),

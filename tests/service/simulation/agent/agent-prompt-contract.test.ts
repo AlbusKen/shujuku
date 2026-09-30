@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { WORLD_SIMULATION_PROMPT_VERSION_V25_ACU, WORLD_SIMULATION_PROMPT_VERSION_V26_ACU, WORLD_SIMULATION_PROMPT_VERSION_V27_ACU, WORLD_SIMULATION_PROMPT_VERSION_V28_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
+import { WORLD_SIMULATION_PROMPT_VERSION_V25_ACU, WORLD_SIMULATION_PROMPT_VERSION_V26_ACU, WORLD_SIMULATION_PROMPT_VERSION_V27_ACU, WORLD_SIMULATION_PROMPT_VERSION_V28_ACU, WORLD_SIMULATION_PROMPT_VERSION_V29_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
 import { USER_PREFILL_CONTENT_ACU } from '../../../../src/shared/user-prefill.js';
 import { buildDefaultWorldSimulationSettings_ACU } from '../../../../src/service/simulation/defaults';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU, WORLD_SIMULATION_AGENT_NAMES_ACU, findWorldSimulationAgentDefinition_ACU, worldSimulationDirectorVisibleCatalog_ACU } from '../../../../src/service/simulation/agent/agent-catalog';
@@ -112,7 +112,7 @@ describe('格林推演提示词装配契约', () => {
   });
 
   it('提示词完整覆盖角色职责，同时保留时间先行、历史默认指纹与信息渠道纪律', () => {
-    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe(WORLD_SIMULATION_PROMPT_VERSION_V28_ACU);
+    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe(WORLD_SIMULATION_PROMPT_VERSION_V29_ACU);
     expect(buildDefaultWorldSimulationSettings_ACU().agentRunBudget).toMatchObject({ maxIterations: 4, maxExtraReads: 1, maxConcurrent: 5 });
     expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].map(item => item.version)).toEqual([
       'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6', 'world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12', 'world-simulation-v13', 'world-simulation-v14', 'world-simulation-v15', 'world-simulation-v16', 'world-simulation-v17', 'world-simulation-v18', 'world-simulation-v19', 'world-simulation-v20', 'world-simulation-v21', 'world-simulation-v22', 'world-simulation-v23', 'world-simulation-v24',
@@ -120,6 +120,7 @@ describe('格林推演提示词装配契约', () => {
       WORLD_SIMULATION_PROMPT_VERSION_V26_ACU,
       WORLD_SIMULATION_PROMPT_VERSION_V27_ACU,
       WORLD_SIMULATION_PROMPT_VERSION_V28_ACU,
+      WORLD_SIMULATION_PROMPT_VERSION_V29_ACU,
     ]);
     expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['undercurrent-analyst'].at(-1)?.version).toBe(WORLD_SIMULATION_PROMPT_VERSION_ACU);
     const v8 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v8');
@@ -230,7 +231,11 @@ describe('格林推演提示词装配契约', () => {
     expect(composerPrompt).toContain('sourceId');
     expect(composerPrompt).toContain('80');
     expect(composerPrompt).toContain('正文没写过');
-    expect(composerPrompt).toContain('需要清理时可以提交空 signals');
+    // v29：场外信号是写给后续剧情的引导提示，大变局时逐轮牵引，且每轮至少保留 1 条（与运行时门禁一致）。
+    expect(composerPrompt).toContain('写给接下来续写者的引导提示');
+    expect(composerPrompt).toContain('大变局牵引：');
+    expect(composerPrompt).toContain('每轮至少保留 1 条');
+    expect(composerPrompt).not.toContain('需要清理时可以提交空 signals');
     expect(composerPrompt).not.toContain('禁止把正文已发生事件做记录、总结或评价');
     const composerInstruction = worldSimulationSpecialistProtocolInstruction_ACU(
       'guidance-composer',

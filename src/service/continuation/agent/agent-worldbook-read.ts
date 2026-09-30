@@ -20,6 +20,7 @@ import {
   resolveRelevantBookNames_ACU,
 } from '../worldbook-context';
 import { countAgentTokens_ACU } from './agent-token-budget';
+import { resolveFillPlanForCurrentChat_ACU } from '../../fill-mode/fill-mode-gate';
 
 /** 一条已启用的普通世界书条目。 */
 export interface AgentWorldbookEntryView_ACU {
@@ -85,7 +86,13 @@ async function countEntryTokens_ACU(bookName: string, uid: string, content: stri
  * 每条条目在预取时统计 token 数（结果缓存跨运行复用），供目录标注读取预算。
  * @returns 快照；宿主读取失败时返回 available=false 的空快照
  */
-export async function loadAgentWorldbookSnapshot_ACU(): Promise<AgentWorldbookSnapshot_ACU> {
+export interface AgentWorldbookSnapshotOptions_ACU {
+  /** 经典/向量模式下纪要以世界书常量条目注入时，续写需要读取纪要与纪要索引条目。 */
+  includeChronicleEntries?: boolean;
+}
+
+export async function loadAgentWorldbookSnapshot_ACU(options: AgentWorldbookSnapshotOptions_ACU = {}): Promise<AgentWorldbookSnapshot_ACU> {
+  const includeChronicleEntries = options.includeChronicleEntries === true;
   try {
     const bookNames = await resolveRelevantBookNames_ACU();
     if (!bookNames.length) return buildEmptyAgentWorldbookSnapshot_ACU();
@@ -102,12 +109,12 @@ export async function loadAgentWorldbookSnapshot_ACU(): Promise<AgentWorldbookSn
         const title = normalizeGeneratedComment_ACU(raw, isolationPrefix);
         const content = typeof raw.content === 'string' ? raw.content : '';
         // 纪要另由快照显示，不在世界书资料域重复暴露。
-        if (isSummaryEntryComment_ACU(title)) continue;
+        if (!includeChronicleEntries && isSummaryEntryComment_ACU(title)) continue;
         if (!uid || !content.trim()) continue;
         if (!isEntrySelected_ACU(bookName, uid, enabledEntriesMap)) continue;
         if (isEntryBlocked_ACU(raw)) continue;
         // 纪要索引及其分片由快照单独显示。
-        if (isSummaryIndexEntryComment_ACU(title)) continue;
+        if (!includeChronicleEntries && isSummaryIndexEntryComment_ACU(title)) continue;
         // 其余已启用条目交由正常世界书读取方案处理，不按插件前缀额外屏蔽。
         entries.push({
           bookName,
@@ -127,6 +134,21 @@ export async function loadAgentWorldbookSnapshot_ACU(): Promise<AgentWorldbookSn
     logWarn_ACU('[Continuation][Agent] 世界书快照预取失败，本轮目录与搜索将不含世界书。', { error: error instanceof Error ? error.message : String(error) });
     return buildEmptyAgentWorldbookSnapshot_ACU(false);
   }
+}
+
+/** 当前填表模式是否要求续写读取纪要世界书条目；推导失败时保持原屏蔽行为。 */
+export function shouldIncludeChronicleEntriesForContinuation_ACU(): boolean {
+  try {
+    return resolveFillPlanForCurrentChat_ACU().unmaskChronicleEntriesForContinuation;
+  } catch (error) {
+    logWarn_ACU('[Continuation][Agent] 填表模式推导失败，续写保持纪要条目屏蔽。', { error: error instanceof Error ? error.message : String(error) });
+    return false;
+  }
+}
+
+/** 续写专用快照：按填表模式决定是否临时解除纪要条目屏蔽。世界推演仍使用默认屏蔽快照。 */
+export function loadContinuationWorldbookSnapshot_ACU(): Promise<AgentWorldbookSnapshot_ACU> {
+  return loadAgentWorldbookSnapshot_ACU({ includeChronicleEntries: shouldIncludeChronicleEntriesForContinuation_ACU() });
 }
 
 /** 目录行里的内容摘要：压平空白后取前 10 个字符。 */

@@ -7,10 +7,10 @@ import {
 import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import {
   FLIGHT_MODE_BIG_SUMMARY_SHEET_KEY_ACU,
-  FLIGHT_MODE_MAX_VISIBLE_CHRONICLE_ROWS_ACU,
   type FlightModeEnableCheck_ACU,
   type FlightModeState_ACU,
 } from '../../shared/models/flight-mode-model';
+import { getClassicRecentChronicleRows_ACU } from '../fill-mode/fill-mode-preferences';
 
 function normalizeHiddenRowIds_ACU(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
@@ -97,12 +97,16 @@ export function countVisibleChronicleRows_ACU(tableData: any = currentJsonTableD
   return chronicle.content.slice(1).filter((row: any) => Array.isArray(row) && !hidden.has(String(row[0] ?? '').trim())).length;
 }
 
-export function canEnableFlightMode_ACU(tableData: any = currentJsonTableData_ACU): FlightModeEnableCheck_ACU {
+/** 启用门槛与大总结提示词中的条数共用经典模式 recentChronicleRows。 */
+export function canEnableFlightMode_ACU(
+  tableData: any = currentJsonTableData_ACU,
+  maxVisibleRows: number = getClassicRecentChronicleRows_ACU(),
+): FlightModeEnableCheck_ACU {
   if (!getChronicleSheet_ACU(tableData)) {
     return { canEnable: false, visibleChronicleRowCount: 0, reason: 'chronicle_not_found' };
   }
   const visibleChronicleRowCount = countVisibleChronicleRows_ACU(tableData);
-  if (visibleChronicleRowCount > FLIGHT_MODE_MAX_VISIBLE_CHRONICLE_ROWS_ACU) {
+  if (visibleChronicleRowCount > maxVisibleRows) {
     return { canEnable: false, visibleChronicleRowCount, reason: 'too_many_visible_chronicle_rows' };
   }
   return { canEnable: true, visibleChronicleRowCount };

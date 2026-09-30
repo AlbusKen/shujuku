@@ -23,7 +23,7 @@ import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, D
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
-import { globalMeta_ACU } from '../../data/repositories/profile-repo';
+import { isVectorPipelineEnabledForCurrentChat_ACU } from '../fill-mode/fill-mode-gate';
 
 export const NEW_MESSAGE_DEBOUNCE_DELAY_ACU = 500;
 
@@ -167,8 +167,8 @@ export function shouldProcessSummaryVectorIndexForGeneration_ACU(type: any, para
   if (isQuietLikeGeneration_ACU(type, params)) return false;
   if (params?.automatic_trigger) return false;
   const worldbookConfig = getCurrentWorldbookConfig_ACU();
-  const globalEnabled = globalMeta_ACU?.summaryVectorIndexModeGlobal === true;
   const worldbookProjectionEnabled = worldbookConfig.summaryVectorIndexModeEnabled === true;
+  const globalEnabled = isVectorPipelineEnabledForCurrentChat_ACU();
   if (!globalEnabled) {
     logDebug_ACU(`[状态管理] shouldProcessSummaryVectorIndex: type=${type}, dryRun=${dryRun}, globalEnabled=false, worldbookProjection=${worldbookProjectionEnabled}, result=false`);
     return false;

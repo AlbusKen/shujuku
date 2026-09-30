@@ -9,7 +9,7 @@ import { normalizeSummaryVectorIndexScope_ACU, normalizeSummaryVectorIsolationKe
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { callAIWithPreset_ACU } from '../ai/api-call';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
-import { globalMeta_ACU } from '../../data/repositories/profile-repo';
+import { getVectorPipelinePlanForCurrentChat_ACU, isVectorPipelineEnabledForCurrentChat_ACU } from '../fill-mode/fill-mode-gate';
 import { getInjectionTargetLorebook_ACU, getIsolationPrefix_ACU } from '../worldbook/injection-engine';
 import {
     createLorebookEntries_ACU,
@@ -449,6 +449,7 @@ const SUMMARY_VECTOR_OVERVIEW_RESTORE_REASONS_ACU = new Set([
     'no_selected_rows',
     'below_min_rows',
     'rerank_failed',
+    'vector_rerank_failed',
 ]);
 
 async function restoreSummaryIndexOverview_ACU(rows: ChatSummaryVectorIndexRow_ACU[]): Promise<void> {
@@ -847,7 +848,7 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     options: SummaryVectorIndexRuntimeOptions_ACU = {},
 ): Promise<SummaryVectorIndexRuntimeResult_ACU> {
     const worldbookConfig = getCurrentWorldbookConfig_ACU();
-    const globalEnabled = globalMeta_ACU?.summaryVectorIndexModeGlobal === true;
+    const globalEnabled = isVectorPipelineEnabledForCurrentChat_ACU();
     if (!globalEnabled) {
         logDebug_ACU(`[交火模式纪要索引] 全局开关未启用，跳过发送前处理。worldbookProjection=${worldbookConfig.summaryVectorIndexModeEnabled === true}`);
         return { success: false, skipped: true, reason: 'summary_vector_index_disabled' };
@@ -870,11 +871,31 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     lastRuntimeSignature_ACU = signature;
     lastRuntimeAt_ACU = Date.now();
 
-    const config = getEffectiveSummaryVectorIndexConfig_ACU();
+    // 向量表格模式：请求级覆写，不改写 vectorMemoryConfig，交火参数保持原值。
+    const vectorPlan = getVectorPipelinePlanForCurrentChat_ACU();
+    const baseConfig = getEffectiveSummaryVectorIndexConfig_ACU();
+    const config = vectorPlan?.overrides
+        ? {
+            ...baseConfig,
+            keywordGenerationEnabled: false,
+            summaryIndexHybridRetrievalEnabled: false,
+            summaryIndexRecentFixedInjectCount: 0,
+            topK: vectorPlan.overrides.topK,
+            summaryIndexCandidateLimit: Math.max(baseConfig.summaryIndexCandidateLimit, vectorPlan.overrides.topK),
+        }
+        : baseConfig;
     const validation = validateSummaryVectorIndexConfig_ACU(config);
     if (!validation.valid) {
         logWarn_ACU('[交火模式纪要索引] 配置无效，跳过发送前注入:', validation.errors.join('; '));
         return { success: false, skipped: true, reason: 'invalid_config' };
+    }
+    if (vectorPlan?.rerankRequired && (!normalizeText_ACU(config.rerankEndpoint) || !normalizeText_ACU(config.rerankModel))) {
+        logWarn_ACU('[向量表格] rerank 服务未配置，本轮不执行向量召回。');
+        return await finalizeSummaryVectorRecallResult_ACU({
+            success: false,
+            reason: 'vector_rerank_not_configured',
+            error: '向量表格模式需要 rerank 服务，请先配置 rerank 接口与模型',
+        });
     }
 
     const chat = getChatArray_ACU();
@@ -1068,6 +1089,20 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
 
     // Rerank 只处理较早行的候选；document 取实时纪要正文，候选行不多于 topK 时跳过。
     const rerank = await rerankCandidates_ACU(config, queryText, candidates, liveRows);
+    if (vectorPlan?.rerankRequired && rerank.status !== 'applied' && rerank.status !== 'skipped_within_topk') {
+        return await finalizeSummaryVectorRecallResult_ACU({
+            success: false,
+            reason: 'vector_rerank_failed',
+            error: rerank.error || `rerank 未生效（${rerank.status}），向量表格模式不回退 embedding 排序`,
+            keywordCount: keywords.length,
+            candidateCount: candidates.length,
+            denseCandidateCount: denseCandidates.length,
+            rerankStatus: rerank.status,
+            rerankError: rerank.error,
+            rerankDocumentCount: rerank.documentCount,
+            keywordGenerationEnabled: false,
+        }, rows);
+    }
     const selectedByRow = new Map<string, SummaryIndexSelectedCandidate_ACU>();
     for (const candidate of rerank.candidates) {
         if (!selectedByRow.has(candidate.row.rowKey)) selectedByRow.set(candidate.row.rowKey, { kind: 'ranked', chunk: candidate.chunk, row: candidate.row, score: candidate.score, rerankScore: candidate.rerankScore });

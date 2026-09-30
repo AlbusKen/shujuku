@@ -12,7 +12,7 @@
 import { defineStore } from 'pinia';
 import { logWarn_ACU } from '../../shared/utils';
 import {
-  ACU_V2_BASIC_PAGE_ID,
+  ACU_V2_FORM_FILL_PAGE_ID,
   ACU_V2_DEFAULT_PAGE_ID,
   ACU_V2_PAGE_REGISTRY,
   FEATURE_GATE_CONTENT_REPLACE,
@@ -26,11 +26,12 @@ import type { AcuV2Page, AcuV2PageGroup } from '../router/page-types';
 import { ACU_V2_PAGE_GROUPS } from '../router/page-types';
 import { readSection, writeSection } from './persistence';
 import { settings_ACU } from '../../service/runtime/state-manager';
-import { useUiModeStore } from './ui-mode-store';
+import { ACU_UI_TIER_RANK, useUiModeStore } from './ui-mode-store';
 import { setContentReplaceEnabledBySettings, syncContentReplaceAvailability } from './content-replace-gate';
 
 const SECTION_KEY = 'router';
 const LEGACY_PAGE_ID_ALIASES: Record<string, string> = {
+  'basic-config': ACU_V2_FORM_FILL_PAGE_ID,
   'sql-console': 'advanced-tools',
   'log-viewer': 'advanced-tools',
 };
@@ -100,9 +101,8 @@ function persistRouterArmed_ACU(activePageId: string): void {
 }
 
 function isPageVisible(page: AcuV2Page, state: RouterState): boolean {
-  const uiMode = useUiModeStore();
-  if (uiMode.isBasicMode) return page.id === ACU_V2_BASIC_PAGE_ID;
-  if (page.id === ACU_V2_BASIC_PAGE_ID) return false;
+  const uiTier = useUiModeStore().tier;
+  if (page.minUiTier && ACU_UI_TIER_RANK[uiTier] < ACU_UI_TIER_RANK[page.minUiTier]) return false;
   if (page.requiresSqlite && !state.isSqliteMode) return false;
   if (page.featureGate && !state.featureGates[page.featureGate]) return false;
   if (page.visibleWhen && !page.visibleWhen()) return false;
@@ -110,7 +110,7 @@ function isPageVisible(page: AcuV2Page, state: RouterState): boolean {
 }
 
 function defaultVisiblePageId(): string {
-  return useUiModeStore().isBasicMode ? ACU_V2_BASIC_PAGE_ID : ACU_V2_DEFAULT_PAGE_ID;
+  return useUiModeStore().tier === 'low' ? ACU_V2_FORM_FILL_PAGE_ID : ACU_V2_DEFAULT_PAGE_ID;
 }
 
 export const useRouterStore = defineStore('acu-v2-router', {

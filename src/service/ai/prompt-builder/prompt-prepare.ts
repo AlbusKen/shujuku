@@ -30,6 +30,7 @@ import { decodeSqlIdentifier_ACU } from '../../../shared/sql-mutation-table-rebi
 import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var';
 import { getCurrentFlightModeState_ACU } from '../../flight-mode/flight-mode-state';
 import { projectFlightModeHiddenChronicleRows_ACU } from '../../flight-mode/flight-mode-hidden-rows';
+import { getClassicRecentChronicleRows_ACU, resolveSheetSourceDataPlaceholders_ACU } from '../../fill-mode/fill-mode-preferences';
 
 const AUTHOR_SQL_TABLE_IDENTIFIER_ACU = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -207,6 +208,8 @@ function resolvePromptRowWindow_ACU(
 
     let tableDataText = '';
     let _seedRowsTablesUsed_ACU: string[] = [];
+    // 本次请求冻结一次近期纪要条数：大总结规则中的 $RECENT_CHRONICLE_ROWS 全部按同一快照解析。
+    const recentChronicleRows = getClassicRecentChronicleRows_ACU();
     // 模板只起指导作用：只有模板声明的表参与 prompt。
     // 范围未知（解析失败）时不过滤，避免把所有表判成不参与。
     const templateScope = Object.prototype.hasOwnProperty.call(options, 'templateScope')
@@ -225,7 +228,10 @@ function resolvePromptRowWindow_ACU(
         const rawTable = workingTableData[sheetKey];
         if (!rawTable || !rawTable.name || !rawTable.content) continue;
         // 模板未声明的列合并进 hiddenPhysicalColumns，只影响投影，不改写持久化数据。
-        const table: any = projectSheetForTemplateScope_ACU(rawTable, templateScope, sheetKey);
+        const table: any = resolveSheetSourceDataPlaceholders_ACU(
+            projectSheetForTemplateScope_ACU(rawTable, templateScope, sheetKey),
+            recentChronicleRows,
+        );
 
         if (targetSheetKeys && Array.isArray(targetSheetKeys)) {
             if (!targetSheetKeys.includes(sheetKey)) continue;

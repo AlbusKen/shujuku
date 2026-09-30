@@ -5,7 +5,6 @@ import { describe, expect, it } from 'vitest';
 const panelGridPages = [
   'AdvancedToolsPage.vue',
   'ApiPage.vue',
-  'BasicConfigPage.vue',
   'ContentReplacePage.vue',
   'ContinuationPage.vue',
   'DataMgmtPage.vue',

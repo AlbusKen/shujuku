@@ -11,6 +11,7 @@ import { defaultWorldbookConfig_ACU } from '../../shared/defaults';
 import { deepMerge_ACU, logDebug_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 import { getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { CHARACTER_SCOPE_DEFAULT_KEY_ACU, getCurrentCharacterScopeKey_ACU, getLegacyChatScopeKey_ACU } from './character-scope';
+import { isVectorPipelineEnabledForCurrentChat_ACU } from '../fill-mode/fill-mode-gate';
 
 /**
  * 旧版 characterSettings 以聊天文件名为键；升级后首次访问某张角色卡时，
@@ -48,7 +49,7 @@ export function getCurrentCharSettings_ACU() {
         const worldbookConfigForNewChat = JSON.parse(JSON.stringify(defaultWorldbookConfig_ACU));
         worldbookConfigForNewChat.zeroTkOccupyMode = globalZeroTkDefault;
         worldbookConfigForNewChat.outlineEntryEnabled = !globalZeroTkDefault;
-        worldbookConfigForNewChat.summaryVectorIndexModeEnabled = globalMeta_ACU?.summaryVectorIndexModeGlobal === true;
+        worldbookConfigForNewChat.summaryVectorIndexModeEnabled = isVectorPipelineEnabledForCurrentChat_ACU();
         settings_ACU.characterSettings[charId] = {
             worldbookConfig: worldbookConfigForNewChat,
         };
@@ -60,7 +61,7 @@ export function getCurrentCharSettings_ACU() {
             JSON.parse(JSON.stringify(defaultWorldbookConfig_ACU)),
             existingCfg,
         );
-        const globalSummaryVectorIndexEnabled = globalMeta_ACU?.summaryVectorIndexModeGlobal === true;
+        const globalSummaryVectorIndexEnabled = isVectorPipelineEnabledForCurrentChat_ACU();
         mergedCfg.summaryVectorIndexModeEnabled = globalSummaryVectorIndexEnabled;
         mergedCfg.zeroTkOccupyMode = globalZeroTkDefault;
         mergedCfg.outlineEntryEnabled = !mergedCfg.zeroTkOccupyMode;

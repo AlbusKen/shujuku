@@ -5,8 +5,10 @@ import { isSummaryOrOutlineTable_ACU } from '../../../src/shared/utils';
 import { buildFlightModeBigSummarySheet_ACU } from '../../../src/service/flight-mode/big-summary-sheet-def';
 import {
   FLIGHT_MODE_BIG_SUMMARY_SHEET_KEY_ACU,
-  FLIGHT_MODE_MAX_VISIBLE_CHRONICLE_ROWS_ACU,
 } from '../../../src/shared/models/flight-mode-model';
+import {
+  RECENT_CHRONICLE_ROWS_PLACEHOLDER_ACU,
+} from '../../../src/service/fill-mode/fill-mode-preferences';
 
 describe('buildFlightModeBigSummarySheet_ACU', () => {
   const chronicle: any = {
@@ -38,10 +40,10 @@ describe('buildFlightModeBigSummarySheet_ACU', () => {
   it('以不可变、连续且完整归纳的契约约束大总结新增', () => {
     const sheet = buildFlightModeBigSummarySheet_ACU(chronicle, { sheet_chronicle: chronicle });
 
-    expect(sheet.sourceData.note).toContain(`达到 ${FLIGHT_MODE_MAX_VISIBLE_CHRONICLE_ROWS_ACU} 条`);
+    expect(sheet.sourceData.note).toContain(`达到 ${RECENT_CHRONICLE_ROWS_PLACEHOLDER_ACU} 条`);
     expect(sheet.sourceData.note).toContain('全部可见纪要');
     expect(sheet.sourceData.note).toContain('辑连贯');
-    expect(sheet.sourceData.insertNode).toContain(`达到 ${FLIGHT_MODE_MAX_VISIBLE_CHRONICLE_ROWS_ACU} 条`);
+    expect(sheet.sourceData.insertNode).toContain(`达到 ${RECENT_CHRONICLE_ROWS_PLACEHOLDER_ACU} 条`);
     expect(sheet.sourceData.insertNode).toContain('全部可见内容');
     expect(sheet.sourceData.updateNode).toContain('禁止修改');
     expect(sheet.sourceData.deleteNode).toContain('禁止删除');

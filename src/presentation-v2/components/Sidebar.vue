@@ -3,19 +3,15 @@
     <div class="acu-v2-sidebar__brand">
       <span class="acu-v2-sidebar__brand-mark" aria-hidden="true">SP</span>
       <span class="acu-v2-sidebar__brand-copy">
-        <span class="acu-v2-sidebar__brand-title">SP·数据库 IX</span>
+        <button
+          type="button"
+          class="acu-v2-sidebar__brand-title"
+          aria-label="SP·数据库 IX（连续点击五次打开功能档位设置）"
+          @click="onBrandTitleClick"
+        >SP·数据库 IX</button>
         <span class="acu-v2-sidebar__brand-tag">新 UI · {{ uiMode.modeLabel }}</span>
       </span>
     </div>
-
-    <button
-      type="button"
-      class="acu-v2-sidebar__mode"
-      @click="toggleMode"
-    >
-      <i class="fa-solid fa-repeat" aria-hidden="true"></i>
-      {{ uiMode.isBasicMode ? '切换到高手模式' : '返回基础模式' }}
-    </button>
 
     <template v-for="group in router.groups" :key="group.id">
       <div
@@ -43,8 +39,15 @@
 </template>
 
 <script setup lang="ts">
+import { onBeforeUnmount, ref } from 'vue';
+import { acuClearTimeout, acuSetTimeout, type AcuTimerHandle } from '../bootstrap/host-env';
+import { useDialogStore } from '../stores/dialog-store';
 import { useRouterStore } from '../stores/router-store';
-import { useUiModeStore } from '../stores/ui-mode-store';
+import {
+  ACU_UI_TIER_LABELS,
+  useUiModeStore,
+  type AcuUiTier,
+} from '../stores/ui-mode-store';
 
 withDefaults(defineProps<{
   variant?: 'desktop' | 'drawer';
@@ -58,17 +61,95 @@ const emit = defineEmits<{
 
 const router = useRouterStore();
 const uiMode = useUiModeStore();
+const dialogStore = useDialogStore();
+const brandClickCount = ref(0);
+let brandClickTimer: AcuTimerHandle | undefined;
+
+const tierDescriptions: Record<AcuUiTier, string> = {
+  low: '显示日常填表、模板与基础 API 配置。',
+  medium: '在基础功能上显示填表调节、剧情与逻辑召回配置。',
+  high: '显示完整诊断、索引维护、数据管理与开发者工具。',
+};
+
+function resetBrandClickSequence(): void {
+  brandClickCount.value = 0;
+  if (brandClickTimer !== undefined) {
+    acuClearTimeout(brandClickTimer);
+    brandClickTimer = undefined;
+  }
+}
+
+function onBrandTitleClick(): void {
+  brandClickCount.value += 1;
+  if (brandClickTimer !== undefined) acuClearTimeout(brandClickTimer);
+  brandClickTimer = acuSetTimeout(resetBrandClickSequence, 2000);
+  if (brandClickCount.value < 5) return;
+  resetBrandClickSequence();
+  void openTierDialog();
+}
+
+async function openTierDialog(): Promise<void> {
+  const currentTier = uiMode.tier;
+  const selectableTiers: AcuUiTier[] = currentTier === 'low'
+    ? ['low', 'medium']
+    : ['low', 'medium', 'high'];
+  const selected = await dialogStore.choose<AcuUiTier>({
+    title: '功能档位设置',
+    badge: { label: `当前：${ACU_UI_TIER_LABELS[currentTier]}`, variant: 'accent' },
+    message: [
+      ...selectableTiers.map((tier) => `${ACU_UI_TIER_LABELS[tier]}：${tierDescriptions[tier]}`),
+      '',
+      '档位只影响界面显示，不会改变填表模式或已保存的模式参数。',
+    ].join('\n'),
+    actions: selectableTiers.map((tier) => ({
+      value: tier,
+      label: ACU_UI_TIER_LABELS[tier],
+      variant: tier === currentTier ? 'default' : tier === 'high' ? 'danger' : 'primary',
+    })),
+  });
+  if (!selected || selected === currentTier) return;
+
+  if (selected === 'medium' && currentTier === 'low') {
+    const confirmed = await dialogStore.confirm({
+      title: '开启进阶模式',
+      message: '将显示更多配置项与诊断入口，但不会改变填表模式、模式参数或历史数据。',
+      confirmLabel: '开启进阶模式',
+    });
+    if (!confirmed) return;
+  }
+
+  if (selected === 'high') {
+    const confirmed = await dialogStore.confirm({
+      title: '准备开启高级模式',
+      message: '高级模式会显示索引维护、数据管理、完整诊断和开发者工具。显示这些入口不会自动执行危险操作。',
+      confirmLabel: '继续',
+      confirmVariant: 'danger',
+      confirmCountdownSeconds: 2,
+    });
+    if (!confirmed) return;
+    const phrase = await dialogStore.prompt({
+      title: '确认开启高级模式',
+      message: '请输入“开启高级功能”以完成解锁。',
+      label: '确认短语',
+      placeholder: '开启高级功能',
+      confirmLabel: '解锁高级模式',
+      confirmVariant: 'danger',
+    });
+    if (phrase !== '开启高级功能') return;
+  }
+
+  uiMode.setTier(selected);
+  router.ensureActiveVisible();
+  emit('navigate');
+}
+
+onBeforeUnmount(resetBrandClickSequence);
 
 function setActivePage(pageId: string): void {
   router.setActivePage(pageId);
   emit('navigate');
 }
 
-function toggleMode(): void {
-  uiMode.toggleMode();
-  router.ensureActiveVisible();
-  emit('navigate');
-}
 </script>
 
 <style scoped>
@@ -120,14 +201,26 @@ function toggleMode(): void {
 }
 
 .acu-v2-sidebar__brand-title {
+  appearance: none;
   display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
   font-size: var(--acu-font-size-panel-title, 15px);
   line-height: 1.25;
   font-weight: 700;
   color: var(--acu-text-1);
+  cursor: pointer;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.acu-v2-sidebar__brand-title:hover,
+.acu-v2-sidebar__brand-title:focus-visible {
+  color: var(--acu-accent);
 }
 
 .acu-v2-sidebar__brand-tag {
@@ -139,30 +232,6 @@ function toggleMode(): void {
 
 .acu-v2-sidebar__group {
   margin-bottom: var(--acu-panel-gap, 12px);
-}
-
-.acu-v2-sidebar__mode {
-  width: 100%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--acu-space-175, 7px);
-  min-height: var(--acu-control-height-md, 32px);
-  margin: 0 0 var(--acu-page-gap, 14px);
-  padding: var(--acu-space-175, 7px) var(--acu-space-250, 10px);
-  border: 1px solid var(--acu-border-2);
-  border-radius: var(--acu-radius-sm);
-  background: color-mix(in srgb, var(--acu-bg-1) 72%, transparent);
-  color: var(--acu-text-2);
-  font-size: var(--acu-font-size-body, 12px);
-  cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-}
-
-.acu-v2-sidebar__mode:hover {
-  background: var(--acu-hover-overlay);
-  color: var(--acu-text-1);
-  border-color: var(--acu-border);
 }
 
 .acu-v2-sidebar__group-title {

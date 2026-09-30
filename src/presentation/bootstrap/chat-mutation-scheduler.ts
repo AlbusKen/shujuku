@@ -22,7 +22,7 @@ import { getChatArray_ACU } from '../../service/chat/chat-service';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
 import { clearAgentRunState_ACU } from '../../service/continuation/agent/agent-run-cache';
 import { clearWorldSimulationRunState_ACU } from '../../service/simulation/agent/agent-run-cache';
-import { globalMeta_ACU } from '../../data/repositories/profile-repo';
+import { isVectorPipelineEnabledForCurrentChat_ACU } from '../../service/fill-mode/fill-mode-gate';
 import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../../service/runtime/state-manager';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 
@@ -128,7 +128,7 @@ async function runMutationRound_ACU(): Promise<void> {
       // P2：dirty 标记必须有消费端。楼层删除/滑动后，当向量功能开启且该 scope 已建过
       // 索引时，直接入队重新归档（flush 成功后由队列清除 dirty）。未建过索引的聊天
       // 不入队，避免凭空发起首次建索引产生意外 embedding 费用。
-      const vectorModeEnabled = globalMeta_ACU?.summaryVectorIndexModeGlobal === true;
+      const vectorModeEnabled = isVectorPipelineEnabledForCurrentChat_ACU();
       const hasExistingIndex = chatHasSummaryVectorMirror_ACU(getChatArray_ACU());
       if (vectorModeEnabled && hasExistingIndex) {
         void enqueueSummaryVectorIndexFlush_ACU({ sourceTableKey: summaryTable.summaryKey, reason: realignDirtyReason })

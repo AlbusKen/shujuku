@@ -58,7 +58,6 @@ async function mountFormFillPage(
   vi.resetModules();
   document.body.innerHTML = '';
   document.head.innerHTML = '';
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({ router: { activePageId } }));
   const { ref, computed } = await import('vue');
   const saveSettings = vi.fn(() => ({ saved: true, storageType: 'memory' }));
   const orchestrate = vi.fn(async (..._args: any[]) => ({ success: true }));
@@ -245,7 +244,13 @@ async function mountFormFillPage(
   vi.spyOn(window, 'confirm').mockReturnValue(false);
 
   const mount = await import('../../../src/presentation-v2/bootstrap/mount');
+  // 上一用例的双 rAF 完成回调可能在异步 import 期间写回旧路由；种子必须紧贴挂载同步写入。
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ uiTier: { tier: 'high' }, router: { activePageId } }));
   await mount.openAcuV2App();
+  const pinia = mount.getAcuV2PiniaForBridge()!;
+  const { useRouterStore } = await import('../../../src/presentation-v2/stores/router-store');
+  const { useUiModeStore } = await import('../../../src/presentation-v2/stores/ui-mode-store');
+  expect({ tier: useUiModeStore(pinia).tier, page: useRouterStore(pinia).activePageId }).toEqual({ tier: 'high', page: activePageId });
   await new Promise(r => setTimeout(r, 0));
   return {
     mount,
@@ -349,10 +354,10 @@ describe('FormFillPage', () => {
     expect(page!.querySelector('.acu-prompt-segs')).toBeNull();
     const panelTitles = Array.from(page!.querySelectorAll('.acu-v2-form-fill-page__grid > .acu-panel .acu-panel__title'))
       .map(title => (title.textContent || '').trim());
-    expect(panelTitles).toEqual(['表格状态', '自动更新设置', '表格模板预设', '手动填表']);
+    expect(panelTitles).toEqual(['表格状态', '填表模式', '自动更新设置', '表格模板预设', '手动填表']);
     const mobileNavItems = Array.from(page!.querySelectorAll('.acu-mobile-panel-nav__item'))
       .map(item => (item.textContent || '').trim());
-    expect(mobileNavItems).toEqual(['表格状态', '自动更新', '手动填表', '表格模板预设']);
+    expect(mobileNavItems).toEqual(['表格状态', '填表模式', '自动更新', '手动填表', '表格模板预设']);
     expect(document.getElementById('form-fill-update-panel')).not.toBeNull();
     expect(page!.querySelector('.acu-v2-form-fill-page__panel--manual')).not.toBeNull();
 

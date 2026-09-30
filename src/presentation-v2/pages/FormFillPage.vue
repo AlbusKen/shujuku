@@ -77,6 +77,107 @@
         </div>
       </AcuPanel>
 
+      <AcuPanel
+        id="form-fill-mode-panel"
+        class="acu-v2-form-fill-page__panel--mode"
+        title="填表模式"
+        :description="fillModeDescriptions[formFillMode.selectedMode]"
+      >
+        <AcuFormRow label="当前填表模式" hint="每种模式的参数独立保存，切换模式不会覆盖其它模式，也不会改变功能档位。">
+          <AcuSegmentedControl
+            :options="FORM_FILL_MODE_OPTIONS"
+            :model-value="formFillMode.selectedMode"
+            aria-label="选择填表模式"
+            @update:model-value="selectFillMode"
+          />
+        </AcuFormRow>
+
+        <AcuMessage v-if="formFillMode.saveError" kind="error">
+          {{ formFillMode.saveError }}
+        </AcuMessage>
+        <AcuMessage
+          v-if="formFillMode.selectedMode === 'crossfire' && formFillMode.crossfireLoadError"
+          kind="error"
+        >
+          {{ formFillMode.crossfireLoadError }}
+        </AcuMessage>
+
+        <template v-if="formFillMode.selectedMode === 'classic'">
+          <AcuFormRow label="最近纪要表条数" hint="同时控制界面显示与经典模式提示词中的近期纪要条数，默认 15 条。">
+            <AcuInput
+              type="number"
+              :min="1"
+              :max="200"
+              :step="1"
+              :model-value="formFillMode.profiles.classic.recentChronicleRows"
+              @change="formFillMode.setClassicRecentChronicleRows($event)"
+            />
+          </AcuFormRow>
+        </template>
+
+        <template v-if="formFillMode.selectedMode === 'vector'">
+          <AcuFormRow label="保留相关纪要条数" hint="按 rerank 结果从上到下保留的纪要条数；embedding 与 rerank 服务需先完成配置。">
+            <AcuInput
+              type="number"
+              :min="1"
+              :max="1000"
+              :step="1"
+              :model-value="formFillMode.profiles.vector.resultCount"
+              @change="formFillMode.setVectorResultCount($event)"
+            />
+          </AcuFormRow>
+        </template>
+
+        <template v-if="formFillMode.selectedMode === 'llm'">
+          <AcuFormRow label="LLM / continuation API 预设" hint="选择后仅用于逻辑召回模式；留空时跟随当前 API。">
+            <AcuSelect
+              :options="apiPresetSelectOptions"
+              :model-value="formFillMode.profiles.llm.apiPresetName"
+              :placeholder="followActiveApiLabel"
+              @update:model-value="formFillMode.setLlmApiPresetName($event)"
+            />
+          </AcuFormRow>
+        </template>
+
+        <template v-if="formFillMode.selectedMode === 'crossfire'">
+          <AcuFormRow label="发送前生成关键词" hint="关闭后只使用用户输入进行召回。">
+            <AcuToggle
+              :model-value="formFillMode.profiles.crossfire.keywordGenerationEnabled"
+              @update:model-value="formFillMode.setCrossfireField('keywordGenerationEnabled', $event)"
+            />
+          </AcuFormRow>
+          <AcuFormRow label="启用混合召回" hint="开启 BM25 稀疏召回并与向量结果融合。">
+            <AcuToggle
+              :model-value="formFillMode.profiles.crossfire.hybridRetrievalEnabled"
+              @update:model-value="formFillMode.setCrossfireField('hybridRetrievalEnabled', $event)"
+            />
+          </AcuFormRow>
+          <div class="acu-v2-form-fill-page__mode-number-grid">
+            <AcuFormRow label="Top-K" hint="融合后交给 rerank 的候选上限。">
+              <AcuInput
+                type="number"
+                :min="1"
+                :max="1000"
+                :step="1"
+                :model-value="formFillMode.profiles.crossfire.topK"
+                @change="formFillMode.setCrossfireField('topK', $event)"
+              />
+            </AcuFormRow>
+            <AcuFormRow label="最近固定注入条数" hint="始终保留的最近纪要条目数量。">
+              <AcuInput
+                type="number"
+                :min="1"
+                :max="1000"
+                :step="1"
+                :model-value="formFillMode.profiles.crossfire.recentFixedInjectCount"
+                @change="formFillMode.setCrossfireField('recentFixedInjectCount', $event)"
+              />
+            </AcuFormRow>
+          </div>
+        </template>
+
+      </AcuPanel>
+
       <FormFillUpdateSettingsPanel
         id="form-fill-update-panel"
         class="acu-v2-form-fill-page__panel--update"
@@ -207,26 +308,50 @@ import AcuMessage from "../components/_lib/AcuMessage.vue";
 import AcuMobilePanelNav from "../components/_lib/AcuMobilePanelNav.vue";
 import AcuPanel from "../components/_lib/AcuPanel.vue";
 import AcuPanelGrid from "../components/_lib/AcuPanelGrid.vue";
+import AcuSegmentedControl from "../components/_lib/AcuSegmentedControl.vue";
+import AcuSelect from "../components/_lib/AcuSelect.vue";
 import AcuText from "../components/_lib/AcuText.vue";
 import AcuTextarea from "../components/_lib/AcuTextarea.vue";
+import AcuToggle from "../components/_lib/AcuToggle.vue";
 import FormFillUpdateSettingsPanel from "../components/FormFillUpdateSettingsPanel.vue";
 import TableTemplatePresetPanel from "../components/TableTemplatePresetPanel.vue";
 import TableSelector from "../components/TableSelector.vue";
+import { useApiPresetSelectOptions } from "../composables/useApiPresetSelectOptions";
 import { useChatChangedTick } from "../composables/useChatChangedListener";
 import { useTemplateRuntimeChangeTick } from "../composables/useTemplateRuntimeChangeListener";
 import { useDashboardPage } from "../composables/useDashboardPage";
 import { useManualUpdate } from "../composables/useManualUpdate";
 import { formFillCopy } from "../copy/form-fill-copy";
 import { tableCopy } from "../copy/table-copy";
+import {
+  FORM_FILL_MODE_OPTIONS,
+  useFormFillModeStore,
+  type FillMode,
+} from "../stores/form-fill-mode-store";
 
 const dashboard = useDashboardPage();
 const manualUpdate = useManualUpdate();
+const formFillMode = useFormFillModeStore();
+const { followActiveApiLabel, apiPresetSelectOptions } = useApiPresetSelectOptions();
+const fillModeDescriptions: Record<FillMode, string> = {
+  classic: "经典表格：沿用稳定的经典填表流程，是新安装的默认模式。",
+  vector: "向量表格：只用 embedding 与 rerank 选出相关纪要，不生成关键词，也不执行剧情推进或混合召回。",
+  llm: "LLM 逻辑召回：由 LLM 先读纪要概览与目录，再按信息缺口精读具体纪要区间。",
+  crossfire: "交火模式：关键词、向量、混合召回与 rerank 的完整流程；索引维护在交火模式页面。",
+};
 const panelNavItems = [
   { id: "form-fill-status-panel", label: formFillCopy.nav.status },
+  { id: "form-fill-mode-panel", label: "填表模式" },
   { id: "form-fill-update-panel", label: formFillCopy.nav.update },
   { id: "form-fill-manual-panel", label: formFillCopy.nav.manual },
   { id: "form-fill-template-panel", label: tableCopy.panels.templatePreset.title },
 ];
+
+function selectFillMode(value: string): void {
+  if (value === "classic" || value === "vector" || value === "llm" || value === "crossfire") {
+    formFillMode.selectMode(value);
+  }
+}
 
 async function refreshAll(): Promise<void> {
   manualUpdate.refresh();
@@ -256,8 +381,8 @@ watch(useTemplateRuntimeChangeTick(), () => {
 
 .acu-v2-form-fill-page__grid {
   grid-template-areas:
-    "status update"
-    "manual template"
+    "status mode"
+    "update template"
     "manual template";
 }
 
@@ -269,6 +394,10 @@ watch(useTemplateRuntimeChangeTick(), () => {
   grid-area: update;
 }
 
+.acu-v2-form-fill-page__panel--mode {
+  grid-area: mode;
+}
+
 .acu-v2-form-fill-page__panel--template {
   grid-area: template;
 }
@@ -278,6 +407,12 @@ watch(useTemplateRuntimeChangeTick(), () => {
 }
 
 .acu-v2-form-fill-page__manual-number-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.acu-v2-form-fill-page__mode-number-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
@@ -372,12 +507,17 @@ watch(useTemplateRuntimeChangeTick(), () => {
   .acu-v2-form-fill-page__grid {
     grid-template-areas:
       "status"
+      "mode"
       "update"
       "manual"
       "template";
   }
 
   .acu-v2-form-fill-page__manual-number-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .acu-v2-form-fill-page__mode-number-grid {
     grid-template-columns: 1fr;
   }
 }

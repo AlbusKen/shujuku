@@ -22,7 +22,7 @@ import type { AgentResolveContext_ACU } from './agent/agent-placeholder-resolver
 import { resolveAgentReadToken_ACU } from './agent/agent-placeholder-resolver';
 import { runAgentSearch_ACU } from './agent/agent-search';
 import type { AgentToolCall_ACU } from './agent/agent-model';
-import { loadAgentWorldbookSnapshot_ACU } from './agent/agent-worldbook-read';
+import { loadContinuationWorldbookSnapshot_ACU } from './agent/agent-worldbook-read';
 import {
   ContinuationValidationError_ACU,
   createContinuationError_ACU,
@@ -77,7 +77,7 @@ const OUTLINE_WORLDBOOK_TOOL_ROUNDS_ACU = 4;
 
 /** 大纲只能读已启用目录里的世界书地址，或在世界书域里按关键词搜索。 */
 export async function runOutlineWorldbookTools_ACU(calls: readonly AgentToolCall_ACU[]): Promise<string> {
-  const snapshot = await loadAgentWorldbookSnapshot_ACU();
+  const snapshot = await loadContinuationWorldbookSnapshot_ACU();
   const context = { worldbook: snapshot } as AgentResolveContext_ACU;
   const sections: string[] = [];
   for (const call of calls) {

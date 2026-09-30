@@ -41,6 +41,7 @@ import { getContinuationHostGenerationBridge_ACU } from '../../service/continuat
 import { getContinuationRuntime_ACU } from '../../service/continuation/continuation-runtime';
 import { bindWorldSimulationInternalAiGenerationStarted_ACU, consumeWorldSimulationInternalAiGenerationEnded_ACU, hasWorldSimulationInternalAiInflight_ACU } from '../../service/simulation/simulation-internal-ai-events';
 import { createWorldSimulationCompletionIntentForCurrentChat_ACU, getWorldSimulationRuntime_ACU } from '../../service/simulation/simulation-runtime';
+import { autoEnableFlightModeForNewChatIfNeeded_ACU } from '../../service/fill-mode/fill-mode-auto-enable';
 
 // [从 state-manager.ts 搬入 presentation 层] 安装发送意图捕捉钩子（DOM 事件绑定）
 async function ensureInitialSeedCheckpointBeforeGeneration_ACU(reason: string, { allowPendingFirstUserMessage = true } = {}) {
@@ -358,6 +359,22 @@ export   function mainInitialize_ACU() {
                     } catch (e: any) {
                         logError_ACU(`[SQLite] CHAT_CHANGED: 数据库重建失败: ${e?.message}`);
                     }
+                }
+            }
+
+            // 新对话（无表格数据）自动启用经典表格；必须在表格数据刷新之后、且刷新未降级时执行。
+            if (refreshResult && !refreshResult.degraded
+                && (!scheduledChatIdentifier_ACU || currentChatFileIdentifier_ACU === scheduledChatIdentifier_ACU)) {
+                try {
+                    const autoEnable = await autoEnableFlightModeForNewChatIfNeeded_ACU();
+                    if (autoEnable.attempted && !autoEnable.result.ok) {
+                        showUiSurfaceToast_ACU({
+                            kind: 'warning',
+                            text: `新对话自动启用经典表格失败（${autoEnable.result.reason || 'unknown'}），本轮沿用旧填表方案。`,
+                        });
+                    }
+                } catch (autoEnableError) {
+                    logWarn_ACU('[填表模式] 新对话自动启用经典表格异常，本轮沿用旧填表方案:', autoEnableError);
                 }
             }
 

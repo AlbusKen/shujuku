@@ -13,7 +13,7 @@ import { rebuildCurrentSummaryVectorIndexNow_ACU } from '../../service/vector/su
 import { isSummaryVectorIndexSourceTextOutdated_ACU, type SummaryVectorIndexArchiveResult_ACU } from '../../service/vector/summary-vector-index-archive-service';
 import { getLatestSummaryVectorIndexSnapshotState_ACU } from '../../service/vector/summary-vector-index-state-service';
 import { validateSummaryVectorIndexConfig_ACU } from '../../service/vector/vector-memory-config';
-import { globalMeta_ACU } from '../../data/repositories/profile-repo';
+import { isVectorPipelineEnabledForCurrentChat_ACU } from '../../service/fill-mode/fill-mode-gate';
 import { showToastr_ACU } from '../theme/toast';
 
 const SUMMARY_VECTOR_REBUILD_REQUIRED_REASONS_ACU = new Set([
@@ -99,7 +99,7 @@ let backgroundSourceTextRebuildInFlight_ACU = false;
  */
 export async function rebuildOutdatedSummaryVectorIndexInBackground_ACU(): Promise<boolean> {
   if (backgroundSourceTextRebuildInFlight_ACU) return false;
-  if (globalMeta_ACU?.summaryVectorIndexModeGlobal !== true) return false;
+  if (!isVectorPipelineEnabledForCurrentChat_ACU()) return false;
   const snapshot = getLatestSummaryVectorIndexSnapshotState_ACU();
   const state = snapshot?.summaryVectorIndexState || null;
   if (!state || !isSummaryVectorIndexSourceTextOutdated_ACU(state)) return false;

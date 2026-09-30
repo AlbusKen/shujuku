@@ -43,17 +43,17 @@ afterEach(() => {
 });
 
 describe('router-store · pageRegistry 基线', () => {
-  it('注册表恰好 15 项，分布于 5 分组', async () => {
+  it('注册表恰好 14 项，分布于 5 分组', async () => {
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
-    expect(r.pageRegistry.length).toBe(15);
+    expect(r.pageRegistry.length).toBe(14);
     const byGroup = r.pageRegistry.reduce<Record<string, number>>((acc, p) => {
       acc[p.group] = (acc[p.group] || 0) + 1;
       return acc;
     }, {});
     expect(byGroup).toEqual({
-      overview: 2,
+      overview: 1,
       config: 5,
       feature: 5,
       tool: 2,
@@ -67,7 +67,7 @@ describe('router-store · pageRegistry 基线', () => {
     const r = m.router.useRouterStore();
 
     expect(r.pageRegistry.map(p => [p.id, p.title, p.group])).toEqual([
-      ['basic-config', '基础配置', 'overview'],
+
       ['dashboard', '仪表盘', 'overview'],
       ['form-fill', '填表工作台', 'config'],
       ['table', '填表规则', 'config'],
@@ -87,21 +87,23 @@ describe('router-store · pageRegistry 基线', () => {
 });
 
 describe('router-store · 基础模式默认可见性', () => {
-  it('未持久化时默认进入基础配置页，sidebar 只显示基础配置', async () => {
+  it('未持久化时默认进入填表工作台，基础档显示日常配置', async () => {
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
-    expect(r.activePageId).toBe('basic-config');
-    expect(r.visiblePages.map(p => p.id)).toEqual(['basic-config']);
-    expect(r.visiblePagesByGroup.overview.map(p => p.id)).toEqual(['basic-config']);
+    expect(r.activePageId).toBe('form-fill');
+    expect(r.visiblePages.map(p => p.id)).toEqual(['dashboard', 'form-fill', 'api']);
+    expect(r.visiblePagesByGroup.overview.map(p => p.id)).toEqual(['dashboard']);
   });
 
-  it('基础模式拒绝切到高手模式页面', async () => {
+  it('基础模式拒绝切到进阶页面，但允许 API 配置', async () => {
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
+    r.setActivePage('table');
+    expect(r.activePageId).toBe('form-fill');
     r.setActivePage('api');
-    expect(r.activePageId).toBe('basic-config');
+    expect(r.activePageId).toBe('api');
   });
 });
 
@@ -290,11 +292,13 @@ describe('router-store · 高手模式可见性', () => {
 });
 
 describe('router-store · 切页 + 持久化', () => {
-  it('未持久化时默认页是 basic-config', async () => {
+  it('旧 basic-config 路由恢复到填表工作台且不隐式升档', async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ router: { activePageId: 'basic-config' } }));
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
-    expect(r.activePageId).toBe('basic-config');
+    expect(r.activePageId).toBe('form-fill');
+    expect(r.visiblePages.map(p => p.id)).toEqual(['dashboard', 'form-fill', 'api']);
   });
 
   it('高手模式未持久化路由时默认页是 dashboard', async () => {
@@ -435,7 +439,7 @@ describe('router-store · 崩溃哨兵', () => {
     expect(persisted.router.bootPending).toBe(true);
   });
 
-  it('上次页面未完成绘制时基础模式回退到 basic-config', async () => {
+  it('上次页面未完成绘制时基础模式回退到填表工作台', async () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       uiMode: { mode: 'basic' },
       router: { activePageId: 'basic-config', bootPending: true },
@@ -443,7 +447,7 @@ describe('router-store · 崩溃哨兵', () => {
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
-    expect(r.activePageId).toBe('basic-config');
+    expect(r.activePageId).toBe('form-fill');
   });
 
   it('markBootComplete 仅在 generation 匹配时清除 bootPending', async () => {

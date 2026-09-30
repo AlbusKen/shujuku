@@ -21,7 +21,7 @@ import {
 } from './agent/agent-placeholder-resolver';
 import { readAgentModuleSnapshot_ACU, renderAgentChronology_ACU, renderAgentConstraints_ACU, renderAgentHooksByIds_ACU, renderAgentInfoGapByIds_ACU, renderAgentStoryArc_ACU } from './agent/agent-module-store';
 import { renderAgentUserRequirements_ACU } from './agent/agent-user-requirements';
-import { loadAgentWorldbookSnapshot_ACU, renderAgentWorldbookBrowseCatalog_ACU } from './agent/agent-worldbook-read';
+import { loadContinuationWorldbookSnapshot_ACU, renderAgentWorldbookBrowseCatalog_ACU } from './agent/agent-worldbook-read';
 import { createSillyTavernContinuationHostBridge_ACU } from './sillytavern-host-bridge';
 import { registerContinuationHostGenerationBridge_ACU } from './host-generation-bridge-registry';
 import { settings_ACU } from '../runtime/state-manager';
@@ -143,7 +143,7 @@ function buildResolvers_ACU(task: ContinuationTask_ACU, stage: ContinuationStage
   return {
     $ORIGIN_INSTRUCTION: () => task.originInstruction,
     $USER_REQUIREMENTS: () => renderAgentUserRequirements_ACU(readAgentModuleSnapshot_ACU(getChatArray_ACU()), task.originInstruction),
-    $1: async () => `${renderAgentWorldbookBrowseCatalog_ACU(await loadAgentWorldbookSnapshot_ACU())}\n写阶段标签之前，如需查阅，先输出 JSON：{"action":"read","reads":["$WORLDBOOK:书名:uid"]} 或 {"action":"search","query":"关键词","scope":["worldbook"]}。不要把设定全文写进标签。`,
+    $1: async () => `${renderAgentWorldbookBrowseCatalog_ACU(await loadContinuationWorldbookSnapshot_ACU())}\n写阶段标签之前，如需查阅，先输出 JSON：{"action":"read","reads":["$WORLDBOOK:书名:uid"]} 或 {"action":"search","query":"关键词","scope":["worldbook"]}。不要把设定全文写进标签。`,
     $STORY_OVERVIEW: () => renderAgentStoryOverview_ACU({ recallCodes: extractAgentRecallCodesFromChat_ACU(getChatArray_ACU()) }),
     $STORY_TAIL: storyTail,
     $STAGE_HISTORY: () => serializeStageHistory_ACU(task),
