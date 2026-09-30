@@ -1,6 +1,6 @@
 import type { WorldSimulationLedger_ACU } from '../model';
 import { relevanceGate_ACU } from '../relevance-gate';
-import { buildInUseWorldCatalog_ACU, catalogArchiveHints_ACU, sliceModuleCatalog_ACU, summarizeCandidatePatches_ACU } from '../world-catalog';
+import { buildInUseWorldCatalog_ACU, catalogArchiveHints_ACU, sliceModuleCatalog_ACU, summarizeCandidatePatches_ACU, worldLedgerRowsForAgent_ACU } from '../world-catalog';
 import type { WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
 import type { WorldSimulationPromptPlaceholder_ACU } from './agent-defaults';
 
@@ -69,9 +69,9 @@ export function createWorldSimulationPlaceholderResolvers_ACU(
             clock: ledger.clock,
             player: ledger.player,
             dimensions: ledger.dimensions,
-            seeds: ledger.seeds,
-            actors: ledger.actors,
-            rumors: ledger.rumors,
+            seeds: worldLedgerRowsForAgent_ACU('seeds', ledger.seeds),
+            actors: worldLedgerRowsForAgent_ACU('actors', ledger.actors),
+            rumors: worldLedgerRowsForAgent_ACU('rumors', ledger.rumors),
             chronicle: ledger.chronicle,
             chronicleOverview: ledger.chronicleOverview,
             guidance: ledger.guidance,

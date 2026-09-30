@@ -18,6 +18,7 @@ import { eventFingerprint_ACU } from './event-similarity';
 import { collectWorldSimulationLedgerViolations_ACU, validateWorldSimulationLedger_ACU } from './simulation-store';
 import { validateWorldSimulationGuidanceComposerSignals_ACU } from './agent/agent-protocol';
 import { WorldSimulationSqlViewError_ACU, materializeWorldSimulationLedgerSqlView_ACU, type WorldSimulationSqlArrayModule_ACU, type WorldSimulationSqlSingleton_ACU } from './simulation-ledger-sql-view';
+import { stampWorldActorTimelines_ACU } from './actor-timeline';
 
 const MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance', 'rumors', 'player'] as const;
 type Module_ACU = typeof MODULES_ACU[number];
@@ -304,7 +305,9 @@ function applyChronicle_ACU(
     if (!related.ok) fail_ACU(`${path}.relatedIds 必须是字符串数组`);
     const evidence = coerceWorldSimulationStringArray_ACU(item.evidenceRefs === undefined ? [] : item.evidenceRefs);
     if (!evidence.ok) fail_ACU(`${path}.evidenceRefs 必须是字符串数组`);
-    return { id, at, summary, relatedIds: related.value, evidenceRefs: evidence.value };
+    // 主角错过标记由维护 AI 判定；空串视为普通纪要。
+    const missedNote = typeof item.missedNote === 'string' && item.missedNote.trim() ? item.missedNote.trim() : null;
+    return { id, at, summary, relatedIds: related.value, evidenceRefs: evidence.value, missedNote };
   });
   return [...clone_ACU(retained), ...appended];
 }
@@ -670,6 +673,8 @@ export function applyWorldSimulationCandidatesDetailed_ACU(
     }
   }
 
+  // 行为开始/结束时间以本次提交的最终 clock 为准（批次一的时序推进已并入 next.clock）。
+  next.actors = stampWorldActorTimelines_ACU(validatedBase.actors, next.actors, next.clock);
   const problems = crossFieldProblems_ACU(next);
   const grouped = new Map<WorldSimulationLedgerModule_ACU, string[]>();
   for (const problem of problems) {
@@ -958,6 +963,7 @@ export function applyWorldSimulationFieldDomain_ACU(
       action === 'delete' ? { remove: [{ id, expectedRevision: values.expectedRevision, reason: values.reason }] }
         : { upsert: [{ id, ...values, expectedRevision: values.expectedRevision }] },
       `patch.${module}`, module, next.clock.day) as never;
+    if (module === 'actors') next.actors = stampWorldActorTimelines_ACU(ledger.actors, next.actors, next.clock);
   }
   if (!deferCrossValidation) {
     const problems = crossFieldProblems_ACU(next);

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildEmptyWorldSimulationLedger_ACU } from '../../../src/service/simulation/defaults';
-import type { WorldRumor_ACU, WorldSeed_ACU, WorldSimulationLedger_ACU, WorldSimulationTimelineEntry_ACU } from '../../../src/service/simulation/model';
+import type { WorldRumor_ACU, WorldSeed_ACU, WorldSimulationLedger_ACU } from '../../../src/service/simulation/model';
 import {
   buildWorldChronicleContrast_ACU,
   buildWorldMissedList_ACU,
@@ -32,16 +32,17 @@ describe('world simulation dynamics views', () => {
     });
   });
 
-  it('错过清单合并 swept 时间线与 retired/missed 种子', () => {
-    const timeline: WorldSimulationTimelineEntry_ACU[] = [
-      { id: 'run:swept', at: 't1', kind: 'swept', taskId: 'task', message: 'seed-miss' },
-      { id: 'run:committed', at: 't2', kind: 'committed', taskId: 'task' },
-    ];
+  it('错过清单只列维护 AI 标注 missedNote 的幕后纪要，不列清扫动作或退役种子', () => {
     const items = buildWorldMissedList_ACU(ledger({
-      seeds: [seed(), seed({ id: 'seed-ok', status: 'active', retiredReason: null })],
-    }), timeline);
-    expect(items.map(item => item.id)).toEqual(['run:swept', 'seed-miss']);
-    expect(items[1]).toMatchObject({ missedOutcome: '矿洞塌了', expiresAtDay: 10, source: 'seed' });
+      seeds: [seed()],
+      chronicle: [
+        { id: 'sweep:seed-miss:11', at: '第11日', summary: '[错过] 矿洞塌了', relatedIds: ['seed-miss'], evidenceRefs: [], missedNote: null },
+        { id: 'chr-11-1', at: '第11日', summary: '北岭矿洞塌方', relatedIds: ['seed-miss'], evidenceRefs: [], missedNote: '主角远在客栈，错过了救出矿工的最后机会' },
+        { id: 'chr-11-2', at: '第11日', summary: '商会换了掌柜', relatedIds: [], evidenceRefs: [], missedNote: '  ' },
+      ],
+    }));
+    expect(items.map(item => item.id)).toEqual(['chr-11-1']);
+    expect(items[0]).toMatchObject({ title: '北岭矿洞塌方', detail: '主角远在客栈，错过了救出矿工的最后机会', at: '第11日', relatedIds: ['seed-miss'] });
   });
 
   it('传闻队列按 status 分组：latent 倒计时，ripe 区分开放命中与闭关延迟', () => {

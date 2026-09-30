@@ -1,14 +1,19 @@
 <template>
   <nav :class="['acu-v2-sidebar', `acu-v2-sidebar--${variant}`]" aria-label="一级页导航">
     <div class="acu-v2-sidebar__brand">
-      <span class="acu-v2-sidebar__brand-mark" aria-hidden="true">SP</span>
+      <img
+        class="acu-v2-sidebar__brand-mark"
+        :src="brandImages[uiMode.tier]"
+        alt=""
+        aria-hidden="true"
+      />
       <span class="acu-v2-sidebar__brand-copy">
         <button
           type="button"
           class="acu-v2-sidebar__brand-title"
-          aria-label="SP·数据库 IX（连续点击五次打开功能档位设置）"
+          aria-label="龙血玄黄·数据库（连续点击五次打开功能档位设置）"
           @click="onBrandTitleClick"
-        >SP·数据库 IX</button>
+        >龙血玄黄·数据库</button>
         <span class="acu-v2-sidebar__brand-tag">{{ uiMode.modeLabel }}</span>
       </span>
     </div>
@@ -40,6 +45,9 @@
 
 <script setup lang="ts">
 import { onBeforeUnmount, ref } from 'vue';
+import lightBrandImage from '../assets/brand-modes/light.png';
+import mediumBrandImage from '../assets/brand-modes/medium.png';
+import highBrandImage from '../assets/brand-modes/high.jpg';
 import { acuClearTimeout, acuSetTimeout, type AcuTimerHandle } from '../bootstrap/host-env';
 import { useDialogStore } from '../stores/dialog-store';
 import { useRouterStore } from '../stores/router-store';
@@ -62,6 +70,11 @@ const emit = defineEmits<{
 const router = useRouterStore();
 const uiMode = useUiModeStore();
 const dialogStore = useDialogStore();
+const brandImages: Record<AcuUiTier, string> = {
+  low: lightBrandImage,
+  medium: mediumBrandImage,
+  high: highBrandImage,
+};
 const brandClickCount = ref(0);
 let brandClickTimer: AcuTimerHandle | undefined;
 
@@ -177,15 +190,10 @@ function setActivePage(pageId: string): void {
   width: var(--acu-space-850, 34px);
   height: var(--acu-space-850, 34px);
   flex: 0 0 var(--acu-space-850, 34px);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  display: block;
+  object-fit: cover;
   border-radius: var(--acu-radius-md);
-  background: var(--acu-accent);
-  color: var(--acu-on-accent);
-  font-size: var(--acu-font-size-caption, 11px);
-  font-weight: 700;
-  letter-spacing: 0.04em;
+  background: var(--acu-bg-2);
 }
 
 .acu-v2-sidebar__brand-copy {

@@ -25,7 +25,7 @@ const PACKAGE_VERSION = JSON.parse(readFileSync(join(__dirname, 'package.json'),
 const ACU_BUILD_VERSION = process.env.ACU_BUILD_VERSION || PACKAGE_VERSION;
 
 const USER_SCRIPT_BANNER = `// ==UserScript==
-// @name         SP·数据库 IX
+// @name         龙血玄黄·数据库
 // @namespace    http://tampermonkey.net/
 // @version      ${ACU_BUILD_VERSION}
 // @description  SillyTavern 数据库自动更新与交火模式索引管理脚本。
@@ -88,11 +88,24 @@ function createReplacePlugin() {
   });
 }
 
+function inlineImageAssets() {
+  return {
+    name: 'acu-inline-image-assets',
+    load(id) {
+      if (!/\.(png|jpe?g)$/i.test(id)) return null;
+      const mime = /\.png$/i.test(id) ? 'image/png' : 'image/jpeg';
+      const base64 = readFileSync(id).toString('base64');
+      return `export default ${JSON.stringify(`data:${mime};base64,${base64}`)};`;
+    },
+  };
+}
+
 const sharedPlugins = [
   nodeBuiltinsShim,
   createVuePlugin(),
   vueScriptTranspiler(),
   sfcStyleInjector(),
+  inlineImageAssets(),
   nodeResolve({
     browser: true,
     preferBuiltins: false,

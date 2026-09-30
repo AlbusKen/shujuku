@@ -163,6 +163,7 @@ import VisualizerSurface from "./surfaces/visualizer/VisualizerSurface.vue";
 import type { AcuV2ThemeId } from "./theme/theme-types";
 import { getAcuHostDocument } from "./bootstrap/host-document";
 import { acuClearTimeout, acuSetTimeout, type AcuTimerHandle } from "./bootstrap/host-env";
+import { ACU_PRODUCT_SHORT_NAME_ACU } from "../shared/product-brand";
 import {
   ACU_UI_SCALE_OPTIONS,
   useAppearanceStore,
@@ -195,7 +196,7 @@ let themeMenuCloseTimer: AcuTimerHandle | undefined;
 let mobileNavCloseTimer: AcuTimerHandle | undefined;
 
 const shellTitle = computed(() =>
-  visualizer.isActive ? "数据库编辑器" : router.activePage?.title || "SP·数据库 IX",
+  visualizer.isActive ? "数据库编辑器" : router.activePage?.title || ACU_PRODUCT_SHORT_NAME_ACU,
 );
 
 const uiScaleOptions = computed(() =>

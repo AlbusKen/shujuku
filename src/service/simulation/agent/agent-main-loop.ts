@@ -830,7 +830,7 @@ export class WorldSimulationMainLoop_ACU {
           transcript.push({ role: 'assistant', content: raw || '(empty)' }, {
             role: 'user', content: `${workflowFeedback}
 ${workflow.summary}
-资料维护未合格。请向用户说明缺口，或在用户要求维护资料时 delegate 对应角色。不要再次 open_round 同一批已升级的待修复项。`,
+资料维护未合格。你是和用户对话的主会话，要针对子代理反馈制定修缮方案，不要直接停下：逐条对照 pendingFixes 的模块、违规路径与原因，能修的 delegate 负责该模块的 specialist 定向修复，instruction 写明修哪条记录的哪一栏、依据哪段正文、不许做什么（例如已删除的条目不要重建）。证据不足、需要用户裁决或定向修复后仍失败时输出 block，unresolved 逐条写明缺口与建议。不要再次 open_round 同一批已升级的待修复项。`,
           });
           await flushDirectorHistory();
           workflowEscalation = { summary: workflow.summary, pendingFixes: workflow.pendingFixes };

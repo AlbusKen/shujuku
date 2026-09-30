@@ -7,7 +7,7 @@ export const THEME_DEFAULT_LIGHT: ACUTheme = {
     id: 'default-light',
     name: '浅色管理台',
     description: '默认浅色风格，细边框、弱阴影、蓝色主强调，适合日常使用',
-    author: 'SP·数据库 9.0',
+    author: '龙血玄黄·数据库',
     version: '1.0.0',
     colorScheme: 'light',
 

@@ -35,7 +35,7 @@ export function sweepWorldLedger_ACU(ledger: WorldSimulationLedger_ACU, settings
     seed.status = 'retired';
     seed.retiredReason = 'missed';
     seed.revision += 1;
-    next.chronicle.push({ id: `sweep:${seed.id}:${day}`, at: next.clock.storyTime, summary: `[错过] ${seed.missedOutcome ?? ''}`, relatedIds: [seed.id], evidenceRefs: [] });
+    next.chronicle.push({ id: `sweep:${seed.id}:${day}`, at: next.clock.storyTime, summary: `[错过] ${seed.missedOutcome ?? ''}`, relatedIds: [seed.id], evidenceRefs: [], missedNote: null });
     sweptSeedIds.push(seed.id);
   }
   for (const rumor of next.rumors) {

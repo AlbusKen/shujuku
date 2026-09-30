@@ -11,6 +11,7 @@ import { $popupInstance_ACU } from '../../state/ui-refs';
 import { renderOption_ACU } from '../../../shared/html-helpers';
 import { logError_ACU } from '../../../shared/utils';
 import { getCurrentVectorMemoryConfig_ACU } from '../../../service/vector/vector-memory-config';
+import { ACU_PRODUCT_NAME_ACU } from '../../../shared/product-brand';
 // V1 API 写权限已收敛到 service 层；此处仅保留事务式委托与 fail-closed 提示。
 import { saveApiPreset_ACU as serviceSaveApiPreset_ACU, deleteApiPreset_ACU as serviceDeleteApiPreset_ACU, setActivePresetForCurrentChat_ACU, saveCurrentConfigAsPreset_ACU } from '../../../service/settings/api-preset-service';
 /**
@@ -124,11 +125,11 @@ import { saveApiPreset_ACU as serviceSaveApiPreset_ACU, deleteApiPreset_ACU as s
   // [V1 收敛] API 配置写权限已迁移至 V2（service 层单一权威）。
   // 旧 popup 不再直接读写 settings_ACU.apiConfig；调用方应跳转 V2 配置面板。
   export function saveApiConfig_ACU() {
-    showToastr_ACU('warning', '旧UI的API配置编辑已停用，请使用 扩展菜单 → SP·数据库 IX 管理API配置。');
+    showToastr_ACU('warning', `旧UI的API配置编辑已停用，请使用 扩展菜单 → ${ACU_PRODUCT_NAME_ACU} 管理API配置。`);
   }
 
   export function clearApiConfig_ACU() {
-    showToastr_ACU('warning', '旧UI的API配置清除已停用，请使用 扩展菜单 → SP·数据库 IX 管理API配置。');
+    showToastr_ACU('warning', `旧UI的API配置清除已停用，请使用 扩展菜单 → ${ACU_PRODUCT_NAME_ACU} 管理API配置。`);
   }
 
   // --- [V1 收敛] API预设管理函数 ---

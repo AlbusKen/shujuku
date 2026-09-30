@@ -1,5 +1,5 @@
 export const WORLD_SIMULATION_SCHEMA_VERSION_ACU = 1 as const;
-export const WORLD_LEDGER_SCHEMA_VERSION_ACU = 5 as const;
+export const WORLD_LEDGER_SCHEMA_VERSION_ACU = 6 as const;
 export const WORLD_CHRONICLE_OVERVIEW_CAP_ACU = 512 as const;
 export const WORLD_CHRONICLE_HOT_WINDOW_ACU = 32 as const;
 export const WORLD_GUIDANCE_SIGNAL_MAX_CHARS_ACU = 80 as const;
@@ -52,6 +52,18 @@ export const WORLD_SEED_EXPOSE_POLICIES_ACU = ['on_collision', 'gradual', 'publi
 export type WorldSeedExposePolicy_ACU = typeof WORLD_SEED_EXPOSE_POLICIES_ACU[number];
 export const WORLD_ACTOR_LIFE_ACU = ['alive', 'missing', 'dead'] as const;
 export type WorldActorLife_ACU = typeof WORLD_ACTOR_LIFE_ACU[number];
+export const WORLD_ACTOR_LONG_TERM_STATUSES_ACU = ['ongoing', 'done', 'abandoned'] as const;
+export type WorldActorLongTermStatus_ACU = typeof WORLD_ACTOR_LONG_TERM_STATUSES_ACU[number];
+/** 人物经历上限：超出时从最早的经历开始覆盖。 */
+export const WORLD_ACTOR_EXPERIENCE_CAP_ACU = 30 as const;
+/** 注入子代理时每个人物只带最近若干条经历。 */
+export const WORLD_ACTOR_EXPERIENCE_INJECT_ACU = 20 as const;
+/** 人物行为：text/expectedDuration 由模型写；startedAtDay/startedAt 由程序按提交时的 clock 盖戳。 */
+export interface WorldActorAction_ACU { text: string; expectedDuration: string; startedAtDay: number | null; startedAt: string; }
+/** 长期行为：只有显式 done/abandoned 才会被程序归档为经历。 */
+export interface WorldActorLongTermAction_ACU extends WorldActorAction_ACU { status: WorldActorLongTermStatus_ACU; outcome: string | null; }
+/** 已结束的长期行为；startedAtDay 为 null 表示起始早于记录。 */
+export interface WorldActorExperience_ACU { text: string; expectedDuration: string; startedAtDay: number | null; startedAt: string; endedAtDay: number; endedAt: string; status: 'done' | 'abandoned'; outcome: string | null; }
 export const WORLD_RUMOR_STATUSES_ACU = ['latent', 'ripe', 'revealed', 'dead'] as const;
 export type WorldRumorStatus_ACU = typeof WORLD_RUMOR_STATUSES_ACU[number];
 export const WORLD_PLAYER_CONTACTS_ACU = ['open', 'secluded'] as const;
@@ -65,8 +77,9 @@ export interface WorldCollisionReport_ACU { playerRegion: string | null; playerC
 export interface WorldClock_ACU { day: number; slot: string; storyTime: string; precision: 'exact' | 'approximate' | 'unknown'; evidenceRefs: string[]; }
 export interface WorldDimension_ACU { id: string; name: string; kind: 'pressure' | 'growth'; value: number; trend: 'rising' | 'stable' | 'falling'; rationale: string; evidenceRefs: string[]; revision: number; }
 export interface WorldSeed_ACU { id: string; title: string; status: 'established' | 'incubating' | 'active' | 'converging' | 'resolved' | 'retired'; level: number; catalyst: string; visibility: 'hidden' | 'limited' | 'public'; actorIds: string[]; location: WorldLocationRef_ACU | null; expiresAtDay: number | null; missedOutcome: string | null; exposePolicy: WorldSeedExposePolicy_ACU; evidenceRefs: string[]; retiredReason: string | null; revision: number; }
-export interface WorldActor_ACU { id: string; name: string; interests: string[]; location: string; locationRef: WorldLocationRef_ACU | null; life: WorldActorLife_ACU; diedAtDay: number | null; deathSummary: string | null; resources: string[]; goals: string[]; constraints: string[]; informationSources: string[]; knownFacts: string[]; visibility: 'hidden' | 'limited' | 'public'; revision: number; }
-export interface WorldChronicleEntry_ACU { id: string; at: string; summary: string; relatedIds: string[]; evidenceRefs: string[]; }
+export interface WorldActor_ACU { id: string; name: string; interests: string[]; location: string; locationRef: WorldLocationRef_ACU | null; life: WorldActorLife_ACU; diedAtDay: number | null; deathSummary: string | null; resources: string[]; goals: string[]; constraints: string[]; informationSources: string[]; knownFacts: string[]; visibility: 'hidden' | 'limited' | 'public'; currentAction: WorldActorAction_ACU | null; longTermAction: WorldActorLongTermAction_ACU | null; experiences: WorldActorExperience_ACU[]; revision: number; }
+/** missedNote：维护 AI 判定为「主角错过的重要幕后事件」时写明错过了什么；普通纪要为 null。 */
+export interface WorldChronicleEntry_ACU { id: string; at: string; summary: string; relatedIds: string[]; evidenceRefs: string[]; missedNote: string | null; }
 export interface WorldChronicleOverviewRow_ACU { fingerprint: string; day: number; oneLine: string; archiveRef: string; }
 export interface WorldGuidance_ACU { signals: WorldGuidanceSignal_ACU[]; excludedFacts: string[]; evidenceRefs: string[]; }
 
@@ -135,8 +148,8 @@ export const WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU = {
   clock: ['day', 'slot', 'storyTime', 'precision', 'evidenceRefs'],
   dimensions: ['id', 'name', 'kind', 'value', 'trend', 'rationale', 'evidenceRefs', 'revision'],
   seeds: ['id', 'title', 'status', 'level', 'catalyst', 'visibility', 'actorIds', 'location', 'expiresAtDay', 'missedOutcome', 'exposePolicy', 'evidenceRefs', 'retiredReason', 'revision'],
-  actors: ['id', 'name', 'interests', 'location', 'locationRef', 'life', 'diedAtDay', 'deathSummary', 'resources', 'goals', 'constraints', 'informationSources', 'knownFacts', 'visibility', 'revision'],
-  chronicle: ['id', 'at', 'summary', 'relatedIds', 'evidenceRefs'],
+  actors: ['id', 'name', 'interests', 'location', 'locationRef', 'life', 'diedAtDay', 'deathSummary', 'resources', 'goals', 'constraints', 'informationSources', 'knownFacts', 'visibility', 'currentAction', 'longTermAction', 'experiences', 'revision'],
+  chronicle: ['id', 'at', 'summary', 'relatedIds', 'evidenceRefs', 'missedNote'],
   guidance: ['signals', 'excludedFacts', 'evidenceRefs'],
   rumors: ['id', 'fact', 'originDay', 'earliestRevealDay', 'channels', 'relatedActorIds', 'status', 'revealedAtDay', 'revision'],
 } as const;
@@ -201,8 +214,8 @@ export const WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU: Record<WorldSimulationLed
   clock: { fields: ['day', 'slot', 'storyTime', 'precision', 'evidenceRefs'], required: ['day', 'slot', 'storyTime', 'precision', 'evidenceRefs'], consistencyGroups: [] },
   dimensions: { fields: ['name', 'kind', 'value', 'trend', 'rationale', 'evidenceRefs', 'revision'], required: ['name', 'kind', 'value', 'trend', 'rationale', 'evidenceRefs'], consistencyGroups: [] },
   seeds: { fields: ['title', 'status', 'level', 'catalyst', 'visibility', 'actorIds', 'location', 'expiresAtDay', 'missedOutcome', 'exposePolicy', 'evidenceRefs', 'retiredReason', 'revision'], required: ['title', 'status', 'level', 'catalyst', 'visibility', 'location', 'evidenceRefs'], consistencyGroups: [['status', 'retiredReason']] },
-  actors: { fields: ['name', 'interests', 'location', 'locationRef', 'life', 'diedAtDay', 'deathSummary', 'resources', 'goals', 'constraints', 'informationSources', 'knownFacts', 'visibility', 'revision'], required: ['name', 'interests', 'location', 'goals', 'informationSources', 'knownFacts'], consistencyGroups: [['life', 'diedAtDay', 'deathSummary']] },
-  chronicle: { fields: ['at', 'summary', 'relatedIds', 'evidenceRefs'], required: ['summary'], consistencyGroups: [] },
+  actors: { fields: ['name', 'interests', 'location', 'locationRef', 'life', 'diedAtDay', 'deathSummary', 'resources', 'goals', 'constraints', 'informationSources', 'knownFacts', 'visibility', 'currentAction', 'longTermAction', 'revision'], required: ['name', 'interests', 'location', 'goals', 'informationSources', 'knownFacts'], consistencyGroups: [['life', 'diedAtDay', 'deathSummary']] },
+  chronicle: { fields: ['at', 'summary', 'relatedIds', 'evidenceRefs', 'missedNote'], required: ['summary'], consistencyGroups: [] },
   guidance: { fields: ['signals', 'excludedFacts', 'evidenceRefs'], required: ['signals', 'excludedFacts', 'evidenceRefs'], consistencyGroups: [] },
   rumors: { fields: ['fact', 'originDay', 'earliestRevealDay', 'channels', 'relatedActorIds', 'status', 'revealedAtDay', 'revision'], required: ['fact', 'originDay', 'channels'], consistencyGroups: [['originDay', 'earliestRevealDay'], ['status', 'revealedAtDay']] },
   player: { fields: ['location', 'locationUpdatedAtDay', 'regionVisits', 'contact', 'evidenceRefs'], required: ['location', 'locationUpdatedAtDay', 'regionVisits', 'contact', 'evidenceRefs'], consistencyGroups: [] },

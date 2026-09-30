@@ -60,6 +60,8 @@ function validateField_ACU(module: WorldSimulationLedgerModule_ACU, field: strin
   if (module === 'chronicle') {
     if (field === 'at' || field === 'summary') return text_ACU(value) ? { value: value.trim() } : { problem: `${path} 必须是非空字符串` };
     if (field === 'relatedIds') return Array.isArray(value) && value.every(text_ACU) ? { value: value.map(item => item.trim()) } : { problem: `${path} 必须是字符串数组` };
+    if (field === 'missedNote') return value === null || value === '' ? { value: null }
+      : text_ACU(value) ? { value: value.trim() } : { problem: `${path} 必须是字符串或 null` };
   }
   if (module === 'clock') {
     if (field === 'days') return Number.isInteger(value) && (value as number) >= 0 ? { value } : { problem: `${path} 必须是非负整数` };

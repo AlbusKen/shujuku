@@ -333,7 +333,7 @@ describe('WorldSimulationPage', () => {
     next.envelope.ledger = {
       ...next.envelope.ledger,
       clock: { day: 47, slot: '', storyTime: '第47日', precision: 'exact', evidenceRefs: [] },
-      chronicle: [{ id: 'death-north', at: '第12日', summary: '铁匠死于北岭', relatedIds: ['rumor-tax'], evidenceRefs: [] }],
+      chronicle: [{ id: 'death-north', at: '第12日', summary: '铁匠死于北岭', relatedIds: ['rumor-tax'], evidenceRefs: [], missedNote: '主角远在客栈，没能拦下进山的铁匠' }],
       rumors: [{
         id: 'rumor-tax', fact: '铁匠死在北岭', originDay: 12, earliestRevealDay: 17, channels: ['客栈'],
         relatedActorIds: [], status: 'revealed', revealedAtDay: 47, revision: 1,
@@ -368,14 +368,19 @@ describe('WorldSimulationPage', () => {
 
     button(host, '错过清单')!.click();
     await nextTick();
-    expect(host.textContent).toContain('矿洞塌了');
-    expect(host.textContent).toContain('seed-miss');
+    expect(host.textContent).toContain('主角远在客栈，没能拦下进山的铁匠');
+    expect(host.textContent).toContain('铁匠死于北岭');
+    // 错过清单卡片只来自 missedNote 纪要，不再出现「清扫」动作徽标（设置区的「错过清扫」开关不在此范围）。
+    const badges = Array.from(host.querySelectorAll('.acu-v2-ws-materials__badge')).map(item => item.textContent?.trim());
+    expect(badges).toContain('错过');
+    expect(badges).not.toContain('清扫');
 
     button(host, '风声')!.click();
     await nextTick();
     expect(host.textContent).toContain('接触状态：开放');
-    expect(host.textContent).toContain('铁匠死在北岭');
-    expect(host.textContent).toContain('得知日 第 47 天');
+    // 已得知的风声属于已结束条目：归档不显示，只给出计数。
+    expect(host.textContent).toContain('已得知 1 条');
+    expect(host.textContent).not.toContain('铁匠死在北岭');
   });
 
   it('世界动态非法值在页面内报错且不落盘', async () => {

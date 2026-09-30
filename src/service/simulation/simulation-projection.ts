@@ -4,6 +4,9 @@ const START_V1_ACU = '<!-- qrf-world-simulation-projection:v1:start -->';
 const END_V1_ACU = '<!-- qrf-world-simulation-projection:v1:end -->';
 const START_ACU = '<!-- qrf-world-simulation-projection:v2:start -->';
 const END_ACU = '<!-- qrf-world-simulation-projection:v2:end -->';
+/** 浏览器可渲染的隐藏容器：正文渲染时对读者隐藏，原文仍留在楼层里供后续续写读取。位于 v2 标记之内，剥离逻辑不变。 */
+const HIDDEN_OPEN_ACU = '<div hidden class="qrf-world-simulation-projection" style="display:none">';
+const HIDDEN_CLOSE_ACU = '</div>';
 const escape_ACU = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const OWNED_BLOCK_ACU = new RegExp(`(?:\\r?\\n)*(?:${escape_ACU(START_V1_ACU)}[\\s\\S]*?${escape_ACU(END_V1_ACU)}|${escape_ACU(START_ACU)}[\\s\\S]*?${escape_ACU(END_ACU)})(?:\\r?\\n)*`, 'g');
 const SECTION_ORDER_ACU: WorldGuidanceSignalVoice_ACU[] = ['encounter', 'rumor', 'ambient'];
@@ -24,7 +27,7 @@ export function buildWorldSimulationProjection_ACU(ledger: WorldSimulationLedger
     return items.length ? [`${SECTION_LABELS_ACU[voice]}\n${items.map(item => `- ${item}`).join('\n')}`] : [];
   });
   if (!sections.length) return null;
-  return `${START_ACU}\n<与此同时>\n${sections.join('\n')}\n</与此同时>\n${END_ACU}`;
+  return `${START_ACU}\n${HIDDEN_OPEN_ACU}\n<与此同时>\n${sections.join('\n')}\n</与此同时>\n${HIDDEN_CLOSE_ACU}\n${END_ACU}`;
 }
 
 /** Prompt-only view: never use this text for anchor identity or persistent content. */

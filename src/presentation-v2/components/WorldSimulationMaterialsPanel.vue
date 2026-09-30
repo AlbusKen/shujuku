@@ -38,6 +38,7 @@
       <p v-else class="acu-v2-ws-materials__meta">当前没有基线，也没有楼层增量。首次提交后会把账本增量写到冻结的 assistant 楼层。</p>
 
       <p v-if="!ledger || !ledgerGroups.some(group => group.items.length)" class="acu-v2-ws-materials__empty">账本还是空的。发送一条指令或等待正文生成完成后，首轮会建立局势刻度、伏线与人物谱。</p>
+      <p v-if="archivedNote" class="acu-v2-ws-materials__meta">{{ archivedNote }}</p>
       <details v-for="group in ledgerGroups" :key="group.key" class="acu-v2-ws-materials__block" open>
         <summary>{{ group.label }} · {{ group.items.length }} 条</summary>
         <p v-if="!group.items.length" class="acu-v2-ws-materials__empty">暂无记录。</p>
@@ -46,6 +47,12 @@
             <p class="acu-v2-ws-materials__card-head"><strong>{{ item.title }}</strong><span v-if="item.badge" class="acu-v2-ws-materials__badge">{{ item.badge }}</span></p>
             <p class="acu-v2-ws-materials__card-body">{{ item.detail }}</p>
             <p v-if="item.meta" class="acu-v2-ws-materials__card-meta">{{ item.meta }}</p>
+            <details v-if="item.timeline?.length" class="acu-v2-ws-materials__timeline">
+              <summary>经历时间线 · {{ item.timeline.length }} 条</summary>
+              <ol class="acu-v2-ws-materials__list">
+                <li v-for="(line, lineIndex) in item.timeline" :key="lineIndex">{{ line }}</li>
+              </ol>
+            </details>
           </article>
         </div>
       </details>
@@ -132,11 +139,12 @@
     </template>
 
     <template v-else-if="activeTab === 'missed'">
-      <p v-if="!missedItems.length" class="acu-v2-ws-materials__empty">当前没有错过的伏线或过期清扫记录。</p>
+      <p class="acu-v2-ws-materials__meta">由维护 AI 在整理幕后纪要时判定：主角因不在场、不知情或时机已过而错过的重要幕后事件。</p>
+      <p v-if="!missedItems.length" class="acu-v2-ws-materials__empty">目前没有主角错过的重要幕后事件。</p>
       <div v-else class="acu-v2-ws-materials__cards">
-        <article v-for="item in missedItems" :key="`${item.source}:${item.id}`" class="acu-v2-ws-materials__card">
-          <p class="acu-v2-ws-materials__card-head"><strong>{{ item.title }}</strong><span class="acu-v2-ws-materials__badge">{{ item.source === 'timeline' ? '清扫' : '错过' }}</span></p>
-          <p class="acu-v2-ws-materials__card-body">{{ item.detail || '暂无摘要' }}</p>
+        <article v-for="item in missedItems" :key="item.id" class="acu-v2-ws-materials__card">
+          <p class="acu-v2-ws-materials__card-head"><strong>{{ item.title }}</strong><span class="acu-v2-ws-materials__badge">错过</span></p>
+          <p class="acu-v2-ws-materials__card-body">{{ item.detail }}</p>
           <p class="acu-v2-ws-materials__card-meta">{{ missedMeta(item) }}</p>
         </article>
       </div>
@@ -146,6 +154,7 @@
       <p v-if="!rumorQueue" class="acu-v2-ws-materials__empty">当前没有可展示的风声。</p>
       <template v-else>
         <p class="acu-v2-ws-materials__meta">接触状态：{{ CONTACT_LABELS[rumorQueue.contact] ?? rumorQueue.contact }} · 当前位置：{{ rumorQueue.playerRegion || '未知' }}</p>
+        <p v-if="rumorQueue.revealed.length || rumorQueue.dead.length" class="acu-v2-ws-materials__meta">已结束的风声（已得知 {{ rumorQueue.revealed.length }} 条、已失效 {{ rumorQueue.dead.length }} 条）已归档，不在此显示。</p>
         <details v-for="group in rumorQueueGroups" :key="group.key" class="acu-v2-ws-materials__block" open>
           <summary>{{ group.label }} · {{ group.items.length }} 条</summary>
           <p v-if="!group.items.length" class="acu-v2-ws-materials__empty">暂无记录。</p>
@@ -173,16 +182,17 @@
         条目 {{ userRequirements.snapshot.requirements.length }} 条
       </p>
       <p v-if="userRequirements.diagnostics.length" class="acu-v2-ws-materials__error">{{ userRequirements.diagnostics.join('；') }}</p>
-      <p v-if="userRequirements.snapshot && !userRequirements.snapshot.requirements.length" class="acu-v2-ws-materials__empty">
+      <p v-if="!userRequirements.diagnostics.length && !userRequirements.snapshot?.requirements.length" class="acu-v2-ws-materials__empty">
         还没有用户要求条目。可点击新增标签手动添加。
       </p>
+      <!-- 合法为空（从未写过、也没有读取诊断）时允许写入首条；只有读取失败时锁定，避免覆盖损坏快照。 -->
       <UserRequirementsEditor
         editor-id="simulation"
         :items="requirementsDraft"
         :dirty="requirementsDirty"
         :error="requirementsError"
         :saving="requirementsSaving"
-        :disabled="busy || !userRequirements.snapshot || !!userRequirements.diagnostics.length"
+        :disabled="busy || !!userRequirements.diagnostics.length"
         @update:items="updateRequirementsDraft"
         @discard="discardRequirementsDraft"
         @save="saveRequirementsDraft"
@@ -197,7 +207,7 @@ import AcuButton from './_lib/AcuButton.vue';
 import UserRequirementsEditor from './UserRequirementsEditor.vue';
 import type { WorldSimulationAnchorIdentity_ACU, WorldSimulationConversationView_ACU, WorldSimulationMaterialsReadResult_ACU, WorldSimulationUserRequirementsReadResult_ACU } from '../../service/simulation/agent/agent-model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 import type { WorldSimulationSessionEntry_ACU } from '../../service/simulation/agent/agent-session-log'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
-import type { WorldSimulationLedger_ACU, WorldSimulationLedgerFieldSnapshot_ACU, WorldSimulationLedgerModule_ACU, WorldSimulationTimelineEntry_ACU } from '../../service/simulation/model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
+import type { WorldActorAction_ACU, WorldActorExperience_ACU, WorldSimulationLedger_ACU, WorldSimulationLedgerFieldSnapshot_ACU, WorldSimulationLedgerModule_ACU, WorldSimulationTimelineEntry_ACU } from '../../service/simulation/model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 import { worldSimulationAgentLabel_ACU } from '../copy/world-simulation-copy';
 import { buildWorldChronicleContrast_ACU, buildWorldMissedList_ACU, buildWorldRumorQueue_ACU, type WorldChronicleContrastRow_ACU, type WorldMissedItem_ACU, type WorldRumorQueueItem_ACU } from '../simulation/world-simulation-dynamics-views';
 
@@ -275,7 +285,8 @@ function discardRequirementsDraft(): void {
 }
 
 async function saveRequirementsDraft(): Promise<void> {
-  if (!requirementsDirty.value || requirementsSaving.value || props.busy || !props.userRequirements.snapshot) return;
+  // 与编辑器禁用条件同源：读取失败时拒绝写入；合法为空时允许写入首份快照。
+  if (!requirementsDirty.value || requirementsSaving.value || props.busy || props.userRequirements.diagnostics.length) return;
   const payload = requirementsDraft.value.map(item => item.trim());
   if (payload.some(item => !item || item.length > 8000)) {
     requirementsError.value = '每条要求不能为空或超过 8000 字；请修改或删除空标签。';
@@ -329,7 +340,32 @@ const VISIBILITY_LABELS: Record<string, string> = { hidden: '幕后', limited: '
 const TREND_LABELS: Record<string, string> = { rising: '上升', stable: '平稳', falling: '下降' };
 const DIMENSION_KIND_LABELS: Record<string, string> = { pressure: '压力', growth: '生长' };
 
-interface LedgerCard { id: string; title: string; detail: string; badge?: string; meta?: string }
+interface LedgerCard { id: string; title: string; detail: string; badge?: string; meta?: string; timeline?: string[] }
+
+function actionText(action: WorldActorAction_ACU | null | undefined): string {
+  return action ? `${action.text}（预计 ${action.expectedDuration || '未定'}）` : '无';
+}
+
+function dayText(day: number | null, story: string): string {
+  return day === null ? '起始不详（早于记录）' : `第 ${day} 日${story ? `（${story}）` : ''}`;
+}
+
+function experienceLine(item: WorldActorExperience_ACU): string {
+  const span = item.startedAtDay === null ? '' : ` · 历时 ${Math.max(0, item.endedAtDay - item.startedAtDay)} 日`;
+  const result = item.outcome
+    ? ` · ${item.status === 'done' ? '结果' : '中止原因'}：${item.outcome}`
+    : item.status === 'abandoned' ? ' · 已中止' : '';
+  return `${dayText(item.startedAtDay, item.startedAt)} → ${dayText(item.endedAtDay, item.endedAt)}${span} · ${item.text}${result}`;
+}
+
+/** 已结束的伏线与已故人物归档隐藏；账本与注入给 AI 的视图仍保留并标注「已结束」。 */
+const archivedNote = computed(() => {
+  const ledger = props.ledger;
+  if (!ledger) return '';
+  const seeds = ledger.seeds.filter(item => item.status === 'resolved' || item.status === 'retired').length;
+  const actors = ledger.actors.filter(item => item.life === 'dead').length;
+  return seeds || actors ? `已结束的伏线 ${seeds} 条、已故人物 ${actors} 位已归档，不在此显示。` : '';
+});
 
 const ledgerGroups = computed<Array<{ key: string; label: string; items: LedgerCard[] }>>(() => {
   const ledger = props.ledger;
@@ -346,7 +382,7 @@ const ledgerGroups = computed<Array<{ key: string; label: string; items: LedgerC
     },
     {
       key: 'seeds', label: '伏线',
-      items: ledger.seeds.map(item => ({
+      items: ledger.seeds.filter(item => item.status !== 'resolved' && item.status !== 'retired').map(item => ({
         id: item.id, title: item.title,
         badge: `${SEED_STATUS_LABELS[item.status] ?? item.status} · L${item.level} · ${VISIBILITY_LABELS[item.visibility] ?? item.visibility}`,
         detail: item.catalyst || '暂无催化条件',
@@ -355,12 +391,13 @@ const ledgerGroups = computed<Array<{ key: string; label: string; items: LedgerC
     },
     {
       key: 'actors', label: '人物谱',
-      items: ledger.actors.map(item => ({
+      items: ledger.actors.filter(item => item.life !== 'dead').map(item => ({
         id: item.id, title: item.name,
         badge: VISIBILITY_LABELS[item.visibility] ?? item.visibility,
-        // 正在做什么与预计耗时是本轮推演最需要看到的，放在首行；认知只作背景，压到次要行。
-        detail: `在做：${item.goals.join('；') || '无'} · 位置：${item.location || '未知'}`,
-        meta: `关注：${item.interests.join('、') || '无'} · 认知：${item.knownFacts.join('、') || '无'}`,
+        // 当前与长期行为（含预计持续时间）放首行；打算、关注与认知压到次要行，经历折叠。
+        detail: `在做：${actionText(item.currentAction)} · 长期：${actionText(item.longTermAction)} · 位置：${item.location || '未知'}`,
+        meta: `打算：${item.goals.join('；') || '无'} · 关注：${item.interests.join('、') || '无'} · 认知：${item.knownFacts.join('、') || '无'}`,
+        timeline: (item.experiences ?? []).map(experienceLine),
       })),
     },
     {
@@ -420,16 +457,15 @@ function formatTimestamp(value: number): string {
 }
 
 const chronicleRows = computed(() => (props.ledger ? buildWorldChronicleContrast_ACU(props.ledger) : []));
-const missedItems = computed(() => (props.ledger ? buildWorldMissedList_ACU(props.ledger, props.timeline) : []));
+const missedItems = computed(() => (props.ledger ? buildWorldMissedList_ACU(props.ledger) : []));
 const rumorQueue = computed(() => (props.ledger ? buildWorldRumorQueue_ACU(props.ledger) : null));
 const rumorQueueGroups = computed(() => {
   const queue = rumorQueue.value;
   if (!queue) return [];
+  // 已得知与已失效的风声属于已结束条目，归档不显示。
   return [
     { key: 'latent', label: '潜伏', items: queue.latent },
     { key: 'ripe', label: '待命', items: queue.ripe },
-    { key: 'revealed', label: '已得知', items: queue.revealed },
-    { key: 'dead', label: '已失效', items: queue.dead },
   ];
 });
 
@@ -440,10 +476,9 @@ function chronicleMeta(row: WorldChronicleContrastRow_ACU): string {
 }
 
 function missedMeta(item: WorldMissedItem_ACU): string {
-  const parts: string[] = [];
-  if (item.expiresAtDay !== null) parts.push(`过期日 第 ${item.expiresAtDay} 天`);
-  if (item.missedOutcome) parts.push(item.missedOutcome);
-  return parts.join(' · ') || '过期清扫';
+  const parts = [`发生于 ${item.at}`];
+  if (item.relatedIds.length) parts.push(`关联 ${item.relatedIds.join('、')}`);
+  return parts.join(' · ');
 }
 
 function rumorMeta(item: WorldRumorQueueItem_ACU): string {
@@ -488,6 +523,8 @@ function rumorMeta(item: WorldRumorQueueItem_ACU): string {
 .acu-v2-ws-materials__json > summary { cursor: pointer; color: var(--acu-text-1); font-size: var(--acu-font-size-body, 12px); }
 .acu-v2-ws-materials__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .acu-v2-ws-materials__list { margin: 0; padding-left: 18px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); }
+.acu-v2-ws-materials__timeline { display: grid; gap: 4px; }
+.acu-v2-ws-materials__timeline > summary { cursor: pointer; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); }
 .acu-v2-ws-materials__projection { max-height: 320px; overflow: auto; margin: 0; padding: 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; background: var(--acu-bg-2); color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word; }
 .acu-v2-ws-materials__diagnostics { margin: 0; padding: 10px 10px 10px 28px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 20%, transparent); border-radius: 7px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); }
 @media (max-width: 640px) {

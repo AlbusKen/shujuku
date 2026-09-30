@@ -10,6 +10,7 @@ plans/
 specs/
 /*.md
 /*.txt
+/素材/
 
 # Node.js
 node_modules/

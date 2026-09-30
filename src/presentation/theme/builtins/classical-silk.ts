@@ -7,7 +7,7 @@ export const THEME_CLASSICAL_SILK: ACUTheme = {
     id: 'classical-silk',
     name: '古典·素纱',
     description: '淡雅浅色纱质感，暖褐色调，宋体排版',
-    author: 'SP·数据库 9.0',
+    author: '龙血玄黄·数据库',
     version: '1.0.0',
     colorScheme: 'light',
 

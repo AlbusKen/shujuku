@@ -25,7 +25,9 @@ export const WORLD_SIMULATION_PROMPT_VERSION_V26_ACU = 'world-simulation-v26';
 export const WORLD_SIMULATION_PROMPT_VERSION_V27_ACU = 'world-simulation-v27';
 export const WORLD_SIMULATION_PROMPT_VERSION_V28_ACU = 'world-simulation-v28';
 export const WORLD_SIMULATION_PROMPT_VERSION_V29_ACU = 'world-simulation-v29';
-export const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V29_ACU;
+export const WORLD_SIMULATION_PROMPT_VERSION_V30_ACU = 'world-simulation-v30';
+export const WORLD_SIMULATION_PROMPT_VERSION_V31_ACU = 'world-simulation-v31';
+export const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V31_ACU;
 export const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'] as const;
 export type WorldSimulationEngineSeam_ACU = typeof WORLD_SIMULATION_ENGINE_SEAMS_ACU[number];
 export type WorldSimulationAgentPrompts_ACU = Record<WorldSimulationAgentName_ACU, WorldSimulationPromptSegment_ACU[]>;
@@ -251,7 +253,23 @@ function alignThinkPrefillProtocol_ACU(content: string): string {
 }
 
 export function worldSimulationDirectorRuntimeProtocolInstruction_ACU(): string {
-  return alignThinkPrefillProtocol_ACU(applyWorldSimulationNativeToolPrompt_ACU('world-director', worldSimulationDirectorProtocolInstruction_ACU())).replace(/<UNTRUSTED_READ_BUDGET>[\s\S]*?<\/UNTRUSTED_READ_BUDGET>/g, '<UNTRUSTED_READ_BUDGET>阅读预算见本轮运行时快照。</UNTRUSTED_READ_BUDGET>');
+  return alignThinkPrefillProtocol_ACU(applyWorldSimulationNativeToolPrompt_ACU('world-director', worldSimulationDirectorProtocolInstructionV31_ACU())).replace(/<UNTRUSTED_READ_BUDGET>[\s\S]*?<\/UNTRUSTED_READ_BUDGET>/g, '<UNTRUSTED_READ_BUDGET>阅读预算见本轮运行时快照。</UNTRUSTED_READ_BUDGET>');
+}
+
+/** v31 导演改写：工作流升级后针对子代理反馈制定修缮方案并定向派工，而不是直接阻断。冻结协议与 v21/v30 构造器不变。 */
+const V31_DIRECTOR_DELEGATE_OLD_ACU = '仅当用户明确要求维护某份资料时才 delegate 给对应 specialist。';
+const V31_DIRECTOR_DELEGATE_NEW_ACU = '用户明确要求维护某份资料，或工作流升级后需要按修缮方案定向修复某个模块时，delegate 给负责该模块的 specialist；instruction 写明修哪条记录的哪一栏、依据哪段正文、不许做什么。';
+const V31_DIRECTOR_WORKFLOW_OLD_ACU = '工作流未合格且用户本轮没有新指令时，只输出 {"action":"block","reason":"资料维护失败","unresolved":["模块: 原因"]}；逐条列出 pendingFixes，不输出自然语言。';
+const V31_DIRECTOR_WORKFLOW_NEW_ACU = '工作流未合格时，你是和用户对话的主会话，负责针对子代理反馈制定修缮方案：逐条对照 pendingFixes 的模块、违规路径与原因，能修的 delegate 负责该模块的 specialist 定向修复（instruction 写明修哪条、依据哪段正文、不许做什么，例如已删除的条目不要重建），不对同批缺口再开相同工作流；证据不足、需要用户裁决或定向修复后仍失败时，输出 {"action":"block","reason":"资料维护失败","unresolved":["模块: 原因与建议"]}，逐条列出缺口与建议。';
+
+/** 冻结基线漂移必须暴露：替换目标缺失时抛错，不能静默产出与旧版相同的正文。 */
+function rewriteV31DirectorText_ACU(content: string, from: string, to: string): string {
+  if (!content.includes(from)) throw new Error('world-director v31 改写基线漂移');
+  return content.replace(from, () => to);
+}
+
+export function worldSimulationDirectorProtocolInstructionV31_ACU(): string {
+  return rewriteV31DirectorText_ACU(worldSimulationDirectorProtocolInstruction_ACU(), V31_DIRECTOR_DELEGATE_OLD_ACU, V31_DIRECTOR_DELEGATE_NEW_ACU);
 }
 
 export function worldSimulationSpecialistRuntimeProtocolInstruction_ACU(
@@ -886,6 +904,76 @@ export function buildV29WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgen
     : buildV21WorldSimulationAgentPrompt_ACU(name);
 }
 
+function replaceOnceV30_ACU(text: string, search: string, replacement: string): string {
+  if (!text.includes(search)) throw new Error('WORLD_SIMULATION_V30_PROMPT_BASE_DRIFT');
+  return text.replace(search, () => replacement);
+}
+
+/** v30 共用问答第 4 组：行为拆成短期/长期并带预计持续时间，认知改为与当前剧情相关的覆盖式快照。 */
+const ACTION_QA_ANSWER_V30_ACU = [
+  `每个在场或本轮有动向的人物，我分两栏写行为，两栏都要带预计持续时间：current_action 是此刻这个剧情时间点他正在做的事，写成 {"text":"在客栈盯着往来客商","expected_duration":"今夜之内"}；long_term_action 是这一段时间里他主要在忙的事，写成 {"text":"护送粮车南下","expected_duration":"约三日","status":"ongoing"}。开始时间不用我写，程序按提交时的时序自动盖戳。`,
+  `下一轮我拿时间跨度结算：短期动作做完或被打断，就换成新的当前动作；长期事务达成或到期，把 status 改为 done 并用 outcome 写一句结果，被迫中止就改为 abandoned 并写明原因。只有显式写了 done 或 abandoned，程序才会把它归档进这个人的经历时间线并记下起止时间；只是改写措辞或调整预计时长时，status 保持 ongoing。行为变化后位置与资源同步跟上——人在赶路就不该还挂在原地。goals 只写长远打算，不再塞当前动作。`,
+  `认知是覆盖式的当前快照，不是日记：known_facts 每次整列重写，只保留和当前正文剧情直接相关、会左右他接下来行动的几条（一般不超过五条）；已经过时、已经落地、与眼下剧情无关的旧认知直接删掉，不因为“仍然成立”就留着。他做过的事、经历过的场面不写进认知，那些由经历时间线记录。`,
+].join('\n');
+
+function deliveryQaAnswerV30_ACU(): string {
+  return replaceOnceV30_ACU(ONE_SHOT_QA_V28_ACU[4].answer, '数组列整列替换，仍成立的旧内容要一并保留',
+    '数组列整列替换，仍成立的旧内容要一并保留（known_facts 例外：只写当前仍与剧情相关的认知，过时的直接删去）');
+}
+
+function dramatisAnswerV30_ACU(): string {
+  const lines = ONE_SHOT_ROLES_V28_ACU['dramatis-keeper'].answer.split('\n');
+  if (lines.length !== 7 || !lines[3].startsWith('在册人物逐个更新') || !lines[4].startsWith('认知')) throw new Error('WORLD_SIMULATION_V30_PROMPT_BASE_DRIFT');
+  lines[3] = `在册人物逐个更新：current_action 写他此刻正在做的事与预计持续时间，long_term_action 写这段时间的主要事务与预计持续时间（status 取 ongoing/done/abandoned）。本轮跨度内做完的短期动作换成新动作；长期事务达成或到期写 done 加 outcome，被迫中止写 abandoned 加原因，程序会据此把它归档成经历并记下起止时间。location 是地名文本（如 '江南府·客栈'），location_ref 是结构化 JSON，两者要和当前行动对得上——人在赶路就不能还挂在原地。goals 只写长远打算。场外人物我顺着动机、资源、约束和可用时间推演，有意图不等于已办成，没出场不等于失踪或死亡；与当前伏线、地点、期限有牵连的场外人物同样核查，不只维护玩家身边一两人。`;
+  lines[4] = `认知：known_facts 是覆盖式快照，每次整列重写，只写与当前正文剧情直接相关、会改变他接下来行动的认知，一般不超过五条；过时、已落地或与眼下剧情无关的旧认知直接删去，不为“仍然成立”而保留，也不把他做过的事写成认知。谁知道什么按渠道、距离和时间判断，读者知道的不等于人物知道；每条认知都要能对上 information_sources 里的具体渠道。`;
+  lines[6] = replaceOnceV30_ACU(lines[6], 'goals 第一条同样带上当前行动与预计耗时', 'current_action 与 long_term_action 一并写上、各带预计持续时间');
+  return lines.join('\n');
+}
+
+const DRAMATIS_ACK_V30_ACU = '只写人物谱、玩家与死亡伴生风声；新登场的当轮建档，行为分短期与长期并写明预计持续时间，认知只留与当前剧情相关的。';
+
+function guidanceAnswerV30_ACU(): string {
+  const lines = GUIDANCE_COMPOSER_V29_ACU.answer.split('\n');
+  if (lines.length !== 11 || !lines[2].startsWith('幕后纪要') || !lines[8].startsWith('大变局牵引')) throw new Error('WORLD_SIMULATION_V30_PROMPT_BASE_DRIFT');
+  lines[2] = `${lines[2]}其中若某件幕后事件与主角切身相关、分量足以改变他的处境或选择，而主角因为不在场、不知情或时机已过而错过了它，就在这条纪要的 missed_note 里写明主角错过了什么、错过会带来什么；普通的幕后变化不写 missed_note。程序清扫留下的「[错过] …」纪要只是期限到期的机械记录，算不算主角错过的重要事件由我判断，重要时另写一条带 missed_note 的纪要，不重复记同一件事。完整纪要写入后不能修改，missed_note 必须在 INSERT 时一起写。`;
+  lines.splice(9, 0, `错过事件的蛛丝马迹：带 missed_note 的纪要也是世界里真实发生过的事。若主角眼下所在或接触的人与它有牵连、消息来得及传到，可以留一条信号给续写者，借残留痕迹、旁人一句闲话或迟到的消息点出一点端倪，不把真相说破；sourceId 用那条纪要的 ID 或它关联的伏线、人物 ID（本轮新写的纪要改用关联 ID）。没有合理渠道就不写，不为留线索硬造。`);
+  return lines.join('\n');
+}
+
+/**
+ * v30：以冻结的 v29 为底逐段替换——共用问答第 4、5 组（行为与认知、交付），dramatis-keeper 角色自述与确认，
+ * guidance-composer 角色自述（错过事件判定与线索）。段序段数与 v29 一致，迁移按问答轮序号映射；未全部命中即抛错。
+ */
+export function buildV30OneShotWorldSimulationAgentPrompt_ACU(name: WorldSimulationOneShotRole_ACU): WorldSimulationPromptSegment_ACU[] {
+  const segments = buildV29OneShotWorldSimulationAgentPrompt_ACU(name);
+  const ack = (text: string): string => `${worldSimulationSeamMarker_ACU('ACKNOWLEDGEMENT')}\n已理解：${text}`;
+  const replacements = new Map<string, string>([
+    [ONE_SHOT_QA_V28_ACU[3].answer, ACTION_QA_ANSWER_V30_ACU],
+    [ONE_SHOT_QA_V28_ACU[4].answer, deliveryQaAnswerV30_ACU()],
+  ]);
+  if (name === 'dramatis-keeper') {
+    replacements.set(ONE_SHOT_ROLES_V28_ACU['dramatis-keeper'].answer, dramatisAnswerV30_ACU());
+    replacements.set(ack(ONE_SHOT_ROLES_V28_ACU['dramatis-keeper'].ack), ack(DRAMATIS_ACK_V30_ACU));
+  }
+  if (name === 'guidance-composer') replacements.set(GUIDANCE_COMPOSER_V29_ACU.answer, guidanceAnswerV30_ACU());
+  let hits = 0;
+  const next = segments.map(segment => {
+    const content = replacements.get(segment.content);
+    if (content === undefined) return segment;
+    hits += 1;
+    return { ...segment, content };
+  });
+  if (hits !== replacements.size) throw new Error('WORLD_SIMULATION_V30_PROMPT_BASE_DRIFT');
+  return next;
+}
+
+/** v30 全体角色入口；非一次性角色仍沿用 v21 默认。 */
+export function buildV30WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
+  return (ONE_SHOT_ROLES_ACU as readonly string[]).includes(name)
+    ? buildV30OneShotWorldSimulationAgentPrompt_ACU(name as WorldSimulationOneShotRole_ACU)
+    : buildV21WorldSimulationAgentPrompt_ACU(name);
+}
+
 
 
 export function buildV20WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
@@ -909,9 +997,19 @@ export function buildV21WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgen
     : segment);
 }
 
+/** v31 全体角色入口：导演的 PROTOCOL/WORKFLOW 两段改为定向修缮；其余角色与 v30 相同。 */
+export function buildV31WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
+  const segments = buildV30WorldSimulationAgentPrompt_ACU(name);
+  if (name !== 'world-director') return segments;
+  return segments.map(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW'))
+    ? { ...segment, content: rewriteV31DirectorText_ACU(segment.content, V31_DIRECTOR_WORKFLOW_OLD_ACU, V31_DIRECTOR_WORKFLOW_NEW_ACU) }
+    : segment.content.startsWith(worldSimulationSeamMarker_ACU('PROTOCOL'))
+      ? { ...segment, content: rewriteV31DirectorText_ACU(segment.content, V31_DIRECTOR_DELEGATE_OLD_ACU, V31_DIRECTOR_DELEGATE_NEW_ACU) }
+      : segment);
+}
+
 export function buildDefaultWorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
-  if ((ONE_SHOT_ROLES_ACU as readonly string[]).includes(name)) return buildV29OneShotWorldSimulationAgentPrompt_ACU(name as WorldSimulationOneShotRole_ACU);
-  return buildV21WorldSimulationAgentPrompt_ACU(name);
+  return buildV31WorldSimulationAgentPrompt_ACU(name);
 }
 
 export function buildDefaultWorldSimulationAgentPrompts_ACU(): WorldSimulationAgentPrompts_ACU {
@@ -1107,6 +1205,8 @@ export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
     { version: WORLD_SIMULATION_PROMPT_VERSION_V26_ACU, fingerprint: promptFingerprint_ACU(buildV26WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_V27_ACU, fingerprint: promptFingerprint_ACU(buildV27WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_V28_ACU, fingerprint: promptFingerprint_ACU(buildV28WorldSimulationAgentPrompt_ACU(name)) },
+    { version: WORLD_SIMULATION_PROMPT_VERSION_V29_ACU, fingerprint: promptFingerprint_ACU(buildV29WorldSimulationAgentPrompt_ACU(name)) },
+    { version: WORLD_SIMULATION_PROMPT_VERSION_V30_ACU, fingerprint: promptFingerprint_ACU(buildV30WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildDefaultWorldSimulationAgentPrompt_ACU(name)) },
   ]]),
 ) as unknown as Record<WorldSimulationAgentName_ACU, readonly { version: string; fingerprint: string }[]>;
@@ -1158,7 +1258,7 @@ export function migrateWorldSimulationAgentPromptsDetailed_ACU(current: Record<s
     const value = current[name];
     const previous = previousDefaults[name];
     // One-shot 历史默认逐段匹配；用户编辑和追加段原样保留，不用当前生成器重建旧默认。
-    if ((previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V22_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V23_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V24_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V25_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V26_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V27_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V28_ACU) && (ONE_SHOT_ROLES_ACU as readonly string[]).includes(name)) {
+    if ((previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V22_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V23_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V24_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V25_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V26_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V27_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V28_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V29_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V30_ACU) && (ONE_SHOT_ROLES_ACU as readonly string[]).includes(name)) {
       const role = name as WorldSimulationOneShotRole_ACU;
       const old = previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU ? buildV21OneShotWorldSimulationAgentPrompt_ACU(role)
         : previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V22_ACU ? buildV22OneShotWorldSimulationAgentPrompt_ACU(role)
@@ -1167,7 +1267,9 @@ export function migrateWorldSimulationAgentPromptsDetailed_ACU(current: Record<s
               : previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V25_ACU ? buildV25OneShotWorldSimulationAgentPrompt_ACU(role)
                 : previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V26_ACU ? buildV26OneShotWorldSimulationAgentPrompt_ACU(role)
                   : previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V27_ACU ? buildV27OneShotWorldSimulationAgentPrompt_ACU(role)
-                    : buildV28OneShotWorldSimulationAgentPrompt_ACU(role);
+                    : previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V28_ACU ? buildV28OneShotWorldSimulationAgentPrompt_ACU(role)
+                      : previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V29_ACU ? buildV29OneShotWorldSimulationAgentPrompt_ACU(role)
+                        : buildV30OneShotWorldSimulationAgentPrompt_ACU(role);
       if (!value) {
         migrated[name] = defaults[name];
       } else if (promptFingerprint_ACU(value) === promptFingerprint_ACU(old)) {
@@ -1176,7 +1278,9 @@ export function migrateWorldSimulationAgentPromptsDetailed_ACU(current: Record<s
         // 按 seam 语义对齐而不是按下标：v28 删掉了 HISTORY 段，段数与 v21-v27 不再一致，
         // 继续按下标会把 HISTORY 之后的段整体串位，末段还会退化成空对象。
         // v28 起问答轮没有 seam 标记：从 v28 升级时按同 role 问答轮序号对齐（v29 段序与 v28 一致）。
-        const withTurns = previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V28_ACU;
+        // v30 段序与 v29 一致，从 v29 升级同样按问答轮序号对齐。
+        // v31 一次性角色与 v30 相同，从 v30 升级同样按问答轮序号对齐。
+        const withTurns = previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V28_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V29_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V30_ACU;
         const oldKeys = oneShotSegmentKeys_ACU(old, withTurns);
         const latest = defaults[name];
         const latestKeys = oneShotSegmentKeys_ACU(latest, withTurns);
@@ -1221,11 +1325,15 @@ export function migrateWorldSimulationAgentPromptsDetailed_ACU(current: Record<s
     const v17 = WORLD_SIMULATION_PROMPT_V17_SEGMENTS_ACU[name];
     const v18 = WORLD_SIMULATION_PROMPT_V18_SEGMENTS_ACU[name];
     const latest = defaults[name];
+    const v30 = buildV30WorldSimulationAgentPrompt_ACU(name);
     const promote_ACU = (segment: WorldSimulationPromptSegment_ACU): WorldSimulationPromptSegment_ACU => {
       const v18Index = v18.findIndex(old => JSON.stringify(old) === JSON.stringify(segment));
       return v18Index < 0 ? segment : { ...latest[v18Index] };
     };
     migrated[name] = value.map(segment => {
+      // v30→v31 只改导演两段正文且段序不变：完整命中 v30 默认段的换成当前默认段，用户改写段原样保留。
+      const v30Index = v30.findIndex(old => JSON.stringify(old) === JSON.stringify(segment));
+      if (v30Index >= 0 && v30.length === latest.length) return { ...latest[v30Index] };
       const currentIndex = v18.findIndex(old => JSON.stringify(old) === JSON.stringify(segment));
       if (currentIndex >= 0) return { ...latest[currentIndex] };
       const oldIndex = v16.findIndex(old => JSON.stringify(old) === JSON.stringify(segment));

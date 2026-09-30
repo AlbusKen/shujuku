@@ -11,6 +11,7 @@ import { defineStore } from 'pinia';
 import {
   ACU_V2_BUILTIN_THEMES,
   ACU_V2_DEFAULT_THEME_ID,
+  ACU_V2_THEME_MIGRATION_VERSION,
 } from '../theme/builtin-themes';
 import {
   ACU_V2_CUSTOM_THEME_FILE_KIND,
@@ -36,6 +37,7 @@ const MAX_THEME_NAME_LENGTH = 40;
 const MAX_TOKEN_VALUE_LENGTH = 240;
 
 interface PersistedTheme {
+  migrationVersion?: unknown;
   activeId?: unknown;
   customThemes?: unknown;
 }
@@ -213,12 +215,21 @@ function sanitizePersistedCustomThemes(value: unknown): SanitizedPersistedCustom
 function readInitialThemeState(): InitialThemeState {
   const persisted = readSection<PersistedTheme>(SECTION_KEY);
   const { customThemes, builtinOverridesByCustomId } = sanitizePersistedCustomThemes(persisted?.customThemes);
-  const activeId = normalizePersistedActiveThemeId(persisted?.activeId, customThemes, builtinOverridesByCustomId);
+  // 一次性主题迁移：迁移版本不匹配时，本次启动的活动主题落到奶龙配色。
+  // 只在内存中生效，不在读取阶段写回存储，避免清洗后的自定义主题或损坏的根状态被隐式覆盖；
+  // 用户下一次切换、导入或删除主题时由 persist() 写入 migrationVersion，写入前每次启动结果一致。
+  const needsMigration = persisted?.migrationVersion !== ACU_V2_THEME_MIGRATION_VERSION;
+  const activeId = needsMigration
+    ? ACU_V2_DEFAULT_THEME_ID
+    : normalizePersistedActiveThemeId(persisted?.activeId, customThemes, builtinOverridesByCustomId);
   return { activeId, customThemes };
 }
 
 function buildPersistedTheme(state: ThemeState): PersistedTheme {
-  const payload: PersistedTheme = { activeId: state.activeId };
+  const payload: PersistedTheme = {
+    migrationVersion: ACU_V2_THEME_MIGRATION_VERSION,
+    activeId: state.activeId,
+  };
   if (state.customThemes.length > 0) {
     payload.customThemes = state.customThemes.map(t => ({
       id: t.id,

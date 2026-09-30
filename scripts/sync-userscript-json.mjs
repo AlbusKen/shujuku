@@ -12,7 +12,7 @@ const __dirname = dirname(__filename);
 const ROOT = resolve(__dirname, '..');
 
 const sourcePath = resolve(ROOT, process.argv[2] || 'index.js');
-const jsonPath = resolve(ROOT, process.argv[3] || '酒馆助手脚本-SP·数据库.json');
+const jsonPath = resolve(ROOT, process.argv[3] || '酒馆助手脚本-龙血玄黄·数据库.json');
 
 function fail(message) {
   console.error(`[sync-userscript-json] ERROR: ${message}`);

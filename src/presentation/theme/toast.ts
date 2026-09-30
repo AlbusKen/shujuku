@@ -6,9 +6,10 @@ import { SCRIPT_ID_PREFIX_ACU, ACU_TOAST_CATEGORY_ACU } from '../../shared/const
 import { topLevelWindow_ACU } from '../../shared/env';
 import { logDebug_ACU } from '../../shared/utils';
 import { settings_ACU } from '../../service/runtime/state-manager';
+import { ACU_PRODUCT_NAME_ACU } from '../../shared/product-brand';
 
 // toast 相关状态
-export const ACU_TOAST_TITLE_ACU = 'SP·数据库';
+export const ACU_TOAST_TITLE_ACU = ACU_PRODUCT_NAME_ACU;
 export const _acuToastDedup_ACU = new Map<string, number>(); // key -> ts
 export let _acuToastStyleInjected_ACU = false;
 export function _set__acuToastStyleInjected_ACU(v: any) { _acuToastStyleInjected_ACU = v; }

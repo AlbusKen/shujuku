@@ -1,4 +1,4 @@
-import { normalizeWorldRegionName_ACU, type WorldChronicleEntry_ACU, type WorldPlayerContact_ACU, type WorldRumor_ACU, type WorldRumorStatus_ACU, type WorldSimulationLedger_ACU, type WorldSimulationTimelineEntry_ACU } from '../../service/simulation/model';
+import { normalizeWorldRegionName_ACU, type WorldChronicleEntry_ACU, type WorldPlayerContact_ACU, type WorldRumor_ACU, type WorldRumorStatus_ACU, type WorldSimulationLedger_ACU } from '../../service/simulation/model';
 
 export interface WorldChronicleContrastRow_ACU {
   id: string;
@@ -10,13 +10,13 @@ export interface WorldChronicleContrastRow_ACU {
   relatedRumorId: string | null;
 }
 
+/** 错过清单只列维护 AI 判定为「主角错过的重要幕后事件」的纪要（missedNote 非空），不再列清扫动作日志。 */
 export interface WorldMissedItem_ACU {
   id: string;
   title: string;
   detail: string;
-  missedOutcome: string | null;
-  expiresAtDay: number | null;
-  source: 'timeline' | 'seed';
+  at: string;
+  relatedIds: string[];
 }
 
 export type WorldRipeHitState_ACU = 'open-hit' | 'secluded-delay' | 'waiting';
@@ -70,24 +70,14 @@ export function buildWorldChronicleContrast_ACU(ledger: WorldSimulationLedger_AC
   });
 }
 
-export function buildWorldMissedList_ACU(ledger: WorldSimulationLedger_ACU, timeline: readonly WorldSimulationTimelineEntry_ACU[] = []): WorldMissedItem_ACU[] {
-  const swept = timeline.filter(item => item.kind === 'swept').map((item): WorldMissedItem_ACU => ({
-    id: item.id,
-    title: item.message || '过期清扫',
-    detail: String(item.at),
-    missedOutcome: null as string | null,
-    expiresAtDay: null as number | null,
-    source: 'timeline',
+export function buildWorldMissedList_ACU(ledger: WorldSimulationLedger_ACU): WorldMissedItem_ACU[] {
+  return ledger.chronicle.filter(entry => !!entry.missedNote?.trim()).map(entry => ({
+    id: entry.id,
+    title: entry.summary,
+    detail: entry.missedNote!.trim(),
+    at: entry.at,
+    relatedIds: [...entry.relatedIds],
   }));
-  const missedSeeds = ledger.seeds.filter(item => item.status === 'retired' && item.retiredReason === 'missed').map((item): WorldMissedItem_ACU => ({
-    id: item.id,
-    title: item.title,
-    detail: item.catalyst,
-    missedOutcome: item.missedOutcome,
-    expiresAtDay: item.expiresAtDay,
-    source: 'seed',
-  }));
-  return [...swept, ...missedSeeds];
 }
 
 function ripeHitState_ACU(ledger: WorldSimulationLedger_ACU, rumor: WorldRumor_ACU): WorldRipeHitState_ACU {

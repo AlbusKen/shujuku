@@ -539,7 +539,7 @@ export function readAgentModuleSnapshot_ACU(chat?: any[]): AgentModuleSnapshot_A
     foldedDeltaCount: folded.foldedDeltaCount,
   };
   if (folded.salvaged) {
-    console.warn(`[SP·数据库][续写资料] 楼层 ${folded.adoptedIndex} 的资料快照未通过严格校验，已按宽容模式读取：${folded.candidates.find(item => item.index === folded.adoptedIndex)?.problems.join('；') ?? ''}`);
+    console.warn(`[龙血玄黄·数据库][续写资料] 楼层 ${folded.adoptedIndex} 的资料快照未通过严格校验，已按宽容模式读取：${folded.candidates.find(item => item.index === folded.adoptedIndex)?.problems.join('；') ?? ''}`);
   }
   return folded.snapshot;
 }

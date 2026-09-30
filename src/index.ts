@@ -80,7 +80,7 @@ declare const $: any;
 $(function() {
     // 互斥检测：如果已有实例（插件或另一个油猴脚本）在运行，跳过初始化
     if (checkAndMarkInstance()) {
-        console.warn('[SP·数据库 IX] 油猴脚本检测到已有实例运行，跳过初始化。');
+        console.warn('[龙血玄黄·数据库] 油猴脚本检测到已有实例运行，跳过初始化。');
         return;
     }
     console.log('ACU_INIT_DEBUG: Document is ready, attempting to initialize ACU script (Userscript mode).');

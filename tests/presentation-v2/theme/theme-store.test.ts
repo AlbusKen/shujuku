@@ -70,36 +70,37 @@ afterEach(() => {
 });
 
 describe('theme-store', () => {
-  it('未持久化时使用默认主题（default-dark）', async () => {
+  it('未持久化时使用奶龙主题', async () => {
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const store = m.themeStore.useThemeStore();
-    expect(store.activeId).toBe('default-dark');
+    expect(store.activeId).toBe('milk-dragon');
   });
 
   it('localStorage 中已有合法 id 时按持久化值初始化', async () => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ theme: { activeId: 'creamy-minimal' } }));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ theme: { migrationVersion: 1, activeId: 'creamy-minimal' } }));
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const store = m.themeStore.useThemeStore();
     expect(store.activeId).toBe('creamy-minimal');
   });
 
-  it('旧草莓奶龙 id 会迁移到奶油主题', async () => {
+  it('旧版本主题状态会一次性迁移到奶龙主题', async () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ theme: { activeId: 'strawberry-dragon' } }));
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const store = m.themeStore.useThemeStore();
-    expect(store.activeId).toBe('creamy-minimal');
-    expect(store.activeTheme.name).toBe('奶油风');
+    expect(store.activeId).toBe('milk-dragon');
+    expect(store.activeTheme.name).toBe('奶龙配色');
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!)).toEqual({ theme: { activeId: 'strawberry-dragon' } });
   });
 
-  it('非法 id 落回默认主题', async () => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ theme: { activeId: 'not-a-theme' } }));
+  it('已迁移状态中的非法 id 落回奶龙主题', async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ theme: { migrationVersion: 1, activeId: 'not-a-theme' } }));
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const store = m.themeStore.useThemeStore();
-    expect(store.activeId).toBe('default-dark');
+    expect(store.activeId).toBe('milk-dragon');
   });
 
   it('setTheme 切换后 localStorage 被写入新 id', async () => {
@@ -110,7 +111,7 @@ describe('theme-store', () => {
     expect(store.activeId).toBe('default-light');
     const raw = localStorage.getItem(STORAGE_KEY);
     expect(raw).not.toBeNull();
-    expect(JSON.parse(raw!)).toEqual({ theme: { activeId: 'default-light' } });
+    expect(JSON.parse(raw!)).toEqual({ theme: { migrationVersion: 1, activeId: 'default-light' } });
   });
 
   it('setTheme 拒绝非法 id（不变更 state）', async () => {
@@ -122,7 +123,7 @@ describe('theme-store', () => {
     expect(store.activeId).toBe(before);
   });
 
-  it('只暴露当前维护的四个内置主题', async () => {
+  it('只暴露当前维护的五个内置主题', async () => {
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const store = m.themeStore.useThemeStore();
@@ -131,6 +132,7 @@ describe('theme-store', () => {
       'default-dark',
       'creamy-minimal',
       'jirai-kei',
+      'milk-dragon',
     ]);
   });
 
@@ -163,6 +165,7 @@ describe('theme-store', () => {
       'default-dark',
       'creamy-minimal',
       'jirai-kei',
+      'milk-dragon',
       'custom:theme',
     ]);
 
@@ -203,16 +206,18 @@ describe('theme-store', () => {
       'default-dark',
       'creamy-minimal',
       'jirai-kei',
+      'milk-dragon',
     ]);
     expect(store.activeTheme.tokens.bg0).toBe('#2B2B2B');
     expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!)).toEqual({
-      theme: { activeId: 'jirai-kei' },
+      theme: { migrationVersion: 1, activeId: 'jirai-kei' },
     });
   });
 
   it('localStorage 中已有同名自定义地雷色时恢复为内置主题', async () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       theme: {
+        migrationVersion: 1,
         activeId: 'custom:jirai-kei',
         customThemes: [{
           id: 'custom:jirai-kei',
@@ -277,10 +282,10 @@ describe('theme-store', () => {
 
     expect(store.deleteCustomTheme('default-dark')).toBe(false);
     expect(store.deleteCustomTheme(imported.id)).toBe(true);
-    expect(store.activeId).toBe('default-dark');
+    expect(store.activeId).toBe('milk-dragon');
     expect(store.themes.some(t => t.id === imported.id)).toBe(false);
     expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!)).toEqual({
-      theme: { activeId: 'default-dark' },
+      theme: { migrationVersion: 1, activeId: 'milk-dragon' },
     });
   });
 
@@ -407,7 +412,7 @@ describe('theme-store', () => {
     store.setTheme('creamy-minimal');
     expect(store.activeId).toBe('creamy-minimal');
     expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!)).toEqual({
-      theme: { activeId: 'creamy-minimal' },
+      theme: { migrationVersion: 1, activeId: 'creamy-minimal' },
     });
   });
 
@@ -440,7 +445,7 @@ describe('theme-store', () => {
     store.setTheme('jirai-kei');
     expect(store.activeId).toBe('jirai-kei');
     expect(JSON.parse(localStorage.getItem(STORAGE_KEY)!)).toEqual({
-      theme: { activeId: 'jirai-kei' },
+      theme: { migrationVersion: 1, activeId: 'jirai-kei' },
     });
   });
 });

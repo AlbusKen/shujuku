@@ -276,7 +276,10 @@ export function planAgentModuleFieldCommit_ACU(
       reject(path, `revision_conflict: expected=${intent.expectedRevision}, actual=${snapshot.revisions[module]}`); continue;
     }
     if (intent.kind === 'insert' && (existing || record || drafts.has(key) || reserved.has(id))) { reject(path, 'id_exists'); continue; }
-    if (intent.kind !== 'insert' && !existing && !record && !drafts.has(key)) { reject(path, 'not_found'); continue; }
+    if (intent.kind !== 'insert' && !existing && !record && !drafts.has(key)) {
+      // DELETE 的目标已不存在即已达到删除效果：单独标记，运行时不把它记为待修复，提示也禁止 INSERT 重建。
+      reject(path, intent.kind === 'delete' ? 'already_absent: 删除目标不存在，视为已删除' : 'not_found'); continue;
+    }
     if (existing?.retired && intent.kind !== 'delete') { reject(path, 'retired: 已退役条目不可修改'); continue; }
     if (intent.kind === 'delete') {
       if (existing) {
@@ -429,7 +432,11 @@ export function commitAgentModuleFieldWrites_ACU(input: {
     const now = Date.now();
     const plan = planAgentModuleFieldCommit_ACU(folded.snapshot, folded.fields, parsed.intents, input.role, input.completedStages, input.resolvePage, now, agentStoryEvidenceFloorIndexes_ACU(input.chat));
     receipt.rejected.push(...plan.rejected);
-    if (!plan.batches.length) return receipt;
+    if (!plan.batches.length) {
+      // 仅有「删除目标已不存在」时删除效果已成立：按空提交确认，不留待修复缺口。
+      if (receipt.rejected.length && receipt.rejected.every(item => item.reason.startsWith('already_absent'))) receipt.status = 'committed';
+      return receipt;
+    }
     let view: Awaited<ReturnType<typeof materializeAgentModuleSqlView_ACU>> | undefined;
     let delta: Pick<AgentModuleFloorDelta_ACU, 'writes' | 'revisions' | 'fieldUpserts' | 'removedIds'>;
     const expected = new Map<string, AgentModuleFieldRecord_ACU | null>();

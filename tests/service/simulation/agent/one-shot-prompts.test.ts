@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildDefaultWorldSimulationAgentPrompts_ACU, buildV21WorldSimulationAgentPrompt_ACU, buildV22WorldSimulationAgentPrompt_ACU, buildV23WorldSimulationAgentPrompt_ACU, buildV24WorldSimulationAgentPrompt_ACU, buildV25WorldSimulationAgentPrompt_ACU, buildV26WorldSimulationAgentPrompt_ACU, buildV27WorldSimulationAgentPrompt_ACU, migrateWorldSimulationAgentPromptsDetailed_ACU, WORLD_SIMULATION_PROMPT_VERSION_ACU, WORLD_SIMULATION_PROMPT_VERSION_V21_ACU, WORLD_SIMULATION_PROMPT_VERSION_V22_ACU, WORLD_SIMULATION_PROMPT_VERSION_V23_ACU, WORLD_SIMULATION_PROMPT_VERSION_V24_ACU, WORLD_SIMULATION_PROMPT_VERSION_V25_ACU, WORLD_SIMULATION_PROMPT_VERSION_V26_ACU, WORLD_SIMULATION_PROMPT_VERSION_V27_ACU, WORLD_SIMULATION_PROMPT_VERSION_V28_ACU, WORLD_SIMULATION_PROMPT_VERSION_V29_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
+import { buildDefaultWorldSimulationAgentPrompts_ACU, buildV21WorldSimulationAgentPrompt_ACU, buildV22WorldSimulationAgentPrompt_ACU, buildV23WorldSimulationAgentPrompt_ACU, buildV24WorldSimulationAgentPrompt_ACU, buildV25WorldSimulationAgentPrompt_ACU, buildV26WorldSimulationAgentPrompt_ACU, buildV27WorldSimulationAgentPrompt_ACU, migrateWorldSimulationAgentPromptsDetailed_ACU, WORLD_SIMULATION_PROMPT_VERSION_ACU, WORLD_SIMULATION_PROMPT_VERSION_V21_ACU, WORLD_SIMULATION_PROMPT_VERSION_V22_ACU, WORLD_SIMULATION_PROMPT_VERSION_V23_ACU, WORLD_SIMULATION_PROMPT_VERSION_V24_ACU, WORLD_SIMULATION_PROMPT_VERSION_V25_ACU, WORLD_SIMULATION_PROMPT_VERSION_V26_ACU, WORLD_SIMULATION_PROMPT_VERSION_V27_ACU, WORLD_SIMULATION_PROMPT_VERSION_V28_ACU, WORLD_SIMULATION_PROMPT_VERSION_V29_ACU, WORLD_SIMULATION_PROMPT_VERSION_V30_ACU, WORLD_SIMULATION_PROMPT_VERSION_V31_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
 import { oneShotBootstrapNotice_ACU, worldSimulationOneShotProtocol_ACU } from '../../../../src/service/simulation/agent/agent-subagent-runtime';
 import { validateWorldSimulationPromptSegments_ACU } from '../../../../src/service/simulation/agent/prompt-template';
 import { stripWritingAnnotations_ACU } from '../../../../src/service/simulation/simulation-projection';
@@ -135,8 +135,13 @@ describe('一次性资料角色默认提示词', () => {
       expect(pairs.some(item => item.content.includes('我每轮都要查三项'))).toBe(true);
     }
     const dramatis = fullBody(prompts['dramatis-keeper']);
-    // 人物当前行动与预计耗时必须有明确写法，且认知必须有渠道。
-    expect(dramatis).toContain('「正在做的事·预计多久」');
+    // v30：行为拆成短期/长期并各带预计持续时间，只有显式 done/abandoned 才归档经历；认知为与当前剧情相关的覆盖式快照。
+    expect(dramatis).toContain('current_action');
+    expect(dramatis).toContain('long_term_action');
+    expect(dramatis).toContain('预计持续时间');
+    expect(dramatis).toContain('只有显式写了 done 或 abandoned');
+    expect(dramatis).toContain('known_facts 是覆盖式快照');
+    expect(dramatis).not.toContain('保留仍成立的旧认知');
     expect(dramatis).toContain('读者知道的不等于人物知道');
     expect(fullBody(prompts['undercurrent-analyst'])).toContain('正文往哪走，我的推演就往哪走');
   });
@@ -225,7 +230,7 @@ describe('一次性资料角色默认提示词', () => {
 
   it('旧版角色键及自定义旧协议提示词能归一化到当前版本', () => {
     const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
-    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe(WORLD_SIMULATION_PROMPT_VERSION_V29_ACU);
+    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe(WORLD_SIMULATION_PROMPT_VERSION_V31_ACU);
     const custom = structuredClone(defaults) as Record<string, typeof defaults[typeof roles[number]]>;
     custom['undercurrent-analyst'][0].content += '\n旧版自定义逐栏 write_sql';
     custom.timekeeper = structuredClone(defaults['undercurrent-analyst']);

@@ -706,6 +706,8 @@ export class ContinuationAgentTurnPlanner_ACU {
       const totalCallLimit = budget.maxIterations + budget.maxReads + 4;
       let totalCalls = 0;
       let iteration = iterationStart;
+      // 工作流升级后的定向修缮账：同一批缺口只允许按修缮方案重试一次。
+      const escalatedBatches = new Set<string>();
       while (iteration <= budget.maxIterations || postReviewDecisionAvailable || maintenanceConvergenceAvailable) {
         if (request.signal?.aborted) {
           throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_loop', '本轮规划已被用户中断', false));
@@ -815,7 +817,17 @@ export class ContinuationAgentTurnPlanner_ACU {
             await session.discardPreviousRound();
             return { instruction: workflow.instruction, attempts: totalAttempts, apiPreset: { presetName: preset.presetName, source: preset.source, reason: preset.reason } };
           }
-          session.record([{ kind: 'tool', text: `${workflow.summary}\n资料维护未合格，请向用户说明缺口；总纲与阶段大纲仍由后续 open_round 固定工作流维护，只有网页检索可按需 delegate web-researcher。不要对同一批已升级的待修复项再次 open_round。`, digest: '工作流升级主会话', turnKey: session.turnKey }]);
+          // 升级后由主会话针对子代理反馈制定修缮方案，而不是直接停下；同一批缺口只定向重试一次，避免循环。
+          const escalationKey = `${workflow.escalationKind || workflow.outcome}|${workflow.pendingFixes
+            .map(item => `${item.module}:${item.violations.map(violation => violation.path).sort().join(',')}`).sort().join(';')}`;
+          const repeated = escalatedBatches.has(escalationKey);
+          escalatedBatches.add(escalationKey);
+          const guidance = repeated
+            ? '同一批问题已经按修缮方案定向重试过一次，仍未合格。不要再次 open_round；输出 block，向用户逐条说明缺口、已尝试的修缮和建议的处理方式。'
+            : workflow.pendingFixes.length
+              ? '资料维护未合格。你是和用户对话的主会话，要针对子代理反馈制定修缮方案，不要直接停下：先对照回执中每条 pending 的 module、violations 与 lastError 判断原因（缺栏、ID 不存在、修订号冲突、枚举或格式不合法、正文证据不足），再输出一次 open_round，在 focus 中逐条写明修缮方案——修哪条记录的哪一栏、依据哪一楼正文、不许做什么（例如已删除的条目不要重建）。结算代理会带着待修复清单定向修缮。缺口属于正文证据不足或需要用户裁决时不要硬修，改为 block 向用户说明缺口并给出建议。总纲与阶段大纲仍由 open_round 固定工作流维护，只有网页检索可按需 delegate web-researcher。'
+              : '本轮工作流没有产出可交付的写作指令。先按回执判断原因：终审意见可以修正时，再输出一次 open_round，在 focus 中写明针对这些意见的修订方向；无法修正的硬冲突或需要用户决定的事项，用 block 向用户说明。总纲与阶段大纲仍由 open_round 固定工作流维护，只有网页检索可按需 delegate web-researcher。';
+          session.record([{ kind: 'tool', text: `${workflow.summary}\n${guidance}`, digest: '工作流升级主会话', turnKey: session.turnKey }]);
           await session.flush();
           iteration += 1;
           continue;
@@ -1261,7 +1273,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       callOptions.cacheBoundary = session.snapshot().messages.find(item => item.kind === 'handoff')?.text;
       // 缓存前缀诊断：主 Agent 相邻请求应共享大前缀，服务商缓存 0 命中时用这行定位分歧点。
       // 必须无条件输出（logDebug/logWarn 默认关闭），确认问题后可降级或移除。
-      console.info('[SP·数据库][缓存诊断][agent-main]', trackAgentPromptDrift_ACU('agent-main', messages));
+      console.info('[龙血玄黄·数据库][缓存诊断][agent-main]', trackAgentPromptDrift_ACU('agent-main', messages));
       // 本地输入门禁：以完整消息与工具定义计量，得出 60% 默认上围栏预算；max_tokens 仅控制输出。
       // 放在传输重试之外：超限是确定性失败，不发送、不截断、不重发同一超限请求。
       try {

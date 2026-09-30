@@ -352,9 +352,9 @@ const WORLD_SIMULATION_SQL_TABLE_MODULE_ACU = {
 const WORLD_SIMULATION_SQL_COLUMNS_ACU: Readonly<Record<string, ReadonlySet<string>>> = {
   dimensions: new Set(['id', 'name', 'kind', 'value', 'trend', 'rationale', 'evidence_refs', 'expected_revision']),
   seeds: new Set(['id', 'title', 'status', 'level', 'catalyst', 'visibility', 'actor_ids', 'location', 'expires_at_day', 'missed_outcome', 'expose_policy', 'evidence_refs', 'retired_reason', 'expected_revision']),
-  actors: new Set(['id', 'name', 'interests', 'location', 'location_ref', 'life', 'died_at_day', 'death_summary', 'resources', 'goals', 'constraints', 'information_sources', 'known_facts', 'visibility', 'evidence_refs', 'expected_revision']),
+  actors: new Set(['id', 'name', 'interests', 'location', 'location_ref', 'life', 'died_at_day', 'death_summary', 'resources', 'goals', 'constraints', 'information_sources', 'known_facts', 'visibility', 'current_action', 'long_term_action', 'evidence_refs', 'expected_revision']),
   rumors: new Set(['id', 'fact', 'origin_day', 'earliest_reveal_day', 'channels', 'related_actor_ids', 'status', 'revealed_at_day', 'evidence_refs', 'expected_revision']),
-  chronicle: new Set(['id', 'at', 'summary', 'related_ids', 'evidence_refs']),
+  chronicle: new Set(['id', 'at', 'summary', 'related_ids', 'evidence_refs', 'missed_note']),
   clock: new Set(['days', 'story_time', 'slot', 'evidence_refs', 'expected_revision']),
   player: new Set(['location', 'contact', 'evidence_refs', 'expected_revision']),
   guidance: new Set(['signals', 'excluded_facts', 'evidence_refs', 'expected_revision']),

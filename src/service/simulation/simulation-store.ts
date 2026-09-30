@@ -38,6 +38,7 @@ import {
   type WorldRumor_ACU,
   WORLD_SIMULATION_WEB_PROVIDERS_ACU,
 } from './model';
+import { WORLD_ACTOR_EXPERIENCE_CAP_ACU, WORLD_ACTOR_LONG_TERM_STATUSES_ACU, type WorldActorAction_ACU, type WorldActorExperience_ACU, type WorldActorLongTermAction_ACU } from './model';
 
 export const WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU = '_qrf_world_simulation';
 
@@ -141,6 +142,68 @@ function validateGuidanceSignals_ACU(value: unknown, path: string, phase: WorldS
   });
 }
 
+/** v6 人物时间线栏目与幕后纪要错过标记：读取时缺失按空值归一（不伪造时间），写入由派生层补齐。 */
+const ACTOR_TIMELINE_KEYS_ACU: readonly string[] = ['currentAction', 'longTermAction', 'experiences'];
+const ACTOR_BASE_KEYS_ACU: readonly string[] = WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors.filter(key => !ACTOR_TIMELINE_KEYS_ACU.includes(key));
+const CHRONICLE_OPTIONAL_KEYS_ACU: readonly string[] = ['missedNote'];
+const CHRONICLE_BASE_KEYS_ACU: readonly string[] = WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.chronicle.filter(key => !CHRONICLE_OPTIONAL_KEYS_ACU.includes(key));
+
+function validateActorAction_ACU(value: unknown, path: string, phase: WorldSimulationErrorPhase_ACU): WorldActorAction_ACU | null {
+  if (value === null || value === undefined) return null;
+  if (!isRecord_ACU(value)) fail_ACU(`${path} 必须是对象或 null`, phase, { path });
+  exactKeys_ACU(value, ['text', 'expectedDuration', 'startedAtDay', 'startedAt'], [], path, phase);
+  return {
+    text: string_ACU(value.text, `${path}.text`, phase),
+    expectedDuration: string_ACU(value.expectedDuration, `${path}.expectedDuration`, phase, true),
+    startedAtDay: nullableInteger_ACU(value.startedAtDay, `${path}.startedAtDay`, phase, 1),
+    startedAt: string_ACU(value.startedAt, `${path}.startedAt`, phase, true),
+  };
+}
+
+function validateActorLongTermAction_ACU(value: unknown, path: string, phase: WorldSimulationErrorPhase_ACU): WorldActorLongTermAction_ACU | null {
+  if (value === null || value === undefined) return null;
+  if (!isRecord_ACU(value)) fail_ACU(`${path} 必须是对象或 null`, phase, { path });
+  exactKeys_ACU(value, ['text', 'expectedDuration', 'startedAtDay', 'startedAt', 'status', 'outcome'], [], path, phase);
+  const action = validateActorAction_ACU({ text: value.text, expectedDuration: value.expectedDuration, startedAtDay: value.startedAtDay, startedAt: value.startedAt }, path, phase)!;
+  return {
+    ...action,
+    status: enum_ACU(value.status, WORLD_ACTOR_LONG_TERM_STATUSES_ACU, `${path}.status`, phase),
+    outcome: nullableString_ACU(value.outcome, `${path}.outcome`, phase),
+  };
+}
+
+function validateActorExperiences_ACU(value: unknown, path: string, phase: WorldSimulationErrorPhase_ACU): WorldActorExperience_ACU[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > WORLD_ACTOR_EXPERIENCE_CAP_ACU) fail_ACU(`${path} 必须是不超过 ${WORLD_ACTOR_EXPERIENCE_CAP_ACU} 条的数组`, phase, { path });
+  return value.map((item, index) => {
+    const itemPath = `${path}[${index}]`;
+    if (!isRecord_ACU(item)) fail_ACU(`${itemPath} 必须是对象`, phase, { path: itemPath });
+    exactKeys_ACU(item, ['text', 'expectedDuration', 'startedAtDay', 'startedAt', 'endedAtDay', 'endedAt', 'status', 'outcome'], [], itemPath, phase);
+    return {
+      text: string_ACU(item.text, `${itemPath}.text`, phase),
+      expectedDuration: string_ACU(item.expectedDuration, `${itemPath}.expectedDuration`, phase, true),
+      startedAtDay: nullableInteger_ACU(item.startedAtDay, `${itemPath}.startedAtDay`, phase, 1),
+      startedAt: string_ACU(item.startedAt, `${itemPath}.startedAt`, phase, true),
+      endedAtDay: integer_ACU(item.endedAtDay, `${itemPath}.endedAtDay`, phase, 1),
+      endedAt: string_ACU(item.endedAt, `${itemPath}.endedAt`, phase, true),
+      status: enum_ACU(item.status, ['done', 'abandoned'] as const, `${itemPath}.status`, phase),
+      outcome: nullableString_ACU(item.outcome, `${itemPath}.outcome`, phase),
+    };
+  });
+}
+
+function validateActorTimelineFields_ACU(item: Record<string, unknown>, path: string, phase: WorldSimulationErrorPhase_ACU): Pick<import('./model').WorldActor_ACU, 'currentAction' | 'longTermAction' | 'experiences'> {
+  return {
+    currentAction: validateActorAction_ACU(item.currentAction, `${path}.currentAction`, phase),
+    longTermAction: validateActorLongTermAction_ACU(item.longTermAction, `${path}.longTermAction`, phase),
+    experiences: validateActorExperiences_ACU(item.experiences, `${path}.experiences`, phase),
+  };
+}
+
+function validateChronicleMissedNote_ACU(value: unknown, path: string, phase: WorldSimulationErrorPhase_ACU): string | null {
+  return value === undefined ? null : nullableString_ACU(value, path, phase);
+}
+
 function migrateV1Ledger_ACU(raw: Record<string, unknown>): Record<string, unknown> {
   const clockRaw = isRecord_ACU(raw.clock) ? raw.clock : {};
   const day = Number.isInteger(clockRaw.day) && (clockRaw.day as number) >= 1
@@ -199,11 +262,22 @@ function migrateV4Ledger_ACU(raw: Record<string, unknown>): Record<string, unkno
     : [];
   return {
     ...raw,
-    schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU,
+    schemaVersion: 5,
     materialCompletion: isRecord_ACU(raw.materialCompletion)
       ? raw.materialCompletion
       : { state: 'legacy_unknown', expectedModules: [], modules: {}, sourceRunId: '', updatedAt: 0 },
     pendingFixes,
+  };
+}
+
+function migrateV5Ledger_ACU(raw: Record<string, unknown>): Record<string, unknown> {
+  // v6：人物补齐短期/长期行为与经历，幕后纪要补齐主角错过标记；旧值一律缺省为空，不伪造时间。
+  const fill = (item: unknown, extras: Record<string, unknown>): unknown => isRecord_ACU(item) ? { ...item, ...Object.fromEntries(Object.entries(extras).filter(([key]) => !Object.prototype.hasOwnProperty.call(item, key))) } : item;
+  return {
+    ...raw,
+    schemaVersion: WORLD_LEDGER_SCHEMA_VERSION_ACU,
+    actors: Array.isArray(raw.actors) ? raw.actors.map(item => fill(item, { currentAction: null, longTermAction: null, experiences: [] })) : raw.actors,
+    chronicle: Array.isArray(raw.chronicle) ? raw.chronicle.map(item => fill(item, { missedNote: null })) : raw.chronicle,
   };
 }
 
@@ -213,6 +287,7 @@ function migrateLedgerToCurrent_ACU(raw: Record<string, unknown>): Record<string
   if (current.schemaVersion === 2) current = migrateV2Ledger_ACU(current);
   if (current.schemaVersion === 3) current = migrateV3Ledger_ACU(current);
   if (current.schemaVersion === 4) current = migrateV4Ledger_ACU(current);
+  if (current.schemaVersion === 5) current = migrateV5Ledger_ACU(current);
   return current;
 }
 
@@ -485,7 +560,7 @@ function validateLedger_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU):
   if (!Array.isArray(normalized.actors) || normalized.actors.length > 128) fail_ACU('ledger.actors 容量非法', phase);
   const actors = normalized.actors.map((item, index) => {
     if (!isRecord_ACU(item)) fail_ACU(`ledger.actors[${index}] 必须是对象`, phase);
-    exactKeys_ACU(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors, [], `ledger.actors[${index}]`, phase);
+    exactKeys_ACU(item, ACTOR_BASE_KEYS_ACU, ACTOR_TIMELINE_KEYS_ACU, `ledger.actors[${index}]`, phase);
     const life = enum_ACU(item.life, WORLD_ACTOR_LIFE_ACU, `ledger.actors[${index}].life`, phase);
     const diedAtDay = nullableInteger_ACU(item.diedAtDay, `ledger.actors[${index}].diedAtDay`, phase, 1);
     const deathSummary = nullableString_ACU(item.deathSummary, `ledger.actors[${index}].deathSummary`, phase);
@@ -495,7 +570,7 @@ function validateLedger_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU):
     } else if (diedAtDay !== null || deathSummary !== null) {
       fail_ACU(`ledger.actors[${index}] 非 dead 状态不能携带死亡字段`, phase);
     }
-    return { id: stableId_ACU(item.id, `ledger.actors[${index}].id`, phase), name: string_ACU(item.name, `ledger.actors[${index}].name`, phase), interests: stringArray_ACU(item.interests, `ledger.actors[${index}].interests`, phase), location: string_ACU(item.location, `ledger.actors[${index}].location`, phase, true), locationRef: validateLocationRef_ACU(item.locationRef, `ledger.actors[${index}].locationRef`, phase), life, diedAtDay, deathSummary, resources: stringArray_ACU(item.resources, `ledger.actors[${index}].resources`, phase), goals: stringArray_ACU(item.goals, `ledger.actors[${index}].goals`, phase), constraints: stringArray_ACU(item.constraints, `ledger.actors[${index}].constraints`, phase), informationSources: stringArray_ACU(item.informationSources, `ledger.actors[${index}].informationSources`, phase), knownFacts: stringArray_ACU(item.knownFacts, `ledger.actors[${index}].knownFacts`, phase), visibility: enum_ACU(item.visibility, ['hidden', 'limited', 'public'] as const, `ledger.actors[${index}].visibility`, phase), revision: integer_ACU(item.revision, `ledger.actors[${index}].revision`, phase) };
+    return { id: stableId_ACU(item.id, `ledger.actors[${index}].id`, phase), name: string_ACU(item.name, `ledger.actors[${index}].name`, phase), interests: stringArray_ACU(item.interests, `ledger.actors[${index}].interests`, phase), location: string_ACU(item.location, `ledger.actors[${index}].location`, phase, true), locationRef: validateLocationRef_ACU(item.locationRef, `ledger.actors[${index}].locationRef`, phase), life, diedAtDay, deathSummary, resources: stringArray_ACU(item.resources, `ledger.actors[${index}].resources`, phase), goals: stringArray_ACU(item.goals, `ledger.actors[${index}].goals`, phase), constraints: stringArray_ACU(item.constraints, `ledger.actors[${index}].constraints`, phase), informationSources: stringArray_ACU(item.informationSources, `ledger.actors[${index}].informationSources`, phase), knownFacts: stringArray_ACU(item.knownFacts, `ledger.actors[${index}].knownFacts`, phase), visibility: enum_ACU(item.visibility, ['hidden', 'limited', 'public'] as const, `ledger.actors[${index}].visibility`, phase), ...validateActorTimelineFields_ACU(item, `ledger.actors[${index}]`, phase), revision: integer_ACU(item.revision, `ledger.actors[${index}].revision`, phase) };
   });
   uniqueIds_ACU(dimensions, 'ledger.dimensions', phase); uniqueIds_ACU(actors, 'ledger.actors', phase);
   const actorIds = new Set(actors.map(item => item.id));
@@ -516,10 +591,10 @@ function validateLedger_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU):
   const knownIds = new Set([...dimensions.map(item => item.id), ...actors.map(item => item.id), ...seeds.map(item => item.id)]);
   const chronicle = normalized.chronicle.map((item, index) => {
     if (!isRecord_ACU(item)) fail_ACU(`ledger.chronicle[${index}] 必须是对象`, phase);
-    exactKeys_ACU(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.chronicle, [], `ledger.chronicle[${index}]`, phase);
+    exactKeys_ACU(item, CHRONICLE_BASE_KEYS_ACU, CHRONICLE_OPTIONAL_KEYS_ACU, `ledger.chronicle[${index}]`, phase);
     const related = stringArray_ACU(item.relatedIds, `ledger.chronicle[${index}].relatedIds`, phase);
     for (const relatedId of related) if (!knownIds.has(relatedId)) fail_ACU(`ledger.chronicle[${index}] 引用了不存在的对象`, phase, { relatedId });
-    return { id: stableId_ACU(item.id, `ledger.chronicle[${index}].id`, phase), at: string_ACU(item.at, `ledger.chronicle[${index}].at`, phase), summary: string_ACU(item.summary, `ledger.chronicle[${index}].summary`, phase), relatedIds: related, evidenceRefs: stringArray_ACU(item.evidenceRefs, `ledger.chronicle[${index}].evidenceRefs`, phase) };
+    return { id: stableId_ACU(item.id, `ledger.chronicle[${index}].id`, phase), at: string_ACU(item.at, `ledger.chronicle[${index}].at`, phase), summary: string_ACU(item.summary, `ledger.chronicle[${index}].summary`, phase), relatedIds: related, evidenceRefs: stringArray_ACU(item.evidenceRefs, `ledger.chronicle[${index}].evidenceRefs`, phase), missedNote: validateChronicleMissedNote_ACU(item.missedNote, `ledger.chronicle[${index}].missedNote`, phase) };
   });
   uniqueIds_ACU(chronicle, 'ledger.chronicle', phase);
   const rumors = validateRumors_ACU(normalized.rumors, actorIds, phase);
@@ -913,7 +988,7 @@ export function collectWorldSimulationLedgerViolations_ACU(raw: unknown): string
     for (const [index, item] of normalized.actors.entries()) {
       probe(() => {
         if (!isRecord_ACU(item)) fail_ACU(`ledger.actors[${index}] 必须是对象`, phase);
-        exactKeys_ACU(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors, [], `ledger.actors[${index}]`, phase);
+        exactKeys_ACU(item, ACTOR_BASE_KEYS_ACU, ACTOR_TIMELINE_KEYS_ACU, `ledger.actors[${index}]`, phase);
         const life = enum_ACU(item.life, WORLD_ACTOR_LIFE_ACU, `ledger.actors[${index}].life`, phase);
         const diedAtDay = nullableInteger_ACU(item.diedAtDay, `ledger.actors[${index}].diedAtDay`, phase, 1);
         const deathSummary = nullableString_ACU(item.deathSummary, `ledger.actors[${index}].deathSummary`, phase);
@@ -935,6 +1010,7 @@ export function collectWorldSimulationLedgerViolations_ACU(raw: unknown): string
         stringArray_ACU(item.knownFacts, `ledger.actors[${index}].knownFacts`, phase);
         enum_ACU(item.visibility, ['hidden', 'limited', 'public'] as const, `ledger.actors[${index}].visibility`, phase);
         integer_ACU(item.revision, `ledger.actors[${index}].revision`, phase);
+        validateActorTimelineFields_ACU(item, `ledger.actors[${index}]`, phase);
         actors.push({ id });
         actorIds.add(id);
       });
@@ -976,13 +1052,14 @@ export function collectWorldSimulationLedgerViolations_ACU(raw: unknown): string
     for (const [index, item] of normalized.chronicle.entries()) {
       probe(() => {
         if (!isRecord_ACU(item)) fail_ACU(`ledger.chronicle[${index}] 必须是对象`, phase);
-        exactKeys_ACU(item, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.chronicle, [], `ledger.chronicle[${index}]`, phase);
+        exactKeys_ACU(item, CHRONICLE_BASE_KEYS_ACU, CHRONICLE_OPTIONAL_KEYS_ACU, `ledger.chronicle[${index}]`, phase);
         const related = stringArray_ACU(item.relatedIds, `ledger.chronicle[${index}].relatedIds`, phase);
         for (const relatedId of related) if (!knownIds.has(relatedId)) fail_ACU(`ledger.chronicle[${index}] 引用了不存在的对象`, phase, { relatedId });
         chronicle.push({ id: stableId_ACU(item.id, `ledger.chronicle[${index}].id`, phase) });
         string_ACU(item.at, `ledger.chronicle[${index}].at`, phase);
         string_ACU(item.summary, `ledger.chronicle[${index}].summary`, phase);
         stringArray_ACU(item.evidenceRefs, `ledger.chronicle[${index}].evidenceRefs`, phase);
+        validateChronicleMissedNote_ACU(item.missedNote, `ledger.chronicle[${index}].missedNote`, phase);
       });
     }
     probe(() => uniqueIds_ACU(chronicle, 'ledger.chronicle', phase));

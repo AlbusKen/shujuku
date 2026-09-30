@@ -12,6 +12,7 @@ import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { bindPopupEvents_ACU } from './popup-bindings';
 import { loadPlotSettingsToUI_ACU } from './popup-helpers';
 import { createACUWindow } from '../window/window-system';
+import { ACU_PRODUCT_NAME_ACU } from '../../shared/product-brand';
 
 // 标签页 HTML 生成模块
 import { generateDashboardTabHTML } from './main-popup-status';
@@ -118,7 +119,7 @@ function generateThemeSelectorHTMLForChrome(): string {
     
     createACUWindow({
       id: windowId,
-      title: 'SP·数据库 IX',
+      title: ACU_PRODUCT_NAME_ACU,
       content: popupHtml,
       width: 1400,  // 基础宽度
       height: 900,  // 基础高度

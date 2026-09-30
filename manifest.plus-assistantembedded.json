@@ -1,12 +1,12 @@
 {
-    "display_name": "SP·数据库 8.8.4 + AI 改表助手",
+    "display_name": "龙血玄黄·数据库 1.0.0 + AI 改表助手",
     "loading_order": 200,
     "requires": [],
     "optional": [],
     "js": "index.js",
     "css": "",
     "author": "Cline (AI Assisted)",
-    "version": "8.8.4",
+    "version": "1.0.0",
     "homePage": "",
     "auto_update": false
 }

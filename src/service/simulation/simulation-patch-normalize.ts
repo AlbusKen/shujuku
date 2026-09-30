@@ -1,4 +1,5 @@
 import {
+  WORLD_ACTOR_LONG_TERM_STATUSES_ACU,
   WORLD_ACTOR_LIFE_ACU,
   WORLD_GUIDANCE_SIGNAL_VOICES_ACU,
   WORLD_PLAYER_CONTACTS_ACU,
@@ -180,6 +181,45 @@ function applyLocation_ACU(target: Record<string, unknown>, key: string, raw: un
   return true;
 }
 
+/**
+ * 人物行为：模型只写 text、expectedDuration（长期行为另有 status/outcome）；开始时间由提交层按最终 clock 盖戳，
+ * 这里先置空占位。null 或空串表示清空当前行为。
+ */
+function applyActorAction_ACU(target: Record<string, unknown>, field: 'currentAction' | 'longTermAction', value: unknown, path: string, notes: WorldSimulationPatchNormalizationNote_ACU[]): boolean {
+  if (value === undefined) return true;
+  const fieldPath = `${path}.${field}`;
+  let raw = value;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!trimmed) { target[field] = null; return true; }
+    try { raw = JSON.parse(trimmed); } catch {
+      note_ACU(notes, 'blocking', fieldPath, `${fieldPath} 必须是 JSON 对象，例如 {"text":"护送粮车南下","expected_duration":"约三日"}`);
+      return false;
+    }
+  }
+  if (raw === null) { target[field] = null; return true; }
+  if (!isRecord_ACU(raw)) {
+    note_ACU(notes, 'blocking', fieldPath, `${fieldPath} 必须是对象或 null`);
+    return false;
+  }
+  const text = typeof raw.text === 'string' ? raw.text.trim() : '';
+  const durationRaw = raw.expectedDuration ?? raw.expected_duration;
+  const expectedDuration = typeof durationRaw === 'string' ? durationRaw.trim() : '';
+  if (!text) { note_ACU(notes, 'blocking', `${fieldPath}.text`, `${fieldPath}.text 必须是非空字符串`); return false; }
+  if (!expectedDuration) { note_ACU(notes, 'blocking', `${fieldPath}.expected_duration`, `${fieldPath} 必须写明预计持续时间 expected_duration`); return false; }
+  const action: Record<string, unknown> = { text, expectedDuration, startedAtDay: null, startedAt: '' };
+  if (field === 'longTermAction') {
+    const status = raw.status === undefined || raw.status === null
+      ? { ok: true as const, value: 'ongoing' as const, autoFixed: false }
+      : coerceWorldSimulationEnum_ACU(raw.status, WORLD_ACTOR_LONG_TERM_STATUSES_ACU);
+    if (!status.ok) { note_ACU(notes, 'blocking', `${fieldPath}.status`, `${fieldPath}.status 只能是 ongoing、done、abandoned`, { actual: raw.status }); return false; }
+    action.status = status.value;
+    action.outcome = typeof raw.outcome === 'string' && raw.outcome.trim() ? raw.outcome.trim() : null;
+  }
+  target[field] = action;
+  return true;
+}
+
 function fillMissing_ACU(target: Record<string, unknown>, defaults: Record<string, unknown>, path: string, notes: WorldSimulationPatchNormalizationNote_ACU[]): void {
   for (const [key, value] of Object.entries(defaults)) {
     if (!Object.prototype.hasOwnProperty.call(target, key)) {
@@ -353,7 +393,9 @@ function normalizeActor_ACU(
   if (!applyStringArray_ACU(next, 'informationSources', item.informationSources, path, notes)) return null;
   if (!applyStringArray_ACU(next, 'knownFacts', item.knownFacts, path, notes)) return null;
   if (!applyEnum_ACU(next, 'visibility', item.visibility, path, notes, VISIBILITY_ACU)) return null;
-  if (!existing) fillMissing_ACU(next, { interests: [], location: '', locationRef: null, life: 'alive', diedAtDay: null, deathSummary: null, resources: [], goals: [], constraints: [], informationSources: [], knownFacts: [], visibility: 'hidden' }, path, notes);
+  if (!applyActorAction_ACU(next, 'currentAction', item.currentAction, path, notes)) return null;
+  if (!applyActorAction_ACU(next, 'longTermAction', item.longTermAction, path, notes)) return null;
+  if (!existing) fillMissing_ACU(next, { interests: [], location: '', locationRef: null, life: 'alive', diedAtDay: null, deathSummary: null, resources: [], goals: [], constraints: [], informationSources: [], knownFacts: [], visibility: 'hidden', currentAction: null, longTermAction: null, experiences: [] }, path, notes);
   if (next.life === 'dead') {
     if (next.diedAtDay === null || !next.deathSummary) {
       note_ACU(notes, 'blocking', path, `${path} dead 状态必须提供 diedAtDay 与 deathSummary`);
@@ -453,6 +495,7 @@ export function validateWorldSimulationUpsertField_ACU(
         ? applyNullableInteger_ACU(target, field, value, path, notes, 1)
         : applyInteger_ACU(target, field, value, path, notes, 1);
     if (field === 'locationRef' && module === 'actors' || field === 'location' && module === 'seeds') return applyLocation_ACU(target, field, value, path, notes);
+    if ((field === 'currentAction' || field === 'longTermAction') && module === 'actors') return applyActorAction_ACU(target, field, value, path, notes);
     if (['interests', 'resources', 'goals', 'constraints', 'informationSources', 'knownFacts', 'actorIds', 'channels', 'relatedActorIds', 'evidenceRefs'].includes(field)) {
       const arrayModules: Record<string, readonly WorldSimulationUpsertModule_ACU[]> = {
         interests: ['actors'], resources: ['actors'], goals: ['actors'], constraints: ['actors'], informationSources: ['actors'], knownFacts: ['actors'],

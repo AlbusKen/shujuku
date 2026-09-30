@@ -9,6 +9,7 @@ import { jQuery_API_ACU } from '../dom-utils';
 import { MENU_ITEM_ID_ACU, SCRIPT_ID_PREFIX_ACU } from '../../shared/constants';
 import { logDebug_ACU, logError_ACU } from '../../shared/utils';
 import { applyLegacyUiMenuVisibility } from '../../shared/legacy-ui-menu-entry';
+import { ACU_PRODUCT_NAME_ACU, ACU_PRODUCT_VERSION_ACU } from '../../shared/product-brand';
 
   export function addAutoCardMenuItem_ACU() {
     const parentDoc = (window.parent || window).document;
@@ -42,7 +43,7 @@ import { applyLegacyUiMenuVisibility } from '../../shared/legacy-ui-menu-entry';
     $menuItemContainer = jQuery_API_ACU(
       `<div class="extension_container interactable" id="${MENU_ITEM_CONTAINER_ID_ACU}" tabindex="0"></div>`,
     );
-    const menuItemHTML = `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID_ACU}" title="打开 SP·数据库 9.2.5"><div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div><span>SP·数据库 9.2.5</span></div>`;
+    const menuItemHTML = `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID_ACU}" title="打开 ${ACU_PRODUCT_NAME_ACU} ${ACU_PRODUCT_VERSION_ACU}"><div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div><span>${ACU_PRODUCT_NAME_ACU} ${ACU_PRODUCT_VERSION_ACU}</span></div>`;
     const $menuItem = jQuery_API_ACU(menuItemHTML);
     $menuItem.on(`click.${SCRIPT_ID_PREFIX_ACU}`, async function (e) {
       e.stopPropagation();

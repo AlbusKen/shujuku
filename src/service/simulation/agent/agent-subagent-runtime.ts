@@ -10,7 +10,7 @@ import type {
 import { resolveWorldSimulationAgentApiPreset_ACU, type WorldSimulationApiPresetDependencies_ACU, type WorldSimulationResolvedApiPreset_ACU } from '../api-preset';
 import { stripWritingAnnotations_ACU } from '../simulation-projection';
 import { preflightWorldSimulationCandidates_ACU } from '../simulation-transaction';
-import { buildInUseWorldCatalog_ACU } from '../world-catalog';
+import { buildInUseWorldCatalog_ACU, worldLedgerRowsForAgent_ACU } from '../world-catalog';
 import type { WorldSimulationEvidenceRegistry_ACU, WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
 import { snapshotWorldSimulationEvidenceRegistry_ACU } from '../world-simulation-evidence-registry';
 import { formatWorldSimulationToolAddressHints_ACU, runWorldSimulationToolBatch_ACU, type WorldSimulationReadRoundState_ACU, type WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
@@ -315,8 +315,8 @@ export function worldSimulationOneShotProtocol_ACU(name: WorldSimulationOneShotR
   const tables = oneShotTables_ACU(modules);
   const details: Record<WorldSimulationOneShotRole_ACU, string> = {
     'undercurrent-analyst': 'clock: UPDATE SET days, story_time, slot; dimensions: name, kind, value, trend, rationale，其中 kind 只能是英文原值 pressure 或 growth，trend 只能是 rising、stable、falling；seeds: title, status, level, catalyst, visibility, location, expires_at_day, missed_outcome, actor_ids, expose_policy, retired_reason。seeds.actor_ids 只能是已存在的 actor.id 字符串数组，例如 actor_ids = \'["actor-1"]\'；没有已确认人物 ID 就省略该列，绝不能写人物对象数组。seeds.location 必须是 JSON 对象字符串，例如 location = \'{"region":"江南府","place":"城外"}\'，只有 region 必填；无确定地点则省略 location，不可填单独地名。其中 visibility 只能是英文原值 hidden、limited、public，status 只能是 established、incubating、active、converging、resolved、retired。枚举不得填写中文解释、组合描述或其他同义词。',
-    'dramatis-keeper': 'player: UPDATE SET location, contact（仅这两列及 evidence_refs，location_updated_at_day 与 region_visits 是内部派生字段，绝对不可写进 SQL）；actors: name, interests, location, location_ref, goals, information_sources, known_facts, life, died_at_day, death_summary; rumors 仅死亡伴生: fact, origin_day, earliest_reveal_day, channels, related_actor_ids。',
-    'guidance-composer': 'chronicle: INSERT summary, related_ids 或 DELETE id, reason；chronicle_archive 只能写 archive_ref, day, summary, fingerprints, related_ids, source_chronicle_ids；chronicle_overview 只能写 fingerprint, day, one_line, archive_ref，二者必须用同一个 archive_ref 成对 INSERT，不能把 summary/related_ids 写入 chronicle_overview。rumors: fact, origin_day, earliest_reveal_day, channels, related_actor_ids, status, revealed_at_day；guidance: 只能 UPDATE signals, excluded_facts（必须带 WHERE expected_revision）。guidance.signals 的 sourceId 只能指向本次输入账本中已经存在的条目 ID、clock 或 player；本候选新 INSERT 的 rumor/chronicle 不能在同一候选中作为 sourceId，不得编造 rumors:1 等地址。',
+    'dramatis-keeper': 'player: UPDATE SET location, contact（仅这两列及 evidence_refs，location_updated_at_day 与 region_visits 是内部派生字段，绝对不可写进 SQL）；actors: name, interests, location, location_ref, goals, information_sources, known_facts, life, died_at_day, death_summary, current_action, long_term_action; rumors 仅死亡伴生: fact, origin_day, earliest_reveal_day, channels, related_actor_ids。current_action 写 JSON 对象，例如 current_action = \'{"text":"在客栈盯着往来客商","expected_duration":"今夜之内"}\'；long_term_action 另带 status（ongoing/done/abandoned）与可选 outcome，例如 long_term_action = \'{"text":"护送粮车南下","expected_duration":"约三日","status":"done","outcome":"顺利抵达江南府"}\'。行为的开始时间与经历时间线由程序派生，不能写 experiences 或任何时间戳。',
+    'guidance-composer': 'chronicle: INSERT summary, related_ids, missed_note 或 DELETE id, reason；missed_note 只在主角错过了重要幕后事件时写（说明错过了什么），普通纪要省略该列；chronicle_archive 只能写 archive_ref, day, summary, fingerprints, related_ids, source_chronicle_ids；chronicle_overview 只能写 fingerprint, day, one_line, archive_ref，二者必须用同一个 archive_ref 成对 INSERT，不能把 summary/related_ids 写入 chronicle_overview。rumors: fact, origin_day, earliest_reveal_day, channels, related_actor_ids, status, revealed_at_day；guidance: 只能 UPDATE signals, excluded_facts（必须带 WHERE expected_revision）。guidance.signals 的 sourceId 只能指向本次输入账本中已经存在的条目 ID、clock 或 player；本候选新 INSERT 的 rumor/chronicle 不能在同一候选中作为 sourceId，不得编造 rumors:1 等地址。',
   };
   return [
     '【交付协议】有可证实的变更时调用原生 write_sql 函数，参数只填 sql 字段（一条或多条受限 SQL）；工具调用仅生成待验证候选，不即时写入账本；候选通过校验后本角色结束，由两批工作流统一预览与最终提交。不得把 SQL 放入文本 JSON 或输出裸 SQL。',
@@ -471,7 +471,9 @@ export class WorldSimulationSubagentRuntime_ACU {
             // 传闻单行很短，不设上限整组完整注入；只排除已消亡条目。
             ? input.givenLedger.rumors.filter(row => row.status !== 'dead')
             : rows;
-      own[module] = selected;
+      own[module] = module === 'seeds' || module === 'actors' || module === 'rumors'
+        ? worldLedgerRowsForAgent_ACU(module, selected as readonly object[])
+        : selected;
       const kept = new Set(selected.map(row => row.id));
       for (const row of rows) if (!kept.has(row.id)) omitted.push({ id: row.id, name: 'name' in row ? String(row.name) : 'title' in row ? String(row.title) : String(row.fact), readAddress: `${module}:${row.id}` });
     }
@@ -483,7 +485,7 @@ export class WorldSimulationSubagentRuntime_ACU {
       else if (module === 'chronicle') related[module] = catalog.chronicleHot;
       // 维度与传闻单行很短，直接注入完整行，不再拆成目录与详情；种子与人物字段多，仍用浓缩目录。
       else if (module === 'dimensions') related[module] = input.givenLedger.dimensions;
-      else if (module === 'rumors') related[module] = input.givenLedger.rumors.filter(row => row.status !== 'dead');
+      else if (module === 'rumors') related[module] = worldLedgerRowsForAgent_ACU('rumors', input.givenLedger.rumors.filter(row => row.status !== 'dead'));
       else if (module in catalog) related[module] = catalog[module as 'dimensions' | 'seeds' | 'actors' | 'rumors'];
     }
     const anchor = typeof input.promptContext.anchorMessage === 'string' ? input.promptContext.anchorMessage : '';

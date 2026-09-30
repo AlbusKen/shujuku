@@ -593,8 +593,12 @@ function renderWriteSqlRepair_ACU(receipt: AgentModuleFieldReceipt_ACU): string 
     if (item.promotionError) lines.push(`未能提升：${item.promotionError}。如 missingFields 为空，先 read 核对已存栏目，再只修正领域校验失败的栏目；不能照搬缺栏范例。`);
   }
   for (const item of receipt.rejected) {
+    if (item.reason.startsWith('already_absent')) {
+      lines.push(`${item.path}：删除目标已不存在，视为删除已完成。不要 INSERT 重建该条目，也不要重发这条 DELETE。`);
+      continue;
+    }
     lines.push(`${item.path}：${item.reason}。被拒栏目尚未保存；按报错核对类型、枚举和正文证据，只补拒绝的栏目，不重发 accepted。`);
-    if (item.reason === 'not_found') lines.push('先 read 对应 $FIELD:模块:ID 确认记录确实不存在；只有确认为新记录时才用 INSERT，已有草稿必须用 UPDATE。');
+    if (item.reason === 'not_found') lines.push('UPDATE 的目标不存在：先 read 对应 $FIELD:模块:ID 核实；只有正文确实新出现该条目才用 INSERT 建新行，已有草稿必须用 UPDATE，已删除的条目不要重建。');
     if (item.reason === 'id_exists' || item.reason.startsWith('revision_conflict')) lines.push('先 read 对应 $FIELD:模块:ID 核实已存栏目，再用回执 revisions 或权威快照中的当前模块修订号补写；不要使用旧号或示例的 0。');
     if (item.reason.includes('字段数与值数量不一致') || item.reason.includes('字符串字面量未闭合')) lines.push('正文里的单引号写成两个单引号；检查每个值与列一一对应。');
     if (item.reason.includes('必须是非空字符串数组')) lines.push("数组必须写成单引号包裹的 JSON 文本，例如 '[\"与守门人的信任\"]'，不能用逗号或竖线代替。");
@@ -604,7 +608,8 @@ function renderWriteSqlRepair_ACU(receipt: AgentModuleFieldReceipt_ACU): string 
 
 /** 契约 SQL 已经按栏目落库时，只追缺栏和被拒栏目，不再把整行收成会失败的 patch。 */
 function renderIncompleteFieldWrite_ACU(receipt: AgentModuleFieldReceipt_ACU): string | null {
-  const rejected = receipt.rejected.filter(item => item.path !== 'host');
+  // 删除目标已不存在是幂等完成，不要求补写。
+  const rejected = receipt.rejected.filter(item => item.path !== 'host' && !item.reason.startsWith('already_absent'));
   const missing = (receipt.partials ?? []).filter(item => item.missingFields.length || item.promotionError);
   if (!rejected.length && !missing.length && receipt.partials !== null && !renderWriteSqlRepair_ACU(receipt)) return null;
   const lines: string[] = [];
@@ -840,6 +845,8 @@ export class AgentSubagentRuntime_ACU {
         writeProblems.delete(key);
       }
       for (const item of receipt.rejected) {
+        // 删除目标已不存在属于幂等完成，不是待修复缺口。
+        if (item.reason.startsWith('already_absent')) continue;
         const match = /^(hooks|infoGap|storyArc|chronology|webRefs)#([^.#]+)\.([A-Za-z][A-Za-z0-9]*)$/.exec(item.path);
         const module = match?.[1] as AgentWritableModule_ACU | undefined;
         writeProblems.set(item.path, { module: module && writes.includes(module) ? module : writes[0],
@@ -850,8 +857,9 @@ export class AgentSubagentRuntime_ACU {
         ...receipt.accepted.map(item => `${item.module}#${item.id}`),
         ...(receipt.partials ?? []).map(item => `${item.module}#${item.id}`),
       ]);
-      for (const [key, issue] of writeProblems) {
-        if (settledIds.has(key) && issue.message.startsWith('revision_conflict')) writeProblems.delete(key);
+      // 行级拒绝（not_found、id_exists、revision_conflict 等）在同一条目后续被确认写入或进入草稿后即已解决。
+      for (const key of [...writeProblems.keys()]) {
+        if (settledIds.has(key)) writeProblems.delete(key);
       }
     };
     const terminalIssues = (): AgentSubagentUnresolvedIssue_ACU[] => {

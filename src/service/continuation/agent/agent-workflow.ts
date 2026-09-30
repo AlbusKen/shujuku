@@ -323,6 +323,13 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
         snapshot = recordWorkflowIssues_ACU(snapshot, issues, MAINTAINER_NAME_ACU, settlementStartIndex, settlementEndIndex, maintainer.acceptedKeys);
         completion = appliedModules.length ? 'partial' : 'failed';
       }
+      if (maintainer.ok && maintainer.usedFieldWrites) {
+        // 逐栏写入事务保留旧 pendingFixes（见 agent-module-field-commit），delta 路径不会走到这里。
+        // 运行时已按权威折叠状态核对缺栏与拒绝，本轮没有新问题的已完成模块在此清账，避免旧缺口每轮升级。
+        const unresolvedModules = new Set<string>(issues.map(item => item.module));
+        snapshot = clearCompletedPending_ACU(snapshot, Object.fromEntries(Object.entries(modules)
+          .filter(([module]) => !unresolvedModules.has(module))) as typeof modules);
+      }
       const transactionPending = snapshot.pendingFixes.filter(item => writes.includes(item.module));
       if (transactionPending.length) {
         for (const fix of transactionPending) {

@@ -1,10 +1,11 @@
 /**
  * menu-button — 在 host document 的 #extensionsMenu 中挂 UI v2 按钮（D15）
  *
- * 与旧菜单按钮（startup.ts 中的 SP·数据库 IX 旧UI）共存，互不影响。
+ * 与旧菜单按钮（startup.ts 中的旧 UI 入口）共存，互不影响。
  * 依赖 host document 解析（D15.1），因此也只在 host document 上注册按钮。
  */
 import { logDebug_ACU, logError_ACU } from '../../shared/utils';
+import { ACU_PRODUCT_NAME_ACU } from '../../shared/product-brand';
 import { getAcuHostDocument, getAcuHostWindow, getAcuHostSource } from './host-document';
 import { openAcuV2App } from './mount';
 
@@ -49,9 +50,9 @@ function attemptInsert(retry: number): void {
     `<div class="extension_container interactable" id="${MENU_CONTAINER_ID}" tabindex="0"></div>`;
   const itemHtml =
     `<div class="list-group-item flex-container flexGap5 interactable" id="${MENU_ITEM_ID}" ` +
-    `title="打开 SP·数据库 IX">` +
+    `title="打开 ${ACU_PRODUCT_NAME_ACU}">` +
     `<div class="fa-fw fa-solid fa-database extensionsMenuExtensionButton"></div>` +
-    `<span>SP·数据库 IX</span>` +
+    `<span>${ACU_PRODUCT_NAME_ACU}</span>` +
     `</div>`;
   const $container = $(containerHtml);
   const $item = $(itemHtml);

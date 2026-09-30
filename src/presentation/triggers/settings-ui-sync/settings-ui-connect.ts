@@ -210,7 +210,7 @@ import { buildTavernHelperCompat_ACU, formatHostCapabilities_ACU } from '../../.
       }
       const diagnostics = `缺失项: [${missingParts.join(', ')}]；宿主能力: ${formatHostCapabilities_ACU(tavernHelperCompat.capabilities)}`;
       logError_ACU(`Failed to load one or more critical APIs for AutoCardUpdater. ${diagnostics}`);
-      console.error(`[SP·数据库] 核心API加载失败。${diagnostics}`);
+      console.error(`[龙血玄黄·数据库] 核心API加载失败。${diagnostics}`);
     }
     return coreApisAreReady_ACU;
   }

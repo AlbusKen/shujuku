@@ -1,5 +1,6 @@
 import { WORLD_CHRONICLE_HOT_WINDOW_ACU, type WorldChronicleOverviewRow_ACU, type WorldLocationRef_ACU, type WorldSimulationLedger_ACU } from './model';
 import { buildArchiveHints_ACU, type WorldArchiveHint_ACU } from './archive-hints';
+import { recentWorldActorExperiences_ACU } from './actor-timeline';
 
 export interface WorldCatalogRow_ACU {
   id: string;
@@ -40,6 +41,45 @@ function joinParts_ACU(parts: ReadonlyArray<string | false | 0 | null | undefine
   return parts.filter((part): part is string => typeof part === 'string' && part.length > 0).join('；');
 }
 
+/** 已结束条目的显式标注，避免其他 AI 把已收场的事当成仍在进行。 */
+export function worldLedgerEndedLabel_ACU(module: 'seeds' | 'rumors' | 'actors', row: Record<string, unknown>): string | null {
+  if (module === 'seeds') {
+    if (row.status === 'resolved') return '已结束：已收束';
+    if (row.status === 'retired') return `已结束：已退役${row.retiredReason ? `（${String(row.retiredReason)}）` : ''}`;
+  }
+  if (module === 'rumors') {
+    if (row.status === 'revealed') return '已结束：主角已得知';
+    if (row.status === 'dead') return '已结束：已失效';
+  }
+  if (module === 'actors' && row.life === 'dead') return '已结束：已死亡';
+  return null;
+}
+
+/**
+ * 注入子代理的完整行视图：已结束条目追加 ended 标注；人物经历只带最近若干条。
+ * 只读视图，不写回账本；ended 不是可写列。
+ */
+export function worldLedgerRowsForAgent_ACU<T extends object>(module: 'seeds' | 'rumors' | 'actors', rows: readonly T[]): Array<T & { ended?: string }> {
+  return rows.map(row => {
+    const view = { ...row } as unknown as Record<string, unknown>;
+    if (module === 'actors' && Array.isArray(view.experiences)) {
+      view.experiences = recentWorldActorExperiences_ACU(view as { experiences: never[] });
+    }
+    const ended = worldLedgerEndedLabel_ACU(module, view);
+    if (ended) view.ended = ended;
+    return view as T & { ended?: string };
+  });
+}
+
+function actorActionText_ACU(action: { text: string; expectedDuration: string } | null | undefined): string {
+  return action ? `${action.text}（预计${action.expectedDuration}）` : '';
+}
+
+function actorLatestExperience_ACU(item: WorldSimulationLedger_ACU['actors'][number]): string {
+  const latest = recentWorldActorExperiences_ACU(item, 1)[0];
+  return latest ? `近期经历：${latest.text}（第${latest.endedAtDay}日${latest.status === 'done' ? '了结' : '中止'}）` : '';
+}
+
 export function buildInUseWorldCatalog_ACU(ledger: WorldSimulationLedger_ACU): WorldInUseCatalog_ACU {
   const activeSeeds = ledger.seeds.filter(seed => seed.status !== 'resolved' && seed.status !== 'retired');
   const activeRumors = ledger.rumors.filter(rumor => rumor.status === 'latent' || rumor.status === 'ripe');
@@ -56,12 +96,15 @@ export function buildInUseWorldCatalog_ACU(ledger: WorldSimulationLedger_ACU): W
       item.actorIds.length > 0 && `人物：${item.actorIds.join(',')}`,
     ]), 'seeds', 140)),
     actors: ledger.actors.map(item => row_ACU(item.id, item.name, joinParts_ACU([
-      `${item.life} ${item.visibility}`,
+      item.life === 'dead' ? `已结束：已死亡 ${item.visibility}` : `${item.life} ${item.visibility}`,
       `@${locationText_ACU(item.locationRef, item.location) || '未知'}`,
       item.life === 'dead' && item.deathSummary && `死因：${item.deathSummary}`,
+      item.life !== 'dead' && item.currentAction && `在做：${actorActionText_ACU(item.currentAction)}`,
+      item.life !== 'dead' && item.longTermAction && `长期：${actorActionText_ACU(item.longTermAction)}`,
       item.goals.length > 0 && `目标：${item.goals.slice(0, 2).join('、')}`,
       item.interests.length > 0 && `关切：${item.interests.slice(0, 2).join('、')}`,
-    ]), 'actors', 140)),
+      actorLatestExperience_ACU(item),
+    ]), 'actors', 220)),
     rumors: activeRumors.map(item => row_ACU(item.id, item.fact, `${item.status} ${item.channels.join(',')}`, 'rumors')),
     chronicleHot: hot.map(item => ({
       id: item.id,
