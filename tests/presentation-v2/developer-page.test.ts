@@ -44,7 +44,7 @@ async function mountDeveloperPage() {
   localStorage.setItem(
     STORAGE_KEY,
     JSON.stringify({
-      router: { activePageId: 'developer' },
+      uiTierV2: { tier: 'high' }, router: { activePageId: 'developer' },
       devOptions: { developerOptionsEnabled: true },
     }),
   );

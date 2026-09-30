@@ -14,7 +14,6 @@ const panelGridPages = [
   'ImportPage.vue',
   'PlotPage.vue',
   'TablePage.vue',
-  'VectorIndexPage.vue',
   'WorldSimulationPage.vue',
 ];
 

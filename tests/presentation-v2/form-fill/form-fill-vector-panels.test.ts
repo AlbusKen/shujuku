@@ -1,5 +1,5 @@
 /**
- * VectorIndexPage 集成 — 交火模式（向量混合增强）页骨架与立即构建动作
+ * FormFillVectorPanels 集成 — 填表工作台交火模式分支的向量面板骨架与立即构建动作
  *
  * @vitest-environment jsdom
  */
@@ -73,7 +73,8 @@ async function mountVectorIndexPage(opts: {
   document.body.innerHTML = '';
   document.head.innerHTML = '';
   localStorage.setItem(STORAGE_KEY, JSON.stringify({
-    router: { activePageId: 'vector-index' },
+    uiTierV2: { tier: 'high' },
+    router: { activePageId: 'form-fill' },
     ...(opts.devOptions ? { devOptions: opts.devOptions } : {}),
   }));
 
@@ -134,6 +135,8 @@ async function mountVectorIndexPage(opts: {
   }));
   vi.doMock('../../../src/service/settings/settings-service', () => ({
     saveSettings_ACU: saveSettings,
+    setGlobalPlotEnabled_ACU: vi.fn(),
+    setZeroTkOccupyMode_ACU: vi.fn(),
   }));
   vi.doMock('../../../src/service/ai/ai-service', () => ({
     getConnectionManagerProfiles_ACU: () => [],
@@ -190,6 +193,15 @@ async function mountVectorIndexPage(opts: {
     deleteCurrentSummaryVectorIndexFromChat_ACU: deleteIndex,
   }));
 
+  // 交火参数面板只在填表模式为交火时出现：经真实权威存储播种所选模式。
+  const profileRepo = await import('../../../src/data/repositories/profile-repo');
+  profileRepo.globalMeta_ACU.formFillPreferencesGlobal = {
+    schemaVersion: 1,
+    selectedMode: 'crossfire',
+    classic: { recentChronicleRows: 15 },
+    vector: { resultCount: 200 },
+    llm: { apiPresetName: '' },
+  };
   const mount = await import('../../../src/presentation-v2/bootstrap/mount');
   await mount.openAcuV2App();
   await new Promise(r => setTimeout(r, 0));
@@ -227,7 +239,7 @@ async function flushDialog(): Promise<HTMLElement> {
 }
 
 describe('VectorIndexPage', () => {
-  it('渲染交火模式页骨架，包含核心面板', async () => {
+  it('交火模式下填表工作台渲染全部向量面板', async () => {
     const { mount, getStats } = await mountVectorIndexPage();
 
     const page = document.querySelector('.acu-v2-vector-index-page');
@@ -292,9 +304,9 @@ describe('VectorIndexPage', () => {
       .find(panel => panel.querySelector('.acu-panel__title')?.textContent?.includes('关键词生成提示词'))!;
     expect(promptPanel.querySelector('.acu-panel__actions .acu-badge')?.textContent).toContain('使用默认提示词');
     expect(promptPanel.querySelector('.acu-v2-vector-index-page__prompt-overview')).toBeNull();
-    const mobileNavItems = Array.from(page!.querySelectorAll('.acu-mobile-panel-nav__item'))
+    const mobileNavItems = Array.from(document.querySelectorAll('.acu-v2-form-fill-page .acu-mobile-panel-nav__item'))
       .map(item => item.textContent?.trim());
-    expect(mobileNavItems).toEqual(['索引状态', '关键词', '向量服务', '提示词', '召回参数', '归档分块']);
+    expect(mobileNavItems).toEqual(['表格状态', '填表模式', '自动更新', '手动填表', '表格模板预设', '索引状态', '关键词', '向量服务', '提示词', '召回参数', '归档分块']);
 
     mount.__resetAcuV2MountForTests();
   });
@@ -313,7 +325,7 @@ describe('VectorIndexPage', () => {
       content: typeof segment.content === 'string' ? segment.content.trim() : segment.content,
     }));
 
-    useRouterStore().setActivePage('vector-index');
+    useRouterStore().setActivePage('form-fill');
     await nextTick();
 
     const textAfterReturn = document.querySelector('.acu-v2-vector-index-page')?.textContent || '';
@@ -337,9 +349,9 @@ describe('VectorIndexPage', () => {
     expect(text).not.toContain('折叠阈值 K');
     expect(text).not.toContain('V2 写入闸门');
     expect(document.querySelector('.acu-v2-vector-index-page__scope-allowlist')).toBeNull();
-    const mobileNavItems = Array.from(document.querySelectorAll('.acu-v2-vector-index-page .acu-mobile-panel-nav__item'))
+    const mobileNavItems = Array.from(document.querySelectorAll('.acu-v2-form-fill-page .acu-mobile-panel-nav__item'))
       .map(item => item.textContent?.trim());
-    expect(mobileNavItems).toEqual(['索引状态', '关键词', '向量服务', '提示词', '召回参数', '归档分块']);
+    expect(mobileNavItems.slice(-6)).toEqual(['索引状态', '关键词', '向量服务', '提示词', '召回参数', '归档分块']);
 
     mount.__resetAcuV2MountForTests();
   });
@@ -362,7 +374,7 @@ describe('VectorIndexPage', () => {
 
     expect(document.querySelector('.acu-v2-vector-index-page .acu-page-header')).toBeNull();
     const globalTitle = document.querySelector('.acu-v2-app__page-title');
-    expect(globalTitle?.textContent?.trim()).toBe('交火模式');
+    expect(globalTitle?.textContent?.trim()).toBe('填表工作台');
 
     mount.__resetAcuV2MountForTests();
   });

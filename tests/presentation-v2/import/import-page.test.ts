@@ -33,7 +33,7 @@ async function mountImportPage(
   vi.resetModules();
   document.body.innerHTML = '';
   document.head.innerHTML = '';
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({ router: { activePageId: 'import' } }));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ uiTierV2: { tier: 'high' }, router: { activePageId: 'import' } }));
 
   vi.doMock('../../../src/service/runtime/state-manager', () => ({
     settings_ACU: settings,

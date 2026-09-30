@@ -16,7 +16,7 @@ async function mountAdvancedToolsLogPanel(seedLogs = true, warnLogEnabled = seed
   document.body.innerHTML = '';
   document.head.innerHTML = '';
   localStorage.setItem(STORAGE_KEY, JSON.stringify({
-    router: { activePageId: 'advanced-tools' },
+    uiTierV2: { tier: 'high' }, router: { activePageId: 'advanced-tools' },
     devOptions: { warnLogEnabled },
   }));
 

@@ -9,7 +9,7 @@
           aria-label="SP·数据库 IX（连续点击五次打开功能档位设置）"
           @click="onBrandTitleClick"
         >SP·数据库 IX</button>
-        <span class="acu-v2-sidebar__brand-tag">新 UI · {{ uiMode.modeLabel }}</span>
+        <span class="acu-v2-sidebar__brand-tag">{{ uiMode.modeLabel }}</span>
       </span>
     </div>
 
@@ -65,10 +65,13 @@ const dialogStore = useDialogStore();
 const brandClickCount = ref(0);
 let brandClickTimer: AcuTimerHandle | undefined;
 
+const HIGH_TIER_PHRASE = '开启高级功能';
+const TIER_ORDER: readonly AcuUiTier[] = ['low', 'medium', 'high'];
+
 const tierDescriptions: Record<AcuUiTier, string> = {
-  low: '显示日常填表、模板与基础 API 配置。',
-  medium: '在基础功能上显示填表调节、剧情与逻辑召回配置。',
-  high: '显示完整诊断、索引维护、数据管理与开发者工具。',
+  low: '只显示记忆功能所需的填表工作台、填表模式与 API。',
+  medium: '显示填表规则、剧情推进、Agent、智能续写与外部导入。',
+  high: '在进阶模式基础上再显示格林推演、正文替换、数据管理、高级工具与开发者选项。',
 };
 
 function resetBrandClickSequence(): void {
@@ -90,18 +93,16 @@ function onBrandTitleClick(): void {
 
 async function openTierDialog(): Promise<void> {
   const currentTier = uiMode.tier;
-  const selectableTiers: AcuUiTier[] = currentTier === 'low'
-    ? ['low', 'medium']
-    : ['low', 'medium', 'high'];
   const selected = await dialogStore.choose<AcuUiTier>({
     title: '功能档位设置',
     badge: { label: `当前：${ACU_UI_TIER_LABELS[currentTier]}`, variant: 'accent' },
     message: [
-      ...selectableTiers.map((tier) => `${ACU_UI_TIER_LABELS[tier]}：${tierDescriptions[tier]}`),
+      ...TIER_ORDER.map((tier) => `${ACU_UI_TIER_LABELS[tier]}：${tierDescriptions[tier]}`),
       '',
-      '档位只影响界面显示，不会改变填表模式或已保存的模式参数。',
+      '如果你只是想要记忆功能，轻量模式已经足够，完全没有必要打开进阶或高级模式里的功能，也不需要对它们进行配置。',
+      '档位只影响界面显示，不会改变填表模式或已保存的参数。',
     ].join('\n'),
-    actions: selectableTiers.map((tier) => ({
+    actions: TIER_ORDER.map((tier) => ({
       value: tier,
       label: ACU_UI_TIER_LABELS[tier],
       variant: tier === currentTier ? 'default' : tier === 'high' ? 'danger' : 'primary',
@@ -109,19 +110,11 @@ async function openTierDialog(): Promise<void> {
   });
   if (!selected || selected === currentTier) return;
 
-  if (selected === 'medium' && currentTier === 'low') {
-    const confirmed = await dialogStore.confirm({
-      title: '开启进阶模式',
-      message: '将显示更多配置项与诊断入口，但不会改变填表模式、模式参数或历史数据。',
-      confirmLabel: '开启进阶模式',
-    });
-    if (!confirmed) return;
-  }
-
+  // 只有切到高级模式需要倒计时与口令确认；轻量 / 进阶之间直接生效。
   if (selected === 'high') {
     const confirmed = await dialogStore.confirm({
       title: '准备开启高级模式',
-      message: '高级模式会显示索引维护、数据管理、完整诊断和开发者工具。显示这些入口不会自动执行危险操作。',
+      message: '高级模式会显示数据管理、高级工具和开发者选项等入口。显示这些入口不会自动执行危险操作。',
       confirmLabel: '继续',
       confirmVariant: 'danger',
       confirmCountdownSeconds: 2,
@@ -129,13 +122,13 @@ async function openTierDialog(): Promise<void> {
     if (!confirmed) return;
     const phrase = await dialogStore.prompt({
       title: '确认开启高级模式',
-      message: '请输入“开启高级功能”以完成解锁。',
+      message: `请输入“${HIGH_TIER_PHRASE}”以完成解锁。`,
       label: '确认短语',
-      placeholder: '开启高级功能',
+      placeholder: HIGH_TIER_PHRASE,
       confirmLabel: '解锁高级模式',
       confirmVariant: 'danger',
     });
-    if (phrase !== '开启高级功能') return;
+    if (phrase !== HIGH_TIER_PHRASE) return;
   }
 
   uiMode.setTier(selected);

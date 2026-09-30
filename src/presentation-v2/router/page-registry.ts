@@ -2,7 +2,7 @@
  * page-registry — 一级页静态注册表（plan §4.1 + §D24）
  *
  * 页面 id 保持稳定；退役页面通过路由别名兼容。可见性依赖运行时状态
- * 的页通过 requiresSqlite / featureGate / visibleWhen 表达，由 router store
+ * 的页通过 uiTier / requiresSqlite / featureGate / visibleWhen 表达，由 router store
  * 在请求 visiblePages 时计算。
  */
 import { markRaw } from 'vue';
@@ -18,7 +18,6 @@ import AgentPage from '../pages/AgentPage.vue';
 import ContinuationPage from '../pages/ContinuationPage.vue';
 import WorldSimulationPage from '../pages/WorldSimulationPage.vue';
 import ImportPage from '../pages/ImportPage.vue';
-import VectorIndexPage from '../pages/VectorIndexPage.vue';
 import DataMgmtPage from '../pages/DataMgmtPage.vue';
 import ContentReplacePage from '../pages/ContentReplacePage.vue';
 import AdvancedToolsPage from '../pages/AdvancedToolsPage.vue';
@@ -32,26 +31,24 @@ export const FEATURE_GATE_PLOT = 'plot';
 export const FEATURE_GATE_CONTINUATION = 'continuation';
 export const FEATURE_GATE_WORLD_SIMULATION = 'world-simulation';
 export const FEATURE_GATE_IMPORT = 'import';
-export const FEATURE_GATE_VECTOR_INDEX = 'vector-index';
 export const ACU_V2_FORM_FILL_PAGE_ID = 'form-fill';
 
 export const ACU_V2_PAGE_REGISTRY: readonly AcuV2Page[] = Object.freeze([
 
   // 概览
-  { id: 'dashboard', title: dashboardCopy.pageTitle, group: 'overview', component: markRaw(DashboardPage), minUiTier: 'low' },
+  { id: 'dashboard', title: dashboardCopy.pageTitle, group: 'overview', component: markRaw(DashboardPage) },
 
   // 配置
-  { id: ACU_V2_FORM_FILL_PAGE_ID, title: '填表工作台', group: 'config', component: markRaw(FormFillPage), minUiTier: 'low' },
+  { id: ACU_V2_FORM_FILL_PAGE_ID, title: '填表工作台', group: 'config', component: markRaw(FormFillPage) },
   { id: 'table', title: '填表规则', group: 'config', component: markRaw(TablePage), minUiTier: 'medium' },
   { id: 'plot', title: '剧情推进', group: 'config', component: markRaw(PlotPage), minUiTier: 'medium', featureGate: FEATURE_GATE_PLOT },
   { id: 'agent', title: 'Agent', group: 'config', component: markRaw(AgentPage), minUiTier: 'medium' },
-  { id: 'api', title: 'API', group: 'config', component: markRaw(ApiPage), minUiTier: 'low' },
+  { id: 'api', title: 'API', group: 'config', component: markRaw(ApiPage) },
 
   // 功能
   { id: 'continuation', title: '智能续写', group: 'feature', component: markRaw(ContinuationPage), minUiTier: 'medium', featureGate: FEATURE_GATE_CONTINUATION },
   { id: 'world-simulation', title: '格林推演', group: 'feature', component: markRaw(WorldSimulationPage), minUiTier: 'high', featureGate: FEATURE_GATE_WORLD_SIMULATION },
   { id: 'import', title: '外部导入', group: 'feature', component: markRaw(ImportPage), minUiTier: 'medium', featureGate: FEATURE_GATE_IMPORT },
-  { id: 'vector-index', title: '交火模式', group: 'feature', component: markRaw(VectorIndexPage), minUiTier: 'high', featureGate: FEATURE_GATE_VECTOR_INDEX },
   {
     id: 'content-replace',
     title: '正文替换',

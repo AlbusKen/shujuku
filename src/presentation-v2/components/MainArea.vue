@@ -67,8 +67,7 @@ watch(
 .acu-v2-main :deep(.acu-v2-data-mgmt-page),
 .acu-v2-main :deep(.acu-v2-developer-page),
 .acu-v2-main :deep(.acu-v2-plot-page),
-.acu-v2-main :deep(.acu-v2-table-page),
-.acu-v2-main :deep(.acu-v2-vector-index-page) {
+.acu-v2-main :deep(.acu-v2-table-page) {
   padding: var(--acu-page-padding, 20px);
   gap: var(--acu-page-gap, 14px);
 }
@@ -90,8 +89,7 @@ watch(
   .acu-v2-main :deep(.acu-v2-data-mgmt-page),
   .acu-v2-main :deep(.acu-v2-developer-page),
   .acu-v2-main :deep(.acu-v2-plot-page),
-  .acu-v2-main :deep(.acu-v2-table-page),
-  .acu-v2-main :deep(.acu-v2-vector-index-page) {
+  .acu-v2-main :deep(.acu-v2-table-page) {
     padding: var(--acu-page-padding-compact, 14px);
   }
 }

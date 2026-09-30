@@ -28,7 +28,7 @@ async function freshImport(): Promise<{
 
 function persistAdvancedMode(activePageId?: string): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify({
-    uiMode: { mode: 'advanced' },
+    uiTierV2: { tier: 'high' },
     ...(activePageId ? { router: { activePageId } } : {}),
   }));
 }
@@ -43,11 +43,11 @@ afterEach(() => {
 });
 
 describe('router-store · pageRegistry 基线', () => {
-  it('注册表恰好 14 项，分布于 5 分组', async () => {
+  it('注册表恰好 13 项，分布于 5 分组', async () => {
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
-    expect(r.pageRegistry.length).toBe(14);
+    expect(r.pageRegistry.length).toBe(13);
     const byGroup = r.pageRegistry.reduce<Record<string, number>>((acc, p) => {
       acc[p.group] = (acc[p.group] || 0) + 1;
       return acc;
@@ -55,7 +55,7 @@ describe('router-store · pageRegistry 基线', () => {
     expect(byGroup).toEqual({
       overview: 1,
       config: 5,
-      feature: 5,
+      feature: 4,
       tool: 2,
       developer: 1,
     });
@@ -77,7 +77,6 @@ describe('router-store · pageRegistry 基线', () => {
       ['continuation', '智能续写', 'feature'],
       ['world-simulation', '格林推演', 'feature'],
       ['import', '外部导入', 'feature'],
-      ['vector-index', '交火模式', 'feature'],
       ['content-replace', '正文替换', 'feature'],
       ['data-mgmt', '数据管理', 'tool'],
       ['advanced-tools', '高级工具', 'tool'],
@@ -310,7 +309,7 @@ describe('router-store · 切页 + 持久化', () => {
   });
 
   it('localStorage 中已有合法 id 时使用持久化值', async () => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ uiMode: { mode: 'advanced' }, router: { activePageId: 'plot' } }));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ uiTierV2: { tier: 'high' }, router: { activePageId: 'plot' } }));
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
@@ -318,7 +317,7 @@ describe('router-store · 切页 + 持久化', () => {
   });
 
   it('旧 SQL 控制台持久化路由会迁移到高级工具', async () => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ uiMode: { mode: 'advanced' }, router: { activePageId: 'sql-console' } }));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ uiTierV2: { tier: 'high' }, router: { activePageId: 'sql-console' } }));
     const m = await freshImport();
     const state = await import('../../../src/service/runtime/state-manager');
     state._set_settings_ACU({ ...state.settings_ACU, storageMode: 'sqlite' });
@@ -382,9 +381,6 @@ describe('router-store · 切页 + 持久化', () => {
     expect(r.visiblePages.map(p => p.id)).not.toContain('continuation');
     expect(r.visiblePages.map(p => p.id)).not.toContain('world-simulation');
     expect(r.visiblePages.map(p => p.id)).not.toContain('import');
-
-    r.setFeatureGate(m.registry.FEATURE_GATE_VECTOR_INDEX, true);
-    expect(r.visiblePages.map(p => p.id)).toContain('vector-index');
   });
 
   it('setActivePage 拒绝切到不可见页', async () => {
@@ -427,7 +423,7 @@ describe('router-store · 崩溃哨兵', () => {
 
   it('上次页面未完成绘制时高手模式回退到 dashboard，不恢复 continuation', async () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      uiMode: { mode: 'advanced' },
+      uiTierV2: { tier: 'high' },
       router: { activePageId: 'continuation', bootPending: true },
     }));
     const m = await freshImport();

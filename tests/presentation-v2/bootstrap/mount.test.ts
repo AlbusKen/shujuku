@@ -43,7 +43,7 @@ function setParent(parent: any) {
 }
 
 function persistAdvancedMode(): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({ uiMode: { mode: 'advanced' } }));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ uiTierV2: { tier: 'high' } }));
 }
 
 afterEach(() => {
@@ -362,7 +362,7 @@ describe('mount — 父文档场景（iframe 模拟）', () => {
 
   it('父文档挂载时，Vue 创建的表单控件属于父文档 realm', async () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      uiMode: { mode: 'advanced' },
+      uiTierV2: { tier: 'high' },
       router: { activePageId: 'api' },
     }));
 

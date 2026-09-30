@@ -6,7 +6,7 @@
  *   "开发者"一级页（plan §D24）。不联动任何 gated 字段的真假状态。
  * - plotAdvanced：编辑剧情推进预设抽屉中的"匹配替换"字段（sulv1-4 / zhaohui）
  *   是否显示。开关 UI 在开发者一级页内；与总开关相互独立。
- * - vectorIndexAdvanced：交火模式页中的"召回参数"与"归档与分块"面板是否显示。
+ * - vectorIndexAdvanced：历史字段，仅保留持久化兼容；交火参数面板已并入填表工作台且不再受其控制。
  * - legacyUiMenuVisible：SillyTavern 扩展菜单中的旧 UI 入口是否显示，默认隐藏。
  * - warnLogEnabled：WARN 日志是否输出并写入运行日志，默认关闭。
  *
@@ -24,7 +24,7 @@ export interface DevOptionsState {
   developerOptionsEnabled: boolean;
   /** 编辑剧情推进预设抽屉中的"匹配替换"字段是否显示。与 developerOptionsEnabled 相互独立。 */
   plotAdvanced: boolean;
-  /** 交火模式页中的高级索引参数面板是否显示。与 developerOptionsEnabled 相互独立。 */
+  /** 历史字段，仅保留持久化兼容；与 developerOptionsEnabled 相互独立。 */
   vectorIndexAdvanced: boolean;
   /** SillyTavern 扩展菜单中的旧 UI 入口是否显示。默认隐藏。 */
   legacyUiMenuVisible: boolean;

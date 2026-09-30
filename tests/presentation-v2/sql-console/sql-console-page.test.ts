@@ -14,7 +14,7 @@ async function mountAdvancedToolsSqlPanel(opts: {
   vi.resetModules();
   document.body.innerHTML = '';
   document.head.innerHTML = '';
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({ router: { activePageId: 'advanced-tools' } }));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ uiTierV2: { tier: 'high' }, router: { activePageId: 'advanced-tools' } }));
 
   const executeQuery = vi.fn(() => opts.queryResult ?? {
     columns: ['name'],

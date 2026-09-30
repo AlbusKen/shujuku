@@ -127,6 +127,7 @@ async function mountDashboardPage(
     developerOptionsEnabled?: boolean;
     warnLogEnabled?: boolean;
     failStorageSwitch?: boolean;
+    vectorPipelineEnabled?: boolean;
     historyState?: Record<string, unknown>;
     templateData?: Record<string, unknown> | null;
   } = {},
@@ -238,6 +239,14 @@ async function mountDashboardPage(
       return { valid: errors.length === 0, errors };
     },
   }));
+  // 向量服务健康项按填表模式推导是否需要就绪；这里直接控制门控结果，其余导出保持真实实现。
+  vi.doMock("../../../src/service/fill-mode/fill-mode-gate", async () => {
+    const actual = await vi.importActual<typeof import("../../../src/service/fill-mode/fill-mode-gate")>("src/service/fill-mode/fill-mode-gate");
+    return {
+      ...actual,
+      isVectorPipelineEnabledForCurrentChat_ACU: () => options.vectorPipelineEnabled === true,
+    };
+  });
   vi.doMock("../../../src/service/ai/ai-service", () => ({
     getConnectionManagerProfiles_ACU: () => [],
     fetchAvailableModels_ACU: vi.fn(async () => ({
@@ -259,7 +268,7 @@ async function mountDashboardPage(
   localStorage.setItem(
     STORAGE_KEY,
     JSON.stringify({
-      router: { activePageId: "dashboard" },
+      uiTierV2: { tier: 'high' }, router: { activePageId: "dashboard" },
       devOptions: {
         developerOptionsEnabled: options.developerOptionsEnabled === true,
         warnLogEnabled: options.warnLogEnabled === true,
@@ -680,10 +689,8 @@ describe("DashboardPage", () => {
     developer.mount.__resetAcuV2MountForTests();
   });
 
-  it("交火模式开启但向量模型缺失时显示独立提醒", async () => {
-    const settings = createSettings();
-    settings.summaryVectorIndexModeDefault = true;
-    const { mount } = await mountDashboardPage(settings);
+  it("填表模式使用向量召回但向量模型缺失时显示独立提醒", async () => {
+    const { mount } = await mountDashboardPage(createSettings(), createTableData(), { vectorPipelineEnabled: true });
 
     const text =
       document.querySelector(".acu-v2-dashboard-page")?.textContent || "";
@@ -695,7 +702,7 @@ describe("DashboardPage", () => {
     expect(text).not.toContain("embeddingModel");
     expect(text).not.toContain(`服务${"地址"}`);
     expect(text).not.toContain(`模型${"名称"}`);
-    expect(text).toContain("配置交火模式");
+    expect(text).toContain("前往填表工作台");
 
     mount.__resetAcuV2MountForTests();
   });
@@ -751,7 +758,7 @@ describe("DashboardPage", () => {
     expect(text).toContain("智能续写");
     expect(text).toContain("格林推演");
     expect(text).toContain("外部导入");
-    expect(text).toContain("交火模式");
+    expect(document.querySelector('button[data-acu-toggle-key="summaryVectorIndexModeEnabled"]')).toBeNull();
     expect(text).toContain("存储模式");
     expect(text).toContain("原生 JSON");
     expect(text).toContain("SQLite");
@@ -773,7 +780,6 @@ describe("DashboardPage", () => {
       "worldSimulationPageEnabled",
       "externalImportPageEnabled",
       "contentReplaceEnabled",
-      "summaryVectorIndexModeEnabled",
       "developerOptionsEnabled",
     ]);
 
@@ -945,7 +951,6 @@ describe("DashboardPage", () => {
     expect(text).toContain("智能续写");
     expect(text).toContain("格林推演");
     expect(text).toContain("外部导入");
-    expect(text).toContain("交火模式");
     expect(text).toContain("正文替换");
 
     expect(
@@ -976,14 +981,10 @@ describe("DashboardPage", () => {
     const importToggle = document.querySelector(
       'button[data-acu-toggle-key="externalImportPageEnabled"]',
     ) as HTMLButtonElement;
-    const vectorToggle = document.querySelector(
-      'button[data-acu-toggle-key="summaryVectorIndexModeEnabled"]',
-    ) as HTMLButtonElement;
     expect(plotToggle).not.toBeNull();
     expect(continuationToggle).not.toBeNull();
     expect(worldSimulationToggle).not.toBeNull();
     expect(importToggle).not.toBeNull();
-    expect(vectorToggle).not.toBeNull();
     expect(worldSimulationToggle.getAttribute("aria-checked")).toBe("false");
 
     continuationToggle.click();
@@ -1012,15 +1013,11 @@ describe("DashboardPage", () => {
     expect(text).not.toContain("格林推演");
 
     plotToggle.click();
-    vectorToggle.click();
     await Promise.resolve();
 
     expect(settings.plotSettings.enabled).toBe(true);
-    expect(settings.summaryVectorIndexModeDefault).toBe(true);
     text = document.querySelector(".acu-v2-sidebar")?.textContent || "";
     expect(text).toContain("剧情推进");
-    expect(text).toContain("交火模式");
-    expect(text).toContain("功能");
 
     mount.__resetAcuV2MountForTests();
   });
@@ -1059,7 +1056,6 @@ describe("DashboardPage", () => {
       "worldSimulationPageEnabled",
       "externalImportPageEnabled",
       "contentReplaceEnabled",
-      "summaryVectorIndexModeEnabled",
       "developerOptionsEnabled",
     ]);
 

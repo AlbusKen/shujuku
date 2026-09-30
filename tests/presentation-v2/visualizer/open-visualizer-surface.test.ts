@@ -12,7 +12,7 @@ function persistAdvancedMode(activePageId = 'dashboard'): void {
   localStorage.setItem(
     STORAGE_KEY,
     JSON.stringify({
-      uiMode: { mode: 'advanced' },
+      uiTierV2: { tier: 'high' },
       router: { activePageId },
     }),
   );

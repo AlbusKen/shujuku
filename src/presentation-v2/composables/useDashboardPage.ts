@@ -16,9 +16,9 @@ import {
 import {
   saveSettings_ACU,
   setGlobalPlotEnabled_ACU,
-  setSummaryVectorIndexMode_ACU,
   setZeroTkOccupyMode_ACU,
 } from "../../service/settings/settings-service";
+import { isVectorPipelineEnabledForCurrentChat_ACU } from "../../service/fill-mode/fill-mode-gate";
 import { getCurrentStorageMode } from "../../service/table/storage-mode";
 import { resolveTableHistoryStateFromChat_ACU } from "../../service/table/table-history";
 import { switchStorageMode } from "../../service/table/table-storage-strategy";
@@ -630,7 +630,8 @@ function buildSqlTemplateHealthItem(
 }
 
 function buildVectorHealthItem(): DashboardHealthItem {
-  const enabled = settings_ACU.summaryVectorIndexModeDefault === true;
+  // 向量服务是否需要就绪由当前填表模式推导（向量表格 / 交火模式），不再读取已退役的仪表盘交火开关。
+  const enabled = isVectorPipelineEnabledForCurrentChat_ACU();
   if (!enabled) {
     return makeHealthItem({
       key: "vector",
@@ -654,7 +655,7 @@ function buildVectorHealthItem(): DashboardHealthItem {
         summary: dashboardCopy.vectorHealth.incompleteSummary(readableErrors),
         action: {
           label: dashboardCopy.vectorHealth.configureAction,
-          pageId: "vector-index",
+          pageId: "form-fill",
         },
       });
     }
@@ -676,7 +677,7 @@ function buildVectorHealthItem(): DashboardHealthItem {
       ),
       action: {
         label: dashboardCopy.vectorHealth.configureAction,
-        pageId: "vector-index",
+        pageId: "form-fill",
       },
     });
   }
@@ -984,20 +985,13 @@ export function useDashboardPage(): DashboardPageState {
         value: isContentReplaceEnabledBySettings(),
       },
     ];
-    items.push(
-      {
-        key: "summaryVectorIndexModeEnabled",
-        label: dashboardCopy.toggles.vector.label,
-        description: dashboardCopy.toggles.vector.description,
-        value: settings_ACU.summaryVectorIndexModeDefault === true,
-      },
-      {
-        key: "developerOptionsEnabled",
-        label: dashboardCopy.developerToggle.label,
-        description: dashboardCopy.developerToggle.description,
-        value: developerOptionsEnabled.value,
-      },
-    );
+    // 交火模式改由填表工作台的填表模式选择，仪表盘不再提供重复开关。
+    items.push({
+      key: "developerOptionsEnabled",
+      label: dashboardCopy.developerToggle.label,
+      description: dashboardCopy.developerToggle.description,
+      value: developerOptionsEnabled.value,
+    });
     return items;
   });
 
@@ -1099,8 +1093,6 @@ export function useDashboardPage(): DashboardPageState {
       saveSettings_ACU();
     } else if (key === "zeroTkOccupyModeDefault") {
       setZeroTkOccupyMode_ACU(!!value);
-    } else if (key === "summaryVectorIndexModeEnabled") {
-      setSummaryVectorIndexMode_ACU(!!value);
     } else if (key === "developerOptionsEnabled") {
       setDeveloperOptionsEnabled(!!value);
     } else if (

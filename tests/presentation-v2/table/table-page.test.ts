@@ -43,7 +43,7 @@ async function mountTablePage(opts: {
   vi.resetModules();
   document.body.innerHTML = '';
   document.head.innerHTML = '';
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({ router: { activePageId: 'table' } }));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ uiTierV2: { tier: 'high' }, router: { activePageId: 'table' } }));
 
   const { ref, shallowRef, computed } = await import('vue');
   const settings = createSettings();

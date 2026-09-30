@@ -47,7 +47,7 @@ async function mountPlotPage(opts: {
   vi.resetModules();
   document.body.innerHTML = '';
   document.head.innerHTML = '';
-  const persisted: any = { router: { activePageId: 'plot' } };
+  const persisted: any = { uiTierV2: { tier: 'high' }, router: { activePageId: 'plot' } };
   if (opts.devOptions) persisted.devOptions = opts.devOptions;
   localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
 

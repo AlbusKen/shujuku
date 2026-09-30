@@ -83,23 +83,16 @@
         title="填表模式"
         :description="fillModeDescriptions[formFillMode.selectedMode]"
       >
-        <AcuFormRow label="当前填表模式" hint="每种模式的参数独立保存，切换模式不会覆盖其它模式，也不会改变功能档位。">
-          <AcuSegmentedControl
+        <AcuFormRow label="当前填表模式" hint="从下拉菜单中选择一种模式。每种模式的参数独立保存，切换模式不会覆盖其它模式，也不会改变功能档位。">
+          <AcuSelect
             :options="FORM_FILL_MODE_OPTIONS"
             :model-value="formFillMode.selectedMode"
-            aria-label="选择填表模式"
             @update:model-value="selectFillMode"
           />
         </AcuFormRow>
 
         <AcuMessage v-if="formFillMode.saveError" kind="error">
           {{ formFillMode.saveError }}
-        </AcuMessage>
-        <AcuMessage
-          v-if="formFillMode.selectedMode === 'crossfire' && formFillMode.crossfireLoadError"
-          kind="error"
-        >
-          {{ formFillMode.crossfireLoadError }}
         </AcuMessage>
 
         <template v-if="formFillMode.selectedMode === 'classic'">
@@ -116,7 +109,7 @@
         </template>
 
         <template v-if="formFillMode.selectedMode === 'vector'">
-          <AcuFormRow label="保留相关纪要条数" hint="按 rerank 结果从上到下保留的纪要条数；embedding 与 rerank 服务需先完成配置。">
+          <AcuFormRow label="保留相关纪要条数" hint="按 rerank 结果从上到下保留的纪要条数；embedding 与 rerank 服务在下方「Embedding / Rerank」面板配置。">
             <AcuInput
               type="number"
               :min="1"
@@ -137,43 +130,6 @@
               @update:model-value="formFillMode.setLlmApiPresetName($event)"
             />
           </AcuFormRow>
-        </template>
-
-        <template v-if="formFillMode.selectedMode === 'crossfire'">
-          <AcuFormRow label="发送前生成关键词" hint="关闭后只使用用户输入进行召回。">
-            <AcuToggle
-              :model-value="formFillMode.profiles.crossfire.keywordGenerationEnabled"
-              @update:model-value="formFillMode.setCrossfireField('keywordGenerationEnabled', $event)"
-            />
-          </AcuFormRow>
-          <AcuFormRow label="启用混合召回" hint="开启 BM25 稀疏召回并与向量结果融合。">
-            <AcuToggle
-              :model-value="formFillMode.profiles.crossfire.hybridRetrievalEnabled"
-              @update:model-value="formFillMode.setCrossfireField('hybridRetrievalEnabled', $event)"
-            />
-          </AcuFormRow>
-          <div class="acu-v2-form-fill-page__mode-number-grid">
-            <AcuFormRow label="Top-K" hint="融合后交给 rerank 的候选上限。">
-              <AcuInput
-                type="number"
-                :min="1"
-                :max="1000"
-                :step="1"
-                :model-value="formFillMode.profiles.crossfire.topK"
-                @change="formFillMode.setCrossfireField('topK', $event)"
-              />
-            </AcuFormRow>
-            <AcuFormRow label="最近固定注入条数" hint="始终保留的最近纪要条目数量。">
-              <AcuInput
-                type="number"
-                :min="1"
-                :max="1000"
-                :step="1"
-                :model-value="formFillMode.profiles.crossfire.recentFixedInjectCount"
-                @change="formFillMode.setCrossfireField('recentFixedInjectCount', $event)"
-              />
-            </AcuFormRow>
-          </div>
         </template>
 
       </AcuPanel>
@@ -295,11 +251,16 @@
         </div>
       </AcuPanel>
     </AcuPanelGrid>
+
+    <FormFillVectorPanels
+      v-if="vectorPanelMode"
+      :mode="vectorPanelMode"
+    />
   </section>
 </template>
 
 <script setup lang="ts">
-import { onMounted, watch } from "vue";
+import { computed, onMounted, watch } from "vue";
 import AcuBadge from "../components/_lib/AcuBadge.vue";
 import AcuButton from "../components/_lib/AcuButton.vue";
 import AcuFormRow from "../components/_lib/AcuFormRow.vue";
@@ -308,11 +269,10 @@ import AcuMessage from "../components/_lib/AcuMessage.vue";
 import AcuMobilePanelNav from "../components/_lib/AcuMobilePanelNav.vue";
 import AcuPanel from "../components/_lib/AcuPanel.vue";
 import AcuPanelGrid from "../components/_lib/AcuPanelGrid.vue";
-import AcuSegmentedControl from "../components/_lib/AcuSegmentedControl.vue";
 import AcuSelect from "../components/_lib/AcuSelect.vue";
 import AcuText from "../components/_lib/AcuText.vue";
 import AcuTextarea from "../components/_lib/AcuTextarea.vue";
-import AcuToggle from "../components/_lib/AcuToggle.vue";
+import FormFillVectorPanels from "../components/FormFillVectorPanels.vue";
 import FormFillUpdateSettingsPanel from "../components/FormFillUpdateSettingsPanel.vue";
 import TableTemplatePresetPanel from "../components/TableTemplatePresetPanel.vue";
 import TableSelector from "../components/TableSelector.vue";
@@ -323,6 +283,7 @@ import { useDashboardPage } from "../composables/useDashboardPage";
 import { useManualUpdate } from "../composables/useManualUpdate";
 import { formFillCopy } from "../copy/form-fill-copy";
 import { tableCopy } from "../copy/table-copy";
+import { vectorIndexCopy } from "../copy/vector-index-copy";
 import {
   FORM_FILL_MODE_OPTIONS,
   useFormFillModeStore,
@@ -337,15 +298,39 @@ const fillModeDescriptions: Record<FillMode, string> = {
   classic: "经典表格：沿用稳定的经典填表流程，是新安装的默认模式。",
   vector: "向量表格：只用 embedding 与 rerank 选出相关纪要，不生成关键词，也不执行剧情推进或混合召回。",
   llm: "LLM 逻辑召回：由 LLM 先读纪要概览与目录，再按信息缺口精读具体纪要区间。",
-  crossfire: "交火模式：关键词、向量、混合召回与 rerank 的完整流程；索引维护在交火模式页面。",
+  crossfire: "交火模式：关键词、向量、混合召回与 rerank 的完整流程；全部参数与索引维护在下方面板。",
 };
-const panelNavItems = [
-  { id: "form-fill-status-panel", label: formFillCopy.nav.status },
-  { id: "form-fill-mode-panel", label: "填表模式" },
-  { id: "form-fill-update-panel", label: formFillCopy.nav.update },
-  { id: "form-fill-manual-panel", label: formFillCopy.nav.manual },
-  { id: "form-fill-template-panel", label: tableCopy.panels.templatePreset.title },
-];
+/** 向量表格与交火模式需要向量服务与索引维护面板；其余模式不渲染。 */
+const vectorPanelMode = computed<"vector" | "crossfire" | null>(() => {
+  const mode = formFillMode.selectedMode;
+  return mode === "vector" || mode === "crossfire" ? mode : null;
+});
+const panelNavItems = computed(() => {
+  const items = [
+    { id: "form-fill-status-panel", label: formFillCopy.nav.status },
+    { id: "form-fill-mode-panel", label: "填表模式" },
+    { id: "form-fill-update-panel", label: formFillCopy.nav.update },
+    { id: "form-fill-manual-panel", label: formFillCopy.nav.manual },
+    { id: "form-fill-template-panel", label: tableCopy.panels.templatePreset.title },
+  ];
+  if (vectorPanelMode.value === "crossfire") {
+    items.push(
+      { id: "vector-index-status-panel", label: vectorIndexCopy.nav.status },
+      { id: "vector-index-keyword-panel", label: vectorIndexCopy.nav.keyword },
+      { id: "vector-index-api-panel", label: vectorIndexCopy.nav.api },
+      { id: "vector-index-prompt-panel", label: vectorIndexCopy.nav.prompt },
+      { id: "vector-index-recall-panel", label: vectorIndexCopy.nav.recall },
+      { id: "vector-index-archive-panel", label: vectorIndexCopy.nav.archive },
+    );
+  } else if (vectorPanelMode.value === "vector") {
+    items.push(
+      { id: "vector-index-status-panel", label: vectorIndexCopy.nav.status },
+      { id: "vector-index-api-panel", label: vectorIndexCopy.nav.api },
+      { id: "vector-index-archive-panel", label: vectorIndexCopy.nav.archive },
+    );
+  }
+  return items;
+});
 
 function selectFillMode(value: string): void {
   if (value === "classic" || value === "vector" || value === "llm" || value === "crossfire") {

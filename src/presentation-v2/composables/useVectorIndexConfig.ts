@@ -1,5 +1,5 @@
 /**
- * useVectorIndexConfig — 交火模式（向量混合增强）页配置 + buildNow 编排。
+ * useVectorIndexConfig — 填表工作台向量表格 / 交火模式面板的配置 + buildNow 编排。
  *
  * 边界：
  * - 读写权威配置：globalMeta_ACU.vectorMemoryConfigGlobal 通过
@@ -74,6 +74,7 @@ export interface VectorIndexForm {
   recallCandidateLimit: number;
   recentFixedInjectCount: number;
   vectorNamespace: string;
+  hybridRetrievalEnabled: boolean;
   // 归档分块
   summaryChunkSentenceCount: number;
   summaryIndexChunkChronicleBySentence: boolean;
@@ -144,6 +145,7 @@ function createEmptyForm(): VectorIndexForm {
     recallCandidateLimit: defaults.recallCandidateLimit,
     recentFixedInjectCount: defaults.recentFixedInjectCount,
     vectorNamespace: defaults.vectorNamespace || 'chat',
+    hybridRetrievalEnabled: (defaults as any).hybridRetrievalEnabled !== false,
     summaryChunkSentenceCount: defaults.summaryChunkSentenceCount,
     summaryIndexChunkChronicleBySentence: (defaults as any).summaryIndexChunkChronicleBySentence === true,
     summaryIndexArchiveMaxConcurrency: defaults.summaryIndexArchiveMaxConcurrency ?? 30,
@@ -246,6 +248,7 @@ export function useVectorIndexConfig() {
     form.recallCandidateLimit = config.recallCandidateLimit;
     form.recentFixedInjectCount = config.recentFixedInjectCount;
     form.vectorNamespace = config.vectorNamespace || 'chat';
+    form.hybridRetrievalEnabled = config.hybridRetrievalEnabled !== false;
     form.summaryChunkSentenceCount = config.summaryChunkSentenceCount;
     form.summaryIndexChunkChronicleBySentence = config.summaryIndexChunkChronicleBySentence === true;
     form.summaryIndexArchiveMaxConcurrency = config.summaryIndexArchiveMaxConcurrency;
@@ -355,7 +358,7 @@ export function useVectorIndexConfig() {
 
   function setBooleanField<
     K extends 'summaryIndexRollingDeltaEnabled' | 'summaryIndexV2WriteEnabled' | 'summaryIndexContentPackWriteEnabled'
-      | 'keywordGenerationEnabled' | 'summaryIndexChunkChronicleBySentence',
+      | 'keywordGenerationEnabled' | 'summaryIndexChunkChronicleBySentence' | 'hybridRetrievalEnabled',
   >(key: K, value: boolean): void {
     const next = value === true;
     (form as any)[key] = next;

@@ -20,7 +20,6 @@ import {
   FEATURE_GATE_WORLD_SIMULATION,
   FEATURE_GATE_IMPORT,
   FEATURE_GATE_PLOT,
-  FEATURE_GATE_VECTOR_INDEX,
 } from '../router/page-registry';
 import type { AcuV2Page, AcuV2PageGroup } from '../router/page-types';
 import { ACU_V2_PAGE_GROUPS } from '../router/page-types';
@@ -32,6 +31,8 @@ import { setContentReplaceEnabledBySettings, syncContentReplaceAvailability } fr
 const SECTION_KEY = 'router';
 const LEGACY_PAGE_ID_ALIASES: Record<string, string> = {
   'basic-config': ACU_V2_FORM_FILL_PAGE_ID,
+  // 交火模式独立页已退役，全部参数并入填表工作台的交火模式分支。
+  'vector-index': ACU_V2_FORM_FILL_PAGE_ID,
   'sql-console': 'advanced-tools',
   'log-viewer': 'advanced-tools',
 };
@@ -68,7 +69,6 @@ function readInitialFeatureGates(): Record<string, boolean> {
     [FEATURE_GATE_CONTINUATION]: settings_ACU?.continuationPageEnabled !== false,
     [FEATURE_GATE_WORLD_SIMULATION]: settings_ACU?.worldSimulationPageEnabled === true,
     [FEATURE_GATE_IMPORT]: settings_ACU?.externalImportPageEnabled !== false,
-    [FEATURE_GATE_VECTOR_INDEX]: settings_ACU?.summaryVectorIndexModeDefault === true,
   };
 }
 
@@ -110,7 +110,7 @@ function isPageVisible(page: AcuV2Page, state: RouterState): boolean {
 }
 
 function defaultVisiblePageId(): string {
-  return useUiModeStore().tier === 'low' ? ACU_V2_FORM_FILL_PAGE_ID : ACU_V2_DEFAULT_PAGE_ID;
+  return useUiModeStore().isBasicMode ? ACU_V2_FORM_FILL_PAGE_ID : ACU_V2_DEFAULT_PAGE_ID;
 }
 
 export const useRouterStore = defineStore('acu-v2-router', {

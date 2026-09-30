@@ -100,7 +100,7 @@ const RULES: HintRule[] = [
     summary: 'API 配置不完整：接口地址、密钥或模型名有一项没填。',
     steps: [
       '到「API」页补全该预设的接口地址、API Key 和模型名，然后保存预设。',
-      '向量相关报错请到「交火模式」页检查 Embedding / Rerank 的地址与模型。',
+      '向量相关报错请到「填表工作台」的「Embedding / Rerank」面板检查 Embedding / Rerank 的地址与模型。',
       '确认对应功能（填表 / 剧情推进 / 续写）选择的是这个已补全的预设。',
     ],
   },
@@ -111,7 +111,7 @@ const RULES: HintRule[] = [
     test: /rerank 调用失败|rerank 响应没有任何可用的评分/,
     summary: 'Rerank 重排序没有生效，本轮交火已回退为仅按 Embedding 相似度排序。',
     steps: [
-      '到「交火模式」页核对 Rerank 的接口地址（要填到 /rerank 这一级的完整地址）、API Key 与模型名。',
+      '到「填表工作台」的「Embedding / Rerank」面板核对 Rerank 的接口地址（要填到 /rerank 这一级的完整地址）、API Key 与模型名。',
       '报错含「网络失败 / Failed to fetch」时多半是服务商不允许浏览器跨域直连，换用支持 CORS 的 rerank 服务或反向代理地址。',
       '报错含「没有任何可用的评分」时说明返回格式不是 results[].index / relevance_score，换一个兼容 Jina / Cohere 格式的服务商。',
       '不想用重排序就把 Rerank 地址与模型都清空，日志就不会再出现这条报错。',
@@ -427,9 +427,9 @@ const RULES: HintRule[] = [
     test: /\bembedding\b|\brerank\b|向量|\bvector\b/,
     summary: '交火模式（向量索引）相关操作失败。',
     steps: [
-      '到「交火模式」页检查 Embedding / Rerank 的接口地址、密钥和模型名，确认服务商支持该接口。',
+      '到「填表工作台」的「Embedding / Rerank」面板检查 Embedding / Rerank 的接口地址、密钥和模型名，确认服务商支持该接口。',
       SEE_PREVIOUS_LOG,
-      '可先暂时关闭交火模式，不影响填表等基础功能。',
+      '可先在填表工作台把填表模式切到经典表格或 LLM 逻辑召回，不影响填表等基础功能。',
     ],
   },
   {

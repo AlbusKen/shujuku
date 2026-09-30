@@ -66,7 +66,7 @@ async function mountDataMgmtPage(chatFileIdentifier = 'chat-data', initialMixedD
   vi.resetModules();
   document.body.innerHTML = '';
   document.head.innerHTML = '';
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({ router: { activePageId: 'data-mgmt' } }));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ uiTierV2: { tier: 'high' }, router: { activePageId: 'data-mgmt' } }));
 
   const settings = createSettings();
   const isolationHistory = ['alpha', 'beta'];

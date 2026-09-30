@@ -19,7 +19,7 @@ export const vectorIndexCopy = {
     api: {
       title: "Embedding / Rerank",
       description:
-        "交火模式专用向量配置。Embedding 负责向量召回，Rerank 为可选增强。填错仅影响交火模式。",
+        "向量表格与交火模式共用的向量配置。Embedding 负责向量召回；Rerank 在交火模式中为可选增强，在向量表格中必填。",
     },
     prompt: {
       title: "关键词生成提示词",

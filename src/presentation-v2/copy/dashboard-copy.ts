@@ -158,23 +158,23 @@ export const dashboardCopy = {
   },
   vectorHealth: {
     title: "交火向量",
-    configureAction: "配置交火模式",
+    configureAction: "前往填表工作台",
     disabledBadge: "未启用",
-    disabledSummary: "交火模式是可选增强，未开启时不会影响基础数据库更新。",
+    disabledSummary: "当前填表模式不使用向量召回，无需配置向量服务。",
     incompleteBadge: "配置不完整",
     incompleteSummary(errors: string[]): string {
       return errors.length
-        ? `交火模式已开启，但向量服务还不能正常使用：${errors.join("；")}。`
-        : "交火模式已开启，但向量服务还不能正常使用。";
+        ? `当前填表模式需要向量服务，但它还不能正常使用：${errors.join("；")}。`
+        : "当前填表模式需要向量服务，但它还不能正常使用。";
     },
     configuredBadge: "已配置",
     configuredSummary:
-      "交火模式已开启，必填的向量化服务已经配置完整。重排服务属于可选增强，未填写也不会阻止使用。",
+      "当前填表模式使用向量召回，必填的向量化服务已经配置完整。",
     readFailedBadge: "读取失败",
     readFailedSummary(message: string): string {
       return `交火向量配置读取失败：${message}。`;
     },
-    readFailedFallback: "请进入交火模式页重新检查配置",
+    readFailedFallback: "请到填表工作台重新检查向量服务配置",
     missingEmbeddingEndpoint: "缺少“向量化URL”",
     missingEmbeddingModel: "缺少“向量化模型名”",
     rerankPairRequired: "“重排URL”和“重排模型名”需要同时填写，或者同时留空",
@@ -273,11 +273,6 @@ export const dashboardCopy = {
       label: "正文替换",
       description:
         "默认关闭。开启后每轮正文生成后会自动检查并优化 AI 回复的正文内容。",
-    },
-    vector: {
-      label: "交火模式",
-      description:
-        "默认关闭。详情前往对应页面，增强记忆召回效果。需配置向量API服务。",
     },
   },
   templatePreset: {

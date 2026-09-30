@@ -44,6 +44,7 @@
         :description="dashboardCopy.panels.togglesDescription"
       >
         <AcuSegmentedControl
+          v-if="showAdvancedGroup"
           v-model="activeGroup"
           :options="groupOptions"
           :aria-label="dashboardCopy.groups.ariaLabel"
@@ -52,9 +53,9 @@
 
         <div
           class="acu-v2-dashboard-page__toggle-list"
-          :data-acu-toggle-group="activeGroup"
+          :data-acu-toggle-group="effectiveGroup"
         >
-          <template v-if="activeGroup === 'basic'">
+          <template v-if="effectiveGroup === 'basic'">
             <ToggleRow
               v-for="item in dashboard.basicToggles.value"
               :key="item.key"
@@ -65,23 +66,25 @@
 
           <template v-else>
             <ToggleRow
-              v-for="item in dashboard.advancedToggles.value"
+              v-for="item in visibleAdvancedToggles"
               :key="item.key"
               :item="item"
               @change="handleToggleChange(item.key, $event)"
             />
 
-            <DashboardStorageModeSection
-              :model-value="dashboard.storageMode.value"
-              :options="dashboard.storageOptions"
-              @update:model-value="handleStorageModeChange"
-            />
-            <AcuMessage
-              v-if="dashboard.storageMessage.value"
-              :kind="dashboard.storageMessage.value.kind"
-            >
-              {{ dashboard.storageMessage.value.text }}
-            </AcuMessage>
+            <template v-if="showStorageMode">
+              <DashboardStorageModeSection
+                :model-value="dashboard.storageMode.value"
+                :options="dashboard.storageOptions"
+                @update:model-value="handleStorageModeChange"
+              />
+              <AcuMessage
+                v-if="dashboard.storageMessage.value"
+                :kind="dashboard.storageMessage.value.kind"
+              >
+                {{ dashboard.storageMessage.value.text }}
+              </AcuMessage>
+            </template>
           </template>
         </div>
       </AcuPanel>
@@ -90,7 +93,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import AcuBadge from "../components/_lib/AcuBadge.vue";
 import AcuButton from "../components/_lib/AcuButton.vue";
 import AcuMessage from "../components/_lib/AcuMessage.vue";
@@ -108,25 +111,56 @@ import {
   FEATURE_GATE_WORLD_SIMULATION,
   FEATURE_GATE_IMPORT,
   FEATURE_GATE_PLOT,
-  FEATURE_GATE_VECTOR_INDEX,
 } from "../router/page-registry";
 import { dashboardCopy } from "../copy/dashboard-copy";
 import { useDialogStore } from "../stores/dialog-store";
 import { usePlotPresetStore } from "../stores/plot-preset-store";
 import { useRouterStore } from "../stores/router-store";
 import { useToastStore } from "../stores/toast-store";
+import { ACU_UI_TIER_RANK, useUiModeStore, type AcuUiTier } from "../stores/ui-mode-store";
 
 const dashboard = useDashboardPage();
 const plotStore = usePlotPresetStore();
 const routerStore = useRouterStore();
 const dialogStore = useDialogStore();
 const toastStore = useToastStore();
+const uiMode = useUiModeStore();
 
 const activeGroup = ref<"basic" | "advanced">("basic");
 const groupOptions = [
   { value: "basic", label: dashboardCopy.groups.basic },
   { value: "advanced", label: dashboardCopy.groups.advanced },
 ];
+
+/**
+ * 高级设置中各开关所需的功能档位，与对应一级页的 minUiTier 保持一致。
+ * 只裁剪渲染；featureGate 同步仍基于完整列表，避免隐藏开关后已开启的页面状态被改写。
+ */
+const ADVANCED_TOGGLE_MIN_TIER: Record<string, AcuUiTier> = {
+  plotEnabled: "medium",
+  continuationPageEnabled: "medium",
+  externalImportPageEnabled: "medium",
+  worldSimulationPageEnabled: "high",
+  contentReplaceEnabled: "high",
+  developerOptionsEnabled: "high",
+};
+
+function tierAllows(minTier: AcuUiTier): boolean {
+  return ACU_UI_TIER_RANK[uiMode.tier] >= ACU_UI_TIER_RANK[minTier];
+}
+
+const visibleAdvancedToggles = computed(() =>
+  dashboard.advancedToggles.value.filter((item) =>
+    tierAllows(ADVANCED_TOGGLE_MIN_TIER[item.key] ?? "high"),
+  ),
+);
+const showStorageMode = computed(() => tierAllows("medium"));
+const showAdvancedGroup = computed(
+  () => visibleAdvancedToggles.value.length > 0 || showStorageMode.value,
+);
+const effectiveGroup = computed<"basic" | "advanced">(() =>
+  showAdvancedGroup.value ? activeGroup.value : "basic",
+);
 
 async function refreshAll(): Promise<void> {
   plotStore.refreshFromSettings();
@@ -157,12 +191,6 @@ function syncFeaturePageGates(): void {
     FEATURE_GATE_IMPORT,
     dashboard.advancedToggles.value.some(
       (item) => item.key === "externalImportPageEnabled" && item.value,
-    ),
-  );
-  routerStore.syncFeatureGate(
-    FEATURE_GATE_VECTOR_INDEX,
-    dashboard.advancedToggles.value.some(
-      (item) => item.key === "summaryVectorIndexModeEnabled" && item.value,
     ),
   );
 }

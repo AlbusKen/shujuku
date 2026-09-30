@@ -11,7 +11,7 @@
  * - requiresSqlite：true 时仅在 SQLite 存储模式下可见（保留给需要整页隐藏的 SQLite 专属页）
  * - featureGate：与 router store 的 featureGates 对应；为 false / 未提供时隐藏
  *   → 用于 D7 中"暂不公开"的正文替换页
- * - minUiTier：功能档位达到该等级后才可见
+ * - minUiTier：功能档位达到该等级后才可见；不写表示轻量模式即可见
  * - visibleWhen：兜底自定义函数，true 才可见；不写视为 true
  *
  * 显隐串接顺序：minUiTier -> requiresSqlite -> featureGate -> visibleWhen，任一不通过就隐藏。

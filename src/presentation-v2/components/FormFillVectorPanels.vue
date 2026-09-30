@@ -1,7 +1,5 @@
 <template>
-  <section class="acu-v2-vector-index-page">
-    <AcuMobilePanelNav :items="panelNavItems" />
-
+  <div class="acu-v2-vector-index-page">
     <AcuPanelGrid class="acu-v2-vector-index-page__main-grid">
       <div class="acu-v2-vector-index-page__panel-stack">
         <AcuPanel
@@ -18,9 +16,7 @@
           <AcuStatsList :items="vector.statusStatsItems.value" />
 
           <p class="acu-v2-vector-index-page__hint">
-            发送前流程：关键词生成（可关闭）→ 用户输入与关键词合并 embedding →
-            "概览 + 纪要正文"向量与 BM25 混合召回 → 可选 Rerank（按纪要正文分批精排，候选不多于
-            TopK 时跳过）→ 按纪要表原顺序覆盖原概要索引条目。
+            {{ isCrossfire ? CROSSFIRE_FLOW_HINT : VECTOR_FLOW_HINT }}
           </p>
 
           <div
@@ -65,6 +61,7 @@
         </AcuPanel>
 
         <AcuPanel
+          v-if="isCrossfire"
           id="vector-index-keyword-panel"
           :title="vectorIndexCopy.panels.keyword.title"
           :description="vectorIndexCopy.panels.keyword.description"
@@ -223,6 +220,7 @@
         </AcuPanel>
 
         <AcuPanel
+          v-if="isCrossfire"
           id="vector-index-prompt-panel"
           :title="vectorIndexCopy.panels.prompt.title"
           :description="vectorIndexCopy.panels.prompt.description"
@@ -250,11 +248,22 @@
       class="acu-v2-vector-index-page__advanced-grid"
     >
       <AcuPanel
+        v-if="isCrossfire"
         id="vector-index-recall-panel"
         :title="vectorIndexCopy.panels.recall.title"
         :description="vectorIndexCopy.panels.recall.description"
       >
         <div class="acu-v2-vector-index-page__number-grid">
+          <AcuFormRow
+            label="混合召回"
+            hint="开启后 BM25 稀疏召回与向量结果融合；关闭则只用向量召回。"
+          >
+            <AcuToggle
+              :model-value="vector.form.hybridRetrievalEnabled"
+              label="启用 BM25 混合召回"
+              @update:model-value="vector.setBooleanField('hybridRetrievalEnabled', $event)"
+            />
+          </AcuFormRow>
           <AcuFormRow
             label="触发阈值"
             hint="纪要有效行数达标后，发送前生成关键词并召回分块，未达标则保留原索引流程。"
@@ -447,6 +456,7 @@
           ></textarea>
         </AcuFormRow>
       </AcuPanel>
+      <div v-if="!isCrossfire" aria-hidden="true"></div>
     </AcuPanelGrid>
 
     <VectorIndexPromptDrawer
@@ -462,7 +472,7 @@
       @delete="vector.deletePromptSegment($event)"
       @update="onPromptUpdate"
     />
-  </section>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -474,7 +484,6 @@ import AcuButton from "../components/_lib/AcuButton.vue";
 import AcuFormRow from "../components/_lib/AcuFormRow.vue";
 import AcuInput from "../components/_lib/AcuInput.vue";
 import AcuMessage from "../components/_lib/AcuMessage.vue";
-import AcuMobilePanelNav from "../components/_lib/AcuMobilePanelNav.vue";
 import AcuPanel from "../components/_lib/AcuPanel.vue";
 import AcuPanelGrid from "../components/_lib/AcuPanelGrid.vue";
 import type { PromptSegment } from "../components/_lib/AcuPromptSegments.vue";
@@ -505,6 +514,17 @@ import { useDialogStore } from "../stores/dialog-store";
  */
 const SHOW_LEGACY_VECTOR_MAINTENANCE_UI = false;
 
+const CROSSFIRE_FLOW_HINT =
+  '发送前流程：关键词生成（可关闭）→ 用户输入与关键词合并 embedding → "概览 + 纪要正文"向量与 BM25 混合召回（可关闭）→ 可选 Rerank（按纪要正文分批精排，候选不多于 TopK 时跳过）→ 按纪要表原顺序覆盖原概要索引条目。';
+const VECTOR_FLOW_HINT =
+  '发送前流程：用户输入直接 embedding 召回 → Rerank 精排并按「保留相关纪要条数」截取 → 按纪要表原顺序覆盖原概要索引条目。向量表格不生成关键词、不做混合召回；Rerank 未配置或失败时本轮召回判定失败，不会静默退回 embedding 排序。';
+
+const props = defineProps<{
+  /** 当前填表模式：向量表格只显示索引、向量服务与分块面板；交火模式显示全部参数。 */
+  mode: "vector" | "crossfire";
+}>();
+const isCrossfire = computed(() => props.mode === "crossfire");
+
 const dialogStore = useDialogStore();
 const vector = useVectorIndexConfig();
 const vectorApiConfig = useVectorApiConfig();
@@ -515,14 +535,6 @@ const {
   apiPresetSelectOptions: keywordApiOptions,
 } = useApiPresetSelectOptions();
 const promptDrawerOpen = ref(false);
-const panelNavItems = computed(() => [
-  { id: "vector-index-status-panel", label: vectorIndexCopy.nav.status },
-  { id: "vector-index-keyword-panel", label: vectorIndexCopy.nav.keyword },
-  { id: "vector-index-api-panel", label: vectorIndexCopy.nav.api },
-  { id: "vector-index-prompt-panel", label: vectorIndexCopy.nav.prompt },
-  { id: "vector-index-recall-panel", label: vectorIndexCopy.nav.recall },
-  { id: "vector-index-archive-panel", label: vectorIndexCopy.nav.archive },
-]);
 
 const ROLE_OPTIONS: AcuSelectOption[] = [
   { value: "system", label: "SYSTEM" },
@@ -608,12 +620,10 @@ useUiCloseGuard(confirmPromptClose);
 
 <style scoped>
 .acu-v2-vector-index-page {
-  min-height: 100%;
   min-width: 0;
-  padding: 20px;
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: var(--acu-page-gap, 14px);
 }
 
 .acu-v2-vector-index-page__panel-stack {
@@ -703,12 +713,6 @@ useUiCloseGuard(confirmPromptClose);
   gap: 8px;
   padding-top: 12px;
   margin-top: 4px;
-}
-
-@media (max-width: 860px) {
-  .acu-v2-vector-index-page {
-    padding: 14px;
-  }
 }
 
 .acu-v2-vector-api-form__instruction-textarea {

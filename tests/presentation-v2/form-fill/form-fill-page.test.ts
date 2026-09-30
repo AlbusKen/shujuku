@@ -245,7 +245,7 @@ async function mountFormFillPage(
 
   const mount = await import('../../../src/presentation-v2/bootstrap/mount');
   // 上一用例的双 rAF 完成回调可能在异步 import 期间写回旧路由；种子必须紧贴挂载同步写入。
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({ uiTier: { tier: 'high' }, router: { activePageId } }));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ uiTierV2: { tier: 'high' }, router: { activePageId } }));
   await mount.openAcuV2App();
   const pinia = mount.getAcuV2PiniaForBridge()!;
   const { useRouterStore } = await import('../../../src/presentation-v2/stores/router-store');
