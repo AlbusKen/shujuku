@@ -31,11 +31,14 @@ import { projectFlightModeHiddenChronicleRows_ACU } from '../flight-mode/flight-
       if (mergedData) {
           const flightMode = getCurrentFlightModeState_ACU();
           if (flightMode.enabled && flightMode.hiddenRowIds.length > 0) {
+              const source = mergedData;
               try {
-                  mergedData = projectFlightModeHiddenChronicleRows_ACU(mergedData, flightMode);
+                  mergedData = projectFlightModeHiddenChronicleRows_ACU(source, flightMode);
               } catch (error) {
-                  // 投影失败不得阻断世界书重建，更不能误删运行时数据。
-                  logWarn_ACU('[FlightMode] 世界书纪要隐藏行投影失败，已回退为未过滤数据。', error);
+                  // fail-closed：投影失败时本轮不导出纪要表，避免把已归纳的纪要重新注入世界书；只影响导出投影，不改运行时数据。
+                  logWarn_ACU('[FlightMode] 世界书纪要隐藏行投影失败，本轮暂不导出纪要表。', error);
+                  mergedData = Object.fromEntries(Object.entries(source)
+                      .filter(([key, sheet]: [string, any]) => !(key.startsWith('sheet_') && sheet?.name === '纪要表')));
               }
           }
       }

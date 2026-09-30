@@ -1,11 +1,13 @@
 /**
  * 填表模式运行时门控：所有“是否运行向量/交火管线”的判定统一经由这里推导。
- * 旧交火全局开关 summaryVectorIndexModeGlobal 不再被覆写，只作为旧对话临时默认方案的输入。
+ * 当前对话的模式由 fill-mode-chat-record 解析：对话记录优先，未记录时回落全局偏好模式。
+ * 旧交火全局开关 summaryVectorIndexModeGlobal 不再被覆写，只作为从未保存偏好时的旧默认方案输入。
  */
 import { logWarn_ACU } from '../../shared/utils';
 import { currentJsonTableData_ACU } from '../runtime/state-manager';
 import { getCurrentFlightModeState_ACU } from '../flight-mode/flight-mode-state';
-import { isLegacyCrossfireEnabled_ACU, readFillModePreferences_ACU } from './fill-mode-preferences';
+import { isLegacyCrossfireEnabled_ACU } from './fill-mode-preferences';
+import { resolveCurrentChatFillMode_ACU, withFillMode_ACU } from './fill-mode-chat-record';
 import {
   resolveFillPlan_ACU,
   type FillRuntimeContext_ACU,
@@ -33,19 +35,19 @@ export function buildFillRuntimeContext_ACU(): FillRuntimeContext_ACU {
 
 /** 按当前聊天冻结一份运行计划；调用方应在单次请求内复用同一计划。 */
 export function resolveFillPlanForCurrentChat_ACU(): ResolvedFillPlan_ACU {
-  const { preferences } = readFillModePreferences_ACU();
-  return resolveFillPlan_ACU(preferences, buildFillRuntimeContext_ACU());
+  const current = resolveCurrentChatFillMode_ACU();
+  return resolveFillPlan_ACU(withFillMode_ACU(current.preferences.preferences, current.mode), buildFillRuntimeContext_ACU());
 }
 
 /**
- * 向量管线的请求级计划。只有显式选择向量表格时才返回覆写；
+ * 向量管线的请求级计划。只有当前对话显式使用向量表格时才返回覆写；
  * 交火、经典（旧对话临时交火）与未保存模式均返回 null，沿用 vectorMemoryConfig 现值。
  * 向量/交火的计划与聊天运行时状态无关，因此不读取表格数据。
  */
 export function getVectorPipelinePlanForCurrentChat_ACU(): VectorPipelinePlan_ACU | null {
-  const { preferences, source } = readFillModePreferences_ACU();
-  if (source === 'default' || preferences.selectedMode !== 'vector') return null;
-  return resolveFillPlan_ACU(preferences, {
+  const current = resolveCurrentChatFillMode_ACU();
+  if (current.source === 'default' || current.mode !== 'vector') return null;
+  return resolveFillPlan_ACU(withFillMode_ACU(current.preferences.preferences, 'vector'), {
     flightModeActive: false,
     hasExistingTableData: true,
     legacyCrossfireEnabled: false,
@@ -53,14 +55,14 @@ export function getVectorPipelinePlanForCurrentChat_ACU(): VectorPipelinePlan_AC
 }
 
 /**
- * UI 展示用：当前显式选择的填表模式是否使用向量召回。
- * 只看用户保存过的 selectedMode，不吃旧交火全局开关与经典模式的临时回退，
+ * UI 展示用：当前对话显式使用的填表模式是否需要向量召回。
+ * 只看对话记录或已保存的偏好模式，不吃旧交火全局开关与经典模式的临时回退，
  * 避免经典模式下仍把向量服务标成必需项。
  */
 export function isVectorModeExplicitlySelected_ACU(): boolean {
-  const { preferences, source } = readFillModePreferences_ACU();
-  if (source === 'default') return false;
-  return preferences.selectedMode === 'vector' || preferences.selectedMode === 'crossfire';
+  const current = resolveCurrentChatFillMode_ACU();
+  if (current.source === 'default') return false;
+  return current.mode === 'vector' || current.mode === 'crossfire';
 }
 
 /**
@@ -68,9 +70,10 @@ export function isVectorModeExplicitlySelected_ACU(): boolean {
  * 推导失败时回退旧交火开关并记录诊断，保持升级前行为，不静默关闭已有交火。
  */
 export function isVectorPipelineEnabledForCurrentChat_ACU(): boolean {
-  const { preferences, source } = readFillModePreferences_ACU();
+  const current = resolveCurrentChatFillMode_ACU();
+  const preferences = withFillMode_ACU(current.preferences.preferences, current.mode);
   // 从未保存过填表模式：完全沿用旧交火开关，不读取运行时状态，保证升级前后行为一致。
-  if (source === 'default') return isLegacyCrossfireEnabled_ACU();
+  if (current.source === 'default') return isLegacyCrossfireEnabled_ACU();
   if (preferences.selectedMode === 'vector' || preferences.selectedMode === 'crossfire') return true;
   if (preferences.selectedMode === 'llm') return false;
   const legacy = isLegacyCrossfireEnabled_ACU();

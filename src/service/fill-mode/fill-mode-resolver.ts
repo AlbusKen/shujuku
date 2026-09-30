@@ -79,8 +79,7 @@ export function resolveFillPlan_ACU(
     autoEnableFlightMode: effective.autoEnable,
     recentChronicleRows: preferences.classic.recentChronicleRows,
     vectorPipeline,
-    // 经典模式只有飞行模式真正启用时纪要才是常量条目；新对话待启用或旧对话临时方案不解除屏蔽。
-    unmaskChronicleEntriesForContinuation: effective.mode === 'vector'
-      || (effective.mode === 'classic' && runtime.flightModeActive),
+    // 经典模式的纪要表与大总结以世界书常驻条目注入，续写沿用默认屏蔽（纪要索引仍屏蔽）；只有向量表格模式解除屏蔽。
+    unmaskChronicleEntriesForContinuation: effective.mode === 'vector',
   };
 }

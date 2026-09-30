@@ -7,6 +7,8 @@
  */
 
 import { currentJsonTableData_ACU } from '../../runtime/state-manager';
+import { getCurrentFlightModeState_ACU } from '../../flight-mode/flight-mode-state';
+import { projectFlightModeHiddenChronicleRows_ACU } from '../../flight-mode/flight-mode-hidden-rows';
 
 export const AGENT_TABLE_ALIASES_ACU = {
   global: ['全局数据表', '全局表', '总体大纲'],
@@ -28,9 +30,31 @@ interface AgentSheetView_ACU {
   rows: string[][];
 }
 
-function readTableData_ACU(tableData?: unknown): Record<string, any> {
+/**
+ * Agent 读取的表格数据。经典表格模式下只保留未被大总结归纳的纪要行，与世界书常驻条目一致；
+ * 投影失败时不暴露纪要表（fail-closed），已归纳的纪要改由大总结承载。
+ */
+export function readAgentTableData_ACU(tableData?: unknown): Record<string, any> {
   const source = tableData ?? currentJsonTableData_ACU;
-  return source && typeof source === 'object' && !Array.isArray(source) ? source as Record<string, any> : {};
+  if (!source || typeof source !== 'object' || Array.isArray(source)) return {};
+  const data = source as Record<string, any>;
+  let state: ReturnType<typeof getCurrentFlightModeState_ACU>;
+  try {
+    state = getCurrentFlightModeState_ACU();
+  } catch (_) {
+    return data;
+  }
+  if (!state.enabled || state.hiddenRowIds.length === 0) return data;
+  try {
+    return projectFlightModeHiddenChronicleRows_ACU(data, state);
+  } catch (_) {
+    return Object.fromEntries(Object.entries(data)
+      .filter(([key, sheet]: [string, any]) => !(key.startsWith('sheet_') && sheet?.name === '纪要表')));
+  }
+}
+
+function readTableData_ACU(tableData?: unknown): Record<string, any> {
+  return readAgentTableData_ACU(tableData);
 }
 
 function toSheetView_ACU(sheet: any): AgentSheetView_ACU | null {

@@ -19,6 +19,7 @@ import {
 } from './agent-placeholder-resolver';
 import { buildEmptyAgentWorldbookSnapshot_ACU } from './agent-worldbook-read';
 import { currentJsonTableData_ACU } from '../../runtime/state-manager';
+import { readAgentTableData_ACU } from './agent-tables';
 
 /** 单行片段上限：匹配词居中开窗。 */
 const SEARCH_LINE_SNIPPET_LIMIT_ACU = 300;
@@ -84,7 +85,7 @@ function collectStoryLines_ACU(context: AgentResolveContext_ACU): AgentSearchLin
 }
 
 function collectTableLines_ACU(context: AgentResolveContext_ACU): AgentSearchLine_ACU[] {
-  const source = context.tableData ?? currentJsonTableData_ACU;
+  const source = readAgentTableData_ACU(context.tableData ?? currentJsonTableData_ACU);
   if (!source || typeof source !== 'object' || Array.isArray(source)) return [];
   const lines: AgentSearchLine_ACU[] = [];
   for (const [key, sheet] of Object.entries(source as Record<string, any>)) {

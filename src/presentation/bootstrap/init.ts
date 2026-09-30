@@ -42,6 +42,7 @@ import { getContinuationRuntime_ACU } from '../../service/continuation/continuat
 import { bindWorldSimulationInternalAiGenerationStarted_ACU, consumeWorldSimulationInternalAiGenerationEnded_ACU, hasWorldSimulationInternalAiInflight_ACU } from '../../service/simulation/simulation-internal-ai-events';
 import { createWorldSimulationCompletionIntentForCurrentChat_ACU, getWorldSimulationRuntime_ACU } from '../../service/simulation/simulation-runtime';
 import { autoEnableFlightModeForNewChatIfNeeded_ACU } from '../../service/fill-mode/fill-mode-auto-enable';
+import { ensureCurrentChatFillModeRecorded_ACU } from '../../service/fill-mode/fill-mode-chat-switch';
 
 // [从 state-manager.ts 搬入 presentation 层] 安装发送意图捕捉钩子（DOM 事件绑定）
 async function ensureInitialSeedCheckpointBeforeGeneration_ACU(reason: string, { allowPendingFirstUserMessage = true } = {}) {
@@ -365,6 +366,15 @@ export   function mainInitialize_ACU() {
             // 新对话（无表格数据）自动启用经典表格；必须在表格数据刷新之后、且刷新未降级时执行。
             if (refreshResult && !refreshResult.degraded
                 && (!scheduledChatIdentifier_ACU || currentChatFileIdentifier_ACU === scheduledChatIdentifier_ACU)) {
+                // 先为未记录的对话固定填表模式（新对话取偏好模式），后续自动启用按该对话记录推导。
+                try {
+                    const recorded = await ensureCurrentChatFillModeRecorded_ACU();
+                    if ('reason' in recorded && recorded.reason === 'save_failed') {
+                        logWarn_ACU(`[填表模式] 对话填表模式记录保存失败，本轮按偏好模式运行: ${recorded.error || 'unknown'}`);
+                    }
+                } catch (recordError) {
+                    logWarn_ACU('[填表模式] 对话填表模式记录异常，本轮按偏好模式运行:', recordError);
+                }
                 try {
                     const autoEnable = await autoEnableFlightModeForNewChatIfNeeded_ACU();
                     if (autoEnable.attempted && !autoEnable.result.ok) {

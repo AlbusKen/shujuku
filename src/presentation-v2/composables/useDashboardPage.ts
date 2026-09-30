@@ -25,11 +25,6 @@ import { getCurrentTableDisplayData_ACU } from "../../service/settings/settings-
 import { setStorageMode_ACU, setAutoUpdateEnabled_ACU } from "../../service/settings/settings-write-service";
 import { getSortedSheetKeys_ACU } from "../../service/template/chat-scope";
 import { getActiveTemplatePresetMeta_ACU } from "../../service/template/template-preset-service";
-import {
-  disableFlightMode_ACU,
-  enableFlightMode_ACU,
-  type FlightModeTransitionResult_ACU,
-} from "../../service/flight-mode/flight-mode-transition";
 import { getCurrentFlightModeState_ACU } from "../../service/flight-mode/flight-mode-state";
 import {
   getCurrentVectorMemoryConfig_ACU,
@@ -132,7 +127,6 @@ export interface DashboardPageState {
   healthItems: ComputedRef<DashboardHealthItem[]>;
   contentReplaceGateEnabled: ComputedRef<boolean>;
   refresh: () => Promise<void>;
-  setFlightMode: (enabled: boolean, options?: { confirmTemplateScopeChange?: boolean }) => Promise<FlightModeTransitionResult_ACU>;
   setToggle: (key: string, value: boolean) => void;
   setStorageMode: (mode: string) => Promise<void>;
 }
@@ -1034,25 +1028,6 @@ export function useDashboardPage(): DashboardPageState {
     dataRefreshTick.value++;
   }
 
-  async function setFlightMode(
-    enabled: boolean,
-    options: { confirmTemplateScopeChange?: boolean } = {},
-  ): Promise<FlightModeTransitionResult_ACU> {
-    try {
-      return enabled
-        ? await enableFlightMode_ACU()
-        : await disableFlightMode_ACU(options);
-    } catch (error: any) {
-      return {
-        ok: false,
-        reason: "commit_failed",
-        error: error?.message || String(error || "飞行模式切换失败。"),
-      };
-    } finally {
-      await refresh();
-    }
-  }
-
   function setToggle(key: string, value: boolean): void {
     if (key === "zeroTkOccupyModeDefault") {
       setZeroTkOccupyMode_ACU(!!value);
@@ -1129,7 +1104,6 @@ export function useDashboardPage(): DashboardPageState {
     healthItems,
     contentReplaceGateEnabled,
     refresh,
-    setFlightMode,
     setToggle,
     setStorageMode,
   };

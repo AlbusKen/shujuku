@@ -16,11 +16,11 @@ function data(summaryRows: string[][], chronicleRows: string[][]) {
 }
 
 describe('flight-mode-hidden-rows', () => {
-  it('大总结新增行时隐藏提交后快照内全部纪要行，包含同批新增纪要', () => {
+  it('大总结新增行时只隐藏写入前可见的纪要行，同批新增纪要保持可见', () => {
     const before = data([], [['c1', '旧纪要']]);
     const after = data([['s1', '阶段总结']], [['c1', '旧纪要'], ['c2', '同批新增纪要']]);
 
-    expect(getHiddenChronicleRowIdsAfterBigSummaryInsert_ACU(before, after, state)).toEqual(['c1', 'c2', 'old']);
+    expect(getHiddenChronicleRowIdsAfterBigSummaryInsert_ACU(before, after, state)).toEqual(['c1', 'old']);
   });
 
   it('未新增大总结行时不改变隐藏集合', () => {

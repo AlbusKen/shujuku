@@ -80,7 +80,7 @@
             </AcuButton>
           </template>
           <template v-else>
-            <AcuButton @click="dialog.cancelActive">
+            <AcuButton v-if="renderedDialog.kind !== 'alert'" @click="dialog.cancelActive">
               {{ renderedDialog.cancelLabel || "取消" }}
             </AcuButton>
             <AcuButton

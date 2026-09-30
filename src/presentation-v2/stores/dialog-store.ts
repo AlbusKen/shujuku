@@ -2,7 +2,7 @@ import { defineStore } from "pinia";
 import { acuClearInterval, acuSetInterval, type AcuTimerHandle } from "../bootstrap/host-env";
 
 export type AcuDialogVariant = "default" | "primary" | "danger";
-export type AcuDialogKind = "confirm" | "prompt" | "choice" | "multiselect";
+export type AcuDialogKind = "confirm" | "prompt" | "choice" | "multiselect" | "alert";
 
 export interface AcuDialogAction {
   value: string;
@@ -50,6 +50,13 @@ export interface ConfirmDialogOptions {
     cancelLabel?: string;
     confirmVariant?: AcuDialogVariant;
     confirmCountdownSeconds?: number;
+}
+
+export interface AlertDialogOptions {
+  title: string;
+  message: string;
+  dangerMessage?: string;
+  confirmLabel?: string;
 }
 
 export interface PromptDialogOptions {
@@ -137,6 +144,20 @@ export const useDialogStore = defineStore("acu-v2-dialog", {
         resolve: () => {},
       }).then((value) => value === true);
     },
+    /** 只有一个确认按钮的提示框。 */
+    alert(options: AlertDialogOptions): Promise<void> {
+      return this.enqueue({
+        id: makeDialogId(),
+        kind: "alert",
+        title: options.title,
+        message: options.message,
+        dangerMessage: options.dangerMessage,
+        confirmLabel: options.confirmLabel || "知道了",
+        confirmVariant: "primary",
+        requireNonEmpty: false,
+        resolve: () => {},
+      }).then((): void => undefined);
+    },
     prompt(options: PromptDialogOptions): Promise<string | null> {
       return this.enqueue({
         id: makeDialogId(),
@@ -210,7 +231,7 @@ export const useDialogStore = defineStore("acu-v2-dialog", {
         this.activateNext();
         return;
       }
-      if (dialog.kind === "confirm") {
+      if (dialog.kind === "confirm" || dialog.kind === "alert") {
         this.active = null;
         this.inputValue = "";
         this.checkedValues = {};

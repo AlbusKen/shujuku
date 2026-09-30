@@ -6,6 +6,7 @@ const h = vi.hoisted(() => ({
   tableData: null as any,
   template: null as any,
   save: vi.fn().mockResolvedValue(undefined),
+  strictSave: vi.fn().mockResolvedValue(undefined),
   setLock: vi.fn(),
   deleteLock: vi.fn(),
   commit: vi.fn(),
@@ -15,6 +16,7 @@ const h = vi.hoisted(() => ({
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
   getChatArray_ACU: () => h.chat,
   saveChatToHost_ACU: h.save,
+  saveChatToHostStrict_ACU: h.strictSave,
 }));
 vi.mock('../../../src/data/storage/chat-history', () => ({
   getChatScopedConfigContainer_ACU: () => h.container,
@@ -129,7 +131,9 @@ describe('flight-mode-transition', () => {
     const result = await enableFlightMode_ACU();
 
     expect(result).toMatchObject({ ok: false, reason: 'commit_failed', error: expect.stringContaining('最新 AI 楼层') });
-    expect(h.container).toBeNull();
+    // 启用前预存的待完成归档在提交失败后清除，且不写开关状态。
+    expect(h.container?.flightModeByIsolationKey).toBeUndefined();
+    expect(h.container?.flightModePendingEnableByIsolationKey).toBeUndefined();
     expect(h.save).not.toHaveBeenCalled();
     expect(h.setLock).not.toHaveBeenCalled();
   });
@@ -140,7 +144,7 @@ describe('flight-mode-transition', () => {
     const result = await enableFlightMode_ACU();
 
     expect(result).toMatchObject({ ok: false, reason: 'big_summary_sheet_key_unresolved' });
-    expect(h.container).toBeNull();
+    expect(h.container?.flightModeByIsolationKey).toBeUndefined();
     expect(h.setLock).not.toHaveBeenCalled();
   });
 

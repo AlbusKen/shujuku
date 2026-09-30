@@ -18,7 +18,8 @@
           type="button"
           class="acu-preset-dd__star"
           :class="{ 'acu-preset-dd__star--active': itemValue(item) === defaultName }"
-          :title="itemValue(item) === defaultName ? '全局默认' : '设为全局默认'"
+          :title="itemValue(item) === defaultName ? defaultActiveTitle : defaultInactiveTitle"
+          :aria-label="itemValue(item) === defaultName ? defaultActiveTitle : defaultInactiveTitle"
           @click.stop="$emit('set-default', itemValue(item))"
         >
           <i :class="itemValue(item) === defaultName ? 'fa-solid fa-star' : 'fa-regular fa-star'"></i>
@@ -49,11 +50,15 @@ const props = withDefaults(defineProps<{
   placeholder?: string;
   disabled?: boolean;
   showDefaultAction?: boolean;
+  defaultActiveTitle?: string;
+  defaultInactiveTitle?: string;
 }>(), {
   emptyText: '暂无预设',
   placeholder: '未选择',
   disabled: false,
   showDefaultAction: true,
+  defaultActiveTitle: '全局默认',
+  defaultInactiveTitle: '设为全局默认',
 });
 
 const emit = defineEmits<{

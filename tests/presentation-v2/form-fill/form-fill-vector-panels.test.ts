@@ -306,7 +306,7 @@ describe('VectorIndexPage', () => {
     expect(promptPanel.querySelector('.acu-v2-vector-index-page__prompt-overview')).toBeNull();
     const mobileNavItems = Array.from(document.querySelectorAll('.acu-v2-fill-mode-page .acu-mobile-panel-nav__item'))
       .map(item => item.textContent?.trim());
-    expect(mobileNavItems).toEqual(['填表模式', '模式对比', '索引状态', '关键词', '向量服务', '提示词', '召回参数', '归档分块', '剧情推进']);
+    expect(mobileNavItems).toEqual(['填表模式', '剧情推进', '索引状态', '关键词', '向量服务', '提示词', '召回参数', '归档分块']);
 
     mount.__resetAcuV2MountForTests();
   });

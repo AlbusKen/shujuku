@@ -393,6 +393,14 @@ export function useManualUpdate(): ManualUpdateState {
     return `危险：当前聊天的所有 full checkpoint 都在本次重填范围内（${coveredFloors}）。系统首次执行时只会做边界检查；如果确认缺少重填起点前可回放 checkpoint，会在下一步要求你单独确认是否替换本次范围内选中表的基底。`;
   });
 
+  /** 本次重填范围是否会覆盖（删除并重建）任一 full checkpoint；不覆盖时静默执行。 */
+  const refillRangeCoversCheckpoint = computed<boolean>(() => {
+    const range = manualRefillRange.value;
+    if (!range) return false;
+    const rangeIndexSet = new Set(range.indices);
+    return checkpointFloors.value.some(item => rangeIndexSet.has(item.messageIndex));
+  });
+
   const vectorIndexWarning = computed<boolean>(() => {
     void refreshTick.value;
     try {
@@ -460,6 +468,7 @@ export function useManualUpdate(): ManualUpdateState {
 
     manualUpdateBusy.value = true;
     try {
+      if (refillRangeCoversCheckpoint.value) {
       const injectionTargetLabel = await describeInjectionTargetForConfirm();
       const confirmed = await dialogStore.confirm({
         title: '执行手动填表',
@@ -470,6 +479,7 @@ export function useManualUpdate(): ManualUpdateState {
         confirmVariant: 'danger',
       });
       if (!confirmed) return;
+      }
       // 兼容沿用 clearBeforeUpdate 参数名；service 层实际执行事务式重填，不会预清空聊天记录。
       const clearBeforeUpdate = true;
       // 确认后 TOCTOU 复检：确认期间 runtime 可能被 purge/表删除/新增表改变。

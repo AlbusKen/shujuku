@@ -45,14 +45,46 @@ export const fillModeCopy = {
     mode: '填表模式',
     plot: '剧情推进',
   },
+  reject: {
+    title: '无法切换填表模式',
+    message(reason: string, currentLabel: string, error?: string): string {
+      if (reason === 'classic_locked') {
+        return `当前对话使用「${currentLabel}」，纪要表会持续累积，切回经典表格模式会超出经典模式的纪要窗口，因此不能切回。需要经典表格模式时请新开对话，可先点击五角星把经典表格模式设为新对话的偏好模式。`;
+      }
+      if (reason === 'record_invalid') {
+        return '当前对话的填表模式记录无法识别，为避免纪要表超出经典模式的纪要窗口，已拒绝切回经典表格模式。';
+      }
+      if (reason === 'no_active_chat') {
+        return '当前没有打开的对话，无法切换对话的填表模式。点击五角星可以设置新对话的偏好模式。';
+      }
+      if (reason === 'classic_enable_failed') {
+        return `无法启用经典表格模式，当前对话仍使用「${currentLabel}」。${error ? `原因：${error}` : ''}`;
+      }
+      if (reason === 'classic_disable_failed') {
+        return `无法退出经典表格模式，当前对话仍使用经典表格模式。${error ? `原因：${error}` : ''}`;
+      }
+      return `填表模式保存失败，当前对话仍使用「${currentLabel}」。${error ? `原因：${error}` : ''}`;
+    },
+  },
+  leaveClassic: {
+    title: '退出经典表格模式',
+    confirmLabel: '确认切换',
+    message(targetLabel: string): string {
+      return `即将把当前对话切换为「${targetLabel}」。切换后会删除大总结表，已被大总结归纳的纪要恢复可见，纪要表恢复原导出方式。切换后当前对话不能再切回经典表格模式。`;
+    },
+  },
+  templateChanged: {
+    title: '表格模板已修改',
+    confirmLabel: '恢复模板并切换',
+    message: '启用经典表格模式后，当前对话的表格模板被修改过。继续切换会恢复为启用经典表格模式前的模板，覆盖这些修改。',
+  },
   panels: {
     mode: {
       title: '填表模式',
-      description: '选择数据库如何为本次正文生成召回记忆。每种模式的参数独立保存，切换模式不会覆盖其它模式，也不会改变功能档位。',
-    },
-    intro: {
-      title: '模式对比',
-      description: '四种模式的适用场景与代价。拿不定主意时保持经典表格模式即可。',
+      description: '选择当前对话如何为正文生成召回记忆。模式按对话记录；每种模式的参数独立保存，切换模式不会覆盖其它模式，也不会改变功能档位。',
+      selectHint: '点击五角星把该模式设为新对话的偏好模式（全局保存）。经典表格模式可随时切换为其它模式（会删除大总结表），其它模式的对话不能切回经典表格模式。',
+      preferActiveTitle: '新对话偏好模式',
+      preferInactiveTitle: '设为新对话偏好模式',
     },
     plot: {
       title: '剧情推进',

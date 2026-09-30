@@ -4,8 +4,13 @@
  */
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { currentChatFileIdentifier_ACU } from '../runtime/state-manager';
-import { enableFlightMode_ACU, type FlightModeTransitionResult_ACU } from '../flight-mode/flight-mode-transition';
-import { isLegacyCrossfireEnabled_ACU, readFillModePreferences_ACU } from './fill-mode-preferences';
+import {
+  enableFlightMode_ACU,
+  hasPendingFlightModeEnable_ACU,
+  type FlightModeTransitionResult_ACU,
+} from '../flight-mode/flight-mode-transition';
+import { isLegacyCrossfireEnabled_ACU } from './fill-mode-preferences';
+import { resolveCurrentChatFillMode_ACU, withFillMode_ACU } from './fill-mode-chat-record';
 import { resolveFillPlan_ACU } from './fill-mode-resolver';
 import { buildFillRuntimeContext_ACU } from './fill-mode-gate';
 
@@ -18,13 +23,15 @@ let inFlightChatKey_ACU: string | null = null;
 export async function autoEnableFlightModeForNewChatIfNeeded_ACU(): Promise<FlightModeAutoEnableResult_ACU> {
   const chatKey = String(currentChatFileIdentifier_ACU || '');
   if (inFlightChatKey_ACU !== null) return { attempted: false, reason: 'in_flight' };
-  const { preferences, source } = readFillModePreferences_ACU();
+  const current = resolveCurrentChatFillMode_ACU();
   // 从未选择过填表模式且旧交火开关开启：保持升级前行为，不给新对话叠加飞行模式。
-  if (source === 'default' && isLegacyCrossfireEnabled_ACU()) {
+  if (current.source === 'default' && isLegacyCrossfireEnabled_ACU()) {
     return { attempted: false, reason: 'legacy_crossfire_default' };
   }
-  const plan = resolveFillPlan_ACU(preferences, buildFillRuntimeContext_ACU());
-  if (!plan.autoEnableFlightMode) return { attempted: false, reason: 'not_required' };
+  const plan = resolveFillPlan_ACU(withFillMode_ACU(current.preferences.preferences, current.mode), buildFillRuntimeContext_ACU());
+  // 新对话按经典模式启用；上次启用半完成（模板已提交、开关未落盘）的经典对话在打开时补完。
+  const recoverPending = current.mode === 'classic' && hasPendingFlightModeEnable_ACU();
+  if (!plan.autoEnableFlightMode && !recoverPending) return { attempted: false, reason: 'not_required' };
 
   inFlightChatKey_ACU = chatKey;
   try {
