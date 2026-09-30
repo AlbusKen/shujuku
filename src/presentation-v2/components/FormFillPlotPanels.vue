@@ -1,61 +1,40 @@
 <template>
-  <div class="acu-v2-fill-mode-plot">
-    <AcuPanel
-      id="fill-mode-plot-panel"
-      :title="fillModeCopy.panels.plot.title"
-      :description="fillModeCopy.panels.plot.description"
-    >
-      <AcuFormRow
-        :label="fillModeCopy.panels.plot.enableLabel"
-        :hint="fillModeCopy.panels.plot.enableHint"
-      >
-        <AcuToggle
-          :model-value="plotStore.enabled"
-          data-acu-plot-enabled-toggle="1"
-          @update:model-value="plotStore.setEnabled($event)"
-        />
-      </AcuFormRow>
-    </AcuPanel>
-
-    <template v-if="plotStore.enabled">
-      <PlotPresetPanel />
-
-      <AcuPanel
-        id="fill-mode-plot-worldbook-panel"
-        :title="fillModeCopy.panels.worldbook.title"
-        :description="fillModeCopy.panels.worldbook.description"
-      >
-        <WorldbookEntryPickerBody
-          :source="plotWorldbook.source.value"
-          :selected-names="plotWorldbook.manualSelection.value"
-          :names="worldbook.names.value"
-          :selector-status="worldbook.status.value"
-          :selector-error="worldbook.error.value"
-          :current-label="currentWorldbookLabel"
-          v-model:filter="entryFilter"
-          :groups="wbEntries.groups.value"
-          :loading="wbEntries.status.value === 'loading'"
-          :entry-status="wbEntries.status.value"
-          :entry-error="wbEntries.error.value"
-          :empty-text="entryEmptyText"
-          @update:source="onWorldbookSourceChange($event)"
-          @toggle-book="onManualWorldbookToggle"
-          @select-all="wbEntries.selectAll()"
-          @deselect-all="wbEntries.deselectAll()"
-          @toggle="(bookName: string, uid: number, checked: boolean) => wbEntries.toggleEntry(bookName, uid, checked)"
-          @toggle-group="wbEntries.toggleGroupExpanded($event)"
-        />
-      </AcuPanel>
-    </template>
-  </div>
+  <AcuPanel
+    id="fill-mode-plot-worldbook-panel"
+    class="acu-v2-fill-mode-plot"
+    :title="fillModeCopy.panels.worldbook.title"
+    :description="fillModeCopy.panels.worldbook.description"
+  >
+    <WorldbookEntryPickerBody
+      :source="plotWorldbook.source.value"
+      :selected-names="plotWorldbook.manualSelection.value"
+      :names="worldbook.names.value"
+      :selector-status="worldbook.status.value"
+      :selector-error="worldbook.error.value"
+      :current-label="currentWorldbookLabel"
+      v-model:filter="entryFilter"
+      :groups="wbEntries.groups.value"
+      :loading="wbEntries.status.value === 'loading'"
+      :entry-status="wbEntries.status.value"
+      :entry-error="wbEntries.error.value"
+      :empty-text="entryEmptyText"
+      @update:source="onWorldbookSourceChange($event)"
+      @toggle-book="onManualWorldbookToggle"
+      @select-all="wbEntries.selectAll()"
+      @deselect-all="wbEntries.deselectAll()"
+      @toggle="(bookName: string, uid: number, checked: boolean) => wbEntries.toggleEntry(bookName, uid, checked)"
+      @toggle-group="wbEntries.toggleGroupExpanded($event)"
+    />
+  </AcuPanel>
 </template>
 
 <script setup lang="ts">
+/**
+ * 填表模式页的剧情推进世界书面板（通栏）。
+ * 启用开关在填表模式面板内，剧情推进预设由页面直接挂载在右栏。
+ */
 import { computed, onMounted, ref, watch } from 'vue';
-import AcuFormRow from './_lib/AcuFormRow.vue';
 import AcuPanel from './_lib/AcuPanel.vue';
-import AcuToggle from './_lib/AcuToggle.vue';
-import PlotPresetPanel from './PlotPresetPanel.vue';
 import WorldbookEntryPickerBody from './WorldbookEntryPickerBody.vue';
 import { useWorldbookSelector } from '../composables/useWorldbookSelector';
 import { usePlotWorldbookConfig } from '../composables/usePlotWorldbookConfig';
@@ -63,11 +42,9 @@ import { usePlotWorldbookEntries } from '../composables/usePlotWorldbookEntries'
 import { useChatChangedTick } from '../composables/useChatChangedListener';
 import { fillModeCopy } from '../copy/fill-mode-copy';
 import { plotCopy } from '../copy/plot-copy';
-import { usePlotPresetStore } from '../stores/plot-preset-store';
 
 type WorldbookSource = 'character' | 'manual';
 
-const plotStore = usePlotPresetStore();
 const worldbook = useWorldbookSelector();
 const plotWorldbook = usePlotWorldbookConfig();
 const wbEntries = usePlotWorldbookEntries();
@@ -117,7 +94,6 @@ const currentWorldbookLabel = computed<string>(() => {
 });
 
 async function refreshAll(): Promise<void> {
-  plotStore.refreshFromSettings();
   plotWorldbook.refreshFromSettings();
   await worldbook.refresh();
   await refreshWorldbookEntries();
@@ -126,10 +102,3 @@ async function refreshAll(): Promise<void> {
 onMounted(() => { void refreshAll(); });
 watch(useChatChangedTick(), () => { void refreshAll(); });
 </script>
-
-<style scoped>
-.acu-v2-fill-mode-plot {
-  min-width: 0;
-  display: contents;
-}
-</style>

@@ -372,13 +372,13 @@ describe('PlotPage', () => {
   it('剧情推进预设下拉直接使用 AcuPresetDropdown，显示任务数并支持切换与星标', async () => {
     const { mount, settings } = await mountPlotPage();
 
-    const trigger = document.querySelector('.acu-v2-fill-mode-plot .acu-preset-dd__trigger') as HTMLButtonElement | null;
+    const trigger = document.querySelector('#fill-mode-plot-panel .acu-preset-dd__trigger') as HTMLButtonElement | null;
     expect(trigger).not.toBeNull();
     expect(trigger!.textContent).toContain('记忆召回');
 
     trigger!.click();
     await Promise.resolve();
-    const items = Array.from(document.querySelectorAll('.acu-v2-fill-mode-plot .acu-preset-dd__item')) as HTMLElement[];
+    const items = Array.from(document.querySelectorAll('#fill-mode-plot-panel .acu-preset-dd__item')) as HTMLElement[];
     const defaultItem = items.find(item => item.textContent?.includes('默认预设'));
     expect(defaultItem).not.toBeUndefined();
     expect(defaultItem!.textContent).toContain('1 个任务');
@@ -391,7 +391,7 @@ describe('PlotPage', () => {
 
     trigger!.click();
     await Promise.resolve();
-    const stars = Array.from(document.querySelectorAll('.acu-v2-fill-mode-plot .acu-preset-dd__star')) as HTMLButtonElement[];
+    const stars = Array.from(document.querySelectorAll('#fill-mode-plot-panel .acu-preset-dd__star')) as HTMLButtonElement[];
     stars.find(star => star.closest('.acu-preset-dd__item')?.textContent?.includes('低速推进'))!.click();
     await Promise.resolve();
     expect(settings.plotSettings.lastUsedPresetName).toBe('低速推进');
@@ -402,12 +402,12 @@ describe('PlotPage', () => {
   it('剧情推进预设下拉支持选择默认预设，并可将默认预设设为全局默认', async () => {
     const { mount, settings } = await mountPlotPage();
 
-    const trigger = document.querySelector('.acu-v2-fill-mode-plot .acu-preset-dd__trigger') as HTMLButtonElement | null;
+    const trigger = document.querySelector('#fill-mode-plot-panel .acu-preset-dd__trigger') as HTMLButtonElement | null;
     expect(trigger).not.toBeNull();
 
     trigger!.click();
     await Promise.resolve();
-    const defaultItem = Array.from(document.querySelectorAll('.acu-v2-fill-mode-plot .acu-preset-dd__item'))
+    const defaultItem = Array.from(document.querySelectorAll('#fill-mode-plot-panel .acu-preset-dd__item'))
       .find(item => item.textContent?.includes('默认预设')) as HTMLElement | undefined;
     expect(defaultItem).not.toBeUndefined();
     defaultItem!.click();
@@ -418,7 +418,7 @@ describe('PlotPage', () => {
 
     trigger!.click();
     await Promise.resolve();
-    const defaultStar = Array.from(document.querySelectorAll('.acu-v2-fill-mode-plot .acu-preset-dd__star'))
+    const defaultStar = Array.from(document.querySelectorAll('#fill-mode-plot-panel .acu-preset-dd__star'))
       .find(star => star.closest('.acu-preset-dd__item')?.textContent?.includes('默认预设')) as HTMLButtonElement | undefined;
     expect(defaultStar).not.toBeUndefined();
     defaultStar!.click();

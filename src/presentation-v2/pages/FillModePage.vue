@@ -2,16 +2,12 @@
   <section class="acu-v2-fill-mode-page">
     <AcuMobilePanelNav :items="panelNavItems" />
 
-    <AcuPanelGrid class="acu-v2-fill-mode-page__grid">
+    <AcuPanelGrid class="acu-v2-fill-mode-page__grid" :columns="showPlotPanels ? 2 : 1">
       <AcuPanel
         id="fill-mode-select-panel"
         :title="fillModeCopy.panels.mode.title"
         :description="fillModeCopy.panels.mode.description"
       >
-        <template #actions>
-          <AcuBadge variant="accent">{{ currentIntro.label }}</AcuBadge>
-        </template>
-
         <AcuFormRow label="当前对话填表模式" :hint="fillModeCopy.panels.mode.selectHint">
           <AcuPresetDropdown
             :items="modeItems"
@@ -78,14 +74,25 @@
             />
           </AcuFormRow>
         </template>
+
+        <AcuFormRow
+          v-if="showPlotPanels"
+          :label="fillModeCopy.panels.plot.enableLabel"
+          :hint="fillModeCopy.panels.plot.enableHint"
+        >
+          <AcuToggle
+            :model-value="plotStore.enabled"
+            :aria-label="fillModeCopy.panels.plot.enableLabel"
+            data-acu-plot-enabled-toggle="1"
+            @update:model-value="plotStore.setEnabled($event)"
+          />
+        </AcuFormRow>
       </AcuPanel>
-      <div aria-hidden="true"></div>
+      <PlotPresetPanel v-if="showPlotPanels" id="fill-mode-plot-panel" />
     </AcuPanelGrid>
 
     <!-- 交火模式同时挂载两组面板：剧情推进在前，向量服务与索引维护在后。 -->
-    <AcuPanelGrid v-if="showPlotPanels" class="acu-v2-fill-mode-page__plot-grid">
-      <FormFillPlotPanels />
-    </AcuPanelGrid>
+    <FormFillPlotPanels v-if="showPlotPanels" />
 
     <FormFillVectorPanels v-if="vectorPanelMode" :mode="vectorPanelMode" />
   </section>
@@ -93,7 +100,6 @@
 
 <script setup lang="ts">
 import { computed, onMounted, watch } from "vue";
-import AcuBadge from "../components/_lib/AcuBadge.vue";
 import AcuFormRow from "../components/_lib/AcuFormRow.vue";
 import AcuInput from "../components/_lib/AcuInput.vue";
 import AcuMessage from "../components/_lib/AcuMessage.vue";
@@ -102,8 +108,10 @@ import AcuPanel from "../components/_lib/AcuPanel.vue";
 import AcuPanelGrid from "../components/_lib/AcuPanelGrid.vue";
 import AcuPresetDropdown from "../components/_lib/AcuPresetDropdown.vue";
 import AcuSelect from "../components/_lib/AcuSelect.vue";
+import AcuToggle from "../components/_lib/AcuToggle.vue";
 import FormFillVectorPanels from "../components/FormFillVectorPanels.vue";
 import FormFillPlotPanels from "../components/FormFillPlotPanels.vue";
+import PlotPresetPanel from "../components/PlotPresetPanel.vue";
 import { useApiPresetSelectOptions } from "../composables/useApiPresetSelectOptions";
 import { useChatChangedTick } from "../composables/useChatChangedListener";
 import { FILL_MODE_INTROS, fillModeCopy } from "../copy/fill-mode-copy";
@@ -114,8 +122,10 @@ import {
   type FillMode,
 } from "../stores/form-fill-mode-store";
 import { useDialogStore } from "../stores/dialog-store";
+import { usePlotPresetStore } from "../stores/plot-preset-store";
 
 const formFillMode = useFormFillModeStore();
+const plotStore = usePlotPresetStore();
 const dialogStore = useDialogStore();
 const { followActiveApiLabel, apiPresetSelectOptions } = useApiPresetSelectOptions();
 
