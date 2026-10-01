@@ -15,11 +15,26 @@ export function setSendTextareaValue_ACU(text: string): boolean {
         const $textarea = jQuery_API_ACU?.('#send_textarea');
         if (!$textarea || typeof $textarea.val !== 'function' || typeof $textarea.trigger !== 'function') return false;
         $textarea?.val(text);
-        $textarea?.trigger('input');
+        notifySendTextareaInput_ACU($textarea);
         return true;
     } catch {
         return false;
     }
+}
+
+/**
+ * 宿主的发送框自适应高度与输入暂存用原生 addEventListener('input') 监听；jQuery trigger('input')
+ * 只调用 jQuery 处理器，原生监听收不到，清空后发送框会保持原高度。与宿主一致派发原生 input 事件
+ * （jQuery 处理器同样会收到），拿不到原生元素时回落到 trigger。
+ */
+function notifySendTextareaInput_ACU($textarea: JQuery<HTMLElement>): void {
+    const el = $textarea[0];
+    if (el && typeof el.dispatchEvent === 'function') {
+        const EventCtor = el.ownerDocument?.defaultView?.Event ?? Event;
+        el.dispatchEvent(new EventCtor('input', { bubbles: true }));
+        return;
+    }
+    $textarea.trigger('input');
 }
 
 /** Clicks the host send button and reports availability instead of swallowing it. */

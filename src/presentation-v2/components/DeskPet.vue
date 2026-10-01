@@ -885,7 +885,10 @@ onBeforeUnmount(() => {
   animation: acu-desk-pet-dizzy 1.2s ease-in-out infinite;
 }
 
+/* 吓一跳：惊吓帧身体收拢，不透明面积只有待机帧约 72%，按面积比放大 1.18 倍，
+   让被叫醒时体型与基础状态一致（与挣扎帧同一补偿方式）。 */
 .acu-desk-pet__img.pose-surprised {
+  transform: scale(1.18);
   animation: acu-desk-pet-jump 0.6s cubic-bezier(0.3, 1.6, 0.5, 1) both;
 }
 
@@ -1047,10 +1050,10 @@ onBeforeUnmount(() => {
 }
 
 @keyframes acu-desk-pet-jump {
-  0% { transform: translateY(0) scale(1, 1); }
-  30% { transform: translateY(-14px) scale(0.94, 1.08); }
-  70% { transform: translateY(0) scale(1.06, 0.94); }
-  100% { transform: translateY(0) scale(1, 1); }
+  0% { transform: translateY(0) scale(1.18, 1.18); }
+  30% { transform: translateY(-14px) scale(1.11, 1.27); }
+  70% { transform: translateY(0) scale(1.25, 1.11); }
+  100% { transform: translateY(0) scale(1.18, 1.18); }
 }
 
 @keyframes acu-desk-pet-wave {
