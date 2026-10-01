@@ -239,6 +239,11 @@ export const dashboardCopy = {
       label: "0TK 占用模式",
       description: "默认开启。开启后纪要概览不占用上下文。",
     },
+    streaming: {
+      label: "开启流式输出",
+      description:
+        "开启后，支持流式的文本生成会边生成边返回；关闭后会等完整结果返回。",
+    },
     continuation: {
       label: "智能续写",
       description: "手动功能。代替你自动发送提示词，AI 根据内容持续续写。",

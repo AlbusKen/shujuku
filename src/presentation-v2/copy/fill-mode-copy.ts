@@ -85,6 +85,9 @@ export const fillModeCopy = {
       selectHint: '五角星设为新对话偏好模式。经典表格模式可切换为其它模式，其它模式不能切回经典。',
       preferActiveTitle: '新对话偏好模式',
       preferInactiveTitle: '设为新对话偏好模式',
+      nativeToolLabel: '填表使用工具调用',
+      nativeToolHint:
+        '默认关闭，四种模式通用。开启后填表改走 table_edit / table_sql 原生工具提交，默认提示词同步切换；部分渠道不支持工具调用，收到 tools 字段会直接报错。',
     },
     plot: {
       title: '剧情推进',

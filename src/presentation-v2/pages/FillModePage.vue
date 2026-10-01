@@ -95,6 +95,19 @@
           </AcuFormRow>
         </template>
 
+        <!-- 填表工具调用对四种模式都生效，始终显示。 -->
+        <AcuFormRow
+          :label="fillModeCopy.panels.mode.nativeToolLabel"
+          :hint="fillModeCopy.panels.mode.nativeToolHint"
+        >
+          <AcuToggle
+            :model-value="formFillSettings.tableFillNativeToolEnabled.value"
+            :aria-label="fillModeCopy.panels.mode.nativeToolLabel"
+            data-acu-table-fill-native-tool-toggle="1"
+            @update:model-value="formFillSettings.setTableFillNativeToolEnabled($event)"
+          />
+        </AcuFormRow>
+
         <AcuFormRow
           v-if="showPlotPanels"
           :label="fillModeCopy.panels.plot.enableLabel"
@@ -134,6 +147,7 @@ import FormFillPlotPanels from "../components/FormFillPlotPanels.vue";
 import PlotPresetPanel from "../components/PlotPresetPanel.vue";
 import { useApiPresetSelectOptions } from "../composables/useApiPresetSelectOptions";
 import { useChatChangedTick } from "../composables/useChatChangedListener";
+import { useFormFillSettings } from "../composables/useFormFillSettings";
 import { FILL_MODE_INTROS, fillModeCopy } from "../copy/fill-mode-copy";
 import { vectorIndexCopy } from "../copy/vector-index-copy";
 import {
@@ -147,6 +161,7 @@ import { usePlotPresetStore } from "../stores/plot-preset-store";
 const formFillMode = useFormFillModeStore();
 const plotStore = usePlotPresetStore();
 const dialogStore = useDialogStore();
+const formFillSettings = useFormFillSettings();
 const { followActiveApiLabel, apiPresetSelectOptions } = useApiPresetSelectOptions();
 
 const modeItems = FORM_FILL_MODE_OPTIONS.map((option) => ({ value: option.value, label: option.label }));

@@ -53,6 +53,7 @@ import {
 } from "../stores/content-replace-gate";
 import { dashboardCopy } from "../copy/dashboard-copy";
 import { useToastStore } from "../stores/toast-store";
+import { useApiPresetStore } from "../stores/api-preset-store";
 import { useDevOptions } from "./useDevOptions";
 
 type MessageKind = "info" | "success" | "warning" | "error";
@@ -942,6 +943,12 @@ export function useDashboardPage(): DashboardPageState {
         description: dashboardCopy.toggles.zeroTk.description,
         value: settings_ACU.zeroTkOccupyModeDefault === true,
       },
+      {
+        key: "streamingEnabled",
+        label: dashboardCopy.toggles.streaming.label,
+        description: dashboardCopy.toggles.streaming.description,
+        value: settings_ACU.streamingEnabled === true,
+      },
     ];
   });
 
@@ -1063,6 +1070,8 @@ export function useDashboardPage(): DashboardPageState {
       saveSettings_ACU();
     } else if (key === "autoUpdateEnabled") {
       setAutoUpdateEnabled_ACU(!!value);
+    } else if (key === "streamingEnabled") {
+      useApiPresetStore().setStreamingEnabled(!!value);
     } else if (
       key === "silentModeEnabled" ||
       key === "desktopPetEnabled" ||

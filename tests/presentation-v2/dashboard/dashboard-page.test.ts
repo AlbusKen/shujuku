@@ -390,7 +390,7 @@ describe("DashboardPage", () => {
     expect(text).toContain("自动更新");
     expect(text).toContain("静默模式");
     expect(text).toContain("桌面宠物");
-    expect(text).not.toContain("开启流式输出");
+    expect(text).toContain("开启流式输出");
     expect(text).toContain("0TK 占用模式");
 
     const visibleToggleKeys = Array.from(
@@ -404,6 +404,7 @@ describe("DashboardPage", () => {
       "desktopPetEnabled",
       "deskPetJokesEnabled",
       "zeroTkOccupyModeDefault",
+      "streamingEnabled",
     ]);
 
     // 默认在基础设置视图下，高级字段不可见
@@ -806,9 +807,20 @@ describe("DashboardPage", () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it("仪表盘不再渲染流式输出开关", async () => {
-    const { mount } = await mountDashboardPage();
-    expect(document.querySelector('button[data-acu-toggle-key="streamingEnabled"]')).toBeNull();
+  it("修改流式输出开关会保存 settings", async () => {
+    const { mount, settings, saveSettings } = await mountDashboardPage();
+
+    const toggle = document.querySelector(
+      'button[data-acu-toggle-key="streamingEnabled"]',
+    ) as HTMLButtonElement;
+    expect(toggle).not.toBeNull();
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    toggle.click();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(settings.streamingEnabled).toBe(true);
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    expect(saveSettings).toHaveBeenCalled();
 
     mount.__resetAcuV2MountForTests();
   });
