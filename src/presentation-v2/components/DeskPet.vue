@@ -33,11 +33,14 @@ import dizzyImage from "../assets/desk-pet/dizzy.png";
 import eatAImage from "../assets/desk-pet/eat-a.png";
 import eatBImage from "../assets/desk-pet/eat-b.png";
 import happyImage from "../assets/desk-pet/happy.png";
+import huffImage from "../assets/desk-pet/huff.png";
 import idleImage from "../assets/desk-pet/idle.png";
+import knockdownImage from "../assets/desk-pet/knockdown.png";
 import lookLeftImage from "../assets/desk-pet/look-left.png";
 import lookRightImage from "../assets/desk-pet/look-right.png";
 import peekImage from "../assets/desk-pet/peek.png";
 import peekSleepyImage from "../assets/desk-pet/peek-sleepy.png";
+import poundImage from "../assets/desk-pet/pound.png";
 import rollImage from "../assets/desk-pet/roll.png";
 import shyImage from "../assets/desk-pet/shy.png";
 import sitSnoreImage from "../assets/desk-pet/sit-snore.png";
@@ -68,7 +71,7 @@ import {
 
 type IdlePose = "idle" | "blink" | "look-left" | "look-right" | "walk-a" | "walk-b" | "roll" | "eat-a" | "eat-b" | "yawn";
 type SnoozePose = "snore" | "sit-snore";
-type ReactionPose = "shy" | "tickle" | "angry" | "happy" | "dizzy" | "surprised" | "wave";
+type ReactionPose = "shy" | "tickle" | "angry" | "happy" | "dizzy" | "surprised" | "wave" | "huff" | "pound" | "knockdown";
 type Pose = IdlePose | SnoozePose | ReactionPose | "working" | "struggle";
 
 const POSE_IMAGES: Record<Pose, string> = {
@@ -93,6 +96,9 @@ const POSE_IMAGES: Record<Pose, string> = {
   dizzy: dizzyImage,
   surprised: surprisedImage,
   wave: waveImage,
+  huff: huffImage,
+  pound: poundImage,
+  knockdown: knockdownImage,
 };
 
 const POSE_LABELS: Record<Pose, string> = {
@@ -117,6 +123,9 @@ const POSE_LABELS: Record<Pose, string> = {
   dizzy: "被晃晕了",
   surprised: "吓一跳",
   wave: "打招呼",
+  huff: "气得直哈气",
+  pound: "锤屏幕",
+  knockdown: "把自己震倒了",
 };
 
 const props = defineProps<{
@@ -134,14 +143,19 @@ const NARROW_VIEWPORT_PX = 640;
 const DEFAULT_BOTTOM_GAP_PX = 120;
 /** 松手时离左右边缘不超过该距离就吸附到侧边。 */
 const DOCK_SNAP_PX = 28;
+/** 宽屏下吸附阈值按视口短边比例放大。 */
+const DOCK_SNAP_RATIO = 0.05;
+/** 拖动时允许越过屏幕边缘的比例；越过后松手立刻缩进。 */
+const DRAG_OVERSHOOT_RATIO = 0.5;
 /** 吸附后完整露出时离屏幕边缘的距离。 */
 const DOCK_INSET_PX = 2;
 /** 半隐时露出的宽度占桌宠尺寸的比例：只露眼睛和嘴。 */
 const PEEK_DEPTH_RATIO = 0.56;
 /** 吸附后无人理会多久缩进去。 */
 const TUCK_DELAY_MS = 4000;
-const IDLE_ACTION_MIN_MS = 4500;
-const IDLE_ACTION_SPREAD_MS = 6000;
+/** 待机动作间隔 15–20 秒。 */
+const IDLE_ACTION_MIN_MS = 15000;
+const IDLE_ACTION_SPREAD_MS = 5000;
 /** 无任何互动多久后睡着打呼噜。 */
 const SNORE_AFTER_MS = 60000;
 /** 短时间内连点达到该次数，从害羞变成怕痒。 */
@@ -166,7 +180,12 @@ const REACTION_MS: Record<ReactionPose, number> = {
   dizzy: 2400,
   surprised: 1300,
   wave: 1600,
+  huff: 1000,
+  pound: 1300,
+  knockdown: 2200,
 };
+/** 戳到生气后的连段：生气 → 哈气 → 锤屏幕 → 把自己震得仰面倒地。 */
+const RAGE_SEQUENCE: ReactionPose[] = ["angry", "huff", "pound", "knockdown"];
 
 const petEl = ref<HTMLElement | null>(null);
 const viewport = ref(readViewport());
@@ -227,9 +246,17 @@ const flipped = computed(() => facing.value === "left" && ["walk-a", "walk-b", "
 /** 实际露出的区域：半隐时只剩贴边的一条，气泡据此锚定。 */
 const visibleRect = computed<DeskPetRect>(() => {
   if (showPeek.value) {
-    const width = peekDepth.value;
-    const x = dockEdge.value === "right" ? viewport.value.width - width : 0;
-    return { x, y: top.value, width, height: size.value };
+    const depth = peekDepth.value;
+    switch (dockEdge.value) {
+      case "right":
+        return { x: viewport.value.width - depth, y: top.value, width: depth, height: size.value };
+      case "left":
+        return { x: 0, y: top.value, width: depth, height: size.value };
+      case "top":
+        return { x: left.value, y: 0, width: size.value, height: depth };
+      default:
+        return { x: left.value, y: viewport.value.height - depth, width: size.value, height: depth };
+    }
   }
   return { x: left.value, y: top.value, width: size.value, height: size.value };
 });
@@ -241,16 +268,14 @@ const petStyle = computed(() => ({
   ...(strollMs.value > 0 ? { transition: `transform ${strollMs.value}ms linear` } : {}),
 }));
 
-/** 探头图底边平切：右侧逆时针、左侧顺时针转 90°，让平切边贴住屏幕边缘。 */
+/** 探头图底边平切：按停靠边旋转，让平切边贴住屏幕边缘（下边不转、上边转 180°、右边 -90°、左边 90°）。 */
 const peekImgStyle = computed(() => {
-  const right = dockEdge.value === "right";
-  return {
-    width: `${size.value}px`,
-    height: `${size.value}px`,
-    left: right ? "auto" : "0px",
-    right: right ? "0px" : "auto",
-    transform: `rotate(${right ? -90 : 90}deg)`,
-  };
+  const edge = dockEdge.value ?? "bottom";
+  const base = { width: `${size.value}px`, height: `${size.value}px` };
+  if (edge === "right") return { ...base, top: "0px", right: "0px", transform: "rotate(-90deg)" };
+  if (edge === "left") return { ...base, top: "0px", left: "0px", transform: "rotate(90deg)" };
+  if (edge === "top") return { ...base, top: "0px", left: "0px", transform: "rotate(180deg)" };
+  return { ...base, bottom: "0px", left: "0px" };
 });
 
 const rootClass = computed(() => ({
@@ -285,8 +310,26 @@ function usableSpan(total: number): number {
   return Math.max(1, total - size.value - EDGE_MARGIN_PX * 2);
 }
 
-function dockedLeft(edge: DeskPetDockEdge): number {
-  return edge === "left" ? DOCK_INSET_PX : Math.max(DOCK_INSET_PX, viewport.value.width - size.value - DOCK_INSET_PX);
+/** 拖动中的夹取：允许越过屏幕边缘一部分，用来把桌宠「推进墙里」。 */
+function clampDragPosition(nextLeft: number, nextTop: number): { left: number; top: number } {
+  const over = Math.round(size.value * DRAG_OVERSHOOT_RATIO);
+  const maxLeft = viewport.value.width - size.value + over;
+  const maxTop = viewport.value.height - size.value + over;
+  return {
+    left: Math.min(Math.max(-over, nextLeft), Math.max(-over, maxLeft)),
+    top: Math.min(Math.max(-over, nextTop), Math.max(-over, maxTop)),
+  };
+}
+
+/** 吸附到某条边后的完整露出位置：贴边那一轴靠边，另一轴夹进视口。 */
+function dockedPosition(edge: DeskPetDockEdge, fromLeft: number, fromTop: number): { left: number; top: number } {
+  const free = clampPosition(fromLeft, fromTop);
+  const farLeft = Math.max(DOCK_INSET_PX, viewport.value.width - size.value - DOCK_INSET_PX);
+  const farTop = Math.max(DOCK_INSET_PX, viewport.value.height - size.value - DOCK_INSET_PX);
+  if (edge === "left") return { left: DOCK_INSET_PX, top: free.top };
+  if (edge === "right") return { left: farLeft, top: free.top };
+  if (edge === "top") return { left: free.left, top: DOCK_INSET_PX };
+  return { left: free.left, top: farTop };
 }
 
 /** 按已保存比例（或默认右下角）落位并夹进当前视口；吸附过侧边的继续贴边。 */
@@ -302,8 +345,9 @@ function applySavedPosition(): void {
         viewport.value.height - size.value - DEFAULT_BOTTOM_GAP_PX,
       );
   dockEdge.value = ratio?.edge ?? null;
-  left.value = dockEdge.value ? dockedLeft(dockEdge.value) : next.left;
-  top.value = next.top;
+  const placed = dockEdge.value ? dockedPosition(dockEdge.value, next.left, next.top) : next;
+  left.value = placed.left;
+  top.value = placed.top;
   if (dockEdge.value) {
     if (!tucked.value) scheduleTuck();
   } else {
@@ -319,13 +363,34 @@ function persistPosition(): void {
   });
 }
 
-/** 松手时贴近左右边缘就吸附过去。 */
-function settleDock(): void {
+/**
+ * 松手时贴近上下左右任一边就吸附过去；阈值随视口放大，宽屏也容易吸附。
+ * 返回 true 表示是被推进墙里的，应立刻缩进。
+ */
+function settleDock(): boolean {
+  const snap = Math.max(DOCK_SNAP_PX, Math.round(Math.min(viewport.value.width, viewport.value.height) * DOCK_SNAP_RATIO));
   const maxLeft = viewport.value.width - size.value - EDGE_MARGIN_PX;
-  if (left.value <= EDGE_MARGIN_PX + DOCK_SNAP_PX) dockEdge.value = "left";
-  else if (left.value >= maxLeft - DOCK_SNAP_PX) dockEdge.value = "right";
-  else dockEdge.value = null;
-  if (dockEdge.value) left.value = dockedLeft(dockEdge.value);
+  const maxTop = viewport.value.height - size.value - EDGE_MARGIN_PX;
+  const distances: Array<[DeskPetDockEdge, number]> = [
+    ["left", left.value - EDGE_MARGIN_PX],
+    ["right", maxLeft - left.value],
+    ["top", top.value - EDGE_MARGIN_PX],
+    ["bottom", maxTop - top.value],
+  ];
+  distances.sort((a, b) => a[1] - b[1]);
+  const [edge, distance] = distances[0];
+  if (distance > snap) {
+    dockEdge.value = null;
+    const free = clampPosition(left.value, top.value);
+    left.value = free.left;
+    top.value = free.top;
+    return false;
+  }
+  dockEdge.value = edge;
+  const placed = dockedPosition(edge, left.value, top.value);
+  left.value = placed.left;
+  top.value = placed.top;
+  return distance < -EDGE_MARGIN_PX;
 }
 
 function flushPendingPosition(): void {
@@ -373,9 +438,9 @@ function playStroll(kind: "walk" | "roll"): boolean {
   const roomRight = maxLeft - left.value;
   if (Math.max(roomLeft, roomRight) < STROLL_MIN_ROOM_PX) return false;
   const dir = roomLeft < STROLL_MIN_ROOM_PX ? 1 : roomRight < STROLL_MIN_ROOM_PX ? -1 : Math.random() < 0.5 ? -1 : 1;
-  const steps = kind === "walk" ? 10 : 6;
+  const steps = kind === "walk" ? 12 : 6;
   const stepPx = kind === "walk" ? 8 : 15;
-  const stepMs = kind === "walk" ? 260 : 170;
+  const stepMs = kind === "walk" ? 230 : 170;
   idleStepTimer = clearTimer(idleStepTimer);
   facing.value = dir > 0 ? "right" : "left";
   strollMs.value = stepMs;
@@ -469,6 +534,25 @@ function startReaction(kind: ReactionPose, hold = false): void {
   if (!hold) endReactionLater(REACTION_MS[kind]);
 }
 
+/** 按顺序播放一串互动反应（生气连段），播完回到常态。 */
+function playReactionSequence(steps: ReactionPose[]): void {
+  const [head, ...rest] = steps;
+  if (!head) {
+    reaction.value = null;
+    scheduleTuck();
+    return;
+  }
+  startReaction(head, true);
+  reactionTimer = acuSetTimeout(() => {
+    reactionTimer = null;
+    playReactionSequence(rest);
+  }, REACTION_MS[head]);
+}
+
+function inRageSequence(): boolean {
+  return !!reaction.value && RAGE_SEQUENCE.includes(reaction.value);
+}
+
 /** 点一下害羞，连点三下怕痒，戳太多会生气；睡着时被点会吓一跳。 */
 function onTap(): void {
   if (pressWasSnoozing) {
@@ -476,16 +560,14 @@ function onTap(): void {
     startReaction("surprised");
     return;
   }
-  if (reaction.value === "angry") {
-    endReactionLater(REACTION_MS.angry);
-    return;
-  }
+  // 气头上的连段不被打断。
+  if (inRageSequence()) return;
   const now = Date.now();
   tapTimes = [...tapTimes.filter(time => now - time < ANGRY_WINDOW_MS), now];
   const recent = tapTimes.filter(time => now - time < TICKLE_WINDOW_MS).length;
   if (tapTimes.length >= ANGRY_TAP_COUNT) {
     tapTimes = [];
-    startReaction("angry");
+    playReactionSequence(RAGE_SEQUENCE);
   } else if (recent >= TICKLE_TAP_COUNT) {
     startReaction("tickle");
   } else {
@@ -543,7 +625,7 @@ function onPointerMove(event: PointerEvent): void {
   }
   trackShake(event.clientX);
   event.preventDefault();
-  pendingPosition = clampPosition(dragStart.left + dx, dragStart.top + dy);
+  pendingPosition = clampDragPosition(dragStart.left + dx, dragStart.top + dy);
   if (frameHandle === undefined) frameHandle = acuRequestAnimationFrame(flushPendingPosition);
 }
 
@@ -564,10 +646,13 @@ function finishDrag(): void {
   }
   flushPendingPosition();
   dragging.value = false;
-  settleDock();
+  const pushedIn = settleDock();
   persistPosition();
   if (reversals >= DIZZY_REVERSALS) startReaction("dizzy");
-  else scheduleTuck();
+  else if (pushedIn) {
+    tuckTimer = clearTimer(tuckTimer);
+    tucked.value = true;
+  } else scheduleTuck();
 }
 
 function releasePointer(event: PointerEvent): boolean {
@@ -725,9 +810,11 @@ onBeforeUnmount(() => {
   animation: acu-desk-pet-sway 1.4s ease-in-out infinite;
 }
 
-/* 悬空挣扎：以头顶为支点乱晃 */
+/* 悬空挣扎：以头顶为支点乱晃。挣扎帧四肢张开，身体在素材里只占待机帧约 66% 面积，
+   按面积比放大 1.23 倍，让身体保持与基础状态同等体型（四肢可超出桌宠框）。 */
 .acu-desk-pet__img.pose-struggle {
-  transform-origin: 50% 8%;
+  transform-origin: 50% 20%;
+  transform: scale(1.23);
   filter: drop-shadow(0 14px 8px rgba(60, 40, 0, 0.16));
   animation: acu-desk-pet-dangle 0.42s ease-in-out infinite;
 }
@@ -749,8 +836,28 @@ onBeforeUnmount(() => {
   transform: scaleX(-1);
 }
 
+/* 走路两帧左右脚交替，身体随步子左右摇摆，不再上下跳 */
+.acu-desk-pet__img.pose-walk-a {
+  transform: rotate(-3deg);
+}
+
 .acu-desk-pet__img.pose-walk-b {
-  transform: translateY(-2px);
+  transform: rotate(3deg);
+}
+
+.acu-desk-pet__img.pose-huff {
+  animation: acu-desk-pet-huff 0.5s ease-in-out infinite;
+}
+
+/* 锤屏幕：一下下朝镜头扑过来 */
+.acu-desk-pet__img.pose-pound {
+  transform-origin: 50% 60%;
+  animation: acu-desk-pet-pound 0.43s cubic-bezier(0.3, 0, 0.2, 1) 3;
+}
+
+/* 把自己震倒：先往后弹，再仰面落地 */
+.acu-desk-pet__img.pose-knockdown {
+  animation: acu-desk-pet-knockdown 0.7s cubic-bezier(0.3, 1.4, 0.5, 1) both;
 }
 
 .acu-desk-pet__img.pose-roll {
@@ -811,6 +918,14 @@ onBeforeUnmount(() => {
   animation: acu-desk-pet-peek-left 3.4s ease-in-out infinite;
 }
 
+.acu-desk-pet__peek.is-top {
+  animation: acu-desk-pet-peek-top 3.4s ease-in-out infinite;
+}
+
+.acu-desk-pet__peek.is-bottom {
+  animation: acu-desk-pet-peek-bottom 3.4s ease-in-out infinite;
+}
+
 @keyframes acu-desk-pet-breathe {
   0%,
   100% {
@@ -837,16 +952,16 @@ onBeforeUnmount(() => {
 @keyframes acu-desk-pet-dangle {
   0%,
   100% {
-    transform: rotate(-10deg);
+    transform: scale(1.23) rotate(-10deg);
   }
   25% {
-    transform: rotate(6deg) translateY(2px);
+    transform: scale(1.23) rotate(6deg) translateY(2px);
   }
   50% {
-    transform: rotate(-6deg) translateY(-1px);
+    transform: scale(1.23) rotate(-6deg) translateY(-1px);
   }
   75% {
-    transform: rotate(10deg) translateY(2px);
+    transform: scale(1.23) rotate(10deg) translateY(2px);
   }
 }
 
@@ -871,6 +986,34 @@ onBeforeUnmount(() => {
 @keyframes acu-desk-pet-peek-left {
   0%, 100% { transform: translateX(0); }
   50% { transform: translateX(-4px); }
+}
+
+@keyframes acu-desk-pet-peek-top {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+
+@keyframes acu-desk-pet-peek-bottom {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(4px); }
+}
+
+@keyframes acu-desk-pet-huff {
+  0%, 100% { transform: scale(1, 1); }
+  40% { transform: scale(1.06, 0.95) translateY(1px); }
+  70% { transform: scale(0.97, 1.04) translateX(1px); }
+}
+
+@keyframes acu-desk-pet-pound {
+  0%, 100% { transform: scale(1) translateY(0); }
+  45% { transform: scale(1.22) translateY(-4px); }
+  60% { transform: scale(1.16) translateY(-2px) rotate(-2deg); }
+}
+
+@keyframes acu-desk-pet-knockdown {
+  0% { transform: translateY(-18px) rotate(-20deg) scale(0.92); }
+  60% { transform: translateY(2px) rotate(4deg) scale(1.04, 0.96); }
+  100% { transform: translateY(0) rotate(0deg) scale(1); }
 }
 
 @keyframes acu-desk-pet-roll {

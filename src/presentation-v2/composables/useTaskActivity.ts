@@ -38,7 +38,7 @@ export interface DeskPetRect {
 }
 
 /** 桌宠吸附的侧边。 */
-export type DeskPetDockEdge = "left" | "right";
+export type DeskPetDockEdge = "left" | "right" | "top" | "bottom";
 
 /** 桌宠位置按视口可用范围的比例保存（0~1），换屏幕尺寸后仍落在相对同一处。 */
 export interface DeskPetPositionRatio {
@@ -49,7 +49,7 @@ export interface DeskPetPositionRatio {
 }
 
 function normalizeDockEdge(value: unknown): DeskPetDockEdge | null {
-  return value === "left" || value === "right" ? value : null;
+  return value === "left" || value === "right" || value === "top" || value === "bottom" ? value : null;
 }
 
 /** 读取已保存的桌宠位置；未保存或数据无效时返回 null（使用默认右下角）。 */

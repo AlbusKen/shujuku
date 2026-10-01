@@ -245,9 +245,7 @@ onBeforeUnmount(() => {
   width: max-content;
   min-width: 160px;
   max-width: min(320px, calc(100vw - 16px));
-  padding: 9px 10px 9px 12px;
   border: 1px solid var(--bubble-border);
-  border-left: 3px solid var(--bubble-tone);
   border-radius: 12px;
   background: var(--bubble-bg);
   color: var(--bubble-text);
