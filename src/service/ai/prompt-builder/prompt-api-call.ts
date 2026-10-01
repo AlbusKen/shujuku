@@ -302,9 +302,10 @@ export class RetryableAiResponseError_ACU extends Error {
                 // Chat Completion 酒馆连接由本插件组装请求体直发生成端点，不经宿主被第三方脚本包装的全局 fetch。
                 // 指定工具的 tool_choice 同时让预设脚本的抗截断拦截器放行（调用方已强制工具选择时它不接管）；
                 // Claude 源后端把 tool_choice 包成 { type }，只接受字符串，故回退 auto。
+                const apiType = String(targetProfile.api || '').toLowerCase();
                 const overridePayload: Record<string, unknown> = {
                     tools: tableFillTools,
-                    tool_choice: String(targetProfile.api || '') === 'claude'
+                    tool_choice: apiType === 'claude' || apiType === 'google'
                         ? 'auto'
                         : { type: 'function', function: { name: tableFillTools[0].function.name } },
                 };
@@ -385,7 +386,7 @@ export class RetryableAiResponseError_ACU extends Error {
                 const routing = readMainApiChatCompletionRouting_ACU();
                 const mainOverridePayload: Record<string, unknown> = {
                     tools: tableFillTools,
-                    tool_choice: routing.source === 'claude'
+                    tool_choice: routing.source === 'claude' || routing.source === 'google'
                         ? 'auto'
                         : { type: 'function', function: { name: tableFillTools[0].function.name } },
                 };
