@@ -21,7 +21,7 @@ export const FILL_MODE_INTROS: Record<FillMode_ACU, FillModeIntro> = {
   },
   vector: {
     label: '向量表格模式',
-    summary: '用 embedding 与 rerank 直接选出与当前情节相关的纪要，不生成关键词，也不做混合召回。',
+    summary: '用 embedding 与 rerank 直接选出与当前情节相关的纪要，并把选中的纪要条目切为蓝灯注入；纪要索引保持完整目录。不生成关键词、不做混合召回，也不触发剧情推进。',
     pros: '快速无感，不额外增加正文生成前的 LLM 调用。',
     cons: '需要单独配置向量参数；向量的语义匹配不如 LLM 召回的逻辑匹配精准。',
   },

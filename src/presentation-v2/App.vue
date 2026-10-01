@@ -402,6 +402,12 @@ function clearMobileNavCloseTimer(): void {
   box-sizing: border-box;
 }
 
+/* 禁止 iOS WebKit 文字自动放大：展开说明等重排后，说明文字会被放大到超过标题。 */
+:global(#acu-app-v2) {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 :global(#acu-app-v2 button) {
   appearance: none;
   -webkit-appearance: none;

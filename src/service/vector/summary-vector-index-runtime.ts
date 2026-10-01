@@ -90,6 +90,8 @@ export interface SummaryVectorIndexRuntimeResult_ACU {
     keywordGenerationEnabled?: boolean;
     /** API/异常类失败的可读原因，供 UI toast 展示。 */
     error?: string;
+    /** 本轮召回所属填表模式：vector 切换纪要条目蓝灯，crossfire 覆写纪要索引。 */
+    mode?: 'vector' | 'crossfire';
 }
 
 interface RankedSummaryCandidate_ACU extends SummaryHybridCandidate_ACU {
@@ -507,6 +509,74 @@ async function upsertOriginalSummaryIndexEntry_ACU(content: string): Promise<voi
     }
 }
 
+/**
+ * 向量表格：把召回选中的纪要行条目切为蓝灯（constant），其余纪要行条目恢复模板的条目类型（默认绿灯 keyword）。
+ * 纪要行条目按注释前缀加行号定位、按编码索引关键词匹配选中行（导出时 keys 取自编码索引列），不依赖行下标；
+ * 纪要索引条目的注释没有数字行号后缀，不在匹配范围内。传入空数组即撤回全部蓝灯；options.all 为 true 时全部纪要条目切为蓝灯。
+ * 返回本轮切为蓝灯的条目数。
+ */
+async function applyVectorTableBlueLights_ACU(
+    selectedRows: ChatSummaryVectorIndexRow_ACU[],
+    options: { all?: boolean } = {},
+): Promise<number> {
+    if (!isWorldbookApiAvailable_ACU()) return 0;
+    const targetLorebook = await getInjectionTargetLorebook_ACU();
+    if (!targetLorebook) return 0;
+    const summary = findSummaryTable_ACU();
+    const exportConfig = summary?.table?.exportConfig || {};
+    const restoreType = exportConfig.entryType === 'constant' ? 'constant' : 'keyword';
+    const entryName = normalizeText_ACU(exportConfig.entryName || summary?.table?.name || '纪要');
+    const rowPrefix = [getIsolationPrefix_ACU(), 'TavernDB-ACU-CustomExport-', entryName, '-'].join('');
+    const isChronicleRowComment = (comment: string): boolean =>
+        comment.startsWith(rowPrefix) && /^\d+$/.test(comment.slice(rowPrefix.length));
+    const selectedCodes = new Set(
+        (Array.isArray(selectedRows) ? selectedRows : [])
+            .map((row) => normalizeText_ACU(row?.indexCode))
+            .filter(Boolean),
+    );
+    const entries = await getLorebookEntries_ACU(targetLorebook);
+    const updates: Array<{ uid: any; type: string }> = [];
+    let blueLightCount = 0;
+    for (const entry of Array.isArray(entries) ? entries : []) {
+        if (entry?.uid == null || !isChronicleRowComment(String(entry?.comment || ''))) continue;
+        const keys = Array.isArray(entry.keys) ? entry.keys.map((key: any) => normalizeText_ACU(key)) : [];
+        const selected = options.all === true || keys.some((key: string) => selectedCodes.has(key));
+        if (selected) blueLightCount += 1;
+        const nextType = selected ? 'constant' : restoreType;
+        if (entry.type !== nextType) updates.push({ uid: entry.uid, type: nextType });
+    }
+    if (updates.length > 0) await setLorebookEntries_ACU(targetLorebook, updates);
+    return blueLightCount;
+}
+
+/**
+ * 向量表格的结果收尾：不保护也不改写纪要索引（普通导出始终写完整目录，与 LLM 召回一致）；
+ * 纪要行数不足保留相关纪要条数而不召回时，全部纪要条目切为蓝灯；
+ * 其余失败或跳过时撤回上一轮蓝灯，避免过期结果进入本轮生成。
+ */
+async function finalizeVectorTableRecallResult_ACU(
+    result: SummaryVectorIndexRuntimeResult_ACU,
+): Promise<SummaryVectorIndexRuntimeResult_ACU> {
+    if (result.reason === 'deduped') return result;
+    setLastSummaryVectorRecallSucceeded_ACU(false);
+    if (result.reason === 'below_min_rows') {
+        try {
+            const blueLightCount = await applyVectorTableBlueLights_ACU([], { all: true });
+            logDebug_ACU(['[向量表格] 纪要行数不足保留相关纪要条数，不召回，全部 ', blueLightCount, ' 条纪要条目切为蓝灯。'].join(''));
+            return { ...result, injectedCount: blueLightCount };
+        } catch (error: any) {
+            logWarn_ACU('[向量表格] 不召回时将纪要条目切为蓝灯失败:', error?.message || error);
+        }
+    } else if (!(result.success === true && result.skipped !== true)) {
+        try {
+            await applyVectorTableBlueLights_ACU([]);
+        } catch (error: any) {
+            logWarn_ACU('[向量表格] 召回未成功，撤回纪要蓝灯失败:', error?.message || error);
+        }
+    }
+    return result;
+}
+
 interface LiveSummaryVectorRows_ACU {
     summaryKey: string;
     rows: SummaryVectorArchivePreparedRow_ACU[];
@@ -873,6 +943,7 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
 
     // 向量表格模式：请求级覆写，不改写 vectorMemoryConfig，交火参数保持原值。
     const vectorPlan = getVectorPipelinePlanForCurrentChat_ACU();
+    const isVectorTable = vectorPlan?.kind === 'vector';
     const baseConfig = getEffectiveSummaryVectorIndexConfig_ACU();
     const config = vectorPlan?.overrides
         ? {
@@ -881,9 +952,31 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
             summaryIndexHybridRetrievalEnabled: false,
             summaryIndexRecentFixedInjectCount: 0,
             topK: vectorPlan.overrides.topK,
-            summaryIndexCandidateLimit: Math.max(baseConfig.summaryIndexCandidateLimit, vectorPlan.overrides.topK),
+            // 向量表格独立参数：不读取交火配置；纪要有效行数少于保留相关纪要条数时不触发召回。
+            summaryIndexKeywordMinRows: vectorPlan.overrides.topK,
+            minScore: vectorPlan.overrides.minScore,
+            summaryIndexMinScore: vectorPlan.overrides.minScore,
+            recallCandidateLimit: vectorPlan.overrides.candidateLimit,
+            summaryIndexCandidateLimit: vectorPlan.overrides.candidateLimit,
         }
         : baseConfig;
+    const finalizeRecall = async (
+        result: SummaryVectorIndexRuntimeResult_ACU,
+        overviewRows?: ChatSummaryVectorIndexRow_ACU[],
+    ): Promise<SummaryVectorIndexRuntimeResult_ACU> => {
+        const stamped: SummaryVectorIndexRuntimeResult_ACU = { ...result, mode: isVectorTable ? 'vector' : 'crossfire' };
+        return isVectorTable
+            ? finalizeVectorTableRecallResult_ACU(stamped)
+            : finalizeSummaryVectorRecallResult_ACU(stamped, overviewRows);
+    };
+    // 向量表格：实时纪要行数不足保留相关纪要条数时不召回，全部纪要条目直接切为蓝灯，
+    // 不依赖向量索引与 embedding / rerank 配置（新对话尚未建索引时同样生效）。
+    if (isVectorTable && vectorPlan?.overrides) {
+        const liveForThreshold = buildLiveSummaryVectorRows_ACU();
+        if (liveForThreshold && liveForThreshold.rows.length < vectorPlan.overrides.topK) {
+            return await finalizeRecall({ success: false, skipped: true, reason: 'below_min_rows' });
+        }
+    }
     const validation = validateSummaryVectorIndexConfig_ACU(config);
     if (!validation.valid) {
         logWarn_ACU('[交火模式纪要索引] 配置无效，跳过发送前注入:', validation.errors.join('; '));
@@ -891,7 +984,7 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     }
     if (vectorPlan?.rerankRequired && (!normalizeText_ACU(config.rerankEndpoint) || !normalizeText_ACU(config.rerankModel))) {
         logWarn_ACU('[向量表格] rerank 服务未配置，本轮不执行向量召回。');
-        return await finalizeSummaryVectorRecallResult_ACU({
+        return await finalizeRecall({
             success: false,
             reason: 'vector_rerank_not_configured',
             error: '向量表格模式需要 rerank 服务，请先配置 rerank 接口与模型',
@@ -969,13 +1062,13 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
         });
     }
     if (rows.length < config.summaryIndexKeywordMinRows) {
-        return await finalizeSummaryVectorRecallResult_ACU(
+        return await finalizeRecall(
             { success: false, skipped: true, reason: 'below_min_rows' },
             rows,
         );
     }
     if (chunks.length === 0) {
-        return await finalizeSummaryVectorRecallResult_ACU(
+        return await finalizeRecall(
             { success: false, skipped: true, reason: 'no_chunks' },
             rows,
         );
@@ -1012,7 +1105,7 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
         queryVector = embeddings[0]?.embedding || [];
         if (queryVector.length === 0) {
             logWarn_ACU('[交火模式纪要索引] query embedding 返回空向量，已中止召回并恢复纪要索引概览:', userInput);
-            return await finalizeSummaryVectorRecallResult_ACU({
+            return await finalizeRecall({
                 success: false,
                 reason: 'empty_query_embedding',
                 error: 'query embedding 返回空向量',
@@ -1022,7 +1115,7 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     } catch (error: any) {
         const message = error?.message || String(error || 'embedding 调用失败');
         logWarn_ACU('[交火模式纪要索引] query embedding 失败，已中止召回并恢复纪要索引概览:', message);
-        return await finalizeSummaryVectorRecallResult_ACU({
+        return await finalizeRecall({
             success: false,
             reason: 'embedding_failed',
             error: message,
@@ -1076,7 +1169,7 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     );
 
     if (candidates.length === 0 && recentFixedRows.length === 0) {
-        return await finalizeSummaryVectorRecallResult_ACU({
+        return await finalizeRecall({
             success: false,
             skipped: true,
             reason: 'no_candidates',
@@ -1090,7 +1183,7 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     // Rerank 只处理较早行的候选；document 取实时纪要正文，候选行不多于 topK 时跳过。
     const rerank = await rerankCandidates_ACU(config, queryText, candidates, liveRows);
     if (vectorPlan?.rerankRequired && rerank.status !== 'applied' && rerank.status !== 'skipped_within_topk') {
-        return await finalizeSummaryVectorRecallResult_ACU({
+        return await finalizeRecall({
             success: false,
             reason: 'vector_rerank_failed',
             error: rerank.error || `rerank 未生效（${rerank.status}），向量表格模式不回退 embedding 排序`,
@@ -1120,7 +1213,7 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     const keywordGenerationEnabled = config.keywordGenerationEnabled !== false;
     if (selected.length === 0) {
         if (rerank.status === 'failed') {
-            return await finalizeSummaryVectorRecallResult_ACU({
+            return await finalizeRecall({
                 success: false,
                 reason: 'rerank_failed',
                 error: rerank.error || 'rerank 失败且没有可注入的可信结果',
@@ -1135,7 +1228,7 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
                 keywordGenerationEnabled,
             }, rows);
         }
-        return await finalizeSummaryVectorRecallResult_ACU({
+        return await finalizeRecall({
             success: false,
             skipped: true,
             reason: 'no_selected_rows',
@@ -1151,12 +1244,30 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
         }, rows);
     }
 
+    if (isVectorTable) {
+        const blueLightCount = await applyVectorTableBlueLights_ACU(selected.map((candidate) => candidate.row));
+        logDebug_ACU(['[向量表格] 召回 ', selected.length, ' 条纪要，已切为蓝灯 ', blueLightCount, ' 条，其余纪要条目保持模板类型；纪要索引保持完整目录。rerank=', rerank.status].join(''));
+        return await finalizeRecall({
+            success: true,
+            keywordCount: 0,
+            candidateCount: candidates.length,
+            injectedCount: blueLightCount,
+            denseCandidateCount: denseCandidates.length,
+            sparseCandidateCount: 0,
+            fusionCandidateCount: candidates.length,
+            rerankStatus: rerank.status,
+            rerankError: rerank.error,
+            rerankDocumentCount: rerank.documentCount,
+            keywordGenerationEnabled: false,
+        }, rows);
+    }
+
     const content = buildSummaryIndexOverwriteContent_ACU(selected);
     await upsertOriginalSummaryIndexEntry_ACU(content);
     logDebug_ACU(
         `[交火模式纪要索引] 已覆盖原概要索引条目：${selected.length} 条（其中固定注入 ${recentFixedRows.length} 条，排序选取 ${selected.length - recentFixedRows.length} 条），关键词 ${keywords.length} 个（关键词 AI ${keywordGenerationEnabled ? '开' : '关'}），rerank=${rerank.status}${rerank.documentCount ? `（${rerank.documentCount} 条 documents）` : ''}，输出顺序按纪要表原 rowOrder。`,
     );
-    return await finalizeSummaryVectorRecallResult_ACU({
+    return await finalizeRecall({
         success: true,
         keywordCount: keywords.length,
         candidateCount: candidates.length,

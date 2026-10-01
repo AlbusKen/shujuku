@@ -52,7 +52,7 @@
         </template>
 
         <template v-if="formFillMode.selectedMode === 'vector'">
-          <AcuFormRow label="保留相关纪要条数" hint="按 rerank 结果从上到下保留的纪要条数；embedding 与 rerank 服务在下方「Embedding / Rerank」面板配置。">
+          <AcuFormRow label="保留相关纪要条数" hint="按 rerank 结果从上到下保留的纪要条数，默认 30 条；纪要有效行数少于此数时不触发召回，全部纪要条目切为蓝灯。选中的纪要条目本轮切为蓝灯（常驻）注入，纪要索引仍保持完整目录。embedding 与 rerank 服务在下方「Embedding / Rerank」面板配置。">
             <AcuInput
               type="number"
               :min="1"
@@ -60,6 +60,26 @@
               :step="1"
               :model-value="formFillMode.profiles.vector.resultCount"
               @change="formFillMode.setVectorResultCount($event)"
+            />
+          </AcuFormRow>
+          <AcuFormRow label="预筛最低分" hint="Embedding 余弦分门槛，低于此分不进入候选，默认 0.35。与交火模式的预筛最低分独立。">
+            <AcuInput
+              type="number"
+              :min="0"
+              :max="1"
+              :step="0.01"
+              :model-value="formFillMode.profiles.vector.minScore"
+              @change="formFillMode.setVectorMinScore($event)"
+            />
+          </AcuFormRow>
+          <AcuFormRow label="候选上限" hint="送入 Rerank 的候选分片上限，运行时不小于保留相关纪要条数。与交火模式的候选上限独立。">
+            <AcuInput
+              type="number"
+              :min="1"
+              :max="5000"
+              :step="1"
+              :model-value="formFillMode.profiles.vector.candidateLimit"
+              @change="formFillMode.setVectorCandidateLimit($event)"
             />
           </AcuFormRow>
         </template>

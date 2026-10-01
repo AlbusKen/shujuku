@@ -8,6 +8,9 @@
 import { defineStore } from 'pinia';
 import {
   saveFillModePreferences_ACU,
+  VECTOR_CANDIDATE_LIMIT_DEFAULT_ACU,
+  VECTOR_MIN_SCORE_DEFAULT_ACU,
+  VECTOR_RESULT_COUNT_DEFAULT_ACU,
   type FillMode_ACU,
   type FillModePreferences_ACU,
 } from '../../service/fill-mode/fill-mode-preferences';
@@ -45,6 +48,12 @@ function clampInteger(value: unknown, fallback: number, min: number, max: number
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(max, Math.max(min, Math.floor(parsed)));
+}
+
+function clampScore(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(1, Math.max(0, parsed));
 }
 
 function readState(): Omit<FormFillModeState, 'switching' | 'saveError'> {
@@ -91,7 +100,15 @@ export const useFormFillModeStore = defineStore('acu-v2-form-fill-mode', {
       this.persistPreferences();
     },
     setVectorResultCount(value: number): void {
-      this.profiles.vector.resultCount = clampInteger(value, 200, 1, 1000);
+      this.profiles.vector.resultCount = clampInteger(value, VECTOR_RESULT_COUNT_DEFAULT_ACU, 1, 1000);
+      this.persistPreferences();
+    },
+    setVectorMinScore(value: number): void {
+      this.profiles.vector.minScore = clampScore(value, VECTOR_MIN_SCORE_DEFAULT_ACU);
+      this.persistPreferences();
+    },
+    setVectorCandidateLimit(value: number): void {
+      this.profiles.vector.candidateLimit = clampInteger(value, VECTOR_CANDIDATE_LIMIT_DEFAULT_ACU, 1, 5000);
       this.persistPreferences();
     },
     setLlmApiPresetName(value: string): void {

@@ -283,7 +283,7 @@ export async function processUpdates_ACU(indicesToUpdate: number[], mode = 'auto
  * 手动更新：presentation 层负责收集 UI 输入、显示确认框、显示 toast、重置按钮
  * service 层只返回 ManualUpdateResult
  */
-export async function handleManualUpdate_ACU() {
+export async function handleManualUpdate_ACU(options: { skipConfirm?: boolean } = {}): Promise<boolean> {
     logDebug_ACU('[更新流程] handleManualUpdate: 开始手动更新');
     let manualProgressTask: NoticeTaskHandle_ACU | null = null;
     try {
@@ -304,14 +304,15 @@ export async function handleManualUpdate_ACU() {
         // 避免用户确认后又因为"没选表格"或"聊天为空"而报错
         if (!targetKeys || targetKeys.length === 0) {
             showToastr_ACU('warning', '未选择需要更新的表格。');
-            return;
+            return false;
         }
 
         const selectedSheetSummary = buildLegacySelectedSheetSummary_ACU(targetKeys);
         const checkpointFloorsLabel = buildLegacyCheckpointFloorsLabel_ACU();
         const manualRefillRangeLabel = buildLegacyManualRefillRangeLabel_ACU();
         // 弹出确认框：手动填表会先删除范围内选中表的 checkpoint 与增量，再重新填写
-        const confirmed = await showCustomConfirm_ACU(
+        // 外部 API 调用由调用方负责确认（skipConfirm），不在宿主页面弹出确认遮罩。
+        const confirmed = options.skipConfirm === true || await showCustomConfirm_ACU(
             '手动填表确认',
             `即将执行手动填表。\n\n当前 full checkpoint：${checkpointFloorsLabel}\n本次重填范围：${manualRefillRangeLabel}\n选中表：${selectedSheetSummary}\n\n` +
             '高风险操作：系统会先删除本次重填范围内选中表的 checkpoint 与 V2 增量日志，再以清理后的状态作为填表基底重新填写，最后写入新的单表 checkpoint。\n' +
@@ -324,7 +325,7 @@ export async function handleManualUpdate_ACU() {
         if (!confirmed) {
             logDebug_ACU('[更新流程] 用户取消了手动填表确认框');
             showToastr_ACU('info', '已取消手动填表。');
-            return;
+            return false;
         }
 
         // 调用 service 层，启用事务式手动重填（兼容沿用 clearBeforeUpdate 参数名）
@@ -371,6 +372,7 @@ export async function handleManualUpdate_ACU() {
             const isWarning = warningMessages.some(msg => result.error!.includes(msg));
             showToastr_ACU(isWarning ? 'warning' : 'error', result.error);
         }
+        return result.success === true;
     } finally {
         manualProgressTask?.end();
         // UI：重置手动更新按钮

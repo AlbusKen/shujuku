@@ -48,6 +48,10 @@ vi.mock('../../../../src/service/flight-mode/flight-mode-state', () => ({
   isFlightModeActive_ACU: mockFlightModeActive,
 }));
 
+vi.mock('../../../../src/service/fill-mode/fill-mode-gate', () => ({
+  isPlotSuppressedByFillModeForCurrentChat_ACU: () => false,
+}));
+
 import { runOptimizationLogic_ACU } from '../../../../src/service/runtime/plot-runtime/plot-entry';
 
 beforeEach(() => {

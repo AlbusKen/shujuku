@@ -1,7 +1,8 @@
 /**
  * 填表模式偏好：全局持久化于 globalMeta.formFillPreferencesGlobal（跨设备一致）。
  * 读时归一化，非法值 fail-closed 回退默认并保留诊断；只有保存成功才写回。
- * 交火参数的权威来源仍是 vectorMemoryConfigGlobal，这里不复制。
+ * 交火参数的权威来源仍是 vectorMemoryConfigGlobal，这里不复制；
+ * 向量表格的召回参数独立保存在 vector 下，运行时不读取交火的召回参数。
  */
 import { globalMeta_ACU, saveGlobalMeta_ACU } from '../../data/repositories/profile-repo';
 
@@ -9,13 +10,22 @@ export type FillMode_ACU = 'classic' | 'vector' | 'llm' | 'crossfire';
 export const FILL_MODES_ACU: readonly FillMode_ACU[] = ['classic', 'vector', 'llm', 'crossfire'];
 export const FILL_MODE_PREFERENCES_KEY_ACU = 'formFillPreferencesGlobal';
 export const CLASSIC_RECENT_CHRONICLE_ROWS_DEFAULT_ACU = 15;
-export const VECTOR_RESULT_COUNT_DEFAULT_ACU = 200;
+export const VECTOR_RESULT_COUNT_DEFAULT_ACU = 30;
+export const VECTOR_MIN_SCORE_DEFAULT_ACU = 0.35;
+export const VECTOR_CANDIDATE_LIMIT_DEFAULT_ACU = 200;
 
 export interface FillModePreferences_ACU {
   schemaVersion: 1;
   selectedMode: FillMode_ACU;
   classic: { recentChronicleRows: number };
-  vector: { resultCount: number };
+  vector: {
+    /** 保留相关纪要条数：rerank 后从高到低保留的行数，选中行本轮切为蓝灯条目；纪要有效行数少于此数时不触发召回。 */
+    resultCount: number;
+    /** 预筛最低分：embedding 余弦分低于此值不进入候选。 */
+    minScore: number;
+    /** 候选上限：送入 rerank 的候选分片上限，运行时不小于 resultCount。 */
+    candidateLimit: number;
+  };
   llm: { apiPresetName: string };
 }
 
@@ -33,6 +43,16 @@ function readInt_ACU(value: unknown, fallback: number, min: number, max: number,
   if (value === undefined) return fallback;
   const num = Number(value);
   if (!Number.isInteger(num) || num < min || num > max) {
+    diagnostics.push(`${field} 非法（${String(value)}），已回退为 ${fallback}`);
+    return fallback;
+  }
+  return num;
+}
+
+function readScore_ACU(value: unknown, fallback: number, field: string, diagnostics: string[]): number {
+  if (value === undefined) return fallback;
+  const num = Number(value);
+  if (!Number.isFinite(num) || num < 0 || num > 1) {
     diagnostics.push(`${field} 非法（${String(value)}），已回退为 ${fallback}`);
     return fallback;
   }
@@ -60,6 +80,8 @@ export function normalizeFillModePreferences_ACU(
       },
       vector: {
         resultCount: readInt_ACU(source.vector?.resultCount, VECTOR_RESULT_COUNT_DEFAULT_ACU, 1, 1000, 'vector.resultCount', diagnostics),
+        minScore: readScore_ACU(source.vector?.minScore, VECTOR_MIN_SCORE_DEFAULT_ACU, 'vector.minScore', diagnostics),
+        candidateLimit: readInt_ACU(source.vector?.candidateLimit, VECTOR_CANDIDATE_LIMIT_DEFAULT_ACU, 1, 5000, 'vector.candidateLimit', diagnostics),
       },
       llm: { apiPresetName: typeof apiPresetName === 'string' ? apiPresetName.trim() : '' },
     },

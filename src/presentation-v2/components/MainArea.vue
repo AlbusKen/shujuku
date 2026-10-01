@@ -58,6 +58,7 @@ watch(
 }
 
 .acu-v2-main :deep(.acu-v2-dashboard-page),
+.acu-v2-main :deep(.acu-v2-fill-mode-page),
 .acu-v2-main :deep(.acu-v2-advanced-tools-page),
 .acu-v2-main :deep(.acu-v2-form-fill-page),
 .acu-v2-main :deep(.acu-v2-api-page),
@@ -80,6 +81,7 @@ watch(
 
 @media (max-width: 720px) {
   .acu-v2-main :deep(.acu-v2-dashboard-page),
+  .acu-v2-main :deep(.acu-v2-fill-mode-page),
   .acu-v2-main :deep(.acu-v2-advanced-tools-page),
   .acu-v2-main :deep(.acu-v2-form-fill-page),
   .acu-v2-main :deep(.acu-v2-api-page),

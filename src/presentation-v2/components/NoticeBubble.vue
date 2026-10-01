@@ -12,11 +12,25 @@
     :role="tone === 'error' ? 'alert' : 'status'"
     aria-live="polite"
     @pointerenter="emit('pause')"
-    @pointerleave="emit('resume')"
+    @pointerleave="onPointerLeave"
   >
-    <div class="acu-notice-bubble__body">
+    <div
+      class="acu-notice-bubble__body"
+      :class="{ 'is-expandable': expandable }"
+      :role="expandable ? 'button' : undefined"
+      :tabindex="expandable ? 0 : undefined"
+      :aria-expanded="expandable ? expanded : undefined"
+      :title="expandable ? (expanded ? '点击收起' : '点击查看在做什么') : undefined"
+      @click="toggleDetail"
+      @keydown.enter.prevent="toggleDetail"
+      @keydown.space.prevent="toggleDetail"
+    >
       <p v-if="heading" class="acu-notice-bubble__heading">{{ heading }}</p>
       <p v-if="bodyText" class="acu-notice-bubble__text">{{ bodyText }}</p>
+      <div v-if="expandable && expanded" class="acu-notice-bubble__detail">
+        <p class="acu-notice-bubble__detail-title">{{ task?.feature }}</p>
+        <p class="acu-notice-bubble__detail-text">{{ task?.detail }}</p>
+      </div>
     </div>
     <div v-if="actionButtons.length || closable" class="acu-notice-bubble__tools">
       <button
@@ -89,17 +103,18 @@ const tone = computed(() => {
 const heading = computed(() => {
   const current = props.slide;
   if (!current) return "";
-  if (current.type === "joke") return "冷笑话";
+  if (current.type === "joke") return "你知道吗？";
   if (current.type === "notice") return current.notice.title;
-  return props.task ? `${props.task.feature} · ${current.word}…` : "";
+  return "";
 });
 
+/** 任务片只显示似是而非的「正在XXXX…」，不展示批次、重试等明细。 */
 const bodyText = computed(() => {
   const current = props.slide;
   if (!current) return "";
   if (current.type === "joke") return current.text;
   if (current.type === "notice") return current.notice.text;
-  return props.task?.detail || "";
+  return props.task ? `正在${current.word}…` : "";
 });
 
 const actionButtons = computed(() => {
@@ -120,6 +135,27 @@ const actionButtons = computed(() => {
 
 /** 任务片只有可关闭任务才显示关闭；消息与笑话的关闭即跳到下一条。 */
 const closable = computed(() => props.slide?.type !== "task" || props.task?.dismissible === true);
+
+/** 任务片可点开查看真实明细（批次、重试等）；默认只显示「正在XXXX…」。 */
+const expanded = ref(false);
+const expandable = computed(() => props.slide?.type === "task" && !!props.task?.detail);
+
+function toggleDetail(): void {
+  if (!expandable.value) return;
+  expanded.value = !expanded.value;
+  // 展开时暂停轮播，方便看完；收起后继续。
+  emit(expanded.value ? "pause" : "resume");
+}
+
+function onPointerLeave(event: PointerEvent): void {
+  // 触屏点按后会立刻触发 pointerleave；展开期间不因此恢复轮播。
+  if (expanded.value && event.pointerType !== "mouse") return;
+  emit("resume");
+}
+
+watch(() => props.slide?.key, () => {
+  expanded.value = false;
+});
 
 function onClose(): void {
   if (props.slide?.type === "task") emit("dismiss-task");
@@ -279,6 +315,38 @@ onBeforeUnmount(() => {
 }
 
 .acu-notice-bubble__text {
+  margin: 0;
+  color: var(--bubble-text);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.acu-notice-bubble__body.is-expandable {
+  cursor: pointer;
+}
+
+.acu-notice-bubble__body.is-expandable:focus-visible {
+  outline: 2px solid var(--bubble-tone);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+.acu-notice-bubble__detail {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--bubble-border);
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.acu-notice-bubble__detail-title {
+  margin: 0 0 2px;
+  color: var(--bubble-muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.acu-notice-bubble__detail-text {
   margin: 0;
   color: var(--bubble-text);
   white-space: pre-line;

@@ -27,7 +27,8 @@ export const WORLD_SIMULATION_PROMPT_VERSION_V28_ACU = 'world-simulation-v28';
 export const WORLD_SIMULATION_PROMPT_VERSION_V29_ACU = 'world-simulation-v29';
 export const WORLD_SIMULATION_PROMPT_VERSION_V30_ACU = 'world-simulation-v30';
 export const WORLD_SIMULATION_PROMPT_VERSION_V31_ACU = 'world-simulation-v31';
-export const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V31_ACU;
+export const WORLD_SIMULATION_PROMPT_VERSION_V32_ACU = 'world-simulation-v32';
+export const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V32_ACU;
 export const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'] as const;
 export type WorldSimulationEngineSeam_ACU = typeof WORLD_SIMULATION_ENGINE_SEAMS_ACU[number];
 export type WorldSimulationAgentPrompts_ACU = Record<WorldSimulationAgentName_ACU, WorldSimulationPromptSegment_ACU[]>;
@@ -1008,8 +1009,57 @@ export function buildV31WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgen
       : segment);
 }
 
+/** v32 共用问答第 4 组：处境剧变时连带改写当前行动、长期事务与打算；认知只简述知道什么、不知道什么。 */
+function actionQaAnswerV32_ACU(): string {
+  const lines = ACTION_QA_ANSWER_V30_ACU.split('\n');
+  if (lines.length !== 3 || !lines[2].startsWith('认知是覆盖式的当前快照')) throw new Error('WORLD_SIMULATION_V32_PROMPT_BASE_DRIFT');
+  lines[1] = `${lines[1]}处境剧变时（被擒、重伤、身份败露、靠山倒台、原目标已无从实现）当轮连带重写三处：current_action 换成他在新处境里的实际动作（如「被押在柴房，伺机脱身」）；原长期事务写 abandoned 并写明原因，再按新处境另起一条；goals 改写成他眼下真会去打算的事（脱身、求援、保命、拖延、反咬），已经办不到或失去意义的旧打算直接删掉，不因为写过就保留。`;
+  lines[2] = `认知是覆盖式的当前快照，只说清两件事：他知道什么、他不知道什么。known_facts 每次整列重写，一条一事的短句，写成「知道：……」或「不知道：……」，一般不超过五条，只挑会左右他接下来行动的，尤其是他被蒙在鼓里、判断失误或刚刚得知的关键事实。认知不是事件经过：来龙去脉、他做过的事、经历过的场面都不写进认知，那些由经历时间线和纪要记录；已经过时、已经落地、与眼下剧情无关的旧认知直接删掉。`;
+  return lines.join('\n');
+}
+
+function dramatisAnswerV32_ACU(): string {
+  const lines = dramatisAnswerV30_ACU().split('\n');
+  if (lines.length !== 7 || !lines[3].startsWith('在册人物逐个更新') || !lines[4].startsWith('认知')) throw new Error('WORLD_SIMULATION_V32_PROMPT_BASE_DRIFT');
+  lines[3] = replaceOnceV30_ACU(lines[3], 'goals 只写长远打算。', 'goals 只写长远打算。处境剧变（被擒、重伤、败露、失势）的人物当轮连带改写：current_action 换成困境里的实际动作，原长期事务写 abandoned 加原因，goals 改成新处境下他真会打算的事，办不到的旧打算删去。');
+  lines[4] = `认知：known_facts 是覆盖式快照，每次整列重写，只说清他知道什么、不知道什么：一条一事的短句，写成「知道：……」或「不知道：……」，一般不超过五条，挑会改变他接下来行动的写，尤其是他被蒙在鼓里或误判的关键事实；不复述事件经过，不把他做过的事写成认知，过时、已落地或与眼下剧情无关的旧认知直接删去。谁知道什么按渠道、距离和时间判断，读者知道的不等于人物知道；每条「知道」都要能对上 information_sources 里的具体渠道。`;
+  return lines.join('\n');
+}
+
+const DRAMATIS_ACK_V32_ACU = '只写人物谱、玩家与死亡伴生风声；新登场的当轮建档，行为分短期与长期并写明预计持续时间，处境剧变时连带改写行动、长期事务与打算，认知只简述知道与不知道。';
+
+/**
+ * v32：以 v31 为底逐段替换——共用问答第 4 组（处境剧变连带改写、认知简述知道与不知道），
+ * dramatis-keeper 角色自述与确认。段序段数与 v31 一致，迁移按问答轮序号映射；未全部命中即抛错。
+ */
+function buildV32OneShotWorldSimulationAgentPrompt_ACU(name: WorldSimulationOneShotRole_ACU): WorldSimulationPromptSegment_ACU[] {
+  const segments = buildV31WorldSimulationAgentPrompt_ACU(name);
+  const ack = (text: string): string => `${worldSimulationSeamMarker_ACU('ACKNOWLEDGEMENT')}\n已理解：${text}`;
+  const replacements = new Map<string, string>([[ACTION_QA_ANSWER_V30_ACU, actionQaAnswerV32_ACU()]]);
+  if (name === 'dramatis-keeper') {
+    replacements.set(dramatisAnswerV30_ACU(), dramatisAnswerV32_ACU());
+    replacements.set(ack(DRAMATIS_ACK_V30_ACU), ack(DRAMATIS_ACK_V32_ACU));
+  }
+  let hits = 0;
+  const next = segments.map(segment => {
+    const content = replacements.get(segment.content);
+    if (content === undefined) return segment;
+    hits += 1;
+    return { ...segment, content };
+  });
+  if (hits !== replacements.size) throw new Error('WORLD_SIMULATION_V32_PROMPT_BASE_DRIFT');
+  return next;
+}
+
+/** v32 全体角色入口：一次性角色改写行为与认知口径；其余角色与 v31 相同。 */
+export function buildV32WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
+  return (ONE_SHOT_ROLES_ACU as readonly string[]).includes(name)
+    ? buildV32OneShotWorldSimulationAgentPrompt_ACU(name as WorldSimulationOneShotRole_ACU)
+    : buildV31WorldSimulationAgentPrompt_ACU(name);
+}
+
 export function buildDefaultWorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
-  return buildV31WorldSimulationAgentPrompt_ACU(name);
+  return buildV32WorldSimulationAgentPrompt_ACU(name);
 }
 
 export function buildDefaultWorldSimulationAgentPrompts_ACU(): WorldSimulationAgentPrompts_ACU {
@@ -1207,6 +1257,7 @@ export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
     { version: WORLD_SIMULATION_PROMPT_VERSION_V28_ACU, fingerprint: promptFingerprint_ACU(buildV28WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_V29_ACU, fingerprint: promptFingerprint_ACU(buildV29WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_V30_ACU, fingerprint: promptFingerprint_ACU(buildV30WorldSimulationAgentPrompt_ACU(name)) },
+    { version: WORLD_SIMULATION_PROMPT_VERSION_V31_ACU, fingerprint: promptFingerprint_ACU(buildV31WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildDefaultWorldSimulationAgentPrompt_ACU(name)) },
   ]]),
 ) as unknown as Record<WorldSimulationAgentName_ACU, readonly { version: string; fingerprint: string }[]>;
@@ -1258,7 +1309,7 @@ export function migrateWorldSimulationAgentPromptsDetailed_ACU(current: Record<s
     const value = current[name];
     const previous = previousDefaults[name];
     // One-shot 历史默认逐段匹配；用户编辑和追加段原样保留，不用当前生成器重建旧默认。
-    if ((previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V22_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V23_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V24_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V25_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V26_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V27_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V28_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V29_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V30_ACU) && (ONE_SHOT_ROLES_ACU as readonly string[]).includes(name)) {
+    if ((previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V22_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V23_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V24_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V25_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V26_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V27_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V28_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V29_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V30_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V31_ACU) && (ONE_SHOT_ROLES_ACU as readonly string[]).includes(name)) {
       const role = name as WorldSimulationOneShotRole_ACU;
       const old = previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V21_ACU ? buildV21OneShotWorldSimulationAgentPrompt_ACU(role)
         : previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V22_ACU ? buildV22OneShotWorldSimulationAgentPrompt_ACU(role)
@@ -1269,7 +1320,8 @@ export function migrateWorldSimulationAgentPromptsDetailed_ACU(current: Record<s
                   : previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V27_ACU ? buildV27OneShotWorldSimulationAgentPrompt_ACU(role)
                     : previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V28_ACU ? buildV28OneShotWorldSimulationAgentPrompt_ACU(role)
                       : previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V29_ACU ? buildV29OneShotWorldSimulationAgentPrompt_ACU(role)
-                        : buildV30OneShotWorldSimulationAgentPrompt_ACU(role);
+                        : previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V30_ACU ? buildV30OneShotWorldSimulationAgentPrompt_ACU(role)
+                          : buildV31WorldSimulationAgentPrompt_ACU(role);
       if (!value) {
         migrated[name] = defaults[name];
       } else if (promptFingerprint_ACU(value) === promptFingerprint_ACU(old)) {
@@ -1280,7 +1332,8 @@ export function migrateWorldSimulationAgentPromptsDetailed_ACU(current: Record<s
         // v28 起问答轮没有 seam 标记：从 v28 升级时按同 role 问答轮序号对齐（v29 段序与 v28 一致）。
         // v30 段序与 v29 一致，从 v29 升级同样按问答轮序号对齐。
         // v31 一次性角色与 v30 相同，从 v30 升级同样按问答轮序号对齐。
-        const withTurns = previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V28_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V29_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V30_ACU;
+        // v32 只改问答第 4 组与 dramatis 自述/确认，段序与 v31 一致，从 v31 升级同样按问答轮序号对齐。
+        const withTurns = previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V28_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V29_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V30_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V31_ACU;
         const oldKeys = oneShotSegmentKeys_ACU(old, withTurns);
         const latest = defaults[name];
         const latestKeys = oneShotSegmentKeys_ACU(latest, withTurns);

@@ -37,10 +37,19 @@ export interface DeskPetRect {
   height: number;
 }
 
+/** 桌宠吸附的侧边。 */
+export type DeskPetDockEdge = "left" | "right";
+
 /** 桌宠位置按视口可用范围的比例保存（0~1），换屏幕尺寸后仍落在相对同一处。 */
 export interface DeskPetPositionRatio {
   x: number;
   y: number;
+  /** 吸附的侧边；缺失或 null 表示自由停放（旧数据没有该字段）。 */
+  edge?: DeskPetDockEdge | null;
+}
+
+function normalizeDockEdge(value: unknown): DeskPetDockEdge | null {
+  return value === "left" || value === "right" ? value : null;
 }
 
 /** 读取已保存的桌宠位置；未保存或数据无效时返回 null（使用默认右下角）。 */
@@ -50,7 +59,7 @@ export function readDeskPetPositionRatio(): DeskPetPositionRatio | null {
   const x = Number(saved.x);
   const y = Number(saved.y);
   if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-  return { x: Math.min(Math.max(x, 0), 1), y: Math.min(Math.max(y, 0), 1) };
+  return { x: Math.min(Math.max(x, 0), 1), y: Math.min(Math.max(y, 0), 1), edge: normalizeDockEdge(saved.edge) };
 }
 
 /** 保存桌宠位置到独立设置字段（走 saveSettings_ACU，不写 localStorage）。 */
@@ -58,6 +67,7 @@ export function saveDeskPetPositionRatio(ratio: DeskPetPositionRatio): void {
   settings_ACU.desktopPetPosition = {
     x: Number(ratio.x.toFixed(4)),
     y: Number(ratio.y.toFixed(4)),
+    edge: normalizeDockEdge(ratio.edge),
   };
   saveSettings_ACU();
 }

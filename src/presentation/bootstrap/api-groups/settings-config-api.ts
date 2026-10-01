@@ -128,10 +128,10 @@ export function createSettingsConfigApi(_ctx: ApiGroupContext): Record<string, F
             }
         },
 
-        // 立即手动更新
-        manualUpdate: async function() {
+        // 立即手动更新：外部调用默认直接执行，不弹出宿主页面的确认遮罩；传入 { confirm: true } 时保留确认框。
+        manualUpdate: async function(options?: { confirm?: boolean }) {
             try {
-                return await handleManualUpdate_ACU();
+                return await handleManualUpdate_ACU({ skipConfirm: options?.confirm !== true });
             } catch (e) {
                 logError_ACU('manualUpdate failed:', e);
                 return false;

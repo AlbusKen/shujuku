@@ -17,7 +17,10 @@ export interface VectorPipelineOverrides_ACU {
   keywordGenerationEnabled: false;
   hybridRetrievalEnabled: false;
   recentFixedInjectCount: 0;
+  /** 保留相关纪要条数，同时作为触发门槛（纪要行数不足时不召回）。以下字段均为向量表格独立参数，不读取交火的同名配置。 */
   topK: number;
+  minScore: number;
+  candidateLimit: number;
 }
 
 export interface VectorPipelinePlan_ACU {
@@ -66,6 +69,8 @@ export function resolveFillPlan_ACU(
         hybridRetrievalEnabled: false,
         recentFixedInjectCount: 0,
         topK: preferences.vector.resultCount,
+        minScore: preferences.vector.minScore,
+        candidateLimit: Math.max(preferences.vector.candidateLimit, preferences.vector.resultCount),
       },
       rerankRequired: true,
     };

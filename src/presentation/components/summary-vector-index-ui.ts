@@ -37,15 +37,28 @@ function shouldNotifySummaryVectorRecallFailure_ACU(result: SummaryVectorIndexRu
 function notifySummaryVectorRecallFailure_ACU(result: SummaryVectorIndexRuntimeResult_ACU): void {
   const reason = String(result?.reason || 'unknown');
   const detail = String(result?.error || '').trim();
+  const isVectorTable = result?.mode === 'vector';
+  const title = isVectorTable ? '向量表格记忆召回失败' : '交火记忆召回失败';
+  const recovery = isVectorTable ? '已撤回本轮纪要蓝灯' : '已恢复纪要索引全量概览';
   const text = detail
-    ? `交火记忆召回失败（${reason}）：${detail}。已恢复纪要索引全量概览。请检查 Embedding / Rerank 接口、额度与模型配置。`
-    : `交火记忆召回失败（${reason}）。已恢复纪要索引全量概览。请检查 Embedding / Rerank 接口、额度与模型配置。`;
+    ? `${title}（${reason}）：${detail}。${recovery}。请检查 Embedding / Rerank 接口、额度与模型配置。`
+    : `${title}（${reason}）。${recovery}。请检查 Embedding / Rerank 接口、额度与模型配置。`;
   try {
     useToastStore().error(text, { muteable: false });
     return;
   } catch {
     showToastr_ACU('error', text);
   }
+}
+
+function showSummaryVectorRecallSuccessToast_ACU(result: SummaryVectorIndexRuntimeResult_ACU, rebuilt = false): void {
+  const count = result.injectedCount || 0;
+  const text = result.mode === 'vector'
+    ? `${rebuilt ? '向量索引已重建并完成召回' : '向量记忆召回完成'}，已将 ${count} 条纪要切为蓝灯。`
+    : `${rebuilt ? '交火索引已重建并完成召回' : '交火记忆召回完成'}，已覆盖纪要索引 ${count} 条。`;
+  showToastr_ACU('success', text, result.mode === 'vector' ? '向量召回完成' : '交火召回完成', {
+    acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLAN_OK,
+  });
 }
 
 export function shouldRebuildSummaryVectorIndexWithUI_ACU(reason: string | undefined): boolean {
@@ -137,12 +150,7 @@ export async function processSummaryVectorIndexBeforeGenerationWithUI_ACU(
   try {
     result = await processSummaryVectorIndexBeforeGeneration_ACU(options);
     if (shouldShowSummaryVectorResultToast_ACU(result)) {
-      showToastr_ACU(
-        'success',
-        `交火记忆召回完成，已覆盖纪要索引 ${result.injectedCount || 0} 条。`,
-        '交火召回完成',
-        { acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLAN_OK },
-      );
+      showSummaryVectorRecallSuccessToast_ACU(result);
     } else if (shouldNotifySummaryVectorRecallFailure_ACU(result)) {
       notifySummaryVectorRecallFailure_ACU(result);
     } else {
@@ -170,12 +178,7 @@ export async function processSummaryVectorIndexBeforeGenerationWithUI_ACU(
         const retried = await processSummaryVectorIndexBeforeGeneration_ACU({ ...options, bypassDedupe: true });
         logDebug_ACU(`[交火模式纪要索引] 自愈重建后补跑召回：success=${retried.success}, skipped=${retried.skipped === true}, reason=${retried.reason || 'none'}, injected=${retried.injectedCount ?? 0}`);
         if (shouldShowSummaryVectorResultToast_ACU(retried)) {
-          showToastr_ACU(
-            'success',
-            `交火索引已重建并完成召回，已覆盖纪要索引 ${retried.injectedCount || 0} 条。`,
-            '交火召回完成',
-            { acuToastCategory: ACU_TOAST_CATEGORY_ACU.PLAN_OK },
-          );
+          showSummaryVectorRecallSuccessToast_ACU(retried, true);
         } else if (shouldNotifySummaryVectorRecallFailure_ACU(retried)) {
           notifySummaryVectorRecallFailure_ACU(retried);
         }

@@ -161,7 +161,8 @@ export async function bindStatusEvents_ACU(): Promise<void> {
       }
       // [新增] 统一的手动更新按钮
       if ($manualUpdateCardButton_ACU && $manualUpdateCardButton_ACU.length) {
-          $manualUpdateCardButton_ACU.on('click', handleManualUpdate_ACU);
+          // 包一层箭头函数：不把 jQuery 事件对象当作 options 传入，按钮点击始终保留确认框。
+          $manualUpdateCardButton_ACU.on('click', () => { void handleManualUpdate_ACU(); });
       }
 
       // 手动更新表选择：全选 / 全不选

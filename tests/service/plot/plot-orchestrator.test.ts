@@ -39,6 +39,10 @@ vi.mock('../../../src/service/flight-mode/flight-mode-state', () => ({
   isFlightModeActive_ACU: mockFlightModeActive,
 }));
 
+vi.mock('../../../src/service/fill-mode/fill-mode-gate', () => ({
+  isPlotSuppressedByFillModeForCurrentChat_ACU: () => false,
+}));
+
 import {
   shouldProcessTavernHelperHook_ACU,
   extractUserMessageFromOptions_ACU,

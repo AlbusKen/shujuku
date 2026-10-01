@@ -24,7 +24,7 @@ import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { configureNoticeHub_ACU } from '../../shared/notice-hub';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
-import { isVectorPipelineEnabledForCurrentChat_ACU } from '../fill-mode/fill-mode-gate';
+import { isPlotSuppressedByFillModeForCurrentChat_ACU, isVectorPipelineEnabledForCurrentChat_ACU } from '../fill-mode/fill-mode-gate';
 
 export const NEW_MESSAGE_DEBOUNCE_DELAY_ACU = 500;
 
@@ -155,6 +155,8 @@ function hasFreshUserGenerationTrigger_ACU() {
 export function shouldProcessPlotForGeneration_ACU(type: any, params: any, dryRun: any) {
   if (dryRun) return false;
   if (!settings_ACU?.plotSettings?.enabled) return false;
+  // 向量表格模式只做向量召回，不触发剧情推进。
+  if (isPlotSuppressedByFillModeForCurrentChat_ACU()) return false;
   if (isQuietLikeGeneration_ACU(type, params)) return false;
   if (params?.automatic_trigger) return false;
   const fresh = hasFreshUserGenerationTrigger_ACU();

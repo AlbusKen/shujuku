@@ -149,11 +149,15 @@ onBeforeUnmount(() => {
   border: 0; background: transparent; color: var(--acu-text-3); cursor: pointer;
   border-radius: var(--acu-radius-sm); font-size: var(--acu-font-size-body, 12px); transition: color 0.15s ease;
 }
-.acu-preset-dd__star:hover { color: var(--acu-text-1); background: var(--acu-hover-overlay); }
-.acu-preset-dd__star--active { color: var(--acu-text-1); }
+/* 星标状态只由 defaultName（全局默认）决定，不随当前选中行变化；触屏设备不保留 hover 高亮。 */
+@media (hover: hover) {
+  .acu-preset-dd__star:hover { color: var(--acu-text-1); background: var(--acu-hover-overlay); }
+}
+.acu-preset-dd__star--active { --acu-icon-color: var(--acu-accent); color: var(--acu-accent); }
 .acu-preset-dd__item--active .acu-preset-dd__item-meta,
-.acu-preset-dd__item--active .acu-preset-dd__star,
 .acu-preset-dd__item--active .acu-preset-dd__check { --acu-icon-color: var(--acu-on-accent); color: var(--acu-on-accent); }
+.acu-preset-dd__item--active .acu-preset-dd__star { --acu-icon-color: var(--acu-on-accent); color: var(--acu-on-accent); opacity: 0.45; }
+.acu-preset-dd__item--active .acu-preset-dd__star--active { opacity: 1; }
 .acu-preset-dd__check { font-size: var(--acu-font-size-caption, 11px); --acu-icon-color: var(--acu-text-1); color: var(--acu-text-1); }
 .acu-preset-dd__empty { padding: var(--acu-space-3, 12px); text-align: center; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); }
 </style>

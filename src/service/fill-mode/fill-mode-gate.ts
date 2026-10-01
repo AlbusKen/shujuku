@@ -66,6 +66,19 @@ export function isVectorModeExplicitlySelected_ACU(): boolean {
 }
 
 /**
+ * 剧情推进的填表模式门控：向量表格模式只做向量召回，不触发剧情推进。
+ * 推导失败时保持升级前行为（不额外拦截），并记录诊断。
+ */
+export function isPlotSuppressedByFillModeForCurrentChat_ACU(): boolean {
+  try {
+    return resolveCurrentChatFillMode_ACU().mode === 'vector';
+  } catch (error) {
+    logWarn_ACU('[填表模式] 剧情推进门控推导失败，沿用剧情推进开关:', error);
+    return false;
+  }
+}
+
+/**
  * 当前聊天是否运行向量管线（向量表格或交火）。
  * 推导失败时回退旧交火开关并记录诊断，保持升级前行为，不静默关闭已有交火。
  */
