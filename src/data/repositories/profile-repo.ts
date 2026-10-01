@@ -105,7 +105,6 @@ export function deleteProfileFromStorage_ACU(code: string): void {
     store.removeItem(getProfileSettingsKey_ACU(normalizedCode));
     store.removeItem(getProfileTemplateKey_ACU(normalizedCode));
 }
-
 export function saveCurrentProfileTemplate_ACU(templateStr?: string, settings?: any): void {
     const tpl = templateStr !== undefined ? templateStr : TABLE_TEMPLATE_ACU;
     const code = normalizeIsolationCode_ACU(settings?.dataIsolationCode || '');

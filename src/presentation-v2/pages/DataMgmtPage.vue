@@ -673,7 +673,6 @@ async function onDeleteLocalData(mode: "current" | "all"): Promise<void> {
   void flow.deleteLocalData("all");
 }
 
-
 async function onCleanupLegacyIsolationProfiles(): Promise<void> {
   if (runtimeDiagnostic.busy.value) return;
   const codes = flow.legacyIsolationCodes.value;
@@ -694,6 +693,7 @@ async function onCleanupLegacyIsolationProfiles(): Promise<void> {
   if (runtimeDiagnostic.busy.value) return;
   await flow.cleanupLegacyIsolationProfiles();
 }
+
 
 async function onCommitMixedStorageDecision(action: MixedStorageCommitAction_ACU): Promise<void> {
   if (runtimeDiagnostic.busy.value) return;
