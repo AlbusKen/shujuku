@@ -26,6 +26,7 @@ import { orchestrateTavernHelperHook_ACU, orchestrateAfterCommandsStrategy1_ACU,
 import { getSendTextareaValue_ACU, setSendTextareaValue_ACU } from '../../shared/host-input';
 import { handleNewMessageDebounced_ACU } from '../triggers/settings-ui-sync/settings-ui-connect';
 import { runOptimizationLogicWithUI_ACU } from '../components/plot-planning-ui';
+import { beginPlotPendingDisguise_ACU } from '../components/plot-pending-disguise';
 import { processSummaryVectorIndexBeforeGenerationWithUI_ACU, rebuildCurrentSummaryVectorIndexWithUI_ACU, rebuildOutdatedSummaryVectorIndexInBackground_ACU, shouldRebuildSummaryVectorIndexWithUI_ACU } from '../components/summary-vector-index-ui';
 import { preloadSummaryVectorIndexCacheForCurrentChat_ACU } from '../../service/vector/summary-vector-index-cache-service';
 import { restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU } from '../../service/vector/summary-vector-index-flush-queue';
@@ -672,25 +673,35 @@ export   function mainInitialize_ACU() {
             // 交火召回可能耗时超过 USER_SEND_TRIGGER_TTL_MS_ACU；这里不能再用 TTL 二次否决，
             // 否则会出现“交火已覆盖纪要索引，但剧情推进被跳过并直接正文生成”的断链。
             if (!shouldProcessPlot && !isRecentUserSendIntent_ACU()) return;
-            const textInBox = getSendTextareaValue_ACU();
+            const textInBox = String(getSendTextareaValue_ACU() || '');
 
-            // [重构] 调用 service 层策略2编排
-            const s2 = await orchestrateAfterCommandsStrategy2_ACU(String(textInBox || ''), runOptimizationLogicWithUI_ACU);
+            // [伪装发送] 宿主要等本监听结束才读取发送框并让用户楼层入楼。规划期间先在聊天区显示
+            // 伪装的用户楼层与“思考中”AI 楼层（纯 DOM），并清空发送框；无论规划结果如何，
+            // 结束时都把文本交还发送框（成功为规划结果，其余为原文），宿主随后按原生流程入楼并生成。
+            const disguise = textInBox.trim() ? beginPlotPendingDisguise_ACU(textInBox) : null;
+            let textForHost = textInBox;
+            try {
+              // [重构] 调用 service 层策略2编排
+              const s2 = await orchestrateAfterCommandsStrategy2_ACU(textInBox, runOptimizationLogicWithUI_ACU);
 
-            switch (s2.action) {
-              case 'aborted':
-                if (s2.manual) {
-                  try {
-                    if (SillyTavern_API_ACU && typeof SillyTavern_API_ACU.stopGeneration === 'function') SillyTavern_API_ACU.stopGeneration();
-                    else if ((window as any).SillyTavern?.stopGeneration) (window as any).SillyTavern.stopGeneration();
-                  } catch (e) {}
-                }
-                break;
+              switch (s2.action) {
+                case 'aborted':
+                  if (s2.manual) {
+                    try {
+                      if (SillyTavern_API_ACU && typeof SillyTavern_API_ACU.stopGeneration === 'function') SillyTavern_API_ACU.stopGeneration();
+                      else if ((window as any).SillyTavern?.stopGeneration) (window as any).SillyTavern.stopGeneration();
+                    } catch (e) {}
+                  }
+                  break;
 
-              case 'planned':
-                setSendTextareaValue_ACU(s2.finalMessage!);
-                try { params.prompt = s2.finalMessage; } catch (e) {}
-                break;
+                case 'planned':
+                  textForHost = s2.finalMessage!;
+                  if (!disguise) setSendTextareaValue_ACU(s2.finalMessage!);
+                  try { params.prompt = s2.finalMessage; } catch (e) {}
+                  break;
+              }
+            } finally {
+              disguise?.release(textForHost);
             }
 
             // 消费掉本次发送意图
