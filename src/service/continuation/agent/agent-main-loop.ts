@@ -201,6 +201,8 @@ interface AgentRunLedger_ACU {
 /** 一次运行内 read/search 工具的累计状态：批次计数、门禁账本、放行地址与失效地址集合。 */
 interface AgentToolUsage_ACU {
   batchesUsed: number;
+  /** 本次运行是否已有一个成功放行的读取批次；主 Agent 每次运行只允许一个，失败批次不占额度。 */
+  successfulReadBatch: boolean;
   gateState: AgentReadGateState_ACU;
   /**
    * 本次运行已放行的读取地址（read token 或 search 指纹）。重复调阅返回一行提示而不重注内容、
@@ -336,19 +338,19 @@ export function renderAgentBudget_ACU(
   iteration: number,
   ledger: AgentRunLedger_ACU,
   waveLimit: number,
-  tool?: { batchesUsed: number; grantedTokens: number; maxReadTokens: number },
+  tool?: { batchesUsed: number; grantedTokens: number; maxReadTokens: number; successfulReadBatch?: boolean },
   lifecycle?: { outlineMaintenanceReserveAvailable: boolean; convergenceOnly: boolean },
 ): string {
   const isFinal = iteration >= budget.maxIterations;
   const lines = [
-    `迭代：第 ${iteration} / ${budget.maxIterations} 次（read/search 工具批次不计入迭代，放心读取）`,
+    `迭代：第 ${iteration} / ${budget.maxIterations} 次（read/search 工具批次不计入迭代，但每次运行只有一个成功读取批次）`,
     `派工：已用 ${ledger.delegationsUsed} / ${budget.maxDelegations} 次`,
     `单代理上限：同一代理最多 ${budget.maxSameAgent} 次`,
     `并发上限：同一波次最多 ${waveLimit} 个子代理`,
   ];
   if (tool) {
-    lines.push(`read/search：已用 ${tool.batchesUsed} / ${budget.maxReads} 个工具批次；单批次上限约 ${tool.maxReadTokens} tokens（本次累计已读取约 ${tool.grantedTokens} tokens，仅作遥测，不扣减后续批次额度）`);
-    lines.push('单批次读取过大时，先用 search 定位、再缩小到正文楼层区间、表格行区间或模块 ID；不同批次不共享 token 额度。临近总结阈值时，只有不超过精读兜底额度的小批次会被放行，随后由总结机制处理。世界书目录与命中提示里每条都标注了 token 估算，按本轮需求精读。');
+    lines.push(`read/search：已用 ${tool.batchesUsed} / ${budget.maxReads} 个工具批次；本次运行只允许一个成功读取批次${tool.successfulReadBatch ? '，已用完，不能再读' : ''}；单批次上限约 ${tool.maxReadTokens} tokens（本次累计已读取约 ${tool.grantedTokens} tokens，仅作遥测）`);
+    lines.push('会话记录、运行时快照与目录够用就不读，直接 open_round。确需补读时把全部地址放进同一次回复并发读取，失败批次不占额度、修正后可重试；读过一次就立即决策（open_round / delegate / finalize / block），不要逐项串行读。伏笔、信息差、年代学、阶段大纲与总纲由固定工作流按角色注入给子代理，主 Agent 不必为它们 read。');
   }
   if (lifecycle?.convergenceOnly) {
     lines.push('CONVERGENCE_ONLY：必要的大纲维护已完成，本次只允许输出 finalize 或 block；不得继续派工。');
@@ -553,6 +555,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     // 账本从零起算只是给恢复后的运行一份完整的读取额度。
     const toolUsage: AgentToolUsage_ACU = {
       batchesUsed: 0,
+      successfulReadBatch: false,
       gateState: createAgentReadGateState_ACU(),
       granted: new Set(),
       narrowed: new Map(),
@@ -954,6 +957,8 @@ export class ContinuationAgentTurnPlanner_ACU {
         for (const key of toolUsage.granted) toolUsage.invalidated.add(key);
         toolUsage.granted.clear();
         toolUsage.narrowed.clear();
+        // 资料已变：派工之后重新开放一次成功读取批次，仍是每个决策周期至多一批。
+        toolUsage.successfulReadBatch = false;
         await commitOutcomes(outcomesBefore);
         iteration += 1;
       }
@@ -1485,8 +1490,11 @@ export class ContinuationAgentTurnPlanner_ACU {
     iteration: number,
     nativeCalls: readonly AiNativeToolCall_ACU[] = [],
   ): Promise<void> {
+    const exhaustedText = `read-once-exhausted：read/search 工具批次已用尽（本次运行只允许一个成功读取批次，尝试上限 ${budget.maxReads} 次）。请基于已有资料直接输出决策动作（open_round / delegate / finalize / block）；总纲与阶段大纲由 open_round 固定工作流维护。`;
+    // 唯一成功批次用过后仍走一次结算：重复与收窄地址照常回如实提示，新地址一律不注入正文。
+    const readOnceExhausted = toolUsage.successfulReadBatch;
     if (toolUsage.batchesUsed >= budget.maxReads) {
-      const text = `read/search 工具批次已用尽（上限 ${budget.maxReads} 个批次）。请基于已有资料输出决策动作（delegate / finalize / block）；大纲调整请委派 outline-architect 或 arc-architect。`;
+      const text = exhaustedText;
       session.record(nativeCalls.map(call => ({ kind: 'tool' as const, text, digest: '工具批次已用尽', turnKey: session.turnKey, toolCallId: call.id })));
       logAgentSession_ACU({ kind: 'tool_read', title: `迭代 ${iteration} · 工具批次已用尽`, detail: text, ok: false });
       await session.flush();
@@ -1576,7 +1584,11 @@ export class ContinuationAgentTurnPlanner_ACU {
       appends.push({ kind: 'tool', text: `以下调阅请求未重复注入：\n${duplicated.join('\n')}`, digest: '重复调阅提示', turnKey: session.turnKey });
     }
 
-    if (!failed.length && fresh.length) {
+    if (!failed.length && fresh.length && readOnceExhausted) {
+      owners.push(0);
+      appends.push({ kind: 'tool', text: exhaustedText, digest: '读取额度已用尽', turnKey: session.turnKey });
+      logAgentSession_ACU({ kind: 'tool_read', title: `迭代 ${iteration} · 工具批次已用尽`, detail: exhaustedText, ok: false });
+    } else if (!failed.length && fresh.length) {
       // 未显式提供上围栏的本地读取：60% 默认上围栏预算经地址适配器解析为可证明的子范围，不截断正文。
       const defaultFenced = fresh.filter(material => material.local && material.local.requestedFence?.upper === undefined);
       const allocation = defaultFenced.length
@@ -1620,6 +1632,7 @@ export class ContinuationAgentTurnPlanner_ACU {
         const items: AgentGateItem_ACU[] = admitted.map(material => ({ label: material.label, text: material.text }));
         const decision = await gateAgentReadBatch_ACU(items, toolUsage.gateState, gateConfig, await measureContextTokens(), counter);
         if (decision.allowed) {
+          toolUsage.successfulReadBatch = true;
           toolUsage.gateState.grantedTokens += decision.batchTokens;
           for (const material of admitted) {
             // 收窄读取是原地址的子范围：原地址若已失效，旧结果中与本范围重叠的部分同样可能过时。

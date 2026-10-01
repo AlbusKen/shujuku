@@ -1269,7 +1269,7 @@ export function buildV41ContinuationAgentPrompts_ACU(): ContinuationAgentPrompts
  * 写作指令没有本地调阅工具。总纲、阶段大纲与网页检索保持多轮调阅，不在此列。
  * 只改写仍要求 search 定位或多轮调阅的句子，其余正文逐字保留。
  */
-const V42_READ_ONCE_ROLES_ACU: ReadonlySet<keyof ContinuationAgentPrompts_ACU> = new Set(['maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer', 'instructionComposer']);
+const V42_READ_ONCE_ROLES_ACU: ReadonlySet<keyof ContinuationAgentPrompts_ACU> = new Set(['main', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer', 'instructionComposer']);
 const V42_CONTRACT_TOOL_RE_ACU = /先调用 read 或 search 函数补充调阅：[^。]*。[^。]*search 定位、再用窄地址精读[^。]*。/g;
 const V42_READ_ONCE_CONTRACT_ACU = '只在固定注入与目录确实回答不了的特别缺口时调用 read 函数补读：参数 reads 是地址数组，全部地址放进同一次回复并发调用。每轮至多一个成功读取批次，失败批次不占额度、修正后可重试；读过一次就直接交付契约 JSON，不再调阅。';
 const V42_PROTOCOL_OLD_ACU = '独立 read/search 在授权和预算内于同一回复并发调用，不拆批等待；搜索结果决定的精读等回执后再读。';
@@ -1290,6 +1290,13 @@ const V42_PHRASES_ACU: ReadonlyArray<readonly [string, string]> = [
   ['证据不足先在世界书范围 search 定位再精读条目，', '证据不足时把世界书条目地址放进唯一一次 read 精读，'],
   ['证据不足先用 worldbook scope 的 search 定位，再用 $WORLDBOOK:书名:uid 精读，不能凭印象判定', '证据不足时用唯一一次 read 精读 $WORLDBOOK:书名:uid，不能凭印象判定'],
 ];
+/** 主 Agent：每次运行只有一个成功读取批次，读完立即决策；资料模块由固定工作流注入子代理。 */
+const V42_MAIN_PHRASES_ACU: ReadonlyArray<readonly [string, string]> = [
+  ['工具批次不消耗决策迭代，读取是正常成本而不是浪费。先 search 定位再用窄地址精读，省读取额度；被门禁打回时我按报告缩小目标重试，绝不原样重发。', '每次运行只有一个成功读取批次：会话记录、运行时快照与目录够用就不读，直接 open_round；确需补读时把全部地址放进同一次回复并发读齐，读完立即决策，不逐项串行读；被门禁打回时缩小目标重试，绝不原样重发。'],
+  ['独立 read/search 请在预算许可范围内于同一回复并发调用，不要分批等待；仅搜索结果决定的精读须等回执。', '确需补读时把全部 read/search 放进同一回复并发调用；每次运行只有一个成功读取批次，读完立即决策。'],
+  ['需要多份资料时在同一次回复里并发调用这些函数，不要一轮只读一份。', '需要多份资料时在同一次回复里并发调用这些函数；每次运行只有一个成功读取批次，读完立即决策。'],
+  ['绝不一轮只读一份白耗迭代', '每次运行只有一个成功读取批次，读完立即决策'],
+];
 const V42_COMPOSER_PHRASES_ACU: ReadonlyArray<readonly [string, string]> = [
   ['需要核对的事实先 search 定位再 read 精读。', '我没有本地调阅工具，事实只依据已注入资料，缺口在 summary 写明。'],
   ['请输出契约 JSON。资料不够时先 read/search，足够后直接交付。', '请输出契约 JSON。你没有本地调阅工具，直接依据已注入资料交付。'],
@@ -1302,6 +1309,11 @@ function swapLiteral_ACU(text: string, from: string, to: string): string {
 
 function v42Content_ACU(role: keyof ContinuationAgentPrompts_ACU, content: string): string {
   if (!V42_READ_ONCE_ROLES_ACU.has(role)) return content;
+  if (role === 'main') {
+    let next = content;
+    for (const [from, to] of V42_MAIN_PHRASES_ACU) next = swapLiteral_ACU(next, from, to);
+    return next;
+  }
   if (role === 'instructionComposer') {
     let next = swapLiteral_ACU(content, V42_PROTOCOL_OLD_ACU, V42_COMPOSER_PROTOCOL_NEW_ACU);
     for (const [from, to] of V42_COMPOSER_PHRASES_ACU) next = swapLiteral_ACU(next, from, to);

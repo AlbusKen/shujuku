@@ -4,6 +4,7 @@ import { USER_PREFILL_CONTENT_ACU } from '../../../../src/shared/user-prefill.js
 import {
   buildDefaultContinuationAgentPrompts_ACU,
   buildV40ContinuationAgentPrompts_ACU,
+  buildV41ContinuationAgentPrompts_ACU,
   withV41RoleProcedure_ACU,
 } from '../../../../src/service/continuation/agent/agent-defaults';
 import { validateContinuationSettings_ACU } from '../../../../src/service/continuation/continuation-store';
@@ -28,8 +29,8 @@ describe('V41 子代理执行流程问答', () => {
     expect(segments.at(-1)).toMatchObject({ role: 'user', content: USER_PREFILL_CONTENT_ACU });
   });
 
-  it('主 Agent 不受影响', () => {
-    expect(defaults.main).toEqual(v40.main);
+  it('V41 不改主 Agent', () => {
+    expect(buildV41ContinuationAgentPrompts_ACU().main).toEqual(v40.main);
   });
 
   it('任务段前一段被用户改写时不插入；重复调用不重复插入', () => {

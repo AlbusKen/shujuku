@@ -767,14 +767,14 @@ function migrateV40AgentPromptsToV41_ACU(raw: unknown): unknown {
 }
 
 /**
- * V41 → V42：维护、策划、审查、终审与写作指令改为单次读取后直接交付。
+ * V41 → V42：主 Agent、维护、策划、审查、终审与写作指令改为单次读取后直接交付。
  * 只改写与 V41 默认正文逐字相同的段；用户改写过的段、整组自定义的角色一律不动。
  */
 function migrateV41AgentPromptsToV42_ACU(raw: unknown): unknown {
   if (!isRecord_ACU(raw)) return raw;
   let changed = false;
   const next: Record<string, unknown> = { ...raw };
-  for (const role of ['maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer', 'instructionComposer'] as const) {
+  for (const role of ['main', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer', 'instructionComposer'] as const) {
     const segments = raw[role];
     if (!Array.isArray(segments)) continue;
     if (!segments.every(segment => isRecord_ACU(segment) && typeof segment.content === 'string')) continue;
