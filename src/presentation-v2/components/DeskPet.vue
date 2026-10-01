@@ -152,8 +152,8 @@ const DRAG_OVERSHOOT_RATIO = 0.5;
 const DOCK_INSET_PX = 2;
 /** 半隐时露出的宽度占桌宠尺寸的比例：只露眼睛和嘴。 */
 const PEEK_DEPTH_RATIO = 0.56;
-/** 原图探头帧露出更深（素材里头顶到嘴下约占 74%）。 */
-const PEEK_ORIGINAL_DEPTH_RATIO = 0.74;
+/** 原图探头帧：原图左侧切口转为贴边，奶蛋占画布 92%，两只眼睛横跨整个探出范围，需整段露出。 */
+const PEEK_ORIGINAL_DEPTH_RATIO = 0.92;
 /** 缩边期间两种探头造型的轮换间隔。 */
 const PEEK_ROTATE_MS = 30000;
 /** 吸附后无人理会多久缩进去。 */
