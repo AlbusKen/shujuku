@@ -398,13 +398,15 @@ export function insertBeforeTrailingPrefill_ACU(
  * 由运行时在首轮注入、并在每次工具批次后追加刷新；本侧门禁是单批次独立判定，额度不跨批累计。
  */
 function renderSubagentReadBudgetNote_ACU(params: {
-  maxReadTokens: number; fallbackTokens: number; maxToolRounds: number; toolRoundsUsed: number; grantedTokens: number;
+  maxReadTokens: number; fallbackTokens: number; maxToolRounds: number; toolRoundsUsed: number; grantedTokens: number; readOnce?: boolean;
 }): string {
   const remaining = Math.max(0, params.maxToolRounds - params.toolRoundsUsed);
   return [
     `【读取预算状态】单批次读取上限约 ${params.maxReadTokens} tokens；临近总结阈值时只有不超过 ${params.fallbackTokens} tokens 的精读批次会被放行。`,
     `工具轮次剩余 ${remaining} / ${params.maxToolRounds}（本次派工已累计放行读取约 ${params.grantedTokens} tokens，仅遥测、不扣减后续批次额度）。`,
-    '按预算分配调阅：先 search 定位，再用窄地址（楼层区间/表格行区间/模块 ID）精读；轮次见底就基于已有资料交付，缺口如实标注「信息不足」，不许硬编。',
+    params.readOnce
+      ? '本轮只允许一个成功读取批次：确需补读时把全部地址放进同一次回复并发读取，失败批次不占额度、修正后可重试；读过或无需读取就直接交付，缺口如实标注「信息不足」，不许硬编。'
+      : '按预算分配调阅：先 search 定位，再用窄地址（楼层区间/表格行区间/模块 ID）精读；轮次见底就基于已有资料交付，缺口如实标注「信息不足」，不许硬编。',
   ].join('\n');
 }
 
@@ -727,7 +729,7 @@ export class AgentSubagentRuntime_ACU {
     for (const seed of seeds) gate.granted.add(seed.key);
     const materials = seeds.length
       ? seeds.map(seed => seed.text).join('\n\n')
-      : '本次没有为你注入任何种子资料。需要的信息用 read / search 工具按各目录的地址调阅。';
+      : `本次没有为你注入任何种子资料。需要的信息用 ${accessProfile.allowSearch ? 'read / search' : 'read'} 工具按各目录的地址调阅。`;
 
     // 捕获与渲染必须同一时刻取自同一份快照，否则并发校验的基准就不是子代理真正读到的版本。
     const readRevisions: AgentModuleRevisions_ACU = { ...input.resolveContext.moduleSnapshot.revisions };
@@ -739,8 +741,12 @@ export class AgentSubagentRuntime_ACU {
     const isResearch = definition.kind === 'research';
     const webSettings = input.settings.webResearch;
     const pageCache: ResearcherPageCache_ACU = { pages: new Map(), byUrl: new Map(), pagesUsed: 0 };
-    // 网页检索天然要多轮「搜 → 读 → 补搜」，工具轮上限独立于普通子代理的 maxExtraReads。
-    const maxToolRounds = Math.max(0, isResearch ? webSettings.maxToolRounds : input.budget.maxExtraReads);
+    // 网页检索天然要多轮「搜 → 读 → 补搜」，工具轮上限独立于普通子代理的 maxExtraReads；总纲保留多轮世界书 read/search。
+    // 维护、策划、审查与世界推演 one-shot 同口径：至多一个成功读取批次，读完直接交付。
+    const readOnceKind = definition.kind === 'maintain' || definition.kind === 'plan' || definition.kind === 'review';
+    const maxToolRounds = Math.max(0, isResearch
+      ? webSettings.maxToolRounds
+      : readOnceKind ? Math.min(1, input.budget.maxExtraReads) : input.budget.maxExtraReads);
     const readBudget = resolveAgentReadBudget_ACU(gate.config);
     const renderReadBudgetNote = (roundsUsed: number): string => renderSubagentReadBudgetNote_ACU({
       maxReadTokens: readBudget.effectiveMaxReadTokens,
@@ -748,6 +754,7 @@ export class AgentSubagentRuntime_ACU {
       maxToolRounds,
       toolRoundsUsed: roundsUsed,
       grantedTokens: gate.state.grantedTokens,
+      readOnce: readOnceKind,
     });
     const keptTokens = keptSubagentMaterialTokens_ACU(definition.kind, writes);
     const split = splitDefaultSubagentMaterials_ACU(selectPromptSegments_ACU(input.settings, definition), definition.promptKey);
@@ -814,7 +821,7 @@ export class AgentSubagentRuntime_ACU {
     const ownReads = authorizedReads;
     const authorizedToolNames = new Set<string>([...accessProfile.tools, ...(input.writeSql && writes.length ? ['write_sql'] : [])]);
     if (input.writeSql && writes.length) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: renderMaintenanceSqlGuide_ACU(definition.name) });
-    baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: ownReads.length ? `本角色只可 read 以下自有或强相关地址：${ownReads.join('、')}。${allowSearch ? '世界书检索限已授权范围。' : '不得做本地 search。'}` : '本角色没有本地调阅工具，直接根据已备资料交付。' });
+    baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: ownReads.length ? `本角色只可 read 以下自有或强相关地址：${ownReads.join('、')}。${allowSearch ? '世界书检索限已授权范围。' : '不得做本地 search。'}${readOnceKind ? '每轮至多一个成功读取批次：确需补读时把地址放进同一次回复并发读齐；固定注入与目录足够时不读，直接交付。' : ''}` : '本角色没有本地调阅工具，直接根据已备资料交付。' });
     const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
     // 小循环的追加消息：子代理自己的输出（assistant）与工具结果。原生工具回执使用 role=tool。
     const transcript: Array<{ role: string; content: string; tool_calls?: NonNullable<ReturnType<typeof nativeToolExchange_ACU>[number]['tool_calls']>; tool_call_id?: string }> = [];
@@ -1076,15 +1083,27 @@ export class AgentSubagentRuntime_ACU {
         continue;
       }
       if (toolCalls) {
-        const readsAllowed = toolRoundsUsed < maxToolRounds;
+        // 读取一次型角色只按成功批次计额：失败批次不占额度、修正后可重试；同轮共享额度用完同样拒绝。
+        const readsAllowed = readOnceKind
+          ? maxToolRounds > 0 && !gate.successfulReadBatch && !(gate.readRoundKey && gate.readRoundState?.successfulReadBatches.has(gate.readRoundKey))
+          : toolRoundsUsed < maxToolRounds;
         if (!readsAllowed && toolCalls.every(item => item.kind !== 'write_sql')) {
           const exhausted = isResearch
             ? `工具轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已抓到的页面输出契约 JSON；没查到的实体在 summary 里如实列出，不许伪造。\n\n${renderReadBudgetNote(toolRoundsUsed)}`
-            : `read/search 轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已有资料输出契约 JSON；确实缺失的信息在结果里标注「信息不足」，不许伪造。\n\n${renderReadBudgetNote(toolRoundsUsed)}`;
-          transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => exhausted)));
+            : readOnceKind
+              ? `read-once-exhausted：读取轮次已用尽（每轮至多一个成功读取批次，本次上限 ${maxToolRounds}），不能再 read。${maxWriteRounds - writeRoundsUsed > 0 ? '有可证实的变化就调用一次 write_sql 写齐；' : ''}请基于已有资料直接交付契约 JSON；确实缺失的信息标注「信息不足」，不许伪造。\n\n${renderReadBudgetNote(toolRoundsUsed)}`
+              : `read/search 轮次已用尽（上限 ${maxToolRounds} 轮）。请基于已有资料输出契约 JSON；确实缺失的信息在结果里标注「信息不足」，不许伪造。\n\n${renderReadBudgetNote(toolRoundsUsed)}`;
+          // 唯一批次已用过时仍结算一次：只回报重复/收窄地址的如实提示或 read-once-exhausted，不注入任何新正文。
+          const localReads = readOnceKind && maxToolRounds > 0
+            ? toolCalls.filter((item): item is AgentToolCall_ACU => item.kind === 'read' || item.kind === 'search')
+            : [];
+          const notice = localReads.length
+            ? await this.executeToolCalls_ACU(localReads, input.resolveContext, gate, expandedReads, ownReads, allowSearch, true)
+            : '';
+          transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map((_, index) => index === 0 && notice ? `${notice}\n\n${exhausted}` : exhausted)));
           continue;
         }
-        if (readsAllowed && toolCalls.some(item => item.kind !== 'write_sql')) toolRoundsUsed += 1;
+        if (readsAllowed && !readOnceKind && toolCalls.some(item => item.kind !== 'write_sql')) toolRoundsUsed += 1;
         const perCallResults: string[] = [];
         for (let index = 0; index < toolCalls.length; index += 1) {
           const call = toolCalls[index];
@@ -1155,7 +1174,7 @@ export class AgentSubagentRuntime_ACU {
             }
           } else {
             if (!readsAllowed) {
-              const denied = JSON.stringify({ action: call.kind, status: 'rejected', reason: 'read/search 轮次已用尽',
+              const denied = JSON.stringify({ action: call.kind, status: 'rejected', reason: readOnceKind ? 'read-once-exhausted' : 'read/search 轮次已用尽',
                 remainingToolRounds: 0, remainingWriteRounds: maxWriteRounds - writeRoundsUsed });
               perCallResults.push(denied);
               continue;
@@ -1170,6 +1189,7 @@ export class AgentSubagentRuntime_ACU {
               }
               const result = await this.executeToolCalls_ACU(batch, input.resolveContext, gate, expandedReads, ownReads, allowSearch, !isResearch && definition.kind !== 'arc',
                 isResearch ? { settings: input.settings, cache: pageCache } : undefined);
+              if (readOnceKind && gate.successfulReadBatch) toolRoundsUsed = 1;
               perCallResults.push(result, ...batch.slice(1).map(() => '本逻辑读取批次已统一结算，结果见首个工具回执。'));
               continue;
             }
@@ -1355,7 +1375,8 @@ export class AgentSubagentRuntime_ACU {
     const readRevisions: AgentModuleRevisions_ACU = { ...input.resolveContext.moduleSnapshot.revisions };
     const prefill = AGENT_PREFILLS_ACU.reviewer;
     const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
-    const maxToolRounds = Math.max(0, input.settings.finalReview.maxExtraReads);
+    // 终审与普通子代理同口径：设置大于 0 时只开放一个成功读取批次，读完直接给判词。
+    const maxToolRounds = Math.max(0, Math.min(1, input.settings.finalReview.maxExtraReads));
     const readBudget = resolveAgentReadBudget_ACU(gate.config);
     const renderReadBudgetNote = (roundsUsed: number): string => renderSubagentReadBudgetNote_ACU({
       maxReadTokens: readBudget.effectiveMaxReadTokens,
@@ -1363,6 +1384,7 @@ export class AgentSubagentRuntime_ACU {
       maxToolRounds,
       toolRoundsUsed: roundsUsed,
       grantedTokens: gate.state.grantedTokens,
+      readOnce: true,
     });
     // 终审与普通派工同一预算语义：首轮给出上限，每个工具批次后刷新剩余轮次与遥测；注入点必须在尾部预填充之前。
     const reviewPresent = new Set([...reviewSegments, ...(reviewSplit.taskTemplate ? [{ content: reviewSplit.taskTemplate }] : [])].flatMap(segment => segment.content.match(/\$[A-Z][A-Z0-9_]*/g) ?? [] as string[]));
@@ -1458,14 +1480,15 @@ export class AgentSubagentRuntime_ACU {
         continue;
       }
       if (toolCalls) {
-        if (toolRoundsUsed >= maxToolRounds) {
-          const exhausted = `read/search 轮次已用尽（上限 ${maxToolRounds} 轮）。请依据已有证据输出终审 JSON；无法证实的内容写为未验证，不许臆测。\n\n${renderReadBudgetNote(toolRoundsUsed)}`;
+        if (maxToolRounds === 0 || gate.successfulReadBatch) {
+          const exhausted = `read-once-exhausted：读取轮次已用尽（终审至多一个成功读取批次，本次上限 ${maxToolRounds}），不能再 read。请依据已有证据直接输出终审 JSON；无法证实的内容写为未验证，不许臆测。\n\n${renderReadBudgetNote(toolRoundsUsed)}`;
           transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => exhausted)));
           continue;
         }
-        toolRoundsUsed += 1;
         const batchResult = await this.executeToolCalls_ACU(toolCalls, input.resolveContext, gate, expandedReads,
           input.sharedMaterials !== undefined ? [] : null, false, true);
+        // 只有成功批次计额；失败批次不注入正文，修正后可重试。
+        if (gate.successfulReadBatch) toolRoundsUsed = 1;
         const perCallResults = toolCalls.map((_, index) => index === 0 ? batchResult : '本逻辑读取批次已统一结算，结果见首个工具回执。');
         transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, perCallResults.map(result => `${result}\n\n${renderReadBudgetNote(toolRoundsUsed)}`)));
         continue;

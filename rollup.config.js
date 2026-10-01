@@ -9,6 +9,7 @@ import typescript from '@rollup/plugin-typescript';
 import commonjs from '@rollup/plugin-commonjs';
 import nodeResolve from '@rollup/plugin-node-resolve';
 import replace from '@rollup/plugin-replace';
+import terser from '@rollup/plugin-terser';
 import vuePlugin from 'unplugin-vue/rollup';
 import sfcStyleInjector from './src/presentation-v2/build/rollup-sfc-style-injector.js';
 import vueScriptTranspiler from './src/presentation-v2/build/rollup-vue-script-transpiler.js';
@@ -117,6 +118,21 @@ function createTsPlugin() {
   });
 }
 
+/**
+ * 生产压缩。保留函数名与类名：运行时日志、错误分类（error.name）与调试依赖这些名称。
+ * 保留 UserScript 元数据注释（// ==UserScript== 与 // @xxx 行），否则油猴无法识别脚本头。
+ */
+function createTerserPlugin({ module }) {
+  return terser({
+    module,
+    keep_classnames: true,
+    keep_fnames: true,
+    format: {
+      comments: (_node, comment) => /==\/?UserScript==|^\s*@/.test(comment.value),
+    },
+  });
+}
+
 const sharedOnWarn = (warning, warn) => {
   if (warning.code === 'THIS_IS_UNDEFINED') return;
   if (warning.code === 'CIRCULAR_DEPENDENCY') return;
@@ -131,11 +147,12 @@ const userscriptConfig = {
     banner: USER_SCRIPT_BANNER,
     sourcemap: false,
   },
-  treeshake: false,
+  treeshake: true,
   plugins: [
     ...sharedPlugins,
     createTsPlugin(),
     createReplacePlugin(),
+    createTerserPlugin({ module: false }),
     {
       name: 'sync-userscript-artifacts',
       writeBundle() {
@@ -168,11 +185,12 @@ const extensionConfig = {
     format: 'es',
     sourcemap: false,
   },
-  treeshake: false,
+  treeshake: true,
   plugins: [
     ...sharedPlugins,
     createTsPlugin(),
     createReplacePlugin(),
+    createTerserPlugin({ module: true }),
     {
       name: 'sync-extension-artifacts',
       writeBundle() {

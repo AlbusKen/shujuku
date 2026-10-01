@@ -27,7 +27,7 @@ describe('scratch: bad count callback escapes as unstructured throw', () => {
       candidates,
       budgetTokens: 50,
       reservedTokens: 0,
-      axis: (key) => (key === 'addr-1' ? { length: 10, addressAt: (upper: number) => `addr-1@${upper}` } : null),
+      axis: (key) => (key === 'addr-1' ? { length: 10, addressAt: (upper: number) => `addr-1@${upper}`, remainderAfter: () => null } : null),
       resolve: () => ({ title: 't1', text: 'y', proof: { stableAddress: 'addr-1@0', completeWithinFence: true, resolvedFence: {}, revision: 1 } as any }),
       count: async (text: string) => {
         callCount += 1;

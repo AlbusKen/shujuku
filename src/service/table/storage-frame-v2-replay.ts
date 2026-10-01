@@ -55,6 +55,24 @@ interface V2FrameRef_ACU {
  */
 const inflightV2Replays_ACU = new Map<string, Promise<TableReplayResultV2_ACU | null>>();
 
+/**
+ * chat 数组的对象身份标识。String(chat) 只会得到 "[object Object],..."，实际只区分长度，
+ * 两份等长的不同聊天会在并发窗口内错误共享回放结果；WeakMap 按引用分配单调 ID，不阻止 GC。
+ */
+const chatReplayIdentities_ACU = new WeakMap<object, number>();
+let nextChatReplayIdentity_ACU = 1;
+
+function getChatReplayIdentity_ACU(chat: any[]): string {
+  if (!chat || typeof chat !== 'object') return 'none';
+  let identity = chatReplayIdentities_ACU.get(chat);
+  if (identity === undefined) {
+    identity = nextChatReplayIdentity_ACU;
+    nextChatReplayIdentity_ACU += 1;
+    chatReplayIdentities_ACU.set(chat, identity);
+  }
+  return String(identity);
+}
+
 function buildInflightReplayKey_ACU(
   chat: any[],
   isolationKey: string,
@@ -70,11 +88,13 @@ function buildInflightReplayKey_ACU(
   if (Number(options.yieldBudgetMs) > 0) return null;
   return [
     'chat-ref',
-    // chat 引用（数组对象身份）。同一数组内容原地变化时引用仍相同，但调用方
+    // chat 引用（数组对象身份，WeakMap 分配）。同一数组内容原地变化时引用仍相同，但调用方
     // 若在两次调用间原地 mutate chat（fill run 每批提交），in-flight 窗口内
     // 引用相同而内容不同——由调用方保证 fill 提交不在并发 replay 窗口内发生
     // （commit lock 内串行），否则此处只合并同一时刻的请求，语义安全。
-    String(chat),
+    getChatReplayIdentity_ACU(chat),
+    // 长度作为附加防线：窗口内若有楼层增删，不再共享结果。
+    'len', Array.isArray(chat) ? chat.length : -1,
     'iso', isolationKey,
     'max', options.maxMessageIndex ?? 'latest',
     'struct', structureMappingDigest || '',
@@ -1588,7 +1608,11 @@ async function ensureSqlReplayRuntime_ACU(
   if (!options.legacyDuplicateRowIds) normalizeHistoricalReplayState_ACU(state, 'snapshot');
   await runtime.engine.init();
   if (options.legacyDuplicateRowIds) runtime.syncBridge.loadSpv79LegacyDuplicateRowIdHistory(state);
-  else runtime.syncBridge.loadFromTableData(state, { strict: true });
+  // 回放必须复现写入时的 runtime schema：运行时 provider 以 allowRuntimeDdlFallback 加载，
+  // 显式 DDL 无法在 SQLite 执行时（如尾逗号）首条 CREATE TABLE 会回退为 fallback schema 并继续写入。
+  // 回放若拒绝同一回退，写入基底与回放基底必然分叉，触发写入守卫且该聊天永久无法填表。
+  // 回退仍只覆盖首条 CREATE TABLE 失败；行数据、约束与映射错误照旧 fail-closed，sourceData.ddl 不改写。
+  else runtime.syncBridge.loadFromTableData(state, { strict: true, allowRuntimeDdlFallback: true });
   if (options.metrics) {
     options.metrics.sqliteHydrateCount += 1;
   }

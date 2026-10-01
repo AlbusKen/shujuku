@@ -10,12 +10,14 @@
  * - 在 App.vue setup 中调用一次 `useChatChangedListener()`
  * - 内部通过 SillyTavern_API_ACU.eventSource 订阅
  * - onBeforeUnmount 时自动取消订阅
- * - 延迟 1500ms 执行刷新（旧 init.ts 的 CHAT_CHANGED 回调内有 1200ms setTimeout，
- *   需要等它完成后再读取最新状态）
+ * - 旧 init.ts 的 CHAT_CHANGED 链路完成派生数据重建后会发出显式完成信号
+ *   （shared/chat-runtime-reload-signal），收到与最近一次 CHAT_CHANGED 同名的信号才刷新；
+ *   旧链路异常未发信号时由兜底计时器刷新一次
  * - 同时递增全局 chatChangedTick，供非 Pinia 的页面级 composable watch
  */
 import { onBeforeUnmount, ref, type Ref } from 'vue';
 import { SillyTavern_API_ACU } from '../../shared/host-api';
+import { subscribeChatRuntimeReloaded_ACU } from '../../shared/chat-runtime-reload-signal';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { useApiPresetStore } from '../stores/api-preset-store';
 import { usePlotPresetStore } from '../stores/plot-preset-store';
@@ -32,6 +34,9 @@ const chatMutationTick = ref(0);
 
 /** 楼层删除会连发事件（批量删除、regenerate 先删后生成），短窗口聚合成一次刷新。 */
 const CHAT_MUTATION_DEBOUNCE_MS = 300;
+
+/** 旧链路未发出完成信号时的兜底刷新延迟。 */
+const CHAT_CHANGED_FALLBACK_REFRESH_MS = 10_000;
 
 /** 页面级 composable 可 watch 此 ref 来响应聊天切换。 */
 export function useChatChangedTick(): Ref<number> {
@@ -54,6 +59,8 @@ export function useChatChangedListener(): void {
 
   let pendingTimer: ReturnType<typeof setTimeout> | null = null;
   let mutationTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 最近一次 CHAT_CHANGED 的聊天名；null 表示没有待完成的切换。 */
+  let pendingChatFileName: string | null = null;
 
   function onChatMutated(): void {
     if (mutationTimer) clearTimeout(mutationTimer);
@@ -67,31 +74,45 @@ export function useChatChangedListener(): void {
     .map(name => (eventTypes as Record<string, string | undefined>)[name])
     .filter((name): name is string => typeof name === 'string' && name.length > 0);
 
-  function onChatChanged(chatFileName: string): void {
-    logDebug_ACU(`[ACU-V2] CHAT_CHANGED 收到: "${chatFileName}"，将延迟刷新 v2 store`);
-
+  function runChatChangedRefresh(): void {
     if (pendingTimer) clearTimeout(pendingTimer);
-
-    pendingTimer = setTimeout(() => {
-      pendingTimer = null;
-      logDebug_ACU('[ACU-V2] CHAT_CHANGED 延迟刷新开始');
-      try {
-        usePlotPresetStore().refreshFromSettings();
-        useApiPresetStore().refreshFromSettings();
-        useImportFlowStore().refreshFromSettings();
-      } catch (e) {
-        logWarn_ACU('[ACU-V2] CHAT_CHANGED 刷新 store 异常', e);
-      }
-      chatChangedTick.value++;
-    }, 1500);
+    pendingTimer = null;
+    pendingChatFileName = null;
+    logDebug_ACU('[ACU-V2] CHAT_CHANGED 刷新开始');
+    try {
+      usePlotPresetStore().refreshFromSettings();
+      useApiPresetStore().refreshFromSettings();
+      useImportFlowStore().refreshFromSettings();
+    } catch (e) {
+      logWarn_ACU('[ACU-V2] CHAT_CHANGED 刷新 store 异常', e);
+    }
+    chatChangedTick.value++;
   }
 
+  function onChatChanged(chatFileName: string): void {
+    logDebug_ACU(`[ACU-V2] CHAT_CHANGED 收到: "${chatFileName}"，等待旧链路完成信号后刷新 v2 store`);
+    pendingChatFileName = String(chatFileName ?? '');
+    if (pendingTimer) clearTimeout(pendingTimer);
+    pendingTimer = setTimeout(() => {
+      logWarn_ACU('[ACU-V2] 未收到 CHAT_CHANGED 完成信号，按兜底超时刷新 v2 store');
+      runChatChangedRefresh();
+    }, CHAT_CHANGED_FALLBACK_REFRESH_MS);
+  }
+
+  function onChatRuntimeReloaded(chatFileName: string): void {
+    // 被后续切换取代的旧链路信号不触发刷新：只认最近一次 CHAT_CHANGED。
+    if (pendingChatFileName === null || chatFileName !== pendingChatFileName) return;
+    runChatChangedRefresh();
+  }
+
+  const unsubscribeReloaded = subscribeChatRuntimeReloaded_ACU(onChatRuntimeReloaded);
   eventSource.on(eventTypes.CHAT_CHANGED, onChatChanged);
   for (const eventName of mutationEventNames) eventSource.on(eventName, onChatMutated);
 
   onBeforeUnmount(() => {
     if (pendingTimer) clearTimeout(pendingTimer);
     if (mutationTimer) clearTimeout(mutationTimer);
+    unsubscribeReloaded();
     try {
       eventSource.removeListener(eventTypes.CHAT_CHANGED, onChatChanged);
       for (const eventName of mutationEventNames) eventSource.removeListener(eventName, onChatMutated);

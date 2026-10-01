@@ -18,6 +18,10 @@ const router = useRouterStore();
 const shell = useRootShellStore();
 const containerRef = ref<HTMLElement | null>(null);
 
+// 仅在面板打开时挂载：父组件 setup 先于子页面 setup 执行，在这里武装崩溃哨兵，
+// 当前页 setup/onMounted 卡死时哨兵保持 true，下次打开回退到默认页。
+router.armBootPending();
+
 function resetScroll() {
   if (containerRef.value) containerRef.value.scrollTop = 0;
 }

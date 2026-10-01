@@ -7,7 +7,7 @@ import {
   withV41RoleProcedure_ACU,
 } from '../../../../src/service/continuation/agent/agent-defaults';
 import { validateContinuationSettings_ACU } from '../../../../src/service/continuation/continuation-store';
-import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V40_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V41_ACU } from '../../../../src/service/continuation/defaults';
+import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V40_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V42_ACU } from '../../../../src/service/continuation/defaults';
 
 const ROLES_ACU = ['arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer', 'webResearcher', 'instructionComposer'] as const;
 
@@ -48,7 +48,7 @@ describe('V41 子代理执行流程问答', () => {
     const custom = [{ role: 'user', content: '用户自定义策划提示词', enabled: true, deletable: true }];
     settings.agentPrompts.beatPlanner = custom;
     const loaded = validateContinuationSettings_ACU(settings);
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V41_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V42_ACU);
     for (const role of ROLES_ACU.filter(item => item !== 'beatPlanner')) expect(loaded.agentPrompts[role]).toEqual(defaults[role]);
     expect(loaded.agentPrompts.beatPlanner).toEqual(custom);
   });

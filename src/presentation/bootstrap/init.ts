@@ -18,7 +18,7 @@ import { createCanonicalSnapshotEnvelope_ACU } from '../../service/table/canonic
 import { isSqliteMode } from '../../service/table/storage-mode';
 import { flushRuntimeOnlyPendingChanges_ACU } from '../../service/table/runtime-only-pending-flush';
 import { ensureNoActiveProvisionalBridgeForCurrentScope_ACU } from '../../service/table/manual-catch-up-provisional-bridge';
-import { loadAllChatMessages_ACU } from '../../service/worldbook/pipeline';
+import { notifyChatRuntimeReloaded_ACU } from '../../shared/chat-runtime-reload-signal';
 import { refreshMergedDataAndNotifyWithUI_ACU } from '../components/pipeline-ui-helpers';
 import { cleanChatName_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { shouldSkipPlotIntercept_ACU } from '../../service/plot/plot-logic';
@@ -26,7 +26,7 @@ import { orchestrateTavernHelperHook_ACU, orchestrateAfterCommandsStrategy1_ACU,
 import { getSendTextareaValue_ACU, setSendTextareaValue_ACU } from '../../shared/host-input';
 import { handleNewMessageDebounced_ACU } from '../triggers/settings-ui-sync/settings-ui-connect';
 import { runOptimizationLogicWithUI_ACU } from '../components/plot-planning-ui';
-import { beginPlotPendingDisguise_ACU } from '../components/plot-pending-disguise';
+import { beginPlotPendingDisguise_ACU, isPendingDisguiseGenerationType_ACU, PLOT_PENDING_NOTICE_ACU, SUMMARY_RECALL_PENDING_NOTICE_ACU, type PlotPendingDisguiseHandle_ACU } from '../components/plot-pending-disguise';
 import { processSummaryVectorIndexBeforeGenerationWithUI_ACU, rebuildCurrentSummaryVectorIndexWithUI_ACU, rebuildOutdatedSummaryVectorIndexInBackground_ACU, shouldRebuildSummaryVectorIndexWithUI_ACU } from '../components/summary-vector-index-ui';
 import { preloadSummaryVectorIndexCacheForCurrentChat_ACU } from '../../service/vector/summary-vector-index-cache-service';
 import { restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU } from '../../service/vector/summary-vector-index-flush-queue';
@@ -44,6 +44,7 @@ import { bindWorldSimulationInternalAiGenerationStarted_ACU, consumeWorldSimulat
 import { createWorldSimulationCompletionIntentForCurrentChat_ACU, getWorldSimulationRuntime_ACU } from '../../service/simulation/simulation-runtime';
 import { autoEnableFlightModeForNewChatIfNeeded_ACU } from '../../service/fill-mode/fill-mode-auto-enable';
 import { ensureCurrentChatFillModeRecorded_ACU } from '../../service/fill-mode/fill-mode-chat-switch';
+import { isVectorPipelineEnabledForCurrentChat_ACU } from '../../service/fill-mode/fill-mode-gate';
 
 // [从 state-manager.ts 搬入 presentation 层] 安装发送意图捕捉钩子（DOM 事件绑定）
 async function ensureInitialSeedCheckpointBeforeGeneration_ACU(reason: string, { allowPendingFirstUserMessage = true } = {}) {
@@ -220,6 +221,8 @@ export   function mainInitialize_ACU() {
           const hasValidChatFileName_ACU = isValidChatFileName_ACU(chatFileName);
           if (!hasValidChatFileName_ACU && !hasActiveChatMessages_ACU()) {
             clearRuntimeForNoActiveChat_ACU(chatFileName);
+            // 同步返回路径：推迟到本次事件分发之后，确保新 UI 已收到 CHAT_CHANGED。
+            setTimeout(() => notifyChatRuntimeReloaded_ACU(chatFileName), 0);
             return;
           }
 
@@ -236,7 +239,8 @@ export   function mainInitialize_ACU() {
 
           // [触发门控] generationGate 重置已搬到 service 层的 resetScriptStateForNewChat_ACU 中
 
-          // [触发门控] 每次切换聊天都尝试安装一次 capture 钩子（防止 DOM 重新渲染导致丢失）          installSendIntentCaptureHooks_ACU();
+          // [触发门控] 每次切换聊天都尝试安装一次 capture 钩子（防止 DOM 重新渲染导致丢失）
+          installSendIntentCaptureHooks_ACU();
 
           await loadPresetAndCleanCharacterData_ACU();
 
@@ -310,12 +314,14 @@ export   function mainInitialize_ACU() {
 
              if (!hasActiveChatMessages_ACU()) {
                  clearRuntimeForNoActiveChat_ACU(chatFileName);
+                 notifyChatRuntimeReloaded_ACU(chatFileName);
                  return;
              }
 
              // 先重新读取当前聊天持久化消息，再应用 chat_metadata 中的聊天模板快照。
              // 此处是“持久化 → 派生缓存”的唯一重建入口，不能依赖切换前遗留的 TABLE_TEMPLATE/currentJsonTableData。
-             await loadAllChatMessages_ACU();
+             // 聊天消息投影由下方 refreshMergedDataAndNotifyWithUI_ACU 内部统一加载（pipeline.ts），
+             // 模板作用域只读 chat_metadata，不依赖消息投影，这里不再重复全量拉取。
              applyTemplateScopeForCurrentChat_ACU();
 
             // 阶段 D：合并刷新（一轮 V2 replay，产出 canonical）与 provider hydrate 收敛。
@@ -391,7 +397,17 @@ export   function mainInitialize_ACU() {
 
             // [交火向量索引] 聊天数据刷新完成后，预热当前聊天对应的外置分片缓存。
             // 注意：必须放在 refreshMergedDataAndNotifyWithUI_ACU 之后，否则可能读取到旧聊天的 manifest。
-            const vectorCacheResult = await preloadSummaryVectorIndexCacheForCurrentChat_ACU();
+            // 预热只是热缓存：未启用向量管线的聊天跳过整段聊天逆序扫描与外置分片加载；
+            // 检索路径会按需加载分片。门控推导异常时保持原行为（照常预热）。
+            let vectorPipelineEnabled = true;
+            try {
+                vectorPipelineEnabled = isVectorPipelineEnabledForCurrentChat_ACU();
+            } catch (gateError) {
+                logWarn_ACU('[交火向量索引] 向量管线门控推导失败，按原行为预热缓存:', gateError);
+            }
+            const vectorCacheResult: Awaited<ReturnType<typeof preloadSummaryVectorIndexCacheForCurrentChat_ACU>> = vectorPipelineEnabled
+                ? await preloadSummaryVectorIndexCacheForCurrentChat_ACU()
+                : { success: true, skipped: true, reason: 'vector_pipeline_disabled', chunkCount: 0 };
             logDebug_ACU(`[交火向量索引] CHAT_CHANGED 缓存预热结果：success=${vectorCacheResult.success}, skipped=${vectorCacheResult.skipped === true}, reason=${vectorCacheResult.reason || 'none'}, chunks=${vectorCacheResult.chunkCount}, indexId=${vectorCacheResult.indexId || 'none'}`);
             if (shouldRebuildSummaryVectorIndexWithUI_ACU(vectorCacheResult.reason)) {
                 try {
@@ -427,6 +443,8 @@ export   function mainInitialize_ACU() {
             }
 
             logDebug_ACU('ACU: Chat data reload and UI refresh triggered after chat change (Delayed).');
+            // 显式完成信号：新 UI 据此刷新 store，替代按固定延迟猜测旧链路已完成。
+            notifyChatRuntimeReloaded_ACU(chatFileName);
            } catch (chatChangedError) {
              const message = chatChangedError instanceof Error ? chatChangedError.message : String(chatChangedError);
              logError_ACU('ACU: CHAT_CHANGED 延迟刷新失败（已尝试全部兼容读取层）:', chatChangedError);
@@ -438,6 +456,7 @@ export   function mainInitialize_ACU() {
                  onClick: async () => { await getUiSurface_ACU()?.openSettings?.(); },
                },
              });
+             notifyChatRuntimeReloaded_ACU(chatFileName);
            }
          }, 1200); // 增加延迟到1200ms，给SillyTavern更多的DOM渲染和上下文切换时间
         });
@@ -594,93 +613,107 @@ export   function mainInitialize_ACU() {
               await ensureInitialSeedCheckpointBeforeGeneration_ACU('generation_after_commands_before_ai', { allowPendingFirstUserMessage: true });
             }
             if (!shouldProcessSummaryVectorIndex && !shouldProcessPlot) return;
-            if (shouldProcessSummaryVectorIndex) {
-              try {
-                const chatForSummaryIndex = SillyTavern_API_ACU.chat;
-                const lastUserText = (chatForSummaryIndex?.length && (chatForSummaryIndex as any)[chatForSummaryIndex.length - 1]?.is_user)
-                  ? String((chatForSummaryIndex as any)[chatForSummaryIndex.length - 1].mes || '')
-                  : String(getSendTextareaValue_ACU() || params?.prompt || '');
-                const summaryVectorResult = await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput: lastUserText, source: 'generation_after_commands' });
-                logDebug_ACU(`[交火模式纪要索引] GENERATION_AFTER_COMMANDS 发送前处理完成：success=${summaryVectorResult.success}, skipped=${summaryVectorResult.skipped === true}, reason=${summaryVectorResult.reason || 'none'}, keywords=${summaryVectorResult.keywordCount ?? 0}, injected=${summaryVectorResult.injectedCount ?? 0}`);
-              } catch (error) {
-                logWarn_ACU('[交火模式纪要索引] 发送前注入失败，继续原始生成:', error);
-              }
-            }
-            if (!shouldProcessPlot) return;
-            if (type === 'regenerate' || isProcessing_Plot_ACU) return;
 
-            // [去重] 若同一文本刚被 TavernHelper.generate 钩子处理过，跳过
+            // [伪装发送] 宿主要等本监听全部结束才读取发送框并让用户楼层入楼。交火 / 向量表格召回与
+            // 剧情推进都在本监听内等待，共用同一个伪装实例：召回开始时就渲染伪装的用户楼层与“思考中”
+            // AI 楼层（纯 DOM）并清空发送框，进入剧情推进只切换拦截提示；监听结束时统一把文本交还
+            // 发送框（剧情推进成功为规划结果，其余为原文），宿主随后按原生流程入楼并生成。
+            // 末楼已是用户楼层（/send 等先入楼路径）时召回不伪装，避免伪装楼层与真实楼层并存。
+            const chatAtStart = SillyTavern_API_ACU.chat;
+            const lastAtStart = chatAtStart?.length ? (chatAtStart as any)[chatAtStart.length - 1] : null;
+            const pendingTextInBox = String(getSendTextareaValue_ACU() || '');
+            let disguise: PlotPendingDisguiseHandle_ACU | null = null;
+            let textForHost = pendingTextInBox;
             try {
-              const lastMsgText = (SillyTavern_API_ACU.chat?.length && (SillyTavern_API_ACU.chat as any)[SillyTavern_API_ACU.chat.length - 1]?.is_user)
-                ? ((SillyTavern_API_ACU.chat as any)[SillyTavern_API_ACU.chat.length - 1].mes || '')
-                : '';
-              const boxText = String(getSendTextareaValue_ACU() || '');
-              if (shouldSkipPlotIntercept_ACU(String(lastMsgText)) || shouldSkipPlotIntercept_ACU(boxText)) {
-                logDebug_ACU('[剧情推进] Skip GENERATION_AFTER_COMMANDS due to recent TavernHelper.generate interception.');
-                return;
-              }
-            } catch (e) {}
-
-            const chat = SillyTavern_API_ACU.chat;
-            if (!chat || chat.length === 0) return;
-
-            // ── 策略1：已有用户消息 ──
-            const lastMessageIndex = chat.length - 1;
-            const lastMessage = chat[lastMessageIndex];
-
-            // [重构] 调用 service 层策略1编排
-            const s1 = await orchestrateAfterCommandsStrategy1_ACU(lastMessage, lastMessageIndex, runOptimizationLogicWithUI_ACU);
-
-            if (s1.action !== 'no_match') {
-              // 策略1匹配，根据结果做 UI 操作
-              switch (s1.action) {
-                case 'aborted':
-                  if (s1.manual) {
-                    // 停止生成
-                    try {
-                      if (SillyTavern_API_ACU && typeof SillyTavern_API_ACU.stopGeneration === 'function') SillyTavern_API_ACU.stopGeneration();
-                      else if ((window as any).SillyTavern?.stopGeneration) (window as any).SillyTavern.stopGeneration();
-                    } catch (e) {}
-                    // 删除刚创建的用户消息
-                    try {
-                      const chatNow = SillyTavern_API_ACU.chat;
-                      const lastNow = chatNow?.length ? chatNow[chatNow.length - 1] : null;
-                      if (lastNow && lastNow.is_user && String(lastNow.mes || '') === String(s1.originalMessage || '')) {
-                        if (typeof SillyTavern_API_ACU.deleteLastMessage === 'function') await SillyTavern_API_ACU.deleteLastMessage();
-                        else if ((window as any).SillyTavern?.deleteLastMessage) await (window as any).SillyTavern.deleteLastMessage();
-                      }
-                    } catch (e) {}
-                    // 恢复输入框
-                    try { setSendTextareaValue_ACU(s1.restoreText || ''); } catch (e) {}
+              if (shouldProcessSummaryVectorIndex) {
+                try {
+                  const lastUserText = lastAtStart?.is_user
+                    ? String(lastAtStart.mes || '')
+                    : String(pendingTextInBox || params?.prompt || '');
+                  if (!lastAtStart?.is_user && pendingTextInBox.trim() && isPendingDisguiseGenerationType_ACU(type)) {
+                    disguise = beginPlotPendingDisguise_ACU(pendingTextInBox, { notice: SUMMARY_RECALL_PENDING_NOTICE_ACU });
                   }
-                  break;
-
-                case 'planned':
-                  // 写回 params 和消息对象
-                  params.prompt = s1.finalMessage;
-                  lastMessage.mes = s1.finalMessage;
-                  SillyTavern_API_ACU.eventSource.emit(SillyTavern_API_ACU.eventTypes.MESSAGE_UPDATED, lastMessageIndex);
-                  if (getSendTextareaValue_ACU() === s1.originalMessage) setSendTextareaValue_ACU('');
-                  break;
-
-                // 'skipped' — 不做额外操作
+                  const summaryVectorResult = await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput: lastUserText, source: 'generation_after_commands' });
+                  logDebug_ACU(`[交火模式纪要索引] GENERATION_AFTER_COMMANDS 发送前处理完成：success=${summaryVectorResult.success}, skipped=${summaryVectorResult.skipped === true}, reason=${summaryVectorResult.reason || 'none'}, keywords=${summaryVectorResult.keywordCount ?? 0}, injected=${summaryVectorResult.injectedCount ?? 0}`);
+                } catch (error) {
+                  logWarn_ACU('[交火模式纪要索引] 发送前注入失败，继续原始生成:', error);
+                }
               }
-              return; // 策略1匹配，不再执行策略2
-            }
+              if (!shouldProcessPlot) return;
+              if (type === 'regenerate' || isProcessing_Plot_ACU) return;
 
-            // ── 策略2：输入框文本 ──
-            // shouldProcessPlot 是本次 GENERATION_AFTER_COMMANDS 事件开始时捕获的授权。
-            // 交火召回可能耗时超过 USER_SEND_TRIGGER_TTL_MS_ACU；这里不能再用 TTL 二次否决，
-            // 否则会出现“交火已覆盖纪要索引，但剧情推进被跳过并直接正文生成”的断链。
-            if (!shouldProcessPlot && !isRecentUserSendIntent_ACU()) return;
-            const textInBox = String(getSendTextareaValue_ACU() || '');
+              // [去重] 若同一文本刚被 TavernHelper.generate 钩子处理过，跳过
+              try {
+                const lastMsgText = (SillyTavern_API_ACU.chat?.length && (SillyTavern_API_ACU.chat as any)[SillyTavern_API_ACU.chat.length - 1]?.is_user)
+                  ? ((SillyTavern_API_ACU.chat as any)[SillyTavern_API_ACU.chat.length - 1].mes || '')
+                  : '';
+                // 召回伪装期间发送框已清空，用户原文以伪装实例为准。
+                const boxText = disguise ? disguise.originalText : String(getSendTextareaValue_ACU() || '');
+                if (shouldSkipPlotIntercept_ACU(String(lastMsgText)) || shouldSkipPlotIntercept_ACU(boxText)) {
+                  logDebug_ACU('[剧情推进] Skip GENERATION_AFTER_COMMANDS due to recent TavernHelper.generate interception.');
+                  return;
+                }
+              } catch (e) {}
 
-            // [伪装发送] 宿主要等本监听结束才读取发送框并让用户楼层入楼。规划期间先在聊天区显示
-            // 伪装的用户楼层与“思考中”AI 楼层（纯 DOM），并清空发送框；无论规划结果如何，
-            // 结束时都把文本交还发送框（成功为规划结果，其余为原文），宿主随后按原生流程入楼并生成。
-            const disguise = textInBox.trim() ? beginPlotPendingDisguise_ACU(textInBox) : null;
-            let textForHost = textInBox;
-            try {
+              const chat = SillyTavern_API_ACU.chat;
+              if (!chat || chat.length === 0) return;
+
+              // ── 策略1：已有用户消息 ──
+              const lastMessageIndex = chat.length - 1;
+              const lastMessage = chat[lastMessageIndex];
+
+              // [重构] 调用 service 层策略1编排
+              const s1 = await orchestrateAfterCommandsStrategy1_ACU(lastMessage, lastMessageIndex, runOptimizationLogicWithUI_ACU);
+
+              if (s1.action !== 'no_match') {
+                // 策略1匹配，根据结果做 UI 操作
+                switch (s1.action) {
+                  case 'aborted':
+                    if (s1.manual) {
+                      // 停止生成
+                      try {
+                        if (SillyTavern_API_ACU && typeof SillyTavern_API_ACU.stopGeneration === 'function') SillyTavern_API_ACU.stopGeneration();
+                        else if ((window as any).SillyTavern?.stopGeneration) (window as any).SillyTavern.stopGeneration();
+                      } catch (e) {}
+                      // 删除刚创建的用户消息
+                      try {
+                        const chatNow = SillyTavern_API_ACU.chat;
+                        const lastNow = chatNow?.length ? chatNow[chatNow.length - 1] : null;
+                        if (lastNow && lastNow.is_user && String(lastNow.mes || '') === String(s1.originalMessage || '')) {
+                          if (typeof SillyTavern_API_ACU.deleteLastMessage === 'function') await SillyTavern_API_ACU.deleteLastMessage();
+                          else if ((window as any).SillyTavern?.deleteLastMessage) await (window as any).SillyTavern.deleteLastMessage();
+                        }
+                      } catch (e) {}
+                      // 恢复输入框
+                      try { setSendTextareaValue_ACU(s1.restoreText || ''); } catch (e) {}
+                    }
+                    break;
+
+                  case 'planned':
+                    // 写回 params 和消息对象
+                    params.prompt = s1.finalMessage;
+                    lastMessage.mes = s1.finalMessage;
+                    SillyTavern_API_ACU.eventSource.emit(SillyTavern_API_ACU.eventTypes.MESSAGE_UPDATED, lastMessageIndex);
+                    if (getSendTextareaValue_ACU() === s1.originalMessage) setSendTextareaValue_ACU('');
+                    break;
+
+                  // 'skipped' — 不做额外操作
+                }
+                return; // 策略1匹配，不再执行策略2
+              }
+
+              // ── 策略2：输入框文本 ──
+              // shouldProcessPlot 是本次 GENERATION_AFTER_COMMANDS 事件开始时捕获的授权。
+              // 交火召回可能耗时超过 USER_SEND_TRIGGER_TTL_MS_ACU；这里不能再用 TTL 二次否决，
+              // 否则会出现“交火已覆盖纪要索引，但剧情推进被跳过并直接正文生成”的断链。
+              if (!shouldProcessPlot && !isRecentUserSendIntent_ACU()) return;
+              const textInBox = disguise ? disguise.originalText : String(getSendTextareaValue_ACU() || '');
+              textForHost = textInBox;
+
+              // 召回阶段已伪装则沿用同一实例，只切换拦截提示；否则在规划开始前伪装。
+              if (disguise) disguise.setNotice(PLOT_PENDING_NOTICE_ACU);
+              else if (textInBox.trim()) disguise = beginPlotPendingDisguise_ACU(textInBox);
+
               // [重构] 调用 service 层策略2编排
               const s2 = await orchestrateAfterCommandsStrategy2_ACU(textInBox, runOptimizationLogicWithUI_ACU);
 
@@ -700,12 +733,12 @@ export   function mainInitialize_ACU() {
                   try { params.prompt = s2.finalMessage; } catch (e) {}
                   break;
               }
+
+              // 消费掉本次发送意图
+              generationGate_ACU.lastUserSendIntentAt = 0;
             } finally {
               disguise?.release(textForHost);
             }
-
-            // 消费掉本次发送意图
-            generationGate_ACU.lastUserSendIntentAt = 0;
           });
         }
         const chatModificationEvents = ['MESSAGE_DELETED', 'MESSAGE_SWIPED'] as const;
@@ -739,8 +772,8 @@ export   function mainInitialize_ACU() {
           logDebug_ACU(`ACU: Initializing with current chat on load: ${chatId}`);
           await resetScriptStateForNewChat_ACU(chatId, { reason: 'startup_restore' });
           await loadPresetAndCleanCharacterData_ACU();
-          // 再次强制刷新数据和UI，确保初始加载时表格显示正确
-          await loadAllChatMessages_ACU();
+          // 聊天消息投影由下方 refreshMergedDataAndNotifyWithUI_ACU 内部统一加载；
+          // provisional bridge 恢复门直接读取宿主聊天，不依赖消息投影，这里不再重复全量拉取。
 
           // [provisional bridge] 启动加载当前聊天后统一恢复门：
           // 若上次运行崩溃留下 active provisional bridge（原 full 被暂存、临时根在链上），

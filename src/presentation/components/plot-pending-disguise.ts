@@ -39,9 +39,37 @@ const PENDING_STYLE_ACU = `
 @media (prefers-reduced-motion: reduce) { .acu-plot-pending-thinking { animation: none; opacity: 0.7; } }
 `;
 
+/** 伪装期间拦截重复发送时的提示文案；召回与剧情推进共用同一伪装实例，按当前阶段切换。 */
+export interface PendingDisguiseNotice_ACU {
+  message: string;
+  title: string;
+}
+
+export const PLOT_PENDING_NOTICE_ACU: PendingDisguiseNotice_ACU = {
+  message: '剧情推进中，完成后会自动发送当前消息。',
+  title: '剧情推进',
+};
+
+export const SUMMARY_RECALL_PENDING_NOTICE_ACU: PendingDisguiseNotice_ACU = {
+  message: '正在召回相关纪要，完成后会自动发送当前消息。',
+  title: '纪要召回',
+};
+
+/**
+ * 宿主会在监听结束后读取发送框入楼的生成类型才允许伪装。
+ * regenerate / swipe / impersonate / quiet 不把发送框作为用户楼层发送，伪装会凭空多出用户楼层。
+ */
+const NON_SENDING_GENERATION_TYPES_ACU = new Set(['regenerate', 'swipe', 'impersonate', 'quiet']);
+
+export function isPendingDisguiseGenerationType_ACU(type: unknown): boolean {
+  return !NON_SENDING_GENERATION_TYPES_ACU.has(String(type ?? ''));
+}
+
 export interface PlotPendingDisguiseHandle_ACU {
   /** 用户点击发送时发送框里的原文 */
   readonly originalText: string;
+  /** 切换拦截重复发送时的提示文案（例如召回结束、进入剧情推进）。 */
+  setNotice(notice: PendingDisguiseNotice_ACU): void;
   /** 移除伪装楼层、解除发送拦截，把 textForHost 写回发送框交给宿主继续原生发送。幂等；返回发送框是否写入成功。 */
   release(textForHost: string): boolean;
 }
@@ -153,13 +181,14 @@ function resolveCharacterAvatarSrc_ACU(ctx: any, $chat: JQuery<HTMLElement>): st
  * 伪装期间拦截发送按钮与回车发送。文档捕获阶段先于宿主绑定在元素上的监听执行，
  * stopImmediatePropagation 后宿主 sendTextareaMessage 不会被调用。
  */
-function installSendBlock_ACU(doc: Document): () => void {
+function installSendBlock_ACU(doc: Document, getNotice: () => PendingDisguiseNotice_ACU): () => void {
   let lastToastAt = 0;
   const notify = () => {
     const now = Date.now();
     if (now - lastToastAt < BLOCK_TOAST_INTERVAL_MS_ACU) return;
     lastToastAt = now;
-    showToastr_ACU('info', '剧情推进中，完成后会自动发送当前消息。', '剧情推进');
+    const notice = getNotice();
+    showToastr_ACU('info', notice.message, notice.title);
   };
   const onClick = (e: Event) => {
     const target = e.target as Element | null;
@@ -188,10 +217,14 @@ function installSendBlock_ACU(doc: Document): () => void {
  * 开始伪装：渲染伪装楼层、清空发送框、拦截重复发送。
  * 条件不满足（已有伪装、找不到聊天区或消息模板、发送框不可写）时返回 null，调用方保持原有行为。
  */
-export function beginPlotPendingDisguise_ACU(originalText: string): PlotPendingDisguiseHandle_ACU | null {
+export function beginPlotPendingDisguise_ACU(
+  originalText: string,
+  options: { notice?: PendingDisguiseNotice_ACU } = {},
+): PlotPendingDisguiseHandle_ACU | null {
   const jq = jQuery_API_ACU;
   if (activeDisguise_ACU || !jq || !String(originalText || '').trim()) return null;
 
+  let currentNotice: PendingDisguiseNotice_ACU = options.notice || PLOT_PENDING_NOTICE_ACU;
   let $nodes: JQuery<HTMLElement> | null = null;
   let removeBlock: (() => void) | null = null;
   let textareaCleared = false;
@@ -229,7 +262,7 @@ export function beginPlotPendingDisguise_ACU(originalText: string): PlotPendingD
       return null;
     }
     textareaCleared = true;
-    removeBlock = installSendBlock_ACU(doc);
+    removeBlock = installSendBlock_ACU(doc, () => currentNotice);
 
     const nodes = $nodes;
     const unblock = removeBlock;
@@ -237,6 +270,9 @@ export function beginPlotPendingDisguise_ACU(originalText: string): PlotPendingD
     let writeOk = true;
     const handle: PlotPendingDisguiseHandle_ACU = {
       originalText,
+      setNotice(notice: PendingDisguiseNotice_ACU): void {
+        if (!released && notice) currentNotice = notice;
+      },
       release(textForHost: string): boolean {
         if (released) return writeOk;
         released = true;

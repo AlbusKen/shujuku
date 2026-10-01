@@ -238,6 +238,8 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V39_ACU = 'spv4.7-continu
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V40_ACU = 'spv4.8-continuation-subagent-qa-v40';
 /** 各子代理在任务段前补一组执行流程问答：逐步写清怎么查、怎么判、怎么写、怎么自检。 */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V41_ACU = 'spv4.9-continuation-subagent-procedure-v41';
+/** 维护、策划、审查、终审与写作指令子代理改为单次读取后直接交付；总纲、大纲与网页检索不变。 */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V42_ACU = 'spv5.0-continuation-subagent-read-once-v42';
 
 /**
  * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
@@ -330,7 +332,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V41_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V42_ACU,
   };
 }
 

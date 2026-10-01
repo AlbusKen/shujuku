@@ -1254,8 +1254,8 @@ function v41PristineRoleSegments_ACU(role: keyof ContinuationAgentPrompts_ACU): 
   return cached;
 }
 
-/** 当前默认组：V40 之上为各子代理在任务段前补一组执行流程问答。 */
-export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+/** V41 冻结入口：V40 之上为各子代理在任务段前补一组执行流程问答；V42 在其上收敛读取口径，这里保持原样供迁移对照。 */
+export function buildV41ContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
   const prompts = buildV40ContinuationAgentPrompts_ACU();
   const next = { ...prompts };
   for (const role of Object.keys(prompts) as Array<keyof ContinuationAgentPrompts_ACU>) {
@@ -1263,6 +1263,81 @@ export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPro
   }
   return next;
 }
+
+/**
+ * V42 单次读取口径：维护、策划、审查与终审只有 read 工具，且每轮至多一个成功读取批次，读完直接交付；
+ * 写作指令没有本地调阅工具。总纲、阶段大纲与网页检索保持多轮调阅，不在此列。
+ * 只改写仍要求 search 定位或多轮调阅的句子，其余正文逐字保留。
+ */
+const V42_READ_ONCE_ROLES_ACU: ReadonlySet<keyof ContinuationAgentPrompts_ACU> = new Set(['maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer', 'instructionComposer']);
+const V42_CONTRACT_TOOL_RE_ACU = /先调用 read 或 search 函数补充调阅：[^。]*。[^。]*search 定位、再用窄地址精读[^。]*。/g;
+const V42_READ_ONCE_CONTRACT_ACU = '只在固定注入与目录确实回答不了的特别缺口时调用 read 函数补读：参数 reads 是地址数组，全部地址放进同一次回复并发调用。每轮至多一个成功读取批次，失败批次不占额度、修正后可重试；读过一次就直接交付契约 JSON，不再调阅。';
+const V42_PROTOCOL_OLD_ACU = '独立 read/search 在授权和预算内于同一回复并发调用，不拆批等待；搜索结果决定的精读等回执后再读。';
+const V42_PROTOCOL_NEW_ACU = '确需补读时把全部 read 地址放进同一回复并发调用；每轮至多一个成功读取批次，读完直接交付。';
+const V42_COMPOSER_PROTOCOL_NEW_ACU = '本角色没有本地调阅工具，直接依据已注入资料交付。';
+const V42_PHRASES_ACU: ReadonlyArray<readonly [string, string]> = [
+  ['我用 read/search 工具实际调阅到的资料', '我用 read 工具实际补读到的资料'],
+  ['我用 read/search 工具调阅到的资料', '我用 read 工具补读到的资料'],
+  ['资料里没有的，我先用工具去查；查不到', '资料里没有的，我只在特别缺口时用唯一一次 read 补读；查不到'],
+  ['要么先用工具去查证，要么不提', '要么用唯一一次 read 查证，要么不提'],
+  ['【读取地址词汇表】（read/search 工具可用的地址体系）', '【读取地址词汇表】（read 工具可用的地址体系）'],
+  ['资料不足先用工具调阅，足够就直接交付契约 JSON。', '固定注入与目录足够就直接交付契约 JSON；确有特别缺口时只调用一次 read 补读，读完即交付。'],
+  ['需要核对的事实先用工具调阅，足够就直接交付契约 JSON。', '固定注入与目录足够就直接交付契约 JSON；确需核对的事实只调用一次 read 补读，读完即交付。'],
+  ['需要更早脉络时按行区间精读纪要表，或 search 正文定位楼层后精读。', '需要更早脉络时在同一次 read 里按行区间精读纪要表或正文楼层。'],
+  ['先 search 定位再 read 窄地址核对；互不依赖的读取在同一次回复里并发调用。', '固定注入与目录查不到时，把窄地址放进同一次 read 并发核对；本轮只有这一次成功读取。'],
+  ['先 search 定位再 read 窄地址精读，互不依赖的读取并发调用。', '把窄地址放进同一次 read 并发精读；本轮只有这一次成功读取。'],
+  ['先 search 定位再 read 窄地址精读，互不依赖的核对在同一次回复并发调用。', '把窄地址放进同一次 read 并发核对；本轮只有这一次成功读取。'],
+  ['证据不足先在世界书范围 search 定位再精读条目，', '证据不足时把世界书条目地址放进唯一一次 read 精读，'],
+  ['证据不足先用 worldbook scope 的 search 定位，再用 $WORLDBOOK:书名:uid 精读，不能凭印象判定', '证据不足时用唯一一次 read 精读 $WORLDBOOK:书名:uid，不能凭印象判定'],
+];
+const V42_COMPOSER_PHRASES_ACU: ReadonlyArray<readonly [string, string]> = [
+  ['需要核对的事实先 search 定位再 read 精读。', '我没有本地调阅工具，事实只依据已注入资料，缺口在 summary 写明。'],
+  ['请输出契约 JSON。资料不够时先 read/search，足够后直接交付。', '请输出契约 JSON。你没有本地调阅工具，直接依据已注入资料交付。'],
+];
+
+/** 字面替换：用 split/join 避免替换串里的 $ 被当作捕获引用展开。 */
+function swapLiteral_ACU(text: string, from: string, to: string): string {
+  return text.split(from).join(to);
+}
+
+function v42Content_ACU(role: keyof ContinuationAgentPrompts_ACU, content: string): string {
+  if (!V42_READ_ONCE_ROLES_ACU.has(role)) return content;
+  if (role === 'instructionComposer') {
+    let next = swapLiteral_ACU(content, V42_PROTOCOL_OLD_ACU, V42_COMPOSER_PROTOCOL_NEW_ACU);
+    for (const [from, to] of V42_COMPOSER_PHRASES_ACU) next = swapLiteral_ACU(next, from, to);
+    return next;
+  }
+  let next = content.replace(V42_CONTRACT_TOOL_RE_ACU, () => V42_READ_ONCE_CONTRACT_ACU);
+  next = swapLiteral_ACU(next, V42_PROTOCOL_OLD_ACU, V42_PROTOCOL_NEW_ACU);
+  for (const [from, to] of V42_PHRASES_ACU) next = swapLiteral_ACU(next, from, to);
+  return next;
+}
+
+let v42PristineRoles_ACU: ContinuationAgentPrompts_ACU | null = null;
+
+/**
+ * V41 → V42 精确迁移：只改写与 V41 默认正文逐字相同的段；用户改写、追加或重排的段原样保留，
+ * 段的元数据（enabled、pinned 等）不动。V42 正文不在 V41 集合里，重复调用不产生变化。
+ */
+export function withV42ReadOnceContract_ACU(role: keyof ContinuationAgentPrompts_ACU, segments: readonly ContinuationPromptSegment_ACU[]): ContinuationPromptSegment_ACU[] {
+  if (!V42_READ_ONCE_ROLES_ACU.has(role)) return segments.map(segment => ({ ...segment }));
+  if (!v42PristineRoles_ACU) v42PristineRoles_ACU = buildV41ContinuationAgentPrompts_ACU();
+  const pristine = new Set(v42PristineRoles_ACU[role].map(segment => segment.content));
+  return segments.map(segment => (pristine.has(segment.content)
+    ? { ...segment, content: v42Content_ACU(role, segment.content) }
+    : { ...segment }));
+}
+
+/** 当前默认组：V41 之上把普通子代理收敛为单次读取后直接交付。 */
+export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+  const prompts = buildV41ContinuationAgentPrompts_ACU();
+  const next = { ...prompts };
+  for (const role of Object.keys(prompts) as Array<keyof ContinuationAgentPrompts_ACU>) {
+    next[role] = withV42ReadOnceContract_ACU(role, prompts[role]);
+  }
+  return next;
+}
+
 
 /**
  * 在任务段正前方插入执行流程问答。只有任务段前一段仍与 V40 默认正文逐字相同才插：

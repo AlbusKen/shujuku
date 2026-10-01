@@ -108,7 +108,9 @@
             </div>
           </header>
           <VisualizerSurface v-if="visualizer.isActive" @close="closeApp" />
-          <MainArea v-else />
+          <!-- 面板关闭时不挂载页面：避免隐藏页随启动挂载、随切聊天刷新；
+               重开本就会 remount 当前页，关闭时卸载不丢失额外状态。 -->
+          <MainArea v-else-if="rootShell.isOpen" />
         </div>
       </div>
 
@@ -152,7 +154,7 @@ import { useDevOptions } from "./composables/useDevOptions";
 import { canCloseUi } from "./composables/useUiCloseGuard";
 import { useDialogStore } from "./stores/dialog-store";
 import { useRootShellStore } from "./stores/root-shell-store";
-import { useRouterStore } from "./stores/router-store";
+import { scheduleRouterBootComplete_ACU, useRouterStore } from "./stores/router-store";
 import { isCustomThemeId, useThemeStore } from "./stores/theme-store";
 import { useToastStore } from "./stores/toast-store";
 import { useUiModeStore } from "./stores/ui-mode-store";
@@ -316,7 +318,14 @@ watch(() => devOptions.developerOptionsEnabled.value, () => {
   router.ensureActiveVisible();
 });
 
-onMounted(() => router.ensureActiveVisible());
+onMounted(() => {
+  router.ensureActiveVisible();
+  // router store 创建时即武装崩溃哨兵；页面改为打开面板才挂载后，启动阶段没有页面
+  // 需要绘制，这里按当前代次清掉启动哨兵，避免从未打开面板时下次刷新被误判为卡死。
+  // 打开面板时 MainArea 会重新武装并在首帧后清除；代次不匹配的旧回调会被忽略。
+  const generation = router.bootGeneration;
+  scheduleRouterBootComplete_ACU(() => router.markBootComplete(generation));
+});
 watch(() => uiMode.mode, () => router.ensureActiveVisible());
 
 function openMobileNav(): void {
