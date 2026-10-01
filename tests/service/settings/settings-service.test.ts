@@ -159,6 +159,7 @@ vi.mock('../../../src/shared/defaults', () => ({
   SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU: 'spv3.6.10-v2-writer-force-enable',
   USER_PREFILL_PROFILE_FORCE_DEFAULT_VERSION_ACU: 'test-user-prefill-profile-force-default',
   USER_PREFILL_VECTOR_FORCE_DEFAULT_VERSION_ACU: 'test-user-prefill-vector-force-default',
+  CREATIVE_IDENTITY_PROMPT_UPGRADE_VERSION_ACU: 'spv9.6-creative-identity-prompt',
 
   defaultWorldbookConfig_ACU: {
     zeroTkOccupyMode: false,

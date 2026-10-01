@@ -28,7 +28,7 @@ import { logAgentSession_ACU, updateAgentSession_ACU } from './agent-session-log
 import { findMainSessionReadAppendix_ACU, keptSubagentMaterialTokens_ACU, omitSnapshotSectionsForSubagent_ACU, renderFallbackAgentSnapshot_ACU, stripUnownedSubagentPrompt_ACU } from './agent-shared-materials';
 import { agentNativeTools_ACU, nativeToolArguments_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, withNativeToolThinkPrefill_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
 import { hasActiveStoryArc_ACU, readAgentModuleFoldState_ACU, readAgentModuleSnapshot_ACU } from './agent-module-store';
-import type { AgentFieldPage_ACU, AgentModuleFieldReceipt_ACU } from './agent-module-field-commit';
+import type { AgentFieldPage_ACU, AgentModuleFieldReceipt_ACU, AgentModuleRevisionWindow_ACU } from './agent-module-field-commit';
 import { findAgentSubagentDefinition_ACU, getAgentSubagentAccessProfile_ACU, getAgentSubagentReadPrefixes_ACU, renderAgentReadCatalog_ACU, renderAgentWebToolCatalog_ACU, type AgentSubagentDefinition_ACU } from './agent-catalog';
 import { renderAgentUserRequirements_ACU } from './agent-user-requirements';
 import {
@@ -199,7 +199,7 @@ export interface AgentSubagentRunInput_ACU {
   targetModules?: readonly AgentWritableModule_ACU[];
   /** 同一主会话轮次内由所有同名子代理调用共享的读取额度状态。 */
   readRoundState?: AgentReadRoundState_ACU;
-  writeSql?: (input: { role: AgentSubagentName_ACU; sql: string; resolvePage: (handle: string) => AgentFieldPage_ACU | null; isCurrent?: () => boolean }) => Promise<AgentModuleFieldReceipt_ACU>;
+  writeSql?: (input: { role: AgentSubagentName_ACU; sql: string; resolvePage: (handle: string) => AgentFieldPage_ACU | null; isCurrent?: () => boolean; revisionWindow?: AgentModuleRevisionWindow_ACU }) => Promise<AgentModuleFieldReceipt_ACU>;
   /** 主会话为本轮备好的世界书全文和已有检索。传入后子代理不能再读这些范围。 */
   sharedMaterials?: string;
   /** 主会话当前运行时快照。附在子代理末尾，与主会话看到的是同一份。 */
@@ -498,7 +498,7 @@ function blankMaintainerOutput_ACU(summary: string): AgentMaintainerOutput_ACU {
   };
 }
 
-const SQL_QUOTING_ACU = '字符串用单引号，正文里的单引号写成两个单引号。数组和对象用单引号包裹的 JSON 文本，例如 \'["条目"]\'、\'{"min":1,"max":2}\'。列名用 snake_case。新行可以不写 id 和 expected_revision；若写 expected_revision，必须是 0。已有行的 UPDATE/DELETE 在 WHERE 里写 id 和回执给出的当前修订号，SET 里不要写这两项。';
+const SQL_QUOTING_ACU = '字符串用单引号，正文里的单引号写成两个单引号。数组和对象用单引号包裹的 JSON 文本，例如 \'["条目"]\'、\'{"min":1,"max":2}\'。列名用 snake_case。新行可以不写 id 和 expected_revision；若写 expected_revision，必须是 0。已有行的 UPDATE/DELETE 在 WHERE 里写 id 和该模块的当前修订号，SET 里不要写这两项。修订号是模块级的：同一模块各行共用一个号，取最近一次回执 revisions 里该模块的值或 $FIELD 读到的 revisions；fieldOutcome.saved 里的 fieldRevision 只是单个栏目的版本，不能写进 expected_revision。';
 
 /** 各维护角色的 write_sql 格式、范例和使用时机。运行时注入，不依赖提示词模板是否已迁移。 */
 function renderMaintenanceSqlGuide_ACU(name: string): string {
@@ -515,8 +515,8 @@ function renderMaintenanceSqlGuide_ACU(name: string): string {
       '范例（全书加第一卷，新行修订号为 0）：',
       'INSERT INTO story_arc (scope, title, direction, escalation, withheld, status) VALUES (\'story\', \'追查真相\', \'主角要查清禁区来历，失败就会失去进城资格\', \'从门外怀疑到确认守门人知情\', \'终局身份\', \'active\');',
       'INSERT INTO story_arc (scope, title, direction, escalation, withheld, status, narrative_role, target_stage_range, target_time_span, progress_ceiling, sustaining_threads, payoff_targets) VALUES (\'volume\', \'入城\', \'主角选择进城并结识守门人\', \'从门外观察进入到获得第一块线索\', \'守门人真实身份\', \'active\', \'setup\', \'{"min":1,"max":2}\', \'数日\', \'只确认入口，不揭开禁区核心\', \'["与守门人的信任"]\', \'["拿到第一块晶屑线索"]\');',
-      '改已有卷：UPDATE story_arc SET stage_numbers = \'[1]\' WHERE id = \'VOL-01\' AND expected_revision = 0;',
-      '删除：DELETE FROM story_arc WHERE id = \'VOL-02\' AND reason = \'与正文冲突\' AND expected_revision = 0;',
+      '改已有卷（7 只是示意，换成 revisions.storyArc 的当前值）：UPDATE story_arc SET stage_numbers = \'[1]\' WHERE id = \'VOL-01\' AND expected_revision = 7;',
+      '删除：DELETE FROM story_arc WHERE id = \'VOL-02\' AND reason = \'与正文冲突\' AND expected_revision = 7;',
     ].join('\n');
   }
   if (name === 'hook-cognition-maintainer') {
@@ -529,10 +529,10 @@ function renderMaintenanceSqlGuide_ACU(name: string): string {
       '信息差范例：INSERT INTO info_gap (topic, objective_fact, reader_known, character_knowledge, reveal_status) VALUES (\'晶屑来历\', \'晶屑来自禁区核心\', \'读者只看见守门人藏起晶屑\', \'[{"name":"守门人","knows":"亲身保管晶屑"}]\', \'partial\');',
       'reveal_status 为 revealed 时必须同时写 reveal_index；未揭示时 reveal_index 写 NULL。角色知道的内容必须能追溯到亲历、目击、听闻、阅读或转述。',
       '年代学范例：INSERT INTO chronology (anchor, elapsed, precision, transition, evidence_indexes) VALUES (\'入城后的第二天清晨\', \'自开篇约两日\', \'approximate\', \'在城门口守了一夜\', \'[3,4]\');',
-      'precision 只能是 exact、approximate、unknown。evidence_indexes 必须是已经出现的正文楼层号。',
+      'precision 只能是 exact、approximate、unknown。evidence_indexes 必须是已经出现的 AI 正文楼层号，可以引用本次正在结算的楼层；用户楼层和不存在的楼层会被拒绝。',
       "约束建议：只有真实正文暴露出需要长期遵守的新边界时才登记提议；这不会直接修改长期约束，须由主 Agent 裁决。constraint_proposals 只能 INSERT，只有 text 一列，不写 id、UPDATE 或 DELETE。范例：INSERT INTO constraint_proposals (text) VALUES ('伏笔回收前不要提前揭露守门人身份');",
-      '改已有伏笔：UPDATE hooks SET status = \'reinforced\' WHERE id = \'H001\' AND expected_revision = 0;',
-      '作废：DELETE FROM hooks WHERE id = \'H001\' AND reason = \'正文已经明示回收\' AND expected_revision = 0;',
+      '改已有伏笔（7 只是示意，换成 revisions.hooks 的当前值）：UPDATE hooks SET status = \'reinforced\' WHERE id = \'H001\' AND expected_revision = 7;',
+      '作废：DELETE FROM hooks WHERE id = \'H001\' AND reason = \'正文已经明示回收\' AND expected_revision = 7;',
     ].join('\n');
   }
   if (name === 'web-researcher') {
@@ -541,8 +541,8 @@ function renderMaintenanceSqlGuide_ACU(name: string): string {
       '只写 web_refs。page_ref 必须是本轮 encyclopedia_read 或 web_read 返回的页面句柄，例如 P1。不要编造 URL，原文不入库。',
       '何时使用：抓到可用页面后 INSERT；确认旧条目过时或错误时 UPDATE 或 DELETE。没有抓到页面就不要 INSERT。',
       '范例：INSERT INTO web_refs (page_ref, name, brief, tags, detail) VALUES (\'P1\', \'守门人\', \'禁区入口的常驻看守\', \'["人物"]\', \'页面写明其只知道铁门前的事\');',
-      '修订已有条目：UPDATE web_refs SET name = \'守门人\', brief = \'禁区入口的常驻看守\', page_ref = \'P1\' WHERE id = \'WR-001\' AND expected_revision = 0;',
-      '删除：DELETE FROM web_refs WHERE id = \'WR-001\' AND reason = \'页面已不存在\' AND expected_revision = 0;',
+      '修订已有条目（7 只是示意，换成 revisions.webRefs 的当前值）：UPDATE web_refs SET name = \'守门人\', brief = \'禁区入口的常驻看守\', page_ref = \'P1\' WHERE id = \'WR-001\' AND expected_revision = 7;',
+      '删除：DELETE FROM web_refs WHERE id = \'WR-001\' AND reason = \'页面已不存在\' AND expected_revision = 7;',
     ].join('\n');
   }
   return head.join('\n');
@@ -733,6 +733,11 @@ export class AgentSubagentRuntime_ACU {
 
     // 捕获与渲染必须同一时刻取自同一份快照，否则并发校验的基准就不是子代理真正读到的版本。
     const readRevisions: AgentModuleRevisions_ACU = { ...input.resolveContext.moduleSnapshot.revisions };
+    // 本派工的修订号窗口：自身提交推进的模块号由提交口接管，外部写入会让提交口把窗口重置到最新版。
+    const revisionWindow: AgentModuleRevisionWindow_ACU = {};
+    for (const module of writes) {
+      if (module === 'hooks' || module === 'infoGap' || module === 'storyArc' || module === 'chronology' || module === 'webRefs') revisionWindow[module] = { base: readRevisions[module], head: readRevisions[module] };
+    }
     // 概览行数按角色裁剪：mainline-planner 每轮必派、只需近期脉络，取最近 50 轮；其余子代理
     // （含 arc-architect）取最近 100 轮。召回命中的更早轮次不受截断影响（前置展示纪要全文）。
     const overviewMaxRows = definition.promptKey === 'mainlinePlanner'
@@ -1124,7 +1129,7 @@ export class AgentSubagentRuntime_ACU {
               throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '写入请求已失效', false));
             }
             try {
-              const receipt = await input.writeSql!({ role: definition.name, sql: call.sql,
+              const receipt = await input.writeSql!({ role: definition.name, sql: call.sql, revisionWindow,
                 isCurrent: () => input.isCurrent(identity) && !input.signal?.aborted, resolvePage: handle => {
                 const page = pageCache.pages.get(handle.trim().toUpperCase());
                 return page?.status === 'ok' && page.text ? { title: page.title, source: page.source, url: page.url, query: page.query, sourceStatus: page.status } : null;
@@ -1148,7 +1153,7 @@ export class AgentSubagentRuntime_ACU {
               const repair = renderWriteSqlRepair_ACU(receipt);
               const receiptText = JSON.stringify({ action: 'write_sql', originalSql: call.sql, ...receipt,
                 fieldOutcome: receipt.partials === null || receipt.revisions === null ? '保存状态不明；先读取权威字段' : {
-                  saved: receipt.accepted.map(item => ({ module: item.module, id: item.id, field: item.field, revision: item.revision, ...('value' in item ? { value: item.value } : {}) })),
+                  saved: receipt.accepted.map(item => ({ module: item.module, id: item.id, field: item.field, fieldRevision: item.revision, ...('value' in item ? { value: item.value } : {}) })),
                   notSaved: [...receipt.partials.flatMap(item => item.missingFields.map(field => `${item.module}#${item.id}.${field}`)), ...receipt.rejected.map(item => item.path)],
                   generatedIds: [...new Set(receipt.accepted.map(item => `${item.module}#${item.id}`))],
                 },

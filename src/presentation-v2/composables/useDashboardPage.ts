@@ -925,6 +925,17 @@ export function useDashboardPage(): DashboardPageState {
         description: dashboardCopy.toggles.desktopPet.description,
         value: settings_ACU.desktopPetEnabled !== false,
       },
+      // 冷笑话插播是桌宠的子开关：只在勾选桌宠后出现在它下方。
+      ...(settings_ACU.desktopPetEnabled !== false
+        ? [
+            {
+              key: "deskPetJokesEnabled",
+              label: dashboardCopy.toggles.deskPetJokes.label,
+              description: dashboardCopy.toggles.deskPetJokes.description,
+              value: settings_ACU.deskPetJokesEnabled !== false,
+            },
+          ]
+        : []),
       {
         key: "zeroTkOccupyModeDefault",
         label: dashboardCopy.toggles.zeroTk.label,
@@ -1052,7 +1063,11 @@ export function useDashboardPage(): DashboardPageState {
       saveSettings_ACU();
     } else if (key === "autoUpdateEnabled") {
       setAutoUpdateEnabled_ACU(!!value);
-    } else if (key === "silentModeEnabled" || key === "desktopPetEnabled") {
+    } else if (
+      key === "silentModeEnabled" ||
+      key === "desktopPetEnabled" ||
+      key === "deskPetJokesEnabled"
+    ) {
       settings_ACU[key] = !!value;
       saveSettings_ACU();
       notifyNoticeSettingsChanged_ACU();

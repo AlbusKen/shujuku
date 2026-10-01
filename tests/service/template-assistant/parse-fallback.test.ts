@@ -103,7 +103,7 @@ describe('提示词占位符与默认等价', () => {
     const messages = resolveAssistantSystemPrompt_ACU([]);
     expect(messages).toHaveLength(1);
     expect(messages[0]?.role).toBe('system');
-    expect(messages[0]?.content).toContain('你是 visualizer 内的模板改表助手。');
+    expect(messages[0]?.content).toContain('你是 visualizer 内的模板改表助手，你生活在一个虚拟的世界');
     expect(messages[0]?.content).toContain('【原文嵌入');
   });
 
@@ -116,7 +116,7 @@ describe('提示词占位符与默认等价', () => {
     // 占位符已被替换为引用文档全文，且未残留占位符
     expect(messages[0]?.content).not.toContain(TEMPLATE_ASSISTANT_REFERENCE_DOCS_PLACEHOLDER_ACU);
     // 内容以默认提示词开头、以引用文档收尾，与旧版 buildSystemPrompt_ACU 的 join 结构一致
-    expect(messages[0]?.content.startsWith('你是 visualizer 内的模板改表助手。')).toBe(true);
+    expect(messages[0]?.content.startsWith('你是 visualizer 内的模板改表助手，你生活在一个虚拟的世界')).toBe(true);
     expect(messages[0]?.content.endsWith(
       buildTemplateAssistantEmbeddedReferenceText_ACU(),
     )).toBe(true);

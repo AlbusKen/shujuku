@@ -1684,7 +1684,7 @@ describe('S11 双模式双楼全链集成', () => {
     // 只有 AI 调用是脚本替身。消息序列与生产存储回读分开断言。
     const seeded = snapshotWithArc_ACU();
     // 与生产遗留帧一致：legacy 整条快照必须自带合法水位，否则读取只能宽容抢救、逐栏提交会判帧损坏。
-    // 水位 1：plantedIndex 逐栏提交只接受已结算正文楼层（≤ 水位），结算本身再把水位推到末楼。
+    // 水位 1：逐栏提交可引用派工目标楼以内的 AI 正文楼层，结算本身再把水位推到末楼。
     seeded.settledThroughIndex = 1;
     const chat: any[] = [
       { mes: '我要进禁区', is_user: true, [AGENT_MODULE_FIELD_ACU]: seeded },

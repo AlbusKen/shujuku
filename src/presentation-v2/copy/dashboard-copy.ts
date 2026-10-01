@@ -230,6 +230,11 @@ export const dashboardCopy = {
       description:
         "默认开启。桌宠干活时会流口水，通知以气泡出现在它身边，可拖动摆放；关闭后气泡回到右上角。",
     },
+    deskPetJokes: {
+      label: "冷笑话插播",
+      description:
+        "默认开启。桌宠闲着或通知轮播间隙会插播冷笑话；关闭后不再出现冷笑话。",
+    },
     zeroTk: {
       label: "0TK 占用模式",
       description: "默认开启。开启后纪要概览不占用上下文。",

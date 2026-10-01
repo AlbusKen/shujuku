@@ -46,7 +46,8 @@ export const AGENT_CONTEXT_SETTINGS_LIMITS_ACU = {
   greenlightMaxTkBudget: { min: 1 },
 };
 
-export function buildDefaultAgentDecisionPromptSegments_ACU() {
+/** 创作身份声明前的前置控制 Agent 默认段；仅供一次性升级识别未改写的旧默认。 */
+export function buildLegacyAgentDecisionPromptSegments_ACU() {
   return [
     {
       role: 'system',
@@ -81,7 +82,8 @@ export function buildDefaultAgentDecisionPromptSegments_ACU() {
   ];
 }
 
-export function buildDefaultAgentSkillifyPromptSegments_ACU() {
+/** 创作身份声明前的 Skill 元数据生成默认段；仅供一次性升级识别未改写的旧默认。 */
+export function buildLegacyAgentSkillifyPromptSegments_ACU() {
   return [
     {
       role: 'system',
@@ -105,6 +107,28 @@ export function buildDefaultAgentSkillifyPromptSegments_ACU() {
       deletable: true,
     },
   ];
+}
+
+/**
+ * 给提示词组的第一条身份段融入创作身份声明：取首个含「你是」的段；
+ * 给出 fallbackName 时，首个文本段即视为身份段（用于「你负责……」开头的默认段）。
+ */
+function withFirstIdentitySegment_ACU<T extends { content: string }>(segments: T[], goal: string, fallbackName = ''): T[] {
+  let applied = false;
+  return segments.map(segment => {
+    if (applied || typeof segment.content !== 'string') return segment;
+    if (!fallbackName && !segment.content.includes('你是')) return segment;
+    applied = true;
+    return { ...segment, content: withCreativeIdentity_ACU(segment.content, goal, fallbackName) };
+  });
+}
+
+export function buildDefaultAgentDecisionPromptSegments_ACU() {
+  return withFirstIdentitySegment_ACU(buildLegacyAgentDecisionPromptSegments_ACU(), '剧情推进决策');
+}
+
+export function buildDefaultAgentSkillifyPromptSegments_ACU() {
+  return withFirstIdentitySegment_ACU(buildLegacyAgentSkillifyPromptSegments_ACU(), '世界书 Skill 元数据');
 }
 
 export function buildDefaultAgentWorldbookPromptTemplates_ACU() {
@@ -217,6 +241,9 @@ export const TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU = 'spv9.4.1-table-fill-t
 // 一次性强制关闭流式传输：UI 开关已移除，底层能力保留。
 // 执行后写入 marker 不再重复；同时清理 API 预设 apiConfig 内可能残留的同名字段。
 export const STREAMING_FORCE_DISABLE_VERSION_ACU = 'spv9.5-force-disable-streaming';
+// 各默认提示词第一条身份句融入创作身份声明的一次性升级：只替换与声明前默认段逐字相同的段，用户改写保留。
+// profile 域与交火全局配置各自记录标记。
+export const CREATIVE_IDENTITY_PROMPT_UPGRADE_VERSION_ACU = 'spv9.6-creative-identity-prompt';
 
 
 
@@ -330,6 +357,16 @@ export const defaultVectorMemoryConfig_ACU = {
   recallCandidateLimit: 1000,
 };
 
+/** 创作身份声明前的默认组快照；仅供一次性升级识别未改写的旧默认段。 */
+export const CREATIVE_IDENTITY_LEGACY_SHARED_PROMPTS_ACU = {
+  agentDecision: buildLegacyAgentDecisionPromptSegments_ACU(),
+  agentSkillify: buildLegacyAgentSkillifyPromptSegments_ACU(),
+  keywordPromptGroup: JSON.parse(JSON.stringify(defaultVectorMemoryConfig_ACU.keywordPromptGroup)),
+  summaryPromptGroup: JSON.parse(JSON.stringify(defaultVectorMemoryConfig_ACU.summaryPromptGroup)),
+};
+defaultVectorMemoryConfig_ACU.keywordPromptGroup = withFirstIdentitySegment_ACU(defaultVectorMemoryConfig_ACU.keywordPromptGroup, '检索关键词', '交火关键词生成助手');
+defaultVectorMemoryConfig_ACU.summaryPromptGroup = withFirstIdentitySegment_ACU(defaultVectorMemoryConfig_ACU.summaryPromptGroup, '远记忆大总结', '远记忆总结助手');
+
 // --- 全局世界书默认配置 ---
 export const defaultWorldbookConfig_ACU = {
   source: 'character',
@@ -347,6 +384,7 @@ export const defaultWorldbookConfig_ACU = {
 
 import { DEFAULT_CONTENT_OPTIMIZATION_PROMPT_GROUP_ACU } from './defaults-json.js';
 import { USER_PREFILL_CONTENT_ACU } from './user-prefill.js';
+import { withCreativeIdentity_ACU } from './creative-identity.js';
 
 /** 构建默认正文优化提示词组（纯数据构造，无运行时依赖） */
 export function buildDefaultContentOptimizationPromptGroup_ACU({ mainContent = '' } = {}) {

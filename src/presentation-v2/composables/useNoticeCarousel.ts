@@ -92,6 +92,8 @@ export function useNoticeCarousel(hubState: NoticeHubState, tasks: ComputedRef<A
   }
 
   function showJoke(): void {
+    // 冷笑话插播开关关闭（或桌宠关闭）时不再出现冷笑话。
+    if (!hubState.jokesEnabled.value) return;
     lastJoke = pickDeskPetJoke(lastJoke);
     if (!lastJoke) return;
     show({ type: "joke", key: `joke-${nextKey++}`, text: lastJoke });
@@ -99,7 +101,7 @@ export function useNoticeCarousel(hubState: NoticeHubState, tasks: ComputedRef<A
 
   function armIdle(): void {
     clearIdleTimer();
-    if (!active.value) return;
+    if (!active.value || !hubState.jokesEnabled.value) return;
     idleTimer = acuSetTimeout(() => {
       idleTimer = undefined;
       if (slide.value === null && active.value) showJoke();
@@ -119,7 +121,7 @@ export function useNoticeCarousel(hubState: NoticeHubState, tasks: ComputedRef<A
       slide.value = null;
       return;
     }
-    if (slidesSinceJoke >= NOTICE_SLIDES_PER_JOKE && hasContent()) {
+    if (hubState.jokesEnabled.value && slidesSinceJoke >= NOTICE_SLIDES_PER_JOKE && hasContent()) {
       slidesSinceJoke = 0;
       showJoke();
       return;
@@ -215,6 +217,15 @@ export function useNoticeCarousel(hubState: NoticeHubState, tasks: ComputedRef<A
     }
     advance();
   }, { immediate: true });
+
+  // 冷笑话开关切换：打开后若正空闲则重新计时，关闭后撤掉待插播的空闲笑话。
+  watch(
+    () => hubState.jokesEnabled.value,
+    (enabled) => {
+      if (!enabled) clearIdleTimer();
+      else if (slide.value === null) armIdle();
+    },
+  );
 
   const doc = getAcuHostDocument();
   const onVisibilityChange = (): void => {

@@ -859,7 +859,7 @@ describe('子代理逐栏工具会话', () => {
       expect(toolContent_ACU(messages[1], 'call-first-write')).not.toBe('');
       expect(saveChat).toHaveBeenCalledTimes(2);
       expect(messages[1].map(item => item.content).join('\n')).toContain('"status":"committed"');
-      expect(messages[1].map(item => item.content).join('\n')).toContain('"field":"summary","revision":1');
+      expect(messages[1].map(item => item.content).join('\n')).toContain('"field":"summary","fieldRevision":1');
       expect(messages[2].map(item => item.content).join('\n')).toContain('"missingFields"');
       expect(messages[3].map(item => item.content).join('\n')).toContain('"field":"status"');
       expect(messages[2].some(item => item.content.includes('write_sql 轮次剩余 3 / 4'))).toBe(true);
@@ -1094,7 +1094,7 @@ describe('子代理逐栏工具会话', () => {
       expect(failed).toContain('"recovery":"saved"');
       const accepted = messages[2].map(item => item.content).join('\n');
       expect(accepted).toContain('"status":"committed"');
-      expect(accepted).toContain('"field":"summary","revision":1');
+      expect(accepted).toContain('"field":"summary","fieldRevision":1');
     } finally { _set_SillyTavern_API_ACU(null as any); }
   });
 

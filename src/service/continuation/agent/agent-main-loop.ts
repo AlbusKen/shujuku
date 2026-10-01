@@ -63,7 +63,7 @@ import { planAgentHistoryCompaction_ACU } from './agent-history-compactor';
 import type { AgentConversationCompactionMarkV2_ACU } from './agent-model';
 import { renderAgentTableCatalog_ACU } from './agent-tables';
 import { applyAgentConstraintRegistrationViaSql_ACU, applyAgentModuleDeltaViaSql_ACU, applyAgentWebRefsDeltaViaSql_ACU, mergeAgentDeltaRevisions_ACU } from './agent-transaction';
-import { commitAgentModuleFieldWrites_ACU, type AgentFieldPage_ACU } from './agent-module-field-commit';
+import { commitAgentModuleFieldWrites_ACU, type AgentFieldPage_ACU, type AgentModuleRevisionWindow_ACU } from './agent-module-field-commit';
 import { readMessageSwipeId_ACU } from './agent-module-frame';
 import { compactAgentProtocolError_ACU, parseAgentMainOutput_ACU, parseAgentToolCall_ACU } from './agent-protocol';
 import {
@@ -1697,8 +1697,8 @@ export class ContinuationAgentTurnPlanner_ACU {
     const message = chat[targetIndex];
     const dispatchTarget = { message, swipeId: readMessageSwipeId_ACU(message), content: message?.mes };
     const completedStages = context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber);
-    return ({ role, sql, resolvePage, isCurrent }: { role: AgentSubagentName_ACU; sql: string; resolvePage: (handle: string) => AgentFieldPage_ACU | null; isCurrent?: () => boolean }) => commitAgentModuleFieldWrites_ACU({
-      chat, targetIndex, dispatchTarget, role, sql, resolvePage, isCurrent, completedStages,
+    return ({ role, sql, resolvePage, isCurrent, revisionWindow }: { role: AgentSubagentName_ACU; sql: string; resolvePage: (handle: string) => AgentFieldPage_ACU | null; isCurrent?: () => boolean; revisionWindow?: AgentModuleRevisionWindow_ACU }) => commitAgentModuleFieldWrites_ACU({
+      chat, targetIndex, dispatchTarget, role, sql, resolvePage, isCurrent, completedStages, revisionWindow,
     });
   }
 

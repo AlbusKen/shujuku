@@ -402,6 +402,7 @@ describe("DashboardPage", () => {
       "autoUpdateEnabled",
       "silentModeEnabled",
       "desktopPetEnabled",
+      "deskPetJokesEnabled",
       "zeroTkOccupyModeDefault",
     ]);
 

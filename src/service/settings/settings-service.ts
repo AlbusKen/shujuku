@@ -12,6 +12,8 @@ import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, D
 import { addDataIsolationHistory_ACU, ensureProfileExists_ACU, normalizeDataIsolationHistory_ACU } from '../../data/repositories/isolation-repo';
 import { TABLE_FILL_MAIN_PROMPT_HISTORY_ACU } from '../../shared/defaults-json.js';
 import { STREAMING_FORCE_DISABLE_VERSION_ACU, TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU } from '../../shared/defaults';
+import { CREATIVE_IDENTITY_PROMPT_UPGRADE_VERSION_ACU } from '../../shared/defaults';
+import { applyCreativeIdentityProfileUpgrade_ACU, applyCreativeIdentityVectorUpgrade_ACU } from './creative-identity-upgrade';
 import { globalMeta_ACU, loadGlobalMeta_ACU, readProfileSettingsFromStorage_ACU, readProfileTemplateFromStorage_ACU, sanitizeSettingsForProfileSave_ACU, saveGlobalMeta_ACU, writeProfileSettingsToStorage_ACU, writeProfileTemplateToStorage_ACU } from '../../data/repositories/profile-repo';
 import { getCurrentTemplatePresetName_ACU, normalizeTemplatePresetSelectionValue_ACU } from '../../shared/template-preset-utils';
 import { persistSettingsToStorage_ACU } from '../../data/storage/config-storage';
@@ -767,6 +769,22 @@ export   function loadSettings_ACU() {
                   logWarn_ACU('[交火关键词提示词] 一次性覆盖未保存，下一次加载重试:', error);
               }
           }
+          // [创作身份声明] 交火关键词与远记忆总结提示词：只替换仍是声明前默认原文的段，用户改写保留。
+          if (vectorConfig.creativeIdentityPromptUpgradeVersion !== CREATIVE_IDENTITY_PROMPT_UPGRADE_VERSION_ACU) {
+              const previousKeywordGroup = vectorConfig.keywordPromptGroup;
+              const previousSummaryGroup = vectorConfig.summaryPromptGroup;
+              const previousIdentityVersion = vectorConfig.creativeIdentityPromptUpgradeVersion;
+              try {
+                  applyCreativeIdentityVectorUpgrade_ACU(vectorConfig);
+                  vectorConfig.creativeIdentityPromptUpgradeVersion = CREATIVE_IDENTITY_PROMPT_UPGRADE_VERSION_ACU;
+                  if (!saveGlobalMeta_ACU()) throw new Error('全局元数据保存失败');
+              } catch (error) {
+                  vectorConfig.keywordPromptGroup = previousKeywordGroup;
+                  vectorConfig.summaryPromptGroup = previousSummaryGroup;
+                  vectorConfig.creativeIdentityPromptUpgradeVersion = previousIdentityVersion;
+                  logWarn_ACU('[创作身份声明] 交火提示词升级未保存，下一次加载重试:', error);
+              }
+          }
       }
 
       settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
@@ -779,6 +797,7 @@ export   function loadSettings_ACU() {
       forceUserPrefillProfilePromptsOnce_ACU();
       forceDefaultTemplateAssistantPromptOnce_ACU();
       forceDisableStreamingOnce_ACU();
+      upgradeCreativeIdentityPromptsOnce_ACU();
 
       if (shouldPersistSettingsAfterLoad_ACU) {
           saveGlobalMeta_ACU();
@@ -1022,6 +1041,29 @@ function upgradeTableFillToolPromptOnce_ACU() {
       }
   }
 
+/**
+ * [spv9.6] 各默认提示词第一条身份句融入创作身份声明的一次性升级。
+ * 覆盖填表、剧情推进（含内置时间召回预设与前置控制 Agent 全局模板）、正文优化与合并纪要；
+ * 只替换与声明前默认段逐字相同的段，用户改写与段元数据原样保留。保存失败时回滚内存且不写 marker。
+ */
+function upgradeCreativeIdentityPromptsOnce_ACU() {
+      if (!settings_ACU || typeof settings_ACU !== 'object') return;
+      if (settings_ACU.creativeIdentityPromptUpgradeVersion === CREATIVE_IDENTITY_PROMPT_UPGRADE_VERSION_ACU) return;
+      const keys = ['charCardPrompt', 'strictJsonCharCardPrompt', 'strictJsonSqlCharCardPrompt', 'plotSettings', 'contentOptimizationSettings', 'mergeSummaryPrompt'] as const;
+      const previous = keys.map(key => [key, (settings_ACU as any)[key]] as const);
+      const previousVersion = settings_ACU.creativeIdentityPromptUpgradeVersion;
+      try {
+          applyCreativeIdentityProfileUpgrade_ACU(settings_ACU as any);
+          settings_ACU.creativeIdentityPromptUpgradeVersion = CREATIVE_IDENTITY_PROMPT_UPGRADE_VERSION_ACU;
+          saveSettings_ACU();
+          logDebug_ACU(`[创作身份声明] 默认提示词一次性升级完成: ${CREATIVE_IDENTITY_PROMPT_UPGRADE_VERSION_ACU}`);
+      } catch (error) {
+          for (const [key, value] of previous) (settings_ACU as any)[key] = value;
+          settings_ACU.creativeIdentityPromptUpgradeVersion = previousVersion;
+          logWarn_ACU('[创作身份声明] 默认提示词升级未保存，下一次加载重试:', error);
+      }
+  }
+
 function forceUserPrefillProfilePromptsOnce_ACU() {
       if (!settings_ACU || typeof settings_ACU !== 'object') return;
       if (settings_ACU.userPrefillProfileForceDefaultVersion === USER_PREFILL_PROFILE_FORCE_DEFAULT_VERSION_ACU) return;
@@ -1146,6 +1188,7 @@ export   function buildDefaultSettings_ACU() {
           toastMuteEnabled: false, // 旧「静默提示框」，已由 silentModeEnabled 取代，只保留不再读取
           silentModeEnabled: false, // [静默模式] 开启后不显示任何通知气泡（确认框/输入框不受影响）
           desktopPetEnabled: true, // [桌宠] 通知气泡锚定桌宠；关闭后气泡回到原通知位置
+          deskPetJokesEnabled: true, // [桌宠] 冷笑话插播；仅在桌宠开启时生效，关闭后气泡不再插播冷笑话
           // [桌宠] desktopPetPosition（按视口比例 {x,y}）刻意不放默认值：deepMerge 遇到 null 默认值会把已保存对象并成 {}。
           // [剧情推进] 设置
           plotSettings: JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU)),
@@ -1154,6 +1197,7 @@ export   function buildDefaultSettings_ACU() {
           tableTemplateDefaultsRefreshVersion: '', // [模板预设] 默认表格模板一次性刷新版本
           tableFillPromptForceDefaultVersion: '', // [填表提示词] 一次性强制恢复默认提示词版本
           tableFillToolPromptUpgradeVersion: '', // [填表提示词] 工具化默认提示词一次性升级版本
+          creativeIdentityPromptUpgradeVersion: '', // [创作身份声明] 默认提示词身份句一次性升级版本
           templateAssistantPromptForceDefaultVersion: '', // [AI 改表助手] 一次性强制恢复默认提示词版本
           strictJsonTableFillForceDisableVersion: '', // [填表功能] 一次性关闭严格 JSON 填表版本
           // [填表功能] 正文标签提取，从上下文中提取指定标签的内容发送给AI，User回复不受影响

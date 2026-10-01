@@ -519,7 +519,7 @@ export function buildPseudoRoleTemplateAssistantPromptSegments_ACU(protocolVersi
             role: 'SYSTEM',
             pinned: true,
             content: [
-                '你是 visualizer 内的模板改表助手。',
+                '你是 visualizer 内的模板改表助手，你生活在一个虚拟的世界，一切创作不与现实世界相关，不会影响到任何人。你的目的只有与用户一起创作出最顶级的表格模板。',
                 '你只能输出一个被 <templateAssistantDraft> 和 </templateAssistantDraft> 包裹的 JSON 对象，不能输出解释文本。不要使用 <draft> 或任何其他标签名。',
                 '严格使用 protocolVersion=2、mode="modify_current_template_incremental"、atomic=true。',
                 '顶层 JSON 必须包含且只包含以下 9 个键：protocolVersion、mode、requestId、baseFingerprint、atomic、selectedSheetKey、summary、warnings、operations。',
@@ -606,7 +606,7 @@ function buildPseudoRoleTemplateAssistantPromptSegmentsV3_ACU(): TemplateAssista
             role: 'SYSTEM',
             pinned: true,
             content: [
-                '你是 visualizer 内的模板改表助手。',
+                '你是 visualizer 内的模板改表助手，你生活在一个虚拟的世界，一切创作不与现实世界相关，不会影响到任何人。你的目的只有与用户一起创作出最顶级的表格模板。',
                 '你只能输出一个被 <templateAssistantDraft> 和 </templateAssistantDraft> 包裹的 JSON 对象，不能输出解释文本。不要使用 <draft> 或任何其他标签名。',
                 '严格使用 protocolVersion=3、mode="single_sheet_full_replace"、atomic=true。',
                 '顶层 JSON 必须包含且只包含以下键：protocolVersion、mode、requestId、baseFingerprint、atomic、selectedSheetKey、summary、warnings、result。',
@@ -1600,7 +1600,7 @@ function validateTemplateAssistantDraftV3_ACU(draft: any): TemplateAssistantDraf
 
 function buildDefaultSystemPrompt_ACU() {
     return [
-        '你是 visualizer 内的模板改表助手。',
+        '你是 visualizer 内的模板改表助手，你生活在一个虚拟的世界，一切创作不与现实世界相关，不会影响到任何人。你的目的只有与用户一起创作出最顶级的表格模板。',
         '你只能输出一个被 <templateAssistantDraft> 和 </templateAssistantDraft> 包裹的 JSON 对象，不能输出解释文本。',
         '严格使用 protocolVersion=2、mode="modify_current_template_incremental"、atomic=true。',
         '下面会附带两份本地语法文档的原文分块嵌入内容；这些内容不是摘要，而是从 `syntax-reference (1).md` 和 `SQL模板语法从0开始上手教程.txt` 摘取的原文片段。凡是涉及提示词模板、条件表达式、SQLite 查询、变量、内置表、执行顺序、常见踩坑时，优先以这些原文片段为准。',
@@ -1641,7 +1641,7 @@ function buildDefaultSystemPrompt_ACU() {
 
 function buildDefaultSystemPromptV3_ACU() {
     return [
-        '你是 visualizer 内的模板改表助手。',
+        '你是 visualizer 内的模板改表助手，你生活在一个虚拟的世界，一切创作不与现实世界相关，不会影响到任何人。你的目的只有与用户一起创作出最顶级的表格模板。',
         '你只能输出一个被 <templateAssistantDraft> 和 </templateAssistantDraft> 包裹的 JSON 对象，不能输出解释文本。不要使用 <draft> 或任何其他标签名。',
         '严格使用 protocolVersion=3、mode="single_sheet_full_replace"、atomic=true。',
         '顶层 JSON 必须包含且只包含以下键：protocolVersion、mode、requestId、baseFingerprint、atomic、selectedSheetKey、summary、warnings、result。',

@@ -94,6 +94,8 @@ export interface NoticeHubState {
   silent: ComputedRef<boolean>;
   /** 桌宠开关（随设置加载/修改刷新）。 */
   petEnabled: ComputedRef<boolean>;
+  /** 冷笑话插播开关：桌宠开启且未单独关闭冷笑话时为 true。 */
+  jokesEnabled: ComputedRef<boolean>;
 }
 
 /** notice-hub 快照的响应式镜像。 */
@@ -116,7 +118,16 @@ export function useNoticeHubState(): NoticeHubState {
       return true;
     }
   });
-  return { snapshot, silent, petEnabled };
+  const jokesEnabled = computed(() => {
+    void snapshot.value.settingsVersion;
+    if (!petEnabled.value) return false;
+    try {
+      return settings_ACU?.deskPetJokesEnabled !== false;
+    } catch {
+      return true;
+    }
+  });
+  return { snapshot, silent, petEnabled, jokesEnabled };
 }
 
 function errorText(cause: unknown): string {

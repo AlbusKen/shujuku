@@ -1,6 +1,7 @@
 import { CONTINUATION_AGENT_API_PRESET_ROLES_ACU, ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationAgentApiPresets_ACU, type ContinuationPromptSegment_ACU, type ContinuationSettings_ACU, type ContinuationStageSize_ACU, type ContinuationTurnRange_ACU, type ContinuationWebResearchSettings_ACU } from './model';
 import { buildDefaultContinuationAgentPrompts_ACU } from './agent/agent-defaults';
 import { USER_PREFILL_CONTENT_ACU } from '../../shared/user-prefill.js';
+import { withCreativeIdentity_ACU } from '../../shared/creative-identity.js';
 import {
   AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
   AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU,
@@ -240,6 +241,8 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V40_ACU = 'spv4.8-continu
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V41_ACU = 'spv4.9-continuation-subagent-procedure-v41';
 /** 维护、策划、审查、终审与写作指令子代理改为单次读取后直接交付；总纲、大纲与网页检索不变。 */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V42_ACU = 'spv5.0-continuation-subagent-read-once-v42';
+/** 主 Agent、各子代理与阶段大纲的第一条身份句融入创作身份声明；只替换仍与 V42 默认逐字相同的身份段。 */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V43_ACU = 'spv5.1-continuation-creative-identity-v43';
 
 /**
  * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
@@ -279,8 +282,25 @@ function clonePromptSegments_ACU(segments: readonly ContinuationPromptSegment_AC
   return segments.map(segment => ({ ...segment }));
 }
 
-export function buildDefaultContinuationOutlinePrompt_ACU(): ContinuationPromptSegment_ACU[] {
+/** V42 冻结大纲默认组：V23→V24、V37→V38 迁移按它比对，V43 只替换与其身份段逐字相同的段。 */
+export function buildV42ContinuationOutlinePrompt_ACU(): ContinuationPromptSegment_ACU[] {
   return [...clonePromptSegments_ACU(DEFAULT_OUTLINE_PROMPT_ACU), { role: 'user', content: USER_PREFILL_CONTENT_ACU, enabled: true, deletable: true }];
+}
+
+const V42_OUTLINE_IDENTITY_CONTENT_ACU = DEFAULT_OUTLINE_PROMPT_ACU.find(segment => segment.content.startsWith('你是'))!.content;
+
+/**
+ * V42 → V43：大纲身份段仍是 V42 默认原文时融入创作身份声明；用户改写过的段与段元数据原样保留。
+ * 新正文已含声明，重复调用不产生变化。
+ */
+export function withV43OutlineCreativeIdentity_ACU(segments: readonly ContinuationPromptSegment_ACU[]): ContinuationPromptSegment_ACU[] {
+  return segments.map(segment => (segment.content === V42_OUTLINE_IDENTITY_CONTENT_ACU
+    ? { ...segment, content: withCreativeIdentity_ACU(segment.content, '阶段剧情大纲') }
+    : { ...segment }));
+}
+
+export function buildDefaultContinuationOutlinePrompt_ACU(): ContinuationPromptSegment_ACU[] {
+  return withV43OutlineCreativeIdentity_ACU(buildV42ContinuationOutlinePrompt_ACU());
 }
 
 export function buildDefaultContinuationWorkflowSettings_ACU(): ContinuationSettings_ACU['workflow'] {
@@ -332,7 +352,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V42_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V43_ACU,
   };
 }
 

@@ -41,6 +41,8 @@ export interface AgentFieldPage_ACU {
   sourceStatus: AgentWebRefEntry_ACU['sourceStatus'];
 }
 export interface AgentModuleFieldAccepted_ACU { module: Module_ACU; id: string; field: string; revision: number; value?: unknown }
+/** 本次派工的修订号窗口：base 是子代理读到的版本，head 是本派工最近一次确认的权威版本。 */
+export type AgentModuleRevisionWindow_ACU = Partial<Record<Module_ACU, { base: number; head: number }>>;
 export interface AgentModuleFieldReceipt_ACU {
   status: 'committed' | 'rejected' | 'persist_failed' | 'readback_failed';
   accepted: AgentModuleFieldAccepted_ACU[];
@@ -76,24 +78,24 @@ function stringArray_ACU(value: unknown): boolean { return Array.isArray(value) 
 function record_ACU(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value); }
 function inList_ACU(value: unknown, list: readonly string[]): boolean { return text_ACU(value) && list.includes(value); }
 
-/** 显式栏目逐栏校验；null、合法空值与缺栏不可混淆。 */
-function fieldProblem_ACU(module: Module_ACU, field: string, value: unknown, snapshot: AgentModuleSnapshot_ACU, evidence?: ReadonlySet<number>): string | null {
+/** 显式栏目逐栏校验；null、合法空值与缺栏不可混淆。楼层上限 evidenceThrough 是本次派工目标楼，不是结算水位。 */
+function fieldProblem_ACU(module: Module_ACU, field: string, value: unknown, evidenceThrough: number, evidence?: ReadonlySet<number>): string | null {
   switch (module) {
     case 'hooks':
       if (field === 'status') return inList_ACU(value, AGENT_HOOK_STATUSES_ACU) ? null : 'status 枚举非法';
       if (field === 'importance') return inList_ACU(value, AGENT_HOOK_IMPORTANCES_ACU) ? null : 'importance 枚举非法';
-      if (field === 'plantedIndex') return index_ACU(value) && (value as number) <= snapshot.settledThroughIndex && (!evidence || evidence.has(value as number)) ? null : 'plantedIndex 必须引用已结算正文楼层';
+      if (field === 'plantedIndex') return index_ACU(value) && (value as number) <= evidenceThrough && (!evidence || evidence.has(value as number)) ? null : 'plantedIndex 必须引用已出现的 AI 正文楼层';
       return field === 'summary' ? (nonempty_ACU(value) ? null : 'summary 必须为非空文本') : (text_ACU(value) ? null : '必须为字符串');
     case 'infoGap':
       if (field === 'revealStatus') return inList_ACU(value, AGENT_REVEAL_STATUSES_ACU) ? null : 'revealStatus 枚举非法';
-      if (field === 'revealIndex') return value === null || (index_ACU(value) && (value as number) <= snapshot.settledThroughIndex && (!evidence || evidence.has(value as number))) ? null : 'revealIndex 必须为空或已结算正文楼层';
+      if (field === 'revealIndex') return value === null || (index_ACU(value) && (value as number) <= evidenceThrough && (!evidence || evidence.has(value as number))) ? null : 'revealIndex 必须为空或已出现的 AI 正文楼层';
       if (field === 'characterKnowledge') return Array.isArray(value) && value.every(item => record_ACU(item) && nonempty_ACU(item.name) && text_ACU(item.knows)) ? null : 'characterKnowledge 需要带 name / knows 的数组';
       return field === 'topic' ? (nonempty_ACU(value) ? null : 'topic 必须为非空文本') : (text_ACU(value) ? null : '必须为字符串');
     case 'chronology':
       if (field === 'precision') return inList_ACU(value, AGENT_CHRONOLOGY_PRECISIONS_ACU) ? null : 'precision 枚举非法';
       if (field === 'evidenceIndexes') {
         const indexes = normalizeEvidenceIndexes_ACU(value);
-        return indexes?.length && indexes.every(item => item <= snapshot.settledThroughIndex && (!evidence || evidence.has(item))) ? null : 'evidenceIndexes 必须是非空、已结算正文楼层数组';
+        return indexes?.length && indexes.every(item => item <= evidenceThrough && (!evidence || evidence.has(item))) ? null : 'evidenceIndexes 必须是非空、已出现的 AI 正文楼层数组';
       }
       return nonempty_ACU(value) ? null : '时间事实栏目必须为非空文本';
     case 'storyArc':
@@ -121,7 +123,7 @@ function freshDelta_ACU(module: Module_ACU, revision: number): AgentModuleDelta_
 }
 
 /** 逐 ID 复用既有领域事务：缺栏或领域不合格时不产生完整领域行。 */
-function applyDomain_ACU(snapshot: AgentModuleSnapshot_ACU, module: Module_ACU, id: string, values: Record<string, unknown>, action: 'insert' | 'update' | 'delete', reason: string | undefined, completedStages: readonly number[], now: number, evidenceFloorIndexes?: ReadonlySet<number>): AgentModuleSnapshot_ACU {
+function applyDomain_ACU(snapshot: AgentModuleSnapshot_ACU, module: Module_ACU, id: string, values: Record<string, unknown>, action: 'insert' | 'update' | 'delete', reason: string | undefined, completedStages: readonly number[], now: number, evidenceThrough: number = snapshot.settledThroughIndex, evidenceFloorIndexes?: ReadonlySet<number>): AgentModuleSnapshot_ACU {
   if (module === 'webRefs') {
     if (action === 'delete') return applyAgentWebRefsDelta_ACU(snapshot, {
       summary: '', expectedRevision: snapshot.revisions.webRefs, items: [{ action: 'retire', id, title: '', source: 'web', url: '', query: '', tags: [], brief: '', summary: '', sourceStatus: 'ok', reason: reason ?? '' }],
@@ -176,7 +178,8 @@ function applyDomain_ACU(snapshot: AgentModuleSnapshot_ACU, module: Module_ACU, 
       precision: values.precision as AgentModuleDelta_ACU['chronology'][number]['precision'] ?? 'unknown',
       transition: values.transition as string ?? '', evidenceIndexes: values.evidenceIndexes as number[] ?? [], reason: reason ?? '' });
   }
-  const applied = applyAgentModuleDelta_ACU(snapshot, delta, [module], snapshot.settledThroughIndex, completedStages, undefined, evidenceFloorIndexes);
+  // 领域事务的未来楼层防线与条目变动楼层按派工目标楼计，和结算分支的 delta 口径一致；结算水位不在这里推进。
+  const applied = applyAgentModuleDelta_ACU(snapshot, delta, [module], evidenceThrough, completedStages, undefined, evidenceFloorIndexes);
   // 单栏独立事务只使用领域规则校验，不把旧 pendingFixes 视作本次修复。
   return { ...applied.snapshot, pendingFixes: snapshot.pendingFixes };
 }
@@ -217,6 +220,8 @@ export function planAgentModuleFieldCommit_ACU(
   resolvePage?: (handle: string) => AgentFieldPage_ACU | null,
   now = Date.now(),
   evidence?: ReadonlySet<number>,
+  evidenceThrough = snapshot.settledThroughIndex,
+  revisionWindow?: AgentModuleRevisionWindow_ACU,
 ): AgentModuleFieldPlan_ACU {
   let working = snapshot;
   const drafts = new Map<string, Record<string, unknown>>();
@@ -271,6 +276,10 @@ export function planAgentModuleFieldCommit_ACU(
     // 新行用 0。没写修订号时按这个规则补，模块修订号只约束显式写错的 UPDATE/DELETE。
     const newInsert = intent.kind === 'insert' && !existing && !record && !reserved.has(id);
     if (intent.expectedRevision === undefined) intent.expectedRevision = newInsert ? 0 : snapshot.revisions[module];
+    // 派工基线到当前之间的修订号只被本派工自己的提交推进过（提交口已核对 head），模型抄到其中哪一版都指向同一读集，
+    // 由运行时接管为当前号。越过当前或早于基线的号仍按冲突拒绝；外部写入会让提交口把窗口重置到最新版。
+    const window = revisionWindow?.[module];
+    if (window && window.head === snapshot.revisions[module] && typeof intent.expectedRevision === 'number' && intent.expectedRevision >= window.base && intent.expectedRevision <= window.head) intent.expectedRevision = window.head;
     const revisionOk = intent.expectedRevision === snapshot.revisions[module] || (newInsert && intent.expectedRevision === 0);
     if (!revisionOk) {
       reject(path, `revision_conflict: expected=${intent.expectedRevision}, actual=${snapshot.revisions[module]}`); continue;
@@ -283,7 +292,7 @@ export function planAgentModuleFieldCommit_ACU(
     if (existing?.retired && intent.kind !== 'delete') { reject(path, 'retired: 已退役条目不可修改'); continue; }
     if (intent.kind === 'delete') {
       if (existing) {
-        try { working = applyDomain_ACU(working, module, id, {}, 'delete', intent.reason, completedStages, now); }
+        try { working = applyDomain_ACU(working, module, id, {}, 'delete', intent.reason, completedStages, now, evidenceThrough); }
         catch (error) { reject(`${path}.reason`, errorText_ACU(error)); continue; }
         bucketFor(module).domainUpserts![id] = domainRow_ACU(working, module, id)!;
         accepted.push({ module, id, field: 'retired', revision: 0 });
@@ -306,7 +315,7 @@ export function planAgentModuleFieldCommit_ACU(
       if ((field === 'plantedIndex' && existing) || (field === 'scope' && existing && existing.scope !== raw)) {
         reject(fieldPath, '已登记的不可变栏目不能改写'); continue;
       }
-      const problem = fieldProblem_ACU(module, field, raw, snapshot, evidence);
+      const problem = fieldProblem_ACU(module, field, raw, evidenceThrough, evidence);
       if (problem) { reject(fieldPath, problem); continue; }
       writable[field] = raw;
     }
@@ -349,7 +358,7 @@ export function planAgentModuleFieldCommit_ACU(
     const complete = existing || AGENT_MODULE_FIELD_MATRIX_ACU[module].required.every(field => Object.prototype.hasOwnProperty.call(candidate, field));
     if (complete) {
       try {
-        working = applyDomain_ACU(working, module, id, existing ? writable : candidate, existing ? 'update' : 'insert', undefined, completedStages, now);
+        working = applyDomain_ACU(working, module, id, existing ? writable : candidate, existing ? 'update' : 'insert', undefined, completedStages, now, evidenceThrough);
         bucketFor(module).domainUpserts![id] = domainRow_ACU(working, module, id)!;
         promotionProblems.delete(key);
       } catch (error) {
@@ -395,6 +404,14 @@ function verifyRecords_ACU(actual: AgentModuleFieldSnapshot_ACU, sqlRecords: Map
   }
   return true;
 }
+/** 提交结束后维护派工修订号窗口：状态不明即撤销窗口、退回严格比对；成功提交把 head 推到权威新版。 */
+function syncRevisionWindow_ACU(window: AgentModuleRevisionWindow_ACU | undefined, receipt: AgentModuleFieldReceipt_ACU): void {
+  if (!window) return;
+  for (const module of Object.keys(window) as Module_ACU[]) {
+    if (receipt.revisions === null) delete window[module];
+    else if (receipt.status === 'committed') window[module]!.head = receipt.revisions[module];
+  }
+}
 const queue_ACU = new WeakMap<any[], Promise<void>>();
 
 /** 同聊天串行；只有宿主保存成功且楼层重新折叠验证后签发 accepted。 */
@@ -407,6 +424,8 @@ export function commitAgentModuleFieldWrites_ACU(input: {
   completedStages?: readonly number[];
   resolvePage?: (handle: string) => AgentFieldPage_ACU | null;
   isCurrent?: () => boolean;
+  /** 本次派工的修订号窗口；提交口在同一串行队列内维护，调用方只负责派工时初始化。 */
+  revisionWindow?: AgentModuleRevisionWindow_ACU;
 }): Promise<AgentModuleFieldReceipt_ACU> {
   const prior = queue_ACU.get(input.chat) ?? Promise.resolve();
   const run = prior.catch(() => {}).then(async (): Promise<AgentModuleFieldReceipt_ACU> => {
@@ -429,8 +448,16 @@ export function commitAgentModuleFieldWrites_ACU(input: {
       receipt.rejected.push({ path: 'frame', reason: '资料帧损坏，拒绝在宽容抢救结果上写入' });
       receipt.partials = null; receipt.revisions = null; return receipt;
     }
+    // 窗口 head 与当前权威修订号不符，说明有本派工之外的写入：基线重置到最新版，之后只认模型重新读到的号。
+    if (input.revisionWindow) for (const module of Object.keys(input.revisionWindow) as Module_ACU[]) {
+      const current = folded.snapshot.revisions[module];
+      if (input.revisionWindow[module]!.head !== current) input.revisionWindow[module] = { base: current, head: current };
+    }
     const now = Date.now();
-    const plan = planAgentModuleFieldCommit_ACU(folded.snapshot, folded.fields, parsed.intents, input.role, input.completedStages, input.resolvePage, now, agentStoryEvidenceFloorIndexes_ACU(input.chat));
+    // 可引用楼层上限取派工目标楼：结算分支本就以末楼为水位校验 delta，逐栏口径必须一致。
+    // 只放宽引用上限，不推进结算水位；用户楼与不存在的楼仍由 evidence 集合拒绝。
+    const evidenceThrough = Math.max(folded.snapshot.settledThroughIndex, input.targetIndex);
+    const plan = planAgentModuleFieldCommit_ACU(folded.snapshot, folded.fields, parsed.intents, input.role, input.completedStages, input.resolvePage, now, agentStoryEvidenceFloorIndexes_ACU(input.chat), evidenceThrough, input.revisionWindow);
     receipt.rejected.push(...plan.rejected);
     if (!plan.batches.length) {
       // 仅有「删除目标已不存在」时删除效果已成立：按空提交确认，不留待修复缺口。
@@ -442,7 +469,7 @@ export function commitAgentModuleFieldWrites_ACU(input: {
     const expected = new Map<string, AgentModuleFieldRecord_ACU | null>();
     try {
       // 空聊天尚无合法基线；首个 schema-3 checkpoint 按现有帧契约使用水位 0。
-      // 规划器仍基于原始 -1 水位校验正文证据，不能借首基线凭空结算第 0 楼。
+      // 首基线水位只影响帧写入，不代表第 0 楼被结算；正文证据由规划器按派工目标楼与 evidence 集合校验。
       const base = folded.contributed ? folded.snapshot : { ...folded.snapshot, settledThroughIndex: 0 };
       view = await materializeAgentModuleSqlView_ACU(base, folded.fields);
       for (const batch of plan.batches) view.applyFieldBatch(batch);
@@ -486,7 +513,7 @@ export function commitAgentModuleFieldWrites_ACU(input: {
       revision: confirmed.fields.records[item.module]?.[item.id]?.fields[item.field]?.revision ?? 0,
     }));
     return receipt;
-  });
+  }).then(receipt => { syncRevisionWindow_ACU(input.revisionWindow, receipt); return receipt; });
   queue_ACU.set(input.chat, run.then(() => {}, () => {}));
   return run;
 }

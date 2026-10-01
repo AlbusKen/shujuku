@@ -154,8 +154,10 @@ const DOCK_INSET_PX = 2;
 const PEEK_DEPTH_RATIO = 0.56;
 /** 原图探头帧：与普通探头同规范（头朝屏幕内、只露头顶到嘴），头顶到嘴下约占 61%。 */
 const PEEK_ORIGINAL_DEPTH_RATIO = 0.61;
-/** 缩边期间两种探头造型的轮换间隔。 */
+/** 缩边期间每隔多久重抽一次探头造型。 */
 const PEEK_ROTATE_MS = 30000;
+/** 原图探头是稀有造型：与普通探头按 1:99 抽取。 */
+const PEEK_ORIGINAL_CHANCE = 0.01;
 /** 吸附后无人理会多久缩进去。 */
 const TUCK_DELAY_MS = 4000;
 /** 待机动作间隔 15–20 秒。 */
@@ -233,9 +235,13 @@ let lastWaveAt = 0;
 const size = computed(() => (viewport.value.width <= NARROW_VIEWPORT_PX ? 64 : 88));
 const showPeek = computed(() => !!dockEdge.value && tucked.value && !dragging.value && !reaction.value);
 
-/** 缩边探头造型：普通探头 / 原图探头，每 30 秒轮换；睡着时固定犯困探头。 */
+/** 缩边探头造型：普通探头为主、原图探头稀有（1:99），每 30 秒重抽一次；睡着时固定犯困探头。 */
 const peekVariant = ref<"peek" | "original">("peek");
 let peekRotateTimer: AcuTimerHandle | null = null;
+
+function rollPeekVariant(): "peek" | "original" {
+  return Math.random() < PEEK_ORIGINAL_CHANCE ? "original" : "peek";
+}
 const peekOriginal = computed(() => peekVariant.value === "original" && !snoozing.value);
 const peekSrc = computed(() => (snoozing.value ? peekSleepyImage : peekOriginal.value ? peekOriginalImage : peekImage));
 const peekDepth = computed(() => Math.round(size.value * (peekOriginal.value ? PEEK_ORIGINAL_DEPTH_RATIO : PEEK_DEPTH_RATIO)));
@@ -249,7 +255,7 @@ function schedulePeekRotate(): void {
   stopPeekRotate();
   peekRotateTimer = acuSetTimeout(() => {
     peekRotateTimer = null;
-    peekVariant.value = peekVariant.value === "peek" ? "original" : "peek";
+    peekVariant.value = rollPeekVariant();
     schedulePeekRotate();
   }, PEEK_ROTATE_MS);
 }
@@ -259,8 +265,8 @@ watch(showPeek, shown => {
     stopPeekRotate();
     return;
   }
-  // 每次缩进去随机挑起始造型，之后每 30 秒换一次。
-  peekVariant.value = Math.random() < 0.5 ? "peek" : "original";
+  // 每次缩进去按 1:99 抽一次造型，之后每 30 秒重抽。
+  peekVariant.value = rollPeekVariant();
   schedulePeekRotate();
 });
 
@@ -891,7 +897,9 @@ onBeforeUnmount(() => {
   animation: acu-desk-pet-pound 0.43s cubic-bezier(0.3, 0, 0.2, 1) 3;
 }
 
-/* 把自己震倒：先往后弹，再仰面落地 */
+/* 把自己震倒：先往后弹，再仰面落地。倒地帧身体面积只有旧帧约 80%（14721/18394），
+   关键帧里的缩放统一乘 1.12（面积比开方），以底边为原点放大，让倒地后体型与基础状态一致；
+   两侧可略微超出桌宠框（与挣扎帧同一补偿方式）。 */
 .acu-desk-pet__img.pose-knockdown {
   animation: acu-desk-pet-knockdown 0.7s cubic-bezier(0.3, 1.4, 0.5, 1) both;
 }
@@ -1050,9 +1058,9 @@ onBeforeUnmount(() => {
 }
 
 @keyframes acu-desk-pet-knockdown {
-  0% { transform: translateY(-18px) rotate(-20deg) scale(0.92); }
-  60% { transform: translateY(2px) rotate(4deg) scale(1.04, 0.96); }
-  100% { transform: translateY(0) rotate(0deg) scale(1); }
+  0% { transform: translateY(-18px) rotate(-20deg) scale(1.03); }
+  60% { transform: translateY(2px) rotate(4deg) scale(1.165, 1.075); }
+  100% { transform: translateY(0) rotate(0deg) scale(1.12); }
 }
 
 @keyframes acu-desk-pet-roll {

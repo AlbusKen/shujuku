@@ -1,4 +1,5 @@
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
+import { withCreativeIdentity_ACU } from '../../../shared/creative-identity.js';
 /**
  * service/continuation/agent/agent-defaults.ts — Agent 各请求的伪 role + 预填充提示词
  *
@@ -1340,12 +1341,50 @@ export function withV42ReadOnceContract_ACU(role: keyof ContinuationAgentPrompts
     : { ...segment }));
 }
 
-/** 当前默认组：V41 之上把普通子代理收敛为单次读取后直接交付。 */
-export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+/** V42 冻结入口：V41 之上把普通子代理收敛为单次读取后直接交付；V43 在其上融入创作身份声明，这里保持原样供迁移对照。 */
+export function buildV42ContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
   const prompts = buildV41ContinuationAgentPrompts_ACU();
   const next = { ...prompts };
   for (const role of Object.keys(prompts) as Array<keyof ContinuationAgentPrompts_ACU>) {
     next[role] = withV42ReadOnceContract_ACU(role, prompts[role]);
+  }
+  return next;
+}
+
+/** V43 各角色身份句的创作目标：「你的目的只有与用户一起创作出最顶级的{目标}」。 */
+const V43_CREATIVE_IDENTITY_GOALS_ACU: Record<keyof ContinuationAgentPrompts_ACU, string> = {
+  main: '小说续写作品',
+  arcArchitect: '故事总纲',
+  maintainer: '伏笔与认知账本',
+  mainlinePlanner: '主线推进方案',
+  beatPlanner: '伏笔与情绪节拍方案',
+  reviewer: '前后连贯的故事',
+  finalReviewer: '写作指导',
+  webResearcher: '作品设定资料',
+  instructionComposer: '写作指令',
+};
+
+let v43PristineRoles_ACU: ContinuationAgentPrompts_ACU | null = null;
+
+/**
+ * V42 → V43 精确迁移：只给与 V42 默认身份段（首个以「你是」开头的段）逐字相同的段融入创作身份声明；
+ * 用户改写过的身份段与其余段原样保留，段元数据不动。新正文已含声明，重复调用不产生变化。
+ */
+export function withV43CreativeIdentity_ACU(role: keyof ContinuationAgentPrompts_ACU, segments: readonly ContinuationPromptSegment_ACU[]): ContinuationPromptSegment_ACU[] {
+  if (!v43PristineRoles_ACU) v43PristineRoles_ACU = buildV42ContinuationAgentPrompts_ACU();
+  const identity = v43PristineRoles_ACU[role]?.find(segment => segment.content.startsWith('你是'));
+  const goal = V43_CREATIVE_IDENTITY_GOALS_ACU[role];
+  return segments.map(segment => (identity && goal && segment.content === identity.content
+    ? { ...segment, content: withCreativeIdentity_ACU(segment.content, goal) }
+    : { ...segment }));
+}
+
+/** 当前默认组：V42 之上给每个角色的第一条身份句融入创作身份声明。 */
+export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+  const prompts = buildV42ContinuationAgentPrompts_ACU();
+  const next = { ...prompts };
+  for (const role of Object.keys(prompts) as Array<keyof ContinuationAgentPrompts_ACU>) {
+    next[role] = withV43CreativeIdentity_ACU(role, prompts[role]);
   }
   return next;
 }
