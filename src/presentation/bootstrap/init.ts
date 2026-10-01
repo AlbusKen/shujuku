@@ -290,7 +290,13 @@ export   function mainInitialize_ACU() {
                     options._qrf_processed_by_hook = true;
                     break;
                   }
-                  // 'passthrough', 'skipped', 'aborted' — 不做额外操作，直接透传
+                  case 'aborted': {
+                    // 任务失败时阻止后续生成，标记已处理
+                    options._qrf_processed_by_hook = true;
+                    // 返回空 Promise，不调用原始 generate
+                    return Promise.resolve();
+                  }
+                  // 'passthrough', 'skipped' — 不做额外操作，直接透传
                 }
 
                 return await (window as any).original_TavernHelper_generate_ACU.apply(this, args);
@@ -687,6 +693,8 @@ export   function mainInitialize_ACU() {
                       // 恢复输入框
                       try { setSendTextareaValue_ACU(s1.restoreText || ''); } catch (e) {}
                     }
+                    // 标记 params 已处理，阻止宿主继续生成
+                    try { params._qrf_processed_by_hook = true; } catch (e) {}
                     break;
 
                   case 'planned':
@@ -725,6 +733,10 @@ export   function mainInitialize_ACU() {
                       else if ((window as any).SillyTavern?.stopGeneration) (window as any).SillyTavern.stopGeneration();
                     } catch (e) {}
                   }
+                  // 任务失败时保留输入框原文，取消本次生成
+                  textForHost = textInBox;
+                  // 标记 params 已处理，阻止宿主继续读取输入框并生成
+                  try { params._qrf_processed_by_hook = true; } catch (e) {}
                   break;
 
                 case 'planned':

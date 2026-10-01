@@ -17,8 +17,9 @@ function createHarness(options: { tags?: string; chat?: any[]; send?: boolean; r
     readAutoContinueState: vi.fn(() => autoContinueStates.length ? autoContinueStates.shift()! : { eligible: false, delaySeconds: 0 }),
     retryCurrentTurn,
     continueTask,
-    recordHostTurn: vi.fn(async ({ identity: sent, capture }) => { pending = { identity: sent, capture, retryCount: pending?.retryCount ?? 0, status: 'awaiting_generation' }; }),
-    bindHostTurnGeneration: vi.fn(async (_identity, generationSeq) => { pending = { ...pending, capture: { ...pending.capture, generationSeq } }; }),
+    // 模拟编排器按硬游标自动填身份：重试沿用已有 attemptId。
+    recordHostTurn: vi.fn(async ({ capture }) => { pending = { identity: pending?.identity ?? identity, capture, retryCount: pending?.retryCount ?? 0, status: 'awaiting_generation' }; }),
+    bindHostTurnGeneration: vi.fn(async (generationSeq) => { pending = { ...pending, capture: { ...pending.capture, generationSeq } }; }),
     confirmCurrentTurn: vi.fn(async () => { pending = null; }),
     rejectHostTurnForMissingTags: vi.fn(async () => { pending = { ...pending, status: 'retry_ready' }; }),
     rejectHostTurnForShortGeneration: vi.fn(async () => { pending = { ...pending, status: 'retry_ready' }; }),
@@ -56,8 +57,8 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
     expect(h.runtime.recordHostTurn).toHaveBeenCalledBefore(h.hostInput.send as any);
     h.setChat([{ is_user: true }, { is_user: false, mes: '<ok>正文', message_id: 9 }]);
     await h.bridge.onGenerationEnded(9, 7);
-    expect(h.runtime.bindHostTurnGeneration).toHaveBeenCalledWith(identity, 7);
-    expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(identity, 1);
+    expect(h.runtime.bindHostTurnGeneration).toHaveBeenCalledWith(7);
+    expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(1);
     expect(h.runtime.rejectHostTurnForMissingTags).not.toHaveBeenCalled();
   });
 
@@ -72,7 +73,7 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
     h.setChat([{ is_user: true }, { is_user: false, mes: '<ok>正文', message_id: 9 }]);
     await h.bridge.onGenerationEnded(9, 7);
 
-    expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(identity, 1);
+    expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(1);
     expect(listener).toHaveBeenCalledOnce();
   });
 
@@ -85,13 +86,13 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
 
     await h.bridge.onGenerationEnded(9, 7);
 
-    expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(identity, 1);
+    expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(1);
   });
 
   it('pauses instead of claiming a host send whose input adapter is unavailable', async () => {
     const h = createHarness({ send: false });
     await expect(h.bridge.send(prepared)).resolves.toBe(false);
-    expect(h.runtime.pauseForHostInputFailure).toHaveBeenCalledWith(identity);
+    expect(h.runtime.pauseForHostInputFailure).toHaveBeenCalledWith();
     expect(h.bridge.onGenerationStarted(7)).toBe(false);
   });
 
@@ -102,12 +103,11 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
     await h.bridge.send(prepared);
     h.setChat([{ is_user: true }, { is_user: false, mes: '正文', message_id: 9 }]);
     await h.bridge.onGenerationEnded(9, 7);
-    expect(h.runtime.rejectHostTurnForMissingTags).toHaveBeenCalledWith({ identity, messageIndex: 1 });
+    expect(h.runtime.rejectHostTurnForMissingTags).toHaveBeenCalledWith({ messageIndex: 1 });
     expect(h.hostInput.removeLastMessage).not.toHaveBeenCalled();
     expect(h.hostInput.send).toHaveBeenCalledOnce();
     expect(h.hostInput.retryGeneration).toHaveBeenCalledWith('regenerate');
     expect(h.runtime.recordHostTurn).toHaveBeenLastCalledWith({
-      identity,
       capture: { capturedAt: 100, capturedChatLength: 1, capturedAiFloorCount: 0, generationSeq: null },
     });
     expect(h.runtime.confirmCurrentTurn).not.toHaveBeenCalled();
@@ -123,7 +123,7 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
 
     expect(h.hostInput.removeLastMessage).not.toHaveBeenCalled();
     expect(h.hostInput.retryGeneration).not.toHaveBeenCalled();
-    expect(h.runtime.pauseForHostResultFailure).toHaveBeenCalledWith(identity);
+    expect(h.runtime.pauseForHostResultFailure).toHaveBeenCalledWith();
     expect(h.runtime.rejectHostTurnForMissingTags).not.toHaveBeenCalled();
   });
 
@@ -150,7 +150,7 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
 
     await h.bridge.onGenerationEnded(undefined, 7);
 
-    expect(h.runtime.rejectHostTurnForFailedGeneration).toHaveBeenCalledWith(identity);
+    expect(h.runtime.rejectHostTurnForFailedGeneration).toHaveBeenCalledWith();
     expect(h.runtime.pauseForHostResultFailure).not.toHaveBeenCalled();
     expect(h.retryCurrentTurn).toHaveBeenCalledBefore(h.hostInput.retryGeneration as any);
     expect(h.hostInput.send).toHaveBeenCalledOnce();
@@ -165,7 +165,7 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
 
     await h.bridge.onGenerationEnded(9, 7);
 
-    expect(h.runtime.rejectHostTurnForFailedGeneration).toHaveBeenCalledWith(identity);
+    expect(h.runtime.rejectHostTurnForFailedGeneration).toHaveBeenCalledWith();
     expect(h.runtime.pauseForHostResultFailure).not.toHaveBeenCalled();
     expect(h.hostInput.retryGeneration).toHaveBeenCalledWith('generate');
   });
@@ -177,7 +177,7 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
     h.setChat([{ is_user: true }, { is_user: false, mes: '<ok>短', message_id: 9 }]);
     await h.bridge.onGenerationEnded(9, 7);
 
-    expect(h.runtime.rejectHostTurnForShortGeneration).toHaveBeenCalledWith({ identity, messageIndex: 1, tokenCount: 12, threshold: 1000 });
+    expect(h.runtime.rejectHostTurnForShortGeneration).toHaveBeenCalledWith({ messageIndex: 1, tokenCount: 12, threshold: 1000 });
     expect(h.hostInput.removeLastMessage).not.toHaveBeenCalled();
     expect(h.hostInput.retryGeneration).toHaveBeenCalledWith('regenerate');
     expect(h.runtime.confirmCurrentTurn).not.toHaveBeenCalled();
@@ -195,8 +195,8 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
     expect(h.bridge.onGenerationStarted(8, automaticRetryEvent)).toBe(true);
     await h.bridge.onGenerationEnded(9, 8, automaticRetryEvent);
 
-    expect(h.runtime.bindHostTurnGeneration).toHaveBeenCalledWith(identity, 8);
-    expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(identity, 1);
+    expect(h.runtime.bindHostTurnGeneration).toHaveBeenNthCalledWith(2, 8);
+    expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(1);
   });
 
   it('does not let an ordinary automatic generation claim an awaiting continuation turn', async () => {
@@ -217,7 +217,7 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
     await h.bridge.send(prepared);
     h.setChat([{ is_user: true }, { is_user: false, mes: '<ok>a' }, { is_user: false, mes: '<ok>b' }]);
     await h.bridge.onGenerationEnded(99, 7);
-    expect(h.runtime.pauseForHostResultFailure).toHaveBeenCalledWith(identity);
+    expect(h.runtime.pauseForHostResultFailure).toHaveBeenCalledWith();
     expect(h.runtime.confirmCurrentTurn).not.toHaveBeenCalled();
   });
 
@@ -228,7 +228,7 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
     h.setChat([{ is_user: true }, { is_user: false, mes: '<ok>正文', message_id: 9 }]);
     await h.bridge.onGenerationEnded(9, 7);
 
-    expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(identity, 1);
+    expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(1);
     expect(h.wait).toHaveBeenCalledWith(5_000);
     expect(h.continueTask).toHaveBeenCalledOnce();
     expect(h.hostInput.send).toHaveBeenLastCalledWith('自动续写的下一轮文本');
@@ -241,7 +241,7 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
     h.setChat([{ is_user: true }, { is_user: false, mes: '<ok>正文', message_id: 9 }]);
     await h.bridge.onGenerationEnded(9, 7);
 
-    expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(identity, 1);
+    expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(1);
     expect(h.continueTask).not.toHaveBeenCalled();
     expect(h.hostInput.send).toHaveBeenCalledOnce();
   });
@@ -257,7 +257,7 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
     expect(h.bridge.claimsGenerationEnded(7, true)).toBe(true);
     await h.bridge.onGenerationEnded(9, 7, true);
 
-    expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(identity, 1);
+    expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(1);
     expect(h.runtime.pauseForHostResultFailure).not.toHaveBeenCalled();
   });
 
@@ -266,7 +266,7 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
     await h.bridge.send(prepared);
 
     expect(h.bridge.onGenerationStarted(7, true)).toBe(true);
-    expect(h.runtime.bindHostTurnGeneration).toHaveBeenCalledWith(identity, 7);
+    expect(h.runtime.bindHostTurnGeneration).toHaveBeenCalledWith(7);
     expect(h.bridge.hasLiveClaim('chat-a')).toBe(true);
     expect(h.bridge.claimsGenerationEnded(7)).toBe(true);
   });
@@ -287,7 +287,7 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
 
     await h.bridge.onGenerationStopped(undefined);
 
-    expect(h.runtime.failHostTurnForStoppedGeneration).toHaveBeenCalledWith(identity);
+    expect(h.runtime.failHostTurnForStoppedGeneration).toHaveBeenCalledWith();
     expect(h.runtime.readPendingHostTurn()!.pending.status).toBe('retry_ready');
   });
 
@@ -310,7 +310,6 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
     await expect(h.bridge.retryHostGeneration()).resolves.toBe(true);
     expect(h.hostInput.retryGeneration).toHaveBeenCalledWith('generate');
     expect(h.runtime.recordHostTurn).toHaveBeenLastCalledWith({
-      identity,
       capture: { capturedAt: 100, capturedChatLength: 2, capturedAiFloorCount: 1, generationSeq: null },
     });
   });

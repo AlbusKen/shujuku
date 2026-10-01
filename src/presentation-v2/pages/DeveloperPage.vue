@@ -24,6 +24,10 @@
             :item="strictJsonTableFillToggle"
             @change="settings.setStrictJsonTableFillEnabled($event)"
           />
+          <ToggleRow
+            :item="tableFillNativeToolToggle"
+            @change="settings.setTableFillNativeToolEnabled($event)"
+          />
         </div>
       </AcuPanel>
 
@@ -88,6 +92,13 @@ const strictJsonTableFillToggle = computed<DeveloperFieldItem>(() => ({
   label: "严格 JSON 填表响应",
   description: "默认关闭。开启后原生表格输出结构化操作，SQLite 输出 JSON 包裹的 SQL 脚本。",
   value: settings.strictJsonTableFillEnabled.value,
+}));
+const tableFillNativeToolToggle = computed<DeveloperFieldItem>(() => ({
+  key: "tableFillNativeToolEnabled",
+  label: "填表使用工具调用",
+  description:
+    "默认关闭。开启后填表改走 table_edit / table_sql 原生工具提交，默认提示词同步切换；部分渠道不支持工具调用，收到 tools 字段会直接报错。",
+  value: settings.tableFillNativeToolEnabled.value,
 }));
 const maxConcurrentGroups = computed(
   () =>

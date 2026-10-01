@@ -1265,7 +1265,7 @@ export class AgentSubagentRuntime_ACU {
             continue;
           }
           if (emptyArcBootstrap && !pending.length && !draft.truncated) {
-            pending.push({ module: 'storyArc', index: 0, id: '', reason: '总纲尚未建立，但 delta.storyArc 为空。summary 里的文字不会写入任何东西：必须在 delta.storyArc 里给出 1 条 scope=story 的 upsert 与按【总纲卷数计划】数量的 scope=volume upsert，每条都带 id / title / direction / escalation / withheld / status 与卷级契约字段' });
+            pending.push({ module: 'storyArc', index: 0, id: '', reason: '总纲尚未建立，但 delta.storyArc 为空。summary 里的文字不会写入任何东西：必须在 delta.storyArc 里给出 1 条 scope=story 的 upsert 与按【总纲卷数计划】数量的 scope=volume upsert，每条都带 title / direction / escalation / withheld / status 与卷级契约字段（id 可省略，系统自动编号）' });
           }
           if (!draft.truncated && !pending.length) return deliverContract(accumulated);
           if (continuationsUsed >= maxContinuations) {

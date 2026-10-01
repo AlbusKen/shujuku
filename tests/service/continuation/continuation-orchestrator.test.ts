@@ -88,9 +88,8 @@ function createOrchestrator(options: { preview?: boolean; planner?: ReturnType<t
   return { orchestrator, planner, store, executionEngine, appendAgentConversation, clearAgentModules, clearAgentConversation };
 }
 
-async function recordPendingHostTurn(orchestrator: ContinuationOrchestrator_ACU, identity: any): Promise<void> {
+async function recordPendingHostTurn(orchestrator: ContinuationOrchestrator_ACU): Promise<void> {
   await orchestrator.recordHostTurn({
-    identity,
     capture: { capturedAt: 1_000, capturedChatLength: 1, capturedAiFloorCount: 0, generationSeq: 1 },
   });
 }
@@ -100,14 +99,8 @@ async function confirmTurns(orchestrator: ContinuationOrchestrator_ACU, store: F
     // 每轮确认后任务统一落 paused，真实链路由桥的自动续写调 continueTask 再进入下一轮。
     const before = store.readPersisted()!.activeTask!;
     if (before.status === 'paused' && before.stopReason === null) await orchestrator.continueTask();
-    const task = store.readPersisted()!.activeTask!;
-    const stage = task.stages.find(item => item.stageId === task.activeStageId)!;
-    const revision = stage.revisions.find(item => item.revision === stage.activeRevision)!;
-    const node = revision.outline.nodes[stage.activeNodeIndex];
-    const turn = node.turns[stage.activeTurnIndex];
-    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: stage.activeRevision, nodeId: node.id, turnId: turn.id, attemptId: `attempt-${index}` };
-    await recordPendingHostTurn(orchestrator, identity);
-    await orchestrator.confirmCurrentTurn(identity);
+    await recordPendingHostTurn(orchestrator);
+    await orchestrator.confirmCurrentTurn();
   }
 }
 
@@ -226,16 +219,12 @@ describe('ContinuationOrchestrator_ACU', () => {
     const { orchestrator, store } = createOrchestrator();
     await orchestrator.createTask({ originInstruction: '推进剧情' });
     await orchestrator.continueTask();
-    const task = store.readPersisted()!.activeTask!;
-    const stage = task.stages[0];
-    const revision = stage.revisions[0];
-    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-a' };
-    await recordPendingHostTurn(orchestrator, identity);
-    await orchestrator.confirmCurrentTurn(identity, 3);
+    await recordPendingHostTurn(orchestrator);
+    await orchestrator.confirmCurrentTurn(3);
     const afterConfirm = store.readPersisted()!.activeTask!;
     expect(afterConfirm.stages[0]).toMatchObject({ completedTurns: 1, activeNodeIndex: 0, activeTurnIndex: 1 });
     expect(afterConfirm.timeline.some(entry => entry.kind === 'turn_completed' && entry.messageIndex === 3)).toBe(true);
-    await expectCode(() => orchestrator.confirmCurrentTurn(identity), 'CONTINUATION_INTERNAL_REQUEST_STALE');
+    await expectCode(() => orchestrator.confirmCurrentTurn(), 'CONTINUATION_INTERNAL_REQUEST_STALE');
   });
 
   it('正文楼确认后追加下一轮通告；失败只影响通告，不倒退已确认游标', async () => {
@@ -245,29 +234,26 @@ describe('ContinuationOrchestrator_ACU', () => {
     const { orchestrator, store } = createOrchestrator();
     await orchestrator.createTask({ originInstruction: '推进剧情' });
     await orchestrator.continueTask();
-    const task = store.readPersisted()!.activeTask!;
-    const stage = task.stages[0];
-    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: outline.nodes[0].id, turnId: outline.nodes[0].turns[0].id, attemptId: 'attempt-notice' };
-    await recordPendingHostTurn(orchestrator, identity);
+    await recordPendingHostTurn(orchestrator);
     expect(readAgentConversation_ACU(chat).messages).toHaveLength(0);
     chat.push({ mes: '<ok>正文', is_user: false });
-    await orchestrator.confirmCurrentTurn(identity, 1);
+    await orchestrator.confirmCurrentTurn(1);
     expect(store.readPersisted()!.activeTask!.stages[0].completedTurns).toBe(1);
     const notice = readAgentConversation_ACU(chat).messages;
     expect(notice).toHaveLength(1);
+    const stage = store.readPersisted()!.activeTask!.stages[0];
     expect(notice[0]).toMatchObject({ kind: 'turn', turnKey: `${stage.stageId}#1#turn-2` });
     expect(notice[0].text).toContain('第 2 楼正文已确认');
     expect(chat[0][AGENT_CONVERSATION_FIELD_ACU]).toBeUndefined();
     expect(chat[1][AGENT_CONVERSATION_FIELD_ACU].segment).toHaveLength(1);
-    await expectCode(() => orchestrator.confirmCurrentTurn(identity, 1), 'CONTINUATION_INTERNAL_REQUEST_STALE');
+    await expectCode(() => orchestrator.confirmCurrentTurn(1), 'CONTINUATION_INTERNAL_REQUEST_STALE');
     expect(readAgentConversation_ACU(chat).messages).toHaveLength(1);
 
     await orchestrator.continueTask();
-    const secondIdentity = { ...identity, turnId: 'turn-2', attemptId: 'attempt-notice-2' };
-    await recordPendingHostTurn(orchestrator, secondIdentity);
+    await recordPendingHostTurn(orchestrator);
     chat.push({ mes: '<ok>第二轮正文', is_user: false });
     saveChat.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('notice save refused'));
-    await expect(orchestrator.confirmCurrentTurn(secondIdentity, 2)).resolves.toBeDefined();
+    await expect(orchestrator.confirmCurrentTurn(2)).resolves.toBeDefined();
     expect(store.readPersisted()!.activeTask!.stages[0].completedTurns).toBe(2);
     expect(chat[2][AGENT_CONVERSATION_FIELD_ACU]).toBeUndefined();
   });
@@ -294,12 +280,8 @@ describe('ContinuationOrchestrator_ACU', () => {
     const { orchestrator, store, executionEngine } = createOrchestrator();
     await orchestrator.createTask({ originInstruction: '推进剧情' });
     await orchestrator.continueTask();
-    const task = store.readPersisted()!.activeTask!;
-    const stage = task.stages[0];
-    const revision = stage.revisions[0];
-    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-anchor' };
-    await recordPendingHostTurn(orchestrator, identity);
-    await orchestrator.confirmCurrentTurn(identity, 3);
+    await recordPendingHostTurn(orchestrator);
+    await orchestrator.confirmCurrentTurn(3);
     expect(store.readPersisted()!.activeTask!.stages[0].completedTurns).toBe(1);
 
     const persisted = store.readPersisted()!;
@@ -328,11 +310,7 @@ describe('ContinuationOrchestrator_ACU', () => {
 
     await orchestrator.createTask({ originInstruction: '推进剧情' });
     await orchestrator.continueTask();
-    const task = store.readPersisted()!.activeTask!;
-    const stage = task.stages[0];
-    const revision = stage.revisions[0];
-    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-a' };
-    await recordPendingHostTurn(orchestrator, identity);
+    await recordPendingHostTurn(orchestrator);
     const staleFailure = store.readPersisted()!;
     staleFailure.activeTask = {
       ...staleFailure.activeTask!,
@@ -342,7 +320,7 @@ describe('ContinuationOrchestrator_ACU', () => {
     await store.replaceAtomically(staleFailure, { chatIdentity: 'chat-a' });
     expect(orchestrator.readAutoContinueState().eligible).toBe(false);
 
-    await orchestrator.confirmCurrentTurn(identity);
+    await orchestrator.confirmCurrentTurn();
     expect(store.readPersisted()!.activeTask).toMatchObject({ pendingHostTurn: null, stopReason: null, lastError: null });
     expect(orchestrator.readAutoContinueState().eligible).toBe(true);
     await orchestrator.stopTask();
@@ -383,18 +361,24 @@ describe('ContinuationOrchestrator_ACU', () => {
     expect(revision).toMatchObject({ reason: 'manual_replan', replanInstruction: '收束当前冲突', frozen: true });
   });
 
-  it('persists a host-turn identity before dispatch and rejects a mismatched attempt result', async () => {
+  it('auto-fills the host-turn identity from the hard cursor and rejects a second send while one is awaiting', async () => {
     const { orchestrator, store } = createOrchestrator();
     await orchestrator.createTask({ originInstruction: '推进剧情' });
     await orchestrator.continueTask();
     const task = store.readPersisted()!.activeTask!;
     const stage = task.stages[0];
     const revision = stage.revisions[0];
-    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-host-a' };
 
-    await recordPendingHostTurn(orchestrator, identity);
-    expect(store.readPersisted()!.activeTask!.pendingHostTurn).toMatchObject({ identity, status: 'awaiting_generation', retryCount: 0 });
-    await expectCode(() => orchestrator.confirmCurrentTurn({ ...identity, attemptId: 'attempt-host-b' }), 'CONTINUATION_INTERNAL_REQUEST_STALE');
+    await recordPendingHostTurn(orchestrator);
+    const pending = store.readPersisted()!.activeTask!.pendingHostTurn!;
+    expect(pending).toMatchObject({
+      identity: { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id },
+      status: 'awaiting_generation',
+      retryCount: 0,
+    });
+    expect(pending.identity.attemptId).toMatch(/^attempt-/);
+    await expectCode(() => recordPendingHostTurn(orchestrator), 'CONTINUATION_INTERNAL_REQUEST_STALE');
+    expect(store.readPersisted()!.activeTask!.pendingHostTurn!.identity.attemptId).toBe(pending.identity.attemptId);
     expect(store.readPersisted()!.activeTask!.stages[0].completedTurns).toBe(0);
   });
 
@@ -405,18 +389,16 @@ describe('ContinuationOrchestrator_ACU', () => {
     initial.settings = { ...initial.settings, generationRetryLimit: 1 };
     await store.replaceAtomically(initial, { chatIdentity: 'chat-a' });
     await orchestrator.continueTask();
-    const task = store.readPersisted()!.activeTask!;
-    const stage = task.stages[0];
-    const revision = stage.revisions[0];
-    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-host-a' };
 
-    await recordPendingHostTurn(orchestrator, identity);
-    await orchestrator.rejectHostTurnForMissingTags({ identity, messageIndex: 1 });
+    await recordPendingHostTurn(orchestrator);
+    const identity = store.readPersisted()!.activeTask!.pendingHostTurn!.identity;
+    await orchestrator.rejectHostTurnForMissingTags({ messageIndex: 1 });
     expect(store.readPersisted()!.activeTask).toMatchObject({ status: 'paused', pendingHostTurn: { retryCount: 1, status: 'retry_ready' }, lastError: { code: 'CONTINUATION_GENERATION_TAGS_MISSING' } });
 
     await orchestrator.continueTask();
-    await recordPendingHostTurn(orchestrator, identity);
-    await orchestrator.rejectHostTurnForMissingTags({ identity, messageIndex: 2 });
+    await recordPendingHostTurn(orchestrator);
+    expect(store.readPersisted()!.activeTask!.pendingHostTurn!.identity).toEqual(identity);
+    await orchestrator.rejectHostTurnForMissingTags({ messageIndex: 2 });
     expect(store.readPersisted()!.activeTask).toMatchObject({ status: 'paused', stopReason: 'generation_retry_exhausted', pendingHostTurn: { retryCount: 1, status: 'exhausted' }, lastError: { code: 'CONTINUATION_GENERATION_TAGS_MISSING', retryable: false } });
 
     // 重试耗尽后点继续：再走一次酒馆 regenerate，不重跑 Agent、不跳轮。
@@ -434,20 +416,16 @@ describe('ContinuationOrchestrator_ACU', () => {
     initial.settings = { ...initial.settings, generationRetryLimit: 1 };
     await store.replaceAtomically(initial, { chatIdentity: 'chat-a' });
     await orchestrator.continueTask();
-    const task = store.readPersisted()!.activeTask!;
-    const stage = task.stages[0];
-    const revision = stage.revisions[0];
-    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-host-a' };
 
     // 首次生成失败：消耗一次重试额度，转 retry_ready（桥据此自动重发），不设停止原因。
-    await recordPendingHostTurn(orchestrator, identity);
-    await orchestrator.rejectHostTurnForFailedGeneration(identity);
+    await recordPendingHostTurn(orchestrator);
+    await orchestrator.rejectHostTurnForFailedGeneration();
     expect(store.readPersisted()!.activeTask).toMatchObject({ status: 'paused', stopReason: null, pendingHostTurn: { retryCount: 1, status: 'retry_ready' }, lastError: { code: 'CONTINUATION_GENERATION_FAILED', retryable: true } });
 
     // 额度耗尽：落 generation_retry_exhausted + exhausted。
     await orchestrator.continueTask();
-    await recordPendingHostTurn(orchestrator, identity);
-    await orchestrator.rejectHostTurnForFailedGeneration(identity);
+    await recordPendingHostTurn(orchestrator);
+    await orchestrator.rejectHostTurnForFailedGeneration();
     expect(store.readPersisted()!.activeTask).toMatchObject({ status: 'paused', stopReason: 'generation_retry_exhausted', pendingHostTurn: { retryCount: 1, status: 'exhausted' }, lastError: { code: 'CONTINUATION_GENERATION_FAILED', retryable: false } });
 
     // 自动链停下后，手动「继续」再走一次酒馆 regenerate，不重跑 Agent。
@@ -463,12 +441,8 @@ describe('ContinuationOrchestrator_ACU', () => {
     const { orchestrator, store, executionEngine } = createOrchestrator();
     await orchestrator.createTask({ originInstruction: '推进剧情' });
     await orchestrator.continueTask();
-    const task = store.readPersisted()!.activeTask!;
-    const stage = task.stages[0];
-    const revision = stage.revisions[0];
-    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-host-a' };
-    await orchestrator.recordHostTurn({ identity, capture: { capturedAt: 1_000, capturedChatLength: 1, capturedAiFloorCount: 1, generationSeq: 1 } });
-    await orchestrator.failHostTurnForStoppedGeneration(identity);
+    await orchestrator.recordHostTurn({ capture: { capturedAt: 1_000, capturedChatLength: 1, capturedAiFloorCount: 1, generationSeq: 1 } });
+    await orchestrator.failHostTurnForStoppedGeneration();
     expect(store.readPersisted()!.activeTask!.pendingHostTurn).toMatchObject({ status: 'retry_ready' });
 
     // 指令楼还在：继续走宿主 generate，不重跑 Agent。
@@ -490,13 +464,9 @@ describe('ContinuationOrchestrator_ACU', () => {
     const { orchestrator, store } = createOrchestrator();
     await orchestrator.createTask({ originInstruction: '推进剧情' });
     await orchestrator.continueTask();
-    const task = store.readPersisted()!.activeTask!;
-    const stage = task.stages[0];
-    const revision = stage.revisions[0];
-    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-host-a' };
 
-    await recordPendingHostTurn(orchestrator, identity);
-    await orchestrator.pauseForHostResultFailure(identity);
+    await recordPendingHostTurn(orchestrator);
+    await orchestrator.pauseForHostResultFailure();
     expect(store.readPersisted()!.activeTask).toMatchObject({ status: 'paused', stopReason: 'state_invalid', pendingHostTurn: { status: 'exhausted' }, lastError: { code: 'CONTINUATION_TASK_STATE_INVALID' } });
 
     // 正文生成出错/归属失败后，继续按钮直接从当前轮次恢复，不再要求清空任务重新规划。
@@ -673,11 +643,7 @@ describe('ContinuationOrchestrator_ACU', () => {
     const { orchestrator, store } = createOrchestrator({ hasLiveHostClaim: () => true });
     await orchestrator.createTask({ originInstruction: '推进剧情' });
     await orchestrator.continueTask();
-    const task = store.readPersisted()!.activeTask!;
-    const stage = task.stages[0];
-    const revision = stage.revisions[0];
-    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-live' };
-    await recordPendingHostTurn(orchestrator, identity);
+    await recordPendingHostTurn(orchestrator);
 
     await expectCode(() => orchestrator.continueTask(), 'CONTINUATION_OPERATION_BUSY');
     expect(store.readPersisted()!.activeTask!.pendingHostTurn).toMatchObject({ status: 'awaiting_generation' });
@@ -687,11 +653,7 @@ describe('ContinuationOrchestrator_ACU', () => {
     const { orchestrator, store, executionEngine } = createOrchestrator({ hasLiveHostClaim: () => false });
     await orchestrator.createTask({ originInstruction: '推进剧情' });
     await orchestrator.continueTask();
-    const task = store.readPersisted()!.activeTask!;
-    const stage = task.stages[0];
-    const revision = stage.revisions[0];
-    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-stale' };
-    await recordPendingHostTurn(orchestrator, identity);
+    await recordPendingHostTurn(orchestrator);
 
     // 重载/事件丢失后的滞留等待轮：桥没有活认领，继续应当丢弃它并重新规划当前轮。
     await orchestrator.continueTask();
@@ -705,11 +667,7 @@ describe('ContinuationOrchestrator_ACU', () => {
     const { orchestrator, store, executionEngine } = createOrchestrator();
     await orchestrator.createTask({ originInstruction: '推进剧情' });
     await orchestrator.continueTask();
-    const task = store.readPersisted()!.activeTask!;
-    const stage = task.stages[0];
-    const revision = stage.revisions[0];
-    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-stop' };
-    await recordPendingHostTurn(orchestrator, identity);
+    await recordPendingHostTurn(orchestrator);
 
     await orchestrator.stopTask();
     const stopped = store.readPersisted()!.activeTask!;
@@ -740,13 +698,9 @@ describe('ContinuationOrchestrator_ACU', () => {
     const { orchestrator, store } = createOrchestrator();
     await orchestrator.createTask({ originInstruction: '推进剧情' });
     await orchestrator.continueTask();
-    const task = store.readPersisted()!.activeTask!;
-    const stage = task.stages[0];
-    const revision = stage.revisions[0];
-    const identity = { chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1, nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-stopped' };
-    await recordPendingHostTurn(orchestrator, identity);
+    await recordPendingHostTurn(orchestrator);
 
-    await orchestrator.failHostTurnForStoppedGeneration(identity);
+    await orchestrator.failHostTurnForStoppedGeneration();
     expect(store.readPersisted()!.activeTask).toMatchObject({
       status: 'paused',
       stopReason: null,
@@ -827,13 +781,7 @@ describe('ContinuationOrchestrator_ACU', () => {
     const { orchestrator, store, appendAgentConversation } = createOrchestrator({ hasLiveHostClaim: () => true });
     await orchestrator.createTask({ originInstruction: '推进剧情' });
     await orchestrator.continueTask();
-    const task = store.readPersisted()!.activeTask!;
-    const stage = task.stages[0];
-    const revision = stage.revisions[0];
-    await recordPendingHostTurn(orchestrator, {
-      chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1,
-      nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-await',
-    });
+    await recordPendingHostTurn(orchestrator);
 
     const result = await orchestrator.sendAgentMessage({ text: '下一轮收一点' });
     expect(result).toMatchObject({ interrupted: false, disposition: 'queued_after_host', shouldContinue: false });
@@ -845,13 +793,7 @@ describe('ContinuationOrchestrator_ACU', () => {
     const { orchestrator, store } = createOrchestrator({ hasLiveHostClaim: () => false });
     await orchestrator.createTask({ originInstruction: '推进剧情' });
     await orchestrator.continueTask();
-    const task = store.readPersisted()!.activeTask!;
-    const stage = task.stages[0];
-    const revision = stage.revisions[0];
-    await recordPendingHostTurn(orchestrator, {
-      chatIdentity: 'chat-a', taskId: task.taskId, stageId: stage.stageId, revision: 1,
-      nodeId: revision.outline.nodes[0].id, turnId: revision.outline.nodes[0].turns[0].id, attemptId: 'attempt-stale-message',
-    });
+    await recordPendingHostTurn(orchestrator);
 
     const result = await orchestrator.sendAgentMessage({ text: '从这一轮重新准备' });
     expect(result).toMatchObject({ interrupted: false, disposition: 'continue_now', shouldContinue: true });

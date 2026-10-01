@@ -53,6 +53,8 @@ export interface Settings_ACU {
   tableMaxRetries: number;
   /** 丢弃可证明仅影响非目标表的 SQL 语句；混合/无法归属写入仍保持失败。 */
   discardUnauthorizedTableEditsEnabled: boolean;
+  /** 填表走原生工具调用（table_edit / table_sql）；默认关闭，部分渠道带 tools 字段会直接报错。 */
+  tableFillNativeToolEnabled: boolean;
   worldbookConfig: WorldbookConfig_ACU;
   plotSettings: PlotSettings_ACU;
   /**

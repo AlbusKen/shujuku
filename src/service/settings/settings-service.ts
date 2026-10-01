@@ -11,7 +11,8 @@ import { DEFAULT_BUILTIN_PLOT_PRESETS_ACU, DEFAULT_CHAR_CARD_PROMPT_ACU, DEFAULT
 import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU, STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU, SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU, TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU, USER_PREFILL_PROFILE_FORCE_DEFAULT_VERSION_ACU, USER_PREFILL_VECTOR_FORCE_DEFAULT_VERSION_ACU, TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU, TEMPLATE_ASSISTANT_PROMPT_FORCE_DEFAULT_VERSION_ACU, VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU, VECTOR_MEMORY_LEGACY_MIN_SCORE_DEFAULTS_ACU, VECTOR_MEMORY_RECALL_PARAM_KEYS_ACU, VECTOR_MEMORY_RECALL_PARAMS_FORCE_OVERRIDE_VERSION_ACU, VECTOR_MEMORY_SOURCE_TEXT_UPGRADE_VERSION_ACU, buildDefaultAgentWorldbookControl_ACU, buildDefaultAgentWorldbookPromptTemplates_ACU, buildDefaultPlotWorldbookConfig_ACU, buildDefaultContentOptimizationPromptGroup_ACU, defaultWorldbookConfig_ACU, defaultVectorMemoryConfig_ACU } from '../../shared/defaults';
 import { addDataIsolationHistory_ACU, ensureProfileExists_ACU, normalizeDataIsolationHistory_ACU } from '../../data/repositories/isolation-repo';
 import { TABLE_FILL_MAIN_PROMPT_HISTORY_ACU } from '../../shared/defaults-json.js';
-import { STREAMING_FORCE_DISABLE_VERSION_ACU, TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU } from '../../shared/defaults';
+import { STREAMING_FORCE_DISABLE_VERSION_ACU, TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU, TABLE_FILL_TOOL_DEFAULT_OFF_VERSION_ACU } from '../../shared/defaults';
+import { adaptTableFillPromptSegmentsToToolMode_ACU } from '../ai/prompt-builder/table-fill-tools';
 import { CREATIVE_IDENTITY_PROMPT_UPGRADE_VERSION_ACU } from '../../shared/defaults';
 import { applyCreativeIdentityProfileUpgrade_ACU, applyCreativeIdentityVectorUpgrade_ACU } from './creative-identity-upgrade';
 import { globalMeta_ACU, loadGlobalMeta_ACU, readProfileSettingsFromStorage_ACU, readProfileTemplateFromStorage_ACU, sanitizeSettingsForProfileSave_ACU, saveGlobalMeta_ACU, writeProfileSettingsToStorage_ACU, writeProfileTemplateToStorage_ACU } from '../../data/repositories/profile-repo';
@@ -794,6 +795,7 @@ export   function loadSettings_ACU() {
       forceDisableStrictJsonTableFillOnce_ACU();
       forceDefaultTableFillPromptsOnce_ACU();
       upgradeTableFillToolPromptOnce_ACU();
+      degradeTableFillToolPromptOnce_ACU();
       forceUserPrefillProfilePromptsOnce_ACU();
       forceDefaultTemplateAssistantPromptOnce_ACU();
       forceDisableStreamingOnce_ACU();
@@ -1042,6 +1044,35 @@ function upgradeTableFillToolPromptOnce_ACU() {
   }
 
 /**
+ * [spv9.7] 填表工具调用改为默认关闭后，把仍是「工具版默认主段」的填表提示词降级回正文 <tableEdit> 默认。
+ * 只替换与当前工具版默认逐字相同的主段（原生/SQL 两套都查），用户改写过的主段与其余段原样保留。
+ * 保存失败时回滚内存且不写 marker，下次加载重试。
+ */
+function degradeTableFillToolPromptOnce_ACU() {
+      if (!settings_ACU || typeof settings_ACU !== 'object') return;
+      if (settings_ACU.tableFillToolDefaultOffVersion === TABLE_FILL_TOOL_DEFAULT_OFF_VERSION_ACU) return;
+      const previousPrompt = settings_ACU.charCardPrompt;
+      const previousVersion = settings_ACU.tableFillToolDefaultOffVersion;
+      try {
+          if (Array.isArray(previousPrompt) && settings_ACU.tableFillNativeToolEnabled !== true) {
+              // charCardPrompt 里可能是原生或 SQL 任一套默认；两套依次过一遍，各自只替换逐字命中的主段。
+              settings_ACU.charCardPrompt = adaptTableFillPromptSegmentsToToolMode_ACU(
+                  adaptTableFillPromptSegmentsToToolMode_ACU(previousPrompt, false, false),
+                  true,
+                  false,
+              );
+          }
+          settings_ACU.tableFillToolDefaultOffVersion = TABLE_FILL_TOOL_DEFAULT_OFF_VERSION_ACU;
+          saveSettings_ACU();
+          logDebug_ACU(`[填表提示词] 工具调用默认关闭的提示词降级完成: ${TABLE_FILL_TOOL_DEFAULT_OFF_VERSION_ACU}`);
+      } catch (error) {
+          settings_ACU.charCardPrompt = previousPrompt;
+          settings_ACU.tableFillToolDefaultOffVersion = previousVersion;
+          logWarn_ACU('[填表提示词] 工具调用默认关闭的提示词降级未保存，下一次加载重试:', error);
+      }
+  }
+
+/**
  * [spv9.6] 各默认提示词第一条身份句融入创作身份声明的一次性升级。
  * 覆盖填表、剧情推进（含内置时间召回预设与前置控制 Agent 全局模板）、正文优化与合并纪要；
  * 只替换与声明前默认段逐字相同的段，用户改写与段元数据原样保留。保存失败时回滚内存且不写 marker。
@@ -1166,6 +1197,8 @@ export   function buildDefaultSettings_ACU() {
           tableApiPreset: '',
           plotApiPreset: '',
           strictJsonTableFillEnabled: false,
+          // 默认关闭：部分渠道只要请求体带 tools 字段就直接报错，开启前需确认渠道支持工具调用。
+          tableFillNativeToolEnabled: false,
           discardUnauthorizedTableEditsEnabled: true,
           // [剧情推进] 按剧情任务ID保存的任务级 API 预设覆盖（key=taskId, value=presetName）
           // 不保存入聊天记录或剧情推进预设，只写进插件全局设置。
@@ -1197,6 +1230,7 @@ export   function buildDefaultSettings_ACU() {
           tableTemplateDefaultsRefreshVersion: '', // [模板预设] 默认表格模板一次性刷新版本
           tableFillPromptForceDefaultVersion: '', // [填表提示词] 一次性强制恢复默认提示词版本
           tableFillToolPromptUpgradeVersion: '', // [填表提示词] 工具化默认提示词一次性升级版本
+          tableFillToolDefaultOffVersion: '', // [填表提示词] 工具调用默认关闭后的提示词降级版本
           creativeIdentityPromptUpgradeVersion: '', // [创作身份声明] 默认提示词身份句一次性升级版本
           templateAssistantPromptForceDefaultVersion: '', // [AI 改表助手] 一次性强制恢复默认提示词版本
           strictJsonTableFillForceDisableVersion: '', // [填表功能] 一次性关闭严格 JSON 填表版本

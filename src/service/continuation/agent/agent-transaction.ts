@@ -41,6 +41,24 @@ function reject_ACU(message: string, details?: Record<string, unknown>): never {
   throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_WRITE_REJECTED', 'agent_delegate', message, false, details));
 }
 
+/** 与 SQL 写入口同一套编号：按既有 prefix+序号的最大值顺延。 */
+function nextEntryId_ACU(prefix: string, width: number, taken: Iterable<string>): string {
+  const pattern = new RegExp(`^${prefix}(\\d+)$`);
+  let max = 0;
+  for (const id of taken) {
+    const matched = pattern.exec(id);
+    if (matched) max = Math.max(max, Number(matched[1]));
+  }
+  return `${prefix}${String(max + 1).padStart(width, '0')}`;
+}
+
+/** 新增条目漏写 id 时由运行时补号，不再整批拒绝；retire 必须指向既有条目，仍要求 id。 */
+function withEntryId_ACU<T extends { action: string; id: string }>(item: T, label: string, prefix: string, width: number, taken: Iterable<string>): T {
+  if (item.id.trim()) return item;
+  if (item.action === 'retire') reject_ACU(`retire ${label}必须指明 id`);
+  return { ...item, id: nextEntryId_ACU(prefix, width, taken) };
+}
+
 function collectTouchedModules_ACU(delta: AgentModuleDelta_ACU): AgentWritableModule_ACU[] {
   const touched: AgentWritableModule_ACU[] = [];
   if (delta.hooks.length || delta.hookPatches.length) touched.push('hooks');
@@ -77,8 +95,8 @@ export function mergeAgentDeltaRevisions_ACU(delta: AgentModuleDelta_ACU, readRe
 
 function applyHookDelta_ACU(existing: AgentHookEntry_ACU[], items: AgentHookDeltaItem_ACU[], settledIndex: number): AgentHookEntry_ACU[] {
   const byId = new Map(existing.map(entry => [entry.id, entry]));
-  for (const item of items) {
-    if (!item.id.trim()) reject_ACU('伏笔条目缺少 id');
+  for (const raw of items) {
+    const item = withEntryId_ACU(raw, '伏笔', 'H', 3, byId.keys());
     if (item.action === 'retire') {
       const current = byId.get(item.id);
       if (!current) reject_ACU(`retire 的伏笔不存在：${item.id}`, { id: item.id });
@@ -123,8 +141,8 @@ function applyHookPatches_ACU(entries: AgentHookEntry_ACU[], patches: AgentHookP
 
 function applyInfoGapDelta_ACU(existing: AgentInfoGapEntry_ACU[], items: AgentInfoGapDeltaItem_ACU[], settledIndex: number): AgentInfoGapEntry_ACU[] {
   const byId = new Map(existing.map(entry => [entry.id, entry]));
-  for (const item of items) {
-    if (!item.id.trim()) reject_ACU('信息差条目缺少 id');
+  for (const raw of items) {
+    const item = withEntryId_ACU(raw, '信息差条目', 'E', 3, byId.keys());
     if (item.action === 'retire') {
       const current = byId.get(item.id);
       if (!current) reject_ACU(`retire 的信息差条目不存在：${item.id}`, { id: item.id });
@@ -356,8 +374,8 @@ function assertVolumeLifecycle_ACU(
  */
 function applyChronologyDelta_ACU(existing: AgentChronologyEntry_ACU[], items: AgentChronologyDeltaItem_ACU[], settledIndex: number, evidenceFloorIndexes?: ReadonlySet<number>): AgentChronologyEntry_ACU[] {
   const byId = new Map(existing.map(entry => [entry.id, entry]));
-  for (const item of items) {
-    if (!item.id.trim()) reject_ACU('年代学条目缺少 id');
+  for (const raw of items) {
+    const item = withEntryId_ACU(raw, '年代学条目', 'T', 3, byId.keys());
     if (item.action === 'retire') {
       const current = byId.get(item.id);
       if (!current) reject_ACU(`retire 的年代学条目不存在：${item.id}`, { id: item.id });
@@ -434,8 +452,8 @@ function applyChronologyPatches_ACU(existing: AgentChronologyEntry_ACU[], patche
 
 function applyStoryArcDelta_ACU(existing: AgentStoryArcEntry_ACU[], items: AgentStoryArcDeltaItem_ACU[]): AgentStoryArcEntry_ACU[] {
   const byId = new Map(existing.map(entry => [entry.id, entry]));
-  for (const item of items) {
-    if (!item.id.trim()) reject_ACU('总纲条目缺少 id');
+  for (const raw of items) {
+    const item = withEntryId_ACU(raw, '总纲条目', raw.scope === 'story' ? 'STORY-' : 'VOL-', 2, byId.keys());
     if (item.action === 'retire') {
       const current = byId.get(item.id);
       if (!current) reject_ACU(`retire 的总纲条目不存在：${item.id}`, { id: item.id });

@@ -18,7 +18,7 @@ import { preserveNativeToolPostProcessing_ACU, callMainApiChatCompletionText_ACU
 import { isConnectionProfileChatCompletion_ACU, isMainApiChatCompletionAvailable_ACU, readMainApiChatCompletionRouting_ACU, sendMainApiChatCompletionRequest_ACU, sendProfileChatCompletionRequest_ACU } from '../../../data/gateways/ai-gateway';
 import { pristineFetch_ACU } from '../../../data/gateways/pristine-fetch';
 import { chatTurnFromJson_ACU, readFetchChatTurn_ACU, type AiChatTurn_ACU } from '../native-tool';
-import { buildTableFillNativeTools_ACU, degradeTableFillPromptSegmentsToBodyFormat_ACU, resolveTableFillToolTurn_ACU } from './table-fill-tools';
+import { adaptTableFillPromptSegmentsToToolMode_ACU, buildTableFillNativeTools_ACU, resolveTableFillToolTurn_ACU } from './table-fill-tools';
 
 
 /**
@@ -98,9 +98,11 @@ export class RetryableAiResponseError_ACU extends Error {
         promptSegments = [{ role: 'USER', content: charCardPromptSetting }];
     }
 
+    // 填表原生工具默认关闭：部分渠道只要请求体出现 tools 字段就直接报错而不降级，需用户显式开启。
+    const tableFillToolOptIn = settings_ACU.tableFillNativeToolEnabled === true;
     // 判定本次请求实际能否携带填表原生工具：Text Completion 连接与 generateRaw 回退取不回 tool_calls。
     const tableFillToolChannelAvailable = (() => {
-        if (strictJsonFillEnabled) return false;
+        if (strictJsonFillEnabled || !tableFillToolOptIn) return false;
         if (effectiveApiMode === 'tavern') {
             const profile = getConnectionManagerProfiles_ACU().find(p => p.id === effectiveTavernProfile);
             return !!profile && isConnectionProfileChatCompletion_ACU(profile);
@@ -111,10 +113,14 @@ export class RetryableAiResponseError_ACU extends Error {
         }
         return true;
     })();
-    if (!strictJsonFillEnabled && !tableFillToolChannelAvailable) {
-        // 通道带不了工具：工具版默认主段降级为正文 <tableEdit> 格式，避免提示词要求调用不存在的工具。
-        promptSegments = degradeTableFillPromptSegmentsToBodyFormat_ACU(promptSegments, sqliteMode);
-        logDebug_ACU('[填表] 当前通道无法携带原生工具，降级使用正文 <tableEdit> 格式提示词。');
+    if (!strictJsonFillEnabled) {
+        // 默认主段按本次是否真的携带工具对齐：带工具用工具版默认，不带工具用正文 <tableEdit> 格式默认。
+        promptSegments = adaptTableFillPromptSegmentsToToolMode_ACU(promptSegments, sqliteMode, tableFillToolChannelAvailable);
+        if (!tableFillToolChannelAvailable) {
+            logDebug_ACU(tableFillToolOptIn
+                ? '[填表] 当前通道无法携带原生工具，降级使用正文 <tableEdit> 格式提示词。'
+                : '[填表] 填表工具调用未开启，使用正文 <tableEdit> 格式提示词。');
+        }
     }
 
     let userInfoContent_Table = '';
@@ -300,14 +306,11 @@ export class RetryableAiResponseError_ACU extends Error {
             useTavernTools = tableFillTools.length > 0 && isConnectionProfileChatCompletion_ACU(targetProfile);
             if (useTavernTools) {
                 // Chat Completion 酒馆连接由本插件组装请求体直发生成端点，不经宿主被第三方脚本包装的全局 fetch。
-                // 指定工具的 tool_choice 同时让预设脚本的抗截断拦截器放行（调用方已强制工具选择时它不接管）；
-                // Claude 源后端把 tool_choice 包成 { type }，只接受字符串，故回退 auto。
-                const apiType = String(targetProfile.api || '').toLowerCase();
+                // 指定 tool_choice 让预设脚本的抗截断拦截器放行（调用方已提供工具时它不接管）；
+                // Claude/Gemini/DeepSeek/Kimi 等多数后端只接受字符串格式，统一使用 'auto' 保证兼容性。
                 const overridePayload: Record<string, unknown> = {
                     tools: tableFillTools,
-                    tool_choice: apiType === 'claude' || apiType === 'google'
-                        ? 'auto'
-                        : { type: 'function', function: { name: tableFillTools[0].function.name } },
+                    tool_choice: 'auto',
                 };
                 // strict/merge/semi/single 后处理会剥掉 tool_calls，与自定义通道同规则改用 *_tools 变体。
                 const rawPostProcessing = String(targetProfile['prompt-post-processing'] ?? '');
@@ -380,15 +383,13 @@ export class RetryableAiResponseError_ACU extends Error {
         if (effectiveApiConfig.useMainApi && !forceDirectApi) {
             if (tableFillTools.length && isMainApiChatCompletionAvailable_ACU()) {
                 // generateRaw 只返回文本、取不回 tool_calls；带工具时按主连接设置组装请求体直发生成端点。
-                // 工具选择与后处理规则与酒馆连接路径一致：指定工具的 tool_choice 让预设脚本拦截器放行，
-                // Claude 源后端只接受字符串 tool_choice，回退 auto。
+                // 工具选择与后处理规则与酒馆连接路径一致：指定 tool_choice 让预设脚本拦截器放行，
+                // Claude/Gemini/DeepSeek/Kimi 等多数后端只接受字符串格式，统一使用 'auto' 保证兼容性。
                 logDebug_ACU('ACU: 通过酒馆主连接（Chat Completion）发送带原生工具的填表请求...');
                 const routing = readMainApiChatCompletionRouting_ACU();
                 const mainOverridePayload: Record<string, unknown> = {
                     tools: tableFillTools,
-                    tool_choice: routing.source === 'claude' || routing.source === 'google'
-                        ? 'auto'
-                        : { type: 'function', function: { name: tableFillTools[0].function.name } },
+                    tool_choice: 'auto',
                 };
                 const mainToolPostProcessing = preserveNativeToolPostProcessing_ACU(routing.postProcessing, true);
                 if (mainToolPostProcessing !== routing.postProcessing) mainOverridePayload.custom_prompt_post_processing = mainToolPostProcessing;
@@ -471,8 +472,9 @@ export class RetryableAiResponseError_ACU extends Error {
                 return finalizeTableFillTurn(turn);
             }
             const content = await handleApiResponse_ACU(response, abortSignal);
-            if (content) {
-                return content.trim();
+            const trimmed = typeof content === 'string' ? content.trim() : '';
+            if (trimmed) {
+                return trimmed;
             }
             throw new RetryableAiResponseError_ACU();
 

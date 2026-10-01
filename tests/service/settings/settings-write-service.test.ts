@@ -40,11 +40,15 @@ import {
   setUpdateNumberFields_ACU,
 } from '../../../src/service/settings/settings-write-service';
 import {
-  DEFAULT_CHAR_CARD_PROMPT_ACU,
-  DEFAULT_CHAR_CARD_PROMPT_SQL_ACU,
   DEFAULT_MERGE_SUMMARY_PROMPT_ACU,
   DEFAULT_MERGE_SUMMARY_PROMPT_SQL_ACU,
 } from '../../../src/shared/defaults-json.js';
+import { buildTableFillDefaultPromptSegments_ACU } from '../../../src/service/ai/prompt-builder/table-fill-tools';
+
+/** 填表默认提示词的期望值：默认关闭原生工具，主段应为正文格式。 */
+function expectedTableFillDefault_ACU(sqlite: boolean): any[] {
+  return buildTableFillDefaultPromptSegments_ACU(sqlite, false);
+}
 
 beforeEach(() => {
   mockSettings.storageMode = 'native';
@@ -61,7 +65,7 @@ describe('resetAllPromptsToDefault_ACU', () => {
     const result = resetAllPromptsToDefault_ACU();
 
     expect(result.ok).toBe(true);
-    expect(mockSettings.charCardPrompt).toEqual(DEFAULT_CHAR_CARD_PROMPT_ACU);
+    expect(mockSettings.charCardPrompt).toEqual(expectedTableFillDefault_ACU(false));
     expect(mockSettings.mergeSummaryPrompt).toEqual(DEFAULT_MERGE_SUMMARY_PROMPT_ACU);
     expect(mockSaveSettings).toHaveBeenCalledTimes(1);
   });
@@ -71,7 +75,7 @@ describe('resetAllPromptsToDefault_ACU', () => {
     const result = resetAllPromptsToDefault_ACU();
 
     expect(result.ok).toBe(true);
-    expect(mockSettings.charCardPrompt).toEqual(DEFAULT_CHAR_CARD_PROMPT_SQL_ACU);
+    expect(mockSettings.charCardPrompt).toEqual(expectedTableFillDefault_ACU(true));
     expect(mockSettings.mergeSummaryPrompt).toEqual(DEFAULT_MERGE_SUMMARY_PROMPT_SQL_ACU);
   });
 
@@ -79,7 +83,7 @@ describe('resetAllPromptsToDefault_ACU', () => {
     const result = resetAllPromptsToDefault_ACU('sqlite');
 
     expect(result.ok).toBe(true);
-    expect(mockSettings.charCardPrompt).toEqual(DEFAULT_CHAR_CARD_PROMPT_SQL_ACU);
+    expect(mockSettings.charCardPrompt).toEqual(expectedTableFillDefault_ACU(true));
     expect(mockSettings.mergeSummaryPrompt).toEqual(DEFAULT_MERGE_SUMMARY_PROMPT_SQL_ACU);
   });
 
@@ -99,7 +103,7 @@ describe('resetAllPromptsToDefault_ACU', () => {
     const result = resetAllPromptsToDefault_ACU(undefined, { save: false });
 
     expect(result.ok).toBe(true);
-    expect(mockSettings.charCardPrompt).toEqual(DEFAULT_CHAR_CARD_PROMPT_ACU);
+    expect(mockSettings.charCardPrompt).toEqual(expectedTableFillDefault_ACU(false));
     expect(mockSaveSettings).not.toHaveBeenCalled();
   });
 

@@ -210,56 +210,57 @@ function isRecordCompatible_ACU(record: VectorIndexHotCacheChunkRecord_ACU | nul
  * 只作用于 chunk 数据 store，绝不触碰 flush 任务 store（任务是持久化意图，不是缓存）。
  */
 const VECTOR_HOT_CACHE_MAX_BYTES_ACU = 64 * 1024 * 1024;
-const VECTOR_HOT_CACHE_TRIM_THROTTLE_MS_ACU = 60_000;
+const VECTOR_HOT_CACHE_TRIM_THROTTLE_MS_ACU = 5_000;
 let lastHotCacheTrimAt_ACU = 0;
 
 export async function trimSummaryVectorHotCacheToBudget_ACU(
     maxBytes: number = VECTOR_HOT_CACHE_MAX_BYTES_ACU,
 ): Promise<void> {
-    try {
-        const db = await openDb_ACU();
-        const totalBytes = await new Promise<number>((resolve, reject) => {
-            let bytes = 0;
-            const tx = db.transaction(STORE_NAME_ACU, 'readonly');
-            const request = tx.objectStore(STORE_NAME_ACU).openCursor();
-            request.onsuccess = () => {
-                const cursor = request.result;
-                if (cursor) {
-                    bytes += Math.max(0, Number((cursor.value as VectorIndexHotCacheChunkRecord_ACU).byteSize) || 0);
-                    cursor.continue();
-                }
-            };
-            request.onerror = () => reject(request.error || new Error('统计交火向量热缓存体积失败'));
-            tx.oncomplete = () => { db.close(); resolve(bytes); };
-            tx.onerror = () => { db.close(); reject(tx.error || new Error('统计交火向量热缓存体积事务失败')); };
-        });
-        if (totalBytes <= maxBytes) return;
-        let bytesToFree = totalBytes - maxBytes;
-        const trimDb = await openDb_ACU();
-        await new Promise<void>((resolve, reject) => {
-            const tx = trimDb.transaction(STORE_NAME_ACU, 'readwrite');
-            const request = tx.objectStore(STORE_NAME_ACU).index('lastAccessAt').openCursor();
-            request.onsuccess = () => {
-                const cursor = request.result;
-                if (cursor && bytesToFree > 0) {
-                    bytesToFree -= Math.max(0, Number((cursor.value as VectorIndexHotCacheChunkRecord_ACU).byteSize) || 0);
-                    cursor.delete();
-                    cursor.continue();
-                }
-            };
-            request.onerror = () => reject(request.error || new Error('交火向量热缓存 LRU 淘汰失败'));
-            tx.oncomplete = () => { trimDb.close(); resolve(); };
-            tx.onerror = () => { trimDb.close(); reject(tx.error || new Error('交火向量热缓存 LRU 淘汰事务失败')); };
-        });
-    } catch {
-        // 淘汰失败不影响读写链路，下次写入会再次尝试。
-    }
+    const db = await openDb_ACU();
+    const totalBytes = await new Promise<number>((resolve, reject) => {
+        let bytes = 0;
+        const tx = db.transaction(STORE_NAME_ACU, 'readonly');
+        const request = tx.objectStore(STORE_NAME_ACU).openCursor();
+        request.onsuccess = () => {
+            const cursor = request.result;
+            if (cursor) {
+                bytes += Math.max(0, Number((cursor.value as VectorIndexHotCacheChunkRecord_ACU).byteSize) || 0);
+                cursor.continue();
+            }
+        };
+        request.onerror = () => reject(request.error || new Error('统计交火向量热缓存体积失败'));
+        tx.oncomplete = () => { db.close(); resolve(bytes); };
+        tx.onerror = () => { db.close(); reject(tx.error || new Error('统计交火向量热缓存体积事务失败')); };
+    });
+    if (totalBytes <= maxBytes) return;
+    let bytesToFree = totalBytes - maxBytes;
+    const trimDb = await openDb_ACU();
+    await new Promise<void>((resolve, reject) => {
+        const tx = trimDb.transaction(STORE_NAME_ACU, 'readwrite');
+        const request = tx.objectStore(STORE_NAME_ACU).index('lastAccessAt').openCursor();
+        request.onsuccess = () => {
+            const cursor = request.result;
+            if (cursor && bytesToFree > 0) {
+                bytesToFree -= Math.max(0, Number((cursor.value as VectorIndexHotCacheChunkRecord_ACU).byteSize) || 0);
+                cursor.delete();
+                cursor.continue();
+            }
+        };
+        request.onerror = () => reject(request.error || new Error('交火向量热缓存 LRU 淘汰失败'));
+        tx.oncomplete = () => { trimDb.close(); resolve(); };
+        tx.onerror = () => { trimDb.close(); reject(tx.error || new Error('交火向量热缓存 LRU 淘汰事务失败')); };
+    });
 }
 
-function maybeScheduleHotCacheTrim_ACU(): void {
-    if (Date.now() - lastHotCacheTrimAt_ACU < VECTOR_HOT_CACHE_TRIM_THROTTLE_MS_ACU) return;
-    lastHotCacheTrimAt_ACU = Date.now();
-    void trimSummaryVectorHotCacheToBudget_ACU().catch((): undefined => undefined);
+async function maybeScheduleHotCacheTrim_ACU(): Promise<void> {
+    const now = Date.now();
+    if (now - lastHotCacheTrimAt_ACU < VECTOR_HOT_CACHE_TRIM_THROTTLE_MS_ACU) return;
+    lastHotCacheTrimAt_ACU = now;
+    try {
+        await trimSummaryVectorHotCacheToBudget_ACU();
+    } catch (error) {
+        console.warn('[交火向量热缓存] LRU 淘汰失败，缓存可能超预算:', error);
+    }
 }
 
 export async function putSummaryVectorHotCacheChunks_ACU(options: VectorIndexHotCacheWriteOptions_ACU): Promise<void> {
@@ -270,6 +271,13 @@ export async function putSummaryVectorHotCacheChunks_ACU(options: VectorIndexHot
 
         // 不可变 V2 快照：外部文件即权威，写入热缓存只会产生无效 IDB 扫描。
         if (isImmutableV2SnapshotManifest_ACU(manifest)) return;
+
+        // 写入前先删除同一 scope 的旧缓存，避免历史版本累积（indexId 每次更新都不同）。
+        await deleteSummaryVectorHotCacheByScope_ACU({
+            chatKey: manifest.chatKey,
+            isolationKey: manifest.isolationKey,
+            sourceTableKey: manifest.sourceTableKey,
+        });
 
         // ── 单文件快照模式：直接写入所有 chunks，不依赖 contentAddressed.chunkRefs ──
         if (isSingleFileSnapshotManifest_ACU(manifest)) {
@@ -313,7 +321,7 @@ export async function putSummaryVectorHotCacheChunks_ACU(options: VectorIndexHot
                 tx.oncomplete = () => { db.close(); resolve(); };
                 tx.onerror = () => { db.close(); reject(tx.error || new Error('写入交火向量热缓存事务失败（单文件快照）')); };
             });
-            maybeScheduleHotCacheTrim_ACU();
+            await maybeScheduleHotCacheTrim_ACU();
             return;
         }
 
@@ -368,7 +376,7 @@ export async function putSummaryVectorHotCacheChunks_ACU(options: VectorIndexHot
                 reject(tx.error || new Error('写入交火向量热缓存事务失败'));
             };
         });
-        maybeScheduleHotCacheTrim_ACU();
+        await maybeScheduleHotCacheTrim_ACU();
     } catch {
         // 热缓存只是可丢失加速层，失败不能影响外置权威链路。
     }

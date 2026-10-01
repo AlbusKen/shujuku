@@ -1379,12 +1379,54 @@ export function withV43CreativeIdentity_ACU(role: keyof ContinuationAgentPrompts
     : { ...segment }));
 }
 
-/** 当前默认组：V42 之上给每个角色的第一条身份句融入创作身份声明。 */
-export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+/** V43 冻结入口：V42 之上给每个角色的第一条身份句融入创作身份声明；V44 在其上改写子代理 INSERT 范例，这里保持原样供迁移对照。 */
+export function buildV43ContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
   const prompts = buildV42ContinuationAgentPrompts_ACU();
   const next = { ...prompts };
   for (const role of Object.keys(prompts) as Array<keyof ContinuationAgentPrompts_ACU>) {
     next[role] = withV43CreativeIdentity_ACU(role, prompts[role]);
+  }
+  return next;
+}
+
+
+
+/** V44：新行 ID 由运行时自动编号，INSERT 范例不再示范手写 id，避免模型自造编号撞号或格式不一。 */
+const V44_ID_AUTOFILL_SWAPS_ACU: ReadonlyArray<readonly [string, string]> = [
+  ["INSERT INTO story_arc (id, scope, title, direction, escalation, status, expected_revision) VALUES ('VOL-01', 'volume',", "INSERT INTO story_arc (scope, title, direction, escalation, status, expected_revision) VALUES ('volume',"],
+  ["INSERT INTO hooks (id, summary, status, importance, planted_index, expected_revision) VALUES ('H1', '伏笔',", "INSERT INTO hooks (summary, status, importance, planted_index, expected_revision) VALUES ('伏笔',"],
+];
+const V44_ID_AUTOFILL_NOTE_ACU = '新行 INSERT 不写 id，由系统自动编号，回执的 generatedIds 会列出新编号；之后的 UPDATE/DELETE 再用回执或读取到的 id。';
+
+function v44Content_ACU(content: string): string {
+  let next = content;
+  for (const [from, to] of V44_ID_AUTOFILL_SWAPS_ACU) next = swapLiteral_ACU(next, from, to);
+  if (next === content) return content;
+  const anchor = '不输出 delta。';
+  const at = next.indexOf(anchor);
+  return at < 0 ? next : `${next.slice(0, at + anchor.length)}${V44_ID_AUTOFILL_NOTE_ACU}${next.slice(at + anchor.length)}`;
+}
+
+let v44PristineRoles_ACU: ContinuationAgentPrompts_ACU | null = null;
+
+/**
+ * V43 → V44 精确迁移：只改写与 V43 默认正文逐字相同、且含旧 INSERT 范例的段；
+ * 用户改写过的段与段元数据原样保留。新正文不含旧范例，重复调用不产生变化。
+ */
+export function withV44IdAutofill_ACU(role: keyof ContinuationAgentPrompts_ACU, segments: readonly ContinuationPromptSegment_ACU[]): ContinuationPromptSegment_ACU[] {
+  if (!v44PristineRoles_ACU) v44PristineRoles_ACU = buildV43ContinuationAgentPrompts_ACU();
+  const pristine = new Set((v44PristineRoles_ACU[role] ?? []).map(segment => segment.content));
+  return segments.map(segment => (pristine.has(segment.content)
+    ? { ...segment, content: v44Content_ACU(segment.content) }
+    : { ...segment }));
+}
+
+/** 当前默认组：V43 之上让子代理新行 INSERT 省略 id，由运行时自动编号。 */
+export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+  const prompts = buildV43ContinuationAgentPrompts_ACU();
+  const next = { ...prompts };
+  for (const role of Object.keys(prompts) as Array<keyof ContinuationAgentPrompts_ACU>) {
+    next[role] = withV44IdAutofill_ACU(role, prompts[role]);
   }
   return next;
 }
