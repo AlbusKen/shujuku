@@ -17,7 +17,7 @@ export const deskPetStatusWords = {
 export type DeskPetStatusGroup = keyof typeof deskPetStatusWords;
 
 const FEATURE_GROUP_RULES: Array<[RegExp, DeskPetStatusGroup]> = [
-  [/填表|追平/, "table"],
+  [/填表|追平|表格/, "table"],
   [/规划/, "plan"],
   [/优化/, "polish"],
   [/续写/, "continuation"],

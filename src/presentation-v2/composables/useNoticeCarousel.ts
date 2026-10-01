@@ -20,7 +20,7 @@ export const NOTICE_SLIDES_PER_JOKE = 2;
 const RESUME_MIN_MS = 1500;
 
 export type NoticeSlide =
-  | { type: "notice"; key: string; notice: Notice_ACU }
+  | { type: "notice"; key: string; notice: Notice_ACU; word: string }
   | { type: "task"; key: string; taskId: string; word: string }
   | { type: "joke"; key: string; text: string };
 
@@ -127,7 +127,7 @@ export function useNoticeCarousel(hubState: NoticeHubState, tasks: ComputedRef<A
     const notice = shiftNotice_ACU();
     if (notice) {
       slidesSinceJoke += 1;
-      show({ type: "notice", key: notice.id, notice });
+      show({ type: "notice", key: notice.id, notice, word: pickDeskPetStatusWord(`${notice.title} ${notice.text}`) });
       return;
     }
     const task = nextTask();

@@ -15,7 +15,7 @@
     @pointerleave="onPointerLeave"
   >
     <div v-if="showPeek" class="acu-desk-pet__peek" :class="`is-${dockEdge}`">
-      <img class="acu-desk-pet__peek-img" :src="snoozing ? peekSleepyImage : peekImage" :style="peekImgStyle" alt="" draggable="false" />
+      <img class="acu-desk-pet__peek-img" :src="peekSrc" :style="peekImgStyle" alt="" draggable="false" />
     </div>
     <div v-else class="acu-desk-pet__body" :class="{ 'is-breathing': breathing }">
       <div class="acu-desk-pet__flip" :class="{ 'is-flipped': flipped }">
@@ -39,6 +39,7 @@ import knockdownImage from "../assets/desk-pet/knockdown.png";
 import lookLeftImage from "../assets/desk-pet/look-left.png";
 import lookRightImage from "../assets/desk-pet/look-right.png";
 import peekImage from "../assets/desk-pet/peek.png";
+import peekOriginalImage from "../assets/desk-pet/peek-original.png";
 import peekSleepyImage from "../assets/desk-pet/peek-sleepy.png";
 import poundImage from "../assets/desk-pet/pound.png";
 import rollImage from "../assets/desk-pet/roll.png";
@@ -151,6 +152,10 @@ const DRAG_OVERSHOOT_RATIO = 0.5;
 const DOCK_INSET_PX = 2;
 /** 半隐时露出的宽度占桌宠尺寸的比例：只露眼睛和嘴。 */
 const PEEK_DEPTH_RATIO = 0.56;
+/** 原图探头帧露出更深（素材里头顶到嘴下约占 74%）。 */
+const PEEK_ORIGINAL_DEPTH_RATIO = 0.74;
+/** 缩边期间两种探头造型的轮换间隔。 */
+const PEEK_ROTATE_MS = 30000;
 /** 吸附后无人理会多久缩进去。 */
 const TUCK_DELAY_MS = 4000;
 /** 待机动作间隔 15–20 秒。 */
@@ -226,8 +231,38 @@ let lastMoveDir = 0;
 let lastWaveAt = 0;
 
 const size = computed(() => (viewport.value.width <= NARROW_VIEWPORT_PX ? 64 : 88));
-const peekDepth = computed(() => Math.round(size.value * PEEK_DEPTH_RATIO));
 const showPeek = computed(() => !!dockEdge.value && tucked.value && !dragging.value && !reaction.value);
+
+/** 缩边探头造型：普通探头 / 原图探头，每 30 秒轮换；睡着时固定犯困探头。 */
+const peekVariant = ref<"peek" | "original">("peek");
+let peekRotateTimer: AcuTimerHandle | null = null;
+const peekOriginal = computed(() => peekVariant.value === "original" && !snoozing.value);
+const peekSrc = computed(() => (snoozing.value ? peekSleepyImage : peekOriginal.value ? peekOriginalImage : peekImage));
+const peekDepth = computed(() => Math.round(size.value * (peekOriginal.value ? PEEK_ORIGINAL_DEPTH_RATIO : PEEK_DEPTH_RATIO)));
+
+function stopPeekRotate(): void {
+  acuClearTimeout(peekRotateTimer);
+  peekRotateTimer = null;
+}
+
+function schedulePeekRotate(): void {
+  stopPeekRotate();
+  peekRotateTimer = acuSetTimeout(() => {
+    peekRotateTimer = null;
+    peekVariant.value = peekVariant.value === "peek" ? "original" : "peek";
+    schedulePeekRotate();
+  }, PEEK_ROTATE_MS);
+}
+
+watch(showPeek, shown => {
+  if (!shown) {
+    stopPeekRotate();
+    return;
+  }
+  // 每次缩进去随机挑起始造型，之后每 30 秒换一次。
+  peekVariant.value = Math.random() < 0.5 ? "peek" : "original";
+  schedulePeekRotate();
+});
 
 const pose = computed<Pose>(() => {
   if (dragging.value) return "struggle";
@@ -738,6 +773,7 @@ onBeforeUnmount(() => {
   getAcuHostWindow().removeEventListener("resize", onResize);
   if (frameHandle !== undefined) acuCancelAnimationFrame(frameHandle);
   for (const handle of [idleTimer, idleStepTimer, snoozeTimer, tuckTimer, reactionTimer, settleTimer, pressTimer]) acuClearTimeout(handle);
+  stopPeekRotate();
 });
 </script>
 

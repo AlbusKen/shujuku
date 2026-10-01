@@ -198,12 +198,15 @@ describe('mount — 当前文档场景', () => {
     expect(root!.contains(bubble!)).toBe(false);
     expect(shell!.contains(bubble!)).toBe(false);
     // 任务片默认只显示「正在XXXX…」，明细需点击气泡后才展开。
-    expect(bubble!.textContent).toMatch(/正在.+…/);
-    expect(bubble!.textContent).not.toContain('手动填表开始。');
+    expect(bubble!.querySelector('.acu-notice-bubble__text')!.textContent).toMatch(/正在.+…/);
+    const detail = bubble!.querySelector<HTMLElement>('.acu-notice-bubble__detail');
+    expect(detail).not.toBeNull();
+    expect(detail!.style.display).toBe('none');
     bubble!.querySelector<HTMLElement>('.acu-notice-bubble__body')!.click();
     await nextTick();
-    expect(bubble!.textContent).toContain('手动填表');
-    expect(bubble!.textContent).toContain('手动填表开始。');
+    expect(detail!.style.display).not.toBe('none');
+    expect(detail!.textContent).toContain('手动填表');
+    expect(detail!.textContent).toContain('手动填表开始。');
 
     mount.closeAcuV2App();
     await nextTick();

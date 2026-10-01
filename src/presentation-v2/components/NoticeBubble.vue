@@ -27,9 +27,9 @@
     >
       <p v-if="heading" class="acu-notice-bubble__heading">{{ heading }}</p>
       <p v-if="bodyText" class="acu-notice-bubble__text">{{ bodyText }}</p>
-      <div v-if="expandable && expanded" class="acu-notice-bubble__detail">
-        <p class="acu-notice-bubble__detail-title">{{ task?.feature }}</p>
-        <p class="acu-notice-bubble__detail-text">{{ task?.detail }}</p>
+      <div v-if="expandable" v-show="expanded" class="acu-notice-bubble__detail">
+        <p v-if="detailTitle" class="acu-notice-bubble__detail-title">{{ detailTitle }}</p>
+        <p v-if="detailText" class="acu-notice-bubble__detail-text">{{ detailText }}</p>
       </div>
     </div>
     <div v-if="actionButtons.length || closable" class="acu-notice-bubble__tools">
@@ -104,16 +104,15 @@ const heading = computed(() => {
   const current = props.slide;
   if (!current) return "";
   if (current.type === "joke") return "你知道吗？";
-  if (current.type === "notice") return current.notice.title;
   return "";
 });
 
-/** 任务片只显示似是而非的「正在XXXX…」，不展示批次、重试等明细。 */
+/** 通知与任务表面只显示似是而非的「正在XXXX…」；原文、批次、重试等明细点击后展开。 */
 const bodyText = computed(() => {
   const current = props.slide;
   if (!current) return "";
   if (current.type === "joke") return current.text;
-  if (current.type === "notice") return current.notice.text;
+  if (current.type === "notice") return `正在${current.word}…`;
   return props.task ? `正在${current.word}…` : "";
 });
 
@@ -136,9 +135,21 @@ const actionButtons = computed(() => {
 /** 任务片只有可关闭任务才显示关闭；消息与笑话的关闭即跳到下一条。 */
 const closable = computed(() => props.slide?.type !== "task" || props.task?.dismissible === true);
 
-/** 任务片可点开查看真实明细（批次、重试等）；默认只显示「正在XXXX…」。 */
+/** 通知片与任务片可点开查看真实内容；默认只显示「正在XXXX…」。 */
 const expanded = ref(false);
-const expandable = computed(() => props.slide?.type === "task" && !!props.task?.detail);
+const detailTitle = computed(() => {
+  const current = props.slide;
+  if (current?.type === "notice") return current.notice.title;
+  if (current?.type === "task") return props.task?.feature || "";
+  return "";
+});
+const detailText = computed(() => {
+  const current = props.slide;
+  if (current?.type === "notice") return current.notice.text;
+  if (current?.type === "task") return props.task?.detail || "";
+  return "";
+});
+const expandable = computed(() => props.slide?.type !== "joke" && !!(detailText.value || detailTitle.value));
 
 function toggleDetail(): void {
   if (!expandable.value) return;
@@ -243,8 +254,9 @@ onBeforeUnmount(() => {
   align-items: flex-start;
   gap: 8px;
   width: max-content;
-  min-width: 160px;
-  max-width: min(320px, calc(100vw - 16px));
+  min-width: 200px;
+  max-width: min(400px, calc(100vw - 16px));
+  padding: 10px 12px 10px 14px;
   border: 1px solid var(--bubble-border);
   border-radius: 12px;
   background: var(--bubble-bg);
