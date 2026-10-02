@@ -30,7 +30,6 @@ export type FillMode = FillMode_ACU;
 export interface FormFillProfiles {
   classic: FillModePreferences_ACU['classic'];
   vector: FillModePreferences_ACU['vector'];
-  llm: FillModePreferences_ACU['llm'];
 }
 
 interface FormFillModeState {
@@ -67,7 +66,6 @@ function readState(): Omit<FormFillModeState, 'switching' | 'saveError'> {
     profiles: {
       classic: { ...preferences.classic },
       vector: { ...preferences.vector },
-      llm: { ...preferences.llm },
     },
   };
 }
@@ -111,17 +109,12 @@ export const useFormFillModeStore = defineStore('acu-v2-form-fill-mode', {
       this.profiles.vector.candidateLimit = clampInteger(value, VECTOR_CANDIDATE_LIMIT_DEFAULT_ACU, 1, 5000);
       this.persistPreferences();
     },
-    setLlmApiPresetName(value: string): void {
-      this.profiles.llm.apiPresetName = String(value || '').trim();
-      this.persistPreferences();
-    },
     persistPreferences(): void {
       const result = saveFillModePreferences_ACU({
         schemaVersion: 1,
         selectedMode: this.preferredMode,
         classic: { ...this.profiles.classic },
         vector: { ...this.profiles.vector },
-        llm: { ...this.profiles.llm },
       });
       if (!('error' in result)) {
         this.saveError = null;

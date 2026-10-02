@@ -26,7 +26,6 @@ export interface FillModePreferences_ACU {
     /** 候选上限：送入 rerank 的候选分片上限，运行时不小于 resultCount。 */
     candidateLimit: number;
   };
-  llm: { apiPresetName: string };
 }
 
 export interface FillModePreferencesRead_ACU {
@@ -70,7 +69,6 @@ export function normalizeFillModePreferences_ACU(
     if (isFillMode_ACU(source.selectedMode)) selectedMode = source.selectedMode;
     else diagnostics.push(`selectedMode 非法（${String(source.selectedMode)}），已回退为 ${fallbackMode}`);
   }
-  const apiPresetName = source.llm?.apiPresetName;
   return {
     preferences: {
       schemaVersion: 1,
@@ -83,7 +81,6 @@ export function normalizeFillModePreferences_ACU(
         minScore: readScore_ACU(source.vector?.minScore, VECTOR_MIN_SCORE_DEFAULT_ACU, 'vector.minScore', diagnostics),
         candidateLimit: readInt_ACU(source.vector?.candidateLimit, VECTOR_CANDIDATE_LIMIT_DEFAULT_ACU, 1, 5000, 'vector.candidateLimit', diagnostics),
       },
-      llm: { apiPresetName: typeof apiPresetName === 'string' ? apiPresetName.trim() : '' },
     },
     diagnostics,
   };

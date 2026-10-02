@@ -103,7 +103,6 @@ async function mountPlotPage(opts: {
     selectedMode: 'llm',
     classic: { recentChronicleRows: 15 },
     vector: { resultCount: 200 },
-    llm: { apiPresetName: '' },
   };
   const mount = await import('../../../src/presentation-v2/bootstrap/mount');
   await mount.openAcuV2App();
@@ -134,6 +133,12 @@ describe('PlotPage', () => {
     expect(toggle).toBeNull();
 
     mount.__resetAcuV2MountForTests();
+  });
+
+  it('LLM 模式不再渲染无效的 continuation API 预设字段', async () => {
+    await mountPlotPage();
+
+    expect(document.body.textContent).not.toContain('LLM / continuation API 预设');
   });
 
   it('开发者选项关闭时，编辑抽屉不渲染"匹配替换"字段', async () => {
