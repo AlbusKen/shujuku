@@ -9,7 +9,7 @@ import { logDebug_ACU, logError_ACU } from '../../../shared/utils';
 import { runPlotTasksRuntime_ACU } from './plot-task-engine';
 import { capturePlotRuntimeScope_ACU, summarizePlotRuntimeError_ACU, summarizePlotRuntimeScope_ACU } from './plot-runtime-scope';
 import { isFlightModeActive_ACU } from '../../flight-mode/flight-mode-state';
-import { isPlotSuppressedByFillModeForCurrentChat_ACU } from '../../fill-mode/fill-mode-gate';
+import { isPlotRequiredByFillModeForCurrentChat_ACU } from '../../fill-mode/fill-mode-gate';
 import { isLorebookReadAbortedError_ACU } from '../../../shared/lorebook-read-error';
 import { isPlotStageError_ACU } from './plot-runtime-phase';
 
@@ -75,12 +75,8 @@ function isTaskAbortedError_ACU(error: unknown): boolean {
         ...currentSettings,
       };
 
-      if (!plotSettings.enabled || isFlightModeActive_ACU()) {
+      if (!isPlotRequiredByFillModeForCurrentChat_ACU() || isFlightModeActive_ACU()) {
         return { success: false, skipped: true, reason: 'disabled' };
-      }
-      // 向量表格模式只做向量召回，不触发剧情推进（所有调用入口的兜底门控）。
-      if (isPlotSuppressedByFillModeForCurrentChat_ACU()) {
-        return { success: false, skipped: true, reason: 'fill_mode_vector' };
       }
 
       _set_abortController_ACU(new AbortController());

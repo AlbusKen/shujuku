@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mockSettings, mockLoopState, mockPlanningGuard, mockRunPlotTasks, mockLogError, mockCaptureScope, mockFlightModeActive } = vi.hoisted(() => ({
+const { mockSettings, mockLoopState, mockPlanningGuard, mockRunPlotTasks, mockLogError, mockCaptureScope, mockFlightModeActive, mockPlotRequired } = vi.hoisted(() => ({
   mockSettings: {
     plotSettings: { enabled: true },
     streamingEnabled: false,
@@ -15,6 +15,7 @@ const { mockSettings, mockLoopState, mockPlanningGuard, mockRunPlotTasks, mockLo
   mockLogError: vi.fn(),
   mockCaptureScope: vi.fn(),
   mockFlightModeActive: vi.fn(() => false),
+  mockPlotRequired: vi.fn(() => true),
 }));
 
 vi.mock('../../../../src/shared/defaults-json.js', () => ({
@@ -49,7 +50,7 @@ vi.mock('../../../../src/service/flight-mode/flight-mode-state', () => ({
 }));
 
 vi.mock('../../../../src/service/fill-mode/fill-mode-gate', () => ({
-  isPlotSuppressedByFillModeForCurrentChat_ACU: () => false,
+  isPlotRequiredByFillModeForCurrentChat_ACU: mockPlotRequired,
 }));
 
 import { runOptimizationLogic_ACU } from '../../../../src/service/runtime/plot-runtime/plot-entry';
@@ -61,6 +62,7 @@ beforeEach(() => {
   mockPlanningGuard.inProgress = false;
   mockCaptureScope.mockReturnValue({ chatId: 'chat-1', characterId: '1', isolationKey: '', reliable: true });
   mockFlightModeActive.mockReturnValue(false);
+  mockPlotRequired.mockReturnValue(true);
   // 重置 __inFlight 标记
   (runOptimizationLogic_ACU as any).__inFlight = false;
   (runOptimizationLogic_ACU as any).__inFlightText = '';
@@ -84,7 +86,7 @@ describe('runOptimizationLogic_ACU', () => {
   });
 
   it('剧情推进未启用时跳过', async () => {
-    mockSettings.plotSettings = { enabled: false };
+    mockPlotRequired.mockReturnValue(false);
     const result = await runOptimizationLogic_ACU('继续');
     expect(result.success).toBe(false);
     expect(result.skipped).toBe(true);

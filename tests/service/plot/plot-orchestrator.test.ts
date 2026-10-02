@@ -4,12 +4,13 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { mockSettings, mockLoopState, mockIsProcessing, mockSetIsProcessing, mockFlightModeActive } = vi.hoisted(() => ({
+const { mockSettings, mockLoopState, mockIsProcessing, mockSetIsProcessing, mockFlightModeActive, mockPlotRequired } = vi.hoisted(() => ({
   mockSettings: { plotSettings: { enabled: true } } as any,
   mockLoopState: { isLooping: false, isRetrying: false, awaitingReply: false } as any,
   mockIsProcessing: false,
   mockSetIsProcessing: vi.fn(),
   mockFlightModeActive: vi.fn(() => false),
+  mockPlotRequired: vi.fn(() => true),
 }));
 
 vi.mock('../../../src/service/runtime/state-manager', () => ({
@@ -40,7 +41,7 @@ vi.mock('../../../src/service/flight-mode/flight-mode-state', () => ({
 }));
 
 vi.mock('../../../src/service/fill-mode/fill-mode-gate', () => ({
-  isPlotSuppressedByFillModeForCurrentChat_ACU: () => false,
+  isPlotRequiredByFillModeForCurrentChat_ACU: mockPlotRequired,
 }));
 
 import {
@@ -61,6 +62,7 @@ beforeEach(() => {
   mockLoopState.isRetrying = false;
   mockLoopState.awaitingReply = false;
   mockFlightModeActive.mockReturnValue(false);
+  mockPlotRequired.mockReturnValue(true);
 });
 
 // ═══ shouldProcessTavernHelperHook_ACU ═══
@@ -69,7 +71,7 @@ describe('shouldProcessTavernHelperHook_ACU', () => {
     expect(shouldProcessTavernHelperHook_ACU({})).toBe(true);
   });
   it('未启用返回 false', () => {
-    mockSettings.plotSettings.enabled = false;
+    mockPlotRequired.mockReturnValue(false);
     expect(shouldProcessTavernHelperHook_ACU({})).toBe(false);
   });
   it('飞行模式开启时返回 false', () => {
@@ -170,7 +172,7 @@ describe('orchestrateTavernHelperHook_ACU', () => {
     expect(result.finalMessage).toBe('规划结果');
   });
   it('未启用时透传', async () => {
-    mockSettings.plotSettings.enabled = false;
+    mockPlotRequired.mockReturnValue(false);
     const result = await orchestrateTavernHelperHook_ACU({}, vi.fn());
     expect(result.action).toBe('passthrough');
   });

@@ -11,7 +11,7 @@ import { markPlotIntercept_ACU, shouldSkipPlotIntercept_ACU } from '../plot/plot
 import { logDebug_ACU, logError_ACU, logWarn_ACU, hashUserInput_ACU } from '../../shared/utils';
 import { DEFAULT_PLOT_SETTINGS_ACU } from '../../shared/defaults-json.js';
 import { isFlightModeActive_ACU } from '../flight-mode/flight-mode-state';
-import { isPlotSuppressedByFillModeForCurrentChat_ACU } from '../fill-mode/fill-mode-gate';
+import { isPlotRequiredByFillModeForCurrentChat_ACU } from '../fill-mode/fill-mode-gate';
 
 // ============================================================
 // 类型定义
@@ -41,11 +41,9 @@ export interface PlotOrchestrationResult {
  * 纯业务逻辑
  */
 export function shouldProcessTavernHelperHook_ACU(options: any): boolean {
-    if (!settings_ACU.plotSettings.enabled || isFlightModeActive_ACU() || isProcessing_Plot_ACU || loopState_ACU.isRetrying || options.should_stream) {
+    if (!isPlotRequiredByFillModeForCurrentChat_ACU() || isFlightModeActive_ACU() || isProcessing_Plot_ACU || loopState_ACU.isRetrying || options.should_stream) {
         return false;
     }
-    // 向量表格模式只做向量召回，不触发剧情推进。
-    if (isPlotSuppressedByFillModeForCurrentChat_ACU()) return false;
     return true;
 }
 

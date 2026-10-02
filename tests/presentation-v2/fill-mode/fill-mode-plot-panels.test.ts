@@ -141,6 +141,12 @@ describe('PlotPage', () => {
     expect(document.body.textContent).not.toContain('LLM / continuation API 预设');
   });
 
+  it('不再渲染手动剧情推进开关', async () => {
+    await mountPlotPage();
+
+    expect(document.querySelector('button[data-acu-plot-enabled-toggle="1"]')).toBeNull();
+  });
+
   it('开发者选项关闭时，编辑抽屉不渲染"匹配替换"字段', async () => {
     const { mount } = await mountPlotPage();
 

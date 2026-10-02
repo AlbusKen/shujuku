@@ -97,18 +97,6 @@
           />
         </AcuFormRow>
 
-        <AcuFormRow
-          v-if="showPlotPanels"
-          :label="fillModeCopy.panels.plot.enableLabel"
-          :hint="fillModeCopy.panels.plot.enableHint"
-        >
-          <AcuToggle
-            :model-value="plotStore.enabled"
-            :aria-label="fillModeCopy.panels.plot.enableLabel"
-            data-acu-plot-enabled-toggle="1"
-            @update:model-value="plotStore.setEnabled($event)"
-          />
-        </AcuFormRow>
       </AcuPanel>
       <PlotPresetPanel v-if="showPlotPanels" id="fill-mode-plot-panel" />
     </AcuPanelGrid>
@@ -143,10 +131,8 @@ import {
   type FillMode,
 } from "../stores/form-fill-mode-store";
 import { useDialogStore } from "../stores/dialog-store";
-import { usePlotPresetStore } from "../stores/plot-preset-store";
 
 const formFillMode = useFormFillModeStore();
-const plotStore = usePlotPresetStore();
 const dialogStore = useDialogStore();
 const formFillSettings = useFormFillSettings();
 

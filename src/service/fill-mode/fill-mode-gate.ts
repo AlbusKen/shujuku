@@ -4,10 +4,14 @@
  * 旧交火全局开关 summaryVectorIndexModeGlobal 不再被覆写，只作为从未保存偏好时的旧默认方案输入。
  */
 import { logWarn_ACU } from '../../shared/utils';
-import { currentJsonTableData_ACU } from '../runtime/state-manager';
+import { currentJsonTableData_ACU, settings_ACU } from '../runtime/state-manager';
 import { getCurrentFlightModeState_ACU } from '../flight-mode/flight-mode-state';
-import { isLegacyCrossfireEnabled_ACU } from './fill-mode-preferences';
-import { resolveCurrentChatFillMode_ACU, withFillMode_ACU } from './fill-mode-chat-record';
+import { isLegacyCrossfireEnabled_ACU, type FillMode_ACU } from './fill-mode-preferences';
+import {
+  resolveCurrentChatFillMode_ACU,
+  withFillMode_ACU,
+  type ChatFillModeSource_ACU,
+} from './fill-mode-chat-record';
 import {
   resolveFillPlan_ACU,
   type FillRuntimeContext_ACU,
@@ -66,15 +70,35 @@ export function isVectorModeExplicitlySelected_ACU(): boolean {
 }
 
 /**
- * 剧情推进的填表模式门控：向量表格模式只做向量召回，不触发剧情推进。
- * 推导失败时保持升级前行为（不额外拦截），并记录诊断。
+ * 新填表模式下，剧情推进由实际运行模式决定：
+ * - LLM 逻辑召回模式、交火模式需要剧情推进；
+ * - 经典表格、向量表格不需要，也不再受旧全局按钮影响；
+ * - 尚未记录过填表模式的旧聊天继续沿用旧设置，避免破坏旧流程。
  */
-export function isPlotSuppressedByFillModeForCurrentChat_ACU(): boolean {
+export function isPlotRequiredForFillMode_ACU(
+  source: ChatFillModeSource_ACU,
+  effectiveMode: FillMode_ACU,
+  legacyPlotEnabled: boolean,
+): boolean {
+  if (source === 'default') return legacyPlotEnabled;
+  return effectiveMode === 'llm' || effectiveMode === 'crossfire';
+}
+
+export function isPlotRequiredByFillModeForCurrentChat_ACU(): boolean {
   try {
-    return resolveCurrentChatFillMode_ACU().mode === 'vector';
+    const current = resolveCurrentChatFillMode_ACU();
+    const plan = resolveFillPlan_ACU(
+      withFillMode_ACU(current.preferences.preferences, current.mode),
+      buildFillRuntimeContext_ACU(),
+    );
+    return isPlotRequiredForFillMode_ACU(
+      current.source,
+      plan.effectiveMode,
+      settings_ACU?.plotSettings?.enabled !== false,
+    );
   } catch (error) {
-    logWarn_ACU('[填表模式] 剧情推进门控推导失败，沿用剧情推进开关:', error);
-    return false;
+    logWarn_ACU('[填表模式] 剧情推进需求推导失败，回退剧情推进开关:', error);
+    return settings_ACU?.plotSettings?.enabled !== false;
   }
 }
 

@@ -91,9 +91,7 @@ export const fillModeCopy = {
     },
     plot: {
       title: '剧情推进',
-      description: 'LLM模型逻辑召回模式与交火模式依赖剧情推进在正文生成前分析记忆。关闭后这两种模式只保留表格召回，不再执行剧情规划。',
-      enableLabel: '启用剧情推进',
-      enableHint: '关闭后不再在正文生成前额外调用 LLM；当前模式的其余召回行为不变。',
+      description: 'LLM模型逻辑召回模式与交火模式依赖剧情推进在正文生成前分析记忆；经典表格和向量表格不会调用剧情推进。',
     },
     worldbook: {
       title: '剧情推进世界书',
