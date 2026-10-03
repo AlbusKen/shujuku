@@ -163,7 +163,7 @@ function parseOneStatement_ACU(statement: string): RestrictedSqlStatement_ACU {
       const columns = splitSqlList_ACU(match[2]).map(unquoteIdentifier_ACU);
       const values = splitSqlList_ACU(match[3]).map(parseValue_ACU);
       if (new Set(columns).size !== columns.length) throw new Error('INSERT 字段不能重复');
-      if (columns.length !== values.length) throw new Error(`INSERT 字段数与值数量不一致（${columns.length} 个字段、${values.length} 个值）。不是缺 id，也不是表少了字段；字符串里的单引号把值拆开了，单引号要写成两个单引号。id 和 expected_revision 可以不写`);
+      if (columns.length !== values.length) throw new Error(`INSERT 字段数与值数量不一致（${columns.length} 个字段、${values.length} 个值）。请逐项核对列名列表与 VALUES 一一对应：不要把正文内容写进列名，也不要漏写值；若正文含单引号，应写成两个单引号。id 和 expected_revision 可以不写`);
       return { kind: 'insert', table: unquoteIdentifier_ACU(match[1]), values: Object.fromEntries(columns.map((column, index) => [column, values[index]])) };
     }
     match = statement.match(/^UPDATE\s+([A-Za-z_][\w]*)\s+SET\s+([\s\S]+?)\s+WHERE\s+([\s\S]+)$/i);
@@ -188,12 +188,43 @@ export function parseRestrictedSqlDml_ACU(sql: string): RestrictedSqlStatement_A
   return splitStatements_ACU(source).map(parseOneStatement_ACU);
 }
 
-export interface RestrictedSqlTolerantResult_ACU {
-  statements: RestrictedSqlStatement_ACU[];
-  rejected: Array<{ index: number; text: string; reason: string }>;
+/** 仅供纠错关联，不是可写入的语句；列值不匹配时只信任第一个明确的配对。 */
+export interface RestrictedSqlRepairTarget_ACU {
+  table: string;
+  column: string;
+  value: RestrictedSqlValue_ACU;
+  columns: string[];
 }
 
-/** Only the new one-shot pipeline tolerates independent malformed statements. */
+function inspectSqlRepairTarget_ACU(text: string): RestrictedSqlRepairTarget_ACU | undefined {
+  try {
+    const insert = text.match(/^INSERT\s+INTO\s+([A-Za-z_][\w]*)\s*\(([^)]+)\)\s*VALUES\s*\(([\s\S]+)\)$/i);
+    if (insert) {
+      const columns = splitSqlList_ACU(insert[2]).map(unquoteIdentifier_ACU);
+      const values = splitSqlList_ACU(insert[3]);
+      if (!/^[A-Za-z_][\w]*$/.test(columns[0] ?? '') || !values.length) return undefined;
+      return { table: unquoteIdentifier_ACU(insert[1]), column: columns[0], value: parseValue_ACU(values[0]), columns };
+    }
+    const update = text.match(/^UPDATE\s+([A-Za-z_][\w]*)\s+SET\s+([\s\S]+?)\s+WHERE\s+([\s\S]+)$/i);
+    if (update) {
+      const where = parseAssignments_ACU(update[3], 'and');
+      if (typeof where.id !== 'string' || !where.id.trim() || Object.keys(where).some(key => !['id', 'expected_revision'].includes(key))) return undefined;
+      const columns = splitSqlAssignments_ACU(update[2], 'comma').map(part => /^([A-Za-z_][\w]*)\s*=/.exec(part)?.[1]?.toLowerCase() ?? '');
+      if (columns.some(column => !column)) return undefined;
+      return { table: unquoteIdentifier_ACU(update[1]), column: 'id', value: where.id, columns };
+    }
+  } catch { /* 不能可靠识别时保留未关联诊断，不猜测目标。 */ }
+  return undefined;
+}
+
+export interface RestrictedSqlTolerantResult_ACU {
+  statements: RestrictedSqlStatement_ACU[];
+  /** 与 statements 一一对应，保留坏语句前后的原始位置。 */
+  statementIndexes: number[];
+  rejected: Array<{ index: number; text: string; reason: string; repairTarget?: RestrictedSqlRepairTarget_ACU }>;
+}
+
+/** 按独立语句保留合法写集；无法确定的语法只报告拒绝，不猜补列或值。 */
 export function parseRestrictedSqlDmlTolerant_ACU(sql: string): RestrictedSqlTolerantResult_ACU {
   let source = String(sql ?? '').replace(/```sql|```/gi, '').trim();
   const scan = (value: string): { parts: string[]; tail: string; open: boolean } => {
@@ -228,23 +259,25 @@ export function parseRestrictedSqlDmlTolerant_ACU(sql: string): RestrictedSqlTol
   }
   const rejected: RestrictedSqlTolerantResult_ACU['rejected'] = [];
   const statements: RestrictedSqlStatement_ACU[] = [];
+  const statementIndexes: number[] = [];
   const parts = [...scanned.parts, ...(scanned.tail ? [scanned.tail] : [])];
   parts.forEach((text, index) => {
     if (scanned.open && index === parts.length - 1) {
       rejected.push({ index, text, reason: '字符串字面量未闭合' });
       return;
     }
-    try { statements.push(parseOneStatement_ACU(text)); }
+    try { statements.push(parseOneStatement_ACU(text)); statementIndexes.push(index); }
     catch (error) {
       // 逐个尝试可安全改写的形状：引号近似字符、尾部多余右括号，以及两者叠加。
       const quoteFixed = normalizeSqlQuoteLookalikes_ACU(text);
       const variants = [quoteFixed, normalizeSqlParenBalance_ACU(text), normalizeSqlParenBalance_ACU(quoteFixed)];
       for (const variant of variants) {
         if (variant === text) continue;
-        try { statements.push(parseOneStatement_ACU(variant)); return; } catch { /* 换下一种改写 */ }
+        try { statements.push(parseOneStatement_ACU(variant)); statementIndexes.push(index); return; } catch { /* 换下一种改写 */ }
       }
-      rejected.push({ index, text, reason: error instanceof Error ? error.message : String(error) });
+      const repairTarget = inspectSqlRepairTarget_ACU(text);
+      rejected.push({ index, text, reason: error instanceof Error ? error.message : String(error), ...(repairTarget ? { repairTarget } : {}) });
     }
   });
-  return { statements, rejected };
+  return { statements, statementIndexes, rejected };
 }

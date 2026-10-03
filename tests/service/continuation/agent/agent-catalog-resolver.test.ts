@@ -7,6 +7,7 @@ import {
   renderAgentStoryCatalog_ACU,
   renderAgentStoryOverview_ACU,
   renderAgentUnsettledHistory_ACU,
+  resolveAgentUnsettledStoryWindow_ACU,
   resolveAgentReadToken_ACU,
   type AgentResolveContext_ACU,
 } from '../../../../src/service/continuation/agent/agent-placeholder-resolver';
@@ -235,6 +236,46 @@ describe('正文窗口与区间读取', () => {
     expect(catalog).toContain('$STORY_RANGE:3-3');
     expect(catalog).toContain('第四楼正文内容');
     expect(catalog).not.toContain('第一楼正文内容');
+    const highFloorContext = {
+      ...storyContext_ACU(2, 1),
+      settledThroughIndex: -1,
+      chat: Array.from({ length: 1000 }, (_, index) => ({ mes: `正文标记-${index}-结束`, is_user: index % 2 === 0 })),
+    };
+    for (const token of ['$HISTORY_UNSETTLED', '$STORY_TEXT']) {
+      const text = resolveAgentReadToken_ACU(token, highFloorContext).text;
+      expect(text.match(/【楼层 \d+】/g)).toHaveLength(2);
+      expect(text).toContain('正文标记-997-结束');
+      expect(text).toContain('正文标记-999-结束');
+      expect(text).not.toContain('正文标记-995-结束');
+      expect(text).not.toContain('正文标记-998-结束');
+      expect(text).toContain('498 个未结算 AI 楼层');
+      expect(text).toContain('不能据此宣称旧正文已被完整结算');
+      expect(text).toContain('$TABLE:纪要表');
+      const disabled = resolveAgentReadToken_ACU(token, { ...highFloorContext, storyWindowFloors: 0 }).text;
+      expect(disabled).not.toContain('正文标记-');
+    }
+    const completed = { ...highFloorContext, moduleSnapshot: { ...highFloorContext.moduleSnapshot,
+      materialCompletion: { state: 'complete_no_change' as const, rangeStartIndex: 997, rangeEndIndex: 999,
+        modules: { hooks: 'complete_no_change' as const, infoGap: 'complete_no_change' as const, chronology: 'complete_no_change' as const }, updatedAt: 1 } } };
+    expect(resolveAgentReadToken_ACU('$HISTORY_UNSETTLED', completed).text).not.toContain('正文标记-');
+    expect(resolveAgentReadToken_ACU('$STORY_TEXT', completed).text).toContain('正文标记-999-结束');
+    expect(resolveAgentReadToken_ACU('$STORY_TEXT', completed).text.match(/【楼层 \d+】/g)).toHaveLength(2);
+    const resumed = { ...completed, chat: [...completed.chat, { mes: '用户新指令', is_user: true }, { mes: '新增正文' }] };
+    const resumedText = resolveAgentReadToken_ACU('$HISTORY_UNSETTLED', resumed).text;
+    expect(resumedText).toContain('新增正文');
+    expect(resumedText).not.toContain('正文标记-999-结束');
+    const gap = { ...completed, chat: [...completed.chat,
+      ...Array.from({ length: 10 }, (_, index) => ({ mes: `新增正文-${1000 + index}`, is_user: index % 2 === 0 })),
+    ] };
+    const gapSelection = resolveAgentUnsettledStoryWindow_ACU(gap);
+    expect(gapSelection.startIndex).toBe(1007);
+    expect(gapSelection.floors.map(floor => floor.index)).toEqual([1007, 1009]);
+    const gapText = resolveAgentReadToken_ACU('$HISTORY_UNSETTLED', gap).text;
+    expect(gapText).toContain('新增正文-1009');
+    expect(gapText).not.toContain('新增正文-1005');
+    const failed = { ...completed, moduleSnapshot: { ...completed.moduleSnapshot,
+      materialCompletion: { ...completed.moduleSnapshot.materialCompletion, state: 'partial' as const } } };
+    expect(resolveAgentReadToken_ACU('$HISTORY_UNSETTLED', failed).text).toContain('正文标记-999-结束');
   });
 
   it('$STORY_RANGE 只放行窗口内楼层，窗口外指引事件概览与纪要表行区间', () => {

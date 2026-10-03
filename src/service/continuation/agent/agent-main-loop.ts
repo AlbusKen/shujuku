@@ -80,6 +80,7 @@ import {
   renderAgentStoryText_ACU,
   renderAgentTurnGuidance_ACU,
   renderAgentUnsettledHistory_ACU,
+  resolveAgentUnsettledStoryWindow_ACU,
   resolveAgentReadToken_ACU,
   resolveAgentReadAddressAxis_ACU,
   resolveAgentReadTokenWithProof_ACU,
@@ -675,8 +676,12 @@ export class ContinuationAgentTurnPlanner_ACU {
     /** 门禁的 H：主 Agent 当前实际读取的完整上下文（骨架开销 + 实时会话历史）。 */
     const measureContextTokens = async (): Promise<number> =>
       (await measureOverhead()) + await measureAgentPromptTokens_ACU(session.history(), counter);
-    // 页面重载会清空内存 run cache；已通告过的同一轮仍须走恢复路径，不能重复启动工作流。
-    const restartingSameTurn = !!session.turnKey && lastAnnouncedTurnKey_ACU(session.snapshot()) === session.turnKey;
+    // 通告只证明轮次已展示，不证明工作流已启动。实际动作和启动锚点才阻止重复开局。
+    const restartingSameTurn = session.snapshot().messages.some(message => message.turnKey === session.turnKey
+      && (message.kind === 'agent' || message.digest === '固定工作流启动' || message.digest === '工作流状态回执'));
+    const openingAvailable = request.directOpening === true && !restartingSameTurn
+      && (!resumedState || (resumedState.nextIteration === 1 && resumedState.ledger.delegationsUsed === 0
+        && resumedState.ledger.outcomes.length === 0));
     // 换轮通告只在游标真的变了时追加：同一轮内的中断恢复不重复通告，否则模型会以为又开了一轮。
     if (session.turnKey && lastAnnouncedTurnKey_ACU(session.snapshot()) !== session.turnKey) {
       const visible = session.snapshot().messages;
@@ -752,8 +757,8 @@ export class ContinuationAgentTurnPlanner_ACU {
           && ((iteration < budget.maxIterations && ledger.delegationsUsed < budget.maxDelegations) || outlineMaintenanceReserveAvailable);
         const lifecycle = { outlineMaintenanceReserveAvailable, convergenceOnly: maintenanceConvergenceAvailable };
         await this.ensureRuntimeSnapshot_ACU(request, session, context, ledger, budget, iteration, toolUsage, gateConfig, toolMode, lifecycle);
-        // 新运行的开局由固定工作流接管；恢复与终审后的裁决仍交给主 Agent。
-        const directOpening = request.directOpening === true && !resumedState && !restartingSameTurn && iteration === 1 && totalCalls === 1 && !postReviewDecisionAvailable;
+        // 未执行的本轮由程序开局；已执行动作、工作流升级与终审后的裁决仍交给主 Agent。
+        const directOpening = openingAvailable && iteration === 1 && totalCalls === 1 && !postReviewDecisionAvailable;
         const openingFocus = context.execution.turn?.goal?.trim() || context.originInstruction.trim() || '本轮续写';
         const round = directOpening
           ? {
@@ -811,6 +816,13 @@ export class ContinuationAgentTurnPlanner_ACU {
           const workflowEntry = logAgentSession_ACU({ kind: 'delegation', title: '固定工作流正在执行', detail: action.focus, status: 'running' });
           let workflow: ContinuationWorkflowResult_ACU;
           try {
+            // 开始任何付费派工前落盘；重载后不能把已启动的工作流当成未执行的新轮。
+            if (request.signal?.aborted || !request.isInternalRequestCurrent(identitySeed)) {
+              throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_loop', '工作流启动身份已失效', false));
+            }
+            session.record([{ kind: 'runtime', text: JSON.stringify({ taskId: identitySeed.taskId, focus: action.focus, status: 'started' }), digest: '固定工作流启动', turnKey: session.turnKey }]);
+            await session.flush();
+            persistRunState(iteration);
             workflow = await this.runFixedWorkflow_ACU(action, request, context, ledger, budget, chat, session, readRoundState, toolMode, apiDependencies);
           } catch (error) {
             updateAgentSession_ACU(workflowEntry, { title: '固定工作流失败', detail: error instanceof Error ? error.message : String(error), ok: false });
@@ -1852,7 +1864,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     apiDependencies?: ContinuationApiPresetDependencies_ACU,
   ): Promise<ContinuationWorkflowResult_ACU> {
     await this.prepareFixedWorkflowStructure_ACU(action, request, context, budget, chat, session, readRoundState, toolMode, apiDependencies);
-    const unsettled = renderAgentUnsettledHistory_ACU(context);
+    const unsettled = resolveAgentUnsettledStoryWindow_ACU(context);
     const mapPayload = (result: AgentSubagentRunResult_ACU): ContinuationWorkflowAgentPayload_ACU => ({
       ok: result.completion !== 'failed' && result.completion !== 'partial',
       summary: result.composer?.summary || result.maintainer?.summary || result.arc?.summary || result.planner?.summary || result.reviewer?.reason || result.researcher?.summary || '',
@@ -1879,10 +1891,12 @@ export class ContinuationAgentTurnPlanner_ACU {
         summary: action.summary,
         dispatchWebResearcher: action.dispatchWebResearcher && request.settings.webResearch.enabled,
       },
-      hasUnsettledHistory: !unsettled.startsWith('没有尚未结算的真实历史'),
+      hasUnsettledHistory: unsettled.floors.length > 0,
       beatObligation: continuationBeatObligation_ACU(context.execution.turn),
       turnNumber: context.execution.turnNumber ?? 1,
       settledIndex: Math.max(0, chat.length - 1),
+      settlementStartIndex: unsettled.startIndex,
+      canAdvanceSettlement: unsettled.hiddenCount === 0,
       completedStageNumbers: context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber),
       evidenceFloorIndexes: agentStoryEvidenceFloorIndexes_ACU(chat),
       runAgent: async call => {
@@ -1956,6 +1970,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       },
     });
     context.moduleSnapshot = workflow.snapshot;
+    context.settledThroughIndex = workflow.snapshot.settledThroughIndex;
     await this.persistSnapshot_ACU(chat, workflow.snapshot);
     return workflow;
   }
@@ -1965,10 +1980,15 @@ export class ContinuationAgentTurnPlanner_ACU {
    * 主 Agent 要看必须自己 read $HISTORY_UNSETTLED。
    */
   private renderUnsettledRange_ACU(context: AgentResolveContext_ACU): string {
-    const start = context.settledThroughIndex + 1;
+    const selection = resolveAgentUnsettledStoryWindow_ACU(context);
+    const start = selection.startIndex;
     const last = context.chat.length - 1;
-    if (start > last) return '没有尚未结算的真实历史，无需派工结算维护类代理。';
-    return `未结算楼层区间：${start} 到 ${last}（共 ${last - start + 1} 楼）。输出 open_round 后，固定工作流会自动派 hook-cognition-maintainer 结算这些楼层。不要 delegate 结算、策划或审查角色。这些楼层的正文默认没有注入，需要核对时 read $HISTORY_UNSETTLED。`;
+    const hiddenNote = selection.hiddenCount > 0
+      ? `更早的 ${selection.hiddenCount} 个未结算 AI 楼层在正文可读窗口外，本轮不逐楼结算，也不推进连续结算水位；早期剧情经事件概览与纪要回溯。` : '';
+    if (!selection.floors.length) return hiddenNote
+      ? `${hiddenNote}当前窗口内没有待结算正文。`
+      : '没有尚未结算的真实历史，无需派工结算维护类代理。';
+    return `${hiddenNote}未结算楼层区间：${start} 到 ${last}（窗口内 ${selection.floors.length} 个 AI 正文楼层）。输出 open_round 后，固定工作流会自动派 hook-cognition-maintainer 结算本次窗口内正文。不要 delegate 结算、策划或审查角色。这些楼层的正文默认没有注入，需要核对时 read $HISTORY_UNSETTLED。`;
   }
 
   /**
@@ -2268,11 +2288,29 @@ export class ContinuationAgentTurnPlanner_ACU {
         try {
           const delta = mergeAgentDeltaRevisions_ACU(result.maintainer.delta, result.readRevisions);
           const applied = result.usedFieldWrites ? nextSnapshot : (await applyAgentModuleDeltaViaSql_ACU(nextSnapshot, delta, result.writes, chat.length - 1, [], undefined, agentStoryEvidenceFloorIndexes_ACU(chat))).snapshot;
-          // 结算派工成功交付契约即推进水位到当轮末楼：空 delta（这段楼层没有新增伏笔/信息差）
-          // 同样代表已被处理过，不推水位会让同一区间每轮重复要求结算、白烧派工。
+          // 兼容派工也只记录实际窗口；旧正文未处理时保留连续结算水位。
+          const selection = resolveAgentUnsettledStoryWindow_ACU(context);
           const settledTarget = chat.length - 1;
-          if (applied !== nextSnapshot || applied.settledThroughIndex < settledTarget) {
-            nextSnapshot = { ...applied, settledThroughIndex: Math.max(applied.settledThroughIndex, settledTarget) };
+          if (selection.floors.length) {
+            const previous = context.moduleSnapshot.materialCompletion;
+            const mergePrevious = previous && (previous.state === 'complete_changed' || previous.state === 'complete_no_change')
+              && previous.rangeStartIndex >= 0 && previous.rangeEndIndex >= previous.rangeStartIndex
+              && previous.rangeEndIndex + 1 >= selection.startIndex && previous.rangeStartIndex <= settledTarget + 1;
+            const state = result.completion ?? 'complete_changed';
+            nextSnapshot = { ...applied,
+              settledThroughIndex: selection.hiddenCount === 0
+                ? Math.max(applied.settledThroughIndex, settledTarget) : applied.settledThroughIndex,
+              materialCompletion: {
+                state,
+                rangeStartIndex: mergePrevious ? Math.min(previous.rangeStartIndex, selection.startIndex) : selection.startIndex,
+                rangeEndIndex: mergePrevious ? Math.max(previous.rangeEndIndex, settledTarget) : settledTarget,
+                modules: result.moduleCompletion ?? { hooks: state, infoGap: state, chronology: state },
+                updatedAt: Date.now(),
+              },
+            };
+            snapshotChanged = true;
+          } else if (applied !== nextSnapshot) {
+            nextSnapshot = applied;
             snapshotChanged = true;
           }
           const proposals = result.maintainer.delta.constraintProposals;

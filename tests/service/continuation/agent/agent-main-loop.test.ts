@@ -803,8 +803,22 @@ describe('主 Agent 提示词装配', () => {
     expect(runtime).toContain('未结算楼层区间：0 到 3');
     expect(runtime).toContain('hook-cognition-maintainer');
     expect(runtime).toContain('$HOOKS_LEDGER');
-    // 区间只报范围不带正文：正文已由 $STORY_TEXT 独立摘取，重复注入等于白烧 token。
+    // 区间只报范围不带正文；默认正文全文由 $STORY_TAIL 单独提供。
     expect(runtime).not.toContain('守门人挡在门后，右手藏着黑色晶屑。');
+    const high = harness_ACU({
+      mainReplies: ['{"action":"finalize","instruction":"本轮指导"}'],
+      chat: Array.from({ length: 1000 }, (_, index) => ({ mes: `正文标记-${index}-结束`, is_user: index % 2 === 0 })),
+    });
+    high.request.settings.storyWindowFloors = 2;
+    await high.planner.plan(high.request);
+    const highRuntime = high.mainCalls[0][findIndex_ACU(high.mainCalls[0], '本轮预算状态')].content;
+    expect(highRuntime).toContain('未结算楼层区间：997 到 999');
+    expect(highRuntime).toContain('不推进连续结算水位');
+    const highRequest = high.mainCalls[0].map(message => message.content).join('\n');
+    expect(highRequest).toContain('正文标记-997-结束');
+    expect(highRequest).toContain('正文标记-999-结束');
+    expect(highRequest).not.toContain('正文标记-995-结束');
+    expect(highRequest).not.toContain('正文标记-998-结束');
   });
 });
 
@@ -1110,6 +1124,9 @@ describe('open_round 固定结构工作流', () => {
 
   it('生产新轮次直接运行固定工作流，不请求主 Agent 开局', async () => {
     const h = harness_ACU({
+      conversation: appendAgentConversation_ACU(buildEmptyAgentConversation_ACU(), [
+        { kind: 'turn', text: '已通告本轮，但工作流尚未启动', digest: '本轮通告', turnKey: 'stage-1#0#turn-2' },
+      ]),
       snapshot: snapshotWithArc_ACU(),
       mainReplies: [],
       subReplies: [maintainerReply_ACU, plannerReply_ACU, '{"summary":"本轮无节拍操作","recommendation":"no_change"}', composerReply_ACU],
@@ -1125,6 +1142,7 @@ describe('open_round 固定结构工作流', () => {
     expect(h.mainCalls).toHaveLength(0);
     expect(label).toHaveBeenCalledWith('试探');
     expect(h.subCalls).toHaveLength(4);
+    expect(h.conversationWrites.some(snapshot => snapshot.messages.some(message => message.digest === '固定工作流启动'))).toBe(true);
   });
 
   it('总纲和阶段大纲都缺失时，open_round 先自动立总纲、再准备大纲并交付指令', async () => {

@@ -10,7 +10,7 @@
 import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../model';
 import type { AgentToolMode_ACU } from '../../ai/agent-tool-mode';
 import { parseJsonLenient_ACU, salvageTruncatedJson_ACU, stripReasoningBlocks_ACU } from '../lenient-text';
-import { parseRestrictedSqlDml_ACU, type RestrictedSqlStatement_ACU, type RestrictedSqlValue_ACU } from '../../shared/restricted-sql-dml';
+import { parseRestrictedSqlDml_ACU, parseRestrictedSqlDmlTolerant_ACU, type RestrictedSqlStatement_ACU, type RestrictedSqlValue_ACU } from '../../shared/restricted-sql-dml';
 import {
   AGENT_CHRONOLOGY_PRECISIONS_ACU,
   AGENT_HOOK_IMPORTANCES_ACU,
@@ -1011,18 +1011,47 @@ function validateContinuationSqlColumns_ACU(table: string, values: Record<string
   }
 }
 
+/** 只将已声明的 SQL 列或领域字段名归一化，未知列仍由原白名单拒绝。 */
+function canonicalSqlColumn_ACU(table: string, column: string): string {
+  const allowed = CONTINUATION_SQL_COLUMNS_ACU[table];
+  if (!allowed || allowed.has(column)) return column;
+  return [...allowed].find(key => key.replace(/_/g, '') === column
+    || FIELD_SQL_COLUMNS_ACU[table]?.[key]?.toLowerCase() === column) ?? column;
+}
+
+function normalizeContinuationSqlStatement_ACU(statement: RestrictedSqlStatement_ACU): RestrictedSqlStatement_ACU {
+  const normalize = (values: Record<string, RestrictedSqlValue_ACU>): Record<string, RestrictedSqlValue_ACU> => {
+    const result: Record<string, RestrictedSqlValue_ACU> = {};
+    for (const [column, value] of Object.entries(values)) {
+      const key = canonicalSqlColumn_ACU(statement.table, column);
+      if (Object.prototype.hasOwnProperty.call(result, key)) failProtocol_ACU(`SQL 同一栏目不能通过不同别名重复写入：${statement.table}.${key}`);
+      result[key] = value;
+    }
+    return result;
+  };
+  if (statement.kind === 'insert') return { ...statement, values: normalize(statement.values) };
+  if (statement.kind === 'update') return { ...statement, values: normalize(statement.values), where: normalize(statement.where) };
+  return { ...statement, where: normalize(statement.where) };
+}
+
 function sqlColumnName_ACU(value: string): string {
   return value.replace(/_([a-z])/g, (_match, letter: string) => letter.toUpperCase());
 }
 
 function sqlProtocolValue_ACU(value: RestrictedSqlValue_ACU): unknown {
   if (typeof value !== 'string') return value;
-  const trimmed = value.trim();
-  if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
-    try { return JSON.parse(trimmed); } catch { /* 普通文本按原值保留 */ }
+  let text = value.trim();
+  // 支持多包一层 JSON 字符串；不抢救截断结构，也不猜补正文里的引号。
+  for (let depth = 0; depth < 3; depth += 1) {
+    const structured = (text.startsWith('{') && text.endsWith('}')) || (text.startsWith('[') && text.endsWith(']'));
+    if (!structured && !(text.startsWith('"') && text.endsWith('"'))) break;
+    const parsed = parseJsonLenient_ACU(text);
+    if (parsed !== null && typeof parsed === 'object') return parsed;
+    if (typeof parsed !== 'string' || parsed === text) break;
+    text = parsed.trim();
   }
-  if (trimmed === 'true') return true;
-  if (trimmed === 'false') return false;
+  if (text === 'true') return true;
+  if (text === 'false') return false;
   return value;
 }
 
@@ -1041,7 +1070,8 @@ function requireSqlText_ACU(value: RestrictedSqlValue_ACU | undefined, field: st
 function continuationSqlDelta_ACU(statements: readonly RestrictedSqlStatement_ACU[], role: 'maintainer' | 'researcher'): Record<string, unknown> {
   const delta: Record<string, unknown> = { expectedRevisions: {} };
   const revisions = delta.expectedRevisions as Record<string, number>;
-  for (const statement of statements) {
+  for (const rawStatement of statements) {
+    const statement = normalizeContinuationSqlStatement_ACU(rawStatement);
     if (role === 'maintainer' && statement.table !== 'hooks' && statement.table !== 'info_gap' && statement.table !== 'story_arc' && statement.table !== 'chronology' && statement.table !== 'constraint_proposals') failProtocol_ACU(`维护类角色无权写入 ${statement.table}`);
     if (role === 'researcher' && statement.table !== 'web_refs') failProtocol_ACU(`web-researcher 只允许写入 web_refs，实际收到：${statement.table}`);
     if (statement.kind !== 'delete') {
@@ -1107,6 +1137,8 @@ export interface AgentModuleSqlFieldIntent_ACU {
 export interface AgentModuleSqlFieldRejection_ACU {
   path: string;
   reason: string;
+  /** 只关联后续纠错，不参与写入；目标必须唯一匹配且所有对应栏目均有确认回执。 */
+  repairTarget?: { module: AgentWritableModule_ACU; column: string; value: RestrictedSqlValue_ACU; fields: string[] };
 }
 
 export interface AgentModuleSqlFieldParseResult_ACU {
@@ -1137,13 +1169,33 @@ const FIELD_SQL_ROLE_TABLES_ACU: Readonly<Partial<Record<AgentSubagentName_ACU, 
 
 /** 一次性解析语法；语句/栏目错误归入拒绝清单，合法栏保留供提交入口独立领域校验。 */
 export function parseAgentModuleSqlFieldWrites_ACU(sql: string, role: AgentSubagentName_ACU): AgentModuleSqlFieldParseResult_ACU {
-  let statements: RestrictedSqlStatement_ACU[];
-  try { statements = parseRestrictedSqlDml_ACU(sql); }
-  catch (error) { failProtocol_ACU(`受限 SQL 解析失败：${error instanceof Error ? error.message : String(error)}`); }
-  if (!statements.length) failProtocol_ACU('受限 SQL 不允许空写集');
-  const result: AgentModuleSqlFieldParseResult_ACU = { intents: [], rejected: [], constraintProposals: [] };
+  const parsed = parseRestrictedSqlDmlTolerant_ACU(sql);
+  if (!parsed.statements.length && !parsed.rejected.length) failProtocol_ACU('受限 SQL 不允许空写集');
   const allowed = FIELD_SQL_ROLE_TABLES_ACU[role] ?? [];
-  statements.forEach((statement, index) => {
+  const result: AgentModuleSqlFieldParseResult_ACU = { intents: [], rejected: parsed.rejected.map(item => {
+    const target = item.repairTarget;
+    const module = target && allowed.includes(target.table)
+      ? CONTINUATION_SQL_TABLE_MODULE_ACU[target.table as keyof typeof CONTINUATION_SQL_TABLE_MODULE_ACU] : undefined;
+    const columns = target ? FIELD_SQL_COLUMNS_ACU[target.table] : undefined;
+    const column = target ? canonicalSqlColumn_ACU(target.table, target.column) : '';
+    const field = column === 'id' ? 'id' : columns?.[column];
+    const fields = target ? [...new Set(target.columns.map(key => columns?.[canonicalSqlColumn_ACU(target.table, key)])
+      .filter((key): key is string => !!key))] : [];
+    const identifiable = module && field && ['id', 'summary', 'topic', 'title', 'anchor'].includes(field)
+      && typeof target?.value === 'string' && !!target.value.trim() && fields.length > 0;
+    return {
+      path: `sql[${item.index}]`, reason: `受限 SQL 解析失败，该语句未写入：${item.reason}`,
+      ...(identifiable ? { repairTarget: { module, column: field, value: target!.value, fields } } : {}),
+    };
+  }), constraintProposals: [] };
+  parsed.statements.forEach((rawStatement, position) => {
+    const index = parsed.statementIndexes[position];
+    let statement: RestrictedSqlStatement_ACU;
+    try { statement = normalizeContinuationSqlStatement_ACU(rawStatement); }
+    catch (error) {
+      result.rejected.push({ path: `sql[${index}].${rawStatement.table}`, reason: error instanceof Error ? error.message : String(error) });
+      return;
+    }
     const path = `sql[${index}].${statement.table}`;
     const reject = (field: string, reason: string) => result.rejected.push({ path: `${path}${field ? `.${field}` : ''}`, reason });
     if (!allowed.includes(statement.table)) { reject('', `角色 ${role} 无权写入 ${statement.table}`); return; }
@@ -1180,7 +1232,7 @@ export function parseAgentModuleSqlFieldWrites_ACU(sql: string, role: AgentSubag
         continue;
       }
       const field = columns[column];
-      if (!field) { reject(column, '栏目不在逐栏写入白名单'); continue; }
+      if (!field) { reject(column, `栏目不在逐栏写入白名单；${statement.table} 可写 SQL 列：${Object.keys(columns).join(', ')}`); continue; }
       if (field === 'pageRef') {
         if (typeof raw !== 'string' || !raw.trim()) reject(column, 'page_ref 必须是本次抓取的非空页面句柄');
         else pageRef = raw.trim();

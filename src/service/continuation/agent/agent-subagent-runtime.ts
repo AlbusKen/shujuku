@@ -588,6 +588,8 @@ function renderWriteSqlRepair_ACU(receipt: AgentModuleFieldReceipt_ACU): string 
     return '【write_sql 补栏】保存或恢复状态不确定。先按上一次回执的 ID read $FIELD:模块:ID 权威栏目，核实已存栏目与当前 revisions；不要重发原 SQL 或猜测修订号。';
   }
   const lines: string[] = [];
+  if (receipt.rejected.length || receipt.partials.length) lines.push(`WHERE expected_revision 使用当前模块修订号 revisions：${JSON.stringify(receipt.revisions)}；accepted / alreadySaved 的 revision 是字段修订号，不是模块修订号。`);
+  if (receipt.alreadySaved?.length) lines.push(`此前已保存且本次未重复写入：${receipt.alreadySaved.map(item => `${item.module}#${item.id}.${item.field}`).join('、')}。不要再次提交这些栏目。`);
   const drafts = receipt.partials.filter(item => item.missingFields.length || item.promotionError);
   if (drafts.length || receipt.rejected.length) {
     lines.push('字段对照示例：原 INSERT 拟写 A/B/C/D，若回执 accepted 确认 A/C 已保存而 missingFields 或 rejected 指出 B/D 未保存，下次只按回执给出的真实 ID 和当前 revision 执行 UPDATE B/D；不得重发 INSERT 或 A/C。');
@@ -611,7 +613,8 @@ function renderWriteSqlRepair_ACU(receipt: AgentModuleFieldReceipt_ACU): string 
     lines.push(`${item.path}：${item.reason}。被拒栏目尚未保存；按报错核对类型、枚举和正文证据，只补拒绝的栏目，不重发 accepted。`);
     if (item.reason === 'not_found') lines.push('UPDATE 的目标不存在：先 read 对应 $FIELD:模块:ID 核实；只有正文确实新出现该条目才用 INSERT 建新行，已有草稿必须用 UPDATE，已删除的条目不要重建。');
     if (item.reason === 'id_exists' || item.reason.startsWith('revision_conflict')) lines.push('先 read 对应 $FIELD:模块:ID 核实已存栏目，再用回执 revisions 或权威快照中的当前模块修订号补写；不要使用旧号或示例的 0。');
-    if (item.reason.includes('字段数与值数量不一致') || item.reason.includes('字符串字面量未闭合')) lines.push('正文里的单引号写成两个单引号；检查每个值与列一一对应。');
+    if (item.reason.includes('字段数与值数量不一致')) lines.push('列名与 VALUES 必须逐项对应；检查是否把正文误放进列名列表或漏写值，不要盲目添加 id / expected_revision。只有失败语句未写入，其他语句按 accepted / alreadySaved 确认，不重发。');
+    if (item.reason.includes('字符串字面量未闭合')) lines.push('检查字符串的英文单引号是否成对，正文里的单引号写成两个单引号。');
     if (item.reason.includes('必须是非空字符串数组')) lines.push("数组必须写成单引号包裹的 JSON 文本，例如 '[\"与守门人的信任\"]'，不能用逗号或竖线代替。");
   }
   return lines.join('\n');
@@ -862,11 +865,14 @@ export class AgentSubagentRuntime_ACU {
     let usedFieldWrites = false;
     const confirmedFields = new Set<string>();
     const writeProblems = new Map<string, AgentSubagentUnresolvedIssue_ACU>();
+    const sqlRepairTargets = new Map<string, NonNullable<AgentModuleFieldReceipt_ACU['rejected'][number]['repairTarget']>>();
     let writeAttempted = false;
     let writeStateUnknown = false;
     const recordWriteReceipt = (receipt: AgentModuleFieldReceipt_ACU): void => {
       if (receipt.partials === null || receipt.revisions === null) writeStateUnknown = true;
-      for (const item of receipt.accepted) {
+      const confirmed = [...receipt.accepted, ...(receipt.partials !== null && receipt.revisions !== null ? receipt.alreadySaved ?? [] : [])];
+      const confirmedThisReceipt = new Set(confirmed.map(item => `${item.module}:${item.id}:${item.field}`));
+      for (const item of confirmed) {
         const key = `${item.module}#${item.id}.${item.field}`;
         confirmedFields.add(`${item.module}:${item.id}:${item.field}`);
         writeProblems.delete(key);
@@ -874,19 +880,37 @@ export class AgentSubagentRuntime_ACU {
       for (const item of receipt.rejected) {
         // 删除目标已不存在属于幂等完成，不是待修复缺口。
         if (item.reason.startsWith('already_absent')) continue;
-        const match = /^(hooks|infoGap|storyArc|chronology|webRefs)#([^.#]+)\.([A-Za-z][A-Za-z0-9]*)$/.exec(item.path);
-        const module = match?.[1] as AgentWritableModule_ACU | undefined;
-        writeProblems.set(item.path, { module: module && writes.includes(module) ? module : writes[0],
+        const match = /^(hooks|infoGap|storyArc|chronology|webRefs)#([^.#]+)(?:\.([A-Za-z][A-Za-z0-9]*))?$/.exec(item.path);
+        const module = (item.repairTarget?.module ?? match?.[1]) as AgentWritableModule_ACU | undefined;
+        const key = item.repairTarget ? `sql:${JSON.stringify(item.repairTarget)}` : item.path;
+        if (item.repairTarget) sqlRepairTargets.set(key, item.repairTarget);
+        writeProblems.set(key, { module: module && writes.includes(module) ? module : writes[0],
           source: 'transaction_rejected', path: item.path, message: item.reason,
           ...(match ? { id: match[2] } : {}) });
       }
-      const settledIds = new Set([
-        ...receipt.accepted.map(item => `${item.module}#${item.id}`),
-        ...(receipt.partials ?? []).map(item => `${item.module}#${item.id}`),
-      ]);
-      // 行级拒绝（not_found、id_exists、revision_conflict 等）在同一条目后续被确认写入或进入草稿后即已解决。
+      const settledIds = new Set(confirmed.map(item => `${item.module}#${item.id}`));
+      // 同条目获得新确认才能解决旧行级拒绝；本次仍被拒的条目不能误清。
       for (const key of [...writeProblems.keys()]) {
-        if (settledIds.has(key)) writeProblems.delete(key);
+        if (settledIds.has(key) && !receipt.rejected.some(item => item.path === key)) writeProblems.delete(key);
+      }
+      if (receipt.partials === null || receipt.revisions === null) return;
+      const folded = readAgentModuleFoldState_ACU(input.resolveContext.chat);
+      if (folded.salvaged || folded.candidates.some(item => !item.valid)) return;
+      for (const [key, target] of sqlRepairTargets) {
+        const matches = Object.values(folded.fields.records[target.module] ?? {}).filter(record =>
+          target.column === 'id' ? record.id === target.value : record.fields[target.column]?.value === target.value);
+        if (matches.length !== 1) continue;
+        const record = matches[0];
+        if (record.status !== 'complete' || !settledIds.has(`${target.module}#${record.id}`)
+          || receipt.rejected.some(item => item.path === `${target.module}#${record.id}` || item.path.startsWith(`${target.module}#${record.id}.`)
+            || (item.repairTarget?.module === target.module
+              && (item.repairTarget.column === 'id' ? item.repairTarget.value === record.id
+                : record.fields[item.repairTarget.column]?.value === item.repairTarget.value)))
+          // 旧 SQL 拒绝只能由本次明确确认的目标字段解决，不能借用历史确认。
+          || !target.fields.every(field => record.fields[field]
+            && confirmedThisReceipt.has(`${target.module}:${record.id}:${field}`))) continue;
+        writeProblems.delete(key);
+        sqlRepairTargets.delete(key);
       }
     };
     const terminalIssues = (): AgentSubagentUnresolvedIssue_ACU[] => {
@@ -1177,7 +1201,7 @@ export class AgentSubagentRuntime_ACU {
               updateAgentSession_ACU(writeEntryId, {
                 ok: receipt.status === 'committed',
                 status: receipt.status === 'committed' ? 'done' : 'failed',
-                title: receipt.status === 'committed' ? `已保存 ${receipt.accepted.length} 栏` : '提交被拒',
+                title: receipt.status === 'committed' ? (receipt.accepted.length ? `已保存 ${receipt.accepted.length} 栏` : receipt.alreadySaved?.length ? `已确认 ${receipt.alreadySaved.length} 栏此前已保存` : '提交已确认') : '提交被拒',
                 ...(rejectedPaths ? { detail: `${call.sql}\n未采纳：${rejectedPaths}` } : {}),
               });
               if (receipt.status === 'committed') {
@@ -1190,11 +1214,12 @@ export class AgentSubagentRuntime_ACU {
               const receiptText = JSON.stringify({ action: 'write_sql', originalSql: call.sql, ...receipt,
                 fieldOutcome: receipt.partials === null || receipt.revisions === null ? '保存状态不明；先读取权威字段' : {
                   saved: receipt.accepted.map(item => ({ module: item.module, id: item.id, field: item.field, fieldRevision: item.revision, ...('value' in item ? { value: item.value } : {}) })),
+                  alreadySaved: receipt.alreadySaved ?? [],
                   notSaved: [...receipt.partials.flatMap(item => item.missingFields.map(field => `${item.module}#${item.id}.${field}`)), ...receipt.rejected.map(item => item.path)],
                   generatedIds: [...new Set(receipt.accepted.map(item => `${item.module}#${item.id}`))],
                 },
                 readAddresses: [...new Set([
-                  ...receipt.accepted.map(item => `$FIELD:${item.module}:${item.id}:${item.field}`),
+                  ...[...receipt.accepted, ...(receipt.partials !== null && receipt.revisions !== null ? receipt.alreadySaved ?? [] : [])].map(item => `$FIELD:${item.module}:${item.id}:${item.field}`),
                   ...(receipt.partials ?? []).map(item => `$FIELD:${item.module}:${item.id}`),
                   ...rejectedFieldReadAddresses_ACU(receipt),
                 ])],

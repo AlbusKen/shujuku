@@ -913,7 +913,7 @@ describe('子代理逐栏工具会话', () => {
     const saveChat = vi.fn().mockResolvedValue(undefined);
     _set_SillyTavern_API_ACU({ chat, saveChat } as any);
     input.writeSql = ({ role, sql, resolvePage }) => commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role, sql, resolvePage });
-    const firstSql = "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '门后信件', 0)";
+    const firstSql = "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '门后信件', 0); UPDATE hooks SET status=(), importance='mid', planted_index=1, planned_payoff='' WHERE id='H1' AND expected_revision=1";
     const restSql = "UPDATE hooks SET status = 'planted', importance = 'mid', planted_index = 1, planned_payoff = '' WHERE id = 'H1' AND expected_revision = 1";
     const replies = [
       nativeToolTurn_ACU('write_sql', { sql: firstSql }, 'call-first-write'),
@@ -929,12 +929,17 @@ describe('子代理逐栏工具会话', () => {
     try {
       const result = await runtime.run(input);
       expect(result.usedFieldWrites).toBe(true);
+      expect(result.completion).toBe('complete_changed');
+      expect(result.unresolvedIssues).toEqual([]);
       expect(result.iterations).toBe(4);
       expect(messages.slice(0, 4).every(request => request.some(item => item.content.startsWith('{')))).toBe(true);
       expect(toolContent_ACU(messages[1], 'call-first-write')).not.toBe('');
       expect(saveChat).toHaveBeenCalledTimes(2);
       expect(messages[1].map(item => item.content).join('\n')).toContain('"status":"committed"');
       expect(messages[1].map(item => item.content).join('\n')).toContain('"field":"summary","fieldRevision":1');
+      expect(toolContent_ACU(messages[1], 'call-first-write')).toContain('该语句未写入');
+      expect(toolContent_ACU(messages[1], 'call-first-write')).not.toContain('保存状态无法确认');
+      expect(toolContent_ACU(messages[1], 'call-first-write')).toContain('字段修订号，不是模块修订号');
       expect(messages[2].map(item => item.content).join('\n')).toContain('"missingFields"');
       expect(messages[3].map(item => item.content).join('\n')).toContain('"field":"status"');
       expect(messages[2].some(item => item.content.includes('write_sql 轮次剩余 3 / 4'))).toBe(true);

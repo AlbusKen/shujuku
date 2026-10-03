@@ -347,7 +347,14 @@ describe('逐栏 write_sql 意图解析', () => {
     );
     expect(parsed.rejected.map(item => item.path)).toEqual(['sql[0].web_refs', 'sql[1].hooks.WHERE']);
     expect(parsed.intents).toEqual([{ kind: 'update', module: 'hooks', id: 'H1', expectedRevision: 1, fields: { summary: '合法' } }]);
-    expect(() => parseAgentModuleSqlFieldWrites_ACU("UPDATE hooks SET summary=() WHERE id='H1'", 'hook-cognition-maintainer')).toThrow();
+    const invalid = parseAgentModuleSqlFieldWrites_ACU("UPDATE hooks SET summary='甲' WHERE id='H1'; UPDATE hooks SET summary=() WHERE id='H1'; INSERT INTO chronology (anchor, 入城后第七天, elapsed, precision, transition, evidence_indexes) VALUES ('入城后第七天', '七日', 'approximate', '迁居客栈', '[1]'); UPDATE hooks SET summary='丙' WHERE id='H2'", 'hook-cognition-maintainer');
+    expect(invalid.intents.map(item => item.fields)).toEqual([{ summary: '甲' }, { summary: '丙' }]);
+    expect(invalid.rejected).toEqual([
+      { path: 'sql[1]', reason: expect.stringContaining('该语句未写入'), repairTarget: { module: 'hooks', column: 'id', value: 'H1', fields: ['summary'] } },
+      { path: 'sql[2]', reason: expect.stringContaining('6 个字段、5 个值'), repairTarget: { module: 'chronology', column: 'anchor', value: '入城后第七天', fields: ['anchor', 'elapsed', 'precision', 'transition', 'evidenceIndexes'] } },
+    ]);
+    expect(invalid.rejected[1].reason).toContain('不要把正文内容写进列名');
+    expect(invalid.rejected[1].reason).not.toContain('单引号把值拆开了');
   });
 
   it('映射结构化值与网页句柄，退役语句携带原因，约束提议单独归集', () => {
@@ -359,11 +366,14 @@ describe('逐栏 write_sql 意图解析', () => {
       { kind: 'insert', module: 'webRefs', id: '', expectedRevision: 0, fields: { title: '名称', brief: '摘要' }, pageRef: 'page-1' },
       { kind: 'delete', module: 'webRefs', id: 'WR-001', expectedRevision: 0, fields: {}, reason: '过时' },
     ]);
+    const knowledge = [{ name: '林', knows: '亲眼看到写着 "封城" 的告示；署名 O\'Neil' }];
+    const nestedJson = JSON.stringify(JSON.stringify(knowledge)).replace(/'/g, "''");
     const maintainer = parseAgentModuleSqlFieldWrites_ACU(
-      "INSERT INTO constraint_proposals (text) VALUES ('请登记红线'); UPDATE info_gap SET character_knowledge='[{\"name\":\"林\",\"knows\":\"事\"}]' WHERE id='E1' AND expected_revision=3",
+      `INSERT INTO constraint_proposals (text) VALUES ('请登记红线'); UPDATE info_gap SET characterKnowledge='${nestedJson}' WHERE id='E1' AND expectedRevision=3`,
       'hook-cognition-maintainer',
     );
     expect(maintainer.constraintProposals).toEqual(['请登记红线']);
-    expect(maintainer.intents[0].fields.characterKnowledge).toEqual([{ name: '林', knows: '事' }]);
+    expect(maintainer.rejected).toEqual([]);
+    expect(maintainer.intents[0]).toMatchObject({ expectedRevision: 3, fields: { characterKnowledge: knowledge } });
   });
 });

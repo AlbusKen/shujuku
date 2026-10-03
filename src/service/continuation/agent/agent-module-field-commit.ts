@@ -46,6 +46,8 @@ export type AgentModuleRevisionWindow_ACU = Partial<Record<Module_ACU, { base: n
 export interface AgentModuleFieldReceipt_ACU {
   status: 'committed' | 'rejected' | 'persist_failed' | 'readback_failed';
   accepted: AgentModuleFieldAccepted_ACU[];
+  /** 从权威基线确认的同值重发；不产生新写入或推进修订号。 */
+  alreadySaved?: AgentModuleFieldAccepted_ACU[];
   rejected: AgentModuleSqlFieldRejection_ACU[];
   /** null 表示保存/补偿后的当前状态无法确认；必须重新读取权威帧。 */
   partials: Array<{ module: Module_ACU; id: string; missingFields: string[]; promotionError?: string }> | null;
@@ -58,6 +60,7 @@ export interface AgentModuleFieldPlan_ACU {
   batches: AgentModuleSqlFieldBatch_ACU[];
   snapshot: AgentModuleSnapshot_ACU;
   accepted: AgentModuleFieldAccepted_ACU[];
+  alreadySaved: AgentModuleFieldAccepted_ACU[];
   rejected: AgentModuleSqlFieldRejection_ACU[];
   partials: NonNullable<AgentModuleFieldReceipt_ACU['partials']>;
 }
@@ -78,24 +81,29 @@ function stringArray_ACU(value: unknown): boolean { return Array.isArray(value) 
 function record_ACU(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value); }
 function inList_ACU(value: unknown, list: readonly string[]): boolean { return text_ACU(value) && list.includes(value); }
 
+function evidenceRepair_ACU(evidenceThrough: number, evidence?: ReadonlySet<number>): string {
+  const indexes = evidence ? [...evidence].filter(index => index <= evidenceThrough).sort((a, b) => a - b) : [];
+  return `；本次引用上限 ${evidenceThrough}，可核对的 AI 正文楼层号：${indexes.join(', ') || '无'}。使用正文标注的原始楼层号，不要按第几条 AI 回复重新计数；须核对对应正文，不得仅为通过校验换号`;
+}
+
 /** 显式栏目逐栏校验；null、合法空值与缺栏不可混淆。楼层上限 evidenceThrough 是本次派工目标楼，不是结算水位。 */
 function fieldProblem_ACU(module: Module_ACU, field: string, value: unknown, evidenceThrough: number, evidence?: ReadonlySet<number>): string | null {
   switch (module) {
     case 'hooks':
       if (field === 'status') return inList_ACU(value, AGENT_HOOK_STATUSES_ACU) ? null : 'status 枚举非法';
       if (field === 'importance') return inList_ACU(value, AGENT_HOOK_IMPORTANCES_ACU) ? null : 'importance 枚举非法';
-      if (field === 'plantedIndex') return index_ACU(value) && (value as number) <= evidenceThrough && (!evidence || evidence.has(value as number)) ? null : 'plantedIndex 必须引用已出现的 AI 正文楼层';
+      if (field === 'plantedIndex') return index_ACU(value) && (value as number) <= evidenceThrough && (!evidence || evidence.has(value as number)) ? null : 'plantedIndex 必须引用已出现的 AI 正文楼层' + evidenceRepair_ACU(evidenceThrough, evidence);
       return field === 'summary' ? (nonempty_ACU(value) ? null : 'summary 必须为非空文本') : (text_ACU(value) ? null : '必须为字符串');
     case 'infoGap':
       if (field === 'revealStatus') return inList_ACU(value, AGENT_REVEAL_STATUSES_ACU) ? null : 'revealStatus 枚举非法';
-      if (field === 'revealIndex') return value === null || (index_ACU(value) && (value as number) <= evidenceThrough && (!evidence || evidence.has(value as number))) ? null : 'revealIndex 必须为空或已出现的 AI 正文楼层';
-      if (field === 'characterKnowledge') return Array.isArray(value) && value.every(item => record_ACU(item) && nonempty_ACU(item.name) && text_ACU(item.knows)) ? null : 'characterKnowledge 需要带 name / knows 的数组';
+      if (field === 'revealIndex') return value === null || (index_ACU(value) && (value as number) <= evidenceThrough && (!evidence || evidence.has(value as number))) ? null : 'revealIndex 必须为空或已出现的 AI 正文楼层' + evidenceRepair_ACU(evidenceThrough, evidence);
+      if (field === 'characterKnowledge') return Array.isArray(value) && value.every(item => record_ACU(item) && nonempty_ACU(item.name) && text_ACU(item.knows)) ? null : 'characterKnowledge 需要带 name / knows 的数组；SQL 列名 character_knowledge，值用单引号包裹完整 JSON 数组，如 \'[{"name":"角色","knows":"亲眼所见"}]\'；JSON 文本内部双引号须用反斜杠转义，SQL 文本内部单引号须写成两个单引号';
       return field === 'topic' ? (nonempty_ACU(value) ? null : 'topic 必须为非空文本') : (text_ACU(value) ? null : '必须为字符串');
     case 'chronology':
       if (field === 'precision') return inList_ACU(value, AGENT_CHRONOLOGY_PRECISIONS_ACU) ? null : 'precision 枚举非法';
       if (field === 'evidenceIndexes') {
         const indexes = normalizeEvidenceIndexes_ACU(value);
-        return indexes?.length && indexes.every(item => item <= evidenceThrough && (!evidence || evidence.has(item))) ? null : 'evidenceIndexes 必须是非空、已出现的 AI 正文楼层数组';
+        return indexes?.length && indexes.every(item => item <= evidenceThrough && (!evidence || evidence.has(item))) ? null : 'evidenceIndexes 必须是非空、已出现的 AI 正文楼层数组' + evidenceRepair_ACU(evidenceThrough, evidence);
       }
       return nonempty_ACU(value) ? null : '时间事实栏目必须为非空文本';
     case 'storyArc':
@@ -227,6 +235,7 @@ export function planAgentModuleFieldCommit_ACU(
   const drafts = new Map<string, Record<string, unknown>>();
   const batches = new Map<Module_ACU, AgentModuleSqlFieldBatch_ACU>();
   const accepted: AgentModuleFieldAccepted_ACU[] = [];
+  const alreadySaved: AgentModuleFieldAccepted_ACU[] = [];
   const rejected: AgentModuleSqlFieldRejection_ACU[] = [];
   const promotionProblems = new Map<string, string>();
   const reserved = new Set<string>();
@@ -312,6 +321,11 @@ export function planAgentModuleFieldCommit_ACU(
       if (!AGENT_MODULE_FIELD_MATRIX_ACU[module].fields.includes(field) || ['retired', 'retiredReason', 'updatedIndex', 'fetchedAt', 'source', 'url', 'query', 'sourceStatus'].includes(field)) {
         reject(fieldPath, 'field_forbidden'); continue;
       }
+      const confirmedRow = domainRow_ACU(snapshot, module, id);
+      if (confirmedRow && Object.prototype.hasOwnProperty.call(confirmedRow, field) && canonical_ACU(confirmedRow[field]) === canonical_ACU(raw) && canonical_ACU(baseline[field]) === canonical_ACU(raw)) {
+        alreadySaved.push({ module, id, field, revision: record?.fields[field]?.revision ?? snapshot.revisions[module], value: baseline[field] });
+        continue;
+      }
       if ((field === 'plantedIndex' && existing) || (field === 'scope' && existing && existing.scope !== raw)) {
         reject(fieldPath, '已登记的不可变栏目不能改写'); continue;
       }
@@ -381,7 +395,7 @@ export function planAgentModuleFieldCommit_ACU(
     partials.push({ module, id, missingFields: AGENT_MODULE_FIELD_MATRIX_ACU[module].required.filter(field => !Object.prototype.hasOwnProperty.call(values, field)),
       ...(promotionProblems.has(key) ? { promotionError: promotionProblems.get(key) } : {}) });
   }
-  return { snapshot: working, batches: [...batches.values()].filter(batch => Object.keys(batch.fieldWrites!).length || Object.keys(batch.domainUpserts!).length || batch.discardPartialIds!.length), accepted, rejected, partials };
+  return { snapshot: working, batches: [...batches.values()].filter(batch => Object.keys(batch.fieldWrites!).length || Object.keys(batch.domainUpserts!).length || batch.discardPartialIds!.length), accepted, alreadySaved, rejected, partials };
 }
 
 function confirmedPartials_ACU(fields: AgentModuleFieldSnapshot_ACU, planned: NonNullable<AgentModuleFieldReceipt_ACU['partials']> = []): NonNullable<AgentModuleFieldReceipt_ACU['partials']> {
@@ -459,9 +473,10 @@ export function commitAgentModuleFieldWrites_ACU(input: {
     const evidenceThrough = Math.max(folded.snapshot.settledThroughIndex, input.targetIndex);
     const plan = planAgentModuleFieldCommit_ACU(folded.snapshot, folded.fields, parsed.intents, input.role, input.completedStages, input.resolvePage, now, agentStoryEvidenceFloorIndexes_ACU(input.chat), evidenceThrough, input.revisionWindow);
     receipt.rejected.push(...plan.rejected);
+    receipt.alreadySaved = plan.alreadySaved;
     if (!plan.batches.length) {
       // 仅有「删除目标已不存在」时删除效果已成立：按空提交确认，不留待修复缺口。
-      if (receipt.rejected.length && receipt.rejected.every(item => item.reason.startsWith('already_absent'))) receipt.status = 'committed';
+      if ((receipt.rejected.length || plan.alreadySaved.length) && receipt.rejected.every(item => item.reason.startsWith('already_absent'))) receipt.status = 'committed';
       return receipt;
     }
     let view: Awaited<ReturnType<typeof materializeAgentModuleSqlView_ACU>> | undefined;
@@ -500,7 +515,7 @@ export function commitAgentModuleFieldWrites_ACU(input: {
     receipt.status = result.status;
     if (result.recovery) receipt.recovery = result.recovery;
     if (result.status !== 'committed') {
-      if (result.recovery !== 'saved') { receipt.partials = null; receipt.revisions = null; }
+      if (result.recovery !== 'saved') { receipt.partials = null; receipt.revisions = null; receipt.alreadySaved = []; }
       receipt.rejected.push({ path: 'host', reason: result.reason ?? result.status }); return receipt;
     }
     const confirmed = readAgentModuleFoldState_ACU(input.chat);

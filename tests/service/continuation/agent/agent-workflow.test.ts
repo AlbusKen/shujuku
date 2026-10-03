@@ -48,7 +48,7 @@ function harness_ACU(patch: Partial<ContinuationWorkflowInput_ACU> = {}) {
             delta: delta_ACU({ hooks: [{ action: 'upsert', id: 'H1', summary: '断裂的封印', status: 'planted', importance: 'mid', plantedIndex: 2, plannedPayoff: '后文回收', reason: '' }] }),
           },
           writes: ['hooks'],
-          readRevisions: snapshot_ACU().revisions,
+          readRevisions: input.snapshot.revisions,
         } satisfies ContinuationWorkflowAgentPayload_ACU;
       }
       return {
@@ -90,6 +90,37 @@ describe('续写固定工作流', () => {
     expect(harness.calls[0].prompt).toContain('守门人的回避');
     expect(harness.composerPrompts[0]).toContain('守门人的回避');
     expect(result.snapshot.revisions.hooks).toBe(1);
+    const windowed = harness_ACU({
+      snapshot: snapshot_ACU({ settledThroughIndex: -1 }),
+      settledIndex: 999,
+      settlementStartIndex: 997,
+      canAdvanceSettlement: false,
+    });
+    const windowedResult = await windowed.run();
+    expect(windowedResult.outcome).toBe('deliver');
+    expect(windowedResult.snapshot.settledThroughIndex).toBe(-1);
+    expect(windowedResult.snapshot.materialCompletion).toMatchObject({
+      state: 'complete_changed', rangeStartIndex: 997, rangeEndIndex: 999,
+    });
+    const resumed = harness_ACU({
+      snapshot: windowedResult.snapshot,
+      settledIndex: 1001,
+      settlementStartIndex: 1000,
+      canAdvanceSettlement: false,
+    });
+    const resumedResult = await resumed.run();
+    expect(resumedResult.snapshot.settledThroughIndex).toBe(-1);
+    expect(resumedResult.snapshot.materialCompletion).toMatchObject({ rangeStartIndex: 997, rangeEndIndex: 1001 });
+    const afterGap = harness_ACU({
+      snapshot: resumedResult.snapshot,
+      settledIndex: 1009,
+      settlementStartIndex: 1007,
+      canAdvanceSettlement: false,
+    });
+    const afterGapResult = await afterGap.run();
+    expect(afterGapResult.outcome).toBe('deliver');
+    expect(afterGapResult.snapshot.settledThroughIndex).toBe(-1);
+    expect(afterGapResult.snapshot.materialCompletion).toMatchObject({ rangeStartIndex: 1007, rangeEndIndex: 1009 });
   });
 
   it('部分契约保留合法资料、挂账缺失模块且不推进结算水位', async () => {

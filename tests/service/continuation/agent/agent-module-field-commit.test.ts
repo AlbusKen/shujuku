@@ -272,7 +272,8 @@ describe('续写逐栏真实提交', () => {
       role: 'hook-cognition-maintainer',
     });
     expect(conflict.status).toBe('rejected');
-    expect(conflict.rejected).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'infoGap#G2.revealStatus' })]));
+    expect(conflict.rejected).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'infoGap#G2.revealIndex' })]));
+    expect(conflict.alreadySaved).toEqual([expect.objectContaining({ module: 'infoGap', id: 'G2', field: 'revealStatus', value: 'unrevealed' })]);
     expect(readAgentModuleSnapshot_ACU(chat).infoGap.find(item => item.id === 'G2')).toMatchObject({ revealStatus: 'unrevealed', revealIndex: null });
   });
 

@@ -321,61 +321,74 @@ export function renderAgentStoryRange_ACU(context: AgentResolveContext_ACU, star
 }
 
 /**
- * 渲染已经发生的小说正文。
- *
- * 只取 AI 楼层——用户楼是操作指令而不是小说内容，把它当正文注入会让模型把指令误读成剧情。
- * 分「已结算」「尚未结算」两段：已结算段按窗口取最近若干楼（更早部分已经沉淀进资料模块与纪要），
- * 未结算段全量注入（它还没被任何资料模块吸收，是本轮必须亲自读的部分）。
- * @param context 解析上下文
- * @returns 分段的逐楼正文；没有 AI 楼层时如实说明
+ * 未结算正文与目录、区间读取共用最近 AI 楼层窗口。
+ * 返回实际处理起点，供工作流记录完成范围；窗口外的旧正文并不代表已被资料模块吸收。
  */
+export function resolveAgentUnsettledStoryWindow_ACU(context: AgentResolveContext_ACU) {
+  const allFloors = listAgentStoryFloors_ACU(context);
+  const window = agentStoryWindowSize_ACU(context);
+  const windowFloors = window > 0 ? allFloors.slice(-window) : [];
+  const completion = context.moduleSnapshot.materialCompletion;
+  const completedRange = completion
+    && (completion.state === 'complete_changed' || completion.state === 'complete_no_change')
+    && completion.rangeStartIndex >= 0 && completion.rangeEndIndex >= completion.rangeStartIndex
+    ? completion : null;
+  const isUnsettled = (floor: AgentStoryFloor_ACU) => floor.index > context.settledThroughIndex
+    && !(completedRange && floor.index >= completedRange.rangeStartIndex && floor.index <= completedRange.rangeEndIndex);
+  const unsettledFloors = allFloors.filter(isUnsettled);
+  const floors = windowFloors.filter(isUnsettled);
+  const hiddenCount = unsettledFloors.length - floors.length;
+  let startIndex = hiddenCount > 0
+    ? floors[0]?.index ?? context.chat.length
+    : Math.max(0, context.settledThroughIndex + 1);
+  // 最近窗口已完成后，只处理其后新增的正文；保留连续水位与窗口完成区间的区别。
+  if (floors.length && completedRange && windowFloors[0].index >= completedRange.rangeStartIndex
+    && windowFloors[0].index <= completedRange.rangeEndIndex
+    && floors[0].index > completedRange.rangeEndIndex) {
+    startIndex = completedRange.rangeEndIndex + 1;
+  }
+  if (!floors.length) startIndex = windowFloors[0]?.index ?? context.chat.length;
+  return { floors, hiddenCount, startIndex };
+}
+
+function renderUnsettledWindow_ACU(selection: ReturnType<typeof resolveAgentUnsettledStoryWindow_ACU>): string {
+  if (!selection.hiddenCount && !selection.floors.length) {
+    return '没有尚未结算的真实历史；当前正文已完成结算。';
+  }
+  const note = selection.hiddenCount > 0
+    ? `更早的 ${selection.hiddenCount} 个未结算 AI 楼层不在正文可读窗口内，本次未注入、也不属于本次逐楼结算范围；不能据此宣称旧正文已被完整结算。更早剧情请通过事件概览或 $TABLE:纪要表:行区间 回溯。`
+    : '';
+  return [note, selection.floors.length
+    ? renderStoryFloors_ACU(selection.floors)
+    : '当前可读窗口内没有待结算正文（窗口为 0 或窗口内正文已处理）；本次不注入或逐楼结算正文。'].filter(Boolean).join('\n\n');
+}
+
+/** 已发生正文只注入可读窗口内的 AI 楼层，已结算与未结算两段共用同一个上限。 */
 export function renderAgentStoryText_ACU(context: AgentResolveContext_ACU): string {
-  const chat = Array.isArray(context.chat) ? context.chat : [];
-  const highestIndex = chat.length - 1;
-  if (highestIndex < 0) return '当前聊天还没有任何楼层，也就没有已经发生的正文。';
-  // 删楼后残留的水位可能指向已不存在的楼层，必须钳制，否则未结算段起点会越过末楼输出空段。
-  const settledThrough = Math.min(context.settledThroughIndex, highestIndex);
-  const floors = chat
-    .map((message, index) => ({ index, text: messageText_ACU(message, context.contextRules) }))
-    .filter(item => chat[item.index] && !chat[item.index].is_user && item.text);
-  if (!floors.length) return '当前聊天还没有 AI 产出的正文楼层。';
-
-  const window = Math.max(0, context.storyWindowFloors ?? AGENT_STORY_WINDOW_DEFAULT_ACU);
-  const settled = floors.filter(item => item.index <= settledThrough);
-  const unsettled = floors.filter(item => item.index > settledThrough);
-  const shownSettled = window > 0 ? settled.slice(-window) : [];
+  if (!context.chat.length) return '当前聊天还没有任何楼层，也就没有已经发生的正文。';
+  const allFloors = listAgentStoryFloors_ACU(context);
+  if (!allFloors.length) return '当前聊天还没有 AI 产出的正文楼层。';
+  const selection = resolveAgentUnsettledStoryWindow_ACU(context);
+  const pendingIndexes = new Set(selection.floors.map(floor => floor.index));
+  const shownSettled = listAgentStoryWindowFloors_ACU(context).filter(floor => !pendingIndexes.has(floor.index));
+  const settled = allFloors.filter(floor => floor.index <= context.settledThroughIndex);
   const hiddenSettled = settled.length - shownSettled.length;
-  const render = (items: Array<{ index: number; text: string }>) => items.map(item => `【楼层 ${item.index}】\n${item.text}`).join('\n\n');
-
   const sections: string[] = [];
   const settledHead = hiddenSettled > 0
-    ? `## 已结算正文（只列最近 ${shownSettled.length} 楼；更早的 ${hiddenSettled} 楼未注入，其事实已沉淀进资料模块与纪要，需要时派工读取）`
+    ? `## 已结算正文（窗口内 ${shownSettled.length} 楼；更早的 ${hiddenSettled} 楼未注入，需要时通过事件概览与纪要回溯）`
     : '## 已结算正文';
-  if (shownSettled.length) sections.push(`${settledHead}\n${render(shownSettled)}`);
+  if (shownSettled.length) sections.push(`${settledHead}\n${renderStoryFloors_ACU(shownSettled)}`);
   else if (settled.length) sections.push(`${settledHead}\n（本次未注入任何已结算正文。）`);
-  sections.push(unsettled.length
-    ? `## 尚未结算的最新正文（全量）\n${render(unsettled)}`
-    : '## 尚未结算的最新正文\n没有尚未结算的正文楼层；上一轮已结算到当前最后一楼。');
+  sections.push(`## 尚未结算的最新正文（正文可读窗口内）\n${renderUnsettledWindow_ACU(selection)}`);
   return sections.join('\n\n');
 }
 
 /**
- * 渲染尚未结算的真实历史。只含 AI 楼层——正文域永远不含用户楼层，
- * 用户楼层的唯一职责是承载召回码（见 extractAgentRecallCodesFromChat_ACU）。
- * 该区间不做任何截断：结算子代理必须看到全部未结算正文，否则水位推进会吞掉未处理的楼层。
- * @param context 解析上下文
- * @returns 逐楼文本；无未结算楼层时如实标注
+ * 渲染可读窗口内尚未结算的 AI 正文。冷启动不回灌全部旧楼层；
+ * 省略范围明确说明，结算工作流用同一选择结果记录实际完成范围。
  */
 export function renderAgentUnsettledHistory_ACU(context: AgentResolveContext_ACU): string {
-  const start = context.settledThroughIndex + 1;
-  const lines: string[] = [];
-  for (let index = start; index < context.chat.length; index += 1) {
-    const message = context.chat[index];
-    if (!message || message.is_user) continue;
-    const text = messageText_ACU(message, context.contextRules);
-    if (text) lines.push(`【楼层 ${index}】\n${text}`);
-  }
-  return lines.length ? lines.join('\n\n') : '没有尚未结算的真实历史；上一轮已结算到当前最后一楼。';
+  return renderUnsettledWindow_ACU(resolveAgentUnsettledStoryWindow_ACU(context));
 }
 
 /** 世界书触发只扫描最近一个用户楼层与最近一个 AI 楼层；不拼入任务或旧历史。 */

@@ -151,7 +151,7 @@ export interface AgentConversationAppend_ACU {
   toolCallId?: string;
 }
 
-/** Agent 可读/可搜正文窗口的默认楼数。未结算楼层始终在窗口内，不受此值限制。 */
+/** Agent 可读、可搜与逐楼结算正文窗口的默认 AI 楼层数。 */
 export const AGENT_STORY_WINDOW_DEFAULT_ACU = 20;
 
 /** 骨架里固定注入全文的末尾 AI 楼层数默认值（承接锚点）。 */
