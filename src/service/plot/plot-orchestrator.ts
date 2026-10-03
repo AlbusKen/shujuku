@@ -7,7 +7,6 @@
  */
 
 import { isProcessing_Plot_ACU, loopState_ACU, settings_ACU, _set_isProcessing_Plot_ACU } from '../runtime/state-manager';
-import { markPlotIntercept_ACU, shouldSkipPlotIntercept_ACU } from '../plot/plot-logic';
 import { logDebug_ACU, logError_ACU, logWarn_ACU, hashUserInput_ACU } from '../../shared/utils';
 import { DEFAULT_PLOT_SETTINGS_ACU } from '../../shared/defaults-json.js';
 import { isFlightModeActive_ACU } from '../flight-mode/flight-mode-state';
@@ -55,7 +54,8 @@ export function shouldProcessTavernHelperHook_ACU(options: any): boolean {
  */
 export function extractUserMessageFromOptions_ACU(options: any): string | null {
     let userMessage = options.user_input || options.prompt;
-    if (options.injects?.[0]?.content) {
+    // injects 是附加提示词，不能覆盖本次真实用户输入；仅兼容旧的 inject-only 调用。
+    if (!userMessage && options.injects?.[0]?.content) {
         userMessage = options.injects[0].content;
     }
     return userMessage || null;
@@ -69,10 +69,12 @@ export function applyPlanningResultToOptions_ACU(
     options: any,
     finalMessage: string
 ): { target: 'injects' | 'prompt' | 'user_input'; value: string } {
-    if (options.injects?.[0]?.content) {
-        return { target: 'injects', value: finalMessage };
+    if (options.user_input) {
+        return { target: 'user_input', value: finalMessage };
     } else if (options.prompt) {
         return { target: 'prompt', value: finalMessage };
+    } else if (options.injects?.[0]?.content) {
+        return { target: 'injects', value: finalMessage };
     } else {
         return { target: 'user_input', value: finalMessage };
     }
@@ -131,7 +133,7 @@ export type PlanningFn = (userMessage: string, options: any) => Promise<string |
  */
 export interface TavernHelperHookResult {
     /** 'passthrough' = 不处理直接透传, 'planned' = 规划成功, 'aborted' = 用户中止, 'skipped' = 跳过, 'loop_retry' = 需要循环重试 */
-    action: 'passthrough' | 'planned' | 'aborted' | 'skipped' | 'loop_retry';
+    action: 'passthrough' | 'planned' | 'aborted' | 'skipped' | 'loop_retry' | 'failed';
     /** 规划后的最终消息（action='planned' 时有值） */
     finalMessage?: string;
     /** 写回目标 */
@@ -143,7 +145,7 @@ export interface TavernHelperHookResult {
  */
 export interface Strategy1Result {
     /** 'no_match' = 不匹配策略1, 'planned' = 规划成功, 'aborted' = 用户中止, 'skipped' = 跳过, 'loop_retry' = 需要循环重试 */
-    action: 'no_match' | 'planned' | 'aborted' | 'skipped' | 'loop_retry';
+    action: 'no_match' | 'planned' | 'aborted' | 'skipped' | 'loop_retry' | 'failed';
     /** 规划后的最终消息 */
     finalMessage?: string;
     /** 是否是手动中止（需要停止生成、删除消息、恢复输入框） */
@@ -161,7 +163,7 @@ export interface Strategy1Result {
  */
 export interface Strategy2Result {
     /** 'skip' = 不处理, 'planned' = 规划成功, 'aborted' = 用户中止 */
-    action: 'skip' | 'planned' | 'aborted';
+    action: 'skip' | 'planned' | 'aborted' | 'failed';
     /** 规划后的最终消息 */
     finalMessage?: string;
     /** 是否是手动中止 */
@@ -183,6 +185,11 @@ export async function orchestrateTavernHelperHook_ACU(
     runPlanning: PlanningFn
 ): Promise<TavernHelperHookResult> {
     // 1. 判断是否应该处理
+    if (isProcessing_Plot_ACU && settings_ACU.plotSettings.enabled
+        && !isFlightModeActive_ACU() && !isPlotSuppressedByFillModeForCurrentChat_ACU()
+        && !loopState_ACU.isRetrying && !options.should_stream) {
+        return { action: 'skipped' };
+    }
     if (!shouldProcessTavernHelperHook_ACU(options)) {
         return { action: 'passthrough' };
     }
@@ -192,9 +199,6 @@ export async function orchestrateTavernHelperHook_ACU(
     if (!userMessage) {
         return { action: 'passthrough' };
     }
-
-    // 3. 标记拦截（供 GENERATION_AFTER_COMMANDS 去重）
-    markPlotIntercept_ACU(userMessage);
 
     // 4. 调用规划
     _set_isProcessing_Plot_ACU(true);
@@ -223,16 +227,16 @@ export async function orchestrateTavernHelperHook_ACU(
         }
 
         // 8. 规划成功，决定写回位置
-        if (finalMessage && typeof finalMessage === 'string') {
+        if (typeof finalMessage === 'string' && finalMessage.trim()) {
             const writeBack = applyPlanningResultToOptions_ACU(options, finalMessage);
             return { action: 'planned', finalMessage, writeBack };
         }
 
-        // 9. 规划返回 null（未启用/失败），透传
-        return { action: 'passthrough' };
+        // 已进入规划却没有最终提示词，不能静默退回用户原文。
+        return { action: 'failed' };
     } catch (error) {
         logError_ACU('[剧情推进] Error in TavernHelper.generate hook orchestration:', error);
-        return { action: 'passthrough' };
+        return { action: 'failed' };
     } finally {
         _set_isProcessing_Plot_ACU(false);
     }
@@ -301,7 +305,7 @@ export async function orchestrateAfterCommandsStrategy1_ACU(
         }
 
         // 7. 规划成功
-        if (finalMessage && typeof finalMessage === 'string') {
+        if (typeof finalMessage === 'string' && finalMessage.trim()) {
             return {
                 action: 'planned',
                 finalMessage,
@@ -310,13 +314,14 @@ export async function orchestrateAfterCommandsStrategy1_ACU(
             };
         }
 
-        // 8. 规划返回 null
-        return { action: 'no_match' };
+        // no_match 只表示未选择该路径，不得表示已经执行的规划失败。
+        return { action: 'failed', originalMessage: messageToProcess, lastMessageIndex };
     } catch (error) {
         logError_ACU('[剧情推进] Error processing last chat message:', error);
-        delete lastMessage._plot_processed;
-        return { action: 'no_match' };
+        return { action: 'failed', originalMessage: messageToProcess, lastMessageIndex };
     } finally {
+        // 只有最终提示词真正写回楼层后，调用方才登记已处理。
+        delete lastMessage._plot_processed;
         _set_isProcessing_Plot_ACU(false);
     }
 }
@@ -351,7 +356,7 @@ export async function orchestrateAfterCommandsStrategy2_ACU(
         // 处理跳过
         if (finalMessage && (finalMessage as any).skipped) {
             logDebug_ACU('[剧情推进] Planning skipped in Strategy 2 (duplicate).');
-            return { action: 'skip' };
+            return { action: 'failed' };
         }
 
         // 处理中止
@@ -361,14 +366,14 @@ export async function orchestrateAfterCommandsStrategy2_ACU(
         }
 
         // 规划成功
-        if (finalMessage && typeof finalMessage === 'string') {
+        if (typeof finalMessage === 'string' && finalMessage.trim()) {
             return { action: 'planned', finalMessage };
         }
 
-        return { action: 'skip' };
+        return { action: 'failed' };
     } catch (error) {
         logError_ACU('[剧情推进] Error processing textarea input (Strategy 2):', error);
-        return { action: 'skip' };
+        return { action: 'failed' };
     } finally {
         _set_isProcessing_Plot_ACU(false);
         // 消费掉本次发送意图，避免同一次生成链路重复触发

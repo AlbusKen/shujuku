@@ -96,6 +96,8 @@ export interface NoticeHubState {
   petEnabled: ComputedRef<boolean>;
   /** 冷笑话插播开关：桌宠开启且未单独关闭冷笑话时为 true。 */
   jokesEnabled: ComputedRef<boolean>;
+  /** 桌宠开启时直接显示已有通知与任务进度；缺失按关闭处理。 */
+  showRealWork: ComputedRef<boolean>;
 }
 
 /** notice-hub 快照的响应式镜像。 */
@@ -127,7 +129,16 @@ export function useNoticeHubState(): NoticeHubState {
       return true;
     }
   });
-  return { snapshot, silent, petEnabled, jokesEnabled };
+  const showRealWork = computed(() => {
+    void snapshot.value.settingsVersion;
+    if (!petEnabled.value) return false;
+    try {
+      return settings_ACU?.deskPetShowRealWork === true;
+    } catch {
+      return false;
+    }
+  });
+  return { snapshot, silent, petEnabled, jokesEnabled, showRealWork };
 }
 
 function errorText(cause: unknown): string {

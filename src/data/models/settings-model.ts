@@ -56,6 +56,10 @@ export interface Settings_ACU {
   /** 填表走原生工具调用（table_edit / table_sql）；默认关闭，部分渠道带 tools 字段会直接报错。 */
   tableFillNativeToolEnabled: boolean;
   worldbookConfig: WorldbookConfig_ACU;
+  /** 解除剧情推进发送伪装，原文留在输入框等待结果；默认关闭，不随预设切换。 */
+  plotSendDisguiseDisabled?: boolean;
+  /** 桌宠直接显示现有通知与任务进度的真实内容；默认关闭。 */
+  deskPetShowRealWork?: boolean;
   plotSettings: PlotSettings_ACU;
   /**
    * 剧情推进世界书选择的权威副本，按角色卡作用域键（char:<avatar> / group:<id>）存储。

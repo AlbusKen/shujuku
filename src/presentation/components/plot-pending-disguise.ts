@@ -5,11 +5,13 @@
  * 剧情推进在该事件里等待规划，用户消息因此一直停在输入框。规划期间本模块：
  *   - 在 #chat 末尾渲染伪装的用户楼层与“思考中”的 AI 楼层（纯 DOM，不写 chat 数组、不触发保存）；
  *   - 清空发送框并拦截重复发送（宿主此时尚未置 is_send_press，空发送框会被当作空输入直接生成）；
- *   - 规划结束后移除伪装楼层，把文本写回发送框，交给宿主原生入楼与生成；
- *     规划期间用户新输入的草稿，在宿主读走发送框后还原。
+ *   - 规划结束后受保护地交还最终文本，直到真实用户楼层确认才解除发送拦截；
+ *     规划期间的新草稿在本次入楼确认后还原。
  */
 import { jQuery_API_ACU, SillyTavern_API_ACU } from '../../shared/host-api';
-import { getSendTextareaValue_ACU, setSendTextareaValue_ACU } from '../../shared/host-input';
+import { getSendTextareaValue_ACU, setSendTextareaValue_ACU, protectSendTextareaValue_ACU, type ProtectedSendTextarea_ACU } from '../../shared/host-input';
+import { getChatArray_ACU, stopGeneration_ACU } from '../../data/gateways/chat-gateway';
+import { currentChatFileIdentifier_ACU } from '../../service/runtime/state-manager';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { showToastr_ACU } from '../theme/toast';
 
@@ -70,11 +72,83 @@ export interface PlotPendingDisguiseHandle_ACU {
   readonly originalText: string;
   /** 切换拦截重复发送时的提示文案（例如召回结束、进入剧情推进）。 */
   setNotice(notice: PendingDisguiseNotice_ACU): void;
-  /** 移除伪装楼层、解除发送拦截，把 textForHost 写回发送框交给宿主继续原生发送。幂等；返回发送框是否写入成功。 */
-  release(textForHost: string): boolean;
+  /** 等待已失效时只撤销展示与拦截，不写入当前会话的发送框。 */
+  discard(): void;
+  /** 最终文本受保护地交给宿主，真实入楼后才解除拦截；空文本走取消。幂等。 */
+  release(textForHost: string, options?: { restoreDraft?: string }): boolean;
 }
 
 let activeDisguise_ACU: PlotPendingDisguiseHandle_ACU | null = null;
+
+interface PendingHandoff_ACU {
+  input: ProtectedSendTextarea_ACU;
+  chat: any[];
+  chatKey: string;
+  startIndex: number;
+  expected: string;
+  draft: string;
+  unblock: () => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+let pendingHandoff_ACU: PendingHandoff_ACU | null = null;
+const normalizePrompt_ACU = (text: unknown): string => String(text ?? '').replace(/\r\n?/g, '\n').trim();
+
+/** 无伪装路径也使用同一交接保护，不能只同步写回后放行。 */
+export function handoffPlotPendingSend_ACU(text: string, draft = ''): boolean {
+  if (pendingHandoff_ACU || !text.trim()) return false;
+  const input = protectSendTextareaValue_ACU(text);
+  if (!input) return false;
+  const chat = getChatArray_ACU();
+  const handoff: PendingHandoff_ACU = {
+    input, chat, chatKey: currentChatFileIdentifier_ACU, startIndex: chat.length,
+    expected: normalizePrompt_ACU(text), draft,
+    unblock: installSendBlock_ACU(input.element.ownerDocument, () => PLOT_PENDING_NOTICE_ACU),
+    timer: setTimeout(() => {
+      if (pendingHandoff_ACU !== handoff) return;
+      // 不恢复待发送正文：超时只清空并停止，避免迟到的宿主读到下一轮草稿。
+      disposePlotPendingHandoff_ACU(false);
+      stopGeneration_ACU();
+      logWarn_ACU('[剧情推进] 未收到真实用户楼层确认，已停止发送交接。');
+      showToastr_ACU('warning', '未收到用户楼层确认，本次发送已停止。', '剧情推进');
+    }, DRAFT_RESTORE_TIMEOUT_MS_ACU),
+  };
+  pendingHandoff_ACU = handoff;
+  return true;
+}
+
+/** 只认同一聊天、本次交接以后新增的真实用户楼层；清空 input 不是确认。 */
+export function confirmPlotPendingHandoff_ACU(messageId?: unknown): boolean {
+  const handoff = pendingHandoff_ACU;
+  if (!handoff || getChatArray_ACU() !== handoff.chat || currentChatFileIdentifier_ACU !== handoff.chatKey) return false;
+  const index = typeof messageId === 'number' ? messageId : -1;
+  const candidates = index >= handoff.startIndex ? [handoff.chat[index]]
+    : messageId === undefined ? handoff.chat.slice(handoff.startIndex) : [];
+  if (!candidates.some(message => message?.is_user && normalizePrompt_ACU(message.mes) === handoff.expected)) return false;
+  disposePlotPendingHandoff_ACU(true);
+  return true;
+}
+
+/** 终态或聊天切换清理；恢复草稿仅限已确认入楼的同一输入框。 */
+export function disposePlotPendingHandoff_ACU(consumed = false): void {
+  if (!consumed) activeDisguise_ACU?.discard();
+  const handoff = pendingHandoff_ACU;
+  if (!handoff) return;
+  pendingHandoff_ACU = null;
+  clearTimeout(handoff.timer);
+  handoff.unblock();
+  const draft = handoff.input.getDraft() || handoff.draft;
+  handoff.input.release('');
+  if (consumed && draft) {
+    const chat = handoff.chat;
+    const chatKey = handoff.chatKey;
+    // MESSAGE_SENT 后某些宿主仍会清空 textarea，等当前事件分发任务结束再恢复。
+    setTimeout(() => {
+      if (getChatArray_ACU() === chat && currentChatFileIdentifier_ACU === chatKey
+          && jQuery_API_ACU?.('#send_textarea')?.[0] === handoff.input.element
+          && !getSendTextareaValue_ACU()) setSendTextareaValue_ACU(draft);
+    }, 0);
+  }
+}
 
 /** 插件模式下 SillyTavern_API_ACU 是 getContext() 快照的 Proxy；否则尝试调用 getContext()。 */
 function getHostContext_ACU(): any {
@@ -163,6 +237,33 @@ function scheduleDraftRestore_ACU(jq: JQueryStatic, draft: string): void {
     if (getSendTextareaValue_ACU() === '') finish(true);
   });
   timer = setTimeout(() => finish(getSendTextareaValue_ACU() === ''), DRAFT_RESTORE_TIMEOUT_MS_ACU);
+}
+
+/** 中止宿主请求并清空本次待发送文本；原文/新草稿只在宿主读走发送框后恢复。 */
+export function cancelPlotPendingSend_ACU(
+  disguise: PlotPendingDisguiseHandle_ACU | null,
+  originalText: string,
+): void {
+  // 先释放伪装并清空，避免 stopGeneration 同步发出 STOPPED 后使 handle 失效。
+  if (disguise) {
+    if (!disguise.release('', { restoreDraft: originalText })) {
+      logWarn_ACU('[剧情推进] 取消发送时无法清空发送框，请检查宿主输入框状态。');
+    }
+    try { stopGeneration_ACU(); } catch (error) {
+      logWarn_ACU('[剧情推进] 停止宿主生成失败:', error);
+    }
+    return;
+  }
+  const draft = getSendTextareaValue_ACU() || originalText;
+  disposePlotPendingHandoff_ACU(false);
+  try { stopGeneration_ACU(); } catch (error) {
+    logWarn_ACU('[剧情推进] 停止宿主生成失败:', error);
+  }
+  if (!setSendTextareaValue_ACU('')) {
+    logWarn_ACU('[剧情推进] 取消发送时无法清空发送框，请检查宿主输入框状态。');
+    return;
+  }
+  if (draft && jQuery_API_ACU) scheduleDraftRestore_ACU(jQuery_API_ACU, draft);
 }
 
 function resolveCharacterAvatarSrc_ACU(ctx: any, $chat: JQuery<HTMLElement>): string {
@@ -273,17 +374,27 @@ export function beginPlotPendingDisguise_ACU(
       setNotice(notice: PendingDisguiseNotice_ACU): void {
         if (!released && notice) currentNotice = notice;
       },
-      release(textForHost: string): boolean {
+      discard(): void {
+        if (released) return;
+        released = true;
+        writeOk = false;
+        if (activeDisguise_ACU === handle) activeDisguise_ACU = null;
+        unblock();
+        nodes.remove();
+      },
+      release(textForHost: string, options: { restoreDraft?: string } = {}): boolean {
         if (released) return writeOk;
         released = true;
         if (activeDisguise_ACU === handle) activeDisguise_ACU = null;
         unblock();
         nodes.remove();
-        const draft = getSendTextareaValue_ACU();
-        writeOk = setSendTextareaValue_ACU(textForHost);
+        const draft = getSendTextareaValue_ACU() || options.restoreDraft || '';
+        writeOk = textForHost.trim()
+          ? handoffPlotPendingSend_ACU(textForHost, draft === textForHost ? '' : draft)
+          : setSendTextareaValue_ACU(textForHost);
         if (!writeOk) {
-          logWarn_ACU('[剧情推进] 伪装结束时写回发送框失败，宿主将读取到当前发送框内容。');
-        } else if (draft && draft !== textForHost) {
+          logWarn_ACU('[剧情推进] 伪装结束时发送框写回校验失败。');
+        } else if (!textForHost.trim() && draft) {
           scheduleDraftRestore_ACU(jq, draft);
         }
         return writeOk;

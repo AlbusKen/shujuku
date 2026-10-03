@@ -73,6 +73,7 @@ const props = defineProps<{
   viewportWidth: number;
   viewportHeight: number;
   actionBusy: boolean;
+  showRealWork?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -104,14 +105,20 @@ const heading = computed(() => {
   const current = props.slide;
   if (!current) return "";
   if (current.type === "joke") return "你知道吗？";
+  if (props.showRealWork) {
+    return current.type === "notice" ? current.notice.title : props.task?.feature || "";
+  }
   return "";
 });
 
-/** 通知与任务表面只显示似是而非的「正在XXXX…」；原文、批次、重试等明细点击后展开。 */
+/** 真实内容沿用现有通知/进度，不额外读取任务载荷；默认显示桌宠状态词。 */
 const bodyText = computed(() => {
   const current = props.slide;
   if (!current) return "";
   if (current.type === "joke") return current.text;
+  if (props.showRealWork) {
+    return current.type === "notice" ? current.notice.text : props.task?.detail || "";
+  }
   if (current.type === "notice") return `正在${current.word}…`;
   return props.task ? `正在${current.word}…` : "";
 });
@@ -149,7 +156,7 @@ const detailText = computed(() => {
   if (current?.type === "task") return props.task?.detail || "";
   return "";
 });
-const expandable = computed(() => props.slide?.type !== "joke" && !!(detailText.value || detailTitle.value));
+const expandable = computed(() => !props.showRealWork && props.slide?.type !== "joke" && !!(detailText.value || detailTitle.value));
 
 function toggleDetail(): void {
   if (!expandable.value) return;

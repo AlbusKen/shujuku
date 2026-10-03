@@ -103,7 +103,6 @@ async function mountPlotPage(opts: {
     selectedMode: 'llm',
     classic: { recentChronicleRows: 15 },
     vector: { resultCount: 200 },
-    llm: { apiPresetName: '' },
   };
   const mount = await import('../../../src/presentation-v2/bootstrap/mount');
   await mount.openAcuV2App();
@@ -119,7 +118,7 @@ beforeEach(() => {
 
 describe('PlotPage', () => {
   it('渲染主区头部与状态行，header 不再放启用 toggle', async () => {
-    const { mount } = await mountPlotPage();
+    const { mount, settings } = await mountPlotPage();
 
     const page = document.querySelector('.acu-v2-fill-mode-page');
     expect(page).not.toBeNull();
@@ -132,6 +131,35 @@ describe('PlotPage', () => {
 
     const toggle = document.querySelector('button[data-acu-plot-toggle="enabled"]') as HTMLButtonElement | null;
     expect(toggle).toBeNull();
+
+    expect(text).not.toContain('LLM / continuation API 预设');
+    const disguiseToggle = page!.querySelector<HTMLButtonElement>('[data-acu-plot-disguise-disabled-toggle]')!;
+    expect(disguiseToggle.getAttribute('aria-checked')).toBe('false');
+    disguiseToggle.click();
+    await Promise.resolve();
+    expect(settings.plotSendDisguiseDisabled).toBe(true);
+    expect(disguiseToggle.getAttribute('aria-checked')).toBe('true');
+    const { usePlotPresetStore } = await import('../../../src/presentation-v2/stores/plot-preset-store');
+    const plotStore = usePlotPresetStore();
+    plotStore.resetCurrentToDefaults();
+    expect(settings.plotSendDisguiseDisabled).toBe(true);
+    disguiseToggle.click();
+    await Promise.resolve();
+    expect(settings.plotSendDisguiseDisabled).toBe(false);
+
+    const repo = await import('../../../src/data/repositories/profile-repo');
+    const preferences = await import('../../../src/service/fill-mode/fill-mode-preferences');
+    const legacy = { ...repo.globalMeta_ACU.formFillPreferencesGlobal, llm: { apiPresetName: '旧字段' } };
+    repo.globalMeta_ACU.formFillPreferencesGlobal = legacy;
+    const read = preferences.readFillModePreferences_ACU();
+    expect(repo.globalMeta_ACU.formFillPreferencesGlobal).toBe(legacy);
+    expect(read.preferences).not.toHaveProperty('llm');
+    const save = vi.spyOn(repo, 'saveGlobalMeta_ACU').mockReturnValue(true);
+    const saved = preferences.saveFillModePreferences_ACU(read.preferences);
+    expect(saved.ok).toBe(true);
+    expect(repo.globalMeta_ACU.formFillPreferencesGlobal).not.toHaveProperty('llm');
+    expect(save).toHaveBeenCalledOnce();
+    save.mockRestore();
 
     mount.__resetAcuV2MountForTests();
   });

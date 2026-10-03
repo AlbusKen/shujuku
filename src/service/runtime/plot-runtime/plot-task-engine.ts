@@ -747,6 +747,9 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
 
   export async function runPlotTasksRuntime_ACU(plotSettings: Record<string, any>, userMessage: string, runtimeOptions: any = {}) {
     const { inputForHash = userMessage, hasExistingUserMessage = false } = runtimeOptions;
+    const chatId = currentChatFileIdentifier_ACU || '';
+    // 真实用户层尚未创建时，只允许认领本轮开始后新增的楼层，不能匹配同文旧层。
+    const targetStartIndex = Math.max(0, (getChatArray_ACU()?.length || 0) - (hasExistingUserMessage ? 1 : 0));
 
     // ── P4-T4.1: 入口 flush 上一轮残留 pending ──
     // 下一轮开始意味着用户已发送新消息，上一轮目标用户消息必然已在 chat 中，
@@ -999,7 +1002,6 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
     const userInputHash = hashUserInput_ACU(inputForHash);
     const finalMessageHash = hashUserInput_ACU(finalMessage);
     const roundId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-    const chatId = currentChatFileIdentifier_ACU || '';
     _set_tempPlotToSave_ACU({
       content: saveContent,
       userInputHash,
@@ -1007,6 +1009,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       finalMessageHash,
       roundId,
       taskResults: successfulResults,
+      targetStartIndex,
       // P1-T1.1: 绑定当前聊天标识，供 flush/延迟路径跨聊天校验
       chatId,
     });
