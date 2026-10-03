@@ -56,24 +56,41 @@ describe('world simulation commit adapter', () => {
     _set_SillyTavern_API_ACU(null as any);
   });
 
-  it('联合提交 envelope、账本、材料与 active swipe，且主保存只调用一次', async () => {
-    const { chat, commitInput, saveChat, userBlock } = fixture();
+  it('联合提交 envelope、账本、材料与 active swipe，主保存一次且延时刷新一次', async () => {
+    vi.useFakeTimers();
+    try {
+      const { chat, commitInput, saveChat, userBlock } = fixture();
+      const updateMessageBlock = vi.fn();
+      _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat, updateMessageBlock } as any);
 
-    const committedAnchor = await commitWorldSimulationProjection_ACU(commitInput);
+      const committedAnchor = await commitWorldSimulationProjection_ACU(commitInput);
 
-    expect(saveChat).toHaveBeenCalledTimes(1);
-    expect(chat[1].mes).toBe(chat[1].swipes[0]);
-    expect(chat[1].mes).toContain(userBlock);
-    expect(chat[1].mes).toContain('远处钟声响起');
-    const persistedAnchor = resolveWorldSimulationAnchor_ACU(1, chat);
-    expect(committedAnchor).toEqual(persistedAnchor);
-    expect(persistedAnchor.contentDigest).not.toBe(commitInput.anchor.contentDigest);
-    const ledger = readWorldSimulationLedgerAtAnchor_ACU(persistedAnchor, chat);
-    expect(ledger).toMatchObject({ revision: 1, clock: { day: 2, storyTime: '1h' }, guidance: { signals: [{ text: '远处钟声响起', voice: 'ambient' }] } });
-    const materials = readLatestWorldSimulationMaterials_ACU(chat);
-    expect(materials).toMatchObject({ adoptedIndex: 1, snapshot: { ledgerRevision: 1, evidenceRefs: ['e1'] } });
-    expect(chat[0]._qrf_world_simulation.task).toMatchObject({ status: 'completed', activeRun: null });
-    expect(chat[0]._qrf_world_simulation.timeline.at(-1)).toMatchObject({ kind: 'committed', id: 'timeline-1' });
+      expect(saveChat).toHaveBeenCalledTimes(1);
+      expect(chat[1].mes).toBe(chat[1].swipes[0]);
+      expect(chat[1].mes).toContain(userBlock);
+      expect(chat[1].mes).toContain('远处钟声响起');
+      const persistedAnchor = resolveWorldSimulationAnchor_ACU(1, chat);
+      expect(committedAnchor).toEqual(persistedAnchor);
+      expect(persistedAnchor.contentDigest).not.toBe(commitInput.anchor.contentDigest);
+      const ledger = readWorldSimulationLedgerAtAnchor_ACU(persistedAnchor, chat);
+      expect(ledger).toMatchObject({ revision: 1, clock: { day: 2, storyTime: '1h' }, guidance: { signals: [{ text: '远处钟声响起', voice: 'ambient' }] } });
+      const materials = readLatestWorldSimulationMaterials_ACU(chat);
+      expect(materials).toMatchObject({ adoptedIndex: 1, snapshot: { ledgerRevision: 1, evidenceRefs: ['e1'] } });
+      expect(chat[0]._qrf_world_simulation.task).toMatchObject({ status: 'completed', activeRun: null });
+      expect(chat[0]._qrf_world_simulation.timeline.at(-1)).toMatchObject({ kind: 'committed', id: 'timeline-1' });
+
+      expect(updateMessageBlock).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(99);
+      expect(updateMessageBlock).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(updateMessageBlock).toHaveBeenCalledTimes(1);
+      expect(updateMessageBlock).toHaveBeenCalledWith(1, chat[1], { rerenderMessage: true });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(updateMessageBlock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 
   it('正文 digest 改变时保留旧会话 entry，并把当前 segment 复制到新锚点', async () => {

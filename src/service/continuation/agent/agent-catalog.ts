@@ -10,6 +10,7 @@
 import { AGENT_FINAL_REVIEWER_NAME_ACU, AGENT_INSTRUCTION_COMPOSER_NAME_ACU, AGENT_OUTLINE_AGENT_NAME_ACU, AGENT_WEB_RESEARCHER_NAME_ACU, type AgentSubagentKind_ACU, type AgentSubagentName_ACU } from './agent-model';
 import type { AgentWritableModule_ACU } from './agent-model';
 import type { AgentNativeToolName_ACU } from '../../ai/native-tool';
+import type { AgentToolMode_ACU } from '../../ai/agent-tool-mode';
 
 export interface AgentSubagentDefinition_ACU {
   name: AgentSubagentName_ACU;
@@ -272,7 +273,7 @@ export function renderAgentModuleCatalog_ACU(options?: AgentCatalogOptions_ACU &
  * 子代理一定解析得了。各资料的具体可用地址以对应目录（正文/表格/世界书）为准。
  * @returns 词汇表文本
  */
-export function renderAgentReadCatalog_ACU(): string {
+export function renderAgentReadCatalog_ACU(toolMode: AgentToolMode_ACU): string {
   return [
     'read 在已经有地址时使用；还不知道地址时先 search。参数 reads 可混用多种地址，一次批量取数：',
     '- $STORY_RANGE:起始楼-结束楼：可读窗口内的 AI 正文楼层区间，逐楼全文。可用楼层与窗口范围见正文目录。',
@@ -287,7 +288,9 @@ export function renderAgentReadCatalog_ACU(): string {
     '- $WORLDBOOK:书名:uid[,uid]：已启用世界书条目全文。已触发的内容见末尾快照，不必重复 read；未命中条目可从目录或 search（scope=["worldbook"]）取得地址后精读。目录标注 token 数以便分配预算。',
     '- $STORY_CATALOG / $STORY_OVERVIEW / $STORY_TAIL / $OUTLINE_WINDOW / $HISTORY_UNSETTLED：楼层索引、事件概览、尾部正文全文、完整大纲窗口、未结算正文全量。',
     '- 早期剧情的详细纪要在纪要表里：$TABLE:纪要表:起始行-结束行 按行区间精读（行号见事件概览与表格目录）。',
-    'search 使用函数调用。参数示例：{"query":"关键词或正则","scope":["story","tables","modules","outline","worldbook"],"isRegex":false,"maxResults":30}。',
+    toolMode === 'tools'
+      ? 'search 使用函数调用。参数示例：{"query":"关键词或正则","scope":["story","tables","modules","outline","worldbook"],"isRegex":false,"maxResults":30}。'
+      : 'search 输出 JSON 动作：{"action":"search","query":"关键词或正则","scope":["story","tables","modules","outline","worldbook"],"isRegex":false,"maxResults":30}；read 输出 {"action":"read","reads":["授权地址"]}。',
     '命中行会带上可直接复制进 read 的地址；先 search 定位、再用窄地址精读，比整读省预算。',
   ].join('\n');
 }
@@ -305,10 +308,12 @@ export function findAgentSubagentDefinition_ACU(name: string): AgentSubagentDefi
  * 渲染 web-researcher 的出网工具说明：按设置列出启用的百科来源、搜索提供方与页数上限。
  * 只注入该子代理，主 Agent 与其它子代理看不到这些动作名。
  */
-export function renderAgentWebToolCatalog_ACU(input: { sources: string[]; provider: string; maxPages: number; pageCharLimit: number; pagesUsed: number }): string {
+export function renderAgentWebToolCatalog_ACU(input: { sources: string[]; provider: string; maxPages: number; pageCharLimit: number; pagesUsed: number }, toolMode: AgentToolMode_ACU): string {
   const sourceText = input.sources.length ? input.sources.join('、') : '（全部百科来源已关闭，只能用 web_search / web_read）';
   return [
-    '出网工具 encyclopedia_search、encyclopedia_read、web_search、web_read 都是函数调用，和本地 read/search 一样，可以在同一次回复里并发调用，不要写成 JSON。结果里的页面带句柄 P1、P2…，契约里用 pageRef 引用它们。继续调用工具时，把上一批页面要留下的事实放进 notes 参数。',
+    toolMode === 'tools'
+      ? '出网工具 encyclopedia_search、encyclopedia_read、web_search、web_read 都是函数调用，和本地 read/search 一样，可以在同一次回复里并发调用，不要写成 JSON。结果里的页面带句柄 P1、P2…，契约里用 pageRef 引用它们。继续调用工具时，把上一批页面要留下的事实放进 notes 参数。'
+      : '出网工具 encyclopedia_search、encyclopedia_read、web_search、web_read 都输出 JSON 动作，action 填工具名，其余字段填下列参数，可与本地 read/search 在同一次回复输出多个对象。例如 {"action":"encyclopedia_search","query":"角色名","notes":"待核实的设定"}。结果里的页面带句柄 P1、P2…，用 pageRef 引用。继续调阅时，把上一批页面要留下的事实放进 notes 字段。',
     `- 调用 encyclopedia_search，参数 query 为「角色名 或 作品名」，sources 例如 ["moegirl","wikipedia_zh"]。sources 省略即用全部启用来源：${sourceText}。萌娘按标题前缀匹配、百度按精确词条名匹配，查不到就换全名或作品内译名。`,
     '- 调用 encyclopedia_read，参数 source 为 moegirl，title 为候选里的准确标题。精读词条正文，返回带句柄的页面。',
     `- 调用 web_search，参数 query 为关键词。通用搜索（提供方：${input.provider}），返回标题、链接与摘要；百科查不到的冷门设定再用它。`,

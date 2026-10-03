@@ -1229,6 +1229,9 @@ describe('runPlotTasksRuntime_ACU', () => {
       content: '保存的剧情内容',
       userInputHash: 'hash_当前输入',
       userInputText: '当前输入',
+      targetStartIndex: mockGetChatArray().length,
+      finalMessageHash: 'hash_最终注入消息',
+      chatId: 'test-chat',
       taskResults: expect.arrayContaining([
         expect.objectContaining({ taskId: 'task-a', success: true, rawResponse: '结果A' }),
         expect.objectContaining({ taskId: 'task-b', success: true, rawResponse: '结果B' }),

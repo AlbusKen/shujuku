@@ -13,8 +13,8 @@ import { logDebug_ACU } from '../../shared/utils';
  * 在 presentation 层调用 runOptimizationLogic_ACU 并处理所有 UI 反馈。
  * 返回值与原 runOptimizationLogic_ACU 兼容：
  *   - string: 规划成功的最终消息
- *   - null: 规划失败/跳过/未启用
- *   - { skipped: true }: 重复触发被跳过
+ *   - null: 规划失败
+ *   - { skipped: true, reason: string }: 未执行规划，保留不适用与忙碌的区别
  *   - { aborted: true, manual: true, restoreText: string }: 用户中止
  */
 export async function runOptimizationLogicWithUI_ACU(userMessage: any, options: any = {}) {
@@ -52,7 +52,7 @@ export async function runOptimizationLogicWithUI_ACU(userMessage: any, options: 
 
   // 跳过的情况（retrying / inflight / disabled）—— 不弹 toast，静默返回
   if (result.skipped) {
-    return result.reason === 'inflight' ? { skipped: true } : null;
+    return { skipped: true, reason: result.reason };
   }
 
   // 用户中止

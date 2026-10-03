@@ -403,6 +403,7 @@ describe("DashboardPage", () => {
       "silentModeEnabled",
       "desktopPetEnabled",
       "deskPetJokesEnabled",
+      "deskPetShowRealWork",
       "zeroTkOccupyModeDefault",
       "streamingEnabled",
     ]);
@@ -871,6 +872,53 @@ describe("DashboardPage", () => {
     expect(page.textContent || "").not.toContain("已切换到 SQLite 模式。");
     expect(document.body.textContent || "").toContain("已切换到 SQLite 模式。");
 
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it("桌宠真实工作内容默认关闭，切换即时刷新当前通知与任务进度", async () => {
+    const settings = createSettings();
+    settings.deskPetJokesEnabled = false;
+    const { mount, saveSettings } = await mountDashboardPage(settings);
+    const hub = await import('../../../src/shared/notice-hub');
+    const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+    const toggle = () => document.querySelector<HTMLButtonElement>('[data-acu-toggle-key="deskPetShowRealWork"]')!;
+    expect(toggle().getAttribute('aria-checked')).toBe('false');
+    hub.notify_ACU('info', '正在核对第三批纪要', { title: '纪要召回' });
+    await tick();
+    const body = () => document.querySelector('.acu-notice-bubble__text')?.textContent || '';
+    expect(body()).toMatch(/^正在.+…$/);
+    expect(body()).not.toBe('正在核对第三批纪要');
+    toggle().click();
+    await tick();
+    expect(settings.deskPetShowRealWork).toBe(true);
+    expect(saveSettings).toHaveBeenCalled();
+    expect(body()).toBe('正在核对第三批纪要');
+    expect(document.querySelector('.acu-notice-bubble__heading')?.textContent).toBe('纪要召回');
+    expect(document.querySelector('.acu-notice-bubble__detail')).toBeNull();
+    toggle().click();
+    await tick();
+    expect(body()).toMatch(/^正在.+…$/);
+
+    const task = hub.beginNoticeTask_ACU('剧情推进', { detail: '分析记忆目录', busy: true });
+    document.querySelector<HTMLButtonElement>('.acu-notice-bubble__close')!.click();
+    await tick();
+    toggle().click();
+    await tick();
+    expect(document.querySelector('.acu-notice-bubble__heading')?.textContent).toBe('剧情推进');
+    expect(body()).toBe('分析记忆目录');
+    task.update('整理最终提示词');
+    await tick();
+    expect(body()).toBe('整理最终提示词');
+
+    document.querySelector<HTMLButtonElement>('[data-acu-toggle-key="desktopPetEnabled"]')!.click();
+    await tick();
+    expect(toggle()).toBeNull();
+    expect(body()).toMatch(/^正在.+…$/);
+    document.querySelector<HTMLButtonElement>('[data-acu-toggle-key="desktopPetEnabled"]')!.click();
+    await tick();
+    expect(toggle().getAttribute('aria-checked')).toBe('true');
+    expect(body()).toBe('整理最终提示词');
+    task.end();
     mount.__resetAcuV2MountForTests();
   });
 

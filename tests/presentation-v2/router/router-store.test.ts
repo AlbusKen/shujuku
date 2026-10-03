@@ -85,12 +85,12 @@ describe('router-store · pageRegistry 基线', () => {
 });
 
 describe('router-store · 基础模式默认可见性', () => {
-  it('未持久化时默认进入填表工作台，基础档显示日常配置', async () => {
+  it('未持久化时默认进入填表工作台，基础档显示日常配置与高级工具（运行日志）', async () => {
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
     expect(r.activePageId).toBe('form-fill');
-    expect(r.visiblePages.map(p => p.id)).toEqual(['dashboard', 'fill-mode', 'form-fill', 'api']);
+    expect(r.visiblePages.map(p => p.id)).toEqual(['dashboard', 'fill-mode', 'form-fill', 'api', 'advanced-tools']);
     expect(r.visiblePagesByGroup.overview.map(p => p.id)).toEqual(['dashboard']);
   });
 
@@ -296,7 +296,7 @@ describe('router-store · 切页 + 持久化', () => {
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
     expect(r.activePageId).toBe('form-fill');
-    expect(r.visiblePages.map(p => p.id)).toEqual(['dashboard', 'fill-mode', 'form-fill', 'api']);
+    expect(r.visiblePages.map(p => p.id)).toEqual(['dashboard', 'fill-mode', 'form-fill', 'api', 'advanced-tools']);
   });
 
   it('高手模式未持久化路由时默认页是 dashboard', async () => {

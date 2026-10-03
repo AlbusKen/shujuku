@@ -2,8 +2,13 @@
   <section class="acu-v2-advanced-tools-page">
     <AcuMobilePanelNav :items="panelNavItems" />
 
-    <AcuPanelGrid class="acu-v2-advanced-tools-page__tools-grid" collapse-at="lg">
+    <AcuPanelGrid
+      class="acu-v2-advanced-tools-page__tools-grid"
+      :columns="showSqlPanel ? 2 : 1"
+      collapse-at="lg"
+    >
       <AcuPanel
+        v-if="showSqlPanel"
         id="advanced-tools-sql-panel"
         class="acu-v2-advanced-tools-page__sql-panel"
         :title="advancedToolsCopy.panels.sql.title"
@@ -245,7 +250,7 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import AcuBadge, { type AcuBadgeVariant } from '../components/_lib/AcuBadge.vue';
 import AcuButton from '../components/_lib/AcuButton.vue';
 import AcuFormRow from '../components/_lib/AcuFormRow.vue';
@@ -262,9 +267,13 @@ import { useSqlConsole } from '../composables/useSqlConsole';
 import { type LogErrorHint, resolveLogErrorHint } from '../composables/log-error-hints';
 import { type LogLevelFilter, useLogViewer } from '../composables/useLogViewer';
 import { advancedToolsCopy } from '../copy/advanced-tools-copy';
+import { useUiModeStore } from '../stores/ui-mode-store';
 
 const sqlFlow = useSqlConsole();
 const logFlow = useLogViewer();
+const uiMode = useUiModeStore();
+/** SQL 控制台可直接改写聊天数据库，只在高级模式开放；轻量 / 进阶模式本页只显示运行日志。 */
+const showSqlPanel = computed(() => uiMode.isAdvancedMode);
 const logListRef = ref<HTMLElement | null>(null);
 
 /** 日志条目不可变，按 id 缓存匹配结果，避免每次列表刷新都对全部条目重跑规则。 */
@@ -281,10 +290,10 @@ function hintFor(entry: LogEntry): LogErrorHint | null {
   }
   return hint;
 }
-const panelNavItems = [
-  { id: 'advanced-tools-sql-panel', label: advancedToolsCopy.nav.sql },
+const panelNavItems = computed(() => [
+  ...(showSqlPanel.value ? [{ id: 'advanced-tools-sql-panel', label: advancedToolsCopy.nav.sql }] : []),
   { id: 'advanced-tools-log-panel', label: advancedToolsCopy.nav.logs },
-];
+]);
 
 function onSqlEditorKeydown(event: KeyboardEvent): void {
   if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {

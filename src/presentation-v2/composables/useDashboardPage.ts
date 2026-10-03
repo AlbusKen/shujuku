@@ -935,6 +935,12 @@ export function useDashboardPage(): DashboardPageState {
               description: dashboardCopy.toggles.deskPetJokes.description,
               value: settings_ACU.deskPetJokesEnabled !== false,
             },
+            {
+              key: "deskPetShowRealWork",
+              label: dashboardCopy.toggles.deskPetRealWork.label,
+              description: dashboardCopy.toggles.deskPetRealWork.description,
+              value: settings_ACU.deskPetShowRealWork === true,
+            },
           ]
         : []),
       {
@@ -1075,7 +1081,8 @@ export function useDashboardPage(): DashboardPageState {
     } else if (
       key === "silentModeEnabled" ||
       key === "desktopPetEnabled" ||
-      key === "deskPetJokesEnabled"
+      key === "deskPetJokesEnabled" ||
+      key === "deskPetShowRealWork"
     ) {
       settings_ACU[key] = !!value;
       saveSettings_ACU();

@@ -19,6 +19,7 @@ import { isConnectionProfileChatCompletion_ACU, isMainApiChatCompletionAvailable
 import { pristineFetch_ACU } from '../../../data/gateways/pristine-fetch';
 import { chatTurnFromJson_ACU, readFetchChatTurn_ACU, type AiChatTurn_ACU } from '../native-tool';
 import { adaptTableFillPromptSegmentsToToolMode_ACU, buildTableFillNativeTools_ACU, resolveTableFillToolTurn_ACU } from './table-fill-tools';
+import { isNativeToolChannelAvailable_ACU } from '../agent-tool-mode';
 
 
 /**
@@ -101,18 +102,11 @@ export class RetryableAiResponseError_ACU extends Error {
     // 填表原生工具默认关闭：部分渠道只要请求体出现 tools 字段就直接报错而不降级，需用户显式开启。
     const tableFillToolOptIn = settings_ACU.tableFillNativeToolEnabled === true;
     // 判定本次请求实际能否携带填表原生工具：Text Completion 连接与 generateRaw 回退取不回 tool_calls。
-    const tableFillToolChannelAvailable = (() => {
-        if (strictJsonFillEnabled || !tableFillToolOptIn) return false;
-        if (effectiveApiMode === 'tavern') {
-            const profile = getConnectionManagerProfiles_ACU().find(p => p.id === effectiveTavernProfile);
-            return !!profile && isConnectionProfileChatCompletion_ACU(profile);
-        }
-        if (effectiveApiConfig.useMainApi) {
-            if (!forceDirectApi) return isMainApiChatCompletionAvailable_ACU();
-            return !!(effectiveApiConfig.url && effectiveApiConfig.model);
-        }
-        return true;
-    })();
+    const tableFillToolChannelAvailable = !strictJsonFillEnabled && tableFillToolOptIn && isNativeToolChannelAvailable_ACU({
+        apiMode: effectiveApiMode,
+        apiConfig: effectiveApiConfig,
+        tavernProfile: effectiveTavernProfile,
+    }, forceDirectApi);
     if (!strictJsonFillEnabled) {
         // 默认主段按本次是否真的携带工具对齐：带工具用工具版默认，不带工具用正文 <tableEdit> 格式默认。
         promptSegments = adaptTableFillPromptSegmentsToToolMode_ACU(promptSegments, sqliteMode, tableFillToolChannelAvailable);

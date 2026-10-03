@@ -8,6 +8,7 @@
  */
 
 import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../model';
+import type { AgentToolMode_ACU } from '../../ai/agent-tool-mode';
 import { parseJsonLenient_ACU, salvageTruncatedJson_ACU, stripReasoningBlocks_ACU } from '../lenient-text';
 import { parseRestrictedSqlDml_ACU, type RestrictedSqlStatement_ACU, type RestrictedSqlValue_ACU } from '../../shared/restricted-sql-dml';
 import {
@@ -1331,7 +1332,7 @@ export function mergeAgentMaintainerOutputs_ACU(base: AgentMaintainerOutput_ACU,
  * 渲染截断/条目修补的续写请求：告诉模型哪些条目已收下（不要重发）、哪些条目要修正、
  * 以及输出是否在中途被截断需要从下一条继续。回复只需含剩余/修正条目。
  */
-export function renderAgentContractContinuationRequest_ACU(accepted: AgentMaintainerOutput_ACU, rejected: readonly AgentContractRejection_ACU[], truncated: boolean): string {
+export function renderAgentContractContinuationRequest_ACU(accepted: AgentMaintainerOutput_ACU, rejected: readonly AgentContractRejection_ACU[], truncated: boolean, toolMode: AgentToolMode_ACU): string {
   const acceptedIds: string[] = [];
   for (const [label, list] of [
     ['伏笔', [...accepted.delta.hooks, ...accepted.delta.hookPatches]],
@@ -1344,7 +1345,7 @@ export function renderAgentContractContinuationRequest_ACU(accepted: AgentMainta
   }
   const lines: string[] = [];
   if (truncated) {
-    lines.push('你上一次的输出在 JSON 中途被截断。截断前已写完整的条目已经收下，不要重发它们；请从被截断的那一条开始，只输出剩余条目。');
+    lines.push('你上一次的交付载荷中途被截断。截断前完整的条目已经收下，不要重发它们；请从被截断的那一条开始，只交付剩余条目。');
   } else {
     lines.push('你上一次的输出大部分已收下，只有下列条目不符合契约，请只重发这些条目（修正后），其余不要重发。');
   }
@@ -1353,7 +1354,9 @@ export function renderAgentContractContinuationRequest_ACU(accepted: AgentMainta
     lines.push('需要修正的条目：');
     for (const item of rejected) lines.push(`- ${item.module}[${item.index}]${item.id ? `（id=${item.id}）` : ''}：${item.reason}`);
   }
-  lines.push('回复仍是一个 JSON 对象，sql 必须是字符串。只提交上面点名的栏目：还没有写入的条目用 INSERT，只有出现在「已收下的条目」里的才用 UPDATE。不要重发未点名的栏目，也不要把整行重发成 patch。summary 可省略。');
+  lines.push(toolMode === 'tools'
+    ? '请单独调用 submit，只修正上面点名的交付条目，参数遵守原交付契约，不带 sql；不要重发已收下的条目。实际资料写入仍须单独调用 write_sql，不能与交付同回复。'
+    : '请单独输出符合原交付契约的 JSON 对象，只修正上面点名的交付条目，不带 sql；不要重发已收下的条目。实际资料写入仍须单独输出 {"action":"write_sql","sql":"全部语句"}，不能与交付同回复。');
   return lines.join('\n');
 }
 

@@ -48,6 +48,9 @@
 
       <AcuPanel v-if="settingsDraft" title="推演设置" description="修改后自动保存；任务运行中也可以改，改动会在本轮结束后落盘、下一轮开始时生效。常用项直接可见，其余参数按主题折叠。">
         <div class="acu-v2-world-simulation-page__settings-grid">
+          <AcuFormRow label="使用工具调用" hint="开启后决策与交付都通过函数调用完成；部分渠道不支持 tools 字段会报错。全局生效，不随对话保存。">
+            <AcuToggle :model-value="runtime.nativeToolEnabled.value" aria-label="使用工具调用" @update:model-value="runtime.setNativeToolEnabled($event)" />
+          </AcuFormRow>
           <AcuFormRow label="API 预设（全局默认）" hint="所有 Agent 默认走这个预设；需要给某个 Agent 单独指定时，展开下方「各 Agent 渠道」。需要工具的 Agent 须使用 Chat Completion 类连接：自定义 API、Chat Completion 酒馆连接预设或 Chat Completion 主连接均可；Text Completion 连接无法返回工具调用。">
             <AcuSelect
               :options="apiPresetOptions"
@@ -220,7 +223,7 @@
           @toggle="toggleGroup(`prompt:${agentName}`)"
         >
           <AcuPromptSegments
-            :segments="settingsDraft.agentPrompts[agentName] ?? []"
+            :segments="runtime.presentPromptSegments(agentName, settingsDraft.agentPrompts[agentName] ?? [])"
             :role-options="roleOptions"
             :show-slot="false"
             :show-enabled="true"
@@ -258,6 +261,7 @@ import type { WorldSimulationAgentName_ACU } from '../../service/simulation/agen
 import type { WorldSimulationPromptSegment_ACU, WorldSimulationSettings_ACU } from '../../service/simulation/model'; // arch-ok: 仅类型导入，用于本页状态标注，编译后无运行时依赖
 import AcuButton from '../components/_lib/AcuButton.vue';
 import AcuCheckbox from '../components/_lib/AcuCheckbox.vue';
+import AcuToggle from '../components/_lib/AcuToggle.vue';
 import AcuDisclosureGroup from '../components/_lib/AcuDisclosureGroup.vue';
 import AcuFormRow from '../components/_lib/AcuFormRow.vue';
 import AcuInput from '../components/_lib/AcuInput.vue';

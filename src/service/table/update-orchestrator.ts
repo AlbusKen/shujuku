@@ -3613,13 +3613,15 @@ export async function processUpdatesBatch_ACU(
                 }
             }
 
-            const batchSheetKeys = getSortedSheetKeys_ACU(mergedBatchData);
-            const batchIsolationKey = getCurrentIsolationKey_ACU();
-
-            // 加载历史数据
-            const loadResult = loadBatchBaseData_ACU(chatHistory, firstMessageIndexOfBatch, batchIsolationKey, batchSheetKeys, mergedBatchData);
+            // SQLite 的 SQL 在实时数据库上执行，提示词必须沿用同一基底；
+            // 非 SQLite 路径仍按批次之前的聊天历史加载表格数据。
+            if (!isSqliteMode()) {
+                const batchSheetKeys = getSortedSheetKeys_ACU(mergedBatchData);
+                const batchIsolationKey = getCurrentIsolationKey_ACU();
+                const loadResult = loadBatchBaseData_ACU(chatHistory, firstMessageIndexOfBatch, batchIsolationKey, batchSheetKeys, mergedBatchData);
+                logDebug_ACU(`[Batch ${batchNumber}] Loaded ${loadResult.foundCount}/${loadResult.totalCount} tables from history before index ${firstMessageIndexOfBatch}. Missing tables will use template structure (header-only).`);
+            }
             _set_currentJsonTableData_ACU(mergedBatchData);
-            logDebug_ACU(`[Batch ${batchNumber}] Loaded ${loadResult.foundCount}/${loadResult.totalCount} tables from history before index ${firstMessageIndexOfBatch}. Missing tables will use template structure (header-only).`);
 
             // 计算上下文范围
             let sliceStartIndex = firstMessageIndexOfBatch;

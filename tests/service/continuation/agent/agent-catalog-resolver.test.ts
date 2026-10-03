@@ -95,7 +95,7 @@ describe('Agent 目录渲染', () => {
   it('用户要求模块进资料目录与读集词汇表，AI 维护子代理已退役、目录查无此人', () => {
     const moduleCatalog = renderAgentModuleCatalog_ACU();
     expect(moduleCatalog).toContain('$USER_REQUIREMENTS');
-    expect(renderAgentReadCatalog_ACU()).toContain('$USER_REQUIREMENTS');
+    expect(renderAgentReadCatalog_ACU('tools')).toContain('$USER_REQUIREMENTS');
     expect(findAgentSubagentDefinition_ACU('requirements-maintainer')).toBeNull();
   });
 });
@@ -185,7 +185,7 @@ describe('Agent 读写集解析', () => {
   });
 
   it('读集词汇表覆盖全部地址体系，主/子代理共用同一份', () => {
-    const catalog = renderAgentReadCatalog_ACU();
+    const catalog = renderAgentReadCatalog_ACU('tools');
     expect(catalog).toContain('$STORY_RANGE:');
     expect(catalog).toContain('$TABLE:表名:起始行-结束行');
     expect(catalog).toContain('$WORLDBOOK:书名:uid');

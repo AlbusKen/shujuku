@@ -11,9 +11,37 @@ import {
   isModelExchangeSequence_ACU,
   nativeToolCallsToProtocolJson_ACU,
   nativeToolExchange_ACU,
+  projectNativeToolHistoryToText_ACU,
+  withJsonTailPrefill_ACU,
 } from '../../../src/service/ai/native-tool';
 
 describe('native tool calls', () => {
+  describe('JSON 历史投影', () => {
+  it('最终请求不携带 tools、tool_calls 或 role=tool，保留正文、顺序和原历史', () => {
+    const source = [
+      { role: 'system', content: '静态协议' },
+      ...nativeToolExchange_ACU('已决定调阅', [{ id: 'history-read', name: 'read', arguments: '{"reads":["anchor:message"]}' }], ['真实回执']),
+    ];
+    const before = JSON.stringify(source);
+    const projected = projectNativeToolHistoryToText_ACU(source);
+    expect(projected.map(message => message.role)).toEqual(['system', 'assistant', 'user']);
+    expect(projected[1].content).toContain('已决定调阅');
+    expect(projected[1].content).toContain('"action":"read"');
+    expect(projected[2].content).toBe('真实回执');
+    const messages = withJsonTailPrefill_ACU(projected);
+    const body = buildCustomApiRequestBody_ACU(messages, { url: 'https://example.invalid', model: 'test' }, { tools: [] });
+    expect(body).not.toHaveProperty('tools');
+    expect(body).not.toHaveProperty('tool_choice');
+    for (const message of body.messages) {
+      expect(message.role).not.toBe('tool');
+      expect(message).not.toHaveProperty('tool_calls');
+      expect(message).not.toHaveProperty('tool_call_id');
+    }
+    expect(JSON.stringify(source)).toBe(before);
+  });
+});
+
+
   it('请求体只在显式传入时带上 tools', () => {
     const plain = buildCustomApiRequestBody_ACU([{ role: 'user', content: 'hi' }], { url: 'https://api.example.com', model: 'gpt' });
     expect(plain).not.toHaveProperty('tools');

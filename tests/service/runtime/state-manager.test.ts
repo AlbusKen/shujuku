@@ -6,12 +6,18 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const {
   mockGetChatArray,
+  mockFlightModeActive,
 } = vi.hoisted(() => ({
   mockGetChatArray: vi.fn(() => []),
+  mockFlightModeActive: vi.fn(() => false),
 }));
 
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
   getChatArray_ACU: mockGetChatArray,
+}));
+
+vi.mock('../../../src/service/flight-mode/flight-mode-state', () => ({
+  isFlightModeActive_ACU: mockFlightModeActive,
 }));
 
 vi.mock('../../../src/shared/defaults-json.js', () => ({
@@ -70,6 +76,7 @@ import {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockFlightModeActive.mockReturnValue(false);
   // 重置 generationGate
   generationGate_ACU.lastUserMessageId = null;
   generationGate_ACU.lastUserMessageText = '';
@@ -278,6 +285,14 @@ describe('shouldProcessPlotForGeneration_ACU', () => {
     _set_settings_ACU({ plotSettings: { enabled: true } });
     mockGetChatArray.mockReturnValue([]);
     generationGate_ACU.lastUserSendIntentAt = Date.now();
+    expect(shouldProcessPlotForGeneration_ACU('normal', {}, false)).toBe(true);
+    // 经典/飞行模式即使保留剧情总开关，也不能进入规划并取消正常发送。
+    mockFlightModeActive.mockReturnValue(true);
+    expect(shouldProcessPlotForGeneration_ACU('normal', {}, false)).toBe(false);
+    mockFlightModeActive.mockReturnValue(false);
+    loopState_ACU.isRetrying = true;
+    expect(shouldProcessPlotForGeneration_ACU('normal', {}, false)).toBe(false);
+    loopState_ACU.isRetrying = false;
     expect(shouldProcessPlotForGeneration_ACU('normal', {}, false)).toBe(true);
   });
 

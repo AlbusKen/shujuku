@@ -7,6 +7,8 @@ import type { ContinuationPreparedTurnInstruction_ACU } from '../../service/cont
 import { restoreContinuationPromptDefault_ACU, validateContinuationPromptSegments_ACU, type ContinuationPromptKind_ACU } from '../../service/continuation/prompt-template';
 import { CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU } from '../../service/continuation/defaults';
 import { buildDefaultContinuationAgentPrompts_ACU } from '../../service/continuation/agent/agent-defaults';
+import { adaptContinuationAgentPromptsToToolMode_ACU, adaptContinuationPromptSegmentsToToolMode_ACU } from '../../service/continuation/agent/agent-prompt-mode';
+import { useAgentToolMode } from './useAgentToolMode';
 import { useToastStore } from '../stores/toast-store';
 
 /** 连续高压轮上限的可配置上界。页面是 .vue，不能直接 import 服务层常量，由本组合式函数中转。 */
@@ -43,6 +45,7 @@ function errorMessage_ACU(error: unknown): string {
 
 export function useContinuationRuntime() {
   const toast = useToastStore();
+  const toolMode = useAgentToolMode('continuation');
   const runtime = getContinuationRuntime_ACU();
   const envelope = ref<ContinuationEnvelope_ACU | null>(null);
   // 无信封聊天的展示兜底：全局设置副本优先，用户在新聊天里看到的就是自己保存过的偏好。
@@ -319,7 +322,11 @@ export function useContinuationRuntime() {
    * @returns 恢复默认值后的设置草稿
    */
   function restorePromptDefault(settings: ContinuationSettings_ACU, kind: ContinuationPromptKind_ACU): ContinuationSettings_ACU {
-    return restoreContinuationPromptDefault_ACU(settings, kind);
+    return restoreContinuationPromptDefault_ACU(settings, kind, toolMode.mode.value);
+  }
+
+  function presentPromptSegments(role: keyof ContinuationSettings_ACU['agentPrompts'], segments: readonly ContinuationPromptSegment_ACU[]): ContinuationPromptSegment_ACU[] {
+    return adaptContinuationPromptSegmentsToToolMode_ACU(role, segments, toolMode.mode.value);
   }
 
   /**
@@ -348,7 +355,7 @@ export function useContinuationRuntime() {
       for (const key of CONTINUATION_AGENT_PROMPT_KEYS_ACU) {
         agentPrompts[key] = validateContinuationPromptSegments_ACU(agentRecord[key] ?? defaults[key], 'load');
       }
-      return { outlinePrompt, agentPrompts };
+      return { outlinePrompt, agentPrompts: adaptContinuationAgentPromptsToToolMode_ACU(agentPrompts, toolMode.mode.value) };
     } catch (error) {
       throw new Error(`提示词校验失败：${errorMessage_ACU(error)}`);
     }
@@ -384,6 +391,9 @@ export function useContinuationRuntime() {
     clearData,
     parsePromptBundle,
     restorePromptDefault,
+    presentPromptSegments,
+    nativeToolEnabled: toolMode.enabled,
+    setNativeToolEnabled: toolMode.setEnabled,
     saveActiveOutline,
     sendAgentMessage,
     activeStage,

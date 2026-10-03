@@ -1199,6 +1199,9 @@ export   function buildDefaultSettings_ACU() {
           strictJsonTableFillEnabled: false,
           // 默认关闭：部分渠道只要请求体带 tools 字段就直接报错，开启前需确认渠道支持工具调用。
           tableFillNativeToolEnabled: false,
+          // 续写 / 推演的工具方案全局开关；关闭时请求不带 tools，提示词为纯 JSON 版。
+          continuationNativeToolEnabled: false,
+          worldSimulationNativeToolEnabled: false,
           discardUnauthorizedTableEditsEnabled: true,
           // [剧情推进] 按剧情任务ID保存的任务级 API 预设覆盖（key=taskId, value=presetName）
           // 不保存入聊天记录或剧情推进预设，只写进插件全局设置。
@@ -1222,6 +1225,8 @@ export   function buildDefaultSettings_ACU() {
           silentModeEnabled: false, // [静默模式] 开启后不显示任何通知气泡（确认框/输入框不受影响）
           desktopPetEnabled: true, // [桌宠] 通知气泡锚定桌宠；关闭后气泡回到原通知位置
           deskPetJokesEnabled: true, // [桌宠] 冷笑话插播；仅在桌宠开启时生效，关闭后气泡不再插播冷笑话
+          deskPetShowRealWork: false, // [桌宠] 直接展示已有通知与任务进度的真实内容
+          plotSendDisguiseDisabled: false, // [剧情推进] 解除等待期发送伪装，不随预设切换
           // [桌宠] desktopPetPosition（按视口比例 {x,y}）刻意不放默认值：deepMerge 遇到 null 默认值会把已保存对象并成 {}。
           // [剧情推进] 设置
           plotSettings: JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU)),

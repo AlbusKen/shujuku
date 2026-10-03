@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { settings_ACU } from '../../../../src/service/runtime/state-manager';
+import { nativeAgentReply_ACU } from '../../../helpers/agent-mode-fixture';
 
 import { AgentSubagentRuntime_ACU, createAgentReadRoundState_ACU, renderStoryArcVolumePlanInstruction_ACU } from '../../../../src/service/continuation/agent/agent-subagent-runtime';
 import { findMainSessionReadAppendix_ACU, renderMainSessionReadAppendix_ACU, omitSnapshotSectionsForSubagent_ACU } from '../../../../src/service/continuation/agent/agent-shared-materials';
@@ -9,6 +11,10 @@ import { buildDefaultContinuationSettings_ACU } from '../../../../src/service/co
 import type { AiUsageMetadata_ACU } from '../../../../src/service/continuation/internal-ai-call';
 
 const preset_ACU = { presetName: 'p1', source: 'settings', reason: 'test', apiMode: 'custom', apiConfig: { useMainApi: false, max_tokens: 60000 }, tavernProfile: '' } as any;
+const previousNativeToolEnabled_ACU = settings_ACU.continuationNativeToolEnabled;
+// 本文件的读取与写入夹具使用原生函数；纯 JSON 协议另行直接验证。
+beforeEach(() => { settings_ACU.continuationNativeToolEnabled = true; });
+afterEach(() => { settings_ACU.continuationNativeToolEnabled = previousNativeToolEnabled_ACU; });
 type SentMessage_ACU = { role: string; content: string; tool_call_id?: string };
 const toolContent_ACU = (messages: readonly SentMessage_ACU[], id: string): string =>
   messages.find(message => message.role === 'tool' && message.tool_call_id === id)?.content ?? '';
@@ -78,7 +84,7 @@ it('普通子代理最终请求保留世界书伪标题正文并正确识别真�
     { bookName: '设定集', uid: '7', title: '常开', keys: [], constant: true, content, tokens: 20 },
   ] };
   const injected = renderAgentWorldbookTriggeredInjection_ACU(input.resolveContext.worldbook, '');
-  const snapshot = await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext);
+  const snapshot = await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext, 'tools');
   const appendix = renderMainSessionReadAppendix_ACU([
     { id: 1, kind: 'tool', text: '真正的调阅回执', digest: 'read', readKey: '$STORY_RANGE:1-1' },
   ] as any);
@@ -142,8 +148,8 @@ it('已读附录的长度帧损坏或帧间缺口时拒绝整份快照，不注�
 });
 
 const readReply_ACU = nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表'] }, 'call-table-read');
-const finalReply_ACU = JSON.stringify({ summary: '结算完成', delta: {} });
-const readOnlyReviewReply_ACU = JSON.stringify({ verdict: 'pass', reason: '读取回归完成', fixes: [] });
+const finalReply_ACU = nativeAgentReply_ACU(JSON.stringify({ summary: '结算完成', delta: {} }))!;
+const readOnlyReviewReply_ACU = nativeAgentReply_ACU(JSON.stringify({ verdict: 'pass', reason: '读取回归完成', fixes: [] }))!;
 
 function input_ACU(): Parameters<AgentSubagentRuntime_ACU['run']>[0] {
   const settings = buildDefaultContinuationSettings_ACU();
@@ -176,6 +182,75 @@ function input_ACU(): Parameters<AgentSubagentRuntime_ACU['run']>[0] {
 }
 
 
+it.each(['json', 'tools'] as const)('%s 总纲请求在协议错误后允许检索与补读，保存后独立交付', async toolMode => {
+  const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');
+  const { commitAgentModuleFieldWrites_ACU } = await import('../../../../src/service/continuation/agent/agent-module-field-commit');
+  const { readAgentModuleSnapshot_ACU } = await import('../../../../src/service/continuation/agent/agent-module-store');
+  const input = input_ACU();
+  input.toolMode = toolMode;
+  input.delegation = { agentName: 'arc-architect', prompt: '查清世界书设定后建立全书方向', reads: [] };
+  input.settings.internalAiRetryLimit = 2;
+  input.budget.maxExtraReads = 2;
+  input.resolveContext.worldbook = { available: true, entries: [
+    { bookName: '设定集', uid: '7', title: '禁区', keys: ['禁区'], constant: false, content: '禁区入口必须支付代价。', tokens: 20 },
+  ] };
+  const chat = input.resolveContext.chat;
+  let saves = 0;
+  _set_SillyTavern_API_ACU({ chat, saveChat: async () => { saves += 1; } } as any);
+  input.writeSql = ({ role, sql, resolvePage }) => commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role, sql, resolvePage });
+  const sql = "INSERT INTO story_arc (id, scope, title, direction, escalation, withheld, status, expected_revision) VALUES ('STORY-01', 'story', '追查禁区', '查清入口代价', '从观察到进入', '禁区核心', 'active', 0);";
+  const replies = [
+    '<function_calls><invoke name="read"><parameter name="reads">["$WORLDBOOK:设定集:7"]</parameter></invoke></function_calls>',
+    JSON.stringify({ action: 'search', query: '禁区', scope: ['worldbook'] }),
+    JSON.stringify({ action: 'read', reads: ['$WORLDBOOK:设定集:7'] }),
+    JSON.stringify({ action: 'write_sql', sql }),
+    JSON.stringify({ summary: '全书方向已保存' }),
+  ];
+  const sent: Array<{ messages: Array<{ role: string; content: string; tool_calls?: unknown; tool_call_id?: string }>; tools: string[]; cacheTools: string[] }> = [];
+  const runtime = new AgentSubagentRuntime_ACU({
+    resolveApiPreset: (() => preset_ACU) as any,
+    callInternalAi: async (messages, _preset, _identity, _signal, options) => {
+      sent.push({ messages, tools: options?.tools?.map(tool => tool.function.name) ?? [], cacheTools: options?.cacheTools ?? [] });
+      // 运行中翻转全局开关，后续请求仍须沿用 input.toolMode。
+      settings_ACU.continuationNativeToolEnabled = toolMode === 'json';
+      const reply = replies.shift() ?? '{"summary":"全书方向已保存"}';
+      return toolMode === 'tools' ? nativeAgentReply_ACU(reply) : reply;
+    },
+  });
+  try {
+    const result = await runtime.run(input);
+    expect(sent).toHaveLength(5);
+    expect(result.usedFieldWrites).toBe(true);
+    expect(result.iterations).toBe(5);
+    expect(saves).toBe(1);
+    expect(readAgentModuleSnapshot_ACU(chat).storyArc[0]).toMatchObject({ id: 'STORY-01', title: '追查禁区', direction: '查清入口代价' });
+    const texts = sent.map(request => request.messages.map(message => message.content).join('\n'));
+    expect(texts[2]).toContain('$WORLDBOOK:设定集:7');
+    expect(texts[3]).toContain('禁区入口必须支付代价。');
+    expect(texts[4]).toContain('"status":"committed"');
+    expect(texts[1]).not.toContain('调用一次 write_sql');
+    for (const request of sent) {
+      const text = request.messages.map(message => message.content).join('\n');
+      expect(text).not.toMatch(/\{"summary":"[^"]*","sql":/);
+      if (toolMode === 'json') {
+        expect(request.tools).toEqual([]);
+        expect(request.cacheTools).toContain('mode:json');
+        expect(request.messages.some(message => message.role === 'tool' || message.tool_calls || message.tool_call_id)).toBe(false);
+        expect(text).not.toMatch(/函数调用|submit|原生 write_sql/);
+        expect(text).toContain('search 输出 JSON 动作');
+      } else {
+        expect(request.tools).toEqual(['read', 'search', 'write_sql', 'submit']);
+        expect(request.cacheTools).not.toContain('mode:json');
+        expect(text).toContain('search 使用函数调用');
+        expect(text).not.toContain('我的最终交付是一个 JSON 对象');
+      }
+    }
+    if (toolMode === 'tools') expect(sent[4].messages.some(message => message.role === 'tool')).toBe(true);
+  } finally { _set_SillyTavern_API_ACU(null as any); }
+});
+
+
+
 async function runWithUsageSequence_ACU(sequence: Array<AiUsageMetadata_ACU | null>) {
   const usages = [...sequence];
   const replies = [readReply_ACU, finalReply_ACU];
@@ -192,10 +267,10 @@ async function runWithUsageSequence_ACU(sequence: Array<AiUsageMetadata_ACU | nu
 
 it('各角色的最终工具集合与本地搜索执行权限一致', async () => {
   for (const [agentName, expected] of [
-    ['hook-cognition-maintainer', ['read']],
-    ['arc-architect', ['read', 'search']],
-    ['web-researcher', ['read', 'search', 'encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read']],
-    ['instruction-composer', []],
+    ['hook-cognition-maintainer', ['read', 'submit']],
+    ['arc-architect', ['read', 'search', 'submit']],
+    ['web-researcher', ['read', 'search', 'encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read', 'submit']],
+    ['instruction-composer', ['submit']],
   ] as const) {
     const input = input_ACU();
     input.delegation.agentName = agentName;
@@ -220,7 +295,7 @@ it('普通计划子代理只暴露 read，并拒绝未授权资料域', async ()
   input.budget.maxExtraReads = 1;
   const replies = [
     nativeToolTurn_ACU('read', { reads: ['$WEB_REFS:W1'] }, 'unauthorized-web-ref'),
-    JSON.stringify({ summary: '策划完成', recommendation: '依据已注入资料给出本轮策划建议', mustPreserve: [], risks: [] }),
+    nativeAgentReply_ACU(JSON.stringify({ summary: '策划完成', recommendation: '依据已注入资料给出本轮策划建议', mustPreserve: [], risks: [] }))!,
   ];
   const sent: SentMessage_ACU[][] = [];
   const runtime = new AgentSubagentRuntime_ACU({
@@ -542,12 +617,12 @@ it('终审实际请求仅挂 read，伪造 search 不进入检索执行', async 
     resolveAgentApiPreset: (() => preset_ACU) as any,
     callInternalAi: async (messages, _preset, _identity, _signal, options) => {
       seen.push({ tools: options?.tools?.map(tool => tool.function.name) ?? [], messages });
-      return replies.shift() ?? null;
+      return nativeAgentReply_ACU(replies.shift() ?? null);
     },
   });
   await runtime.runFinalReview({ settings: base.settings, resolveContext: base.resolveContext,
     candidateInstruction: '写作指令', currentUserInput: '继续', createIdentity: base.createIdentity, isCurrent: base.isCurrent });
-  expect(seen[0].tools).toEqual(['read']);
+  expect(seen[0].tools).toEqual(['read', 'submit']);
   expect(toolContent_ACU(seen[1].messages, 'forged-review-search')).toContain('终审未授权该工具');
 });
 
@@ -711,7 +786,7 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
     const realAppendix = renderMainSessionReadAppendix_ACU([
       { id: 1, kind: 'tool', text: '### 本卷（$STORY_ARC:VOL-01）\n真实调阅正文', digest: 'read', readKey: '$STORY_ARC:VOL-01' },
     ] as any);
-    const mainSnapshot = `${await renderFallbackAgentSnapshot_ACU(base.settings, base.resolveContext)}\n\n${realAppendix}`;
+    const mainSnapshot = `${await renderFallbackAgentSnapshot_ACU(base.settings, base.resolveContext, 'tools')}\n\n${realAppendix}`;
     const roles: string[] = [];
     const calls: Array<Array<{ role: string; content: string }>> = [];
     const replies = [
@@ -723,7 +798,7 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
       resolveAgentApiPreset: ((_settings: unknown, role: string) => { roles.push(role); return preset_ACU; }) as any,
       callInternalAi: async messages => {
         calls.push(messages);
-        return replies.shift() ?? null;
+        return nativeAgentReply_ACU(replies.shift() ?? null);
       },
     });
 
@@ -1167,7 +1242,7 @@ describe('子代理逐栏工具会话', () => {
       callInternalAi: async value => {
         messages.push(value);
         return messages.length === 1
-          ? '{"summary":"资料已充分，直接交付总纲契约"}'
+          ? nativeAgentReply_ACU('{"summary":"资料已充分，直接交付总纲契约"}')
           : messages.length === 2
             ? nativeToolTurn_ACU('write_sql', { sql: "INSERT INTO story_arc (id, scope, title, direction, escalation, withheld, status, expected_revision) VALUES ('STORY-01', 'story', '题', '方向', '台阶', '底牌', 'active', 0)" }, 'call-arc-bootstrap')
             : finalReply_ACU;

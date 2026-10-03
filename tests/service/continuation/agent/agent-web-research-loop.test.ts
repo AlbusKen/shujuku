@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { settings_ACU } from '../../../../src/service/runtime/state-manager';
+import { nativeAgentReply_ACU } from '../../../helpers/agent-mode-fixture';
 
 import { ContinuationAgentTurnPlanner_ACU } from '../../../../src/service/continuation/agent/agent-main-loop';
 import { AgentSubagentRuntime_ACU } from '../../../../src/service/continuation/agent/agent-subagent-runtime';
@@ -15,7 +17,9 @@ import type { AgentConversationMessage_ACU, AgentConversationSnapshot_ACU, Agent
 
 const preset_ACU = { presetName: 'p1', source: 'settings' as const, reason: 'test', apiMode: 'custom' as const, apiConfig: { useMainApi: false, max_tokens: 60000 }, tavernProfile: '' };
 
-beforeEach(() => { resetAgentSessionLogForTests_ACU(); resetAgentRunCacheForTests_ACU(); });
+const previousToolEnabled_ACU = settings_ACU.continuationNativeToolEnabled;
+beforeEach(() => { settings_ACU.continuationNativeToolEnabled = true; resetAgentSessionLogForTests_ACU(); resetAgentRunCacheForTests_ACU(); });
+afterEach(() => { settings_ACU.continuationNativeToolEnabled = previousToolEnabled_ACU; });
 
 const chat_ACU = () => ([
   { mes: '写一篇无职转生同人，主角是鲁迪乌斯', is_user: true },
@@ -72,11 +76,15 @@ function fakeWebClient_ACU(log: string[]): AgentWebClient_ACU {
   } as unknown as AgentWebClient_ACU;
 }
 
-function harness_ACU(options: { mainReplies: string[]; subReplies: string[]; enabled: boolean; context?: () => any; snapshot?: AgentModuleSnapshot_ACU }) {
+function harness_ACU(options: { mainReplies: string[]; subReplies: string[]; enabled: boolean; context?: () => any; snapshot?: AgentModuleSnapshot_ACU; toolMode?: 'json' | 'tools' }) {
+  const nativeTools = options.toolMode !== 'json';
+  settings_ACU.continuationNativeToolEnabled = nativeTools;
   const mainReplies = [...options.mainReplies];
   const subReplies = [...options.subReplies];
   const mainCalls: Array<Array<{ role: string; content: string }>> = [];
   const subCalls: Array<Array<{ role: string; content: string }>> = [];
+  const mainToolOptions: Array<{ tools: string[]; cacheTools: string[] }> = [];
+  const subToolOptions: Array<{ tools: string[]; cacheTools: string[] }> = [];
   const webLog: string[] = [];
   const written: AgentModuleSnapshot_ACU[] = [];
   const presetRoles: string[] = [];
@@ -91,13 +99,25 @@ function harness_ACU(options: { mainReplies: string[]; subReplies: string[]; ena
   const subagentRuntime = new AgentSubagentRuntime_ACU({
     resolveApiPreset: (() => preset_ACU) as any,
     resolveAgentApiPreset: (() => preset_ACU) as any,
-    callInternalAi: async messages => { subCalls.push(messages); return subReplies.shift() ?? '{"summary":"没有更多回复","delta":{"webRefs":[]}}'; },
+    callInternalAi: async (messages, _preset, _identity, _signal, callOptions) => {
+      subCalls.push(messages);
+      subToolOptions.push({ tools: callOptions?.tools?.map(tool => tool.function.name) ?? [], cacheTools: callOptions?.cacheTools ?? [] });
+      // 显式模式用例在运行中翻转设置，主循环及子代理仍须使用起点协议。
+      if (options.toolMode) settings_ACU.continuationNativeToolEnabled = !nativeTools;
+      const reply = subReplies.shift() ?? '{"summary":"没有更多回复","delta":{"webRefs":[]}}';
+      return nativeTools ? nativeAgentReply_ACU(reply) : reply;
+    },
     webClient: fakeWebClient_ACU(webLog),
     hostOrigin: () => 'http://127.0.0.1:8000',
   });
   const plannerImpl = new ContinuationAgentTurnPlanner_ACU({
     resolveApiPreset: ((_settings: unknown, role: string) => { presetRoles.push(role); return preset_ACU; }) as any,
-    callInternalAi: async messages => { mainCalls.push(messages); return mainReplies.shift() ?? '{"action":"block","reason":"脚本没有更多回复"}'; },
+    callInternalAi: async (messages, _preset, _identity, _signal, callOptions) => {
+      mainCalls.push(messages);
+      mainToolOptions.push({ tools: callOptions?.tools?.map(tool => tool.function.name) ?? [], cacheTools: callOptions?.cacheTools ?? [] });
+      const reply = mainReplies.shift() ?? '{"action":"block","reason":"脚本没有更多回复"}';
+      return nativeTools ? nativeAgentReply_ACU(reply) : reply;
+    },
     subagentRuntime,
     readChat: () => chat,
     readModuleSnapshot: readAgentModuleSnapshot_ACU,
@@ -131,7 +151,7 @@ function harness_ACU(options: { mainReplies: string[]; subReplies: string[]; ena
     applyOutline: async () => ({ op: 'create', requiresReview: false, stopped: null, summary: '已创建大纲' }),
   };
   const planner = { plan: async (input: ContinuationAgentTurnPlanRequest_ACU) => { await ready; return plannerImpl.plan(input); } };
-  return { planner, request, ready, mainCalls, subCalls, webLog, written, presetRoles, snapshot: () => readAgentModuleSnapshot_ACU(chat), conversation: () => conversation };
+  return { planner, request, ready, mainCalls, subCalls, mainToolOptions, subToolOptions, webLog, written, presetRoles, snapshot: () => readAgentModuleSnapshot_ACU(chat), conversation: () => conversation };
 }
 
 const RESEARCH_REPLIES_ACU = [
@@ -141,12 +161,17 @@ const RESEARCH_REPLIES_ACU = [
 ];
 
 describe('开场百科检索', () => {
-  it('功能开启且新任务资料库为空时，先跑 web-researcher 写入资料库，主 Agent 第一次调用就能在运行时快照里看到预览', async () => {
-    const sqlReply = nativeWriteSqlTurn_ACU("INSERT INTO web_refs (page_ref, name, brief, tags, detail, expected_revision) VALUES ('P1', '鲁迪乌斯·格雷拉特', '《无职转生》主角，转生的前尼特魔术师。', '[\"人物\"]', '身份：布耶纳村贵族长男。能力：帝级土系魔术。', 0);", 'call-write-webref');
-    const h = harness_ACU({ enabled: true, mainReplies: ['{"action":"block","reason":"测试到此为止"}'], subReplies: [...RESEARCH_REPLIES_ACU.slice(0, 2), sqlReply, '{"summary":"入库 1 条","delta":{"webRefs":[]}}'] });
+  it.each(['json', 'tools'] as const)('%s 开场检索写入资料库，主 Agent 首请求看到预览且沿用起点模式', async toolMode => {
+    const sql = "INSERT INTO web_refs (page_ref, name, brief, tags, detail, expected_revision) VALUES ('P1', '鲁迪乌斯·格雷拉特', '《无职转生》主角，转生的前尼特魔术师。', '[\"人物\"]', '身份：布耶纳村贵族长男。能力：帝级土系魔术。', 0);";
+    const h = harness_ACU({ enabled: true, toolMode, mainReplies: ['{"action":"block","reason":"测试到此为止"}'], subReplies: [
+      JSON.stringify({ action: 'encyclopedia_search', query: '鲁迪乌斯·格雷拉特', sources: ['moegirl'] }),
+      JSON.stringify({ action: 'encyclopedia_read', source: 'moegirl', title: '鲁迪乌斯·格雷拉特' }),
+      JSON.stringify({ action: 'write_sql', sql }),
+      '{"summary":"入库 1 条"}',
+    ] });
     await expect(h.planner.plan(h.request)).rejects.toBeInstanceOf(Error);
 
-    // 搜 → 读 → 原生 write_sql → 工具回执后的最终契约。
+    // 搜 → 读 → write_sql → 回执后的独立交付。
     expect(h.subCalls).toHaveLength(4);
     expect(h.webLog).toEqual(['search:moegirl:鲁迪乌斯·格雷拉特', 'read:鲁迪乌斯·格雷拉特']);
     expect(h.presetRoles).toContain('webResearcher');
@@ -182,6 +207,24 @@ describe('开场百科检索', () => {
     expect(mainText).toContain('web-researcher｜成功');
     expect(mainText).toContain('$WEB_REFS:ID');
 
+    for (const [calls, captured] of [[h.subCalls, h.subToolOptions], [h.mainCalls, h.mainToolOptions]] as const) {
+      calls.forEach((messages, index) => {
+        const text = messages.map(message => message.content).join('\n');
+        expect(text).not.toMatch(/\{"summary":"[^"]*","sql":/);
+        if (toolMode === 'json') {
+          expect(captured[index].tools).toEqual([]);
+          expect(captured[index].cacheTools).toContain('mode:json');
+          expect(text).not.toMatch(/函数调用|submit|原生 write_sql/);
+          expect(messages.some(message => message.role === 'tool' || message.tool_calls || message.tool_call_id)).toBe(false);
+        } else {
+          expect(captured[index].tools).not.toEqual([]);
+          expect(captured[index].cacheTools).not.toContain('mode:json');
+          expect(text).not.toContain('我的最终交付是一个 JSON 对象');
+        }
+      });
+    }
+    expect(h.subToolOptions[0].tools).toEqual(toolMode === 'json' ? [] : ['read', 'search', 'encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read', 'write_sql', 'submit']);
+    expect(h.subCalls[3].map(message => message.content).join('\n')).toContain('"status":"committed"');
     const log = readAgentSessionLog_ACU();
     expect(log.some(entry => entry.title.includes('开场百科检索完成'))).toBe(true);
   });

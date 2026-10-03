@@ -23,7 +23,7 @@ import {
   type WorldSimulationAnchorIdentity_ACU,
 } from './agent/agent-model';
 import type { WorldSimulationPlaceholderContext_ACU } from './agent/agent-placeholder-resolver';
-import { WorldSimulationSubagentRuntime_ACU } from './agent/agent-subagent-runtime';
+import { WorldSimulationSubagentRuntime_ACU, type WorldSimulationInvokeTools_ACU } from './agent/agent-subagent-runtime';
 import {
   readLatestWorldSimulationUserRequirements_ACU,
   renderWorldSimulationUserRequirements_ACU,
@@ -94,17 +94,19 @@ async function invokeWorldSimulationAgentOnce_ACU(
   preset: Parameters<typeof callAIWithResolvedPreset_ACU>[1],
   identity: WorldSimulationRunIdentity_ACU,
   signal: AbortSignal,
-  requestedTools?: readonly import('../ai/native-tool').AgentNativeToolName_ACU[],
+  request?: WorldSimulationInvokeTools_ACU,
 ): Promise<string | AiChatTurn_ACU> {
   const requestId = `${identity.runId}:${role}:${++internalRequestSequence_ACU}`;
   beginWorldSimulationInternalAiRequest_ACU({ requestId, runId: identity.runId, role });
   try {
     const definition = WORLD_SIMULATION_AGENT_CATALOG_ACU.find(item => item.name === role);
-    const nativeTools = requestedTools ?? worldSimulationAgentNativeTools_ACU(role);
+    // 调用方按工具模式给出请求体 tools 与缓存键标记；json 模式 tools 为空、缓存键带 mode:json。
+    const tools = request?.tools ?? agentNativeTools_ACU(worldSimulationAgentNativeTools_ACU(role));
+    const cacheTools = request?.cacheTools ?? worldSimulationAgentNativeTools_ACU(role);
     const boundary = readWorldSimulationConversation_ACU(getChatArray_ACU()).compaction?.report;
     const promptCacheKey = supportsExplicitOpenAiCacheKey_ACU(preset) ? buildOpenAiPromptCacheKey_ACU({
       chatIdentity: identity.chatIdentity, role,
-      tools: [...nativeTools, ...(definition?.writableModules.map(module => `module:${module}`) ?? [])],
+      tools: [...cacheTools, ...(definition?.writableModules.map(module => `module:${module}`) ?? [])],
       boundary, preset,
     }) : undefined;
     const response = await callAIChatTurn_ACU([...messages], preset, signal, {
@@ -112,7 +114,7 @@ async function invokeWorldSimulationAgentOnce_ACU(
       afterMainApiCall: () => endWorldSimulationInternalAiMainApiInvocation_ACU(requestId),
     }, {
       ...(promptCacheKey ? { promptCacheKey } : {}),
-      tools: agentNativeTools_ACU(nativeTools),
+      tools: [...tools],
     });
     if (response.content.trim() || response.toolCalls.length) return response;
     throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(
@@ -285,8 +287,8 @@ function createProductionOrchestrator_ACU(): WorldSimulationOrchestrator_ACU {
         },
         webResearch: envelope.settings.webResearch,
       });
-      const invoke = (role: WorldSimulationAgentName_ACU, messages: readonly { role: string; content: string }[], preset: Parameters<typeof callAIWithResolvedPreset_ACU>[1], nativeTools?: readonly import('../ai/native-tool').AgentNativeToolName_ACU[]) =>
-        invokeWorldSimulationAgent_ACU(role, messages, preset, identity, signal, nativeTools);
+      const invoke = (role: WorldSimulationAgentName_ACU, messages: readonly { role: string; content: string }[], preset: Parameters<typeof callAIWithResolvedPreset_ACU>[1], request?: WorldSimulationInvokeTools_ACU) =>
+        invokeWorldSimulationAgent_ACU(role, messages, preset, identity, signal, request);
       const subagents = new WorldSimulationSubagentRuntime_ACU({ invoke });
       const writeSql = (runIdentity: WorldSimulationRunIdentity_ACU) => async (write: Parameters<NonNullable<import('./agent/agent-subagent-runtime').WorldSimulationSubagentRunInput_ACU['writeSql']>>[0]) => {
         if (signal.aborted) throw new Error('WORLD_SIMULATION_RUN_STALE');

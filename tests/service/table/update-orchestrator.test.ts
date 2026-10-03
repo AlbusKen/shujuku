@@ -1299,44 +1299,86 @@ describe('processUpdatesBatch_ACU', () => {
     expect(mockExecute).not.toHaveBeenCalled();
   });
 
-  it('执行更新时传入基于批次历史数据的 batchBaseSnapshot 深拷贝', async () => {
+  it.each([false, true])('批次快照遵循存储基底并读取前批结果（SQLite=%s）', async (sqliteMode) => {
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
-    vi.mocked(parseTableTemplateJson_ACU).mockReturnValueOnce({
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    const template = {
       sheet_0: { name: '背包物品表', content: [['row_id', '物品名']] },
-      sheet_1: { name: '纪要表', content: [['row_id', '事件']] },
-    });
-    mockCurrentJsonTableData = {
-      sheet_0: { name: '背包物品表', content: [['row_id', '物品名']] },
-      sheet_1: { name: '纪要表', content: [['row_id', '事件']] },
+      sheet_1: { name: '纪要表', content: [['row_id', '事件', 'code_index']] },
     };
+    const rows = Array.from({ length: 241 }, (_, index) => [
+      String(index + 1), `事件${index + 1}`, `AM${String(index + 1).padStart(4, '0')}`,
+    ]);
+    const runtimeData = structuredClone(template);
+    runtimeData.sheet_0.content.push(['1', '钢剑']);
+    runtimeData.sheet_1.content.push(...structuredClone(rows));
+    const historicalData = structuredClone(template);
+    historicalData.sheet_0.content.push(['1', '铁剑']);
+    historicalData.sheet_1.content.push(...structuredClone(rows.slice(0, 239)));
 
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
-    vi.mocked(getChatArray_ACU).mockReturnValue([
-      { is_user: true, mes: '用户0' },
-      {
-        is_user: false,
-        mes: 'AI0',
-        TavernDB_ACU_IsolatedData: {
-          '': {
-            independentData: {
-              sheet_0: { name: '背包物品表', content: [['row_id', '物品名'], ['1', '铁剑']] },
-              sheet_1: { name: '纪要表', content: [['row_id', '事件'], ['1', '旧事件']] },
-            },
+    try {
+      vi.mocked(isSqliteMode).mockReturnValue(sqliteMode);
+      vi.mocked(parseTableTemplateJson_ACU).mockReturnValue(template);
+      mockCurrentJsonTableData = structuredClone(runtimeData);
+      // 与内存视图分离：每批读取同一实时 provider，提交后更新它的权威数据。
+      mockEnsureStorageProviderReady.mockResolvedValue({
+        mode: 'sqlite',
+        isReady: () => true,
+        getCurrentData: () => runtimeData,
+      });
+      const chatHistory = [
+        { is_user: true, mes: '用户0' },
+        {
+          is_user: false,
+          mes: 'AI0',
+          TavernDB_ACU_IsolatedData: {
+            '': { independentData: historicalData },
           },
         },
-      },
-      { is_user: true, mes: '用户1' },
-      { is_user: false, mes: '这是AI回复' },
-    ]);
-    const mockExecute = vi.fn().mockResolvedValue({ success: true, modifiedKeys: ['sheet_1'] } as CardUpdateResult);
-
-    const result = await processUpdatesBatch_ACU([3], 'auto_standard', { targetSheetKeys: ['sheet_1'], requestOptions: { tableApiPreset: 'preset' } }, mockExecute);
-
-    expect(result.success).toBe(true);
-    const progressContext = mockExecute.mock.calls[0][6];
-    expect(progressContext.batchBaseSnapshot.sheet_0.content[1][1]).toBe('铁剑');
-    expect(progressContext.batchBaseSnapshot.sheet_1.content[1][1]).toBe('旧事件');
-    expect(progressContext.batchBaseSnapshot).not.toBe(mockCurrentJsonTableData);
+        { is_user: true, mes: '用户1' },
+        { is_user: false, mes: '本批AI回复' },
+        { is_user: true, mes: '用户2' },
+        { is_user: false, mes: '下批AI回复' },
+      ];
+      vi.mocked(getChatArray_ACU).mockReturnValue(chatHistory);
+      const mockExecute = vi.fn().mockImplementation(async (...args: any[]) => {
+        const snapshot = args[6].batchBaseSnapshot;
+        const firstBatch = args[6].currentBatch === 1;
+        expect(snapshot).not.toBe(mockCurrentJsonTableData);
+        expect(snapshot.sheet_1.content).not.toBe(runtimeData.sheet_1.content);
+        const expectedCount = (sqliteMode ? 241 : 239) + (firstBatch ? 0 : 1);
+        expect(snapshot.sheet_1.content).toHaveLength(expectedCount + 1);
+        expect(snapshot.sheet_1.content.at(-1)?.[2]).toBe(`AM${String(expectedCount).padStart(4, '0')}`);
+        expect(snapshot.sheet_0.content[1][1]).toBe(sqliteMode ? '钢剑' : '铁剑');
+        if (firstBatch) {
+          const nextRow = [String(expectedCount + 1), '新事件', `AM${String(expectedCount + 1).padStart(4, '0')}`];
+          if (sqliteMode) {
+            runtimeData.sheet_1.content.push(nextRow);
+          } else {
+            const committedData = structuredClone(snapshot);
+            committedData.sheet_1.content.push(nextRow);
+            chatHistory[3] = {
+              ...chatHistory[3],
+              TavernDB_ACU_IsolatedData: {
+                '': { independentData: committedData },
+              },
+            };
+          }
+          snapshot.sheet_1.content[1][1] = '仅修改请求副本';
+          expect(runtimeData.sheet_1.content[1][1]).toBe('事件1');
+          expect(historicalData.sheet_1.content[1][1]).toBe('事件1');
+        }
+        return { success: true, modifiedKeys: ['sheet_1'] } as CardUpdateResult;
+      });
+      const result = await processUpdatesBatch_ACU([3, 5], 'auto_standard', {
+        batchSize: 1, targetSheetKeys: ['sheet_1'], requestOptions: { tableApiPreset: 'preset' },
+      }, mockExecute);
+      expect(result.success).toBe(true);
+      expect(mockExecute).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+    }
   });
 
   it('构建历史基底后将调度期随机 key 唯一重绑定为稳定 key', async () => {

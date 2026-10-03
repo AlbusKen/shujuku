@@ -1,6 +1,8 @@
 import { WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldSimulationErrorPhase_ACU, type WorldSimulationPromptSegment_ACU, type WorldSimulationSettings_ACU } from '../model';
 import { WORLD_SIMULATION_AGENT_NAMES_ACU, WORLD_SIMULATION_RETIRED_AGENT_NAMES_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
 import { WORLD_SIMULATION_PROMPT_PLACEHOLDERS_ACU, buildDefaultWorldSimulationAgentPrompt_ACU, buildDefaultWorldSimulationAgentPrompts_ACU, type WorldSimulationAgentPrompts_ACU, type WorldSimulationPromptPlaceholder_ACU } from './agent-defaults';
+import { buildWorldSimulationAgentPromptsForMode_ACU } from './agent-prompt-mode';
+import type { AgentToolMode_ACU } from '../../ai/agent-tool-mode';
 
 /**
  * 段落校验只管字段与占位符，不再强制 seam 必须存在、唯一、按序、固定身份或 pinned。
@@ -80,8 +82,8 @@ export async function renderWorldSimulationPrompt_ACU(
   return { messages, usedPlaceholders: [...used] };
 }
 
-export function restoreWorldSimulationPromptDefault_ACU(settings: WorldSimulationSettings_ACU, agentName: WorldSimulationAgentName_ACU): WorldSimulationSettings_ACU {
-  return { ...settings, agentPrompts: { ...settings.agentPrompts, [agentName]: buildDefaultWorldSimulationAgentPrompt_ACU(agentName) } };
+export function restoreWorldSimulationPromptDefault_ACU(settings: WorldSimulationSettings_ACU, agentName: WorldSimulationAgentName_ACU, mode?: AgentToolMode_ACU): WorldSimulationSettings_ACU {
+  return { ...settings, agentPrompts: { ...settings.agentPrompts, [agentName]: mode ? buildWorldSimulationAgentPromptsForMode_ACU(mode)[agentName] : buildDefaultWorldSimulationAgentPrompt_ACU(agentName) } };
 }
 
 export function exportWorldSimulationPrompts_ACU(prompts: unknown): string {

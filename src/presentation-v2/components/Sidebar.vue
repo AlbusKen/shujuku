@@ -87,9 +87,9 @@ const HIGH_TIER_PHRASE = '开启高级功能';
 const TIER_ORDER: readonly AcuUiTier[] = ['low', 'medium', 'high'];
 
 const tierDescriptions: Record<AcuUiTier, string> = {
-  low: '只显示记忆功能所需的填表工作台、填表模式与 API。',
-  medium: '显示填表规则、剧情推进、Agent、智能续写与外部导入。',
-  high: '在进阶模式基础上再显示格林推演、正文替换、数据管理、高级工具与开发者选项。',
+  low: '只显示记忆功能所需的填表工作台、填表模式、API 与高级工具里的运行日志。',
+  medium: '显示填表规则、剧情推进、Agent、智能续写、外部导入与数据管理。',
+  high: '在进阶模式基础上再显示格林推演、正文替换、SQL 控制台与开发者选项。',
 };
 
 function resetBrandClickSequence(): void {
@@ -132,7 +132,7 @@ async function openTierDialog(): Promise<void> {
   if (selected === 'high') {
     const confirmed = await dialogStore.confirm({
       title: '准备开启高级模式',
-      message: '高级模式会显示数据管理、高级工具和开发者选项等入口。显示这些入口不会自动执行危险操作。',
+      message: '高级模式会显示 SQL 控制台和开发者选项等入口。显示这些入口不会自动执行危险操作。',
       confirmLabel: '继续',
       confirmVariant: 'danger',
       confirmCountdownSeconds: 2,

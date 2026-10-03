@@ -3,6 +3,7 @@
  */
 
 import type { ContinuationPromptSegment_ACU, ContinuationSettings_ACU } from '../model';
+import type { AgentToolMode_ACU } from '../../ai/agent-tool-mode';
 import { renderContinuationPrompt_ACU } from '../prompt-template';
 import { AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU } from './agent-defaults';
 import { getAgentSubagentAccessProfile_ACU, renderAgentModuleCatalog_ACU, renderAgentReadCatalog_ACU, renderAgentSubagentCatalog_ACU } from './agent-catalog';
@@ -200,7 +201,7 @@ export function stripUnownedSubagentPrompt_ACU(
   });
 }
 
-export async function renderFallbackAgentSnapshot_ACU(settings: ContinuationSettings_ACU, context: AgentResolveContext_ACU): Promise<string> {
+export async function renderFallbackAgentSnapshot_ACU(settings: ContinuationSettings_ACU, context: AgentResolveContext_ACU, toolMode: AgentToolMode_ACU): Promise<string> {
   const worldbook = context.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false);
   const start = context.settledThroughIndex + 1;
   const last = context.chat.length - 1;
@@ -225,7 +226,7 @@ export async function renderFallbackAgentSnapshot_ACU(settings: ContinuationSett
       $WORLDBOOK_CATALOG: () => renderAgentWorldbookBrowseCatalog_ACU(worldbook),
       $WORLDBOOK_HITS: () => renderAgentWorldbookTriggeredInjection_ACU(worldbook, buildAgentWorldbookScanText_ACU(context)),
       $WEB_REFS_CATALOG: () => renderAgentWebRefsCatalog_ACU(context.moduleSnapshot, settings.webResearch.enabled),
-      $AGENT_READ_CATALOG: () => renderAgentReadCatalog_ACU(),
+      $AGENT_READ_CATALOG: () => renderAgentReadCatalog_ACU(toolMode),
       $BUDGET: () => '主会话预算见会话里的最新快照。本子代理的读取轮次见紧随其后的【读取预算状态】。',
     },
     'agent_delegate',

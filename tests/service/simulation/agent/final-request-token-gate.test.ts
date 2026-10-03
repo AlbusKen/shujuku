@@ -36,6 +36,9 @@ describe('默认读取上围栏容量', () => {
       historyBudgetTokens: 10000, count, invoke });
     expect(rejected).toMatchObject({ status: 'rejected', totalTokens: occupied, limitTokens: occupied });
     expect(invoke).not.toHaveBeenCalled();
+    const exhausted = await executeWorldSimulationFinalRequest_ACU({ messages, tools, inputLimitTokens: occupied + 1,
+      historyBudgetTokens: 10000, count, invoke });
+    expect(exhausted).toMatchObject({ status: 'rejected', reason: 'final-request-token-overflow' });
     const accepted = await executeWorldSimulationFinalRequest_ACU({ messages, tools, inputLimitTokens: occupied + 100,
       historyBudgetTokens: 10000, count, invoke });
     expect(accepted.status).toBe('sent');

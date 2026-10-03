@@ -17,6 +17,9 @@ const busy = ref(false);
 const error = ref('');
 const snapshot = ref<any>(null);
 const settings = ref<any>(buildDefaultWorldSimulationSettings_ACU());
+const nativeToolEnabled = ref(false);
+const setNativeToolEnabled = vi.fn((value: boolean) => { nativeToolEnabled.value = value; });
+const presentPromptSegments = vi.fn((_role: string, segments: any[]) => segments);
 const statusText = ref('尚未创建任务');
 const stageText = ref('尚未创建任务');
 const revisionText = ref('');
@@ -45,6 +48,7 @@ vi.mock('../../../src/presentation-v2/composables/useWorldSimulationRuntime', ()
   useWorldSimulationRuntime: () => ({
     snapshot, ready, busy, error, envelope, task, settings, activeStage, activeRevision, anchor, anchorText, entries, running,
     statusText, stageText, revisionText, refresh, initialize, send, stop, resume, saveSettings, saveUserRequirements, clearData, restorePromptDefault, parsePromptBundle, resyncAfterChatMutation,
+    nativeToolEnabled, setNativeToolEnabled, presentPromptSegments,
   }),
 }));
 vi.mock('../../../src/presentation-v2/composables/useApiPresetSelectOptions', async () => {
@@ -133,6 +137,7 @@ beforeEach(() => {
   busy.value = false;
   error.value = '';
   settings.value = buildDefaultWorldSimulationSettings_ACU();
+  nativeToolEnabled.value = false;
   snapshot.value = baseSnapshot();
   statusText.value = '尚未创建任务';
   stageText.value = '尚未创建任务';
@@ -148,6 +153,37 @@ afterEach(() => {
 });
 
 describe('WorldSimulationPage', () => {
+  it('切换工具模式保留设置草稿，段启用编辑不固化展示映射正文', async () => {
+    vi.useFakeTimers();
+    settings.value.agentPrompts['world-director'] = [{ role: 'system', content: '原始导演正文', enabled: true, deletable: true, pinned: false }];
+    presentPromptSegments.mockImplementation((_role, segments) => segments.map(segment => ({ ...segment,
+      content: nativeToolEnabled.value ? '工具模式展示正文' : segment.content })));
+    try {
+      const { app, host } = await mountPage();
+      const budget = host.querySelector<HTMLInputElement>('input.acu-input[type="number"]')!;
+      budget.value = '90000';
+      budget.dispatchEvent(new Event('input', { bubbles: true }));
+      await nextTick();
+      const group = Array.from(host.querySelectorAll<HTMLElement>('.acu-v2-world-simulation-page__group'))
+        .find(item => item.querySelector('.acu-disclosure-group__label')?.textContent?.includes('world-director'))!;
+      group.querySelector<HTMLButtonElement>('.acu-disclosure-group__header')!.click();
+      await nextTick();
+      nativeToolEnabled.value = true;
+      await nextTick();
+      expect(group.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe('工具模式展示正文');
+      expect(budget.value).toBe('90000');
+      group.querySelector<HTMLButtonElement>('.acu-prompt-segs__item [role="checkbox"]')!.click();
+      await nextTick();
+      await vi.advanceTimersByTimeAsync(900);
+      expect(saveSettings).toHaveBeenCalledOnce();
+      expect(saveSettings.mock.calls[0][0]).toMatchObject({ agentHistoryTokenBudget: 90000,
+        agentPrompts: { 'world-director': [{ content: '原始导演正文', enabled: false }] } });
+      expect(settings.value.agentPrompts['world-director'][0].content).toBe('原始导演正文');
+      app.unmount();
+    } finally { presentPromptSegments.mockImplementation((_role, segments) => segments); }
+  });
+
+
   it('页面骨架与智能续写同构：会话面板整宽在上，资料与设置并列，提示词独立面板；不再有显式保存按钮', async () => {
     const { host } = await mountPage();
     const root = host.querySelector('.acu-v2-world-simulation-page')!;

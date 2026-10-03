@@ -348,6 +348,49 @@ export function withNativeToolThinkPrefill_ACU<T extends ToolAnchorMessage_ACU>(
 }
 
 /**
+ * JSON 模式的历史投影：请求体不带 tools 时，消息里不能出现 tool_calls 与 role=tool。
+ * 带调用的助手消息改写为文本 JSON 动作，工具回执改写为用户消息；正文与顺序保持不变。
+ */
+export function projectNativeToolHistoryToText_ACU<T extends ToolAnchorMessage_ACU>(messages: readonly T[]): T[] {
+  return messages.map(message => {
+    if (message.role === 'assistant' && message.tool_calls?.length) {
+      const { tool_calls: calls, ...rest } = message;
+      const actions = calls.map(call => {
+        let args: Record<string, unknown>;
+        try {
+          args = parseArguments_ACU(call.function.arguments);
+        } catch {
+          args = { arguments: call.function.arguments };
+        }
+        return JSON.stringify({ ...args, action: call.function.name });
+      });
+      return { ...rest, content: [message.content, ...actions].filter(part => part?.trim()).join('\n') } as T;
+    }
+    if (message.role === 'tool' || message.tool_call_id !== undefined) {
+      const { tool_call_id: _id, ...rest } = message;
+      return { ...rest, role: message.role === 'tool' ? 'user' : message.role } as T;
+    }
+    return message;
+  });
+}
+
+/**
+ * JSON 模式的请求收尾：历史投影成纯文本，去掉思维链预填充，
+ * 并把提示词里的 JSON 预填充移到请求最末，让模型直接接着写动作对象。
+ * 末尾已是 assistant 或用户预填充时不再追加，避免连续 assistant 被合并。
+ */
+export function withJsonTailPrefill_ACU<T extends ToolAnchorMessage_ACU>(messages: readonly T[]): T[] {
+  const stubs = messages.filter(message => message.role === 'assistant' && isJsonPrefillStub_ACU(message.content));
+  const body = projectNativeToolHistoryToText_ACU(dropTerminalJsonPrefill_ACU(messages).filter(
+    message => !(message.role === 'assistant' && isThinkPrefillStub_ACU(message.content)),
+  ));
+  const stub = stubs[stubs.length - 1];
+  const last = body[body.length - 1];
+  if (!stub || !last || last.role === 'assistant' || (last.role === 'user' && last.content === USER_PREFILL_CONTENT_ACU)) return body;
+  return [...body, { role: 'assistant', content: stub.content } as T];
+}
+
+/**
  * assistant 之后必须有 user 或 tool 反馈。一个动作可以跟多条 tool 结果。
  * 纯 assistant/user 交替仍然合法。
  */

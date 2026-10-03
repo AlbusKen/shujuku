@@ -3,13 +3,15 @@
  * 剧情推进编排逻辑 单元测试
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { markPlotIntercept_ACU } from '../../../src/service/plot/plot-logic';
 
-const { mockSettings, mockLoopState, mockIsProcessing, mockSetIsProcessing, mockFlightModeActive } = vi.hoisted(() => ({
+const { mockSettings, mockLoopState, mockIsProcessing, mockSetIsProcessing, mockFlightModeActive, mockRunOptimization } = vi.hoisted(() => ({
   mockSettings: { plotSettings: { enabled: true } } as any,
   mockLoopState: { isLooping: false, isRetrying: false, awaitingReply: false } as any,
   mockIsProcessing: false,
   mockSetIsProcessing: vi.fn(),
   mockFlightModeActive: vi.fn(() => false),
+  mockRunOptimization: vi.fn(),
 }));
 
 vi.mock('../../../src/service/runtime/state-manager', () => ({
@@ -17,6 +19,7 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   loopState_ACU: mockLoopState,
   get isProcessing_Plot_ACU() { return mockIsProcessing; },
   _set_isProcessing_Plot_ACU: mockSetIsProcessing,
+  abortController_ACU: null,
 }));
 
 vi.mock('../../../src/service/plot/plot-logic', () => ({
@@ -42,6 +45,16 @@ vi.mock('../../../src/service/flight-mode/flight-mode-state', () => ({
 vi.mock('../../../src/service/fill-mode/fill-mode-gate', () => ({
   isPlotSuppressedByFillModeForCurrentChat_ACU: () => false,
 }));
+
+vi.mock('../../../src/service/runtime/helpers-remaining', () => ({
+  runOptimizationLogic_ACU: (...args: any[]) => mockRunOptimization(...args),
+}));
+vi.mock('../../../src/shared/notice-hub', () => ({
+  beginNoticeTask_ACU: vi.fn(() => ({ end: vi.fn() })),
+}));
+vi.mock('../../../src/presentation/theme/toast', () => ({ showToastr_ACU: vi.fn() }));
+
+import { runOptimizationLogicWithUI_ACU } from '../../../src/presentation/components/plot-planning-ui';
 
 import {
   shouldProcessTavernHelperHook_ACU,
@@ -93,11 +106,12 @@ describe('extractUserMessageFromOptions_ACU', () => {
   it('从 prompt 提取', () => {
     expect(extractUserMessageFromOptions_ACU({ prompt: '继续' })).toBe('继续');
   });
-  it('优先从 injects 提取', () => {
+  it('优先真实用户输入，inject-only 保留兼容', () => {
     expect(extractUserMessageFromOptions_ACU({
       user_input: '你好',
       injects: [{ content: '注入内容' }],
-    })).toBe('注入内容');
+    })).toBe('你好');
+    expect(extractUserMessageFromOptions_ACU({ injects: [{ content: '注入内容' }] })).toBe('注入内容');
   });
   it('无消息返回 null', () => {
     expect(extractUserMessageFromOptions_ACU({})).toBeNull();
@@ -110,6 +124,8 @@ describe('applyPlanningResultToOptions_ACU', () => {
     const result = applyPlanningResultToOptions_ACU({ injects: [{ content: '原始' }] }, '新内容');
     expect(result.target).toBe('injects');
     expect(result.value).toBe('新内容');
+    expect(applyPlanningResultToOptions_ACU({ user_input: '原文', injects: [{ content: '附加提示' }] }, '新内容'))
+      .toEqual({ target: 'user_input', value: '新内容' });
   });
   it('有 prompt 时写回 prompt', () => {
     const result = applyPlanningResultToOptions_ACU({ prompt: '原始' }, '新内容');
@@ -168,6 +184,8 @@ describe('orchestrateTavernHelperHook_ACU', () => {
     const result = await orchestrateTavernHelperHook_ACU({ user_input: '继续' }, runPlanning);
     expect(result.action).toBe('planned');
     expect(result.finalMessage).toBe('规划结果');
+    // 编排成功尚不等于宿主已收到提示词，不能提前登记去重。
+    expect(markPlotIntercept_ACU).not.toHaveBeenCalled();
   });
   it('未启用时透传', async () => {
     mockSettings.plotSettings.enabled = false;
@@ -195,10 +213,12 @@ describe('orchestrateTavernHelperHook_ACU', () => {
     const result = await orchestrateTavernHelperHook_ACU({ user_input: '继续' }, runPlanning);
     expect(result.action).toBe('loop_retry');
   });
-  it('规划异常时透传', async () => {
-    const runPlanning = vi.fn().mockRejectedValue(new Error('规划失败'));
-    const result = await orchestrateTavernHelperHook_ACU({ user_input: '继续' }, runPlanning);
-    expect(result.action).toBe('passthrough');
+  it('已进入规划后异常或没有最终提示词均返回 failed', async () => {
+    for (const runPlanning of [vi.fn().mockRejectedValue(new Error('规划失败')),
+      vi.fn().mockResolvedValue(null), vi.fn().mockResolvedValue('   ')]) {
+      const result = await orchestrateTavernHelperHook_ACU({ user_input: '继续' }, runPlanning);
+      expect(result.action).toBe('failed');
+    }
   });
 });
 
@@ -222,6 +242,13 @@ describe('orchestrateAfterCommandsStrategy1_ACU', () => {
     const result = await orchestrateAfterCommandsStrategy1_ACU(msg, 5, runPlanning);
     expect(result.action).toBe('aborted');
     expect(result.manual).toBe(true);
+    expect((msg as any)._plot_processed).toBeUndefined();
+    for (const run of [vi.fn().mockResolvedValue(null), vi.fn().mockRejectedValue(new Error('失败'))]) {
+      expect(await orchestrateAfterCommandsStrategy1_ACU(msg, 5, run)).toMatchObject({
+        action: 'failed', originalMessage: '你好', lastMessageIndex: 5,
+      });
+      expect((msg as any)._plot_processed).toBeUndefined();
+    }
   });
 });
 
@@ -237,10 +264,24 @@ describe('orchestrateAfterCommandsStrategy2_ACU', () => {
     const result = await orchestrateAfterCommandsStrategy2_ACU('', vi.fn());
     expect(result.action).toBe('skip');
   });
-  it('规划跳过返回 skip', async () => {
-    const runPlanning = vi.fn().mockResolvedValue({ skipped: true });
-    const result = await orchestrateAfterCommandsStrategy2_ACU('继续', runPlanning);
-    expect(result.action).toBe('skip');
+  it('真实 UI 保留跳过原因，仅无需规划透传，忙碌和未知跳过仍停止', async () => {
+    for (const reason of ['disabled', 'fill_mode_vector', 'retrying']) {
+      mockRunOptimization.mockResolvedValue({ success: false, skipped: true, reason });
+      expect(await runOptimizationLogicWithUI_ACU('继续')).toEqual({ skipped: true, reason });
+      expect(await orchestrateTavernHelperHook_ACU({ user_input: '继续' }, runOptimizationLogicWithUI_ACU))
+        .toEqual({ action: 'passthrough' });
+      expect(await orchestrateAfterCommandsStrategy1_ACU({ is_user: true, mes: '继续' }, 0, runOptimizationLogicWithUI_ACU))
+        .toEqual({ action: 'passthrough' });
+      expect(await orchestrateAfterCommandsStrategy2_ACU('继续', runOptimizationLogicWithUI_ACU))
+        .toEqual({ action: 'skip' });
+    }
+    for (const reason of ['inflight', undefined]) {
+      mockRunOptimization.mockResolvedValue({ success: false, skipped: true, reason });
+      expect(await orchestrateAfterCommandsStrategy2_ACU('继续', runOptimizationLogicWithUI_ACU))
+        .toEqual({ action: 'failed' });
+      expect(await orchestrateTavernHelperHook_ACU({ user_input: '继续' }, runOptimizationLogicWithUI_ACU))
+        .toEqual({ action: 'skipped' });
+    }
   });
   it('用户中止返回 aborted', async () => {
     const runPlanning = vi.fn().mockResolvedValue({ aborted: true, manual: true });
@@ -248,9 +289,11 @@ describe('orchestrateAfterCommandsStrategy2_ACU', () => {
     expect(result.action).toBe('aborted');
     expect(result.manual).toBe(true);
   });
-  it('规划异常返回 skip', async () => {
-    const runPlanning = vi.fn().mockRejectedValue(new Error('失败'));
-    const result = await orchestrateAfterCommandsStrategy2_ACU('继续', runPlanning);
-    expect(result.action).toBe('skip');
+  it('规划异常或没有最终提示词返回 failed', async () => {
+    for (const runPlanning of [vi.fn().mockRejectedValue(new Error('失败')),
+      vi.fn().mockResolvedValue(null), vi.fn().mockResolvedValue('   ')]) {
+      const result = await orchestrateAfterCommandsStrategy2_ACU('继续', runPlanning);
+      expect(result.action).toBe('failed');
+    }
   });
 });

@@ -25,6 +25,7 @@ import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { configureNoticeHub_ACU } from '../../shared/notice-hub';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
 import { isPlotSuppressedByFillModeForCurrentChat_ACU, isVectorPipelineEnabledForCurrentChat_ACU } from '../fill-mode/fill-mode-gate';
+import { isFlightModeActive_ACU } from '../flight-mode/flight-mode-state';
 
 export const NEW_MESSAGE_DEBOUNCE_DELAY_ACU = 500;
 
@@ -155,6 +156,8 @@ function hasFreshUserGenerationTrigger_ACU() {
 export function shouldProcessPlotForGeneration_ACU(type: any, params: any, dryRun: any) {
   if (dryRun) return false;
   if (!settings_ACU?.plotSettings?.enabled) return false;
+  // 与规划内层和 TavernHelper 入口一致：经典/飞行模式以及重试不接管普通发送。
+  if (isFlightModeActive_ACU() || loopState_ACU.isRetrying) return false;
   // 向量表格模式只做向量召回，不触发剧情推进。
   if (isPlotSuppressedByFillModeForCurrentChat_ACU()) return false;
   if (isQuietLikeGeneration_ACU(type, params)) return false;
@@ -224,6 +227,9 @@ export let settings_ACU: any = {
     strictJsonTableFillEnabled: false,
     // 默认关闭：部分渠道只要请求体带 tools 字段就直接报错，开启前需确认渠道支持工具调用。
     tableFillNativeToolEnabled: false,
+    // 续写 / 推演的工具方案全局开关；关闭时请求不带 tools，提示词为纯 JSON 版。
+    continuationNativeToolEnabled: false,
+    worldSimulationNativeToolEnabled: false,
     discardUnauthorizedTableEditsEnabled: true,
     // [剧情推进] 按剧情任务ID保存的任务级 API 预设覆盖（key=taskId, value=presetName）
     // 不保存入聊天记录或剧情推进预设，只写进插件全局设置。
@@ -246,6 +252,8 @@ export let settings_ACU: any = {
     silentModeEnabled: false,
     desktopPetEnabled: true,
     deskPetJokesEnabled: true,
+    deskPetShowRealWork: false,
+    plotSendDisguiseDisabled: false,
     plotSettings: JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU)),
     plotPresetBindings: {},
     currentTemplatePresetName: '',

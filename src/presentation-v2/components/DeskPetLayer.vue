@@ -14,6 +14,7 @@
         :viewport-width="viewport.width"
         :viewport-height="viewport.height"
         :action-busy="carousel.actionBusy.value"
+        :show-real-work="hubState.showRealWork.value"
         @pause="carousel.pause"
         @resume="carousel.resume"
         @skip="carousel.skip"

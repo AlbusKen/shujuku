@@ -35,6 +35,8 @@ export interface AcuV2PlotPreset {
 interface PlotPresetState {
   /** 启用开关（绑定 settings_ACU.plotSettings.enabled）。 */
   enabled: boolean;
+  /** 等待期解除发送伪装；独立全局设置，不随预设切换。 */
+  sendDisguiseDisabled: boolean;
   /** 已注册全局预设。 */
   presets: AcuV2PlotPreset[];
   /** 全局默认预设名（用于"新聊天默认继承"）。 */
@@ -141,6 +143,7 @@ export function getDefaultPlotPresetRawForV2(): Record<string, any> {
 export const usePlotPresetStore = defineStore('acu-v2-plot-presets', {
   state: (): PlotPresetState => ({
     enabled: false,
+    sendDisguiseDisabled: false,
     presets: [],
     defaultPresetName: '',
     activePresetName: '',
@@ -173,6 +176,7 @@ export const usePlotPresetStore = defineStore('acu-v2-plot-presets', {
       ensureSettingsShape();
       const plot = settings_ACU.plotSettings as Record<string, any>;
       this.enabled = plot.enabled === true;
+      this.sendDisguiseDisabled = settings_ACU.plotSendDisguiseDisabled === true;
       this.presets = readPresetList();
       const defaultName = normalizePlotPresetSelectionValue_ACU(plot.lastUsedPresetName || '');
       this.defaultPresetName = findPresetIndex(this.presets, defaultName) >= 0 ? defaultName : '';
@@ -196,6 +200,18 @@ export const usePlotPresetStore = defineStore('acu-v2-plot-presets', {
         if (settings_ACU.plotSettings) (settings_ACU.plotSettings as Record<string, any>).enabled = next;
       }
       saveSettings_ACU();
+    },
+
+    setSendDisguiseDisabled(disabled: boolean): void {
+      const previous = settings_ACU.plotSendDisguiseDisabled === true;
+      settings_ACU.plotSendDisguiseDisabled = disabled === true;
+      try {
+        const result = saveSettings_ACU();
+        if (result?.saved === false) settings_ACU.plotSendDisguiseDisabled = previous;
+      } catch {
+        settings_ACU.plotSendDisguiseDisabled = previous;
+      }
+      this.sendDisguiseDisabled = settings_ACU.plotSendDisguiseDisabled === true;
     },
 
     /** D23.2：切换"当前聊天使用"——即 PresetDropdown 主操作。 */
