@@ -334,7 +334,9 @@ export function buildCustomApiRequestBody_ACU(
     custom_include_headers: headers,
     custom_include_body: composedIncludeBody.value,
     custom_exclude_body: normalizeExcludeBodyParamsForSillyTavern_ACU(effectiveApiConfig.excludeBodyParams),
-    ...(opts.tools?.length ? { tools: opts.tools, tool_choice: 'auto' } : {}),
+    // 无工具的内部请求明确禁用工具；Kemini 即使被其他包装遮挡，也会按 none 原样放行。
+    // 带工具的 Agent 仍须允许自行选择工具或最终文本，不能为了避开包装而强制 required。
+    ...(opts.tools?.length ? { tools: opts.tools, tool_choice: 'auto' } : { tool_choice: 'none' }),
   };
   if (promptPostProcessing) {
     // 「未选择」（''）时省略该键，酒馆后端（getPromptPostProcessing）按 none 处理，原样透传消息。

@@ -206,11 +206,15 @@ const CHAT_COMPLETION_GENERATE_URL_ACU = '/api/backends/chat-completions/generat
 export async function postChatCompletionDirect_ACU(payload: Record<string, unknown>, signal?: AbortSignal | null): Promise<any> {
     const service: any = (SillyTavern_API_ACU as any)?.ChatCompletionService;
     const data = typeof service?.createRequestData === 'function' ? service.createRequestData.call(service, payload) : { ...payload };
+    // 在宿主归一化之后声明无工具语义，避免默认 auto 让内层 Kemini 接管文本/JSON 请求。
+    // 有工具时保留调用方的选择，不强制调用工具，也不剥离未知的宿主发送包装。
+    const request = { ...data, stream: false };
+    if (!Array.isArray(request.tools) || request.tools.length === 0) request.tool_choice = 'none';
     const response = await pristineFetch_ACU(CHAT_COMPLETION_GENERATE_URL_ACU, {
         method: 'POST',
         headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
         cache: 'no-cache',
-        body: JSON.stringify({ ...data, stream: false }),
+        body: JSON.stringify(request),
         signal: signal ?? undefined,
     });
     const text = await response.text();
