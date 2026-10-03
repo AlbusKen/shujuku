@@ -18,6 +18,9 @@ const activeNode = ref<any>(null);
 const activeTurn = ref<any>(null);
 const materialsSnapshot = ref<any>(null);
 const settings = ref<any>(null);
+const nativeToolEnabled = ref(false);
+const setNativeToolEnabled = vi.fn((value: boolean) => { nativeToolEnabled.value = value; });
+const presentPromptSegments = vi.fn((_role: string, segments: any[]) => segments);
 const busy = ref(false);
 const canContinue = ref(false);
 const awaitingHostResult = ref(false);
@@ -53,6 +56,7 @@ vi.mock('../../../src/presentation-v2/composables/useContinuationRuntime', () =>
     isAwaitingHostResult: awaitingHostResult, originInstruction, refresh,
     retryCurrentTurn, acceptOutline, sendAgentMessage, saveActiveOutline, clearData, restorePromptDefault,
     saveSettings, settings, statusText, stopTask, task,
+    nativeToolEnabled, setNativeToolEnabled, presentPromptSegments,
   }),
   // 连续高压轮上限输入框的上界常量：组件从 composable 取，mock 缺了它会整页渲染失败。
   CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_UI_ACU: 20,
@@ -174,6 +178,7 @@ beforeEach(() => {
   activeTurn.value = null;
   materialsSnapshot.value = null;
   settings.value = null;
+  nativeToolEnabled.value = false;
   busy.value = false;
   canContinue.value = false;
   awaitingHostResult.value = false;
@@ -621,6 +626,41 @@ describe('ContinuationPage', () => {
     expect(clearData).toHaveBeenCalledOnce();
     app.unmount();
   });
+
+  it('工具开关刷新展示而不重建未保存草稿，元数据编辑保留原始提示词正文', async () => {
+    vi.useFakeTimers();
+    setSettings();
+    setTask();
+    presentPromptSegments.mockImplementation((_role, segments) => segments.map(segment => ({ ...segment,
+      content: nativeToolEnabled.value ? '工具模式展示正文' : segment.content })));
+    try {
+      const { app, el } = await mountPage();
+      const stageSize = el.querySelector<HTMLSelectElement>('select')!;
+      stageSize.value = 'short';
+      stageSize.dispatchEvent(new Event('change', { bubbles: true }));
+      await nextTick();
+      const group = Array.from(el.querySelectorAll<HTMLElement>('.acu-v2-continuation-page__group'))
+        .find(item => item.querySelector('.acu-disclosure-group__label')?.textContent?.trim() === '主 Agent 提示词')!;
+      group.querySelector<HTMLButtonElement>('.acu-disclosure-group__header')!.click();
+      await nextTick();
+      nativeToolEnabled.value = true;
+      await nextTick();
+      expect(group.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe('工具模式展示正文');
+      expect(stageSize.value).toBe('short');
+      group.querySelector<HTMLButtonElement>('.acu-prompt-segs__item [role="checkbox"]')!.click();
+      await nextTick();
+      await vi.advanceTimersByTimeAsync(900);
+      expect(saveSettings).toHaveBeenCalledOnce();
+      expect(saveSettings.mock.calls[0][0]).toMatchObject({ stageSize: 'short',
+        agentPrompts: { main: [{ content: '主控', enabled: false }] } });
+      expect(settings.value.agentPrompts.main[0].content).toBe('主控');
+      app.unmount();
+    } finally {
+      presentPromptSegments.mockImplementation((_role, segments) => segments);
+      vi.useRealTimers();
+    }
+  });
+
 
   it('渲染设置与伪 Role 提示词，设置修改后自动经 runtime 保存', async () => {
     vi.useFakeTimers();

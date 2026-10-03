@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { settings_ACU } from '../../../../src/service/runtime/state-manager';
+import { nativeAgentReply_ACU } from '../../../helpers/agent-mode-fixture';
 
 import { ContinuationAgentTurnPlanner_ACU, evaluateArcArchitectDispatch_ACU, renderAgentBudget_ACU } from '../../../../src/service/continuation/agent/agent-main-loop';
 import { renderMainSessionReadAppendix_ACU, omitSnapshotSectionsForSubagent_ACU } from '../../../../src/service/continuation/agent/agent-shared-materials';
@@ -27,7 +29,10 @@ const nativeToolTurn_ACU = (name: 'read' | 'write_sql', args: Record<string, unk
 const toolMessageContent_ACU = (messages: readonly { role: string; content: string; tool_call_id?: string; tool_calls?: readonly { id: string }[] }[], predicate: (message: { role: string; content: string; tool_call_id?: string; tool_calls?: readonly { id: string }[] }) => boolean) =>
   messages.find(predicate)?.content ?? '';
 
-beforeEach(() => { resetAgentSessionLogForTests_ACU(); resetAgentRunCacheForTests_ACU(); });
+const previousNativeToolEnabled_ACU = settings_ACU.continuationNativeToolEnabled;
+beforeEach(() => { settings_ACU.continuationNativeToolEnabled = false; resetAgentSessionLogForTests_ACU(); resetAgentRunCacheForTests_ACU(); });
+afterEach(() => { settings_ACU.continuationNativeToolEnabled = previousNativeToolEnabled_ACU; });
+
 
 const chat_ACU = () => ([
   { mes: '我要进禁区', is_user: true },
@@ -139,6 +144,7 @@ function harness_ACU(options: {
   chat?: any[];
   onHandoffCall?: (chat: any[], callNumber: number, saveChat: ReturnType<typeof vi.fn>) => void;
 }): Harness_ACU {
+  settings_ACU.continuationNativeToolEnabled = options.nativeTools === true;
   const mainReplies = [...options.mainReplies];
   const subReplies = [...(options.subReplies ?? [])];
   const handoffReplies = [...(options.handoffReplies ?? [])];
@@ -163,8 +169,11 @@ function harness_ACU(options: {
   const subagentRuntime = new AgentSubagentRuntime_ACU({
     resolveApiPreset: (() => preset_ACU) as any,
     resolveAgentApiPreset: (() => preset_ACU) as any,
-    callInternalAi: async messages => { subCalls.push(messages); return options.onSubagentCall
-      ? options.onSubagentCall(chat, messages) : subReplies.shift() ?? '{"summary":"空","recommendation":"随便推进"}'; },
+    callInternalAi: async messages => {
+      subCalls.push(messages);
+      const reply = options.onSubagentCall ? await options.onSubagentCall(chat, messages) : subReplies.shift() ?? '{"summary":"空","recommendation":"随便推进"}';
+      return options.nativeTools ? nativeAgentReply_ACU(reply) : reply;
+    },
   });
 
   const planner = new ContinuationAgentTurnPlanner_ACU({
@@ -177,7 +186,8 @@ function harness_ACU(options: {
       }
       mainCalls.push(messages);
       mainCacheBoundaries.push(callOptions?.cacheBoundary);
-      return mainReplies.shift() ?? '{"action":"block","reason":"脚本没有更多回复"}';
+      const reply = mainReplies.shift() ?? '{"action":"block","reason":"脚本没有更多回复"}';
+      return options.nativeTools ? nativeAgentReply_ACU(reply) : reply;
     },
     subagentRuntime,
     nativeTools: options.nativeTools,
@@ -593,6 +603,7 @@ ${appendix}`, new Set(['$STORY_ARC']));
 describe('主 Agent read/search 工具批次', () => {
   it('损坏栏目读取明确失败且不会占用成功读取缓存', async () => {
     const h = harness_ACU({
+      nativeTools: true,
       mutateChat: chat => { chat[3]._qrf_continuation_agent = { schemaVersion: 4, invalid: true }; },
       mainReplies: [
         nativeToolTurn_ACU('read', { reads: ['$FIELD:hooks:H1'] }, 'call-invalid-read-1'),
@@ -610,6 +621,7 @@ describe('主 Agent read/search 工具批次', () => {
 
   it('调阅结果作为带 readKey 的工具消息回灌，重复调阅只回提示不重注内容', async () => {
     const h = harness_ACU({
+      nativeTools: true,
       mainReplies: [
         nativeToolTurn_ACU('read', { reads: ['$HOOKS_LEDGER'] }, 'call-hooks-read-1'),
         nativeToolTurn_ACU('read', { reads: ['$HOOKS_LEDGER'] }, 'call-hooks-read-2'),
@@ -630,6 +642,7 @@ describe('主 Agent read/search 工具批次', () => {
 
   it('资料变化后重读同一地址时，只在新工具消息自身标记最新快照', async () => {
     const h = harness_ACU({
+      nativeTools: true,
       mainReplies: [
         nativeToolTurn_ACU('read', { reads: ['$OUTLINE_WINDOW'] }, 'call-outline-read-1'),
         '{"action":"delegate","delegations":[{"agentName":"outline-architect","prompt":"将当前轮目标调整为守门人先露破绽"}]}',
@@ -652,6 +665,7 @@ describe('主 Agent read/search 工具批次', () => {
 
   it('工具批次超过 maxReads 上限时回灌用尽提示，不再执行读取', async () => {
     const h = harness_ACU({
+      nativeTools: true,
       budget: { maxReads: 1 },
       mainReplies: [
         nativeToolTurn_ACU('read', { reads: ['$HOOKS_LEDGER'] }, 'call-hooks-read'),
@@ -665,6 +679,7 @@ describe('主 Agent read/search 工具批次', () => {
 
   it('读取批次被门禁打回时回灌结构化报告，循环不中断', async () => {
     const h = harness_ACU({
+      nativeTools: true,
       mainReplies: [
         nativeToolTurn_ACU('read', { reads: ['$HISTORY_UNSETTLED'] }, 'call-history-read'),
         '{"action":"finalize","instruction":"不读了"}',
@@ -722,6 +737,7 @@ describe('主 Agent 提示词装配', () => {
 
   it('相邻迭代只追加不改写已发出的前缀', async () => {
     const h = harness_ACU({
+      nativeTools: true,
       mainReplies: [
         nativeToolTurn_ACU('read', { reads: ['$OUTLINE_WINDOW'] }, 'call-outline-budget-read'),
         '{"action":"finalize","instruction":"本轮指导"}',
@@ -1123,6 +1139,7 @@ describe('open_round 固定结构工作流', () => {
     let lastChat: any[] = [];
     let calls = 0;
     const h = harness_ACU({
+      nativeTools: true,
       snapshot: snapshotWithArc_ACU(),
       context: preOutlineContext_ACU,
       // 写入被拒后维护员没有重发 H1 而以空 delta 收尾：hooks 缺口留 pending，
@@ -1202,6 +1219,7 @@ describe('派工与写集落盘', () => {
     const saveChat = vi.fn().mockResolvedValue(undefined);
     let lastChat: any[] = [];
     const h = harness_ACU({
+      nativeTools: true,
       mainReplies: [
         '{"action":"delegate","delegations":[{"agentName":"hook-cognition-maintainer","prompt":"逐栏结算","reads":[],"writes":["$HOOKS_LEDGER"]}]}',
         '{"action":"finalize","instruction":"停止"}',
@@ -1233,6 +1251,7 @@ describe('派工与写集落盘', () => {
     let lastChat: any[] = [];
     let calls = 0;
     const h = harness_ACU({
+      nativeTools: true,
       mainReplies: [
         '{"action":"delegate","delegations":[{"agentName":"hook-cognition-maintainer","prompt":"逐栏结算","reads":[],"writes":["$HOOKS_LEDGER"]}]}',
         '{"action":"finalize","instruction":"停止"}',
@@ -1263,6 +1282,7 @@ describe('派工与写集落盘', () => {
     let lastChat: any[] = [];
     let calls = 0;
     const h = harness_ACU({
+      nativeTools: true,
       mainReplies: [
         '{"action":"delegate","delegations":[{"agentName":"hook-cognition-maintainer","prompt":"逐栏结算","reads":[],"writes":["$HOOKS_LEDGER"]}]}',
         '{"action":"finalize","instruction":"停止"}',
@@ -1530,7 +1550,11 @@ describe('子代理运行时', () => {
     replies = [];
     runtime = new AgentSubagentRuntime_ACU({
       resolveApiPreset: (() => preset_ACU) as any,
-      callInternalAi: async messages => { calls.push(messages); return replies.shift() ?? '{}'; },
+      callInternalAi: async (messages, _preset, _identity, _signal, options) => {
+        calls.push(messages);
+        const reply = replies.shift() ?? '{}';
+        return options?.tools?.length ? nativeAgentReply_ACU(reply) : reply;
+      },
     });
   });
 
@@ -1551,6 +1575,7 @@ describe('子代理运行时', () => {
   });
 
   it('子代理输出 read 工具批次时执行调阅并把结果回灌，随后继续小循环', async () => {
+    settings_ACU.continuationNativeToolEnabled = true;
     replies = [
       { content: '', toolCalls: [{ id: 'call-table-catalog', name: 'read', arguments: JSON.stringify({ reads: ['$TABLE:角色表'] }) }] },
       JSON.stringify({ summary: '补齐后结算', delta: { hooks: [{ action: 'upsert', id: 'H1', summary: '晶屑' }] } }),
@@ -1566,6 +1591,7 @@ describe('子代理运行时', () => {
   });
 
   it('工具轮次用尽后回灌最后通牒，子代理必须基于已有资料交付', async () => {
+    settings_ACU.continuationNativeToolEnabled = true;
     replies = [
       { content: '', toolCalls: [{ id: 'call-exhausted-hooks', name: 'read', arguments: JSON.stringify({ reads: ['$HOOKS_LEDGER'] }) }] },
       JSON.stringify({ summary: '就这样结算', delta: {} }),
@@ -1680,6 +1706,7 @@ describe('子代理运行时', () => {
 
 describe('S11 双模式双楼全链集成', () => {
   it('续写双楼全链：主会话读→工作流子代理先写部分栏→本次下一条补栏→合格指导→宿主正文→主会话续接', async () => {
+    settings_ACU.continuationNativeToolEnabled = true;
     // 全部走生产持久化：模块快照读/写、会话分段、逐栏提交都落在真实楼层字段上，
     // 只有 AI 调用是脚本替身。消息序列与生产存储回读分开断言。
     const seeded = snapshotWithArc_ACU();
@@ -1712,12 +1739,12 @@ describe('S11 双模式双楼全链集成', () => {
     const subagentRuntime = new AgentSubagentRuntime_ACU({
       resolveApiPreset: (() => preset_ACU) as any,
       resolveAgentApiPreset: (() => preset_ACU) as any,
-      callInternalAi: async messages => { subCalls.push(messages); return subReplies.shift() ?? '{"summary":"空","delta":{}}'; },
+      callInternalAi: async messages => { subCalls.push(messages); return nativeAgentReply_ACU(subReplies.shift() ?? '{"summary":"空","delta":{}}'); },
     });
     let turnId = 'turn-2';
     const planner = new ContinuationAgentTurnPlanner_ACU({
       resolveApiPreset: (() => preset_ACU) as any,
-      callInternalAi: async messages => { mainCalls.push(messages); return mainReplies.shift() ?? '{"action":"block","reason":"脚本没有更多回复"}'; },
+      callInternalAi: async messages => { mainCalls.push(messages); return nativeAgentReply_ACU(mainReplies.shift() ?? '{"action":"block","reason":"脚本没有更多回复"}'); },
       subagentRuntime,
       readChat: () => chat,
       readModuleSnapshot: source => readAgentModuleSnapshot_ACU(source),
@@ -1819,6 +1846,7 @@ describe('主 Agent 最终请求容量门禁与 60% 默认上围栏', () => {
   it('未给上围栏的正文区间按默认上围栏收窄为可证明前缀，注入完整逐字正文并登记收窄地址', async () => {
     // 本地输入余量的 60% 为 700：容得下 2–3 个 ~210 字楼层，容不下 5 个。
     const h = harness_ACU({
+      nativeTools: true,
       historyTokenBudget: 60000,
       chat: storyChat_ACU(),
       countTokens: counter_ACU(58833),
@@ -1845,6 +1873,7 @@ describe('主 Agent 最终请求容量门禁与 60% 默认上围栏', () => {
   it('默认上围栏连最小范围都放不下时整批不注入，改用显式围栏后可完整读取', async () => {
     // 本地输入余量的 60% 为 115：单个楼层（~210 字）也放不下。
     const h = harness_ACU({
+      nativeTools: true,
       historyTokenBudget: 60000,
       chat: storyChat_ACU(),
       countTokens: counter_ACU(59808),
@@ -1874,6 +1903,7 @@ describe('主 Agent 最终请求容量门禁与 60% 默认上围栏', () => {
   it('重复请求收窄前的原始宽地址时如实提示剩余范围，不重复注入正文', async () => {
     // 预算 700：第一次宽地址被收窄；第二次重复同一宽地址不得再走分配、不得重注正文。
     const h = harness_ACU({
+      nativeTools: true,
       historyTokenBudget: 60000,
       chat: storyChat_ACU(),
       countTokens: counter_ACU(58833),

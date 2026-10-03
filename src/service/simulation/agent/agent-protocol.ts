@@ -897,25 +897,38 @@ export function parseWorldSimulationSubagentToolCalls_ACU(raw: string | null | u
  * 「照这个样子写」远比对「请修正」服从；同时显式禁止模仿系统提示词里的
  * WORLD_SIMULATION_ENGINE_SEAM 标记——推理模型会把这些标记当输出格式照抄。
  */
-export function renderWorldSimulationDirectorProtocolRejection_ACU(issue: WorldSimulationProtocolIssue_ACU, allowDelegate: boolean): string {
+export function renderWorldSimulationDirectorProtocolRejection_ACU(issue: WorldSimulationProtocolIssue_ACU, allowDelegate: boolean, mode: 'json' | 'tools' = 'json'): string {
+  const tools = mode === 'tools';
+  // tools 模式下决策也是函数：示例写成“调用 X，参数 {...}”，参数里不带 action。
+  const example = (record: Record<string, unknown>): string => {
+    if (!tools) return JSON.stringify(record);
+    const { action, ...args } = record;
+    return `调用 ${String(action)}，参数 ${JSON.stringify(args)}`;
+  };
   const lines = [
     `你上一次的输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
-    'read 与 search 使用函数调用，不要写成 JSON。推理写在思维链里，闭合后再输出一个决策 JSON。不要 Markdown 围栏，也不要输出 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签。',
-    '调用 read 时参数 reads 必须是非空地址数组；调用 search 时参数 query 必填，可选 scope、maxResults、isRegex。不要添加 evidenceRef、purpose 或其他字段。',
+    tools
+      ? 'read、search 与 open_round、delegate、finalize、block 都使用函数调用，不要写成 JSON 文本。推理写在思维链里，闭合后再调用函数；一次回复只调用一个决策函数，且不要与 read/search 同时调用。不要输出 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签。'
+      : '每个动作都写成一个 JSON 对象，用 action 字段区分：read、search、open_round、delegate、finalize、block。推理写在思维链里，闭合后再输出 JSON。不要 Markdown 围栏，也不要输出 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签。',
+    tools
+      ? '调用 read 时参数 reads 必须是非空地址数组；调用 search 时参数 query 必填，可选 scope、maxResults、isRegex。不要添加 evidenceRef、purpose 或其他字段。'
+      : 'read 只能包含 action、reads，reads 必须是非空地址数组；search 只能包含 action、query，可选 scope、maxResults、isRegex。不要添加 evidenceRef、purpose 或其他字段。',
     `字段地址必须使用 ${formatWorldSimulationToolAddressHints_ACU()}；必须包含模块名和条目 ID，例如 field:dimensions:dim-a；不得使用 field:dimensions 这类裸模块地址。`,
     'evidenceRef 由服务端在读取成功后随工具结果颁发；只能在后续 finalize / candidate 的 evidenceRefs 数组中引用，不能由模型在 read/search 请求中生成。',
-    'delegate 只能包含 action、delegations；open_round 只能包含 action、summary、focus、dispatchChronicler，skipModules 可选；block 只能包含 action、reason、unresolved。evidenceRefs 只允许出现在 finalize 顶层，其他动作禁止携带。',
-    '调阅时调用函数，决策动作格式必须是下面之一：',
-    '调用 read，参数 {"reads":["ledger:current","summary:current"]}',
-    '调用 search，参数 {"query":"关键词","scope":["worldbook"],"maxResults":10}',
+    tools
+      ? 'delegate 只能包含 delegations；open_round 只能包含 summary、focus、dispatchChronicler，skipModules 可选；block 只能包含 reason、unresolved。evidenceRefs 只允许出现在 finalize，其他函数禁止携带。'
+      : 'delegate 只能包含 action、delegations；open_round 只能包含 action、summary、focus、dispatchChronicler，skipModules 可选；block 只能包含 action、reason、unresolved。evidenceRefs 只允许出现在 finalize 顶层，其他动作禁止携带。',
+    '动作格式必须是下面之一：',
+    example({ action: 'read', reads: ['ledger:current', 'summary:current'] }),
+    example({ action: 'search', query: '关键词', scope: ['worldbook'], maxResults: 10 }),
   ];
-  if (allowDelegate) lines.push('{"action":"delegate","delegations":[{"agentName":"dramatis-keeper","instruction":"按用户要求核对人物档案","reads":[]}]}');
-  lines.push('{"action":"open_round","summary":"锁定本轮幕后焦点并启动固定工作流","focus":"时间推进与暗流压力","dispatchChronicler":false}');
-  lines.push('finalize 顶层只能包含 action、outcome、summary、evidenceRefs；candidateId、acceptedCandidateIds、status、verdict 禁止出现。');
+  if (allowDelegate) lines.push(example({ action: 'delegate', delegations: [{ agentName: 'dramatis-keeper', instruction: '按用户要求核对人物档案', reads: [] }] }));
+  lines.push(example({ action: 'open_round', summary: '锁定本轮幕后焦点并启动固定工作流', focus: '时间推进与暗流压力', dispatchChronicler: false }));
+  lines.push(`finalize ${tools ? '参数' : '顶层'}只能包含 ${tools ? '' : 'action、'}outcome、summary、evidenceRefs；candidateId、acceptedCandidateIds、status、verdict 禁止出现。`);
   lines.push('outcome 必须精确为 commit、no_change、blocked 之一，不得使用 candidate、success、done、finalized 等别名。');
-  lines.push('{"action":"finalize","outcome":"commit","summary":"提交已审核候选","evidenceRefs":["evidence:已颁发引用"]}');
-  lines.push('{"action":"finalize","outcome":"no_change","summary":"证据表明无需变更","evidenceRefs":["evidence:已颁发引用"]}');
-  lines.push('{"action":"block","reason":"……","unresolved":["……"]}');
+  lines.push(example({ action: 'finalize', outcome: 'commit', summary: '提交已审核候选', evidenceRefs: ['evidence:已颁发引用'] }));
+  lines.push(example({ action: 'finalize', outcome: 'no_change', summary: '证据表明无需变更', evidenceRefs: ['evidence:已颁发引用'] }));
+  lines.push(example({ action: 'block', reason: '……', unresolved: ['……'] }));
   return lines.join('\n');
 }
 
@@ -923,10 +936,15 @@ export function renderWorldSimulationSpecialistProtocolRejection_ACU(
   issue: WorldSimulationProtocolIssue_ACU,
   agentName: string,
   writableModules: readonly string[],
+  mode: 'json' | 'tools' = 'json',
 ): string {
+  const tools = mode === 'tools';
+  const example = (record: Record<string, unknown>): string => (tools ? `调用 submit，参数 ${JSON.stringify(record)}` : JSON.stringify(record));
   const lines = [
     `你上一次的输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
-    '推理写在思维链里。闭合后只输出一个 JSON 对象，不要 Markdown、解释或额外字段。',
+    tools
+      ? '推理写在思维链里。闭合后调用函数：读取与写入用对应函数，交付结果调用 submit；submit 不能与其它函数在同一次回复里调用，不要输出 JSON 文本。'
+      : '推理写在思维链里。闭合后只输出一个 JSON 对象，不要 Markdown、解释或额外字段。',
     'status 必须精确为 candidate、no_change、failed、blocked 之一。',
     `agentName 必须精确为 ${agentName}。`,
   ];
@@ -938,7 +956,7 @@ export function renderWorldSimulationSpecialistProtocolRejection_ACU(
       ? `UPDATE ${firstModule} SET ${firstModule === 'clock' ? 'days = 1' : firstModule === 'player' ? "contact = 'open'" : "signals = '[]'"} WHERE expected_revision = 0;`
       : firstModule === 'chronicle' ? "INSERT INTO chronicle (summary) VALUES ('有证据的新事件');"
         : `INSERT INTO ${firstModule} (${firstModule === 'seeds' ? 'title' : firstModule === 'rumors' ? 'fact' : 'name'}, expected_revision) VALUES ('有证据的新条目', 0);`;
-    lines.push(JSON.stringify({
+    lines.push(example({
       status: 'candidate',
       agentName,
       sql: sqlExample,
@@ -947,29 +965,33 @@ export function renderWorldSimulationSpecialistProtocolRejection_ACU(
       uncertainties: [],
     }));
   }
-  lines.push(JSON.stringify({ status: 'no_change', agentName, summary: '没有需要修改的内容', evidenceRefs: [], uncertainties: [] }));
-  lines.push(JSON.stringify({ status: 'failed', agentName, reasonCode: 'REASON_CODE', message: '失败原因' }));
-  lines.push(JSON.stringify({ status: 'blocked', agentName, unresolved: ['仍需解决的问题'] }));
+  lines.push(example({ status: 'no_change', agentName, summary: '没有需要修改的内容', evidenceRefs: [], uncertainties: [] }));
+  lines.push(example({ status: 'failed', agentName, reasonCode: 'REASON_CODE', message: '失败原因' }));
+  lines.push(example({ status: 'blocked', agentName, unresolved: ['仍需解决的问题'] }));
   return lines.join('\n');
 }
 
-export function renderWorldSimulationReviewerProtocolRejection_ACU(issue: WorldSimulationProtocolIssue_ACU): string {
+export function renderWorldSimulationReviewerProtocolRejection_ACU(issue: WorldSimulationProtocolIssue_ACU, mode: 'json' | 'tools' = 'json'): string {
+  const tools = mode === 'tools';
+  const example = (record: Record<string, unknown>): string => (tools ? `调用 submit，参数 ${JSON.stringify(record)}` : JSON.stringify(record));
   return [
     `你上一次的审核输出没有被采纳。原因：${issue.reasonCode} ${issue.path} 应为 ${issue.expected}。`,
-    '推理写在思维链里，闭合后再输出一个 JSON 对象。不要 Markdown 围栏、解释、<WORLD_SIMULATION_ENGINE_SEAM:...> 标签或额外字段。',
-    '顶层必须且只能包含 verdict、summary、findings、acceptedCandidateIds；不得输出 guidance。',
+    tools
+      ? '推理写在思维链里，闭合后调用 submit 交付审核结论；需要补读时先单独调用 read。不要输出 JSON 文本或 <WORLD_SIMULATION_ENGINE_SEAM:...> 标签。'
+      : '推理写在思维链里，闭合后再输出一个 JSON 对象。不要 Markdown 围栏、解释、<WORLD_SIMULATION_ENGINE_SEAM:...> 标签或额外字段。',
+    `${tools ? 'submit 参数' : '顶层'}必须且只能包含 verdict、summary、findings、acceptedCandidateIds；不得输出 guidance。`,
     'verdict 必须精确为 accept、revise、reject 之一；不得使用 approve、approved、pass、success、done 等别名。',
     'findings 必须是数组；每项必须且只能包含 severity、reasonCode、path、expected、actual。severity 必须精确为 blocking、major、minor 之一。',
     'accept 必须包含至少一个真实候选 ID；reject 的 acceptedCandidateIds 必须为空；不得编造候选 ID。',
     '不得输出 guidance：投影由 guidance-composer 专责，审核只判断时间、空间、因果、权限与证据。',
-    JSON.stringify({ verdict: 'accept', summary: '候选满足时间、因果、权限与证据约束', findings: [], acceptedCandidateIds: ['candidate:已有候选ID'] }),
-    JSON.stringify({
+    example({ verdict: 'accept', summary: '候选满足时间、因果、权限与证据约束', findings: [], acceptedCandidateIds: ['candidate:已有候选ID'] }),
+    example({
       verdict: 'revise',
       summary: '候选仍需修正',
       findings: [{ severity: 'major', reasonCode: 'CAUSE_GAP', path: '$.clock', expected: '时间与因果连续', actual: '缺少因果说明' }],
       acceptedCandidateIds: [],
     }),
-    JSON.stringify({
+    example({
       verdict: 'reject',
       summary: '候选不满足证据约束',
       findings: [{ severity: 'blocking', reasonCode: 'EVIDENCE_GAP', path: '$', expected: '可验证证据', actual: '缺失' }],

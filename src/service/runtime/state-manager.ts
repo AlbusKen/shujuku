@@ -224,6 +224,9 @@ export let settings_ACU: any = {
     strictJsonTableFillEnabled: false,
     // 默认关闭：部分渠道只要请求体带 tools 字段就直接报错，开启前需确认渠道支持工具调用。
     tableFillNativeToolEnabled: false,
+    // 续写 / 推演的工具方案全局开关；关闭时请求不带 tools，提示词为纯 JSON 版。
+    continuationNativeToolEnabled: false,
+    worldSimulationNativeToolEnabled: false,
     discardUnauthorizedTableEditsEnabled: true,
     // [剧情推进] 按剧情任务ID保存的任务级 API 预设覆盖（key=taskId, value=presetName）
     // 不保存入聊天记录或剧情推进预设，只写进插件全局设置。

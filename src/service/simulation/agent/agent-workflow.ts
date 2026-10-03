@@ -38,6 +38,7 @@ export interface WorldSimulationWorkflowOpening_ACU {
 export interface WorldSimulationWorkflowInput_ACU {
   identity: WorldSimulationRunIdentity_ACU;
   settings: WorldSimulationSettings_ACU;
+  toolMode?: import('../../ai/agent-tool-mode').AgentToolMode_ACU;
   promptContext: WorldSimulationPlaceholderContext_ACU;
   registry: WorldSimulationEvidenceRegistry_ACU;
   tools: WorldSimulationToolDependencies_ACU;
@@ -448,6 +449,7 @@ async function applyOneShotCandidates_ACU(
 export async function runWorldSimulationGuidanceComposer_ACU(input: {
   identity: WorldSimulationRunIdentity_ACU;
   settings: WorldSimulationSettings_ACU;
+  toolMode?: import('../../ai/agent-tool-mode').AgentToolMode_ACU;
   promptContext: WorldSimulationPlaceholderContext_ACU;
   registry: WorldSimulationEvidenceRegistry_ACU;
   tools: WorldSimulationToolDependencies_ACU;
@@ -475,6 +477,7 @@ export async function runWorldSimulationGuidanceComposer_ACU(input: {
       },
       settings: input.settings,
       promptContext: { ...input.promptContext, worldState: input.ledger },
+      toolMode: input.toolMode,
       registry: input.registry,
       tools: input.tools,
       writeSql: input.writeSql,
@@ -552,6 +555,7 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
         },
         settings: input.settings,
         promptContext: { ...input.promptContext, worldState: ledger },
+        toolMode: input.toolMode,
         registry: input.registry,
         tools: input.tools,
         writeSql: input.writeSql,
@@ -654,6 +658,7 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
     const composer = await runWorldSimulationGuidanceComposer_ACU({
       identity: input.identity,
       settings: input.settings,
+      toolMode: input.toolMode,
       promptContext: input.promptContext,
       registry: input.registry,
       tools: input.tools,
@@ -775,6 +780,7 @@ export async function runWorldSimulationOneShotWorkflow_ACU(
     let state: 'done' | 'failed' | 'running' = 'failed';
     try {
       const outcome = await input.subagents.runOneShot({ agentName: role, settings: input.settings,
+        toolMode: input.toolMode,
         promptContext: { ...input.promptContext, worldState: ledger }, registry: input.registry,
         tools: input.tools, runId: input.identity.runId, candidateSeq: seq,
         focus: input.opening.focus, anchorEvidenceRef, givenLedger: ledger,

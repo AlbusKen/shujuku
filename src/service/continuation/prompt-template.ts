@@ -9,6 +9,8 @@ import { buildDefaultContinuationOutlinePrompt_ACU } from './defaults';
 import {
   buildDefaultContinuationAgentPrompts_ACU,
 } from './agent/agent-defaults';
+import { buildContinuationAgentPromptsForMode_ACU } from './agent/agent-prompt-mode';
+import type { AgentToolMode_ACU } from '../ai/agent-tool-mode';
 
 export const CONTINUATION_PROMPT_PLACEHOLDERS_ACU = [
   '$ORIGIN_INSTRUCTION', '$1',
@@ -88,7 +90,7 @@ export async function renderContinuationPrompt_ACU(segments: unknown, resolvers:
  * @param kind 要恢复的提示词组
  * @returns 新的设置对象，只替换目标提示词组
  */
-export function restoreContinuationPromptDefault_ACU(settings: ContinuationSettings_ACU, kind: ContinuationPromptKind_ACU): ContinuationSettings_ACU {
+export function restoreContinuationPromptDefault_ACU(settings: ContinuationSettings_ACU, kind: ContinuationPromptKind_ACU, mode?: AgentToolMode_ACU): ContinuationSettings_ACU {
   if (kind === 'outline') return { ...settings, outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU() };
   const agentPrompts = { ...settings.agentPrompts };
   const key: Record<Exclude<ContinuationPromptKind_ACU, 'outline'>, keyof typeof agentPrompts> = {
@@ -97,6 +99,6 @@ export function restoreContinuationPromptDefault_ACU(settings: ContinuationSetti
     agent_final_reviewer: 'finalReviewer', agent_web_researcher: 'webResearcher',
     agent_instruction_composer: 'instructionComposer',
   };
-  agentPrompts[key[kind]] = buildDefaultContinuationAgentPrompts_ACU()[key[kind]];
+  agentPrompts[key[kind]] = (mode ? buildContinuationAgentPromptsForMode_ACU(mode) : buildDefaultContinuationAgentPrompts_ACU())[key[kind]];
   return { ...settings, agentPrompts };
 }

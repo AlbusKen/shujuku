@@ -58,8 +58,10 @@ export const ACU_V2_PAGE_REGISTRY: readonly AcuV2Page[] = Object.freeze([
   },
 
   // 工具
-  { id: 'data-mgmt', title: '数据管理', group: 'tool', component: markRaw(DataMgmtPage), minUiTier: 'high' },
-  { id: 'advanced-tools', title: '高级工具', group: 'tool', component: markRaw(AdvancedToolsPage), minUiTier: 'high' },
+  // 高级工具页轻量模式即可见：轻量 / 进阶只显示运行日志，SQL 控制台由页内按高级档位开放。
+  // 数据管理（含删除表格数据）随进阶模式开放。
+  { id: 'data-mgmt', title: '数据管理', group: 'tool', component: markRaw(DataMgmtPage), minUiTier: 'medium' },
+  { id: 'advanced-tools', title: '高级工具', group: 'tool', component: markRaw(AdvancedToolsPage) },
 
   // 开发者（plan §D24：仪表盘"启用开发者选项"总开关 gate）
   {

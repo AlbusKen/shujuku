@@ -1,8 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { settings_ACU } from '../../../../src/service/runtime/state-manager';
+import { nativeAgentReply_ACU } from '../../../helpers/agent-mode-fixture';
 import { buildDefaultWorldSimulationEnvelope_ACU, buildDefaultWorldSimulationSettings_ACU, buildEmptyWorldSimulationLedger_ACU } from '../../../../src/service/simulation/defaults';
 import { buildDefaultWorldSimulationAgentPrompts_ACU, WORLD_SIMULATION_AGENT_PREFILLS_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
-import { WorldSimulationSubagentRuntime_ACU } from '../../../../src/service/simulation/agent/agent-subagent-runtime';
-import { WorldSimulationMainLoop_ACU } from '../../../../src/service/simulation/agent/agent-main-loop';
+import { WorldSimulationSubagentRuntime_ACU as ProductionSubagentRuntime_ACU, type WorldSimulationAgentInvoker_ACU } from '../../../../src/service/simulation/agent/agent-subagent-runtime';
+import { WorldSimulationMainLoop_ACU as ProductionMainLoop_ACU } from '../../../../src/service/simulation/agent/agent-main-loop';
 import { WorldSimulationRunWriteState_ACU, readWorldSimulationRunWriteProof_ACU } from '../../../../src/service/simulation/simulation-run-write-state';
 import { commitWorldSimulationFieldWrites_ACU } from '../../../../src/service/simulation/simulation-commit-adapter';
 import { foldWorldSimulationLedger_ACU, foldWorldSimulationArchive_ACU, readWorldSimulationLedgerFieldSnapshot_ACU } from '../../../../src/service/simulation/simulation-ledger-fold';
@@ -18,6 +20,25 @@ import { createWorldSimulationEvidenceRegistry_ACU, recordWorldSimulationEvidenc
 import { bindWorldSimulationFixedWorldbook_ACU } from '../../../../src/service/simulation/agent/agent-shared-materials';
 import { renderAgentWorldbookTriggeredInjection_ACU } from '../../../../src/service/continuation/agent/agent-worldbook-read';
 
+
+// 仅编码显式 tools 用例的业务回包；JSON 用例与非法原生回包均不转换。
+const encodeInvoker_ACU = (invoke: WorldSimulationAgentInvoker_ACU): WorldSimulationAgentInvoker_ACU => async (...args) => {
+  const reply = await invoke(...args);
+  return args[3]?.tools.length ? nativeAgentReply_ACU(reply)! : reply;
+};
+class WorldSimulationMainLoop_ACU extends ProductionMainLoop_ACU {
+  constructor(dependencies: ConstructorParameters<typeof ProductionMainLoop_ACU>[0]) {
+    super({ ...dependencies, invoke: encodeInvoker_ACU(dependencies.invoke) });
+  }
+}
+class WorldSimulationSubagentRuntime_ACU extends ProductionSubagentRuntime_ACU {
+  constructor(dependencies: ConstructorParameters<typeof ProductionSubagentRuntime_ACU>[0]) {
+    super({ ...dependencies, invoke: encodeInvoker_ACU(dependencies.invoke) });
+  }
+}
+const previousNativeToolEnabled_ACU = settings_ACU.worldSimulationNativeToolEnabled;
+beforeEach(() => { settings_ACU.worldSimulationNativeToolEnabled = false; });
+afterEach(() => { settings_ACU.worldSimulationNativeToolEnabled = previousNativeToolEnabled_ACU; });
 
 const apiPreset = { resolvePreset: () => ({ resolved: true, apiMode: 'openai' as any, apiConfig: { max_tokens: 60000 } as any, tavernProfile: '' }) };
 const tools = { read: vi.fn(async () => ({ status: 'empty' as const, summary: 'empty' })), search: vi.fn(async () => ({ status: 'empty' as const, hits: [], summary: 'empty' })) };
@@ -108,6 +129,7 @@ describe('格林推演 Agent runtime', () => {
 
 
   it('锚定主会话第二次请求见首次 read 原文，重启后不会从展示卡片重复投影', async () => {
+    settings_ACU.worldSimulationNativeToolEnabled = true;
     const { registry, promptContext } = fixture('director-history');
     const chat: any[] = [{ message_id: 1, mes: '正文原文', swipe_id: 0 }];
     const saveChat = vi.fn().mockResolvedValue(undefined);
@@ -132,7 +154,8 @@ describe('格林推演 Agent runtime', () => {
     expect(readWorldSimulationDirectorHistory_ACU(chat)).toEqual([
       { role: 'assistant', content: '', tool_calls: [{ id: 'call_0_read', type: 'function', function: { name: 'read', arguments: '{"reads":["anchor:message"]}' } }] },
       { role: 'tool', tool_call_id: 'call_0_read', content: expect.stringContaining('已读完整正文') },
-      { role: 'assistant', content: blocked }, { role: 'user', content: expect.stringContaining('\"outcome\":\"blocked\"') },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'fixture-block', type: 'function', function: { name: 'block', arguments: '{"reason":"待续","unresolved":["稍后继续"]}' } }] },
+      { role: 'tool', tool_call_id: 'fixture-block', content: expect.stringContaining('\"outcome\":\"blocked\"') },
     ]);
     expect(readWorldSimulationConversation_ACU(chat).messages.filter(item => item.kind === 'model_agent')).toHaveLength(2);
     resetWorldSimulationRunCacheForTests_ACU();
@@ -141,7 +164,7 @@ describe('格林推演 Agent runtime', () => {
       freshSent.push(messages); return JSON.stringify({ action: 'block', reason: '暂停', unresolved: ['待用户'] });
     }), subagents: { run: vi.fn(), runReviewer: vi.fn() }, apiPreset, countTokens: async () => 1 });
     await fresh.run({ identity, anchor, chat, settings: settings(), promptContext, registry, tools, persistSessionEvent: async () => undefined });
-    expect(freshSent[0].filter(item => item.role === 'assistant' && item.tool_calls)).toHaveLength(1);
+    expect(freshSent[0].filter(item => item.role === 'assistant' && item.tool_calls)).toHaveLength(2);
     expect(freshSent[0].filter(item => item.content.includes('已读完整正文'))).toHaveLength(1);
     expect(freshSent[0].some(item => item.content.includes('主 Agent 正在读取资料'))).toBe(false);
   });
@@ -286,6 +309,7 @@ describe('格林推演 Agent runtime', () => {
   });
 
   it('无锚点路径按最终完整请求判定压缩：骨架超支时压缩旧轮而不是拒发', async () => {
+    settings_ACU.worldSimulationNativeToolEnabled = true;
     const markerCount = async (text: string) => (text.match(/填/g)?.length ?? 0);
     const pad = '填'.repeat(80);
     const receipt = `回执${'x'.repeat(250)}${'填'.repeat(10)}`;
@@ -300,17 +324,19 @@ describe('格林推演 Agent runtime', () => {
     // 先用极大预算实测固定段标记数，避免预算写死依赖真实提示词骨架长度。
     const probeFixture = fixture('volatile-probe');
     const probeSent: Array<readonly { role: string; content: string }[]> = [];
-    const probe = vi.fn(async (_role: string, messages: readonly { role: string; content: string }[]) => { probeSent.push(messages); return block; });
+    let probeTools: readonly unknown[] = [];
+    const probe = vi.fn(async (_role: string, messages: readonly { role: string; content: string }[], _preset, request) => {
+      probeSent.push(messages); probeTools = request?.tools ?? []; return block;
+    });
     await new WorldSimulationMainLoop_ACU({ invoke: probe, subagents: { run: vi.fn(), runReviewer: vi.fn() }, apiPreset, countTokens: markerCount })
       .run({ identity: { ...baseIdentity, runId: 'volatile-probe' }, settings: { ...runSettings, agentHistoryTokenBudget: 1000000 },
         promptContext: { ...probeFixture.promptContext, userRequirements: pad }, registry: probeFixture.registry, tools: paddedTools });
-    let fixed = 0;
-    for (const message of probeSent[0]) fixed += await markerCount(message.content);
+    const fixed = await markerCount(JSON.stringify({ messages: probeSent[0], tools: probeTools, tool_choice: 'auto' }));
     expect(fixed).toBeGreaterThanOrEqual(80);
 
     // transcript 5 轮仅 50 个标记、远低于 0.8×预算；但固定段 + transcript 超出预算与越界线。
     // 压缩旧轮不能保证最终完整请求落在本地输入硬限制以内；超限时必须拒发。
-    const budget = Math.floor((fixed + 45) / 1.25);
+    const budget = fixed + 25;
     const second = fixture('volatile-run');
     const sent: Array<readonly { role: string; content: string }[]> = [];
     let calls = 0;
@@ -325,6 +351,7 @@ describe('格林推演 Agent runtime', () => {
   });
 
   it('实际导演请求稳定协议在动态用户要求之前，模型历史追加在末位预填充之前', async () => {
+    settings_ACU.worldSimulationNativeToolEnabled = true;
     const { registry, promptContext } = fixture('director-prefix');
     const sent: Array<readonly { role: string; content: string; tool_calls?: unknown; tool_call_id?: string }[]> = [];
     const read = { content: '', toolCalls: [{ id: 'call-director-prefix', name: 'read', arguments: JSON.stringify({ reads: ['anchor:message'] }) }] };
@@ -340,7 +367,7 @@ describe('格林推演 Agent runtime', () => {
       tools: { read: vi.fn(async () => ({ status: 'ok' as const, content: '已读北境正文', summary: '正文' })), search: tools.search } });
     expect(sent).toHaveLength(2);
     expect(sent[0].slice(0, 5)).toEqual(sent[1].slice(0, 5));
-    expect(sent[0][0].content).toContain('read 与 search 使用函数调用');
+    expect(sent[0][0].content).toContain('调阅调用 read / search；决策单独调用 open_round / delegate / finalize / block');
     expect(sent[0][5].content).toContain('只推演北境');
     expect(sent[1].some(item => item.role === 'assistant' && item.tool_calls)).toBe(true);
     expect(sent[1].find(item => item.tool_call_id === 'call-director-prefix')).toMatchObject({ role: 'tool', content: expect.stringContaining('已读北境正文') });
@@ -419,6 +446,7 @@ describe('格林推演 Agent runtime', () => {
   });
 
   it('楼层 run-state 保存失败不会继续发下一轮请求，恢复后仍只见已确认的动作与回执', async () => {
+    settings_ACU.worldSimulationNativeToolEnabled = true;
     const { registry, promptContext } = fixture('run-save-failed');
     const chat: any[] = [{ message_id: 1, mes: '正文', swipe_id: 0 }];
     const saveChat = vi.fn().mockResolvedValue(undefined);
@@ -487,6 +515,7 @@ describe('格林推演 Agent runtime', () => {
   });
 
   it('生产逐栏入口的连续请求见到已保存缺栏回执，下一次派工不继承私有 transcript', async () => {
+    settings_ACU.worldSimulationNativeToolEnabled = true;
     const { registry, promptContext, runId } = fixture('write-loop');
     const chat: any[] = [{}, { message_id: 1, mes: '正文', swipe_id: 0 }];
     const saveChat = vi.fn().mockResolvedValue(undefined);
@@ -534,9 +563,9 @@ describe('格林推演 Agent runtime', () => {
 
     const completed = await runtime.run(input);
     expect(completed).toMatchObject({ status: 'no_change', completion: 'complete_changed', acceptedKeys: expect.arrayContaining(['dimensions:dim-loop:name', 'dimensions:dim-loop:kind']) });
-    expect(sent.slice(0, 4).every(request => request.some(message => message.role === 'system' && message.content.includes('只输出一个 specialist JSON')))).toBe(true);
+    expect(sent.slice(0, 4).every(request => request.some(message => message.role === 'system' && message.content.includes('单独调用 submit 交付 specialist 结果')))).toBe(true);
     expect(sent[0].slice(0, 5)).toEqual(sent[1].slice(0, 5));
-    expect(sent[0][0].content).toContain('只输出一个 specialist JSON');
+    expect(sent[0][0].content).toContain('单独调用 submit 交付 specialist 结果');
     expect(sent[1].some(message => message.content.includes('以下是用户对任务曾经提过的要求'))).toBe(true);
     const receipt = (request: number, id: string) => sent[request].find(message => message.role === 'tool' && (message as { tool_call_id?: string }).tool_call_id === id)?.content ?? '';
     expect(receipt(1, 'call-sql-1')).not.toBe('');
@@ -568,6 +597,7 @@ describe('格林推演 Agent runtime', () => {
   });
 
   it('逐栏写入只覆盖部分 ID 时模型 no_change 不能结束合格派工', async () => {
+    settings_ACU.worldSimulationNativeToolEnabled = true;
     const { registry, promptContext, runId } = fixture('partial-terminal');
     const replies = [toolTurn('write_sql', { sql: "INSERT INTO dimensions (id, name) VALUES ('d1', '山雨')" }, 'call-partial'),
       JSON.stringify({ status: 'no_change', summary: '结束', evidenceRefs: [], uncertainties: [] })];
@@ -616,6 +646,7 @@ describe('格林推演 Agent runtime', () => {
   });
 
   it('无效写动作回灌协议错误，不虚记一次写入或成功回执', async () => {
+    settings_ACU.worldSimulationNativeToolEnabled = true;
     const { registry, promptContext, runId } = fixture('write-protocol-repair');
     const sql = "INSERT INTO dimensions (id, name) VALUES ('d1', '雨')";
     const replies = [toolTurn('write_sql', { sql, extra: true }, 'call-invalid-write'),
@@ -634,6 +665,7 @@ describe('格林推演 Agent runtime', () => {
   });
 
   it('重复写动作超过额度后停止发请求，且不会继续触发提交端口', async () => {
+    settings_ACU.worldSimulationNativeToolEnabled = true;
     const { registry, promptContext, runId } = fixture('write-round-limit');
     const limited = settings();
     limited.agentRunBudget.maxIterations = 1;
@@ -652,6 +684,7 @@ describe('格林推演 Agent runtime', () => {
   });
 
   it('恢复失败回执没有旧 revision 和缺栏，也不进入新派工历史', async () => {
+    settings_ACU.worldSimulationNativeToolEnabled = true;
     const { registry, promptContext, runId } = fixture('uncertain-write');
     const replies = [toolTurn('write_sql', { sql: "INSERT INTO dimensions (id, name) VALUES ('d1', '雨')" }, 'call-uncertain'),
       JSON.stringify({ status: 'no_change', summary: '写入结果不确定', evidenceRefs: [], uncertainties: [] }),
@@ -672,6 +705,7 @@ describe('格林推演 Agent runtime', () => {
   });
 
   it('生产端口抛出失效错误时写回状态未知的结构化回执与读写剩余额度', async () => {
+    settings_ACU.worldSimulationNativeToolEnabled = true;
     const { registry, promptContext, runId } = fixture('throwing-write');
     const sent: Array<readonly { role: string; content: string }[]> = [];
     const replies = [toolTurn('write_sql', { sql: "INSERT INTO dimensions (id, name) VALUES ('d1', '雨')" }, 'call-throwing'),
@@ -689,6 +723,7 @@ describe('格林推演 Agent runtime', () => {
   });
 
   it('仅拒绝已定位栏目时给权威读取地址，恢复未知时不返回旧地址', async () => {
+    settings_ACU.worldSimulationNativeToolEnabled = true;
     const { registry, promptContext, runId } = fixture('rejected-address');
     const sql = "UPDATE dimensions SET kind = 'invalid' WHERE id = 'dim-a' AND expected_revision = 0";
     const sent: Array<readonly { role: string; content: string }[]> = [];
@@ -817,6 +852,7 @@ describe('格林推演 Agent runtime', () => {
 
 
   it('specialist 多个原生 read 失败不泄露正文，修正后仅一次成功', async () => {
+    settings_ACU.worldSimulationNativeToolEnabled = true;
     const { registry, promptContext, runId } = fixture('specialist-read-atomic');
     const configured = settings();
     configured.agentRunBudget.maxExtraReads = 3;
@@ -850,6 +886,7 @@ describe('格林推演 Agent runtime', () => {
   });
 
   it('同角色同轮的不同 runtime 实例共享成功读取额度，不同轮独立', async () => {
+    settings_ACU.worldSimulationNativeToolEnabled = true;
     const { registry, promptContext, runId } = fixture('runtime-round-shared');
     const readRoundState = createWorldSimulationReadRoundState_ACU();
     const read = vi.fn(async () => ({ status: 'ok' as const, content: 'FULL_ANCHOR', exact: true }));
@@ -875,6 +912,7 @@ describe('格林推演 Agent runtime', () => {
 
 
   it('普通角色混合越权 read 在运行时整批拒绝，修正后不丢失成功额度', async () => {
+    settings_ACU.worldSimulationNativeToolEnabled = true;
     const { registry, promptContext, runId } = fixture('runtime-address-denied');
     const configured = settings();
     configured.agentRunBudget.maxExtraReads = 2;
@@ -904,6 +942,7 @@ describe('格林推演 Agent runtime', () => {
   });
 
   it('reviewer 多个原生 read 任一不完整时整批拒绝，修正后只成功一次', async () => {
+    settings_ACU.worldSimulationNativeToolEnabled = true;
     const { registry, promptContext } = fixture('reviewer-read-atomic');
     const configured = settings();
     configured.agentRunBudget.maxExtraReads = 3;
@@ -978,6 +1017,7 @@ describe('格林推演 Agent runtime', () => {
   });
 
   it('reviewer 读取额度耗尽后仍反复请求工具时在有限模型调用内失败', async () => {
+    settings_ACU.worldSimulationNativeToolEnabled = true;
     const { registry, promptContext } = fixture('reviewer-read-limit');
     const limited = settings();
     limited.agentRunBudget.maxExtraReads = 0;
@@ -1290,7 +1330,7 @@ describe('格林推演 Agent runtime', () => {
     const result = await loop.run({ identity, settings: settings(), promptContext, registry, tools });
     expect(result).toMatchObject({ outcome: 'blocked', summary: '修正后阻断' });
     expect(invoke).toHaveBeenCalledTimes(2);
-    expect(sent.every(messages => messages.some(message => message.role === 'system' && message.content.includes('read 与 search 使用函数调用')))).toBe(true);
+    expect(sent.every(messages => messages.some(message => message.role === 'system' && message.content.includes('仅输出一个主动作 JSON：read、search、open_round、delegate、finalize 或 block')))).toBe(true);
     expect(sent[1].find(message => message.role === 'user' && message.content.includes('INVALID_ACTION'))).toMatchObject({ role: 'user', content: expect.stringContaining('INVALID_ACTION') });
     expect(sent[1].some(message => message.role === 'assistant' && message.content.includes('"action":"unknown"'))).toBe(true);
     expect(subagents.run).not.toHaveBeenCalled();
@@ -1340,6 +1380,7 @@ describe('格林推演 Agent runtime', () => {
   });
 
   it('工具读取未返回时立即显示 running 卡片，完成后原位更新', async () => {
+    settings_ACU.worldSimulationNativeToolEnabled = true;
     const { registry, promptContext } = fixture('tool-live');
     const subagents = { run: vi.fn(), runReviewer: vi.fn() };
     const responses = [
@@ -1370,6 +1411,7 @@ describe('格林推演 Agent runtime', () => {
   });
 
   it('导演同轮多个原生 read 并发执行并按调用 ID 回灌各自结果', async () => {
+    settings_ACU.worldSimulationNativeToolEnabled = true;
     const { registry, promptContext } = fixture('director-parallel-read');
     const sent: Array<readonly { role: string; content: string; tool_call_id?: string }[]> = [];
     let started = 0;
@@ -1767,6 +1809,7 @@ describe('格林推演 Agent runtime', () => {
   });
 
   it('预算耗尽后继续时重置迭代与派工窗口并保留候选', async () => {
+    settings_ACU.worldSimulationNativeToolEnabled = true;
     const { registry, evidence, promptContext } = fixture('budget-reset-resume');
     const chat: any[] = [{ message_id: 1, mes: '锚点正文', swipe_id: 0, is_user: false, is_system: false }];
     const saveChat = vi.fn().mockResolvedValue(undefined);
@@ -1855,11 +1898,11 @@ describe('格林推演 Agent runtime', () => {
     resetWorldSimulationRunCacheForTests_ACU();
 
     // 第二段：模拟重启后恢复；Director 首轮请求应携带楼层回填的审核意见。
-    const resumedLoop = new WorldSimulationMainLoop_ACU({ invoke: vi.fn(async () => JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '对话恢复后提交', evidenceRefs: [evidence] })), subagents, apiPreset, countTokens: async () => 1 });
+    const resumedInvoke = vi.fn(async () => JSON.stringify({ action: 'finalize', outcome: 'commit', summary: '对话恢复后提交', evidenceRefs: [evidence] }));
+    const resumedLoop = new WorldSimulationMainLoop_ACU({ invoke: resumedInvoke, subagents, apiPreset, countTokens: async () => 1 });
     const result = await resumedLoop.run({ identity, settings: runSettings, promptContext, registry, tools, anchor, chat });
 
     expect(result).toMatchObject({ outcome: 'commit', summary: '对话恢复后提交' });
-    const resumedInvoke = (resumedLoop as unknown as { dependencies: { invoke: { mock: { calls: unknown[][] } } } })['dependencies']['invoke'] as unknown as { mock: { calls: Array<[string, Array<{ role: string; content: string }>, unknown]> } };
     expect(resumedInvoke.mock.calls.length).toBeGreaterThan(0);
     expect(JSON.stringify(resumedInvoke.mock.calls[0][1])).toContain('reviewer 驳回或要求修订候选');
     expect(JSON.stringify(resumedInvoke.mock.calls[0][1])).toContain('EVIDENCE_GAP');
@@ -2294,6 +2337,7 @@ describe('格林推演 Agent runtime', () => {
   });
 
   it('取证后作废投机审核，commit 改走串行审核且不复用 reject', async () => {
+    settings_ACU.worldSimulationNativeToolEnabled = true;
     const { registry, evidence, promptContext } = fixture('speculative-review-invalidate');
     const candidate = {
       candidateId: 'candidate:invalidate', agentName: 'timekeeper',
@@ -2347,6 +2391,7 @@ describe('格林推演 Agent runtime', () => {
   });
 
   it('原生 tool_calls 的回执以 role=tool 进入下一次请求', async () => {
+    settings_ACU.worldSimulationNativeToolEnabled = true;
     const { registry, promptContext } = fixture('native-tool');
     const sent: Array<readonly { role: string; content: string; tool_call_id?: string }[]> = [];
     const replies = [
@@ -2375,6 +2420,7 @@ describe('S11 推演双楼全链集成', () => {
   beforeEach(() => { resetWorldSimulationRunCacheForTests_ACU(); resetWorldSimulationSessionLogForTests_ACU(); vi.clearAllMocks(); });
 
   it('推演双楼全链：正文锚点→同会话逐栏写入→提交账本→等待下一正文', async () => {
+    settings_ACU.worldSimulationNativeToolEnabled = true;
     const firstBody = '山雨将至，江面压低。';
     const nextBody = '雨落九江，水寨灯火忽明忽灭。';
     const { registry, evidence, promptContext } = fixture('s11-sim');
