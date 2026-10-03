@@ -9,6 +9,8 @@
 // 不修改全局 fetch；只为本插件内部请求选择发送函数。
 // 宿主正文生成不经过本模块，脚本对聊天正文的效果不受影响。
 
+import { getHostWindow } from '../../shared/runtime-env';
+
 /** Kemini 两层拦截器登记原函数的标记键，形如 wrapper[MARKER] = { original }。 */
 const KNOWN_FETCH_PATCH_MARKERS_ACU = [
   '__keminiAntiTruncation__',
@@ -45,17 +47,31 @@ function unwrapKnownPatches_ACU(start: unknown): unknown {
 }
 
 /**
- * 解析当前 fetch，仅剥离明确登记的 Kemini 包装，保留宿主与未知包装。
+ * 检查宿主与当前窗口的 fetch，仅剥离明确登记的 Kemini 包装。
+ * iframe 的 fetch 可能只是转发到父窗口，标记实际登记在宿主 fetch 上。
+ * 仅当宿主命中已知包装时直接调用其原函数；否则保留当前窗口的发送链。
  * 每次调用都重新解析：脚本可能在本模块加载之后才安装，缓存会让屏蔽静默失效。
- * @returns 剥离已知包装后的发送函数；没有可识别标记时原样返回当前 fetch
+ * @returns 保留宿主桥接的发送函数；宿主原函数绑定到所属窗口
  */
 export function resolvePristineFetch_ACU(): typeof fetch {
-  return unwrapKnownPatches_ACU(globalThis.fetch) as typeof fetch;
+  const current = globalThis.fetch;
+  try {
+    const host = getHostWindow();
+    const hostFetch = host.fetch;
+    const unwrappedHost = unwrapKnownPatches_ACU(hostFetch);
+    if (typeof unwrappedHost === 'function' && unwrappedHost !== hostFetch) {
+      // 原函数可能仍是 TT 的发送桥接，必须绑定宿主窗口，不替换为原生 fetch。
+      return unwrappedHost.bind(host) as typeof fetch;
+    }
+  } catch {
+    // 跨域或宿主属性不可访问时，仍沿当前窗口的已知标记解析，不猜测未知包装。
+  }
+  return unwrapKnownPatches_ACU(current) as typeof fetch;
 }
 
 /**
  * 通过保留宿主桥接的发送函数发起请求，仅绕过已识别的 Kemini 包装。
- * 显式绑定 globalThis，沿用当前窗口的调用上下文，不改写地址或请求参数。
+ * 宿主原函数已绑定所属窗口，其余发送函数沿用 globalThis；不改写地址或请求参数。
  * @param input 请求地址或 Request
  * @param init 请求参数
  * @returns 宿主返回的原始响应

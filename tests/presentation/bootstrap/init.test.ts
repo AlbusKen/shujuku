@@ -109,7 +109,7 @@ vi.mock('../../../src/service/simulation/simulation-runtime', () => ({
 vi.mock('../../../src/service/continuation/continuation-runtime', () => ({ getContinuationRuntime_ACU: () => m.getContinuationRuntime() }));
 vi.mock('../../../src/service/continuation/host-generation-bridge-registry', () => ({ getContinuationHostGenerationBridge_ACU: () => m.continuationBridge }));
 
-import { disposePlotPendingHandoff_ACU } from '../../../src/presentation/components/plot-pending-disguise';
+import { disposePlotPendingHandoff_ACU, handoffPlotPendingSend_ACU } from '../../../src/presentation/components/plot-pending-disguise';
 
 let reinitialize_ACU: (() => void) | null = null;
 
@@ -181,7 +181,9 @@ beforeEach(() => {
     m.input = '';
     return { originalText, release: m.releaseDisguise, discard: m.discardDisguise, setNotice: m.setNotice };
   });
-  m.releaseDisguise.mockImplementation((text: string) => { m.input = text; return true; });
+  m.releaseDisguise.mockImplementation((text: string, options?: { waitForMessage?: boolean }) => {
+    return options?.waitForMessage ? handoffPlotPendingSend_ACU(text) : m.setInput(text);
+  });
   m.shouldProcessSummary.mockReturnValue(false);
   m.continuationRuntimeInitialize.mockResolvedValue(undefined);
   m.consumeInternalGeneration.mockReturnValue(null);
@@ -467,7 +469,7 @@ describe('mainInitialize_ACU TavernHelper.generate 钩子 T5 降级', () => {
     expect(m.beginDisguise).toHaveBeenCalledWith('用户原文', { notice: '召回' });
     expect(m.setNotice).toHaveBeenCalledWith('剧情推进');
     expect(m.strategy2).toHaveBeenCalledWith('用户原文', expect.any(Function));
-    expect(m.releaseDisguise).toHaveBeenCalledWith('最终注入内容', { protectPrompt: true });
+    expect(m.releaseDisguise).toHaveBeenCalledWith('最终注入内容', { waitForMessage: true });
     expect(m.input).toBe('最终注入内容');
     expect(params.prompt).toBe('最终注入内容');
     expect(m.api.chat).toEqual([previousReply]);
@@ -479,6 +481,7 @@ describe('mainInitialize_ACU TavernHelper.generate 钩子 T5 降级', () => {
 
     // 宿主原生入楼后，事件才补写 pending，不依赖短轮询是否仍在运行。
     const userLayer = { is_user: true, mes: m.input };
+    m.input = ''; // 宿主读取后正常清空输入框。
     m.api.chat.push(userLayer);
     expect(m.messageSent).toBeTypeOf('function');
     await m.messageSent!(1);
@@ -503,6 +506,9 @@ describe('mainInitialize_ACU TavernHelper.generate 钩子 T5 降级', () => {
     await m.afterCommands!('normal', {}, false);
     expect(m.input).toBe('最终注入内容');
     expect(m.strategy2).toHaveBeenLastCalledWith('首轮输入', expect.any(Function));
+    m.api.chat.push({ is_user: true, mes: m.input });
+    m.input = '';
+    await m.messageSent!(0);
 
     // 去重只针对成功交接的最终文本，不能被旧用户层的文本命中截断。
     m.api.chat = [{ is_user: true, mes: '旧用户层' }];
@@ -510,8 +516,11 @@ describe('mainInitialize_ACU TavernHelper.generate 钩子 T5 降级', () => {
     m.input = '新一轮原文';
     await m.afterCommands!('normal', {}, false);
     expect(m.input).toBe('最终注入内容');
+    m.api.chat.push({ is_user: true, mes: m.input });
+    m.input = '';
+    await m.messageSent!(1);
 
-    // 明确无需规划应恢复原文发送，不停止生成、不安装剧情提示词保护。
+    // 明确无需规划应恢复原文发送，不停止生成。
     m.input = '无需规划原文';
     m.strategy2.mockResolvedValueOnce({ action: 'skip' });
     m.stopGeneration.mockClear();
@@ -521,7 +530,7 @@ describe('mainInitialize_ACU TavernHelper.generate 钩子 T5 降级', () => {
     await m.afterCommands!('normal', skipParams, false);
     expect(m.stopGeneration).not.toHaveBeenCalled();
     expect(m.protectInput).not.toHaveBeenCalled();
-    expect(m.releaseDisguise).toHaveBeenCalledWith('无需规划原文', { protectPrompt: false });
+    expect(m.releaseDisguise).toHaveBeenCalledWith('无需规划原文', { waitForMessage: false });
     expect(m.input).toBe('无需规划原文');
     expect(skipParams.prompt).toBeUndefined();
 
@@ -596,7 +605,7 @@ describe('mainInitialize_ACU TavernHelper.generate 钩子 T5 降级', () => {
 
 
 describe('发送交接生命周期', () => {
-  it('解除伪装保留原文等待，最终提示词只在本轮真实入楼后解除保护', async () => {
+  it('伪装等待后宿主正常发送正文，完整剧情数据保存到本轮真实用户楼层', async () => {
     vi.useFakeTimers();
     const hostInput = await vi.importActual<typeof import('../../../src/shared/host-input')>('../../../src/shared/host-input');
     const element = document.querySelector<HTMLTextAreaElement>('#send_textarea')!;
@@ -694,34 +703,58 @@ describe('发送交接生命周期', () => {
     planningDone({ action: 'planned', finalMessage: '最终提示词' });
     await pending;
     expect(element.value).toBe('最终提示词');
-    expect(element.readOnly).toBe(true);
+    expect(element.readOnly).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(element, 'value')).toBe(false);
+    expect(m.protectInput).not.toHaveBeenCalled();
     expect(params.prompt).toBe('最终提示词');
     expect(m.markIntercept).toHaveBeenCalledWith('最终提示词');
     await m.messageSent!(0);
-    expect(element.readOnly).toBe(true);
-    await Promise.resolve();
-    collection.val('监听器改回原文');
+    expect(element.value).toBe('最终提示词');
+
+    // 宿主先读取并清空，再创建真实楼层；MESSAGE_SENT 等待 pending 保存完成才继续生成。
+    const hostRead = String(collection.val());
     collection.val('');
     element.dispatchEvent(new Event('input', { bubbles: true }));
-    await vi.advanceTimersByTimeAsync(1);
-    expect(element.value).toBe('最终提示词');
-    element.value = '下一轮草稿';
-    const hostRead = String(collection.val());
-    // 无 MESSAGE_SENT 时不能用任意新楼层解除保护；事件确认须兼容宿主正则、宏、附件处理。
     m.api.chat.push({ is_user: true, mes: `宿主处理后的${hostRead}` });
+    let savedChat: any[] = JSON.parse(JSON.stringify(m.api.chat)); // 宿主原生建楼保存。
+    const pendingPlot = { content: '完整剧情反馈', taskResults: { task: '任务反馈' } };
+    let finishSave!: () => void;
+    m.saveChat.mockImplementationOnce(async () => {
+      await new Promise<void>(resolve => { finishSave = resolve; });
+      savedChat = JSON.parse(JSON.stringify(m.api.chat));
+    });
+    m.flushPlot.mockImplementationOnce(async () => {
+      const layer = m.api.chat[1];
+      layer.qrf_plot = pendingPlot.content;
+      layer.qrf_plot_tasks = pendingPlot.taskResults;
+      await m.saveChat();
+      return { status: 'committed', targetIndex: 1 };
+    });
     const { confirmPlotPendingHandoff_ACU } = await import('../../../src/presentation/components/plot-pending-disguise');
     expect(confirmPlotPendingHandoff_ACU()).toBe(false);
-    expect(element.readOnly).toBe(true);
-    await m.messageSent!(1);
+    let generationText: string | undefined;
+    const hostContinue = (async () => {
+      await m.messageSent!(1);
+      generationText = m.api.chat[1].mes;
+    })();
+    expect(generationText).toBeUndefined();
+    expect(savedChat[1].qrf_plot).toBeUndefined();
+    finishSave();
+    await hostContinue;
     expect(hostRead).toBe('最终提示词');
     expect(element.readOnly).toBe(false);
     expect(element.value).toBe('');
-    await vi.advanceTimersByTimeAsync(0);
+    expect(generationText).toBe('宿主处理后的最终提示词');
+    expect(savedChat).toHaveLength(2);
+    expect(savedChat[0]).toEqual({ is_user: true, mes: '最终提示词' });
+    expect(savedChat[1]).toMatchObject({ is_user: true, mes: generationText, qrf_plot: pendingPlot.content, qrf_plot_tasks: pendingPlot.taskResults });
+    expect(m.stopGeneration).not.toHaveBeenCalled();
+    element.value = '下一轮草稿';
     expect(element.value).toBe('下一轮草稿');
     m.shouldProcessSummary.mockReturnValue(false);
     m.strategy2.mockResolvedValue({ action: 'planned', finalMessage: '停止轮提示词' });
     await m.afterCommands!('normal', {}, false);
-    expect(element.readOnly).toBe(true);
+    expect(element.readOnly).toBe(false);
     m.generationStopped!();
     expect(element.readOnly).toBe(false);
     expect(element.value).toBe('');

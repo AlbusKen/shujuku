@@ -662,9 +662,9 @@ export   function mainInitialize_ACU() {
             }
             if (!isSendCurrent() || (!shouldProcessSummaryVectorIndex && !shouldProcessPlot)) return;
 
-            // 宿主要等监听与后续异步步骤结束才读取发送框。召回与剧情推进共用伪装实例；
-            // 仅成功规划的最终提示词保护到真实用户入楼确认，普通召回结束恢复宿主发送。
-            // 解除伪装开关只改变等待阶段的显示，不改变最终交接保护。
+            // 召回与剧情推进共用等待展示；成功后把发送正文交还宿主原流程。
+            // 完整剧情数据由 MESSAGE_SENT 后的 pending 保存链附到真实用户楼层。
+            // 解除伪装开关只改变等待阶段的显示。
             // 末楼已是用户楼层（/send 等先入楼路径）时召回不伪装，避免伪装楼层与真实楼层并存。
             const chatAtStart = SillyTavern_API_ACU.chat;
             const lastAtStart = chatAtStart?.length ? (chatAtStart as any)[chatAtStart.length - 1] : null;
@@ -813,7 +813,7 @@ export   function mainInitialize_ACU() {
               if (!isSendCurrent()) {
                 disguise?.discard();
               } else if (!sendCancelled) {
-                const writeOk = disguise ? disguise.release(textForHost, { protectPrompt: plannedForTextarea })
+                const writeOk = disguise ? disguise.release(textForHost, { waitForMessage: plannedForTextarea })
                   : plannedForTextarea ? handoffPlotPendingSend_ACU(textForHost) : true;
                 if (!writeOk || (plannedForTextarea
                     && getSendTextareaValue_ACU().replace(/\r\n?/g, '\n') !== textForHost.replace(/\r\n?/g, '\n'))) {
