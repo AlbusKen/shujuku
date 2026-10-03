@@ -23,10 +23,13 @@ import {
   type ContinuationPromptSegment_ACU,
   type ContinuationSettings_ACU,
 } from '../model';
-import { AGENT_PREFILLS_ACU, buildDefaultContinuationAgentPrompts_ACU } from './agent-defaults';
+import { AGENT_PREFILLS_ACU } from './agent-defaults';
+import { adaptContinuationPromptSegmentsToToolMode_ACU, buildContinuationAgentPromptsForMode_ACU } from './agent-prompt-mode';
 import { logAgentSession_ACU, updateAgentSession_ACU } from './agent-session-log';
 import { findMainSessionReadAppendix_ACU, keptSubagentMaterialTokens_ACU, omitSnapshotSectionsForSubagent_ACU, renderFallbackAgentSnapshot_ACU, stripUnownedSubagentPrompt_ACU } from './agent-shared-materials';
-import { agentNativeTools_ACU, nativeToolArguments_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, withNativeToolThinkPrefill_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
+import { agentNativeTools_ACU, nativeToolArguments_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, withJsonTailPrefill_ACU, withNativeToolThinkPrefill_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
+import { resolveAgentToolMode_ACU, type AgentToolMode_ACU } from '../../ai/agent-tool-mode';
+import { AGENT_SUBMIT_TOOL_NAME_ACU, continuationSubmitTool_ACU, splitNativeDecisionCalls_ACU, submitPayloadObject_ACU, submitPayloadText_ACU } from '../../ai/agent-decision-tools';
 import { hasActiveStoryArc_ACU, readAgentModuleFoldState_ACU, readAgentModuleSnapshot_ACU } from './agent-module-store';
 import type { AgentFieldPage_ACU, AgentModuleFieldReceipt_ACU, AgentModuleRevisionWindow_ACU } from './agent-module-field-commit';
 import { findAgentSubagentDefinition_ACU, getAgentSubagentAccessProfile_ACU, getAgentSubagentReadPrefixes_ACU, renderAgentReadCatalog_ACU, renderAgentWebToolCatalog_ACU, type AgentSubagentDefinition_ACU } from './agent-catalog';
@@ -204,6 +207,8 @@ export interface AgentSubagentRunInput_ACU {
   sharedMaterials?: string;
   /** 主会话当前运行时快照。附在子代理末尾，与主会话看到的是同一份。 */
   mainSnapshot?: string;
+  /** 本次运行的工具协议；缺省为 json（请求不带函数，动作写成 JSON 对象）。 */
+  toolMode?: AgentToolMode_ACU;
 }
 
 /** 终审由 finalize 前的受控状态机调用，不接受普通 delegation。 */
@@ -218,6 +223,7 @@ export interface AgentFinalReviewRunInput_ACU {
   signal?: AbortSignal | null;
   sharedMaterials?: string;
   mainSnapshot?: string;
+  toolMode?: AgentToolMode_ACU;
 }
 
 export interface AgentFinalReviewRunResult_ACU {
@@ -312,15 +318,16 @@ function subagentFailed_ACU(message: string, retryable: boolean, details?: Recor
   return new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SUBAGENT_FAILED', 'agent_delegate', message, retryable, details));
 }
 
-function selectPromptSegments_ACU(settings: ContinuationSettings_ACU, definition: AgentSubagentDefinition_ACU): readonly ContinuationPromptSegment_ACU[] {
-  return settings.agentPrompts[definition.promptKey];
+function selectPromptSegments_ACU(settings: ContinuationSettings_ACU, definition: AgentSubagentDefinition_ACU, mode: AgentToolMode_ACU): readonly ContinuationPromptSegment_ACU[] {
+  return adaptContinuationPromptSegmentsToToolMode_ACU(definition.promptKey, settings.agentPrompts[definition.promptKey], mode);
 }
 
 function splitDefaultSubagentMaterials_ACU(
   segments: readonly ContinuationPromptSegment_ACU[],
   key: keyof ContinuationSettings_ACU['agentPrompts'],
+  mode: AgentToolMode_ACU,
 ): { segments: ContinuationPromptSegment_ACU[]; taskTemplate: string } {
-  const defaults = buildDefaultContinuationAgentPrompts_ACU()[key];
+  const defaults = buildContinuationAgentPromptsForMode_ACU(mode)[key];
   const taskIndex = defaults.findIndex(segment => segment.content.includes('$AGENT_TASK'));
   const candidate = taskIndex >= 0 ? segments[taskIndex] : undefined;
   if (!candidate?.enabled || !candidate.content.includes('$AGENT_TASK') || candidate.content !== defaults[taskIndex].content) {
@@ -501,11 +508,13 @@ function blankMaintainerOutput_ACU(summary: string): AgentMaintainerOutput_ACU {
 const SQL_QUOTING_ACU = '字符串用单引号，正文里的单引号写成两个单引号。数组和对象用单引号包裹的 JSON 文本，例如 \'["条目"]\'、\'{"min":1,"max":2}\'。列名用 snake_case。新行可以不写 id 和 expected_revision；若写 expected_revision，必须是 0。已有行的 UPDATE/DELETE 在 WHERE 里写 id 和该模块的当前修订号，SET 里不要写这两项。修订号是模块级的：同一模块各行共用一个号，取最近一次回执 revisions 里该模块的值或 $FIELD 读到的 revisions；fieldOutcome.saved 里的 fieldRevision 只是单个栏目的版本，不能写进 expected_revision。';
 
 /** 各维护角色的 write_sql 格式、范例和使用时机。运行时注入，不依赖提示词模板是否已迁移。 */
-function renderMaintenanceSqlGuide_ACU(name: string): string {
+function renderMaintenanceSqlGuide_ACU(name: string, toolMode: AgentToolMode_ACU = 'json'): string {
   const head = [
-    '调用 write_sql 函数提交。一次调用的 sql 可以包含多条语句，用分号隔开，不要拆成多次调用，也不要写成 JSON、delta 或 Markdown。',
+    toolMode === 'tools'
+      ? '调用 write_sql 函数提交。一次调用的 sql 可以包含多条语句，用分号隔开，不要拆成多次调用，也不要写成 JSON、delta 或 Markdown。'
+      : '用 write_sql 动作对象提交：{"action":"write_sql","sql":"语句"}。一个 sql 可以包含多条语句，用分号隔开，不要拆成多个对象，也不要写成 delta 或 Markdown。',
     SQL_QUOTING_ACU,
-    '只在资料确实要新增、修改或删除时调用。没有变化就不要调用，直接交最终 JSON 的 summary。status=committed 的 accepted 已保存；有 partials 时按 missingFields 仅 UPDATE 补未保存栏目，不要重发整行。保存状态不确定时先 read 权威帧。',
+    `${toolMode === 'tools' ? '只在资料确实要新增、修改或删除时调用。没有变化就不要调用，直接调用 submit 交付 summary。' : '只在资料确实要新增、修改或删除时输出 write_sql。没有变化就不要输出，直接交最终 JSON 的 summary。'}status=committed 的 accepted 已保存；有 partials 时按 missingFields 仅 UPDATE 补未保存栏目，不要重发整行。保存状态不确定时先 read 权威帧。`,
   ];
   if (name === 'arc-architect') {
     return [
@@ -761,8 +770,11 @@ export class AgentSubagentRuntime_ACU {
       grantedTokens: gate.state.grantedTokens,
       readOnce: readOnceKind,
     });
+    // 整次派工先固定协议，再映射默认正文与拆出动态任务段。
+    const toolMode: AgentToolMode_ACU = input.toolMode ?? resolveAgentToolMode_ACU('continuation', input.preset);
+    const nativeMode = toolMode === 'tools';
     const keptTokens = keptSubagentMaterialTokens_ACU(definition.kind, writes);
-    const split = splitDefaultSubagentMaterials_ACU(selectPromptSegments_ACU(input.settings, definition), definition.promptKey);
+    const split = splitDefaultSubagentMaterials_ACU(selectPromptSegments_ACU(input.settings, definition, toolMode), definition.promptKey, toolMode);
     const promptSegments = stripUnownedSubagentPrompt_ACU(split.segments, keptTokens);
     const resolvers = {
       $AGENT_READ_MATERIALS: () => materials,
@@ -825,7 +837,7 @@ export class AgentSubagentRuntime_ACU {
     const allowSearch = accessProfile.allowSearch;
     const ownReads = authorizedReads;
     const authorizedToolNames = new Set<string>([...accessProfile.tools, ...(input.writeSql && writes.length ? ['write_sql'] : [])]);
-    if (input.writeSql && writes.length) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: renderMaintenanceSqlGuide_ACU(definition.name) });
+    if (input.writeSql && writes.length) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: renderMaintenanceSqlGuide_ACU(definition.name, toolMode) });
     baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: ownReads.length ? `本角色只可 read 以下自有或强相关地址：${ownReads.join('、')}。${allowSearch ? '世界书检索限已授权范围。' : '不得做本地 search。'}${readOnceKind ? '每轮至多一个成功读取批次：确需补读时把地址放进同一次回复并发读齐；固定注入与目录足够时不读，直接交付。' : ''}` : '本角色没有本地调阅工具，直接根据已备资料交付。' });
     const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
     // 小循环的追加消息：子代理自己的输出（assistant）与工具结果。原生工具回执使用 role=tool。
@@ -912,9 +924,10 @@ export class AgentSubagentRuntime_ACU {
       promptCacheEnabled: true,
       // 每次派工的对话全新；命名空间按角色和可用工具稳定划分，不跟随尝试号。
       cacheScope: `sub-${definition.name}`,
-      cacheTools: [...accessProfile.tools,
-        ...(input.writeSql && writes.length ? ['write_sql', ...writes.map(module => `module:${module}`)] : [])],
-      tools: agentNativeTools_ACU([...accessProfile.tools, ...(input.writeSql && writes.length ? ['write_sql' as const] : [])]),
+      cacheTools: nativeMode
+        ? [...accessProfile.tools, ...(input.writeSql && writes.length ? ['write_sql', ...writes.map(module => `module:${module}`)] : []), AGENT_SUBMIT_TOOL_NAME_ACU]
+        : ['mode:json', ...(input.writeSql && writes.length ? writes.map(module => `module:${module}`) : [])],
+      tools: nativeMode ? [...agentNativeTools_ACU([...accessProfile.tools, ...(input.writeSql && writes.length ? ['write_sql' as const] : [])]), continuationSubmitTool_ACU(definition.kind)] : [],
       minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU[definition.promptKey],
       onUsage: usage => {
         usageTotal = usageTotal
@@ -1016,7 +1029,10 @@ export class AgentSubagentRuntime_ACU {
       }
       // 传输错误（502/网络抖动）按设置延时重试；协议/契约拒绝仍走小循环内的对话级立即重试。
       const requestSnapshot = await renderRequestSnapshot();
-      const requestMessages = withNativeToolThinkPrefill_ACU([...baseMessages, ...transcript, { role: 'user', content: `${requestSnapshot}\n\n${renderReadBudgetNote(toolRoundsUsed)}` }, ...(trailingPrefill?.content === USER_PREFILL_CONTENT_ACU ? [trailingPrefill] : [])]);
+      const requestBody = [...baseMessages, ...transcript, { role: 'user', content: `${requestSnapshot}\n\n${renderReadBudgetNote(toolRoundsUsed)}` }];
+      const requestMessages = nativeMode
+        ? withNativeToolThinkPrefill_ACU([...requestBody, ...(trailingPrefill?.content === USER_PREFILL_CONTENT_ACU ? [trailingPrefill] : [])])
+        : withJsonTailPrefill_ACU([...requestBody, ...(trailingPrefill ? [trailingPrefill] : [])]);
       // 容量门禁在传输重试之外：超限是确定性失败，不得被当作传输错误重发。
       gate.defaultReadFenceTokens = await this.measureFinalRequestCapacity_ACU(requestMessages, input.settings.agentHistoryTokenBudget, callOptions, definition.name);
       const raw = await callContinuationInternalAiWithRetry_ACU(
@@ -1041,10 +1057,24 @@ export class AgentSubagentRuntime_ACU {
       const protocolText = typeof raw === 'string' || raw == null ? String(raw ?? '') : turn.content;
       const rawText = protocolText.trim();
 
-      // 函数调用参数保留原生 ID；权限和领域校验仍由对应的解析器执行。
+      // 函数调用参数保留原生 ID；权限和领域校验仍由对应的解析器执行。submit 只能单独调用。
       let toolCalls: ReturnType<typeof parseAgentWritableToolCalls_ACU>;
+      let submitText: string | null = null;
+      // 回灌反馈：工具模式给每个函数调用配一条回执，json 模式用普通 user 消息。
+      const pushFeedback = (feedback: string): void => {
+        if (nativeMode && nativeCalls.length) transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => feedback)));
+        else transcript.push({ role: 'assistant', content: rawText || '(空输出)' }, { role: 'user', content: feedback });
+      };
+      const pushToolResults = (results: readonly string[]): void => {
+        if (nativeMode) transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, results));
+        else transcript.push({ role: 'assistant', content: rawText || '(空输出)' }, { role: 'user', content: `【工具结果】\n${results.join('\n\n')}` });
+      };
       try {
-        toolCalls = nativeCalls.length ? nativeToolArguments_ACU(nativeCalls).map(({ call, payload }) => {
+        if (nativeMode) {
+          if (!nativeCalls.length) throw new Error('工具模式下必须调用函数：读取与写入用对应函数，交付结果调用 submit，不要输出 JSON 文本');
+          const split = splitNativeDecisionCalls_ACU(nativeToolArguments_ACU(nativeCalls), [AGENT_SUBMIT_TOOL_NAME_ACU]);
+          if (split.decision) submitText = submitPayloadText_ACU(split.decision.payload);
+          toolCalls = split.tools.length ? split.tools.map(({ call, payload }) => {
           if (isResearch && ['encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read'].includes(call.name) && payload.notes !== undefined) {
             const notes = parseAgentResearcherWorkingNotes_ACU(JSON.stringify({ action: call.name, notes: payload.notes }), '');
             for (const note of notes) if (!researchWorkingNotes.includes(note)) researchWorkingNotes.push(note);
@@ -1066,11 +1096,15 @@ export class AgentSubagentRuntime_ACU {
           const parsed = parseAgentToolCall_ACU(argumentsWithoutNotes);
           if (parsed.kind !== call.name) throw new Error('工具名称与动作不一致');
           return parsed;
-        }) : null;
-        if (!nativeCalls.length && (input.writeSql && writes.length
-          ? parseAgentWritableToolCalls_ACU(protocolText, prefill, isResearch)
-          : isResearch ? parseAgentResearcherToolCalls_ACU(protocolText, prefill) : parseAgentSubagentToolCalls_ACU(protocolText, prefill))) {
-          throw new Error('工具必须通过原生函数调用，不能作为 JSON 文本输出');
+          }) : null;
+        } else {
+          if (nativeCalls.length) throw new Error('当前为 JSON 模式，不要调用函数；把动作写成 JSON 对象输出');
+          toolCalls = input.writeSql && writes.length
+            ? parseAgentWritableToolCalls_ACU(protocolText, prefill, isResearch)
+            : isResearch ? parseAgentResearcherToolCalls_ACU(protocolText, prefill) : parseAgentSubagentToolCalls_ACU(protocolText, prefill);
+          if (toolCalls && isResearch) {
+            for (const note of parseAgentResearcherWorkingNotes_ACU(protocolText, prefill)) if (!researchWorkingNotes.includes(note)) researchWorkingNotes.push(note);
+          }
         }
       } catch (error) {
         protocolRejections += 1;
@@ -1082,9 +1116,8 @@ export class AgentSubagentRuntime_ACU {
           });
           throw error;
         }
-        const reason = `工具动作未执行：${compactAgentProtocolError_ACU(error)}。请修正 action / sql 后重试。`;
-        if (nativeCalls.length) transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => reason)));
-        else transcript.push({ role: 'assistant', content: rawText || '(空输出)' }, { role: 'user', content: reason }); // 非工具协议纠错，不是工具回执
+        const reason = `工具动作未执行：${compactAgentProtocolError_ACU(error)}。${nativeMode ? '请修正函数调用后重试。' : '请修正 action / sql 后重试。'}`;
+        pushFeedback(reason);
         continue;
       }
       if (toolCalls) {
@@ -1105,7 +1138,7 @@ export class AgentSubagentRuntime_ACU {
           const notice = localReads.length
             ? await this.executeToolCalls_ACU(localReads, input.resolveContext, gate, expandedReads, ownReads, allowSearch, true)
             : '';
-          transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map((_, index) => index === 0 && notice ? `${notice}\n\n${exhausted}` : exhausted)));
+          pushToolResults(toolCalls.map((_, index) => index === 0 && notice ? `${notice}\n\n${exhausted}` : exhausted));
           continue;
         }
         if (readsAllowed && !readOnceKind && toolCalls.some(item => item.kind !== 'write_sql')) toolRoundsUsed += 1;
@@ -1205,17 +1238,19 @@ export class AgentSubagentRuntime_ACU {
         }
         const roundNote = maxWriteRounds ? `write_sql 轮次剩余 ${maxWriteRounds - writeRoundsUsed} / ${maxWriteRounds}。` : '';
         const note = renderReadBudgetNote(toolRoundsUsed);
-        const results = nativeCalls.map((_, index) => [perCallResults[index] || '工具没有返回内容', roundNote, note].filter(Boolean).join('\n\n'));
+        const results = toolCalls.map((_, index) => [perCallResults[index] || '工具没有返回内容', roundNote, note].filter(Boolean).join('\n\n'));
         for (const call of nativeCalls) {
           if (isResearch && ['encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read'].includes(call.name)) researchToolCallIds.add(call.id);
         }
-        transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, results));
+        pushToolResults(results);
         continue;
       }
 
+      // 交付文本：工具模式取 submit 参数，json 模式取回复正文。
+      const contractText = submitText ?? protocolText;
       try {
         if (isResearch) {
-          const payload = parseAgentJsonPayload_ACU(protocolText, nativeCalls.length ? '' : prefill, KIND_PAYLOAD_KEYS_ACU.research);
+          const payload = parseAgentJsonPayload_ACU(contractText, nativeCalls.length ? '' : prefill, KIND_PAYLOAD_KEYS_ACU.research);
           if (payload.sql !== undefined) throw new Error('文本契约中的 sql 不会执行；请调用原生 write_sql 函数提交写入');
           const draft = parseAgentResearcherOutput_ACU(payload);
           const researcher = resolveResearcherDraft_ACU(draft, pageCache);
@@ -1238,7 +1273,7 @@ export class AgentSubagentRuntime_ACU {
           };
         }
         if (contractKind) {
-          const draft = parseAgentJsonPayloadDraft_ACU(protocolText, nativeCalls.length ? '' : prefill, KIND_PAYLOAD_KEYS_ACU[definition.kind]);
+          const draft = parseAgentJsonPayloadDraft_ACU(contractText, nativeCalls.length ? '' : prefill, KIND_PAYLOAD_KEYS_ACU[definition.kind]);
           if (draft.payload.sql !== undefined) throw new Error('文本契约中的 sql 不会执行；请调用原生 write_sql 函数提交写入');
           const parsed = parseAgentMaintainerOutputDraft_ACU(draft.payload);
           accumulated = accumulated ? mergeAgentMaintainerOutputs_ACU(accumulated, parsed.output) : parsed.output;
@@ -1260,12 +1295,11 @@ export class AgentSubagentRuntime_ACU {
               return deliverContract(accumulated, [{ module: 'storyArc', index: 0, id: '', reason: request }]);
             }
             continuationsUsed += 1;
-            transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
-            transcript.push({ role: 'user', content: request });
+            pushFeedback(request);
             continue;
           }
           if (emptyArcBootstrap && !pending.length && !draft.truncated) {
-            pending.push({ module: 'storyArc', index: 0, id: '', reason: '总纲尚未建立，但 delta.storyArc 为空。summary 里的文字不会写入任何东西：必须在 delta.storyArc 里给出 1 条 scope=story 的 upsert 与按【总纲卷数计划】数量的 scope=volume upsert，每条都带 id / title / direction / escalation / withheld / status 与卷级契约字段' });
+            pending.push({ module: 'storyArc', index: 0, id: '', reason: '总纲尚未建立，但 delta.storyArc 为空。summary 里的文字不会写入任何东西：必须在 delta.storyArc 里给出 1 条 scope=story 的 upsert 与按【总纲卷数计划】数量的 scope=volume upsert，每条都带 title / direction / escalation / withheld / status 与卷级契约字段（id 可省略，系统自动编号）' });
           }
           if (!draft.truncated && !pending.length) return deliverContract(accumulated);
           if (continuationsUsed >= maxContinuations) {
@@ -1276,11 +1310,10 @@ export class AgentSubagentRuntime_ACU {
             return deliverContract(accumulated, [], true);
           }
           continuationsUsed += 1;
-          transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
-          transcript.push({ role: 'user', content: renderAgentContractContinuationRequest_ACU(accumulated, pending, draft.truncated) });
+          pushFeedback(renderAgentContractContinuationRequest_ACU(accumulated, pending, draft.truncated));
           continue;
         }
-        const payload = parseAgentJsonPayload_ACU(protocolText, nativeCalls.length ? '' : prefill, KIND_PAYLOAD_KEYS_ACU[definition.kind]);
+        const payload = parseAgentJsonPayload_ACU(contractText, nativeCalls.length ? '' : prefill, KIND_PAYLOAD_KEYS_ACU[definition.kind]);
         return {
           agentName: definition.name,
           kind: definition.kind,
@@ -1312,11 +1345,10 @@ export class AgentSubagentRuntime_ACU {
           });
         }
         // 被拒原文也要留在小循环对话里：模型必须看到自己上一次写了什么才能真正修正。
-        transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
         const protocolRepair = input.writeSql && writes.length
           ? `你上一次的输出没有被采纳。原因：${lastReason}\n不要写说明、Markdown 或 delta。${maxWriteRounds - writeRoundsUsed > 0 ? '调用一次 write_sql，把全部语句放进同一个 sql 参数。' : 'write_sql 轮次已用尽，不要再调用函数；如实报告未完成的缺口。'}新行 expected_revision 写 0，补已有行共用回执里的模块修订号。sustaining_threads 与 payoff_targets 写成 '["条目"]'。volume 同时只能有一条 active，其余 planned。`
-          : `你上一次的输出没有被采纳。原因：${lastReason}\n请修正后重新输出符合契约的 JSON 对象。`;
-        transcript.push({ role: 'user', content: protocolRepair });
+          : `你上一次的输出没有被采纳。原因：${lastReason}\n${nativeMode ? '请修正后重新调用 submit 交付。' : '请修正后重新输出符合契约的 JSON 对象。'}`;
+        pushFeedback(protocolRepair);
       }
     }
 
@@ -1357,8 +1389,12 @@ export class AgentSubagentRuntime_ACU {
     gate.state.grantedTokens += fixedDecision.batchTokens;
     for (const key of evidence.fixedReadKeys) gate.granted.add(key);
 
+    const resolveAgentPreset = this.dependencies.resolveAgentApiPreset ?? resolveContinuationAgentApiPreset_ACU;
+    const preset = resolveAgentPreset(input.settings, 'finalReviewer', 'agent_delegate');
+    const toolMode: AgentToolMode_ACU = input.toolMode ?? resolveAgentToolMode_ACU('continuation', preset);
+    const nativeMode = toolMode === 'tools';
     const reviewKept = keptSubagentMaterialTokens_ACU('review', []);
-    const reviewSplit = splitDefaultSubagentMaterials_ACU(input.settings.agentPrompts.finalReviewer, 'finalReviewer');
+    const reviewSplit = splitDefaultSubagentMaterials_ACU(adaptContinuationPromptSegmentsToToolMode_ACU('finalReviewer', input.settings.agentPrompts.finalReviewer, toolMode), 'finalReviewer', toolMode);
     const reviewSegments = stripUnownedSubagentPrompt_ACU(reviewSplit.segments, reviewKept);
     const reviewResolvers = {
       $USER_INTENT: () => input.resolveContext.originInstruction || '（用户未提供初始要求）',
@@ -1375,8 +1411,6 @@ export class AgentSubagentRuntime_ACU {
     const reviewTaskMaterial = reviewSplit.taskTemplate
       ? (await renderContinuationPrompt_ACU([{ role: 'user', content: reviewSplit.taskTemplate }], reviewResolvers, 'agent_delegate')).messages[0].content
       : '';
-    const resolveAgentPreset = this.dependencies.resolveAgentApiPreset ?? resolveContinuationAgentApiPreset_ACU;
-    const preset = resolveAgentPreset(input.settings, 'finalReviewer', 'agent_delegate');
     const readRevisions: AgentModuleRevisions_ACU = { ...input.resolveContext.moduleSnapshot.revisions };
     const prefill = AGENT_PREFILLS_ACU.reviewer;
     const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
@@ -1420,8 +1454,10 @@ export class AgentSubagentRuntime_ACU {
     const callOptions: ContinuationInternalAiCallOptions_ACU = {
       promptCacheEnabled: true,
       cacheScope: 'final-reviewer',
-      cacheTools: [...(input.sharedMaterials === undefined ? ['read'] : []), 'review'],
-      tools: input.sharedMaterials === undefined ? agentNativeTools_ACU(['read']) : [],
+      cacheTools: nativeMode
+        ? [...(input.sharedMaterials === undefined ? ['read'] : []), 'review', AGENT_SUBMIT_TOOL_NAME_ACU]
+        : ['mode:json', ...(input.sharedMaterials === undefined ? ['read'] : []), 'review'],
+      tools: nativeMode ? [...(input.sharedMaterials === undefined ? agentNativeTools_ACU(['read']) : []), continuationSubmitTool_ACU('finalReview')] : [],
       minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU.finalReviewer,
       onUsage: usage => {
         usageTotal = usageTotal
@@ -1442,7 +1478,10 @@ export class AgentSubagentRuntime_ACU {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '终审请求已失效', false));
       }
       const reviewTail = await renderReviewTail();
-      const requestMessages = withNativeToolThinkPrefill_ACU([...baseMessages, ...transcript, { role: 'user', content: `${reviewTail}\n\n${renderReadBudgetNote(toolRoundsUsed)}` }, ...(trailingPrefill?.content === USER_PREFILL_CONTENT_ACU ? [trailingPrefill] : [])]);
+      const requestBody = [...baseMessages, ...transcript, { role: 'user', content: `${reviewTail}\n\n${renderReadBudgetNote(toolRoundsUsed)}` }];
+      const requestMessages = nativeMode
+        ? withNativeToolThinkPrefill_ACU([...requestBody, ...(trailingPrefill?.content === USER_PREFILL_CONTENT_ACU ? [trailingPrefill] : [])])
+        : withJsonTailPrefill_ACU([...requestBody, ...(trailingPrefill ? [trailingPrefill] : [])]);
       gate.defaultReadFenceTokens = await this.measureFinalRequestCapacity_ACU(requestMessages, input.settings.agentHistoryTokenBudget, callOptions, AGENT_FINAL_REVIEWER_NAME_ACU);
       const raw = await callContinuationInternalAiWithRetry_ACU(
         () => this.dependencies.callInternalAi(requestMessages, preset, identity, input.signal, callOptions),
@@ -1460,46 +1499,59 @@ export class AgentSubagentRuntime_ACU {
       const protocolText = typeof raw === 'string' || raw == null ? String(raw ?? '') : turn.content;
       const rawText = protocolText.trim();
       let toolCalls: ReturnType<typeof parseAgentSubagentToolCalls_ACU>;
+      let submitPayload: Record<string, unknown> | null = null;
+      // 回灌：工具模式给每个函数调用配一条回执，json 模式用普通 user 消息。
+      const pushFeedback = (feedback: string): void => {
+        if (nativeMode && nativeCalls.length) transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => feedback)));
+        else transcript.push({ role: 'assistant', content: rawText || '(空输出)' }, { role: 'user', content: feedback });
+      };
       try {
-        toolCalls = nativeCalls.length
-          ? nativeToolArguments_ACU(nativeCalls).map(({ call, payload }) => {
+        if (nativeMode) {
+          if (!nativeCalls.length) throw new Error('必须调用函数：补读用 read，交付终审判词调用 submit，不要输出 JSON 文本');
+          const split = splitNativeDecisionCalls_ACU(nativeToolArguments_ACU(nativeCalls), [AGENT_SUBMIT_TOOL_NAME_ACU]);
+          if (split.decision) submitPayload = submitPayloadObject_ACU(split.decision.payload);
+          toolCalls = split.tools.length ? split.tools.map(({ call, payload }) => {
             if (call.name !== 'read' || input.sharedMaterials !== undefined) throw new Error('终审未授权该工具');
             const parsed = parseAgentToolCall_ACU(payload);
             if (parsed.kind !== 'read') throw new Error('终审只允许 read');
             return parsed;
-          })
-          : parseAgentSubagentToolCalls_ACU(protocolText, prefill);
-        if (!nativeCalls.length && toolCalls) {
-          protocolRejections += 1;
-          if (protocolRejections > retries) throw new Error('read/search 必须使用原生函数调用');
-          transcript.push(
-            { role: 'assistant', content: rawText || '(空输出)' },
-            { role: 'user', content: 'read/search 必须使用原生函数调用，不能作为 JSON 文本输出。请改用原生函数后重试。' },
-          );
-          continue;
+          }) : null;
+        } else {
+          toolCalls = parseAgentSubagentToolCalls_ACU(protocolText, prefill);
+          if (toolCalls && (input.sharedMaterials !== undefined || toolCalls.some(item => item.kind !== 'read'))) throw new Error('终审只允许 read');
         }
       } catch (error) {
-        if (!nativeCalls.length) throw error;
         const reason = compactAgentProtocolError_ACU(error);
-        transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => reason)));
+        // 有函数调用的错误只回执不计数（与此前一致）；其余协议错误计入拒绝次数。
+        if (!(nativeMode && nativeCalls.length)) {
+          lastReason = reason;
+          protocolRejections += 1;
+          if (protocolRejections > retries) throw subagentFailed_ACU(`最终审查连续 ${retries + 1} 次返回不符合契约`, false, { lastReason });
+        }
+        pushFeedback(nativeMode ? reason : `你上一次的输出没有被采纳。原因：${reason}\n请修正后重新输出。`);
         continue;
       }
       if (toolCalls) {
         if (maxToolRounds === 0 || gate.successfulReadBatch) {
-          const exhausted = `read-once-exhausted：读取轮次已用尽（终审至多一个成功读取批次，本次上限 ${maxToolRounds}），不能再 read。请依据已有证据直接输出终审 JSON；无法证实的内容写为未验证，不许臆测。\n\n${renderReadBudgetNote(toolRoundsUsed)}`;
-          transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, nativeCalls.map(() => exhausted)));
+          const exhausted = `read-once-exhausted：读取轮次已用尽（终审至多一个成功读取批次，本次上限 ${maxToolRounds}），不能再 read。请依据已有证据直接${nativeMode ? '调用 submit 交付终审判词' : '输出终审 JSON'}；无法证实的内容写为未验证，不许臆测。\n\n${renderReadBudgetNote(toolRoundsUsed)}`;
+          pushFeedback(exhausted);
           continue;
         }
         const batchResult = await this.executeToolCalls_ACU(toolCalls, input.resolveContext, gate, expandedReads,
           input.sharedMaterials !== undefined ? [] : null, false, true);
         // 只有成功批次计额；失败批次不注入正文，修正后可重试。
         if (gate.successfulReadBatch) toolRoundsUsed = 1;
-        const perCallResults = toolCalls.map((_, index) => index === 0 ? batchResult : '本逻辑读取批次已统一结算，结果见首个工具回执。');
-        transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, perCallResults.map(result => `${result}\n\n${renderReadBudgetNote(toolRoundsUsed)}`)));
+        if (nativeMode) {
+          const perCallResults = toolCalls.map((_, index) => index === 0 ? batchResult : '本逻辑读取批次已统一结算，结果见首个工具回执。');
+          transcript.push(...nativeToolExchange_ACU(turn.content, nativeCalls, perCallResults.map(result => `${result}\n\n${renderReadBudgetNote(toolRoundsUsed)}`)));
+        } else {
+          transcript.push({ role: 'assistant', content: rawText || '(空输出)' }, { role: 'user', content: `【工具结果】\n${batchResult}\n\n${renderReadBudgetNote(toolRoundsUsed)}` });
+        }
         continue;
       }
       try {
-        const payload = parseAgentJsonPayload_ACU(protocolText, nativeCalls.length ? '' : prefill, ['verdict', 'summary', 'emotionFindings', 'worldFindings', 'logicFindings', 'requiredFixes', 'preserve']);
+        if (nativeMode && !submitPayload) throw new Error('交付终审判词必须调用 submit');
+        const payload = submitPayload ?? parseAgentJsonPayload_ACU(protocolText, prefill, ['verdict', 'summary', 'emotionFindings', 'worldFindings', 'logicFindings', 'requiredFixes', 'preserve']);
         return {
           output: parseAgentFinalReviewerOutput_ACU(payload),
           evidence,
@@ -1517,8 +1569,8 @@ export class AgentSubagentRuntime_ACU {
         if (protocolRejections > retries) {
           throw subagentFailed_ACU(`最终审查连续 ${retries + 1} 次返回不符合契约`, false, { lastReason });
         }
-        transcript.push({ role: 'assistant', content: rawText || '(空输出)' });
-        transcript.push({ role: 'user', content: `你上一次的输出没有被采纳。原因：${lastReason}\n请修正后重新输出符合终审契约的 JSON 对象。` });
+        // 工具模式下 submit 调用也要配回执，否则下一次请求里存在没有结果的 tool_call。
+        pushFeedback(`你上一次的输出没有被采纳。原因：${lastReason}\n${nativeMode ? '请修正后重新调用 submit 交付终审判词。' : '请修正后重新输出符合终审契约的 JSON 对象。'}`);
       }
     }
     throw subagentFailed_ACU(`最终审查在 ${maxCalls} 次调用内没有交付契约输出`, false, { lastReason, toolRoundsUsed });

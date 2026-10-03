@@ -549,7 +549,9 @@ describe('world simulation subagent production write loop', () => {
     const responses: unknown[] = [
       { content: '', toolCalls: [{ id: 'call-write-1', name: 'write_sql', arguments: JSON.stringify({ sql: input.sql }) }] },
       { content: '', toolCalls: [{ id: 'call-write-2', name: 'write_sql', arguments: JSON.stringify({ sql: complete }) }] },
-      { status: 'no_change', agentName: 'undercurrent-analyst', summary: '分栏已提交', evidenceRefs: [], uncertainties: [] },
+      { content: '', toolCalls: [{ id: 'call-submit', name: 'submit', arguments: JSON.stringify({
+        status: 'no_change', agentName: 'undercurrent-analyst', summary: '分栏已提交', evidenceRefs: [], uncertainties: [],
+      }) }] },
     ];
     const invoke = vi.fn(async (_role: string, messages: readonly { role: string; content: string }[]) => {
       requests.push(messages.map(message => ({ ...message })));
@@ -561,7 +563,7 @@ describe('world simulation subagent production write loop', () => {
       worldState: chat[0]._qrf_world_simulation.ledger, anchorMessage: '第二楼', anchorIdentity: input.anchor, worldStagePlan: {},
       worldChronicle: [], worldCandidates: [], worldCollisions: {}, evidenceRegistry: snapshotWorldSimulationEvidenceRegistry_ACU(registry), projectionPreview: {} };
     const run = () => runtime.run({ delegation: { agentName: 'undercurrent-analyst', instruction: '补齐维度', reads: [] },
-      settings, promptContext: promptContext as any, registry, tools, runId: input.identity.runId,
+      toolMode: 'tools', settings, promptContext: promptContext as any, registry, tools, runId: input.identity.runId,
       writeSql: write => commitWorldSimulationFieldWrites_ACU({ ...input, ...write }),
       readCurrent: () => foldWorldSimulationLedger_ACU(chat, input.anchor.messageIndex)?.ledger ?? chat[0]._qrf_world_simulation.ledger });
     await run();
@@ -581,11 +583,13 @@ describe('world simulation subagent production write loop', () => {
     const otherRequests: Array<readonly { role: string; content: string }[]> = [];
     const fresh = new WorldSimulationSubagentRuntime_ACU({ invoke: (async (_role: string, messages: readonly { role: string; content: string }[]) => {
       otherRequests.push(messages);
-      return JSON.stringify({ status: 'no_change', summary: '新派工', evidenceRefs: [], uncertainties: [] });
+      return { content: '', toolCalls: [{ id: 'fresh-submit', name: 'submit', arguments: JSON.stringify({
+        status: 'no_change', agentName: 'dramatis-keeper', summary: '新派工', evidenceRefs: [], uncertainties: [],
+      }) }] };
     }) as any, countTokens: async () => 1,
     apiPreset: { resolvePreset: () => ({ resolved: true, apiMode: 'openai' as any, apiConfig: { max_tokens: 60000 } as any, tavernProfile: '' }) } });
     await fresh.run({ delegation: { agentName: 'dramatis-keeper', instruction: '核对人物', reads: [] },
-      settings, promptContext: promptContext as any, registry, tools, runId: 'next-run', readCurrent: () => foldWorldSimulationLedger_ACU(chat)!.ledger });
+      toolMode: 'tools', settings, promptContext: promptContext as any, registry, tools, runId: 'next-run', readCurrent: () => foldWorldSimulationLedger_ACU(chat)!.ledger });
     expect(otherRequests[0].some(message => message.role === 'assistant' && message.content.includes(input.sql))).toBe(false);
     expect(otherRequests[0].some(message => message.role === 'user' && message.content.includes('"ledgerRevision":0'))).toBe(false);
     expect(otherRequests[0].some(message => message.content.includes('"name":"风暴"'))).toBe(true);

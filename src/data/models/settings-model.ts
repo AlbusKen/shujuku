@@ -53,7 +53,17 @@ export interface Settings_ACU {
   tableMaxRetries: number;
   /** 丢弃可证明仅影响非目标表的 SQL 语句；混合/无法归属写入仍保持失败。 */
   discardUnauthorizedTableEditsEnabled: boolean;
+  /** 填表走原生工具调用（table_edit / table_sql）；默认关闭，部分渠道带 tools 字段会直接报错。 */
+  tableFillNativeToolEnabled: boolean;
+  /** 智能续写走纯工具方案（决策与交付都用函数调用）；全局开关，不随对话保存，默认关闭即纯 JSON。 */
+  continuationNativeToolEnabled: boolean;
+  /** 格林推演走纯工具方案（决策与交付都用函数调用）；全局开关，不随对话保存，默认关闭即纯 JSON。 */
+  worldSimulationNativeToolEnabled: boolean;
   worldbookConfig: WorldbookConfig_ACU;
+  /** 解除剧情推进发送伪装，原文留在输入框等待结果；默认关闭，不随预设切换。 */
+  plotSendDisguiseDisabled?: boolean;
+  /** 桌宠直接显示现有通知与任务进度的真实内容；默认关闭。 */
+  deskPetShowRealWork?: boolean;
   plotSettings: PlotSettings_ACU;
   /**
    * 剧情推进世界书选择的权威副本，按角色卡作用域键（char:<avatar> / group:<id>）存储。

@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { settings_ACU } from '../../../../src/service/runtime/state-manager';
+import { nativeAgentReply_ACU } from '../../../helpers/agent-mode-fixture';
 
 import { AgentSubagentRuntime_ACU, createAgentReadRoundState_ACU, renderStoryArcVolumePlanInstruction_ACU } from '../../../../src/service/continuation/agent/agent-subagent-runtime';
 import { findMainSessionReadAppendix_ACU, renderMainSessionReadAppendix_ACU, omitSnapshotSectionsForSubagent_ACU } from '../../../../src/service/continuation/agent/agent-shared-materials';
@@ -9,6 +11,10 @@ import { buildDefaultContinuationSettings_ACU } from '../../../../src/service/co
 import type { AiUsageMetadata_ACU } from '../../../../src/service/continuation/internal-ai-call';
 
 const preset_ACU = { presetName: 'p1', source: 'settings', reason: 'test', apiMode: 'custom', apiConfig: { useMainApi: false, max_tokens: 60000 }, tavernProfile: '' } as any;
+const previousNativeToolEnabled_ACU = settings_ACU.continuationNativeToolEnabled;
+// 本文件的读取与写入夹具使用原生函数；纯 JSON 协议另行直接验证。
+beforeEach(() => { settings_ACU.continuationNativeToolEnabled = true; });
+afterEach(() => { settings_ACU.continuationNativeToolEnabled = previousNativeToolEnabled_ACU; });
 type SentMessage_ACU = { role: string; content: string; tool_call_id?: string };
 const toolContent_ACU = (messages: readonly SentMessage_ACU[], id: string): string =>
   messages.find(message => message.role === 'tool' && message.tool_call_id === id)?.content ?? '';
@@ -142,8 +148,8 @@ it('已读附录的长度帧损坏或帧间缺口时拒绝整份快照，不注�
 });
 
 const readReply_ACU = nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表'] }, 'call-table-read');
-const finalReply_ACU = JSON.stringify({ summary: '结算完成', delta: {} });
-const readOnlyReviewReply_ACU = JSON.stringify({ verdict: 'pass', reason: '读取回归完成', fixes: [] });
+const finalReply_ACU = nativeAgentReply_ACU(JSON.stringify({ summary: '结算完成', delta: {} }))!;
+const readOnlyReviewReply_ACU = nativeAgentReply_ACU(JSON.stringify({ verdict: 'pass', reason: '读取回归完成', fixes: [] }))!;
 
 function input_ACU(): Parameters<AgentSubagentRuntime_ACU['run']>[0] {
   const settings = buildDefaultContinuationSettings_ACU();
@@ -192,10 +198,10 @@ async function runWithUsageSequence_ACU(sequence: Array<AiUsageMetadata_ACU | nu
 
 it('各角色的最终工具集合与本地搜索执行权限一致', async () => {
   for (const [agentName, expected] of [
-    ['hook-cognition-maintainer', ['read']],
-    ['arc-architect', ['read', 'search']],
-    ['web-researcher', ['read', 'search', 'encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read']],
-    ['instruction-composer', []],
+    ['hook-cognition-maintainer', ['read', 'submit']],
+    ['arc-architect', ['read', 'search', 'submit']],
+    ['web-researcher', ['read', 'search', 'encyclopedia_search', 'encyclopedia_read', 'web_search', 'web_read', 'submit']],
+    ['instruction-composer', ['submit']],
   ] as const) {
     const input = input_ACU();
     input.delegation.agentName = agentName;
@@ -220,7 +226,7 @@ it('普通计划子代理只暴露 read，并拒绝未授权资料域', async ()
   input.budget.maxExtraReads = 1;
   const replies = [
     nativeToolTurn_ACU('read', { reads: ['$WEB_REFS:W1'] }, 'unauthorized-web-ref'),
-    JSON.stringify({ summary: '策划完成', recommendation: '依据已注入资料给出本轮策划建议', mustPreserve: [], risks: [] }),
+    nativeAgentReply_ACU(JSON.stringify({ summary: '策划完成', recommendation: '依据已注入资料给出本轮策划建议', mustPreserve: [], risks: [] }))!,
   ];
   const sent: SentMessage_ACU[][] = [];
   const runtime = new AgentSubagentRuntime_ACU({
@@ -542,12 +548,12 @@ it('终审实际请求仅挂 read，伪造 search 不进入检索执行', async 
     resolveAgentApiPreset: (() => preset_ACU) as any,
     callInternalAi: async (messages, _preset, _identity, _signal, options) => {
       seen.push({ tools: options?.tools?.map(tool => tool.function.name) ?? [], messages });
-      return replies.shift() ?? null;
+      return nativeAgentReply_ACU(replies.shift() ?? null);
     },
   });
   await runtime.runFinalReview({ settings: base.settings, resolveContext: base.resolveContext,
     candidateInstruction: '写作指令', currentUserInput: '继续', createIdentity: base.createIdentity, isCurrent: base.isCurrent });
-  expect(seen[0].tools).toEqual(['read']);
+  expect(seen[0].tools).toEqual(['read', 'submit']);
   expect(toolContent_ACU(seen[1].messages, 'forged-review-search')).toContain('终审未授权该工具');
 });
 
@@ -723,7 +729,7 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
       resolveAgentApiPreset: ((_settings: unknown, role: string) => { roles.push(role); return preset_ACU; }) as any,
       callInternalAi: async messages => {
         calls.push(messages);
-        return replies.shift() ?? null;
+        return nativeAgentReply_ACU(replies.shift() ?? null);
       },
     });
 
@@ -1167,7 +1173,7 @@ describe('子代理逐栏工具会话', () => {
       callInternalAi: async value => {
         messages.push(value);
         return messages.length === 1
-          ? '{"summary":"资料已充分，直接交付总纲契约"}'
+          ? nativeAgentReply_ACU('{"summary":"资料已充分，直接交付总纲契约"}')
           : messages.length === 2
             ? nativeToolTurn_ACU('write_sql', { sql: "INSERT INTO story_arc (id, scope, title, direction, escalation, withheld, status, expected_revision) VALUES ('STORY-01', 'story', '题', '方向', '台阶', '底牌', 'active', 0)" }, 'call-arc-bootstrap')
             : finalReply_ACU;

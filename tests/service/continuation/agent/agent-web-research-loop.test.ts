@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { settings_ACU } from '../../../../src/service/runtime/state-manager';
+import { nativeAgentReply_ACU } from '../../../helpers/agent-mode-fixture';
 
 import { ContinuationAgentTurnPlanner_ACU } from '../../../../src/service/continuation/agent/agent-main-loop';
 import { AgentSubagentRuntime_ACU } from '../../../../src/service/continuation/agent/agent-subagent-runtime';
@@ -15,7 +17,9 @@ import type { AgentConversationMessage_ACU, AgentConversationSnapshot_ACU, Agent
 
 const preset_ACU = { presetName: 'p1', source: 'settings' as const, reason: 'test', apiMode: 'custom' as const, apiConfig: { useMainApi: false, max_tokens: 60000 }, tavernProfile: '' };
 
-beforeEach(() => { resetAgentSessionLogForTests_ACU(); resetAgentRunCacheForTests_ACU(); });
+const previousToolEnabled_ACU = settings_ACU.continuationNativeToolEnabled;
+beforeEach(() => { settings_ACU.continuationNativeToolEnabled = true; resetAgentSessionLogForTests_ACU(); resetAgentRunCacheForTests_ACU(); });
+afterEach(() => { settings_ACU.continuationNativeToolEnabled = previousToolEnabled_ACU; });
 
 const chat_ACU = () => ([
   { mes: '写一篇无职转生同人，主角是鲁迪乌斯', is_user: true },
@@ -91,13 +95,13 @@ function harness_ACU(options: { mainReplies: string[]; subReplies: string[]; ena
   const subagentRuntime = new AgentSubagentRuntime_ACU({
     resolveApiPreset: (() => preset_ACU) as any,
     resolveAgentApiPreset: (() => preset_ACU) as any,
-    callInternalAi: async messages => { subCalls.push(messages); return subReplies.shift() ?? '{"summary":"没有更多回复","delta":{"webRefs":[]}}'; },
+    callInternalAi: async messages => { subCalls.push(messages); return nativeAgentReply_ACU(subReplies.shift() ?? '{"summary":"没有更多回复","delta":{"webRefs":[]}}'); },
     webClient: fakeWebClient_ACU(webLog),
     hostOrigin: () => 'http://127.0.0.1:8000',
   });
   const plannerImpl = new ContinuationAgentTurnPlanner_ACU({
     resolveApiPreset: ((_settings: unknown, role: string) => { presetRoles.push(role); return preset_ACU; }) as any,
-    callInternalAi: async messages => { mainCalls.push(messages); return mainReplies.shift() ?? '{"action":"block","reason":"脚本没有更多回复"}'; },
+    callInternalAi: async messages => { mainCalls.push(messages); return nativeAgentReply_ACU(mainReplies.shift() ?? '{"action":"block","reason":"脚本没有更多回复"}'); },
     subagentRuntime,
     readChat: () => chat,
     readModuleSnapshot: readAgentModuleSnapshot_ACU,

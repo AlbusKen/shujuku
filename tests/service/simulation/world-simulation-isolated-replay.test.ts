@@ -18,6 +18,8 @@ import { createWorldSimulationEvidenceRegistry_ACU, recordWorldSimulationEvidenc
 import type { WorldSimulationAgentName_ACU } from '../../../src/service/simulation/agent/agent-catalog';
 import type { WorldSimulationRunIdentity_ACU } from '../../../src/service/simulation/model';
 import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
+import { settings_ACU } from '../../../src/service/runtime/state-manager';
+import { nativeAgentReply_ACU } from '../../helpers/agent-mode-fixture';
 
 type ReplayMode = 'commit_partial' | 'no_change' | 'blocked';
 
@@ -137,23 +139,31 @@ function buildReplay(options: ReplayOptions) {
         uncertainties: [],
       })]],
     ]);
+    // 候选写集与终态交付分两轮，证据沿用本次 registry 已颁发的引用。
+    for (const [role, queue] of scripts) {
+      if (role === 'world-director') continue;
+      const first = JSON.parse(queue[0]) as { status: string; sql?: string };
+      if (first.status === 'candidate' && first.sql) {
+        const { sql: _sql, ...delivery } = first;
+        queue.push(JSON.stringify(delivery));
+      }
+    }
     const invoke = vi.fn(async (role: WorldSimulationAgentName_ACU, messages: readonly { role: string; content: string }[]) => {
       const queue = scripts.get(role);
       const response = queue?.shift();
       if (!response) throw new Error(`UNEXPECTED_MODEL_INVOCATION:${role}`);
       invocations.push({ role, response, messages });
-      // Director read is native-only; retain the source script for replay diagnostics.
+      // 工具回包保留稳定调用 ID；脚本正文仅用于隔离 replay 的断言。
       if (role === 'world-director' && JSON.parse(response).action === 'read') {
         return { content: '', toolCalls: [{ id: 'replay-director-read', name: 'read', arguments: JSON.stringify({ reads: ['anchor:message'] }) }] };
       }
-      // One-shot roles answer with native write_sql or the NO_CHANGE text state, as a real provider would.
       if (role === 'undercurrent-analyst' || role === 'dramatis-keeper' || role === 'guidance-composer') {
         const script = JSON.parse(response) as { status: string; sql?: string };
         return script.status === 'candidate' && script.sql
           ? { content: '', toolCalls: [{ id: `replay-${role}-sql`, name: 'write_sql', arguments: JSON.stringify({ sql: script.sql }) }] }
-          : 'NO_CHANGE';
+          : nativeAgentReply_ACU(response)!;
       }
-      return response;
+      return nativeAgentReply_ACU(response)!;
     });
     const countTokens = async () => 1;
     const plannedRevision = buildDirectorOwnedStageRevision_ACU({
@@ -263,8 +273,10 @@ function buildReplay(options: ReplayOptions) {
   };
 }
 
+const previousToolEnabled_ACU = settings_ACU.worldSimulationNativeToolEnabled;
 describe('T9 格林推演隔离 API replay', () => {
   beforeEach(() => {
+    settings_ACU.worldSimulationNativeToolEnabled = true;
     vi.clearAllMocks();
     resetWorldSimulationRunCacheForTests_ACU();
     resetWorldSimulationSessionLogForTests_ACU();
@@ -272,6 +284,7 @@ describe('T9 格林推演隔离 API replay', () => {
   });
 
   afterEach(() => {
+    settings_ACU.worldSimulationNativeToolEnabled = previousToolEnabled_ACU;
     _set_SillyTavern_API_ACU(undefined);
   });
 

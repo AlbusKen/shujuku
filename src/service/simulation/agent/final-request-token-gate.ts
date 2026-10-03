@@ -29,7 +29,7 @@ export async function executeWorldSimulationFinalRequest_ACU<T>(input: {
   }
   if (totalTokens > limitTokens) return { status: 'rejected', reason: 'final-request-token-overflow', messages, totalTokens, limitTokens, compressed };
   const occupied = await measurePreparedReadRequestTokens_ACU(messages, input.tools ?? [], input.count);
-  if (occupied >= input.inputLimitTokens) return { status: 'rejected', reason: 'final-request-token-overflow', messages, totalTokens: occupied, limitTokens: input.inputLimitTokens, compressed };
+  if (Math.floor((input.inputLimitTokens - occupied) * 0.6) <= 0) return { status: 'rejected', reason: 'final-request-token-overflow', messages, totalTokens: occupied, limitTokens: input.inputLimitTokens, compressed };
   const defaultReadFenceTokens = resolveDefaultReadFenceTokens_ACU(input.inputLimitTokens, occupied);
   return { status: 'sent', response: await input.invoke(messages), messages, totalTokens, compressed, defaultReadFenceTokens };
 }

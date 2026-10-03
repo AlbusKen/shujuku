@@ -33,6 +33,35 @@ describe('格林推演阶段 runtime', () => {
       '正文时间跨度',
     ]));
   });
+  it('tools 阶段规划只认 submit，修正回执绑定调用且运行中切换全局设置不改变模式', async () => {
+    const { settings_ACU } = await import('../../../src/service/runtime/state-manager');
+    const previous = settings_ACU.worldSimulationNativeToolEnabled;
+    const requests: any[] = [];
+    const messages: any[] = [];
+    const invoke = vi.fn(async (sent: any, _preset: any, request: any) => {
+      requests.push(request);
+      messages.push(sent);
+      settings_ACU.worldSimulationNativeToolEnabled = false;
+      return { content: '', toolCalls: [{ id: `plan-${requests.length}`, name: 'submit',
+        arguments: JSON.stringify(requests.length === 1 ? { summary: '漏计划' } : { summary: '计划完成', plan }) }] };
+    });
+    try {
+      settings_ACU.worldSimulationNativeToolEnabled = true;
+      const planner = new WorldSimulationStagePlanner_ACU({ apiPreset, countTokens: async () => 1, invoke });
+      const result = await planner.plan({ settings: buildDefaultWorldSimulationSettings_ACU(), promptContext: context() });
+      expect(result.revision.plan).toEqual(plan);
+      expect(invoke).toHaveBeenCalledTimes(2);
+      for (const request of requests) {
+        expect(request.tools.map((tool: any) => tool.function.name)).toEqual(['submit']);
+        expect(request.cacheTools).toEqual(['submit']);
+      }
+      expect(messages[1]).toContainEqual(expect.objectContaining({ role: 'tool', tool_call_id: 'plan-1',
+        content: expect.stringContaining('MISSING_FIELD $.plan') }));
+      expect(JSON.stringify(messages[1])).not.toContain('再输出一个 JSON 对象');
+    } finally { settings_ACU.worldSimulationNativeToolEnabled = previous; }
+  });
+
+
   it('生成、确认并冻结阶段 revision', async () => {
     const settings = { ...buildDefaultWorldSimulationSettings_ACU(), agentPrompts: buildDefaultWorldSimulationAgentPrompts_ACU() };
     const planner = new WorldSimulationStagePlanner_ACU({ apiPreset, countTokens: async () => 1, invoke: async () => JSON.stringify({ action: 'plan', summary: 'ok', plan }) });

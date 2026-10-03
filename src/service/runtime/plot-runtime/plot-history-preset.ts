@@ -291,6 +291,13 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
     | { status: 'superseded'; reason: 'newer_round_pending' | 'chat_changed' }
     | { status: 'failed'; reason: 'host_save_failed' | 'empty_content'; error?: unknown };
 
+  // 真实入楼事件与兜底轮询共用同一轮提交，避免宿主保存尚未返回时重复写入。
+  let plotCommitInFlight_ACU: {
+    roundRef: unknown;
+    chatId: string;
+    promise: Promise<PlotSaveOutcome_ACU>;
+  } | null = null;
+
   /**
    * 将 plot 附加到对应的用户消息上，并显式请求一次宿主保存。
    * roundId 是稳定身份；两类内容哈希仅用于首次认领宿主刚创建的用户楼层。
@@ -314,7 +321,7 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
       logDebug_ACU('[剧情推进] [Plot] Planning in progress, ignoring GENERATION_ENDED.');
       return { status: 'deferred', reason: 'target_not_found_yet' };
     }
-    if (planningGuard_ACU.ignoreNextGenerationEndedCount > 0) {
+    if (!force && planningGuard_ACU.ignoreNextGenerationEndedCount > 0) {
       planningGuard_ACU.ignoreNextGenerationEndedCount--;
       logDebug_ACU(`[剧情推进] [Plot] Ignoring planning-triggered GENERATION_ENDED (${planningGuard_ACU.ignoreNextGenerationEndedCount} left).`);
       return { status: 'deferred', reason: 'target_not_found_yet' };
@@ -328,6 +335,17 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
     // ── P1: 本轮 pending 快照化（对象引用防旧回调 + roundId 持久化身份）──
     const roundRef = tempPlotToSave_ACU;
     const roundChatId = currentChatFileIdentifier_ACU || '';
+    const pendingChatId = typeof roundRef === 'object' ? String(roundRef.chatId || '') : '';
+    if (pendingChatId && pendingChatId !== roundChatId) {
+      logWarn_ACU('[剧情推进] [Plot] 待保存结果不属于当前聊天，停止提交');
+      _set_tempPlotToSave_ACU(null);
+      return { status: 'superseded', reason: 'chat_changed' };
+    }
+    // 新轮次捕获的边界仅用于首次认领；已附着的 roundId 仍是重试权威身份。
+    const targetStartIndex = typeof roundRef === 'object'
+      && Number.isInteger(roundRef.targetStartIndex) && roundRef.targetStartIndex >= 0
+      ? roundRef.targetStartIndex
+      : 0;
     let plotContent: string;
     let userInputHash: string | null;
     let finalMessageHash: string | null;
@@ -381,7 +399,7 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
         // 策略1 标记认领：要求未被其他轮次认领，且尚未附着 plot。
         // 失败重试无需依赖本分支（已写入 roundId，由上一分支精确命中），
         // 因此这里可以安全地拒绝覆盖任何已有 plot 的楼层：宁可不写，也不错层。
-        for (let i = chat.length - 1; i >= 0; i--) {
+        for (let i = chat.length - 1; i >= targetStartIndex; i--) {
           const msg = chat[i];
           if (msg?.is_user && !msg._qrf_plot_round_id && !msg.qrf_plot && msg._qrf_plot_pending_hash === userInputHash) {
             msg._qrf_plot_round_id = roundId;
@@ -392,7 +410,7 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
 
         // 策略2 首次认领：宿主已把 finalMessage 写入 msg.mes，因此同时接受
         // 最终注入文本哈希与用户原文哈希；只认未认领、未附着 plot 的用户层。
-        for (let i = chat.length - 1; i >= 0; i--) {
+        for (let i = chat.length - 1; i >= targetStartIndex; i--) {
           const msg = chat[i];
           if (!msg?.is_user || msg._qrf_plot_round_id || msg.qrf_plot) continue;
           const messageHash = hashUserInput_ACU(msg.mes || '');
@@ -437,7 +455,13 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
     };
 
     // ── P3: 写入并提交（立即 / 延迟共用）──
-    const writeAndCommit = async (found: { msg: any; index: number }): Promise<PlotSaveOutcome_ACU> => {
+    const commitToHost = async (found: { msg: any; index: number }): Promise<PlotSaveOutcome_ACU> => {
+      if (tempPlotToSave_ACU !== roundRef) {
+        return { status: 'superseded', reason: 'newer_round_pending' };
+      }
+      if ((currentChatFileIdentifier_ACU || '') !== roundChatId) {
+        return { status: 'superseded', reason: 'chat_changed' };
+      }
       const target = found.msg;
       if (roundId) {
         target._qrf_plot_round_id = roundId;
@@ -484,6 +508,25 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
       return { status: 'committed', targetIndex: found.index };
     };
 
+    const writeAndCommit = async (found: { msg: any; index: number }): Promise<PlotSaveOutcome_ACU> => {
+      const inFlight = plotCommitInFlight_ACU;
+      if (inFlight?.roundRef === roundRef && inFlight.chatId === roundChatId) {
+        return await inFlight.promise;
+      }
+      const lease = {
+        roundRef,
+        chatId: roundChatId,
+        // 先登记再执行，宿主同步派发事件也只能加入已有提交。
+        promise: Promise.resolve().then(() => commitToHost(found)),
+      };
+      plotCommitInFlight_ACU = lease;
+      try {
+        return await lease.promise;
+      } finally {
+        if (plotCommitInFlight_ACU === lease) plotCommitInFlight_ACU = null;
+      }
+    };
+
     // ── P2-T2.1: 入口先做一次同步查找，命中走立即提交 ──
     const immediate = tryFindTarget();
     if (immediate) {
@@ -506,9 +549,9 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
       if (delayedFinished) return;
       pollAttempts++;
 
-      // T1.3: 被更新轮次取代 → 终止本轮
-      if (tempPlotToSave_ACU !== null && tempPlotToSave_ACU !== roundRef) {
-        logWarn_ACU('[剧情推进] [Plot] 检测到新一轮 pending，放弃本轮延迟提交');
+      // 已由入楼事件提交或被更新轮次取代时，旧轮询不再写入。
+      if (tempPlotToSave_ACU !== roundRef) {
+        logDebug_ACU('[剧情推进] [Plot] 本轮 pending 已完成或被替换，停止延迟提交');
         delayedFinished = true;
         return;
       }
@@ -531,7 +574,7 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
 
       if (pollAttempts >= MAX_POLL_ATTEMPTS) {
         delayedFinished = true;
-        logWarn_ACU(`[剧情推进] [Plot] 轮询 ${MAX_POLL_ATTEMPTS} 次后仍未找到目标用户消息。roundId: ${roundId || '(旧格式)'}，用户输入哈希: ${userInputHash || '(无)'}，原始文本: ${userInputText ? `长度=${userInputText.length}` : '(无)'}。pending 已保留，将在下一轮推进入口尝试补写。`);
+        logWarn_ACU(`[剧情推进] [Plot] 轮询 ${MAX_POLL_ATTEMPTS} 次后仍未找到目标用户消息。roundId: ${roundId || '(旧格式)'}，用户输入哈希: ${userInputHash || '(无)'}，原始文本: ${userInputText ? `长度=${userInputText.length}` : '(无)'}。pending 已保留，等待用户入楼、正文结束或下一轮入口补写。`);
         return;
       }
 
@@ -543,15 +586,15 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
   }
 
   /**
-   * 下一轮推进入口 flush：补写上一轮残留的 pending。
+   * 用户入楼、正文结束及下一轮入口共用的 pending 补写。
    *
-   * 时机约束（P4）：下一轮 runPlotTasksRuntime_ACU 入口处，上一轮目标用户消息
-   * 必然已在 chat 数组中，因此这里只做一次同步查找 + 写入 + 提交，不起定时器。
+   * 只做一次同步查找 + 写入 + 提交，不起定时器。尚未入楼则保留 pending，
+   * 不阻塞宿主继续创建真实楼层；同一轮已在提交时共用已有保存请求。
    *
    * 安全约束（P4-T4.2）：
    * - pending 绑定的聊天标识与当前不一致 → 丢弃并 warn，禁止跨聊天误写。
-   * - 持 hash 时禁用尾部回退（savePlotToLatestMessage_ACU 内已实现）；此刻聊天尾部
-   *   是新一轮用户消息，回退会直接错层。
+   * - 持 hash 时禁用尾部回退（savePlotToLatestMessage_ACU 内已实现），
+   *   首次认领限定本轮范围，重试使用 roundId，避免补写错层。
    */
   export async function flushPlotPendingSave_ACU(): Promise<PlotSaveOutcome_ACU | null> {
     if (!tempPlotToSave_ACU) return null;

@@ -4,6 +4,7 @@ import { saveSettings_ACU } from "../../service/settings/settings-service";
 import { setFeatureApiPreset_ACU } from "../../service/settings/feature-preset-reference-service";
 import { setUpdateNumberFields_ACU, setTableContextRules_ACU, setCharCardPrompt_ACU } from "../../service/settings/settings-write-service";
 import { getCurrentStorageMode } from "../../service/table/storage-mode";
+import { buildTableFillDefaultPromptSegments_ACU } from "../../service/ai/prompt-builder/table-fill-tools";
 import {
   DEFAULT_AUTO_UPDATE_FREQUENCY_ACU,
   DEFAULT_AUTO_UPDATE_THRESHOLD_ACU,
@@ -11,7 +12,6 @@ import {
 } from "../../shared/defaults";
 import {
   DEFAULT_CHAR_CARD_PROMPT_ACU,
-  DEFAULT_CHAR_CARD_PROMPT_SQL_ACU,
   DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU,
   DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU,
 } from "../../shared/defaults-json.js";
@@ -69,6 +69,7 @@ export interface FormFillSettingsState {
   tableApiPreset: Ref<string>;
   tableEditLastPairOnly: Ref<boolean>;
   strictJsonTableFillEnabled: Ref<boolean>;
+  tableFillNativeToolEnabled: Ref<boolean>;
   discardUnauthorizedTableEditsEnabled: Ref<boolean>;
   extractRules: Ref<FormFillRulePair[]>;
   excludeRules: Ref<FormFillRulePair[]>;
@@ -84,6 +85,7 @@ export interface FormFillSettingsState {
   ) => void;
   setTableEditLastPairOnly: (value: boolean) => void;
   setStrictJsonTableFillEnabled: (value: boolean) => void;
+  setTableFillNativeToolEnabled: (value: boolean) => void;
   setDiscardUnauthorizedTableEditsEnabled: (value: boolean) => void;
   setExtractRules: (rules: FormFillRulePair[]) => void;
   setExcludeRules: (rules: FormFillRulePair[]) => void;
@@ -288,11 +290,11 @@ function currentDefaultPromptSegments(): FormFillPromptSegment[] {
         : DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU;
     return normalizePromptSegments(defaults);
   }
-  const defaults =
-    getCurrentStorageMode() === "sqlite"
-      ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU
-      : DEFAULT_CHAR_CARD_PROMPT_ACU;
-  return normalizePromptSegments(defaults);
+  // 正文/工具两套默认主段按填表工具开关对齐，否则关着工具时编辑器会显示要求调用工具的默认提示词。
+  return normalizePromptSegments(buildTableFillDefaultPromptSegments_ACU(
+    getCurrentStorageMode() === "sqlite",
+    settings_ACU.tableFillNativeToolEnabled === true,
+  ));
 }
 
 function currentPromptSettingKey(): "charCardPrompt" | "strictJsonCharCardPrompt" | "strictJsonSqlCharCardPrompt" {
@@ -323,6 +325,9 @@ export function useFormFillSettings(): FormFillSettingsState {
   );
   const strictJsonTableFillEnabled = ref(
     settings_ACU.strictJsonTableFillEnabled === true,
+  );
+  const tableFillNativeToolEnabled = ref(
+    settings_ACU.tableFillNativeToolEnabled === true,
   );
   const discardUnauthorizedTableEditsEnabled = ref(
     settings_ACU.discardUnauthorizedTableEditsEnabled !== false,
@@ -357,6 +362,7 @@ export function useFormFillSettings(): FormFillSettingsState {
     tableApiPreset.value = String(settings_ACU.tableApiPreset || "");
     tableEditLastPairOnly.value = settings_ACU.tableEditLastPairOnly !== false;
     strictJsonTableFillEnabled.value = settings_ACU.strictJsonTableFillEnabled === true;
+    tableFillNativeToolEnabled.value = settings_ACU.tableFillNativeToolEnabled === true;
     discardUnauthorizedTableEditsEnabled.value = settings_ACU.discardUnauthorizedTableEditsEnabled !== false;
     extractRules.value = normalizeRules(
       settings_ACU.tableContextExtractRules,
@@ -416,6 +422,20 @@ export function useFormFillSettings(): FormFillSettingsState {
   function setTableEditLastPairOnly(value: boolean): void {
     tableEditLastPairOnly.value = !!value;
     settings_ACU.tableEditLastPairOnly = tableEditLastPairOnly.value;
+    saveSettings_ACU();
+    message.value = null;
+  }
+
+  function setTableFillNativeToolEnabled(value: boolean): void {
+    // 先按切换前的默认判定是否仍是默认提示词，再改开关，否则比对基准已变。
+    const wasDefault = promptTemplateMode.value === "default";
+    tableFillNativeToolEnabled.value = !!value;
+    settings_ACU.tableFillNativeToolEnabled = tableFillNativeToolEnabled.value;
+    // 仍用默认提示词时跟随切换到对应的默认主段；用户改写过的提示词原样保留。
+    if (wasDefault) {
+      promptSegments.value = currentDefaultPromptSegments();
+      promptDirty.value = false;
+    }
     saveSettings_ACU();
     message.value = null;
   }
@@ -615,6 +635,7 @@ export function useFormFillSettings(): FormFillSettingsState {
     tableApiPreset,
     tableEditLastPairOnly,
     strictJsonTableFillEnabled,
+    tableFillNativeToolEnabled,
     discardUnauthorizedTableEditsEnabled,
     extractRules,
     excludeRules,
@@ -628,6 +649,7 @@ export function useFormFillSettings(): FormFillSettingsState {
     setNumbers,
     setTableEditLastPairOnly,
     setStrictJsonTableFillEnabled,
+    setTableFillNativeToolEnabled,
     setDiscardUnauthorizedTableEditsEnabled,
     setExtractRules,
     setExcludeRules,

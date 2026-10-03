@@ -16,9 +16,14 @@ import { renderWorldSimulationPrompt_ACU } from './agent/prompt-template';
 import { countWorldSimulationTokens_ACU, type WorldSimulationTokenCounter_ACU } from './agent/agent-token-budget';
 import { logWorldSimulationSession_ACU, readWorldSimulationSessionLog_ACU, updateWorldSimulationSession_ACU } from './agent/agent-session-log';
 import type { WorldSimulationSessionInput_ACU } from './agent/agent-session-log';
+import { nativeToolArguments_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, type AiChatTurn_ACU, type AiWireMessage_ACU } from '../ai/native-tool';
+import { resolveAgentToolMode_ACU, type AgentToolMode_ACU } from '../ai/agent-tool-mode';
+import { splitNativeDecisionCalls_ACU, submitPayloadObject_ACU, worldSimulationPlannerSubmitTool_ACU } from '../ai/agent-decision-tools';
+import { adaptWorldSimulationPromptSegmentsToToolMode_ACU, worldSimulationProtocolForMode_ACU } from './agent/agent-prompt-mode';
+import { finishWorldSimulationMessages_ACU, worldSimulationInvokeTools_ACU, type WorldSimulationInvokeTools_ACU } from './agent/agent-subagent-runtime';
 
 export interface WorldSimulationStagePlannerDependencies_ACU {
-  invoke(messages: readonly { role: string; content: string }[], preset: WorldSimulationResolvedApiPreset_ACU): Promise<string>;
+  invoke(messages: readonly { role: string; content: string }[], preset: WorldSimulationResolvedApiPreset_ACU, request?: WorldSimulationInvokeTools_ACU): Promise<string | AiChatTurn_ACU>;
   countTokens?: WorldSimulationTokenCounter_ACU;
   apiPreset?: WorldSimulationApiPresetDependencies_ACU;
   protocolRetries?: number;
@@ -27,6 +32,7 @@ export interface WorldSimulationStagePlannerDependencies_ACU {
 }
 export interface WorldSimulationStagePlanRequest_ACU {
   settings: WorldSimulationSettings_ACU;
+  toolMode?: AgentToolMode_ACU;
   promptContext: WorldSimulationPlaceholderContext_ACU;
   now?: number;
 }
@@ -80,6 +86,8 @@ export class WorldSimulationStagePlanner_ACU {
 
   async plan(input: WorldSimulationStagePlanRequest_ACU): Promise<{ summary: string; revision: WorldSimulationStageRevision_ACU }> {
     const preset = resolveWorldSimulationAgentApiPreset_ACU(input.settings, 'world-stage-planner', 'agent_loop', this.dependencies.apiPreset);
+    const toolMode = input.toolMode ?? resolveAgentToolMode_ACU('worldSimulation', preset);
+    const request = worldSimulationInvokeTools_ACU(toolMode, [worldSimulationPlannerSubmitTool_ACU()]);
     let protocolEventSequence = 0;
     const persistEntry = async (entryId: number, eventKey: string, stageRevision: number): Promise<void> => {
       if (!this.dependencies.chatIdentity || !this.dependencies.persistSessionEvent) return;
@@ -101,24 +109,35 @@ export class WorldSimulationStagePlanner_ACU {
       : null;
 
     try {
-      const rendered = await renderWorldSimulationPrompt_ACU(input.settings.agentPrompts['world-stage-planner'], 'world-stage-planner', createWorldSimulationPlaceholderResolvers_ACU(input.promptContext));
-      const transcript: Array<{ role: string; content: string }> = [];
+      const rendered = await renderWorldSimulationPrompt_ACU(adaptWorldSimulationPromptSegmentsToToolMode_ACU('world-stage-planner', input.settings.agentPrompts['world-stage-planner'], toolMode), 'world-stage-planner', createWorldSimulationPlaceholderResolvers_ACU(input.promptContext));
+      const transcript: AiWireMessage_ACU[] = [];
       const repair = createWorldSimulationProtocolRepairState_ACU(this.dependencies.protocolRetries ?? 2);
-      const protocolGuard = { role: 'system', content: worldSimulationPlannerProtocolInstruction_ACU() };
+      const protocolGuard = { role: 'system', content: worldSimulationProtocolForMode_ACU('world-stage-planner', worldSimulationPlannerProtocolInstruction_ACU(), toolMode) };
 
       for (;;) {
         const sent = await executeWorldSimulationFinalRequest_ACU({
-          messages: [...rendered.messages, protocolGuard, ...transcript],
+          messages: finishWorldSimulationMessages_ACU(toolMode, [...rendered.messages, protocolGuard, ...transcript]),
+          tools: request.tools,
           inputLimitTokens: input.settings.agentHistoryTokenBudget,
           historyBudgetTokens: input.settings.agentHistoryTokenBudget,
           count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
-          invoke: messages => this.dependencies.invoke(messages, preset),
+          invoke: messages => this.dependencies.invoke(messages, preset, request),
         });
         if (sent.status === 'rejected') throw new Error(sent.reason);
-        const raw = String(sent.response ?? '');
+        const turn = normalizeAgentModelReply_ACU(sent.response);
+        const raw = turn.content;
         let parsed;
         try {
-          parsed = parseWorldSimulationPlannerOutput_ACU(parseWorldSimulationJsonPayload_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU['world-stage-planner'], ['action', 'plan']));
+          let payload: Record<string, unknown>;
+          if (toolMode === 'tools') {
+            const split = splitNativeDecisionCalls_ACU(nativeToolArguments_ACU(turn.toolCalls), ['submit']);
+            if (!split.decision || split.tools.length) throw new Error('WORLD_SIMULATION_PLANNER_SUBMIT_REQUIRED');
+            payload = { ...submitPayloadObject_ACU(split.decision.payload), action: 'plan' };
+          } else {
+            if (turn.toolCalls.length) throw new Error('WORLD_SIMULATION_PLANNER_JSON_REQUIRED');
+            payload = parseWorldSimulationJsonPayload_ACU(raw, WORLD_SIMULATION_AGENT_PREFILLS_ACU['world-stage-planner'], ['action', 'plan']);
+          }
+          parsed = parseWorldSimulationPlannerOutput_ACU(payload);
           if (parsed.action !== 'plan') throw new Error('WORLD_SIMULATION_PLAN_ACTION_REQUIRED');
         } catch (error) {
           const failure = recordWorldSimulationProtocolFailure_ACU(repair, error);
@@ -133,10 +152,15 @@ export class WorldSimulationStagePlanner_ACU {
             await persistEntry(retryEntryId, `stage-plan-protocol-${++protocolEventSequence}`, 0);
           }
           if (!failure.retry) throw error;
-          transcript.push(
-            { role: 'assistant', content: raw || '(empty)' },
-            { role: 'user', content: renderWorldSimulationPlannerProtocolRejection_ACU(failure.issue) },
-          );
+          const rejection = worldSimulationProtocolForMode_ACU('world-stage-planner', renderWorldSimulationPlannerProtocolRejection_ACU(failure.issue), toolMode);
+          if (toolMode === 'tools' && turn.toolCalls.length && turn.toolCalls.every(call => call.id && call.name)) {
+            transcript.push(...nativeToolExchange_ACU(turn.content, turn.toolCalls, turn.toolCalls.map(() => rejection)));
+          } else {
+            transcript.push(
+              { role: 'assistant', content: raw || '(empty)' },
+              { role: 'user', content: rejection },
+            );
+          }
           continue;
         }
         const revision = 1;

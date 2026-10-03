@@ -84,16 +84,18 @@
           </AcuFormRow>
         </template>
 
-        <template v-if="formFillMode.selectedMode === 'llm'">
-          <AcuFormRow label="LLM / continuation API 预设" hint="选择后仅用于逻辑召回模式；留空时跟随当前 API。">
-            <AcuSelect
-              :options="apiPresetSelectOptions"
-              :model-value="formFillMode.profiles.llm.apiPresetName"
-              :placeholder="followActiveApiLabel"
-              @update:model-value="formFillMode.setLlmApiPresetName($event)"
-            />
-          </AcuFormRow>
-        </template>
+        <!-- 填表工具调用对四种模式都生效，始终显示。 -->
+        <AcuFormRow
+          :label="fillModeCopy.panels.mode.nativeToolLabel"
+          :hint="fillModeCopy.panels.mode.nativeToolHint"
+        >
+          <AcuToggle
+            :model-value="formFillSettings.tableFillNativeToolEnabled.value"
+            :aria-label="fillModeCopy.panels.mode.nativeToolLabel"
+            data-acu-table-fill-native-tool-toggle="1"
+            @update:model-value="formFillSettings.setTableFillNativeToolEnabled($event)"
+          />
+        </AcuFormRow>
 
         <AcuFormRow
           v-if="showPlotPanels"
@@ -105,6 +107,18 @@
             :aria-label="fillModeCopy.panels.plot.enableLabel"
             data-acu-plot-enabled-toggle="1"
             @update:model-value="plotStore.setEnabled($event)"
+          />
+        </AcuFormRow>
+        <AcuFormRow
+          v-if="showPlotPanels"
+          :label="fillModeCopy.panels.plot.disguiseDisabledLabel"
+          :hint="fillModeCopy.panels.plot.disguiseDisabledHint"
+        >
+          <AcuToggle
+            :model-value="plotStore.sendDisguiseDisabled"
+            :aria-label="fillModeCopy.panels.plot.disguiseDisabledLabel"
+            data-acu-plot-disguise-disabled-toggle="1"
+            @update:model-value="plotStore.setSendDisguiseDisabled($event)"
           />
         </AcuFormRow>
       </AcuPanel>
@@ -127,13 +141,12 @@ import AcuMobilePanelNav from "../components/_lib/AcuMobilePanelNav.vue";
 import AcuPanel from "../components/_lib/AcuPanel.vue";
 import AcuPanelGrid from "../components/_lib/AcuPanelGrid.vue";
 import AcuPresetDropdown from "../components/_lib/AcuPresetDropdown.vue";
-import AcuSelect from "../components/_lib/AcuSelect.vue";
 import AcuToggle from "../components/_lib/AcuToggle.vue";
 import FormFillVectorPanels from "../components/FormFillVectorPanels.vue";
 import FormFillPlotPanels from "../components/FormFillPlotPanels.vue";
 import PlotPresetPanel from "../components/PlotPresetPanel.vue";
-import { useApiPresetSelectOptions } from "../composables/useApiPresetSelectOptions";
 import { useChatChangedTick } from "../composables/useChatChangedListener";
+import { useFormFillSettings } from "../composables/useFormFillSettings";
 import { FILL_MODE_INTROS, fillModeCopy } from "../copy/fill-mode-copy";
 import { vectorIndexCopy } from "../copy/vector-index-copy";
 import {
@@ -147,7 +160,7 @@ import { usePlotPresetStore } from "../stores/plot-preset-store";
 const formFillMode = useFormFillModeStore();
 const plotStore = usePlotPresetStore();
 const dialogStore = useDialogStore();
-const { followActiveApiLabel, apiPresetSelectOptions } = useApiPresetSelectOptions();
+const formFillSettings = useFormFillSettings();
 
 const modeItems = FORM_FILL_MODE_OPTIONS.map((option) => ({ value: option.value, label: option.label }));
 const currentIntro = computed(() => FILL_MODE_INTROS[formFillMode.selectedMode]);

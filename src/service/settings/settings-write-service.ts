@@ -9,9 +9,8 @@
 import { settings_ACU } from '../runtime/state-manager';
 import { saveSettings_ACU, type SaveSettingsResult_ACU } from './settings-service';
 import { getCurrentStorageMode } from '../table/storage-mode';
+import { buildTableFillDefaultPromptSegments_ACU } from '../ai/prompt-builder/table-fill-tools';
 import {
-  DEFAULT_CHAR_CARD_PROMPT_ACU,
-  DEFAULT_CHAR_CARD_PROMPT_SQL_ACU,
   DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU,
   DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU,
   DEFAULT_MERGE_SUMMARY_PROMPT_ACU,
@@ -105,9 +104,7 @@ export function setStorageMode_ACU(mode: 'native' | 'sqlite'): SettingsWriteResu
     ['storageMode', 'charCardPrompt', 'strictJsonCharCardPrompt', 'strictJsonSqlCharCardPrompt'],
     () => {
       settings_ACU.storageMode = mode;
-      settings_ACU.charCardPrompt = JSON.parse(JSON.stringify(
-        mode === 'sqlite' ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU : DEFAULT_CHAR_CARD_PROMPT_ACU,
-      ));
+      settings_ACU.charCardPrompt = currentTableFillDefaultPrompt_ACU(mode);
       settings_ACU.strictJsonCharCardPrompt = JSON.parse(JSON.stringify(DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU));
       settings_ACU.strictJsonSqlCharCardPrompt = JSON.parse(JSON.stringify(DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU));
     },
@@ -193,6 +190,17 @@ export function setCharCardPrompt_ACU(prompt: unknown): SettingsWriteResult_ACU 
   });
 }
 
+/**
+ * 当前填表默认提示词（非 strictJson 分支）：按填表工具开关在正文版/工具版默认之间选择，
+ * 避免工具关闭时写入要求调用工具的默认提示词。
+ */
+function currentTableFillDefaultPrompt_ACU(mode: 'native' | 'sqlite'): any[] {
+  return buildTableFillDefaultPromptSegments_ACU(
+    mode === 'sqlite',
+    settings_ACU.tableFillNativeToolEnabled === true,
+  );
+}
+
 /** 解析当前填表提示词应写入的字段名（与 V1 getCurrentPromptSettingKey_ACU 语义一致） */
 function resolveCurrentPromptKey_ACU(mode: 'native' | 'sqlite' = getCurrentStorageMode()): string {
   if (settings_ACU.strictJsonTableFillEnabled === true) {
@@ -216,10 +224,10 @@ export function resetCurrentPromptToDefault_ACU(): SettingsWriteResult_ACU {
   const mode = getCurrentStorageMode();
   const key = resolveCurrentPromptKey_ACU(mode);
   const defaultValue = settings_ACU.strictJsonTableFillEnabled === true
-    ? (mode === 'sqlite' ? DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU : DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU)
-    : (mode === 'sqlite' ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU : DEFAULT_CHAR_CARD_PROMPT_ACU);
+    ? JSON.parse(JSON.stringify(mode === 'sqlite' ? DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU : DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU))
+    : currentTableFillDefaultPrompt_ACU(mode);
   return withSettingsWrite_ACU([key], () => {
-    (settings_ACU as Record<string, unknown>)[key] = JSON.parse(JSON.stringify(defaultValue));
+    (settings_ACU as Record<string, unknown>)[key] = defaultValue;
   });
 }
 
@@ -227,10 +235,10 @@ export function resetCurrentPromptToDefault_ACU(): SettingsWriteResult_ACU {
 export function applyDefaultCharCardPrompt_ACU(mode: 'native' | 'sqlite'): SettingsWriteResult_ACU {
   const key = resolveCurrentPromptKey_ACU(mode);
   const defaultValue = settings_ACU.strictJsonTableFillEnabled === true
-    ? (mode === 'sqlite' ? DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU : DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU)
-    : (mode === 'sqlite' ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU : DEFAULT_CHAR_CARD_PROMPT_ACU);
+    ? JSON.parse(JSON.stringify(mode === 'sqlite' ? DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU : DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU))
+    : currentTableFillDefaultPrompt_ACU(mode);
   return withSettingsWrite_ACU([key], () => {
-    (settings_ACU as Record<string, unknown>)[key] = JSON.parse(JSON.stringify(defaultValue));
+    (settings_ACU as Record<string, unknown>)[key] = defaultValue;
   });
 }
 
@@ -240,9 +248,7 @@ export function resetFormFillPromptsToDefault_ACU(): SettingsWriteResult_ACU {
     ['charCardPrompt', 'strictJsonCharCardPrompt', 'strictJsonSqlCharCardPrompt'],
     () => {
       const mode = getCurrentStorageMode();
-      settings_ACU.charCardPrompt = JSON.parse(JSON.stringify(
-        mode === 'sqlite' ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU : DEFAULT_CHAR_CARD_PROMPT_ACU,
-      ));
+      settings_ACU.charCardPrompt = currentTableFillDefaultPrompt_ACU(mode);
       settings_ACU.strictJsonCharCardPrompt = JSON.parse(JSON.stringify(DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU));
       settings_ACU.strictJsonSqlCharCardPrompt = JSON.parse(JSON.stringify(DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU));
     },
@@ -267,9 +273,7 @@ export function resetAllPromptsToDefault_ACU(
     return { ok: false, code: 'invalid_input', changed: false, message: '存储模式无效。' };
   }
   const applyDefaults = () => {
-    settings_ACU.charCardPrompt = JSON.parse(JSON.stringify(
-      mode === 'sqlite' ? DEFAULT_CHAR_CARD_PROMPT_SQL_ACU : DEFAULT_CHAR_CARD_PROMPT_ACU,
-    ));
+    settings_ACU.charCardPrompt = currentTableFillDefaultPrompt_ACU(mode);
     settings_ACU.mergeSummaryPrompt = JSON.parse(JSON.stringify(
       mode === 'sqlite' ? DEFAULT_MERGE_SUMMARY_PROMPT_SQL_ACU : DEFAULT_MERGE_SUMMARY_PROMPT_ACU,
     ));

@@ -235,9 +235,19 @@ export const dashboardCopy = {
       description:
         "默认开启。桌宠闲着或通知轮播间隙会插播冷笑话；关闭后不再出现冷笑话。",
     },
+    deskPetRealWork: {
+      label: "显示真实工作内容",
+      description:
+        "默认关闭。开启后桌宠气泡直接显示当前通知与任务进度，不再使用“正在XXXX…”状态词；内容与原先点击展开的明细相同。",
+    },
     zeroTk: {
       label: "0TK 占用模式",
       description: "默认开启。开启后纪要概览不占用上下文。",
+    },
+    streaming: {
+      label: "开启流式输出",
+      description:
+        "开启后，支持流式的文本生成会边生成边返回；关闭后会等完整结果返回。",
     },
     continuation: {
       label: "智能续写",

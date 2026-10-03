@@ -200,7 +200,6 @@ async function mountVectorIndexPage(opts: {
     selectedMode: 'crossfire',
     classic: { recentChronicleRows: 15 },
     vector: { resultCount: 200 },
-    llm: { apiPresetName: '' },
   };
   const mount = await import('../../../src/presentation-v2/bootstrap/mount');
   await mount.openAcuV2App();

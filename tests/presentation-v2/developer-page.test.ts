@@ -109,6 +109,7 @@ describe('DeveloperPage', () => {
     expect(text).toContain('填表高级选项');
     expect(text).toContain('旧 UI 入口');
     expect(text).toContain('严格 JSON 填表响应');
+    expect(text).not.toContain('填表使用工具调用');
     expect(text).toContain('最大并发更新组数');
 
     mount.__resetAcuV2MountForTests();

@@ -17,6 +17,9 @@ import { WORLD_SIMULATION_STOP_REASON_LABELS_ACU, getWorldSimulationRuntime_ACU,
 import type { WorldSimulationOrchestratorResult_ACU } from '../../service/simulation/simulation-orchestrator';
 import { WorldSimulationValidationError_ACU, type WorldSimulationSettings_ACU, type WorldSimulationTaskStatus_ACU } from '../../service/simulation/model';
 import { useToastStore } from '../stores/toast-store';
+import { adaptWorldSimulationAgentPromptsToToolMode_ACU, adaptWorldSimulationPromptSegmentsToToolMode_ACU } from '../../service/simulation/agent/agent-prompt-mode';
+import type { WorldSimulationPromptSegment_ACU } from '../../service/simulation/model';
+import { useAgentToolMode } from './useAgentToolMode';
 
 const TASK_STATUS_LABELS_ACU: Record<WorldSimulationTaskStatus_ACU, string> = {
   drafting: '运行中',
@@ -80,6 +83,7 @@ export function projectWorldSimulationSessionFromConversation_ACU(
 
 export function useWorldSimulationRuntime() {
   const toast = useToastStore();
+  const toolMode = useAgentToolMode('worldSimulation');
   const runtime = getWorldSimulationRuntime_ACU();
   const snapshot = ref<WorldSimulationUiSnapshot_ACU | null>(null);
   const ready = ref(false);
@@ -322,7 +326,11 @@ export function useWorldSimulationRuntime() {
    * 把某个角色的提示词恢复成内置默认值。恢复本身不落盘，由设置面板既有的保存链路决定何时写入。
    */
   function restorePromptDefault(current: WorldSimulationSettings_ACU, agentName: WorldSimulationAgentName_ACU): WorldSimulationSettings_ACU {
-    return restoreWorldSimulationPromptDefault_ACU(current, agentName);
+    return restoreWorldSimulationPromptDefault_ACU(current, agentName, toolMode.mode.value);
+  }
+
+  function presentPromptSegments(agentName: WorldSimulationAgentName_ACU, segments: readonly WorldSimulationPromptSegment_ACU[]): WorldSimulationPromptSegment_ACU[] {
+    return adaptWorldSimulationPromptSegmentsToToolMode_ACU(agentName, segments, toolMode.mode.value);
   }
 
   /**
@@ -340,7 +348,7 @@ export function useWorldSimulationRuntime() {
     const agentRaw = (raw as Record<string, unknown>).agentPrompts;
     if (!agentRaw || typeof agentRaw !== 'object' || Array.isArray(agentRaw)) throw new Error('提示词 JSON 缺少 agentPrompts 对象。');
     try {
-      return validateWorldSimulationAgentPrompts_ACU(agentRaw, 'load');
+      return adaptWorldSimulationAgentPromptsToToolMode_ACU(validateWorldSimulationAgentPrompts_ACU(agentRaw, 'load'), toolMode.mode.value);
     } catch (cause) {
       throw new Error(`提示词校验失败：${errorMessage_ACU(cause)}`);
     }
@@ -392,6 +400,9 @@ export function useWorldSimulationRuntime() {
     saveUserRequirements,
     clearData,
     restorePromptDefault,
+    presentPromptSegments,
+    nativeToolEnabled: toolMode.enabled,
+    setNativeToolEnabled: toolMode.setEnabled,
     parsePromptBundle,
     resyncAfterChatMutation,
   };

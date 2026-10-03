@@ -84,7 +84,8 @@ describe('put 早退', () => {
 
   it('legacy manifest 仍走 legacy 写入（触碰 IDB）', async () => {
     await putSummaryVectorHotCacheChunks_ACU({ manifest: legacyManifest(), chunks: [chunk()] });
-    expect(openSpy).toHaveBeenCalledTimes(1);
+    // 写入前先按 scope 清理旧缓存（一次 open），再写入新 chunks（一次 open）。
+    expect(openSpy).toHaveBeenCalledTimes(2);
   });
 });
 

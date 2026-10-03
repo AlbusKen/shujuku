@@ -243,6 +243,8 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V41_ACU = 'spv4.9-continu
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V42_ACU = 'spv5.0-continuation-subagent-read-once-v42';
 /** 主 Agent、各子代理与阶段大纲的第一条身份句融入创作身份声明；只替换仍与 V42 默认逐字相同的身份段。 */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V43_ACU = 'spv5.1-continuation-creative-identity-v43';
+/** 子代理 INSERT 范例不再手写 id：新行编号由运行时自动分配；只替换仍与 V43 默认逐字相同的段。 */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V44_ACU = 'spv5.2-continuation-id-autofill-v44';
 
 /**
  * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
@@ -352,7 +354,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V43_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V44_ACU,
   };
 }
 

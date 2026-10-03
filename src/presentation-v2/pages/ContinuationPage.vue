@@ -44,6 +44,9 @@
 
       <AcuPanel v-if="settingsDraft" title="续写设置" description="修改后自动保存；任务运行中也可以改，改动会在本轮空档落盘、下一轮开始时生效。常用项直接可见，其余参数按主题折叠，默认值已能满足大多数场景。">
         <div class="acu-v2-continuation-page__settings-grid">
+          <AcuFormRow label="使用工具调用" hint="开启后决策与交付都通过函数调用完成；部分渠道不支持 tools 字段会报错。全局生效，不随对话保存。">
+            <AcuToggle :model-value="runtime.nativeToolEnabled.value" aria-label="使用工具调用" @update:model-value="runtime.setNativeToolEnabled($event)" />
+          </AcuFormRow>
           <AcuFormRow label="阶段规模" hint="一个阶段规划多少轮正文；轮数越多，单个大纲覆盖的剧情越长。">
             <select v-model="settingsDraft.stageSize">
               <option value="short">短（3–5）</option>
@@ -312,7 +315,7 @@
           @toggle="toggleGroup(`prompt:${group.key}`)"
         >
           <AcuPromptSegments
-            :segments="promptList(group.key) ?? []"
+            :segments="promptDisplay(group.key)"
             :role-options="continuationRoleOptions"
             :show-slot="false"
             :show-enabled="true"
@@ -353,6 +356,7 @@ import type { ContinuationPromptKind_ACU } from '../../service/continuation/prom
 import type { ContinuationPromptSegment_ACU, ContinuationSettings_ACU, StageOutline_ACU } from '../../service/continuation/model'; // arch-ok: 仅类型导入，用于本页状态标注，编译后无运行时依赖
 import AcuButton from '../components/_lib/AcuButton.vue';
 import AcuCheckbox from '../components/_lib/AcuCheckbox.vue';
+import AcuToggle from '../components/_lib/AcuToggle.vue';
 import AcuDisclosureGroup from '../components/_lib/AcuDisclosureGroup.vue';
 import AcuFormRow from '../components/_lib/AcuFormRow.vue';
 import AcuInput from '../components/_lib/AcuInput.vue';
@@ -843,6 +847,11 @@ function promptList(key: PromptKey): ContinuationPromptSegment_ACU[] | null {
   if (!settingsDraft.value) return null;
   if (key === 'outlinePrompt') return settingsDraft.value.outlinePrompt;
   return settingsDraft.value.agentPrompts[key];
+}
+
+function promptDisplay(key: PromptKey): ContinuationPromptSegment_ACU[] {
+  const segments = promptList(key) ?? [];
+  return key === 'outlinePrompt' ? segments : runtime.presentPromptSegments(key, segments);
 }
 
 function addPrompt(key: PromptKey, position: 'top' | 'bottom' = 'bottom'): void {

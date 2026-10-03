@@ -117,6 +117,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.clearAllTimers();
   vi.useRealTimers();
 });
 
@@ -309,9 +310,9 @@ describe('savePlotToLatestMessage_ACU', () => {
     expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
   });
 
-  it('同步标记命中：写入 qrf_plot/qrf_plot_preset/qrf_plot_tasks 并请求宿主保存', async () => {
-    mockPlanningGuard.inProgress = false;
-    mockPlanningGuard.ignoreNextGenerationEndedCount = 0;
+  it('强制保存同步标记命中：提交剧情字段且不消费内部生成忽略计数', async () => {
+    mockPlanningGuard.inProgress = true;
+    mockPlanningGuard.ignoreNextGenerationEndedCount = 2;
     const target = { is_user: true, mes: '你好', _qrf_plot_pending_hash: 'hash_你好' };
     mockGetChatArray.mockReturnValue([target]);
     mockTempPlotToSaveRef.value = {
@@ -333,6 +334,7 @@ describe('savePlotToLatestMessage_ACU', () => {
     expect(target._qrf_plot_pending_hash).toBeUndefined();
     expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
     expect(mockSetTempPlotToSave).toHaveBeenCalledWith(null);
+    expect(mockPlanningGuard.ignoreNextGenerationEndedCount).toBe(2);
   });
 
   it('宿主保存失败时保留 pending 与标记，返回 failed', async () => {
@@ -398,28 +400,59 @@ describe('savePlotToLatestMessage_ACU', () => {
     expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
   });
 
-  it('延迟提交：目标消息随后入数组时完成写入并保存（fake timers）', async () => {
+  it('伪装延迟入楼：轮询耗尽后仍能补写新层，重复提交共用一次宿主保存', async () => {
     mockPlanningGuard.inProgress = false;
-    mockPlanningGuard.ignoreNextGenerationEndedCount = 0;
-    const target = { is_user: true, mes: '你好', _qrf_plot_pending_hash: 'hash_你好' };
-    mockGetChatArray.mockReturnValue([]);
+    mockPlanningGuard.ignoreNextGenerationEndedCount = 2;
+    const oldLayer = { is_user: true, mes: '你好', _qrf_plot_pending_hash: 'hash_你好' } as any;
+    const chat: any[] = [oldLayer, { is_user: false, mes: '旧回复' }];
+    const target = { is_user: true, mes: '最终注入内容' } as any;
+    mockGetChatArray.mockReturnValue(chat);
     mockTempPlotToSaveRef.value = {
       content: '剧情内容',
       userInputHash: 'hash_你好',
+      finalMessageHash: 'hash_最终注入内容',
+      roundId: 'round-delayed',
       userInputText: '你好',
-      taskResults: null,
+      taskResults: [{ success: true, taskId: 't1', rawResponse: '任务推进' }],
+      targetStartIndex: chat.length,
+      chatId: 'test-chat',
     };
     vi.useFakeTimers();
     const out = await savePlotToLatestMessage_ACU(true);
     expect(out.status).toBe('deferred');
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(oldLayer.qrf_plot).toBeUndefined();
+    expect(oldLayer._qrf_plot_round_id).toBeUndefined();
+    expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
+    expect(mockTempPlotToSaveRef.value).not.toBeNull();
 
-    // 目标消息随后出现
-    mockGetChatArray.mockReturnValue([target]);
-    await vi.advanceTimersByTimeAsync(200);
-    expect(target.qrf_plot).toBe('剧情内容');
-    expect(target._qrf_plot_pending_hash).toBeUndefined();
+    // 宿主在事件监听返回后创建真实层；保存替身记录真实写口收到的快照。
+    chat.push(target);
+    let savedChat: any[] = [];
+    let finishSave!: () => void;
+    mockSaveChatToHostStrict.mockImplementationOnce(() => {
+      savedChat = JSON.parse(JSON.stringify(chat));
+      return new Promise<void>(resolve => { finishSave = resolve; });
+    });
+    const firstFlush = flushPlotPendingSave_ACU();
+    const secondFlush = flushPlotPendingSave_ACU();
+    await Promise.resolve();
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
+    finishSave();
+    expect(await firstFlush).toEqual({ status: 'committed', targetIndex: 2 });
+    expect(await secondFlush).toEqual({ status: 'committed', targetIndex: 2 });
+    await vi.advanceTimersByTimeAsync(300);
     expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
     expect(mockTempPlotToSaveRef.value).toBeNull();
+    expect(mockPlanningGuard.ignoreNextGenerationEndedCount).toBe(2);
+    // 从宿主保存的快照恢复，而不是只断言内存对象。
+    mockGetChatArray.mockReturnValue(savedChat);
+    expect(savedChat[2]).toMatchObject({
+      mes: '最终注入内容', qrf_plot: '剧情内容',
+      qrf_plot_tasks: { t1: '任务推进' }, _qrf_plot_round_id: 'round-delayed',
+    });
+    expect(getPlotFromHistory_ACU()).toBe('剧情内容');
+    expect(getPlotFromHistory_ACU({ taskId: 't1' })).toBe('任务推进');
   });
 
   it('延迟提交：新一轮 pending 替换时旧回调不写入也不清空新 pending', async () => {
@@ -615,6 +648,8 @@ describe('savePlotToLatestMessage_ACU', () => {
 
     // 下一轮：新用户层已进入聊天尾部，且其 mes 与本轮 finalMessage 完全相同
     const newerLayer = { is_user: true, mes: '最终注入内容' } as any;
+    // 重试仍以 roundId 为权威，不受首次认领范围限制。
+    (pending as any).targetStartIndex = 2;
     mockGetChatArray.mockReturnValue([target, { is_user: false, mes: 'A' }, newerLayer]);
     mockSaveChatToHostStrict.mockResolvedValueOnce(undefined);
 

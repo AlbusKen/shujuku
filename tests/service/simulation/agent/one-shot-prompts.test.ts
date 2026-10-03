@@ -36,13 +36,15 @@ describe('一次性资料角色默认提示词', () => {
     expect(guidanceBody).toContain('不能把 summary 或 related_ids 写入 chronicle_overview');
     expect(guidanceBody).toContain('不能编造 rumors:1 等伪 ID');
     const protocol = worldSimulationOneShotProtocol_ACU('guidance-composer', ['chronicle', 'rumors', 'guidance']);
-    expect(protocol).toContain('原生 write_sql');
+    expect(protocol).toContain('先调用 write_sql');
+    expect(protocol).toContain('下一次回复单独调用 submit');
+    expect(protocol).toContain('空回复和裸状态行均不是交付');
     expect(protocol).not.toContain('"status":"candidate"');
     expect(protocol).toContain('chronicle_overview=(fingerprint, day, one_line, archive_ref)');
     expect(protocol).toContain('不能写 rumors:1');
     expect(protocol).not.toContain('"reads":["ledger:current"]');
     expect(protocol).toContain('ledger:current 并非普通角色可读地址');
-    expect(protocol).toContain('闭合于 <think> 标签中');
+    expect(protocol).toContain('交付不带 sql 或 patch');
     expect(protocol).toContain('【可写列白名单】');
     expect(protocol).toContain('guidance(signals, excluded_facts, evidence_refs)');
     const clockProtocol = worldSimulationOneShotProtocol_ACU('undercurrent-analyst', ['clock', 'dimensions', 'seeds']);

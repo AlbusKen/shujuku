@@ -456,8 +456,20 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<WorldSimul
       ...(saveAttempted ? { recovery: 'saved' } : {}),
     });
   }
-  // 联合保存已成功：让宿主重渲染触发楼层，使〈与此同时〉段即时可见。
-  if (refreshIndex !== null) refreshMessageBlock_ACU(refreshIndex);
+  // 联合保存已成功：短暂等待宿主更新后，仅重渲染仍匹配的触发楼层一次。
+  if (refreshIndex !== null) {
+    setTimeout(() => {
+      if (getChatArray_ACU() !== chat || getActiveChatStorageIdentity_ACU(chat) !== input.identity.chatIdentity) return;
+      let currentRefreshIndex: number;
+      try {
+        currentRefreshIndex = resolveCurrentWorldSimulationAnchor_ACU(persistedAnchor, chat).messageIndex;
+      } catch {
+        // 延时期间正文或 swipe 已变化，放弃旧锚点的刷新。
+        return;
+      }
+      refreshMessageBlock_ACU(currentRefreshIndex);
+    }, 100);
+  }
   return persistedAnchor;
 }
 
