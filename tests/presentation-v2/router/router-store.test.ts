@@ -91,8 +91,9 @@ describe('router-store · 基础模式默认可见性', () => {
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
     expect(r.activePageId).toBe('form-fill');
-    expect(r.visiblePages.map(p => p.id)).toEqual(['dashboard', 'fill-mode', 'form-fill', 'api', 'data-mgmt', 'advanced-tools']);
+    expect(r.visiblePages.map(p => p.id)).toEqual(['dashboard', 'fill-mode', 'form-fill', 'api', 'plot', 'data-mgmt', 'advanced-tools']);
     expect(r.visiblePagesByGroup.overview.map(p => p.id)).toEqual(['dashboard']);
+    expect(r.visiblePagesByGroup.feature.map(p => p.id)).toEqual(['plot']);
     expect(r.visiblePagesByGroup.tool.map(p => p.id)).toEqual(['data-mgmt', 'advanced-tools']);
   });
 
@@ -113,6 +114,10 @@ describe('router-store · 基础模式默认可见性', () => {
       r.ensureActiveVisible();
       expect(r.visiblePages.map(p => p.id)).toContain('data-mgmt');
       expect(r.activePageId).toBe('data-mgmt');
+      expect(r.visiblePagesByGroup.feature.map(p => p.id)).toContain('plot');
+      r.setActivePage('plot');
+      expect(r.activePageId).toBe('plot');
+      r.setActivePage('data-mgmt');
     }
   });
 });
@@ -308,7 +313,7 @@ describe('router-store · 切页 + 持久化', () => {
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
     expect(r.activePageId).toBe('form-fill');
-    expect(r.visiblePages.map(p => p.id)).toEqual(['dashboard', 'fill-mode', 'form-fill', 'api', 'data-mgmt', 'advanced-tools']);
+    expect(r.visiblePages.map(p => p.id)).toEqual(['dashboard', 'fill-mode', 'form-fill', 'api', 'plot', 'data-mgmt', 'advanced-tools']);
   });
 
   it('高手模式未持久化路由时默认页是 dashboard', async () => {
@@ -328,7 +333,7 @@ describe('router-store · 切页 + 持久化', () => {
   });
 
   it('plot 恢复为独立页，vector-index / table 保留兼容路由', async () => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ uiTierV2: { tier: 'high' }, router: { activePageId: 'plot' } }));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ router: { activePageId: 'plot' } }));
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();

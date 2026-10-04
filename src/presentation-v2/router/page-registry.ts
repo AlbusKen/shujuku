@@ -48,7 +48,8 @@ export const ACU_V2_PAGE_REGISTRY: readonly AcuV2Page[] = Object.freeze([
   { id: 'api', title: 'API', group: 'config', component: markRaw(ApiPage) },
 
   // 功能
-  { id: ACU_V2_PLOT_PAGE_ID, title: plotCopy.pageTitle, group: 'feature', component: markRaw(PlotPage), minUiTier: 'medium' },
+  // 剧情推进始终保留导航入口，填表模式支持范围由页面内说明。
+  { id: ACU_V2_PLOT_PAGE_ID, title: plotCopy.pageTitle, group: 'feature', component: markRaw(PlotPage) },
   { id: 'continuation', title: '智能续写', group: 'feature', component: markRaw(ContinuationPage), minUiTier: 'medium', featureGate: FEATURE_GATE_CONTINUATION },
   { id: 'world-simulation', title: '格林推演', group: 'feature', component: markRaw(WorldSimulationPage), minUiTier: 'high', featureGate: FEATURE_GATE_WORLD_SIMULATION },
   { id: 'import', title: '外部导入', group: 'feature', component: markRaw(ImportPage), minUiTier: 'medium', featureGate: FEATURE_GATE_IMPORT },

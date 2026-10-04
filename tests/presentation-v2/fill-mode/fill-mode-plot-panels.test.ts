@@ -40,6 +40,7 @@ function createSettings() {
 }
 
 async function mountPlotPage(opts: {
+  uiTier?: 'low' | 'medium' | 'high';
   devOptions?: { plotAdvanced?: boolean };
   settings?: any;
   resolveCharacterBinding?: () => Promise<any>;
@@ -47,7 +48,7 @@ async function mountPlotPage(opts: {
   vi.resetModules();
   document.body.innerHTML = '';
   document.head.innerHTML = '';
-  const persisted: any = { uiTierV2: { tier: 'high' }, router: { activePageId: 'plot' } };
+  const persisted: any = { uiTierV2: { tier: opts.uiTier ?? 'high' }, router: { activePageId: 'plot' } };
   if (opts.devOptions) persisted.devOptions = opts.devOptions;
   localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
 
@@ -118,8 +119,10 @@ beforeEach(() => {
 
 describe('PlotPage', () => {
   it('渲染主区头部与状态行，header 不再放启用 toggle', async () => {
-    const { mount, settings } = await mountPlotPage();
+    const { mount, settings } = await mountPlotPage({ uiTier: 'low' });
 
+    const plotEntry = document.querySelector<HTMLButtonElement>('.acu-v2-sidebar [data-page-id="plot"]');
+    expect(plotEntry?.textContent).toContain('剧情推进');
     const page = document.querySelector('.acu-v2-plot-page');
     expect(page).not.toBeNull();
     const text = page!.textContent || '';
@@ -160,6 +163,26 @@ describe('PlotPage', () => {
     expect(repo.globalMeta_ACU.formFillPreferencesGlobal).not.toHaveProperty('llm');
     expect(save).toHaveBeenCalledOnce();
     save.mockRestore();
+
+    const { useFormFillModeStore } = await import('../../../src/presentation-v2/stores/form-fill-mode-store');
+    const { nextTick } = await import('vue');
+    const modeStore = useFormFillModeStore();
+    for (const mode of ['classic', 'vector', 'llm', 'crossfire'] as const) {
+      repo.globalMeta_ACU.formFillPreferencesGlobal = { ...read.preferences, selectedMode: mode };
+      modeStore.refresh();
+      await nextTick();
+      expect(document.querySelector('.acu-v2-sidebar [data-page-id="plot"]')).not.toBeNull();
+      expect(!!document.querySelector('#plot-preset-panel')).toBe(mode === 'llm' || mode === 'crossfire');
+      expect(!!document.querySelector('.acu-v2-plot-page__empty')).toBe(mode === 'classic' || mode === 'vector');
+    }
+    // 通过实际侧栏按钮离开并重开，验证轻量档不只是注册表中有页面。
+    document.querySelector<HTMLButtonElement>('.acu-v2-sidebar [data-page-id="fill-mode"]')!.click();
+    await nextTick();
+    expect(document.querySelector('.acu-v2-fill-mode-page')).not.toBeNull();
+    document.querySelector<HTMLButtonElement>('.acu-v2-sidebar [data-page-id="plot"]')!.click();
+    await nextTick();
+    expect(document.querySelector('.acu-v2-plot-page')).not.toBeNull();
+    expect(document.querySelector('#plot-preset-panel')).not.toBeNull();
 
     mount.__resetAcuV2MountForTests();
   });

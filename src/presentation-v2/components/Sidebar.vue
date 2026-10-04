@@ -87,8 +87,8 @@ const HIGH_TIER_PHRASE = '开启高级功能';
 const TIER_ORDER: readonly AcuUiTier[] = ['low', 'medium', 'high'];
 
 const tierDescriptions: Record<AcuUiTier, string> = {
-  low: '只显示记忆功能所需的填表工作台、填表模式、API 与高级工具里的运行日志。',
-  medium: '显示填表规则、剧情推进、Agent、智能续写、外部导入与数据管理。',
+  low: '显示填表工作台、填表模式、剧情推进、API、数据管理与高级工具里的运行日志。剧情推进页按当前填表模式显示配置或说明。',
+  medium: '在轻量模式基础上再显示 Agent、智能续写与外部导入。',
   high: '在进阶模式基础上再显示格林推演、正文替换、SQL 控制台与开发者选项。',
 };
 
