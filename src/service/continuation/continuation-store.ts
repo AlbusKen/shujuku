@@ -3,6 +3,8 @@ import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-histor
 import { USER_PREFILL_CONTENT_ACU } from '../../shared/user-prefill.js';
 import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, buildDefaultContinuationWebResearchSettings_ACU, buildDefaultContinuationWorkflowSettings_ACU, CONTINUATION_FINAL_REVIEW_MAX_EXTRA_READS_DEFAULT_ACU, CONTINUATION_FINAL_REVIEW_READ_TOKEN_BUDGET_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_MIN_GENERATION_TOKENS_DEFAULT_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V21_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V24_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V25_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V31_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V32_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V33_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V37_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU, V23_DEFAULT_OUTLINE_ACK_SEGMENT_ACU, V23_DEFAULT_OUTLINE_METHOD_ACK_SEGMENT_ACU, V23_DEFAULT_OUTLINE_PACING_SEGMENT_ACU, V23_DEFAULT_OUTLINE_SYSTEM_SEGMENT_ACU, V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU, V26_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU, V27_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU, V29_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU } from './defaults';
 import { reconcileContinuationEnvelopeCursor_ACU } from './stage-cursor';
+import { CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V46_ACU } from './defaults';
+import { withV46ProgressAdjustment_ACU } from './agent/agent-defaults';
 import { CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V39_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V40_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V41_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V42_ACU } from './defaults';
 import { CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V43_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V44_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V45_ACU, buildV42ContinuationOutlinePrompt_ACU, withV43OutlineCreativeIdentity_ACU } from './defaults';
 import { buildV38ContinuationAgentPrompts_ACU, withV39MainAgentSelfNarration_ACU, withV40RoleSelfNarration_ACU, withV41RoleProcedure_ACU, withV42ReadOnceContract_ACU, withV43CreativeIdentity_ACU, withV44IdAutofill_ACU, withV45MainCorrection_ACU } from './agent/agent-defaults';
@@ -1119,7 +1121,8 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
     && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V42_ACU
     && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V43_ACU
     && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V44_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V45_ACU) {
+    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V45_ACU
+    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V46_ACU) {
     outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
     agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
     promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU;
@@ -1231,6 +1234,14 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
     promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V45_ACU;
   }
 
+  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V45_ACU) {
+    if (isRecord_ACU(agentPrompts) && Array.isArray(agentPrompts.main)
+      && agentPrompts.main.every(segment => isRecord_ACU(segment) && typeof segment.content === 'string')) {
+      agentPrompts = { ...agentPrompts, main: withV46ProgressAdjustment_ACU('main', agentPrompts.main as Parameters<typeof withV46ProgressAdjustment_ACU>[1]) };
+    }
+    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V46_ACU;
+  }
+
   return {
     stageSize: raw.stageSize as ContinuationSettings_ACU['stageSize'], customTurnMin, customTurnMax,
     storyArcVolumePlan: raw.storyArcVolumePlan as ContinuationSettings_ACU['storyArcVolumePlan'], customStoryArcVolumeCount,
@@ -1309,7 +1320,7 @@ function validatePendingHostTurn_ACU(raw: unknown): ContinuationEnvelope_ACU['ac
 function validateTask_ACU(raw: unknown, settings: ContinuationSettings_ACU): ContinuationEnvelope_ACU['activeTask'] {
   if (!isRecord_ACU(raw)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'activeTask 必须是对象或 null');
   const requiredKeys = ['taskId', 'originInstruction', 'status', 'createdAt', 'updatedAt', 'runStartedAt', 'deadlineAt', 'runStageCount', 'activeStageId', 'stages', 'timeline', 'stopReason', 'lastError'];
-  const allowedKeys = [...requiredKeys, 'pendingHostTurn', 'stageBudgetBaseCount'];
+  const allowedKeys = [...requiredKeys, 'pendingHostTurn', 'stageBudgetBaseCount', 'progressSelections'];
   for (const key of requiredKeys) if (!Object.prototype.hasOwnProperty.call(raw, key)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `缺少持久化字段：activeTask.${key}`, { path: `activeTask.${key}` });
   for (const key of Object.keys(raw)) if (!allowedKeys.includes(key)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `存在未知持久化字段：activeTask.${key}`, { path: `activeTask.${key}` });
   const runStageCount = requireInteger_ACU(raw.runStageCount, 'activeTask.runStageCount', 0);
@@ -1328,7 +1339,7 @@ function validateTask_ACU(raw: unknown, settings: ContinuationSettings_ACU): Con
       if (Object.prototype.hasOwnProperty.call(stage, legacyKey)) delete stage[legacyKey];
     }
     const stageKeys = ['stageId', 'stageNumber', 'status', 'activeRevision', 'revisions', 'activeNodeIndex', 'activeTurnIndex', 'completedTurns'];
-    requireKeys_ACU(stage, stageKeys, path, ['agentTurnLabel']);
+    requireKeys_ACU(stage, stageKeys, path, ['agentTurnLabel', 'progressAdjustments']);
     const stageId = requireString_ACU(stage.stageId, `${path}.stageId`);
     if (stageIds.has(stageId)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `阶段 ID 重复：${stageId}`);
     stageIds.add(stageId);
@@ -1346,6 +1357,27 @@ function validateTask_ACU(raw: unknown, settings: ContinuationSettings_ACU): Con
     });
     const activeRevision = requireInteger_ACU(stage.activeRevision, `${path}.activeRevision`, 1);
     if (!revisionNumbers.has(activeRevision)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `activeRevision 未指向现有 revision：${path}`);
+    const progressAdjustments = (() => {
+      if (!('progressAdjustments' in stage)) return {};
+      if (!Array.isArray(stage.progressAdjustments)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `进度校准必须是数组：${path}.progressAdjustments`);
+      const records = stage.progressAdjustments.map((item, adjustmentIndex) => {
+        const itemPath = `${path}.progressAdjustments[${adjustmentIndex}]`;
+        if (!isRecord_ACU(item)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `进度校准必须是对象：${itemPath}`);
+        requireKeys_ACU(item, ['revision', 'completedTurns', 'timelineOffset', 'messageIndex', 'reason'], itemPath);
+        const revision = requireInteger_ACU(item.revision, `${itemPath}.revision`, 1);
+        const outline = revisions.find(entry => entry.revision === revision)?.outline;
+        const completedTurns = requireInteger_ACU(item.completedTurns, `${itemPath}.completedTurns`, 0);
+        const timelineOffset = requireInteger_ACU(item.timelineOffset, `${itemPath}.timelineOffset`, 0);
+        if (!outline || completedTurns > outline.totalTurns || !Array.isArray(raw.timeline) || timelineOffset > raw.timeline.length) {
+          fail_ACU('CONTINUATION_ENVELOPE_INVALID', `进度校准引用或范围无效：${itemPath}`);
+        }
+        return { revision, completedTurns, timelineOffset,
+          messageIndex: requireInteger_ACU(item.messageIndex, `${itemPath}.messageIndex`, 0),
+          reason: requireString_ACU(item.reason, `${itemPath}.reason`),
+        };
+      });
+      return { progressAdjustments: records };
+    })();
     const agentTurnLabel = (() => {
       if (!('agentTurnLabel' in stage)) return {};
       if (!isRecord_ACU(stage.agentTurnLabel)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `轮次标注必须是对象：${path}.agentTurnLabel`);
@@ -1356,10 +1388,25 @@ function validateTask_ACU(raw: unknown, settings: ContinuationSettings_ACU): Con
         text: requireString_ACU(stage.agentTurnLabel.text, `${path}.agentTurnLabel.text`),
       } };
     })();
-    return { stageId, stageNumber: requireInteger_ACU(stage.stageNumber, `${path}.stageNumber`, 1), status: stageStatus, activeRevision, revisions, activeNodeIndex: requireInteger_ACU(stage.activeNodeIndex, `${path}.activeNodeIndex`, 0), activeTurnIndex: requireInteger_ACU(stage.activeTurnIndex, `${path}.activeTurnIndex`, 0), completedTurns: requireInteger_ACU(stage.completedTurns, `${path}.completedTurns`, 0), ...agentTurnLabel };
+    return { stageId, stageNumber: requireInteger_ACU(stage.stageNumber, `${path}.stageNumber`, 1), status: stageStatus, activeRevision, revisions, activeNodeIndex: requireInteger_ACU(stage.activeNodeIndex, `${path}.activeNodeIndex`, 0), activeTurnIndex: requireInteger_ACU(stage.activeTurnIndex, `${path}.activeTurnIndex`, 0), completedTurns: requireInteger_ACU(stage.completedTurns, `${path}.completedTurns`, 0), ...agentTurnLabel, ...progressAdjustments };
   });
   const activeStageId = raw.activeStageId === null ? null : requireString_ACU(raw.activeStageId, 'activeTask.activeStageId');
   if (activeStageId !== null && !stageIds.has(activeStageId)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'activeStageId 未指向现有阶段');
+  const progressSelections = (() => {
+    if (!('progressSelections' in raw)) return {};
+    if (!Array.isArray(raw.progressSelections)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', '阶段选择必须是数组');
+    return { progressSelections: raw.progressSelections.map((item, index) => {
+      const path = `activeTask.progressSelections[${index}]`;
+      if (!isRecord_ACU(item)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `阶段选择必须是对象：${path}`);
+      requireKeys_ACU(item, ['stageId', 'messageIndex', 'timelineOffset'], path);
+      const stageId = requireString_ACU(item.stageId, `${path}.stageId`);
+      const timelineOffset = requireInteger_ACU(item.timelineOffset, `${path}.timelineOffset`, 0);
+      if (!stageIds.has(stageId) || !Array.isArray(raw.timeline) || timelineOffset > raw.timeline.length) {
+        fail_ACU('CONTINUATION_ENVELOPE_INVALID', `阶段选择引用或范围无效：${path}`);
+      }
+      return { stageId, timelineOffset, messageIndex: requireInteger_ACU(item.messageIndex, `${path}.messageIndex`, 0) };
+    }) };
+  })();
   const stopReason = raw.stopReason === null ? null : requireEnum_ACU(raw.stopReason, STOP_REASONS_ACU, 'activeTask.stopReason');
   const lastError = raw.lastError === null ? null : (() => {
     if (!isRecord_ACU(raw.lastError)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'lastError 必须是对象');
@@ -1375,7 +1422,7 @@ function validateTask_ACU(raw: unknown, settings: ContinuationSettings_ACU): Con
     if ('details' in raw.lastError) { if (!isRecord_ACU(raw.lastError.details)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'lastError.details 必须是对象'); error.details = { ...raw.lastError.details }; }
     return error;
   })();
-  return { taskId: requireString_ACU(raw.taskId, 'activeTask.taskId'), originInstruction: requireString_ACU(raw.originInstruction, 'activeTask.originInstruction'), status, createdAt: requireInteger_ACU(raw.createdAt, 'activeTask.createdAt', 0), updatedAt: requireInteger_ACU(raw.updatedAt, 'activeTask.updatedAt', 0), runStartedAt: raw.runStartedAt === null ? null : requireInteger_ACU(raw.runStartedAt, 'activeTask.runStartedAt', 0), deadlineAt: raw.deadlineAt === null ? null : requireInteger_ACU(raw.deadlineAt, 'activeTask.deadlineAt', 0), runStageCount, stageBudgetBaseCount, activeStageId, stages, timeline: validateTimeline_ACU(raw.timeline), stopReason, lastError: lastError as any, ...('pendingHostTurn' in raw ? { pendingHostTurn: validatePendingHostTurn_ACU(raw.pendingHostTurn) } : {}) } as ContinuationEnvelope_ACU['activeTask'];
+  return { taskId: requireString_ACU(raw.taskId, 'activeTask.taskId'), originInstruction: requireString_ACU(raw.originInstruction, 'activeTask.originInstruction'), status, createdAt: requireInteger_ACU(raw.createdAt, 'activeTask.createdAt', 0), updatedAt: requireInteger_ACU(raw.updatedAt, 'activeTask.updatedAt', 0), runStartedAt: raw.runStartedAt === null ? null : requireInteger_ACU(raw.runStartedAt, 'activeTask.runStartedAt', 0), deadlineAt: raw.deadlineAt === null ? null : requireInteger_ACU(raw.deadlineAt, 'activeTask.deadlineAt', 0), runStageCount, stageBudgetBaseCount, activeStageId, stages, timeline: validateTimeline_ACU(raw.timeline), stopReason, lastError: lastError as any, ...progressSelections, ...('pendingHostTurn' in raw ? { pendingHostTurn: validatePendingHostTurn_ACU(raw.pendingHostTurn) } : {}) } as ContinuationEnvelope_ACU['activeTask'];
 }
 
 export function validateContinuationEnvelope_ACU(raw: unknown, phase: ContinuationErrorPhase_ACU = 'load'): ContinuationEnvelope_ACU {

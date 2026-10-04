@@ -161,12 +161,16 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
     const contextTurnCount = plotSettings.contextTurnCount ?? 1;
     let slicedContext: { role: string; content: string }[] = [];
     let contextEndIndex = (chat?.length || 0) - 1;
+    // 真实 AI 占位不属于历史；当前 user 通过独立用户输入注入。
+    while (contextEndIndex >= 0 && chat[contextEndIndex]?._qrf_plot_pending_placeholder) contextEndIndex--;
     if (contextEndIndex >= 0 && chat[contextEndIndex] && chat[contextEndIndex].is_user) {
       if (String(chat[contextEndIndex].mes || '') === String(userMessage || '')) {
         contextEndIndex -= 1;
       }
     }
-    const agentContextMessages = contextEndIndex >= 0 ? chat.slice(0, contextEndIndex + 1) : [];
+    const agentContextMessages = contextEndIndex >= 0
+      ? chat.slice(0, contextEndIndex + 1).filter((message: any) => !message?._qrf_plot_pending_placeholder)
+      : [];
 
     if (contextTurnCount > 0) {
       let aiCount = 0;
@@ -176,7 +180,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         const msg = chat[i];
         if (!msg) continue;
         if (msg.is_user) continue;
-        if (msg._qrf_from_planning) continue;
+        if (msg._qrf_from_planning || msg._qrf_plot_pending_placeholder) continue;
 
         let content = msg.mes;
         const extractTags = (plotSettings.contextExtractTags || '').trim();
@@ -751,8 +755,11 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
   export async function runPlotTasksRuntime_ACU(plotSettings: Record<string, any>, userMessage: string, runtimeOptions: any = {}) {
     const { inputForHash = userMessage, hasExistingUserMessage = false } = runtimeOptions;
     const chatId = currentChatFileIdentifier_ACU || '';
+    const chat = getChatArray_ACU();
+    let userTailIndex = chat.length - 1;
+    while (userTailIndex >= 0 && chat[userTailIndex]?._qrf_plot_pending_placeholder) userTailIndex--;
     // 真实用户层尚未创建时，只允许认领本轮开始后新增的楼层，不能匹配同文旧层。
-    const targetStartIndex = Math.max(0, (getChatArray_ACU()?.length || 0) - (hasExistingUserMessage ? 1 : 0));
+    const targetStartIndex = hasExistingUserMessage ? Math.max(0, userTailIndex) : chat.length;
 
     // ── P4-T4.1: 入口 flush 上一轮残留 pending ──
     // 下一轮开始意味着用户已发送新消息，上一轮目标用户消息必然已在 chat 中，
@@ -1188,7 +1195,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       const historyLimit = agentContextSettings
         ? agentContextSettings.plotWorldbookScanMessageLimit
         : (Number.isFinite(apiSettings.contextTurnCount) ? Math.max(1, Math.trunc(apiSettings.contextTurnCount)) : 3);
-      const chatArray = getChatArray_ACU();
+      const chatArray = getChatArray_ACU().filter((message: any) => !message?._qrf_plot_pending_placeholder);
       const recentMessages = historyLimit > 0 ? chatArray.slice(-historyLimit) : chatArray;
       const historyAndUserText = `${recentMessages.map((message: any) => message.mes || '').join('\n')}\n${userMessage || ''}`;
       const enabledMap = plotCfg?.enabledEntries;

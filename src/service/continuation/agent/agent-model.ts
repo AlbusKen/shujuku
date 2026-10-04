@@ -748,6 +748,24 @@ export interface AgentCorrectMaterialsAction_ACU {
   userMessageId?: number;
 }
 
+/** 选择已有阶段和下一轮，或修改阶段完结状态。大纲内容由对应修改入口处理。 */
+export interface AgentAdjustProgressAction_ACU {
+  kind: 'adjust_progress';
+  thought: string;
+  reason: string;
+  stageId: string;
+  revision: number;
+  nextTurnId?: string;
+  completeStage?: boolean;
+}
+
+export interface AgentAdjustProgressReceipt_ACU {
+  status: 'committed' | 'rejected';
+  message: string;
+  stageId?: string;
+  completedTurns?: number;
+}
+
 /**
  * 大纲句级编辑操作。运行时替模型收尾结构一致性（重算 suggestedTurns/totalTurns），
  * 模型只表达意图；已完成轮次与当前轮的保护由校验层强制。
@@ -777,7 +795,7 @@ export type AgentOutlineEditOp_ACU =
   | { op: 'remove_turn'; turnId: string }
   | { op: 'set_node_goal'; nodeId: string; goal: string };
 
-export type AgentMainAction_ACU = AgentFinalizeAction_ACU | AgentDelegateAction_ACU | AgentBlockAction_ACU | AgentToolsAction_ACU | AgentOpenRoundAction_ACU | AgentCorrectMaterialsAction_ACU;
+export type AgentMainAction_ACU = AgentFinalizeAction_ACU | AgentDelegateAction_ACU | AgentBlockAction_ACU | AgentToolsAction_ACU | AgentOpenRoundAction_ACU | AgentCorrectMaterialsAction_ACU | AgentAdjustProgressAction_ACU;
 
 /** instruction-composer 的产出。instruction 非空；constraints 走容错登记。 */
 export interface AgentComposerOutput_ACU {
@@ -1057,6 +1075,8 @@ export interface ContinuationAgentTurnPlanRequest_ACU {
   applyOutline?: (instruction: string) => Promise<AgentOutlineOpResult_ACU>;
   /** 工作流交付时更新当前轮的非门禁标注；正文重试不调用。 */
   updateTurnLabel?: (text: string) => Promise<void>;
+  /** 主会话受限进度校准；正文重试不注入，保存成功才返回 committed。 */
+  adjustProgress?: (action: AgentAdjustProgressAction_ACU) => Promise<AgentAdjustProgressReceipt_ACU>;
   signal?: AbortSignal | null;
 }
 

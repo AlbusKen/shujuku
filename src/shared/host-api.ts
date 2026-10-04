@@ -59,6 +59,8 @@ export interface ChatMessageACUExtensions {
     _plot_processed?: boolean;
     /** QRF 来自规划标记 */
     _qrf_from_planning?: boolean;
+    /** 发送前处理的真实 AI 占位；不参与剧情历史，成功时由宿主重生成替换。 */
+    _qrf_plot_pending_placeholder?: boolean;
     /** QRF 剧情待处理哈希 */
     _qrf_plot_pending_hash?: string;
     /** QRF 剧情推进轮次身份；用于精确定位与失败重试。 */

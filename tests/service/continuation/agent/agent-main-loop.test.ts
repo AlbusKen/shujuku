@@ -1167,13 +1167,13 @@ describe('open_round 固定结构工作流', () => {
   });
 
 
-  it('生产新轮次直接运行固定工作流，不请求主 Agent 开局', async () => {
+  it('已有阶段先由主 Agent 对照剧情再开启工作流，即使已通告本轮', async () => {
     const h = harness_ACU({
       conversation: appendAgentConversation_ACU(buildEmptyAgentConversation_ACU(), [
         { kind: 'turn', text: '已通告本轮，但工作流尚未启动', digest: '本轮通告', turnKey: 'stage-1#0#turn-2' },
       ]),
       snapshot: snapshotWithArc_ACU(),
-      mainReplies: [],
+      mainReplies: ['{"action":"open_round","focus":"试探"}'],
       subReplies: [maintainerReply_ACU, plannerReply_ACU, '{"summary":"本轮无节拍操作","recommendation":"no_change"}', composerReply_ACU],
     });
     h.request.directOpening = true;
@@ -1183,8 +1183,8 @@ describe('open_round 固定结构工作流', () => {
     const result = await h.planner.plan(h.request);
 
     expect(result.instruction).toBe('按阶段大纲先观察守门人的回避。');
-    expect(result.attempts).toBe(0);
-    expect(h.mainCalls).toHaveLength(0);
+    expect(result.attempts).toBe(1);
+    expect(h.mainCalls).toHaveLength(1);
     expect(label).toHaveBeenCalledWith('试探');
     expect(h.subCalls).toHaveLength(4);
     expect(h.conversationWrites.some(snapshot => snapshot.messages.some(message => message.digest === '固定工作流启动'))).toBe(true);
@@ -1286,22 +1286,27 @@ describe('open_round 固定结构工作流', () => {
     expect(h.subCalls).toHaveLength(4);
   });
 
-  it('主 Agent 直接派工总纲、大纲和指令编排内部角色时全部拒绝，且不消耗子代理调用', async () => {
+  it('主 Agent 依次委派总纲与阶段大纲修改，写作指令编排仍由工作流调用', async () => {
     const h = harness_ACU({
+      snapshot: buildEmptyAgentModuleSnapshot_ACU(),
+      subReplies: [arcReply_ACU],
+      applyOutline: () => ({ op: 'revise', requiresReview: false, stopped: null, summary: '已按实际剧情改写阶段大纲' }),
       mainReplies: [
-        '{"action":"delegate","delegations":[{"agentName":"arc-architect","prompt":"立总纲"},{"agentName":"outline-architect","prompt":"改大纲"},{"agentName":"instruction-composer","prompt":"写指令"}]}',
+        '{"action":"delegate","delegations":[{"agentName":"arc-architect","prompt":"按实际剧情建立总纲"}]}',
+        '{"action":"delegate","delegations":[{"agentName":"outline-architect","prompt":"按新总纲改写阶段大纲"}]}',
+        '{"action":"delegate","delegations":[{"agentName":"instruction-composer","prompt":"写指令"}]}',
         '{"action":"finalize","instruction":"保持现有大纲推进"}',
       ],
     });
 
     const result = await h.planner.plan(h.request);
-    const feedback = h.mainCalls[1].map(message => message.content).join('\n');
+    const feedback = h.mainCalls[3].map(message => message.content).join('\n');
 
     expect(result.instruction).toBe('保持现有大纲推进');
-    expect(h.subCalls).toHaveLength(0);
-    expect(h.outlineCalls).toHaveLength(0);
-    expect(feedback).toContain('arc-architect 已由固定工作流内部调度');
-    expect(feedback).toContain('outline-architect 已由固定工作流内部调度');
+    expect(h.subCalls).toHaveLength(1);
+    expect(h.outlineCalls).toEqual(['按新总纲改写阶段大纲']);
+    expect(h.written.some(write => write.snapshot.storyArc.some(entry => entry.id === 'ARC-STORY'))).toBe(true);
+    expect(feedback).toContain('已按实际剧情改写阶段大纲');
     expect(feedback).toContain('该角色由固定工作流调用，主 Agent 不能 delegate');
     expect(feedback).toContain('本次未消耗派工额度');
   });

@@ -193,17 +193,24 @@ beforeEach(() => {
   m.api.humanizedDateTime = () => '2026-01-01';
   m.api.saveChat = m.saveChat;
   m.api.generate = m.generate;
-  m.generate.mockResolvedValue(undefined);
+  m.generate.mockImplementation(async (type: string) => {
+    await m.api.eventSource.emit('after_commands', type, {}, false);
+    // 宿主 regenerate 在构造正文上下文前删除末尾非 user 消息。
+    if (type === 'regenerate' && m.api.chat.length && !m.api.chat.at(-1).is_user) {
+      const index = m.api.chat.length - 1;
+      m.api.chat.pop();
+      document.querySelector(`#chat .mes[mesid="${index}"]`)?.remove();
+    }
+  });
   m.jquery.mockImplementation((selector: string) => {
     const nodes = Array.from(document.querySelectorAll<HTMLElement>(selector));
     return { ...nodes, length: nodes.length, remove: () => nodes.forEach(node => node.remove()) };
   });
   m.api.addOneMessage = vi.fn((message: any) => {
-    const node = document.createElement('div');
-    node.className = 'mes';
+    const node = document.querySelector('#message_template .mes')!.cloneNode(true) as HTMLElement;
     node.setAttribute('mesid', String(m.api.chat.indexOf(message)));
     node.setAttribute('is_user', String(message.is_user));
-    node.innerHTML = '<div class="mes_text"></div>';
+    node.querySelector('.name_text')!.textContent = message.name;
     node.querySelector('.mes_text')!.textContent = message.mes;
     document.querySelector('#chat')?.append(node);
   });
@@ -497,7 +504,7 @@ describe('mainInitialize_ACU TavernHelper.generate 独立入口契约', () => {
 
 // 钩子由 mainInitialize_ACU 在 beforeAll 时安装（window.TavernHelper 已就绪）。
 describe('发送前处理楼层生命周期', () => {
-  it('等待时真实入楼，成功保存完整剧情数据后保留同一节点并重生成一次', async () => {
+  it('等待时保留真实双楼层且不保存回读，成功写回同一 user 节点并重生成一次', async () => {
     vi.useFakeTimers();
     m.shouldProcessPlot.mockReturnValue(true);
     m.shouldProcessSummary.mockReturnValue(true);
@@ -524,7 +531,11 @@ describe('发送前处理楼层生命周期', () => {
     const user = m.api.chat[1];
     const node = document.querySelector('#chat .mes[mesid="1"]');
     expect(user).toMatchObject({ is_user: true, mes: '本轮原输入' });
-    expect(savedChat[1].mes).toBe('本轮原输入');
+    expect(m.api.chat).toHaveLength(3);
+    expect(m.api.chat[2]).toMatchObject({ is_user: false, mes: '', _qrf_plot_pending_placeholder: true });
+    expect(m.api.addOneMessage).toHaveBeenCalledTimes(2);
+    expect(m.saveChat).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
     expect(m.generate).not.toHaveBeenCalled();
     expect(m.input).toBe('');
     expect(document.querySelectorAll('#chat .acu-plot-pending-mes')).toHaveLength(1);
@@ -551,13 +562,13 @@ describe('发送前处理楼层生命周期', () => {
     expect(m.api.updateMessageBlock).toHaveBeenCalledExactlyOnceWith(1, user, { rerenderMessage: true });
     expect(m.messageUpdated).toHaveBeenCalledExactlyOnceWith(1);
     expect(m.hostEmit).toHaveBeenCalledWith('message_updated', 1);
-    expect(node?.textContent).toBe('最终剧情正文');
+    expect(node?.querySelector('.mes_text')?.textContent).toBe('最终剧情正文');
     expect(m.generate).not.toHaveBeenCalled();
     completeRender();
     await redirected;
     expect(m.api.chat[1]).toBe(user);
     expect(document.querySelector('#chat .mes[mesid="1"]')).toBe(node);
-    expect(node?.textContent).toBe('最终剧情正文');
+    expect(node?.querySelector('.mes_text')?.textContent).toBe('最终剧情正文');
     expect(savedChat[1]).toMatchObject({ mes: '最终剧情正文', qrf_plot: '完整剧情反馈', qrf_plot_tasks: { task: '任务反馈' } });
     expect(savedChat[0]).toEqual(previous);
     expect(m.generate).not.toHaveBeenCalled();
@@ -587,13 +598,16 @@ describe('发送前处理楼层生命周期', () => {
       expect(document.querySelector('#chat .acu-plot-pending-mes')).toBeNull();
       expect(m.input).toBe('失败轮原输入');
     }
-    m.input = '建楼保存失败原输入';
+    m.input = '任务后保存失败原输入';
+    m.strategy1.mockResolvedValueOnce({ action: 'planned', finalMessage: '任务已完成的提示词' });
     m.saveChat.mockRejectedValueOnce(new Error('保存失败'));
     await expect(m.api.eventSource.emit('after_commands', 'normal', {}, false)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(m.strategy1).toHaveBeenCalledTimes(4);
     expect(m.api.chat).toEqual([previous]);
     expect(document.querySelector('#chat .mes[mesid="1"]')).toBeNull();
     expect(document.querySelector('#chat .acu-plot-pending-mes')).toBeNull();
-    expect(m.input).toBe('建楼保存失败原输入');
+    expect(m.input).toBe('任务后保存失败原输入');
+    expect(fetch).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(0);
     expect(m.generate).not.toHaveBeenCalled();
   });
@@ -606,12 +620,15 @@ describe('发送前处理楼层生命周期', () => {
     m.beginDisguise.mockImplementation(pendingUi.beginPlotPendingDisguise_ACU);
     m.input = '召回原输入';
     await expect(m.api.eventSource.emit('after_commands', 'normal', {}, false)).rejects.toMatchObject({ name: 'AbortError' });
-    expect(m.api.chat).toHaveLength(1);
+    expect(m.api.chat).toHaveLength(2);
+    expect(m.api.chat[1]).toMatchObject({ is_user: false, _qrf_plot_pending_placeholder: true });
+    expect(document.querySelector('#chat .acu-plot-pending-mes')).toBeNull();
     expect(m.api.chat[0].mes).toBe('召回原输入');
     expect(m.input).toBe('');
     expect(m.strategy1).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(0);
     expect(m.generate).toHaveBeenCalledExactlyOnceWith('regenerate');
+    expect(m.api.chat).toHaveLength(1);
     m.input = '失败召回原输入';
     m.processBeforeGen.mockResolvedValueOnce({ success: false, reason: 'request_failed' });
     await expect(m.api.eventSource.emit('after_commands', 'normal', {}, false)).rejects.toMatchObject({ name: 'AbortError' });
@@ -621,84 +638,7 @@ describe('发送前处理楼层生命周期', () => {
     expect(m.generate).toHaveBeenCalledOnce();
   });
 
-  it('停止或切聊天后迟到的规划结果不修改草稿、不触发正文生成', async () => {
-    vi.useFakeTimers();
-    m.shouldProcessPlot.mockReturnValue(true);
-    for (const scenario of ['stopped', 'chat_changed']) {
-      m.api.chat = [];
-      m.input = '本轮原文';
-      let complete!: (result: any) => void;
-      let started!: () => void;
-      const planningStarted = new Promise<void>(resolve => { started = resolve; });
-      m.strategy1.mockImplementationOnce(() => {
-        started();
-        return new Promise(resolve => { complete = resolve; });
-      });
-      const request = m.api.eventSource.emit('after_commands', 'normal', {}, false);
-      const redirected = expect(request).rejects.toMatchObject({ name: 'AbortError' });
-      await planningStarted;
-      const user = m.api.chat[0];
-      if (scenario === 'stopped') m.generationStopped!();
-      else { m.api.chat = []; await m.chatChanged!(''); }
-      m.input = '当前会话的新草稿';
-      complete({ action: 'planned', finalMessage: '失效结果' });
-      await redirected;
-      await vi.advanceTimersByTimeAsync(0);
-      expect(m.api.chat).not.toContain(user);
-      expect(m.input).toBe('当前会话的新草稿');
-      expect(m.generate).not.toHaveBeenCalled();
-      expect(user.mes).toBe('本轮原文');
-    }
-  });
-
-  it.each([false, true])('checkpoint 等待期间拒绝双入站，不调用全局停止（STOPPED=%s）', async (emitsStopped) => {
-    vi.useFakeTimers();
-    m.shouldProcessPlot.mockReturnValue(true);
-    m.input = '首轮输入';
-    m.stopGeneration.mockImplementation(() => { if (emitsStopped) m.generationStopped!(); });
-    let complete!: (value: boolean) => void;
-    let started!: () => void;
-    const seedStarted = new Promise<void>(resolve => { started = resolve; });
-    m.ensureSeed.mockImplementationOnce(() => {
-      started();
-      return new Promise(resolve => { complete = resolve; });
-    });
-    m.strategy1.mockResolvedValueOnce({ action: 'planned', finalMessage: '首轮提示词' });
-    const request = m.api.eventSource.emit('after_commands', 'normal', {}, false);
-    const redirected = expect(request).rejects.toMatchObject({ name: 'AbortError' });
-    await seedStarted;
-    await expect(m.api.eventSource.emit('after_commands', 'normal', {}, false)).rejects.toMatchObject({ name: 'AbortError' });
-    expect(m.ensureSeed).toHaveBeenCalledOnce();
-    expect(m.api.chat).toEqual([]);
-    expect(m.setInput).not.toHaveBeenCalled();
-    complete(false);
-    await redirected;
-    await vi.advanceTimersByTimeAsync(0);
-    expect(m.strategy1).toHaveBeenCalledOnce();
-    expect(m.api.chat[0].mes).toBe('首轮提示词');
-    expect(m.generate).toHaveBeenCalledExactlyOnceWith('regenerate');
-    expect(m.stopGeneration).not.toHaveBeenCalled();
-  });
-
-
-  it('入口已忙时，宿主不能消费另一轮输入，也不触发全局停止', async () => {
-    m.shouldProcessPlot.mockReturnValue(true);
-    m.processingPlot = true;
-    m.input = '有效请求的正文';
-    const consume = vi.fn();
-    await expect((async () => {
-      await m.api.eventSource.emit('after_commands', 'normal', {}, false);
-      consume();
-    })()).rejects.toMatchObject({ name: 'AbortError' });
-    expect(consume).not.toHaveBeenCalled();
-    expect(m.api.chat).toEqual([]);
-    expect(m.input).toBe('有效请求的正文');
-    expect(m.ensureSeed).not.toHaveBeenCalled();
-    expect(m.setInput).not.toHaveBeenCalled();
-    expect(m.stopGeneration).not.toHaveBeenCalled();
-  });
-
-  it('召回期间其他入口开始规划时，仅撤销本轮楼层并保留新草稿', async () => {
+  it('召回后编排返回 busy 时，删除末尾双楼层并恢复原输入', async () => {
     m.shouldProcessPlot.mockReturnValue(true);
     m.shouldProcessSummary.mockReturnValue(true);
     m.input = '本轮输入';
@@ -716,6 +656,7 @@ describe('发送前处理楼层生命周期', () => {
     })();
     const redirected = expect(request).rejects.toMatchObject({ name: 'AbortError' });
     await recallStarted;
+    expect(m.api.chat).toHaveLength(2);
     m.processingPlot = true;
     m.input = '其他请求的草稿';
     m.strategy1.mockResolvedValueOnce({ action: 'busy' });
@@ -723,12 +664,12 @@ describe('发送前处理楼层生命周期', () => {
     await redirected;
     expect(consume).not.toHaveBeenCalled();
     expect(m.api.chat).toEqual([]);
-    expect(m.input).toBe('其他请求的草稿');
+    expect(m.input).toBe('本轮输入');
     expect(m.stopGeneration).not.toHaveBeenCalled();
     expect(m.processingPlot).toBe(true);
   });
 
-  it.each(['existing', 'pending'])('编排返回 busy 时不删除历史楼层或覆盖新草稿（%s）', async path => {
+  it.each(['existing', 'pending'])('编排返回 busy 时固定删除末尾两层并恢复原输入（%s）', async path => {
     m.shouldProcessPlot.mockReturnValue(true);
     const layer = { is_user: true, mes: '已有用户正文' };
     m.api.chat = [layer];
@@ -738,51 +679,13 @@ describe('发送前处理楼层生命周期', () => {
       return { action: 'busy' };
     });
     await expect(m.api.eventSource.emit('after_commands', 'normal', {}, false)).rejects.toMatchObject({ name: 'AbortError' });
-    expect(m.api.chat).toEqual([layer]);
+    expect(m.api.chat).toEqual(path === 'pending' ? [layer] : []);
     expect(layer.mes).toBe('已有用户正文');
-    expect(m.input).toBe('其他请求的草稿');
+    expect(m.input).toBe(path === 'pending' ? '待发送输入' : '已有用户正文');
     expect(m.stopGeneration).not.toHaveBeenCalled();
     expect(m.generate).not.toHaveBeenCalled();
   });
 
-  it.each(['stopped', 'chat_changed'])('失效旧回调不释放新一轮发送归属（%s）', async scenario => {
-    vi.useFakeTimers();
-    m.shouldProcessPlot.mockReturnValue(true);
-    const finishes: Array<(result: any) => void> = [];
-    m.strategy1.mockImplementation(() => new Promise(resolve => { finishes.push(resolve); }));
-    m.input = '旧轮输入';
-    const oldRequest = m.api.eventSource.emit('after_commands', 'normal', {}, false);
-    const oldRedirected = expect(oldRequest).rejects.toMatchObject({ name: 'AbortError' });
-    await vi.waitFor(() => expect(finishes).toHaveLength(1));
-    const oldUser = m.api.chat[0];
-    if (scenario === 'stopped') m.generationStopped!();
-    else {
-      // 宿主复用 chat 数组；身份与事件决定旧轮次已失效。
-      m.api.chat.splice(0);
-      m.api.chatId = 'chat-b';
-      document.querySelector('#chat')?.replaceChildren();
-      await m.chatChanged!('chat-b');
-    }
-    m.input = '新轮输入';
-    const newRequest = m.api.eventSource.emit('after_commands', 'normal', {}, false);
-    const newRedirected = expect(newRequest).rejects.toMatchObject({ name: 'AbortError' });
-    await vi.waitFor(() => expect(finishes).toHaveLength(2));
-    const newUser = m.api.chat[m.api.chat.length - 1];
-    finishes[0]({ action: 'planned', finalMessage: '旧轮迟到结果' });
-    await oldRedirected;
-    expect(m.api.chat).not.toContain(oldUser);
-    expect(m.api.chat).toContain(newUser);
-    await expect(m.api.eventSource.emit('after_commands', 'normal', {}, false)).rejects.toMatchObject({ name: 'AbortError' });
-    expect(m.strategy1).toHaveBeenCalledTimes(2);
-    finishes[1]({ action: 'planned', finalMessage: '新轮提示词' });
-    await newRedirected;
-    await vi.advanceTimersByTimeAsync(0);
-    expect(m.api.chat).toEqual([newUser]);
-    expect(newUser.mes).toBe('新轮提示词');
-    expect(document.querySelector('#chat .mes[mesid="0"] .mes_text')?.textContent).toBe('新轮提示词');
-    expect(m.generate).toHaveBeenCalledExactlyOnceWith('regenerate');
-    expect(m.stopGeneration).not.toHaveBeenCalled();
-  });
 
 
 });

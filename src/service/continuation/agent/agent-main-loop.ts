@@ -314,6 +314,7 @@ export function describeAgentActionLabel_ACU(action: AgentMainAction_ACU): strin
   if (action.kind === 'delegate') return `派工 ${action.delegations.length} 项`;
   if (action.kind === 'open_round') return '开局并交给固定工作流';
   if (action.kind === 'correct_materials') return '主会话纠正资料';
+  if (action.kind === 'adjust_progress') return '主会话校准续写进度';
   if (action.kind === 'finalize') return '交付写作指导';
   return '阻断本轮';
 }
@@ -681,7 +682,8 @@ export class ContinuationAgentTurnPlanner_ACU {
     // 通告只证明轮次已展示，不证明工作流已启动。实际动作和启动锚点才阻止重复开局。
     const restartingSameTurn = session.snapshot().messages.some(message => message.turnKey === session.turnKey
       && (message.kind === 'agent' || message.digest === '固定工作流启动' || message.digest === '工作流状态回执'));
-    const openingAvailable = request.directOpening === true && !restartingSameTurn
+    // 已有阶段必须先让主会话对照真实剧情，不能按旧游标直接开局。
+    const openingAvailable = request.directOpening === true && context.execution.task.stages.length === 0 && !restartingSameTurn
       && !session.snapshot().messages.some(message => message.kind === 'user' && message.digest !== '创建续写任务')
       && (!resumedState || (resumedState.nextIteration === 1 && resumedState.ledger.delegationsUsed === 0
         && resumedState.ledger.outcomes.length === 0));
@@ -815,6 +817,31 @@ export class ContinuationAgentTurnPlanner_ACU {
           continue;
         }
 
+        if (action.kind === 'adjust_progress') {
+          if (request.signal?.aborted || !request.isInternalRequestCurrent(identitySeed)) {
+            throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_loop', '进度校准请求已失效', false));
+          }
+          const receipt = request.adjustProgress
+            ? await request.adjustProgress(action)
+            : { status: 'rejected' as const, message: '本轮不允许调整进度；正文重试必须保持原轮次身份' };
+          context.execution = request.readContext();
+          if (receipt.status === 'committed') {
+            resetLedgerForAuthorityChange();
+            finalReview = { status: 'not_started', candidateFingerprint: '', candidateSummary: '', feedback: '' };
+            postReviewDecisionAvailable = false;
+            session.turnKey = conversationTurnKeyOf();
+          }
+          session.record([{ kind: 'tool', text: JSON.stringify(receipt), digest: '进度校准回执', turnKey: session.turnKey }]);
+          if (receipt.status === 'committed') {
+            session.record([{ kind: 'turn', text: buildAgentTurnAnnouncement_ACU(context, false), digest: describeRunLabel_ACU(context), turnKey: session.turnKey }]);
+          }
+          await session.flush();
+          logAgentSession_ACU({ kind: 'thought', title: '进度校准回执', detail: JSON.stringify(receipt), ok: receipt.status === 'committed' });
+          iteration += 1;
+          persistRunState(iteration);
+          continue;
+        }
+
         if (action.kind === 'correct_materials') {
           const receipt = await correctAgentMaterials_ACU({
             action, chat, conversation: session.snapshot(),
@@ -877,8 +904,8 @@ export class ContinuationAgentTurnPlanner_ACU {
           const guidance = repeated
             ? '同一批问题定向重试仍未合格，不要原样再次 open_round。已核实的字段错误可用 correct_materials 直接纠正；用户已明确选择跳过旧历史时，用 correct_materials 登记新追溯起点。只有纠正保存成功、实际范围或资料版本改变后再 open_round；没有可执行的纠正或仍需用户决定时输出 block。'
             : workflow.pendingFixes.length
-              ? '资料维护未合格。你是和用户对话的主会话，要针对子代理反馈制定修缮方案，不要直接停下：先对照回执中每条 pending 的 module、violations 与 lastError 判断原因（缺栏、ID 不存在、修订号冲突、枚举或格式不合法、正文证据不足），再输出一次 open_round，在 focus 中逐条写明修缮方案——修哪条记录的哪一栏、依据哪一楼正文、不许做什么（例如已删除的条目不要重建）。结算代理会带着待修复清单定向修缮。缺口属于正文证据不足或需要用户裁决时不要硬修，改为 block 向用户说明缺口并给出建议。总纲与阶段大纲仍由 open_round 固定工作流维护，只有网页检索可按需 delegate web-researcher。'
-              : '本轮工作流没有产出可交付的写作指令。先按回执判断原因：终审意见可以修正时，再输出一次 open_round，在 focus 中写明针对这些意见的修订方向；无法修正的硬冲突或需要用户决定的事项，用 block 向用户说明。总纲与阶段大纲仍由 open_round 固定工作流维护，只有网页检索可按需 delegate web-researcher。';
+              ? '资料维护未合格。你是和用户对话的主会话，要针对子代理反馈制定修缮方案，不要直接停下：先对照回执中每条 pending 的 module、violations 与 lastError 判断原因（缺栏、ID 不存在、修订号冲突、枚举或格式不合法、正文证据不足），再输出一次 open_round，在 focus 中逐条写明修缮方案——修哪条记录的哪一栏、依据哪一楼正文、不许做什么（例如已删除的条目不要重建）。结算代理会带着待修复清单定向修缮。缺口属于正文证据不足或需要用户裁决时不要硬修，改为 block 向用户说明缺口并给出建议。总纲可用 correct_materials 修正或 delegate arc-architect 维护；阶段大纲可单独 delegate outline-architect 重规划。结构和进度保存成功后再 open_round。'
+              : '本轮工作流没有产出可交付的写作指令。先按回执判断原因：终审意见可以修正时，再输出一次 open_round，在 focus 中写明针对这些意见的修订方向；无法修正的硬冲突或需要用户决定的事项，用 block 向用户说明。总纲可用 correct_materials 修正或 delegate arc-architect 维护；阶段大纲可单独 delegate outline-architect 重规划。结构和进度保存成功后再 open_round。';
           const correctionGuide = renderAgentCorrectionGuide_ACU(session.snapshot(), context.moduleSnapshot);
           session.record([{ kind: 'tool', text: `${workflow.summary}\n${guidance}\n${correctionGuide}`, digest: '工作流升级主会话', turnKey: session.turnKey }]);
           await session.flush();
@@ -1564,7 +1591,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     iteration: number,
     nativeCalls: readonly AiNativeToolCall_ACU[] = [],
   ): Promise<void> {
-    const exhaustedText = `read-once-exhausted：read/search 工具批次已用尽（本次运行只允许一个成功读取批次，尝试上限 ${budget.maxReads} 次）。请基于已有资料直接输出决策动作（open_round / delegate / finalize / block）；总纲与阶段大纲由 open_round 固定工作流维护。`;
+    const exhaustedText = `read-once-exhausted：read/search 工具批次已用尽（本次运行只允许一个成功读取批次，尝试上限 ${budget.maxReads} 次）。请基于已有资料决策：correct_materials 修正资料或总纲，delegate 要求总纲或阶段大纲修改，adjust_progress 校准阶段与轮次，准备完成后 open_round；无法继续时 block。`;
     // 唯一成功批次用过后仍走一次结算：重复与收窄地址照常回如实提示，新地址一律不注入正文。
     const readOnceExhausted = toolUsage.successfulReadBatch;
     if (toolUsage.batchesUsed >= budget.maxReads) {
@@ -2018,7 +2045,7 @@ export class ContinuationAgentTurnPlanner_ACU {
    */
   private renderStoryArcState_ACU(context: AgentResolveContext_ACU): string {
     if (!hasActiveStoryArc_ACU(context.moduleSnapshot)) {
-      return '故事总纲：尚未建立。输出 open_round 后，固定工作流会先调用 arc-architect 建立一条全书方向与若干卷台阶，再准备可执行阶段大纲；主 Agent 不直接 delegate 这些内部角色。';
+      return '故事总纲：尚未建立。可 delegate arc-architect 建立全书方向与卷台阶，再单独 delegate outline-architect 准备阶段大纲；也可用 open_round 固定工作流准备。';
     }
     const completed = context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber);
     const unregistered = findUnregisteredStageNumbers_ACU(context.moduleSnapshot, completed);
@@ -2167,8 +2194,8 @@ export class ContinuationAgentTurnPlanner_ACU {
     apiDependencies?: ContinuationApiPresetDependencies_ACU,
     outlineMaintenanceReserveAvailable = false,
   ): Promise<{ snapshot: AgentModuleSnapshot_ACU; usedOutlineMaintenanceReserve: boolean }> {
-    const internalWorkflowDelegations = action.delegations.filter(item => item.agentName === AGENT_OUTLINE_AGENT_NAME_ACU || item.agentName === 'arc-architect');
-    const normalDelegations = action.delegations.filter(item => item.agentName !== AGENT_OUTLINE_AGENT_NAME_ACU && item.agentName !== 'arc-architect');
+    const outlineDelegations = action.delegations.filter(item => item.agentName === AGENT_OUTLINE_AGENT_NAME_ACU);
+    const normalDelegations = action.delegations.filter(item => item.agentName !== AGENT_OUTLINE_AGENT_NAME_ACU);
     // 波次并发门禁按本波实际派出渠道的解析结果判定：只有真实落到酒馆连接（全局
     // profile 切换串行队列）或主 API（内部请求归因）的渠道才必须串行；fixed 自定义
     // 渠道恢复并发，与填表分组并发对齐。未派出角色的渠道不拖累本波上限；解析结果
@@ -2205,8 +2232,37 @@ export class ContinuationAgentTurnPlanner_ACU {
       });
     };
 
-    for (const delegation of internalWorkflowDelegations) {
-      rejectImmediately(delegation.agentName, `${delegation.agentName} 已由固定工作流内部调度，主 Agent 不能直接 delegate。请输出 open_round，本次未消耗派工额度。`);
+    // 总纲写入与阶段重规划有数据依赖，不能在同一波并发修改。
+    for (const delegation of outlineDelegations) {
+      if (action.delegations.length !== 1) {
+        rejectImmediately(delegation.agentName, '阶段大纲必须单独委派；先完成总纲或资料维护，收到回执后再重规划。');
+        continue;
+      }
+      if (!request.applyOutline) {
+        rejectImmediately(delegation.agentName, '本轮不允许修改阶段大纲；正文重试必须保持原轮次身份。');
+        continue;
+      }
+      const used = ledger.perAgent.get(delegation.agentName) ?? 0;
+      if (!outlineMaintenanceReserveAvailable && (ledger.delegationsUsed >= budget.maxDelegations || used >= budget.maxSameAgent)) {
+        rejectImmediately(delegation.agentName, '阶段大纲派工额度已用尽。');
+        continue;
+      }
+      ledger.delegationsUsed += 1;
+      ledger.perAgent.set(delegation.agentName, used + 1);
+      usedOutlineMaintenanceReserve = outlineMaintenanceReserveAvailable;
+      const entry = logAgentSession_ACU({ kind: 'outline_op', agentName: delegation.agentName, title: '阶段大纲规划中', detail: delegation.prompt, status: 'running' });
+      try {
+        if (request.signal?.aborted || !request.isInternalRequestCurrent(request.createInternalRequestIdentity(0))) throw new Error('阶段大纲请求已失效');
+        const result = await request.applyOutline(delegation.prompt);
+        context.execution = request.readContext();
+        const ok = !result.requiresReview && !result.stopped;
+        ledger.outcomes.push({ agentName: delegation.agentName, ok, summary: result.summary, detail: result.summary, rejectedReason: ok ? '' : result.summary });
+        updateAgentSession_ACU(entry, { title: ok ? '阶段大纲已更新' : '阶段大纲等待处理', detail: result.summary, ok });
+      } catch (error) {
+        const reason = compactAgentProtocolError_ACU(error);
+        ledger.outcomes.push({ agentName: delegation.agentName, ok: false, summary: '', detail: '', rejectedReason: reason });
+        updateAgentSession_ACU(entry, { title: '阶段大纲未更新', detail: reason, ok: false });
+      }
     }
 
     const accepted: AgentDelegation_ACU[] = [];

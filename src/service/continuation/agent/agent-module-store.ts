@@ -998,7 +998,7 @@ export function renderAgentActiveVolumePlanningContext_ACU(snapshot: AgentModule
 export function renderAgentStoryArc_ACU(snapshot: AgentModuleSnapshot_ACU, completedStageNumbers: readonly number[] = []): string {
   const head = `当前修订号=${snapshot.revisions.storyArc}`;
   const active = snapshot.storyArc.filter(entry => !entry.retired);
-  if (!active.length) return `${head}\n当前还没有故事总纲。总纲缺失时无法判断本阶段该走到哪一步；输出 open_round 后，固定工作流会先调用 arc-architect 建立总纲，主 Agent 不直接派工。`;
+  if (!active.length) return `${head}\n当前还没有故事总纲。可 delegate arc-architect 建立全书方向与卷台阶，或用 open_round 固定工作流先建立总纲；已有总纲可由主会话用 correct_materials 修正或委派维护。`;
   const sorted = [...active].sort(compareStoryArc_ACU);
   return truncateAgentBlock_ACU(`${head}\n${sorted.map(renderStoryArcEntry_ACU).join('\n')}\n\n${renderAgentActiveVolumePlanningContext_ACU(snapshot, completedStageNumbers)}`);
 }

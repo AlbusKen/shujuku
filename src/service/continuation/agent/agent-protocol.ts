@@ -601,6 +601,23 @@ export function parseAgentMainAction_ACU(payload: Record<string, unknown>, allow
       dispatchWebResearcher: payload.dispatchWebResearcher === true,
     };
   }
+  if (action === 'adjust_progress') {
+    const allowed = ['action', 'thought', 'reason', 'stageId', 'revision', 'nextTurnId', 'completeStage'];
+    if (Object.keys(payload).some(key => !allowed.includes(key))) failProtocol_ACU('adjust_progress 含未声明的参数');
+    const reason = readText_ACU(payload.reason).trim();
+    const stageId = readText_ACU(payload.stageId).trim();
+    const revision = payload.revision;
+    const nextTurnId = payload.nextTurnId;
+    const completeStage = payload.completeStage;
+    if (!reason || !stageId) failProtocol_ACU('adjust_progress 必须提供非空 reason 与 stageId');
+    if (typeof revision !== 'number' || !Number.isInteger(revision) || revision < 1) failProtocol_ACU('revision 必须是正整数');
+    if (nextTurnId !== undefined && (typeof nextTurnId !== 'string' || !nextTurnId.trim())) failProtocol_ACU('nextTurnId 必须是非空轮次 ID');
+    if (completeStage !== undefined && typeof completeStage !== 'boolean') failProtocol_ACU('completeStage 必须是布尔值');
+    if ((nextTurnId !== undefined) === (completeStage !== undefined)) failProtocol_ACU('nextTurnId 与 completeStage 必须且只能给一项');
+    return { kind: 'adjust_progress', thought, reason, stageId, revision: revision as number,
+      ...(typeof nextTurnId === 'string' ? { nextTurnId: nextTurnId.trim() } : { completeStage: completeStage as boolean }),
+    };
+  }
   if (action === 'correct_materials') {
     const allowed = ['action', 'thought', 'reason', 'sql', 'settlementStartIndex', 'userMessageId'];
     if (Object.keys(payload).some(key => !allowed.includes(key))) failProtocol_ACU('correct_materials 含未声明的参数');
@@ -639,7 +656,7 @@ export function parseAgentMainAction_ACU(payload: Record<string, unknown>, allow
   if (action === 'read' || action === 'search') {
     return { kind: 'tools', thought, calls: [parseAgentToolCall_ACU(payload)] };
   }
-  failProtocol_ACU(`action 必须是 read / search / delegate / open_round / correct_materials / finalize / block 之一；总纲与阶段大纲由 open_round 固定工作流维护，实际收到：${action || '(空)'}`);
+  failProtocol_ACU(`action 必须是 read / search / delegate / open_round / correct_materials / adjust_progress / finalize / block 之一；总纲修改可用 correct_materials 或 delegate arc-architect，阶段大纲修改单独 delegate outline-architect，实际收到：${action || '(空)'}`);
 }
 
 export function parseAgentComposerOutput_ACU(payload: Record<string, unknown>): AgentComposerOutput_ACU {

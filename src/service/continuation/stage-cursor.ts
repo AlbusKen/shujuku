@@ -13,6 +13,9 @@ import type { ContinuationEnvelope_ACU, ContinuationStage_ACU, ContinuationTask_
  */
 export function reconcileTaskCursorFromChat_ACU(task: ContinuationTask_ACU, chatLength: number): ContinuationTask_ACU {
   if (!Number.isInteger(chatLength) || chatLength < 0) return task;
+  const selection = [...(task.progressSelections ?? [])].reverse().find(item => item.messageIndex < chatLength);
+  // 阶段交接随新阶段一起保存选择；恢复时只采用仍有聊天依据的最新选择。
+  const selectedStageId = selection?.stageId ?? null;
   const completions = task.timeline.filter(entry => entry.kind === 'turn_completed' && entry.stageId);
   const survivingByStage = new Map<string, number>();
   const hasAnchorByStage = new Map<string, boolean>();
@@ -34,17 +37,25 @@ export function reconcileTaskCursorFromChat_ACU(task: ContinuationTask_ACU, chat
   const stages = task.stages.map((stage, index) => {
     const revision = stage.revisions.find(item => item.revision === stage.activeRevision) ?? null;
     const totalTurns = revision?.outline.totalTurns ?? 0;
-    const hasAnchor = hasAnchorByStage.get(stage.stageId) === true;
+    // 大纲重规划保护已完成前缀，校准基线在后续修订中仍然有效。
+    const adjustments = stage.progressAdjustments ?? [];
+    const adjustment = [...adjustments].reverse().find(item => item.messageIndex < chatLength);
+    const stageCompletions = task.timeline.slice(adjustment?.timelineOffset ?? 0)
+      .filter(entry => entry.kind === 'turn_completed' && entry.stageId === stage.stageId);
+    // 校准是进度基线，不是假造的宿主完成记录；基线之后仍按真实楼层恢复。
+    const hasAnchor = hasAnchorByStage.get(stage.stageId) === true || adjustments.length > 0;
+    if (hasAnchor) hasAnchorByStage.set(stage.stageId, true);
+
     if (!hasAnchor) {
       if (stage.status !== 'completed' && stage.status !== 'abandoned' && stage.status !== 'failed' && firstOpenIndex < 0) {
         firstOpenIndex = index;
       }
       return stage;
     }
-    const recorded = completions.filter(entry => entry.stageId === stage.stageId).length;
-    let surviving = 0;
-    for (const entry of completions) {
-      if (entry.stageId !== stage.stageId) continue;
+    const baseline = adjustment?.completedTurns ?? 0;
+    const recorded = baseline + stageCompletions.length;
+    let surviving = baseline;
+    for (const entry of stageCompletions) {
       if (typeof entry.messageIndex === 'number') {
         if (entry.messageIndex < chatLength) surviving += 1;
         else break;
@@ -53,6 +64,7 @@ export function reconcileTaskCursorFromChat_ACU(task: ContinuationTask_ACU, chat
       }
     }
     surviving = Math.min(surviving, recorded, totalTurns);
+    survivingByStage.set(stage.stageId, surviving);
     const cursor = cursorFromCompletedTurns_ACU(revision, surviving);
     const fullyDone = totalTurns > 0 && surviving >= totalTurns;
     let nextStatus: ContinuationStage_ACU['status'] = stage.status;
@@ -74,7 +86,7 @@ export function reconcileTaskCursorFromChat_ACU(task: ContinuationTask_ACU, chat
     return { ...stage, completedTurns: surviving, activeNodeIndex: cursor.nodeIndex, activeTurnIndex: cursor.turnIndex, status: nextStatus };
   });
 
-  if (firstOpenIndex >= 0) {
+  if (firstOpenIndex >= 0 && !selectedStageId) {
     for (let index = firstOpenIndex + 1; index < stages.length; index += 1) {
       const stage = stages[index];
       const hasAnchor = hasAnchorByStage.get(stage.stageId) === true;
@@ -87,7 +99,13 @@ export function reconcileTaskCursorFromChat_ACU(task: ContinuationTask_ACU, chat
   }
 
   const firstOpen = stages.find(stage => stage.status !== 'completed' && stage.status !== 'abandoned' && stage.status !== 'failed') ?? null;
-  const activeStageId = firstOpen?.stageId ?? task.activeStageId;
+  const selectedIndex = stages.findIndex(stage => stage.stageId === selectedStageId);
+  const selected = stages[selectedIndex];
+  const nextSelected = selected?.status === 'completed'
+    ? stages.slice(selectedIndex + 1).find(stage => stage.status !== 'completed' && stage.status !== 'abandoned' && stage.status !== 'failed')
+    : null;
+  const activeStageId = selected && (selected.status === 'running' || selected.status === 'completed')
+    ? nextSelected?.stageId ?? selected.stageId : firstOpen?.stageId ?? task.activeStageId;
   if (activeStageId !== task.activeStageId) changed = true;
   if (!changed) return task;
   return { ...task, activeStageId, stages };

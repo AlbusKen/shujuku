@@ -65,8 +65,8 @@ describe('Agent 目录渲染', () => {
     expect(catalog).toContain('无（只返回建议）');
     expect(catalog).not.toContain('你只输出一个 JSON 对象');
     expect(catalog).not.toContain('requirements-maintainer');
-    expect(catalog).not.toContain('arc-architect');
-    expect(catalog).not.toContain('outline-architect');
+    expect(catalog).toContain('arc-architect');
+    expect(catalog).toContain('outline-architect');
     expect(catalog).not.toContain('instruction-composer');
   });
 
@@ -156,8 +156,8 @@ describe('Agent 读写集解析', () => {
     const noOutline = context_ACU();
     noOutline.execution = { ...noOutline.execution, stage: null, revision: null, node: null, turn: null, turnNumber: null, nodeTurnNumber: null } as any;
     expect(resolveAgentReadToken_ACU('$OUTLINE_WINDOW', noOutline).text).toContain('还没有阶段大纲');
-    expect(resolveAgentReadToken_ACU('$OUTLINE_WINDOW', noOutline).text).toContain('输出 open_round');
-    expect(resolveAgentReadToken_ACU('$OUTLINE_WINDOW', noOutline).text).toContain('主 Agent 不直接派工 outline-architect');
+    expect(resolveAgentReadToken_ACU('$OUTLINE_WINDOW', noOutline).text).toContain('open_round 固定工作流');
+    expect(resolveAgentReadToken_ACU('$OUTLINE_WINDOW', noOutline).text).toContain('可单独 delegate outline-architect 创建');
     expect(resolveAgentReadToken_ACU('$CURRENT_TURN_GOAL', noOutline).text).toContain('尚无可执行的大纲轮次');
 
     const completed = context_ACU();

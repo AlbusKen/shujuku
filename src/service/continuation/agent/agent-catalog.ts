@@ -224,8 +224,8 @@ const KIND_WRITE_LABELS_ACU: Record<AgentSubagentKind_ACU, string> = {
 };
 
 function isDefinitionVisible_ACU(name: AgentSubagentName_ACU, options?: AgentCatalogOptions_ACU): boolean {
-  // 总纲与写作指令都由 open_round 固定工作流内部调度，不向主 Agent 暴露直接派工入口。
-  if (name === AGENT_INSTRUCTION_COMPOSER_NAME_ACU || name === 'arc-architect') return false;
+  // 写作指令由固定工作流交付；总纲可由主会话按剧情变化要求维护。
+  if (name === AGENT_INSTRUCTION_COMPOSER_NAME_ACU) return false;
   if (name === AGENT_WEB_RESEARCHER_NAME_ACU) return options?.webResearchEnabled === true;
   return true;
 }
@@ -247,7 +247,7 @@ export function renderAgentSubagentCatalog_ACU(options?: AgentCatalogOptions_ACU
         : `  读取: 仅限角色 profile 的自有/强相关地址；派工时用 reads 给出种子地址${getAgentSubagentAccessProfile_ACU(definition.kind).allowSearch ? '，并可用 search 定位' : '，不提供 search 工具'}`,
       `  写入: ${KIND_WRITE_LABELS_ACU[definition.kind]}`,
     ].join('\n'));
-  return blocks.join('\n');
+  return [...blocks, `- name: ${AGENT_OUTLINE_AGENT_NAME_ACU}\n  类型: 阶段大纲\n  职责: 按主会话给出的剧情依据创建、继续或重规划当前阶段大纲\n  写入: 当前阶段的新修订；保留已发生的完成前缀\n  调用: 单独 delegate，prompt 写清修改方向；总纲修改完成后再派阶段大纲`].join('\n');
 }
 
 /**

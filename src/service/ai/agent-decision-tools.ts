@@ -7,8 +7,8 @@ import type { AiNativeToolCall_ACU, AiNativeToolDefinition_ACU } from './native-
 
 export type AgentDecisionToolName_ACU = 'open_round' | 'delegate' | 'finalize' | 'block';
 export const AGENT_DECISION_TOOL_NAMES_ACU: readonly AgentDecisionToolName_ACU[] = ['open_round', 'delegate', 'finalize', 'block'];
-export type ContinuationDecisionToolName_ACU = AgentDecisionToolName_ACU | 'correct_materials';
-export const CONTINUATION_DECISION_TOOL_NAMES_ACU: readonly ContinuationDecisionToolName_ACU[] = [...AGENT_DECISION_TOOL_NAMES_ACU, 'correct_materials'];
+export type ContinuationDecisionToolName_ACU = AgentDecisionToolName_ACU | 'correct_materials' | 'adjust_progress';
+export const CONTINUATION_DECISION_TOOL_NAMES_ACU: readonly ContinuationDecisionToolName_ACU[] = [...AGENT_DECISION_TOOL_NAMES_ACU, 'correct_materials', 'adjust_progress'];
 export const AGENT_SUBMIT_TOOL_NAME_ACU = 'submit';
 
 const closed_ACU = (properties: Record<string, unknown>, required: readonly string[] = []): Record<string, unknown> => ({
@@ -57,6 +57,14 @@ export function continuationDecisionTools_ACU(names: readonly ContinuationDecisi
       userMessageId: { type: 'integer', minimum: 1 },
       thought: thought_ACU,
     }, ['reason'])),
+    adjust_progress: fn_ACU('adjust_progress', '依据实际剧情选择当前阶段和下一轮，或修改阶段完结状态。stageId 与 revision 从阶段目录复制；nextTurnId 选择该阶段接下来执行的已有轮次，其前面的规划轮次视为完成，同时切换当前阶段。completeStage=true 标记阶段完结；false 重新开启阶段，从其最后一轮接续。nextTurnId 与 completeStage 必须且只能给一项，reason 写清依据。选择阶段不自动完结其他阶段，也不推进资料结算水位。总纲修改用 correct_materials 或 delegate arc-architect；阶段大纲修改单独 delegate outline-architect。等 committed 回执后再 open_round；正文重试不可用。', closed_ACU({
+      reason: text_ACU('剧情依据或用户要求，不能为空。'),
+      stageId: text_ACU('已有阶段的稳定 ID。'),
+      revision: { type: 'integer', minimum: 1 },
+      nextTurnId: text_ACU('接下来执行的已有轮次 ID；其前面的轮次视为完成。'),
+      completeStage: { type: 'boolean', description: 'true 标记完结；false 重新开启阶段，从最后一轮接续。' },
+      thought: thought_ACU,
+    }, ['reason', 'stageId', 'revision'])),
     block: fn_ACU('block', '无法继续时停止本次续写。何时使用：关键资料缺失或冲突，无法写出可靠指令时。reason 必填，unresolved 列出未解决的问题。', closed_ACU({
       reason: text_ACU('停止的原因，不能为空。'),
       unresolved: texts_ACU(),

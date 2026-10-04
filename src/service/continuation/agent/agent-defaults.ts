@@ -1454,10 +1454,44 @@ export function withV45MainCorrection_ACU(role: keyof ContinuationAgentPrompts_A
     : { ...segment });
 }
 
-/** 当前默认：主会话具备受校验的资料纠正及用户指定追溯起点能力。 */
-export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+/** 冻结 V45，供后续逐段迁移比对；不得随当前默认演进。 */
+export function buildV45ContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
   const prompts = buildV44ContinuationAgentPrompts_ACU();
   return { ...prompts, main: withV45MainCorrection_ACU('main', prompts.main) };
+}
+
+const V46_PROGRESS_RULE_ACU = '【剧情衔接与结构维护】用户可能在两次续写之间自行演绎。续写前我先对照真实正文、用户要求、总纲和阶段大纲，重新判断当前阶段与下一轮，不把旧游标或新增楼数当成剧情进度。总纲需要调整时，我可用 correct_materials 的 story_arc SQL 提交最小修正，或 delegate arc-architect，写清依据与修改方向；阶段大纲需要修改时，单独 delegate outline-architect 重规划，保留已发生的事实前缀。总纲与阶段大纲有依赖时先改总纲，收到保存回执后再改阶段大纲。位置或完结状态不符时用 adjust_progress：stageId、revision 从阶段目录复制；nextTurnId 选择该阶段接下来执行的轮次并切换当前阶段，其前面的规划轮次视为完成；或 completeStage=true 标记该阶段完结，false 重新开启该阶段。nextTurnId 与 completeStage 只给一项，reason 写清依据。选择阶段不自动完结其他阶段，进度调整也不等于资料已结算。收到成功保存回执后，我再 open_round，以最新正文与用户意图确定焦点；正文已偏离旧规划时先修改结构或定位，不硬按旧轮目标续写。正文重试保持原轮次身份；证据不足先补读，只有确需用户裁决才 block。';
+
+function v46MainContent_ACU(content: string): string {
+  let next = swapLiteral_ACU(content, 'open_round|correct_materials|delegate|finalize|block', 'open_round|correct_materials|adjust_progress|delegate|finalize|block');
+  next = next
+    .replace('用 open_round 把本轮焦点交给固定工作流、按需派工 web-researcher', '用 open_round 把本轮焦点交给固定工作流、按需派工 arc-architect / outline-architect / web-researcher')
+    .replace(/不亲自编或直接修改大纲（[^）]*）/g, '总纲修正使用 correct_materials 或委派 arc-architect，阶段大纲修改委派 outline-architect，均经保存校验')
+    .replace('我只按需派工 web-researcher。', '我可按剧情变化要求 arc-architect 修改总纲、outline-architect 修改阶段大纲，或按需派工 web-researcher。')
+    .replace(/0\. 总纲与阶段大纲由程序固定工作流维护：[^\n]+\n1\. 偏差处理：[^\n]+\n/, '0. 总纲与阶段大纲由主会话统筹：总纲可用 correct_materials 修正或 delegate arc-architect 维护；阶段大纲可单独 delegate outline-architect 创建、继续或重规划。\n1. 偏差处理：先依据真实剧情调整结构或进度，保存成功后再 open_round；不要在旧大纲已失效时硬交付。\n')
+    .replace('9. arc-architect、outline-architect 与 instruction-composer 是固定工作流内部角色，不出现在可派工目录；公开代理仍遵守单代理派工上限。', '9. arc-architect 与 outline-architect 可按需委派并遵守派工预算；instruction-composer 仍由固定工作流交付。')
+    .replace(/结构维护的分工我复述一遍：[^\n]+/, '结构维护由我统筹：总纲可直接修正或委派 arc-architect，阶段大纲修改单独委派 outline-architect；我先对照真实剧情校准阶段、轮次与完结状态，再 open_round，不能硬按失效的旧规划续写。');
+  if (content.startsWith('【子代理使用规则】')) next += `\n${V46_PROGRESS_RULE_ACU}`;
+  if (content.startsWith('【文本协议规范】')) next += '\n\naction = adjust_progress：选择当前阶段与下一轮，或修改阶段完结状态。reason、stageId、revision 必填；nextTurnId 与 completeStage 必须且只能给一项。completeStage=true 标记完结，false 重新开启。stageId、revision、轮次 ID 从阶段目录及大纲窗口复制。\naction = delegate：总纲修改派 arc-architect；阶段大纲修改单独派 outline-architect，prompt 写清真实剧情依据、修改方向和保留内容。先收到结构或进度的保存回执，再 open_round；正文重试保持原轮次身份。';
+  if (content.startsWith('我的行动规则：')) next += `\n${V46_PROGRESS_RULE_ACU}`;
+  return next;
+}
+
+let v46PristineMain_ACU: ContinuationPromptSegment_ACU[] | null = null;
+
+/** 仅迁移完整匹配 V45 默认的主会话段，保留用户正文、追加段及全部元数据。 */
+export function withV46ProgressAdjustment_ACU(role: keyof ContinuationAgentPrompts_ACU, segments: readonly ContinuationPromptSegment_ACU[]): ContinuationPromptSegment_ACU[] {
+  if (role !== 'main') return segments.map(segment => ({ ...segment }));
+  if (!v46PristineMain_ACU) v46PristineMain_ACU = buildV45ContinuationAgentPrompts_ACU().main;
+  return segments.map(segment => v46PristineMain_ACU!.some(previous => previous.role === segment.role && previous.content === segment.content)
+    ? { ...segment, content: v46MainContent_ACU(segment.content) }
+    : { ...segment });
+}
+
+/** 当前默认：主会话对照实际剧情校准进度，再启动固定工作流。 */
+export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+  const prompts = buildV45ContinuationAgentPrompts_ACU();
+  return { ...prompts, main: withV46ProgressAdjustment_ACU('main', prompts.main) };
 }
 
 

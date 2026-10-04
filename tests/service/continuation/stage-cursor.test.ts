@@ -83,6 +83,23 @@ describe('reconcileTaskCursorFromChat_ACU', () => {
     expect(next).not.toBe(task);
     expect(next.stages[0]).toMatchObject({ completedTurns: 2, activeNodeIndex: 0, activeTurnIndex: 2, status: 'running' });
     expect(next.activeStageId).toBe('stage-1');
+
+    // 主会话依据手动演绎校准到第三轮：旧确认记录不能覆盖新基线。
+    const adjusted = { ...task, stages: [{ ...stage, progressAdjustments: [
+      { revision: 1, completedTurns: 2, timelineOffset: task.timeline.length, messageIndex: 6, reason: '用户自行演绎已到第三轮' },
+    ] }] };
+    const calibrated = reconcileTaskCursorFromChat_ACU(adjusted, 7);
+    expect(calibrated.stages[0]).toMatchObject({ completedTurns: 2, activeTurnIndex: 2 });
+    const generated = { ...calibrated, timeline: [...calibrated.timeline, completed('stage-1', 's1-t3', 8, 'after-adjustment')] };
+    expect(reconcileTaskCursorFromChat_ACU(generated, 9).stages[0]).toMatchObject({ completedTurns: 3, activeTurnIndex: 3 });
+    expect(reconcileTaskCursorFromChat_ACU(generated, 7).stages[0]).toMatchObject({ completedTurns: 2, activeTurnIndex: 2 });
+    expect(reconcileTaskCursorFromChat_ACU(generated, 4).stages[0]).toMatchObject({ completedTurns: 2, activeTurnIndex: 2 });
+
+    // 重规划保留完成前缀；新修订继续消费同一校准基线。
+    const revised = { ...calibrated, stages: [{ ...calibrated.stages[0], activeRevision: 2,
+      revisions: [...stage.revisions, { ...stage.revisions[0], revision: 2 }],
+    }] };
+    expect(reconcileTaskCursorFromChat_ACU(revised, 7).stages[0]).toMatchObject({ completedTurns: 2, activeTurnIndex: 2 });
   });
 
   it('回退到更早未完成阶段时，废弃其后没有任何存活完成的阶段', () => {
@@ -106,6 +123,23 @@ describe('reconcileTaskCursorFromChat_ACU', () => {
     expect(next.activeStageId).toBe('stage-1');
     expect(next.stages[0]).toMatchObject({ status: 'running', completedTurns: 3, activeTurnIndex: 3 });
     expect(next.stages[1]).toMatchObject({ status: 'abandoned', completedTurns: 0, activeTurnIndex: 0 });
+
+    // 选择阶段不隐式完结更早阶段，切到第一轮也不能被自动废弃。
+    const selected = { ...taskOf([stageOf(1, 4, 1), stageOf(2, 6, 0)], [], 'stage-2'),
+      progressSelections: [{ stageId: 'stage-2', messageIndex: 5, timelineOffset: 0 }],
+    };
+    const restored = reconcileTaskCursorFromChat_ACU(selected, 6);
+    expect(restored.activeStageId).toBe('stage-2');
+    expect(restored.stages.map(stage => stage.status)).toEqual(['running', 'running']);
+    expect(restored.stages[0].completedTurns).toBe(1);
+
+    // 选定阶段完结后新建第三阶段，保存的交接不能退回尚未完结的第一阶段。
+    const handedOff = { ...selected, activeStageId: 'stage-3', stages: [selected.stages[0], stageOf(2, 6, 6, 'completed'), stageOf(3, 6, 0)],
+      progressSelections: [...selected.progressSelections, { stageId: 'stage-3', messageIndex: 6, timelineOffset: 0 }],
+    };
+    expect(reconcileTaskCursorFromChat_ACU(handedOff, 7).activeStageId).toBe('stage-3');
+    expect(reconcileTaskCursorFromChat_ACU(handedOff, 6).activeStageId).toBe('stage-3');
+    expect(reconcileTaskCursorFromChat_ACU(selected, 5).activeStageId).toBe('stage-1');
   });
 
   it('没有任何带 messageIndex 的完成记录时保持原游标，避免旧信封被误回退', () => {

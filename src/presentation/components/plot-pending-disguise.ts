@@ -1,5 +1,5 @@
-/** 真实用户楼层等待处理期间的 AI 占位，使用酒馆原生 reasoning 样式。 */
-import { jQuery_API_ACU, SillyTavern_API_ACU } from '../../shared/host-api';
+/** 为真实 AI 占位楼层附加酒馆原生 reasoning 等待样式，不增删消息。 */
+import { jQuery_API_ACU } from '../../shared/host-api';
 
 const PENDING_CLASS_ACU = 'acu-plot-pending-mes';
 const STYLE_ID_ACU = 'acu-plot-pending-disguise-style';
@@ -23,7 +23,7 @@ const PENDING_STYLE_ACU = `
 `;
 
 export interface PlotPendingDisguiseHandle_ACU {
-  /** 仅撤销 AI 等待展示，真实用户楼层由聊天网关管理。 */
+  /** 仅撤销等待样式，不删除真实楼层。 */
   finish(): void;
 }
 
@@ -38,15 +38,15 @@ export function isPendingDisguiseGenerationType_ACU(type: unknown): boolean {
   return !NON_SENDING_GENERATION_TYPES_ACU.has(String(type ?? ''));
 }
 
-/** 只添加 AI 等待展示，不改用户楼层，也不写发送框。 */
+/** 样式绑定到已渲染的真实 AI 楼层；展示不可用时不阻断任务。 */
 export function beginPlotPendingDisguise_ACU(
-  options: { visible?: boolean } = {},
+  options: { messageIndex: number; visible?: boolean },
 ): PlotPendingDisguiseHandle_ACU | undefined {
   if (options.visible === false) return;
   const jq = jQuery_API_ACU;
   const chat = jq?.('#chat')?.[0];
-  const template = jq?.('#message_template .mes')?.[0];
-  if (!chat || !template) throw new Error('酒馆消息模板不可用');
+  const ai = chat?.querySelector<HTMLElement>(`.mes[mesid="${options.messageIndex}"]`);
+  if (!chat || !ai) return;
   const doc = chat.ownerDocument;
   let style = doc.getElementById(STYLE_ID_ACU);
   if (!style) {
@@ -55,23 +55,9 @@ export function beginPlotPendingDisguise_ACU(
     doc.head.appendChild(style);
   }
   style.textContent = PENDING_STYLE_ACU;
-  const api = SillyTavern_API_ACU;
-  const ai = template.cloneNode(true) as HTMLElement;
-  const prepare = (node: HTMLElement, isUser: boolean, name: string) => {
-    node.classList.add(PENDING_CLASS_ACU);
-    node.setAttribute('mesid', 'acu-plot-pending');
-    node.setAttribute('is_user', String(isUser));
-    node.setAttribute('is_system', 'false');
-    node.setAttribute('ch_name', name);
-    const title = node.querySelector('.name_text');
-    if (title) title.textContent = name;
-    const avatar = node.querySelector<HTMLImageElement>('.avatar img');
-    const previous = chat.querySelector<HTMLImageElement>(`.mes[is_user="${isUser}"] .avatar img`);
-    if (avatar && previous) avatar.src = previous.src;
-    node.querySelector('.mes_text')?.replaceChildren();
-  };
-  prepare(ai, false, api?.name2 || '');
-  // 复用酒馆消息模板的原生 reasoning 面板与状态，不另造动画。
+  disposePlotPendingDisguise_ACU();
+  ai.classList.add(PENDING_CLASS_ACU);
+  // 复用宿主已经渲染的 reasoning 面板，不另建 DOM 占位。
   ai.classList.add('reasoning');
   ai.dataset.reasoningState = 'thinking';
   const details = ai.querySelector<HTMLDetailsElement>('.mes_reasoning_details');
@@ -86,11 +72,12 @@ export function beginPlotPendingDisguise_ACU(
     thinking.setAttribute('role', 'status');
     thinking.setAttribute('aria-live', 'polite');
   }
-  chat.append(ai);
   chat.scrollTop = chat.scrollHeight;
   const handle: PlotPendingDisguiseHandle_ACU = {
     finish(): void {
-      ai.remove();
+      ai.classList.remove(PENDING_CLASS_ACU, 'reasoning');
+      delete ai.dataset.reasoningState;
+      if (details) delete details.dataset.state;
       if (activeDisguise_ACU === handle) activeDisguise_ACU = null;
     },
   };

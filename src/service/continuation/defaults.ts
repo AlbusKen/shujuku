@@ -247,6 +247,8 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V43_ACU = 'spv5.1-continu
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V44_ACU = 'spv5.2-continuation-id-autofill-v44';
 /** 主会话可直接纠正资料并登记用户指定的追溯起点；仅迁移完整匹配的旧默认段。 */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V45_ACU = 'spv5.3-continuation-main-correction-v45';
+/** 主会话对照手动演绎后的剧情校准进度；只迁移完整匹配的旧默认段。 */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V46_ACU = 'spv5.4-continuation-progress-adjustment-v46';
 
 /**
  * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
@@ -356,7 +358,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V45_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V46_ACU,
   };
 }
 

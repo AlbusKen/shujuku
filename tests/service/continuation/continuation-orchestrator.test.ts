@@ -274,6 +274,41 @@ describe('ContinuationOrchestrator_ACU', () => {
     await orchestrator.replanRemaining({ instruction: '换个方向' });
     expect(store.readPersisted()!.activeTask!.stages[0].agentTurnLabel?.revision).toBe(1);
     expect(store.readPersisted()!.activeTask!.stages[0].activeRevision).toBe(2);
+    // 通过生产回调保存校准，不旁路改写首楼快照。
+    executionEngine.prepareCurrentTurnInstruction.mockImplementationOnce(async (
+      _lease: unknown, _attempt: unknown, applyOutline: (text: string) => Promise<unknown>,
+      _signal: unknown, _label: unknown,
+      adjustProgress: (action: import('../../../src/service/continuation/agent/agent-model').AgentAdjustProgressAction_ACU) => Promise<import('../../../src/service/continuation/agent/agent-model').AgentAdjustProgressReceipt_ACU>,
+    ) => {
+      const first = store.readPersisted()!.activeTask!.stages[0];
+      const action = { kind: 'adjust_progress' as const, thought: '', reason: '用户自行演绎后的剧情定位', stageId: first.stageId, revision: first.activeRevision };
+      expect((await adjustProgress({ ...action, revision: 1, nextTurnId: 'turn-4' })).status).toBe('rejected');
+      expect((await adjustProgress({ ...action, nextTurnId: 'turn-4' })).status).toBe('committed');
+      expect(new FirstFloorContinuationStore_ACU().read()!.activeTask!.stages[0]).toMatchObject({ completedTurns: 3, activeTurnIndex: 3 });
+      expect((await adjustProgress({ ...action, completeStage: true })).status).toBe('committed');
+      expect((await adjustProgress({ ...action, completeStage: false })).status).toBe('committed');
+      expect(store.readPersisted()!.activeTask!.stages[0]).toMatchObject({ status: 'running', completedTurns: 5 });
+      await adjustProgress({ ...action, completeStage: true });
+      await applyOutline('依据实际剧情创建第二阶段');
+      const second = store.readPersisted()!.activeTask!.stages[1];
+      await adjustProgress({ ...action, nextTurnId: 'turn-2' });
+      expect(new FirstFloorContinuationStore_ACU().read()!.activeTask!.activeStageId).toBe(first.stageId);
+      const secondAction = { ...action, stageId: second.stageId, revision: second.activeRevision };
+      await adjustProgress({ ...secondAction, nextTurnId: 'turn-3' });
+      expect(new FirstFloorContinuationStore_ACU().read()!.activeTask!.activeStageId).toBe(second.stageId);
+      expect(store.readPersisted()!.activeTask!.stages[0].completedTurns).toBe(1);
+      await adjustProgress({ ...secondAction, completeStage: true });
+      await applyOutline('第二阶段完结后衔接第三阶段');
+      const persisted = store.readPersisted()!.activeTask!;
+      expect(persisted.stages).toHaveLength(3);
+      expect(new FirstFloorContinuationStore_ACU().read()!.activeTask!.activeStageId).toBe(persisted.stages[2].stageId);
+      return { identity: {}, instruction: { instruction: '按第三阶段接续', attempts: 1 } };
+    });
+    await orchestrator.continueTask();
+    await orchestrator.continueTask();
+    const restored = new FirstFloorContinuationStore_ACU().read()!.activeTask!;
+    expect(restored.activeStageId).toBe(restored.stages[2].stageId);
+    expect(restored.stages[0]).toMatchObject({ status: 'running', completedTurns: 1 });
   });
 
   it('continueTask 按仍存在的确认楼层回退硬游标，再把校正后的阶段交给 Agent', async () => {

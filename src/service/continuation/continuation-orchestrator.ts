@@ -1,13 +1,13 @@
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { buildDefaultContinuationSettings_ACU } from './defaults';
 import { FirstFloorContinuationStore_ACU } from './continuation-store';
-import { reconcileTaskCursorFromChat_ACU } from './stage-cursor';
+import { cursorFromCompletedTurns_ACU, reconcileTaskCursorFromChat_ACU } from './stage-cursor';
 import { resolveHostRetryMode_ACU } from './host-retry-mode';
 import { acceptPlannedStageRevision_ACU, ContinuationOutlinePlanner_ACU, createPlannedStageRevision_ACU, freezePlannedStageRevision_ACU, type ContinuationOutlinePlanningResult_ACU } from './outline-planner';
 import { listStageOutlineTurns_ACU, resolveContinuationTurnRange_ACU, resolveStageOutlinePacingContext_ACU, validateReplannedStageOutline_ACU, validateStageOutlinePacing_ACU } from './outline-schema';
 import { CONTINUATION_RECOVERABLE_STOP_REASONS_ACU, ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationEnvelope_ACU, type ContinuationError_ACU, type ContinuationHostGenerationCapture_ACU, type ContinuationReplanConstraints_ACU, type ContinuationRevisionReason_ACU, type ContinuationSettings_ACU, type ContinuationStage_ACU, type ContinuationTask_ACU, type ContinuationWriteGuard_ACU, type StageOutline_ACU, type StageRevision_ACU, type TurnAttemptIdentity_ACU } from './model';
 import { StageExecutionEngine_ACU, type ContinuationPreparedTurnInstruction_ACU, type ContinuationExecutionSnapshot_ACU } from './stage-execution-engine';
-import { type AgentConversationAppend_ACU, type AgentOutlineEditOp_ACU, type AgentOutlineOpResult_ACU } from './agent/agent-model';
+import { type AgentAdjustProgressAction_ACU, type AgentAdjustProgressReceipt_ACU, type AgentConversationAppend_ACU, type AgentOutlineEditOp_ACU, type AgentOutlineOpResult_ACU } from './agent/agent-model';
 import { appendAgentConversationToChat_ACU, appendConfirmedAgentTurn_ACU, clearAgentConversationField_ACU } from './agent/agent-conversation-store';
 import { clearAgentModuleField_ACU } from './agent/agent-module-store';
 import { seedAgentUserRequirementsIfEmpty_ACU } from './agent/agent-user-requirements';
@@ -378,6 +378,7 @@ export class ContinuationOrchestrator_ACU {
           async instruction => (await this.applyOutlineOpWithinLease_ACU(chatIdentity, lease, instruction, 'running')).opResult,
           controller.signal,
           async text => this.updateAgentTurnLabelWithinLease_ACU(chatIdentity, lease, task.taskId, text),
+          async action => this.adjustAgentProgressWithinLease_ACU(chatIdentity, lease, task.taskId, action),
         );
         return { ...taskResult_ACU(this.dependencies.store.readPersisted() ?? started!), preparedTurn };
       } catch (error) {
@@ -387,6 +388,59 @@ export class ContinuationOrchestrator_ACU {
         if (abortControllersByChat_ACU.get(chatIdentity) === controller) abortControllersByChat_ACU.delete(chatIdentity);
       }
     });
+  }
+
+  /** 在本轮租约内保存阶段选择、轮次定位及阶段完结状态。 */
+  private async adjustAgentProgressWithinLease_ACU(chatIdentity: string, lease: Lease_ACU, taskId: string, action: AgentAdjustProgressAction_ACU): Promise<AgentAdjustProgressReceipt_ACU> {
+    this.assertLeaseCurrent_ACU(chatIdentity, lease);
+    let receipt: AgentAdjustProgressReceipt_ACU = { status: 'rejected', message: '当前进度不可调整' };
+    await this.dependencies.store.updatePersistedAtomically(current => {
+      this.assertLeaseCurrent_ACU(chatIdentity, lease);
+      const envelope = this.requireEnvelope_ACU(current);
+      const task = this.requireTask_ACU(envelope);
+      if (task.taskId !== taskId || task.status !== 'running' || task.stopReason !== null || task.pendingHostTurn) {
+        receipt = { status: 'rejected', message: '任务已变化或正文轮次仍在等待，不能调整进度' };
+        return envelope;
+      }
+      const stage = task.stages.find(item => item.stageId === action.stageId);
+      const revision = stage?.revisions.find(item => item.revision === stage.activeRevision);
+      const reject = (message: string) => { receipt = { status: 'rejected', message }; return envelope; };
+      if (!stage || !revision?.frozen || action.revision !== stage.activeRevision) return reject('阶段不存在、版本已变化或大纲尚未冻结，请重新读取大纲状态');
+      if (!['running', 'completed', 'abandoned', 'failed'].includes(stage.status)) return reject('待确认的阶段须先确认大纲');
+      if (!action.reason.trim() || (!!action.nextTurnId === (action.completeStage !== undefined))) return reject('必须提供依据，并且只选择下一轮或阶段完结状态之一');
+      const turns = revision.outline.nodes.flatMap(node => node.turns);
+      const completedTurns = action.completeStage === true ? turns.length
+        : action.completeStage === false ? Math.min(stage.completedTurns, turns.length - 1)
+          : turns.findIndex(turn => turn.id === action.nextTurnId);
+      if (completedTurns < 0) return reject('nextTurnId 不属于该阶段当前大纲');
+      const chat = getChatArray_ACU();
+      if (!Array.isArray(chat) || chat.length === 0) return reject('当前聊天没有可保存校准依据的楼层');
+      const cursor = cursorFromCompletedTurns_ACU(revision, completedTurns);
+      const { agentTurnLabel: _label, ...unchanged } = stage;
+      const nextStage: ContinuationStage_ACU = {
+        ...unchanged, status: action.completeStage ? 'completed' : 'running', completedTurns,
+        activeNodeIndex: cursor.nodeIndex, activeTurnIndex: cursor.turnIndex,
+        progressAdjustments: [...(stage.progressAdjustments ?? []), {
+          revision: stage.activeRevision, completedTurns, timelineOffset: task.timeline.length,
+          messageIndex: chat.length - 1, reason: action.reason.trim(),
+        }],
+      };
+      const selectsStage = action.completeStage !== true || task.activeStageId === stage.stageId;
+      const nextTask = reconcileTaskCursorFromChat_ACU({
+        ...task, stages: task.stages.map(item => item.stageId === stage.stageId ? nextStage : item),
+        updatedAt: this.dependencies.now(),
+        ...(selectsStage ? {
+          activeStageId: stage.stageId,
+          progressSelections: [...(task.progressSelections ?? []), { stageId: stage.stageId, messageIndex: chat.length - 1, timelineOffset: task.timeline.length }],
+        } : {}),
+      }, chat.length);
+      receipt = { status: 'committed', message: action.completeStage === true ? '阶段已标记完结'
+        : action.completeStage === false ? '阶段已重新开启并设为当前阶段' : '当前阶段与续写轮次已校准', stageId: stage.stageId, completedTurns };
+      return { ...envelope, activeTask: nextTask };
+    }, { chatIdentity, taskId });
+    // 保存失败直接抛出，不能返回候选的 committed 回执。
+    this.assertLeaseCurrent_ACU(chatIdentity, lease);
+    return receipt;
   }
 
   /** 仅展示用：当前可执行大纲轮次的标注，不改变大纲、宿主身份或正文完成数。 */
@@ -1056,7 +1110,11 @@ export class ContinuationOrchestrator_ACU {
       const at = this.dependencies.now();
       const revision = createPlannedStageRevision_ACU(planned.outline, 1, 'auto_next_stage', instruction, at);
       const nextStage = stageForOutline_ACU(nextStageId, stageNumber, planned.requiresReview ? revision : acceptPlannedStageRevision_ACU(revision, env.settings), planned.requiresReview ? 'awaiting_review' : 'running');
-      result = { ...env, activeTask: { ...t, status: planned.requiresReview ? 'awaiting_outline_review' : endStatus, updatedAt: at, activeStageId: nextStageId, runStageCount: stageNumber, stages: [...t.stages, nextStage], lastError: null, timeline: [...t.timeline, this.timeline_ACU('outline_ready', at, { stageId: nextStageId, revision: 1 })] } };
+      const chatLength = getChatArray_ACU().length;
+      const progressSelections = t.progressSelections?.length && chatLength > 0
+        ? [...t.progressSelections, { stageId: nextStageId, messageIndex: chatLength - 1, timelineOffset: t.timeline.length + 1 }]
+        : t.progressSelections;
+      result = { ...env, activeTask: { ...t, status: planned.requiresReview ? 'awaiting_outline_review' : endStatus, updatedAt: at, activeStageId: nextStageId, runStageCount: stageNumber, stages: [...t.stages, nextStage], lastError: null, timeline: [...t.timeline, this.timeline_ACU('outline_ready', at, { stageId: nextStageId, revision: 1 })], ...(progressSelections ? { progressSelections } : {}) } };
       return result;
     }, guardForTask_ACU(chatIdentity, task));
     return {

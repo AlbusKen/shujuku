@@ -25,11 +25,11 @@ import { cleanChatName_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../.
 import { markPlotIntercept_ACU } from '../../service/plot/plot-logic';
 import { orchestrateTavernHelperHook_ACU, orchestrateAfterCommandsStrategy1_ACU } from '../../service/plot/plot-orchestrator';
 import { flushPlotPendingSave_ACU } from '../../service/runtime/plot-runtime/plot-history-preset';
-import { createUserMessage_ACU, removeUserMessage_ACU, refreshMessageBlock_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
+import { createAiPlaceholderMessage_ACU, createUserMessage_ACU, refreshMessageBlock_ACU, removeLastTwoMessages_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getSendTextareaValue_ACU, setSendTextareaValue_ACU } from '../../shared/host-input';
 import { handleNewMessageDebounced_ACU } from '../triggers/settings-ui-sync/settings-ui-connect';
 import { runOptimizationLogicWithUI_ACU } from '../components/plot-planning-ui';
-import { beginPlotPendingDisguise_ACU, disposePlotPendingDisguise_ACU, isPendingDisguiseGenerationType_ACU, type PlotPendingDisguiseHandle_ACU } from '../components/plot-pending-disguise';
+import { beginPlotPendingDisguise_ACU, isPendingDisguiseGenerationType_ACU } from '../components/plot-pending-disguise';
 import { processSummaryVectorIndexBeforeGenerationWithUI_ACU, rebuildCurrentSummaryVectorIndexWithUI_ACU, rebuildOutdatedSummaryVectorIndexInBackground_ACU, shouldRebuildSummaryVectorIndexWithUI_ACU } from '../components/summary-vector-index-ui';
 import { preloadSummaryVectorIndexCacheForCurrentChat_ACU } from '../../service/vector/summary-vector-index-cache-service';
 import { restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU } from '../../service/vector/summary-vector-index-flush-queue';
@@ -49,13 +49,6 @@ import { autoEnableFlightModeForNewChatIfNeeded_ACU } from '../../service/fill-m
 import { ensureCurrentChatFillModeRecorded_ACU } from '../../service/fill-mode/fill-mode-chat-switch';
 import { isVectorPipelineEnabledForCurrentChat_ACU } from '../../service/fill-mode/fill-mode-gate';
 
-// 仅记录当前发送的归属；停止或切聊天后，迟到结果不得继续生成。
-let pendingFloorSend_ACU: { chat: any[]; cancelled: boolean } | null = null;
-function cancelPendingFloorSend_ACU(): void {
-  if (pendingFloorSend_ACU) pendingFloorSend_ACU.cancelled = true;
-  pendingFloorSend_ACU = null;
-  disposePlotPendingDisguise_ACU();
-}
 
 // [从 state-manager.ts 搬入 presentation 层] 安装发送意图捕捉钩子（DOM 事件绑定）
 async function ensureInitialSeedCheckpointBeforeGeneration_ACU(reason: string, { allowPendingFirstUserMessage = true } = {}) {
@@ -227,7 +220,6 @@ export   function mainInitialize_ACU() {
         }, 60_000);
 
         SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.CHAT_CHANGED, async (chatFileName: string) => {
-          cancelPendingFloorSend_ACU();
           logDebug_ACU(`ACU CHAT_CHANGED event: ${chatFileName}`);
 
           const hasValidChatFileName_ACU = isValidChatFileName_ACU(chatFileName);
@@ -538,7 +530,6 @@ export   function mainInitialize_ACU() {
         if (SillyTavern_API_ACU.eventTypes.GENERATION_STOPPED) {
           SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.GENERATION_STOPPED, () => {
             try {
-              cancelPendingFloorSend_ACU();
               const discarded = discardLatestGenerationContext_ACU();
               // 被中止的生成不会再有 GENERATION_ENDED；通知桥把等待中的续写轮转为可重试，避免卡死。
               void getContinuationHostGenerationBridge_ACU()?.onGenerationStopped(discarded?.seq);
@@ -644,7 +635,7 @@ export   function mainInitialize_ACU() {
             }
         }
 
-        // 先创建真实用户楼层；发送前处理只决定成功重生成或失败撤销本轮。
+        // 固定 user + AI 两层：等待任务返回，再写回重生成或删除末尾两层。
         if (SillyTavern_API_ACU.eventTypes.GENERATION_AFTER_COMMANDS) {
           const source = SillyTavern_API_ACU.eventSource;
           const eventType = SillyTavern_API_ACU.eventTypes.GENERATION_AFTER_COMMANDS;
@@ -657,89 +648,58 @@ export   function mainInitialize_ACU() {
             const input = getSendTextareaValue_ACU();
             const pendingInput = isPendingDisguiseGenerationType_ACU(type) && !!input.trim();
             const chat = SillyTavern_API_ACU.chat;
-            const chatId = SillyTavern_API_ACU.chatId;
-            const characterId = SillyTavern_API_ACU.characterId;
-            const groupId = SillyTavern_API_ACU.groupId;
-            const isSameChat = () => SillyTavern_API_ACU.chat === chat && SillyTavern_API_ACU.chatId === chatId
-              && SillyTavern_API_ACU.characterId === characterId && SillyTavern_API_ACU.groupId === groupId;
             const existing = chat[chat.length - 1];
             if (!pendingInput && !existing?.is_user) return;
             const originalText = pendingInput ? input : String(existing.mes || '');
-            // 原请求不再读取输入框或生成；保存成功后才安排一次重生成。
+            // 阻止宿主继续原发送；成功后只安排一次 regenerate。
             redirectPlotSendEvent_ACU(params);
-            if (pendingFloorSend_ACU || isProcessing_Plot_ACU) return;
-            const send = { chat, cancelled: false };
-            pendingFloorSend_ACU = send;
-            const isCurrent = () => !send.cancelled && pendingFloorSend_ACU === send && isSameChat();
-            const assertCurrent = () => { if (!isCurrent()) throw new Error('本轮发送已停止或聊天已切换'); };
-            const previousMessage = pendingInput ? undefined : JSON.parse(JSON.stringify(existing));
-            let userFloor: Awaited<ReturnType<typeof createUserMessage_ACU>> | undefined;
-            let waiting: PlotPendingDisguiseHandle_ACU | undefined;
             try {
               await ensureInitialSeedCheckpointBeforeGeneration_ACU('generation_after_commands_before_ai', { allowPendingFirstUserMessage: true });
-              assertCurrent();
               if (pendingInput) setSendTextareaValue_ACU('');
-              userFloor = pendingInput ? await createUserMessage_ACU(originalText)
+              const userFloor = pendingInput ? createUserMessage_ACU(originalText)
                 : { chat, message: existing, index: chat.length - 1 };
-              assertCurrent();
-              waiting = beginPlotPendingDisguise_ACU({ visible: settings_ACU.plotSendDisguiseDisabled !== true });
+              const aiFloor = createAiPlaceholderMessage_ACU();
+              beginPlotPendingDisguise_ACU({ messageIndex: aiFloor.index, visible: settings_ACU.plotSendDisguiseDisabled !== true });
+              // 通知在双楼层建好后派发；监听器错误不改变等待期间的楼层。
+              if (pendingInput) {
+                try {
+                  await source.emit(SillyTavern_API_ACU.eventTypes.MESSAGE_SENT, userFloor.index);
+                  await source.emit(SillyTavern_API_ACU.eventTypes.USER_MESSAGE_RENDERED, userFloor.index);
+                } catch (error) {
+                  logWarn_ACU('[发送前处理] 用户楼层事件通知失败:', error);
+                }
+              }
               if (recall) {
                 const result = await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput: originalText, source: 'generation_after_commands' });
-                assertCurrent();
                 if (!result.success) throw new Error('纪要召回失败');
               }
               if (plan) {
-                assertCurrent();
                 const result = await orchestrateAfterCommandsStrategy1_ACU(userFloor.message, userFloor.index, runOptimizationLogicWithUI_ACU);
-                assertCurrent();
                 if (result.action !== 'passthrough' && (result.action !== 'planned' || !result.finalMessage?.trim())) throw new Error('剧情推进未返回有效内容');
                 if (result.action === 'planned') userFloor.message.mes = result.finalMessage;
                 (userFloor.message as ACUMessage)._plot_processed = true;
                 const saved = await flushPlotPendingSave_ACU();
-                assertCurrent();
                 if (saved?.status === 'failed' || saved?.status === 'superseded') throw new Error('剧情推进数据保存失败或轮次已失效');
               }
-              await saveChatToHostStrict_ACU({ verify: true });
-              assertCurrent();
-              userFloor.index = chat.indexOf(userFloor.message);
-              if (userFloor.index < 0) throw new Error('本轮用户楼层已不存在');
+              await saveChatToHostStrict_ACU();
               await refreshMessageBlock_ACU(userFloor.index);
-              assertCurrent();
               recordLastUserSend_ACU(userFloor.index);
               generationGate_ACU.lastUserSendIntentAt = 0;
               redirectPlotSendEvent_ACU(params, () => {
-                waiting?.finish();
-                if (!isCurrent() || chat[chat.length - 1] !== userFloor?.message) {
-                  if (pendingFloorSend_ACU === send) pendingFloorSend_ACU = null;
-                  return;
-                }
-                pendingFloorSend_ACU = null;
-                // 末楼为本轮真实用户消息，regenerate 不删除历史 AI 回复，也不发送输入框草稿。
+                // 宿主删除末尾 AI 占位，再基于已更新的 user 生成，不消费下一轮草稿。
                 void SillyTavern_API_ACU.generate('regenerate').catch((error: unknown) => {
                   logWarn_ACU('[发送前处理] 正文重生成失败:', error);
                 });
               });
             } catch (error) {
-              if (pendingFloorSend_ACU === send) _set_tempPlotToSave_ACU(null);
-              waiting?.finish();
+              _set_tempPlotToSave_ACU(null);
               try {
-                if (userFloor && pendingInput) {
-                  await removeUserMessage_ACU(userFloor.chat, userFloor.message);
-                } else if (userFloor && previousMessage && isSameChat() && chat.includes(userFloor.message)) {
-                  // 已有楼层不属于本轮建楼，失败只能恢复，不能删除历史。
-                  for (const key of Object.keys(userFloor.message)) delete userFloor.message[key];
-                  Object.assign(userFloor.message, previousMessage);
-                  await saveChatToHostStrict_ACU({ verify: true });
-                  await refreshMessageBlock_ACU(userFloor.index);
-                }
+                await removeLastTwoMessages_ACU();
               } catch (cleanupError) {
                 logWarn_ACU('[发送前处理] 撤销本轮楼层保存失败:', cleanupError);
               } finally {
-                if (isSameChat() && (!pendingFloorSend_ACU || pendingFloorSend_ACU === send)) {
-                  if (pendingInput && !getSendTextareaValue_ACU()) setSendTextareaValue_ACU(originalText);
-                  generationGate_ACU.lastUserSendIntentAt = 0;
-                }
-                if (pendingFloorSend_ACU === send) pendingFloorSend_ACU = null;
+                setSendTextareaValue_ACU(originalText);
+                generationGate_ACU.lastUserSendIntentAt = 0;
               }
               logWarn_ACU('[发送前处理] 本轮未生成正文:', error);
             }

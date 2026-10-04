@@ -124,13 +124,13 @@ function removeRenderedUserMessage_ACU(index: number): void {
     });
 }
 
-/** 创建正常用户楼层并保存；只建楼，不启动 AI 生成。 */
-export async function createUserMessage_ACU(text: string): Promise<{ chat: any[]; message: any; index: number }> {
+/**
+ * 创建正常用户楼层并渲染；只建楼，不启动 AI 生成。
+ * 保存统一放在发送前任务返回后，不在建楼阶段回读或撤楼。
+ */
+export function createUserMessage_ACU(text: string): { chat: any[]; message: any; index: number } {
     const api = SillyTavern_API_ACU;
     const chat = getChatArray_ACU();
-    const chatId = api.chatId;
-    const characterId = api.characterId;
-    const groupId = api.groupId;
     const message = {
         name: api.name1,
         is_user: true,
@@ -143,23 +143,55 @@ export async function createUserMessage_ACU(text: string): Promise<{ chat: any[]
     chat.push(message);
     try {
         api.addOneMessage(message);
-        await saveChatToHostStrict_ACU({ verify: true });
-        await api.eventSource.emit(api.eventTypes.MESSAGE_SENT, index);
-        await api.eventSource.emit(api.eventTypes.USER_MESSAGE_RENDERED, index);
-        return { chat, message, index };
     } catch (error) {
-        const currentIndex = chat.indexOf(message);
-        if (currentIndex >= 0) chat.splice(currentIndex, 1);
-        if (currentIndex >= 0 && getChatArray_ACU() === chat
-            && api.chatId === chatId && api.characterId === characterId && api.groupId === groupId) {
-            removeRenderedUserMessage_ACU(currentIndex);
-            try {
-                await saveChatToHostStrict_ACU({ verify: true });
-            } catch (cleanupError) {
-                throw Object.assign(new Error('建楼失败，撤销保存也未获确认。'), { errors: [error, cleanupError] });
-            }
-        }
-        throw error;
+        logWarn_ACU('[ChatGateway] 用户楼层渲染失败，保留消息并继续发送前任务:', error);
+    }
+    return { chat, message, index };
+}
+
+/**
+ * 创建真实 AI 占位楼层（入 chat 数组并渲染）。
+ * 任务成功后由宿主 Generate('regenerate') 自动删除该末楼；失败时随用户楼层一并删除。
+ * 独立占位标记用于排除剧情上下文，不复用循环模式的规划层标记。
+ */
+export function createAiPlaceholderMessage_ACU(): { message: any; index: number } {
+    const api = SillyTavern_API_ACU;
+    const chat = getChatArray_ACU();
+    const message = {
+        name: api.name2,
+        is_user: false,
+        is_system: false,
+        send_date: api.humanizedDateTime(),
+        mes: '',
+        extra: { isSmallSys: false },
+        _qrf_plot_pending_placeholder: true,
+    };
+    const index = chat.length;
+    chat.push(message);
+    try {
+        api.addOneMessage(message);
+    } catch (error) {
+        logWarn_ACU('[ChatGateway] AI 占位楼层渲染失败，保留消息并继续发送前任务:', error);
+    }
+    return { message, index };
+}
+
+/** 固定删除聊天末尾两个楼层并保存，用于发送前处理失败后的尾部回退。 */
+export async function removeLastTwoMessages_ACU(): Promise<void> {
+    const chat = getChatArray_ACU();
+    if (!chat.length) return;
+    const count = Math.min(2, chat.length);
+    const startIndex = chat.length - count;
+    chat.splice(startIndex, count);
+    const root = jQuery_API_ACU?.('#chat')?.[0];
+    root?.querySelectorAll<HTMLElement>('.mes[mesid]').forEach(node => {
+        const id = node.getAttribute('mesid');
+        if (id && /^\d+$/.test(id) && Number(id) >= startIndex) node.remove();
+    });
+    try {
+        await saveChatToHostStrict_ACU();
+    } finally {
+        await SillyTavern_API_ACU.eventSource.emit(SillyTavern_API_ACU.eventTypes.MESSAGE_DELETED, chat.length);
     }
 }
 

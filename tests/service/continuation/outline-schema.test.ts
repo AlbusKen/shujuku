@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildDefaultContinuationSettings_ACU,
-  CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V45_ACU,
+  CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V46_ACU,
   normalizeContinuationInternalAiRetryLimit_ACU,
   normalizeContinuationMaxAutomaticStages_ACU,
 } from '../../../src/service/continuation/defaults';
@@ -464,7 +464,7 @@ describe('Continuation defaults', () => {
     expect(first.maxAutomaticStages).toBe(6);
     expect(first.internalAiRetryLimit).toBe(3);
     expect(first.apiPresetMode).toBe('current');
-    expect(first.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V45_ACU);
+    expect(first.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V46_ACU);
     expect(first.outlinePrompt[0].content).toContain('<stage_title>');
     expect(first.maxConsecutivePressureTurns).toBe(8);
     expect(first.agentPrompts.main[0].content).toContain('主控 Agent');

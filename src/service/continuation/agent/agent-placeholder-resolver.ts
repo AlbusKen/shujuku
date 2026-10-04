@@ -510,7 +510,7 @@ function renderTurnSemanticMeta_ACU(turn: StageTurn_ACU): string {
 export function renderAgentOutlineWindow_ACU(context: AgentResolveContext_ACU): string {
   const { execution } = context;
   if (!execution.stage) {
-    return '当前任务还没有阶段大纲。输出 open_round 后，固定工作流会先准备可执行阶段大纲，再进入资料工作流与写作指令编排；主 Agent 不直接派工 outline-architect。';
+    return '当前任务还没有阶段大纲。可单独 delegate outline-architect 创建，或用 open_round 固定工作流准备可执行阶段后进入写作指令编排。';
   }
   if (execution.stage.status === 'completed') {
     return `第 ${execution.stage.stageNumber} 阶段已全部完成（共 ${execution.stage.completedTurns} 轮）。输出 open_round 后，固定工作流会继续下一阶段大纲，再进入资料工作流与写作指令编排。`;
@@ -526,7 +526,7 @@ export function renderAgentOutlineWindow_ACU(context: AgentResolveContext_ACU): 
     return [`节点：[${node.id}] ${node.title}`, `节点目标：${node.goal}`, turns].join('\n');
   });
   return [
-    `阶段 ${execution.stage.stageNumber}：${execution.revision.outline.title}`,
+    `阶段 ${execution.stage.stageNumber}：${execution.revision.outline.title} [${execution.stage.stageId}] revision=${execution.stage.activeRevision}`,
     `阶段目标：${execution.revision.outline.goal}`,
     `阶段节奏形态：${describeStageTempo_ACU(execution.revision.outline.tempo)}——它决定本阶段低压轮的下限，也决定下一阶段不能选什么形态。`,
     `阶段结构职责：${execution.revision.outline.role ?? '旧快照未标注'}`,
@@ -547,9 +547,16 @@ export function renderAgentOutlineWindow_ACU(context: AgentResolveContext_ACU): 
  */
 export function renderAgentOutlineState_ACU(context: AgentResolveContext_ACU): string {
   const { execution } = context;
-  if (!execution.stage) return '大纲状态：尚无阶段大纲（须先派工 outline-architect 创建，之后才能 finalize）。';
+  const catalog = execution.task.stages.map(stage => `第 ${stage.stageNumber} 阶段 [${stage.stageId}] revision=${stage.activeRevision} status=${stage.status} 已完成 ${stage.completedTurns} 轮`).join('；');
+  const state = renderCurrentAgentOutlineState_ACU(context);
+  return catalog ? `${state}\n阶段进度目录：${catalog}。用 adjust_progress 选择阶段和下一轮，或修改阶段完结状态；总纲可用 correct_materials 或 delegate arc-architect 修改，阶段大纲修改单独 delegate outline-architect。` : state;
+}
+
+function renderCurrentAgentOutlineState_ACU(context: AgentResolveContext_ACU): string {
+  const { execution } = context;
+  if (!execution.stage) return '大纲状态：尚无阶段大纲（open_round 固定工作流先创建，之后才能交付）。';
   if (execution.stage.status === 'completed') {
-    return `大纲状态：第 ${execution.stage.stageNumber} 阶段已全部完成，下一阶段大纲未创建（须派工 outline-architect 继续）。`;
+    return `大纲状态：第 ${execution.stage.stageNumber} 阶段已全部完成，open_round 固定工作流准备下一阶段大纲。`;
   }
   if (!execution.revision || !execution.node || !execution.turn) {
     return `大纲状态：第 ${execution.stage.stageNumber} 阶段的大纲当前不可执行（可能等待确认或游标无效）。`;

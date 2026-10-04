@@ -738,6 +738,7 @@ describe('getWorldbookContentForPlot_ACU', () => {
       { mes: '旧消息1' },
       { mes: '旧消息2' },
       { mes: '旧消息3' },
+      { is_user: false, mes: '等待占位', _qrf_plot_pending_placeholder: true },
     ]);
 
     await getWorldbookContentForPlot_ACU(
@@ -757,6 +758,7 @@ describe('getWorldbookContentForPlot_ACU', () => {
     expect(options.baseScanText).not.toContain('旧消息2');
     expect(options.baseScanText).toContain('旧消息3');
     expect(options.baseScanText).toContain('当前输入');
+    expect(options.baseScanText).not.toContain('等待占位');
   });
 
   it('角色模式会合并 primary 和 additional 世界书并去重', async () => {
@@ -1187,7 +1189,19 @@ describe('runPlotTasksRuntime_ACU', () => {
     expect(mockFlushPlotPendingSave).not.toHaveBeenCalled();
   });
 
-  it('成功执行时会按 stage 与 order 排序、暂存剧情并保存到最新消息', async () => {
+  it.each([false, true])('按 stage/order 执行并保存到 user，排除真实 AI 占位（已有 user=%s）', async hasExistingUserMessage => {
+    if (hasExistingUserMessage) {
+      mockGetChatArray.mockReturnValue([
+        { is_user: false, mes: '历史回复1' },
+        { is_user: false, mes: '历史回复2' },
+        { is_user: true, mes: '当前输入' },
+        { is_user: false, mes: '等待占位', _qrf_plot_pending_placeholder: true },
+      ]);
+      mockResolveAgentWorldbookFilterAvailability.mockResolvedValueOnce({
+        available: true,
+        control: { mode: 'agent', agentPlotExecutionMode: 'sequential' },
+      });
+    }
     const plotSettings = {
       tasks: [
         {
@@ -1222,7 +1236,7 @@ describe('runPlotTasksRuntime_ACU', () => {
       .mockResolvedValueOnce('结果B')
       .mockResolvedValueOnce('结果C');
 
-    const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+    const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入', { hasExistingUserMessage });
 
     expect(result.finalMessage).toBe('最终注入消息');
     expect(result.successfulResults).toHaveLength(3);
@@ -1237,7 +1251,7 @@ describe('runPlotTasksRuntime_ACU', () => {
       content: '保存的剧情内容',
       userInputHash: 'hash_当前输入',
       userInputText: '当前输入',
-      targetStartIndex: mockGetChatArray().length,
+      targetStartIndex: hasExistingUserMessage ? 2 : mockGetChatArray().length,
       finalMessageHash: 'hash_最终注入消息',
       chatId: 'test-chat',
       taskResults: expect.arrayContaining([
@@ -1247,6 +1261,13 @@ describe('runPlotTasksRuntime_ACU', () => {
       ]),
     }));
     expect(mockSavePlotToLatestMessage).toHaveBeenCalledWith(true);
+    if (hasExistingUserMessage) {
+      const context = mockRunAgentDecisionForPlot.mock.calls[0][0].sharedContext;
+      expect(context.recentContextMessages).toEqual([
+        { is_user: false, mes: '历史回复1' },
+        { is_user: false, mes: '历史回复2' },
+      ]);
+    }
   });
 
 
