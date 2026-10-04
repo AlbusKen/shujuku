@@ -24,6 +24,8 @@ export interface TableMutationEventV2_ACU {
 export interface TableCheckpointScheduleSummaryV2_ACU {
   lastFilledAiFloor?: number;
   lastChangedAiFloor?: number;
+  /** checkpoint 恢复所覆盖的楼层，不代表实际执行过填表。 */
+  lastImportBaselineAiFloor?: number;
 }
 
 export type ManualRefillProgressStatusV2_ACU =

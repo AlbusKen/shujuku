@@ -51,6 +51,9 @@ function hasValidScheduleSummary_ACU(value: unknown): boolean {
       && ((summary as Record<string, unknown>).lastFilledAiFloor === undefined
         || (Number.isFinite((summary as Record<string, unknown>).lastFilledAiFloor)
           && Number((summary as Record<string, unknown>).lastFilledAiFloor) >= 0))
+      && ((summary as Record<string, unknown>).lastImportBaselineAiFloor === undefined
+        || (Number.isInteger((summary as Record<string, unknown>).lastImportBaselineAiFloor)
+          && Number((summary as Record<string, unknown>).lastImportBaselineAiFloor) >= 0))
       && ((summary as Record<string, unknown>).lastChangedAiFloor === undefined
         || (Number.isFinite((summary as Record<string, unknown>).lastChangedAiFloor)
           && Number((summary as Record<string, unknown>).lastChangedAiFloor) >= 0))));

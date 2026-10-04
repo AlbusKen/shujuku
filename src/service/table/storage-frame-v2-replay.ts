@@ -25,6 +25,7 @@ import type { CompatTransitionCheckpointV1_ACU } from './storage-frame-v2-types'
 import { collectSheetIdentityCanonicals_ACU, mergeLegacySheetIdentities_ACU, type SheetIdentityRemap_ACU } from '../../shared/sheet-identity-merge';
 import { runTableWriteTransaction_ACU } from './table-write-transaction';
 import { buildReplayOptionsFingerprint_ACU, computeReplayHeadRevisionDigest_ACU, validateV2ReplayEvidenceFresh_ACU } from './v2-replay-session';
+import { getV2ImportBaselineAiFloor_ACU } from './table-import-baseline';
 
 interface V2FrameRef_ACU {
   messageIndex: number;
@@ -2373,6 +2374,12 @@ export function collectScheduleSummaryFromFramesV2_ACU(
       ? deepClone_ACU(checkpointRef.frame.checkpoint.scheduleSummary || {})
       : {});
   if (!transitionRef && checkpointRef?.frame.checkpoint) {
+    for (const sheetKey of Object.keys(checkpointRef.frame.checkpoint.data || {})) {
+      const baseline = getV2ImportBaselineAiFloor_ACU(checkpointRef.frame, sheetKey, checkpointRef.aiFloor);
+      if (baseline > 0) {
+        summary[sheetKey] = { ...summary[sheetKey], lastImportBaselineAiFloor: baseline };
+      }
+    }
     applyEventToScheduleSummary_ACU(summary, checkpointRef.frame.checkpoint.event, checkpointRef.aiFloor);
   }
 

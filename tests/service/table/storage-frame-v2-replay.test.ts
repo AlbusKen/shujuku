@@ -3315,6 +3315,28 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     expect(result?.sheet_0.content).toEqual([['row_id', 'name'], ['1', '物理顺序-1']]);
     expect(summary.sheet_0).toEqual({ lastFilledAiFloor: 1, lastChangedAiFloor: 1 });
     expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('按数组物理顺序重建临时 seq'));
+
+    const restoreFrame = chat[0].TavernDB_ACU_IsolatedData[''].storageFrame as any;
+    restoreFrame.checkpoint.reason = 'import';
+    restoreFrame.logEntries = [{
+      seq: 1, source: 'import', filledSheetKeys: [], changedSheetKeys: ['sheet_0'],
+      operations: [{ kind: 'data_replace', data: rootData, reason: 'checkpoint_fallback' }],
+    }];
+    const importedSummary = collectScheduleSummaryFromFramesV2_ACU(chat, '');
+    expect(importedSummary.sheet_0).toEqual({ lastImportBaselineAiFloor: 1, lastChangedAiFloor: 1 });
+    const compactedChat = [
+      { is_user: false },
+      { is_user: false, TavernDB_ACU_IsolatedData: { '': {
+        _acu_storage_version: 2,
+        storageFrame: {
+          version: 2,
+          checkpoint: { ...restoreFrame.checkpoint, reason: 'compact', scheduleSummary: importedSummary },
+          logEntries: [],
+        },
+      } } },
+    ];
+    expect(collectScheduleSummaryFromFramesV2_ACU(compactedChat, '').sheet_0)
+      .toEqual({ lastImportBaselineAiFloor: 1, lastChangedAiFloor: 1 });
   });
 
   it('introduction 的声明 messageIndex 漂移时，replay 与 schedule summary 按物理承载 frame 继续工作', async () => {

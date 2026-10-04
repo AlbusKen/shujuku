@@ -1678,6 +1678,7 @@ function scheduleSummaryIsValidForIntroductionHistory_ACU(value: unknown): boole
     isObjectRecord_ACU(value)
     && Object.values(value).every(summary => isObjectRecord_ACU(summary)
       && (summary.lastFilledAiFloor === undefined || isFiniteNonNegativeNumber_ACU(summary.lastFilledAiFloor))
+      && (summary.lastImportBaselineAiFloor === undefined || (Number.isInteger(summary.lastImportBaselineAiFloor) && Number(summary.lastImportBaselineAiFloor) >= 0))
       && (summary.lastChangedAiFloor === undefined || isFiniteNonNegativeNumber_ACU(summary.lastChangedAiFloor)))
   );
 }
@@ -2503,8 +2504,7 @@ async function persistTableMutationLogV2Core_ACU(
   if (shouldCheckpoint) {
     const checkpointRevision = buildCommitRevision_ACU('checkpoint', generateEntryId_ACU());
     const checkpointEvent = {
-      // import bootstrap 是灾备快照，不是填表完成事件。filledSheetKeys/groupKeys
-      // 会让 table-history 把恢复所在楼层当成已追平前沿（#18 问题五）。
+      // 导入只建立独立调度基线，不伪造实际填表完成事件。
       filledSheetKeys: importDataReplaceBootstrap ? [] : filledSheetKeys,
       changedSheetKeys: effectiveChangedSheetKeys,
       groupKeys: importDataReplaceBootstrap ? [] : (options.groupKeys || []),
@@ -2512,11 +2512,17 @@ async function persistTableMutationLogV2Core_ACU(
       batchId: options.batchId,
       error: options.error,
     };
+    const scheduleSummary = collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: target.index });
+    if (importDataReplaceBootstrap && operations.some(operation => operation.kind === 'data_replace' && operation.reason === 'checkpoint_fallback')) {
+      for (const sheetKey of Object.keys(afterData).filter(key => key.startsWith('sheet_'))) {
+        scheduleSummary[sheetKey] = { ...scheduleSummary[sheetKey], lastImportBaselineAiFloor: aiFloor };
+      }
+    }
     const checkpointResult = buildCanonicalFullCheckpoint_ACU({
       createdAt: now,
       reason: initialCheckpointReason,
       data: afterData,
-      scheduleSummary: collectScheduleSummaryFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: target.index }),
+      scheduleSummary,
       event: checkpointEvent,
       context: { messageIndex: target.index, aiFloor, isolationKey },
     });

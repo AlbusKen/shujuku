@@ -60,7 +60,7 @@ describe('resolveTableHistoryStateFromChat_ACU', () => {
     expect(state.lastTrackedUpdateAiFloor).toBe(1);
   });
 
-  it('位于最后一层的 import 恢复帧不把空 filledSheetKeys 当成已追平前沿', () => {
+  it('位于最后一层的 import 恢复帧独立提供调度基线，不伪造填表记录', () => {
     const restoredSheet = { name: '表A', content: [['row_id', '值'], ['1', '恢复数据']] };
     const chat = [
       { is_user: false },
@@ -102,6 +102,27 @@ describe('resolveTableHistoryStateFromChat_ACU', () => {
     expect(state.hasTrackedUpdate).toBe(false);
     expect(state.latestDataAiFloor).toBe(3);
     expect(state.lastTrackedUpdateAiFloor).toBe(0);
+    expect(state.lastImportBaselineAiFloor).toBe(3);
+    expect(state.lastCompletedAiFloor).toBe(3);
+
+    const missingSheet = resolveTableHistoryStateFromChat_ACU(chat, {
+      sheetKey: 'sheet_missing', isSummaryTable: false, isolationKey: '', settings,
+    });
+    expect(missingSheet.lastCompletedAiFloor).toBe(0);
+
+    const frame = (chat[4] as any).TavernDB_ACU_IsolatedData[''].storageFrame;
+    frame.checkpoint.reason = 'compact';
+    frame.checkpoint.scheduleSummary = { sheet_0: { lastImportBaselineAiFloor: 3 } };
+    frame.logEntries = [];
+    const compacted = resolveTableHistoryStateFromChat_ACU(chat, {
+      sheetKey: 'sheet_0', isSummaryTable: false, isolationKey: '', settings,
+    });
+    expect(compacted.lastCompletedAiFloor).toBe(3);
+    expect(compacted.hasTrackedUpdate).toBe(false);
+    frame.checkpoint.scheduleSummary.sheet_0.lastImportBaselineAiFloor = 4;
+    expect(resolveTableHistoryStateFromChat_ACU(chat, {
+      sheetKey: 'sheet_0', isSummaryTable: false, isolationKey: '', settings,
+    }).lastCompletedAiFloor).toBe(0);
   });
 
   it('识别 V2 operation log 的 filledSheetKeys 作为最后填表楼层', () => {
@@ -602,6 +623,8 @@ describe('resolveTableHistoryStatesFromChat_ACU', () => {
       lastTrackedUpdateMessageIndex: 0,
       latestDataAiFloor: 1,
       lastTrackedUpdateAiFloor: 1,
+      lastImportBaselineAiFloor: 0,
+      lastCompletedAiFloor: 1,
       hasAnyData: true,
       hasTrackedUpdate: true,
     });
@@ -656,6 +679,8 @@ describe('resolveTableHistoryStatesFromChat_ACU', () => {
       lastTrackedUpdateMessageIndex: -1,
       latestDataAiFloor: 0,
       lastTrackedUpdateAiFloor: 0,
+      lastImportBaselineAiFloor: 0,
+      lastCompletedAiFloor: 0,
       hasAnyData: false,
       hasTrackedUpdate: false,
     });

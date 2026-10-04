@@ -1,6 +1,7 @@
 import type { ACUMessage } from '../../shared/host-api';
 import { hasAnyTableData_ACU, readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import { isV2TagData_ACU } from './storage-strategy-resolver';
+import { getV2ImportBaselineAiFloor_ACU } from './table-import-baseline';
 
 export interface TableHistoryState_ACU {
     latestAiMessageIndex: number;
@@ -8,6 +9,10 @@ export interface TableHistoryState_ACU {
     lastTrackedUpdateMessageIndex: number;
     latestDataAiFloor: number;
     lastTrackedUpdateAiFloor: number;
+    /** 导入快照覆盖的楼层，与实际填表完成记录分开。 */
+    lastImportBaselineAiFloor: number;
+    /** 自动填表与追平共用的已覆盖前沿。 */
+    lastCompletedAiFloor: number;
     hasAnyData: boolean;
     hasTrackedUpdate: boolean;
 }
@@ -272,6 +277,8 @@ export function resolveTableHistoryStateFromChat_ACU(
         lastTrackedUpdateMessageIndex: -1,
         latestDataAiFloor: 0,
         lastTrackedUpdateAiFloor: 0,
+        lastImportBaselineAiFloor: 0,
+        lastCompletedAiFloor: 0,
         hasAnyData: false,
         hasTrackedUpdate: false,
     };
@@ -296,12 +303,23 @@ export function resolveTableHistoryStatesFromChat_ACU(
     }
 
     const aiFloorByMessageIndex = new Array<number>(safeChat.length).fill(0);
+    const importBaselineBySheetKey = new Map<string, number>();
     let aiFloor = 0;
     let latestAiMessageIndex = -1;
     for (let index = 0; index < safeChat.length; index += 1) {
         if (safeChat[index] && !safeChat[index].is_user) {
             aiFloor += 1;
             latestAiMessageIndex = index;
+            const tagsByIsolationKey = new Map<string, any>();
+            for (const [sheetKey, options] of uniqueOptions) {
+                if (!tagsByIsolationKey.has(options.isolationKey)) {
+                    tagsByIsolationKey.set(options.isolationKey, readIsolatedTagData_ACU(safeChat[index], options.isolationKey));
+                }
+                const tagData = tagsByIsolationKey.get(options.isolationKey);
+                if (!isV2TagData_ACU(tagData)) continue;
+                const baseline = getV2ImportBaselineAiFloor_ACU(tagData.storageFrame, sheetKey, aiFloor);
+                importBaselineBySheetKey.set(sheetKey, Math.max(importBaselineBySheetKey.get(sheetKey) || 0, baseline));
+            }
         }
         aiFloorByMessageIndex[index] = aiFloor;
     }
@@ -350,6 +368,8 @@ export function resolveTableHistoryStatesFromChat_ACU(
             lastTrackedUpdateMessageIndex: state.lastTrackedUpdateMessageIndex,
             latestDataAiFloor: state.latestDataMessageIndex >= 0 ? aiFloorByMessageIndex[state.latestDataMessageIndex] : 0,
             lastTrackedUpdateAiFloor: state.lastTrackedUpdateAiFloor,
+            lastImportBaselineAiFloor: importBaselineBySheetKey.get(sheetKey) || 0,
+            lastCompletedAiFloor: Math.max(state.lastTrackedUpdateAiFloor, importBaselineBySheetKey.get(sheetKey) || 0),
             hasAnyData: state.latestDataMessageIndex !== -1,
             hasTrackedUpdate: state.lastTrackedUpdateAiFloor > 0,
         });

@@ -2332,6 +2332,10 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
       kind: 'full',
       reason: 'import',
       data: restoredData,
+      scheduleSummary: {
+        sheet_a: { lastImportBaselineAiFloor: 1 },
+        sheet_b: { lastImportBaselineAiFloor: 1 },
+      },
       event: { filledSheetKeys: [], changedSheetKeys: ['sheet_a', 'sheet_b'], groupKeys: [] },
     });
     expect(restoreFrame.logEntries).toHaveLength(1);

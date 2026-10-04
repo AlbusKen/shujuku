@@ -218,8 +218,8 @@ describe('buildAutoUpdatePlan_ACU', () => {
     expect(plan.tablesToUpdate).toHaveLength(0);
   });
 
-  it('有未更新的 AI 消息时生成更新计划', () => {
-    const liveChat = [
+  it('未填历史生成计划，导入基线后仅调度新增楼层', () => {
+    const liveChat: any[] = [
       { is_user: true },
       { is_user: false },
       { is_user: true },
@@ -230,6 +230,33 @@ describe('buildAutoUpdatePlan_ACU', () => {
     };
     const plan = buildAutoUpdatePlan_ACU(liveChat, tableData, baseSettings, '');
     expect(plan.tablesToUpdate.length).toBeGreaterThan(0);
+
+    liveChat[3].TavernDB_ACU_IsolatedData = {
+      '': {
+        _acu_storage_version: 2,
+        storageFrame: {
+          version: 2,
+          checkpoint: { kind: 'full', reason: 'import', createdAt: 1, data: tableData },
+          logEntries: [{
+            seq: 1, source: 'import', filledSheetKeys: [], changedSheetKeys: ['sheet_0'],
+            operations: [{ kind: 'data_replace', data: tableData, reason: 'checkpoint_fallback' }],
+          }],
+        },
+      },
+    };
+    expect(buildAutoUpdatePlan_ACU(liveChat, tableData, baseSettings, '').tablesToUpdate).toEqual([]);
+    liveChat.push({ is_user: true }, { is_user: false });
+    expect(buildAutoUpdatePlan_ACU(liveChat, tableData, baseSettings, '').tablesToUpdate)
+      .toMatchObject([{ sheetKey: 'sheet_0', indices: [5], allIndices: [5] }]);
+
+    const frame = liveChat[3].TavernDB_ACU_IsolatedData[''].storageFrame;
+    frame.checkpoint.reason = 'compact';
+    frame.checkpoint.scheduleSummary = { sheet_0: { lastImportBaselineAiFloor: 2 } };
+    frame.logEntries = [];
+    expect(buildAutoUpdatePlan_ACU(liveChat, tableData, baseSettings, '').tablesToUpdate)
+      .toMatchObject([{ sheetKey: 'sheet_0', indices: [5] }]);
+    expect(buildAutoUpdatePlan_ACU(liveChat, tableData, { ...baseSettings, autoUpdateFrequency: 2 }, '').tablesToUpdate)
+      .toEqual([]);
   });
 
   it('updateFrequency=0 的表不参与自动更新', () => {

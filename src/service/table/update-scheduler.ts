@@ -111,7 +111,7 @@ export function buildAutoUpdatePlan_ACU(
         const groupId = rawGroupId;
 
         const history = historyBySheetKey.get(sheetKey);
-        const lastUpdatedAiFloor = history?.lastTrackedUpdateAiFloor ?? 0;
+        const lastUpdatedAiFloor = history?.lastCompletedAiFloor ?? 0;
 
         // 计算未记录楼层数
         const effectiveUnrecordedFloors = Math.max(0, (totalAiMessages - skipFloors) - lastUpdatedAiFloor);

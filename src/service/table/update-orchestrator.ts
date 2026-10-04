@@ -3812,7 +3812,7 @@ export async function prepareManualCatchUpPlan_ACU(targetKeys: string[]): Promis
         const preset = resolveTableApiPresetOverride_ACU(sheet.name);
         return {
             sheetKey,
-            lastCompletedAiFloor: history.lastTrackedUpdateAiFloor,
+            lastCompletedAiFloor: history.lastCompletedAiFloor,
             groupId,
             // 追平的分批粒度跟手动面板的「每 N 层合并为一次填表」走，不读自动填表的 updateBatchSize。
             batchSize: resolveManualUpdateBatchSize_ACU(),

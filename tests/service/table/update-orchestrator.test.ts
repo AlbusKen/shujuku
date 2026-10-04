@@ -7652,6 +7652,27 @@ describe('orchestrateManualCatchUp_ACU', () => {
     delete mockSettings.manualUpdateBatchSize;
     const fallback = await prepareManualCatchUpPlan_ACU(['sheet_a', 'sheet_b']);
     expect(new Set(fallback.plan!.waves.flatMap(wave => wave.groups.map(group => group.batchSize)))).toEqual(new Set([3]));
+
+    const importedChat = createCatchUpChat(0, 0) as any[];
+    const frame = importedChat[1].TavernDB_ACU_IsolatedData[''].storageFrame;
+    delete importedChat[1].TavernDB_ACU_IsolatedData;
+    frame.checkpoint.reason = 'import';
+    frame.checkpoint.scheduleSummary = {};
+    frame.logEntries = [{
+      seq: 1, source: 'import', filledSheetKeys: [], changedSheetKeys: ['sheet_a', 'sheet_b'],
+      operations: [{ kind: 'data_replace', data: frame.checkpoint.data, reason: 'checkpoint_fallback' }],
+    }];
+    importedChat[5].TavernDB_ACU_IsolatedData = { '': { _acu_storage_version: 2, storageFrame: frame } };
+    mockGetChatArray_ACU.mockReturnValue(importedChat);
+    const imported = await prepareManualCatchUpPlan_ACU(['sheet_a', 'sheet_b']);
+    expect(imported.success).toBe(true);
+    expect(imported.plan!.waves).toEqual([]);
+    importedChat.push({ is_user: true, mes: '新用户消息' }, { is_user: false, mes: '新AI回复' });
+    const incremental = await prepareManualCatchUpPlan_ACU(['sheet_a', 'sheet_b']);
+    expect(incremental.success).toBe(true);
+    expect(incremental.plan!.waves).toMatchObject([{
+      startAiFloor: 4, endAiFloor: 4, messageIndices: [7], sheetKeys: ['sheet_a', 'sheet_b'],
+    }]);
   });
 
   it('模板存在但 runtime 缺失时，prepareManualCatchUpPlan_ACU 拒绝（模板不作资格兜底）', async () => {
