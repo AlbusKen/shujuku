@@ -22,10 +22,10 @@ import { ensureNoActiveProvisionalBridgeForCurrentScope_ACU } from '../../servic
 import { notifyChatRuntimeReloaded_ACU } from '../../shared/chat-runtime-reload-signal';
 import { refreshMergedDataAndNotifyWithUI_ACU } from '../components/pipeline-ui-helpers';
 import { cleanChatName_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
-import { markPlotIntercept_ACU } from '../../service/plot/plot-logic';
-import { orchestrateTavernHelperHook_ACU, orchestrateAfterCommandsStrategy1_ACU } from '../../service/plot/plot-orchestrator';
+import { markPlotIntercept_ACU, shouldSkipPlotIntercept_ACU } from '../../service/plot/plot-logic';
+import { orchestrateTavernHelperHook_ACU, orchestrateAfterCommandsStrategy1_ACU, orchestrateAfterCommandsStrategy2_ACU } from '../../service/plot/plot-orchestrator';
 import { flushPlotPendingSave_ACU } from '../../service/runtime/plot-runtime/plot-history-preset';
-import { createAiPlaceholderMessage_ACU, createUserMessage_ACU, refreshMessageBlock_ACU, removeLastTwoMessages_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
+import { createAiPlaceholderMessage_ACU, createUserMessage_ACU, refreshMessageBlock_ACU, removePlotSendMessages_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { beginHostGenerationUi_ACU, getSendTextareaValue_ACU, setSendTextareaValue_ACU } from '../../shared/host-input';
 import { handleNewMessageDebounced_ACU } from '../triggers/settings-ui-sync/settings-ui-connect';
 import { runOptimizationLogicWithUI_ACU } from '../components/plot-planning-ui';
@@ -297,24 +297,24 @@ export   function mainInitialize_ACU() {
                       markPlotIntercept_ACU(result.finalMessage);
                       options._qrf_processed_by_hook = true;
                     } catch {
-                      showToastr_ACU('error', '推进提示词未能交给宿主，本次生成已取消。', '剧情推进');
-                      return;
+                      showToastr_ACU('warning', '推进提示词写回未完成，继续宿主发送。', '剧情推进');
                     }
                     break;
                   }
                   case 'busy':
-                    showToastr_ACU('info', '上一轮剧情规划仍在处理中，本次请求未发送。', '剧情推进');
-                    return;
+                    break;
                   case 'failed':
                   case 'skipped':
                   case 'loop_retry':
-                    showToastr_ACU('warning', '本次推进未取得最终提示词，未发送用户原文，请稍后重试。', '剧情推进');
-                    return;
+                    if (result.apiRetriesExhausted === true) return;
+                    showToastr_ACU('warning', '本次推进未取得最终提示词，继续宿主发送。', '剧情推进');
+                    break;
                   case 'aborted': {
-                    // 任务失败时阻止后续生成，标记已处理
-                    options._qrf_processed_by_hook = true;
-                    // 返回空 Promise，不调用原始 generate
-                    return Promise.resolve();
+                    if (result.manual === true) {
+                      options._qrf_processed_by_hook = true;
+                      return Promise.resolve();
+                    }
+                    break;
                   }
                   // 'passthrough' — 未进入剧情规划，保留宿主原有行为。
                 }
@@ -635,13 +635,14 @@ export   function mainInitialize_ACU() {
             }
         }
 
-        // 固定 user + AI 两层：等待任务返回，再写回重生成或删除末尾两层。
+        // 共用发送前任务链；伪装只改变等待外观和宿主续发方式。
         if (SillyTavern_API_ACU.eventTypes.GENERATION_AFTER_COMMANDS) {
           const source = SillyTavern_API_ACU.eventSource;
           const eventType = SillyTavern_API_ACU.eventTypes.GENERATION_AFTER_COMMANDS;
           installPlotSendEventGate_ACU(source, eventType);
           source.on(eventType, async (type: any, params: any, dryRun: any) => {
-            if (dryRun || type === 'regenerate' || params?._qrf_processed_by_hook) return;
+            // 与旧版一致：规划内部的宿主事件继续自己的请求，不重复接管外层发送。
+            if (dryRun || type === 'regenerate' || params?._qrf_processed_by_hook || isProcessing_Plot_ACU) return;
             const recall = shouldProcessSummaryVectorIndexForGeneration_ACU(type, params, dryRun);
             const plan = shouldProcessPlotForGeneration_ACU(type, params, dryRun);
             if (!recall && !plan) return;
@@ -651,60 +652,85 @@ export   function mainInitialize_ACU() {
             const existing = chat[chat.length - 1];
             if (!pendingInput && !existing?.is_user) return;
             const originalText = pendingInput ? input : String(existing.mes || '');
-            // 阻止宿主继续原发送；成功后只安排一次 regenerate。
-            redirectPlotSendEvent_ACU(params);
-            const restoreGenerationUi = beginHostGenerationUi_ACU();
+            const needsPlan = plan && !shouldSkipPlotIntercept_ACU(originalText)
+              && (pendingInput || !(existing as ACUMessage)._plot_processed);
+            const disguised = settings_ACU.plotSendDisguiseDisabled !== true;
+            const createdMessages: any[] = [];
+            let userFloor = pendingInput ? null : { chat, message: existing, index: chat.length - 1 };
+            let restoreGenerationUi = () => {};
+            const warn = (text: string) => showToastr_ACU('warning', text, '剧情推进');
             try {
               await ensureInitialSeedCheckpointBeforeGeneration_ACU('generation_after_commands_before_ai', { allowPendingFirstUserMessage: true });
-              if (pendingInput) setSendTextareaValue_ACU('');
-              const userFloor = pendingInput ? createUserMessage_ACU(originalText)
-                : { chat, message: existing, index: chat.length - 1 };
-              const aiFloor = createAiPlaceholderMessage_ACU();
-              beginPlotPendingDisguise_ACU({ messageIndex: aiFloor.index, visible: settings_ACU.plotSendDisguiseDisabled !== true });
-              // 通知在双楼层建好后派发；监听器错误不改变等待期间的楼层。
-              if (pendingInput) {
-                try {
-                  await source.emit(SillyTavern_API_ACU.eventTypes.MESSAGE_SENT, userFloor.index);
-                  await source.emit(SillyTavern_API_ACU.eventTypes.USER_MESSAGE_RENDERED, userFloor.index);
-                } catch (error) {
-                  logWarn_ACU('[发送前处理] 用户楼层事件通知失败:', error);
+              if (disguised) {
+                redirectPlotSendEvent_ACU(params);
+                restoreGenerationUi = beginHostGenerationUi_ACU();
+                if (pendingInput) {
+                  setSendTextareaValue_ACU('');
+                  userFloor = createUserMessage_ACU(originalText);
+                  createdMessages.push(userFloor.message);
                 }
+                const aiFloor = createAiPlaceholderMessage_ACU();
+                createdMessages.push(aiFloor.message);
+                beginPlotPendingDisguise_ACU({ messageIndex: aiFloor.index });
               }
               if (recall) {
-                const result = await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput: originalText, source: 'generation_after_commands' });
-                if (!result.success) throw new Error('纪要召回失败');
+                try {
+                  const result = await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput: originalText, source: 'generation_after_commands' });
+                  if (!result.success && !result.skipped) warn('纪要召回未完成，继续剧情任务与发送。');
+                } catch {
+                  warn('纪要召回异常，继续剧情任务与发送。');
+                }
               }
-              if (plan) {
-                const result = await orchestrateAfterCommandsStrategy1_ACU(userFloor.message, userFloor.index, runOptimizationLogicWithUI_ACU);
-                if (result.action !== 'passthrough' && (result.action !== 'planned' || !result.finalMessage?.trim())) throw new Error('剧情推进未返回有效内容');
-                if (result.action === 'planned') userFloor.message.mes = result.finalMessage;
-                (userFloor.message as ACUMessage)._plot_processed = true;
-                const saved = await flushPlotPendingSave_ACU();
-                if (saved?.status === 'failed' || saved?.status === 'superseded') throw new Error('剧情推进数据保存失败或轮次已失效');
+              if (needsPlan) {
+                const result = userFloor
+                  ? await orchestrateAfterCommandsStrategy1_ACU(userFloor.message, userFloor.index, runOptimizationLogicWithUI_ACU)
+                  : await orchestrateAfterCommandsStrategy2_ACU(originalText, runOptimizationLogicWithUI_ACU);
+                if (result.apiRetriesExhausted === true || (result.action === 'aborted' && result.manual === true)) {
+                  redirectPlotSendEvent_ACU(params);
+                  _set_tempPlotToSave_ACU(null);
+                  await removePlotSendMessages_ACU(chat, createdMessages).catch(() => warn('本轮临时楼层清理未完成，请检查聊天记录。'));
+                  setSendTextareaValue_ACU(originalText);
+                  return;
+                }
+                if (result.action === 'planned' && result.finalMessage?.trim()) {
+                  params.prompt = result.finalMessage;
+                  if (userFloor) {
+                    userFloor.message.mes = result.finalMessage;
+                    (userFloor.message as ACUMessage)._plot_processed = true;
+                  } else {
+                    setSendTextareaValue_ACU(result.finalMessage);
+                  }
+                }
               }
-              await saveChatToHostStrict_ACU();
-              await refreshMessageBlock_ACU(userFloor.index);
-              recordLastUserSend_ACU(userFloor.index);
-              generationGate_ACU.lastUserSendIntentAt = 0;
-              redirectPlotSendEvent_ACU(params, () => {
-                // 宿主删除末尾 AI 占位，再基于已更新的 user 生成，不消费下一轮草稿。
-                void SillyTavern_API_ACU.generate('regenerate').catch((error: unknown) => {
-                  logWarn_ACU('[发送前处理] 正文重生成失败:', error);
-                });
-              });
-            } catch (error) {
-              _set_tempPlotToSave_ACU(null);
-              try {
-                await removeLastTwoMessages_ACU();
-              } catch (cleanupError) {
-                logWarn_ACU('[发送前处理] 撤销本轮楼层保存失败:', cleanupError);
-              } finally {
-                setSendTextareaValue_ACU(originalText);
-                generationGate_ACU.lastUserSendIntentAt = 0;
+              if (userFloor) {
+                try {
+                  const saved = await flushPlotPendingSave_ACU();
+                  if (saved?.status === 'failed') warn('剧情反馈保存未完成，保留结果并继续发送。');
+                  if (saved?.status !== 'committed') await saveChatToHostStrict_ACU();
+                } catch {
+                  warn('聊天保存异常，保留楼层并继续发送。');
+                }
+                await refreshMessageBlock_ACU(userFloor.index);
+                // 任务完成后才通知宿主，避免监听器在规划启动前重入。
+                if (disguised && pendingInput) {
+                  try {
+                    await source.emit(SillyTavern_API_ACU.eventTypes.MESSAGE_SENT, userFloor.index);
+                    await source.emit(SillyTavern_API_ACU.eventTypes.USER_MESSAGE_RENDERED, userFloor.index);
+                  } catch { warn('用户楼层通知未完成，继续发送。'); }
+                }
               }
-              logWarn_ACU('[发送前处理] 本轮未生成正文:', error);
+            } catch {
+              warn('发送前处理异常，保留当前内容并继续发送。');
             } finally {
               restoreGenerationUi();
+              generationGate_ACU.lastUserSendIntentAt = 0;
+            }
+            if (disguised && userFloor) {
+              redirectPlotSendEvent_ACU(params, () => {
+                void SillyTavern_API_ACU.generate('regenerate').catch(() => {
+                  showToastr_ACU('error', '宿主正文生成失败，已保留用户楼层，可重新生成。', '剧情推进');
+                });
+              });
             }
           });
         }

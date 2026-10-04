@@ -154,12 +154,13 @@ describe('runOptimizationLogic_ACU', () => {
     expect(result.aborted).toBe(true);
   });
 
-  it('AbortError 返回 aborted', async () => {
+  it('裸 AbortError 返回普通错误，不伪装为手动中止', async () => {
     const err = new DOMException('The operation was aborted', 'AbortError');
     mockRunPlotTasks.mockRejectedValue(err);
     const result = await runOptimizationLogic_ACU('继续');
     expect(result.success).toBe(false);
-    expect(result.aborted).toBe(true);
+    expect(result.aborted).toBeUndefined();
+    expect(result.errorType).toBe('exception');
   });
 
   it('未知异常返回通用错误且日志与结果均不泄露宿主正文', async () => {
@@ -238,7 +239,7 @@ describe('runOptimizationLogic_ACU', () => {
     expect(result.success).toBe(false);
     expect(result.errorType).toBe('worldbook_preflight_failure');
     expect(result.errorMessage).toBe('剧情推进的世界书预检失败，请检查绑定/选择的世界书。');
-    expect(mockLogError).toHaveBeenCalledWith('[剧情推进] 世界书预检失败，本轮已停止。', expect.objectContaining({
+    expect(mockLogError).toHaveBeenCalledWith('[剧情推进] 世界书预检失败，继续宿主发送。', expect.objectContaining({
       phase: 'clear_final_generation_greenlights',
     }));
     expect(JSON.stringify(mockLogError.mock.calls)).not.toContain('Lorebook permission denied');
@@ -289,7 +290,7 @@ describe('runOptimizationLogic_ACU', () => {
   });
 });
 
-  it('PlotStageError 的 cause.category=aborted 恢复为取消语义，不伪装成预检失败', async () => {
+  it('阶段错误的 aborted 分类没有用户信号时仍是普通预检失败', async () => {
     const stageError = Object.assign(new Error('stage failed'), {
       name: 'PlotStageError_ACU',
       phase: 'clear_final_generation_greenlights',
@@ -298,8 +299,9 @@ describe('runOptimizationLogic_ACU', () => {
     mockRunPlotTasks.mockRejectedValue(stageError);
     const result = await runOptimizationLogic_ACU('继续');
     expect(result.success).toBe(false);
-    expect(result.aborted).toBe(true);
-    expect(result.manual).toBe(true);
-    expect(result.errorType).toBeUndefined();
+    expect(result.aborted).toBeUndefined();
+    expect(result.manual).toBeUndefined();
+    expect(result.apiRetriesExhausted).not.toBe(true);
+    expect(result.errorType).toBe('worldbook_preflight_failure');
   });
 

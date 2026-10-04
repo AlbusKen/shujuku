@@ -10,33 +10,17 @@ import { runPlotTasksRuntime_ACU } from './plot-task-engine';
 import { capturePlotRuntimeScope_ACU, summarizePlotRuntimeError_ACU, summarizePlotRuntimeScope_ACU } from './plot-runtime-scope';
 import { isFlightModeActive_ACU } from '../../flight-mode/flight-mode-state';
 import { isPlotSuppressedByFillModeForCurrentChat_ACU } from '../../fill-mode/fill-mode-gate';
-import { isLorebookReadAbortedError_ACU } from '../../../shared/lorebook-read-error';
 import { isPlotStageError_ACU } from './plot-runtime-phase';
 
 const PLOT_RUNTIME_BUILD_VERSION_ACU = (globalThis as any).__ACU_BUILD_VERSION__ || 'unknown';
 
 /**
- * 精确取消判定：只认 AbortError / TaskAbortedByUser / 世界书读取取消分类，
- * 不再用 message.includes('aborted') 误伤普通错误；并对 null/undefined 拒绝值安全。
+ * 只有本次用户中止信号或明确的用户取消错误才恢复手动取消语义。
+ * 宿主 AbortError、超时和世界书取消分类不能自动中断发送。
  */
 function isTaskAbortedError_ACU(error: unknown): boolean {
-  // PlotStageError 的 cause 已由 clearFinalGenerationGreenlights 透传安全摘要；
-  // category='aborted' 必须恢复为取消语义，不伪装成普通预检失败。
-  if (isPlotStageError_ACU(error)) {
-    const cause = (error as { cause?: unknown }).cause;
-    if (cause && typeof cause === 'object') {
-      const category = (cause as { category?: unknown }).category;
-      if (category === 'aborted') return true;
-    }
-    return false;
-  }
-  if (error && typeof error === 'object') {
-    const name = (error as { name?: unknown }).name;
-    if (name === 'AbortError') return true;
-    const message = (error as { message?: unknown }).message;
-    if (typeof message === 'string' && message === 'TaskAbortedByUser') return true;
-  }
-  return isLorebookReadAbortedError_ACU(error);
+  return abortController_ACU?.signal.aborted === true
+    || (error as { message?: unknown } | null)?.message === 'TaskAbortedByUser';
 }
 
   /**
@@ -88,9 +72,18 @@ function isTaskAbortedError_ACU(error: unknown): boolean {
       const runtimeResult = await runPlotTasksRuntime_ACU(plotSettings, userMessage, {
         inputForHash,
         hasExistingUserMessage,
+        reportWarning: options.reportWarning,
       });
 
       if (!runtimeResult?.finalMessage) {
+        if (runtimeResult?.apiRetriesExhausted === true) {
+          return {
+            success: false,
+            apiRetriesExhausted: true,
+            errorType: 'api_retries_exhausted',
+            errorMessage: runtimeResult.errorMessage || '剧情任务 API 调用失败且已耗尽重试次数。',
+          };
+        }
         if (runtimeResult?.abortedByStageFailure) {
           return {
             success: false,
@@ -105,7 +98,7 @@ function isTaskAbortedError_ACU(error: unknown): boolean {
           return {
             success: false,
             errorType: 'all_failed',
-            errorMessage: `共 ${runtimeResult.enabledTaskCount} 个剧情任务均未返回有效结果，操作已取消。`,
+            errorMessage: `共 ${runtimeResult.enabledTaskCount} 个剧情任务均未返回有效结果，继续宿主发送。`,
             enabledTaskCount: runtimeResult.enabledTaskCount,
           };
         } else {
@@ -139,7 +132,7 @@ function isTaskAbortedError_ACU(error: unknown): boolean {
           return { success: false, aborted: true, manual: true, restoreText: originalUserInputForAbort_ACU };
       }
       if (isPlotStageError_ACU(error) && error.phase === 'clear_final_generation_greenlights') {
-        logError_ACU('[剧情推进] 世界书预检失败，本轮已停止。', {
+        logError_ACU('[剧情推进] 世界书预检失败，继续宿主发送。', {
           phase: error.phase,
           build: PLOT_RUNTIME_BUILD_VERSION_ACU,
           error: summarizePlotRuntimeError_ACU(error),

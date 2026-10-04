@@ -3,6 +3,7 @@
  * 设置加载/保存编排 单元测试
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { USER_PREFILL_CONTENT_ACU } from '../../../src/shared/user-prefill.js';
 
 const {
   mockSettings,
@@ -126,7 +127,8 @@ vi.mock('../../../src/shared/data-constants', () => ({
   normalizeIsolationCode_ACU: (code: any) => String(code || '').trim(),
 }));
 
-vi.mock('../../../src/shared/defaults-json.js', () => ({
+vi.mock('../../../src/shared/defaults-json.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../src/shared/defaults-json.js')>(),
   DEFAULT_BUILTIN_PLOT_PRESETS_ACU: [{ name: '时间召回', _acuBuiltinPresetId: 'time-recall', _acuBuiltinPresetVersion: 'test' }],
   DEFAULT_CHAR_CARD_PROMPT_ACU: [{ role: 'USER', content: '默认提示词' }],
   DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU: [{ role: 'USER', content: '默认 strict json 提示词' }],
@@ -762,10 +764,25 @@ describe('loadSettings_ACU', () => {
     expect(calledWith.discardUnauthorizedTableEditsEnabled).toBe(true);
   });
 
-  it('有保存设置时 deepMerge 合并', () => {
+  it('合并已保存设置并升级时间召回旧尾段，保留自定义且持久化', () => {
+    mockGlobalMeta.plotEnabledGlobal = true;
+    const rules = { role: 'USER', content: '自定义时间分组规则', deletable: false };
+    const legacyTail = { role: 'assistant', content: '收到，天之音开始执行！', enabled: false, deletable: true };
+    const group = [rules, legacyTail];
+    const customGroup = [rules, { ...legacyTail }];
     mockReadProfileSettings.mockReturnValue({
       autoUpdateEnabled: false,
       customField: '自定义值',
+      userPrefillProfileForceDefaultVersion: 'test-user-prefill-profile-force-default',
+      creativeIdentityPromptUpgradeVersion: 'spv9.6-creative-identity-prompt',
+      plotSettings: {
+        enabled: true,
+        lastUsedPresetName: '时间召回',
+        recallCount: 7,
+        promptGroup: group,
+        plotTasks: [{ id: 'defaultPlotTask', enabled: false, promptGroup: group }],
+        promptPresets: [{ name: '时间召回', _acuBuiltinPresetId: 'time-recall', _acuBuiltinPresetVersion: 'test', promptGroup: group, plotTasks: [{ id: 'defaultPlotTask', promptGroup: group }] }, { name: '自定义', promptGroup: customGroup }],
+      },
     });
     loadSettings_ACU();
     expect(mockSetSettings).toHaveBeenCalled();
@@ -774,6 +791,15 @@ describe('loadSettings_ACU', () => {
     expect(calledWith.autoUpdateEnabled).toBe(false);
     expect(calledWith.customField).toBe('自定义值');
     expect(calledWith.discardUnauthorizedTableEditsEnabled).toBe(true);
+    const expectedGroup = [rules, { ...legacyTail, role: 'user', content: USER_PREFILL_CONTENT_ACU }];
+    expect(mockSettings.plotSettings.promptGroup).toEqual(expectedGroup);
+    expect(mockSettings.plotSettings.plotTasks[0]).toMatchObject({ enabled: false, promptGroup: expectedGroup });
+    expect(mockSettings.plotSettings.promptPresets[0].promptGroup).toEqual(expectedGroup);
+    expect(mockSettings.plotSettings.promptPresets[0].plotTasks[0].promptGroup).toEqual(expectedGroup);
+    expect(mockSettings.plotSettings.promptPresets[1].promptGroup).toEqual(customGroup);
+    expect(mockSettings.plotSettings).toMatchObject({ enabled: true, recallCount: 7 });
+    expect(mockPersistSettingsToStorage).toHaveBeenCalledWith(mockSettings, expect.any(String));
+    expect(group.at(-1)).toEqual(legacyTail);
   });
 
   it('补齐缺失的 V2 rollout 开关与 allowlist，且持久化全局配置', () => {

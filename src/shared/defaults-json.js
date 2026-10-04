@@ -483,8 +483,8 @@ sql 必须是字符串，内容是按下文 DDL、Note 和 SQL 编写原则生�
           "isMain2": true
         },
         {
-          "role": "assistant",
-          "content": "收到，天之音开始执行！",
+          "role": "user",
+          "content": USER_PREFILL_CONTENT_ACU,
           "deletable": true
         }
       ],
@@ -528,8 +528,8 @@ sql 必须是字符串，内容是按下文 DDL、Note 和 SQL 编写原则生�
       "isMain2": true
     },
     {
-      "role": "assistant",
-      "content": "收到，天之音开始执行！",
+      "role": "user",
+      "content": USER_PREFILL_CONTENT_ACU,
       "deletable": true
     }
   ],
@@ -819,8 +819,8 @@ $CONTENT
     strictJson: cloneLegacyPrompt_ACU(DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU),
     strictJsonSql: cloneLegacyPrompt_ACU(DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU),
     plotGroup: cloneLegacyPrompt_ACU(DEFAULT_PLOT_PROMPT_GROUP_ACU),
-    timeRecallTask: cloneLegacyPrompt_ACU(DEFAULT_TIME_RECALL_PLOT_PRESET_ACU.plotTasks[0].promptGroup),
-    timeRecallGroup: cloneLegacyPrompt_ACU(DEFAULT_TIME_RECALL_PLOT_PRESET_ACU.promptGroup),
+    timeRecallTask: cloneLegacyPrompt_ACU(DEFAULT_TIME_RECALL_PLOT_PRESET_ACU.plotTasks[0].promptGroup).map((segment, index, group) => index === group.length - 1 ? { ...segment, role: 'assistant', content: '收到，天之音开始执行！' } : segment),
+    timeRecallGroup: cloneLegacyPrompt_ACU(DEFAULT_TIME_RECALL_PLOT_PRESET_ACU.promptGroup).map((segment, index, group) => index === group.length - 1 ? { ...segment, role: 'assistant', content: '收到，天之音开始执行！' } : segment),
     contentOptimization: cloneLegacyPrompt_ACU(DEFAULT_CONTENT_OPTIMIZATION_PROMPT_GROUP_ACU),
     mergeSummary: LEGACY_MERGE_SUMMARY_PROMPT_ACU,
     mergeSummarySql: LEGACY_MERGE_SUMMARY_PROMPT_SQL_ACU,

@@ -8,7 +8,7 @@ export const plotCopy = {
     enableLabel: "启用剧情推进",
     enableHint: "关闭后不再在正文生成前额外调用 LLM；当前模式的其余召回行为不变。",
     disguiseDisabledLabel: "解除发送伪装",
-    disguiseDisabledHint: "默认关闭。开启后原文停留在输入框等待剧情 AI 返回，再写入最终提示词；不显示临时用户楼层和思考楼层。最终发送仍受交接保护。",
+    disguiseDisabledHint: "默认关闭。开启后原文留在输入框等待剧情 AI 返回，不显示临时楼层或生成中外观；成功后写入最终提示词，由酒馆继续本次发送。",
   },
   panels: {
     preset: {

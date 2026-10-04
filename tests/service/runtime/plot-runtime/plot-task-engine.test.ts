@@ -990,7 +990,7 @@ describe('getAgentControlledWorldbookEntriesForFinalPrompt_ACU', () => {
 });
 
 describe('runPlotTasksRuntime_ACU', () => {
-  it('清绿灯读取失败时在任何任务 AI 调用前阻断本轮剧情推进', async () => {
+  it('清绿灯读取失败时提示并继续本轮剧情任务', async () => {
     mockClearFinalGenerationGreenlights.mockRejectedValue(new Error('Lorebook permission denied'));
     const plotSettings = {
       tasks: [{
@@ -999,13 +999,17 @@ describe('runPlotTasksRuntime_ACU', () => {
       }],
     };
 
-    await expect(runPlotTasksRuntime_ACU(plotSettings, '当前输入')).rejects.toThrow('Lorebook permission denied');
+    const reportWarning = vi.fn();
+    const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入', { reportWarning });
     expect(mockClearFinalGenerationGreenlights).toHaveBeenCalledTimes(1);
     expect(mockSetPendingFinalGenerationGreenlights).toHaveBeenCalledWith([]);
-    expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
+    expect(result.successfulResults).toHaveLength(1);
+    expect(result.apiRetriesExhausted).not.toBe(true);
+    expect(reportWarning).toHaveBeenCalledWith('世界书绿灯清理异常，继续剧情任务。');
   });
 
-  it('清绿灯条目更新失败时在任何任务 AI 调用前阻断本轮剧情推进', async () => {
+  it('清绿灯条目更新失败时提示并继续本轮剧情任务', async () => {
     mockClearFinalGenerationGreenlights.mockRejectedValue(new Error('host setLorebookEntries rejected'));
     const plotSettings = {
       tasks: [{
@@ -1014,12 +1018,14 @@ describe('runPlotTasksRuntime_ACU', () => {
       }],
     };
 
-    await expect(runPlotTasksRuntime_ACU(plotSettings, '当前输入')).rejects.toThrow('host setLorebookEntries rejected');
+    const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
     expect(mockClearFinalGenerationGreenlights).toHaveBeenCalledTimes(1);
-    expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
+    expect(result.successfulResults).toHaveLength(1);
+    expect(result.apiRetriesExhausted).not.toBe(true);
   });
 
-  it('Agent availability discovery 失败时在任何任务 AI 调用前阻断本轮剧情推进', async () => {
+  it('Agent availability discovery 失败时继续普通剧情任务', async () => {
     mockResolveAgentWorldbookFilterAvailability.mockRejectedValue(new Error('Lorebook response malformed'));
     const plotSettings = {
       tasks: [{
@@ -1028,9 +1034,11 @@ describe('runPlotTasksRuntime_ACU', () => {
       }],
     };
 
-    await expect(runPlotTasksRuntime_ACU(plotSettings, '当前输入')).rejects.toThrow('Lorebook response malformed');
+    const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
     expect(mockClearFinalGenerationGreenlights).toHaveBeenCalledTimes(1);
-    expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
+    expect(result.successfulResults).toHaveLength(1);
+    expect(result.apiRetriesExhausted).not.toBe(true);
   });
 
   it('清绿灯预检发现失效世界书引用时隔离 stale，其余有效任务继续工作', async () => {
@@ -1053,7 +1061,7 @@ describe('runPlotTasksRuntime_ACU', () => {
     expect(mockClearFinalGenerationGreenlights).toHaveBeenCalledTimes(1);
   });
 
-  it('清绿灯预检 failed 时抛阶段错误阻断本轮，AI 调用次数为 0', async () => {
+  it('清绿灯预检 failed 时提示并继续 AI 调用', async () => {
     mockClearFinalGenerationGreenlights.mockResolvedValue({
       status: 'failed',
       patched: 0,
@@ -1067,14 +1075,15 @@ describe('runPlotTasksRuntime_ACU', () => {
       }],
     };
 
-    await expect(runPlotTasksRuntime_ACU(plotSettings, '当前输入')).rejects.toMatchObject({
-      name: 'PlotStageError_ACU',
-      phase: 'clear_final_generation_greenlights',
-    });
-    expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
+    const reportWarning = vi.fn();
+    const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入', { reportWarning });
+    expect(result.successfulResults).toHaveLength(1);
+    expect(result.apiRetriesExhausted).not.toBe(true);
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
+    expect(reportWarning).toHaveBeenCalledWith('世界书绿灯清理未完成，继续剧情任务。');
   });
 
-  it('清绿灯预检 failed 时不泄露宿主正文或堆栈到错误摘要', async () => {
+  it('清绿灯预检 failed 时继续且不泄露宿主正文或堆栈到提示', async () => {
     mockClearFinalGenerationGreenlights.mockResolvedValue({
       status: 'failed',
       patched: 0,
@@ -1089,8 +1098,11 @@ describe('runPlotTasksRuntime_ACU', () => {
       }],
     };
 
-    await expect(runPlotTasksRuntime_ACU(plotSettings, '当前输入')).rejects.toThrow();
-    const logCallsJson = JSON.stringify(mockLogError.mock.calls);
+    const reportWarning = vi.fn();
+    const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入', { reportWarning });
+    expect(result.successfulResults).toHaveLength(1);
+    expect(result.apiRetriesExhausted).not.toBe(true);
+    const logCallsJson = JSON.stringify([mockLogError.mock.calls, mockLogWarn.mock.calls, reportWarning.mock.calls]);
     expect(logCallsJson).not.toContain('宿主正文泄露样例');
   });
 
@@ -1271,7 +1283,7 @@ describe('runPlotTasksRuntime_ACU', () => {
   });
 
 
-  it('严格世界书读取失败时在 API 调用前阻断任务', async () => {
+  it('严格世界书读取失败时提示并继续 API 调用', async () => {
     mockGetLorebookEntriesStrict.mockResolvedValue({
       status: 'read_failed',
       source: 'manual_validation',
@@ -1292,18 +1304,16 @@ describe('runPlotTasksRuntime_ACU', () => {
       }],
     }, '当前输入');
 
-    expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
     expect(mockGetLorebookEntriesStrict).toHaveBeenCalledWith(['剧情书'], expect.objectContaining({
       source: 'manual_validation',
       validationPolicy: 'validate_list',
     }));
-    expect(result.successfulResults).toHaveLength(0);
-    expect(result.failedResults).toEqual([expect.objectContaining({
-      taskId: 'strict-read-failure',
-      error: '必需世界书读取失败，已阻断任务 AI 调用。',
-    })]);
+    expect(result.successfulResults).toHaveLength(1);
+    expect(result.failedResults).toHaveLength(0);
+    expect(result.apiRetriesExhausted).not.toBe(true);
     expect(mockLogWarn).toHaveBeenCalledWith(
-      '[剧情推进] [任务:严格读取失败] 严格世界书读取失败，已阻断 AI 调用。',
+      '[剧情推进] [任务:严格读取失败] 世界书处理失败，继续 AI 调用。',
       expect.objectContaining({
         phase: 'strict_worldbook_read',
         runId: expect.any(String),
@@ -1316,7 +1326,7 @@ describe('runPlotTasksRuntime_ACU', () => {
     );
   });
 
-  it('手动选择包含失效世界书时在 API 调用前阻断任务', async () => {
+  it('手动选择包含失效世界书时提示并继续任务', async () => {
     mockGetLorebookEntriesStrict.mockResolvedValue({
       status: 'invalid_selection',
       source: 'manual_validation',
@@ -1341,13 +1351,12 @@ describe('runPlotTasksRuntime_ACU', () => {
       source: 'manual_validation',
       validationPolicy: 'validate_list',
     }));
-    expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
-    expect(result.failedResults).toEqual([expect.objectContaining({
-      taskId: 'invalid-manual-selection',
-      error: '必需世界书读取失败，已阻断任务 AI 调用。',
-    })]);
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
+    expect(result.successfulResults).toHaveLength(1);
+    expect(result.failedResults).toHaveLength(0);
+    expect(result.apiRetriesExhausted).not.toBe(true);
     expect(mockLogWarn).toHaveBeenCalledWith(
-      '[剧情推进] [任务:失效手动选择] 严格世界书读取失败，已阻断 AI 调用。',
+      '[剧情推进] [任务:失效手动选择] 世界书处理失败，继续 AI 调用。',
       expect.objectContaining({
         phase: 'strict_worldbook_read',
         error: expect.objectContaining({
@@ -1364,7 +1373,7 @@ describe('runPlotTasksRuntime_ACU', () => {
     ['能力缺失', Object.assign(new Error('CharacterWorldbookApiUnavailableError_ACU'), { name: 'CharacterWorldbookApiUnavailableError_ACU' })],
     ['宿主契约错误', Object.assign(new Error('CharacterWorldbookBindingContractError_ACU'), { name: 'CharacterWorldbookBindingContractError_ACU' })],
     ['未知错误', new Error('host response malformed')],
-  ])('角色绑定%s时在 AI 调用前阻断任务', async (_label, error) => {
+  ])('角色绑定%s时提示并继续 AI 调用', async (_label, error) => {
     mockGetCurrentCharacterWorldbookBinding.mockRejectedValue(error);
 
     const result = await runPlotTasksRuntime_ACU({
@@ -1375,13 +1384,12 @@ describe('runPlotTasksRuntime_ACU', () => {
       }],
     }, '当前输入');
 
-    expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
-    expect(result.failedResults).toEqual([expect.objectContaining({
-      taskId: 'character-binding-failure',
-      error: '必需世界书读取失败，已阻断任务 AI 调用。',
-    })]);
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
+    expect(result.successfulResults).toHaveLength(1);
+    expect(result.failedResults).toHaveLength(0);
+    expect(result.apiRetriesExhausted).not.toBe(true);
     expect(mockLogWarn).toHaveBeenCalledWith(
-      '[剧情推进] [任务:角色绑定失败] 严格世界书读取失败，已阻断 AI 调用。',
+      '[剧情推进] [任务:角色绑定失败] 世界书处理失败，继续 AI 调用。',
       expect.objectContaining({
         phase: 'strict_worldbook_read',
         error: expect.objectContaining({
@@ -1396,29 +1404,34 @@ describe('runPlotTasksRuntime_ACU', () => {
   it.each([
     ['AbortError', Object.assign(new Error('request aborted'), { name: 'AbortError' })],
     ['TaskAbortedByUser', new Error('TaskAbortedByUser')],
-  ])('角色 binding %s 时传播取消而不伪装为严格读取失败', async (_label, error) => {
+  ])('角色 binding %s 时仅显式用户取消终止，普通 AbortError 继续', async (_label, error) => {
     mockGetCurrentCharacterWorldbookBinding.mockRejectedValue(error);
 
-    await expect(runPlotTasksRuntime_ACU({
+    const request = runPlotTasksRuntime_ACU({
       plotWorldbookConfig: { source: 'character' },
       tasks: [{
         id: 'character-binding-aborted', name: '角色绑定取消', stage: 1, order: 1, maxRetries: 1,
         promptGroup: [{ role: 'user', content: '必须读取角色世界书' }],
       }],
-    }, '当前输入')).rejects.toMatchObject({
-      name: error.name,
-      message: error.message,
-    });
+    }, '当前输入');
+    if (error.message === 'TaskAbortedByUser') {
+      await expect(request).rejects.toMatchObject({ name: error.name, message: error.message });
+      expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
+    } else {
+      const result = await request;
+      expect(result.successfulResults).toHaveLength(1);
+      expect(result.apiRetriesExhausted).not.toBe(true);
+      expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
+    }
 
     expect(mockGetCurrentCharacterWorldbookBinding).toHaveBeenCalledTimes(1);
-    expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
     expect(mockLogWarn).not.toHaveBeenCalledWith(
       '[剧情推进] [任务:角色绑定取消] 严格世界书读取失败，已阻断 AI 调用。',
       expect.anything(),
     );
   });
 
-  it('角色绑定读取后 scope 变化时以 scope_changed 阻断任务 AI 调用', async () => {
+  it('角色绑定读取后 scope 变化时保留诊断并继续任务', async () => {
     const stableScope = { chatId: 'chat-1', characterId: '1', isolationKey: '', reliable: true };
     const changedScope = { chatId: 'chat-2', characterId: '1', isolationKey: '', reliable: true };
     mockCapturePlotRuntimeScope
@@ -1438,13 +1451,12 @@ describe('runPlotTasksRuntime_ACU', () => {
       }],
     }, '当前输入');
 
-    expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
-    expect(result.failedResults).toEqual([expect.objectContaining({
-      taskId: 'character-binding-scope-changed',
-      error: '必需世界书读取失败，已阻断任务 AI 调用。',
-    })]);
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
+    expect(result.successfulResults).toHaveLength(1);
+    expect(result.failedResults).toHaveLength(0);
+    expect(result.apiRetriesExhausted).not.toBe(true);
     expect(mockLogWarn).toHaveBeenCalledWith(
-      '[剧情推进] [任务:角色绑定作用域变化] 严格世界书读取失败，已阻断 AI 调用。',
+      '[剧情推进] [任务:角色绑定作用域变化] 世界书处理失败，继续 AI 调用。',
       expect.objectContaining({
         phase: 'strict_worldbook_read',
         error: expect.objectContaining({
@@ -1475,7 +1487,7 @@ describe('runPlotTasksRuntime_ACU', () => {
     expect(readContext.bookEntriesPromises.size).toBe(0);
   });
 
-  it('表名索引严格读取失败时保留失败而非保留 token 后调用 AI', async () => {
+  it('表名索引严格读取失败时保留 token 并继续调用 AI', async () => {
     mockCurrentJsonTableDataRef.value = {
       relation_sheet: { name: '关系档案', exportConfig: { entryName: '关系档案' } },
     };
@@ -1504,26 +1516,20 @@ describe('runPlotTasksRuntime_ACU', () => {
       validationPolicy: 'validate_list',
       notFoundPolicy: 'isolate_stale',
     }));
-    expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
-    expect(result.failedResults).toEqual([expect.objectContaining({
-      taskId: 'table-read-failure',
-      error: '必需世界书读取失败，已阻断任务 AI 调用。',
-    })]);
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
+    expect(mockCallApiWithPlotPreset.mock.calls[0][0][0].content).toBe('表={{关系档案}}');
+    expect(result.successfulResults).toHaveLength(1);
+    expect(result.failedResults).toHaveLength(0);
+    expect(result.apiRetriesExhausted).not.toBe(true);
     expect(mockLogWarn).toHaveBeenCalledWith(
-      '[剧情推进] [任务:表名读取失败] 严格世界书读取失败，已阻断 AI 调用。',
+      '[剧情推进] 提示词段处理异常，继续任务。',
       expect.objectContaining({
-        phase: 'strict_worldbook_read',
-        runId: expect.any(String),
-        error: expect.objectContaining({
-          category: 'strict_lorebook_read', status: 'read_failed',
-          source: 'plot_table_index', validationPolicy: 'validate_list',
-          failedBookNames: ['剧情书'], errorCategories: ['unknown'],
-        }),
+        error: expect.objectContaining({ category: 'unknown' }),
       }),
     );
   });
 
-  it('Agent 正文绿灯会写入真实世界书蓝灯并继续执行剧情任务', async () => {
+  it.each(['success', 'not_written', 'exception'])('Agent 正文绿灯写入结果=%s 时继续执行剧情任务', async outcome => {
     const finalGreenlights = [{ bookName: '剧情书', uid: 12, reason: '正文需要' }];
     mockResolveAgentWorldbookFilterAvailability.mockResolvedValueOnce({
       available: true,
@@ -1554,13 +1560,24 @@ describe('runPlotTasksRuntime_ACU', () => {
       ],
     });
 
-    const result = await runPlotTasksRuntime_ACU({ tasks: [{ id: 'task-a', name: '任务A', stage: 1, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: 'stage-1-task-a' }] }] }, '当前输入');
+    const reportWarning = vi.fn();
+    if (outcome === 'exception') {
+      mockWriteFinalGenerationGreenlights.mockRejectedValueOnce(new Error('绿灯快照恢复失败'));
+    } else {
+      mockWriteFinalGenerationGreenlights.mockResolvedValueOnce(outcome === 'success');
+    }
+    const result = await runPlotTasksRuntime_ACU({ tasks: [{ id: 'task-a', name: '任务A', stage: 1, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: 'stage-1-task-a' }] }] }, '当前输入', { reportWarning });
 
     expect(mockClearFinalGenerationGreenlights).toHaveBeenCalled();
     expect(mockSetPendingFinalGenerationGreenlights).toHaveBeenCalledWith(finalGreenlights);
     expect(mockWriteFinalGenerationGreenlights).toHaveBeenCalledWith(finalGreenlights);
     expect(result.finalMessage).toBe('最终注入消息');
     expect(result.successfulResults).toHaveLength(1);
+    expect(result.apiRetriesExhausted).not.toBe(true);
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
+    if (outcome === 'exception') {
+      expect(reportWarning).toHaveBeenCalledWith('正文世界书绿灯写入异常，保留剧情结果并继续。');
+   }
     const availabilityReadContext = mockResolveAgentWorldbookFilterAvailability.mock.calls[0][0];
     const decisionReadContext = mockRunAgentDecisionForPlot.mock.calls[0][0].sharedContext.worldbookReadContext;
     expect(availabilityReadContext).toBe(decisionReadContext);
@@ -2376,16 +2393,14 @@ describe('runPlotTasksRuntime_ACU', () => {
     ))).toBe(false);
     expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
   });
-  it('长度达标但缺少配置标签时重试，并复用成功尝试的提取结果', async () => {
+  it('长度不足且缺少配置标签时保留成功响应，不作为 API 失败重试', async () => {
     const plotSettings = {
       tasks: [{
-        id: 'tag-retry', name: '标签重试任务', stage: 1, order: 1, maxRetries: 2, minLength: 1,
+        id: 'tag-retry', name: '标签重试任务', stage: 1, order: 1, maxRetries: 2, minLength: 100,
         extractTags: 'plot', promptGroup: [{ role: 'user', content: 'tag-retry-prompt' }],
       }],
     };
-    mockCallApiWithPlotPreset
-      .mockResolvedValueOnce('第一次没有标签')
-      .mockResolvedValueOnce('<plot>有效剧情</plot>');
+    mockCallApiWithPlotPreset.mockResolvedValueOnce('第一次没有标签');
     mockExtractPlotTagsFromResponse.mockImplementation((rawText: string) => (
       String(rawText).includes('<plot>')
         ? {
@@ -2408,19 +2423,20 @@ describe('runPlotTasksRuntime_ACU', () => {
 
     const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
 
-    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(2);
-    expect(mockExtractPlotTagsFromResponse).toHaveBeenCalledTimes(2);
-    expect(mockAbortableDelay).toHaveBeenCalledTimes(1);
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
+    expect(mockExtractPlotTagsFromResponse).toHaveBeenCalledTimes(1);
+    expect(mockAbortableDelay).not.toHaveBeenCalled();
+    expect(result.apiRetriesExhausted).not.toBe(true);
     expect(result.successfulResults).toEqual([
       expect.objectContaining({
         taskId: 'tag-retry',
-        rawResponse: '<plot>有效剧情</plot>',
-        extractedTags: { plot: '有效剧情' },
+        rawResponse: '第一次没有标签',
+        extractedTags: {},
       }),
     ]);
   });
 
-  it('配置标签重试耗尽时失败并阻断后续阶段', async () => {
+  it('配置标签缺失时保留响应并继续后续阶段', async () => {
     const plotSettings = {
       tasks: [
         {
@@ -2428,8 +2444,8 @@ describe('runPlotTasksRuntime_ACU', () => {
           extractTags: 'plot', promptGroup: [{ role: 'user', content: 'stage-1-tag-fail' }],
         },
         {
-          id: 'tag-never', name: '不应执行任务', stage: 2, order: 1, maxRetries: 1,
-          promptGroup: [{ role: 'user', content: 'stage-2-should-not-run' }],
+          id: 'tag-next', name: '后续任务', stage: 2, order: 1, maxRetries: 1,
+          promptGroup: [{ role: 'user', content: 'stage-2-continue' }],
         },
       ],
     };
@@ -2445,20 +2461,21 @@ describe('runPlotTasksRuntime_ACU', () => {
 
     const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
 
-    expect(result.abortedByStageFailure).toBe(true);
-    expect(result.failedStage).toBe(1);
-    expect(result.failedResults).toEqual([
+    expect(result.abortedByStageFailure).not.toBe(true);
+    expect(result.apiRetriesExhausted).not.toBe(true);
+    expect(result.failedResults).toHaveLength(0);
+    expect(result.successfulResults).toEqual([
       expect.objectContaining({
         taskId: 'tag-fail',
-        error: expect.stringContaining('未提取到任何配置标签（plot）'),
+        rawResponse: '始终无标签',
       }),
+      expect.objectContaining({ taskId: 'tag-next', rawResponse: '始终无标签' }),
     ]);
-    expect(result.failedResults[0].error).not.toContain('始终无标签');
     expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(2);
-    expect(mockCallApiWithPlotPreset.mock.calls.some((call: any[]) => call[0][0].content === 'stage-2-should-not-run')).toBe(false);
+    expect(mockCallApiWithPlotPreset.mock.calls.some((call: any[]) => call[0][0].content === 'stage-2-continue')).toBe(true);
   });
 
-  it('仅配置 extractInjectTags 且未提取标签时进入失败路径', async () => {
+  it('仅配置 extractInjectTags 且未提取标签时保留响应并继续', async () => {
     const plotSettings = {
       tasks: [{
         id: 'inject-tag-fail', name: '注入标签失败任务', stage: 1, order: 1, maxRetries: 1,
@@ -2477,11 +2494,14 @@ describe('runPlotTasksRuntime_ACU', () => {
 
     const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
 
-    expect(result.abortedByStageFailure).toBe(true);
-    expect(result.failedResults).toEqual([
+    expect(result.abortedByStageFailure).not.toBe(true);
+    expect(result.apiRetriesExhausted).not.toBe(true);
+    expect(result.failedResults).toHaveLength(0);
+    expect(result.successfulResults).toEqual([
       expect.objectContaining({
         taskId: 'inject-tag-fail',
-        error: expect.stringContaining('未提取到任何配置标签（memory）'),
+        rawResponse: '没有注入标签',
+        extractedTags: {},
       }),
     ]);
     expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);

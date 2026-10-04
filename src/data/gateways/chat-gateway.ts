@@ -176,23 +176,18 @@ export function createAiPlaceholderMessage_ACU(): { message: any; index: number 
     return { message, index };
 }
 
-/** 固定删除聊天末尾两个楼层并保存，用于发送前处理失败后的尾部回退。 */
-export async function removeLastTwoMessages_ACU(): Promise<void> {
-    const chat = getChatArray_ACU();
-    if (!chat.length) return;
-    const count = Math.min(2, chat.length);
-    const startIndex = chat.length - count;
-    chat.splice(startIndex, count);
-    const root = jQuery_API_ACU?.('#chat')?.[0];
-    root?.querySelectorAll<HTMLElement>('.mes[mesid]').forEach(node => {
-        const id = node.getAttribute('mesid');
-        if (id && /^\d+$/.test(id) && Number(id) >= startIndex) node.remove();
-    });
-    try {
-        await saveChatToHostStrict_ACU();
-    } finally {
-        await SillyTavern_API_ACU.eventSource.emit(SillyTavern_API_ACU.eventTypes.MESSAGE_DELETED, chat.length);
+/** 仅撤销本次发送创建的消息，不删除既有 user、历史回复或其他请求的楼层。 */
+export async function removePlotSendMessages_ACU(chat: any[], messages: any[]): Promise<void> {
+    if (getChatArray_ACU() !== chat) return;
+    const indices = messages.map(message => chat.indexOf(message)).filter(index => index >= 0)
+        .sort((a, b) => b - a);
+    if (!indices.length) return;
+    for (const index of indices) {
+        chat.splice(index, 1);
+        removeRenderedUserMessage_ACU(index);
     }
+    await saveChatToHostStrict_ACU();
+    await SillyTavern_API_ACU.eventSource.emit(SillyTavern_API_ACU.eventTypes.MESSAGE_DELETED, chat.length);
 }
 
 /** 删除本轮用户楼层，按消息对象定位，不影响历史回复。 */

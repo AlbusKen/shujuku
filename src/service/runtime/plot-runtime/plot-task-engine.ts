@@ -15,7 +15,7 @@ import { capturePlotRuntimeScope_ACU, isSamePlotRuntimeScope_ACU, isTransientLor
 import { buildCombinedWorldbookContentByStrategy_ACU, collectCombinedWorldbookEntriesByStrategy_ACU, createStrictLorebookReadError_ACU, formatCombinedWorldbookEntries_ACU, getLorebookEntriesStrict_ACU, isStrictLorebookReadError_ACU, summarizeStrictLorebookReadError_ACU, type StrictLorebookReadContext_ACU } from '../../worldbook/pipeline';
 import { createPlotWorldbookReadContext_ACU, type PlotWorldbookReadContext_ACU } from './plot-worldbook-read-context';
 import { isDatabaseGeneratedLorebookEntry_ACU, resolveGeneratedEntriesForTable_ACU } from '../../worldbook/worldbook-placeholder-classification';
-import { PlotStageError_ACU } from './plot-runtime-phase';
+
 import { escapeRegExp_ACU, hashUserInput_ACU, isEntryBlocked_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, normalizeNonNegativeInteger_ACU, normalizePositiveInteger_ACU, normalizeExcludeRules_ACU, normalizeExtractRules_ACU } from '../../../shared/utils';
 import { ensurePlotTasksCompat_ACU, getPlotPromptContentByIdFromSettings_ACU, normalizePlotTask_ACU, normalizePlotTasks_ACU } from '../../plot/plot-logic';
 import { parseRandomTags_ACU, replaceRandomVariables_ACU, getLatestAIMessageContent_ACU, getLatestUserMessageContent_ACU, composeSeedMatchContent_ACU, replaceDbSqlVariables } from '../template-vars';
@@ -92,6 +92,10 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
     if (abortController_ACU && abortController_ACU.signal.aborted) {
       throw new Error('TaskAbortedByUser');
     }
+  }
+
+  function isManualPlotAbort_ACU(error: any): boolean {
+    return abortController_ACU?.signal.aborted === true || error?.message === 'TaskAbortedByUser';
   }
 
   function getPlotTaskApiPresetOverrides_ACU(): Record<string, string> {
@@ -472,13 +476,21 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
     for (const seg of messagesToUse) {
       if (!seg || typeof seg.content !== 'string') continue;
       let c = seg.content;
-      if (typeof sharedContext.resolveTaskTableWorldbookTokens === 'function') {
-        c = await sharedContext.resolveTaskTableWorldbookTokens(c);
+      try {
+        if (typeof sharedContext.resolveTaskTableWorldbookTokens === 'function') {
+          c = await sharedContext.resolveTaskTableWorldbookTokens(c);
+        }
+        c = await tryRenderPlotTemplateWithEjs_ACU(c);
+        c = sharedContext.performReplacements(c, replacementOverrides);
+        c = replacePlotTagPlaceholders_ACU(c, relayTagMap, historyTagMap);
+        c = renderPlotTaskContentWithIsolatedVariables_ACU(c, sharedContext);
+      } catch (error) {
+        if (isManualPlotAbort_ACU(error)) throw error;
+        sharedContext.reportWarning?.('提示词段处理未完成，保留已处理的文本并继续任务。');
+        logWarn_ACU('[剧情推进] 提示词段处理异常，继续任务。', {
+          error: summarizePlotRuntimeError_ACU(error),
+        });
       }
-      c = await tryRenderPlotTemplateWithEjs_ACU(c);
-      c = sharedContext.performReplacements(c, replacementOverrides);
-      c = replacePlotTagPlaceholders_ACU(c, relayTagMap, historyTagMap);
-      c = renderPlotTaskContentWithIsolatedVariables_ACU(c, sharedContext);
       seg.__renderedContent = c;
     }
 
@@ -583,25 +595,13 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         taskWorldbookOptions,
       );
     } catch (wbError) {
-      if (wbError?.message === 'TaskAbortedByUser' || wbError?.name === 'AbortError' || String(wbError?.message || '').toLowerCase().includes('aborted')) {
-        throw wbError;
-      }
-      logWarn_ACU(`[剧情推进] [任务:${taskLabel}] 严格世界书读取失败，已阻断 AI 调用。`, {
+      if (isManualPlotAbort_ACU(wbError)) throw wbError;
+      sharedContext.reportWarning?.(`任务「${taskLabel}」的世界书处理失败，使用已取得的资料继续。`);
+      logWarn_ACU(`[剧情推进] [任务:${taskLabel}] 世界书处理失败，继续 AI 调用。`, {
         phase: 'strict_worldbook_read',
         runId: sharedContext.worldbookReadContext?.runId || '',
         error: summarizeStrictLorebookReadError_ACU(wbError) || summarizePlotRuntimeError_ACU(wbError),
       });
-      return {
-        taskId: normalizedTask.id,
-        taskName: taskLabel,
-        success: false,
-        rawResponse: '',
-        extractedTags: {},
-        injectedFragments: [],
-        error: '必需世界书读取失败，已阻断任务 AI 调用。',
-        stage: taskStage,
-        order: normalizedTask.order ?? 0,
-      };
     }
 
     // 构建任务级共享上下文：覆盖 $1/$9 替换值，并在 EJS 前解析表名占位符。
@@ -634,6 +634,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       let rawResponse = '';
       let lastErrorMessage = '';
       let acceptedTagExtraction: ReturnType<typeof extractPlotTagsFromResponse_ACU> | null = null;
+      let apiSucceeded = false;
 
       for (let attemptIndex = 0; attemptIndex < maxRetries; attemptIndex++) {
         checkPlotAbortRequested_ACU();
@@ -644,42 +645,36 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         }
 
         let tempMessage = null;
-        let apiError = null;
+        let apiFailed = false;
         try {
           logDebug_ACU(`[剧情推进] [阶段:${taskStage}] [任务:${taskLabel}] 使用任务级API预设: ${effectivePlotApiPreset || '当前配置'}`);
           tempMessage = await callApiWithPlotPreset_ACU(messages, effectivePlotApiPreset, abortController_ACU?.signal || null);
         } catch (apiCallError) {
-          if (apiCallError?.name === 'AbortError' || String(apiCallError?.message || '').toLowerCase().includes('aborted')) {
-            throw apiCallError;
-          }
-          apiError = apiCallError;
+          if (isManualPlotAbort_ACU(apiCallError)) throw apiCallError;
+          apiFailed = true;
           lastErrorMessage = apiCallError?.message || 'API调用失败';
           logWarn_ACU(`[剧情推进] [阶段:${taskStage}] [任务:${taskLabel}] 第 ${attemptIndex + 1} 次API调用失败:`, lastErrorMessage);
         }
 
         checkPlotAbortRequested_ACU();
 
-        if (!apiError && tempMessage) {
-          if (minLength > 0 && tempMessage.length < minLength) {
-            lastErrorMessage = `回复长度不足（${tempMessage.length}/${minLength}）`;
-            logWarn_ACU(`[剧情推进] [阶段:${taskStage}] [任务:${taskLabel}] 第 ${attemptIndex + 1} 次回复过短: ${tempMessage.length}/${minLength}`);
-          } else {
-            const candidateTagExtraction = extractPlotTagsFromResponse_ACU(
-              tempMessage,
-              normalizedTask.extractTags,
-              normalizedTask.extractInjectTags,
-            );
-            if (candidateTagExtraction.tagNames.length > 0 && Object.keys(candidateTagExtraction.extractedTags).length === 0) {
-              const expectedTagNames = candidateTagExtraction.tagNames.join(', ');
-              lastErrorMessage = `未提取到任何配置标签（${expectedTagNames}）`;
-              logWarn_ACU(`[剧情推进] [阶段:${taskStage}] [任务:${taskLabel}] 第 ${attemptIndex + 1} 次回复未包含任何配置标签: ${expectedTagNames}`);
-            } else {
-              rawResponse = tempMessage;
-              acceptedTagExtraction = candidateTagExtraction;
-              logDebug_ACU(`[剧情推进] [阶段:${taskStage}] [任务:${taskLabel}] 在第 ${attemptIndex + 1} 次尝试中成功完成。`);
-              break;
-            }
+        if (!apiFailed) {
+          apiSucceeded = true;
+          rawResponse = typeof tempMessage === 'string' ? tempMessage : '';
+          if (minLength > 0 && rawResponse.length < minLength) {
+            sharedContext.reportWarning?.(`任务「${taskLabel}」的回复长度不足，保留回复并继续。`);
           }
+          try {
+            acceptedTagExtraction = extractPlotTagsFromResponse_ACU(rawResponse, normalizedTask.extractTags, normalizedTask.extractInjectTags);
+            if (acceptedTagExtraction.tagNames.length > 0 && Object.keys(acceptedTagExtraction.extractedTags).length === 0) {
+              sharedContext.reportWarning?.(`任务「${taskLabel}」未提取到配置标签，保留回复并继续。`);
+            }
+          } catch (error) {
+            if (isManualPlotAbort_ACU(error)) throw error;
+            sharedContext.reportWarning?.(`任务「${taskLabel}」的标签提取失败，保留回复并继续。`);
+          }
+          acceptedTagExtraction ??= { tagNames: [], extractedTags: {}, injectedFragments: [], injectOnlyTags: {}, injectOnlyFragments: [], injectOnlyTagNames: [] };
+          break;
         }
 
         if (attemptIndex < maxRetries - 1) {
@@ -688,21 +683,22 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         }
       }
 
-      if (!rawResponse || !acceptedTagExtraction) {
+      if (!apiSucceeded) {
         return {
           taskId: normalizedTask.id,
           taskName: taskLabel,
           success: false,
           rawResponse: '',
           extractedTags: {},
-          injectedFragments: [],
-          error: lastErrorMessage || '任务在最大重试次数后仍未返回有效结果。',
+          injectedFragments: [] as any[],
+          error: 'API 调用失败且已耗尽重试次数。',
+          apiRetriesExhausted: true,
           stage: taskStage,
           order: normalizedTask.order ?? 0,
         };
       }
 
-      const { tagNames, extractedTags, injectedFragments, injectOnlyTags, injectOnlyFragments, injectOnlyTagNames } = acceptedTagExtraction;
+      const { tagNames, extractedTags, injectedFragments, injectOnlyTags, injectOnlyFragments, injectOnlyTagNames } = acceptedTagExtraction!;
       if (tagNames.length > 0 && Object.keys(extractedTags).length > 0) {
         logDebug_ACU(`[剧情推进] [阶段:${taskStage}] [任务:${taskLabel}] 成功摘取标签: ${Object.keys(extractedTags).join(', ')}`);
       }
@@ -722,18 +718,17 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         order: normalizedTask.order ?? 0,
       };
     } catch (error) {
-      if (error?.message === 'TaskAbortedByUser' || error?.name === 'AbortError' || String(error?.message || '').toLowerCase().includes('aborted')) {
-        throw error;
-      }
+      if (isManualPlotAbort_ACU(error)) throw error;
       if (isStrictLorebookReadError_ACU(error) || String((error as any)?.message || '').startsWith('StrictLorebookRead:')) {
-        logWarn_ACU(`[剧情推进] [任务:${taskLabel}] 严格世界书读取失败，已阻断 AI 调用。`, {
+        sharedContext.reportWarning?.(`任务「${taskLabel}」的提示词处理失败，继续后续任务。`);
+        logWarn_ACU(`[剧情推进] [任务:${taskLabel}] 提示词处理失败，继续后续任务。`, {
           phase: 'strict_worldbook_read',
           runId: sharedContext.worldbookReadContext?.runId || '',
           error: summarizeStrictLorebookReadError_ACU(error) || summarizePlotRuntimeError_ACU(error),
         });
         return {
           taskId: normalizedTask.id, taskName: taskLabel, success: false, rawResponse: '',
-          extractedTags: {}, injectedFragments: [], error: '必需世界书读取失败，已阻断任务 AI 调用。',
+          extractedTags: {}, injectedFragments: [], error: '世界书提示词处理失败。',
           stage: taskStage, order: normalizedTask.order ?? 0,
         };
       }
@@ -754,6 +749,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
 
   export async function runPlotTasksRuntime_ACU(plotSettings: Record<string, any>, userMessage: string, runtimeOptions: any = {}) {
     const { inputForHash = userMessage, hasExistingUserMessage = false } = runtimeOptions;
+    const reportWarning = (text: string) => runtimeOptions.reportWarning?.(text);
     const chatId = currentChatFileIdentifier_ACU || '';
     const chat = getChatArray_ACU();
     let userTailIndex = chat.length - 1;
@@ -798,18 +794,17 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
     );
     try {
       _set_pendingFinalGenerationGreenlights_ACU([]);
-      const clearGreenlightsOutcome = await clearFinalGenerationGreenlights_ACU(worldbookReadContext);
-      if (clearGreenlightsOutcome.status === 'failed') {
-        // 直接把安全摘要对象作为 cause，避免二次压缩为 {category, phase} 丢失 subphase/strict 字段。
-        // category='aborted' 由 plot-entry 恢复为取消语义；其余错误失败关闭。
-        const cause = clearGreenlightsOutcome.error || { category: 'unknown', phase: 'clear_final_generation_greenlights' };
-        throw new PlotStageError_ACU('clear_final_generation_greenlights', 'worldbook preflight failed', cause);
-      }
-      if (clearGreenlightsOutcome.status === 'isolated_stale' && clearGreenlightsOutcome.staleBookNames.length > 0) {
-        logWarn_ACU('[剧情推进] 部分世界书已失效（可能被删除/改名），已隔离，其余世界书继续工作。', {
-          phase: 'clear_final_generation_greenlights',
-          staleBookNames: clearGreenlightsOutcome.staleBookNames,
-        });
+      try {
+        const clearGreenlightsOutcome = await clearFinalGenerationGreenlights_ACU(worldbookReadContext);
+        checkPlotAbortRequested_ACU();
+        if (clearGreenlightsOutcome.status === 'failed') {
+          reportWarning('世界书绿灯清理未完成，继续剧情任务。');
+        } else if (clearGreenlightsOutcome.status === 'isolated_stale' && clearGreenlightsOutcome.staleBookNames.length > 0) {
+          reportWarning('部分世界书已失效，使用其余资料继续剧情任务。');
+        }
+      } catch (error) {
+        if (isManualPlotAbort_ACU(error)) throw error;
+        reportWarning('世界书绿灯清理异常，继续剧情任务。');
       }
 
       ensurePlotTasksCompat_ACU(plotSettings, { syncLegacy: true });
@@ -832,9 +827,14 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         readContext: worldbookReadContext,
       });
       sharedContext.worldbookReadContext = worldbookReadContext;
+      sharedContext.reportWarning = reportWarning;
     checkPlotAbortRequested_ACU();
 
-    const agentAvailability = await resolveAgentWorldbookFilterAvailability_ACU(worldbookReadContext);
+    const agentAvailability = await resolveAgentWorldbookFilterAvailability_ACU(worldbookReadContext).catch((error): { available: false; control: null } => {
+      if (isManualPlotAbort_ACU(error)) throw error;
+      reportWarning('世界书 Agent 状态读取失败，继续普通剧情任务。');
+      return { available: false, control: null };
+    });
     const agentWorldbookControl = agentAvailability.available ? agentAvailability.control : null;
     const effectivePlotSettings = agentWorldbookControl
       ? { ...plotSettings, agentWorldbookControl }
@@ -854,7 +854,14 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         : [];
       _set_pendingFinalGenerationGreenlights_ACU(finalGenerationGreenlights);
       if (agentDecision.active === true) {
-        const written = await writeFinalGenerationGreenlights_ACU(finalGenerationGreenlights);
+        const written = await writeFinalGenerationGreenlights_ACU(finalGenerationGreenlights).catch((error): false => {
+          if (isManualPlotAbort_ACU(error)) throw error;
+          reportWarning('正文世界书绿灯写入异常，保留剧情结果并继续。');
+          logWarn_ACU('[剧情推进] 正文世界书绿灯写入异常，继续剧情任务。', {
+            error: summarizePlotRuntimeError_ACU(error),
+          });
+          return false;
+        });
         if (!written && finalGenerationGreenlights.length > 0) {
           // 写入未生效时放行条目在世界书里仍是禁用态，原生注入不会包含它们；
           // 生成不阻断（缺内容比漏内容安全），但必须可观测。
@@ -961,7 +968,10 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
             `[剧情推进] [阶段:${result.stage ?? stageGroup.stage}] [任务:${result.taskName || result.taskId || '未命名任务'}] 未产出有效结果: ${result.error || '未知错误'}`,
           );
         });
-        const failedTaskNames = stageFailedResults.map((result: any) => result.taskName || result.taskId || '未命名任务').join('、');
+      }
+      const exhaustedTasks = stageFailedResults.filter((result: any) => result.apiRetriesExhausted === true);
+      if (exhaustedTasks.length > 0) {
+        const failedTaskNames = exhaustedTasks.map((result: any) => result.taskName || result.taskId || '未命名任务').join('、');
         if (agentDecisionPromise) {
           await agentDecisionPromise;
         }
@@ -972,8 +982,9 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
           aggregatedTags,
           enabledTaskCount: enabledTasks.length,
           abortedByStageFailure: true,
+          apiRetriesExhausted: true,
           failedStage: stageGroup.stage,
-          errorMessage: `剧情任务阶段 ${stageGroup.stage} 执行失败（${failedTaskNames}），后续阶段已停止。`,
+          errorMessage: `剧情任务 API 调用失败且重试耗尽（${failedTaskNames}），后续阶段已停止。`,
         };
       }
 
@@ -1026,7 +1037,11 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
     // 对象引用仅用于识别旧延迟回调是否被新 pending 取代；roundId 才是消息持久化身份。
     logDebug_ACU('[剧情推进] [Plot] 已暂存plot数据，roundId:', roundId, '，用户输入哈希:', userInputHash, '，原始文本长度:', inputForHash?.length || 0);
 
-    const saveOutcome = await savePlotToLatestMessage_ACU(true);
+    const saveOutcome = await savePlotToLatestMessage_ACU(true).catch((error): null => {
+      if (isManualPlotAbort_ACU(error)) throw error;
+      reportWarning('剧情反馈保存异常，保留结果并继续发送。');
+      return null;
+    });
     if (saveOutcome?.status === 'committed') {
       logDebug_ACU(`[剧情推进] [Plot] 已写入并提交到目标消息索引 ${saveOutcome.targetIndex}`);
     } else if (saveOutcome?.status === 'deferred') {

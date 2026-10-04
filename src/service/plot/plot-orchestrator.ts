@@ -126,7 +126,7 @@ export function prepareStrategy1Context_ACU(lastMessage: any): {
  * 规划函数类型：由 presentation 层传入，负责调用 AI 规划并处理 UI 反馈（toast、中止按钮等）
  * 返回值与 runOptimizationLogicWithUI_ACU 兼容
  */
-export type PlanningFn = (userMessage: string, options: any) => Promise<string | null | { skipped?: boolean; reason?: string; aborted?: boolean; manual?: boolean; restoreText?: string }>;
+export type PlanningFn = (userMessage: string, options: any) => Promise<string | null | { skipped?: boolean; reason?: string; aborted?: boolean; manual?: boolean; restoreText?: string; apiRetriesExhausted?: boolean }>;
 
 /** 只有明确的未启用/模式不适用/重试跳过允许普通发送；忙碌或未知跳过不能透传原文。 */
 function isPlanningNotRequired_ACU(result: Awaited<ReturnType<PlanningFn>>): boolean {
@@ -143,6 +143,8 @@ function isPlanningBusy_ACU(result: Awaited<ReturnType<PlanningFn>>): boolean {
  * TavernHelper hook 编排结果
  */
 export interface TavernHelperHookResult {
+    apiRetriesExhausted?: boolean;
+    manual?: boolean;
     /** 'passthrough' = 不处理直接透传, 'planned' = 规划成功, 'aborted' = 用户中止, 'skipped' = 跳过, 'loop_retry' = 需要循环重试 */
     action: 'passthrough' | 'planned' | 'aborted' | 'skipped' | 'loop_retry' | 'failed' | 'busy';
     /** 规划后的最终消息（action='planned' 时有值） */
@@ -155,6 +157,7 @@ export interface TavernHelperHookResult {
  * GENERATION_AFTER_COMMANDS 策略1编排结果
  */
 export interface Strategy1Result {
+    apiRetriesExhausted?: boolean;
     /** 'no_match' = 不匹配策略1, 'passthrough' = 无需规划, 'busy' = 未取得所有权, 'skipped' = 未知跳过 */
     action: 'no_match' | 'passthrough' | 'planned' | 'aborted' | 'skipped' | 'loop_retry' | 'failed' | 'busy';
     /** 规划后的最终消息 */
@@ -173,6 +176,7 @@ export interface Strategy1Result {
  * GENERATION_AFTER_COMMANDS 策略2编排结果
  */
 export interface Strategy2Result {
+    apiRetriesExhausted?: boolean;
     /** 'skip' = 不处理, 'planned' = 规划成功, 'aborted' = 用户中止 */
     action: 'skip' | 'planned' | 'aborted' | 'failed' | 'busy';
     /** 规划后的最终消息 */
@@ -219,6 +223,9 @@ export async function orchestrateTavernHelperHook_ACU(
             originalUserInput: userMessage,
             hasExistingUserMessage: false,
         });
+        if (finalMessage && typeof finalMessage === 'object' && finalMessage.apiRetriesExhausted === true) {
+            return { action: 'failed', apiRetriesExhausted: true };
+        }
 
         // 5. 处理跳过
         if (finalMessage && (finalMessage as any).skipped) {
@@ -233,8 +240,8 @@ export async function orchestrateTavernHelperHook_ACU(
 
         // 6. 处理中止
         if (finalMessage && (finalMessage as any).aborted) {
-            logDebug_ACU('[剧情推进] Generation aborted by user.');
-            return { action: 'aborted' };
+            logDebug_ACU('[剧情推进] Planning returned an abort result.');
+            return { action: 'aborted', manual: (finalMessage as any).manual === true };
         }
 
         // 7. 判断循环模式下规划失败
@@ -249,7 +256,7 @@ export async function orchestrateTavernHelperHook_ACU(
             return { action: 'planned', finalMessage, writeBack };
         }
 
-        // 已进入规划却没有最终提示词，不能静默退回用户原文。
+        // 普通失败由发送层提示并继续；仅 API 重试耗尽或用户主动取消中断。
         return { action: 'failed' };
     } catch (error) {
         logError_ACU('[剧情推进] Error in TavernHelper.generate hook orchestration:', error);
@@ -298,6 +305,9 @@ export async function orchestrateAfterCommandsStrategy1_ACU(
             originalUserInput: messageToProcess,
             hasExistingUserMessage: true,
         });
+        if (finalMessage && typeof finalMessage === 'object' && finalMessage.apiRetriesExhausted === true) {
+            return { action: 'failed', apiRetriesExhausted: true };
+        }
 
         // 4. 处理跳过
         if (finalMessage && (finalMessage as any).skipped) {
@@ -378,6 +388,9 @@ export async function orchestrateAfterCommandsStrategy2_ACU(
             originalUserInput: originalInputText,
             hasExistingUserMessage: false,
         });
+        if (finalMessage && typeof finalMessage === 'object' && finalMessage.apiRetriesExhausted === true) {
+            return { action: 'failed', apiRetriesExhausted: true };
+        }
 
         // 处理跳过
         if (finalMessage && (finalMessage as any).skipped) {

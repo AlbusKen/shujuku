@@ -15,6 +15,7 @@ import { STREAMING_FORCE_DISABLE_VERSION_ACU, TABLE_FILL_TOOL_PROMPT_UPGRADE_VER
 import { adaptTableFillPromptSegmentsToToolMode_ACU } from '../ai/prompt-builder/table-fill-tools';
 import { CREATIVE_IDENTITY_PROMPT_UPGRADE_VERSION_ACU } from '../../shared/defaults';
 import { applyCreativeIdentityProfileUpgrade_ACU, applyCreativeIdentityVectorUpgrade_ACU } from './creative-identity-upgrade';
+import { upgradeTimeRecallPrefill_ACU } from '../plot/time-recall-prefill';
 import { globalMeta_ACU, loadGlobalMeta_ACU, readProfileSettingsFromStorage_ACU, readProfileTemplateFromStorage_ACU, sanitizeSettingsForProfileSave_ACU, saveGlobalMeta_ACU, writeProfileSettingsToStorage_ACU, writeProfileTemplateToStorage_ACU } from '../../data/repositories/profile-repo';
 import { getCurrentTemplatePresetName_ACU, normalizeTemplatePresetSelectionValue_ACU } from '../../shared/template-preset-utils';
 import { persistSettingsToStorage_ACU } from '../../data/storage/config-storage';
@@ -800,6 +801,11 @@ export   function loadSettings_ACU() {
       forceDefaultTemplateAssistantPromptOnce_ACU();
       forceDisableStreamingOnce_ACU();
       upgradeCreativeIdentityPromptsOnce_ACU();
+      const upgradedPlotSettings = upgradeTimeRecallPrefill_ACU(settings_ACU.plotSettings);
+      if (upgradedPlotSettings) {
+          settings_ACU.plotSettings = upgradedPlotSettings;
+          shouldPersistSettingsAfterLoad_ACU = true;
+      }
 
       if (shouldPersistSettingsAfterLoad_ACU) {
           saveGlobalMeta_ACU();

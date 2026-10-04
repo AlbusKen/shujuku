@@ -202,9 +202,10 @@ describe('orchestrateTavernHelperHook_ACU', () => {
     expect(result.action).toBe('skipped');
   });
   it('用户中止返回 aborted', async () => {
-    const runPlanning = vi.fn().mockResolvedValue({ aborted: true });
+    const runPlanning = vi.fn().mockResolvedValue({ aborted: true, manual: true });
     const result = await orchestrateTavernHelperHook_ACU({ user_input: '继续' }, runPlanning);
     expect(result.action).toBe('aborted');
+    expect(result.manual).toBe(true);
   });
   it('循环模式规划失败返回 loop_retry', async () => {
     mockLoopState.isLooping = true;

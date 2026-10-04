@@ -14,6 +14,7 @@ import { clearCurrentChatPlotScopeState_ACU, getCurrentChatPlotScopeState_ACU, s
 import { cleanChatName_ACU, logDebug_ACU, logWarn_ACU, normalizeExcludeRules_ACU, normalizeExtractRules_ACU, normalizeNonNegativeInteger_ACU, normalizePositiveInteger_ACU } from '../../shared/utils';
 import { getLastOptimizationBase_ACU, setLastOptimizationBase_ACU } from '../optimization/content-optimization';
 import { stripLegacyLoopPromptFields_ACU, stripLegacyLoopPromptFieldsInPlace_ACU } from '../../shared/legacy-loop-fields';
+import { upgradeTimeRecallPrefill_ACU } from './time-recall-prefill';
 
 // ═══ 循环提示词/提示词组兼容 ═══
 
@@ -288,6 +289,8 @@ function syncPrimaryPlotTaskFromLegacySettings_ACU(plotSettings: Record<string, 
 
 export function ensurePlotTasksCompat_ACU(plotSettings: Record<string, any>, { persist = false, syncLegacy = true } = {}) {
     if (!plotSettings || typeof plotSettings !== 'object') return;
+    const upgraded = upgradeTimeRecallPrefill_ACU(plotSettings);
+    if (upgraded) Object.assign(plotSettings, upgraded);
     const normalizedTasks = normalizePlotTasks_ACU(plotSettings);
     plotSettings.plotTasks = normalizedTasks;
     if (syncLegacy && normalizedTasks.length > 0) {

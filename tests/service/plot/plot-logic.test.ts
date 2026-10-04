@@ -3,6 +3,8 @@
  * 剧情推进纯逻辑函数 单元测试
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { USER_PREFILL_CONTENT_ACU } from '../../../src/shared/user-prefill.js';
+import { upgradeTimeRecallPrefill_ACU } from '../../../src/service/plot/time-recall-prefill';
 
 const { mockSettings } = vi.hoisted(() => {
   const mockSettings: any = {
@@ -20,7 +22,8 @@ const { mockSettings } = vi.hoisted(() => {
   return { mockSettings };
 });
 
-vi.mock('../../../src/shared/defaults-json.js', () => ({
+vi.mock('../../../src/shared/defaults-json.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../src/shared/defaults-json.js')>(),
   DEFAULT_PLOT_SETTINGS_ACU: {
     contextExtractRules: [],
     contextExcludeRules: [],
@@ -584,14 +587,47 @@ describe('syncLegacyPlotSettingsFromTask_ACU', () => {
 
 // ═══ ensurePlotTasksCompat_ACU ═══
 describe('ensurePlotTasksCompat_ACU', () => {
-  it('规范化 plotTasks 并同步 legacy', () => {
+  it('规范化任务并同步 legacy，精确升级时间召回尾段且保留自定义', async () => {
+    const defaults = await vi.importActual<typeof import('../../../src/shared/defaults-json.js')>('../../../src/shared/defaults-json.js');
+    const defaultTail = defaults.DEFAULT_PLOT_PROMPT_GROUP_ACU.at(-1);
+    expect(defaultTail).toMatchObject({ role: 'user', content: USER_PREFILL_CONTENT_ACU });
+    expect(defaults.DEFAULT_TIME_RECALL_PLOT_PRESET_ACU.promptGroup.at(-1)).toEqual(defaultTail);
+    expect(defaults.DEFAULT_TIME_RECALL_PLOT_PRESET_ACU.plotTasks[0].promptGroup.at(-1)).toEqual(defaultTail);
+    expect(defaults.CREATIVE_IDENTITY_LEGACY_PROMPTS_ACU.timeRecallTask.at(-1)).toMatchObject({ role: 'assistant', content: '收到，天之音开始执行！' });
+    const rules = { role: 'USER', content: '自定义时间分组规则', mainSlot: 'B', isMain2: true };
+    const legacyTail = { role: 'assistant', content: '收到，天之音开始执行！', enabled: false, deletable: true };
+    const customGroup = [rules, { role: 'assistant', content: '用户改写的尾段', enabled: false }];
     const plotSettings: any = {
-      plotTasks: [{ id: 'task1', name: '任务1', enabled: true }],
+      name: '时间召回',
+      _acuBuiltinPresetId: 'time-recall',
+      plotTasks: [
+        { id: 'defaultPlotTask', name: '任务1', enabled: true, promptGroup: [rules, legacyTail] },
+        { id: 'custom', name: '自定义任务', enabled: false, promptGroup: customGroup },
+      ],
       prompts: [],
     };
     ensurePlotTasksCompat_ACU(plotSettings);
     expect(Array.isArray(plotSettings.plotTasks)).toBe(true);
-    expect(plotSettings.plotTasks[0].id).toBe('task1');
+    expect(plotSettings.plotTasks[0].id).toBe('defaultPlotTask');
+    expect(plotSettings.plotTasks[0].promptGroup).toEqual([
+      rules, { ...legacyTail, role: 'user', content: USER_PREFILL_CONTENT_ACU },
+    ]);
+    expect(plotSettings.promptGroup).toEqual(plotSettings.plotTasks[0].promptGroup);
+    expect(plotSettings.plotTasks[1].promptGroup).toEqual(customGroup);
+    expect(legacyTail.role).toBe('assistant');
+    expect(upgradeTimeRecallPrefill_ACU(plotSettings)).toBeNull();
+    const sameTailCustom = { name: '自定义', promptGroup: [rules, legacyTail], plotTasks: [{ id: 'custom', promptGroup: [rules, legacyTail] }] };
+    expect(upgradeTimeRecallPrefill_ACU(sameTailCustom)).toBeNull();
+    expect(upgradeTimeRecallPrefill_ACU({ ...sameTailCustom, name: '时间召回' })).toBeNull();
+    const legacyGroup = defaults.CREATIVE_IDENTITY_LEGACY_PROMPTS_ACU.timeRecallGroup;
+    const legacyPreset = { name: '时间召回', promptGroup: legacyGroup };
+    const upgradedLegacy = upgradeTimeRecallPrefill_ACU(legacyPreset);
+    expect(upgradedLegacy?.promptGroup.at(-1)).toMatchObject({ role: 'user', content: USER_PREFILL_CONTENT_ACU });
+    expect(upgradeTimeRecallPrefill_ACU(upgradedLegacy)).toBeNull();
+    const customFirstTask = { _acuBuiltinPresetId: 'time-recall', plotTasks: sameTailCustom.plotTasks };
+    expect(upgradeTimeRecallPrefill_ACU(customFirstTask)).toBeNull();
+    const mainTailGroup = [rules, { ...legacyTail, mainSlot: 'B', isMain2: true }];
+    expect(upgradeTimeRecallPrefill_ACU({ _acuBuiltinPresetId: 'time-recall', promptGroup: mainTailGroup })).toBeNull();
   });
   it('null 输入不报错', () => {
     expect(() => ensurePlotTasksCompat_ACU(null as any)).not.toThrow();
