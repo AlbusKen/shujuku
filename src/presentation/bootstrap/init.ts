@@ -26,7 +26,7 @@ import { markPlotIntercept_ACU } from '../../service/plot/plot-logic';
 import { orchestrateTavernHelperHook_ACU, orchestrateAfterCommandsStrategy1_ACU } from '../../service/plot/plot-orchestrator';
 import { flushPlotPendingSave_ACU } from '../../service/runtime/plot-runtime/plot-history-preset';
 import { createAiPlaceholderMessage_ACU, createUserMessage_ACU, refreshMessageBlock_ACU, removeLastTwoMessages_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
-import { getSendTextareaValue_ACU, setSendTextareaValue_ACU } from '../../shared/host-input';
+import { beginHostGenerationUi_ACU, getSendTextareaValue_ACU, setSendTextareaValue_ACU } from '../../shared/host-input';
 import { handleNewMessageDebounced_ACU } from '../triggers/settings-ui-sync/settings-ui-connect';
 import { runOptimizationLogicWithUI_ACU } from '../components/plot-planning-ui';
 import { beginPlotPendingDisguise_ACU, isPendingDisguiseGenerationType_ACU } from '../components/plot-pending-disguise';
@@ -653,6 +653,7 @@ export   function mainInitialize_ACU() {
             const originalText = pendingInput ? input : String(existing.mes || '');
             // 阻止宿主继续原发送；成功后只安排一次 regenerate。
             redirectPlotSendEvent_ACU(params);
+            const restoreGenerationUi = beginHostGenerationUi_ACU();
             try {
               await ensureInitialSeedCheckpointBeforeGeneration_ACU('generation_after_commands_before_ai', { allowPendingFirstUserMessage: true });
               if (pendingInput) setSendTextareaValue_ACU('');
@@ -702,6 +703,8 @@ export   function mainInitialize_ACU() {
                 generationGate_ACU.lastUserSendIntentAt = 0;
               }
               logWarn_ACU('[发送前处理] 本轮未生成正文:', error);
+            } finally {
+              restoreGenerationUi();
             }
           });
         }

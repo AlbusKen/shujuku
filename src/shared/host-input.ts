@@ -1,5 +1,23 @@
 import { jQuery_API_ACU, SillyTavern_API_ACU } from './host-api';
 
+/** 仅显示宿主生成中外观；返回恢复函数，不启动生成或派发宿主事件。 */
+export function beginHostGenerationUi_ACU(): () => void {
+    const stopButton = jQuery_API_ACU?.('#mes_stop')?.[0];
+    const body = stopButton?.ownerDocument.body;
+    if (!stopButton || !body) return () => {};
+
+    const previousDisplay = stopButton.style.display;
+    const previousGenerating = body.dataset.generating;
+    stopButton.style.display = 'flex';
+    body.dataset.generating = 'true';
+
+    return () => {
+        stopButton.style.display = previousDisplay;
+        if (previousGenerating === undefined) delete body.dataset.generating;
+        else body.dataset.generating = previousGenerating;
+    };
+}
+
 /** 宿主发送框操作，不属于任何 V1 popup。 */
 export function getSendTextareaValue_ACU(): string {
     try {

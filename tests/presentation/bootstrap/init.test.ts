@@ -76,7 +76,8 @@ vi.mock('../../../src/shared/utils', () => ({ cleanChatName_ACU: vi.fn((name: st
 vi.mock('../../../src/service/plot/plot-logic', () => ({ markPlotIntercept_ACU: m.markIntercept }));
 vi.mock('../../../src/service/plot/plot-orchestrator', () => ({ orchestrateTavernHelperHook_ACU: (...args: any[]) => m.orchestrate(...args), orchestrateAfterCommandsStrategy1_ACU: (...args: any[]) => m.strategy1(...args) }));
 vi.mock('../../../src/service/runtime/plot-runtime/plot-history-preset', () => ({ flushPlotPendingSave_ACU: (...args: any[]) => m.flushPlot(...args) }));
-vi.mock('../../../src/shared/host-input', () => ({
+vi.mock('../../../src/shared/host-input', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../src/shared/host-input')>(),
   getSendTextareaValue_ACU: () => m.getInput(),
   setSendTextareaValue_ACU: (text: string) => m.setInput(text),
 
@@ -114,6 +115,7 @@ let reinitialize_ACU: (() => void) | null = null;
 
 beforeAll(async () => {
   document.body.innerHTML = '<button id="send_but"></button><textarea id="send_textarea"></textarea><div id="chat"></div><div id="message_template"><div class="mes"><span class="name_text"></span><div class="avatar"><img></div><details class="mes_reasoning_details"><summary class="mes_reasoning_summary flex-container"><div class="mes_reasoning_header_block flex-container"><div class="mes_reasoning_header flex-container"><span class="mes_reasoning_header_title"></span><div class="mes_reasoning_arrow fa-solid fa-chevron-up"></div></div></div></summary><div class="mes_reasoning"></div></details><div class="mes_text"></div></div></div>';
+  document.querySelector('#send_but')!.insertAdjacentHTML('afterend', '<button id="mes_stop" style="display: none"></button>');
   vi.spyOn(globalThis, 'setInterval').mockImplementation(() => 0 as any);
   // T5：TavernHelper.generate 钩子测试需要宿主 API 在 mainInitialize 前就绪，钩子才会被安装。
   (window as any).TavernHelper = { generate: vi.fn(async (...args: any[]) => ({ handled: true, args })) };
@@ -157,6 +159,8 @@ afterEach(() => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  delete document.body.dataset.generating;
+  document.querySelector<HTMLElement>('#mes_stop')!.style.display = 'none';
   m.processingPlot = false;
   m.ensureSeed.mockResolvedValue(false);
   m.isQuiet.mockReturnValue(false);
@@ -537,6 +541,9 @@ describe('发送前处理楼层生命周期', () => {
     expect(m.saveChat).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
     expect(m.generate).not.toHaveBeenCalled();
+    expect(document.body.dataset.generating).toBe('true');
+    expect(document.querySelector<HTMLElement>('#mes_stop')!.style.display).toBe('flex');
+    expect(m.hostEmit).not.toHaveBeenCalledWith('generation_ended', expect.anything());
     expect(m.input).toBe('');
     expect(document.querySelectorAll('#chat .acu-plot-pending-mes')).toHaveLength(1);
     const ai = document.querySelector<HTMLElement>('#chat .acu-plot-pending-mes')!;
@@ -572,6 +579,9 @@ describe('发送前处理楼层生命周期', () => {
     expect(savedChat[1]).toMatchObject({ mes: '最终剧情正文', qrf_plot: '完整剧情反馈', qrf_plot_tasks: { task: '任务反馈' } });
     expect(savedChat[0]).toEqual(previous);
     expect(m.generate).not.toHaveBeenCalled();
+    expect(document.body.dataset.generating).toBeUndefined();
+    expect(document.querySelector<HTMLElement>('#mes_stop')!.style.display).toBe('none');
+    expect(m.hostEmit).not.toHaveBeenCalledWith('generation_ended', expect.anything());
     await vi.advanceTimersByTimeAsync(0);
     expect(m.generate).toHaveBeenCalledExactlyOnceWith('regenerate');
     expect(document.querySelector('#chat .acu-plot-pending-mes')).toBeNull();
@@ -596,6 +606,8 @@ describe('发送前处理楼层生命周期', () => {
       expect(m.api.chat).toEqual([previous]);
       expect(document.querySelector('#chat .mes[mesid="1"]')).toBeNull();
       expect(document.querySelector('#chat .acu-plot-pending-mes')).toBeNull();
+      expect(document.body.dataset.generating).toBeUndefined();
+      expect(document.querySelector<HTMLElement>('#mes_stop')!.style.display).toBe('none');
       expect(m.input).toBe('失败轮原输入');
     }
     m.input = '任务后保存失败原输入';
@@ -607,6 +619,8 @@ describe('发送前处理楼层生命周期', () => {
     expect(document.querySelector('#chat .mes[mesid="1"]')).toBeNull();
     expect(document.querySelector('#chat .acu-plot-pending-mes')).toBeNull();
     expect(m.input).toBe('任务后保存失败原输入');
+    expect(document.body.dataset.generating).toBeUndefined();
+    expect(document.querySelector<HTMLElement>('#mes_stop')!.style.display).toBe('none');
     expect(fetch).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(0);
     expect(m.generate).not.toHaveBeenCalled();
