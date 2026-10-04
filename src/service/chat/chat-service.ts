@@ -1108,7 +1108,7 @@ export async function replaceChatMessage_ACU(messageIndex: number, newContent: s
             await saveChatToHost_ACU();
             logDebug_ACU('[正文优化] 聊天已保存');
 
-            emitMessageUpdated_ACU(messageIndex);
+            await emitMessageUpdated_ACU(messageIndex);
         }
 
         logDebug_ACU(`[正文优化] 消息 ${messageIndex} 已更新完成`);

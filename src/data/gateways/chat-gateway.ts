@@ -295,40 +295,43 @@ export async function listAllHostChatNames_ACU(): Promise<Set<string> | null> {
 
 /**
  * 触发消息更新事件通知宿主平台
- * 优先使用 eventTypes.MESSAGE_UPDATED，降级使用字符串 'MESSAGE_UPDATED'
+ * 优先使用 eventTypes.MESSAGE_UPDATED，降级使用宿主事件名 'message_updated'
  * @param messageIndex 更新的消息索引
  */
-export function emitMessageUpdated_ACU(messageIndex: number): void {
+export async function emitMessageUpdated_ACU(messageIndex: number): Promise<void> {
     if (!SillyTavern_API_ACU?.eventSource?.emit) {
         logWarn_ACU('[ChatGateway] eventSource.emit 不可用，跳过事件通知');
         return;
     }
     if (SillyTavern_API_ACU?.eventTypes?.MESSAGE_UPDATED) {
-        SillyTavern_API_ACU.eventSource.emit(
+        await SillyTavern_API_ACU.eventSource.emit(
             SillyTavern_API_ACU.eventTypes.MESSAGE_UPDATED,
             messageIndex
         );
     } else {
         // 降级：直接使用字符串事件名
-        SillyTavern_API_ACU.eventSource.emit('MESSAGE_UPDATED', messageIndex);
+        await SillyTavern_API_ACU.eventSource.emit('message_updated', messageIndex);
     }
 }
 
 
 /**
- * 请求宿主重渲染指定楼层；updateMessageBlock 不可用或抛错时降级为 MESSAGE_UPDATED 事件。
+ * 更新指定楼层正文后派发 MESSAGE_UPDATED，等待扩展完成本轮渲染通知。
  * 仅做界面刷新，失败不影响已持久化的数据。
  * @param messageIndex 需要重渲染的消息下标
  */
-export function refreshMessageBlock_ACU(messageIndex: number): void {
+export async function refreshMessageBlock_ACU(messageIndex: number): Promise<void> {
     const message = SillyTavern_API_ACU?.chat?.[messageIndex];
     try {
         if (message && typeof SillyTavern_API_ACU?.updateMessageBlock === 'function') {
             SillyTavern_API_ACU.updateMessageBlock(messageIndex, message, { rerenderMessage: true });
-            return;
         }
     } catch (error: any) {
         logWarn_ACU(`[ChatGateway] updateMessageBlock 失败，降级为 MESSAGE_UPDATED：${error?.message || error}`);
     }
-    emitMessageUpdated_ACU(messageIndex);
+    try {
+        await emitMessageUpdated_ACU(messageIndex);
+    } catch (error: any) {
+        logWarn_ACU(`[ChatGateway] MESSAGE_UPDATED 渲染通知失败：${error?.message || error}`);
+    }
 }

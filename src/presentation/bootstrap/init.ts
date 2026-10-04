@@ -703,7 +703,8 @@ export   function mainInitialize_ACU() {
               assertCurrent();
               userFloor.index = chat.indexOf(userFloor.message);
               if (userFloor.index < 0) throw new Error('本轮用户楼层已不存在');
-              refreshMessageBlock_ACU(userFloor.index);
+              await refreshMessageBlock_ACU(userFloor.index);
+              assertCurrent();
               recordLastUserSend_ACU(userFloor.index);
               generationGate_ACU.lastUserSendIntentAt = 0;
               redirectPlotSendEvent_ACU(params, () => {
@@ -729,7 +730,7 @@ export   function mainInitialize_ACU() {
                   for (const key of Object.keys(userFloor.message)) delete userFloor.message[key];
                   Object.assign(userFloor.message, previousMessage);
                   await saveChatToHostStrict_ACU({ verify: true });
-                  refreshMessageBlock_ACU(userFloor.index);
+                  await refreshMessageBlock_ACU(userFloor.index);
                 }
               } catch (cleanupError) {
                 logWarn_ACU('[发送前处理] 撤销本轮楼层保存失败:', cleanupError);

@@ -26,7 +26,7 @@ const m = vi.hoisted(() => ({
   flushPlot: vi.fn(), saveChat: vi.fn(),
   persistedChat: [] as any[],
   ensureSeed: vi.fn(), processingPlot: false,
-  hostEmit: vi.fn(),
+  hostEmit: vi.fn(), messageUpdated: vi.fn(),
   getInput: vi.fn(), setInput: vi.fn(),
   beginDisguise: vi.fn(), finishDisguise: vi.fn(), generate: vi.fn(),
   markIntercept: vi.fn(), stopGeneration: vi.fn(),
@@ -123,6 +123,8 @@ beforeAll(async () => {
       try { await m.afterCommands!(args[0], args[1], args[2]); } catch { /* 宿主吞监听器异常 */ }
     } else if (event === 'message_sent') {
       await m.messageSent?.(args[0]);
+    } else if (event === 'message_updated') {
+      await m.messageUpdated(args[0]);
     }
   });
   m.api.eventSource.emit = m.hostEmit;
@@ -172,6 +174,7 @@ beforeEach(() => {
 
   m.shouldProcessPlot.mockReturnValue(false);
   m.flushPlot.mockResolvedValue(null);
+  m.messageUpdated.mockResolvedValue(undefined);
   m.persistedChat = [];
   m.saveChat.mockImplementation(async () => { m.persistedChat = JSON.parse(JSON.stringify(m.api.chat)); });
   vi.stubGlobal('fetch', vi.fn(async () => ({
@@ -536,7 +539,21 @@ describe('发送前处理楼层生命周期', () => {
       await m.saveChat();
       return { status: 'committed', targetIndex: 1 };
     });
+    let completeRender!: () => void;
+    let renderingStarted!: () => void;
+    const renderStarted = new Promise<void>(resolve => { renderingStarted = resolve; });
+    m.messageUpdated.mockImplementationOnce(() => {
+      renderingStarted();
+      return new Promise<void>(resolve => { completeRender = resolve; });
+    });
     complete({ action: 'planned', finalMessage: '最终剧情正文' });
+    await renderStarted;
+    expect(m.api.updateMessageBlock).toHaveBeenCalledExactlyOnceWith(1, user, { rerenderMessage: true });
+    expect(m.messageUpdated).toHaveBeenCalledExactlyOnceWith(1);
+    expect(m.hostEmit).toHaveBeenCalledWith('message_updated', 1);
+    expect(node?.textContent).toBe('最终剧情正文');
+    expect(m.generate).not.toHaveBeenCalled();
+    completeRender();
     await redirected;
     expect(m.api.chat[1]).toBe(user);
     expect(document.querySelector('#chat .mes[mesid="1"]')).toBe(node);

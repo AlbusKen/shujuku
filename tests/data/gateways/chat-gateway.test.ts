@@ -141,23 +141,23 @@ describe('setChatMessages_ACU', () => {
 });
 
 describe('emitMessageUpdated_ACU', () => {
-  it('eventSource 不可用时静默跳过', () => {
-    emitMessageUpdated_ACU(0);
+  it('eventSource 不可用时静默跳过', async () => {
+    await emitMessageUpdated_ACU(0);
     expect(mockLogWarn).toHaveBeenCalled();
   });
 
-  it('有 eventTypes.MESSAGE_UPDATED 时使用常量', () => {
+  it('有 eventTypes.MESSAGE_UPDATED 时使用常量', async () => {
     const emit = vi.fn();
     mockSillyTavern.eventSource = { emit };
     mockSillyTavern.eventTypes = { MESSAGE_UPDATED: 'MESSAGE_UPDATED_CONST' };
-    emitMessageUpdated_ACU(5);
+    await emitMessageUpdated_ACU(5);
     expect(emit).toHaveBeenCalledWith('MESSAGE_UPDATED_CONST', 5);
   });
 
-  it('无 eventTypes 时降级使用字符串', () => {
+  it('无 eventTypes 时降级使用宿主事件名', async () => {
     const emit = vi.fn();
     mockSillyTavern.eventSource = { emit };
-    emitMessageUpdated_ACU(3);
-    expect(emit).toHaveBeenCalledWith('MESSAGE_UPDATED', 3);
+    await emitMessageUpdated_ACU(3);
+    expect(emit).toHaveBeenCalledWith('message_updated', 3);
   });
 });

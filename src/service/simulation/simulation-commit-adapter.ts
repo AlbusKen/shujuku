@@ -467,7 +467,7 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<WorldSimul
         // 延时期间正文或 swipe 已变化，放弃旧锚点的刷新。
         return;
       }
-      refreshMessageBlock_ACU(currentRefreshIndex);
+      void refreshMessageBlock_ACU(currentRefreshIndex);
     }, 100);
   }
   return persistedAnchor;
