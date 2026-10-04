@@ -935,14 +935,15 @@ export function useDashboardPage(): DashboardPageState {
               description: dashboardCopy.toggles.deskPetJokes.description,
               value: settings_ACU.deskPetJokesEnabled !== false,
             },
-            {
-              key: "deskPetShowRealWork",
-              label: dashboardCopy.toggles.deskPetRealWork.label,
-              description: dashboardCopy.toggles.deskPetRealWork.description,
-              value: settings_ACU.deskPetShowRealWork === true,
-            },
           ]
         : []),
+      // 真实工作内容同时适用于桌宠气泡与普通气泡，开关始终可见。
+      {
+        key: "deskPetShowRealWork",
+        label: dashboardCopy.toggles.deskPetRealWork.label,
+        description: dashboardCopy.toggles.deskPetRealWork.description,
+        value: settings_ACU.deskPetShowRealWork === true,
+      },
       {
         key: "zeroTkOccupyModeDefault",
         label: dashboardCopy.toggles.zeroTk.label,

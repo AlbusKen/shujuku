@@ -238,7 +238,7 @@ export const dashboardCopy = {
     deskPetRealWork: {
       label: "显示真实工作内容",
       description:
-        "默认关闭。开启后桌宠气泡直接显示当前通知与任务进度，不再使用“正在XXXX…”状态词；内容与原先点击展开的明细相同。",
+        "默认关闭。开启后气泡直接显示当前通知与任务进度，不再使用“正在XXXX…”状态词；关闭桌面宠物时同样生效，内容与原先点击展开的明细相同。",
     },
     zeroTk: {
       label: "0TK 占用模式",

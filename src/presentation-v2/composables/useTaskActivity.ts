@@ -131,7 +131,7 @@ export function useNoticeHubState(): NoticeHubState {
   });
   const showRealWork = computed(() => {
     void snapshot.value.settingsVersion;
-    if (!petEnabled.value) return false;
+    // 桌宠仅决定气泡停靠位置，不限制真实工作内容的显示。
     try {
       return settings_ACU?.deskPetShowRealWork === true;
     } catch {

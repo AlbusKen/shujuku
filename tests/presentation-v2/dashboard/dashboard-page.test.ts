@@ -875,7 +875,7 @@ describe("DashboardPage", () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it("桌宠真实工作内容默认关闭，切换即时刷新普通通知与进度，错误始终显示真实内容", async () => {
+  it("真实工作内容默认关闭，桌宠与普通气泡均即时刷新通知和进度，错误始终显示真实内容", async () => {
     const settings = createSettings();
     settings.deskPetJokesEnabled = false;
     const { mount, saveSettings } = await mountDashboardPage(settings);
@@ -895,6 +895,23 @@ describe("DashboardPage", () => {
     expect(body()).toBe('正在核对第三批纪要');
     expect(document.querySelector('.acu-notice-bubble__heading')?.textContent).toBe('纪要召回');
     expect(document.querySelector('.acu-notice-bubble__detail')).toBeNull();
+    document.querySelector<HTMLButtonElement>('[data-acu-toggle-key="desktopPetEnabled"]')!.click();
+    await tick();
+    expect(settings.desktopPetEnabled).toBe(false);
+    expect(toggle()).not.toBeNull();
+    expect(toggle().getAttribute('aria-checked')).toBe('true');
+    expect(document.querySelector('[data-acu-toggle-key="deskPetJokesEnabled"]')).toBeNull();
+    expect(body()).toBe('正在核对第三批纪要');
+    expect(document.querySelector('.acu-notice-bubble__heading')?.textContent).toBe('纪要召回');
+    toggle().click();
+    await tick();
+    expect(settings.deskPetShowRealWork).toBe(false);
+    expect(body()).toMatch(/^正在.+…$/);
+    toggle().click();
+    await tick();
+    expect(body()).toBe('正在核对第三批纪要');
+    document.querySelector<HTMLButtonElement>('[data-acu-toggle-key="desktopPetEnabled"]')!.click();
+    await tick();
     toggle().click();
     await tick();
     expect(body()).toMatch(/^正在.+…$/);
@@ -918,7 +935,8 @@ describe("DashboardPage", () => {
     expect(document.querySelector('.acu-notice-bubble__detail')).toBeNull();
     document.querySelector<HTMLButtonElement>('[data-acu-toggle-key="desktopPetEnabled"]')!.click();
     await tick();
-    expect(toggle()).toBeNull();
+    expect(toggle()).not.toBeNull();
+    expect(toggle().getAttribute('aria-checked')).toBe('false');
     expect(body()).toBe(errorText);
     expect(document.querySelector('.acu-notice-bubble__heading')?.textContent).toBe('纪要召回失败');
     document.querySelector<HTMLButtonElement>('[data-acu-toggle-key="desktopPetEnabled"]')!.click();
@@ -937,12 +955,27 @@ describe("DashboardPage", () => {
 
     document.querySelector<HTMLButtonElement>('[data-acu-toggle-key="desktopPetEnabled"]')!.click();
     await tick();
-    expect(toggle()).toBeNull();
+    expect(toggle()).not.toBeNull();
+    expect(toggle().getAttribute('aria-checked')).toBe('true');
+    expect(body()).toBe('整理最终提示词');
+    const savesBeforeRealWorkToggle = saveSettings.mock.calls.length;
+    toggle().click();
+    await tick();
+    expect(settings.deskPetShowRealWork).toBe(false);
+    expect(saveSettings).toHaveBeenCalledTimes(savesBeforeRealWorkToggle + 1);
     expect(body()).toMatch(/^正在.+…$/);
+    toggle().click();
+    await tick();
+    expect(settings.deskPetShowRealWork).toBe(true);
+    expect(saveSettings).toHaveBeenCalledTimes(savesBeforeRealWorkToggle + 2);
+    expect(document.querySelector('.acu-notice-bubble__heading')?.textContent).toBe('剧情推进');
+    task.update('普通气泡持续显示工作进度');
+    await tick();
+    expect(body()).toBe('普通气泡持续显示工作进度');
     document.querySelector<HTMLButtonElement>('[data-acu-toggle-key="desktopPetEnabled"]')!.click();
     await tick();
     expect(toggle().getAttribute('aria-checked')).toBe('true');
-    expect(body()).toBe('整理最终提示词');
+    expect(body()).toBe('普通气泡持续显示工作进度');
     task.end();
     mount.__resetAcuV2MountForTests();
   });

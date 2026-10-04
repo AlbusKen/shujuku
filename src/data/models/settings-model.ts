@@ -62,7 +62,7 @@ export interface Settings_ACU {
   worldbookConfig: WorldbookConfig_ACU;
   /** 解除剧情推进发送伪装，原文留在输入框等待结果；默认关闭，不随预设切换。 */
   plotSendDisguiseDisabled?: boolean;
-  /** 桌宠直接显示现有通知与任务进度的真实内容；默认关闭。 */
+  /** 桌宠气泡与普通气泡直接显示现有通知与任务进度的真实内容；默认关闭。 */
   deskPetShowRealWork?: boolean;
   plotSettings: PlotSettings_ACU;
   /**
