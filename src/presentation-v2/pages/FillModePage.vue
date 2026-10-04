@@ -2,13 +2,13 @@
   <section class="acu-v2-fill-mode-page">
     <AcuMobilePanelNav :items="panelNavItems" />
 
-    <AcuPanelGrid class="acu-v2-fill-mode-page__grid" :columns="showPlotPanels ? 2 : 1">
+    <AcuPanelGrid class="acu-v2-fill-mode-page__grid" :columns="1">
       <AcuPanel
         id="fill-mode-select-panel"
         :title="fillModeCopy.panels.mode.title"
         :description="fillModeCopy.panels.mode.description"
       >
-        <AcuFormRow label="当前对话填表模式" :hint="fillModeCopy.panels.mode.selectHint">
+        <AcuFormRow label="当前对话填表模式" :hint="currentModeHint">
           <AcuPresetDropdown
             :items="modeItems"
             :model-value="formFillMode.selectedMode"
@@ -96,44 +96,16 @@
             @update:model-value="formFillSettings.setTableFillNativeToolEnabled($event)"
           />
         </AcuFormRow>
-
-        <AcuFormRow
-          v-if="showPlotPanels"
-          :label="fillModeCopy.panels.plot.enableLabel"
-          :hint="fillModeCopy.panels.plot.enableHint"
-        >
-          <AcuToggle
-            :model-value="plotStore.enabled"
-            :aria-label="fillModeCopy.panels.plot.enableLabel"
-            data-acu-plot-enabled-toggle="1"
-            @update:model-value="plotStore.setEnabled($event)"
-          />
-        </AcuFormRow>
-        <AcuFormRow
-          v-if="showPlotPanels"
-          :label="fillModeCopy.panels.plot.disguiseDisabledLabel"
-          :hint="fillModeCopy.panels.plot.disguiseDisabledHint"
-        >
-          <AcuToggle
-            :model-value="plotStore.sendDisguiseDisabled"
-            :aria-label="fillModeCopy.panels.plot.disguiseDisabledLabel"
-            data-acu-plot-disguise-disabled-toggle="1"
-            @update:model-value="plotStore.setSendDisguiseDisabled($event)"
-          />
-        </AcuFormRow>
       </AcuPanel>
-      <PlotPresetPanel v-if="showPlotPanels" id="fill-mode-plot-panel" />
     </AcuPanelGrid>
-
-    <!-- 交火模式同时挂载两组面板：剧情推进在前，向量服务与索引维护在后。 -->
-    <FormFillPlotPanels v-if="showPlotPanels" />
 
     <FormFillVectorPanels v-if="vectorPanelMode" :mode="vectorPanelMode" />
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, watch } from "vue";
+import { subscribeChatConfigurationChanges_ACU } from "../../shared/chat-configuration-change";
 import AcuFormRow from "../components/_lib/AcuFormRow.vue";
 import AcuInput from "../components/_lib/AcuInput.vue";
 import AcuMessage from "../components/_lib/AcuMessage.vue";
@@ -143,9 +115,7 @@ import AcuPanelGrid from "../components/_lib/AcuPanelGrid.vue";
 import AcuPresetDropdown from "../components/_lib/AcuPresetDropdown.vue";
 import AcuToggle from "../components/_lib/AcuToggle.vue";
 import FormFillVectorPanels from "../components/FormFillVectorPanels.vue";
-import FormFillPlotPanels from "../components/FormFillPlotPanels.vue";
-import PlotPresetPanel from "../components/PlotPresetPanel.vue";
-import { useChatChangedTick } from "../composables/useChatChangedListener";
+import { useChatChangedTick, useChatMutationTick } from "../composables/useChatChangedListener";
 import { useFormFillSettings } from "../composables/useFormFillSettings";
 import { FILL_MODE_INTROS, fillModeCopy } from "../copy/fill-mode-copy";
 import { vectorIndexCopy } from "../copy/vector-index-copy";
@@ -155,33 +125,31 @@ import {
   type FillMode,
 } from "../stores/form-fill-mode-store";
 import { useDialogStore } from "../stores/dialog-store";
-import { usePlotPresetStore } from "../stores/plot-preset-store";
 
 const formFillMode = useFormFillModeStore();
-const plotStore = usePlotPresetStore();
 const dialogStore = useDialogStore();
 const formFillSettings = useFormFillSettings();
 
 const modeItems = FORM_FILL_MODE_OPTIONS.map((option) => ({ value: option.value, label: option.label }));
 const currentIntro = computed(() => FILL_MODE_INTROS[formFillMode.selectedMode]);
+const currentModeHint = computed(() => {
+  const status = formFillMode.recordStatus;
+  const recordHint = status === "recorded" ? "当前模式已保存到本会话。"
+    : status === "invalid" ? "本会话的模式记录无法识别，请核对后重新选择模式。"
+    : status === "no_chat" ? "尚未打开会话，当前显示新会话偏好。"
+    : "本会话尚未保存模式标记，当前显示兼容判定或偏好模式。";
+  return `${recordHint} ${fillModeCopy.panels.mode.selectHint}`;
+});
 
 /** 向量表格与交火模式需要向量服务与索引维护面板。 */
 const vectorPanelMode = computed<"vector" | "crossfire" | null>(() => {
   const mode = formFillMode.selectedMode;
   return mode === "vector" || mode === "crossfire" ? mode : null;
 });
-/** LLM 逻辑召回与交火模式依赖剧情推进在正文生成前分析记忆。 */
-const showPlotPanels = computed(
-  () => formFillMode.selectedMode === "llm" || formFillMode.selectedMode === "crossfire",
-);
-
 const panelNavItems = computed(() => {
   const items = [
     { id: "fill-mode-select-panel", label: fillModeCopy.nav.mode },
   ];
-  if (showPlotPanels.value) {
-    items.push({ id: "fill-mode-plot-panel", label: fillModeCopy.nav.plot });
-  }
   if (vectorPanelMode.value === "crossfire") {
     items.push(
       { id: "vector-index-status-panel", label: vectorIndexCopy.nav.status },
@@ -207,7 +175,9 @@ function isFillMode(value: string): value is FillMode {
 
 async function selectFillMode(value: string): Promise<void> {
   if (!isFillMode(value)) return;
-  if (formFillMode.classicActive && value !== "classic") {
+  const options = { confirmIrreversibleChange: false, confirmTemplateScopeChange: false };
+  let result = await formFillMode.selectMode(value, options);
+  if ("reason" in result && result.reason === "irreversible_confirmation_required") {
     const confirmed = await dialogStore.confirm({
       title: fillModeCopy.leaveClassic.title,
       message: fillModeCopy.leaveClassic.message(FILL_MODE_INTROS[value].label),
@@ -215,8 +185,9 @@ async function selectFillMode(value: string): Promise<void> {
       confirmVariant: "danger",
     });
     if (!confirmed) return;
+    options.confirmIrreversibleChange = true;
+    result = await formFillMode.selectMode(value, options);
   }
-  let result = await formFillMode.selectMode(value);
   if ("reason" in result && result.reason === "template_scope_changed") {
     const confirmed = await dialogStore.confirm({
       title: fillModeCopy.templateChanged.title,
@@ -225,7 +196,8 @@ async function selectFillMode(value: string): Promise<void> {
       confirmVariant: "danger",
     });
     if (!confirmed) return;
-    result = await formFillMode.selectMode(value, { confirmTemplateScopeChange: true });
+    options.confirmTemplateScopeChange = true;
+    result = await formFillMode.selectMode(value, options);
   }
   if ("reason" in result) {
     await dialogStore.alert({
@@ -240,7 +212,8 @@ function setPreferredMode(value: string): void {
 }
 
 onMounted(() => formFillMode.refresh());
-watch(useChatChangedTick(), () => formFillMode.refresh());
+watch([useChatChangedTick(), useChatMutationTick()], () => formFillMode.refresh());
+onBeforeUnmount(subscribeChatConfigurationChanges_ACU(() => formFillMode.refresh()));
 </script>
 
 <style scoped>

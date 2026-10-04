@@ -48,6 +48,7 @@ import {
   type AgentModuleFieldUpserts_ACU,
   type AgentModuleFloorDelta_ACU,
   type AgentPendingFix_ACU,
+  type AgentSettlementBoundary_ACU,
   type AgentStoryArcEntry_ACU,
   type AgentWebRefEntry_ACU,
   isAgentWritableModule_ACU,
@@ -369,6 +370,21 @@ function validatePendingFixes_ACU(raw: unknown, present: boolean, legacy: boolea
   return fixes;
 }
 
+function validateSettlementBoundary_ACU(raw: unknown): AgentSettlementBoundary_ACU | null {
+  if (!isRecord_ACU(raw) || readIndex_ACU(raw.startIndex) < 0
+    || readIndex_ACU(raw.userMessageId) < 1 || typeof raw.reason !== 'string' || !raw.reason.trim()
+    || typeof raw.updatedAt !== 'number' || !Number.isInteger(raw.updatedAt) || raw.updatedAt < 0) return null;
+  const skippedPendingFixes = validatePendingFixes_ACU(raw.skippedPendingFixes, true, false, raw.updatedAt);
+  if (!skippedPendingFixes) return null;
+  return {
+    startIndex: raw.startIndex as number,
+    userMessageId: raw.userMessageId as number,
+    reason: raw.reason,
+    updatedAt: raw.updatedAt,
+    skippedPendingFixes,
+  };
+}
+
 /**
  * 校验一份持久化快照。非法返回 null 而不抛错，让读取端可以继续向前寻找上一个合法快照，
  * 因为某一楼层的字段可能只是被外部工具污染，不代表整条链路不可用。
@@ -408,6 +424,8 @@ export function validateAgentModuleSnapshot_ACU(raw: unknown): AgentModuleSnapsh
   const completionPresent = Object.prototype.hasOwnProperty.call(raw, 'materialCompletion');
   const materialCompletion = validateMaterialCompletion_ACU(raw.materialCompletion, completionPresent, legacy, updatedAt);
   if (!materialCompletion) return null;
+  const settlementBoundary = raw.settlementBoundary === undefined ? undefined : validateSettlementBoundary_ACU(raw.settlementBoundary);
+  if (settlementBoundary === null) return null;
   return {
     schemaVersion: AGENT_MODULE_SCHEMA_VERSION_ACU,
     settledThroughIndex,
@@ -430,6 +448,7 @@ export function validateAgentModuleSnapshot_ACU(raw: unknown): AgentModuleSnapsh
     userRequirements: validatedUserRequirements as string[],
     materialCompletion,
     pendingFixes,
+    ...(settlementBoundary ? { settlementBoundary } : {}),
   };
 }
 
@@ -482,6 +501,7 @@ export function salvageAgentModuleSnapshot_ACU(raw: unknown): { snapshot: AgentM
     userRequirements: pick(raw.userRequirements, validateUserRequirementLine_ACU, 'userRequirements'),
     materialCompletion: materialCompletion ?? { state: 'legacy_unknown', rangeStartIndex: -1, rangeEndIndex: -1, modules: {}, updatedAt },
     pendingFixes: pendingFixes ?? [],
+    ...(validateSettlementBoundary_ACU(raw.settlementBoundary) ? { settlementBoundary: validateSettlementBoundary_ACU(raw.settlementBoundary)! } : {}),
   };
   return { snapshot, problems };
 }
@@ -665,7 +685,7 @@ export function captureAgentModuleCommitBaseline_ACU(chat: any[]): {
 export async function writeAgentModuleCommitDelta_ACU(
   chat: any[],
   targetIndex: number,
-  changes: Pick<AgentModuleFloorDelta_ACU, 'writes' | 'revisions' | 'fieldUpserts' | 'removedIds'>,
+  changes: Pick<AgentModuleFloorDelta_ACU, 'writes' | 'revisions' | 'fieldUpserts' | 'removedIds' | 'pendingFixes' | 'materialCompletion' | 'settlementBoundary'>,
   updatedAt: number,
   verify: (folded: AgentModuleFoldResult_ACU) => boolean,
   baseline: ReturnType<typeof captureAgentModuleCommitBaseline_ACU>,

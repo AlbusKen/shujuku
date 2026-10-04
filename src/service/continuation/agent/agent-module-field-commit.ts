@@ -5,7 +5,7 @@ import {
   AGENT_MODULE_FIELD_ACU, AGENT_MODULE_FIELD_MATRIX_ACU, AGENT_REVEAL_STATUSES_ACU,
   AGENT_STORY_ARC_SCOPES_ACU, AGENT_STORY_ARC_STATUSES_ACU, AGENT_VOLUME_NARRATIVE_ROLES_ACU, copiedStoryArcExample_ACU,
   type AgentModuleDelta_ACU, type AgentModuleFieldRecord_ACU, type AgentModuleFieldSnapshot_ACU,
-  type AgentModuleFloorDelta_ACU, type AgentModuleSnapshot_ACU, type AgentSubagentName_ACU,
+  type AgentModuleFloorDelta_ACU, type AgentModuleSnapshot_ACU, type AgentModuleWriterRole_ACU,
   type AgentWebRefEntry_ACU, type AgentWritableModule_ACU, type AgentResearcherOutput_ACU,
 } from './agent-model';
 import { foldAgentModuleSnapshot_ACU, planAgentModuleCommitDelta_ACU, readMessageSwipeId_ACU } from './agent-module-frame';
@@ -26,7 +26,8 @@ function dispatchContent_ACU(value: unknown): unknown {
 }
 
 type Module_ACU = 'hooks' | 'infoGap' | 'storyArc' | 'chronology' | 'webRefs';
-const ROLE_MODULES_ACU: Readonly<Partial<Record<AgentSubagentName_ACU, readonly AgentWritableModule_ACU[]>>> = {
+const ROLE_MODULES_ACU: Readonly<Partial<Record<AgentModuleWriterRole_ACU, readonly AgentWritableModule_ACU[]>>> = {
+  main: ['hooks', 'infoGap', 'chronology', 'storyArc'],
   'arc-architect': ['storyArc'],
   'hook-cognition-maintainer': ['hooks', 'infoGap', 'chronology'],
   'web-researcher': ['webRefs'],
@@ -223,7 +224,7 @@ export function planAgentModuleFieldCommit_ACU(
   snapshot: AgentModuleSnapshot_ACU,
   fields: AgentModuleFieldSnapshot_ACU,
   intents: readonly AgentModuleSqlFieldIntent_ACU[],
-  role: AgentSubagentName_ACU,
+  role: AgentModuleWriterRole_ACU,
   completedStages: readonly number[] = [],
   resolvePage?: (handle: string) => AgentFieldPage_ACU | null,
   now = Date.now(),
@@ -434,7 +435,7 @@ export function commitAgentModuleFieldWrites_ACU(input: {
   targetIndex: number;
   dispatchTarget?: { message: unknown; swipeId: string; content: unknown };
   sql: string;
-  role: AgentSubagentName_ACU;
+  role: AgentModuleWriterRole_ACU;
   completedStages?: readonly number[];
   resolvePage?: (handle: string) => AgentFieldPage_ACU | null;
   isCurrent?: () => boolean;

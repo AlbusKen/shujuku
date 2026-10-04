@@ -12,6 +12,7 @@ import type { AcuV2Page } from './page-types';
 import DashboardPage from '../pages/DashboardPage.vue';
 import FillModePage from '../pages/FillModePage.vue';
 import FormFillPage from '../pages/FormFillPage.vue';
+import PlotPage from '../pages/PlotPage.vue';
 import ApiPage from '../pages/ApiPage.vue';
 import AgentPage from '../pages/AgentPage.vue';
 import ContinuationPage from '../pages/ContinuationPage.vue';
@@ -24,6 +25,7 @@ import DeveloperPage from '../pages/DeveloperPage.vue';
 import { dashboardCopy } from '../copy/dashboard-copy';
 import { fillModeCopy } from '../copy/fill-mode-copy';
 import { useDevOptionsStore } from '../stores/dev-options-store';
+import { plotCopy } from '../copy/plot-copy';
 
 /** 正文替换页对应的 feature gate key；页面可见性由仪表盘常驻的正文替换启用开关控制。 */
 export const FEATURE_GATE_CONTENT_REPLACE = 'content-replace';
@@ -33,6 +35,7 @@ export const FEATURE_GATE_IMPORT = 'import';
 export const ACU_V2_FORM_FILL_PAGE_ID = 'form-fill';
 export const ACU_V2_FILL_MODE_PAGE_ID = 'fill-mode';
 
+export const ACU_V2_PLOT_PAGE_ID = 'plot';
 export const ACU_V2_PAGE_REGISTRY: readonly AcuV2Page[] = Object.freeze([
 
   // 概览
@@ -45,6 +48,7 @@ export const ACU_V2_PAGE_REGISTRY: readonly AcuV2Page[] = Object.freeze([
   { id: 'api', title: 'API', group: 'config', component: markRaw(ApiPage) },
 
   // 功能
+  { id: ACU_V2_PLOT_PAGE_ID, title: plotCopy.pageTitle, group: 'feature', component: markRaw(PlotPage), minUiTier: 'medium' },
   { id: 'continuation', title: '智能续写', group: 'feature', component: markRaw(ContinuationPage), minUiTier: 'medium', featureGate: FEATURE_GATE_CONTINUATION },
   { id: 'world-simulation', title: '格林推演', group: 'feature', component: markRaw(WorldSimulationPage), minUiTier: 'high', featureGate: FEATURE_GATE_WORLD_SIMULATION },
   { id: 'import', title: '外部导入', group: 'feature', component: markRaw(ImportPage), minUiTier: 'medium', featureGate: FEATURE_GATE_IMPORT },
@@ -59,8 +63,8 @@ export const ACU_V2_PAGE_REGISTRY: readonly AcuV2Page[] = Object.freeze([
 
   // 工具
   // 高级工具页轻量模式即可见：轻量 / 进阶只显示运行日志，SQL 控制台由页内按高级档位开放。
-  // 数据管理（含删除表格数据）随进阶模式开放。
-  { id: 'data-mgmt', title: '数据管理', group: 'tool', component: markRaw(DataMgmtPage), minUiTier: 'medium' },
+  // 数据管理（含删除表格数据）在所有模式下可见。
+  { id: 'data-mgmt', title: '数据管理', group: 'tool', component: markRaw(DataMgmtPage) },
   { id: 'advanced-tools', title: '高级工具', group: 'tool', component: markRaw(AdvancedToolsPage) },
 
   // 开发者（plan §D24：仪表盘"启用开发者选项"总开关 gate）

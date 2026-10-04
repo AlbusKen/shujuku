@@ -13,6 +13,7 @@ const JSON_SWAPS_ACU: ReadonlyArray<readonly [string, string]> = [
   ['调阅资料时调用 read 或 search 函数；决策时本轮以一个完整的 JSON 对象收尾。', '本轮我的动作以一个完整的 JSON 对象收尾。'],
   ['read 与 search 使用函数调用，不要写成 JSON。决策动作用 JSON 对象表达', '你的每个动作用 JSON 对象表达'],
   ['"action":"open_round|delegate|finalize|block"', '"action":"read|search|open_round|delegate|finalize|block"'],
+  ['"action":"open_round|correct_materials|delegate|finalize|block"', '"action":"read|search|open_round|correct_materials|delegate|finalize|block"'],
   ['但决策动作本身必须完整出现在 JSON 对象里。', '但动作本身必须完整出现在 JSON 对象里。'],
   ['调用 read 函数补读：参数 reads 是地址数组', '输出 {"action":"read","reads":["地址"]} 补读：reads 是地址数组'],
 ];
@@ -23,7 +24,7 @@ function swap_ACU(text: string, pairs: ReadonlyArray<readonly [string, string]>)
 }
 
 const JSON_READ_PROTOCOL_ACU = '【工具动作：read / search，可并发】\nread 对象包含 action="read" 与非空 reads 地址数组。search 对象包含 action="search"、query，可选 scope、isRegex、maxResults；scope 是 ["story","tables","modules","outline","worldbook"] 的子集。命中行带有可复制进 read 的地址。\n需要补读时把全部对象放在同一次回复；每次运行只有一个成功读取批次，读完立即决策。工具对象不能与决策对象混在同一次回复。工具结果回来后再决定下一步。';
-const TOOL_MAIN_PROTOCOL_ACU = '【工具协议规范】\n所有动作通过当前声明的函数完成，不用正文表达动作。调阅调用 read / search；决策只调用 open_round / delegate / finalize / block 中的一个。函数参数遵守对应字段约束。\n\n【调阅工具】\nread 的 reads 是非空地址数组；search 的 query 必填，可选 scope、isRegex、maxResults。需要补读时在同一次回复并发调用；每次运行只有一个成功读取批次，读完立即决策。调阅不能与决策函数在同一次回复调用。\n';
+const TOOL_MAIN_PROTOCOL_ACU = '【工具协议规范】\n所有动作通过当前声明的函数完成，不用正文表达动作。调阅调用 read / search；决策只调用 open_round / correct_materials / delegate / finalize / block 中的一个。函数参数遵守对应字段约束。\n\n【调阅工具】\nread 的 reads 是非空地址数组；search 的 query 必填，可选 scope、isRegex、maxResults。需要补读时在同一次回复并发调用；每次运行只有一个成功读取批次，读完立即决策。调阅不能与决策函数在同一次回复调用。\n';
 
 /** 在冻结的当前默认之上派生呈现文本，不参与存储版本迁移。 */
 function jsonContent_ACU(content: string, role?: keyof ContinuationAgentPrompts_ACU): string {
@@ -48,15 +49,15 @@ function toolContent_ACU(role: keyof ContinuationAgentPrompts_ACU, content: stri
   if (role === 'main' && next.startsWith('【文本协议规范】')) {
     const decisionAt = next.indexOf('【决策动作：');
     next = TOOL_MAIN_PROTOCOL_ACU + (decisionAt >= 0 ? next.slice(decisionAt) : '');
-    next = next.replace(/action = (delegate|open_round|finalize|block)：/g, '调用 $1：')
+    next = next.replace(/action = (delegate|open_round|correct_materials|finalize|block)：/g, '调用 $1：')
       .split('附加字段').join('参数')
       .split('dispatchArcArchitect、').join('');
   }
   next = swap_ACU(next, [
     ['你的每一次输出都必须由符合协议的 JSON 对象构成（工具批次可以是多个对象）', '你的每一次动作都必须通过声明的函数完成（调阅可并发，决策只能调用一个函数）'],
-    ['我的每个动作都以完整的协议 JSON 对象表达；JSON 之外最多留少量思路梳理，绝不把动作内容散落在 JSON 外面。', '我的每个动作都通过函数完成；决策只调用 open_round / delegate / finalize / block 中的一个，不把动作散落在正文里。'],
-    ['每个动作都是一个完整的 JSON 对象，JSON 之外最多留一点思路梳理，动作本身绝不散落在对象外面。', '每个动作都通过声明的函数完成，决策只调用 open_round / delegate / finalize / block 中的一个，动作本身绝不散落在正文里。'],
-    ['本轮我的动作以一个完整的 JSON 对象收尾。', '本轮以一次 open_round / delegate / finalize / block 决策调用收尾。'],
+    ['我的每个动作都以完整的协议 JSON 对象表达；JSON 之外最多留少量思路梳理，绝不把动作内容散落在 JSON 外面。', '我的每个动作都通过函数完成；决策只调用 open_round / correct_materials / delegate / finalize / block 中的一个，不把动作散落在正文里。'],
+    ['每个动作都是一个完整的 JSON 对象，JSON 之外最多留一点思路梳理，动作本身绝不散落在对象外面。', '每个动作都通过声明的函数完成，决策只调用 open_round / correct_materials / delegate / finalize / block 中的一个，动作本身绝不散落在正文里。'],
+    ['本轮我的动作以一个完整的 JSON 对象收尾。', '本轮以一次 open_round / correct_materials / delegate / finalize / block 决策调用收尾。'],
     ['能一次批量取的资料就在同一次输出里发多个 read/search 对象', '能一次批量取的资料就在同一次回复里并发调用 read/search'],
     ['我把多个工具对象写进同一次输出', '我在同一次回复并发调用调阅函数'],
     ['工具对象不与决策动作混在同一次输出', '调阅函数不与决策函数混在同一次回复'],

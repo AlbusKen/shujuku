@@ -7,6 +7,8 @@ import type { AiNativeToolCall_ACU, AiNativeToolDefinition_ACU } from './native-
 
 export type AgentDecisionToolName_ACU = 'open_round' | 'delegate' | 'finalize' | 'block';
 export const AGENT_DECISION_TOOL_NAMES_ACU: readonly AgentDecisionToolName_ACU[] = ['open_round', 'delegate', 'finalize', 'block'];
+export type ContinuationDecisionToolName_ACU = AgentDecisionToolName_ACU | 'correct_materials';
+export const CONTINUATION_DECISION_TOOL_NAMES_ACU: readonly ContinuationDecisionToolName_ACU[] = [...AGENT_DECISION_TOOL_NAMES_ACU, 'correct_materials'];
 export const AGENT_SUBMIT_TOOL_NAME_ACU = 'submit';
 
 const closed_ACU = (properties: Record<string, unknown>, required: readonly string[] = []): Record<string, unknown> => ({
@@ -26,8 +28,8 @@ const fn_ACU = (name: string, description: string, parameters: Record<string, un
 const thought_ACU = text_ACU('可选：一两句说明这次决定的理由。');
 
 /** 续写主 Agent 的决策函数；字段与 parseAgentMainAction_ACU 读取的键一一对应。 */
-export function continuationDecisionTools_ACU(names: readonly AgentDecisionToolName_ACU[] = AGENT_DECISION_TOOL_NAMES_ACU): AiNativeToolDefinition_ACU[] {
-  const catalog: Record<AgentDecisionToolName_ACU, AiNativeToolDefinition_ACU> = {
+export function continuationDecisionTools_ACU(names: readonly ContinuationDecisionToolName_ACU[] = CONTINUATION_DECISION_TOOL_NAMES_ACU): AiNativeToolDefinition_ACU[] {
+  const catalog: Record<ContinuationDecisionToolName_ACU, AiNativeToolDefinition_ACU> = {
     open_round: fn_ACU('open_round', '开启本轮续写规划，进入固定工作流。何时使用：本轮还没有开启，资料已经足够确定本轮焦点时。调用后本次回复结束，等待工作流结果。focus 必填，写本轮要推进的核心；summary 可写当前局面一句话；需要联网补资料时 dispatchWebResearcher 设为 true。', closed_ACU({
       focus: text_ACU('本轮推进焦点，不能为空。'),
       summary: text_ACU(),
@@ -48,6 +50,13 @@ export function continuationDecisionTools_ACU(names: readonly AgentDecisionToolN
       constraints: closed_ACU({ add: texts_ACU('新增的长期约束。'), retire: texts_ACU('要退役的长期约束原文。') }),
       thought: thought_ACU,
     }, ['instruction'])),
+    correct_materials: fn_ACU('correct_materials', '主会话纠正资料或执行用户指定的追溯起点。sql 可写 hooks、info_gap、chronology、story_arc 的受限 INSERT/UPDATE/DELETE，复用逐栏校验与保存回执；已有条目必须指定 id 和当前 expected_revision，不能凭空补事实。仅当用户明确要求跳过旧历史时给 settlementStartIndex（从该 AI 楼层开始，包含该楼）和 userMessageId（会话中真实用户消息的 ID），reason 必填。跳过记录另存，不冒充已结算；没有新事实不提交 SQL。单独调用，随后依据回执 open_round，不反复提交已保存栏目。', closed_ACU({
+      reason: text_ACU('纠正依据或用户选择，不能为空。'),
+      sql: text_ACU('可选受限资料 DML；不可写水位、用户要求或其它表。'),
+      settlementStartIndex: { type: 'integer', minimum: 0 },
+      userMessageId: { type: 'integer', minimum: 1 },
+      thought: thought_ACU,
+    }, ['reason'])),
     block: fn_ACU('block', '无法继续时停止本次续写。何时使用：关键资料缺失或冲突，无法写出可靠指令时。reason 必填，unresolved 列出未解决的问题。', closed_ACU({
       reason: text_ACU('停止的原因，不能为空。'),
       unresolved: texts_ACU(),

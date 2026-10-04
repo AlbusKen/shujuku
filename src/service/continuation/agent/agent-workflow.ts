@@ -369,6 +369,16 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
         snapshot = clearCompletedPending_ACU(snapshot, Object.fromEntries(Object.entries(modules)
           .filter(([module]) => !unresolvedModules.has(module))) as typeof modules, settlementStartIndex, settlementEndIndex);
       }
+      if (maintainer.ok && !maintainer.usedFieldWrites) {
+        // 成功检查同一范围后，旧调用失败已恢复；字段拒绝不能靠无变化交付清账。
+        const completed = new Set(Object.entries(modules)
+          .filter(([, state]) => state === 'complete_changed' || state === 'complete_no_change')
+          .map(([module]) => module));
+        const unresolvedModules = new Set(issues.map(item => item.module));
+        snapshot = { ...snapshot, pendingFixes: snapshot.pendingFixes.filter(item => item.source !== 'invoke_failed'
+          || !completed.has(item.module) || unresolvedModules.has(item.module)
+          || !pendingWithinSettlement_ACU(item, settlementStartIndex, settlementEndIndex)) };
+      }
       const transactionPending = snapshot.pendingFixes.filter(item => writes.includes(item.module)
         && pendingWithinSettlement_ACU(item, settlementStartIndex, settlementEndIndex));
       if (transactionPending.length) {

@@ -11,6 +11,8 @@ export interface FillRuntimeContext_ACU {
   hasExistingTableData: boolean;
   /** 旧交火全局开关，仅用于推导旧对话的临时默认方案。 */
   legacyCrossfireEnabled: boolean;
+  /** 已记录模式不再走历史兼容；非法记录不得触发自动模板变更。 */
+  modeRecordStatus?: 'recorded' | 'absent' | 'invalid' | 'no_chat';
 }
 
 export interface VectorPipelineOverrides_ACU {
@@ -50,6 +52,12 @@ function resolveEffectiveMode_ACU(
 ): { mode: FillMode_ACU; temporary: boolean; autoEnable: boolean } {
   if (preferences.selectedMode !== 'classic' || runtime.flightModeActive) {
     return { mode: preferences.selectedMode, temporary: false, autoEnable: false };
+  }
+  if (runtime.modeRecordStatus === 'recorded') {
+    return { mode: 'classic', temporary: false, autoEnable: true };
+  }
+  if (runtime.modeRecordStatus === 'invalid' || runtime.modeRecordStatus === 'no_chat') {
+    return { mode: 'classic', temporary: false, autoEnable: false };
   }
   if (!runtime.hasExistingTableData) return { mode: 'classic', temporary: false, autoEnable: true };
   return { mode: runtime.legacyCrossfireEnabled ? 'crossfire' : 'llm', temporary: true, autoEnable: false };

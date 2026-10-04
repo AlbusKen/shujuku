@@ -333,21 +333,23 @@ export function resolveAgentUnsettledStoryWindow_ACU(context: AgentResolveContex
     && (completion.state === 'complete_changed' || completion.state === 'complete_no_change')
     && completion.rangeStartIndex >= 0 && completion.rangeEndIndex >= completion.rangeStartIndex
     ? completion : null;
+  const boundary = context.moduleSnapshot.settlementBoundary?.startIndex ?? 0;
   const isUnsettled = (floor: AgentStoryFloor_ACU) => floor.index > context.settledThroughIndex
+    && floor.index >= boundary
     && !(completedRange && floor.index >= completedRange.rangeStartIndex && floor.index <= completedRange.rangeEndIndex);
   const unsettledFloors = allFloors.filter(isUnsettled);
   const floors = windowFloors.filter(isUnsettled);
   const hiddenCount = unsettledFloors.length - floors.length;
   let startIndex = hiddenCount > 0
     ? floors[0]?.index ?? context.chat.length
-    : Math.max(0, context.settledThroughIndex + 1);
+    : Math.max(boundary, context.settledThroughIndex + 1);
   // 最近窗口已完成后，只处理其后新增的正文；保留连续水位与窗口完成区间的区别。
   if (floors.length && completedRange && windowFloors[0].index >= completedRange.rangeStartIndex
     && windowFloors[0].index <= completedRange.rangeEndIndex
     && floors[0].index > completedRange.rangeEndIndex) {
     startIndex = completedRange.rangeEndIndex + 1;
   }
-  if (!floors.length) startIndex = windowFloors[0]?.index ?? context.chat.length;
+  if (!floors.length) startIndex = Math.max(boundary, windowFloors[0]?.index ?? context.chat.length);
   return { floors, hiddenCount, startIndex };
 }
 

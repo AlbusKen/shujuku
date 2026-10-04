@@ -9,6 +9,8 @@ const mocks = vi.hoisted(() => ({
   sanitizeTemplate: vi.fn((template: any) => ({ templateStr: JSON.stringify(template) })),
   upsertTemplatePreset: vi.fn(() => true),
   saveSettings: vi.fn(),
+  switchFillMode: vi.fn(),
+  persistedPresets: [] as any[],
   refreshPreset: vi.fn(),
   switchPreset: vi.fn(() => ({ presetName: '西幻剧情引导', followsGlobal: false })),
   emitMessageUpdated: vi.fn(),
@@ -48,8 +50,12 @@ vi.mock('../../../../src/service/table/table-storage-strategy', () => ({
 }));
 vi.mock('../../../../src/presentation/components/settings-ui-helpers', () => ({ saveSettingsAndNotify_ACU: mocks.saveSettings }));
 vi.mock('../../../../src/presentation/components/pipeline-ui-helpers', () => ({ refreshPresetUIAfterSwitch_ACU: mocks.refreshPreset }));
+vi.mock('../../../../src/service/fill-mode/fill-mode-chat-switch', () => ({
+  setCurrentChatFillMode_ACU: mocks.switchFillMode,
+}));
 
 import { createPlotPresetApi } from '../../../../src/presentation/bootstrap/api-groups/plot-preset-api';
+import { settings_ACU } from '../../../../src/service/runtime/state-manager';
 
 function createApi() {
   let api: Record<string, Function>;
@@ -65,18 +71,41 @@ beforeEach(() => {
   mocks.didSqliteFallback.mockReturnValue(false);
   mocks.sanitizeTemplate.mockImplementation((template: any) => ({ templateStr: JSON.stringify(template) }));
   mocks.upsertTemplatePreset.mockReturnValue(true);
+  settings_ACU.plotSettings.promptPresets = [];
+  mocks.persistedPresets = [];
+  mocks.saveSettings.mockReset().mockImplementation(() => {
+    mocks.persistedPresets = JSON.parse(JSON.stringify(settings_ACU.plotSettings.promptPresets));
+    return { saved: true, storageType: 'tavern' };
+  });
+  mocks.switchFillMode.mockReset().mockResolvedValue({ ok: true, mode: 'llm', changed: true });
+  mocks.switchPreset.mockReset().mockReturnValue({ presetName: '西幻剧情引导', followsGlobal: false });
+  mocks.refreshPreset.mockReset();
 });
 
 describe('initGameSession 模板重置契约', () => {
   it('reset=true 通过单一原子入口写入模板，而不调用旧的 delete/guide-only 链路', async () => {
     const templateData = { mate: { type: 'chatSheets', version: 1 }, sheet_legacy: { uid: 'sheet_legacy', name: '角色', content: [['row_id', '名称'], ['seed-1', '助手']] } };
 
-    const result = await createApi().initGameSession({}, { templateData, loadPreset: false });
+    const api = createApi();
+    const result = await api.initGameSession({}, {
+      templateData, presetData: { name: '西幻剧情引导' },
+    });
 
     expect(mocks.resetFromTemplate).toHaveBeenCalledWith(templateData, expect.objectContaining({
       presetName: '', source: 'game_init', reason: 'game_init', resetExistingTableData: true,
     }));
     expect(result).toMatchObject({ success: true, templateInjected: true });
+    expect(result).toMatchObject({ presetLoaded: true, fillModeSwitch: { ok: true, mode: 'llm' } });
+    expect(mocks.persistedPresets.map(preset => preset.name)).toEqual(['西幻剧情引导']);
+    expect(mocks.switchFillMode).toHaveBeenCalledWith('llm');
+    mocks.switchFillMode.mockClear();
+    mocks.refreshPreset.mockClear();
+    const batch = await api.importPlotPresetsFromData([{ name: '批量一' }, {}, { name: '批量二' }]);
+    expect(batch).toMatchObject({ success: false, imported: 2, failed: 1, fillModeSwitch: { ok: true, mode: 'llm' } });
+    expect(batch.details.map((item: any) => item.success)).toEqual([true, false, true]);
+    expect(mocks.switchFillMode).toHaveBeenCalledOnce();
+    expect(mocks.refreshPreset).toHaveBeenCalledOnce();
+    expect(mocks.persistedPresets.map(preset => preset.name)).toEqual(['西幻剧情引导', '批量一', '批量二']);
   });
 
   it('reset 成功后用已提交的规范化模板注册预设，而非原始缺列输入', async () => {
@@ -112,6 +141,18 @@ describe('initGameSession 模板重置契约', () => {
 
     expect(result).toMatchObject({ success: false, templateInjected: false });
     expect(result.message).toContain('严格保存失败');
+    const api = createApi();
+    const previous = settings_ACU.plotSettings.promptPresets;
+    for (const saved of [{ saved: false, error: '保存拒绝' }, { saved: true, storageType: 'memory' }]) {
+      mocks.saveSettings.mockReturnValueOnce(saved);
+      expect(await api.importPlotPresetFromData({ name: '未保存' })).toMatchObject({ success: false });
+      expect(settings_ACU.plotSettings.promptPresets).toBe(previous);
+      expect(mocks.persistedPresets).toEqual([]);
+    }
+    mocks.saveSettings.mockImplementationOnce(() => { throw new Error('保存异常'); });
+    expect(await api.importPlotPresetFromData({ name: '异常' })).toMatchObject({ success: false });
+    expect(settings_ACU.plotSettings.promptPresets).toBe(previous);
+    expect(mocks.switchFillMode).not.toHaveBeenCalled();
   });
 
   it('reset=false 不执行破坏性重置，而是进入既有模板协调入口', async () => {
@@ -150,5 +191,24 @@ describe('initGameSession 模板重置契约', () => {
     expect(mocks.reloadStorage).toHaveBeenCalledOnce();
     expect(result).toMatchObject({ success: true, templateInjected: true, runtimeReady: false });
     expect(result.warning).toContain('回退到原生模式');
+    const api = createApi();
+    mocks.switchFillMode.mockResolvedValueOnce({ ok: false, reason: 'irreversible_confirmation_required', currentMode: 'classic' });
+    const imported = await api.initGameSession({}, { injectTemplate: false, presetData: { name: '受保护预设' } });
+    expect(imported).toMatchObject({ success: true, presetLoaded: true, fillModeSwitch: { ok: false, reason: 'irreversible_confirmation_required' } });
+    expect(imported.warning).toContain('irreversible_confirmation_required');
+    expect(mocks.persistedPresets.map(preset => preset.name)).toContain('受保护预设');
+    mocks.switchFillMode.mockRejectedValueOnce(new Error('切换异常'));
+    mocks.switchPreset.mockReturnValueOnce(null as any);
+    mocks.refreshPreset.mockImplementationOnce(() => { throw new Error('刷新异常'); });
+    const exceptional = await api.importPlotPresetFromData({ name: '异常后保留' }, { switchTo: true });
+    expect(exceptional).toMatchObject({ success: true, switchedCurrentChat: false, fillModeSwitch: { ok: false, reason: 'switch_exception' } });
+    expect(exceptional.warning).toContain('模式切换异常');
+    expect(exceptional.warning).toContain('未能绑定');
+    expect(exceptional.warning).toContain('界面刷新失败');
+    expect(mocks.persistedPresets.map(preset => preset.name)).toContain('异常后保留');
+    mocks.switchFillMode.mockResolvedValueOnce({ ok: false, reason: 'save_failed', currentMode: 'llm' });
+    const batch = await api.importPlotPresetsFromData([{ name: '批量保留' }]);
+    expect(batch).toMatchObject({ success: true, imported: 1, failed: 0, fillModeSwitch: { ok: false, reason: 'save_failed' } });
+    expect(batch.warning).toContain('save_failed');
   });
 });

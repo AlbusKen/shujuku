@@ -8,7 +8,7 @@ import {
   withV40RoleSelfNarration_ACU,
 } from '../../../../src/service/continuation/agent/agent-defaults';
 import { validateContinuationSettings_ACU } from '../../../../src/service/continuation/continuation-store';
-import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V39_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V44_ACU } from '../../../../src/service/continuation/defaults';
+import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V39_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V45_ACU } from '../../../../src/service/continuation/defaults';
 
 const TARGETS_ACU = [
   ['arcArchitect', '【卷级容量、时间与长期经营契约】'],
@@ -65,7 +65,7 @@ describe('V40 子代理自述段', () => {
     const custom = [{ role: 'user', content: '用户自定义终审提示词', enabled: true, deletable: true }];
     settings.agentPrompts.finalReviewer = custom;
     const loaded = validateContinuationSettings_ACU(settings);
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V44_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V45_ACU);
     expect(loaded.agentPrompts.arcArchitect).toEqual(defaults.arcArchitect);
     expect(loaded.agentPrompts.maintainer).toEqual(defaults.maintainer);
     expect(loaded.agentPrompts.instructionComposer).toEqual(defaults.instructionComposer);

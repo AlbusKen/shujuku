@@ -17,6 +17,7 @@ import {
 import {
   resolveCurrentChatFillMode_ACU,
   type ChatFillModeSource_ACU,
+  type ChatFillModeRecordStatus_ACU,
 } from '../../service/fill-mode/fill-mode-chat-record';
 import {
   setCurrentChatFillMode_ACU,
@@ -35,6 +36,7 @@ export interface FormFillProfiles {
 interface FormFillModeState {
   selectedMode: FillMode;
   modeSource: ChatFillModeSource_ACU;
+  recordStatus: ChatFillModeRecordStatus_ACU;
   /** 当前对话已按经典表格模式运行（大总结表存在）；切出时会删除大总结表。 */
   classicActive: boolean;
   preferredMode: FillMode;
@@ -61,6 +63,7 @@ function readState(): Omit<FormFillModeState, 'switching' | 'saveError'> {
   return {
     selectedMode: current.mode,
     modeSource: current.source,
+    recordStatus: current.recordStatus,
     classicActive: isClassicModeActiveForCurrentChat_ACU(),
     preferredMode: preferences.selectedMode,
     profiles: {
@@ -79,10 +82,10 @@ export const useFormFillModeStore = defineStore('acu-v2-form-fill-mode', {
       this.switching = true;
       try {
         const result = await setCurrentChatFillMode_ACU(mode, options);
-        // 切换会改动飞行模式与模板，成功或失败都以权威存储回读。
-        this.refresh();
         return result;
       } finally {
+        // 包括抛错在内，始终回读实际状态。
+        this.refresh();
         this.switching = false;
       }
     },
@@ -91,7 +94,7 @@ export const useFormFillModeStore = defineStore('acu-v2-form-fill-mode', {
       if (mode === this.preferredMode) return;
       this.preferredMode = mode;
       this.persistPreferences();
-      if (this.modeSource !== 'chat') this.selectedMode = this.preferredMode;
+      this.refresh();
     },
     setClassicRecentChronicleRows(value: number): void {
       this.profiles.classic.recentChronicleRows = clampInteger(value, 15, 1, 200);

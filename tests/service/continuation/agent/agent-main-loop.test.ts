@@ -143,6 +143,7 @@ function harness_ACU(options: {
   onSubagentCall?: (chat: any[], messages: readonly { role: string; content: string }[]) => Promise<string> | string;
   productionConversation?: boolean;
   chat?: any[];
+  productionModules?: boolean;
   onMainCall?: () => void;
   onHandoffCall?: (chat: any[], callNumber: number, saveChat: ReturnType<typeof vi.fn>) => void;
 }): Harness_ACU {
@@ -197,8 +198,8 @@ function harness_ACU(options: {
     subagentRuntime,
     nativeTools: options.nativeTools,
     readChat: () => chat,
-    readModuleSnapshot: () => snapshot,
-    writeModuleSnapshot: async (_chat, index, next) => { written.push({ index, snapshot: next }); snapshot = next; },
+    readModuleSnapshot: options.productionModules ? readAgentModuleSnapshot_ACU : () => snapshot,
+    writeModuleSnapshot: async (_chat, index, next) => { if (options.productionModules) await writeAgentModuleSnapshot_ACU(_chat, index, next); written.push({ index, snapshot: next }); snapshot = next; },
     readConversation: options.productionConversation ? readAgentConversation_ACU : () => conversation,
     // 分段落盘的内存替身：把新消息接到会话尾部，与真实实现同样按 id 去重。
     appendConversationMessages: options.productionConversation ? appendPreparedAgentConversationMessages_ACU : async (_chat, prepared: readonly AgentConversationMessage_ACU[]) => {
@@ -1121,6 +1122,50 @@ describe('open_round 固定结构工作流', () => {
   const maintainerReply_ACU = JSON.stringify({ summary: '没有新增资料', delta: { hooks: [], infoGap: [], chronology: [] } });
   const plannerReply_ACU = JSON.stringify({ summary: '主线建议', recommendation: '先观察守门人的回避', mustPreserve: [], risks: [] });
   const composerReply_ACU = JSON.stringify({ instruction: '按阶段大纲先观察守门人的回避。', summary: '完成本轮指令', constraints: { add: [], retire: [] } });
+
+  it.each([false, true])('主会话执行新追溯起点并交付，旧历史不进入结算请求（原生工具=%s）', async nativeTools => {
+    const snapshot = snapshotWithArc_ACU();
+    snapshot.settledThroughIndex = 0;
+    snapshot.pendingFixes = (['hooks', 'infoGap', 'chronology'] as const).map(module => ({
+      module, agentName: 'hook-cognition-maintainer', source: 'invoke_failed', completion: 'failed',
+      violations: [{ path: module, message: 'READ_FENCE_CAPACITY_EXHAUSTED' }],
+      attempts: 12, firstFailedAtIndex: 1, lastError: 'READ_FENCE_CAPACITY_EXHAUSTED',
+      rangeStartIndex: 1, rangeEndIndex: 3, acceptedKeys: [], createdAt: 1, updatedAt: 1,
+    }));
+    const h = harness_ACU({
+      nativeTools, productionModules: true, productionConversation: true,
+      conversation: appendAgentConversation_ACU(buildEmptyAgentConversation_ACU(), [
+        { kind: 'user', text: '不结算旧历史，从当前楼层 3 开始', digest: '会话输入', turnKey: '' },
+      ]),
+      mainReplies: [
+        '{"action":"correct_materials","reason":"用户要求从当前楼层开始","settlementStartIndex":3,"userMessageId":1}',
+        '{"action":"open_round","focus":"只结算当前楼层"}',
+      ],
+      subReplies: [maintainerReply_ACU, plannerReply_ACU, '{"summary":"无操作","recommendation":"no_change"}', composerReply_ACU],
+    });
+    try {
+      await writeAgentModuleSnapshot_ACU(h.chat, 1, snapshot);
+      h.request.directOpening = true;
+      const result = await h.planner.plan(h.request).catch(error => {
+        const receipts = h.conversation().messages.filter(message => message.digest === '主会话纠正回执' || message.digest === '工作流状态回执');
+        throw new Error(`${String(error)}；实际回执：${JSON.stringify(receipts.map(message => message.text))}`);
+      });
+      expect(result.instruction).toBe('按阶段大纲先观察守门人的回避。');
+      expect(h.mainCalls).toHaveLength(2);
+      expect(h.mainCalls[0].map(message => message.content).join('\n')).toContain('最新真实用户消息 ID：1');
+      const settlementRequest = h.subCalls[0].map(message => message.content).join('\n');
+      expect(settlementRequest).toContain('【楼层 3】');
+      expect(settlementRequest).not.toContain('【楼层 1】');
+      const persisted = readAgentModuleSnapshot_ACU(h.chat);
+      expect(persisted.settlementBoundary?.startIndex).toBe(3);
+      expect(persisted.settlementBoundary?.skippedPendingFixes.map(fix => [fix.module, fix.rangeStartIndex, fix.rangeEndIndex])).toEqual([
+        ['hooks', 1, 2], ['infoGap', 1, 2], ['chronology', 1, 2],
+      ]);
+      expect(persisted.pendingFixes).toEqual([]);
+      expect(persisted.settledThroughIndex).toBe(0);
+    } finally { _set_SillyTavern_API_ACU(null as any); }
+  });
+
 
   it('生产新轮次直接运行固定工作流，不请求主 Agent 开局', async () => {
     const h = harness_ACU({

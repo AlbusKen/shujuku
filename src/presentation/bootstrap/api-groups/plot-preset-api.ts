@@ -12,11 +12,99 @@ import { applyChatTemplateSnapshotWithReconciliation_ACU, upsertTemplatePreset_A
 import { sanitizeTemplateSnapshotForChat_ACU } from '../../../service/template/chat-scope';
 import { isSqliteMode } from '../../../service/table/storage-mode';
 import { didSqliteFallbackAfterReload_ACU, reloadStorageProvider } from '../../../service/table/table-storage-strategy';
+import { setCurrentChatFillMode_ACU } from '../../../service/fill-mode/fill-mode-chat-switch';
+import { notifyChatConfigurationChanged_ACU } from '../../../shared/chat-configuration-change';
 import { saveSettingsAndNotify_ACU } from '../../components/settings-ui-helpers';
 import { refreshPresetUIAfterSwitch_ACU } from '../../components/pipeline-ui-helpers';
 import type { ApiGroupContext } from './callback-api';
 
 export function createPlotPresetApi(ctx: ApiGroupContext): Record<string, Function> {
+    async function switchImportedPresetMode() {
+        try {
+            const fillModeSwitch = await setCurrentChatFillMode_ACU('llm');
+            const warning = 'reason' in fillModeSwitch
+                ? `预设已导入，但当前会话未切换到 LLM 召回模式（${fillModeSwitch.reason}）。请在填表模式页处理确认或重试。`
+                : '';
+            return { fillModeSwitch, warning };
+        } catch (error: any) {
+            return {
+                fillModeSwitch: { ok: false, reason: 'switch_exception', error: String(error?.message || error) },
+                warning: '预设已保存，但当前会话模式切换异常，请在填表模式页核对并重试。',
+            };
+        }
+    }
+
+    function refreshImportedPresets(): string {
+        notifyChatConfigurationChanged_ACU('plot-presets');
+        try {
+            refreshPresetUIAfterSwitch_ACU();
+            return '';
+        } catch (error) {
+            logWarn_ACU('[API] 已保存预设的界面刷新失败:', error);
+            return '预设已保存，但界面刷新失败，请重新打开配置页。';
+        }
+    }
+
+    async function importPreset(presetData: any, options: any = {}, deferPostImport = false) {
+        try {
+           const { overwrite = false, switchTo = false } = options;
+            const preset = typeof presetData === 'string' ? JSON.parse(presetData)
+                : typeof presetData === 'object' && presetData !== null ? JSON.parse(JSON.stringify(presetData)) : null;
+            if (!preset || typeof preset.name !== 'string' || !preset.name.trim()) {
+                return { success: false, message: '预设数据无效：必须是包含非空 name 的 JSON 对象。' };
+            }
+            const previousPresets = settings_ACU.plotSettings.promptPresets || [];
+            const presets = [...previousPresets];
+            let finalName = preset.name.trim();
+            const existingIndex = presets.findIndex((item: any) => item.name === finalName);
+            const normalizedPreset = normalizePlotPresetExcludeRules_ACU(preset);
+            if (existingIndex !== -1 && !overwrite) {
+                let counter = 1;
+                while (presets.some((item: any) => item.name === finalName)) finalName = `${preset.name.trim()} (${counter++})`;
+            }
+            normalizedPreset.name = finalName;
+            if (existingIndex !== -1 && overwrite) presets[existingIndex] = normalizedPreset;
+            else presets.push(normalizedPreset);
+            settings_ACU.plotSettings.promptPresets = presets;
+            try {
+                const saved = saveSettingsAndNotify_ACU();
+                if (!saved?.saved || saved.storageType === 'memory') {
+                    settings_ACU.plotSettings.promptPresets = previousPresets;
+                    return { success: false, message: saved?.error || saved?.warning || '预设未能持久化保存，请稍后重试。' };
+                }
+            } catch (error) {
+                settings_ACU.plotSettings.promptPresets = previousPresets;
+                throw error;
+            }
+            // 保存已经成功；后续独立操作只能产生警告，不能把已导入预设误报为丢失。
+            const postImport = deferPostImport ? { fillModeSwitch: undefined, warning: '' } : await switchImportedPresetMode();
+            const warnings = [postImport.warning];
+            let switchedCurrentChat = false;
+            if (!deferPostImport && switchTo) {
+                try {
+                    switchedCurrentChat = ctx.getApi().injectPlotPresetToCurrentChat(finalName) === true;
+                    if (!switchedCurrentChat) warnings.push('预设已保存，但未能绑定到当前会话，请手动选择该预设。');
+                } catch (error) {
+                    logWarn_ACU('[API] 已导入预设的会话绑定异常:', error);
+                    warnings.push('预设已保存，但当前会话预设绑定异常，请手动选择该预设。');
+                }
+            }
+            if (!deferPostImport) warnings.push(refreshImportedPresets());
+            return {
+                success: true,
+                message: switchedCurrentChat
+                    ? `预设 "${finalName}" 已成功导入到全局预设库，并已切换当前聊天使用该预设。`
+                    : `预设 "${finalName}" 已成功导入到全局预设库！`,
+                presetName: finalName, switchedCurrentChat,
+                fillModeSwitch: postImport.fillModeSwitch,
+                warning: warnings.filter(Boolean).join('；'),
+            };
+        } catch (error: any) {
+            logError_ACU('importPlotPresetFromData failed:', error);
+            return { success: false, message: `导入失败: ${error?.message || error}` };
+        }
+    }
+
     return {
         getPlotPresets: function() {
             try {
@@ -113,83 +201,12 @@ export function createPlotPresetApi(ctx: ApiGroupContext): Record<string, Functi
             }
         },
 
-        importPlotPresetFromData: async function(presetData: any, options: any = {}) {
-            try {
-                const { overwrite = false, switchTo = false } = options;
-                let preset;
-
-                if (typeof presetData === 'string') {
-                    try {
-                        preset = JSON.parse(presetData);
-                    } catch (parseError) {
-                        return { success: false, message: `JSON解析错误: ${parseError.message}` };
-                    }
-                } else if (typeof presetData === 'object' && presetData !== null) {
-                    preset = JSON.parse(JSON.stringify(presetData));
-                } else {
-                    return { success: false, message: '无效的预设数据：必须是 JSON 对象或 JSON 字符串' };
-                }
-
-                if (!preset.name || typeof preset.name !== 'string' || preset.name.trim() === '') {
-                    return { success: false, message: '预设数据无效：缺少 "name" 字段或名称为空' };
-                }
-
-                const presetName = preset.name.trim();
-                const presets = settings_ACU.plotSettings?.promptPresets || [];
-                const existingIndex = presets.findIndex((p: any) => p.name === presetName);
-                const normalizedPreset = normalizePlotPresetExcludeRules_ACU(preset);
-                normalizedPreset.name = presetName;
-
-                let finalName = presetName;
-
-                if (existingIndex !== -1) {
-                    if (overwrite) {
-                        presets[existingIndex] = normalizedPreset;
-                        logDebug_ACU(`[API] importPlotPresetFromData: 覆盖已存在的预设 "${presetName}"`);
-                    } else {
-                        let counter = 1;
-                        while (presets.some((p: any) => p.name === finalName)) {
-                            finalName = `${presetName} (${counter})`;
-                            counter++;
-                        }
-                        normalizedPreset.name = finalName;
-                        presets.push(normalizedPreset);
-                        logDebug_ACU(`[API] importPlotPresetFromData: 预设已存在，重命名为 "${finalName}"`);
-                    }
-                } else {
-                    presets.push(normalizedPreset);
-                    logDebug_ACU(`[API] importPlotPresetFromData: 新增预设 "${presetName}"`);
-                }
-
-                settings_ACU.plotSettings.promptPresets = presets;
-                saveSettingsAndNotify_ACU();
-
-                let switchedCurrentChat = false;
-                if (switchTo) {
-                    switchedCurrentChat = ctx.getApi().injectPlotPresetToCurrentChat(finalName) === true;
-                } else {
-                    // 导入预设后刷新 UI 下拉框与状态显示
-                    refreshPresetUIAfterSwitch_ACU();
-                }
-
-                return {
-                    success: true,
-                    message: switchedCurrentChat
-                        ? `预设 "${finalName}" 已成功导入到全局预设库，并已切换当前聊天使用该预设。`
-                        : `预设 "${finalName}" 已成功导入到全局预设库！`,
-                    presetName: finalName,
-                };
-
-            } catch (e) {
-                logError_ACU('importPlotPresetFromData failed:', e);
-                return { success: false, message: `导入失败: ${e.message}` };
-            }
-        },
+        importPlotPresetFromData: (presetData: any, options: any = {}) => importPreset(presetData, options),
 
         importPlotPresetsFromData: async function(presetsArray: any[], options: any = {}) {
             try {
                 if (!Array.isArray(presetsArray)) {
-                    return { success: false, message: '输入必须是数组', imported: 0, failed: 0, details: [] };
+                    return { success: false, message: '输入必须是数组', imported: 0, failed: 0, details: [] as Record<string, any>[] };
                 }
 
                 const details = [];
@@ -197,7 +214,7 @@ export function createPlotPresetApi(ctx: ApiGroupContext): Record<string, Functi
                 let failed = 0;
 
                 for (const presetData of presetsArray) {
-                    const result = await ctx.getApi().importPlotPresetFromData(presetData, { ...options, switchTo: false });
+                    const result = await importPreset(presetData, { ...options, switchTo: false }, true);
                     details.push(result);
                     if (result.success) {
                         imported++;
@@ -206,20 +223,23 @@ export function createPlotPresetApi(ctx: ApiGroupContext): Record<string, Functi
                     }
                 }
 
-                // 批量导入结束后统一刷新一次 UI
-                refreshPresetUIAfterSwitch_ACU();
+                // 成功条目已经独立保存；批量结束只尝试一次会话模式切换与刷新。
+                const postImport = imported > 0 ? await switchImportedPresetMode() : { fillModeSwitch: undefined, warning: '' };
+                const refreshWarning = imported > 0 ? refreshImportedPresets() : '';
 
                 return {
                     success: failed === 0,
                     message: `批量导入完成：成功 ${imported} 个，失败 ${failed} 个`,
                     imported,
                     failed,
-                    details
+                    details,
+                    fillModeSwitch: postImport.fillModeSwitch,
+                    warning: [postImport.warning, refreshWarning].filter(Boolean).join('；'),
                 };
 
             } catch (e) {
                 logError_ACU('importPlotPresetsFromData failed:', e);
-                return { success: false, message: `批量导入失败: ${e.message}`, imported: 0, failed: 0, details: [] };
+                return { success: false, message: `批量导入失败: ${e.message}`, imported: 0, failed: 0, details: [] as Record<string, any>[] };
             }
         },
 
@@ -358,6 +378,8 @@ export function createPlotPresetApi(ctx: ApiGroupContext): Record<string, Functi
                             throw new Error(importResult.message || '预设导入失败');
                         }
                         result.presetLoaded = true;
+                        result.fillModeSwitch = importResult.fillModeSwitch;
+                        result.warning = [result.warning, importResult.warning].filter(Boolean).join('；');
                         logDebug_ACU('[游戏初始化] 剧情引导预设加载成功');
                     } catch (presetError) {
                         logError_ACU('[游戏初始化] 预设加载失败:', presetError);

@@ -77,6 +77,23 @@ describe('Agent 文本协议 JSON 提取', () => {
 });
 
 describe('主 Agent 动作解析', () => {
+  it('纠正动作在文本与原生参数下共用封闭解析，并保持角色写集隔离', () => {
+    const action = { action: 'correct_materials', reason: '用户选择新起点', settlementStartIndex: 3, userMessageId: 1 };
+    expect(parseAgentMainAction_ACU(action, true)).toMatchObject({ kind: 'correct_materials', settlementStartIndex: 3 });
+    expect(parseAgentMainOutput_ACU(JSON.stringify(action), AGENT_PREFILLS_ACU.main, true)).toEqual(parseAgentMainAction_ACU(action, true));
+    expect(() => parseAgentMainAction_ACU({ ...action, userMessageId: undefined }, true)).toThrow(/userMessageId/);
+    expect(() => parseAgentMainAction_ACU({ ...action, settlementStartIndex: -1 }, true)).toThrow(/非负整数/);
+    expect(() => parseAgentMainAction_ACU({ ...action, settledThroughIndex: 3 }, true)).toThrow(/未声明/);
+    expect(() => parseAgentMainAction_ACU({ action: 'correct_materials', reason: '没有动作' }, true)).toThrow(/必须提供/);
+    const sql = "UPDATE hooks SET status='paid' WHERE id='H1' AND expected_revision=2; UPDATE story_arc SET title='新标题' WHERE id='VOL-01' AND expected_revision=1";
+    expect(parseAgentModuleSqlFieldWrites_ACU(sql, 'main').intents.map(item => item.module)).toEqual(['hooks', 'storyArc']);
+    expect(parseAgentModuleSqlFieldWrites_ACU(sql, 'hook-cognition-maintainer').rejected).toEqual([
+      expect.objectContaining({ path: 'sql[1].story_arc', reason: expect.stringContaining('无权') }),
+    ]);
+    expect(parseAgentModuleSqlFieldWrites_ACU("INSERT INTO web_refs (name) VALUES ('越权')", 'main').intents).toEqual([]);
+    expect(parseAgentModuleSqlFieldWrites_ACU("INSERT INTO user_requirements (value) VALUES ('越权')", 'main').rejected.length).toBeGreaterThan(0);
+  });
+
   it('delegate 需要非空派工列表，且每项都要有代理名与任务', () => {
     const action = parseAgentMainAction_ACU({ action: 'delegate', thought: '先结算', delegations: [{ agentName: 'hook-cognition-maintainer', prompt: '结算未处理正文', reads: ['$HISTORY_UNSETTLED'], writes: ['$HOOKS_LEDGER'] }] }, true);
     expect(action).toMatchObject({ kind: 'delegate' });
@@ -159,7 +176,7 @@ describe('主 Agent 动作解析', () => {
 
   it('未知动作和已退役的大纲动作直接拒绝', () => {
     expect(() => parseAgentMainAction_ACU({ action: 'write_story' }, true)).toThrowError(/action 必须是/);
-    expect(() => parseAgentMainAction_ACU({ action: 'revise_outline', replanInstruction: '改' }, true)).toThrowError(/action 必须是 read \/ search \/ delegate \/ open_round \/ finalize \/ block/);
+    expect(() => parseAgentMainAction_ACU({ action: 'revise_outline', replanInstruction: '改' }, true)).toThrowError(/action 必须是 read \/ search \/ delegate \/ open_round \/ correct_materials \/ finalize \/ block/);
     expect(parseAgentMainAction_ACU({ action: 'open_round', focus: '接住守门人的回避' }, true)).toMatchObject({
       kind: 'open_round', focus: '接住守门人的回避', dispatchWebResearcher: false,
     });

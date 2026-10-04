@@ -43,11 +43,11 @@ afterEach(() => {
 });
 
 describe('router-store · pageRegistry 基线', () => {
-  it('注册表恰好 12 项，分布于 5 分组', async () => {
+  it('注册表恰好 13 项，分布于 5 分组', async () => {
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
-    expect(r.pageRegistry.length).toBe(12);
+    expect(r.pageRegistry.length).toBe(13);
     const byGroup = r.pageRegistry.reduce<Record<string, number>>((acc, p) => {
       acc[p.group] = (acc[p.group] || 0) + 1;
       return acc;
@@ -55,7 +55,7 @@ describe('router-store · pageRegistry 基线', () => {
     expect(byGroup).toEqual({
       overview: 1,
       config: 4,
-      feature: 4,
+      feature: 5,
       tool: 2,
       developer: 1,
     });
@@ -73,6 +73,7 @@ describe('router-store · pageRegistry 基线', () => {
       ['form-fill', '填表工作台', 'config'],
       ['agent', 'Agent', 'config'],
       ['api', 'API', 'config'],
+      ['plot', '剧情推进', 'feature'],
       ['continuation', '智能续写', 'feature'],
       ['world-simulation', '格林推演', 'feature'],
       ['import', '外部导入', 'feature'],
@@ -85,16 +86,17 @@ describe('router-store · pageRegistry 基线', () => {
 });
 
 describe('router-store · 基础模式默认可见性', () => {
-  it('未持久化时默认进入填表工作台，基础档显示日常配置与高级工具（运行日志）', async () => {
+  it('未持久化时默认进入填表工作台，基础档显示日常配置、数据管理与高级工具（运行日志）', async () => {
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
     expect(r.activePageId).toBe('form-fill');
-    expect(r.visiblePages.map(p => p.id)).toEqual(['dashboard', 'fill-mode', 'form-fill', 'api', 'advanced-tools']);
+    expect(r.visiblePages.map(p => p.id)).toEqual(['dashboard', 'fill-mode', 'form-fill', 'api', 'data-mgmt', 'advanced-tools']);
     expect(r.visiblePagesByGroup.overview.map(p => p.id)).toEqual(['dashboard']);
+    expect(r.visiblePagesByGroup.tool.map(p => p.id)).toEqual(['data-mgmt', 'advanced-tools']);
   });
 
-  it('基础模式拒绝切到进阶页面，但允许 API 配置', async () => {
+  it('基础模式拒绝切到进阶页面，但允许 API 配置与数据管理，切档后保留数据管理页', async () => {
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
@@ -102,6 +104,16 @@ describe('router-store · 基础模式默认可见性', () => {
     expect(r.activePageId).toBe('form-fill');
     r.setActivePage('api');
     expect(r.activePageId).toBe('api');
+    r.setActivePage('data-mgmt');
+    expect(r.activePageId).toBe('data-mgmt');
+
+    const uiMode = (await import('../../../src/presentation-v2/stores/ui-mode-store')).useUiModeStore();
+    for (const tier of ['medium', 'high', 'low'] as const) {
+      uiMode.setTier(tier);
+      r.ensureActiveVisible();
+      expect(r.visiblePages.map(p => p.id)).toContain('data-mgmt');
+      expect(r.activePageId).toBe('data-mgmt');
+    }
   });
 });
 
@@ -213,14 +225,14 @@ describe('router-store · 高手模式可见性', () => {
     expect(state.settings_ACU.contentOptimizationSettings?.enabled).toBe(true);
   });
 
-  it('高手模式格林推演默认隐藏：overview=1 / config=4 / feature=2 / tool=2 / developer=0', async () => {
+  it('高手模式格林推演默认隐藏：overview=1 / config=4 / feature=3 / tool=2 / developer=0', async () => {
     persistAdvancedMode();
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
     expect(r.visiblePagesByGroup.overview.length).toBe(1);
     expect(r.visiblePagesByGroup.config.length).toBe(4);
-    expect(r.visiblePagesByGroup.feature.length).toBe(2);
+    expect(r.visiblePagesByGroup.feature.length).toBe(3);
     expect(r.visiblePages.map(p => p.id)).not.toContain('world-simulation');
     expect(r.visiblePagesByGroup.tool.length).toBe(2); // 数据管理 + 高级工具
     expect(r.visiblePagesByGroup.developer.length).toBe(0); // 默认 developerOptionsEnabled=false
@@ -242,7 +254,7 @@ describe('router-store · 高手模式可见性', () => {
     expect(r.activePageId).toBe('dashboard');
   });
 
-  it('智能续写、格林推演、外部导入、交火模式都关闭时功能分组为空', async () => {
+  it('其余功能关闭时仍保留独立剧情推进页', async () => {
     persistAdvancedMode();
     const m = await freshImport();
     const state = await import('../../../src/service/runtime/state-manager');
@@ -267,7 +279,7 @@ describe('router-store · 高手模式可见性', () => {
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
 
-    expect(r.visiblePagesByGroup.feature).toEqual([]);
+    expect(r.visiblePagesByGroup.feature.map(p => p.id)).toEqual(['plot']);
     expect(r.visiblePages.map(p => p.id)).not.toContain('continuation');
     expect(r.visiblePages.map(p => p.id)).not.toContain('world-simulation');
     expect(r.visiblePages.map(p => p.id)).not.toContain('import');
@@ -296,7 +308,7 @@ describe('router-store · 切页 + 持久化', () => {
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
     expect(r.activePageId).toBe('form-fill');
-    expect(r.visiblePages.map(p => p.id)).toEqual(['dashboard', 'fill-mode', 'form-fill', 'api', 'advanced-tools']);
+    expect(r.visiblePages.map(p => p.id)).toEqual(['dashboard', 'fill-mode', 'form-fill', 'api', 'data-mgmt', 'advanced-tools']);
   });
 
   it('高手模式未持久化路由时默认页是 dashboard', async () => {
@@ -315,18 +327,18 @@ describe('router-store · 切页 + 持久化', () => {
     expect(r.activePageId).toBe('agent');
   });
 
-  it('退役页面路由别名：plot / vector-index 进入填表模式，table 进入填表工作台', async () => {
+  it('plot 恢复为独立页，vector-index / table 保留兼容路由', async () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ uiTierV2: { tier: 'high' }, router: { activePageId: 'plot' } }));
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
-    expect(r.activePageId).toBe('fill-mode');
+    expect(r.activePageId).toBe('plot');
     r.setActivePage('table');
     expect(r.activePageId).toBe('form-fill');
     r.setActivePage('vector-index');
     expect(r.activePageId).toBe('fill-mode');
     const ids = r.pageRegistry.map(p => p.id);
-    expect(ids).not.toContain('plot');
+    expect(ids).toContain('plot');
     expect(ids).not.toContain('table');
   });
 
@@ -370,14 +382,15 @@ describe('router-store · 切页 + 持久化', () => {
     expect(persisted.router.bootPending).toBe(true);
   });
 
-  it('剧情推进、智能续写、格林推演、外部导入与交火模式按功能开关控制一级页可见性', async () => {
+  it('剧情推进独立可见，其余功能页遵守各自开关', async () => {
     persistAdvancedMode();
     const m = await freshImport();
     m.pinia.setActivePinia(m.pinia.createPinia());
     const r = m.router.useRouterStore();
 
     expect(r.visiblePagesByGroup.config.map(p => p.id)).not.toContain('plot');
-    expect(r.visiblePagesByGroup.feature.map(p => p.id)[0]).toBe('continuation');
+    expect(r.visiblePagesByGroup.feature.map(p => p.id)[0]).toBe('plot');
+    expect(r.visiblePagesByGroup.feature.map(p => p.id)).toContain('continuation');
     expect(r.visiblePagesByGroup.feature.map(p => p.id)).not.toContain('world-simulation');
     r.setFeatureGate(m.registry.FEATURE_GATE_WORLD_SIMULATION, true);
     expect(r.visiblePagesByGroup.feature.map(p => p.id)).toContain('world-simulation');

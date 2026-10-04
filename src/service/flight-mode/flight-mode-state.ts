@@ -90,6 +90,20 @@ function getChronicleSheet_ACU(tableData: any): any | null {
   return Object.values(tableData).find((sheet: any) => sheet?.name === '纪要表') || null;
 }
 
+/** 切换模式使用全部纪要（包括已被大总结隐藏的行），而不是可见窗口。 */
+export function countChronicleRows_ACU(tableData: any = currentJsonTableData_ACU): number | null {
+  if (!tableData || typeof tableData !== 'object') return null;
+  const chronicle = getChronicleSheet_ACU(tableData);
+  if (!chronicle) return 0;
+  if (!Array.isArray(chronicle.content)) return null;
+  return chronicle.content.slice(1).filter((row: any) => Array.isArray(row)).length;
+}
+
+export function isChronicleBelowClassicThreshold_ACU(): boolean {
+  const count = countChronicleRows_ACU();
+  return count !== null && count < getClassicRecentChronicleRows_ACU();
+}
+
 export function countVisibleChronicleRows_ACU(tableData: any = currentJsonTableData_ACU): number {
   const chronicle = getChronicleSheet_ACU(tableData);
   if (!Array.isArray(chronicle?.content)) return 0;

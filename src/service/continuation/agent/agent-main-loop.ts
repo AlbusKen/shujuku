@@ -22,7 +22,7 @@ import { normalizeContinuationInternalAiRetryLimit_ACU } from '../defaults';
 import { callContinuationInternalAi_ACU, callContinuationInternalAiWithRetry_ACU, CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU, formatAgentUsageLabel_ACU, type AiUsageMetadata_ACU, type ContinuationInternalAiCallOptions_ACU } from '../internal-ai-call';
 import { agentNativeTools_ACU, nativeToolArguments_ACU, normalizeAgentModelReply_ACU, withJsonTailPrefill_ACU, withNativeToolThinkPrefill_ACU, type AiNativeToolCall_ACU } from '../../ai/native-tool';
 import { resolveAgentToolMode_ACU, type AgentToolMode_ACU } from '../../ai/agent-tool-mode';
-import { AGENT_DECISION_TOOL_NAMES_ACU, continuationDecisionTools_ACU, splitNativeDecisionCalls_ACU } from '../../ai/agent-decision-tools';
+import { CONTINUATION_DECISION_TOOL_NAMES_ACU, continuationDecisionTools_ACU, splitNativeDecisionCalls_ACU } from '../../ai/agent-decision-tools';
 import { effectiveAgentApiPresetMode_ACU, resolveContinuationAgentApiPreset_ACU, type ContinuationApiPresetDependencies_ACU, type ContinuationResolvedApiPreset_ACU } from '../api-preset';
 import { renderContinuationPrompt_ACU } from '../prompt-template';
 import type { ContinuationAgentExecutionContext_ACU } from '../stage-execution-engine';
@@ -68,6 +68,7 @@ import { renderAgentTableCatalog_ACU } from './agent-tables';
 import { applyAgentConstraintRegistrationViaSql_ACU, applyAgentModuleDeltaViaSql_ACU, applyAgentWebRefsDeltaViaSql_ACU, mergeAgentDeltaRevisions_ACU } from './agent-transaction';
 import { commitAgentModuleFieldWrites_ACU, type AgentFieldPage_ACU, type AgentModuleRevisionWindow_ACU } from './agent-module-field-commit';
 import { readMessageSwipeId_ACU } from './agent-module-frame';
+import { correctAgentMaterials_ACU, renderAgentCorrectionGuide_ACU } from './agent-main-correction';
 import { compactAgentProtocolError_ACU, parseAgentMainAction_ACU, parseAgentMainOutput_ACU, parseAgentToolCall_ACU } from './agent-protocol';
 import {
   buildAgentWorldbookScanText_ACU,
@@ -312,6 +313,7 @@ export function describeAgentActionLabel_ACU(action: AgentMainAction_ACU): strin
   if (action.kind === 'tools') return `调用 ${action.calls.length} 个 read/search 工具`;
   if (action.kind === 'delegate') return `派工 ${action.delegations.length} 项`;
   if (action.kind === 'open_round') return '开局并交给固定工作流';
+  if (action.kind === 'correct_materials') return '主会话纠正资料';
   if (action.kind === 'finalize') return '交付写作指导';
   return '阻断本轮';
 }
@@ -680,6 +682,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     const restartingSameTurn = session.snapshot().messages.some(message => message.turnKey === session.turnKey
       && (message.kind === 'agent' || message.digest === '固定工作流启动' || message.digest === '工作流状态回执'));
     const openingAvailable = request.directOpening === true && !restartingSameTurn
+      && !session.snapshot().messages.some(message => message.kind === 'user' && message.digest !== '创建续写任务')
       && (!resumedState || (resumedState.nextIteration === 1 && resumedState.ledger.delegationsUsed === 0
         && resumedState.ledger.outcomes.length === 0));
     // 换轮通告只在游标真的变了时追加：同一轮内的中断恢复不重复通告，否则模型会以为又开了一轮。
@@ -812,6 +815,22 @@ export class ContinuationAgentTurnPlanner_ACU {
           continue;
         }
 
+        if (action.kind === 'correct_materials') {
+          const receipt = await correctAgentMaterials_ACU({
+            action, chat, conversation: session.snapshot(),
+            isCurrent: () => !request.signal?.aborted && request.isInternalRequestCurrent(identitySeed),
+            completedStages: context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber),
+          });
+          context.moduleSnapshot = readAgentModuleSnapshot_ACU(chat);
+          context.settledThroughIndex = context.moduleSnapshot.settledThroughIndex;
+          snapshot = context.moduleSnapshot;
+          session.record([{ kind: 'tool', text: JSON.stringify(receipt), digest: '主会话纠正回执', turnKey: session.turnKey }]);
+          await session.flush();
+          logAgentSession_ACU({ kind: 'thought', title: '主会话纠正回执', detail: JSON.stringify(receipt), ok: receipt.status === 'committed' });
+          iteration += 1;
+          continue;
+        }
+
         if (action.kind === 'open_round') {
           const workflowEntry = logAgentSession_ACU({ kind: 'delegation', title: '固定工作流正在执行', detail: action.focus, status: 'running' });
           let workflow: ContinuationWorkflowResult_ACU;
@@ -856,11 +875,12 @@ export class ContinuationAgentTurnPlanner_ACU {
           const repeated = escalatedBatches.has(escalationKey);
           escalatedBatches.add(escalationKey);
           const guidance = repeated
-            ? '同一批问题已经按修缮方案定向重试过一次，仍未合格。不要再次 open_round；输出 block，向用户逐条说明缺口、已尝试的修缮和建议的处理方式。'
+            ? '同一批问题定向重试仍未合格，不要原样再次 open_round。已核实的字段错误可用 correct_materials 直接纠正；用户已明确选择跳过旧历史时，用 correct_materials 登记新追溯起点。只有纠正保存成功、实际范围或资料版本改变后再 open_round；没有可执行的纠正或仍需用户决定时输出 block。'
             : workflow.pendingFixes.length
               ? '资料维护未合格。你是和用户对话的主会话，要针对子代理反馈制定修缮方案，不要直接停下：先对照回执中每条 pending 的 module、violations 与 lastError 判断原因（缺栏、ID 不存在、修订号冲突、枚举或格式不合法、正文证据不足），再输出一次 open_round，在 focus 中逐条写明修缮方案——修哪条记录的哪一栏、依据哪一楼正文、不许做什么（例如已删除的条目不要重建）。结算代理会带着待修复清单定向修缮。缺口属于正文证据不足或需要用户裁决时不要硬修，改为 block 向用户说明缺口并给出建议。总纲与阶段大纲仍由 open_round 固定工作流维护，只有网页检索可按需 delegate web-researcher。'
               : '本轮工作流没有产出可交付的写作指令。先按回执判断原因：终审意见可以修正时，再输出一次 open_round，在 focus 中写明针对这些意见的修订方向；无法修正的硬冲突或需要用户决定的事项，用 block 向用户说明。总纲与阶段大纲仍由 open_round 固定工作流维护，只有网页检索可按需 delegate web-researcher。';
-          session.record([{ kind: 'tool', text: `${workflow.summary}\n${guidance}`, digest: '工作流升级主会话', turnKey: session.turnKey }]);
+          const correctionGuide = renderAgentCorrectionGuide_ACU(session.snapshot(), context.moduleSnapshot);
+          session.record([{ kind: 'tool', text: `${workflow.summary}\n${guidance}\n${correctionGuide}`, digest: '工作流升级主会话', turnKey: session.turnKey }]);
           await session.flush();
           iteration += 1;
           continue;
@@ -1264,7 +1284,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     const callOptions: ContinuationInternalAiCallOptions_ACU = {
       promptCacheEnabled: true,
       cacheScope: 'agent-main',
-      cacheTools: nativeMode ? ['read', 'search', ...AGENT_DECISION_TOOL_NAMES_ACU] : ['mode:json'],
+      cacheTools: nativeMode ? ['read', 'search', ...CONTINUATION_DECISION_TOOL_NAMES_ACU] : ['mode:json'],
       minOutputTokens: CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU.main,
       onUsage: usage => { callUsage = usage; },
       tools: nativeMode ? [...agentNativeTools_ACU(['read', 'search']), ...continuationDecisionTools_ACU()] : [],
@@ -1360,7 +1380,7 @@ export class ContinuationAgentTurnPlanner_ACU {
         let decisionCallId = '';
         if (nativeMode) {
           if (!nativeCalls.length) throw new Error('本次回复没有调用任何函数；核对资料请调用 read / search，做决定请调用 open_round / delegate / finalize / block 之一');
-          const split = splitNativeDecisionCalls_ACU(nativeToolArguments_ACU(nativeCalls), AGENT_DECISION_TOOL_NAMES_ACU);
+          const split = splitNativeDecisionCalls_ACU(nativeToolArguments_ACU(nativeCalls), CONTINUATION_DECISION_TOOL_NAMES_ACU);
           if (split.decision) {
             action = parseAgentMainAction_ACU(split.decision.payload, allowDelegate);
             decisionCallId = split.decision.call.id;
@@ -1510,7 +1530,8 @@ export class ContinuationAgentTurnPlanner_ACU {
       this.buildMainPromptResolvers_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig, toolMode, lifecycle),
       'agent_loop',
     );
-    const text = rendered.messages[0]?.content?.trim() ?? '';
+    const text = [rendered.messages[0]?.content?.trim() ?? '', renderAgentCorrectionGuide_ACU(session.snapshot(), context.moduleSnapshot)]
+      .filter(Boolean).join('\n\n');
     if (!text || text === lastRuntimeSnapshotText_ACU(session.snapshot())) return;
     session.record([{ kind: 'runtime', text, digest: '运行时快照', turnKey: session.turnKey }]);
     await session.flush();
@@ -1896,7 +1917,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       turnNumber: context.execution.turnNumber ?? 1,
       settledIndex: Math.max(0, chat.length - 1),
       settlementStartIndex: unsettled.startIndex,
-      canAdvanceSettlement: unsettled.hiddenCount === 0,
+      canAdvanceSettlement: unsettled.hiddenCount === 0 && !context.moduleSnapshot.settlementBoundary,
       completedStageNumbers: context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber),
       evidenceFloorIndexes: agentStoryEvidenceFloorIndexes_ACU(chat),
       runAgent: async call => {
@@ -2407,7 +2428,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     logAgentSession_ACU({
       kind: 'thought',
       title: `资料快照已写入楼层 ${targetIndex}`,
-      detail: `伏笔 ${active(snapshot.hooks)} 条 · 信息差 ${active(snapshot.infoGap)} 条 · 总纲 ${active(snapshot.storyArc)} 条 · 年代学 ${active(snapshot.chronology)} 条 · 百科 ${active(snapshot.webRefs)} 条 · 长期约束 ${snapshot.constraints.length} 条 · 结算水位 ${Math.max(snapshot.settledThroughIndex, 0)}。资料按最近基线折叠；该楼增量会随删除或 swipe 一起退出折叠。`,
+      detail: `伏笔 ${active(snapshot.hooks)} 条 · 信息差 ${active(snapshot.infoGap)} 条 · 总纲 ${active(snapshot.storyArc)} 条 · 年代学 ${active(snapshot.chronology)} 条 · 百科 ${active(snapshot.webRefs)} 条 · 长期约束 ${snapshot.constraints.length} 条 · 结算水位 ${Math.max(snapshot.settledThroughIndex, 0)}。${snapshot.settlementBoundary ? `追溯从楼层 ${snapshot.settlementBoundary.startIndex} 开始，此前历史未结算，跳过缺口 ${snapshot.settlementBoundary.skippedPendingFixes.length} 项。` : ''}资料按最近基线折叠；该楼增量会随删除或 swipe 一起退出折叠。`,
       ok: true,
     });
   }

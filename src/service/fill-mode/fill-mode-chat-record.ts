@@ -2,13 +2,14 @@
  * 对话级填表模式记录（读取侧）。
  *
  * 权威存储：当前聊天 scoped container 的 fillModeByIsolationKey[isolationKey]（独立字段）。
- * 已记录的对话按记录运行；未记录时回落全局偏好模式 formFillPreferencesGlobal.selectedMode（五角星）。
+ * 已记录的对话按记录运行；旧会话按表格/向量证据兼容识别，新对话回落全局偏好（五角星）。
  * 读取只做归一化，不回写；记录无法识别时保留原值，按偏好模式运行。
  */
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU, peekChatScopedConfigContainer_ACU } from '../../data/storage/chat-history';
 import { getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { getCurrentFlightModeState_ACU } from '../flight-mode/flight-mode-state';
+import { hasLegacyFillModeTableData_ACU, hasLegacyVectorHistoryForCurrentChat_ACU, hasSummaryVectorDataForCurrentChat_ACU } from './fill-mode-chat-evidence';
 import {
   isFillMode_ACU,
   readFillModePreferences_ACU,
@@ -17,17 +18,13 @@ import {
   type FillModePreferencesRead_ACU,
 } from './fill-mode-preferences';
 
-export const CHAT_FILL_MODE_FIELD_ACU = 'fillModeByIsolationKey';
-
-export interface ChatFillModeRecord_ACU {
-  mode: FillMode_ACU;
-  recordedAt: number;
-}
+import { CHAT_FILL_MODE_FIELD_ACU, type ChatFillModeRecord_ACU } from './fill-mode-chat-record-fields';
+export { CHAT_FILL_MODE_FIELD_ACU, stageChatFillModeRecord_ACU, type ChatFillModeRecord_ACU } from './fill-mode-chat-record-fields';
 
 /** no_chat：未打开对话；absent：尚未记录；invalid：记录无法识别。 */
 export type ChatFillModeRecordStatus_ACU = 'recorded' | 'absent' | 'invalid' | 'no_chat';
-/** chat：对话记录；preferred：沿用已保存的偏好；default：偏好也从未保存。 */
-export type ChatFillModeSource_ACU = 'chat' | 'preferred' | 'default';
+/** legacy：按旧会话数据识别；其余分别为对话记录、偏好和默认。 */
+export type ChatFillModeSource_ACU = 'chat' | 'legacy' | 'preferred' | 'default';
 
 export interface CurrentChatFillMode_ACU {
   mode: FillMode_ACU;
@@ -63,11 +60,19 @@ export function isClassicModeActiveForCurrentChat_ACU(): boolean {
 
 export function resolveCurrentChatFillMode_ACU(): CurrentChatFillMode_ACU {
   const preferences = readFillModePreferences_ACU();
-  if (isClassicModeActiveForCurrentChat_ACU()) {
-    return { mode: 'classic', source: 'chat', recordStatus: 'recorded', preferences };
-  }
   const slot = readRecordSlot_ACU();
+  if (isClassicModeActiveForCurrentChat_ACU()) {
+    return { mode: 'classic', source: 'chat', recordStatus: slot.status, preferences };
+  }
   if (slot.record) return { mode: slot.record.mode, source: 'chat', recordStatus: 'recorded', preferences };
+  if (slot.status === 'absent' && (hasLegacyFillModeTableData_ACU() || hasLegacyVectorHistoryForCurrentChat_ACU())) {
+    return {
+      mode: hasSummaryVectorDataForCurrentChat_ACU() ? 'crossfire' : 'llm',
+      source: 'legacy',
+      recordStatus: 'absent',
+      preferences,
+    };
+  }
   return {
     mode: preferences.preferences.selectedMode,
     source: preferences.source === 'default' ? 'default' : 'preferred',

@@ -489,6 +489,7 @@ export interface AgentModuleFloorDelta_ACU {
   revisions: Partial<AgentModuleRevisions_ACU>;
   pendingFixes?: AgentPendingFix_ACU[];
   materialCompletion?: AgentMaterialCompletionRecord_ACU;
+  settlementBoundary?: AgentSettlementBoundary_ACU;
   /** 本条显式推进的结算水位。省略表示不改水位。 */
   settledThroughIndex?: number;
   updatedAt: number;
@@ -524,6 +525,17 @@ export interface AgentModuleSnapshot_ACU {
   materialCompletion: AgentMaterialCompletionRecord_ACU;
   /** 最近一次容错提交没能入库的模块。旧快照缺该字段时读取为空数组。 */
   pendingFixes: AgentPendingFix_ACU[];
+  /** 用户明确选择的新追溯起点；不是旧历史已经结算的证明。 */
+  settlementBoundary?: AgentSettlementBoundary_ACU;
+}
+
+export interface AgentSettlementBoundary_ACU {
+  startIndex: number;
+  reason: string;
+  userMessageId: number;
+  updatedAt: number;
+  /** 退出主动追溯的历史缺口，保留原始失败记录供核对。 */
+  skippedPendingFixes: AgentPendingFix_ACU[];
 }
 
 export const AGENT_WRITABLE_MODULES_ACU = ['hooks', 'infoGap', 'constraints', 'storyArc', 'chronology', 'webRefs', 'userRequirements'] as const;
@@ -725,6 +737,17 @@ export interface AgentOpenRoundAction_ACU {
   dispatchWebResearcher: boolean;
 }
 
+export type AgentModuleWriterRole_ACU = AgentSubagentName_ACU | 'main';
+export interface AgentCorrectMaterialsAction_ACU {
+  kind: 'correct_materials';
+  thought: string;
+  reason: string;
+  sql?: string;
+  settlementStartIndex?: number;
+  /** 必须引用当前持久化会话中真实用户消息的 ID。 */
+  userMessageId?: number;
+}
+
 /**
  * 大纲句级编辑操作。运行时替模型收尾结构一致性（重算 suggestedTurns/totalTurns），
  * 模型只表达意图；已完成轮次与当前轮的保护由校验层强制。
@@ -754,7 +777,7 @@ export type AgentOutlineEditOp_ACU =
   | { op: 'remove_turn'; turnId: string }
   | { op: 'set_node_goal'; nodeId: string; goal: string };
 
-export type AgentMainAction_ACU = AgentFinalizeAction_ACU | AgentDelegateAction_ACU | AgentBlockAction_ACU | AgentToolsAction_ACU | AgentOpenRoundAction_ACU;
+export type AgentMainAction_ACU = AgentFinalizeAction_ACU | AgentDelegateAction_ACU | AgentBlockAction_ACU | AgentToolsAction_ACU | AgentOpenRoundAction_ACU | AgentCorrectMaterialsAction_ACU;
 
 /** instruction-composer 的产出。instruction 非空；constraints 走容错登记。 */
 export interface AgentComposerOutput_ACU {

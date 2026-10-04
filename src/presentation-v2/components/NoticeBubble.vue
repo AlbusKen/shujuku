@@ -101,22 +101,25 @@ const tone = computed(() => {
   return props.task?.kind || "info";
 });
 
+/** 错误始终显示真实内容，不受桌宠工作内容开关影响。 */
+const showRealContent = computed(() => props.showRealWork || tone.value === "error");
+
 const heading = computed(() => {
   const current = props.slide;
   if (!current) return "";
   if (current.type === "joke") return "你知道吗？";
-  if (props.showRealWork) {
+  if (showRealContent.value) {
     return current.type === "notice" ? current.notice.title : props.task?.feature || "";
   }
   return "";
 });
 
-/** 真实内容沿用现有通知/进度，不额外读取任务载荷；默认显示桌宠状态词。 */
+/** 真实内容沿用现有通知/进度；非错误提示默认显示桌宠状态词。 */
 const bodyText = computed(() => {
   const current = props.slide;
   if (!current) return "";
   if (current.type === "joke") return current.text;
-  if (props.showRealWork) {
+  if (showRealContent.value) {
     return current.type === "notice" ? current.notice.text : props.task?.detail || "";
   }
   if (current.type === "notice") return `正在${current.word}…`;
@@ -142,7 +145,7 @@ const actionButtons = computed(() => {
 /** 任务片只有可关闭任务才显示关闭；消息与笑话的关闭即跳到下一条。 */
 const closable = computed(() => props.slide?.type !== "task" || props.task?.dismissible === true);
 
-/** 通知片与任务片可点开查看真实内容；默认只显示「正在XXXX…」。 */
+/** 使用桌宠状态词的通知片与任务片可点开查看真实内容。 */
 const expanded = ref(false);
 const detailTitle = computed(() => {
   const current = props.slide;
@@ -156,7 +159,7 @@ const detailText = computed(() => {
   if (current?.type === "task") return props.task?.detail || "";
   return "";
 });
-const expandable = computed(() => !props.showRealWork && props.slide?.type !== "joke" && !!(detailText.value || detailTitle.value));
+const expandable = computed(() => !showRealContent.value && props.slide?.type !== "joke" && !!(detailText.value || detailTitle.value));
 
 function toggleDetail(): void {
   if (!expandable.value) return;

@@ -1,6 +1,8 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import {
   getChatScopedConfigContainer_ACU,
+  getActiveChatStorageIdentity_ACU,
+  peekChatScopedConfigContainer_ACU,
   normalizeChatScopedConfigContainer_ACU,
   setChatScopedConfigContainer_ACU,
 } from '../../data/storage/chat-history';
@@ -24,6 +26,9 @@ import {
   getCurrentFlightModeState_ACU,
   normalizeFlightModeState_ACU,
 } from './flight-mode-state';
+import { stageChatFillModeRecord_ACU } from '../fill-mode/fill-mode-chat-record-fields';
+import { notifyChatConfigurationChanged_ACU } from '../../shared/chat-configuration-change';
+import type { FillMode_ACU } from '../fill-mode/fill-mode-preferences';
 
 export type FlightModeTransitionResult_ACU = {
   ok: boolean;
@@ -37,6 +42,8 @@ export type FlightModeTransitionResult_ACU = {
 export interface DisableFlightModeOptions_ACU {
   /** 用户已明确确认：停用将按 archive 恢复模板，并覆盖启用后对该会话模板的修改。 */
   confirmTemplateScopeChange?: boolean;
+  /** 与经典状态同次保存的目标填表模式；直接停用默认回到 llm。 */
+  fillMode?: Exclude<FillMode_ACU, 'classic'>;
 }
 
 function cloneValue_ACU<T>(value: T): T {
@@ -141,7 +148,11 @@ function updateScopedContainer_ACU(mutate: (container: Record<string, any>) => v
   setChatScopedConfigContainer_ACU(chat, container);
 }
 
-async function persistFlightModeState_ACU(next: FlightModeState_ACU): Promise<void> {
+async function persistFlightModeState_ACU(next: FlightModeState_ACU, mode: FillMode_ACU = next.enabled ? 'classic' : 'llm'): Promise<void> {
+  const chat = getChatArray_ACU();
+  const identity = getActiveChatStorageIdentity_ACU(chat);
+  const previous = peekChatScopedConfigContainer_ACU(chat);
+  const snapshot = previous ? cloneValue_ACU(previous) : null;
   updateScopedContainer_ACU(container => {
     const isolationKey = String(getCurrentIsolationKey_ACU() ?? '');
     const states = container.flightModeByIsolationKey;
@@ -149,10 +160,17 @@ async function persistFlightModeState_ACU(next: FlightModeState_ACU): Promise<vo
       ...(isPlainObject_ACU(states) ? states : {}),
       [isolationKey]: normalizeFlightModeState_ACU(next),
     };
+    stageChatFillModeRecord_ACU(container, isolationKey, mode);
     setPendingEnableSlot_ACU(container, null);
   });
   // 严格保存：宿主不可用时必须报错，不能让模板与开关状态静默脱节。
-  await saveChatToHostStrict_ACU();
+  try {
+    await saveChatToHostStrict_ACU();
+  } catch (error) {
+    if (getActiveChatStorageIdentity_ACU(getChatArray_ACU()) === identity) setChatScopedConfigContainer_ACU(chat, snapshot);
+    throw error;
+  }
+  notifyChatConfigurationChanged_ACU('fill-mode');
 }
 
 async function clearPendingEnableBestEffort_ACU(): Promise<void> {
@@ -331,7 +349,7 @@ export async function disableFlightMode_ACU(options: DisableFlightModeOptions_AC
       enabledAt: 0,
       hiddenRowIds: [],
       bigSummarySheetKey: bigSummaryKey,
-    });
+    }, options.fillMode || 'llm');
   } catch (error: any) {
     return { ok: false, reason: 'state_persist_failed', error: `模板已恢复，但经典表格模式开关状态保存失败：${describeError_ACU(error)}` };
   }

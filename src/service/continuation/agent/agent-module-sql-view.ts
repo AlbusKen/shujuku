@@ -361,6 +361,7 @@ function loadSnapshot_ACU(engine: SqliteEngine, snapshot: AgentModuleSnapshot_AC
   engine.run(`INSERT INTO ${BASE_TABLE_ACU} (key, value) VALUES ('updatedAt', ?)`, [String(snapshot.updatedAt)]);
   engine.run(`INSERT INTO ${BASE_TABLE_ACU} (key, value) VALUES ('materialCompletion', ?)`, [JSON.stringify(snapshot.materialCompletion)]);
   engine.run(`INSERT INTO ${BASE_TABLE_ACU} (key, value) VALUES ('pendingFixes', ?)`, [JSON.stringify(snapshot.pendingFixes)]);
+  if (snapshot.settlementBoundary) engine.run(`INSERT INTO ${BASE_TABLE_ACU} (key, value) VALUES ('settlementBoundary', ?)`, [JSON.stringify(snapshot.settlementBoundary)]);
 }
 
 
@@ -673,6 +674,7 @@ function readSnapshot_ACU(engine: SqliteEngine): AgentModuleSnapshot_ACU {
     userRequirements: [],
     materialCompletion: JSON.parse(base.get('materialCompletion') ?? 'null'),
     pendingFixes: JSON.parse(base.get('pendingFixes') ?? '[]'),
+    ...(base.has('settlementBoundary') ? { settlementBoundary: JSON.parse(base.get('settlementBoundary')!) } : {}),
   } as unknown as AgentModuleSnapshot_ACU;
   for (const module of AGENT_WRITABLE_MODULES_ACU) {
     const rows = engine.query(`SELECT payload FROM ${moduleTable_ACU(module)} ORDER BY rowid`).values;

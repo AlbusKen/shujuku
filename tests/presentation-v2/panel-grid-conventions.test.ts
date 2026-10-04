@@ -13,6 +13,7 @@ const panelGridPages = [
   'FillModePage.vue',
   'FormFillPage.vue',
   'ImportPage.vue',
+  'PlotPage.vue',
   'WorldSimulationPage.vue',
 ];
 

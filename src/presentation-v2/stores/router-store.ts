@@ -33,8 +33,6 @@ const LEGACY_PAGE_ID_ALIASES: Record<string, string> = {
   'basic-config': ACU_V2_FORM_FILL_PAGE_ID,
   // 交火模式独立页已退役，全部参数并入填表工作台的交火模式分支。
   'vector-index': ACU_V2_FILL_MODE_PAGE_ID,
-  // 剧情推进独立页已退役，面板并入填表模式页的 LLM / 交火分支。
-  'plot': ACU_V2_FILL_MODE_PAGE_ID,
   // 填表规则已并入填表工作台。
   'table': ACU_V2_FORM_FILL_PAGE_ID,
   'sql-console': 'advanced-tools',

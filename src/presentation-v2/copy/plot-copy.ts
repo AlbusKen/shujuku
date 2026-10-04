@@ -1,4 +1,15 @@
 export const plotCopy = {
+  pageTitle: "剧情推进",
+  unsupported: (modeLabel: string) => `当前填表模式为「${modeLabel}」，不支持也不需要剧情推进。`,
+  nav: { settings: "剧情推进", preset: "剧情推进预设", worldbook: "剧情推进世界书" },
+  controls: {
+    title: "剧情推进",
+    description: "LLM模型逻辑召回模式与交火模式依赖剧情推进在正文生成前分析记忆。关闭后保留表格召回，不再执行剧情规划。",
+    enableLabel: "启用剧情推进",
+    enableHint: "关闭后不再在正文生成前额外调用 LLM；当前模式的其余召回行为不变。",
+    disguiseDisabledLabel: "解除发送伪装",
+    disguiseDisabledHint: "默认关闭。开启后原文停留在输入框等待剧情 AI 返回，再写入最终提示词；不显示临时用户楼层和思考楼层。最终发送仍受交接保护。",
+  },
   panels: {
     preset: {
       title: "剧情推进预设",

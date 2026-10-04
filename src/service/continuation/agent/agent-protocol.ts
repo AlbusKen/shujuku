@@ -35,6 +35,7 @@ import {
   type AgentMaintainerOutput_ACU,
   type AgentModuleDelta_ACU,
   type AgentSubagentName_ACU,
+  type AgentModuleWriterRole_ACU,
   type AgentWritableModule_ACU,
   type AgentPlannerOutput_ACU,
   type AgentReadFence_ACU,
@@ -600,6 +601,23 @@ export function parseAgentMainAction_ACU(payload: Record<string, unknown>, allow
       dispatchWebResearcher: payload.dispatchWebResearcher === true,
     };
   }
+  if (action === 'correct_materials') {
+    const allowed = ['action', 'thought', 'reason', 'sql', 'settlementStartIndex', 'userMessageId'];
+    if (Object.keys(payload).some(key => !allowed.includes(key))) failProtocol_ACU('correct_materials 含未声明的参数');
+    const reason = readText_ACU(payload.reason).trim();
+    const sql = readText_ACU(payload.sql).trim();
+    const start = payload.settlementStartIndex;
+    const user = payload.userMessageId;
+    if (!reason || (!sql && start === undefined)) failProtocol_ACU('correct_materials 必须提供 reason 与 sql 或 settlementStartIndex');
+    if (payload.sql !== undefined && (typeof payload.sql !== 'string' || !sql)) failProtocol_ACU('sql 必须是非空字符串');
+    if (start !== undefined && (typeof start !== 'number' || !Number.isInteger(start) || start < 0)) failProtocol_ACU('settlementStartIndex 必须是非负整数');
+    if (start !== undefined && (typeof user !== 'number' || !Number.isInteger(user) || user < 1)) failProtocol_ACU('改变追溯起点必须引用真实用户消息 userMessageId');
+    if (start === undefined && user !== undefined) failProtocol_ACU('userMessageId 只能随 settlementStartIndex 提供');
+    return { kind: 'correct_materials', thought, reason,
+      ...(sql ? { sql } : {}),
+      ...(start !== undefined ? { settlementStartIndex: start as number, userMessageId: user as number } : {}),
+    };
+  }
   if (action === 'finalize') {
     const instruction = readText_ACU(payload.instruction);
     if (!instruction) failProtocol_ACU('finalize 动作必须提供非空 instruction');
@@ -621,7 +639,7 @@ export function parseAgentMainAction_ACU(payload: Record<string, unknown>, allow
   if (action === 'read' || action === 'search') {
     return { kind: 'tools', thought, calls: [parseAgentToolCall_ACU(payload)] };
   }
-  failProtocol_ACU(`action 必须是 read / search / delegate / open_round / finalize / block 之一；总纲与阶段大纲由 open_round 固定工作流维护，实际收到：${action || '(空)'}`);
+  failProtocol_ACU(`action 必须是 read / search / delegate / open_round / correct_materials / finalize / block 之一；总纲与阶段大纲由 open_round 固定工作流维护，实际收到：${action || '(空)'}`);
 }
 
 export function parseAgentComposerOutput_ACU(payload: Record<string, unknown>): AgentComposerOutput_ACU {
@@ -1161,14 +1179,15 @@ const FIELD_SQL_COLUMNS_ACU: Readonly<Record<string, Readonly<Record<string, str
   web_refs: { name: 'title', brief: 'brief', tags: 'tags', detail: 'summary', page_ref: 'pageRef' },
 };
 
-const FIELD_SQL_ROLE_TABLES_ACU: Readonly<Partial<Record<AgentSubagentName_ACU, readonly string[]>>> = {
+const FIELD_SQL_ROLE_TABLES_ACU: Readonly<Partial<Record<AgentModuleWriterRole_ACU, readonly string[]>>> = {
+  main: ['hooks', 'info_gap', 'chronology', 'story_arc'],
   'arc-architect': ['story_arc'],
   'hook-cognition-maintainer': ['hooks', 'info_gap', 'chronology', 'constraint_proposals'],
   'web-researcher': ['web_refs'],
 };
 
 /** 一次性解析语法；语句/栏目错误归入拒绝清单，合法栏保留供提交入口独立领域校验。 */
-export function parseAgentModuleSqlFieldWrites_ACU(sql: string, role: AgentSubagentName_ACU): AgentModuleSqlFieldParseResult_ACU {
+export function parseAgentModuleSqlFieldWrites_ACU(sql: string, role: AgentModuleWriterRole_ACU): AgentModuleSqlFieldParseResult_ACU {
   const parsed = parseRestrictedSqlDmlTolerant_ACU(sql);
   if (!parsed.statements.length && !parsed.rejected.length) failProtocol_ACU('受限 SQL 不允许空写集');
   const allowed = FIELD_SQL_ROLE_TABLES_ACU[role] ?? [];

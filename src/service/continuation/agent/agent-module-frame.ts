@@ -168,6 +168,7 @@ function semanticPayload_ACU(snapshot: AgentModuleSnapshot_ACU): string {
     userRequirements: snapshot.userRequirements,
     materialCompletion: snapshot.materialCompletion,
     pendingFixes: snapshot.pendingFixes,
+    ...(snapshot.settlementBoundary ? { settlementBoundary: snapshot.settlementBoundary } : {}),
   });
 }
 
@@ -198,6 +199,7 @@ function parseDelta_ACU(raw: unknown, deps: AgentModuleFrameDeps_ACU): AgentModu
     ...(raw.pendingFixes === undefined ? {} : { pendingFixes: raw.pendingFixes as AgentPendingFix_ACU[] }),
     ...(raw.materialCompletion === undefined ? {} : { materialCompletion: raw.materialCompletion as AgentModuleFloorDelta_ACU['materialCompletion'] }),
     ...(raw.settledThroughIndex === undefined ? {} : { settledThroughIndex: raw.settledThroughIndex as number }),
+    ...(raw.settlementBoundary === undefined ? {} : { settlementBoundary: raw.settlementBoundary as AgentModuleFloorDelta_ACU['settlementBoundary'] }),
     updatedAt: typeof raw.updatedAt === 'number' && raw.updatedAt >= 0 ? raw.updatedAt : 0,
   });
   if (!deps.validateSnapshot(applied)) return null;
@@ -212,6 +214,7 @@ function parseDelta_ACU(raw: unknown, deps: AgentModuleFrameDeps_ACU): AgentModu
   if (isRecord_ACU(raw.removedIds)) delta.removedIds = cloneJson_ACU(raw.removedIds) as AgentModuleFloorDelta_ACU['removedIds'];
   if (Array.isArray(raw.pendingFixes)) delta.pendingFixes = cloneJson_ACU(applied.pendingFixes);
   if (isRecord_ACU(raw.materialCompletion)) delta.materialCompletion = cloneJson_ACU(applied.materialCompletion);
+  if (applied.settlementBoundary) delta.settlementBoundary = cloneJson_ACU(applied.settlementBoundary);
   if (typeof raw.settledThroughIndex === 'number' && Number.isInteger(raw.settledThroughIndex) && raw.settledThroughIndex >= 0) {
     delta.settledThroughIndex = raw.settledThroughIndex;
   }
@@ -301,6 +304,7 @@ function applyDelta_ACU(snapshot: AgentModuleSnapshot_ACU, delta: AgentModuleFlo
   next.revisions = { ...next.revisions, ...delta.revisions };
   if (delta.pendingFixes) next.pendingFixes = cloneJson_ACU(delta.pendingFixes);
   if (delta.materialCompletion) next.materialCompletion = cloneJson_ACU(delta.materialCompletion);
+  if (delta.settlementBoundary) next.settlementBoundary = cloneJson_ACU(delta.settlementBoundary);
   if (typeof delta.settledThroughIndex === 'number') next.settledThroughIndex = delta.settledThroughIndex;
   next.updatedAt = delta.updatedAt;
   return next;
@@ -350,6 +354,10 @@ function diffSnapshot_ACU(before: AgentModuleSnapshot_ACU, after: AgentModuleSna
   }
   if (JSON.stringify(before.materialCompletion) !== JSON.stringify(after.materialCompletion)) {
     delta.materialCompletion = cloneJson_ACU(after.materialCompletion);
+    changed = true;
+  }
+  if (JSON.stringify(before.settlementBoundary) !== JSON.stringify(after.settlementBoundary) && after.settlementBoundary) {
+    delta.settlementBoundary = cloneJson_ACU(after.settlementBoundary);
     changed = true;
   }
   if (before.settledThroughIndex !== after.settledThroughIndex) {
@@ -778,7 +786,7 @@ export function planAgentModuleSnapshotWrite_ACU(
 export function planAgentModuleCommitDelta_ACU(
   chat: unknown[],
   targetIndex: number,
-  changes: Pick<AgentModuleFloorDelta_ACU, 'writes' | 'revisions' | 'fieldUpserts' | 'removedIds'>,
+  changes: Pick<AgentModuleFloorDelta_ACU, 'writes' | 'revisions' | 'fieldUpserts' | 'removedIds' | 'pendingFixes' | 'materialCompletion' | 'settlementBoundary'>,
   deps: AgentModuleFrameDeps_ACU,
   _tableAnchorIndex: number | null,
   updatedAt: number,
@@ -798,6 +806,9 @@ export function planAgentModuleCommitDelta_ACU(
   };
   if (changes.removedIds) delta.removedIds = cloneJson_ACU(changes.removedIds);
   if (changes.fieldUpserts) delta.fieldUpserts = cloneJson_ACU(changes.fieldUpserts);
+  if (changes.pendingFixes) delta.pendingFixes = cloneJson_ACU(changes.pendingFixes);
+  if (changes.materialCompletion) delta.materialCompletion = cloneJson_ACU(changes.materialCompletion);
+  if (changes.settlementBoundary) delta.settlementBoundary = cloneJson_ACU(changes.settlementBoundary);
   if (!hasSchema3Checkpoint_ACU(scratch.slice(0, targetIndex + 1), deps)) {
     // 把旧全量帧转换为当前目标楼基线；旧楼层若在表格锚点之后，提前安放基线会被旧帧覆盖。
     const message = scratch[targetIndex];

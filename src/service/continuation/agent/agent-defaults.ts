@@ -1421,14 +1421,43 @@ export function withV44IdAutofill_ACU(role: keyof ContinuationAgentPrompts_ACU, 
     : { ...segment }));
 }
 
-/** 当前默认组：V43 之上让子代理新行 INSERT 省略 id，由运行时自动编号。 */
-export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+/** V44 冻结入口：新行 INSERT 省略 id，由运行时自动编号。 */
+export function buildV44ContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
   const prompts = buildV43ContinuationAgentPrompts_ACU();
   const next = { ...prompts };
   for (const role of Object.keys(prompts) as Array<keyof ContinuationAgentPrompts_ACU>) {
     next[role] = withV44IdAutofill_ACU(role, prompts[role]);
   }
   return next;
+}
+
+const V45_MAIN_CORRECTION_RULE_ACU = '【主会话纠正】资料维护升级后，我可以用 correct_materials 直接提交有正文证据的最小 SQL 修正，不必把同一错误反复交回子代理。sql 只允许 hooks、info_gap、chronology、story_arc；已有条目带 id 与当前 expected_revision，缺栏只补缺失栏目，只有 committed 回执证明保存。用户明确要求不追溯旧历史、从指定楼层开始时，我给 settlementStartIndex（包含该 AI 楼层）、最新真实用户消息 userMessageId 和 reason，先登记追溯边界再 open_round。此前历史保留为未结算和跳过记录，不冒充成功；不能仅因容量失败自行跳过。范围和资料未改变时，不原样重发失败工作流；没有可执行修正或确需用户决定时才 block。';
+
+function v45MainContent_ACU(content: string): string {
+  let next = swapLiteral_ACU(content, '伏笔账本与信息差只有结算代理能写，我自己读过正文不等于已结算。', '日常结算归结算代理；升级后主会话可用 correct_materials 纠正资料。我自己读过正文不等于已结算。');
+  next = swapLiteral_ACU(next, 'open_round|delegate|finalize|block', 'open_round|correct_materials|delegate|finalize|block');
+  next = next.replace(/不直接改资料模块（[^）]*）/g, '不绕过校验改资料模块（常规维护按角色执行，主会话纠正使用 correct_materials）');
+  next = swapLiteral_ACU(next, '不自己去动这两样。', '常规维护不自己去动这两样；有证据的资料纠错使用 correct_materials。');
+  if (content.startsWith('【子代理使用规则】')) next += `\n${V45_MAIN_CORRECTION_RULE_ACU}`;
+  if (content.startsWith('【文本协议规范】')) next += '\n\naction = correct_materials：主会话纠正资料。reason 必填，sql 与 settlementStartIndex 至少给一项；改起点须同时给最新真实用户消息 userMessageId，起点是已出现的 AI 楼层号且包含该楼。sql 使用受限 INSERT/UPDATE/DELETE；不能改用户要求或水位。收到保存回执后再决定补栏或 open_round。';
+  return next;
+}
+
+let v45PristineMain_ACU: ContinuationPromptSegment_ACU[] | null = null;
+
+/** 仅迁移消息身份与完整正文仍匹配 V44 默认的主会话段；保留自定义、追加和开关。 */
+export function withV45MainCorrection_ACU(role: keyof ContinuationAgentPrompts_ACU, segments: readonly ContinuationPromptSegment_ACU[]): ContinuationPromptSegment_ACU[] {
+  if (role !== 'main') return segments.map(segment => ({ ...segment }));
+  if (!v45PristineMain_ACU) v45PristineMain_ACU = buildV44ContinuationAgentPrompts_ACU().main;
+  return segments.map(segment => v45PristineMain_ACU!.some(previous => previous.role === segment.role && previous.content === segment.content)
+    ? { ...segment, content: v45MainContent_ACU(segment.content) }
+    : { ...segment });
+}
+
+/** 当前默认：主会话具备受校验的资料纠正及用户指定追溯起点能力。 */
+export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+  const prompts = buildV44ContinuationAgentPrompts_ACU();
+  return { ...prompts, main: withV45MainCorrection_ACU('main', prompts.main) };
 }
 
 

@@ -4,9 +4,9 @@
  * 旧交火全局开关 summaryVectorIndexModeGlobal 不再被覆写，只作为从未保存偏好时的旧默认方案输入。
  */
 import { logWarn_ACU } from '../../shared/utils';
-import { currentJsonTableData_ACU } from '../runtime/state-manager';
+export { hasExistingTableDataForCurrentChat_ACU } from './fill-mode-chat-evidence';
+import { hasExistingTableDataForCurrentChat_ACU } from './fill-mode-chat-evidence';
 import { getCurrentFlightModeState_ACU } from '../flight-mode/flight-mode-state';
-import { isLegacyCrossfireEnabled_ACU } from './fill-mode-preferences';
 import { resolveCurrentChatFillMode_ACU, withFillMode_ACU } from './fill-mode-chat-record';
 import {
   resolveFillPlan_ACU,
@@ -15,21 +15,13 @@ import {
   type VectorPipelinePlan_ACU,
 } from './fill-mode-resolver';
 
-/**
- * 当前聊天是否已有用户表格数据。运行时表格尚未加载（null）属于“状态未知”，
- * 按已有数据处理：宁可沿用旧方案，也不把旧对话误判为新对话去改写模板。
- */
-export function hasExistingTableDataForCurrentChat_ACU(tableData: any = currentJsonTableData_ACU): boolean {
-  if (!tableData || typeof tableData !== 'object') return true;
-  return Object.entries(tableData).some(([key, sheet]: [string, any]) =>
-    key.startsWith('sheet_') && Array.isArray(sheet?.content) && sheet.content.length > 1);
-}
-
 export function buildFillRuntimeContext_ACU(): FillRuntimeContext_ACU {
+  const current = resolveCurrentChatFillMode_ACU();
   return {
     flightModeActive: getCurrentFlightModeState_ACU().enabled === true,
     hasExistingTableData: hasExistingTableDataForCurrentChat_ACU(),
-    legacyCrossfireEnabled: isLegacyCrossfireEnabled_ACU(),
+    legacyCrossfireEnabled: current.mode === 'crossfire',
+    modeRecordStatus: current.recordStatus,
   };
 }
 
@@ -85,16 +77,12 @@ export function isPlotSuppressedByFillModeForCurrentChat_ACU(): boolean {
 export function isVectorPipelineEnabledForCurrentChat_ACU(): boolean {
   const current = resolveCurrentChatFillMode_ACU();
   const preferences = withFillMode_ACU(current.preferences.preferences, current.mode);
-  // 从未保存过填表模式：完全沿用旧交火开关，不读取运行时状态，保证升级前后行为一致。
-  if (current.source === 'default') return isLegacyCrossfireEnabled_ACU();
   if (preferences.selectedMode === 'vector' || preferences.selectedMode === 'crossfire') return true;
   if (preferences.selectedMode === 'llm') return false;
-  const legacy = isLegacyCrossfireEnabled_ACU();
-  if (!legacy) return false;
   try {
     return resolveFillPlan_ACU(preferences, buildFillRuntimeContext_ACU()).vectorPipeline !== null;
   } catch (error) {
-    logWarn_ACU('[填表模式] 运行时门控推导失败，回退旧交火开关:', error);
-    return legacy;
+    logWarn_ACU('[填表模式] 运行时门控推导失败，未启用向量管线:', error);
+    return false;
   }
 }

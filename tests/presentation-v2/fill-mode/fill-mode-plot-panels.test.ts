@@ -1,5 +1,5 @@
 /**
- * FillModePage 剧情推进面板集成 — LLM模型逻辑召回模式下的剧情推进面板
+ * PlotPage 剧情推进面板集成 — LLM模型逻辑召回模式下的独立剧情推进页
  *
  * @vitest-environment jsdom
  */
@@ -47,7 +47,7 @@ async function mountPlotPage(opts: {
   vi.resetModules();
   document.body.innerHTML = '';
   document.head.innerHTML = '';
-  const persisted: any = { uiTierV2: { tier: 'high' }, router: { activePageId: 'fill-mode' } };
+  const persisted: any = { uiTierV2: { tier: 'high' }, router: { activePageId: 'plot' } };
   if (opts.devOptions) persisted.devOptions = opts.devOptions;
   localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
 
@@ -120,7 +120,7 @@ describe('PlotPage', () => {
   it('渲染主区头部与状态行，header 不再放启用 toggle', async () => {
     const { mount, settings } = await mountPlotPage();
 
-    const page = document.querySelector('.acu-v2-fill-mode-page');
+    const page = document.querySelector('.acu-v2-plot-page');
     expect(page).not.toBeNull();
     const text = page!.textContent || '';
     expect(text).toContain('剧情推进');
@@ -186,7 +186,7 @@ describe('PlotPage', () => {
   it('开发者选项开启时，在编辑抽屉渲染"匹配替换"字段（含 5 个数字字段）', async () => {
     const { mount } = await mountPlotPage({ devOptions: { plotAdvanced: true } });
 
-    expect(document.querySelector('.acu-v2-fill-mode-page')!.textContent || '').not.toContain('匹配替换（进阶）');
+    expect(document.querySelector('.acu-v2-plot-page')!.textContent || '').not.toContain('匹配替换（进阶）');
 
     const editButton = Array.from(document.querySelectorAll('button'))
       .find(b => b.getAttribute('title') === '编辑当前预设') as HTMLButtonElement | undefined;
@@ -352,7 +352,7 @@ describe('PlotPage', () => {
 
   it('每个 AcuPanel 都附常驻说明信息条（D22.5）', async () => {
     const { mount } = await mountPlotPage();
-    const panels = document.querySelectorAll('.acu-v2-fill-mode-page .acu-panel');
+    const panels = document.querySelectorAll('.acu-v2-plot-page .acu-panel');
     expect(panels.length).toBeGreaterThanOrEqual(2);
     panels.forEach(panel => {
       expect(panel.querySelector('.acu-panel__description-region .acu-info-banner')).not.toBeNull();
@@ -363,7 +363,7 @@ describe('PlotPage', () => {
   it('剧情推进 API 预设下拉默认空选项 = "跟随当前活动"，并列出 apiStore 预设', async () => {
     const { mount } = await mountPlotPage();
 
-    const panel = Array.from(document.querySelectorAll('.acu-v2-fill-mode-page .acu-panel'))
+    const panel = Array.from(document.querySelectorAll('.acu-v2-plot-page .acu-panel'))
       .find(p => (p.textContent || '').includes('剧情推进 API 预设'));
     expect(panel).not.toBeUndefined();
     const acuSelect = panel!.querySelector('.acu-select') as HTMLElement | null;
@@ -400,13 +400,13 @@ describe('PlotPage', () => {
   it('剧情推进预设下拉直接使用 AcuPresetDropdown，显示任务数并支持切换与星标', async () => {
     const { mount, settings } = await mountPlotPage();
 
-    const trigger = document.querySelector('#fill-mode-plot-panel .acu-preset-dd__trigger') as HTMLButtonElement | null;
+    const trigger = document.querySelector('#plot-preset-panel .acu-preset-dd__trigger') as HTMLButtonElement | null;
     expect(trigger).not.toBeNull();
     expect(trigger!.textContent).toContain('记忆召回');
 
     trigger!.click();
     await Promise.resolve();
-    const items = Array.from(document.querySelectorAll('#fill-mode-plot-panel .acu-preset-dd__item')) as HTMLElement[];
+    const items = Array.from(document.querySelectorAll('#plot-preset-panel .acu-preset-dd__item')) as HTMLElement[];
     const defaultItem = items.find(item => item.textContent?.includes('默认预设'));
     expect(defaultItem).not.toBeUndefined();
     expect(defaultItem!.textContent).toContain('1 个任务');
@@ -419,7 +419,7 @@ describe('PlotPage', () => {
 
     trigger!.click();
     await Promise.resolve();
-    const stars = Array.from(document.querySelectorAll('#fill-mode-plot-panel .acu-preset-dd__star')) as HTMLButtonElement[];
+    const stars = Array.from(document.querySelectorAll('#plot-preset-panel .acu-preset-dd__star')) as HTMLButtonElement[];
     stars.find(star => star.closest('.acu-preset-dd__item')?.textContent?.includes('低速推进'))!.click();
     await Promise.resolve();
     expect(settings.plotSettings.lastUsedPresetName).toBe('低速推进');
@@ -430,12 +430,12 @@ describe('PlotPage', () => {
   it('剧情推进预设下拉支持选择默认预设，并可将默认预设设为全局默认', async () => {
     const { mount, settings } = await mountPlotPage();
 
-    const trigger = document.querySelector('#fill-mode-plot-panel .acu-preset-dd__trigger') as HTMLButtonElement | null;
+    const trigger = document.querySelector('#plot-preset-panel .acu-preset-dd__trigger') as HTMLButtonElement | null;
     expect(trigger).not.toBeNull();
 
     trigger!.click();
     await Promise.resolve();
-    const defaultItem = Array.from(document.querySelectorAll('#fill-mode-plot-panel .acu-preset-dd__item'))
+    const defaultItem = Array.from(document.querySelectorAll('#plot-preset-panel .acu-preset-dd__item'))
       .find(item => item.textContent?.includes('默认预设')) as HTMLElement | undefined;
     expect(defaultItem).not.toBeUndefined();
     defaultItem!.click();
@@ -446,7 +446,7 @@ describe('PlotPage', () => {
 
     trigger!.click();
     await Promise.resolve();
-    const defaultStar = Array.from(document.querySelectorAll('#fill-mode-plot-panel .acu-preset-dd__star'))
+    const defaultStar = Array.from(document.querySelectorAll('#plot-preset-panel .acu-preset-dd__star'))
       .find(star => star.closest('.acu-preset-dd__item')?.textContent?.includes('默认预设')) as HTMLButtonElement | undefined;
     expect(defaultStar).not.toBeUndefined();
     defaultStar!.click();
@@ -522,7 +522,7 @@ describe('PlotPage', () => {
   it('面板导入按钮会导入为预设并切换当前聊天使用', async () => {
     const { mount, settings } = await mountPlotPage();
 
-    const input = document.querySelector('.acu-v2-fill-mode-page .acu-file-button__input') as HTMLInputElement | null;
+    const input = document.querySelector('.acu-v2-plot-page .acu-file-button__input') as HTMLInputElement | null;
     expect(input).not.toBeNull();
     const file = new File([
       JSON.stringify([
