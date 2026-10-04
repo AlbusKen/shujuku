@@ -11,7 +11,6 @@
     "build:extension": "node scripts/run-rollup.mjs extension",
     "build:all": "node scripts/run-rollup.mjs all && node scripts/fix-generated-whitespace.mjs && node scripts/sync-userscript-json.mjs dist/index.bundle.js",
     "sync:json": "node scripts/sync-userscript-json.mjs",
-    "publish:extension": "bash scripts/publish-extension.sh",
     "verify": "bash scripts/verify-build.sh",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

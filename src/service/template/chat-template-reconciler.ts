@@ -753,10 +753,10 @@ function reconcileMatchedSheet_ACU(before: Sheet_ACU, template: Sheet_ACU, sheet
     if (source.physical !== target.physical) mappings.push({ fromPhysicalName: source.physical, toPhysicalName: target.physical });
   }
 
-  // 同一稳定 Sheet key 下，physical column 才是持久化数据身份；表头只是可变显示名。
-  // 不同 key 的导入模板仍禁止依赖 physical 同名推断，以免把无关字段重新解释为旧数据。
+  // 已匹配为同一张表时，physical column 是列身份；表头只是可变显示名。
+  // 模板作者 key 不影响列继承，匹配仍保持一对一，持久化沿用旧聊天表的 key。
   // native 无独立于表头的物理身份（physical=表头），canonical 匹配已覆盖，跳过。
-  if (sqlite && sheetKey === templateSheetKey) {
+  if (sqlite) {
     for (const target of targetEntries) {
       if (matchedTargetCanonical.has(target.canonical)) continue;
       const source = beforeByPhysical.get(target.physical.toLowerCase());
@@ -902,7 +902,7 @@ function reconcileMatchedSheet_ACU(before: Sheet_ACU, template: Sheet_ACU, sheet
   let retainedHiddenPhysicalNames: string[];
   if (sqlite) {
     const retainedHiddenColumns = hiddenEntries.map(entry => beforeColumns[entry.index]);
-    // 列身份由 canonical 显示名决定，物理列名一旦确立就不再随模板 DDL 文本变动。
+    // 列经显示名、physical 或显式别名匹配后，沿用既有物理列名，不随模板 DDL 文本变动。
     // 若采用模板的物理名，同一显示名会在切模板时被改名（如 last_round_time → prev_scene_time），
     // 而历史 log 里的 SQL 仍按旧物理名书写，回放时必然撞 "has no column named ..."。
     const effectiveTargetColumns = targetColumns.map((column, index) => {
