@@ -73,9 +73,11 @@ import {
 import { agentNativeTools_ACU } from '../../../src/service/ai/native-tool';
 import { getAgentSubagentAccessProfile_ACU } from '../../../src/service/continuation/agent/agent-catalog';
 import { worldSimulationAgentNativeTools_ACU } from '../../../src/service/simulation/agent/agent-catalog';
+import { isMainApiChatCompletionAvailable_ACU, sendMainApiChatCompletionRequest_ACU } from '../../../src/data/gateways/ai-gateway';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(isMainApiChatCompletionAvailable_ACU).mockReturnValue(false);
   mockSettings.apiMode = 'custom';
   mockSettings.apiConfig = { url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test', max_tokens: 4096 };
   mockSettings.tavernProfile = 'default';
@@ -950,6 +952,37 @@ describe('callApiWithPlotPreset_ACU 温度透传', () => {
     await expect(callApiWithPlotPreset_ACU([{ role: 'user', content: '你好' }], 'ghost')).rejects.toBeInstanceOf(ApiPresetUnresolvedError_ACU);
     expect(mockFetch).not.toHaveBeenCalled();
     expect(mockGenerateRaw).not.toHaveBeenCalled();
+  });
+});
+
+describe('剧情 API 传输路由', () => {
+  it.each([
+    ['custom', false, false, 'custom'],
+    ['custom', false, true, 'custom'],
+    ['custom', true, false, 'generate-raw'],
+    ['custom', true, true, 'main-chat-completion'],
+    ['tavern', false, false, 'generate-raw'],
+    ['tavern', false, true, 'main-chat-completion'],
+    ['tavern', true, false, 'generate-raw'],
+    ['tavern', true, true, 'main-chat-completion'],
+  ])('模式=%s useMainApi=%s CC可用=%s 实际发送=%s', async (apiMode, useMainApi, ccAvailable, expected) => {
+    mockSettings.apiMode = apiMode;
+    mockSettings.apiConfig.useMainApi = useMainApi;
+    vi.mocked(isMainApiChatCompletionAvailable_ACU).mockReturnValue(ccAvailable as boolean);
+    mockGenerateRaw.mockResolvedValue('路由正文');
+    vi.mocked(sendMainApiChatCompletionRequest_ACU).mockResolvedValue({ choices: [{ message: { content: '路由正文' } }] });
+    mockFetch.mockResolvedValue({ ok: true });
+    mockHandleApiResponse.mockResolvedValue('路由正文');
+    const messages = [{ role: 'user', content: '输入' }];
+    for (const call of [() => callApiWithPlotPreset_ACU(messages, ''), () => callApi_ACU(messages, {})]) {
+      mockGenerateRaw.mockClear();
+      vi.mocked(sendMainApiChatCompletionRequest_ACU).mockClear();
+      mockFetch.mockClear();
+      expect(await call()).toBe('路由正文');
+      expect(mockGenerateRaw).toHaveBeenCalledTimes(expected === 'generate-raw' ? 1 : 0);
+      expect(sendMainApiChatCompletionRequest_ACU).toHaveBeenCalledTimes(expected === 'main-chat-completion' ? 1 : 0);
+      expect(mockFetch).toHaveBeenCalledTimes(expected === 'custom' ? 1 : 0);
+    }
   });
 });
 

@@ -14,6 +14,7 @@ import { isTauriTavernHost_ACU } from '../../shared/host-detect';
 import { supportsExplicitOpenAiCacheKey_ACU } from './prompt-cache';
 import { resolveRequestMaxTokens_ACU } from './request-max-tokens';
 import { resolveApiConfigByPreset_ACU, normalizeCustomApiFormat_ACU, normalizePromptPostProcessing_ACU, type ApiPresetApiConfig_ACU, type ApiPresetApiMode_ACU } from '../settings/api-preset-service';
+import { resolvePlotApiTransport_ACU } from './plot-api-route';
 
 type CustomIncludeBodyRootType_ACU = 'empty' | 'mapping' | 'sequence' | 'scalar' | 'invalid';
 
@@ -361,8 +362,9 @@ export async function callApiWithPlotPreset_ACU(messages: any[], presetName: str
     logDebug_ACU(`[剧情推进] 任务级API调用，预设: ${effectivePresetName || '当前配置'}, 模式: ${effectiveApiMode}`);
 
 
-    if (effectiveApiMode === 'tavern' || effectiveApiConfig.useMainApi) {
-      if (isMainApiChatCompletionAvailable_ACU()) {
+    const transport = resolvePlotApiTransport_ACU(effectiveApiMode, effectiveApiConfig);
+    if (transport !== 'custom') {
+      if (transport === 'main-chat-completion') {
         // Chat Completion 主连接直发生成端点，避开 generateRaw 经过的第三方脚本 fetch 包装。
         return await callMainApiChatCompletionText_ACU(messages, abortSignal);
       }
@@ -418,9 +420,10 @@ export async function callApi_ACU(messages: any[], apiSettings: any, abortSignal
 
     logDebug_ACU(`[剧情推进] 使用API预设: ${settings_ACU.plotApiPreset || '当前配置'}, 模式: ${effectiveApiMode}`);
 
-    if (effectiveApiMode === 'tavern' || effectiveApiConfig.useMainApi) {
+    const transport = resolvePlotApiTransport_ACU(effectiveApiMode, effectiveApiConfig);
+    if (transport !== 'custom') {
       // 使用主API或酒馆预设（流式传输）
-      if (isMainApiChatCompletionAvailable_ACU()) {
+      if (transport === 'main-chat-completion') {
         // Chat Completion 主连接直发生成端点，避开 generateRaw 经过的第三方脚本 fetch 包装。
         return await callMainApiChatCompletionText_ACU(messages, abortSignal);
       }

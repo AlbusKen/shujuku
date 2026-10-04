@@ -1,4 +1,4 @@
-import { isMainApiChatCompletionAvailable_ACU } from '../../../data/gateways/ai-gateway';
+import { resolvePlotApiTransport_ACU } from '../../ai/plot-api-route';
 
 /**
  * service/runtime/plot-runtime/plot-task-engine.ts
@@ -112,16 +112,19 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
     return String(settings_ACU.plotApiPreset || '').trim();
   }
 
-  export function willPlotUseMainApiGenerateRaw_ACU(taskApiPreset: string = '') {
+  export function willPlotUseMainApiGenerateRaw_ACU(taskApiPreset: string = ''): boolean {
     try {
       const effectivePreset = String(taskApiPreset || '').trim() || String(settings_ACU.plotApiPreset || '').trim();
       const apiPresetConfig: any = getApiConfigByPreset_ACU(effectivePreset) || {};
+      if (effectivePreset && apiPresetConfig.resolved === false) return false;
       const effectiveApiMode = apiPresetConfig.apiMode ?? settings_ACU.apiMode;
       const effectiveApiConfig = apiPresetConfig.apiConfig || settings_ACU.apiConfig || {};
       // Chat Completion 主连接直发生成端点，不触发宿主 GENERATION_ENDED，不能登记忽略计数。
-      return effectiveApiMode !== 'tavern' && !!effectiveApiConfig.useMainApi && !isMainApiChatCompletionAvailable_ACU();
-    } catch (e) {
-      return settings_ACU.apiMode !== 'tavern' && !!settings_ACU.useMainApi;
+      return resolvePlotApiTransport_ACU(effectiveApiMode, effectiveApiConfig) === 'generate-raw';
+    } catch (error) {
+      // 实际入口同样会拒绝解析失败，不能凭全局配置登记不存在的生成。
+      logWarn_ACU('[剧情推进] API 路由预判失败，不登记宿主结束事件忽略计数。');
+      return false;
     }
   }
 

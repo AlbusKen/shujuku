@@ -24,6 +24,8 @@ const m = vi.hoisted(() => ({
   orchestrate: vi.fn(),
   strategy1: vi.fn(), strategy2: vi.fn(), shouldProcessPlot: vi.fn(),
   flushPlot: vi.fn(), saveChat: vi.fn(),
+  ensureSeed: vi.fn(), processingPlot: false,
+  hostEmit: vi.fn(),
   getInput: vi.fn(), setInput: vi.fn(), protectInput: vi.fn(),
   beginDisguise: vi.fn(), releaseDisguise: vi.fn(), discardDisguise: vi.fn(), setNotice: vi.fn(),
   markIntercept: vi.fn(), skipIntercept: vi.fn(), stopGeneration: vi.fn(),
@@ -55,10 +57,10 @@ vi.mock('../../../src/shared/host-api', () => ({ SillyTavern_API_ACU: m.api, jQu
 vi.mock('../../../src/shared/env', () => ({ topLevelWindow_ACU: { AutoCardUpdaterAPI: { _notifyTableUpdate: m.notify } } }));
 vi.mock('../../../src/presentation/theme/toast', () => ({ showToastr_ACU: vi.fn() }));
 vi.mock('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect', () => ({ attemptToLoadCoreApis_ACU: vi.fn(() => true), handleNewMessageDebounced_ACU: (...args: any[]) => m.handleNewMessage(...args) }));
-vi.mock('../../../src/service/runtime/helpers-remaining', () => ({ ensureInitialSeedCheckpoint_ACU: vi.fn(), handleChatCompletionReady_ACU: vi.fn(), loadPresetAndCleanCharacterData_ACU: m.loadPreset }));
+vi.mock('../../../src/service/runtime/helpers-remaining', () => ({ ensureInitialSeedCheckpoint_ACU: m.ensureSeed, handleChatCompletionReady_ACU: vi.fn(), loadPresetAndCleanCharacterData_ACU: m.loadPreset }));
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   chatMutationDebounceTimer_ACU: null, _set_chatMutationDebounceTimer_ACU: m.setChatMutationTimer, _set_wasStoppedByUser_ACU: vi.fn(), generationGate_ACU: m.gate,
-  get currentChatFileIdentifier_ACU() { return m.currentChatKey; }, currentJsonTableData_ACU: null, getCurrentIsolationKey_ACU: () => 'test-isolation', discardLatestGenerationContext_ACU: vi.fn(), markUserSendIntent_ACU: vi.fn(), isProcessing_Plot_ACU: false, isQuietLikeGeneration_ACU: (...args: any[]) => m.isQuiet(...args), isRecentUserSendIntent_ACU: vi.fn(), loopState_ACU: { isLooping: false }, recordGenerationContext_ACU: (...args: any[]) => m.recordGeneration(...args), recordLastUserSend_ACU: vi.fn(), settings_ACU: m.settings, consumeGenerationContextForEnded_ACU: () => m.consumeGeneration(), shouldProcessAutoTableUpdateForGenerationEnded_ACU: (...args: any[]) => m.autoUpdate(...args), shouldProcessPlotForGeneration_ACU: (...args: any[]) => m.shouldProcessPlot(...args), shouldProcessSummaryVectorIndexForGeneration_ACU: (...args: any[]) => m.shouldProcessSummary(...args),
+  get currentChatFileIdentifier_ACU() { return m.currentChatKey; }, currentJsonTableData_ACU: null, getCurrentIsolationKey_ACU: () => 'test-isolation', discardLatestGenerationContext_ACU: vi.fn(), markUserSendIntent_ACU: vi.fn(), get isProcessing_Plot_ACU() { return m.processingPlot; }, isQuietLikeGeneration_ACU: (...args: any[]) => m.isQuiet(...args), isRecentUserSendIntent_ACU: vi.fn(), loopState_ACU: { isLooping: false }, recordGenerationContext_ACU: (...args: any[]) => m.recordGeneration(...args), recordLastUserSend_ACU: vi.fn(), settings_ACU: m.settings, consumeGenerationContextForEnded_ACU: () => m.consumeGeneration(), shouldProcessAutoTableUpdateForGenerationEnded_ACU: (...args: any[]) => m.autoUpdate(...args), shouldProcessPlotForGeneration_ACU: (...args: any[]) => m.shouldProcessPlot(...args), shouldProcessSummaryVectorIndexForGeneration_ACU: (...args: any[]) => m.shouldProcessSummary(...args),
   _set_allChatMessages_ACU: m.setMessages, _set_currentChatFileIdentifier_ACU: (value: string) => { m.currentChatKey = value; m.setChat(value); }, _set_currentJsonTableData_ACU: m.setData, _set_independentTableStates_ACU: m.setTables, _set_isProcessing_Plot_ACU: vi.fn(), _set_lastTotalAiMessages_ACU: m.setTotal,
 }));
 vi.mock('../../../src/service/settings/settings-service', () => ({ applyTemplateScopeForCurrentChat_ACU: vi.fn(), loadSettings_ACU: vi.fn() }));
@@ -118,6 +120,13 @@ beforeAll(async () => {
   vi.spyOn(globalThis, 'setInterval').mockImplementation(() => 0 as any);
   // T5：TavernHelper.generate 钩子测试需要宿主 API 在 mainInitialize 前就绪，钩子才会被安装。
   (window as any).TavernHelper = { generate: vi.fn(async (...args: any[]) => ({ handled: true, args })) };
+  // 与宿主一致：原派发器吞掉监听器异常，阻断必须由外层派发返回边界完成。
+  m.hostEmit.mockImplementation(async (event: string, ...args: any[]) => {
+    if (event === 'after_commands') {
+      try { await m.afterCommands!(args[0], args[1], args[2]); } catch { /* 宿主吞监听器异常 */ }
+    }
+  });
+  m.api.eventSource.emit = m.hostEmit;
   m.api.eventSource.on.mockImplementation((event: string, callback: any) => {
     if (event === 'chat') m.chatChanged = callback;
     if (event === 'deleted' || event === 'swiped') m.chatMutationHandler = callback;
@@ -146,6 +155,9 @@ afterEach(() => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  m.processingPlot = false;
+  m.ensureSeed.mockResolvedValue(false);
+  m.isQuiet.mockReturnValue(false);
   delete m.settings.worldSimulationPageEnabled;
   delete m.settings.plotSendDisguiseDisabled;
   m.api.chat = [];
@@ -496,7 +508,7 @@ describe('mainInitialize_ACU TavernHelper.generate 钩子 T5 降级', () => {
     await m.afterCommands!('normal', {}, false);
     expect(m.saveChat).toHaveBeenCalledOnce();
     expect(savedChat[1].mes).toBe('已有层规划正文');
-    expect(m.api.eventSource.emit).toHaveBeenCalledWith('message_updated', 1);
+    expect(m.hostEmit).toHaveBeenCalledWith('message_updated', 1);
     expect(m.beginDisguise).toHaveBeenCalledTimes(1);
     expect(m.strategy2).toHaveBeenCalledTimes(1);
 
@@ -534,7 +546,7 @@ describe('mainInitialize_ACU TavernHelper.generate 钩子 T5 降级', () => {
     expect(m.input).toBe('无需规划原文');
     expect(skipParams.prompt).toBeUndefined();
 
-    // 失败/忙碌/中止都必须调用真实取消函数，不能仅设置内部标记放行原文。
+    // 失败与中止调用真实取消函数，不能仅设置内部标记放行原文。
     for (const action of ['failed', 'aborted']) {
       m.input = '失败轮原文';
       m.strategy2.mockResolvedValueOnce({ action });
@@ -588,7 +600,7 @@ describe('mainInitialize_ACU TavernHelper.generate 钩子 T5 降级', () => {
     // TavernHelper 只有成功写回最终提示词才调用原始 generate。
     const hostGenerate = (window as any).original_TavernHelper_generate_ACU;
     const hostCalls = hostGenerate.mock.calls.length;
-    for (const action of ['failed', 'skipped', 'loop_retry', 'aborted']) {
+    for (const action of ['failed', 'skipped', 'loop_retry', 'aborted', 'busy']) {
       m.orchestrate.mockResolvedValueOnce({ action });
       await (window as any).TavernHelper.generate({ user_input: '不能透传的原文' });
       expect(hostGenerate).toHaveBeenCalledTimes(hostCalls);
@@ -628,6 +640,7 @@ describe('发送交接生命周期', () => {
     pendingUi.innerHTML = '<div id="chat"></div><div id="message_template"><div class="mes"><span class="name_text"></span><div class="avatar"><img></div><div class="mes_text"></div></div></div>';
     document.body.appendChild(pendingUi);
     const wrap = (nodes: HTMLElement[]): any => ({
+      ...nodes,
       0: nodes[0], length: nodes.length,
       first: () => wrap(nodes.slice(0, 1)),
       last: () => wrap(nodes.slice(-1)),
@@ -669,10 +682,8 @@ describe('发送交接生命周期', () => {
     expect(document.querySelector('.acu-plot-pending-mes')).toBeNull();
     const sendClick = new MouseEvent('click', { bubbles: true, cancelable: true });
     expect(document.querySelector('#send_but')!.dispatchEvent(sendClick)).toBe(true);
-    pendingUi.remove();
-    m.jquery.mockReturnValue(collection);
     m.beginDisguise.mockClear();
-    m.settings.plotSendDisguiseDisabled = true;
+    m.beginDisguise.mockImplementation(pendingDisguise.beginPlotPendingDisguise_ACU);
     m.shouldProcessSummary.mockReturnValue(true);
     m.shouldProcessPlot.mockReturnValue(true);
     m.api.chat = [{ is_user: true, mes: '最终提示词' }];
@@ -694,14 +705,32 @@ describe('发送交接生命周期', () => {
     const params: any = {};
     const pending = m.afterCommands!('normal', params, false);
     await recallStarted;
-    expect(element.value).toBe('本轮原文');
-    expect(m.beginDisguise).not.toHaveBeenCalled();
+    expect(element.value).toBe('');
+    expect(document.querySelectorAll('.acu-plot-pending-mes')).toHaveLength(2);
+    m.isQuiet.mockImplementation((type: unknown) => type === 'quiet');
+    m.generationStarted!('quiet', {}, false);
+    m.generationEnded!(undefined);
+    expect(document.querySelectorAll('.acu-plot-pending-mes')).toHaveLength(2);
+    await expect(m.api.eventSource.emit('after_commands', 'normal', {}, false)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(m.processBeforeGen).toHaveBeenCalledTimes(2); // 仅召回与本轮召回。
+    expect(m.stopGeneration).not.toHaveBeenCalled();
     recallDone({ success: true });
     await planningStarted;
     expect(m.strategy2).toHaveBeenCalledWith('本轮原文', expect.any(Function));
-    expect(element.value).toBe('本轮原文');
+    expect(element.value).toBe('');
+    m.gate.activeGenerations = [];
+    m.generationEnded!(undefined); // 未知归属的结束事件也不能撤销规划等待。
+    expect(document.querySelectorAll('.acu-plot-pending-mes')).toHaveLength(2);
+    element.value = '等待期间的新草稿';
     planningDone({ action: 'planned', finalMessage: '最终提示词' });
     await pending;
+    expect(element.value).toBe('最终提示词');
+    expect(document.querySelector('.acu-plot-pending-mes')).toBeNull();
+    // 交接后、宿主消费前的无关结束事件不能清空最终正文。
+    m.generationEnded!(undefined);
+    expect(element.value).toBe('最终提示词');
+    await expect(m.api.eventSource.emit('after_commands', 'normal', {}, false)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(m.stopGeneration).not.toHaveBeenCalled();
     expect(element.value).toBe('最终提示词');
     expect(element.readOnly).toBe(false);
     expect(Object.prototype.hasOwnProperty.call(element, 'value')).toBe(false);
@@ -749,6 +778,11 @@ describe('发送交接生命周期', () => {
     expect(savedChat[0]).toEqual({ is_user: true, mes: '最终提示词' });
     expect(savedChat[1]).toMatchObject({ is_user: true, mes: generationText, qrf_plot: pendingPlot.content, qrf_plot_tasks: pendingPlot.taskResults });
     expect(m.stopGeneration).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(element.value).toBe('等待期间的新草稿');
+    pendingUi.remove();
+    m.jquery.mockReturnValue(collection);
+    m.settings.plotSendDisguiseDisabled = true;
     element.value = '下一轮草稿';
     expect(element.value).toBe('下一轮草稿');
     m.shouldProcessSummary.mockReturnValue(false);
@@ -797,4 +831,175 @@ describe('发送交接生命周期', () => {
       expect(params.prompt).toBeUndefined();
     }
   });
+
+  it.each([false, true])('前置 checkpoint 等待时拒绝双入站且不触发全局停止（STOPPED=%s）', async (emitsStopped) => {
+    vi.useFakeTimers();
+    m.shouldProcessPlot.mockReturnValue(true);
+    m.input = '首轮输入';
+    m.stopGeneration.mockImplementation(() => { if (emitsStopped) m.generationStopped!(); });
+    let finishSeed!: (value: boolean) => void;
+    let signalSeed!: () => void;
+    const seedStarted = new Promise<void>(resolve => { signalSeed = resolve; });
+    m.ensureSeed.mockImplementationOnce(() => {
+      signalSeed();
+      return new Promise(resolve => { finishSeed = resolve; });
+    });
+    m.strategy2.mockResolvedValueOnce({ action: 'planned', finalMessage: '首轮提示词' });
+    const params: any = {};
+    const first = m.afterCommands!('normal', params, false);
+    await expect(m.api.eventSource.emit('after_commands', 'normal', {}, false)).rejects.toMatchObject({ name: 'AbortError' });
+    await seedStarted;
+    expect(m.ensureSeed).toHaveBeenCalledOnce();
+    expect(m.beginDisguise).not.toHaveBeenCalled();
+    expect(m.setInput).not.toHaveBeenCalled();
+    expect(m.input).toBe('首轮输入');
+    expect(m.stopGeneration).not.toHaveBeenCalled();
+    finishSeed(false);
+    await first;
+    expect(m.strategy2).toHaveBeenCalledOnce();
+    expect(params.prompt).toBe('首轮提示词');
+    expect(m.input).toBe('首轮提示词');
+    expect(m.stopGeneration).not.toHaveBeenCalled();
+    m.api.chat.push({ is_user: true, mes: m.input });
+    m.input = '';
+    await m.messageSent!(0);
+    m.stopGeneration.mockReset();
+  });
+
+  it.each(['stopped', 'chat_changed'])('失效旧回调不释放新一轮发送归属（%s）', async (scenario) => {
+    vi.useFakeTimers();
+    m.shouldProcessPlot.mockReturnValue(true);
+    const finishes: Array<(value: any) => void> = [];
+    m.strategy2.mockImplementation(() => new Promise(resolve => { finishes.push(resolve); }));
+    m.input = '旧轮输入';
+    const oldParams: any = {};
+    const old = m.afterCommands!('normal', oldParams, false);
+    await vi.waitFor(() => expect(finishes).toHaveLength(1));
+    if (scenario === 'stopped') m.generationStopped!();
+    else { m.api.chat = []; await m.chatChanged!(''); }
+    m.input = '新轮输入';
+    const newParams: any = {};
+    const current = m.afterCommands!('normal', newParams, false);
+    await vi.waitFor(() => expect(finishes).toHaveLength(2));
+    finishes[0]({ action: 'planned', finalMessage: '旧轮迟到结果' });
+    await old;
+    expect(oldParams.prompt).toBeUndefined();
+    await expect(m.api.eventSource.emit('after_commands', 'normal', {}, false)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(m.strategy2).toHaveBeenCalledTimes(2);
+    finishes[1]({ action: 'planned', finalMessage: '新轮提示词' });
+    await current;
+    expect(newParams.prompt).toBe('新轮提示词');
+    expect(m.input).toBe('新轮提示词');
+    expect(m.stopGeneration).not.toHaveBeenCalled();
+  });
+
+  it('入口已忙时，吞异常的宿主派发也不能消费另一轮输入', async () => {
+    m.shouldProcessPlot.mockReturnValue(true);
+    m.processingPlot = true;
+    m.input = '有效请求的正文';
+    const consume = vi.fn(() => { m.api.chat.push({ is_user: true, mes: m.getInput() }); });
+    const hostSend = async () => {
+    await m.api.eventSource.emit('after_commands', 'normal', {}, false);
+      consume();
+    };
+    await expect(hostSend()).rejects.toMatchObject({ name: 'AbortError' });
+    expect(consume).not.toHaveBeenCalled();
+    expect(m.api.chat).toEqual([]);
+    expect(m.input).toBe('有效请求的正文');
+    expect(m.ensureSeed).not.toHaveBeenCalled();
+    expect(m.setInput).not.toHaveBeenCalled();
+    expect(m.stopGeneration).not.toHaveBeenCalled();
+    expect(m.processingPlot).toBe(true);
+  });
+
+  it('召回期间其他入口开始规划时，只拒绝本轮消费', async () => {
+    m.shouldProcessPlot.mockReturnValue(true);
+    m.shouldProcessSummary.mockReturnValue(true);
+    m.settings.plotSendDisguiseDisabled = true;
+    m.input = '本轮输入';
+    let finish!: (value: any) => void;
+    let started!: () => void;
+    const recallStarted = new Promise<void>(resolve => { started = resolve; });
+    m.processBeforeGen.mockImplementationOnce(() => {
+      started();
+      return new Promise(resolve => { finish = resolve; });
+    });
+    const consume = vi.fn();
+    const hostSend = (async () => {
+      await m.api.eventSource.emit('after_commands', 'normal', {}, false);
+      consume(m.getInput());
+    })();
+    const rejected = expect(hostSend).rejects.toMatchObject({ name: 'AbortError' });
+    await recallStarted;
+    m.processingPlot = true;
+    m.input = '其他请求的草稿';
+    finish({ success: true });
+    await rejected;
+    expect(consume).not.toHaveBeenCalled();
+    expect(m.strategy1).not.toHaveBeenCalled();
+    expect(m.strategy2).not.toHaveBeenCalled();
+    expect(m.input).toBe('其他请求的草稿');
+    expect(m.setInput).not.toHaveBeenCalled();
+    expect(m.stopGeneration).not.toHaveBeenCalled();
+    expect(m.processingPlot).toBe(true);
+  });
+
+  it.each(['existing', 'pending'])('编排返回 busy 时不走全局取消（%s）', async (path) => {
+    m.shouldProcessPlot.mockReturnValue(true);
+    m.settings.plotSendDisguiseDisabled = true;
+    const layer = { is_user: true, mes: '已有用户正文' };
+    m.api.chat = [layer];
+    m.input = path === 'pending' ? '待发送输入' : '';
+    const busy = () => { m.input = '其他请求的草稿'; return Promise.resolve({ action: 'busy' }); };
+    if (path === 'existing') m.strategy1.mockImplementationOnce(busy);
+    else m.strategy2.mockImplementationOnce(busy);
+    const consume = vi.fn();
+    const params: any = {};
+    await expect((async () => {
+      await m.api.eventSource.emit('after_commands', 'normal', params, false);
+      consume(m.getInput());
+    })()).rejects.toMatchObject({ name: 'AbortError' });
+    expect(consume).not.toHaveBeenCalled();
+    expect(layer.mes).toBe('已有用户正文');
+    expect(m.input).toBe('其他请求的草稿');
+    expect(params.prompt).toBeUndefined();
+    expect(m.stopGeneration).not.toHaveBeenCalled();
+    expect(m.setInput).not.toHaveBeenCalled();
+    expect(m.releaseDisguise).not.toHaveBeenCalled();
+    expect(m.saveChat).not.toHaveBeenCalled();
+  });
+
+  it('未确认交接超时清理拦截且不恢复待发送正文或新草稿', async () => {
+    vi.useFakeTimers();
+    const element = document.querySelector<HTMLTextAreaElement>('#send_textarea')!;
+    m.jquery.mockReturnValue({ 0: element, length: 1 });
+    expect(handoffPlotPendingSend_ACU('待发送正文', '等待草稿')).toBe(true);
+    expect(document.querySelector('#send_but')!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))).toBe(false);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(m.input).toBe('待发送正文');
+    expect(m.stopGeneration).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(m.input).toBe('');
+    expect(m.stopGeneration).toHaveBeenCalledOnce();
+    expect(document.querySelector('#send_but')!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(m.input).toBe('');
+  });
+
+  it('已清理的旧交接计时器不影响新交接及用户新草稿', async () => {
+    vi.useFakeTimers();
+    expect(handoffPlotPendingSend_ACU('旧轮正文', '旧草稿')).toBe(true);
+    await vi.advanceTimersByTimeAsync(30_000);
+    disposePlotPendingHandoff_ACU(false);
+    expect(handoffPlotPendingSend_ACU('新轮正文', '新草稿')).toBe(true);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(m.input).toBe('新轮正文');
+    expect(m.stopGeneration).not.toHaveBeenCalled();
+    m.input = '用户后来输入的草稿';
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(m.input).toBe('用户后来输入的草稿');
+    expect(m.stopGeneration).toHaveBeenCalledOnce();
+  });
+
+
 });

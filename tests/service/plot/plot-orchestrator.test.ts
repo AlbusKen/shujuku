@@ -264,7 +264,7 @@ describe('orchestrateAfterCommandsStrategy2_ACU', () => {
     const result = await orchestrateAfterCommandsStrategy2_ACU('', vi.fn());
     expect(result.action).toBe('skip');
   });
-  it('真实 UI 保留跳过原因，仅无需规划透传，忙碌和未知跳过仍停止', async () => {
+  it('真实 UI 保留跳过原因：无需规划透传，忙碌独立拒绝，未知跳过仍失败', async () => {
     for (const reason of ['disabled', 'fill_mode_vector', 'retrying']) {
       mockRunOptimization.mockResolvedValue({ success: false, skipped: true, reason });
       expect(await runOptimizationLogicWithUI_ACU('继续')).toEqual({ skipped: true, reason });
@@ -275,7 +275,17 @@ describe('orchestrateAfterCommandsStrategy2_ACU', () => {
       expect(await orchestrateAfterCommandsStrategy2_ACU('继续', runOptimizationLogicWithUI_ACU))
         .toEqual({ action: 'skip' });
     }
-    for (const reason of ['inflight', undefined]) {
+    mockRunOptimization.mockResolvedValue({ success: false, skipped: true, reason: 'inflight' });
+    for (const call of [
+      () => orchestrateAfterCommandsStrategy1_ACU({ is_user: true, mes: '继续' }, 0, runOptimizationLogicWithUI_ACU),
+      () => orchestrateAfterCommandsStrategy2_ACU('继续', runOptimizationLogicWithUI_ACU),
+      () => orchestrateTavernHelperHook_ACU({ user_input: '继续' }, runOptimizationLogicWithUI_ACU),
+    ]) {
+      mockSetIsProcessing.mockClear();
+      expect(await call()).toEqual({ action: 'busy' });
+      expect(mockSetIsProcessing).not.toHaveBeenCalledWith(false);
+    }
+    for (const reason of [undefined]) {
       mockRunOptimization.mockResolvedValue({ success: false, skipped: true, reason });
       expect(await orchestrateAfterCommandsStrategy2_ACU('继续', runOptimizationLogicWithUI_ACU))
         .toEqual({ action: 'failed' });

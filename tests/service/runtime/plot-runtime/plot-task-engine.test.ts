@@ -152,6 +152,12 @@ const {
   };
 });
 
+const mockMainChatCompletionAvailable = vi.hoisted(() => vi.fn(() => false));
+vi.mock('../../../../src/data/gateways/ai-gateway', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../../src/data/gateways/ai-gateway')>(),
+  isMainApiChatCompletionAvailable_ACU: mockMainChatCompletionAvailable,
+}));
+
 vi.mock('../../../../src/shared/defaults-json.js', () => ({
   DEFAULT_PLOT_SETTINGS_ACU: {
     loopSettings: { maxRetries: 3 },
@@ -350,6 +356,7 @@ import {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockMainChatCompletionAvailable.mockReturnValue(false);
 
   mockSettings.plotApiPreset = '';
   mockSettings.apiMode = 'custom';
@@ -488,32 +495,33 @@ beforeEach(() => {
 });
 
 describe('willPlotUseMainApiGenerateRaw_ACU', () => {
-  it('预设为非 tavern 且 useMainApi=true 时返回 true', () => {
-    mockGetApiConfigByPreset.mockReturnValue({
-      apiMode: 'custom',
-      apiConfig: { useMainApi: true },
-    });
-
-    expect(willPlotUseMainApiGenerateRaw_ACU()).toBe(true);
+  it.each([
+    ['custom', false, false, false],
+    ['custom', false, true, false],
+    ['custom', true, false, true],
+    ['custom', true, true, false],
+    ['tavern', false, false, true],
+    ['tavern', false, true, false],
+    ['tavern', true, false, true],
+    ['tavern', true, true, false],
+  ])('模式=%s useMainApi=%s CC可用=%s 时 generateRaw 预判=%s', (apiMode, useMainApi, ccAvailable, expected) => {
+    mockMainChatCompletionAvailable.mockReturnValue(ccAvailable as boolean);
+    mockGetApiConfigByPreset.mockReturnValue({ apiMode, apiConfig: { useMainApi } });
+    expect(willPlotUseMainApiGenerateRaw_ACU()).toBe(expected);
   });
 
-  it('预设为 tavern 模式时返回 false', () => {
-    mockGetApiConfigByPreset.mockReturnValue({
-      apiMode: 'tavern',
-      apiConfig: { useMainApi: true },
-    });
-
-    expect(willPlotUseMainApiGenerateRaw_ACU()).toBe(false);
-  });
-
-  it('读取预设失败时回退到全局设置', () => {
+  it('读取预设失败时不登记不存在的宿主生成', () => {
     mockSettings.apiMode = 'custom';
-    (mockSettings as any).useMainApi = true;
+    mockSettings.apiConfig = { useMainApi: true };
     mockGetApiConfigByPreset.mockImplementation(() => {
       throw new Error('preset broken');
     });
+    expect(willPlotUseMainApiGenerateRaw_ACU()).toBe(false);
+  });
 
-    expect(willPlotUseMainApiGenerateRaw_ACU()).toBe(true);
+  it('悬挂任务预设不会按回退渠道登记计数', () => {
+    mockGetApiConfigByPreset.mockReturnValue({ apiMode: 'tavern', apiConfig: {}, resolved: false });
+    expect(willPlotUseMainApiGenerateRaw_ACU('ghost')).toBe(false);
   });
 });
 

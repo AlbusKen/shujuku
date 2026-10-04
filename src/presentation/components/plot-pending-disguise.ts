@@ -93,6 +93,11 @@ interface PendingHandoff_ACU {
 let pendingHandoff_ACU: PendingHandoff_ACU | null = null;
 const normalizePrompt_ACU = (text: unknown): string => String(text ?? '').replace(/\r\n?/g, '\n').trim();
 
+/** 发送前处理结束后，未确认的交接仍占有发送框，不能开始下一轮。 */
+export function hasPlotPendingSend_ACU(): boolean {
+  return activeDisguise_ACU !== null || pendingHandoff_ACU !== null;
+}
+
 /** 写回提取出的发送正文；仅保留本轮入楼确认与草稿恢复状态，不改变宿主发送流程。 */
 export function handoffPlotPendingSend_ACU(text: string, draft = ''): boolean {
   if (pendingHandoff_ACU || !text.trim()) return false;
@@ -328,7 +333,7 @@ export function beginPlotPendingDisguise_ACU(
   options: { notice?: PendingDisguiseNotice_ACU } = {},
 ): PlotPendingDisguiseHandle_ACU | null {
   const jq = jQuery_API_ACU;
-  if (activeDisguise_ACU || !jq || !String(originalText || '').trim()) return null;
+  if (hasPlotPendingSend_ACU() || !jq || !String(originalText || '').trim()) return null;
 
   let currentNotice: PendingDisguiseNotice_ACU = options.notice || PLOT_PENDING_NOTICE_ACU;
   let $nodes: JQuery<HTMLElement> | null = null;

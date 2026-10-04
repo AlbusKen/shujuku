@@ -134,13 +134,17 @@ function isPlanningNotRequired_ACU(result: Awaited<ReturnType<PlanningFn>>): boo
         && (result.reason === 'disabled' || result.reason === 'fill_mode_vector' || result.reason === 'retrying');
 }
 
+/** 未取得规划所有权的调用只拒绝自身，不得走有效请求的失败取消。 */
+function isPlanningBusy_ACU(result: Awaited<ReturnType<PlanningFn>>): boolean {
+    return !!result && typeof result === 'object' && result.skipped === true && result.reason === 'inflight';
+}
 
 /**
  * TavernHelper hook 编排结果
  */
 export interface TavernHelperHookResult {
     /** 'passthrough' = 不处理直接透传, 'planned' = 规划成功, 'aborted' = 用户中止, 'skipped' = 跳过, 'loop_retry' = 需要循环重试 */
-    action: 'passthrough' | 'planned' | 'aborted' | 'skipped' | 'loop_retry' | 'failed';
+    action: 'passthrough' | 'planned' | 'aborted' | 'skipped' | 'loop_retry' | 'failed' | 'busy';
     /** 规划后的最终消息（action='planned' 时有值） */
     finalMessage?: string;
     /** 写回目标 */
@@ -151,8 +155,8 @@ export interface TavernHelperHookResult {
  * GENERATION_AFTER_COMMANDS 策略1编排结果
  */
 export interface Strategy1Result {
-    /** 'no_match' = 不匹配策略1, 'passthrough' = 无需规划, 'skipped' = 忙碌/未知跳过，其余为规划结果 */
-    action: 'no_match' | 'passthrough' | 'planned' | 'aborted' | 'skipped' | 'loop_retry' | 'failed';
+    /** 'no_match' = 不匹配策略1, 'passthrough' = 无需规划, 'busy' = 未取得所有权, 'skipped' = 未知跳过 */
+    action: 'no_match' | 'passthrough' | 'planned' | 'aborted' | 'skipped' | 'loop_retry' | 'failed' | 'busy';
     /** 规划后的最终消息 */
     finalMessage?: string;
     /** 是否是手动中止（需要停止生成、删除消息、恢复输入框） */
@@ -170,7 +174,7 @@ export interface Strategy1Result {
  */
 export interface Strategy2Result {
     /** 'skip' = 不处理, 'planned' = 规划成功, 'aborted' = 用户中止 */
-    action: 'skip' | 'planned' | 'aborted' | 'failed';
+    action: 'skip' | 'planned' | 'aborted' | 'failed' | 'busy';
     /** 规划后的最终消息 */
     finalMessage?: string;
     /** 是否是手动中止 */
@@ -195,7 +199,7 @@ export async function orchestrateTavernHelperHook_ACU(
     if (isProcessing_Plot_ACU && settings_ACU.plotSettings.enabled
         && !isFlightModeActive_ACU() && !isPlotSuppressedByFillModeForCurrentChat_ACU()
         && !loopState_ACU.isRetrying && !options.should_stream) {
-        return { action: 'skipped' };
+        return { action: 'busy' };
     }
     if (!shouldProcessTavernHelperHook_ACU(options)) {
         return { action: 'passthrough' };
@@ -209,6 +213,7 @@ export async function orchestrateTavernHelperHook_ACU(
 
     // 4. 调用规划
     _set_isProcessing_Plot_ACU(true);
+    let planningBusy = false;
     try {
         const finalMessage = await runPlanning(userMessage, {
             originalUserInput: userMessage,
@@ -217,6 +222,10 @@ export async function orchestrateTavernHelperHook_ACU(
 
         // 5. 处理跳过
         if (finalMessage && (finalMessage as any).skipped) {
+            if (isPlanningBusy_ACU(finalMessage)) {
+                planningBusy = true;
+                return { action: 'busy' };
+            }
             if (isPlanningNotRequired_ACU(finalMessage)) return { action: 'passthrough' };
             logDebug_ACU('[剧情推进] Planning skipped in TavernHelper.generate hook (duplicate).');
             return { action: 'skipped' };
@@ -246,7 +255,7 @@ export async function orchestrateTavernHelperHook_ACU(
         logError_ACU('[剧情推进] Error in TavernHelper.generate hook orchestration:', error);
         return { action: 'failed' };
     } finally {
-        _set_isProcessing_Plot_ACU(false);
+        if (!planningBusy) _set_isProcessing_Plot_ACU(false);
     }
 }
 
@@ -265,6 +274,7 @@ export async function orchestrateAfterCommandsStrategy1_ACU(
     lastMessageIndex: number,
     runPlanning: PlanningFn
 ): Promise<Strategy1Result> {
+    if (isProcessing_Plot_ACU) return { action: 'busy' };
     // 1. 准备策略1上下文
     const context = prepareStrategy1Context_ACU(lastMessage);
     if (!context) {
@@ -282,6 +292,7 @@ export async function orchestrateAfterCommandsStrategy1_ACU(
 
     // 3. 调用规划
     _set_isProcessing_Plot_ACU(true);
+    let planningBusy = false;
     try {
         const finalMessage = await runPlanning(messageToProcess, {
             originalUserInput: messageToProcess,
@@ -290,6 +301,10 @@ export async function orchestrateAfterCommandsStrategy1_ACU(
 
         // 4. 处理跳过
         if (finalMessage && (finalMessage as any).skipped) {
+            if (isPlanningBusy_ACU(finalMessage)) {
+                planningBusy = true;
+                return { action: 'busy' };
+            }
             if (isPlanningNotRequired_ACU(finalMessage)) return { action: 'passthrough' };
             logDebug_ACU('[剧情推进] Planning skipped in Strategy 1 (duplicate).');
             return { action: 'skipped' };
@@ -331,7 +346,7 @@ export async function orchestrateAfterCommandsStrategy1_ACU(
     } finally {
         // 只有最终提示词真正写回楼层后，调用方才登记已处理。
         delete lastMessage._plot_processed;
-        _set_isProcessing_Plot_ACU(false);
+        if (!planningBusy) _set_isProcessing_Plot_ACU(false);
     }
 }
 
@@ -353,9 +368,11 @@ export async function orchestrateAfterCommandsStrategy2_ACU(
         return { action: 'skip' };
     }
 
+    if (isProcessing_Plot_ACU) return { action: 'busy' };
     const originalInputText = String(textInBox);
 
     _set_isProcessing_Plot_ACU(true);
+    let planningBusy = false;
     try {
         const finalMessage = await runPlanning(originalInputText, {
             originalUserInput: originalInputText,
@@ -364,6 +381,10 @@ export async function orchestrateAfterCommandsStrategy2_ACU(
 
         // 处理跳过
         if (finalMessage && (finalMessage as any).skipped) {
+            if (isPlanningBusy_ACU(finalMessage)) {
+                planningBusy = true;
+                return { action: 'busy' };
+            }
             if (isPlanningNotRequired_ACU(finalMessage)) return { action: 'skip' };
             logDebug_ACU('[剧情推进] Planning skipped in Strategy 2 (duplicate).');
             return { action: 'failed' };
@@ -385,7 +406,7 @@ export async function orchestrateAfterCommandsStrategy2_ACU(
         logError_ACU('[剧情推进] Error processing textarea input (Strategy 2):', error);
         return { action: 'failed' };
     } finally {
-        _set_isProcessing_Plot_ACU(false);
+        if (!planningBusy) _set_isProcessing_Plot_ACU(false);
         // 消费掉本次发送意图，避免同一次生成链路重复触发
         // 注意：generationGate 的重置由 presentation 层负责（因为它涉及 UI 状态）
     }
