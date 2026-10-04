@@ -8,7 +8,7 @@
  * 所有方法内置空值防御，宿主 API 不可用时返回安全默认值或静默跳过。
  */
 
-import { SillyTavern_API_ACU } from '../../shared/host-api';
+import { jQuery_API_ACU, SillyTavern_API_ACU } from '../../shared/host-api';
 import { cleanChatName_ACU, logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { getHostRequestHeaders_ACU } from './ai-gateway';
 
@@ -73,14 +73,107 @@ export async function saveChatToHost_ACU(): Promise<void> {
 /**
  * 执行必须真实提交到宿主的聊天保存。
  * 仅适用于后续会触发不可逆外置副作用的事务；宿主保存能力缺失时必须失败，不能静默跳过。
+ * verify=true 时回读本轮聊天，避免宿主吞掉保存异常后误放行正文生成。
  */
-export async function saveChatToHostStrict_ACU(): Promise<void> {
+export async function saveChatToHostStrict_ACU({ verify = false } = {}): Promise<void> {
     if (typeof SillyTavern_API_ACU?.saveChat !== 'function') {
         throw new Error('宿主 saveChat 不可用，无法提交破坏性聊天数据变更。');
     }
+    const api = SillyTavern_API_ACU;
+    const chat = api.chat;
+    const chatId = api.chatId;
+    const characterId = api.characterId;
+    const groupId = api.groupId;
+    const group = api.groupId != null && api.groupId !== '';
+    const character = api.characters?.[Number(api.characterId)];
+    if (verify && (!chatId || (!group && !character?.avatar))) {
+        throw new Error('聊天保存确认缺少宿主聊天身份。');
+    }
     await SillyTavern_API_ACU.saveChat();
+    if (verify) {
+        if (api.chat !== chat || api.chatId !== chatId || api.characterId !== characterId || api.groupId !== groupId) throw new Error('保存期间聊天已切换。');
+        const response = await fetch(group ? '/api/chats/group/get' : '/api/chats/get', {
+            method: 'POST', cache: 'no-cache',
+            headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
+            body: JSON.stringify(group ? { id: chatId } : {
+                ch_name: character.name, file_name: chatId, avatar_url: character.avatar,
+            }),
+        });
+        if (!response.ok) throw new Error(`聊天保存回读失败（HTTP ${response.status}）。`);
+        const persisted = await response.json();
+        const messages = Array.isArray(persisted) ? (group ? persisted : persisted.slice(1)) : null;
+        if (api.chat !== chat || api.chatId !== chatId || api.characterId !== characterId || api.groupId !== groupId) throw new Error('保存回读期间聊天已切换。');
+        if (!messages || JSON.stringify(messages) !== JSON.stringify(chat)) {
+            throw new Error('聊天保存未获确认：服务器消息与本轮楼层不一致。');
+        }
+    }
     notifyPostChatSaveListeners_ACU();
 }
+
+/** 撤销楼层后同步后续 DOM 编号，保持宿主按 mesid 定位消息的约定。 */
+function removeRenderedUserMessage_ACU(index: number): void {
+    jQuery_API_ACU?.(`#chat .mes[mesid="${index}"]`).remove();
+    const root = jQuery_API_ACU?.('#chat')?.[0];
+    root?.querySelectorAll<HTMLElement>('.mes[mesid]').forEach(node => {
+        const id = node.getAttribute('mesid');
+        if (!id || !/^\d+$/.test(id)) return;
+        const messageIndex = Number(id);
+        if (messageIndex > index) {
+            node.setAttribute('mesid', String(messageIndex - 1));
+        }
+    });
+}
+
+/** 创建正常用户楼层并保存；只建楼，不启动 AI 生成。 */
+export async function createUserMessage_ACU(text: string): Promise<{ chat: any[]; message: any; index: number }> {
+    const api = SillyTavern_API_ACU;
+    const chat = getChatArray_ACU();
+    const chatId = api.chatId;
+    const characterId = api.characterId;
+    const groupId = api.groupId;
+    const message = {
+        name: api.name1,
+        is_user: true,
+        is_system: false,
+        send_date: api.humanizedDateTime(),
+        mes: text,
+        extra: { isSmallSys: false },
+    };
+    const index = chat.length;
+    chat.push(message);
+    try {
+        api.addOneMessage(message);
+        await saveChatToHostStrict_ACU({ verify: true });
+        await api.eventSource.emit(api.eventTypes.MESSAGE_SENT, index);
+        await api.eventSource.emit(api.eventTypes.USER_MESSAGE_RENDERED, index);
+        return { chat, message, index };
+    } catch (error) {
+        const currentIndex = chat.indexOf(message);
+        if (currentIndex >= 0) chat.splice(currentIndex, 1);
+        if (currentIndex >= 0 && getChatArray_ACU() === chat
+            && api.chatId === chatId && api.characterId === characterId && api.groupId === groupId) {
+            removeRenderedUserMessage_ACU(currentIndex);
+            try {
+                await saveChatToHostStrict_ACU({ verify: true });
+            } catch (cleanupError) {
+                throw Object.assign(new Error('建楼失败，撤销保存也未获确认。'), { errors: [error, cleanupError] });
+            }
+        }
+        throw error;
+    }
+}
+
+/** 删除本轮用户楼层，按消息对象定位，不影响历史回复。 */
+export async function removeUserMessage_ACU(chat: any[], message: any): Promise<void> {
+    const index = chat.indexOf(message);
+    if (index < 0) return;
+    chat.splice(index, 1);
+    if (getChatArray_ACU() !== chat) return;
+    removeRenderedUserMessage_ACU(index);
+    await saveChatToHostStrict_ACU({ verify: true });
+    await SillyTavern_API_ACU.eventSource.emit(SillyTavern_API_ACU.eventTypes.MESSAGE_DELETED, index);
+}
+
 
 // ═══ 宿主动作 ═══
 
