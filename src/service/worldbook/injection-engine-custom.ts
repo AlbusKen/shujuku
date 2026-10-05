@@ -3,7 +3,7 @@
  * 从 injection-engine.ts 拆出
  */
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
-import { settings_ACU } from '../runtime/state-manager';
+import { settings_ACU, currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { isWorldbookApiAvailable_ACU, getLorebookEntries_ACU, setLorebookEntries_ACU, createLorebookEntries_ACU, deleteLorebookEntries_ACU } from '../../data/gateways/worldbook-gateway';
 import { saveSettings_ACU } from '../settings/settings-service';
 import { getSortedSheetKeys_ACU } from '../template/chat-scope';
@@ -14,14 +14,19 @@ import { DEFAULT_ENTRY_PLACEMENT_ACU, DEFAULT_EXTRA_INDEX_PLACEMENT_ACU, ensureE
 import { buildUsedOrderSet_ACU, allocOrder_ACU, allocConsecutiveOrderBlock_ACU } from './injection-engine-order';
 import { getInjectionTargetLorebook_ACU, getIsolationPrefix_ACU } from './injection-engine-state';
 import { splitKeywordsByComma_ACU } from './injection-engine-entries';
-import { getLatestSummaryVectorIndexSnapshotState_ACU } from '../vector/summary-vector-index-state-service';
-import { didLastSummaryVectorRecallSucceed_ACU } from '../vector/summary-vector-index-recall-status';
-import { getEffectiveSummaryVectorIndexConfig_ACU } from '../vector/vector-memory-config';
 import { isSqliteMode } from '../table/storage-mode';
 import { buildExternalCustomTableExportComment_ACU, type ExternalCustomTableExportMarker_ACU } from './worldbook-placeholder-classification';
 import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
 import { getCurrentFlightModeState_ACU } from '../flight-mode/flight-mode-state';
 import { projectFlightModeHiddenChronicleRows_ACU } from '../flight-mode/flight-mode-hidden-rows';
+
+// 仅记录当前运行期成功导出的来源行身份，用于区分真实删除与无数据变化的楼层刷新。
+// 世界书正文仍由交火负责；不同聊天、隔离环境和目标世界书不共享删除基线。
+const summaryIndexSourceRowsByScope_ACU = new Map<string, Set<string>>();
+
+export function __resetCustomTableExportStateForTests_ACU(): void {
+    summaryIndexSourceRowsByScope_ACU.clear();
+}
 
   // [新增] 处理自定义表格导出逻辑
   // [修复] 当 mergedData 为空/null 时，仍需执行"清理旧自定义导出条目"逻辑，
@@ -71,25 +76,11 @@ import { projectFlightModeHiddenChronicleRows_ACU } from '../flight-mode/flight-
       const extraIndexEntryEnabled = !zeroTkOccupyMode;
       logDebug_ACU(`[CustomExport] 0TK模式=${zeroTkOccupyMode}, 交火纪要索引=${summaryVectorIndexModeEnabled}, 纪要索引条目enabled=${extraIndexEntryEnabled}`);
 
-      // [spv3.6.4] 计算交火索引是否已达门槛：未达门槛时内容保护补丁不生效，让普通填表正常更新纪要索引条目
-      let crossfireThresholdMet = false;
-      if (summaryVectorIndexModeEnabled) {
-          try {
-              const snapshot = getLatestSummaryVectorIndexSnapshotState_ACU();
-              const state = snapshot?.summaryVectorIndexState || null;
-              if (state) {
-                  const activeRowKeys = new Set((state as any).manifest?.snapshot?.activeRowKeys || []);
-                  const indexedRowCount = Array.isArray((state as any).rows)
-                      ? (state as any).rows.filter((row: any) => row.status !== 'removed' && (activeRowKeys.size === 0 || activeRowKeys.has(row.rowKey))).length
-                      : 0;
-                  const config = getEffectiveSummaryVectorIndexConfig_ACU();
-                  crossfireThresholdMet = indexedRowCount >= config.summaryIndexKeywordMinRows;
-              }
-          } catch (e) {
-              logWarn_ACU('[CustomExport] 无法获取交火索引状态，默认不保护纪要索引条目内容:', e);
-          }
-      }
-      logDebug_ACU(`[CustomExport] 交火门槛已达标=${crossfireThresholdMet}`);
+      const summaryIndexComment = `${isoPrefix}TavernDB-ACU-CustomExport-纪要索引`;
+      const summaryIndexScope = JSON.stringify([
+          currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU(), primaryLorebookName,
+      ]);
+      const summaryIndexSourceRows = new Set<string>();
 
       try {
           const allEntries = await getLorebookEntries_ACU(primaryLorebookName);
@@ -103,7 +94,7 @@ import { projectFlightModeHiddenChronicleRows_ACU } from '../flight-mode/flight-
           let knownNames = settings_ACU.knownCustomEntryNames || [];
           if (!Array.isArray(knownNames)) knownNames = [];
 
-          const uidsToDelete = allEntries
+          let uidsToDelete = allEntries
               .filter(e => {
                   const comment = typeof e?.comment === 'string' ? e.comment : '';
                   if (!comment) return false;
@@ -124,15 +115,7 @@ import { projectFlightModeHiddenChronicleRows_ACU } from '../flight-mode/flight-
               })
               .map(e => e.uid);
             
-          // [新增] 还需要把当前配置会生成的名字也加入到"待删除"列表中，以防它们是新生成的但同名
-          // 这一步会在后续生成 entriesToCreate 时自然覆盖，但显式删除更干净。
-          // 由于我们下面会重新生成并添加到 knownNames，这里先删除所有已知的"本插件生成条目"是安全的。
-
-          if (uidsToDelete.length > 0) {
-                  await deleteLorebookEntries_ACU(primaryLorebookName, uidsToDelete);
-              logDebug_ACU(`Deleted ${uidsToDelete.length} custom export entries (Legacy + Known).`);
-          }
-          
+          // 先计算目标条目，再执行清理，避免普通刷新通过删建绕过交火正文独占。
           // 每次更新时，我们重置 knownNames 列表（仅非外部导入模式）
           // 外部导入模式不维护 knownNames，避免影响第三方世界书
           if (!isImport) {
@@ -142,9 +125,13 @@ import { projectFlightModeHiddenChronicleRows_ACU } from '../flight-mode/flight-
 
           // [修复] 如果 mergedData 为空，清理完旧条目后直接返回，不再尝试创建新条目
           if (!mergedData) {
+              if (uidsToDelete.length > 0) {
+                  await deleteLorebookEntries_ACU(primaryLorebookName, uidsToDelete);
+              }
               logDebug_ACU('[CustomExport] mergedData 为空，已清理旧条目，跳过创建。');
               // 保存清理后的 knownNames
               if (!isImport) {
+                  summaryIndexSourceRowsByScope_ACU.delete(summaryIndexScope);
                   settings_ACU.knownCustomEntryNames = knownNames;
                   saveSettings_ACU();
               }
@@ -277,24 +264,25 @@ import { projectFlightModeHiddenChronicleRows_ACU } from '../flight-mode/flight-
               // [修复] 外部导入时只使用"外部导入-"前缀
               const mainComment = getImportEntryName(extraIndexSpec.entryName, marker ? { ...marker, role: 'index' } : undefined);
               const isCrossfireSummaryEntry = extraIndexSpec.entryName === '纪要索引';
-              let mainContent = buildEntryContent(
+              if (!isImport && isCrossfireSummaryEntry && marker) {
+                  const table = mergedData[marker.sheetKey];
+                  const columns = getSheetColumnProjection_ACU(table).visibleColumns
+                      .filter(column => column.sourceIndex > 0);
+                  for (const row of table.content.slice(1)) {
+                      const rowId = String(row[0] ?? '').trim();
+                      const hasData = columns.some(column => String(row[column.sourceIndex] ?? '').trim() !== '');
+                      if (rowId && hasData) {
+                          summaryIndexSourceRows.add(JSON.stringify([marker.sheetKey, rowId]));
+                      }
+                  }
+              }
+              const mainContent = buildEntryContent(
                   extraIndexSpec.entryName,
                   fullTable,
                   templateStr,
                   false,
                   fallbackTemplate
               );
-              if (!isImport && isCrossfireSummaryEntry && summaryVectorIndexModeEnabled && crossfireThresholdMet && didLastSummaryVectorRecallSucceed_ACU()) {
-                  const existingEntry = allEntries.find(e => e.comment === mainComment);
-                  if (existingEntry?.content) {
-                      mainContent = existingEntry.content;
-                      logDebug_ACU('[CustomExport] 交火模式已启用、已达门槛且上一轮召回成功，保留现有纪要索引召回内容，避免覆盖发送前召回结果。');
-                  }
-              } else if (!isImport && isCrossfireSummaryEntry && summaryVectorIndexModeEnabled && !didLastSummaryVectorRecallSucceed_ACU()) {
-                  logDebug_ACU('[CustomExport] 交火模式已启用但上一轮召回未成功，纪要索引条目使用普通填表概览覆盖写入。');
-              } else if (!isImport && isCrossfireSummaryEntry && summaryVectorIndexModeEnabled && !crossfireThresholdMet) {
-                  logDebug_ACU('[CustomExport] 交火模式已启用但未达门槛，纪要索引条目使用普通填表数据，不保护现有内容。');
-              }
               names.push(mainComment);
               const normalizedPlacement = normalizePlacementConfig_ACU(placement, DEFAULT_EXTRA_INDEX_PLACEMENT_ACU);
               plans.push({ comment: mainComment, order: cursor, placement: normalizedPlacement });
@@ -713,6 +701,31 @@ import { projectFlightModeHiddenChronicleRows_ACU } from '../flight-mode/flight-
               nextCustomExportOrder = cursor + CUSTOM_EXPORT_ORDER_GAP;
           });
 
+          const summaryIndexPlan = entriesToCreate.find(entry => entry.comment === summaryIndexComment);
+          const previousSourceRows = summaryIndexSourceRowsByScope_ACU.get(summaryIndexScope);
+          const sourceRowsRemoved = !!previousSourceRows
+              && [...previousSourceRows].some(rowId => !summaryIndexSourceRows.has(rowId));
+          const existingSummaryIndex = allEntries.find(entry => entry.comment === summaryIndexComment);
+          const protectSummaryIndex = !isImport && summaryVectorIndexModeEnabled && !!summaryIndexPlan
+              && existingSummaryIndex?.uid != null && !sourceRowsRemoved;
+
+          if (protectSummaryIndex) {
+              uidsToDelete = uidsToDelete.filter(uid => uid !== existingSummaryIndex.uid);
+              entriesToCreate.splice(entriesToCreate.indexOf(summaryIndexPlan!), 1);
+          }
+          if (uidsToDelete.length > 0) {
+              await deleteLorebookEntries_ACU(primaryLorebookName, uidsToDelete);
+              logDebug_ACU(`Deleted ${uidsToDelete.length} custom export entries (Legacy + Known).`);
+          }
+          if (protectSummaryIndex) {
+              // 只同步配置属性，不回写旧正文，避免覆盖交火在读取后产生的新结果。
+              const { content: _content, ...attributes } = summaryIndexPlan!;
+              await setLorebookEntries_ACU(primaryLorebookName, [{ ...attributes, uid: existingSummaryIndex.uid }]);
+              logDebug_ACU('[CustomExport] 交火独占纪要索引正文，保留现有条目，仅同步配置属性。');
+          } else if (!isImport && sourceRowsRemoved && summaryIndexPlan) {
+              logDebug_ACU('[CustomExport] 纪要来源行已删除或回溯，清理旧索引并按剩余数据创建。');
+          }
+
           if (entriesToCreate.length > 0) {
                   await createLorebookEntries_ACU(primaryLorebookName, entriesToCreate);
               logDebug_ACU(`Successfully created ${entriesToCreate.length} new custom export entries.`);
@@ -741,6 +754,11 @@ import { projectFlightModeHiddenChronicleRows_ACU } from '../flight-mode/flight-
           
           // [新增] 更新并保存 knownCustomEntryNames（外部导入模式不写入，避免绑定第三方世界书）
           if (!isImport) {
+          if (summaryIndexPlan) {
+              summaryIndexSourceRowsByScope_ACU.set(summaryIndexScope, summaryIndexSourceRows);
+          } else {
+              summaryIndexSourceRowsByScope_ACU.delete(summaryIndexScope);
+          }
           settings_ACU.knownCustomEntryNames = [...knownNames, ...newGeneratedNames];
           settings_ACU.knownCustomEntryNames = [...new Set(settings_ACU.knownCustomEntryNames)];
           saveSettings_ACU();

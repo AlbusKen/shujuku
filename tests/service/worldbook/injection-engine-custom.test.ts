@@ -19,10 +19,8 @@ const {
   mockBuildUsedOrderSet, mockAllocOrder, mockAllocConsecutiveOrderBlock,
   mockGetInjectionTargetLorebook, mockGetIsolationPrefix,
   mockSplitKeywordsByComma,
-  mockGetLatestSummaryVectorIndexSnapshotState,
-  mockGetEffectiveSummaryVectorIndexConfig,
   mockGetCurrentFlightModeState,
-  mockDidLastRecallSucceed,
+  mockRuntimeScope,
 } = vi.hoisted(() => ({
   mockSettings: {
     dataIsolationEnabled: false,
@@ -74,12 +72,8 @@ const {
     if (!raw) return [];
     return raw.split(/[,，]/).map((k: string) => k.trim()).filter(Boolean);
   }),
-  mockGetLatestSummaryVectorIndexSnapshotState: vi.fn(() => null),
-  mockGetEffectiveSummaryVectorIndexConfig: vi.fn(() => ({
-    summaryIndexKeywordMinRows: 3,
-  })),
   mockGetCurrentFlightModeState: vi.fn(() => ({ enabled: false, hiddenRowIds: [], bigSummarySheetKey: '' })),
-  mockDidLastRecallSucceed: vi.fn(() => false),
+  mockRuntimeScope: { chatKey: 'chat-1', isolationKey: 'iso-1' },
 }));
 
 vi.mock('../../../src/service/settings/settings-readers', () => ({
@@ -88,6 +82,8 @@ vi.mock('../../../src/service/settings/settings-readers', () => ({
 
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   get settings_ACU() { return mockSettings; },
+  get currentChatFileIdentifier_ACU() { return mockRuntimeScope.chatKey; },
+  getCurrentIsolationKey_ACU: () => mockRuntimeScope.isolationKey,
 }));
 
 vi.mock('../../../src/data/gateways/worldbook-gateway', () => ({
@@ -140,26 +136,20 @@ vi.mock('../../../src/service/worldbook/injection-engine-entries', () => ({
   splitKeywordsByComma_ACU: mockSplitKeywordsByComma,
 }));
 
-vi.mock('../../../src/service/vector/summary-vector-index-state-service', () => ({
-  getLatestSummaryVectorIndexSnapshotState_ACU: mockGetLatestSummaryVectorIndexSnapshotState,
-}));
-
-vi.mock('../../../src/service/vector/vector-memory-config', () => ({
-  getEffectiveSummaryVectorIndexConfig_ACU: mockGetEffectiveSummaryVectorIndexConfig,
-}));
-
-vi.mock('../../../src/service/vector/summary-vector-index-recall-status', () => ({
-  didLastSummaryVectorRecallSucceed_ACU: (...args: any[]) => mockDidLastRecallSucceed(...args),
-}));
-
 vi.mock('../../../src/service/flight-mode/flight-mode-state', () => ({
   getCurrentFlightModeState_ACU: (...args: any[]) => mockGetCurrentFlightModeState(...args),
 }));
 
-import { updateCustomTableExports_ACU } from '../../../src/service/worldbook/injection-engine-custom';
+import { updateCustomTableExports_ACU, __resetCustomTableExportStateForTests_ACU } from '../../../src/service/worldbook/injection-engine-custom';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  __resetCustomTableExportStateForTests_ACU();
+  mockRuntimeScope.chatKey = 'chat-1';
+  mockRuntimeScope.isolationKey = 'iso-1';
+  mockSetLorebookEntries.mockReset().mockResolvedValue({});
+  mockCreateLorebookEntries.mockReset().mockResolvedValue({});
+  mockDeleteLorebookEntries.mockReset().mockResolvedValue({});
   mockSettings.dataIsolationEnabled = false;
   mockSettings.dataIsolationCode = '';
   mockSettings.knownCustomEntryNames = [];
@@ -173,7 +163,6 @@ beforeEach(() => {
   mockGetCurrentWorldbookConfig.mockReturnValue({ zeroTkOccupyMode: false });
   mockGetSortedSheetKeys.mockReturnValue([]);
   mockGetCurrentFlightModeState.mockReset().mockReturnValue({ enabled: false, hiddenRowIds: [], bigSummarySheetKey: '' });
-  mockDidLastRecallSucceed.mockReturnValue(false);
 });
 
 describe('updateCustomTableExports_ACU', () => {
@@ -776,16 +765,26 @@ describe('updateCustomTableExports_ACU', () => {
         zeroTkOccupyMode: false,
         summaryVectorIndexModeEnabled: true,
       } as any);
-      mockGetEffectiveSummaryVectorIndexConfig.mockReturnValue({ summaryIndexKeywordMinRows: 1 });
-      mockGetLatestSummaryVectorIndexSnapshotState.mockReturnValue({
-        summaryVectorIndexState: {
-          rows: [{ rowKey: 'r1', status: 'active' }, { rowKey: 'r2', status: 'active' }],
-          manifest: { snapshot: { activeRowKeys: ['r1', 'r2'] } },
-        },
+      let entries: any[] = [
+        { uid: 9, comment: 'TavernDB-ACU-CustomExport-纪要索引', content: '交火筛选正文', enabled: true },
+      ];
+      let nextUid = 10;
+      mockGetLorebookEntries.mockImplementation(async () => entries.map(entry => ({ ...entry })) as any);
+      mockDeleteLorebookEntries.mockImplementation(async (_book: any, uids: any) => {
+        entries = entries.filter(entry => !uids.includes(entry.uid));
+        return {};
       });
-      mockGetLorebookEntries.mockResolvedValue([
-        { uid: 9, comment: 'TavernDB-ACU-CustomExport-纪要索引', content: '召回残留内容' },
-      ]);
+      mockCreateLorebookEntries.mockImplementation(async (_book: any, created: any) => {
+        entries.push(...created.map((entry: any) => ({ ...entry, uid: nextUid++ })));
+        return {};
+      });
+      mockSetLorebookEntries.mockImplementation(async (_book: any, patches: any) => {
+        for (const patch of patches) {
+          const entry = entries.find(entry => entry.uid === patch.uid);
+          if (entry) Object.assign(entry, patch);
+        }
+        return {};
+      });
       mockGetSortedSheetKeys.mockReturnValue(['sheet_chronicle']);
       mockEnsureExportConfigDefaults.mockReturnValue({
         enabled: true,
@@ -817,26 +816,130 @@ describe('updateCustomTableExports_ACU', () => {
       };
     }
 
-    function collectedIndexContent(): string {
-      const created = mockCreateLorebookEntries.mock.calls.flatMap((call) => call[1] || []);
-      const updated = mockSetLorebookEntries.mock.calls.flatMap((call) => call[1] || []);
-      const entries = [...created, ...updated];
-      const indexEntry = entries.find((entry: any) => String(entry?.comment || '').includes('纪要索引'));
-      return String(indexEntry?.content || '');
+    async function readIndex() {
+      const entries: any[] = await mockGetLorebookEntries();
+      return entries.find(entry => entry.comment === 'TavernDB-ACU-CustomExport-纪要索引');
     }
 
-    it('上一轮召回成功时保留现有召回内容', async () => {
-      mockDidLastRecallSucceed.mockReturnValue(true);
-      await updateCustomTableExports_ACU(setupChronicleIndexExport());
-      expect(collectedIndexContent()).toContain('召回残留内容');
-      expect(collectedIndexContent()).not.toContain('表内全量概览');
+    it('交火开启时保留已有 UID 和正文，不依赖召回状态或门槛', async () => {
+      const data = setupChronicleIndexExport();
+      await updateCustomTableExports_ACU(data);
+      expect(await readIndex()).toMatchObject({ uid: 9, content: '交火筛选正文' });
+      expect(mockDeleteLorebookEntries).not.toHaveBeenCalled();
+      const created = mockCreateLorebookEntries.mock.calls.flatMap(call => call[1] || []);
+      expect(created.some((entry: any) => entry.comment.includes('纪要索引'))).toBe(false);
+      const updated = mockSetLorebookEntries.mock.calls.flatMap(call => call[1] || []);
+      expect(updated.some((entry: any) => entry.uid === 9)).toBe(true);
+      expect(updated.filter((entry: any) => entry.uid === 9).every((entry: any) => !('content' in entry))).toBe(true);
     });
 
-    it('上一轮召回失败时用全量概览覆盖纪要索引', async () => {
-      mockDidLastRecallSucceed.mockReturnValue(false);
-      await updateCustomTableExports_ACU(setupChronicleIndexExport());
-      expect(collectedIndexContent()).toContain('表内全量概览');
-      expect(collectedIndexContent()).not.toContain('召回残留内容');
+    it('重复刷新、行重排和新增行不重置交火正文', async () => {
+      const data = setupChronicleIndexExport();
+      data.sheet_chronicle.content.push(['2', '另一条纪要']);
+      await updateCustomTableExports_ACU(data);
+      data.sheet_chronicle.content = [data.sheet_chronicle.content[0], ['2', '另一条纪要'], ['1', '更新后的概览'], ['3', '新增纪要']];
+      await updateCustomTableExports_ACU(data);
+      await updateCustomTableExports_ACU(data);
+      expect(await readIndex()).toMatchObject({ uid: 9, content: '交火筛选正文' });
+      expect(mockDeleteLorebookEntries.mock.calls.flatMap(call => call[1] || [])).not.toContain(9);
+    });
+
+    it('真实删除部分纪要后清理旧索引并按剩余数据创建', async () => {
+      const data = setupChronicleIndexExport();
+      data.sheet_chronicle.content.push(['2', '已删除纪要']);
+      await updateCustomTableExports_ACU(data);
+      data.sheet_chronicle.content.pop();
+      await updateCustomTableExports_ACU(data);
+      const index = await readIndex();
+      expect(index.uid).not.toBe(9);
+      expect(index.content).toContain('表内全量概览');
+      expect(index.content).not.toContain('已删除纪要');
+      expect(mockDeleteLorebookEntries.mock.calls.flatMap(call => call[1] || [])).toContain(9);
+    });
+
+    it('纪要清空而其他表仍有数据时只清理索引，不重新创建', async () => {
+      const data = setupChronicleIndexExport();
+      await updateCustomTableExports_ACU(data);
+      data.sheet_chronicle.content = [data.sheet_chronicle.content[0]];
+      await updateCustomTableExports_ACU({ ...data, sheet_people: { name: '人物表', content: [['row_id', '姓名'], ['p1', '角色']], exportConfig: { enabled: false } } });
+      expect(await readIndex()).toBeUndefined();
+    });
+
+    it('来源表删除、索引关闭和显式空数据均允许清理', async () => {
+      for (const action of ['remove_sheet', 'disable_index', 'empty_data']) {
+        __resetCustomTableExportStateForTests_ACU();
+        const data = setupChronicleIndexExport();
+        await updateCustomTableExports_ACU(data);
+        if (action === 'disable_index') {
+          data.sheet_chronicle.exportConfig.extraIndexEnabled = false;
+          mockEnsureExportConfigDefaults.mockReturnValue({ enabled: true, extraIndexEnabled: false, entryType: 'constant' });
+        }
+        await updateCustomTableExports_ACU(action === 'empty_data' ? null : action === 'remove_sheet' ? {} : data);
+        expect(await readIndex()).toBeUndefined();
+      }
+    });
+
+    it('索引缺失时允许创建初始概览，关闭交火后恢复普通更新', async () => {
+      const data = setupChronicleIndexExport();
+      await mockDeleteLorebookEntries('test-lorebook', [9]);
+      await updateCustomTableExports_ACU(data);
+      expect((await readIndex()).content).toContain('表内全量概览');
+      mockGetCurrentWorldbookConfig.mockReturnValue({ zeroTkOccupyMode: false });
+      data.sheet_chronicle.content[1][1] = '关闭交火后的概览';
+      await updateCustomTableExports_ACU(data);
+      expect((await readIndex()).content).toContain('关闭交火后的概览');
+    });
+
+    it('只导出索引时仍同步 0TK 和位置属性而不写正文', async () => {
+      const data = setupChronicleIndexExport();
+      Object.assign(data.sheet_chronicle.exportConfig, { injectIntoWorldbook: false });
+      mockEnsureExportConfigDefaults.mockReturnValue({ enabled: true, injectIntoWorldbook: false, extraIndexEnabled: true, extraIndexEntryName: '纪要索引', extraIndexColumns: ['事件'], extraIndexPlacement: { position: 'at_depth_as_system', depth: 5, order: 12345 } });
+      mockGetCurrentWorldbookConfig.mockReturnValue({ zeroTkOccupyMode: true, summaryVectorIndexModeEnabled: true } as any);
+      await updateCustomTableExports_ACU(data);
+      expect(await readIndex()).toMatchObject({ uid: 9, content: '交火筛选正文', enabled: false, depth: 5 });
+      expect(mockCreateLorebookEntries).not.toHaveBeenCalled();
+      mockGetCurrentWorldbookConfig.mockReturnValue({ zeroTkOccupyMode: false, summaryVectorIndexModeEnabled: true } as any);
+      await updateCustomTableExports_ACU(data);
+      expect(await readIndex()).toMatchObject({ uid: 9, content: '交火筛选正文', enabled: true });
+    });
+
+    it('聊天、隔离环境和目标世界书不共享来源行删除基线', async () => {
+      for (const axis of ['chat', 'isolation', 'book']) {
+        __resetCustomTableExportStateForTests_ACU();
+        const data = setupChronicleIndexExport();
+        data.sheet_chronicle.content.push(['2', '另一作用域的纪要']);
+        await updateCustomTableExports_ACU(data);
+        data.sheet_chronicle.content.pop();
+        if (axis === 'chat') mockRuntimeScope.chatKey += '-next';
+        if (axis === 'isolation') mockRuntimeScope.isolationKey += '-next';
+        if (axis === 'book') mockGetInjectionTargetLorebook.mockResolvedValue('next-lorebook');
+        await updateCustomTableExports_ACU(data);
+        expect(await readIndex()).toMatchObject({ uid: 9, content: '交火筛选正文' });
+      }
+    });
+
+    it('世界书读取失败不会清理条目或推进来源行基线', async () => {
+      const data = setupChronicleIndexExport();
+      data.sheet_chronicle.content.push(['2', '待删除纪要']);
+      await updateCustomTableExports_ACU(data);
+      data.sheet_chronicle.content.pop();
+      mockDeleteLorebookEntries.mockClear();
+      mockGetLorebookEntries.mockRejectedValueOnce(new Error('读取失败'));
+      await updateCustomTableExports_ACU(data);
+      expect(mockDeleteLorebookEntries).not.toHaveBeenCalled();
+      expect(await readIndex()).toMatchObject({ uid: 9, content: '交火筛选正文' });
+      await updateCustomTableExports_ACU(data);
+      expect((await readIndex()).uid).not.toBe(9);
+    });
+
+    it('交火更新正文后普通刷新仍不回写先前正文', async () => {
+      const data = setupChronicleIndexExport();
+      await updateCustomTableExports_ACU(data);
+      await mockSetLorebookEntries('test-lorebook', [{ uid: 9, content: '新一轮交火筛选正文' }]);
+      mockSetLorebookEntries.mockClear();
+      await updateCustomTableExports_ACU(data);
+      expect(await readIndex()).toMatchObject({ uid: 9, content: '新一轮交火筛选正文' });
+      expect(mockSetLorebookEntries.mock.calls.flatMap(call => call[1] || []).every((entry: any) => !('content' in entry))).toBe(true);
     });
   });
 });
