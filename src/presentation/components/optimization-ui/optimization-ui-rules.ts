@@ -10,7 +10,6 @@ import { $popupInstance_ACU } from '../../state/ui-refs';
 import { buildChatPlotScopeStateFromSettings_ACU, clearCurrentChatPlotScopeState_ACU, getCurrentChatPlotScopeState_ACU, sanitizePlotSettingsSnapshotForChat_ACU, setCurrentChatPlotScopeState_ACU } from '../../../service/template/chat-scope';
 import { escapeHtml_ACU } from '../../../shared/html-helpers';
 import { cleanChatName_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, normalizeExcludeRules_ACU, normalizeExtractRules_ACU, normalizeNonNegativeInteger_ACU, normalizePositiveInteger_ACU } from '../../../shared/utils';
-import { triggerAutomaticUpdateIfNeeded_ACU } from '../../triggers/settings-ui-sync';
 import { cancelContentOptimization_ACU, contentOptimizationAbortRequested_ACU, ensureOptimizationNotCancelled_ACU, getLastOptimizationBase_ACU, optimizationProgressToast_ACU, performContentOptimization_ACU, setLastOptimizationBase_ACU, _set_optimizationProgressToast_ACU, _set_contentOptimizationAbortRequested_ACU } from '../../../service/optimization/content-optimization';
 import { applyContextTagFilters_ACU } from '../../../service/runtime/helpers-remaining';
 import { getActivePlotEditorSettings_ACU } from '../../../service/plot/plot-logic';

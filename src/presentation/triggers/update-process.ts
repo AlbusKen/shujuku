@@ -206,17 +206,6 @@ export async function proceedWithCardUpdate_ACU(
     const localAbortController = new AbortController();
     let progressTask: NoticeTaskHandle_ACU | null = null;
 
-    // UI：通知填表开始
-    if (!isSilentMode) {
-        notifyTableFillStart();
-
-        // UI：登记可停止的填表进度任务
-        const initialMessage = progressContext
-            ? `${buildBatchProgressLabel(progressContext)}：${batchToastMessage || '正在填表，请稍候...'}`
-            : (batchToastMessage || '正在填表，请稍候...');
-        progressTask = beginTableFillTask(isImportMode ? '外部导入' : '填表', initialMessage);
-    }
-
     try {
         // 调用 service 层，传入进度回调（只接收纯数据事件）
         const result = await executeCardUpdateCore_ACU(
@@ -229,11 +218,21 @@ export async function proceedWithCardUpdate_ACU(
             requestOptions,
             localAbortController,
             progressContext,
-            (event) => handleProgressEvent(event, isSilentMode, progressTask)
+            (event) => {
+                // 仅准备输入或合法无工作返回不创建提示框。
+                if (!isSilentMode && !progressTask && event.phase === 'calling_ai') {
+                    notifyTableFillStart();
+                    const initialMessage = progressContext
+                        ? `${buildBatchProgressLabel(progressContext)}：${batchToastMessage || '正在填表，请稍候...'}`
+                        : (batchToastMessage || '正在填表，请稍候...');
+                    progressTask = beginTableFillTask(isImportMode ? '外部导入' : '填表', initialMessage);
+                }
+                handleProgressEvent(event, isSilentMode, progressTask);
+            }
         );
 
         // UI：根据返回值决定后续 UI 操作
-        if (result.success && !isSilentMode) {
+        if (result.success && !isSilentMode && progressTask) {
             setTimeout(() => {
                 notifyTableUpdate();
             }, 250);

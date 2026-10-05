@@ -8,7 +8,7 @@ import {
   settings_ACU,
   isAutoUpdatingCard_ACU,
   wasStoppedByUser_ACU,
-  autoFillDebounceTimer_ACU,
+  contentOptimizationDebounceTimer_ACU,
   chatMutationDebounceTimer_ACU,
   currentAbortController_ACU,
   activeAbortControllers_ACU,
@@ -20,7 +20,7 @@ import {
   _set_isAutoUpdatingCard_ACU,
   _set_manualExtraHint_ACU,
   _set_wasStoppedByUser_ACU,
-  _set_autoFillDebounceTimer_ACU,
+  _set_contentOptimizationDebounceTimer_ACU,
   _set_chatMutationDebounceTimer_ACU,
 } from '../../service/runtime/state-manager';
 
@@ -588,10 +588,10 @@ function persistPlotTaskEditorSettings_ACU(source = 'ui_task_edit') {
 // 运行时可变状态统一归 service/runtime/state-manager 所有；此处仅保留兼容导出。
 export {
   isAutoUpdatingCard_ACU, wasStoppedByUser_ACU,
-  autoFillDebounceTimer_ACU, chatMutationDebounceTimer_ACU,
+  contentOptimizationDebounceTimer_ACU, chatMutationDebounceTimer_ACU,
   currentAbortController_ACU, activeAbortControllers_ACU,
   manualExtraHint_ACU, trackAbortController_ACU, untrackAbortController_ACU,
   abortAllActiveRequests_ACU, _set_currentAbortController_ACU, _set_isAutoUpdatingCard_ACU,
   _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU,
-  _set_autoFillDebounceTimer_ACU, _set_chatMutationDebounceTimer_ACU,
+  _set_contentOptimizationDebounceTimer_ACU, _set_chatMutationDebounceTimer_ACU,
 };

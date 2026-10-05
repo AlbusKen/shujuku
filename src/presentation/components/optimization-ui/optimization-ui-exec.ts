@@ -16,7 +16,6 @@ import { buildChatPlotScopeStateFromSettings_ACU, clearCurrentChatPlotScopeState
 import { SCRIPT_ID_PREFIX_ACU } from '../../../shared/constants';
 import { escapeHtml_ACU } from '../../../shared/html-helpers';
 import { cleanChatName_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, normalizeExcludeRules_ACU, normalizeExtractRules_ACU, normalizeNonNegativeInteger_ACU, normalizePositiveInteger_ACU } from '../../../shared/utils';
-import { triggerAutomaticUpdateIfNeeded_ACU } from '../../triggers/settings-ui-sync';
 import { cancelContentOptimization_ACU, contentOptimizationAbortRequested_ACU, ensureOptimizationNotCancelled_ACU, getLastOptimizationBase_ACU, optimizationProgressToast_ACU, performContentOptimization_ACU, setLastOptimizationBase_ACU, _set_optimizationProgressToast_ACU, _set_contentOptimizationAbortRequested_ACU } from '../../../service/optimization/content-optimization';
 import { applyContextTagFilters_ACU } from '../../../service/runtime/helpers-remaining';
 import { getActivePlotEditorSettings_ACU, getPlotPromptContentByIdFromSettings_ACU, setPlotPromptContentByIdForSettings_ACU } from '../../../service/plot/plot-logic';
@@ -454,8 +453,7 @@ import { showOptimizationDiffDialogForLoop_ACU, showOptimizationDiff_ACU } from 
         showToastr_ACU('error', `正文优化失败: ${result.error}`);
         return false;
       }
-      // 如果是后续轮次失败，使用之前的结果触发填表
-      await triggerAutomaticUpdateIfNeeded_ACU();
+      // 后续轮次失败时结束优化流程。
       return true;
     }
     
@@ -467,13 +465,12 @@ import { showOptimizationDiffDialogForLoop_ACU, showOptimizationDiff_ACU } from 
         // 继续下一轮（使用当前内容）
         return await executeContentOptimizationWithConfirm_ACU(messageIndex, content, userMessage, totalLoops, currentLoop + 1, workingContent, totalOptimizations);
       } else {
-        // 所有轮次完成，触发填表
+        // 所有优化轮次完成。
         if (totalOptimizations.length > 0) {
           showToastr_ACU('success', `正文优化完成，共 ${totalLoops} 轮优化，累计 ${totalOptimizations.length} 处改进`);
         } else {
           showToastr_ACU('info', '正文无需优化');
         }
-        await triggerAutomaticUpdateIfNeeded_ACU();
         return true;
       }
     }
@@ -506,10 +503,9 @@ import { showOptimizationDiffDialogForLoop_ACU, showOptimizationDiff_ACU } from 
             );
             resolve(nextResult);
           } else {
-            // 所有轮次完成，应用最终结果并触发填表
+            // 所有轮次完成，应用最终结果。
             await replaceChatMessage_ACU(messageIndex, result.optimizedContent);
             showToastr_ACU('success', `正文优化完成，共 ${totalLoops} 轮优化，累计 ${newTotalOptimizations.length} 处改进`);
-            await triggerAutomaticUpdateIfNeeded_ACU();
             resolve(true);
           }
         } else if (action === 'skip') {
@@ -528,19 +524,14 @@ import { showOptimizationDiffDialogForLoop_ACU, showOptimizationDiff_ACU } from 
           } else {
             // 最后一轮跳过
             if (totalOptimizations.length > 0) {
-              // 如果有之前的优化，应用之前的结果
-              // 注意：这里需要应用之前累积的优化内容
-              await triggerAutomaticUpdateIfNeeded_ACU();
               showToastr_ACU('success', `正文优化完成，共 ${totalLoops} 轮优化，累计 ${totalOptimizations.length} 处改进`);
             } else {
               showToastr_ACU('info', '正文优化已跳过');
             }
-            await triggerAutomaticUpdateIfNeeded_ACU();
             resolve(true);
           }
         } else {
           // 用户取消，结束优化流程
-          await triggerAutomaticUpdateIfNeeded_ACU();
           resolve(true);
         }
       });

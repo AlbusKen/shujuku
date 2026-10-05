@@ -10,6 +10,12 @@ async function importTrigger() {
   const processUpdatesBatch_ACU = vi.fn();
   const executeCardUpdateCore_ACU = vi.fn();
   const resetManualUpdateButton_ACU = vi.fn();
+  const updateTask = vi.fn();
+  const endTask = vi.fn();
+  const beginTask = vi.fn(() => ({ update: updateTask, end: endTask }));
+  const notifyStart = vi.fn();
+  const notifyUpdate = vi.fn();
+  vi.doMock('../../../src/shared/notice-hub', () => ({ beginNoticeTask_ACU: beginTask }));
 
   vi.doMock('../../../src/service/runtime/state-manager', () => ({
     settings_ACU: { manualUpdateContextDepth: 3, skipUpdateFloors: 0 },
@@ -31,7 +37,7 @@ async function importTrigger() {
   vi.doMock('../../../src/shared/constants', () => ({ ACU_TOAST_CATEGORY_ACU: { MANUAL_TABLE: 'manual' } }));
   vi.doMock('../../../src/shared/utils', () => ({ logDebug_ACU: vi.fn(), logError_ACU: vi.fn(), logWarn_ACU: vi.fn() }));
   vi.doMock('../../../src/presentation/state/ui-refs', () => ({ $statusMessageSpan_ACU: null }));
-  vi.doMock('../../../src/shared/env', () => ({ topLevelWindow_ACU: { AutoCardUpdaterAPI: { _notifyTableFillStart: vi.fn(), _notifyTableUpdate: vi.fn() } } }));
+  vi.doMock('../../../src/shared/env', () => ({ topLevelWindow_ACU: { AutoCardUpdaterAPI: { _notifyTableFillStart: notifyStart, _notifyTableUpdate: notifyUpdate } } }));
   vi.doMock('../../../src/presentation/components/status-display', () => ({
     resetManualUpdateButton_ACU,
     shouldShowVectorMemoryManualUpdateWarning_ACU: vi.fn(() => false),
@@ -61,6 +67,11 @@ async function importTrigger() {
     processUpdatesBatch_ACU,
     executeCardUpdateCore_ACU,
     resetManualUpdateButton_ACU,
+    beginTask,
+    updateTask,
+    endTask,
+    notifyStart,
+    notifyUpdate,
   };
 }
 
@@ -124,13 +135,28 @@ describe('handleManualUpdate_ACU destructive refill confirmation', () => {
 
 
 describe('update error toast ownership', () => {
-  it('直接执行单次更新失败时由 proceedWithCardUpdate 显示一次错误', async () => {
-    const { proceedWithCardUpdate_ACU, executeCardUpdateCore_ACU, showToastr_ACU } = await importTrigger();
-    executeCardUpdateCore_ACU.mockResolvedValue({ success: false, modifiedKeys: [], error: '单次失败' });
+  it('单次更新首次 AI 调用才显示进度，重试复用任务且失败只提示一次', async () => {
+    const { proceedWithCardUpdate_ACU, executeCardUpdateCore_ACU, showToastr_ACU, beginTask, updateTask, endTask, notifyStart } = await importTrigger();
+    executeCardUpdateCore_ACU.mockImplementation(async (...args: any[]) => {
+      const onProgress = args[9];
+      expect(beginTask).not.toHaveBeenCalled();
+      onProgress({ phase: 'preparing' });
+      expect(beginTask).not.toHaveBeenCalled();
+      expect(notifyStart).not.toHaveBeenCalled();
+      onProgress({ phase: 'calling_ai', attempt: 1, maxRetries: 2 });
+      expect(beginTask).toHaveBeenCalledTimes(1);
+      onProgress({ phase: 'calling_ai', attempt: 2, maxRetries: 2 });
+      expect(beginTask).toHaveBeenCalledTimes(1);
+      return { success: false, modifiedKeys: [], error: '单次失败' };
+    });
 
     const result = await proceedWithCardUpdate_ACU([{ is_user: false, mes: 'AI' }]);
 
     expect(result.success).toBe(false);
+    expect(notifyStart).toHaveBeenCalledTimes(1);
+    expect(updateTask).toHaveBeenCalledTimes(2);
+    expect(endTask).toHaveBeenCalledTimes(1);
+    expect(beginTask.mock.calls[0][1].action.label).toBe('终止');
     expect(showToastr_ACU.mock.calls.filter(call => call[0] === 'error')).toEqual([
       ['error', '更新失败: 单次失败'],
     ]);
@@ -157,8 +183,20 @@ describe('update error toast ownership', () => {
     ]);
   });
 
-  it('批处理静默内部失败仍只由最外层输出一次最终错误', async () => {
-    const { processUpdates_ACU, processUpdatesBatch_ACU, showToastr_ACU } = await importTrigger();
+  it('无工作批处理与仅准备输入保持静默，真实失败仍由最外层提示一次', async () => {
+    const { processUpdates_ACU, proceedWithCardUpdate_ACU, processUpdatesBatch_ACU, executeCardUpdateCore_ACU, showToastr_ACU, beginTask, endTask, notifyStart, notifyUpdate } = await importTrigger();
+    processUpdatesBatch_ACU.mockResolvedValueOnce({ success: true });
+    await processUpdates_ACU([1], 'auto');
+    executeCardUpdateCore_ACU.mockImplementationOnce(async (...args: any[]) => {
+      args[9]({ phase: 'preparing' });
+      return { success: true, modifiedKeys: [] };
+    });
+    await proceedWithCardUpdate_ACU([{ is_user: false, mes: 'AI' }]);
+    expect(beginTask).not.toHaveBeenCalled();
+    expect(endTask).not.toHaveBeenCalled();
+    expect(notifyStart).not.toHaveBeenCalled();
+    expect(notifyUpdate).not.toHaveBeenCalled();
+    expect(showToastr_ACU).not.toHaveBeenCalled();
     processUpdatesBatch_ACU.mockResolvedValue({ success: false, failedBatches: [0], error: '静默批失败' });
 
     await processUpdates_ACU([1], 'auto');

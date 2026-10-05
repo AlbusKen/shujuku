@@ -2,9 +2,8 @@
  * presentation/triggers/settings-ui-sync/settings-ui-connect.ts
  */
 import { DEFAULT_CHAR_CARD_PROMPT_ACU } from '../../../shared/defaults-json.js';
-import { AUTO_UPDATE_FLOOR_INCREASE_DELAY_ACU } from '../../../shared/defaults';
 import { updateCardUpdateStatusDisplay_ACU } from '../../components/update-status-display';
-import { autoFillDebounceTimer_ACU, getCharCardPromptFromUI_ACU, isAutoUpdatingCard_ACU, manualExtraHint_ACU, renderPromptSegments_ACU, wasStoppedByUser_ACU, _set_autoFillDebounceTimer_ACU, _set_isAutoUpdatingCard_ACU, _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU } from '../../components/plot-editors';
+import { contentOptimizationDebounceTimer_ACU, getCharCardPromptFromUI_ACU, isAutoUpdatingCard_ACU, manualExtraHint_ACU, renderPromptSegments_ACU, wasStoppedByUser_ACU, _set_contentOptimizationDebounceTimer_ACU, _set_isAutoUpdatingCard_ACU, _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU } from '../../components/plot-editors';
 import { showToastr_ACU } from '../../theme/toast';
 import { ACU_TOAST_CATEGORY_ACU } from '../../../shared/constants';
 import { SillyTavern_API_ACU, TavernHelper_API_ACU, toastr_API_ACU, _set_SillyTavern_API_ACU, _set_TavernHelper_API_ACU, _set_jQuery_API_ACU, _set_toastr_API_ACU } from '../../../shared/host-api';
@@ -27,9 +26,9 @@ import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } 
 import { startRuntimePerformanceSpan_ACU } from '../../../shared/runtime-performance';
 import { executeContentOptimization_ACU } from '../../components/optimization-ui';
 import { maybeLiftWorldbookSuppression_ACU } from '../../../service/runtime/helpers-remaining';
-import { triggerAutomaticUpdateIfNeeded_ACU } from './settings-ui-trigger';
+
 import { evaluateNewMessageAction_ACU, resolveGeneratedAiMessageIndex_ACU, type AutoFillIntent_ACU } from '../../../service/runtime/message-handler';
-import { logAutoFillSkip_ACU } from '../../../shared/trigger-diagnostics';
+import { logContentOptimizationSkip_ACU } from '../../../shared/trigger-diagnostics';
 import { buildTavernHelperCompat_ACU, formatHostCapabilities_ACU } from '../../../shared/host-compat/tavern-helper-compat';
 
   export async function fetchModelsAndConnect_ACU() {
@@ -215,38 +214,25 @@ import { buildTavernHelperCompat_ACU, formatHostCapabilities_ACU } from '../../.
     return coreApisAreReady_ACU;
   }
 
-  // [触发修复] GENERATION_ENDED 后 AI 楼层有界物化等待常量
-  export async function handleNewMessageDebounced_ACU(eventType = 'unknown_acu', intent?: AutoFillIntent_ACU) {
+  // 正文优化独立处理消息定位与物化；不参与自动填表派发。
+  export async function handleContentOptimizationEvent_ACU(eventType = 'unknown_acu', intent?: AutoFillIntent_ACU) {
     logDebug_ACU(
       `New message event (${eventType}) detected for ACU, debouncing for ${NEW_MESSAGE_DEBOUNCE_DELAY_ACU}ms...`,
     );
-    clearTimeout(autoFillDebounceTimer_ACU);
-    _set_autoFillDebounceTimer_ACU(setTimeout(async () => {
+    clearTimeout(contentOptimizationDebounceTimer_ACU);
+    _set_contentOptimizationDebounceTimer_ACU(setTimeout(async () => {
       const performanceSpan = startRuntimePerformanceSpan_ACU('new-message-pipeline', {
         settings: settings_ACU,
         metrics: { source: eventType },
       });
-      const performanceContext = { runId: performanceSpan.id, parentSpanId: performanceSpan.id };
       try {
-      // 新一轮消息评估：清掉上一轮填表「终止」残留，避免永久 user_aborted。
-      _set_wasStoppedByUser_ACU(false);
       // [健全性] 如果用户已经开始对话，则解除"开场白阶段世界书注入抑制"
       try { maybeLiftWorldbookSuppression_ACU(); } catch (e) {}
-
-      const loadSpan = startRuntimePerformanceSpan_ACU('new-message-load-chat', {
-        ...performanceContext,
-        settings: settings_ACU,
-      });
-      try {
-        await loadAllChatMessages_ACU();
-      } finally {
-        loadSpan.end();
-      }
 
       // [触发修复] chatKey / isolationKey 校验：防抖期间切聊天或切隔离必须立即丢弃，不污染新会话。
       if (intent) {
         if (currentChatFileIdentifier_ACU !== intent.chatKey) {
-          logAutoFillSkip_ACU('chat_changed', {
+          logContentOptimizationSkip_ACU('chat_changed', {
             eventType,
             eventMessageId: intent.eventMessageId,
             messageId: intent.eventMessageId,
@@ -259,7 +245,7 @@ import { buildTavernHelperCompat_ACU, formatHostCapabilities_ACU } from '../../.
         }
         const liveIsolationKey = getCurrentIsolationKey_ACU();
         if (liveIsolationKey !== intent.isolationKey) {
-          logAutoFillSkip_ACU('chat_changed', {
+          logContentOptimizationSkip_ACU('chat_changed', {
             eventType,
             eventMessageId: intent.eventMessageId,
             messageId: intent.eventMessageId,
@@ -284,7 +270,7 @@ import { buildTavernHelperCompat_ACU, formatHostCapabilities_ACU } from '../../.
           await new Promise(resolve => setTimeout(resolve, AI_MATERIALIZATION_RETRY_DELAY_MS_ACU));
           // 每次重试前校验 chatKey / isolationKey：等待中切聊天/切隔离立即终止。
           if (currentChatFileIdentifier_ACU !== intent.chatKey || getCurrentIsolationKey_ACU() !== intent.isolationKey) {
-            logAutoFillSkip_ACU('chat_changed', {
+            logContentOptimizationSkip_ACU('chat_changed', {
               eventType,
               eventMessageId: intent.eventMessageId,
               messageId: intent.eventMessageId,
@@ -301,7 +287,7 @@ import { buildTavernHelperCompat_ACU, formatHostCapabilities_ACU } from '../../.
         }
 
         if (resolution.kind === 'ambiguous') {
-          logAutoFillSkip_ACU('ambiguous_generated_ai_message', {
+          logContentOptimizationSkip_ACU('ambiguous_generated_ai_message', {
             eventType,
             eventMessageId: intent.eventMessageId,
             messageId: intent.eventMessageId,
@@ -316,7 +302,7 @@ import { buildTavernHelperCompat_ACU, formatHostCapabilities_ACU } from '../../.
           return;
         }
         if (resolution.kind === 'pending_materialization') {
-          logAutoFillSkip_ACU('generated_ai_message_not_materialized', {
+          logContentOptimizationSkip_ACU('generated_ai_message_not_materialized', {
             eventType,
             eventMessageId: intent.eventMessageId,
             messageId: intent.eventMessageId,
@@ -330,7 +316,7 @@ import { buildTavernHelperCompat_ACU, formatHostCapabilities_ACU } from '../../.
           return;
         }
         if (resolution.kind === 'invalid_intent') {
-          logAutoFillSkip_ACU('message_evaluation_skipped', {
+          logContentOptimizationSkip_ACU('message_evaluation_skipped', {
             eventType,
             eventMessageId: intent.eventMessageId,
             messageId: intent.eventMessageId,
@@ -356,7 +342,7 @@ import { buildTavernHelperCompat_ACU, formatHostCapabilities_ACU } from '../../.
 
       if (result.action === 'skip') {
           logDebug_ACU(`ACU: ${result.reason}. Skipping.`);
-          logAutoFillSkip_ACU(result.skipReason || 'message_evaluation_skipped', {
+          logContentOptimizationSkip_ACU(result.skipReason || 'message_evaluation_skipped', {
               eventType,
               eventMessageId: intent?.eventMessageId,
               messageId: intent?.eventMessageId,
@@ -368,31 +354,17 @@ import { buildTavernHelperCompat_ACU, formatHostCapabilities_ACU } from '../../.
 
       switch (result.action) {
           case 'optimize_parallel':
-              logDebug_ACU('[正文优化] 并行模式已启用，正文优化与填表将同时进行...');
-              await Promise.all([
-                  executeContentOptimization_ACU(result.lastMessageIndex!),
-                  triggerAutomaticUpdateIfNeeded_ACU(performanceContext)
-              ]);
-              break;
-
           case 'optimize_manual':
-              logDebug_ACU('[正文优化] 手动确认模式：等待用户确认后再填表...');
-              await executeContentOptimization_ACU(result.lastMessageIndex!);
-              break;
-
           case 'optimize_then_update':
               await executeContentOptimization_ACU(result.lastMessageIndex!);
-              await triggerAutomaticUpdateIfNeeded_ACU(performanceContext);
               break;
-
           case 'update_only':
-              await triggerAutomaticUpdateIfNeeded_ACU(performanceContext);
               break;
       }
+      } catch (error) {
+        logError_ACU('ACU 正文事件处理失败:', error);
       } finally {
         performanceSpan.end({ messageCount: getChatArray_ACU()?.length || 0 });
       }
     }, NEW_MESSAGE_DEBOUNCE_DELAY_ACU));
   }
-
-  // [重构] 核心触发逻辑：基于独立表格参数的触发检查

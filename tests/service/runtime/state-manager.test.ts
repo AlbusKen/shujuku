@@ -47,7 +47,7 @@ import {
   isQuietLikeGeneration_ACU,
   isRecentUserSend_ACU,
   shouldProcessPlotForGeneration_ACU,
-  shouldProcessAutoTableUpdateForGenerationEnded_ACU,
+  consumeGenerationContextForEnded_ACU,
   getCurrentIsolationKey_ACU,
   settings_ACU,
   _set_settings_ACU,
@@ -66,7 +66,7 @@ import {
   _set_isAutoUpdatingCard_ACU,
   _set_manualExtraHint_ACU,
   _set_wasStoppedByUser_ACU,
-  _set_autoFillDebounceTimer_ACU,
+  _set_contentOptimizationDebounceTimer_ACU,
   _set_chatMutationDebounceTimer_ACU,
   trackAbortController_ACU,
   untrackAbortController_ACU,
@@ -195,12 +195,12 @@ describe('recordGenerationContext_ACU', () => {
     expect(generationGate_ACU.lastGeneration.at).toBeLessThanOrEqual(after);
   });
 
-  it('前台生成结束时先消费自身上下文，后续 quiet 生成不影响本轮判定', () => {
+  it('生成结束逐次消费上下文，普通与 quiet 生成保持各自类型', () => {
     recordGenerationContext_ACU('normal', {}, false);
-    expect(shouldProcessAutoTableUpdateForGenerationEnded_ACU()).toBe(true);
+    expect(consumeGenerationContextForEnded_ACU()).toEqual(expect.objectContaining({ type: 'normal' }));
 
     recordGenerationContext_ACU('quiet', { quiet_prompt: '第三方插件后台任务' }, false);
-    expect(shouldProcessAutoTableUpdateForGenerationEnded_ACU()).toBe(false);
+    expect(consumeGenerationContextForEnded_ACU()).toEqual(expect.objectContaining({ type: 'quiet' }));
   });
 
 });
@@ -305,38 +305,6 @@ describe('shouldProcessPlotForGeneration_ACU', () => {
   });
 });
 
-// ═══ shouldProcessAutoTableUpdateForGenerationEnded_ACU ═══
-describe('shouldProcessAutoTableUpdateForGenerationEnded_ACU', () => {
-  it('无 lastGeneration 时返回 true', () => {
-    generationGate_ACU.lastGeneration = null;
-    expect(shouldProcessAutoTableUpdateForGenerationEnded_ACU()).toBe(true);
-  });
-
-  it('dryRun 时返回 false', () => {
-    recordGenerationContext_ACU('normal', {}, true);
-    expect(shouldProcessAutoTableUpdateForGenerationEnded_ACU()).toBe(false);
-  });
-
-  it('quiet 类型时返回 false', () => {
-    recordGenerationContext_ACU('quiet', {}, false);
-    expect(shouldProcessAutoTableUpdateForGenerationEnded_ACU()).toBe(false);
-  });
-
-  it('quiet_prompt 有内容时返回 false', () => {
-    recordGenerationContext_ACU('normal', { quiet_prompt: '静默' }, false);
-    expect(shouldProcessAutoTableUpdateForGenerationEnded_ACU()).toBe(false);
-  });
-
-  it('automatic_trigger 时返回 false', () => {
-    recordGenerationContext_ACU('normal', { automatic_trigger: true }, false);
-    expect(shouldProcessAutoTableUpdateForGenerationEnded_ACU()).toBe(false);
-  });
-
-  it('正常生成时返回 true', () => {
-    recordGenerationContext_ACU('normal', {}, false);
-    expect(shouldProcessAutoTableUpdateForGenerationEnded_ACU()).toBe(true);
-  });
-});
 
 // ═══ getCurrentIsolationKey_ACU ═══
 describe('getCurrentIsolationKey_ACU', () => {
@@ -377,14 +345,14 @@ describe('Setter 函数', () => {
     const autoFillTimer = { kind: 'auto-fill' };
     const chatMutationTimer = { kind: 'chat-mutation' };
 
-    _set_autoFillDebounceTimer_ACU(autoFillTimer);
+    _set_contentOptimizationDebounceTimer_ACU(autoFillTimer);
     _set_chatMutationDebounceTimer_ACU(chatMutationTimer);
 
     const mod = await import('../../../src/service/runtime/state-manager');
-    expect(mod.autoFillDebounceTimer_ACU).toBe(autoFillTimer);
+    expect(mod.contentOptimizationDebounceTimer_ACU).toBe(autoFillTimer);
     expect(mod.chatMutationDebounceTimer_ACU).toBe(chatMutationTimer);
 
-    _set_autoFillDebounceTimer_ACU(null);
+    _set_contentOptimizationDebounceTimer_ACU(null);
     _set_chatMutationDebounceTimer_ACU(null);
   });
 });

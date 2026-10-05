@@ -35,7 +35,7 @@ const m = vi.hoisted(() => ({
   jquery: vi.fn(), clearPendingPlot: vi.fn(),
   input: '',
   shouldProcessSummary: vi.fn(),
-  autoUpdate: vi.fn(() => true),
+  autoUpdate: vi.fn(async () => undefined),
   handleNewMessage: vi.fn(),
   bindInternalGeneration: vi.fn(),
   consumeInternalGeneration: vi.fn(() => null),
@@ -60,11 +60,12 @@ const m = vi.hoisted(() => ({
 vi.mock('../../../src/shared/host-api', () => ({ SillyTavern_API_ACU: m.api, jQuery_API_ACU: m.jquery }));
 vi.mock('../../../src/shared/env', () => ({ topLevelWindow_ACU: { AutoCardUpdaterAPI: { _notifyTableUpdate: m.notify } } }));
 vi.mock('../../../src/presentation/theme/toast', () => ({ showToastr_ACU: vi.fn() }));
-vi.mock('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect', () => ({ attemptToLoadCoreApis_ACU: vi.fn(() => true), handleNewMessageDebounced_ACU: (...args: any[]) => m.handleNewMessage(...args) }));
+vi.mock('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect', () => ({ attemptToLoadCoreApis_ACU: vi.fn(() => true), handleContentOptimizationEvent_ACU: (...args: any[]) => m.handleNewMessage(...args) }));
+vi.mock('../../../src/presentation/triggers/settings-ui-sync/settings-ui-trigger', () => ({ triggerAutomaticUpdateIfNeeded_ACU: (...args: any[]) => m.autoUpdate(...args) }));
 vi.mock('../../../src/service/runtime/helpers-remaining', () => ({ ensureInitialSeedCheckpoint_ACU: m.ensureSeed, handleChatCompletionReady_ACU: vi.fn(), loadPresetAndCleanCharacterData_ACU: m.loadPreset }));
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   chatMutationDebounceTimer_ACU: null, _set_chatMutationDebounceTimer_ACU: m.setChatMutationTimer, _set_wasStoppedByUser_ACU: vi.fn(), generationGate_ACU: m.gate,
-  get currentChatFileIdentifier_ACU() { return m.currentChatKey; }, currentJsonTableData_ACU: null, getCurrentIsolationKey_ACU: () => 'test-isolation', discardLatestGenerationContext_ACU: vi.fn(), markUserSendIntent_ACU: vi.fn(), get isProcessing_Plot_ACU() { return m.processingPlot; }, isQuietLikeGeneration_ACU: (...args: any[]) => m.isQuiet(...args), isRecentUserSendIntent_ACU: vi.fn(), loopState_ACU: { isLooping: false }, recordGenerationContext_ACU: (...args: any[]) => m.recordGeneration(...args), recordLastUserSend_ACU: vi.fn(), settings_ACU: m.settings, consumeGenerationContextForEnded_ACU: () => m.consumeGeneration(), shouldProcessAutoTableUpdateForGenerationEnded_ACU: (...args: any[]) => m.autoUpdate(...args), shouldProcessPlotForGeneration_ACU: (...args: any[]) => m.shouldProcessPlot(...args), shouldProcessSummaryVectorIndexForGeneration_ACU: (...args: any[]) => m.shouldProcessSummary(...args),
+  get currentChatFileIdentifier_ACU() { return m.currentChatKey; }, currentJsonTableData_ACU: null, getCurrentIsolationKey_ACU: () => 'test-isolation', discardLatestGenerationContext_ACU: vi.fn(), markUserSendIntent_ACU: vi.fn(), get isProcessing_Plot_ACU() { return m.processingPlot; }, isQuietLikeGeneration_ACU: (...args: any[]) => m.isQuiet(...args), isRecentUserSendIntent_ACU: vi.fn(), loopState_ACU: { isLooping: false }, recordGenerationContext_ACU: (...args: any[]) => m.recordGeneration(...args), recordLastUserSend_ACU: vi.fn(), settings_ACU: m.settings, consumeGenerationContextForEnded_ACU: () => m.consumeGeneration(), shouldProcessPlotForGeneration_ACU: (...args: any[]) => m.shouldProcessPlot(...args), shouldProcessSummaryVectorIndexForGeneration_ACU: (...args: any[]) => m.shouldProcessSummary(...args),
   _set_allChatMessages_ACU: m.setMessages, _set_currentChatFileIdentifier_ACU: (value: string) => { m.currentChatKey = value; m.setChat(value); }, _set_currentJsonTableData_ACU: m.setData, _set_independentTableStates_ACU: m.setTables, _set_isProcessing_Plot_ACU: vi.fn(), _set_lastTotalAiMessages_ACU: m.setTotal, _set_tempPlotToSave_ACU: m.clearPendingPlot,
 }));
 vi.mock('../../../src/service/settings/settings-service', () => ({ applyTemplateScopeForCurrentChat_ACU: vi.fn(), loadSettings_ACU: vi.fn() }));
@@ -170,7 +171,7 @@ beforeEach(() => {
   m.skipIntercept.mockReturnValue(false);
   m.ensureSeed.mockResolvedValue(false);
   m.isQuiet.mockReturnValue(false);
-  m.autoUpdate.mockReturnValue(true);
+  m.autoUpdate.mockResolvedValue(undefined);
   m.handleNewMessage.mockResolvedValue(undefined);
   delete m.settings.worldSimulationPageEnabled;
   delete m.settings.plotSendDisguiseDisabled;
@@ -336,7 +337,7 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
   it.each(['MESSAGE_RECEIVED', 'CHARACTER_MESSAGE_RENDERED'] as const)('%s 独立唤醒检查并传递明确消息下标', (eventName) => {
     m.currentChatKey = 'chat-a';
     m.api.chat = [{ is_user: true, mes: '用户' }, { is_user: false, mes: '正文' }];
-    m.autoUpdate.mockReturnValue(false);
+    m.autoUpdate.mockResolvedValue(undefined);
     const callback = eventName === 'MESSAGE_RECEIVED' ? m.messageReceived : m.characterMessageRendered;
 
     expect(callback).toBeTypeOf('function');
@@ -346,7 +347,7 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
       eventMessageId: 1, eventMessageIdKind: 'index', chatKey: 'chat-a',
       isolationKey: 'test-isolation', capturedChatLength: 2, capturedAiFloorCount: 1,
     }));
-    expect(m.autoUpdate).not.toHaveBeenCalled();
+    expect(m.autoUpdate).toHaveBeenCalledExactlyOnceWith();
     expect(m.consumeGeneration).not.toHaveBeenCalled();
     expect(m.consumeInternalGeneration).not.toHaveBeenCalled();
     expect(m.consumeSimulationInternalGeneration).not.toHaveBeenCalled();
@@ -354,7 +355,7 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
   });
 
   it.each(['normal', 'swipe', 'appendFinal', 'continue', 'first_message', 'quiet'])('正文事件的 %s 类型不增加入口过滤', (type) => {
-    m.autoUpdate.mockReturnValue(false);
+    m.autoUpdate.mockResolvedValue(undefined);
     m.isQuiet.mockReturnValue(true);
     m.generationStarted!('normal', { quiet_prompt: '附加提示', automatic_trigger: true }, false);
 
@@ -362,7 +363,7 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
     m.characterMessageRendered!(0, type);
 
     expect(m.handleNewMessage).toHaveBeenCalledTimes(2);
-    expect(m.autoUpdate).not.toHaveBeenCalled();
+    expect(m.autoUpdate).toHaveBeenCalledTimes(2);
     expect(m.consumeGeneration).not.toHaveBeenCalled();
   });
 
@@ -376,7 +377,7 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
 });
 
 describe('mainInitialize_ACU continuation internal AI event isolation', () => {
-  it('does not dispatch an explicitly attributed internal generation to auto-update', () => {
+  it('内部生成只隔离续写和优化，不阻断填表信号', () => {
     const identity = { source: 'turn_instruction' as const, requestId: 'request-a', chatIdentity: 'chat-a', taskId: 'task-a', stageId: 'stage-a', revision: 1, nodeId: 'node-a', turnId: 'turn-a', attemptId: 'attempt-a' };
     m.consumeInternalGeneration.mockReturnValueOnce(identity);
 
@@ -390,13 +391,13 @@ describe('mainInitialize_ACU continuation internal AI event isolation', () => {
     expect(m.consumeInternalGeneration).toHaveBeenCalledWith(m.gate.generationSeq);
     expect(m.consumeSimulationInternalGeneration).not.toHaveBeenCalled();
     expect(m.handleSimulationCompletion).not.toHaveBeenCalled();
-    expect(m.autoUpdate).not.toHaveBeenCalled();
+    expect(m.autoUpdate).toHaveBeenCalledTimes(1);
     expect(m.handleNewMessage).not.toHaveBeenCalled();
   });
 });
 
 describe('mainInitialize_ACU world simulation generation isolation', () => {
-  it('simulation 内部生成结束时短路自动推演与常规正文管线', () => {
+  it('simulation 内部生成结束时仅短路推演和优化，仍派发填表', () => {
     m.consumeSimulationInternalGeneration.mockReturnValueOnce({ requestId: 'simulation-request', runId: 'run-a', role: 'world-director' });
 
     m.generationStarted!('normal', {}, false);
@@ -405,7 +406,7 @@ describe('mainInitialize_ACU world simulation generation isolation', () => {
     expect(m.bindSimulationInternalGeneration).toHaveBeenCalledWith(m.gate.generationSeq);
     expect(m.consumeSimulationInternalGeneration).toHaveBeenCalledWith(m.gate.generationSeq);
     expect(m.handleSimulationCompletion).not.toHaveBeenCalled();
-    expect(m.autoUpdate).not.toHaveBeenCalled();
+    expect(m.autoUpdate).toHaveBeenCalledTimes(1);
     expect(m.handleNewMessage).not.toHaveBeenCalled();
   });
 
@@ -463,6 +464,7 @@ describe('mainInitialize_ACU world simulation generation isolation', () => {
 
     expect(m.createSimulationIntent).not.toHaveBeenCalled();
     expect(m.handleSimulationCompletion).not.toHaveBeenCalled();
+    expect(m.autoUpdate).toHaveBeenCalledTimes(3);
   });
 });
 
@@ -504,7 +506,7 @@ describe('mainInitialize_ACU continuation host generation isolation', () => {
     expect(bridge.onGenerationStarted).toHaveBeenCalledWith(m.gate.generationSeq, { allowOrdinaryLooseClaim: true, automaticTrigger: false, quietLike: false, dryRun: false });
     expect(bridge.claimsGenerationEnded).toHaveBeenCalledWith(m.gate.generationSeq, { allowOrdinaryLooseClaim: true, automaticTrigger: false, quietLike: false, dryRun: false });
     expect(bridge.onGenerationEnded).not.toHaveBeenCalled();
-    expect(m.autoUpdate).toHaveBeenCalledWith(expect.objectContaining({ seq: m.gate.generationSeq }));
+    expect(m.autoUpdate).toHaveBeenCalledExactlyOnceWith();
     expect(m.handleNewMessage).toHaveBeenCalledWith('GENERATION_ENDED', expect.objectContaining({ eventMessageId: 42 }));
   });
 

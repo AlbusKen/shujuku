@@ -54,6 +54,21 @@ export function logAutoFillSkip_ACU(
   reason: AutoFillSkipReason_ACU,
   context: AutoFillSkipContext_ACU = {},
 ): void {
+  logTriggerSkip_ACU('[AutoFill]', reason, context);
+}
+
+export function logContentOptimizationSkip_ACU(
+  reason: AutoFillSkipReason_ACU,
+  context: AutoFillSkipContext_ACU = {},
+): void {
+  logTriggerSkip_ACU('[ContentOptimization]', reason, context);
+}
+
+function logTriggerSkip_ACU(
+  source: string,
+  reason: AutoFillSkipReason_ACU,
+  context: AutoFillSkipContext_ACU,
+): void {
   const {
     eventType,
     messageId,
@@ -73,7 +88,7 @@ export function logAutoFillSkip_ACU(
     preconditionReason,
   } = context;
   const log = AUTO_FILL_SKIP_WARN_REASONS_ACU.has(reason) ? logWarn_ACU : logDebug_ACU;
-  log('[AutoFill] Trigger skipped', {
+  log(`${source} Trigger skipped`, {
     reason,
     eventType,
     messageId,

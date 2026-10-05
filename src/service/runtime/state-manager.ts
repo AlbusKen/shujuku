@@ -197,14 +197,6 @@ export function consumeGenerationContextForEnded_ACU(): GenerationContext_ACU | 
   return activeContext || (generationGate_ACU.generationSeq === 0 ? generationGate_ACU.lastGeneration : null);
 }
 
-export function shouldProcessAutoTableUpdateForGenerationEnded_ACU(context?: GenerationContext_ACU | null) {
-  const g = context === undefined ? consumeGenerationContextForEnded_ACU() : context;
-  if (!g) return true;
-  if (g.dryRun) return false;
-  if (isQuietLikeGeneration_ACU(g.type, g.params)) return false;
-  if (g.params?.automatic_trigger) return false;
-  return true;
-}
 
 // ═══ 业务运行时状态 ═══
 export let coreApisAreReady_ACU = false;
@@ -343,7 +335,7 @@ export function _set_independentTableStates_ACU(v: any) { independentTableStates
 // ═══ 从 plot-editors.ts 迁移的业务状态 ═══
 export let isAutoUpdatingCard_ACU = false;
 export let wasStoppedByUser_ACU = false;
-export let autoFillDebounceTimer_ACU: any = null;
+export let contentOptimizationDebounceTimer_ACU: any = null;
 export let chatMutationDebounceTimer_ACU: any = null;
 export let currentAbortController_ACU: any = null;
 export let activeAbortControllers_ACU = new Set<any>();
@@ -367,5 +359,5 @@ export function _set_currentAbortController_ACU(v: any) { currentAbortController
 export function _set_isAutoUpdatingCard_ACU(v: any) { isAutoUpdatingCard_ACU = v; }
 export function _set_manualExtraHint_ACU(v: any) { manualExtraHint_ACU = v; }
 export function _set_wasStoppedByUser_ACU(v: any) { wasStoppedByUser_ACU = v; }
-export function _set_autoFillDebounceTimer_ACU(v: any) { autoFillDebounceTimer_ACU = v; }
+export function _set_contentOptimizationDebounceTimer_ACU(v: any) { contentOptimizationDebounceTimer_ACU = v; }
 export function _set_chatMutationDebounceTimer_ACU(v: any) { chatMutationDebounceTimer_ACU = v; }

@@ -5,7 +5,7 @@
  * 策略：
  * - buildAutoUpdatePlan_ACU 通过构造 mock 聊天记录和表格数据直接测试
  * - checkAutoUpdatePreConditions_ACU 是纯函数，直接测试
- * - handleFloorIncreaseDelay_ACU 通过 mock 回调测试
+
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -44,7 +44,7 @@ import {
 import {
   buildAutoUpdatePlan_ACU,
   checkAutoUpdatePreConditions_ACU,
-  handleFloorIncreaseDelay_ACU,
+
   executeAutoUpdatePlan_ACU,
 } from '../../../src/service/table/update-scheduler';
 
@@ -60,135 +60,44 @@ describe('checkAutoUpdatePreConditions_ACU', () => {
   };
 
   it('所有条件满足时返回 canProceed=true', () => {
-    const result = checkAutoUpdatePreConditions_ACU(baseSettings, true, false, { sheet_0: {} }, 5);
+    const result = checkAutoUpdatePreConditions_ACU(baseSettings);
     expect(result.canProceed).toBe(true);
   });
 
   it('autoUpdateEnabled=false 时不可继续', () => {
-    const result = checkAutoUpdatePreConditions_ACU({ ...baseSettings, autoUpdateEnabled: false }, true, false, {}, 5);
+    const result = checkAutoUpdatePreConditions_ACU({ ...baseSettings, autoUpdateEnabled: false });
     expect(result.canProceed).toBe(false);
     expect(result.reason).toContain('disabled');
     expect(result.code).toBe('auto_update_disabled');
   });
 
-  it('coreApisAreReady=false 时不可继续', () => {
-    const result = checkAutoUpdatePreConditions_ACU(baseSettings, false, false, {}, 5);
-    expect(result.canProceed).toBe(false);
-    expect(result.reason).toContain('Pre-flight');
-    expect(result.code).toBe('core_apis_not_ready');
+
+  it('调度不再以聊天长度作为前置门控', () => {
+    expect(checkAutoUpdatePreConditions_ACU(baseSettings)).toEqual({ canProceed: true });
   });
 
-  it('isAutoUpdatingCard=true 时不可继续', () => {
-    const result = checkAutoUpdatePreConditions_ACU(baseSettings, true, true, {}, 5);
-    expect(result.canProceed).toBe(false);
-    expect(result.code).toBe('update_in_flight');
-  });
-
-  it('currentJsonTableData=null 时不可继续', () => {
-    const result = checkAutoUpdatePreConditions_ACU(baseSettings, true, false, null, 5);
-    expect(result.canProceed).toBe(false);
-    expect(result.code).toBe('runtime_not_ready');
-  });
-
-  it('聊天记录少于2条时不可继续', () => {
-    const result = checkAutoUpdatePreConditions_ACU(baseSettings, true, false, { sheet_0: {} }, 1);
-    expect(result.canProceed).toBe(false);
-    expect(result.reason).toContain('too short');
-    expect(result.code).toBe('chat_too_short');
-  });
-
-  it('API 未配置时不可继续（custom 模式无 useMainApi）', () => {
+  it('自定义 API 配置留给请求层校验，不阻断调度', () => {
     const settings = {
       ...baseSettings,
       apiConfig: { useMainApi: false, url: '', model: '' },
     };
-    const result = checkAutoUpdatePreConditions_ACU(settings, true, false, { sheet_0: {} }, 5);
-    expect(result.canProceed).toBe(false);
-    expect(result.code).toBe('api_not_configured');
+    expect(checkAutoUpdatePreConditions_ACU(settings)).toEqual({ canProceed: true });
   });
 
-  it('tavern 模式有 profile 时可继续', () => {
-    const settings = {
-      ...baseSettings,
-      apiMode: 'tavern',
-      tavernProfile: 'my-profile',
-    };
-    const result = checkAutoUpdatePreConditions_ACU(settings, true, false, { sheet_0: {} }, 5);
-    expect(result.canProceed).toBe(true);
+  it('只检查调度所需状态，不要求全局 API 配置块', () => {
+    expect(checkAutoUpdatePreConditions_ACU({ autoUpdateEnabled: true })).toEqual({ canProceed: true });
   });
 
-  it('tavern 模式无 profile 时不可继续', () => {
+  it('tavern profile 留给请求层校验，不阻断调度', () => {
     const settings = {
       ...baseSettings,
       apiMode: 'tavern',
       tavernProfile: '',
     };
-    const result = checkAutoUpdatePreConditions_ACU(settings, true, false, { sheet_0: {} }, 5);
-    expect(result.canProceed).toBe(false);
+    expect(checkAutoUpdatePreConditions_ACU(settings)).toEqual({ canProceed: true });
   });
 
-  // 原因码优先级契约：disabled → core APIs → in-flight → API config → runtime → chat length。
-  // 多个条件同时失败时，必须返回优先级最高的原因码，保证同一现场状态下的诊断码稳定。
-  it.each([
-    {
-      name: 'disabled 优先于 core APIs',
-      settings: { ...baseSettings, autoUpdateEnabled: false },
-      coreReady: false,
-      inFlight: true,
-      table: null,
-      chatLen: 1,
-      expected: 'auto_update_disabled',
-    },
-    {
-      name: 'core APIs 优先于 in-flight 与 API config',
-      settings: { ...baseSettings, apiConfig: { useMainApi: false, url: '', model: '' } },
-      coreReady: false,
-      inFlight: true,
-      table: null,
-      chatLen: 1,
-      expected: 'core_apis_not_ready',
-    },
-    {
-      name: 'in-flight 优先于 API config 与 runtime',
-      settings: { ...baseSettings, apiConfig: { useMainApi: false, url: '', model: '' } },
-      coreReady: true,
-      inFlight: true,
-      table: null,
-      chatLen: 1,
-      expected: 'update_in_flight',
-    },
-    {
-      name: 'API config 优先于 runtime 与 chat length',
-      settings: { ...baseSettings, apiConfig: { useMainApi: false, url: '', model: '' } },
-      coreReady: true,
-      inFlight: false,
-      table: null,
-      chatLen: 1,
-      expected: 'api_not_configured',
-    },
-    {
-      name: 'runtime 优先于 chat length',
-      settings: baseSettings,
-      coreReady: true,
-      inFlight: false,
-      table: null,
-      chatLen: 1,
-      expected: 'runtime_not_ready',
-    },
-    {
-      name: 'chat length 为最低优先级',
-      settings: baseSettings,
-      coreReady: true,
-      inFlight: false,
-      table: { sheet_0: {} },
-      chatLen: 1,
-      expected: 'chat_too_short',
-    },
-  ])('优先级：$name', ({ settings, coreReady, inFlight, table, chatLen, expected }) => {
-    const result = checkAutoUpdatePreConditions_ACU(settings, coreReady, inFlight, table, chatLen);
-    expect(result.canProceed).toBe(false);
-    expect(result.code).toBe(expected);
-  });
+
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -587,93 +496,6 @@ describe('buildAutoUpdatePlan_ACU', () => {
 
     expect(plan.tablesToUpdate).toHaveLength(sheetCount);
     expect(isUserReads).toBeLessThanOrEqual(messageCount * 3);
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════
-// handleFloorIncreaseDelay_ACU
-// ═══════════════════════════════════════════════════════════════
-describe('handleFloorIncreaseDelay_ACU', () => {
-  it('AI 消息数增加时等待并返回新数据', async () => {
-    const mockGetChat = vi.fn().mockReturnValue([
-      { is_user: true },
-      { is_user: false },
-      { is_user: true },
-      { is_user: false },
-    ]);
-    const mockSetLast = vi.fn();
-
-    const result = await handleFloorIncreaseDelay_ACU(
-      3, // totalAiMessages（新）
-      2, // lastTotalAiMessages（旧）
-      10, // delayMs（短延迟用于测试）
-      mockGetChat,
-      mockSetLast,
-    );
-
-    expect(result).not.toBeNull();
-    expect(mockSetLast).toHaveBeenCalled();
-  });
-
-  it('AI 消息数减少时更新 lastTotal', async () => {
-    const mockGetChat = vi.fn();
-    const mockSetLast = vi.fn();
-
-    const result = await handleFloorIncreaseDelay_ACU(
-      1, // totalAiMessages（减少了）
-      3, // lastTotalAiMessages
-      10,
-      mockGetChat,
-      mockSetLast,
-    );
-
-    expect(mockSetLast).toHaveBeenCalledWith(1);
-  });
-
-  it('AI 消息数不变时不做任何操作', async () => {
-    const mockGetChat = vi.fn();
-    const mockSetLast = vi.fn();
-
-    await handleFloorIncreaseDelay_ACU(
-      3,
-      3,
-      10,
-      mockGetChat,
-      mockSetLast,
-    );
-
-    expect(mockGetChat).not.toHaveBeenCalled();
-    expect(mockSetLast).not.toHaveBeenCalled();
-  });
-
-  it('延迟后聊天记录为空时返回 null', async () => {
-    const mockGetChat = vi.fn().mockReturnValue([]);
-    const mockSetLast = vi.fn();
-
-    const result = await handleFloorIncreaseDelay_ACU(
-      3,
-      2,
-      10,
-      mockGetChat,
-      mockSetLast,
-    );
-
-    expect(result).toBeNull();
-  });
-
-  it('延迟后聊天记录为 null 时返回 null', async () => {
-    const mockGetChat = vi.fn().mockReturnValue(null);
-    const mockSetLast = vi.fn();
-
-    const result = await handleFloorIncreaseDelay_ACU(
-      3,
-      2,
-      10,
-      mockGetChat,
-      mockSetLast,
-    );
-
-    expect(result).toBeNull();
   });
 });
 

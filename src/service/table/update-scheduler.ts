@@ -204,46 +204,18 @@ export function buildAutoUpdatePlan_ACU(
  */
 export function checkAutoUpdatePreConditions_ACU(
     settings: any,
-    coreApisAreReady: boolean,
-    isAutoUpdatingCard: boolean,
-    currentJsonTableData: any,
-    allChatMessagesLength: number
 ): {
     canProceed: boolean;
 
     reason?: string;
     /** 稳定原因码：供诊断日志区分失败分支，不承诺为面向用户的文案 */
-    code?:
-        | 'auto_update_disabled'
-        | 'core_apis_not_ready'
-        | 'update_in_flight'
-        | 'api_not_configured'
-        | 'runtime_not_ready'
-        | 'chat_too_short';
+    code?: 'auto_update_disabled';
 } {
     if (!settings.autoUpdateEnabled) {
         return { canProceed: false, reason: 'Auto update is disabled via settings.', code: 'auto_update_disabled' };
     }
 
-    const apiIsConfigured = (settings.apiMode === 'custom' && (settings.apiConfig.useMainApi || (settings.apiConfig.url && settings.apiConfig.model))) || (settings.apiMode === 'tavern' && settings.tavernProfile);
-
-    if (!coreApisAreReady) {
-        return { canProceed: false, reason: 'Pre-flight checks failed.', code: 'core_apis_not_ready' };
-    }
-    if (isAutoUpdatingCard) {
-        return { canProceed: false, reason: 'Pre-flight checks failed.', code: 'update_in_flight' };
-    }
-    if (!apiIsConfigured) {
-        return { canProceed: false, reason: 'Pre-flight checks failed.', code: 'api_not_configured' };
-    }
-    if (!currentJsonTableData) {
-        return { canProceed: false, reason: 'Pre-flight checks failed.', code: 'runtime_not_ready' };
-    }
-
-    if (allChatMessagesLength < 2) {
-        return { canProceed: false, reason: 'Chat history too short.', code: 'chat_too_short' };
-    }
-
+    // 信号逐次串行调度；待填范围、请求和持久化校验由各自业务层负责。
     return { canProceed: true };
 }
 // ============================================================
@@ -423,7 +395,6 @@ export async function executeAutoUpdatePlan_ACU(
     logDebug_ACU(`All group updates completed. Forcing data refresh...`);
     await ops.loadAllChatMessages();
     await ops.refreshData();
-    await new Promise(resolve => setTimeout(resolve, 500));
 
     setAutoUpdating(false);
     await ops.refreshData();
@@ -486,34 +457,4 @@ export async function executeAutoUpdatePlan_ACU(
       setAutoUpdating(false);
       throw error;
     }
-}
-
-// ============================================================
-// 楼层增加延迟逻辑
-// ============================================================
-
-/**
- * 处理楼层增加延迟：当 AI 消息数增加时等待一段时间再继续
- * 纯业务逻辑
- */
-export async function handleFloorIncreaseDelay_ACU(
-    totalAiMessages: number,
-    lastTotalAiMessages: number,
-    delayMs: number,
-    getChatArray: () => any[],
-    setLastTotalAiMessages: (v: number) => void
-): Promise<{ liveChat: any[]; totalAiMessages: number } | null> {
-    if (totalAiMessages > lastTotalAiMessages) {
-        logDebug_ACU(`ACU: AI Message count increased (${lastTotalAiMessages} -> ${totalAiMessages}). Waiting ${delayMs}ms...`);
-        await new Promise(resolve => setTimeout(resolve, delayMs));
-
-        const liveChat = getChatArray();
-        if (!liveChat || liveChat.length === 0) return null;
-        const newTotal = liveChat.filter((m: any) => !m.is_user).length;
-        setLastTotalAiMessages(newTotal);
-        return { liveChat, totalAiMessages: newTotal };
-    } else if (totalAiMessages < lastTotalAiMessages) {
-        setLastTotalAiMessages(totalAiMessages);
-    }
-    return undefined as any; // 不需要更新
 }

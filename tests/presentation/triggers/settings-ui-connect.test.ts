@@ -6,8 +6,8 @@ const m = vi.hoisted(() => ({
 }));
 
 vi.mock('../../../src/presentation/components/plot-editors', () => ({
-  autoFillDebounceTimer_ACU: m.autoFillTimer,
-  _set_autoFillDebounceTimer_ACU: m.setAutoFillTimer,
+  contentOptimizationDebounceTimer_ACU: m.autoFillTimer,
+  _set_contentOptimizationDebounceTimer_ACU: m.setAutoFillTimer,
 }));
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   NEW_MESSAGE_DEBOUNCE_DELAY_ACU: 500,
@@ -21,12 +21,12 @@ afterEach(() => {
   m.autoFillTimer = null;
 });
 
-describe('handleNewMessageDebounced_ACU 防抖隔离', () => {
+describe('handleContentOptimizationEvent_ACU 防抖隔离', () => {
   it('仅写入自动填表专用 timer 槽', async () => {
     vi.useFakeTimers();
-    const { handleNewMessageDebounced_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect');
+    const { handleContentOptimizationEvent_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect');
 
-    await handleNewMessageDebounced_ACU('GENERATION_ENDED');
+    await handleContentOptimizationEvent_ACU('GENERATION_ENDED');
 
     expect(m.setAutoFillTimer).toHaveBeenCalledOnce();
     expect(m.autoFillTimer).not.toBeNull();

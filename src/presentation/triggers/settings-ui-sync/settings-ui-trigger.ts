@@ -1,33 +1,22 @@
 /**
  * presentation/triggers/settings-ui-sync/settings-ui-trigger.ts
  */
-import { DEFAULT_CHAR_CARD_PROMPT_ACU } from '../../../shared/defaults-json.js';
-import { AUTO_UPDATE_FLOOR_INCREASE_DELAY_ACU } from '../../../shared/defaults';
 import { syncManualUpdateButtonAvailability_ACU } from '../../components/status-display';
 import { beginNoticeTask_ACU, type NoticeTaskHandle_ACU } from '../../../shared/notice-hub';
 import { updateCardUpdateStatusDisplay_ACU } from '../../components/update-status-display';
-import { getCharCardPromptFromUI_ACU, isAutoUpdatingCard_ACU, renderPromptSegments_ACU, wasStoppedByUser_ACU, _set_isAutoUpdatingCard_ACU } from '../../components/plot-editors';
+import { isAutoUpdatingCard_ACU, _set_isAutoUpdatingCard_ACU } from '../../components/plot-editors';
 import { showToastr_ACU } from '../../theme/toast';
-import { ACU_TOAST_CATEGORY_ACU } from '../../../shared/constants';
-import { SillyTavern_API_ACU, TavernHelper_API_ACU, _set_SillyTavern_API_ACU, _set_TavernHelper_API_ACU, _set_jQuery_API_ACU, _set_toastr_API_ACU } from '../../../shared/host-api';
-import { jQuery_API_ACU } from '../../dom-utils';
-import { getChatArray_ACU, saveChatToHost_ACU } from '../../../service/chat/chat-service';
-import { getConnectionManagerProfiles_ACU } from '../../../service/ai/ai-service';
-import { getCurrentCharacterFallback_ACU } from '../../../service/host/host-state-service';
-import { NEW_MESSAGE_DEBOUNCE_DELAY_ACU, abortAllActiveRequests_ACU, allChatMessages_ACU, coreApisAreReady_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, lastTotalAiMessages_ACU, settings_ACU , _set_coreApisAreReady_ACU, _set_lastTotalAiMessages_ACU, _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU} from '../../../service/runtime/state-manager';
-import { $popupInstance_ACU, $customApiUrlInput_ACU, $customApiKeyInput_ACU, $customApiModelInput_ACU, $customApiModelSelect_ACU, $maxTokensInput_ACU, $temperatureInput_ACU, $apiStatusDisplay_ACU, $charCardPromptSegmentsContainer_ACU, $autoUpdateThresholdInput_ACU, $autoUpdateTokenThresholdInput_ACU, $autoUpdateFrequencyInput_ACU, $updateBatchSizeInput_ACU, $maxConcurrentGroupsInput_ACU, $skipUpdateFloorsInput_ACU, $retainRecentLayersInput_ACU, $tableMaxRetriesInput_ACU, $manualExtraHintCheckbox_ACU } from '../../state/ui-refs';
+import { getChatArray_ACU } from '../../../service/chat/chat-service';
+import { abortAllActiveRequests_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU } from '../../../service/runtime/state-manager';
+import { $manualExtraHintCheckbox_ACU } from '../../state/ui-refs';
 import { processUpdates_ACU } from '../update-process';
 import { getSortedSheetKeys_ACU } from '../../../service/template/chat-scope';
 import { loadAllChatMessages_ACU, updateReadableLorebookEntry_ACU } from '../../../service/worldbook/pipeline';
 import { getStorageProvider } from '../../../service/table/table-storage-strategy';
-import { SCRIPT_ID_PREFIX_ACU } from '../../../shared/constants';
-import { escapeHtml_ACU, renderStopButton_ACU } from '../../../shared/html-helpers';
 import { topLevelWindow_ACU } from '../../../shared/env';
-import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../../../shared/utils';
-import { executeContentOptimization_ACU } from '../../components/optimization-ui';
-import { maybeLiftWorldbookSuppression_ACU } from '../../../service/runtime/helpers-remaining';
+import { logDebug_ACU } from '../../../shared/utils';
 import { purgeOldLayerData_ACU } from './settings-ui-config';
-import { buildAutoUpdatePlan_ACU, checkAutoUpdatePreConditions_ACU, executeAutoUpdatePlan_ACU, handleFloorIncreaseDelay_ACU } from '../../../service/table/update-scheduler';
+import { buildAutoUpdatePlan_ACU, checkAutoUpdatePreConditions_ACU, executeAutoUpdatePlan_ACU } from '../../../service/table/update-scheduler';
 import { executeAutoFillStagingGroups_ACU, processGroupedRuntimeChunk_ACU, type CardUpdateProgressEvent } from '../../../service/table/update-orchestrator';
 import { isSqliteMode } from '../../../service/table/storage-mode';
 import { startRuntimePerformanceSpan_ACU } from '../../../shared/runtime-performance';
@@ -90,24 +79,21 @@ function handleAutoGroupedProgressEvent_ACU(event: CardUpdateProgressEvent, prog
     }
 }
 
-let autoUpdateTriggerInFlight_ACU = false;
-let pendingAutoUpdateTrigger_ACU = false;
-let pendingAutoUpdatePerformanceContext_ACU: { runId?: string; parentSpanId?: string } | undefined;
+let autoUpdateQueueTail_ACU: Promise<void> = Promise.resolve();
 
-  export async function triggerAutomaticUpdateIfNeeded_ACU(
+  // 每次调用独立排队；失败只回报当前调用，不中断后续信号。
+  export function triggerAutomaticUpdateIfNeeded_ACU(
     performanceContext?: { runId?: string; parentSpanId?: string },
-  ) {
+  ): Promise<void> {
+    const request = autoUpdateQueueTail_ACU.then(() => runAutomaticUpdateIfNeeded_ACU(performanceContext));
+    autoUpdateQueueTail_ACU = request.catch(() => {});
+    return request;
+  }
+
+  async function runAutomaticUpdateIfNeeded_ACU(
+    performanceContext?: { runId?: string; parentSpanId?: string },
+  ): Promise<void> {
     logDebug_ACU('ACU Auto-Trigger: Starting independent check...');
-    if (autoUpdateTriggerInFlight_ACU) {
-      pendingAutoUpdateTrigger_ACU = true;
-      pendingAutoUpdatePerformanceContext_ACU = performanceContext;
-      logDebug_ACU('ACU Auto-Trigger: trigger already in flight. Coalescing a follow-up run.');
-      logAutoFillSkip_ACU('auto_update_coalesced', {
-        inFlight: true,
-      });
-      return;
-    }
-    autoUpdateTriggerInFlight_ACU = true;
     // 新一轮自动填表开跑前清掉上一轮「终止」残留，避免 isStopped() 立刻把新任务掐死。
     _set_wasStoppedByUser_ACU(false);
     const performanceSpan = startRuntimePerformanceSpan_ACU('auto-update-trigger', {
@@ -116,48 +102,20 @@ let pendingAutoUpdatePerformanceContext_ACU: { runId?: string; parentSpanId?: st
     });
 
     try {
-    // [重构] 调用 service 层前置检查
-    const preCheck = checkAutoUpdatePreConditions_ACU(
-        settings_ACU,
-        coreApisAreReady_ACU,
-        isAutoUpdatingCard_ACU,
-        currentJsonTableData_ACU,
-        allChatMessages_ACU.length
-    );
+    // 前置检查与更新计划使用同一宿主聊天，不依赖世界书消息投影的加载状态。
+    const liveChat = getChatArray_ACU();
+    const preCheck = checkAutoUpdatePreConditions_ACU(settings_ACU);
     if (!preCheck.canProceed) {
       logDebug_ACU(`ACU Auto-Trigger: ${preCheck.reason} Skipping.`);
       logAutoFillSkip_ACU('preconditions_failed', {
-        aiFloorCount: allChatMessages_ACU.filter((message: any) => !message.is_user).length,
+        aiFloorCount: liveChat?.filter((message: any) => !message.is_user).length || 0,
         inFlight: isAutoUpdatingCard_ACU,
         preconditionReason: preCheck.code,
       });
       return;
     }
 
-    let liveChat = getChatArray_ACU();
-    if (!liveChat || liveChat.length === 0) {
-      logAutoFillSkip_ACU('empty_chat');
-      return;
-    }
-
-    let totalAiMessages = liveChat.filter(m => !m.is_user).length;
-
-    // [重构] 调用 service 层楼层增加延迟逻辑
-    const delayResult = await handleFloorIncreaseDelay_ACU(
-        totalAiMessages,
-        lastTotalAiMessages_ACU,
-        AUTO_UPDATE_FLOOR_INCREASE_DELAY_ACU,
-        getChatArray_ACU,
-        _set_lastTotalAiMessages_ACU
-    );
-    if (delayResult === null) {
-      logAutoFillSkip_ACU('empty_chat');
-      return;
-    }
-    if (delayResult) {
-        liveChat = delayResult.liveChat;
-        totalAiMessages = delayResult.totalAiMessages;
-    }
+    const totalAiMessages = liveChat.filter(m => !m.is_user).length;
 
     // [重构] 调用 service 层构建更新计划
     const triggerIsolationKey = getCurrentIsolationKey_ACU();
@@ -173,22 +131,14 @@ let pendingAutoUpdatePerformanceContext_ACU: { runId?: string; parentSpanId?: st
       return;
     }
 
-    // UI：显示开始 toast
-    const totalGroups = Object.keys(plan.updateGroups).length;
-    const maxConcurrentGroups = Math.max(1, settings_ACU.maxConcurrentGroups || 1);
     const useGroupedAutoUpdates = !isSqliteMode();
-    if (totalGroups > maxConcurrentGroups) {
-        showToastr_ACU('info', `检测到 ${plan.tablesToUpdate.length} 个表格需要更新，将分批并发处理 ${totalGroups} 组（每批最多 ${maxConcurrentGroups} 组）。`);
-    } else {
-        showToastr_ACU('info', `检测到 ${plan.tablesToUpdate.length} 个表格需要更新，将并发处理 ${totalGroups} 组。`);
-    }
-
     const autoGroupedAbortController = new AbortController();
-    // 进度任务不受静默模式影响：静默只决定气泡是否显示，任务登记照常驱动桌宠。
+    // 实际开始填表请求后才登记任务；同一调度的分组与批次共用一个进度框。
     let autoProgressTask: NoticeTaskHandle_ACU | null = null;
-    if (useGroupedAutoUpdates) {
+    const onAutoGroupedProgress = (event: CardUpdateProgressEvent): void => {
+      if (!autoProgressTask && event.phase === 'calling_ai') {
         autoProgressTask = beginNoticeTask_ACU('自动填表', {
-            detail: '自动填表正在准备，请稍候...',
+            detail: buildAutoUpdateProgressMessage_ACU(event),
             action: {
                 label: '终止',
                 variant: 'danger',
@@ -203,7 +153,9 @@ let pendingAutoUpdatePerformanceContext_ACU: { runId?: string; parentSpanId?: st
                 },
             },
         });
-    }
+      }
+      handleAutoGroupedProgressEvent_ACU(event, autoProgressTask);
+    };
 
     // 调用 service 层执行更新计划，传入纯业务操作委托（不含 UI 操作）
     let result: Awaited<ReturnType<typeof executeAutoUpdatePlan_ACU>>;
@@ -223,7 +175,7 @@ let pendingAutoUpdatePerformanceContext_ACU: { runId?: string; parentSpanId?: st
                                 abortController: autoGroupedAbortController,
                                 onProgress: event => {
                                     upstreamProgress?.(event);
-                                    handleAutoGroupedProgressEvent_ACU(event, autoProgressTask);
+                                    onAutoGroupedProgress(event);
                                 },
                             });
                         },
@@ -248,7 +200,7 @@ let pendingAutoUpdatePerformanceContext_ACU: { runId?: string; parentSpanId?: st
                         abortController: autoGroupedAbortController,
                         onProgress: event => {
                             upstreamProgress?.(event);
-                            handleAutoGroupedProgressEvent_ACU(event, autoProgressTask);
+                            onAutoGroupedProgress(event);
                         },
                     });
                 },
@@ -280,16 +232,6 @@ let pendingAutoUpdatePerformanceContext_ACU: { runId?: string; parentSpanId?: st
         sheetCount: currentJsonTableData_ACU ? getSortedSheetKeys_ACU(currentJsonTableData_ACU).length : 0,
         sqlite: isSqliteMode(),
       });
-      autoUpdateTriggerInFlight_ACU = false;
-      if (!pendingAutoUpdateTrigger_ACU || wasStoppedByUser_ACU) {
-        pendingAutoUpdateTrigger_ACU = false;
-        pendingAutoUpdatePerformanceContext_ACU = undefined;
-        return;
-      }
-      const followUpContext = pendingAutoUpdatePerformanceContext_ACU;
-      pendingAutoUpdateTrigger_ACU = false;
-      pendingAutoUpdatePerformanceContext_ACU = undefined;
-      queueMicrotask(() => { void triggerAutomaticUpdateIfNeeded_ACU(followUpContext); });
     }
   }
 
