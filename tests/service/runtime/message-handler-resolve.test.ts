@@ -75,6 +75,27 @@ describe('resolveGeneratedAiMessageIndex_ACU', () => {
     expect(result).toEqual({ kind: 'resolved', messageIndex: 1 });
   });
 
+  it('正文事件明确使用数组下标，不被另一消息的同值稳定 ID 抢先匹配', () => {
+    const liveChat = chatWith([
+      { ...ai, message_id: 1, mes: '历史消息' },
+      { ...ai, message_id: 99, mes: '事件目标' },
+    ]);
+    const result = resolveGeneratedAiMessageIndex_ACU({
+      liveChat,
+      intent: makeIntent({ eventMessageId: 1, eventMessageIdKind: 'index' }),
+    });
+    expect(result).toEqual({ kind: 'resolved', messageIndex: 1 });
+  });
+
+  it('正文事件不把已删除目标下标减一映射到历史尾楼', () => {
+    const result = resolveGeneratedAiMessageIndex_ACU({
+      liveChat: chatWith([user, ai]),
+      intent: makeIntent({ eventMessageId: 2, eventMessageIdKind: 'index' }),
+    });
+    // 保留事件下标，交给已有动作评估判断目标是否仍有效。
+    expect(result).toEqual({ kind: 'resolved', messageIndex: 2 });
+  });
+
   it('稳定 message_id 与另一个 AI 的数组索引冲突时，稳定 ID 优先', () => {
     const liveChat = chatWith([
       { ...ai, message_id: 1, mes: '稳定 ID 目标' },

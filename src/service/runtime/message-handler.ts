@@ -12,15 +12,16 @@ import { getCurrentCharacterFallback_ACU } from '../host/host-state-service';
 export type MessageAction = 'skip' | 'update_only' | 'optimize_parallel' | 'optimize_then_update' | 'optimize_manual';
 
 /**
- * GENERATION_ENDED 触发意图快照。
+ * 生成结束或正文消息事件的触发意图快照。
  *
- * 事件参数（eventMessageId）只作为**锚点**，不承诺它就是最终聊天数组里的 AI 下标：
- * makeFirst 可能早于宿主把本轮 AI 回复追加进 chat，因此必须同时记录捕获时的边界，
- * 由 resolveGeneratedAiMessageIndex_ACU 在防抖回调中按唯一候选规则解析本轮 AI 楼层。
+ * 正文消息事件明确提供数组下标；GENERATION_ENDED 的参数仅作为锚点，
+ * 两者由 eventMessageIdKind 区分。捕获边界供旧结束事件的兼容解析使用。
  */
 export interface AutoFillIntent_ACU {
-    /** 宿主 GENERATION_ENDED 事件携带的 message_id，仅作锚点 */
+    /** 宿主事件参数；未声明 index 语义时沿用结束事件的锚点解析 */
     eventMessageId: number;
+    /** MESSAGE_RECEIVED / CHARACTER_MESSAGE_RENDERED 明确携带零基数组下标 */
+    eventMessageIdKind?: 'index';
     /** 捕获时聊天文件标识，用于防抖期间切聊天校验 */
     chatKey: string;
     /** 捕获时数据隔离键；空字符串表示未启用隔离 */
@@ -110,6 +111,12 @@ export function resolveGeneratedAiMessageIndex_ACU(options: ResolveGeneratedAiOp
         if (index < 0 || index >= liveChat.length) return false;
         return isAiMessage_ACU(liveChat[index]);
     };
+
+    // 正文事件提供的是数组下标，不允许被其他消息的同值 message_id 抢先匹配。
+    // 目标是否仍为 AI 由既有 evaluateNewMessageAction_ACU 判断。
+    if (intent.eventMessageIdKind === 'index') {
+        return { kind: 'resolved', messageIndex: intent.eventMessageId };
+    }
 
     const capturedLength = Number.isInteger(intent.capturedChatLength) ? (intent.capturedChatLength as number) : -1;
     const capturedAiCount = Number.isInteger(intent.capturedAiFloorCount) ? (intent.capturedAiFloorCount as number) : -1;

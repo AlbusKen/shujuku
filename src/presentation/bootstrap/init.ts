@@ -636,6 +636,34 @@ export   function mainInitialize_ACU() {
             }
         }
 
+        // 消息接收、正文渲染均唤醒现有防抖检查；是否需要填表仍由原调度链判断。
+        const autoFillMessageEvents = ['MESSAGE_RECEIVED', 'CHARACTER_MESSAGE_RENDERED'] as const;
+        autoFillMessageEvents.forEach(evName => {
+          const eventType = SillyTavern_API_ACU.eventTypes[evName];
+          if (!eventType) return;
+          SillyTavern_API_ACU.eventSource.on(eventType, (messageId: any) => {
+            const chatAtCapture = SillyTavern_API_ACU?.chat || [];
+            const eventMessageId = typeof messageId === 'number' && Number.isInteger(messageId)
+              ? messageId
+              : undefined;
+            const intent = eventMessageId !== undefined
+              ? {
+                  eventMessageId,
+                  eventMessageIdKind: 'index' as const,
+                  chatKey: currentChatFileIdentifier_ACU,
+                  isolationKey: getCurrentIsolationKey_ACU(),
+                  capturedAt: Date.now(),
+                  capturedChatLength: chatAtCapture.length,
+                  capturedAiFloorCount: chatAtCapture.filter((m: any) => m && !m.is_user && m?.extra?.type !== 'narrator').length,
+                  generationSeq: generationGate_ACU.generationSeq > 0 ? generationGate_ACU.generationSeq : undefined,
+                }
+              : undefined;
+            void handleNewMessageDebounced_ACU(evName, intent).catch(error => {
+              logWarn_ACU(`ACU ${evName} 自动填表检查调度失败:`, error);
+            });
+          });
+        });
+
         // 共用发送前任务链；伪装只改变等待外观和宿主续发方式。
         if (SillyTavern_API_ACU.eventTypes.GENERATION_AFTER_COMMANDS) {
           const source = SillyTavern_API_ACU.eventSource;

@@ -9,10 +9,12 @@ const m = vi.hoisted(() => ({
   generationEnded: undefined as undefined | ((messageId: any) => void),
   generationStopped: undefined as undefined | (() => void),
   messageSent: undefined as undefined | ((messageId: any) => Promise<void>),
+  messageReceived: undefined as undefined | ((messageId?: any, type?: any) => void),
+  characterMessageRendered: undefined as undefined | ((messageId?: any, type?: any) => void),
   afterCommands: undefined as undefined | ((type: any, params: any, dryRun: any) => Promise<void>),
   currentChatKey: '',
   settings: { plotSettings: {} } as { plotSettings: Record<string, unknown>; worldSimulationPageEnabled?: boolean; plotSendDisguiseDisabled?: boolean },
-  api: { chat: [] as any[], chatId: '', eventTypes: { CHAT_CHANGED: 'chat', MESSAGE_DELETED: 'deleted', MESSAGE_SWIPED: 'swiped', MESSAGE_SENT: 'message_sent', MESSAGE_UPDATED: 'message_updated', GENERATION_AFTER_COMMANDS: 'after_commands', GENERATION_STARTED: 'generation_started', GENERATION_ENDED: 'generation_ended', GENERATION_STOPPED: 'generation_stopped' }, eventSource: { on: vi.fn(), makeFirst: vi.fn(), makeLast: vi.fn(), emit: vi.fn() } } as any,
+  api: { chat: [] as any[], chatId: '', eventTypes: { CHAT_CHANGED: 'chat', MESSAGE_DELETED: 'deleted', MESSAGE_SWIPED: 'swiped', MESSAGE_SENT: 'message_sent', MESSAGE_UPDATED: 'message_updated', MESSAGE_RECEIVED: 'message_received', CHARACTER_MESSAGE_RENDERED: 'character_message_rendered', GENERATION_AFTER_COMMANDS: 'after_commands', GENERATION_STARTED: 'generation_started', GENERATION_ENDED: 'generation_ended', GENERATION_STOPPED: 'generation_stopped' }, eventSource: { on: vi.fn(), makeFirst: vi.fn(), makeLast: vi.fn(), emit: vi.fn() } } as any,
   gate: { lastUserMessageId: 7 as any, lastUserMessageText: 'stale', lastUserMessageAt: 1, lastUserSendIntentAt: 2, lastGeneration: { stale: true } as any, generationSeq: 0, activeGenerations: [] as any[] },
   resetTakeover: vi.fn(), dispose: vi.fn(), setData: vi.fn(), setTables: vi.fn(), setMessages: vi.fn(), setTotal: vi.fn(), setChat: vi.fn(),
   setChatMutationTimer: vi.fn(),
@@ -136,6 +138,8 @@ beforeAll(async () => {
     if (event === 'deleted' || event === 'swiped') m.chatMutationHandler = callback;
     if (event === 'generation_started') m.generationStarted = callback;
     if (event === 'message_sent') m.messageSent = callback;
+    if (event === 'message_received') m.messageReceived = callback;
+    if (event === 'character_message_rendered') m.characterMessageRendered = callback;
     if (event === 'generation_stopped') m.generationStopped = callback;
     if (event === 'after_commands') m.afterCommands = callback;
   });
@@ -166,6 +170,8 @@ beforeEach(() => {
   m.skipIntercept.mockReturnValue(false);
   m.ensureSeed.mockResolvedValue(false);
   m.isQuiet.mockReturnValue(false);
+  m.autoUpdate.mockReturnValue(true);
+  m.handleNewMessage.mockResolvedValue(undefined);
   delete m.settings.worldSimulationPageEnabled;
   delete m.settings.plotSendDisguiseDisabled;
   m.api.chat = [];
@@ -325,6 +331,49 @@ describe('mainInitialize_ACU 聊天变更防抖', () => {
 });
 
 // T5：TavernHelper.generate 钩子内发送前注入失败不得中断宿主生成（对齐 GENERATION_AFTER_COMMANDS 降级）。
+
+describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
+  it.each(['MESSAGE_RECEIVED', 'CHARACTER_MESSAGE_RENDERED'] as const)('%s 独立唤醒检查并传递明确消息下标', (eventName) => {
+    m.currentChatKey = 'chat-a';
+    m.api.chat = [{ is_user: true, mes: '用户' }, { is_user: false, mes: '正文' }];
+    m.autoUpdate.mockReturnValue(false);
+    const callback = eventName === 'MESSAGE_RECEIVED' ? m.messageReceived : m.characterMessageRendered;
+
+    expect(callback).toBeTypeOf('function');
+    expect(callback!(1, 'normal')).toBeUndefined();
+
+    expect(m.handleNewMessage).toHaveBeenCalledWith(eventName, expect.objectContaining({
+      eventMessageId: 1, eventMessageIdKind: 'index', chatKey: 'chat-a',
+      isolationKey: 'test-isolation', capturedChatLength: 2, capturedAiFloorCount: 1,
+    }));
+    expect(m.autoUpdate).not.toHaveBeenCalled();
+    expect(m.consumeGeneration).not.toHaveBeenCalled();
+    expect(m.consumeInternalGeneration).not.toHaveBeenCalled();
+    expect(m.consumeSimulationInternalGeneration).not.toHaveBeenCalled();
+    expect(m.handleSimulationCompletion).not.toHaveBeenCalled();
+  });
+
+  it.each(['normal', 'swipe', 'appendFinal', 'continue', 'first_message', 'quiet'])('正文事件的 %s 类型不增加入口过滤', (type) => {
+    m.autoUpdate.mockReturnValue(false);
+    m.isQuiet.mockReturnValue(true);
+    m.generationStarted!('normal', { quiet_prompt: '附加提示', automatic_trigger: true }, false);
+
+    m.messageReceived!(0, type);
+    m.characterMessageRendered!(0, type);
+
+    expect(m.handleNewMessage).toHaveBeenCalledTimes(2);
+    expect(m.autoUpdate).not.toHaveBeenCalled();
+    expect(m.consumeGeneration).not.toHaveBeenCalled();
+  });
+
+  it('无消息参数仍唤醒已有兼容检查，不增加拒绝条件', () => {
+    m.messageReceived!();
+    m.characterMessageRendered!('unknown');
+
+    expect(m.handleNewMessage).toHaveBeenNthCalledWith(1, 'MESSAGE_RECEIVED', undefined);
+    expect(m.handleNewMessage).toHaveBeenNthCalledWith(2, 'CHARACTER_MESSAGE_RENDERED', undefined);
+  });
+});
 
 describe('mainInitialize_ACU continuation internal AI event isolation', () => {
   it('does not dispatch an explicitly attributed internal generation to auto-update', () => {

@@ -13,6 +13,7 @@ const m = vi.hoisted(() => {
   return {
     getChat: () => chat,
     setChat: (next: any[]) => { chat = next; },
+    autoFillTimer: null as ReturnType<typeof setTimeout> | null,
     setAutoFillTimer: vi.fn(),
     loadAllChatMessages: vi.fn(),
     triggerAutomaticUpdateIfNeeded: vi.fn(),
@@ -91,7 +92,7 @@ vi.mock('../../../src/service/runtime/helpers-remaining', () => ({
 }));
 
 vi.mock('../../../src/presentation/components/plot-editors', () => ({
-  autoFillDebounceTimer_ACU: null,
+  get autoFillDebounceTimer_ACU() { return m.autoFillTimer; },
   _set_autoFillDebounceTimer_ACU: m.setAutoFillTimer,
   isAutoUpdatingCard_ACU: false,
   wasStoppedByUser_ACU: false,
@@ -116,6 +117,8 @@ const baseIntent = {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  m.autoFillTimer = null;
+  m.setAutoFillTimer.mockImplementation((timer) => { m.autoFillTimer = timer; });
   m.setChat([user, user]);
   m.loadAllChatMessages.mockResolvedValue(undefined);
   m.triggerAutomaticUpdateIfNeeded.mockResolvedValue(undefined);
@@ -123,6 +126,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.clearAllTimers();
+  m.autoFillTimer = null;
   vi.useRealTimers();
   vi.clearAllMocks();
 });
@@ -190,6 +195,48 @@ describe('handleNewMessageDebounced_ACU 有界物化等待', () => {
       expect.objectContaining({ candidateIndexes: [2, 3] }),
     );
     expect(m.evaluateNewMessageAction).not.toHaveBeenCalled();
+  });
+
+  it('结束、接收和渲染通知共用防抖，合并为一次按需检查', async () => {
+    const { handleNewMessageDebounced_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect');
+    m.setChat([user, ai]);
+    m.resolveGeneratedAiMessageIndex.mockReturnValue({ kind: 'resolved', messageIndex: 1 });
+    m.evaluateNewMessageAction.mockReturnValue({ action: 'update_only', lastMessageIndex: 1 });
+    const messageIntent = { ...baseIntent, eventMessageIdKind: 'index' as const, capturedAiFloorCount: 1 };
+
+    await handleNewMessageDebounced_ACU('GENERATION_ENDED', { ...baseIntent, eventMessageId: 2 });
+    await handleNewMessageDebounced_ACU('MESSAGE_RECEIVED', messageIntent);
+    await vi.advanceTimersByTimeAsync(250);
+    await handleNewMessageDebounced_ACU('CHARACTER_MESSAGE_RENDERED', messageIntent);
+    await vi.advanceTimersByTimeAsync(499);
+    expect(m.loadAllChatMessages).not.toHaveBeenCalled();
+    expect(m.triggerAutomaticUpdateIfNeeded).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(m.loadAllChatMessages).toHaveBeenCalledTimes(1);
+    expect(m.resolveGeneratedAiMessageIndex).toHaveBeenCalledExactlyOnceWith({ liveChat: [user, ai], intent: messageIntent });
+    expect(m.evaluateNewMessageAction).toHaveBeenCalledTimes(1);
+    expect(m.triggerAutomaticUpdateIfNeeded).toHaveBeenCalledTimes(1);
+  });
+
+  it('同楼层后续正文变化仍能再次唤醒，不被首次通知永久去重', async () => {
+    const { handleNewMessageDebounced_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect');
+    m.setChat([user, ai]);
+    m.resolveGeneratedAiMessageIndex.mockReturnValue({ kind: 'resolved', messageIndex: 1 });
+    m.evaluateNewMessageAction.mockReturnValue({ action: 'update_only', lastMessageIndex: 1 });
+    const messageIntent = { ...baseIntent, eventMessageIdKind: 'index' as const, capturedAiFloorCount: 1 };
+
+    await handleNewMessageDebounced_ACU('MESSAGE_RECEIVED', messageIntent);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(m.triggerAutomaticUpdateIfNeeded).toHaveBeenCalledTimes(1);
+
+    m.setChat([user, { ...ai, mes: '续写后的正文' }]);
+    await handleNewMessageDebounced_ACU('CHARACTER_MESSAGE_RENDERED', messageIntent);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(m.triggerAutomaticUpdateIfNeeded).toHaveBeenCalledTimes(2);
+    expect(m.evaluateNewMessageAction).toHaveBeenLastCalledWith(
+      m.getChat(), false, true, false, {}, 1,
+    );
   });
 
   it('防抖期间切聊天 → chat_changed，丢弃且不污染新会话', async () => {
