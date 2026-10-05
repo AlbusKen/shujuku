@@ -42,6 +42,7 @@ import { getUiSurface_ACU, showUiSurfaceToast_ACU } from '../../shared/ui-surfac
 import { logAutoFillSkip_ACU } from '../../shared/trigger-diagnostics';
 import { bindContinuationInternalAiGenerationStarted_ACU, consumeContinuationInternalAiGenerationEnded_ACU } from '../../service/continuation/internal-ai-events';
 import { getContinuationHostGenerationBridge_ACU } from '../../service/continuation/host-generation-bridge-registry';
+import type { ContinuationHostGenerationRedirect_ACU } from '../../service/continuation/host-generation-bridge';
 import { getContinuationRuntime_ACU } from '../../service/continuation/continuation-runtime';
 import { bindWorldSimulationInternalAiGenerationStarted_ACU, consumeWorldSimulationInternalAiGenerationEnded_ACU, hasWorldSimulationInternalAiInflight_ACU } from '../../service/simulation/simulation-internal-ai-events';
 import { createWorldSimulationCompletionIntentForCurrentChat_ACU, getWorldSimulationRuntime_ACU } from '../../service/simulation/simulation-runtime';
@@ -658,11 +659,15 @@ export   function mainInitialize_ACU() {
             const createdMessages: any[] = [];
             let userFloor = pendingInput ? null : { chat, message: existing, index: chat.length - 1 };
             let restoreGenerationUi = () => {};
+            let continuationRedirect: ContinuationHostGenerationRedirect_ACU | null = null;
             const warn = (text: string) => showToastr_ACU('warning', text, '剧情推进');
             try {
-              await ensureInitialSeedCheckpointBeforeGeneration_ACU('generation_after_commands_before_ai', { allowPendingFirstUserMessage: true });
               if (disguised) {
                 redirectPlotSendEvent_ACU(params);
+                continuationRedirect = await getContinuationHostGenerationBridge_ACU()?.prepareHostGenerationRedirect(generationGate_ACU.lastGeneration?.seq) ?? null;
+              }
+              await ensureInitialSeedCheckpointBeforeGeneration_ACU('generation_after_commands_before_ai', { allowPendingFirstUserMessage: true });
+              if (disguised) {
                 restoreGenerationUi = beginHostGenerationUi_ACU();
                 if (pendingInput) {
                   setSendTextareaValue_ACU('');
@@ -690,6 +695,7 @@ export   function mainInitialize_ACU() {
                   _set_tempPlotToSave_ACU(null);
                   await removePlotSendMessages_ACU(chat, createdMessages).catch(() => warn('本轮临时楼层清理未完成，请检查聊天记录。'));
                   setSendTextareaValue_ACU(originalText);
+                  await continuationRedirect?.cancel();
                   return;
                 }
                 if (result.action === 'planned' && result.finalMessage?.trim()) {
@@ -727,10 +733,13 @@ export   function mainInitialize_ACU() {
             }
             if (disguised && userFloor) {
               redirectPlotSendEvent_ACU(params, () => {
-                void SillyTavern_API_ACU.generate('regenerate').catch(() => {
+                const generate = async () => SillyTavern_API_ACU.generate('regenerate');
+                void (continuationRedirect ? continuationRedirect.resume(generate) : generate()).catch(() => {
                   showToastr_ACU('error', '宿主正文生成失败，已保留用户楼层，可重新生成。', '剧情推进');
                 });
               });
+            } else {
+              await continuationRedirect?.cancel();
             }
           });
         }

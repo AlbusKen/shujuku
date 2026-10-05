@@ -48,6 +48,7 @@ const m = vi.hoisted(() => ({
   recordGeneration: vi.fn((type: any, params: any, dryRun: any) => {
     const context = { seq: ++m.gate.generationSeq, type, params, dryRun };
     m.gate.activeGenerations.push(context);
+    m.gate.lastGeneration = context;
     return context;
   }),
   consumeGeneration: vi.fn(() => m.gate.activeGenerations.pop() || null),
@@ -520,6 +521,14 @@ describe('发送前处理楼层生命周期', () => {
     m.shouldProcessPlot.mockReturnValue(true);
     m.shouldProcessSummary.mockReturnValue(true);
     m.settings.plotSendDisguiseDisabled = unmasked;
+    const handoff = { resume: vi.fn(async (generate: () => Promise<unknown>) => { await generate(); }), cancel: vi.fn(async () => undefined) };
+    const bridge = {
+      prepareHostGenerationRedirect: vi.fn(async () => handoff),
+      onGenerationStarted: vi.fn(() => true),
+    };
+    m.continuationBridge = bridge;
+    m.generationStarted!('normal', {}, false);
+    const sourceSequence = m.gate.generationSeq;
     const pendingUi = await vi.importActual<typeof import('../../../src/presentation/components/plot-pending-disguise')>('../../../src/presentation/components/plot-pending-disguise');
     m.beginDisguise.mockImplementation(pendingUi.beginPlotPendingDisguise_ACU);
     const previous = { is_user: false, mes: '历史回复' };
@@ -561,9 +570,13 @@ describe('发送前处理楼层生命周期', () => {
       expect(m.processBeforeGen).toHaveBeenCalledOnce();
       await vi.advanceTimersByTimeAsync(0);
       expect(m.generate).not.toHaveBeenCalled();
+      expect(bridge.prepareHostGenerationRedirect).not.toHaveBeenCalled();
+      expect(handoff.resume).not.toHaveBeenCalled();
       return;
     }
     const user = m.api.chat[1];
+    expect(bridge.prepareHostGenerationRedirect).toHaveBeenCalledExactlyOnceWith(sourceSequence);
+    expect(bridge.prepareHostGenerationRedirect).toHaveBeenCalledBefore(m.strategy1 as any);
     const node = document.querySelector('#chat .mes[mesid="1"]');
     expect(user).toMatchObject({ is_user: true, mes: '本轮原输入' });
     expect(m.api.chat).toHaveLength(3);
@@ -615,6 +628,8 @@ describe('发送前处理楼层生命周期', () => {
     expect(m.hostEmit).not.toHaveBeenCalledWith('generation_ended', expect.anything());
     await vi.advanceTimersByTimeAsync(0);
     expect(m.generate).toHaveBeenCalledExactlyOnceWith('regenerate');
+    expect(handoff.resume).toHaveBeenCalledOnce();
+    expect(handoff.cancel).not.toHaveBeenCalled();
     expect(document.querySelector('#chat .acu-plot-pending-mes')).toBeNull();
     expect(m.input).toBe('下一轮草稿');
     expect(m.setInput).not.toHaveBeenCalledWith('最终剧情正文');
@@ -627,6 +642,10 @@ describe('发送前处理楼层生命周期', () => {
     vi.useFakeTimers();
     m.shouldProcessPlot.mockReturnValue(true);
     m.settings.plotSendDisguiseDisabled = unmasked;
+    const handoff = { resume: vi.fn(async (generate: () => Promise<unknown>) => { await generate(); }), cancel: vi.fn(async () => undefined) };
+    const bridge = { prepareHostGenerationRedirect: vi.fn(async () => handoff), onGenerationStarted: vi.fn(() => true) };
+    m.continuationBridge = bridge;
+    m.generationStarted!('normal', {}, false);
     const pendingUi = await vi.importActual<typeof import('../../../src/presentation/components/plot-pending-disguise')>('../../../src/presentation/components/plot-pending-disguise');
     m.beginDisguise.mockImplementation(pendingUi.beginPlotPendingDisguise_ACU);
     const previous = { is_user: false, mes: '历史回复' };
@@ -643,6 +662,8 @@ describe('发送前处理楼层生命周期', () => {
       expect(m.input).toBe('失败轮原输入');
     }
     m.input = '任务后保存失败原输入';
+    expect(handoff.cancel).toHaveBeenCalledTimes(unmasked ? 0 : 2);
+    expect(handoff.resume).not.toHaveBeenCalled();
     if (unmasked) {
       expect(m.api.addOneMessage).not.toHaveBeenCalled();
       expect(m.beginDisguise).not.toHaveBeenCalled();
@@ -664,6 +685,8 @@ describe('发送前处理楼层生命周期', () => {
     expect(fetch).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(0);
     expect(m.generate).toHaveBeenCalledExactlyOnceWith('regenerate');
+    expect(handoff.resume).toHaveBeenCalledOnce();
+    expect(handoff.cancel).toHaveBeenCalledTimes(2);
     expect(m.api.chat).toHaveLength(2);
   });
 

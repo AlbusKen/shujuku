@@ -17,6 +17,7 @@ export interface ContinuationHostTurnRuntime_ACU {
   continueTask(): Promise<{ preparedTurn?: ContinuationPreparedTurnInstruction_ACU; retryHostGeneration?: boolean }>;
   recordHostTurn(input: { capture: ContinuationHostGenerationCapture_ACU }): Promise<unknown>;
   bindHostTurnGeneration(generationSeq: number): Promise<void>;
+  redirectHostTurnGeneration(input: { attemptId: string; generationSeq: number | null }): Promise<void>;
   confirmCurrentTurn(messageIndex?: number): Promise<unknown>;
   rejectHostTurnForMissingTags(input: { messageIndex: number }): Promise<unknown>;
   rejectHostTurnForShortGeneration(input: { messageIndex: number; tokenCount: number; threshold: number }): Promise<unknown>;
@@ -52,6 +53,13 @@ export interface ContinuationHostGenerationBridgeDependencies_ACU {
 
 type StartedHostGeneration_ACU = { attemptId: string; sequence: number; bind: Promise<void> };
 type LocalRetryClaim_ACU = { attemptId: string; mode: 'generate' | 'regenerate'; createdAt: number; sequence: number | null; consumed: boolean };
+type RedirectClaim_ACU = { attemptId: string; sourceSequence: number | null; phase: 'preparing' | 'waiting' | 'resuming'; completionStarted: boolean };
+
+/** 发送前接管持有的单轮交接；停止或切换聊天后不再启动迟到的正文请求。 */
+export interface ContinuationHostGenerationRedirect_ACU {
+  resume(generate: () => Promise<unknown>): Promise<void>;
+  cancel(): Promise<void>;
+}
 
 /**
  * The only bridge that may couple a prepared continuation turn to host input
@@ -68,6 +76,7 @@ type LocalRetryClaim_ACU = { attemptId: string; mode: 'generate' | 'regenerate';
 export class ContinuationHostGenerationBridge_ACU {
   private sendingAttemptId: string | null = null;
   private readonly startedByChat = new Map<string, StartedHostGeneration_ACU>();
+  private readonly redirectsByChat = new Map<string, RedirectClaim_ACU>();
   private readonly stateListeners = new Set<() => void>();
   private localRetryClaim: LocalRetryClaim_ACU | null = null;
   private static readonly LOCAL_RETRY_CLAIM_TTL_MS = 60_000;
@@ -99,7 +108,88 @@ export class ContinuationHostGenerationBridge_ACU {
         return true;
       }
     }
+    const redirect = this.redirectsByChat.get(chatIdentity);
+    if (redirect && this.isCurrentRedirect_ACU(chatIdentity, redirect)) return true;
     return this.startedByChat.has(chatIdentity);
+  }
+
+  /** 明确认领发送前处理的替代请求，不把任意新生成当作原轮次的延续。 */
+  async prepareHostGenerationRedirect(sourceSequence: number | undefined): Promise<ContinuationHostGenerationRedirect_ACU | null> {
+    const runtime = this.dependencies.runtime;
+    const chatIdentity = runtime.getChatIdentity();
+    const snapshot = runtime.readPendingHostTurn();
+    if (!snapshot || snapshot.pending.status !== 'awaiting_generation' || snapshot.pending.identity.chatIdentity !== chatIdentity) return null;
+    const started = this.startedByChat.get(chatIdentity);
+    const boundSequence = started?.sequence ?? snapshot.pending.capture.generationSeq;
+    if (sourceSequence !== undefined && boundSequence !== null && sourceSequence !== boundSequence) return null;
+    if (this.redirectsByChat.has(chatIdentity)) return null;
+    const claim: RedirectClaim_ACU = { attemptId: snapshot.pending.identity.attemptId, sourceSequence: sourceSequence ?? boundSequence, phase: 'preparing', completionStarted: false };
+    // 在首次 await 前屏蔽原请求的终态和处理期间的内部生成。
+    this.redirectsByChat.set(chatIdentity, claim);
+    const handoff: ContinuationHostGenerationRedirect_ACU = {
+      resume: async generate => {
+        if (!this.isCurrentRedirect_ACU(chatIdentity, claim)) {
+          this.releaseRedirect_ACU(chatIdentity, claim);
+          return;
+        }
+        if (claim.phase !== 'waiting') return;
+        claim.phase = 'resuming';
+        try {
+          await generate();
+        } finally {
+          // 宿主生成 Promise 已结束但未派发终态时，仍走同一正文解析/空回重试链。
+          // 已开始消费的原生回调独占结算，避免同一轮被确认或重试两次。
+          try {
+            if (!claim.completionStarted && this.isCurrentRedirect_ACU(chatIdentity, claim)) {
+              const sequence = this.startedByChat.get(chatIdentity)?.sequence ?? runtime.readPendingHostTurn()?.pending.capture.generationSeq ?? undefined;
+              await this.onGenerationEnded(undefined, sequence, true);
+            }
+          } finally {
+            // 原生终态回调仍在处理中时，由该回调负责释放交接。
+            if (!claim.completionStarted) this.releaseRedirect_ACU(chatIdentity, claim);
+          }
+        }
+      },
+      cancel: async () => {
+        if (!this.isCurrentRedirect_ACU(chatIdentity, claim)) {
+          this.releaseRedirect_ACU(chatIdentity, claim);
+          return;
+        }
+        this.startedByChat.delete(chatIdentity);
+        try { await runtime.failHostTurnForStoppedGeneration(); }
+        finally {
+          this.releaseRedirect_ACU(chatIdentity, claim);
+          this.notifyStateChanges_ACU();
+        }
+      },
+    };
+    try {
+      if (started) await started.bind;
+      if (!this.isCurrentRedirect_ACU(chatIdentity, claim)) return handoff;
+      const pending = runtime.readPendingHostTurn()!.pending;
+      await runtime.redirectHostTurnGeneration({ attemptId: claim.attemptId, generationSeq: pending.capture.generationSeq });
+      this.startedByChat.delete(chatIdentity);
+      claim.phase = 'waiting';
+      this.notifyStateChanges_ACU();
+    } catch {
+      if (this.isCurrentRedirect_ACU(chatIdentity, claim)) {
+        try { await runtime.pauseForHostResultFailure(); } catch { /* 保留原持久化失败。 */ }
+      }
+      this.releaseRedirect_ACU(chatIdentity, claim);
+      this.notifyStateChanges_ACU();
+    }
+    return handoff;
+  }
+
+  private isCurrentRedirect_ACU(chatIdentity: string, claim: RedirectClaim_ACU): boolean {
+    const runtime = this.dependencies.runtime;
+    if (runtime.getChatIdentity() !== chatIdentity || this.redirectsByChat.get(chatIdentity) !== claim) return false;
+    const pending = runtime.readPendingHostTurn()?.pending;
+    return pending?.status === 'awaiting_generation' && pending.identity.chatIdentity === chatIdentity && pending.identity.attemptId === claim.attemptId;
+  }
+
+  private releaseRedirect_ACU(chatIdentity: string, claim: RedirectClaim_ACU): void {
+    if (this.redirectsByChat.get(chatIdentity) === claim) this.redirectsByChat.delete(chatIdentity);
   }
 
   async send(prepared: ContinuationPreparedTurnInstruction_ACU): Promise<boolean> {
@@ -139,6 +229,8 @@ export class ContinuationHostGenerationBridge_ACU {
     const context = normalizeGenerationEventContext_ACU(contextInput);
     const runtime = this.dependencies.runtime;
     const chatIdentity = runtime.getChatIdentity();
+    const redirect = this.redirectsByChat.get(chatIdentity);
+    if (redirect && (redirect.completionStarted || redirect.phase !== 'resuming' || !this.isCurrentRedirect_ACU(chatIdentity, redirect) || context.quietLike || context.dryRun || sequence === redirect.sourceSequence)) return false;
     const sendingAttemptId = this.sendingAttemptId;
     if (sendingAttemptId) {
       const snapshot = runtime.readPendingHostTurn();
@@ -168,6 +260,8 @@ export class ContinuationHostGenerationBridge_ACU {
     const context = normalizeGenerationEventContext_ACU(contextInput);
     const runtime = this.dependencies.runtime;
     const started = this.startedByChat.get(runtime.getChatIdentity());
+    const redirect = this.redirectsByChat.get(runtime.getChatIdentity());
+    if (redirect && (redirect.completionStarted || redirect.phase !== 'resuming' || sequence === redirect.sourceSequence)) return false;
     if (started && sequence !== undefined && started.sequence === sequence) return true;
     const localRetryClaim = this.getMatchingLocalRetryClaim_ACU(context, sequence);
     if (!context.allowOrdinaryLooseClaim && !localRetryClaim) return false;
@@ -183,6 +277,8 @@ export class ContinuationHostGenerationBridge_ACU {
     const endedOnlyLocalRetryClaim = this.getMatchingLocalRetryClaim_ACU(context, sequence);
     if (!this.claimsGenerationEnded(sequence, context)) return;
     const chatIdentity = this.dependencies.runtime.getChatIdentity();
+    const redirect = this.redirectsByChat.get(chatIdentity);
+    if (redirect) redirect.completionStarted = true;
     const started = this.startedByChat.get(chatIdentity) ?? null;
     this.startedByChat.delete(chatIdentity);
     if (endedOnlyLocalRetryClaim) {
@@ -218,6 +314,11 @@ export class ContinuationHostGenerationBridge_ACU {
       }
       const message = chat[messageIndex];
       const body = String(message?.mes ?? '');
+      if (!body.trim()) {
+        await this.dependencies.runtime.rejectHostTurnForFailedGeneration();
+        await this.autoRetryHostGenerationIfReady_ACU(snapshot.settings.retryDelaySeconds ?? 0);
+        return;
+      }
       if (!message || !validateLoopTags_ACU(body, snapshot.settings.loopTags)) {
         await this.dependencies.runtime.rejectHostTurnForMissingTags({ messageIndex });
         await this.autoRetryHostGenerationIfReady_ACU(snapshot.settings.retryDelaySeconds ?? 0);
@@ -245,6 +346,7 @@ export class ContinuationHostGenerationBridge_ACU {
       }
       return;
     } finally {
+      if (redirect) this.releaseRedirect_ACU(chatIdentity, redirect);
       this.notifyStateChanges_ACU();
     }
     await this.autoContinueAfterTurn_ACU();
@@ -258,10 +360,13 @@ export class ContinuationHostGenerationBridge_ACU {
     const runtime = this.dependencies.runtime;
     const chatIdentity = runtime.getChatIdentity();
     const started = this.startedByChat.get(chatIdentity) ?? null;
+    const redirect = this.redirectsByChat.get(chatIdentity);
+    if (redirect && (redirect.completionStarted || redirect.phase !== 'resuming' || sequence === redirect.sourceSequence)) return;
     const snapshot = runtime.readPendingHostTurn();
     if (!snapshot || snapshot.pending.status !== 'awaiting_generation') return;
     const boundSequence = snapshot.pending.capture.generationSeq ?? started?.sequence ?? null;
     if (boundSequence !== null && sequence !== undefined && boundSequence !== sequence) return;
+    if (redirect) redirect.completionStarted = true;
     this.startedByChat.delete(chatIdentity);
     if (this.localRetryClaim?.attemptId === snapshot.pending.identity.attemptId) this.localRetryClaim = null;
     if (started) {
@@ -272,6 +377,7 @@ export class ContinuationHostGenerationBridge_ACU {
     } catch {
       // 状态已变化（轮次已被其他路径推进/暂停）时无需补写。
     }
+    if (redirect) this.releaseRedirect_ACU(chatIdentity, redirect);
     this.notifyStateChanges_ACU();
   }
 
@@ -331,6 +437,10 @@ export class ContinuationHostGenerationBridge_ACU {
     if (beforeRetry?.pending.status !== 'retry_ready' || beforeRetry.pending.identity.attemptId !== attemptId) return;
     const action = await this.dependencies.runtime.retryCurrentTurn();
     if (!action.retryHostGeneration) return;
+    const chatIdentity = this.dependencies.runtime.getChatIdentity();
+    const redirect = this.redirectsByChat.get(chatIdentity);
+    // 旧请求已结算为重试；新请求必须能够独立认领自己的开始和结束事件。
+    if (redirect?.completionStarted && redirect.attemptId === attemptId) this.releaseRedirect_ACU(chatIdentity, redirect);
     await this.retryHostGeneration();
   }
 

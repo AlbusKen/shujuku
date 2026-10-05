@@ -535,7 +535,24 @@ export class ContinuationOrchestrator_ACU {
     return this.pauseHostTurn_ACU('CONTINUATION_HOST_INPUT_UNAVAILABLE', '酒馆输入框或发送按钮不可用', 'host_input_unavailable');
   }
 
-  /** Binds a generation sequence only after the host bridge observed a synchronous send-start event. */
+  /** 仅供发送前接管交接：清除被替代请求的序号，不改变轮次身份、捕获边界或重试额度。 */
+  async redirectHostTurnGeneration(input: { attemptId: string; generationSeq: number | null }): Promise<void> {
+    const chatIdentity = this.requireChatIdentity_ACU();
+    await this.withLease_ACU(async () => {
+      await this.dependencies.store.updatePersistedAtomically(current => {
+        const envelope = this.requireEnvelope_ACU(current);
+        const task = this.requireTask_ACU(envelope);
+        const pending = task.pendingHostTurn;
+        if (task.status !== 'running' || !pending || pending.status !== 'awaiting_generation'
+          || pending.identity.attemptId !== input.attemptId || pending.capture.generationSeq !== input.generationSeq) {
+          throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'host_send', '宿主生成交接已不属于当前轮次', false));
+        }
+        return { ...envelope, activeTask: { ...task, pendingHostTurn: { ...pending, capture: { ...pending.capture, generationSeq: null } } } };
+      }, { chatIdentity });
+    });
+  }
+
+  /** 桥认领宿主生成开始后绑定序号；明确交接后的正文请求重新绑定。 */
   async bindHostTurnGeneration(generationSeq: number): Promise<void> {
     const chatIdentity = this.requireChatIdentity_ACU();
     await this.withLease_ACU(async () => {

@@ -20,6 +20,10 @@ function createHarness(options: { tags?: string; chat?: any[]; send?: boolean; r
     // 模拟编排器按硬游标自动填身份：重试沿用已有 attemptId。
     recordHostTurn: vi.fn(async ({ capture }) => { pending = { identity: pending?.identity ?? identity, capture, retryCount: pending?.retryCount ?? 0, status: 'awaiting_generation' }; }),
     bindHostTurnGeneration: vi.fn(async (generationSeq) => { pending = { ...pending, capture: { ...pending.capture, generationSeq } }; }),
+    redirectHostTurnGeneration: vi.fn(async ({ attemptId, generationSeq }) => {
+      if (pending?.identity.attemptId !== attemptId || pending.capture.generationSeq !== generationSeq) throw new Error('stale redirect');
+      pending = { ...pending, capture: { ...pending.capture, generationSeq: null } };
+    }),
     confirmCurrentTurn: vi.fn(async () => { pending = null; }),
     rejectHostTurnForMissingTags: vi.fn(async () => { pending = { ...pending, status: 'retry_ready' }; }),
     rejectHostTurnForShortGeneration: vi.fn(async () => { pending = { ...pending, status: 'retry_ready' }; }),
@@ -51,15 +55,55 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
   const prepared: any = { identity, instruction: { instruction: '最终普通文本' } };
 
   it('persists identity before host send, then uniquely confirms the matching materialized reply', async () => {
-    const h = createHarness();
-    h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(7); return true; });
-    await expect(h.bridge.send(prepared)).resolves.toBe(true);
-    expect(h.runtime.recordHostTurn).toHaveBeenCalledBefore(h.hostInput.send as any);
-    h.setChat([{ is_user: true }, { is_user: false, mes: '<ok>正文', message_id: 9 }]);
-    await h.bridge.onGenerationEnded(9, 7);
-    expect(h.runtime.bindHostTurnGeneration).toHaveBeenCalledWith(7);
-    expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(1);
-    expect(h.runtime.rejectHostTurnForMissingTags).not.toHaveBeenCalled();
+    for (const redirected of [false, true]) {
+      const h = createHarness();
+      h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(7); return true; });
+      await expect(h.bridge.send(prepared)).resolves.toBe(true);
+      expect(h.runtime.recordHostTurn).toHaveBeenCalledBefore(h.hostInput.send as any);
+      if (redirected) {
+        const handoff = await h.bridge.prepareHostGenerationRedirect(7);
+        expect(handoff).not.toBeNull();
+        expect(h.runtime.redirectHostTurnGeneration).toHaveBeenCalledWith({ attemptId: identity.attemptId, generationSeq: 7 });
+        expect(h.bridge.hasLiveClaim('chat-a')).toBe(true);
+        expect(h.bridge.onGenerationStarted(8, true)).toBe(false);
+        await h.bridge.onGenerationEnded(undefined, 7, true);
+        await h.bridge.onGenerationStopped(7);
+        expect(h.runtime.rejectHostTurnForFailedGeneration).not.toHaveBeenCalled();
+        expect(h.runtime.failHostTurnForStoppedGeneration).not.toHaveBeenCalled();
+        const confirm = h.runtime.confirmCurrentTurn.getMockImplementation()!;
+        let finishConfirmation!: () => void;
+        let confirmationEntered!: () => void;
+        const entered = new Promise<void>(resolve => { confirmationEntered = resolve; });
+        h.runtime.confirmCurrentTurn.mockImplementationOnce(async () => {
+          confirmationEntered();
+          await new Promise<void>(resolve => { finishConfirmation = resolve; });
+          await confirm();
+        });
+        let completion!: Promise<void>;
+        await handoff!.resume(async () => {
+          expect(h.bridge.onGenerationStarted(9, true)).toBe(true);
+          h.setChat([{ is_user: true }, { is_user: false, mes: '<ok>正文', message_id: 10 }]);
+          completion = h.bridge.onGenerationEnded(10, 9);
+          await entered;
+        });
+        expect(h.bridge.hasLiveClaim('chat-a')).toBe(true);
+        expect(h.bridge.claimsGenerationEnded(9, true)).toBe(false);
+        const duplicateGenerate = vi.fn(async () => undefined);
+        await handoff!.resume(duplicateGenerate);
+        await h.bridge.onGenerationEnded(10, 9, true);
+        await h.bridge.onGenerationStopped(9);
+        expect(duplicateGenerate).not.toHaveBeenCalled();
+        expect(h.runtime.failHostTurnForStoppedGeneration).not.toHaveBeenCalled();
+        finishConfirmation();
+        await completion;
+        expect(h.runtime.bindHostTurnGeneration).toHaveBeenLastCalledWith(9);
+      } else {
+        h.setChat([{ is_user: true }, { is_user: false, mes: '<ok>正文', message_id: 9 }]);
+        await h.bridge.onGenerationEnded(9, 7);
+      }
+      expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledExactlyOnceWith(1);
+      expect(h.runtime.rejectHostTurnForMissingTags).not.toHaveBeenCalled();
+    }
   });
 
   it('notifies state observers after confirming a claimed host reply', async () => {
@@ -131,31 +175,47 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
     const h = createHarness();
     h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(7); return true; });
     await h.bridge.send(prepared);
+    const handoff = await h.bridge.prepareHostGenerationRedirect(7);
     h.setChat([{ is_user: true }, { is_user: false, mes: '<ok>正文', message_id: 9 }]);
     h.setChatIdentity('chat-b');
 
     expect(h.bridge.claimsGenerationEnded(7)).toBe(false);
     await h.bridge.onGenerationEnded(9, 7);
+    const generate = vi.fn(async () => undefined);
+    await handoff!.resume(generate);
+    await handoff!.cancel();
 
+    expect(generate).not.toHaveBeenCalled();
     expect(h.runtime.confirmCurrentTurn).not.toHaveBeenCalled();
     expect(h.runtime.pauseForHostResultFailure).not.toHaveBeenCalled();
     expect(h.runtime.rejectHostTurnForMissingTags).not.toHaveBeenCalled();
+    expect(h.runtime.failHostTurnForStoppedGeneration).not.toHaveBeenCalled();
   });
 
   it('auto-retries the current turn when an errored generation ends without a message id or new floor', async () => {
-    const h = createHarness();
-    h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(7); return true; });
-    h.hostInput.retryGeneration.mockImplementation(() => { h.bridge.onGenerationStarted(8); return true; });
-    await h.bridge.send(prepared);
-
-    await h.bridge.onGenerationEnded(undefined, 7);
-
-    expect(h.runtime.rejectHostTurnForFailedGeneration).toHaveBeenCalledWith();
-    expect(h.runtime.pauseForHostResultFailure).not.toHaveBeenCalled();
-    expect(h.retryCurrentTurn).toHaveBeenCalledBefore(h.hostInput.retryGeneration as any);
-    expect(h.hostInput.send).toHaveBeenCalledOnce();
-    expect(h.hostInput.retryGeneration).toHaveBeenCalledWith('generate');
-    expect(h.runtime.confirmCurrentTurn).not.toHaveBeenCalled();
+    for (const outcome of ['no_floor', 'redirected_no_floor', 'redirected_empty_floor']) {
+      const h = createHarness({ tags: '' });
+      h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(7); return true; });
+      h.hostInput.retryGeneration.mockImplementation(() => { h.bridge.onGenerationStarted(10, true); return true; });
+      await h.bridge.send(prepared);
+      if (outcome === 'no_floor') {
+        await h.bridge.onGenerationEnded(undefined, 7);
+      } else {
+        const handoff = await h.bridge.prepareHostGenerationRedirect(7);
+        await handoff!.resume(async () => {
+          h.bridge.onGenerationStarted(9, true);
+          if (outcome === 'redirected_empty_floor') h.setChat([{ is_user: true }, { is_user: false, mes: '  \n ', message_id: 9 }]);
+          // 宿主空回未派发 ENDED：生成 Promise 的终态仍须结束本轮等待。
+        });
+      }
+      expect(h.runtime.rejectHostTurnForFailedGeneration).toHaveBeenCalledOnce();
+      expect(h.runtime.pauseForHostResultFailure).not.toHaveBeenCalled();
+      expect(h.retryCurrentTurn).toHaveBeenCalledBefore(h.hostInput.retryGeneration as any);
+      expect(h.hostInput.send).toHaveBeenCalledOnce();
+      expect(h.hostInput.retryGeneration).toHaveBeenCalledExactlyOnceWith(outcome === 'redirected_empty_floor' ? 'regenerate' : 'generate');
+      expect(h.runtime.confirmCurrentTurn).not.toHaveBeenCalled();
+      expect(h.runtime.readPendingHostTurn()!.pending.capture.generationSeq).toBe(10);
+    }
   });
 
   it('auto-retries when the anchored reply never materializes in the live chat', async () => {
@@ -284,10 +344,15 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
   it('converts an awaiting turn to retry-ready when its host generation is stopped', async () => {
     const h = createHarness();
     await h.bridge.send(prepared);
+    const handoff = await h.bridge.prepareHostGenerationRedirect(undefined);
 
+    await handoff!.cancel();
     await h.bridge.onGenerationStopped(undefined);
+    const generate = vi.fn(async () => undefined);
+    await handoff!.resume(generate);
 
-    expect(h.runtime.failHostTurnForStoppedGeneration).toHaveBeenCalledWith();
+    expect(generate).not.toHaveBeenCalled();
+    expect(h.runtime.failHostTurnForStoppedGeneration).toHaveBeenCalledOnce();
     expect(h.runtime.readPendingHostTurn()!.pending.status).toBe('retry_ready');
   });
 

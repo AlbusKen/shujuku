@@ -415,6 +415,21 @@ describe('ContinuationOrchestrator_ACU', () => {
     await expectCode(() => recordPendingHostTurn(orchestrator), 'CONTINUATION_INTERNAL_REQUEST_STALE');
     expect(store.readPersisted()!.activeTask!.pendingHostTurn!.identity.attemptId).toBe(pending.identity.attemptId);
     expect(store.readPersisted()!.activeTask!.stages[0].completedTurns).toBe(0);
+    await expectCode(() => orchestrator.redirectHostTurnGeneration({ attemptId: 'other-attempt', generationSeq: 1 }), 'CONTINUATION_INTERNAL_REQUEST_STALE');
+    await expectCode(() => orchestrator.redirectHostTurnGeneration({ attemptId: pending.identity.attemptId, generationSeq: 2 }), 'CONTINUATION_INTERNAL_REQUEST_STALE');
+    expect(store.readPersisted()!.activeTask!.pendingHostTurn).toEqual(pending);
+    await orchestrator.redirectHostTurnGeneration({ attemptId: pending.identity.attemptId, generationSeq: 1 });
+    expect(new FirstFloorContinuationStore_ACU().readPersisted()!.activeTask!.pendingHostTurn).toEqual({
+      ...pending, capture: { ...pending.capture, generationSeq: null },
+    });
+    await orchestrator.bindHostTurnGeneration(2);
+    expect(new FirstFloorContinuationStore_ACU().readPersisted()!.activeTask!.pendingHostTurn).toEqual({
+      ...pending, capture: { ...pending.capture, generationSeq: 2 },
+    });
+    expect(store.readPersisted()!.activeTask!.stages[0].completedTurns).toBe(0);
+    await orchestrator.stopTask();
+    await expectCode(() => orchestrator.redirectHostTurnGeneration({ attemptId: pending.identity.attemptId, generationSeq: 2 }), 'CONTINUATION_INTERNAL_REQUEST_STALE');
+    expect(store.readPersisted()!.activeTask).toMatchObject({ status: 'paused', stopReason: 'manual', pendingHostTurn: null });
   });
 
   it('retries the current host turn with its stable attempt and pauses after the generation retry limit', async () => {
