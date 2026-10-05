@@ -22,6 +22,7 @@ const m = vi.hoisted(() => ({
   preload: vi.fn(), shouldRebuild: vi.fn(), rebuild: vi.fn(), restoreFlush: vi.fn(),
   // 切聊天向量预热门控：默认启用，保持既有 preload→rebuild/restore 编排语义。
   vectorPipelineEnabled: vi.fn(() => true),
+  vectorPlan: null as any,
   processBeforeGen: vi.fn(),
   orchestrate: vi.fn(),
   strategy1: vi.fn(), strategy2: vi.fn(), shouldProcessPlot: vi.fn(),
@@ -95,7 +96,7 @@ vi.mock('../../../src/presentation/components/plot-planning-ui', () => ({ runOpt
 vi.mock('../../../src/presentation/components/summary-vector-index-ui', () => ({ processSummaryVectorIndexBeforeGenerationWithUI_ACU: (...args: any[]) => m.processBeforeGen(...args), shouldRebuildSummaryVectorIndexWithUI_ACU: (...args: any[]) => m.shouldRebuild(...args), rebuildCurrentSummaryVectorIndexWithUI_ACU: (...args: any[]) => m.rebuild(...args) }));
 vi.mock('../../../src/service/vector/summary-vector-index-cache-service', () => ({ preloadSummaryVectorIndexCacheForCurrentChat_ACU: (...args: any[]) => m.preload(...args) }));
 vi.mock('../../../src/service/vector/summary-vector-index-flush-queue', () => ({ restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU: (...args: any[]) => m.restoreFlush(...args) }));
-vi.mock('../../../src/service/fill-mode/fill-mode-gate', () => ({ isVectorPipelineEnabledForCurrentChat_ACU: () => m.vectorPipelineEnabled() }));
+vi.mock('../../../src/service/fill-mode/fill-mode-gate', () => ({ isVectorPipelineEnabledForCurrentChat_ACU: () => m.vectorPipelineEnabled(), getVectorPipelinePlanForCurrentChat_ACU: () => m.vectorPlan }));
 vi.mock('../../../src/service/vector/summary-vector-index-realign-state', () => ({ markSummaryVectorIndexDirtyForRealign_ACU: vi.fn() }));
 vi.mock('../../../src/service/continuation/internal-ai-events', () => ({
   bindContinuationInternalAiGenerationStarted_ACU: (...args: any[]) => m.bindInternalGeneration(...args),
@@ -123,6 +124,9 @@ beforeAll(async () => {
   vi.spyOn(globalThis, 'setInterval').mockImplementation(() => 0 as any);
   // T5：TavernHelper.generate 钩子测试需要宿主 API 在 mainInitialize 前就绪，钩子才会被安装。
   (window as any).TavernHelper = { generate: vi.fn(async (...args: any[]) => ({ handled: true, args })) };
+  m.api.eventTypes.USER_MESSAGE_RENDERED = 'user_message_rendered';
+  m.api.eventTypes.WORLDINFO_ENTRIES_LOADED = 'worldinfo_entries_loaded';
+  m.api.eventTypes.GENERATE_AFTER_DATA = 'generate_after_data';
   // 与宿主一致：原派发器吞掉监听器异常，阻断必须由外层派发返回边界完成。
   m.hostEmit.mockImplementation(async (event: string, ...args: any[]) => {
     if (event === 'after_commands') {
@@ -131,6 +135,10 @@ beforeAll(async () => {
       await m.messageSent?.(args[0]);
     } else if (event === 'message_updated') {
       await m.messageUpdated(args[0]);
+    } else if (event === 'generation_stopped') {
+      m.generationStopped?.();
+    } else if (event === 'chat') {
+      await m.chatChanged?.(args[0]);
     }
   });
   m.api.eventSource.emit = m.hostEmit;
@@ -168,6 +176,7 @@ beforeEach(() => {
   delete document.body.dataset.generating;
   document.querySelector<HTMLElement>('#mes_stop')!.style.display = 'none';
   m.processingPlot = false;
+  m.vectorPlan = null;
   m.skipIntercept.mockReturnValue(false);
   m.ensureSeed.mockResolvedValue(false);
   m.isQuiet.mockReturnValue(false);
@@ -530,7 +539,7 @@ describe('mainInitialize_ACU continuation host generation isolation', () => {
 });
 
 describe('mainInitialize_ACU TavernHelper.generate 独立入口契约', () => {
-  it('召回与普通处理异常继续发送，仅 API 重试耗尽或主动终止取消', async () => {
+  it('召回异常仍可发送，剧情失败或忙碌阻断正文', async () => {
     await m.chatChanged!('chat-a');
     m.shouldProcessSummary.mockReturnValue(true);
     m.processBeforeGen.mockRejectedValueOnce(new Error('召回请求失败'));
@@ -543,12 +552,13 @@ describe('mainInitialize_ACU TavernHelper.generate 独立入口契约', () => {
     expect(result).toEqual({ handled: true, args });
 
     let hostCalls = hostGenerate.mock.calls.length;
-    for (const action of ['failed', 'skipped', 'loop_retry', 'busy', 'aborted']) {
+    for (const action of ['passthrough', 'aborted']) {
       m.orchestrate.mockResolvedValueOnce({ action });
       await (window as any).TavernHelper.generate({ user_input: '继续发送的原文' });
       expect(hostGenerate).toHaveBeenCalledTimes(++hostCalls);
     }
-    for (const result of [{ action: 'failed', apiRetriesExhausted: true }, { action: 'aborted', manual: true }]) {
+    for (const result of [{ action: 'failed' }, { action: 'skipped' }, { action: 'loop_retry' }, { action: 'busy' },
+      { action: 'failed', blocked: true }, { action: 'failed', apiRetriesExhausted: true }, { action: 'aborted', manual: true }]) {
       m.orchestrate.mockResolvedValueOnce(result);
       await (window as any).TavernHelper.generate({ user_input: '取消轮原文' });
       expect(hostGenerate).toHaveBeenCalledTimes(hostCalls);
@@ -689,7 +699,7 @@ describe('发送前处理楼层生命周期', () => {
     expect(m.processBeforeGen).toHaveBeenCalledOnce();
   });
 
-  it.each([false, true])('仅 API 重试耗尽或手动终止恢复原输入，保存失败继续（解除伪装=%s）', async unmasked => {
+  it.each([false, true])('任务失败或手动终止恢复原输入，保存失败继续（解除伪装=%s）', async unmasked => {
     vi.useFakeTimers();
     m.shouldProcessPlot.mockReturnValue(true);
     m.settings.plotSendDisguiseDisabled = unmasked;
@@ -701,7 +711,8 @@ describe('发送前处理楼层生命周期', () => {
     m.beginDisguise.mockImplementation(pendingUi.beginPlotPendingDisguise_ACU);
     const previous = { is_user: false, mes: '历史回复' };
     m.api.chat = [previous];
-    for (const result of [{ action: 'failed', apiRetriesExhausted: true }, { action: 'aborted', manual: true }]) {
+    const stopResults = [{ action: 'failed', apiRetriesExhausted: true }, { action: 'failed', blocked: true }, { action: 'aborted', manual: true }];
+    for (const result of stopResults) {
       m.input = '失败轮原输入';
       (unmasked ? m.strategy2 : m.strategy1).mockResolvedValueOnce(result);
       await expect(m.api.eventSource.emit('after_commands', 'normal', {}, false)).rejects.toMatchObject({ name: 'AbortError' });
@@ -713,20 +724,20 @@ describe('发送前处理楼层生命周期', () => {
       expect(m.input).toBe('失败轮原输入');
     }
     m.input = '任务后保存失败原输入';
-    expect(handoff.cancel).toHaveBeenCalledTimes(unmasked ? 0 : 2);
+    expect(handoff.cancel).toHaveBeenCalledTimes(unmasked ? 0 : stopResults.length);
     expect(handoff.resume).not.toHaveBeenCalled();
     if (unmasked) {
       expect(m.api.addOneMessage).not.toHaveBeenCalled();
       expect(m.beginDisguise).not.toHaveBeenCalled();
       expect(m.saveChat).not.toHaveBeenCalled();
-      expect(m.strategy2).toHaveBeenCalledTimes(2);
+      expect(m.strategy2).toHaveBeenCalledTimes(stopResults.length);
       expect(m.generate).not.toHaveBeenCalled();
       return;
     }
     m.strategy1.mockResolvedValueOnce({ action: 'planned', finalMessage: '任务已完成的提示词' });
     m.saveChat.mockRejectedValueOnce(new Error('保存失败'));
     await expect(m.api.eventSource.emit('after_commands', 'normal', {}, false)).rejects.toMatchObject({ name: 'AbortError' });
-    expect(m.strategy1).toHaveBeenCalledTimes(3);
+    expect(m.strategy1).toHaveBeenCalledTimes(stopResults.length + 1);
     expect(m.api.chat[0]).toBe(previous);
     expect(m.api.chat[1].mes).toBe('任务已完成的提示词');
     expect(m.api.chat).toHaveLength(3);
@@ -737,11 +748,11 @@ describe('发送前处理楼层生命周期', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(m.generate).toHaveBeenCalledExactlyOnceWith('regenerate');
     expect(handoff.resume).toHaveBeenCalledOnce();
-    expect(handoff.cancel).toHaveBeenCalledTimes(2);
+    expect(handoff.cancel).toHaveBeenCalledTimes(stopResults.length);
     expect(m.api.chat).toHaveLength(2);
   });
 
-  it('仅向量或交火召回使用同一真实楼层流程，召回失败仍继续正文', async () => {
+  it('仅交火召回保留原伪装楼层流程，召回失败仍继续正文', async () => {
     vi.useFakeTimers();
     m.shouldProcessSummary.mockReturnValue(true);
     const pendingUi = await vi.importActual<typeof import('../../../src/presentation/components/plot-pending-disguise')>('../../../src/presentation/components/plot-pending-disguise');
@@ -768,7 +779,7 @@ describe('发送前处理楼层生命周期', () => {
     expect(m.api.chat).toHaveLength(2);
   });
 
-  it('召回后编排返回 busy 时保留楼层与草稿并继续正文', async () => {
+  it('召回后返回 busy 只清理本次临时楼层，保留其他规划与新草稿且不续发', async () => {
     vi.useFakeTimers();
     m.shouldProcessPlot.mockReturnValue(true);
     m.shouldProcessSummary.mockReturnValue(true);
@@ -794,16 +805,15 @@ describe('发送前处理楼层生命周期', () => {
     complete({ success: true });
     await redirected;
     expect(consume).not.toHaveBeenCalled();
-    expect(m.api.chat).toHaveLength(2);
-    expect(m.api.chat[0].mes).toBe('本轮输入');
+    expect(m.api.chat).toHaveLength(0);
     expect(m.input).toBe('其他请求的草稿');
     expect(m.stopGeneration).not.toHaveBeenCalled();
     expect(m.processingPlot).toBe(true);
     await vi.advanceTimersByTimeAsync(0);
-    expect(m.generate).toHaveBeenCalledExactlyOnceWith('regenerate');
+    expect(m.generate).not.toHaveBeenCalled();
   });
 
-  it.each(['existing', 'pending'])('普通退出结果保留原楼层并继续正文（%s）', async path => {
+  it.each(['existing', 'pending'])('无需规划继续，忙碌与失败退出不续发且保留既有楼层和新草稿（%s）', async path => {
     vi.useFakeTimers();
     m.shouldProcessPlot.mockReturnValue(true);
     const layer = { is_user: true, mes: '已有用户正文' };
@@ -818,15 +828,256 @@ describe('发送前处理楼层生命周期', () => {
       const userCount = m.api.chat.length;
       await expect(m.api.eventSource.emit('after_commands', 'normal', {}, false)).rejects.toMatchObject({ name: 'AbortError' });
       expect(m.api.chat[0]).toBe(layer);
-      expect(m.api.chat).toHaveLength(userCount + (path === 'pending' ? 2 : 1));
+      expect(m.api.chat).toHaveLength(userCount + (action === 'no_match' ? (path === 'pending' ? 2 : 1) : 0));
       expect(layer.mes).toBe('已有用户正文');
       expect(m.input).toBe('其他请求的草稿');
       expect(m.stopGeneration).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(0);
     }
-    expect(m.generate).toHaveBeenCalledTimes(5);
+    expect(m.generate).toHaveBeenCalledTimes(1);
   });
 
 
+
+});
+
+describe('向量模式宿主普通发送', () => {
+  beforeEach(() => {
+    m.vectorPlan = { kind: 'vector' };
+    m.shouldProcessSummary.mockReturnValue(true);
+    m.shouldProcessPlot.mockReturnValue(true);
+  });
+
+  async function hostSend(consume: () => void, params: any = {}, lores = { globalLore: [] as any[], characterLore: [] as any[], chatLore: [] as any[], personaLore: [] as any[] }) {
+    await m.api.eventSource.emit('after_commands', 'normal', params, false);
+    const text = m.input;
+    m.input = '';
+    if (text) {
+      const message = { is_user: true, mes: text, name: '用户' };
+      m.api.chat.push(message);
+      await m.saveChat();
+      const index = m.api.chat.length - 1;
+      await m.api.eventSource.emit('message_sent', index);
+      m.api.addOneMessage(message);
+      await m.api.eventSource.emit('user_message_rendered', index);
+    }
+    // 世界书加载层会吞掉异常，正文请求边界仍必须阻断取消。
+    try { await m.api.eventSource.emit('worldinfo_entries_loaded', lores); } catch { /* 宿主返回空世界书 */ }
+    await m.api.eventSource.emit('generate_after_data', {}, false);
+    consume();
+  }
+
+  function holdRecall() {
+    let complete!: (result: any) => void;
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    m.processBeforeGen.mockImplementationOnce(() => {
+      started();
+      return new Promise(resolve => { complete = resolve; });
+    });
+    return { ready, complete: (result: any) => complete(result) };
+  }
+
+  it.each([false, true])('宿主保存唯一用户楼后等待召回，不发送等待中新草稿（解除伪装=%s）', async unmasked => {
+    m.settings.plotSendDisguiseDisabled = unmasked;
+    m.api.chat = [{ is_user: false, mes: '历史回复' }];
+    m.input = '本轮输入';
+    const recall = holdRecall();
+    const consume = vi.fn();
+    const request = hostSend(consume);
+    await recall.ready;
+    expect(m.persistedChat).toEqual([{ is_user: false, mes: '历史回复' }, { is_user: true, mes: '本轮输入', name: '用户' }]);
+    expect(m.api.chat).toHaveLength(2);
+    expect(m.api.addOneMessage).toHaveBeenCalledOnce();
+    expect(m.beginDisguise).not.toHaveBeenCalled();
+    expect(m.setInput).not.toHaveBeenCalled();
+    expect(m.processBeforeGen.mock.calls[0][0]).toMatchObject({ userInput: '本轮输入', source: 'user_message_rendered' });
+    expect(document.body.dataset.generating).toBe('true');
+    expect(document.querySelector<HTMLElement>('#mes_stop')!.style.display).toBe('flex');
+    expect(consume).not.toHaveBeenCalled();
+    m.input = '下一轮草稿';
+    recall.complete({ success: true, injectedCount: 2 });
+    await request;
+    expect(consume).toHaveBeenCalledOnce();
+    expect(m.input).toBe('下一轮草稿');
+    expect(m.api.chat).toHaveLength(2);
+    expect(m.generate).not.toHaveBeenCalled();
+    expect(m.strategy1).not.toHaveBeenCalled();
+    expect(m.strategy2).not.toHaveBeenCalled();
+    expect(m.hostEmit).not.toHaveBeenCalledWith('deleted', expect.anything());
+    expect(document.body.dataset.generating).toBeUndefined();
+    expect(document.querySelector<HTMLElement>('#mes_stop')!.style.display).toBe('none');
+  });
+
+  it.each([
+    ['new', 'failure'], ['new', 'exception'], ['existing', 'failure'], ['existing', 'exception'],
+  ])('%s 用户楼召回%s时报错并停止正文，保留楼层与新草稿', async (path, outcome) => {
+    const user = { is_user: true, mes: '已有用户正文' };
+    m.api.chat = path === 'existing' ? [user] : [];
+    m.input = path === 'existing' ? '' : '失败时也保存';
+    if (path === 'existing') await m.saveChat();
+    m.processBeforeGen.mockImplementationOnce(async () => {
+      m.input = '下一轮草稿';
+      if (outcome === 'exception') throw new Error('召回失败');
+      return { success: false, reason: 'embedding_failed' };
+    });
+    const consume = vi.fn();
+    await expect(hostSend(consume)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(consume).not.toHaveBeenCalled();
+    expect(m.persistedChat).toEqual(path === 'existing' ? [user] : [{ is_user: true, mes: '失败时也保存', name: '用户' }]);
+    expect(m.api.chat).toEqual(m.persistedChat);
+    expect(m.input).toBe('下一轮草稿');
+    expect(m.processBeforeGen.mock.calls[0][0].signal.aborted).toBe(true);
+    const { showToastr_ACU } = await import('../../../src/presentation/theme/toast');
+    expect(showToastr_ACU).toHaveBeenCalledWith('error', '纪要召回失败，本次生成已停止。', '向量表格');
+    expect(m.generate).not.toHaveBeenCalled();
+    expect(m.beginDisguise).not.toHaveBeenCalled();
+    expect(m.hostEmit).not.toHaveBeenCalledWith('deleted', expect.anything());
+    expect(document.body.dataset.generating).toBeUndefined();
+    expect(document.querySelector<HTMLElement>('#mes_stop')!.style.display).toBe('none');
+  });
+
+  it.each(['stop', 'signal', 'chat'])('召回等待中%s立即阻断正文，迟到结果不能续发', async cause => {
+    m.input = '停止轮';
+    const recall = holdRecall();
+    const consume = vi.fn();
+    const controller = new AbortController();
+    const request = hostSend(consume, { signal: controller.signal });
+    const rejected = expect(request).rejects.toMatchObject({ name: 'AbortError' });
+    await recall.ready;
+    const options = m.processBeforeGen.mock.calls[0][0];
+    m.input = '保留草稿';
+    if (cause === 'stop') await m.api.eventSource.emit('generation_stopped');
+    else if (cause === 'signal') controller.abort();
+    else {
+      m.api.chat = [{ is_user: false, mes: '新聊天' }];
+      await m.api.eventSource.emit('chat', 'chat-b');
+    }
+    await rejected;
+    expect(options.signal.aborted).toBe(true);
+    expect(() => options.assertActive()).toThrow();
+    recall.complete({ success: true, injectedCount: 4 });
+    await Promise.resolve();
+    expect(consume).not.toHaveBeenCalled();
+    expect(m.generate).not.toHaveBeenCalled();
+    expect(m.input).toBe('保留草稿');
+    expect(document.body.dataset.generating).toBeUndefined();
+    expect(document.querySelector<HTMLElement>('#mes_stop')!.style.display).toBe('none');
+  });
+
+  it('已有用户楼在输入消费后召回，草稿保留且本轮蓝灯按世界书和 uid 同步', async () => {
+    const user = { is_user: true, mes: '已有用户正文' };
+    m.api.chat = [user];
+    const lores = {
+      globalLore: [{ world: 'book', uid: 1, constant: false }, { world: 'other', uid: 1, constant: false }],
+      characterLore: [{ world: 'book', uid: 2, constant: true }, { world: 'book', uid: 3, constant: true }],
+      chatLore: [] as any[], personaLore: [] as any[],
+    };
+    const recall = holdRecall();
+    const consume = vi.fn();
+    const request = hostSend(consume, {}, lores);
+    await recall.ready;
+    const options = m.processBeforeGen.mock.calls[0][0];
+    expect(options).toMatchObject({ userInput: '已有用户正文', source: 'worldinfo_entries_loaded' });
+    expect(m.input).toBe('');
+    m.input = '召回期间的新草稿';
+    options.onVectorTableEntriesApplied('book', [{ uid: 1, type: 'constant' }, { uid: 2, type: 'keyword' }]);
+    recall.complete({ success: true, injectedCount: 1 });
+    await request;
+    expect(consume).toHaveBeenCalledOnce();
+    expect(m.api.chat).toEqual([user]);
+    expect(m.api.addOneMessage).not.toHaveBeenCalled();
+    expect(m.generate).not.toHaveBeenCalled();
+    expect(m.setInput).not.toHaveBeenCalled();
+    expect(m.input).toBe('召回期间的新草稿');
+    expect(lores.globalLore.map(entry => entry.constant)).toEqual([true, false]);
+    expect(lores.characterLore.map(entry => entry.constant)).toEqual([false, true]);
+  });
+
+  it.each(['stop', 'signal', 'chat'])('召回结束到正文请求之间的 %s 仍阻断正文', async cause => {
+    const controller = new AbortController();
+    m.api.chat = [{ is_user: true, mes: '已有正文' }];
+    await m.api.eventSource.emit('after_commands', 'normal', { signal: controller.signal }, false);
+    // 与宿主一致，先读取并清空输入框，再加载世界书。
+    m.input = '';
+    await m.api.eventSource.emit('worldinfo_entries_loaded', { globalLore: [], characterLore: [], chatLore: [], personaLore: [] });
+    expect(m.processBeforeGen).toHaveBeenCalledOnce();
+    m.input = '正文装配期间草稿';
+    if (cause === 'stop') await m.api.eventSource.emit('generation_stopped');
+    else if (cause === 'signal') controller.abort();
+    else {
+      m.api.chat = [{ is_user: false, mes: '新聊天' }];
+      await m.api.eventSource.emit('chat', 'chat-b');
+    }
+    const consume = vi.fn();
+    const request = (async () => {
+      await m.api.eventSource.emit('generate_after_data', {}, false);
+      consume();
+    })();
+    await expect(request).rejects.toMatchObject({ name: 'AbortError' });
+    expect(consume).not.toHaveBeenCalled();
+    expect(m.input).toBe('正文装配期间草稿');
+    expect(m.generate).not.toHaveBeenCalled();
+  });
+
+  it('已有用户楼复用原楼，停止仍在外层阻断', async () => {
+    const user = { is_user: true, mes: '已有用户楼' };
+    m.api.chat = [user];
+    const recall = holdRecall();
+    const consume = vi.fn();
+    const request = hostSend(consume);
+    const rejected = expect(request).rejects.toMatchObject({ name: 'AbortError' });
+    await recall.ready;
+    await m.api.eventSource.emit('generation_stopped');
+    await rejected;
+    recall.complete({ success: true });
+    expect(m.api.chat).toEqual([user]);
+    expect(m.api.addOneMessage).not.toHaveBeenCalled();
+    expect(consume).not.toHaveBeenCalled();
+  });
+  it('用户入楼前停止仍阻断迟到入楼，并允许下一次普通发送', async () => {
+    m.input = '入楼前停止';
+    await m.api.eventSource.emit('after_commands', 'normal', {}, false);
+    expect(m.processBeforeGen).not.toHaveBeenCalled();
+    await m.api.eventSource.emit('generation_stopped');
+    const user = { is_user: true, mes: '入楼前停止' };
+    m.api.chat.push(user);
+    await expect(m.api.eventSource.emit('user_message_rendered', 0)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(m.processBeforeGen).not.toHaveBeenCalled();
+    m.input = '重试输入';
+    const consume = vi.fn();
+    await hostSend(consume);
+    expect(consume).toHaveBeenCalledOnce();
+    expect(m.processBeforeGen).toHaveBeenCalledOnce();
+    expect(m.api.chat[0]).toBe(user);
+    expect(m.api.chat).toHaveLength(2);
+  });
+
+  it('入楼前停止且宿主不再派发入楼事件，下一次发送不被旧租约卡住', async () => {
+    m.input = '未入楼';
+    await m.api.eventSource.emit('after_commands', 'normal', {}, false);
+    await m.api.eventSource.emit('generation_stopped');
+    expect(document.body.dataset.generating).toBeUndefined();
+    m.input = '新的发送';
+    const consume = vi.fn();
+    await hostSend(consume);
+    expect(consume).toHaveBeenCalledOnce();
+    expect(m.persistedChat).toEqual([{ is_user: true, mes: '新的发送', name: '用户' }]);
+    expect(m.generate).not.toHaveBeenCalled();
+  });
+
+  it('召回结果刚返回时停止仍阻断本轮正文', async () => {
+    m.input = '完成交界停止';
+    const recall = holdRecall();
+    const consume = vi.fn();
+    const request = hostSend(consume);
+    const rejected = expect(request).rejects.toMatchObject({ name: 'AbortError' });
+    await recall.ready;
+    recall.complete({ success: true });
+    await m.api.eventSource.emit('generation_stopped');
+    await rejected;
+    expect(consume).not.toHaveBeenCalled();
+    expect(m.api.chat).toHaveLength(1);
+  });
 
 });

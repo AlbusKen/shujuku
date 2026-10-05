@@ -276,4 +276,19 @@ describe('createEmbeddings_ACU 错误结构化分类（T3）', () => {
       httpStatus: 200,
     });
   });
+  it('主动停止中断请求且不按超时错误重试', async () => {
+    const controller = new AbortController();
+    const fetchMock = vi.fn((_url: unknown, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init.signal!.addEventListener('abort', () => reject(init.signal!.reason), { once: true });
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const request = createEmbeddings_ACU({ endpoint: 'https://embedding.test', model: 'm', input: ['x'], signal: controller.signal });
+    const rejected = expect(request).rejects.toMatchObject({ name: 'AbortError' });
+    controller.abort();
+    await rejected;
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0][1].signal!.aborted).toBe(true);
+  });
+
+
 });

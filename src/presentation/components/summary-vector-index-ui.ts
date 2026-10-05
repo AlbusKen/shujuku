@@ -7,7 +7,8 @@
 import { ACU_TOAST_CATEGORY_ACU } from '../../shared/constants';
 import { logDebug_ACU } from '../../shared/utils';
 import { beginNoticeTask_ACU } from '../../shared/notice-hub';
-import { processSummaryVectorIndexBeforeGeneration_ACU, type SummaryVectorIndexRuntimeResult_ACU } from '../../service/vector/summary-vector-index-runtime';
+import { processSummaryVectorIndexBeforeGeneration_ACU, type SummaryVectorIndexRuntimeResult_ACU, type SummaryVectorIndexRuntimeOptions_ACU } from '../../service/vector/summary-vector-index-runtime';
+import { runWithAbortSignal_ACU } from '../../shared/abort-signal';
 import { useToastStore } from '../../presentation-v2/stores/toast-store';
 import { rebuildCurrentSummaryVectorIndexNow_ACU } from '../../service/vector/summary-vector-index-rebuild-service';
 import { isSummaryVectorIndexSourceTextOutdated_ACU, type SummaryVectorIndexArchiveResult_ACU } from '../../service/vector/summary-vector-index-archive-service';
@@ -66,10 +67,15 @@ export function shouldRebuildSummaryVectorIndexWithUI_ACU(reason: string | undef
 }
 
 /** 复用“立即构建交火纪要索引”的普通业务链路，并登记进度任务。 */
-export async function rebuildCurrentSummaryVectorIndexWithUI_ACU(): Promise<SummaryVectorIndexArchiveResult_ACU> {
+export async function rebuildCurrentSummaryVectorIndexWithUI_ACU(
+  options: Pick<SummaryVectorIndexRuntimeOptions_ACU, 'signal' | 'assertActive'> = {},
+): Promise<SummaryVectorIndexArchiveResult_ACU> {
+  const assertActive = () => { options.signal?.throwIfAborted(); options.assertActive?.(); };
+  assertActive();
   const task = beginNoticeTask_ACU(SUMMARY_VECTOR_INDEX_FEATURE_ACU, { detail: '正在重建交火索引快照...' });
   try {
-    const result = await rebuildCurrentSummaryVectorIndexNow_ACU();
+    const result = await rebuildCurrentSummaryVectorIndexNow_ACU(options);
+    assertActive();
     if (result.success && !result.skipped) {
       showToastr_ACU(
         'success',
@@ -84,6 +90,7 @@ export async function rebuildCurrentSummaryVectorIndexWithUI_ACU(): Promise<Summ
     showToastr_ACU(result.success ? 'info' : 'error', `交火索引快照未完成：${reason}`);
     return result;
   } catch (error: any) {
+    assertActive();
     showToastr_ACU('error', `交火索引快照重建失败：${error?.message || '未知错误'}`);
     throw error;
   } finally {
@@ -140,15 +147,20 @@ export async function rebuildOutdatedSummaryVectorIndexInBackground_ACU(): Promi
  * 包装交火发送前处理，登记“正在召回记忆”进度任务。
  */
 export async function processSummaryVectorIndexBeforeGenerationWithUI_ACU(
-  options: { userInput?: string; source?: string } = {},
+  options: SummaryVectorIndexRuntimeOptions_ACU = {},
 ): Promise<SummaryVectorIndexRuntimeResult_ACU> {
+  const assertActive = () => { options.signal?.throwIfAborted(); options.assertActive?.(); };
+  assertActive();
   const task = beginNoticeTask_ACU(SUMMARY_VECTOR_RECALL_FEATURE_ACU, {
     detail: '正在召回交火记忆并重排纪要索引，请稍后...',
   });
 
   let result: SummaryVectorIndexRuntimeResult_ACU;
   try {
-    result = await processSummaryVectorIndexBeforeGeneration_ACU(options);
+    result = options.signal
+      ? await runWithAbortSignal_ACU(options.signal, () => processSummaryVectorIndexBeforeGeneration_ACU(options))
+      : await processSummaryVectorIndexBeforeGeneration_ACU(options);
+    assertActive();
     if (shouldShowSummaryVectorResultToast_ACU(result)) {
       showSummaryVectorRecallSuccessToast_ACU(result);
     } else if (shouldNotifySummaryVectorRecallFailure_ACU(result)) {
@@ -160,6 +172,7 @@ export async function processSummaryVectorIndexBeforeGenerationWithUI_ACU(
     task.end();
   }
 
+  assertActive();
   if (shouldRebuildSummaryVectorIndexWithUI_ACU(result.reason)) {
     const confirmed = typeof window !== 'undefined' && typeof window.confirm === 'function'
       ? window.confirm(SUMMARY_VECTOR_SCHEME_REBUILD_CONFIRM_ACU)
@@ -167,15 +180,21 @@ export async function processSummaryVectorIndexBeforeGenerationWithUI_ACU(
     if (!confirmed) return result;
     let rebuilt = false;
     try {
-      const rebuildResult = await rebuildCurrentSummaryVectorIndexWithUI_ACU();
+      assertActive();
+      const rebuildResult = options.signal || options.assertActive
+        ? await rebuildCurrentSummaryVectorIndexWithUI_ACU({ signal: options.signal, assertActive })
+        : await rebuildCurrentSummaryVectorIndexWithUI_ACU();
+      assertActive();
       rebuilt = rebuildResult.success && !rebuildResult.skipped;
     } catch (error) {
+      assertActive();
       logDebug_ACU(`[交火模式纪要索引] 失效索引已删除，但普通重建路径执行失败；继续原始生成：${error instanceof Error ? error.message : String(error)}`);
     }
     // 重建成功后在同一次发送里补跑一次召回，否则这一轮目录沿用上一轮的内容。
     if (rebuilt) {
       try {
-        const retried = await processSummaryVectorIndexBeforeGeneration_ACU({ ...options, bypassDedupe: true });
+        const retried = await runWithAbortSignal_ACU(options.signal, () => processSummaryVectorIndexBeforeGeneration_ACU({ ...options, bypassDedupe: true }));
+        assertActive();
         logDebug_ACU(`[交火模式纪要索引] 自愈重建后补跑召回：success=${retried.success}, skipped=${retried.skipped === true}, reason=${retried.reason || 'none'}, injected=${retried.injectedCount ?? 0}`);
         if (shouldShowSummaryVectorResultToast_ACU(retried)) {
           showSummaryVectorRecallSuccessToast_ACU(retried, true);
@@ -184,6 +203,7 @@ export async function processSummaryVectorIndexBeforeGenerationWithUI_ACU(
         }
         return retried;
       } catch (error) {
+        assertActive();
         logDebug_ACU(`[交火模式纪要索引] 自愈重建后补跑召回失败；继续原始生成：${error instanceof Error ? error.message : String(error)}`);
       }
     }

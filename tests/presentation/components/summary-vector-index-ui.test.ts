@@ -160,6 +160,28 @@ describe('summary vector index UI recovery', () => {
     expect(h.process).toHaveBeenCalledTimes(1);
     expect(result).toMatchObject({ reason: 'legacy_vector_scheme_rebuild_required' });
   });
+  it('自愈重建透传取消租约，停止后不补跑召回或显示成功提示', async () => {
+    const controller = new AbortController();
+    const pending = deferred<any>();
+    const started = deferred<void>();
+    h.rebuild.mockImplementationOnce(() => { started.resolve(); return pending.promise; });
+    const assertActive = vi.fn(() => controller.signal.throwIfAborted());
+    const operation = processSummaryVectorIndexBeforeGenerationWithUI_ACU({
+      userInput: '继续', source: 'test', signal: controller.signal, assertActive,
+    });
+    const rejected = expect(operation).rejects.toMatchObject({ name: 'AbortError' });
+    await started.promise;
+    expect(h.rebuild.mock.calls[0][0]).toMatchObject({ signal: controller.signal, assertActive: expect.any(Function) });
+    controller.abort();
+    pending.resolve({ success: true, skipped: false, indexedRowCount: 6, chunkCount: 3, errors: [] });
+    await rejected;
+    expect(h.process).toHaveBeenCalledOnce();
+    expect(h.toast).not.toHaveBeenCalled();
+    expect(h.toastError).not.toHaveBeenCalled();
+    expect(h.taskEnd).toHaveBeenCalledTimes(2);
+  });
+
+
 });
 
 describe('rebuildOutdatedSummaryVectorIndexInBackground_ACU', () => {

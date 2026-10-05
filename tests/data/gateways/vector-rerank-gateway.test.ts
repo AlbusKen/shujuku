@@ -139,4 +139,22 @@ describe('createRerankScores_ACU 分批', () => {
     expect(await createRerankScores_ACU({ endpoint: 'https://rerank.test', model: 'm', query: 'q', documents: ['', '  '] })).toEqual([]);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+  it('主动停止中断当前全部批次，不继续下一波请求', async () => {
+    const controller = new AbortController();
+    const fetchMock = vi.fn((_url: unknown, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init.signal!.addEventListener('abort', () => reject(init.signal!.reason), { once: true });
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const request = createRerankScores_ACU({
+      endpoint: 'https://rerank.test', model: 'm', query: 'q',
+      documents: Array.from({ length: 50 }, (_, i) => `d${i}`), batchSize: 10, signal: controller.signal,
+    });
+    const rejected = expect(request).rejects.toMatchObject({ name: 'AbortError' });
+    controller.abort();
+    await rejected;
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock.mock.calls.every(call => call[1].signal!.aborted)).toBe(true);
+  });
+
+
 });

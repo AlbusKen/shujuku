@@ -32,3 +32,25 @@ export function installPlotSendEventGate_ACU(source: PlotEventSource_ACU, eventT
 export function redirectPlotSendEvent_ACU(params: object, resume: (() => void) | null = null): void {
   redirects_ACU.set(params, resume);
 }
+
+const waitGates_ACU = new WeakMap<object, Map<string, { wait: (...args: any[]) => Promise<void> }>>();
+
+/** 宿主会吞掉监听器异常；在 emit 外层等待并传播取消，普通成功不改变宿主发送。 */
+export function installHostEventWaitGate_ACU(
+  source: PlotEventSource_ACU,
+  eventType: string,
+  wait: (...args: any[]) => Promise<void>,
+): void {
+  const gates = waitGates_ACU.get(source) ?? new Map();
+  waitGates_ACU.set(source, gates);
+  const installed = gates.get(eventType);
+  if (installed) { installed.wait = wait; return; }
+  const gate = { wait };
+  gates.set(eventType, gate);
+  const original = source.emit;
+  source.emit = async function (this: unknown, event, ...args) {
+    const result = await original.call(this, event, ...args);
+    if (event === eventType) await gate.wait(...args);
+    return result;
+  };
+}

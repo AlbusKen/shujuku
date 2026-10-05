@@ -29,26 +29,37 @@ export interface EnsureSummaryVectorMirrorAfterTableFillResult_ACU {
  * 显式按钮走 rebuild_user；发送前自愈走 rebuild_repair；legacy / 首次构建走 initial。
  */
 export async function rebuildCurrentSummaryVectorIndexNow_ACU(
-    options: { reason?: SummaryVectorMirrorRebuildReason_ACU } = {},
+    options: { reason?: SummaryVectorMirrorRebuildReason_ACU; signal?: AbortSignal; assertActive?: () => void } = {},
 ): Promise<SummaryVectorIndexArchiveResult_ACU> {
+    const assertActive = () => {
+        options.signal?.throwIfAborted();
+        options.assertActive?.();
+    };
+    assertActive();
     if (!currentJsonTableData_ACU) {
         await loadOrCreateJsonTableFromChatHistory_ACU();
     }
+    assertActive();
     if (!currentJsonTableData_ACU) {
         throw new Error('数据库未加载，无法重建交火索引快照。');
     }
 
     const result = await rebuildSummaryVectorMirror_ACU({
         reason: options.reason || 'rebuild_user',
+        ...(options.signal || options.assertActive ? { signal: options.signal, assertActive } : {}),
     });
+    assertActive();
     if (result.success && !result.skipped) {
         clearSummaryVectorIndexCredentialCooldowns_ACU();
         try {
+            assertActive();
             await updateReadableLorebookEntry_ACU(true);
         } catch {
+            assertActive();
             // 镜像已经 durable publish；世界书刷新失败不应把已完成构建报告为失败。
         }
     }
+    assertActive();
     return result;
 }
 

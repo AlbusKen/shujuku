@@ -28,6 +28,7 @@ export interface VectorRerankRequest_ACU {
     instruction?: string;
     /** 每批 documents 条数；缺省 VECTOR_RERANK_DEFAULT_BATCH_SIZE_ACU，夹在 [10, 500]。 */
     batchSize?: number;
+    signal?: AbortSignal;
 }
 
 export function normalizeRerankBatchSize_ACU(value: unknown, fallback = VECTOR_RERANK_DEFAULT_BATCH_SIZE_ACU): number {
@@ -107,6 +108,7 @@ interface RerankBatchRequest_ACU {
     instruction: string;
     documents: string[];
     batchLabel: string;
+    signal?: AbortSignal;
 }
 
 async function requestRerankBatch_ACU(request: RerankBatchRequest_ACU): Promise<VectorRerankResult_ACU[]> {
@@ -114,7 +116,10 @@ async function requestRerankBatch_ACU(request: RerankBatchRequest_ACU): Promise<
     if (request.instruction) payload.instruction = request.instruction;
 
     // 超时可中断：rerank 在发送前同步链路上，挂起的上游不允许无限阻塞生成。
+    request.signal?.throwIfAborted();
     const controller = new AbortController();
+    const abort = () => controller.abort(request.signal?.reason);
+    request.signal?.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(() => controller.abort(), VECTOR_RERANK_TIMEOUT_MS_ACU);
     let response: Response;
     try {
@@ -125,12 +130,15 @@ async function requestRerankBatch_ACU(request: RerankBatchRequest_ACU): Promise<
             signal: controller.signal,
         });
     } catch (error: any) {
+        request.signal?.throwIfAborted();
         throw new Error(error?.name === 'AbortError'
             ? `Rerank 请求超时（${VECTOR_RERANK_TIMEOUT_MS_ACU}ms，${request.batchLabel}），已中断。`
             : `Rerank 请求网络失败（${request.batchLabel}）：${error?.message || String(error || '未知错误')}`);
     } finally {
+        request.signal?.removeEventListener('abort', abort);
         clearTimeout(timer);
     }
+    request.signal?.throwIfAborted();
 
     if (!response.ok) {
         const detail = await response.text().catch(() => response.statusText);
@@ -138,6 +146,7 @@ async function requestRerankBatch_ACU(request: RerankBatchRequest_ACU): Promise<
     }
 
     const rawBody = await response.text().catch((): string => '');
+    request.signal?.throwIfAborted();
     let responsePayload: any;
     try {
         responsePayload = JSON.parse(rawBody);
@@ -153,6 +162,7 @@ async function requestRerankBatch_ACU(request: RerankBatchRequest_ACU): Promise<
  * 任一批失败整体抛错，由调用方回退到 embedding 排序（不接受"半批有分、半批无分"的混合排序）。
  */
 export async function createRerankScores_ACU(request: VectorRerankRequest_ACU): Promise<VectorRerankResult_ACU[]> {
+    request.signal?.throwIfAborted();
     const endpoint = normalizeEndpoint_ACU(request.endpoint);
     const model = String(request.model || '').trim();
     const query = String(request.query || '').trim();
@@ -178,6 +188,7 @@ export async function createRerankScores_ACU(request: VectorRerankRequest_ACU): 
     const merged: VectorRerankResult_ACU[] = [];
 
     for (let round = 0; round < batches.length; round += VECTOR_RERANK_BATCH_CONCURRENCY_ACU) {
+        request.signal?.throwIfAborted();
         const wave = batches.slice(round, round + VECTOR_RERANK_BATCH_CONCURRENCY_ACU);
         const waveResults = await Promise.all(wave.map((batch, waveIndex) => requestRerankBatch_ACU({
             endpoint,
@@ -187,7 +198,9 @@ export async function createRerankScores_ACU(request: VectorRerankRequest_ACU): 
             instruction,
             documents: batch.documents,
             batchLabel: `第 ${round + waveIndex + 1}/${batches.length} 批，${batch.documents.length} 条`,
+            signal: request.signal,
         })));
+        request.signal?.throwIfAborted();
         waveResults.forEach((results, waveIndex) => {
             const offset = wave[waveIndex].offset;
             const batchLength = wave[waveIndex].documents.length;

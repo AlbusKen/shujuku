@@ -2,7 +2,8 @@
 // 从 05_core_tail.js 迁入
 
 import { cancelPendingChatMutationRefresh_ACU, scheduleChatMutationRefresh_ACU } from './chat-mutation-scheduler';
-import { installPlotSendEventGate_ACU, redirectPlotSendEvent_ACU } from './plot-send-event-gate';
+import { installHostEventWaitGate_ACU, installPlotSendEventGate_ACU, redirectPlotSendEvent_ACU } from './plot-send-event-gate';
+import { runWithAbortSignal_ACU } from '../../shared/abort-signal';
 import { showToastr_ACU } from '../theme/toast';
 import { attemptToLoadCoreApis_ACU } from '../triggers/settings-ui-sync/settings-ui-connect';
 import { formatHostCapabilities_ACU, getLastHostCapabilities_ACU } from '../../shared/host-compat/tavern-helper-compat';
@@ -49,7 +50,7 @@ import { bindWorldSimulationInternalAiGenerationStarted_ACU, consumeWorldSimulat
 import { createWorldSimulationCompletionIntentForCurrentChat_ACU, getWorldSimulationRuntime_ACU } from '../../service/simulation/simulation-runtime';
 import { autoEnableFlightModeForNewChatIfNeeded_ACU } from '../../service/fill-mode/fill-mode-auto-enable';
 import { ensureCurrentChatFillModeRecorded_ACU } from '../../service/fill-mode/fill-mode-chat-switch';
-import { isVectorPipelineEnabledForCurrentChat_ACU } from '../../service/fill-mode/fill-mode-gate';
+import { getVectorPipelinePlanForCurrentChat_ACU, isVectorPipelineEnabledForCurrentChat_ACU } from '../../service/fill-mode/fill-mode-gate';
 
 
 // [从 state-manager.ts 搬入 presentation 层] 安装发送意图捕捉钩子（DOM 事件绑定）
@@ -299,18 +300,18 @@ export   function mainInitialize_ACU() {
                       markPlotIntercept_ACU(result.finalMessage);
                       options._qrf_processed_by_hook = true;
                     } catch {
-                      showToastr_ACU('warning', '推进提示词写回未完成，继续宿主发送。', '剧情推进');
+                      showToastr_ACU('error', '推进提示词写回未完成，正文发送已停止。', '剧情推进');
+                      return;
                     }
                     break;
                   }
                   case 'busy':
-                    break;
+                    return;
                   case 'failed':
                   case 'skipped':
                   case 'loop_retry':
-                    if (result.apiRetriesExhausted === true) return;
-                    showToastr_ACU('warning', '本次推进未取得最终提示词，继续宿主发送。', '剧情推进');
-                    break;
+                    showToastr_ACU('warning', '本次推进未取得有效提示词，正文发送已停止。', '剧情推进');
+                    return;
                   case 'aborted': {
                     if (result.manual === true) {
                       options._qrf_processed_by_hook = true;
@@ -658,16 +659,142 @@ export   function mainInitialize_ACU() {
           });
         });
 
-        // 共用发送前任务链；伪装只改变等待外观和宿主续发方式。
+        // 向量模式沿宿主普通发送；剧情模式保留既有伪装与续发链路。
         if (SillyTavern_API_ACU.eventTypes.GENERATION_AFTER_COMMANDS) {
           const source = SillyTavern_API_ACU.eventSource;
           const eventType = SillyTavern_API_ACU.eventTypes.GENERATION_AFTER_COMMANDS;
+          type VectorSend = {
+            chat: any[]; chatKey: string; isolationKey: string; messageIndex: number;
+            awaitUserMessage: boolean;
+            controller: AbortController; restoreUi: () => void; disposeSignal: () => void;
+          };
+          let pendingVectorSend: VectorSend | null = null;
+          let activeVectorWait: VectorSend | null = null;
+          // 保留到正文请求边界，世界书加载层可能吞掉等待取消异常。
+          let vectorGenerationSend: VectorSend | null = null;
+          const assertVectorSend = (send: VectorSend) => {
+            if (send.chat !== SillyTavern_API_ACU.chat || send.chatKey !== currentChatFileIdentifier_ACU
+              || send.isolationKey !== getCurrentIsolationKey_ACU()) send.controller.abort();
+            send.controller.signal.throwIfAborted();
+          };
+          const releaseVectorSend = (send: VectorSend) => {
+            send.restoreUi();
+            if (pendingVectorSend === send) pendingVectorSend = null;
+            if (activeVectorWait === send) activeVectorWait = null;
+            generationGate_ACU.lastUserSendIntentAt = 0;
+          };
+          const finishVectorGeneration = (send: VectorSend) => {
+            releaseVectorSend(send);
+            send.disposeSignal();
+            if (vectorGenerationSend === send) vectorGenerationSend = null;
+          };
+          const cancelVectorSend = () => {
+            for (const send of new Set([pendingVectorSend, activeVectorWait, vectorGenerationSend])) {
+              if (!send) continue;
+              send.restoreUi();
+              send.controller.abort();
+            }
+          };
+          const waitForVectorRecall = async (send: VectorSend, userInput: string, lores?: Record<string, any[]>) => {
+            activeVectorWait = send;
+            try {
+              assertVectorSend(send);
+              const result = await runWithAbortSignal_ACU(send.controller.signal, async () => {
+                await ensureInitialSeedCheckpointBeforeGeneration_ACU('vector_after_user_message');
+                assertVectorSend(send);
+                const result = await processSummaryVectorIndexBeforeGenerationWithUI_ACU({
+                  userInput, source: lores ? 'worldinfo_entries_loaded' : 'user_message_rendered', signal: send.controller.signal,
+                  assertActive: () => assertVectorSend(send),
+                  onVectorTableEntriesApplied: lores ? (book, entries) => {
+                    assertVectorSend(send);
+                    const types = new Map(entries.map(entry => [String(entry.uid), entry.type]));
+                    for (const list of Object.values(lores)) {
+                      if (!Array.isArray(list)) continue;
+                      for (const entry of list) {
+                        if (entry?.world !== book || !types.has(String(entry.uid))) continue;
+                        entry.constant = types.get(String(entry.uid)) === 'constant';
+                      }
+                    }
+                  } : undefined,
+                });
+                assertVectorSend(send);
+                return result;
+              });
+              if (!result.success && !result.skipped) {
+                throw new Error('纪要召回未完成。');
+              }
+            } catch (error) {
+              assertVectorSend(send);
+              logWarn_ACU('[向量表格] 发送前召回失败，本次生成已停止:', error);
+              showToastr_ACU('error', '纪要召回失败，本次生成已停止。', '向量表格');
+              send.controller.abort(new DOMException('纪要召回失败，本次生成已停止。', 'AbortError'));
+              send.controller.signal.throwIfAborted();
+            } finally {
+              releaseVectorSend(send);
+            }
+          };
+          if (SillyTavern_API_ACU.eventTypes.GENERATION_STOPPED) {
+            source.on(SillyTavern_API_ACU.eventTypes.GENERATION_STOPPED, cancelVectorSend);
+          }
+          // 切聊天在原监听器执行前作废租约，不等异步重载结束。
+          const originalEmit = source.emit;
+          source.emit = function (this: unknown, event: string, ...args: any[]) {
+            if (event === SillyTavern_API_ACU.eventTypes.CHAT_CHANGED) cancelVectorSend();
+            return originalEmit.call(this, event, ...args);
+          };
+          if (SillyTavern_API_ACU.eventTypes.USER_MESSAGE_RENDERED) {
+            installHostEventWaitGate_ACU(source, SillyTavern_API_ACU.eventTypes.USER_MESSAGE_RENDERED, async (messageId: any) => {
+              const pending = pendingVectorSend;
+              if (!pending || !Number.isInteger(messageId)) return;
+              const expectedIndex = pending.awaitUserMessage ? pending.messageIndex : pending.messageIndex + 1;
+              if (messageId !== expectedIndex) return;
+              const message = pending.chat[messageId];
+              if (!message?.is_user) return;
+              pendingVectorSend = null;
+              // 宿主已保存并渲染用户楼层；外层 emit 传播取消，不会被监听器 catch 吞掉。
+              await waitForVectorRecall(pending, String(message.mes || ''));
+            });
+          }
+          if (SillyTavern_API_ACU.eventTypes.WORLDINFO_ENTRIES_LOADED) {
+            installHostEventWaitGate_ACU(source, SillyTavern_API_ACU.eventTypes.WORLDINFO_ENTRIES_LOADED, async (lores: Record<string, any[]>) => {
+              const pending = pendingVectorSend;
+              if (!pending || pending.awaitUserMessage) return;
+              pendingVectorSend = null;
+              // 普通生成已消费输入框；只复用原用户楼，不再读等待中新写的草稿。
+              await waitForVectorRecall(pending, String(pending.chat[pending.messageIndex]?.mes || ''), lores);
+            });
+          }
+          if (SillyTavern_API_ACU.eventTypes.GENERATE_AFTER_DATA) {
+            installHostEventWaitGate_ACU(source, SillyTavern_API_ACU.eventTypes.GENERATE_AFTER_DATA, async (_data: unknown, dryRun: boolean) => {
+              const send = vectorGenerationSend;
+              if (!send || dryRun) return;
+              try {
+                assertVectorSend(send);
+                if (pendingVectorSend === send || activeVectorWait === send) {
+                  throw new DOMException('本轮向量召回尚未完成。', 'AbortError');
+                }
+              } finally { finishVectorGeneration(send); }
+            });
+          }
           installPlotSendEventGate_ACU(source, eventType);
+          installHostEventWaitGate_ACU(source, eventType, async () => {
+            const pending = pendingVectorSend;
+            if (!pending) return;
+            try { assertVectorSend(pending); }
+            catch (error) { releaseVectorSend(pending); throw error; }
+          });
           source.on(eventType, async (type: any, params: any, dryRun: any) => {
-            // 与旧版一致：规划内部的宿主事件继续自己的请求，不重复接管外层发送。
-            if (dryRun || type === 'regenerate' || params?._qrf_processed_by_hook || isProcessing_Plot_ACU) return;
+            // 内部生成继续自己的请求；普通用户发送不能借忙碌早退绕过规划。
+            if (dryRun || type === 'regenerate' || params?._qrf_processed_by_hook) return;
+            if (isProcessing_Plot_ACU) {
+              if (shouldProcessPlotForGeneration_ACU(type, params, dryRun)) {
+                redirectPlotSendEvent_ACU(params);
+              }
+              return;
+            }
             const recall = shouldProcessSummaryVectorIndexForGeneration_ACU(type, params, dryRun);
-            const plan = shouldProcessPlotForGeneration_ACU(type, params, dryRun);
+            const vectorOnly = getVectorPipelinePlanForCurrentChat_ACU()?.kind === 'vector';
+            const plan = !vectorOnly && shouldProcessPlotForGeneration_ACU(type, params, dryRun);
             if (!recall && !plan) return;
             const input = getSendTextareaValue_ACU();
             const pendingInput = isPendingDisguiseGenerationType_ACU(type) && !!input.trim();
@@ -675,6 +802,36 @@ export   function mainInitialize_ACU() {
             const existing = chat[chat.length - 1];
             if (!pendingInput && !existing?.is_user) return;
             const originalText = pendingInput ? input : String(existing.mes || '');
+            if (vectorOnly) {
+              // 让原普通发送创建用户楼层，不清空输入框、不建立 AI 占位或重生成。
+              // 宿主在入楼前终止时可能不再派发渲染事件；新发送释放已取消的旧租约。
+              if (vectorGenerationSend?.controller.signal.aborted) {
+                finishVectorGeneration(vectorGenerationSend);
+              }
+              if (pendingVectorSend || activeVectorWait) { redirectPlotSendEvent_ACU(params); return; }
+              const controller = new AbortController();
+              const signal: AbortSignal | undefined = params?.signal;
+              const abort = () => controller.abort();
+              signal?.addEventListener('abort', abort, { once: true });
+              if (signal?.aborted) abort();
+              const restore = beginHostGenerationUi_ACU();
+              let restored = false;
+              const send: VectorSend = {
+                chat, chatKey: currentChatFileIdentifier_ACU, isolationKey: getCurrentIsolationKey_ACU(),
+                messageIndex: pendingInput ? chat.length : chat.length - 1, controller,
+                awaitUserMessage: pendingInput,
+                restoreUi: () => { if (!restored) { restored = true; restore(); } },
+                disposeSignal: () => signal?.removeEventListener('abort', abort),
+              };
+              if (!pendingInput && !SillyTavern_API_ACU.eventTypes.WORLDINFO_ENTRIES_LOADED) {
+                finishVectorGeneration(send);
+                redirectPlotSendEvent_ACU(params);
+                return;
+              }
+              pendingVectorSend = send;
+              vectorGenerationSend = send;
+              return;
+            }
             const needsPlan = plan && !shouldSkipPlotIntercept_ACU(originalText)
               && (pendingInput || !(existing as ACUMessage)._plot_processed);
             const disguised = settings_ACU.plotSendDisguiseDisabled !== true;
@@ -712,11 +869,20 @@ export   function mainInitialize_ACU() {
                 const result = userFloor
                   ? await orchestrateAfterCommandsStrategy1_ACU(userFloor.message, userFloor.index, runOptimizationLogicWithUI_ACU)
                   : await orchestrateAfterCommandsStrategy2_ACU(originalText, runOptimizationLogicWithUI_ACU);
-                if (result.apiRetriesExhausted === true || (result.action === 'aborted' && result.manual === true)) {
+                if (result.action === 'busy') {
+                  redirectPlotSendEvent_ACU(params);
+                  await removePlotSendMessages_ACU(chat, createdMessages).catch(() => warn('本轮临时楼层清理未完成，请检查聊天记录。'));
+                  if (pendingInput && !getSendTextareaValue_ACU().trim()) setSendTextareaValue_ACU(originalText);
+                  await continuationRedirect?.cancel();
+                  return;
+                }
+                if (result.blocked === true || result.apiRetriesExhausted === true
+                  || result.action === 'failed' || result.action === 'skipped' || result.action === 'loop_retry'
+                  || (result.action === 'aborted' && result.manual === true)) {
                   redirectPlotSendEvent_ACU(params);
                   _set_tempPlotToSave_ACU(null);
                   await removePlotSendMessages_ACU(chat, createdMessages).catch(() => warn('本轮临时楼层清理未完成，请检查聊天记录。'));
-                  setSendTextareaValue_ACU(originalText);
+                  if (!getSendTextareaValue_ACU().trim()) setSendTextareaValue_ACU(originalText);
                   await continuationRedirect?.cancel();
                   return;
                 }
@@ -748,6 +914,14 @@ export   function mainInitialize_ACU() {
                 }
               }
             } catch {
+              if (needsPlan) {
+                redirectPlotSendEvent_ACU(params);
+                warn('剧情发送前处理异常，正文发送已停止。');
+                await removePlotSendMessages_ACU(chat, createdMessages).catch(() => warn('本轮临时楼层清理未完成，请检查聊天记录。'));
+                if (pendingInput && !getSendTextareaValue_ACU().trim()) setSendTextareaValue_ACU(originalText);
+                await continuationRedirect?.cancel();
+                return;
+              }
               warn('发送前处理异常，保留当前内容并继续发送。');
             } finally {
               restoreGenerationUi();

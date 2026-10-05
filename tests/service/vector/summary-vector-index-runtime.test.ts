@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   chat: [{ is_user: true, mes: 'latest user' } as any],
   config: {} as any,
+  vectorPlan: null as any,
   rows: [] as any[],
   chunks: [] as any[],
   entries: [] as any[],
@@ -175,6 +176,14 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   currentChatFileIdentifier_ACU: 'chat-a',
   getCurrentIsolationKey_ACU: () => 'iso-source',
 }));
+// 运行时测试显式选择模式，不让聊天模式解析读取未声明的重型状态替身。
+vi.mock('../../../src/service/fill-mode/fill-mode-gate', () => ({
+  isVectorPipelineEnabledForCurrentChat_ACU: () => true,
+  getVectorPipelinePlanForCurrentChat_ACU: () => h.vectorPlan,
+}));
+beforeEach(() => {
+  h.vectorPlan = null;
+});
 
 import {
   processSummaryVectorIndexBeforeGeneration_ACU,
@@ -670,6 +679,82 @@ describe('processSummaryVectorIndexBeforeGeneration_ACU hybrid retrieval', () =>
     expect(result.reason).toBe('empty_query_embedding');
     expect(createdContent_ACU()).toContain('recent fixed summary');
     expect(createdContent_ACU()).toContain('old sparse summary');
+  });
+
+  function setVectorTableFixture_ACU(topK = 1): void {
+    h.vectorPlan = { kind: 'vector', overrides: { topK, minScore: 0.95, candidateLimit: 10 }, rerankRequired: false };
+    h.summaryTable.table = { name: '纪要', exportConfig: { entryType: 'keyword' } };
+    h.entries = [
+      { uid: 1, comment: 'TavernDB-ACU-CustomExport-纪要-1', keys: ['IDX-2'], type: 'keyword' },
+      { uid: 2, comment: 'TavernDB-ACU-CustomExport-纪要-2', keys: ['IDX-1'], type: 'constant' },
+      { uid: 3, comment: 'TavernDB-ACU-CustomExport-纪要索引', keys: [], type: 'constant' },
+    ];
+  }
+
+  it('向量蓝灯写入完成后同步本轮条目，只返回纪要行的实际类型', async () => {
+    setVectorTableFixture_ACU();
+    let finishWrite!: () => void;
+    let started!: () => void;
+    const writing = new Promise<void>(resolve => { started = resolve; });
+    h.setEntries.mockImplementationOnce(() => {
+      started();
+      return new Promise<void>(resolve => { finishWrite = resolve; });
+    });
+    const applied = vi.fn();
+    const operation = processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'find dense', onVectorTableEntriesApplied: applied });
+    await writing;
+    expect(applied).not.toHaveBeenCalled();
+    expect(h.setEntries).toHaveBeenCalledWith('book', [{ uid: 1, type: 'constant' }, { uid: 2, type: 'keyword' }]);
+    finishWrite();
+    await expect(operation).resolves.toMatchObject({ success: true, mode: 'vector', injectedCount: 1 });
+    expect(applied).toHaveBeenCalledExactlyOnceWith('book', [{ uid: 1, type: 'constant' }, { uid: 2, type: 'keyword' }]);
+    expect(h.createEntries).not.toHaveBeenCalled();
+  });
+
+  it.each(['stop', 'chat'])('向量查询等待中 %s 后迟到结果不写世界书或同步条目', async cause => {
+    setVectorTableFixture_ACU();
+    let finishEmbedding!: (value: any) => void;
+    let started!: () => void;
+    const querying = new Promise<void>(resolve => { started = resolve; });
+    h.createEmbeddings.mockImplementationOnce(() => {
+      started();
+      return new Promise(resolve => { finishEmbedding = resolve; });
+    });
+    const controller = new AbortController();
+    let chatActive = true;
+    const applied = vi.fn();
+    const operation = processSummaryVectorIndexBeforeGeneration_ACU({
+      userInput: 'find dense', signal: controller.signal, onVectorTableEntriesApplied: applied,
+      assertActive: () => { if (!chatActive) throw new DOMException('聊天已切换。', 'AbortError'); },
+    });
+    const rejected = expect(operation).rejects.toMatchObject({ name: 'AbortError' });
+    await querying;
+    if (cause === 'stop') controller.abort();
+    else chatActive = false;
+    finishEmbedding([{ index: 0, embedding: [1, 0] }]);
+    await rejected;
+    expect(h.setEntries).not.toHaveBeenCalled();
+    expect(h.createEntries).not.toHaveBeenCalled();
+    expect(applied).not.toHaveBeenCalled();
+  });
+
+  it('向量召回失败撤回蓝灯时同步本轮扫描状态', async () => {
+    setVectorTableFixture_ACU();
+    h.createEmbeddings.mockRejectedValueOnce(new Error('embedding down'));
+    const applied = vi.fn();
+    await expect(processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'find dense', onVectorTableEntriesApplied: applied }))
+      .resolves.toMatchObject({ success: false, reason: 'embedding_failed', mode: 'vector' });
+    expect(h.setEntries).toHaveBeenCalledWith('book', [{ uid: 2, type: 'keyword' }]);
+    expect(applied).toHaveBeenCalledExactlyOnceWith('book', [{ uid: 1, type: 'keyword' }, { uid: 2, type: 'keyword' }]);
+  });
+
+  it('纪要行数低于阈值时全蓝灯同步不依赖查询请求', async () => {
+    setVectorTableFixture_ACU(4);
+    const applied = vi.fn();
+    await expect(processSummaryVectorIndexBeforeGeneration_ACU({ userInput: 'find dense', onVectorTableEntriesApplied: applied }))
+      .resolves.toMatchObject({ skipped: true, reason: 'below_min_rows', mode: 'vector', injectedCount: 2 });
+    expect(h.createEmbeddings).not.toHaveBeenCalled();
+    expect(applied).toHaveBeenCalledExactlyOnceWith('book', [{ uid: 1, type: 'constant' }, { uid: 2, type: 'constant' }]);
   });
 
 });

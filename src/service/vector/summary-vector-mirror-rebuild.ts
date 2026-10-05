@@ -402,7 +402,14 @@ function clearLegacyVectorFields_ACU(chat: any[]): void {
 
 export async function rebuildSummaryVectorMirror_ACU(options: {
     reason: SummaryVectorMirrorRebuildReason_ACU;
+    signal?: AbortSignal;
+    assertActive?: () => void;
 }): Promise<SummaryVectorMirrorRebuildResult_ACU> {
+    const assertActive = () => {
+        options.signal?.throwIfAborted();
+        options.assertActive?.();
+    };
+    assertActive();
     const chat = getChatArray_ACU();
     if (!Array.isArray(chat) || chat.length === 0) {
         return emptyResult_ACU({ success: true, skipped: true, reason: 'chat_empty' });
@@ -459,6 +466,7 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
             sourceTableKey: selected.summaryKey,
             loadManifest: (ref) => loadSummaryVectorMirrorManifest_ACU(ref),
         });
+        assertActive();
         if (head.status === 'ok') {
             const headPackRefsByHash = new Map(head.packRefs.map((ref) => [ref.packHash, ref]));
             for (const rowId of source.rowIds) {
@@ -468,6 +476,7 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
                 for (const ref of refs) {
                     const packRef = headPackRefsByHash.get(ref.packHash);
                     const pack = await loadSummaryVectorMirrorPack_ACU({ packHash: ref.packHash, path: packRef?.path || '', chunkCount: 0, byteLength: 0 });
+                    assertActive();
                     if (!pack || !pack.chunks[ref.chunkIndex]) {
                         valid = false;
                         break;
@@ -509,14 +518,17 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
                     apiKey: config.embeddingApiKey,
                     model: config.embeddingModel,
                     input,
+                    signal: options.signal,
                 }),
             });
+            assertActive();
             embeddings = executed.embeddings;
             if (embeddings.some((vector) => vector.length === 0)) {
                 return emptyResult_ACU({ reason: 'embedding_incomplete', errors: ['重建 embedding 结果不完整'] });
             }
             embedding.dimension = embeddings[0].length;
         } catch (error: any) {
+            assertActive();
             const embeddingError = error instanceof EmbeddingBatchExecutionError_ACU ? (error as any).cause : error;
             const credential = isVectorEmbeddingError_ACU(embeddingError)
                 && (Number((embeddingError as any).httpStatus) === 401 || Number((embeddingError as any).httpStatus) === 403);
@@ -530,6 +542,7 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
         if (first) embedding.dimension = embedding.dimension;
     }
 
+    assertActive();
     const scope = normalizeSummaryVectorIndexScope_ACU({
         chatKey: currentChatFileIdentifier_ACU,
         isolationKey,
@@ -558,6 +571,7 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
             dimension: embedding.dimension,
             chunks: packChunks,
         });
+        assertActive();
         files.push(packPersist.file);
         packRefsByHash.set(packPersist.ref.packHash, { ...packPersist.ref });
         chunkSources.forEach((source, index) => {
@@ -589,6 +603,7 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
             sourceTableKey: selected.summaryKey,
             loadManifest: (ref) => loadSummaryVectorMirrorManifest_ACU(ref),
         });
+        assertActive();
         if (existingHead.status === 'ok' && existingHead.checkpoint && isSummaryVectorEmbeddingIdentity_ACU(existingHead.checkpoint.embedding)) {
             embedding = { ...existingHead.checkpoint.embedding };
         } else {
@@ -619,6 +634,7 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
             rows: rows.map((row) => ({ rowId: row.rowId, chunks: row.chunks })),
         },
     });
+    assertActive();
     files.push(manifestPersist.file);
 
     const checkpoint: SummaryVectorIndexMirrorCheckpointV2_ACU = {
@@ -651,7 +667,9 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
             workingDataMode: 'none',
         }, async (ctx) => {
             ctx.assertFresh?.('vector_mirror_rebuild:before_write');
+            assertActive();
             await ctx.runCommit(async () => {
+                assertActive();
                 for (const ref of collectSummaryVectorMirrorFrameRefs_ACU(chat, isolationKey)) {
                     if (ref.frame.summaryVectorIndexFrame) {
                         delete ref.frame.summaryVectorIndexFrame.checkpoint;
@@ -685,6 +703,7 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
             if (snapshot.existed) snapshot.message.TavernDB_ACU_IsolatedData = snapshot.value;
             else delete snapshot.message.TavernDB_ACU_IsolatedData;
         }
+        assertActive();
         return emptyResult_ACU({
             reason: 'rebuild_commit_failed',
             errors: [error?.message || String(error || '重建落盘失败')],
@@ -697,10 +716,12 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
         logWarn_ACU('[向量镜像] 重建已写入聊天，registry published 失败:', error?.message || error);
     }
 
+    assertActive();
     const flushed = await flushSummaryVectorMirrorNow_ACU({
         isolationKey,
         sourceTableKey: selected.summaryKey,
     });
+    assertActive();
     if (!flushed.success) {
         logWarn_ACU(`[向量镜像] 重建后立刻 flush 失败：${flushed.errors.join('; ') || flushed.reason || 'unknown'}`);
     } else if (!flushed.skipped) {

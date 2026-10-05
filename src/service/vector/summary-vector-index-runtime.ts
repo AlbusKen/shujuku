@@ -64,6 +64,11 @@ import {
 export interface SummaryVectorIndexRuntimeOptions_ACU {
     userInput?: string;
     source?: string;
+    signal?: AbortSignal;
+    /** 发送租约检查：停止或聊天切换后禁止迟到结果写回。 */
+    assertActive?: () => void;
+    /** 同步宿主本轮已加载的纪要行状态；仅按世界书和 uid 匹配。 */
+    onVectorTableEntriesApplied?: (book: string, entries: Array<{ uid: unknown; type: string }>) => void;
     /**
      * 跳过 8s 去重窗口。仅供"索引自愈重建后在同一次发送里补跑召回"使用：
      * 第一次调用已登记签名，不绕过的话补跑会被当作重复钩子触发直接去重掉。
@@ -287,6 +292,7 @@ async function rerankCandidates_ACU(
     query: string,
     candidates: RankedSummaryCandidate_ACU[],
     live: LiveSummaryVectorRows_ACU | null,
+    signal?: AbortSignal,
 ): Promise<SummaryRerankOutcome_ACU> {
     const endpoint = normalizeText_ACU(config.rerankEndpoint);
     const model = normalizeText_ACU(config.rerankModel);
@@ -309,6 +315,7 @@ async function rerankCandidates_ACU(
             documents,
             instruction: normalizeText_ACU(config.rerankInstruction) || undefined,
             batchSize: config.rerankBatchSize,
+            signal,
         });
         const byIndex = new Map<number, number>();
         results.forEach((item) => {
@@ -326,6 +333,7 @@ async function rerankCandidates_ACU(
                 .sort((left, right) => (right.rerankScore ?? right.score) - (left.rerankScore ?? left.score)),
         };
     } catch (error) {
+        signal?.throwIfAborted();
         const message = error instanceof Error ? error.message : String(error);
         logError_ACU(`[交火模式纪要索引] Rerank 调用失败（endpoint=${endpoint}, model=${model}），本轮回退到 Embedding 排序：${message}`);
         return { candidates: rowCandidates, status: 'failed', error: message };
@@ -517,10 +525,12 @@ async function upsertOriginalSummaryIndexEntry_ACU(content: string): Promise<voi
  */
 async function applyVectorTableBlueLights_ACU(
     selectedRows: ChatSummaryVectorIndexRow_ACU[],
-    options: { all?: boolean } = {},
+    options: { all?: boolean; assertActive?: () => void; onVectorTableEntriesApplied?: SummaryVectorIndexRuntimeOptions_ACU['onVectorTableEntriesApplied'] } = {},
 ): Promise<number> {
+    options.assertActive?.();
     if (!isWorldbookApiAvailable_ACU()) return 0;
     const targetLorebook = await getInjectionTargetLorebook_ACU();
+    options.assertActive?.();
     if (!targetLorebook) return 0;
     const summary = findSummaryTable_ACU();
     const exportConfig = summary?.table?.exportConfig || {};
@@ -535,7 +545,9 @@ async function applyVectorTableBlueLights_ACU(
             .filter(Boolean),
     );
     const entries = await getLorebookEntries_ACU(targetLorebook);
+    options.assertActive?.();
     const updates: Array<{ uid: any; type: string }> = [];
+    const applied: Array<{ uid: unknown; type: string }> = [];
     let blueLightCount = 0;
     for (const entry of Array.isArray(entries) ? entries : []) {
         if (entry?.uid == null || !isChronicleRowComment(String(entry?.comment || ''))) continue;
@@ -543,9 +555,13 @@ async function applyVectorTableBlueLights_ACU(
         const selected = options.all === true || keys.some((key: string) => selectedCodes.has(key));
         if (selected) blueLightCount += 1;
         const nextType = selected ? 'constant' : restoreType;
+        applied.push({ uid: entry.uid, type: nextType });
         if (entry.type !== nextType) updates.push({ uid: entry.uid, type: nextType });
     }
+    options.assertActive?.();
     if (updates.length > 0) await setLorebookEntries_ACU(targetLorebook, updates);
+    options.assertActive?.();
+    options.onVectorTableEntriesApplied?.(targetLorebook, applied);
     return blueLightCount;
 }
 
@@ -556,21 +572,26 @@ async function applyVectorTableBlueLights_ACU(
  */
 async function finalizeVectorTableRecallResult_ACU(
     result: SummaryVectorIndexRuntimeResult_ACU,
+    assertActive?: () => void,
+    onVectorTableEntriesApplied?: SummaryVectorIndexRuntimeOptions_ACU['onVectorTableEntriesApplied'],
 ): Promise<SummaryVectorIndexRuntimeResult_ACU> {
+    assertActive?.();
     if (result.reason === 'deduped') return result;
     setLastSummaryVectorRecallSucceeded_ACU(false);
     if (result.reason === 'below_min_rows') {
         try {
-            const blueLightCount = await applyVectorTableBlueLights_ACU([], { all: true });
+            const blueLightCount = await applyVectorTableBlueLights_ACU([], { all: true, assertActive, onVectorTableEntriesApplied });
             logDebug_ACU(['[向量表格] 纪要行数不足保留相关纪要条数，不召回，全部 ', blueLightCount, ' 条纪要条目切为蓝灯。'].join(''));
             return { ...result, injectedCount: blueLightCount };
         } catch (error: any) {
+            assertActive?.();
             logWarn_ACU('[向量表格] 不召回时将纪要条目切为蓝灯失败:', error?.message || error);
         }
     } else if (!(result.success === true && result.skipped !== true)) {
         try {
-            await applyVectorTableBlueLights_ACU([]);
+            await applyVectorTableBlueLights_ACU([], { assertActive, onVectorTableEntriesApplied });
         } catch (error: any) {
+            assertActive?.();
             logWarn_ACU('[向量表格] 召回未成功，撤回纪要蓝灯失败:', error?.message || error);
         }
     }
@@ -917,6 +938,14 @@ async function tryRealignSummaryVectorIndexPointerFromDisk_ACU(params: {
 export async function processSummaryVectorIndexBeforeGeneration_ACU(
     options: SummaryVectorIndexRuntimeOptions_ACU = {},
 ): Promise<SummaryVectorIndexRuntimeResult_ACU> {
+    const assertActive = () => {
+        options.signal?.throwIfAborted();
+        options.assertActive?.();
+    };
+    assertActive();
+    const guarded = async <T>(run: () => Promise<T>): Promise<T> => {
+        assertActive(); const result = await run(); assertActive(); return result;
+    };
     const worldbookConfig = getCurrentWorldbookConfig_ACU();
     const globalEnabled = isVectorPipelineEnabledForCurrentChat_ACU();
     if (!globalEnabled) {
@@ -964,9 +993,10 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
         result: SummaryVectorIndexRuntimeResult_ACU,
         overviewRows?: ChatSummaryVectorIndexRow_ACU[],
     ): Promise<SummaryVectorIndexRuntimeResult_ACU> => {
+        assertActive();
         const stamped: SummaryVectorIndexRuntimeResult_ACU = { ...result, mode: isVectorTable ? 'vector' : 'crossfire' };
         return isVectorTable
-            ? finalizeVectorTableRecallResult_ACU(stamped)
+            ? finalizeVectorTableRecallResult_ACU(stamped, assertActive, options.onVectorTableEntriesApplied)
             : finalizeSummaryVectorRecallResult_ACU(stamped, overviewRows);
     };
     // 向量表格：实时纪要行数不足保留相关纪要条数时不召回，全部纪要条目直接切为蓝灯，
@@ -1005,14 +1035,17 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
         embedding: buildCurrentSummaryVectorEmbeddingIdentity_ACU(),
         loadManifest: (ref) => loadSummaryVectorMirrorManifest_ACU(ref),
     });
-    let head = await resolveHead();
+    let head = await guarded(resolveHead);
     const shouldAutoRepair = head.chainConflict
         || head.status === 'checkpoint_mismatch'
         || head.status === 'manifest_unavailable';
     if (shouldAutoRepair) {
-        const repaired = await rebuildSummaryVectorMirror_ACU({ reason: 'rebuild_repair' });
+        const repaired = await guarded(() => rebuildSummaryVectorMirror_ACU({
+            reason: 'rebuild_repair',
+            ...(options.signal || options.assertActive ? { signal: options.signal, assertActive } : {}),
+        }));
         if (repaired.success && !repaired.skipped) {
-            head = await resolveHead();
+            head = await guarded(resolveHead);
         }
     }
     if (head.status === 'no_mirror') {
@@ -1027,13 +1060,16 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     if (head.status !== 'ok') {
         return { success: false, skipped: true, reason: `mirror_${head.status}` };
     }
-    const materialized = await materializeSummaryVectorMirrorHead_ACU(head, liveRows);
+    const materialized = await guarded(() => materializeSummaryVectorMirrorHead_ACU(head, liveRows));
     if (head.head.size > 0 && materialized.rows.length === 0) {
-        const repaired = await rebuildSummaryVectorMirror_ACU({ reason: 'rebuild_repair' });
+        const repaired = await guarded(() => rebuildSummaryVectorMirror_ACU({
+            reason: 'rebuild_repair',
+            ...(options.signal || options.assertActive ? { signal: options.signal, assertActive } : {}),
+        }));
         if (repaired.success && !repaired.skipped) {
-            head = await resolveHead();
+            head = await guarded(resolveHead);
             if (head.status === 'ok') {
-                const retried = await materializeSummaryVectorMirrorHead_ACU(head, liveRows);
+                const retried = await guarded(() => materializeSummaryVectorMirrorHead_ACU(head, liveRows));
                 materialized.rows = retried.rows;
                 materialized.chunks = retried.chunks;
             }
@@ -1094,14 +1130,16 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     let queryText = '';
     let queryVector: number[] | Float32Array = [];
     try {
-        keywords = await generateKeywords_ACU(config, userInput);
+        keywords = await guarded(() => generateKeywords_ACU(config, userInput));
         queryText = [userInput, keywords.join('，')].filter(Boolean).join('\n关键词：');
         const embeddings = await createEmbeddings_ACU({
             endpoint: config.embeddingEndpoint,
             apiKey: config.embeddingApiKey,
             model: config.embeddingModel,
             input: [queryText],
+            signal: options.signal,
         });
+        assertActive();
         queryVector = embeddings[0]?.embedding || [];
         if (queryVector.length === 0) {
             logWarn_ACU('[交火模式纪要索引] query embedding 返回空向量，已中止召回并恢复纪要索引概览:', userInput);
@@ -1113,6 +1151,7 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
             }, rows);
         }
     } catch (error: any) {
+        assertActive();
         const message = error?.message || String(error || 'embedding 调用失败');
         logWarn_ACU('[交火模式纪要索引] query embedding 失败，已中止召回并恢复纪要索引概览:', message);
         return await finalizeRecall({
@@ -1181,7 +1220,7 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     }
 
     // Rerank 只处理较早行的候选；document 取实时纪要正文，候选行不多于 topK 时跳过。
-    const rerank = await rerankCandidates_ACU(config, queryText, candidates, liveRows);
+    const rerank = await guarded(() => rerankCandidates_ACU(config, queryText, candidates, liveRows, options.signal));
     if (vectorPlan?.rerankRequired && rerank.status !== 'applied' && rerank.status !== 'skipped_within_topk') {
         return await finalizeRecall({
             success: false,
@@ -1245,7 +1284,9 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     }
 
     if (isVectorTable) {
-        const blueLightCount = await applyVectorTableBlueLights_ACU(selected.map((candidate) => candidate.row));
+        const blueLightCount = await applyVectorTableBlueLights_ACU(selected.map((candidate) => candidate.row), {
+            assertActive, onVectorTableEntriesApplied: options.onVectorTableEntriesApplied,
+        });
         logDebug_ACU(['[向量表格] 召回 ', selected.length, ' 条纪要，已切为蓝灯 ', blueLightCount, ' 条，其余纪要条目保持模板类型；纪要索引保持完整目录。rerank=', rerank.status].join(''));
         return await finalizeRecall({
             success: true,
