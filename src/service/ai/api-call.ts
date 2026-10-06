@@ -360,8 +360,9 @@ export function buildCustomApiRequestBody_ACU(
  * 剧情推进任务级 API 调用 — 接受显式预设名称
  * 调用优先级：presetName 参数 > 全局 plotApiPreset > 当前 API 配置
  */
-export async function callApiWithPlotPreset_ACU(messages: any[], presetName: string, abortSignal: AbortSignal | null = null) {
-    const effectivePresetName = presetName || settings_ACU.plotApiPreset || '';
+export async function callApiWithPlotPreset_ACU(messages: any[], presetName?: string, abortSignal: AbortSignal | null = null) {
+    // undefined 继承功能选择；显式空名跟随当前配置，不再被固定预设覆盖。
+    const effectivePresetName = String(presetName !== undefined ? presetName : (settings_ACU.plotApiPreset || '')).trim();
     const apiPresetConfig = getApiConfigByPreset_ACU(effectivePresetName);
     requireResolvedApiPreset_ACU(effectivePresetName, apiPresetConfig);
     const effectiveApiMode = apiPresetConfig.apiMode ?? settings_ACU.apiMode;

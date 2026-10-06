@@ -42,7 +42,10 @@ vi.mock('../../../src/service/table/update-scheduler', async (importOriginal) =>
 });
 vi.mock('../../../src/service/chat/chat-service', () => ({ getChatArray_ACU: (...args: any[]) => m.getChat(...args), saveChatToHost_ACU: vi.fn() }));
 vi.mock('../../../src/shared/runtime-performance', () => ({ startRuntimePerformanceSpan_ACU: vi.fn(() => ({ id: 'span', end: vi.fn() })) }));
-vi.mock('../../../src/shared/trigger-diagnostics', () => ({ logAutoFillSkip_ACU: (...args: any[]) => m.logSkip(...args) }));
+vi.mock('../../../src/shared/trigger-diagnostics', () => ({
+  logAutoFillSkip_ACU: (...args: any[]) => m.logSkip(...args),
+  logAutoFillStage_ACU: vi.fn(),
+}));
 vi.mock('../../../src/service/template/chat-scope', () => ({ getSortedSheetKeys_ACU: vi.fn(() => ['sheet_0']) }));
 vi.mock('../../../src/service/table/storage-mode', () => ({ isSqliteMode: () => m.sqlite }));
 vi.mock('../../../src/presentation/theme/toast', () => ({ showToastr_ACU: m.showToast }));
@@ -150,7 +153,7 @@ describe('triggerAutomaticUpdateIfNeeded_ACU 逐次串行调度', () => {
       triggerAutomaticUpdateIfNeeded_ACU(),
     ]);
 
-    expect(m.logSkip).toHaveBeenCalledWith('no_tables_due', { aiFloorCount: 1 });
+    expect(m.logSkip).toHaveBeenCalledWith('no_tables_due', expect.objectContaining({ aiFloorCount: 1 }));
     expect(m.executePlan).not.toHaveBeenCalled();
     expect(m.beginTask).not.toHaveBeenCalled();
     expect(m.showToast).not.toHaveBeenCalled();
@@ -201,6 +204,7 @@ describe('triggerAutomaticUpdateIfNeeded_ACU 逐次串行调度', () => {
     await second;
 
     expect(m.executePlan).toHaveBeenCalledTimes(2);
-    expect(m.logSkip).not.toHaveBeenCalled();
+    expect(m.logSkip).toHaveBeenCalledWith('execution_failed', expect.objectContaining({ stage: 'dispatch' }));
+    expect(m.logSkip).toHaveBeenCalledTimes(1);
   });
 });

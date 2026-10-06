@@ -1,4 +1,5 @@
 import { logDebug_ACU, logWarn_ACU } from './utils';
+import { pushLog } from './log-buffer';
 
 const AUTO_FILL_SKIP_WARN_REASONS_ACU = new Set<AutoFillSkipReason_ACU>([
   'ambiguous_generated_ai_message',
@@ -21,7 +22,14 @@ export type AutoFillSkipReason_ACU =
   | 'auto_update_coalesced'
   | 'preconditions_failed'
   | 'initial_chat_message'
-  | 'no_tables_due';
+  | 'no_tables_due'
+  | 'reply_below_threshold'
+  | 'execution_failed'
+  | 'request_failed'
+  | 'input_preparation_failed'
+  | 'commit_failed'
+  | 'staging_runner_unavailable'
+  | 'refresh_failed';
 
 export interface AutoFillSkipContext_ACU {
   eventType?: string;
@@ -49,6 +57,21 @@ export interface AutoFillSkipContext_ACU {
   inFlight?: boolean;
   /** 前置检查失败分支的稳定原因码（来自 checkAutoUpdatePreConditions_ACU） */
   preconditionReason?: string;
+  runId?: string;
+  queueId?: number;
+  stage?: string;
+  groupCount?: number;
+  sheetCount?: number;
+  failedGroupCount?: number;
+  batchNumber?: number;
+  attempt?: number;
+  replyLength?: number;
+  threshold?: number;
+  diagnosticCode?: string;
+  errorCategory?: string;
+  apiMode?: string;
+  apiSource?: 'current' | 'fixed' | 'snapshot';
+  success?: boolean;
 }
 
 export function logAutoFillSkip_ACU(
@@ -65,11 +88,26 @@ export function logContentOptimizationSkip_ACU(
   logTriggerSkip_ACU('[ContentOptimization]', reason, context);
 }
 
+/** 详细过程遵从 Debug 开关；仅挑选诊断字段，不序列化业务载荷。 */
+export function logAutoFillStage_ACU(stage: string, context: AutoFillSkipContext_ACU = {}): void {
+  logDebug_ACU('[AutoFill] Stage', { ...pickTriggerContext_ACU(context), stage });
+}
+
 function logTriggerSkip_ACU(
   source: string,
   reason: AutoFillSkipReason_ACU,
   context: AutoFillSkipContext_ACU,
 ): void {
+  const detail = { reason, ...pickTriggerContext_ACU(context) };
+  if (source === '[AutoFill]') {
+    pushLog('debug', ['[ACU]', `${source} Trigger skipped`, detail], true);
+    return;
+  }
+  const log = AUTO_FILL_SKIP_WARN_REASONS_ACU.has(reason) ? logWarn_ACU : logDebug_ACU;
+  log(`${source} Trigger skipped`, detail);
+}
+
+function pickTriggerContext_ACU(context: AutoFillSkipContext_ACU): AutoFillSkipContext_ACU {
   const {
     eventType,
     messageId,
@@ -87,10 +125,11 @@ function logTriggerSkip_ACU(
     candidateIndexes,
     inFlight,
     preconditionReason,
+    runId, queueId, stage, groupCount, sheetCount, failedGroupCount,
+    batchNumber, attempt, replyLength, threshold, diagnosticCode,
+    errorCategory, apiMode, apiSource, success,
   } = context;
-  const log = AUTO_FILL_SKIP_WARN_REASONS_ACU.has(reason) ? logWarn_ACU : logDebug_ACU;
-  log(`${source} Trigger skipped`, {
-    reason,
+  return {
     eventType,
     messageId,
     eventMessageId,
@@ -107,5 +146,8 @@ function logTriggerSkip_ACU(
     candidateIndexes,
     inFlight,
     preconditionReason,
-  });
+    runId, queueId, stage, groupCount, sheetCount, failedGroupCount,
+    batchNumber, attempt, replyLength, threshold, diagnosticCode,
+    errorCategory, apiMode, apiSource, success,
+  };
 }

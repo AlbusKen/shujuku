@@ -120,9 +120,9 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
     return String(settings_ACU.plotApiPreset || '').trim();
   }
 
-  export function willPlotUseMainApiGenerateRaw_ACU(taskApiPreset: string = ''): boolean {
+  export function willPlotUseMainApiGenerateRaw_ACU(taskApiPreset?: string): boolean {
     try {
-      const effectivePreset = String(taskApiPreset || '').trim() || String(settings_ACU.plotApiPreset || '').trim();
+      const effectivePreset = String(taskApiPreset !== undefined ? taskApiPreset : (settings_ACU.plotApiPreset || '')).trim();
       const apiPresetConfig: any = getApiConfigByPreset_ACU(effectivePreset) || {};
       if (effectivePreset && apiPresetConfig.resolved === false) return false;
       const effectiveApiMode = apiPresetConfig.apiMode ?? settings_ACU.apiMode;
@@ -704,7 +704,10 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         checkCurrent();
 
         const effectivePlotApiPreset = requestContext
-          ? requestContext.resolveTaskApiPreset(normalizedTask) : resolvePlotTaskApiPreset_ACU(normalizedTask);
+          ? requestContext.resolveTaskApiPreset(normalizedTask)
+          : runtimeOptions.resolveApiPreset
+            ? runtimeOptions.resolveApiPreset()
+            : resolvePlotTaskApiPreset_ACU(normalizedTask);
         if (!requestContext && willPlotUseMainApiGenerateRaw_ACU(effectivePlotApiPreset)) {
           planningGuard_ACU.ignoreNextGenerationEndedCount++;
         }
@@ -1050,26 +1053,25 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
     for (let stageIndex = 0; stageIndex < stageGroups.length; stageIndex++) {
       const stageGroup = stageGroups[stageIndex];
 
-      let stageEffectivePreset = requestContext ? '' : String(settings_ACU.plotApiPreset || '').trim();
-      for (const stageTask of requestContext ? [] : stageGroup.tasks) {
-        const taskId = String(stageTask?.id || '').trim();
-        const mappedPreset = taskId ? String(getPlotTaskApiPresetOverrides_ACU()[taskId] || '').trim() : '';
-        const legacyTaskPreset = String(stageTask?.taskApiPreset || '').trim();
-        const explicitTaskPreset = mappedPreset || legacyTaskPreset;
-        if (explicitTaskPreset) {
-          stageEffectivePreset = explicitTaskPreset;
-          break;
+      // 阶段选择属于运行参数，不注入会被归一化丢弃的任务字段。
+      // 每次新请求（包括重试）重新决议功能选择；零层仍由请求级快照负责。
+      const resolveStageApiPreset = (): string => {
+        for (const stageTask of stageGroup.tasks) {
+          const taskId = String(stageTask?.id || '').trim();
+          const mappedPreset = taskId ? String(getPlotTaskApiPresetOverrides_ACU()[taskId] || '').trim() : '';
+          const legacyTaskPreset = String(stageTask?.taskApiPreset || '').trim();
+          const explicitTaskPreset = mappedPreset || legacyTaskPreset;
+          if (explicitTaskPreset) return explicitTaskPreset;
         }
-      }
+        return String(settings_ACU.plotApiPreset || '').trim();
+      };
 
-      logDebug_ACU(`[剧情推进] 阶段 ${stageGroup.stage} 开始执行，任务级API预设将按各任务独立决议。`);
+      logDebug_ACU(`[剧情推进] 阶段 ${stageGroup.stage} 开始执行，${requestContext ? '使用请求级冻结选择' : '按阶段统一选择 API'}。`);
 
       const stageRelayTagMap = new Map(aggregatedTags);
       const operations = stageGroup.tasks.map((task: any) => {
-        const stageTask = stageEffectivePreset
-          ? { ...task, taskApiPreset: stageEffectivePreset }
-          : task;
-        return executeSinglePlotTask_ACU(stageTask, sharedContext, {
+        return executeSinglePlotTask_ACU(task, sharedContext, {
+          ...(!requestContext ? { resolveApiPreset: resolveStageApiPreset } : {}),
           relayTagMap: stageRelayTagMap,
           historyTagMap,
           historyLookupOptions,

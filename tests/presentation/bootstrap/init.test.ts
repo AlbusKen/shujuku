@@ -362,7 +362,7 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
       eventMessageId: 1, eventMessageIdKind: 'index', chatKey: 'chat-a',
       isolationKey: 'test-isolation', capturedChatLength: 2, capturedAiFloorCount: 1,
     }));
-    expect(m.autoUpdate).toHaveBeenCalledExactlyOnceWith();
+    expect(m.autoUpdate).toHaveBeenCalledExactlyOnceWith(undefined, { eventType: eventName, messageId: 1 });
     expect(m.consumeGeneration).not.toHaveBeenCalled();
     expect(m.consumeInternalGeneration).not.toHaveBeenCalled();
     expect(m.consumeSimulationInternalGeneration).not.toHaveBeenCalled();
@@ -531,7 +531,7 @@ describe('mainInitialize_ACU continuation host generation isolation', () => {
     expect(bridge.onGenerationStarted).toHaveBeenCalledWith(m.gate.generationSeq, { allowOrdinaryLooseClaim: true, automaticTrigger: false, quietLike: false, dryRun: false });
     expect(bridge.claimsGenerationEnded).toHaveBeenCalledWith(m.gate.generationSeq, { allowOrdinaryLooseClaim: true, automaticTrigger: false, quietLike: false, dryRun: false });
     expect(bridge.onGenerationEnded).not.toHaveBeenCalled();
-    expect(m.autoUpdate).toHaveBeenCalledExactlyOnceWith();
+    expect(m.autoUpdate).toHaveBeenCalledExactlyOnceWith(undefined, { eventType: 'GENERATION_ENDED', messageId: 42 });
     expect(m.handleNewMessage).toHaveBeenCalledWith('GENERATION_ENDED', expect.objectContaining({ eventMessageId: 42 }));
   });
 

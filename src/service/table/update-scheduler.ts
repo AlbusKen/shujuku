@@ -7,6 +7,7 @@
 
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { startRuntimePerformanceSpan_ACU } from '../../shared/runtime-performance';
+import { logAutoFillSkip_ACU, logAutoFillStage_ACU } from '../../shared/trigger-diagnostics';
 import { getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { getLatestV2FullCheckpointMessageIndex_ACU, resolveTableHistoryStatesFromChat_ACU } from './table-history';
 
@@ -290,6 +291,8 @@ export async function executeAutoUpdatePlan_ACU(
     const maxConcurrentGroups = Math.max(1, settings.maxConcurrentGroups || 1);
     const failedGroupKeys: string[] = [];
     const failedGroupErrors: string[] = [];
+    const runnerUnavailableGroupKeys: string[] = [];
+    let executionStage = 'execute';
     const pushGroupError_ACU = (groupKey: string, error: unknown): void => {
         const message = error instanceof Error ? error.message : String(error || '').trim();
         if (!message) return;
@@ -322,7 +325,13 @@ export async function executeAutoUpdatePlan_ACU(
             }
             : {};
         const groupedResult = await runner(groupedChunk, 'auto_independent', groupedOptions);
+        logAutoFillStage_ACU('chunk_result', {
+            runId: performanceContext?.runId, groupCount: chunkKeys.length, success: groupedResult.success,
+        });
         if (!groupedResult.success) {
+            logAutoFillSkip_ACU('execution_failed', {
+                runId: performanceContext?.runId, stage: 'group', failedGroupCount: groupedResult.failedGroups.length,
+            });
             failedGroupKeys.push(...groupedResult.failedGroups);
             const groupedError = groupedResult.error || '分组更新失败，未返回具体错误。';
             groupedResult.failedGroups.forEach(groupKey => pushGroupError_ACU(groupKey, groupedError));
@@ -346,6 +355,7 @@ export async function executeAutoUpdatePlan_ACU(
                 const success = await ops.processUpdates(group.indices, 'auto_independent', {
                     targetSheetKeys: group.sheetKeys,
                     batchSize: group.batchSize,
+                    ...(performanceContext?.runId ? { performanceRunId: performanceContext.runId } : {}),
                     requestOptions: { skipProfileSwitch: true, forceDirectApi: true }
                 });
 
@@ -388,6 +398,7 @@ export async function executeAutoUpdatePlan_ACU(
         } else {
             // 无 staging/grouped runner：结构化失败，绝不用 legacy processUpdates 兜底。
             chunkKeys.forEach(key => {
+                runnerUnavailableGroupKeys.push(key);
                 failedGroupKeys.push(key);
                 pushGroupError_ACU(key, 'staging_runner_unavailable：跨 replay 根的分组缺少 staging runner，已阻止本次填表。');
             });
@@ -395,11 +406,15 @@ export async function executeAutoUpdatePlan_ACU(
     }
 
     if (failedGroupKeys.length > 0) {
-        const errorSummary = failedGroupErrors.length > 0 ? `原因：${failedGroupErrors.slice(0, 3).join('；')}` : '未返回具体原因。';
-        logWarn_ACU(`并发分组更新失败 ${failedGroupKeys.length}/${totalGroups} 组。${errorSummary}`);
+        logAutoFillSkip_ACU(runnerUnavailableGroupKeys.length ? 'staging_runner_unavailable' : 'execution_failed', {
+            runId: performanceContext?.runId, stage: 'execute', groupCount: totalGroups,
+            failedGroupCount: failedGroupKeys.length,
+        });
     }
 
     // 并发更新完成后统一刷新数据链条
+    executionStage = 'refresh';
+    logAutoFillStage_ACU('refresh', { runId: performanceContext?.runId });
     logDebug_ACU(`All group updates completed. Forcing data refresh...`);
     await ops.loadAllChatMessages();
     await ops.refreshData();
@@ -439,7 +454,6 @@ export async function executeAutoUpdatePlan_ACU(
         logWarn_ACU('清理旧层数据失败:', e);
     }
 
-    const runnerUnavailableGroupKeys = stagingGroupKeys.filter(key => failedGroupKeys.includes(key));
     const result = {
         success: failedGroupKeys.length === 0,
         failedGroups: failedGroupKeys.length,
@@ -463,6 +477,9 @@ export async function executeAutoUpdatePlan_ACU(
     } catch (error) {
       performanceSpan.end({ success: false });
       setAutoUpdating(false);
+      logAutoFillSkip_ACU(executionStage === 'refresh' ? 'refresh_failed' : 'execution_failed', {
+          runId: performanceContext?.runId, stage: executionStage,
+      });
       throw error;
     }
 }

@@ -585,15 +585,18 @@ describe('executeAutoUpdatePlan_ACU', () => {
     expect(mockProcess).not.toHaveBeenCalled();
   });
 
-  it('grouped 委托返回 failedGroups 时按数量汇总失败组', async () => {
+  it('跨边界 runner 执行失败按数量汇总，不误报为 runner 缺失', async () => {
     const plan = {
       tablesToUpdate: [],
       updateGroups: {
-        'group_a': { indices: [1], batchSize: 2, groupId: 0, sheetKeys: ['sheet_0'], sheetNames: ['表A'] },
+        'group_a': { indices: [1], batchSize: 2, groupId: 0, sheetKeys: ['sheet_0'], sheetNames: ['表A'], requiresBoundaryStaging: true },
         'group_b': { indices: [2], batchSize: 2, groupId: 1, sheetKeys: ['sheet_1'], sheetNames: ['表B'] },
       },
     };
-    const mockGrouped = vi.fn().mockResolvedValue({ success: false, failedGroups: ['group_a'] });
+    const mockGrouped = vi.fn().mockImplementation(async (groups: Array<{ key: string }>) => {
+      const failedGroups = groups.filter(group => group.key === 'group_a').map(group => group.key);
+      return { success: failedGroups.length === 0, failedGroups };
+    });
     const mockProcess = vi.fn().mockResolvedValue(true);
     const ops = makeOps({ processGroupedUpdates: mockGrouped, processUpdates: mockProcess });
 
@@ -602,6 +605,7 @@ describe('executeAutoUpdatePlan_ACU', () => {
     expect(result.success).toBe(false);
     expect(result.failedGroups).toBe(1);
     expect(result.totalGroups).toBe(2);
+    expect(result.diagnosticCode).toBeUndefined();
     expect(mockProcess).not.toHaveBeenCalled();
   });
 

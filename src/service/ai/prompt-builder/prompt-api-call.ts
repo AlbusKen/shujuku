@@ -21,6 +21,7 @@ import { withApiRequestTimeout_ACU } from '../api-request-timeout';
 import { chatTurnFromJson_ACU, readFetchChatTurn_ACU, type AiChatTurn_ACU } from '../native-tool';
 import { adaptTableFillPromptSegmentsToToolMode_ACU, buildTableFillNativeTools_ACU, resolveTableFillToolTurn_ACU } from './table-fill-tools';
 import { isNativeToolChannelAvailable_ACU } from '../agent-tool-mode';
+import { logAutoFillStage_ACU, logAutoFillSkip_ACU } from '../../../shared/trigger-diagnostics';
 
 
 /**
@@ -75,27 +76,28 @@ export class RetryableAiResponseError_ACU extends Error {
     const skipProfileSwitch = !!options?.skipProfileSwitch;
     const forceDirectApi = !!options?.forceDirectApi;
 
+    try {
     options?.assertCurrent?.();
     if (options?.isolatedSnapshot && (!forceDirectApi || !skipProfileSwitch)) {
         throw new Error('隔离填表必须使用数据库独立 API，禁止宿主预设切换。');
     }
-    const effectiveTableApiPreset = options?.tableApiPreset !== undefined
+    const readPresetName = () => String(options?.tableApiPreset !== undefined
         ? String(options.tableApiPreset)
-        : (settings_ACU.tableApiPreset || '');
-    const apiPresetConfig: ReturnType<typeof getApiConfigByPreset_ACU> = options?.isolatedSnapshot && options?.apiPresetSnapshot
-        ? structuredClone(options.apiPresetSnapshot)
-        : getApiConfigByPreset_ACU(effectiveTableApiPreset);
-    requireResolvedApiPreset_ACU(effectiveTableApiPreset, apiPresetConfig);
-    const effectiveApiMode = apiPresetConfig.apiMode;
-    const effectiveApiConfig = apiPresetConfig.apiConfig;
-    const effectiveTavernProfile = apiPresetConfig.tavernProfile;
-    const streaming = options?.streaming ?? (settings_ACU.streamingEnabled || false);
-
-    if (options?.isolatedSnapshot && (effectiveApiMode !== 'custom'
-        || !effectiveApiConfig.url || !effectiveApiConfig.model)) {
-        throw new Error('隔离填表缺少数据库独立 API 配置，禁止回退宿主生成。');
-    }
-    const messages: Array<{ role: string; content: string }> = [];
+        : (settings_ACU.tableApiPreset || '')).trim();
+    const readChannel = (name: string): ReturnType<typeof getApiConfigByPreset_ACU> => {
+        const channel = options?.isolatedSnapshot && options?.apiPresetSnapshot
+            ? structuredClone(options.apiPresetSnapshot)
+            : getApiConfigByPreset_ACU(name);
+        requireResolvedApiPreset_ACU(name, channel);
+        if (options?.isolatedSnapshot && (channel.apiMode !== 'custom'
+            || !channel.apiConfig.url || !channel.apiConfig.model)) {
+            throw new Error('隔离填表缺少数据库独立 API 配置，禁止回退宿主生成。');
+        }
+        return channel;
+    };
+    // 先用于提示词协议适配；普通请求在异步准备完成后重新读取。
+    const initialPresetName = readPresetName();
+    const initialChannel = readChannel(initialPresetName);
     const strictJsonFillEnabled = settings_ACU.strictJsonTableFillEnabled === true;
     const sqliteMode = isSqliteMode();
     const charCardPromptSetting = strictJsonFillEnabled
@@ -114,15 +116,17 @@ export class RetryableAiResponseError_ACU extends Error {
     // 填表原生工具默认关闭：部分渠道只要请求体出现 tools 字段就直接报错而不降级，需用户显式开启。
     const tableFillToolOptIn = settings_ACU.tableFillNativeToolEnabled === true;
     // 判定本次请求实际能否携带填表原生工具：Text Completion 连接与 generateRaw 回退取不回 tool_calls。
-    const tableFillToolChannelAvailable = !strictJsonFillEnabled && tableFillToolOptIn && isNativeToolChannelAvailable_ACU({
-        apiMode: effectiveApiMode,
-        apiConfig: effectiveApiConfig,
-        tavernProfile: effectiveTavernProfile,
-    }, forceDirectApi);
+    const canUseTools = (channel: ReturnType<typeof getApiConfigByPreset_ACU>) =>
+        !strictJsonFillEnabled && tableFillToolOptIn && isNativeToolChannelAvailable_ACU(channel, forceDirectApi);
+    const initialToolChannelAvailable = canUseTools(initialChannel);
+    const sourcePromptSegments = promptSegments;
+    const renderMessages = async (toolChannelAvailable: boolean) => {
+    const messages: Array<{ role: string; content: string }> = [];
+    let promptSegments = sourcePromptSegments;
     if (!strictJsonFillEnabled) {
         // 默认主段按本次是否真的携带工具对齐：带工具用工具版默认，不带工具用正文 <tableEdit> 格式默认。
-        promptSegments = adaptTableFillPromptSegmentsToToolMode_ACU(promptSegments, sqliteMode, tableFillToolChannelAvailable);
-        if (!tableFillToolChannelAvailable) {
+        promptSegments = adaptTableFillPromptSegmentsToToolMode_ACU(promptSegments, sqliteMode, toolChannelAvailable);
+        if (!toolChannelAvailable) {
             logDebug_ACU(tableFillToolOptIn
                 ? '[填表] 当前通道无法携带原生工具，降级使用正文 <tableEdit> 格式提示词。'
                 : '[填表] 填表工具调用未开启，使用正文 <tableEdit> 格式提示词。');
@@ -222,6 +226,32 @@ export class RetryableAiResponseError_ACU extends Error {
         options?.assertCurrent?.();
         messages.push({ role: normalizeRoleForApi_ACU(segment.role), content: finalContent });
     }
+    return messages;
+    };
+
+    let messages = await renderMessages(initialToolChannelAvailable);
+    options?.assertCurrent?.();
+    let effectiveTableApiPreset = options?.isolatedSnapshot ? initialPresetName : readPresetName();
+    let apiPresetConfig = options?.isolatedSnapshot ? initialChannel : readChannel(effectiveTableApiPreset);
+    let tableFillToolChannelAvailable = canUseTools(apiPresetConfig);
+    if (tableFillToolChannelAvailable !== initialToolChannelAvailable) {
+        messages = await renderMessages(tableFillToolChannelAvailable);
+        options?.assertCurrent?.();
+        // 协议重渲染也含异步操作，完成后必须再读当前选择，不能继续使用旧渠道。
+        effectiveTableApiPreset = options?.isolatedSnapshot ? initialPresetName : readPresetName();
+        apiPresetConfig = options?.isolatedSnapshot ? initialChannel : readChannel(effectiveTableApiPreset);
+        if (canUseTools(apiPresetConfig) !== tableFillToolChannelAvailable) {
+            throw Object.assign(new Error('填表准备期间 API 工具协议再次变化，请重新发起请求。'), {
+                code: 'api_channel_changed_during_preparation',
+            });
+        }
+    }
+    // 异步准备完成后冻结本次请求；后续全局修改只影响下一次请求。
+    apiPresetConfig = structuredClone(apiPresetConfig);
+    const effectiveApiMode = apiPresetConfig.apiMode;
+    const effectiveApiConfig = apiPresetConfig.apiConfig;
+    const effectiveTavernProfile = apiPresetConfig.tavernProfile;
+    const streaming = options?.streaming ?? (settings_ACU.streamingEnabled || false);
 
     if (strictJsonFillEnabled) {
         warnIfStrictJsonPromptPolluted_ACU(messages);
@@ -259,10 +289,13 @@ export class RetryableAiResponseError_ACU extends Error {
     };
 
 
-    logDebug_ACU('Final messages array being sent to API:', messages);
-    logDebug_ACU(`使用API预设: ${effectiveTableApiPreset || '当前配置'}, 模式: ${effectiveApiMode}`);
+    if (options?.autoFillDiagnostics) logAutoFillStage_ACU('request', {
+        runId: options.performanceRunId, batchNumber: options.batchNumber, attempt: options.attempt,
+        apiMode: effectiveApiMode,
+        apiSource: options?.isolatedSnapshot ? 'snapshot' : effectiveTableApiPreset ? 'fixed' : 'current',
+    });
+    logDebug_ACU('[填表] 请求已准备', { messageCount: messages.length, apiMode: effectiveApiMode });
 
-    try {
         return await withApiRequestTimeout_ACU(effectiveApiConfig, abortSignal, async (abortSignal) => {
         if (effectiveApiMode === 'tavern') {
         if (strictJsonResponseFormat) {
@@ -490,6 +523,15 @@ export class RetryableAiResponseError_ACU extends Error {
         }
         }
         });
+    } catch (error) {
+        if (options?.autoFillDiagnostics) logAutoFillSkip_ACU('request_failed', {
+            runId: options.performanceRunId, batchNumber: options.batchNumber, attempt: options.attempt,
+            stage: 'request', diagnosticCode: error instanceof RetryableAiResponseError_ACU
+                ? error.code : (error as { name?: string })?.name === 'ApiPresetUnresolvedError_ACU'
+                    ? 'api_preset_unresolved' : (error as { code?: string })?.code === 'api_channel_changed_during_preparation'
+                        ? 'api_channel_changed_during_preparation' : 'api_request_failed',
+        });
+        throw error;
     } finally {
         untrackAbortController_ACU(localAbortController);
         if (currentAbortController_ACU === localAbortController) {

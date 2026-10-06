@@ -54,6 +54,7 @@ import { getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
 
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 import { startRuntimePerformanceSpan_ACU } from '../../shared/runtime-performance';
+import { logAutoFillSkip_ACU, logAutoFillStage_ACU } from '../../shared/trigger-diagnostics';
 import { showUiSurfaceToast_ACU } from '../../shared/ui-surface-registry';
 import { createLorebookReadContext_ACU, type LorebookReadContext_ACU } from '../worldbook/read-context';
 
@@ -1300,12 +1301,22 @@ export async function collectGroupFillResponse_ACU(
     const effectiveAbortController = abortController || new AbortController();
     const isStopped = () => effectiveAbortController.signal.aborted || (options.respectGlobalStop !== false && wasStoppedByUser_ACU);
     const maxRetries = options.maxRetriesOverride || settings_ACU.tableMaxRetries || 3;
-    if (isStopped()) return { job, success: false, attempt: 0, aborted: true };
+    const diagnoseInput = (diagnosticCode: string, attempt = 0): void => {
+        if (job.requestOptions?.autoFillDiagnostics) logAutoFillSkip_ACU('input_preparation_failed', {
+            runId: job.performanceRunId || job.requestOptions.performanceRunId,
+            batchNumber: job.batchNumber, stage: 'prepare', diagnosticCode, attempt,
+        });
+    };
+    if (isStopped()) {
+        diagnoseInput('user_aborted');
+        return { job, success: false, attempt: 0, aborted: true };
+    }
     options.assertCurrent?.();
     // 请求前冻结 runtime schema 失败 = 本地基础设施失败：模型无法通过重试修复。
     // 必须在 AI 调用前 fail-closed，避免消耗 token 后在提交阶段才失败。
     const runtimeSchemaFailure = job.sqlApplyScope?.runtimeSchemaFailure;
     if (runtimeSchemaFailure) {
+        diagnoseInput('runtime_schema_unavailable');
         const error = `SQLite runtime schema 冻结失败（${runtimeSchemaFailure.code}）：${runtimeSchemaFailure.message}`;
         return {
             job,
@@ -1342,12 +1353,14 @@ export async function collectGroupFillResponse_ACU(
         });
     } catch (error: any) {
         prepareSpan.end({ success: false });
+        diagnoseInput(error?.name === 'AbortError' || isStopped() ? 'user_aborted' : 'prepare_input_exception');
         if (error?.name === 'AbortError' || isStopped()) return { job, success: false, attempt: 0, aborted: true };
         throw error;
     }
     prepareSpan.end({ success: Boolean(dynamicContent) });
     options.assertCurrent?.();
     if (dynamicContent && typeof dynamicContent === 'object' && dynamicContent.ok === false) {
+        diagnoseInput('provider_load_failed');
         const failure = dynamicContent as { failureCode?: string; message?: string };
         const error = `无法准备AI输入（${failure.failureCode || 'provider_load_failed'}）：${failure.message || 'SQLite 运行时未就绪。'}`;
         return {
@@ -1361,6 +1374,7 @@ export async function collectGroupFillResponse_ACU(
     }
 
     if (!dynamicContent) {
+        diagnoseInput('table_data_unavailable');
         return {
             job,
             success: false,
@@ -1375,6 +1389,7 @@ export async function collectGroupFillResponse_ACU(
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         if (isStopped()) {
+            diagnoseInput('user_aborted', attempt);
             return { job, success: false, attempt, aborted: true };
         }
 
@@ -1404,9 +1419,16 @@ export async function collectGroupFillResponse_ACU(
             });
             let aiResponse: string;
             let submittedViaTool = false;
+            const diagnoseResponse = (diagnosticCode: string): void => {
+                if (job.requestOptions?.autoFillDiagnostics) logAutoFillSkip_ACU('execution_failed', {
+                    runId: job.performanceRunId || job.requestOptions.performanceRunId,
+                    batchNumber: job.batchNumber, stage: 'response', attempt, diagnosticCode,
+                });
+            };
             try {
                 aiResponse = await callCustomOpenAI_ACU(dynamicContent, effectiveAbortController, {
                     ...(job.requestOptions || {}),
+                    attempt,
                     isolatedSnapshot: job.isolatedSnapshot,
                     assertCurrent: options.assertCurrent,
                     tableData: job.baseSnapshot,
@@ -1421,11 +1443,13 @@ export async function collectGroupFillResponse_ACU(
                 throw error;
             }
             if (isStopped()) {
+                diagnoseResponse('user_aborted');
                 return { job, success: false, attempt, aborted: true };
             }
 
             const minReplyLength = settings_ACU.autoUpdateTokenThreshold || 0;
             if (aiResponse && !submittedViaTool && minReplyLength > 0 && aiResponse.length < minReplyLength) {
+                diagnoseResponse('response_below_threshold');
                 throw new ModelOutputRetryError_ACU(`AI回复过短 (${aiResponse.length} 字符)，低于阈值 (${minReplyLength} 字符)`);
             }
             let normalizedAiResponse = aiResponse;
@@ -1437,12 +1461,14 @@ export async function collectGroupFillResponse_ACU(
                     targetSheetKeys: job.targetSheetKeys,
                 });
                 if (!extracted.ok) {
+                    diagnoseResponse('strict_json_response_invalid');
                     throw new ModelOutputRetryError_ACU(extracted.retryHint || extracted.error || '严格 JSON 填表响应格式无效');
                 }
                 normalizedAiResponse = extracted.normalizedResponse || aiResponse;
                 tableEditText = (extracted.tableEditText || '').trim();
             } else {
                 if (!aiResponse || !aiResponse.includes('<tableEdit>') || !aiResponse.includes('</tableEdit>')) {
+                    diagnoseResponse('table_edit_block_missing');
                     throw new ModelOutputRetryError_ACU('AI响应中未找到完整有效的 <tableEdit> 标签');
                 }
                 tableEditText = (aiResponse.match(/<tableEdit>([\s\S]*?)<\/tableEdit>/i)?.[1] || '').trim();
@@ -1456,6 +1482,7 @@ export async function collectGroupFillResponse_ACU(
                         job.sqlApplyScope?.runtimeData ? job.sqlApplyScope.runtimeData as any : job.baseSnapshot,
                     );
                 } catch (error: any) {
+                    diagnoseResponse('sql_column_mutation_rejected');
                     throw new ModelOutputRetryError_ACU(error?.message || 'SQLite 填表 SQL 无效。');
                 }
             }
@@ -2248,6 +2275,8 @@ export function applyUnifiedGroupFillResponses_ACU(
 ): ReturnType<typeof applyUnifiedGroupFillResponsesCore_ACU> {
     const responses = args[0];
     const options = args[2];
+    const autoFill = responses?.some(response => response?.job?.requestOptions?.autoFillDiagnostics === true);
+    if (autoFill) logAutoFillStage_ACU('commit_started', { runId: options.performanceRunId, groupCount: responses.length });
     const performanceSpan = startRuntimePerformanceSpan_ACU('table-fill-apply', {
         runId: options.performanceRunId,
         parentSpanId: options.performanceParentSpanId,
@@ -2262,9 +2291,19 @@ export function applyUnifiedGroupFillResponses_ACU(
         performanceParentSpanId: performanceSpan.id,
     }).then(result => {
         performanceSpan.end({ success: result.success, changedSheetCount: result.modifiedKeys.length });
+        if (autoFill) {
+            logAutoFillStage_ACU('commit_result', { runId: options.performanceRunId, success: result.success, sheetCount: result.modifiedKeys.length });
+            if (!result.success) logAutoFillSkip_ACU('commit_failed', {
+                runId: options.performanceRunId, stage: 'commit',
+                diagnosticCode: result.diagnosticCode, errorCategory: result.errorCategory,
+            });
+        }
         return result;
     }, error => {
         performanceSpan.end({ success: false });
+        if (autoFill) logAutoFillSkip_ACU('commit_failed', {
+            runId: options.performanceRunId, stage: 'commit', diagnosticCode: 'commit_exception',
+        });
         throw error;
     });
 }
@@ -2547,6 +2586,10 @@ async function processGroupedRuntimeChunkCore_ACU(
                 const lastAiMessageLength = lastAiMessageContent.length;
                 const minReplyLength = settings_ACU.autoUpdateTokenThreshold || 0;
                 if (isAutoUpdateMode && lastAiMessageLength < minReplyLength) {
+                    logAutoFillSkip_ACU('reply_below_threshold', {
+                        runId: options.performanceRunId, stage: 'batch', batchNumber: plannedJob.batchNumber,
+                        replyLength: lastAiMessageLength, threshold: minReplyLength,
+                    });
                     continue;
                 }
 
@@ -2556,13 +2599,18 @@ async function processGroupedRuntimeChunkCore_ACU(
                 }
                 const messagesForContext = chatHistory.slice(sliceStartIndex, plannedJob.lastMessageIndexOfBatch + 1);
                 let effectiveRequestOptions = plannedJob.group.requestOptions || null;
-                if (!effectiveRequestOptions?.tableApiPreset && Array.isArray(plannedJob.group.sheetKeys) && plannedJob.group.sheetKeys.length > 0) {
+                if (effectiveRequestOptions?.tableApiPreset === undefined && Array.isArray(plannedJob.group.sheetKeys) && plannedJob.group.sheetKeys.length > 0) {
                     const firstTableName = templateForLookup?.[plannedJob.group.sheetKeys[0]]?.name || '';
                     const resolvedPreset = resolveTableApiPresetOverride_ACU(firstTableName);
                     if (resolvedPreset) {
                         effectiveRequestOptions = { ...(effectiveRequestOptions || {}), tableApiPreset: resolvedPreset };
                     }
                 }
+
+                if (isAutoUpdateMode) effectiveRequestOptions = {
+                    ...(effectiveRequestOptions || {}), autoFillDiagnostics: true,
+                    performanceRunId: options.performanceRunId, batchNumber: plannedJob.batchNumber,
+                };
 
                 jobs.push({
                     groupKey: plannedJob.group.key,
@@ -2811,6 +2859,8 @@ export function processGroupedRuntimeChunk_ACU(
 ): ReturnType<typeof processGroupedRuntimeChunkCore_ACU> {
     const groups = args[0];
     const options = args[2] || {};
+    const autoFill = args[1]?.startsWith('auto') === true;
+    if (autoFill) logAutoFillStage_ACU('group_execution', { runId: options.performanceRunId, groupCount: groups?.length || 0 });
     const performanceSpan = startRuntimePerformanceSpan_ACU('grouped-runtime-chunk', {
         runId: options.performanceRunId,
         parentSpanId: options.performanceParentSpanId,
@@ -2826,9 +2876,19 @@ export function processGroupedRuntimeChunk_ACU(
         performanceParentSpanId: performanceSpan.id,
     }).then(result => {
         performanceSpan.end({ success: result.success, failedGroupCount: result.failedGroups.length, bucketCount: result.committedBucketCount });
+        if (autoFill) {
+            logAutoFillStage_ACU('group_result', { runId: options.performanceRunId, success: result.success, failedGroupCount: result.failedGroups.length });
+            if (!result.success) logAutoFillSkip_ACU(result.aborted ? 'user_aborted' : 'execution_failed', {
+                runId: options.performanceRunId, stage: 'group',
+                diagnosticCode: result.diagnosticCode, failedGroupCount: result.failedGroups.length,
+            });
+        }
         return result;
     }, error => {
         performanceSpan.end({ success: false });
+        if (autoFill) logAutoFillSkip_ACU('execution_failed', {
+            runId: options.performanceRunId, stage: 'group', diagnosticCode: 'group_execution_exception',
+        });
         throw error;
     });
 }
@@ -3080,8 +3140,17 @@ export async function executeCardUpdateCore_ACU(
         progressContext = null;
     }
     const effectiveAbortController = abortController || new AbortController();
+    const autoFill = requestOptions?.autoFillDiagnostics === true || updateMode?.startsWith('auto') === true;
+    if (autoFill) requestOptions = { ...(requestOptions || {}), autoFillDiagnostics: true };
+    const diagnosticContext = {
+        runId: requestOptions?.performanceRunId,
+        batchNumber: progressContext?.currentBatch || requestOptions?.batchNumber,
+    };
 
     const emitProgress = (event: CardUpdateProgressEvent): void => {
+        if (autoFill) logAutoFillStage_ACU(event.phase, {
+            ...diagnosticContext, attempt: event.attempt,
+        });
         onProgress?.({
             ...event,
             ...(progressContext
@@ -3121,6 +3190,9 @@ export async function executeCardUpdateCore_ACU(
                 targetMessageIndex: saveTargetIndex,
                 latestReplayRootIndex: admissionFailure.latestFullCheckpointIndex,
             };
+            if (autoFill) logAutoFillSkip_ACU('execution_failed', {
+                ...diagnosticContext, stage: 'admission', diagnosticCode: 'write_target_before_replay_root',
+            });
             return {
                 success: false,
                 modifiedKeys: [],
@@ -3314,6 +3386,10 @@ export async function executeCardUpdateCore_ACU(
                     });
 
                     if (!commitResult.success || !commitResult.value) {
+                        if (autoFill) logAutoFillSkip_ACU('commit_failed', {
+                            ...diagnosticContext, stage: 'commit', attempt,
+                            errorCategory: commitResult.errorCategory, diagnosticCode: 'legacy_commit_rejected',
+                        });
                         throw new UpdateAttemptError_ACU(
                             commitResult.error || '解析或应用AI更新时出错',
                             commitResult.errorCategory || 'infrastructure',
@@ -3450,6 +3526,10 @@ export async function executeCardUpdateCore_ACU(
                 });
 
                 if (!updateOutcome.success || !updateOutcome.value) {
+                    if (autoFill) logAutoFillSkip_ACU('commit_failed', {
+                        ...diagnosticContext, stage: 'commit', attempt,
+                        errorCategory: updateOutcome.errorCategory, diagnosticCode: 'legacy_commit_rejected',
+                    });
                     return {
                         success: false,
                         modifiedKeys: [],
@@ -3466,6 +3546,10 @@ export async function executeCardUpdateCore_ACU(
                 break;
 
             } catch (error: any) {
+                if (autoFill) logAutoFillSkip_ACU('execution_failed', {
+                    ...diagnosticContext, stage: 'legacy_attempt', attempt,
+                    diagnosticCode: 'legacy_attempt_failed',
+                });
                 const safeError = sanitizeRetryFeedback_ACU(error?.message || String(error), MAX_WARN_ERROR_LENGTH_ACU);
                 logWarn_ACU(`第 ${attempt} 次尝试失败: ${safeError}`);
 
@@ -3664,6 +3748,10 @@ export async function processUpdatesBatch_ACU(
             const minReplyLength = settings_ACU.autoUpdateTokenThreshold || 0;
 
             if (isAutoUpdateMode && lastAiMessageLength < minReplyLength) {
+                logAutoFillSkip_ACU('reply_below_threshold', {
+                    runId: options.performanceRunId, stage: 'batch', batchNumber,
+                    replyLength: lastAiMessageLength, threshold: minReplyLength,
+                });
                 logDebug_ACU(`[Auto] Batch ${batchNumber}/${batches.length} skipped: Last AI reply length (${lastAiMessageLength}) is below threshold (${minReplyLength}).`);
                 continue;
             }
@@ -3674,13 +3762,18 @@ export async function processUpdatesBatch_ACU(
             // 决议 effective API preset：如果调用方未指定 tableApiPreset，
             // 则以 targetSheetKeys 中第一个表名为准查覆盖映射
             let effectiveRequestOptions = requestOptions;
-            if (!effectiveRequestOptions?.tableApiPreset && effectiveTargetSheetKeys && effectiveTargetSheetKeys.length > 0) {
+            if (effectiveRequestOptions?.tableApiPreset === undefined && effectiveTargetSheetKeys && effectiveTargetSheetKeys.length > 0) {
                 const firstTableName = mergedBatchData?.[effectiveTargetSheetKeys[0]]?.name || '';
                 const resolvedPreset = resolveTableApiPresetOverride_ACU(firstTableName);
                 if (resolvedPreset) {
                     effectiveRequestOptions = { ...(effectiveRequestOptions || {}), tableApiPreset: resolvedPreset };
                 }
             }
+
+            if (isAutoUpdateMode) effectiveRequestOptions = {
+                ...(effectiveRequestOptions || {}), autoFillDiagnostics: true,
+                performanceRunId: options.performanceRunId, batchNumber,
+            };
 
             const result = await executeUpdate(
                 messagesForContext,

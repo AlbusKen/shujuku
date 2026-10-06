@@ -20,7 +20,7 @@ import { buildAutoUpdatePlan_ACU, checkAutoUpdatePreConditions_ACU, executeAutoU
 import { executeAutoFillStagingGroups_ACU, processGroupedRuntimeChunk_ACU, type CardUpdateProgressEvent } from '../../../service/table/update-orchestrator';
 import { isSqliteMode } from '../../../service/table/storage-mode';
 import { startRuntimePerformanceSpan_ACU } from '../../../shared/runtime-performance';
-import { logAutoFillSkip_ACU } from '../../../shared/trigger-diagnostics';
+import { logAutoFillSkip_ACU, logAutoFillStage_ACU, type AutoFillSkipContext_ACU } from '../../../shared/trigger-diagnostics';
 
 function buildAutoUpdateProgressLabel_ACU(event: Partial<CardUpdateProgressEvent>): string {
     if (Number.isFinite(event.currentBatch) && Number.isFinite(event.totalBatches)) {
@@ -80,18 +80,34 @@ function handleAutoGroupedProgressEvent_ACU(event: CardUpdateProgressEvent, prog
 }
 
 let autoUpdateQueueTail_ACU: Promise<void> = Promise.resolve();
+let autoUpdateQueueId_ACU = 0;
 
   // 每次调用独立排队；失败只回报当前调用，不中断后续信号。
   export function triggerAutomaticUpdateIfNeeded_ACU(
     performanceContext?: { runId?: string; parentSpanId?: string },
+    triggerContext: AutoFillSkipContext_ACU = {},
   ): Promise<void> {
-    const request = autoUpdateQueueTail_ACU.then(() => runAutomaticUpdateIfNeeded_ACU(performanceContext));
+    const queueId = ++autoUpdateQueueId_ACU;
+    const runId = performanceContext?.runId || `autofill-${queueId}`;
+    const context = { ...triggerContext, runId, queueId };
+    logAutoFillStage_ACU('queued', context);
+    const request = autoUpdateQueueTail_ACU.then(async () => {
+      logAutoFillStage_ACU('dequeued', context);
+      try {
+        await runAutomaticUpdateIfNeeded_ACU({ ...performanceContext, runId }, context);
+        logAutoFillStage_ACU('queue_completed', context);
+      } catch (error) {
+        logAutoFillSkip_ACU('execution_failed', { ...context, stage: 'dispatch' });
+        throw error;
+      }
+    });
     autoUpdateQueueTail_ACU = request.catch(() => {});
     return request;
   }
 
   async function runAutomaticUpdateIfNeeded_ACU(
     performanceContext?: { runId?: string; parentSpanId?: string },
+    context: AutoFillSkipContext_ACU = {},
   ): Promise<void> {
     logDebug_ACU('ACU Auto-Trigger: Starting independent check...');
     // 新一轮自动填表开跑前清掉上一轮「终止」残留，避免 isStopped() 立刻把新任务掐死。
@@ -105,9 +121,11 @@ let autoUpdateQueueTail_ACU: Promise<void> = Promise.resolve();
     // 前置检查与更新计划使用同一宿主聊天，不依赖世界书消息投影的加载状态。
     const liveChat = getChatArray_ACU();
     const preCheck = checkAutoUpdatePreConditions_ACU(settings_ACU);
+    logAutoFillStage_ACU('preconditions', { ...context, success: preCheck.canProceed });
     if (!preCheck.canProceed) {
       logDebug_ACU(`ACU Auto-Trigger: ${preCheck.reason} Skipping.`);
       logAutoFillSkip_ACU('preconditions_failed', {
+        ...context,
         aiFloorCount: liveChat?.filter((message: any) => !message.is_user).length || 0,
         inFlight: isAutoUpdatingCard_ACU,
         preconditionReason: preCheck.code,
@@ -126,8 +144,12 @@ let autoUpdateQueueTail_ACU: Promise<void> = Promise.resolve();
       triggerIsolationKey,
       { runId: performanceContext?.runId || performanceSpan.id, parentSpanId: performanceSpan.id },
     );
+    logAutoFillStage_ACU('plan', {
+      ...context, aiFloorCount: totalAiMessages, sheetCount: plan.tablesToUpdate.length,
+      groupCount: Object.keys(plan.updateGroups).length,
+    });
     if (plan.tablesToUpdate.length === 0) {
-      logAutoFillSkip_ACU('no_tables_due', { aiFloorCount: totalAiMessages });
+      logAutoFillSkip_ACU('no_tables_due', { ...context, aiFloorCount: totalAiMessages });
       return;
     }
 
@@ -136,6 +158,14 @@ let autoUpdateQueueTail_ACU: Promise<void> = Promise.resolve();
     // 实际开始填表请求后才登记任务；同一调度的分组与批次共用一个进度框。
     let autoProgressTask: NoticeTaskHandle_ACU | null = null;
     const onAutoGroupedProgress = (event: CardUpdateProgressEvent): void => {
+      logAutoFillStage_ACU(event.phase, {
+        ...context, batchNumber: event.currentBatch, attempt: event.attempt,
+      });
+      if (event.phase === 'retry' || event.phase === 'error') {
+        logAutoFillSkip_ACU('execution_failed', {
+          ...context, stage: event.phase, batchNumber: event.currentBatch, attempt: event.attempt,
+        });
+      }
       if (!autoProgressTask && event.phase === 'calling_ai') {
         autoProgressTask = beginNoticeTask_ACU('自动填表', {
             detail: buildAutoUpdateProgressMessage_ACU(event),
@@ -215,6 +245,17 @@ let autoUpdateQueueTail_ACU: Promise<void> = Promise.resolve();
     }
 
     // UI：根据返回值显示结果
+    logAutoFillStage_ACU('execution_result', {
+      ...context, success: result.success, groupCount: result.totalGroups,
+      failedGroupCount: result.failedGroups, diagnosticCode: result.diagnosticCode,
+    });
+    if (result.success === false || result.failedGroups > 0) {
+      logAutoFillSkip_ACU(result.diagnosticCode === 'staging_runner_unavailable'
+        ? 'staging_runner_unavailable' : 'execution_failed', {
+        ...context, stage: 'execute', groupCount: result.totalGroups,
+        failedGroupCount: result.failedGroups, diagnosticCode: result.diagnosticCode,
+      });
+    }
     if (result.failedGroups > 0) {
         const firstError = Array.isArray(result.errors) && result.errors.length > 0 ? result.errors[0] : '';
         showToastr_ACU('warning', firstError

@@ -891,7 +891,7 @@ describe('callCustomOpenAI_ACU — AbortController 管理', () => {
     expect(mockGetApiConfigByPreset).toHaveBeenCalledWith('override-preset');
   });
 
-  it('options 无 tableApiPreset 时使用全局 tableApiPreset', async () => {
+  it('options 未指定选择时，在异步准备完成后使用最新功能预设', async () => {
     mockSettings.tableApiPreset = 'global-preset';
     mockGetApiConfigByPreset.mockReturnValue({
       apiMode: 'custom',
@@ -905,11 +905,16 @@ describe('callCustomOpenAI_ACU — AbortController 管理', () => {
       messagesText: '消息',
       worldbookContent: '世界书',
       manualExtraHint: '',
+      resolveTableWorldbookContent: async () => {
+        mockSettings.tableApiPreset = 'latest-preset';
+        return '已准备';
+      },
     };
+    mockSettings.charCardPrompt = [{ role: 'USER', content: '{{测试表}}' }];
 
     await callCustomOpenAI_ACU(dynamicContent, null, {});
 
-    expect(mockGetApiConfigByPreset).toHaveBeenCalledWith('global-preset');
+    expect(mockGetApiConfigByPreset).toHaveBeenLastCalledWith('latest-preset');
   });
 
   it('options 为 null 时使用全局 tableApiPreset', async () => {

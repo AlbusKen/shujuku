@@ -1976,7 +1976,14 @@ describe('runPlotTasksRuntime_ACU', () => {
   // ═══════════════════════════════════════════════════════════════
   // stage 级统一 effective preset
   // ═══════════════════════════════════════════════════════════════
-  it('同 stage 多任务并发执行，并统一使用第一个有显式 taskApiPreset 的任务的预设', async () => {
+  it('同 stage 使用权威任务覆盖统一选择，归一化丢弃旧字段后仍并发执行', async () => {
+    mockSettings.plotTaskApiPresetOverridesById = { t1: 'preset-A' };
+    const normalizeTask = mockNormalizePlotTask.getMockImplementation()!;
+    mockNormalizePlotTask.mockImplementation((task: any) => {
+      const normalized = normalizeTask(task);
+      delete normalized.taskApiPreset;
+      return normalized;
+    });
     let activeCalls = 0;
     let maxActiveCalls = 0;
     let release!: () => void;
@@ -2030,6 +2037,7 @@ describe('runPlotTasksRuntime_ACU', () => {
     // 第二个任务也应使用 stage 级统一后的 'preset-A'
     expect(allCalls[1][1]).toBe('preset-A');
     expect(maxActiveCalls).toBeGreaterThan(1);
+    delete mockSettings.plotTaskApiPresetOverridesById;
   });
 
   it('同 stage 无任务有显式 taskApiPreset 时，统一回退到全局 plotApiPreset', async () => {

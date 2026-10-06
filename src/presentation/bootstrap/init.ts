@@ -545,8 +545,8 @@ export   function mainInitialize_ACU() {
         if (SillyTavern_API_ACU.eventTypes.GENERATION_ENDED) {
             const onGenerationEnded = (message_id: any) => {
                 // 每个宿主信号独立入队，不受其他功能的事件归属或早返回影响。
-                void triggerAutomaticUpdateIfNeeded_ACU().catch(error => {
-                  logWarn_ACU('ACU GENERATION_ENDED 自动填表调度失败:', error);
+                void triggerAutomaticUpdateIfNeeded_ACU(undefined, { eventType: 'GENERATION_ENDED', messageId: message_id }).catch(() => {
+                  // 调度入口已记录脱敏失败原因，避免将异常载荷写入日志。
                 });
                 logDebug_ACU(`ACU GENERATION_ENDED event for message_id: ${message_id}`);
                 const generationContext = consumeGenerationContextForEnded_ACU();
@@ -641,8 +641,8 @@ export   function mainInitialize_ACU() {
             if (messageType === 'first_message') {
               logAutoFillSkip_ACU('initial_chat_message', { eventType: evName, messageId });
             } else {
-              void triggerAutomaticUpdateIfNeeded_ACU().catch(error => {
-                logWarn_ACU(`ACU ${evName} 自动填表调度失败:`, error);
+              void triggerAutomaticUpdateIfNeeded_ACU(undefined, { eventType: evName, messageId }).catch(() => {
+                // 调度入口已记录脱敏失败原因。
               });
             }
             const chatAtCapture = SillyTavern_API_ACU?.chat || [];
