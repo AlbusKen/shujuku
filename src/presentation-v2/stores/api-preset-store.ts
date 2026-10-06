@@ -71,6 +71,8 @@ function findPresetMatchingCurrentConfig(presets: AcuV2ApiPreset[]): AcuV2ApiPre
     if (preset.tavernProfile !== current.tavernProfile) return false;
     return (
       preset.apiConfig.useMainApi === current.apiConfig.useMainApi &&
+      preset.apiConfig.requestTimeoutSeconds === current.apiConfig.requestTimeoutSeconds &&
+      preset.apiConfig.sendViaTavern === current.apiConfig.sendViaTavern &&
       preset.apiConfig.url === current.apiConfig.url &&
       preset.apiConfig.apiKey === current.apiConfig.apiKey &&
       preset.apiConfig.model === current.apiConfig.model &&
@@ -193,7 +195,7 @@ export const useApiPresetStore = defineStore('acu-v2-api-presets', {
     async loadModelsForConfig(apiConfig: Partial<AcuV2ApiConfig>): Promise<boolean> {
       this.modelLoadStatus = 'loading';
       this.modelLoadError = '';
-      const result = await fetchAvailableModels_ACU(String(apiConfig.url || ''), String(apiConfig.apiKey || ''));
+      const result = await fetchAvailableModels_ACU(String(apiConfig.url || ''), String(apiConfig.apiKey || ''), apiConfig);
       if (!result.success) {
         this.modelOptions = [];
         this.modelLoadStatus = 'error';

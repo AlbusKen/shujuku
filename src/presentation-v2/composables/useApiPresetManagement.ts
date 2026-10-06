@@ -1,6 +1,8 @@
 import {
   API_PROMPT_POST_PROCESSING_DEFAULT_ACU,
   CUSTOM_API_FORMAT_DEFAULT_ACU,
+  API_REQUEST_TIMEOUT_DEFAULT_ACU,
+  normalizeApiRequestTimeout_ACU,
   normalizeCustomApiFormat_ACU,
   normalizePromptPostProcessing_ACU,
   type ApiPromptPostProcessingValue_ACU,
@@ -12,6 +14,8 @@ export interface ApiPresetDraft {
   name: string;
   apiMode: AcuV2ApiMode;
   useMainApi: boolean;
+  requestTimeoutSeconds: number;
+  sendViaTavern: boolean;
   url: string;
   apiKey: string;
   model: string;
@@ -52,6 +56,8 @@ export function createEmptyApiPresetDraft(): ApiPresetDraft {
     name: '',
     apiMode: 'custom',
     useMainApi: true,
+    requestTimeoutSeconds: API_REQUEST_TIMEOUT_DEFAULT_ACU,
+    sendViaTavern: false,
     url: '',
     apiKey: '',
     model: '',
@@ -71,6 +77,8 @@ export function apiPresetDraftFromPreset(preset: AcuV2ApiPreset): ApiPresetDraft
     name: preset.name,
     apiMode: preset.apiMode,
     useMainApi: preset.apiConfig.useMainApi !== false,
+    requestTimeoutSeconds: normalizeApiRequestTimeout_ACU(preset.apiConfig.requestTimeoutSeconds),
+    sendViaTavern: preset.apiConfig.sendViaTavern === true,
     url: preset.apiConfig.url || '',
     apiKey: preset.apiConfig.apiKey || '',
     model: preset.apiConfig.model || '',
@@ -97,6 +105,8 @@ export function apiPresetFromDraft(draft: ApiPresetDraft): AcuV2ApiPreset {
       apiKey: draft.apiKey,
       model: draft.model.trim(),
       useMainApi: draft.useMainApi,
+      requestTimeoutSeconds: normalizeApiRequestTimeout_ACU(draft.requestTimeoutSeconds),
+      sendViaTavern: draft.sendViaTavern === true,
       max_tokens: Math.max(1, Math.floor(Number(draft.max_tokens) || 60000)),
       temperature: Number.isFinite(Number(draft.temperature)) ? Number(draft.temperature) : 1,
       bodyParams: draft.bodyParams || '',

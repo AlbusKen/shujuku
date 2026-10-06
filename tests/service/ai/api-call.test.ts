@@ -8,7 +8,7 @@ import { parse } from 'yaml';
 const { mockSettings, mockIsGenerateRawAvailable, mockGenerateRaw, mockSendConnectionManager, mockGetHeaders, mockHandleApiResponse, mockGetProfiles, mockTriggerSlash } = vi.hoisted(() => ({
   mockSettings: {
     apiMode: 'custom',
-    apiConfig: { url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test', max_tokens: 4096 },
+    apiConfig: { sendViaTavern: true, url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test', max_tokens: 4096 },
     tavernProfile: 'default',
     plotApiPreset: '',
     streamingEnabled: false,
@@ -79,7 +79,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(isMainApiChatCompletionAvailable_ACU).mockReturnValue(false);
   mockSettings.apiMode = 'custom';
-  mockSettings.apiConfig = { url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test', max_tokens: 4096 };
+  mockSettings.apiConfig = { sendViaTavern: true, url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test', max_tokens: 4096 };
   mockSettings.tavernProfile = 'default';
   mockSettings.plotApiPreset = '';
   mockSettings.streamingEnabled = false;
@@ -98,7 +98,7 @@ describe('getApiConfigByPreset_ACU', () => {
 
   it('找到预设时返回预设配置', () => {
     mockSettings.apiPresets = [
-      { name: '预设A', apiMode: 'tavern', apiConfig: { url: 'http://a.com' }, tavernProfile: 'profileA' },
+      { name: '预设A', apiMode: 'tavern', apiConfig: { sendViaTavern: true, url: 'http://a.com' }, tavernProfile: 'profileA' },
     ];
     const config = getApiConfigByPreset_ACU('预设A');
     expect(config.apiMode).toBe('tavern');
@@ -140,7 +140,7 @@ describe('requireResolvedApiPreset_ACU', () => {
 describe('callApi_ACU', () => {
   it('tavern 模式使用 generateRaw', async () => {
     mockSettings.plotApiPreset = '';
-    mockSettings.apiConfig = { useMainApi: true };
+    mockSettings.apiConfig = { sendViaTavern: true, useMainApi: true };
     mockGenerateRaw.mockResolvedValue('AI 回复');
     const result = await callApi_ACU([{ role: 'user', content: '你好' }], {});
     expect(result).toBe('AI 回复');
@@ -148,7 +148,7 @@ describe('callApi_ACU', () => {
   });
 
   it('generateRaw 不可用时抛错', async () => {
-    mockSettings.apiConfig = { useMainApi: true };
+    mockSettings.apiConfig = { sendViaTavern: true, useMainApi: true };
     mockIsGenerateRawAvailable.mockReturnValue(false);
     await expect(callApi_ACU([{ role: 'user', content: '你好' }], {})).rejects.toThrow('generateRaw');
   });
@@ -165,7 +165,7 @@ describe('callApi_ACU', () => {
   it('空预设名即使 resolved=false 也走当前配置', async () => {
     mockSettings.plotApiPreset = '';
     mockSettings.apiPresets = [];
-    mockSettings.apiConfig = { url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test' };
+    mockSettings.apiConfig = { sendViaTavern: true, url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test' };
     mockFetch.mockResolvedValue({ ok: true, text: () => Promise.resolve('response') });
     mockHandleApiResponse.mockResolvedValue('当前配置回复');
     const result = await callApi_ACU([{ role: 'user', content: '你好' }], {});
@@ -174,7 +174,7 @@ describe('callApi_ACU', () => {
   });
 
   it('自定义 API 模式使用 fetch', async () => {
-    mockSettings.apiConfig = { url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test' };
+    mockSettings.apiConfig = { sendViaTavern: true, url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test' };
     mockFetch.mockResolvedValue({ ok: true, text: () => Promise.resolve('response') });
     mockHandleApiResponse.mockResolvedValue('AI 回复');
     const result = await callApi_ACU([{ role: 'user', content: '你好' }], {});
@@ -183,18 +183,18 @@ describe('callApi_ACU', () => {
   });
 
   it('自定义 API 未配置 URL 时抛错', async () => {
-    mockSettings.apiConfig = { url: '', model: 'gpt-4' };
+    mockSettings.apiConfig = { sendViaTavern: true, url: '', model: 'gpt-4' };
     await expect(callApi_ACU([{ role: 'user', content: '你好' }], {})).rejects.toThrow('URL或模型未配置');
   });
 
   it('fetch 返回非 ok 时抛错', async () => {
-    mockSettings.apiConfig = { url: 'https://api.example.com', model: 'gpt-4' };
+    mockSettings.apiConfig = { sendViaTavern: true, url: 'https://api.example.com', model: 'gpt-4' };
     mockFetch.mockResolvedValue({ ok: false, status: 500, text: () => Promise.resolve('Internal Error') });
     await expect(callApi_ACU([{ role: 'user', content: '你好' }], {})).rejects.toThrow('500');
   });
 
   it('handleApiResponse 返回 null 时抛错', async () => {
-    mockSettings.apiConfig = { url: 'https://api.example.com', model: 'gpt-4' };
+    mockSettings.apiConfig = { sendViaTavern: true, url: 'https://api.example.com', model: 'gpt-4' };
     mockFetch.mockResolvedValue({ ok: true });
     mockHandleApiResponse.mockResolvedValue(null);
     await expect(callApi_ACU([{ role: 'user', content: '你好' }], {})).rejects.toThrow('无效响应');
@@ -239,7 +239,7 @@ describe('callAIWithPreset_ACU', () => {
 
   it('useMainApi 模式使用 generateRaw', async () => {
     mockSettings.apiMode = 'custom';
-    mockSettings.apiConfig = { useMainApi: true };
+    mockSettings.apiConfig = { sendViaTavern: true, useMainApi: true };
     mockIsGenerateRawAvailable.mockReturnValue(true);
     mockGenerateRaw.mockResolvedValue('AI 回复');
     const result = await callAIWithPreset_ACU([{ role: 'user', content: '你好' }]);
@@ -247,7 +247,7 @@ describe('callAIWithPreset_ACU', () => {
   });
 
   it('自定义 API 模式使用 fetch', async () => {
-    mockSettings.apiConfig = { url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test' };
+    mockSettings.apiConfig = { sendViaTavern: true, url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test' };
     mockFetch.mockResolvedValue({ ok: true });
     mockHandleApiResponse.mockResolvedValue('AI 回复');
     const result = await callAIWithPreset_ACU([{ role: 'user', content: '你好' }]);
@@ -268,7 +268,7 @@ describe('callAIWithPreset_ACU', () => {
 
   it('指定预设名使用对应预设', async () => {
     mockSettings.apiPresets = [
-      { name: '预设B', apiMode: 'tavern', apiConfig: {}, tavernProfile: 'profileB' },
+      { name: '预设B', apiMode: 'tavern', apiConfig: { sendViaTavern: true,}, tavernProfile: 'profileB' },
     ];
     mockSendConnectionManager.mockResolvedValue({
       result: { choices: [{ message: { content: '预设B回复' } }] },
@@ -278,17 +278,19 @@ describe('callAIWithPreset_ACU', () => {
   });
 
   it('自定义 API 模式把 signal 传给 fetch', async () => {
-    mockSettings.apiConfig = { url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test' };
+    mockSettings.apiConfig = { sendViaTavern: true, url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test' };
     mockFetch.mockResolvedValue({ ok: true });
     mockHandleApiResponse.mockResolvedValue('AI 回复');
     const controller = new AbortController();
     const result = await callAIWithPreset_ACU([{ role: 'user', content: '你好' }], '', undefined, controller.signal);
     expect(result).toBe('AI 回复');
-    expect(mockFetch).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ signal: controller.signal }));
+    const requestSignal = mockFetch.mock.calls[0][1].signal as AbortSignal;
+    expect(requestSignal).toBeInstanceOf(AbortSignal);
+    expect(requestSignal.aborted).toBe(false);
   });
 
   it('custom 分支 signal 已 abort 时仍先发请求，handleApiResponse 拒绝中断', async () => {
-    mockSettings.apiConfig = { url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test' };
+    mockSettings.apiConfig = { sendViaTavern: true, url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test' };
     const controller = new AbortController();
     controller.abort();
     mockFetch.mockRejectedValue(new DOMException('aborted', 'AbortError'));
@@ -361,7 +363,7 @@ describe('原生工具实际宿主请求体', () => {
       { role: 'assistant', content: '', tool_calls: [{ id: 'call-read-1', type: 'function', function: { name: 'read', arguments: '{"reads":["anchor:message"]}' } }] },
       { role: 'tool', tool_call_id: 'call-read-1', content: '完整正文' },
     ];
-    const preset = { apiMode: 'custom' as const, apiConfig: { url: 'https://api.example.com', model: 'gpt-4', max_tokens: 4096, useMainApi: false }, tavernProfile: '' };
+    const preset = { apiMode: 'custom' as const, apiConfig: { sendViaTavern: true, url: 'https://api.example.com', model: 'gpt-4', max_tokens: 4096, useMainApi: false }, tavernProfile: '' };
     const result = await callAIChatTurn_ACU(messages, preset, undefined, undefined, {
       tools: agentNativeTools_ACU(worldSimulationAgentNativeTools_ACU('timekeeper')),
     });
@@ -383,7 +385,7 @@ describe('原生工具实际宿主请求体', () => {
     ['lore-researcher', ['read', 'search']],
   ] as const)('%s 的宿主请求只传对应角色工具白名单', async (name, expectedTools) => {
     mockFetch.mockResolvedValue({ ok: true, json: async () => ({ choices: [{ message: { content: '完成' } }] }) });
-    const preset = { apiMode: 'custom' as const, apiConfig: { url: 'https://api.example.com', model: 'gpt-4', max_tokens: 4096, useMainApi: false }, tavernProfile: '' };
+    const preset = { apiMode: 'custom' as const, apiConfig: { sendViaTavern: true, url: 'https://api.example.com', model: 'gpt-4', max_tokens: 4096, useMainApi: false }, tavernProfile: '' };
     await callAIChatTurn_ACU([{ role: 'user', content: '测试' }], preset, undefined, undefined, {
       tools: agentNativeTools_ACU(worldSimulationAgentNativeTools_ACU(name)),
     });
@@ -401,7 +403,7 @@ describe('原生工具实际宿主请求体', () => {
     ['compose', []],
   ] as const)('续写 %s profile 的宿主请求只携带授权工具', async (kind, expectedTools) => {
     mockFetch.mockResolvedValue({ ok: true, json: async () => ({ choices: [{ message: { content: '完成' } }] }) });
-    const preset = { apiMode: 'custom' as const, apiConfig: { url: 'https://api.example.com', model: 'gpt-4', max_tokens: 4096, useMainApi: false }, tavernProfile: '' };
+    const preset = { apiMode: 'custom' as const, apiConfig: { sendViaTavern: true, url: 'https://api.example.com', model: 'gpt-4', max_tokens: 4096, useMainApi: false }, tavernProfile: '' };
     await callAIChatTurn_ACU([{ role: 'user', content: '测试' }], preset, undefined, undefined, {
       tools: agentNativeTools_ACU(getAgentSubagentAccessProfile_ACU(kind).tools),
     });
@@ -411,7 +413,7 @@ describe('原生工具实际宿主请求体', () => {
   });
 
   it('酒馆主 API 带原生工具时在 generateRaw 前拒绝，避免丢失 tool_calls', async () => {
-    const preset = { apiMode: 'custom' as const, apiConfig: { max_tokens: 4096, useMainApi: true }, tavernProfile: '' };
+    const preset = { apiMode: 'custom' as const, apiConfig: { sendViaTavern: true, max_tokens: 4096, useMainApi: true }, tavernProfile: '' };
     await expect(callAIChatTurn_ACU([{ role: 'user', content: '测试' }], preset, undefined, undefined, {
       tools: agentNativeTools_ACU(['read']),
     })).rejects.toThrow('酒馆主 API 无法保证原生工具调用及回执');
@@ -420,14 +422,14 @@ describe('原生工具实际宿主请求体', () => {
   });
 
   it('主 API 本次无工具定义但历史已有工具回执时同样拒发', async () => {
-    const preset = { apiMode: 'custom' as const, apiConfig: { max_tokens: 4096, useMainApi: true }, tavernProfile: '' };
+    const preset = { apiMode: 'custom' as const, apiConfig: { sendViaTavern: true, max_tokens: 4096, useMainApi: true }, tavernProfile: '' };
     await expect(callAIChatTurn_ACU([{ role: 'tool', tool_call_id: 'read-1', content: '完整正文' }], preset))
       .rejects.toThrow('酒馆主 API 无法保证原生工具调用及回执');
     expect(mockGenerateRaw).not.toHaveBeenCalled();
   });
 
   it('酒馆主 API 无工具时仍使用 generateRaw', async () => {
-    const preset = { apiMode: 'custom' as const, apiConfig: { max_tokens: 4096, useMainApi: true }, tavernProfile: '' };
+    const preset = { apiMode: 'custom' as const, apiConfig: { sendViaTavern: true, max_tokens: 4096, useMainApi: true }, tavernProfile: '' };
     const messages = [{ role: 'user', content: '测试' }];
     mockGenerateRaw.mockResolvedValue('直接回复');
     const result = await callAIChatTurn_ACU(messages, preset);
@@ -437,7 +439,7 @@ describe('原生工具实际宿主请求体', () => {
   });
 
   it('Tavern 连接管理器不支持原生工具时在宿主调用前拒绝', async () => {
-    const preset = { apiMode: 'tavern' as const, apiConfig: { max_tokens: 4096 }, tavernProfile: 'default' };
+    const preset = { apiMode: 'tavern' as const, apiConfig: { sendViaTavern: true, max_tokens: 4096 }, tavernProfile: 'default' };
     await expect(callAIChatTurn_ACU([{ role: 'user', content: '测试' }], preset, undefined, undefined, {
       tools: agentNativeTools_ACU(['read']),
     })).rejects.toThrow('酒馆连接管理器不支持原生工具调用及回执');
@@ -446,7 +448,7 @@ describe('原生工具实际宿主请求体', () => {
   });
 
   it('Tavern 本次无工具定义但历史已有 tool_calls 时同样拒发', async () => {
-    const preset = { apiMode: 'tavern' as const, apiConfig: { max_tokens: 4096 }, tavernProfile: 'default' };
+    const preset = { apiMode: 'tavern' as const, apiConfig: { sendViaTavern: true, max_tokens: 4096 }, tavernProfile: 'default' };
     await expect(callAIChatTurn_ACU([{
       role: 'assistant', content: '', tool_calls: [{ id: 'read-1', type: 'function', function: { name: 'read', arguments: '{"reads":["$HOOKS_LEDGER"]}' } }],
     }], preset)).rejects.toThrow('酒馆连接管理器不支持原生工具调用及回执');
@@ -455,7 +457,7 @@ describe('原生工具实际宿主请求体', () => {
   });
 
   it('Tavern 不带工具仍按原有连接管理器路径发送', async () => {
-    const preset = { apiMode: 'tavern' as const, apiConfig: { max_tokens: 4096 }, tavernProfile: 'default' };
+    const preset = { apiMode: 'tavern' as const, apiConfig: { sendViaTavern: true, max_tokens: 4096 }, tavernProfile: 'default' };
     const messages = [{ role: 'user', content: '测试' }];
     mockGetProfiles.mockReturnValue([{ id: 'default', name: 'default', api: 'openai' }]);
     mockSendConnectionManager.mockResolvedValue({ result: { choices: [{ message: { content: '直接回复' } }] } });
@@ -900,7 +902,7 @@ describe('callAIWithPreset_ACU 自定义模式 role 归一化', () => {
 // ═══ callApi_ACU 温度透传 ═══
 describe('callApi_ACU 温度透传', () => {
   it('custom 模式 fetch body 使用配置温度，不是 0.7', async () => {
-    mockSettings.apiConfig = { url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test', temperature: 0.3, top_p: 0.8, max_tokens: 2048 };
+    mockSettings.apiConfig = { sendViaTavern: true, url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test', temperature: 0.3, top_p: 0.8, max_tokens: 2048 };
     mockFetch.mockResolvedValue({ ok: true });
     mockHandleApiResponse.mockResolvedValue('AI 回复');
     await callApi_ACU([{ role: 'user', content: '你好' }], {});
@@ -911,7 +913,7 @@ describe('callApi_ACU 温度透传', () => {
   });
 
   it('custom 模式 temperature=0 进入 fetch body', async () => {
-    mockSettings.apiConfig = { url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test', temperature: 0 };
+    mockSettings.apiConfig = { sendViaTavern: true, url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test', temperature: 0 };
     mockFetch.mockResolvedValue({ ok: true });
     mockHandleApiResponse.mockResolvedValue('AI 回复');
     await callApi_ACU([{ role: 'user', content: '你好' }], {});
@@ -924,7 +926,7 @@ describe('callApi_ACU 温度透传', () => {
 describe('callApiWithPlotPreset_ACU 温度透传', () => {
   it('custom 模式 fetch body 使用配置温度', async () => {
     mockSettings.plotApiPreset = '';
-    mockSettings.apiConfig = { url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test', temperature: 0.5, top_p: 0.7 };
+    mockSettings.apiConfig = { sendViaTavern: true, url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test', temperature: 0.5, top_p: 0.7 };
     mockFetch.mockResolvedValue({ ok: true });
     mockHandleApiResponse.mockResolvedValue('AI 回复');
     await callApiWithPlotPreset_ACU([{ role: 'user', content: '你好' }], '');
@@ -936,7 +938,7 @@ describe('callApiWithPlotPreset_ACU 温度透传', () => {
   it('custom 模式指定预设温度进入 fetch body', async () => {
     mockSettings.plotApiPreset = '预设C';
     mockSettings.apiPresets = [
-      { name: '预设C', apiMode: 'custom', apiConfig: { url: 'https://api.example.com', model: 'gpt-4', temperature: 0.2, top_p: 0.6 }, tavernProfile: '' },
+      { name: '预设C', apiMode: 'custom', apiConfig: { sendViaTavern: true, url: 'https://api.example.com', model: 'gpt-4', temperature: 0.2, top_p: 0.6 }, tavernProfile: '' },
     ];
     mockFetch.mockResolvedValue({ ok: true });
     mockHandleApiResponse.mockResolvedValue('AI 回复');
@@ -993,7 +995,7 @@ describe('callAIWithResolvedPreset_ACU', () => {
 
     await expect(callAIWithResolvedPreset_ACU(
       [{ role: 'user', content: '仅使用候选配置' }],
-      { apiMode: 'custom', apiConfig: { url: 'https://resolved.example', apiKey: '', model: 'resolved-model', useMainApi: false, max_tokens: 222, temperature: 0, bodyParams: '', excludeBodyParams: '', requestHeaders: '' }, tavernProfile: '' },
+      { apiMode: 'custom', apiConfig: { sendViaTavern: true, url: 'https://resolved.example', apiKey: '', model: 'resolved-model', useMainApi: false, max_tokens: 222, temperature: 0, bodyParams: '', excludeBodyParams: '', requestHeaders: '' }, tavernProfile: '' },
     )).resolves.toBe('明确配置回复');
 
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
@@ -1012,7 +1014,7 @@ describe('callAIWithResolvedPreset_ACU', () => {
       [{ role: 'user', content: '合成宿主边界验证' }],
       {
         apiMode: 'custom',
-        apiConfig: {
+        apiConfig: { sendViaTavern: true,
           url: 'https://api.openai.com/v1', apiKey: '', model: 'gpt-4o-mini', useMainApi: false,
           max_tokens: 222, temperature: 0,
           bodyParams: '{"metadata":{"source":"synthetic"},"stream_options":{"trace":true}}',
@@ -1040,13 +1042,13 @@ describe('callAIWithResolvedPreset_ACU', () => {
     mockHandleApiResponse.mockResolvedValue('回复');
     mockFetch.mockResolvedValue({ ok: true });
     const apiConfig = {
-      url: 'https://api.openai.com/v1', apiKey: '', model: 'gpt-4o-mini', useMainApi: false,
+      url: 'https://api.openai.com/v1', apiKey: '', model: 'gpt-4o-mini', useMainApi: false, sendViaTavern: true,
       max_tokens: 128, bodyParams: '', excludeBodyParams: '', requestHeaders: '',
     };
     const variants = [
-      { apiConfig: { ...apiConfig, url: 'https://gateway.example/v1' }, tt: false },
-      { apiConfig: { ...apiConfig, customApiFormat: 'claude_messages' }, tt: false },
-      { apiConfig: { ...apiConfig, excludeBodyParams: '- prompt_cache_key' }, tt: false },
+      { apiConfig: { sendViaTavern: true, ...apiConfig, url: 'https://gateway.example/v1' }, tt: false },
+      { apiConfig: { sendViaTavern: true, ...apiConfig, customApiFormat: 'claude_messages' }, tt: false },
+      { apiConfig: { sendViaTavern: true, ...apiConfig, excludeBodyParams: '- prompt_cache_key' }, tt: false },
       { apiConfig, tt: true },
     ];
     try {
@@ -1075,10 +1077,10 @@ describe('callAIWithResolvedPreset_ACU', () => {
     const messages = [{ role: 'user', content: '宿主代管' }];
     const extras = { promptCacheKey: 'not-controllable' };
     await expect(callAIWithResolvedPreset_ACU(messages, {
-      apiMode: 'tavern', apiConfig: { url: '', model: '' }, tavernProfile: 'profile-id',
+      apiMode: 'tavern', apiConfig: { sendViaTavern: true, url: '', model: '' }, tavernProfile: 'profile-id',
     }, undefined, undefined, extras)).resolves.toBe('profile reply');
     await expect(callAIWithResolvedPreset_ACU(messages, {
-      apiMode: 'custom', apiConfig: { url: '', model: '', useMainApi: true }, tavernProfile: '',
+      apiMode: 'custom', apiConfig: { sendViaTavern: true, url: '', model: '', useMainApi: true }, tavernProfile: '',
     }, undefined, undefined, extras)).resolves.toBe('main reply');
     expect(mockSendConnectionManager).toHaveBeenCalledWith('profile-id', messages, expect.any(Number));
     expect(mockGenerateRaw).toHaveBeenCalledWith(expect.objectContaining({ ordered_prompts: messages }));
@@ -1100,7 +1102,7 @@ describe('callAIWithResolvedPreset_ACU', () => {
 
     await expect(callAIWithResolvedPreset_ACU(
       [{ role: 'user', content: 'profile request' }],
-      { apiMode: 'tavern', apiConfig: { url: '', apiKey: '', model: '', useMainApi: false, max_tokens: 17, temperature: 1, bodyParams: '', excludeBodyParams: '', requestHeaders: '' }, tavernProfile: 'resolved-profile' },
+      { apiMode: 'tavern', apiConfig: { sendViaTavern: true, url: '', apiKey: '', model: '', useMainApi: false, max_tokens: 17, temperature: 1, bodyParams: '', excludeBodyParams: '', requestHeaders: '' }, tavernProfile: 'resolved-profile' },
     )).resolves.toBe('profile reply');
 
     expect(mockSendConnectionManager).toHaveBeenCalledWith('resolved-profile', expect.any(Array), 17);
@@ -1116,7 +1118,7 @@ describe('callAIWithResolvedPreset_ACU', () => {
     mockGetProfiles.mockReturnValue([{ id: 'resolved-profile', name: '续写渠道', api: 'openai' }]);
     mockTriggerSlash.mockResolvedValue('续写渠道');
     mockSendConnectionManager.mockResolvedValue({ result: { choices: [{ message: { content: 'profile reply' } }] } });
-    const resolved = { apiMode: 'tavern' as const, apiConfig: { url: '', apiKey: '', model: '', useMainApi: false, max_tokens: 17, temperature: 1, bodyParams: '', excludeBodyParams: '', requestHeaders: '' }, tavernProfile: 'resolved-profile' };
+    const resolved = { apiMode: 'tavern' as const, apiConfig: { sendViaTavern: true, url: '', apiKey: '', model: '', useMainApi: false, max_tokens: 17, temperature: 1, bodyParams: '', excludeBodyParams: '', requestHeaders: '' }, tavernProfile: 'resolved-profile' };
 
     await expect(callAIWithResolvedPreset_ACU([{ role: 'user', content: 'profile request' }], resolved)).resolves.toBe('profile reply');
     expect(mockTriggerSlash.mock.calls.map(call => call[0]).filter(command => command.startsWith('/profile await=true'))).toHaveLength(0);
@@ -1132,7 +1134,7 @@ describe('callAIWithResolvedPreset_ACU', () => {
 
     await expect(callAIWithResolvedPreset_ACU(
       [{ role: 'user', content: 'main API request' }],
-      { apiMode: 'custom', apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 33, temperature: 1, bodyParams: '', excludeBodyParams: '', requestHeaders: '' }, tavernProfile: '' },
+      { apiMode: 'custom', apiConfig: { sendViaTavern: true, url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 33, temperature: 1, bodyParams: '', excludeBodyParams: '', requestHeaders: '' }, tavernProfile: '' },
     )).resolves.toBe('main-api reply');
 
     expect(mockGenerateRaw).toHaveBeenCalledWith(expect.objectContaining({
@@ -1145,7 +1147,7 @@ describe('callAIWithResolvedPreset_ACU', () => {
     const beforeMainApiCall = vi.fn();
     const afterMainApiCall = vi.fn();
     mockGenerateRaw.mockResolvedValueOnce('main-api reply').mockRejectedValueOnce(new Error('offline'));
-    const resolved = { apiMode: 'custom' as const, apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 33, temperature: 1, bodyParams: '', excludeBodyParams: '', requestHeaders: '' }, tavernProfile: '' };
+    const resolved = { apiMode: 'custom' as const, apiConfig: { sendViaTavern: true, url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 33, temperature: 1, bodyParams: '', excludeBodyParams: '', requestHeaders: '' }, tavernProfile: '' };
 
     await expect(callAIWithResolvedPreset_ACU([{ role: 'user', content: 'main API request' }], resolved, undefined, { beforeMainApiCall, afterMainApiCall })).resolves.toBe('main-api reply');
     await expect(callAIWithResolvedPreset_ACU([{ role: 'user', content: 'main API request' }], resolved, undefined, { beforeMainApiCall, afterMainApiCall })).rejects.toThrow('offline');
@@ -1160,7 +1162,7 @@ describe('callAIWithResolvedPreset_ACU', () => {
 // ═══ callAIWithPreset_ACU 参数透传 ═══
 describe('callAIWithPreset_ACU 参数透传', () => {
   it('custom 分支 fetch body temperature=0 不被回退', async () => {
-    mockSettings.apiConfig = { url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test', temperature: 0 };
+    mockSettings.apiConfig = { sendViaTavern: true, url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test', temperature: 0 };
     mockFetch.mockResolvedValue({ ok: true });
     mockHandleApiResponse.mockResolvedValue('AI 回复');
     await callAIWithPreset_ACU([{ role: 'user', content: '你好' }]);
@@ -1169,7 +1171,7 @@ describe('callAIWithPreset_ACU 参数透传', () => {
   });
 
   it('custom 分支 fetch body topP 驼峰别名生效', async () => {
-    mockSettings.apiConfig = { url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test', topP: 0.3 };
+    mockSettings.apiConfig = { sendViaTavern: true, url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test', topP: 0.3 };
     mockFetch.mockResolvedValue({ ok: true });
     mockHandleApiResponse.mockResolvedValue('AI 回复');
     await callAIWithPreset_ACU([{ role: 'user', content: '你好' }]);
@@ -1178,11 +1180,146 @@ describe('callAIWithPreset_ACU 参数透传', () => {
   });
 
   it('custom 分支 fetch body max_tokens=0 不被回退', async () => {
-    mockSettings.apiConfig = { url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test', max_tokens: 0 };
+    mockSettings.apiConfig = { sendViaTavern: true, url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test', max_tokens: 0 };
     mockFetch.mockResolvedValue({ ok: true });
     mockHandleApiResponse.mockResolvedValue('AI 回复');
     await callAIWithPreset_ACU([{ role: 'user', content: '你好' }]);
     const fetchBody = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(fetchBody.max_tokens).toBe(0);
+  });
+});
+
+describe('插件直连与请求期限', () => {
+  it('默认直连发送最终请求，并在 Debug 关闭时记录完整请求和原始回复且隐藏凭据', async () => {
+    const { clearLogs, getAllLogs, setDebugLogEnabled } = await import('../../../src/shared/log-buffer');
+    clearLogs(); setDebugLogEnabled(false);
+    mockSettings.apiConfig = { url: 'https://direct.test/v1', model: 'm', apiKey: 'secret-direct-key',
+      promptPostProcessing: '', bodyParams: 'top_k: 42', requestHeaders: 'X-Api-Key: secret-header-key' };
+    const prompt = '完整提示词'.repeat(10000);
+    const raw = JSON.stringify({ choices: [{ message: { content: '完整回复'.repeat(10000) } }] });
+    mockFetch.mockResolvedValue(new Response(raw, { headers: { 'Content-Type': 'application/json' } }));
+    mockHandleApiResponse.mockImplementationOnce(async response => (await response.json()).choices[0].message.content);
+    await expect(callAIWithPreset_ACU([{ role: 'system', content: prompt }])).resolves.toBe('完整回复'.repeat(10000));
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toBe('https://direct.test/v1/chat/completions');
+    expect(init.credentials).toBe('omit');
+    expect(init.headers.get('Authorization')).toBe('Bearer secret-direct-key');
+    const body = JSON.parse(init.body);
+    expect(body.messages).toEqual([{ role: 'system', content: prompt }]);
+    expect(body.top_k).toBe(42);
+    expect(body).not.toHaveProperty('custom_url');
+    expect(body).not.toHaveProperty('custom_include_headers');
+    const logs = getAllLogs().filter(entry => entry.tag === 'API直连');
+    expect(logs).toHaveLength(2);
+    expect(logs[0].message).toContain(init.body);
+    expect(logs[1].message).toContain(raw);
+    expect(JSON.stringify(logs)).not.toMatch(/secret-direct-key|secret-header-key/);
+  });
+
+  it('默认 300 秒，超时取消当次发送且保持上层信号可用于下一次重试', async () => {
+    vi.useFakeTimers();
+    try {
+      mockSettings.apiConfig = { url: 'https://direct.test/v1', model: 'm' };
+      const parent = new AbortController();
+      mockFetch.mockImplementationOnce(() => new Promise<Response>(() => {}));
+      const result = callAIWithPreset_ACU([{ role: 'user', content: '测试' }], '', undefined, parent.signal).catch(error => error);
+      await vi.advanceTimersByTimeAsync(299999);
+      const requestSignal = mockFetch.mock.calls[0][1].signal as AbortSignal;
+      expect(requestSignal.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const error = await result;
+      expect(error.name).toBe('TimeoutError');
+      expect(isRetryableAiRequestError_ACU(error)).toBe(true);
+      expect(requestSignal.aborted).toBe(true);
+      expect(parent.signal.aborted).toBe(false);
+      mockFetch.mockResolvedValueOnce(new Response('{"choices":[{"message":{"content":"重试成功"}}]}'));
+      mockHandleApiResponse.mockResolvedValueOnce('重试成功');
+      await expect(callAIWithPreset_ACU([{ role: 'user', content: '测试' }], '', undefined, parent.signal)).resolves.toBe('重试成功');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('回复读取仍受可配置期限约束，用户取消不归为可重试超时', async () => {
+    vi.useFakeTimers();
+    try {
+      mockSettings.apiConfig = { url: 'https://direct.test/v1', model: 'm', requestTimeoutSeconds: 1 };
+      mockFetch.mockResolvedValueOnce({ text: () => new Promise<string>(() => {}) });
+      const result = callAIWithPreset_ACU([{ role: 'user', content: '测试' }]).catch(error => error);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect((await result).name).toBe('TimeoutError');
+      const parent = new AbortController();
+      mockFetch.mockImplementationOnce(() => new Promise<Response>(() => {}));
+      const cancelled = callAIWithPreset_ACU([{ role: 'user', content: '测试' }], '', undefined, parent.signal).catch(error => error);
+      await vi.advanceTimersByTimeAsync(0);
+      parent.abort();
+      const error = await cancelled;
+      expect(error.name).toBe('AbortError');
+      expect(isRetryableAiRequestError_ACU(error)).toBe(false);
+      expect(mockFetch.mock.calls.at(-1)![1].signal.aborted).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+});
+
+describe('直连接口协议适配', () => {
+  it.each([
+    ['openai_compat', '/chat/completions', { choices: [{ message: { content: '协议回复' }, finish_reason: 'stop' }] }],
+    ['openai_responses', '/responses', { status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: '协议回复' }] }] }],
+    ['claude_messages', '/messages', { stop_reason: 'end_turn', content: [{ type: 'text', text: '协议回复' }] }],
+    ['gemini_interactions', '/interactions', { status: 'completed', steps: [{ type: 'model_output', content: [{ type: 'text', text: '协议回复' }] }] }],
+  ] as const)('%s 直发所选端点并保留工具历史与完整原始回复', async (format, suffix, reply) => {
+    const { sendCustomApiRequest_ACU } = await import('../../../src/service/ai/custom-api-transport');
+    const { getAllLogs, clearLogs } = await import('../../../src/shared/log-buffer');
+    clearLogs();
+    const messages = [
+      { role: 'system', content: '系统指令' },
+      { role: 'assistant', content: '调用', tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'read', arguments: '{"reads":["地址"]}' } }] },
+      { role: 'tool', tool_call_id: 'call-1', content: '工具结果' },
+      { role: 'user', content: '继续' },
+    ];
+    const config = { url: 'https://direct.test/v1', model: 'm', apiKey: 'protocol-secret', customApiFormat: format,
+      promptPostProcessing: '', bodyParams: 'metadata:\n  purpose: test' };
+    const raw = JSON.stringify(reply);
+    mockFetch.mockResolvedValueOnce(new Response(raw, { headers: { 'Content-Type': 'application/json' } }));
+    const response = await sendCustomApiRequest_ACU(config, buildCustomApiRequestBody_ACU(messages, config, { tools: agentNativeTools_ACU(['read']) }));
+    expect((await response.json()).choices[0].message.content).toBe('协议回复');
+    expect(mockFetch.mock.calls[0][0]).toBe('https://direct.test/v1' + suffix);
+    const init = mockFetch.mock.calls[0][1];
+    const body = JSON.parse(init.body);
+    expect(body.metadata).toEqual({ purpose: 'test' });
+    expect(JSON.stringify(body)).toContain('工具结果');
+    expect(JSON.stringify(body)).toContain('call-1');
+    expect(body.tools).toHaveLength(1);
+    if (format === 'openai_responses' || format === 'gemini_interactions') expect(body).not.toHaveProperty('messages');
+    if (format === 'claude_messages') expect(init.headers.get('x-api-key')).toBe('protocol-secret');
+    if (format === 'gemini_interactions') expect(init.headers.get('x-goog-api-key')).toBe('protocol-secret');
+    expect(getAllLogs().find(entry => entry.message.includes('回复 HTTP'))!.message).toContain(raw);
+  });
+
+  it('原生回复没有完成终态时不伪造 stop', async () => {
+    const { normalizeProviderReply_ACU } = await import('../../../src/service/ai/custom-api-protocol');
+    for (const format of ['openai_responses', 'claude_messages', 'gemini_interactions'] as const) {
+      expect(normalizeProviderReply_ACU({}, format).choices[0].finish_reason).toBeNull();
+    }
+  });
+});
+
+describe('直连流式回复', () => {
+  it.each([
+    ['openai_compat', [{ choices: [{ delta: { content: '流式正文' } }] }, '[DONE]']],
+    ['openai_responses', [{ type: 'response.output_text.delta', delta: '流式正文' }, { type: 'response.completed', response: { status: 'completed', output: [] } }]],
+    ['claude_messages', [{ type: 'content_block_delta', delta: { type: 'text_delta', text: '流式正文' } }, { type: 'message_stop' }]],
+    ['gemini_interactions', [{ event_type: 'content.delta', delta: { type: 'text', text: '流式正文' } }, { event_type: 'interaction.complete', interaction: { status: 'completed', steps: [] } }]],
+  ] as const)('%s 流式回复保留正文与完整原始日志', async (format, packets) => {
+    const { sendCustomApiRequest_ACU } = await import('../../../src/service/ai/custom-api-transport');
+    const { readFetchChatTurn_ACU } = await import('../../../src/service/ai/native-tool');
+    const { clearLogs, getAllLogs } = await import('../../../src/shared/log-buffer');
+    clearLogs();
+    const config = { url: 'https://direct.test/v1', model: 'm', customApiFormat: format, promptPostProcessing: '' };
+    const raw = packets.map(packet => 'data: ' + (typeof packet === 'string' ? packet : JSON.stringify(packet)) + '\n\n').join('');
+    mockFetch.mockResolvedValueOnce(new Response(raw, { headers: { 'Content-Type': 'text/event-stream' } }));
+    const response = await sendCustomApiRequest_ACU(config, buildCustomApiRequestBody_ACU([{ role: 'user', content: '测试流' }], config, { streaming: true }));
+    expect((await readFetchChatTurn_ACU(response, true)).turn.content).toBe('流式正文');
+    expect(getAllLogs().find(entry => entry.message.includes('回复 HTTP'))!.message).toContain(raw);
   });
 });

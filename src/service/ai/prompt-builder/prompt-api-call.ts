@@ -16,7 +16,8 @@ import { isSqliteMode } from '../../table/storage-mode';
 import { buildStrictJsonTableFillResponseFormatForData_ACU, cloneStrictPromptSegments_ACU } from './strict-json-table-fill';
 import { preserveNativeToolPostProcessing_ACU, callMainApiChatCompletionText_ACU } from '../api-call';
 import { isConnectionProfileChatCompletion_ACU, isMainApiChatCompletionAvailable_ACU, readMainApiChatCompletionRouting_ACU, sendMainApiChatCompletionRequest_ACU, sendProfileChatCompletionRequest_ACU } from '../../../data/gateways/ai-gateway';
-import { pristineFetch_ACU } from '../../../data/gateways/pristine-fetch';
+import { sendCustomApiRequest_ACU } from '../custom-api-transport';
+import { withApiRequestTimeout_ACU } from '../api-request-timeout';
 import { chatTurnFromJson_ACU, readFetchChatTurn_ACU, type AiChatTurn_ACU } from '../native-tool';
 import { adaptTableFillPromptSegmentsToToolMode_ACU, buildTableFillNativeTools_ACU, resolveTableFillToolTurn_ACU } from './table-fill-tools';
 import { isNativeToolChannelAvailable_ACU } from '../agent-tool-mode';
@@ -262,6 +263,7 @@ export class RetryableAiResponseError_ACU extends Error {
     logDebug_ACU(`使用API预设: ${effectiveTableApiPreset || '当前配置'}, 模式: ${effectiveApiMode}`);
 
     try {
+        return await withApiRequestTimeout_ACU(effectiveApiConfig, abortSignal, async (abortSignal) => {
         if (effectiveApiMode === 'tavern') {
         if (strictJsonResponseFormat) {
             logDebug_ACU('[严格JSON填表] 酒馆连接预设路径无请求体扩展通道，response_format 未附加，仅靠提示词约束。');
@@ -456,12 +458,12 @@ export class RetryableAiResponseError_ACU extends Error {
             
             const headers = { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' };
             
-            const body = JSON.stringify(buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, {
+            const body = buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, {
                 stripModelPrefix: false,
                 streaming,
                 responseFormat: strictJsonResponseFormat,
                 ...(tableFillTools.length ? { tools: tableFillTools } : {}),
-            }));
+            });
             if (strictJsonResponseFormat) {
                 logDebug_ACU('[严格JSON填表] 已在请求体附加 json_schema response_format。');
             }
@@ -469,7 +471,7 @@ export class RetryableAiResponseError_ACU extends Error {
             logDebug_ACU('ACU: 调用新的后端生成API:', generateUrl, 'Model:', effectiveApiConfig.model);
             // 填表内部请求绕过第三方脚本对生成端点的 fetch 包装（见 data/gateways/pristine-fetch.ts）。
             options?.assertCurrent?.();
-            const response = await pristineFetch_ACU(generateUrl, { method: 'POST', headers, body, signal: abortSignal });
+            const response = await sendCustomApiRequest_ACU(effectiveApiConfig, body, abortSignal);
 
             if (!response.ok) {
               const errTxt = await response.text();
@@ -480,7 +482,7 @@ export class RetryableAiResponseError_ACU extends Error {
                 const { turn } = await readFetchChatTurn_ACU(response, streaming, abortSignal);
                 return finalizeTableFillTurn(turn);
             }
-            const content = await handleApiResponse_ACU(response, abortSignal, streaming);
+            const content = await handleApiResponse_ACU(response, abortSignal, undefined, streaming);
             const trimmed = typeof content === 'string' ? content.trim() : '';
             if (trimmed) {
                 return trimmed;
@@ -489,6 +491,7 @@ export class RetryableAiResponseError_ACU extends Error {
 
         }
         }
+        });
     } finally {
         untrackAbortController_ACU(localAbortController);
         if (currentAbortController_ACU === localAbortController) {

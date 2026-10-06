@@ -1473,7 +1473,7 @@ export async function collectGroupFillResponse_ACU(
             if (error?.name === 'AbortError' || String(lastErrorMessage).toLowerCase().includes('aborted') || isStopped()) {
                 return { job, success: false, attempt, aborted: true };
             }
-            if (lastErrorCategory !== 'model') {
+            if (lastErrorCategory !== 'model' && error?.name !== 'TimeoutError') {
                 const safeError = sanitizeRetryFeedback_ACU(lastErrorMessage, MAX_WARN_ERROR_LENGTH_ACU);
                 return {
                     job,

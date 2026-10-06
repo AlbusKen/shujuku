@@ -89,11 +89,19 @@ export function normalizeCustomApiFormat_ACU(value: unknown): CustomApiFormat_AC
   return (CUSTOM_API_FORMAT_VALUES_ACU as readonly string[]).includes(raw) ? (raw as CustomApiFormat_ACU) : CUSTOM_API_FORMAT_DEFAULT_ACU;
 }
 
+export const API_REQUEST_TIMEOUT_DEFAULT_ACU = 300;
+export function normalizeApiRequestTimeout_ACU(value: unknown): number {
+  const seconds = Number(value);
+  return Number.isFinite(seconds) && seconds >= 1 ? Math.min(Math.floor(seconds), 2147483) : API_REQUEST_TIMEOUT_DEFAULT_ACU;
+}
+
 export interface ApiPresetApiConfig_ACU {
   url: string;
   apiKey: string;
   model: string;
   useMainApi: boolean;
+  requestTimeoutSeconds?: number;
+  sendViaTavern?: boolean;
   max_tokens: number;
   maxTokens?: number; // [兼容] 历史字段别名，防止旧调用方 maxTokens 访问崩溃
   temperature: number;
@@ -144,6 +152,8 @@ export function normalizeApiConfig_ACU(value: any): ApiPresetApiConfig_ACU {
     apiKey: typeof source.apiKey === 'string' ? source.apiKey : '',
     model: typeof source.model === 'string' ? source.model : '',
     useMainApi: source.useMainApi === true,
+    requestTimeoutSeconds: normalizeApiRequestTimeout_ACU(source.requestTimeoutSeconds),
+    sendViaTavern: source.sendViaTavern === true,
     max_tokens: Number.isFinite(maxTokens) && maxTokens >= 0 ? Math.floor(maxTokens) : 60000,
     maxTokens: Number.isFinite(maxTokens) && maxTokens >= 0 ? Math.floor(maxTokens) : 60000,
     temperature: Number.isFinite(temperature) ? temperature : 1,
@@ -154,7 +164,7 @@ export function normalizeApiConfig_ACU(value: any): ApiPresetApiConfig_ACU {
     customApiFormat: normalizeCustomApiFormat_ACU(source.customApiFormat),
     ...Object.fromEntries(
       Object.entries(source).filter(([key]) =>
-        !['url', 'apiKey', 'model', 'useMainApi', 'max_tokens', 'maxTokens', 'temperature', 'bodyParams', 'excludeBodyParams', 'requestHeaders', 'promptPostProcessing', 'customApiFormat'].includes(key)
+        !['url', 'apiKey', 'model', 'useMainApi', 'requestTimeoutSeconds', 'sendViaTavern', 'max_tokens', 'maxTokens', 'temperature', 'bodyParams', 'excludeBodyParams', 'requestHeaders', 'promptPostProcessing', 'customApiFormat'].includes(key)
       )
     ),
   };

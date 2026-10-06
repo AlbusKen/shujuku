@@ -177,9 +177,9 @@ export function isWarnLogEnabled(): boolean {
  * 由 logDebug_ACU / logWarn_ACU / logError_ACU 调用
  * 当对应日志级别禁用时，debug / warn 日志会被跳过
  */
-export function pushLog(level: LogLevel, args: any[]): void {
+export function pushLog(level: LogLevel, args: any[], alwaysCollect = false): void {
   // 可选日志级别禁用时直接跳过，避免噪声与不必要的序列化开销
-  if (level === 'debug' && !_debugLogEnabled) return;
+  if (level === 'debug' && !_debugLogEnabled && !alwaysCollect) return;
   if (level === 'warn' && !_warnLogEnabled) return;
 
   const tag = extractTag(args);

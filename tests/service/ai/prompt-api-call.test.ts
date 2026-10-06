@@ -168,7 +168,7 @@ beforeEach(() => {
   mockApplyExcludeRulesToText.mockImplementation((text: string) => text);
   mockGetApiConfigByPreset.mockReturnValue({
     apiMode: 'custom',
-    apiConfig: { useMainApi: true, url: '', model: '', max_tokens: 4096 },
+    apiConfig: { sendViaTavern: true, useMainApi: true, url: '', model: '', max_tokens: 4096 },
     tavernProfile: '',
   });
   mockGetPersonaDescription.mockReturnValue('用户设定');
@@ -447,7 +447,7 @@ describe('callCustomOpenAI_ACU — prompt 组装', () => {
     ];
     mockGetApiConfigByPreset.mockReturnValue({
       apiMode: 'custom',
-      apiConfig: { useMainApi: true },
+      apiConfig: { sendViaTavern: true, useMainApi: true },
       tavernProfile: '',
     });
     mockGenerateRaw.mockResolvedValue('AI回复');
@@ -523,7 +523,7 @@ describe('callCustomOpenAI_ACU — prompt 组装', () => {
     mockSettings.charCardPrompt = '纯字符串提示词 $0';
     mockGetApiConfigByPreset.mockReturnValue({
       apiMode: 'custom',
-      apiConfig: { useMainApi: true },
+      apiConfig: { sendViaTavern: true, useMainApi: true },
       tavernProfile: '',
     });
     mockGenerateRaw.mockResolvedValue('AI回复');
@@ -541,7 +541,7 @@ describe('callCustomOpenAI_ACU — prompt 组装', () => {
     mockGetPersonaDescription.mockImplementation(() => { throw new Error('获取失败'); });
     mockGetApiConfigByPreset.mockReturnValue({
       apiMode: 'custom',
-      apiConfig: { useMainApi: true },
+      apiConfig: { sendViaTavern: true, useMainApi: true },
       tavernProfile: '',
     });
     mockGenerateRaw.mockResolvedValue('AI回复');
@@ -590,7 +590,7 @@ describe('callCustomOpenAI_ACU — useMainApi 模式', () => {
   beforeEach(() => {
     mockGetApiConfigByPreset.mockReturnValue({
       apiMode: 'custom',
-      apiConfig: { useMainApi: true },
+      apiConfig: { sendViaTavern: true, useMainApi: true },
       tavernProfile: '',
     });
   });
@@ -623,7 +623,7 @@ describe('callCustomOpenAI_ACU — custom fetch 模式', () => {
   beforeEach(() => {
     mockGetApiConfigByPreset.mockReturnValue({
       apiMode: 'custom',
-      apiConfig: { useMainApi: false, url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test', max_tokens: 4096 },
+      apiConfig: { sendViaTavern: true, useMainApi: false, url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test', max_tokens: 4096 },
       tavernProfile: '',
     });
   });
@@ -644,7 +644,7 @@ describe('callCustomOpenAI_ACU — custom fetch 模式', () => {
   it('URL 或 model 未配置时抛错', async () => {
     mockGetApiConfigByPreset.mockReturnValue({
       apiMode: 'custom',
-      apiConfig: { useMainApi: false, url: '', model: '' },
+      apiConfig: { sendViaTavern: true, useMainApi: false, url: '', model: '' },
       tavernProfile: '',
     });
     await expect(callCustomOpenAI_ACU({})).rejects.toThrow('URL或模型未配置');
@@ -756,7 +756,7 @@ describe('callCustomOpenAI_ACU — tavern 模式', () => {
   beforeEach(() => {
     mockGetApiConfigByPreset.mockReturnValue({
       apiMode: 'tavern',
-      apiConfig: { max_tokens: 4096 },
+      apiConfig: { sendViaTavern: true, max_tokens: 4096 },
       tavernProfile: 'profile-1',
     });
   });
@@ -764,7 +764,7 @@ describe('callCustomOpenAI_ACU — tavern 模式', () => {
   it('profileId 为空时抛错', async () => {
     mockGetApiConfigByPreset.mockReturnValue({
       apiMode: 'tavern',
-      apiConfig: {},
+      apiConfig: { sendViaTavern: true,},
       tavernProfile: '',
     });
     await expect(callCustomOpenAI_ACU({})).rejects.toThrow('未选择酒馆连接预设');
@@ -801,7 +801,7 @@ describe('callCustomOpenAI_ACU — tavern 模式', () => {
   it('max_tokens=0 透传给 sendConnectionManagerRequest_ACU', async () => {
     mockGetApiConfigByPreset.mockReturnValue({
       apiMode: 'tavern',
-      apiConfig: { max_tokens: 0 },
+      apiConfig: { sendViaTavern: true, max_tokens: 0 },
       tavernProfile: 'profile-1',
     });
     mockGetConnectionManagerProfiles.mockReturnValue([
@@ -823,7 +823,7 @@ describe('callCustomOpenAI_ACU — AbortController 管理', () => {
   it('finally 块中 untrack 并重置 currentAbortController', async () => {
     mockGetApiConfigByPreset.mockReturnValue({
       apiMode: 'custom',
-      apiConfig: { useMainApi: true },
+      apiConfig: { sendViaTavern: true, useMainApi: true },
       tavernProfile: '',
     });
     mockGenerateRaw.mockResolvedValue('AI回复');
@@ -841,7 +841,7 @@ describe('callCustomOpenAI_ACU — AbortController 管理', () => {
   it('使用外部传入的 AbortController', async () => {
     mockGetApiConfigByPreset.mockReturnValue({
       apiMode: 'custom',
-      apiConfig: { useMainApi: true },
+      apiConfig: { sendViaTavern: true, useMainApi: true },
       tavernProfile: '',
     });
     mockGenerateRaw.mockResolvedValue('AI回复');
@@ -857,7 +857,7 @@ describe('callCustomOpenAI_ACU — AbortController 管理', () => {
   it('API 调用失败后仍然执行 untrack', async () => {
     mockGetApiConfigByPreset.mockReturnValue({
       apiMode: 'custom',
-      apiConfig: { useMainApi: true },
+      apiConfig: { sendViaTavern: true, useMainApi: true },
       tavernProfile: '',
     });
     mockIsGenerateRawAvailable.mockReturnValue(false);
@@ -873,7 +873,7 @@ describe('callCustomOpenAI_ACU — AbortController 管理', () => {
     mockSettings.tableApiPreset = 'global-preset';
     mockGetApiConfigByPreset.mockReturnValue({
       apiMode: 'custom',
-      apiConfig: { useMainApi: true, url: '', model: '', max_tokens: 4096, temperature: 1.0 },
+      apiConfig: { sendViaTavern: true, useMainApi: true, url: '', model: '', max_tokens: 4096, temperature: 1.0 },
       tavernProfile: '',
     });
     mockGenerateRaw.mockResolvedValue('AI回复内容');
@@ -895,7 +895,7 @@ describe('callCustomOpenAI_ACU — AbortController 管理', () => {
     mockSettings.tableApiPreset = 'global-preset';
     mockGetApiConfigByPreset.mockReturnValue({
       apiMode: 'custom',
-      apiConfig: { useMainApi: true, url: '', model: '', max_tokens: 4096, temperature: 1.0 },
+      apiConfig: { sendViaTavern: true, useMainApi: true, url: '', model: '', max_tokens: 4096, temperature: 1.0 },
       tavernProfile: '',
     });
     mockGenerateRaw.mockResolvedValue('AI回复内容');
@@ -916,7 +916,7 @@ describe('callCustomOpenAI_ACU — AbortController 管理', () => {
     mockSettings.tableApiPreset = 'global-preset';
     mockGetApiConfigByPreset.mockReturnValue({
       apiMode: 'custom',
-      apiConfig: { useMainApi: true, url: '', model: '', max_tokens: 4096, temperature: 1.0 },
+      apiConfig: { sendViaTavern: true, useMainApi: true, url: '', model: '', max_tokens: 4096, temperature: 1.0 },
       tavernProfile: '',
     });
     mockGenerateRaw.mockResolvedValue('AI回复内容');
@@ -939,7 +939,7 @@ describe('callCustomOpenAI_ACU — 悬挂预设 fail-closed', () => {
     mockSettings.tableApiPreset = 'ghost';
     mockGetApiConfigByPreset.mockReturnValue({
       apiMode: 'custom',
-      apiConfig: { useMainApi: false, url: 'https://api.example.com', model: 'gpt-4', max_tokens: 4096, temperature: 1 },
+      apiConfig: { sendViaTavern: true, useMainApi: false, url: 'https://api.example.com', model: 'gpt-4', max_tokens: 4096, temperature: 1 },
       tavernProfile: '',
       resolved: false,
     });
@@ -952,7 +952,7 @@ describe('callCustomOpenAI_ACU — 悬挂预设 fail-closed', () => {
     mockSettings.tableApiPreset = '';
     mockGetApiConfigByPreset.mockReturnValue({
       apiMode: 'custom',
-      apiConfig: { useMainApi: true, url: '', model: '', max_tokens: 4096, temperature: 1 },
+      apiConfig: { sendViaTavern: true, useMainApi: true, url: '', model: '', max_tokens: 4096, temperature: 1 },
       tavernProfile: '',
       resolved: false,
     });
@@ -965,7 +965,7 @@ describe('callCustomOpenAI_ACU — 悬挂预设 fail-closed', () => {
     mockSettings.tableApiPreset = 'legacy-mock';
     mockGetApiConfigByPreset.mockReturnValue({
       apiMode: 'custom',
-      apiConfig: { useMainApi: true, url: '', model: '', max_tokens: 4096, temperature: 1 },
+      apiConfig: { sendViaTavern: true, useMainApi: true, url: '', model: '', max_tokens: 4096, temperature: 1 },
       tavernProfile: '',
     });
     mockGenerateRaw.mockResolvedValue('兼容回复');

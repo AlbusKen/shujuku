@@ -4985,6 +4985,39 @@ describe('collectGroupFillResponse_ACU', () => {
     }
   });
 
+  it('请求超时沿现有次数自动重试，不把传输错误注入模型提示词', async () => {
+    vi.useFakeTimers();
+    try {
+      const job = createJob();
+      mockSettings.tableMaxRetries = 2;
+      mockPrepareAIInput.mockResolvedValue({ tableDataText: '原始数据' });
+      mockCallCustomOpenAI
+        .mockRejectedValueOnce(Object.assign(new Error('API 请求超时'), { name: 'TimeoutError' }))
+        .mockImplementationOnce(async (dynamicContent: any) => {
+          expect(dynamicContent.tableDataText).not.toContain('SQL_ERROR_FEEDBACK');
+          return '<tableEdit>UPDATE test SET value = 1;</tableEdit>';
+        });
+      const pending = collectGroupFillResponse_ACU(job);
+      await vi.runAllTimersAsync();
+      expect(await pending).toMatchObject({ success: true, attempt: 2 });
+      expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(2);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('请求超时重试耗尽后保留基础设施错误分类', async () => {
+    vi.useFakeTimers();
+    try {
+      mockSettings.tableMaxRetries = 2;
+      mockPrepareAIInput.mockResolvedValue({ tableDataText: '原始数据' });
+      mockCallCustomOpenAI.mockRejectedValue(Object.assign(new Error('API 请求超时'), { name: 'TimeoutError' }));
+      const pending = collectGroupFillResponse_ACU(createJob());
+      await vi.runAllTimersAsync();
+      expect(await pending).toMatchObject({ success: false, attempt: 2, errorCategory: 'infrastructure' });
+      expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(2);
+    } finally { vi.useRealTimers(); }
+  });
+
+
   it('空 API 响应重试耗尽后保留模型错误分类', async () => {
     vi.useFakeTimers();
     try {

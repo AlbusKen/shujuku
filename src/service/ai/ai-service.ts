@@ -19,6 +19,9 @@ export {
 
 import { getHostRequestHeaders_ACU as _getHeaders } from '../../data/gateways/ai-gateway';
 import { logDebug_ACU } from '../../shared/utils';
+import { pristineFetch_ACU } from '../../data/gateways/pristine-fetch';
+import { withApiRequestTimeout_ACU } from './api-request-timeout';
+import { providerEndpoint_ACU } from './custom-api-protocol';
 
 // ============================================================
 // 模型列表获取
@@ -35,11 +38,16 @@ export interface FetchModelsResult {
  * 纯业务逻辑：发送 HTTP 请求、解析响应、返回模型列表
  * 不涉及 UI（toast、状态显示由 presentation 层负责）
  */
-export async function fetchAvailableModels_ACU(apiUrl: string, apiKey: string): Promise<FetchModelsResult> {
+export async function fetchAvailableModels_ACU(apiUrl: string, apiKey: string, config: {
+    sendViaTavern?: boolean; requestTimeoutSeconds?: number; requestHeaders?: string;
+    customApiFormat?: import('../settings/api-preset-service').CustomApiFormat_ACU;
+} = { sendViaTavern: true }): Promise<FetchModelsResult> {
     if (!apiUrl) {
         return { success: false, error: '请输入API基础URL。' };
     }
 
+    try {
+    return await withApiRequestTimeout_ACU(config, undefined, async (signal) => {
     const statusUrl = `/api/backends/chat-completions/status`;
     const body = {
         "reverse_proxy": apiUrl,
@@ -49,11 +57,29 @@ export async function fetchAvailableModels_ACU(apiUrl: string, apiKey: string): 
         "custom_include_headers": apiKey ? `Authorization: Bearer ${apiKey}` : ""
     };
 
-    const response = await fetch(statusUrl, {
+    const modelUrl = new URL(providerEndpoint_ACU(apiUrl, config.customApiFormat ?? 'openai_compat'));
+    modelUrl.pathname = modelUrl.pathname.replace(/\/(chat\/completions|responses|messages|interactions)$/, '/models');
+    const directHeaders = new Headers({ 'Content-Type': 'application/json' });
+    if (apiKey) {
+        if (config.customApiFormat === 'claude_messages') directHeaders.set('x-api-key', apiKey);
+        else if (config.customApiFormat === 'gemini_interactions') directHeaders.set('x-goog-api-key', apiKey);
+        else directHeaders.set('Authorization', `Bearer ${apiKey}`);
+    }
+    if (config.customApiFormat === 'claude_messages') {
+        directHeaders.set('anthropic-version', '2023-06-01');
+        directHeaders.set('anthropic-dangerous-direct-browser-access', 'true');
+    }
+    for (const line of String(config.requestHeaders ?? '').split('\n')) {
+        if (!line.trim()) continue;
+        const colon = line.indexOf(':');
+        if (colon < 1) throw new Error('附加请求标头须按 Header: Value 填写。');
+        directHeaders.set(line.slice(0, colon).trim(), line.slice(colon + 1).trim());
+    }
+    const response = config.sendViaTavern === true ? await pristineFetch_ACU(statusUrl, {
         method: 'POST',
         headers: { ..._getHeaders(), 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-    });
+        body: JSON.stringify(body), signal,
+    }) : await pristineFetch_ACU(modelUrl.toString(), { method: 'GET', headers: directHeaders, credentials: 'omit', signal });
 
     if (!response.ok) {
         const errorText = await response.text();
@@ -80,7 +106,7 @@ export async function fetchAvailableModels_ACU(apiUrl: string, apiKey: string): 
     }
 
     const modelNames = modelsList
-        .map((model: any) => typeof model === 'string' ? model : model.id)
+        .map((model: any) => typeof model === 'string' ? model : model.id ?? model.name?.replace(/^models\//, ''))
         .filter(Boolean);
 
     if (modelNames.length === 0) {
@@ -88,4 +114,8 @@ export async function fetchAvailableModels_ACU(apiUrl: string, apiKey: string): 
     }
 
     return { success: true, models: modelNames };
+    });
+    } catch (error: any) {
+        return { success: false, error: error?.message || '模型列表加载失败。' };
+    }
 }

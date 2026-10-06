@@ -19,6 +19,8 @@ describe('api preset draft helpers', () => {
     expect(draft.name).toBe('');
     expect(draft.apiMode).toBe('custom');
     expect(draft.useMainApi).toBe(true);
+    expect(draft.requestTimeoutSeconds).toBe(300);
+    expect(draft.sendViaTavern).toBe(false);
     expect(connectionModeFromDraft(draft)).toBe('main');
   });
 
@@ -65,6 +67,8 @@ describe('api preset draft helpers', () => {
       url: '  https://b.test/v1  ',
       model: '  model-b  ',
       max_tokens: 128.8,
+      requestTimeoutSeconds: 123.8,
+      sendViaTavern: true,
       temperature: Number.NaN,
     });
 
@@ -73,6 +77,8 @@ describe('api preset draft helpers', () => {
     expect(preset.apiConfig.model).toBe('model-b');
     expect(preset.apiConfig.max_tokens).toBe(128);
     expect(preset.apiConfig.temperature).toBe(1);
+    expect(preset.apiConfig.requestTimeoutSeconds).toBe(123);
+    expect(preset.apiConfig.sendViaTavern).toBe(true);
   });
 
   it('三个附加参数字段在 draft 转换中保留', () => {
@@ -121,6 +127,8 @@ describe('api preset draft helpers', () => {
     expect(draft.bodyParams).toBe('');
     expect(draft.excludeBodyParams).toBe('');
     expect(draft.requestHeaders).toBe('');
+    expect(draft.requestTimeoutSeconds).toBe(300);
+    expect(draft.sendViaTavern).toBe(false);
   });
 
   it('旧预设缺失 promptPostProcessing / customApiFormat 时草稿归一为运行时默认值，而不是「未选择」', () => {
@@ -159,6 +167,8 @@ describe('api preset draft helpers', () => {
         max_tokens: 1000,
         temperature: 1,
         promptPostProcessing: '',
+        requestTimeoutSeconds: 65,
+        sendViaTavern: true,
         customApiFormat: 'claude_messages',
       } as any,
       tavernProfile: '',
@@ -170,6 +180,8 @@ describe('api preset draft helpers', () => {
     const preset = apiPresetFromDraft(draft);
     expect(preset.apiConfig.promptPostProcessing).toBe('');
     expect(preset.apiConfig.customApiFormat).toBe('claude_messages');
+    expect(preset.apiConfig.requestTimeoutSeconds).toBe(65);
+    expect(preset.apiConfig.sendViaTavern).toBe(true);
   });
 
   it('草稿中的非法提示词后处理 / 接口协议值保存时回退默认，不写入预设', () => {

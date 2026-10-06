@@ -7,7 +7,8 @@ import { readFetchChatTurn_ACU, chatTurnFromJson_ACU, type AiChatTurn_ACU, type 
 export type { AiUsageMetadata_ACU };
 import { settings_ACU } from '../runtime/state-manager';
 import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, getHostRequestHeaders_ACU, getConnectionManagerProfiles_ACU, triggerSlash_ACU } from '../../data/gateways/ai-gateway';
-import { pristineFetch_ACU } from '../../data/gateways/pristine-fetch';
+import { sendCustomApiRequest_ACU } from './custom-api-transport';
+import { withApiRequestTimeout_ACU } from './api-request-timeout';
 import { isConnectionProfileChatCompletion_ACU, isMainApiChatCompletionAvailable_ACU, readMainApiChatCompletionRouting_ACU, sendMainApiChatCompletionRequest_ACU, sendProfileChatCompletionRequest_ACU } from '../../data/gateways/ai-gateway';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { isTauriTavernHost_ACU } from '../../shared/host-detect';
@@ -370,6 +371,7 @@ export async function callApiWithPlotPreset_ACU(messages: any[], presetName: str
     logDebug_ACU(`[剧情推进] 任务级API调用，预设: ${effectivePresetName || '当前配置'}, 模式: ${effectiveApiMode}`);
 
 
+    return withApiRequestTimeout_ACU(effectiveApiConfig, abortSignal, async (abortSignal) => {
     const transport = resolvePlotApiTransport_ACU(effectiveApiMode, effectiveApiConfig);
     if (transport !== 'custom') {
       if (transport === 'main-chat-completion') {
@@ -396,12 +398,7 @@ export async function callApiWithPlotPreset_ACU(messages: any[], presetName: str
       const requestBody = buildCustomApiRequestBody_ACU(messages, effectiveApiConfig);
 
 
-      const response = await pristineFetch_ACU('/api/backends/chat-completions/generate', {
-        method: 'POST',
-        headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody),
-        signal: abortSignal,
-      });
+      const response = await sendCustomApiRequest_ACU(effectiveApiConfig, requestBody, abortSignal);
 
       if (!response.ok) {
         const errTxt = await response.text();
@@ -415,6 +412,7 @@ export async function callApiWithPlotPreset_ACU(messages: any[], presetName: str
 
       throw new Error(`API调用返回无效响应`);
     }
+    });
 }
 
 export async function callApi_ACU(messages: any[], apiSettings: any, abortSignal: AbortSignal | null = null) {
@@ -428,6 +426,7 @@ export async function callApi_ACU(messages: any[], apiSettings: any, abortSignal
 
     logDebug_ACU(`[剧情推进] 使用API预设: ${settings_ACU.plotApiPreset || '当前配置'}, 模式: ${effectiveApiMode}`);
 
+    return withApiRequestTimeout_ACU(effectiveApiConfig, abortSignal, async (abortSignal) => {
     const transport = resolvePlotApiTransport_ACU(effectiveApiMode, effectiveApiConfig);
     if (transport !== 'custom') {
       // 使用主API或酒馆预设（流式传输）
@@ -455,12 +454,7 @@ export async function callApi_ACU(messages: any[], apiSettings: any, abortSignal
 
       const requestBody = buildCustomApiRequestBody_ACU(messages, effectiveApiConfig);
 
-      const response = await pristineFetch_ACU('/api/backends/chat-completions/generate', {
-        method: 'POST',
-        headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody),
-        signal: abortSignal,
-      });
+      const response = await sendCustomApiRequest_ACU(effectiveApiConfig, requestBody, abortSignal);
 
 
       if (!response.ok) {
@@ -477,6 +471,7 @@ export async function callApi_ACU(messages: any[], apiSettings: any, abortSignal
 
       throw new Error(`API调用返回无效响应`);
     }
+    });
 }
 
 
@@ -499,6 +494,7 @@ export async function callCustomOpenAI_ACU_Direct(messages: any[]) {
       // I should refactor callCustomOpenAI_ACU to accept direct messages, or duplicate the API calling part.
 
       // Duplicating API calling logic for safety and isolation
+      return withApiRequestTimeout_ACU(settings_ACU.apiConfig, undefined, async (signal) => {
       if (settings_ACU.apiMode === 'tavern') {
           const profileId = settings_ACU.tavernProfile;
           return await sendConnectionManagerRequest_ACU(
@@ -510,12 +506,15 @@ export async function callCustomOpenAI_ACU_Direct(messages: any[]) {
              return await generateRaw_ACU({ ordered_prompts: messages, should_stream: settings_ACU.streamingEnabled || false });
           } else {
              const requestBody = buildCustomApiRequestBody_ACU(messages, settings_ACU.apiConfig, { stripModelPrefix: false });
-             const res = await pristineFetch_ACU('/api/backends/chat-completions/generate', { method: 'POST', headers: {...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json'}, body: JSON.stringify(requestBody) });
+             const res = await sendCustomApiRequest_ACU(settings_ACU.apiConfig, requestBody, signal);
+             if (!res.ok) throw new AgentApiHttpError_ACU(res.status, `API 请求失败: ${res.status}`);
              // 根据streamingEnabled设置选择响应处理方式
-             const content = await handleApiResponse_ACU(res);
+             const content = await handleApiResponse_ACU(res, signal);
              return content;
           }
       }
+      });
+
   }
 
 
@@ -543,6 +542,7 @@ export async function callAIWithPreset_ACU(messages: any[], presetName: string =
 
     logDebug_ACU(`[callAIWithPreset] 调用 AI，消息数=${messages.length}，预设=${presetName || '当前配置'}，模式=${effectiveApiMode}`);
 
+    return withApiRequestTimeout_ACU(effectiveApiConfig, signal, async (signal) => {
     if (effectiveApiMode === 'tavern') {
         const profileId = effectiveTavernProfile || settings_ACU.tavernProfile;
         const directProfile = getConnectionManagerProfiles_ACU().find(item => item.id === profileId);
@@ -587,14 +587,8 @@ export async function callAIWithPreset_ACU(messages: any[], presetName: string =
         throw new Error('自定义API的URL或模型未配置。');
     }
 
-    const body = JSON.stringify(buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, { maxTokens, stripModelPrefix: false }));
-
-    const res = await pristineFetch_ACU('/api/backends/chat-completions/generate', {
-        method: 'POST',
-        headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
-        body,
-        signal: signal || undefined,
-    });
+    const body = buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, { maxTokens, stripModelPrefix: false });
+    const res = await sendCustomApiRequest_ACU(effectiveApiConfig, body, signal);
 
     if (!res.ok) {
         const errTxt = await res.text();
@@ -603,6 +597,7 @@ export async function callAIWithPreset_ACU(messages: any[], presetName: string =
 
     const content = await handleApiResponse_ACU(res, signal);
     return content ? content.trim() : null;
+    });
 }
 
 /**
@@ -709,6 +704,7 @@ export async function callAIWithResolvedPreset_ACU(
     if (!Array.isArray(messages) || messages.length === 0) {
         throw new Error('内部 AI 消息必须是非空数组。');
     }
+    return withApiRequestTimeout_ACU(resolved.apiConfig, signal, async (signal) => {
     const reportUsage = (raw: unknown): void => {
         if (!lifecycle?.onUsage) return;
         const usage = extractAiUsageMetadata_ACU(raw);
@@ -782,10 +778,7 @@ export async function callAIWithResolvedPreset_ACU(
     }
     // 内部续写/推演请求绕过第三方脚本对生成端点的 fetch 包装：脚本注入的传输函数
     // 会与本链路的原生工具协议互相污染（见 data/gateways/pristine-fetch.ts）。
-    const response = await pristineFetch_ACU('/api/backends/chat-completions/generate', {
-        method: 'POST',
-        headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+    const response = await sendCustomApiRequest_ACU(resolved.apiConfig, {
             ...extras?.generationParameters,
             ...buildCustomApiRequestBody_ACU(messages, resolved.apiConfig, {
                 maxTokens,
@@ -798,9 +791,7 @@ export async function callAIWithResolvedPreset_ACU(
                 // usage 回调在场时才请求流式 usage chunk：不改变没有订阅方时的请求体。
                 includeStreamUsage: !!lifecycle?.onUsage,
             }),
-        }),
-        signal: signal || undefined,
-    });
+        }, signal);
     if (!response.ok) throw new AgentApiHttpError_ACU(response.status, `API 请求失败: ${response.status}`);
     if (extras?.requireDirectTransport) {
         const parsed = await readFetchChatTurn_ACU(response, extras.streaming ?? false, signal, true);
@@ -810,6 +801,7 @@ export async function callAIWithResolvedPreset_ACU(
     }
     const content = await handleApiResponse_ACU(response, signal, lifecycle?.onUsage, extras?.streaming);
     return typeof content === 'string' && content.trim() ? content.trim() : null;
+    });
 }
 
 /**
@@ -863,6 +855,7 @@ export async function callAIChatTurn_ACU(
     extras?: ResolvedPresetCallExtras_ACU,
 ): Promise<AiChatTurn_ACU> {
     if (!Array.isArray(messages) || messages.length === 0) throw new Error('内部 AI 消息必须是非空数组。');
+    return withApiRequestTimeout_ACU(resolved.apiConfig, signal, async (signal) => {
     const reportUsage = (raw: unknown): void => {
         if (!lifecycle?.onUsage) return;
         const usage = extractAiUsageMetadata_ACU(raw);
@@ -895,7 +888,7 @@ export async function callAIChatTurn_ACU(
         assertNotAborted_ACU(signal);
         const parsed = chatTurnFromJson_ACU(response?.result ?? response);
         reportUsage(parsed.usage ?? response?.result?.usage);
-        return parsed.turn.content || parsed.turn.toolCalls.length ? parsed.turn : { content: typeof response?.content === 'string' ? response.content : '', toolCalls: [] };
+        return parsed.turn.content || parsed.turn.toolCalls.length ? parsed.turn : { content: typeof response?.content === 'string' ? response.content : '', toolCalls: [] as AiChatTurn_ACU['toolCalls'] };
     }
     if (resolved.apiConfig.useMainApi) {
         if (isMainApiChatCompletionAvailable_ACU()) {
@@ -927,22 +920,18 @@ export async function callAIChatTurn_ACU(
     }
     if (!resolved.apiConfig.url || !resolved.apiConfig.model) throw new Error('自定义 API 的 URL 或模型未配置。');
     // 同上：原生工具通道尤其不能被脚本改写请求体与响应流。
-    const response = await pristineFetch_ACU('/api/backends/chat-completions/generate', {
-        method: 'POST',
-        headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildCustomApiRequestBody_ACU(messages, resolved.apiConfig, {
+    const response = await sendCustomApiRequest_ACU(resolved.apiConfig, buildCustomApiRequestBody_ACU(messages, resolved.apiConfig, {
             maxTokens,
             stripModelPrefix: false,
             promptCacheKey: supportsExplicitOpenAiCacheKey_ACU(resolved) ? extras?.promptCacheKey : undefined,
             includeStreamUsage: !!lifecycle?.onUsage,
             tools: extras?.tools,
-        })),
-        signal: signal || undefined,
-    });
+        }), signal);
     if (!response.ok) throw new AgentApiHttpError_ACU(response.status, `API 请求失败: ${response.status}`);
     const parsed = await readFetchChatTurn_ACU(response, settings_ACU.streamingEnabled || false, signal);
     reportUsage(parsed.usage);
     return parsed.turn;
+    });
 }
 
 /**

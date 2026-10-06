@@ -52,10 +52,17 @@
           />
         </AcuFormRow>
 
+        <AcuFormRow label="请求超时（秒）" hint="默认 300 秒；单次请求超过此期限按错误处理，并沿用当前功能的重试次数。">
+          <AcuInput v-model="activeDraft.requestTimeoutSeconds" type="number" :min="1" :step="1" />
+        </AcuFormRow>
+
         <template v-if="activeConnectionMode === 'custom'">
+          <AcuFormRow label="通过酒馆渠道发送" hint="默认关闭，由插件直接请求预设端点；完整请求与回复记录在高级工具 → 运行日志（API直连）。直连需端点允许跨域；开启则沿用酒馆后端转发。日志含提示词正文，分享前请检查隐私。">
+            <AcuToggle v-model="activeDraft.sendViaTavern" aria-label="通过酒馆渠道发送" />
+          </AcuFormRow>
           <AcuFormRow
             label="接口协议"
-            hint="决定上游端点与请求/响应变形，默认兼容 OpenAI。TauriTavern 按 custom_api_format 分流到 /chat/completions、/responses、/messages、/interactions；原版 SillyTavern 把 Claude/Gemini 映射到服务端原生协议源（端点填协议根即可，插件自动补 /v1 或剥版本段），OpenAI Responses 在原版 ST 下回退兼容 OpenAI。纯原生端点下「加载模型」可能失败，可手填模型名。"
+            hint="直连按所选协议请求 /chat/completions、/responses、/messages 或 /interactions。酒馆渠道沿用宿主协议适配。纯原生端点下「加载模型」可能失败，可手填模型名。"
           >
             <AcuSelect
               :options="customApiFormatOptions"
@@ -238,6 +245,7 @@ import AcuPresetDropdown from "./_lib/AcuPresetDropdown.vue";
 import type { AcuSegmentedOption } from "./_lib/AcuSegmentedControl.vue";
 import AcuSegmentedControl from "./_lib/AcuSegmentedControl.vue";
 import AcuSelect, { type AcuSelectOption } from "./_lib/AcuSelect.vue";
+import AcuToggle from "./_lib/AcuToggle.vue";
 
 const store = useApiPresetStore();
 const dialogStore = useDialogStore();
@@ -447,6 +455,10 @@ async function loadModelsForActive(): Promise<void> {
   await store.loadModelsForConfig({
     url: activeDraft.url,
     apiKey: activeDraft.apiKey,
+    sendViaTavern: activeDraft.sendViaTavern,
+    requestTimeoutSeconds: activeDraft.requestTimeoutSeconds,
+    customApiFormat: activeDraft.customApiFormat,
+    requestHeaders: activeDraft.requestHeaders,
   });
 }
 

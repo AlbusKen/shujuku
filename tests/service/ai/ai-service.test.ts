@@ -188,4 +188,17 @@ describe('fetchAvailableModels_ACU', () => {
     expect(result.success).toBe(true);
     expect(result.models).toEqual(['valid-model', 'another-valid']);
   });
+  it('关闭酒馆渠道时模型列表直接访问预设端点，不携带宿主认证', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('{"data":[{"id":"direct-model"}]}', { headers: { 'Content-Type': 'application/json' } }));
+    const result = await fetchAvailableModels_ACU('https://direct.test/v1', 'direct-key', { sendViaTavern: false });
+    expect(result).toEqual({ success: true, models: ['direct-model'] });
+    const [url, init] = mockFetch.mock.calls[0];
+    expect(url).toBe('https://direct.test/v1/models');
+    expect(init.method).toBe('GET');
+    expect(init.credentials).toBe('omit');
+    expect(init.headers.get('Authorization')).toBe('Bearer direct-key');
+    expect(init.headers.has('X-Custom')).toBe(false);
+    expect(init.body).toBeUndefined();
+  });
+
 });
