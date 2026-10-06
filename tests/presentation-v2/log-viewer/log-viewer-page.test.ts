@@ -104,7 +104,7 @@ describe('AdvancedToolsPage log panel', () => {
     expect(toggles.classList.contains('acu-v2-advanced-tools-page__toggles')).toBe(true);
     const toggleLabels = Array.from(toggles.querySelectorAll<HTMLButtonElement>('.acu-toggle'))
       .map(toggle => toggle.textContent?.trim());
-    expect(toggleLabels).toEqual(['自动滚动', 'Warn', 'Debug']);
+    expect(toggleLabels).toEqual(['自动滚动', 'API 请求', 'Warn', 'Debug']);
     expect(hint.textContent || '').toContain('当前显示');
 
     mount.__resetAcuV2MountForTests();
@@ -220,25 +220,38 @@ describe('AdvancedToolsPage log panel', () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it('Debug 采集开关会控制 debug 日志进入缓冲区', async () => {
+  it('API 请求与 Debug 独立采集，持久化恢复并保留脱敏分行', async () => {
     const { mount, logBuffer } = await mountAdvancedToolsLogPanel(false);
 
-    const { createApiRequestLog_ACU } = await import('../../../src/shared/api-request-log');
+    const { createApiRequestLog_ACU, observeApiResponse_ACU } = await import('../../../src/shared/api-request-log');
+    const { logAutoFillSkip_ACU } = await import('../../../src/shared/trigger-diagnostics');
+    const disabledLogs = [];
     for (const tag of ['API主连接', 'API连接预设', 'API酒馆转发', 'API直连']) {
       const log = createApiRequestLog_ACU(tag, '请求', { messages: [{ role: 'user', content: `完整提示词 ${tag}` }] });
       log.write('回复', `完整回复 ${tag}`);
+      disabledLogs.push(log);
     }
+    logAutoFillSkip_ACU('no_tables_due');
+    const getter = vi.fn();
+    const disabledResponse = Object.defineProperty({}, 'body', { get: getter }) as Response;
+    const observed = observeApiResponse_ACU(disabledResponse, disabledLogs[0]);
+    expect(observed.response).toBe(disabledResponse);
+    observed.finish();
+    expect(getter).not.toHaveBeenCalled();
     await waitForUi(30);
     const defaultText = getPage().textContent || '';
     for (const tag of ['API主连接', 'API连接预设', 'API酒馆转发', 'API直连']) {
-      expect(defaultText).toContain(`完整提示词 ${tag}`);
-      expect(defaultText).toContain(`完整回复 ${tag}`);
+      expect(defaultText).not.toContain(`完整提示词 ${tag}`);
+      expect(defaultText).not.toContain(`完整回复 ${tag}`);
     }
-    expect(defaultText).toContain('无需开启 Debug');
+    expect(defaultText).not.toContain('no_tables_due');
+    expect(defaultText).toContain('API 请求开关独立采集');
+    expect(defaultText).toContain('关闭采集不会删除已有日志');
     expect(defaultText).toContain('不代表最终网络请求');
     expect(defaultText).toContain('检查隐私');
     expect(logBuffer.isDebugLogEnabled()).toBe(false);
-    expect(logBuffer.getAllLogs()).toHaveLength(8);
+    expect(logBuffer.isApiLogEnabled()).toBe(false);
+    expect(logBuffer.getAllLogs()).toHaveLength(0);
 
     logBuffer.pushLog('debug', ['[ACU]', '[调试] 不应出现']);
     await waitForUi(30);
@@ -251,13 +264,128 @@ describe('AdvancedToolsPage log panel', () => {
     await waitForUi();
 
     logBuffer.pushLog('debug', ['[ACU]', '[调试] Debug 已采集']);
+    logAutoFillSkip_ACU('no_tables_due');
+    createApiRequestLog_ACU('API直连', '请求', { messages: [{ content: '只开 Debug 不采集 API' }] });
+    await waitForUi(30);
+    expect(logBuffer.getAllLogs()).toHaveLength(2);
+    expect(getPage().textContent || '').toContain('no_tables_due');
+    expect(getPage().textContent || '').not.toContain('只开 Debug 不采集 API');
+
+    debugToggle!.click();
+    const apiToggle = Array.from(document.querySelectorAll<HTMLButtonElement>('.acu-v2-advanced-tools-page .acu-toggle'))
+      .find(button => button.textContent?.trim() === 'API 请求');
+    expect(apiToggle).not.toBeUndefined();
+    expect(apiToggle!.getAttribute('aria-checked')).toBe('false');
+    apiToggle!.click();
+    await waitForUi();
+    expect(apiToggle!.getAttribute('aria-checked')).toBe('true');
+    expect(logBuffer.isDebugLogEnabled()).toBe(false);
+    expect(logBuffer.isApiLogEnabled()).toBe(true);
+    const persisted = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+    expect(persisted.devOptions.apiLogEnabled).toBe(true);
+    expect(persisted.devOptions.warnLogEnabled).toBe(false);
+    expect(persisted.router.activePageId).toBe('advanced-tools');
+    logBuffer.clearLogs();
+    logAutoFillSkip_ACU('no_tables_due');
+    logBuffer.pushLog('debug', ['[ACU]', '[调试] 只开 API 不采集 Debug']);
+    expect(logBuffer.getAllLogs()).toHaveLength(0);
+    disabledLogs[0].write('回复', '开启前请求不补采集');
+    const activeLogs = [];
+    const prompt = '提示词首行\n提示词次行';
+    const literalPath = String.raw`C:\notes\new.txt`;
+    for (const tag of ['API主连接', 'API连接预设', 'API酒馆转发', 'API直连']) {
+      const request = { messages: [{ role: 'user', content: prompt }], api_key: 'log-secret', path: literalPath,
+        body: JSON.stringify({ messages: [{ role: 'system', content: '嵌套首行\n嵌套次行' }] }) };
+      const log = createApiRequestLog_ACU(tag, '请求', request);
+      log.write('回复', JSON.stringify({ choices: [{ message: { content: '回复首行\n回复次行 log-secret' } }] }));
+      expect(request.messages[0].content).toBe(prompt);
+      activeLogs.push(log);
+    }
+    logAutoFillSkip_ACU('no_tables_due');
     await waitForUi(30);
 
     const text = getPage().textContent || '';
-    expect(text).toContain('Debug 已采集');
-    expect(text).toContain('Debug 采集中');
+    expect(text).toContain('Debug 未采集');
+    expect(text).toContain('API 采集中');
+    expect(text).not.toContain('no_tables_due');
+    expect(text).not.toContain('只开 API 不采集 Debug');
+    expect(text).not.toContain('log-secret');
+    expect(text).not.toContain('开启前请求不补采集');
+    expect(logBuffer.getAllLogs()).toHaveLength(8);
+    expect(logBuffer.getAllLogs().every(entry => entry.level === 'api')).toBe(true);
+    const bodyText = Array.from(getPage().querySelectorAll('.acu-v2-advanced-tools-page__log-body'))
+      .map(body => body.textContent || '').join('\n');
+    expect(bodyText).toMatch(/提示词首行\n +提示词次行/);
+    expect(bodyText).toMatch(/回复首行\n +回复次行/);
+    expect(bodyText).toMatch(/嵌套首行\n +嵌套次行/);
+    expect(bodyText).not.toContain(String.raw`提示词首行\n提示词次行`);
+    expect(bodyText).toContain(JSON.stringify(literalPath));
+    const apiRow = getPage().querySelector('.acu-v2-advanced-tools-page__log-row--api');
+    expect(apiRow).not.toBeNull();
+    expect(apiRow!.querySelector('.acu-badge')?.textContent?.trim()).toBe('API');
+    const levelSelect = getPage().querySelector<HTMLElement>('.acu-select')!;
+    levelSelect.querySelector<HTMLButtonElement>('.acu-select__trigger')!.click();
+    await waitForUi();
+    const apiOption = Array.from(levelSelect.querySelectorAll<HTMLElement>('.acu-select__item'))
+      .find(item => item.textContent?.trim() === 'API 请求');
+    expect(apiOption).not.toBeUndefined();
+    apiOption!.click();
+    await waitForUi();
+    expect(getPage().querySelectorAll('.acu-v2-advanced-tools-page__log-row--api')).toHaveLength(8);
+    findButton('导出').click();
+    await waitForUi();
+    expect(URL.createObjectURL).toHaveBeenCalled();
 
+    // 两个开关同时开启时两种日志各自采集。
+    debugToggle!.click();
+    await waitForUi();
+    logAutoFillSkip_ACU('no_tables_due');
+    activeLogs[0].write('回复', '两个开关同时开启');
+    expect(logBuffer.getAllLogs()).toHaveLength(10);
+    expect(logBuffer.getAllLogs().at(-2)!.level).toBe('debug');
+    expect(logBuffer.getAllLogs().at(-1)!.level).toBe('api');
+    expect(getPage().querySelectorAll('.acu-v2-advanced-tools-page__log-row--debug')).toHaveLength(0);
+
+    const count = logBuffer.getAllLogs().length;
+    apiToggle!.click();
+    await waitForUi();
+    activeLogs[0].write('回复', '关闭后不再采集');
+    createApiRequestLog_ACU('API直连', '请求', { messages: [{ content: '关闭后请求' }] });
+    expect(logBuffer.getAllLogs()).toHaveLength(count);
+    expect(logBuffer.isDebugLogEnabled()).toBe(true);
+    expect(logBuffer.isApiLogEnabled()).toBe(false);
+    logAutoFillSkip_ACU('no_tables_due');
+    expect(logBuffer.getAllLogs()).toHaveLength(count + 1);
+    debugToggle!.click();
+    await waitForUi(30);
+    expect(logBuffer.isDebugLogEnabled()).toBe(false);
+    expect(getPage().textContent || '').not.toContain('关闭后不再采集');
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}').devOptions.apiLogEnabled).toBe(false);
+
+    // 已保存的开关在 Vue 挂载前恢复，Debug 仍默认关闭。
+    apiToggle!.click();
+    await waitForUi();
     mount.__resetAcuV2MountForTests();
+    vi.resetModules();
+    const reloadedLogBuffer = await import('../../../src/shared/log-buffer');
+    expect(reloadedLogBuffer.isApiLogEnabled()).toBe(true);
+    expect(reloadedLogBuffer.isDebugLogEnabled()).toBe(false);
+    const reloadedApi = await import('../../../src/shared/api-request-log');
+    reloadedApi.createApiRequestLog_ACU('API直连', '请求', { messages: [{ content: '重载后 API 请求' }] });
+    expect(reloadedLogBuffer.getAllLogs()[0].level).toBe('api');
+    const reloadedMount = await import('../../../src/presentation-v2/bootstrap/mount');
+    await reloadedMount.openAcuV2App();
+    await waitForUi();
+    const reloadedToggle = Array.from(getPage().querySelectorAll<HTMLButtonElement>('.acu-toggle'))
+      .find(button => button.textContent?.trim() === 'API 请求')!;
+    expect(reloadedToggle.getAttribute('aria-checked')).toBe('true');
+    expect(getPage().textContent || '').toContain('重载后 API 请求');
+    reloadedToggle.click();
+    await waitForUi();
+    reloadedMount.__resetAcuV2MountForTests();
+    vi.resetModules();
+    const disabledAfterReload = await import('../../../src/shared/log-buffer');
+    expect(disabledAfterReload.isApiLogEnabled()).toBe(false);
   });
 
   it('清空与导出使用当前筛选后的日志数据', async () => {

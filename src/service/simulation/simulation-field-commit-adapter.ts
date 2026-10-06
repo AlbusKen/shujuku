@@ -105,6 +105,7 @@ function stageChain_ACU(chat: unknown[], anchor: WorldSimulationAnchorIdentity_A
     appendWorldSimulationCommitChain_ACU({ chat: staged, messageIndex: anchor.messageIndex, anchor,
       beforeLedger: ledger, nextLedger: plan.ledger, evidenceRefs: [], updatedAt,
       checkpointIndex: before?.checkpointIndex ?? null, beforeArchive: archive, nextArchive: plan.archive,
+      beforeFields: before?.fields,
       beforePartials: before ? extractWorldSimulationPartialFields_ACU(before.fields) : {} });
   }
   const fieldUpserts: WorldSimulationLedgerFieldUpserts_ACU = {};

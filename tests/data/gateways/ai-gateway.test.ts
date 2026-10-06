@@ -21,7 +21,7 @@ vi.mock('../../../src/shared/utils', () => ({
 }));
 
 vi.mock('../../../src/data/gateways/pristine-fetch', () => ({ pristineFetch_ACU: mockFetch }));
-import { clearLogs, getAllLogs, setDebugLogEnabled } from '../../../src/shared/log-buffer';
+import { clearLogs, getAllLogs, setApiLogEnabled } from '../../../src/shared/log-buffer';
 import { readFetchChatTurn_ACU } from '../../../src/service/ai/native-tool';
 import { createApiRequestLog_ACU } from '../../../src/shared/api-request-log';
 
@@ -42,7 +42,7 @@ import {
 beforeEach(() => {
   vi.clearAllMocks();
   clearLogs();
-  setDebugLogEnabled(false);
+  setApiLogEnabled(false);
   Object.keys(mockTavernHelper).forEach(k => delete mockTavernHelper[k]);
   Object.keys(mockSillyTavern).forEach(k => delete mockSillyTavern[k]);
 });
@@ -157,7 +157,8 @@ describe('getHostRequestHeaders_ACU', () => {
   });
 });
 
-describe('各酒馆渠道的默认 API 日志', () => {
+describe('各酒馆渠道的 API 请求日志', () => {
+  beforeEach(() => setApiLogEnabled(true));
   it('generateRaw 记录可见参数与完整返回值，不改参数或读取 getter', async () => {
     const prompt = '完整提示词'.repeat(2000);
     const getter = vi.fn(() => { throw new Error('不应读取'); });
@@ -199,7 +200,7 @@ describe('各酒馆渠道的默认 API 日志', () => {
     expect(JSON.stringify(logs)).not.toMatch(/session-secret|custom-secret/);
   });
 
-  it('主连接和 Chat Completion 预设记录实际后端请求体及原始 JSON', async () => {
+  it('主连接和 Chat Completion 预设分行记录后端请求体及完整回复', async () => {
     mockSillyTavern.mainApi = 'openai';
     mockSillyTavern.chatCompletionSettings = { chat_completion_source: 'custom', custom_url: 'https://endpoint.test/v1?key=query-secret', proxy_password: 'proxy-secret' };
     mockSillyTavern.getRequestHeaders = () => ({ 'X-CSRF-Token': 'csrf-secret' });
@@ -217,7 +218,9 @@ describe('各酒馆渠道的默认 API 日志', () => {
     expect(logs.map(entry => entry.tag)).toEqual(['API主连接', 'API主连接', 'API连接预设', 'API连接预设']);
     expect(logs[0].message).toContain('酒馆后端请求体');
     expect(logs[0].message).toContain('提示词正文');
-    expect(logs[1].message).toContain(raw);
+    expect(logs[1].message).toContain('原始回复');
+    expect(logs[1].message).toContain('"total_tokens": 12');
+    expect(logs[1].message).toContain('{\n');
     expect(JSON.stringify(logs)).not.toMatch(/query-secret|csrf-secret|proxy-secret/);
     expect(JSON.parse(mockFetch.mock.calls[0][1].body).custom_url).toContain('query-secret');
   });
@@ -225,6 +228,7 @@ describe('各酒馆渠道的默认 API 日志', () => {
 
 
 describe('酒馆响应单次消费与取消', () => {
+  beforeEach(() => setApiLogEnabled(true));
   it('流式回调只获取一个 reader，逐块读取且保留完整原始 SSE', async () => {
     const raw = 'data: {"choices":[{"delta":{"content":"流式正文"}}]}\n\ndata: [DONE]\n\n';
     const bytes = new TextEncoder().encode(raw);
@@ -277,10 +281,11 @@ describe('酒馆响应单次消费与取消', () => {
   });
 
   it.each([['{ "error": { "message": "上游拒绝" } }', 429], ['非 JSON 完整错误正文', 502]])(
-    'HTTP 错误仍记录完整原文，且保持原有异常', async (raw, status) => {
+    'HTTP 错误仍记录完整正文，JSON 分行展示且保持原有异常', async (raw, status) => {
       mockFetch.mockResolvedValueOnce(new Response(raw, { status }));
       await expect(postChatCompletionDirect_ACU({ messages: [] })).rejects.toThrow();
-      expect(getAllLogs().find(entry => entry.message.includes('回复 HTTP'))!.message).toContain(raw);
+      const expectedBody = status === 429 ? '"message": "上游拒绝"' : raw;
+      expect(getAllLogs().find(entry => entry.message.includes('回复 HTTP'))!.message).toContain(expectedBody);
     },
   );
 });

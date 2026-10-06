@@ -518,7 +518,7 @@ export function chatTurnFromJson_ACU(data: unknown): { turn: AiChatTurn_ACU; usa
   return { turn: finishChatTurn_ACU(state), usage: state.usage };
 }
 
-export async function readFetchChatTurn_ACU(response: { headers?: { get(name: string): string | null }; json: () => Promise<unknown>; body?: { getReader(): ReadableStreamDefaultReader<Uint8Array> } }, streaming: boolean, signal?: AbortSignal | null, requireComplete = false): Promise<{ turn: AiChatTurn_ACU; usage: unknown }> {
+export async function readFetchChatTurn_ACU(response: { headers?: { get(name: string): string | null }; json: () => Promise<unknown>; body?: { getReader(): ReadableStreamDefaultReader<Uint8Array> } }, streaming: boolean, signal?: AbortSignal | null, requireComplete = false, onTextPreview?: (body: string) => void): Promise<{ turn: AiChatTurn_ACU; usage: unknown }> {
   const contentType = response.headers?.get('content-type') ?? '';
   if ((!streaming || requireComplete && contentType.includes('application/json')) && !contentType.includes('text/event-stream')) {
     const json = await response.json();
@@ -538,6 +538,13 @@ export async function readFetchChatTurn_ACU(response: { headers?: { get(name: st
   const state = accumulator_ACU();
   let buffer = '';
   let completed = false;
+  let lastPreview = '';
+  const preview = (): void => {
+    if (!onTextPreview || signal?.aborted || state.content === lastPreview) return;
+    lastPreview = state.content;
+    try { onTextPreview(state.content); }
+    catch { /* 展示回调不改变响应解析及完整终态校验。 */ }
+  };
   const consume = (line: string): void => {
     if (!line.startsWith('data:')) return;
     const data = line.slice(5).trim();
@@ -569,10 +576,12 @@ export async function readFetchChatTurn_ACU(response: { headers?: { get(name: st
           try { absorbChatCompletionEvent_ACU(state, JSON.parse(data)); } catch { /* 保留普通调用的容错语义。 */ }
         }
       }
+      preview();
     }
     if (requireComplete) {
       buffer += decoder.decode();
       if (buffer.trim()) consume(buffer);
+      preview();
       if (signal?.aborted) throw new Error('Request aborted');
       if (!completed) throw new Error('正文流在完整终态前结束，未确认正文。');
     }

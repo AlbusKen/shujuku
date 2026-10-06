@@ -24,12 +24,14 @@ export function validateZeroLayerExitManifest_ACU(source: ZeroLayerEnvelope_ACU)
     && fingerprint(raw.scope) === fingerprint(source.scope)
     && raw.activationMessageCount === source.activationMessageCount
     && raw.activationFingerprint === source.activationFingerprint
+    && typeof raw.physicalPrefixSnapshot === 'string'
+    && raw.physicalPrefixSnapshot.trim()
     && integer(raw.sourceRevision) && raw.sourceRevision < source.revision && integer(raw.createdAt), '退出来源与载体不一致。');
   const branch = source.branches.find(item => item.branchId === raw.branchId);
   const turn = source.turns.find(item => item.turnId === branch?.headTurnId);
   requireValue(turn?.phase === 'published' && fingerprint(raw.head) === fingerprint(checkpointTurnRef_ACU(source, turn)), '退出 head 不是所选已发布逻辑前沿。');
   requireValue(record(raw.target) && raw.target.kind === 'host' && integer(raw.target.messageIndex)
-    && raw.target.messageIndex < source.activationMessageCount && integer(raw.target.swipeId)
+    && raw.target.messageIndex === source.activationMessageCount - 1 && integer(raw.target.swipeId)
     && fingerprint(raw.target.scope) === fingerprint(source.scope)
     && raw.target.sourceFingerprint === source.activationFingerprint, '退出物理接入引用无效。');
   requireValue(Array.isArray(raw.assignments) && raw.assignments.length > 0, '退出缺少完整写集。');
@@ -47,6 +49,12 @@ export function validateZeroLayerExitManifest_ACU(source: ZeroLayerEnvelope_ACU)
         && (value.exists ? Object.prototype.hasOwnProperty.call(value, 'value') && value.value !== undefined
           : !Object.prototype.hasOwnProperty.call(value, 'value')), '退出字段快照无效。');
     }
+  }
+  requireValue(keys.size === source.activationMessageCount * ZERO_LAYER_EXIT_FIELDS_ACU.length,
+    '退出写集未覆盖固定物理前缀的完整字段。');
+  for (let messageIndex = 0; messageIndex < source.activationMessageCount; messageIndex += 1) {
+    requireValue(ZERO_LAYER_EXIT_FIELDS_ACU.every(field => keys.has(JSON.stringify([messageIndex, field]))),
+      '退出写集缺少前缀字段。');
   }
   requireValue(typeof raw.configFingerprint === 'string' && raw.configFingerprint.trim()
     && typeof raw.materialFingerprint === 'string' && raw.materialFingerprint.trim()

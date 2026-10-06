@@ -46,11 +46,12 @@ export async function sendCustomApiRequest_ACU(
     const base: Record<string, any> = {};
     const bridgeKeys = new Set(['chat_completion_source', 'custom_api_format', 'group_names', 'include_reasoning',
         'reasoning_effort', 'enable_web_search', 'request_images', 'reverse_proxy', 'proxy_password', 'custom_url',
-        'custom_include_headers', 'custom_include_body', 'custom_exclude_body', 'custom_prompt_post_processing']);
+        'custom_include_headers', 'custom_include_body', 'custom_exclude_body', 'custom_prompt_post_processing', 'preserve_multiple_system']);
     for (const [key, value] of Object.entries(bridgeBody)) {
         if (!bridgeKeys.has(key) && value !== undefined) base[key] = value;
     }
-    base.messages = processDirectMessages_ACU(base.messages, String(bridgeBody.custom_prompt_post_processing ?? ''));
+    const preserveMultipleSystem = bridgeBody.preserve_multiple_system !== false;
+    base.messages = processDirectMessages_ACU(base.messages, String(bridgeBody.custom_prompt_post_processing ?? ''), preserveMultipleSystem);
     const included = includeBody(String(bridgeBody.custom_include_body ?? config.bodyParams ?? ''));
     const body = buildProviderRequest_ACU({ ...base, ...included }, format);
     // 协议原生附加字段在转换后保留；通用字段只由协议转换器写入，不能重新覆盖为旧协议。

@@ -18,11 +18,15 @@ export interface ZeroLayerRequestLease_ACU {
   beforeDispatch(): Promise<void>;
   /** 接收完整正文并完成保存；回调成功不意味着宿主可继续入楼。 */
   commitReply(body: string): Promise<void>;
+  /** 仅展示累计正文；不取得保存或发布资格。 */
+  preview?(body: string): void;
+  endPreview?(): void;
   fail(error: unknown): Promise<void>;
 }
 
 export interface ZeroLayerRequestForwarderOptions_ACU {
   isActive(): boolean;
+  beforeForward?(request: Pick<InterceptedHostRequest_ACU, 'bodyText' | 'signal'>): void;
   /** 必须同步认领本轮身份；独占期内返回 null 也会阻断原发送。 */
   claim(request: InterceptedHostRequest_ACU): ZeroLayerRequestLease_ACU | null;
 }
@@ -31,7 +35,7 @@ export interface ZeroLayerRequestForwarderOptions_ACU {
 const DATABASE_TRANSPORT_FIELDS_ACU = new Set([
   'messages', 'model', 'stream', 'chat_completion_source', 'custom_api_format',
   'reverse_proxy', 'proxy_password', 'custom_url', 'custom_include_headers',
-  'custom_include_body', 'custom_exclude_body', 'custom_prompt_post_processing',
+  'custom_include_body', 'custom_exclude_body', 'custom_prompt_post_processing', 'preserve_multiple_system',
   'vertexai_auth_mode', 'vertexai_region', 'vertexai_express_project_id',
   'azure_base_url', 'azure_deployment_name', 'azure_api_version',
 ]);
@@ -49,6 +53,7 @@ function assertCurrent_ACU(lease: ZeroLayerRequestLease_ACU, signal?: AbortSigna
 export function installZeroLayerRequestForwarder_ACU(options: ZeroLayerRequestForwarderOptions_ACU): () => void {
   return installHostGenerationInterceptor_ACU({
     isActive: options.isActive,
+    beforeForward: options.beforeForward,
     rejectUnclaimed: true,
     claim(request) {
       const lease = options.claim(request);
@@ -100,7 +105,11 @@ async function forward_ACU(
     assertCurrent_ACU(lease, request.signal);
     const body = await callAIWithResolvedPreset_ACU(
       payload.messages, preset, controller.signal, undefined,
-      { generationParameters: parameters, streaming: requestStreaming, requireDirectTransport: true },
+      { generationParameters: parameters, streaming: requestStreaming, requireDirectTransport: true,
+        onTextPreview: body => {
+          if (!controller.signal.aborted && !lease.signal.aborted && lease.isCurrent()) lease.preview?.(body);
+        },
+      },
     );
     assertCurrent_ACU(lease, request.signal);
     if (typeof body !== 'string' || !body.trim()) throw new Error('数据库 API 未返回有效正文。');
@@ -110,6 +119,7 @@ async function forward_ACU(
     try { await lease.fail(error); } catch { /* 保存失败保持恢复状态，不放行原发送。 */ }
     throw error;
   } finally {
+    lease.endPreview?.();
     lease.signal.removeEventListener('abort', abort);
     request.signal?.removeEventListener('abort', abort);
   }

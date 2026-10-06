@@ -1190,9 +1190,9 @@ describe('callAIWithPreset_ACU 参数透传', () => {
 });
 
 describe('插件直连与请求期限', () => {
-  it('默认直连发送最终请求，并在 Debug 关闭时记录完整请求和原始回复且隐藏凭据', async () => {
-    const { clearLogs, getAllLogs, setDebugLogEnabled } = await import('../../../src/shared/log-buffer');
-    clearLogs(); setDebugLogEnabled(false);
+  it('默认直连发送最终请求，API 请求采集开启后分行记录完整请求与回复且隐藏凭据', async () => {
+    const { clearLogs, getAllLogs, setApiLogEnabled } = await import('../../../src/shared/log-buffer');
+    clearLogs(); setApiLogEnabled(true);
     mockSettings.apiConfig = { url: 'https://direct.test/v1', model: 'm', apiKey: 'secret-direct-key',
       promptPostProcessing: '', bodyParams: 'top_k: 42', requestHeaders: 'X-Api-Key: secret-header-key' };
     const prompt = '完整提示词'.repeat(10000);
@@ -1211,8 +1211,9 @@ describe('插件直连与请求期限', () => {
     expect(body).not.toHaveProperty('custom_include_headers');
     const logs = getAllLogs().filter(entry => entry.tag === 'API直连');
     expect(logs).toHaveLength(2);
-    expect(logs[0].message).toContain(init.body);
-    expect(logs[1].message).toContain(raw);
+    expect(logs[0].message).toContain(prompt);
+    expect(logs[0].message).toContain('"top_k": 42');
+    expect(logs[1].message).toContain('完整回复'.repeat(10000));
     expect(JSON.stringify(logs)).not.toMatch(/secret-direct-key|secret-header-key/);
   });
 
@@ -1262,6 +1263,10 @@ describe('插件直连与请求期限', () => {
 });
 
 describe('直连接口协议适配', () => {
+  beforeEach(async () => {
+    const { setApiLogEnabled } = await import('../../../src/shared/log-buffer');
+    setApiLogEnabled(true);
+  });
   it.each([
     ['openai_compat', '/chat/completions', { choices: [{ message: { content: '协议回复' }, finish_reason: 'stop' }] }],
     ['openai_responses', '/responses', { status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: '协议回复' }] }] }],
@@ -1293,7 +1298,9 @@ describe('直连接口协议适配', () => {
     if (format === 'openai_responses' || format === 'gemini_interactions') expect(body).not.toHaveProperty('messages');
     if (format === 'claude_messages') expect(init.headers.get('x-api-key')).toBe('protocol-secret');
     if (format === 'gemini_interactions') expect(init.headers.get('x-goog-api-key')).toBe('protocol-secret');
-    expect(getAllLogs().find(entry => entry.message.includes('回复 HTTP'))!.message).toContain(raw);
+    const replyLog = getAllLogs().find(entry => entry.message.includes('回复 HTTP'))!.message;
+    expect(replyLog).toContain('协议回复');
+    expect(replyLog).toContain('{\n');
   });
 
   it('原生回复没有完成终态时不伪造 stop', async () => {
@@ -1305,6 +1312,10 @@ describe('直连接口协议适配', () => {
 });
 
 describe('直连流式回复', () => {
+  beforeEach(async () => {
+    const { setApiLogEnabled } = await import('../../../src/shared/log-buffer');
+    setApiLogEnabled(true);
+  });
   it.each([
     ['openai_compat', [{ choices: [{ delta: { content: '流式正文' } }] }, '[DONE]']],
     ['openai_responses', [{ type: 'response.output_text.delta', delta: '流式正文' }, { type: 'response.completed', response: { status: 'completed', output: [] } }]],
@@ -1327,10 +1338,14 @@ describe('直连流式回复', () => {
 
 
 describe('自定义 API 酒馆转发日志', () => {
-  it('默认采集完整请求和单次消费的原始回复，隐藏嵌套凭据、标头和 URL 查询值', async () => {
+  beforeEach(async () => {
+    const { setApiLogEnabled } = await import('../../../src/shared/log-buffer');
+    setApiLogEnabled(true);
+  });
+  it('API 请求采集开启后采集完整请求和单次消费的回复，隐藏嵌套凭据、标头和 URL 查询值', async () => {
     const { sendCustomApiRequest_ACU } = await import('../../../src/service/ai/custom-api-transport');
-    const { clearLogs, getAllLogs, setDebugLogEnabled } = await import('../../../src/shared/log-buffer');
-    clearLogs(); setDebugLogEnabled(false);
+    const { clearLogs, getAllLogs, setApiLogEnabled } = await import('../../../src/shared/log-buffer');
+    clearLogs(); setApiLogEnabled(true);
     const config = { sendViaTavern: true, apiKey: 'config-secret' };
     const body = { messages: [{ role: 'user', content: '完整转发提示词'.repeat(2000) }], max_tokens: 321,
       proxy_password: 'proxy-secret', custom_url: 'https://forward.test/v1?key=query-secret',
@@ -1379,6 +1394,10 @@ describe('自定义 API 酒馆转发日志', () => {
 });
 
 describe('酒馆转发 HTTP 错误正文', () => {
+  beforeEach(async () => {
+    const { setApiLogEnabled } = await import('../../../src/shared/log-buffer');
+    setApiLogEnabled(true);
+  });
   it.each(['direct', 'resolved', 'chatTurn'] as const)('%s 调用保留 HTTP 分类并单次记录完整错误正文', async mode => {
     const { clearLogs, getAllLogs } = await import('../../../src/shared/log-buffer');
     clearLogs();

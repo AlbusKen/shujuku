@@ -7,6 +7,12 @@ import { ZeroLayerError_ACU } from './model';
 /** 只按请求对象绑定，不存在可泄漏到后台 Agent 请求的全局历史替换。 */
 const contexts_ACU = new WeakMap<object, ChatCompletionPromptContext_ACU>();
 const passes_ACU = new WeakMap<object, Promise<void>>();
+const readyCallbacks_ACU = new WeakMap<object, () => void>();
+
+/** 仅装配成功可登记普通发送凭据；失败的模板 pass 不会触发。 */
+export function onZeroLayerTemplateReady_ACU(request: object, ready: () => void): void {
+  readyCallbacks_ACU.set(request, ready);
+}
 
 export function bindZeroLayerPromptContext_ACU(
   request: object,
@@ -44,6 +50,9 @@ export function runZeroLayerTemplatePass_ACU(
         tableData: provider.getCurrentDataStrict_ACU() });
       context.assertCurrent?.();
     } finally { provider.dispose(); }
+  }).then(() => {
+    context?.assertCurrent?.();
+    readyCallbacks_ACU.get(request)?.();
   });
   passes_ACU.set(request, result);
   return result;

@@ -18,6 +18,7 @@ import { createWorldbookAiApi } from './api-groups/worldbook-ai-api';
 import { createAgentWorldbookApi } from './api-groups/agent-worldbook-api';
 import { createSqlApi, installRuntimeGatedSqlReadApi_ACU } from './api-groups/sql-api';
 import { createPerformanceDiagnosticsApi } from './api-groups/performance-diagnostics-api';
+import { createZeroLayerExitApi_ACU } from './api-groups/zero-layer-api';
 
 // --- 共享状态（回调数组） ---
 const tableUpdateCallbacks: Function[] = [];
@@ -47,6 +48,7 @@ const api = Object.assign(
     createWorldbookAiApi(ctx),
     createAgentWorldbookApi(ctx),
     createPerformanceDiagnosticsApi(),
+    createZeroLayerExitApi_ACU(),
     sqlApi,
 );
 

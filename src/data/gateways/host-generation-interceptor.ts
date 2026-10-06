@@ -16,6 +16,8 @@ export interface InterceptedHostRequest_ACU {
 export interface HostRequestInterceptorOptions_ACU {
   /** 无活动零层回合时不读取请求体，也不改变宿主请求行为。 */
   isActive(): boolean;
+  /** 生成端点的同步放行门；只核对现有 JSON 字符串，不重写请求或接管传输。 */
+  beforeForward?(request: Pick<InterceptedHostRequest_ACU, 'bodyText' | 'signal'>): void;
   /** 独占装配期间未知正文请求必须阻断；普通调用默认仍可放行。 */
   rejectUnclaimed?: boolean;
   /** 同步认领；返回 null 的请求沿原链发送，认领后绝不回退原发送。 */
@@ -55,8 +57,7 @@ export function installHostGenerationInterceptor_ACU(
   const wrapper: typeof fetch = function (this: unknown, input, init) {
     const receiver = this || host;
     const forward = () => original.call(receiver, input, init);
-    if (disposed || (init as InternalRequestInit_ACU | undefined)?.[INTERNAL_GENERATION_FETCH_ACU]
-      || !options.isActive()) return forward();
+    if (disposed || (init as InternalRequestInit_ACU | undefined)?.[INTERNAL_GENERATION_FETCH_ACU]) return forward();
     const request = asRequest_ACU(input);
     const url = new URL(request?.url ?? String(input), host.location.href);
     const method = String(init?.method ?? request?.method ?? 'GET').toUpperCase();
@@ -65,6 +66,8 @@ export function installHostGenerationInterceptor_ACU(
     const signal = init?.signal !== undefined ? init.signal : request?.signal ?? null;
     // 同步认领再读 body；处理期间模式关闭也不能把已经认领的请求发回宿主。
     try {
+      options.beforeForward?.({ bodyText: typeof init?.body === 'string' ? init.body : null, signal });
+      if (!options.isActive()) return forward();
       const run = options.claim({
         url: url.href,
         signal,

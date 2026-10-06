@@ -8,6 +8,7 @@ import { createZeroLayerTableSettlement_ACU } from './table-settlement';
 import { getWorldSimulationRuntime_ACU } from '../simulation/simulation-runtime';
 import type { ZeroLayerBranchCommand_ACU } from './branch-command';
 import { captureZeroLayerCarrier_ACU, assertZeroLayerCarrier_ACU, type ZeroLayerCarrierContext_ACU } from './carrier-context';
+import type { ZeroLayerExitSelection_ACU } from './exit-model';
 
 /** 页面拥有的装配；初始化只注册拦截器，不创建或启用聊天存档。 */
 export class ZeroLayerRuntime_ACU {
@@ -161,6 +162,22 @@ export class ZeroLayerRuntime_ACU {
       block.release();
       this.closeBlocks.delete(context.key);
     }
+  }
+
+  /** 已确认关闭后显式退出；与正文及分支操作共享互斥锁。 */
+  async exitToOrdinary(selection: ZeroLayerExitSelection_ACU): Promise<ZeroLayerEnvelope_ACU> {
+    return this.runExclusive(() => this.session.exitToOrdinary(selection));
+  }
+
+  /** 只从服务器恢复已保存退出意图，不重新发送任何请求。 */
+  async recoverExit(): Promise<ZeroLayerEnvelope_ACU> {
+    const context = captureZeroLayerCarrier_ACU();
+    return this.runExclusive(async () => {
+      const envelope = await this.session.recoverExit();
+      assertZeroLayerCarrier_ACU(context);
+      this.releaseCloseBlock(context, envelope);
+      return envelope;
+    }, 'recover');
   }
 
   /** 回退/分叉与分支选择共享正文操作锁，调用者传入原 FloorRef。 */

@@ -92,13 +92,11 @@
             <span
               v-if="store.modelLoadStatus === 'loading'"
               class="acu-api-config-panel__muted"
-              >加载中...</span
-            >
+            >加载中...</span>
             <span
               v-else-if="store.modelLoadStatus === 'error'"
               class="acu-api-config-panel__danger"
-              >{{ store.modelLoadError }}</span
-            >
+              >{{ store.modelLoadError }}</span>
           </div>
           <AcuFormRow v-if="store.modelOptions.length" label="模型列表">
             <AcuSelect
@@ -176,6 +174,17 @@
             placeholder="未选择"
             @update:model-value="setPromptPostProcessing"
           />
+        </AcuFormRow>
+        <AcuFormRow
+          label="保留多个 system 消息"
+          hint="默认开启。当提示词后处理为严格或半严格模式时，仍保留提示词中部的 system 消息角色，不降级为 user。关闭后恢复旧版 SillyTavern 行为（中部 system 强制改为 user）。"
+        >
+          <AcuCheckbox
+            :model-value="activeDraft.preserveMultipleSystem ?? true"
+            @update:model-value="setPreserveMultipleSystem"
+          >
+            启用
+          </AcuCheckbox>
         </AcuFormRow>
         <AcuFormRow label="附加请求标头" hint="每行一个 Header: Value，追加到请求头中。">
           <AcuTextarea
@@ -443,6 +452,11 @@ function setActiveConnectionMode(value: string): void {
 function setPromptPostProcessing(value: string): void {
   activeDraft.promptPostProcessing =
     normalizePromptPostProcessing_ACU(value);
+  activeDraftSavedAt.value = null;
+}
+
+function setPreserveMultipleSystem(value: boolean): void {
+  activeDraft.preserveMultipleSystem = value;
   activeDraftSavedAt.value = null;
 }
 

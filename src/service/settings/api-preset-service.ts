@@ -109,6 +109,7 @@ export interface ApiPresetApiConfig_ACU {
   excludeBodyParams: string;
   requestHeaders: string;
   promptPostProcessing: ApiPromptPostProcessingValue_ACU;
+  preserveMultipleSystem?: boolean;
   /** 接口协议（预设级），见 CustomApiFormat_ACU。 */
   customApiFormat: CustomApiFormat_ACU;
 }
@@ -161,10 +162,11 @@ export function normalizeApiConfig_ACU(value: any): ApiPresetApiConfig_ACU {
     excludeBodyParams: typeof source.excludeBodyParams === 'string' ? source.excludeBodyParams : '',
     requestHeaders: typeof source.requestHeaders === 'string' ? source.requestHeaders : '',
     promptPostProcessing: normalizePromptPostProcessing_ACU(source.promptPostProcessing),
+    preserveMultipleSystem: typeof source.preserveMultipleSystem === 'boolean' ? source.preserveMultipleSystem : true,
     customApiFormat: normalizeCustomApiFormat_ACU(source.customApiFormat),
     ...Object.fromEntries(
       Object.entries(source).filter(([key]) =>
-        !['url', 'apiKey', 'model', 'useMainApi', 'requestTimeoutSeconds', 'sendViaTavern', 'max_tokens', 'maxTokens', 'temperature', 'bodyParams', 'excludeBodyParams', 'requestHeaders', 'promptPostProcessing', 'customApiFormat'].includes(key)
+        !['url', 'apiKey', 'model', 'useMainApi', 'requestTimeoutSeconds', 'sendViaTavern', 'max_tokens', 'maxTokens', 'temperature', 'bodyParams', 'excludeBodyParams', 'requestHeaders', 'promptPostProcessing', 'preserveMultipleSystem', 'customApiFormat'].includes(key)
       )
     ),
   };

@@ -18,6 +18,8 @@ import {
   setDebugLogEnabled,
   setWarnLogEnabled,
   isWarnLogEnabled,
+  setApiLogEnabled,
+  isApiLogEnabled,
   MAX_BUFFER_CHARACTERS_ACU,
 } from '../../src/shared/log-buffer';
 
@@ -73,9 +75,12 @@ describe('Warn 日志开关', () => {
     const received: any[] = [];
     subscribe((entry) => received.push(entry));
 
+    setDebugLogEnabled(true);
     pushLog('warn', ['[ACU]', '[SQL] 应被隐藏']);
+    pushLog('api', ['[ACU]', '[API直连] 应被隐藏']);
 
     expect(isWarnLogEnabled()).toBe(false);
+    expect(isApiLogEnabled()).toBe(false);
     expect(getAllLogs()).toEqual([]);
     expect(getKnownTags()).toEqual([]);
     expect(received).toEqual([]);
@@ -90,6 +95,15 @@ describe('Warn 日志开关', () => {
     expect(isWarnLogEnabled()).toBe(true);
     expect(getAllLogs()).toHaveLength(1);
     expect(received).toHaveLength(1);
+    setDebugLogEnabled(false);
+    setWarnLogEnabled(false);
+    setApiLogEnabled(true);
+    pushLog('api', ['[ACU]', '[API直连] 独立采集']);
+    pushLog('debug', ['[ACU]', '[调试] 不采集']);
+    expect(isApiLogEnabled()).toBe(true);
+    expect(getAllLogs()).toHaveLength(2);
+    expect(getAllLogs()[1].level).toBe('api');
+    expect(received).toHaveLength(2);
   });
 });
 
@@ -320,11 +334,13 @@ describe('_resetForTesting', () => {
   it('重置所有状态', () => {
     pushLog('debug', ['[ACU]', '[SQL] test']);
     setWarnLogEnabled(true);
+    setApiLogEnabled(true);
     subscribe(() => {});
     _resetForTesting();
     expect(getLogCount()).toBe(0);
     expect(getKnownTags()).toEqual([]);
     expect(getSubscriberCount()).toBe(0);
     expect(isWarnLogEnabled()).toBe(false);
+    expect(isApiLogEnabled()).toBe(false);
   });
 });

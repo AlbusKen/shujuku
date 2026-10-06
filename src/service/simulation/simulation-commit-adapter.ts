@@ -416,6 +416,7 @@ async function persistHostFinalCommit_ACU(
       beforeArchive: archiveBefore,
       nextArchive: archiveSnapshot,
       // 必须取改写锚点正文前的折叠：分桶键含正文摘要，改写后旧键下的逐栏草稿不可再读。
+      beforeFields: foldedBefore?.fields,
       beforePartials: foldedBefore ? extractWorldSimulationPartialFields_ACU(foldedBefore.fields) : {},
     });
     const projectedFold = foldWorldSimulationLedger_ACU(chat, persistedAnchor.messageIndex);

@@ -14,6 +14,7 @@ export function useDevOptions() {
     vectorIndexAdvanced,
     legacyUiMenuVisible,
     warnLogEnabled,
+    apiLogEnabled,
   } = storeToRefs(store);
   return {
     developerOptionsEnabled,
@@ -26,6 +27,8 @@ export function useDevOptions() {
     setLegacyUiMenuVisible: (enabled: boolean) => store.setLegacyUiMenuVisible(enabled),
     warnLogEnabled,
     setWarnLogEnabled: (enabled: boolean) => store.setWarnLogEnabled(enabled),
+    apiLogEnabled,
+    setApiLogEnabled: (enabled: boolean) => store.setApiLogEnabled(enabled),
     refresh: () => store.refresh(),
   };
 }

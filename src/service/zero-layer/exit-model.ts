@@ -21,6 +21,8 @@ export interface ZeroLayerExitManifest_ACU {
   sourceRevision: number;
   activationMessageCount: number;
   activationFingerprint: string;
+  /** 冻结的物理正文/swipe 前缀；普通后缀不参与该证明。 */
+  physicalPrefixSnapshot: string;
   target: Extract<ZeroLayerFloorRef_ACU, { kind: 'host' }>;
   configFingerprint: string;
   materialFingerprint: string;

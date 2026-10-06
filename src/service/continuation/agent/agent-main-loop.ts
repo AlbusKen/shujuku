@@ -1332,9 +1332,8 @@ export class ContinuationAgentTurnPlanner_ACU {
       onUsage: usage => { callUsage = usage; },
       tools: nativeMode ? [...agentNativeTools_ACU(['read', 'search']), ...continuationDecisionTools_ACU()] : [],
     };
-    const finishMessages = (items: ReturnType<ContinuationAgentTurnPlanner_ACU['spliceHistory_ACU']>) => (
-      nativeMode ? withNativeToolThinkPrefill_ACU(items) : withJsonTailPrefill_ACU(items)
-    );
+    // 工具模式只影响 tools 参数，不修改消息底部预填充
+    const finishMessages = (items: ReturnType<ContinuationAgentTurnPlanner_ACU['spliceHistory_ACU']>) => items;
 
     for (let attempt = 0; attempt <= retries; attempt += 1) {
       const base = request.createInternalRequestIdentity(attempt);
@@ -2089,8 +2088,10 @@ export class ContinuationAgentTurnPlanner_ACU {
       result.push({ ...message });
     }
     const body = !inserted && historical.length ? [...historical.map(item => ({ ...item })), ...result] : result;
-    body.push({ role: 'user', content: latestSnapshot || '【运行时快照】\n本次没有可用的运行时资料；请以此前已确认的工具回执为准。' });
-    if (messages.some(item => item.content === USER_PREFILL_CONTENT_ACU)) body.push({ role: 'user', content: USER_PREFILL_CONTENT_ACU });
+    // 状态快照作为独立 system 板块置于真实历史后
+    body.push({ role: 'system', content: latestSnapshot || '【运行时快照】\n本次没有可用的运行时资料；请以此前已确认的工具回执为准。' });
+    // 末尾始终追加 user 预填充
+    body.push({ role: 'user', content: USER_PREFILL_CONTENT_ACU });
     return body;
   }
 

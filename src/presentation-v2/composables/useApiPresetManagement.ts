@@ -28,6 +28,7 @@ export interface ApiPresetDraft {
   promptPostProcessing: ApiPromptPostProcessingValue_ACU;
   /** 接口协议（预设级）：openai_compat / openai_responses / claude_messages / gemini_interactions */
   customApiFormat: CustomApiFormat_ACU;
+  preserveMultipleSystem: boolean;
 }
 
 /** Effective connection mode — flattens apiMode + useMainApi into 3 user-visible states. */
@@ -68,6 +69,7 @@ export function createEmptyApiPresetDraft(): ApiPresetDraft {
     excludeBodyParams: '',
     requestHeaders: '',
     promptPostProcessing: API_PROMPT_POST_PROCESSING_DEFAULT_ACU,
+    preserveMultipleSystem: true,
     customApiFormat: CUSTOM_API_FORMAT_DEFAULT_ACU,
   };
 }
@@ -92,6 +94,7 @@ export function apiPresetDraftFromPreset(preset: AcuV2ApiPreset): ApiPresetDraft
     // 草稿若显示为「未选择」，用户直接保存就会把行为静默改成 none。
     promptPostProcessing: normalizePromptPostProcessing_ACU(preset.apiConfig.promptPostProcessing),
     customApiFormat: normalizeCustomApiFormat_ACU(preset.apiConfig.customApiFormat),
+    preserveMultipleSystem: preset.apiConfig.preserveMultipleSystem !== false,
   };
 }
 
@@ -114,6 +117,7 @@ export function apiPresetFromDraft(draft: ApiPresetDraft): AcuV2ApiPreset {
       requestHeaders: draft.requestHeaders || '',
       promptPostProcessing: normalizePromptPostProcessing_ACU(draft.promptPostProcessing),
       customApiFormat: normalizeCustomApiFormat_ACU(draft.customApiFormat),
+      preserveMultipleSystem: draft.preserveMultipleSystem !== false,
     },
   };
 }

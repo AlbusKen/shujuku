@@ -100,7 +100,7 @@ function logTriggerSkip_ACU(
 ): void {
   const detail = { reason, ...pickTriggerContext_ACU(context) };
   if (source === '[AutoFill]') {
-    pushLog('debug', ['[ACU]', `${source} Trigger skipped`, detail], true);
+    pushLog('debug', ['[ACU]', `${source} Trigger skipped`, detail]);
     return;
   }
   const log = AUTO_FILL_SKIP_WARN_REASONS_ACU.has(reason) ? logWarn_ACU : logDebug_ACU;

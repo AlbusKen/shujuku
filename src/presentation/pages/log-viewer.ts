@@ -26,6 +26,8 @@ import {
   getLogCount,
   setDebugLogEnabled,
   isDebugLogEnabled,
+  setApiLogEnabled,
+  isApiLogEnabled,
 } from '../../shared/log-buffer';
 
 // ═══════════════════════════════════════════════════════════════
@@ -78,6 +80,7 @@ export function generateLogViewerTabHTML(): string {
           <!-- 级别过滤 -->
           <select id="${SCRIPT_ID_PREFIX_ACU}-log-level-filter" style="padding: 4px 8px; border: 1px solid var(--border-normal); border-radius: 4px; background: var(--input-background); color: var(--input-text-color); font-size: 0.85em;">
             <option value="all">全部级别</option>
+            <option value="api">API 请求</option>
             <option value="debug">🔵 Debug</option>
             <option value="warn">🟡 Warn</option>
             <option value="error">🔴 Error</option>
@@ -107,6 +110,10 @@ export function generateLogViewerTabHTML(): string {
           <label style="display: flex; align-items: center; gap: 4px; font-size: 0.85em; margin-left: auto; cursor: pointer;">
             <input id="${SCRIPT_ID_PREFIX_ACU}-log-autoscroll" type="checkbox" checked />
             自动滚动
+          </label>
+          <label style="display: flex; align-items: center; gap: 4px; font-size: 0.85em; cursor: pointer;" title="独立采集 API 请求与回复；分享日志前请检查隐私">
+            <input id="${SCRIPT_ID_PREFIX_ACU}-log-api-toggle" type="checkbox" />
+            API 请求
           </label>
           <label style="display: flex; align-items: center; gap: 4px; font-size: 0.85em; cursor: pointer;" title="开启后 Debug 级别日志会写入缓冲区（可能影响性能）">
             <input id="${SCRIPT_ID_PREFIX_ACU}-log-debug-toggle" type="checkbox" />
@@ -142,10 +149,12 @@ export async function bindLogViewerEvents_ACU(): Promise<void> {
   const $exportBtn = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-log-export`);
   const $autoScrollCheckbox = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-log-autoscroll`);
   const $debugToggle = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-log-debug-toggle`);
+  const $apiToggle = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-log-api-toggle`);
   const $logCount = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-log-count`);
 
   // 初始化 debug 开关状态
   $debugToggle.prop('checked', isDebugLogEnabled());
+  $apiToggle.prop('checked', isApiLogEnabled());
 
   // 初始化 tab 可见性
   _tabVisible = false;
@@ -279,6 +288,11 @@ export async function bindLogViewerEvents_ACU(): Promise<void> {
     _autoScroll = jQuery_API_ACU(this).prop('checked');
   });
 
+  // API 请求与 Debug 分开采集。
+  $apiToggle.on('change', function() {
+    setApiLogEnabled(!!jQuery_API_ACU(this).prop('checked'));
+  });
+
   // Debug 日志采集开关
   $debugToggle.on('change', function() {
     const enabled = jQuery_API_ACU(this).prop('checked');
@@ -292,6 +306,7 @@ export async function bindLogViewerEvents_ACU(): Promise<void> {
 
 /** 级别对应的颜色和图标 */
 const LEVEL_STYLES: Record<LogLevel, { color: string; icon: string; bg: string }> = {
+  api:   { color: '#a6e3a1', icon: '', bg: 'transparent' },
   debug: { color: '#89b4fa', icon: '🔵', bg: 'transparent' },
   warn:  { color: '#f9e2af', icon: '🟡', bg: 'rgba(249, 226, 175, 0.05)' },
   error: { color: '#f38ba8', icon: '🔴', bg: 'rgba(243, 139, 168, 0.08)' },

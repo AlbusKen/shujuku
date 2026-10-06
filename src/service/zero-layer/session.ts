@@ -15,6 +15,8 @@ import { buildZeroLayerTimeline_ACU, getPublishedZeroLayerPath_ACU, projectZeroL
 import { synchronizeZeroLayerCheckpoints_ACU } from './checkpoint-scheduler';
 import { synchronizeZeroLayerBridge_ACU } from './bridge-scheduler';
 import type { ZeroLayerBranchCommand_ACU } from './branch-command';
+import type { ZeroLayerExitSelection_ACU } from './exit-model';
+import { notifyZeroLayerViewPreview_ACU } from './view-preview';
 
 /** 仅用于本地装配到 fetch 的归属传递；数据库请求不携带该字段。 */
 export const ZERO_LAYER_REQUEST_ID_ACU = '_acu_zero_layer_attempt_id';
@@ -42,6 +44,8 @@ interface ActiveTurn_ACU {
   dispatchStarted: boolean;
   responseSaved: boolean;
   settlementFailed: boolean;
+  previewSequence: number;
+  previewOpen: boolean;
   failure?: unknown;
 }
 
@@ -146,7 +150,7 @@ export class ZeroLayerSession_ACU {
         ...(turn.plotCandidate ? { plotCandidate: structuredClone(turn.plotCandidate) } : {}),
         assertCurrent: () => this.assertCurrent(active) },
       messages: null, request: null, claimed: false, dispatchStarted: false, responseSaved: false,
-      settlementFailed: false,
+      settlementFailed: false, previewSequence: 0, previewOpen: false,
     };
     return active;
   }
@@ -256,6 +260,8 @@ export class ZeroLayerSession_ACU {
     return {
       signal: active.controller.signal, presetName: active.envelope.apiPresetName,
       isCurrent: () => this.isCurrent(active),
+      preview: body => this.preview(active, body),
+      endPreview: () => this.preview(active, null),
       beforeDispatch: async () => {
         this.assertCurrent(active);
         await this.transition(active, 'dispatching');
@@ -323,6 +329,7 @@ export class ZeroLayerSession_ACU {
       }
       return current;
     } finally {
+      this.preview(active, null);
       if (this.active === active) this.active = null;
     }
   }
@@ -383,6 +390,42 @@ export class ZeroLayerSession_ACU {
         throw new ZeroLayerError_ACU('revision-conflict', '分支保存回读不一致，禁止继续。');
       }
       return confirmed;
+    } finally {
+      if (this.recoveryController === controller) this.recoveryController = null;
+    }
+  }
+
+  /** 退出只保存所选状态；不启动生成，也不改写原逻辑身份。 */
+  async exitToOrdinary(selection: ZeroLayerExitSelection_ACU): Promise<ZeroLayerEnvelope_ACU> {
+    const frozen = structuredClone(selection);
+    return this.withExitLease(assertLease => this.store.exitToOrdinary(frozen, assertLease));
+  }
+
+  async recoverExit(): Promise<ZeroLayerEnvelope_ACU> {
+    return this.withExitLease(assertLease => this.store.recoverExit(assertLease));
+  }
+
+  private async withExitLease(
+    work: (assertLease: () => void) => Promise<ZeroLayerEnvelope_ACU>,
+  ): Promise<ZeroLayerEnvelope_ACU> {
+    if (this.hasActiveTurn()) throw new ZeroLayerError_ACU('pending-turn', '请先停止在途任务，再退出或恢复退出。');
+    const context = captureZeroLayerCarrier_ACU();
+    const epoch = this.epoch;
+    const controller = new AbortController();
+    this.recoveryController = controller;
+    const assertLease = () => {
+      if (epoch !== this.epoch || this.recoveryController !== controller || controller.signal.aborted) {
+        throw new ZeroLayerError_ACU('scope-changed', '退出操作租约已失效；已保存意图须显式恢复。');
+      }
+      assertZeroLayerCarrier_ACU(context);
+      assertBridgeHostIdle_ACU();
+    };
+    try {
+      await ensureHostGenerationState_ACU(controller.signal);
+      assertLease();
+      const saved = await work(assertLease);
+      assertLease();
+      return saved;
     } finally {
       if (this.recoveryController === controller) this.recoveryController = null;
     }
@@ -523,6 +566,7 @@ export class ZeroLayerSession_ACU {
     // preparation 的等待窗口同样撤销，不能在停止后新建活动请求。
     this.epoch += 1;
     this.active?.controller.abort();
+    if (this.active) this.preview(this.active, null);
     this.recoveryController?.abort();
   }
 
@@ -532,7 +576,25 @@ export class ZeroLayerSession_ACU {
     this.active = null;
   }
 
+  /** 仅临时展示；终止通知保留原身份，不能触发保存或把候选当 published。 */
+  private preview(active: ActiveTurn_ACU, body: string | null): void {
+    if (body !== null) {
+      if (!this.isCurrent(active) || active.responseSaved) return;
+      active.previewOpen = true;
+    } else {
+      if (!active.previewOpen) return;
+      active.previewOpen = false;
+    }
+    notifyZeroLayerViewPreview_ACU({
+      sessionId: active.envelope.sessionId, branchId: active.envelope.activeBranchId,
+      carrierId: active.envelope.carrierId, carrierSwipeId: active.envelope.carrierSwipeId,
+      turnId: active.turnId, attemptId: active.attemptId, revision: active.envelope.revision,
+      sequence: ++active.previewSequence, body,
+    });
+  }
+
   private async failActive(active: ActiveTurn_ACU, error: unknown): Promise<void> {
+    this.preview(active, null);
     if (active.responseSaved || this.active !== active) return;
     // 保存未知及作用域失效不追加写入；恢复时从权威 snapshot 决定后续。
     if (error instanceof ZeroLayerError_ACU && (['persist-unknown', 'source-changed'].includes(error.code)

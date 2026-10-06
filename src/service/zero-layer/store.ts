@@ -14,17 +14,18 @@ import { getTableDataFingerprint_ACU } from '../table/table-data-upgrade-audit';
 import { applyZeroLayerCommand_ACU, mergeZeroLayerEffectReceipt_ACU, type ZeroLayerCommand_ACU } from './store-command';
 import { assertBridgeSource_ACU, assertBridgeHostIdle_ACU } from './bridge-source';
 import { assertBridgeConfig_ACU } from './bridge-config';
+import type { ZeroLayerExitSelection_ACU, ZeroLayerExitAssignment_ACU } from './exit-model';
+import { buildZeroLayerExitCandidate_ACU } from './exit-candidate';
+import { applyExitAssignments_ACU, exitAssignmentsMatch_ACU } from './exit-fields';
+import { requireExit_ACU } from './exit-source';
+import { pendingZeroLayerPersistence_ACU, type PendingZeroLayerPersistence_ACU } from './persistence-state';
 
-interface PendingPersistence_ACU {
-  before: ZeroLayerEnvelope_ACU | null;
-  candidate: ZeroLayerEnvelope_ACU;
-  source: string;
-}
+type PendingPersistence_ACU = PendingZeroLayerPersistence_ACU;
 
 /** 单实例链路的串行写口，不承诺宿主 CAS 或跨标签事务。 */
 export class ZeroLayerStore_ACU {
   private static tails = new Map<string, Promise<void>>();
-  private static unknown = new Map<string, PendingPersistence_ACU>();
+  private static unknown = pendingZeroLayerPersistence_ACU;
   private static operationBlocks = new WeakMap<ZeroLayerCarrierContext_ACU['carrier'], Set<symbol>>();
 
   /** 只阻断新操作，不阻断旧租约收尾和显式存档回读。 */
@@ -81,6 +82,9 @@ export class ZeroLayerStore_ACU {
         throw new ZeroLayerError_ACU('persist-unknown', '保存结果未知，禁止追加或重试提交。');
       }
       const current = readZeroLayerCarrier_ACU(context);
+      if (current?.exitManifest) {
+        throw new ZeroLayerError_ACU('mode-disabled', '退出 journal 已冻结零层历史，请使用显式退出恢复，不能重启或改写归档。');
+      }
       if ((current?.revision ?? null) !== expectedRevision) {
         throw new ZeroLayerError_ACU('revision-conflict', '零层 revision 已变化，请重新读取。');
       }
@@ -88,6 +92,67 @@ export class ZeroLayerStore_ACU {
       const candidate = applyZeroLayerCommand_ACU(current, snapshot, context, fingerprint);
       return this.persist(context, current, candidate);
     });
+  }
+
+  /** 显式选择原 FloorRef；意图与完整候选均在同一 carrier 写队列内确认。 */
+  exitToOrdinary(selection: ZeroLayerExitSelection_ACU, assertLease: () => void = () => {}): Promise<ZeroLayerEnvelope_ACU> {
+    assertLease();
+    const context = captureZeroLayerCarrier_ACU();
+    const selected = structuredClone(selection);
+    return this.enqueue(context, async () => {
+      if (ZeroLayerStore_ACU.unknown.has(context.key)) {
+        throw new ZeroLayerError_ACU('persist-unknown', '退出保存尚未确认，请先显式回读，禁止重复提交。');
+      }
+      const current = readZeroLayerCarrier_ACU(context);
+      requireExit_ACU(current, '退出缺少已保存的零层载体。');
+      assertBridgeHostIdle_ACU();
+      await this.verifySource(context, current);
+      const manifest = await buildZeroLayerExitCandidate_ACU(current,
+        context.chat as Record<string, unknown>[], selected);
+      assertLease();
+      assertZeroLayerCarrier_ACU(context);
+      assertBridgeConfig_ACU(context.chat, manifest.configFingerprint);
+      requireExit_ACU(exitAssignmentsMatch_ACU(context.chat as Record<string, unknown>[], manifest.assignments, 'before'),
+        '退出候选回放期间普通字段已变化。');
+      const prepared = validateZeroLayerEnvelope_ACU({ ...current, revision: current.revision + 1, exitManifest: manifest });
+      await this.persist(context, current, prepared);
+      assertLease();
+      return this.finishExitWithinQueue(context, prepared, assertLease);
+    });
+  }
+
+  /** 先回读未知结果；只有已保存的意图才可继续，不重发任何模型请求。 */
+  async recoverExit(assertLease: () => void = () => {}): Promise<ZeroLayerEnvelope_ACU> {
+    assertLease();
+    const recovered = await this.recover();
+    assertLease();
+    requireExit_ACU(recovered?.exitManifest, '服务器没有可续接的退出意图。');
+    if (recovered.exitManifest.phase === 'committed') return recovered;
+    const context = captureZeroLayerCarrier_ACU();
+    return this.enqueue(context, async () => {
+      if (ZeroLayerStore_ACU.unknown.has(context.key)) {
+        throw new ZeroLayerError_ACU('persist-unknown', '回读后又出现未知保存，禁止推进退出。');
+      }
+      const current = readZeroLayerCarrier_ACU(context);
+      requireExit_ACU(sameEnvelope_ACU(current, recovered), '退出回读后载体已变化。');
+      return this.finishExitWithinQueue(context, recovered, assertLease);
+    });
+  }
+
+  private async finishExitWithinQueue(context: ZeroLayerCarrierContext_ACU,
+    prepared: ZeroLayerEnvelope_ACU, assertLease: () => void): Promise<ZeroLayerEnvelope_ACU> {
+    assertLease();
+    const journal = prepared.exitManifest;
+    requireExit_ACU(journal?.phase === 'prepared' && !prepared.enabled, '退出缺少已确认的 prepared 意图。');
+    assertBridgeHostIdle_ACU();
+    await this.verifySource(context, prepared);
+    assertLease();
+    assertBridgeConfig_ACU(context.chat, journal.configFingerprint);
+    requireExit_ACU(exitAssignmentsMatch_ACU(context.chat as Record<string, unknown>[], journal.assignments, 'before'),
+      '退出意图的普通来源已变化。');
+    const candidate = validateZeroLayerEnvelope_ACU({ ...prepared, revision: prepared.revision + 1,
+      exitManifest: { ...journal, phase: 'committed' } });
+    return this.persist(context, prepared, candidate, { values: journal.assignments, beforeSide: 'before' });
   }
 
   /** 同一零层写队列内更新分支续写状态；不授予调用者改写正文或其他效果的权限。 */
@@ -236,7 +301,9 @@ export class ZeroLayerStore_ACU {
   }
 
   private async verifySource(context: ZeroLayerCarrierContext_ACU, current: ZeroLayerEnvelope_ACU | null): Promise<string> {
-    const fingerprint = await physicalHistoryFingerprint_ACU(context.source);
+    const source = current?.exitManifest?.phase === 'committed'
+      ? physicalHistorySnapshot_ACU(context.chat.slice(0, current.activationMessageCount)) : context.source;
+    const fingerprint = await physicalHistoryFingerprint_ACU(source);
     assertZeroLayerCarrier_ACU(context);
     if (current && current.activationFingerprint !== fingerprint) {
       throw new ZeroLayerError_ACU('source-changed', '零层启用时的物理源历史指纹已变化。');
@@ -247,6 +314,36 @@ export class ZeroLayerStore_ACU {
       assertBridgeConfig_ACU(context.chat, bridge.configFingerprint);
     }
     return fingerprint;
+  }
+
+  /** 设置展示专用服务器快照；不替换本地字段、不通知、不解除未知保存。 */
+  readPersistedSnapshot(): Promise<ZeroLayerEnvelope_ACU | null> {
+    const context = captureZeroLayerCarrier_ACU();
+    return this.enqueue(context, async () => {
+      const assertKnown = () => {
+        if (ZeroLayerStore_ACU.unknown.has(context.key)) {
+          throw new ZeroLayerError_ACU('persist-unknown', '保存结果未知，请使用显式恢复；状态读取不能解除门禁。');
+        }
+      };
+      assertKnown();
+      const beforeRaw = context.carrier[ZERO_LAYER_CARRIER_FIELD_ACU];
+      const before = structuredClone(readZeroLayerCarrier_ACU(context));
+      const messages = await readChatFromHostStrict_ACU();
+      assertZeroLayerCarrier_ACU(context);
+      assertKnown();
+      if (physicalHistorySnapshot_ACU(messages) !== context.source) {
+        throw new ZeroLayerError_ACU('source-changed', '服务器物理历史与当前聊天不一致，不能显示为默认关闭。');
+      }
+      const persisted = readZeroLayerCarrier_ACU({ ...context, chat: messages,
+        carrier: messages[context.carrierIndex] });
+      await this.verifySource(context, persisted);
+      assertKnown();
+      if (context.carrier[ZERO_LAYER_CARRIER_FIELD_ACU] !== beforeRaw
+        || !sameEnvelope_ACU(readZeroLayerCarrier_ACU(context), before)) {
+        throw new ZeroLayerError_ACU('revision-conflict', '状态读取期间本地载体已变化，请重新读取。');
+      }
+      return structuredClone(persisted);
+    });
   }
 
   /** 普通生命周期回读服务器权威快照；无权解除未知保存门禁。 */
@@ -297,6 +394,28 @@ export class ZeroLayerStore_ACU {
         && !sameEnvelope_ACU(persisted, pending.before)) {
         throw new ZeroLayerError_ACU('revision-conflict', '服务器存档既不是原快照也不是本次候选，需人工确认。');
       }
+      const journal = pending?.candidate.exitManifest ?? persisted?.exitManifest;
+      if (journal) {
+        const chat = context.chat as Record<string, unknown>[];
+        const localBefore = exitAssignmentsMatch_ACU(chat, journal.assignments, 'before');
+        const localAfter = exitAssignmentsMatch_ACU(chat, journal.assignments, 'after');
+        if (pending?.assignments) {
+          const side = sameEnvelope_ACU(persisted, pending.candidate) ? 'after' : pending.assignments.beforeSide;
+          requireExit_ACU(exitAssignmentsMatch_ACU(messages, journal.assignments, side)
+            && (localBefore || localAfter), '退出保存回读不是完整旧状态或完整候选。');
+          applyExitAssignments_ACU(chat, journal.assignments, side);
+        } else if (persisted?.exitManifest?.phase === 'prepared') {
+          requireExit_ACU(exitAssignmentsMatch_ACU(messages, journal.assignments, 'before') && localBefore,
+            '退出意图的普通来源已变化。');
+        } else if (persisted?.exitManifest?.phase === 'committed') {
+          // 已有普通后缀时基线允许沿普通写口演化，不能把旧 assignments 再写回。
+          requireExit_ACU(pending ? exitAssignmentsMatch_ACU(messages, journal.assignments, 'after') && localAfter
+            : JSON.stringify(messages) === JSON.stringify(context.chat), '退出存档回读与当前完整聊天不一致。');
+        } else {
+          requireExit_ACU(exitAssignmentsMatch_ACU(messages, journal.assignments, 'before') && localBefore,
+            '退出意图未保存，但普通来源已变化。');
+        }
+      }
       if (persisted === null) delete context.carrier[ZERO_LAYER_CARRIER_FIELD_ACU];
       else context.carrier[ZERO_LAYER_CARRIER_FIELD_ACU] = structuredClone(persisted);
       if (resolveUnknown) ZeroLayerStore_ACU.unknown.delete(context.key);
@@ -309,8 +428,18 @@ export class ZeroLayerStore_ACU {
     context: ZeroLayerCarrierContext_ACU,
     before: ZeroLayerEnvelope_ACU | null,
     candidate: ZeroLayerEnvelope_ACU,
+    assignments?: PendingPersistence_ACU['assignments'],
   ): Promise<ZeroLayerEnvelope_ACU> {
     assertZeroLayerCarrier_ACU(context);
+    const chat = context.chat as Record<string, unknown>[];
+    const journal = candidate.exitManifest;
+    const verifyExit = (side: 'before' | 'after') => {
+      if (!journal) return;
+      assertBridgeHostIdle_ACU();
+      assertBridgeConfig_ACU(context.chat, journal.configFingerprint);
+      requireExit_ACU(exitAssignmentsMatch_ACU(chat, journal.assignments, side), '退出保存字段与冻结写集不一致。');
+    };
+    verifyExit(assignments?.beforeSide ?? (journal?.phase === 'committed' ? 'after' : 'before'));
     if (!sameEnvelope_ACU(readZeroLayerCarrier_ACU(context), before)) {
       throw new ZeroLayerError_ACU('revision-conflict', '保存前载体存档已变化。');
     }
@@ -332,9 +461,11 @@ export class ZeroLayerStore_ACU {
     const releaseCandidate = isolateZeroLayerCarrierCandidate_ACU(context, before);
     context.carrier[ZERO_LAYER_CARRIER_FIELD_ACU] = candidate;
     try {
+      if (assignments) applyExitAssignments_ACU(chat, assignments.values, 'after');
       await saveChatToHostStrict_ACU({ verify: true });
       assertZeroLayerCarrier_ACU(context);
       verifyBridge();
+      verifyExit(journal?.phase === 'committed' ? 'after' : 'before');
       const confirmed = readZeroLayerCarrierCandidate_ACU(context);
       if (!sameEnvelope_ACU(confirmed, candidate)) {
         throw new ZeroLayerError_ACU('revision-conflict', '保存确认后载体存档已变化。');
@@ -343,6 +474,9 @@ export class ZeroLayerStore_ACU {
       notifyZeroLayerChanges_ACU(before, candidate);
       return structuredClone(candidate);
     } catch (error) {
+      if (assignments && exitAssignmentsMatch_ACU(chat, assignments.values, 'after')) {
+        applyExitAssignments_ACU(chat, assignments.values, assignments.beforeSide);
+      }
       if (context.carrier[ZERO_LAYER_CARRIER_FIELD_ACU] === candidate) {
         if (existed) context.carrier[ZERO_LAYER_CARRIER_FIELD_ACU] = previousRaw;
         else delete context.carrier[ZERO_LAYER_CARRIER_FIELD_ACU];
@@ -352,6 +486,7 @@ export class ZeroLayerStore_ACU {
       }
       ZeroLayerStore_ACU.unknown.set(context.key, {
         before: structuredClone(before), candidate: structuredClone(candidate), source: context.source,
+        ...(assignments ? { assignments: structuredClone(assignments) } : {}),
       });
       throw new ZeroLayerError_ACU('persist-unknown', '零层保存结果尚未确认；禁止继续提交，请从服务器回读恢复。');
     } finally {

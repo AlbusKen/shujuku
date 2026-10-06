@@ -612,8 +612,10 @@ export class WorldSimulationMainLoop_ACU {
           ? { role: 'user', content: USER_PREFILL_CONTENT_ACU }
           : null;
         const count = this.dependencies.countTokens ?? countWorldSimulationTokens_ACU;
+        // 状态快照作为独立 system 板块置于真实历史后，末尾追加 user 预填充
         const assemble = (body: typeof transcript) => finishWorldSimulationMessages_ACU(toolMode,
-          [...fixed, ...body, ...tail, { role: 'user', content: snapshotText }, ...(prefill ? [prefill] : [])], WORLD_SIMULATION_AGENT_PREFILLS_ACU[director]);
+          [...fixed, ...body, ...tail, { role: 'system', content: snapshotText }, { role: 'user', content: USER_PREFILL_CONTENT_ACU }],
+          WORLD_SIMULATION_AGENT_PREFILLS_ACU[director]);
         let prepared = assemble(transcript);
         // 无锚点路径与锚定路径同一口径：用最终准备发送的完整请求判定是否压缩，
         // 不再只按 transcript 估算——骨架与尾部的开销同样会把请求顶过阈值。

@@ -62,6 +62,7 @@
               :item="item"
               @change="handleToggleChange(item.key, $event)"
             />
+            <DashboardZeroLayerStatus />
           </template>
 
           <template v-else>
@@ -101,6 +102,7 @@ import AcuPanel from "../components/_lib/AcuPanel.vue";
 import AcuPanelGrid from "../components/_lib/AcuPanelGrid.vue";
 import AcuSegmentedControl from "../components/_lib/AcuSegmentedControl.vue";
 import DashboardStorageModeSection from "../components/DashboardStorageModeSection.vue";
+import DashboardZeroLayerStatus from "../components/DashboardZeroLayerStatus.vue";
 import ToggleRow from "../components/DashboardToggleRow.vue";
 import { useChatChangedTick } from "../composables/useChatChangedListener";
 import { useTemplateRuntimeChangeTick } from "../composables/useTemplateRuntimeChangeListener";

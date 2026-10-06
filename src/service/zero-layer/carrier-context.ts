@@ -125,9 +125,20 @@ function validateCarrierValue_ACU(context: ZeroLayerCarrierContext_ACU, raw: unk
     || envelope.carrierSwipeId !== context.swipeId) {
     throw new ZeroLayerError_ACU('scope-changed', '零层存档与当前聊天或 swipe 不匹配。');
   }
+  const committed = envelope.exitManifest?.phase === 'committed';
   if (envelope.seedBody !== context.carrier.mes
-    || envelope.activationMessageCount !== context.chat.length) {
+    || (committed ? context.chat.length < envelope.activationMessageCount
+      : envelope.activationMessageCount !== context.chat.length)) {
     throw new ZeroLayerError_ACU('source-changed', '零层启用时的物理历史已变化。');
+  }
+  if (committed) {
+    const journal = envelope.exitManifest!;
+    const target = context.chat[journal.target.messageIndex];
+    if (physicalHistorySnapshot_ACU(context.chat.slice(0, envelope.activationMessageCount)) !== journal.physicalPrefixSnapshot
+      || !message_ACU(target) || target.is_user === true || target.is_system === true
+      || carrierSwipeId_ACU(target) !== journal.target.swipeId) {
+      throw new ZeroLayerError_ACU('source-changed', '退出归档的固定物理前缀或接入点已变化。');
+    }
   }
   return envelope;
 }

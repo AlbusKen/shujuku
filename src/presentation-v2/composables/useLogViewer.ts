@@ -30,6 +30,7 @@ export interface LogViewerMessage {
 
 const levelOptions: { value: LogLevelFilter; label: string }[] = [
   { value: 'all', label: '全部级别' },
+  { value: 'api', label: 'API 请求' },
   { value: 'debug', label: 'Debug' },
   { value: 'warn', label: 'Warn' },
   { value: 'error', label: 'Error' },
@@ -50,7 +51,7 @@ function downloadJson(filename: string, data: unknown): void {
 
 export function useLogViewer() {
   const toast = useToastStore();
-  const { warnLogEnabled, setWarnLogEnabled } = useDevOptions();
+  const { apiLogEnabled, setApiLogEnabled, warnLogEnabled, setWarnLogEnabled } = useDevOptions();
   const logs = ref<LogEntry[]>([]);
   const knownTags = ref<string[]>([]);
   const totalCount = ref(0);
@@ -89,6 +90,7 @@ export function useLogViewer() {
   });
   const debugLabel = computed(() => (debugLogEnabled.value ? 'Debug 采集中' : 'Debug 未采集'));
   const warnLabel = computed(() => (warnLogEnabled.value ? 'Warn 采集中' : 'Warn 未采集'));
+  const apiLabel = computed(() => (apiLogEnabled.value ? 'API 采集中' : 'API 未采集'));
 
   function refresh(): void {
     logs.value = getAllLogs();
@@ -130,6 +132,13 @@ export function useLogViewer() {
     message.value = null;
     if (enabled) toast.info('已开始采集 Debug 日志；排查完成后建议关闭。');
     else toast.success('已停止采集 Debug 日志。');
+  }
+
+  function setApiCollection(enabled: boolean): void {
+    setApiLogEnabled(enabled);
+    message.value = null;
+    if (enabled) toast.info('已开始采集 API 请求与回复；分享日志前请检查隐私。');
+    else toast.success('已停止采集 API 请求与回复。');
   }
 
   function setWarnCollection(enabled: boolean): void {
@@ -186,6 +195,7 @@ export function useLogViewer() {
     autoScroll,
     debugLogEnabled,
     warnLogEnabled,
+    apiLogEnabled,
     message,
     totalCount,
     filteredCount,
@@ -193,11 +203,13 @@ export function useLogViewer() {
     statusLabel,
     debugLabel,
     warnLabel,
+    apiLabel,
     refresh,
     setPaused,
     clearAll,
     setDebugCollection,
     setWarnCollection,
+    setApiCollection,
     exportFiltered,
   };
 }

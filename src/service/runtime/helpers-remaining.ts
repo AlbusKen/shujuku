@@ -281,6 +281,8 @@ export {
         requestContext?.assertCurrent?.();
         // 过滤失败意味着未放行的接管条目可能残留在最终提示词里，方向与接管语义相反，必须用 error 级可见。
         logError_ACU('[提示词模板] 运行时 Agent 正文世界书绿灯过滤失败，未放行条目可能残留在本轮提示词中:', e);
+        // 归档请求必须完整装配才可获得发送凭据；普通未绑定请求保留既有行为。
+        if (requestContext) throw e;
       }
     }
     requestContext?.assertCurrent?.();

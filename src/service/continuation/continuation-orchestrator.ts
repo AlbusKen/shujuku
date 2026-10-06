@@ -2,7 +2,8 @@ import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { buildDefaultContinuationSettings_ACU } from './defaults';
 import { FirstFloorContinuationStore_ACU } from './continuation-store';
 import type { ContinuationLogicalRef_ACU, ContinuationHistoryAnchor_ACU } from './model';
-import { cursorFromCompletedTurns_ACU, reconcileTaskCursorFromChat_ACU } from './stage-cursor';
+import { cursorFromCompletedTurns_ACU } from './stage-cursor';
+import { reconcileHostContinuationTask_ACU } from './host-history';
 import { resolveHostRetryMode_ACU } from './host-retry-mode';
 import { acceptPlannedStageRevision_ACU, ContinuationOutlinePlanner_ACU, createPlannedStageRevision_ACU, freezePlannedStageRevision_ACU, type ContinuationOutlinePlanningResult_ACU } from './outline-planner';
 import { listStageOutlineTurns_ACU, resolveContinuationTurnRange_ACU, resolveStageOutlinePacingContext_ACU, validateReplannedStageOutline_ACU, validateStageOutlinePacing_ACU } from './outline-schema';
@@ -329,8 +330,7 @@ export class ContinuationOrchestrator_ACU {
         this.dependencies.logicalHistory?.assertCanContinue();
         const task = this.dependencies.logicalHistory
           ? this.dependencies.logicalHistory.reconcile(this.requireTask_ACU(envelope))
-          : reconcileTaskCursorFromChat_ACU(this.requireTask_ACU(envelope),
-            Array.isArray(getChatArray_ACU()) ? getChatArray_ACU().length : 0);
+          : reconcileHostContinuationTask_ACU(this.requireTask_ACU(envelope));
         // 等待宿主结果时只有"桥内存里仍有本次生成的活认领"才是真在飞；
         // 重载或事件丢失后的滞留等待轮无法再被归属，丢弃后从当前进度重新继续。
         const staleAwaitingTurn = task.pendingHostTurn?.status === 'awaiting_generation';
@@ -455,7 +455,7 @@ export class ContinuationOrchestrator_ACU {
       };
       const nextTask = this.dependencies.logicalHistory
         ? this.dependencies.logicalHistory.reconcile(adjusted)
-        : reconcileTaskCursorFromChat_ACU(adjusted, chat!.length);
+        : reconcileHostContinuationTask_ACU(adjusted);
       receipt = { status: 'committed', message: action.completeStage === true ? '阶段已标记完结'
         : action.completeStage === false ? '阶段已重新开启并设为当前阶段' : '当前阶段与续写轮次已校准', stageId: stage.stageId, completedTurns };
       return { ...envelope, activeTask: nextTask };

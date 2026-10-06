@@ -138,6 +138,9 @@
           <AcuBadge :variant="logFlow.paused.value ? 'warning' : 'success'">
             {{ logFlow.statusLabel.value }}
           </AcuBadge>
+          <AcuBadge :variant="logFlow.apiLogEnabled.value ? 'accent' : 'neutral'">
+            {{ logFlow.apiLabel.value }}
+          </AcuBadge>
           <AcuBadge :variant="logFlow.debugLogEnabled.value ? 'accent' : 'neutral'">
             {{ logFlow.debugLabel.value }}
           </AcuBadge>
@@ -193,6 +196,11 @@
                 :model-value="logFlow.autoScroll.value"
                 label="自动滚动"
                 @update:model-value="logFlow.autoScroll.value = $event"
+              />
+              <AcuToggle
+                :model-value="logFlow.apiLogEnabled.value"
+                label="API 请求"
+                @update:model-value="logFlow.setApiCollection"
               />
               <AcuToggle
                 :model-value="logFlow.warnLogEnabled.value"

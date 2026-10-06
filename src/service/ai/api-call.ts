@@ -626,6 +626,8 @@ export interface ResolvedPresetCallExtras_ACU {
     requireDirectTransport?: boolean;
     /** 冻结本次数据库 API 的流式开关，避免返回时读取新设置。 */
     streaming?: boolean;
+    /** 可选累计正文预览；不代表完整响应或保存成功，不携带工具或私有推理。 */
+    onTextPreview?: (body: string) => void;
     /** OpenAI 兼容缓存路由 key。稳定的 key 让同一会话的请求落到同一缓存命名空间。 */
     promptCacheKey?: string;
     /**
@@ -730,7 +732,7 @@ export async function callAIWithResolvedPreset_ACU(
             streaming: extras?.streaming ?? false,
             preservePayload: extras?.requireDirectTransport === true,
             readResponse: async (response: Response) => {
-                const parsed = await readFetchChatTurn_ACU(response, extras?.streaming ?? false, signal, extras?.requireDirectTransport === true);
+                const parsed = await readFetchChatTurn_ACU(response, extras?.streaming ?? false, signal, extras?.requireDirectTransport === true, extras?.onTextPreview);
                 return { choices: [{ message: { content: parsed.turn.content } }], usage: parsed.usage };
             },
         }
@@ -801,7 +803,7 @@ export async function callAIWithResolvedPreset_ACU(
         }, signal);
     if (!response.ok) await throwApiHttpError_ACU(response);
     if (extras?.requireDirectTransport) {
-        const parsed = await readFetchChatTurn_ACU(response, extras.streaming ?? false, signal, true);
+        const parsed = await readFetchChatTurn_ACU(response, extras.streaming ?? false, signal, true, extras.onTextPreview);
         assertNotAborted_ACU(signal);
         reportUsage(parsed.usage);
         return parsed.turn.content.trim() || null;

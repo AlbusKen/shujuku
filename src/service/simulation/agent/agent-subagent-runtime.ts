@@ -55,9 +55,11 @@ export function worldSimulationInvokeTools_ACU(mode: AgentToolMode_ACU, tools: r
  * 并在没有用户预填充时把 JSON 预填充放到请求最末。
  */
 export function finishWorldSimulationMessages_ACU<T extends { role: string; content: string }>(mode: AgentToolMode_ACU, messages: readonly T[], jsonPrefill?: string): T[] {
-  if (mode === 'tools') return withNativeToolThinkPrefill_ACU(messages as never) as T[];
-  const primed = jsonPrefill ? [...messages, { role: 'assistant', content: jsonPrefill } as T] : messages;
-  return withJsonTailPrefill_ACU(primed as never) as T[];
+  // 工具模式只影响 tools 参数，不修改消息底部预填充
+  if (jsonPrefill && !messages.some(m => m.content === jsonPrefill)) {
+    return [...messages, { role: 'assistant', content: jsonPrefill } as T];
+  }
+  return messages as T[];
 }
 
 export function resolveWorldSimulationToolMode_ACU(preset: WorldSimulationResolvedApiPreset_ACU): AgentToolMode_ACU {

@@ -1,7 +1,8 @@
 import { parse as parseYaml } from 'yaml';
-import { pushLog } from './log-buffer';
+import { isApiLogEnabled, pushLog } from './log-buffer';
 
 const HIDDEN = '[已隐藏凭据]';
+const DISABLED_LOG_ACU: ApiRequestLog_ACU = { write() {} };
 let nextRequestId = 0;
 const credentialKey = (key: string): boolean => /authorization|apikey|password|passwd|secret|cookie|csrf|sessionid|token$|^key$/.test(key.replace(/[^a-z0-9]/gi, '').toLowerCase());
 const headerBlock = (key: string): boolean => /^(custom_include_headers|requestHeaders|headers)$/i.test(key);
@@ -91,17 +92,53 @@ export interface ApiRequestLog_ACU {
     write(phase: string, value: unknown): void;
 }
 
-/** 同一请求共用编号和凭据集合，所有日志默认采集；日志异常不能改变 API 行为。 */
+/** 只格式化已脱敏的快照；多行正文用文本块展示，不改写字面量反斜杠。 */
+function formatApiLogText_ACU(text: string): string {
+    const render = (value: any, depth: number): string => {
+        const indent = '  '.repeat(depth);
+        const childIndent = indent + '  ';
+        if (typeof value === 'string') {
+            // 请求 body 和工具参数可能是嵌套 JSON 字符串，只有合法结构才展开。
+            if (depth < 32 && /^\s*[\[{]/.test(value)) {
+                try { return render(JSON.parse(value), depth + 1); } catch { /* 保留原文。 */ }
+            }
+            if (/[\r\n]/.test(value)) {
+                return '|\n' + value.split(/\r\n|\r|\n/).map(line => childIndent + line).join('\n');
+            }
+            return JSON.stringify(value);
+        }
+        if (value === null || typeof value !== 'object') return JSON.stringify(value);
+        const array = Array.isArray(value);
+        const entries = Object.entries(value);
+        const [open, close] = array ? ['[', ']'] : ['{', '}'];
+        if (!entries.length) return open + close;
+        return open + '\n' + entries.map(([key, child]) =>
+            childIndent + (array ? '' : JSON.stringify(key) + ': ') + render(child, depth + 1),
+        ).join(',\n') + '\n' + indent + close;
+    };
+    try {
+        const value = JSON.parse(text);
+        // 非 JSON 正文、SSE 和 JSON 标量不擅自重解释。
+        if (value && typeof value === 'object') return render(value, 0);
+    } catch { /* 不完整 JSON 和普通文本保持原文。 */ }
+    return text;
+}
+
+/** 同一请求共用编号和凭据集合，详细日志遵从独立 API 请求采集开关。 */
 export function createApiRequestLog_ACU(tag: string, phase: string, request: unknown, context?: unknown): ApiRequestLog_ACU {
+    if (!isApiLogEnabled()) return DISABLED_LOG_ACU;
     const id = ++nextRequestId;
     const secrets = new Set<string>();
     const write = (label: string, value: unknown): void => {
+        if (!isApiLogEnabled()) return;
         try {
             const copy = snapshot(value, secrets);
             const text = typeof copy === 'string' ? copy : JSON.stringify(copy) ?? String(copy);
-            pushLog('debug', ['[ACU]', `[${tag}] #${id} ${redactText(label, secrets)}\n${redactText(text, secrets)}`], true);
+            const safeLabel = redactText(label, secrets);
+            const safeText = redactText(text, secrets);
+            pushLog('api', ['[ACU]', `[${tag}] #${id} ${safeLabel}\n${formatApiLogText_ACU(safeText)}`]);
         } catch {
-            pushLog('debug', ['[ACU]', `[${tag}] #${id} 日志快照失败（未记录原对象）`], true);
+            pushLog('api', ['[ACU]', `[${tag}] #${id} 日志快照失败（未记录原对象）`]);
         }
     };
     try { redactText(JSON.stringify(snapshot(context, secrets)) ?? '', secrets); } catch { /* 不泄露未知对象。 */ }
@@ -112,6 +149,7 @@ export function createApiRequestLog_ACU(tag: string, phase: string, request: unk
 
 /** 只旁观消费者发起的读取：不预读、不 clone/tee、不增加取消或释放锁动作。 */
 export function observeApiResponse_ACU(response: Response, log: ApiRequestLog_ACU, signal?: AbortSignal | null): { response: Response; finish(): void } {
+    if (log === DISABLED_LOG_ACU) return { response, finish() {} };
     const decoder = new TextDecoder();
     const parts: string[] = [];
     let finished = false;

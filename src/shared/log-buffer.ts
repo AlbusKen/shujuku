@@ -2,17 +2,17 @@
  * shared/log-buffer.ts — 日志缓冲区
  *
  * 零 DOM 依赖的内存日志存储。
- * Error 始终写入；Debug / Warn 仅在对应采集开关开启时写入。
+ * Error 始终写入；API / Debug / Warn 仅在对应采集开关开启时写入。
  * presentation 层通过 subscribe 实时接收已写入的新日志并渲染到 UI。
  */
 
-import { readWarnLogEnabled } from './v2-ui-state';
+import { readApiLogEnabled, readWarnLogEnabled } from './v2-ui-state';
 
 // ═══════════════════════════════════════════════════════════════
 // 类型定义
 // ═══════════════════════════════════════════════════════════════
 
-export type LogLevel = 'debug' | 'warn' | 'error';
+export type LogLevel = 'api' | 'debug' | 'warn' | 'error';
 
 export interface LogEntry {
   /** 自增 ID（用于去重和排序） */
@@ -63,6 +63,9 @@ let _debugLogEnabled = false;
 
 /** warn 级别日志是否写入缓冲区（默认关闭，用户显式开启后才采集） */
 let _warnLogEnabled = readWarnLogEnabled();
+
+/** API 请求与回复独立采集，默认关闭；启动时恢复持久化设置。 */
+let _apiLogEnabled = readApiLogEnabled();
 
 // ═══════════════════════════════════════════════════════════════
 // 公共 API
@@ -175,15 +178,25 @@ export function isWarnLogEnabled(): boolean {
   return _warnLogEnabled;
 }
 
+/** API 采集与 Debug / Warn 相互独立。 */
+export function setApiLogEnabled(enabled: boolean): void {
+  _apiLogEnabled = enabled;
+}
+
+export function isApiLogEnabled(): boolean {
+  return _apiLogEnabled;
+}
+
 /**
  * 推送一条日志到缓冲区
  * 由 logDebug_ACU / logWarn_ACU / logError_ACU 调用
  * 当对应日志级别禁用时，debug / warn 日志会被跳过
  */
-export function pushLog(level: LogLevel, args: any[], alwaysCollect = false): void {
+export function pushLog(level: LogLevel, args: any[]): void {
   // 可选日志级别禁用时直接跳过，避免噪声与不必要的序列化开销
-  if (level === 'debug' && !_debugLogEnabled && !alwaysCollect) return;
+  if (level === 'debug' && !_debugLogEnabled) return;
   if (level === 'warn' && !_warnLogEnabled) return;
+  if (level === 'api' && !_apiLogEnabled) return;
 
   const tag = extractTag(args);
   _knownTags.add(tag);
@@ -279,4 +292,5 @@ export function _resetForTesting(): void {
   _knownTags.clear();
   _debugLogEnabled = false;
   _warnLogEnabled = false;
+  _apiLogEnabled = false;
 }

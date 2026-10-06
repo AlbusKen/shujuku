@@ -39,6 +39,7 @@ import {
   validateWorldSimulationChronicleArchiveSnapshot_ACU,
   validateWorldSimulationLedger_ACU,
 } from './simulation-store';
+import { validateWorldSimulationFieldSnapshot_ACU } from './simulation-field-snapshot';
 import type { WorldSimulationEnvelope_ACU } from './model';
 
 export const WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU = 2 as const;
@@ -75,6 +76,8 @@ export interface WorldSimulationLedgerFrame_ACU {
   checkpoint?: WorldSimulationLedger_ACU;
   /** 基线时刻的 partial 草稿栏目（只含值写入）。基线重建会越过其前的 delta，草稿必须随基线保存。 */
   checkpointPartials?: WorldSimulationLedgerFieldUpserts_ACU;
+  /** 无损迁移基线；旧帧缺失时仍沿用既有分栏重建。 */
+  checkpointFields?: WorldSimulationLedgerFieldSnapshot_ACU;
   deltas: WorldSimulationLedgerDelta_ACU[];
 }
 
@@ -548,6 +551,13 @@ export function foldWorldSimulationLedger_ACU(chat: readonly unknown[], throughI
         view = applyLedgerFieldUpsertsToView_ACU(view, requireLedgerFieldUpserts_ACU(value.checkpointPartials, `楼层 ${index} checkpointPartials`), updatedAt);
         reconcileLedgerFieldViewWithLedger_ACU(view, ledger, updatedAt);
       }
+      if (value.checkpointFields !== undefined) {
+        const fields = validateWorldSimulationFieldSnapshot_ACU(value.checkpointFields);
+        const reconciled = cloneJson_ACU(fields);
+        reconcileLedgerFieldViewWithLedger_ACU(reconciled, ledger, updatedAt);
+        if (canonicalJson_ACU(reconciled) !== canonicalJson_ACU(fields)) invalidFloorValue_ACU(`楼层 ${index} 完整分栏基线`);
+        view = fields;
+      }
       checkpointIndex = index;
       foldedDeltaCount = 0;
       touched = true;
@@ -645,6 +655,7 @@ function frameWithAppendedDelta_ACU(current: unknown, delta: WorldSimulationLedg
       schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU,
       ...(current.checkpoint ? { checkpoint: current.checkpoint } : {}),
       ...(current.checkpointPartials ? { checkpointPartials: current.checkpointPartials } : {}),
+      ...(current.checkpointFields ? { checkpointFields: current.checkpointFields } : {}),
       deltas: [...current.deltas, delta],
     };
   }
@@ -686,12 +697,15 @@ export function appendWorldSimulationCommitChain_ACU(input: {
   beforeArchive: WorldChronicleArchiveSnapshot_ACU;
   nextArchive: WorldChronicleArchiveSnapshot_ACU;
   beforePartials?: WorldSimulationLedgerFieldUpserts_ACU;
+  /** 正文摘要变化前捕获的分栏快照；不得在改写后重新猜测。 */
+  beforeFields?: WorldSimulationLedgerFieldSnapshot_ACU;
 }): void {
   const message = input.chat[input.messageIndex];
   if (!isRecord_ACU(message)) return;
+  const foldedBefore = input.beforeFields ? null : foldWorldSimulationLedger_ACU(input.chat);
   const partials = input.beforePartials
     ?? (() => {
-      const folded = foldWorldSimulationLedger_ACU(input.chat);
+      const folded = foldedBefore;
       return folded ? extractWorldSimulationPartialFields_ACU(folded.fields) : {};
     })();
   const seq = maxLedgerSeq_ACU(input.chat) + 1;
@@ -706,9 +720,19 @@ export function appendWorldSimulationCommitChain_ACU(input: {
     }
   }
   const installCheckpoint = baselineAnchor === null;
+  // 已迁移的完整分栏基底随 checkpoint 重建保留；普通旧帧仍走原来的重建契约。
+  const preservesFields = input.chat.some(value => isRecord_ACU(value)
+    && Object.values(bucketEntries_ACU(value, WORLD_SIMULATION_STATE_FIELD_ACU))
+      .some(entry => isLedgerFrame_ACU(entry.value) && entry.value.checkpointFields !== undefined));
+  const beforeFields = preservesFields && input.beforeFields ? validateWorldSimulationFieldSnapshot_ACU(input.beforeFields) : preservesFields && foldedBefore
+    && canonicalJson_ACU(foldedBefore.ledger) === canonicalJson_ACU(input.beforeLedger)
+    ? cloneJson_ACU(foldedBefore.fields) : undefined;
+  if (preservesFields && !beforeFields) invalidFloorValue_ACU('完整分栏提交基底与账本不一致');
   if (baselineAnchor && baselineFloor !== null) {
     const baselineMessage = input.chat[baselineFloor] as Record<string, unknown>;
-    writeEntry_ACU(baselineMessage, WORLD_SIMULATION_STATE_FIELD_ACU, baselineAnchor, checkpointFrame_ACU(input.beforeLedger, partials, []), input.updatedAt);
+    const frame = checkpointFrame_ACU(input.beforeLedger, partials, []);
+    if (beforeFields) frame.checkpointFields = beforeFields;
+    writeEntry_ACU(baselineMessage, WORLD_SIMULATION_STATE_FIELD_ACU, baselineAnchor, frame, input.updatedAt);
     writeEntry_ACU(baselineMessage, WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU, baselineAnchor, {
       schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU,
       checkpoint: cloneJson_ACU(input.beforeArchive),
@@ -718,6 +742,7 @@ export function appendWorldSimulationCommitChain_ACU(input: {
   if (installCheckpoint) {
     clearActiveLedgerCheckpoints_ACU(input.chat);
     const frame = checkpointFrame_ACU(delta ? input.beforeLedger : input.nextLedger, partials, delta ? [delta] : []);
+    if (beforeFields) frame.checkpointFields = beforeFields;
     writeEntry_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU, input.anchor, frame, input.updatedAt);
   } else if (delta) {
     const current = entryValue_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU, input.anchor);
@@ -777,7 +802,8 @@ export function relocateWorldSimulationCheckpoint_ACU(chat: unknown[], anchorInd
     chat[anchorIndex] as Record<string, unknown>,
     WORLD_SIMULATION_STATE_FIELD_ACU,
     anchor,
-    checkpointFrame_ACU(folded.ledger, extractWorldSimulationPartialFields_ACU(folded.fields), []),
+    { ...checkpointFrame_ACU(folded.ledger, extractWorldSimulationPartialFields_ACU(folded.fields), []),
+      checkpointFields: cloneJson_ACU(folded.fields) },
     folded.updatedAt || Date.now(),
   );
   return true;
@@ -794,6 +820,7 @@ export interface WorldSimulationLedgerCheckpointArtifact_ACU {
   anchor: WorldSimulationAnchorIdentity_ACU;
   ledger: WorldSimulationLedger_ACU;
   partials?: WorldSimulationLedgerFieldUpserts_ACU;
+  fields?: WorldSimulationLedgerFieldSnapshot_ACU;
 }
 
 export function simulationLedgerCheckpointArtifact_ACU(message: unknown): WorldSimulationLedgerCheckpointArtifact_ACU | null {
@@ -803,6 +830,7 @@ export function simulationLedgerCheckpointArtifact_ACU(message: unknown): WorldS
     if (isLedgerFrame_ACU(entry.value) && entry.value.checkpoint) {
       const artifact: WorldSimulationLedgerCheckpointArtifact_ACU = { anchor: cloneJson_ACU(entry.anchor), ledger: cloneJson_ACU(entry.value.checkpoint) };
       if (entry.value.checkpointPartials) artifact.partials = cloneJson_ACU(entry.value.checkpointPartials);
+      if (entry.value.checkpointFields) artifact.fields = validateWorldSimulationFieldSnapshot_ACU(entry.value.checkpointFields);
       return artifact;
     }
     if (isLedgerValue_ACU(entry.value)) {
@@ -829,6 +857,7 @@ export function graftSimulationLedgerCheckpoint_ACU(
   const current = entryValue_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU, anchor);
   if ((isLedgerFrame_ACU(current) && current.checkpoint) || isLedgerValue_ACU(current)) return false;
   const frame = checkpointFrame_ACU(artifact.ledger, artifact.partials ?? {}, isLedgerFrame_ACU(current) ? current.deltas : []);
+  if (artifact.fields) frame.checkpointFields = validateWorldSimulationFieldSnapshot_ACU(artifact.fields);
   writeEntry_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU, anchor, frame, Date.now());
   return true;
 }
