@@ -50,9 +50,10 @@ export async function sendCustomApiRequest_ACU(
     for (const [key, value] of Object.entries(bridgeBody)) {
         if (!bridgeKeys.has(key) && value !== undefined) base[key] = value;
     }
-    const preserveMultipleSystem = bridgeBody.preserve_multiple_system !== false;
-    base.messages = processDirectMessages_ACU(base.messages, String(bridgeBody.custom_prompt_post_processing ?? ''), preserveMultipleSystem);
+    base.messages = processDirectMessages_ACU(base.messages, String(bridgeBody.custom_prompt_post_processing ?? ''));
     const included = includeBody(String(bridgeBody.custom_include_body ?? config.bodyParams ?? ''));
+    // 后处理已在上一行完成；保留的控制字段只会让上游误认为还要执行 single/strict。
+    delete included.custom_prompt_post_processing;
     const body = buildProviderRequest_ACU({ ...base, ...included }, format);
     // 协议原生附加字段在转换后保留；通用字段只由协议转换器写入，不能重新覆盖为旧协议。
     const convertedKeys = new Set(['messages', 'max_tokens', 'tools', 'tool_choice', 'response_format']);

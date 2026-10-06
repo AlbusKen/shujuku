@@ -4,28 +4,66 @@ const text = (value: any): string => typeof value === 'string' ? value : Array.i
     ? value.map(part => typeof part === 'string' ? part : part?.text ?? '').join('') : '';
 const args = (value: any): any => typeof value === 'string' ? JSON.parse(value || '{}') : value ?? {};
 
-/** 保留正文和原生工具字段；后处理只改变明确选择的角色组织方式。 */
-export function processDirectMessages_ACU(input: any[], mode: string, preserveMultipleSystem = true): any[] {
-    const messages = input.map(message => ({ ...message }));
-    if (!mode) return messages;
-    const withTools = mode.endsWith('_tools') || messages.some(message => message.tool_calls || message.role === 'tool');
-    if (mode === 'single' && !withTools) return [{ role: 'user', content: messages.map(message => text(message.content)).join('\n\n') }];
-    // preserveMultipleSystem 保护多个 system 消息不降级为 user（默认开启）
-    const strict = mode.startsWith('strict') || mode === 'single';
-    const semi = (strict || mode.startsWith('semi')) && !preserveMultipleSystem;
+const DIRECT_PROMPT_PLACEHOLDER_ACU = "Let's get started.";
+
+function mergeConsecutiveDirectMessages_ACU(messages: any[]): any[] {
     const result: any[] = [];
     for (const original of messages) {
         const message = { ...original };
-        if (semi && message.role === 'system' && result.length) message.role = 'user';
         const previous = result[result.length - 1];
-        if (previous && previous.role === message.role && message.role !== 'tool'
-            && typeof previous.content === 'string' && typeof message.content === 'string') {
-            previous.content += '\n\n' + message.content;
+        if (previous
+            && previous.role === message.role
+            && message.role !== 'tool'
+            && typeof previous.content === 'string'
+            && typeof message.content === 'string') {
+            previous.content += `\n\n${message.content}`;
             if (message.tool_calls) previous.tool_calls = [...(previous.tool_calls ?? []), ...message.tool_calls];
-        } else result.push(message);
+        } else {
+            result.push(message);
+        }
     }
-    const first = result.find(message => message.role !== 'system');
-    if (strict && first?.role === 'assistant' && !first.tool_calls) first.role = 'user';
+    return result;
+}
+
+function demoteNonLeadingSystemMessages_ACU(messages: any[]): any[] {
+    return messages.map((message, index) => (
+        index > 0 && message.role === 'system' ? { ...message, role: 'user' } : message
+    ));
+}
+
+/**
+ * 直连接口的提示词后处理，语义对齐 SillyTavern mergeMessages：
+ * - 空模式原样保留；merge 仅合并连续同角色；
+ * - semi/strict 先合并、再把非开头 system 转为 user 并重合并；
+ * - strict 额外保证 system 后首先出现 user；
+ * - single 在无工具流量时压成一条 user。
+ * 原生 tool_calls 与 role=tool 始终保留，工具变体只影响角色整理方式。
+ */
+export function processDirectMessages_ACU(input: any[], mode: string): any[] {
+    const messages = input.map(message => ({ ...message }));
+    if (!mode) return messages;
+
+    const withTools = mode.endsWith('_tools')
+        || messages.some(message => message.tool_calls || message.role === 'tool');
+    if (mode === 'single' && !withTools) {
+        return [{ role: 'user', content: messages.map(message => text(message.content)).join('\n\n') }];
+    }
+
+    let result = mergeConsecutiveDirectMessages_ACU(messages);
+    const semiOrStrict = mode.startsWith('strict') || mode === 'single' || mode.startsWith('semi');
+    if (semiOrStrict) {
+        result = mergeConsecutiveDirectMessages_ACU(demoteNonLeadingSystemMessages_ACU(result));
+    }
+
+    if (mode.startsWith('strict') || (mode === 'single' && withTools)) {
+        const firstNonSystemIndex = result.findIndex(message => message.role !== 'system');
+        if (firstNonSystemIndex < 0) {
+            result.push({ role: 'user', content: DIRECT_PROMPT_PLACEHOLDER_ACU });
+        } else if (result[firstNonSystemIndex].role !== 'user') {
+            result.splice(firstNonSystemIndex, 0, { role: 'user', content: DIRECT_PROMPT_PLACEHOLDER_ACU });
+        }
+        result = mergeConsecutiveDirectMessages_ACU(result);
+    }
     return result;
 }
 
@@ -50,40 +88,88 @@ export function buildProviderRequest_ACU(body: Record<string, any>, format: Cust
             for (const call of m.tool_calls ?? []) items.push({ type: 'function_call', call_id: call.id, ...call.function });
             return items;
         });
-        return { modalities: ['text'], ...rest, input, max_output_tokens: max_tokens };
+        return {
+            modalities: ['text'],
+            ...rest,
+            ...(tools?.length ? { tools } : {}),
+            input,
+            max_output_tokens: max_tokens,
+        };
     }
     if (format === 'claude_messages') {
         let system: string | undefined;
-        const cleaned = messages.filter((m: any) => {
-            if (m.role !== 'system') return true;
-            system = (system ? system + '\n\n' : '') + text(m.content);
-            return false;
+        const toolNamesById = new Map<string, string>();
+        for (const message of messages) {
+            for (const call of message.tool_calls ?? []) toolNamesById.set(call.id, call.function.name);
+        }
+        const cleaned = messages.flatMap((m: any) => {
+            if (m.role === 'system') {
+                system = (system ? system + '\n\n' : '') + text(m.content);
+                return [];
+            }
+            if (m.role === 'tool') {
+                return [{
+                    role: 'user',
+                    content: [{ type: 'tool_result', tool_use_id: m.tool_call_id, content: text(m.content) }],
+                }];
+            }
+            const content: any[] = text(m.content) ? [{ type: 'text', text: text(m.content) }] : [];
+            for (const call of m.tool_calls ?? []) {
+                content.push({ type: 'tool_use', id: call.id, name: call.function.name, input: args(call.function.arguments) });
+            }
+            return [{ role: m.role, content }];
         });
-        const body: any = { ...rest, messages: cleaned.map((m: any) => ({ role: m.role, content: text(m.content) })), max_tokens };
-        if (system) body.system = system;
-        if (tools?.length) body.tools = tools.map((tool: any) => ({ name: tool.function.name, description: tool.function.description, input_schema: tool.function.parameters }));
-        if (tool_choice === 'required') body.tool_choice = { type: 'any' };
-        return body;
+        const requestBody: any = { ...rest, messages: cleaned, max_tokens };
+        if (system) requestBody.system = system;
+        if (tools?.length) requestBody.tools = tools.map((tool: any) => ({ name: tool.function.name, description: tool.function.description, input_schema: tool.function.parameters }));
+        if (tool_choice === 'required') requestBody.tool_choice = { type: 'any' };
+        return requestBody;
     }
     if (format === 'gemini_interactions') {
-        const systemInstruction = messages.find((m: any) => m.role === 'system');
+        const systemText = messages
+            .filter((m: any) => m.role === 'system')
+            .map((m: any) => text(m.content))
+            .join('\n\n');
+        const toolNamesById = new Map<string, string>();
+        for (const message of messages) {
+            for (const call of message.tool_calls ?? []) toolNamesById.set(call.id, call.function.name);
+        }
         const contents = messages
             .filter((m: any) => m.role !== 'system')
             .flatMap((m: any) => {
+                if (m.role === 'tool') {
+                    return [{
+                        role: 'user',
+                        parts: [{
+                            functionResponse: {
+                                name: toolNamesById.get(m.tool_call_id) ?? '',
+                                response: { callId: m.tool_call_id, output: text(m.content) },
+                            },
+                        }],
+                    }];
+                }
                 const parts: any[] = m.content ? [{ text: text(m.content) }] : [];
                 for (const call of m.tool_calls ?? []) {
                     parts.push({ functionCall: { name: call.function.name, args: args(call.function.arguments) } });
                 }
-                if (m.role === 'tool') parts.push({ functionResponse: { name: '', response: { output: text(m.content) } } });
                 return [{ role: m.role === 'assistant' ? 'model' : 'user', parts }];
             });
-        const body: any = { ...rest, contents, generationConfig: { maxOutputTokens: max_tokens, responseModalities: ['TEXT'] } };
-        if (systemInstruction) body.systemInstruction = { parts: [{ text: text(systemInstruction.content) }] };
-        if (tools?.length) body.tools = [{ functionDeclarations: tools.map((tool: any) => ({ name: tool.function.name, description: tool.function.description, parameters: tool.function.parameters })) }];
-        if (tool_choice === 'required') body.toolConfig = { functionCallingConfig: { mode: 'ANY' } };
-        return body;
+        const requestBody: any = { ...rest, contents, generationConfig: { maxOutputTokens: max_tokens, responseModalities: ['TEXT'] } };
+        if (systemText) requestBody.systemInstruction = { parts: [{ text: systemText }] };
+        if (tools?.length) requestBody.tools = [{ functionDeclarations: tools.map((tool: any) => ({ name: tool.function.name, description: tool.function.description, parameters: tool.function.parameters })) }];
+        if (tool_choice === 'required') requestBody.toolConfig = { functionCallingConfig: { mode: 'ANY' } };
+        return requestBody;
     }
     return body;
+}
+
+function normalizedProviderChoice_ACU(content: string, finishReason: unknown) {
+    return {
+        choices: [{
+            message: { role: 'assistant', content },
+            finish_reason: finishReason === undefined || finishReason === null ? null : finishReason,
+        }],
+    };
 }
 
 export function normalizeProviderStream_ACU(raw: string, format: CustomApiFormat_ACU): string {
@@ -121,21 +207,63 @@ export function normalizeProviderStream_ACU(raw: string, format: CustomApiFormat
 }
 
 export function normalizeProviderReply_ACU(response: any, format: CustomApiFormat_ACU): any {
-    if (format === 'openai_compat' || format === 'openai_responses') return response;
+    if (format === 'openai_compat') return response;
+    if (format === 'openai_responses') {
+        const output = Array.isArray(response?.output) ? response.output : [];
+        const content = output
+            .flatMap((item: any) => item?.type === 'message' && Array.isArray(item.content) ? item.content : [])
+            .map((part: any) => part?.text ?? '')
+            .join('');
+        const toolCalls = output
+            .filter((item: any) => item?.type === 'function_call')
+            .map((item: any, index: number) => ({
+                index,
+                id: item.call_id ?? item.id,
+                type: 'function',
+                function: { name: item.name, arguments: JSON.stringify(item.arguments ?? {}) },
+            }));
+        const finishReason = response?.status === 'completed'
+            ? 'stop'
+            : response?.status === 'incomplete'
+                ? 'length'
+                : null;
+        const message: any = { role: 'assistant', content };
+        if (toolCalls.length) message.tool_calls = toolCalls;
+        return {
+            id: response?.id,
+            model: response?.model,
+            choices: [{ message, finish_reason: finishReason }],
+            usage: {
+                prompt_tokens: response?.usage?.input_tokens,
+                completion_tokens: response?.usage?.output_tokens,
+            },
+        };
+    }
     if (format === 'claude_messages') {
         return {
-            id: response.id,
-            model: response.model,
-            choices: [{ message: { role: 'assistant', content: response.content?.map((block: any) => block.text ?? '').join('') ?? '' }, finish_reason: response.stop_reason }],
-            usage: { prompt_tokens: response.usage?.input_tokens, completion_tokens: response.usage?.output_tokens },
+            id: response?.id,
+            model: response?.model,
+            ...normalizedProviderChoice_ACU(response?.content?.map((block: any) => block?.text ?? '').join('') ?? '', response?.stop_reason),
+            usage: {
+                prompt_tokens: response?.usage?.input_tokens,
+                completion_tokens: response?.usage?.output_tokens,
+            },
         };
     }
     if (format === 'gemini_interactions') {
+        const stepText = Array.isArray(response?.steps)
+            ? response.steps.flatMap((step: any) => Array.isArray(step?.content) ? step.content : []).map((part: any) => part?.text ?? '').join('')
+            : '';
+        const candidateText = response?.candidates?.[0]?.content?.parts?.map((part: any) => part?.text ?? '').join('') ?? '';
+        const finishReason = response?.status === 'completed' || response?.interaction?.status === 'completed' ? 'stop' : null;
         return {
             id: '',
-            model: response.modelVersion ?? '',
-            choices: [{ message: { role: 'assistant', content: response.candidates?.[0]?.content?.parts?.map((part: any) => part.text ?? '').join('') ?? '' }, finish_reason: response.candidates?.[0]?.finishReason }],
-            usage: { prompt_tokens: response.usageMetadata?.promptTokenCount, completion_tokens: response.usageMetadata?.candidatesTokenCount },
+            model: response?.modelVersion ?? '',
+            ...normalizedProviderChoice_ACU(stepText || candidateText, finishReason),
+            usage: {
+                prompt_tokens: response?.usageMetadata?.promptTokenCount,
+                completion_tokens: response?.usageMetadata?.candidatesTokenCount,
+            },
         };
     }
     return response;

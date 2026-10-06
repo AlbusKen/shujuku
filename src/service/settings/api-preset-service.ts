@@ -34,19 +34,19 @@ import {
 export type ApiPresetApiMode_ACU = 'custom' | 'tavern';
 
 /**
- * 提示词后处理（SillyTavern custom_prompt_post_processing）可选值。
- * '' = 未选择：请求体不带该字段，酒馆后端原样透传消息（保留中部的 system 角色）。
- * 缺失/非法值统一归一为 'strict'（默认严格，与历史写死 strict 的行为保持兼容）。
+ * 提示词后处理（SillyTavern custom_prompt_post_processing）的用户配置值。
+ *
+ * 五个选项的语义：
+ * - ''：未选择。请求不带 custom_prompt_post_processing，消息原样发送；需要保留中部 system 角色时使用。
+ * - merge：仅合并连续同角色消息；不改变 system 角色，也不强制 user 先行。
+ * - semi：半严格。合并连续同角色，并把非开头 system 视为 user；不插入 user 占位消息。
+ * - strict：严格。合并连续同角色，把非开头 system 视为 user，并保证 system 后首先出现 user。
+ * - single：单一用户消息。无原生工具流量时把全部消息压成一条 user。
+ *
+ * *_tools 只是请求出口根据实际原生工具流量派生的线格式，不属于用户配置；
+ * 旧配置读取时映射回基础值，缺失/非法值统一归一为默认 strict。
  */
-export type ApiPromptPostProcessingValue_ACU =
-  | ''
-  | 'merge'
-  | 'semi'
-  | 'strict'
-  | 'single'
-  | 'merge_tools'
-  | 'semi_tools'
-  | 'strict_tools';
+export type ApiPromptPostProcessingValue_ACU = '' | 'merge' | 'semi' | 'strict' | 'single';
 
 export const API_PROMPT_POST_PROCESSING_VALUES_ACU: readonly ApiPromptPostProcessingValue_ACU[] = [
   '',
@@ -54,18 +54,23 @@ export const API_PROMPT_POST_PROCESSING_VALUES_ACU: readonly ApiPromptPostProces
   'semi',
   'strict',
   'single',
-  'merge_tools',
-  'semi_tools',
-  'strict_tools',
 ];
 
 export const API_PROMPT_POST_PROCESSING_DEFAULT_ACU: ApiPromptPostProcessingValue_ACU = 'strict';
+
+const LEGACY_API_PROMPT_POST_PROCESSING_VALUES_ACU: Readonly<Record<string, ApiPromptPostProcessingValue_ACU>> = {
+  merge_tools: 'merge',
+  semi_tools: 'semi',
+  strict_tools: 'strict',
+};
 
 export function normalizePromptPostProcessing_ACU(value: unknown): ApiPromptPostProcessingValue_ACU {
   // 显式空串 = 用户选择「未选择」，保留；缺失/非字符串/非法值 → 默认严格。
   if (typeof value !== 'string') return API_PROMPT_POST_PROCESSING_DEFAULT_ACU;
   const normalized = value.trim();
   if (normalized === '') return '';
+  const legacy = LEGACY_API_PROMPT_POST_PROCESSING_VALUES_ACU[normalized];
+  if (legacy) return legacy;
   return (API_PROMPT_POST_PROCESSING_VALUES_ACU as readonly string[]).includes(normalized)
     ? (normalized as ApiPromptPostProcessingValue_ACU)
     : API_PROMPT_POST_PROCESSING_DEFAULT_ACU;
@@ -109,7 +114,6 @@ export interface ApiPresetApiConfig_ACU {
   excludeBodyParams: string;
   requestHeaders: string;
   promptPostProcessing: ApiPromptPostProcessingValue_ACU;
-  preserveMultipleSystem?: boolean;
   /** 接口协议（预设级），见 CustomApiFormat_ACU。 */
   customApiFormat: CustomApiFormat_ACU;
 }
@@ -162,7 +166,6 @@ export function normalizeApiConfig_ACU(value: any): ApiPresetApiConfig_ACU {
     excludeBodyParams: typeof source.excludeBodyParams === 'string' ? source.excludeBodyParams : '',
     requestHeaders: typeof source.requestHeaders === 'string' ? source.requestHeaders : '',
     promptPostProcessing: normalizePromptPostProcessing_ACU(source.promptPostProcessing),
-    preserveMultipleSystem: typeof source.preserveMultipleSystem === 'boolean' ? source.preserveMultipleSystem : true,
     customApiFormat: normalizeCustomApiFormat_ACU(source.customApiFormat),
     ...Object.fromEntries(
       Object.entries(source).filter(([key]) =>

@@ -123,6 +123,32 @@ describe('ApiPage', () => {
     mount.__resetAcuV2MountForTests();
   });
 
+  it('提示词后处理只展示五个基础选项且不再提供保留 system 开关', async () => {
+    const settings = createSettings();
+    settings.apiPresetBindingsByChat['chat-page'].presetName = 'alpha';
+    const { mount } = await mountApiPage(settings);
+
+    const page = document.querySelector('.acu-v2-api-page') as HTMLElement;
+    expect(page.textContent).not.toContain('保留多个 system 消息');
+
+    const row = Array.from(page.querySelectorAll('.acu-form-row'))
+      .find(item => (item.textContent || '').includes('提示词后处理')) as HTMLElement;
+    const trigger = row.querySelector('.acu-select__trigger') as HTMLButtonElement;
+    trigger.click();
+    await Promise.resolve();
+
+    const options = Array.from(document.querySelectorAll('.acu-select__item')) as HTMLElement[];
+    expect(options.map(option => option.textContent?.trim())).toEqual([
+      '未选择',
+      '合并相同角色连续的发言',
+      '半严格（强制对话角色交替）',
+      '严格（强制对话角色交替、用户最先）',
+      '单一用户消息',
+    ]);
+
+    mount.__resetAcuV2MountForTests();
+  });
+
   it('当前 API 配置表单可直接保存活动预设并同步当前聊天绑定', async () => {
     const { mount, settings } = await mountApiPage();
 

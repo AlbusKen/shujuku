@@ -166,7 +166,7 @@
         </AcuFormRow>
         <AcuFormRow
           label="提示词后处理"
-          hint="SillyTavern custom_prompt_post_processing，默认严格（与旧版本行为一致）。未选择=不带该字段原样透传消息，可保留提示词组中 system 段的角色；严格等模式会把提示词中部的 system 消息强制改为 user。"
+          hint="SillyTavern custom_prompt_post_processing，默认严格。未选择=原样发送消息；合并=仅合并连续同角色；半严格=处理中部 system 但不补占位；严格=处理中部 system 并保证 user 先行；单一用户消息=压成一条 user。带原生工具时由插件自动使用含工具变体。"
         >
           <AcuSelect
             :options="promptPostProcessingOptions"
@@ -174,17 +174,6 @@
             placeholder="未选择"
             @update:model-value="setPromptPostProcessing"
           />
-        </AcuFormRow>
-        <AcuFormRow
-          label="保留多个 system 消息"
-          hint="默认开启。当提示词后处理为严格或半严格模式时，仍保留提示词中部的 system 消息角色，不降级为 user。关闭后恢复旧版 SillyTavern 行为（中部 system 强制改为 user）。"
-        >
-          <AcuCheckbox
-            :model-value="activeDraft.preserveMultipleSystem ?? true"
-            @update:model-value="setPreserveMultipleSystem"
-          >
-            启用
-          </AcuCheckbox>
         </AcuFormRow>
         <AcuFormRow label="附加请求标头" hint="每行一个 Header: Value，追加到请求头中。">
           <AcuTextarea
@@ -282,32 +271,13 @@ const connectionModeOptions: AcuSegmentedOption[] = [
   { value: "custom", label: "自定义" },
   { value: "tavern", label: "酒馆预设" },
 ];
-// 选项与 SillyTavern「提示词后处理」下拉一致；'' 为「未选择」，默认 'strict'。
+// 只暴露五个用户语义；*_tools 由请求出口按实际工具流量自动派生，不作为预设配置。
 const promptPostProcessingOptions: AcuSelectOption[] = [
   { value: "", label: "未选择" },
-  {
-    value: "merge_tools",
-    label: "合并相同角色连续的发言（含工具）",
-    group: "With Tools",
-  },
-  {
-    value: "semi_tools",
-    label: "半严格（强制对话角色交替）（含工具）",
-    group: "With Tools",
-  },
-  {
-    value: "strict_tools",
-    label: "严格（强制对话角色交替、用户最先）（含工具）",
-    group: "With Tools",
-  },
-  { value: "merge", label: "合并相同角色连续的发言", group: "No Tools" },
-  { value: "semi", label: "半严格（强制对话角色交替）", group: "No Tools" },
-  {
-    value: "strict",
-    label: "严格（强制对话角色交替、用户最先）",
-    group: "No Tools",
-  },
-  { value: "single", label: "单一用户消息（无工具）" },
+  { value: "merge", label: "合并相同角色连续的发言" },
+  { value: "semi", label: "半严格（强制对话角色交替）" },
+  { value: "strict", label: "严格（强制对话角色交替、用户最先）" },
+  { value: "single", label: "单一用户消息" },
 ];
 // 接口协议选项（对齐 TT 主 API 四个「自定义」选项，custom_api_format 契约）；值集合以
 // api-preset-service 的 CUSTOM_API_FORMAT_VALUES_ACU 为唯一来源，此处只补人类可读标签。
@@ -452,11 +422,6 @@ function setActiveConnectionMode(value: string): void {
 function setPromptPostProcessing(value: string): void {
   activeDraft.promptPostProcessing =
     normalizePromptPostProcessing_ACU(value);
-  activeDraftSavedAt.value = null;
-}
-
-function setPreserveMultipleSystem(value: boolean): void {
-  activeDraft.preserveMultipleSystem = value;
   activeDraftSavedAt.value = null;
 }
 

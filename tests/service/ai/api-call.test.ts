@@ -71,6 +71,7 @@ import {
   callAIChatTurn_ACU,
 } from '../../../src/service/ai/api-call';
 import { agentNativeTools_ACU } from '../../../src/service/ai/native-tool';
+import { processDirectMessages_ACU } from '../../../src/service/ai/custom-api-protocol';
 import { getAgentSubagentAccessProfile_ACU } from '../../../src/service/continuation/agent/agent-catalog';
 import { worldSimulationAgentNativeTools_ACU } from '../../../src/service/simulation/agent/agent-catalog';
 import { isMainApiChatCompletionAvailable_ACU, sendMainApiChatCompletionRequest_ACU } from '../../../src/data/gateways/ai-gateway';
@@ -818,14 +819,96 @@ describe('buildCustomApiRequestBody_ACU', () => {
     expect(body.custom_prompt_post_processing).toBe('merge');
   });
 
-  it('promptPostProcessing=strict 等合法值原样透传', () => {
-    for (const value of ['semi', 'strict', 'single', 'merge_tools', 'semi_tools', 'strict_tools']) {
+  it('promptPostProcessing 只透传五个用户可选项', () => {
+    for (const value of ['', 'merge', 'semi', 'strict', 'single'] as const) {
       const body = buildCustomApiRequestBody_ACU(
         [{ role: 'user', content: 'test' }],
         { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: value },
       );
-      expect(body.custom_prompt_post_processing).toBe(value);
+      if (value === '') expect(body).not.toHaveProperty('custom_prompt_post_processing');
+      else expect(body.custom_prompt_post_processing).toBe(value);
     }
+  });
+
+  it('显式未选择不会被生成参数或附加主体参数改成 single', () => {
+    const body = buildCustomApiRequestBody_ACU(
+      [{ role: 'system', content: '系统' }, { role: 'user', content: '用户' }, { role: 'assistant', content: '助手' }],
+      {
+        url: 'https://api.example.com',
+        model: 'gpt-4',
+        promptPostProcessing: '',
+        bodyParams: 'custom_prompt_post_processing: single',
+      },
+      { generationParameters: { custom_prompt_post_processing: 'single' } },
+    );
+
+    expect(body).not.toHaveProperty('custom_prompt_post_processing');
+    expect(body.custom_include_body).not.toContain('custom_prompt_post_processing');
+  });
+
+  describe('直连消息后处理语义', () => {
+    const source = () => ([
+      { role: 'system', content: 'S1' },
+      { role: 'system', content: 'S2' },
+      { role: 'user', content: 'U1' },
+      { role: 'user', content: 'U2' },
+      { role: 'system', content: 'MID' },
+      { role: 'assistant', content: 'A1' },
+      { role: 'user', content: 'U3' },
+    ]);
+
+    it('未选择原样保留消息与工具协议', () => {
+      const messages = source();
+      expect(processDirectMessages_ACU(messages, '')).toEqual(messages);
+      expect(processDirectMessages_ACU(messages, '')).not.toBe(messages);
+    });
+
+    it('合并只合并连续同角色', () => {
+      expect(processDirectMessages_ACU(source(), 'merge')).toEqual([
+        { role: 'system', content: 'S1\n\nS2' },
+        { role: 'user', content: 'U1\n\nU2' },
+        { role: 'system', content: 'MID' },
+        { role: 'assistant', content: 'A1' },
+        { role: 'user', content: 'U3' },
+      ]);
+    });
+
+    it('半严格处理中部 system 但不插入 user 占位', () => {
+      expect(processDirectMessages_ACU(source(), 'semi')).toEqual([
+        { role: 'system', content: 'S1\n\nS2' },
+        { role: 'user', content: 'U1\n\nU2\n\nMID' },
+        { role: 'assistant', content: 'A1' },
+        { role: 'user', content: 'U3' },
+      ]);
+      expect(processDirectMessages_ACU([
+        { role: 'system', content: 'S' },
+        { role: 'assistant', content: 'A' },
+        { role: 'user', content: 'U' },
+      ], 'semi')).toEqual([
+        { role: 'system', content: 'S' },
+        { role: 'assistant', content: 'A' },
+        { role: 'user', content: 'U' },
+      ]);
+    });
+
+    it('严格保证 system 后首先出现 user', () => {
+      expect(processDirectMessages_ACU([
+        { role: 'system', content: 'S' },
+        { role: 'assistant', content: 'A' },
+        { role: 'user', content: 'U' },
+      ], 'strict')).toEqual([
+        { role: 'system', content: 'S' },
+        { role: 'user', content: "Let's get started." },
+        { role: 'assistant', content: 'A' },
+        { role: 'user', content: 'U' },
+      ]);
+    });
+
+    it('单一用户消息在没有工具流量时压成一条 user', () => {
+      expect(processDirectMessages_ACU(source(), 'single')).toEqual([
+        { role: 'user', content: 'S1\n\nS2\n\nU1\n\nU2\n\nMID\n\nA1\n\nU3' },
+      ]);
+    });
   });
 
   it('带原生工具时把会拆掉 tool 角色的后处理升成对应 tools 变体', () => {

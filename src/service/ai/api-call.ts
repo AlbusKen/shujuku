@@ -83,6 +83,33 @@ function copyRecordWithoutPrototype_ACU(value: Record<string, unknown>): Record<
 }
 
 /**
+ * 提示词后处理由预设字段唯一控制。它不能从 custom_include_body 或生成参数透传覆盖，
+ * 否则用户显式选择的「未选择」可能在后续合并阶段被改成 single。
+ */
+function omitPromptPostProcessingFromRecord_ACU(value: Record<string, unknown>): Record<string, unknown> {
+  const copy = copyRecordWithoutPrototype_ACU(value);
+  delete copy.custom_prompt_post_processing;
+  return copy;
+}
+
+function omitPromptPostProcessingFromUserBody_ACU(raw: string): string {
+  if (!raw.trim()) return raw;
+  try {
+    const parsed = parseYaml_ACU(raw);
+    if (isRecord_ACU(parsed) && 'custom_prompt_post_processing' in parsed) {
+      return JSON.stringify(omitPromptPostProcessingFromRecord_ACU(parsed));
+    }
+    if (Array.isArray(parsed)
+      && parsed.some(item => isRecord_ACU(item) && 'custom_prompt_post_processing' in item)) {
+      return JSON.stringify(parsed.map(item => isRecord_ACU(item) ? omitPromptPostProcessingFromRecord_ACU(item) : item));
+    }
+  } catch {
+    // 无效 YAML 保持原样，由既有诊断路径处理。
+  }
+  return raw;
+}
+
+/**
  * 组合 SillyTavern 的 custom_include_body。JSON 是合法 YAML；输出 JSON 可避免把对象字段
  * 再拼成不合法的混合 YAML，同时与宿主 yaml.parse 后的浅合并语义保持一致。
  */
@@ -116,11 +143,11 @@ export function composeCustomIncludeBody_ACU(
     rootType = 'sequence';
     for (const item of parsed) {
       if (!isRecord_ACU(item)) continue;
-      for (const key of Object.keys(item)) merged[key] = item[key];
+      for (const [key, value] of Object.entries(omitPromptPostProcessingFromRecord_ACU(item))) merged[key] = value;
     }
   } else if (isRecord_ACU(parsed)) {
     rootType = 'mapping';
-    for (const key of Object.keys(parsed)) merged[key] = parsed[key];
+    for (const [key, value] of Object.entries(omitPromptPostProcessingFromRecord_ACU(parsed))) merged[key] = value;
   } else {
     return { value: userBodyParams, diagnostic: { reason: 'unsupported_root', rootType: 'scalar' } };
   }
@@ -237,8 +264,12 @@ export function buildCustomApiRequestBody_ACU(
   // 插件字段与用户 bodyParams 先按 SillyTavern 的 YAML 解析规则结构化组合，再作为
   // custom_include_body 交给宿主合并。无法安全解析时保留用户原文并跳过插件字段。
   const streaming = opts.streaming ?? (settings_ACU.streamingEnabled || false);
-  const userBodyParams = String(effectiveApiConfig.bodyParams || '');
+  const userBodyParams = omitPromptPostProcessingFromUserBody_ACU(String(effectiveApiConfig.bodyParams || ''));
   const pluginFields = Object.assign(Object.create(null), opts.generationParameters) as Record<string, unknown>;
+  delete pluginFields.custom_prompt_post_processing;
+  const generationParameters = opts.generationParameters && typeof opts.generationParameters === 'object'
+    ? pluginFields
+    : undefined;
   if (opts.promptCacheKey && /^[A-Za-z0-9_-]+$/.test(opts.promptCacheKey)) {
     pluginFields.prompt_cache_key = opts.promptCacheKey;
   }
@@ -346,7 +377,7 @@ export function buildCustomApiRequestBody_ACU(
     // 无工具的内部请求明确禁用工具；带工具的 Agent 自行选择工具或最终文本。
     // 使用 auto 而非 required，保留模型直接返回最终文本的能力。
     ...(opts.tools?.length ? { tools: opts.tools, tool_choice: 'auto' } : { tool_choice: 'none' }),
-    ...opts.generationParameters,
+    ...(generationParameters ?? {}),
   };
   if (promptPostProcessing) {
     // 「未选择」（''）时省略该键，酒馆后端（getPromptPostProcessing）按 none 处理，原样透传消息。

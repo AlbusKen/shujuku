@@ -184,6 +184,39 @@ describe('api preset draft helpers', () => {
     expect(preset.apiConfig.sendViaTavern).toBe(true);
   });
 
+  it('旧版含工具后处理读取时映射回基础选项，且不再保留 system 开关字段', () => {
+    const cases = [
+      ['merge_tools', 'merge'],
+      ['semi_tools', 'semi'],
+      ['strict_tools', 'strict'],
+    ] as const;
+
+    for (const [legacy, base] of cases) {
+      const draft = apiPresetDraftFromPreset({
+        name: 'legacy-tools',
+        apiMode: 'custom',
+        apiConfig: {
+          url: 'https://legacy.test',
+          apiKey: '',
+          model: 'm',
+          useMainApi: false,
+          max_tokens: 1000,
+          temperature: 1,
+          promptPostProcessing: legacy,
+          preserveMultipleSystem: false,
+        } as any,
+        tavernProfile: '',
+      });
+
+      expect(draft.promptPostProcessing).toBe(base);
+      expect('preserveMultipleSystem' in draft).toBe(false);
+
+      const preset = apiPresetFromDraft(draft);
+      expect(preset.apiConfig.promptPostProcessing).toBe(base);
+      expect(preset.apiConfig).not.toHaveProperty('preserveMultipleSystem');
+    }
+  });
+
   it('草稿中的非法提示词后处理 / 接口协议值保存时回退默认，不写入预设', () => {
     const preset = apiPresetFromDraft({
       ...createEmptyApiPresetDraft(),
