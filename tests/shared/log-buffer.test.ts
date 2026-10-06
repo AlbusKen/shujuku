@@ -18,6 +18,7 @@ import {
   setDebugLogEnabled,
   setWarnLogEnabled,
   isWarnLogEnabled,
+  MAX_BUFFER_CHARACTERS_ACU,
 } from '../../src/shared/log-buffer';
 
 beforeEach(() => {
@@ -105,6 +106,33 @@ describe('环形缓冲区', () => {
     // 最旧的应该是第 100 条（0-99 被丢弃）
     expect(logs[0].message).toContain('日志 100');
     expect(logs[logs.length - 1].message).toContain('日志 2099');
+  });
+});
+
+describe('完整正文容量', () => {
+  it('按字符预算淘汰旧条目，不截断最新条目，并保留订阅通知', () => {
+    const received = vi.fn();
+    subscribe(received);
+    const body = '正文'.repeat(MAX_BUFFER_CHARACTERS_ACU / 4 + 1);
+    pushLog('debug', [body]);
+    pushLog('debug', [body]);
+    expect(getAllLogs()).toHaveLength(1);
+    expect(getAllLogs()[0].message).toBe(body);
+    expect(received).toHaveBeenCalledTimes(2);
+    const oversized = '长'.repeat(MAX_BUFFER_CHARACTERS_ACU + 1);
+    pushLog('debug', [oversized]);
+    expect(getAllLogs()).toHaveLength(1);
+    expect(getAllLogs()[0].message).toBe(oversized);
+  });
+
+  it('清空及测试重置均重置字符计数', () => {
+    pushLog('debug', ['长'.repeat(MAX_BUFFER_CHARACTERS_ACU + 1)]);
+    clearLogs();
+    pushLog('debug', ['a']); pushLog('debug', ['b']);
+    expect(getLogCount()).toBe(2);
+    _resetForTesting(); setDebugLogEnabled(true);
+    pushLog('debug', ['c']); pushLog('debug', ['d']);
+    expect(getLogCount()).toBe(2);
   });
 });
 

@@ -57,7 +57,7 @@
         </AcuFormRow>
 
         <template v-if="activeConnectionMode === 'custom'">
-          <AcuFormRow label="通过酒馆渠道发送" hint="默认关闭，由插件直接请求预设端点；完整请求与回复记录在高级工具 → 运行日志（API直连）。直连需端点允许跨域；开启则沿用酒馆后端转发。日志含提示词正文，分享前请检查隐私。">
+          <AcuFormRow label="通过酒馆渠道发送" hint="默认关闭，由插件直接请求预设端点；直连需端点允许跨域，开启则沿用酒馆后端转发。两种渠道的完整请求与回复默认记录在高级工具 → 运行日志（API直连／API酒馆转发），无需开启 Debug。认证信息隐藏，但日志含提示词与回复正文，分享前请检查隐私。">
             <AcuToggle v-model="activeDraft.sendViaTavern" aria-label="通过酒馆渠道发送" />
           </AcuFormRow>
           <AcuFormRow

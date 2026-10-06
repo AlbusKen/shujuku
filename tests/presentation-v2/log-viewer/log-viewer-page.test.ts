@@ -223,6 +223,23 @@ describe('AdvancedToolsPage log panel', () => {
   it('Debug 采集开关会控制 debug 日志进入缓冲区', async () => {
     const { mount, logBuffer } = await mountAdvancedToolsLogPanel(false);
 
+    const { createApiRequestLog_ACU } = await import('../../../src/shared/api-request-log');
+    for (const tag of ['API主连接', 'API连接预设', 'API酒馆转发', 'API直连']) {
+      const log = createApiRequestLog_ACU(tag, '请求', { messages: [{ role: 'user', content: `完整提示词 ${tag}` }] });
+      log.write('回复', `完整回复 ${tag}`);
+    }
+    await waitForUi(30);
+    const defaultText = getPage().textContent || '';
+    for (const tag of ['API主连接', 'API连接预设', 'API酒馆转发', 'API直连']) {
+      expect(defaultText).toContain(`完整提示词 ${tag}`);
+      expect(defaultText).toContain(`完整回复 ${tag}`);
+    }
+    expect(defaultText).toContain('无需开启 Debug');
+    expect(defaultText).toContain('不代表最终网络请求');
+    expect(defaultText).toContain('检查隐私');
+    expect(logBuffer.isDebugLogEnabled()).toBe(false);
+    expect(logBuffer.getAllLogs()).toHaveLength(8);
+
     logBuffer.pushLog('debug', ['[ACU]', '[调试] 不应出现']);
     await waitForUi(30);
     expect(getPage().textContent || '').not.toContain('不应出现');

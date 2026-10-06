@@ -1323,3 +1323,81 @@ describe('直连流式回复', () => {
     expect(getAllLogs().find(entry => entry.message.includes('回复 HTTP'))!.message).toContain(raw);
   });
 });
+
+
+
+describe('自定义 API 酒馆转发日志', () => {
+  it('默认采集完整请求和单次消费的原始回复，隐藏嵌套凭据、标头和 URL 查询值', async () => {
+    const { sendCustomApiRequest_ACU } = await import('../../../src/service/ai/custom-api-transport');
+    const { clearLogs, getAllLogs, setDebugLogEnabled } = await import('../../../src/shared/log-buffer');
+    clearLogs(); setDebugLogEnabled(false);
+    const config = { sendViaTavern: true, apiKey: 'config-secret' };
+    const body = { messages: [{ role: 'user', content: '完整转发提示词'.repeat(2000) }], max_tokens: 321,
+      proxy_password: 'proxy-secret', custom_url: 'https://forward.test/v1?key=query-secret',
+      custom_include_headers: 'Authorization: Bearer header-secret',
+      custom_include_body: 'metadata:\n  api_key: nested-secret\n  purpose: diagnosis' };
+    const raw = '{ "choices": [{"message":{"content":"完整转发回复 config-secret header-secret nested-secret query-secret"}}] }';
+    const original = new Response(raw, { headers: { 'Content-Type': 'application/json' } });
+    const text = vi.spyOn(original, 'text');
+    const clone = vi.spyOn(original, 'clone');
+    mockFetch.mockResolvedValueOnce(original);
+    const response = await sendCustomApiRequest_ACU(config, body);
+    expect(text).not.toHaveBeenCalled();
+    expect(getAllLogs()).toHaveLength(1);
+    expect((await response.json()).choices[0].message.content).toContain('完整转发回复');
+    expect(text).toHaveBeenCalledTimes(1);
+    expect(clone).not.toHaveBeenCalled();
+    expect(mockFetch.mock.calls[0][0]).toBe('/api/backends/chat-completions/generate');
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toEqual(body);
+    const logs = getAllLogs();
+    expect(logs).toHaveLength(2);
+    expect(logs.every(entry => entry.tag === 'API酒馆转发')).toBe(true);
+    expect(logs[0].message).toContain(body.messages[0].content);
+    expect(logs[0].message).toContain('321');
+    expect(logs[1].message).toContain('完整转发回复');
+    expect(JSON.stringify(logs)).not.toMatch(/config-secret|proxy-secret|header-secret|nested-secret|query-secret/);
+  });
+
+  it('转发 SSE 保持流式读取，取消不由日志增加 reader 或取消动作', async () => {
+    const { sendCustomApiRequest_ACU } = await import('../../../src/service/ai/custom-api-transport');
+    const { readFetchChatTurn_ACU } = await import('../../../src/service/ai/native-tool');
+    const { clearLogs, getAllLogs } = await import('../../../src/shared/log-buffer');
+    clearLogs();
+    const raw = 'data: {"choices":[{"delta":{"content":"转发流式正文"}}]}\n\ndata: [DONE]\n\n';
+    const original = new Response(raw, { headers: { 'Content-Type': 'text/event-stream' } });
+    const getReader = vi.spyOn(original.body!, 'getReader');
+    const cancel = vi.spyOn(original.body!, 'cancel');
+    mockFetch.mockResolvedValueOnce(original);
+    const response = await sendCustomApiRequest_ACU({ sendViaTavern: true }, { messages: [], stream: true });
+    expect(getReader).not.toHaveBeenCalled();
+    expect((await readFetchChatTurn_ACU(response, true)).turn.content).toBe('转发流式正文');
+    expect(getReader).toHaveBeenCalledTimes(1);
+    expect(cancel).not.toHaveBeenCalled();
+    expect(original.body!.locked).toBe(false);
+    expect(getAllLogs().at(-1)!.message).toContain(raw);
+  });
+});
+
+describe('酒馆转发 HTTP 错误正文', () => {
+  it.each(['direct', 'resolved', 'chatTurn'] as const)('%s 调用保留 HTTP 分类并单次记录完整错误正文', async mode => {
+    const { clearLogs, getAllLogs } = await import('../../../src/shared/log-buffer');
+    clearLogs();
+    const raw = '上游完整错误正文'.repeat(2000);
+    const response = new Response(raw, { status: 429 });
+    const text = vi.spyOn(response, 'text');
+    mockFetch.mockResolvedValueOnce(response);
+    const messages = [{ role: 'user', content: '测试错误结果' }];
+    const resolved = { apiMode: 'custom' as const, apiConfig: mockSettings.apiConfig, tavernProfile: '' };
+    const operation = mode === 'direct' ? callCustomOpenAI_ACU_Direct(messages)
+      : mode === 'resolved' ? callAIWithResolvedPreset_ACU(messages, resolved)
+      : callAIChatTurn_ACU(messages, resolved);
+    const error = await operation.catch(error => error);
+    expect(error).toBeInstanceOf(AgentApiHttpError_ACU);
+    expect(error.status).toBe(429);
+    expect(isRetryableAiRequestError_ACU(error)).toBe(true);
+    expect(text).toHaveBeenCalledTimes(1);
+    const replies = getAllLogs().filter(entry => entry.tag === 'API酒馆转发' && entry.message.includes('回复 HTTP'));
+    expect(replies).toHaveLength(1);
+    expect(replies[0].message).toContain(raw);
+  });
+});

@@ -487,6 +487,12 @@ export function getApiConfigByPreset_ACU(presetName: string) {
 }
 
 
+/** 错误正文沿原消费路径记录；读取失败不替换既有 HTTP 异常及重试分类。 */
+async function throwApiHttpError_ACU(response: Response): Promise<never> {
+    try { await response.text(); } catch { /* 读取诊断由传输日志保留，仍抛原 HTTP 分类。 */ }
+    throw new AgentApiHttpError_ACU(response.status, `API 请求失败: ${response.status}`);
+}
+
 export async function callCustomOpenAI_ACU_Direct(messages: any[]) {
       // Reuse the logic from callCustomOpenAI_ACU but bypass the prompt replacement part
       // ... For brevity, I will just call callCustomOpenAI_ACU with a hacked dynamicContent?
@@ -507,7 +513,7 @@ export async function callCustomOpenAI_ACU_Direct(messages: any[]) {
           } else {
              const requestBody = buildCustomApiRequestBody_ACU(messages, settings_ACU.apiConfig, { stripModelPrefix: false });
              const res = await sendCustomApiRequest_ACU(settings_ACU.apiConfig, requestBody, signal);
-             if (!res.ok) throw new AgentApiHttpError_ACU(res.status, `API 请求失败: ${res.status}`);
+             if (!res.ok) await throwApiHttpError_ACU(res);
              // 根据streamingEnabled设置选择响应处理方式
              const content = await handleApiResponse_ACU(res, signal);
              return content;
@@ -792,7 +798,7 @@ export async function callAIWithResolvedPreset_ACU(
                 includeStreamUsage: !!lifecycle?.onUsage,
             }),
         }, signal);
-    if (!response.ok) throw new AgentApiHttpError_ACU(response.status, `API 请求失败: ${response.status}`);
+    if (!response.ok) await throwApiHttpError_ACU(response);
     if (extras?.requireDirectTransport) {
         const parsed = await readFetchChatTurn_ACU(response, extras.streaming ?? false, signal, true);
         assertNotAborted_ACU(signal);
@@ -927,7 +933,7 @@ export async function callAIChatTurn_ACU(
             includeStreamUsage: !!lifecycle?.onUsage,
             tools: extras?.tools,
         }), signal);
-    if (!response.ok) throw new AgentApiHttpError_ACU(response.status, `API 请求失败: ${response.status}`);
+    if (!response.ok) await throwApiHttpError_ACU(response);
     const parsed = await readFetchChatTurn_ACU(response, settings_ACU.streamingEnabled || false, signal);
     reportUsage(parsed.usage);
     return parsed.turn;

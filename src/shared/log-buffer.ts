@@ -35,6 +35,9 @@ export type LogSubscriber = (entry: LogEntry) => void;
 
 /** 缓冲区最大容量 */
 const MAX_BUFFER_SIZE = 2000;
+/** 约 32 MiB UTF-16 正文；按整条淘汰，单条超限仍保留完整最新内容。 */
+export const MAX_BUFFER_CHARACTERS_ACU = 16 * 1024 * 1024;
+let _bufferCharacters = 0;
 
 /** 未分类标签 */
 const UNCATEGORIZED_TAG = '未分类';
@@ -193,10 +196,12 @@ export function pushLog(level: LogLevel, args: any[], alwaysCollect = false): vo
     message: formatArgs(args),
   };
 
-  // 环形缓冲区：超过上限时丢弃最旧的
+  // 超过条数或正文预算时淘汰完整旧条目，不截断请求/回复。
   _buffer.push(entry);
-  if (_buffer.length > MAX_BUFFER_SIZE) {
-    _buffer = _buffer.slice(_buffer.length - MAX_BUFFER_SIZE);
+  _bufferCharacters += entry.message.length;
+  while (_buffer.length > 1 &&
+    (_buffer.length > MAX_BUFFER_SIZE || _bufferCharacters > MAX_BUFFER_CHARACTERS_ACU)) {
+    _bufferCharacters -= _buffer.shift()!.message.length;
   }
 
   // 通知所有订阅者
@@ -228,6 +233,7 @@ export function getLogCount(): number {
  */
 export function clearLogs(): void {
   _buffer = [];
+  _bufferCharacters = 0;
 }
 
 /**
@@ -267,6 +273,7 @@ export function getSubscriberCount(): number {
  */
 export function _resetForTesting(): void {
   _buffer = [];
+  _bufferCharacters = 0;
   _nextId = 1;
   _subscribers.clear();
   _knownTags.clear();

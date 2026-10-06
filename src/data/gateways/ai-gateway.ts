@@ -11,6 +11,7 @@
 import { TavernHelper_API_ACU, SillyTavern_API_ACU } from '../../shared/host-api';
 import { logWarn_ACU } from '../../shared/utils';
 import { pristineFetch_ACU } from './pristine-fetch';
+import { createApiRequestLog_ACU, observeApiResponse_ACU } from '../../shared/api-request-log';
 
 // ═══ 可用性检查 ═══
 
@@ -52,8 +53,15 @@ export async function generateRaw_ACU(options: {
     if (!isGenerateRawAvailable_ACU()) {
         throw new Error('主API生成不可用：未检测到酒馆助手（TavernHelper.generateRaw）。请安装酒馆助手（JS-Slash-Runner），或在设置中改用自定义API。');
     }
-    const response = await TavernHelper_API_ACU.generateRaw(options);
-    return typeof response === 'string' ? response : String(response ?? '');
+    const log = createApiRequestLog_ACU('API主连接', '宿主 generateRaw 调用参数（非最终网络请求）', options);
+    try {
+        const response = await TavernHelper_API_ACU.generateRaw(options);
+        log.write('宿主 generateRaw 返回值', response);
+        return typeof response === 'string' ? response : String(response ?? '');
+    } catch (error) {
+        log.write('宿主 generateRaw 调用失败', error);
+        throw error;
+    }
 }
 
 /**
@@ -75,14 +83,20 @@ export async function sendConnectionManagerRequest_ACU(
         throw new Error('ConnectionManagerRequestService 不可用。请检查酒馆版本或连接管理器配置。');
     }
     const service = SillyTavern_API_ACU.ConnectionManagerRequestService;
-    // 未传扩展参数时保持三参调用，旧调用方的请求形态不变。
-    if (custom === undefined && overridePayload === undefined) {
-        return await service.sendRequest(profileId, messages, maxTokens);
+    const log = createApiRequestLog_ACU('API连接预设', '宿主 ConnectionManager 调用参数（非最终网络请求）',
+        { profileId, messages, maxTokens, custom, overridePayload });
+    try {
+        // 未传扩展参数时保持三参调用，旧调用方的请求形态不变。
+        // 扩展参数保持宿主 sendRequest(profileId, prompt, maxTokens, custom, overridePayload) 契约。
+        const response = custom === undefined && overridePayload === undefined
+            ? await service.sendRequest(profileId, messages, maxTokens)
+            : await service.sendRequest(profileId, messages, maxTokens, custom ?? {}, overridePayload ?? {});
+        log.write('宿主 ConnectionManager 返回值', response);
+        return response;
+    } catch (error) {
+        log.write('宿主 ConnectionManager 调用失败', error);
+        throw error;
     }
-    // 宿主 sendRequest(profileId, prompt, maxTokens, custom, overridePayload)：
-    // custom 与默认参数合并（如 extractData:false 返回原始响应）；
-    // overridePayload 展开进 Chat Completion 请求体（如 tools、tool_choice）。
-    return await service.sendRequest(profileId, messages, maxTokens, custom ?? {}, overridePayload ?? {});
 }
 
 /**
@@ -198,7 +212,7 @@ export async function sendMainApiChatCompletionRequest_ACU(
         request.azure_deployment_name = oai.azure_deployment_name;
         request.azure_api_version = oai.azure_api_version;
     }
-    return await postChatCompletionDirect_ACU({ ...request, ...overridePayload }, signal, options);
+    return await postChatCompletionDirect_ACU({ ...request, ...overridePayload }, signal, options, 'API主连接');
 }
 
 const CHAT_COMPLETION_GENERATE_URL_ACU = '/api/backends/chat-completions/generate';
@@ -216,6 +230,7 @@ export async function postChatCompletionDirect_ACU(
     payload: Record<string, unknown>,
     signal?: AbortSignal | null,
     options?: DirectChatCompletionOptions_ACU,
+    logTag = 'API酒馆直发',
 ): Promise<any> {
     if (options?.streaming && !options.readResponse) {
         throw new Error('流式直发缺少本次请求的响应解析器，未发送请求。');
@@ -227,26 +242,38 @@ export async function postChatCompletionDirect_ACU(
     // 有工具时保留调用方的选择，不强制调用工具，也不剥离未知的宿主发送包装。
     const request = { ...data, stream: options?.streaming ?? false };
     if (!options?.preservePayload && (!Array.isArray(request.tools) || request.tools.length === 0)) request.tool_choice = 'none';
-    const response = await pristineFetch_ACU(CHAT_COMPLETION_GENERATE_URL_ACU, {
-        method: 'POST',
-        headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
-        cache: 'no-cache',
-        body: JSON.stringify(request),
-        signal: signal ?? undefined,
-    });
-    if (response.ok && options?.readResponse) return await options.readResponse(response);
-    const text = await response.text();
-    let json: any = null;
+    const headers = { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' };
+    const wire = JSON.stringify(request);
+    const log = createApiRequestLog_ACU(logTag, `请求 POST ${CHAT_COMPLETION_GENERATE_URL_ACU}（酒馆后端请求体）`, wire, { request, headers });
     try {
-        json = text ? JSON.parse(text) : null;
-    } catch {
-        throw new Error(`生成端点返回了无法解析的响应（HTTP ${response.status}）。`);
+        const rawResponse = await pristineFetch_ACU(CHAT_COMPLETION_GENERATE_URL_ACU, {
+            method: 'POST',
+            headers,
+            cache: 'no-cache',
+            body: wire,
+            signal: signal ?? undefined,
+        });
+        const observed = observeApiResponse_ACU(rawResponse, log, signal);
+        const response = observed.response;
+        try {
+            if (response.ok && options?.readResponse) return await options.readResponse(response);
+            const text = await response.text();
+            let json: any = null;
+            try {
+                json = text ? JSON.parse(text) : null;
+            } catch {
+                throw new Error(`生成端点返回了无法解析的响应（HTTP ${response.status}）。`);
+            }
+            if (!response.ok || json?.error) {
+                const detail = json?.error?.message || (typeof json?.error === 'string' ? json.error : '') || text.slice(0, 300);
+                throw new Error(`API 请求失败: HTTP ${response.status}${detail ? ` ${detail}` : ''}`);
+            }
+            return json;
+        } finally { observed.finish(); }
+    } catch (error) {
+        log.write('请求或响应处理失败', error);
+        throw error;
     }
-    if (!response.ok || json?.error) {
-        const detail = json?.error?.message || (typeof json?.error === 'string' ? json.error : '') || text.slice(0, 300);
-        throw new Error(`API 请求失败: HTTP ${response.status}${detail ? ` ${detail}` : ''}`);
-    }
-    return json;
 }
 
 /**
@@ -313,7 +340,7 @@ export async function sendProfileChatCompletionRequest_ACU(
         proxy_password: proxy.password,
         custom_prompt_post_processing: profile['prompt-post-processing'],
         ...overridePayload,
-    }, signal, options);
+    }, signal, options, 'API连接预设');
 }
 
 /**
