@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const m = vi.hoisted(() => ({
   wasStopped: false,
+  chatKey: 'chat-a',
+  isolationKey: 'isolation-a',
   executePlan: vi.fn(),
   logSkip: vi.fn(),
   sqlite: true,
@@ -25,7 +27,8 @@ vi.mock('../../../src/presentation/components/plot-editors', () => ({
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   NEW_MESSAGE_DEBOUNCE_DELAY_ACU: 500, abortAllActiveRequests_ACU: m.abortRequests,
   allChatMessages_ACU: [], coreApisAreReady_ACU: true,
-  currentJsonTableData_ACU: { sheet_0: {} }, getCurrentIsolationKey_ACU: vi.fn(() => ''),
+  get currentChatFileIdentifier_ACU() { return m.chatKey; },
+  currentJsonTableData_ACU: { sheet_0: {} }, getCurrentIsolationKey_ACU: vi.fn(() => m.isolationKey),
   lastTotalAiMessages_ACU: 1, settings_ACU: { autoUpdateEnabled: true, maxConcurrentGroups: 1, silentModeEnabled: true },
   _set_coreApisAreReady_ACU: vi.fn(), _set_lastTotalAiMessages_ACU: vi.fn(),
   _set_manualExtraHint_ACU: vi.fn(), _set_wasStoppedByUser_ACU: vi.fn(),
@@ -69,6 +72,8 @@ async function settleMicrotasks() { await Promise.resolve(); await Promise.resol
 describe('triggerAutomaticUpdateIfNeeded_ACU 逐次串行调度', () => {
   beforeEach(() => {
     m.wasStopped = false;
+    m.chatKey = 'chat-a';
+    m.isolationKey = '';
     m.sqlite = true;
     m.showToast.mockReset();
     m.updateTask.mockReset();
@@ -206,5 +211,31 @@ describe('triggerAutomaticUpdateIfNeeded_ACU 逐次串行调度', () => {
     expect(m.executePlan).toHaveBeenCalledTimes(2);
     expect(m.logSkip).toHaveBeenCalledWith('execution_failed', expect.objectContaining({ stage: 'dispatch' }));
     expect(m.logSkip).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['chat', 'isolation', 'array'] as const)('正文接收任务等待期间 %s 变化，不在新作用域执行', async changed => {
+    let releaseFirst!: () => void;
+    m.executePlan.mockImplementationOnce(() => new Promise(resolve => {
+      releaseFirst = () => resolve({ failedGroups: 0, errors: [], autoMergeTriggered: false, autoMergeSuccess: false });
+    }));
+    const { triggerAutomaticUpdateIfNeeded_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-trigger');
+    const first = triggerAutomaticUpdateIfNeeded_ACU();
+    await settleMicrotasks();
+    const queued = triggerAutomaticUpdateIfNeeded_ACU(undefined, {
+      eventType: 'CHARACTER_MESSAGE_RENDERED', messageId: 1,
+      chatKey: m.chatKey, isolationKey: m.isolationKey,
+    });
+    if (changed === 'chat') m.chatKey = 'chat-b';
+    if (changed === 'isolation') m.isolationKey = 'another-isolation';
+    if (changed === 'array') m.getChat.mockReturnValue([{ is_user: false }]);
+
+    releaseFirst();
+    await Promise.all([first, queued]);
+
+    expect(m.executePlan).toHaveBeenCalledOnce();
+    expect(m.buildPlan).toHaveBeenCalledOnce();
+    expect(m.logSkip).toHaveBeenCalledExactlyOnceWith('chat_changed', expect.objectContaining({
+      eventType: 'CHARACTER_MESSAGE_RENDERED', chatKey: 'chat-a', isolationKey: '', stage: 'dequeue',
+    }));
   });
 });

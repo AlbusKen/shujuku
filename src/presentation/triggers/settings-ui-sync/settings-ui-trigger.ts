@@ -7,7 +7,7 @@ import { updateCardUpdateStatusDisplay_ACU } from '../../components/update-statu
 import { isAutoUpdatingCard_ACU, _set_isAutoUpdatingCard_ACU } from '../../components/plot-editors';
 import { showToastr_ACU } from '../../theme/toast';
 import { getChatArray_ACU } from '../../../service/chat/chat-service';
-import { abortAllActiveRequests_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU } from '../../../service/runtime/state-manager';
+import { abortAllActiveRequests_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU } from '../../../service/runtime/state-manager';
 import { $manualExtraHintCheckbox_ACU } from '../../state/ui-refs';
 import { processUpdates_ACU } from '../update-process';
 import { getSortedSheetKeys_ACU } from '../../../service/template/chat-scope';
@@ -90,10 +90,19 @@ let autoUpdateQueueId_ACU = 0;
     const queueId = ++autoUpdateQueueId_ACU;
     const runId = performanceContext?.runId || `autofill-${queueId}`;
     const context = { ...triggerContext, runId, queueId };
+    const scoped = context.chatKey !== undefined || context.isolationKey !== undefined;
+    const chatAtEnqueue = scoped ? getChatArray_ACU() : undefined;
     logAutoFillStage_ACU('queued', context);
     const request = autoUpdateQueueTail_ACU.then(async () => {
       logAutoFillStage_ACU('dequeued', context);
       try {
+        // 正文监听延后执行；排队期间切换聊天不能把旧信号用于新聊天。
+        if (scoped && (getChatArray_ACU() !== chatAtEnqueue
+          || context.chatKey !== undefined && context.chatKey !== currentChatFileIdentifier_ACU
+          || context.isolationKey !== undefined && context.isolationKey !== getCurrentIsolationKey_ACU())) {
+          logAutoFillSkip_ACU('chat_changed', { ...context, stage: 'dequeue' });
+          return;
+        }
         await runAutomaticUpdateIfNeeded_ACU({ ...performanceContext, runId }, context);
         logAutoFillStage_ACU('queue_completed', context);
       } catch (error) {

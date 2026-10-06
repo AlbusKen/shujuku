@@ -30,6 +30,7 @@ const m = vi.hoisted(() => ({
   persistedChat: [] as any[],
   ensureSeed: vi.fn(), processingPlot: false,
   hostEmit: vi.fn(), messageUpdated: vi.fn(),
+  publicCompletionObserver: vi.fn(),
   getInput: vi.fn(), setInput: vi.fn(),
   beginDisguise: vi.fn(), finishDisguise: vi.fn(), generate: vi.fn(),
   markIntercept: vi.fn(), skipIntercept: vi.fn(() => false), stopGeneration: vi.fn(),
@@ -137,6 +138,13 @@ beforeAll(async () => {
       await m.messageUpdated(args[0]);
     } else if (event === 'generation_stopped') {
       m.generationStopped?.();
+    } else if (event === 'generation_ended') {
+      await m.generationEnded?.(args[0]);
+      m.publicCompletionObserver(event, ...args);
+    } else if (event === 'message_received' || event === 'character_message_rendered') {
+      const callback = event === 'message_received' ? m.messageReceived : m.characterMessageRendered;
+      await callback?.(args[0], args[1]);
+      m.publicCompletionObserver(event, ...args);
     } else if (event === 'chat') {
       await m.chatChanged?.(args[0]);
     }
@@ -181,6 +189,7 @@ beforeEach(() => {
   m.ensureSeed.mockResolvedValue(false);
   m.isQuiet.mockReturnValue(false);
   m.autoUpdate.mockResolvedValue(undefined);
+  m.publicCompletionObserver.mockReset();
   m.handleNewMessage.mockResolvedValue(undefined);
   delete m.settings.worldSimulationPageEnabled;
   delete m.settings.plotSendDisguiseDisabled;
@@ -348,8 +357,14 @@ describe('mainInitialize_ACU 聊天变更防抖', () => {
 
 // T5：TavernHelper.generate 钩子内发送前注入失败不得中断宿主生成（对齐 GENERATION_AFTER_COMMANDS 降级）。
 
+async function dispatchCompletionTasks_ACU(): Promise<void> {
+  await vi.advanceTimersByTimeAsync(0);
+}
+
 describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
-  it.each(['MESSAGE_RECEIVED', 'CHARACTER_MESSAGE_RENDERED'] as const)('%s 独立唤醒检查并传递明确消息下标', (eventName) => {
+  beforeEach(() => { vi.useFakeTimers(); });
+
+  it.each(['MESSAGE_RECEIVED', 'CHARACTER_MESSAGE_RENDERED'] as const)('%s 独立唤醒检查并传递明确消息下标', async (eventName) => {
     m.currentChatKey = 'chat-a';
     m.api.chat = [{ is_user: true, mes: '用户' }, { is_user: false, mes: '正文' }];
     m.autoUpdate.mockResolvedValue(undefined);
@@ -357,25 +372,31 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
 
     expect(callback).toBeTypeOf('function');
     expect(callback!(1, 'normal')).toBeUndefined();
+    expect(m.autoUpdate).not.toHaveBeenCalled();
+    expect(m.handleNewMessage).not.toHaveBeenCalled();
+    await dispatchCompletionTasks_ACU();
 
     expect(m.handleNewMessage).toHaveBeenCalledWith(eventName, expect.objectContaining({
       eventMessageId: 1, eventMessageIdKind: 'index', chatKey: 'chat-a',
       isolationKey: 'test-isolation', capturedChatLength: 2, capturedAiFloorCount: 1,
     }));
-    expect(m.autoUpdate).toHaveBeenCalledExactlyOnceWith(undefined, { eventType: eventName, messageId: 1 });
+    expect(m.autoUpdate).toHaveBeenCalledExactlyOnceWith(undefined, {
+      eventType: eventName, messageId: 1, chatKey: 'chat-a', isolationKey: 'test-isolation',
+    });
     expect(m.consumeGeneration).not.toHaveBeenCalled();
     expect(m.consumeInternalGeneration).not.toHaveBeenCalled();
     expect(m.consumeSimulationInternalGeneration).not.toHaveBeenCalled();
     expect(m.handleSimulationCompletion).not.toHaveBeenCalled();
   });
 
-  it.each(['normal', 'swipe', 'appendFinal', 'continue', 'first_message', 'quiet'])('正文事件的 %s 类型只排除开场白自动填表，保留后续真实回复', (type) => {
+  it.each(['normal', 'swipe', 'appendFinal', 'continue', 'first_message', 'quiet'])('正文事件的 %s 类型只排除开场白自动填表，保留后续真实回复', async (type) => {
     m.autoUpdate.mockResolvedValue(undefined);
     m.isQuiet.mockReturnValue(true);
     m.generationStarted!('normal', { quiet_prompt: '附加提示', automatic_trigger: true }, false);
 
     m.messageReceived!(0, type);
     m.characterMessageRendered!(0, type);
+    await dispatchCompletionTasks_ACU();
 
     expect(m.handleNewMessage).toHaveBeenCalledTimes(2);
     expect(m.autoUpdate).toHaveBeenCalledTimes(type === 'first_message' ? 0 : 2);
@@ -385,24 +406,75 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
       // 开场白过滤不建立冷却期，也不按下标永久禁用首条消息的真实续写。
       m.messageReceived!(0, 'continue');
       m.characterMessageRendered!(0, 'continue');
+      await dispatchCompletionTasks_ACU();
       expect(m.autoUpdate).toHaveBeenCalledTimes(2);
       expect(m.handleNewMessage).toHaveBeenCalledTimes(4);
       m.generationEnded!(1);
+      await dispatchCompletionTasks_ACU();
       expect(m.autoUpdate).toHaveBeenCalledTimes(3);
     }
   });
 
-  it('无消息参数仍唤醒已有兼容检查，不增加拒绝条件', () => {
+  it('无消息参数仍唤醒已有兼容检查，不增加拒绝条件', async () => {
     m.messageReceived!();
     m.characterMessageRendered!('unknown');
+    await dispatchCompletionTasks_ACU();
 
     expect(m.handleNewMessage).toHaveBeenNthCalledWith(1, 'MESSAGE_RECEIVED', undefined);
     expect(m.handleNewMessage).toHaveBeenNthCalledWith(2, 'CHARACTER_MESSAGE_RENDERED', undefined);
   });
+
+  it.each(['GENERATION_ENDED', 'MESSAGE_RECEIVED', 'CHARACTER_MESSAGE_RENDERED'] as const)(
+    '%s 的私有接收不改变公共派发或重放信号', async eventName => {
+      m.currentChatKey = 'chat-a';
+      const message = Object.freeze({ is_user: false, mes: '正文' });
+      m.api.chat = [message];
+      const source = m.api.eventSource;
+      const emit = source.emit;
+      const event = m.api.eventTypes[eventName];
+      m.autoUpdate.mockImplementationOnce(() => { throw new Error('内部填表失败'); });
+      m.handleNewMessage.mockRejectedValueOnce(new Error('内部优化失败'));
+
+      await expect(source.emit(event, 0, 'normal')).resolves.toBeUndefined();
+      expect(m.publicCompletionObserver).toHaveBeenCalledExactlyOnceWith(event, 0, 'normal');
+      expect(m.autoUpdate).not.toHaveBeenCalled();
+      expect(m.handleNewMessage).not.toHaveBeenCalled();
+      expect(source.emit).toBe(emit);
+      await dispatchCompletionTasks_ACU();
+
+      expect(m.autoUpdate).toHaveBeenCalledOnce();
+      expect(m.handleNewMessage).toHaveBeenCalledOnce();
+      expect(m.hostEmit).toHaveBeenCalledExactlyOnceWith(event, 0, 'normal');
+      expect(m.publicCompletionObserver).toHaveBeenCalledOnce();
+      expect(m.api.chat).toEqual([message]);
+      expect(m.generate).not.toHaveBeenCalled();
+      expect(m.stopGeneration).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['GENERATION_ENDED', 'MESSAGE_RECEIVED', 'CHARACTER_MESSAGE_RENDERED'] as const)(
+    '%s 的后台任务不跨聊天执行', async eventName => {
+      m.currentChatKey = 'chat-a';
+      m.api.chat = [{ is_user: false, mes: '原聊天正文' }];
+      const event = m.api.eventTypes[eventName];
+      await m.api.eventSource.emit(event, 0, 'normal');
+      m.currentChatKey = 'chat-b';
+      m.api.chat = [{ is_user: false, mes: '另一聊天正文' }];
+      await dispatchCompletionTasks_ACU();
+
+      expect(m.publicCompletionObserver).toHaveBeenCalledExactlyOnceWith(event, 0, 'normal');
+      expect(m.autoUpdate).not.toHaveBeenCalled();
+      expect(m.handleNewMessage).not.toHaveBeenCalled();
+      expect(m.flushPlot).not.toHaveBeenCalled();
+      expect(m.generate).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('mainInitialize_ACU continuation internal AI event isolation', () => {
-  it('内部生成只隔离续写和优化，不阻断填表信号', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+
+  it('内部生成只隔离续写和优化，不阻断填表信号', async () => {
     const identity = { source: 'turn_instruction' as const, requestId: 'request-a', chatIdentity: 'chat-a', taskId: 'task-a', stageId: 'stage-a', revision: 1, nodeId: 'node-a', turnId: 'turn-a', attemptId: 'attempt-a' };
     m.consumeInternalGeneration.mockReturnValueOnce(identity);
 
@@ -410,6 +482,7 @@ describe('mainInitialize_ACU continuation internal AI event isolation', () => {
     expect(m.generationEnded).toBeTypeOf('function');
     m.generationStarted!('normal', {}, false);
     m.generationEnded!(42);
+    await dispatchCompletionTasks_ACU();
 
     expect(m.bindInternalGeneration).toHaveBeenCalledWith(m.gate.generationSeq);
     expect(m.bindSimulationInternalGeneration).toHaveBeenCalledWith(m.gate.generationSeq);
@@ -422,11 +495,14 @@ describe('mainInitialize_ACU continuation internal AI event isolation', () => {
 });
 
 describe('mainInitialize_ACU world simulation generation isolation', () => {
-  it('simulation 内部生成结束时仅短路推演和优化，仍派发填表', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+
+  it('simulation 内部生成结束时仅短路推演和优化，仍派发填表', async () => {
     m.consumeSimulationInternalGeneration.mockReturnValueOnce({ requestId: 'simulation-request', runId: 'run-a', role: 'world-director' });
 
     m.generationStarted!('normal', {}, false);
     m.generationEnded!(42);
+    await dispatchCompletionTasks_ACU();
 
     expect(m.bindSimulationInternalGeneration).toHaveBeenCalledWith(m.gate.generationSeq);
     expect(m.consumeSimulationInternalGeneration).toHaveBeenCalledWith(m.gate.generationSeq);
@@ -441,6 +517,7 @@ describe('mainInitialize_ACU world simulation generation isolation', () => {
 
     m.generationStarted!('normal', {}, false);
     m.generationEnded!(42);
+    await dispatchCompletionTasks_ACU();
     expect(m.createSimulationIntent).not.toHaveBeenCalled();
     expect(m.getSimulationRuntime).not.toHaveBeenCalled();
     expect(m.handleNewMessage).toHaveBeenCalledTimes(1);
@@ -448,12 +525,13 @@ describe('mainInitialize_ACU world simulation generation isolation', () => {
     m.settings.worldSimulationPageEnabled = true;
     m.generationStarted!('normal', {}, false);
     m.generationEnded!(42);
-    await Promise.resolve();
+    await dispatchCompletionTasks_ACU();
     expect(m.handleSimulationCompletion).toHaveBeenCalledTimes(1);
 
     m.settings.worldSimulationPageEnabled = false;
     m.generationStarted!('normal', {}, false);
     m.generationEnded!(42);
+    await dispatchCompletionTasks_ACU();
     expect(m.createSimulationIntent).toHaveBeenCalledTimes(1);
     expect(m.handleSimulationCompletion).toHaveBeenCalledTimes(1);
     expect(m.handleNewMessage).toHaveBeenCalledTimes(3);
@@ -466,7 +544,7 @@ describe('mainInitialize_ACU world simulation generation isolation', () => {
 
     m.generationStarted!('normal', {}, false);
     m.generationEnded!(42);
-    await Promise.resolve();
+    await dispatchCompletionTasks_ACU();
 
     expect(m.createSimulationIntent).toHaveBeenCalledWith(42, 'chat-a', 'test-isolation', m.gate.generationSeq);
     expect(m.handleSimulationCompletion).toHaveBeenCalledTimes(1);
@@ -485,7 +563,7 @@ describe('mainInitialize_ACU world simulation generation isolation', () => {
     m.generationEnded!(42);
     m.generationStarted!('normal', { automatic_trigger: true }, false);
     m.generationEnded!(42);
-    await Promise.resolve();
+    await dispatchCompletionTasks_ACU();
 
     expect(m.createSimulationIntent).not.toHaveBeenCalled();
     expect(m.handleSimulationCompletion).not.toHaveBeenCalled();
@@ -494,7 +572,9 @@ describe('mainInitialize_ACU world simulation generation isolation', () => {
 });
 
 describe('mainInitialize_ACU continuation host generation isolation', () => {
-  it('claimed host generation runs the bridge and the normal auto-update pipeline in parallel', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+
+  it('claimed host generation runs the bridge and the normal auto-update pipeline in parallel', async () => {
     const bridge = { onGenerationStarted: vi.fn(() => true), claimsGenerationEnded: vi.fn(() => true), onGenerationEnded: vi.fn() };
     m.continuationBridge = bridge;
     expect(reinitialize_ACU).not.toBeNull();
@@ -504,6 +584,7 @@ describe('mainInitialize_ACU continuation host generation isolation', () => {
 
     m.generationStarted!('normal', {}, false);
     m.generationEnded!(42);
+    await dispatchCompletionTasks_ACU();
 
     // 第二个参数是宽松认领开关：普通生成（非 quiet、非 dryRun、非自动触发）才允许，
     // 因为宿主的 GENERATION_STARTED 常在发送返回后的微任务里才到，严格同步配对必然错过。
@@ -519,7 +600,7 @@ describe('mainInitialize_ACU continuation host generation isolation', () => {
     expect(m.flushPlot).toHaveBeenCalledOnce();
   });
 
-  it('leaves an unclaimed host generation on the normal auto-update path', () => {
+  it('leaves an unclaimed host generation on the normal auto-update path', async () => {
     const bridge = { onGenerationStarted: vi.fn(() => false), claimsGenerationEnded: vi.fn(() => false), onGenerationEnded: vi.fn() };
     m.continuationBridge = bridge;
 
@@ -527,15 +608,18 @@ describe('mainInitialize_ACU continuation host generation isolation', () => {
     reinitialize_ACU!();
     m.generationStarted!('normal', {}, false);
     m.generationEnded!(42);
+    await dispatchCompletionTasks_ACU();
 
     expect(bridge.onGenerationStarted).toHaveBeenCalledWith(m.gate.generationSeq, { allowOrdinaryLooseClaim: true, automaticTrigger: false, quietLike: false, dryRun: false });
     expect(bridge.claimsGenerationEnded).toHaveBeenCalledWith(m.gate.generationSeq, { allowOrdinaryLooseClaim: true, automaticTrigger: false, quietLike: false, dryRun: false });
     expect(bridge.onGenerationEnded).not.toHaveBeenCalled();
-    expect(m.autoUpdate).toHaveBeenCalledExactlyOnceWith(undefined, { eventType: 'GENERATION_ENDED', messageId: 42 });
+    expect(m.autoUpdate).toHaveBeenCalledExactlyOnceWith(undefined, {
+      eventType: 'GENERATION_ENDED', messageId: 42, chatKey: '', isolationKey: 'test-isolation',
+    });
     expect(m.handleNewMessage).toHaveBeenCalledWith('GENERATION_ENDED', expect.objectContaining({ eventMessageId: 42 }));
   });
 
-  it('quiet、dryRun 与自动触发的生成不开放宽松认领', () => {
+  it('quiet、dryRun 与自动触发的生成不开放宽松认领', async () => {
     const bridge = { onGenerationStarted: vi.fn(() => false), claimsGenerationEnded: vi.fn(() => false), onGenerationEnded: vi.fn() };
     m.continuationBridge = bridge;
     reinitialize_ACU!();
@@ -549,6 +633,7 @@ describe('mainInitialize_ACU continuation host generation isolation', () => {
     for (const call of bridge.onGenerationStarted.mock.calls) expect(call[1].allowOrdinaryLooseClaim).toBe(false);
     expect(bridge.onGenerationStarted).toHaveBeenCalledTimes(3);
     m.generationEnded!(42);
+    await dispatchCompletionTasks_ACU();
     expect(bridge.claimsGenerationEnded).toHaveBeenLastCalledWith(m.gate.generationSeq, { allowOrdinaryLooseClaim: false, automaticTrigger: true, quietLike: false, dryRun: false });
     expect(m.flushPlot).not.toHaveBeenCalled();
   });

@@ -3,6 +3,7 @@
 
 import { cancelPendingChatMutationRefresh_ACU, scheduleChatMutationRefresh_ACU } from './chat-mutation-scheduler';
 import { installHostEventWaitGate_ACU, installPlotSendEventGate_ACU, redirectPlotSendEvent_ACU } from './plot-send-event-gate';
+import { PassiveCompletionReceiver_ACU } from './passive-completion-receiver';
 import { runWithAbortSignal_ACU } from '../../shared/abort-signal';
 import { installZeroLayerBootstrap_ACU } from './zero-layer-bootstrap';
 import { showToastr_ACU } from '../theme/toast';
@@ -543,21 +544,28 @@ export   function mainInitialize_ACU() {
           });
         }
         if (SillyTavern_API_ACU.eventTypes.GENERATION_ENDED) {
+            const receiver = new PassiveCompletionReceiver_ACU();
             const onGenerationEnded = (message_id: any) => {
-                // 每个宿主信号独立入队，不受其他功能的事件归属或早返回影响。
-                void triggerAutomaticUpdateIfNeeded_ACU(undefined, { eventType: 'GENERATION_ENDED', messageId: message_id }).catch(() => {
-                  // 调度入口已记录脱敏失败原因，避免将异常载荷写入日志。
+              receiver.receive('GENERATION_ENDED', dispatch => {
+                const chatAtCapture = SillyTavern_API_ACU.chat;
+                const chatKey = currentChatFileIdentifier_ACU;
+                const isolationKey = getCurrentIsolationKey_ACU();
+                const isCurrent = () => SillyTavern_API_ACU?.chat === chatAtCapture
+                  && currentChatFileIdentifier_ACU === chatKey && getCurrentIsolationKey_ACU() === isolationKey;
+                // 每个信号独立登记；仅自己的后台处理受原聊天作用域约束。
+                dispatch('auto-fill', () => {
+                  if (!isCurrent()) return;
+                  return triggerAutomaticUpdateIfNeeded_ACU(undefined, {
+                    eventType: 'GENERATION_ENDED', messageId: message_id, chatKey, isolationKey,
+                  });
                 });
-                logDebug_ACU(`ACU GENERATION_ENDED event for message_id: ${message_id}`);
                 const generationContext = consumeGenerationContextForEnded_ACU();
                 const internalRequest = consumeContinuationInternalAiGenerationEnded_ACU(generationContext?.seq);
                 if (internalRequest) {
-                  logDebug_ACU(`ACU 忽略 continuation 内部 ${internalRequest.source} GENERATION_ENDED: ${internalRequest.requestId}`);
                   return;
                 }
                 const simulationInternalRequest = consumeWorldSimulationInternalAiGenerationEnded_ACU(generationContext?.seq);
                 if (simulationInternalRequest) {
-                  logDebug_ACU(`ACU 忽略格林推演内部 ${simulationInternalRequest.role} GENERATION_ENDED: ${simulationInternalRequest.requestId}`);
                   return;
                 }
                 const continuationBridge = getContinuationHostGenerationBridge_ACU();
@@ -572,21 +580,23 @@ export   function mainInitialize_ACU() {
                   dryRun: Boolean(generationContext?.dryRun),
                 };
                 if (continuationBridge?.claimsGenerationEnded(generationContext?.seq, continuationEventContext)) {
-                  // 桥负责续写归属与续轮；正文优化独立定位，填表信号已入队。
-                  void continuationBridge.onGenerationEnded(message_id, generationContext?.seq, continuationEventContext);
+                  // 桥只认领自己的轮次；后续处理不进入公共事件派发链。
+                  dispatch('continuation', () => {
+                    if (!isCurrent()) return;
+                    return continuationBridge.onGenerationEnded(message_id, generationContext?.seq, continuationEventContext);
+                  });
                 }
                 // [触发修复] 原子捕获完整意图快照：事件参数只作为锚点，不承诺是 AI 数组下标。
                 // makeFirst 可能早于宿主把本轮 AI 回复追加进 chat，因此必须记录捕获时边界，
                 // 由 resolveGeneratedAiMessageIndex_ACU 在防抖回调中按唯一候选规则解析。
-                const chatAtCapture = SillyTavern_API_ACU?.chat || [];
                 const eventMessageId = typeof message_id === 'number' && Number.isInteger(message_id)
                   ? message_id
                   : undefined;
                 const optimizationIntent = eventMessageId !== undefined
                   ? {
                       eventMessageId,
-                      chatKey: currentChatFileIdentifier_ACU,
-                      isolationKey: getCurrentIsolationKey_ACU(),
+                      chatKey,
+                      isolationKey,
                       capturedAt: Date.now(),
                       capturedChatLength: chatAtCapture.length,
                       capturedAiFloorCount: chatAtCapture.filter((m: any) => m && !m.is_user && m?.extra?.type !== 'narrator').length,
@@ -595,34 +605,36 @@ export   function mainInitialize_ACU() {
                   }
                   : undefined;
                 // 格林推演独立判断生成上下文与内部请求归属；缺失上下文不直接跳过。
-                // 此判断不影响已经入队的填表信号。
+                // 此判断不影响已登记的独立填表任务。
                 const simulationInternalInFlight = hasWorldSimulationInternalAiInflight_ACU();
                 const simulationContextBlocked = !!generationContext && (generationContext.dryRun || quietLike || automaticTrigger);
                 // 仪表盘开关同时门控后台自动触发；缺失配置按关闭处理，不影响其他正文完成管线。
                 if (settings_ACU.worldSimulationPageEnabled === true && !simulationContextBlocked && !simulationInternalInFlight && eventMessageId !== undefined) {
                   const simulationIntent = createWorldSimulationCompletionIntentForCurrentChat_ACU(
                     eventMessageId,
-                    currentChatFileIdentifier_ACU,
-                    getCurrentIsolationKey_ACU(),
+                    chatKey,
+                    isolationKey,
                     generationContext?.seq,
                   );
-                  void getWorldSimulationRuntime_ACU().handleAssistantCompletion(simulationIntent).catch(error => {
-                    logWarn_ACU(`格林推演自动触发失败：${error instanceof Error ? error.message : String(error)}`);
+                  dispatch('simulation', () => {
+                    if (!isCurrent() || settings_ACU.worldSimulationPageEnabled !== true) return;
+                    return getWorldSimulationRuntime_ACU().handleAssistantCompletion(simulationIntent);
                   });
-                } else {
-                  logDebug_ACU(`格林推演自动触发跳过：${settings_ACU.worldSimulationPageEnabled !== true ? 'feature_disabled' : eventMessageId === undefined ? 'no_event_message_id' : simulationInternalInFlight ? 'internal_inflight' : 'quiet_or_background_generation'}`);
                 }
                 // 未提供 MESSAGE_SENT 或入楼事件早于物化的宿主，在正文结束时再补写一次。
                 if (!isProcessing_Plot_ACU && !generationContext?.dryRun && !quietLike && !automaticTrigger) {
-                  void flushPlotPendingSave_ACU().catch(error => {
-                    logWarn_ACU('[剧情推进] 正文结束后补写失败，保留待保存数据:', error);
+                  dispatch('plot-save', () => {
+                    if (!isCurrent()) return;
+                    return flushPlotPendingSave_ACU();
                   });
                 }
                 if (!generationContext || (!generationContext.dryRun && !quietLike && !automaticTrigger)) {
-                  void handleContentOptimizationEvent_ACU('GENERATION_ENDED', optimizationIntent).catch(error => {
-                    logWarn_ACU('ACU GENERATION_ENDED 正文优化调度失败:', error);
+                  dispatch('content-optimization', () => {
+                    if (!isCurrent()) return;
+                    return handleContentOptimizationEvent_ACU('GENERATION_ENDED', optimizationIntent);
                   });
                 }
+              });
             };
             if (typeof SillyTavern_API_ACU.eventSource.makeFirst === 'function') {
               SillyTavern_API_ACU.eventSource.makeFirst(SillyTavern_API_ACU.eventTypes.GENERATION_ENDED, onGenerationEnded);
@@ -631,38 +643,47 @@ export   function mainInitialize_ACU() {
             }
         }
 
-        // 信号逐次派发填表；消息定位仅用于独立的正文优化。
+        // 每个信号仅作私有接收登记；消息定位用于独立的正文优化。
         const autoFillMessageEvents = ['MESSAGE_RECEIVED', 'CHARACTER_MESSAGE_RENDERED'] as const;
         autoFillMessageEvents.forEach(evName => {
+          const receiver = new PassiveCompletionReceiver_ACU();
           const eventType = SillyTavern_API_ACU.eventTypes[evName];
           if (!eventType) return;
           SillyTavern_API_ACU.eventSource.on(eventType, (messageId: any, messageType?: string) => {
-            // 宿主加载开场白时会发送 first_message；它不是一次新生成，不派发自动填表。
-            if (messageType === 'first_message') {
-              logAutoFillSkip_ACU('initial_chat_message', { eventType: evName, messageId });
-            } else {
-              void triggerAutomaticUpdateIfNeeded_ACU(undefined, { eventType: evName, messageId }).catch(() => {
-                // 调度入口已记录脱敏失败原因。
-              });
-            }
-            const chatAtCapture = SillyTavern_API_ACU?.chat || [];
-            const eventMessageId = typeof messageId === 'number' && Number.isInteger(messageId)
-              ? messageId
-              : undefined;
-            const intent = eventMessageId !== undefined
-              ? {
-                  eventMessageId,
-                  eventMessageIdKind: 'index' as const,
-                  chatKey: currentChatFileIdentifier_ACU,
-                  isolationKey: getCurrentIsolationKey_ACU(),
-                  capturedAt: Date.now(),
-                  capturedChatLength: chatAtCapture.length,
-                  capturedAiFloorCount: chatAtCapture.filter((m: any) => m && !m.is_user && m?.extra?.type !== 'narrator').length,
-                  generationSeq: generationGate_ACU.generationSeq > 0 ? generationGate_ACU.generationSeq : undefined,
+            receiver.receive(evName, dispatch => {
+              const chatAtCapture = SillyTavern_API_ACU.chat;
+              const chatKey = currentChatFileIdentifier_ACU;
+              const isolationKey = getCurrentIsolationKey_ACU();
+              const isCurrent = () => SillyTavern_API_ACU?.chat === chatAtCapture
+                && currentChatFileIdentifier_ACU === chatKey && getCurrentIsolationKey_ACU() === isolationKey;
+              // 开场白不是一次新生成，不安排自动填表。
+              dispatch('auto-fill', () => {
+                if (!isCurrent()) return;
+                if (messageType === 'first_message') {
+                  logAutoFillSkip_ACU('initial_chat_message', { eventType: evName, messageId });
+                  return;
                 }
-              : undefined;
-            void handleContentOptimizationEvent_ACU(evName, intent).catch(error => {
-              logWarn_ACU(`ACU ${evName} 正文优化调度失败:`, error);
+                return triggerAutomaticUpdateIfNeeded_ACU(undefined, { eventType: evName, messageId, chatKey, isolationKey });
+              });
+              const eventMessageId = typeof messageId === 'number' && Number.isInteger(messageId)
+                ? messageId
+                : undefined;
+              const intent = eventMessageId !== undefined
+                ? {
+                    eventMessageId,
+                    eventMessageIdKind: 'index' as const,
+                    chatKey,
+                    isolationKey,
+                    capturedAt: Date.now(),
+                    capturedChatLength: chatAtCapture.length,
+                    capturedAiFloorCount: chatAtCapture.filter((m: any) => m && !m.is_user && m?.extra?.type !== 'narrator').length,
+                    generationSeq: generationGate_ACU.generationSeq > 0 ? generationGate_ACU.generationSeq : undefined,
+                  }
+                : undefined;
+              dispatch('content-optimization', () => {
+                if (!isCurrent()) return;
+                return handleContentOptimizationEvent_ACU(evName, intent);
+              });
             });
           });
         });
