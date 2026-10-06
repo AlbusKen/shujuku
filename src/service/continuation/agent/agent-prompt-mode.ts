@@ -108,6 +108,8 @@ function modeDefaults_ACU(): NonNullable<typeof defaults_ACU> {
       for (const role of Object.keys(mixed) as PromptRole_ACU[]) {
         result[role] = mixed[role].map(segment => ({
           ...segment, content: mode === 'json' ? jsonContent_ACU(segment.content, legacy ? undefined : role) : toolContent_ACU(role, segment.content),
+          ...(segment.snapshotTemplate === undefined ? {} : { snapshotTemplate: mode === 'json'
+            ? jsonContent_ACU(segment.snapshotTemplate, legacy ? undefined : role) : toolContent_ACU(role, segment.snapshotTemplate) }),
         }));
       }
       return result;
@@ -132,9 +134,15 @@ export function adaptContinuationPromptSegmentsToToolMode_ACU(
 ): ContinuationPromptSegment_ACU[] {
   const defaults = modeDefaults_ACU();
   return segments.map(segment => {
-    for (const source of [defaults.mixed[role], defaults.legacyJson[role], defaults.json[role], defaults.tools[role]]) {
+    const sources = [defaults.mixed[role], defaults.legacyJson[role], defaults.json[role], defaults.tools[role]];
+    for (const source of sources) {
       const index = source.findIndex(item => item.role === segment.role && item.content.length === segment.content.length && item.content === segment.content);
-      if (index >= 0) return { ...segment, content: defaults[mode][role][index].content };
+      if (index >= 0) return { ...segment, content: defaults[mode][role][index].content,
+        ...(segment.snapshotTemplate !== undefined && sources.some(items => items.some(item => item.role === segment.role
+          && item.content === segment.content && item.snapshotTemplate === segment.snapshotTemplate))
+          ? { snapshotTemplate: defaults[mode][role][index].snapshotTemplate }
+          : {}),
+      };
     }
     return { ...segment };
   });

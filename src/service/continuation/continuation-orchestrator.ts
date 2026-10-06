@@ -68,6 +68,7 @@ export interface ContinuationOrchestratorDependencies_ACU {
   now: () => number;
   allocateId: (prefix: string) => string;
   createOutlineResolvers: (context: ContinuationPlanningContext_ACU) => Partial<Record<ContinuationPromptPlaceholder_ACU, () => string | Promise<string | null | undefined> | null | undefined>>;
+  createOutlineHistory?: () => readonly import('../ai/native-tool').AiWireMessage_ACU[];
   /** 桥内存中是否持有该聊天的活认领。缺省视为无认领（测试注入场景）。 */
   hasLiveHostClaim?: (chatIdentity: string) => boolean;
   /** 把消息追加进主 Agent 的持久会话记录。缺省用楼层锚定存储。 */
@@ -1323,6 +1324,7 @@ export class ContinuationOrchestrator_ACU {
       pacingContext: resolveStageOutlinePacingContext_ACU(context.task.stages, context.stage?.stageId ?? null),
       allocateId: this.dependencies.allocateId,
       resolvers: this.dependencies.createOutlineResolvers(context),
+      history: this.dependencies.createOutlineHistory?.(),
       createInternalRequestIdentity: attempt => ({ source: 'outline', requestId: this.dependencies.allocateId('outline-request'), chatIdentity, taskId: context.task.taskId, stageId, revision, attemptId: `outline-${attempt}` }),
       isInternalRequestCurrent: identity => this.isLeaseCurrent_ACU(chatIdentity, lease) && identity.chatIdentity === chatIdentity && identity.taskId === context.task.taskId && identity.stageId === stageId && identity.revision === revision,
     });

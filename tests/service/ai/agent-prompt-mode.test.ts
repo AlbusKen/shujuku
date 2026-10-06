@@ -16,7 +16,7 @@ describe.each(features)('$name 默认提示词模式', feature => {
       ? /函数调用|原生 write_sql|调用 (?:read|search|write_sql) 函数/
       : /输出(?:必须是一个|一个|契约)?\s*JSON(?: 对象)?|交(?:付)?(?:最终|契约)\s*JSON|以一个完整的 JSON 对象收尾|回复 NO_CHANGE/;
     const violations = Object.entries(prompts).flatMap(([role, segments]) => segments.flatMap((segment, index) =>
-      segment.content.split('\n').filter(line => forbidden.test(line)).map(line => `${role}#${index}: ${line}`)));
+      [segment.content, segment.snapshotTemplate ?? ''].join('\n').split('\n').filter(line => forbidden.test(line)).map(line => `${role}#${index}: ${line}`)));
     expect(violations).toEqual([]);
   });
 
@@ -43,10 +43,27 @@ describe.each(features)('$name 默认提示词模式', feature => {
       segments.forEach((segment, index) => {
         const output = (result as Record<string, typeof segments>)[role][index];
         expect(output).toEqual(index === 1 || index === segments.length - 1 ? segment
-          : { ...segment, content: target[target.length - 1 - index].content });
+          : { ...segment, content: target[target.length - 1 - index].content,
+            ...(segment.snapshotTemplate === undefined ? {} : { snapshotTemplate: target[target.length - 1 - index].snapshotTemplate }) });
       });
     }
     expect(JSON.stringify(input)).toBe(before);
+  });
+
+  it.each(['json', 'tools'] as const)('%s 不覆盖编辑或主动清空的快照模板', mode => {
+    for (const text of ['用户自定义：调用 read 函数；输出 JSON。', '']) {
+      const source = feature.stock();
+      for (const segments of Object.values(source)) {
+        const slot = segments.find(segment => segment.snapshotTemplate !== undefined)!;
+        slot.snapshotTemplate = text;
+      }
+      const before = JSON.stringify(source);
+      const result = feature.adapt(source as never, mode);
+      for (const segments of Object.values(result)) {
+        expect(segments.find(segment => segment.snapshotTemplate !== undefined)?.snapshotTemplate).toBe(text);
+      }
+      expect(JSON.stringify(source)).toBe(before);
+    }
   });
 
 });

@@ -88,21 +88,21 @@ describe('continuation prompt templates', () => {
     // V26 在 system 与任务段之间插入了故事时间一致性规则段，任务段按内容定位而不是按下标。
     const finalReviewer = buildDefaultContinuationSettings_ACU().agentPrompts.finalReviewer;
     const system = finalReviewer[0];
-    const user = finalReviewer.find(segment => segment.content.includes('$USER_REQUIREMENTS'))!;
+    const snapshot = finalReviewer.find(segment => segment.snapshotTemplate?.includes('$USER_REQUIREMENTS'))!;
     expect(system.content).toContain('角色人设参考来源优先级：角色卡（卡片简述和背景设定）> 前文剧情 > 已发生事件概览。');
     expect(system.content).toContain('公平但不冷漠：DM在规则上公平对待<user>和角色，但不用刻意制造障碍，只是不给<user>开绿灯。');
     expect(system.content).toContain('关系阶段变化需要主角和角色的双向互动+标志性事件');
     expect(system.content).toContain('角色控制权（用户只能控制自己的角色）、信息边界（角色只使用已知信息）、能力边界（行为在角色能力范围内）、世界规则（符合世界观的物理或魔法规则）、因果逻辑（行为与结果符合因果）。');
     expect(system.content).toContain('分析所有登场角色，不能遗漏；保留所有板块：基础信息+状态+心理+认知+行为预测+情绪优化+主动性。');
     expect(system.content).toContain('字段为 verdict、summary、emotionFindings、worldFindings、logicFindings、requiredFixes、preserve。');
-    expect(user.content).toContain('$USER_REQUIREMENTS');
-    expect(user.content).toContain('$OUTLINE_WINDOW');
-    expect(user.content).toContain('不要写正文、不要修改大纲、不要展示思维链。');
+    expect(snapshot.snapshotTemplate).toContain('$USER_REQUIREMENTS');
+    expect(snapshot.snapshotTemplate).toContain('$OUTLINE_WINDOW');
+    expect(snapshot.snapshotTemplate).toContain('不要写正文、不要修改大纲、不要展示思维链。');
   });
 
   it('locks the fixed user-intent and complete-outline injection matrix', () => {
     const prompts = buildDefaultContinuationSettings_ACU().agentPrompts;
-    const text = (segments: typeof prompts.main) => segments.map(segment => segment.content).join('\n');
+    const text = (segments: typeof prompts.main) => segments.map(segment => segment.snapshotTemplate ?? segment.content).join('\n');
 
     expect(text(prompts.arcArchitect)).toContain('$USER_REQUIREMENTS');
     expect(text(prompts.arcArchitect)).toContain('$OUTLINE_WINDOW');

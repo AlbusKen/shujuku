@@ -92,7 +92,9 @@ function modeDefaults_ACU(): ModeDefaults_ACU {
       const result = { ...mixed };
       for (const name of Object.keys(mixed) as Array<keyof WorldSimulationAgentPrompts_ACU>) {
         result[name] = mixed[name].map(segment => ({ ...segment,
-          content: worldSimulationProtocolForMode_ACU(name, segment.content, mode) }));
+          content: worldSimulationProtocolForMode_ACU(name, segment.content, mode),
+          ...(segment.snapshotTemplate === undefined ? {} : { snapshotTemplate: worldSimulationProtocolForMode_ACU(name, segment.snapshotTemplate, mode) }),
+        }));
       }
       return result;
     };
@@ -120,7 +122,12 @@ export function adaptWorldSimulationPromptSegmentsToToolMode_ACU(
   return segments.map(segment => {
     for (const source of sources) {
       const index = source.findIndex(item => item.role === segment.role && item.content === segment.content);
-      if (index >= 0) return { ...segment, content: defaults[mode][name][index].content };
+      if (index >= 0) return { ...segment, content: defaults[mode][name][index].content,
+        ...(segment.snapshotTemplate !== undefined && sources.some(items => items.some(item => item.role === segment.role
+          && item.content === segment.content && item.snapshotTemplate === segment.snapshotTemplate))
+          ? { snapshotTemplate: defaults[mode][name][index].snapshotTemplate }
+          : {}),
+      };
     }
     if (legacy.some(item => item.role === segment.role && item.content === segment.content)) {
       return { ...segment, content: worldSimulationProtocolForMode_ACU(name, segment.content, mode) };

@@ -257,7 +257,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import { isAgentFixedSlot_ACU } from '../../shared/agent-prompt-layout';
+import { isAgentFixedSlot_ACU, isAgentSnapshotSlot_ACU } from '../../shared/agent-prompt-layout';
 import type { WorldSimulationAgentName_ACU } from '../../service/simulation/agent/agent-catalog'; // arch-ok: 仅类型导入，用于本页状态标注，编译后无运行时依赖
 import type { WorldSimulationPromptSegment_ACU, WorldSimulationSettings_ACU } from '../../service/simulation/model'; // arch-ok: 仅类型导入，用于本页状态标注，编译后无运行时依赖
 import AcuButton from '../components/_lib/AcuButton.vue';
@@ -592,7 +592,10 @@ function updatePrompt(agentName: WorldSimulationAgentName_ACU, index: number, pa
   const prompts = promptList(agentName);
   const current = prompts?.[index];
   if (!prompts || !current) return;
-  if (isAgentFixedSlot_ACU(current)) return;
+  if (isAgentFixedSlot_ACU(current)) {
+    if (isAgentSnapshotSlot_ACU(current) && typeof patch.snapshotTemplate === 'string') prompts[index] = { ...current, snapshotTemplate: patch.snapshotTemplate };
+    return;
+  }
   prompts[index] = current.pinned
     ? { ...current, ...(typeof patch.content === 'string' ? { content: patch.content } : {}) }
     : { ...current, ...patch, pinned: false };

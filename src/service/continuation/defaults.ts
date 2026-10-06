@@ -2,6 +2,7 @@ import { CONTINUATION_AGENT_API_PRESET_ROLES_ACU, ContinuationValidationError_AC
 import { buildDefaultContinuationAgentPrompts_ACU } from './agent/agent-defaults';
 import { USER_PREFILL_CONTENT_ACU } from '../../shared/user-prefill.js';
 import { withCreativeIdentity_ACU } from '../../shared/creative-identity.js';
+import { isAgentSnapshotSlot_ACU, withAgentPromptLayout_ACU } from '../../shared/agent-prompt-layout';
 import {
   AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
   AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU,
@@ -251,6 +252,8 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V45_ACU = 'spv5.3-continu
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V46_ACU = 'spv5.4-continuation-progress-adjustment-v46';
 /** 独立快照与历史插入卡；不覆盖用户正文。 */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V47_ACU = 'continuation-prompt-layout-v47';
+/** 各请求消费可编辑快照正文；仅迁移完整匹配的内置资料段。 */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU = 'continuation-editable-snapshot-v48';
 
 /**
  * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
@@ -307,8 +310,25 @@ export function withV43OutlineCreativeIdentity_ACU(segments: readonly Continuati
     : { ...segment }));
 }
 
-export function buildDefaultContinuationOutlinePrompt_ACU(): ContinuationPromptSegment_ACU[] {
+export function buildV47ContinuationOutlinePrompt_ACU(): ContinuationPromptSegment_ACU[] {
   return withV43OutlineCreativeIdentity_ACU(buildV42ContinuationOutlinePrompt_ACU());
+}
+
+export function withV48OutlineSnapshot_ACU(segments: readonly ContinuationPromptSegment_ACU[]): ContinuationPromptSegment_ACU[] {
+  if (segments.some(segment => isAgentSnapshotSlot_ACU(segment) && segment.snapshotTemplate !== undefined)) return withAgentPromptLayout_ACU(segments);
+  const material = segments.find(segment => segment.role === 'user'
+    && segment.content === V29_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU && segment.enabled !== false);
+  const template = ['【阶段大纲运行时快照】', material?.content ?? '',
+    '【当前启用的阶段大纲】\n$OUTLINE_WINDOW',
+    ...(material ? [] : ['【当前故事总纲】\n$STORY_ARC'])].filter(Boolean).join('\n\n');
+  const next = segments.map(segment => segment === material
+    ? { ...segment, content: '当前阶段资料与规划要求见独立运行时快照，请按规定标签交付。' }
+    : { ...segment });
+  return withAgentPromptLayout_ACU(next, template);
+}
+
+export function buildDefaultContinuationOutlinePrompt_ACU(): ContinuationPromptSegment_ACU[] {
+  return withV48OutlineSnapshot_ACU(buildV47ContinuationOutlinePrompt_ACU());
 }
 
 export function buildDefaultContinuationWorkflowSettings_ACU(): ContinuationSettings_ACU['workflow'] {
@@ -360,7 +380,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V47_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU,
   };
 }
 

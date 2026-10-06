@@ -28,7 +28,7 @@ export interface WorldSimulationError_ACU { code: WorldSimulationErrorCode_ACU; 
 export class WorldSimulationValidationError_ACU extends Error { readonly error: WorldSimulationError_ACU; constructor(error: WorldSimulationError_ACU) { super(error.message); this.name = 'WorldSimulationValidationError_ACU'; this.error = error; } }
 export function createWorldSimulationError_ACU(code: WorldSimulationErrorCode_ACU, phase: WorldSimulationErrorPhase_ACU, message: string, retryable = false, details?: Record<string, unknown>): WorldSimulationError_ACU { return details ? { code, phase, message, retryable, details } : { code, phase, message, retryable }; }
 
-export interface WorldSimulationPromptSegment_ACU { role: string; content: string; enabled: boolean; deletable: boolean; pinned: boolean; }
+export interface WorldSimulationPromptSegment_ACU { role: string; content: string; snapshotTemplate?: string; enabled: boolean; deletable: boolean; pinned: boolean; }
 export interface WorldSimulationRunBudget_ACU { maxIterations: number; maxDelegations: number; maxSameAgent: number; maxConcurrent: number; maxReads: number; maxExtraReads: number; }
 export const WORLD_SIMULATION_WEB_PROVIDERS_ACU = ['duckduckgo', 'serper', 'tavily', 'searxng'] as const;
 export type WorldSimulationWebProvider_ACU = typeof WORLD_SIMULATION_WEB_PROVIDERS_ACU[number];

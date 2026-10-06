@@ -10,10 +10,10 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { USER_PREFILL_CONTENT_ACU } from '../../../src/shared/user-prefill.js';
-import { withAgentPromptLayout_ACU } from '../../../src/shared/agent-prompt-layout';
+import { isAgentFixedSlot_ACU, withAgentPromptLayout_ACU } from '../../../src/shared/agent-prompt-layout';
 
 import { validateContinuationSettings_ACU } from '../../../src/service/continuation/continuation-store';
-import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V47_ACU } from '../../../src/service/continuation/defaults';
+import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU } from '../../../src/service/continuation/defaults';
 
 import {
   AGENT_PROMPT_DEFAULT_LINEAGE_ACU,
@@ -86,7 +86,7 @@ describe('默认提示词谱系迁移', () => {
   it.each(labels)('%s 的默认组迁移后与当前默认组逐段一致', label => {
     const loaded = validateContinuationSettings_ACU(historicalSettings_ACU(label));
     const defaults = buildDefaultContinuationSettings_ACU();
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V47_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU);
     expect(loaded.outlinePrompt).toEqual(defaults.outlinePrompt);
     for (const role of Object.keys(defaults.agentPrompts) as (keyof typeof defaults.agentPrompts)[]) {
       expect(loaded.agentPrompts[role], `agentPrompts.${role}`).toEqual(defaults.agentPrompts[role]);
@@ -96,7 +96,7 @@ describe('默认提示词谱系迁移', () => {
   it.each(labels)('%s 迁移后每个角色都保有运行时依赖的占位符', label => {
     const loaded = validateContinuationSettings_ACU(historicalSettings_ACU(label));
     for (const [role, required] of Object.entries(REQUIRED_PLACEHOLDERS_ACU)) {
-      const text = (loaded.agentPrompts as any)[role].filter((segment: ContinuationPromptSegment_ACU) => segment.enabled !== false).map((segment: ContinuationPromptSegment_ACU) => segment.content).join('\n');
+      const text = (loaded.agentPrompts as any)[role].filter((segment: ContinuationPromptSegment_ACU) => segment.enabled !== false).map((segment: ContinuationPromptSegment_ACU) => segment.snapshotTemplate ?? segment.content).join('\n');
       const missing = required.filter(token => !text.includes(token));
       expect(missing, `${label} ${role}`).toEqual([]);
     }
@@ -146,7 +146,7 @@ describe('默认提示词谱系迁移', () => {
 
     const loaded = validateContinuationSettings_ACU(settings);
 
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V47_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU);
     expect(loaded.agentPrompts.arcArchitect).toEqual(defaults.arcArchitect);
   });
 
@@ -158,7 +158,9 @@ describe('默认提示词谱系迁移', () => {
 
     const loaded = validateContinuationSettings_ACU(settings);
 
-    expect(loaded.agentPrompts.reviewer).toEqual(withAgentPromptLayout_ACU(custom));
+    const migrated = loaded.agentPrompts.reviewer;
+    expect(migrated.filter(segment => !isAgentFixedSlot_ACU(segment))).toEqual(withAgentPromptLayout_ACU(custom).filter(segment => !isAgentFixedSlot_ACU(segment)));
+    expect(migrated.find(segment => segment.snapshotTemplate !== undefined)?.snapshotTemplate).toContain('$USER_REQUIREMENTS');
   });
 
   it('谱系表条目都指向当前默认组里存在的槽位，且不与当前默认正文重合', () => {
@@ -203,7 +205,7 @@ describe('V34 → V35 逐段精确迁移', () => {
     settings.agentPrompts.maintainer.push(appended);
 
     const loaded = validateContinuationSettings_ACU(settings);
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V47_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU);
     expect(loaded.agentPrompts.main[mainIndex]).toEqual({ ...defaults.main[mainIndex], enabled: false });
     expect(loaded.agentPrompts.maintainer[customIndex]).toEqual(settings.agentPrompts.maintainer[customIndex]);
     expect(loaded.agentPrompts.maintainer).toContainEqual(appended);

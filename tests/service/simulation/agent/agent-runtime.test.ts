@@ -368,7 +368,9 @@ describe('格林推演 Agent runtime', () => {
     expect(sent).toHaveLength(2);
     expect(sent[0].slice(0, 5)).toEqual(sent[1].slice(0, 5));
     expect(sent[0][0].content).toContain('调阅调用 read / search；决策单独调用 open_round / delegate / finalize / block');
-    expect(sent[0][5].content).toContain('只推演北境');
+    const snapshotAt = sent[0].findIndex(item => item.content.includes('只推演北境'));
+    expect(snapshotAt).toBeGreaterThan(4);
+    expect(sent[0][snapshotAt].role).toBe('system');
     expect(sent[1].some(item => item.role === 'assistant' && item.tool_calls)).toBe(true);
     expect(sent[1].find(item => item.tool_call_id === 'call-director-prefix')).toMatchObject({ role: 'tool', content: expect.stringContaining('已读北境正文') });
     expect(sent[1].at(-1)?.role).toBe('user');

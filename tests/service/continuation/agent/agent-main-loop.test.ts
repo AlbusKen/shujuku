@@ -805,8 +805,8 @@ describe('主 Agent 提示词装配', () => {
     expect(runtime).toContain('未结算楼层区间：0 到 3');
     expect(runtime).toContain('hook-cognition-maintainer');
     expect(runtime).toContain('$HOOKS_LEDGER');
-    // 区间只报范围不带正文；默认正文全文由 $STORY_TAIL 单独提供。
-    expect(runtime).not.toContain('守门人挡在门后，右手藏着黑色晶屑。');
+    // 区间只报范围；$STORY_TAIL 的正文现在同属可编辑快照。
+    expect(runtime).toContain('守门人挡在门后，右手藏着黑色晶屑。');
     const high = harness_ACU({
       mainReplies: ['{"action":"finalize","instruction":"本轮指导"}'],
       chat: Array.from({ length: 1000 }, (_, index) => ({ mes: `正文标记-${index}-结束`, is_user: index % 2 === 0 })),

@@ -187,6 +187,28 @@ describe('两批一次性格林推演工作流', () => {
     const runtime = new WorldSimulationSubagentRuntime_ACU({ invoke, apiPreset, countTokens: async () => 1 });
     expect((await runtime.runOneShot(input)).status).toBe('no_change');
     expect(invoke).toHaveBeenCalledTimes(2);
+    for (const template of ['编辑推演快照：$ANCHOR_MESSAGE\n$WORLD_USER_REQUIREMENTS', '']) {
+      const edited = structuredClone(settings);
+      edited.agentPrompts[input.agentName].find(segment => segment.snapshotTemplate !== undefined)!.snapshotTemplate = template;
+      const capture = vi.fn(async (name: string) => submitTurn('no_change', name));
+      const outcome = await new WorldSimulationSubagentRuntime_ACU({ invoke: capture, apiPreset,
+        countTokens: async () => 1 }).runOneShot({ ...input, settings: edited });
+      expect(outcome.status).toBe('no_change');
+      const messages = capture.mock.calls[0][1] as Array<{ role: string; content: string }>;
+      const text = messages.map(message => message.content).join('\n');
+      if (template) expect(messages.find(message => message.content.includes('编辑推演快照：锚点正文'))?.role).toBe('system');
+      expect(text).not.toContain('【你负责的资料（完整行）】');
+      expect(text).toContain('共同时间基准');
+      expect(messages.at(-1)).toEqual({ role: 'user', content: USER_PREFILL_CONTENT_ACU });
+      expect(messages.some(message => message.role === 'history' || message.content.includes('\u0000'))).toBe(false);
+    }
+    const forbiddenSettings = structuredClone(settings);
+    forbiddenSettings.agentPrompts[input.agentName].find(segment => segment.snapshotTemplate !== undefined)!.snapshotTemplate = '$WORLD_CANDIDATES';
+    const forbiddenCapture = vi.fn();
+    await expect(new WorldSimulationSubagentRuntime_ACU({ invoke: forbiddenCapture, apiPreset,
+      countTokens: async () => 1 }).runOneShot({ ...input, settings: forbiddenSettings }))
+      .rejects.toThrow('WORLD_SIMULATION_SNAPSHOT_TOKEN_FORBIDDEN');
+    expect(forbiddenCapture).not.toHaveBeenCalled();
     const empty = vi.fn().mockResolvedValueOnce({ content: '', toolCalls: [] })
       .mockResolvedValueOnce(submitTurn('no_change', input.agentName, '无可证实变化'));
     expect((await new WorldSimulationSubagentRuntime_ACU({ invoke: empty, apiPreset,

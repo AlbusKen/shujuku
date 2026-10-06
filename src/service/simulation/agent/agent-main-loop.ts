@@ -26,7 +26,7 @@ import { countWorldSimulationTokens_ACU, measureWorldSimulationPrompt_ACU, type 
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './prompt-template';
 import { runWorldSimulationWorkflow_ACU, runWorldSimulationOneShotWorkflow_ACU } from './agent-workflow';
-import { bindWorldSimulationFixedWorldbook_ACU, renderWorldSimulationDirectorReads_ACU, splitWorldSimulationSubagentPrompt_ACU, verifyWorldSimulationFixedWorldbook_ACU, WORLD_SIMULATION_WORLDBOOK_UNAVAILABLE_ACU } from './agent-shared-materials';
+import { bindWorldSimulationFixedWorldbook_ACU, renderWorldSimulationDirectorReads_ACU, renderWorldSimulationSnapshotSections_ACU, splitWorldSimulationSubagentPrompt_ACU, verifyWorldSimulationFixedWorldbook_ACU, verifyWorldSimulationSnapshotSections_ACU, WORLD_SIMULATION_WORLDBOOK_UNAVAILABLE_ACU } from './agent-shared-materials';
 import { loadAgentWorldbookSnapshot_ACU, renderAgentWorldbookTriggeredInjection_ACU, selectTriggeredWorldbookEntries_ACU, type AgentWorldbookSnapshot_ACU } from '../../continuation/agent/agent-worldbook-read';
 import { buildRecentWorldbookScanText_ACU } from '../../continuation/agent/agent-placeholder-resolver';
 import { planWorldSimulationHistoryCompaction_ACU } from './agent-history-compactor';
@@ -595,20 +595,14 @@ export class WorldSimulationMainLoop_ACU {
           }),
         );
         const fixed = [{ role: 'system', content: worldSimulationProtocolForMode_ACU(director, worldSimulationDirectorRuntimeProtocolInstruction_ACU(), toolMode) }, ...rendered.messages.filter(message => message.content !== USER_PREFILL_CONTENT_ACU)];
+        const snapshot = await renderWorldSimulationSnapshotSections_ACU(split.snapshotTemplate,
+          createWorldSimulationPlaceholderResolvers_ACU({ ...requestContext, evidenceRegistry: requestSnapshot }));
         const snapshotText = [
           '【本次格林推演最新快照】',
+          snapshot.text,
           ...(triggeredWorldbook ? [triggeredWorldbook] : []),
-          ...(requestContext.userRequirements ? [`用户要求：${requestContext.userRequirements}`] : []),
-          `本次任务：${JSON.stringify(requestContext.task ?? null)}`,
-          ...(requestContext.anchorMessage ? [`最近 AI 楼层：${requestContext.anchorMessage}`] : []),
-          `运行状态：${JSON.stringify(requestContext.runtimeContext ?? {})}`,
-          `世界状态：${JSON.stringify(requestContext.worldState ?? null)}`,
-          `阶段计划：${JSON.stringify(requestContext.worldStagePlan ?? null)}`,
-          `待处理候选：${JSON.stringify(requestContext.worldCandidates ?? null)}`,
-          `碰撞：${JSON.stringify(requestContext.worldCollisions ?? null)}`,
           `实时阅读预算：${requestContext.readBudgetText ?? '（不可用）'}`,
           `账本修订号：${currentLedger().revision}`,
-          `证据注册表：${JSON.stringify(requestSnapshot)}`,
         ].join('\n\n');
         const tail = [...(persistentHistory && handoffHint ? [handoffHint] : [])];
         const count = this.dependencies.countTokens ?? countWorldSimulationTokens_ACU;
@@ -678,6 +672,7 @@ export class WorldSimulationMainLoop_ACU {
           count,
           invoke: messages => {
             if (fixedWorldbook.text) verifyWorldSimulationFixedWorldbook_ACU(fixedWorldbook, messages);
+            if (snapshot.sections.length) verifyWorldSimulationSnapshotSections_ACU(snapshot, messages);
             return this.dependencies.invoke(director, messages, preset, request);
           },
         });

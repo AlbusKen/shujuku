@@ -9,7 +9,7 @@ import {
   withV41RoleProcedure_ACU,
 } from '../../../../src/service/continuation/agent/agent-defaults';
 import { validateContinuationSettings_ACU } from '../../../../src/service/continuation/continuation-store';
-import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V40_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V47_ACU } from '../../../../src/service/continuation/defaults';
+import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V40_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU } from '../../../../src/service/continuation/defaults';
 
 const ROLES_ACU = ['arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer', 'webResearcher', 'instructionComposer'] as const;
 
@@ -18,7 +18,7 @@ describe('V41 子代理执行流程问答', () => {
   const v40 = buildV40ContinuationAgentPrompts_ACU();
 
   it.each(ROLES_ACU)('%s 在任务段正前方多一组流程问答，预填充仍是最后一条', role => {
-    const segments = defaults[role];
+    const segments = buildV41ContinuationAgentPrompts_ACU()[role];
     const task = segments.findIndex(segment => segment.content.includes('$AGENT_TASK'));
     expect(segments.filter(segment => !isAgentFixedSlot_ACU(segment)).length).toBe(v40[role].length + 2);
     expect(segments[task - 2].role).toBe('user');
@@ -27,6 +27,7 @@ describe('V41 子代理执行流程问答', () => {
     expect(segments[task - 1].content).toMatch(/第一步[\s\S]*第四步/);
     expect(segments[task - 1].content).not.toMatch(/\$[A-Z]/);
     expect(segments.filter(segment => segment.content.includes('$AGENT_TASK'))).toHaveLength(1);
+    expect(defaults[role].filter(segment => segment.snapshotTemplate?.includes('$AGENT_TASK'))).toHaveLength(1);
     expect(segments.at(-1)).toMatchObject({ role: 'user', content: USER_PREFILL_CONTENT_ACU });
   });
 
@@ -50,8 +51,10 @@ describe('V41 子代理执行流程问答', () => {
     const custom = [{ role: 'user', content: '用户自定义策划提示词', enabled: true, deletable: true }];
     settings.agentPrompts.beatPlanner = custom;
     const loaded = validateContinuationSettings_ACU(settings);
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V47_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU);
     for (const role of ROLES_ACU.filter(item => item !== 'beatPlanner')) expect(loaded.agentPrompts[role]).toEqual(defaults[role]);
-    expect(loaded.agentPrompts.beatPlanner).toEqual(withAgentPromptLayout_ACU(custom));
+    const migrated = loaded.agentPrompts.beatPlanner;
+    expect(migrated.filter(segment => !isAgentFixedSlot_ACU(segment))).toEqual(withAgentPromptLayout_ACU(custom).filter(segment => !isAgentFixedSlot_ACU(segment)));
+    expect(migrated.find(segment => segment.snapshotTemplate !== undefined)?.snapshotTemplate).toContain('$USER_REQUIREMENTS');
   });
 });

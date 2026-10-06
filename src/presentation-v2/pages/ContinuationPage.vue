@@ -878,7 +878,13 @@ function movePrompt(key: PromptKey, index: number, delta: -1 | 1): void {
 function updatePrompt(key: PromptKey, index: number, patch: Partial<ContinuationPromptSegment_ACU>): void {
   const prompts = promptList(key);
   const current = prompts?.[index];
-  if (prompts && current) prompts[index] = { ...current, ...patch };
+  if (!prompts || !current) return;
+  if (current.content.trim() === '$HISTORY_ANCHOR') return;
+  if (current.content.trim() === '$RUNTIME_SNAPSHOT') {
+    if (typeof patch.snapshotTemplate === 'string') prompts[index] = { ...current, snapshotTemplate: patch.snapshotTemplate };
+    return;
+  }
+  prompts[index] = { ...current, ...patch };
 }
 
 function restorePrompt(kind: ContinuationPromptKind_ACU): void {

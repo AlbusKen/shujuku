@@ -792,6 +792,12 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
     ] as any);
     const mainSnapshot = `${await renderFallbackAgentSnapshot_ACU(base.settings, base.resolveContext, 'tools')}\n\n${realAppendix}`;
     const roles: string[] = [];
+    base.settings.agentPrompts.finalReviewer.find(segment => segment.snapshotTemplate !== undefined)!.snapshotTemplate += '\n【编辑终审快照】';
+    const mainHistory = [
+      { role: 'user', content: '主会话原用户消息' },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'review-main-read', type: 'function' as const, function: { name: 'read', arguments: '{}' } }] },
+      { role: 'tool', content: '主会话原工具结果', tool_call_id: 'review-main-read' },
+    ];
     const calls: Array<Array<{ role: string; content: string }>> = [];
     const replies = [
       nativeToolTurn_ACU('read', { reads: ['$TABLE:角色表'] }, 'call-review-table-read'),
@@ -813,6 +819,7 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
       currentUserInput: '让主角观察晶屑。',
       planningSummary: '主线建议主角试探守门人。',
       mainSnapshot,
+      mainHistory,
       createIdentity: (_name, attempt) => ({ taskId: 't', stageId: 's', turnId: 'u', attemptId: `final-${attempt}`, source: 'agent_subagent' }) as any,
       isCurrent: () => true,
     });
@@ -826,6 +833,13 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
     const firstCall = calls[0].map(message => message.content).join('\n');
     const secondCall = calls[1].map(message => message.content).join('\n');
     expect(firstCall).toContain('【本回合运行时数据】');
+    expect(firstCall).toContain('【编辑终审快照】');
+    for (const messages of calls) {
+      const historyAt = messages.findIndex(message => message.content === '主会话原用户消息');
+      expect(messages.slice(historyAt, historyAt + mainHistory.length)).toEqual(mainHistory);
+      expect(messages.at(-1)?.role).toBe('user');
+      expect(messages.some(message => message.role === 'history' || message.content.includes('\u0000'))).toBe(false);
+    }
     expect(firstCall).toContain('主角拿起晶屑走出铁门。');
     expect(firstCall.split(worldbookBody)).toHaveLength(2);
     expect(firstCall.split('【主会话已调阅】')).toHaveLength(3);

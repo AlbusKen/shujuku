@@ -106,6 +106,7 @@ export interface ContinuationRulePair_ACU {
 export interface ContinuationPromptSegment_ACU {
   role: string;
   content: string;
+  snapshotTemplate?: string;
   enabled?: boolean;
   deletable?: boolean;
   pinned?: boolean;

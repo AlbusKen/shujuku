@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { buildDefaultContinuationSettings_ACU } from '../../../src/service/continuation/defaults';
 import { ContinuationValidationError_ACU, type StageOutline_ACU } from '../../../src/service/continuation/model';
 import { ContinuationOutlinePlanner_ACU, acceptPlannedStageRevision_ACU, createPlannedStageRevision_ACU, freezePlannedStageRevision_ACU } from '../../../src/service/continuation/outline-planner';
+import { USER_PREFILL_CONTENT_ACU } from '../../../src/shared/user-prefill.js';
 
 /** 每三轮一个低压轮：足以满足 mixed 形态四分之一的低压下限。 */
 function pacingAt_ACU(index: number): 'setup' | 'pressure' {
@@ -87,6 +88,36 @@ describe('ContinuationOutlinePlanner_ACU', () => {
       expect.objectContaining({ cacheScope: 'outline', promptCacheEnabled: true, cacheTools: [] }),
     );
     expect(resolveApiPreset).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([true, false])('编辑快照与原身份历史按卡片位置装配，重试保留工具事务（历史在前=%s）', async historyFirst => {
+    const snapshot = { role: 'system', content: '$RUNTIME_SNAPSHOT', snapshotTemplate: '编辑大纲快照：$ORIGIN_INSTRUCTION' };
+    const historySlot = { role: 'history', content: '$HISTORY_ANCHOR' };
+    const settings = { ...settings_ACU(1), outlinePrompt: [
+      { role: 'system', content: '稳定规则' },
+      ...(historyFirst ? [historySlot, snapshot] : [snapshot, historySlot]),
+      { role: 'user', content: USER_PREFILL_CONTENT_ACU },
+    ] };
+    const history = [
+      { role: 'user', content: '原用户消息' },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'outline-read', type: 'function' as const, function: { name: 'read', arguments: '{}' } }] },
+      { role: 'tool', content: '原工具回执', tool_call_id: 'outline-read' },
+    ];
+    const before = JSON.stringify(history);
+    const { planner, callInternalAi } = createPlanner_ACU(['非法大纲', tagOutline_ACU(6)]);
+    await planner.plan(request_ACU(settings, { history, resolvers: { $ORIGIN_INSTRUCTION: () => '保存后的要求' } }));
+    expect(callInternalAi).toHaveBeenCalledTimes(2);
+    for (const call of callInternalAi.mock.calls as unknown as Array<[Array<typeof history[number]>]>) {
+      const messages = call[0];
+      const snapshotAt = messages.findIndex(message => message.content === '编辑大纲快照：保存后的要求');
+      const historyAt = messages.findIndex(message => message.content === '原用户消息');
+      expect(messages[snapshotAt].role).toBe('system');
+      expect(messages.slice(historyAt, historyAt + history.length)).toEqual(history);
+      expect(historyAt < snapshotAt).toBe(historyFirst);
+      expect(messages.at(-1)).toEqual({ role: 'user', content: USER_PREFILL_CONTENT_ACU });
+      expect(messages.some(message => message.role === 'history' || message.content.includes('\u0000'))).toBe(false);
+    }
+    expect(JSON.stringify(history)).toBe(before);
   });
 
   it('格式范例照抄会重试并指出具体字段，不拦截没有该范例的旧模板', async () => {

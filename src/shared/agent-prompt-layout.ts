@@ -17,8 +17,26 @@ export function isAgentFixedSlot_ACU(segment: { content: string }): boolean {
   return isAgentHistorySlot_ACU(segment) || isAgentSnapshotSlot_ACU(segment);
 }
 
+export interface AgentSnapshotTemplate_ACU {
+  content: string;
+  snapshotTemplate?: string;
+}
+
+/** 卡片标识与可编辑模板分离；旧卡缺少模板时才使用兼容默认。 */
+export function agentSnapshotTemplate_ACU(segments: readonly AgentSnapshotTemplate_ACU[], fallback: string): string {
+  return segments.find(isAgentSnapshotSlot_ACU)?.snapshotTemplate ?? fallback;
+}
+
+/** 只搬迁逐字匹配的内置动态段；自定义正文、开关与顺序保持不变。 */
+export function withEditableAgentSnapshot_ACU<T extends { role: string; content: string; enabled?: boolean; deletable?: boolean; pinned?: boolean; snapshotTemplate?: string }>(
+  segments: readonly T[], template: string, movedDefaults: readonly { role: string; content: string }[] = [],
+): T[] {
+  const kept = segments.filter(segment => !movedDefaults.some(previous => previous.role === segment.role && previous.content === segment.content));
+  return withAgentPromptLayout_ACU(kept, template);
+}
+
 /** 给默认或升级后的提示词补固定插入点；不覆盖用户正文和开关。 */
-export function withAgentPromptLayout_ACU<T extends { role: string; content: string; enabled?: boolean; deletable?: boolean; pinned?: boolean }>(segments: readonly T[]): T[] {
+export function withAgentPromptLayout_ACU<T extends { role: string; content: string; enabled?: boolean; deletable?: boolean; pinned?: boolean; snapshotTemplate?: string }>(segments: readonly T[], snapshotTemplate?: string): T[] {
   const next = segments.filter(segment => segment.content !== USER_PREFILL_CONTENT_ACU).map(segment => ({ ...segment }));
   let historyAt = next.findIndex(isAgentHistorySlot_ACU);
   if (historyAt < 0) {
@@ -29,6 +47,10 @@ export function withAgentPromptLayout_ACU<T extends { role: string; content: str
   if (snapshotAt < 0) {
     next.splice(historyAt, 0, { role: 'system', content: AGENT_SNAPSHOT_TOKEN_ACU, enabled: true, deletable: false, pinned: true } as T);
   } else next[snapshotAt] = { ...next[snapshotAt], role: 'system', enabled: true, deletable: false, pinned: true };
+  if (snapshotTemplate !== undefined) {
+    const slot = next.find(isAgentSnapshotSlot_ACU)!;
+    if (slot.snapshotTemplate === undefined) slot.snapshotTemplate = snapshotTemplate;
+  }
   const prefill = segments.find(segment => segment.content === USER_PREFILL_CONTENT_ACU);
   next.push({ ...prefill, role: 'user', content: USER_PREFILL_CONTENT_ACU, enabled: true, deletable: false, pinned: true } as T);
   return next;

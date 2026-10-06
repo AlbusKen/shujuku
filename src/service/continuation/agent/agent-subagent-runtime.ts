@@ -1,5 +1,5 @@
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
-import { assembleAgentPrompt_ACU } from '../../../shared/agent-prompt-layout';
+import { agentSnapshotTemplate_ACU, assembleAgentPrompt_ACU } from '../../../shared/agent-prompt-layout';
 /**
  * service/continuation/agent/agent-subagent-runtime.ts — 子代理运行时
  *
@@ -208,6 +208,8 @@ export interface AgentSubagentRunInput_ACU {
   sharedMaterials?: string;
   /** 主会话当前运行时快照。附在子代理末尾，与主会话看到的是同一份。 */
   mainSnapshot?: string;
+  /** 主会话已确认的原身份消息投影；本次工具往返追加在其后。 */
+  mainHistory?: readonly import('../../ai/native-tool').AiWireMessage_ACU[];
   /** 本次运行的工具协议；缺省为 json（请求不带函数，动作写成 JSON 对象）。 */
   toolMode?: AgentToolMode_ACU;
 }
@@ -224,6 +226,7 @@ export interface AgentFinalReviewRunInput_ACU {
   signal?: AbortSignal | null;
   sharedMaterials?: string;
   mainSnapshot?: string;
+  mainHistory?: readonly import('../../ai/native-tool').AiWireMessage_ACU[];
   toolMode?: AgentToolMode_ACU;
 }
 
@@ -828,6 +831,19 @@ export class AgentSubagentRuntime_ACU {
     let baseMessages = rendered.messages;
     const presentTokens = new Set([...promptSegments, ...(split.taskTemplate ? [{ content: split.taskTemplate }] : [])].flatMap(segment => segment.content.match(/\$[A-Z][A-Z0-9_]*/g) ?? [] as string[]));
     const renderRequestSnapshot = async (): Promise<string> => {
+      const editable = agentSnapshotTemplate_ACU(promptSegments, '');
+      if (promptSegments.some(segment => segment.snapshotTemplate !== undefined)) {
+        const ownSnapshot = editable.trim() ? (await renderContinuationPrompt_ACU([{ role: 'system', content: editable }], resolvers, 'agent_delegate')).messages[0].content : editable;
+        const worldbook = input.resolveContext.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false);
+        const injection = renderAgentWorldbookTriggeredInjection_ACU(worldbook, buildAgentWorldbookScanText_ACU(input.resolveContext));
+        const readsAt = findMainSessionReadAppendix_ACU(input.mainSnapshot ?? '', injection);
+        const tokens = new Set(editable.match(/\$[A-Z][A-Z0-9_]*/g) ?? []);
+        return [ownSnapshot, tokens.has('$AGENT_TASK') ? '' : `【本次派工任务】\n${input.delegation.prompt}`,
+          tokens.has('$AGENT_READ_MATERIALS') ? '' : `【本轮种子资料】\n${materials}`,
+          definition.kind !== 'arc' && !tokens.has('$WORLDBOOK_HITS') ? `【本轮语境命中的世界书条目】\n${injection}` : '',
+          readsAt >= 0 ? omitSnapshotSectionsForSubagent_ACU((input.mainSnapshot ?? '').slice(readsAt), tokens) : '',
+          definition.promptKey === 'arcArchitect' ? renderStoryArcVolumePlanInstruction_ACU(input.settings) : '', input.sharedMaterials ?? ''].filter(Boolean).join('\n\n');
+      }
       const originalSnapshot = input.mainSnapshot?.trim() ? input.mainSnapshot : '';
       const worldbook = input.resolveContext.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false);
       const worldbookInjection = renderAgentWorldbookTriggeredInjection_ACU(worldbook, buildAgentWorldbookScanText_ACU(input.resolveContext));
@@ -1057,7 +1073,7 @@ export class AgentSubagentRuntime_ACU {
       }
       // 传输错误（502/网络抖动）按设置延时重试；协议/契约拒绝仍走小循环内的对话级立即重试。
       const requestSnapshot = await renderRequestSnapshot();
-      const requestBody = assembleAgentPrompt_ACU([...baseMessages, ...(trailingPrefill ? [trailingPrefill] : [])], transcript,
+      const requestBody = assembleAgentPrompt_ACU([...baseMessages, ...(trailingPrefill ? [trailingPrefill] : [])], [...(input.mainHistory ?? []), ...transcript],
         `${requestSnapshot}\n\n${renderReadBudgetNote(toolRoundsUsed)}`);
       const requestMessages = nativeMode
         ? withNativeToolThinkPrefill_ACU(requestBody)
@@ -1472,6 +1488,19 @@ export class AgentSubagentRuntime_ACU {
     // 终审与普通派工同一预算语义：首轮给出上限，每个工具批次后刷新剩余轮次与遥测；注入点必须在尾部预填充之前。
     const reviewPresent = new Set([...reviewSegments, ...(reviewSplit.taskTemplate ? [{ content: reviewSplit.taskTemplate }] : [])].flatMap(segment => segment.content.match(/\$[A-Z][A-Z0-9_]*/g) ?? [] as string[]));
     const renderReviewTail = async (): Promise<string> => {
+      const editable = agentSnapshotTemplate_ACU(reviewSegments, '');
+      if (reviewSegments.some(segment => segment.snapshotTemplate !== undefined)) {
+        const ownSnapshot = editable.trim() ? (await renderContinuationPrompt_ACU([{ role: 'system', content: editable }], reviewResolvers, 'agent_delegate')).messages[0].content : editable;
+        const tokens = new Set(editable.match(/\$[A-Z][A-Z0-9_]*/g) ?? []);
+        const worldbook = input.resolveContext.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false);
+        const injection = renderAgentWorldbookTriggeredInjection_ACU(worldbook, buildAgentWorldbookScanText_ACU(input.resolveContext));
+        const readsAt = findMainSessionReadAppendix_ACU(input.mainSnapshot ?? '', injection);
+        return [ownSnapshot, tokens.has('$AGENT_TASK') ? '' : `【本次终审任务】\n${input.candidateInstruction}`,
+          tokens.has('$WORLDBOOK_HITS') ? '' : evidence.worldbookEvidence,
+          tokens.has('$AGENT_READ_MATERIALS') ? '' : evidence.supplementalMaterials,
+          readsAt >= 0 ? omitSnapshotSectionsForSubagent_ACU((input.mainSnapshot ?? '').slice(readsAt), tokens) : '',
+          input.sharedMaterials ?? ''].filter(Boolean).join('\n\n');
+      }
       const originalSnapshot = input.mainSnapshot?.trim() ? input.mainSnapshot : '';
       const worldbook = input.resolveContext.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false);
       const worldbookInjection = renderAgentWorldbookTriggeredInjection_ACU(worldbook, buildAgentWorldbookScanText_ACU(input.resolveContext));
@@ -1522,7 +1551,7 @@ export class AgentSubagentRuntime_ACU {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '终审请求已失效', false));
       }
       const reviewTail = await renderReviewTail();
-      const requestBody = assembleAgentPrompt_ACU([...baseMessages, ...(trailingPrefill ? [trailingPrefill] : [])], transcript,
+      const requestBody = assembleAgentPrompt_ACU([...baseMessages, ...(trailingPrefill ? [trailingPrefill] : [])], [...(input.mainHistory ?? []), ...transcript],
         `${reviewTail}\n\n${renderReadBudgetNote(toolRoundsUsed)}`);
       const requestMessages = nativeMode
         ? withNativeToolThinkPrefill_ACU(requestBody)

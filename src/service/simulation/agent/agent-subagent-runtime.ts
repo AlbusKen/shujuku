@@ -528,12 +528,21 @@ export class WorldSimulationSubagentRuntime_ACU {
       input.agentName === 'guidance-composer'
         ? `【共同时间基准】本轮共享的明确经过天数为 ${elapsedDays}（由工作流对同一锚点一次计算）。批次一已按这段跨度维护 clock，当前日 ${input.givenLedger.clock.day} 已包含本轮推进（本轮内存预览，尚未持久化）；直接采用该日，不再叠加经过天数。幕后纪要 day、风声 origin_day 与 earliest_reveal_day 以当前日为准，并按本轮经过的时间跨度判断哪些幕后事件已完结、哪些消息已传开；不把回忆或既已计入的旅程重复累加。`
         : `【共同时间基准】本轮共享的明确经过天数为 ${elapsedDays}（由工作流对同一锚点一次计算；无明确时间流逝即为 0）。当前已提交日为 ${input.givenLedger.clock.day}；不把回忆或既已计入的旅程重复累加。undercurrent-analyst 独占 clock 写入，clock.days 只能表达这一本轮推进量；dramatis-keeper 不写 clock，但人物状态、死亡时间及伴生传闻的演算必须使用本轮共享经过天数。另一并发角色的推断尚未落账，不得当作已提交事实。`,
-      `单例修订号：${input.baseLedgerRevision}（clock/player/guidance 的 UPDATE 写 WHERE expected_revision = ${input.baseLedgerRevision}；数组行用各自 revision 字段）`, `【你负责的资料（完整行）】${JSON.stringify(own)}`,
-      `【关联只读资料】局势刻度与风声为完整行；伏线与人物谱为浓缩目录，需细节时按 readAddress 调用 read。${JSON.stringify(related)}`, `【待修复】${JSON.stringify(input.givenLedger.pendingFixes.filter(fix => modules.includes(fix.module)))}`,
-      ...(input.roundChanges ? [`【本轮变更清单】${input.roundChanges}`] : []), `【锚点正文】\n${stripWritingAnnotations_ACU(anchor)}`,
-      ...(input.injectWorldbook && input.triggeredWorldbook ? [input.triggeredWorldbook] : [])].join('\n');
-    const resolvers = createWorldSimulationPlaceholderResolvers_ACU({ ...input.promptContext, worldState: input.givenLedger });
-    const rendered = await renderWorldSimulationPrompt_ACU(adaptWorldSimulationPromptSegmentsToToolMode_ACU(input.agentName, input.settings.agentPrompts[input.agentName], toolMode), input.agentName, resolvers);
+      `单例修订号：${input.baseLedgerRevision}（clock/player/guidance 的 UPDATE 写 WHERE expected_revision = ${input.baseLedgerRevision}；数组行用各自 revision 字段）`,
+      `【待修复】${JSON.stringify(input.givenLedger.pendingFixes.filter(fix => modules.includes(fix.module)))}`,
+      ...(input.roundChanges ? [`【本轮变更清单】${input.roundChanges}`] : [])].join('\n');
+    const resolvers = createWorldSimulationPlaceholderResolvers_ACU({ ...input.promptContext,
+      runtimeContext: runtime, writableModules: modules, worldState: input.givenLedger,
+      anchorMessage: stripWritingAnnotations_ACU(anchor) });
+    // 一次性路径沿用已筛选的完整自有资料与关联目录，不能因模板编辑扩大到整份账本。
+    resolvers.$WORLD_STATE = () => `【你负责的资料（完整行）】${JSON.stringify(own)}\n【关联只读资料】局势刻度与风声为完整行；伏线与人物谱为浓缩目录，需细节时按 readAddress 调用 read。${JSON.stringify(related)}`;
+    const split = splitWorldSimulationSubagentPrompt_ACU(adaptWorldSimulationPromptSegmentsToToolMode_ACU(input.agentName, input.settings.agentPrompts[input.agentName], toolMode), input.agentName);
+    const rendered = await renderWorldSimulationPrompt_ACU(split.segments, input.agentName, resolvers);
+    const snapshot = await renderWorldSimulationSnapshotSections_ACU(split.snapshotTemplate, resolvers,
+      { ledger: input.baseLedgerRevision }, input.agentName);
+    const runtimeText = [snapshot.text,
+      ...(split.snapshotTemplate.includes('$WORLD_RUNTIME_CONTEXT') ? [] : [runtime]),
+      ...(input.injectWorldbook && input.triggeredWorldbook ? [input.triggeredWorldbook] : [])].filter(Boolean).join('\n\n');
     const protocol = worldSimulationOneShotProtocol_ACU(input.agentName, modules, toolMode);
     const base = [{ role: 'system', content: protocol }, ...rendered.messages.filter(message => message.content !== USER_PREFILL_CONTENT_ACU)];
     // 快照和历史由固定卡片装配，末尾 user 预填充与工具模式无关。
@@ -569,7 +578,7 @@ export class WorldSimulationSubagentRuntime_ACU {
       let sqlSubmitted = false;
       // 本次尝试提交的 SQL 在会话流里的条目 id；成败都回写到同一条，避免内容与结论分家。
       let writeEntryId: number | null = null;
-      const messages = finishWorldSimulationMessages_ACU(toolMode, assembleAgentPrompt_ACU(base, transcript, runtime));
+      const messages = finishWorldSimulationMessages_ACU(toolMode, assembleAgentPrompt_ACU(base, transcript, runtimeText));
       const requestTools = maxReads && reads === 0 ? ['read', 'write_sql'] as const : ['write_sql'] as const;
       // 声明必须与本路径的校验一致：write_sql 在 one-shot 只收 sql，证据引用由程序按锚点绑定。
       // 共享目录里宣传 evidenceRefs 会让模型照着填，再被“多余参数”拒掉。json 模式请求不带 tools。
@@ -587,6 +596,7 @@ export class WorldSimulationSubagentRuntime_ACU {
           tools: request.tools, historyBudgetTokens: input.settings.agentHistoryTokenBudget,
           count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
           invoke: value => {
+            if (snapshot.sections.length) verifyWorldSimulationSnapshotSections_ACU(snapshot, value);
             if (input.injectWorldbook && input.fixedWorldbook) {
               if (input.fixedWorldbook.text !== (input.triggeredWorldbook ?? '')) throw new Error('WORLD_SIMULATION_WORLDBOOK_SOURCE_UNVERIFIED');
               verifyWorldSimulationFixedWorldbook_ACU(input.fixedWorldbook, value);
@@ -860,7 +870,7 @@ export class WorldSimulationSubagentRuntime_ACU {
       const split = splitWorldSimulationSubagentPrompt_ACU(adaptWorldSimulationPromptSegmentsToToolMode_ACU(agentName, legacyPrompt, toolMode), agentName);
       const rendered = await renderWorldSimulationPrompt_ACU(split.segments, agentName, resolvers);
       const snapshot = await renderWorldSimulationSnapshotSections_ACU(split.snapshotTemplate, resolvers,
-        isWorldSimulationLedgerContext_ACU(requestContext.worldState) ? { ledger: requestContext.worldState.revision } : {});
+        isWorldSimulationLedgerContext_ACU(requestContext.worldState) ? { ledger: requestContext.worldState.revision } : {}, agentName);
       const snapshotText = snapshot.text;
       const guidance = split.movedGuidanceIndex >= 0 ? rendered.messages[split.movedGuidanceIndex]?.content : '';
       const appendix = [snapshotText, guidance, input.triggeredWorldbook ?? ''].filter(Boolean).join('\n\n');
@@ -875,7 +885,7 @@ export class WorldSimulationSubagentRuntime_ACU {
         historyBudgetTokens: input.settings.agentHistoryTokenBudget,
         count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
         invoke: value => {
-          if (snapshot.text) verifyWorldSimulationSnapshotSections_ACU(snapshot, value);
+          if (snapshot.sections.length) verifyWorldSimulationSnapshotSections_ACU(snapshot, value);
           if (input.fixedWorldbook) {
             if (input.fixedWorldbook.text !== (input.triggeredWorldbook ?? '')) throw new Error('WORLD_SIMULATION_WORLDBOOK_SOURCE_UNVERIFIED');
             verifyWorldSimulationFixedWorldbook_ACU(input.fixedWorldbook, value);
@@ -1083,7 +1093,7 @@ export class WorldSimulationSubagentRuntime_ACU {
       const split = splitWorldSimulationSubagentPrompt_ACU(adaptWorldSimulationPromptSegmentsToToolMode_ACU(agentName, input.settings.agentPrompts[agentName], toolMode), agentName);
       const rendered = await renderWorldSimulationPrompt_ACU(split.segments, agentName, resolvers);
       const snapshot = await renderWorldSimulationSnapshotSections_ACU(split.snapshotTemplate, resolvers,
-        isWorldSimulationLedgerContext_ACU(requestContext.worldState) ? { ledger: requestContext.worldState.revision } : {});
+        isWorldSimulationLedgerContext_ACU(requestContext.worldState) ? { ledger: requestContext.worldState.revision } : {}, agentName);
       const snapshotText = snapshot.text;
       const guidance = split.movedGuidanceIndex >= 0 ? rendered.messages[split.movedGuidanceIndex]?.content : '';
       const appendix = [snapshotText, guidance, input.triggeredWorldbook ?? ''].filter(Boolean).join('\n\n');
@@ -1097,7 +1107,7 @@ export class WorldSimulationSubagentRuntime_ACU {
         historyBudgetTokens: input.settings.agentHistoryTokenBudget,
         count: this.dependencies.countTokens ?? countWorldSimulationTokens_ACU,
         invoke: value => {
-          if (snapshot.text) verifyWorldSimulationSnapshotSections_ACU(snapshot, value);
+          if (snapshot.sections.length) verifyWorldSimulationSnapshotSections_ACU(snapshot, value);
           if (input.fixedWorldbook) {
             if (input.fixedWorldbook.text !== (input.triggeredWorldbook ?? '')) throw new Error('WORLD_SIMULATION_WORLDBOOK_SOURCE_UNVERIFIED');
             verifyWorldSimulationFixedWorldbook_ACU(input.fixedWorldbook, value);

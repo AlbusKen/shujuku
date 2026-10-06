@@ -11,7 +11,7 @@ import {
 } from './agent/agent-defaults';
 import { buildContinuationAgentPromptsForMode_ACU } from './agent/agent-prompt-mode';
 import type { AgentToolMode_ACU } from '../ai/agent-tool-mode';
-import { AGENT_HISTORY_SENTINEL_ACU, AGENT_SNAPSHOT_SENTINEL_ACU, isAgentHistorySlot_ACU } from '../../shared/agent-prompt-layout';
+import { AGENT_HISTORY_SENTINEL_ACU, AGENT_SNAPSHOT_SENTINEL_ACU, isAgentHistorySlot_ACU, isAgentSnapshotSlot_ACU } from '../../shared/agent-prompt-layout';
 
 export const CONTINUATION_PROMPT_PLACEHOLDERS_ACU = [
   '$ORIGIN_INSTRUCTION', '$1',
@@ -56,14 +56,17 @@ export function validateContinuationPromptSegments_ACU(value: unknown, phase: Co
   const result = value.map((raw, index) => {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) failPrompt_ACU(errorCode, phase, '提示词段必须是对象', { index });
     const segment = raw as Record<string, unknown>;
-    if (Object.keys(segment).some(key => !['role', 'content', 'enabled', 'deletable', 'pinned'].includes(key))) failPrompt_ACU(errorCode, phase, '提示词段包含未知字段', { index });
+    if (Object.keys(segment).some(key => !['role', 'content', 'snapshotTemplate', 'enabled', 'deletable', 'pinned'].includes(key))) failPrompt_ACU(errorCode, phase, '提示词段包含未知字段', { index });
     if (typeof segment.content !== 'string' || (!['system', 'user', 'assistant'].includes(segment.role as string)
       && !(segment.role === 'history' && isAgentHistorySlot_ACU(segment as { content: string })))) failPrompt_ACU(errorCode, phase, '提示词段角色或内容非法', { index });
     if (segment.enabled !== undefined && typeof segment.enabled !== 'boolean') failPrompt_ACU(errorCode, phase, '提示词段 enabled 非法', { index });
     if (segment.deletable !== undefined && typeof segment.deletable !== 'boolean') failPrompt_ACU(errorCode, phase, '提示词段 deletable 非法', { index });
     if (segment.pinned !== undefined && typeof segment.pinned !== 'boolean') failPrompt_ACU(errorCode, phase, '提示词段 pinned 非法', { index });
     if (!segment.content.trim()) failPrompt_ACU(errorCode, phase, '提示词段内容不能为空', { index });
-    return { role: segment.role, content: segment.content, ...(segment.enabled === undefined ? {} : { enabled: segment.enabled }), ...(segment.deletable === undefined ? {} : { deletable: segment.deletable }), ...(segment.pinned === undefined ? {} : { pinned: segment.pinned }) } as ContinuationPromptSegment_ACU;
+    if (segment.snapshotTemplate !== undefined && (typeof segment.snapshotTemplate !== 'string'
+      || !isAgentSnapshotSlot_ACU(segment as { content: string })
+      || /\$(?:HISTORY_ANCHOR|RUNTIME_SNAPSHOT)\b/.test(segment.snapshotTemplate))) failPrompt_ACU(errorCode, phase, '快照模板必须属于快照卡，且不能嵌套历史或快照插入点', { index });
+    return { role: segment.role, content: segment.content, ...(segment.snapshotTemplate === undefined ? {} : { snapshotTemplate: segment.snapshotTemplate }), ...(segment.enabled === undefined ? {} : { enabled: segment.enabled }), ...(segment.deletable === undefined ? {} : { deletable: segment.deletable }), ...(segment.pinned === undefined ? {} : { pinned: segment.pinned }) } as ContinuationPromptSegment_ACU;
   });
   if (!result.length) failPrompt_ACU(errorCode, phase, '提示词不能为空');
   return result;

@@ -1,5 +1,5 @@
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
-import { withAgentPromptLayout_ACU } from '../../../shared/agent-prompt-layout';
+import { isAgentSnapshotSlot_ACU, withAgentPromptLayout_ACU } from '../../../shared/agent-prompt-layout';
 import { withCreativeIdentity_ACU } from '../../../shared/creative-identity.js';
 /**
  * service/continuation/agent/agent-defaults.ts — Agent 各请求的伪 role + 预填充提示词
@@ -706,7 +706,7 @@ const AGENT_PROMPT_SLOT_LOCATORS_ACU: Record<AgentPromptSlotKey_ACU, (segment: C
   textProtocol: segment => segment.content.startsWith('【文本协议规范】'),
   subagentRules: segment => segment.content.startsWith('【子代理使用规则】'),
   outputContract: segment => segment.role === 'assistant' && segment.content.startsWith('我的最终交付是一个 JSON 对象'),
-  task: segment => segment.content.includes('$AGENT_TASK'),
+  task: segment => (segment.snapshotTemplate ?? segment.content).includes('$AGENT_TASK'),
 };
 
 /**
@@ -1495,11 +1495,38 @@ export function buildV46ContinuationAgentPrompts_ACU(): ContinuationAgentPrompts
   return { ...prompts, main: withV46ProgressAdjustment_ACU('main', prompts.main) };
 }
 
-/** 当前默认：独立 system 快照、原身份历史及固定 user 尾段。 */
-export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+/** V47 冻结布局；历史迁移不依赖持续演进的当前默认。 */
+export function buildV47ContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
   const prompts = buildV46ContinuationAgentPrompts_ACU();
   for (const role of Object.keys(prompts) as Array<keyof ContinuationAgentPrompts_ACU>) {
     prompts[role] = withAgentPromptLayout_ACU(prompts[role]);
+  }
+  return prompts;
+}
+
+/** V48：完整命中的启用内置资料段进入可编辑快照，保留原段元数据与用户段序。 */
+export function withV48EditableSnapshot_ACU(role: keyof ContinuationAgentPrompts_ACU, segments: readonly ContinuationPromptSegment_ACU[]): ContinuationPromptSegment_ACU[] {
+  if (segments.some(segment => isAgentSnapshotSlot_ACU(segment) && segment.snapshotTemplate !== undefined)) {
+    return withAgentPromptLayout_ACU(segments);
+  }
+  const previous = buildV47ContinuationAgentPrompts_ACU()[role];
+  const material = previous.find(segment => role === 'main'
+    ? segment.content.startsWith('【已经发生的小说正文】') : segment.content.includes('$AGENT_TASK'));
+  const moved = material && segments.find(segment => segment.role === material.role && segment.content === material.content && segment.enabled !== false);
+  const template = role === 'main'
+    ? [AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU, moved?.content ?? ''].filter(Boolean).join('\n\n')
+    : ['【本回合运行时数据】\n以下是本角色当前任务与资料；大纲是计划，已发生事实以正文为准。',
+      moved?.content ?? '以下是用户对任务曾经提过的要求：\n$USER_REQUIREMENTS'].join('\n\n');
+  const next = segments.map(segment => moved === segment
+    ? { ...segment, content: '当前任务与资料见独立的运行时快照。' } : { ...segment });
+  return withAgentPromptLayout_ACU(next, template);
+}
+
+/** 当前默认：角色自己的可编辑快照、原身份历史与固定 user 尾段。 */
+export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+  const prompts = buildV47ContinuationAgentPrompts_ACU();
+  for (const role of Object.keys(prompts) as Array<keyof ContinuationAgentPrompts_ACU>) {
+    prompts[role] = withV48EditableSnapshot_ACU(role, prompts[role]);
   }
   return prompts;
 }

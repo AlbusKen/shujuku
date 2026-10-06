@@ -3,7 +3,7 @@ import { WORLD_SIMULATION_AGENT_NAMES_ACU, WORLD_SIMULATION_RETIRED_AGENT_NAMES_
 import { WORLD_SIMULATION_PROMPT_PLACEHOLDERS_ACU, buildDefaultWorldSimulationAgentPrompt_ACU, buildDefaultWorldSimulationAgentPrompts_ACU, type WorldSimulationAgentPrompts_ACU, type WorldSimulationPromptPlaceholder_ACU } from './agent-defaults';
 import { buildWorldSimulationAgentPromptsForMode_ACU } from './agent-prompt-mode';
 import type { AgentToolMode_ACU } from '../../ai/agent-tool-mode';
-import { AGENT_HISTORY_SENTINEL_ACU, AGENT_SNAPSHOT_SENTINEL_ACU, isAgentHistorySlot_ACU } from '../../../shared/agent-prompt-layout';
+import { AGENT_HISTORY_SENTINEL_ACU, AGENT_SNAPSHOT_SENTINEL_ACU, isAgentHistorySlot_ACU, isAgentSnapshotSlot_ACU } from '../../../shared/agent-prompt-layout';
 
 /**
  * 段落校验只管字段与占位符，不再强制 seam 必须存在、唯一、按序、固定身份或 pinned。
@@ -22,16 +22,23 @@ export function validateWorldSimulationPromptSegments_ACU(value: unknown, agentN
   const result = value.map((item, index) => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) fail_ACU('提示词段必须是对象', { agentName, index }, phase);
     const raw = item as Record<string, unknown>;
-    if (Object.keys(raw).some(key => !['role', 'content', 'enabled', 'deletable', 'pinned'].includes(key))) fail_ACU('提示词段包含未知字段', { agentName, index }, phase);
+    if (Object.keys(raw).some(key => !['role', 'content', 'snapshotTemplate', 'enabled', 'deletable', 'pinned'].includes(key))) fail_ACU('提示词段包含未知字段', { agentName, index }, phase);
     if (typeof raw.content !== 'string' || !raw.content.trim() || (!['system', 'user', 'assistant'].includes(String(raw.role))
       && !(raw.role === 'history' && isAgentHistorySlot_ACU(raw as { content: string })))) fail_ACU('提示词段角色或内容非法', { agentName, index }, phase);
     if (typeof raw.enabled !== 'boolean' || typeof raw.deletable !== 'boolean' || typeof raw.pinned !== 'boolean') fail_ACU('提示词段开关非法', { agentName, index }, phase);
-    return { role: raw.role as string, content: raw.content, enabled: raw.enabled, deletable: raw.deletable, pinned: raw.pinned };
+    if (raw.snapshotTemplate !== undefined && (typeof raw.snapshotTemplate !== 'string'
+      || !isAgentSnapshotSlot_ACU(raw as { content: string })
+      || /\$(?:HISTORY_ANCHOR|RUNTIME_SNAPSHOT)\b/.test(raw.snapshotTemplate))) fail_ACU('快照模板必须属于快照卡，且不能嵌套历史或快照插入点', { agentName, index }, phase);
+    return { role: raw.role as string, content: raw.content, ...(raw.snapshotTemplate === undefined ? {} : { snapshotTemplate: raw.snapshotTemplate as string }), enabled: raw.enabled, deletable: raw.deletable, pinned: raw.pinned };
 
   });
-  const guidance = result.filter(segment => segment.content.includes('$WORLD_USER_REQUIREMENTS') || segment.content.includes('$WORLD_USER_GUIDANCE'));
-  if (guidance.length !== 1 || !guidance[0].enabled || !guidance[0].deletable || guidance[0].pinned) fail_ACU('用户要求/guidance 段必须唯一、启用且可编辑', { agentName }, phase);
-  for (const segment of result) for (const token of segment.content.match(PLACEHOLDER_PATTERN_ACU) ?? []) if (!(WORLD_SIMULATION_PROMPT_PLACEHOLDERS_ACU as readonly string[]).includes(token)) fail_ACU('提示词包含未知占位符', { agentName, token }, phase);
+  const guidance = result.filter(segment => (segment.snapshotTemplate ?? segment.content).includes('$WORLD_USER_REQUIREMENTS') || (segment.snapshotTemplate ?? segment.content).includes('$WORLD_USER_GUIDANCE'));
+  const editableSnapshot = result.some(segment => isAgentSnapshotSlot_ACU(segment) && segment.snapshotTemplate !== undefined);
+  if (guidance.length > 1 || (!editableSnapshot && guidance.length !== 1)
+    || guidance.some(segment => !segment.enabled || (!isAgentSnapshotSlot_ACU(segment) && (!segment.deletable || segment.pinned)))) fail_ACU('用户要求/guidance 必须位于唯一启用的可编辑模板中', { agentName }, phase);
+  for (const segment of result) for (const text of [segment.content, segment.snapshotTemplate ?? '']) {
+    for (const token of text.match(PLACEHOLDER_PATTERN_ACU) ?? []) if (!(WORLD_SIMULATION_PROMPT_PLACEHOLDERS_ACU as readonly string[]).includes(token)) fail_ACU('提示词包含未知占位符', { agentName, token }, phase);
+  }
   return result;
 }
 

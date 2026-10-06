@@ -64,7 +64,9 @@ export function renderMainSessionReadAppendix_ACU(messages: readonly AgentConver
 }
 
 export function keptSubagentMaterialTokens_ACU(kind: AgentSubagentKind_ACU, writes: readonly AgentWritableModule_ACU[]): Set<string> {
-  return new Set<string>(['$AGENT_TASK', '$AGENT_WRITE_SCOPE', '$AGENT_READ_MATERIALS', ...getAgentSubagentAccessProfile_ACU(kind).snapshotTokens, ...writes.map(module => MODULE_TOKEN_ACU[module])]);
+  return new Set<string>(['$AGENT_TASK', '$AGENT_WRITE_SCOPE', '$AGENT_READ_MATERIALS',
+    ...(kind === 'arc' ? ['$AGENT_READ_CATALOG', '$WORLDBOOK_HITS'] : []),
+    ...getAgentSubagentAccessProfile_ACU(kind).snapshotTokens, ...writes.map(module => MODULE_TOKEN_ACU[module])]);
 }
 
 /** Only an appendix after the complete fixed worldbook body can be a main-session read. */
@@ -186,8 +188,10 @@ export function stripUnownedSubagentPrompt_ACU(
 ): ContinuationPromptSegment_ACU[] {
   const dropped = new Set(SHARED_PLACEHOLDERS_ACU.filter(token => !kept.has(token)));
   return segments.flatMap(segment => {
-    if (!segment.content.includes('$AGENT_TASK')) return [{ ...segment }];
-    const lines = segment.content.split('\n');
+    const isSnapshot = segment.snapshotTemplate !== undefined;
+    const source = isSnapshot ? segment.snapshotTemplate! : segment.content;
+    if (!isSnapshot && !source.includes('$AGENT_TASK')) return [{ ...segment }];
+    const lines = source.split('\n');
     const dropLine = new Set<number>();
     lines.forEach((line, index) => {
       const tokens = line.match(/\$[A-Z][A-Z0-9_]*/g) ?? [];
@@ -197,6 +201,7 @@ export function stripUnownedSubagentPrompt_ACU(
       if (previous.includes('【') && !previous.includes('$')) dropLine.add(index - 1);
     });
     const content = lines.filter((_, index) => !dropLine.has(index)).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    if (isSnapshot) return [{ ...segment, snapshotTemplate: content }];
     return content ? [{ ...segment, content }] : [];
   });
 }

@@ -4,6 +4,7 @@ import { ContinuationOutlinePlanner_ACU } from '../continuation/outline-planner'
 import { StageExecutionEngine_ACU, type ContinuationPreparedTurnInstruction_ACU } from '../continuation/stage-execution-engine';
 import { ContinuationAgentTurnPlanner_ACU } from '../continuation/agent/agent-main-loop';
 import { applyAgentUserRequirementsReplace_ACU } from '../continuation/agent/agent-user-requirements';
+import { renderAgentConversationMessages_ACU } from '../continuation/agent/agent-conversation-store';
 import type { ContinuationAgentTurnPlanRequest_ACU } from '../continuation/agent/agent-model';
 import type { ContinuationSettings_ACU, ContinuationLogicalRef_ACU, TurnAttemptIdentity_ACU } from '../continuation/model';
 import type { ContinuationPromptPlaceholder_ACU } from '../continuation/prompt-template';
@@ -63,6 +64,10 @@ export function createZeroLayerContinuationRuntime_ACU(dependencies: Dependencie
     now: () => Date.now(),
     allocateId: dependencies.allocateId,
     createOutlineResolvers: context => dependencies.createOutlineResolvers(context, storage()),
+    createOutlineHistory: () => {
+      const adapter = storage();
+      return renderAgentConversationMessages_ACU(adapter.readConversation(adapter.readChat()));
+    },
     hasLiveHostClaim: identity => sending && identity === store.getChatIdentity(),
     buildFallbackSettings: dependencies.buildSettings,
     onSettingsReplaced: dependencies.onSettingsReplaced,

@@ -60,14 +60,20 @@
           </div>
         </header>
         <AcuTextarea
-          v-if="!isAgentFixedSlot_ACU(seg)"
+          v-if="isAgentSnapshotSlot_ACU(seg)"
+          :model-value="seg.snapshotTemplate || ''"
+          :rows="rows"
+          placeholder="运行时状态快照模板（SYSTEM）；可编辑正文和资料占位符。"
+          @update:model-value="$emit('update', index, { snapshotTemplate: $event })"
+        />
+        <AcuTextarea
+          v-else-if="!isAgentFixedSlot_ACU(seg)"
           :model-value="seg.content"
           :rows="rows"
           placeholder="提示词内容..."
           @update:model-value="$emit('update', index, { content: $event })"
         />
         <p v-else-if="isAgentHistorySlot_ACU(seg)" class="acu-prompt-segs__history">真实历史上下文 · 固定插入板块。请求时使用每条真实对话的原身份展开，不包裹为单条提示词；可上下移动调整位置。</p>
-        <p v-else class="acu-prompt-segs__history">运行时状态快照 · 独立 SYSTEM 板块。请求时注入当前状态，默认位于真实历史之前；可上下移动调整位置。</p>
       </li>
       <li v-if="!segments.length" class="acu-prompt-segs__empty">
         {{ emptyText }}
@@ -87,6 +93,7 @@ import type { AcuSelectOption } from './AcuSelect.vue';
 export interface PromptSegment {
   role: string;
   content: string;
+  snapshotTemplate?: string;
   enabled?: boolean;
   deletable?: boolean;
   mainSlot?: 'A' | 'B' | '';
@@ -113,7 +120,7 @@ import AcuCheckbox from './AcuCheckbox.vue';
 import AcuIconButton from './AcuIconButton.vue';
 import AcuSelect from './AcuSelect.vue';
 import AcuTextarea from './AcuTextarea.vue';
-import { isAgentFixedSlot_ACU, isAgentHistorySlot_ACU } from '../../../shared/agent-prompt-layout';
+import { isAgentFixedSlot_ACU, isAgentHistorySlot_ACU, isAgentSnapshotSlot_ACU } from '../../../shared/agent-prompt-layout';
 
 withDefaults(defineProps<{
   segments: PromptSegment[];

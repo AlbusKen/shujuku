@@ -13,6 +13,7 @@ import { ContinuationOrchestrator_ACU, type ContinuationPlanningContext_ACU } fr
 import { ContinuationOutlinePlanner_ACU } from './outline-planner';
 import { StageExecutionEngine_ACU, type ContinuationExecutionSnapshot_ACU, type ContinuationPreparedTurnInstruction_ACU } from './stage-execution-engine';
 import { ContinuationAgentTurnPlanner_ACU } from './agent/agent-main-loop';
+import { readAgentConversation_ACU, renderAgentConversationMessages_ACU } from './agent/agent-conversation-store';
 import {
   extractAgentRecallCodesFromChat_ACU,
   renderAgentStoryOverview_ACU,
@@ -299,6 +300,7 @@ function createRuntime_ACU(): ContinuationRuntime_ACU {
       return buildResolvers_ACU(context.task, stage, revision, context.envelope.settings);
     },
     hasLiveHostClaim: chatIdentity => bridgeRef?.hasLiveClaim(chatIdentity) ?? false,
+    createOutlineHistory: () => renderAgentConversationMessages_ACU(readAgentConversation_ACU()),
     buildFallbackSettings: buildInitialContinuationSettings_ACU,
     onSettingsReplaced: writeGlobalContinuationSettings_ACU,
   });

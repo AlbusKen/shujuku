@@ -1,4 +1,5 @@
 import { USER_PREFILL_CONTENT_ACU } from '../../shared/user-prefill.js';
+import { agentSnapshotTemplate_ACU, assembleAgentPrompt_ACU, isAgentSnapshotSlot_ACU } from '../../shared/agent-prompt-layout';
 import { callContinuationInternalAi_ACU, CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU, type ContinuationInternalAiCallOptions_ACU } from './internal-ai-call';
 import { normalizeContinuationInternalAiRetryLimit_ACU } from './defaults';
 import { resolveContinuationAgentApiPreset_ACU, type ContinuationApiPresetDependencies_ACU, type ContinuationResolvedApiPreset_ACU } from './api-preset';
@@ -47,6 +48,8 @@ export interface ContinuationOutlinePlanningRequest_ACU {
   /** 跨阶段节奏上下文。缺省按「第一个阶段、无历史连续高压」处理。 */
   pacingContext?: StageOutlinePacingContext_ACU;
   resolvers?: Partial<Record<ContinuationPromptPlaceholder_ACU, () => string | Promise<string | null | undefined> | null | undefined>>;
+  /** 权威会话投影，保留原角色和工具事务字段，不序列化为 SYSTEM 文本。 */
+  history?: readonly import('../ai/native-tool').AiWireMessage_ACU[];
 }
 
 export interface ContinuationOutlinePlanningResult_ACU {
@@ -307,7 +310,12 @@ export class ContinuationOutlinePlanner_ACU {
     // 校验错误不再写回骨架占位符：重试只追加 transcript，前缀保持字节级稳定以便命中缓存。
     const rendered = await renderContinuationPrompt_ACU(request.settings.outlinePrompt, resolvers, request.reason === 'manual_replan' ? 'replan' : 'outline_prompt');
     const trailingPrefill = rendered.messages[rendered.messages.length - 1]?.content === USER_PREFILL_CONTENT_ACU ? rendered.messages.pop() : undefined;
-    const renderedBlob = rendered.messages.map(message => message.content).join('\n');
+    const hasSnapshot = request.settings.outlinePrompt.some(isAgentSnapshotSlot_ACU);
+    const snapshotTemplate = agentSnapshotTemplate_ACU(request.settings.outlinePrompt, '');
+    const snapshotText = snapshotTemplate.trim()
+      ? (await renderContinuationPrompt_ACU([{ role: 'system', content: snapshotTemplate }], resolvers,
+        request.reason === 'manual_replan' ? 'replan' : 'outline_prompt')).messages[0].content : '';
+    const renderedBlob = [...rendered.messages.map(message => message.content), snapshotText].join('\n');
     const injected: string[] = [];
     const storyArc = resolvers.$STORY_ARC ? String(await resolvers.$STORY_ARC() ?? '').trim() : '';
     const enabledOutline = resolvers.$OUTLINE_WINDOW ? String(await resolvers.$OUTLINE_WINDOW() ?? '').trim() : '';
@@ -325,7 +333,10 @@ export class ContinuationOutlinePlanner_ACU {
       if (!isCurrent(identity)) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '阶段大纲内部请求已失效', false));
       }
-      const rawValue = await this.dependencies.callInternalAi(trailingPrefill ? [...messages, trailingPrefill] : messages, preset, identity, undefined, {
+      const prepared = hasSnapshot
+        ? assembleAgentPrompt_ACU(messages, request.history ?? [], snapshotText, trailingPrefill)
+        : trailingPrefill ? [...messages, trailingPrefill] : messages;
+      const rawValue = await this.dependencies.callInternalAi(prepared, preset, identity, undefined, {
         promptCacheEnabled: true,
         cacheScope: 'outline',
         cacheTools: [],

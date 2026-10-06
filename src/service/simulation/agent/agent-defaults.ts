@@ -1,9 +1,9 @@
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
-import { withAgentPromptLayout_ACU } from '../../../shared/agent-prompt-layout';
+import { isAgentSnapshotSlot_ACU, withAgentPromptLayout_ACU } from '../../../shared/agent-prompt-layout';
 import { withCreativeIdentity_ACU } from '../../../shared/creative-identity.js';
 import { WORLD_SIMULATION_LEDGER_MODULES_ACU, WORLD_SIMULATION_SCHEMA_VERSION_ACU, formatWorldSimulationLedgerRequiredFields_ACU, formatWorldSimulationLedgerRequiredFieldsLegacy_ACU, type WorldSimulationPromptSegment_ACU } from '../model';
 import { formatWorldSimulationToolAddressHints_ACU, WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from '../world-simulation-agent-tools';
-import { WORLD_SIMULATION_AGENT_CATALOG_ACU, findWorldSimulationAgentDefinition_ACU, worldSimulationAgentNativeTools_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
+import { WORLD_SIMULATION_AGENT_CATALOG_ACU, findWorldSimulationAgentDefinition_ACU, getWorldSimulationAgentAccessProfile_ACU, worldSimulationAgentNativeTools_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
 
 export const WORLD_SIMULATION_PROMPT_VERSION_V8_ACU = 'world-simulation-v8';
 export const WORLD_SIMULATION_PROMPT_VERSION_V9_ACU = 'world-simulation-v9';
@@ -34,7 +34,9 @@ export const WORLD_SIMULATION_PROMPT_VERSION_V32_ACU = 'world-simulation-v32';
 export const WORLD_SIMULATION_PROMPT_VERSION_V33_ACU = 'world-simulation-v33';
 /** v34：独立快照、原身份历史插入卡及固定 user 尾段。 */
 export const WORLD_SIMULATION_PROMPT_VERSION_V34_ACU = 'world-simulation-v34';
-export const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V34_ACU;
+/** v35：角色快照正文可编辑，运行时直接消费持久化模板。 */
+export const WORLD_SIMULATION_PROMPT_VERSION_V35_ACU = 'world-simulation-v35';
+export const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V35_ACU;
 export const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'] as const;
 export type WorldSimulationEngineSeam_ACU = typeof WORLD_SIMULATION_ENGINE_SEAMS_ACU[number];
 export type WorldSimulationAgentPrompts_ACU = Record<WorldSimulationAgentName_ACU, WorldSimulationPromptSegment_ACU[]>;
@@ -1076,8 +1078,45 @@ export function buildV33WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgen
     : segment));
 }
 
-export function buildDefaultWorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
+export function buildV34WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
   return withAgentPromptLayout_ACU(buildV33WorldSimulationAgentPrompt_ACU(name));
+}
+
+/** 仅从冻结默认提取授权字段；自定义和禁用段不搬迁，已编辑模板不覆盖。 */
+export function withV35WorldSimulationSnapshot_ACU(name: WorldSimulationAgentName_ACU, segments: readonly WorldSimulationPromptSegment_ACU[]): WorldSimulationPromptSegment_ACU[] {
+  if (segments.some(segment => isAgentSnapshotSlot_ACU(segment) && segment.snapshotTemplate !== undefined)) return withAgentPromptLayout_ACU(segments);
+  const previous = buildV34WorldSimulationAgentPrompt_ACU(name);
+  const runtimeMarker = worldSimulationSeamMarker_ACU('RUNTIME_CONTEXT');
+  const historyMarker = worldSimulationSeamMarker_ACU('HISTORY');
+  const allowed = new Set(['$WORLD_TASK', '$WORLD_USER_REQUIREMENTS', '$READ_BUDGET', '$ANCHOR_MESSAGE',
+    ...getWorldSimulationAgentAccessProfile_ACU(name).snapshotTokens]);
+  const lines: string[] = [];
+  const next = segments.map(segment => {
+    const stock = previous.some(item => item.role === segment.role && item.content === segment.content);
+    if (!stock || !segment.enabled) return { ...segment };
+    if (segment.content.startsWith(runtimeMarker)) {
+      lines.push(...segment.content.split('\n').slice(1).filter(line => name === 'world-director'
+        || (line.match(/\$[A-Z][A-Z0-9_]*/g) ?? []).every(token => allowed.has(token))));
+      return { ...segment, content: `${runtimeMarker}\n当前任务与资料见独立运行时快照。` };
+    }
+    if (segment.content.startsWith(historyMarker) && segment.content.includes('$WORLD_HISTORY')) {
+      return { ...segment, content: `${historyMarker}\n会话历史由独立历史板块按原身份提供。` };
+    }
+    if (segment.content.includes('$WORLD_USER_REQUIREMENTS')) {
+      lines.push(segment.content);
+      return { ...segment, content: '用户要求见独立运行时快照。' };
+    }
+    return { ...segment };
+  });
+  const oneShot = (ONE_SHOT_ROLES_ACU as readonly string[]).includes(name);
+  return withAgentPromptLayout_ACU(next, ['【本回合运行时数据】', '以下是本角色当前任务与授权资料的最新快照。', ...lines,
+    ...(oneShot ? ['$WORLD_RUNTIME_CONTEXT', '世界状态：$WORLD_STATE', '锚点正文：$ANCHOR_MESSAGE',
+      ...getWorldSimulationAgentAccessProfile_ACU(name).snapshotTokens
+        .filter(token => token !== '$WORLD_STATE').map(token => `${token.slice(1)}：${token}`)] : [])].join('\n'));
+}
+
+export function buildDefaultWorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
+  return withV35WorldSimulationSnapshot_ACU(name, buildV34WorldSimulationAgentPrompt_ACU(name));
 }
 
 export function buildDefaultWorldSimulationAgentPrompts_ACU(): WorldSimulationAgentPrompts_ACU {
@@ -1278,6 +1317,7 @@ export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
     { version: WORLD_SIMULATION_PROMPT_VERSION_V31_ACU, fingerprint: promptFingerprint_ACU(buildV31WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_V32_ACU, fingerprint: promptFingerprint_ACU(buildV32WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_V33_ACU, fingerprint: promptFingerprint_ACU(buildV33WorldSimulationAgentPrompt_ACU(name)) },
+    { version: WORLD_SIMULATION_PROMPT_VERSION_V34_ACU, fingerprint: promptFingerprint_ACU(buildV34WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildDefaultWorldSimulationAgentPrompt_ACU(name)) },
   ]]),
 ) as unknown as Record<WorldSimulationAgentName_ACU, readonly { version: string; fingerprint: string }[]>;
@@ -1322,9 +1362,10 @@ function oneShotSegmentKeys_ACU(segments: readonly WorldSimulationPromptSegment_
 }
 
 export function migrateWorldSimulationAgentPromptsDetailed_ACU(current: Record<string, WorldSimulationPromptSegment_ACU[]>, previousDefaults: Record<string, WorldSimulationPromptSegment_ACU[]>, previousVersion?: string): WorldSimulationPromptMigration_ACU {
-  if (previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V33_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_ACU) {
+  if (previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V33_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V34_ACU
+    || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_ACU) {
     const prompts = Object.fromEntries(WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name,
-      withAgentPromptLayout_ACU(current[name] ?? buildV33WorldSimulationAgentPrompt_ACU(name))])) as WorldSimulationAgentPrompts_ACU;
+      withV35WorldSimulationSnapshot_ACU(name, current[name] ?? buildV34WorldSimulationAgentPrompt_ACU(name))])) as WorldSimulationAgentPrompts_ACU;
     return { prompts, forcedRoles: [] };
   }
   // 旧迁移仍以 V33 段序对齐，布局在迁移完成后追加，避免历史槽位串位。
@@ -1444,6 +1485,6 @@ export function migrateWorldSimulationAgentPromptsDetailed_ACU(current: Record<s
       next.splice(afterWorkflow + 1, 0, requirements);
     }
   }
-  for (const { name } of WORLD_SIMULATION_AGENT_CATALOG_ACU) migrated[name] = withAgentPromptLayout_ACU(migrated[name]);
+  for (const { name } of WORLD_SIMULATION_AGENT_CATALOG_ACU) migrated[name] = withV35WorldSimulationSnapshot_ACU(name, migrated[name]);
   return { prompts: migrated, forcedRoles };
 }

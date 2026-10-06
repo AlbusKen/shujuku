@@ -17,7 +17,7 @@
 
 import { getChatArray_ACU } from '../../../data/gateways/chat-gateway';
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
-import { assembleAgentPrompt_ACU } from '../../../shared/agent-prompt-layout';
+import { agentSnapshotTemplate_ACU, assembleAgentPrompt_ACU } from '../../../shared/agent-prompt-layout';
 import { getActiveChatStorageIdentity_ACU } from '../../../data/storage/chat-history';
 import { normalizeContinuationInternalAiRetryLimit_ACU } from '../defaults';
 import { callContinuationInternalAi_ACU, callContinuationInternalAiWithRetry_ACU, CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU, formatAgentUsageLabel_ACU, type AiUsageMetadata_ACU, type ContinuationInternalAiCallOptions_ACU } from '../internal-ai-call';
@@ -942,6 +942,7 @@ export class ContinuationAgentTurnPlanner_ACU {
                 toolMode,
                 resolveContext: context,
                 mainSnapshot: this.subagentTail_ACU(session),
+          mainHistory: session.history().filter(message => message.content !== USER_PREFILL_CONTENT_ACU && !message.content.startsWith('【运行时快照】\n')),
                 candidateInstruction: action.instruction,
                 currentUserInput: context.originInstruction,
                 planningSummary: action.summary,
@@ -1581,11 +1582,13 @@ export class ContinuationAgentTurnPlanner_ACU {
     toolMode: AgentToolMode_ACU,
     lifecycle?: { outlineMaintenanceReserveAvailable: boolean; convergenceOnly: boolean },
   ): Promise<void> {
-    const rendered = await renderContinuationPrompt_ACU(
-      [{ role: 'system', content: AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU, enabled: true, deletable: false, pinned: true }],
+    const template = agentSnapshotTemplate_ACU(adaptContinuationPromptSegmentsToToolMode_ACU('main',
+      request.settings.agentPrompts.main, toolMode), AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU);
+    const rendered = template.trim() ? await renderContinuationPrompt_ACU(
+      [{ role: 'system', content: template, enabled: true, deletable: false, pinned: true }],
       this.buildMainPromptResolvers_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig, toolMode, lifecycle),
       'agent_loop',
-    );
+    ) : { messages: [{ content: '【本回合运行时数据】\n（运行时快照模板已清空。）' }] };
     const text = [rendered.messages[0]?.content?.trim() ?? '', renderAgentCorrectionGuide_ACU(session.snapshot(), context.moduleSnapshot)]
       .filter(Boolean).join('\n\n');
     if (!text || text === lastRuntimeSnapshotText_ACU(session.snapshot())) return;
@@ -1879,6 +1882,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           readRoundState,
           writeSql: this.moduleFieldWrite_ACU(chat, context),
           mainSnapshot: this.subagentTail_ACU(session),
+          mainHistory: session.history().filter(message => message.content !== USER_PREFILL_CONTENT_ACU && !message.content.startsWith('【运行时快照】\n')),
         });
         if (result.usedFieldWrites) context.moduleSnapshot = this.dependencies.readModuleSnapshot(chat);
         if (!result.usedFieldWrites && result.arc && (result.arc.delta.storyArc.length || result.arc.delta.storyArcPatches.length)) {
@@ -2002,6 +2006,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           readRoundState,
           writeSql: this.moduleFieldWrite_ACU(chat, context),
           mainSnapshot: this.subagentTail_ACU(session),
+          mainHistory: session.history().filter(message => message.content !== USER_PREFILL_CONTENT_ACU && !message.content.startsWith('【运行时快照】\n')),
         });
         if (call.billing === 'opening') {
           ledger.delegationsUsed += 1;
@@ -2025,6 +2030,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           signal: request.signal,
           readRoundState,
           mainSnapshot: this.subagentTail_ACU(session),
+          mainHistory: session.history().filter(message => message.content !== USER_PREFILL_CONTENT_ACU && !message.content.startsWith('【运行时快照】\n')),
         });
         if (!result.composer?.instruction.trim()) {
           throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', 'agent_delegate', 'instruction-composer 必须提供非空 instruction', false));
@@ -2040,6 +2046,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           currentUserInput: context.originInstruction,
           planningSummary: summary,
           mainSnapshot: this.subagentTail_ACU(session),
+          mainHistory: session.history().filter(message => message.content !== USER_PREFILL_CONTENT_ACU && !message.content.startsWith('【运行时快照】\n')),
           createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
           isCurrent: identity => request.isInternalRequestCurrent(identity),
           signal: request.signal,
@@ -2138,6 +2145,7 @@ export class ContinuationAgentTurnPlanner_ACU {
         readRoundState,
         writeSql: this.moduleFieldWrite_ACU(chat, context),
         mainSnapshot: this.subagentTail_ACU(session),
+          mainHistory: session.history().filter(message => message.content !== USER_PREFILL_CONTENT_ACU && !message.content.startsWith('【运行时快照】\n')),
       });
       const settled = result.usedFieldWrites
         ? { snapshot: this.dependencies.readModuleSnapshot(chat), outcome: { agentName: result.agentName, ok: true, summary: result.researcher?.summary || '百科资料已按栏目写入', detail: '', rejectedReason: '' } }
@@ -2357,6 +2365,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           readRoundState,
           writeSql: this.moduleFieldWrite_ACU(chat, context),
           mainSnapshot: this.subagentTail_ACU(session),
+          mainHistory: session.history().filter(message => message.content !== USER_PREFILL_CONTENT_ACU && !message.content.startsWith('【运行时快照】\n')),
         });
         return { delegation, result, error: null as unknown };
       } catch (error) {
