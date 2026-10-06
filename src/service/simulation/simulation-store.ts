@@ -7,6 +7,7 @@ import type { WorldChronicleArchiveDetail_ACU, WorldChronicleArchiveSnapshot_ACU
 import { WORLD_SIMULATION_CHRONICLE_ARCHIVE_SCHEMA_VERSION_ACU } from './agent/agent-model';
 import { validateWorldSimulationAgentPrompts_ACU } from './agent/prompt-template';
 import {
+  WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU,
   WORLD_CHRONICLE_OVERVIEW_CAP_ACU,
   WORLD_CHRONICLE_HOT_WINDOW_ACU,
   WORLD_LEDGER_SCHEMA_VERSION_ACU,
@@ -42,7 +43,7 @@ import {
 import { WORLD_ACTOR_EXPERIENCE_CAP_ACU, WORLD_ACTOR_LONG_TERM_STATUSES_ACU, type WorldActorAction_ACU, type WorldActorExperience_ACU, type WorldActorLongTermAction_ACU } from './model';
 import { assertWorldSimulationHostEnvelope_ACU, requireWorldSimulationHostAnchor_ACU } from './simulation-identity';
 
-export const WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU = '_qrf_world_simulation';
+export { WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU } from './model';
 
 const TASK_STATUSES_ACU = ['drafting', 'paused', 'running', 'stopping_after_inflight', 'completed', 'abandoned', 'failed'] as const;
 const STAGE_STATUSES_ACU = ['planning', 'running', 'completed', 'abandoned', 'failed'] as const;

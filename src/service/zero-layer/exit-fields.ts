@@ -1,6 +1,6 @@
-import { CONTINUATION_FIRST_FLOOR_FIELD_ACU } from '../continuation/continuation-store';
+import { CONTINUATION_FIRST_FLOOR_FIELD_ACU } from '../continuation/model';
 import { AGENT_MODULE_FIELD_ACU, AGENT_CONVERSATION_FIELD_ACU } from '../continuation/agent/agent-model';
-import { WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU } from '../simulation/simulation-store';
+import { WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU } from '../simulation/model';
 import { WORLD_SIMULATION_STATE_FIELD_ACU, WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU,
   WORLD_SIMULATION_CONVERSATION_FIELD_ACU, WORLD_SIMULATION_USER_REQUIREMENTS_FIELD_ACU,
   WORLD_SIMULATION_MATERIALS_FIELD_ACU } from '../simulation/agent/agent-model';

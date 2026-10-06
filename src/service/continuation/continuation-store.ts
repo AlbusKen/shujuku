@@ -22,6 +22,7 @@ import { CONTINUATION_AGENT_API_PRESET_ROLES_ACU, CONTINUATION_AGENT_PROMPT_KEYS
 import { resolveContinuationTurnRange_ACU, validateStageOutline_ACU } from './outline-schema';
 import { validateContinuationPromptSegments_ACU } from './prompt-template';
 import {
+  CONTINUATION_FIRST_FLOOR_FIELD_ACU,
   CONTINUATION_SCHEMA_VERSION_ACU,
   ContinuationValidationError_ACU,
   createContinuationError_ACU,
@@ -35,7 +36,7 @@ import {
 } from './model';
 import { stripLegacyLoopPromptFields_ACU } from '../../shared/legacy-loop-fields';
 
-export const CONTINUATION_FIRST_FLOOR_FIELD_ACU = '_qrf_continuation';
+export { CONTINUATION_FIRST_FLOOR_FIELD_ACU } from './model';
 
 const TASK_STATUSES_ACU = ['drafting', 'awaiting_outline_review', 'paused', 'running', 'stopping_after_inflight', 'completed', 'abandoned', 'failed'] as const;
 const STAGE_STATUSES_ACU = ['planning', 'awaiting_review', 'running', 'completed', 'abandoned', 'failed'] as const;

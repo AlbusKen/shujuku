@@ -1,4 +1,6 @@
 export const WORLD_SIMULATION_SCHEMA_VERSION_ACU = 1 as const;
+/** 首楼持久化字段属于数据契约，不能依赖 Store 的模块初始化。 */
+export const WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU = '_qrf_world_simulation';
 export const WORLD_LEDGER_SCHEMA_VERSION_ACU = 6 as const;
 export const WORLD_CHRONICLE_OVERVIEW_CAP_ACU = 512 as const;
 export const WORLD_CHRONICLE_HOT_WINDOW_ACU = 32 as const;

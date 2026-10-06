@@ -1,4 +1,6 @@
 export const CONTINUATION_SCHEMA_VERSION_ACU = 1 as const;
+/** 首楼持久化字段属于数据契约，不能依赖 Store 的模块初始化。 */
+export const CONTINUATION_FIRST_FLOOR_FIELD_ACU = '_qrf_continuation';
 
 export type ContinuationStageSize_ACU = 'short' | 'standard' | 'long' | 'custom';
 export type ContinuationStoryArcVolumePlan_ACU = 'short' | 'medium' | 'long' | 'custom';
