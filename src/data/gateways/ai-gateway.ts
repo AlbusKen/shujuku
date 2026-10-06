@@ -220,7 +220,7 @@ const CHAT_COMPLETION_GENERATE_URL_ACU = '/api/backends/chat-completions/generat
 /**
  * 把组装好的 Chat Completion 请求体直发宿主生成端点，返回原始 JSON（含 tool_calls）。
  * 宿主 ConnectionManagerRequestService / ChatCompletionService 内部经全局 fetch 发送，
- * 会被第三方脚本的生成端点拦截器改写请求体与响应；这里经 pristineFetch 绕过包装。
+ * 这里经 pristineFetch 区分内部请求与宿主正文，避免被本插件的正文拦截器重复认领。
  * 请求体归一沿用宿主纯函数 ChatCompletionService.createRequestData（不发请求、无副作用）。
  * @param payload 请求体字段
  * @param signal 中止信号
@@ -238,7 +238,7 @@ export async function postChatCompletionDirect_ACU(
     const service: any = (SillyTavern_API_ACU as any)?.ChatCompletionService;
     const data = !options?.preservePayload && typeof service?.createRequestData === 'function'
         ? service.createRequestData.call(service, payload) : { ...payload };
-    // 在宿主归一化之后声明无工具语义，避免默认 auto 让内层 Kemini 接管文本/JSON 请求。
+    // 在宿主归一化之后声明无工具语义，保持文本/JSON 请求的工具选择明确。
     // 有工具时保留调用方的选择，不强制调用工具，也不剥离未知的宿主发送包装。
     const request = { ...data, stream: options?.streaming ?? false };
     if (!options?.preservePayload && (!Array.isArray(request.tools) || request.tools.length === 0)) request.tool_choice = 'none';

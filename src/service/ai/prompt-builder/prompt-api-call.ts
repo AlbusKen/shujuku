@@ -315,8 +315,7 @@ export class RetryableAiResponseError_ACU extends Error {
             useTavernTools = tableFillTools.length > 0 && isConnectionProfileChatCompletion_ACU(targetProfile);
             if (useTavernTools) {
                 // Chat Completion 酒馆连接由本插件组装请求体，经 pristineFetch 直发生成端点。
-                // 带工具时使用 auto 保留模型选择；auto 不会触发 Kemini 的请求级放行，
-                // 此路径依赖 pristineFetch 剥离可识别包装，不强制 required 改变调用语义。
+                // 带工具时使用 auto，保留模型选择工具或直接返回最终文本的能力。
                 const overridePayload: Record<string, unknown> = {
                     tools: tableFillTools,
                     tool_choice: 'auto',
@@ -392,8 +391,7 @@ export class RetryableAiResponseError_ACU extends Error {
         if (effectiveApiConfig.useMainApi && !forceDirectApi) {
             if (tableFillTools.length && isMainApiChatCompletionAvailable_ACU()) {
                 // generateRaw 只返回文本、取不回 tool_calls；带工具时按主连接设置组装请求体直发生成端点。
-                // 工具选择与后处理规则与酒馆连接路径一致：auto 保留模型选择，不会让 Kemini 放行；
-                // 防改写依赖 pristineFetch 剥离可识别包装，不强制 required 改变调用语义。
+                // 工具选择与后处理规则与酒馆连接路径一致：auto 保留模型选择。
                 logDebug_ACU('ACU: 通过酒馆主连接（Chat Completion）发送带原生工具的填表请求...');
                 const routing = readMainApiChatCompletionRouting_ACU();
                 const mainOverridePayload: Record<string, unknown> = {

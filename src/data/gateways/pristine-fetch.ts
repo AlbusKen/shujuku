@@ -1,10 +1,8 @@
-// data/gateways/pristine-fetch.ts — 内部请求绕过已登记的生成请求包装
+// data/gateways/pristine-fetch.ts — 内部请求绕过本插件的生成请求包装
 //
-// Kemini 伴生面板会 patch `window.parent ?? window` 的 fetch，
-// 命中 /api/backends/*/generate 后改写请求体并重写响应流（注入自己的"传输函数"工具与控制提示词）。
-// 本插件的内部请求打同一个端点且自带原生工具协议，被改写后会与脚本注入的工具互相污染。
+// 内部请求与宿主正文共用生成端点，需避免被本插件的正文拦截器重复认领。
 //
-// 仅沿明确登记的 original 引用剥离；遇到未知包装立即停止。
+// 仅沿本插件包装登记的 original 引用剥离；遇到其他包装立即停止。
 // TT 等宿主的非原生 fetch 可能承担必需的后端桥接，必须保留，不能按函数源码猜测并绕过。
 // 不修改全局 fetch；只为本插件内部请求选择发送函数。
 // 宿主正文生成不经过本模块，脚本对聊天正文的效果不受影响。
@@ -15,8 +13,6 @@ import { HOST_GENERATION_INTERCEPTOR_MARKER_ACU, markInternalGenerationFetch_ACU
 /** 已知包装登记原函数的标记键，形如 wrapper[MARKER] = { original }。 */
 const KNOWN_FETCH_PATCH_MARKERS_ACU = [
   HOST_GENERATION_INTERCEPTOR_MARKER_ACU,
-  '__keminiAntiTruncation__',
-  '__keminiFetchInterceptor__',
 ] as const;
 
 /** 包装链深度上限，防御环形引用与异常长的链条。 */
@@ -49,10 +45,10 @@ function unwrapKnownPatches_ACU(start: unknown): unknown {
 }
 
 /**
- * 检查宿主与当前窗口的 fetch，仅剥离明确登记的 Kemini 包装。
+ * 检查宿主与当前窗口的 fetch，仅剥离本插件的生成请求包装。
  * iframe 的 fetch 可能只是转发到父窗口，标记实际登记在宿主 fetch 上。
  * 仅当宿主命中已知包装时直接调用其原函数；否则保留当前窗口的发送链。
- * 每次调用都重新解析：脚本可能在本模块加载之后才安装，缓存会让屏蔽静默失效。
+ * 每次调用都重新解析，以适应拦截器在本模块加载之后安装或释放的情况。
  * @returns 保留宿主桥接的发送函数；宿主原函数绑定到所属窗口
  */
 export function resolvePristineFetch_ACU(): typeof fetch {
@@ -72,7 +68,7 @@ export function resolvePristineFetch_ACU(): typeof fetch {
 }
 
 /**
- * 通过保留宿主桥接的发送函数发起请求，仅绕过已识别的 Kemini 包装。
+ * 通过保留宿主桥接的发送函数发起内部请求，仅绕过本插件的生成请求包装。
  * 宿主原函数已绑定所属窗口，其余发送函数沿用 globalThis；不改写地址或请求参数。
  * @param input 请求地址或 Request
  * @param init 请求参数
