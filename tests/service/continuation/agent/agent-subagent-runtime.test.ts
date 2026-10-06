@@ -203,7 +203,7 @@ it.each(['json', 'tools'] as const)('%s 总纲请求在协议错误后允许检�
     '<function_calls><invoke name="read"><parameter name="reads">["$WORLDBOOK:设定集:7"]</parameter></invoke></function_calls>',
     JSON.stringify({ action: 'search', query: '禁区', scope: ['worldbook'] }),
     JSON.stringify({ action: 'read', reads: ['$WORLDBOOK:设定集:7'] }),
-    JSON.stringify({ action: 'write_sql', sql }),
+    JSON.stringify({ action: 'write_sql', sql, ...(toolMode === 'tools' ? { evidenceRefs: ['$WORLDBOOK:设定集:7'] } : {}) }),
     JSON.stringify({ summary: '全书方向已保存' }),
   ];
   const sent: Array<{ messages: Array<{ role: string; content: string; tool_calls?: unknown; tool_call_id?: string }>; tools: string[]; cacheTools: string[] }> = [];
@@ -241,6 +241,10 @@ it.each(['json', 'tools'] as const)('%s 总纲请求在协议错误后允许检�
       } else {
         expect(request.tools).toEqual(['read', 'search', 'write_sql', 'submit']);
         expect(request.cacheTools).not.toContain('mode:json');
+        if (request === sent[3]) {
+          expect(sent[4].messages.some(message => message.role === 'tool' && message.content.includes('未授权或参数非法'))).toBe(false);
+          expect(sent[4].messages.some(message => message.role === 'tool' && message.content.includes('"status":"committed"'))).toBe(true);
+        }
         expect(text).toContain('search 使用函数调用');
         expect(text).not.toContain('我的最终交付是一个 JSON 对象');
       }

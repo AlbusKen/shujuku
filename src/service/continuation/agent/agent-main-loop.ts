@@ -883,7 +883,11 @@ export class ContinuationAgentTurnPlanner_ACU {
             persistRunState(iteration);
             workflow = await this.runFixedWorkflow_ACU(action, request, context, ledger, budget, chat, session, readRoundState, toolMode, apiDependencies);
           } catch (error) {
-            updateAgentSession_ACU(workflowEntry, { title: '固定工作流失败', detail: error instanceof Error ? error.message : String(error), ok: false });
+            const awaitingReview = error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_AGENT_OUTLINE_REPLANNED';
+            updateAgentSession_ACU(workflowEntry, {
+              title: awaitingReview ? '固定工作流等待大纲确认' : '固定工作流失败',
+              detail: error instanceof Error ? error.message : String(error), ok: awaitingReview,
+            });
             throw error;
           }
           snapshot = context.moduleSnapshot;
@@ -1061,14 +1065,22 @@ export class ContinuationAgentTurnPlanner_ACU {
         { delegationsUsed: ledger.delegationsUsed },
       );
     } catch (error) {
-      // 中断即存档（block 除外，其缓存已清）：迭代中途的失败保留已完成的派工结论，
-      // 用户再发送时据此从当前迭代恢复而不是从头重跑。
-      if (!(error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_AGENT_BLOCKED')) {
+      const awaitingReview = error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_AGENT_OUTLINE_REPLANNED';
+      // 预览已改变大纲游标：持久资料保留，确认后按新游标启动，不再读取运行上下文保存旧缓存。
+      if (awaitingReview) {
+        clearAgentRunState_ACU(identitySeed.chatIdentity);
+      } else if (!(error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_AGENT_BLOCKED')) {
+        // 其余中断保留已完成的派工结论，恢复时无需从头重跑。
         persistRunState(Math.min(currentIteration, budget.maxIterations));
       }
       if (!terminalLogged) {
         const message = error instanceof ContinuationValidationError_ACU ? error.error.message : error instanceof Error ? error.message : String(error);
-        logAgentSession_ACU({ kind: 'run_failed', title: '本轮已终止', detail: `${message}\n（进度已保留，输入新指令后发送即可继续）`, ok: false });
+        if (awaitingReview) {
+          // 人工预览是正常交接：清除运行标记，不记为生成失败。
+          logAgentSession_ACU({ kind: 'block', title: '等待大纲确认', detail: message });
+        } else {
+          logAgentSession_ACU({ kind: 'run_failed', title: '本轮已终止', detail: `${message}\n（进度已保留，输入新指令后发送即可继续）`, ok: false });
+        }
       }
       throw error;
     }
@@ -2259,11 +2271,14 @@ export class ContinuationAgentTurnPlanner_ACU {
       try {
         if (request.signal?.aborted || !request.isInternalRequestCurrent(request.createInternalRequestIdentity(0))) throw new Error('阶段大纲请求已失效');
         const result = await request.applyOutline(delegation.prompt);
-        context.execution = request.readContext();
         const ok = !result.requiresReview && !result.stopped;
         ledger.outcomes.push({ agentName: delegation.agentName, ok, summary: result.summary, detail: result.summary, rejectedReason: ok ? '' : result.summary });
         updateAgentSession_ACU(entry, { title: ok ? '阶段大纲已更新' : '阶段大纲等待处理', detail: result.summary, ok });
+        // 预览落盘后任务已不在 running，不能再读取执行上下文或继续派工。
+        if (result.requiresReview) failLoop_ACU('CONTINUATION_AGENT_OUTLINE_REPLANNED', '新大纲已产出，等待你在界面上确认后再继续', { op: result.op, requiresReview: true });
+        context.execution = request.readContext();
       } catch (error) {
+        if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_AGENT_OUTLINE_REPLANNED') throw error;
         const reason = compactAgentProtocolError_ACU(error);
         ledger.outcomes.push({ agentName: delegation.agentName, ok: false, summary: '', detail: '', rejectedReason: reason });
         updateAgentSession_ACU(entry, { title: '阶段大纲未更新', detail: reason, ok: false });

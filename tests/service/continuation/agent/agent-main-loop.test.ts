@@ -13,7 +13,7 @@ import { _set_SillyTavern_API_ACU } from '../../../../src/shared/host-api';
 import { buildEmptyAgentWorldbookSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-worldbook-read';
 import { buildDefaultContinuationSettings_ACU } from '../../../../src/service/continuation/defaults';
 import { ContinuationValidationError_ACU, type ContinuationInternalAiRequestIdentity_ACU } from '../../../../src/service/continuation/model';
-import { readAgentSessionLog_ACU, resetAgentSessionLogForTests_ACU } from '../../../../src/service/continuation/agent/agent-session-log';
+import { isAgentSessionRunning_ACU, readAgentSessionLog_ACU, resetAgentSessionLogForTests_ACU } from '../../../../src/service/continuation/agent/agent-session-log';
 import { readAgentRunState_ACU, resetAgentRunCacheForTests_ACU } from '../../../../src/service/continuation/agent/agent-run-cache';
 import type { AgentConversationCompactionMark_ACU, AgentConversationCompactionMarkV2_ACU, AgentConversationMessage_ACU, AgentConversationSnapshot_ACU, AgentModuleSnapshot_ACU, AgentOutlineOpResult_ACU, AgentRunBudget_ACU, ContinuationAgentTurnPlanRequest_ACU } from '../../../../src/service/continuation/agent/agent-model';
 
@@ -1268,17 +1268,34 @@ describe('open_round 固定结构工作流', () => {
     } finally { _set_SillyTavern_API_ACU(null as any); }
   });
 
-  it('已有可用总纲但没有阶段大纲时，只自动准备大纲，不重复运行 arc-architect', async () => {
+  it.each([false, true])('已有总纲时只准备阶段大纲，预览=%s 时按确认门禁交接', async requiresReview => {
     const h = harness_ACU({
       snapshot: snapshotWithArc_ACU(),
       context: preOutlineContext_ACU,
       mainReplies: ['{"action":"open_round","focus":"围绕晶屑继续试探"}'],
       subReplies: [maintainerReply_ACU, plannerReply_ACU, '{"summary":"本轮无节拍操作","recommendation":"no_change"}', composerReply_ACU],
-      applyOutline: () => ({ op: 'continue', requiresReview: false, stopped: null, summary: '已继续下一阶段大纲' }),
+      applyOutline: () => ({ op: 'continue', requiresReview, stopped: null, summary: '已继续下一阶段大纲' }),
     });
     const original = h.request.applyOutline!;
-    h.request.applyOutline = async instruction => { const result = await original(instruction); h.setContext(execution_ACU); return result; };
+    h.request.applyOutline = async instruction => {
+      const result = await original(instruction);
+      if (requiresReview) h.request.readContext = () => { throw new Error('预览落盘后不得读取运行上下文'); };
+      else h.setContext(execution_ACU);
+      return result;
+    };
 
+    if (requiresReview) {
+      await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_OUTLINE_REPLANNED' } });
+      expect(h.outlineCalls).toHaveLength(1);
+      expect(h.subCalls).toHaveLength(0);
+      expect(h.mainCalls).toHaveLength(1);
+      expect(isAgentSessionRunning_ACU()).toBe(false);
+      const entries = readAgentSessionLog_ACU();
+      expect(entries.some(entry => entry.kind === 'block' && entry.title === '等待大纲确认' && entry.ok)).toBe(true);
+      expect(entries.some(entry => entry.title === '固定工作流等待大纲确认' && entry.status === 'done')).toBe(true);
+      expect(entries.some(entry => entry.kind === 'run_failed' || entry.status === 'running')).toBe(false);
+      return;
+    }
     const result = await h.planner.plan(h.request);
 
     expect(result.instruction).toBe('按阶段大纲先观察守门人的回避。');
@@ -1287,11 +1304,11 @@ describe('open_round 固定结构工作流', () => {
     expect(h.subCalls).toHaveLength(4);
   });
 
-  it('主 Agent 依次委派总纲与阶段大纲修改，写作指令编排仍由工作流调用', async () => {
+  it.each([false, true])('主 Agent 委派大纲修改，预览=%s 时不继续读取运行上下文', async requiresReview => {
     const h = harness_ACU({
       snapshot: buildEmptyAgentModuleSnapshot_ACU(),
       subReplies: [arcReply_ACU],
-      applyOutline: () => ({ op: 'revise', requiresReview: false, stopped: null, summary: '已按实际剧情改写阶段大纲' }),
+      applyOutline: () => ({ op: 'revise', requiresReview, stopped: null, summary: '已按实际剧情改写阶段大纲' }),
       mainReplies: [
         '{"action":"delegate","delegations":[{"agentName":"arc-architect","prompt":"按实际剧情建立总纲"}]}',
         '{"action":"delegate","delegations":[{"agentName":"outline-architect","prompt":"按新总纲改写阶段大纲"}]}',
@@ -1300,6 +1317,20 @@ describe('open_round 固定结构工作流', () => {
       ],
     });
 
+    if (requiresReview) {
+      const original = h.request.applyOutline!;
+      h.request.applyOutline = async instruction => {
+        const result = await original(instruction);
+        h.request.readContext = () => { throw new Error('预览落盘后不得读取运行上下文'); };
+        return result;
+      };
+      await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_OUTLINE_REPLANNED' } });
+      expect(h.mainCalls).toHaveLength(2);
+      expect(h.outlineCalls).toEqual(['按新总纲改写阶段大纲']);
+      expect(isAgentSessionRunning_ACU()).toBe(false);
+      expect(readAgentSessionLog_ACU().some(entry => entry.kind === 'run_failed')).toBe(false);
+      return;
+    }
     const result = await h.planner.plan(h.request);
     const feedback = h.mainCalls[3].map(message => message.content).join('\n');
 

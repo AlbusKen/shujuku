@@ -14,7 +14,7 @@ import { appendAgentConversationToChat_ACU, appendConfirmedAgentTurn_ACU, clearA
 import { clearAgentModuleField_ACU } from './agent/agent-module-store';
 import { seedAgentUserRequirementsIfEmpty_ACU } from './agent/agent-user-requirements';
 import { clearAgentRunState_ACU } from './agent/agent-run-cache';
-import { clearAgentSessionLog_ACU, logAgentSession_ACU } from './agent/agent-session-log';
+import { clearAgentSessionLog_ACU, isAgentSessionRunning_ACU, logAgentSession_ACU } from './agent/agent-session-log';
 import type { ContinuationPromptPlaceholder_ACU } from './prompt-template';
 
 export interface SendAgentMessageInput_ACU { text: string; }
@@ -399,6 +399,21 @@ export class ContinuationOrchestrator_ACU {
         );
         return { ...taskResult_ACU(this.dependencies.store.readPersisted() ?? started!), preparedTurn };
       } catch (error) {
+        if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_AGENT_OUTLINE_REPLANNED'
+          && this.isLeaseCurrent_ACU(chatIdentity, lease) && this.dependencies.getChatIdentity() === chatIdentity) {
+          const waiting = this.dependencies.store.readPersisted();
+          const waitingTask = waiting?.activeTask;
+          const stage = waitingTask?.stages.find(item => item.stageId === waitingTask.activeStageId);
+          const revision = stage?.revisions.find(item => item.revision === stage.activeRevision);
+          // 只接住本任务已经成功落盘的预览交接；其他错误仍按失败处理。
+          if (waitingTask?.taskId === task.taskId && waitingTask.status === 'awaiting_outline_review'
+            && waitingTask.stopReason === null && stage?.status === 'awaiting_review' && revision && !revision.frozen) {
+            if (isAgentSessionRunning_ACU()) {
+              logAgentSession_ACU({ kind: 'block', title: '等待大纲确认', detail: error.error.message });
+            }
+            return taskResult_ACU(waiting!);
+          }
+        }
         await this.pauseWithError_ACU(chatIdentity, task.taskId, error, 'turn_call', '每轮指令生成失败');
         throw error;
       } finally {

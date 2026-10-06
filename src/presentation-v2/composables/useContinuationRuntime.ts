@@ -360,7 +360,14 @@ export function useContinuationRuntime() {
   }
 
   async function acceptOutline(outline: StageOutline_ACU): Promise<boolean> {
-    return run_ACU(runtime => runtime.orchestrator.acceptOutline({ outline }));
+    return run_ACU(async current => {
+      const epoch = pageEpoch;
+      const actionStopEpoch = stopEpoch;
+      const accepted = await current.orchestrator.acceptOutline({ outline });
+      // 确认落盘后沿现有运行时续跑；停止、换聊天或卸载不得重新点火。
+      if (!isCurrent(current, epoch) || stopEpoch !== actionStopEpoch) return accepted;
+      return current.continueTask();
+    });
   }
 
   async function abandonAndCreate(newOriginInstruction: string): Promise<boolean> {

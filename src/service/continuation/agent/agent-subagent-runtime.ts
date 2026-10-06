@@ -1110,8 +1110,9 @@ export class AgentSubagentRuntime_ACU {
             compactResearchTranscript();
           }
           if (call.name === 'write_sql') {
+            // 兼容共享工具声明的可选证据参数；续写仍只按 SQL 与角色权限提交。
             if (!input.writeSql || !writes.length || typeof payload.sql !== 'string' || !payload.sql.trim()
-              || Object.keys(payload).some(key => key !== 'action' && key !== 'sql')) throw new Error('write_sql 未授权或参数非法');
+              || Object.keys(payload).some(key => !['action', 'sql', 'evidenceRefs'].includes(key))) throw new Error('write_sql 未授权或参数非法');
             return { kind: 'write_sql' as const, sql: payload.sql.trim() };
           }
           const { notes: _notes, ...argumentsWithoutNotes } = payload;

@@ -179,18 +179,43 @@ describe('useContinuationRuntime', () => {
     expect(continuation.canContinue.value).toBe(false);
   });
 
-  it('将设置保存和预览确认经由编排器处理，不直接发送宿主消息', async () => {
+  it('设置保存不发送正文，预览确认落盘后仅续跑并发送一次，失败或停止不续跑', async () => {
     const { useContinuationRuntime } = await import('../../../src/presentation-v2/composables/useContinuationRuntime');
     const continuation = useContinuationRuntime();
     const settings = { stageSize: 'standard' } as any;
     const outline = { schemaVersion: 1, title: '阶段', goal: '目标', totalTurns: 6, nodes: [] } as any;
 
     await expect(continuation.saveSettings(settings)).resolves.toBe('saved');
-    await continuation.acceptOutline(outline);
-
     expect(harness.replaceSettings).toHaveBeenCalledWith({ settings });
-    expect(harness.acceptOutline).toHaveBeenCalledWith({ outline });
     expect(harness.bridgeSend).not.toHaveBeenCalled();
+    harness.continueTask.mockResolvedValue({ ...result, preparedTurn });
+    await expect(continuation.acceptOutline(outline)).resolves.toBe(true);
+    expect(harness.acceptOutline).toHaveBeenCalledWith({ outline });
+    expect(harness.continueTask).toHaveBeenCalledOnce();
+    expect(harness.acceptOutline.mock.invocationCallOrder[0]).toBeLessThan(harness.continueTask.mock.invocationCallOrder[0]);
+    expect(harness.bridgeSend).toHaveBeenCalledOnce();
+    expect(harness.bridgeSend).toHaveBeenCalledWith(preparedTurn);
+    expect(continuation.busy.value).toBe(false);
+
+    harness.continueTask.mockClear();
+    harness.bridgeSend.mockClear();
+    harness.acceptOutline.mockRejectedValueOnce(new Error('确认保存失败'));
+    await expect(continuation.acceptOutline(outline)).resolves.toBe(false);
+    expect(harness.continueTask).not.toHaveBeenCalled();
+    expect(harness.bridgeSend).not.toHaveBeenCalled();
+
+    let release!: (value: unknown) => void;
+    harness.acceptOutline.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    const confirming = continuation.acceptOutline(outline);
+    await vi.waitFor(() => { expect(release).toBeDefined(); });
+    expect(continuation.busy.value).toBe(true);
+    // 在确认落盘与续跑之间停止，迟到的确认结果不得重新启动任务。
+    await continuation.stopTask();
+    release(result);
+    await expect(confirming).resolves.toBe(false);
+    expect(harness.continueTask).not.toHaveBeenCalled();
+    expect(harness.bridgeSend).not.toHaveBeenCalled();
+    expect(continuation.busy.value).toBe(false);
   });
 
   it('设置保存遇到操作互斥时返回 busy 且不弹错误吐司，其他错误返回 failed 并吐司', async () => {
