@@ -27,11 +27,17 @@ const harness = vi.hoisted(() => ({
   toastInfo: vi.fn(),
 }));
 
-vi.mock('../../../src/service/continuation/continuation-runtime', () => ({
+vi.mock('../../../src/service/continuation/continuation-runtime', () => {
   // 展示兜底设置：composable 初始化即调用，mock 里给最小骨架即可（测试不断言其内容）。
-  buildInitialContinuationSettings_ACU: () => ({}) as any,
-  getContinuationRuntime_ACU: () => ({
+  // 生产工厂在作用域不变时返回同一实例，替身也保持该契约。
+  const runtime = {
+    mode: 'host',
     bridge: { send: harness.bridgeSend, retryHostGeneration: harness.bridgeRetryHostGeneration, stopHostGeneration: harness.stopHostGeneration, subscribeStateChanges: harness.bridgeSubscribe },
+    send: harness.bridgeSend,
+    retryHostGeneration: harness.bridgeRetryHostGeneration,
+    stopGeneration: harness.stopHostGeneration,
+    subscribeStateChanges: harness.bridgeSubscribe,
+    continueTask: harness.continueTask,
     orchestrator: {
       continueTask: harness.continueTask,
       retryCurrentTurn: harness.retryCurrentTurn,
@@ -47,8 +53,12 @@ vi.mock('../../../src/service/continuation/continuation-runtime', () => ({
     },
     initialize: harness.initialize,
     read: harness.read,
-  }),
-}));
+  };
+  return {
+    buildInitialContinuationSettings_ACU: () => ({}) as any,
+    getContinuationRuntime_ACU: () => runtime,
+  };
+});
 vi.mock('../../../src/presentation-v2/stores/toast-store', () => ({
   useToastStore: () => ({ error: harness.toastError, success: harness.toastSuccess, info: harness.toastInfo }),
 }));

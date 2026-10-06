@@ -1,4 +1,7 @@
 import { computed, getCurrentScope, onScopeDispose, ref } from 'vue';
+import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
+import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
+import { subscribeZeroLayerChanges_ACU } from '../../service/zero-layer/notifications';
 import { buildDefaultWorldSimulationSettings_ACU } from '../../service/simulation/defaults';
 import type { WorldSimulationAgentName_ACU } from '../../service/simulation/agent/agent-catalog';
 import type { WorldSimulationAgentPrompts_ACU } from '../../service/simulation/agent/agent-defaults';
@@ -84,7 +87,7 @@ export function projectWorldSimulationSessionFromConversation_ACU(
 export function useWorldSimulationRuntime() {
   const toast = useToastStore();
   const toolMode = useAgentToolMode('worldSimulation');
-  const runtime = getWorldSimulationRuntime_ACU();
+  const runtime = () => getWorldSimulationRuntime_ACU();
   const snapshot = ref<WorldSimulationUiSnapshot_ACU | null>(null);
   const ready = ref(false);
   const busy = ref(false);
@@ -110,7 +113,7 @@ export function useWorldSimulationRuntime() {
 
   async function initialize(): Promise<void> {
     try {
-      const forcedRoles = await runtime.initialize();
+      const forcedRoles = await runtime().initialize();
       refresh();
       if (forcedRoles.length) {
         toast.info(`格林推演 v21 已重置 ${forcedRoles.length} 个自定义资料角色的提示词；旧版逐栏写入协议不适用于新流程。`);
@@ -123,7 +126,7 @@ export function useWorldSimulationRuntime() {
 
   function refresh(): boolean {
     try {
-      const next = runtime.readUiSnapshot();
+      const next = runtime().readUiSnapshot();
       snapshot.value = next;
       error.value = '';
       ready.value = true;
@@ -203,7 +206,9 @@ export function useWorldSimulationRuntime() {
   const revisionText = computed(() => (activeRevision.value ? `revision ${activeRevision.value.revision}` : ''));
   const anchorText = computed(() => {
     const current = anchor.value;
-    return current ? `第 ${current.messageIndex + 1} 楼 · swipe ${Number(current.swipeId) + 1}` : '';
+    return !current ? '' : 'logicalRef' in current
+      ? `逻辑回合 ${current.logicalRef.turnId}`
+      : `第 ${current.messageIndex + 1} 楼 · swipe ${Number(current.swipeId) + 1}`;
   });
 
   /**
@@ -239,7 +244,7 @@ export function useWorldSimulationRuntime() {
    */
   function send(text: string): Promise<boolean> {
     if (!text.trim()) return Promise.resolve(false);
-    return run_ACU(async () => reportSendOutcome_ACU(await runtime.sendAgentMessage(text)));
+    return run_ACU(async () => reportSendOutcome_ACU(await runtime().sendAgentMessage(text)));
   }
 
   /**
@@ -252,7 +257,7 @@ export function useWorldSimulationRuntime() {
       logWorldSimulationSession_ACU(chatIdentity, { kind: 'run_failed', title: '已停止', detail: '用户停止', ok: false });
     }
     try {
-      await runtime.stop();
+      await runtime().stop();
     } catch (cause) {
       toast.error(errorMessage_ACU(cause), { muteable: false });
     } finally {
@@ -261,7 +266,7 @@ export function useWorldSimulationRuntime() {
   }
 
   function resume(): Promise<boolean> {
-    return run_ACU(async () => reportSendOutcome_ACU(await runtime.resume()));
+    return run_ACU(async () => reportSendOutcome_ACU(await runtime().resume()));
   }
 
   /**
@@ -271,9 +276,9 @@ export function useWorldSimulationRuntime() {
    * @returns 'saved' 已落盘；'busy' 暂时写不进（稍后重试）；'failed' 校验或持久化失败（已吐司）
    */
   async function saveSettings(next: WorldSimulationSettings_ACU): Promise<'saved' | 'busy' | 'failed'> {
-    if (runtime.isInFlight()) return 'busy';
     try {
-      await runtime.saveSettings(JSON.parse(JSON.stringify(next)) as WorldSimulationSettings_ACU);
+      if (runtime().isInFlight()) return 'busy';
+      await runtime().saveSettings(JSON.parse(JSON.stringify(next)) as WorldSimulationSettings_ACU);
       refresh();
       return 'saved';
     } catch (cause) {
@@ -288,7 +293,7 @@ export function useWorldSimulationRuntime() {
     if (busy.value) return false;
     busy.value = true;
     try {
-      await runtime.saveUserRequirements(requirements);
+      await runtime().saveUserRequirements(requirements);
       refresh();
       toast.success('已保存用户要求。');
       return true;
@@ -309,7 +314,7 @@ export function useWorldSimulationRuntime() {
     if (busy.value) return false;
     busy.value = true;
     try {
-      const outcome = await runtime.clearData();
+      const outcome = await runtime().clearData();
       refresh();
       toast.success(`已清空格林推演任务、账本、会话记录与 ${outcome.clearedFloors} 个楼层的资料快照，正文未改动。`);
       return true;
@@ -372,7 +377,17 @@ export function useWorldSimulationRuntime() {
     }
   }
 
-  if (getCurrentScope()) onScopeDispose(() => unsubscribeSession?.());
+  if (getCurrentScope()) {
+    let lastChange = '';
+    const unsubscribeChanges = subscribeZeroLayerChanges_ACU(change => {
+      if (change.scope.chatId !== getActiveChatStorageIdentity_ACU(getChatArray_ACU())) return;
+      const key = JSON.stringify([change.sessionId, change.branchId, change.revision, change.kind === 'scope-invalidated']);
+      if (key === lastChange) return;
+      lastChange = key;
+      refresh();
+    });
+    onScopeDispose(() => { unsubscribeSession?.(); unsubscribeChanges(); });
+  }
 
   return {
     snapshot,

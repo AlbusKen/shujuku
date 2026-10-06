@@ -3,7 +3,7 @@ import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { parseAndApplyTableEditsToData_ACU } from '../ai/prompt-builder';
-import { isSqliteMode } from './storage-mode';
+import { getCurrentStorageMode, isSqliteMode } from './storage-mode';
 import { createDetachedSqlTableService_ACU } from './table-storage-strategy';
 import type { SqlTableService } from './sql-table-service';
 import {
@@ -15,7 +15,8 @@ import {
 
 export interface StagingBucketInput_ACU {
   historicalBase: Record<string, any>;
-  saveTargetIndex: number;
+  saveTargetIndex?: number;
+  logicalTarget?: import('../zero-layer/timeline').ZeroLayerFloorRef_ACU & { kind: 'logical' };
   updateMode: string;
   sqlTexts?: string[];
   dslResponses?: Array<{ aiResponse: string; targetSheetKeys: readonly string[] }>;
@@ -36,6 +37,7 @@ export interface TableFillStagingSession_ACU {
 
 export function createTableFillStagingSession_ACU(
   run: TableFillStagingRunContext_ACU,
+  assertCurrent?: () => void,
 ): TableFillStagingSession_ACU {
   let discarded = false;
   let detachedProvider: SqlTableService | null = null;
@@ -43,6 +45,11 @@ export function createTableFillStagingSession_ACU(
   const assertScope = (phase: string): StagingBucketResult_ACU | null => {
     if (discarded) {
       return { ok: false, error: `staging session 已释放，拒绝 ${phase}。`, errorCategory: 'precondition' };
+    }
+    try { assertCurrent?.(); }
+    catch { return { ok: false, error: 'staging session 租约已失效。', errorCategory: 'precondition' }; }
+    if (run.storageMode && run.storageMode !== getCurrentStorageMode()) {
+      return { ok: false, error: 'staging session 存储模式已变化。', errorCategory: 'precondition' };
     }
     if (String(currentChatFileIdentifier_ACU || '') !== String(run.chatKey || '')
       || String(getCurrentIsolationKey_ACU() || '') !== String(run.isolationKey || '')) {
@@ -72,10 +79,22 @@ export function createTableFillStagingSession_ACU(
     async applyBucket(input: StagingBucketInput_ACU): Promise<StagingBucketResult_ACU> {
       const scopeError = assertScope('applyBucket');
       if (scopeError) return scopeError;
+      if (run.logicalTarget) {
+        if (input.saveTargetIndex !== undefined || JSON.stringify(input.logicalTarget) !== JSON.stringify(run.logicalTarget)) {
+          return { ok: false, error: 'staging session 逻辑楼层身份不匹配。', errorCategory: 'precondition' };
+        }
+      } else if (input.logicalTarget || !Number.isSafeInteger(input.saveTargetIndex) || input.saveTargetIndex! < 0) {
+        return { ok: false, error: 'staging session 物理目标下标无效。', errorCategory: 'precondition' };
+      }
+      const mergeOverlay = (data: Record<string, any>) => {
+        const stale = assertScope('mergeOverlay');
+        if (stale?.ok === false) throw new Error(stale.error);
+        return mergeTargetOverlayFromBucket_ACU(run.overlay, data, input.saveTargetIndex ?? null, input.logicalTarget);
+      };
       const workingView = assembleBucketWorkingView_ACU(input.historicalBase, run.overlay);
       try {
         if (input.appliedTableData && typeof input.appliedTableData === 'object') {
-          run.overlay = mergeTargetOverlayFromBucket_ACU(run.overlay, input.appliedTableData, input.saveTargetIndex);
+          run.overlay = mergeOverlay(input.appliedTableData);
           return { ok: true, overlay: run.overlay, tableData: input.appliedTableData };
         }
         if (isSqliteMode() && Array.isArray(input.sqlTexts) && input.sqlTexts.length > 0) {
@@ -90,6 +109,8 @@ export function createTableFillStagingSession_ACU(
               errorCategory: 'infrastructure',
             };
           }
+          const stale = assertScope('afterLoad');
+          if (stale) { await releaseDetached(); return stale; }
           const parseResult = detachedProvider.applyEditsWithSystemRowIds(
             input.sqlTexts,
             input.updateMode,
@@ -104,7 +125,7 @@ export function createTableFillStagingSession_ACU(
             };
           }
           const tableData = parseResult.tableData as Record<string, any>;
-          run.overlay = mergeTargetOverlayFromBucket_ACU(run.overlay, tableData, input.saveTargetIndex);
+          run.overlay = mergeOverlay(tableData);
           await releaseDetached();
           logDebug_ACU(`[TableFillStagingSession] SQLite bucket 已累积 overlay：runId=${run.runId}, target=${input.saveTargetIndex}, sheets=${run.targetSheetKeys.join('、')}`);
           return { ok: true, overlay: run.overlay, tableData };
@@ -141,7 +162,7 @@ export function createTableFillStagingSession_ACU(
             }
           }
         }
-        run.overlay = mergeTargetOverlayFromBucket_ACU(run.overlay, workingTableData, input.saveTargetIndex);
+        run.overlay = mergeOverlay(workingTableData);
         logDebug_ACU(`[TableFillStagingSession] native bucket 已累积 overlay：runId=${run.runId}, target=${input.saveTargetIndex}, sheets=${run.targetSheetKeys.join('、')}`);
         return { ok: true, overlay: run.overlay, tableData: workingTableData };
       } catch (error: any) {

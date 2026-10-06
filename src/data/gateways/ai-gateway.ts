@@ -146,10 +146,19 @@ function finiteOrUndefined_ACU(value: unknown): number | undefined {
  * @param signal 中止信号
  * @returns 宿主返回的原始 JSON
  */
+export interface DirectChatCompletionOptions_ACU {
+    /** 未传时保持既有非流式调用。 */
+    streaming?: boolean;
+    /** 请求已经完成装配，不再次归一化或裁剪字段。 */
+    preservePayload?: boolean;
+    readResponse?(response: Response): Promise<any>;
+}
+
 export async function sendMainApiChatCompletionRequest_ACU(
     messages: any[],
     overridePayload: Record<string, unknown>,
     signal?: AbortSignal | null,
+    options?: DirectChatCompletionOptions_ACU,
 ): Promise<any> {
     if (!isMainApiChatCompletionAvailable_ACU()) {
         throw new Error('酒馆主 API 当前不是 Chat Completion 连接，无法携带原生工具。');
@@ -189,7 +198,7 @@ export async function sendMainApiChatCompletionRequest_ACU(
         request.azure_deployment_name = oai.azure_deployment_name;
         request.azure_api_version = oai.azure_api_version;
     }
-    return await postChatCompletionDirect_ACU({ ...request, ...overridePayload }, signal);
+    return await postChatCompletionDirect_ACU({ ...request, ...overridePayload }, signal, options);
 }
 
 const CHAT_COMPLETION_GENERATE_URL_ACU = '/api/backends/chat-completions/generate';
@@ -203,13 +212,21 @@ const CHAT_COMPLETION_GENERATE_URL_ACU = '/api/backends/chat-completions/generat
  * @param signal 中止信号
  * @returns 生成端点返回的原始 JSON
  */
-export async function postChatCompletionDirect_ACU(payload: Record<string, unknown>, signal?: AbortSignal | null): Promise<any> {
+export async function postChatCompletionDirect_ACU(
+    payload: Record<string, unknown>,
+    signal?: AbortSignal | null,
+    options?: DirectChatCompletionOptions_ACU,
+): Promise<any> {
+    if (options?.streaming && !options.readResponse) {
+        throw new Error('流式直发缺少本次请求的响应解析器，未发送请求。');
+    }
     const service: any = (SillyTavern_API_ACU as any)?.ChatCompletionService;
-    const data = typeof service?.createRequestData === 'function' ? service.createRequestData.call(service, payload) : { ...payload };
+    const data = !options?.preservePayload && typeof service?.createRequestData === 'function'
+        ? service.createRequestData.call(service, payload) : { ...payload };
     // 在宿主归一化之后声明无工具语义，避免默认 auto 让内层 Kemini 接管文本/JSON 请求。
     // 有工具时保留调用方的选择，不强制调用工具，也不剥离未知的宿主发送包装。
-    const request = { ...data, stream: false };
-    if (!Array.isArray(request.tools) || request.tools.length === 0) request.tool_choice = 'none';
+    const request = { ...data, stream: options?.streaming ?? false };
+    if (!options?.preservePayload && (!Array.isArray(request.tools) || request.tools.length === 0)) request.tool_choice = 'none';
     const response = await pristineFetch_ACU(CHAT_COMPLETION_GENERATE_URL_ACU, {
         method: 'POST',
         headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
@@ -217,6 +234,7 @@ export async function postChatCompletionDirect_ACU(payload: Record<string, unkno
         body: JSON.stringify(request),
         signal: signal ?? undefined,
     });
+    if (response.ok && options?.readResponse) return await options.readResponse(response);
     const text = await response.text();
     let json: any = null;
     try {
@@ -266,6 +284,7 @@ export async function sendProfileChatCompletionRequest_ACU(
     maxTokens: number,
     overridePayload: Record<string, unknown>,
     signal?: AbortSignal | null,
+    options?: DirectChatCompletionOptions_ACU,
 ): Promise<any> {
     const st: any = SillyTavern_API_ACU;
     const entry = profile?.api ? st?.CONNECT_API_MAP?.[profile.api] : null;
@@ -280,6 +299,7 @@ export async function sendProfileChatCompletionRequest_ACU(
             presetPayload = st.ChatCompletionService.presetToGeneratePayload(preset, {}) || {};
         }
     } catch (error) {
+        if (options?.preservePayload) throw Object.assign(new Error('连接预设的生成参数读取失败，未发送零层正文请求。'), { cause: error });
         logWarn_ACU('[AIGateway] 读取连接预设的生成参数失败，按默认参数发送:', error);
     }
     return await postChatCompletionDirect_ACU({
@@ -293,7 +313,7 @@ export async function sendProfileChatCompletionRequest_ACU(
         proxy_password: proxy.password,
         custom_prompt_post_processing: profile['prompt-post-processing'],
         ...overridePayload,
-    }, signal);
+    }, signal, options);
 }
 
 /**

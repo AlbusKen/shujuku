@@ -1,6 +1,9 @@
-import { computed, getCurrentScope, onScopeDispose, ref } from 'vue';
+import { computed, getCurrentScope, onScopeDispose, ref, watch } from 'vue';
+import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
+import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
+import { useChatChangedTick, useChatMutationTick } from './useChatChangedListener';
 import { isAgentSessionRunning_ACU, logAgentSession_ACU } from '../../service/continuation/agent/agent-session-log';
-import { buildInitialContinuationSettings_ACU, getContinuationRuntime_ACU } from '../../service/continuation/continuation-runtime';
+import { buildInitialContinuationSettings_ACU, getContinuationRuntime_ACU, type ContinuationRuntime_ACU } from '../../service/continuation/continuation-runtime';
 import { CONTINUATION_AGENT_PROMPT_KEYS_ACU, CONTINUATION_RECOVERABLE_STOP_REASONS_ACU, ContinuationValidationError_ACU, type ContinuationEnvelope_ACU, type ContinuationPromptSegment_ACU, type ContinuationSettings_ACU, type ContinuationTask_ACU, type StageOutline_ACU } from '../../service/continuation/model';
 import type { ContinuationOrchestratorResult_ACU } from '../../service/continuation/continuation-orchestrator';
 import type { ContinuationPreparedTurnInstruction_ACU } from '../../service/continuation/stage-execution-engine';
@@ -46,7 +49,7 @@ function errorMessage_ACU(error: unknown): string {
 export function useContinuationRuntime() {
   const toast = useToastStore();
   const toolMode = useAgentToolMode('continuation');
-  const runtime = getContinuationRuntime_ACU();
+  let runtime = getContinuationRuntime_ACU();
   const envelope = ref<ContinuationEnvelope_ACU | null>(null);
   // 无信封聊天的展示兜底：全局设置副本优先，用户在新聊天里看到的就是自己保存过的偏好。
   const fallbackSettings = buildInitialContinuationSettings_ACU();
@@ -57,19 +60,72 @@ export function useContinuationRuntime() {
   // 用户点停止后递增：挡住「发送已落盘、continueTask 尚未启动」这一空档把停止吞掉再开跑。
   let stopEpoch = 0;
 
-  // 正文确认与自动续写由宿主事件异步触发，不会经过页面动作。订阅桥的状态提交通知，
-  // 使「等待宿主正文」在 confirmCurrentTurn 后立即从权威快照刷新。
-  const subscribeStateChanges = (runtime.bridge as { subscribeStateChanges?: (listener: () => void) => () => void }).subscribeStateChanges;
-  const unsubscribeStateChanges = typeof subscribeStateChanges === 'function'
-    ? subscribeStateChanges.call(runtime.bridge, () => refresh())
-    : null;
-  if (unsubscribeStateChanges && getCurrentScope()) {
-    onScopeDispose(unsubscribeStateChanges);
+  let pageChat = getChatArray_ACU().length ? getChatArray_ACU() : null;
+  let pageChatIdentity = getActiveChatStorageIdentity_ACU(pageChat ?? []);
+  const chatChangedTick = useChatChangedTick();
+  const chatMutationTick = useChatMutationTick();
+  let pageChatChangedTick = chatChangedTick.value;
+  let pageChatMutationTick = chatMutationTick.value;
+  let pageEpoch = 0;
+  let disposed = false;
+  let unsubscribeStateChanges: (() => void) | null = null;
+
+  function bindStateChanges(): void {
+    const bound = runtime;
+    const epoch = pageEpoch;
+    unsubscribeStateChanges = bound.subscribeStateChanges(() => {
+      if (!disposed && bound === runtime && epoch === pageEpoch) refresh();
+    });
+  }
+
+  /** 动作入口重取模式；同一异步动作始终使用取得时的运行时。 */
+  function resolveRuntime(): ContinuationRuntime_ACU {
+    if (disposed) throw new Error('续写页面已卸载');
+    const current = getContinuationRuntime_ACU();
+    const messages = getChatArray_ACU();
+    const chat = messages.length ? messages : null;
+    const chatIdentity = getActiveChatStorageIdentity_ACU(messages);
+    if (current !== runtime || chat !== pageChat || chatIdentity !== pageChatIdentity
+      || chatChangedTick.value !== pageChatChangedTick
+      || chatMutationTick.value !== pageChatMutationTick) {
+      unsubscribeStateChanges?.();
+      runtime = current;
+      pageChat = chat;
+      pageChatIdentity = chatIdentity;
+      pageChatChangedTick = chatChangedTick.value;
+      pageChatMutationTick = chatMutationTick.value;
+      pageEpoch += 1;
+      stopEpoch += 1;
+      initialization = null;
+      activeAction = null;
+      busy.value = false;
+      envelope.value = null;
+      originInstruction.value = '';
+      bindStateChanges();
+    }
+    return current;
+  }
+
+  function isCurrent(current: ContinuationRuntime_ACU, epoch: number): boolean {
+    if (disposed) return false;
+    try { return resolveRuntime() === current && pageEpoch === epoch; }
+    catch { return false; }
+  }
+
+  bindStateChanges();
+  if (getCurrentScope()) {
+    watch([chatChangedTick, chatMutationTick], refresh);
+    onScopeDispose(() => {
+      disposed = true;
+      pageEpoch += 1;
+      unsubscribeStateChanges?.();
+    });
   }
 
   function refresh(): void {
     try {
-      envelope.value = runtime.read();
+      if (disposed) return;
+      envelope.value = resolveRuntime().read();
     } catch (error) {
       envelope.value = null;
       toast.error(errorMessage_ACU(error), { muteable: false });
@@ -77,17 +133,22 @@ export function useContinuationRuntime() {
   }
 
   async function initialize(): Promise<void> {
+    const current = resolveRuntime();
+    const epoch = pageEpoch;
     if (initialization) return initialization;
     busy.value = true;
-    const currentInitialization = runtime.initialize()
-      .then(() => refresh())
+    const currentInitialization = current.initialize()
+      .then(() => { if (isCurrent(current, epoch)) refresh(); })
       .catch(error => {
+        if (!isCurrent(current, epoch)) return;
         toast.error(errorMessage_ACU(error), { muteable: false });
         refresh();
       })
       .finally(() => {
-        busy.value = false;
-        if (initialization === currentInitialization) initialization = null;
+        if (initialization === currentInitialization) {
+          if (!activeAction) busy.value = false;
+          initialization = null;
+        }
       });
     initialization = currentInitialization;
     return initialization;
@@ -100,29 +161,44 @@ export function useContinuationRuntime() {
    * @param suppressErrorToast 为 true 时失败不弹吐司，由调用方决定如何呈现
    * @param onError 失败回调，把原始异常交给调用方（用于拼出更具体的提示）
    */
-  function run_ACU(action: () => Promise<ContinuationRuntimeActionResult_ACU>, replaceActive = false, suppressErrorToast = false, onError?: (error: unknown) => void): Promise<boolean> {
+  function run_ACU(action: (runtime: ContinuationRuntime_ACU) => Promise<ContinuationRuntimeActionResult_ACU>, replaceActive = false, suppressErrorToast = false, onError?: (error: unknown) => void): Promise<boolean> {
+    let current: ContinuationRuntime_ACU;
+    try { current = resolveRuntime(); }
+    catch (error) {
+      onError?.(error);
+      if (!suppressErrorToast) toast.error(errorMessage_ACU(error), { muteable: false });
+      return Promise.resolve(false);
+    }
+    const epoch = pageEpoch;
+    const actionStopEpoch = stopEpoch;
     if (busy.value && !replaceActive) return Promise.resolve(false);
     busy.value = true;
     const completion = Promise.resolve()
-      .then(action)
+      .then(() => {
+        if (!isCurrent(current, epoch)) throw new Error('续写操作所属页面已切换');
+        return action(current);
+      })
       .then(async result => {
+      if (!isCurrent(current, epoch) || activeAction !== completion || stopEpoch !== actionStopEpoch) return false;
       if ('retryHostGeneration' in result && result.retryHostGeneration) {
         // 上一轮正文中断/失败后的恢复走酒馆自己的重发，不经过 Agent。此分支只由用户
         // 动作到达（自动重试链走桥内部，不经 run_ACU），必须留痕并解释消息去向——
         // 否则用户看到的是「在 Agent 输入框发消息却直接触发了主对话生成」。
         logAgentSession_ACU({ kind: 'protocol_retry', title: '重发上一轮正文', detail: '上一轮酒馆正文未正常完成，先让酒馆直接重新生成；本次发送的消息会在正文完成后的下一轮由主 Agent 读取。' });
         toast.info('上一轮正文未完成，已让酒馆直接重新生成；你的消息会在下一轮被主 Agent 读取。');
-        const sent = await runtime.bridge.retryHostGeneration();
+        const sent = await current.retryHostGeneration();
         if (!sent) toast.error('宿主重新生成不可用，智能续写已暂停。', { muteable: false });
       } else if ('preparedTurn' in result && result.preparedTurn) {
-        const sent = await runtime.bridge.send(result.preparedTurn);
+        const sent = await current.send(result.preparedTurn);
         if (!sent) toast.error('宿主输入不可用，智能续写已暂停。', { muteable: false });
       }
+      if (!isCurrent(current, epoch) || activeAction !== completion) return false;
       envelope.value = 'envelope' in result ? result.envelope : result;
       refresh();
       return true;
       })
       .catch(error => {
+      if (!isCurrent(current, epoch) || activeAction !== completion) return false;
       onError?.(error);
       if (suppressErrorToast) {
         refresh();
@@ -182,7 +258,7 @@ export function useContinuationRuntime() {
   });
 
   async function createTask(): Promise<void> {
-    const created = await run_ACU(() => runtime.orchestrator.createTask({ originInstruction: originInstruction.value }));
+    const created = await run_ACU(runtime => runtime.orchestrator.createTask({ originInstruction: originInstruction.value }));
     if (task.value) originInstruction.value = '';
     // 创建即时完成后直接开始第一轮：主 Agent 会先派工大纲子代理创建大纲，不需要用户再点一次继续。
     if (created && canContinue.value) await continueTask();
@@ -195,10 +271,15 @@ export function useContinuationRuntime() {
    */
   async function sendAgentMessage(text: string): Promise<boolean> {
     if (!text.trim()) return false;
+    let current: ContinuationRuntime_ACU;
+    try { current = resolveRuntime(); }
+    catch (error) { toast.error(errorMessage_ACU(error), { muteable: false }); return false; }
+    const epoch = pageEpoch;
     const actionBeforeMessage = activeAction;
     const epochAtStart = stopEpoch;
     try {
-      const result = await runtime.orchestrator.sendAgentMessage({ text });
+      const result = await current.orchestrator.sendAgentMessage({ text });
+      if (!isCurrent(current, epoch)) return false;
       envelope.value = result.envelope;
       refresh();
       if (result.disposition === 'queued_after_host') {
@@ -215,7 +296,8 @@ export function useContinuationRuntime() {
       }
       if (stopEpoch !== epochAtStart) return true;
       let startFailure = '';
-      const started = await run_ACU(() => runtime.orchestrator.continueTask(), actionBeforeMessage !== null, true, error => { startFailure = errorMessage_ACU(error); });
+      const started = await run_ACU(runtime => runtime.continueTask(), actionBeforeMessage !== null, true, error => { startFailure = errorMessage_ACU(error); });
+      if (!isCurrent(current, epoch)) return false;
       if (!started) {
         // 启动失败的原因已由编排器落成 lastError（或就是被拒的异常本身）；只说「失败」用户没法判断下一步。
         const reason = startFailure || task.value?.lastError?.message || (busy.value ? '另一项续写操作正在执行' : '');
@@ -223,6 +305,7 @@ export function useContinuationRuntime() {
       }
       return true;
     } catch (error) {
+      if (!isCurrent(current, epoch)) return false;
       toast.error(errorMessage_ACU(error), { muteable: false });
       refresh();
       return false;
@@ -230,54 +313,58 @@ export function useContinuationRuntime() {
   }
 
   function continueTask(): Promise<boolean> {
-    return run_ACU(() => runtime.orchestrator.continueTask());
+    return run_ACU(runtime => runtime.continueTask());
   }
 
   /**
    * 停止 Agent 循环与酒馆正文。刻意不经 run_ACU：busy 恰好在循环运行期间为 true，
    * 走 busy 闸会把停止请求静默吞掉——而那正是用户最需要停止的时刻。
-   * 先递增 stopEpoch、落盘手动停止（清掉 awaiting pending），再打断酒馆生成：
+   * 先递增 stopEpoch、落盘手动停止（逻辑模式保留恢复引用），再打断对应生成：
    * GENERATION_STOPPED 随后的 failHostTurn 会因状态已不是 running 而 STALE 忽略，
    * 避免把手动停止改写成 retry_ready。会话 running 标记也立刻清掉，按钮才能切回发送。
    */
   async function stopTask(): Promise<void> {
+    let current: ContinuationRuntime_ACU;
+    try { current = resolveRuntime(); }
+    catch (error) { toast.error(errorMessage_ACU(error), { muteable: false }); return; }
+    const epoch = pageEpoch;
     stopEpoch += 1;
     if (isAgentSessionRunning_ACU()) {
       logAgentSession_ACU({ kind: 'run_failed', title: '已停止', detail: '用户停止', ok: false });
     }
     try {
-      const result = await runtime.orchestrator.stopTask();
-      envelope.value = result.envelope;
+      const result = await current.orchestrator.stopTask();
+      if (isCurrent(current, epoch)) envelope.value = result.envelope;
     } catch (error) {
-      toast.error(errorMessage_ACU(error), { muteable: false });
+      if (isCurrent(current, epoch)) toast.error(errorMessage_ACU(error), { muteable: false });
     } finally {
       try {
-        runtime.bridge.stopHostGeneration();
+        if (isCurrent(current, epoch)) current.stopGeneration();
       } catch {
         // 宿主 API 不可用时仍保留已落盘的停止态，避免按钮停了任务没停。
       }
-      refresh();
+      if (isCurrent(current, epoch)) refresh();
     }
   }
 
   async function replanRemaining(): Promise<void> {
-    await run_ACU(() => runtime.orchestrator.replanRemaining());
+    await run_ACU(runtime => runtime.orchestrator.replanRemaining());
   }
 
   async function replanRemainingWithInstruction(instruction: string): Promise<boolean> {
-    return run_ACU(() => runtime.orchestrator.replanRemaining({ instruction }));
+    return run_ACU(runtime => runtime.orchestrator.replanRemaining({ instruction }));
   }
 
   async function retryCurrentTurn(): Promise<void> {
-    await run_ACU(() => runtime.orchestrator.retryCurrentTurn());
+    await run_ACU(runtime => runtime.orchestrator.retryCurrentTurn());
   }
 
   async function acceptOutline(outline: StageOutline_ACU): Promise<boolean> {
-    return run_ACU(() => runtime.orchestrator.acceptOutline({ outline }));
+    return run_ACU(runtime => runtime.orchestrator.acceptOutline({ outline }));
   }
 
   async function abandonAndCreate(newOriginInstruction: string): Promise<boolean> {
-    const succeeded = await run_ACU(() => runtime.orchestrator.abandonAndCreate({ originInstruction: newOriginInstruction, confirmAbandon: true }));
+    const succeeded = await run_ACU(runtime => runtime.orchestrator.abandonAndCreate({ originInstruction: newOriginInstruction, confirmAbandon: true }));
     if (succeeded) originInstruction.value = '';
     return succeeded;
   }
@@ -291,19 +378,26 @@ export function useContinuationRuntime() {
    * @returns 'saved' 已落盘；'busy' 暂时写不进（稍后重试）；'failed' 校验或持久化失败（已吐司）
    */
   async function saveSettings(settings: ContinuationSettings_ACU): Promise<'saved' | 'busy' | 'failed'> {
+    let current: ContinuationRuntime_ACU;
+    try { current = resolveRuntime(); }
+    catch (error) { toast.error(errorMessage_ACU(error), { muteable: false }); return 'failed'; }
+    const epoch = pageEpoch;
     if (busy.value) return 'busy';
     busy.value = true;
     try {
-      envelope.value = await runtime.orchestrator.replaceSettings({ settings });
+      const saved = await current.orchestrator.replaceSettings({ settings });
+      if (!isCurrent(current, epoch)) return 'failed';
+      envelope.value = saved;
       refresh();
       return 'saved';
     } catch (error) {
+      if (!isCurrent(current, epoch)) return 'failed';
       if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_OPERATION_BUSY') return 'busy';
       toast.error(errorMessage_ACU(error), { muteable: false });
       refresh();
       return 'failed';
     } finally {
-      busy.value = false;
+      if (isCurrent(current, epoch)) busy.value = false;
     }
   }
 
@@ -362,7 +456,7 @@ export function useContinuationRuntime() {
   }
 
   async function saveActiveOutline(outline: StageOutline_ACU): Promise<boolean> {
-    return run_ACU(() => runtime.orchestrator.replaceActiveOutline({ outline }));
+    return run_ACU(runtime => runtime.orchestrator.replaceActiveOutline({ outline }));
   }
 
   /**
@@ -370,20 +464,26 @@ export function useContinuationRuntime() {
    * @returns 是否清空成功
    */
   async function clearData(): Promise<boolean> {
+    let current: ContinuationRuntime_ACU;
+    try { current = resolveRuntime(); }
+    catch (error) { toast.error(errorMessage_ACU(error), { muteable: false }); return false; }
+    const epoch = pageEpoch;
     if (busy.value) return false;
     busy.value = true;
     try {
-      const result = await runtime.orchestrator.clearContinuationData();
+      const result = await current.orchestrator.clearContinuationData();
+      if (!isCurrent(current, epoch)) return false;
       envelope.value = result.envelope;
       refresh();
       toast.success('已清空续写任务、会话记录与本地资料，正文未改动。');
       return true;
     } catch (error) {
+      if (!isCurrent(current, epoch)) return false;
       toast.error(errorMessage_ACU(error), { muteable: false });
       refresh();
       return false;
     } finally {
-      busy.value = false;
+      if (isCurrent(current, epoch)) busy.value = false;
     }
   }
 

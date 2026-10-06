@@ -97,7 +97,7 @@
                 出错路径：{{ fix.violations.map(item => `${item.path}（${item.message}）`).join('；') || fix.lastError || '（未记录）' }}
               </p>
               <p class="acu-v2-ws-materials__card-meta">
-                <template v-if="fix.anchor">来源楼层 {{ fix.anchor.messageIndex + 1 }} · </template>已接受 {{ fix.acceptedKeys.length }} 栏 · 尝试 {{ fix.attempts }} 次 · 首次失败于第 {{ fix.firstFailedAtDay }} 天
+                <template v-if="fix.anchor">来源 {{ fix.anchor.logicalRef ? `逻辑回合 ${fix.anchor.logicalRef.turnId}` : `宿主消息 ${fix.anchor.messageKey}` }} · </template>已接受 {{ fix.acceptedKeys.length }} 栏 · 尝试 {{ fix.attempts }} 次 · 首次失败于第 {{ fix.firstFailedAtDay }} 天
               </p>
             </article>
           </div>
@@ -205,7 +205,7 @@
 import { computed, ref, watch } from 'vue';
 import AcuButton from './_lib/AcuButton.vue';
 import UserRequirementsEditor from './UserRequirementsEditor.vue';
-import type { WorldSimulationAnchorIdentity_ACU, WorldSimulationConversationView_ACU, WorldSimulationMaterialsReadResult_ACU, WorldSimulationUserRequirementsReadResult_ACU } from '../../service/simulation/agent/agent-model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
+import type { WorldSimulationTargetAnchor_ACU, WorldSimulationConversationView_ACU, WorldSimulationMaterialsReadResult_ACU, WorldSimulationUserRequirementsReadResult_ACU } from '../../service/simulation/agent/agent-model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 import type { WorldSimulationSessionEntry_ACU } from '../../service/simulation/agent/agent-session-log'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 import type { WorldActorAction_ACU, WorldActorExperience_ACU, WorldSimulationLedger_ACU, WorldSimulationLedgerFieldSnapshot_ACU, WorldSimulationLedgerModule_ACU, WorldSimulationTimelineEntry_ACU } from '../../service/simulation/model'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 import { worldSimulationAgentLabel_ACU } from '../copy/world-simulation-copy';
@@ -220,7 +220,7 @@ const props = withDefaults(defineProps<{
   saveRequirements: (requirements: string[]) => Promise<boolean>;
   session: WorldSimulationSessionEntry_ACU[];
   ledger: WorldSimulationLedger_ACU | null;
-  anchor: WorldSimulationAnchorIdentity_ACU | null;
+  anchor: WorldSimulationTargetAnchor_ACU | null;
   projectionPreview: string | null;
   busy?: boolean;
   timeline?: WorldSimulationTimelineEntry_ACU[];
@@ -321,9 +321,12 @@ function confirmClear(): void {
   emit('clear');
 }
 
-const anchorText = computed(() => (props.anchor
-  ? `第 ${props.anchor.messageIndex + 1} 楼 · swipe ${Number(props.anchor.swipeId) + 1}`
-  : '当前未解析到 assistant 楼层'));
+const anchorText = computed(() => {
+  const anchor = props.anchor;
+  return !anchor ? '当前未解析到已保存的 assistant 正文' : 'logicalRef' in anchor
+    ? `逻辑回合 ${anchor.logicalRef.turnId}`
+    : `第 ${anchor.messageIndex + 1} 楼 · swipe ${Number(anchor.swipeId) + 1}`;
+});
 
 const diagnostics = computed(() => [...props.conversation.diagnostics, ...props.materials.diagnostics]);
 

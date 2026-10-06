@@ -356,6 +356,7 @@ import {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockCallApiWithPlotPreset.mockReset();
   mockMainChatCompletionAvailable.mockReturnValue(false);
 
   mockSettings.plotApiPreset = '';
@@ -1729,7 +1730,7 @@ describe('runPlotTasksRuntime_ACU', () => {
     expect(mockWriteFinalGenerationGreenlights).toHaveBeenCalledWith(finalGreenlights);
   });
 
-  it('某个 stage 失败时会阻断后续 stage', async () => {
+  it.each(['api', 'validation', 'reject'])('快任务失败（%s）时等齐慢任务与 Agent 收尾，再阻断后续阶段', async failureMode => {
     const plotSettings = {
       tasks: [
         {
@@ -1746,6 +1747,7 @@ describe('runPlotTasksRuntime_ACU', () => {
           stage: 1,
           order: 2,
           maxRetries: 1,
+          extractTags: failureMode === 'validation' ? 'plot' : '',
           promptGroup: [{ role: 'user', content: 'stage-1-fail' }],
         },
         {
@@ -1759,22 +1761,56 @@ describe('runPlotTasksRuntime_ACU', () => {
       ],
     };
 
+    let finishSlow!: (text: string) => void;
+    let finishAgent!: (decision: any) => void;
+    const slow = new Promise<string>(resolve => { finishSlow = resolve; });
+    const agent = new Promise<any>(resolve => { finishAgent = resolve; });
+    mockResolveAgentWorldbookFilterAvailability.mockResolvedValue({
+      available: true, control: { mode: 'agent', agentPlotExecutionMode: 'concurrent' },
+      bookNames: [], skillMetas: [],
+    });
+    mockRunAgentDecisionForPlot.mockReturnValue(agent);
     mockCallApiWithPlotPreset.mockImplementation(async (messages: any[]) => {
       const content = messages[0]?.content;
       if (content === 'stage-1-fail') {
+        if (failureMode === 'validation') return '缺少配置标签';
+        if (failureMode === 'reject') throw new Error('TaskAbortedByUser');
         throw new Error('接口失败');
       }
-      return '成功结果';
+      return slow;
     });
 
-    const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
-
-    expect(result.finalMessage).toBeNull();
-    expect(result.abortedByStageFailure).toBe(true);
-    expect(result.failedStage).toBe(1);
-    expect(result.errorMessage).toContain('失败任务');
+    let finished = false;
+    const outcome = runPlotTasksRuntime_ACU(plotSettings, '当前输入').then(
+      result => { finished = true; return { result, error: null }; },
+      error => { finished = true; return { result: null, error }; },
+    );
+    try {
+      await vi.waitFor(() => expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(2));
+      expect(finished).toBe(false);
+      expect(mockBuildFinalPlotInjectionMessage).not.toHaveBeenCalled();
+      finishSlow('成功结果');
+      // 让任务结果完成结算；仍未收尾的 Agent 必须继续持有本轮生命周期。
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(finished).toBe(false);
+      expect(mockSetTempPlotToSave).not.toHaveBeenCalled();
+    } finally {
+      finishSlow('成功结果');
+      finishAgent({ active: false, taskPlan: [], plotGreenlights: {}, finalGenerationGreenlights: [], effectiveTasks: plotSettings.tasks });
+    }
+    const { result, error } = await outcome;
+    if (failureMode === 'reject') {
+      expect(error).toMatchObject({ message: 'TaskAbortedByUser' });
+      expect(result).toBeNull();
+    } else {
+      expect(error).toBeNull();
+      expect(result).toMatchObject({ finalMessage: null, abortedByStageFailure: true, failedStage: 1 });
+      expect(result!.errorMessage).toContain('失败任务');
+      expect(result!.apiRetriesExhausted).toBe(failureMode === 'api');
+    }
     expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(2);
     expect(mockCallApiWithPlotPreset.mock.calls.some((call: any[]) => call[0][0].content === 'stage-2-never')).toBe(false);
+    expect(mockSavePlotToLatestMessage).not.toHaveBeenCalled();
   });
 
   it('用户中止时抛出 TaskAbortedByUser', async () => {
@@ -1865,11 +1901,11 @@ describe('runPlotTasksRuntime_ACU', () => {
   it('标签来源按阶段切换：阶段1用历史，阶段1产出后阶段2用本轮', async () => {
     const plotSettings = {
       tasks: [
-        { id: 't1', name: '任务1', stage: 1, order: 1, maxRetries: 1, extractTags: 'recall', promptGroup: [{ role: 'user', content: 'T1 {{recall}}' }] },
-        { id: 't2', name: '任务2', stage: 1, order: 2, maxRetries: 1, extractTags: 'recall', promptGroup: [{ role: 'user', content: 'T2 {{recall}}' }] },
+        { id: 't1', name: '任务1', stage: 1, order: 1, maxRetries: 1, extractTags: '', promptGroup: [{ role: 'user', content: 'T1 {{recall}}' }] },
+        { id: 't2', name: '任务2', stage: 1, order: 2, maxRetries: 1, extractTags: '', promptGroup: [{ role: 'user', content: 'T2 {{recall}}' }] },
         { id: 't3', name: '任务3', stage: 1, order: 3, maxRetries: 1, extractTags: 'recall', promptGroup: [{ role: 'user', content: 'T3 {{recall}}' }] },
-        { id: 't4', name: '任务4', stage: 2, order: 4, maxRetries: 1, extractTags: 'recall', promptGroup: [{ role: 'user', content: 'T4 {{recall}}' }] },
-        { id: 't5', name: '任务5', stage: 2, order: 5, maxRetries: 1, extractTags: 'recall', promptGroup: [{ role: 'user', content: 'T5 {{recall}}' }] },
+        { id: 't4', name: '任务4', stage: 2, order: 4, maxRetries: 1, extractTags: '', promptGroup: [{ role: 'user', content: 'T4 {{recall}}' }] },
+        { id: 't5', name: '任务5', stage: 2, order: 5, maxRetries: 1, extractTags: '', promptGroup: [{ role: 'user', content: 'T5 {{recall}}' }] },
       ],
     };
 
@@ -1943,10 +1979,15 @@ describe('runPlotTasksRuntime_ACU', () => {
   it('同 stage 多任务并发执行，并统一使用第一个有显式 taskApiPreset 的任务的预设', async () => {
     let activeCalls = 0;
     let maxActiveCalls = 0;
+    let release!: () => void;
+    let started!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    const bothStarted = new Promise<void>(resolve => { started = resolve; });
     mockCallApiWithPlotPreset.mockImplementation(async () => {
       activeCalls += 1;
       maxActiveCalls = Math.max(maxActiveCalls, activeCalls);
-      await Promise.resolve();
+      if (activeCalls === 2) started();
+      await pending;
       activeCalls -= 1;
       return 'AI回复内容';
     });
@@ -1973,7 +2014,13 @@ describe('runPlotTasksRuntime_ACU', () => {
       ],
     };
 
-    await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+    const request = runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+    await bothStarted;
+    try {
+      expect(activeCalls).toBe(2);
+      expect(mockBuildFinalPlotInjectionMessage).not.toHaveBeenCalled();
+    } finally { release(); }
+    await request;
 
     // 两个任务应使用相同的 effective preset
     const allCalls = mockCallApiWithPlotPreset.mock.calls;
@@ -2393,14 +2440,23 @@ describe('runPlotTasksRuntime_ACU', () => {
     ))).toBe(false);
     expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
   });
-  it('长度不足且缺少配置标签时保留成功响应，不作为 API 失败重试', async () => {
+  it.each([false, true])('长度不足后标签缺失，重试只说明最新原因（隔离调用=%s）', async isolated => {
     const plotSettings = {
       tasks: [{
-        id: 'tag-retry', name: '标签重试任务', stage: 1, order: 1, maxRetries: 2, minLength: 100,
+        id: 'tag-retry', name: '标签重试任务', stage: 1, order: 1, maxRetries: 3, minLength: 100,
         extractTags: 'plot', promptGroup: [{ role: 'user', content: 'tag-retry-prompt' }],
       }],
     };
-    mockCallApiWithPlotPreset.mockResolvedValueOnce('第一次没有标签');
+    const acceptedResponse = `<plot>${'有效剧情'.repeat(30)}</plot>`;
+    const shortResponse = '第一次没有标签';
+    mockCallApiWithPlotPreset.mockResolvedValueOnce(shortResponse)
+      .mockResolvedValueOnce('第二次长度足够但缺少标签'.repeat(10)).mockResolvedValueOnce(acceptedResponse);
+    const contextCall = vi.fn((messages: any[], preset: string) => mockCallApiWithPlotPreset(messages, preset));
+    const requestContext = isolated ? {
+      history: [], tableData: {}, presetName: '', signal: new AbortController().signal,
+      sqlReadContext: null, ejsContext: {}, finalPromptEntries: [], assertCurrent: vi.fn(),
+      resolveTaskApiPreset: () => '', callApi: contextCall,
+    } : undefined;
     mockExtractPlotTagsFromResponse.mockImplementation((rawText: string) => (
       String(rawText).includes('<plot>')
         ? {
@@ -2421,22 +2477,39 @@ describe('runPlotTasksRuntime_ACU', () => {
           }
     ));
 
-    const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
+    const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入', { requestContext });
 
-    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
-    expect(mockExtractPlotTagsFromResponse).toHaveBeenCalledTimes(1);
-    expect(mockAbortableDelay).not.toHaveBeenCalled();
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(3);
+    expect(contextCall).toHaveBeenCalledTimes(isolated ? 3 : 0);
+    const firstMessages = mockCallApiWithPlotPreset.mock.calls[0][0];
+    const retryMessages = mockCallApiWithPlotPreset.mock.calls[1][0];
+    const finalMessages = mockCallApiWithPlotPreset.mock.calls[2][0];
+    expect(firstMessages).toEqual([{ role: 'user', content: 'tag-retry-prompt' }]);
+    expect(retryMessages.slice(0, -1)).toEqual(firstMessages);
+    expect(retryMessages.at(-1)).toMatchObject({ role: 'system' });
+    expect(retryMessages.at(-1).content).toContain('第 2/3 次尝试');
+    expect(retryMessages.at(-1).content).toContain(`实际 ${shortResponse.length}，最低要求 100`);
+    expect(retryMessages.at(-1).content).toContain('不要编造记忆或事实');
+    expect(retryMessages.at(-1).content).not.toContain('未提取到');
+    expect(finalMessages.slice(0, -1)).toEqual(firstMessages);
+    expect(finalMessages).toHaveLength(2);
+    expect(finalMessages.at(-1).content).toContain('第 3/3 次尝试');
+    expect(finalMessages.at(-1).content).toContain('未提取到这些配置标签：plot');
+    expect(finalMessages.at(-1).content).not.toContain(`实际 ${shortResponse.length}，最低要求 100`);
+    expect(finalMessages.at(-1).content).not.toContain('回复长度不足');
+    expect(mockExtractPlotTagsFromResponse).toHaveBeenCalledTimes(2);
+    expect(mockAbortableDelay).toHaveBeenCalledTimes(2);
     expect(result.apiRetriesExhausted).not.toBe(true);
     expect(result.successfulResults).toEqual([
       expect.objectContaining({
         taskId: 'tag-retry',
-        rawResponse: '第一次没有标签',
-        extractedTags: {},
+        rawResponse: acceptedResponse,
+        extractedTags: { plot: '有效剧情' },
       }),
     ]);
   });
 
-  it('配置标签缺失时保留响应并继续后续阶段', async () => {
+  it('配置标签缺失且重试耗尽时停止后续阶段，不保存不完整结果', async () => {
     const plotSettings = {
       tasks: [
         {
@@ -2461,21 +2534,25 @@ describe('runPlotTasksRuntime_ACU', () => {
 
     const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
 
-    expect(result.abortedByStageFailure).not.toBe(true);
+    expect(result.abortedByStageFailure).toBe(true);
     expect(result.apiRetriesExhausted).not.toBe(true);
-    expect(result.failedResults).toHaveLength(0);
-    expect(result.successfulResults).toEqual([
-      expect.objectContaining({
-        taskId: 'tag-fail',
-        rawResponse: '始终无标签',
-      }),
-      expect.objectContaining({ taskId: 'tag-next', rawResponse: '始终无标签' }),
-    ]);
+    expect(result.finalMessage).toBeNull();
+    expect(result.failedResults).toEqual([expect.objectContaining({ taskId: 'tag-fail', validationRetriesExhausted: true })]);
+    expect(result.successfulResults).toHaveLength(0);
     expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(2);
-    expect(mockCallApiWithPlotPreset.mock.calls.some((call: any[]) => call[0][0].content === 'stage-2-continue')).toBe(true);
+    const retryMessages = mockCallApiWithPlotPreset.mock.calls[1][0];
+    expect(mockCallApiWithPlotPreset.mock.calls[0][0]).toHaveLength(1);
+    expect(retryMessages).toHaveLength(2);
+    expect(retryMessages.at(-1)).toMatchObject({ role: 'system' });
+    expect(retryMessages.at(-1).content).toContain('未提取到这些配置标签：plot');
+    expect(retryMessages.at(-1).content).toContain('<plot></plot>');
+    expect(retryMessages.at(-1).content).toContain('保留对应的闭合空标签');
+    expect(retryMessages.at(-1).content).toContain('不要只补写残片');
+    expect(mockCallApiWithPlotPreset.mock.calls.some((call: any[]) => call[0][0].content === 'stage-2-continue')).toBe(false);
+    expect(mockSetTempPlotToSave).not.toHaveBeenCalled();
   });
 
-  it('仅配置 extractInjectTags 且未提取标签时保留响应并继续', async () => {
+  it('仅配置 extractInjectTags 且未提取标签时仍判定验收失败', async () => {
     const plotSettings = {
       tasks: [{
         id: 'inject-tag-fail', name: '注入标签失败任务', stage: 1, order: 1, maxRetries: 1,
@@ -2494,27 +2571,44 @@ describe('runPlotTasksRuntime_ACU', () => {
 
     const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
 
-    expect(result.abortedByStageFailure).not.toBe(true);
+    expect(result.abortedByStageFailure).toBe(true);
     expect(result.apiRetriesExhausted).not.toBe(true);
-    expect(result.failedResults).toHaveLength(0);
-    expect(result.successfulResults).toEqual([
-      expect.objectContaining({
-        taskId: 'inject-tag-fail',
-        rawResponse: '没有注入标签',
-        extractedTags: {},
-      }),
-    ]);
+    expect(result.finalMessage).toBeNull();
+    expect(result.failedResults).toEqual([expect.objectContaining({ taskId: 'inject-tag-fail', validationRetriesExhausted: true })]);
+    expect(result.successfulResults).toHaveLength(0);
     expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
   });
 
-  it('未配置提取标签时维持长度达标即成功', async () => {
+  it.each([
+    { kind: 'success', expected: '' },
+    { kind: 'empty', expected: '上一轮没有返回非空文本' },
+    { kind: 'extraction', expected: '标签提取发生异常' },
+    { kind: 'api', error: { status: 401 }, expected: '鉴权或访问权限失败（HTTP 401）' },
+    { kind: 'api', error: { status: 403 }, expected: '鉴权或访问权限失败（HTTP 403）' },
+    { kind: 'api', error: { status: 408 }, expected: '请求超时（HTTP 408）' },
+    { kind: 'api', error: { status: 504 }, expected: '请求超时（HTTP 504）' },
+    { kind: 'api', error: { status: 413 }, expected: '请求体超过服务允许的大小（HTTP 413）' },
+    { kind: 'api', error: { status: 429 }, expected: '限流或配额受限（HTTP 429）' },
+    { kind: 'api', error: { status: 503 }, expected: '服务端异常（HTTP 503）' },
+    { kind: 'api', error: { status: 400 }, expected: '拒绝了请求（HTTP 400）' },
+    { kind: 'api', error: { code: 'API_PRESET_UNRESOLVED' }, expected: '预设无法解析' },
+    { kind: 'api', error: { name: 'TimeoutError' }, expected: '请求超时，未取得有效响应' },
+    { kind: 'api', error: { name: 'AbortError' }, expected: '被上游中断' },
+    { kind: 'api', error: { name: 'TypeError' }, expected: '网络或传输异常' },
+    { kind: 'api', error: {}, expected: '具体原因尚未确认' },
+  ])('未配置标签时按长度验收，重试区分 $kind：$expected', async ({ kind, error, expected }) => {
     const plotSettings = {
       tasks: [{
-        id: 'no-tag-config', name: '无标签配置任务', stage: 1, order: 1, maxRetries: 1, minLength: 2,
+        id: 'no-tag-config', name: '无标签配置任务', stage: 1, order: 1, maxRetries: 2, minLength: 2,
         promptGroup: [{ role: 'user', content: 'no-tag-config-prompt' }],
       }],
     };
+    const sensitiveText = '私密接口正文 https://private.example token=secret';
     mockCallApiWithPlotPreset.mockResolvedValue('正常输出');
+    if (kind === 'empty') mockCallApiWithPlotPreset.mockResolvedValueOnce('  ');
+    if (kind === 'api') {
+      mockCallApiWithPlotPreset.mockRejectedValueOnce(Object.assign(new Error(sensitiveText), error));
+    }
     mockExtractPlotTagsFromResponse.mockReturnValue({
       tagNames: [],
       extractedTags: {},
@@ -2523,14 +2617,32 @@ describe('runPlotTasksRuntime_ACU', () => {
       injectOnlyFragments: [],
       injectOnlyTagNames: [],
     });
+    if (kind === 'extraction') {
+      mockExtractPlotTagsFromResponse.mockImplementationOnce(() => { throw new Error(sensitiveText); });
+    }
 
     const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
 
     expect(result.successfulResults).toEqual([
       expect.objectContaining({ taskId: 'no-tag-config', rawResponse: '正常输出' }),
     ]);
-    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
-    expect(mockExtractPlotTagsFromResponse).toHaveBeenCalledTimes(1);
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(kind === 'success' ? 1 : 2);
+    expect(mockExtractPlotTagsFromResponse).toHaveBeenCalledTimes(kind === 'extraction' ? 2 : 1);
+    const firstMessages = mockCallApiWithPlotPreset.mock.calls[0][0];
+    expect(firstMessages).toEqual([{ role: 'user', content: 'no-tag-config-prompt' }]);
+    if (kind !== 'success') {
+      const retryMessages = mockCallApiWithPlotPreset.mock.calls[1][0];
+      expect(retryMessages.slice(0, -1)).toEqual(firstMessages);
+      expect(retryMessages).toHaveLength(2);
+      expect(retryMessages.at(-1)).toMatchObject({ role: 'system' });
+      expect(retryMessages.at(-1).content).toContain('失败原因：');
+      expect(retryMessages.at(-1).content).toContain(expected);
+      expect(retryMessages.at(-1).content).toContain(kind === 'api' ? '处理要求：' : '修正要求：');
+      expect(JSON.stringify(retryMessages)).not.toContain(sensitiveText);
+      expect(JSON.stringify(mockLogWarn.mock.calls)).not.toContain(sensitiveText);
+      if (kind === 'api') expect(retryMessages.at(-1).content).toContain('不是回复内容验收失败');
+      expect(mockAbortableDelay).toHaveBeenCalledTimes(1);
+    }
   });
 
 });

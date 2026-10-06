@@ -59,6 +59,10 @@ export function buildAutoUpdatePlan_ACU(
     settings: any,
     isolationKey: string,
     performanceContext?: { runId?: string; parentSpanId?: string },
+    logicalHistory?: {
+        lastCompletedAiFloorBySheetKey: Readonly<Record<string, number>>;
+        aiMessageIndices: readonly number[];
+    },
 ): AutoUpdatePlan {
     const tablesToUpdate: TableUpdateItem[] = [];
     const sheetKeys = getSortedSheetKeys_ACU(tableData);
@@ -68,7 +72,9 @@ export function buildAutoUpdatePlan_ACU(
         metrics: { messageCount: liveChat.length, sheetCount: sheetKeys.length },
     });
 
-    const historyBySheetKey = resolveTableHistoryStatesFromChat_ACU(
+    const historyBySheetKey = logicalHistory
+      ? new Map(sheetKeys.map(sheetKey => [sheetKey, { lastCompletedAiFloor: logicalHistory.lastCompletedAiFloorBySheetKey[sheetKey] ?? 0 }]))
+      : resolveTableHistoryStatesFromChat_ACU(
         liveChat,
         sheetKeys.map(sheetKey => ({
             sheetKey,
@@ -78,8 +84,10 @@ export function buildAutoUpdatePlan_ACU(
         })),
     );
 
-    // 预计算所有 AI 消息索引
-    const allAiMessageIndices = liveChat
+    // 逻辑模式的索引只定位请求快照；AI 身份与序号由 Timeline 提供，不推测物理楼层。
+    const allAiMessageIndices = logicalHistory
+        ? [...logicalHistory.aiMessageIndices]
+        : liveChat
         .map((msg: any, index: number) => !msg.is_user ? index : -1)
         .filter((index: number) => index !== -1);
 
@@ -90,7 +98,7 @@ export function buildAutoUpdatePlan_ACU(
     const globalSkip = settings.skipUpdateFloors || 0;
 
     // 当前唯一 full checkpoint（replay 正式根）：为 -1 时表示尚无 full，不触发跨根 staging。
-    const originalFullIndex = getLatestV2FullCheckpointMessageIndex_ACU(liveChat, isolationKey);
+    const originalFullIndex = logicalHistory ? -1 : getLatestV2FullCheckpointMessageIndex_ACU(liveChat, isolationKey);
 
     for (const sheetKey of sheetKeys) {
         const table = tableData[sheetKey];

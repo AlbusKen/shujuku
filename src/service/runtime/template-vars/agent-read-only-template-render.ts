@@ -1,5 +1,5 @@
 import { logDebug_ACU, logWarn_ACU } from '../../../shared/utils';
-import { evaluateRawSqlExpression, TableQueryBuilder } from './sql-query-var';
+import { evaluateRawSqlExpression, TableQueryBuilder, withSqlTemplateReadContext_ACU, type SqlTemplateReadContext_ACU } from './sql-query-var';
 import { isSqliteMode } from '../../table/storage-mode';
 import { validateReadOnlySql_ACU } from './read-only-sql-validation';
 import { currentJsonTableData_ACU } from '../state-manager';
@@ -209,7 +209,11 @@ function extractRawSql_ACU(expression: string): string | null {
   return match ? match[2] : null;
 }
 
-export function renderAgentReadOnlyQueryTemplates_ACU(content: string): AgentReadOnlyRenderResult_ACU {
+export function renderAgentReadOnlyQueryTemplates_ACU(content: string, sqlReadContext?: SqlTemplateReadContext_ACU | null): AgentReadOnlyRenderResult_ACU {
+  return withSqlTemplateReadContext_ACU(sqlReadContext, () => renderScopedAgentQueries_ACU(content, sqlReadContext));
+}
+
+function renderScopedAgentQueries_ACU(content: string, sqlReadContext?: SqlTemplateReadContext_ACU | null): AgentReadOnlyRenderResult_ACU {
   const parts = splitAgentQueryTemplateParts_ACU(content);
   const aliases = new Map<string, string>();
   let tagCount = 0;
@@ -220,7 +224,7 @@ export function renderAgentReadOnlyQueryTemplates_ACU(content: string): AgentRea
       return replaceLocalAliasesInText_ACU(part.value, aliases);
     }
     tagCount++;
-    if (!isSqliteMode() || part.value.includes('{{')) {
+    if (!(sqlReadContext === undefined ? isSqliteMode() : sqlReadContext !== null) || part.value.includes('{{')) {
       rejectedCount++;
       return part.value;
     }
@@ -235,8 +239,8 @@ export function renderAgentReadOnlyQueryTemplates_ACU(content: string): AgentRea
         const rawSql = extractRawSql_ACU(expression);
         if (rawSql === null) throw new Error('query_tag_not_supported');
         const before = validateReadOnlySql_ACU(rawSql);
-        const mapper = getNameMapper();
-        const translated = resolveReadQuerySql_ACU(rawSql, currentJsonTableData_ACU as any, mapper.translateSql.bind(mapper)).sql;
+        const mapper = sqlReadContext?.mapper ?? getNameMapper();
+        const translated = resolveReadQuerySql_ACU(rawSql, sqlReadContext?.tableData ?? currentJsonTableData_ACU as any, mapper.translateSql.bind(mapper)).sql;
         const after = validateReadOnlySql_ACU(translated);
         if (!before.valid || !after.valid) throw new Error(before.reason || after.reason || 'sql_not_allowed');
         value = evaluateRawSqlExpression(`sql ${JSON.stringify(rawSql)}`, {

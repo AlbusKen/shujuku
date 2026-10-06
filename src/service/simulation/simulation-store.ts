@@ -29,6 +29,7 @@ import {
   type WorldSimulationErrorPhase_ACU,
   type WorldSimulationLedger_ACU,
   type WorldSimulationMaterialCompletionRecord_ACU,
+  type WorldSimulationLogicalRef_ACU,
   type WorldSimulationPendingFix_ACU,
   type WorldSimulationWriteGuard_ACU,
   type WorldChronicleOverviewRow_ACU,
@@ -39,6 +40,7 @@ import {
   WORLD_SIMULATION_WEB_PROVIDERS_ACU,
 } from './model';
 import { WORLD_ACTOR_EXPERIENCE_CAP_ACU, WORLD_ACTOR_LONG_TERM_STATUSES_ACU, type WorldActorAction_ACU, type WorldActorExperience_ACU, type WorldActorLongTermAction_ACU } from './model';
+import { assertWorldSimulationHostEnvelope_ACU, requireWorldSimulationHostAnchor_ACU } from './simulation-identity';
 
 export const WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU = '_qrf_world_simulation';
 
@@ -87,6 +89,19 @@ function stableId_ACU(value: unknown, path: string, phase: WorldSimulationErrorP
   const id = string_ACU(value, path, phase);
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)) fail_ACU(`${path} 不是合法稳定 ID`, phase, { path, actual: id });
   return id;
+}
+
+/** 仅校验引用形状；真实回合归属由 carrier Adapter 在同一写队列内核验。 */
+export function validateWorldSimulationLogicalRef_ACU(raw: unknown, path: string, phase: WorldSimulationErrorPhase_ACU): WorldSimulationLogicalRef_ACU {
+  if (!isRecord_ACU(raw)) fail_ACU(`${path} 必须是对象`, phase);
+  exactKeys_ACU(raw, ['sessionId', 'branchId', 'turnId', 'attemptId', 'floorId'], [], path, phase);
+  return {
+    sessionId: string_ACU(raw.sessionId, `${path}.sessionId`, phase),
+    branchId: string_ACU(raw.branchId, `${path}.branchId`, phase),
+    turnId: string_ACU(raw.turnId, `${path}.turnId`, phase),
+    attemptId: string_ACU(raw.attemptId, `${path}.attemptId`, phase),
+    floorId: string_ACU(raw.floorId, `${path}.floorId`, phase),
+  };
 }
 
 function uniqueIds_ACU(items: readonly { id: string }[], path: string, phase: WorldSimulationErrorPhase_ACU): void {
@@ -331,13 +346,22 @@ function validatePendingFixes_ACU(raw: unknown, phase: WorldSimulationErrorPhase
     let anchor: WorldSimulationPendingFix_ACU['anchor'] = null;
     if (item.anchor !== null) {
       if (!isRecord_ACU(item.anchor)) fail_ACU(`${path}.anchor 必须是对象或 null`, phase);
-      exactKeys_ACU(item.anchor, ['messageKey', 'swipeId', 'contentDigest', 'baseLedgerRevision'], [], `${path}.anchor`, phase);
-      anchor = {
-        messageKey: string_ACU(item.anchor.messageKey, `${path}.anchor.messageKey`, phase),
-        swipeId: string_ACU(item.anchor.swipeId, `${path}.anchor.swipeId`, phase),
-        contentDigest: string_ACU(item.anchor.contentDigest, `${path}.anchor.contentDigest`, phase),
-        baseLedgerRevision: integer_ACU(item.anchor.baseLedgerRevision, `${path}.anchor.baseLedgerRevision`, phase),
-      };
+      if (Object.prototype.hasOwnProperty.call(item.anchor, 'logicalRef')) {
+        exactKeys_ACU(item.anchor, ['logicalRef', 'contentDigest', 'baseLedgerRevision'], [], `${path}.anchor`, phase);
+        anchor = {
+          logicalRef: validateWorldSimulationLogicalRef_ACU(item.anchor.logicalRef, `${path}.anchor.logicalRef`, phase),
+          contentDigest: string_ACU(item.anchor.contentDigest, `${path}.anchor.contentDigest`, phase),
+          baseLedgerRevision: integer_ACU(item.anchor.baseLedgerRevision, `${path}.anchor.baseLedgerRevision`, phase),
+        };
+      } else {
+        exactKeys_ACU(item.anchor, ['messageKey', 'swipeId', 'contentDigest', 'baseLedgerRevision'], [], `${path}.anchor`, phase);
+        anchor = {
+          messageKey: string_ACU(item.anchor.messageKey, `${path}.anchor.messageKey`, phase),
+          swipeId: string_ACU(item.anchor.swipeId, `${path}.anchor.swipeId`, phase),
+          contentDigest: string_ACU(item.anchor.contentDigest, `${path}.anchor.contentDigest`, phase),
+          baseLedgerRevision: integer_ACU(item.anchor.baseLedgerRevision, `${path}.anchor.baseLedgerRevision`, phase),
+        };
+      }
     }
     const createdAt = integer_ACU(item.createdAt, `${path}.createdAt`, phase);
     const updatedAt = integer_ACU(item.updatedAt, `${path}.updatedAt`, phase);
@@ -644,20 +668,50 @@ export function validateWorldSimulationEnvelope_ACU(raw: unknown, phase: WorldSi
     if (raw.task.completedAutoAnchor !== undefined) {
       const completed = raw.task.completedAutoAnchor;
       if (!isRecord_ACU(completed)) fail_ACU('task.completedAutoAnchor 必须是对象', phase);
-      exactKeys_ACU(completed, ['chatIdentity', 'messageKey', 'swipeId', 'contentDigest'], [], 'task.completedAutoAnchor', phase);
-      task.completedAutoAnchor = {
-        chatIdentity: string_ACU(completed.chatIdentity, 'task.completedAutoAnchor.chatIdentity', phase),
-        messageKey: string_ACU(completed.messageKey, 'task.completedAutoAnchor.messageKey', phase),
-        swipeId: string_ACU(completed.swipeId, 'task.completedAutoAnchor.swipeId', phase),
-        contentDigest: string_ACU(completed.contentDigest, 'task.completedAutoAnchor.contentDigest', phase),
-      };
+      if (completed.kind === 'logical') {
+        exactKeys_ACU(completed, ['kind', 'chatIdentity', 'logicalRef', 'contentDigest'], [], 'task.completedAutoAnchor', phase);
+        task.completedAutoAnchor = {
+          kind: 'logical',
+          chatIdentity: string_ACU(completed.chatIdentity, 'task.completedAutoAnchor.chatIdentity', phase),
+          logicalRef: validateWorldSimulationLogicalRef_ACU(completed.logicalRef, 'task.completedAutoAnchor.logicalRef', phase),
+          contentDigest: string_ACU(completed.contentDigest, 'task.completedAutoAnchor.contentDigest', phase),
+        };
+      } else {
+        exactKeys_ACU(completed, ['chatIdentity', 'messageKey', 'swipeId', 'contentDigest'], ['kind'], 'task.completedAutoAnchor', phase);
+        task.completedAutoAnchor = {
+          ...(completed.kind === undefined ? {} : { kind: enum_ACU(completed.kind, ['host'] as const, 'task.completedAutoAnchor.kind', phase) }),
+          chatIdentity: string_ACU(completed.chatIdentity, 'task.completedAutoAnchor.chatIdentity', phase),
+          messageKey: string_ACU(completed.messageKey, 'task.completedAutoAnchor.messageKey', phase),
+          swipeId: string_ACU(completed.swipeId, 'task.completedAutoAnchor.swipeId', phase),
+          contentDigest: string_ACU(completed.contentDigest, 'task.completedAutoAnchor.contentDigest', phase),
+        };
+      }
     }
     if (raw.task.activeRun !== null) {
       const run = raw.task.activeRun;
       if (!isRecord_ACU(run)) fail_ACU('task.activeRun 必须是对象或 null', phase);
-      exactKeys_ACU(run, ['runId', 'chatIdentity', 'triggerKind', 'triggerConversationMessageId', 'anchorMessageId', 'anchorMessageKey', 'anchorSwipeId', 'anchorContentDigest', 'baseLedgerRevision', 'taskId', 'stageId', 'stageRevision'], [], 'task.activeRun', phase);
-      const anchorMessageId = typeof run.anchorMessageId === 'number' ? integer_ACU(run.anchorMessageId, 'task.activeRun.anchorMessageId', phase) : string_ACU(run.anchorMessageId, 'task.activeRun.anchorMessageId', phase);
-      task.activeRun = { runId: stableId_ACU(run.runId, 'task.activeRun.runId', phase), chatIdentity: string_ACU(run.chatIdentity, 'task.activeRun.chatIdentity', phase), triggerKind: enum_ACU(run.triggerKind, ['assistant_completed', 'agent_chat_message'] as const, 'task.activeRun.triggerKind', phase), triggerConversationMessageId: run.triggerConversationMessageId === null ? null : string_ACU(run.triggerConversationMessageId, 'task.activeRun.triggerConversationMessageId', phase), anchorMessageId, anchorMessageKey: string_ACU(run.anchorMessageKey, 'task.activeRun.anchorMessageKey', phase), anchorSwipeId: string_ACU(run.anchorSwipeId, 'task.activeRun.anchorSwipeId', phase), anchorContentDigest: string_ACU(run.anchorContentDigest, 'task.activeRun.anchorContentDigest', phase), baseLedgerRevision: integer_ACU(run.baseLedgerRevision, 'task.activeRun.baseLedgerRevision', phase), taskId: stableId_ACU(run.taskId, 'task.activeRun.taskId', phase), stageId: stableId_ACU(run.stageId, 'task.activeRun.stageId', phase), stageRevision: integer_ACU(run.stageRevision, 'task.activeRun.stageRevision', phase, 1) };
+      const commonKeys = ['runId', 'chatIdentity', 'triggerKind', 'triggerConversationMessageId', 'anchorContentDigest', 'baseLedgerRevision', 'taskId', 'stageId', 'stageRevision'];
+      const logical = run.kind === 'logical';
+      exactKeys_ACU(run, [...commonKeys, ...(logical ? ['kind', 'logicalRef'] : ['anchorMessageId', 'anchorMessageKey', 'anchorSwipeId'])], logical ? [] : ['kind'], 'task.activeRun', phase);
+      const common = {
+        runId: stableId_ACU(run.runId, 'task.activeRun.runId', phase),
+        chatIdentity: string_ACU(run.chatIdentity, 'task.activeRun.chatIdentity', phase),
+        triggerKind: enum_ACU(run.triggerKind, ['assistant_completed', 'agent_chat_message'] as const, 'task.activeRun.triggerKind', phase),
+        triggerConversationMessageId: run.triggerConversationMessageId === null ? null : string_ACU(run.triggerConversationMessageId, 'task.activeRun.triggerConversationMessageId', phase),
+        anchorContentDigest: string_ACU(run.anchorContentDigest, 'task.activeRun.anchorContentDigest', phase),
+        baseLedgerRevision: integer_ACU(run.baseLedgerRevision, 'task.activeRun.baseLedgerRevision', phase),
+        taskId: stableId_ACU(run.taskId, 'task.activeRun.taskId', phase),
+        stageId: stableId_ACU(run.stageId, 'task.activeRun.stageId', phase),
+        stageRevision: integer_ACU(run.stageRevision, 'task.activeRun.stageRevision', phase, 1),
+      };
+      task.activeRun = logical ? { ...common, kind: 'logical',
+        logicalRef: validateWorldSimulationLogicalRef_ACU(run.logicalRef, 'task.activeRun.logicalRef', phase),
+      } : { ...common,
+        ...(run.kind === undefined ? {} : { kind: enum_ACU(run.kind, ['host'] as const, 'task.activeRun.kind', phase) }),
+        anchorMessageId: typeof run.anchorMessageId === 'number' ? integer_ACU(run.anchorMessageId, 'task.activeRun.anchorMessageId', phase) : string_ACU(run.anchorMessageId, 'task.activeRun.anchorMessageId', phase),
+        anchorMessageKey: string_ACU(run.anchorMessageKey, 'task.activeRun.anchorMessageKey', phase),
+        anchorSwipeId: string_ACU(run.anchorSwipeId, 'task.activeRun.anchorSwipeId', phase),
+      };
       if (task.activeRun.taskId !== task.taskId) fail_ACU('task.activeRun.taskId 与 task 不一致', phase);
       const runStage = stages.find(stage => stage.stageId === task!.activeRun!.stageId);
       if (!runStage || runStage.activeRevision !== task.activeRun.stageRevision) fail_ACU('task.activeRun 阶段 revision 不一致', phase);
@@ -716,7 +770,10 @@ function assertContext_ACU(context: ReturnType<typeof captureContext_ACU>): void
 
 function readRaw_ACU(firstMessage: Record<string, unknown>): WorldSimulationEnvelope_ACU | null {
   const raw = firstMessage[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU];
-  return raw === undefined ? null : validateWorldSimulationEnvelope_ACU(raw);
+  if (raw === undefined) return null;
+  const envelope = validateWorldSimulationEnvelope_ACU(raw);
+  assertWorldSimulationHostEnvelope_ACU(envelope);
+  return envelope;
 }
 
 type WorldSimulationLedgerOverlay_ACU = (envelope: WorldSimulationEnvelope_ACU, chat: any[]) => WorldSimulationEnvelope_ACU;
@@ -758,6 +815,7 @@ export class FirstFloorWorldSimulationStore_ACU {
     assertContext_ACU(context);
     assertGuard_ACU(readRaw_ACU(context.firstMessage), guard);
     const validated = validateWorldSimulationEnvelope_ACU(candidate, 'persist');
+    assertWorldSimulationHostEnvelope_ACU(validated);
     const existed = Object.prototype.hasOwnProperty.call(context.firstMessage, WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU);
     const previous = context.firstMessage[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU];
     let saveAttempted = false;
@@ -809,6 +867,7 @@ function isAssistantMessage_ACU(message: Record<string, unknown>): boolean {
 }
 
 export function buildWorldSimulationBucketKey_ACU(anchor: WorldSimulationAnchorIdentity_ACU): string {
+  requireWorldSimulationHostAnchor_ACU(anchor);
   return sha256HexSync_ACU([anchor.chatIdentity, anchor.messageKey, anchor.swipeId, anchor.contentDigest].join('\n'));
 }
 
@@ -838,6 +897,7 @@ export function resolveWorldSimulationAnchor_ACU(messageIndex: number, chat?: an
 }
 
 export function assertWorldSimulationAnchorCurrent_ACU(anchor: WorldSimulationAnchorIdentity_ACU, chat?: any[]): WorldSimulationAnchorIdentity_ACU {
+  requireWorldSimulationHostAnchor_ACU(anchor);
   const current = resolveWorldSimulationAnchor_ACU(anchor.messageIndex, chat);
   if (current.chatIdentity !== anchor.chatIdentity
     || current.messageKey !== anchor.messageKey
@@ -853,6 +913,7 @@ export function assertWorldSimulationAnchorCurrent_ACU(anchor: WorldSimulationAn
 
 /** 按身份四元组重扫当前下标；正文 digest / swipe 变化时仍 fail-closed。 */
 export function resolveCurrentWorldSimulationAnchor_ACU(anchor: WorldSimulationAnchorIdentity_ACU, chat?: any[]): WorldSimulationAnchorIdentity_ACU {
+  requireWorldSimulationHostAnchor_ACU(anchor);
   const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
   const chatIdentity = getActiveChatStorageIdentity_ACU(messages);
   if (!chatIdentity) {

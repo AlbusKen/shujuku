@@ -70,7 +70,7 @@ function normalizeTableNameForPresetLookup_ACU(name: any): string {
  * 根据起始表的名称，查找表级 API 预设覆盖
  * @returns 预设名称，空字符串表示使用全局 tableApiPreset
  */
-function resolveTableApiPresetOverride_ACU(tableName: any): string {
+export function resolveTableApiPresetOverride_ACU(tableName: any): string {
     const normalizedName = normalizeTableNameForPresetLookup_ACU(tableName);
     if (!normalizedName) return '';
     const overrides = settings_ACU.tableApiPresetOverridesByName;
@@ -444,12 +444,16 @@ async function settleStagedBoundaryAndPublish_ACU(
 }
 
 export interface GroupFillJob_ACU {
+    /** 只消费显式快照，不初始化物理聊天 Sheet Guide。 */
+    isolatedSnapshot?: boolean;
+    /** 仅用于只读填表收集；逻辑目标不经过物理写入口。 */
+    logicalTarget?: import('../zero-layer/timeline').ZeroLayerFloorRef_ACU & { kind: 'logical' };
     groupKey: string;
     groupId: number;
     batchNumber: number;
     targetSheetKeys: string[] | null;
     messagesForContext: any[];
-    saveTargetIndex: number;
+    saveTargetIndex?: number;
     updateMode: string;
     requestOptions: Record<string, any> | null;
     baseSnapshot: Record<string, any>;
@@ -1290,12 +1294,14 @@ export async function collectGroupFillResponse_ACU(
         maxRetriesOverride?: number;
         respectGlobalStop?: boolean;
         worldbookReadContext?: LorebookReadContext_ACU;
+        assertCurrent?: () => void;
     } = {}
 ): Promise<GroupFillResponse_ACU> {
     const effectiveAbortController = abortController || new AbortController();
     const isStopped = () => effectiveAbortController.signal.aborted || (options.respectGlobalStop !== false && wasStoppedByUser_ACU);
     const maxRetries = options.maxRetriesOverride || settings_ACU.tableMaxRetries || 3;
     if (isStopped()) return { job, success: false, attempt: 0, aborted: true };
+    options.assertCurrent?.();
     // 请求前冻结 runtime schema 失败 = 本地基础设施失败：模型无法通过重试修复。
     // 必须在 AI 调用前 fail-closed，避免消耗 token 后在提交阶段才失败。
     const runtimeSchemaFailure = job.sqlApplyScope?.runtimeSchemaFailure;
@@ -1325,6 +1331,7 @@ export async function collectGroupFillResponse_ACU(
     try {
         dynamicContent = await prepareAIInput_ACU(job.messagesForContext, job.updateMode, job.targetSheetKeys, {
             tableData: job.baseSnapshot,
+            isolatedSnapshot: job.isolatedSnapshot,
             excludeImportTaggedWorldbookEntries: job.isImportMode === true && settings_ACU.importPromptExcludeImportedWorldbookEntries !== false,
             agentGreenlights: Array.isArray(pendingFinalGenerationGreenlights_ACU) ? [...pendingFinalGenerationGreenlights_ACU] : [],
             isolationKey: job.isolationKey,
@@ -1339,6 +1346,7 @@ export async function collectGroupFillResponse_ACU(
         throw error;
     }
     prepareSpan.end({ success: Boolean(dynamicContent) });
+    options.assertCurrent?.();
     if (dynamicContent && typeof dynamicContent === 'object' && dynamicContent.ok === false) {
         const failure = dynamicContent as { failureCode?: string; message?: string };
         const error = `无法准备AI输入（${failure.failureCode || 'provider_load_failed'}）：${failure.message || 'SQLite 运行时未就绪。'}`;
@@ -1399,7 +1407,10 @@ export async function collectGroupFillResponse_ACU(
             try {
                 aiResponse = await callCustomOpenAI_ACU(dynamicContent, effectiveAbortController, {
                     ...(job.requestOptions || {}),
+                    isolatedSnapshot: job.isolatedSnapshot,
+                    assertCurrent: options.assertCurrent,
                     tableData: job.baseSnapshot,
+                    chatSnapshot: job.isolatedSnapshot ? job.messagesForContext : undefined,
                     targetSheetKeys: job.targetSheetKeys,
                     // 工具提交不含正文思考，回复长度阈值只约束正文提取兜底。
                     onTableFillToolSubmitted: () => { submittedViaTool = true; },
@@ -1449,6 +1460,7 @@ export async function collectGroupFillResponse_ACU(
                 }
             }
 
+            options.assertCurrent?.();
             return { job, success: true, attempt, aiResponse: normalizedAiResponse, tableEditText };
         } catch (error: any) {
             lastErrorMessage = error?.message || '未知错误';
@@ -1635,7 +1647,8 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
     responses: GroupFillResponse_ACU[],
     baseSnapshot: Record<string, any>,
     options: {
-        saveTargetIndex: number;
+        saveTargetIndex?: number;
+        logicalTarget?: import('../zero-layer/timeline').ZeroLayerFloorRef_ACU & { kind: 'logical' };
         updateMode: string;
         isImportMode: boolean;
         chatKey?: string;
@@ -1658,6 +1671,16 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
     }
     if (!baseSnapshot || typeof baseSnapshot !== 'object') {
         return { success: false, modifiedKeys: [], error: '统一提交失败：baseSnapshot 无效。', errorCategory: 'precondition' };
+    }
+
+    const saveTargetIndex = options.saveTargetIndex;
+    if (options.logicalTarget) {
+        if (saveTargetIndex !== undefined || options.commitMode !== 'stage_only' || !options.stagingSession
+            || responses.some(response => JSON.stringify(response.job.logicalTarget) !== JSON.stringify(options.logicalTarget))) {
+            return { success: false, modifiedKeys: [], error: '逻辑填表目标只允许同身份隔离暂存。', errorCategory: 'precondition' };
+        }
+    } else if (!Number.isSafeInteger(saveTargetIndex) || saveTargetIndex! < 0) {
+        return { success: false, modifiedKeys: [], error: '物理填表目标下标无效。', errorCategory: 'precondition' };
     }
 
     const sortedResponses = sortGroupFillResponses_ACU(responses);
@@ -1838,6 +1861,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
             const staged = await options.stagingSession.applyBucket({
                 historicalBase: baseSnapshot,
                 saveTargetIndex: options.saveTargetIndex,
+                logicalTarget: options.logicalTarget,
                 updateMode: options.updateMode,
                 sqlTexts,
                 sqlApplyScope: capturedSqlApplyScope,
@@ -2071,6 +2095,25 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
     applySpecialIndexSequenceToSummaryTables_ACU(workingTableData);
 
     const modifiedKeys = [...modifiedKeySet].sort();
+    // 隔离候选不读取物理 frame/checkpoint，也不触发首轮初始化或宿主保存。
+    // 与 SQL 分支共用 detached session，仅累积本次授权目标表的 overlay。
+    if (options.commitMode === 'stage_only' && options.stagingSession) {
+        const staged = await options.stagingSession.applyBucket({
+            historicalBase: baseSnapshot,
+            saveTargetIndex: options.saveTargetIndex,
+            logicalTarget: options.logicalTarget,
+            updateMode: options.updateMode,
+            appliedTableData: workingTableData,
+        });
+        if (staged.ok === false) {
+            return {
+                success: false, modifiedKeys,
+                error: sanitizeRetryFeedback_ACU(staged.error, MAX_WARN_ERROR_LENGTH_ACU),
+                errorCategory: staged.errorCategory,
+            };
+        }
+        return { success: true, modifiedKeys, tableData: staged.tableData as any };
+    }
     if (!options.isImportMode) {
         const isFirstTimeInit = await checkIfFirstTimeInit_ACU();
         // 模板只起指导作用：快照只覆盖模板声明的表。
@@ -2121,23 +2164,6 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
             );
         }
         const revisionWriteSet = modifiedKeys.map(sheetKey => ({ kind: 'sheet' as const, sheetKey }));
-        if (options.commitMode === 'stage_only' && options.stagingSession) {
-            const staged = await options.stagingSession.applyBucket({
-                historicalBase: baseSnapshot,
-                saveTargetIndex: options.saveTargetIndex,
-                updateMode: options.updateMode,
-                appliedTableData: workingTableData,
-            });
-            if (staged.ok === false) {
-                return {
-                    success: false,
-                    modifiedKeys,
-                    error: sanitizeRetryFeedback_ACU(staged.error, MAX_WARN_ERROR_LENGTH_ACU),
-                    errorCategory: staged.errorCategory,
-                };
-            }
-            return { success: true, modifiedKeys, tableData: staged.tableData as any };
-        }
         const commitResult = await runTableUpdateCommit_ACU<{ modifiedKeys: string[] }>({
             source: 'group_fill',
             reason: 'applyUnifiedGroupFillResponses:snapshot',

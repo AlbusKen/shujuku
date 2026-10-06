@@ -36,6 +36,7 @@ import { appendWorldSimulationCommitChain_ACU, extractWorldSimulationPartialFiel
 import { commitWorldSimulationFieldWritesWithinQueue_ACU, type WorldSimulationFieldCommitInput_ACU, type WorldSimulationFieldCommitReceipt_ACU } from './simulation-field-commit-adapter';
 import { hasPartialWorldSimulationRunWrites_ACU, readWorldSimulationRunWriteProof_ACU, rebaseWorldSimulationRunWriteProof_ACU, stageWorldSimulationRunWriteProof_ACU, type WorldSimulationRunWriteState_ACU } from './simulation-run-write-state';
 import { WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU, buildWorldSimulationBucketKey_ACU, resolveCurrentWorldSimulationAnchor_ACU, validateWorldSimulationEnvelope_ACU } from './simulation-store';
+import { assertWorldSimulationHostEnvelope_ACU, assertWorldSimulationHostRun_ACU, requireWorldSimulationHostAnchor_ACU } from './simulation-identity';
 
 interface CommitInput_ACU {
   identity: WorldSimulationRunIdentity_ACU;
@@ -217,6 +218,8 @@ function restoreField_ACU(target: Record_ACU, key: string, existed: boolean, val
 }
 
 async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<WorldSimulationAnchorIdentity_ACU> {
+  assertWorldSimulationHostRun_ACU(input.identity);
+  requireWorldSimulationHostAnchor_ACU(input.anchor);
   const chat = getChatArray_ACU();
   const chatIdentity = getActiveChatStorageIdentity_ACU(chat);
   if (chatIdentity !== input.identity.chatIdentity || chatIdentity !== input.anchor.chatIdentity) {
@@ -229,6 +232,7 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<WorldSimul
 
   const rawEnvelope = firstMessage[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU];
   const validatedEnvelope = validateWorldSimulationEnvelope_ACU(rawEnvelope, 'persist');
+  assertWorldSimulationHostEnvelope_ACU(validatedEnvelope);
   const foldedBefore = foldWorldSimulationLedger_ACU(chat, currentAnchor.messageIndex);
   const envelope = foldedBefore ? { ...validatedEnvelope, ledger: foldedBefore.ledger } : validatedEnvelope;
   assertRun_ACU(envelope, input);
@@ -242,6 +246,21 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<WorldSimul
   if (!input.commitCandidate.acceptedCandidates.length && !input.runWrites?.hasConfirmedWrites) {
     reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', '提交缺少已确认写入和候选');
   }
+  const { ledger, extraTimeline, archiveSnapshot } = await planWorldSimulationFinalCommit_ACU(envelope, input, storyText, archiveBefore);
+  const projection = buildWorldSimulationProjection_ACU(ledger);
+  const oldContent = readWorldSimulationMessageContent_ACU(anchorMessage);
+  const newContent = applyWorldSimulationProjection_ACU(oldContent, projection);
+  const persistedAnchor: WorldSimulationAnchorIdentity_ACU = { ...currentAnchor, contentDigest: sha256HexSync_ACU(newContent) };
+  const nextEnvelope = completedEnvelope_ACU(envelope, input, ledger, extraTimeline, persistedAnchor);
+  return await persistHostFinalCommit_ACU(input, chat, currentAnchor, firstMessage, anchorMessage,
+    rawEnvelope, foldedBefore, runWriteView, runWriteProof, ledger, newContent, persistedAnchor, nextEnvelope, archiveBefore, archiveSnapshot);
+}
+
+/** 载体无关的终局领域处理；不读写宿主聊天，不改变正文。 */
+export async function planWorldSimulationFinalCommit_ACU(
+  envelope: WorldSimulationEnvelope_ACU, input: Omit<CommitInput_ACU, 'anchor'>,
+  storyText: string, archiveBefore: WorldChronicleArchiveSnapshot_ACU,
+) {
   const applied = input.commitCandidate.acceptedCandidates.length
     ? await applyWorldSimulationCandidatesDetailedViaSql_ACU(
       envelope.ledger, input.commitCandidate.acceptedCandidates, new Set(input.commitCandidate.evidenceRefs),
@@ -322,19 +341,25 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<WorldSimul
       message: violations.join('；'), errorCode: 'WORLD_SIMULATION_SNAPSHOT_INVALID',
     });
   }
-  const projection = buildWorldSimulationProjection_ACU(ledger);
-  const oldContent = readWorldSimulationMessageContent_ACU(anchorMessage);
-  const newContent = applyWorldSimulationProjection_ACU(oldContent, projection);
-  const persistedAnchor: WorldSimulationAnchorIdentity_ACU = {
-    ...currentAnchor,
-    contentDigest: sha256HexSync_ACU(newContent),
-  };
-  const nextEnvelope = completedEnvelope_ACU(envelope, input, ledger, extraTimeline, persistedAnchor);
   const archiveSnapshot: WorldChronicleArchiveSnapshot_ACU = {
     schemaVersion: archiveBefore.schemaVersion,
     records: { ...archiveBefore.records },
   };
   for (const write of applied.chronicleArchiveWrites) archiveSnapshot.records[write.archiveRef] = write;
+  return { ledger, extraTimeline, archiveSnapshot };
+}
+
+async function persistHostFinalCommit_ACU(
+  input: CommitInput_ACU, chat: any[], currentAnchor: WorldSimulationAnchorIdentity_ACU,
+  firstMessage: Record_ACU, anchorMessage: Record_ACU, rawEnvelope: unknown,
+  foldedBefore: ReturnType<typeof foldWorldSimulationLedger_ACU>,
+  runWriteView: import('./simulation-run-write-state').WorldSimulationRunWriteView_ACU,
+  runWriteProof: ReturnType<typeof readWorldSimulationRunWriteProof_ACU>,
+  ledger: WorldSimulationEnvelope_ACU['ledger'], newContent: string,
+  persistedAnchor: WorldSimulationAnchorIdentity_ACU, nextEnvelope: WorldSimulationEnvelope_ACU,
+  archiveBefore: WorldChronicleArchiveSnapshot_ACU, archiveSnapshot: WorldChronicleArchiveSnapshot_ACU,
+): Promise<WorldSimulationAnchorIdentity_ACU> {
+  const envelope = { ...validateWorldSimulationEnvelope_ACU(rawEnvelope, 'persist'), ledger: runWriteView.ledger };
   const nextConversationBucket = conversationBucketWithMigratedEntry_ACU(
     anchorMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU],
     anchorMessage,

@@ -239,7 +239,7 @@ describe('runOptimizationLogic_ACU', () => {
     expect(result.success).toBe(false);
     expect(result.errorType).toBe('worldbook_preflight_failure');
     expect(result.errorMessage).toBe('剧情推进的世界书预检失败，请检查绑定/选择的世界书。');
-    expect(mockLogError).toHaveBeenCalledWith('[剧情推进] 世界书预检失败，继续宿主发送。', expect.objectContaining({
+    expect(mockLogError).toHaveBeenCalledWith('[剧情推进] 世界书预检失败，正文发送已停止。', expect.objectContaining({
       phase: 'clear_final_generation_greenlights',
     }));
     expect(JSON.stringify(mockLogError.mock.calls)).not.toContain('Lorebook permission denied');
@@ -263,7 +263,7 @@ describe('runOptimizationLogic_ACU', () => {
   });
 
 
-  it('部分失败时 hasPartialFailure=true', async () => {
+  it('部分失败时阻断不完整的最终提示词', async () => {
     mockRunPlotTasks.mockResolvedValue({
       finalMessage: '结果',
       successfulResults: [{ taskId: 'task1' }],
@@ -272,8 +272,8 @@ describe('runOptimizationLogic_ACU', () => {
       aggregatedTags: new Map(),
     });
     const result = await runOptimizationLogic_ACU('继续');
-    expect(result.success).toBe(true);
-    expect(result.hasPartialFailure).toBe(true);
+    expect(result).toMatchObject({ success: false, blocked: true, errorType: 'partial_failure' });
+    expect(result.finalMessage).toBeUndefined();
   });
 
   it('finally 块重置 planningGuard 和 __inFlight', async () => {

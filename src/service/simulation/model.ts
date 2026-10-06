@@ -111,12 +111,22 @@ export interface WorldSimulationMaterialCompletionRecord_ACU {
   updatedAt: number;
 }
 
-export interface WorldSimulationPendingAnchor_ACU {
+/** 零层真实楼层引用；没有宿主 messageIndex 或 swipe 坐标。 */
+export interface WorldSimulationLogicalRef_ACU {
+  sessionId: string;
+  branchId: string;
+  turnId: string;
+  attemptId: string;
+  floorId: string;
+}
+
+export type WorldSimulationPendingAnchor_ACU = {
   messageKey: string;
   swipeId: string;
   contentDigest: string;
   baseLedgerRevision: number;
-}
+  logicalRef?: never;
+} | { logicalRef: WorldSimulationLogicalRef_ACU; contentDigest: string; baseLedgerRevision: number };
 
 export interface WorldSimulationPendingFixViolation_ACU { path: string; message: string; }
 export interface WorldSimulationPendingFix_ACU {
@@ -265,20 +275,35 @@ export interface WorldSimulationStage_ACU {
   revisions: WorldSimulationStageRevision_ACU[];
 }
 
-export interface WorldSimulationRunIdentity_ACU {
+interface WorldSimulationRunIdentityBase_ACU {
   runId: string;
   chatIdentity: string;
   triggerKind: WorldSimulationTriggerKind_ACU;
   triggerConversationMessageId: string | null;
-  anchorMessageId: string | number;
-  anchorMessageKey: string;
-  anchorSwipeId: string;
   anchorContentDigest: string;
   baseLedgerRevision: number;
   taskId: string;
   stageId: string;
   stageRevision: number;
 }
+
+/** 旧存档省略 kind；保存普通模式时保持原有字段形状。 */
+export interface WorldSimulationHostRunIdentity_ACU extends WorldSimulationRunIdentityBase_ACU {
+  kind?: 'host';
+  anchorMessageId: string | number;
+  anchorMessageKey: string;
+  anchorSwipeId: string;
+}
+
+export interface WorldSimulationLogicalRunIdentity_ACU extends WorldSimulationRunIdentityBase_ACU {
+  kind: 'logical';
+  logicalRef: WorldSimulationLogicalRef_ACU;
+}
+
+export type WorldSimulationRunIdentity_ACU = WorldSimulationHostRunIdentity_ACU | WorldSimulationLogicalRunIdentity_ACU;
+export type WorldSimulationCompletedAnchor_ACU = {
+  chatIdentity: string; messageKey: string; swipeId: string; contentDigest: string; kind?: 'host';
+} | { kind: 'logical'; chatIdentity: string; logicalRef: WorldSimulationLogicalRef_ACU; contentDigest: string };
 
 export interface WorldSimulationTask_ACU {
   taskId: string;
@@ -289,7 +314,7 @@ export interface WorldSimulationTask_ACU {
   activeRun: WorldSimulationRunIdentity_ACU | null;
   stopReason: string | null;
   /** 已结算的自动触发锚点；提交改写正文时记录改写后的摘要，防止完成事件重放。 */
-  completedAutoAnchor?: Pick<import('./agent/agent-model').WorldSimulationAnchorIdentity_ACU, 'chatIdentity' | 'messageKey' | 'swipeId' | 'contentDigest'>;
+  completedAutoAnchor?: WorldSimulationCompletedAnchor_ACU;
 }
 
 export interface WorldSimulationTimelineEntry_ACU {

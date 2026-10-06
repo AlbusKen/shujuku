@@ -101,10 +101,12 @@ function getChatMetadata_ACU(): Record<string, unknown> | null {
     return metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata as Record<string, unknown> : null;
 }
 
-function readContainer_ACU(raw: unknown): Record<string, unknown> | null {
-    if (!raw) return null;
+function readContainer_ACU(raw: unknown, strict = false): Record<string, unknown> | null {
+    if (raw == null || !strict && !raw) return null;
     const obj = (typeof raw === 'string') ? safeJsonParse_ACU(raw, null) : raw;
-    return (obj && typeof obj === 'object' && !Array.isArray(obj)) ? obj as Record<string, unknown> : null;
+    if (obj && typeof obj === 'object' && !Array.isArray(obj)) return obj as Record<string, unknown>;
+    if (strict) throw new Error('只读聊天配置容器损坏，禁止以缺失来源继续桥接。');
+    return null;
 }
 
 /** 聊天 metadata 字段精确快照（包含 owner 字段），供跨字段严格保存事务回滚使用。 */
@@ -238,14 +240,24 @@ function mergeLegacyGuideIntoMetadata_ACU(metadataContainer: Record<string, unkn
  * @param chat SillyTavern 聊天数组
  * @returns 解析后的配置对象，或 null
  */
-function readChatScopedConfigContainer_ACU(chat: unknown[], persistLegacyMerge: boolean): Record<string, unknown> | null {
+function readChatScopedConfigContainer_ACU(chat: unknown[], persistLegacyMerge: boolean, strict = false): Record<string, unknown> | null {
     if (!hasActiveChatContext_ACU(chat)) return null;
-    const rawMetadataContainer = readContainer_ACU(getChatMetadata_ACU()?.[CHAT_SCOPED_CONFIG_FIELD_ACU]);
+    const owner = getChatMetadataOwner_ACU(CHAT_SCOPED_CONFIG_FIELD_ACU);
+    const activeChatId = getActiveChatId_ACU();
+    const metadataApplies = !activeChatId || !owner || owner === activeChatId;
+    const rawMetadataContainer = readContainer_ACU(metadataApplies || !strict
+        ? getChatMetadata_ACU()?.[CHAT_SCOPED_CONFIG_FIELD_ACU] : null, strict);
     const first = getChatFirstLayerMessageLocal_ACU(chat);
-    const legacyContainer = first ? readContainer_ACU(first[CHAT_SCOPED_CONFIG_FIELD_ACU]) : null;
+    const legacyContainer = first ? readContainer_ACU(first[CHAT_SCOPED_CONFIG_FIELD_ACU], strict) : null;
     const metadataContainer = shouldUseChatMetadataContainer_ACU(CHAT_SCOPED_CONFIG_FIELD_ACU, rawMetadataContainer, legacyContainer)
         ? rawMetadataContainer
         : null;
+    if (strict) for (const container of [metadataContainer, legacyContainer]) {
+        const slots = container?.template;
+        if (slots !== undefined && (!slots || typeof slots !== 'object' || Array.isArray(slots))) {
+            throw new Error('只读模板槽位容器损坏，禁止合并或回退默认模板。');
+        }
+    }
     const merged = mergeLegacyScopedConfigIntoMetadata_ACU(metadataContainer, legacyContainer);
     if (persistLegacyMerge && merged.changed && merged.container) writeChatMetadataField_ACU(CHAT_SCOPED_CONFIG_FIELD_ACU, merged.container);
     return merged.container;
@@ -256,8 +268,8 @@ export function getChatScopedConfigContainer_ACU(chat: unknown[]): Record<string
 }
 
 /** 事务快照专用纯读取：合并 legacy 槽位但绝不回写 chatMetadata。 */
-export function peekChatScopedConfigContainer_ACU(chat: unknown[]): Record<string, unknown> | null {
-    return readChatScopedConfigContainer_ACU(chat, false);
+export function peekChatScopedConfigContainer_ACU(chat: unknown[], { strict = false } = {}): Record<string, unknown> | null {
+    return readChatScopedConfigContainer_ACU(chat, false, strict);
 }
 
 /**
@@ -282,14 +294,24 @@ export function normalizeChatScopedConfigContainer_ACU(container: unknown): Reco
  * @param chat SillyTavern 聊天数组
  * @returns 解析后的 guide 对象，或 null
  */
-function readChatSheetGuideContainer_ACU(chat: unknown[], persistLegacyMerge: boolean): Record<string, unknown> | null {
+function readChatSheetGuideContainer_ACU(chat: unknown[], persistLegacyMerge: boolean, strict = false): Record<string, unknown> | null {
     if (!hasActiveChatContext_ACU(chat)) return null;
-    const rawMetadataContainer = readContainer_ACU(getChatMetadata_ACU()?.[CHAT_SHEET_GUIDE_FIELD_ACU]);
+    const owner = getChatMetadataOwner_ACU(CHAT_SHEET_GUIDE_FIELD_ACU);
+    const activeChatId = getActiveChatId_ACU();
+    const metadataApplies = !activeChatId || !owner || owner === activeChatId;
+    const rawMetadataContainer = readContainer_ACU(metadataApplies || !strict
+        ? getChatMetadata_ACU()?.[CHAT_SHEET_GUIDE_FIELD_ACU] : null, strict);
     const first = getChatFirstLayerMessageLocal_ACU(chat);
-    const legacyContainer = first ? readContainer_ACU(first[CHAT_SHEET_GUIDE_FIELD_ACU]) : null;
+    const legacyContainer = first ? readContainer_ACU(first[CHAT_SHEET_GUIDE_FIELD_ACU], strict) : null;
     const metadataContainer = shouldUseChatMetadataContainer_ACU(CHAT_SHEET_GUIDE_FIELD_ACU, rawMetadataContainer, legacyContainer)
         ? rawMetadataContainer
         : null;
+    if (strict) for (const container of [metadataContainer, legacyContainer]) {
+        const tags = container?.tags;
+        if (tags !== undefined && (!tags || typeof tags !== 'object' || Array.isArray(tags))) {
+            throw new Error('只读 guide 标签容器损坏，禁止合并或回退默认模板。');
+        }
+    }
     const merged = mergeLegacyGuideIntoMetadata_ACU(metadataContainer, legacyContainer);
     if (persistLegacyMerge && merged.changed && merged.container) writeChatMetadataField_ACU(CHAT_SHEET_GUIDE_FIELD_ACU, merged.container);
     return merged.container;
@@ -300,8 +322,8 @@ export function getChatSheetGuideContainer_ACU(chat: unknown[]): Record<string, 
 }
 
 /** 事务快照专用纯读取：合并 legacy 槽位但绝不回写 chatMetadata。 */
-export function peekChatSheetGuideContainer_ACU(chat: unknown[]): Record<string, unknown> | null {
-    return readChatSheetGuideContainer_ACU(chat, false);
+export function peekChatSheetGuideContainer_ACU(chat: unknown[], { strict = false } = {}): Record<string, unknown> | null {
+    return readChatSheetGuideContainer_ACU(chat, false, strict);
 }
 
 export function setChatScopedConfigContainer_ACU(chat: unknown[], container: Record<string, unknown> | null): void {

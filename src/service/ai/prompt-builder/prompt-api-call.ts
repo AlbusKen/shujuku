@@ -10,7 +10,7 @@ import { getPersonaDescription_ACU, getCharDescription_ACU } from '../../../data
 import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, triggerSlash_ACU, getConnectionManagerProfiles_ACU, getHostRequestHeaders_ACU } from '../../../data/gateways/ai-gateway';
 import { logDebug_ACU, logError_ACU, logWarn_ACU, normalizeExcludeRules_ACU } from '../../../shared/utils';
 import { applyExcludeRulesToText_ACU, getLatestAIMessageContent_ACU, getPlotFromHistory_ACU, parseIfBlocksInContent_ACU, parseRandomTags_ACU, replaceRandomVariables_ACU } from '../../runtime/helpers-remaining';
-import { replaceDbSqlVariables } from '../../runtime/template-vars/sql-query-var';
+import { replaceDbSqlVariables, withSqlTemplateReadContext_ACU } from '../../runtime/template-vars/sql-query-var';
 import { DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU } from '../../../shared/defaults-json.js';
 import { isSqliteMode } from '../../table/storage-mode';
 import { buildStrictJsonTableFillResponseFormatForData_ACU, cloneStrictPromptSegments_ACU } from './strict-json-table-fill';
@@ -74,15 +74,26 @@ export class RetryableAiResponseError_ACU extends Error {
     const skipProfileSwitch = !!options?.skipProfileSwitch;
     const forceDirectApi = !!options?.forceDirectApi;
 
+    options?.assertCurrent?.();
+    if (options?.isolatedSnapshot && (!forceDirectApi || !skipProfileSwitch)) {
+        throw new Error('隔离填表必须使用数据库独立 API，禁止宿主预设切换。');
+    }
     const effectiveTableApiPreset = options?.tableApiPreset !== undefined
         ? String(options.tableApiPreset)
         : (settings_ACU.tableApiPreset || '');
-    const apiPresetConfig = getApiConfigByPreset_ACU(effectiveTableApiPreset);
+    const apiPresetConfig: ReturnType<typeof getApiConfigByPreset_ACU> = options?.isolatedSnapshot && options?.apiPresetSnapshot
+        ? structuredClone(options.apiPresetSnapshot)
+        : getApiConfigByPreset_ACU(effectiveTableApiPreset);
     requireResolvedApiPreset_ACU(effectiveTableApiPreset, apiPresetConfig);
     const effectiveApiMode = apiPresetConfig.apiMode;
     const effectiveApiConfig = apiPresetConfig.apiConfig;
     const effectiveTavernProfile = apiPresetConfig.tavernProfile;
+    const streaming = options?.streaming ?? (settings_ACU.streamingEnabled || false);
 
+    if (options?.isolatedSnapshot && (effectiveApiMode !== 'custom'
+        || !effectiveApiConfig.url || !effectiveApiConfig.model)) {
+        throw new Error('隔离填表缺少数据库独立 API 配置，禁止回退宿主生成。');
+    }
     const messages: Array<{ role: string; content: string }> = [];
     const strictJsonFillEnabled = settings_ACU.strictJsonTableFillEnabled === true;
     const sqliteMode = isSqliteMode();
@@ -135,7 +146,7 @@ export class RetryableAiResponseError_ACU extends Error {
       charInfoContent_Table = '';
     }
 
-    const lastPlotContent = getPlotFromHistory_ACU();
+    const lastPlotContent = getPlotFromHistory_ACU({}, options?.chatSnapshot);
     logDebug_ACU('[填表] $6 上轮规划数据:', lastPlotContent ? `长度=${lastPlotContent.length}` : '(空)');
 
     const tableExcludeTags = (settings_ACU.tableContextExcludeTags || '').trim();
@@ -191,21 +202,23 @@ export class RetryableAiResponseError_ACU extends Error {
         finalContent = replaceRandomVariables_ACU(finalContent);
 
         // [P4] {[db...]}/{[sql...]} 值替换（SQLite 模式下，在 <if> 之前执行）
-        finalContent = replaceDbSqlVariables(finalContent);
-
-        if (settings_ACU.promptTemplateSettings?.enabled !== false) {
-          // 填表条件必须与本次 $1 实际读取的 AI 上下文一致，不能越过批次边界读取聊天最新层。
-          const conditionalSeedContent = typeof dynamicContent?.conditionalSeedContent === 'string'
-            ? dynamicContent.conditionalSeedContent
-            : getLatestAIMessageContent_ACU();
-          const templateContext = {
-            seedContent: conditionalSeedContent,
-            allTablesJson: currentJsonTableData_ACU,
-            plotContent: lastPlotContent || ''
-          };
-          finalContent = parseIfBlocksInContent_ACU(finalContent, templateContext, 0);
-        }
+        finalContent = withSqlTemplateReadContext_ACU(options?.sqlReadContext, () => {
+          let content = replaceDbSqlVariables(finalContent);
+          if (settings_ACU.promptTemplateSettings?.enabled !== false) {
+            // 条件与本次填表快照一致；SQL 变量和 if 必须共享同一同步作用域。
+            const conditionalSeedContent = typeof dynamicContent?.conditionalSeedContent === 'string'
+              ? dynamicContent.conditionalSeedContent
+              : getLatestAIMessageContent_ACU(options?.chatSnapshot);
+            content = parseIfBlocksInContent_ACU(content, {
+              seedContent: conditionalSeedContent,
+              allTablesJson: options?.tableData ?? currentJsonTableData_ACU,
+              plotContent: lastPlotContent || ''
+            }, 0);
+          }
+          return content;
+        });
         
+        options?.assertCurrent?.();
         messages.push({ role: normalizeRoleForApi_ACU(segment.role), content: finalContent });
     }
 
@@ -445,6 +458,7 @@ export class RetryableAiResponseError_ACU extends Error {
             
             const body = JSON.stringify(buildCustomApiRequestBody_ACU(messages, effectiveApiConfig, {
                 stripModelPrefix: false,
+                streaming,
                 responseFormat: strictJsonResponseFormat,
                 ...(tableFillTools.length ? { tools: tableFillTools } : {}),
             }));
@@ -454,6 +468,7 @@ export class RetryableAiResponseError_ACU extends Error {
 
             logDebug_ACU('ACU: 调用新的后端生成API:', generateUrl, 'Model:', effectiveApiConfig.model);
             // 填表内部请求绕过第三方脚本对生成端点的 fetch 包装（见 data/gateways/pristine-fetch.ts）。
+            options?.assertCurrent?.();
             const response = await pristineFetch_ACU(generateUrl, { method: 'POST', headers, body, signal: abortSignal });
 
             if (!response.ok) {
@@ -462,10 +477,10 @@ export class RetryableAiResponseError_ACU extends Error {
             }
 
             if (tableFillTools.length) {
-                const { turn } = await readFetchChatTurn_ACU(response, settings_ACU.streamingEnabled || false, abortSignal);
+                const { turn } = await readFetchChatTurn_ACU(response, streaming, abortSignal);
                 return finalizeTableFillTurn(turn);
             }
-            const content = await handleApiResponse_ACU(response, abortSignal);
+            const content = await handleApiResponse_ACU(response, abortSignal, streaming);
             const trimmed = typeof content === 'string' ? content.trim() : '';
             if (trimmed) {
                 return trimmed;
@@ -653,8 +668,8 @@ export class RetryableAiResponseError_ACU extends Error {
     }
   }
 
-  export async function handleApiResponse_ACU(response: any, signal: AbortSignal | null = null, onUsage?: (usage: AiUsageMetadata_ACU) => void) {
-    if (settings_ACU.streamingEnabled) {
+  export async function handleApiResponse_ACU(response: any, signal: AbortSignal | null = null, onUsage?: (usage: AiUsageMetadata_ACU) => void, streaming = settings_ACU.streamingEnabled) {
+    if (streaming) {
         return await streamToText_ACU(response, signal, onUsage);
     } else {
         return await parseNonStreamResponse_ACU(response, onUsage);

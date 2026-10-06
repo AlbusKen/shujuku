@@ -90,6 +90,7 @@ export interface TableFillTargetOverlay_ACU {
   readonly targetSheetKeys: readonly string[];
   sheets: Record<string, Sheet_ACU>;
   lastTargetMessageIndex: number | null;
+  lastLogicalTarget?: import('../zero-layer/timeline').ZeroLayerFloorRef_ACU & { kind: 'logical' };
   stagedBucketCount: number;
 }
 
@@ -105,6 +106,8 @@ export interface TableFillStagingRunContext_ACU {
   readonly originalFullIndex: number | null;
   readonly originalFullFingerprint: string | null;
   readonly templateFingerprint: string;
+  readonly logicalTarget?: import('../zero-layer/timeline').ZeroLayerFloorRef_ACU & { kind: 'logical' };
+  readonly storageMode?: 'native' | 'sqlite';
   overlay: TableFillTargetOverlay_ACU;
 }
 
@@ -116,6 +119,8 @@ export function createTableFillStagingRunContext_ACU(input: {
   originalFullIndex: number | null;
   originalFullFingerprint?: string | null;
   templateFingerprint: string;
+  logicalTarget?: import('../zero-layer/timeline').ZeroLayerFloorRef_ACU & { kind: 'logical' };
+  storageMode?: 'native' | 'sqlite';
 }): TableFillStagingRunContext_ACU {
   return {
     runId: input.runId,
@@ -125,6 +130,8 @@ export function createTableFillStagingRunContext_ACU(input: {
     originalFullIndex: input.originalFullIndex,
     originalFullFingerprint: input.originalFullFingerprint ?? null,
     templateFingerprint: input.templateFingerprint,
+    ...(input.logicalTarget ? { logicalTarget: structuredClone(input.logicalTarget) } : {}),
+    ...(input.storageMode ? { storageMode: input.storageMode } : {}),
     overlay: createEmptyTargetOverlay_ACU(input.targetSheetKeys),
   };
 }
@@ -177,7 +184,8 @@ export function assembleBucketWorkingView_ACU(
 export function mergeTargetOverlayFromBucket_ACU(
   overlay: TableFillTargetOverlay_ACU,
   data: Record<string, any> | null | undefined,
-  targetMessageIndex: number,
+  targetMessageIndex: number | null,
+  logicalTarget?: import('../zero-layer/timeline').ZeroLayerFloorRef_ACU & { kind: 'logical' },
 ): TableFillTargetOverlay_ACU {
   return {
     targetSheetKeys: overlay.targetSheetKeys,
@@ -186,6 +194,7 @@ export function mergeTargetOverlayFromBucket_ACU(
       ...extractTargetOverlaySheets_ACU(data, overlay.targetSheetKeys),
     },
     lastTargetMessageIndex: targetMessageIndex,
+    ...(logicalTarget ? { lastLogicalTarget: structuredClone(logicalTarget) } : {}),
     stagedBucketCount: overlay.stagedBucketCount + 1,
   };
 }

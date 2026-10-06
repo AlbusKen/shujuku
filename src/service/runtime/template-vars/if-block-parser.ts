@@ -170,8 +170,8 @@ import { projectFlightModeHiddenChronicleRows_ACU } from '../../flight-mode/flig
   /**
    * 获取最新一条AI消息的正文内容，用于条件模板的 seed 关键词检测
    */
-  export function getLatestAIMessageContent_ACU() {
-    const chat = getChatArray_ACU();
+  export function getLatestAIMessageContent_ACU(chatSnapshot?: readonly Record<string, unknown>[]) {
+    const chat = chatSnapshot ?? getChatArray_ACU();
     if (!chat || chat.length === 0) {
       return '';
     }
@@ -189,8 +189,8 @@ import { projectFlightModeHiddenChronicleRows_ACU } from '../../flight-mode/flig
   /**
    * 获取最新一条用户消息的正文。seed 必须能匹配上轮用户输入里的关键词。
    */
-  export function getLatestUserMessageContent_ACU() {
-    const chat = getChatArray_ACU();
+  export function getLatestUserMessageContent_ACU(chatSnapshot?: readonly Record<string, unknown>[]) {
+    const chat = chatSnapshot ?? getChatArray_ACU();
     if (!chat || chat.length === 0) {
       return '';
     }

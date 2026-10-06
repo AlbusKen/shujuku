@@ -11,7 +11,7 @@ import {
 import { buildDefaultContinuationSettings_ACU } from './defaults';
 import { ContinuationOrchestrator_ACU, type ContinuationPlanningContext_ACU } from './continuation-orchestrator';
 import { ContinuationOutlinePlanner_ACU } from './outline-planner';
-import { StageExecutionEngine_ACU, type ContinuationExecutionSnapshot_ACU } from './stage-execution-engine';
+import { StageExecutionEngine_ACU, type ContinuationExecutionSnapshot_ACU, type ContinuationPreparedTurnInstruction_ACU } from './stage-execution-engine';
 import { ContinuationAgentTurnPlanner_ACU } from './agent/agent-main-loop';
 import {
   extractAgentRecallCodesFromChat_ACU,
@@ -30,16 +30,28 @@ import type { ContinuationHostGenerationBridge_ACU } from './host-generation-bri
 import type { ContinuationPromptPlaceholder_ACU } from './prompt-template';
 import { logWarn_ACU } from '../../shared/utils';
 import type { ContinuationEnvelope_ACU, ContinuationSettings_ACU, ContinuationStage_ACU, ContinuationTask_ACU, StageRevision_ACU, StageTurn_ACU } from './model';
+import type { ContinuationAgentTurnPlanRequest_ACU } from './agent/agent-model';
+import { ZERO_LAYER_CARRIER_FIELD_ACU } from '../zero-layer/model';
+import { ZeroLayerStore_ACU } from '../zero-layer/store';
+import { createZeroLayerContinuationRuntime_ACU } from '../zero-layer/continuation-runtime';
 
 export interface ContinuationRuntime_ACU {
+  readonly mode: 'host' | 'logical';
   orchestrator: ContinuationOrchestrator_ACU;
-  bridge: ContinuationHostGenerationBridge_ACU;
+  bridge: ContinuationHostGenerationBridge_ACU | null;
+  continueTask(): ReturnType<ContinuationOrchestrator_ACU['continueTask']>;
+  send(prepared: ContinuationPreparedTurnInstruction_ACU): Promise<boolean>;
+  retryHostGeneration(): Promise<boolean>;
+  stopGeneration(): void;
+  subscribeStateChanges(listener: () => void): () => void;
   initialize(): Promise<ContinuationEnvelope_ACU | null>;
   read(): ContinuationEnvelope_ACU | null;
   dispose(): void;
 }
 
 let runtime_ACU: ContinuationRuntime_ACU | null = null;
+let logicalRuntimeKey_ACU: string | null = null;
+let logicalRuntimeChat_ACU: unknown[] | null = null;
 let idSequence_ACU = 0;
 
 function allocateContinuationId_ACU(prefix: string): string {
@@ -135,16 +147,20 @@ function completedPrefix_ACU(stage: ContinuationStage_ACU | null, revision: Stag
   return parts.join('\n\n');
 }
 
-function buildResolvers_ACU(task: ContinuationTask_ACU, stage: ContinuationStage_ACU | null, revision: StageRevision_ACU | null, settings: ContinuationSettings_ACU, current?: ContinuationExecutionSnapshot_ACU): Partial<Record<ContinuationPromptPlaceholder_ACU, () => string | Promise<string>>> {
+function buildResolvers_ACU(task: ContinuationTask_ACU, stage: ContinuationStage_ACU | null, revision: StageRevision_ACU | null, settings: ContinuationSettings_ACU, current?: ContinuationExecutionSnapshot_ACU,
+  storage?: NonNullable<ContinuationAgentTurnPlanRequest_ACU['storage']>,
+): Partial<Record<ContinuationPromptPlaceholder_ACU, () => string | Promise<string>>> {
   // 大纲侧与主会话共用同一套正文渲染器与参数（尾楼数、可读窗口、提取/排除规则），不再有独立的"最近剧情"概念。
   const contextRules: AgentContextRules_ACU = { extractRules: settings.contextExtractRules, excludeRules: settings.contextExcludeRules };
-  const storySource = () => ({ chat: getChatArray_ACU(), storyWindowFloors: settings.storyWindowFloors, storyTailFloors: settings.storyTailFloors, contextRules });
+  const readChat = storage?.readChat ?? getChatArray_ACU;
+  const readModules = () => storage ? storage.readModuleSnapshot(readChat()) : readAgentModuleSnapshot_ACU(readChat());
+  const storySource = () => ({ chat: readChat(), storyWindowFloors: settings.storyWindowFloors, storyTailFloors: settings.storyTailFloors, contextRules });
   const storyTail = () => renderAgentStoryTail_ACU(storySource());
   return {
     $ORIGIN_INSTRUCTION: () => task.originInstruction,
-    $USER_REQUIREMENTS: () => renderAgentUserRequirements_ACU(readAgentModuleSnapshot_ACU(getChatArray_ACU()), task.originInstruction),
+    $USER_REQUIREMENTS: () => renderAgentUserRequirements_ACU(readModules(), task.originInstruction),
     $1: async () => `${renderAgentWorldbookBrowseCatalog_ACU(await loadContinuationWorldbookSnapshot_ACU())}\n写阶段标签之前，如需查阅，先输出 JSON：{"action":"read","reads":["$WORLDBOOK:书名:uid"]} 或 {"action":"search","query":"关键词","scope":["worldbook"]}。不要把设定全文写进标签。`,
-    $STORY_OVERVIEW: () => renderAgentStoryOverview_ACU({ recallCodes: extractAgentRecallCodesFromChat_ACU(getChatArray_ACU()) }),
+    $STORY_OVERVIEW: () => renderAgentStoryOverview_ACU({ recallCodes: extractAgentRecallCodesFromChat_ACU(readChat()) }),
     $STORY_TAIL: storyTail,
     $STAGE_HISTORY: () => serializeStageHistory_ACU(task),
     $COMPLETED_STAGE_PART: () => completedPrefix_ACU(stage, revision),
@@ -155,15 +171,15 @@ function buildResolvers_ACU(task: ContinuationTask_ACU, stage: ContinuationStage
     $CURRENT_TURN_GOAL: () => current?.turn.goal ?? '',
     // 总纲是大纲的方向约束：阶段目标必须落在当前 active 卷的台阶内，否则每个阶段都会各自为政。
     $STORY_ARC: () => renderAgentStoryArc_ACU(
-      readAgentModuleSnapshot_ACU(getChatArray_ACU()),
+      readModules(),
       task.stages.filter(item => item.status === 'completed').map(item => item.stageNumber),
     ),
     $OUTLINE_WINDOW: () => renderEnabledStageOutline_ACU(stage, revision),
     // 大纲模型没有 read/search 工具：伏笔操作、揭示层级、时间锚与红线只能靠固定注入拿到事实依据。
-    $HOOKS_LEDGER: () => renderAgentHooksByIds_ACU(readAgentModuleSnapshot_ACU(getChatArray_ACU())),
-    $INFO_GAP: () => renderAgentInfoGapByIds_ACU(readAgentModuleSnapshot_ACU(getChatArray_ACU())),
-    $CHRONOLOGY: () => renderAgentChronology_ACU(readAgentModuleSnapshot_ACU(getChatArray_ACU())),
-    $ACTIVE_CONSTRAINTS: () => renderAgentConstraints_ACU(readAgentModuleSnapshot_ACU(getChatArray_ACU())),
+    $HOOKS_LEDGER: () => renderAgentHooksByIds_ACU(readModules()),
+    $INFO_GAP: () => renderAgentInfoGapByIds_ACU(readModules()),
+    $CHRONOLOGY: () => renderAgentChronology_ACU(readModules()),
+    $ACTIVE_CONSTRAINTS: () => renderAgentConstraints_ACU(readModules()),
     $TURN_NUMBER: () => current ? String(current.turnNumber) : '',
     $NODE_TURN_NUMBER: () => current ? String(current.nodeTurnNumber) : '',
   };
@@ -290,8 +306,14 @@ function createRuntime_ACU(): ContinuationRuntime_ACU {
   bridgeRef = bridge;
   const unregister = registerContinuationHostGenerationBridge_ACU(bridge);
   return {
+    mode: 'host',
     orchestrator,
     bridge,
+    continueTask: () => orchestrator.continueTask(),
+    send: prepared => bridge.send(prepared),
+    retryHostGeneration: () => bridge.retryHostGeneration(),
+    stopGeneration: () => bridge.stopHostGeneration(),
+    subscribeStateChanges: listener => bridge.subscribeStateChanges(listener),
     initialize: () => migrateLegacySettings_ACU(store),
     read: () => {
       // 桥内存里有本次生成的活认领时保留 running 视图：UI 显示"等待宿主正文"并隐藏继续按钮。
@@ -311,12 +333,38 @@ function createRuntime_ACU(): ContinuationRuntime_ACU {
 }
 
 export function getContinuationRuntime_ACU(): ContinuationRuntime_ACU {
-  if (!runtime_ACU) runtime_ACU = createRuntime_ACU();
+  const chat = getChatArray_ACU();
+  // 无零层字段的普通聊天不要求载体能力；有字段则严格读取，损坏或保存未知不能回落普通写口。
+  const source = chat.some(message => message && Object.prototype.hasOwnProperty.call(message, ZERO_LAYER_CARRIER_FIELD_ACU))
+    ? new ZeroLayerStore_ACU().readSnapshot() : null;
+  const key = source?.enabled ? JSON.stringify([source.scope.characterKey, source.scope.chatId,
+    source.sessionId, source.activeBranchId, source.carrierSwipeId]) : null;
+  if (runtime_ACU && (key !== logicalRuntimeKey_ACU
+    || (key !== null && chat !== logicalRuntimeChat_ACU))) {
+    runtime_ACU.dispose();
+    runtime_ACU = null;
+  }
+  if (!runtime_ACU) {
+    logicalRuntimeKey_ACU = key;
+    logicalRuntimeChat_ACU = key ? chat : null;
+    runtime_ACU = key ? createZeroLayerContinuationRuntime_ACU({
+      allocateId: allocateContinuationId_ACU,
+      buildSettings: buildInitialContinuationSettings_ACU,
+      onSettingsReplaced: writeGlobalContinuationSettings_ACU,
+      createOutlineResolvers: (context, storage) => {
+        const stage = context.stage;
+        const revision = stage?.revisions.find(item => item.revision === stage.activeRevision) ?? null;
+        return buildResolvers_ACU(context.task, stage, revision, context.envelope.settings, undefined, storage);
+      },
+    }) : createRuntime_ACU();
+  }
   return runtime_ACU;
 }
 
 export function resetContinuationRuntimeForTests_ACU(): void {
   runtime_ACU?.dispose();
   runtime_ACU = null;
+  logicalRuntimeKey_ACU = null;
+  logicalRuntimeChat_ACU = null;
   idSequence_ACU = 0;
 }

@@ -501,6 +501,10 @@ export interface AgentModuleFloorFrame_ACU {
   checkpoint?: {
     swipeId: string;
     snapshot: AgentModuleSnapshot_ACU;
+    /** 隔离载体的无损基线；旧物理构造器不写此字段。 */
+    fieldSnapshot?: AgentModuleFieldSnapshot_ACU;
+    /** 已覆盖操作的序号水位，与楼层位置无关。 */
+    operationSeq?: number;
     /** 基线时刻的 partial 草稿栏目（只含值写入）。基线重建会丢弃其前的 delta，草稿必须随基线保存。 */
     partials?: AgentModuleFieldUpserts_ACU;
   };
@@ -1065,6 +1069,13 @@ export interface ContinuationAgentTurnPlanResult_ACU {
 /** 一次轮次准备所需的全部外部输入。 */
 export interface ContinuationAgentTurnPlanRequest_ACU {
   settings: ContinuationSettings_ACU;
+  /** 请求独占的存储 Adapter；全部端口齐备才允许脱离宿主物理写入。 */
+  storage?: Pick<import('./agent-main-loop').ContinuationAgentTurnPlannerDependencies_ACU,
+    'readChat' | 'readModuleSnapshot' | 'writeModuleSnapshot' | 'readConversation'
+    | 'readCompactionMark' | 'appendConversationMessages' | 'moduleCommitStorage'>
+    & Required<Pick<import('./agent-main-loop').ContinuationAgentTurnPlannerDependencies_ACU,
+      'captureCompactionCommit'>>
+    & { storageLabel: string };
   /** 生产新轮次直接进入固定工作流；恢复与正文重试不启用。 */
   directOpening?: boolean;
   /** 宽松执行上下文供应器。大纲操作会改变游标，循环每次迭代都要重新读取。 */

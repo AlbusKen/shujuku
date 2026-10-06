@@ -273,17 +273,23 @@ describe('mainInitialize_ACU CHAT_CHANGED 无活动聊天早退', () => {
     expect(m.loadPreset).not.toHaveBeenCalled();
     expect(m.loadMessages).not.toHaveBeenCalled();
     expect(m.refresh).not.toHaveBeenCalled();
+    expect(m.autoUpdate).not.toHaveBeenCalled();
     expect(m.gate).toEqual({ lastUserMessageId: null, lastUserMessageText: '', lastUserMessageAt: 0, lastUserSendIntentAt: 0, lastGeneration: null, generationSeq: 0, activeGenerations: [] });
   });
 
   it('无效聊天名但仍有消息时不误清理运行时', async () => {
-    m.api.chat = [{ mes: 'still active' }];
+    m.api.chat = [
+      { is_user: false, mes: '已有开场白' },
+      { is_user: true, mes: '已有用户消息' },
+      { is_user: false, mes: '已有回复' },
+    ];
     await m.chatChanged!('');
 
     expect(m.resetTakeover).not.toHaveBeenCalled();
     expect(m.dispose).not.toHaveBeenCalled();
     expect(m.resetScript).toHaveBeenCalledWith('', { reason: 'chat_changed' });
     expect(m.loadPreset).toHaveBeenCalledOnce();
+    expect(m.autoUpdate).not.toHaveBeenCalled();
   });
 });
 
@@ -363,7 +369,7 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
     expect(m.handleSimulationCompletion).not.toHaveBeenCalled();
   });
 
-  it.each(['normal', 'swipe', 'appendFinal', 'continue', 'first_message', 'quiet'])('正文事件的 %s 类型不增加入口过滤', (type) => {
+  it.each(['normal', 'swipe', 'appendFinal', 'continue', 'first_message', 'quiet'])('正文事件的 %s 类型只排除开场白自动填表，保留后续真实回复', (type) => {
     m.autoUpdate.mockResolvedValue(undefined);
     m.isQuiet.mockReturnValue(true);
     m.generationStarted!('normal', { quiet_prompt: '附加提示', automatic_trigger: true }, false);
@@ -372,8 +378,18 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
     m.characterMessageRendered!(0, type);
 
     expect(m.handleNewMessage).toHaveBeenCalledTimes(2);
-    expect(m.autoUpdate).toHaveBeenCalledTimes(2);
+    expect(m.autoUpdate).toHaveBeenCalledTimes(type === 'first_message' ? 0 : 2);
     expect(m.consumeGeneration).not.toHaveBeenCalled();
+
+    if (type === 'first_message') {
+      // 开场白过滤不建立冷却期，也不按下标永久禁用首条消息的真实续写。
+      m.messageReceived!(0, 'continue');
+      m.characterMessageRendered!(0, 'continue');
+      expect(m.autoUpdate).toHaveBeenCalledTimes(2);
+      expect(m.handleNewMessage).toHaveBeenCalledTimes(4);
+      m.generationEnded!(1);
+      expect(m.autoUpdate).toHaveBeenCalledTimes(3);
+    }
   });
 
   it('无消息参数仍唤醒已有兼容检查，不增加拒绝条件', () => {

@@ -235,11 +235,11 @@ export function evaluateNewMessageAction_ACU(
         return { action: 'skip', reason: 'Last message is not an AI reply', skipReason: 'last_message_not_ai' };
     }
 
-    // 检查是否来自当前角色
+    // 当前角色只限定正文优化对象；聊天中的其他作者仍可唤醒按需填表。
     const activeChar = getCurrentCharacterFallback_ACU();
     const activeCharName = activeChar?.name;
     if (activeCharName && lastMessage.name && lastMessage.name !== activeCharName) {
-        return { action: 'skip', reason: `AI reply from different character (${lastMessage.name} != ${activeCharName})`, skipReason: 'different_character' };
+        return { action: 'update_only', reason: 'Message author differs from the active character; checking table updates without content optimization', lastMessageIndex };
     }
 
     // 决定执行模式

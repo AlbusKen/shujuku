@@ -92,6 +92,7 @@ vi.mock('../../../src/service/runtime/helpers-remaining', () => ({
 }));
 
 vi.mock('../../../src/service/runtime/template-vars/sql-query-var', () => ({
+  withSqlTemplateReadContext_ACU: <T>(_context: unknown, run: () => T): T => run(),
   replaceDbSqlVariables: (content: string) => mockReplaceDbSqlVariables(content),
 }));
 

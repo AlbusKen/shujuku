@@ -72,14 +72,11 @@ describe('checkAutoUpdatePreConditions_ACU', () => {
   });
 
 
-  it('调度不再以聊天长度作为前置门控', () => {
-    expect(checkAutoUpdatePreConditions_ACU(baseSettings)).toEqual({ canProceed: true });
-  });
-
-  it('自定义 API 配置留给请求层校验，不阻断调度', () => {
+  it('全局 API 未配置时仍允许检查，实际请求使用填表预设', () => {
     const settings = {
       ...baseSettings,
       apiConfig: { useMainApi: false, url: '', model: '' },
+      tableApiPreset: '填表专用',
     };
     expect(checkAutoUpdatePreConditions_ACU(settings)).toEqual({ canProceed: true });
   });
@@ -88,11 +85,12 @@ describe('checkAutoUpdatePreConditions_ACU', () => {
     expect(checkAutoUpdatePreConditions_ACU({ autoUpdateEnabled: true })).toEqual({ canProceed: true });
   });
 
-  it('tavern profile 留给请求层校验，不阻断调度', () => {
+  it('全局酒馆连接未选择 profile 时，不抢先拒绝填表专用配置', () => {
     const settings = {
       ...baseSettings,
       apiMode: 'tavern',
       tavernProfile: '',
+      tableApiPreset: '独立连接',
     };
     expect(checkAutoUpdatePreConditions_ACU(settings)).toEqual({ canProceed: true });
   });

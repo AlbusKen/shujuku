@@ -768,12 +768,17 @@ export async function writeAgentModuleCommitDelta_ACU(
  * @param chat 聊天数组，缺省取当前聊天
  * @returns 落盘后的快照
  */
-export async function replaceAgentModuleSnapshotByUser_ACU(raw: unknown, chat?: any[]): Promise<AgentModuleSnapshot_ACU> {
+export async function replaceAgentModuleSnapshotByUser_ACU(raw: unknown, chat?: any[],
+  storage?: {
+    readModuleSnapshot: (chat: any[]) => AgentModuleSnapshot_ACU;
+    writeModuleSnapshot: (chat: any[], targetIndex: number, snapshot: AgentModuleSnapshot_ACU) => Promise<void>;
+  },
+): Promise<AgentModuleSnapshot_ACU> {
   const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
   const targetIndex = messages.length - 1;
   if (targetIndex < 0) rejectSnapshotEdit_ACU('当前聊天没有可承载资料快照的楼层');
   if (!isRecord_ACU(raw)) rejectSnapshotEdit_ACU('资料快照必须是 JSON 对象');
-  const current = readAgentModuleSnapshot_ACU(messages);
+  const current = (storage?.readModuleSnapshot ?? readAgentModuleSnapshot_ACU)(messages);
   const merged = {
     ...current,
     ...raw,
@@ -809,7 +814,7 @@ export async function replaceAgentModuleSnapshotByUser_ACU(raw: unknown, chat?: 
       rejectSnapshotEdit_ACU(`${label} 中有 ${inputLength - accepted.length} 条记录不符合结构要求（id 与关键文本字段不能为空），整份编辑未保存`, { label, inputLength, acceptedLength: accepted.length });
     }
   }
-  await writeAgentModuleSnapshot_ACU(messages, targetIndex, validated);
+  await (storage?.writeModuleSnapshot ?? writeAgentModuleSnapshot_ACU)(messages, targetIndex, validated);
   return validated;
 }
 

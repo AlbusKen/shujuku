@@ -1,6 +1,7 @@
 import type { WorldSimulationEnvelope_ACU, WorldSimulationRunIdentity_ACU } from './model';
 import type { WorldSimulationMainLoopResult_ACU } from './agent/agent-model';
 import type { WorldSimulationRunWriteState_ACU } from './simulation-run-write-state';
+import { sameWorldSimulationTargetRef_ACU, worldSimulationRunTargetRef_ACU } from './simulation-identity';
 
 export interface WorldSimulationStageExecutionDependencies_ACU<TInput> {
   readEnvelope(): WorldSimulationEnvelope_ACU | null;
@@ -14,7 +15,8 @@ function assertIdentity_ACU(envelope: WorldSimulationEnvelope_ACU | null, chatId
   if (!envelope?.task || envelope.task.taskId !== identity.taskId) throw new Error('WORLD_SIMULATION_TASK_STALE');
   if (chatIdentity !== identity.chatIdentity) throw new Error('WORLD_SIMULATION_CHAT_STALE');
   const active = envelope.task.activeRun;
-  if (!active || active.runId !== identity.runId || active.anchorMessageKey !== identity.anchorMessageKey || active.anchorSwipeId !== identity.anchorSwipeId || active.anchorContentDigest !== identity.anchorContentDigest) throw new Error('WORLD_SIMULATION_RUN_STALE');
+  if (!active || active.runId !== identity.runId
+    || !sameWorldSimulationTargetRef_ACU(worldSimulationRunTargetRef_ACU(active), worldSimulationRunTargetRef_ACU(identity))) throw new Error('WORLD_SIMULATION_RUN_STALE');
   const stage = envelope.stages.find(item => item.stageId === identity.stageId);
   const revision = stage?.revisions.find(item => item.revision === identity.stageRevision);
   if (!stage || stage.activeRevision !== identity.stageRevision || !revision?.frozen) throw new Error('WORLD_SIMULATION_STAGE_STALE');

@@ -1,4 +1,6 @@
 /** 格林推演逐栏生产提交：SQL 与帧仅作预演，楼层私有字段是保存权威。 */
+import { assertWorldSimulationHostEnvelope_ACU, assertWorldSimulationHostRun_ACU, requireWorldSimulationHostAnchor_ACU } from './simulation-identity';
+
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
 import { WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU, WORLD_SIMULATION_RUN_WRITE_FIELD_ACU, WORLD_SIMULATION_STATE_FIELD_ACU,
@@ -173,6 +175,8 @@ async function verifySqlAndStage_ACU(chat: unknown[], anchor: WorldSimulationAnc
 }
 
 export async function commitWorldSimulationFieldWritesWithinQueue_ACU(input: WorldSimulationFieldCommitInput_ACU): Promise<WorldSimulationFieldCommitReceipt_ACU> {
+  assertWorldSimulationHostRun_ACU(input.identity);
+  requireWorldSimulationHostAnchor_ACU(input.anchor);
   const lease = { ...input.identity };
   if (input.isCurrent?.() === false) fail_ACU('逐栏提交派工租约已失效');
   const chat = getChatArray_ACU();
@@ -182,6 +186,7 @@ export async function commitWorldSimulationFieldWritesWithinQueue_ACU(input: Wor
   const first = chat[0];
   if (!isRecord_ACU(first)) fail_ACU('逐栏提交首楼不可用');
   const envelope = validateWorldSimulationEnvelope_ACU(first[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU], 'persist');
+  assertWorldSimulationHostEnvelope_ACU(envelope);
   const run = envelope.task?.activeRun;
   if (!run || envelope.task?.taskId !== lease.taskId || run.runId !== lease.runId
     || run.stageRevision !== lease.stageRevision || envelope.activeStageId !== lease.stageId

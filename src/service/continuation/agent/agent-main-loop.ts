@@ -66,7 +66,7 @@ import { planAgentHistoryCompaction_ACU } from './agent-history-compactor';
 import type { AgentConversationCompactionMarkV2_ACU } from './agent-model';
 import { renderAgentTableCatalog_ACU } from './agent-tables';
 import { applyAgentConstraintRegistrationViaSql_ACU, applyAgentModuleDeltaViaSql_ACU, applyAgentWebRefsDeltaViaSql_ACU, mergeAgentDeltaRevisions_ACU } from './agent-transaction';
-import { commitAgentModuleFieldWrites_ACU, type AgentFieldPage_ACU, type AgentModuleRevisionWindow_ACU } from './agent-module-field-commit';
+import { commitAgentModuleFieldWrites_ACU, hostAgentModuleCommitStorage_ACU, type AgentModuleCommitStorage_ACU, type AgentFieldPage_ACU, type AgentModuleRevisionWindow_ACU } from './agent-module-field-commit';
 import { readMessageSwipeId_ACU } from './agent-module-frame';
 import { correctAgentMaterials_ACU, renderAgentCorrectionGuide_ACU } from './agent-main-correction';
 import { compactAgentProtocolError_ACU, parseAgentMainAction_ACU, parseAgentMainOutput_ACU, parseAgentToolCall_ACU } from './agent-protocol';
@@ -154,6 +154,10 @@ export interface ContinuationAgentTurnPlannerDependencies_ACU {
   appendConversationMessages: typeof appendPreparedAgentConversationMessages_ACU;
   /** 在末楼记录非破坏压缩标记。 */
   writeCompactionMark: typeof writeAgentConversationCompactionMark_ACU;
+  moduleCommitStorage: AgentModuleCommitStorage_ACU;
+  /** 请求绑定的压缩提交租约；未注入时使用宿主物理身份守卫。 */
+  captureCompactionCommit?: (chat: any[]) => ((mark: AgentConversationCompactionMarkV2_ACU) => Promise<boolean>) | null;
+  storageLabel?: string;
   /** 运行起点预取已启用世界书快照。测试注入空快照以摆脱宿主依赖。 */
   loadWorldbook: () => Promise<AgentWorldbookSnapshot_ACU>;
   budget: AgentRunBudget_ACU;
@@ -172,6 +176,7 @@ const defaultDependencies_ACU: ContinuationAgentTurnPlannerDependencies_ACU = {
   readCompactionMark: readActiveAgentConversationCompactionMark_ACU,
   appendConversationMessages: appendPreparedAgentConversationMessages_ACU,
   writeCompactionMark: writeAgentConversationCompactionMark_ACU,
+  moduleCommitStorage: hostAgentModuleCommitStorage_ACU,
   loadWorldbook: loadContinuationWorldbookSnapshot_ACU,
   budget: DEFAULT_AGENT_RUN_BUDGET_ACU,
 };
@@ -540,6 +545,11 @@ export class ContinuationAgentTurnPlanner_ACU {
    * @returns 最终指导与本轮使用的 API 预设信息
    */
   async plan(request: ContinuationAgentTurnPlanRequest_ACU, apiDependencies?: ContinuationApiPresetDependencies_ACU): Promise<ContinuationAgentTurnPlanResult_ACU> {
+    if (request.storage) {
+      const { storage, ...boundRequest } = request;
+      // 独立实例固定本请求的存储端口，不修改共享规划器或宿主 chat[]。
+      return new ContinuationAgentTurnPlanner_ACU({ ...this.dependencies, ...storage }).plan(boundRequest, apiDependencies);
+    }
     const preset = this.dependencies.resolveApiPreset(request.settings, 'main', 'turn_call', apiDependencies);
     // 整条运行固定一种工具协议：全局开关关闭或通道不支持原生工具时为纯 JSON。
     const toolMode = resolveAgentToolMode_ACU('continuation', preset);
@@ -845,10 +855,11 @@ export class ContinuationAgentTurnPlanner_ACU {
         if (action.kind === 'correct_materials') {
           const receipt = await correctAgentMaterials_ACU({
             action, chat, conversation: session.snapshot(),
+            storage: this.dependencies.moduleCommitStorage,
             isCurrent: () => !request.signal?.aborted && request.isInternalRequestCurrent(identitySeed),
             completedStages: context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber),
           });
-          context.moduleSnapshot = readAgentModuleSnapshot_ACU(chat);
+          context.moduleSnapshot = this.dependencies.readModuleSnapshot(chat);
           context.settledThroughIndex = context.moduleSnapshot.settledThroughIndex;
           snapshot = context.moduleSnapshot;
           session.record([{ kind: 'tool', text: JSON.stringify(receipt), digest: '主会话纠正回执', turnKey: session.turnKey }]);
@@ -1146,20 +1157,13 @@ export class ContinuationAgentTurnPlanner_ACU {
       const expectedMark = this.dependencies.readCompactionMark(chat);
       const source = this.dependencies.readConversation(chat);
       if (fingerprintAgentConversationSource_ACU(source, expectedMark) !== fingerprintAgentConversationSource_ACU(snapshot, expectedMark)) return false;
-      const anchor = chat[chat.length - 1];
-      if (!anchor || this.dependencies.readChat() !== chat) return false;
-      const swipeId = readMessageSwipeId_ACU(anchor);
-      const chatIdentity = getActiveChatStorageIdentity_ACU(chat);
-      if (!chatIdentity) return false;
-      const sourceFingerprint = readAgentConversationCompactionSource_ACU(chat).fingerprint;
+      const commit = this.captureConversationCommit_ACU(chat);
+      if (!commit) return false;
       const planCursor = readCurrentStageCursor_ACU(request);
       if (!planCursor) return false;
       if (!request.isInternalRequestCurrent(request.createInternalRequestIdentity(0)) || request.signal?.aborted) return false;
       try {
-        if (this.dependencies.readChat() !== chat || getActiveChatStorageIdentity_ACU(chat) !== chatIdentity
-          || chat[chat.length - 1] !== anchor || readMessageSwipeId_ACU(anchor) !== swipeId
-          || readAgentConversationCompactionSource_ACU(chat).fingerprint !== sourceFingerprint) return false;
-        if (!await this.dependencies.writeCompactionMark(chat, mark, { fingerprint: sourceFingerprint, anchor, swipeId, chatIdentity })) return false;
+        if (!await commit(mark)) return false;
         const persisted = this.dependencies.readCompactionMark(chat);
         if (!persisted || !('summaryState' in persisted) || persisted.compactedThroughId !== throughId || persisted.report !== report) return false;
         const authoritative = this.dependencies.readConversation(chat);
@@ -1175,6 +1179,7 @@ export class ContinuationAgentTurnPlanner_ACU {
         });
         return true;
       } catch (error) {
+        if (this.dependencies.captureCompactionCommit) throw error;
         logAgentSession_ACU({ kind: 'thought', title: '上一轮会话丢弃未提交', detail: error instanceof Error ? error.message : String(error) });
         return false;
       }
@@ -1222,12 +1227,8 @@ export class ContinuationAgentTurnPlanner_ACU {
     const source = this.dependencies.readConversation(chat);
     // No persistent floor may be inferred from an in-memory transcript after a failed flush.
     if (fingerprintAgentConversationSource_ACU(source, expectedMark) !== fingerprintAgentConversationSource_ACU(snapshot, expectedMark)) return null;
-    const anchor = chat[chat.length - 1];
-    if (!anchor || this.dependencies.readChat() !== chat) return null;
-    const swipeId = readMessageSwipeId_ACU(anchor);
-    const chatIdentity = getActiveChatStorageIdentity_ACU(chat);
-    if (!chatIdentity) return null;
-    const sourceFingerprint = readAgentConversationCompactionSource_ACU(chat).fingerprint;
+    const commit = this.captureConversationCommit_ACU(chat);
+    if (!commit) return null;
     // 候选只代表规划时刻的阶段游标：摘要生成期间大纲 revision 可能已前进，
     // 提交前必须重新核对，游标无法确认时宁可不压缩也不提交过期候选。
     const planCursor = readCurrentStageCursor_ACU(request);
@@ -1248,10 +1249,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       if (!request.isInternalRequestCurrent(request.createInternalRequestIdentity(0)) || request.signal?.aborted) return null;
       const commitCursor = readCurrentStageCursor_ACU(request);
       if (!commitCursor || commitCursor.stageId !== planCursor.stageId || commitCursor.revision !== planCursor.revision) return null;
-      if (this.dependencies.readChat() !== chat || getActiveChatStorageIdentity_ACU(chat) !== chatIdentity
-        || chat[chat.length - 1] !== anchor || readMessageSwipeId_ACU(anchor) !== swipeId
-        || readAgentConversationCompactionSource_ACU(chat).fingerprint !== sourceFingerprint) return null;
-      if (await this.dependencies.writeCompactionMark(chat, candidate, { fingerprint: sourceFingerprint, anchor, swipeId, chatIdentity })) {
+      if (await commit(candidate)) {
         const persisted = this.dependencies.readCompactionMark(chat);
         const committed = !!persisted
           && 'summaryState' in persisted
@@ -1266,6 +1264,7 @@ export class ContinuationAgentTurnPlanner_ACU {
         }
       }
     } catch (error) {
+      if (this.dependencies.captureCompactionCommit) throw error;
       logAgentSession_ACU({ kind: 'thought', title: '会话历史压缩写入失败', detail: error instanceof Error ? error.message : String(error) });
     }
     if (!reread) {
@@ -1285,6 +1284,23 @@ export class ContinuationAgentTurnPlanner_ACU {
     // 「AI 的可见历史从这份交接文件开始」，而不是只看到一条统计说明。
     logAgentSession_ACU({ kind: 'handoff', title: '早期会话交接报告（此前内容对当前 AI 不可见）', detail: candidate.report });
     return reread;
+  }
+
+  /** 固定规划起点的提交租约；请求级存储不得进入宿主尾楼守卫。 */
+  private captureConversationCommit_ACU(chat: any[]): ((mark: AgentConversationCompactionMarkV2_ACU) => Promise<boolean>) | null {
+    if (this.dependencies.captureCompactionCommit) return this.dependencies.captureCompactionCommit(chat);
+    const anchor = chat[chat.length - 1];
+    if (!anchor || this.dependencies.readChat() !== chat) return null;
+    const swipeId = readMessageSwipeId_ACU(anchor);
+    const chatIdentity = getActiveChatStorageIdentity_ACU(chat);
+    if (!chatIdentity) return null;
+    const fingerprint = readAgentConversationCompactionSource_ACU(chat).fingerprint;
+    return async mark => {
+      if (this.dependencies.readChat() !== chat || getActiveChatStorageIdentity_ACU(chat) !== chatIdentity
+        || chat[chat.length - 1] !== anchor || readMessageSwipeId_ACU(anchor) !== swipeId
+        || readAgentConversationCompactionSource_ACU(chat).fingerprint !== fingerprint) return false;
+      return this.dependencies.writeCompactionMark(chat, mark, { fingerprint, anchor, swipeId, chatIdentity });
+    };
   }
 
   private async callMainAgent(
@@ -1800,6 +1816,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     const completedStages = context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber);
     return ({ role, sql, resolvePage, isCurrent, revisionWindow }: { role: AgentSubagentName_ACU; sql: string; resolvePage: (handle: string) => AgentFieldPage_ACU | null; isCurrent?: () => boolean; revisionWindow?: AgentModuleRevisionWindow_ACU }) => commitAgentModuleFieldWrites_ACU({
       chat, targetIndex, dispatchTarget, role, sql, resolvePage, isCurrent, completedStages, revisionWindow,
+      storage: this.dependencies.moduleCommitStorage,
     });
   }
 
@@ -1850,7 +1867,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           writeSql: this.moduleFieldWrite_ACU(chat, context),
           mainSnapshot: this.subagentTail_ACU(session),
         });
-        if (result.usedFieldWrites) context.moduleSnapshot = readAgentModuleSnapshot_ACU(chat);
+        if (result.usedFieldWrites) context.moduleSnapshot = this.dependencies.readModuleSnapshot(chat);
         if (!result.usedFieldWrites && result.arc && (result.arc.delta.storyArc.length || result.arc.delta.storyArcPatches.length)) {
           const delta = mergeAgentDeltaRevisions_ACU(result.arc.delta, result.readRevisions);
           const applied = await applyAgentModuleDeltaViaSql_ACU(
@@ -1933,7 +1950,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     const workflow = await runContinuationAgentWorkflow_ACU({
       settings: request.settings,
       snapshot: context.moduleSnapshot,
-      readCommittedSnapshot: () => readAgentModuleSnapshot_ACU(chat),
+      readCommittedSnapshot: () => this.dependencies.readModuleSnapshot(chat),
       opening: {
         focus: action.focus,
         summary: action.summary,
@@ -2123,7 +2140,7 @@ export class ContinuationAgentTurnPlanner_ACU {
         mainSnapshot: this.subagentTail_ACU(session),
       });
       const settled = result.usedFieldWrites
-        ? { snapshot: readAgentModuleSnapshot_ACU(chat), outcome: { agentName: result.agentName, ok: true, summary: result.researcher?.summary || '百科资料已按栏目写入', detail: '', rejectedReason: '' } }
+        ? { snapshot: this.dependencies.readModuleSnapshot(chat), outcome: { agentName: result.agentName, ok: true, summary: result.researcher?.summary || '百科资料已按栏目写入', detail: '', rejectedReason: '' } }
         : await this.settleResearcherResult_ACU(result, snapshot);
       ledger.outcomes.push(settled.outcome);
       updateAgentSession_ACU(entryId, {
@@ -2344,7 +2361,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       }
     }));
 
-    let nextSnapshot = settled.some(item => item.result?.usedFieldWrites) ? readAgentModuleSnapshot_ACU(chat) : snapshot;
+    let nextSnapshot = settled.some(item => item.result?.usedFieldWrites) ? this.dependencies.readModuleSnapshot(chat) : snapshot;
     let snapshotChanged = false;
 
     for (const item of settled) {
@@ -2483,7 +2500,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     const active = (list: ReadonlyArray<{ retired: boolean }>) => list.filter(item => !item.retired).length;
     logAgentSession_ACU({
       kind: 'thought',
-      title: `资料快照已写入楼层 ${targetIndex}`,
+      title: this.dependencies.storageLabel ? `资料快照已保存到${this.dependencies.storageLabel}` : `资料快照已写入楼层 ${targetIndex}`,
       detail: `伏笔 ${active(snapshot.hooks)} 条 · 信息差 ${active(snapshot.infoGap)} 条 · 总纲 ${active(snapshot.storyArc)} 条 · 年代学 ${active(snapshot.chronology)} 条 · 百科 ${active(snapshot.webRefs)} 条 · 长期约束 ${snapshot.constraints.length} 条 · 结算水位 ${Math.max(snapshot.settledThroughIndex, 0)}。${snapshot.settlementBoundary ? `追溯从楼层 ${snapshot.settlementBoundary.startIndex} 开始，此前历史未结算，跳过缺口 ${snapshot.settlementBoundary.skippedPendingFixes.length} 项。` : ''}资料按最近基线折叠；该楼增量会随删除或 swipe 一起退出折叠。`,
       ok: true,
     });

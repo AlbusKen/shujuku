@@ -11,14 +11,15 @@ import { findWorldSimulationAgentDefinition_ACU, worldSimulationAgentNativeTools
 import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationDirectorRuntimeProtocolInstruction_ACU } from './agent-defaults';
 import { adaptWorldSimulationPromptSegmentsToToolMode_ACU, worldSimulationProtocolForMode_ACU } from './agent-prompt-mode';
 import type { WorldSimulationCandidate_ACU, WorldSimulationConversationMessage_ACU, WorldSimulationMainLoopResult_ACU, WorldSimulationReviewerResult_ACU, WorldSimulationRunResumeState_ACU, WorldSimulationSubagentOutcome_ACU } from './agent-model';
-import type { WorldSimulationAnchorIdentity_ACU } from './agent-model';
+import type { WorldSimulationTargetAnchor_ACU } from './agent-model';
+import { requireWorldSimulationHostAnchor_ACU } from '../simulation-identity';
 import { summarizeWorldSimulationHandoff_ACU } from './agent-handoff-summarizer';
 import type { WorldSimulationSessionInput_ACU } from './agent-session-log';
 import { createWorldSimulationPlaceholderResolvers_ACU, type WorldSimulationPlaceholderContext_ACU } from './agent-placeholder-resolver';
 import { compactWorldSimulationProtocolError_ACU, createWorldSimulationProtocolRepairState_ACU, parseWorldSimulationMainAction_ACU, parseWorldSimulationMainOutput_ACU, recordWorldSimulationProtocolFailure_ACU, renderWorldSimulationDirectorProtocolRejection_ACU } from './agent-protocol';
 import { createWorldSimulationReadGateState_ACU, resolveWorldSimulationReadBudget_ACU } from './agent-read-gate';
 import { clearWorldSimulationRunState_ACU, readWorldSimulationRunState_ACU, saveWorldSimulationRunState_ACU } from './agent-run-cache';
-import { persistWorldSimulationRunState_ACU, restoreWorldSimulationRunState_ACU, clearWorldSimulationRunStateAtAnchor_ACU } from './agent-run-state-store';
+import { createHostWorldSimulationAgentStorage_ACU, type WorldSimulationAgentStorage_ACU } from './agent-storage';
 import { beginWorldSimulationSessionRun_ACU, endWorldSimulationSessionRun_ACU, logWorldSimulationSession_ACU, readWorldSimulationSessionLog_ACU, updateWorldSimulationSession_ACU } from './agent-session-log';
 import { countWorldSimulationTokens_ACU, measureWorldSimulationPrompt_ACU, type WorldSimulationTokenCounter_ACU } from './agent-token-budget';
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
@@ -27,8 +28,6 @@ import { runWorldSimulationWorkflow_ACU, runWorldSimulationOneShotWorkflow_ACU }
 import { bindWorldSimulationFixedWorldbook_ACU, renderWorldSimulationDirectorReads_ACU, verifyWorldSimulationFixedWorldbook_ACU, WORLD_SIMULATION_WORLDBOOK_UNAVAILABLE_ACU } from './agent-shared-materials';
 import { loadAgentWorldbookSnapshot_ACU, renderAgentWorldbookTriggeredInjection_ACU, selectTriggeredWorldbookEntries_ACU, type AgentWorldbookSnapshot_ACU } from '../../continuation/agent/agent-worldbook-read';
 import { buildRecentWorldbookScanText_ACU } from '../../continuation/agent/agent-placeholder-resolver';
-import { getChatArray_ACU } from '../../../data/gateways/chat-gateway';
-import { appendWorldSimulationDirectorHistory_ACU, readWorldSimulationDirectorCompactionSource_ACU, readWorldSimulationDirectorHistory_ACU, readWorldSimulationDirectorRunHistory_ACU, writeWorldSimulationConversationCompaction_ACU } from './agent-conversation-store';
 import { planWorldSimulationHistoryCompaction_ACU } from './agent-history-compactor';
 import { finishWorldSimulationMessages_ACU, resolveWorldSimulationToolMode_ACU, worldSimulationInvokeTools_ACU, type WorldSimulationAgentInvoker_ACU, type WorldSimulationSubagentRuntime_ACU } from './agent-subagent-runtime';
 import { agentNativeTools_ACU, isModelExchangeSequence_ACU, nativeToolArguments_ACU, nativeToolExchange_ACU, normalizeAgentModelReply_ACU, type AiNativeToolCall_ACU, type AiWireMessage_ACU } from '../../ai/native-tool';
@@ -53,8 +52,10 @@ export interface WorldSimulationMainLoopInput_ACU {
   runWrites?: WorldSimulationRunWriteState_ACU;
   isCurrent?: () => boolean;
   persistSessionEvent?: (eventKey: string, event: WorldSimulationSessionInput_ACU) => Promise<unknown>;
-  anchor?: WorldSimulationAnchorIdentity_ACU;
+  anchor?: WorldSimulationTargetAnchor_ACU;
   chat?: any[];
+  /** 完整的请求级存储；逻辑模式不从 anchor/chat 推测宿主写口。 */
+  storage?: WorldSimulationAgentStorage_ACU;
   resetRunBudget?: boolean;
   /** 仅由生产新任务入口启用；直接调用或恢复仍可沿用导演循环。 */
   directOpening?: boolean;
@@ -247,12 +248,22 @@ export class WorldSimulationMainLoop_ACU {
   constructor(private readonly dependencies: WorldSimulationMainLoopDependencies_ACU) {}
 
   async run(input: WorldSimulationMainLoopInput_ACU): Promise<WorldSimulationMainLoopResult_ACU> {
+    const storage = input.storage ?? createHostWorldSimulationAgentStorage_ACU(
+      input.anchor ? requireWorldSimulationHostAnchor_ACU(input.anchor) : undefined, input.chat);
+    if ((input.identity.kind === 'logical') !== (storage.mode === 'logical')) {
+      throw new Error('WORLD_SIMULATION_STORAGE_IDENTITY_MISMATCH');
+    }
+    if (storage.mode === 'logical' && (!storage.hasPersistentHistory || !storage.canCompactHistory)) {
+      throw new Error('WORLD_SIMULATION_LOGICAL_STORAGE_INCOMPLETE');
+    }
+    const persistentHistory = storage.hasPersistentHistory;
     const cursorKey = cursorKey_ACU(input.identity);
-    const resumed = readWorldSimulationRunState_ACU(input.identity.chatIdentity, input.identity.taskId, cursorKey);
-    const anchorState = input.anchor && !resumed
-      ? await restoreWorldSimulationRunState_ACU(input.anchor, input.identity.taskId, cursorKey, input.chat)
+    const resumed = storage.mode === 'host'
+      ? readWorldSimulationRunState_ACU(input.identity.chatIdentity, input.identity.taskId, cursorKey) : null;
+    const anchorState = persistentHistory && !resumed
+      ? await storage.restoreRunState(input.identity.taskId, cursorKey)
       : null;
-    // 楼层记录与内存缓存语义等价：优先内存（活跃 run），楼层回退覆盖重启恢复。
+    // 普通模式沿用活跃缓存；逻辑模式以本轮 Adapter 的持久状态为恢复权威。
     const resumedState = resumed ?? anchorState;
     if (resumedState?.evidenceSnapshot) {
       mergeWorldSimulationEvidenceRegistrySnapshot_ACU(input.registry, resumedState.evidenceSnapshot);
@@ -274,13 +285,13 @@ export class WorldSimulationMainLoop_ACU {
     let delegationsUsed = delegationsStart;
     let iteration = iterationStart;
 
-    const persistedHistory = input.anchor ? readWorldSimulationDirectorHistory_ACU(input.chat) : [];
+    const persistedHistory = persistentHistory ? storage.readDirectorHistory() : [];
     // The floor projection owns confirmed turns. Only migrate the still-missing suffix of a
     // legacy run-state transcript when the current run's persisted prefix matches exactly.
     const legacyTranscript = resumedState?.transcript ?? [];
-    const activeMark = input.anchor ? readWorldSimulationDirectorCompactionSource_ACU(input.chat).view.compaction : null;
-    const runHistory = input.anchor && !activeMark
-      ? readWorldSimulationDirectorRunHistory_ACU(input.identity.runId, input.chat) : [];
+    const activeMark = persistentHistory ? storage.readCompactionSource().view.compaction : null;
+    const runHistory = persistentHistory && !activeMark
+      ? storage.readDirectorRunHistory(input.identity.runId) : [];
     const legacyPairs = legacyTranscript[0]?.role === 'user'
       && legacyTranscript[0].content === resumedState?.handoffSummary
       ? legacyTranscript.slice(1) : legacyTranscript;
@@ -291,23 +302,23 @@ export class WorldSimulationMainLoop_ACU {
     // persist() flushes paired messages before saving run-state, so the floor projection owns
     // all acknowledged turns. Comparing a post-mark copy against just its new run suffix
     // would falsely report a conflict after the second resume.
-    const missingLegacy = input.anchor && !activeMark && isPairSequence(legacyPairs) && matchingRunPrefix
+    const missingLegacy = persistentHistory && !activeMark && isPairSequence(legacyPairs) && matchingRunPrefix
       ? legacyPairs.slice(runHistory.length) : [];
-    if (input.anchor && !activeMark && legacyPairs.length > runHistory.length && isPairSequence(legacyPairs) && !matchingRunPrefix) {
+    if (persistentHistory && !activeMark && legacyPairs.length > runHistory.length && isPairSequence(legacyPairs) && !matchingRunPrefix) {
       throw new Error('WORLD_SIMULATION_LEGACY_TRANSCRIPT_CONFLICT');
     }
-    if (input.anchor && !activeMark && resumedState?.transcript?.length && !persistedHistory.length && !isPairSequence(legacyPairs)) {
+    if (persistentHistory && !activeMark && resumedState?.transcript?.length && !persistedHistory.length && !isPairSequence(legacyPairs)) {
       throw new Error('WORLD_SIMULATION_LEGACY_TRANSCRIPT_UNPAIRED');
     }
-    const transcript: AiWireMessage_ACU[] = input.anchor
+    const transcript: AiWireMessage_ACU[] = persistentHistory
       ? [...persistedHistory, ...missingLegacy]
       : [...legacyTranscript];
     const handoffHint = resumedState?.handoffSummary && !activeMark && !transcript.some(item => item.content === resumedState.handoffSummary)
       ? { role: 'user', content: resumedState.handoffSummary } : null;
-    if (!input.anchor && handoffHint) transcript.unshift(handoffHint);
+    if (!persistentHistory && handoffHint) transcript.unshift(handoffHint);
     const worldbookSnapshot = await (input.worldbookSnapshot ?? loadAgentWorldbookSnapshot_ACU());
     const worldbookScan = worldbookSnapshot.available && worldbookSnapshot.entries.length
-      ? buildRecentWorldbookScanText_ACU(input.chat ?? getChatArray_ACU()) : '';
+      ? buildRecentWorldbookScanText_ACU(storage.readChat()) : '';
     const triggeredWorldbook = !worldbookSnapshot.available
       ? WORLD_SIMULATION_WORLDBOOK_UNAVAILABLE_ACU
       : worldbookSnapshot.entries.length
@@ -315,13 +326,12 @@ export class WorldSimulationMainLoop_ACU {
     const fixedWorldbook = bindWorldSimulationFixedWorldbook_ACU(triggeredWorldbook,
       worldbookSnapshot.available && worldbookSnapshot.entries.length
         ? selectTriggeredWorldbookEntries_ACU(worldbookSnapshot.entries, worldbookScan) : []);
-    let persistedTranscriptLength = input.anchor ? persistedHistory.length : 0;
+    let persistedTranscriptLength = persistentHistory ? persistedHistory.length : 0;
     const flushDirectorHistory = async (): Promise<void> => {
-      if (!input.anchor || transcript.length <= persistedTranscriptLength) return;
+      if (!persistentHistory || transcript.length <= persistedTranscriptLength) return;
       const pending = transcript.slice(persistedTranscriptLength);
       if (!isPairSequence(pending)) throw new Error('WORLD_SIMULATION_DIRECTOR_HISTORY_UNPAIRED');
-      await appendWorldSimulationDirectorHistory_ACU({
-        anchor: input.anchor,
+      await storage.appendDirectorHistory({
         runId: input.identity.runId,
         taskId: input.identity.taskId,
         stageId: input.identity.stageId,
@@ -332,7 +342,7 @@ export class WorldSimulationMainLoop_ACU {
           ...(item.tool_calls ? { tool_calls: item.tool_calls } : {}),
           ...(item.tool_call_id ? { tool_call_id: item.tool_call_id } : {}),
         })),
-      }, input.chat);
+      });
       persistedTranscriptLength = transcript.length;
     };
     const director = 'world-director' as const;
@@ -439,8 +449,8 @@ export class WorldSimulationMainLoop_ACU {
         ...(extras.budgetExhausted ? { budgetExhausted: true } : {}),
         ...(extras.handoffSummary ? { handoffSummary: extras.handoffSummary } : {}),
       };
-      if (input.anchor) await persistWorldSimulationRunState_ACU(input.anchor, state, input.chat);
-      saveWorldSimulationRunState_ACU(input.identity.chatIdentity, state);
+      if (persistentHistory) await storage.persistRunState(state);
+      if (storage.mode === 'host') saveWorldSimulationRunState_ACU(input.identity.chatIdentity, state);
     };
 
     const summarizeHandoff_ACU = async (): Promise<string | undefined> => {
@@ -531,8 +541,8 @@ export class WorldSimulationMainLoop_ACU {
         await persist(iteration + 1);
         iteration += 1;
       } else {
-        await clearWorldSimulationRunStateAtAnchor_ACU(input.anchor, input.chat);
-        clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
+        await storage.clearRunState();
+        if (storage.mode === 'host') clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
         if (workflow.outcome === 'blocked') {
           const unresolved = workflow.pendingFixes.map(fix => `${fix.module}: ${fix.lastError}`);
           const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: workflow.summary, detail: unresolved.join('；'), agentName: director, ok: false });
@@ -555,7 +565,7 @@ export class WorldSimulationMainLoop_ACU {
       });
       const requestContext = resultContext_ACU(currentContext(), input.registry, uniqueCandidates_ACU(candidates), outcomes);
       requestContext.readBudgetText = `本轮剩余阅读预算：约 ${Math.max(0, readBudget.effectiveMaxReadTokens - readGateState.grantedTokens)} tokens（上限 ${readBudget.effectiveMaxReadTokens}，已授予 ${readGateState.grantedTokens}）；剩余 read/search 次数 ${Math.max(0, input.settings.agentRunBudget.maxReads - toolUsage.readsUsed)}/${input.settings.agentRunBudget.maxReads}。`;
-      if (input.anchor) requestContext.history = { note: '主会话历史已按模型消息顺序提供；此处不重复展示卡片' };
+      if (persistentHistory) requestContext.history = { note: '主会话历史已按模型消息顺序提供；此处不重复展示卡片' };
       if (workflowEscalation) {
         const runtimeContext = requestContext.runtimeContext && typeof requestContext.runtimeContext === 'object'
           ? requestContext.runtimeContext as Record<string, unknown>
@@ -597,7 +607,7 @@ export class WorldSimulationMainLoop_ACU {
           `账本修订号：${currentLedger().revision}`,
           `证据注册表：${JSON.stringify(requestSnapshot)}`,
         ].join('\n\n');
-        const tail = [...(input.anchor && handoffHint ? [handoffHint] : [])];
+        const tail = [...(persistentHistory && handoffHint ? [handoffHint] : [])];
         const prefill = rendered.messages.some(message => message.content === USER_PREFILL_CONTENT_ACU)
           ? { role: 'user', content: USER_PREFILL_CONTENT_ACU }
           : null;
@@ -607,7 +617,7 @@ export class WorldSimulationMainLoop_ACU {
         let prepared = assemble(transcript);
         // 无锚点路径与锚定路径同一口径：用最终准备发送的完整请求判定是否压缩，
         // 不再只按 transcript 估算——骨架与尾部的开销同样会把请求顶过阈值。
-        if (!input.anchor) {
+        if (!persistentHistory) {
           const threshold = input.settings.agentHistoryTokenBudget;
           if (threshold > 0 && await measureWorldSimulationPrompt_ACU(prepared, count) > threshold) {
             const compacted = await compactWorldSimulationTranscriptIfNeeded_ACU({
@@ -624,12 +634,12 @@ export class WorldSimulationMainLoop_ACU {
             }
           }
         }
-        if (input.anchor && input.chat) {
+        if (storage.canCompactHistory) {
           const threshold = input.settings.agentHistoryTokenBudget;
           if (threshold > 0 && await measureWorldSimulationPrompt_ACU(prepared, count) > threshold) {
             await flushDirectorHistory();
-            const confirmed = readWorldSimulationDirectorCompactionSource_ACU(input.chat);
-            const confirmedHistory = readWorldSimulationDirectorHistory_ACU(input.chat);
+            const confirmed = storage.readCompactionSource();
+            const confirmedHistory = storage.readDirectorHistory();
             if (JSON.stringify(confirmedHistory) !== JSON.stringify(transcript)) {
               // Another confirmed floor event may arrive while the summary is prepared. Build
               // the candidate and the final request from the same authoritative projection.
@@ -645,16 +655,16 @@ export class WorldSimulationMainLoop_ACU {
               input.runWrites?.assertCurrent();
               if (input.isCurrent?.() === false) throw new Error('WORLD_SIMULATION_COMPACTION_RUN_STALE');
             }
-            if (planned?.mark && await writeWorldSimulationConversationCompaction_ACU({
-              anchor: input.anchor, compaction: planned.mark, expectedFingerprint: confirmed.fingerprint,
+            if (planned?.mark && await storage.writeCompaction({
+              compaction: planned.mark, expectedFingerprint: confirmed.fingerprint,
               expectedStageId: input.identity.stageId, expectedStageRevision: input.identity.stageRevision,
-            }, input.chat)) {
-              const reloaded = readWorldSimulationDirectorCompactionSource_ACU(input.chat);
+            })) {
+              const reloaded = storage.readCompactionSource();
               if (reloaded.view.compaction?.report !== planned.mark.report
                 || reloaded.view.compaction.compactedThroughId !== planned.mark.compactedThroughId) {
                 throw new Error('WORLD_SIMULATION_COMPACTION_READBACK_FAILED');
               }
-              transcript.splice(0, transcript.length, ...readWorldSimulationDirectorHistory_ACU(input.chat));
+              transcript.splice(0, transcript.length, ...storage.readDirectorHistory());
               persistedTranscriptLength = transcript.length;
               prepared = assemble(transcript);
             }
@@ -862,9 +872,9 @@ ${workflow.summary}
         pushFeedback(JSON.stringify({ outcome: workflow.outcome,
           summary: workflow.summary, source: 'fixed-workflow' }));
         await flushDirectorHistory();
-        await clearWorldSimulationRunStateAtAnchor_ACU(input.anchor, input.chat);
+        await storage.clearRunState();
         if (workflow.outcome === 'blocked') {
-          clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
+          if (storage.mode === 'host') clearWorldSimulationRunState_ACU(input.identity.chatIdentity);
           const unresolved = workflow.pendingFixes.map(fix => `${fix.module}: ${fix.lastError}`);
           const blockId = logWorldSimulationSession_ACU(input.identity.chatIdentity, { kind: 'block', title: workflow.summary, detail: unresolved.join('；'), agentName: director, ok: false });
           await persistEntry(blockId, `workflow-${iteration}-blocked`);
@@ -995,7 +1005,7 @@ ${rejectionText}` : delegationFeedback);
         }
         pushFeedback(JSON.stringify({ outcome: 'prepared_no_change', summary: action.summary }));
         await flushDirectorHistory();
-        await clearWorldSimulationRunStateAtAnchor_ACU(input.anchor, input.chat);
+        await storage.clearRunState();
         return { outcome: 'no_change', summary: action.summary, outcomes };
       }
 
@@ -1011,7 +1021,7 @@ ${rejectionText}` : delegationFeedback);
         input.runWrites.assertCurrent();
         pushFeedback(JSON.stringify({ outcome: 'prepared', summary: action.summary, confirmedWrites: input.runWrites.confirmedWrites }));
         await flushDirectorHistory();
-        await clearWorldSimulationRunStateAtAnchor_ACU(input.anchor, input.chat);
+        await storage.clearRunState();
         const commitCandidate = { runId: input.identity.runId, taskId: input.identity.taskId, stageId: input.identity.stageId,
           stageRevision: input.identity.stageRevision, baseLedgerRevision: input.identity.baseLedgerRevision,
           summary: action.summary, acceptedCandidates: [] as WorldSimulationCandidate_ACU[], evidenceRefs: [...new Set([...action.evidenceRefs, ...input.runWrites.evidenceRefs])],
@@ -1090,7 +1100,7 @@ ${rejectionText}` : delegationFeedback);
         input.runWrites?.assertCurrent();
         pushFeedback(JSON.stringify({ outcome: 'prepared', summary: action.summary, acceptedCandidates: finalCandidates.map(item => ({ candidateId: item.candidateId, agentName: item.agentName })) }));
         await flushDirectorHistory();
-        await clearWorldSimulationRunStateAtAnchor_ACU(input.anchor, input.chat);
+        await storage.clearRunState();
         const commitCandidate = { runId: input.identity.runId, taskId: input.identity.taskId, stageId: input.identity.stageId, stageRevision: input.identity.stageRevision, baseLedgerRevision: input.identity.baseLedgerRevision, summary: action.summary, acceptedCandidates: finalCandidates, evidenceRefs: commitEvidenceRefs, reviewer, collisionReport: input.promptContext.worldCollisions as WorldCollisionReport_ACU };
         return { outcome: 'commit', summary: action.summary, commitCandidate, outcomes };
       } catch (error) {

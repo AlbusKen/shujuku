@@ -293,6 +293,26 @@ describe('orchestrateAfterCommandsStrategy2_ACU', () => {
       expect(await orchestrateTavernHelperHook_ACU({ user_input: '继续' }, runOptimizationLogicWithUI_ACU))
         .toEqual({ action: 'skipped' });
     }
+    mockRunOptimization.mockResolvedValue({ success: false, errorType: 'no_tasks' });
+    expect(await orchestrateTavernHelperHook_ACU({ user_input: '继续' }, runOptimizationLogicWithUI_ACU))
+      .toEqual({ action: 'passthrough' });
+    for (const result of [
+      { success: false, blocked: true, errorType: 'stage_failure' },
+      { success: false, apiRetriesExhausted: true },
+      { success: true, hasPartialFailure: true, finalMessage: '不完整结果' },
+    ]) {
+      mockRunOptimization.mockResolvedValue(result);
+      for (const call of [
+        () => orchestrateAfterCommandsStrategy1_ACU({ is_user: true, mes: '继续' }, 0, runOptimizationLogicWithUI_ACU),
+        () => orchestrateAfterCommandsStrategy2_ACU('继续', runOptimizationLogicWithUI_ACU),
+        () => orchestrateTavernHelperHook_ACU({ user_input: '继续' }, runOptimizationLogicWithUI_ACU),
+      ]) {
+        expect(await call()).toMatchObject({ action: 'failed', blocked: true });
+      }
+    }
+    mockRunOptimization.mockRejectedValueOnce(new Error('意外异常'));
+    expect(await orchestrateAfterCommandsStrategy2_ACU('继续', runOptimizationLogicWithUI_ACU))
+      .toMatchObject({ action: 'failed', blocked: true });
   });
   it('用户中止返回 aborted', async () => {
     const runPlanning = vi.fn().mockResolvedValue({ aborted: true, manual: true });

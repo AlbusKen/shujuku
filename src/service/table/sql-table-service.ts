@@ -19,7 +19,8 @@ import type {
   ApplyEditsResult,
   SqlQueryExecutionOptions_ACU,
 } from '../../shared/table-storage-provider';
-import type { TableDataObject_ACU, Mate_ACU } from '../../shared/models/table-data';
+import type { TableDataObject_ACU, Mate_ACU, Sheet_ACU } from '../../shared/models/table-data';
+import { CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU } from '../../data/storage/chat-history';
 import type { TableMutationOperationV2_ACU, TableSqlBindValueV2_ACU } from './storage-frame-v2-types';
 import { SqliteEngine } from '../../data/sqlite/sqlite-engine';
 import { SyncBridge } from '../../data/sqlite/sync-bridge';
@@ -30,6 +31,7 @@ import {
 import { mergeAllIndependentTables_ACU } from '../runtime/helpers-data-merge';
 import { hashUserInput_ACU, logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU, stripSeedRowsFromTemplate_ACU } from '../../shared/utils';
 import {
+  NameMapper,
   createNameMapperOwnerToken_ACU,
   publishGlobalNameMapperEmptySchema_ACU,
   publishGlobalNameMapperForDDLs_ACU,
@@ -487,9 +489,11 @@ export function captureSqlTableApplyScope_ACU(options: {
   isolationKey: string;
   /** 请求前从 live SQLite provider 冻结的完整运行时数据（含 non-enumerable descriptor）。 */
   runtimeData?: TableDataObject_ACU | null;
+  /** 隔离业务快照的显式模板；不回读当前物理聊天配置。 */
+  templateData?: TableDataObject_ACU;
 }): SqlTableApplyScope_ACU {
-  const rawTemplateData = resolveChatTemplateData_ACU({ ...options, stripSeedRows: true });
-  const rawTemplateDataWithRows = resolveChatTemplateData_ACU({ ...options, stripSeedRows: false });
+  const rawTemplateData = options.templateData ? stripSeedRowsFromTemplate_ACU(JSON.parse(JSON.stringify(options.templateData))) : resolveChatTemplateData_ACU({ ...options, stripSeedRows: true });
+  const rawTemplateDataWithRows = options.templateData ? JSON.parse(JSON.stringify(options.templateData)) : resolveChatTemplateData_ACU({ ...options, stripSeedRows: false });
   if (!rawTemplateData || !rawTemplateDataWithRows) {
     throw new Error(`[SqlTableService] 无法捕获提交模板上下文 (isolationKey=${options.isolationKey || 'default'})。`);
   }
@@ -1513,6 +1517,9 @@ export class SqlTableService implements ITableStorageProvider {
   }> {
     const mergedData = data ? JSON.parse(JSON.stringify(data)) as TableDataObject_ACU : null;
     this._resetRuntimeForLoad_ACU();
+    if (this.isolatedRuntime_ACU && !mergedData) {
+      return { loaded: false, source: 'empty', error: 'isolated_snapshot_required' };
+    }
 
     // 启动自检（fail-loud）：拼音物理名冲突必须在建表前拦截，给出可读的改名指引，
     // 而不是等到 hydrate 时被 generic catch 吞成 sqlite_hydrate_failed。
@@ -1549,7 +1556,7 @@ export class SqlTableService implements ITableStorageProvider {
           return true;
         });
 
-      if (!mergedData || !hasRealDataRows) {
+      if ((!mergedData || !hasRealDataRows) && !this.isolatedRuntime_ACU) {
         const runtimeSeedSource = mergedData;
         const runtimeSeedData = this._buildInitialRuntimeTableData_ACU(runtimeSeedSource);
         if (runtimeSeedData) {
@@ -2007,6 +2014,12 @@ export class SqlTableService implements ITableStorageProvider {
   }
 
 
+  /** 显式快照消费者必须区分导出失败与合法空表，不能消费 getCurrentData 的回退值。 */
+  getCurrentDataStrict_ACU(): TableDataObject_ACU {
+    this._ensureInitialized();
+    return this._exportCurrentDataStrict();
+  }
+
   private _exportCurrentDataStrict(): TableDataObject_ACU {
     try {
       const mate = (this._readCanonicalView_ACU()?.mate as Mate_ACU) || DEFAULT_MATE_ACU;
@@ -2055,31 +2068,33 @@ export class SqlTableService implements ITableStorageProvider {
    */
   private _buildNameMapper(data: TableDataObject_ACU): boolean {
     try {
-      const ddlMap = new Map<string, string>();
-      const runtimeSchemas = this.syncBridge.getRuntimeEffectiveSchemas_ACU();
-      for (const [key, value] of Object.entries(data)) {
-        if (!key.startsWith('sheet_')) continue;
-        const sheet = value as any;
-        if (!sheet || typeof sheet !== 'object') continue;
-        // 休眠表（非首列空业务表头）不参与 NameMapper：它们不在 SQLite runtime 中，
-        // 构建映射会对坏表头触发 fallback DDL 报错。
-        if (!isSqlActiveTemplateSheet_ACU(sheet)) continue;
-        // NameMapper 必须和 SQLite 实际采用的 schema 一致。直接读取 sourceData.ddl
-        // 会在 fallback_invalid 场景留下无法映射运行时物理列名的陈旧映射。
-        const runtimeTableName = getPhysicalTableNameForSheet_ACU(data, key);
-        const runtimeSchema = runtimeSchemas.get(key);
-        if (!runtimeSchema) {
-          logWarn_ACU(`[SqlTableService] 构建 NameMapper 失败: ${key} 缺少 SyncBridge 实际执行 schema。`);
-          return false;
-        }
-        const effectiveDDL = runtimeSchema.effectiveDDL;
-        ddlMap.set(runtimeTableName, effectiveDDL);
-      }
-      return publishGlobalNameMapperForDDLs_ACU(ddlMap, this.nameMapperOwner_ACU);
+      return publishGlobalNameMapperForDDLs_ACU(this._getRuntimeDdlMap_ACU(data), this.nameMapperOwner_ACU);
     } catch (e: any) {
       logWarn_ACU(`[SqlTableService] 构建 NameMapper 失败: ${e?.message}`);
       return false;
     }
+  }
+
+  /** 请求级映射，只消费本实例实际 schema，不发布全局 NameMapper。 */
+  createReadNameMapper_ACU(): NameMapper {
+    return NameMapper.fromDDLs(this._getRuntimeDdlMap_ACU(this.getCurrentDataStrict_ACU()));
+  }
+
+  private _getRuntimeDdlMap_ACU(data: TableDataObject_ACU): Map<string, string> {
+    const ddlMap = new Map<string, string>();
+    const runtimeSchemas = this.syncBridge.getRuntimeEffectiveSchemas_ACU();
+    for (const [key, value] of Object.entries(data)) {
+      if (!key.startsWith('sheet_')) continue;
+      const sheet = value as Sheet_ACU;
+      if (!sheet || typeof sheet !== 'object' || !isSqlActiveTemplateSheet_ACU(sheet)) continue;
+      // 与 SyncBridge 实际采用的 schema 同源，不能使用可能已 fallback 的旧 sourceData.ddl。
+      const runtimeSchema = runtimeSchemas.get(key);
+      if (!runtimeSchema) {
+        throw new Error(`${key} 缺少 SyncBridge 实际执行 schema。`);
+      }
+      ddlMap.set(getPhysicalTableNameForSheet_ACU(data, key), runtimeSchema.effectiveDDL);
+    }
+    return ddlMap;
   }
 
   /**
@@ -2174,11 +2189,19 @@ export class SqlTableService implements ITableStorageProvider {
    * 2. 当前聊天模板中的 sourceData.ddl（fallback）
    */
   private _ensureTablesFromTemplate(scope?: SqlTableApplyScope_ACU): void {
+    const isolatedSnapshot = this.isolatedRuntime_ACU ? this._readCanonicalView_ACU() : null;
+    if (this.isolatedRuntime_ACU && (
+      Boolean(scope?.templateData) !== Boolean(scope?.templateDataWithRows)
+      || (!scope?.templateData && !isolatedSnapshot)
+    )) {
+      throw new Error('isolated_template_snapshot_required: 隔离写入缺少本实例快照或完整模板快照。');
+    }
     const existingTables = new Set(this.engine.getTableNames());
 
     // [修复] 优先从当前聊天模板预设获取模板，而不是依赖全局变量 TABLE_TEMPLATE_ACU
     // 这样确保建表时只使用当前聊天模板预设的内容，不会混入全局模板的表
-    const templateData = scope?.templateData || this._resolveCurrentChatTemplate();
+    const templateData = scope?.templateData
+      || (this.isolatedRuntime_ACU ? isolatedSnapshot : this._resolveCurrentChatTemplate());
     if (!templateData) {
       if (existingTables.size > 0) return;
       throw new Error('[SqlTableService] 模板解析失败，无法建表。请检查模板格式。');
@@ -2227,7 +2250,8 @@ export class SqlTableService implements ITableStorageProvider {
     // 建表用的 templateData 已被 stripSeedRows 剥掉数据行，需要一份保留数据行的模板，
     // 用来还原「模板自带数据」的表。作者在模板里写了数据就代表要保留这个格式，
     // 不能只在「首次填表」时才生效（shouldUseInitialSeedRows_ACU 的限定）。
-    const templateWithRows = scope?.templateDataWithRows || this._resolveCurrentChatTemplate(false);
+    const templateWithRows = scope?.templateDataWithRows
+      || (this.isolatedRuntime_ACU ? isolatedSnapshot : this._resolveCurrentChatTemplate(false));
     for (const [key, sheet] of Object.entries(missingSheets)) {
       const sheetCopy = JSON.parse(JSON.stringify(sheet));
 
@@ -2239,8 +2263,12 @@ export class SqlTableService implements ITableStorageProvider {
         : [];
       const needsRows = !Array.isArray(sheetCopy.content) || sheetCopy.content.length <= 1;
       if (needsRows) {
+        const snapshotSeedRows = (this._readCanonicalView_ACU()?.[key] as any)?.[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU];
+        const templateSeedRows = (templateWithRows as any)?.[key]?.[CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU];
         const seedRows = authoredRows.length > 0
           ? authoredRows
+          : this.isolatedRuntime_ACU
+          ? (Array.isArray(snapshotSeedRows) ? snapshotSeedRows : Array.isArray(templateSeedRows) ? templateSeedRows : [])
           : getEffectiveSeedRowsForSheet_ACU(key, { allowTemplateFallback: true });
         if (Array.isArray(seedRows) && seedRows.length > 0) {
           // seedRows 是不含表头的纯数据行，拼接到表头后面

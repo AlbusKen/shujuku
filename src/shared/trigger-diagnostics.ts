@@ -20,6 +20,7 @@ export type AutoFillSkipReason_ACU =
   | 'chat_changed'
   | 'auto_update_coalesced'
   | 'preconditions_failed'
+  | 'initial_chat_message'
   | 'no_tables_due';
 
 export interface AutoFillSkipContext_ACU {

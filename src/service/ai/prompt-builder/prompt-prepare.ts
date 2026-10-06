@@ -156,8 +156,11 @@ function resolvePromptRowWindow_ACU(
     messages: any[],
     updateMode = 'standard',
     targetSheetKeys: string[] | null = null,
-    options: { tableData?: any; excludeImportTaggedWorldbookEntries?: boolean; agentGreenlights?: any[]; isolationKey?: string; templateScope?: TemplateScope_ACU; sqlApplyScope?: SqlTableApplyScope_ACU; signal?: AbortSignal; worldbookReadContext?: LorebookReadContext_ACU } = {},
+    options: { tableData?: any; isolatedSnapshot?: boolean; excludeImportTaggedWorldbookEntries?: boolean; agentGreenlights?: any[]; isolationKey?: string; templateScope?: TemplateScope_ACU; sqlApplyScope?: SqlTableApplyScope_ACU; signal?: AbortSignal; worldbookReadContext?: LorebookReadContext_ACU } = {},
   ) {
+    if (options.isolatedSnapshot && (!options.tableData || typeof options.tableData !== 'object')) {
+        throw new Error('隔离填表必须提供显式表格快照。');
+    }
     const sqlMode = isSqliteMode();
     const sourceTableData = await resolvePromptSourceTableData_ACU(options, sqlMode);
     if (sourceTableData && typeof sourceTableData === 'object' && sourceTableData.ok === false) {
@@ -171,9 +174,9 @@ function resolvePromptRowWindow_ACU(
     }
 
     let _seedGuideDataForThisPrepare_ACU: Record<string, any> | null = null;
-    let workingTableData = sourceTableData;
+    let workingTableData = options.isolatedSnapshot ? JSON.parse(JSON.stringify(sourceTableData)) : sourceTableData;
     try {
-        if (!sqlMode) {
+        if (!sqlMode && !options.isolatedSnapshot) {
             _seedGuideDataForThisPrepare_ACU = await ensureChatSheetGuideSeeded_ACU({ reason: 'prepare_ai_input_seedrows' });
             if (_seedGuideDataForThisPrepare_ACU) {
                 if (options?.tableData) {
@@ -239,12 +242,12 @@ function resolvePromptRowWindow_ACU(
 
         const isSummaryTable = isSummaryOrOutlineTable_ACU(table.name);
         let shouldShowData = true;
-        
+
         if (!targetSheetKeys) {
             const isUnifiedMode = (updateMode === 'full' || updateMode === 'manual_unified' || updateMode === 'auto_unified');
             const isStandardMode = (updateMode === 'standard' || updateMode === 'auto_standard' || updateMode === 'manual_standard');
             const isSummaryMode = (updateMode === 'summary' || updateMode === 'auto_summary_silent' || updateMode === 'manual_summary');
-            
+
             if (isUnifiedMode) {
                  shouldShowData = true;
             } else if (isStandardMode && isSummaryTable) {
@@ -276,7 +279,9 @@ function resolvePromptRowWindow_ACU(
         }
 
         const allRows = table.content.slice(1);
-        const seedRows = sqlMode ? [] : getEffectiveSeedRowsForSheet_ACU(sheetKey, { guideData: _seedGuideDataForThisPrepare_ACU, allowTemplateFallback: true });
+        const seedRows = sqlMode ? [] : options.isolatedSnapshot
+            ? (Array.isArray(rawTable.seedRows) ? rawTable.seedRows : [])
+            : getEffectiveSeedRowsForSheet_ACU(sheetKey, { guideData: _seedGuideDataForThisPrepare_ACU, allowTemplateFallback: true });
         try {
             if ((!Array.isArray(table.seedRows) || table.seedRows.length === 0) && Array.isArray(seedRows) && seedRows.length > 0) {
                 table.seedRows = JSON.parse(JSON.stringify(seedRows));
@@ -341,7 +346,7 @@ function resolvePromptRowWindow_ACU(
     if (_seedRowsTablesUsed_ACU.length > 0) {
         logDebug_ACU(`[SeedRows] $0 使用 seedRows 作为基础数据：${_seedRowsTablesUsed_ACU.join('、')}`);
     }
-    
+
     let messagesText = '当前最新对话内容:\n';
     const conditionalSeedParts: string[] = [];
     if (messages && messages.length > 0) {

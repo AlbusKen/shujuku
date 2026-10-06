@@ -199,6 +199,10 @@ export function buildCustomApiRequestBody_ACU(
     stripModelPrefix?: boolean;
     /** 注入上游请求体的 prompt_cache_key（OpenAI 兼容缓存路由）。仅允许 [A-Za-z0-9_-]，防止破坏 YAML 注入通道。 */
     promptCacheKey?: string;
+    /** 请求级流式快照；未传时保持既有全局开关行为。 */
+    streaming?: boolean;
+    /** 已完成装配的生成字段，同时进入 custom 上游透传体，不裁剪扩展字段。 */
+    generationParameters?: Record<string, unknown>;
     /** 流式请求时注入 stream_options.include_usage，让流末尾下发 usage 统计 chunk。非流式请求忽略。 */
     includeStreamUsage?: boolean;
     /**
@@ -231,9 +235,9 @@ export function buildCustomApiRequestBody_ACU(
 
   // 插件字段与用户 bodyParams 先按 SillyTavern 的 YAML 解析规则结构化组合，再作为
   // custom_include_body 交给宿主合并。无法安全解析时保留用户原文并跳过插件字段。
-  const streaming = settings_ACU.streamingEnabled || false;
+  const streaming = opts.streaming ?? (settings_ACU.streamingEnabled || false);
   const userBodyParams = String(effectiveApiConfig.bodyParams || '');
-  const pluginFields = Object.create(null) as Record<string, unknown>;
+  const pluginFields = Object.assign(Object.create(null), opts.generationParameters) as Record<string, unknown>;
   if (opts.promptCacheKey && /^[A-Za-z0-9_-]+$/.test(opts.promptCacheKey)) {
     pluginFields.prompt_cache_key = opts.promptCacheKey;
   }
@@ -245,6 +249,9 @@ export function buildCustomApiRequestBody_ACU(
   }
   const composedIncludeBody = composeCustomIncludeBody_ACU(userBodyParams, pluginFields);
   if (composedIncludeBody.diagnostic.reason === 'parse_error' || composedIncludeBody.diagnostic.reason === 'unsupported_root') {
+    if (opts.generationParameters) {
+      throw new Error('数据库 API 的附加请求体无法合并最终生成字段，未发送请求。');
+    }
     logWarn_ACU('[buildCustomApiRequestBody] 跳过插件请求体字段', composedIncludeBody.diagnostic);
   } else if (composedIncludeBody.diagnostic.reason === 'stream_options_replaced') {
     logWarn_ACU('[buildCustomApiRequestBody] 用户 stream_options 不是对象，已由插件对象替换', composedIncludeBody.diagnostic);
@@ -338,6 +345,7 @@ export function buildCustomApiRequestBody_ACU(
     // 无工具的内部请求明确禁用工具；Kemini 即使被其他包装遮挡，也会按 none 原样放行。
     // 带工具的 Agent 仍须允许自行选择工具或最终文本，不能为了避开包装而强制 required。
     ...(opts.tools?.length ? { tools: opts.tools, tool_choice: 'auto' } : { tool_choice: 'none' }),
+    ...opts.generationParameters,
   };
   if (promptPostProcessing) {
     // 「未选择」（''）时省略该键，酒馆后端（getPromptPostProcessing）按 none 处理，原样透传消息。
@@ -608,8 +616,14 @@ export interface ResolvedPresetCallLifecycle_ACU {
     onUsage?: (usage: AiUsageMetadata_ACU) => void;
 }
 
-/** callAIWithResolvedPreset_ACU 的请求体附加项。仅 custom（chat-completions）路径生效。 */
+/** callAIWithResolvedPreset_ACU 的请求级参数；未传时保留普通调用语义。 */
 export interface ResolvedPresetCallExtras_ACU {
+    /** 酒馆已装配请求中的生成参数，不含模型、路由和鉴权。 */
+    generationParameters?: Record<string, unknown>;
+    /** 不允许经宿主生成器回退；零层正文只使用带内部标记的直发端口。 */
+    requireDirectTransport?: boolean;
+    /** 冻结本次数据库 API 的流式开关，避免返回时读取新设置。 */
+    streaming?: boolean;
     /** OpenAI 兼容缓存路由 key。稳定的 key 让同一会话的请求落到同一缓存命名空间。 */
     promptCacheKey?: string;
     /**
@@ -619,6 +633,28 @@ export interface ResolvedPresetCallExtras_ACU {
     minOutputTokens?: number;
     /** 传入后，自定义 chat-completions 请求体会带上 tools。 */
     tools?: readonly AiNativeToolDefinition_ACU[];
+}
+
+/** 只校验可独立发送的渠道，不启动生成、切换 profile 或写入聊天。 */
+export function assertResolvedPresetDirectTransport_ACU(
+    resolved: { apiMode: ApiPresetApiMode_ACU; apiConfig: ApiPresetApiConfig_ACU; tavernProfile: string },
+): void {
+    if (resolved.apiMode === 'tavern') {
+        const profile = getConnectionManagerProfiles_ACU().find(item => item.id === resolved.tavernProfile);
+        if (!profile || !isConnectionProfileChatCompletion_ACU(profile)) {
+            throw new Error('零层正文需要有效的 Chat Completion 连接预设，未发送请求。');
+        }
+        return;
+    }
+    if (resolved.apiConfig.useMainApi) {
+        if (!isMainApiChatCompletionAvailable_ACU()) {
+            throw new Error('零层正文不支持当前主 API 的宿主生成回退，请选择 Chat Completion 或自定义 API。');
+        }
+        return;
+    }
+    if (!resolved.apiConfig.url || !resolved.apiConfig.model) {
+        throw new Error('自定义 API 的 URL 或模型未配置。');
+    }
 }
 
 /** tavern 模式请求的串行队列尾。/profile 是全局状态，并发切换会互相踩，必须串行「切换→发送→恢复」。 */
@@ -679,13 +715,33 @@ export async function callAIWithResolvedPreset_ACU(
         if (!usage) return;
         try { lifecycle.onUsage(usage); } catch { /* 用量回调异常不允许影响调用主流程。 */ }
     };
-    const maxTokens = resolveRequestMaxTokens_ACU(resolved.apiConfig, extras?.minOutputTokens);
+    if (extras?.requireDirectTransport) assertResolvedPresetDirectTransport_ACU(resolved);
+    const finalMaxTokens = extras?.requireDirectTransport ? extras.generationParameters?.max_tokens : undefined;
+    if (finalMaxTokens !== undefined && (typeof finalMaxTokens !== 'number' || !Number.isFinite(finalMaxTokens) || finalMaxTokens <= 0)) {
+        throw new Error('最终生成请求的 max_tokens 无效，未发送请求。');
+    }
+    const maxTokens = typeof finalMaxTokens === 'number'
+        ? finalMaxTokens : resolveRequestMaxTokens_ACU(resolved.apiConfig, extras?.minOutputTokens);
+    const directOptions = extras?.requireDirectTransport || extras?.streaming !== undefined
+        ? {
+            streaming: extras?.streaming ?? false,
+            preservePayload: extras?.requireDirectTransport === true,
+            readResponse: async (response: Response) => {
+                const parsed = await readFetchChatTurn_ACU(response, extras?.streaming ?? false, signal, extras?.requireDirectTransport === true);
+                return { choices: [{ message: { content: parsed.turn.content } }], usage: parsed.usage };
+            },
+        }
+        : undefined;
+    const wireMessages = extras?.requireDirectTransport ? messages : toWireMessages_ACU(messages);
     if (resolved.apiMode === 'tavern') {
         if (!resolved.tavernProfile) throw new Error('该预设为酒馆连接模式但未选择连接预设。');
         const profile = getConnectionManagerProfiles_ACU().find(item => item.id === resolved.tavernProfile);
         if (profile && isConnectionProfileChatCompletion_ACU(profile)) {
             // 宿主连接管理器经被第三方脚本包装的全局 fetch 发送；Chat Completion 预设改为直发生成端点。
-            const raw = await runWithTavernProfile_ACU(resolved.tavernProfile, target => sendProfileChatCompletionRequest_ACU(target, toWireMessages_ACU(messages), maxTokens, {}, signal));
+            const raw = await runWithTavernProfile_ACU(resolved.tavernProfile, target => {
+                if (extras?.requireDirectTransport) assertResolvedPresetDirectTransport_ACU(resolved);
+                return sendProfileChatCompletionRequest_ACU(target, wireMessages, maxTokens, extras?.generationParameters ?? {}, signal, directOptions);
+            });
             assertNotAborted_ACU(signal);
             const parsed = chatTurnFromJson_ACU(raw);
             reportUsage(parsed.usage ?? raw?.usage);
@@ -701,7 +757,7 @@ export async function callAIWithResolvedPreset_ACU(
     if (resolved.apiConfig.useMainApi) {
         if (isMainApiChatCompletionAvailable_ACU()) {
             // Chat Completion 主连接直发生成端点，避开 generateRaw 经过的脚本 fetch 包装。
-            const raw = await sendMainApiChatCompletionRequest_ACU(toWireMessages_ACU(messages), { max_tokens: maxTokens }, signal);
+            const raw = await sendMainApiChatCompletionRequest_ACU(wireMessages, { ...extras?.generationParameters, max_tokens: maxTokens }, signal, directOptions);
             assertNotAborted_ACU(signal);
             const parsed = chatTurnFromJson_ACU(raw);
             reportUsage(parsed.usage ?? raw?.usage);
@@ -713,7 +769,7 @@ export async function callAIWithResolvedPreset_ACU(
             // Only synchronous GENERATION_STARTED delivery can be attributed:
             // the host event has no request ID, so keeping this window open for
             // the whole request would let an unrelated later generation match.
-            operation = generateRaw_ACU({ ordered_prompts: messages, should_stream: settings_ACU.streamingEnabled || false, max_tokens: maxTokens });
+            operation = generateRaw_ACU({ ordered_prompts: messages, should_stream: extras?.streaming ?? (settings_ACU.streamingEnabled || false), max_tokens: maxTokens });
         } finally {
             lifecycle?.afterMainApiCall?.();
         }
@@ -729,17 +785,30 @@ export async function callAIWithResolvedPreset_ACU(
     const response = await pristineFetch_ACU('/api/backends/chat-completions/generate', {
         method: 'POST',
         headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildCustomApiRequestBody_ACU(messages, resolved.apiConfig, {
-            maxTokens,
-            stripModelPrefix: false,
-            promptCacheKey: supportsExplicitOpenAiCacheKey_ACU(resolved) ? extras?.promptCacheKey : undefined,
-            // usage 回调在场时才请求流式 usage chunk：不改变没有订阅方时的请求体。
-            includeStreamUsage: !!lifecycle?.onUsage,
-        })),
+        body: JSON.stringify({
+            ...extras?.generationParameters,
+            ...buildCustomApiRequestBody_ACU(messages, resolved.apiConfig, {
+                maxTokens,
+                temperature: extras?.generationParameters?.temperature as number | undefined,
+                topP: extras?.generationParameters?.top_p as number | undefined,
+                stripModelPrefix: false,
+                streaming: extras?.streaming,
+                generationParameters: extras?.requireDirectTransport ? extras.generationParameters : undefined,
+                promptCacheKey: supportsExplicitOpenAiCacheKey_ACU(resolved) ? extras?.promptCacheKey : undefined,
+                // usage 回调在场时才请求流式 usage chunk：不改变没有订阅方时的请求体。
+                includeStreamUsage: !!lifecycle?.onUsage,
+            }),
+        }),
         signal: signal || undefined,
     });
     if (!response.ok) throw new AgentApiHttpError_ACU(response.status, `API 请求失败: ${response.status}`);
-    const content = await handleApiResponse_ACU(response, signal, lifecycle?.onUsage);
+    if (extras?.requireDirectTransport) {
+        const parsed = await readFetchChatTurn_ACU(response, extras.streaming ?? false, signal, true);
+        assertNotAborted_ACU(signal);
+        reportUsage(parsed.usage);
+        return parsed.turn.content.trim() || null;
+    }
+    const content = await handleApiResponse_ACU(response, signal, lifecycle?.onUsage, extras?.streaming);
     return typeof content === 'string' && content.trim() ? content.trim() : null;
 }
 

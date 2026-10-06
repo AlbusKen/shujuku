@@ -1,7 +1,6 @@
 /** 主会话纠正：领域 SQL 沿用逐栏提交；追溯边界单独保存，不推进结算水位。 */
 import type { AgentConversationSnapshot_ACU, AgentCorrectMaterialsAction_ACU, AgentModuleSnapshot_ACU, AgentPendingFix_ACU } from './agent-model';
-import { commitAgentModuleFieldWrites_ACU, type AgentModuleFieldReceipt_ACU } from './agent-module-field-commit';
-import { captureAgentModuleCommitBaseline_ACU, readAgentModuleFoldState_ACU, writeAgentModuleCommitDelta_ACU } from './agent-module-store';
+import { commitAgentModuleFieldWrites_ACU, hostAgentModuleCommitStorage_ACU, type AgentModuleCommitStorage_ACU, type AgentModuleFieldReceipt_ACU } from './agent-module-field-commit';
 import { agentStoryEvidenceFloorIndexes_ACU } from './agent-placeholder-resolver';
 import { readMessageSwipeId_ACU } from './agent-module-frame';
 
@@ -32,17 +31,19 @@ export async function correctAgentMaterials_ACU(input: {
   conversation: AgentConversationSnapshot_ACU;
   isCurrent: () => boolean;
   completedStages: readonly number[];
+  storage?: AgentModuleCommitStorage_ACU;
 }) {
   const { action, chat } = input;
+  const storage = input.storage ?? hostAgentModuleCommitStorage_ACU;
   let sqlReceipt: AgentModuleFieldReceipt_ACU | undefined;
   const reject = (reason: string) => ({ status: 'rejected' as const, reason, ...(sqlReceipt ? { sqlReceipt } : {}) });
   const targetIndex = chat.length - 1;
   const target = chat[targetIndex];
   const dispatchTarget = { message: target, swipeId: readMessageSwipeId_ACU(target), content: target?.mes };
-  const current = () => input.isCurrent() && chat.length - 1 === targetIndex
+  const current = () => input.isCurrent() && storage.isActive(chat) && chat.length - 1 === targetIndex
     && chat[targetIndex] === target && readMessageSwipeId_ACU(target) === dispatchTarget.swipeId;
   if (!current() || !agentStoryEvidenceFloorIndexes_ACU(chat).has(targetIndex)) return reject('当前聊天或承载正文楼层不可用');
-  let folded = readAgentModuleFoldState_ACU(chat);
+  let folded = storage.readFold(chat);
   if (folded.salvaged || folded.candidates.some(item => !item.valid)) return reject('资料帧损坏，不能在抢救结果上纠正');
   if (action.settlementStartIndex !== undefined) {
     const users = input.conversation.messages.filter(message => message.kind === 'user');
@@ -53,9 +54,9 @@ export async function correctAgentMaterials_ACU(input: {
   }
   if (action.sql) {
     sqlReceipt = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex, dispatchTarget,
-      sql: action.sql, role: 'main', completedStages: input.completedStages, isCurrent: current });
+      sql: action.sql, role: 'main', completedStages: input.completedStages, isCurrent: current, storage });
     if (sqlReceipt.status !== 'committed') return { status: sqlReceipt.status, sqlReceipt };
-    folded = readAgentModuleFoldState_ACU(chat);
+    folded = storage.readFold(chat);
     if (!current() || folded.salvaged || folded.candidates.some(item => !item.valid)) return reject('纠正后权威资料状态无法确认');
   }
   const before = folded.snapshot;
@@ -82,8 +83,8 @@ export async function correctAgentMaterials_ACU(input: {
   const changed = JSON.stringify(pendingFixes) !== JSON.stringify(before.pendingFixes)
     || JSON.stringify(settlementBoundary) !== JSON.stringify(before.settlementBoundary);
   if (!changed) return { status: 'committed' as const, sqlReceipt, settlementBoundary };
-  const baseline = captureAgentModuleCommitBaseline_ACU(chat);
-  const result = await writeAgentModuleCommitDelta_ACU(chat, targetIndex, {
+  const baseline = storage.captureBaseline(chat);
+  const result = await storage.writeDelta(chat, targetIndex, {
     writes: {}, revisions: {}, pendingFixes,
     ...(settlementBoundary ? { settlementBoundary } : {}),
   }, now, readback => !readback.salvaged && readback.candidates.every(item => item.valid)

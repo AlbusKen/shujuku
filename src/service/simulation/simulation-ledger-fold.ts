@@ -316,7 +316,7 @@ function domainLedgerRecordFields_ACU(
 }
 
 /** 基线时刻的账本条目：栏目 revision 从 0 起算，记为 legacy_unknown。 */
-function seedLedgerFieldView_ACU(ledger: WorldSimulationLedger_ACU, updatedAt: number): WorldSimulationLedgerFieldSnapshot_ACU {
+export function seedLedgerFieldView_ACU(ledger: WorldSimulationLedger_ACU, updatedAt: number): WorldSimulationLedgerFieldSnapshot_ACU {
   const view = emptyLedgerFieldView_ACU();
   reconcileLedgerFieldViewWithLedger_ACU(view, ledger, updatedAt, true);
   return view;
@@ -349,7 +349,7 @@ function recomputeLedgerPartialRecord_ACU(record: WorldSimulationLedgerFieldReco
  * 把逐栏写集叠到视图上。被写到的记录先一律按草稿重算，随后的账本对账再把在账本里的 ID
  * 改回完整状态；值未变的重复写入不推进栏目 revision。
  */
-function applyLedgerFieldUpsertsToView_ACU(
+export function applyLedgerFieldUpsertsToView_ACU(
   view: WorldSimulationLedgerFieldSnapshot_ACU,
   upserts: WorldSimulationLedgerFieldUpserts_ACU,
   updatedAt: number,
@@ -390,7 +390,7 @@ function applyLedgerFieldUpsertsToView_ACU(
  * 每条 delta 后的按 ID 对账。账本是完整条目的唯一来源：在账本里的 ID 按账本值重建栏目，此前经逐栏写入
  * （partial/complete）的记为 complete，其余记为 legacy_unknown；不在账本里的记录只保留仍有栏目的 partial 草稿。
  */
-function reconcileLedgerFieldViewWithLedger_ACU(
+export function reconcileLedgerFieldViewWithLedger_ACU(
   view: WorldSimulationLedgerFieldSnapshot_ACU,
   ledger: WorldSimulationLedger_ACU,
   updatedAt: number,

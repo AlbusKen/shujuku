@@ -24,7 +24,8 @@ import { normalizeSheetGuideRowIds_ACU } from './sheet-guide-row-id-normalizer';
 import { getCurrentChatTemplateScopeState_ACU, buildChatTemplateScopeStateFromCurrent_ACU, setCurrentChatTemplateScopeState_ACU } from './chat-scope-template';
 import { migrateLegacyTemplateScopeForCurrentChat_ACU, getChatSheetGuideDataForIsolationKey_ACU, buildChatSheetGuideDataFromTemplateObj_ACU } from './chat-scope-guide';
 
-  export function getSortedSheetKeys_ACU(dataObj: any, { ignoreChatGuide = false, includeMissingFromGuide = false } = {}) {
+  export function getSortedSheetKeys_ACU(dataObj: any, { ignoreChatGuide = false, includeMissingFromGuide = false, templateSnapshot }:
+      { ignoreChatGuide?: boolean; includeMissingFromGuide?: boolean; templateSnapshot?: Record<string, any> | null } = {}) {
       if (!dataObj || typeof dataObj !== 'object') return [];
       const existingKeys = Object.keys(dataObj).filter(k => k.startsWith('sheet_'));
       if (existingKeys.length === 0) return [];
@@ -52,7 +53,8 @@ import { migrateLegacyTemplateScopeForCurrentChat_ACU, getChatSheetGuideDataForI
       }
 
       // 尝试拿模板做兜底（比如老数据/导入数据缺编号）
-      const templateObj = parseTableTemplateJson_ACU({ stripSeedRows: false });
+      const templateObj = templateSnapshot === undefined
+          ? parseTableTemplateJson_ACU({ stripSeedRows: false }) : templateSnapshot;
 
       // 先对 dataObj 补齐缺失编号（仅在确实缺失/重复时重建）
       // baseOrderKeys 的优先级：模板顺序 > 当前对象键顺序（保证"载入模板编好号"后的稳定性）

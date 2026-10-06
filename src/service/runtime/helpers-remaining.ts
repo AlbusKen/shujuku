@@ -15,6 +15,10 @@ import { logDebug_ACU, logError_ACU } from '../../shared/utils';
 import { parseRandomTags_ACU, replaceRandomVariables_ACU, parseCalcTags_ACU, parseMaxTags_ACU, parseMinTags_ACU, replaceCalcVariables_ACU, replaceMaxVariables_ACU, replaceMinVariables_ACU, parseIfBlockRecursive_ACU, getLatestAIMessageContent_ACU, getLatestUserMessageContent_ACU, composeSeedMatchContent_ACU, replaceDbSqlVariables } from './template-vars';
 import { getPlotFromHistory_ACU, getWorldbookContentForPlot_ACU, getAgentControlledWorldbookEntriesForFinalPrompt_ACU } from './plot-runtime';
 import { ensurePlotAgentWorldbookSnapshotHydrated_ACU, isWorldbookTakeoverActive_ACU } from '../agent/agent-worldbook-takeover';
+import { getZeroLayerPromptContext_ACU, runZeroLayerTemplatePass_ACU } from '../zero-layer/request-context';
+import type { ZeroLayerPlotCandidate_ACU } from '../zero-layer/model';
+import { injectZeroLayerFinalPrompts_ACU } from '../zero-layer/plot-prompt-injection';
+import { withSqlTemplateReadContext_ACU, type SqlTemplateReadContext_ACU } from './template-vars/sql-query-var';
 
 // ═══ 上下文标签提取/过滤 ═══
 export {
@@ -205,9 +209,43 @@ export {
     return currentJsonTableData_ACU || {};
   }
 
-  export async function handleChatCompletionReady_ACU(data: any) {
+  /** 请求级历史与表格快照；不改变普通模式的默认读取来源。 */
+  export interface ChatCompletionPromptContext_ACU {
+    history: readonly Record<string, unknown>[];
+    allTablesJson?: ReturnType<typeof getTableDataForPrompt_ACU>;
+    plotCandidate?: ZeroLayerPlotCandidate_ACU;
+    storageMode?: 'native' | 'sqlite';
+    sqlReadContext?: SqlTemplateReadContext_ACU | null;
+    /** 异步读取结束后复核回合身份，拒绝迟到请求的模板写回。 */
+    assertCurrent?: () => void;
+  }
+
+  export async function handleChatCompletionReady_ACU(data: any, requestContext?: ChatCompletionPromptContext_ACU) {
+    const boundContext = requestContext ?? getZeroLayerPromptContext_ACU(data);
+    if (boundContext) {
+      boundContext.assertCurrent?.();
+      return runZeroLayerTemplatePass_ACU(data, sqlReadContext => processChatCompletionReady_ACU(data,
+        { ...boundContext, sqlReadContext }), boundContext);
+    }
+    return processChatCompletionReady_ACU(data);
+  }
+
+  async function processChatCompletionReady_ACU(data: any, requestContext?: ChatCompletionPromptContext_ACU) {
+    requestContext?.assertCurrent?.();
+    const history = requestContext ? structuredClone(requestContext.history) : undefined;
+    const tableSnapshot = requestContext
+      ? structuredClone(requestContext.allTablesJson ?? getTableDataForPrompt_ACU())
+      : undefined;
     logDebug_ACU('[提示词模板] handleChatCompletionReady_ACU 被调用');
     logDebug_ACU('[提示词模板] settings_ACU?.promptTemplateSettings:', settings_ACU?.promptTemplateSettings);
+    const plotCandidate = requestContext?.plotCandidate;
+    if (plotCandidate && Array.isArray(data?.messages)) {
+      if (plotCandidate.agentActive) {
+        filterNativeWorldbookGreenlightsFromMessages_ACU(data.messages, plotCandidate.filterEntries);
+        injectZeroLayerFinalPrompts_ACU(data.messages, plotCandidate.finalPrompts);
+      }
+      requestContext?.assertCurrent?.();
+    }
     if (!settings_ACU?.promptTemplateSettings?.enabled) {
       logDebug_ACU('[提示词模板] 功能未启用，跳过处理');
       return;
@@ -216,11 +254,12 @@ export {
       return;
     }
     const finalGenerationGreenlights = Array.isArray(pendingFinalGenerationGreenlights_ACU) ? [...pendingFinalGenerationGreenlights_ACU] : [];
-    let shouldHandleAgentWorldbookFinalPrompt = isWorldbookTakeoverActive_ACU() || finalGenerationGreenlights.length > 0;
-    if (!shouldHandleAgentWorldbookFinalPrompt) {
+    let shouldHandleAgentWorldbookFinalPrompt = !plotCandidate && (isWorldbookTakeoverActive_ACU() || finalGenerationGreenlights.length > 0);
+    if (!plotCandidate && !shouldHandleAgentWorldbookFinalPrompt) {
       // 页面刷新后内存快照为空，接管可能仍在持久账本中活跃；水合一次后复判，
       // 否则冷启动首轮生成会跳过接管条目过滤。水合失败按未接管处理（内部已告警）。
       await ensurePlotAgentWorldbookSnapshotHydrated_ACU();
+      requestContext?.assertCurrent?.();
       shouldHandleAgentWorldbookFinalPrompt = isWorldbookTakeoverActive_ACU();
     }
     const startTime = Date.now();
@@ -230,6 +269,7 @@ export {
         const allAgentSkillWorldbookEntries = await getAgentControlledWorldbookEntriesForFinalPrompt_ACU(
           settings_ACU?.plotSettings || {},
         );
+        requestContext?.assertCurrent?.();
         const allowedFinalGreenlightKeySet = buildAgentWorldbookRefKeySet_ACU(finalGenerationGreenlights);
         const entriesToFilter = (Array.isArray(allAgentSkillWorldbookEntries) ? allAgentSkillWorldbookEntries : [])
           .filter(entry => !isAgentWorldbookEntryAllowed_ACU(entry, allowedFinalGreenlightKeySet));
@@ -238,15 +278,21 @@ export {
           logDebug_ACU('[提示词模板] 已过滤酒馆原生正文世界书绿灯片段，数量:', filteredNativeCount);
         }
       } catch (e) {
+        requestContext?.assertCurrent?.();
         // 过滤失败意味着未放行的接管条目可能残留在最终提示词里，方向与接管语义相反，必须用 error 级可见。
         logError_ACU('[提示词模板] 运行时 Agent 正文世界书绿灯过滤失败，未放行条目可能残留在本轮提示词中:', e);
       }
     }
-    const lastPlotContent = getPlotFromHistory_ACU();
+    requestContext?.assertCurrent?.();
+    const lastPlotContent = plotCandidate?.content
+      ?? (history === undefined ? getPlotFromHistory_ACU() : getPlotFromHistory_ACU({}, history));
     logDebug_ACU('[提示词模板] $6 最新一层推进数据:', lastPlotContent ? `长度=${lastPlotContent.length}` : '(空)');
     const context = {
-      seedContent: composeSeedMatchContent_ACU(getLatestUserMessageContent_ACU(), getLatestAIMessageContent_ACU()),
-      allTablesJson: getTableDataForPrompt_ACU(),
+      seedContent: composeSeedMatchContent_ACU(
+        history === undefined ? getLatestUserMessageContent_ACU() : getLatestUserMessageContent_ACU(history),
+        history === undefined ? getLatestAIMessageContent_ACU() : getLatestAIMessageContent_ACU(history),
+      ),
+      allTablesJson: tableSnapshot ?? getTableDataForPrompt_ACU(),
       plotContent: lastPlotContent
     };
     const processPromptTemplateContent_ACU = (content: any) => {
@@ -264,9 +310,10 @@ export {
       processedContent = replaceMaxVariables_ACU(processedContent);
       processedContent = replaceMinVariables_ACU(processedContent);
       // [P4] {[db...]}/{[sql...]} 值替换（SQLite 模式下，在 <if> 之前执行）
-      processedContent = replaceDbSqlVariables(processedContent);
-      processedContent = parseIfBlockRecursive_ACU(processedContent, context, 0);
-      return processedContent;
+      return withSqlTemplateReadContext_ACU(requestContext?.sqlReadContext, () => {
+        processedContent = replaceDbSqlVariables(processedContent);
+        return parseIfBlockRecursive_ACU(processedContent, { ...context, chatSnapshot: history }, 0);
+      });
     };
     let processedCount = 0;
     for (const message of data.messages) {

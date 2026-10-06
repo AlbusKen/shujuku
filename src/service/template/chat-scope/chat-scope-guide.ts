@@ -17,7 +17,7 @@ import { getTemplatePresetDisplayName_ACU, persistTemplateScopeSelectionState_AC
 import { formatPlotScopeUpdatedAt_ACU } from '../../../shared/utils';
 import { ensureExportConfigDefaults_ACU, ensureGlobalInjectionConfigDefaults_ACU } from '../../worldbook/injection-engine';
 import { readIsolatedTagData_ACU, readLegacyIndependentData_ACU, readLegacyStandardData_ACU, readLegacySummaryData_ACU, isLegacyMatchForIsolation_ACU } from '../../../data/repositories/chat-message-data-repo';
-import { normalizeChatScopedConfigSource_ACU, normalizeGuideData_ACU } from './chat-scope-base';
+import { normalizeChatScopedConfigSource_ACU, normalizeGuideData_ACU, assertReadableSheetSource_ACU, parseReadableSheetSource_ACU } from './chat-scope-base';
 import { normalizeSheetGuideRowIds_ACU } from './sheet-guide-row-id-normalizer';
 // 循环 import — 运行时安全
 import { normalizeTemplateScopeMode_ACU, normalizeTemplateScopeIsolationKey_ACU, sanitizeTemplateSnapshotForChat_ACU, getCurrentChatTemplateScopeState_ACU, setCurrentChatTemplateScopeState_ACU, buildChatTemplateScopeStateFromCurrent_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, normalizeChatTemplateScopeState_ACU } from './chat-scope-template';
@@ -126,25 +126,45 @@ export function shouldUseOpeningSeedRows_ACU(): boolean {
       return out;
   }
 
-  function getLegacyHeaderGuideDataForIsolationKey_ACU({ chat = getChatArray_ACU(), isolationKey = getCurrentIsolationKey_ACU() } = {}) {
+  function getLegacyHeaderGuideDataForIsolationKey_ACU({ chat = getChatArray_ACU(), isolationKey = getCurrentIsolationKey_ACU(), readOnly = false } = {}) {
       const normalizedKey = String(isolationKey ?? '');
       try {
           const first = getChatFirstLayerMessage_ACU(chat);
           const legacyRaw = first ? first[LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU] : null;
           const legacyObj = legacyRaw ? ((typeof legacyRaw === 'string') ? safeJsonParse_ACU(legacyRaw, null) : legacyRaw) : null;
+          if (readOnly && legacyRaw != null && (!legacyObj || typeof legacyObj !== 'object' || Array.isArray(legacyObj))) {
+              throw new Error('只读旧表头来源损坏，禁止建立桥接模板。');
+          }
           const legacyTags = legacyObj?.tags;
+          if (readOnly && legacyTags !== undefined
+              && (!legacyTags || typeof legacyTags !== 'object' || Array.isArray(legacyTags))) {
+              throw new Error('只读旧表头标签容器损坏，禁止回退默认模板。');
+          }
           const legacySlot = (legacyTags && typeof legacyTags === 'object') ? legacyTags[normalizedKey] : null;
           const legacyHeaders = Array.isArray(legacySlot?.headers) ? legacySlot.headers : null;
+          if (readOnly && legacySlot != null && (!legacyHeaders || Array.isArray(legacySlot)
+              || typeof legacySlot !== 'object')) {
+              throw new Error('只读旧表头槽位损坏，禁止以缺失模板替代。');
+          }
           if (!legacyHeaders || legacyHeaders.length === 0) return null;
 
           const orderedUids = legacyHeaders
               .map((h: any) => h?.uid)
               .filter((uid: any) => typeof uid === 'string' && uid.startsWith('sheet_'));
+          if (readOnly && (orderedUids.length !== legacyHeaders.length
+              || new Set(orderedUids).size !== orderedUids.length)) {
+              throw new Error('只读旧表头身份缺失或重复，禁止丢弃损坏映射。');
+          }
           if (orderedUids.length === 0) return null;
 
-          const templateObj = parseTableTemplateJson_ACU({ stripSeedRows: false });
+          const templateObj = readOnly
+              ? getGlobalTemplateSnapshotForCurrentProfile_ACU({ readOnly: true })?.templateObj
+              : parseTableTemplateJson_ACU({ stripSeedRows: false });
           const out: any = { mate: { type: 'chatSheets', version: CHAT_SHEET_GUIDE_VERSION_ACU } };
           orderedUids.forEach((uid: string, idx: number) => {
+              if (readOnly && !templateObj?.[uid]) {
+                  throw new Error('只读旧表头缺少对应模板结构，不能伪造桥接基线。');
+              }
               const base = (templateObj && templateObj[uid])
                   ? JSON.parse(JSON.stringify(templateObj[uid]))
                   : { uid, name: uid, content: [["row_id"]], sourceData: {}, updateConfig: {}, exportConfig: {} };
@@ -159,11 +179,12 @@ export function shouldUseOpeningSeedRows_ACU(): boolean {
           });
           return normalizeGuideData_ACU(out);
       } catch (e) {
+          if (readOnly) throw e;
           return null;
       }
   }
 
-  function getHistoricalTemplateGuideDataForIsolationKey_ACU({ chat = getChatArray_ACU(), isolationKey = getCurrentIsolationKey_ACU() } = {}) {
+  function getHistoricalTemplateGuideDataForIsolationKey_ACU({ chat = getChatArray_ACU(), isolationKey = getCurrentIsolationKey_ACU(), readOnly = false } = {}) {
       const normalizedKey = normalizeTemplateScopeIsolationKey_ACU(isolationKey);
       if (!Array.isArray(chat) || chat.length === 0) return null;
 
@@ -171,10 +192,15 @@ export function shouldUseOpeningSeedRows_ACU(): boolean {
       const encounteredKeys: string[] = [];
       const encounteredSet = new Set();
       const appendTables = (dataObj: Record<string, any> | null, { summaryOnly = null as boolean | null } = {}) => {
+          if (readOnly && dataObj != null && (typeof dataObj !== 'object' || Array.isArray(dataObj))) {
+              throw new Error('只读历史模板来源损坏，禁止忽略后继续桥接。');
+          }
           if (!dataObj || typeof dataObj !== 'object' || Array.isArray(dataObj)) return;
           Object.keys(dataObj).forEach(key => {
-              if (!key.startsWith('sheet_') || encounteredSet.has(key)) return;
+              if (!key.startsWith('sheet_')) return;
               const sheet = dataObj[key];
+              if (readOnly) assertReadableSheetSource_ACU({ [key]: sheet });
+              if (encounteredSet.has(key)) return;
               if (!sheet || typeof sheet !== 'object' || Array.isArray(sheet)) return;
               const isSummary = !!sheet.name && isSummaryOrOutlineTable_ACU(sheet.name);
               if (summaryOnly === true && !isSummary) return;
@@ -251,9 +277,9 @@ export function shouldUseOpeningSeedRows_ACU(): boolean {
       });
   }
 
-  export function migrateLegacyTemplateScopeForCurrentChat_ACU({ chat = getChatArray_ACU(), isolationKey = getCurrentIsolationKey_ACU() } = {}) {
+  export function migrateLegacyTemplateScopeForCurrentChat_ACU({ chat = getChatArray_ACU(), isolationKey = getCurrentIsolationKey_ACU(), readOnly = false } = {}) {
       const normalizedKey = normalizeTemplateScopeIsolationKey_ACU(isolationKey);
-      const existingScopeState = getCurrentChatTemplateScopeState_ACU({ chat, isolationKey: normalizedKey });
+      const existingScopeState = getCurrentChatTemplateScopeState_ACU({ chat, isolationKey: normalizedKey, readOnly });
       if (existingScopeState) return existingScopeState;
 
       const persistMigratedState = (guideData: Record<string, any> | null, { source = 'legacy_frozen', updatedAt = Date.now() } = {}) => {
@@ -267,19 +293,29 @@ export function shouldUseOpeningSeedRows_ACU(): boolean {
               guideData,
           });
           if (!templateState) return null;
+          if (readOnly) return templateState;
           return setCurrentChatTemplateScopeState_ACU(templateState, {
               isolationKey: normalizedKey,
               reason: `template_scope_${source}`,
           });
       };
 
-      const container = getChatSheetGuideContainer_ACU(chat);
+      const container = readOnly ? peekChatSheetGuideContainer_ACU(chat, { strict: true }) : getChatSheetGuideContainer_ACU(chat);
       const legacySlot = (container?.tags as Record<string, any> | undefined)?.[normalizedKey];
+      if (readOnly && container?.tags && Object.prototype.hasOwnProperty.call(container.tags, normalizedKey)
+          && (!legacySlot || typeof legacySlot !== 'object' || Array.isArray(legacySlot)
+              || legacySlot.templateScopeMode !== undefined
+                  && !['inherit_global', 'chat_override', 'preset_link'].includes(legacySlot.templateScopeMode))) {
+          throw new Error('只读旧 guide 槽位或作用域损坏，禁止回退其它模板。');
+      }
       const hasExplicitLegacyScopeMode = typeof legacySlot?.templateScopeMode === 'string' && legacySlot.templateScopeMode.trim() !== '';
       const legacySlotMode = hasExplicitLegacyScopeMode
           ? normalizeTemplateScopeMode_ACU(legacySlot.templateScopeMode)
           : 'chat_override';
-      const legacyGuideData = normalizeGuideData_ACU(legacySlot?.data);
+      const legacyGuideSource = readOnly && legacySlotMode === 'chat_override' && legacySlot !== undefined
+          ? parseReadableSheetSource_ACU(legacySlot.data)
+          : legacySlot?.data;
+      const legacyGuideData = normalizeGuideData_ACU(legacyGuideSource);
       if (legacySlotMode === 'chat_override' && legacyGuideData && Object.keys(legacyGuideData).some(k => k.startsWith('sheet_'))) {
           return persistMigratedState(legacyGuideData, {
               source: 'legacy_frozen',
@@ -287,7 +323,7 @@ export function shouldUseOpeningSeedRows_ACU(): boolean {
           });
       }
 
-      const historicalGuideData = getHistoricalTemplateGuideDataForIsolationKey_ACU({ chat, isolationKey: normalizedKey });
+      const historicalGuideData = getHistoricalTemplateGuideDataForIsolationKey_ACU({ chat, isolationKey: normalizedKey, readOnly });
       if (historicalGuideData && Object.keys(historicalGuideData).some(k => k.startsWith('sheet_'))) {
           return persistMigratedState(historicalGuideData, {
               source: 'legacy_history_frozen',
@@ -295,7 +331,7 @@ export function shouldUseOpeningSeedRows_ACU(): boolean {
           });
       }
 
-      const legacyHeaderGuideData = getLegacyHeaderGuideDataForIsolationKey_ACU({ chat, isolationKey: normalizedKey });
+      const legacyHeaderGuideData = getLegacyHeaderGuideDataForIsolationKey_ACU({ chat, isolationKey: normalizedKey, readOnly });
       if (legacyHeaderGuideData && Object.keys(legacyHeaderGuideData).some(k => k.startsWith('sheet_'))) {
           return persistMigratedState(legacyHeaderGuideData, {
               source: 'legacy_header_frozen',
@@ -339,18 +375,21 @@ export function shouldUseOpeningSeedRows_ACU(): boolean {
   // guide 仅在无 checkpoint 时充当结构源（buildBatchMergeBase_ACU 的分支顺序，
   // update-orchestrator.ts:747-804）。让 getter 读 guide 容器会使未显式覆盖模板的
   // 聊天被隐式写入悄悄改变视图，反而破坏"跟随全局模板"的语义。
-  export function getChatSheetGuideDataForIsolationKey_ACU(isolationKey: string) {
-      const chat = getChatArray_ACU();
+  export function getChatSheetGuideDataForIsolationKey_ACU(isolationKey: string,
+      snapshot?: { chat: any[] }) {
+      const chat = snapshot ? snapshot.chat : getChatArray_ACU();
       const normalizedKey = String(isolationKey ?? '');
-      const scopedTemplateState = getCurrentChatTemplateScopeState_ACU({ chat, isolationKey: normalizedKey })
-          || migrateLegacyTemplateScopeForCurrentChat_ACU({ chat, isolationKey: normalizedKey });
+      const scopedTemplateState = getCurrentChatTemplateScopeState_ACU({ chat, isolationKey: normalizedKey, readOnly: !!snapshot })
+          || migrateLegacyTemplateScopeForCurrentChat_ACU({ chat, isolationKey: normalizedKey, readOnly: !!snapshot });
       const scopedGuideData = normalizeGuideRowIdentitiesForUse_ACU(scopedTemplateState?.guideData);
       if (scopedGuideData && Object.keys(scopedGuideData).some(k => k.startsWith('sheet_'))) {
           return scopedGuideData;
       }
 
       const buildGuideDataFromTemplateSource_ACU = (templateSource: any) => {
-          const templateSnapshot = sanitizeTemplateSnapshotForChat_ACU(templateSource);
+          const templateSnapshot = sanitizeTemplateSnapshotForChat_ACU(snapshot
+              ? parseReadableSheetSource_ACU(templateSource)
+              : templateSource);
           const guideData = buildChatSheetGuideDataFromTemplateObj_ACU(templateSnapshot?.templateObj, { stripSeedRows: false });
           const normalizedGuideData = normalizeGuideRowIdentitiesForUse_ACU(guideData);
           return (normalizedGuideData && Object.keys(normalizedGuideData).some(k => k.startsWith('sheet_'))) ? normalizedGuideData : null;
@@ -374,7 +413,7 @@ export function shouldUseOpeningSeedRows_ACU(): boolean {
           }
       }
 
-      const globalSnapshot = getGlobalTemplateSnapshotForCurrentProfile_ACU();
+      const globalSnapshot = getGlobalTemplateSnapshotForCurrentProfile_ACU({ readOnly: !!snapshot });
       const globalGuideData = buildChatSheetGuideDataFromTemplateObj_ACU(globalSnapshot?.templateObj, { stripSeedRows: false });
       const normalizedGlobalGuideData = normalizeGuideRowIdentitiesForUse_ACU(globalGuideData);
       if (normalizedGlobalGuideData && Object.keys(normalizedGlobalGuideData).some(k => k.startsWith('sheet_'))) {

@@ -35,7 +35,7 @@
           :field-snapshot="runtime.snapshot.value.fieldSnapshot"
           :user-requirements="runtime.snapshot.value.userRequirements"
           :session="runtime.entries.value"
-          :ledger="runtime.snapshot.value.envelope?.ledger ?? null"
+          :ledger="'publishedLedger' in runtime.snapshot.value ? runtime.snapshot.value.publishedLedger ?? null : runtime.snapshot.value.envelope?.ledger ?? null"
           :anchor="runtime.anchor.value"
           :projection-preview="runtime.snapshot.value.projectionPreview"
           :busy="runtime.busy.value"

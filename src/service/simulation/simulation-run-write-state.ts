@@ -2,6 +2,7 @@ import { WORLD_SIMULATION_RUN_WRITE_FIELD_ACU, type WorldChronicleArchiveSnapsho
 import { WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldSimulationLedger_ACU, type WorldSimulationLedgerFieldSnapshot_ACU, type WorldSimulationRunIdentity_ACU } from './model';
 import { buildWorldSimulationBucketKey_ACU, readWorldSimulationBucketEntry_ACU } from './simulation-store';
 import { sha256HexSync_ACU } from '../../shared/sha256-sync';
+import { assertWorldSimulationHostRun_ACU, requireWorldSimulationHostAnchor_ACU } from './simulation-identity';
 
 export interface WorldSimulationRunWriteView_ACU {
   ledger: WorldSimulationLedger_ACU;
@@ -30,7 +31,7 @@ function invalidProof_ACU(path: string): never {
     'WORLD_SIMULATION_SNAPSHOT_INVALID', 'load', `${path} 运行写入证明损坏`, false, { path }));
 }
 
-function validateProof_ACU(raw: unknown): WorldSimulationRunWriteProof_ACU {
+export function validateWorldSimulationRunWriteProof_ACU(raw: unknown): WorldSimulationRunWriteProof_ACU {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) invalidProof_ACU(WORLD_SIMULATION_RUN_WRITE_FIELD_ACU);
   const value = raw as Record<string, unknown>;
   const keys = ['schemaVersion', 'runId', 'taskId', 'stageId', 'stageRevision', 'baseLedgerRevision', 'confirmedWrites', 'ledgerRevision', 'fingerprint', 'stateDigest', 'evidenceRefs', 'written'];
@@ -49,11 +50,12 @@ function validateProof_ACU(raw: unknown): WorldSimulationRunWriteProof_ACU {
 }
 
 export function readWorldSimulationRunWriteProof_ACU(anchor: WorldSimulationAnchorIdentity_ACU, chat: any[]): WorldSimulationRunWriteProof_ACU | null {
-  return readWorldSimulationBucketEntry_ACU(WORLD_SIMULATION_RUN_WRITE_FIELD_ACU, anchor, validateProof_ACU, chat);
+  return readWorldSimulationBucketEntry_ACU(WORLD_SIMULATION_RUN_WRITE_FIELD_ACU, anchor, validateWorldSimulationRunWriteProof_ACU, chat);
 }
 
 /** 只写入影子聊天；持久化与失败补偿由逐栏提交适配器共同管理。 */
 export function stageWorldSimulationRunWriteProof_ACU(chat: unknown[], anchor: WorldSimulationAnchorIdentity_ACU, proof: WorldSimulationRunWriteProof_ACU, updatedAt: number): void {
+  requireWorldSimulationHostAnchor_ACU(anchor);
   const message = chat[anchor.messageIndex] as Record<string, unknown>;
   const previous = message[WORLD_SIMULATION_RUN_WRITE_FIELD_ACU];
   const entries = previous && typeof previous === 'object' && !Array.isArray(previous)
@@ -209,7 +211,17 @@ export function hasPartialWorldSimulationRunWrites_ACU(view: WorldSimulationRunW
 /** 旧运行无证明时仍遵守原始 revision；其他运行的证明不可借用。 */
 export function restoreWorldSimulationRunWrites_ACU(read: () => WorldSimulationRunWriteView_ACU,
   identity: WorldSimulationRunIdentity_ACU, anchor: WorldSimulationAnchorIdentity_ACU, chat: any[]): WorldSimulationRunWriteState_ACU {
+  assertWorldSimulationHostRun_ACU(identity);
+  requireWorldSimulationHostAnchor_ACU(anchor);
   const stored = readWorldSimulationRunWriteProof_ACU(anchor, chat);
+  return restoreWorldSimulationRunWritesFromProof_ACU(read, identity, stored);
+}
+
+/** 载体无关的恢复算法；证明必须来自调用者的权威存储，不能借用其他运行。 */
+export function restoreWorldSimulationRunWritesFromProof_ACU(
+  read: () => WorldSimulationRunWriteView_ACU, identity: WorldSimulationRunIdentity_ACU,
+  stored: WorldSimulationRunWriteProof_ACU | null,
+): WorldSimulationRunWriteState_ACU {
   const proof = stored?.runId === identity.runId && stored.taskId === identity.taskId ? stored : undefined;
   if (proof && (proof.stageId !== identity.stageId || proof.stageRevision !== identity.stageRevision
     || proof.baseLedgerRevision !== identity.baseLedgerRevision)) throw new Error('WORLD_SIMULATION_LEDGER_STALE');

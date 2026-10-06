@@ -4,6 +4,7 @@ import { sha256HexSync_ACU } from '../../shared/sha256-sync';
 import type { WorldSimulationRunIdentity_ACU } from './model';
 import { resolveWorldSimulationAnchor_ACU } from './simulation-store';
 import type { WorldSimulationAnchorIdentity_ACU } from './agent/agent-model';
+import { assertWorldSimulationHostRun_ACU } from './simulation-identity';
 
 export type WorldSimulationTriggerResolution_ACU =
   | { kind: 'resolved'; anchor: WorldSimulationAnchorIdentity_ACU }
@@ -109,6 +110,7 @@ export function restoreWorldSimulationAnchor_ACU(
   identity: WorldSimulationRunIdentity_ACU,
   chat: any[],
 ): WorldSimulationAnchorIdentity_ACU {
+  assertWorldSimulationHostRun_ACU(identity);
   for (let index = 0; index < chat.length; index += 1) {
     if (!isAiMessage_ACU(chat[index])) continue;
     const anchor = resolveWorldSimulationAnchor_ACU(index, chat);

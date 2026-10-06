@@ -18,6 +18,44 @@ export function normalizeChatScopedConfigSource_ACU(source: any, fallback = 'inh
     return normalized || fallback;
 }
 
+/** 只读桥接先检查源结构；仅允许缺失的旧版可选配置在内存中补齐。 */
+export function assertReadableSheetSource_ACU(source: unknown): asserts source is Record<string, any> {
+    const isRecord = (value: unknown): value is Record<string, any> =>
+        !!value && typeof value === 'object' && !Array.isArray(value);
+    const fail = (): never => { throw new Error('只读表格模板或 guide 来源损坏，禁止以默认值建立桥接。'); };
+    if (!isRecord(source)) fail();
+    const data = source as Record<string, any>;
+    if (data.mate !== undefined && !isRecord(data.mate)) fail();
+    const keys = Object.keys(data).filter(key => key.startsWith('sheet_'));
+    if (!keys.length) fail();
+    const validRows = (rows: unknown): rows is unknown[][] => Array.isArray(rows)
+        && rows.every(row => Array.isArray(row)
+            && row.every(cell => cell === null || typeof cell === 'string'
+                || typeof cell === 'boolean' || typeof cell === 'number' && Number.isFinite(cell)));
+    for (const key of keys) {
+        const sheet = data[key];
+        if (!isRecord(sheet) || typeof sheet.name !== 'string' || !sheet.name.trim()
+            || !validRows(sheet.content) || !sheet.content.length || !sheet.content[0].length) fail();
+        if (sheet.uid !== undefined && (typeof sheet.uid !== 'string' || !sheet.uid.trim())) fail();
+        for (const field of ['sourceData', 'updateConfig', 'exportConfig']) {
+            if (sheet[field] !== undefined && !isRecord(sheet[field])) fail();
+        }
+        for (const field of [CHAT_SHEET_GUIDE_SEED_ROWS_FIELD_ACU, '_seedRows']) {
+            if (sheet[field] !== undefined && !validRows(sheet[field])) fail();
+        }
+        if (sheet[TABLE_ORDER_FIELD_ACU] !== undefined && !Number.isFinite(sheet[TABLE_ORDER_FIELD_ACU])) fail();
+    }
+}
+
+export function parseReadableSheetSource_ACU(source: unknown): Record<string, any> {
+    let parsed: unknown;
+    try { parsed = typeof source === 'string' ? JSON.parse(source) : source; }
+    catch { throw new Error('只读表格模板来源无法解析，禁止回退默认模板。'); }
+    assertReadableSheetSource_ACU(parsed);
+    // 下游旧规范化器会修改 mate 和顺序号；只读路径只向它提供副本。
+    return JSON.parse(JSON.stringify(parsed));
+}
+
 /**
  * 规范化 sheet guide 数据对象——只保留表头行、sourceData、updateConfig、exportConfig、seedRows
  * 被 B、D、E 三组广泛使用，提取到 base 层避免循环依赖

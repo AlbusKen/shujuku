@@ -129,7 +129,7 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
   // “当前用户层”，策略1 下由 _qrf_plot_pending_hash 提供，策略2 / hook 下
   // 当前层尚未入 chat，因此无需锚点。
 
-  function findPlotHistoryAnchorIndex_ACU(chat: any[], options: any = {}) {
+  function findPlotHistoryAnchorIndex_ACU(chat: readonly any[], options: any = {}) {
     if (!Array.isArray(chat) || chat.length === 0) return -1;
     const beforeUserInputHash = String(options?.beforeUserInputHash || '').trim();
     const beforeUserInputText = String(options?.beforeUserInputText || '');
@@ -153,7 +153,7 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
     return -1;
   }
 
-  function getPlotHistorySearchUpperBound_ACU(chat: any[], options: any = {}) {
+  function getPlotHistorySearchUpperBound_ACU(chat: readonly any[], options: any = {}) {
     if (!Array.isArray(chat) || chat.length === 0) return -1;
 
     if (Number.isFinite(options?.beforeIndex)) {
@@ -179,15 +179,16 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
     return lastIndex;
   }
 
-  export function getPlotFromHistory_ACU(options: any = {}) {
-    const chat = getChatArray_ACU();
+  export function getPlotFromHistory_ACU(options: any = {}, chatSnapshot?: readonly Record<string, unknown>[]) {
+    const chat = chatSnapshot ?? getChatArray_ACU();
     logDebug_ACU('[剧情推进] [Plot] getPlotFromHistory_ACU 被调用，聊天记录长度:', chat?.length || 0, '，检索选项:', options || {});
     if (!chat || chat.length === 0) {
       logDebug_ACU('[剧情推进] [Plot] 聊天记录为空');
       return '';
     }
 
-    const currentPresetName = getCurrentRuntimePlotPresetName_ACU({ fallbackToGlobal: true });
+    const currentPresetName = typeof options?.presetName === 'string'
+      ? options.presetName : getCurrentRuntimePlotPresetName_ACU({ fallbackToGlobal: true });
     logDebug_ACU('[剧情推进] [Plot] 当前聊天实际预设名称:', currentPresetName || '(默认预设)');
 
     const upperBound = getPlotHistorySearchUpperBound_ACU(chat, options);

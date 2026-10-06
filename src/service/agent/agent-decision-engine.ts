@@ -263,8 +263,9 @@ async function collectWorldbookSummariesFromSnapshot_ACU(
   contextSettings: ReturnType<typeof normalizeAgentContextSettings_ACU>,
   readContext?: StrictLorebookReadContext_ACU,
   rankingQuery: AgentWorldbookRankingQuery_ACU = { userInput: '', recentContext: '', taskContext: '' },
+  readOnly = false,
 ): Promise<{ summaries: AgentWorldbookSummary_ACU[]; allowedKeys: Set<string> }> {
-  const snapshot = await refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU(readContext);
+  const snapshot = await refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU(readContext, { readOnly });
   const snapshotCandidates: AgentWorldbookDecisionCandidate_ACU[] = [];
 
   for (const [bookName, snapshotEntries] of Object.entries(snapshot.books || {})) {
@@ -284,7 +285,7 @@ async function collectWorldbookSummariesFromSnapshot_ACU(
     ? snapshotCandidates
     : await (async () => {
       const fallbackCandidates: AgentWorldbookDecisionCandidate_ACU[] = [];
-      for (const bookName of await resolveAgentWorldbookScopeBookNames_ACU()) {
+      for (const bookName of await resolveAgentWorldbookScopeBookNames_ACU(undefined, readContext)) {
         const entries = await getAgentRuntimeLorebookEntries_ACU(bookName, readContext);
         for (const entry of entries) {
           if (!isWorldbookEntrySkillifyCandidate_ACU(entry)) continue;
@@ -617,12 +618,14 @@ function buildAgentDecisionPrompt_ACU(params: {
   const messages = renderAgentPromptSegments_ACU(
     control.agentDecisionPromptSegments || getDefaultAgentDecisionPromptSegments_ACU(),
     placeholders,
-    { enableSqlRender: true, promptKind: 'decision' },
+    { enableSqlRender: true, promptKind: 'decision', sqlReadContext: params.sharedContext.requestContext?.sqlReadContext },
   );
 
   return messages.length > 0
     ? messages
-    : renderAgentPromptSegments_ACU(getDefaultAgentDecisionPromptSegments_ACU(), placeholders, { enableSqlRender: true, promptKind: 'decision' });
+    : renderAgentPromptSegments_ACU(getDefaultAgentDecisionPromptSegments_ACU(), placeholders, {
+      enableSqlRender: true, promptKind: 'decision', sqlReadContext: params.sharedContext.requestContext?.sqlReadContext,
+    });
 }
 
 function normalizePlotGreenlights_ACU(
@@ -659,6 +662,8 @@ async function runAgentDecisionShard_ACU(params: {
   presetName: string;
   maxAiAttempts: number;
 }): Promise<AgentDecisionShardResult_ACU> {
+  const requestContext = params.sharedContext.requestContext as import('../runtime/plot-runtime/plot-request-context').PlotRequestContext_ACU | undefined;
+  requestContext?.assertCurrent();
   const messages = buildAgentDecisionPrompt_ACU({
     plotSettings: params.plotSettings,
     userMessage: params.userMessage,
@@ -675,8 +680,13 @@ async function runAgentDecisionShard_ACU(params: {
   let failureReason = 'empty_agent_response';
   for (let attempt = 1; attempt <= params.maxAiAttempts; attempt++) {
     try {
-      rawResponse = await callAIWithPreset_ACU(messages, params.presetName);
+      requestContext?.assertCurrent();
+      rawResponse = requestContext
+        ? await requestContext.callApi(messages, params.presetName)
+        : await callAIWithPreset_ACU(messages, params.presetName);
+      requestContext?.assertCurrent();
     } catch (error: any) {
+      requestContext?.assertCurrent();
       failureReason = 'agent_request_error';
       const retryable = isRetryableAiRequestError_ACU(error);
       logWarn_ACU(`[Agent决策] 分片 ${params.shard.index + 1}/${params.shardCount} 第 ${attempt}/${params.maxAiAttempts} 次请求失败；${retryable ? '允许重试' : '不可重试'}；候选 ${params.shard.summaries.length} 条：${String(error?.message || 'unknown')}`);
@@ -703,7 +713,9 @@ export async function runAgentDecisionForPlot_ACU(params: {
   requireTaskPlan?: boolean;
 }): Promise<AgentDecisionResult_ACU> {
   const originalTasks = Array.isArray(params.enabledTasks) ? params.enabledTasks : [];
+  const requestContext = params.sharedContext.requestContext as import('../runtime/plot-runtime/plot-request-context').PlotRequestContext_ACU | undefined;
   try {
+    requestContext?.assertCurrent();
     const control = resolveResolvedAgentWorldbookControl_ACU(params);
     if (!isAgentModeEnabled_ACU(control)) return emptyDecision_ACU(originalTasks, 'agent_mode_disabled');
 
@@ -723,7 +735,8 @@ export async function runAgentDecisionForPlot_ACU(params: {
       userInput: params.userMessage,
       recentContext,
       taskContext,
-    });
+    }, requestContext !== undefined);
+    requestContext?.assertCurrent();
     const shards = createAgentDecisionShards_ACU(
       summaries,
       contextSettings.decisionWorldbookCandidateLimit,
@@ -746,6 +759,11 @@ export async function runAgentDecisionForPlot_ACU(params: {
       presetName,
       maxAiAttempts,
     })));
+    requestContext?.assertCurrent();
+    if (requestContext) {
+      const rejected = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+      if (rejected) throw rejected.reason;
+    }
     const successfulShards = settled
       .filter((result): result is PromiseFulfilledResult<AgentDecisionShardResult_ACU> => result.status === 'fulfilled')
       .map(result => result.value)
@@ -763,7 +781,10 @@ export async function runAgentDecisionForPlot_ACU(params: {
     const normalizedPlan = params.requireTaskPlan === false || !authority
       ? { plan: [] as AgentTaskPlanItem_ACU[], effectiveTasks: originalTasks }
       : normalizeTaskPlan_ACU(authority.parsed.taskPlan, agentDecidableTasks, userOrderedTasks);
-    if (authority && params.requireTaskPlan !== false && normalizedPlan.reason) return emptyDecision_ACU(originalTasks, normalizedPlan.reason);
+    if (authority && params.requireTaskPlan !== false && normalizedPlan.reason) {
+      if (requestContext) throw new Error(normalizedPlan.reason);
+      return emptyDecision_ACU(originalTasks, normalizedPlan.reason);
+    }
     const effectivePlan = normalizedPlan.reason
       ? { plan: [] as AgentTaskPlanItem_ACU[], effectiveTasks: originalTasks }
       : normalizedPlan;
@@ -816,6 +837,7 @@ export async function runAgentDecisionForPlot_ACU(params: {
       effectiveTasks: effectivePlan.effectiveTasks,
     };
   } catch (error) {
+    if (requestContext) throw error;
     logWarn_ACU('[Agent决策] 决策失败，回退原剧情推进逻辑:', error);
     return emptyDecision_ACU(originalTasks, 'agent_decision_error');
   }

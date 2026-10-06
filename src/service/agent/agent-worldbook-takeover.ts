@@ -549,18 +549,25 @@ async function refreshPlotAgentWorldbookSnapshotWithStale_ACU(
   return { snapshot, staleBookNames };
 }
 
-export async function refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU(readContext?: StrictLorebookReadContext_ACU): Promise<AgentWorldbookControlSnapshot_ACU> {
+export async function refreshPlotAgentWorldbookSnapshotFromWorldbooks_ACU(readContext?: StrictLorebookReadContext_ACU, options: { readOnly?: boolean } = {}): Promise<AgentWorldbookControlSnapshot_ACU> {
   const initialRevision = getAgentWorldbookSnapshotRevision_ACU();
   const resolvedBookNames = await resolveTakeoverBookNames_ACU(readContext);
   const selectionSignature = buildWorldbookSelectionSignature_ACU(resolvedBookNames);
+  if (options.readOnly) {
+    return readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(resolvedBookNames, selectionSignature, { readContext, readOnly: true });
+  }
   return readAndMaybeCachePlotAgentWorldbookSnapshot_ACU(resolvedBookNames, selectionSignature, initialRevision, readContext);
 }
 
 /** 为普通剧情与填表读取解析持久化接管前视图；expectedSignature 独立于返回快照，防止快照自签名。 */
-export async function resolvePreTakeoverWorldbookSnapshot_ACU(readContext?: StrictLorebookReadContext_ACU): Promise<PreTakeoverWorldbookSnapshotResolution_ACU> {
+export async function resolvePreTakeoverWorldbookSnapshot_ACU(readContext?: StrictLorebookReadContext_ACU, options: { readOnly?: boolean } = {}): Promise<PreTakeoverWorldbookSnapshotResolution_ACU> {
   const initialRevision = getAgentWorldbookSnapshotRevision_ACU();
   const resolvedBookNames = await resolveTakeoverBookNames_ACU(readContext);
   const expectedSignature = buildWorldbookSelectionSignature_ACU(resolvedBookNames);
+  if (options.readOnly) {
+    const snapshot = await readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(resolvedBookNames, expectedSignature, { readContext, readOnly: true });
+    return { snapshot, expectedSignature };
+  }
   const existingPromise = preTakeoverSnapshotResolutionPromisesBySignature_ACU.get(expectedSignature);
   if (existingPromise) return existingPromise;
 
@@ -615,7 +622,7 @@ async function backfillMissingTakeoverMeta_ACU(snapshot: AgentWorldbookControlSn
 async function readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(
   resolvedBookNames: string[],
   selectionSignature: string,
-  options: { backfillMissingMeta?: boolean; readContext?: StrictLorebookReadContext_ACU; onStaleBookNames?: (staleBookNames: string[]) => void } = {},
+  options: { backfillMissingMeta?: boolean; readOnly?: boolean; readContext?: StrictLorebookReadContext_ACU; onStaleBookNames?: (staleBookNames: string[]) => void } = {},
 ): Promise<AgentWorldbookControlSnapshot_ACU> {
   const state = await readAgentWorldbookStateFromWorldbooks_ACU(options.readContext);
   const rawActiveStateSnapshot = state.snapshot.active === true && state.snapshot.selectionSignature === selectionSignature
@@ -684,7 +691,7 @@ async function readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(
       createdAt: Math.max(activeStateSnapshot?.createdAt || 0, createdAt || 0) || Date.now(),
       books: mergedBooks,
     };
-    if (!activeStateSnapshot || hasSnapshotEntriesAbsentFrom_ACU(activeStateSnapshot.books, snapshotBooks)) {
+    if (!options.readOnly && (!activeStateSnapshot || hasSnapshotEntriesAbsentFrom_ACU(activeStateSnapshot.books, snapshotBooks))) {
       try {
         const writeResult = await writeAgentWorldbookStateToWorldbook_ACU({ snapshot: mergedSnapshot });
         if (!writeResult.updated) {
@@ -696,14 +703,14 @@ async function readPlotAgentWorldbookSnapshotFromStateOrLegacy_ACU(
         return activeStateSnapshot || buildInactiveSnapshot_ACU(selectionSignature);
       }
     }
-    if (options.backfillMissingMeta !== false) {
+    if (!options.readOnly && options.backfillMissingMeta !== false) {
       await backfillMissingTakeoverMeta_ACU(mergedSnapshot);
     }
     return mergedSnapshot;
   }
 
   if (activeStateSnapshot) {
-    if (options.backfillMissingMeta !== false) {
+    if (!options.readOnly && options.backfillMissingMeta !== false) {
       await backfillMissingTakeoverMeta_ACU(activeStateSnapshot);
     }
     return activeStateSnapshot;

@@ -6,6 +6,7 @@ import type {
   WorldSimulationMaterialCompletionState_ACU,
   WorldSimulationPendingFix_ACU,
   WorldSimulationPendingFixSource_ACU,
+  WorldSimulationLogicalRef_ACU,
 } from '../model';
 
 export const WORLD_SIMULATION_STATE_FIELD_ACU = '_qrf_world_simulation_state';
@@ -20,6 +21,12 @@ export const WORLD_SIMULATION_USER_REQUIREMENTS_SCHEMA_VERSION_ACU = 1 as const;
 export const WORLD_SIMULATION_CHRONICLE_ARCHIVE_SCHEMA_VERSION_ACU = 1 as const;
 
 export interface WorldSimulationAnchorIdentity_ACU { chatIdentity: string; messageIndex: number; messageId: string | number; messageKey: string; swipeId: string; contentDigest: string; }
+/** 逻辑锚点只持有真实楼层引用，不向宿主存储暴露坐标。 */
+export interface WorldSimulationLogicalAnchorIdentity_ACU {
+  kind: 'logical'; chatIdentity: string; logicalRef: WorldSimulationLogicalRef_ACU; contentDigest: string;
+}
+export type WorldSimulationTargetAnchor_ACU = WorldSimulationAnchorIdentity_ACU | WorldSimulationLogicalAnchorIdentity_ACU;
+
 export interface WorldSimulationBucketEntry_ACU<T> { anchor: WorldSimulationAnchorIdentity_ACU; value: T; updatedAt: number; }
 export const WORLD_SIMULATION_RUN_STATE_FIELD_ACU = '_qrf_world_simulation_agent_run';
 export const WORLD_SIMULATION_RUN_WRITE_FIELD_ACU = '_qrf_world_simulation_run_writes';

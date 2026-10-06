@@ -18,6 +18,47 @@ import { isSqliteMode } from '../../table/storage-mode';
 import { logDebug_ACU, logWarn_ACU, logError_ACU } from '../../../shared/utils';
 import { resolveReadQuerySql_ACU } from '../../../shared/sql-read-resolver';
 import { resolveCurrentRuntimeReadSql_ACU } from '../read-query-resolver';
+import type { ITableStorageProvider } from '../../../shared/table-storage-provider';
+import type { TableDataObject_ACU } from '../../../shared/models/table-data';
+import type { NameMapper } from './name-mapper';
+
+/** 请求内只读查询能力；不发布 provider、mapper 或全局表格数据。 */
+export interface SqlTemplateReadContext_ACU {
+  provider: Pick<ITableStorageProvider, 'isReady' | 'executeQuery'>;
+  mapper: NameMapper;
+  tableData: TableDataObject_ACU;
+}
+let scopedReadContext_ACU: SqlTemplateReadContext_ACU | null | undefined;
+
+/** 仅同步解析；undefined 沿用现有作用域，null 明确禁用 SQL，不回退全局 provider。 */
+export function withSqlTemplateReadContext_ACU<T>(context: SqlTemplateReadContext_ACU | null | undefined, run: () => T): T {
+  if (context === undefined) return run();
+  if (context && !context.provider.isReady()) throw new Error('isolated_sql_runtime_not_ready');
+  const previousContext = scopedReadContext_ACU;
+  const previousVars = _dbSqlVars;
+  scopedReadContext_ACU = context;
+  _dbSqlVars = {};
+  try {
+    const result = run();
+    if (result && typeof (result as any).then === 'function') {
+      throw new Error('sql_template_scope_must_be_synchronous');
+    }
+    return result;
+  } finally {
+    scopedReadContext_ACU = previousContext;
+    _dbSqlVars = previousVars;
+  }
+}
+
+function queryMapper_ACU() {
+  if (scopedReadContext_ACU === null) throw new Error('isolated_sql_disabled');
+  return scopedReadContext_ACU?.mapper ?? getNameMapper();
+}
+function queryProvider_ACU() {
+  if (scopedReadContext_ACU === null) throw new Error('isolated_sql_disabled');
+  return scopedReadContext_ACU?.provider ?? getStorageProvider();
+}
+function querySqliteMode_ACU() { return scopedReadContext_ACU === null ? false : scopedReadContext_ACU !== undefined || isSqliteMode(); }
 
 // ═══════════════════════════════════════════════════════════════
 // 变量系统 — 存储 {[db...as X]} / {[sql...as X]} 的结果
@@ -28,8 +69,9 @@ let _dbSqlVars: Record<string, string | number> = {};
 let lastBlockedQueryKey_ACU = '';
 
 function resolveTemplateReadSql_ACU(sql: string): string {
-  const mapper = getNameMapper();
-  return resolveReadQuerySql_ACU(sql, currentJsonTableData_ACU as any, mapper.translateSql.bind(mapper)).sql;
+  const mapper = queryMapper_ACU();
+  return resolveReadQuerySql_ACU(sql, scopedReadContext_ACU?.tableData ?? currentJsonTableData_ACU,
+    mapper.translateSql.bind(mapper)).sql;
 }
 
 /**
@@ -37,6 +79,8 @@ function resolveTemplateReadSql_ACU(sql: string): string {
  * 未就绪时 fail-closed，避免中文展示名被空 NameMapper 原样下发给 SQLite。
  */
 function isTemplateQueryRuntimeReady_ACU(source: string): boolean {
+  if (scopedReadContext_ACU === null) return false;
+  if (scopedReadContext_ACU) return scopedReadContext_ACU.provider.isReady();
   if (!isStorageRuntimeReadyForSyncRead_ACU()) {
     const health = getStorageRuntimeHealth_ACU();
     const key = `${health.loadToken}:${health.status}:${source}`;
@@ -114,7 +158,7 @@ export class TableQueryBuilder {
 
   constructor(tableName: string, options: TableQueryBuilderOptions_ACU = {}) {
     // 通过 NameMapper 解析表名（中文→英文）
-    const mapper = getNameMapper();
+    const mapper = queryMapper_ACU();
     this.tableName = mapper.resolveTableName(tableName);
     this.options = options;
   }
@@ -126,7 +170,7 @@ export class TableQueryBuilder {
    *   where("列名", ">", 数值)   → 列名 > 数值
    */
   where(column: string, valueOrOperator: any, value?: any): TableQueryBuilder {
-    const mapper = getNameMapper();
+    const mapper = queryMapper_ACU();
     const resolvedColumn = mapper.resolveColumnName(this.tableName, column);
 
     if (value !== undefined) {
@@ -160,7 +204,7 @@ export class TableQueryBuilder {
    *   whereIn("列名", [值1, 值2, 值3])  → 列名 IN ('值1', '值2', '值3')
    */
   whereIn(column: string, values: any[]): TableQueryBuilder {
-    const mapper = getNameMapper();
+    const mapper = queryMapper_ACU();
     const resolvedColumn = mapper.resolveColumnName(this.tableName, column);
     if (!values || values.length === 0) {
       // 空数组：永假条件
@@ -178,7 +222,7 @@ export class TableQueryBuilder {
    *   whereBetween("列名", 10, 50)  → 列名 BETWEEN 10 AND 50
    */
   whereBetween(column: string, min: any, max: any): TableQueryBuilder {
-    const mapper = getNameMapper();
+    const mapper = queryMapper_ACU();
     const resolvedColumn = mapper.resolveColumnName(this.tableName, column);
     // min > max 时自动交换
     const actualMin = (typeof min === 'number' && typeof max === 'number' && min > max) ? max : min;
@@ -191,7 +235,7 @@ export class TableQueryBuilder {
    * 分组
    */
   groupBy(column: string): TableQueryBuilder {
-    const mapper = getNameMapper();
+    const mapper = queryMapper_ACU();
     const resolvedColumn = mapper.resolveColumnName(this.tableName, column);
     this._groupBy = resolvedColumn;
     return this;
@@ -210,7 +254,7 @@ export class TableQueryBuilder {
    *   whereNotIn("列名", [值1, 值2])  → 列名 NOT IN ('值1', '值2')
    */
   whereNotIn(column: string, values: any[]): TableQueryBuilder {
-    const mapper = getNameMapper();
+    const mapper = queryMapper_ACU();
     const resolvedColumn = mapper.resolveColumnName(this.tableName, column);
     if (!values || values.length === 0) {
       // 空数组：不添加条件（返回所有行）
@@ -225,7 +269,7 @@ export class TableQueryBuilder {
    * IS NULL 条件
    */
   whereNull(column: string): TableQueryBuilder {
-    const mapper = getNameMapper();
+    const mapper = queryMapper_ACU();
     const resolvedColumn = mapper.resolveColumnName(this.tableName, column);
     this.conditions.push({ column: resolvedColumn, operator: '=', value: null });
     return this;
@@ -235,7 +279,7 @@ export class TableQueryBuilder {
    * IS NOT NULL 条件
    */
   whereNotNull(column: string): TableQueryBuilder {
-    const mapper = getNameMapper();
+    const mapper = queryMapper_ACU();
     const resolvedColumn = mapper.resolveColumnName(this.tableName, column);
     this.conditions.push({ column: resolvedColumn, operator: '!=', value: null });
     return this;
@@ -246,7 +290,7 @@ export class TableQueryBuilder {
    *   whereLike("列名", "%关键词%")  → 列名 LIKE '%关键词%'
    */
   whereLike(column: string, pattern: string): TableQueryBuilder {
-    const mapper = getNameMapper();
+    const mapper = queryMapper_ACU();
     const resolvedColumn = mapper.resolveColumnName(this.tableName, column);
     this.conditions.push({ column: resolvedColumn, operator: '__LIKE__', value: pattern });
     return this;
@@ -273,7 +317,7 @@ export class TableQueryBuilder {
    * 排序
    */
   orderBy(column: string, direction: 'ASC' | 'DESC' = 'ASC'): TableQueryBuilder {
-    const mapper = getNameMapper();
+    const mapper = queryMapper_ACU();
     const resolvedColumn = mapper.resolveColumnName(this.tableName, column);
     this._orderBy = `${resolvedColumn} ${direction}`;
     return this;
@@ -291,7 +335,7 @@ export class TableQueryBuilder {
    * 获取单个值（第一行指定列）
    */
   get(column: string): string | number | null {
-    const mapper = getNameMapper();
+    const mapper = queryMapper_ACU();
     const resolvedColumn = mapper.resolveColumnName(this.tableName, column);
     const sql = this._buildSelect(resolvedColumn);
     const result = this._executeQuery(sql + ' LIMIT 1');
@@ -317,7 +361,7 @@ export class TableQueryBuilder {
    * 获取某列的值列表
    */
   list(column: string): (string | number)[] {
-    const mapper = getNameMapper();
+    const mapper = queryMapper_ACU();
     const resolvedColumn = mapper.resolveColumnName(this.tableName, column);
     const sql = this._buildSelect(resolvedColumn);
     const result = this._executeQuery(sql);
@@ -353,7 +397,7 @@ export class TableQueryBuilder {
    * 求和
    */
   sum(column: string): number {
-    const mapper = getNameMapper();
+    const mapper = queryMapper_ACU();
     const resolvedColumn = mapper.resolveColumnName(this.tableName, column);
     const sql = this._buildSelect(`SUM(${resolvedColumn})`);
     const result = this._executeQuery(sql);
@@ -365,7 +409,7 @@ export class TableQueryBuilder {
    * 求平均值
    */
   avg(column: string): number {
-    const mapper = getNameMapper();
+    const mapper = queryMapper_ACU();
     const resolvedColumn = mapper.resolveColumnName(this.tableName, column);
     const sql = this._buildSelect(`AVG(${resolvedColumn})`);
     const result = this._executeQuery(sql);
@@ -377,7 +421,7 @@ export class TableQueryBuilder {
    * 求最大值
    */
   max(column: string): number {
-    const mapper = getNameMapper();
+    const mapper = queryMapper_ACU();
     const resolvedColumn = mapper.resolveColumnName(this.tableName, column);
     const sql = this._buildSelect(`MAX(${resolvedColumn})`);
     const result = this._executeQuery(sql);
@@ -389,7 +433,7 @@ export class TableQueryBuilder {
    * 求最小值
    */
   min(column: string): number {
-    const mapper = getNameMapper();
+    const mapper = queryMapper_ACU();
     const resolvedColumn = mapper.resolveColumnName(this.tableName, column);
     const sql = this._buildSelect(`MIN(${resolvedColumn})`);
     const result = this._executeQuery(sql);
@@ -507,8 +551,8 @@ export class TableQueryBuilder {
       return { columns: [], values: [] };
     }
     try {
-      const provider = getStorageProvider();
-      const executableSql = resolveCurrentRuntimeReadSql_ACU(sql).sql;
+      const provider = queryProvider_ACU();
+      const executableSql = scopedReadContext_ACU ? resolveTemplateReadSql_ACU(sql) : resolveCurrentRuntimeReadSql_ACU(sql).sql;
       const result = provider.executeQuery(executableSql, undefined, {
         suppressErrorLog: this.options.suppressQueryErrorLog === true,
       });
@@ -566,7 +610,7 @@ function execExpr(expression: string): string | number | null {
     if (!isTemplateQueryRuntimeReady_ACU('db.expr')) return null;
     const translatedExpr = resolveTemplateReadSql_ACU(expression.trim());
     const sql = `SELECT ${translatedExpr}`;
-    const provider = getStorageProvider();
+    const provider = queryProvider_ACU();
     const result = provider.executeQuery(sql);
     if (result.values.length === 0) return null;
     const val = result.values[0][0];
@@ -595,7 +639,7 @@ function execRand(min: number, max: number): number {
     if (lo > hi) { const tmp = lo; lo = hi; hi = tmp; }
     if (!isTemplateQueryRuntimeReady_ACU('db.rand')) return 0;
     const range = hi - lo + 1;
-    const provider = getStorageProvider();
+    const provider = queryProvider_ACU();
     const result = provider.executeQuery(`SELECT ABS(RANDOM()) % ${range} + ${lo}`);
     if (result.values.length === 0) return lo;
     return Number(result.values[0][0]) || lo;
@@ -632,7 +676,7 @@ function execCalc(expression: string): number | null {
       return null;
     }
     if (!isTemplateQueryRuntimeReady_ACU('db.calc')) return null;
-    const provider = getStorageProvider();
+    const provider = queryProvider_ACU();
     const result = provider.executeQuery(`SELECT ${processed}`);
     if (result.values.length === 0) return null;
     const val = Number(result.values[0][0]);
@@ -772,7 +816,7 @@ export function evaluateRawSqlExpression(expr: string, options: RawSqlEvaluation
     const translatedSql = resolveTemplateReadSql_ACU(trimmed);
 
     // 执行查询
-    const provider = getStorageProvider();
+    const provider = queryProvider_ACU();
     const result = provider.executeQuery(translatedSql, undefined, {
       suppressErrorLog: options.suppressQueryErrorLog === true,
     });
@@ -811,7 +855,7 @@ export function evaluateRawSqlExpression(expr: string, options: RawSqlEvaluation
  */
 export function replaceDbSqlVariables(content: string): string {
   if (!content || typeof content !== 'string') return content || '';
-  if (!isSqliteMode()) return content;
+  if (!querySqliteMode_ACU()) return content;
 
   if (!isTemplateQueryRuntimeReady_ACU('模板变量')) return content;
 
@@ -845,7 +889,7 @@ export function replaceDbSqlVariables(content: string): string {
  * 纯 ORM 表达式（无比较运算）则对结果做 truthy 判断。
  */
 export function evaluateDbCondition(expression: string): boolean {
-  if (!isSqliteMode()) return false;
+  if (!querySqliteMode_ACU()) return false;
   if (!isTemplateQueryRuntimeReady_ACU('<if db>')) return false;
 
   try {
@@ -873,7 +917,7 @@ export function evaluateDbCondition(expression: string): boolean {
  * 返回布尔值：结果非零/非空 = true
  */
 export function evaluateSqlCondition(expression: string): boolean {
-  if (!isSqliteMode()) return false;
+  if (!querySqliteMode_ACU()) return false;
   if (!isTemplateQueryRuntimeReady_ACU('<if sql>')) return false;
 
   try {
@@ -881,7 +925,7 @@ export function evaluateSqlCondition(expression: string): boolean {
     // evaluateRawSqlExpression 内部会处理 "sql " 前缀和引号剥离
     // 但这里的 expression 来自 <if sql="...">，本身就是纯 SQL，直接执行即可
     const translatedSql = resolveTemplateReadSql_ACU(expression.trim());
-    const provider = getStorageProvider();
+    const provider = queryProvider_ACU();
     const result = provider.executeQuery(translatedSql);
     if (result.values.length === 0) return false;
     return isTruthy(result.values[0][0]);

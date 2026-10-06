@@ -240,6 +240,17 @@ function parseField_ACU(raw: unknown, deps: AgentModuleFrameDeps_ACU): ParsedFie
       const swipeId = typeof raw.checkpoint.swipeId === 'string' && raw.checkpoint.swipeId.trim() ? raw.checkpoint.swipeId : '';
       if (snapshot && swipeId) {
         frame.checkpoint = { swipeId, snapshot };
+        if (raw.checkpoint.operationSeq !== undefined) {
+          const seq = raw.checkpoint.operationSeq;
+          if (typeof seq !== 'number' || !Number.isSafeInteger(seq) || seq < 0) {
+            problems.push('checkpoint.operationSeq 无效');
+          } else frame.checkpoint.operationSeq = seq;
+        }
+        if (raw.checkpoint.fieldSnapshot !== undefined) {
+          const fields = validateAgentModuleFieldSnapshot_ACU(raw.checkpoint.fieldSnapshot, snapshot);
+          if (!fields) problems.push('checkpoint.fieldSnapshot 未通过严格校验');
+          else frame.checkpoint.fieldSnapshot = fields;
+        }
         if (raw.checkpoint.partials !== undefined) {
           const partials = parseAgentModuleFieldUpserts_ACU(raw.checkpoint.partials);
           if (!partials) problems.push('checkpoint.partials 结构非法，基线草稿栏目已忽略');
@@ -365,6 +376,37 @@ function diffSnapshot_ACU(before: AgentModuleSnapshot_ACU, after: AgentModuleSna
     changed = true;
   }
   return changed ? delta : null;
+}
+
+/** 严格校验无损分栏基底；不得用领域数组重建而抹掉 revision 或草稿。 */
+export function validateAgentModuleFieldSnapshot_ACU(
+  raw: unknown, snapshot: AgentModuleSnapshot_ACU,
+): AgentModuleFieldSnapshot_ACU | null {
+  if (!isRecord_ACU(raw) || !isRecord_ACU(raw.records) || Object.keys(raw).some(key => key !== 'records')) return null;
+  const integer = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+  for (const [module, rows] of Object.entries(raw.records)) {
+    if (!isWritableModuleKey_ACU(module) || !isRecord_ACU(rows)) return null;
+    const matrix = AGENT_MODULE_FIELD_MATRIX_ACU[module];
+    for (const [id, row] of Object.entries(rows)) {
+      if (!id.trim() || !isRecord_ACU(row) || row.module !== module || row.id !== id
+        || (module === 'userRequirements' && id !== AGENT_USER_REQUIREMENTS_SINGLETON_ID_ACU)
+        || !['complete', 'partial', 'legacy_unknown'].includes(String(row.status))
+        || !isRecord_ACU(row.fields) || !Array.isArray(row.missingFields) || !integer(row.updatedAt)
+        || Object.keys(row).some(key => !['module', 'id', 'status', 'fields', 'missingFields', 'updatedAt'].includes(key))) return null;
+      for (const [field, entry] of Object.entries(row.fields)) {
+        if (!matrix.fields.includes(field) || !isRecord_ACU(entry) || !('value' in entry)
+          || !integer(entry.revision) || !integer(entry.updatedAt)
+          || Object.keys(entry).some(key => !['value', 'revision', 'updatedAt'].includes(key))) return null;
+      }
+      const fields = row.fields;
+      const missing = row.status === 'partial' ? matrix.required.filter(key => !(key in fields)) : [];
+      if (canonicalJson_ACU(missing) !== canonicalJson_ACU(row.missingFields)) return null;
+    }
+  }
+  const fields = cloneJson_ACU(raw) as unknown as AgentModuleFieldSnapshot_ACU;
+  const reconciled = cloneJson_ACU(fields);
+  reconcileFieldViewWithSnapshot_ACU(reconciled, snapshot, snapshot.updatedAt);
+  return canonicalJson_ACU(reconciled) === canonicalJson_ACU(fields) ? fields : null;
 }
 
 function emptyFieldView_ACU(): AgentModuleFieldSnapshot_ACU {
@@ -531,6 +573,7 @@ function maxSeq_ACU(chat: readonly unknown[], deps: AgentModuleFrameDeps_ACU): n
   for (const message of chat) {
     const parsed = parseField_ACU(fieldOf_ACU(message), deps);
     if (parsed.kind !== 'frame') continue;
+    max = Math.max(max, parsed.frame.checkpoint?.operationSeq ?? 0);
     for (const delta of parsed.frame.deltas) max = Math.max(max, delta.seq);
   }
   return max;
@@ -590,6 +633,7 @@ export function foldAgentModuleSnapshot_ACU(
     if (parsed.frame.checkpoint && parsed.frame.checkpoint.swipeId === swipeId) {
       snapshot = cloneJson_ACU(parsed.frame.checkpoint.snapshot);
       view = seedFieldViewFromSnapshot_ACU(snapshot, parsed.frame.checkpoint.snapshot.updatedAt);
+      if (parsed.frame.checkpoint.fieldSnapshot) view = cloneJson_ACU(parsed.frame.checkpoint.fieldSnapshot);
       if (parsed.frame.checkpoint.partials) {
         view = applyFieldUpsertsToView_ACU(view, parsed.frame.checkpoint.partials, parsed.frame.checkpoint.snapshot.updatedAt);
         reconcileFieldViewWithSnapshot_ACU(view, snapshot, parsed.frame.checkpoint.snapshot.updatedAt);

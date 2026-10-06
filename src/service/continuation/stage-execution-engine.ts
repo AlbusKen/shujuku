@@ -1,5 +1,5 @@
 import { ContinuationValidationError_ACU, createContinuationError_ACU, type ContinuationEnvelope_ACU, type ContinuationInternalAiRequestIdentity_ACU, type ContinuationStage_ACU, type ContinuationTask_ACU, type StageNode_ACU, type StageRevision_ACU, type StageTurn_ACU, type TurnAttemptIdentity_ACU } from './model';
-import type { AgentAdjustProgressAction_ACU, AgentAdjustProgressReceipt_ACU, AgentOutlineOpResult_ACU, ContinuationAgentTurnPlanResult_ACU } from './agent/agent-model';
+import type { AgentAdjustProgressAction_ACU, AgentAdjustProgressReceipt_ACU, AgentOutlineOpResult_ACU, ContinuationAgentTurnPlanRequest_ACU, ContinuationAgentTurnPlanResult_ACU } from './agent/agent-model';
 import type { ContinuationAgentTurnPlanner_ACU } from './agent/agent-main-loop';
 
 /** 严格执行快照：只在铸造宿主归属身份时使用，要求大纲游标完整且已冻结。 */
@@ -40,6 +40,8 @@ export interface StageExecutionEngineDependencies_ACU {
   getChatIdentity: () => string;
   allocateId: (prefix: string) => string;
   planner: ContinuationAgentTurnPlanner_ACU;
+  /** 每次规划绑定独立历史与存储租约，不修改共享规划器。 */
+  prepareStorage?: (signal?: AbortSignal | null) => Promise<NonNullable<ContinuationAgentTurnPlanRequest_ACU['storage']>>;
 }
 
 function fail_ACU(code: 'CONTINUATION_TASK_NOT_FOUND' | 'CONTINUATION_TASK_STATE_INVALID' | 'CONTINUATION_INTERNAL_REQUEST_STALE', message: string): never {
@@ -119,8 +121,10 @@ export class StageExecutionEngine_ACU {
 
     const attemptId = existingAttempt?.attemptId ?? this.dependencies.allocateId('attempt');
     const readContext = () => currentAgentContext_ACU(this.dependencies.readEnvelope());
+    const storage = await this.dependencies.prepareStorage?.(signal);
     const instruction = await this.dependencies.planner.plan({
       settings: initial.envelope.settings,
+      ...(storage ? { storage } : {}),
       directOpening: !existingAttempt,
       readContext,
       createInternalRequestIdentity: () => {

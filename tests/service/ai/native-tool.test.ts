@@ -31,7 +31,7 @@ describe('native tool calls', () => {
     const messages = withJsonTailPrefill_ACU(projected);
     const body = buildCustomApiRequestBody_ACU(messages, { url: 'https://example.invalid', model: 'test' }, { tools: [] });
     expect(body).not.toHaveProperty('tools');
-    expect(body).not.toHaveProperty('tool_choice');
+    expect(body.tool_choice).toBe('none');
     for (const message of body.messages) {
       expect(message.role).not.toBe('tool');
       expect(message).not.toHaveProperty('tool_calls');

@@ -4,6 +4,7 @@
 import { cancelPendingChatMutationRefresh_ACU, scheduleChatMutationRefresh_ACU } from './chat-mutation-scheduler';
 import { installHostEventWaitGate_ACU, installPlotSendEventGate_ACU, redirectPlotSendEvent_ACU } from './plot-send-event-gate';
 import { runWithAbortSignal_ACU } from '../../shared/abort-signal';
+import { installZeroLayerBootstrap_ACU } from './zero-layer-bootstrap';
 import { showToastr_ACU } from '../theme/toast';
 import { attemptToLoadCoreApis_ACU } from '../triggers/settings-ui-sync/settings-ui-connect';
 import { formatHostCapabilities_ACU, getLastHostCapabilities_ACU } from '../../shared/host-compat/tavern-helper-compat';
@@ -23,6 +24,7 @@ import { ensureNoActiveProvisionalBridgeForCurrentScope_ACU } from '../../servic
 import { notifyChatRuntimeReloaded_ACU } from '../../shared/chat-runtime-reload-signal';
 import { refreshMergedDataAndNotifyWithUI_ACU } from '../components/pipeline-ui-helpers';
 import { cleanChatName_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
+import { logAutoFillSkip_ACU } from '../../shared/trigger-diagnostics';
 import { markPlotIntercept_ACU, shouldSkipPlotIntercept_ACU } from '../../service/plot/plot-logic';
 import { orchestrateTavernHelperHook_ACU, orchestrateAfterCommandsStrategy1_ACU, orchestrateAfterCommandsStrategy2_ACU } from '../../service/plot/plot-orchestrator';
 import { flushPlotPendingSave_ACU } from '../../service/runtime/plot-runtime/plot-history-preset';
@@ -175,6 +177,7 @@ export   function mainInitialize_ACU() {
       ) {
         // [调试] 检查可用的事件类型
         logDebug_ACU('[提示词模板] 可用的事件类型:', Object.keys(SillyTavern_API_ACU.eventTypes));
+        installZeroLayerBootstrap_ACU();
         // [提示词模板] 监听 CHAT_COMPLETION_SETTINGS_READY 事件，使用 makeLast 确保在 st-prompt-template 之后执行
         if (SillyTavern_API_ACU.eventTypes.CHAT_COMPLETION_SETTINGS_READY) {
           // 检查是否有 makeLast 方法
@@ -633,10 +636,15 @@ export   function mainInitialize_ACU() {
         autoFillMessageEvents.forEach(evName => {
           const eventType = SillyTavern_API_ACU.eventTypes[evName];
           if (!eventType) return;
-          SillyTavern_API_ACU.eventSource.on(eventType, (messageId: any) => {
-            void triggerAutomaticUpdateIfNeeded_ACU().catch(error => {
-              logWarn_ACU(`ACU ${evName} 自动填表调度失败:`, error);
-            });
+          SillyTavern_API_ACU.eventSource.on(eventType, (messageId: any, messageType?: string) => {
+            // 宿主加载开场白时会发送 first_message；它不是一次新生成，不派发自动填表。
+            if (messageType === 'first_message') {
+              logAutoFillSkip_ACU('initial_chat_message', { eventType: evName, messageId });
+            } else {
+              void triggerAutomaticUpdateIfNeeded_ACU().catch(error => {
+                logWarn_ACU(`ACU ${evName} 自动填表调度失败:`, error);
+              });
+            }
             const chatAtCapture = SillyTavern_API_ACU?.chat || [];
             const eventMessageId = typeof messageId === 'number' && Number.isInteger(messageId)
               ? messageId

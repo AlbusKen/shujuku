@@ -143,6 +143,10 @@ function isRunWriteOverlap_ACU(error: unknown): boolean {
 }
 
 function pendingAnchor_ACU(identity: WorldSimulationRunIdentity_ACU): WorldSimulationPendingAnchor_ACU {
+  if (identity.kind === 'logical') return {
+    logicalRef: structuredClone(identity.logicalRef), contentDigest: identity.anchorContentDigest,
+    baseLedgerRevision: identity.baseLedgerRevision,
+  };
   return {
     messageKey: identity.anchorMessageKey,
     swipeId: identity.anchorSwipeId,

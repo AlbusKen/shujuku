@@ -317,12 +317,30 @@ function collectSegments_ACU(chat?: any[]): { segments: WorldSimulationConversat
   return { segments, diagnostics };
 }
 
+/** 桥接只读完整会话段；损坏不能被展示路径的诊断降级隐藏。 */
+export function readWorldSimulationConversationRecordStrict_ACU(chat: any[]): WorldSimulationConversationFloorRecord_ACU {
+  const { segments, diagnostics } = collectSegments_ACU(chat);
+  if (diagnostics.length) reject_ACU('推演桥接会话源损坏，禁止建立空基线');
+  const updatedAt = segments.reduce((latest, segment) => Math.max(latest,
+    segment.compaction?.at ?? 0, ...segment.messages.map(message => message.at)), 0);
+  return validateWorldSimulationConversationFloorRecord_ACU({
+    schemaVersion: WORLD_SIMULATION_CONVERSATION_SCHEMA_VERSION_ACU,
+    segments: structuredClone(segments), updatedAt,
+  });
+}
+
+
 export function readWorldSimulationConversation_ACU(chat?: any[]): WorldSimulationConversationView_ACU {
   const collected = collectSegments_ACU(chat);
-  const allMessages = collected.segments.flatMap(segment => segment.messages);
+  return projectWorldSimulationConversationSegments_ACU(collected.segments, collected.diagnostics);
+}
+
+/** 纯会话投影，普通楼层与逻辑 carrier 消费同一算法。 */
+export function projectWorldSimulationConversationSegments_ACU(segments: readonly WorldSimulationConversationSegment_ACU[], diagnostics: string[] = []): WorldSimulationConversationView_ACU {
+  const allMessages = segments.flatMap(segment => segment.messages);
   const maxId = allMessages.reduce((max, message) => Math.max(max, message.id), 0);
   let compaction: WorldSimulationConversationCompaction_ACU | null = null;
-  for (const segment of collected.segments) {
+  for (const segment of segments) {
     if (segment.compaction && (!compaction || segment.compaction.compactedThroughId > compaction.compactedThroughId)) {
       compaction = segment.compaction;
     }
@@ -333,7 +351,7 @@ export function readWorldSimulationConversation_ACU(chat?: any[]): WorldSimulati
         ...allMessages.filter(message => message.id > compaction!.compactedThroughId),
       ]
     : allMessages;
-  return { nextId: maxId + 1, messages: projected, compaction, diagnostics: collected.diagnostics };
+  return { nextId: maxId + 1, messages: projected, compaction, diagnostics };
 }
 
 /** Director requests and compaction must project the same confirmed, model-visible floor messages. */
@@ -342,6 +360,12 @@ export function readWorldSimulationDirectorCompactionSource_ACU(chat?: any[]): {
   fingerprint: string;
 } {
   const { segments, diagnostics } = collectSegments_ACU(chat);
+  return projectWorldSimulationDirectorSource_ACU(segments, diagnostics);
+}
+
+export function projectWorldSimulationDirectorSource_ACU(
+  segments: readonly WorldSimulationConversationSegment_ACU[], diagnostics: string[] = [],
+): { view: WorldSimulationConversationView_ACU; fingerprint: string } {
   if (diagnostics.length) reject_ACU('格林推演主会话历史楼层损坏', { diagnostics });
   const all = segments.flatMap(segment => segment.messages);
   const compaction = segments.flatMap(segment => segment.compaction ? [segment.compaction] : [])
@@ -366,7 +390,11 @@ export function readWorldSimulationDirectorCompactionSource_ACU(chat?: any[]): {
 
 /** Only director requests use this projection; session cards and specialist output are never model turns. */
 export function readWorldSimulationDirectorHistory_ACU(chat?: any[]): Array<{ role: 'assistant' | 'user' | 'tool'; content: string; tool_calls?: ReturnType<typeof toOpenAiToolCalls_ACU>; tool_call_id?: string }> {
-  return readWorldSimulationDirectorCompactionSource_ACU(chat).view.messages.map(message => {
+  return projectWorldSimulationDirectorMessages_ACU(readWorldSimulationDirectorCompactionSource_ACU(chat).view.messages);
+}
+
+export function projectWorldSimulationDirectorMessages_ACU(messages: readonly WorldSimulationConversationMessage_ACU[]): ReturnType<typeof readWorldSimulationDirectorHistory_ACU> {
+  return messages.map(message => {
     if (message.kind === 'model_agent') {
       return { role: 'assistant' as const, content: message.text, ...(message.toolCalls?.length ? { tool_calls: toOpenAiToolCalls_ACU(message.toolCalls) } : {}) };
     }

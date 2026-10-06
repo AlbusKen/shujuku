@@ -1,6 +1,7 @@
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { buildDefaultContinuationSettings_ACU } from './defaults';
 import { FirstFloorContinuationStore_ACU } from './continuation-store';
+import type { ContinuationLogicalRef_ACU, ContinuationHistoryAnchor_ACU } from './model';
 import { cursorFromCompletedTurns_ACU, reconcileTaskCursorFromChat_ACU } from './stage-cursor';
 import { resolveHostRetryMode_ACU } from './host-retry-mode';
 import { acceptPlannedStageRevision_ACU, ContinuationOutlinePlanner_ACU, createPlannedStageRevision_ACU, freezePlannedStageRevision_ACU, type ContinuationOutlinePlanningResult_ACU } from './outline-planner';
@@ -47,10 +48,22 @@ export interface RejectHostTurnInput_ACU { messageIndex: number; }
 export interface ContinuationPendingHostTurnSnapshot_ACU { settings: ContinuationEnvelope_ACU['settings']; pending: NonNullable<ContinuationTask_ACU['pendingHostTurn']>; }
 
 export interface ContinuationOrchestratorDependencies_ACU {
-  store: FirstFloorContinuationStore_ACU;
+  store: Pick<FirstFloorContinuationStore_ACU, 'read' | 'readPersisted' | 'replaceAtomically' | 'updatePersistedAtomically'>;
+  /** 逻辑模式的历史与联合确认端口；不回落到物理长度/宿主尾楼。 */
+  logicalHistory?: {
+    reconcile: (task: ContinuationTask_ACU) => ContinuationTask_ACU;
+    anchor: () => ContinuationHistoryAnchor_ACU;
+    assertCanContinue: () => void;
+    confirm: (ref: ContinuationLogicalRef_ACU,
+      mutator: (current: ContinuationEnvelope_ACU) => ContinuationEnvelope_ACU) => Promise<ContinuationEnvelope_ACU>;
+  };
+  /** 创建任务时的用户要求写入；逻辑存储必须提供自己的实现。 */
+  seedAgentUserRequirements?: (text: string) => Promise<void>;
   planner: ContinuationOutlinePlanner_ACU;
   executionEngine: StageExecutionEngine_ACU;
   getChatIdentity: () => string;
+  /** 独立生命周期门禁；普通模式不提供，不影响停止租约收尾。 */
+  assertCanOperate?: () => void;
   now: () => number;
   allocateId: (prefix: string) => string;
   createOutlineResolvers: (context: ContinuationPlanningContext_ACU) => Partial<Record<ContinuationPromptPlaceholder_ACU, () => string | Promise<string | null | undefined> | null | undefined>>;
@@ -71,6 +84,7 @@ export interface ContinuationOrchestratorDependencies_ACU {
 type Lease_ACU = { id: string; epoch: number };
 const leasesByChat_ACU = new Map<string, Lease_ACU>();
 const epochsByChat_ACU = new Map<string, number>();
+const settlingOperationsByChat_ACU = new Map<string, Set<Promise<void>>>();
 /**
  * 每个聊天在跑的 Agent 循环对应的中断控制器。
  * 租约作废只能让「下一次」身份校验失败，在途的 HTTP 请求还得等它自己返回；
@@ -208,7 +222,7 @@ function stageForOutline_ACU(stageId: string, stageNumber: number, revision: Sta
   return { stageId, stageNumber, status, activeRevision: revision.revision, revisions: [revision], activeNodeIndex: 0, activeTurnIndex: 0, completedTurns: 0 };
 }
 
-function advanceConfirmedTurn_ACU(task: ContinuationTask_ACU, now: number, timeline: (kind: ContinuationTask_ACU['timeline'][number]['kind'], at: number, fields?: Omit<ContinuationTask_ACU['timeline'][number], 'id' | 'at' | 'kind'>) => ContinuationTask_ACU['timeline'][number], messageIndex?: number): ContinuationTask_ACU {
+function advanceConfirmedTurn_ACU(task: ContinuationTask_ACU, now: number, timeline: (kind: ContinuationTask_ACU['timeline'][number]['kind'], at: number, fields?: Omit<ContinuationTask_ACU['timeline'][number], 'id' | 'at' | 'kind'>) => ContinuationTask_ACU['timeline'][number], messageIndex?: number, logicalRef?: ContinuationLogicalRef_ACU): ContinuationTask_ACU {
   const stage = getActiveStage_ACU(task);
   const revision = getActiveRevision_ACU(stage);
   const node = revision.outline.nodes[stage.activeNodeIndex];
@@ -221,7 +235,7 @@ function advanceConfirmedTurn_ACU(task: ContinuationTask_ACU, now: number, timel
     : stage.activeTurnIndex + 1 < node.turns.length
       ? { ...stage, activeTurnIndex: stage.activeTurnIndex + 1, completedTurns }
       : { ...stage, activeNodeIndex: stage.activeNodeIndex + 1, activeTurnIndex: 0, completedTurns };
-  const entries = [...task.timeline, timeline('turn_completed', now, { stageId: stage.stageId, revision: stage.activeRevision, nodeId: node.id, turnId: turn.id, ...(messageIndex !== undefined ? { messageIndex } : {}) })];
+  const entries = [...task.timeline, timeline('turn_completed', now, { stageId: stage.stageId, revision: stage.activeRevision, nodeId: node.id, turnId: turn.id, ...(messageIndex !== undefined ? { messageIndex } : {}), ...(logicalRef ? { logicalRef } : {}) })];
   if (isFinalTurn) entries.push(timeline('stage_completed', now, { stageId: stage.stageId, revision: stage.activeRevision }));
   return { ...task, updatedAt: now, stages: task.stages.map(item => item.stageId === stage.stageId ? nextStage : item), timeline: entries };
 }
@@ -253,7 +267,7 @@ export class ContinuationOrchestrator_ACU {
         },
       };
       await this.dependencies.store.replaceAtomically(candidate, guardForTask_ACU(chatIdentity, existing));
-      await seedAgentUserRequirementsIfEmpty_ACU(originInstruction);
+      await (this.dependencies.seedAgentUserRequirements ?? seedAgentUserRequirementsIfEmpty_ACU)(originInstruction);
       return taskResult_ACU(candidate);
     });
   }
@@ -312,8 +326,11 @@ export class ContinuationOrchestrator_ACU {
       let started: ContinuationEnvelope_ACU | null = null;
       await this.dependencies.store.updatePersistedAtomically(current => {
         const envelope = this.requireEnvelope_ACU(current);
-        const chatLength = Array.isArray(getChatArray_ACU()) ? getChatArray_ACU().length : 0;
-        const task = reconcileTaskCursorFromChat_ACU(this.requireTask_ACU(envelope), chatLength);
+        this.dependencies.logicalHistory?.assertCanContinue();
+        const task = this.dependencies.logicalHistory
+          ? this.dependencies.logicalHistory.reconcile(this.requireTask_ACU(envelope))
+          : reconcileTaskCursorFromChat_ACU(this.requireTask_ACU(envelope),
+            Array.isArray(getChatArray_ACU()) ? getChatArray_ACU().length : 0);
         // 等待宿主结果时只有"桥内存里仍有本次生成的活认领"才是真在飞；
         // 重载或事件丢失后的滞留等待轮无法再被归属，丢弃后从当前进度重新继续。
         const staleAwaitingTurn = task.pendingHostTurn?.status === 'awaiting_generation';
@@ -331,7 +348,7 @@ export class ContinuationOrchestrator_ACU {
         const pending = task.pendingHostTurn;
         // 重试轮只在楼层仍是发送时的形状时才提升为宿主重发：用户删掉了指令楼或上一轮正文后，
         // regenerate 会落错位置甚至误删正文，此时丢弃等待轮、回到 Agent 按现存楼层重新规划。
-        const retryFloorsIntact = !!pending && resolveHostRetryMode_ACU(getChatArray_ACU(), pending.capture) !== null;
+        const retryFloorsIntact = !this.dependencies.logicalHistory && !!pending && resolveHostRetryMode_ACU(getChatArray_ACU(), pending.capture) !== null;
         const promoteHostRetry = retryFloorsIntact && (pending.status === 'retry_ready'
           || (pending.status === 'exhausted' && task.stopReason === 'generation_retry_exhausted'));
         // 归属失败/输入不可用留下的 exhausted 仍清掉：那些场景不能安全 regenerate。
@@ -413,8 +430,10 @@ export class ContinuationOrchestrator_ACU {
         : action.completeStage === false ? Math.min(stage.completedTurns, turns.length - 1)
           : turns.findIndex(turn => turn.id === action.nextTurnId);
       if (completedTurns < 0) return reject('nextTurnId 不属于该阶段当前大纲');
-      const chat = getChatArray_ACU();
-      if (!Array.isArray(chat) || chat.length === 0) return reject('当前聊天没有可保存校准依据的楼层');
+      const chat = this.dependencies.logicalHistory ? null : getChatArray_ACU();
+      if (!this.dependencies.logicalHistory && (!Array.isArray(chat) || chat.length === 0)) return reject('当前聊天没有可保存校准依据的楼层');
+      const anchor: ContinuationHistoryAnchor_ACU = this.dependencies.logicalHistory?.anchor()
+        ?? { messageIndex: chat!.length - 1 };
       const cursor = cursorFromCompletedTurns_ACU(revision, completedTurns);
       const { agentTurnLabel: _label, ...unchanged } = stage;
       const nextStage: ContinuationStage_ACU = {
@@ -422,18 +441,21 @@ export class ContinuationOrchestrator_ACU {
         activeNodeIndex: cursor.nodeIndex, activeTurnIndex: cursor.turnIndex,
         progressAdjustments: [...(stage.progressAdjustments ?? []), {
           revision: stage.activeRevision, completedTurns, timelineOffset: task.timeline.length,
-          messageIndex: chat.length - 1, reason: action.reason.trim(),
+          ...anchor, reason: action.reason.trim(),
         }],
       };
       const selectsStage = action.completeStage !== true || task.activeStageId === stage.stageId;
-      const nextTask = reconcileTaskCursorFromChat_ACU({
+      const adjusted: ContinuationTask_ACU = {
         ...task, stages: task.stages.map(item => item.stageId === stage.stageId ? nextStage : item),
         updatedAt: this.dependencies.now(),
         ...(selectsStage ? {
           activeStageId: stage.stageId,
-          progressSelections: [...(task.progressSelections ?? []), { stageId: stage.stageId, messageIndex: chat.length - 1, timelineOffset: task.timeline.length }],
+          progressSelections: [...(task.progressSelections ?? []), { stageId: stage.stageId, ...anchor, timelineOffset: task.timeline.length }],
         } : {}),
-      }, chat.length);
+      };
+      const nextTask = this.dependencies.logicalHistory
+        ? this.dependencies.logicalHistory.reconcile(adjusted)
+        : reconcileTaskCursorFromChat_ACU(adjusted, chat!.length);
       receipt = { status: 'committed', message: action.completeStage === true ? '阶段已标记完结'
         : action.completeStage === false ? '阶段已重新开启并设为当前阶段' : '当前阶段与续写轮次已校准', stageId: stage.stageId, completedTurns };
       return { ...envelope, activeTask: nextTask };
@@ -481,6 +503,7 @@ export class ContinuationOrchestrator_ACU {
 
   /** Persists the host attribution boundary before the adapter writes the host textarea. */
   async recordHostTurn(input: RecordHostTurnInput_ACU): Promise<ContinuationOrchestratorResult_ACU> {
+    if (this.dependencies.logicalHistory) fail_ACU('CONTINUATION_TASK_STATE_INVALID', '逻辑正文不能登记物理宿主捕获');
     const chatIdentity = this.requireChatIdentity_ACU();
     return this.withLease_ACU(async () => {
       let result: ContinuationEnvelope_ACU | null = null;
@@ -528,6 +551,51 @@ export class ContinuationOrchestrator_ACU {
         return result;
       }, { chatIdentity });
       return taskResult_ACU(result!);
+    });
+  }
+
+  /** 保存规划器铸造的完整身份与实际逻辑正文引用，不重新分配续写 attempt。 */
+  async recordLogicalTurn(identity: TurnAttemptIdentity_ACU, ref: ContinuationLogicalRef_ACU, resume = false): Promise<void> {
+    if (!this.dependencies.logicalHistory) fail_ACU('CONTINUATION_TASK_STATE_INVALID', '当前续写没有逻辑历史端口');
+    identity = structuredClone(identity);
+    ref = structuredClone(ref);
+    await this.withLease_ACU(async (chatIdentity, lease) => {
+      await this.dependencies.store.updatePersistedAtomically(current => {
+        this.assertLeaseCurrent_ACU(chatIdentity, lease);
+        const envelope = this.requireEnvelope_ACU(current);
+        const task = this.requireTask_ACU(envelope);
+        const stage = getActiveStage_ACU(task);
+        const revision = getActiveRevision_ACU(stage);
+        const node = revision.outline.nodes[stage.activeNodeIndex];
+        const turn = node?.turns[stage.activeTurnIndex];
+        const resumable = resume && task.status === 'paused'
+          && (task.stopReason === null || CONTINUATION_RECOVERABLE_STOP_REASONS_ACU.includes(task.stopReason));
+        if ((!resumable && (task.status !== 'running' || task.stopReason !== null))
+          || identity.chatIdentity !== chatIdentity
+          || identity.taskId !== task.taskId || identity.stageId !== stage.stageId
+          || identity.revision !== stage.activeRevision || identity.nodeId !== node?.id || identity.turnId !== turn?.id) {
+          throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'host_send', '待发送逻辑正文已不属于当前规划游标', false));
+        }
+        const pending = task.pendingHostTurn;
+        if (pending) {
+          if (pending.status === 'awaiting_generation'
+            && (['chatIdentity', 'taskId', 'stageId', 'revision', 'nodeId', 'turnId', 'attemptId'] as const)
+              .every(key => pending.identity[key] === identity[key])
+            && pending.capture.logicalRef && (['sessionId', 'branchId', 'turnId', 'attemptId', 'floorId'] as const)
+              .every(key => pending.capture.logicalRef![key] === ref[key])) {
+            return resumable ? { ...envelope, activeTask: { ...task, status: 'running',
+              stopReason: null, lastError: null, updatedAt: this.dependencies.now() } } : envelope;
+          }
+          throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'host_send', '已有逻辑等待轮不能被另一正文替换', false));
+        }
+        const now = this.dependencies.now();
+        return { ...envelope, activeTask: { ...task, status: 'running', stopReason: null, lastError: null, updatedAt: now,
+          pendingHostTurn: { identity, capture: { capturedAt: now, capturedChatLength: 0,
+            capturedAiFloorCount: 0, generationSeq: null, logicalRef: ref }, retryCount: 0, status: 'awaiting_generation' },
+          timeline: [...task.timeline, this.timeline_ACU('turn_sent', now, { stageId: identity.stageId,
+            revision: identity.revision, nodeId: identity.nodeId, turnId: identity.turnId,
+            attemptId: identity.attemptId, logicalRef: ref })] } };
+      }, { chatIdentity, taskId: identity.taskId, stageId: identity.stageId, revision: identity.revision });
     });
   }
 
@@ -687,25 +755,41 @@ export class ContinuationOrchestrator_ACU {
 
   /** T9 calls this only after uniquely attributing a successful host generation to identity. */
   async confirmCurrentTurn(messageIndex?: number): Promise<ContinuationOrchestratorResult_ACU> {
+    if (this.dependencies.logicalHistory) fail_ACU('CONTINUATION_TASK_STATE_INVALID', '逻辑正文必须通过显式回合引用确认');
+    return this.confirmTurn_ACU(messageIndex);
+  }
+
+  async confirmLogicalTurn(ref: ContinuationLogicalRef_ACU): Promise<ContinuationOrchestratorResult_ACU> {
+    if (!this.dependencies.logicalHistory) fail_ACU('CONTINUATION_TASK_STATE_INVALID', '当前续写没有逻辑确认端口');
+    return this.confirmTurn_ACU(undefined, ref);
+  }
+
+  private async confirmTurn_ACU(messageIndex?: number, logicalRef?: ContinuationLogicalRef_ACU): Promise<ContinuationOrchestratorResult_ACU> {
     const chatIdentity = this.requireChatIdentity_ACU();
     return this.withLease_ACU(async (_currentChatIdentity, lease) => {
       const preEnvelope = this.requireEnvelope_ACU(this.dependencies.store.readPersisted());
       const preTask = this.requireTask_ACU(preEnvelope);
-      if (preTask.status !== 'running' || preTask.pendingHostTurn?.status !== 'awaiting_generation') {
+      if (!logicalRef && (preTask.status !== 'running' || preTask.pendingHostTurn?.status !== 'awaiting_generation')) {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'generation_evaluate', '正文结果已不属于当前轮次', false));
       }
       this.assertLeaseCurrent_ACU(chatIdentity, lease);
       let advanced: ContinuationEnvelope_ACU | null = null;
-      await this.dependencies.store.updatePersistedAtomically(current => {
+      const advance = (current: ContinuationEnvelope_ACU | null): ContinuationEnvelope_ACU => {
         const envelope = this.requireEnvelope_ACU(current);
         const task = this.requireTask_ACU(envelope);
         if (task.status !== 'running' || task.pendingHostTurn?.status !== 'awaiting_generation') {
           throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'generation_evaluate', '正文结果已不属于当前轮次', false));
         }
+        const capturedRef = task.pendingHostTurn.capture.logicalRef;
+        if (logicalRef && (!capturedRef || !(['sessionId', 'branchId', 'turnId', 'attemptId', 'floorId'] as const)
+          .every(key => capturedRef[key] === logicalRef[key]))) {
+          throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'generation_evaluate', '逻辑正文引用不属于当前等待轮', false));
+        }
+        this.assertLeaseCurrent_ACU(chatIdentity, lease);
         const now = this.dependencies.now();
         const stage = getActiveStage_ACU(task);
         const isLastTurn = stage.completedTurns + 1 === getActiveRevision_ACU(stage).outline.totalTurns;
-        const progressed = advanceConfirmedTurn_ACU(task, now, this.timeline_ACU.bind(this), messageIndex);
+        const progressed = advanceConfirmedTurn_ACU(task, now, this.timeline_ACU.bind(this), messageIndex, logicalRef);
         const completedTurn: ContinuationTask_ACU = {
           ...progressed,
           pendingHostTurn: null,
@@ -728,7 +812,12 @@ export class ContinuationOrchestrator_ACU {
         // 下一阶段的大纲由主 Agent 在下一次继续时派工大纲子代理创建，这里只落到可继续的暂停态。
         advanced = { ...envelope, activeTask: { ...completedTurn, status: 'paused', updatedAt: now } };
         return advanced;
-      }, { chatIdentity });
+      };
+      if (logicalRef) {
+        advanced = await this.dependencies.logicalHistory!.confirm(logicalRef, advance);
+      } else {
+        await this.dependencies.store.updatePersistedAtomically(advance, { chatIdentity });
+      }
       // 首楼确认是权威提交；通告是独立的正文楼会话写入，失败不撤销已确认轮次。
       if (messageIndex !== undefined) {
         const stage = getActiveStage_ACU(advanced!.activeTask!);
@@ -746,6 +835,18 @@ export class ContinuationOrchestrator_ACU {
       }
       return taskResult_ACU(advanced!);
     });
+  }
+
+  /** 仅撤销当前作用域的规划租约并等待旧操作退出；不清除逻辑正文等待引用。 */
+  async interrupt(): Promise<void> {
+    const chatIdentity = this.requireChatIdentity_ACU();
+    const settling = [...(settlingOperationsByChat_ACU.get(chatIdentity) ?? [])];
+    this.invalidateLease_ACU(chatIdentity);
+    await Promise.all(settling);
+    if (this.dependencies.getChatIdentity() !== chatIdentity) {
+      throw new ContinuationValidationError_ACU(createContinuationError_ACU(
+        'CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_loop', '停止期间续写作用域已变化', false));
+    }
   }
 
   async stopTask(): Promise<ContinuationOrchestratorResult_ACU> {
@@ -1127,9 +1228,11 @@ export class ContinuationOrchestrator_ACU {
       const at = this.dependencies.now();
       const revision = createPlannedStageRevision_ACU(planned.outline, 1, 'auto_next_stage', instruction, at);
       const nextStage = stageForOutline_ACU(nextStageId, stageNumber, planned.requiresReview ? revision : acceptPlannedStageRevision_ACU(revision, env.settings), planned.requiresReview ? 'awaiting_review' : 'running');
-      const chatLength = getChatArray_ACU().length;
-      const progressSelections = t.progressSelections?.length && chatLength > 0
-        ? [...t.progressSelections, { stageId: nextStageId, messageIndex: chatLength - 1, timelineOffset: t.timeline.length + 1 }]
+      const anchor = this.dependencies.logicalHistory?.anchor();
+      const chatLength = anchor ? 0 : getChatArray_ACU().length;
+      const progressSelections = t.progressSelections?.length && (anchor || chatLength > 0)
+        ? [...t.progressSelections, { stageId: nextStageId, ...(anchor ?? { messageIndex: chatLength - 1 }),
+          timelineOffset: t.timeline.length + 1 }]
         : t.progressSelections;
       result = { ...env, activeTask: { ...t, status: planned.requiresReview ? 'awaiting_outline_review' : endStatus, updatedAt: at, activeStageId: nextStageId, runStageCount: stageNumber, stages: [...t.stages, nextStage], lastError: null, timeline: [...t.timeline, this.timeline_ACU('outline_ready', at, { stageId: nextStageId, revision: 1 })], ...(progressSelections ? { progressSelections } : {}) } };
       return result;
@@ -1284,8 +1387,9 @@ export class ContinuationOrchestrator_ACU {
 
   private stopEnvelope_ACU(envelope: ContinuationEnvelope_ACU, reason: 'manual' | 'duration_reached' | 'stage_limit_reached', now: number): ContinuationEnvelope_ACU {
     const task = this.requireTask_ACU(envelope);
-    // 停止即放弃对等待中宿主生成的归属；清掉等待轮，之后继续/恢复不会被它卡死。
-    const pendingHostTurn = task.pendingHostTurn?.status === 'awaiting_generation' ? null : task.pendingHostTurn;
+    // 物理生成停止后释放事件认领；逻辑正文保留身份，显式继续按原引用恢复。
+    const pendingHostTurn = !this.dependencies.logicalHistory && task.pendingHostTurn?.status === 'awaiting_generation'
+      ? null : task.pendingHostTurn;
     return { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, stopReason: reason, ...(pendingHostTurn !== task.pendingHostTurn ? { pendingHostTurn } : {}), timeline: [...task.timeline, this.timeline_ACU('stopped', now)] } };
   }
 
@@ -1321,11 +1425,24 @@ export class ContinuationOrchestrator_ACU {
 
   private async withLease_ACU<T>(work: (chatIdentity: string, lease: Lease_ACU) => Promise<T>): Promise<T> {
     const chatIdentity = this.requireChatIdentity_ACU();
+    this.dependencies.assertCanOperate?.();
     if (leasesByChat_ACU.has(chatIdentity)) fail_ACU('CONTINUATION_OPERATION_BUSY', '当前聊天已有智能续写操作正在执行');
     const lease: Lease_ACU = { id: this.dependencies.allocateId('lease'), epoch: epochsByChat_ACU.get(chatIdentity) ?? 0 };
     leasesByChat_ACU.set(chatIdentity, lease);
+    let release!: () => void;
+    const settled = new Promise<void>(resolve => { release = resolve; });
+    const operations = settlingOperationsByChat_ACU.get(chatIdentity) ?? new Set<Promise<void>>();
+    settlingOperationsByChat_ACU.set(chatIdentity, operations);
+    operations.add(settled);
     try { return await work(chatIdentity, lease); }
-    finally { if (leasesByChat_ACU.get(chatIdentity) === lease) leasesByChat_ACU.delete(chatIdentity); }
+    finally {
+      if (leasesByChat_ACU.get(chatIdentity) === lease) leasesByChat_ACU.delete(chatIdentity);
+      operations.delete(settled);
+      if (operations.size === 0 && settlingOperationsByChat_ACU.get(chatIdentity) === operations) {
+        settlingOperationsByChat_ACU.delete(chatIdentity);
+      }
+      release();
+    }
   }
 
   private invalidateLease_ACU(chatIdentity: string): void {

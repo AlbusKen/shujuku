@@ -205,6 +205,9 @@ export interface ITableStorageProvider {
    * 两种模式都返回 TableDataObject_ACU，保证上层代码零改动
    */
   getCurrentData(): TableDataObject_ACU | null;
+  /** 严格导出；失败抛错，不返回旧运行时视图。 */
+  getCurrentDataStrict_ACU?(): TableDataObject_ACU;
+
 
   /**
    * 在公共提交模型内替换完整运行时数据。

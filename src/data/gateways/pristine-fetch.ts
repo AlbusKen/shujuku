@@ -1,18 +1,20 @@
-// data/gateways/pristine-fetch.ts — 仅绕过 Kemini 登记的 fetch 包装
+// data/gateways/pristine-fetch.ts — 内部请求绕过已登记的生成请求包装
 //
 // Kemini 伴生面板会 patch `window.parent ?? window` 的 fetch，
 // 命中 /api/backends/*/generate 后改写请求体并重写响应流（注入自己的"传输函数"工具与控制提示词）。
 // 本插件的内部请求打同一个端点且自带原生工具协议，被改写后会与脚本注入的工具互相污染。
 //
-// 仅沿两种明确标记的 original 引用剥离；遇到未知包装立即停止。
+// 仅沿明确登记的 original 引用剥离；遇到未知包装立即停止。
 // TT 等宿主的非原生 fetch 可能承担必需的后端桥接，必须保留，不能按函数源码猜测并绕过。
 // 不修改全局 fetch；只为本插件内部请求选择发送函数。
 // 宿主正文生成不经过本模块，脚本对聊天正文的效果不受影响。
 
 import { getHostWindow } from '../../shared/runtime-env';
+import { HOST_GENERATION_INTERCEPTOR_MARKER_ACU, markInternalGenerationFetch_ACU } from './host-generation-interceptor';
 
-/** Kemini 两层拦截器登记原函数的标记键，形如 wrapper[MARKER] = { original }。 */
+/** 已知包装登记原函数的标记键，形如 wrapper[MARKER] = { original }。 */
 const KNOWN_FETCH_PATCH_MARKERS_ACU = [
+  HOST_GENERATION_INTERCEPTOR_MARKER_ACU,
   '__keminiAntiTruncation__',
   '__keminiFetchInterceptor__',
 ] as const;
@@ -78,5 +80,5 @@ export function resolvePristineFetch_ACU(): typeof fetch {
  */
 export function pristineFetch_ACU(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const send = resolvePristineFetch_ACU() as FetchLike_ACU;
-  return send.call(globalThis, input, init);
+  return send.call(globalThis, input, markInternalGenerationFetch_ACU(init));
 }

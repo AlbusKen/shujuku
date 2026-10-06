@@ -518,15 +518,40 @@ export function chatTurnFromJson_ACU(data: unknown): { turn: AiChatTurn_ACU; usa
   return { turn: finishChatTurn_ACU(state), usage: state.usage };
 }
 
-export async function readFetchChatTurn_ACU(response: { headers?: { get(name: string): string | null }; json: () => Promise<unknown>; body?: { getReader(): ReadableStreamDefaultReader<Uint8Array> } }, streaming: boolean, signal?: AbortSignal | null): Promise<{ turn: AiChatTurn_ACU; usage: unknown }> {
+export async function readFetchChatTurn_ACU(response: { headers?: { get(name: string): string | null }; json: () => Promise<unknown>; body?: { getReader(): ReadableStreamDefaultReader<Uint8Array> } }, streaming: boolean, signal?: AbortSignal | null, requireComplete = false): Promise<{ turn: AiChatTurn_ACU; usage: unknown }> {
   const contentType = response.headers?.get('content-type') ?? '';
-  if (!streaming && !contentType.includes('text/event-stream')) {
-    return chatTurnFromJson_ACU(await response.json());
+  if ((!streaming || requireComplete && contentType.includes('application/json')) && !contentType.includes('text/event-stream')) {
+    const json = await response.json();
+    if (signal?.aborted) throw new Error('Request aborted');
+    if (requireComplete) {
+      if (!isCompleteChatResponse_ACU(json)) throw new Error('正文响应缺少完整终态，未确认正文。');
+      const record = json as Record<string, any>;
+      if (Array.isArray(record.content)) {
+        return chatTurnFromJson_ACU({ content: record.content.filter((part: any) => part?.type === 'text').map((part: any) => part.text).join(''), usage: record.usage });
+      }
+    }
+    return chatTurnFromJson_ACU(json);
   }
+  if (requireComplete && !response.body) throw new Error('正文流缺少响应体，未确认正文。');
   const reader = response.body!.getReader();
   const decoder = new TextDecoder();
   const state = accumulator_ACU();
   let buffer = '';
+  let completed = false;
+  const consume = (line: string): void => {
+    if (!line.startsWith('data:')) return;
+    const data = line.slice(5).trim();
+    if (!data) return;
+    if (data === '[DONE]') { completed = true; return; }
+    let json: unknown;
+    try { json = JSON.parse(data); }
+    catch {
+      if (requireComplete) throw new Error('正文流包含无效 JSON，未确认正文。');
+      return;
+    }
+    if (requireComplete && isCompleteChatResponse_ACU(json)) completed = true;
+    absorbChatCompletionEvent_ACU(state, json);
+  };
   try {
     while (true) {
       if (signal?.aborted) throw new Error('Request aborted');
@@ -536,14 +561,42 @@ export async function readFetchChatTurn_ACU(response: { headers?: { get(name: st
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
       for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const data = line.slice(6);
-        if (data === '[DONE]') continue;
-        try { absorbChatCompletionEvent_ACU(state, JSON.parse(data)); } catch { /* 半截 SSE 留给下一行。 */ }
+        if (requireComplete) consume(line);
+        else {
+          if (!line.startsWith('data: ')) continue;
+          const data = line.slice(6);
+          if (data === '[DONE]') continue;
+          try { absorbChatCompletionEvent_ACU(state, JSON.parse(data)); } catch { /* 保留普通调用的容错语义。 */ }
+        }
       }
+    }
+    if (requireComplete) {
+      buffer += decoder.decode();
+      if (buffer.trim()) consume(buffer);
+      if (signal?.aborted) throw new Error('Request aborted');
+      if (!completed) throw new Error('正文流在完整终态前结束，未确认正文。');
     }
   } finally {
     reader.releaseLock();
   }
   return { turn: finishChatTurn_ACU(state), usage: state.usage };
+}
+
+/** 仅用于零层完整正文确认；未知终态不推测为成功。 */
+function isCompleteChatResponse_ACU(json: unknown): boolean {
+  if (!json || typeof json !== 'object' || Array.isArray(json)) return false;
+  const record = json as Record<string, any>;
+  if (record.error || record.type === 'error') throw new Error('正文响应包含上游错误，未确认正文。');
+  const choice = Array.isArray(record.choices) ? record.choices[0] : undefined;
+  const candidate = Array.isArray(record.candidates) ? record.candidates[0] : undefined;
+  const reason = choice?.finish_reason ?? record.stop_reason ?? record.delta?.stop_reason ?? candidate?.finishReason;
+  if (reason !== undefined && reason !== null && !['stop', 'end_turn', 'stop_sequence', 'STOP'].includes(reason)) {
+    throw new Error('正文响应未正常完成，未确认正文。');
+  }
+  if (choice?.message?.tool_calls?.length || choice?.delta?.tool_calls?.length
+    || record.content_block?.type === 'tool_use' || record.content?.some?.((part: any) => part?.type === 'tool_use')
+    || candidate?.content?.parts?.some?.((part: any) => part?.functionCall)) {
+    throw new Error('正文响应包含未执行的工具调用，未确认正文。');
+  }
+  return record.type === 'message_stop' || ['stop', 'end_turn', 'stop_sequence', 'STOP'].includes(reason);
 }

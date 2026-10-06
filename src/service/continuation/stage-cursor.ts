@@ -1,4 +1,4 @@
-import type { ContinuationEnvelope_ACU, ContinuationStage_ACU, ContinuationTask_ACU, StageRevision_ACU } from './model';
+import type { ContinuationEnvelope_ACU, ContinuationStage_ACU, ContinuationTask_ACU, StageRevision_ACU, ContinuationLogicalAnchor_ACU, ContinuationLogicalRef_ACU } from './model';
 
 /**
  * 按聊天实际长度重算阶段硬游标。
@@ -13,7 +13,17 @@ import type { ContinuationEnvelope_ACU, ContinuationStage_ACU, ContinuationTask_
  */
 export function reconcileTaskCursorFromChat_ACU(task: ContinuationTask_ACU, chatLength: number): ContinuationTask_ACU {
   if (!Number.isInteger(chatLength) || chatLength < 0) return task;
-  const selection = [...(task.progressSelections ?? [])].reverse().find(item => item.messageIndex < chatLength);
+  return reconcileTaskCursorFromHistory_ACU(task, anchor => typeof anchor.messageIndex === 'number' && anchor.messageIndex < chatLength);
+}
+
+/** 恢复算法共用；存活判定由物理或逻辑 Adapter 提供，不能把逻辑序号当物理下标。 */
+export function reconcileTaskCursorFromHistory_ACU(
+  task: ContinuationTask_ACU,
+  survives: (anchor: { messageIndex?: number; logicalAnchor?: ContinuationLogicalAnchor_ACU; logicalRef?: ContinuationLogicalRef_ACU }) => boolean,
+): ContinuationTask_ACU {
+  const anchored = (entry: { messageIndex?: number; logicalRef?: ContinuationLogicalRef_ACU }) =>
+    typeof entry.messageIndex === 'number' || entry.logicalRef !== undefined;
+  const selection = [...(task.progressSelections ?? [])].reverse().find(survives);
   // 阶段交接随新阶段一起保存选择；恢复时只采用仍有聊天依据的最新选择。
   const selectedStageId = selection?.stageId ?? null;
   const completions = task.timeline.filter(entry => entry.kind === 'turn_completed' && entry.stageId);
@@ -21,10 +31,10 @@ export function reconcileTaskCursorFromChat_ACU(task: ContinuationTask_ACU, chat
   const hasAnchorByStage = new Map<string, boolean>();
   for (const entry of completions) {
     const stageId = entry.stageId as string;
-    if (typeof entry.messageIndex === 'number') hasAnchorByStage.set(stageId, true);
+    if (anchored(entry)) hasAnchorByStage.set(stageId, true);
     const surviving = survivingByStage.get(stageId) ?? 0;
-    if (typeof entry.messageIndex === 'number') {
-      if (entry.messageIndex < chatLength) survivingByStage.set(stageId, surviving + 1);
+    if (anchored(entry)) {
+      if (survives(entry)) survivingByStage.set(stageId, surviving + 1);
       else survivingByStage.set(stageId, surviving);
     } else {
       survivingByStage.set(stageId, surviving + 1);
@@ -39,7 +49,7 @@ export function reconcileTaskCursorFromChat_ACU(task: ContinuationTask_ACU, chat
     const totalTurns = revision?.outline.totalTurns ?? 0;
     // 大纲重规划保护已完成前缀，校准基线在后续修订中仍然有效。
     const adjustments = stage.progressAdjustments ?? [];
-    const adjustment = [...adjustments].reverse().find(item => item.messageIndex < chatLength);
+    const adjustment = [...adjustments].reverse().find(survives);
     const stageCompletions = task.timeline.slice(adjustment?.timelineOffset ?? 0)
       .filter(entry => entry.kind === 'turn_completed' && entry.stageId === stage.stageId);
     // 校准是进度基线，不是假造的宿主完成记录；基线之后仍按真实楼层恢复。
@@ -56,8 +66,8 @@ export function reconcileTaskCursorFromChat_ACU(task: ContinuationTask_ACU, chat
     const recorded = baseline + stageCompletions.length;
     let surviving = baseline;
     for (const entry of stageCompletions) {
-      if (typeof entry.messageIndex === 'number') {
-        if (entry.messageIndex < chatLength) surviving += 1;
+      if (anchored(entry)) {
+        if (survives(entry)) surviving += 1;
         else break;
       } else {
         surviving += 1;

@@ -429,6 +429,21 @@ function syncRevisionWindow_ACU(window: AgentModuleRevisionWindow_ACU | undefine
 }
 const queue_ACU = new WeakMap<any[], Promise<void>>();
 
+/** 提交所需的权威读写端口；请求级 Adapter 不得回落到宿主楼层写入。 */
+export interface AgentModuleCommitStorage_ACU {
+  isActive: (chat: any[]) => boolean;
+  readFold: typeof readAgentModuleFoldState_ACU;
+  captureBaseline: typeof captureAgentModuleCommitBaseline_ACU;
+  writeDelta: typeof writeAgentModuleCommitDelta_ACU;
+}
+
+export const hostAgentModuleCommitStorage_ACU: AgentModuleCommitStorage_ACU = {
+  isActive: chat => getChatArray_ACU() === chat,
+  readFold: readAgentModuleFoldState_ACU,
+  captureBaseline: captureAgentModuleCommitBaseline_ACU,
+  writeDelta: writeAgentModuleCommitDelta_ACU,
+};
+
 /** 同聊天串行；只有宿主保存成功且楼层重新折叠验证后签发 accepted。 */
 export function commitAgentModuleFieldWrites_ACU(input: {
   chat: any[];
@@ -441,7 +456,9 @@ export function commitAgentModuleFieldWrites_ACU(input: {
   isCurrent?: () => boolean;
   /** 本次派工的修订号窗口；提交口在同一串行队列内维护，调用方只负责派工时初始化。 */
   revisionWindow?: AgentModuleRevisionWindow_ACU;
+  storage?: AgentModuleCommitStorage_ACU;
 }): Promise<AgentModuleFieldReceipt_ACU> {
+  const storage = input.storage ?? hostAgentModuleCommitStorage_ACU;
   const prior = queue_ACU.get(input.chat) ?? Promise.resolve();
   const run = prior.catch(() => {}).then(async (): Promise<AgentModuleFieldReceipt_ACU> => {
     const dispatchTargetCurrent = () => !input.dispatchTarget || (input.chat[input.targetIndex] === input.dispatchTarget.message
@@ -449,13 +466,13 @@ export function commitAgentModuleFieldWrites_ACU(input: {
       && dispatchContent_ACU(input.chat[input.targetIndex]?.mes) === dispatchContent_ACU(input.dispatchTarget.content));
     const isCurrent = () => (input.isCurrent?.() ?? true) && dispatchTargetCurrent();
     const parsed = parseAgentModuleSqlFieldWrites_ACU(input.sql, input.role);
-    const folded = readAgentModuleFoldState_ACU(input.chat);
-    const baseline = captureAgentModuleCommitBaseline_ACU(input.chat);
+    const folded = storage.readFold(input.chat);
+    const baseline = storage.captureBaseline(input.chat);
     const receipt: AgentModuleFieldReceipt_ACU = {
       status: 'rejected', accepted: [], rejected: [...parsed.rejected], partials: confirmedPartials_ACU(folded.fields),
       revisions: { ...folded.snapshot.revisions }, constraintProposals: parsed.constraintProposals,
     };
-    if (!isCurrent() || getChatArray_ACU() !== input.chat || !input.chat[input.targetIndex] || input.chat[input.targetIndex].is_user === true || input.targetIndex !== input.chat.length - 1) {
+    if (!isCurrent() || !storage.isActive(input.chat) || !input.chat[input.targetIndex] || input.chat[input.targetIndex].is_user === true || input.targetIndex !== input.chat.length - 1) {
       receipt.rejected.push({ path: 'chat', reason: '当前聊天或目标楼层已变化' });
       receipt.partials = null; receipt.revisions = null; return receipt;
     }
@@ -509,7 +526,7 @@ export function commitAgentModuleFieldWrites_ACU(input: {
       receipt.sqlDiagnostics = errorText_ACU(error);
       return receipt;
     } finally { view?.dispose(); }
-    const result = await writeAgentModuleCommitDelta_ACU(input.chat, input.targetIndex, delta!, now, foldedResult =>
+    const result = await storage.writeDelta(input.chat, input.targetIndex, delta!, now, foldedResult =>
       !foldedResult.salvaged && foldedResult.candidates.every(item => item.valid)
       && canonical_ACU({ ...foldedResult.snapshot, updatedAt: now }) === canonical_ACU({ ...plan.snapshot, settledThroughIndex: folded.contributed ? plan.snapshot.settledThroughIndex : 0, revisions: { ...plan.snapshot.revisions, ...delta!.revisions }, updatedAt: now })
       && verifyRecords_ACU(foldedResult.fields, expected), baseline, isCurrent);
@@ -519,7 +536,7 @@ export function commitAgentModuleFieldWrites_ACU(input: {
       if (result.recovery !== 'saved') { receipt.partials = null; receipt.revisions = null; receipt.alreadySaved = []; }
       receipt.rejected.push({ path: 'host', reason: result.reason ?? result.status }); return receipt;
     }
-    const confirmed = readAgentModuleFoldState_ACU(input.chat);
+    const confirmed = storage.readFold(input.chat);
     receipt.revisions = confirmed.snapshot.revisions;
     receipt.partials = confirmedPartials_ACU(confirmed.fields, plan.partials);
     receipt.accepted = plan.accepted.map(item => ({

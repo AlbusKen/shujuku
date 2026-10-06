@@ -23,10 +23,12 @@ import {
   subscribeAgentSessionLog_ACU,
 } from "../../service/continuation/agent/agent-session-log";
 import { getContinuationRuntime_ACU } from "../../service/continuation/continuation-runtime";
+import { getChatArray_ACU } from "../../data/gateways/chat-gateway";
+import { getActiveChatStorageIdentity_ACU } from "../../data/storage/chat-history";
 import { settings_ACU } from "../../service/runtime/state-manager";
 import { saveSettings_ACU } from "../../service/settings/settings-service";
 import { deriveWorldSimulationProgressView_ACU } from "../simulation/world-simulation-progress-stage";
-import { useChatChangedTick } from "./useChatChangedListener";
+import { useChatChangedTick, useChatMutationTick } from "./useChatChangedListener";
 import { useWorldSimulationRuntime } from "./useWorldSimulationRuntime";
 
 /** 桌宠在视口中的位置与尺寸（px），气泡据此锚定。 */
@@ -172,13 +174,18 @@ function useContinuationSignal(): ComputedRef<ActivityTask | null> {
       logAgentSession_ACU({ kind: "run_failed", title: "已停止", detail: "用户停止", ok: false });
     }
     const runtime = getContinuationRuntime_ACU();
+    const chat = getChatArray_ACU();
+    const chatIdentity = getActiveChatStorageIdentity_ACU(chat);
     try {
       await runtime.orchestrator.stopTask();
     } catch (cause) {
       notify_ACU("error", errorText(cause));
     } finally {
       try {
-        runtime.bridge.stopHostGeneration();
+        // 停止写盘期间已切聊天时，不打断新聊天的正文。
+        if (getChatArray_ACU() === chat
+          && getActiveChatStorageIdentity_ACU(chat) === chatIdentity
+          && getContinuationRuntime_ACU() === runtime) runtime.stopGeneration();
       } catch {
         // 宿主 API 不可用时仍保留已落盘的停止态。
       }
@@ -187,6 +194,7 @@ function useContinuationSignal(): ComputedRef<ActivityTask | null> {
 
   sync();
   const unsubscribe = subscribeAgentSessionLog_ACU(sync);
+  if (getCurrentScope()) watch([useChatChangedTick(), useChatMutationTick()], sync);
   if (getCurrentScope()) onScopeDispose(unsubscribe);
 
   return computed(() => running.value

@@ -7,11 +7,13 @@ import {
   buildDefaultAgentSkillifyPromptSegments_ACU,
 } from '../../shared/defaults';
 import { renderAgentReadOnlyQueryTemplates_ACU, splitAgentQueryTemplateParts_ACU } from '../runtime/template-vars/agent-read-only-template-render';
+import type { SqlTemplateReadContext_ACU } from '../runtime/template-vars/sql-query-var';
 
 export type AgentPromptPlaceholderMap_ACU = Record<string, unknown>;
 
 export interface AgentPromptRenderOptions_ACU {
   enableSqlRender?: boolean;
+  sqlReadContext?: SqlTemplateReadContext_ACU | null;
   promptKind?: 'decision' | 'skillify' | 'unknown';
 }
 
@@ -112,7 +114,9 @@ function renderAgentPromptContent_ACU(
         });
       })
       .join('');
-    const queryResult = renderAgentReadOnlyQueryTemplates_ACU(protectedContent);
+    const queryResult = options.sqlReadContext === undefined
+      ? renderAgentReadOnlyQueryTemplates_ACU(protectedContent)
+      : renderAgentReadOnlyQueryTemplates_ACU(protectedContent, options.sqlReadContext);
     let restored = queryResult.content;
     for (const [token, value] of tokenValues) restored = restored.split(token).join(value);
     logDebug_ACU(`[AgentPromptSQL] kind=${options.promptKind || 'unknown'}; segment=${segmentIndex}; tags=${queryResult.tagCount}; durationMs=${Date.now() - startedAt}; status=${queryResult.rejectedCount > 0 ? 'partial' : 'ok'}`);

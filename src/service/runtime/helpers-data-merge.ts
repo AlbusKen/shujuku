@@ -80,10 +80,11 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
   function mergeSheetGuideStructureIntoData_ACU(
       mergedData: Record<string, any>,
       sheetGuideData: any,
-      options: { structuralAuthority: 'data' | 'guide' } = { structuralAuthority: 'guide' },
+      options: { structuralAuthority: 'data' | 'guide'; templateSnapshot?: Record<string, any> | null } = { structuralAuthority: 'guide' },
   ): { data: Record<string, any>; quarantinedSheetKeys: string[]; warnings: string[] } {
       const guided = materializeDataFromSheetGuide_ACU(sheetGuideData, { includeSeedRows: false });
-      const guideKeys = getSortedSheetKeys_ACU(guided, { ignoreChatGuide: true, includeMissingFromGuide: true });
+      const guideKeys = getSortedSheetKeys_ACU(guided, { ignoreChatGuide: true, includeMissingFromGuide: true,
+          templateSnapshot: options.templateSnapshot });
       const historicalKeysByCanonicalName = new Map<string, string[]>();
       Object.entries(mergedData).forEach(([key, sheet]: [string, any]) => {
           if (!key.startsWith('sheet_') || !sheet || typeof sheet !== 'object') return;
@@ -230,29 +231,37 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
       return { data: guided, quarantinedSheetKeys, warnings };
   }
 
-  export async function mergeAllIndependentTablesLegacyV1_ACU() {
+  export async function mergeAllIndependentTablesLegacyV1_ACU(snapshot?: {
+      chat: any[]; isolationKey: string; sheetGuideData: any; templateSheetKeys: string[];
+      isolationConfig: { enabled: boolean; code: string }; templateData: Record<string, any>;
+  }) {
+      // 桥接只消费显式快照；诊断和调度写入仅发生在调用内存，不触碰普通运行时。
+      const tableStates = snapshot ? {} as typeof independentTableStates_ACU : independentTableStates_ACU;
+      const registerSheets = snapshot ? (_data: unknown): void => undefined : registerMergeSourceSheets_ACU;
+      const registerDeltas = snapshot ? (_data: unknown): void => undefined : registerMergeSourceDeltaKeys_ACU;
       // 源带行表清单：每次合并从零开始登记，登记发生在读取点的任何过滤之前，
       // 使迁移保险闸消费的清单与合并实际读到的源严格同源（消除独立扫描的语义漂移）。
-      lastMergeSourceInventory = new Map<string, string>();
-      const chat = getChatArray_ACU();
+      if (!snapshot) lastMergeSourceInventory = new Map<string, string>();
+      const chat = snapshot ? snapshot.chat : getChatArray_ACU();
       if (!chat || chat.length === 0) {
           logDebug_ACU('Cannot merge data: Chat history is empty.');
           return null;
       }
 
       // [数据隔离核心] 获取当前隔离标签键名
-      const currentIsolationKey = getCurrentIsolationKey_ACU();
+      const currentIsolationKey = snapshot ? snapshot.isolationKey : getCurrentIsolationKey_ACU();
       logDebug_ACU(`[Merge] Loading data for isolation key: [${currentIsolationKey || '无标签'}]`);
 
       // [新增] 聊天级"空白指导表"：一旦存在，本聊天合并/显示顺序都按指导表，不再按模板
       // 注意：该指导表按隔离标签分槽，因此切换标识时可拥有不同的"参数/表头/顺序总指导"
-      const sheetGuideData = getChatSheetGuideDataForIsolationKey_ACU(currentIsolationKey);
+      const sheetGuideData = snapshot ? snapshot.sheetGuideData : getChatSheetGuideDataForIsolationKey_ACU(currentIsolationKey);
       const hasSheetGuide = hasUsableSheetGuide_ACU(sheetGuideData);
 
       // [新增] 获取当前模板/指导表的表格键列表，用于过滤非当前模板的数据
       // 优先使用指导表（如果存在），否则使用当前模板
       // 这样可以确保：切换/导入新模板后，只读取当前模板中存在的表格数据
       const templateSheetKeys = (() => {
+          if (snapshot) return snapshot.templateSheetKeys;
           if (hasSheetGuide) {
               // 存在指导表：使用指导表的表格键（指导表已在导入/切换模板时更新）
               return Object.keys(sheetGuideData).filter(k => k.startsWith('sheet_'));
@@ -280,8 +289,8 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
               if (isDeltaTagData_ACU(tagData)) {
                   // 清单登记：delta 槽的增量 key 与（畸形混合形态下可能存在的）independentData
                   // 带行表都会被 cleanup 删除，闸门必须看到它们。
-                  registerMergeSourceDeltaKeys_ACU(tagData.incrementalData);
-                  registerMergeSourceSheets_ACU(tagData.independentData);
+                  registerDeltas(tagData.incrementalData);
+                  registerSheets(tagData.independentData);
                   if (tagData.incrementalData && Object.keys(tagData.incrementalData).length > 0) {
                       pendingDeltas.push({ index: i, tagData });
                   }
@@ -290,7 +299,7 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
 
               // checkpoint / legacy 楼层：使用现有的 first-write-wins 逻辑
               const independentData = tagData.independentData || {};
-              registerMergeSourceSheets_ACU(independentData);
+              registerSheets(independentData);
               // 防御历史畸形 tracking 值：契约要求 string[]，但早期坏数据可能写入
               // `{}` 等 truthy 非数组；直接 `|| []` 无法兜底，会在下方 `.includes` 抛错。
               const modifiedKeys = Array.isArray(tagData.modifiedKeys) ? tagData.modifiedKeys : [];
@@ -325,11 +334,11 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
                       }
 
                       if (wasUpdated) {
-                          if (!independentTableStates_ACU[storedSheetKey]) {
-                              independentTableStates_ACU[storedSheetKey] = {};
+                          if (!tableStates[storedSheetKey]) {
+                              tableStates[storedSheetKey] = {};
                           }
                           const currentAiFloor = chat.slice(0, i + 1).filter(m => !m.is_user).length;
-                          independentTableStates_ACU[storedSheetKey].lastUpdatedAiFloor = currentAiFloor;
+                          tableStates[storedSheetKey].lastUpdatedAiFloor = currentAiFloor;
                       }
                   }
               });
@@ -337,7 +346,7 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
 
           // [优先级2] 兼容旧版存储格式 - 严格匹配隔离标签
           // [数据隔离核心逻辑] 无标签也是标签的一种，严格隔离不同标签的数据
-          const isolationConfig = { enabled: settings_ACU.dataIsolationEnabled, code: settings_ACU.dataIsolationCode };
+          const isolationConfig = snapshot ? snapshot.isolationConfig : { enabled: settings_ACU.dataIsolationEnabled, code: settings_ACU.dataIsolationCode };
           const isLegacyMatch = isLegacyMatchForIsolation_ACU(message, isolationConfig);
 
           if (isLegacyMatch) {
@@ -345,7 +354,7 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
               const legacyIndepData = readLegacyIndependentData_ACU(message);
               if (legacyIndepData) {
                   const independentData = legacyIndepData;
-                  registerMergeSourceSheets_ACU(independentData);
+                  registerSheets(independentData);
                   const modifiedKeys = readModifiedKeys_ACU(message);
                   const updateGroupKeys = readUpdateGroupKeys_ACU(message);
 
@@ -370,9 +379,9 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
                           }
 
                           if (wasUpdated) {
-                              if (!independentTableStates_ACU[storedSheetKey]) independentTableStates_ACU[storedSheetKey] = {};
+                              if (!tableStates[storedSheetKey]) tableStates[storedSheetKey] = {};
                               const currentAiFloor = chat.slice(0, i + 1).filter(m => !m.is_user).length;
-                              independentTableStates_ACU[storedSheetKey].lastUpdatedAiFloor = currentAiFloor;
+                              tableStates[storedSheetKey].lastUpdatedAiFloor = currentAiFloor;
                           }
                       }
                   });
@@ -386,7 +395,7 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
               const legacyStdData = readLegacyStandardData_ACU(message);
               if (legacyStdData) {
                   const standardData: any = legacyStdData;
-                  registerMergeSourceSheets_ACU(standardData);
+                  registerSheets(standardData);
                   Object.keys(standardData).forEach(k => {
                       if (!k.startsWith('sheet_') || !standardData[k] || typeof standardData[k] !== 'object') return;
                       // [全版本兼容] guide 过滤只拦截无真实行的占位表；带行数据的表永不静默丢弃
@@ -402,15 +411,15 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
                       }
                       mergedData[k] = JSON.parse(JSON.stringify(standardData[k]));
                       foundSheets[k] = true;
-                      if (!independentTableStates_ACU[k]) independentTableStates_ACU[k] = {};
+                      if (!tableStates[k]) tableStates[k] = {};
                       const currentAiFloor = chat.slice(0, i + 1).filter(m => !m.is_user).length;
-                      independentTableStates_ACU[k].lastUpdatedAiFloor = currentAiFloor;
+                      tableStates[k].lastUpdatedAiFloor = currentAiFloor;
                   });
               }
               const legacySumData = readLegacySummaryData_ACU(message);
               if (legacySumData) {
                   const summaryData: any = legacySumData;
-                  registerMergeSourceSheets_ACU(summaryData);
+                  registerSheets(summaryData);
                   Object.keys(summaryData).forEach(k => {
                       if (!k.startsWith('sheet_') || !summaryData[k] || typeof summaryData[k] !== 'object') return;
                       // [全版本兼容] guide 过滤只拦截无真实行的占位表；带行数据的表永不静默丢弃
@@ -426,9 +435,9 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
                       }
                       mergedData[k] = JSON.parse(JSON.stringify(summaryData[k]));
                       foundSheets[k] = true;
-                      if (!independentTableStates_ACU[k]) independentTableStates_ACU[k] = {};
+                      if (!tableStates[k]) tableStates[k] = {};
                       const currentAiFloor = chat.slice(0, i + 1).filter(m => !m.is_user).length;
-                      independentTableStates_ACU[k].lastUpdatedAiFloor = currentAiFloor;
+                      tableStates[k].lastUpdatedAiFloor = currentAiFloor;
                   });
               }
           }
@@ -446,18 +455,20 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
                   // [全版本兼容] 按 base 表存在性判定（兼容携带的非模板表也要正常叠加 delta），
                   // 不再按 templateSheetKeySet 过滤——base 收集阶段已完成宽容过滤。
                   if (!mergedData[sheetKey]) {
+                      if (snapshot) throw new Error('旧表格增量缺少基底，禁止建立桥接空状态。');
                       logWarn_ACU(`[表格重建] delta 楼层 #${deltaIndex} 引用了 sheetKey=${sheetKey}，但 base 中不存在该表，跳过`);
                       continue;
                   }
                   try {
                       mergedData[sheetKey] = applyTableDelta_ACU(mergedData[sheetKey], delta as any, sheetKey);
                       // 更新 lastUpdatedAiFloor 为 delta 楼层（最新变更来源）
-                      if (!independentTableStates_ACU[sheetKey]) {
-                          independentTableStates_ACU[sheetKey] = {};
+                      if (!tableStates[sheetKey]) {
+                          tableStates[sheetKey] = {};
                       }
                       const currentAiFloor = chat.slice(0, deltaIndex + 1).filter((m: any) => !m.is_user).length;
-                      independentTableStates_ACU[sheetKey].lastUpdatedAiFloor = currentAiFloor;
+                      tableStates[sheetKey].lastUpdatedAiFloor = currentAiFloor;
                   } catch (e) {
+                      if (snapshot) throw e;
                       logError_ACU(`[表格重建] 应用 delta 失败: sheetKey=${sheetKey}, 楼层=#${deltaIndex}`, e);
                   }
               }
@@ -475,7 +486,8 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
           if (hasSheetGuide) {
               // 直接物化：仅表头（seedRows 保留在字段中，但不作为"当前对话真实数据行"展示）
               const base = materializeDataFromSheetGuide_ACU(sheetGuideData, { includeSeedRows: false });
-              const orderedKeys = getSortedSheetKeys_ACU(base);
+              const orderedKeys = getSortedSheetKeys_ACU(base,
+                  snapshot ? { ignoreChatGuide: true, includeMissingFromGuide: true, templateSnapshot: snapshot.templateData } : undefined);
               return migrateContentNullToRowId(reorderDataBySheetKeys_ACU(base, orderedKeys));
           }
           return null;
@@ -517,15 +529,22 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
       // 2) 对指导表中缺失的表：使用指导表结构作为初始值（seedRows 仅保留字段，不默认展开到 content）
       // 3) 对于存在历史数据的表：以历史数据为主，但表名/表头/参数/顺序以指导表为准；不把 seedRows 合并进真实数据行
       if (hasSheetGuide) {
-          const guideMergeResult = mergeSheetGuideStructureIntoData_ACU(mergedData, sheetGuideData);
+          const guideMergeResult = mergeSheetGuideStructureIntoData_ACU(mergedData, sheetGuideData,
+              snapshot ? { structuralAuthority: 'guide', templateSnapshot: snapshot.templateData } : undefined);
           mergedData = guideMergeResult.data;
           // 与 V2 分支一致：隔离表键与结构 warning 透出给加载路径报告，不再静默丢弃。
-          lastMergeQuarantinedSheetKeys = guideMergeResult.quarantinedSheetKeys;
-          lastMergeWarnings = guideMergeResult.warnings;
+          if (snapshot && guideMergeResult.quarantinedSheetKeys.length) {
+              throw new Error('旧表格存在结构隔离，不能证明桥接无损。');
+          }
+          if (!snapshot) {
+              lastMergeQuarantinedSheetKeys = guideMergeResult.quarantinedSheetKeys;
+              lastMergeWarnings = guideMergeResult.warnings;
+          }
       }
 
       // [修复] 合并结果按"用户手动顺序/模板顺序"重排，避免合并过程导致的随机乱序
-      const orderedKeys = getSortedSheetKeys_ACU(mergedData);
+      const orderedKeys = getSortedSheetKeys_ACU(mergedData,
+          snapshot ? { ignoreChatGuide: true, includeMissingFromGuide: true, templateSnapshot: snapshot.templateData } : undefined);
       mergedData = reorderDataBySheetKeys_ACU(mergedData, orderedKeys);
       return migrateContentNullToRowId(mergedData);
   }

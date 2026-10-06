@@ -297,13 +297,8 @@ function buildHandoffMessage_ACU(mark: AgentConversationCompactionMark_ACU): Age
   return { id: mark.compactedThroughId, kind: 'handoff', text: mark.report, digest: '早期会话交接报告', turnKey: '', at: mark.at };
 }
 
-/**
- * 读取当前生效的会话视图：按楼层顺序拼接各段，应用最新的压缩标记投影。
- * @param chat 聊天数组，缺省取当前聊天
- * @returns 拼接后的会话；没有任何段时返回空会话
- */
-export function readAgentConversation_ACU(chat?: any[]): AgentConversationSnapshot_ACU {
-  const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+/** 桥接读取完整消息段与有效压缩标记；不投影、不写回、不丢弃被压缩正文。 */
+export function readAgentConversationRecordStrict_ACU(messages: any[]): AgentConversationFloorRecord_ACU {
   let collected: AgentConversationMessage_ACU[] = [];
   let updatedAt = 0;
   for (let index = 0; index < messages.length; index += 1) {
@@ -326,6 +321,20 @@ export function readAgentConversation_ACU(chat?: any[]): AgentConversationSnapsh
   const ids = collected.map(item => item.id);
   if (new Set(ids).size !== ids.length || ids.some((id, index) => index > 0 && id <= ids[index - 1])) invalidConversation_ACU(-1);
   const mark = readActiveAgentConversationCompactionMark_ACU(messages);
+  return {
+    schemaVersion: AGENT_CONVERSATION_SEGMENT_SCHEMA_VERSION_ACU,
+    updatedAt, segment: structuredClone(collected),
+    ...(mark ? { compaction: structuredClone(mark) } : {}),
+  };
+}
+
+/** 读取当前生效会话；完整记录与模型可见投影共用同一严格回放。 */
+export function readAgentConversation_ACU(chat?: any[]): AgentConversationSnapshot_ACU {
+  const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
+  const record = readAgentConversationRecordStrict_ACU(messages);
+  const collected = record.segment;
+  const updatedAt = record.updatedAt;
+  const mark = record.compaction;
   if (!collected.length && !mark) return buildEmptyAgentConversation_ACU();
   let projected = collected;
   if (mark) {

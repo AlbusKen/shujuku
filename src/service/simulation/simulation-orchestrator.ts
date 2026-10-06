@@ -1,5 +1,5 @@
 import { buildDefaultWorldSimulationEnvelope_ACU } from './defaults';
-import type { WorldSimulationAnchorIdentity_ACU, WorldSimulationCommitCandidate_ACU, WorldSimulationMainLoopResult_ACU } from './agent/agent-model';
+import type { WorldSimulationTargetAnchor_ACU, WorldSimulationCommitCandidate_ACU, WorldSimulationMainLoopResult_ACU } from './agent/agent-model';
 import { buildWorldSimulationProjection_ACU } from './simulation-projection';
 import {
   createWorldSimulationError_ACU,
@@ -14,6 +14,7 @@ import {
 } from './model';
 import { endWorldSimulationSessionRun_ACU, logWorldSimulationSession_ACU } from './agent/agent-session-log';
 import type { WorldSimulationRunWriteState_ACU } from './simulation-run-write-state';
+import { sameWorldSimulationTargetRef_ACU, worldSimulationRunTargetRef_ACU, worldSimulationTargetRef_ACU } from './simulation-identity';
 
 export interface WorldSimulationStorePort_ACU {
   read(): WorldSimulationEnvelope_ACU | null;
@@ -26,14 +27,16 @@ export interface WorldSimulationPreparedRun_ACU {
 }
 export interface WorldSimulationOrchestratorDependencies_ACU {
   store: WorldSimulationStorePort_ACU;
+  /** 独立生命周期门禁；只检查新运行，停止与旧运行收尾不经过此入口。 */
+  assertCanOperate?(): void;
   now(): number;
   allocateId(kind: 'task' | 'stage' | 'run' | 'timeline'): string;
-  prepare(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; instruction: string; envelope: WorldSimulationEnvelope_ACU; signal: AbortSignal; resetRunBudget?: boolean; targetModules?: readonly WorldSimulationLedgerModule_ACU[] }): Promise<WorldSimulationPreparedRun_ACU>;
-  assertAnchorCurrent(anchor: WorldSimulationAnchorIdentity_ACU): void | Promise<void>;
-  readResumeLedgerRevision?(identity: WorldSimulationRunIdentity_ACU, anchor: WorldSimulationAnchorIdentity_ACU): number | Promise<number>;
-  appendUserMessage?(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; text: string; idempotent?: boolean }): Promise<void>;
-  commitProjection(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; commitCandidate: WorldSimulationCommitCandidate_ACU; completedAt: number; timelineId: string; runWrites?: WorldSimulationRunWriteState_ACU }): Promise<WorldSimulationAnchorIdentity_ACU | void>;
-  persistCompletion?(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationAnchorIdentity_ACU; outcome: 'commit' | 'no_change'; summary: string }): Promise<void>;
+  prepare(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationTargetAnchor_ACU; instruction: string; envelope: WorldSimulationEnvelope_ACU; signal: AbortSignal; resetRunBudget?: boolean; targetModules?: readonly WorldSimulationLedgerModule_ACU[] }): Promise<WorldSimulationPreparedRun_ACU>;
+  assertAnchorCurrent(anchor: WorldSimulationTargetAnchor_ACU): void | Promise<void>;
+  readResumeLedgerRevision?(identity: WorldSimulationRunIdentity_ACU, anchor: WorldSimulationTargetAnchor_ACU): number | Promise<number>;
+  appendUserMessage?(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationTargetAnchor_ACU; text: string; idempotent?: boolean }): Promise<void>;
+  commitProjection(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationTargetAnchor_ACU; commitCandidate: WorldSimulationCommitCandidate_ACU; completedAt: number; timelineId: string; runWrites?: WorldSimulationRunWriteState_ACU }): Promise<WorldSimulationTargetAnchor_ACU | void>;
+  persistCompletion?(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationTargetAnchor_ACU; outcome: 'commit' | 'no_change'; summary: string }): Promise<void>;
 }
 /**
  * skipped 的各原因：
@@ -50,7 +53,7 @@ export type WorldSimulationOrchestratorResult_ACU =
 
 export interface WorldSimulationStartInput_ACU {
   triggerKind: WorldSimulationTriggerKind_ACU;
-  anchor: WorldSimulationAnchorIdentity_ACU;
+  anchor: WorldSimulationTargetAnchor_ACU;
   instruction: string;
   triggerConversationMessageId?: string | null;
   targetModules?: readonly WorldSimulationLedgerModule_ACU[];
@@ -79,7 +82,7 @@ const abortByChat_ACU = new Map<string, AbortController>();
 /** 在途运行的结算 Promise：interrupt 需要等它落盘后才能安全地 resume / 取代。 */
 const inflightByChat_ACU = new Map<string, Promise<WorldSimulationOrchestratorResult_ACU>>();
 /** 在途期间到达的自动触发只保留最新一次：更早楼层的推演在更新楼层出现后已无意义。 */
-const pendingAutoByChat_ACU = new Map<string, { anchor: WorldSimulationAnchorIdentity_ACU; instruction: string }>();
+const pendingAutoByChat_ACU = new Map<string, { anchor: WorldSimulationTargetAnchor_ACU; instruction: string }>();
 /** 本次在途运行是被用户主动停止/打断的：结算后不得排空 pending 自动触发，否则用户刚停就被自动重启。 */
 const manualStopByChat_ACU = new Set<string>();
 
@@ -97,11 +100,8 @@ const inflightTaskStatuses_ACU = new Set(['drafting', 'running', 'stopping_after
 /** 已终结、不再持有运行身份的任务状态。 */
 const terminalTaskStatuses_ACU = new Set(['completed', 'failed', 'abandoned']);
 
-function sameAnchor_ACU(run: WorldSimulationRunIdentity_ACU, anchor: WorldSimulationAnchorIdentity_ACU): boolean {
-  return run.chatIdentity === anchor.chatIdentity
-    && run.anchorMessageKey === anchor.messageKey
-    && run.anchorSwipeId === anchor.swipeId
-    && run.anchorContentDigest === anchor.contentDigest;
+function sameAnchor_ACU(run: WorldSimulationRunIdentity_ACU, anchor: WorldSimulationTargetAnchor_ACU): boolean {
+  return sameWorldSimulationTargetRef_ACU(worldSimulationRunTargetRef_ACU(run), worldSimulationTargetRef_ACU(anchor));
 }
 
 function sameTrigger_ACU(run: WorldSimulationRunIdentity_ACU | null, input: WorldSimulationStartInput_ACU): boolean {
@@ -176,13 +176,13 @@ export class WorldSimulationOrchestrator_ACU {
   }
 
   async start(input: WorldSimulationStartInput_ACU): Promise<WorldSimulationOrchestratorResult_ACU> {
+    this.dependencies.assertCanOperate?.();
     const persisted = this.dependencies.store.read();
     if (input.triggerKind === 'assistant_completed' && persisted && !persisted.settings.autoTriggerEnabled) return { status: 'skipped', reason: 'disabled' };
     const chatIdentity = input.anchor.chatIdentity;
     const settled = persisted?.task?.completedAutoAnchor;
     if (input.triggerKind === 'assistant_completed' && persisted?.task?.status === 'completed' && settled
-      && settled.chatIdentity === input.anchor.chatIdentity && settled.messageKey === input.anchor.messageKey
-      && settled.swipeId === input.anchor.swipeId && settled.contentDigest === input.anchor.contentDigest) {
+      && sameWorldSimulationTargetRef_ACU(settled, worldSimulationTargetRef_ACU(input.anchor))) {
       return { status: 'skipped', reason: 'duplicate' };
     }
     if (this.isInFlight(chatIdentity)) {
@@ -203,7 +203,8 @@ export class WorldSimulationOrchestrator_ACU {
     return this.runNew_ACU(input, existing, pausedRun ? existing!.task!.taskId : null);
   }
 
-  async resume(input: { anchor: WorldSimulationAnchorIdentity_ACU; instruction?: string; resetRunBudget?: boolean; targetModules?: readonly WorldSimulationLedgerModule_ACU[] }): Promise<WorldSimulationOrchestratorResult_ACU> {
+  async resume(input: { anchor: WorldSimulationTargetAnchor_ACU; instruction?: string; resetRunBudget?: boolean; targetModules?: readonly WorldSimulationLedgerModule_ACU[] }): Promise<WorldSimulationOrchestratorResult_ACU> {
+    this.dependencies.assertCanOperate?.();
     const envelope = this.deriveEnvelopeView(this.dependencies.store.read());
     const identity = envelope?.task?.activeRun;
     if (!envelope?.task || !identity || envelope.activeStageId !== identity.stageId) return { status: 'skipped', reason: 'duplicate' };
@@ -247,9 +248,14 @@ export class WorldSimulationOrchestrator_ACU {
       chatIdentity: input.anchor.chatIdentity,
       triggerKind: input.triggerKind,
       triggerConversationMessageId: input.triggerConversationMessageId ?? null,
-      anchorMessageId: input.anchor.messageId,
-      anchorMessageKey: input.anchor.messageKey,
-      anchorSwipeId: input.anchor.swipeId,
+      ...('logicalRef' in input.anchor ? {
+        kind: 'logical' as const,
+        logicalRef: structuredClone(input.anchor.logicalRef),
+      } : {
+        anchorMessageId: input.anchor.messageId,
+        anchorMessageKey: input.anchor.messageKey,
+        anchorSwipeId: input.anchor.swipeId,
+      }),
       anchorContentDigest: input.anchor.contentDigest,
       baseLedgerRevision: existing?.ledger.revision ?? 0,
       taskId,
@@ -326,7 +332,7 @@ export class WorldSimulationOrchestrator_ACU {
 
   private async reportCompletion_ACU(
     identity: WorldSimulationRunIdentity_ACU,
-    anchor: WorldSimulationAnchorIdentity_ACU,
+    anchor: WorldSimulationTargetAnchor_ACU,
     outcome: 'commit' | 'no_change',
     summary: string,
   ): Promise<void> {
@@ -345,7 +351,7 @@ export class WorldSimulationOrchestrator_ACU {
 
   private async persistPlanAndExecute_ACU(
     reservedIdentity: WorldSimulationRunIdentity_ACU,
-    anchor: WorldSimulationAnchorIdentity_ACU,
+    anchor: WorldSimulationTargetAnchor_ACU,
     prepared: WorldSimulationPreparedRun_ACU,
     signal: AbortSignal,
   ): Promise<WorldSimulationOrchestratorResult_ACU> {
@@ -435,9 +441,8 @@ export class WorldSimulationOrchestrator_ACU {
       return {
         ...envelope!,
         task: { ...envelope!.task!, status: blocked ? 'paused' : 'completed', updatedAt: completedAt, activeRun: blocked ? envelope!.task!.activeRun : null, stopReason: blocked ? result.summary : null,
-          ...(!blocked && identity.triggerKind === 'assistant_completed' ? { completedAutoAnchor: {
-            chatIdentity: anchor.chatIdentity, messageKey: anchor.messageKey, swipeId: anchor.swipeId, contentDigest: anchor.contentDigest,
-          } } : {}),
+          ...(!blocked && identity.triggerKind === 'assistant_completed'
+            ? { completedAutoAnchor: worldSimulationTargetRef_ACU(anchor) } : {}),
         },
         stages: envelope!.stages.map(stage => stage.stageId === identity.stageId ? { ...stage, status: blocked ? 'failed' : 'completed' } : stage),
         timeline: [...envelope!.timeline, { id: this.dependencies.allocateId('timeline'), at: completedAt, kind: blocked ? 'blocked' : 'no_change', taskId: identity.taskId, stageId: identity.stageId, revision: identity.stageRevision, runId: identity.runId, message: result.summary }],

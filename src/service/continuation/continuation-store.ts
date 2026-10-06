@@ -1274,15 +1274,42 @@ function validateOutline_ACU(raw: unknown, settings: ContinuationSettings_ACU) {
   }
 }
 
+export function validateContinuationLogicalRef_ACU(raw: unknown): import('./model').ContinuationLogicalRef_ACU {
+  if (!isRecord_ACU(raw)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', '逻辑正文引用必须是对象');
+  requireKeys_ACU(raw, ['sessionId', 'branchId', 'turnId', 'attemptId', 'floorId'], 'logicalRef');
+  return Object.fromEntries(['sessionId', 'branchId', 'turnId', 'attemptId', 'floorId'].map(key =>
+    [key, requireString_ACU(raw[key], `logicalRef.${key}`)])) as unknown as import('./model').ContinuationLogicalRef_ACU;
+}
+
+export function validateContinuationLogicalAnchor_ACU(raw: unknown): import('./model').ContinuationLogicalAnchor_ACU {
+  if (!isRecord_ACU(raw)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', '逻辑历史前沿必须是对象');
+  requireKeys_ACU(raw, ['sessionId', 'branchId', 'headTurnId'], 'logicalAnchor');
+  return { sessionId: requireString_ACU(raw.sessionId, 'logicalAnchor.sessionId'),
+    branchId: requireString_ACU(raw.branchId, 'logicalAnchor.branchId'),
+    headTurnId: raw.headTurnId === null ? null : requireString_ACU(raw.headTurnId, 'logicalAnchor.headTurnId') };
+}
+
+function validateHistoryAnchor_ACU(raw: Record<string, unknown>): import('./model').ContinuationHistoryAnchor_ACU {
+  if (('messageIndex' in raw) === ('logicalAnchor' in raw)) {
+    fail_ACU('CONTINUATION_ENVELOPE_INVALID', '历史依据必须且只能选择物理楼层或逻辑前沿');
+  }
+  return 'logicalAnchor' in raw ? { logicalAnchor: validateContinuationLogicalAnchor_ACU(raw.logicalAnchor) }
+    : { messageIndex: requireInteger_ACU(raw.messageIndex, 'messageIndex', 0) };
+}
+
 function validateTimeline_ACU(raw: unknown): any[] {
   if (!Array.isArray(raw)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'timeline 必须是数组');
   return raw.map((entry, index) => {
     const path = `activeTask.timeline[${index}]`;
     if (!isRecord_ACU(entry)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `时间线条目必须是对象：${path}`);
-    for (const key of Object.keys(entry)) if (!['id', 'at', 'kind', 'stageId', 'revision', 'nodeId', 'turnId', 'attemptId', 'messageIndex', 'errorCode'].includes(key)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `时间线存在未知字段：${path}.${key}`);
+    for (const key of Object.keys(entry)) if (!['id', 'at', 'kind', 'stageId', 'revision', 'nodeId', 'turnId', 'attemptId', 'messageIndex', 'logicalRef', 'errorCode'].includes(key)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `时间线存在未知字段：${path}.${key}`);
     const result: Record<string, unknown> = { id: requireString_ACU(entry.id, `${path}.id`), at: requireInteger_ACU(entry.at, `${path}.at`, 0), kind: requireEnum_ACU(entry.kind, TIMELINE_KINDS_ACU, `${path}.kind`) };
     for (const key of ['stageId', 'nodeId', 'turnId', 'attemptId'] as const) if (key in entry) result[key] = requireString_ACU(entry[key], `${path}.${key}`);
     for (const key of ['revision', 'messageIndex'] as const) if (key in entry) result[key] = requireInteger_ACU(entry[key], `${path}.${key}`, 0);
+    if ('logicalRef' in entry) {
+      if ('messageIndex' in entry) fail_ACU('CONTINUATION_ENVELOPE_INVALID', '逻辑正文不能携带物理下标');
+      result.logicalRef = validateContinuationLogicalRef_ACU(entry.logicalRef);
+    }
     if ('errorCode' in entry) result.errorCode = requireString_ACU(entry.errorCode, `${path}.errorCode`);
     return result;
   });
@@ -1295,7 +1322,7 @@ function validatePendingHostTurn_ACU(raw: unknown): ContinuationEnvelope_ACU['ac
   if (!isRecord_ACU(raw.identity)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'pendingHostTurn.identity 必须是对象');
   requireKeys_ACU(raw.identity, ['chatIdentity', 'taskId', 'stageId', 'revision', 'nodeId', 'turnId', 'attemptId'], 'activeTask.pendingHostTurn.identity');
   if (!isRecord_ACU(raw.capture)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'pendingHostTurn.capture 必须是对象');
-  requireKeys_ACU(raw.capture, ['capturedAt', 'capturedChatLength', 'capturedAiFloorCount', 'generationSeq'], 'activeTask.pendingHostTurn.capture');
+  requireKeys_ACU(raw.capture, ['capturedAt', 'capturedChatLength', 'capturedAiFloorCount', 'generationSeq'], 'activeTask.pendingHostTurn.capture', ['logicalRef']);
   return {
     identity: {
       chatIdentity: requireString_ACU(raw.identity.chatIdentity, 'pendingHostTurn.identity.chatIdentity'),
@@ -1311,6 +1338,7 @@ function validatePendingHostTurn_ACU(raw: unknown): ContinuationEnvelope_ACU['ac
       capturedChatLength: requireInteger_ACU(raw.capture.capturedChatLength, 'pendingHostTurn.capture.capturedChatLength', 0),
       capturedAiFloorCount: requireInteger_ACU(raw.capture.capturedAiFloorCount, 'pendingHostTurn.capture.capturedAiFloorCount', 0),
       generationSeq: raw.capture.generationSeq === null ? null : requireInteger_ACU(raw.capture.generationSeq, 'pendingHostTurn.capture.generationSeq', 1),
+      ...('logicalRef' in raw.capture ? { logicalRef: validateContinuationLogicalRef_ACU(raw.capture.logicalRef) } : {}),
     },
     retryCount: requireInteger_ACU(raw.retryCount, 'pendingHostTurn.retryCount', 0),
     status: requireEnum_ACU(raw.status, ['awaiting_generation', 'retry_ready', 'exhausted'] as const, 'pendingHostTurn.status'),
@@ -1363,7 +1391,7 @@ function validateTask_ACU(raw: unknown, settings: ContinuationSettings_ACU): Con
       const records = stage.progressAdjustments.map((item, adjustmentIndex) => {
         const itemPath = `${path}.progressAdjustments[${adjustmentIndex}]`;
         if (!isRecord_ACU(item)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `进度校准必须是对象：${itemPath}`);
-        requireKeys_ACU(item, ['revision', 'completedTurns', 'timelineOffset', 'messageIndex', 'reason'], itemPath);
+        requireKeys_ACU(item, ['revision', 'completedTurns', 'timelineOffset', 'reason'], itemPath, ['messageIndex', 'logicalAnchor']);
         const revision = requireInteger_ACU(item.revision, `${itemPath}.revision`, 1);
         const outline = revisions.find(entry => entry.revision === revision)?.outline;
         const completedTurns = requireInteger_ACU(item.completedTurns, `${itemPath}.completedTurns`, 0);
@@ -1372,7 +1400,7 @@ function validateTask_ACU(raw: unknown, settings: ContinuationSettings_ACU): Con
           fail_ACU('CONTINUATION_ENVELOPE_INVALID', `进度校准引用或范围无效：${itemPath}`);
         }
         return { revision, completedTurns, timelineOffset,
-          messageIndex: requireInteger_ACU(item.messageIndex, `${itemPath}.messageIndex`, 0),
+          ...validateHistoryAnchor_ACU(item),
           reason: requireString_ACU(item.reason, `${itemPath}.reason`),
         };
       });
@@ -1398,13 +1426,13 @@ function validateTask_ACU(raw: unknown, settings: ContinuationSettings_ACU): Con
     return { progressSelections: raw.progressSelections.map((item, index) => {
       const path = `activeTask.progressSelections[${index}]`;
       if (!isRecord_ACU(item)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', `阶段选择必须是对象：${path}`);
-      requireKeys_ACU(item, ['stageId', 'messageIndex', 'timelineOffset'], path);
+      requireKeys_ACU(item, ['stageId', 'timelineOffset'], path, ['messageIndex', 'logicalAnchor']);
       const stageId = requireString_ACU(item.stageId, `${path}.stageId`);
       const timelineOffset = requireInteger_ACU(item.timelineOffset, `${path}.timelineOffset`, 0);
       if (!stageIds.has(stageId) || !Array.isArray(raw.timeline) || timelineOffset > raw.timeline.length) {
         fail_ACU('CONTINUATION_ENVELOPE_INVALID', `阶段选择引用或范围无效：${path}`);
       }
-      return { stageId, timelineOffset, messageIndex: requireInteger_ACU(item.messageIndex, `${path}.messageIndex`, 0) };
+      return { stageId, timelineOffset, ...validateHistoryAnchor_ACU(item) };
     }) };
   })();
   const stopReason = raw.stopReason === null ? null : requireEnum_ACU(raw.stopReason, STOP_REASONS_ACU, 'activeTask.stopReason');

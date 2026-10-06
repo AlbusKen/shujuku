@@ -372,7 +372,7 @@ export interface ContinuationTask_ACU {
   lastError: ContinuationError_ACU | null;
   pendingHostTurn?: ContinuationPendingHostTurn_ACU | null;
   /** 主会话选择的执行阶段；与各阶段完成数分开保存，选择不等于其它阶段已完结。 */
-  progressSelections?: { stageId: string; messageIndex: number; timelineOffset: number }[];
+  progressSelections?: ({ stageId: string; timelineOffset: number } & ContinuationHistoryAnchor_ACU)[];
 }
 
 export interface ContinuationStage_ACU {
@@ -396,7 +396,8 @@ export interface ContinuationProgressAdjustment_ACU {
   /** 校准时的时间线长度；之后的真实完成记录从该位置继续累计。 */
   timelineOffset: number;
   /** 校准依据所在的聊天楼层，退到该楼之前时不再采用此基线。 */
-  messageIndex: number;
+  messageIndex?: number;
+  logicalAnchor?: ContinuationLogicalAnchor_ACU;
   reason: string;
 }
 
@@ -419,12 +420,28 @@ export interface TurnAttemptIdentity_ACU {
   attemptId: string;
 }
 
+/** 逻辑正文归属与历史前沿独立于宿主物理下标。 */
+export interface ContinuationLogicalRef_ACU {
+  sessionId: string;
+  branchId: string;
+  turnId: string;
+  attemptId: string;
+  floorId: string;
+}
+export interface ContinuationLogicalAnchor_ACU {
+  sessionId: string;
+  branchId: string;
+  headTurnId: string | null;
+}
+export type ContinuationHistoryAnchor_ACU = { messageIndex: number; logicalAnchor?: never } | { messageIndex?: never; logicalAnchor: ContinuationLogicalAnchor_ACU };
 /** Durable, non-content state needed to attribute a host generation. */
 export interface ContinuationHostGenerationCapture_ACU {
   capturedAt: number;
   capturedChatLength: number;
   capturedAiFloorCount: number;
   generationSeq: number | null;
+  /** 存在时物理捕获只描述启用前缀，不参与逻辑正文归属或重试。 */
+  logicalRef?: ContinuationLogicalRef_ACU;
 }
 
 export interface ContinuationPendingHostTurn_ACU {
@@ -469,6 +486,7 @@ export interface ContinuationTimelineEntry_ACU {
   turnId?: string;
   attemptId?: string;
   messageIndex?: number;
+  logicalRef?: ContinuationLogicalRef_ACU;
   errorCode?: ContinuationErrorCode_ACU;
 }
 

@@ -63,6 +63,7 @@ export async function injectTavernBridgeIntoTopWindow_ACU(): Promise<boolean> {
                     window['${TAVERN_BRIDGE_GLOBAL_KEY_ACU}'].extension_settings = ext?.extension_settings || null;
                     window['${TAVERN_BRIDGE_GLOBAL_KEY_ACU}'].saveSettingsDebounced = main?.saveSettingsDebounced || null;
                     window['${TAVERN_BRIDGE_GLOBAL_KEY_ACU}'].saveSettings = main?.saveSettings || null;
+                    window['${TAVERN_BRIDGE_GLOBAL_KEY_ACU}'].isGenerating = typeof main?.isGenerating === 'function' ? main.isGenerating : null;
                 } catch (e) {
                     window['${TAVERN_BRIDGE_GLOBAL_KEY_ACU}'] = window['${TAVERN_BRIDGE_GLOBAL_KEY_ACU}'] || {};
                     window['${TAVERN_BRIDGE_GLOBAL_KEY_ACU}'].error = String(e && (e.message || e));

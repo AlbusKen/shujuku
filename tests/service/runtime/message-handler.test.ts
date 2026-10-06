@@ -79,14 +79,16 @@ describe('evaluateNewMessageAction_ACU', () => {
       expect(result.reason).toContain('not an AI reply');
     });
 
-    it('最新消息来自不同角色时跳过', () => {
+    it('消息作者不同仍检查填表，但不优化其他角色正文', () => {
       mockGetCurrentCharacterFallback.mockReturnValue({ name: '角色A' });
       const result = evaluateNewMessageAction_ACU(
         [{ is_user: false, mes: 'AI回复', name: '角色B' }],
-        false, true, false, {},
+        false, true, false, { enabled: true, parallelMode: true },
       );
-      expect(result.action).toBe('skip');
-      expect(result.reason).toContain('different character');
+      expect(result.action).toBe('update_only');
+      expect(result.lastMessageIndex).toBe(0);
+      expect(result.skipReason).toBeUndefined();
+      expect(result.reason).toContain('without content optimization');
     });
   });
 

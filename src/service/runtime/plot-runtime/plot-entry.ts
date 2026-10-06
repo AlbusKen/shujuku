@@ -16,7 +16,7 @@ const PLOT_RUNTIME_BUILD_VERSION_ACU = (globalThis as any).__ACU_BUILD_VERSION__
 
 /**
  * 只有本次用户中止信号或明确的用户取消错误才恢复手动取消语义。
- * 宿主 AbortError、超时和世界书取消分类不能自动中断发送。
+ * 普通异常按失败阻断正文，不伪装为手动取消。
  */
 function isTaskAbortedError_ACU(error: unknown): boolean {
   return abortController_ACU?.signal.aborted === true
@@ -75,6 +75,12 @@ function isTaskAbortedError_ACU(error: unknown): boolean {
         reportWarning: options.reportWarning,
       });
 
+      if (runtimeResult?.failedResults?.length && runtimeResult.finalMessage) {
+        return {
+          success: false, blocked: true, errorType: 'partial_failure',
+          errorMessage: '剧情任务未全部通过验收，正文发送已停止。',
+        };
+      }
       if (!runtimeResult?.finalMessage) {
         if (runtimeResult?.apiRetriesExhausted === true) {
           return {
@@ -87,6 +93,7 @@ function isTaskAbortedError_ACU(error: unknown): boolean {
         if (runtimeResult?.abortedByStageFailure) {
           return {
             success: false,
+            blocked: true,
             errorType: 'stage_failure',
             errorMessage: runtimeResult.errorMessage || `剧情任务阶段 ${runtimeResult.failedStage ?? '?'} 执行失败，后续阶段已停止。`,
             failedStage: runtimeResult.failedStage,
@@ -97,8 +104,9 @@ function isTaskAbortedError_ACU(error: unknown): boolean {
         } else if (runtimeResult?.enabledTaskCount > 0) {
           return {
             success: false,
+            blocked: true,
             errorType: 'all_failed',
-            errorMessage: `共 ${runtimeResult.enabledTaskCount} 个剧情任务均未返回有效结果，继续宿主发送。`,
+            errorMessage: `共 ${runtimeResult.enabledTaskCount} 个剧情任务均未返回有效结果，正文发送已停止。`,
             enabledTaskCount: runtimeResult.enabledTaskCount,
           };
         } else {
@@ -132,13 +140,14 @@ function isTaskAbortedError_ACU(error: unknown): boolean {
           return { success: false, aborted: true, manual: true, restoreText: originalUserInputForAbort_ACU };
       }
       if (isPlotStageError_ACU(error) && error.phase === 'clear_final_generation_greenlights') {
-        logError_ACU('[剧情推进] 世界书预检失败，继续宿主发送。', {
+        logError_ACU('[剧情推进] 世界书预检失败，正文发送已停止。', {
           phase: error.phase,
           build: PLOT_RUNTIME_BUILD_VERSION_ACU,
           error: summarizePlotRuntimeError_ACU(error),
         });
         return {
           success: false,
+          blocked: true,
           errorType: 'worldbook_preflight_failure',
           errorMessage: '剧情推进的世界书预检失败，请检查绑定/选择的世界书。',
         };
@@ -152,6 +161,7 @@ function isTaskAbortedError_ACU(error: unknown): boolean {
       });
       return {
         success: false,
+        blocked: true,
         errorType: 'exception',
         errorMessage: '剧情规划大师在处理时发生错误。',
       };

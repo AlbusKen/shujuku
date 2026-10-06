@@ -134,6 +134,8 @@ beforeEach(async () => {
   m.setChat([user, user]);
   m.loadAllChatMessages.mockResolvedValue(undefined);
   m.triggerAutomaticUpdateIfNeeded.mockResolvedValue(undefined);
+  m.executeContentOptimization.mockReset();
+  m.executeContentOptimization.mockResolvedValue(true);
   m.evaluateNewMessageAction.mockReturnValue({ action: 'update_only', reason: 'No content optimization configured', lastMessageIndex: 2 });
 });
 
@@ -363,5 +365,6 @@ describe('handleContentOptimizationEvent_ACU 有界物化等待', () => {
       expect.objectContaining({ chatKey: 'chat-a' }),
     );
     expect(m.evaluateNewMessageAction).not.toHaveBeenCalled();
+    expect(m.triggerAutomaticUpdateIfNeeded).not.toHaveBeenCalled();
   });
 });
