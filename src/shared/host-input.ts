@@ -1,8 +1,16 @@
 import { jQuery_API_ACU, SillyTavern_API_ACU } from './host-api';
+import { getHostWindow } from './runtime-env';
+
+/** jQuery 可能来自脚本 iframe；宿主控件必须在酒馆主文档中查询。 */
+function selectHostControl_ACU(selector: string): JQuery<HTMLElement> | undefined {
+    const document = getHostWindow().document;
+    if (!document) return undefined;
+    return jQuery_API_ACU?.(selector, document);
+}
 
 /** 仅显示宿主生成中外观；返回恢复函数，不启动生成或派发宿主事件。 */
 export function beginHostGenerationUi_ACU(): () => void {
-    const stopButton = jQuery_API_ACU?.('#mes_stop')?.[0];
+    const stopButton = selectHostControl_ACU('#mes_stop')?.[0];
     const body = stopButton?.ownerDocument.body;
     if (!stopButton || !body) return () => {};
 
@@ -21,7 +29,7 @@ export function beginHostGenerationUi_ACU(): () => void {
 /** 宿主发送框操作，不属于任何 V1 popup。 */
 export function getSendTextareaValue_ACU(): string {
     try {
-        return String(jQuery_API_ACU?.('#send_textarea').val() || '');
+        return String(selectHostControl_ACU('#send_textarea')?.val() || '');
     } catch {
         return '';
     }
@@ -30,7 +38,7 @@ export function getSendTextareaValue_ACU(): string {
 /** 写回宿主发送框，并在 input 监听执行后回读确认，不能把空选择器或被改写当作成功。 */
 export function setSendTextareaValue_ACU(text: string): boolean {
     try {
-        const $textarea = jQuery_API_ACU?.('#send_textarea');
+        const $textarea = selectHostControl_ACU('#send_textarea');
         if (!$textarea || typeof $textarea.val !== 'function' || typeof $textarea.trigger !== 'function') return false;
         if (typeof $textarea.length === 'number' && $textarea.length === 0) return false;
         $textarea.val(text);
@@ -62,8 +70,9 @@ function notifySendTextareaInput_ACU($textarea: JQuery<HTMLElement>): void {
 /** Clicks the host send button and reports availability instead of swallowing it. */
 export function clickSendButton_ACU(): boolean {
     try {
-        const $button = jQuery_API_ACU?.('#send_but');
+        const $button = selectHostControl_ACU('#send_but');
         if (!$button || typeof $button.click !== 'function') return false;
+        if (typeof $button.length === 'number' && $button.length === 0) return false;
         $button.click();
         return true;
     } catch {
@@ -77,7 +86,7 @@ export function clickSendButton_ACU(): boolean {
  */
 export function clickRegenerateButton_ACU(): boolean {
     try {
-        const $button = jQuery_API_ACU?.('#option_regenerate');
+        const $button = selectHostControl_ACU('#option_regenerate');
         if ($button && typeof $button.length === 'number' && $button.length > 0 && typeof $button.trigger === 'function') {
             $button.trigger('click');
             return true;
