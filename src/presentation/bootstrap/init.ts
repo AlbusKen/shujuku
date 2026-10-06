@@ -176,6 +176,24 @@ export   function mainInitialize_ACU() {
         typeof SillyTavern_API_ACU.eventSource.on === 'function' &&
         SillyTavern_API_ACU.eventTypes
       ) {
+        // 填表资格只来自本次加载后观察到的生成；宿主 chat 数组可能被原地复用。
+        let autoFillChatEpoch = 0;
+        const autoFillGenerationScopes = new WeakMap<ReturnType<typeof recordGenerationContext_ACU>, () => boolean>();
+        const captureAutoFillChatScope = (): (() => boolean) => {
+          const api = SillyTavern_API_ACU;
+          const chat = api.chat;
+          const chatId = api.chatId;
+          const characterId = api.characterId;
+          const groupId = api.groupId;
+          const chatKey = currentChatFileIdentifier_ACU;
+          const isolationKey = getCurrentIsolationKey_ACU();
+          const epoch = autoFillChatEpoch;
+          return () => autoFillChatEpoch === epoch
+            && SillyTavern_API_ACU === api && api.chat === chat
+            && api.chatId === chatId && api.characterId === characterId && api.groupId === groupId
+            && currentChatFileIdentifier_ACU === chatKey && getCurrentIsolationKey_ACU() === isolationKey;
+        };
+
         // [调试] 检查可用的事件类型
         logDebug_ACU('[提示词模板] 可用的事件类型:', Object.keys(SillyTavern_API_ACU.eventTypes));
         installZeroLayerBootstrap_ACU();
@@ -227,6 +245,7 @@ export   function mainInitialize_ACU() {
         }, 60_000);
 
         SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.CHAT_CHANGED, async (chatFileName: string) => {
+          ++autoFillChatEpoch;
           logDebug_ACU(`ACU CHAT_CHANGED event: ${chatFileName}`);
 
           const hasValidChatFileName_ACU = isValidChatFileName_ACU(chatFileName);
@@ -519,6 +538,7 @@ export   function mainInitialize_ACU() {
               // 终止只作用于当次填表。新一轮宿主生成必须清掉残留，否则评估闸永久 user_aborted。
               _set_wasStoppedByUser_ACU(false);
               const context = recordGenerationContext_ACU(type, params, dryRun);
+              autoFillGenerationScopes.set(context, captureAutoFillChatScope());
               bindContinuationInternalAiGenerationStarted_ACU(context.seq);
               bindWorldSimulationInternalAiGenerationStarted_ACU(context.seq);
               // 宿主的 GENERATION_STARTED 通常在发送点击返回后的微任务里才送达，同步配对必然错过；
@@ -538,6 +558,7 @@ export   function mainInitialize_ACU() {
           SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.GENERATION_STOPPED, () => {
             try {
               const discarded = discardLatestGenerationContext_ACU();
+              if (discarded) autoFillGenerationScopes.delete(discarded);
               // 被中止的生成不会再有 GENERATION_ENDED；通知桥把等待中的续写轮转为可重试，避免卡死。
               void getContinuationHostGenerationBridge_ACU()?.onGenerationStopped(discarded?.seq);
             } catch (e) {}
@@ -552,14 +573,25 @@ export   function mainInitialize_ACU() {
                 const isolationKey = getCurrentIsolationKey_ACU();
                 const isCurrent = () => SillyTavern_API_ACU?.chat === chatAtCapture
                   && currentChatFileIdentifier_ACU === chatKey && getCurrentIsolationKey_ACU() === isolationKey;
+                const isAutoFillCurrent = captureAutoFillChatScope();
+                const generationContext = consumeGenerationContextForEnded_ACU();
+                const trackedGeneration = !!generationContext && autoFillGenerationScopes.get(generationContext)?.() === true;
+                if (generationContext) autoFillGenerationScopes.delete(generationContext);
                 // 每个信号独立登记；仅自己的后台处理受原聊天作用域约束。
                 dispatch('auto-fill', () => {
-                  if (!isCurrent()) return;
+                  if (!isAutoFillCurrent()) return;
+                  // 酒馆的停止按钮收尾也会派发 ended，不等价于一次新的正文生成。
+                  if (!trackedGeneration) {
+                    logAutoFillSkip_ACU('untracked_generation', {
+                      eventType: 'GENERATION_ENDED', messageId: message_id, chatKey, isolationKey,
+                    });
+                    return;
+                  }
                   return triggerAutomaticUpdateIfNeeded_ACU(undefined, {
                     eventType: 'GENERATION_ENDED', messageId: message_id, chatKey, isolationKey,
+                    isCurrentChat: isAutoFillCurrent,
                   });
                 });
-                const generationContext = consumeGenerationContextForEnded_ACU();
                 const internalRequest = consumeContinuationInternalAiGenerationEnded_ACU(generationContext?.seq);
                 if (internalRequest) {
                   return;
@@ -656,14 +688,18 @@ export   function mainInitialize_ACU() {
               const isolationKey = getCurrentIsolationKey_ACU();
               const isCurrent = () => SillyTavern_API_ACU?.chat === chatAtCapture
                 && currentChatFileIdentifier_ACU === chatKey && getCurrentIsolationKey_ACU() === isolationKey;
+              const isAutoFillCurrent = captureAutoFillChatScope();
               // 开场白不是一次新生成，不安排自动填表。
               dispatch('auto-fill', () => {
-                if (!isCurrent()) return;
+                if (!isAutoFillCurrent()) return;
                 if (messageType === 'first_message') {
                   logAutoFillSkip_ACU('initial_chat_message', { eventType: evName, messageId });
                   return;
                 }
-                return triggerAutomaticUpdateIfNeeded_ACU(undefined, { eventType: evName, messageId, chatKey, isolationKey });
+                return triggerAutomaticUpdateIfNeeded_ACU(undefined, {
+                  eventType: evName, messageId, chatKey, isolationKey,
+                  isCurrentChat: isAutoFillCurrent,
+                });
               });
               const eventMessageId = typeof messageId === 'number' && Number.isInteger(messageId)
                 ? messageId

@@ -22,6 +22,7 @@ export type AutoFillSkipReason_ACU =
   | 'auto_update_coalesced'
   | 'preconditions_failed'
   | 'initial_chat_message'
+  | 'untracked_generation'
   | 'no_tables_due'
   | 'reply_below_threshold'
   | 'execution_failed'

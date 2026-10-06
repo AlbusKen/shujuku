@@ -382,6 +382,7 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
     }));
     expect(m.autoUpdate).toHaveBeenCalledExactlyOnceWith(undefined, {
       eventType: eventName, messageId: 1, chatKey: 'chat-a', isolationKey: 'test-isolation',
+      isCurrentChat: expect.any(Function),
     });
     expect(m.consumeGeneration).not.toHaveBeenCalled();
     expect(m.consumeInternalGeneration).not.toHaveBeenCalled();
@@ -432,6 +433,7 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
       const source = m.api.eventSource;
       const emit = source.emit;
       const event = m.api.eventTypes[eventName];
+      if (eventName === 'GENERATION_ENDED') m.generationStarted!('normal', {}, false);
       m.autoUpdate.mockImplementationOnce(() => { throw new Error('内部填表失败'); });
       m.handleNewMessage.mockRejectedValueOnce(new Error('内部优化失败'));
 
@@ -469,6 +471,86 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
       expect(m.generate).not.toHaveBeenCalled();
     },
   );
+
+  it('未观察到生成开始时，陈旧上下文和按钮收尾事件不触发填表', async () => {
+    m.currentChatKey = 'chat-a';
+    m.api.chat = [{ is_user: false, mes: '已有开场白' }];
+    m.generationEnded!(1);
+    await dispatchCompletionTasks_ACU();
+
+    expect(m.autoUpdate).not.toHaveBeenCalled();
+    expect(m.handleNewMessage).toHaveBeenCalledOnce();
+  });
+
+  it.each(['normal', 'continue', 'regenerate', 'swipe'])('%s 的生成结束仍填表，重复收尾不复用资格', async type => {
+    m.currentChatKey = 'chat-a';
+    m.api.chat = [{ is_user: false, mes: '正文' }];
+    m.generationStarted!(type, {}, false);
+    m.generationEnded!(1);
+    await dispatchCompletionTasks_ACU();
+    expect(m.autoUpdate).toHaveBeenCalledOnce();
+
+    m.generationEnded!(1);
+    await dispatchCompletionTasks_ACU();
+    expect(m.autoUpdate).toHaveBeenCalledOnce();
+  });
+
+  it.each(['切换已有聊天', '新建聊天'])('%s 不因旧生成收尾或开场白填表，下一次真实生成正常触发', async action => {
+    m.currentChatKey = 'chat-a';
+    m.api.chat = [{ is_user: false, mes: '原聊天正文' }];
+    const reusedChat = m.api.chat;
+    m.generationStarted!('normal', {}, false);
+
+    // 宿主先改变聊天身份和原地加载消息，再派发 CHAT_CHANGED。
+    m.api.chatId = 'chat-b';
+    m.api.characterId = '1';
+    const messages = action === '新建聊天'
+      ? [{ is_user: false, mes: '新开场白' }]
+      : [{ is_user: true, mes: '旧用户消息' }, { is_user: false, mes: '旧回复' }];
+    reusedChat.splice(0, reusedChat.length, ...messages);
+    m.generationEnded!(reusedChat.length);
+    await dispatchCompletionTasks_ACU();
+    expect(m.autoUpdate).not.toHaveBeenCalled();
+
+    m.resetScript.mockImplementation(async (name: string) => { m.currentChatKey = name; });
+    await m.chatChanged!('chat-b');
+    if (action === '新建聊天') {
+      m.messageReceived!(0, 'first_message');
+      m.characterMessageRendered!(0, 'first_message');
+    }
+    m.generationEnded!(reusedChat.length);
+    await vi.advanceTimersByTimeAsync(1200);
+    expect(m.autoUpdate).not.toHaveBeenCalled();
+    expect(m.api.chat).toBe(reusedChat);
+
+    m.generationStarted!('continue', {}, false);
+    m.generationEnded!(reusedChat.length);
+    await dispatchCompletionTasks_ACU();
+    expect(m.autoUpdate).toHaveBeenCalledOnce();
+  });
+
+  it.each(['GENERATION_ENDED', 'MESSAGE_RECEIVED', 'CHARACTER_MESSAGE_RENDERED'] as const)(
+    '%s 已登记任务在同名聊天重载且复用数组后失效', async eventName => {
+      m.currentChatKey = 'chat-a';
+      m.api.chat = [{ is_user: false, mes: '正文' }];
+      m.resetScript.mockImplementation(async () => {});
+      if (eventName === 'GENERATION_ENDED') m.generationStarted!('normal', {}, false);
+      await m.api.eventSource.emit(m.api.eventTypes[eventName], 0, 'normal');
+      await m.chatChanged!('chat-a');
+      await dispatchCompletionTasks_ACU();
+      expect(m.autoUpdate).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['chatId', 'characterId', 'groupId'] as const)('生成开始后宿主 %s 改变，即使数组和插件聊天名未变也不填表', async field => {
+    m.currentChatKey = 'chat-a';
+    m.api.chat = [{ is_user: false, mes: '原正文' }];
+    m.generationStarted!('normal', {}, false);
+    m.api[field] = 'another';
+    m.generationEnded!(1);
+    await dispatchCompletionTasks_ACU();
+    expect(m.autoUpdate).not.toHaveBeenCalled();
+  });
 });
 
 describe('mainInitialize_ACU continuation internal AI event isolation', () => {
@@ -615,6 +697,7 @@ describe('mainInitialize_ACU continuation host generation isolation', () => {
     expect(bridge.onGenerationEnded).not.toHaveBeenCalled();
     expect(m.autoUpdate).toHaveBeenCalledExactlyOnceWith(undefined, {
       eventType: 'GENERATION_ENDED', messageId: 42, chatKey: '', isolationKey: 'test-isolation',
+      isCurrentChat: expect.any(Function),
     });
     expect(m.handleNewMessage).toHaveBeenCalledWith('GENERATION_ENDED', expect.objectContaining({ eventMessageId: 42 }));
   });

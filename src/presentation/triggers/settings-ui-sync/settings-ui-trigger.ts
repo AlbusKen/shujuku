@@ -85,11 +85,15 @@ let autoUpdateQueueId_ACU = 0;
   // 每次调用独立排队；失败只回报当前调用，不中断后续信号。
   export function triggerAutomaticUpdateIfNeeded_ACU(
     performanceContext?: { runId?: string; parentSpanId?: string },
-    triggerContext: AutoFillSkipContext_ACU = {},
+    triggerContext: AutoFillSkipContext_ACU & {
+      /** 捕获事件时的宿主身份与聊天代次，在排队等待后再次验证。 */
+      isCurrentChat?: () => boolean;
+    } = {},
   ): Promise<void> {
     const queueId = ++autoUpdateQueueId_ACU;
     const runId = performanceContext?.runId || `autofill-${queueId}`;
-    const context = { ...triggerContext, runId, queueId };
+    const { isCurrentChat, ...diagnosticContext } = triggerContext;
+    const context = { ...diagnosticContext, runId, queueId };
     const scoped = context.chatKey !== undefined || context.isolationKey !== undefined;
     const chatAtEnqueue = scoped ? getChatArray_ACU() : undefined;
     logAutoFillStage_ACU('queued', context);
@@ -97,7 +101,7 @@ let autoUpdateQueueId_ACU = 0;
       logAutoFillStage_ACU('dequeued', context);
       try {
         // 正文监听延后执行；排队期间切换聊天不能把旧信号用于新聊天。
-        if (scoped && (getChatArray_ACU() !== chatAtEnqueue
+        if ((isCurrentChat && !isCurrentChat()) || scoped && (getChatArray_ACU() !== chatAtEnqueue
           || context.chatKey !== undefined && context.chatKey !== currentChatFileIdentifier_ACU
           || context.isolationKey !== undefined && context.isolationKey !== getCurrentIsolationKey_ACU())) {
           logAutoFillSkip_ACU('chat_changed', { ...context, stage: 'dequeue' });

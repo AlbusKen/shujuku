@@ -213,8 +213,9 @@ describe('triggerAutomaticUpdateIfNeeded_ACU 逐次串行调度', () => {
     expect(m.logSkip).toHaveBeenCalledTimes(1);
   });
 
-  it.each(['chat', 'isolation', 'array'] as const)('正文接收任务等待期间 %s 变化，不在新作用域执行', async changed => {
+  it.each(['chat', 'isolation', 'array', 'epoch'] as const)('正文接收任务等待期间 %s 变化，不在新作用域执行', async changed => {
     let releaseFirst!: () => void;
+    let epoch = 0;
     m.executePlan.mockImplementationOnce(() => new Promise(resolve => {
       releaseFirst = () => resolve({ failedGroups: 0, errors: [], autoMergeTriggered: false, autoMergeSuccess: false });
     }));
@@ -224,10 +225,12 @@ describe('triggerAutomaticUpdateIfNeeded_ACU 逐次串行调度', () => {
     const queued = triggerAutomaticUpdateIfNeeded_ACU(undefined, {
       eventType: 'CHARACTER_MESSAGE_RENDERED', messageId: 1,
       chatKey: m.chatKey, isolationKey: m.isolationKey,
+      isCurrentChat: () => epoch === 0,
     });
     if (changed === 'chat') m.chatKey = 'chat-b';
     if (changed === 'isolation') m.isolationKey = 'another-isolation';
     if (changed === 'array') m.getChat.mockReturnValue([{ is_user: false }]);
+    if (changed === 'epoch') ++epoch;
 
     releaseFirst();
     await Promise.all([first, queued]);
