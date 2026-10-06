@@ -810,16 +810,16 @@ describe('buildCustomApiRequestBody_ACU', () => {
     expect(body).not.toHaveProperty('custom_prompt_post_processing');
   });
 
-  it('promptPostProcessing=merge 透传为 custom_prompt_post_processing', () => {
+  it('旧 promptPostProcessing=merge 归一为安全的 merge_tools', () => {
     const body = buildCustomApiRequestBody_ACU(
       [{ role: 'user', content: 'test' }],
-      { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: 'merge' },
+      { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: 'merge' as any },
     );
-    expect(body.custom_prompt_post_processing).toBe('merge');
+    expect(body.custom_prompt_post_processing).toBe('merge_tools');
   });
 
-  it('promptPostProcessing=strict 等合法值原样透传', () => {
-    for (const value of ['semi', 'strict', 'single', 'merge_tools', 'semi_tools', 'strict_tools']) {
+  it('promptPostProcessing 只暴露五个语义选项', () => {
+    for (const value of ['merge_tools', 'semi', 'strict', 'single'] as const) {
       const body = buildCustomApiRequestBody_ACU(
         [{ role: 'user', content: 'test' }],
         { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: value },
@@ -838,7 +838,7 @@ describe('buildCustomApiRequestBody_ACU', () => {
     expect(buildCustomApiRequestBody_ACU(messages, { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: 'merge' }, { tools }).custom_prompt_post_processing).toBe('merge_tools');
     expect(buildCustomApiRequestBody_ACU(messages, { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: 'semi' }, { tools }).custom_prompt_post_processing).toBe('semi_tools');
     expect(buildCustomApiRequestBody_ACU(messages, { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: 'single' }, { tools }).custom_prompt_post_processing).toBe('strict_tools');
-    expect(buildCustomApiRequestBody_ACU(messages, { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: 'strict_tools' }, { tools }).custom_prompt_post_processing).toBe('strict_tools');
+    expect(buildCustomApiRequestBody_ACU(messages, { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: 'strict_tools' as any }, { tools }).custom_prompt_post_processing).toBe('strict_tools');
     const passthrough = buildCustomApiRequestBody_ACU(messages, { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: '' }, { tools });
     expect(passthrough).not.toHaveProperty('custom_prompt_post_processing');
     expect(passthrough.messages[1]).toMatchObject({ role: 'tool', tool_call_id: 'call_0_read' });
