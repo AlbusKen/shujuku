@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { buildDefaultWorldSimulationAgentPrompts_ACU, buildV21WorldSimulationAgentPrompt_ACU, buildV22WorldSimulationAgentPrompt_ACU, buildV23WorldSimulationAgentPrompt_ACU, buildV24WorldSimulationAgentPrompt_ACU, buildV25WorldSimulationAgentPrompt_ACU, buildV26WorldSimulationAgentPrompt_ACU, buildV27WorldSimulationAgentPrompt_ACU, migrateWorldSimulationAgentPromptsDetailed_ACU, WORLD_SIMULATION_PROMPT_VERSION_ACU, WORLD_SIMULATION_PROMPT_VERSION_V21_ACU, WORLD_SIMULATION_PROMPT_VERSION_V22_ACU, WORLD_SIMULATION_PROMPT_VERSION_V23_ACU, WORLD_SIMULATION_PROMPT_VERSION_V24_ACU, WORLD_SIMULATION_PROMPT_VERSION_V25_ACU, WORLD_SIMULATION_PROMPT_VERSION_V26_ACU, WORLD_SIMULATION_PROMPT_VERSION_V27_ACU, WORLD_SIMULATION_PROMPT_VERSION_V28_ACU, WORLD_SIMULATION_PROMPT_VERSION_V29_ACU, WORLD_SIMULATION_PROMPT_VERSION_V30_ACU, WORLD_SIMULATION_PROMPT_VERSION_V31_ACU, WORLD_SIMULATION_PROMPT_VERSION_V32_ACU, WORLD_SIMULATION_PROMPT_VERSION_V33_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
+import { buildDefaultWorldSimulationAgentPrompts_ACU, buildV21WorldSimulationAgentPrompt_ACU, buildV22WorldSimulationAgentPrompt_ACU, buildV23WorldSimulationAgentPrompt_ACU, buildV24WorldSimulationAgentPrompt_ACU, buildV25WorldSimulationAgentPrompt_ACU, buildV26WorldSimulationAgentPrompt_ACU, buildV27WorldSimulationAgentPrompt_ACU, migrateWorldSimulationAgentPromptsDetailed_ACU, WORLD_SIMULATION_PROMPT_VERSION_ACU, WORLD_SIMULATION_PROMPT_VERSION_V21_ACU, WORLD_SIMULATION_PROMPT_VERSION_V22_ACU, WORLD_SIMULATION_PROMPT_VERSION_V23_ACU, WORLD_SIMULATION_PROMPT_VERSION_V24_ACU, WORLD_SIMULATION_PROMPT_VERSION_V25_ACU, WORLD_SIMULATION_PROMPT_VERSION_V26_ACU, WORLD_SIMULATION_PROMPT_VERSION_V27_ACU, WORLD_SIMULATION_PROMPT_VERSION_V28_ACU, WORLD_SIMULATION_PROMPT_VERSION_V29_ACU, WORLD_SIMULATION_PROMPT_VERSION_V30_ACU, WORLD_SIMULATION_PROMPT_VERSION_V31_ACU, WORLD_SIMULATION_PROMPT_VERSION_V32_ACU, WORLD_SIMULATION_PROMPT_VERSION_V34_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
 import { oneShotBootstrapNotice_ACU, worldSimulationOneShotProtocol_ACU } from '../../../../src/service/simulation/agent/agent-subagent-runtime';
 import { validateWorldSimulationPromptSegments_ACU } from '../../../../src/service/simulation/agent/prompt-template';
 import { stripWritingAnnotations_ACU } from '../../../../src/service/simulation/simulation-projection';
+import { isAgentHistorySlot_ACU, isAgentSnapshotSlot_ACU } from '../../../../src/shared/agent-prompt-layout';
+import { USER_PREFILL_CONTENT_ACU } from '../../../../src/shared/user-prefill';
 
 const roles = ['undercurrent-analyst', 'dramatis-keeper', 'guidance-composer'] as const;
 /** v28 把运行逻辑拆进多组问答，推演细则不再集中在单个 WORKFLOW 段，断言按整份提示词检查。 */
@@ -126,8 +128,12 @@ describe('一次性资料角色默认提示词', () => {
       const segments = prompts[role];
       expect(() => validateWorldSimulationPromptSegments_ACU(segments, role)).not.toThrow();
       // system 段只有身份、写入边界、交付协议与用户要求占位，不再承载推演细则。
-      const systems = segments.filter(item => item.role === 'system');
+      const systems = segments.filter(item => item.role === 'system' && !isAgentSnapshotSlot_ACU(item));
       expect(systems).toHaveLength(4);
+      expect(segments.filter(isAgentSnapshotSlot_ACU)).toHaveLength(1);
+      expect(segments.filter(isAgentHistorySlot_ACU)).toHaveLength(1);
+      expect(segments.findIndex(isAgentSnapshotSlot_ACU)).toBeLessThan(segments.findIndex(isAgentHistorySlot_ACU));
+      expect(segments.at(-1)).toMatchObject({ role: 'user', content: USER_PREFILL_CONTENT_ACU, enabled: true, deletable: false, pinned: true });
       for (const item of systems) expect(item.content).not.toContain('我每轮都要查三项');
       // 至少 3 组问答，且每个 assistant 自述都紧跟在一个 user 提问之后。
       const pairs = segments.filter((item, index) => item.role === 'assistant' && segments[index - 1]?.role === 'user');
@@ -170,7 +176,8 @@ describe('一次性资料角色默认提示词', () => {
     expect(result.prompts['undercurrent-analyst']).toEqual(defaults['undercurrent-analyst']);
     expect(result.prompts['dramatis-keeper'][3]).toEqual(current['dramatis-keeper'][3]);
     expect(result.prompts['guidance-composer'][4]).toEqual(current['guidance-composer'][4]);
-    expect(result.prompts['guidance-composer'].at(-1)).toEqual(extra);
+    expect(result.prompts['guidance-composer'].find(segment => segment.content === extra.content)).toEqual(extra);
+    expect(result.prompts['guidance-composer'].at(-1)).toMatchObject({ role: 'user', content: USER_PREFILL_CONTENT_ACU });
     // 未改写的默认段升级到 v28 同 seam 段；HISTORY 在 v28 已删除，迁移后不应残留。
     expect(bySeam(result.prompts['guidance-composer'], 'WORKFLOW')).toEqual(bySeam(defaults['guidance-composer'], 'WORKFLOW'));
     expect(bySeam(result.prompts['guidance-composer'], 'HISTORY')).toBeUndefined();
@@ -187,7 +194,8 @@ describe('一次性资料角色默认提示词', () => {
     expect(result.forcedRoles).toEqual([]);
     expect(result.prompts['undercurrent-analyst']).toEqual(defaults['undercurrent-analyst']);
     expect(result.prompts['dramatis-keeper'][4]).toEqual(current['dramatis-keeper'][4]);
-    expect(result.prompts['guidance-composer'].at(-1)).toEqual(current['guidance-composer'].at(-1));
+    expect(result.prompts['guidance-composer'].find(segment => segment.content === current['guidance-composer'].at(-1)!.content)).toEqual(current['guidance-composer'].at(-1));
+    expect(result.prompts['guidance-composer'].at(-1)).toMatchObject({ role: 'user', content: USER_PREFILL_CONTENT_ACU });
     expect(bySeam(result.prompts['guidance-composer'], 'WORKFLOW')).toEqual(bySeam(defaults['guidance-composer'], 'WORKFLOW'));
     expect(bySeam(result.prompts['guidance-composer'], 'HISTORY')).toBeUndefined();
   });
@@ -212,7 +220,8 @@ describe('一次性资料角色默认提示词', () => {
     expect(bySeam(result.prompts['guidance-composer'], 'WORKFLOW')).toEqual(bySeam(defaults['guidance-composer'], 'WORKFLOW'));
     // 各历史版本迁移后都不再带 HISTORY 段。
     for (const role of roles) expect(bySeam(result.prompts[role], 'HISTORY')).toBeUndefined();
-    expect(result.prompts['guidance-composer'].at(-1)).toEqual(current['guidance-composer'].at(-1));
+    expect(result.prompts['guidance-composer'].find(segment => segment.content === current['guidance-composer'].at(-1)!.content)).toEqual(current['guidance-composer'].at(-1));
+    expect(result.prompts['guidance-composer'].at(-1)).toMatchObject({ role: 'user', content: USER_PREFILL_CONTENT_ACU });
   });
 
   it('非时钟角色先算本轮时间跨度，批次二直接采用批次一维护的 clock', () => {
@@ -232,7 +241,7 @@ describe('一次性资料角色默认提示词', () => {
 
   it('旧版角色键及自定义旧协议提示词能归一化到当前版本', () => {
     const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
-    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe(WORLD_SIMULATION_PROMPT_VERSION_V33_ACU);
+    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe(WORLD_SIMULATION_PROMPT_VERSION_V34_ACU);
     const custom = structuredClone(defaults) as Record<string, typeof defaults[typeof roles[number]]>;
     custom['undercurrent-analyst'][0].content += '\n旧版自定义逐栏 write_sql';
     custom.timekeeper = structuredClone(defaults['undercurrent-analyst']);

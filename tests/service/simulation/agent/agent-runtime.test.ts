@@ -2409,8 +2409,8 @@ describe('格林推演 Agent runtime', () => {
       tools: { read: vi.fn(async () => ({ status: 'ok' as const, content: '山雨将至', summary: '正文' })), search: tools.search },
     });
     expect(result).toMatchObject({ outcome: 'blocked' });
-    expect(sent[0]?.some(message => message.role === 'user' && message.content.includes('本次格林推演最新快照'))).toBe(true);
-    expect(sent[1]?.some(message => message.role === 'user' && message.content.includes('本次格林推演最新快照'))).toBe(true);
+    expect(sent[0]?.some(message => message.role === 'system' && message.content.includes('本次格林推演最新快照'))).toBe(true);
+    expect(sent[1]?.some(message => message.role === 'system' && message.content.includes('本次格林推演最新快照'))).toBe(true);
     expect(sent[1]?.some(message => message.role === 'tool' && message.tool_call_id === 'call-rain' && message.content.includes('山雨将至'))).toBe(true);
   });
 

@@ -11,6 +11,7 @@ import {
 } from './agent/agent-defaults';
 import { buildContinuationAgentPromptsForMode_ACU } from './agent/agent-prompt-mode';
 import type { AgentToolMode_ACU } from '../ai/agent-tool-mode';
+import { AGENT_HISTORY_SENTINEL_ACU, AGENT_SNAPSHOT_SENTINEL_ACU, isAgentHistorySlot_ACU } from '../../shared/agent-prompt-layout';
 
 export const CONTINUATION_PROMPT_PLACEHOLDERS_ACU = [
   '$ORIGIN_INSTRUCTION', '$1',
@@ -19,7 +20,7 @@ export const CONTINUATION_PROMPT_PLACEHOLDERS_ACU = [
   '$CURRENT_TURN_GOAL', '$TURN_NUMBER', '$NODE_TURN_NUMBER', '$VALIDATION_ERRORS',
   // 以下为 Agent 续写链路专用占位符。$TABLE:<表名> 形式的动态读集不在此列，
   // 它只作为读集标识符，由解析器汇入 $AGENT_READ_MATERIALS。
-  '$HISTORY_ANCHOR', '$STORY_TEXT', '$UNSETTLED_RANGE', '$AGENT_CATALOG', '$MODULE_CATALOG',
+  '$HISTORY_ANCHOR', '$RUNTIME_SNAPSHOT', '$STORY_TEXT', '$UNSETTLED_RANGE', '$AGENT_CATALOG', '$MODULE_CATALOG',
   '$TABLE_CATALOG', '$TABLE_GLOBAL', '$TABLE_CHARACTERS', '$TABLE_CHRONICLES',
   '$HOOKS_LEDGER', '$INFO_GAP', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY', '$BUDGET', '$TOOL_RESULTS',
   '$AGENT_READ_MATERIALS', '$AGENT_TASK', '$AGENT_WRITE_SCOPE', '$USER_INTENT', '$USER_REQUIREMENTS', '$OUTLINE_WINDOW',
@@ -56,7 +57,8 @@ export function validateContinuationPromptSegments_ACU(value: unknown, phase: Co
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) failPrompt_ACU(errorCode, phase, '提示词段必须是对象', { index });
     const segment = raw as Record<string, unknown>;
     if (Object.keys(segment).some(key => !['role', 'content', 'enabled', 'deletable', 'pinned'].includes(key))) failPrompt_ACU(errorCode, phase, '提示词段包含未知字段', { index });
-    if (!['system', 'user', 'assistant'].includes(segment.role as string) || typeof segment.content !== 'string') failPrompt_ACU(errorCode, phase, '提示词段角色或内容非法', { index });
+    if (typeof segment.content !== 'string' || (!['system', 'user', 'assistant'].includes(segment.role as string)
+      && !(segment.role === 'history' && isAgentHistorySlot_ACU(segment as { content: string })))) failPrompt_ACU(errorCode, phase, '提示词段角色或内容非法', { index });
     if (segment.enabled !== undefined && typeof segment.enabled !== 'boolean') failPrompt_ACU(errorCode, phase, '提示词段 enabled 非法', { index });
     if (segment.deletable !== undefined && typeof segment.deletable !== 'boolean') failPrompt_ACU(errorCode, phase, '提示词段 deletable 非法', { index });
     if (segment.pinned !== undefined && typeof segment.pinned !== 'boolean') failPrompt_ACU(errorCode, phase, '提示词段 pinned 非法', { index });
@@ -79,7 +81,8 @@ export async function renderContinuationPrompt_ACU(segments: unknown, resolvers:
   }
   const usedPlaceholders = CONTINUATION_PROMPT_PLACEHOLDERS_ACU.filter(token => matched.has(token));
   const values = new Map<ContinuationPromptPlaceholder_ACU, string>();
-  for (const token of usedPlaceholders) values.set(token, String(await resolvers[token]?.() ?? ''));
+  for (const token of usedPlaceholders) values.set(token, token === '$HISTORY_ANCHOR' ? AGENT_HISTORY_SENTINEL_ACU
+    : token === '$RUNTIME_SNAPSHOT' ? AGENT_SNAPSHOT_SENTINEL_ACU : String(await resolvers[token]?.() ?? ''));
   const tokenPattern = new RegExp(PLACEHOLDER_ALTERNATION_ACU, 'g');
   return { usedPlaceholders, messages: enabledSegments.map(segment => ({ role: segment.role, content: segment.content.replace(tokenPattern, token => values.get(token as ContinuationPromptPlaceholder_ACU) ?? '') })) };
 }

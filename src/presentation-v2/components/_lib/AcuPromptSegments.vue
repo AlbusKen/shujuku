@@ -10,12 +10,13 @@
         <header class="acu-prompt-segs__item-head">
           <span class="acu-prompt-segs__index">#{{ index + 1 }}</span>
           <AcuCheckbox
-            v-if="showEnabled"
+            v-if="showEnabled && !isAgentFixedSlot_ACU(seg)"
             :model-value="seg.enabled !== false"
             label="启用"
             @update:model-value="$emit('update', index, { enabled: $event })"
           />
           <AcuSelect
+            v-if="!isAgentFixedSlot_ACU(seg)"
             class="acu-prompt-segs__role"
             size="sm"
             :options="roleOptions"
@@ -23,7 +24,7 @@
             @update:model-value="$emit('update', index, { role: $event })"
           />
           <AcuSelect
-            v-if="showSlot"
+            v-if="showSlot && !isAgentFixedSlot_ACU(seg)"
             class="acu-prompt-segs__slot"
             size="sm"
             :options="slotOptions"
@@ -58,28 +59,15 @@
             />
           </div>
         </header>
-        
-        <!-- 特殊渲染：$HISTORY_ANCHOR 占位符段 -->
-        <div v-if="isHistoryAnchor(seg)" class="acu-prompt-segs__anchor-card">
-          <div class="acu-prompt-segs__anchor-icon">
-            <i class="fa-solid fa-clock-rotate-left"></i>
-          </div>
-          <div class="acu-prompt-segs__anchor-content">
-            <div class="acu-prompt-segs__anchor-title">会话记录插入点</div>
-            <div class="acu-prompt-segs__anchor-desc">
-              真实历史上下文将在此位置插入（用户输入、Agent 历次迭代输出、工具结果、调阅资料）
-            </div>
-          </div>
-        </div>
-        
-        <!-- 普通段：可编辑文本框 -->
         <AcuTextarea
-          v-else
+          v-if="!isAgentFixedSlot_ACU(seg)"
           :model-value="seg.content"
           :rows="rows"
           placeholder="提示词内容..."
           @update:model-value="$emit('update', index, { content: $event })"
         />
+        <p v-else-if="isAgentHistorySlot_ACU(seg)" class="acu-prompt-segs__history">真实历史上下文 · 固定插入板块。请求时使用每条真实对话的原身份展开，不包裹为单条提示词；可上下移动调整位置。</p>
+        <p v-else class="acu-prompt-segs__history">运行时状态快照 · 独立 SYSTEM 板块。请求时注入当前状态，默认位于真实历史之前；可上下移动调整位置。</p>
       </li>
       <li v-if="!segments.length" class="acu-prompt-segs__empty">
         {{ emptyText }}
@@ -125,6 +113,7 @@ import AcuCheckbox from './AcuCheckbox.vue';
 import AcuIconButton from './AcuIconButton.vue';
 import AcuSelect from './AcuSelect.vue';
 import AcuTextarea from './AcuTextarea.vue';
+import { isAgentFixedSlot_ACU, isAgentHistorySlot_ACU } from '../../../shared/agent-prompt-layout';
 
 withDefaults(defineProps<{
   segments: PromptSegment[];
@@ -155,11 +144,6 @@ const emit = defineEmits<{
 function onSlot(index: number, raw: string): void {
   const value = raw === 'A' || raw === 'B' ? raw : '';
   emit('update', index, { mainSlot: value });
-}
-
-/** 判断是否为 $HISTORY_ANCHOR 占位符段 */
-function isHistoryAnchor(seg: PromptSegment): boolean {
-  return seg.content === '$HISTORY_ANCHOR';
 }
 </script>
 
@@ -197,6 +181,7 @@ function isHistoryAnchor(seg: PromptSegment): boolean {
 }
 
 .acu-prompt-segs__role { flex: 1 1 110px; min-width: 0; max-width: 180px; }
+.acu-prompt-segs__history { margin: 0; padding: 12px; color: var(--acu-text-3); background: var(--acu-bg-2); border-radius: 8px; font-size: var(--acu-font-size-body, 12px); }
 .acu-prompt-segs__slot { flex: 1 1 120px; min-width: 0; max-width: 200px; }
 
 .acu-prompt-segs__actions {
@@ -206,56 +191,6 @@ function isHistoryAnchor(seg: PromptSegment): boolean {
   gap: 6px;
   flex-wrap: wrap;
   min-width: 0;
-}
-
-/* $HISTORY_ANCHOR 特殊卡片样式 */
-.acu-prompt-segs__anchor-card {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 14px 16px;
-  background: linear-gradient(135deg, 
-    color-mix(in srgb, #38BDF8 8%, transparent),
-    color-mix(in srgb, #6EE7B7 6%, transparent));
-  border: 1px solid color-mix(in srgb, #38BDF8 24%, transparent);
-  border-radius: 8px;
-  min-width: 0;
-  max-width: 100%;
-}
-
-.acu-prompt-segs__anchor-icon {
-  flex: 0 0 auto;
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  background: color-mix(in srgb, #38BDF8 16%, transparent);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #38BDF8;
-  font-size: 16px;
-}
-
-.acu-prompt-segs__anchor-content {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.acu-prompt-segs__anchor-title {
-  font-size: var(--acu-font-size-body, 12px);
-  font-weight: 600;
-  color: var(--acu-text-1);
-  letter-spacing: 0.01em;
-}
-
-.acu-prompt-segs__anchor-desc {
-  font-size: var(--acu-font-size-caption, 11px);
-  color: var(--acu-text-2);
-  line-height: 1.4;
-  overflow-wrap: anywhere;
 }
 
 .acu-prompt-segs :deep(.acu-textarea),
@@ -280,17 +215,5 @@ function isHistoryAnchor(seg: PromptSegment): boolean {
   .acu-prompt-segs__role,
   .acu-prompt-segs__slot { flex-basis: 100%; max-width: 100%; }
   .acu-prompt-segs__actions { width: 100%; margin-left: 0; justify-content: flex-end; }
-  
-  .acu-prompt-segs__anchor-card {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 10px;
-  }
-  
-  .acu-prompt-segs__anchor-icon {
-    width: 32px;
-    height: 32px;
-    font-size: 14px;
-  }
 }
 </style>

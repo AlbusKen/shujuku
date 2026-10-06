@@ -49,6 +49,10 @@ vi.mock('../../../src/service/template/chat-scope', () => ({
   getSortedSheetKeys_ACU: (tables: Record<string, unknown> | null | undefined) => Object.keys(tables || {}).sort(),
 }));
 
+vi.mock('../../../src/service/fill-mode/fill-mode-gate', () => ({
+  isVectorPipelineEnabledForCurrentChat_ACU: vi.fn(() => false),
+}));
+
 import {
   getCurrentTableDisplayData_ACU,
   getCurrentCharSettings_ACU,

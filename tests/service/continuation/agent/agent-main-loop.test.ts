@@ -339,8 +339,8 @@ describe('主 Agent 会话记录', () => {
     const userIndex = findIndex_ACU(first, '这一轮别急着揭穿守门人');
     expect(first[userIndex].role).toBe('user');
     expect(first[userIndex].content.startsWith('【用户】')).toBe(true);
-    // 运行时快照追加在会话尾部，用户消息仍按发生顺序排在换轮通告之前。
-    expect(userIndex).toBeLessThan(findIndex_ACU(first, '本轮预算状态'));
+    // 独立 system 快照在真实历史之前，历史内部仍按发生顺序展开。
+    expect(userIndex).toBeGreaterThan(findIndex_ACU(first, '本轮预算状态'));
     expect(userIndex).toBeLessThan(findIndex_ACU(first, '开始新的一轮规划'));
   });
 
@@ -746,7 +746,7 @@ describe('主 Agent 提示词装配', () => {
     if (mode === 'tools') expect(h.mainCalls[1].some(message => message.role === 'tool')).toBe(true);
   });
 
-  it('小说正文在前、自己的会话记录在锚点位置、运行时快照落在历史里、预填充收尾', async () => {
+  it('小说正文在前、独立 system 快照在真实历史之前、user 预填充收尾', async () => {
     const h = harness_ACU({ mainReplies: ['{"action":"finalize","instruction":"本轮指导"}'] });
     await h.planner.plan(h.request);
 
@@ -757,8 +757,9 @@ describe('主 Agent 提示词装配', () => {
     expect(messages[0].role).toBe('system');
     expect(storyIndex).toBeGreaterThan(0);
     expect(historyIndex).toBeGreaterThan(storyIndex);
-    // 运行时快照是会话消息：排在历史通告之后、预填充之前，骨架本身不再重算这段。
-    expect(runtimeIndex).toBeGreaterThan(historyIndex);
+    // 快照独立于历史，不降级成 user 或混入历史正文。
+    expect(runtimeIndex).toBeLessThan(historyIndex);
+    expect(messages[runtimeIndex].role).toBe('system');
     expect(messages[runtimeIndex].content).toContain('【完整当前阶段大纲】');
     expect(messages[runtimeIndex].content).toContain('阶段 2：禁区试探');
     expect(messages[runtimeIndex].content).toContain('大纲是计划，不是已经发生的事实');

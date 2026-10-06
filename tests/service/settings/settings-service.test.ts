@@ -311,6 +311,8 @@ import {
   persistCurrentTemplatePresetName_ACU,
   setZeroTkOccupyMode_ACU,
   applyCombinedSettingsImport_ACU,
+  forceApiPromptPostProcessingOnce_ACU,
+  API_POST_PROCESSING_UPGRADE_VERSION_ACU,
   _set_settingsStorageReadyForSave_ACU,
 } from '../../../src/service/settings/settings-service';
 
@@ -318,6 +320,11 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockGetConfigStorage.mockReset().mockReturnValue(undefined);
   mockIsIndexedDbAvailable.mockReset().mockReturnValue(false);
+  mockPersistSettingsToStorage.mockReset().mockReturnValue(true);
+  delete mockSettings.apiConfig;
+  delete mockSettings.apiPresets;
+  delete mockSettings.apiPostProcessingUpgradeVersion;
+  delete mockSettings.apiPostProcessingUpgradeBackup;
   mockReadProfileSettings.mockReset().mockReturnValue(null);
   mockReadProfileTemplate.mockReset().mockReturnValue(null);
   mockGetCurrentWorldbookConfig.mockReset().mockReturnValue({ zeroTkOccupyMode: false, outlineEntryEnabled: true });
@@ -512,6 +519,85 @@ describe('saveSettings_ACU', () => {
     expect(result.saved).toBe(false);
     expect(result.storageType).toBe('memory');
     expect(result.error).toBeDefined();
+  });
+});
+
+describe('forceApiPromptPostProcessingOnce_ACU', () => {
+  beforeEach(() => {
+    mockGetConfigStorage.mockReturnValue({ _isTavern: true });
+    mockSettings.apiConfig = { promptPostProcessing: '', sendViaTavern: false };
+    mockSettings.apiPresets = [
+      { name: '预设一', apiConfig: { promptPostProcessing: 'single', sendViaTavern: true }, enabled: false },
+      { name: '预设二', apiConfig: { model: 'test-model' } },
+    ];
+  });
+
+  it('迁移当前配置和全部预设，备份旧模式并将标记与配置一起保存', () => {
+    let persisted: any;
+    mockPersistSettingsToStorage.mockImplementationOnce((settings: any) => {
+      persisted = JSON.parse(JSON.stringify(settings));
+      return true;
+    });
+    forceApiPromptPostProcessingOnce_ACU();
+    expect(persisted.apiConfig).toEqual({ promptPostProcessing: 'merge_tools', sendViaTavern: false });
+    expect(persisted.apiPresets).toEqual([
+      { name: '预设一', apiConfig: { promptPostProcessing: 'merge_tools', sendViaTavern: true }, enabled: false },
+      { name: '预设二', apiConfig: { model: 'test-model', promptPostProcessing: 'merge_tools' } },
+    ]);
+    expect(persisted.apiPostProcessingUpgradeVersion).toBe(API_POST_PROCESSING_UPGRADE_VERSION_ACU);
+    expect(persisted.apiPostProcessingUpgradeBackup).toEqual({
+      current: '', presets: [
+        { name: '预设一', promptPostProcessing: 'single' },
+        { name: '预设二', promptPostProcessing: null },
+      ],
+    });
+    expect(mockPersistSettingsToStorage).toHaveBeenCalledTimes(1);
+  });
+
+  it('成功迁移后不再覆盖当前配置和预设中的用户修改或原备份', () => {
+    forceApiPromptPostProcessingOnce_ACU();
+    const backup = structuredClone(mockSettings.apiPostProcessingUpgradeBackup);
+    mockSettings.apiConfig.promptPostProcessing = 'strict';
+    mockSettings.apiPresets[0].apiConfig.promptPostProcessing = 'single';
+    mockPersistSettingsToStorage.mockClear();
+    forceApiPromptPostProcessingOnce_ACU();
+    expect(mockSettings.apiConfig.promptPostProcessing).toBe('strict');
+    expect(mockSettings.apiPresets[0].apiConfig.promptPostProcessing).toBe('single');
+    expect(mockSettings.apiPostProcessingUpgradeBackup).toEqual(backup);
+    expect(mockPersistSettingsToStorage).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('保存失败恢复字段存在性、旧标记和备份，允许重试（有旧标记：%s）', hasPrevious => {
+    const previousBackup = { current: 'strict', presets: [] };
+    if (hasPrevious) {
+      mockSettings.apiPostProcessingUpgradeVersion = 'previous-upgrade';
+      mockSettings.apiPostProcessingUpgradeBackup = previousBackup;
+    }
+    const before = structuredClone({ apiConfig: mockSettings.apiConfig, apiPresets: mockSettings.apiPresets });
+    mockPersistSettingsToStorage.mockReturnValueOnce(false);
+    forceApiPromptPostProcessingOnce_ACU();
+    expect(mockSettings.apiConfig).toEqual(before.apiConfig);
+    expect(mockSettings.apiPresets).toEqual(before.apiPresets);
+    expect(Object.hasOwn(mockSettings.apiPresets[1].apiConfig, 'promptPostProcessing')).toBe(false);
+    if (hasPrevious) {
+      expect(mockSettings.apiPostProcessingUpgradeVersion).toBe('previous-upgrade');
+      expect(mockSettings.apiPostProcessingUpgradeBackup).toBe(previousBackup);
+    } else {
+      expect(Object.hasOwn(mockSettings, 'apiPostProcessingUpgradeVersion')).toBe(false);
+      expect(Object.hasOwn(mockSettings, 'apiPostProcessingUpgradeBackup')).toBe(false);
+    }
+    forceApiPromptPostProcessingOnce_ACU();
+    expect(mockSettings.apiConfig.promptPostProcessing).toBe('merge_tools');
+    expect(mockSettings.apiPostProcessingUpgradeVersion).toBe(API_POST_PROCESSING_UPGRADE_VERSION_ACU);
+    expect(mockPersistSettingsToStorage).toHaveBeenCalledTimes(2);
+  });
+
+  it('设置尚未可靠加载时不修改配置也不写入标记', () => {
+    _set_settingsStorageReadyForSave_ACU(false);
+    forceApiPromptPostProcessingOnce_ACU();
+    expect(mockSettings.apiConfig.promptPostProcessing).toBe('');
+    expect(Object.hasOwn(mockSettings, 'apiPostProcessingUpgradeVersion')).toBe(false);
+    expect(mockPersistSettingsToStorage).not.toHaveBeenCalled();
   });
 });
 

@@ -793,12 +793,12 @@ describe('buildCustomApiRequestBody_ACU', () => {
     expect(body.messages[0]).not.toBe(original[0]);
   });
 
-  it('缺失 promptPostProcessing 时默认 strict（向后兼容旧版写死 strict 的行为）', () => {
+  it('缺失 promptPostProcessing 时默认 merge_tools', () => {
     const body = buildCustomApiRequestBody_ACU(
       [{ role: 'system', content: '中部 system' }, { role: 'user', content: 'test' }],
       { url: 'https://api.example.com', model: 'gpt-4' },
     );
-    expect(body.custom_prompt_post_processing).toBe('strict');
+    expect(body.custom_prompt_post_processing).toBe('merge_tools');
   });
 
   it('显式选择未选择（空串）时不携带 custom_prompt_post_processing（后端原样透传消息）', () => {
@@ -834,7 +834,7 @@ describe('buildCustomApiRequestBody_ACU', () => {
       { role: 'assistant', content: '', tool_calls: [{ id: 'call_0_read', type: 'function', function: { name: 'read', arguments: '{"reads":["$STORY_TAIL"]}' } }] },
       { role: 'tool', tool_call_id: 'call_0_read', content: '【工具结果】已读' },
     ];
-    expect(buildCustomApiRequestBody_ACU(messages, { url: 'https://api.example.com', model: 'gpt-4' }, { tools }).custom_prompt_post_processing).toBe('strict_tools');
+    expect(buildCustomApiRequestBody_ACU(messages, { url: 'https://api.example.com', model: 'gpt-4' }, { tools }).custom_prompt_post_processing).toBe('merge_tools');
     expect(buildCustomApiRequestBody_ACU(messages, { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: 'merge' }, { tools }).custom_prompt_post_processing).toBe('merge_tools');
     expect(buildCustomApiRequestBody_ACU(messages, { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: 'semi' }, { tools }).custom_prompt_post_processing).toBe('semi_tools');
     expect(buildCustomApiRequestBody_ACU(messages, { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: 'single' }, { tools }).custom_prompt_post_processing).toBe('strict_tools');
@@ -844,12 +844,12 @@ describe('buildCustomApiRequestBody_ACU', () => {
     expect(passthrough.messages[1]).toMatchObject({ role: 'tool', tool_call_id: 'call_0_read' });
   });
 
-  it('promptPostProcessing 非法值默认 strict', () => {
+  it('promptPostProcessing 非法值默认 merge_tools', () => {
     const body = buildCustomApiRequestBody_ACU(
       [{ role: 'user', content: 'test' }],
       { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: 'fake-mode' },
     );
-    expect(body.custom_prompt_post_processing).toBe('strict');
+    expect(body.custom_prompt_post_processing).toBe('merge_tools');
   });
 
   it('缺失或非字符串 role、数组/原始值等异常消息原样保留，不静默改造成 undefined', () => {
@@ -1190,10 +1190,10 @@ describe('callAIWithPreset_ACU 参数透传', () => {
 });
 
 describe('插件直连与请求期限', () => {
-  it('默认直连发送最终请求，API 请求采集开启后分行记录完整请求与回复且隐藏凭据', async () => {
+  it('显式直连发送最终请求，API 请求采集开启后分行记录完整请求与回复且隐藏凭据', async () => {
     const { clearLogs, getAllLogs, setApiLogEnabled } = await import('../../../src/shared/log-buffer');
     clearLogs(); setApiLogEnabled(true);
-    mockSettings.apiConfig = { url: 'https://direct.test/v1', model: 'm', apiKey: 'secret-direct-key',
+    mockSettings.apiConfig = { sendViaTavern: false, url: 'https://direct.test/v1', model: 'm', apiKey: 'secret-direct-key',
       promptPostProcessing: '', bodyParams: 'top_k: 42', requestHeaders: 'X-Api-Key: secret-header-key' };
     const prompt = '完整提示词'.repeat(10000);
     const raw = JSON.stringify({ choices: [{ message: { content: '完整回复'.repeat(10000) } }] });
@@ -1282,7 +1282,7 @@ describe('直连接口协议适配', () => {
       { role: 'tool', tool_call_id: 'call-1', content: '工具结果' },
       { role: 'user', content: '继续' },
     ];
-    const config = { url: 'https://direct.test/v1', model: 'm', apiKey: 'protocol-secret', customApiFormat: format,
+    const config = { sendViaTavern: false, url: 'https://direct.test/v1', model: 'm', apiKey: 'protocol-secret', customApiFormat: format,
       promptPostProcessing: '', bodyParams: 'metadata:\n  purpose: test' };
     const raw = JSON.stringify(reply);
     mockFetch.mockResolvedValueOnce(new Response(raw, { headers: { 'Content-Type': 'application/json' } }));
@@ -1326,7 +1326,7 @@ describe('直连流式回复', () => {
     const { readFetchChatTurn_ACU } = await import('../../../src/service/ai/native-tool');
     const { clearLogs, getAllLogs } = await import('../../../src/shared/log-buffer');
     clearLogs();
-    const config = { url: 'https://direct.test/v1', model: 'm', customApiFormat: format, promptPostProcessing: '' };
+    const config = { sendViaTavern: false, url: 'https://direct.test/v1', model: 'm', customApiFormat: format, promptPostProcessing: '' };
     const raw = packets.map(packet => 'data: ' + (typeof packet === 'string' ? packet : JSON.stringify(packet)) + '\n\n').join('');
     mockFetch.mockResolvedValueOnce(new Response(raw, { headers: { 'Content-Type': 'text/event-stream' } }));
     const response = await sendCustomApiRequest_ACU(config, buildCustomApiRequestBody_ACU([{ role: 'user', content: '测试流' }], config, { streaming: true }));

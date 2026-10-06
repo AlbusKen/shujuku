@@ -332,19 +332,9 @@ export function anchorNativeToolCalls_ACU<T extends ToolAnchorMessage_ACU>(messa
   return collapsed;
 }
 
-/**
- * 去掉 JSON 预填充，并在请求最末补上思维链开头。
- * 思维链只能是最后一条：若它留在带 tool_calls 的助手消息前面，
- * 酒馆会把连续 assistant 并掉，工具编号随之丢失。
- * 上一条已经是 assistant 时不再追加，避免再次并成一条。
- */
+/** 工具模式保留消息原序、正文及身份；工具声明由请求 options 控制，不注入预填充。 */
 export function withNativeToolThinkPrefill_ACU<T extends ToolAnchorMessage_ACU>(messages: readonly T[]): T[] {
-  const stripped = anchorNativeToolCalls_ACU(dropTerminalJsonPrefill_ACU(messages).filter(
-    message => !(message.role === 'assistant' && isThinkPrefillStub_ACU(message.content)),
-  ));
-  const last = stripped[stripped.length - 1];
-  if (!last || last.role === 'assistant' || (last.role === 'user' && last.content === USER_PREFILL_CONTENT_ACU)) return stripped;
-  return [...stripped, { role: 'assistant', content: NATIVE_TOOL_THINK_PREFILL_ACU } as T];
+  return messages.map(message => ({ ...message }));
 }
 
 /**
@@ -374,20 +364,9 @@ export function projectNativeToolHistoryToText_ACU<T extends ToolAnchorMessage_A
   });
 }
 
-/**
- * JSON 模式的请求收尾：历史投影成纯文本，去掉思维链预填充，
- * 并把提示词里的 JSON 预填充移到请求最末，让模型直接接着写动作对象。
- * 末尾已是 assistant 或用户预填充时不再追加，避免连续 assistant 被合并。
- */
+/** 无工具声明时仅投影历史工具事务；不删除、移动或追加用户配置的预填充。 */
 export function withJsonTailPrefill_ACU<T extends ToolAnchorMessage_ACU>(messages: readonly T[]): T[] {
-  const stubs = messages.filter(message => message.role === 'assistant' && isJsonPrefillStub_ACU(message.content));
-  const body = projectNativeToolHistoryToText_ACU(dropTerminalJsonPrefill_ACU(messages).filter(
-    message => !(message.role === 'assistant' && isThinkPrefillStub_ACU(message.content)),
-  ));
-  const stub = stubs[stubs.length - 1];
-  const last = body[body.length - 1];
-  if (!stub || !last || last.role === 'assistant' || (last.role === 'user' && last.content === USER_PREFILL_CONTENT_ACU)) return body;
-  return [...body, { role: 'assistant', content: stub.content } as T];
+  return projectNativeToolHistoryToText_ACU(messages);
 }
 
 /**

@@ -17,6 +17,7 @@
 
 import { getChatArray_ACU } from '../../../data/gateways/chat-gateway';
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
+import { assembleAgentPrompt_ACU } from '../../../shared/agent-prompt-layout';
 import { getActiveChatStorageIdentity_ACU } from '../../../data/storage/chat-history';
 import { normalizeContinuationInternalAiRetryLimit_ACU } from '../defaults';
 import { callContinuationInternalAi_ACU, callContinuationInternalAiWithRetry_ACU, CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU, formatAgentUsageLabel_ACU, type AiUsageMetadata_ACU, type ContinuationInternalAiCallOptions_ACU } from '../internal-ai-call';
@@ -1332,8 +1333,9 @@ export class ContinuationAgentTurnPlanner_ACU {
       onUsage: usage => { callUsage = usage; },
       tools: nativeMode ? [...agentNativeTools_ACU(['read', 'search']), ...continuationDecisionTools_ACU()] : [],
     };
-    // 工具模式只影响 tools 参数，不修改消息底部预填充
-    const finishMessages = (items: ReturnType<ContinuationAgentTurnPlanner_ACU['spliceHistory_ACU']>) => items;
+    const finishMessages = (items: ReturnType<ContinuationAgentTurnPlanner_ACU['spliceHistory_ACU']>) => (
+      nativeMode ? withNativeToolThinkPrefill_ACU(items) : withJsonTailPrefill_ACU(items)
+    );
 
     for (let attempt = 0; attempt <= retries; attempt += 1) {
       const base = request.createInternalRequestIdentity(attempt);
@@ -1568,7 +1570,7 @@ export class ContinuationAgentTurnPlanner_ACU {
     lifecycle?: { outlineMaintenanceReserveAvailable: boolean; convergenceOnly: boolean },
   ): Promise<void> {
     const rendered = await renderContinuationPrompt_ACU(
-      [{ role: 'user', content: AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU, enabled: true, deletable: false, pinned: true }],
+      [{ role: 'system', content: AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU, enabled: true, deletable: false, pinned: true }],
       this.buildMainPromptResolvers_ACU(request, context, ledger, budget, iteration, toolUsage, gateConfig, toolMode, lifecycle),
       'agent_loop',
     );
@@ -2075,24 +2077,9 @@ export class ContinuationAgentTurnPlanner_ACU {
     history: ReadonlyArray<{ role: string; content: string; tool_calls?: ReturnType<typeof renderAgentConversationMessages_ACU>[number]['tool_calls']; tool_call_id?: string }>,
     latestSnapshot: string,
   ): Array<{ role: string; content: string; tool_calls?: ReturnType<typeof renderAgentConversationMessages_ACU>[number]['tool_calls']; tool_call_id?: string }> {
-    const result: Array<{ role: string; content: string; tool_calls?: ReturnType<typeof renderAgentConversationMessages_ACU>[number]['tool_calls']; tool_call_id?: string }> = [];
     const historical = history.filter(item => item.content !== USER_PREFILL_CONTENT_ACU && !(item.role === 'user' && item.content.startsWith('【运行时快照】\n')));
-    let inserted = false;
-    for (const message of messages) {
-      if (message.content.includes(HISTORY_SENTINEL_ACU)) {
-        result.push(...historical.map(item => ({ ...item })));
-        inserted = true;
-        continue;
-      }
-      if (message.content === USER_PREFILL_CONTENT_ACU) continue;
-      result.push({ ...message });
-    }
-    const body = !inserted && historical.length ? [...historical.map(item => ({ ...item })), ...result] : result;
-    // 状态快照作为独立 system 板块置于真实历史后
-    body.push({ role: 'system', content: latestSnapshot || '【运行时快照】\n本次没有可用的运行时资料；请以此前已确认的工具回执为准。' });
-    // 末尾始终追加 user 预填充
-    body.push({ role: 'user', content: USER_PREFILL_CONTENT_ACU });
-    return body;
+    return assembleAgentPrompt_ACU(messages, historical,
+      latestSnapshot || '【运行时快照】\n本次没有可用的运行时资料；请以此前已确认的工具回执为准。');
   }
 
   /**

@@ -112,7 +112,7 @@ describe('格林推演提示词装配契约', () => {
   });
 
   it('提示词完整覆盖角色职责，同时保留时间先行、历史默认指纹与信息渠道纪律', () => {
-    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe(WORLD_SIMULATION_PROMPT_VERSION_V33_ACU);
+    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe('world-simulation-v34');
     expect(buildDefaultWorldSimulationSettings_ACU().agentRunBudget).toMatchObject({ maxIterations: 4, maxExtraReads: 1, maxConcurrent: 5 });
     expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].map(item => item.version)).toEqual([
       'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6', 'world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12', 'world-simulation-v13', 'world-simulation-v14', 'world-simulation-v15', 'world-simulation-v16', 'world-simulation-v17', 'world-simulation-v18', 'world-simulation-v19', 'world-simulation-v20', 'world-simulation-v21', 'world-simulation-v22', 'world-simulation-v23', 'world-simulation-v24',
@@ -125,6 +125,7 @@ describe('格林推演提示词装配契约', () => {
       WORLD_SIMULATION_PROMPT_VERSION_V31_ACU,
       WORLD_SIMULATION_PROMPT_VERSION_V32_ACU,
       WORLD_SIMULATION_PROMPT_VERSION_V33_ACU,
+      WORLD_SIMULATION_PROMPT_VERSION_ACU,
     ]);
     expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['undercurrent-analyst'].at(-1)?.version).toBe(WORLD_SIMULATION_PROMPT_VERSION_ACU);
     const v8 = WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].find(item => item.version === 'world-simulation-v8');
@@ -424,7 +425,8 @@ describe('V16 → V17 格林推演提示词迁移', () => {
     const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
     expect(migrated['world-director'][3]).toEqual(current['world-director'][3]);
     expect(migrated['world-stage-planner'][customIndex]).toEqual(current['world-stage-planner'][customIndex]);
-    expect(migrated['world-stage-planner'].at(-1)).toEqual(appended);
+    expect(migrated['world-stage-planner']).toContainEqual(appended);
+    expect(migrated['world-stage-planner'].at(-1)).toMatchObject({ role: 'user', content: USER_PREFILL_CONTENT_ACU });
     expect(migrated['world-stage-planner'][2]).toEqual(previous['world-stage-planner'][2]);
     expect(migrateWorldSimulationAgentPrompts_ACU(previous, {})).toEqual(defaults);
     expect(migrateWorldSimulationAgentPrompts_ACU(migrated, {})).toEqual(migrated);

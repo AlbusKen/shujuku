@@ -189,7 +189,6 @@ export async function sendMainApiChatCompletionRequest_ACU(
         temperature: finiteOrUndefined_ACU(oai.temp_openai),
         top_p: finiteOrUndefined_ACU(oai.top_p_openai),
         custom_prompt_post_processing: oai.custom_prompt_post_processing,
-        preserve_multiple_system: oai.preserve_multiple_system,
     };
     if (oai.reverse_proxy && MAIN_API_REVERSE_PROXY_SOURCES_ACU.has(source)) {
         request.reverse_proxy = oai.reverse_proxy;
@@ -340,7 +339,6 @@ export async function sendProfileChatCompletionRequest_ACU(
         reverse_proxy: proxy.url,
         proxy_password: proxy.password,
         custom_prompt_post_processing: profile['prompt-post-processing'],
-        preserve_multiple_system: profile['preserve-multiple-system'],
         ...overridePayload,
     }, signal, options, 'API连接预设');
 }

@@ -1,4 +1,5 @@
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
+import { withAgentPromptLayout_ACU } from '../../../shared/agent-prompt-layout';
 import { withCreativeIdentity_ACU } from '../../../shared/creative-identity.js';
 import { WORLD_SIMULATION_LEDGER_MODULES_ACU, WORLD_SIMULATION_SCHEMA_VERSION_ACU, formatWorldSimulationLedgerRequiredFields_ACU, formatWorldSimulationLedgerRequiredFieldsLegacy_ACU, type WorldSimulationPromptSegment_ACU } from '../model';
 import { formatWorldSimulationToolAddressHints_ACU, WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from '../world-simulation-agent-tools';
@@ -31,12 +32,15 @@ export const WORLD_SIMULATION_PROMPT_VERSION_V31_ACU = 'world-simulation-v31';
 export const WORLD_SIMULATION_PROMPT_VERSION_V32_ACU = 'world-simulation-v32';
 /** v33：各角色 ROOT 身份句融入创作身份声明；只替换仍与 v32 默认逐字相同的段。 */
 export const WORLD_SIMULATION_PROMPT_VERSION_V33_ACU = 'world-simulation-v33';
-export const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V33_ACU;
+/** v34：独立快照、原身份历史插入卡及固定 user 尾段。 */
+export const WORLD_SIMULATION_PROMPT_VERSION_V34_ACU = 'world-simulation-v34';
+export const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V34_ACU;
 export const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'] as const;
 export type WorldSimulationEngineSeam_ACU = typeof WORLD_SIMULATION_ENGINE_SEAMS_ACU[number];
 export type WorldSimulationAgentPrompts_ACU = Record<WorldSimulationAgentName_ACU, WorldSimulationPromptSegment_ACU[]>;
 
 export const WORLD_SIMULATION_PROMPT_PLACEHOLDERS_ACU = [
+  '$HISTORY_ANCHOR', '$RUNTIME_SNAPSHOT',
   '$WORLD_TASK', '$WORLD_HISTORY', '$WORLD_RUNTIME_CONTEXT', '$WORLD_AGENT_CATALOG',
   '$WORLD_TOOL_CATALOG', '$WORLD_EVIDENCE', '$WORLD_USER_GUIDANCE', '$WORLD_USER_REQUIREMENTS',
   '$WORLD_STATE', '$ANCHOR_MESSAGE', '$ANCHOR_IDENTITY', '$WORLD_STAGE_PLAN',
@@ -1073,7 +1077,7 @@ export function buildV33WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgen
 }
 
 export function buildDefaultWorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
-  return buildV33WorldSimulationAgentPrompt_ACU(name);
+  return withAgentPromptLayout_ACU(buildV33WorldSimulationAgentPrompt_ACU(name));
 }
 
 export function buildDefaultWorldSimulationAgentPrompts_ACU(): WorldSimulationAgentPrompts_ACU {
@@ -1273,6 +1277,7 @@ export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
     { version: WORLD_SIMULATION_PROMPT_VERSION_V30_ACU, fingerprint: promptFingerprint_ACU(buildV30WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_V31_ACU, fingerprint: promptFingerprint_ACU(buildV31WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_V32_ACU, fingerprint: promptFingerprint_ACU(buildV32WorldSimulationAgentPrompt_ACU(name)) },
+    { version: WORLD_SIMULATION_PROMPT_VERSION_V33_ACU, fingerprint: promptFingerprint_ACU(buildV33WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildDefaultWorldSimulationAgentPrompt_ACU(name)) },
   ]]),
 ) as unknown as Record<WorldSimulationAgentName_ACU, readonly { version: string; fingerprint: string }[]>;
@@ -1317,7 +1322,13 @@ function oneShotSegmentKeys_ACU(segments: readonly WorldSimulationPromptSegment_
 }
 
 export function migrateWorldSimulationAgentPromptsDetailed_ACU(current: Record<string, WorldSimulationPromptSegment_ACU[]>, previousDefaults: Record<string, WorldSimulationPromptSegment_ACU[]>, previousVersion?: string): WorldSimulationPromptMigration_ACU {
-  const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
+  if (previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V33_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_ACU) {
+    const prompts = Object.fromEntries(WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name,
+      withAgentPromptLayout_ACU(current[name] ?? buildV33WorldSimulationAgentPrompt_ACU(name))])) as WorldSimulationAgentPrompts_ACU;
+    return { prompts, forcedRoles: [] };
+  }
+  // 旧迁移仍以 V33 段序对齐，布局在迁移完成后追加，避免历史槽位串位。
+  const defaults = Object.fromEntries(WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name, buildV33WorldSimulationAgentPrompt_ACU(name)])) as WorldSimulationAgentPrompts_ACU;
   const migrated = {} as WorldSimulationAgentPrompts_ACU;
   const forcedRoles: WorldSimulationAgentName_ACU[] = [];
   for (const { name } of WORLD_SIMULATION_AGENT_CATALOG_ACU) {
@@ -1433,5 +1444,6 @@ export function migrateWorldSimulationAgentPromptsDetailed_ACU(current: Record<s
       next.splice(afterWorkflow + 1, 0, requirements);
     }
   }
+  for (const { name } of WORLD_SIMULATION_AGENT_CATALOG_ACU) migrated[name] = withAgentPromptLayout_ACU(migrated[name]);
   return { prompts: migrated, forcedRoles };
 }

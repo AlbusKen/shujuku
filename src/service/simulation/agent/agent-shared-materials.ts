@@ -64,11 +64,8 @@ export function splitWorldSimulationSubagentPrompt_ACU(
     }
     if (segment.content.includes(historyMarker) && segment.content.includes('$WORLD_HISTORY')) {
       if (segment.content !== defaults[index]?.content) return { ...segment };
-      if (name === 'world-director') {
-        snapshotLines.push('历史锚点与会话：$WORLD_HISTORY');
-        return { ...segment, content: `${historyMarker}\n主会话历史见末尾快照。` };
-      }
-      return { ...segment, content: historyMarker };
+      // 历史由独立插入卡按原身份展开，不作为状态快照的文本字段。
+      return { ...segment, content: `${historyMarker}\n会话历史由独立历史板块提供。` };
     }
     return segment.content === defaults[index]?.content ? { ...segment, content: runtimeDefault_ACU(segment.content) } : { ...segment };
   });

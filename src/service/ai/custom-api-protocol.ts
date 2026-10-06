@@ -4,29 +4,9 @@ const text = (value: any): string => typeof value === 'string' ? value : Array.i
     ? value.map(part => typeof part === 'string' ? part : part?.text ?? '').join('') : '';
 const args = (value: any): any => typeof value === 'string' ? JSON.parse(value || '{}') : value ?? {};
 
-/** 保留正文和原生工具字段；后处理只改变明确选择的角色组织方式。 */
-export function processDirectMessages_ACU(input: any[], mode: string, preserveMultipleSystem = true): any[] {
-    const messages = input.map(message => ({ ...message }));
-    if (!mode) return messages;
-    const withTools = mode.endsWith('_tools') || messages.some(message => message.tool_calls || message.role === 'tool');
-    if (mode === 'single' && !withTools) return [{ role: 'user', content: messages.map(message => text(message.content)).join('\n\n') }];
-    // preserveMultipleSystem 保护多个 system 消息不降级为 user（默认开启）
-    const strict = mode.startsWith('strict') || mode === 'single';
-    const semi = (strict || mode.startsWith('semi')) && !preserveMultipleSystem;
-    const result: any[] = [];
-    for (const original of messages) {
-        const message = { ...original };
-        if (semi && message.role === 'system' && result.length) message.role = 'user';
-        const previous = result[result.length - 1];
-        if (previous && previous.role === message.role && message.role !== 'tool'
-            && typeof previous.content === 'string' && typeof message.content === 'string') {
-            previous.content += '\n\n' + message.content;
-            if (message.tool_calls) previous.tool_calls = [...(previous.tool_calls ?? []), ...message.tool_calls];
-        } else result.push(message);
-    }
-    const first = result.find(message => message.role !== 'system');
-    if (strict && first?.role === 'assistant' && !first.tool_calls) first.role = 'user';
-    return result;
+/** 直连保留消息顺序、身份与工具事务，不读取预设后处理，也不生成伪对话。 */
+export function processDirectMessages_ACU(input: any[]): any[] {
+    return input.map(message => ({ ...message }));
 }
 
 export function providerEndpoint_ACU(raw: string, format: CustomApiFormat_ACU): string {
@@ -50,42 +30,53 @@ export function buildProviderRequest_ACU(body: Record<string, any>, format: Cust
             for (const call of m.tool_calls ?? []) items.push({ type: 'function_call', call_id: call.id, ...call.function });
             return items;
         });
-        return { modalities: ['text'], ...rest, input, max_output_tokens: max_tokens };
+        return { ...rest, input, max_output_tokens: max_tokens,
+            ...(tools?.length ? { tools: tools.map((t: any) => ({ type: 'function', ...t.function })), tool_choice } : {}),
+            ...(response_format ? { text: { format: response_format.type === 'json_schema' ? { type: 'json_schema', ...response_format.json_schema } : response_format } } : {}) };
     }
     if (format === 'claude_messages') {
-        let system: string | undefined;
-        const cleaned = messages.filter((m: any) => {
-            if (m.role !== 'system') return true;
-            system = (system ? system + '\n\n' : '') + text(m.content);
-            return false;
-        });
-        const body: any = { ...rest, messages: cleaned.map((m: any) => ({ role: m.role, content: text(m.content) })), max_tokens };
-        if (system) body.system = system;
-        if (tools?.length) body.tools = tools.map((tool: any) => ({ name: tool.function.name, description: tool.function.description, input_schema: tool.function.parameters }));
-        if (tool_choice === 'required') body.tool_choice = { type: 'any' };
-        return body;
+        const system = messages.filter((m: any) => m.role === 'system').map((m: any) => ({ type: 'text', text: text(m.content) }));
+        const converted = messages.filter((m: any) => m.role !== 'system').map((m: any) => ({
+            role: m.role === 'assistant' ? 'assistant' : 'user',
+            content: m.role === 'tool' ? [{ type: 'tool_result', tool_use_id: m.tool_call_id, content: text(m.content) }]
+                : [...(m.content ? [{ type: 'text', text: text(m.content) }] : []), ...(m.tool_calls ?? []).map((c: any) => ({ type: 'tool_use', id: c.id, name: c.function.name, input: args(c.function.arguments) }))],
+        }));
+        const { top_p, temperature, model, stream } = rest;
+        return { model, stream, temperature, top_p, max_tokens, messages: converted, ...(system.length ? { system } : {}),
+            ...(tools?.length ? { tools: tools.map((t: any) => ({ name: t.function.name, description: t.function.description, input_schema: t.function.parameters })), tool_choice: { type: 'auto' } } : {}),
+            ...(response_format ? { output_config: { format: { type: 'json_schema', schema: response_format.json_schema?.schema ?? { type: 'object' } } } } : {}) };
     }
-    if (format === 'gemini_interactions') {
-        const systemInstruction = messages.find((m: any) => m.role === 'system');
-        const contents = messages
-            .filter((m: any) => m.role !== 'system')
-            .flatMap((m: any) => {
-                const parts: any[] = m.content ? [{ text: text(m.content) }] : [];
-                for (const call of m.tool_calls ?? []) {
-                    parts.push({ functionCall: { name: call.function.name, args: args(call.function.arguments) } });
-                }
-                if (m.role === 'tool') parts.push({ functionResponse: { name: '', response: { output: text(m.content) } } });
-                return [{ role: m.role === 'assistant' ? 'model' : 'user', parts }];
-            });
-        const body: any = { ...rest, contents, generationConfig: { maxOutputTokens: max_tokens, responseModalities: ['TEXT'] } };
-        if (systemInstruction) body.systemInstruction = { parts: [{ text: text(systemInstruction.content) }] };
-        if (tools?.length) body.tools = [{ functionDeclarations: tools.map((tool: any) => ({ name: tool.function.name, description: tool.function.description, parameters: tool.function.parameters })) }];
-        if (tool_choice === 'required') body.toolConfig = { functionCallingConfig: { mode: 'ANY' } };
-        return body;
-    }
-    return body;
+    const input = messages.filter((m: any) => m.role !== 'system').flatMap((m: any) => {
+        if (m.role === 'tool') return [{ type: 'function_result', call_id: m.tool_call_id, result: text(m.content) }];
+        return [...(m.content ? [{ type: m.role === 'assistant' ? 'model_output' : 'user_input', content: [{ type: 'text', text: text(m.content) }] }] : []),
+            ...(m.tool_calls ?? []).map((c: any) => ({ type: 'function_call', id: c.id, name: c.function.name, arguments: args(c.function.arguments) }))];
+    });
+    return { model: rest.model, stream: rest.stream, store: false, input,
+        system_instruction: messages.filter((m: any) => m.role === 'system').map((m: any) => text(m.content)).join('\n\n'),
+        generation_config: { max_output_tokens: max_tokens, ...(tools?.length ? { tool_choice: 'auto' } : {}) },
+        ...(tools?.length ? { tools: tools.map((t: any) => ({ type: 'function', ...t.function })) } : {}),
+        ...(response_format ? { response_format: { type: 'json', schema: response_format.json_schema?.schema ?? { type: 'object' } } } : {}) };
 }
 
+/** 原始非流式回复归一到现有 OpenAI 回复契约，原始 wire 另行完整记录。 */
+export function normalizeProviderReply_ACU(data: any, format: CustomApiFormat_ACU): any {
+    if (format === 'openai_compat' || data?.choices) return data;
+    if (data?.error || data?.errors?.length || ['failed', 'cancelled'].includes(data?.status)) throw new Error('直连 API 返回上游错误。');
+    const blocks = format === 'claude_messages' ? data.content ?? []
+        : format === 'openai_responses' ? data.output ?? [] : data.steps ?? data.outputs ?? [];
+    const content = blocks.map((b: any) => b.type === 'text' ? b.text : text(b.content)).join('');
+    const calls = blocks.filter((b: any) => ['function_call', 'tool_use'].includes(b.type)).map((b: any) => ({
+        id: b.call_id ?? b.id, type: 'function', function: { name: b.name, arguments: typeof b.arguments === 'string' ? b.arguments : JSON.stringify(b.arguments ?? b.input ?? {}) },
+    }));
+    const usage = data.usage;
+    return { choices: [{ message: { role: 'assistant', content, ...(calls.length ? { tool_calls: calls } : {}) },
+        finish_reason: calls.length ? 'tool_calls' : (data.stop_reason === 'max_tokens' || data.status === 'incomplete' ? 'length'
+            : format === 'claude_messages' ? (['end_turn', 'stop_sequence'].includes(data.stop_reason) ? 'stop' : null)
+            : data.status === 'completed' ? 'stop' : null) }],
+        usage: usage ? { ...usage, prompt_tokens: usage.input_tokens ?? usage.total_input_tokens, completion_tokens: usage.output_tokens ?? usage.total_output_tokens } : undefined };
+}
+
+/** Responses / Interactions SSE 转为现有消费者使用的 Chat Completion SSE；不伪造缺失的终态。 */
 export function normalizeProviderStream_ACU(raw: string, format: CustomApiFormat_ACU): string {
     if (format === 'openai_compat' || format === 'claude_messages') return raw;
     const packets: string[] = [];
@@ -118,25 +109,4 @@ export function normalizeProviderStream_ACU(raw: string, format: CustomApiFormat
     }
     if (completed) packets.push('data: [DONE]\n\n');
     return packets.join('');
-}
-
-export function normalizeProviderReply_ACU(response: any, format: CustomApiFormat_ACU): any {
-    if (format === 'openai_compat' || format === 'openai_responses') return response;
-    if (format === 'claude_messages') {
-        return {
-            id: response.id,
-            model: response.model,
-            choices: [{ message: { role: 'assistant', content: response.content?.map((block: any) => block.text ?? '').join('') ?? '' }, finish_reason: response.stop_reason }],
-            usage: { prompt_tokens: response.usage?.input_tokens, completion_tokens: response.usage?.output_tokens },
-        };
-    }
-    if (format === 'gemini_interactions') {
-        return {
-            id: '',
-            model: response.modelVersion ?? '',
-            choices: [{ message: { role: 'assistant', content: response.candidates?.[0]?.content?.parts?.map((part: any) => part.text ?? '').join('') ?? '' }, finish_reason: response.candidates?.[0]?.finishReason }],
-            usage: { prompt_tokens: response.usageMetadata?.promptTokenCount, completion_tokens: response.usageMetadata?.candidatesTokenCount },
-        };
-    }
-    return response;
 }

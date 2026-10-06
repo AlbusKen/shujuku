@@ -1,3 +1,4 @@
+import { assembleAgentPrompt_ACU } from '../../../shared/agent-prompt-layout';
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
 import { sha256HexSync_ACU } from '../../../shared/sha256-sync';
 import { formatWorldSimulationLedgerRequiredFields_ACU, type WorldCollisionReport_ACU, type WorldSimulationLedger_ACU, type WorldSimulationLedgerModule_ACU, type WorldSimulationRunIdentity_ACU, type WorldSimulationSettings_ACU } from '../model';
@@ -25,7 +26,7 @@ import { countWorldSimulationTokens_ACU, measureWorldSimulationPrompt_ACU, type 
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './prompt-template';
 import { runWorldSimulationWorkflow_ACU, runWorldSimulationOneShotWorkflow_ACU } from './agent-workflow';
-import { bindWorldSimulationFixedWorldbook_ACU, renderWorldSimulationDirectorReads_ACU, verifyWorldSimulationFixedWorldbook_ACU, WORLD_SIMULATION_WORLDBOOK_UNAVAILABLE_ACU } from './agent-shared-materials';
+import { bindWorldSimulationFixedWorldbook_ACU, renderWorldSimulationDirectorReads_ACU, splitWorldSimulationSubagentPrompt_ACU, verifyWorldSimulationFixedWorldbook_ACU, WORLD_SIMULATION_WORLDBOOK_UNAVAILABLE_ACU } from './agent-shared-materials';
 import { loadAgentWorldbookSnapshot_ACU, renderAgentWorldbookTriggeredInjection_ACU, selectTriggeredWorldbookEntries_ACU, type AgentWorldbookSnapshot_ACU } from '../../continuation/agent/agent-worldbook-read';
 import { buildRecentWorldbookScanText_ACU } from '../../continuation/agent/agent-placeholder-resolver';
 import { planWorldSimulationHistoryCompaction_ACU } from './agent-history-compactor';
@@ -581,8 +582,10 @@ export class WorldSimulationMainLoop_ACU {
       });
       let sent: Awaited<ReturnType<typeof executeWorldSimulationFinalRequest_ACU>>;
       try {
+        const split = splitWorldSimulationSubagentPrompt_ACU(
+          adaptWorldSimulationPromptSegmentsToToolMode_ACU(director, input.settings.agentPrompts[director], toolMode), director);
         const rendered = await renderWorldSimulationPrompt_ACU(
-          adaptWorldSimulationPromptSegmentsToToolMode_ACU(director, input.settings.agentPrompts[director], toolMode), director,
+          split.segments, director,
           // 阅读预算属于本轮运行时快照；不要把每次 read/search 后变化的数值
           // 混入导演请求的稳定提示前缀，否则历史请求的前缀会随配额漂移。
           createWorldSimulationPlaceholderResolvers_ACU({
@@ -608,14 +611,9 @@ export class WorldSimulationMainLoop_ACU {
           `证据注册表：${JSON.stringify(requestSnapshot)}`,
         ].join('\n\n');
         const tail = [...(persistentHistory && handoffHint ? [handoffHint] : [])];
-        const prefill = rendered.messages.some(message => message.content === USER_PREFILL_CONTENT_ACU)
-          ? { role: 'user', content: USER_PREFILL_CONTENT_ACU }
-          : null;
         const count = this.dependencies.countTokens ?? countWorldSimulationTokens_ACU;
-        // 状态快照作为独立 system 板块置于真实历史后，末尾追加 user 预填充
         const assemble = (body: typeof transcript) => finishWorldSimulationMessages_ACU(toolMode,
-          [...fixed, ...body, ...tail, { role: 'system', content: snapshotText }, { role: 'user', content: USER_PREFILL_CONTENT_ACU }],
-          WORLD_SIMULATION_AGENT_PREFILLS_ACU[director]);
+          assembleAgentPrompt_ACU(fixed, [...body, ...tail], snapshotText), WORLD_SIMULATION_AGENT_PREFILLS_ACU[director]);
         let prepared = assemble(transcript);
         // 无锚点路径与锚定路径同一口径：用最终准备发送的完整请求判定是否压缩，
         // 不再只按 transcript 估算——骨架与尾部的开销同样会把请求顶过阈值。

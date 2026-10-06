@@ -1,4 +1,5 @@
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
+import { assembleAgentPrompt_ACU } from '../../../shared/agent-prompt-layout';
 import { WORLD_CHRONICLE_HOT_WINDOW_ACU } from '../model';
 import type {
   WorldSimulationLedger_ACU,
@@ -51,15 +52,11 @@ export function worldSimulationInvokeTools_ACU(mode: AgentToolMode_ACU, tools: r
 }
 
 /**
- * 按模式收尾请求：tools 模式补思维链预填充；json 模式把工具历史投影成纯文本，
- * 并在没有用户预填充时把 JSON 预填充放到请求最末。
+ * 工具模式原样保留提示词；JSON 模式仅投影工具历史，不注入额外预填充。
  */
 export function finishWorldSimulationMessages_ACU<T extends { role: string; content: string }>(mode: AgentToolMode_ACU, messages: readonly T[], jsonPrefill?: string): T[] {
-  // 工具模式只影响 tools 参数，不修改消息底部预填充
-  if (jsonPrefill && !messages.some(m => m.content === jsonPrefill)) {
-    return [...messages, { role: 'assistant', content: jsonPrefill } as T];
-  }
-  return messages as T[];
+  if (mode === 'tools') return withNativeToolThinkPrefill_ACU(messages as never) as T[];
+  return withJsonTailPrefill_ACU(messages as never) as T[];
 }
 
 export function resolveWorldSimulationToolMode_ACU(preset: WorldSimulationResolvedApiPreset_ACU): AgentToolMode_ACU {
@@ -539,12 +536,7 @@ export class WorldSimulationSubagentRuntime_ACU {
     const rendered = await renderWorldSimulationPrompt_ACU(adaptWorldSimulationPromptSegmentsToToolMode_ACU(input.agentName, input.settings.agentPrompts[input.agentName], toolMode), input.agentName, resolvers);
     const protocol = worldSimulationOneShotProtocol_ACU(input.agentName, modules, toolMode);
     const base = [{ role: 'system', content: protocol }, ...rendered.messages.filter(message => message.content !== USER_PREFILL_CONTENT_ACU)];
-    // 末尾预填充是用户在提示词里设置的 user 段，必须按 role: 'user' 原样补回请求末尾，与主 Agent、
-    // legacy specialist、reviewer 三条链路一致。漏掉它，withNativeToolThinkPrefill_ACU 会改追加
-    // assistant <think> 预填充，请求以 model turn 结尾，Gemini 等通道直接 400。
-    const trailingPrefill = rendered.messages.some(message => message.content === USER_PREFILL_CONTENT_ACU)
-      ? [{ role: 'user', content: USER_PREFILL_CONTENT_ACU }]
-      : [];
+    // 快照和历史由固定卡片装配，末尾 user 预填充与工具模式无关。
     const transcript: AiWireMessage_ACU[] = [];
     const readGateState = createWorldSimulationReadGateState_ACU();
     const usage = { readsUsed: 0 };
@@ -577,7 +569,7 @@ export class WorldSimulationSubagentRuntime_ACU {
       let sqlSubmitted = false;
       // 本次尝试提交的 SQL 在会话流里的条目 id；成败都回写到同一条，避免内容与结论分家。
       let writeEntryId: number | null = null;
-      const messages = finishWorldSimulationMessages_ACU(toolMode, [...base, { role: 'user', content: runtime }, ...transcript, ...trailingPrefill]);
+      const messages = finishWorldSimulationMessages_ACU(toolMode, assembleAgentPrompt_ACU(base, transcript, runtime));
       const requestTools = maxReads && reads === 0 ? ['read', 'write_sql'] as const : ['write_sql'] as const;
       // 声明必须与本路径的校验一致：write_sql 在 one-shot 只收 sql，证据引用由程序按锚点绑定。
       // 共享目录里宣传 evidenceRefs 会让模型照着填，再被“多余参数”拒掉。json 模式请求不带 tools。
@@ -873,9 +865,8 @@ export class WorldSimulationSubagentRuntime_ACU {
       const guidance = split.movedGuidanceIndex >= 0 ? rendered.messages[split.movedGuidanceIndex]?.content : '';
       const appendix = [snapshotText, guidance, input.triggeredWorldbook ?? ''].filter(Boolean).join('\n\n');
       const protocolGuard = { role: 'system', content: worldSimulationProtocolForMode_ACU(agentName, worldSimulationSpecialistRuntimeProtocolInstruction_ACU(agentName, writableModules), toolMode) };
-      const drafted = [protocolGuard, ...rendered.messages.filter((message, index) => index !== split.movedGuidanceIndex && message.content !== USER_PREFILL_CONTENT_ACU), ...transcript, ...(appendix ? [{ role: 'user', content: appendix }] : []), ...(rendered.messages.some(message => message.content === USER_PREFILL_CONTENT_ACU)
-        ? [{ role: 'user', content: USER_PREFILL_CONTENT_ACU }]
-        : [])];
+      const drafted = assembleAgentPrompt_ACU([protocolGuard,
+        ...rendered.messages.filter((message, index) => index !== split.movedGuidanceIndex)], transcript, appendix);
       const messages = finishWorldSimulationMessages_ACU(toolMode, drafted, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName]);
       const sent = await executeWorldSimulationFinalRequest_ACU({
         messages,
@@ -1097,9 +1088,8 @@ export class WorldSimulationSubagentRuntime_ACU {
       const guidance = split.movedGuidanceIndex >= 0 ? rendered.messages[split.movedGuidanceIndex]?.content : '';
       const appendix = [snapshotText, guidance, input.triggeredWorldbook ?? ''].filter(Boolean).join('\n\n');
       const protocolGuard = { role: 'system', content: worldSimulationProtocolForMode_ACU(agentName, worldSimulationReviewerRuntimeProtocolInstruction_ACU(), toolMode) };
-      const reviewerDraft = [protocolGuard, ...rendered.messages.filter((message, index) => index !== split.movedGuidanceIndex && message.content !== USER_PREFILL_CONTENT_ACU), ...transcript, ...(appendix ? [{ role: 'user', content: appendix }] : []), ...(rendered.messages.some(message => message.content === USER_PREFILL_CONTENT_ACU)
-        ? [{ role: 'user', content: USER_PREFILL_CONTENT_ACU }]
-        : [])];
+      const reviewerDraft = assembleAgentPrompt_ACU([protocolGuard,
+        ...rendered.messages.filter((message, index) => index !== split.movedGuidanceIndex)], transcript, appendix);
       const sent = await executeWorldSimulationFinalRequest_ACU({
         messages: finishWorldSimulationMessages_ACU(toolMode, reviewerDraft, WORLD_SIMULATION_AGENT_PREFILLS_ACU[agentName]),
         inputLimitTokens: input.settings.agentHistoryTokenBudget,

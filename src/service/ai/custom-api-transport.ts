@@ -32,7 +32,7 @@ export async function sendCustomApiRequest_ACU(
     config: any, bridgeBody: Record<string, any>, signal?: AbortSignal | null,
 ): Promise<Response> {
     signal?.throwIfAborted();
-    if (config.sendViaTavern === true) {
+    if (config.sendViaTavern !== false) {
         const url = '/api/backends/chat-completions/generate';
         const headers = { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' };
         const wire = JSON.stringify(bridgeBody);
@@ -50,13 +50,12 @@ export async function sendCustomApiRequest_ACU(
     for (const [key, value] of Object.entries(bridgeBody)) {
         if (!bridgeKeys.has(key) && value !== undefined) base[key] = value;
     }
-    const preserveMultipleSystem = bridgeBody.preserve_multiple_system !== false;
-    base.messages = processDirectMessages_ACU(base.messages, String(bridgeBody.custom_prompt_post_processing ?? ''), preserveMultipleSystem);
     const included = includeBody(String(bridgeBody.custom_include_body ?? config.bodyParams ?? ''));
-    const body = buildProviderRequest_ACU({ ...base, ...included }, format);
+    const body = buildProviderRequest_ACU({ ...base, ...included,
+        messages: processDirectMessages_ACU(included.messages ?? base.messages) }, format);
     // 协议原生附加字段在转换后保留；通用字段只由协议转换器写入，不能重新覆盖为旧协议。
     const convertedKeys = new Set(['messages', 'max_tokens', 'tools', 'tool_choice', 'response_format']);
-    for (const [key, value] of Object.entries(included)) if (!convertedKeys.has(key)) body[key] = value;
+    for (const [key, value] of Object.entries(included)) if (!convertedKeys.has(key) && !bridgeKeys.has(key)) body[key] = value;
     for (const key of exclusions(String(config.excludeBodyParams ?? ''))) delete body[key];
     const headers = new Headers({ 'Content-Type': 'application/json' });
     if (config.apiKey) {

@@ -3,6 +3,7 @@ import { WORLD_SIMULATION_AGENT_NAMES_ACU, WORLD_SIMULATION_RETIRED_AGENT_NAMES_
 import { WORLD_SIMULATION_PROMPT_PLACEHOLDERS_ACU, buildDefaultWorldSimulationAgentPrompt_ACU, buildDefaultWorldSimulationAgentPrompts_ACU, type WorldSimulationAgentPrompts_ACU, type WorldSimulationPromptPlaceholder_ACU } from './agent-defaults';
 import { buildWorldSimulationAgentPromptsForMode_ACU } from './agent-prompt-mode';
 import type { AgentToolMode_ACU } from '../../ai/agent-tool-mode';
+import { AGENT_HISTORY_SENTINEL_ACU, AGENT_SNAPSHOT_SENTINEL_ACU, isAgentHistorySlot_ACU } from '../../../shared/agent-prompt-layout';
 
 /**
  * 段落校验只管字段与占位符，不再强制 seam 必须存在、唯一、按序、固定身份或 pinned。
@@ -22,7 +23,8 @@ export function validateWorldSimulationPromptSegments_ACU(value: unknown, agentN
     if (!item || typeof item !== 'object' || Array.isArray(item)) fail_ACU('提示词段必须是对象', { agentName, index }, phase);
     const raw = item as Record<string, unknown>;
     if (Object.keys(raw).some(key => !['role', 'content', 'enabled', 'deletable', 'pinned'].includes(key))) fail_ACU('提示词段包含未知字段', { agentName, index }, phase);
-    if (!['system', 'user', 'assistant'].includes(String(raw.role)) || typeof raw.content !== 'string' || !raw.content.trim()) fail_ACU('提示词段角色或内容非法', { agentName, index }, phase);
+    if (typeof raw.content !== 'string' || !raw.content.trim() || (!['system', 'user', 'assistant'].includes(String(raw.role))
+      && !(raw.role === 'history' && isAgentHistorySlot_ACU(raw as { content: string })))) fail_ACU('提示词段角色或内容非法', { agentName, index }, phase);
     if (typeof raw.enabled !== 'boolean' || typeof raw.deletable !== 'boolean' || typeof raw.pinned !== 'boolean') fail_ACU('提示词段开关非法', { agentName, index }, phase);
     return { role: raw.role as string, content: raw.content, enabled: raw.enabled, deletable: raw.deletable, pinned: raw.pinned };
 
@@ -71,6 +73,8 @@ export async function renderWorldSimulationPrompt_ACU(
   }
   const values = new Map<WorldSimulationPromptPlaceholder_ACU, string>();
   for (const token of used) {
+    if (token === '$HISTORY_ANCHOR') { values.set(token, AGENT_HISTORY_SENTINEL_ACU); continue; }
+    if (token === '$RUNTIME_SNAPSHOT') { values.set(token, AGENT_SNAPSHOT_SENTINEL_ACU); continue; }
     if (!Object.prototype.hasOwnProperty.call(resolvers, token) || typeof resolvers[token] !== 'function') fail_ACU('缺少已使用占位符的授权 resolver', { agentName, token });
     values.set(token, untrustedBlock_ACU(token, String(await resolvers[token]!())));
   }

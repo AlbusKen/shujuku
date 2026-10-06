@@ -10,9 +10,10 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { USER_PREFILL_CONTENT_ACU } from '../../../src/shared/user-prefill.js';
+import { withAgentPromptLayout_ACU } from '../../../src/shared/agent-prompt-layout';
 
 import { validateContinuationSettings_ACU } from '../../../src/service/continuation/continuation-store';
-import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V46_ACU } from '../../../src/service/continuation/defaults';
+import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V47_ACU } from '../../../src/service/continuation/defaults';
 
 import {
   AGENT_PROMPT_DEFAULT_LINEAGE_ACU,
@@ -85,7 +86,7 @@ describe('默认提示词谱系迁移', () => {
   it.each(labels)('%s 的默认组迁移后与当前默认组逐段一致', label => {
     const loaded = validateContinuationSettings_ACU(historicalSettings_ACU(label));
     const defaults = buildDefaultContinuationSettings_ACU();
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V46_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V47_ACU);
     expect(loaded.outlinePrompt).toEqual(defaults.outlinePrompt);
     for (const role of Object.keys(defaults.agentPrompts) as (keyof typeof defaults.agentPrompts)[]) {
       expect(loaded.agentPrompts[role], `agentPrompts.${role}`).toEqual(defaults.agentPrompts[role]);
@@ -145,11 +146,11 @@ describe('默认提示词谱系迁移', () => {
 
     const loaded = validateContinuationSettings_ACU(settings);
 
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V46_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V47_ACU);
     expect(loaded.agentPrompts.arcArchitect).toEqual(defaults.arcArchitect);
   });
 
-  it('整组自定义、没有已知损坏签名的提示词不会被补入默认段', () => {
+  it('整组自定义保留正文，只补固定布局卡与 user 尾段', () => {
     const settings = buildDefaultContinuationSettings_ACU() as any;
     settings.promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU;
     const custom = [{ role: 'user', content: '用户完全自定义的审查提示词', enabled: true, deletable: true }];
@@ -157,7 +158,7 @@ describe('默认提示词谱系迁移', () => {
 
     const loaded = validateContinuationSettings_ACU(settings);
 
-    expect(loaded.agentPrompts.reviewer).toEqual(custom);
+    expect(loaded.agentPrompts.reviewer).toEqual(withAgentPromptLayout_ACU(custom));
   });
 
   it('谱系表条目都指向当前默认组里存在的槽位，且不与当前默认正文重合', () => {
@@ -202,10 +203,11 @@ describe('V34 → V35 逐段精确迁移', () => {
     settings.agentPrompts.maintainer.push(appended);
 
     const loaded = validateContinuationSettings_ACU(settings);
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V46_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V47_ACU);
     expect(loaded.agentPrompts.main[mainIndex]).toEqual({ ...defaults.main[mainIndex], enabled: false });
     expect(loaded.agentPrompts.maintainer[customIndex]).toEqual(settings.agentPrompts.maintainer[customIndex]);
-    expect(loaded.agentPrompts.maintainer.at(-1)).toEqual(appended);
+    expect(loaded.agentPrompts.maintainer).toContainEqual(appended);
+    expect(loaded.agentPrompts.maintainer.at(-1)).toMatchObject({ role: 'user', content: USER_PREFILL_CONTENT_ACU });
     expect(loaded.agentPrompts.arcArchitect).toEqual(defaults.arcArchitect);
     expect(settings.agentPrompts.main[mainIndex].content).toBe(previous.main[mainIndex].content);
     expect(validateContinuationSettings_ACU(loaded).agentPrompts).toEqual(loaded.agentPrompts);

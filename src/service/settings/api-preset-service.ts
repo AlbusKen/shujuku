@@ -36,7 +36,7 @@ export type ApiPresetApiMode_ACU = 'custom' | 'tavern';
 /**
  * 提示词后处理（SillyTavern custom_prompt_post_processing）可选值。
  * '' = 未选择：请求体不带该字段，酒馆后端原样透传消息（保留中部的 system 角色）。
- * 缺失/非法值统一归一为 'strict'（默认严格，与历史写死 strict 的行为保持兼容）。
+ * 缺失/非法值统一归一为 'merge_tools'；插件直连不应用此选项。
  */
 export type ApiPromptPostProcessingValue_ACU =
   | ''
@@ -59,10 +59,10 @@ export const API_PROMPT_POST_PROCESSING_VALUES_ACU: readonly ApiPromptPostProces
   'strict_tools',
 ];
 
-export const API_PROMPT_POST_PROCESSING_DEFAULT_ACU: ApiPromptPostProcessingValue_ACU = 'strict';
+export const API_PROMPT_POST_PROCESSING_DEFAULT_ACU: ApiPromptPostProcessingValue_ACU = 'merge_tools';
 
 export function normalizePromptPostProcessing_ACU(value: unknown): ApiPromptPostProcessingValue_ACU {
-  // 显式空串 = 用户选择「未选择」，保留；缺失/非字符串/非法值 → 默认严格。
+  // 显式空串保留；缺失/非字符串/非法值使用含工具的合并模式。
   if (typeof value !== 'string') return API_PROMPT_POST_PROCESSING_DEFAULT_ACU;
   const normalized = value.trim();
   if (normalized === '') return '';
@@ -109,7 +109,6 @@ export interface ApiPresetApiConfig_ACU {
   excludeBodyParams: string;
   requestHeaders: string;
   promptPostProcessing: ApiPromptPostProcessingValue_ACU;
-  preserveMultipleSystem?: boolean;
   /** 接口协议（预设级），见 CustomApiFormat_ACU。 */
   customApiFormat: CustomApiFormat_ACU;
 }
@@ -154,7 +153,7 @@ export function normalizeApiConfig_ACU(value: any): ApiPresetApiConfig_ACU {
     model: typeof source.model === 'string' ? source.model : '',
     useMainApi: source.useMainApi === true,
     requestTimeoutSeconds: normalizeApiRequestTimeout_ACU(source.requestTimeoutSeconds),
-    sendViaTavern: source.sendViaTavern === true,
+    sendViaTavern: source.sendViaTavern !== false,
     max_tokens: Number.isFinite(maxTokens) && maxTokens >= 0 ? Math.floor(maxTokens) : 60000,
     maxTokens: Number.isFinite(maxTokens) && maxTokens >= 0 ? Math.floor(maxTokens) : 60000,
     temperature: Number.isFinite(temperature) ? temperature : 1,
@@ -162,11 +161,10 @@ export function normalizeApiConfig_ACU(value: any): ApiPresetApiConfig_ACU {
     excludeBodyParams: typeof source.excludeBodyParams === 'string' ? source.excludeBodyParams : '',
     requestHeaders: typeof source.requestHeaders === 'string' ? source.requestHeaders : '',
     promptPostProcessing: normalizePromptPostProcessing_ACU(source.promptPostProcessing),
-    preserveMultipleSystem: typeof source.preserveMultipleSystem === 'boolean' ? source.preserveMultipleSystem : true,
     customApiFormat: normalizeCustomApiFormat_ACU(source.customApiFormat),
     ...Object.fromEntries(
       Object.entries(source).filter(([key]) =>
-        !['url', 'apiKey', 'model', 'useMainApi', 'requestTimeoutSeconds', 'sendViaTavern', 'max_tokens', 'maxTokens', 'temperature', 'bodyParams', 'excludeBodyParams', 'requestHeaders', 'promptPostProcessing', 'preserveMultipleSystem', 'customApiFormat'].includes(key)
+        !['url', 'apiKey', 'model', 'useMainApi', 'requestTimeoutSeconds', 'sendViaTavern', 'max_tokens', 'maxTokens', 'temperature', 'bodyParams', 'excludeBodyParams', 'requestHeaders', 'promptPostProcessing', 'customApiFormat'].includes(key)
       )
     ),
   };

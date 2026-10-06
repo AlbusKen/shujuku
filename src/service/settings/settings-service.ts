@@ -27,7 +27,7 @@ import { getDefaultTemplateSnapshot_ACU, getTemplatePreset_ACU } from '../templa
 import { getCurrentIsolationKey_ACU, settings_ACU, _set_settings_ACU} from '../runtime/state-manager';
 import { getCurrentCharSettings_ACU, getCurrentWorldbookConfig_ACU } from './settings-readers';
 import { getCurrentCharacterScopeKey_ACU, resolveCurrentCharacterScope_ACU } from './character-scope';
-import { reconcileApiBindingForCurrentChat_ACU } from './api-preset-service';
+import { API_PROMPT_POST_PROCESSING_DEFAULT_ACU, reconcileApiBindingForCurrentChat_ACU } from './api-preset-service';
 import { getCurrentChatTemplateScopeState_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, migrateLegacyTemplateScopeForCurrentChat_ACU, normalizeTemplateScopeIsolationKey_ACU, sanitizeChatSheetsObject_ACU, sanitizeTemplateSnapshotForChat_ACU } from '../template/chat-scope';
 import { safeJsonParse_ACU } from '../../shared/json-helpers';
 import { deepMerge_ACU, ensureSheetOrderNumbers_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
@@ -376,7 +376,9 @@ export function saveSettings_ACU(): SaveSettingsResult_ACU {
   }
 
   // 数据层：纯存储持久化
-  persistSettingsToStorage_ACU(settings_ACU, code);
+  if (persistSettingsToStorage_ACU(settings_ACU, code) === false) {
+      return { saved: false, storageType: 'memory', code: 'storage_error', error: '设置持久化失败。' };
+  }
 
   try {
       const store = (getConfigStorage_ACU)();
@@ -792,6 +794,7 @@ export   function loadSettings_ACU() {
       settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
 
       settingsStorageReadyForSave_ACU = true;
+      forceApiPromptPostProcessingOnce_ACU();
       refreshDefaultTableTemplateOnce_ACU(activeCode);
       forceDisableStrictJsonTableFillOnce_ACU();
       forceDefaultTableFillPromptsOnce_ACU();
@@ -1191,9 +1194,47 @@ function forceDisableStreamingOnce_ACU() {
   }
 
 
+export const API_POST_PROCESSING_UPGRADE_VERSION_ACU = 'api-merge-tools-v1';
+
+/** 只覆盖一次后处理模式；备份不含端点、密钥或提示词，保存失败恢复原值与标记。 */
+export function forceApiPromptPostProcessingOnce_ACU(): void {
+    if (!settingsStorageReadyForSave_ACU
+        || settings_ACU.apiPostProcessingUpgradeVersion === API_POST_PROCESSING_UPGRADE_VERSION_ACU) return;
+    const configs = [settings_ACU.apiConfig, ...(Array.isArray(settings_ACU.apiPresets)
+        ? settings_ACU.apiPresets.map((preset: any) => preset?.apiConfig) : [])]
+        .filter(config => config && typeof config === 'object' && !Array.isArray(config));
+    const previous = configs.map(config => ({ config, had: Object.prototype.hasOwnProperty.call(config, 'promptPostProcessing'), value: config.promptPostProcessing }));
+    const markerHad = Object.prototype.hasOwnProperty.call(settings_ACU, 'apiPostProcessingUpgradeVersion');
+    const marker = settings_ACU.apiPostProcessingUpgradeVersion;
+    const backupHad = Object.prototype.hasOwnProperty.call(settings_ACU, 'apiPostProcessingUpgradeBackup');
+    const backup = settings_ACU.apiPostProcessingUpgradeBackup;
+    try {
+        settings_ACU.apiPostProcessingUpgradeBackup = {
+            current: settings_ACU.apiConfig?.promptPostProcessing ?? null,
+            presets: (settings_ACU.apiPresets ?? []).map((preset: any) => ({
+                name: preset.name, promptPostProcessing: preset.apiConfig?.promptPostProcessing ?? null,
+            })),
+        };
+        for (const config of configs) config.promptPostProcessing = API_PROMPT_POST_PROCESSING_DEFAULT_ACU;
+        settings_ACU.apiPostProcessingUpgradeVersion = API_POST_PROCESSING_UPGRADE_VERSION_ACU;
+        const saved = saveSettings_ACU();
+        if (!saved.saved) throw new Error(saved.error || saved.warning || '设置未保存');
+    } catch (error) {
+        for (const item of previous) {
+            if (item.had) item.config.promptPostProcessing = item.value;
+            else delete item.config.promptPostProcessing;
+        }
+        if (markerHad) settings_ACU.apiPostProcessingUpgradeVersion = marker;
+        else delete settings_ACU.apiPostProcessingUpgradeVersion;
+        if (backupHad) settings_ACU.apiPostProcessingUpgradeBackup = backup;
+        else delete settings_ACU.apiPostProcessingUpgradeBackup;
+        logWarn_ACU('[API预设] 后处理模式一次性升级未保存，下次加载重试。', error);
+    }
+}
+
 export   function buildDefaultSettings_ACU() {
       return {
-          apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, max_tokens: 60000, temperature: 1.0, promptPostProcessing: 'strict', customApiFormat: 'openai_compat' },
+          apiConfig: { url: '', apiKey: '', model: '', useMainApi: true, sendViaTavern: true, max_tokens: 60000, temperature: 1.0, promptPostProcessing: API_PROMPT_POST_PROCESSING_DEFAULT_ACU, customApiFormat: 'openai_compat' },
           apiMode: 'custom',
           tavernProfile: '',
           streamingEnabled: false, // [新增] 流式传输开关（默认关闭）

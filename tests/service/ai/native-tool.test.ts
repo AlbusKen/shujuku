@@ -82,13 +82,13 @@ describe('native tool calls', () => {
     expect(kept.map(message => message.role)).toEqual(['user', 'assistant', 'tool']);
     expect(kept[1]?.tool_calls?.[0]?.id).toBe('call_function_1');
     const primed = withNativeToolThinkPrefill_ACU(kept);
-    expect(primed.map(message => message.role)).toEqual(['user', 'assistant', 'tool', 'assistant']);
+    expect(primed.map(message => message.role)).toEqual(['user', 'assistant', 'tool']);
     expect(primed[1]?.tool_calls?.[0]?.id).toBe('call_function_1');
-    expect(primed.at(-1)?.content).toBe(NATIVE_TOOL_THINK_PREFILL_ACU);
+    expect(primed).toEqual(kept);
     expect(withNativeToolThinkPrefill_ACU([
       { role: 'user', content: '任务' },
       { role: 'assistant', content: '{\n  "summary": "' },
-    ]).map(message => message.content)).toEqual(['任务', NATIVE_TOOL_THINK_PREFILL_ACU]);
+    ]).map(message => message.content)).toEqual(['任务', '{\n  "summary": "']);
     const anchored = anchorNativeToolCalls_ACU([
       { role: 'assistant', content: '明白。' },
       { role: 'assistant', content: '<think>先查</think>', tool_calls: [{ id: 'call_function_262nzwiknzi6_1', type: 'function' as const, function: { name: 'search', arguments: '{"query":"入府"}' } }] },

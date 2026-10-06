@@ -35,7 +35,7 @@ export interface ZeroLayerRequestForwarderOptions_ACU {
 const DATABASE_TRANSPORT_FIELDS_ACU = new Set([
   'messages', 'model', 'stream', 'chat_completion_source', 'custom_api_format',
   'reverse_proxy', 'proxy_password', 'custom_url', 'custom_include_headers',
-  'custom_include_body', 'custom_exclude_body', 'custom_prompt_post_processing', 'preserve_multiple_system',
+  'custom_include_body', 'custom_exclude_body', 'custom_prompt_post_processing',
   'vertexai_auth_mode', 'vertexai_region', 'vertexai_express_project_id',
   'azure_base_url', 'azure_deployment_name', 'azure_api_version',
 ]);

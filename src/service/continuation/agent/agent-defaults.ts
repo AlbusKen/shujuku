@@ -1,4 +1,5 @@
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
+import { withAgentPromptLayout_ACU } from '../../../shared/agent-prompt-layout';
 import { withCreativeIdentity_ACU } from '../../../shared/creative-identity.js';
 /**
  * service/continuation/agent/agent-defaults.ts — Agent 各请求的伪 role + 预填充提示词
@@ -1488,10 +1489,19 @@ export function withV46ProgressAdjustment_ACU(role: keyof ContinuationAgentPromp
     : { ...segment });
 }
 
-/** 当前默认：主会话对照实际剧情校准进度，再启动固定工作流。 */
-export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+/** V46 默认保留独立构造，供后续迁移精确匹配。 */
+export function buildV46ContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
   const prompts = buildV45ContinuationAgentPrompts_ACU();
   return { ...prompts, main: withV46ProgressAdjustment_ACU('main', prompts.main) };
+}
+
+/** 当前默认：独立 system 快照、原身份历史及固定 user 尾段。 */
+export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+  const prompts = buildV46ContinuationAgentPrompts_ACU();
+  for (const role of Object.keys(prompts) as Array<keyof ContinuationAgentPrompts_ACU>) {
+    prompts[role] = withAgentPromptLayout_ACU(prompts[role]);
+  }
+  return prompts;
 }
 
 

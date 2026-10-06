@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { USER_PREFILL_CONTENT_ACU } from '../../../../src/shared/user-prefill.js';
+import { isAgentFixedSlot_ACU, withAgentPromptLayout_ACU } from '../../../../src/shared/agent-prompt-layout';
 import {
   buildDefaultContinuationAgentPrompts_ACU,
   buildV40ContinuationAgentPrompts_ACU,
@@ -8,7 +9,7 @@ import {
   withV41RoleProcedure_ACU,
 } from '../../../../src/service/continuation/agent/agent-defaults';
 import { validateContinuationSettings_ACU } from '../../../../src/service/continuation/continuation-store';
-import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V40_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V46_ACU } from '../../../../src/service/continuation/defaults';
+import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V40_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V47_ACU } from '../../../../src/service/continuation/defaults';
 
 const ROLES_ACU = ['arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer', 'webResearcher', 'instructionComposer'] as const;
 
@@ -19,7 +20,7 @@ describe('V41 子代理执行流程问答', () => {
   it.each(ROLES_ACU)('%s 在任务段正前方多一组流程问答，预填充仍是最后一条', role => {
     const segments = defaults[role];
     const task = segments.findIndex(segment => segment.content.includes('$AGENT_TASK'));
-    expect(segments.length).toBe(v40[role].length + 2);
+    expect(segments.filter(segment => !isAgentFixedSlot_ACU(segment)).length).toBe(v40[role].length + 2);
     expect(segments[task - 2].role).toBe('user');
     expect(segments[task - 1].role).toBe('assistant');
     // 流程自述要写到可执行粒度，而不是一句概括。
@@ -49,8 +50,8 @@ describe('V41 子代理执行流程问答', () => {
     const custom = [{ role: 'user', content: '用户自定义策划提示词', enabled: true, deletable: true }];
     settings.agentPrompts.beatPlanner = custom;
     const loaded = validateContinuationSettings_ACU(settings);
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V46_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V47_ACU);
     for (const role of ROLES_ACU.filter(item => item !== 'beatPlanner')) expect(loaded.agentPrompts[role]).toEqual(defaults[role]);
-    expect(loaded.agentPrompts.beatPlanner).toEqual(custom);
+    expect(loaded.agentPrompts.beatPlanner).toEqual(withAgentPromptLayout_ACU(custom));
   });
 });

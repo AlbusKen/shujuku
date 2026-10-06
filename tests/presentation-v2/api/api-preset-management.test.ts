@@ -20,7 +20,7 @@ describe('api preset draft helpers', () => {
     expect(draft.apiMode).toBe('custom');
     expect(draft.useMainApi).toBe(true);
     expect(draft.requestTimeoutSeconds).toBe(300);
-    expect(draft.sendViaTavern).toBe(false);
+    expect(draft.sendViaTavern).toBe(true);
     expect(connectionModeFromDraft(draft)).toBe('main');
   });
 
@@ -128,7 +128,7 @@ describe('api preset draft helpers', () => {
     expect(draft.excludeBodyParams).toBe('');
     expect(draft.requestHeaders).toBe('');
     expect(draft.requestTimeoutSeconds).toBe(300);
-    expect(draft.sendViaTavern).toBe(false);
+    expect(draft.sendViaTavern).toBe(true);
   });
 
   it('旧预设缺失 promptPostProcessing / customApiFormat 时草稿归一为运行时默认值，而不是「未选择」', () => {
@@ -146,12 +146,12 @@ describe('api preset draft helpers', () => {
       tavernProfile: '',
     });
 
-    // 运行时请求体对缺失字段按 strict 发送；草稿若显示「未选择」，用户直接保存就会把行为静默改成 none。
-    expect(draft.promptPostProcessing).toBe('strict');
+    // 草稿与运行时共同默认 merge_tools，显式空串仍单独保留。
+    expect(draft.promptPostProcessing).toBe('merge_tools');
     expect(draft.customApiFormat).toBe('openai_compat');
 
     const preset = apiPresetFromDraft(draft);
-    expect(preset.apiConfig.promptPostProcessing).toBe('strict');
+    expect(preset.apiConfig.promptPostProcessing).toBe('merge_tools');
     expect(preset.apiConfig.customApiFormat).toBe('openai_compat');
   });
 
@@ -195,14 +195,14 @@ describe('api preset draft helpers', () => {
       customApiFormat: 'unknown_format' as any,
     });
 
-    expect(preset.apiConfig.promptPostProcessing).toBe('strict');
+    expect(preset.apiConfig.promptPostProcessing).toBe('merge_tools');
     expect(preset.apiConfig.customApiFormat).toBe('openai_compat');
   });
 
-  it('空白草稿默认 strict 后处理与兼容 OpenAI 协议', () => {
+  it('空白草稿默认 merge_tools 后处理与兼容 OpenAI 协议', () => {
     const draft = createEmptyApiPresetDraft();
 
-    expect(draft.promptPostProcessing).toBe('strict');
+    expect(draft.promptPostProcessing).toBe('merge_tools');
     expect(draft.customApiFormat).toBe('openai_compat');
   });
 });

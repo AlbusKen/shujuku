@@ -1,4 +1,5 @@
 import type { WorldSimulationLedger_ACU } from '../model';
+import { AGENT_HISTORY_SENTINEL_ACU, AGENT_SNAPSHOT_SENTINEL_ACU } from '../../../shared/agent-prompt-layout';
 import { relevanceGate_ACU } from '../relevance-gate';
 import { buildInUseWorldCatalog_ACU, catalogArchiveHints_ACU, sliceModuleCatalog_ACU, summarizeCandidatePatches_ACU, worldLedgerRowsForAgent_ACU } from '../world-catalog';
 import type { WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
@@ -48,6 +49,8 @@ export function createWorldSimulationPlaceholderResolvers_ACU(
   context: WorldSimulationPlaceholderContext_ACU,
 ): Record<WorldSimulationPromptPlaceholder_ACU, () => string> {
   return {
+    '$HISTORY_ANCHOR': () => AGENT_HISTORY_SENTINEL_ACU,
+    '$RUNTIME_SNAPSHOT': () => AGENT_SNAPSHOT_SENTINEL_ACU,
     '$WORLD_TASK': () => serialize_ACU(context.task),
     '$WORLD_HISTORY': () => serialize_ACU(context.history),
     '$WORLD_RUNTIME_CONTEXT': () => serialize_ACU(context.runtimeContext),

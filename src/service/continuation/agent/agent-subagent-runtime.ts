@@ -1,4 +1,5 @@
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
+import { assembleAgentPrompt_ACU } from '../../../shared/agent-prompt-layout';
 /**
  * service/continuation/agent/agent-subagent-runtime.ts — 子代理运行时
  *
@@ -334,7 +335,7 @@ function splitDefaultSubagentMaterials_ACU(
     return { segments: segments.map(segment => ({ ...segment })), taskTemplate: '' };
   }
   return {
-    segments: segments.map((segment, index) => index === taskIndex ? { ...segment, content: '本次任务、写入范围、资料与自检清单均在每次请求末尾的最新快照。' } : { ...segment }),
+    segments: segments.map((segment, index) => index === taskIndex ? { ...segment, content: '本次任务、写入范围、资料与自检清单见独立的当前快照。' } : { ...segment }),
     taskTemplate: candidate.content,
   };
 }
@@ -1056,11 +1057,11 @@ export class AgentSubagentRuntime_ACU {
       }
       // 传输错误（502/网络抖动）按设置延时重试；协议/契约拒绝仍走小循环内的对话级立即重试。
       const requestSnapshot = await renderRequestSnapshot();
-      // 状态快照作为独立 system 板块置于真实历史后，末尾追加 user 预填充
-      const requestBody = [...baseMessages, ...transcript,
-        { role: 'system', content: `${requestSnapshot}\n\n${renderReadBudgetNote(toolRoundsUsed)}` },
-        { role: 'user', content: USER_PREFILL_CONTENT_ACU }];
-      const requestMessages = requestBody;
+      const requestBody = assembleAgentPrompt_ACU([...baseMessages, ...(trailingPrefill ? [trailingPrefill] : [])], transcript,
+        `${requestSnapshot}\n\n${renderReadBudgetNote(toolRoundsUsed)}`);
+      const requestMessages = nativeMode
+        ? withNativeToolThinkPrefill_ACU(requestBody)
+        : withJsonTailPrefill_ACU(requestBody);
       // 容量门禁在传输重试之外：超限是确定性失败，不得被当作传输错误重发。
       gate.defaultReadFenceTokens = await this.measureFinalRequestCapacity_ACU(requestMessages, input.settings.agentHistoryTokenBudget, callOptions, definition.name);
       const raw = await callContinuationInternalAiWithRetry_ACU(
@@ -1520,11 +1521,11 @@ export class AgentSubagentRuntime_ACU {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '终审请求已失效', false));
       }
       const reviewTail = await renderReviewTail();
-      // 状态快照作为独立 system 板块置于真实历史后，末尾追加 user 预填充
-      const requestBody = [...baseMessages, ...transcript,
-        { role: 'system', content: `${reviewTail}\n\n${renderReadBudgetNote(toolRoundsUsed)}` },
-        { role: 'user', content: USER_PREFILL_CONTENT_ACU }];
-      const requestMessages = requestBody;
+      const requestBody = assembleAgentPrompt_ACU([...baseMessages, ...(trailingPrefill ? [trailingPrefill] : [])], transcript,
+        `${reviewTail}\n\n${renderReadBudgetNote(toolRoundsUsed)}`);
+      const requestMessages = nativeMode
+        ? withNativeToolThinkPrefill_ACU(requestBody)
+        : withJsonTailPrefill_ACU(requestBody);
       gate.defaultReadFenceTokens = await this.measureFinalRequestCapacity_ACU(requestMessages, input.settings.agentHistoryTokenBudget, callOptions, AGENT_FINAL_REVIEWER_NAME_ACU);
       const raw = await callContinuationInternalAiWithRetry_ACU(
         () => this.dependencies.callInternalAi(requestMessages, preset, identity, input.signal, callOptions),

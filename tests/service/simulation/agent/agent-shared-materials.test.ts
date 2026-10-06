@@ -28,7 +28,8 @@ describe('格林推演子代理资料边界', () => {
     expect(reviewer.snapshotTemplate).not.toContain('$WORLD_HISTORY');
     expect(reviewer.snapshotTemplate).not.toContain('$WORLD_TOOL_CATALOG');
     const director = splitWorldSimulationSubagentPrompt_ACU(buildDefaultWorldSimulationAgentPrompt_ACU('world-director'), 'world-director');
-    expect(director.snapshotTemplate).toContain('历史锚点与会话：$WORLD_HISTORY');
+    expect(director.snapshotTemplate).not.toContain('$WORLD_HISTORY');
+    expect(director.segments.some(segment => segment.content === '$HISTORY_ANCHOR')).toBe(true);
   });
 
   it('运行时快照的每个来源必须可解析，完整正文逐字保留且重复引用一致', async () => {

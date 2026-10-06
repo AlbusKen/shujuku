@@ -208,13 +208,13 @@ describe('ApiPage', () => {
 
     mount.__resetAcuV2MountForTests();
   });
-  it('自定义标签默认关闭酒馆渠道，超时和开关保存后重新打开仍保持', async () => {
+  it('自定义标签默认启用酒馆渠道，手动关闭后超时和开关保存重开仍保持', async () => {
     const settings = createSettings();
     settings.apiPresetBindingsByChat['chat-page'].presetName = 'alpha';
     const { mount } = await mountApiPage(settings);
     const page = document.querySelector('.acu-v2-api-page') as HTMLElement;
     const toggle = page.querySelector('[aria-label="通过酒馆渠道发送"]') as HTMLButtonElement;
-    expect(toggle.getAttribute('aria-checked')).toBe('false');
+    expect(toggle.getAttribute('aria-checked')).toBe('true');
     const timeoutRow = Array.from(page.querySelectorAll('.acu-form-row')).find(row => row.textContent?.includes('请求超时（秒）'))!;
     const input = timeoutRow.querySelector('input') as HTMLInputElement;
     expect(input.value).toBe('300');
@@ -225,11 +225,11 @@ describe('ApiPage', () => {
     const save = Array.from(page.querySelectorAll('button')).find(button => button.textContent?.includes('保存当前预设'))!;
     save.click();
     await Promise.resolve();
-    expect(settings.apiPresets.find(preset => preset.name === 'alpha')!.apiConfig).toMatchObject({ requestTimeoutSeconds: 75, sendViaTavern: true });
-    expect(settings.apiConfig).toMatchObject({ requestTimeoutSeconds: 75, sendViaTavern: true });
+    expect(settings.apiPresets.find(preset => preset.name === 'alpha')!.apiConfig).toMatchObject({ requestTimeoutSeconds: 75, sendViaTavern: false });
+    expect(settings.apiConfig).toMatchObject({ requestTimeoutSeconds: 75, sendViaTavern: false });
     mount.__resetAcuV2MountForTests();
     const reopened = await mountApiPage(settings);
-    expect(document.querySelector('[aria-label="通过酒馆渠道发送"]')!.getAttribute('aria-checked')).toBe('true');
+    expect(document.querySelector('[aria-label="通过酒馆渠道发送"]')!.getAttribute('aria-checked')).toBe('false');
     const restoredRow = Array.from(document.querySelectorAll('.acu-form-row')).find(row => row.textContent?.includes('请求超时（秒）'))!;
     expect((restoredRow.querySelector('input') as HTMLInputElement).value).toBe('75');
     reopened.mount.__resetAcuV2MountForTests();

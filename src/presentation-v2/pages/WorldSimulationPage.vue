@@ -257,6 +257,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import { isAgentFixedSlot_ACU } from '../../shared/agent-prompt-layout';
 import type { WorldSimulationAgentName_ACU } from '../../service/simulation/agent/agent-catalog'; // arch-ok: 仅类型导入，用于本页状态标注，编译后无运行时依赖
 import type { WorldSimulationPromptSegment_ACU, WorldSimulationSettings_ACU } from '../../service/simulation/model'; // arch-ok: 仅类型导入，用于本页状态标注，编译后无运行时依赖
 import AcuButton from '../components/_lib/AcuButton.vue';
@@ -577,12 +578,12 @@ function deletePrompt(agentName: WorldSimulationAgentName_ACU, index: number): v
   prompts.splice(index, 1);
 }
 
-/** 引擎 seam 段（pinned）的相对顺序由引擎锁定：涉及 pinned 段的移动一律忽略。 */
+/** 固定插入卡可移动；其他 pinned 段仍保持引擎顺序。 */
 function movePrompt(agentName: WorldSimulationAgentName_ACU, index: number, delta: -1 | 1): void {
   const prompts = promptList(agentName);
   const target = index + delta;
   if (!prompts || target < 0 || target >= prompts.length) return;
-  if (prompts[index]?.pinned || prompts[target]?.pinned) return;
+  if (!isAgentFixedSlot_ACU(prompts[index]) && !isAgentFixedSlot_ACU(prompts[target]) && (prompts[index]?.pinned || prompts[target]?.pinned)) return;
   [prompts[index], prompts[target]] = [prompts[target], prompts[index]];
 }
 
@@ -591,6 +592,7 @@ function updatePrompt(agentName: WorldSimulationAgentName_ACU, index: number, pa
   const prompts = promptList(agentName);
   const current = prompts?.[index];
   if (!prompts || !current) return;
+  if (isAgentFixedSlot_ACU(current)) return;
   prompts[index] = current.pinned
     ? { ...current, ...(typeof patch.content === 'string' ? { content: patch.content } : {}) }
     : { ...current, ...patch, pinned: false };

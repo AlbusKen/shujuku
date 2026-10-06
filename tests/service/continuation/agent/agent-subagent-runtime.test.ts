@@ -741,17 +741,17 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
     const last = messages[messages.length - 1];
     expect(last.role).toBe('user');
     expect(last.content).toContain('"role": "assistant"');
-    // 读取预算状态是运行时信息，紧贴预填充注入，是模型看到的最后一条 user 消息。
+    // 读取预算和任务资料属于独立 system 快照，不改变末尾 user 预填充。
     const budgetMessage = messages.find(message => message.content.includes('【读取预算状态】'));
-    expect(budgetMessage).toMatchObject({ role: 'user' });
+    expect(budgetMessage).toMatchObject({ role: 'system' });
     const runtimeSnapshot = messages.find(message => message.content.includes('【本回合运行时数据】'));
-    expect(runtimeSnapshot).toMatchObject({ role: 'user' });
+    expect(runtimeSnapshot).toMatchObject({ role: 'system' });
     const volumePlan = messages.find(message => message.content.includes('【总纲卷数计划】'));
     expect(volumePlan).toBeDefined();
     expect(messages.indexOf(volumePlan!)).toBeLessThan(messages.length - 1);
     // 总纲保留正文、总纲和全部已启用世界书目录，自行查阅；快照不再重复目录，也不注入命中全文。
     const taskSnapshot = messages.find(message => message.content.includes('【本次任务】\n立总纲') && message.content.includes('【故事总纲现状】'));
-    expect(taskSnapshot).toMatchObject({ role: 'user' });
+    expect(taskSnapshot).toMatchObject({ role: 'system' });
     expect(taskSnapshot?.content).toContain('【故事总纲现状】');
     expect(taskSnapshot?.content).toContain('追查真相');
     expect(taskSnapshot?.content).toContain('【完整当前阶段大纲】');
