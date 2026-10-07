@@ -132,11 +132,39 @@ export function assertCollisionFulfillment_ACU(report: WorldCollisionReport_ACU,
   const blocked = ledger.rumors.filter(item => item.status === 'latent' || item.status === 'dead');
   for (const signal of guidance.signals) {
     for (const rumor of blocked) {
-      const fact = normalizeFact_ACU(rumor.fact);
-      if (signal.sourceId === rumor.id || (fact && normalizeFact_ACU(signal.text).includes(fact))) {
-        violations.push(`信号泄露了 ${rumor.status} 传闻 ${rumor.id}`);
-      }
+      if (leaksRumor_ACU(signal, rumor)) violations.push(`信号泄露了 ${rumor.status} 传闻 ${rumor.id}`);
     }
   }
   return violations;
+}
+
+function leaksRumor_ACU(signal: WorldGuidance_ACU['signals'][number], rumor: WorldSimulationLedger_ACU['rumors'][number]): boolean {
+  const fact = normalizeFact_ACU(rumor.fact);
+  return signal.sourceId === rumor.id || (!!fact && normalizeFact_ACU(signal.text).includes(fact));
+}
+
+export interface WorldCollisionRepair_ACU {
+  guidance: WorldGuidance_ACU;
+  filledSeedIds: string[];
+  removedSignals: number;
+}
+
+/**
+ * 修正轮用完后的程序兜底：删掉泄露 latent/dead 传闻的信号，为仍缺 encounter 的碰撞种子补一条最简引导，
+ * 使一条信号的缺口不再让整轮推演作废。
+ */
+export function repairCollisionSignals_ACU(report: WorldCollisionReport_ACU, guidance: WorldGuidance_ACU, ledger: WorldSimulationLedger_ACU): WorldCollisionRepair_ACU {
+  const blocked = ledger.rumors.filter(item => item.status === 'latent' || item.status === 'dead');
+  const kept = guidance.signals.filter(signal => !blocked.some(rumor => leaksRumor_ACU(signal, rumor)));
+  const seeds = new Map(ledger.seeds.map(item => [item.id, item]));
+  const filledSeedIds: string[] = [];
+  const filled = [...kept];
+  for (const seedId of report.collidedSeeds) {
+    const seed = seeds.get(seedId);
+    if (!seed || seed.exposePolicy !== 'on_collision') continue;
+    if (filled.some(signal => signal.voice === 'encounter' && signal.sourceId === seedId)) continue;
+    filled.push({ voice: 'encounter', sourceId: seedId, text: `可借眼前的动静或旁人的话头，引出「${seed.title}」`.slice(0, 80) });
+    filledSeedIds.push(seedId);
+  }
+  return { guidance: { ...guidance, signals: filled }, filledSeedIds, removedSignals: guidance.signals.length - kept.length };
 }

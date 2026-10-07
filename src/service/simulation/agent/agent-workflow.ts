@@ -877,12 +877,19 @@ export async function runWorldSimulationOneShotWorkflow_ACU(
     let violations = projectionViolations();
     for (let attempt = 1; violations.length && attempt <= WORLD_SIMULATION_PROJECTION_CORRECTION_ATTEMPTS_ACU; attempt += 1) {
       const seq = 2 + attempt;
+      const requiredSeeds = strictCollision
+        ? collisionReport!.collidedSeeds.filter(id => ledger.seeds.some(seed => seed.id === id && seed.exposePolicy === 'on_collision'))
+        : [];
       const feedback = [
         roundChangesText,
         projectionDirective,
         `【场外信号未通过·第 ${attempt} 次修正】${violations.join('；')}`,
         lastRejection ? `【上次提交未通过的原因】${lastRejection}` : '',
-        '只修正 guidance：按上述原因整列提交 signals；列出的碰撞种子各补一条 voice=encounter 且 sourceId 等于该种子 ID 的信号；移除泄露 latent/dead 传闻的信号。不要改纪要与风声。',
+        requiredSeeds.length
+          ? `【本轮全部碰撞种子】${requiredSeeds.join('、')}：提交后的 signals 里每个都要各有一条 voice=encounter、sourceId 等于该种子 ID 的信号；已经兑现的那几条原样保留，碰撞 encounter 不受每轮条数上限限制。`
+          : '',
+        `【当前已生效的 signals】${JSON.stringify(ledger.guidance.signals)}`,
+        '只修正 guidance：signals 是整列替换，在当前已生效的 signals 基础上增删，仍成立的信号一并写回；移除泄露 latent/dead 传闻的信号。不要改纪要与风声。',
       ].filter(Boolean).join('\n');
       const fix = await call('guidance-composer', ledger, seq, feedback, ['guidance']);
       outcomes.push(fix);
@@ -904,9 +911,11 @@ export async function runWorldSimulationOneShotWorkflow_ACU(
       lastRejection = '';
       violations = projectionViolations();
     }
-    // 修正耗尽：以 guidance 模块级缺口显式落账，不伪装成无变化。
-    if (violations.length) {
-      outcomes.push(failedOutcome_ACU('guidance-composer', `场外信号修正耗尽：${violations.join('；')}`, 'protocol_failed', ['guidance']));
+    // 修正耗尽：以 guidance 模块级缺口显式落账，不伪装成无变化。碰撞 encounter 缺口与泄露信号
+    // 由提交管线按 strict 规则程序补齐/删除（repairCollisionSignals_ACU），不再记成失败。
+    const unresolved = violations.filter(item => !/^碰撞种子 \S+ 缺少 encounter 信号$|^信号泄露了 /.test(item));
+    if (unresolved.length) {
+      outcomes.push(failedOutcome_ACU('guidance-composer', `场外信号修正耗尽：${unresolved.join('；')}`, 'protocol_failed', ['guidance']));
     }
   }
   ledger = recordWorkflowIssues_ACU(ledger, outcomes, input.identity);

@@ -1,5 +1,6 @@
 import {
   assertCollisionFulfillment_ACU,
+  repairCollisionSignals_ACU,
   filterUnreachableRumorSignals_ACU,
   maintainWorldPlayer_ACU,
   refreshWorldRumors_ACU,
@@ -331,10 +332,17 @@ export async function planWorldSimulationFinalCommit_ACU(
   ledger = refreshWorldRumors_ACU(ledger, ledger.guidance.signals.flatMap(signal => signal.voice === 'rumor' && signal.sourceId ? [signal.sourceId] : []), envelope.settings);
   const collisionReport = input.commitCandidate.collisionReport;
   if (collisionReport) {
-    const violations = assertCollisionFulfillment_ACU(collisionReport, ledger.guidance, ledger);
-    if (violations.length && envelope.settings.dynamics.collisionEnforcement === 'strict') {
-      reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', `碰撞后验失败：${violations.join('；')}`, { violations });
+    // strict 只决定是否兜底补齐，不再因个别信号缺口拒绝整轮提交（批次一、二的成果会一起作废）。
+    if (envelope.settings.dynamics.collisionEnforcement === 'strict' && assertCollisionFulfillment_ACU(collisionReport, ledger.guidance, ledger).length) {
+      const repair = repairCollisionSignals_ACU(collisionReport, ledger.guidance, ledger);
+      ledger = { ...ledger, guidance: repair.guidance };
+      extraTimeline.push({
+        id: `${input.timelineId}:collision-repair`, at: input.completedAt, kind: 'swept',
+        taskId: input.identity.taskId, stageId: input.identity.stageId, revision: input.identity.stageRevision, runId: input.identity.runId,
+        message: JSON.stringify({ collisionFilledSeeds: repair.filledSeedIds, removedLeakingSignals: repair.removedSignals }),
+      });
     }
+    const violations = assertCollisionFulfillment_ACU(collisionReport, ledger.guidance, ledger);
     if (violations.length) extraTimeline.push({
       id: `${input.timelineId}:collision`, at: input.completedAt, kind: 'failed',
       taskId: input.identity.taskId, stageId: input.identity.stageId, revision: input.identity.stageRevision, runId: input.identity.runId,

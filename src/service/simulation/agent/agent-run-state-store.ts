@@ -8,6 +8,9 @@ import type {
 import type { WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
 import { WORLD_SIMULATION_RUN_STATE_FIELD_ACU, WORLD_SIMULATION_RUN_STATE_SCHEMA_VERSION_ACU } from './agent-model';
 import {
+  WORLD_SIMULATION_LEDGER_MODULES_ACU,
+  WORLD_SIMULATION_MATERIAL_COMPLETION_STATES_ACU,
+  WORLD_SIMULATION_PENDING_FIX_SOURCES_ACU,
   WorldSimulationValidationError_ACU,
   createWorldSimulationError_ACU,
 } from '../model';
@@ -115,7 +118,7 @@ function subagentOutcomes_ACU(value: unknown, path: string): WorldSimulationSuba
   if (!Array.isArray(value)) reject_ACU(`${path} 必须是数组`, { path });
   return value.map((item, index): WorldSimulationSubagentOutcome_ACU => {
     if (!record_ACU(item)) reject_ACU(`${path}[${index}] 必须是对象`, { path: `${path}[${index}]` });
-    const allowed = new Set(['agentName', 'status', 'summary', 'candidate', 'evidenceRefs', 'uncertainties', 'reasonCode', 'unresolved']);
+    const allowed = new Set(['agentName', 'status', 'summary', 'candidate', 'evidenceRefs', 'uncertainties', 'reasonCode', 'unresolved', 'completion', 'moduleCompletion', 'unresolvedIssues', 'acceptedKeys']);
     for (const key of ['agentName', 'status', 'summary', 'evidenceRefs', 'uncertainties']) {
       if (!Object.prototype.hasOwnProperty.call(item, key)) reject_ACU(`${path}[${index}].${key} 缺失`, { path: `${path}[${index}].${key}` });
     }
@@ -131,6 +134,45 @@ function subagentOutcomes_ACU(value: unknown, path: string): WorldSimulationSuba
       uncertainties: textArray_ACU(item.uncertainties, `${path}[${index}].uncertainties`),
       ...(item.reasonCode === undefined ? {} : { reasonCode: text_ACU(item.reasonCode, `${path}[${index}].reasonCode`) }),
       ...(item.unresolved === undefined ? {} : { unresolved: textArray_ACU(item.unresolved, `${path}[${index}].unresolved`) }),
+      ...(item.completion === undefined ? {} : { completion: completionState_ACU(item.completion, `${path}[${index}].completion`) }),
+      ...(item.moduleCompletion === undefined ? {} : { moduleCompletion: moduleCompletion_ACU(item.moduleCompletion, `${path}[${index}].moduleCompletion`) }),
+      ...(item.unresolvedIssues === undefined ? {} : { unresolvedIssues: subagentIssues_ACU(item.unresolvedIssues, `${path}[${index}].unresolvedIssues`) }),
+      ...(item.acceptedKeys === undefined ? {} : { acceptedKeys: textArray_ACU(item.acceptedKeys, `${path}[${index}].acceptedKeys`) }),
+    };
+  });
+}
+
+const SUBAGENT_COMPLETION_STATES_ACU = WORLD_SIMULATION_MATERIAL_COMPLETION_STATES_ACU.filter(
+  (state): state is NonNullable<WorldSimulationSubagentOutcome_ACU['completion']> => state !== 'legacy_unknown',
+);
+
+function completionState_ACU(value: unknown, path: string): NonNullable<WorldSimulationSubagentOutcome_ACU['completion']> {
+  return enum_ACU(value, SUBAGENT_COMPLETION_STATES_ACU, path);
+}
+
+function moduleCompletion_ACU(value: unknown, path: string): NonNullable<WorldSimulationSubagentOutcome_ACU['moduleCompletion']> {
+  if (!record_ACU(value)) reject_ACU(`${path} 必须是对象`, { path });
+  const result: NonNullable<WorldSimulationSubagentOutcome_ACU['moduleCompletion']> = {};
+  for (const [module, state] of Object.entries(value)) {
+    result[enum_ACU(module, WORLD_SIMULATION_LEDGER_MODULES_ACU, `${path}.${module}`)] = completionState_ACU(state, `${path}.${module}`);
+  }
+  return result;
+}
+
+function subagentIssues_ACU(value: unknown, path: string): NonNullable<WorldSimulationSubagentOutcome_ACU['unresolvedIssues']> {
+  if (!Array.isArray(value)) reject_ACU(`${path} 必须是数组`, { path });
+  return value.map((issue, index) => {
+    const at = `${path}[${index}]`;
+    if (!record_ACU(issue)) reject_ACU(`${at} 必须是对象`, { path: at });
+    for (const key of Object.keys(issue)) {
+      if (!['module', 'source', 'path', 'message', 'id'].includes(key)) reject_ACU(`${at}.${key} 是未知字段`, { path: `${at}.${key}` });
+    }
+    return {
+      module: enum_ACU(issue.module, WORLD_SIMULATION_LEDGER_MODULES_ACU, `${at}.module`),
+      source: enum_ACU(issue.source, WORLD_SIMULATION_PENDING_FIX_SOURCES_ACU, `${at}.source`),
+      path: textOrEmpty_ACU(issue.path, `${at}.path`),
+      message: textOrEmpty_ACU(issue.message, `${at}.message`),
+      ...(issue.id === undefined ? {} : { id: textOrEmpty_ACU(issue.id, `${at}.id`) }),
     };
   });
 }

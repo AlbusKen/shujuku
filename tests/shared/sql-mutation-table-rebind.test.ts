@@ -615,6 +615,34 @@ describe('sql mutation column rebind', () => {
   });
 
   // ── 阶段 E：requireKnownInsertColumns opt-in 未知 INSERT 列 gate ──
+  it('requireKnownInsertColumns 下写短的列名只有唯一一列以它开头时自动纠正，前缀有歧义或过短仍拒绝', () => {
+    const aliases = new Map([
+      ['juesezhuangtaibiao', new Map([
+        ['row_id', 'row_id'],
+        ['char_name', 'char_name'],
+        ['posture', 'posture'],
+        ['special_status', 'special_status'],
+        ['speech', 'speech'],
+      ])],
+    ]);
+    const [fixed] = rebindSqlMutationColumnsByTarget_ACU(
+      ["INSERT INTO juesezhuangtaibiao (row_id, char_name, post) VALUES ('1', '甲', '站立')"],
+      aliases,
+      { requireKnownInsertColumns: true },
+    );
+    expect(fixed).toBe("INSERT INTO juesezhuangtaibiao (row_id, char_name, posture) VALUES ('1', '甲', '站立')");
+    expect(() => rebindSqlMutationColumnsByTarget_ACU(
+      ["INSERT INTO juesezhuangtaibiao (row_id, sp) VALUES ('1', 'x')"],
+      aliases,
+      { requireKnownInsertColumns: true },
+    )).toThrow('SQL_INSERT_UNKNOWN_COLUMN_ACU');
+    expect(() => rebindSqlMutationColumnsByTarget_ACU(
+      ["INSERT INTO juesezhuangtaibiao (row_id, spe) VALUES ('1', 'x')"],
+      aliases,
+      { requireKnownInsertColumns: true },
+    )).toThrow('SQL_INSERT_UNKNOWN_COLUMN_ACU');
+  });
+
   it('INSERT 列清单命中 registry 未知列时，requireKnownInsertColumns 抛 SQL_INSERT_UNKNOWN_COLUMN_ACU 且不含 VALUES', () => {
     const aliases = new Map([
       ['beibaowupinbiao', new Map([

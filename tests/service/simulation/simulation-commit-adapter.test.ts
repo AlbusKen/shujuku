@@ -413,7 +413,7 @@ describe('world simulation commit adapter', () => {
     expect(ledger.player.regionVisits).toEqual([{ region: '青阳城', day: 2 }]);
   });
 
-  it('strict 模式下 on_collision 未兑现则拒绝 commit 并回滚', async () => {
+  it('strict 模式下 on_collision 未兑现时程序补一条 encounter 信号并照常提交，不再整轮回滚', async () => {
     const { chat, commitInput, saveChat } = fixture();
     chat[0]._qrf_world_simulation.ledger.player = {
       location: { region: '青阳城' }, locationUpdatedAtDay: 1, regionVisits: [], contact: 'open', evidenceRefs: [],
@@ -426,13 +426,15 @@ describe('world simulation commit adapter', () => {
     commitInput.commitCandidate.collisionReport = {
       playerRegion: '青阳城', playerContact: 'open', secludedNote: null, collidedSeeds: ['seed-1'], ripeRumors: [],
     };
-    const before = JSON.parse(JSON.stringify(chat));
+    await commitWorldSimulationProjection_ACU(commitInput);
 
-    await expect(commitWorldSimulationProjection_ACU(commitInput)).rejects.toMatchObject({
-      error: { code: 'WORLD_SIMULATION_SNAPSHOT_INVALID' },
-    });
-    expect(saveChat).not.toHaveBeenCalled();
-    expect(chat).toEqual(before);
+    expect(saveChat).toHaveBeenCalledTimes(1);
+    const timeline = chat[0]._qrf_world_simulation.timeline;
+    expect(timeline).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'swept', message: JSON.stringify({ collisionFilledSeeds: ['seed-1'], removedLeakingSignals: 0 }) }),
+      expect.objectContaining({ kind: 'committed', id: 'timeline-1' }),
+    ]));
+    expect(timeline.some((item: any) => item.kind === 'failed' && String(item.message).includes('seed-1'))).toBe(false);
   });
 
   it('relaxed 模式下碰撞未兑现仅写入 timeline 警告', async () => {

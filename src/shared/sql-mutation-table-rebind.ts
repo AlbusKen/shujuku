@@ -391,6 +391,17 @@ function collectMutationColumnReplacements_ACU(
       // 列清单里出现 registry 未知列：实时 AI 写路径必须 fail-closed，
       // 否则 SQLite 晚失败会泄漏完整 SQL/VALUES（test31 根因 3.4）。
       if (isInsertColumn && requireKnownInsertColumns) {
+        // 模型偶尔把列名写短（posture → post）：只有唯一一列以它开头时才纠正，否则照旧拒绝。
+        const prefixMatches = key.length >= 3
+          ? [...new Set(aliases.values())].filter(value => value.toLowerCase().startsWith(key))
+          : [];
+        if (prefixMatches.length === 1) {
+          if (!handledStarts.has(token.start)) {
+            handledStarts.add(token.start);
+            replacements.push({ token, value: prefixMatches[0] });
+          }
+          return;
+        }
         const allowed = [...new Set([...aliases.values()].map(value => value.toLowerCase()))]
           .filter(Boolean)
           .sort()
