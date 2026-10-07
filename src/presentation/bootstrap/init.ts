@@ -33,8 +33,8 @@ import { refreshMessageBlock_ACU, saveChatToHostStrict_ACU } from '../../data/ga
 import { beginHostGenerationUi_ACU, getSendTextareaValue_ACU, setSendTextareaValue_ACU } from '../../shared/host-input';
 import { handleContentOptimizationEvent_ACU } from '../triggers/settings-ui-sync/settings-ui-connect';
 import { triggerAutomaticUpdateIfNeeded_ACU } from '../triggers/settings-ui-sync/settings-ui-trigger';
-import { runOptimizationLogicWithUI_ACU } from '../components/plot-planning-ui';
-import { beginPlotVirtualPendingFloor_ACU, isPendingDisguiseGenerationType_ACU, type PlotPendingDisguiseHandle_ACU } from '../components/plot-pending-disguise';
+import { abortActivePlotPlanning_ACU, runOptimizationLogicWithUI_ACU } from '../components/plot-planning-ui';
+import { beginPlotSendDisguise_ACU, isPendingDisguiseGenerationType_ACU, type PlotSendDisguiseHandle_ACU } from '../components/plot-pending-disguise';
 import { processSummaryVectorIndexBeforeGenerationWithUI_ACU, rebuildCurrentSummaryVectorIndexWithUI_ACU, rebuildOutdatedSummaryVectorIndexInBackground_ACU, shouldRebuildSummaryVectorIndexWithUI_ACU } from '../components/summary-vector-index-ui';
 import { preloadSummaryVectorIndexCacheForCurrentChat_ACU } from '../../service/vector/summary-vector-index-cache-service';
 import { restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU } from '../../service/vector/summary-vector-index-flush-queue';
@@ -899,25 +899,27 @@ export   function mainInitialize_ACU() {
             const needsPlan = plan && !shouldSkipPlotIntercept_ACU(originalText)
               && (pendingInput || !(existing as ACUMessage)._plot_processed);
             const disguised = settings_ACU.plotSendDisguiseDisabled !== true;
-            let virtualFloor: PlotPendingDisguiseHandle_ACU | undefined;
             const userFloor = pendingInput ? null : { chat, message: existing, index: chat.length - 1 };
-            let restoreGenerationUi = () => {};
-            // 原文只保存在本次请求的闭包内；原宿主发送等待监听器返回后再消费最终输入。
-            let cachedInput = false;
-            let delivered = false;
-            const restoreCachedInput = () => {
-              if (cachedInput && !getSendTextareaValue_ACU().trim()) setSendTextareaValue_ACU(originalText);
+            // 伪装只换等待动画，其余步骤与解除伪装相同；建不起来时没有句柄，中途失效时句柄自行撤回，都按解除伪装继续。
+            let disguise: PlotSendDisguiseHandle_ACU | undefined;
+            // 伪装露出的酒馆停止键与规划任务的「终止」等效。
+            let stopRequested = false;
+            let hostReads = true;
+            const stopSend = () => {
+              hostReads = false;
+              redirectPlotSendEvent_ACU(params);
             };
             const warn = (text: string) => showToastr_ACU('warning', text, '剧情推进');
             try {
               await ensureInitialSeedCheckpointBeforeGeneration_ACU('generation_after_commands_before_ai', { allowPendingFirstUserMessage: true });
               if (disguised) {
-                restoreGenerationUi = beginHostGenerationUi_ACU();
-                if (pendingInput) {
-                  cachedInput = setSendTextareaValue_ACU('');
-                  if (!cachedInput) throw new Error('酒馆输入框不可用');
-                }
-                virtualFloor = beginPlotVirtualPendingFloor_ACU(pendingInput ? originalText : undefined);
+                disguise = beginPlotSendDisguise_ACU({
+                  userInput: pendingInput ? originalText : undefined,
+                  onStop: () => {
+                    stopRequested = true;
+                    abortActivePlotPlanning_ACU();
+                  },
+                });
               }
               if (recall) {
                 try {
@@ -927,21 +929,23 @@ export   function mainInitialize_ACU() {
                   warn('纪要召回异常，继续剧情任务与发送。');
                 }
               }
+              if (stopRequested) {
+                stopSend();
+                return;
+              }
               if (needsPlan) {
                 const result = userFloor
                   ? await orchestrateAfterCommandsStrategy1_ACU(userFloor.message, userFloor.index, runOptimizationLogicWithUI_ACU)
                   : await orchestrateAfterCommandsStrategy2_ACU(originalText, runOptimizationLogicWithUI_ACU);
                 if (result.action === 'busy') {
-                  redirectPlotSendEvent_ACU(params);
-                  restoreCachedInput();
+                  stopSend();
                   return;
                 }
-                if (result.blocked === true || result.apiRetriesExhausted === true
+                if (stopRequested || result.blocked === true || result.apiRetriesExhausted === true
                   || result.action === 'failed' || result.action === 'skipped' || result.action === 'loop_retry'
                   || (result.action === 'aborted' && result.manual === true)) {
-                  redirectPlotSendEvent_ACU(params);
+                  stopSend();
                   _set_tempPlotToSave_ACU(null);
-                  restoreCachedInput();
                   return;
                 }
                 if (result.action === 'planned' && result.finalMessage?.trim()) {
@@ -949,10 +953,9 @@ export   function mainInitialize_ACU() {
                   if (userFloor) {
                     userFloor.message.mes = result.finalMessage;
                     (userFloor.message as ACUMessage)._plot_processed = true;
-                  } else {
-                    if (!setSendTextareaValue_ACU(result.finalMessage)) throw new Error('最终指令无法写入酒馆输入框');
+                  } else if (!(disguise ? disguise.deliver(result.finalMessage) : setSendTextareaValue_ACU(result.finalMessage))) {
+                    throw new Error('最终指令无法写入酒馆输入框');
                   }
-                  delivered = true;
                 }
               }
               if (userFloor) {
@@ -966,18 +969,15 @@ export   function mainInitialize_ACU() {
                 await refreshMessageBlock_ACU(userFloor.index);
               }
             } catch {
-              if (needsPlan || cachedInput) {
-                redirectPlotSendEvent_ACU(params);
+              if (needsPlan) {
+                stopSend();
                 warn('剧情发送前处理异常，正文发送已停止。');
-                restoreCachedInput();
                 return;
               }
               warn('发送前处理异常，保留当前内容并继续发送。');
             } finally {
-              // 无需改写指令（例如仅召回）时，恢复缓存原文供同一次宿主发送消费。
-              if (!delivered) restoreCachedInput();
-              restoreGenerationUi();
-              virtualFloor?.finish();
+              // 没交付最终指令时伪装把原文还给发送框，与解除伪装时原文一直留在输入框相同。
+              disguise?.release(hostReads);
               generationGate_ACU.lastUserSendIntentAt = 0;
             }
           });

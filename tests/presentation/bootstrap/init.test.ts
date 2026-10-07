@@ -32,7 +32,7 @@ const m = vi.hoisted(() => ({
   hostEmit: vi.fn(), messageUpdated: vi.fn(),
   publicCompletionObserver: vi.fn(),
   getInput: vi.fn(), setInput: vi.fn(),
-  beginDisguise: vi.fn(), finishDisguise: vi.fn(), generate: vi.fn(),
+  beginDisguise: vi.fn(), finishDisguise: vi.fn(), abortPlanning: vi.fn(), generate: vi.fn(),
   markIntercept: vi.fn(), skipIntercept: vi.fn(() => false), stopGeneration: vi.fn(),
   jquery: vi.fn(), clearPendingPlot: vi.fn(),
   input: '',
@@ -90,10 +90,10 @@ vi.mock('../../../src/shared/host-input', async (importOriginal) => ({
 }));
 vi.mock('../../../src/presentation/components/plot-pending-disguise', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../../src/presentation/components/plot-pending-disguise')>(),
-  beginPlotVirtualPendingFloor_ACU: (...args: any[]) => m.beginDisguise(...args),
+  beginPlotSendDisguise_ACU: (...args: any[]) => m.beginDisguise(...args),
 
 }));
-vi.mock('../../../src/presentation/components/plot-planning-ui', () => ({ runOptimizationLogicWithUI_ACU: vi.fn() }));
+vi.mock('../../../src/presentation/components/plot-planning-ui', () => ({ runOptimizationLogicWithUI_ACU: vi.fn(), abortActivePlotPlanning_ACU: () => m.abortPlanning() }));
 vi.mock('../../../src/presentation/components/summary-vector-index-ui', () => ({ processSummaryVectorIndexBeforeGenerationWithUI_ACU: (...args: any[]) => m.processBeforeGen(...args), shouldRebuildSummaryVectorIndexWithUI_ACU: (...args: any[]) => m.shouldRebuild(...args), rebuildCurrentSummaryVectorIndexWithUI_ACU: (...args: any[]) => m.rebuild(...args) }));
 vi.mock('../../../src/service/vector/summary-vector-index-cache-service', () => ({ preloadSummaryVectorIndexCacheForCurrentChat_ACU: (...args: any[]) => m.preload(...args) }));
 vi.mock('../../../src/service/vector/summary-vector-index-flush-queue', () => ({ restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU: (...args: any[]) => m.restoreFlush(...args) }));
@@ -253,7 +253,7 @@ beforeEach(() => {
   document.querySelector('#chat')?.replaceChildren();
   m.getInput.mockImplementation(() => m.input);
   m.setInput.mockImplementation((text: string) => { m.input = text; return true; });
-  m.beginDisguise.mockImplementation(() => ({ finish: m.finishDisguise }));
+  m.beginDisguise.mockImplementation(() => ({ deliver: (text: string) => m.setInput(text), release: m.finishDisguise }));
   m.shouldProcessSummary.mockReturnValue(false);
   m.continuationRuntimeInitialize.mockResolvedValue(undefined);
   m.consumeInternalGeneration.mockReturnValue(null);
@@ -773,7 +773,7 @@ describe('发送前处理楼层生命周期', () => {
     m.continuationBridge = bridge;
     m.generationStarted!('normal', {}, false);
     const pendingUi = await vi.importActual<typeof import('../../../src/presentation/components/plot-pending-disguise')>('../../../src/presentation/components/plot-pending-disguise');
-    m.beginDisguise.mockImplementation(pendingUi.beginPlotVirtualPendingFloor_ACU);
+    m.beginDisguise.mockImplementation(pendingUi.beginPlotSendDisguise_ACU);
     const previous = { is_user: false, mes: '历史回复' };
     m.api.chat = [previous];
     m.input = '本轮原输入';
@@ -810,7 +810,7 @@ describe('发送前处理楼层生命周期', () => {
       expect(document.querySelector<HTMLElement>('#mes_stop')!.style.display).toBe('none');
     } else {
       expect(m.input).toBe('');
-      expect(m.beginDisguise).toHaveBeenCalledExactlyOnceWith('本轮原输入');
+      expect(m.beginDisguise).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ userInput: '本轮原输入' }));
       expect(document.querySelectorAll('#chat [data-acu-virtual-floor]')).toHaveLength(2);
       expect(document.querySelector('#chat [data-acu-virtual-floor][is_user="true"] .mes_text')?.textContent).toBe('本轮原输入');
       expect(document.querySelectorAll('#chat [mesid]')).toHaveLength(0);
@@ -847,7 +847,7 @@ describe('发送前处理楼层生命周期', () => {
     m.continuationBridge = bridge;
     m.generationStarted!('normal', {}, false);
     const pendingUi = await vi.importActual<typeof import('../../../src/presentation/components/plot-pending-disguise')>('../../../src/presentation/components/plot-pending-disguise');
-    m.beginDisguise.mockImplementation(pendingUi.beginPlotVirtualPendingFloor_ACU);
+    m.beginDisguise.mockImplementation(pendingUi.beginPlotSendDisguise_ACU);
     const previous = { is_user: false, mes: '历史回复' };
     m.api.chat = [previous];
     const stopResults = [{ action: 'failed', apiRetriesExhausted: true }, { action: 'failed', blocked: true }, { action: 'aborted', manual: true }];
@@ -893,7 +893,7 @@ describe('发送前处理楼层生命周期', () => {
     vi.useFakeTimers();
     m.shouldProcessSummary.mockReturnValue(true);
     const pendingUi = await vi.importActual<typeof import('../../../src/presentation/components/plot-pending-disguise')>('../../../src/presentation/components/plot-pending-disguise');
-    m.beginDisguise.mockImplementation(pendingUi.beginPlotVirtualPendingFloor_ACU);
+    m.beginDisguise.mockImplementation(pendingUi.beginPlotSendDisguise_ACU);
     m.input = '召回原输入';
     m.processBeforeGen.mockImplementationOnce(async () => {
       expect(m.input).toBe('');
@@ -979,7 +979,115 @@ describe('发送前处理楼层生命周期', () => {
     expect(m.generate).not.toHaveBeenCalled();
   });
 
+  it.each(['textarea', 'floor'])('伪装建不起来（%s）时按解除伪装继续：原文留在输入框，规划照常沿原请求发送', async failure => {
+    vi.useFakeTimers();
+    m.shouldProcessPlot.mockReturnValue(true);
+    const pendingUi = await vi.importActual<typeof import('../../../src/presentation/components/plot-pending-disguise')>('../../../src/presentation/components/plot-pending-disguise');
+    m.beginDisguise.mockImplementation(pendingUi.beginPlotSendDisguise_ACU);
+    const template = document.querySelector('#message_template .mes')!;
+    const brokenTemplate = vi.spyOn(template, 'cloneNode');
+    if (failure === 'textarea') {
+      m.setInput.mockImplementation((text: string) => {
+        if (!text) return false;
+        m.input = text;
+        return true;
+      });
+    } else {
+      brokenTemplate.mockImplementation(() => { throw new Error('模板损坏'); });
+    }
+    try {
+      m.api.chat = [{ is_user: false, mes: '历史回复' }];
+      m.input = '本轮原输入';
+      let complete!: (result: any) => void;
+      let started!: () => void;
+      const planningStarted = new Promise<void>(resolve => { started = resolve; });
+      m.strategy2.mockImplementationOnce(() => {
+        started();
+        return new Promise(resolve => { complete = resolve; });
+      });
+      const params: any = {};
+      const consume = vi.fn();
+      const request = (async () => {
+        await m.api.eventSource.emit('after_commands', 'normal', params, false);
+        consume(m.input);
+      })();
+      await planningStarted;
+      expect(m.beginDisguise).toHaveBeenCalledOnce();
+      expect(m.input).toBe('本轮原输入');
+      expect(document.querySelector('#chat [data-acu-virtual-floor]')).toBeNull();
+      expect(document.body.dataset.generating).toBeUndefined();
+      expect(document.querySelector<HTMLElement>('#mes_stop')!.style.display).toBe('none');
+      complete({ action: 'planned', finalMessage: '最终剧情正文' });
+      await request;
+      expect(params.prompt).toBe('最终剧情正文');
+      expect(consume).toHaveBeenCalledExactlyOnceWith('最终剧情正文');
+    } finally {
+      brokenTemplate.mockRestore();
+    }
+  });
 
+  it.each(['recall', 'planning'])('伪装露出的停止键等同「终止」（%s 中点击）：停发、还原原文，迟到的规划结果不发送', async phase => {
+    vi.useFakeTimers();
+    m.shouldProcessPlot.mockReturnValue(true);
+    m.shouldProcessSummary.mockReturnValue(phase === 'recall');
+    const pendingUi = await vi.importActual<typeof import('../../../src/presentation/components/plot-pending-disguise')>('../../../src/presentation/components/plot-pending-disguise');
+    m.beginDisguise.mockImplementation(pendingUi.beginPlotSendDisguise_ACU);
+    m.api.chat = [{ is_user: false, mes: '历史回复' }];
+    m.input = '停止轮原输入';
+    let complete!: (result: any) => void;
+    let started!: () => void;
+    const waiting = new Promise<void>(resolve => { started = resolve; });
+    const hold = () => {
+      started();
+      return new Promise(resolve => { complete = resolve; });
+    };
+    if (phase === 'recall') m.processBeforeGen.mockImplementationOnce(hold);
+    else m.strategy2.mockImplementationOnce(hold);
+    const params: any = {};
+    const consume = vi.fn();
+    const request = (async () => {
+      await m.api.eventSource.emit('after_commands', 'normal', params, false);
+      consume();
+    })();
+    const stopped = expect(request).rejects.toMatchObject({ name: 'AbortError' });
+    await waiting;
+    expect(m.input).toBe('');
+    document.querySelector<HTMLElement>('#mes_stop')!.click();
+    expect(m.abortPlanning).toHaveBeenCalledOnce();
+    complete(phase === 'recall' ? { success: true } : { action: 'planned', finalMessage: '迟到的提示词' });
+    await stopped;
+    expect(consume).not.toHaveBeenCalled();
+    expect(params.prompt).toBeUndefined();
+    expect(m.input).toBe('停止轮原输入');
+    expect(m.api.chat).toHaveLength(1);
+    expect(m.strategy2).toHaveBeenCalledTimes(phase === 'recall' ? 0 : 1);
+    expect(m.clearPendingPlot).toHaveBeenCalledTimes(phase === 'recall' ? 0 : 1);
+    expect(document.querySelector('#chat [data-acu-virtual-floor]')).toBeNull();
+    expect(document.body.dataset.generating).toBeUndefined();
+    expect(document.querySelector<HTMLElement>('#mes_stop')!.style.display).toBe('none');
+  });
+
+  it('伪装期间写的草稿不顶替本轮消息：无需规划时宿主读到原文，读走后草稿放回', async () => {
+    vi.useFakeTimers();
+    m.shouldProcessPlot.mockReturnValue(true);
+    const pendingUi = await vi.importActual<typeof import('../../../src/presentation/components/plot-pending-disguise')>('../../../src/presentation/components/plot-pending-disguise');
+    m.beginDisguise.mockImplementation(pendingUi.beginPlotSendDisguise_ACU);
+    m.api.chat = [{ is_user: false, mes: '历史回复' }];
+    m.input = '本轮原输入';
+    m.strategy2.mockImplementationOnce(async () => {
+      expect(m.input).toBe('');
+      m.input = '下一轮草稿';
+      return { action: 'skip' };
+    });
+    await expect(m.api.eventSource.emit('after_commands', 'normal', {}, false)).resolves.toBeUndefined();
+    expect(m.input).toBe('本轮原输入');
+    expect(m.clearPendingPlot).not.toHaveBeenCalled();
+    // 宿主读走发送框时清空并派发 input。
+    m.input = '';
+    document.querySelector('#send_textarea')!.dispatchEvent(new Event('input', { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(m.input).toBe('下一轮草稿');
+  });
 
 });
 
