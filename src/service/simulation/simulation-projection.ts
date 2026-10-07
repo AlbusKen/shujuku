@@ -16,7 +16,21 @@ const SECTION_LABELS_ACU: Record<WorldGuidanceSignalVoice_ACU, string> = {
   ambient: '【世界暗流】',
 };
 
-export function buildWorldSimulationProjection_ACU(ledger: WorldSimulationLedger_ACU): string | null {
+export const WORLD_SIMULATION_PROJECTION_PLACEHOLDER_ACU = '$WORLD_SIGNALS';
+export const WORLD_SIMULATION_PROJECTION_TEMPLATE_MAX_CHARS_ACU = 4000;
+/** 默认格式即历来的写法：隐藏容器包住〈与此同时〉，再包住分组信号。 */
+export const DEFAULT_WORLD_SIMULATION_PROJECTION_TEMPLATE_ACU = `${HIDDEN_OPEN_ACU}\n<与此同时>\n${WORLD_SIMULATION_PROJECTION_PLACEHOLDER_ACU}\n</与此同时>\n${HIDDEN_CLOSE_ACU}`;
+
+/** 起止标记由插件固定加在模板外层，模板里再出现会破坏剥离与替换。 */
+export function worldSimulationProjectionTemplateError_ACU(template: unknown): string | null {
+  if (typeof template !== 'string' || !template.trim()) return '格式模板不能为空';
+  if (template.length > WORLD_SIMULATION_PROJECTION_TEMPLATE_MAX_CHARS_ACU) return `格式模板不能超过 ${WORLD_SIMULATION_PROJECTION_TEMPLATE_MAX_CHARS_ACU} 字`;
+  if (template.split(WORLD_SIMULATION_PROJECTION_PLACEHOLDER_ACU).length !== 2) return `格式模板必须恰好包含一次 ${WORLD_SIMULATION_PROJECTION_PLACEHOLDER_ACU}`;
+  if (template.includes('qrf-world-simulation-projection:v')) return '格式模板不能包含插件的起止标记，它们会自动加在外层';
+  return null;
+}
+
+export function buildWorldSimulationProjection_ACU(ledger: WorldSimulationLedger_ACU, template: string = DEFAULT_WORLD_SIMULATION_PROJECTION_TEMPLATE_ACU): string | null {
   const grouped: Record<WorldGuidanceSignalVoice_ACU, string[]> = { encounter: [], rumor: [], ambient: [] };
   for (const signal of ledger.guidance.signals) {
     const text = signal.text.trim();
@@ -27,7 +41,8 @@ export function buildWorldSimulationProjection_ACU(ledger: WorldSimulationLedger
     return items.length ? [`${SECTION_LABELS_ACU[voice]}\n${items.map(item => `- ${item}`).join('\n')}`] : [];
   });
   if (!sections.length) return null;
-  return `${START_ACU}\n${HIDDEN_OPEN_ACU}\n<与此同时>\n${sections.join('\n')}\n</与此同时>\n${HIDDEN_CLOSE_ACU}\n${END_ACU}`;
+  const format = worldSimulationProjectionTemplateError_ACU(template) ? DEFAULT_WORLD_SIMULATION_PROJECTION_TEMPLATE_ACU : template;
+  return `${START_ACU}\n${format.replace(WORLD_SIMULATION_PROJECTION_PLACEHOLDER_ACU, () => sections.join('\n'))}\n${END_ACU}`;
 }
 
 /** Prompt-only view: never use this text for anchor identity or persistent content. */

@@ -19,7 +19,13 @@
     </div>
     <div v-else class="acu-desk-pet__body" :class="{ 'is-breathing': breathing }">
       <div class="acu-desk-pet__flip" :class="{ 'is-flipped': flipped }">
-        <img class="acu-desk-pet__img" :class="`pose-${pose}`" :src="POSE_IMAGES[pose]" alt="" draggable="false" />
+        <img
+          class="acu-desk-pet__img"
+          :class="[`pose-${pose}`, { 'is-custom': poseIsCustom }]"
+          :src="poseSrc"
+          alt=""
+          draggable="false"
+        />
       </div>
     </div>
   </div>
@@ -69,11 +75,20 @@ import {
   type DeskPetDockEdge,
   type DeskPetRect,
 } from "../composables/useTaskActivity";
+import {
+  DESK_PET_IDLE_ACTIONS_ACU,
+  type DeskPetAppearance_ACU,
+  type DeskPetIdleAction_ACU,
+  type DeskPetImageKey_ACU,
+  type DeskPetPeekImage_ACU,
+  type DeskPetPose_ACU,
+  type DeskPetReaction_ACU,
+} from "../../shared/desk-pet-appearance";
 
 type IdlePose = "idle" | "blink" | "look-left" | "look-right" | "walk-a" | "walk-b" | "roll" | "eat-a" | "eat-b" | "yawn";
 type SnoozePose = "snore" | "sit-snore";
-type ReactionPose = "shy" | "tickle" | "angry" | "happy" | "dizzy" | "surprised" | "wave" | "huff" | "pound" | "knockdown";
-type Pose = IdlePose | SnoozePose | ReactionPose | "working" | "struggle";
+type ReactionPose = DeskPetReaction_ACU;
+type Pose = DeskPetPose_ACU;
 
 const POSE_IMAGES: Record<Pose, string> = {
   idle: idleImage,
@@ -101,6 +116,14 @@ const POSE_IMAGES: Record<Pose, string> = {
   pound: poundImage,
   knockdown: knockdownImage,
 };
+
+const PEEK_IMAGES: Record<DeskPetPeekImage_ACU, string> = {
+  peek: peekImage,
+  "peek-original": peekOriginalImage,
+  "peek-sleepy": peekSleepyImage,
+};
+
+const BUILTIN_IMAGES: Record<DeskPetImageKey_ACU, string> = { ...POSE_IMAGES, ...PEEK_IMAGES };
 
 const POSE_LABELS: Record<Pose, string> = {
   idle: "发呆中",
@@ -133,6 +156,8 @@ const props = defineProps<{
   busy: boolean;
   /** 设置版本：设置被加载或修改后重读已保存位置。 */
   settingsVersion: number;
+  /** 外观设置的生效值：图片、尺寸与动画节奏。 */
+  appearance: DeskPetAppearance_ACU;
 }>();
 
 const emit = defineEmits<{ (event: "rect", rect: DeskPetRect): void }>();
@@ -150,21 +175,6 @@ const DOCK_SNAP_RATIO = 0.05;
 const DRAG_OVERSHOOT_RATIO = 0.5;
 /** 吸附后完整露出时离屏幕边缘的距离。 */
 const DOCK_INSET_PX = 2;
-/** 半隐时露出的宽度占桌宠尺寸的比例：只露眼睛和嘴。 */
-const PEEK_DEPTH_RATIO = 0.56;
-/** 原图探头帧：与普通探头同规范（头朝屏幕内、只露头顶到嘴），头顶到嘴下约占 61%。 */
-const PEEK_ORIGINAL_DEPTH_RATIO = 0.61;
-/** 缩边期间每隔多久重抽一次探头造型。 */
-const PEEK_ROTATE_MS = 30000;
-/** 原图探头是稀有造型：与普通探头按 1:99 抽取。 */
-const PEEK_ORIGINAL_CHANCE = 0.01;
-/** 吸附后无人理会多久缩进去。 */
-const TUCK_DELAY_MS = 4000;
-/** 待机动作间隔 15–20 秒。 */
-const IDLE_ACTION_MIN_MS = 15000;
-const IDLE_ACTION_SPREAD_MS = 5000;
-/** 无任何互动多久后睡着打呼噜。 */
-const SNORE_AFTER_MS = 60000;
 /** 短时间内连点达到该次数，从害羞变成怕痒。 */
 const TICKLE_TAP_COUNT = 3;
 const TICKLE_WINDOW_MS = 1200;
@@ -175,22 +185,8 @@ const ANGRY_WINDOW_MS = 2600;
 const LONG_PRESS_MS = 550;
 /** 拖动中左右甩动的折返次数达到该值，松手后会晕。 */
 const DIZZY_REVERSALS = 4;
-/** 鼠标靠近时打招呼的冷却时间。 */
-const WAVE_COOLDOWN_MS = 30000;
 /** 散步/打滚至少要有这么宽的空地。 */
 const STROLL_MIN_ROOM_PX = 60;
-const REACTION_MS: Record<ReactionPose, number> = {
-  shy: 1600,
-  tickle: 1600,
-  angry: 2200,
-  happy: 1100,
-  dizzy: 2400,
-  surprised: 1300,
-  wave: 1600,
-  huff: 1000,
-  pound: 1300,
-  knockdown: 2200,
-};
 /** 戳到生气后的连段：生气 → 哈气 → 锤屏幕 → 把自己震得仰面倒地。 */
 const RAGE_SEQUENCE: ReactionPose[] = ["angry", "huff", "pound", "knockdown"];
 
@@ -232,19 +228,28 @@ let lastMoveX = 0;
 let lastMoveDir = 0;
 let lastWaveAt = 0;
 
-const size = computed(() => (viewport.value.width <= NARROW_VIEWPORT_PX ? 64 : 88));
+const motion = computed(() => props.appearance.motion);
+const size = computed(() => (viewport.value.width <= NARROW_VIEWPORT_PX ? props.appearance.size.narrow : props.appearance.size.wide));
 const showPeek = computed(() => !!dockEdge.value && tucked.value && !dragging.value && !reaction.value);
 
-/** 缩边探头造型：普通探头为主、原图探头稀有（1:99），每 30 秒重抽一次；睡着时固定犯困探头。 */
+function imageSrc(key: DeskPetImageKey_ACU): string {
+  return props.appearance.images[key] || BUILTIN_IMAGES[key];
+}
+
+/** 缩边探头造型：普通探头为主、稀有造型按设置的概率抽取并定时重抽；睡着时固定犯困探头。 */
 const peekVariant = ref<"peek" | "original">("peek");
 let peekRotateTimer: AcuTimerHandle | null = null;
 
 function rollPeekVariant(): "peek" | "original" {
-  return Math.random() < PEEK_ORIGINAL_CHANCE ? "original" : "peek";
+  return Math.random() < motion.value.peekOriginalChance ? "original" : "peek";
 }
 const peekOriginal = computed(() => peekVariant.value === "original" && !snoozing.value);
-const peekSrc = computed(() => (snoozing.value ? peekSleepyImage : peekOriginal.value ? peekOriginalImage : peekImage));
-const peekDepth = computed(() => Math.round(size.value * (peekOriginal.value ? PEEK_ORIGINAL_DEPTH_RATIO : PEEK_DEPTH_RATIO)));
+const peekSrc = computed(() => imageSrc(snoozing.value ? "peek-sleepy" : peekOriginal.value ? "peek-original" : "peek"));
+/** 缩进时露出的深度：内置探头图只露眼睛和嘴（56%），稀有造型露到嘴下（61%）。 */
+const peekDepth = computed(() => {
+  const { peekDepthRatio, peekOriginalDepthRatio } = props.appearance.size;
+  return Math.round(size.value * (peekOriginal.value ? peekOriginalDepthRatio : peekDepthRatio));
+});
 
 function stopPeekRotate(): void {
   acuClearTimeout(peekRotateTimer);
@@ -257,7 +262,7 @@ function schedulePeekRotate(): void {
     peekRotateTimer = null;
     peekVariant.value = rollPeekVariant();
     schedulePeekRotate();
-  }, PEEK_ROTATE_MS);
+  }, motion.value.peekRotateMs);
 }
 
 watch(showPeek, shown => {
@@ -265,7 +270,7 @@ watch(showPeek, shown => {
     stopPeekRotate();
     return;
   }
-  // 每次缩进去按 1:99 抽一次造型，之后每 30 秒重抽。
+  // 每次缩进去抽一次造型，之后按间隔重抽。
   peekVariant.value = rollPeekVariant();
   schedulePeekRotate();
 });
@@ -277,6 +282,10 @@ const pose = computed<Pose>(() => {
   if (snoozing.value) return snoozePose.value;
   return idleAction.value ?? "idle";
 });
+
+const poseSrc = computed(() => imageSrc(pose.value));
+/** 自定义图按桌宠框原尺寸显示，不套内置图的体型补偿缩放。 */
+const poseIsCustom = computed(() => !!props.appearance.images[pose.value]);
 
 /** 待机系动作共用一条呼吸动画，切帧时动画不重启。 */
 const breathing = computed(() => ["idle", "blink", "look-left", "look-right", "snore", "sit-snore"].includes(pose.value));
@@ -323,6 +332,7 @@ const rootClass = computed(() => ({
   "is-dragging": dragging.value,
   "is-tucked": showPeek.value,
   "is-animated": settled.value && !dragging.value,
+  "is-still": !motion.value.enabled,
 }));
 
 const ariaLabel = computed(() => `桌宠：${showPeek.value ? "躲在边上偷看" : POSE_LABELS[pose.value]}`);
@@ -473,7 +483,7 @@ function playIdleSequence(steps: Array<[IdlePose, number]>): void {
 
 /** 散步或打滚：在当前高度左右挪一段，结束后保存新位置。贴边或空地不够时不走动。 */
 function playStroll(kind: "walk" | "roll"): boolean {
-  if (dockEdge.value || acuMatchesMedia("(prefers-reduced-motion: reduce)")) return false;
+  if (dockEdge.value || !motion.value.enabled || acuMatchesMedia("(prefers-reduced-motion: reduce)")) return false;
   const maxLeft = Math.max(EDGE_MARGIN_PX, viewport.value.width - size.value - EDGE_MARGIN_PX);
   const roomLeft = left.value - EDGE_MARGIN_PX;
   const roomRight = maxLeft - left.value;
@@ -501,55 +511,89 @@ function playStroll(kind: "walk" | "roll"): boolean {
   return true;
 }
 
+/** 按外观设置里的权重抽一个待机小动作；offset 是骰子落在该动作区间内的位置。权重全为 0 时不做。 */
+function pickIdleAction(): { action: DeskPetIdleAction_ACU; offset: number; weight: number } | null {
+  const weights = motion.value.idleActionWeights;
+  const total = DESK_PET_IDLE_ACTIONS_ACU.reduce((sum, action) => sum + weights[action], 0);
+  if (total <= 0) return null;
+  let dice = Math.random() * total;
+  let last: { action: DeskPetIdleAction_ACU; offset: number; weight: number } | null = null;
+  for (const action of DESK_PET_IDLE_ACTIONS_ACU) {
+    const weight = weights[action];
+    if (weight <= 0) continue;
+    last = { action, offset: weight, weight };
+    if (dice < weight) return { action, offset: dice, weight };
+    dice -= weight;
+  }
+  return last;
+}
+
 function runIdleAction(): void {
   idleTimer = null;
   const quiet = !props.busy && !dragging.value && !reaction.value && !snoozing.value && !showPeek.value;
-  if (quiet && !idleAction.value) {
-    const dice = Math.random();
-    if (dice < 0.16) playIdleSequence([["blink", 160]]);
-    else if (dice < 0.24) playIdleSequence([["blink", 140], ["idle", 110], ["blink", 140]]);
-    else if (dice < 0.38) playIdleSequence([["look-left", 1300], ["idle", 250], ["look-right", 1300]]);
-    else if (dice < 0.56) {
+  const picked = quiet && !idleAction.value ? pickIdleAction() : null;
+  switch (picked?.action) {
+    case "blink":
+      playIdleSequence([["blink", 160]]);
+      break;
+    case "doubleBlink":
+      playIdleSequence([["blink", 140], ["idle", 110], ["blink", 140]]);
+      break;
+    case "lookAround":
+      playIdleSequence([["look-left", 1300], ["idle", 250], ["look-right", 1300]]);
+      break;
+    case "walk":
       if (!playStroll("walk")) playIdleSequence([["look-right", 1600]]);
-    } else if (dice < 0.66) {
+      break;
+    case "roll":
       if (!playStroll("roll")) playIdleSequence([["blink", 160]]);
-    } else if (dice < 0.8) playIdleSequence([["eat-a", 900], ["eat-b", 650], ["eat-a", 450], ["eat-b", 900]]);
-    else if (dice < 0.9) playIdleSequence([["yawn", 1500]]);
-    else playIdleSequence([[dice < 0.95 ? "look-left" : "look-right", 1800]]);
+      break;
+    case "eat":
+      playIdleSequence([["eat-a", 900], ["eat-b", 650], ["eat-a", 450], ["eat-b", 900]]);
+      break;
+    case "yawn":
+      playIdleSequence([["yawn", 1500]]);
+      break;
+    case "glance":
+      playIdleSequence([[picked.offset < picked.weight / 2 ? "look-left" : "look-right", 1800]]);
+      break;
   }
   scheduleIdleAction();
 }
 
 function scheduleIdleAction(): void {
   idleTimer = clearTimer(idleTimer);
-  idleTimer = acuSetTimeout(runIdleAction, IDLE_ACTION_MIN_MS + Math.random() * IDLE_ACTION_SPREAD_MS);
+  idleTimer = acuSetTimeout(runIdleAction, motion.value.idleActionMinMs + Math.random() * motion.value.idleActionSpreadMs);
 }
 
-/** 有互动就醒过来，并重新计时打瞌睡。 */
+/** 有互动就醒过来，并重新计时打瞌睡；睡眠间隔为 0 时不睡。 */
 function markActive(): void {
   snoozing.value = false;
   snoozeTimer = clearTimer(snoozeTimer);
-  if (props.busy) return;
+  const snoreAfterMs = motion.value.snoreAfterMs;
+  if (props.busy || snoreAfterMs <= 0) return;
   snoozeTimer = acuSetTimeout(() => {
     snoozeTimer = null;
     if (props.busy || dragging.value || reaction.value) return;
     stopIdleAction();
     snoozePose.value = Math.random() < 0.5 ? "snore" : "sit-snore";
     snoozing.value = true;
-  }, SNORE_AFTER_MS);
+  }, snoreAfterMs);
 }
 
 function canTuck(): boolean {
   return !!dockEdge.value && !hovering.value && !dragging.value && !props.busy && !reaction.value;
 }
 
+/** 吸附后无人理会一段时间就缩进去；缩进延时为 0 时不自动缩进（推进墙里仍会立刻缩进）。 */
 function scheduleTuck(): void {
   tuckTimer = clearTimer(tuckTimer);
-  if (!canTuck()) return;
+  const tuckDelayMs = motion.value.tuckDelayMs;
+  if (!canTuck() || tuckDelayMs <= 0) return;
   tuckTimer = acuSetTimeout(() => {
     tuckTimer = null;
     if (canTuck()) tucked.value = true;
-  }, TUCK_DELAY_MS);
+  }, tuckDelayMs);
 }
 
 function untuck(): void {
@@ -572,7 +616,7 @@ function startReaction(kind: ReactionPose, hold = false): void {
   stopIdleAction();
   untuck();
   reactionTimer = clearTimer(reactionTimer);
-  if (!hold) endReactionLater(REACTION_MS[kind]);
+  if (!hold) endReactionLater(motion.value.reactionMs[kind]);
 }
 
 /** 按顺序播放一串互动反应（生气连段），播完回到常态。 */
@@ -587,7 +631,7 @@ function playReactionSequence(steps: ReactionPose[]): void {
   reactionTimer = acuSetTimeout(() => {
     reactionTimer = null;
     playReactionSequence(rest);
-  }, REACTION_MS[head]);
+  }, motion.value.reactionMs[head]);
 }
 
 function inRageSequence(): boolean {
@@ -620,7 +664,7 @@ function onTap(): void {
 function maybeWave(): void {
   const now = Date.now();
   if (pointerId !== null || props.busy || reaction.value || snoozing.value) return;
-  if (now - lastWaveAt < WAVE_COOLDOWN_MS) return;
+  if (now - lastWaveAt < motion.value.waveCooldownMs) return;
   lastWaveAt = now;
   startReaction("wave");
 }
@@ -753,6 +797,12 @@ watch(() => props.settingsVersion, () => {
   if (!dragging.value) applySavedPosition();
 });
 
+// 睡眠或缩进节奏改了以后按新值重新计时。
+watch(() => motion.value.snoreAfterMs, () => markActive());
+watch(() => motion.value.tuckDelayMs, () => {
+  if (!tucked.value) scheduleTuck();
+});
+
 watch(() => props.busy, busy => {
   if (busy) {
     stopIdleAction();
@@ -853,10 +903,11 @@ onBeforeUnmount(() => {
 }
 
 /* 悬空挣扎：以头顶为支点乱晃。挣扎帧四肢张开，身体在素材里只占待机帧约 66% 面积，
-   按面积比放大 1.23 倍，让身体保持与基础状态同等体型（四肢可超出桌宠框）。 */
+   按面积比放大 1.23 倍（--pose-fit），让身体保持与基础状态同等体型（四肢可超出桌宠框）。 */
 .acu-desk-pet__img.pose-struggle {
+  --pose-fit: 1.23;
   transform-origin: 50% 20%;
-  transform: scale(1.23);
+  transform: scale(var(--pose-fit));
   filter: drop-shadow(0 14px 8px rgba(60, 40, 0, 0.16));
   animation: acu-desk-pet-dangle 0.42s ease-in-out infinite;
 }
@@ -898,9 +949,10 @@ onBeforeUnmount(() => {
 }
 
 /* 把自己震倒：先往后弹，再仰面落地。倒地帧身体面积只有旧帧约 80%（14721/18394），
-   关键帧里的缩放统一乘 1.12（面积比开方），以底边为原点放大，让倒地后体型与基础状态一致；
+   关键帧里的缩放统一乘 1.12（--pose-fit，面积比开方），以底边为原点放大，让倒地后体型与基础状态一致；
    两侧可略微超出桌宠框（与挣扎帧同一补偿方式）。 */
 .acu-desk-pet__img.pose-knockdown {
+  --pose-fit: 1.12;
   animation: acu-desk-pet-knockdown 0.7s cubic-bezier(0.3, 1.4, 0.5, 1) both;
 }
 
@@ -929,15 +981,21 @@ onBeforeUnmount(() => {
   animation: acu-desk-pet-dizzy 1.2s ease-in-out infinite;
 }
 
-/* 吓一跳：惊吓帧身体收拢，不透明面积只有待机帧约 72%，按面积比放大 1.18 倍，
+/* 吓一跳：惊吓帧身体收拢，不透明面积只有待机帧约 72%，按面积比放大 1.18 倍（--pose-fit），
    让被叫醒时体型与基础状态一致（与挣扎帧同一补偿方式）。 */
 .acu-desk-pet__img.pose-surprised {
-  transform: scale(1.18);
+  --pose-fit: 1.18;
+  transform: scale(var(--pose-fit));
   animation: acu-desk-pet-jump 0.6s cubic-bezier(0.3, 1.6, 0.5, 1) both;
 }
 
 .acu-desk-pet__img.pose-wave {
   animation: acu-desk-pet-wave 0.8s ease-in-out 2;
+}
+
+/* 体型补偿只针对内置素材；须写在各 pose 规则之后才能以同等优先级覆盖。 */
+.acu-desk-pet__img.is-custom {
+  --pose-fit: 1;
 }
 
 .acu-desk-pet__peek {
@@ -999,16 +1057,16 @@ onBeforeUnmount(() => {
 @keyframes acu-desk-pet-dangle {
   0%,
   100% {
-    transform: scale(1.23) rotate(-10deg);
+    transform: scale(var(--pose-fit)) rotate(-10deg);
   }
   25% {
-    transform: scale(1.23) rotate(6deg) translateY(2px);
+    transform: scale(var(--pose-fit)) rotate(6deg) translateY(2px);
   }
   50% {
-    transform: scale(1.23) rotate(-6deg) translateY(-1px);
+    transform: scale(var(--pose-fit)) rotate(-6deg) translateY(-1px);
   }
   75% {
-    transform: scale(1.23) rotate(10deg) translateY(2px);
+    transform: scale(var(--pose-fit)) rotate(10deg) translateY(2px);
   }
 }
 
@@ -1057,10 +1115,11 @@ onBeforeUnmount(() => {
   60% { transform: scale(1.16) translateY(-2px) rotate(-2deg); }
 }
 
+/* 第二个 scale 是相对 --pose-fit 的形变：内置图时合成 1.03 → (1.165, 1.075) → 1.12。 */
 @keyframes acu-desk-pet-knockdown {
-  0% { transform: translateY(-18px) rotate(-20deg) scale(1.03); }
-  60% { transform: translateY(2px) rotate(4deg) scale(1.165, 1.075); }
-  100% { transform: translateY(0) rotate(0deg) scale(1.12); }
+  0% { transform: translateY(-18px) rotate(-20deg) scale(var(--pose-fit)) scale(0.9196); }
+  60% { transform: translateY(2px) rotate(4deg) scale(var(--pose-fit)) scale(1.0402, 0.9598); }
+  100% { transform: translateY(0) rotate(0deg) scale(var(--pose-fit)) scale(1); }
 }
 
 @keyframes acu-desk-pet-roll {
@@ -1093,17 +1152,27 @@ onBeforeUnmount(() => {
   50% { transform: rotate(8deg) translateX(2px); }
 }
 
+/* 第二个 scale 是相对 --pose-fit 的形变：内置图时合成 1.18 → (1.11, 1.27) → (1.25, 1.11) → 1.18。 */
 @keyframes acu-desk-pet-jump {
-  0% { transform: translateY(0) scale(1.18, 1.18); }
-  30% { transform: translateY(-14px) scale(1.11, 1.27); }
-  70% { transform: translateY(0) scale(1.25, 1.11); }
-  100% { transform: translateY(0) scale(1.18, 1.18); }
+  0% { transform: translateY(0) scale(var(--pose-fit)) scale(1, 1); }
+  30% { transform: translateY(-14px) scale(var(--pose-fit)) scale(0.9407, 1.0763); }
+  70% { transform: translateY(0) scale(var(--pose-fit)) scale(1.0593, 0.9407); }
+  100% { transform: translateY(0) scale(var(--pose-fit)) scale(1, 1); }
 }
 
 @keyframes acu-desk-pet-wave {
   0%, 100% { transform: rotate(0deg); }
   25% { transform: rotate(-5deg); }
   75% { transform: rotate(5deg); }
+}
+
+/* 外观设置关闭动效时与系统「减少动态效果」同样处理。 */
+.acu-desk-pet.is-still.is-animated,
+.acu-desk-pet.is-still .acu-desk-pet__body,
+.acu-desk-pet.is-still .acu-desk-pet__img,
+.acu-desk-pet.is-still .acu-desk-pet__peek {
+  animation: none !important;
+  transition: none;
 }
 
 @media (prefers-reduced-motion: reduce) {

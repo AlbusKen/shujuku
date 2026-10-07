@@ -151,12 +151,29 @@
               <AcuFormRow label="单次时钟推进上限（世界日）" hint="一次提交允许推进的天数；超过则必须附带证据。范围 0–3650。">
                 <AcuInput v-model="settingsDraft.dynamics.maxClockAdvanceDays" type="number" :min="0" :max="3650" />
               </AcuFormRow>
-              <AcuFormRow label="碰撞兑现策略" hint="严格：撞上必须有当场反应，否则拒绝提交。宽松：只记警告。">
+              <AcuFormRow label="碰撞兑现策略" hint="严格：撞上必须有当场反应，模型没写时由程序补一条最简引导，不拒绝提交。宽松：只记警告。">
                 <AcuSelect v-model="settingsDraft.dynamics.collisionEnforcement" :options="collisionEnforcementOptions" />
               </AcuFormRow>
             </div>
             <div class="acu-v2-world-simulation-page__toggles">
               <AcuCheckbox v-model="settingsDraft.dynamics.missedSweepEnabled" label="启用过期清扫（关闭后过期伏线不会自动记为错过）" />
+            </div>
+          </AcuDisclosureGroup>
+
+          <AcuDisclosureGroup
+            class="acu-v2-world-simulation-page__group"
+            label="场外信号插入正文"
+            :meta="projectionGroupMeta"
+            :expanded="isGroupExpanded('projection')"
+            body-id="acu-world-simulation-group-projection"
+            @toggle="toggleGroup('projection')"
+          >
+            <p class="acu-v2-world-simulation-page__meta">提交时按这个格式把场外信号写进冻结的 assistant 楼层。$WORLD_SIGNALS 会换成按【此地此刻】【风闻轶事】【世界暗流】分组的信号；插件用来识别和替换这一段的起止注释会自动加在最外层，不用写进格式里。改动在下一次提交时生效。</p>
+            <AcuFormRow label="插入格式" hint="必须恰好包含一次 $WORLD_SIGNALS，最多 4000 字。默认用隐藏容器包住〈与此同时〉，正文渲染时对读者隐藏。插入后会自动重渲染该楼层。">
+              <AcuTextarea v-model="settingsDraft.projection.template" :rows="6" />
+            </AcuFormRow>
+            <div class="acu-v2-world-simulation-page__toggles">
+              <AcuButton size="sm" @click="restoreDefaultProjectionTemplate">恢复默认</AcuButton>
             </div>
           </AcuDisclosureGroup>
 
@@ -394,6 +411,16 @@ const dynamicsGroupMeta = computed(() => {
   return `TTL ${dynamics.rumorTTLDays} · 推进 ${dynamics.maxClockAdvanceDays} · ${dynamics.collisionEnforcement === 'strict' ? '严格' : '宽松'}${dynamics.missedSweepEnabled ? ' · 清扫开' : ' · 清扫关'}`;
 });
 
+const projectionGroupMeta = computed(() => {
+  const projection = settingsDraft.value?.projection;
+  if (!projection) return '';
+  return projection.template === runtime.defaultProjectionTemplate ? '默认格式' : '自定义格式';
+});
+
+function restoreDefaultProjectionTemplate(): void {
+  if (settingsDraft.value) settingsDraft.value.projection.template = runtime.defaultProjectionTemplate;
+}
+
 const workflowGroupMeta = computed(() => {
   const workflow = settingsDraft.value?.workflow;
   if (!workflow) return '';
@@ -492,6 +519,14 @@ function normalizeSettingsDraft(): WorldSimulationSettings_ACU {
     },
     workflow: {
       chroniclerHotThreshold: requiredRangeInteger(source.workflow?.chroniclerHotThreshold, '编年热层阈值', 1, 512),
+    },
+    projection: {
+      template: (() => {
+        const template = String(source.projection?.template ?? '');
+        const problem = runtime.projectionTemplateError(template);
+        if (problem) throw new Error(problem);
+        return template;
+      })(),
     },
   };
   if (normalized.webResearch.enabled && normalized.webResearch.searchProvider === 'searxng' && !normalized.webResearch.searxngBaseUrl) {

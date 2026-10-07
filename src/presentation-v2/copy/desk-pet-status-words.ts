@@ -2,6 +2,8 @@
  * 桌宠任务气泡的状态词：似是而非的短词，气泡显示为「正在XXXX…」，不带进度明细。
  * 按功能分组；未识别的功能落到 generic。
  */
+import type { AppearanceTextMode_ACU, DeskPetStatusGroup_ACU } from "../../shared/desk-pet-appearance";
+
 export const deskPetStatusWords = {
   table: ["翻账本", "对表格", "抄小本本", "数格子", "描边框", "誊写", "对账", "补漏项", "排行列", "盖戳"],
   plan: ["掐指", "摆沙盘", "看星象", "推演", "琢磨", "画路线", "扔骰子", "排兵布阵"],
@@ -12,9 +14,10 @@ export const deskPetStatusWords = {
   index: ["翻旧账", "找线头", "对暗号", "嗅线索", "理卷宗", "串珠子", "查底档", "扫书架"],
   skill: ["贴标签", "归档", "分门别类", "写说明书", "装盒子", "编号", "理抽屉", "做卡片"],
   generic: ["忙活", "发功", "嘀咕", "搬砖", "埋头苦干", "转圈圈", "冒热气", "咕噜咕噜"],
-} as const;
+} as const satisfies Record<DeskPetStatusGroup_ACU, readonly string[]>;
 
 export type DeskPetStatusGroup = keyof typeof deskPetStatusWords;
+export type DeskPetStatusWords = Readonly<Record<DeskPetStatusGroup, readonly string[]>>;
 
 const FEATURE_GROUP_RULES: Array<[RegExp, DeskPetStatusGroup]> = [
   [/填表|追平|表格/, "table"],
@@ -35,8 +38,27 @@ export function resolveDeskPetStatusGroup(feature: string): DeskPetStatusGroup {
   return "generic";
 }
 
+/** 按外观设置合成各组状态词：append 追加到内置之后，replace 只用自定义（某组为空时该组仍用内置）。 */
+export function resolveDeskPetStatusWords(custom?: {
+  mode: AppearanceTextMode_ACU;
+  groups: Readonly<Record<DeskPetStatusGroup, readonly string[]>>;
+}): DeskPetStatusWords {
+  if (!custom) return deskPetStatusWords;
+  const merged = {} as Record<DeskPetStatusGroup, readonly string[]>;
+  for (const group of Object.keys(deskPetStatusWords) as DeskPetStatusGroup[]) {
+    const extra = custom.groups[group] ?? [];
+    if (!extra.length) merged[group] = deskPetStatusWords[group];
+    else merged[group] = custom.mode === "replace" ? extra : [...deskPetStatusWords[group], ...extra];
+  }
+  return merged;
+}
+
 /** 为某个功能随机挑一个状态词。 */
-export function pickDeskPetStatusWord(feature: string, random: () => number = Math.random): string {
-  const words = deskPetStatusWords[resolveDeskPetStatusGroup(feature)];
-  return words[Math.floor(random() * words.length) % words.length];
+export function pickDeskPetStatusWord(
+  feature: string,
+  random: () => number = Math.random,
+  words: DeskPetStatusWords = deskPetStatusWords,
+): string {
+  const list = words[resolveDeskPetStatusGroup(feature)];
+  return list[Math.floor(random() * list.length) % list.length];
 }

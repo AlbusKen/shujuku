@@ -26,7 +26,15 @@ import { getContinuationRuntime_ACU } from "../../service/continuation/continuat
 import { getChatArray_ACU } from "../../data/gateways/chat-gateway";
 import { getActiveChatStorageIdentity_ACU } from "../../data/storage/chat-history";
 import { settings_ACU } from "../../service/runtime/state-manager";
+import {
+  deskPetAppearanceStore_ACU,
+  noticeBubbleAppearanceStore_ACU,
+  readDeskPetPosition_ACU,
+  type AppearanceStore_ACU,
+} from "../../service/settings/desk-pet-appearance-settings";
 import { saveSettings_ACU } from "../../service/settings/settings-service";
+import type { DeskPetAppearance_ACU, NoticeBubbleAppearance_ACU } from "../../shared/desk-pet-appearance";
+import { logWarn_ACU } from "../../shared/utils";
 import { deriveWorldSimulationProgressView_ACU } from "../simulation/world-simulation-progress-stage";
 import { useChatChangedTick, useChatMutationTick } from "./useChatChangedListener";
 import { useWorldSimulationRuntime } from "./useWorldSimulationRuntime";
@@ -56,12 +64,7 @@ function normalizeDockEdge(value: unknown): DeskPetDockEdge | null {
 
 /** 读取已保存的桌宠位置；未保存或数据无效时返回 null（使用默认右下角）。 */
 export function readDeskPetPositionRatio(): DeskPetPositionRatio | null {
-  const saved = settings_ACU?.desktopPetPosition;
-  if (!saved || typeof saved !== "object") return null;
-  const x = Number(saved.x);
-  const y = Number(saved.y);
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-  return { x: Math.min(Math.max(x, 0), 1), y: Math.min(Math.max(y, 0), 1), edge: normalizeDockEdge(saved.edge) };
+  return readDeskPetPosition_ACU();
 }
 
 /** 保存桌宠位置到独立设置字段（走 saveSettings_ACU，不写 localStorage）。 */
@@ -100,6 +103,27 @@ export interface NoticeHubState {
   jokesEnabled: ComputedRef<boolean>;
   /** 桌宠开启时直接显示已有通知与任务进度；缺失按关闭处理。 */
   showRealWork: ComputedRef<boolean>;
+  /** 桌宠外观（图片、尺寸、动画节奏、语录与状态词）的生效值。 */
+  petAppearance: ComputedRef<DeskPetAppearance_ACU>;
+  /** 气泡外观（配色、字号、尺寸、摆放、轮播节奏）的生效值。 */
+  bubbleAppearance: ComputedRef<NoticeBubbleAppearance_ACU>;
+}
+
+const warnedAppearanceIssues = new Set<string>();
+
+/** 已存外观里有无效项时按缺省显示，同样的问题只警告一次。 */
+function readAppearanceForUi<T>(store: AppearanceStore_ACU<T>): T {
+  try {
+    const { appearance, issues } = store.read();
+    const warning = issues.join("；");
+    if (warning && !warnedAppearanceIssues.has(warning)) {
+      warnedAppearanceIssues.add(warning);
+      logWarn_ACU(`[外观设置] 已存数据有无法使用的项，已按缺省显示：${warning}`);
+    }
+    return appearance;
+  } catch {
+    return store.defaults();
+  }
 }
 
 /** notice-hub 快照的响应式镜像。 */
@@ -140,7 +164,15 @@ export function useNoticeHubState(): NoticeHubState {
       return false;
     }
   });
-  return { snapshot, silent, petEnabled, jokesEnabled, showRealWork };
+  const petAppearance = computed(() => {
+    void snapshot.value.settingsVersion;
+    return readAppearanceForUi(deskPetAppearanceStore_ACU);
+  });
+  const bubbleAppearance = computed(() => {
+    void snapshot.value.settingsVersion;
+    return readAppearanceForUi(noticeBubbleAppearanceStore_ACU);
+  });
+  return { snapshot, silent, petEnabled, jokesEnabled, showRealWork, petAppearance, bubbleAppearance };
 }
 
 function errorText(cause: unknown): string {

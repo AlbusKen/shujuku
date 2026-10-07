@@ -19,6 +19,8 @@ import { createAgentWorldbookApi } from './api-groups/agent-worldbook-api';
 import { createSqlApi, installRuntimeGatedSqlReadApi_ACU } from './api-groups/sql-api';
 import { createPerformanceDiagnosticsApi } from './api-groups/performance-diagnostics-api';
 import { createZeroLayerExitApi_ACU } from './api-groups/zero-layer-api';
+import { createFeatureRuntimeApi_ACU } from './api-groups/feature-runtime-api';
+import { createDeskPetAppearanceApi_ACU } from './api-groups/desk-pet-appearance-api';
 
 // --- 共享状态（回调数组） ---
 const tableUpdateCallbacks: Function[] = [];
@@ -49,6 +51,8 @@ const api = Object.assign(
     createAgentWorldbookApi(ctx),
     createPerformanceDiagnosticsApi(),
     createZeroLayerExitApi_ACU(),
+    createFeatureRuntimeApi_ACU(),
+    createDeskPetAppearanceApi_ACU(),
     sqlApi,
 );
 

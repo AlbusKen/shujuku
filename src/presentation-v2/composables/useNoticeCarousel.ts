@@ -1,28 +1,25 @@
 /**
  * useNoticeCarousel — 单气泡轮播调度
  *
- * 时间片固定 5 秒：待播消息先进先出、播完出队；进行中任务循环复播。
- * 每播满 2 片消息/任务插 1 片冷笑话；无消息无任务时空闲，每 5 分钟冒 1 条笑话。
+ * 待播消息先进先出、播完出队；进行中任务循环复播。每片停留时长、每播几片插 1 片冷笑话、
+ * 空闲多久冒 1 条笑话取自气泡外观设置（缺省 5 秒 / 每 2 片 / 5 分钟）；笑话池与状态词取自桌宠外观设置。
  * 静默模式或页面隐藏时不播放（静默时清空待播消息）。单一计时器驱动。
  */
 import { computed, getCurrentScope, onScopeDispose, ref, watch, type ComputedRef, type Ref } from "vue";
 import { clearNotices_ACU, dismissNoticeTask_ACU, runNoticeAction_ACU, shiftNotice_ACU, type Notice_ACU, type NoticeAction_ACU } from "../../shared/notice-hub";
 import { acuClearTimeout, acuSetTimeout, type AcuTimerHandle } from "../bootstrap/host-env";
 import { getAcuHostDocument } from "../bootstrap/host-document";
-import { pickDeskPetJoke } from "../copy/desk-pet-jokes";
-import { pickDeskPetStatusWord } from "../copy/desk-pet-status-words";
+import { pickDeskPetJoke, resolveDeskPetJokePool } from "../copy/desk-pet-jokes";
+import { pickDeskPetStatusWord, resolveDeskPetStatusWords } from "../copy/desk-pet-status-words";
 import type { ActivityTask, NoticeHubState } from "./useTaskActivity";
 
-export const NOTICE_SLIDE_MS = 5000;
-export const NOTICE_IDLE_JOKE_MS = 5 * 60 * 1000;
-export const NOTICE_SLIDES_PER_JOKE = 2;
 /** 悬停后恢复计时时至少保留的展示时间，给用户移开鼠标后的余量。 */
 const RESUME_MIN_MS = 1500;
 
 export type NoticeSlide =
   | { type: "notice"; key: string; notice: Notice_ACU; word: string }
   | { type: "task"; key: string; taskId: string; word: string }
-  | { type: "joke"; key: string; text: string };
+  | { type: "joke"; key: string; text: string; heading: string };
 
 export interface NoticeCarousel {
   slide: Ref<NoticeSlide | null>;
@@ -44,6 +41,8 @@ export function useNoticeCarousel(hubState: NoticeHubState, tasks: ComputedRef<A
   let slideTimer: AcuTimerHandle | undefined;
   let idleTimer: AcuTimerHandle | undefined;
   let slideStartedAt = 0;
+  /** 当前片开始时的停留时长；中途改设置只影响下一片。 */
+  let slideDurationMs = 0;
   let pausedRemaining: number | null = null;
   let slidesSinceJoke = 0;
   let lastTaskId: string | null = null;
@@ -51,6 +50,9 @@ export function useNoticeCarousel(hubState: NoticeHubState, tasks: ComputedRef<A
   let nextKey = 1;
 
   const active = computed(() => !hubState.silent.value && !pageHidden.value);
+  const rhythm = computed(() => hubState.bubbleAppearance.value.carousel);
+  const jokePool = computed(() => resolveDeskPetJokePool(hubState.petAppearance.value.jokes));
+  const statusWords = computed(() => resolveDeskPetStatusWords(hubState.petAppearance.value.statusWords));
 
   const currentTask = computed<ActivityTask | null>(() => {
     const current = slide.value;
@@ -88,24 +90,26 @@ export function useNoticeCarousel(hubState: NoticeHubState, tasks: ComputedRef<A
     pausedRemaining = null;
     slide.value = next;
     slideStartedAt = Date.now();
-    slideTimer = acuSetTimeout(advance, NOTICE_SLIDE_MS);
+    slideDurationMs = rhythm.value.slideMs;
+    slideTimer = acuSetTimeout(advance, slideDurationMs);
   }
 
   function showJoke(): void {
     // 冷笑话插播开关关闭（或桌宠关闭）时不再出现冷笑话。
     if (!hubState.jokesEnabled.value) return;
-    lastJoke = pickDeskPetJoke(lastJoke);
+    lastJoke = pickDeskPetJoke(lastJoke, Math.random, jokePool.value);
     if (!lastJoke) return;
-    show({ type: "joke", key: `joke-${nextKey++}`, text: lastJoke });
+    show({ type: "joke", key: `joke-${nextKey++}`, text: lastJoke, heading: hubState.petAppearance.value.jokes.heading });
   }
 
   function armIdle(): void {
     clearIdleTimer();
-    if (!active.value || !hubState.jokesEnabled.value) return;
+    const idleMs = rhythm.value.idleJokeMs;
+    if (!active.value || !hubState.jokesEnabled.value || idleMs <= 0) return;
     idleTimer = acuSetTimeout(() => {
       idleTimer = undefined;
       if (slide.value === null && active.value) showJoke();
-    }, NOTICE_IDLE_JOKE_MS);
+    }, idleMs);
   }
 
   function goIdle(): void {
@@ -121,7 +125,8 @@ export function useNoticeCarousel(hubState: NoticeHubState, tasks: ComputedRef<A
       slide.value = null;
       return;
     }
-    if (hubState.jokesEnabled.value && slidesSinceJoke >= NOTICE_SLIDES_PER_JOKE && hasContent()) {
+    const slidesPerJoke = rhythm.value.slidesPerJoke;
+    if (hubState.jokesEnabled.value && slidesPerJoke > 0 && slidesSinceJoke >= slidesPerJoke && hasContent()) {
       slidesSinceJoke = 0;
       showJoke();
       return;
@@ -129,14 +134,15 @@ export function useNoticeCarousel(hubState: NoticeHubState, tasks: ComputedRef<A
     const notice = shiftNotice_ACU();
     if (notice) {
       slidesSinceJoke += 1;
-      show({ type: "notice", key: notice.id, notice, word: pickDeskPetStatusWord(`${notice.title} ${notice.text}`) });
+      const word = pickDeskPetStatusWord(`${notice.title} ${notice.text}`, Math.random, statusWords.value);
+      show({ type: "notice", key: notice.id, notice, word });
       return;
     }
     const task = nextTask();
     if (task) {
       slidesSinceJoke += 1;
       lastTaskId = task.id;
-      show({ type: "task", key: `${task.id}-${nextKey++}`, taskId: task.id, word: pickDeskPetStatusWord(task.feature) });
+      show({ type: "task", key: `${task.id}-${nextKey++}`, taskId: task.id, word: pickDeskPetStatusWord(task.feature, Math.random, statusWords.value) });
       return;
     }
     goIdle();
@@ -148,7 +154,7 @@ export function useNoticeCarousel(hubState: NoticeHubState, tasks: ComputedRef<A
 
   function pause(): void {
     if (slideTimer === undefined) return;
-    pausedRemaining = Math.max(0, NOTICE_SLIDE_MS - (Date.now() - slideStartedAt));
+    pausedRemaining = Math.max(0, slideDurationMs - (Date.now() - slideStartedAt));
     clearSlideTimer();
   }
 
@@ -156,7 +162,7 @@ export function useNoticeCarousel(hubState: NoticeHubState, tasks: ComputedRef<A
     if (pausedRemaining === null || !slide.value) return;
     const remaining = Math.max(pausedRemaining, RESUME_MIN_MS);
     pausedRemaining = null;
-    slideStartedAt = Date.now() - (NOTICE_SLIDE_MS - remaining);
+    slideStartedAt = Date.now() - (slideDurationMs - remaining);
     slideTimer = acuSetTimeout(advance, remaining);
   }
 
@@ -218,10 +224,10 @@ export function useNoticeCarousel(hubState: NoticeHubState, tasks: ComputedRef<A
     advance();
   }, { immediate: true });
 
-  // 冷笑话开关切换：打开后若正空闲则重新计时，关闭后撤掉待插播的空闲笑话。
+  // 冷笑话开关或空闲间隔变化：打开后若正空闲则重新计时，关闭后撤掉待插播的空闲笑话。
   watch(
-    () => hubState.jokesEnabled.value,
-    (enabled) => {
+    [() => hubState.jokesEnabled.value, () => rhythm.value.idleJokeMs],
+    ([enabled]) => {
       if (!enabled) clearIdleTimer();
       else if (slide.value === null) armIdle();
     },

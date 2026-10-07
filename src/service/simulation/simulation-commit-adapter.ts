@@ -248,7 +248,7 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<WorldSimul
     reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', '提交缺少已确认写入和候选');
   }
   const { ledger, extraTimeline, archiveSnapshot } = await planWorldSimulationFinalCommit_ACU(envelope, input, storyText, archiveBefore);
-  const projection = buildWorldSimulationProjection_ACU(ledger);
+  const projection = buildWorldSimulationProjection_ACU(ledger, envelope.settings.projection.template);
   const oldContent = readWorldSimulationMessageContent_ACU(anchorMessage);
   const newContent = applyWorldSimulationProjection_ACU(oldContent, projection);
   const persistedAnchor: WorldSimulationAnchorIdentity_ACU = { ...currentAnchor, contentDigest: sha256HexSync_ACU(newContent) };
@@ -501,7 +501,7 @@ async function persistHostFinalCommit_ACU(
         // 延时期间正文或 swipe 已变化，放弃旧锚点的刷新。
         return;
       }
-      void refreshMessageBlock_ACU(currentRefreshIndex);
+      void refreshMessageBlock_ACU(currentRefreshIndex, { notify: false });
     }, 100);
   }
   return persistedAnchor;

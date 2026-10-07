@@ -1,6 +1,57 @@
 import { describe, expect, it } from 'vitest';
-import { buildEmptyWorldSimulationLedger_ACU } from '../../../src/service/simulation/defaults';
-import { applyWorldSimulationProjection_ACU, buildWorldSimulationProjection_ACU, writeWorldSimulationActiveSwipeContent_ACU } from '../../../src/service/simulation/simulation-projection';
+import { buildDefaultWorldSimulationEnvelope_ACU, buildEmptyWorldSimulationLedger_ACU } from '../../../src/service/simulation/defaults';
+import {
+  DEFAULT_WORLD_SIMULATION_PROJECTION_TEMPLATE_ACU,
+  applyWorldSimulationProjection_ACU,
+  buildWorldSimulationProjection_ACU,
+  worldSimulationProjectionTemplateError_ACU,
+  writeWorldSimulationActiveSwipeContent_ACU,
+} from '../../../src/service/simulation/simulation-projection';
+import { validateWorldSimulationEnvelope_ACU } from '../../../src/service/simulation/simulation-store';
+
+describe('world simulation projection format', () => {
+  const ledger = () => {
+    const value = buildEmptyWorldSimulationLedger_ACU();
+    value.guidance.signals = [{ text: '远处钟声响起', voice: 'ambient' }, { text: '掌柜压低声音', voice: 'encounter' }];
+    return value;
+  };
+
+  it('默认格式与历来的写法逐字一致', () => {
+    expect(buildWorldSimulationProjection_ACU(ledger())).toBe([
+      '<!-- qrf-world-simulation-projection:v2:start -->',
+      '<div hidden class="qrf-world-simulation-projection" style="display:none">',
+      '<与此同时>',
+      '【此地此刻】\n- 掌柜压低声音\n【世界暗流】\n- 远处钟声响起',
+      '</与此同时>',
+      '</div>',
+      '<!-- qrf-world-simulation-projection:v2:end -->',
+    ].join('\n'));
+  });
+
+  it('自定义格式替换 $WORLD_SIGNALS，起止标记仍在最外层，可被剥离与替换', () => {
+    const projection = buildWorldSimulationProjection_ACU(ledger(), '<details><summary>与此同时</summary>\n$WORLD_SIGNALS\n</details>')!;
+    expect(projection).toBe('<!-- qrf-world-simulation-projection:v2:start -->\n<details><summary>与此同时</summary>\n【此地此刻】\n- 掌柜压低声音\n【世界暗流】\n- 远处钟声响起\n</details>\n<!-- qrf-world-simulation-projection:v2:end -->');
+    expect(applyWorldSimulationProjection_ACU(applyWorldSimulationProjection_ACU('正文', projection), null)).toBe('正文');
+  });
+
+  it('不合法的格式校验报错，生成时回落到默认格式', () => {
+    expect(worldSimulationProjectionTemplateError_ACU(DEFAULT_WORLD_SIMULATION_PROJECTION_TEMPLATE_ACU)).toBeNull();
+    expect(worldSimulationProjectionTemplateError_ACU('没有占位符')).toContain('$WORLD_SIGNALS');
+    expect(worldSimulationProjectionTemplateError_ACU('$WORLD_SIGNALS $WORLD_SIGNALS')).toContain('恰好包含一次');
+    expect(worldSimulationProjectionTemplateError_ACU('<!-- qrf-world-simulation-projection:v2:end -->$WORLD_SIGNALS')).toContain('起止标记');
+    expect(buildWorldSimulationProjection_ACU(ledger(), '没有占位符')).toBe(buildWorldSimulationProjection_ACU(ledger()));
+  });
+
+  it('存量设置缺插入格式时补默认，坏格式回默认，合法的自定义格式原样保留', () => {
+    const legacy: any = JSON.parse(JSON.stringify(buildDefaultWorldSimulationEnvelope_ACU()));
+    delete legacy.settings.projection;
+    expect(validateWorldSimulationEnvelope_ACU(legacy).settings.projection).toEqual({ template: DEFAULT_WORLD_SIMULATION_PROJECTION_TEMPLATE_ACU });
+    legacy.settings.projection = { template: '缺占位符' };
+    expect(validateWorldSimulationEnvelope_ACU(legacy).settings.projection).toEqual({ template: DEFAULT_WORLD_SIMULATION_PROJECTION_TEMPLATE_ACU });
+    legacy.settings.projection = { template: '<与此同时>\n$WORLD_SIGNALS\n</与此同时>' };
+    expect(validateWorldSimulationEnvelope_ACU(legacy).settings.projection).toEqual(legacy.settings.projection);
+  });
+});
 
 describe('world simulation projection', () => {
   it('只替换系统认领块并保留用户同名终端块', () => {

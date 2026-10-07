@@ -2,6 +2,8 @@
  * 桌宠冷笑话库：由项目根目录 冷笑话.txt 按空行切分内置。
  * 针对受保护群体（民族、性取向）的贬损条目未收录。
  */
+import type { AppearanceTextMode_ACU } from "../../shared/desk-pet-appearance";
+
 export const deskPetJokes: readonly string[] = [
   "为什么每次跳水比赛，运动员都会用很慢的速度跳第二遍？",
   "小明爷爷生病了，难受得一直叫唤，小明问：爸爸的爸爸叫什么？",
@@ -135,12 +137,18 @@ export const deskPetJokes: readonly string[] = [
   "怀念过去是不是在时间的长河里刻舟求剑？展望未来是不是在前行的道路上望梅止渴?",
 ];
 
+/** 按外观设置合成语录池：append 追加到内置之后，replace 只用自定义（自定义为空时仍用内置）。 */
+export function resolveDeskPetJokePool(custom?: { mode: AppearanceTextMode_ACU; items: readonly string[] }): readonly string[] {
+  if (!custom?.items.length) return deskPetJokes;
+  return custom.mode === "replace" ? custom.items : [...deskPetJokes, ...custom.items];
+}
+
 /** 随机取一条笑话；传入上一条可避免连续重复。 */
-export function pickDeskPetJoke(previous?: string, random: () => number = Math.random): string {
-  if (deskPetJokes.length === 0) return "";
+export function pickDeskPetJoke(previous?: string, random: () => number = Math.random, pool: readonly string[] = deskPetJokes): string {
+  if (pool.length === 0) return "";
   for (let attempt = 0; attempt < 4; attempt++) {
-    const joke = deskPetJokes[Math.floor(random() * deskPetJokes.length) % deskPetJokes.length];
-    if (joke !== previous || deskPetJokes.length === 1) return joke;
+    const joke = pool[Math.floor(random() * pool.length) % pool.length];
+    if (joke !== previous || pool.length === 1) return joke;
   }
-  return deskPetJokes[0];
+  return pool[0];
 }

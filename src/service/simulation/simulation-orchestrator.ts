@@ -421,7 +421,7 @@ export class WorldSimulationOrchestrator_ACU {
           && Array.isArray((guidance as { signals?: unknown }).signals)
           && JSON.stringify((guidance as { signals: unknown[] }).signals) === JSON.stringify(authoritative.ledger.guidance.signals);
       });
-      const committedContent = buildWorldSimulationProjection_ACU(authoritative.ledger);
+      const committedContent = buildWorldSimulationProjection_ACU(authoritative.ledger, authoritative.settings.projection.template);
       const composerPersisted = composerSignalsPersisted && result.finalProjection?.sourceAgent === 'guidance-composer'
         && guidanceBeforeCommit !== undefined
         && JSON.stringify(guidanceBeforeCommit.signals) !== JSON.stringify(authoritative.ledger.guidance.signals)
@@ -457,7 +457,7 @@ export class WorldSimulationOrchestrator_ACU {
         throw new Error('WORLD_SIMULATION_PROJECTION_AUTHORITY_UNVERIFIED');
       }
       result.finalProjection = {
-        content: buildWorldSimulationProjection_ACU(authoritative.ledger),
+        content: buildWorldSimulationProjection_ACU(authoritative.ledger, authoritative.settings.projection.template),
         sourceAgent: 'current-ledger', sourceRevision: authoritative.ledger.revision, deliverable: true,
       };
     }

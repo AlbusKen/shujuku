@@ -3,6 +3,7 @@ import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
 import { subscribeZeroLayerChanges_ACU } from '../../service/zero-layer/notifications';
 import { buildDefaultWorldSimulationSettings_ACU } from '../../service/simulation/defaults';
+import { DEFAULT_WORLD_SIMULATION_PROJECTION_TEMPLATE_ACU, worldSimulationProjectionTemplateError_ACU } from '../../service/simulation/simulation-projection';
 import type { WorldSimulationAgentName_ACU } from '../../service/simulation/agent/agent-catalog';
 import type { WorldSimulationAgentPrompts_ACU } from '../../service/simulation/agent/agent-defaults';
 import { restoreWorldSimulationPromptDefault_ACU, validateWorldSimulationAgentPrompts_ACU } from '../../service/simulation/agent/prompt-template';
@@ -387,6 +388,8 @@ export function useWorldSimulationRuntime() {
   }
 
   return {
+    defaultProjectionTemplate: DEFAULT_WORLD_SIMULATION_PROJECTION_TEMPLATE_ACU,
+    projectionTemplateError: worldSimulationProjectionTemplateError_ACU,
     snapshot,
     ready,
     busy,

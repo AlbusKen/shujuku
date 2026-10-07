@@ -5,11 +5,13 @@
         v-if="hubState.petEnabled.value"
         :busy="activity.busy.value"
         :settings-version="hubState.snapshot.value.settingsVersion"
+        :appearance="hubState.petAppearance.value"
         @rect="petRect = $event"
       />
       <NoticeBubble
         :slide="carousel.slide.value"
         :task="carousel.currentTask.value"
+        :appearance="hubState.bubbleAppearance.value"
         :anchor="hubState.petEnabled.value ? petRect : null"
         :viewport-width="viewport.width"
         :viewport-height="viewport.height"

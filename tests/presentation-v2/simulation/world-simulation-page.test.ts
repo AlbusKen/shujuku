@@ -44,13 +44,16 @@ const anchor = computed(() => snapshot.value?.anchor ?? null);
 const entries = computed(() => snapshot.value?.session.entries ?? []);
 const running = computed(() => snapshot.value?.session.running ?? false);
 
-vi.mock('../../../src/presentation-v2/composables/useWorldSimulationRuntime', () => ({
-  useWorldSimulationRuntime: () => ({
+vi.mock('../../../src/presentation-v2/composables/useWorldSimulationRuntime', async () => {
+  const projection = await import('../../../src/service/simulation/simulation-projection');
+  return { useWorldSimulationRuntime: () => ({
+    defaultProjectionTemplate: projection.DEFAULT_WORLD_SIMULATION_PROJECTION_TEMPLATE_ACU,
+    projectionTemplateError: projection.worldSimulationProjectionTemplateError_ACU,
     snapshot, ready, busy, error, envelope, task, settings, activeStage, activeRevision, anchor, anchorText, entries, running,
     statusText, stageText, revisionText, refresh, initialize, send, stop, resume, saveSettings, saveUserRequirements, clearData, restorePromptDefault, parsePromptBundle, resyncAfterChatMutation,
     nativeToolEnabled, setNativeToolEnabled, presentPromptSegments,
-  }),
-}));
+  }) };
+});
 vi.mock('../../../src/presentation-v2/composables/useApiPresetSelectOptions', async () => {
   const { ref } = await import('vue');
   return {

@@ -5,7 +5,7 @@
     class="acu-notice-bubble"
     :class="[
       `acu-notice-bubble--${tone}`,
-      anchor ? `is-anchored is-${placement.side}` : 'is-docked',
+      anchor ? `is-anchored is-${placement.side}` : ['is-docked', ...dockClasses],
       { 'is-measuring': anchor && !measured },
     ]"
     :style="bubbleStyle"
@@ -61,6 +61,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import type { NoticeBubbleAppearance_ACU, NoticeBubbleSide_ACU } from "../../shared/desk-pet-appearance";
 import type { NoticeAction_ACU } from "../../shared/notice-hub";
 import type { NoticeSlide } from "../composables/useNoticeCarousel";
 import type { ActivityTask, DeskPetRect } from "../composables/useTaskActivity";
@@ -68,7 +69,9 @@ import type { ActivityTask, DeskPetRect } from "../composables/useTaskActivity";
 const props = defineProps<{
   slide: NoticeSlide | null;
   task: ActivityTask | null;
-  /** 桌宠位置；为 null 时气泡停靠在原通知位置。 */
+  /** 外观设置的生效值：配色、字号、尺寸与摆放。 */
+  appearance: NoticeBubbleAppearance_ACU;
+  /** 桌宠位置；为 null 时气泡停靠在设置的屏幕角落。 */
   anchor: DeskPetRect | null;
   viewportWidth: number;
   viewportHeight: number;
@@ -85,7 +88,6 @@ const emit = defineEmits<{
   (event: "dismiss-task"): void;
 }>();
 
-const BUBBLE_GAP_PX = 12;
 const VIEWPORT_MARGIN_PX = 8;
 
 const bubbleEl = ref<HTMLElement | null>(null);
@@ -107,7 +109,7 @@ const showRealContent = computed(() => props.showRealWork || tone.value === "err
 const heading = computed(() => {
   const current = props.slide;
   if (!current) return "";
-  if (current.type === "joke") return "你知道吗？";
+  if (current.type === "joke") return current.heading;
   if (showRealContent.value) {
     return current.type === "notice" ? current.notice.title : props.task?.feature || "";
   }
@@ -183,29 +185,89 @@ function onClose(): void {
   else emit("skip");
 }
 
-/** 贴桌宠摆放：优先上方，放不下翻到下方，再不行放左右两侧，最后夹进视口。 */
+/**
+ * 贴桌宠摆放：按设置的方位顺序（缺省上 → 下 → 左 → 右）取第一个放得下的；
+ * 都放不下时用最后一个方位并夹进视口。
+ */
 const placement = computed(() => {
   const anchor = props.anchor;
   const { width, height } = bubbleSize.value;
   const vw = props.viewportWidth;
   const vh = props.viewportHeight;
+  const { gap, sides } = props.appearance.anchor;
   const clampX = (x: number) => Math.min(Math.max(VIEWPORT_MARGIN_PX, x), Math.max(VIEWPORT_MARGIN_PX, vw - width - VIEWPORT_MARGIN_PX));
   const clampY = (y: number) => Math.min(Math.max(VIEWPORT_MARGIN_PX, y), Math.max(VIEWPORT_MARGIN_PX, vh - height - VIEWPORT_MARGIN_PX));
-  if (!anchor) return { side: "above" as const, left: 0, top: 0 };
+  if (!anchor) return { side: "above" as NoticeBubbleSide_ACU, left: 0, top: 0 };
   const centerX = anchor.x + anchor.width / 2;
   const centerY = anchor.y + anchor.height / 2;
-  const above = anchor.y - height - BUBBLE_GAP_PX;
-  if (above >= VIEWPORT_MARGIN_PX) return { side: "above" as const, left: clampX(centerX - width / 2), top: above };
-  const below = anchor.y + anchor.height + BUBBLE_GAP_PX;
-  if (below + height <= vh - VIEWPORT_MARGIN_PX) return { side: "below" as const, left: clampX(centerX - width / 2), top: below };
-  const leftSide = anchor.x - width - BUBBLE_GAP_PX;
-  if (leftSide >= VIEWPORT_MARGIN_PX) return { side: "left" as const, left: leftSide, top: clampY(centerY - height / 2) };
-  return { side: "right" as const, left: clampX(anchor.x + anchor.width + BUBBLE_GAP_PX), top: clampY(centerY - height / 2) };
+  const spots: Record<NoticeBubbleSide_ACU, () => { fits: boolean; left: number; top: number }> = {
+    above: () => {
+      const top = anchor.y - height - gap;
+      return { fits: top >= VIEWPORT_MARGIN_PX, left: clampX(centerX - width / 2), top };
+    },
+    below: () => {
+      const top = anchor.y + anchor.height + gap;
+      return { fits: top + height <= vh - VIEWPORT_MARGIN_PX, left: clampX(centerX - width / 2), top };
+    },
+    left: () => {
+      const left = anchor.x - width - gap;
+      return { fits: left >= VIEWPORT_MARGIN_PX, left, top: clampY(centerY - height / 2) };
+    },
+    right: () => {
+      const left = anchor.x + anchor.width + gap;
+      return { fits: left + width <= vw - VIEWPORT_MARGIN_PX, left: clampX(left), top: clampY(centerY - height / 2) };
+    },
+  };
+  for (const side of sides) {
+    const spot = spots[side]();
+    if (spot.fits) return { side, left: spot.left, top: spot.top };
+  }
+  const fallback = sides[sides.length - 1] ?? "right";
+  const spot = spots[fallback]();
+  return { side: fallback, left: clampX(spot.left), top: clampY(spot.top) };
+});
+
+/** 外观设置经 CSS 变量下发，scoped 样式据此取色、取尺寸与停靠边距。 */
+const appearanceVars = computed(() => {
+  const { colors, size, dock, fontSize, fontFamily, borderRadius } = props.appearance;
+  return {
+    "--acu-nb-bg": colors.background,
+    "--acu-nb-text": colors.text,
+    "--acu-nb-muted": colors.muted,
+    "--acu-nb-border": colors.border,
+    "--acu-nb-info": colors.info,
+    "--acu-nb-success": colors.success,
+    "--acu-nb-warning": colors.warning,
+    "--acu-nb-error": colors.error,
+    "--acu-nb-joke": colors.joke,
+    "--acu-nb-joke-bg": colors.jokeBackground,
+    "--acu-nb-joke-heading": colors.jokeHeading,
+    "--acu-nb-danger": colors.danger,
+    "--acu-nb-danger-text": colors.dangerText,
+    "--acu-nb-font-size": `${fontSize}px`,
+    "--acu-nb-font-family": fontFamily,
+    "--acu-nb-radius": `${borderRadius}px`,
+    "--acu-nb-min-width": `${size.minWidth}px`,
+    "--acu-nb-max-width": `${size.maxWidth}px`,
+    "--acu-nb-docked-max-width": `${size.dockedMaxWidth}px`,
+    "--acu-nb-detail-max-height": `${size.detailMaxHeight}px`,
+    "--acu-nb-dock-x": `${dock.offsetX}px`,
+    "--acu-nb-dock-y": `${dock.offsetY}px`,
+    "--acu-nb-dock-narrow-y": `${dock.narrowOffsetY}px`,
+  };
+});
+
+const dockClasses = computed(() => {
+  const [vertical, horizontal] = props.appearance.dock.corner.split("-");
+  return [`is-dock-${vertical}`, `is-dock-${horizontal}`];
 });
 
 const bubbleStyle = computed(() => {
-  if (!props.anchor) return {};
-  return { transform: `translate3d(${Math.round(placement.value.left)}px, ${Math.round(placement.value.top)}px, 0)` };
+  if (!props.anchor) return appearanceVars.value;
+  return {
+    ...appearanceVars.value,
+    transform: `translate3d(${Math.round(placement.value.left)}px, ${Math.round(placement.value.top)}px, 0)`,
+  };
 });
 
 /** 尾巴指向桌宠中心，夹在气泡边缘内。 */
@@ -252,11 +314,11 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .acu-notice-bubble {
-  --bubble-bg: #fffaf0;
-  --bubble-text: #3d3122;
-  --bubble-muted: #7a6a52;
-  --bubble-border: #e9cf8a;
-  --bubble-tone: #d4a93a;
+  --bubble-bg: var(--acu-nb-bg);
+  --bubble-text: var(--acu-nb-text);
+  --bubble-muted: var(--acu-nb-muted);
+  --bubble-border: var(--acu-nb-border);
+  --bubble-tone: var(--acu-nb-info);
   position: fixed;
   z-index: 9410;
   box-sizing: border-box;
@@ -264,16 +326,16 @@ onBeforeUnmount(() => {
   align-items: flex-start;
   gap: 8px;
   width: max-content;
-  min-width: 200px;
-  max-width: min(400px, calc(100vw - 16px));
+  min-width: var(--acu-nb-min-width);
+  max-width: min(var(--acu-nb-max-width), calc(100vw - 16px));
   padding: 10px 12px 10px 14px;
   border: 1px solid var(--bubble-border);
-  border-radius: 12px;
+  border-radius: var(--acu-nb-radius);
   background: var(--bubble-bg);
   color: var(--bubble-text);
   box-shadow: 0 10px 28px rgba(70, 50, 10, 0.18), 0 2px 6px rgba(70, 50, 10, 0.12);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-  font-size: 12px;
+  font-family: var(--acu-nb-font-family);
+  font-size: var(--acu-nb-font-size);
   line-height: 1.5;
   pointer-events: auto;
   animation: acu-notice-bubble-in 0.18s ease-out both;
@@ -295,26 +357,40 @@ onBeforeUnmount(() => {
 }
 
 .acu-notice-bubble.is-docked {
-  top: calc(62px + env(safe-area-inset-top, 0px));
-  right: calc(18px + env(safe-area-inset-right, 0px));
-  max-width: min(360px, calc(100vw - 36px));
+  max-width: min(var(--acu-nb-docked-max-width), calc(100vw - 2 * var(--acu-nb-dock-x)));
+}
+
+.acu-notice-bubble.is-docked.is-dock-top {
+  top: calc(var(--acu-nb-dock-y) + env(safe-area-inset-top, 0px));
+}
+
+.acu-notice-bubble.is-docked.is-dock-bottom {
+  bottom: calc(var(--acu-nb-dock-y) + env(safe-area-inset-bottom, 0px));
+}
+
+.acu-notice-bubble.is-docked.is-dock-right {
+  right: calc(var(--acu-nb-dock-x) + env(safe-area-inset-right, 0px));
+}
+
+.acu-notice-bubble.is-docked.is-dock-left {
+  left: calc(var(--acu-nb-dock-x) + env(safe-area-inset-left, 0px));
 }
 
 .acu-notice-bubble--success {
-  --bubble-tone: #6f9a4d;
+  --bubble-tone: var(--acu-nb-success);
 }
 
 .acu-notice-bubble--warning {
-  --bubble-tone: #d08a2c;
+  --bubble-tone: var(--acu-nb-warning);
 }
 
 .acu-notice-bubble--error {
-  --bubble-tone: #c2503a;
+  --bubble-tone: var(--acu-nb-error);
 }
 
 .acu-notice-bubble--joke {
-  --bubble-tone: #e6b93c;
-  --bubble-bg: #fff6d8;
+  --bubble-tone: var(--acu-nb-joke);
+  --bubble-bg: var(--acu-nb-joke-bg);
 }
 
 .acu-notice-bubble__body {
@@ -325,13 +401,13 @@ onBeforeUnmount(() => {
 .acu-notice-bubble__heading {
   margin: 0 0 2px;
   color: var(--bubble-tone);
-  font-size: 11px;
+  font-size: calc(var(--acu-nb-font-size) - 1px);
   font-weight: 700;
   letter-spacing: 0.2px;
 }
 
 .acu-notice-bubble--joke .acu-notice-bubble__heading {
-  color: #a47a12;
+  color: var(--acu-nb-joke-heading);
 }
 
 .acu-notice-bubble__text {
@@ -355,14 +431,14 @@ onBeforeUnmount(() => {
   margin-top: 6px;
   padding-top: 6px;
   border-top: 1px dashed var(--bubble-border);
-  max-height: 160px;
+  max-height: var(--acu-nb-detail-max-height);
   overflow-y: auto;
 }
 
 .acu-notice-bubble__detail-title {
   margin: 0 0 2px;
   color: var(--bubble-muted);
-  font-size: 11px;
+  font-size: calc(var(--acu-nb-font-size) - 1px);
   font-weight: 700;
 }
 
@@ -388,24 +464,24 @@ onBeforeUnmount(() => {
   background: transparent;
   color: var(--bubble-text);
   font: inherit;
-  font-size: 11px;
+  font-size: calc(var(--acu-nb-font-size) - 1px);
   font-weight: 600;
   white-space: nowrap;
   cursor: pointer;
 }
 
 .acu-notice-bubble__action.is-danger {
-  border-color: #c2503a;
-  color: #a33d29;
+  border-color: var(--acu-nb-danger);
+  color: var(--acu-nb-danger-text);
 }
 
 .acu-notice-bubble__action:hover:not(:disabled) {
   background: var(--bubble-tone);
-  color: #fffaf0;
+  color: var(--bubble-bg);
 }
 
 .acu-notice-bubble__action.is-danger:hover:not(:disabled) {
-  background: #c2503a;
+  background: var(--acu-nb-danger);
 }
 
 .acu-notice-bubble__action:disabled {
@@ -422,7 +498,7 @@ onBeforeUnmount(() => {
   border-radius: 50%;
   background: transparent;
   color: var(--bubble-muted);
-  font-size: 15px;
+  font-size: calc(var(--acu-nb-font-size) + 3px);
   line-height: 20px;
   cursor: pointer;
 }
@@ -478,14 +554,24 @@ onBeforeUnmount(() => {
   }
 }
 
+/* 窄屏停靠时水平居中，只保留设置角落的上 / 下边；左右角规则须同等优先级才能被覆盖。 */
 @media (max-width: 640px) {
-  .acu-notice-bubble.is-docked {
-    top: calc(58px + env(safe-area-inset-top, 0px));
+  .acu-notice-bubble.is-docked,
+  .acu-notice-bubble.is-docked.is-dock-left,
+  .acu-notice-bubble.is-docked.is-dock-right {
     right: auto;
     left: 50%;
-    width: min(88vw, 360px);
+    width: min(88vw, var(--acu-nb-docked-max-width));
     max-width: calc(100vw - 24px);
     transform: translateX(-50%);
+  }
+
+  .acu-notice-bubble.is-docked.is-dock-top {
+    top: calc(var(--acu-nb-dock-narrow-y) + env(safe-area-inset-top, 0px));
+  }
+
+  .acu-notice-bubble.is-docked.is-dock-bottom {
+    bottom: calc(var(--acu-nb-dock-narrow-y) + env(safe-area-inset-bottom, 0px));
   }
 }
 

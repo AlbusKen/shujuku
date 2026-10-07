@@ -42,6 +42,7 @@ import {
 } from './model';
 import { WORLD_ACTOR_EXPERIENCE_CAP_ACU, WORLD_ACTOR_LONG_TERM_STATUSES_ACU, type WorldActorAction_ACU, type WorldActorExperience_ACU, type WorldActorLongTermAction_ACU } from './model';
 import { assertWorldSimulationHostEnvelope_ACU, requireWorldSimulationHostAnchor_ACU } from './simulation-identity';
+import { worldSimulationProjectionTemplateError_ACU } from './simulation-projection';
 
 export { WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU } from './model';
 
@@ -464,7 +465,7 @@ function validateRumors_ACU(raw: unknown, actorIds: ReadonlySet<string>, phase: 
 
 function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU): WorldSimulationEnvelope_ACU['settings'] {
   if (!isRecord_ACU(raw)) fail_ACU('settings 必须是对象', phase, { path: 'settings' });
-  exactKeys_ACU(raw, ['autoTriggerEnabled', 'agentHistoryTokenBudget', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'agentPrompts'], ['webResearch', 'promptForceDefaultVersion', 'planPreview', 'dynamics', 'workflow'], 'settings', phase);
+  exactKeys_ACU(raw, ['autoTriggerEnabled', 'agentHistoryTokenBudget', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'agentPrompts'], ['webResearch', 'promptForceDefaultVersion', 'planPreview', 'dynamics', 'workflow', 'projection'], 'settings', phase);
   if (!isRecord_ACU(raw.agentRunBudget)) fail_ACU('settings.agentRunBudget 必须是对象', phase);
   exactKeys_ACU(raw.agentRunBudget, ['maxIterations', 'maxDelegations', 'maxSameAgent', 'maxConcurrent', 'maxReads', 'maxExtraReads'], [], 'settings.agentRunBudget', phase);
   const budget = {
@@ -542,6 +543,13 @@ function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU
       workflow = { chroniclerHotThreshold };
     }
   }
+  // 插入格式晚于其它设置加入：缺键或格式不合法时回默认，不拒绝整包。
+  const rawProjection = isRecord_ACU(raw.projection) ? raw.projection : {};
+  const projection = {
+    template: worldSimulationProjectionTemplateError_ACU(rawProjection.template)
+      ? buildDefaultWorldSimulationSettings_ACU().projection.template
+      : rawProjection.template as string,
+  };
   return {
     autoTriggerEnabled: boolean_ACU(raw.autoTriggerEnabled, 'settings.autoTriggerEnabled', phase),
     agentHistoryTokenBudget: integer_ACU(raw.agentHistoryTokenBudget, 'settings.agentHistoryTokenBudget', phase, 0, 1000000),
@@ -556,6 +564,7 @@ function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU
     promptForceDefaultVersion: WORLD_SIMULATION_PROMPT_VERSION_ACU,
     dynamics,
     workflow,
+    projection,
   };
 }
 

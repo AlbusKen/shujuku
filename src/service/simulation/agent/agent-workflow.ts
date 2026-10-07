@@ -599,7 +599,7 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
       outcome: 'no_change',
       summary: '正文指纹未变且所有预期资料模块均已完成，整轮跳过',
       outcomes,
-      finalProjection: { content: buildWorldSimulationProjection_ACU(base), sourceAgent: 'current-ledger', sourceRevision: base.revision, deliverable: true },
+      finalProjection: { content: buildWorldSimulationProjection_ACU(base, input.settings.projection.template), sourceAgent: 'current-ledger', sourceRevision: base.revision, deliverable: true },
       pendingFixes: [],
       escalated: false,
       ledger: base,
@@ -706,7 +706,7 @@ export async function runWorldSimulationWorkflow_ACU(input: WorldSimulationWorkf
       : '固定工作流没有产生账本变更';
   const evidenceRefs = [...new Set(accepted.flatMap(item => item.evidenceRefs))];
   const finalProjection = {
-    content: buildWorldSimulationProjection_ACU(ledger),
+    content: buildWorldSimulationProjection_ACU(ledger, input.settings.projection.template),
     sourceAgent: accepted.some(item => item.agentName === 'guidance-composer' && Object.prototype.hasOwnProperty.call(item.patch, 'guidance'))
       ? 'guidance-composer' as const : 'current-ledger' as const,
     sourceRevision: ledger.revision,
@@ -751,7 +751,7 @@ export async function runWorldSimulationOneShotWorkflow_ACU(
   if (input.anchorMaterialsCommitted && anchorMaterialsComplete_ACU(base)) {
     return { outcome: 'no_change', summary: '正文指纹未变且资料模块已经完成', outcomes,
       pendingFixes: [], escalated: false, ledger: base,
-      finalProjection: { content: buildWorldSimulationProjection_ACU(base), sourceAgent: 'current-ledger', sourceRevision: base.revision, deliverable: true } };
+      finalProjection: { content: buildWorldSimulationProjection_ACU(base, input.settings.projection.template), sourceAgent: 'current-ledger', sourceRevision: base.revision, deliverable: true } };
   }
   const anchorMessage = anchorText_ACU(input.promptContext);
   const elapsedDays = inferWorldSimulationElapsedDays_ACU(anchorMessage);
@@ -932,7 +932,7 @@ export async function runWorldSimulationOneShotWorkflow_ACU(
     : accepted.length ? `固定工作流已处理 ${accepted.length} 个候选` : '固定工作流没有产生账本变更';
   return { outcome: blocked ? 'blocked' : accepted.length ? 'commit' : 'no_change', summary,
     outcomes, pendingFixes: ledger.pendingFixes, escalated: false, ledger,
-    finalProjection: { content: buildWorldSimulationProjection_ACU(ledger),
+    finalProjection: { content: buildWorldSimulationProjection_ACU(ledger, input.settings.projection.template),
       sourceAgent: accepted.some(item => item.agentName === 'guidance-composer' && 'guidance' in item.patch) ? 'guidance-composer' : 'current-ledger',
       sourceRevision: ledger.revision, deliverable: !blocked && accepted.length === 0 },
     ...(accepted.length ? { commitCandidate: { runId: input.identity.runId, taskId: input.identity.taskId,

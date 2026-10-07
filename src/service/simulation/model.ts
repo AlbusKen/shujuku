@@ -42,7 +42,9 @@ export interface WorldSimulationWebResearchSettings_ACU {
 }
 export interface WorldSimulationDynamicsSettings_ACU { rumorTTLDays: number; maxClockAdvanceDays: number; collisionEnforcement: 'strict' | 'relaxed'; missedSweepEnabled: boolean; }
 export interface WorldSimulationWorkflowSettings_ACU { chroniclerHotThreshold: number; }
-export interface WorldSimulationSettings_ACU { autoTriggerEnabled: boolean; agentHistoryTokenBudget: number; agentReadTokenBudget: number | string; agentReadFallbackTokens: number; agentRunBudget: WorldSimulationRunBudget_ACU; webResearch: WorldSimulationWebResearchSettings_ACU; apiPresetMode: 'current' | 'fixed'; fixedApiPresetName: string; agentApiPresets: Record<string, { mode: 'current' | 'fixed'; presetName: string }>; agentPrompts: Record<string, WorldSimulationPromptSegment_ACU[]>; dynamics: WorldSimulationDynamicsSettings_ACU; workflow: WorldSimulationWorkflowSettings_ACU; promptForceDefaultVersion?: string; }
+export interface WorldSimulationSettings_ACU { autoTriggerEnabled: boolean; agentHistoryTokenBudget: number; agentReadTokenBudget: number | string; agentReadFallbackTokens: number; agentRunBudget: WorldSimulationRunBudget_ACU; webResearch: WorldSimulationWebResearchSettings_ACU; apiPresetMode: 'current' | 'fixed'; fixedApiPresetName: string; agentApiPresets: Record<string, { mode: 'current' | 'fixed'; presetName: string }>; agentPrompts: Record<string, WorldSimulationPromptSegment_ACU[]>; dynamics: WorldSimulationDynamicsSettings_ACU; workflow: WorldSimulationWorkflowSettings_ACU; projection: WorldSimulationProjectionSettings_ACU; promptForceDefaultVersion?: string; }
+/** 场外信号写进正文的格式：template 是插件起止标记之内的全部内容，$WORLD_SIGNALS 处替换为分组信号。 */
+export interface WorldSimulationProjectionSettings_ACU { template: string; }
 
 export interface WorldEvidenceRef_ACU { ref: string; source: string; summary: string; }
 export function normalizeWorldRegionName_ACU(value: string): string { return value.trim().replace(/\s+/g, ' ').toLowerCase(); }

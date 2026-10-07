@@ -64,6 +64,12 @@ export interface Settings_ACU {
   plotSendDisguiseDisabled?: boolean;
   /** 桌宠气泡与普通气泡直接显示现有通知与任务进度的真实内容；默认关闭。 */
   deskPetShowRealWork?: boolean;
+  /** 桌宠位置，按视口可用范围的比例（0~1）保存；缺失表示默认右下角。 */
+  desktopPetPosition?: { x: number; y: number; edge?: 'left' | 'right' | 'top' | 'bottom' | null };
+  /** 桌宠外观（图片、尺寸、动画节奏、语录、状态词），只存用户改过的项；字段定义见 shared/desk-pet-appearance。 */
+  deskPetAppearance?: Record<string, unknown>;
+  /** 通知气泡外观（配色、字号、尺寸、摆放、轮播节奏），只存用户改过的项。 */
+  noticeBubbleAppearance?: Record<string, unknown>;
   plotSettings: PlotSettings_ACU;
   /**
    * 剧情推进世界书选择的权威副本，按角色卡作用域键（char:<avatar> / group:<id>）存储。

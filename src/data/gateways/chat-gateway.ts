@@ -381,8 +381,9 @@ export async function emitMessageUpdated_ACU(messageIndex: number): Promise<void
  * 更新指定楼层正文后派发 MESSAGE_UPDATED，等待扩展完成本轮渲染通知。
  * 仅做界面刷新，失败不影响已持久化的数据。
  * @param messageIndex 需要重渲染的消息下标
+ * @param options.notify 为 false 时只重渲染，不广播 MESSAGE_UPDATED
  */
-export async function refreshMessageBlock_ACU(messageIndex: number): Promise<void> {
+export async function refreshMessageBlock_ACU(messageIndex: number, options: { notify?: boolean } = {}): Promise<void> {
     const message = SillyTavern_API_ACU?.chat?.[messageIndex];
     try {
         if (message && typeof SillyTavern_API_ACU?.updateMessageBlock === 'function') {
@@ -391,6 +392,7 @@ export async function refreshMessageBlock_ACU(messageIndex: number): Promise<voi
     } catch (error: any) {
         logWarn_ACU(`[ChatGateway] updateMessageBlock 失败，降级为 MESSAGE_UPDATED：${error?.message || error}`);
     }
+    if (options.notify === false) return;
     try {
         await emitMessageUpdated_ACU(messageIndex);
     } catch (error: any) {

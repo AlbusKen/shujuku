@@ -181,7 +181,7 @@ function buildPromptContext_ACU(input: {
     worldCandidates: [],
     worldCollisions: detectWorldCollisions_ACU(input.envelope.ledger),
     evidenceRegistry: snapshotWorldSimulationEvidenceRegistry_ACU(input.registry),
-    projectionPreview: buildWorldSimulationProjection_ACU(input.envelope.ledger),
+    projectionPreview: buildWorldSimulationProjection_ACU(input.envelope.ledger, input.envelope.settings.projection.template),
   };
 }
 
@@ -545,7 +545,7 @@ export class WorldSimulationRuntime_ACU {
         session: { chatIdentity,
           entries: chatIdentity ? readWorldSimulationSessionLog_ACU(chatIdentity) : [],
           running: chatIdentity ? isWorldSimulationSessionRunning_ACU(chatIdentity) : false },
-        projectionPreview: published.envelope ? buildWorldSimulationProjection_ACU(published.envelope.ledger) : null,
+        projectionPreview: published.envelope ? buildWorldSimulationProjection_ACU(published.envelope.ledger, published.envelope.settings.projection.template) : null,
       };
     }
     if (!anchor) {
@@ -564,7 +564,7 @@ export class WorldSimulationRuntime_ACU {
         running: chatIdentity ? isWorldSimulationSessionRunning_ACU(chatIdentity) : false,
       },
       anchor,
-      projectionPreview: envelope ? buildWorldSimulationProjection_ACU(envelope.ledger) : null,
+      projectionPreview: envelope ? buildWorldSimulationProjection_ACU(envelope.ledger, envelope.settings.projection.template) : null,
     };
   }
 

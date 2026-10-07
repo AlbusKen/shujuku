@@ -1275,6 +1275,7 @@ export   function buildDefaultSettings_ACU() {
           deskPetShowRealWork: false, // [桌宠] 直接展示已有通知与任务进度的真实内容
           plotSendDisguiseDisabled: false, // [剧情推进] 解除等待期发送伪装，不随预设切换
           // [桌宠] desktopPetPosition（按视口比例 {x,y}）刻意不放默认值：deepMerge 遇到 null 默认值会把已保存对象并成 {}。
+          // [桌宠 / 气泡外观] deskPetAppearance、noticeBubbleAppearance 只存用户改过的项，缺省值在 shared/desk-pet-appearance，这里同样不放。
           // [剧情推进] 设置
           plotSettings: JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU)),
           plotPresetBindings: {}, // [剧情推进] 按聊天记录绑定剧情推进预设
