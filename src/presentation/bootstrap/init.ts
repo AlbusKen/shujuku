@@ -29,12 +29,12 @@ import { logAutoFillSkip_ACU } from '../../shared/trigger-diagnostics';
 import { markPlotIntercept_ACU, shouldSkipPlotIntercept_ACU } from '../../service/plot/plot-logic';
 import { orchestrateTavernHelperHook_ACU, orchestrateAfterCommandsStrategy1_ACU, orchestrateAfterCommandsStrategy2_ACU } from '../../service/plot/plot-orchestrator';
 import { flushPlotPendingSave_ACU } from '../../service/runtime/plot-runtime/plot-history-preset';
-import { createAiPlaceholderMessage_ACU, createUserMessage_ACU, refreshMessageBlock_ACU, removePlotSendMessages_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
+import { refreshMessageBlock_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { beginHostGenerationUi_ACU, getSendTextareaValue_ACU, setSendTextareaValue_ACU } from '../../shared/host-input';
 import { handleContentOptimizationEvent_ACU } from '../triggers/settings-ui-sync/settings-ui-connect';
 import { triggerAutomaticUpdateIfNeeded_ACU } from '../triggers/settings-ui-sync/settings-ui-trigger';
 import { runOptimizationLogicWithUI_ACU } from '../components/plot-planning-ui';
-import { beginPlotPendingDisguise_ACU, isPendingDisguiseGenerationType_ACU } from '../components/plot-pending-disguise';
+import { beginPlotVirtualPendingFloor_ACU, isPendingDisguiseGenerationType_ACU, type PlotPendingDisguiseHandle_ACU } from '../components/plot-pending-disguise';
 import { processSummaryVectorIndexBeforeGenerationWithUI_ACU, rebuildCurrentSummaryVectorIndexWithUI_ACU, rebuildOutdatedSummaryVectorIndexInBackground_ACU, shouldRebuildSummaryVectorIndexWithUI_ACU } from '../components/summary-vector-index-ui';
 import { preloadSummaryVectorIndexCacheForCurrentChat_ACU } from '../../service/vector/summary-vector-index-cache-service';
 import { restoreSummaryVectorIndexFlushQueueForCurrentChat_ACU } from '../../service/vector/summary-vector-index-flush-queue';
@@ -47,7 +47,6 @@ import { getUiSurface_ACU, showUiSurfaceToast_ACU } from '../../shared/ui-surfac
 
 import { bindContinuationInternalAiGenerationStarted_ACU, consumeContinuationInternalAiGenerationEnded_ACU } from '../../service/continuation/internal-ai-events';
 import { getContinuationHostGenerationBridge_ACU } from '../../service/continuation/host-generation-bridge-registry';
-import type { ContinuationHostGenerationRedirect_ACU } from '../../service/continuation/host-generation-bridge';
 import { getContinuationRuntime_ACU } from '../../service/continuation/continuation-runtime';
 import { bindWorldSimulationInternalAiGenerationStarted_ACU, consumeWorldSimulationInternalAiGenerationEnded_ACU, hasWorldSimulationInternalAiInflight_ACU } from '../../service/simulation/simulation-internal-ai-events';
 import { createWorldSimulationCompletionIntentForCurrentChat_ACU, getWorldSimulationRuntime_ACU } from '../../service/simulation/simulation-runtime';
@@ -900,27 +899,25 @@ export   function mainInitialize_ACU() {
             const needsPlan = plan && !shouldSkipPlotIntercept_ACU(originalText)
               && (pendingInput || !(existing as ACUMessage)._plot_processed);
             const disguised = settings_ACU.plotSendDisguiseDisabled !== true;
-            const createdMessages: any[] = [];
-            let userFloor = pendingInput ? null : { chat, message: existing, index: chat.length - 1 };
+            let virtualFloor: PlotPendingDisguiseHandle_ACU | undefined;
+            const userFloor = pendingInput ? null : { chat, message: existing, index: chat.length - 1 };
             let restoreGenerationUi = () => {};
-            let continuationRedirect: ContinuationHostGenerationRedirect_ACU | null = null;
+            // 原文只保存在本次请求的闭包内；原宿主发送等待监听器返回后再消费最终输入。
+            let cachedInput = false;
+            let delivered = false;
+            const restoreCachedInput = () => {
+              if (cachedInput && !getSendTextareaValue_ACU().trim()) setSendTextareaValue_ACU(originalText);
+            };
             const warn = (text: string) => showToastr_ACU('warning', text, '剧情推进');
             try {
-              if (disguised) {
-                redirectPlotSendEvent_ACU(params);
-                continuationRedirect = await getContinuationHostGenerationBridge_ACU()?.prepareHostGenerationRedirect(generationGate_ACU.lastGeneration?.seq) ?? null;
-              }
               await ensureInitialSeedCheckpointBeforeGeneration_ACU('generation_after_commands_before_ai', { allowPendingFirstUserMessage: true });
               if (disguised) {
                 restoreGenerationUi = beginHostGenerationUi_ACU();
                 if (pendingInput) {
-                  setSendTextareaValue_ACU('');
-                  userFloor = createUserMessage_ACU(originalText);
-                  createdMessages.push(userFloor.message);
+                  cachedInput = setSendTextareaValue_ACU('');
+                  if (!cachedInput) throw new Error('酒馆输入框不可用');
                 }
-                const aiFloor = createAiPlaceholderMessage_ACU();
-                createdMessages.push(aiFloor.message);
-                beginPlotPendingDisguise_ACU({ messageIndex: aiFloor.index });
+                virtualFloor = beginPlotVirtualPendingFloor_ACU(pendingInput ? originalText : undefined);
               }
               if (recall) {
                 try {
@@ -936,9 +933,7 @@ export   function mainInitialize_ACU() {
                   : await orchestrateAfterCommandsStrategy2_ACU(originalText, runOptimizationLogicWithUI_ACU);
                 if (result.action === 'busy') {
                   redirectPlotSendEvent_ACU(params);
-                  await removePlotSendMessages_ACU(chat, createdMessages).catch(() => warn('本轮临时楼层清理未完成，请检查聊天记录。'));
-                  if (pendingInput && !getSendTextareaValue_ACU().trim()) setSendTextareaValue_ACU(originalText);
-                  await continuationRedirect?.cancel();
+                  restoreCachedInput();
                   return;
                 }
                 if (result.blocked === true || result.apiRetriesExhausted === true
@@ -946,9 +941,7 @@ export   function mainInitialize_ACU() {
                   || (result.action === 'aborted' && result.manual === true)) {
                   redirectPlotSendEvent_ACU(params);
                   _set_tempPlotToSave_ACU(null);
-                  await removePlotSendMessages_ACU(chat, createdMessages).catch(() => warn('本轮临时楼层清理未完成，请检查聊天记录。'));
-                  if (!getSendTextareaValue_ACU().trim()) setSendTextareaValue_ACU(originalText);
-                  await continuationRedirect?.cancel();
+                  restoreCachedInput();
                   return;
                 }
                 if (result.action === 'planned' && result.finalMessage?.trim()) {
@@ -957,8 +950,9 @@ export   function mainInitialize_ACU() {
                     userFloor.message.mes = result.finalMessage;
                     (userFloor.message as ACUMessage)._plot_processed = true;
                   } else {
-                    setSendTextareaValue_ACU(result.finalMessage);
+                    if (!setSendTextareaValue_ACU(result.finalMessage)) throw new Error('最终指令无法写入酒馆输入框');
                   }
+                  delivered = true;
                 }
               }
               if (userFloor) {
@@ -970,37 +964,21 @@ export   function mainInitialize_ACU() {
                   warn('聊天保存异常，保留楼层并继续发送。');
                 }
                 await refreshMessageBlock_ACU(userFloor.index);
-                // 任务完成后才通知宿主，避免监听器在规划启动前重入。
-                if (disguised && pendingInput) {
-                  try {
-                    await source.emit(SillyTavern_API_ACU.eventTypes.MESSAGE_SENT, userFloor.index);
-                    await source.emit(SillyTavern_API_ACU.eventTypes.USER_MESSAGE_RENDERED, userFloor.index);
-                  } catch { warn('用户楼层通知未完成，继续发送。'); }
-                }
               }
             } catch {
-              if (needsPlan) {
+              if (needsPlan || cachedInput) {
                 redirectPlotSendEvent_ACU(params);
                 warn('剧情发送前处理异常，正文发送已停止。');
-                await removePlotSendMessages_ACU(chat, createdMessages).catch(() => warn('本轮临时楼层清理未完成，请检查聊天记录。'));
-                if (pendingInput && !getSendTextareaValue_ACU().trim()) setSendTextareaValue_ACU(originalText);
-                await continuationRedirect?.cancel();
+                restoreCachedInput();
                 return;
               }
               warn('发送前处理异常，保留当前内容并继续发送。');
             } finally {
+              // 无需改写指令（例如仅召回）时，恢复缓存原文供同一次宿主发送消费。
+              if (!delivered) restoreCachedInput();
               restoreGenerationUi();
+              virtualFloor?.finish();
               generationGate_ACU.lastUserSendIntentAt = 0;
-            }
-            if (disguised && userFloor) {
-              redirectPlotSendEvent_ACU(params, () => {
-                const generate = async () => SillyTavern_API_ACU.generate('regenerate');
-                void (continuationRedirect ? continuationRedirect.resume(generate) : generate()).catch(() => {
-                  showToastr_ACU('error', '宿主正文生成失败，已保留用户楼层，可重新生成。', '剧情推进');
-                });
-              });
-            } else {
-              await continuationRedirect?.cancel();
             }
           });
         }
