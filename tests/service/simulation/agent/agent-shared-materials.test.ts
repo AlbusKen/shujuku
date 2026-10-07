@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { buildDefaultWorldSimulationAgentPrompt_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
+import { buildDefaultWorldSimulationAgentPrompt_ACU, buildV20WorldSimulationAgentPrompt_ACU, buildV34WorldSimulationAgentPrompt_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
 import { splitWorldSimulationSubagentPrompt_ACU, renderWorldSimulationDirectorReads_ACU, renderWorldSimulationSnapshotTemplate_ACU, renderWorldSimulationSnapshotSections_ACU, verifyWorldSimulationSnapshotSections_ACU, bindWorldSimulationFixedWorldbook_ACU, verifyWorldSimulationFixedWorldbook_ACU, WORLD_SIMULATION_WORLDBOOK_UNAVAILABLE_ACU } from '../../../../src/service/simulation/agent/agent-shared-materials';
 import { renderAgentWorldbookTriggeredInjection_ACU } from '../../../../src/service/continuation/agent/agent-worldbook-read';
 
 describe('格林推演子代理资料边界', () => {
   it('时间官动态快照只包含角色相关资料与锚点，不重复保留在稳定提示段', () => {
-    const split = splitWorldSimulationSubagentPrompt_ACU(buildDefaultWorldSimulationAgentPrompt_ACU('timekeeper'), 'timekeeper');
+    // timekeeper 已退役，只有旧运行恢复还会拆分它的 V20 seam 提示词。
+    const split = splitWorldSimulationSubagentPrompt_ACU(buildV20WorldSimulationAgentPrompt_ACU('timekeeper'), 'timekeeper');
     const runtime = split.segments.find(segment => segment.content.includes('RUNTIME_CONTEXT'))!.content;
     const history = split.segments.find(segment => segment.content.includes('HISTORY'))!.content;
     expect(runtime).not.toContain('$WORLD_STATE');
@@ -136,8 +137,9 @@ describe('格林推演子代理资料边界', () => {
     expect(text).not.toContain('prepared');
   });
 
-  it('普通角色仅在默认段移除搜索建议，自定义提示与研究员例外保留', () => {
-    const defaults = buildDefaultWorldSimulationAgentPrompt_ACU('dramatis-keeper');
+  it('旧 seam 提示词：普通角色仅在默认段移除搜索建议，自定义提示与研究员例外保留', () => {
+    // 当前默认已是问答布局，没有 seam；拆分时的搜索建议裁剪只作用于 V34 seam 旧默认段。
+    const defaults = buildV34WorldSimulationAgentPrompt_ACU('dramatis-keeper');
     const normal = splitWorldSimulationSubagentPrompt_ACU(defaults, 'dramatis-keeper');
     const protocol = normal.segments.find(segment => segment.content.includes('ENGINE_SEAM:PROTOCOL'))!.content;
     const workflow = normal.segments.find(segment => segment.content.includes('ENGINE_SEAM:WORKFLOW'))!.content;
@@ -148,7 +150,7 @@ describe('格林推演子代理资料边界', () => {
       ? { ...segment, content: `${segment.content}\n用户自定义约束` } : segment);
     expect(splitWorldSimulationSubagentPrompt_ACU(customized, 'dramatis-keeper').segments
       .find(segment => segment.content.includes('ENGINE_SEAM:WORKFLOW'))!.content).toBe(`${workflow}\n用户自定义约束`);
-    const researcher = splitWorldSimulationSubagentPrompt_ACU(buildDefaultWorldSimulationAgentPrompt_ACU('lore-researcher'), 'lore-researcher');
+    const researcher = splitWorldSimulationSubagentPrompt_ACU(buildV34WorldSimulationAgentPrompt_ACU('lore-researcher'), 'lore-researcher');
     expect(researcher.segments.find(segment => segment.content.includes('ENGINE_SEAM:PROTOCOL'))!.content).toContain('read/search 需求');
   });
 });

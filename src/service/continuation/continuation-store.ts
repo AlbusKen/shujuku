@@ -3,9 +3,11 @@ import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-histor
 import { USER_PREFILL_CONTENT_ACU } from '../../shared/user-prefill.js';
 import { buildDefaultContinuationSettings_ACU, buildDefaultContinuationOutlinePrompt_ACU, buildDefaultContinuationAgentApiPresets_ACU, buildDefaultContinuationWebResearchSettings_ACU, buildDefaultContinuationWorkflowSettings_ACU, CONTINUATION_FINAL_REVIEW_MAX_EXTRA_READS_DEFAULT_ACU, CONTINUATION_FINAL_REVIEW_READ_TOKEN_BUDGET_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU, CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU, CONTINUATION_MIN_GENERATION_TOKENS_DEFAULT_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V21_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V24_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V25_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V31_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V32_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V33_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V37_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU, V23_DEFAULT_OUTLINE_ACK_SEGMENT_ACU, V23_DEFAULT_OUTLINE_METHOD_ACK_SEGMENT_ACU, V23_DEFAULT_OUTLINE_PACING_SEGMENT_ACU, V23_DEFAULT_OUTLINE_SYSTEM_SEGMENT_ACU, V24_OUTLINE_LONGFORM_PACING_CONTRACT_ACU, V26_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU, V27_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU, V29_DEFAULT_OUTLINE_CONTEXT_SEGMENT_ACU } from './defaults';
 import { reconcileHostContinuationTask_ACU } from './host-history';
-import { CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V46_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V47_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU, withV48OutlineSnapshot_ACU } from './defaults';
+import { CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V46_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V47_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V49_ACU, withV48OutlineSnapshot_ACU } from './defaults';
 import { withAgentPromptLayout_ACU } from '../../shared/agent-prompt-layout';
-import { withV46ProgressAdjustment_ACU, withV48EditableSnapshot_ACU } from './agent/agent-defaults';
+import { withV46ProgressAdjustment_ACU, withV48EditableSnapshot_ACU, buildV48ContinuationAgentPrompts_ACU, continuationV48DefaultLineage_ACU } from './agent/agent-defaults';
+import { buildV49ContinuationAgentPrompts_ACU, withV50ContinuationQa_ACU } from './agent/agent-defaults';
+import { CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V50_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU, withV50OutlineQa_ACU } from './defaults';
 import { CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V39_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V40_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V41_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V42_ACU } from './defaults';
 import { CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V43_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V44_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V45_ACU, buildV42ContinuationOutlinePrompt_ACU, withV43OutlineCreativeIdentity_ACU } from './defaults';
 import { buildV38ContinuationAgentPrompts_ACU, withV39MainAgentSelfNarration_ACU, withV40RoleSelfNarration_ACU, withV41RoleProcedure_ACU, withV42ReadOnceContract_ACU, withV43CreativeIdentity_ACU, withV44IdAutofill_ACU, withV45MainCorrection_ACU } from './agent/agent-defaults';
@@ -120,7 +122,6 @@ function validateAgentPrompts_ACU(raw: unknown): ContinuationSettings_ACU['agent
     maintainer: validateContinuationPromptSegments_ACU(raw.maintainer, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
     mainlinePlanner: validateContinuationPromptSegments_ACU(raw.mainlinePlanner, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
     beatPlanner: validateContinuationPromptSegments_ACU(raw.beatPlanner, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
-    reviewer: validateContinuationPromptSegments_ACU(raw.reviewer, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
     finalReviewer: validateContinuationPromptSegments_ACU(raw.finalReviewer, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
     webResearcher: validateContinuationPromptSegments_ACU(raw.webResearcher, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
     instructionComposer: validateContinuationPromptSegments_ACU(raw.instructionComposer, 'load', 'CONTINUATION_ENVELOPE_INVALID'),
@@ -648,6 +649,39 @@ function migrateV34AgentPromptsToV35_ACU(raw: unknown): unknown {
   return changed ? next : raw;
 }
 
+/**
+ * V48 → V49：工具开关只切换格式输出段，其余段与快照模板的中性化措辞统一成单版本。
+ * 只替换仍与 V48 默认逐字相同的段；用户改写、追加段与已编辑的快照模板原样保留。
+ */
+function migrateV48AgentPromptsToV49_ACU(raw: unknown): unknown {
+  if (!isRecord_ACU(raw)) return raw;
+  const previous = buildV48ContinuationAgentPrompts_ACU();
+  const current = buildV49ContinuationAgentPrompts_ACU();
+  const lineage = continuationV48DefaultLineage_ACU();
+  let changed = false;
+  const next = { ...raw };
+  for (const role of Object.keys(lineage) as (keyof typeof previous)[]) {
+    if (!Array.isArray(raw[role])) continue;
+    next[role] = raw[role].map(segment => {
+      if (!isRecord_ACU(segment) || typeof segment.content !== 'string') return segment;
+      const content = segment.content;
+      const entry = lineage[role].find(item => item.role === segment.role
+        && item.length === content.length && item.hash === hashAgentPromptContent_ACU(content));
+      if (!entry) return segment;
+      const oldSegment = previous[role][entry.index];
+      const currentSegment = current[role][entry.index];
+      // 槽位内容逐字命中旧默认才替换；重排、改写或版本错位一律原样保留。
+      if (!oldSegment || !currentSegment || content !== oldSegment.content) return segment;
+      changed = true;
+      return { ...segment, content: currentSegment.content,
+        ...(oldSegment.snapshotTemplate !== undefined && segment.snapshotTemplate === oldSegment.snapshotTemplate
+          && currentSegment.snapshotTemplate !== undefined
+          ? { snapshotTemplate: currentSegment.snapshotTemplate } : {}) };
+    });
+  }
+  return changed ? next : raw;
+}
+
 function migrateV35AgentPromptsToV36_ACU(raw: unknown): unknown {
   if (!isRecord_ACU(raw)) return raw;
   const previous = buildV35ContinuationAgentPrompts_ACU();
@@ -991,6 +1025,14 @@ export function validateContinuationSettings_ACU(raw: unknown): ContinuationSett
 
 function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   if (!isRecord_ACU(raw)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'settings 必须是对象');
+  // 本次更新明确重置全部提示词；新版本保存后的用户编辑不再被覆盖。
+  // 版本号只写进返回值，不就地改 raw：初始化落盘要凭首楼原始版本号判断是否需要写回。
+  if (raw.promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU) {
+    raw.outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
+    raw.agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
+  }
+  if (isRecord_ACU(raw.agentPrompts)) delete raw.agentPrompts.reviewer;
+  if (isRecord_ACU(raw.agentApiPresets)) delete raw.agentApiPresets.reviewer;
   // V7 及更早的信封带 turnInstructionPrompt 且没有 agentPrompts。严格键校验会把它判成未知字段，
   // 所以先就地迁移：丢掉退役字段、补上 Agent 提示词，再进入正常校验。
   if (Object.prototype.hasOwnProperty.call(raw, 'turnInstructionPrompt')) delete raw.turnInstructionPrompt;
@@ -1059,211 +1101,6 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   if (raw.apiPresetMode === 'follow_plot') raw.apiPresetMode = 'current';
   if (!['current', 'fixed'].includes(raw.apiPresetMode as string)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'apiPresetMode 非法');
 
-  let outlinePrompt = raw.outlinePrompt;
-  let agentPrompts = raw.agentPrompts;
-  let promptForceDefaultVersion = typeof raw.promptForceDefaultVersion === 'string' ? raw.promptForceDefaultVersion : undefined;
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V17_ACU) {
-    agentPrompts = migrateV17AgentPromptsToV18_ACU(agentPrompts);
-    agentPrompts = migrateV18AgentPromptsToV19_ACU(agentPrompts);
-    agentPrompts = migrateV19AgentPromptsToV20_ACU(agentPrompts);
-    agentPrompts = migrateV20AgentPromptsToV21_ACU(agentPrompts);
-    agentPrompts = migrateV21AgentPromptsToV22_ACU(agentPrompts);
-    agentPrompts = migrateV22AgentPromptsToV23_ACU(agentPrompts);
-    outlinePrompt = migrateV22OutlinePromptToV23_ACU(outlinePrompt);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU;
-  } else if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V18_ACU) {
-    agentPrompts = migrateV18AgentPromptsToV19_ACU(agentPrompts);
-    agentPrompts = migrateV19AgentPromptsToV20_ACU(agentPrompts);
-    agentPrompts = migrateV20AgentPromptsToV21_ACU(agentPrompts);
-    agentPrompts = migrateV21AgentPromptsToV22_ACU(agentPrompts);
-    agentPrompts = migrateV22AgentPromptsToV23_ACU(agentPrompts);
-    outlinePrompt = migrateV22OutlinePromptToV23_ACU(outlinePrompt);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU;
-  } else if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V19_ACU) {
-    agentPrompts = migrateV19AgentPromptsToV20_ACU(agentPrompts);
-    agentPrompts = migrateV20AgentPromptsToV21_ACU(agentPrompts);
-    agentPrompts = migrateV21AgentPromptsToV22_ACU(agentPrompts);
-    agentPrompts = migrateV22AgentPromptsToV23_ACU(agentPrompts);
-    outlinePrompt = migrateV22OutlinePromptToV23_ACU(outlinePrompt);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU;
-  } else if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V20_ACU) {
-    agentPrompts = migrateV20AgentPromptsToV21_ACU(agentPrompts);
-    agentPrompts = migrateV21AgentPromptsToV22_ACU(agentPrompts);
-    agentPrompts = migrateV22AgentPromptsToV23_ACU(agentPrompts);
-    outlinePrompt = migrateV22OutlinePromptToV23_ACU(outlinePrompt);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU;
-  } else if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V21_ACU) {
-    agentPrompts = migrateV21AgentPromptsToV22_ACU(agentPrompts);
-    agentPrompts = migrateV22AgentPromptsToV23_ACU(agentPrompts);
-    outlinePrompt = migrateV22OutlinePromptToV23_ACU(outlinePrompt);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU;
-  } else if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V22_ACU) {
-    agentPrompts = migrateV22AgentPromptsToV23_ACU(agentPrompts);
-    outlinePrompt = migrateV22OutlinePromptToV23_ACU(outlinePrompt);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU;
-  } else if (promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V24_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V25_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V31_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V32_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V33_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V37_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V39_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V40_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V41_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V42_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V43_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V44_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V45_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V46_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V47_ACU
-    && promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU) {
-    outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
-    agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU;
-  }
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V23_ACU) {
-    agentPrompts = migrateV23AgentPromptsToV24_ACU(agentPrompts);
-    outlinePrompt = migrateV23OutlinePromptToV24_ACU(outlinePrompt);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V24_ACU;
-  }
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V24_ACU) {
-    agentPrompts = migrateV24AgentPromptsToV25_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V25_ACU;
-  }
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V25_ACU) {
-    agentPrompts = migrateV25AgentPromptsToV26_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU;
-  }
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V26_ACU) {
-    // V24 当初漏换的协议段在 V26 用户身上同样存在；这一步对已是 V24 协议的段无效果，可安全重跑。
-    outlinePrompt = migrateV23OutlinePromptToV24_ACU(outlinePrompt);
-    outlinePrompt = migrateV26OutlinePromptToV27_ACU(outlinePrompt);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU;
-  }
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU) {
-    // 已经带着 V27 标记的信封里可能存着被误迁的总纲提示词（任务段被覆盖成容量契约），
-    // 谱系替换与结构修复都是幂等的，对健康的 V27 默认组不产生任何改动。
-    agentPrompts = migrateV27AgentPromptsToV28_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU;
-  }
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V28_ACU) {
-    agentPrompts = migrateV28AgentPromptsToV29_ACU(agentPrompts);
-    outlinePrompt = migrateV28OutlinePromptToV29_ACU(outlinePrompt);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU;
-  }
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V29_ACU) {
-    agentPrompts = migrateV29AgentPromptsToV30_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU;
-  }
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V30_ACU) {
-    agentPrompts = migrateV30AgentPromptsToV31_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V31_ACU;
-  }
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V31_ACU) {
-    agentPrompts = migrateV31AgentPromptsToV32_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V32_ACU;
-  }
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V32_ACU) {
-    agentPrompts = migrateV32AgentPromptsToV33_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V33_ACU;
-  }
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V33_ACU) {
-    agentPrompts = migrateV33AgentPromptsToV34_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU;
-  }
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU) {
-    agentPrompts = migrateV34AgentPromptsToV35_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU;
-  }
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V35_ACU) {
-    agentPrompts = migrateV35AgentPromptsToV36_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU;
-  }
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU) {
-    agentPrompts = migrateV36AgentPromptsToV37_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V37_ACU;
-  }
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V37_ACU) {
-    if (Array.isArray(outlinePrompt)) {
-      // 与 V37 存量比对的是冻结的 V42 默认组；身份声明由 V42→V43 迁移融入。
-      const current = buildV42ContinuationOutlinePrompt_ACU();
-      const prefill = current[current.length - 1];
-      const currentBase = current.slice(0, -1);
-      const isUnmodifiedDefault = outlinePrompt.length === currentBase.length
-        && outlinePrompt.every((segment, index) => promptSegmentEquals_ACU(segment, currentBase[index]));
-      if (isUnmodifiedDefault && prefill) outlinePrompt = [...outlinePrompt, { ...prefill }];
-    }
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU;
-  }
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V38_ACU) {
-    agentPrompts = migrateV38AgentPromptsToV39_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V39_ACU;
-  }
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V39_ACU) {
-    agentPrompts = migrateV39AgentPromptsToV40_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V40_ACU;
-  }
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V40_ACU) {
-    agentPrompts = migrateV40AgentPromptsToV41_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V41_ACU;
-  }
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V41_ACU) {
-    agentPrompts = migrateV41AgentPromptsToV42_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V42_ACU;
-  }
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V42_ACU) {
-    agentPrompts = migrateV42AgentPromptsToV43_ACU(agentPrompts);
-    outlinePrompt = migrateV42OutlinePromptToV43_ACU(outlinePrompt);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V43_ACU;
-  }
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V43_ACU) {
-    agentPrompts = migrateV43AgentPromptsToV44_ACU(agentPrompts);
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V44_ACU;
-  }
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V44_ACU) {
-    if (isRecord_ACU(agentPrompts) && Array.isArray(agentPrompts.main)
-      && agentPrompts.main.every(segment => isRecord_ACU(segment) && typeof segment.content === 'string')) {
-      agentPrompts = { ...agentPrompts, main: withV45MainCorrection_ACU('main', agentPrompts.main as Parameters<typeof withV45MainCorrection_ACU>[1]) };
-    }
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V45_ACU;
-  }
-
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V45_ACU) {
-    if (isRecord_ACU(agentPrompts) && Array.isArray(agentPrompts.main)
-      && agentPrompts.main.every(segment => isRecord_ACU(segment) && typeof segment.content === 'string')) {
-      agentPrompts = { ...agentPrompts, main: withV46ProgressAdjustment_ACU('main', agentPrompts.main as Parameters<typeof withV46ProgressAdjustment_ACU>[1]) };
-    }
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V46_ACU;
-  }
-
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V46_ACU) {
-    if (isRecord_ACU(agentPrompts)) {
-      agentPrompts = Object.fromEntries(Object.entries(agentPrompts).map(([role, segments]) => [role,
-        withAgentPromptLayout_ACU(validateContinuationPromptSegments_ACU(segments, 'load', 'CONTINUATION_ENVELOPE_INVALID'))]));
-    }
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V47_ACU;
-  }
-
-  if (promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V47_ACU) {
-    if (isRecord_ACU(agentPrompts)) {
-      const previousPrompts = agentPrompts;
-      agentPrompts = Object.fromEntries(CONTINUATION_AGENT_PROMPT_KEYS_ACU.map(role => [role,
-        withV48EditableSnapshot_ACU(role, validateContinuationPromptSegments_ACU(previousPrompts[role], 'load', 'CONTINUATION_ENVELOPE_INVALID'))]));
-    }
-    outlinePrompt = withV48OutlineSnapshot_ACU(validateContinuationPromptSegments_ACU(outlinePrompt, 'load', 'CONTINUATION_ENVELOPE_INVALID'));
-    promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU;
-  }
-
   return {
     stageSize: raw.stageSize as ContinuationSettings_ACU['stageSize'], customTurnMin, customTurnMax,
     storyArcVolumePlan: raw.storyArcVolumePlan as ContinuationSettings_ACU['storyArcVolumePlan'], customStoryArcVolumeCount,
@@ -1281,8 +1118,8 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
     apiPresetMode: raw.apiPresetMode as ContinuationSettings_ACU['apiPresetMode'], fixedApiPresetName: requireString_ACU(raw.fixedApiPresetName, 'settings.fixedApiPresetName'),
     promptCacheEnabled: false,
     agentApiPresets: validateAgentApiPresets_ACU(raw.agentApiPresets),
-    outlinePrompt: validateContinuationPromptSegments_ACU(outlinePrompt, 'load', 'CONTINUATION_ENVELOPE_INVALID'), agentPrompts: validateAgentPrompts_ACU(agentPrompts),
-    promptForceDefaultVersion,
+    outlinePrompt: validateContinuationPromptSegments_ACU(raw.outlinePrompt, 'load', 'CONTINUATION_ENVELOPE_INVALID'), agentPrompts: validateAgentPrompts_ACU(raw.agentPrompts),
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU,
   };
 }
 

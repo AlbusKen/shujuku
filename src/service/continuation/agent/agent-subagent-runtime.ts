@@ -1,5 +1,8 @@
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
 import { agentSnapshotTemplate_ACU, assembleAgentPrompt_ACU } from '../../../shared/agent-prompt-layout';
+import { arcArchitectFormatAnswer_ACU } from './arc-architect-prompt';
+import { maintainerFormatAnswer_ACU } from './maintainer-prompt';
+import { webResearcherFormatAnswer_ACU } from './web-researcher-prompt';
 /**
  * service/continuation/agent/agent-subagent-runtime.ts — 子代理运行时
  *
@@ -272,7 +275,6 @@ const PROMPT_KEY_PREFILLS_ACU: Record<AgentSubagentDefinition_ACU['promptKey'], 
   maintainer: AGENT_PREFILLS_ACU.maintainer,
   mainlinePlanner: AGENT_PREFILLS_ACU.planner,
   beatPlanner: AGENT_PREFILLS_ACU.planner,
-  reviewer: AGENT_PREFILLS_ACU.reviewer,
   webResearcher: AGENT_PREFILLS_ACU.researcher,
   instructionComposer: AGENT_PREFILLS_ACU.composer,
 };
@@ -829,6 +831,27 @@ export class AgentSubagentRuntime_ACU {
     // 总纲卷数计划是随设置变化的运行时指令，不进提示词模板；但它必须落在尾部预填充之前——
     // 追加在预填充之后会让对话以一条 user 消息收尾，预填充失效，模型会另起一段回复而不是续写 JSON。
     let baseMessages = rendered.messages;
+    const maintenanceFormat = definition.promptKey === 'arcArchitect' ? arcArchitectFormatAnswer_ACU
+      : definition.promptKey === 'maintainer' ? maintainerFormatAnswer_ACU
+      : definition.promptKey === 'webResearcher' ? webResearcherFormatAnswer_ACU : undefined;
+    const hasMaintenanceFormat = maintenanceFormat !== undefined && rendered.messages.some(message =>
+      message.role === 'assistant' && (message.content === maintenanceFormat('json')
+        || message.content === maintenanceFormat('tools')));
+    const readScopeSnapshot = authorizedReads.length
+      ? `本角色只可 read 以下自有或强相关地址：${authorizedReads.join('、')}。${accessProfile.allowSearch ? '世界书检索限已授权范围。' : '不得做本地 search。'}${readOnceKind ? '每轮至多一个成功读取批次：确需补读时把地址放进同一次回复并发读齐；固定注入与目录足够时不读，直接交付。' : ''}`
+      : '本角色没有本地调阅工具，直接根据已备资料交付。';
+    const writableTables = definition.promptKey === 'arcArchitect' ? ' story_arc'
+      : definition.promptKey === 'webResearcher' ? ' web_refs' : ' hooks、info_gap、chronology；constraint_proposals 仅登记建议';
+    // 授权随请求快照下发；历史之后只剩固定预填充，不再插入额外 system 段。
+    const maintenanceAuthorization = maintenanceFormat !== undefined
+      ? `【本次读取与写入授权】\n${readScopeSnapshot}\n${input.writeSql && writes.length
+        ? `本次允许 write_sql 写入${writableTables}；只认写入回执的保存结果。`
+        : '本次没有 write_sql 写入授权，不提交写入，仅交付核对结果与缺口。'}`
+      : definition.promptKey === 'mainlinePlanner' || definition.promptKey === 'beatPlanner'
+        ? `【本次读取与交付授权】\n${readScopeSnapshot}\n本角色只返回策划建议，不写入资料，不派遣其他角色。`
+        : definition.promptKey === 'instructionComposer'
+          ? `【本次读取与交付授权】\n${readScopeSnapshot}\n本角色只交付写作指令，不写入资料，不派遣其他角色。`
+          : '';
     const presentTokens = new Set([...promptSegments, ...(split.taskTemplate ? [{ content: split.taskTemplate }] : [])].flatMap(segment => segment.content.match(/\$[A-Z][A-Z0-9_]*/g) ?? [] as string[]));
     const renderRequestSnapshot = async (): Promise<string> => {
       const editable = agentSnapshotTemplate_ACU(promptSegments, '');
@@ -842,7 +865,8 @@ export class AgentSubagentRuntime_ACU {
           tokens.has('$AGENT_READ_MATERIALS') ? '' : `【本轮种子资料】\n${materials}`,
           definition.kind !== 'arc' && !tokens.has('$WORLDBOOK_HITS') ? `【本轮语境命中的世界书条目】\n${injection}` : '',
           readsAt >= 0 ? omitSnapshotSectionsForSubagent_ACU((input.mainSnapshot ?? '').slice(readsAt), tokens) : '',
-          definition.promptKey === 'arcArchitect' ? renderStoryArcVolumePlanInstruction_ACU(input.settings) : '', input.sharedMaterials ?? ''].filter(Boolean).join('\n\n');
+          definition.promptKey === 'arcArchitect' ? renderStoryArcVolumePlanInstruction_ACU(input.settings) : '',
+          maintenanceAuthorization, input.sharedMaterials ?? ''].filter(Boolean).join('\n\n');
       }
       const originalSnapshot = input.mainSnapshot?.trim() ? input.mainSnapshot : '';
       const worldbook = input.resolveContext.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false);
@@ -854,14 +878,18 @@ export class AgentSubagentRuntime_ACU {
       const snapshotText = omitSnapshotSectionsForSubagent_ACU(latestSnapshot, presentTokens,
         { dropTriggeredWorldbook: definition.kind === 'arc', worldbookInjection });
       const taskMaterial = await renderTaskMaterial();
-      return [snapshotText, taskMaterial || `【本次派工任务】\n${input.delegation.prompt}`, ...(taskMaterial ? [] : [`【本轮种子资料】\n${materials}`]), definition.promptKey === 'arcArchitect' ? renderStoryArcVolumePlanInstruction_ACU(input.settings) : '', input.sharedMaterials ?? ''].filter(Boolean).join('\n\n');
+      return [snapshotText, taskMaterial || `【本次派工任务】\n${input.delegation.prompt}`, ...(taskMaterial ? [] : [`【本轮种子资料】\n${materials}`]), definition.promptKey === 'arcArchitect' ? renderStoryArcVolumePlanInstruction_ACU(input.settings) : '', maintenanceAuthorization, input.sharedMaterials ?? ''].filter(Boolean).join('\n\n');
     };
     // 预算状态随每次请求尾部快照刷新。
     const allowSearch = accessProfile.allowSearch;
     const ownReads = authorizedReads;
     const authorizedToolNames = new Set<string>([...accessProfile.tools, ...(input.writeSql && writes.length ? ['write_sql'] : [])]);
-    if (input.writeSql && writes.length) baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: renderMaintenanceSqlGuide_ACU(definition.name, toolMode) });
-    baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: ownReads.length ? `本角色只可 read 以下自有或强相关地址：${ownReads.join('、')}。${allowSearch ? '世界书检索限已授权范围。' : '不得做本地 search。'}${readOnceKind ? '每轮至多一个成功读取批次：确需补读时把地址放进同一次回复并发读齐；固定注入与目录足够时不读，直接交付。' : ''}` : '本角色没有本地调阅工具，直接根据已备资料交付。' });
+    if (input.writeSql && writes.length && !hasMaintenanceFormat) {
+      baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: renderMaintenanceSqlGuide_ACU(definition.name, toolMode) });
+    }
+    if (!maintenanceAuthorization) {
+      baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: readScopeSnapshot });
+    }
     const retries = normalizeContinuationInternalAiRetryLimit_ACU(input.settings.internalAiRetryLimit);
     // 小循环的追加消息：子代理自己的输出（assistant）与工具结果。原生工具回执使用 role=tool。
     const transcript: Array<{ role: string; content: string; tool_calls?: NonNullable<ReturnType<typeof nativeToolExchange_ACU>[number]['tool_calls']>; tool_call_id?: string }> = [];
@@ -1463,6 +1491,8 @@ export class AgentSubagentRuntime_ACU {
       $STORY_ARC: () => resolveAgentReadToken_ACU('$STORY_ARC', input.resolveContext).text,
       $CHRONOLOGY: () => resolveAgentReadToken_ACU('$CHRONOLOGY', input.resolveContext).text,
       $STORY_TAIL: () => renderAgentStoryTail_ACU(input.resolveContext),
+      $HOOKS_LEDGER: () => evidence.hooksLedger,
+      $INFO_GAP: () => evidence.infoGap,
       $WORLDBOOK_HITS: () => evidence.worldbookEvidence,
       $AGENT_READ_MATERIALS: () => evidence.supplementalMaterials,
       $AGENT_TASK: () => input.candidateInstruction,
@@ -1487,6 +1517,9 @@ export class AgentSubagentRuntime_ACU {
     });
     // 终审与普通派工同一预算语义：首轮给出上限，每个工具批次后刷新剩余轮次与遥测；注入点必须在尾部预填充之前。
     const reviewPresent = new Set([...reviewSegments, ...(reviewSplit.taskTemplate ? [{ content: reviewSplit.taskTemplate }] : [])].flatMap(segment => segment.content.match(/\$[A-Z][A-Z0-9_]*/g) ?? [] as string[]));
+    const sharedMaterialsNote = input.sharedMaterials !== undefined
+      ? '世界书全文和各资料库已在【本轮已备资料】。终审没有调阅工具，直接根据这些资料给出判词。'
+      : '';
     const renderReviewTail = async (): Promise<string> => {
       const editable = agentSnapshotTemplate_ACU(reviewSegments, '');
       if (reviewSegments.some(segment => segment.snapshotTemplate !== undefined)) {
@@ -1499,7 +1532,7 @@ export class AgentSubagentRuntime_ACU {
           tokens.has('$WORLDBOOK_HITS') ? '' : evidence.worldbookEvidence,
           tokens.has('$AGENT_READ_MATERIALS') ? '' : evidence.supplementalMaterials,
           readsAt >= 0 ? omitSnapshotSectionsForSubagent_ACU((input.mainSnapshot ?? '').slice(readsAt), tokens) : '',
-          input.sharedMaterials ?? ''].filter(Boolean).join('\n\n');
+          input.sharedMaterials ?? '', sharedMaterialsNote].filter(Boolean).join('\n\n');
       }
       const originalSnapshot = input.mainSnapshot?.trim() ? input.mainSnapshot : '';
       const worldbook = input.resolveContext.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false);
@@ -1507,12 +1540,9 @@ export class AgentSubagentRuntime_ACU {
       const mainReadsAt = findMainSessionReadAppendix_ACU(originalSnapshot, worldbookInjection);
       const latestSnapshot = [await renderFallbackAgentSnapshot_ACU(input.settings, input.resolveContext, toolMode), ...(mainReadsAt >= 0 ? [originalSnapshot.slice(mainReadsAt + 2)] : [])].join('\n\n');
       const reviewSnapshot = omitSnapshotSectionsForSubagent_ACU(latestSnapshot, reviewPresent, { worldbookInjection });
-      return [reviewSnapshot, reviewTaskMaterial || `【本次终审任务】\n${input.candidateInstruction}`, ...(reviewTaskMaterial ? [] : [evidence.worldbookEvidence, evidence.supplementalMaterials]), input.sharedMaterials ?? ''].filter(Boolean).join('\n\n');
+      return [reviewSnapshot, reviewTaskMaterial || `【本次终审任务】\n${input.candidateInstruction}`, ...(reviewTaskMaterial ? [] : [evidence.worldbookEvidence, evidence.supplementalMaterials]), input.sharedMaterials ?? '', sharedMaterialsNote].filter(Boolean).join('\n\n');
     };
-    let baseMessages = rendered.messages;
-    if (input.sharedMaterials !== undefined) {
-      baseMessages = insertBeforeTrailingPrefill_ACU(baseMessages, { role: 'system', content: '世界书全文和各资料库已在【本轮已备资料】。终审没有调阅工具，直接根据这些资料给出判词。' });
-    }
+    const baseMessages = rendered.messages;
     const transcript: Array<{ role: string; content: string }> = [];
     const trailingPrefill = (baseMessages[baseMessages.length - 1]?.role === 'assistant' || baseMessages[baseMessages.length - 1]?.content === USER_PREFILL_CONTENT_ACU) ? baseMessages.pop() : undefined;
     const expandedReads: string[] = [];

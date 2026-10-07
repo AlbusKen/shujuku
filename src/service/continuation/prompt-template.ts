@@ -44,7 +44,7 @@ const PLACEHOLDER_ALTERNATION_ACU = [...CONTINUATION_PROMPT_PLACEHOLDERS_ACU]
   .sort((left, right) => right.length - left.length)
   .map(token => token.replace(/[$]/g, '\\$'))
   .join('|');
-export type ContinuationPromptKind_ACU = 'outline' | 'agent_main' | 'agent_arc' | 'agent_maintainer' | 'agent_mainline' | 'agent_beat' | 'agent_reviewer' | 'agent_final_reviewer' | 'agent_web_researcher' | 'agent_instruction_composer';
+export type ContinuationPromptKind_ACU = 'outline' | 'agent_main' | 'agent_arc' | 'agent_maintainer' | 'agent_mainline' | 'agent_beat' | 'agent_final_reviewer' | 'agent_web_researcher' | 'agent_instruction_composer';
 type PlaceholderResolver_ACU = () => string | Promise<string | null | undefined> | null | undefined;
 
 function failPrompt_ACU(code: 'CONTINUATION_ENVELOPE_INVALID' | 'CONTINUATION_PROMPT_INVALID' | 'CONTINUATION_PROMPT_EMPTY', phase: ContinuationErrorPhase_ACU, message: string, details?: Record<string, unknown>): never {
@@ -101,7 +101,7 @@ export function restoreContinuationPromptDefault_ACU(settings: ContinuationSetti
   const agentPrompts = { ...settings.agentPrompts };
   const key: Record<Exclude<ContinuationPromptKind_ACU, 'outline'>, keyof typeof agentPrompts> = {
     agent_main: 'main', agent_arc: 'arcArchitect', agent_maintainer: 'maintainer',
-    agent_mainline: 'mainlinePlanner', agent_beat: 'beatPlanner', agent_reviewer: 'reviewer',
+    agent_mainline: 'mainlinePlanner', agent_beat: 'beatPlanner',
     agent_final_reviewer: 'finalReviewer', agent_web_researcher: 'webResearcher',
     agent_instruction_composer: 'instructionComposer',
   };

@@ -17,7 +17,7 @@ export interface AgentSubagentDefinition_ACU {
   kind: AgentSubagentKind_ACU;
   description: string;
   triggers: string[];
-  promptKey: 'arcArchitect' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer' | 'webResearcher' | 'instructionComposer';
+  promptKey: 'arcArchitect' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'webResearcher' | 'instructionComposer';
 }
 
 /** 目录渲染的可选开关：网页检索关闭时，web-researcher 及其资料模块不进主 Agent 视野。 */
@@ -56,7 +56,7 @@ export const AGENT_SUBAGENT_ACCESS_PROFILES_ACU: Record<AgentSubagentKind_ACU, A
     allowSearch: false,
   },
   review: {
-    snapshotTokens: ['$OUTLINE_WINDOW', '$STORY_TAIL', '$STORY_ARC', '$HOOKS_LEDGER', '$ACTIVE_CONSTRAINTS', '$WORLDBOOK_HITS', '$USER_REQUIREMENTS'],
+    snapshotTokens: ['$OUTLINE_WINDOW', '$STORY_TAIL', '$STORY_ARC', '$HOOKS_LEDGER', '$INFO_GAP', '$ACTIVE_CONSTRAINTS', '$WORLDBOOK_HITS', '$USER_REQUIREMENTS'],
     readPrefixes: ['$OUTLINE_WINDOW', '$STORY_RANGE', '$TABLE', '$STORY_ARC', '$FIELD:storyArc', '$HOOKS_LEDGER', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY', '$WEB_REFS', '$WORLDBOOK'],
     tools: ['read'],
     allowSearch: false,
@@ -68,7 +68,7 @@ export const AGENT_SUBAGENT_ACCESS_PROFILES_ACU: Record<AgentSubagentKind_ACU, A
     allowSearch: true,
   },
   compose: {
-    snapshotTokens: ['$OUTLINE_WINDOW', '$STORY_ARC', '$STORY_TAIL', '$HOOKS_LEDGER', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY', '$USER_REQUIREMENTS'],
+    snapshotTokens: ['$OUTLINE_WINDOW', '$STORY_ARC', '$STORY_TAIL', '$HOOKS_LEDGER', '$INFO_GAP', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY', '$USER_REQUIREMENTS'],
     readPrefixes: [],
     tools: [],
     allowSearch: false,

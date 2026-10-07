@@ -245,7 +245,7 @@
           @toggle="toggleGroup('prompt:reference')"
         >
           <h4 class="acu-v2-world-simulation-page__subheading">引擎 seam 段</h4>
-          <p class="acu-v2-world-simulation-page__meta">每个角色的提示词由固定顺序的 ROOT、ROLE_RULES、PROTOCOL、WORKFLOW、HISTORY、RUNTIME_CONTEXT、ACKNOWLEDGEMENT、EXECUTION_BOUNDARY 八段引擎 seam 与一段可编辑的用户要求段组成。seam 段的角色与顺序由引擎锁定，只能改内容不能删除或移动；可编辑段必须唯一且包含 $WORLD_USER_REQUIREMENTS 或 $WORLD_USER_GUIDANCE。</p>
+          <p class="acu-v2-world-simulation-page__meta">默认顺序为身份 system、格式问答、方法与流程问答、运行快照、真实会话历史、user 预填充。格式回答只读，随「使用工具调用」切换；快照模板可编辑，动态资料在此注入。快照与历史卡可上下移动，历史按真实身份展开。</p>
           <h4 class="acu-v2-world-simulation-page__subheading">格林推演占位符</h4>
           <p class="acu-v2-world-simulation-page__meta">运行装配占位符：$WORLD_TASK（当前任务）、$WORLD_HISTORY（楼层锚定的 Agent 会话历史）、$WORLD_RUNTIME_CONTEXT（触发种类、指令与基准账本 revision）、$WORLD_AGENT_CATALOG（可派工角色与职责）、$WORLD_TOOL_CATALOG（read/search 地址词汇表）、$WORLD_EVIDENCE（已授权证据条目）、$WORLD_USER_REQUIREMENTS（用户累计要求，默认注入）、$WORLD_USER_GUIDANCE（用户本轮指令，自定义段仍可用）。世界领域占位符：$WORLD_STATE（当前世界账本）、$ANCHOR_MESSAGE（冻结 assistant 楼层正文）、$ANCHOR_IDENTITY（楼层 / swipe / 正文摘要身份）、$WORLD_STAGE_PLAN（本轮阶段计划）、$WORLD_CHRONICLE（宏观编年）、$WORLD_CANDIDATES（本轮候选摘要）、$CURRENT_EVIDENCE_REGISTRY（证据注册表快照）、$PROJECTION_PREVIEW（〈与此同时〉投影预览）。所有动态内容都以转义后的 UNTRUSTED_* 区块注入，只有提示词里实际出现的占位符才会被解析；未知占位符会在保存时被拒绝。</p>
         </AcuDisclosureGroup>
@@ -258,6 +258,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { isAgentFixedSlot_ACU, isAgentSnapshotSlot_ACU } from '../../shared/agent-prompt-layout';
+import { isAgentFormatAnswer_ACU } from '../../shared/agent-prompt-qa';
 import type { WorldSimulationAgentName_ACU } from '../../service/simulation/agent/agent-catalog'; // arch-ok: 仅类型导入，用于本页状态标注，编译后无运行时依赖
 import type { WorldSimulationPromptSegment_ACU, WorldSimulationSettings_ACU } from '../../service/simulation/model'; // arch-ok: 仅类型导入，用于本页状态标注，编译后无运行时依赖
 import AcuButton from '../components/_lib/AcuButton.vue';
@@ -574,7 +575,7 @@ function addPrompt(agentName: WorldSimulationAgentName_ACU, position: 'top' | 'b
 
 function deletePrompt(agentName: WorldSimulationAgentName_ACU, index: number): void {
   const prompts = promptList(agentName);
-  if (!prompts || prompts[index]?.deletable === false) return;
+  if (!prompts || prompts[index]?.deletable === false || isAgentFormatAnswer_ACU(prompts[index])) return;
   prompts.splice(index, 1);
 }
 
@@ -583,6 +584,7 @@ function movePrompt(agentName: WorldSimulationAgentName_ACU, index: number, delt
   const prompts = promptList(agentName);
   const target = index + delta;
   if (!prompts || target < 0 || target >= prompts.length) return;
+  if (isAgentFormatAnswer_ACU(prompts[index]) || isAgentFormatAnswer_ACU(prompts[target])) return;
   if (!isAgentFixedSlot_ACU(prompts[index]) && !isAgentFixedSlot_ACU(prompts[target]) && (prompts[index]?.pinned || prompts[target]?.pinned)) return;
   [prompts[index], prompts[target]] = [prompts[target], prompts[index]];
 }
@@ -592,6 +594,7 @@ function updatePrompt(agentName: WorldSimulationAgentName_ACU, index: number, pa
   const prompts = promptList(agentName);
   const current = prompts?.[index];
   if (!prompts || !current) return;
+  if (isAgentFormatAnswer_ACU(current)) return;
   if (isAgentFixedSlot_ACU(current)) {
     if (isAgentSnapshotSlot_ACU(current) && typeof patch.snapshotTemplate === 'string') prompts[index] = { ...current, snapshotTemplate: patch.snapshotTemplate };
     return;

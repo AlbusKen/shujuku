@@ -85,19 +85,20 @@ describe('continuation prompt templates', () => {
       },
     ]);
 
-    // V26 在 system 与任务段之间插入了故事时间一致性规则段，任务段按内容定位而不是按下标。
+    // 手写版把导入的审查条款分散到各组问答里，按固定段拼接全文定位，不按下标。
     const finalReviewer = buildDefaultContinuationSettings_ACU().agentPrompts.finalReviewer;
-    const system = finalReviewer[0];
+    const fixed = finalReviewer.filter(segment => segment.snapshotTemplate === undefined).map(segment => segment.content).join('\n');
     const snapshot = finalReviewer.find(segment => segment.snapshotTemplate?.includes('$USER_REQUIREMENTS'))!;
-    expect(system.content).toContain('角色人设参考来源优先级：角色卡（卡片简述和背景设定）> 前文剧情 > 已发生事件概览。');
-    expect(system.content).toContain('公平但不冷漠：DM在规则上公平对待<user>和角色，但不用刻意制造障碍，只是不给<user>开绿灯。');
-    expect(system.content).toContain('关系阶段变化需要主角和角色的双向互动+标志性事件');
-    expect(system.content).toContain('角色控制权（用户只能控制自己的角色）、信息边界（角色只使用已知信息）、能力边界（行为在角色能力范围内）、世界规则（符合世界观的物理或魔法规则）、因果逻辑（行为与结果符合因果）。');
-    expect(system.content).toContain('分析所有登场角色，不能遗漏；保留所有板块：基础信息+状态+心理+认知+行为预测+情绪优化+主动性。');
-    expect(system.content).toContain('字段为 verdict、summary、emotionFindings、worldFindings、logicFindings、requiredFixes、preserve。');
+    expect(fixed).toContain('逐个核对在场角色：按角色卡、前文剧情、事件概览的优先级核对每名角色');
+    expect(fixed).toContain('公平但不冷漠：在规则上公平对待<user>和角色，不刻意制造障碍，也不给<user>开绿灯');
+    expect(fixed).toContain('关系阶段变化需要双向互动加标志性事件');
+    expect(fixed).toContain('角色控制权（用户只能控制自己的角色）、信息边界、能力边界、世界规则与因果');
+    expect(fixed).toContain('{"verdict":"pass|revise|block","summary":"一句话结论","emotionFindings":');
+    for (const field of ['worldFindings', 'logicFindings', 'requiredFixes', 'preserve']) expect(fixed).toContain(`"${field}":`);
+    expect(fixed).toContain('我只审查候选写作指导，不写正文，不改大纲');
+    expect(fixed).toContain('不展示推理过程');
     expect(snapshot.snapshotTemplate).toContain('$USER_REQUIREMENTS');
     expect(snapshot.snapshotTemplate).toContain('$OUTLINE_WINDOW');
-    expect(snapshot.snapshotTemplate).toContain('不要写正文、不要修改大纲、不要展示思维链。');
   });
 
   it('locks the fixed user-intent and complete-outline injection matrix', () => {
@@ -106,8 +107,9 @@ describe('continuation prompt templates', () => {
 
     expect(text(prompts.arcArchitect)).toContain('$USER_REQUIREMENTS');
     expect(text(prompts.arcArchitect)).toContain('$OUTLINE_WINDOW');
-    expect(text(prompts.reviewer)).toContain('$USER_REQUIREMENTS');
-    expect(text(prompts.reviewer)).toContain('$OUTLINE_WINDOW');
+    expect(text(prompts.finalReviewer)).toContain('$USER_REQUIREMENTS');
+    expect(text(prompts.finalReviewer)).toContain('$OUTLINE_WINDOW');
+    expect(prompts).not.toHaveProperty('reviewer');
     expect(text(prompts.mainlinePlanner)).toContain('$OUTLINE_WINDOW');
     expect(text(prompts.beatPlanner)).toContain('$OUTLINE_WINDOW');
     expect(text(prompts.mainlinePlanner)).toContain('$USER_REQUIREMENTS');
@@ -120,23 +122,24 @@ describe('continuation prompt templates', () => {
     const settings = buildDefaultContinuationSettings_ACU();
     settings.outlinePrompt = [{ role: 'user', content: 'custom outline', deletable: true }];
     settings.agentPrompts.main = [{ role: 'user', content: 'custom main', deletable: true }];
-    settings.agentPrompts.reviewer = [{ role: 'user', content: 'custom reviewer', deletable: true }];
+    settings.agentPrompts.maintainer = [{ role: 'user', content: 'custom maintainer', deletable: true }];
     settings.agentPrompts.finalReviewer = [{ role: 'user', content: 'custom final reviewer', deletable: true }];
     const restoredOutline = restoreContinuationPromptDefault_ACU(settings, 'outline');
 
-    expect(restoredOutline.outlinePrompt[0].content).toContain('<stage_title>');
+    expect(restoredOutline.outlinePrompt).toEqual(buildDefaultContinuationSettings_ACU().outlinePrompt);
+    expect(restoredOutline.outlinePrompt.some(segment => segment.content.includes('<stage_title>'))).toBe(true);
     expect(restoredOutline.agentPrompts.main[0].content).toBe('custom main');
-    expect(restoredOutline.agentPrompts.reviewer[0].content).toBe('custom reviewer');
+    expect(restoredOutline.agentPrompts.maintainer[0].content).toBe('custom maintainer');
     expect(restoredOutline.agentPrompts.finalReviewer[0].content).toBe('custom final reviewer');
     expect(restoredOutline).toMatchObject({ apiPresetMode: 'current', maxAutomaticStages: 6 });
 
     const restoredMain = restoreContinuationPromptDefault_ACU(restoredOutline, 'agent_main');
     expect(restoredMain.agentPrompts.main[0].content).toContain('主控 Agent');
-    expect(restoredMain.agentPrompts.reviewer[0].content).toBe('custom reviewer');
+    expect(restoredMain.agentPrompts.maintainer[0].content).toBe('custom maintainer');
 
     const restoredFinalReviewer = restoreContinuationPromptDefault_ACU(restoredMain, 'agent_final_reviewer');
-    expect(restoredFinalReviewer.agentPrompts.finalReviewer[0].content).toContain('发送前最终审查代理');
-    expect(restoredFinalReviewer.agentPrompts.reviewer[0].content).toBe('custom reviewer');
+    expect(restoredFinalReviewer.agentPrompts.finalReviewer[0].content).toContain('发送前终审子代理');
+    expect(restoredFinalReviewer.agentPrompts.maintainer[0].content).toBe('custom maintainer');
   });
 });
 

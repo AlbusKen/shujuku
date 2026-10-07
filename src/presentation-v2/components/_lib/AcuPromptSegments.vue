@@ -10,13 +10,13 @@
         <header class="acu-prompt-segs__item-head">
           <span class="acu-prompt-segs__index">#{{ index + 1 }}</span>
           <AcuCheckbox
-            v-if="showEnabled && !isAgentFixedSlot_ACU(seg)"
+            v-if="showEnabled && !isAgentFixedSlot_ACU(seg) && !isAgentFormatAnswer_ACU(seg)"
             :model-value="seg.enabled !== false"
             label="启用"
             @update:model-value="$emit('update', index, { enabled: $event })"
           />
           <AcuSelect
-            v-if="!isAgentFixedSlot_ACU(seg)"
+            v-if="!isAgentFixedSlot_ACU(seg) && !isAgentFormatAnswer_ACU(seg)"
             class="acu-prompt-segs__role"
             size="sm"
             :options="roleOptions"
@@ -24,7 +24,7 @@
             @update:model-value="$emit('update', index, { role: $event })"
           />
           <AcuSelect
-            v-if="showSlot && !isAgentFixedSlot_ACU(seg)"
+            v-if="showSlot && !isAgentFixedSlot_ACU(seg) && !isAgentFormatAnswer_ACU(seg)"
             class="acu-prompt-segs__slot"
             size="sm"
             :options="slotOptions"
@@ -33,7 +33,7 @@
             @update:model-value="onSlot(index, $event)"
           />
           <div class="acu-prompt-segs__actions">
-            <template v-if="allowMove">
+            <template v-if="allowMove && !isAgentFormatAnswer_ACU(seg)">
               <AcuIconButton
                 icon="fa-solid fa-arrow-up"
                 size="sm"
@@ -50,6 +50,7 @@
               />
             </template>
             <AcuIconButton
+              v-if="!isAgentFormatAnswer_ACU(seg)"
               icon="fa-solid fa-trash-can"
               variant="danger"
               size="sm"
@@ -60,7 +61,14 @@
           </div>
         </header>
         <AcuTextarea
-          v-if="isAgentSnapshotSlot_ACU(seg)"
+          v-if="isAgentFormatAnswer_ACU(seg)"
+          :model-value="seg.content"
+          :rows="rows"
+          disabled
+          title="具体格式输出 · 只读；随工具调用开关显示当前生效的回答。"
+        />
+        <AcuTextarea
+          v-else-if="isAgentSnapshotSlot_ACU(seg)"
           :model-value="seg.snapshotTemplate || ''"
           :rows="rows"
           placeholder="运行时状态快照模板（SYSTEM）；可编辑正文和资料占位符。"
@@ -121,6 +129,7 @@ import AcuIconButton from './AcuIconButton.vue';
 import AcuSelect from './AcuSelect.vue';
 import AcuTextarea from './AcuTextarea.vue';
 import { isAgentFixedSlot_ACU, isAgentHistorySlot_ACU, isAgentSnapshotSlot_ACU } from '../../../shared/agent-prompt-layout';
+import { isAgentFormatAnswer_ACU } from '../../../shared/agent-prompt-qa';
 
 withDefaults(defineProps<{
   segments: PromptSegment[];

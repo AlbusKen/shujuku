@@ -1,6 +1,15 @@
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
 import { isAgentSnapshotSlot_ACU, withAgentPromptLayout_ACU } from '../../../shared/agent-prompt-layout';
 import { withCreativeIdentity_ACU } from '../../../shared/creative-identity.js';
+import { buildAgentQaLayout_ACU, migrateAgentQaLayout_ACU, isAgentFormatAnswer_ACU, type AgentQaOptions_ACU } from '../../../shared/agent-prompt-qa';
+import { buildArcArchitectQaPrompt_ACU } from './arc-architect-prompt';
+import { buildMaintainerQaPrompt_ACU } from './maintainer-prompt';
+import { buildMainlinePlannerQaPrompt_ACU } from './mainline-planner-prompt';
+import { buildBeatPlannerQaPrompt_ACU } from './beat-planner-prompt';
+import { buildInstructionComposerQaPrompt_ACU } from './instruction-composer-prompt';
+import { buildFinalReviewerQaPrompt_ACU } from './final-reviewer-prompt';
+import { buildWebResearcherQaPrompt_ACU } from './web-researcher-prompt';
+import { buildMainAgentQaPrompt_ACU } from './main-agent-prompt';
 /**
  * service/continuation/agent/agent-defaults.ts — Agent 各请求的伪 role + 预填充提示词
  *
@@ -18,7 +27,7 @@ import { withCreativeIdentity_ACU } from '../../../shared/creative-identity.js';
  * 让模型先以自己的口吻确认边界，再进入执行。
  */
 
-import type { ContinuationAgentPrompts_ACU, ContinuationPromptSegment_ACU } from '../model';
+import type { ContinuationLegacyAgentPrompts_ACU as ContinuationAgentPrompts_ACU, ContinuationAgentPrompts_ACU as ActiveContinuationAgentPrompts_ACU, ContinuationPromptSegment_ACU } from '../model';
 import { cloneAgentPromptSegments_ACU } from './agent-model';
 
 /** 主 Agent 提示词里标记会话记录插入位置的段。装配器遇到该段时插入会话消息而不发送本段。 */
@@ -703,9 +712,9 @@ const AGENT_PROMPT_SLOT_LOCATORS_ACU: Record<AgentPromptSlotKey_ACU, (segment: C
   arcEpistemology: segment => segment.role === 'assistant' && segment.content.startsWith('我的边界有'),
   capabilityAnswer: segment => segment.role === 'assistant' && segment.content.startsWith('我能做的：'),
   actionRules: segment => segment.role === 'assistant' && segment.content.startsWith('我的行动规则：'),
-  textProtocol: segment => segment.content.startsWith('【文本协议规范】'),
+  textProtocol: segment => segment.content.startsWith('【文本协议规范】') || (isAgentFormatAnswer_ACU(segment) && segment.content.includes('【文本协议规范】')),
   subagentRules: segment => segment.content.startsWith('【子代理使用规则】'),
-  outputContract: segment => segment.role === 'assistant' && segment.content.startsWith('我的最终交付是一个 JSON 对象'),
+  outputContract: segment => segment.role === 'assistant' && (segment.content.startsWith('我的最终交付是一个 JSON 对象') || (isAgentFormatAnswer_ACU(segment) && segment.content.includes('我的最终交付是一个 JSON 对象'))),
   task: segment => (segment.snapshotTemplate ?? segment.content).includes('$AGENT_TASK'),
 };
 
@@ -717,6 +726,16 @@ const AGENT_PROMPT_SLOT_LOCATORS_ACU: Record<AgentPromptSlotKey_ACU, (segment: C
  */
 export function findAgentPromptSlot_ACU(segments: readonly ContinuationPromptSegment_ACU[], slot: AgentPromptSlotKey_ACU): ContinuationPromptSegment_ACU | undefined {
   return segments.find(AGENT_PROMPT_SLOT_LOCATORS_ACU[slot]);
+}
+
+/**
+ * 具体格式输出段：唯一随「使用工具调用」开关在 JSON / 函数调用两套正文间切换的段落。
+ * 主 Agent 是【文本协议规范】段，子代理是最终交付契约段；其余段落与快照模板保持单版本。
+ * 身份用谓词识别，不写入持久化字段，避免污染用户改写段与历史指纹。
+ */
+export function isContinuationModeVariantSegment_ACU(segment: { role: string; content: string }): boolean {
+  const typed = segment as ContinuationPromptSegment_ACU;
+  return isAgentFormatAnswer_ACU(segment) || AGENT_PROMPT_SLOT_LOCATORS_ACU.textProtocol(typed) || AGENT_PROMPT_SLOT_LOCATORS_ACU.outputContract(typed);
 }
 
 /** V30 主 Agent 默认段原文。V31 迁移只接受这些完整正文，用户改写过一个字也不会被覆盖。 */
@@ -1522,11 +1541,333 @@ export function withV48EditableSnapshot_ACU(role: keyof ContinuationAgentPrompts
   return withAgentPromptLayout_ACU(next, template);
 }
 
-/** 当前默认：角色自己的可编辑快照、原身份历史与固定 user 尾段。 */
-export function buildDefaultContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+/**
+ * 非「具体格式输出段」里与工具开关绑定的措辞改为中性表述。
+ * 这些句子本身不承载传输形式：交付形式一律由格式输出段的 json / tools 两套正文声明。
+ * 冻结的历史版本构造器不受影响，迁移仍按旧默认逐字指纹匹配。
+ */
+const CONTINUATION_MODE_NEUTRAL_SWAPS_ACU: ReadonlyArray<readonly [string, string]> = [
+  ['read、search、write_sql 使用函数调用；决策动作以完整的协议 JSON 对象表达。JSON 之外最多留少量思路梳理，绝不把决策内容散落在 JSON 外面。',
+    '调阅、检索与写入都按协议段声明的形式执行；决策动作按协议段声明的交付形式表达，交付之外最多留少量思路梳理，绝不把动作内容散落在交付形式外面。'],
+  ['调用 write_sql 函数即时提交', '按协议段声明的写入形式即时提交'],
+  ['资料不足先用工具调阅，足够就直接交付契约 JSON。', '资料不足先补足调阅，足够就直接进入交付。'],
+  ['固定注入与目录足够就直接交付契约 JSON；确有特别缺口时只调用一次 read 补读，读完即交付。', '固定注入与目录足够就直接进入交付；确有特别缺口时补读一次，读完即交付。'],
+  ['需要核对的事实先用工具调阅，足够就直接交付契约 JSON。', '需要核对的事实先补足调阅，足够就直接进入交付。'],
+  ['固定注入与目录足够就直接交付契约 JSON；确需核对的事实只调用一次 read 补读，读完即交付。', '固定注入与目录足够就直接进入交付；确需核对的事实补读一次，读完即交付。'],
+  ['请开始。先列检索清单并发出第一批工具调用；资料足够时直接交付契约 JSON。', '请开始。先列检索清单并补足调阅；资料足够时直接进入交付。'],
+  ['请开始审查。需要核对的事实先用工具调阅，足够就直接交付契约 JSON。', '请开始审查。需要核对的事实先补足调阅，足够就直接进入交付。'],
+  ['请输出契约 JSON。资料不够时先 read/search，足够后直接交付。', '请按协议段声明的形式交付。资料不够先补足调阅，足够后直接交付。'],
+  ['请输出契约 JSON。你没有本地调阅工具，直接依据已注入资料交付。', '请按协议段声明的形式交付。你没有本地调阅工具，直接依据已注入资料交付。'],
+  // 终审身份段与交付契约同段：只把交付形式指向协议段，字段枚举原样保留，
+  // 否则会连带改掉「必需交付字段」这一业务事实。
+  ['输出必须是一个 JSON 对象，字段为 verdict、summary、emotionFindings、worldFindings、logicFindings、requiredFixes、preserve。',
+    '依协议段声明的形式交付，字段为 verdict、summary、emotionFindings、worldFindings、logicFindings、requiredFixes、preserve。'],
+  ['输出必须是一个 JSON 对象：{"instruction":', '交付字段结构见协议段：{"instruction":'],
+  ['按系统规则逐项输出 JSON：', '按系统规则逐项交付：'],
+  ['本轮我的动作以一个完整的 JSON 对象收尾。', '本轮以协议段声明的交付形式收尾。'],
+];
+
+/**
+ * 兜底模式措辞：任务段被 V48 搬进快照模板后仍可能残留交付形式用语。
+ * 这些句子只描述「怎么交付」，不承载传输形式，统一指向协议段声明。
+ */
+const CONTINUATION_MODE_NEUTRAL_PATTERNS_ACU: ReadonlyArray<readonly [RegExp, string]> = [
+  [/(?:交付|输出|交)契约 JSON/g, '进入交付'],
+  [/交付契约 JSON/g, '进入交付'],
+  [/输出契约 JSON/g, '按协议段声明的形式交付'],
+  [/按系统规则逐项输出 JSON：/g, '按系统规则逐项交付：'],
+  [/输出必须是一个 JSON 对象/g, '按协议段声明的形式交付'],
+  [/以一个完整的 JSON 对象收尾/g, '以协议段声明的交付形式收尾'],
+  [/完整的协议 JSON 对象/g, '协议段声明的交付形式'],
+  [/使用函数调用/g, '按协议段声明的形式'],
+  [/调用 write_sql 函数/g, '按协议段声明的写入形式'],
+  [/调用 read \/ search 函数/g, '按协议段声明的形式调阅'],
+];
+
+function neutralizeContinuationModeText_ACU(content: string): string {
+  let next = content;
+  for (const [from, to] of CONTINUATION_MODE_NEUTRAL_SWAPS_ACU) next = next.split(from).join(to);
+  for (const [pattern, to] of CONTINUATION_MODE_NEUTRAL_PATTERNS_ACU) next = next.replace(pattern, to);
+  return next;
+}
+
+/**
+ * V48→V49 统一收口：格式输出段（主 Agent 的【文本协议规范】、子代理的最终交付契约）
+ * 原样保留，其余段与快照模板做模式中性化。默认构造与存量迁移必须走同一收口，保证两者恒等。
+ */
+export function finalizeContinuationDefault_ACU(
+  segments: readonly ContinuationPromptSegment_ACU[],
+): ContinuationPromptSegment_ACU[] {
+  return segments.map(segment => (isContinuationModeVariantSegment_ACU(segment)
+    ? { ...segment }
+    : { ...segment, content: neutralizeContinuationModeText_ACU(segment.content),
+      ...(segment.snapshotTemplate === undefined ? {}
+        : { snapshotTemplate: neutralizeContinuationModeText_ACU(segment.snapshotTemplate) }) }));
+}
+
+/** V48 冻结组：可编辑快照布局的默认正文，尚未做模式中性化。供 V48→V49 逐段精确迁移。 */
+export function buildV48ContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
   const prompts = buildV47ContinuationAgentPrompts_ACU();
   for (const role of Object.keys(prompts) as Array<keyof ContinuationAgentPrompts_ACU>) {
     prompts[role] = withV48EditableSnapshot_ACU(role, prompts[role]);
+  }
+  return prompts;
+}
+
+type V48DefaultLineage_ACU = Record<keyof ContinuationAgentPrompts_ACU, Array<{ index: number; role: string; hash: string; length: number }>>;
+
+let v48AgentPrompts_ACU: ContinuationAgentPrompts_ACU | undefined;
+let v48DefaultLineageCache_ACU: V48DefaultLineage_ACU | undefined;
+
+function v48AgentPromptsCache_ACU(): ContinuationAgentPrompts_ACU {
+  if (!v48AgentPrompts_ACU) v48AgentPrompts_ACU = buildV48ContinuationAgentPrompts_ACU();
+  return v48AgentPrompts_ACU;
+}
+
+/**
+ * V48 默认段里被模式中性化改写的槽位；迁移只替换完整命中的旧默认正文与快照模板。
+ * 必须惰性求值：该表依赖 V48 构造链，而构造链会经过本模块下方声明的 V39 基线缓存，
+ * 在模块初始化期提前求值会落入暂时性死区（TDZ）。
+ */
+export function continuationV48DefaultLineage_ACU(): V48DefaultLineage_ACU {
+  if (!v48DefaultLineageCache_ACU) {
+    const v48 = v48AgentPromptsCache_ACU();
+    v48DefaultLineageCache_ACU = Object.fromEntries(
+      (Object.keys(v48) as Array<keyof ContinuationAgentPrompts_ACU>).map(role => {
+        const segments = v48[role];
+        return [role, segments.map((segment, index) => ({
+          index, role: segment.role, hash: hashAgentPromptContent_ACU(segment.content), length: segment.content.length,
+        })).filter(({ index }) => {
+          const current = finalizeContinuationDefault_ACU([segments[index]])[0];
+          return current.content !== segments[index].content || current.snapshotTemplate !== segments[index].snapshotTemplate;
+        })];
+      }),
+    ) as V48DefaultLineage_ACU;
+  }
+  return v48DefaultLineageCache_ACU;
+}
+
+/** V49 独立基线：模式中性化，供下一版逐字迁移。 */
+export function buildV49ContinuationAgentPrompts_ACU(): ContinuationAgentPrompts_ACU {
+  const prompts = buildV48ContinuationAgentPrompts_ACU();
+  for (const role of Object.keys(prompts) as Array<keyof ContinuationAgentPrompts_ACU>) {
+    prompts[role] = finalizeContinuationDefault_ACU(prompts[role]);
+  }
+  return prompts;
+}
+
+function continuationQaOptions_ACU(role: keyof ContinuationAgentPrompts_ACU, previous: readonly ContinuationPromptSegment_ACU[]): AgentQaOptions_ACU {
+  const root = previous.findIndex(segment => segment.role === 'system' && !isAgentSnapshotSlot_ACU(segment));
+  const text = previous[root].content;
+  const identityEnd = text.indexOf('。', text.indexOf('你的目的只有')) + 1;
+  let remainder = text.slice(identityEnd);
+  const contract = previous.findIndex(segment => role === 'main'
+    ? segment.content.startsWith('【文本协议规范】')
+    : segment.role === 'assistant' && segment.content.startsWith('我的最终交付是一个 JSON 对象'));
+  const formatIndex = contract >= 0 ? contract : root;
+  let formatContent = previous[formatIndex].content;
+  if (contract < 0) {
+    const frozenRoot = buildV48ContinuationAgentPrompts_ACU()[role][root].content;
+    const paragraph = frozenRoot.split('\n\n').find(part => part.startsWith('输出必须是一个 JSON 对象'))!;
+    formatContent = paragraph + '\n\n' + (role === 'instructionComposer'
+      ? '本角色没有本地调阅工具，直接依据已注入资料交付。'
+      : '确需补读时全部地址放进同一次 read；读完直接交付，不展示推理过程。');
+    remainder = remainder.split('\n\n').filter(part => !/^(?:依协议段声明的形式交付|交付字段结构见协议段)/.test(part)).join('\n\n');
+  }
+  return { formatIndex, formatContent, identity: text.slice(0, identityEnd), rootRemainder: remainder,
+    snapshotAppend: role === 'main' ? '【故事年代学账本】\n$CHRONOLOGY' : '',
+    cleanStatic: neutralizeContinuationModeText_ACU,
+    omitIndices: previous.flatMap((segment, index) => segment.content.startsWith('协议我复述一遍确认：') ? [index] : []),
+    questions: Object.fromEntries(previous.map((segment, index) => [index,
+      segment.content.startsWith('【子代理使用规则】') ? '你怎样分工、派遣子代理并审核结果？'
+        : segment.content.startsWith('【故事时间') ? '你怎样核对故事时间与年代学事实？'
+          : segment.content.startsWith('【卷级容量') ? '每卷的容量、时间和兑现目标怎样约束你的维护？'
+            : segment.content.startsWith('【模式边界】') ? '当前任务有哪些输出与职责边界？'
+              : segment.content.startsWith('【以下是你自己的会话记录】') ? '你怎样使用真实会话历史和较新的工具回执？'
+                : '这一部分有哪些规则，你会怎样执行？'])),
+  };
+}
+
+export function withV50ContinuationQa_ACU(role: keyof ContinuationAgentPrompts_ACU, segments: readonly ContinuationPromptSegment_ACU[]): ContinuationPromptSegment_ACU[] {
+  const previous = buildV49ContinuationAgentPrompts_ACU()[role];
+  if (role === 'arcArchitect') {
+    const next = buildArcArchitectQaPrompt_ACU();
+    // 总纲角色的对应关系明确列出；不按相邻身份或关键词自动拆分正文。
+    const root = previous.findIndex(segment => segment.role === 'system' && !isAgentSnapshotSlot_ACU(segment));
+    const purposeAsk = previous.findIndex(segment => segment.content === '说清楚总纲为什么必须存在，它要解决什么问题？');
+    const boundaryAsk = previous.findIndex(segment => segment.content === '说清楚你的认识论边界：什么能写进总纲，什么不能？');
+    const formatAsk = previous.findIndex(segment => segment.content === '你的输出契约是什么？');
+    const capacityAsk = previous.findIndex(segment => segment.content.startsWith('【卷级容量、时间与长期经营契约】'));
+    const procedureAsk = previous.findIndex(segment => segment.content === V41_ROLE_PROCEDURE_ASK_ACU);
+    const task = previous.findIndex(segment => segment.content === '当前任务与资料见独立的运行时快照。');
+    const snapshot = previous.findIndex(isAgentSnapshotSlot_ACU);
+    const history = previous.findIndex(segment => segment.role === 'history');
+    const prefill = previous.findIndex(segment => segment.content === USER_PREFILL_CONTENT_ACU);
+    const slots = new Map<number, readonly number[]>([
+      [root, [0]], [purposeAsk, [3]], [purposeAsk + 1, [4]],
+      [boundaryAsk, [5]], [boundaryAsk + 1, [6]], [formatAsk, [1]], [formatAsk + 1, [2]],
+      [capacityAsk, [7]], [capacityAsk + 1, [8]], [procedureAsk, [9]],
+      [procedureAsk + 1, [10, 11, 12]], [task, []], [snapshot, [13]], [history, [14]], [prefill, [15]],
+    ]);
+    const matches = (segment: ContinuationPromptSegment_ACU, old: ContinuationPromptSegment_ACU): boolean =>
+      segment.role === old.role && segment.content === old.content;
+    const inherit = (segment: ContinuationPromptSegment_ACU, oldIndex: number, newIndex: number): ContinuationPromptSegment_ACU => ({
+      ...segment, role: next[newIndex].role, content: next[newIndex].content,
+      ...(oldIndex === snapshot && segment.snapshotTemplate === previous[snapshot].snapshotTemplate
+        ? { snapshotTemplate: next[newIndex].snapshotTemplate } : {}),
+    });
+    // 只有段序、开关和模板仍为旧默认的整组才采用新默认顺序。
+    if (segments.length === previous.length && segments.every((segment, index) => matches(segment, previous[index])
+      && segment.enabled === previous[index].enabled && segment.snapshotTemplate === previous[index].snapshotTemplate)) {
+      return next.map((_, newIndex) => {
+        const oldIndex = [...slots].find(([, indexes]) => indexes.includes(newIndex))![0];
+        return inherit(segments[oldIndex], oldIndex, newIndex);
+      });
+    }
+    return segments.flatMap(segment => {
+      const oldIndex = previous.findIndex(old => matches(segment, old));
+      if (oldIndex < 0) return [{ ...segment }];
+      const indexes = slots.get(oldIndex);
+      if (!indexes) return [{ ...segment }];
+      // 用户关闭的资料占位段不删除；编辑过的快照模板不替换。
+      if (oldIndex === task && segment.enabled === false) return [{ ...segment }];
+      return indexes.map(newIndex => inherit(segment, oldIndex, newIndex));
+    });
+  }
+  if (role === 'maintainer') {
+    const next = buildMaintainerQaPrompt_ACU();
+    const root = previous.findIndex(segment => segment.role === 'system' && !isAgentSnapshotSlot_ACU(segment));
+    const boundaryAsk = previous.findIndex(segment => segment.content === '说清楚你的认识论边界：什么能登记，什么不能登记？');
+    const formatAsk = previous.findIndex(segment => segment.content === '你的输出契约是什么？');
+    const chronologyAsk = previous.findIndex(segment => segment.content.startsWith('【故事年代学账本现状】'));
+    const procedureAsk = previous.findIndex(segment => segment.content === V41_ROLE_PROCEDURE_ASK_ACU);
+    const task = previous.findIndex(segment => segment.content === '当前任务与资料见独立的运行时快照。');
+    const snapshot = previous.findIndex(isAgentSnapshotSlot_ACU);
+    const history = previous.findIndex(segment => segment.role === 'history');
+    const prefill = previous.findIndex(segment => segment.content === USER_PREFILL_CONTENT_ACU);
+    // 每个旧槽位对应已手写的新正文；只匹配完整旧正文，不推断用户段落的归属。
+    const slots = new Map<number, readonly number[]>([
+      [root, [0]], [formatAsk, [1]], [formatAsk + 1, [2]],
+      [boundaryAsk, [3]], [boundaryAsk + 1, [4, 5, 6, 7, 8]],
+      [chronologyAsk, [9]], [chronologyAsk + 1, [10]],
+      [procedureAsk, [11]], [procedureAsk + 1, [12, 13, 14]],
+      [task, []], [snapshot, [15]], [history, [16]], [prefill, [17]],
+    ]);
+    const matches = (segment: ContinuationPromptSegment_ACU, old: ContinuationPromptSegment_ACU): boolean =>
+      segment.role === old.role && segment.content === old.content;
+    const inherit = (segment: ContinuationPromptSegment_ACU, oldIndex: number, newIndex: number): ContinuationPromptSegment_ACU => ({
+      ...segment, role: next[newIndex].role, content: next[newIndex].content,
+      ...(oldIndex === snapshot && segment.snapshotTemplate === previous[snapshot].snapshotTemplate
+        ? { snapshotTemplate: next[newIndex].snapshotTemplate } : {}),
+    });
+    if (segments.length === previous.length && segments.every((segment, index) => matches(segment, previous[index])
+      && segment.enabled === previous[index].enabled && segment.snapshotTemplate === previous[index].snapshotTemplate)) {
+      return next.map((_, newIndex) => {
+        const oldIndex = [...slots].find(([, indexes]) => indexes.includes(newIndex))![0];
+        return inherit(segments[oldIndex], oldIndex, newIndex);
+      });
+    }
+    return segments.flatMap(segment => {
+      const oldIndex = previous.findIndex(old => matches(segment, old));
+      if (oldIndex < 0) return [{ ...segment }];
+      const indexes = slots.get(oldIndex);
+      if (!indexes || (oldIndex === task && segment.enabled === false)) return [{ ...segment }];
+      return indexes.map(newIndex => inherit(segment, oldIndex, newIndex));
+    });
+  }
+  if (role === 'mainlinePlanner') {
+    const next = buildMainlinePlannerQaPrompt_ACU();
+    const root = previous.findIndex(segment => segment.role === 'system' && !isAgentSnapshotSlot_ACU(segment));
+    const boundaryAsk = previous.findIndex(segment => segment.content === '说清楚你的认识论边界和策划方法论。');
+    const formatAsk = previous.findIndex(segment => segment.content === '你的输出契约是什么？');
+    const procedureAsk = previous.findIndex(segment => segment.content === V41_ROLE_PROCEDURE_ASK_ACU);
+    const task = previous.findIndex(segment => segment.content === '当前任务与资料见独立的运行时快照。');
+    const snapshot = previous.findIndex(isAgentSnapshotSlot_ACU);
+    const history = previous.findIndex(segment => segment.role === 'history');
+    const prefill = previous.findIndex(segment => segment.content === USER_PREFILL_CONTENT_ACU);
+    const slots = new Map<number, readonly number[]>([
+      [root, [0]], [formatAsk, [1]], [formatAsk + 1, [2]],
+      [boundaryAsk, [3]], [boundaryAsk + 1, [4, 5, 6, 7, 8]],
+      [procedureAsk, [9]], [procedureAsk + 1, [10, 11, 12]],
+      [task, []], [snapshot, [13]], [history, [14]], [prefill, [15]],
+    ]);
+    const matches = (segment: ContinuationPromptSegment_ACU, old: ContinuationPromptSegment_ACU): boolean =>
+      segment.role === old.role && segment.content === old.content;
+    const inherit = (segment: ContinuationPromptSegment_ACU, oldIndex: number, newIndex: number): ContinuationPromptSegment_ACU => ({
+      ...segment, role: next[newIndex].role, content: next[newIndex].content,
+      ...(oldIndex === snapshot && segment.snapshotTemplate === previous[snapshot].snapshotTemplate
+        ? { snapshotTemplate: next[newIndex].snapshotTemplate } : {}),
+    });
+    if (segments.length === previous.length && segments.every((segment, index) => matches(segment, previous[index])
+      && segment.enabled === previous[index].enabled && segment.snapshotTemplate === previous[index].snapshotTemplate)) {
+      return next.map((_, newIndex) => {
+        const oldIndex = [...slots].find(([, indexes]) => indexes.includes(newIndex))![0];
+        return inherit(segments[oldIndex], oldIndex, newIndex);
+      });
+    }
+    return segments.flatMap(segment => {
+      const oldIndex = previous.findIndex(old => matches(segment, old));
+      if (oldIndex < 0) return [{ ...segment }];
+      const indexes = slots.get(oldIndex);
+      if (!indexes || (oldIndex === task && segment.enabled === false)) return [{ ...segment }];
+      return indexes.map(newIndex => inherit(segment, oldIndex, newIndex));
+    });
+  }
+  if (role === 'beatPlanner') {
+    const next = buildBeatPlannerQaPrompt_ACU();
+    const root = previous.findIndex(segment => segment.role === 'system' && !isAgentSnapshotSlot_ACU(segment));
+    const boundaryAsk = previous.findIndex(segment => segment.content === '说清楚你的认识论边界和方法论。');
+    const formatAsk = previous.findIndex(segment => segment.content === '你的输出契约是什么？');
+    const procedureAsk = previous.findIndex(segment => segment.content === V41_ROLE_PROCEDURE_ASK_ACU);
+    const task = previous.findIndex(segment => segment.content === '当前任务与资料见独立的运行时快照。');
+    const snapshot = previous.findIndex(isAgentSnapshotSlot_ACU);
+    const history = previous.findIndex(segment => segment.role === 'history');
+    const prefill = previous.findIndex(segment => segment.content === USER_PREFILL_CONTENT_ACU);
+    // 旧槽位与手写正文明确对应；不根据用户段落的相邻 role 自动生成问答。
+    const slots = new Map<number, readonly number[]>([
+      [root, [0]], [formatAsk, [1]], [formatAsk + 1, [2]],
+      [boundaryAsk, [3]], [boundaryAsk + 1, [4, 5, 6, 7, 8]],
+      [procedureAsk, [9]], [procedureAsk + 1, [10, 11, 12]],
+      [task, []], [snapshot, [13]], [history, [14]], [prefill, [15]],
+    ]);
+    const matches = (segment: ContinuationPromptSegment_ACU, old: ContinuationPromptSegment_ACU): boolean =>
+      segment.role === old.role && segment.content === old.content;
+    const inherit = (segment: ContinuationPromptSegment_ACU, oldIndex: number, newIndex: number): ContinuationPromptSegment_ACU => ({
+      ...segment, role: next[newIndex].role, content: next[newIndex].content,
+      ...(oldIndex === snapshot && segment.snapshotTemplate === previous[snapshot].snapshotTemplate
+        ? { snapshotTemplate: next[newIndex].snapshotTemplate } : {}),
+    });
+    if (segments.length === previous.length && segments.every((segment, index) => matches(segment, previous[index])
+      && segment.enabled === previous[index].enabled && segment.snapshotTemplate === previous[index].snapshotTemplate)) {
+      return next.map((_, newIndex) => {
+        const oldIndex = [...slots].find(([, indexes]) => indexes.includes(newIndex))![0];
+        return inherit(segments[oldIndex], oldIndex, newIndex);
+      });
+    }
+    return segments.flatMap(segment => {
+      const oldIndex = previous.findIndex(old => matches(segment, old));
+      if (oldIndex < 0) return [{ ...segment }];
+      const indexes = slots.get(oldIndex);
+      if (!indexes || (oldIndex === task && segment.enabled === false)) return [{ ...segment }];
+      return indexes.map(newIndex => inherit(segment, oldIndex, newIndex));
+    });
+  }
+  return migrateAgentQaLayout_ACU(segments, previous, continuationQaOptions_ACU(role, previous));
+}
+
+/** 单身份、格式问答、方法流程问答、快照、原身份历史与固定 user 尾段。 */
+export function buildDefaultContinuationAgentPrompts_ACU(): ActiveContinuationAgentPrompts_ACU {
+  const { reviewer: _retiredReviewer, ...prompts } = buildV49ContinuationAgentPrompts_ACU();
+  for (const role of Object.keys(prompts) as Array<keyof ActiveContinuationAgentPrompts_ACU>) {
+    prompts[role] = role === 'main' ? buildMainAgentQaPrompt_ACU()
+      : role === 'arcArchitect' ? buildArcArchitectQaPrompt_ACU()
+      : role === 'maintainer' ? buildMaintainerQaPrompt_ACU()
+      : role === 'mainlinePlanner' ? buildMainlinePlannerQaPrompt_ACU()
+      : role === 'beatPlanner' ? buildBeatPlannerQaPrompt_ACU()
+      : role === 'instructionComposer' ? buildInstructionComposerQaPrompt_ACU()
+      : role === 'finalReviewer' ? buildFinalReviewerQaPrompt_ACU()
+      : role === 'webResearcher' ? buildWebResearcherQaPrompt_ACU()
+      : buildAgentQaLayout_ACU(prompts[role], continuationQaOptions_ACU(role, prompts[role]));
   }
   return prompts;
 }

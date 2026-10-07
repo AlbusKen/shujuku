@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildDefaultContinuationSettings_ACU,
-  CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU,
+  CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU,
   normalizeContinuationInternalAiRetryLimit_ACU,
   normalizeContinuationMaxAutomaticStages_ACU,
 } from '../../../src/service/continuation/defaults';
@@ -464,16 +464,16 @@ describe('Continuation defaults', () => {
     expect(first.maxAutomaticStages).toBe(6);
     expect(first.internalAiRetryLimit).toBe(3);
     expect(first.apiPresetMode).toBe('current');
-    expect(first.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU);
-    expect(first.outlinePrompt[0].content).toContain('<stage_title>');
+    expect(first.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU);
+    expect(first.outlinePrompt.some(segment => segment.content.includes('<stage_title>'))).toBe(true);
     expect(first.maxConsecutivePressureTurns).toBe(8);
     expect(first.agentPrompts.main[0].content).toContain('主控 Agent');
     expect(first.agentPrompts.arcArchitect[0].content).toContain('故事总纲子代理');
-    expect(first.agentPrompts.arcArchitect[6].content).toContain('短线 7–8 卷、中线 10–14 卷、长线 20 卷');
-    expect(first.agentPrompts.maintainer[0].content).toContain('伏笔与认知维护子代理');
+    expect(first.agentPrompts.arcArchitect.some(segment => segment.content.includes('短线 7–8 卷、中线 10–14 卷、长线 20 卷'))).toBe(true);
+    expect(first.agentPrompts.maintainer[0].content).toContain('伏笔、认知信息差与故事年代学的结算维护子代理');
     expect(first.agentPrompts.mainlinePlanner[0].content).toContain('主线推进策划子代理');
-    expect(first.agentPrompts.beatPlanner[0].content).toContain('伏笔与节拍策划子代理');
-    expect(first.agentPrompts.reviewer[0].content).toContain('连续性审查子代理');
+    expect(first.agentPrompts.beatPlanner[0].content).toContain('伏笔与情绪节拍策划子代理');
+    expect(first.agentPrompts).not.toHaveProperty('reviewer');
 
     first.outlinePrompt[0].content = 'modified';
     first.agentPrompts.main[0].content = 'modified';

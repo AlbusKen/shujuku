@@ -312,7 +312,7 @@ export class ContinuationOutlinePlanner_ACU {
     const trailingPrefill = rendered.messages[rendered.messages.length - 1]?.content === USER_PREFILL_CONTENT_ACU ? rendered.messages.pop() : undefined;
     const hasSnapshot = request.settings.outlinePrompt.some(isAgentSnapshotSlot_ACU);
     const snapshotTemplate = agentSnapshotTemplate_ACU(request.settings.outlinePrompt, '');
-    const snapshotText = snapshotTemplate.trim()
+    let snapshotText = snapshotTemplate.trim()
       ? (await renderContinuationPrompt_ACU([{ role: 'system', content: snapshotTemplate }], resolvers,
         request.reason === 'manual_replan' ? 'replan' : 'outline_prompt')).messages[0].content : '';
     const renderedBlob = [...rendered.messages.map(message => message.content), snapshotText].join('\n');
@@ -321,7 +321,10 @@ export class ContinuationOutlinePlanner_ACU {
     const enabledOutline = resolvers.$OUTLINE_WINDOW ? String(await resolvers.$OUTLINE_WINDOW() ?? '').trim() : '';
     if (storyArc && !renderedBlob.includes(storyArc)) injected.push(`【当前故事总纲】\n${storyArc}`);
     if (enabledOutline && !renderedBlob.includes(enabledOutline)) injected.push(`【当前启用的阶段大纲】\n${enabledOutline}`);
-    if (injected.length) rendered.messages.push({ role: 'user', content: injected.join('\n\n') });
+    if (injected.length) {
+      if (hasSnapshot) snapshotText = [snapshotText, ...injected].filter(Boolean).join('\n\n');
+      else rendered.messages.push({ role: 'user', content: injected.join('\n\n') });
+    }
     const transcript: Array<{ role: string; content: string }> = [];
     let lastRaw = '';
 
@@ -334,7 +337,8 @@ export class ContinuationOutlinePlanner_ACU {
         throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'outline_call', '阶段大纲内部请求已失效', false));
       }
       const prepared = hasSnapshot
-        ? assembleAgentPrompt_ACU(messages, request.history ?? [], snapshotText, trailingPrefill)
+        ? assembleAgentPrompt_ACU(rendered.messages, [...(request.history ?? []), ...messages.slice(rendered.messages.length)],
+          snapshotText, trailingPrefill)
         : trailingPrefill ? [...messages, trailingPrefill] : messages;
       const rawValue = await this.dependencies.callInternalAi(prepared, preset, identity, undefined, {
         promptCacheEnabled: true,

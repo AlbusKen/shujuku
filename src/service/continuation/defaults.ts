@@ -3,6 +3,7 @@ import { buildDefaultContinuationAgentPrompts_ACU } from './agent/agent-defaults
 import { USER_PREFILL_CONTENT_ACU } from '../../shared/user-prefill.js';
 import { withCreativeIdentity_ACU } from '../../shared/creative-identity.js';
 import { isAgentSnapshotSlot_ACU, withAgentPromptLayout_ACU } from '../../shared/agent-prompt-layout';
+import { buildAgentQaLayout_ACU, migrateAgentQaLayout_ACU, type AgentQaOptions_ACU } from '../../shared/agent-prompt-qa';
 import {
   AGENT_HISTORY_TOKEN_BUDGET_DEFAULT_ACU,
   AGENT_READ_FALLBACK_TOKENS_DEFAULT_ACU,
@@ -254,6 +255,12 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V46_ACU = 'spv5.4-continu
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V47_ACU = 'continuation-prompt-layout-v47';
 /** 各请求消费可编辑快照正文；仅迁移完整匹配的内置资料段。 */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU = 'continuation-editable-snapshot-v48';
+/** 工具开关只切换格式输出段；其余段与快照模板的中性化措辞统一为单版本。 */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V49_ACU = 'spv5.5-continuation-mode-neutral-v49';
+/** 格式回答紧随身份，静态规则问答化，动态占位符集中于快照模板。 */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V50_ACU = 'continuation-qa-layout-v50';
+/** 本次更新一次性重置全部续写提示词（含大纲），仅保留现役角色。 */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU = 'continuation-qa-reset-v51';
 
 /**
  * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
@@ -327,8 +334,32 @@ export function withV48OutlineSnapshot_ACU(segments: readonly ContinuationPrompt
   return withAgentPromptLayout_ACU(next, template);
 }
 
-export function buildDefaultContinuationOutlinePrompt_ACU(): ContinuationPromptSegment_ACU[] {
+export function buildV49ContinuationOutlinePrompt_ACU(): ContinuationPromptSegment_ACU[] {
   return withV48OutlineSnapshot_ACU(buildV47ContinuationOutlinePrompt_ACU());
+}
+
+function outlineQaOptions_ACU(previous: readonly ContinuationPromptSegment_ACU[]): AgentQaOptions_ACU {
+  const text = previous[0].content;
+  const formatAt = text.indexOf('输出格式：');
+  return { formatIndex: 0, identity: text.slice(0, formatAt).trim(), rootRemainder: '',
+    formatContent: text.slice(formatAt), cleanStatic: text => text,
+    questions: Object.fromEntries(previous.map((segment, index) => [index,
+      segment.content.startsWith('【阶段容量') ? '你怎样判断阶段容量，避免把多个阶段压进一段？'
+        : segment.content.startsWith('【节奏') ? '你怎样确定阶段形态和各轮节奏？'
+          : segment.content.startsWith('【真正日常') ? '低压轮承担什么功能，故事时间怎样合理流逝？'
+            : segment.content.startsWith('【大纲方法论') ? '你规划节点与轮次时怎样推理和自检？'
+              : '你怎样落实这些规划约束？'])),
+  };
+}
+
+export function withV50OutlineQa_ACU(segments: readonly ContinuationPromptSegment_ACU[]): ContinuationPromptSegment_ACU[] {
+  const previous = buildV49ContinuationOutlinePrompt_ACU();
+  return migrateAgentQaLayout_ACU(segments, previous, outlineQaOptions_ACU(previous));
+}
+
+export function buildDefaultContinuationOutlinePrompt_ACU(): ContinuationPromptSegment_ACU[] {
+  const previous = buildV49ContinuationOutlinePrompt_ACU();
+  return buildAgentQaLayout_ACU(previous, outlineQaOptions_ACU(previous));
 }
 
 export function buildDefaultContinuationWorkflowSettings_ACU(): ContinuationSettings_ACU['workflow'] {
@@ -380,7 +411,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU,
   };
 }
 

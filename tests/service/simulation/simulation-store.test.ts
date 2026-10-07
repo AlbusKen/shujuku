@@ -93,7 +93,7 @@ describe('world simulation envelope store', () => {
     expect(chat[0]._qrf_world_simulation.settings.agentPrompts['world-director']).toEqual(old.settings.agentPrompts['world-director']);
   });
 
-  it('生产读取将 v21 原样 one-shot 工作流升级为范例，同时保留用户改写与持久原文', () => {
+  it('生产读取把 v21 存量提示词连同用户改写整组重置为当前默认，读取本身不改写持久原文', () => {
     const old = buildDefaultWorldSimulationEnvelope_ACU();
     old.settings.promptForceDefaultVersion = WORLD_SIMULATION_PROMPT_VERSION_V21_ACU;
     for (const role of ['undercurrent-analyst', 'dramatis-keeper', 'guidance-composer'] as const) {
@@ -108,9 +108,8 @@ describe('world simulation envelope store', () => {
     const loaded = new FirstFloorWorldSimulationStore_ACU().read()!;
     const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
     expect(loaded.settings.promptForceDefaultVersion).toBe(WORLD_SIMULATION_PROMPT_VERSION_ACU);
-    expect(loaded.settings.agentPrompts['undercurrent-analyst']).toEqual(defaults['undercurrent-analyst']);
-    expect(loaded.settings.agentPrompts['guidance-composer']).toEqual(defaults['guidance-composer']);
-    expect(loaded.settings.agentPrompts['dramatis-keeper'][workflowIndex]).toEqual(customized[workflowIndex]);
+    expect(loaded.settings.agentPrompts).toEqual(defaults);
+    expect(loaded.settings.agentPrompts['dramatis-keeper'].some(segment => segment.content.includes('用户自定义人物核查规则'))).toBe(false);
     expect(chat[0]._qrf_world_simulation).toEqual(persisted);
   });
 

@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
 import { USER_PREFILL_CONTENT_ACU } from '../../../../src/shared/user-prefill.js';
-import { isAgentFixedSlot_ACU, withAgentPromptLayout_ACU } from '../../../../src/shared/agent-prompt-layout';
 import {
   buildDefaultContinuationAgentPrompts_ACU,
   buildV39ContinuationAgentPrompts_ACU,
@@ -9,7 +8,7 @@ import {
   withV40RoleSelfNarration_ACU,
 } from '../../../../src/service/continuation/agent/agent-defaults';
 import { validateContinuationSettings_ACU } from '../../../../src/service/continuation/continuation-store';
-import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V39_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU } from '../../../../src/service/continuation/defaults';
+import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V39_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU } from '../../../../src/service/continuation/defaults';
 
 const TARGETS_ACU = [
   ['arcArchitect', '【卷级容量、时间与长期经营契约】'],
@@ -59,19 +58,13 @@ describe('V40 子代理自述段', () => {
     expect(withV40RoleSelfNarration_ACU('maintainer', once)).toEqual(once);
   });
 
-  it('V39 存量配置迁移到 V40 后与当前默认组一致，用户改写的角色原样保留', () => {
+  it('V39 存量配置一次性整组重置为当前默认组，用户改写的角色也换成默认', () => {
     const settings = buildDefaultContinuationSettings_ACU() as any;
     settings.promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V39_ACU;
     settings.agentPrompts = buildV39ContinuationAgentPrompts_ACU();
-    const custom = [{ role: 'user', content: '用户自定义终审提示词', enabled: true, deletable: true }];
-    settings.agentPrompts.finalReviewer = custom;
+    settings.agentPrompts.finalReviewer = [{ role: 'user', content: '用户自定义终审提示词', enabled: true, deletable: true }];
     const loaded = validateContinuationSettings_ACU(settings);
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU);
-    expect(loaded.agentPrompts.arcArchitect).toEqual(defaults.arcArchitect);
-    expect(loaded.agentPrompts.maintainer).toEqual(defaults.maintainer);
-    expect(loaded.agentPrompts.instructionComposer).toEqual(defaults.instructionComposer);
-    const migrated = loaded.agentPrompts.finalReviewer;
-    expect(migrated.filter(segment => !isAgentFixedSlot_ACU(segment))).toEqual(withAgentPromptLayout_ACU(custom).filter(segment => !isAgentFixedSlot_ACU(segment)));
-    expect(migrated.find(segment => segment.snapshotTemplate !== undefined)?.snapshotTemplate).toContain('$USER_REQUIREMENTS');
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU);
+    expect(loaded.agentPrompts).toEqual(defaults);
   });
 });

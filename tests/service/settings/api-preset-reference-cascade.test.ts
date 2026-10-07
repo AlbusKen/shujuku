@@ -88,7 +88,7 @@ function resetSettings(firstFloor: Record<string, unknown> | null) {
       ...buildDefaultContinuationSettings_ACU().agentApiPresets,
       main: { mode: 'fixed' as const, presetName: OLD_NAME },
       outline: { mode: 'inherit' as const, presetName: OLD_NAME },
-      reviewer: { mode: 'fixed' as const, presetName: '其他预设' },
+      finalReviewer: { mode: 'fixed' as const, presetName: '其他预设' },
     },
   };
   const simulationEnvelope = buildDefaultWorldSimulationEnvelope_ACU();
@@ -161,13 +161,13 @@ describe('renameApiPresetReferences_ACU / clearApiPresetReferences_ACU', () => {
     expect(global.fixedApiPresetName).toBe(NEW_NAME);
     expect(global.agentApiPresets.main.presetName).toBe(NEW_NAME);
     expect(global.agentApiPresets.outline.presetName).toBe(NEW_NAME);
-    expect(global.agentApiPresets.reviewer.presetName).toBe('其他预设');
+    expect(global.agentApiPresets.finalReviewer.presetName).toBe('其他预设');
 
     const continuation = (firstFloor[CONTINUATION_FIRST_FLOOR_FIELD_ACU] as any).settings;
     expect(continuation.fixedApiPresetName).toBe(NEW_NAME);
     expect(continuation.agentApiPresets.main.presetName).toBe(NEW_NAME);
     expect(continuation.agentApiPresets.outline.mode).toBe('inherit');
-    expect(continuation.agentApiPresets.reviewer.presetName).toBe('其他预设');
+    expect(continuation.agentApiPresets.finalReviewer.presetName).toBe('其他预设');
 
     const simulation = (firstFloor[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU] as any).settings;
     expect(simulation.fixedApiPresetName).toBe(NEW_NAME);
@@ -197,7 +197,7 @@ describe('renameApiPresetReferences_ACU / clearApiPresetReferences_ACU', () => {
     expect(continuation.fixedApiPresetName).toBe('');
     expect(continuation.agentApiPresets.main).toEqual({ mode: 'current', presetName: '' });
     expect(continuation.agentApiPresets.outline).toEqual({ mode: 'inherit', presetName: '' });
-    expect(continuation.agentApiPresets.reviewer).toEqual({ mode: 'fixed', presetName: '其他预设' });
+    expect(continuation.agentApiPresets.finalReviewer).toEqual({ mode: 'fixed', presetName: '其他预设' });
 
     const simulation = (firstFloor[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU] as any).settings;
     expect(simulation.apiPresetMode).toBe('current');

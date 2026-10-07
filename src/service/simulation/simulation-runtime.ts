@@ -49,7 +49,7 @@ import {
 import { buildDirectorOwnedStageRevision_ACU } from './simulation-stage-planner';
 import { WorldSimulationStageExecutionEngine_ACU } from './simulation-stage-execution-engine';
 import { FirstFloorWorldSimulationStore_ACU, WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU, assertWorldSimulationAnchorCurrent_ACU, resolveCurrentWorldSimulationAnchor_ACU } from './simulation-store';
-import { WORLD_SIMULATION_PROMPT_VERSION_ACU, WORLD_SIMULATION_PROMPT_VERSION_V20_ACU, migrateWorldSimulationAgentPromptsDetailed_ACU, type WorldSimulationAgentPrompts_ACU } from './agent/agent-defaults';
+import { WORLD_SIMULATION_PROMPT_VERSION_ACU, WORLD_SIMULATION_PROMPT_VERSION_V20_ACU } from './agent/agent-defaults';
 import { buildDefaultWorldSimulationEnvelope_ACU } from './defaults';
 import { buildWorldSimulationProjection_ACU } from './simulation-projection';
 import { detectWorldCollisions_ACU } from './world-dynamics';
@@ -487,28 +487,21 @@ export class WorldSimulationRuntime_ACU {
   }
   private getStore_ACU() { return this.logicalStore ?? new FirstFloorWorldSimulationStore_ACU(); }
 
-  private async persistPromptMigration_ACU(): Promise<string[]> {
+  private async persistPromptMigration_ACU(): Promise<void> {
     this.assertScope_ACU();
     const chat = this.getChat();
     const raw = this.logicalStore ? this.logicalStore.read()
       : (chat[0] as Record<string, any> | undefined)?.[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU];
-    if (!raw || raw.settings?.promptForceDefaultVersion === WORLD_SIMULATION_PROMPT_VERSION_ACU) return [];
+    if (!raw || raw.settings?.promptForceDefaultVersion === WORLD_SIMULATION_PROMPT_VERSION_ACU) return;
     const identity = this.getChatIdentity_ACU();
-    if (!identity || this.orchestrator.isInFlight(identity)) return [];
-    // First validate the persisted envelope. Do not announce a migration that failed to save.
+    if (!identity || this.orchestrator.isInFlight(identity)) return;
+    // First validate the persisted envelope so an invalid one fails before any write.
     this.getStore_ACU().read();
-    const previous = raw.settings?.promptForceDefaultVersion;
-    // Pre-v21 custom one-shot profiles are reset; v21 edits are preserved by the version-aware migration.
-    const forcedRoles = previous !== WORLD_SIMULATION_PROMPT_VERSION_ACU
-      ? migrateWorldSimulationAgentPromptsDetailed_ACU(
-        raw.settings.agentPrompts as WorldSimulationAgentPrompts_ACU, {}, previous).forcedRoles
-      : [];
     await this.getStore_ACU().updateAtomically(current => current!, { chatIdentity: identity });
-    return forcedRoles;
   }
 
-  async initialize(): Promise<string[]> {
-    return this.persistPromptMigration_ACU();
+  async initialize(): Promise<void> {
+    await this.persistPromptMigration_ACU();
   }
 
   /** 读取派生视图：重载后残留的 running 以 paused/interrupted 呈现，不落盘。 */

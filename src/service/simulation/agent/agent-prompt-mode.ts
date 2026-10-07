@@ -1,7 +1,9 @@
 import type { AgentToolMode_ACU } from '../../ai/agent-tool-mode';
 import type { WorldSimulationPromptSegment_ACU } from '../model';
 import { findWorldSimulationAgentDefinition_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
-import { buildDefaultWorldSimulationAgentPrompts_ACU, buildV20WorldSimulationAgentPrompt_ACU, type WorldSimulationAgentPrompts_ACU } from './agent-defaults';
+import { buildDefaultWorldSimulationAgentPrompts_ACU, buildV20WorldSimulationAgentPrompt_ACU, isWorldSimulationModeVariantSegment_ACU, type WorldSimulationAgentPrompts_ACU } from './agent-defaults';
+import { AGENT_FORMAT_ANSWER_MARKER_ACU, isAgentFormatAnswer_ACU } from '../../../shared/agent-prompt-qa';
+import { worldSimulationOneShotProtocol_ACU, type WorldSimulationOneShotProtocolRole_ACU } from './agent-format-protocol';
 
 const JSON_SWAPS_ACU: ReadonlyArray<readonly [string, string]> = [
   ['read 与 search 使用函数调用，不要写成 JSON。决策只输出一个主动作 JSON：open_round、delegate、finalize 或 block。', '仅输出一个主动作 JSON：read、search、open_round、delegate、finalize 或 block。'],
@@ -22,6 +24,10 @@ function swap_ACU(text: string, pairs: ReadonlyArray<readonly [string, string]>)
 
 /** 仅供内置正文与动态协议守卫使用；用户正文必须先逐段精确识别。 */
 export function worldSimulationProtocolForMode_ACU(name: WorldSimulationAgentName_ACU, content: string, mode: AgentToolMode_ACU): string {
+  if (content.startsWith(AGENT_FORMAT_ANSWER_MARKER_ACU) && ['undercurrent-analyst', 'dramatis-keeper', 'guidance-composer'].includes(name)) {
+    return AGENT_FORMAT_ANSWER_MARKER_ACU + worldSimulationOneShotProtocol_ACU(name as WorldSimulationOneShotProtocolRole_ACU,
+      findWorldSimulationAgentDefinition_ACU(name)!.writableModules, mode);
+  }
   let next = swap_ACU(content, JSON_SWAPS_ACU).replace(
     /现在只执行当前任务。[^\n。]*使用函数调用；(?:决策输出|最终交付)必须是协议要求的单个 JSON 对象，不附加 Markdown。/g,
     '现在只执行当前任务。输出必须是协议要求的单个 JSON 对象，不附加 Markdown。',
@@ -85,16 +91,19 @@ export function worldSimulationProtocolForMode_ACU(name: WorldSimulationAgentNam
 type ModeDefaults_ACU = Record<'mixed' | AgentToolMode_ACU, WorldSimulationAgentPrompts_ACU>;
 let defaults_ACU: ModeDefaults_ACU | undefined;
 
+/**
+ * 工具调用开关只派生「具体格式输出段」（isWorldSimulationModeVariantSegment_ACU）的正文。
+ * 其余段落与快照模板始终保持单一版本：开关不锚定快照，也不改写其它提示词。
+ */
 function modeDefaults_ACU(): ModeDefaults_ACU {
   if (!defaults_ACU) {
     const mixed = buildDefaultWorldSimulationAgentPrompts_ACU();
     const build = (mode: AgentToolMode_ACU): WorldSimulationAgentPrompts_ACU => {
       const result = { ...mixed };
       for (const name of Object.keys(mixed) as Array<keyof WorldSimulationAgentPrompts_ACU>) {
-        result[name] = mixed[name].map(segment => ({ ...segment,
-          content: worldSimulationProtocolForMode_ACU(name, segment.content, mode),
-          ...(segment.snapshotTemplate === undefined ? {} : { snapshotTemplate: worldSimulationProtocolForMode_ACU(name, segment.snapshotTemplate, mode) }),
-        }));
+        result[name] = mixed[name].map(segment => (isAgentFormatAnswer_ACU(segment)
+          ? { ...segment, content: worldSimulationProtocolForMode_ACU(name, segment.content, mode) }
+          : { ...segment }));
       }
       return result;
     };
@@ -112,7 +121,10 @@ export function buildWorldSimulationAgentPromptsForMode_ACU(mode: AgentToolMode_
   return result;
 }
 
-/** 默认正文可重排，段元数据与用户改写原样保留；旧逐栏恢复用其冻结 V20 基线。 */
+/**
+ * 默认正文可重排，段元数据与用户改写原样保留；只有格式输出段跟随开关切换，
+ * 其余段与快照模板原样保留。旧逐栏恢复用其冻结 V20 基线。
+ */
 export function adaptWorldSimulationPromptSegmentsToToolMode_ACU(
   name: WorldSimulationAgentName_ACU, segments: readonly WorldSimulationPromptSegment_ACU[], mode: AgentToolMode_ACU,
 ): WorldSimulationPromptSegment_ACU[] {
@@ -122,12 +134,9 @@ export function adaptWorldSimulationPromptSegmentsToToolMode_ACU(
   return segments.map(segment => {
     for (const source of sources) {
       const index = source.findIndex(item => item.role === segment.role && item.content === segment.content);
-      if (index >= 0) return { ...segment, content: defaults[mode][name][index].content,
-        ...(segment.snapshotTemplate !== undefined && sources.some(items => items.some(item => item.role === segment.role
-          && item.content === segment.content && item.snapshotTemplate === segment.snapshotTemplate))
-          ? { snapshotTemplate: defaults[mode][name][index].snapshotTemplate }
-          : {}),
-      };
+      if (index < 0) continue;
+      if (!isAgentFormatAnswer_ACU(defaults.mixed[name][index])) return { ...segment };
+      return { ...segment, content: defaults[mode][name][index].content };
     }
     if (legacy.some(item => item.role === segment.role && item.content === segment.content)) {
       return { ...segment, content: worldSimulationProtocolForMode_ACU(name, segment.content, mode) };

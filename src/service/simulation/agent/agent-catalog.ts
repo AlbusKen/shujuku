@@ -4,7 +4,6 @@ import { WORLD_RELATED_READONLY_MODULES_ACU } from '../world-catalog';
 
 export const WORLD_SIMULATION_AGENT_NAMES_ACU = [
   'world-director',
-  'world-stage-planner',
   'undercurrent-analyst',
   'dramatis-keeper',
   'causality-reviewer',
@@ -13,8 +12,9 @@ export const WORLD_SIMULATION_AGENT_NAMES_ACU = [
 ] as const;
 
 /** 退役角色只供旧运行恢复及历史提示词谱系使用，不在公开目录展示。 */
-export type WorldSimulationAgentName_ACU = typeof WORLD_SIMULATION_AGENT_NAMES_ACU[number] | 'timekeeper' | 'chronicler';
+export type WorldSimulationAgentName_ACU = typeof WORLD_SIMULATION_AGENT_NAMES_ACU[number] | 'timekeeper' | 'chronicler' | 'world-stage-planner';
 export const WORLD_SIMULATION_RETIRED_AGENT_NAMES_ACU = [
+  'world-stage-planner',
   'world-analyst',
   'macro-dynamics-analyst',
   'seed-lifecycle-analyst',
@@ -47,7 +47,6 @@ export interface WorldSimulationAgentDefinition_ACU {
 
 export const WORLD_SIMULATION_AGENT_CATALOG_ACU: readonly WorldSimulationAgentDefinition_ACU[] = [
   { name: 'world-director', kind: 'director', description: '用户沟通接口：用户在推演对话发消息时决定开局焦点或定向维护；自动推演不经过导演', triggers: ['用户消息'], promptKey: 'world-director', apiRole: 'world-director', writableModules: [] },
-  { name: 'world-stage-planner', kind: 'planner', description: '兼容展示名：单轮焦点与流程参数已由主会话开局决策吸收，不再独立派工', triggers: ['兼容展示'], promptKey: 'world-stage-planner', apiRole: 'world-stage-planner', writableModules: [] },
   { name: 'undercurrent-analyst', kind: 'specialist', description: '推演世界时钟、维度压力与暗流种子生命周期的幕后演变', triggers: ['每轮推演批次一'], promptKey: 'undercurrent-analyst', apiRole: 'undercurrent-analyst', writableModules: ['clock', 'dimensions', 'seeds'] },
   { name: 'dramatis-keeper', kind: 'specialist', description: '推演行动者信息边界、玩家位置接触与人物死亡伴生传闻', triggers: ['每轮推演批次一'], promptKey: 'dramatis-keeper', apiRole: 'dramatis-keeper', writableModules: ['actors', 'player', 'rumors'] },
   { name: 'causality-reviewer', kind: 'reviewer', description: '审核幕后演变的时间、空间、因果、revision、权限与证据，不写入 guidance', triggers: ['用户路径候选终审'], promptKey: 'causality-reviewer', apiRole: 'causality-reviewer', writableModules: [] },

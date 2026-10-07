@@ -1,27 +1,22 @@
 /**
- * 默认提示词谱系回归：每一份历史版本的默认提示词组（V17–V26，含 9.1 正式版发布时的 V20）
- * 经当前迁移链后都必须与当前默认组逐段一致，用户改写段与追加段原样保留。
- *
- * fixture 维护约定：改写任何默认段正文前，先把改写前的默认组追加进
- * fixtures/continuation-prompt-history.json（可复用其 texts 去重结构），并把旧正文的哈希与长度
- * 登记到 AGENT_PROMPT_DEFAULT_LINEAGE_ACU；否则本文件会在对应版本上失败。
+ * 默认提示词谱系回归：每一份历史版本的默认提示词组（V17–V29，含 9.1 正式版发布时的 V20）
+ * 读出时都按版本标记整组重置为当前默认组（V51），用户改写段与追加段一并重置；
+ * V51 信封里用户保存的编辑原样保留，重复读取不再重置。
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { USER_PREFILL_CONTENT_ACU } from '../../../src/shared/user-prefill.js';
-import { isAgentFixedSlot_ACU, withAgentPromptLayout_ACU } from '../../../src/shared/agent-prompt-layout';
+import { buildContinuationAgentPromptsForMode_ACU } from '../../../src/service/continuation/agent/agent-prompt-mode';
 
 import { validateContinuationSettings_ACU } from '../../../src/service/continuation/continuation-store';
-import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V36_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU } from '../../../src/service/continuation/defaults';
+import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU } from '../../../src/service/continuation/defaults';
 
 import {
-  AGENT_PROMPT_DEFAULT_LINEAGE_ACU,
   buildV33ContinuationAgentPrompts_ACU,
   buildV34ContinuationAgentPrompts_ACU,
   AGENT_PREFILLS_ACU,
   buildDefaultContinuationAgentPrompts_ACU,
-  findAgentPromptSlot_ACU,
   hashAgentPromptContent_ACU,
   V20_DEFAULT_ARC_ARCHITECT_CONTRACT_ACU,
   V20_DEFAULT_ARC_ARCHITECT_EPISTEMOLOGY_ACU,
@@ -71,29 +66,32 @@ const REQUIRED_PLACEHOLDERS_ACU: Record<string, string[]> = {
   maintainer: ['$AGENT_TASK', '$AGENT_READ_MATERIALS', '$HISTORY_UNSETTLED', '$HOOKS_LEDGER', '$INFO_GAP', '$CHRONOLOGY', '$USER_REQUIREMENTS'],
   mainlinePlanner: ['$AGENT_TASK', '$AGENT_READ_MATERIALS', '$OUTLINE_WINDOW', '$STORY_OVERVIEW', '$STORY_TAIL', '$STORY_ARC', '$USER_REQUIREMENTS'],
   beatPlanner: ['$AGENT_TASK', '$AGENT_READ_MATERIALS', '$OUTLINE_WINDOW', '$STORY_TAIL', '$HOOKS_LEDGER', '$INFO_GAP', '$USER_REQUIREMENTS'],
-  reviewer: ['$AGENT_TASK', '$AGENT_READ_MATERIALS', '$OUTLINE_WINDOW', '$STORY_TAIL', '$HOOKS_LEDGER', '$ACTIVE_CONSTRAINTS', '$USER_REQUIREMENTS'],
   finalReviewer: ['$AGENT_TASK', '$AGENT_READ_MATERIALS', '$OUTLINE_WINDOW', '$STORY_TAIL', '$STORY_ARC', '$USER_REQUIREMENTS', '$WORLDBOOK_HITS'],
   instructionComposer: ['$USER_REQUIREMENTS', '$AGENT_TASK', '$OUTLINE_WINDOW', '$STORY_TAIL', '$HOOKS_LEDGER', '$ACTIVE_CONSTRAINTS'],
 };
 
-describe('默认提示词谱系迁移', () => {
+describe('默认提示词谱系重置', () => {
   const labels = Object.keys(fixture_ACU.versions);
 
   it('fixture 覆盖 9.1 正式版（V20）在内的历史默认组', () => {
     expect(labels).toEqual(expect.arrayContaining(['v17', 'v18', 'v19', 'v20', 'v22', 'v23', 'v26']));
   });
 
-  it.each(labels)('%s 的默认组迁移后与当前默认组逐段一致', label => {
+  it.each(labels)('%s 的默认组读出时整组重置为当前默认组', label => {
     const loaded = validateContinuationSettings_ACU(historicalSettings_ACU(label));
     const defaults = buildDefaultContinuationSettings_ACU();
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU);
     expect(loaded.outlinePrompt).toEqual(defaults.outlinePrompt);
     for (const role of Object.keys(defaults.agentPrompts) as (keyof typeof defaults.agentPrompts)[]) {
-      expect(loaded.agentPrompts[role], `agentPrompts.${role}`).toEqual(defaults.agentPrompts[role]);
+      const differences = loaded.agentPrompts[role].flatMap((segment, index) => JSON.stringify(segment) === JSON.stringify(defaults.agentPrompts[role][index]) ? [] : [{ index,
+        actual: { ...segment, content: segment.content.slice(0, 100), snapshotTemplate: segment.snapshotTemplate?.slice(0, 100) },
+        expected: defaults.agentPrompts[role][index] && { ...defaults.agentPrompts[role][index], content: defaults.agentPrompts[role][index].content.slice(0, 100), snapshotTemplate: defaults.agentPrompts[role][index].snapshotTemplate?.slice(0, 100) } }]);
+      expect(loaded.agentPrompts[role], `agentPrompts.${role}: ${JSON.stringify(differences)}`).toEqual(defaults.agentPrompts[role]);
     }
+    expect(loaded.agentPrompts).not.toHaveProperty('reviewer');
   });
 
-  it.each(labels)('%s 迁移后每个角色都保有运行时依赖的占位符', label => {
+  it.each(labels)('%s 重置后每个角色都保有运行时依赖的占位符', label => {
     const loaded = validateContinuationSettings_ACU(historicalSettings_ACU(label));
     for (const [role, required] of Object.entries(REQUIRED_PLACEHOLDERS_ACU)) {
       const text = (loaded.agentPrompts as any)[role].filter((segment: ContinuationPromptSegment_ACU) => segment.enabled !== false).map((segment: ContinuationPromptSegment_ACU) => segment.snapshotTemplate ?? segment.content).join('\n');
@@ -102,19 +100,22 @@ describe('默认提示词谱系迁移', () => {
     }
   });
 
-  it('用户改写过的段与追加段在谱系迁移中原样保留', () => {
+  it('旧版本里用户改写过的段与追加段随整组重置换成默认，V51 信封里原样保留', () => {
     const settings = historicalSettings_ACU('v20');
     const customized = settings.agentPrompts.mainlinePlanner.find((segment: ContinuationPromptSegment_ACU) => segment.content.includes('$AGENT_TASK'));
     customized.content = `${customized.content}\n【用户附加要求】保持第一人称。`;
-    const appended = { role: 'user', content: '用户自定义的策划补充规则', enabled: true, deletable: true };
+    const appended = { role: 'user' as const, content: '用户自定义的策划补充规则', enabled: true, deletable: true };
     settings.agentPrompts.mainlinePlanner.push(appended);
     const loaded = validateContinuationSettings_ACU(settings);
-    expect(loaded.agentPrompts.mainlinePlanner.some(segment => segment.content.endsWith('【用户附加要求】保持第一人称。'))).toBe(true);
-    expect(loaded.agentPrompts.mainlinePlanner).toContainEqual(appended);
-    expect(loaded.agentPrompts.mainlinePlanner.filter(segment => segment.content.includes('$AGENT_TASK'))).toHaveLength(1);
+    expect(loaded.agentPrompts.mainlinePlanner).toEqual(buildDefaultContinuationAgentPrompts_ACU().mainlinePlanner);
+
+    const edited = structuredClone(loaded);
+    edited.agentPrompts.mainlinePlanner[1] = { ...edited.agentPrompts.mainlinePlanner[1], content: '【用户附加要求】保持第一人称。' };
+    edited.agentPrompts.mainlinePlanner.push(appended);
+    expect(validateContinuationSettings_ACU(structuredClone(edited)).agentPrompts.mainlinePlanner).toEqual(edited.agentPrompts.mainlinePlanner);
   });
 
-  it('真实 V20 形态（任务段在容量段位置、无容量段）迁移后总纲任务段完整保留', () => {
+  it('真实 V20 形态（任务段在容量段位置、无容量段）读出后总纲组等于当前默认', () => {
     const settings = buildDefaultContinuationSettings_ACU() as any;
     settings.promptForceDefaultVersion = 'spv2.8-continuation-runtime-snapshot-v20';
     settings.agentPrompts = buildV33ContinuationAgentPrompts_ACU();
@@ -131,7 +132,7 @@ describe('默认提示词谱系迁移', () => {
     expect(loaded.agentPrompts.arcArchitect).toEqual(buildDefaultContinuationAgentPrompts_ACU().arcArchitect);
   });
 
-  it('已被误迁的 V27 信封（总纲任务段被覆盖成容量契约）会被修复回默认任务段', () => {
+  it('已被误迁的 V27 信封（总纲任务段被覆盖成容量契约）读出后恢复为当前默认', () => {
     const settings = buildDefaultContinuationSettings_ACU() as any;
     settings.promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU;
     settings.agentPrompts = buildV33ContinuationAgentPrompts_ACU();
@@ -146,36 +147,24 @@ describe('默认提示词谱系迁移', () => {
 
     const loaded = validateContinuationSettings_ACU(settings);
 
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU);
     expect(loaded.agentPrompts.arcArchitect).toEqual(defaults.arcArchitect);
   });
 
-  it('整组自定义保留正文，只补固定布局卡与 user 尾段', () => {
-    const settings = buildDefaultContinuationSettings_ACU() as any;
-    settings.promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU;
-    const custom = [{ role: 'user', content: '用户完全自定义的审查提示词', enabled: true, deletable: true }];
-    settings.agentPrompts.reviewer = custom;
+  it('整组自定义：旧版本随整组重置换成默认，V51 原样保留、不补固定布局卡', () => {
+    const custom = [{ role: 'user' as const, content: '用户完全自定义的策划提示词', enabled: true, deletable: true }];
+    const legacy = buildDefaultContinuationSettings_ACU() as any;
+    legacy.promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU;
+    legacy.agentPrompts.mainlinePlanner = structuredClone(custom);
+    expect(validateContinuationSettings_ACU(legacy).agentPrompts.mainlinePlanner).toEqual(buildDefaultContinuationAgentPrompts_ACU().mainlinePlanner);
 
-    const loaded = validateContinuationSettings_ACU(settings);
-
-    const migrated = loaded.agentPrompts.reviewer;
-    expect(migrated.filter(segment => !isAgentFixedSlot_ACU(segment))).toEqual(withAgentPromptLayout_ACU(custom).filter(segment => !isAgentFixedSlot_ACU(segment)));
-    expect(migrated.find(segment => segment.snapshotTemplate !== undefined)?.snapshotTemplate).toContain('$USER_REQUIREMENTS');
-  });
-
-  it('谱系表条目都指向当前默认组里存在的槽位，且不与当前默认正文重合', () => {
-    const defaults = buildDefaultContinuationAgentPrompts_ACU();
-    for (const [role, entries] of Object.entries(AGENT_PROMPT_DEFAULT_LINEAGE_ACU) as [keyof typeof defaults, typeof AGENT_PROMPT_DEFAULT_LINEAGE_ACU.main][]) {
-      const currentHashes = new Set(defaults[role].map(segment => `${hashAgentPromptContent_ACU(segment.content)}:${segment.content.length}`));
-      for (const entry of entries) {
-        expect(findAgentPromptSlot_ACU(defaults[role], entry.slot), `${role} ${entry.note}`).toBeDefined();
-        expect(currentHashes.has(`${entry.hash}:${entry.length}`), `${role} ${entry.note} 仍是当前默认正文`).toBe(false);
-      }
-    }
+    const current = buildDefaultContinuationSettings_ACU() as any;
+    current.agentPrompts.mainlinePlanner = structuredClone(custom);
+    expect(validateContinuationSettings_ACU(current).agentPrompts.mainlinePlanner).toEqual(custom);
   });
 });
 
-describe('V34 → V35 逐段精确迁移', () => {
+describe('V34 旧默认组', () => {
   const frozen = JSON.parse(readFileSync(fileURLToPath(new URL('../../fixtures/prompt-lineage-v34-v16.json', import.meta.url)), 'utf8')) as {
     continuationV34: Record<string, Array<{ role: string; length: number; hash: string }>>;
   };
@@ -189,43 +178,36 @@ describe('V34 → V35 逐段精确迁移', () => {
     expect(Object.keys(previous).sort()).toEqual(Object.keys(frozen.continuationV34).sort());
   });
 
-  it('仅升级原位旧默认正文，保留用户改写、追加段和已有元数据', () => {
-    const settings = buildDefaultContinuationSettings_ACU();
+  it('V34 信封读出时整组重置：用户改写、追加段和停用状态一并换成当前默认，再次校验不变', () => {
+    const settings = buildDefaultContinuationSettings_ACU() as any;
     settings.promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU;
     settings.agentPrompts = buildV34ContinuationAgentPrompts_ACU();
-    const previous = structuredClone(settings.agentPrompts);
-    const defaults = buildDefaultContinuationAgentPrompts_ACU();
-    const mainIndex = previous.main.findIndex(segment => segment.content.startsWith('我的行动规则：'));
-    const customIndex = previous.maintainer.findIndex(segment => segment.content.startsWith('我的最终交付是一个 JSON 对象：'));
+    const mainIndex = settings.agentPrompts.main.findIndex((segment: ContinuationPromptSegment_ACU) => segment.content.startsWith('我的行动规则：'));
+    const customIndex = settings.agentPrompts.maintainer.findIndex((segment: ContinuationPromptSegment_ACU) => segment.content.startsWith('我的最终交付是一个 JSON 对象：'));
     expect(mainIndex).toBeGreaterThanOrEqual(0);
     expect(customIndex).toBeGreaterThanOrEqual(0);
     settings.agentPrompts.main[mainIndex].enabled = false;
     settings.agentPrompts.maintainer[customIndex].content += '\n用户修改：保留我的交付术语。';
-    const appended = { role: 'user' as const, content: '用户追加的独立规则', enabled: true, deletable: true };
-    settings.agentPrompts.maintainer.push(appended);
+    settings.agentPrompts.maintainer.push({ role: 'user', content: '用户追加的独立规则', enabled: true, deletable: true });
 
     const loaded = validateContinuationSettings_ACU(settings);
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU);
-    expect(loaded.agentPrompts.main[mainIndex]).toEqual({ ...defaults.main[mainIndex], enabled: false });
-    expect(loaded.agentPrompts.maintainer[customIndex]).toEqual(settings.agentPrompts.maintainer[customIndex]);
-    expect(loaded.agentPrompts.maintainer).toContainEqual(appended);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU);
+    expect(loaded.agentPrompts).toEqual(buildDefaultContinuationAgentPrompts_ACU());
     expect(loaded.agentPrompts.maintainer.at(-1)).toMatchObject({ role: 'user', content: USER_PREFILL_CONTENT_ACU });
-    expect(loaded.agentPrompts.arcArchitect).toEqual(defaults.arcArchitect);
-    expect(settings.agentPrompts.main[mainIndex].content).toBe(previous.main[mainIndex].content);
-    expect(validateContinuationSettings_ACU(loaded).agentPrompts).toEqual(loaded.agentPrompts);
+    expect(validateContinuationSettings_ACU(structuredClone(loaded)).agentPrompts).toEqual(loaded.agentPrompts);
   });
 
-  it('当前组与迁移后的文字契合工具、工作流、预填充和 parser', () => {
-    const current = buildDefaultContinuationAgentPrompts_ACU();
+  it('当前组的文字契合工具、工作流、预填充和 parser', () => {
+    const current = buildContinuationAgentPromptsForMode_ACU('tools');
     const main = current.main.map(segment => segment.content).join('\n');
     const maintainer = current.maintainer.map(segment => segment.content).join('\n');
-    expect(main).toContain('open_round 固定工作流');
-    expect(main).toContain('用户中途指令');
-    expect(main).toContain('本次主循环结束');
-    expect(maintainer).toContain('$FIELD:模块:ID[:栏目]');
-    expect(maintainer).toContain('调用 write_sql 函数');
+    expect(main).toContain('用 open_round 启动固定工作流');
+    expect(main).toContain('用户的最新指令优先于我此前的计划');
+    expect(main).toContain('交付成功即本次运行结束');
+    expect(maintainer).toContain('「$」与「FIELD:hooks:条目ID[:栏目]」拼成一个字符串');
+    expect(maintainer).toContain('调用 write_sql');
     expect(maintainer).not.toContain('"action":"write_sql"');
-    expect(main).toContain('使用函数调用');
+    expect(main).toContain('调阅调用 read / search；决策只调用 open_round / correct_materials / adjust_progress / delegate / finalize / block 中的一个。');
     expect(main).not.toContain('"action":"read"');
     expect(maintainer).toContain('status=committed');
     expect(current.main.at(-1)?.content.endsWith(USER_PREFILL_CONTENT_ACU)).toBe(true);

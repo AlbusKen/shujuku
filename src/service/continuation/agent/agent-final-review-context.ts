@@ -11,6 +11,8 @@ export interface AgentFinalReviewEvidenceInput_ACU {
 
 export interface AgentFinalReviewEvidence_ACU {
   gateItems: AgentGateItem_ACU[];
+  hooksLedger: string;
+  infoGap: string;
   supplementalMaterials: string;
   worldbookEvidence: string;
   worldbookSeeds: string[];
@@ -41,6 +43,8 @@ export function buildAgentFinalReviewEvidence_ACU(input: AgentFinalReviewEvidenc
   const tail = renderAgentStoryTail_ACU(context);
   const constraints = resolveAgentReadToken_ACU('$ACTIVE_CONSTRAINTS', context).text;
   const chronology = resolveAgentReadToken_ACU('$CHRONOLOGY', context).text;
+  const hooksLedger = resolveAgentReadToken_ACU('$HOOKS_LEDGER', context).text;
+  const infoGap = resolveAgentReadToken_ACU('$INFO_GAP', context).text;
   const seedSource = [context.originInstruction, input.currentUserInput, input.candidateInstruction, outline, tail].join('\n');
   const worldbookSeeds = extractAgentFinalReviewWorldbookSeeds_ACU(seedSource);
   const worldbookEvidence = context.worldbook?.available
@@ -54,10 +58,12 @@ export function buildAgentFinalReviewEvidence_ACU(input: AgentFinalReviewEvidenc
     `### 世界书检索种子\n${worldbookSeeds.length ? worldbookSeeds.join('、') : '（未提取到有效检索种子）'}`,
   ].join('\n\n');
   return {
+    hooksLedger,
+    infoGap,
     supplementalMaterials,
     worldbookEvidence,
     worldbookSeeds,
-    fixedReadKeys: unique_ACU(['$USER_INTENT', '$USER_REQUIREMENTS', '$OUTLINE_WINDOW', '$STORY_ARC', '$STORY_TAIL', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY']),
+    fixedReadKeys: unique_ACU(['$USER_INTENT', '$USER_REQUIREMENTS', '$OUTLINE_WINDOW', '$STORY_ARC', '$STORY_TAIL', '$HOOKS_LEDGER', '$INFO_GAP', '$ACTIVE_CONSTRAINTS', '$CHRONOLOGY']),
     gateItems: [
       { label: '用户初始要求', text: context.originInstruction || '（用户未提供初始要求）' },
       { label: '用户累计要求', text: resolveAgentReadToken_ACU('$USER_REQUIREMENTS', context).text },
@@ -66,6 +72,8 @@ export function buildAgentFinalReviewEvidence_ACU(input: AgentFinalReviewEvidenc
       { label: '完整当前阶段大纲', text: outline },
       { label: '故事总纲', text: storyArc },
       { label: '最近正文', text: tail },
+      { label: '伏笔账本', text: hooksLedger },
+      { label: '信息差时间线', text: infoGap },
       { label: '长期约束、故事年代学账本、策划摘要、检索种子与世界书目录', text: supplementalMaterials },
       { label: '本轮语境命中的世界书条目预览', text: worldbookEvidence },
     ],

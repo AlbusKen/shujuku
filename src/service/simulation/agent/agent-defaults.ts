@@ -1,9 +1,17 @@
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
 import { isAgentSnapshotSlot_ACU, withAgentPromptLayout_ACU } from '../../../shared/agent-prompt-layout';
 import { withCreativeIdentity_ACU } from '../../../shared/creative-identity.js';
+import { buildAgentQaLayout_ACU, migrateAgentQaLayout_ACU, isAgentFormatAnswer_ACU, type AgentQaOptions_ACU } from '../../../shared/agent-prompt-qa';
+import { worldSimulationOneShotProtocol_ACU } from './agent-format-protocol';
 import { WORLD_SIMULATION_LEDGER_MODULES_ACU, WORLD_SIMULATION_SCHEMA_VERSION_ACU, formatWorldSimulationLedgerRequiredFields_ACU, formatWorldSimulationLedgerRequiredFieldsLegacy_ACU, type WorldSimulationPromptSegment_ACU } from '../model';
 import { formatWorldSimulationToolAddressHints_ACU, WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from '../world-simulation-agent-tools';
 import { WORLD_SIMULATION_AGENT_CATALOG_ACU, findWorldSimulationAgentDefinition_ACU, getWorldSimulationAgentAccessProfile_ACU, worldSimulationAgentNativeTools_ACU, type WorldSimulationAgentName_ACU } from './agent-catalog';
+import { buildWorldDirectorQaPrompt_ACU } from './world-director-prompt';
+import { buildUndercurrentAnalystQaPrompt_ACU } from './undercurrent-analyst-prompt';
+import { buildDramatisKeeperQaPrompt_ACU } from './dramatis-keeper-prompt';
+import { buildCausalityReviewerQaPrompt_ACU } from './causality-reviewer-prompt';
+import { buildGuidanceComposerQaPrompt_ACU } from './guidance-composer-prompt';
+import { buildLoreResearcherQaPrompt_ACU } from './lore-researcher-prompt';
 
 export const WORLD_SIMULATION_PROMPT_VERSION_V8_ACU = 'world-simulation-v8';
 export const WORLD_SIMULATION_PROMPT_VERSION_V9_ACU = 'world-simulation-v9';
@@ -36,7 +44,11 @@ export const WORLD_SIMULATION_PROMPT_VERSION_V33_ACU = 'world-simulation-v33';
 export const WORLD_SIMULATION_PROMPT_VERSION_V34_ACU = 'world-simulation-v34';
 /** v35：角色快照正文可编辑，运行时直接消费持久化模板。 */
 export const WORLD_SIMULATION_PROMPT_VERSION_V35_ACU = 'world-simulation-v35';
-export const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V35_ACU;
+/** v36：单身份、格式问答、逻辑问答与独立动态快照。 */
+export const WORLD_SIMULATION_PROMPT_VERSION_V36_ACU = 'world-simulation-v36';
+/** v37：本次更新一次性重置全部推演提示词，仅保留现役角色。 */
+export const WORLD_SIMULATION_PROMPT_VERSION_V37_ACU = 'world-simulation-qa-reset-v37';
+export const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V37_ACU;
 export const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'] as const;
 export type WorldSimulationEngineSeam_ACU = typeof WORLD_SIMULATION_ENGINE_SEAMS_ACU[number];
 export type WorldSimulationAgentPrompts_ACU = Record<WorldSimulationAgentName_ACU, WorldSimulationPromptSegment_ACU[]>;
@@ -1115,8 +1127,95 @@ export function withV35WorldSimulationSnapshot_ACU(name: WorldSimulationAgentNam
         .filter(token => token !== '$WORLD_STATE').map(token => `${token.slice(1)}：${token}`)] : [])].join('\n'));
 }
 
+/**
+ * 非「具体格式输出段」里与工具开关绑定的措辞改为中性表述。
+ * 动作形式与交付形式一律由 PROTOCOL 段（格式输出段）的两套正文声明，
+ * 其余段落对开关保持中性，不再随工具调用按钮改变。冻结的历史版本构造器不受影响。
+ */
+const WORLD_SIMULATION_MODE_NEUTRAL_PATTERNS_ACU: ReadonlyArray<readonly [RegExp, string]> = [
+  [/现在只执行当前任务。[^\n]*?使用函数调用；(?:决策输出|最终交付)必须是协议要求的单个 JSON 对象，不附加 Markdown。/g,
+    '现在只执行当前任务。交付形式见协议段，不附加 Markdown。'],
+  [/现在执行任务。[^\n]*?调用原生 write_sql 提交所有有依据的变更；[^\n]*?不输出核查长文、裸 SQL 或 Markdown。/g,
+    '现在执行任务。按上面自述的顺序走完全部职责核查与收口自检，交付形式见协议段。不输出核查长文、裸 SQL 或 Markdown。'],
+  // 交付形式（无变化/失败/写入）一律由协议段声明，自述段保持中性。
+  [/回复 NO_CHANGE/g, '按协议段声明的无变化形式交付'],
+  [/回复 FAILED: 原因/g, '按协议段声明的失败形式交付'],
+  [/回复 FAILED/g, '按协议段声明的失败形式交付'],
+  [/调用原生 write_sql/g, '按协议段声明的写入形式写入'],
+  [/同一次 write_sql 的 sql 参数/g, '同一次 write_sql 提交'],
+  [/使用函数调用/g, '按协议段声明的形式'],
+];
+
+function neutralizeWorldSimulationModeText_ACU(content: string): string {
+  let next = content;
+  for (const [pattern, to] of WORLD_SIMULATION_MODE_NEUTRAL_PATTERNS_ACU) next = next.replace(pattern, to);
+  return next;
+}
+
+/**
+ * 具体格式输出段：唯一随「使用工具调用」开关切换正文的段落（PROTOCOL seam）。
+ * 身份用谓词识别，不写入持久化字段，避免污染用户改写段与历史指纹。
+ */
+export function isWorldSimulationModeVariantSegment_ACU(segment: { role: string; content: string }): boolean {
+  return isAgentFormatAnswer_ACU(segment) || segment.content.startsWith(worldSimulationSeamMarker_ACU('PROTOCOL'));
+}
+
+/**
+ * 当前默认的统一收口：格式输出段（PROTOCOL seam）标记为随开关切换的只读段，
+ * 其余段做模式中性化。默认构造与存量迁移必须走同一收口，保证两者恒等。
+ */
+function finalizeWorldSimulationDefault_ACU(name: WorldSimulationAgentName_ACU, segments: readonly WorldSimulationPromptSegment_ACU[]): WorldSimulationPromptSegment_ACU[] {
+  return segments.map(segment => (isWorldSimulationModeVariantSegment_ACU(segment)
+    ? { ...segment }
+    : { ...segment, content: neutralizeWorldSimulationModeText_ACU(segment.content) }));
+}
+
+export function buildV35WorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
+  return finalizeWorldSimulationDefault_ACU(name, withV35WorldSimulationSnapshot_ACU(name, buildV34WorldSimulationAgentPrompt_ACU(name)));
+}
+
+function worldSimulationQaOptions_ACU(name: WorldSimulationAgentName_ACU, previous: readonly WorldSimulationPromptSegment_ACU[]): AgentQaOptions_ACU {
+  const root = previous.findIndex(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('ROOT')));
+  const formatIndex = previous.findIndex(segment => segment.content.startsWith(worldSimulationSeamMarker_ACU('PROTOCOL')));
+  const definition = findWorldSimulationAgentDefinition_ACU(name)!;
+  const oneShot = (ONE_SHOT_ROLES_ACU as readonly string[]).includes(name);
+  const strip = (text: string) => text.replace(/<WORLD_SIMULATION_ENGINE_SEAM:[A-Z_]+>\n?/g, '');
+  const formatContent = oneShot
+    ? worldSimulationOneShotProtocol_ACU(name as WorldSimulationOneShotRole_ACU, definition.writableModules, 'json')
+    : definition.kind === 'director' ? worldSimulationDirectorRuntimeProtocolInstruction_ACU()
+      : definition.kind === 'reviewer' ? worldSimulationReviewerRuntimeProtocolInstruction_ACU()
+        : definition.kind === 'researcher' ? worldSimulationSpecialistRuntimeProtocolInstruction_ACU(name, definition.writableModules)
+          : strip(previous[formatIndex].content);
+  return { formatIndex, formatContent, identity: strip(previous[root].content), rootRemainder: '',
+    cleanStatic: text => neutralizeWorldSimulationModeText_ACU(strip(text)),
+    questions: Object.fromEntries(previous.map((segment, index) => [index,
+      segment.content.startsWith(worldSimulationSeamMarker_ACU('ROLE_RULES')) ? '你的职责、权限和事实来源有哪些边界？'
+        : segment.content.startsWith(worldSimulationSeamMarker_ACU('WORKFLOW')) ? '你怎样核对证据、安排流程并推进本轮推演？'
+          : '你怎样落实这些规则并核对交付状态？'])),
+  };
+}
+
+export function withV36WorldSimulationQa_ACU(name: WorldSimulationAgentName_ACU, segments: readonly WorldSimulationPromptSegment_ACU[]): WorldSimulationPromptSegment_ACU[] {
+  const previous = buildV35WorldSimulationAgentPrompt_ACU(name);
+  return migrateAgentQaLayout_ACU(segments, previous, worldSimulationQaOptions_ACU(name, previous));
+}
+
+/** 逐段手写的现役角色；格式回答仍取运行时协议生成的原文，与协议守卫同源。 */
+const HANDWRITTEN_WORLD_SIMULATION_PROMPTS_ACU: Partial<Record<WorldSimulationAgentName_ACU, (formatAnswer: string) => WorldSimulationPromptSegment_ACU[]>> = {
+  'world-director': buildWorldDirectorQaPrompt_ACU,
+  'undercurrent-analyst': buildUndercurrentAnalystQaPrompt_ACU,
+  'dramatis-keeper': buildDramatisKeeperQaPrompt_ACU,
+  'causality-reviewer': buildCausalityReviewerQaPrompt_ACU,
+  'guidance-composer': buildGuidanceComposerQaPrompt_ACU,
+  'lore-researcher': buildLoreResearcherQaPrompt_ACU,
+};
+
 export function buildDefaultWorldSimulationAgentPrompt_ACU(name: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] {
-  return withV35WorldSimulationSnapshot_ACU(name, buildV34WorldSimulationAgentPrompt_ACU(name));
+  const previous = buildV35WorldSimulationAgentPrompt_ACU(name);
+  const generated = buildAgentQaLayout_ACU(previous, worldSimulationQaOptions_ACU(name, previous));
+  const handwritten = HANDWRITTEN_WORLD_SIMULATION_PROMPTS_ACU[name];
+  const format = generated.find(isAgentFormatAnswer_ACU);
+  return handwritten && format ? handwritten(format.content) : generated;
 }
 
 export function buildDefaultWorldSimulationAgentPrompts_ACU(): WorldSimulationAgentPrompts_ACU {
@@ -1318,6 +1417,7 @@ export const WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU = Object.fromEntries(
     { version: WORLD_SIMULATION_PROMPT_VERSION_V32_ACU, fingerprint: promptFingerprint_ACU(buildV32WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_V33_ACU, fingerprint: promptFingerprint_ACU(buildV33WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_V34_ACU, fingerprint: promptFingerprint_ACU(buildV34WorldSimulationAgentPrompt_ACU(name)) },
+    { version: WORLD_SIMULATION_PROMPT_VERSION_V35_ACU, fingerprint: promptFingerprint_ACU(buildV35WorldSimulationAgentPrompt_ACU(name)) },
     { version: WORLD_SIMULATION_PROMPT_VERSION_ACU, fingerprint: promptFingerprint_ACU(buildDefaultWorldSimulationAgentPrompt_ACU(name)) },
   ]]),
 ) as unknown as Record<WorldSimulationAgentName_ACU, readonly { version: string; fingerprint: string }[]>;
@@ -1362,10 +1462,15 @@ function oneShotSegmentKeys_ACU(segments: readonly WorldSimulationPromptSegment_
 }
 
 export function migrateWorldSimulationAgentPromptsDetailed_ACU(current: Record<string, WorldSimulationPromptSegment_ACU[]>, previousDefaults: Record<string, WorldSimulationPromptSegment_ACU[]>, previousVersion?: string): WorldSimulationPromptMigration_ACU {
+  if (previousVersion === WORLD_SIMULATION_PROMPT_VERSION_ACU) {
+    return { prompts: Object.fromEntries(WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name,
+      (current[name] ?? buildDefaultWorldSimulationAgentPrompt_ACU(name)).map(segment => ({ ...segment }))])) as WorldSimulationAgentPrompts_ACU, forcedRoles: [] };
+  }
   if (previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V33_ACU || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V34_ACU
-    || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_ACU) {
+    || previousVersion === WORLD_SIMULATION_PROMPT_VERSION_V35_ACU) {
     const prompts = Object.fromEntries(WORLD_SIMULATION_AGENT_CATALOG_ACU.map(({ name }) => [name,
-      withV35WorldSimulationSnapshot_ACU(name, current[name] ?? buildV34WorldSimulationAgentPrompt_ACU(name))])) as WorldSimulationAgentPrompts_ACU;
+      withV36WorldSimulationQa_ACU(name, finalizeWorldSimulationDefault_ACU(name,
+        withV35WorldSimulationSnapshot_ACU(name, current[name] ?? buildV34WorldSimulationAgentPrompt_ACU(name))))])) as WorldSimulationAgentPrompts_ACU;
     return { prompts, forcedRoles: [] };
   }
   // 旧迁移仍以 V33 段序对齐，布局在迁移完成后追加，避免历史槽位串位。
@@ -1485,6 +1590,7 @@ export function migrateWorldSimulationAgentPromptsDetailed_ACU(current: Record<s
       next.splice(afterWorkflow + 1, 0, requirements);
     }
   }
-  for (const { name } of WORLD_SIMULATION_AGENT_CATALOG_ACU) migrated[name] = withV35WorldSimulationSnapshot_ACU(name, migrated[name]);
+  for (const { name } of WORLD_SIMULATION_AGENT_CATALOG_ACU) migrated[name] = withV36WorldSimulationQa_ACU(name,
+    finalizeWorldSimulationDefault_ACU(name, withV35WorldSimulationSnapshot_ACU(name, migrated[name])));
   return { prompts: migrated, forcedRoles };
 }

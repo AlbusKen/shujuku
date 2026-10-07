@@ -408,8 +408,8 @@ export function renderAgentToolResults_ACU(outcomes: readonly AgentDelegationOut
     .join('\n\n');
 }
 
-/** 参与波次并发判定的四个派工子代理渠道角色。 */
-const SUBAGENT_PRESET_ROLES_ACU = ['maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer'] as const;
+/** 参与波次并发判定的现役派工子代理渠道角色。 */
+const SUBAGENT_PRESET_ROLES_ACU = ['maintainer', 'mainlinePlanner', 'beatPlanner'] as const;
 
 /** 参与波次并发判定的子代理渠道角色：网页检索未启用时不派它，其渠道也就不该拖累并发。 */
 function subagentPresetRoles_ACU(settings: ContinuationSettings_ACU): ReadonlyArray<typeof SUBAGENT_PRESET_ROLES_ACU[number] | 'webResearcher'> {

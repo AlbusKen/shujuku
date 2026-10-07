@@ -130,6 +130,38 @@ describe('ContinuationRuntime_ACU migration', () => {
     h.runtime.resetContinuationRuntimeForTests_ACU();
     expect(h.getBridge()).toBeNull();
   });
+
+  it('旧版本信封初始化时一次性重置提示词并立即落盘，重置后保存的编辑在重载后保留', async () => {
+    const h = await createHarness();
+    const defaults = await import('../../../src/service/continuation/defaults');
+    const base = defaults.buildDefaultContinuationSettings_ACU();
+    const stale = {
+      ...base,
+      promptForceDefaultVersion: defaults.CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V50_ACU,
+      outlinePrompt: base.outlinePrompt.map((segment, index) => index === 0 ? { ...segment, content: '旧版大纲改写' } : segment),
+      agentPrompts: { ...base.agentPrompts, main: base.agentPrompts.main.map((segment, index) => index === 0 ? { ...segment, content: '旧版主会话改写' } : segment) },
+    };
+    h.chat[0]._qrf_continuation = JSON.parse(JSON.stringify({ schemaVersion: 1, settings: stale, activeTask: null }));
+
+    await h.runtime.getContinuationRuntime_ACU().initialize();
+
+    expect(h.saveChat).toHaveBeenCalledOnce();
+    const persisted = h.chat[0]._qrf_continuation.settings;
+    expect(persisted.promptForceDefaultVersion).toBe(defaults.CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU);
+    expect(persisted.outlinePrompt[0].content).toBe(base.outlinePrompt[0].content);
+    expect(persisted.agentPrompts.main[0].content).toBe(base.agentPrompts.main[0].content);
+
+    const edited = JSON.parse(JSON.stringify(h.chat[0]._qrf_continuation));
+    edited.settings.agentPrompts.main[0].content = '重置后的用户编辑';
+    h.chat[0]._qrf_continuation = edited;
+    h.runtime.resetContinuationRuntimeForTests_ACU();
+
+    const reloaded = await h.runtime.getContinuationRuntime_ACU().initialize();
+
+    expect(h.saveChat).toHaveBeenCalledOnce();
+    expect(reloaded?.settings.agentPrompts.main[0].content).toBe('重置后的用户编辑');
+    h.runtime.resetContinuationRuntimeForTests_ACU();
+  });
 });
 
 describe('全局续写设置副本', () => {

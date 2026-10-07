@@ -1455,7 +1455,7 @@ export function renderAgentContractContinuationRequest_ACU(accepted: AgentMainta
  */
 export function parseAgentPlannerOutput_ACU(payload: Record<string, unknown>): AgentPlannerOutput_ACU {
   const recommendation = readText_ACU(payload.recommendation);
-  if (!recommendation) failProtocol_ACU('策划子代理必须给出 recommendation；资料不足时应先输出 read / search 工具调用补齐资料');
+  if (!recommendation) failProtocol_ACU('策划子代理必须给出 recommendation；资料不足且仍有读取额度时，用已授权的 read 补齐具体缺口，否则基于已确认资料给出保守建议并说明缺口');
   return {
     summary: readText_ACU(payload.summary),
     recommendation,

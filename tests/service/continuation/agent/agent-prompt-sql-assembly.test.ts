@@ -30,7 +30,7 @@ describe('续写维护代理最终组装的 SQL 写集提示', () => {
     expect(text).toContain('DELETE 必须给出理由');
   });
 
-  it('V33 旧默认逐段升级，自定义和追加段原样保留；恢复默认使用 V34', async () => {
+  it('V33 旧配置读出时整组重置为当前默认，自定义和追加段一并换掉；恢复默认仍是当前默认', async () => {
     const settings = buildDefaultContinuationSettings_ACU();
     settings.promptForceDefaultVersion = 'spv4.1-continuation-sql-dml-v33';
     settings.agentPrompts = buildV33ContinuationAgentPrompts_ACU();
@@ -39,8 +39,9 @@ describe('续写维护代理最终组装的 SQL 写集提示', () => {
     const extra = { role: 'user', content: '用户添加的额外段', enabled: true, deletable: true };
     settings.agentPrompts.webResearcher.push(extra);
     const migrated = validateContinuationSettings_ACU(settings);
-    expect(migrated.agentPrompts.maintainer).toContainEqual(custom);
-    expect(migrated.agentPrompts.webResearcher).toContainEqual(extra);
+    const defaults = buildDefaultContinuationSettings_ACU().agentPrompts;
+    expect(migrated.agentPrompts.maintainer).toEqual(defaults.maintainer);
+    expect(migrated.agentPrompts.webResearcher).toEqual(defaults.webResearcher);
     for (const role of writers) expect(await sentPrompt(role, migrated)).not.toMatch(/"delta"\s*:|delta\.chronology|expectedRevisions/);
     const restored = restoreContinuationPromptDefault_ACU(migrated, 'agent_maintainer');
     expect(await sentPrompt('maintainer', restored)).toContain('UPDATE chronology');

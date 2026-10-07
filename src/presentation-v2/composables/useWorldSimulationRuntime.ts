@@ -113,11 +113,8 @@ export function useWorldSimulationRuntime() {
 
   async function initialize(): Promise<void> {
     try {
-      const forcedRoles = await runtime().initialize();
+      await runtime().initialize();
       refresh();
-      if (forcedRoles.length) {
-        toast.info(`格林推演 v21 已重置 ${forcedRoles.length} 个自定义资料角色的提示词；旧版逐栏写入协议不适用于新流程。`);
-      }
     } catch (cause) {
       toast.error(errorMessage_ACU(cause), { muteable: false });
       refresh();

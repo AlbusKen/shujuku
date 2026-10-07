@@ -367,7 +367,8 @@ describe('格林推演 Agent runtime', () => {
       tools: { read: vi.fn(async () => ({ status: 'ok' as const, content: '已读北境正文', summary: '正文' })), search: tools.search } });
     expect(sent).toHaveLength(2);
     expect(sent[0].slice(0, 5)).toEqual(sent[1].slice(0, 5));
-    expect(sent[0][0].content).toContain('调阅调用 read / search；决策单独调用 open_round / delegate / finalize / block');
+    // 协议在格式回答（assistant）里，属于稳定前缀。
+    expect(sent[0].slice(0, 5).some(item => item.role === 'assistant' && item.content.includes('调阅调用 read / search；决策单独调用 open_round / delegate / finalize / block'))).toBe(true);
     const snapshotAt = sent[0].findIndex(item => item.content.includes('只推演北境'));
     expect(snapshotAt).toBeGreaterThan(4);
     expect(sent[0][snapshotAt].role).toBe('system');
@@ -1078,7 +1079,7 @@ describe('格林推演 Agent runtime', () => {
       .resolves.toMatchObject({ verdict: 'accept', summary: '审核通过', acceptedCandidateIds: [candidate.candidateId] });
     expect(invoke).toHaveBeenCalledTimes(2);
     const initialMessages = invoke.mock.calls[0][1] as readonly { role: string; content: string }[];
-    expect(initialMessages.some(message => message.role === 'system' && message.content.includes('verdict 必须精确为 accept、revise、reject'))).toBe(true);
+    expect(initialMessages.some(message => message.role === 'assistant' && message.content.includes('verdict 必须精确为 accept、revise、reject'))).toBe(true);
     const retryMessages = invoke.mock.calls[1][1] as readonly { role: string; content: string }[];
     const rejection = retryMessages.find(message => message.role === 'user' && message.content.includes('INVALID_REVIEW_VERDICT'))?.content ?? '';
     expect(rejection).toContain('"verdict":"accept"');
@@ -1332,7 +1333,7 @@ describe('格林推演 Agent runtime', () => {
     const result = await loop.run({ identity, settings: settings(), promptContext, registry, tools });
     expect(result).toMatchObject({ outcome: 'blocked', summary: '修正后阻断' });
     expect(invoke).toHaveBeenCalledTimes(2);
-    expect(sent.every(messages => messages.some(message => message.role === 'system' && message.content.includes('仅输出一个主动作 JSON：read、search、open_round、delegate、finalize 或 block')))).toBe(true);
+    expect(sent.every(messages => messages.some(message => message.role === 'assistant' && message.content.includes('仅输出一个主动作 JSON：read、search、open_round、delegate、finalize 或 block')))).toBe(true);
     expect(sent[1].find(message => message.role === 'user' && message.content.includes('INVALID_ACTION'))).toMatchObject({ role: 'user', content: expect.stringContaining('INVALID_ACTION') });
     expect(sent[1].some(message => message.role === 'assistant' && message.content.includes('"action":"unknown"'))).toBe(true);
     expect(subagents.run).not.toHaveBeenCalled();

@@ -1,6 +1,27 @@
 import type { AgentToolMode_ACU } from '../../ai/agent-tool-mode';
 import type { ContinuationAgentPrompts_ACU, ContinuationPromptSegment_ACU } from '../model';
-import { buildDefaultContinuationAgentPrompts_ACU } from './agent-defaults';
+import { buildDefaultContinuationAgentPrompts_ACU, isContinuationModeVariantSegment_ACU } from './agent-defaults';
+import { AGENT_FORMAT_ANSWER_MARKER_ACU } from '../../../shared/agent-prompt-qa';
+import { arcArchitectFormatAnswer_ACU } from './arc-architect-prompt';
+import { maintainerFormatAnswer_ACU } from './maintainer-prompt';
+import { mainlinePlannerFormatAnswer_ACU } from './mainline-planner-prompt';
+import { beatPlannerFormatAnswer_ACU } from './beat-planner-prompt';
+import { instructionComposerFormatAnswer_ACU } from './instruction-composer-prompt';
+import { finalReviewerFormatAnswer_ACU } from './final-reviewer-prompt';
+import { webResearcherFormatAnswer_ACU } from './web-researcher-prompt';
+import { mainAgentFormatAnswer_ACU } from './main-agent-prompt';
+
+/** 逐段手写的角色自带两套格式回答；其余角色仍从冻结正文派生。 */
+const HANDWRITTEN_FORMAT_ANSWERS_ACU: Partial<Record<keyof ContinuationAgentPrompts_ACU, (mode: AgentToolMode_ACU) => string>> = {
+  main: mainAgentFormatAnswer_ACU,
+  arcArchitect: arcArchitectFormatAnswer_ACU,
+  maintainer: maintainerFormatAnswer_ACU,
+  mainlinePlanner: mainlinePlannerFormatAnswer_ACU,
+  beatPlanner: beatPlannerFormatAnswer_ACU,
+  instructionComposer: instructionComposerFormatAnswer_ACU,
+  finalReviewer: finalReviewerFormatAnswer_ACU,
+  webResearcher: webResearcherFormatAnswer_ACU,
+};
 
 // 只加工内置默认正文；持久化和历史版本构造器保持不变。
 const JSON_SWAPS_ACU: ReadonlyArray<readonly [string, string]> = [
@@ -29,6 +50,11 @@ const TOOL_MAIN_PROTOCOL_ACU = '【工具协议规范】\n所有动作通过当�
 
 /** 在冻结的当前默认之上派生呈现文本，不参与存储版本迁移。 */
 function jsonContent_ACU(content: string, role?: keyof ContinuationAgentPrompts_ACU): string {
+  if (content.startsWith(AGENT_FORMAT_ANSWER_MARKER_ACU)) {
+    const handwritten = role && HANDWRITTEN_FORMAT_ANSWERS_ACU[role];
+    if (handwritten) return handwritten('json');
+    return AGENT_FORMAT_ANSWER_MARKER_ACU + jsonContent_ACU(content.slice(AGENT_FORMAT_ANSWER_MARKER_ACU.length), role);
+  }
   let next = swap_ACU(content, JSON_SWAPS_ACU);
   next = next.replace(/【工具：read \/ search，使用函数调用，可并发】[\s\S]*?工具结果回来后再决定下一步。/, () => JSON_READ_PROTOCOL_ACU);
   if (role === 'arcArchitect' || role === 'maintainer' || role === 'webResearcher') {
@@ -46,6 +72,11 @@ function jsonContent_ACU(content: string, role?: keyof ContinuationAgentPrompts_
 }
 
 function toolContent_ACU(role: keyof ContinuationAgentPrompts_ACU, content: string): string {
+  if (content.startsWith(AGENT_FORMAT_ANSWER_MARKER_ACU)) {
+    const handwritten = HANDWRITTEN_FORMAT_ANSWERS_ACU[role];
+    if (handwritten) return handwritten('tools');
+    return AGENT_FORMAT_ANSWER_MARKER_ACU + toolContent_ACU(role, content.slice(AGENT_FORMAT_ANSWER_MARKER_ACU.length));
+  }
   let next = jsonContent_ACU(content);
   if (role === 'main' && next.startsWith('【文本协议规范】')) {
     const decisionAt = next.indexOf('【决策动作：');
@@ -100,17 +131,19 @@ function toolContent_ACU(role: keyof ContinuationAgentPrompts_ACU, content: stri
 type PromptRole_ACU = keyof ContinuationAgentPrompts_ACU;
 let defaults_ACU: { mixed: ContinuationAgentPrompts_ACU; legacyJson: ContinuationAgentPrompts_ACU; json: ContinuationAgentPrompts_ACU; tools: ContinuationAgentPrompts_ACU } | undefined;
 
+/**
+ * 工具调用开关只派生「具体格式输出段」（isContinuationModeVariantSegment_ACU）的正文。
+ * 其余段落与快照模板始终保持单一版本：开关不锚定快照，也不改写其它提示词。
+ */
 function modeDefaults_ACU(): NonNullable<typeof defaults_ACU> {
   if (!defaults_ACU) {
     const mixed = buildDefaultContinuationAgentPrompts_ACU();
     const build = (mode: AgentToolMode_ACU, legacy = false): ContinuationAgentPrompts_ACU => {
       const result = { ...mixed };
       for (const role of Object.keys(mixed) as PromptRole_ACU[]) {
-        result[role] = mixed[role].map(segment => ({
-          ...segment, content: mode === 'json' ? jsonContent_ACU(segment.content, legacy ? undefined : role) : toolContent_ACU(role, segment.content),
-          ...(segment.snapshotTemplate === undefined ? {} : { snapshotTemplate: mode === 'json'
-            ? jsonContent_ACU(segment.snapshotTemplate, legacy ? undefined : role) : toolContent_ACU(role, segment.snapshotTemplate) }),
-        }));
+        result[role] = mixed[role].map(segment => (isContinuationModeVariantSegment_ACU(segment)
+          ? { ...segment, content: mode === 'json' ? jsonContent_ACU(segment.content, legacy ? undefined : role) : toolContent_ACU(role, segment.content) }
+          : { ...segment }));
       }
       return result;
     };
@@ -128,23 +161,27 @@ export function buildContinuationAgentPromptsForMode_ACU(mode: AgentToolMode_ACU
   return result;
 }
 
-/** 角色、消息身份和完整正文均命中时才映射；支持重排，保留段元数据与自定义正文。 */
+/**
+ * 角色、消息身份和完整正文均命中时才映射；只有格式输出段跟随开关切换，
+ * 其余命中段与快照模板一律原样保留，支持重排并保留段元数据与自定义正文。
+ */
 export function adaptContinuationPromptSegmentsToToolMode_ACU(
   role: PromptRole_ACU, segments: readonly ContinuationPromptSegment_ACU[], mode: AgentToolMode_ACU,
 ): ContinuationPromptSegment_ACU[] {
   const defaults = modeDefaults_ACU();
+  // 四套默认由同一份 mixed 逐槽位映射而来，索引一一对齐；格式输出段的判定必须落在
+  // 未派生的 mixed 段上。派生首句已被改造（json 前置写入说明、tools 改写为 submit），
+  // 拿派生正文当判据会把 json/tools 版本误判成非格式段而原样保留。
+  const canonical = defaults.mixed[role];
+  const derived = [defaults.legacyJson[role], defaults.json[role], defaults.tools[role]];
+  const sameSlot_ACU = (item: ContinuationPromptSegment_ACU, segment: ContinuationPromptSegment_ACU): boolean =>
+    item.role === segment.role && item.content === segment.content;
   return segments.map(segment => {
-    const sources = [defaults.mixed[role], defaults.legacyJson[role], defaults.json[role], defaults.tools[role]];
-    for (const source of sources) {
-      const index = source.findIndex(item => item.role === segment.role && item.content.length === segment.content.length && item.content === segment.content);
-      if (index >= 0) return { ...segment, content: defaults[mode][role][index].content,
-        ...(segment.snapshotTemplate !== undefined && sources.some(items => items.some(item => item.role === segment.role
-          && item.content === segment.content && item.snapshotTemplate === segment.snapshotTemplate))
-          ? { snapshotTemplate: defaults[mode][role][index].snapshotTemplate }
-          : {}),
-      };
-    }
-    return { ...segment };
+    const index = canonical.findIndex((item, position) =>
+      sameSlot_ACU(item, segment) || derived.some(variant => sameSlot_ACU(variant[position], segment)));
+    if (index < 0) return { ...segment };
+    if (!isContinuationModeVariantSegment_ACU(canonical[index])) return { ...segment };
+    return { ...segment, content: defaults[mode][role][index].content };
   });
 }
 

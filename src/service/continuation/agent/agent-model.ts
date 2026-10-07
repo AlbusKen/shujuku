@@ -592,7 +592,7 @@ export const AGENT_MODULE_FIELD_MATRIX_ACU: Record<AgentWritableModule_ACU, Agen
 /** userRequirements 整表单例在分栏视图中的固定 ID。 */
 export const AGENT_USER_REQUIREMENTS_SINGLETON_ID_ACU = '_' as const;
 
-export const AGENT_SUBAGENT_NAMES_ACU = ['arc-architect', 'hook-cognition-maintainer', 'mainline-planner', 'beat-planner', 'continuity-reviewer', 'web-researcher', 'instruction-composer'] as const;
+export const AGENT_SUBAGENT_NAMES_ACU = ['arc-architect', 'hook-cognition-maintainer', 'mainline-planner', 'beat-planner', 'web-researcher', 'instruction-composer'] as const;
 export type AgentSubagentName_ACU = typeof AGENT_SUBAGENT_NAMES_ACU[number];
 
 export const AGENT_WEB_RESEARCHER_NAME_ACU = 'web-researcher';

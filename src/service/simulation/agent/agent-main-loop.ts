@@ -9,8 +9,8 @@ import { mergeWorldSimulationEvidenceRegistrySnapshot_ACU, snapshotWorldSimulati
 import { createWorldSimulationReadRoundState_ACU, runWorldSimulationToolBatch_ACU, type WorldSimulationToolDependencies_ACU } from '../world-simulation-agent-tools';
 import { resolveWorldSimulationAgentApiPreset_ACU, type WorldSimulationApiPresetDependencies_ACU } from '../api-preset';
 import { findWorldSimulationAgentDefinition_ACU, worldSimulationAgentNativeTools_ACU } from './agent-catalog';
-import { WORLD_SIMULATION_AGENT_PREFILLS_ACU, worldSimulationDirectorRuntimeProtocolInstruction_ACU } from './agent-defaults';
-import { adaptWorldSimulationPromptSegmentsToToolMode_ACU, worldSimulationProtocolForMode_ACU } from './agent-prompt-mode';
+import { WORLD_SIMULATION_AGENT_PREFILLS_ACU } from './agent-defaults';
+import { adaptWorldSimulationPromptSegmentsToToolMode_ACU } from './agent-prompt-mode';
 import type { WorldSimulationCandidate_ACU, WorldSimulationConversationMessage_ACU, WorldSimulationMainLoopResult_ACU, WorldSimulationReviewerResult_ACU, WorldSimulationRunResumeState_ACU, WorldSimulationSubagentOutcome_ACU } from './agent-model';
 import type { WorldSimulationTargetAnchor_ACU } from './agent-model';
 import { requireWorldSimulationHostAnchor_ACU } from '../simulation-identity';
@@ -594,7 +594,7 @@ export class WorldSimulationMainLoop_ACU {
             readBudgetText: '阅读预算见本轮运行时快照。',
           }),
         );
-        const fixed = [{ role: 'system', content: worldSimulationProtocolForMode_ACU(director, worldSimulationDirectorRuntimeProtocolInstruction_ACU(), toolMode) }, ...rendered.messages.filter(message => message.content !== USER_PREFILL_CONTENT_ACU)];
+        const fixed = rendered.messages.filter(message => message.content !== USER_PREFILL_CONTENT_ACU);
         const snapshot = await renderWorldSimulationSnapshotSections_ACU(split.snapshotTemplate,
           createWorldSimulationPlaceholderResolvers_ACU({ ...requestContext, evidenceRegistry: requestSnapshot }));
         const snapshotText = [

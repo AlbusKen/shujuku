@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { USER_PREFILL_CONTENT_ACU } from '../../../../src/shared/user-prefill.js';
-import { isAgentFixedSlot_ACU, withAgentPromptLayout_ACU } from '../../../../src/shared/agent-prompt-layout';
+import { isAgentFixedSlot_ACU } from '../../../../src/shared/agent-prompt-layout';
 import {
   buildDefaultContinuationAgentPrompts_ACU,
   buildV40ContinuationAgentPrompts_ACU,
@@ -9,9 +9,10 @@ import {
   withV41RoleProcedure_ACU,
 } from '../../../../src/service/continuation/agent/agent-defaults';
 import { validateContinuationSettings_ACU } from '../../../../src/service/continuation/continuation-store';
-import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V40_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU } from '../../../../src/service/continuation/defaults';
+import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V40_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU } from '../../../../src/service/continuation/defaults';
 
 const ROLES_ACU = ['arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer', 'webResearcher', 'instructionComposer'] as const;
+const CURRENT_ROLES_ACU = ROLES_ACU.filter(role => role !== 'reviewer');
 
 describe('V41 子代理执行流程问答', () => {
   const defaults = buildDefaultContinuationAgentPrompts_ACU();
@@ -27,8 +28,11 @@ describe('V41 子代理执行流程问答', () => {
     expect(segments[task - 1].content).toMatch(/第一步[\s\S]*第四步/);
     expect(segments[task - 1].content).not.toMatch(/\$[A-Z]/);
     expect(segments.filter(segment => segment.content.includes('$AGENT_TASK'))).toHaveLength(1);
-    expect(defaults[role].filter(segment => segment.snapshotTemplate?.includes('$AGENT_TASK'))).toHaveLength(1);
     expect(segments.at(-1)).toMatchObject({ role: 'user', content: USER_PREFILL_CONTENT_ACU });
+  });
+
+  it.each(CURRENT_ROLES_ACU)('%s 当前默认组只在快照模板里注入一次任务', role => {
+    expect(defaults[role].filter(segment => segment.snapshotTemplate?.includes('$AGENT_TASK'))).toHaveLength(1);
   });
 
   it('V41 不改主 Agent', () => {
@@ -44,17 +48,14 @@ describe('V41 子代理执行流程问答', () => {
     expect(withV41RoleProcedure_ACU('reviewer', once)).toEqual(once);
   });
 
-  it('V40 存量配置迁移到 V41 后与当前默认组一致，整组自定义的角色原样保留', () => {
+  it('V40 存量配置一次性整组重置为当前默认组，整组自定义的角色也不例外，退役 reviewer 被删除', () => {
     const settings = buildDefaultContinuationSettings_ACU() as any;
     settings.promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V40_ACU;
     settings.agentPrompts = buildV40ContinuationAgentPrompts_ACU();
-    const custom = [{ role: 'user', content: '用户自定义策划提示词', enabled: true, deletable: true }];
-    settings.agentPrompts.beatPlanner = custom;
+    settings.agentPrompts.beatPlanner = [{ role: 'user', content: '用户自定义策划提示词', enabled: true, deletable: true }];
     const loaded = validateContinuationSettings_ACU(settings);
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V48_ACU);
-    for (const role of ROLES_ACU.filter(item => item !== 'beatPlanner')) expect(loaded.agentPrompts[role]).toEqual(defaults[role]);
-    const migrated = loaded.agentPrompts.beatPlanner;
-    expect(migrated.filter(segment => !isAgentFixedSlot_ACU(segment))).toEqual(withAgentPromptLayout_ACU(custom).filter(segment => !isAgentFixedSlot_ACU(segment)));
-    expect(migrated.find(segment => segment.snapshotTemplate !== undefined)?.snapshotTemplate).toContain('$USER_REQUIREMENTS');
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU);
+    for (const role of CURRENT_ROLES_ACU) expect(loaded.agentPrompts[role]).toEqual(defaults[role]);
+    expect(loaded.agentPrompts).not.toHaveProperty('reviewer');
   });
 });

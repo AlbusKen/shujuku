@@ -352,6 +352,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import { isAgentFormatAnswer_ACU } from '../../shared/agent-prompt-qa';
 import type { ContinuationPromptKind_ACU } from '../../service/continuation/prompt-template'; // arch-ok: 仅类型导入，用于本页状态标注，编译后无运行时依赖
 import type { ContinuationPromptSegment_ACU, ContinuationSettings_ACU, StageOutline_ACU } from '../../service/continuation/model'; // arch-ok: 仅类型导入，用于本页状态标注，编译后无运行时依赖
 import AcuButton from '../components/_lib/AcuButton.vue';
@@ -449,7 +450,6 @@ const agentChannelRoles = [
   { role: 'maintainer', label: '伏笔与认知维护' },
   { role: 'mainlinePlanner', label: '主线推进策划' },
   { role: 'beatPlanner', label: '伏笔与节拍策划' },
-  { role: 'reviewer', label: '连续性审查' },
   { role: 'finalReviewer', label: '发送前终审' },
   { role: 'webResearcher', label: '网页检索' },
   { role: 'instructionComposer', label: '写作指令编排' },
@@ -572,7 +572,6 @@ function cloneSettings(settings: ContinuationSettings_ACU): ContinuationSettings
       maintainer: { ...settings.agentApiPresets.maintainer },
       mainlinePlanner: { ...settings.agentApiPresets.mainlinePlanner },
       beatPlanner: { ...settings.agentApiPresets.beatPlanner },
-      reviewer: { ...settings.agentApiPresets.reviewer },
       finalReviewer: { ...settings.agentApiPresets.finalReviewer },
       webResearcher: { ...settings.agentApiPresets.webResearcher },
       instructionComposer: { ...(settings.agentApiPresets.instructionComposer ?? { mode: 'inherit', presetName: '' }) },
@@ -584,7 +583,6 @@ function cloneSettings(settings: ContinuationSettings_ACU): ContinuationSettings
       maintainer: settings.agentPrompts.maintainer.map(segment => ({ ...segment })),
       mainlinePlanner: settings.agentPrompts.mainlinePlanner.map(segment => ({ ...segment })),
       beatPlanner: settings.agentPrompts.beatPlanner.map(segment => ({ ...segment })),
-      reviewer: settings.agentPrompts.reviewer.map(segment => ({ ...segment })),
       finalReviewer: settings.agentPrompts.finalReviewer.map(segment => ({ ...segment })),
       webResearcher: settings.agentPrompts.webResearcher.map(segment => ({ ...segment })),
       instructionComposer: (settings.agentPrompts.instructionComposer ?? []).map(segment => ({ ...segment })),
@@ -810,7 +808,7 @@ async function saveSettingsNow(): Promise<void> {
   }
 }
 
-type PromptKey = 'outlinePrompt' | 'main' | 'arcArchitect' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'reviewer' | 'finalReviewer' | 'webResearcher' | 'instructionComposer';
+type PromptKey = 'outlinePrompt' | 'main' | 'arcArchitect' | 'maintainer' | 'mainlinePlanner' | 'beatPlanner' | 'finalReviewer' | 'webResearcher' | 'instructionComposer';
 
 interface PromptGroupDef {
   key: PromptKey;
@@ -828,7 +826,6 @@ const promptGroups: PromptGroupDef[] = [
   { key: 'maintainer', kind: 'agent_maintainer', title: '伏笔与认知维护子代理提示词', restoreLabel: '恢复维护子代理默认值', note: '该代理不接收用户目标或阶段大纲，避免计划污染事实结算。' },
   { key: 'mainlinePlanner', kind: 'agent_mainline', title: '主线推进策划子代理提示词', restoreLabel: '恢复主线策划默认值' },
   { key: 'beatPlanner', kind: 'agent_beat', title: '伏笔与节拍策划子代理提示词', restoreLabel: '恢复节拍策划默认值' },
-  { key: 'reviewer', kind: 'agent_reviewer', title: '连续性审查子代理提示词', restoreLabel: '恢复审查子代理默认值' },
   { key: 'finalReviewer', kind: 'agent_final_reviewer', title: '发送前终审子代理提示词', restoreLabel: '恢复终审子代理默认值', note: '仅在「启用发送前世界书终审」开启时，固定工作流会在 instruction-composer 之后调用它。' },
   { key: 'instructionComposer', kind: 'agent_instruction_composer', title: continuationCopy.composer.title, restoreLabel: '恢复写作指令编排默认值', note: continuationCopy.composer.note },
   { key: 'webResearcher', kind: 'agent_web_researcher', title: '网页检索子代理（web-researcher）提示词', restoreLabel: '恢复网页检索默认值', note: '仅在「启用开场百科检索」开启时才会被调用。专属占位符：$WEB_TOOL_CATALOG（出网工具说明与本次配额）、$WEB_REFS（百科资料库预览）。' },
@@ -864,7 +861,7 @@ function addPrompt(key: PromptKey, position: 'top' | 'bottom' = 'bottom'): void 
 
 function deletePrompt(key: PromptKey, index: number): void {
   const prompts = promptList(key);
-  if (!prompts || prompts[index]?.deletable === false) return;
+  if (!prompts || prompts[index]?.deletable === false || isAgentFormatAnswer_ACU(prompts[index])) return;
   prompts.splice(index, 1);
 }
 
@@ -872,6 +869,7 @@ function movePrompt(key: PromptKey, index: number, delta: -1 | 1): void {
   const prompts = promptList(key);
   const target = index + delta;
   if (!prompts || target < 0 || target >= prompts.length) return;
+  if (isAgentFormatAnswer_ACU(prompts[index]) || isAgentFormatAnswer_ACU(prompts[target])) return;
   [prompts[index], prompts[target]] = [prompts[target], prompts[index]];
 }
 
@@ -879,6 +877,7 @@ function updatePrompt(key: PromptKey, index: number, patch: Partial<Continuation
   const prompts = promptList(key);
   const current = prompts?.[index];
   if (!prompts || !current) return;
+  if (isAgentFormatAnswer_ACU(current)) return;
   if (current.content.trim() === '$HISTORY_ANCHOR') return;
   if (current.content.trim() === '$RUNTIME_SNAPSHOT') {
     if (typeof patch.snapshotTemplate === 'string') prompts[index] = { ...current, snapshotTemplate: patch.snapshotTemplate };

@@ -479,7 +479,7 @@ function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU
   const agentApiPresets: WorldSimulationEnvelope_ACU['settings']['agentApiPresets'] = {};
   for (const [key, value] of Object.entries(raw.agentApiPresets)) {
     // 退役角色不再公开配置；旧运行仍由运行时兼容路径处理。
-    if (key === 'requirements-maintainer' || key === 'timekeeper' || key === 'chronicler') continue;
+    if (key === 'requirements-maintainer' || key === 'timekeeper' || key === 'chronicler' || key === 'world-stage-planner') continue;
     stableId_ACU(key, `settings.agentApiPresets.${key}`, phase);
     if (!isRecord_ACU(value)) fail_ACU(`settings.agentApiPresets.${key} 必须是对象`, phase);
     exactKeys_ACU(value, ['mode', 'presetName'], [], `settings.agentApiPresets.${key}`, phase);
@@ -487,15 +487,12 @@ function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU
   }
   // requirements-maintainer 已退役。存量提示词组里的该键在校验前就地丢弃，避免严格键校验以「未知角色」拒绝整包。
   if (Object.prototype.hasOwnProperty.call(raw.agentPrompts, 'requirements-maintainer')) delete raw.agentPrompts['requirements-maintainer'];
-  const validatedPrompts = Object.keys(raw.agentPrompts).length === 0
+  // 旧版本直接重置全部提示词，不依赖旧正文或指纹；当前版本仍严格校验用户编辑。
+  const agentPrompts = raw.promptForceDefaultVersion !== WORLD_SIMULATION_PROMPT_VERSION_ACU
     ? buildDefaultWorldSimulationAgentPrompts_ACU()
-    : validateWorldSimulationAgentPrompts_ACU(raw.agentPrompts, phase);
-  const previousPromptVersion = Object.prototype.hasOwnProperty.call(raw, 'promptForceDefaultVersion')
-    ? string_ACU(raw.promptForceDefaultVersion, 'settings.promptForceDefaultVersion', phase) : undefined;
-  // v22 prompts are current; earlier one-shot defaults are upgraded without discarding v21 user edits.
-  const agentPrompts = previousPromptVersion === WORLD_SIMULATION_PROMPT_VERSION_ACU
-    ? validatedPrompts
-    : migrateWorldSimulationAgentPrompts_ACU(validatedPrompts, {}, previousPromptVersion);
+    : Object.keys(raw.agentPrompts).length === 0
+      ? buildDefaultWorldSimulationAgentPrompts_ACU()
+      : validateWorldSimulationAgentPrompts_ACU(raw.agentPrompts, phase);
   const readBudget = typeof raw.agentReadTokenBudget === 'string'
     ? (/^(?:100|[1-9]?\d)%$/.test(raw.agentReadTokenBudget) ? raw.agentReadTokenBudget : fail_ACU('settings.agentReadTokenBudget 百分比非法', phase))
     : integer_ACU(raw.agentReadTokenBudget, 'settings.agentReadTokenBudget', phase, 1, 1000000);

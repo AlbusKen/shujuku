@@ -43,7 +43,6 @@ export const CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU: Readonly<Record<Continua
   maintainer: 8192,
   mainlinePlanner: 4096,
   beatPlanner: 4096,
-  reviewer: 4096,
   finalReviewer: 4096,
   webResearcher: 8192,
   instructionComposer: 4096,

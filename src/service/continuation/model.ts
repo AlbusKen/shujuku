@@ -119,18 +119,20 @@ export interface ContinuationAgentPrompts_ACU {
   maintainer: ContinuationPromptSegment_ACU[];
   mainlinePlanner: ContinuationPromptSegment_ACU[];
   beatPlanner: ContinuationPromptSegment_ACU[];
-  reviewer: ContinuationPromptSegment_ACU[];
   finalReviewer: ContinuationPromptSegment_ACU[];
   webResearcher: ContinuationPromptSegment_ACU[];
   instructionComposer: ContinuationPromptSegment_ACU[];
 }
 
-export const CONTINUATION_AGENT_PROMPT_KEYS_ACU = ['main', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer', 'webResearcher', 'instructionComposer'] as const;
+/** 冻结历史构造器使用；不参与现役角色注册。 */
+export type ContinuationLegacyAgentPrompts_ACU = ContinuationAgentPrompts_ACU & { reviewer: ContinuationPromptSegment_ACU[] };
+
+export const CONTINUATION_AGENT_PROMPT_KEYS_ACU = ['main', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'finalReviewer', 'webResearcher', 'instructionComposer'] as const;
 
 export type ContinuationAgentPromptKey_ACU = typeof CONTINUATION_AGENT_PROMPT_KEYS_ACU[number];
 
-/** 可独立配置 AI 渠道的角色：主 Agent、大纲子代理、派工子代理、最终审查与用户要求维护。 */
-export const CONTINUATION_AGENT_API_PRESET_ROLES_ACU = ['main', 'outline', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'reviewer', 'finalReviewer', 'webResearcher', 'instructionComposer'] as const;
+/** 可独立配置 AI 渠道的现役角色。 */
+export const CONTINUATION_AGENT_API_PRESET_ROLES_ACU = ['main', 'outline', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'finalReviewer', 'webResearcher', 'instructionComposer'] as const;
 
 export type ContinuationAgentApiPresetRole_ACU = typeof CONTINUATION_AGENT_API_PRESET_ROLES_ACU[number];
 
