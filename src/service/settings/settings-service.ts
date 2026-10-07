@@ -1274,6 +1274,7 @@ export   function buildDefaultSettings_ACU() {
           deskPetJokesEnabled: true, // [桌宠] 冷笑话插播；仅在桌宠开启时生效，关闭后气泡不再插播冷笑话
           deskPetShowRealWork: false, // [桌宠] 直接展示已有通知与任务进度的真实内容
           plotSendDisguiseDisabled: false, // [剧情推进] 解除等待期发送伪装，不随预设切换
+          zeroLayerWorldInfoScanRounds: 2, // [零层] 最近几轮逻辑对话参与世界书扫描，0 关闭
           // [桌宠] desktopPetPosition（按视口比例 {x,y}）刻意不放默认值：deepMerge 遇到 null 默认值会把已保存对象并成 {}。
           // [桌宠 / 气泡外观] deskPetAppearance、noticeBubbleAppearance 只存用户改过的项，缺省值在 shared/desk-pet-appearance，这里同样不放。
           // [剧情推进] 设置

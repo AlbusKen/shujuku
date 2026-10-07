@@ -12,7 +12,7 @@ import { validateZeroLayerEnvelope_ACU, validateZeroLayerContinuationReceipt_ACU
 import type { ContinuationLogicalRef_ACU } from '../continuation/model';
 import { getTableDataFingerprint_ACU } from '../table/table-data-upgrade-audit';
 import { applyZeroLayerCommand_ACU, mergeZeroLayerEffectReceipt_ACU, type ZeroLayerCommand_ACU } from './store-command';
-import { assertBridgeSource_ACU, assertBridgeHostIdle_ACU } from './bridge-source';
+import { assertBridgeSource_ACU } from './bridge-source';
 import { assertBridgeConfig_ACU } from './bridge-config';
 import type { ZeroLayerExitSelection_ACU, ZeroLayerExitAssignment_ACU } from './exit-model';
 import { buildZeroLayerExitCandidate_ACU } from './exit-candidate';
@@ -105,7 +105,6 @@ export class ZeroLayerStore_ACU {
       }
       const current = readZeroLayerCarrier_ACU(context);
       requireExit_ACU(current, '退出缺少已保存的零层载体。');
-      assertBridgeHostIdle_ACU();
       await this.verifySource(context, current);
       const manifest = await buildZeroLayerExitCandidate_ACU(current,
         context.chat as Record<string, unknown>[], selected);
@@ -144,7 +143,6 @@ export class ZeroLayerStore_ACU {
     assertLease();
     const journal = prepared.exitManifest;
     requireExit_ACU(journal?.phase === 'prepared' && !prepared.enabled, '退出缺少已确认的 prepared 意图。');
-    assertBridgeHostIdle_ACU();
     await this.verifySource(context, prepared);
     assertLease();
     assertBridgeConfig_ACU(context.chat, journal.configFingerprint);
@@ -435,7 +433,6 @@ export class ZeroLayerStore_ACU {
     const journal = candidate.exitManifest;
     const verifyExit = (side: 'before' | 'after') => {
       if (!journal) return;
-      assertBridgeHostIdle_ACU();
       assertBridgeConfig_ACU(context.chat, journal.configFingerprint);
       requireExit_ACU(exitAssignmentsMatch_ACU(chat, journal.assignments, side), '退出保存字段与冻结写集不一致。');
     };
@@ -448,7 +445,6 @@ export class ZeroLayerStore_ACU {
     const previousBridge = before?.branches.find(branch => branch.branchId === before.activeBranchId)?.bridge;
     // Reconcile 和首次启用的保存窗口同样受保护；正常逻辑工作不重新读取旧基底。
     const verifyBridge = () => {
-      if (!before) assertBridgeHostIdle_ACU();
       if (bridge && (bridge.phase !== 'reconciled' || previousBridge?.phase !== 'reconciled'
         || candidate.enabled && !before?.enabled)) {
         assertBridgeSource_ACU(context.chat, bridge.sourceFingerprint);

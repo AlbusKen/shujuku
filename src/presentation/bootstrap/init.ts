@@ -6,6 +6,7 @@ import { installHostEventWaitGate_ACU, installPlotSendEventGate_ACU, redirectPlo
 import { PassiveCompletionReceiver_ACU } from './passive-completion-receiver';
 import { runWithAbortSignal_ACU } from '../../shared/abort-signal';
 import { installZeroLayerBootstrap_ACU } from './zero-layer-bootstrap';
+import { readOrdinaryZeroLayerState_ACU } from '../../service/zero-layer/ordinary-state';
 import { showToastr_ACU } from '../theme/toast';
 import { attemptToLoadCoreApis_ACU } from '../triggers/settings-ui-sync/settings-ui-connect';
 import { formatHostCapabilities_ACU, getLastHostCapabilities_ACU } from '../../shared/host-compat/tavern-helper-compat';
@@ -53,6 +54,12 @@ import { createWorldSimulationCompletionIntentForCurrentChat_ACU, getWorldSimula
 import { autoEnableFlightModeForNewChatIfNeeded_ACU } from '../../service/fill-mode/fill-mode-auto-enable';
 import { ensureCurrentChatFillModeRecorded_ACU } from '../../service/fill-mode/fill-mode-chat-switch';
 import { getVectorPipelinePlanForCurrentChat_ACU, isVectorPipelineEnabledForCurrentChat_ACU } from '../../service/fill-mode/fill-mode-gate';
+
+/** 零层占用（未完成退出桥接或保存未知）的聊天：物理前缀已冻结为桥接基线，普通自动填表不能写入。 */
+function isZeroLayerOwnedChat_ACU(): boolean {
+  try { readOrdinaryZeroLayerState_ACU(); return false; }
+  catch { return true; }
+}
 
 
 // [从 state-manager.ts 搬入 presentation 层] 安装发送意图捕捉钩子（DOM 事件绑定）
@@ -283,6 +290,14 @@ export   function mainInitialize_ACU() {
                 // quiet/automatic_trigger 直接透传
                 if (isQuietLikeGeneration_ACU('tavernhelper', { quiet_prompt: options.quiet_prompt }) || options.automatic_trigger) {
                   return (window as any).original_TavernHelper_generate_ACU.apply(this, args);
+                }
+
+                // 零层聊天的正文只经输入分流或 submitZeroLayerInput；不先做普通规划/召回再被请求门禁拒绝。
+                try {
+                  readOrdinaryZeroLayerState_ACU();
+                } catch (error) {
+                  showToastr_ACU('warning', '当前聊天由零层接管，卡片的 TavernHelper.generate 正文调用未执行；请改用 AutoCardUpdaterAPI.submitZeroLayerInput。', '零层');
+                  throw error;
                 }
 
                 const userInputForInitialSeed = String(options.user_input || options.prompt || getSendTextareaValue_ACU() || '').trim();
@@ -586,6 +601,13 @@ export   function mainInitialize_ACU() {
                     });
                     return;
                   }
+                  // 零层回合的 quiet 收尾同样派发 ended；表格只经逻辑回合结算。
+                  if (isZeroLayerOwnedChat_ACU()) {
+                    logAutoFillSkip_ACU('zero_layer_owned_chat', {
+                      eventType: 'GENERATION_ENDED', messageId: message_id, chatKey, isolationKey,
+                    });
+                    return;
+                  }
                   return triggerAutomaticUpdateIfNeeded_ACU(undefined, {
                     eventType: 'GENERATION_ENDED', messageId: message_id, chatKey, isolationKey,
                     isCurrentChat: isAutoFillCurrent,
@@ -693,6 +715,10 @@ export   function mainInitialize_ACU() {
                 if (!isAutoFillCurrent()) return;
                 if (messageType === 'first_message') {
                   logAutoFillSkip_ACU('initial_chat_message', { eventType: evName, messageId });
+                  return;
+                }
+                if (isZeroLayerOwnedChat_ACU()) {
+                  logAutoFillSkip_ACU('zero_layer_owned_chat', { eventType: evName, messageId });
                   return;
                 }
                 return triggerAutomaticUpdateIfNeeded_ACU(undefined, {

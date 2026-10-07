@@ -1,5 +1,15 @@
 import { SillyTavern_API_ACU } from '../../shared/host-api';
 
+const invocations_ACU = new Set<{ quiet_prompt: string; signal: AbortSignal }>();
+
+/** 只认可本轮实际装配的完整输入与取消信号，不接受外部布尔标记冒充。 */
+export function isZeroLayerHostInvocation_ACU(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const params = value as { quiet_prompt?: unknown; signal?: unknown };
+  return [...invocations_ACU].some(invocation => !invocation.signal.aborted
+    && params.quiet_prompt === invocation.quiet_prompt && params.signal === invocation.signal);
+}
+
 /** 复用宿主 quiet 装配；只支持已核对的 Chat Completion 单角色入口。 */
 export function requireZeroLayerHostGeneration_ACU(): void {
   const api = SillyTavern_API_ACU;
@@ -15,11 +25,28 @@ export function requireZeroLayerHostGeneration_ACU(): void {
   }
 }
 
+const WORLD_INFO_SCAN_PROMPT_KEY_ACU = 'acu_zero_layer_world_info_scan';
+
 /** 只请求装配并走宿主实际 fetch；最终原请求由零层拦截器阻断。 */
-export async function invokeZeroLayerHostGeneration_ACU(quietPrompt: string, signal: AbortSignal): Promise<void> {
+export async function invokeZeroLayerHostGeneration_ACU(quietPrompt: string, signal: AbortSignal, worldInfoScanText = ''): Promise<void> {
   requireZeroLayerHostGeneration_ACU();
   if (signal.aborted) throw new DOMException('本轮已停止。', 'AbortError');
-  await SillyTavern_API_ACU!.generate('quiet', {
+  const api = SillyTavern_API_ACU!;
+  const options = {
     quiet_prompt: quietPrompt, quietToLoud: false, signal,
-  });
+  };
+  // 位置 -1 不注入提示词；scan=true 只让本次 quiet 装配的世界书扫描看到最近逻辑对话。
+  const scanned = !!worldInfoScanText && typeof api.setExtensionPrompt === 'function';
+  invocations_ACU.add(options);
+  try {
+    if (scanned) await api.setExtensionPrompt(WORLD_INFO_SCAN_PROMPT_KEY_ACU, worldInfoScanText, -1, 0, true, 0,
+      () => invocations_ACU.has(options));
+    await api.generate('quiet', options);
+  } finally {
+    invocations_ACU.delete(options);
+    if (scanned) {
+      try { await api.setExtensionPrompt(WORLD_INFO_SCAN_PROMPT_KEY_ACU, '', -1, 0, false); }
+      catch { /* filter 已随调用结束失效，清空失败不影响后续生成。 */ }
+    }
+  }
 }

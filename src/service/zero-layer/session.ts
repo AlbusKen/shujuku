@@ -1,6 +1,4 @@
 import type { InterceptedHostRequest_ACU } from '../../data/gateways/host-generation-interceptor';
-import { ensureHostGenerationState_ACU } from '../../data/gateways/host-generation-state-gateway';
-import { assertBridgeHostIdle_ACU } from './bridge-source';
 import type { ContinuationLogicalRef_ACU, TurnAttemptIdentity_ACU } from '../continuation/model';
 import type { ChatCompletionPromptContext_ACU } from '../runtime/helpers-remaining';
 import { captureZeroLayerTableInput_ACU } from './table-state';
@@ -17,6 +15,7 @@ import { synchronizeZeroLayerBridge_ACU } from './bridge-scheduler';
 import type { ZeroLayerBranchCommand_ACU } from './branch-command';
 import type { ZeroLayerExitSelection_ACU } from './exit-model';
 import { notifyZeroLayerViewPreview_ACU } from './view-preview';
+import { buildZeroLayerWorldInfoScanText_ACU, readZeroLayerWorldInfoScanRounds_ACU } from './world-info-scan';
 
 /** 仅用于本地装配到 fetch 的归属传递；数据库请求不携带该字段。 */
 export const ZERO_LAYER_REQUEST_ID_ACU = '_acu_zero_layer_attempt_id';
@@ -25,6 +24,8 @@ export interface ZeroLayerPreparedInvocation_ACU {
   readonly quietPrompt: string;
   readonly signal: AbortSignal;
   readonly logicalRef: ContinuationLogicalRef_ACU;
+  /** 只供酒馆世界书扫描的最近逻辑对话；不进入提示词，空串表示关闭。 */
+  readonly worldInfoScanText: string;
 }
 export type ZeroLayerResponseSettlement_ACU = (
   envelope: ZeroLayerEnvelope_ACU, turnId: string, attemptId: string, signal: AbortSignal,
@@ -61,6 +62,13 @@ export class ZeroLayerSession_ACU {
   ) {}
 
   hasActiveTurn(): boolean { return this.active !== null || this.preparing || this.recoveryController !== null; }
+
+  /** 在途正文租约的物理源是否仍一致；无在途正文时返回 null（准备与恢复步骤各自逐步复核）。 */
+  isSourceCurrent(): boolean | null {
+    const active = this.active;
+    if (!active) return null;
+    try { assertZeroLayerCarrier_ACU(active.context); return true; } catch { return false; }
+  }
 
   async prepare(input: string, requiredEffects: ZeroLayerEffectReceipt_ACU['kind'][], continuationIdentity?: TurnAttemptIdentity_ACU): Promise<ZeroLayerPreparedInvocation_ACU> {
     if (this.hasActiveTurn()) throw new ZeroLayerError_ACU('pending-turn', '零层会话已有在途回合。');
@@ -159,7 +167,8 @@ export class ZeroLayerSession_ACU {
     const turn = active.envelope.turns.find(item => item.turnId === active.turnId)!;
     return { quietPrompt: `${active.marker}_BEGIN\n${turn.input}\n${active.marker}_END`, signal: active.controller.signal,
       logicalRef: { sessionId: active.envelope.sessionId, branchId: turn.branchId,
-        turnId: turn.turnId, attemptId: turn.attemptId, floorId: turn.assistantFloor.floorId } };
+        turnId: turn.turnId, attemptId: turn.attemptId, floorId: turn.assistantFloor.floorId },
+      worldInfoScanText: buildZeroLayerWorldInfoScanText_ACU(active.envelope, readZeroLayerWorldInfoScanRounds_ACU()) };
   }
 
   /** 续写等待身份保存后接纳新 revision；正文与其它回合数据必须仍是原候选。 */
@@ -359,6 +368,31 @@ export class ZeroLayerSession_ACU {
     }
   }
 
+  /** 用户显式放弃正文未保存的回合；先回读权威存档，只记取消，不认领宿主请求、不重发正文。 */
+  async abandonPending(turnId: string, attemptId: string): Promise<ZeroLayerEnvelope_ACU> {
+    if (this.hasActiveTurn()) throw new ZeroLayerError_ACU('pending-turn', '请先停止在途任务，再放弃未保存回合。');
+    const context = captureZeroLayerCarrier_ACU();
+    const epoch = this.epoch;
+    const controller = new AbortController();
+    this.recoveryController = controller;
+    const assertLease = () => {
+      if (epoch !== this.epoch || this.recoveryController !== controller || controller.signal.aborted) {
+        throw new ZeroLayerError_ACU('scope-changed', '放弃回合的租约已失效。');
+      }
+      assertZeroLayerCarrier_ACU(context);
+    };
+    try {
+      const envelope = await this.store.recover();
+      assertLease();
+      if (!envelope) throw new ZeroLayerError_ACU('carrier-unavailable', '没有可放弃的零层回合。');
+      const saved = await this.store.commit({ type: 'abandon-turn', turnId, attemptId }, envelope.revision);
+      assertLease();
+      return saved;
+    } finally {
+      if (this.recoveryController === controller) this.recoveryController = null;
+    }
+  }
+
   /** 分支操作只修改 carrier；保存未知时不能重试或重新生成正文。 */
   async changeBranch(command: ZeroLayerBranchCommand_ACU): Promise<ZeroLayerEnvelope_ACU> {
     if (this.hasActiveTurn()) throw new ZeroLayerError_ACU('pending-turn', '请先停止或恢复在途任务，再操作逻辑分支。');
@@ -372,10 +406,8 @@ export class ZeroLayerSession_ACU {
         throw new ZeroLayerError_ACU('scope-changed', '分支操作租约已失效。');
       }
       assertZeroLayerCarrier_ACU(context);
-      assertBridgeHostIdle_ACU();
     };
     try {
-      await ensureHostGenerationState_ACU(controller.signal);
       assertLease();
       let current = await this.store.read();
       assertLease();
@@ -418,10 +450,8 @@ export class ZeroLayerSession_ACU {
         throw new ZeroLayerError_ACU('scope-changed', '退出操作租约已失效；已保存意图须显式恢复。');
       }
       assertZeroLayerCarrier_ACU(context);
-      assertBridgeHostIdle_ACU();
     };
     try {
-      await ensureHostGenerationState_ACU(controller.signal);
       assertLease();
       const saved = await work(assertLease);
       assertLease();
@@ -452,13 +482,9 @@ export class ZeroLayerSession_ACU {
         throw new ZeroLayerError_ACU('scope-changed', '零层启用或桥接恢复已失效。');
       }
       assertZeroLayerCarrier_ACU(context);
-      if (options.enabled === true || options.recover) assertBridgeHostIdle_ACU();
     };
     try {
-      if (options.enabled === true || options.recover) {
-        await ensureHostGenerationState_ACU(controller.signal);
-        assertLease();
-      }
+      assertLease();
       // 启停不能把保存未知当成一次自动恢复；只有显式 recover 入口解除该门禁。
       let envelope = options.recover ? await this.store.recover() : await this.store.readPersisted();
       assertLease();

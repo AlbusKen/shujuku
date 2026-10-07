@@ -10,10 +10,11 @@ export type ZeroLayerHistoryResult_ACU<T> = { readonly ok: true; readonly value:
   | { readonly ok: false; readonly error: { readonly code: ZeroLayerHistoryErrorCode_ACU;
       readonly message: string; readonly retryable: boolean; readonly recoveryAction: string } };
 export type ZeroLayerHistoryStatus_ACU = 'preparing' | 'published' | 'busy' | 'recovery-required';
-export interface ZeroLayerPublicState_ACU {
-  readonly availability: 'unavailable';
-  readonly value: null;
-}
+export type ZeroLayerJsonValue_ACU = null | boolean | number | string
+  | readonly ZeroLayerJsonValue_ACU[] | { readonly [key: string]: ZeroLayerJsonValue_ACU };
+export type ZeroLayerPublicState_ACU =
+  | { readonly availability: 'unavailable' | 'invalid'; readonly value: null }
+  | { readonly availability: 'available'; readonly value: ZeroLayerJsonValue_ACU };
 export interface ZeroLayerSessionSnapshot_ACU {
   readonly protocolVersion: 1;
   readonly sessionId: string;
@@ -34,6 +35,8 @@ export interface ZeroLayerHistoryItem_ACU {
   readonly publicState: ZeroLayerPublicState_ACU;
   readonly settlement: readonly { readonly kind: 'plot' | 'table' | 'continuation' | 'simulation';
     readonly status: 'durable' | 'skipped-by-config' }[];
+  /** 仅宿主授权诊断读取携带；普通游戏历史始终只有 published。 */
+  readonly diagnostic?: { readonly phase: string; readonly errorCode: string | null };
   readonly userRef: ZeroLayerFloorRef_ACU;
   readonly assistantRef: ZeroLayerFloorRef_ACU;
 }

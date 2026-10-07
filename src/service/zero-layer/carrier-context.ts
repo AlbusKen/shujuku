@@ -27,6 +27,12 @@ function message_ACU(value: unknown): value is HostMessage_ACU {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
+/** 只判断当前聊天是否带零层字段；不校验存档，也不计算物理指纹，可用于每次发送前的快速分流。 */
+export function hasZeroLayerCarrierField_ACU(): boolean {
+  return getChatArray_ACU().some(value => message_ACU(value)
+    && Object.prototype.hasOwnProperty.call(value, ZERO_LAYER_CARRIER_FIELD_ACU));
+}
+
 export function carrierSwipeId_ACU(message: HostMessage_ACU): number {
   const value = message.swipe_id ?? 0;
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {

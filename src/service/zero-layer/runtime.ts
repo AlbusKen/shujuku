@@ -92,7 +92,7 @@ export class ZeroLayerRuntime_ACU {
       try {
         await beforeSend?.(prepared.logicalRef);
         await this.session.refreshPrepared(prepared.logicalRef);
-        await invokeZeroLayerHostGeneration_ACU(prepared.quietPrompt, prepared.signal);
+        await invokeZeroLayerHostGeneration_ACU(prepared.quietPrompt, prepared.signal, prepared.worldInfoScanText);
       }
       catch (error) { hostError = error; }
       return await this.session.finish(hostError);
@@ -103,6 +103,11 @@ export class ZeroLayerRuntime_ACU {
   async recoverSettlement(turnId: string, attemptId: string): Promise<ZeroLayerEnvelope_ACU> {
     if (!this.settlement) throw new ZeroLayerError_ACU('effects-pending', '零层结算适配器尚未就绪。');
     return this.runExclusive(() => this.session.recoverSettlement(turnId, attemptId));
+  }
+
+  /** 用户显式放弃正文未保存的回合；属于恢复操作，关闭未确认时也可执行，不发送请求。 */
+  async abandonTurn(turnId: string, attemptId: string): Promise<ZeroLayerEnvelope_ACU> {
+    return this.runExclusive(() => this.session.abandonPending(turnId, attemptId), 'recover');
   }
 
   /** 恢复 carrier 内已保存的 checkpoint 阶段，不开放任何模型发送入口。 */

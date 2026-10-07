@@ -10,6 +10,7 @@ import type { ZeroLayerHistoryApi_ACU, ZeroLayerHistoryItem_ACU, ZeroLayerHistor
   ZeroLayerHistoryQuery_ACU, ZeroLayerHistoryResult_ACU, ZeroLayerSessionSnapshot_ACU,
   ZeroLayerHistoryChange_ACU } from './history-model';
 import { subscribeZeroLayerChanges_ACU } from './notifications';
+import { projectZeroLayerPublicState_ACU } from './public-state';
 
 type Binding_ACU = { context: ZeroLayerCarrierContext_ACU; sessionId: string; branchId: string; token: string };
 type Cursor_ACU = { direction: 'older' | 'newer'; boundary: string };
@@ -24,20 +25,31 @@ export class ZeroLayerHistoryReader_ACU implements ZeroLayerHistoryApi_ACU {
   private readonly subscriptions = new Set<(revoked?: boolean) => void>();
   private epoch = 0;
   private revoking = false;
+  private readonly authorizedReaders = new Set<ZeroLayerHistoryReader_ACU>();
+  constructor(private readonly access?: {
+    assert(): void;
+    select(source: ZeroLayerEnvelope_ACU): ZeroLayerEnvelope_ACU;
+    diagnostic: boolean;
+    revoke?(): void;
+  }) {}
 
   invalidate(): void {
     if (this.revoking) return;
     this.revoking = true;
     try {
       this.epoch += 1;
+      this.access?.revoke?.();
       this.binding = null;
       this.snapshots.clear();
       for (const release of [...this.subscriptions]) release(true);
+      for (const reader of this.authorizedReaders) reader.invalidate();
+      this.authorizedReaders.clear();
     } finally { this.revoking = false; }
   }
 
   private assertReadable(): void {
     if (this.revoking) throw new ReadError('scope-changed', '作用域正在撤销，不能重新取得旧权限。');
+    this.access?.assert();
   }
 
   private bind(context: ZeroLayerCarrierContext_ACU, envelope: ZeroLayerEnvelope_ACU): Binding_ACU {
@@ -53,11 +65,50 @@ export class ZeroLayerHistoryReader_ACU implements ZeroLayerHistoryApi_ACU {
   }
 
   private requireEnabled(envelope: ZeroLayerEnvelope_ACU | null): ZeroLayerEnvelope_ACU {
-    if (!envelope?.enabled) {
+    if (!envelope || !envelope.enabled && !this.access) {
       this.invalidate();
       throw new ReadError('mode-disabled', '当前聊天未启用零层历史读取。');
     }
     return envelope;
+  }
+
+  /** 仅由宿主设置/诊断 UI 签发；返回绑定方法而非 reader/store。 */
+  async authorize(selection: { branchId: string; diagnostic: boolean }) {
+    this.assertReadable();
+    const branchId = selection.branchId;
+    const diagnostic = selection.diagnostic === true;
+    const epoch = this.epoch;
+    const context = captureZeroLayerCarrier_ACU();
+    const source = await this.store.read();
+    assertZeroLayerCarrier_ACU(context);
+    if (!source || epoch !== this.epoch || !source.branches.some(b => b.branchId === branchId)) {
+      throw new ReadError('access-denied', '宿主所选分支不可授权。');
+    }
+    let revoked = false;
+    const assert = () => {
+      if (revoked || epoch !== this.epoch) throw new ReadError('access-denied', '只读授权已撤销。');
+      assertZeroLayerCarrier_ACU(context);
+      const current = this.store.readSnapshot();
+      if (!current || current.sessionId !== source.sessionId || current.activeBranchId !== source.activeBranchId
+        || current.enabled !== source.enabled || !current.branches.some(b => b.branchId === branchId)) {
+        throw new ReadError('scope-changed', '宿主授权的载体或活动作用域已变化。');
+      }
+    };
+    let releaseGuard = () => {};
+    const reader = new ZeroLayerHistoryReader_ACU({ assert, diagnostic,
+      revoke: () => { revoked = true; releaseGuard(); this.authorizedReaders.delete(reader); },
+      select: value => ({ ...value, activeBranchId: branchId }) });
+    const revoke = () => { if (!revoked) reader.invalidate(); };
+    this.authorizedReaders.add(reader);
+    releaseGuard = subscribeZeroLayerChanges_ACU(change => {
+      if (change.kind === 'scope-invalidated') { revoke(); return; }
+      try { assert(); } catch { revoke(); }
+    });
+    const api = Object.freeze({
+      getSnapshot: query => reader.getSnapshot(query), readHistory: query => reader.readHistory(query),
+      subscribe: listener => reader.subscribe(listener),
+    } satisfies ZeroLayerHistoryApi_ACU);
+    return { api, revoke };
   }
 
   private async readCurrent() {
@@ -75,7 +126,9 @@ export class ZeroLayerHistoryReader_ACU implements ZeroLayerHistoryApi_ACU {
     if (JSON.stringify(confirmed) !== JSON.stringify(envelope)) {
       throw new ReadError('snapshot-stale', '异步读取后存档已变化，请重新取得快照。');
     }
-    const current = this.requireEnabled(envelope);
+    this.assertReadable();
+    const original = this.requireEnabled(envelope);
+    const current = this.access ? this.access.select(original) : original;
     return { envelope: current, binding: this.bind(context, current) };
   }
 
@@ -83,18 +136,36 @@ export class ZeroLayerHistoryReader_ACU implements ZeroLayerHistoryApi_ACU {
     for (const snapshot of this.snapshots.values()) {
       if (snapshot.binding === binding && snapshot.value.revision === envelope.revision) return snapshot;
     }
-    const items = projectZeroLayerHistory_ACU(envelope);
+    const items = this.project(envelope);
+    const published = projectZeroLayerHistory_ACU(envelope);
+    const body = published[published.length - 1]?.body ?? envelope.seedBody;
     const token = crypto.randomUUID();
     const snapshot: Snapshot_ACU = { binding, items, cursors: new Map(), value: {
       protocolVersion: 1, sessionId: envelope.sessionId, branchId: envelope.activeBranchId,
       carrierRef: { carrierId: envelope.carrierId, swipeId: envelope.carrierSwipeId },
-      revision: envelope.revision, headTurnId: items[items.length - 1]?.turnId ?? null,
-      currentBody: items[items.length - 1]?.body ?? envelope.seedBody,
-      currentPublicState: { availability: 'unavailable', value: null },
+      revision: envelope.revision, headTurnId: published[published.length - 1]?.turnId ?? null,
+      currentBody: body,
+      currentPublicState: projectZeroLayerPublicState_ACU(body),
       status: zeroLayerHistoryStatus_ACU(envelope), snapshotToken: token,
     } };
     this.snapshots.set(token, snapshot);
     return snapshot;
+  }
+
+  private project(envelope: ZeroLayerEnvelope_ACU): ZeroLayerHistoryItem_ACU[] {
+    const published = projectZeroLayerHistory_ACU(envelope);
+    if (!this.access?.diagnostic) return published;
+    const pending = envelope.turns.filter(turn => turn.branchId === envelope.activeBranchId && turn.phase !== 'published');
+    return [...published, ...pending.map((turn): ZeroLayerHistoryItem_ACU => ({
+      turnId: turn.turnId, parentTurnId: turn.parentTurnId, input: turn.input, body: turn.body ?? '',
+      publicState: { availability: 'unavailable' as const, value: null },
+      settlement: turn.effectReceipts.map(r => ({ kind: r.kind, status: r.status })),
+      diagnostic: { phase: turn.phase, errorCode: turn.errorCode },
+      userRef: { kind: 'logical' as const, sessionId: envelope.sessionId, branchId: turn.branchId,
+        turnId: turn.turnId, floorId: turn.userFloor.floorId, role: 'user' as const },
+      assistantRef: { kind: 'logical' as const, sessionId: envelope.sessionId, branchId: turn.branchId,
+        turnId: turn.turnId, floorId: turn.assistantFloor.floorId, role: 'assistant' as const },
+    }))];
   }
 
   async getSnapshot(raw: { readonly version: 1 }): Promise<ZeroLayerHistoryResult_ACU<ZeroLayerSessionSnapshot_ACU>> {
@@ -120,7 +191,7 @@ export class ZeroLayerHistoryReader_ACU implements ZeroLayerHistoryApi_ACU {
       if (snapshot && snapshot.binding !== binding) throw new ReadError('scope-changed', '快照所属作用域已变化。');
       snapshot ??= this.remember(envelope, binding);
       if (envelope.revision < snapshot.value.revision
-        || !isZeroLayerHistoryRetained_ACU(snapshot.items, projectZeroLayerHistory_ACU(envelope))) {
+        || !isZeroLayerHistoryRetained_ACU(snapshot.items, this.project(envelope))) {
         this.snapshots.delete(snapshot.value.snapshotToken);
         throw new ReadError('snapshot-stale', '快照历史已被删除或改写，禁止静默改读最新版。');
       }
@@ -160,7 +231,8 @@ export class ZeroLayerHistoryReader_ACU implements ZeroLayerHistoryApi_ACU {
     this.assertReadable();
     if (typeof listener !== 'function') throw new ReadError('invalid-query', '订阅回调必须为函数。');
     const context = captureZeroLayerCarrier_ACU();
-    const envelope = this.requireEnabled(this.store.readSnapshot());
+    const original = this.requireEnabled(this.store.readSnapshot());
+    const envelope = this.access ? this.access.select(original) : original;
     const binding = this.bind(context, envelope);
     let active = true;
     let lastRevision = -1;
@@ -184,7 +256,7 @@ export class ZeroLayerHistoryReader_ACU implements ZeroLayerHistoryApi_ACU {
     const emit = (current: ZeroLayerEnvelope_ACU, kind: ZeroLayerHistoryChange_ACU['kind']) => {
       if (!active || current.revision <= lastRevision) return;
       const headTurnId = current.branches.find(branch => branch.branchId === current.activeBranchId)!.headTurnId;
-      const state = JSON.stringify([headTurnId, zeroLayerHistoryStatus_ACU(current)]);
+      const state = JSON.stringify([headTurnId, zeroLayerHistoryStatus_ACU(current), this.access?.diagnostic ? this.project(current) : null]);
       if (kind !== 'snapshot' && state === lastState) return;
       lastRevision = current.revision;
       lastState = state;
@@ -198,8 +270,10 @@ export class ZeroLayerHistoryReader_ACU implements ZeroLayerHistoryApi_ACU {
       if (!active) return;
       try {
         assertZeroLayerCarrier_ACU(binding.context);
-        const current = this.store.readSnapshot();
-        if (!current?.enabled || current.sessionId !== binding.sessionId
+        this.assertReadable();
+        const original = this.store.readSnapshot();
+        const current = original && this.access ? this.access.select(original) : original;
+        if (!current || !current.enabled && !this.access || current.sessionId !== binding.sessionId
           || current.activeBranchId !== binding.branchId || this.binding !== binding) {
           this.invalidate();
           return;

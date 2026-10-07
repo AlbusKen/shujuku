@@ -3,7 +3,7 @@ import type { ZeroLayerCarrierContext_ACU } from './carrier-context';
 import { assertZeroLayerCarrier_ACU } from './carrier-context';
 import { ZeroLayerStore_ACU } from './store';
 import type { ZeroLayerCommand_ACU } from './store-command';
-import { assertBridgeSource_ACU, assertBridgeHostIdle_ACU } from './bridge-source';
+import { assertBridgeSource_ACU } from './bridge-source';
 import { assertBridgeConfig_ACU } from './bridge-config';
 import { buildBridgeCandidate_ACU } from './bridge-candidate';
 import { checkpointFingerprint_ACU as fingerprint } from './checkpoint-payload';
@@ -18,7 +18,6 @@ export async function synchronizeZeroLayerBridge_ACU(store: ZeroLayerStore_ACU,
   const assertCurrent = () => {
     assertLease();
     signal.throwIfAborted();
-    assertBridgeHostIdle_ACU();
     assertZeroLayerCarrier_ACU(context);
     if (current.sessionId !== sessionId || current.activeBranchId !== branchId) {
       throw new ZeroLayerError_ACU('scope-changed', '桥接会话或分支已变化。');

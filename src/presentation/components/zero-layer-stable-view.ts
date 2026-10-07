@@ -4,11 +4,13 @@ import { captureZeroLayerCarrier_ACU, assertZeroLayerCarrier_ACU,
 import { zeroLayerHistoryReader_ACU } from '../../service/zero-layer/history-read';
 import type { ZeroLayerSessionSnapshot_ACU } from '../../service/zero-layer/history-model';
 import { subscribeZeroLayerViewPreview_ACU, type ZeroLayerViewPreview_ACU } from '../../service/zero-layer/view-preview';
+import { ZeroLayerGameChannel_ACU } from './zero-layer-game-channel';
 
 /** 只持有 shell 外的文本槽；不写 mes、不执行 markup、不替换消息或 iframe。 */
 export class ZeroLayerStableView_ACU {
   private context: ZeroLayerCarrierContext_ACU | null = null;
   private root: HTMLElement | null = null;
+  private container: HTMLElement | null = null;
   private slot: HTMLElement | null = null;
   private snapshot: ZeroLayerSessionSnapshot_ACU | null = null;
   private preview: ZeroLayerViewPreview_ACU | null = null;
@@ -18,6 +20,26 @@ export class ZeroLayerStableView_ACU {
   private epoch = 0;
   private syncing: Promise<void> | null = null;
   private dirty = false;
+  private gameChannel: ZeroLayerGameChannel_ACU | null = null;
+  /** 页面发送入口持有；跨挂载保留，只对同一聊天身份显示。 */
+  private busyKey: string | null = null;
+
+  /** 只在自有文本槽提示处理中；不进入游戏通道、快照或任何存档。 */
+  setBusy(key: string | null): void {
+    if (this.busyKey === key) return;
+    this.busyKey = key;
+    if (!this.snapshot) return;
+    try {
+      this.assertSlot();
+      this.paint(this.preview?.body ?? this.publishedBody());
+    } catch { this.markOutOfSync(); }
+  }
+
+  /** 编辑/更新事件后的核对；未挂载时无法确认返回 null。 */
+  isSourceCurrent(): boolean | null {
+    if (!this.context) return null;
+    try { assertZeroLayerCarrier_ACU(this.context); return true; } catch { return false; }
+  }
 
   async mount(): Promise<void> {
     this.dispose();
@@ -35,11 +57,16 @@ export class ZeroLayerStableView_ACU {
     slot.style.whiteSpace = 'pre-wrap';
     slot.style.overflowWrap = 'anywhere';
     slot.setAttribute('aria-live', 'polite');
+    // 酒馆 .mes 是头像与 mes_block 的横向 flex；槽挂在 mes_text 之后，不进入会被宿主重绘的 mes_text。
+    const container = ([...root.children].find(child => child.classList.contains('mes_block')) as HTMLElement | undefined) ?? root;
+    const text = [...container.children].find(child => child.classList.contains('mes_text'));
     this.context = context;
     this.root = root;
+    this.container = container;
     this.slot = slot;
     this.snapshot = result.value;
-    root.appendChild(slot);
+    if (text) text.after(slot);
+    else container.appendChild(slot);
     try {
       this.render(result.value.headTurnId === null ? '' : result.value.currentBody);
       this.releasePreview = subscribeZeroLayerViewPreview_ACU(value => this.receivePreview(value));
@@ -96,14 +123,70 @@ export class ZeroLayerStableView_ACU {
     return this.snapshot?.headTurnId === null ? '' : this.snapshot?.currentBody ?? '';
   }
 
-  private render(body: string): void {
-    if (!this.context || !this.root?.isConnected || !this.slot
-      || this.slot.parentElement !== this.root || this.slot.childElementCount !== 0) {
+  private assertSlot(): void {
+    if (!this.context || !this.root?.isConnected || !this.slot || !this.container
+      || this.slot.parentElement !== this.container || !this.root.contains(this.container)
+      || this.slot.childElementCount !== 0) {
       throw new Error('view-out-of-sync');
     }
     assertZeroLayerCarrier_ACU(this.context);
-    // 只替换自有叶节点文本；模型返回的 HTML、script 和 iframe 均不会执行。
-    this.slot.textContent = body;
+  }
+
+  /** 只替换自有叶节点文本；模型返回的 HTML、script 和 iframe 均不会执行。 */
+  private paint(body: string): void {
+    const busy = this.busyKey !== null && this.busyKey === this.context?.key && !this.preview;
+    this.slot!.textContent = busy ? `${body}${body ? '\n\n' : ''}（零层回合处理中…）` : body;
+  }
+
+  private render(body: string): void {
+    this.assertSlot();
+    this.paint(body);
+    if (this.gameChannel) {
+      try {
+        this.gameChannel.publish({ snapshot: this.snapshot!, body,
+          preview: this.preview ? { turnId: this.preview.turnId, attemptId: this.preview.attemptId,
+            sequence: this.preview.sequence } : null });
+      } catch {
+        this.gameChannel.dispose();
+        this.gameChannel = null;
+        this.markOutOfSync();
+      }
+    }
+  }
+
+  /** 宿主显式选取当前载体的 iframe；不扫描猜测、不改写 src/srcdoc。 */
+  bindGameFrame(frame: HTMLIFrameElement, origin: string) {
+    const context = this.context;
+    const root = this.root;
+    const snapshot = this.snapshot;
+    const epoch = this.epoch;
+    if (!context || !root || !snapshot || frame?.tagName !== 'IFRAME'
+      || frame.ownerDocument !== root.ownerDocument || !root.contains(frame)) {
+      throw new Error('access-denied');
+    }
+    const address = frame.hasAttribute('srcdoc') ? root.ownerDocument.location.href
+      : frame.getAttribute('src') || root.ownerDocument.location.href;
+    const actualOrigin = new URL(address, root.ownerDocument.baseURI).origin;
+    if (actualOrigin !== origin || actualOrigin === 'null') throw new Error('iframe-origin-not-supported');
+    const assertCurrent = () => {
+      if (epoch !== this.epoch || this.context !== context || this.root !== root
+        || !root.isConnected || !root.contains(frame)) throw new Error('scope-changed');
+      assertZeroLayerCarrier_ACU(context);
+    };
+    assertCurrent();
+    this.gameChannel?.dispose();
+    const api = Object.freeze({
+      getSnapshot: zeroLayerHistoryReader_ACU.getSnapshot.bind(zeroLayerHistoryReader_ACU),
+      readHistory: zeroLayerHistoryReader_ACU.readHistory.bind(zeroLayerHistoryReader_ACU),
+      subscribe: zeroLayerHistoryReader_ACU.subscribe.bind(zeroLayerHistoryReader_ACU),
+    });
+    const channel = new ZeroLayerGameChannel_ACU(frame, origin, {
+      snapshot, body: this.preview?.body ?? this.publishedBody(),
+      preview: this.preview ? { turnId: this.preview.turnId, attemptId: this.preview.attemptId,
+        sequence: this.preview.sequence } : null,
+    }, api, assertCurrent, () => {});
+    this.gameChannel = channel;
+    return Object.freeze({ get isReady() { return channel.isReady; }, dispose: channel.dispose });
   }
 
   private markOutOfSync(): void {
@@ -136,6 +219,8 @@ export class ZeroLayerStableView_ACU {
 
   dispose(): void {
     this.epoch += 1;
+    this.gameChannel?.dispose();
+    this.gameChannel = null;
     const releaseHistory = this.releaseHistory;
     const releasePreview = this.releasePreview;
     this.releaseHistory = null;
@@ -146,6 +231,7 @@ export class ZeroLayerStableView_ACU {
     this.slot?.remove();
     this.context = null;
     this.root = null;
+    this.container = null;
     this.slot = null;
     this.snapshot = null;
     this.preview = null;

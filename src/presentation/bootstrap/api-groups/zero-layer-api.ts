@@ -1,5 +1,6 @@
 import { exitZeroLayerForPage_ACU, recoverZeroLayerExitForPage_ACU,
-  resyncZeroLayerViewForPage_ACU } from '../zero-layer-bootstrap';
+  resyncZeroLayerViewForPage_ACU, bindZeroLayerGameFrameForPage_ACU,
+  submitZeroLayerInputForPage_ACU, stopZeroLayerForPage_ACU } from '../zero-layer-bootstrap';
 import type { ZeroLayerExitSelection_ACU } from '../../../service/zero-layer/exit-model';
 import { zeroLayerHistoryReader_ACU } from '../../../service/zero-layer/history-read';
 import type { ZeroLayerHistoryApi_ACU } from '../../../service/zero-layer/history-model';
@@ -11,6 +12,10 @@ export function createZeroLayerExitApi_ACU() {
     exitZeroLayerToOrdinary: (selection: ZeroLayerExitSelection_ACU) => exitZeroLayerForPage_ACU(selection),
     recoverZeroLayerExit: () => recoverZeroLayerExitForPage_ACU(),
     resyncZeroLayerView: () => resyncZeroLayerViewForPage_ACU(),
+    bindZeroLayerGameFrame: (frame: HTMLIFrameElement, origin: string) =>
+      bindZeroLayerGameFrameForPage_ACU(frame, origin),
+    submitZeroLayerInput: (input: string) => submitZeroLayerInputForPage_ACU(input),
+    stopZeroLayer: () => stopZeroLayerForPage_ACU(),
   };
 }
 

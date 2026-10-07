@@ -10,9 +10,9 @@ import { getTableDataFingerprint_ACU } from '../table/table-data-upgrade-audit';
 import { transitionZeroLayerTurn_ACU, validateZeroLayerEnvelope_ACU, validateZeroLayerTableCandidate_ACU, validateZeroLayerPlotCandidate_ACU } from './validation';
 import { applyZeroLayerCheckpointCommand_ACU, type ZeroLayerCheckpointCommand_ACU } from './checkpoint-command';
 import { applyZeroLayerBridgeCommand_ACU, type ZeroLayerBridgeCommand_ACU } from './bridge-command';
-import { assertBridgeSource_ACU, assertBridgeHostIdle_ACU } from './bridge-source';
+import { assertBridgeSource_ACU } from './bridge-source';
 import { applyZeroLayerBranchCommand_ACU, type ZeroLayerBranchCommand_ACU } from './branch-command';
-import { suspendZeroLayerEnvelope_ACU } from './lifecycle-command';
+import { abandonZeroLayerTurn_ACU, suspendZeroLayerEnvelope_ACU } from './lifecycle-command';
 
 export type ZeroLayerCommand_ACU =
   | { type: 'initialize'; apiPresetName: string }
@@ -22,6 +22,7 @@ export type ZeroLayerCommand_ACU =
       continuationIdentity?: TurnAttemptIdentity_ACU }
   | { type: 'transition-turn'; turnId: string; attemptId: string; phase: ZeroLayerTurnPhase_ACU;
       changes?: Pick<Partial<ZeroLayerTurn_ACU>, 'body' | 'effectReceipts' | 'errorCode'> }
+  | { type: 'abandon-turn'; turnId: string; attemptId: string }
   | { type: 'stage-table'; turnId: string; attemptId: string; candidate: ZeroLayerTableCandidate_ACU }
   | { type: 'prepare-plot'; turnId: string; attemptId: string; candidate: ZeroLayerPlotCandidate_ACU;
       receipt: ZeroLayerEffectReceipt_ACU }
@@ -87,7 +88,6 @@ export function applyZeroLayerCommand_ACU(
 ): ZeroLayerEnvelope_ACU {
   if (command.type === 'initialize') {
     if (current) throw new ZeroLayerError_ACU('revision-conflict', '零层存档已存在，禁止覆盖初始化。');
-    assertBridgeHostIdle_ACU();
     const branchId = crypto.randomUUID();
     return validateZeroLayerEnvelope_ACU({
       schemaVersion: ZERO_LAYER_SCHEMA_VERSION_ACU,
@@ -111,6 +111,8 @@ export function applyZeroLayerCommand_ACU(
     return validateZeroLayerEnvelope_ACU(applyZeroLayerCheckpointCommand_ACU(candidate, command,
       context.chat as Record<string, unknown>[]));
   }
+  // 关闭后遗留的发送未知回合同样只能由用户显式放弃，不要求先重新启用。
+  if (command.type === 'abandon-turn') return abandonZeroLayerTurn_ACU(candidate, command.turnId, command.attemptId);
   if (command.type === 'set-enabled') {
     if (!command.enabled) return suspendZeroLayerEnvelope_ACU(candidate, command.apiPresetName);
     if (command.enabled) {

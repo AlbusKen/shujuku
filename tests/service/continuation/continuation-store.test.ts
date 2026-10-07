@@ -560,3 +560,40 @@ describe('continuation API preset reference cascade helpers', () => {
     expect(clearApiPresetReferencesInContinuationSettings_ACU(settings, 'old')).toBe(settings);
   });
 });
+
+describe('零层初始化与源历史校验', () => {
+  beforeEach(() => { _set_SillyTavern_API_ACU(undefined); });
+
+  it('无宿主生成状态接口时可初始化零层并冻结启用切点', async () => {
+    const { applyZeroLayerCommand_ACU } = await import('../../../src/service/zero-layer/store-command');
+    const { captureBridgeActivationCut_ACU } = await import('../../../src/service/zero-layer/bridge-source');
+    const { physicalHistorySnapshot_ACU } = await import('../../../src/service/zero-layer/carrier-context');
+    const { ZERO_LAYER_SCHEMA_VERSION_ACU } = await import('../../../src/service/zero-layer/model');
+    const carrier = { is_user: false, mes: '开场', swipe_id: 0 };
+    const chat = [carrier];
+    const scope = { characterKey: 'card:test', chatId: 'chat-test' };
+    const context = { chat, carrier, carrierIndex: 0, swipeId: 0, scope,
+      key: JSON.stringify([scope.characterKey, scope.chatId]),
+      source: physicalHistorySnapshot_ACU(chat), messageRefs: [...chat] };
+    const fingerprint = 'sha256:activation';
+    const initialized = applyZeroLayerCommand_ACU(null,
+      { type: 'initialize', apiPresetName: 'database-direct' }, context, fingerprint);
+    expect(initialized.schemaVersion).toBe(ZERO_LAYER_SCHEMA_VERSION_ACU);
+    expect(initialized.enabled).toBe(false);
+    expect(initialized.apiPresetName).toBe('database-direct');
+    expect(initialized.scope).toEqual(scope);
+    const cut = captureBridgeActivationCut_ACU(context, fingerprint);
+    expect(cut.messageCount).toBe(1);
+    expect(cut.completedAiCount).toBe(1);
+    expect(cut.refs[0]).toMatchObject({ kind: 'host', scope, messageIndex: 0, swipeId: 0 });
+  });
+
+  it('桥接仍拒绝已变化的源历史', async () => {
+    const { assertBridgeSource_ACU, bridgeSourceFingerprint_ACU } = await import('../../../src/service/zero-layer/bridge-source');
+    const chat = [{ is_user: false, mes: '开场', swipe_id: 0 }];
+    const fingerprint = bridgeSourceFingerprint_ACU(chat);
+    expect(() => assertBridgeSource_ACU(chat, fingerprint)).not.toThrow();
+    chat[0].mes = '已修改的开场';
+    expect(() => assertBridgeSource_ACU(chat, fingerprint)).toThrow('存量桥接来源已变化');
+  });
+});

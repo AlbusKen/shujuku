@@ -48,9 +48,11 @@ import {
   USE_TAVERN_SETTINGS_STORAGE_ACU,
   TAVERN_SETTINGS_NAMESPACE_ACU,
   TAVERN_BRIDGE_GLOBAL_KEY_ACU,
+  TAVERN_BRIDGE_INJECTED_FLAG_ACU,
   CONFIG_IDB_DB_NAME_ACU,
   CONFIG_IDB_STORE_NAME_ACU,
   sleep_ACU,
+  injectTavernBridgeIntoTopWindow_ACU,
   tryReadBridgeFromTop_ACU,
   getTavernSettingsNamespace_ACU,
   getConfigStorage_ACU,
@@ -314,5 +316,22 @@ describe('initTavernSettingsBridge_ACU（插件模式）', () => {
 
     // 清理
     delete (globalThis as any).SillyTavern;
+  });
+});
+
+describe('设置桥接的请求捕获边界', () => {
+  it('只装配设置读写，不导出或查询宿主生成状态', async () => {
+    const script = { type: '', textContent: '' };
+    const appendChild = vi.fn();
+    mockTopLevelWindow.document = {
+      createElement: vi.fn(() => script),
+      head: { appendChild },
+    };
+    await expect(injectTavernBridgeIntoTopWindow_ACU()).resolves.toBe(true);
+    expect(appendChild).toHaveBeenCalledWith(script);
+    expect(script.textContent).toContain('.extension_settings =');
+    expect(script.textContent).toContain('.saveSettingsDebounced =');
+    expect(script.textContent).not.toContain('isGenerating');
+    expect(mockTopLevelWindow[TAVERN_BRIDGE_INJECTED_FLAG_ACU]).toBe(true);
   });
 });

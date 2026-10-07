@@ -62,6 +62,8 @@ export interface Settings_ACU {
   worldbookConfig: WorldbookConfig_ACU;
   /** 解除剧情推进发送伪装，原文留在输入框等待结果；默认关闭，不随预设切换。 */
   plotSendDisguiseDisabled?: boolean;
+  /** 零层：最近几轮逻辑对话参与酒馆世界书扫描（一轮 = 一个 AI 回复，其间用户输入计内容不计轮数）；0 关闭，默认 2。 */
+  zeroLayerWorldInfoScanRounds?: number;
   /** 桌宠气泡与普通气泡直接显示现有通知与任务进度的真实内容；默认关闭。 */
   deskPetShowRealWork?: boolean;
   /** 桌宠位置，按视口可用范围的比例（0~1）保存；缺失表示默认右下角。 */

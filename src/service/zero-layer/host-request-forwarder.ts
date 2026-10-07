@@ -98,7 +98,8 @@ async function forward_ACU(
     if (payload.stream !== undefined && typeof payload.stream !== 'boolean') {
       throw new Error('酒馆最终请求的 stream 字段无效，数据库未发送请求。');
     }
-    const requestStreaming = payload.stream as boolean | undefined ?? streaming;
+    // 酒馆 quiet 装配固定 stream:false，不是正文的流式选择；此时沿认领时冻结的数据库流式开关。
+    const requestStreaming = payload.type === 'quiet' ? streaming : payload.stream as boolean | undefined ?? streaming;
     // 在 durable dispatch 意图之前复核；非直发回退不能丢参数或重入正文拦截器。
     assertResolvedPresetDirectTransport_ACU(preset);
     await lease.beforeDispatch();

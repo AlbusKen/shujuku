@@ -1,6 +1,7 @@
 import type { ZeroLayerEnvelope_ACU } from './model';
 import { getPublishedZeroLayerPath_ACU } from './timeline';
 import type { ZeroLayerHistoryItem_ACU, ZeroLayerHistoryStatus_ACU } from './history-model';
+import { projectZeroLayerPublicState_ACU } from './public-state';
 
 /** 仅显式公开字段；不得透传 floor.data、请求、模板或 Agent 素材。 */
 export function projectZeroLayerHistory_ACU(envelope: ZeroLayerEnvelope_ACU): ZeroLayerHistoryItem_ACU[] {
@@ -9,7 +10,7 @@ export function projectZeroLayerHistory_ACU(envelope: ZeroLayerEnvelope_ACU): Ze
       branchId: turn.branchId, turnId: turn.turnId };
     return {
       turnId: turn.turnId, parentTurnId: turn.parentTurnId, input: turn.input, body: turn.body!,
-      publicState: { availability: 'unavailable' as const, value: null },
+      publicState: projectZeroLayerPublicState_ACU(turn.body!),
       settlement: turn.effectReceipts.map(receipt => ({ kind: receipt.kind, status: receipt.status })),
       userRef: { ...ref, floorId: turn.userFloor.floorId, role: 'user' as const },
       assistantRef: { ...ref, floorId: turn.assistantFloor.floorId, role: 'assistant' as const },

@@ -246,6 +246,7 @@ export let settings_ACU: any = {
     deskPetJokesEnabled: true,
     deskPetShowRealWork: false,
     plotSendDisguiseDisabled: false,
+    zeroLayerWorldInfoScanRounds: 2,
     plotSettings: JSON.parse(JSON.stringify(DEFAULT_PLOT_SETTINGS_ACU)),
     plotPresetBindings: {},
     currentTemplatePresetName: '',

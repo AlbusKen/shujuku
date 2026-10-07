@@ -1,5 +1,5 @@
-import type { ZeroLayerEnvelope_ACU } from './model';
-import { validateZeroLayerEnvelope_ACU } from './validation';
+import { ZeroLayerError_ACU, type ZeroLayerEnvelope_ACU } from './model';
+import { transitionZeroLayerTurn_ACU, validateZeroLayerEnvelope_ACU } from './validation';
 import { getTableDataFingerprint_ACU } from '../table/table-data-upgrade-audit';
 
 /** 调用者先撤销并等待运行租约；单次 carrier 提交冻结阶段，保留所有恢复素材。 */
@@ -44,5 +44,31 @@ export function suspendZeroLayerEnvelope_ACU(source: ZeroLayerEnvelope_ACU,
   if (apiPresetName !== undefined) next.apiPresetName = apiPresetName;
   if (getTableDataFingerprint_ACU(next) === getTableDataFingerprint_ACU(source)) return next;
   next.revision += 1;
+  return validateZeroLayerEnvelope_ACU(next);
+}
+
+/** 用户显式放弃正文未保存的回合：只记取消与原因，保留输入；未知发送不被当成确认未发送而自动重发。 */
+export function abandonZeroLayerTurn_ACU(source: ZeroLayerEnvelope_ACU, turnId: string, attemptId: string): ZeroLayerEnvelope_ACU {
+  const current = validateZeroLayerEnvelope_ACU(source);
+  const turn = current.turns.find(item => item.turnId === turnId && item.attemptId === attemptId);
+  if (!turn || turn.branchId !== current.activeBranchId
+    || !['prepared', 'dispatching', 'delivery-unknown'].includes(turn.phase)) {
+    throw new ZeroLayerError_ACU('invalid-transition', '只能放弃当前分支中正文尚未保存的回合。');
+  }
+  const next = transitionZeroLayerTurn_ACU(current, turnId, 'cancelled', {
+    errorCode: turn.phase === 'prepared' ? 'abandoned-before-dispatch' : 'abandoned-delivery-unknown',
+  });
+  const task = next.branches.find(branch => branch.branchId === turn.branchId)?.continuation?.envelope?.activeTask;
+  const ref = task?.pendingHostTurn?.capture.logicalRef;
+  if (task && ref && ref.sessionId === next.sessionId && ref.branchId === turn.branchId
+    && ref.turnId === turnId && ref.attemptId === attemptId && ref.floorId === turn.assistantFloor.floorId) {
+    // 续写等待轮随回合释放并停在手动暂停；由用户显式继续，不自动重发同一指令。
+    task.pendingHostTurn = null;
+    if (!['completed', 'abandoned', 'failed'].includes(task.status)) {
+      task.status = 'paused';
+      task.stopReason = 'manual';
+      task.updatedAt = Math.max(Date.now(), task.updatedAt);
+    }
+  }
   return validateZeroLayerEnvelope_ACU(next);
 }

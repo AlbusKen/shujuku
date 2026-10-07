@@ -1209,3 +1209,108 @@ describe("DashboardPage", () => {
     mount.__resetAcuV2MountForTests();
   });
 });
+
+describe('零层面板入口反馈', () => {
+  let disposePanel: (() => void) | undefined;
+  afterEach(() => {
+    disposePanel?.();
+    disposePanel = undefined;
+    vi.doUnmock('../../../src/presentation-v2/composables/useZeroLayerStatus');
+    vi.doUnmock('../../../src/presentation-v2/stores/api-preset-store');
+  });
+
+  async function mountPanel() {
+    vi.resetModules();
+    const { createApp, ref, nextTick } = await import('vue');
+    const view = ref({ status: 'disabled', intent: false, label: '已关闭',
+      detail: '当前聊天尚未启用。', revision: null, headTurnId: null });
+    const controls = ref({ apiPresetName: '', branchId: '', branches: [], heads: [],
+      canSend: false, canExit: false, pendingTurn: null });
+    const working = ref(false);
+    const actionError = ref('');
+    const submit = vi.fn(async () => false);
+    const setEnabled = vi.fn(async (enabled: boolean) => {
+      view.value = { ...view.value, status: enabled ? 'unverified' : 'disabled',
+        intent: enabled, label: enabled ? '已开启' : '已关闭' };
+      controls.value = { ...controls.value, canSend: enabled };
+      return true;
+    });
+    const status = { view, controls, working, actionError, submit, setEnabled,
+      worldInfoScanRounds: ref(2), setWorldInfoScanRounds: vi.fn(),
+      history: ref([]), historyHasMore: ref(false), historyLoading: ref(false), historyError: ref(''),
+      refresh: vi.fn(), recover: vi.fn(), stop: vi.fn(), exit: vi.fn(), abandon: vi.fn(),
+      selectBranch: vi.fn(), forkBranch: vi.fn(), loadHistory: vi.fn() };
+    vi.doMock('../../../src/presentation-v2/composables/useZeroLayerStatus', () => ({ useZeroLayerStatus: () => status }));
+    vi.doMock('../../../src/presentation-v2/stores/api-preset-store', () => ({ useApiPresetStore: () => ({
+      presets: [{ name: 'database-direct', apiMode: 'custom',
+        apiConfig: { useMainApi: false, sendViaTavern: false, url: 'https://api.invalid', model: 'test' } }],
+      refreshFromSettings: vi.fn(),
+    }) }));
+    const { default: Panel } = await import('../../../src/presentation-v2/components/DashboardZeroLayerStatus.vue');
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    const app = createApp(Panel);
+    app.mount(root);
+    disposePanel = () => { app.unmount(); root.remove(); };
+    await nextTick();
+    return { root, status, nextTick };
+  }
+
+  it('关闭时解释禁用原因，选择预设并启用后可发送，失败保留草稿', async () => {
+    const { root, status, nextTick } = await mountPanel();
+    const toggle = Array.from(root.querySelectorAll<HTMLButtonElement>('button[role="switch"]'))
+      .find(button => button.textContent?.includes('当前聊天启用零层'))!;
+    const send = Array.from(root.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent === '发送逻辑回合')!;
+    const input = root.querySelector<HTMLInputElement>('.acu-input-shell--text input')!;
+    input.value = '开始';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await nextTick();
+    expect(toggle.disabled).toBe(true);
+    expect(toggle.title).toContain('请先选择');
+    expect(send.disabled).toBe(true);
+    expect(root.querySelector('#acu-zero-layer-send-hint')?.textContent).toContain('尚未启用');
+    send.click();
+    expect(status.submit).not.toHaveBeenCalled();
+
+    root.querySelector<HTMLButtonElement>('.acu-select__trigger')!.click();
+    await nextTick();
+    root.querySelector<HTMLElement>('.acu-select__item')!.click();
+    await nextTick();
+    expect(toggle.disabled).toBe(false);
+    toggle.click();
+    await nextTick();
+    expect(status.setEnabled).toHaveBeenCalledWith(true, 'database-direct');
+    expect(send.disabled).toBe(false);
+    send.click();
+    await status.submit.mock.results[0].value;
+    await nextTick();
+    expect(status.submit).toHaveBeenCalledWith('开始');
+    expect(input.value).toBe('开始');
+    status.submit.mockResolvedValueOnce(true);
+    send.click();
+    expect(status.submit).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(input.value).toBe(''));
+    await nextTick();
+    expect(send.disabled).toBe(true);
+    expect(send.title).toBe('请输入本轮行动。');
+  });
+
+  it('读取失败时保留未知状态，操作期间禁止重复发送并展示具体错误', async () => {
+    const { root, status, nextTick } = await mountPanel();
+    status.view.value = { ...status.view.value, status: 'storage-read-failed',
+      intent: null as any, detail: '存档读取失败，请只读刷新。' };
+    status.actionError.value = '正文 API 连接失败';
+    await nextTick();
+    const toggle = root.querySelector<HTMLButtonElement>('button[role="switch"]')!;
+    const send = Array.from(root.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent === '发送逻辑回合')!;
+    expect(toggle.disabled).toBe(true);
+    expect(send.title).toBe('存档读取失败，请只读刷新。');
+    expect(root.querySelector('[role="alert"]')?.textContent).toBe('正文 API 连接失败');
+    status.working.value = true;
+    await nextTick();
+    expect(send.disabled).toBe(true);
+    expect(send.title).toContain('零层操作进行中');
+  });
+});
