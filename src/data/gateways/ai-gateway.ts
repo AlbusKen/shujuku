@@ -238,10 +238,16 @@ export async function postChatCompletionDirect_ACU(
     const service: any = (SillyTavern_API_ACU as any)?.ChatCompletionService;
     const data = !options?.preservePayload && typeof service?.createRequestData === 'function'
         ? service.createRequestData.call(service, payload) : { ...payload };
-    // 在宿主归一化之后声明无工具语义，保持文本/JSON 请求的工具选择明确。
-    // 有工具时保留调用方的选择，不强制调用工具，也不剥离未知的宿主发送包装。
+    // 不替无工具请求强加禁用策略，允许宿主传输扩展自行挂载并还原工具。
+    // 调用方显式选择优先于宿主默认值；已装配请求保持原样。
     const request = { ...data, stream: options?.streaming ?? false };
-    if (!options?.preservePayload && (!Array.isArray(request.tools) || request.tools.length === 0)) request.tool_choice = 'none';
+    if (!options?.preservePayload) {
+        if (payload.tool_choice !== undefined) {
+            request.tool_choice = payload.tool_choice;
+        } else if (!Array.isArray(request.tools) || request.tools.length === 0) {
+            delete request.tool_choice;
+        }
+    }
     const headers = { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' };
     const wire = JSON.stringify(request);
     const log = createApiRequestLog_ACU(logTag, `请求 POST ${CHAT_COMPLETION_GENERATE_URL_ACU}（酒馆后端请求体）`, wire, { request, headers });

@@ -46,8 +46,8 @@ function unwrapKnownPatches_ACU(start: unknown): unknown {
 
 /**
  * 检查宿主与当前窗口的 fetch，仅剥离本插件的生成请求包装。
- * iframe 的 fetch 可能只是转发到父窗口，标记实际登记在宿主 fetch 上。
- * 仅当宿主命中已知包装时直接调用其原函数；否则保留当前窗口的发送链。
+ * 优先使用宿主当前的发送链，保留第三方包装与必需的后端桥接。
+ * 宿主不可访问或没有 fetch 时，才沿当前窗口的发送链回退。
  * 每次调用都重新解析，以适应拦截器在本模块加载之后安装或释放的情况。
  * @returns 保留宿主桥接的发送函数；宿主原函数绑定到所属窗口
  */
@@ -57,7 +57,7 @@ export function resolvePristineFetch_ACU(): typeof fetch {
     const host = getHostWindow();
     const hostFetch = host.fetch;
     const unwrappedHost = unwrapKnownPatches_ACU(hostFetch);
-    if (typeof unwrappedHost === 'function' && unwrappedHost !== hostFetch) {
+    if (typeof unwrappedHost === 'function') {
       // 原函数可能仍是 TT 的发送桥接，必须绑定宿主窗口，不替换为原生 fetch。
       return unwrappedHost.bind(host) as typeof fetch;
     }

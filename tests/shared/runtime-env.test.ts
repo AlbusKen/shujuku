@@ -190,3 +190,57 @@ describe('checkAndMarkInstance', () => {
         expect(mod2.checkAndMarkInstance()).toBe(false);
     });
 });
+
+
+describe('内部请求保留宿主传输包装', () => {
+    it.each(['before', 'after', 'without'])('第三方包装顺序 %s 不影响调用与内部放行', async order => {
+        const reply = {} as Response;
+        const network = vi.fn(async function (this: unknown) {
+            expect(this).toBe(host);
+            return reply;
+        });
+        const host = { document: {}, location: { href: 'https://tavern.test/', origin: 'https://tavern.test' }, fetch: network } as any;
+        const iframeFetch = vi.fn(() => { throw new Error('不应绕开宿主发送链'); });
+        const beforeForward = vi.fn();
+        const claim = vi.fn(() => { throw new Error('内部请求不应被认领'); });
+        let thirdParty: any;
+        const wrap = () => {
+            const original = host.fetch;
+            thirdParty = vi.fn(function (this: unknown, input, init) {
+                // 与传输插件一样，复制 init 并改写字符串请求体。
+                const body = JSON.parse(init.body);
+                body.transportTest = true;
+                return original.call(this, input, { ...init, body: JSON.stringify(body) });
+            });
+            host.fetch = thirdParty;
+        };
+        vi.stubGlobal('fetch', iframeFetch);
+        try {
+            await withMockParent(host, async () => {
+                await freshImport();
+                const { installHostGenerationInterceptor_ACU, INTERNAL_GENERATION_FETCH_ACU } = await import('../../src/data/gateways/host-generation-interceptor');
+                const { pristineFetch_ACU } = await import('../../src/data/gateways/pristine-fetch');
+                if (order !== 'after') wrap();
+                const dispose = order === 'without' ? () => {} : installHostGenerationInterceptor_ACU({ isActive: () => true, beforeForward, claim }, host);
+                if (order === 'after') wrap();
+                const activeFetch = host.fetch;
+                const controller = new AbortController();
+                try {
+                    expect(await pristineFetch_ACU('/api/backends/chat-completions/generate', {
+                        method: 'POST', body: JSON.stringify({ messages: [{ role: 'user', content: '继续' }] }), signal: controller.signal,
+                    })).toBe(reply);
+                    expect(thirdParty).toHaveBeenCalledTimes(1);
+                    expect(network).toHaveBeenCalledTimes(1);
+                    const init = network.mock.calls[0][1] as any;
+                    expect(init[INTERNAL_GENERATION_FETCH_ACU]).toBe(true);
+                    expect(init.signal).toBe(controller.signal);
+                    expect(JSON.parse(init.body).transportTest).toBe(true);
+                    expect(beforeForward).not.toHaveBeenCalled();
+                    expect(claim).not.toHaveBeenCalled();
+                    expect(iframeFetch).not.toHaveBeenCalled();
+                    expect(host.fetch).toBe(activeFetch);
+                } finally { dispose(); }
+            });
+        } finally { vi.unstubAllGlobals(); }
+    });
+});

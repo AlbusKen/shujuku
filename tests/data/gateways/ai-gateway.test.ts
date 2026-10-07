@@ -157,6 +157,65 @@ describe('getHostRequestHeaders_ACU', () => {
   });
 });
 
+describe('酒馆传输扩展的工具选择兼容', () => {
+  const messages = [{ role: 'user', content: '继续' }];
+  const reply = () => new Response(JSON.stringify({ choices: [{ message: { content: '回复' } }] }));
+  const sentBody = () => JSON.parse(mockFetch.mock.calls.at(-1)![1].body);
+
+  it.each([undefined, []])('无工具请求不继承宿主默认禁用策略（tools=%j）', async tools => {
+    mockSillyTavern.ChatCompletionService = {
+      createRequestData: vi.fn(payload => ({ ...payload, tool_choice: 'none' })),
+    };
+    mockFetch.mockResolvedValueOnce(reply());
+    await postChatCompletionDirect_ACU({ messages, ...(tools ? { tools } : {}) });
+    expect(sentBody()).not.toHaveProperty('tool_choice');
+    expect(sentBody().messages).toEqual(messages);
+  });
+
+  it.each(['none', 'required', { type: 'function', function: { name: 'read' } }])(
+    '调用方显式工具选择原样保留（%j）', async choice => {
+      mockSillyTavern.ChatCompletionService = {
+        createRequestData: vi.fn(payload => ({ ...payload, tool_choice: 'auto' })),
+      };
+      mockFetch.mockResolvedValueOnce(reply());
+      await postChatCompletionDirect_ACU({ messages, tool_choice: choice });
+      expect(sentBody().tool_choice).toEqual(choice);
+    },
+  );
+
+  it('原生工具及其 auto 策略不受宿主默认值覆盖', async () => {
+    const tools = [{ type: 'function', function: { name: 'read', parameters: { type: 'object' } } }];
+    mockSillyTavern.ChatCompletionService = {
+      createRequestData: vi.fn(payload => ({ ...payload, tool_choice: 'none' })),
+    };
+    mockFetch.mockResolvedValueOnce(reply());
+    await postChatCompletionDirect_ACU({ messages, tools, tool_choice: 'auto' });
+    expect(sentBody().tools).toEqual(tools);
+    expect(sentBody().tool_choice).toBe('auto');
+  });
+
+  it('已完成装配的正文请求不重新归一化工具策略', async () => {
+    const normalize = vi.fn(() => { throw new Error('不应再次装配'); });
+    mockSillyTavern.ChatCompletionService = { createRequestData: normalize };
+    mockFetch.mockResolvedValueOnce(reply());
+    await postChatCompletionDirect_ACU({ messages, tool_choice: 'none' }, undefined, { preservePayload: true });
+    expect(normalize).not.toHaveBeenCalled();
+    expect(sentBody().tool_choice).toBe('none');
+  });
+
+  it('主连接与连接预设的默认请求均允许宿主传输扩展介入', async () => {
+    mockSillyTavern.mainApi = 'openai';
+    mockSillyTavern.chatCompletionSettings = { chat_completion_source: 'custom' };
+    mockSillyTavern.CONNECT_API_MAP = { custom: { selected: 'openai', source: 'custom' } };
+    mockFetch.mockImplementation(async () => reply());
+    await sendMainApiChatCompletionRequest_ACU(messages, {});
+    expect(sentBody()).not.toHaveProperty('tool_choice');
+    await sendProfileChatCompletionRequest_ACU({ id: 'p1', api: 'custom', model: 'model' }, messages, 100, {});
+    expect(sentBody()).not.toHaveProperty('tool_choice');
+  });
+});
+
+
 describe('各酒馆渠道的 API 请求日志', () => {
   beforeEach(() => setApiLogEnabled(true));
   it('generateRaw 记录可见参数与完整返回值，不改参数或读取 getter', async () => {

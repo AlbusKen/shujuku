@@ -31,7 +31,7 @@ describe('native tool calls', () => {
     const messages = withJsonTailPrefill_ACU(projected);
     const body = buildCustomApiRequestBody_ACU(messages, { url: 'https://example.invalid', model: 'test' }, { tools: [] });
     expect(body).not.toHaveProperty('tools');
-    expect(body.tool_choice).toBe('none');
+    expect(body).not.toHaveProperty('tool_choice');
     for (const message of body.messages) {
       expect(message.role).not.toBe('tool');
       expect(message).not.toHaveProperty('tool_calls');
@@ -45,6 +45,18 @@ describe('native tool calls', () => {
   it('请求体只在显式传入时带上 tools', () => {
     const plain = buildCustomApiRequestBody_ACU([{ role: 'user', content: 'hi' }], { url: 'https://api.example.com', model: 'gpt' });
     expect(plain).not.toHaveProperty('tools');
+    expect(plain).not.toHaveProperty('tool_choice');
+    const direct = buildCustomApiRequestBody_ACU([{ role: 'user', content: 'hi' }], {
+      url: 'https://api.example.com', model: 'gpt', sendViaTavern: false,
+    });
+    expect(direct.tool_choice).toBe('none');
+    const disabled = buildCustomApiRequestBody_ACU([{ role: 'user', content: 'hi' }], {
+      url: 'https://api.example.com', model: 'gpt', sendViaTavern: true,
+    }, { generationParameters: { tool_choice: 'none' } });
+    expect(disabled.tool_choice).toBe('none');
+    expect(buildCustomApiRequestBody_ACU([{ role: 'user', content: 'hi' }], {
+      url: 'https://api.example.com', model: 'gpt', sendViaTavern: true,
+    })).not.toHaveProperty('tool_choice');
     const body = buildCustomApiRequestBody_ACU([{ role: 'user', content: 'hi' }], { url: 'https://api.example.com', model: 'gpt' }, {
       tools: agentNativeTools_ACU(['read', 'write_sql']),
     });

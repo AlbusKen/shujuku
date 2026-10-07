@@ -343,9 +343,10 @@ export function buildCustomApiRequestBody_ACU(
     custom_include_headers: headers,
     custom_include_body: composedIncludeBody.value,
     custom_exclude_body: normalizeExcludeBodyParamsForSillyTavern_ACU(effectiveApiConfig.excludeBodyParams),
-    // 无工具的内部请求明确禁用工具；带工具的 Agent 自行选择工具或最终文本。
-    // 使用 auto 而非 required，保留模型直接返回最终文本的能力。
-    ...(opts.tools?.length ? { tools: opts.tools, tool_choice: 'auto' } : { tool_choice: 'none' }),
+    // 酒馆转发不强加无工具策略，允许宿主传输扩展挂载并还原工具。
+    // 直连保持无工具语义；带工具时由模型自选，显式生成字段仍在最后覆盖。
+    ...(opts.tools?.length ? { tools: opts.tools, tool_choice: 'auto' }
+      : effectiveApiConfig.sendViaTavern === false ? { tool_choice: 'none' } : {}),
     ...opts.generationParameters,
   };
   if (promptPostProcessing) {
@@ -841,7 +842,7 @@ function toWireMessages_ACU(messages: any[]): any[] {
 
 /**
  * Chat Completion 主连接的纯文本请求直发生成端点。
- * generateRaw 经宿主 sendOpenAIRequest 调用被第三方脚本包装的全局 fetch，会被注入额外工具与控制提示词并改写响应；
+ * 沿宿主发送链保留传输扩展；扩展还原的正文由统一响应解析器读取。
  * 直发路径不触发宿主生成事件，调用方不得再为其登记 GENERATION_ENDED 忽略计数。
  * @param messages 消息序列
  * @param signal 中止信号
@@ -876,8 +877,8 @@ export async function callAIChatTurn_ACU(
     const hasNativeToolTraffic = Boolean(extras?.tools?.length)
         || messages.some(message => message && typeof message === 'object' && (message.role === 'tool' || message.tool_calls));
     if (resolved.apiMode === 'tavern') {
-        // Chat Completion 预设由本插件组装请求体直发生成端点：宿主连接管理器经被第三方脚本包装的
-        // 全局 fetch 发送，会被注入额外工具与控制提示词并改写响应。Text Completion 预设无法承载工具，fail-closed。
+        // Chat Completion 预设直发宿主生成端点，保留原生工具及第三方传输扩展。
+        // Text Completion 预设无法承载原生工具，fail-closed。
         const profile = getConnectionManagerProfiles_ACU().find(item => item.id === resolved.tavernProfile);
         if (profile && isConnectionProfileChatCompletion_ACU(profile)) {
             const overridePayload = hasNativeToolTraffic
@@ -928,7 +929,7 @@ export async function callAIChatTurn_ACU(
         return { content: typeof response === 'string' ? response.trim() : '', toolCalls: [] };
     }
     if (!resolved.apiConfig.url || !resolved.apiConfig.model) throw new Error('自定义 API 的 URL 或模型未配置。');
-    // 同上：原生工具通道尤其不能被脚本改写请求体与响应流。
+    // 自定义通道同样使用统一发送口，保留原生工具与宿主传输扩展。
     const response = await sendCustomApiRequest_ACU(resolved.apiConfig, buildCustomApiRequestBody_ACU(messages, resolved.apiConfig, {
             maxTokens,
             stripModelPrefix: false,
