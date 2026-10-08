@@ -693,8 +693,8 @@ export class ContinuationAgentTurnPlanner_ACU {
     // 通告只证明轮次已展示，不证明工作流已启动。实际动作和启动锚点才阻止重复开局。
     const restartingSameTurn = session.snapshot().messages.some(message => message.turnKey === session.turnKey
       && (message.kind === 'agent' || message.digest === '固定工作流启动' || message.digest === '工作流状态回执'));
-    // 已有阶段必须先让主会话对照真实剧情，不能按旧游标直接开局。
-    const openingAvailable = request.directOpening === true && context.execution.task.stages.length === 0 && !restartingSameTurn
+    // 正常新轮次直接执行固定工作流；用户插话、同轮恢复和异常裁决仍进入主会话。
+    const openingAvailable = request.directOpening === true && !restartingSameTurn
       && !session.snapshot().messages.some(message => message.kind === 'user' && message.digest !== '创建续写任务')
       && (!resumedState || (resumedState.nextIteration === 1 && resumedState.ledger.delegationsUsed === 0
         && resumedState.ledger.outcomes.length === 0));

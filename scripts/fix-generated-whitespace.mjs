@@ -8,13 +8,17 @@ const artifactPaths = [
 ];
 
 function canStartRegexLiteral(line, index) {
-  const prefix = line.slice(0, index).trimEnd();
-  if (prefix.length === 0) return true;
+  let end = index;
+  while (end > 0 && /\s/.test(line[end - 1])) end -= 1;
+  if (end === 0) return true;
 
-  const previousChar = prefix[prefix.length - 1];
+  const previousChar = line[end - 1];
   if ('([{:;,=!?&|^~<>+-*%/'.includes(previousChar)) return true;
 
-  const previousWord = prefix.match(/[A-Za-z_$][\w$]*$/)?.[0];
+  // 只扫描相邻标识符，避免在压缩产物的超长行上反复扫描整段前缀。
+  let start = end;
+  while (start > 0 && /[\w$]/.test(line[start - 1])) start -= 1;
+  const previousWord = line.slice(start, end).match(/[A-Za-z_$][\w$]*$/)?.[0];
   return previousWord === 'return'
     || previousWord === 'throw'
     || previousWord === 'case'

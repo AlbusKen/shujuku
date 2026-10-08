@@ -1168,27 +1168,37 @@ describe('open_round 固定结构工作流', () => {
   });
 
 
-  it('已有阶段先由主 Agent 对照剧情再开启工作流，即使已通告本轮', async () => {
+  it.each([
+    ['正常续轮已通告', 'turn', '本轮通告', 'stage-1#0#turn-2', true, 0],
+    ['上一轮交接后续轮', 'handoff', '早期会话交接报告', '', true, 0],
+    ['已有阶段收到用户插话', 'user', '会话输入', '', true, 1],
+    ['同轮已执行主会话动作', 'agent', '开局决策', 'stage-1#0#turn-2', true, 1],
+    ['同轮固定工作流已启动', 'runtime', '固定工作流启动', 'stage-1#0#turn-2', true, 1],
+    ['同轮工作流升级裁决', 'tool', '工作流状态回执', 'stage-1#0#turn-2', true, 1],
+    ['正文重试不启用直开', 'turn', '本轮通告', 'stage-1#0#turn-2', false, 1],
+  ] as const)('%s：开局调用主 Agent %s 次', async (_label, kind, digest, turnKey, directOpening, mainCallCount) => {
     const h = harness_ACU({
       conversation: appendAgentConversation_ACU(buildEmptyAgentConversation_ACU(), [
-        { kind: 'turn', text: '已通告本轮，但工作流尚未启动', digest: '本轮通告', turnKey: 'stage-1#0#turn-2' },
+        { kind, text: kind === 'user' ? '改为暗中试探' : '当前轮次的状态记录', digest, turnKey },
       ]),
       snapshot: snapshotWithArc_ACU(),
       mainReplies: ['{"action":"open_round","focus":"试探"}'],
       subReplies: [maintainerReply_ACU, plannerReply_ACU, '{"summary":"本轮无节拍操作","recommendation":"no_change"}', composerReply_ACU],
     });
-    h.request.directOpening = true;
+    h.request.directOpening = directOpening;
     const label = vi.fn(async (_focus: string) => undefined);
     h.request.updateTurnLabel = label;
 
     const result = await h.planner.plan(h.request);
 
     expect(result.instruction).toBe('按阶段大纲先观察守门人的回避。');
-    expect(result.attempts).toBe(1);
-    expect(h.mainCalls).toHaveLength(1);
+    expect(result.attempts).toBe(mainCallCount);
+    expect(h.mainCalls).toHaveLength(mainCallCount);
     expect(label).toHaveBeenCalledWith('试探');
     expect(h.subCalls).toHaveLength(4);
     expect(h.conversationWrites.some(snapshot => snapshot.messages.some(message => message.digest === '固定工作流启动'))).toBe(true);
+    expect(readAgentSessionLog_ACU().filter(entry => entry.kind === 'finalize')).toHaveLength(1);
+    expect(isAgentSessionRunning_ACU()).toBe(false);
   });
 
   it('总纲和阶段大纲都缺失时，open_round 先自动立总纲、再准备大纲并交付指令', async () => {
