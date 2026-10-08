@@ -360,6 +360,7 @@ beforeEach(() => {
   mockMainChatCompletionAvailable.mockReturnValue(false);
 
   mockSettings.plotApiPreset = '';
+  mockSettings.plotTaskApiPresetOverridesById = {};
   mockSettings.apiMode = 'custom';
   mockSettings.apiConfig = { useMainApi: true };
   mockSettings.plotSettings = {
@@ -1974,10 +1975,11 @@ describe('runPlotTasksRuntime_ACU', () => {
   });
 
   // ═══════════════════════════════════════════════════════════════
-  // stage 级统一 effective preset
+  // 任务级 API 预设独立解析
   // ═══════════════════════════════════════════════════════════════
-  it('同 stage 使用权威任务覆盖统一选择，归一化丢弃旧字段后仍并发执行', async () => {
-    mockSettings.plotTaskApiPresetOverridesById = { t1: 'preset-A' };
+  it.each(['preset-B', ''])('同 stage 按任务覆盖独立选择，归一化丢弃旧字段后仍并发执行（任务2覆盖=%s）', async task2Preset => {
+    mockSettings.plotApiPreset = 'global-plot-preset';
+    mockSettings.plotTaskApiPresetOverridesById = { t1: 'preset-A', t2: task2Preset };
     const normalizeTask = mockNormalizePlotTask.getMockImplementation()!;
     mockNormalizePlotTask.mockImplementation((task: any) => {
       const normalized = normalizeTask(task);
@@ -2029,18 +2031,16 @@ describe('runPlotTasksRuntime_ACU', () => {
     } finally { release(); }
     await request;
 
-    // 两个任务应使用相同的 effective preset
+    // 按任务提示词关联请求，避免依赖并发请求的到达顺序。
     const allCalls = mockCallApiWithPlotPreset.mock.calls;
-    expect(allCalls.length).toBeGreaterThanOrEqual(2);
-    // 第一个任务的 effectivePreset 应为 'preset-A'
-    expect(allCalls[0][1]).toBe('preset-A');
-    // 第二个任务也应使用 stage 级统一后的 'preset-A'
-    expect(allCalls[1][1]).toBe('preset-A');
+    expect(allCalls).toHaveLength(2);
+    expect(allCalls.find(call => call[0][0].content === '提示词1')?.[1]).toBe('preset-A');
+    expect(allCalls.find(call => call[0][0].content === '提示词2')?.[1]).toBe(task2Preset || 'global-plot-preset');
     expect(maxActiveCalls).toBeGreaterThan(1);
     delete mockSettings.plotTaskApiPresetOverridesById;
   });
 
-  it('同 stage 无任务有显式 taskApiPreset 时，统一回退到全局 plotApiPreset', async () => {
+  it('同 stage 未配置任务覆盖时，各自回退到全局 plotApiPreset', async () => {
     mockCallApiWithPlotPreset.mockResolvedValue('AI回复内容');
     mockExtractPlotTagsFromResponse.mockReturnValue({
       tagNames: ['tag1'],
@@ -2074,7 +2074,7 @@ describe('runPlotTasksRuntime_ACU', () => {
     expect(allCalls[1][1]).toBe('global-plot-preset');
   });
 
-  it('不同 stage 的任务使用各自的 stageEffectivePreset', async () => {
+  it('不同 stage 的任务独立使用任务覆盖或全局预设', async () => {
     mockCallApiWithPlotPreset.mockResolvedValue('AI回复内容');
     mockExtractPlotTagsFromResponse.mockReturnValue({
       tagNames: ['tag1'],
@@ -2085,6 +2085,7 @@ describe('runPlotTasksRuntime_ACU', () => {
       injectOnlyTagNames: [],
     });
     mockSettings.plotApiPreset = 'global-default';
+    mockSettings.plotTaskApiPresetOverridesById = { t1: 'stage1-preset' };
 
     const plotSettings = {
       enabled: true,

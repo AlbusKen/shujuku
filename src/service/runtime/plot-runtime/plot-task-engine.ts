@@ -705,9 +705,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
 
         const effectivePlotApiPreset = requestContext
           ? requestContext.resolveTaskApiPreset(normalizedTask)
-          : runtimeOptions.resolveApiPreset
-            ? runtimeOptions.resolveApiPreset()
-            : resolvePlotTaskApiPreset_ACU(normalizedTask);
+          : resolvePlotTaskApiPreset_ACU(normalizedTask);
         if (!requestContext && willPlotUseMainApiGenerateRaw_ACU(effectivePlotApiPreset)) {
           planningGuard_ACU.ignoreNextGenerationEndedCount++;
         }
@@ -1053,25 +1051,11 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
     for (let stageIndex = 0; stageIndex < stageGroups.length; stageIndex++) {
       const stageGroup = stageGroups[stageIndex];
 
-      // 阶段选择属于运行参数，不注入会被归一化丢弃的任务字段。
-      // 每次新请求（包括重试）重新决议功能选择；零层仍由请求级快照负责。
-      const resolveStageApiPreset = (): string => {
-        for (const stageTask of stageGroup.tasks) {
-          const taskId = String(stageTask?.id || '').trim();
-          const mappedPreset = taskId ? String(getPlotTaskApiPresetOverrides_ACU()[taskId] || '').trim() : '';
-          const legacyTaskPreset = String(stageTask?.taskApiPreset || '').trim();
-          const explicitTaskPreset = mappedPreset || legacyTaskPreset;
-          if (explicitTaskPreset) return explicitTaskPreset;
-        }
-        return String(settings_ACU.plotApiPreset || '').trim();
-      };
-
-      logDebug_ACU(`[剧情推进] 阶段 ${stageGroup.stage} 开始执行，${requestContext ? '使用请求级冻结选择' : '按阶段统一选择 API'}。`);
+      logDebug_ACU(`[剧情推进] 阶段 ${stageGroup.stage} 开始执行，${requestContext ? '使用请求级冻结选择' : '按任务独立选择 API'}。`);
 
       const stageRelayTagMap = new Map(aggregatedTags);
       const operations = stageGroup.tasks.map((task: any) => {
         return executeSinglePlotTask_ACU(task, sharedContext, {
-          ...(!requestContext ? { resolveApiPreset: resolveStageApiPreset } : {}),
           relayTagMap: stageRelayTagMap,
           historyTagMap,
           historyLookupOptions,
