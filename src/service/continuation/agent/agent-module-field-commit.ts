@@ -98,7 +98,7 @@ function fieldProblem_ACU(module: Module_ACU, field: string, value: unknown, evi
     case 'infoGap':
       if (field === 'revealStatus') return inList_ACU(value, AGENT_REVEAL_STATUSES_ACU) ? null : 'revealStatus 枚举非法';
       if (field === 'revealIndex') return value === null || (index_ACU(value) && (value as number) <= evidenceThrough && (!evidence || evidence.has(value as number))) ? null : 'revealIndex 必须为空或已出现的 AI 正文楼层' + evidenceRepair_ACU(evidenceThrough, evidence);
-      if (field === 'characterKnowledge') return Array.isArray(value) && value.every(item => record_ACU(item) && nonempty_ACU(item.name) && text_ACU(item.knows)) ? null : 'characterKnowledge 需要带 name / knows 的数组；SQL 列名 character_knowledge，值用单引号包裹完整 JSON 数组，如 \'[{"name":"角色","knows":"亲眼所见"}]\'；JSON 文本内部双引号须用反斜杠转义，SQL 文本内部单引号须写成两个单引号';
+      if (field === 'characterKnowledge') return Array.isArray(value) && value.every(item => record_ACU(item) && nonempty_ACU(item.name) && text_ACU(item.knows)) ? null : 'characterKnowledge 需要带 name / knows 的数组；SQL 列名 character_knowledge，值用单引号包裹完整 JSON 数组，如 \'[{"name":"角色","knows":"亲眼所见"}]\'；JSON 结构双引号不加反斜杠，字符串内容中的双引号按 JSON 规则转义，SQL 文本内部单引号须写成两个单引号';
       return field === 'topic' ? (nonempty_ACU(value) ? null : 'topic 必须为非空文本') : (text_ACU(value) ? null : '必须为字符串');
     case 'chronology':
       if (field === 'precision') return inList_ACU(value, AGENT_CHRONOLOGY_PRECISIONS_ACU) ? null : 'precision 枚举非法';

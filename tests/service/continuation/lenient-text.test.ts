@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { parseAgentJsonPayload_ACU, parseAgentJsonPayloadDraft_ACU, parseAgentMainOutput_ACU } from '../../../src/service/continuation/agent/agent-protocol';
-import { parseJsonLenient_ACU, salvageTruncatedJson_ACU, sanitizeLooseJson_ACU, stripReasoningBlocks_ACU } from '../../../src/service/continuation/lenient-text';
+import { parseJsonLenient_ACU, parseSqlJsonValue_ACU, salvageTruncatedJson_ACU, sanitizeLooseJson_ACU, stripReasoningBlocks_ACU } from '../../../src/service/continuation/lenient-text';
 
 describe('lenient-text', () => {
   it('剥离闭合的推理块，未闭合时只删标签保留内容', () => {
@@ -21,6 +21,31 @@ describe('lenient-text', () => {
     // 字符串内部逐字保留：冒号、逗号、斜杠都不被当成语法。
     expect(sanitizeLooseJson_ACU('{"url": "http://a/b, c", n: null}')).toBe('{"url": "http://a/b, c", "n": null}');
     expect(parseJsonLenient_ACU('完全不是 JSON')).toBeUndefined();
+  });
+
+  it('SQL JSON 解码保留合法值，自动还原完整的额外编码层', () => {
+    const value = [{ name: '顾雨涵', knows: '他说"好"；路径 C:\\线索\\卷一\n亲眼看见 O\'Brien' }];
+    const json = JSON.stringify(value);
+    expect(parseSqlJsonValue_ACU(json)).toEqual(value);
+    expect(parseSqlJsonValue_ACU(JSON.stringify(json))).toEqual(value);
+    let escaped = json;
+    for (let layer = 0; layer < 3; layer += 1) {
+      escaped = JSON.stringify(escaped).slice(1, -1);
+      expect(parseSqlJsonValue_ACU(escaped)).toEqual(value);
+    }
+    expect(parseSqlJsonValue_ACU('[{name: "角色", knows: "亲眼所见",},]')).toEqual([{ name: '角色', knows: '亲眼所见' }]);
+  });
+
+  it('SQL JSON 解码失败保留原值，不补截断内容或改写普通文本', () => {
+    for (const raw of [String.raw`[{\"name\":\"角色\",\"knows\":\"未闭合}]`,
+      String.raw`[{\"name\":\"角色\"}`, String.raw`[{\"name\":\"角色\",??}]`,
+      String.raw`正文里的 \"引号\" 和 C:\线索`, '  普通正文  ']) {
+      expect(parseSqlJsonValue_ACU(raw)).toBe(raw);
+    }
+    expect(parseSqlJsonValue_ACU(null)).toBeNull();
+    expect(parseSqlJsonValue_ACU(2)).toBe(2);
+    expect(parseSqlJsonValue_ACU('true')).toBe(true);
+    expect(parseSqlJsonValue_ACU('false')).toBe(false);
   });
 
   it('抢救截断 JSON：保留写完的条目，丢掉未完成尾部并补括号', () => {

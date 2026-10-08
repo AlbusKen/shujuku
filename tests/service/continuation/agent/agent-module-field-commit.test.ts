@@ -238,6 +238,36 @@ describe('续写逐栏真实提交', () => {
   });
 
 
+  it('信息差 SQL 的多余 JSON 转义自动清洗并保存，缺字段和坏结构仍拒绝', async () => {
+    const { chat, saveChat } = setup();
+    const role = 'hook-cognition-maintainer' as const;
+    const knowledge = [{ name: '顾雨涵', knows: '亲眼看到"信件"；路径 C:\\线索\nO\'Brien' }];
+    const escaped = JSON.stringify(JSON.stringify(knowledge)).slice(1, -1).replace(/'/g, "''");
+    const created = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role,
+      sql: `INSERT INTO info_gap (id, topic, objective_fact, reader_known, character_knowledge, reveal_status) VALUES ('E001', '秘密', '信件', '已见信件', '${escaped}', 'unrevealed')` });
+    expect(created.status).toBe('committed');
+    expect(created.rejected).toEqual([]);
+    expect(created.accepted).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'E001', field: 'characterKnowledge' })]));
+    expect(readAgentModuleSnapshot_ACU(chat).infoGap.find(item => item.id === 'E001')?.characterKnowledge).toEqual(knowledge);
+    const nextKnowledge = [{ name: '公孙千虑', knows: '亲手递交信件，知道全部内容' }];
+    const updated = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role,
+      sql: `UPDATE info_gap SET character_knowledge = '${JSON.stringify(JSON.stringify(nextKnowledge)).slice(1, -1)}' WHERE id = 'E001'` });
+    expect(updated.status).toBe('committed');
+    expect(updated.rejected).toEqual([]);
+    expect(readAgentModuleSnapshot_ACU(chat).infoGap.find(item => item.id === 'E001')?.characterKnowledge).toEqual(nextKnowledge);
+    saveChat.mockClear();
+    for (const raw of [JSON.stringify(JSON.stringify([{ name: '角色' }])).slice(1, -1),
+      String.raw`[{\"name\":\"角色\",\"knows\":\"未闭合}]`]) {
+      const rejected = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role,
+        sql: `UPDATE info_gap SET character_knowledge = '${raw}' WHERE id = 'E001'` });
+      expect(rejected.status).toBe('rejected');
+      expect(rejected.accepted).toEqual([]);
+      expect(rejected.rejected).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'infoGap#E001.characterKnowledge' })]));
+      expect(readAgentModuleSnapshot_ACU(chat).infoGap.find(item => item.id === 'E001')?.characterKnowledge).toEqual(nextKnowledge);
+    }
+    expect(saveChat).not.toHaveBeenCalled();
+  });
+
   it('信息差揭示两栏同批合并，非法成组时只拒绝相依栏', async () => {
     const { chat } = setup();
     const sql = "INSERT INTO info_gap (id, topic, objective_fact, reader_known, character_knowledge, reveal_status, expected_revision) VALUES ('G1', '秘密', '钥匙', '无人知道', '[]', 'unrevealed', 0)";

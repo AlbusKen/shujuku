@@ -2,6 +2,7 @@ import { WORLD_GUIDANCE_SIGNAL_MAX_CHARS_ACU, WORLD_GUIDANCE_SIGNAL_VOICES_ACU, 
 import { applyWorldSimulationProjection_ACU } from '../simulation-projection';
 import { coerceWorldSimulationEnum_ACU, coerceWorldSimulationInteger_ACU, coerceWorldSimulationStringArray_ACU } from '../simulation-patch-normalize';
 import { parseRestrictedSqlDml_ACU, parseRestrictedSqlDmlTolerant_ACU, type RestrictedSqlStatement_ACU, type RestrictedSqlValue_ACU } from '../../shared/restricted-sql-dml';
+import { parseSqlJsonValue_ACU } from '../../continuation/lenient-text';
 import { findUnauthorizedWorldSimulationEvidenceRefs_ACU, type WorldSimulationEvidenceRegistrySnapshot_ACU } from '../world-simulation-evidence-registry';
 import { formatWorldSimulationToolAddressHints_ACU, WORLD_SIMULATION_TOOL_ADDRESSES_ACU } from '../world-simulation-agent-tools';
 import { findWorldSimulationAgentDefinition_ACU } from './agent-catalog';
@@ -357,14 +358,7 @@ function simulationSqlColumnName_ACU(value: string): string {
 }
 
 function simulationSqlValue_ACU(value: RestrictedSqlValue_ACU): unknown {
-  if (typeof value !== 'string') return value;
-  const trimmed = value.trim();
-  if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
-    try { return JSON.parse(trimmed); } catch { /* ordinary text remains a string */ }
-  }
-  if (trimmed === 'true') return true;
-  if (trimmed === 'false') return false;
-  return value;
+  return parseSqlJsonValue_ACU(value);
 }
 
 function simulationSqlText_ACU(value: RestrictedSqlValue_ACU | undefined, path: string): string {

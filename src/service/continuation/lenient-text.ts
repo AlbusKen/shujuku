@@ -150,3 +150,33 @@ export function parseJsonLenient_ACU(text: string): unknown {
     return undefined;
   }
 }
+
+/** SQL 字段值的格式归一化：只解码完整 JSON，不补内容；失败保留原值交给领域校验。 */
+export function parseSqlJsonValue_ACU(value: string | number | null): unknown {
+  if (typeof value !== 'string') return value;
+  let text = value.trim();
+  for (let depth = 0; depth < 3; depth += 1) {
+    const structured = (text.startsWith('{') && text.endsWith('}')) || (text.startsWith('[') && text.endsWith(']'));
+    if (!structured && !(text.startsWith('"') && text.endsWith('"'))) break;
+    const parsed = parseJsonLenient_ACU(text);
+    if (parsed !== null && typeof parsed === 'object') return parsed;
+    if (parsed === undefined && structured) {
+      // SQL 单引号内误保留了一层 JSON 字符串转义。按完整字符串解码，而非逐个删反斜杠，
+      // 再严格解析完整容器，保留正文中的引号、路径、换行等真实转义。
+      let escaped = text;
+      for (let layer = 0; layer < 3; layer += 1) {
+        try {
+          escaped = JSON.parse(`"${escaped}"`);
+          const decoded: unknown = JSON.parse(escaped);
+          if (decoded !== null && typeof decoded === 'object') return decoded;
+        } catch { /* 无法完整解码时不猜测；仍可尝试剩余的完整编码层。 */ }
+      }
+      break;
+    }
+    if (typeof parsed !== 'string' || parsed === text) break;
+    text = parsed.trim();
+  }
+  if (text === 'true') return true;
+  if (text === 'false') return false;
+  return value;
+}

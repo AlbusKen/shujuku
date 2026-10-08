@@ -9,7 +9,7 @@
 
 import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../model';
 import type { AgentToolMode_ACU } from '../../ai/agent-tool-mode';
-import { parseJsonLenient_ACU, salvageTruncatedJson_ACU, stripReasoningBlocks_ACU } from '../lenient-text';
+import { parseJsonLenient_ACU, parseSqlJsonValue_ACU, salvageTruncatedJson_ACU, stripReasoningBlocks_ACU } from '../lenient-text';
 import { parseRestrictedSqlDml_ACU, parseRestrictedSqlDmlTolerant_ACU, type RestrictedSqlStatement_ACU, type RestrictedSqlValue_ACU } from '../../shared/restricted-sql-dml';
 import {
   AGENT_CHRONOLOGY_PRECISIONS_ACU,
@@ -1074,20 +1074,7 @@ function sqlColumnName_ACU(value: string): string {
 }
 
 function sqlProtocolValue_ACU(value: RestrictedSqlValue_ACU): unknown {
-  if (typeof value !== 'string') return value;
-  let text = value.trim();
-  // 支持多包一层 JSON 字符串；不抢救截断结构，也不猜补正文里的引号。
-  for (let depth = 0; depth < 3; depth += 1) {
-    const structured = (text.startsWith('{') && text.endsWith('}')) || (text.startsWith('[') && text.endsWith(']'));
-    if (!structured && !(text.startsWith('"') && text.endsWith('"'))) break;
-    const parsed = parseJsonLenient_ACU(text);
-    if (parsed !== null && typeof parsed === 'object') return parsed;
-    if (typeof parsed !== 'string' || parsed === text) break;
-    text = parsed.trim();
-  }
-  if (text === 'true') return true;
-  if (text === 'false') return false;
-  return value;
+  return parseSqlJsonValue_ACU(value);
 }
 
 function sqlRecord_ACU(values: Record<string, RestrictedSqlValue_ACU>, omitted: readonly string[] = []): Record<string, unknown> {

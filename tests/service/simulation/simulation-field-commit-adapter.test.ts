@@ -50,6 +50,39 @@ describe('world simulation field commit adapter', () => {
     expect(saveChat).toHaveBeenCalledTimes(2);
   });
 
+  it('编年 SQL 自动解码多余 JSON 转义并回读，坏结构与伪证据仍拒绝', async () => {
+    const { chat, input, saveChat } = fixture();
+    // 编年关联必须指向实际入账的对象；文本转义保真由共享解码和续写提交用例覆盖。
+    const dimension = await commitWorldSimulationFieldWrites_ACU({ ...input,
+      sql: `${input.sql}; ${complete}` });
+    expect(dimension.status).toBe('committed');
+    expect(foldWorldSimulationLedger_ACU(chat)?.ledger.dimensions[0]?.id).toBe('dim-a');
+    saveChat.mockClear();
+    const relatedIds = ['dim-a'];
+    const encoded = JSON.stringify(JSON.stringify(relatedIds)).slice(1, -1).replace(/'/g, "''");
+    const result = await commitWorldSimulationFieldWrites_ACU({ ...input, role: 'chronicler',
+      sql: `INSERT INTO chronicle (id, at, summary, related_ids) VALUES ('chr-clean', '第一日', '守门人夜间盘查', '${encoded}')` });
+    expect(result.status).toBe('committed');
+    expect(result.rejected).toEqual([]);
+    expect(result.accepted).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'chr-clean', field: 'relatedIds' })]));
+    expect(foldWorldSimulationLedger_ACU(chat)?.ledger.chronicle.find(item => item.id === 'chr-clean')?.relatedIds).toEqual(relatedIds);
+    expect(saveChat).toHaveBeenCalledTimes(1);
+    saveChat.mockClear();
+    const corrupt = String.raw`[\"未闭合]`;
+    const rejected = await commitWorldSimulationFieldWrites_ACU({ ...input, role: 'chronicler',
+      sql: `INSERT INTO chronicle (id, related_ids) VALUES ('chr-bad', '${corrupt}')` });
+    expect(rejected.status).toBe('rejected');
+    expect(rejected.accepted).toEqual([]);
+    expect(rejected.rejected).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'chronicle#chr-bad.relatedIds' })]));
+    const forged = JSON.stringify(JSON.stringify(['fake'])).slice(1, -1);
+    const evidence = await commitWorldSimulationFieldWrites_ACU({ ...input,
+      sql: `INSERT INTO dimensions (id, evidence_refs, expected_revision) VALUES ('dim-forged', '${forged}', 0)` });
+    expect(evidence.status).toBe('rejected');
+    expect(evidence.accepted).toEqual([]);
+    expect(evidence.rejected).toEqual(expect.arrayContaining([expect.objectContaining({ reason: expect.stringContaining('未声明或未授权证据') })]));
+    expect(saveChat).not.toHaveBeenCalled();
+  });
+
   it('编年草稿拒绝坏 summary 后保留 at，仅补 summary 再提升；完整编年不可更新', async () => {
     const { chat, input, saveChat } = fixture();
     const base = { ...input, role: 'chronicler' };
