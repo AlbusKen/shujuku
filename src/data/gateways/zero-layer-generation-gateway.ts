@@ -1,6 +1,17 @@
-import { SillyTavern_API_ACU } from '../../shared/host-api';
+import { SillyTavern_API_ACU, type SillyTavernAPI_Type } from '../../shared/host-api';
+import { getHostWindow, isExtensionMode } from '../../shared/runtime-env';
 
 const invocations_ACU = new Set<{ quiet_prompt: string; signal: AbortSignal }>();
+
+/** 接管必须使用酒馆 Generate 所属的真实事件源，不能替换 iframe 的事件代理。 */
+export function getZeroLayerHostContext_ACU(): SillyTavernAPI_Type | undefined {
+  const host = getHostWindow() as Window & {
+    SillyTavern?: { getContext?: () => SillyTavernAPI_Type | undefined };
+  };
+  if (typeof host.SillyTavern?.getContext === 'function') return host.SillyTavern.getContext();
+  // 主窗口的旧式直接 API 仍可使用；iframe 代理不取得宿主派发器写权限。
+  return isExtensionMode() ? SillyTavern_API_ACU : undefined;
+}
 
 /** 只认可本轮实际装配的完整输入与取消信号，不接受外部布尔标记冒充。 */
 export function isZeroLayerHostInvocation_ACU(value: unknown): boolean {
@@ -11,8 +22,8 @@ export function isZeroLayerHostInvocation_ACU(value: unknown): boolean {
 }
 
 /** 复用宿主 quiet 装配；只支持已核对的 Chat Completion 单角色入口。 */
-export function requireZeroLayerHostGeneration_ACU(): void {
-  const api = SillyTavern_API_ACU;
+export function requireZeroLayerHostGeneration_ACU(): SillyTavernAPI_Type {
+  const api = getZeroLayerHostContext_ACU();
   if (!api || typeof api.generate !== 'function' || api.mainApi !== 'openai') {
     throw new Error('零层生成需要酒馆原生 Chat Completion 生成入口。');
   }
@@ -23,15 +34,15 @@ export function requireZeroLayerHostGeneration_ACU(): void {
   if (!events?.CHAT_COMPLETION_PROMPT_READY || !events?.CHAT_COMPLETION_SETTINGS_READY) {
     throw new Error('宿主缺少零层请求绑定所需的提示词与设置事件。');
   }
+  return api;
 }
 
 const WORLD_INFO_SCAN_PROMPT_KEY_ACU = 'acu_zero_layer_world_info_scan';
 
 /** 只请求装配并走宿主实际 fetch；最终原请求由零层拦截器阻断。 */
 export async function invokeZeroLayerHostGeneration_ACU(quietPrompt: string, signal: AbortSignal, worldInfoScanText = ''): Promise<void> {
-  requireZeroLayerHostGeneration_ACU();
+  const api = requireZeroLayerHostGeneration_ACU();
   if (signal.aborted) throw new DOMException('本轮已停止。', 'AbortError');
-  const api = SillyTavern_API_ACU!;
   const options = {
     quiet_prompt: quietPrompt, quietToLoud: false, signal,
   };

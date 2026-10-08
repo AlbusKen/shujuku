@@ -1431,3 +1431,84 @@ describe('向量模式宿主普通发送', () => {
   });
 
 });
+
+describe('零层真实宿主发送接管', () => {
+  it('bootstrap 包装主窗口事件源，普通发送不入楼，quiet 请求仍可装配', async () => {
+    vi.resetModules();
+    const listeners = new Map<string, Array<(...args: any[]) => unknown>>();
+    const nativeSource = {
+      on: vi.fn((event: string, callback: (...args: any[]) => unknown) => {
+        listeners.set(event, [...(listeners.get(event) ?? []), callback]);
+      }),
+      removeListener: vi.fn((event: string, callback: (...args: any[]) => unknown) => {
+        listeners.set(event, (listeners.get(event) ?? []).filter(item => item !== callback));
+      }),
+      // 对照酒馆 EventEmitter：监听器异常会被吞掉，外层 emit 拒绝才会停止 Generate。
+      emit: vi.fn(async (event: string, ...args: any[]) => {
+        for (const callback of [...(listeners.get(event) ?? [])]) {
+          try { await callback(...args); } catch { /* 宿主监听器隔离 */ }
+        }
+      }),
+    };
+    const originalEmit = nativeSource.emit;
+    const proxyEmit = m.api.eventSource.emit;
+    const envelope = { enabled: true, sessionId: 'session-native', activeBranchId: 'branch-native', revision: 1 };
+    const context = { key: 'native-scope' };
+    const runtime = { install: vi.fn(), invalidate: vi.fn(), dispose: vi.fn(), cancel: vi.fn(),
+      session: { hasActiveTurn: () => false, bindPrompt: vi.fn(), bindSettings: vi.fn() },
+      submit: vi.fn(async () => envelope),
+    };
+    class StableView {
+      isMounted = false;
+      mount = vi.fn(async () => { this.isMounted = true; });
+      resync = vi.fn(async () => {});
+      dispose = vi.fn(() => { this.isMounted = false; });
+      setBusy = vi.fn();
+      isSourceCurrent = () => true;
+    }
+    vi.doMock('../../../src/service/zero-layer/carrier-context', () => ({
+      hasZeroLayerCarrierField_ACU: () => true,
+      captureZeroLayerCarrier_ACU: () => context,
+      assertZeroLayerCarrier_ACU: vi.fn(), readZeroLayerCarrier_ACU: () => envelope,
+    }));
+    vi.doMock('../../../src/service/zero-layer/ordinary-context', () => ({
+      bindOrdinaryZeroLayerContext_ACU: vi.fn(), invalidateOrdinaryZeroLayerRequests_ACU: vi.fn(),
+      assertOrdinaryZeroLayerRequest_ACU: vi.fn(),
+    }));
+    vi.doMock('../../../src/presentation/components/zero-layer-stable-view', () => ({ ZeroLayerStableView_ACU: StableView }));
+    vi.doMock('../../../src/service/zero-layer/history-read', () => ({ zeroLayerHistoryReader_ACU: { invalidate: vi.fn() } }));
+    vi.doMock('../../../src/service/zero-layer/notifications', () => ({ subscribeZeroLayerChanges_ACU: () => () => {} }));
+    vi.doMock('../../../src/service/zero-layer/runtime', () => ({ getZeroLayerRuntime_ACU: () => runtime }));
+    const nativeApi = { eventSource: nativeSource, eventTypes: { ...m.api.eventTypes,
+      CHAT_COMPLETION_PROMPT_READY: 'native-prompt', CHAT_COMPLETION_SETTINGS_READY: 'native-settings' } };
+    vi.stubGlobal('SillyTavern', { getContext: () => nativeApi });
+    const input = document.querySelector<HTMLTextAreaElement>('#send_textarea')!;
+    input.value = '零层行动';
+    m.input = input.value;
+    try {
+      const { installZeroLayerBootstrap_ACU } = await import('../../../src/presentation/bootstrap/zero-layer-bootstrap');
+      installZeroLayerBootstrap_ACU();
+      expect(nativeSource.emit).not.toBe(originalEmit);
+      expect(m.api.eventSource.emit).toBe(proxyEmit);
+      const physicalWrite = vi.fn();
+      const hostSend = async () => {
+        await nativeSource.emit('after_commands', 'normal', {}, false);
+        physicalWrite();
+      };
+      await expect(hostSend()).rejects.toMatchObject({ name: 'AbortError' });
+      expect(physicalWrite).not.toHaveBeenCalled();
+      expect(input.value).toBe('零层行动');
+      await vi.waitFor(() => expect(runtime.submit).toHaveBeenCalledWith('零层行动', ['table']));
+      await expect(nativeSource.emit('after_commands', 'quiet', {}, false)).resolves.toBeUndefined();
+      expect(originalEmit).toHaveBeenCalledWith('after_commands', 'quiet', {}, false);
+    } finally {
+      window.dispatchEvent(new Event('pagehide'));
+      for (const path of ['service/zero-layer/carrier-context', 'service/zero-layer/ordinary-context',
+        'presentation/components/zero-layer-stable-view', 'service/zero-layer/history-read',
+        'service/zero-layer/notifications', 'service/zero-layer/runtime']) {
+        vi.doUnmock(`../../../src/${path}`);
+      }
+      vi.resetModules();
+    }
+  });
+});
