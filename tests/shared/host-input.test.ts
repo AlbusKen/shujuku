@@ -72,12 +72,15 @@ describe('host input helpers', () => {
     expect(empty.click).not.toHaveBeenCalled();
   });
 
-  it('iframe 的 jQuery 必须在宿主文档写入指导并触发宿主发送', () => {
+  it.each(['unchanged', 'rewritten', 'replaced'])('智能续写初始指令经宿主 input %s 后，只交接完整文本', mode => {
     const doc = h.hostDocument!;
     doc.body.innerHTML = '<textarea id="send_textarea"></textarea><button id="send_but"></button>';
     const input = doc.querySelector<HTMLTextAreaElement>('#send_textarea')!;
     const button = doc.querySelector<HTMLButtonElement>('#send_but')!;
-    const onInput = vi.fn();
+    const onInput = vi.fn(() => {
+      if (mode === 'rewritten') input.value = input.value.slice(0, -2);
+      if (mode === 'replaced') input.replaceWith(input.cloneNode() as HTMLTextAreaElement);
+    });
     const onSend = vi.fn(() => { expect(input.value).toBe('最终写作指导\n开始正文'); });
     input.addEventListener('input', onInput);
     button.addEventListener('click', onSend);
@@ -92,10 +95,10 @@ describe('host input helpers', () => {
         trigger: vi.fn(), click: () => (element as HTMLElement | null)?.click(),
       };
     });
-    expect(new SillyTavernHostTurnAdapter_ACU().send('最终写作指导\r\n开始正文')).toBe(true);
-    expect(getSendTextareaValue_ACU()).toBe('最终写作指导\n开始正文');
+    expect(new SillyTavernHostTurnAdapter_ACU().send('最终写作指导\r\n开始正文')).toBe(mode !== 'replaced');
+    if (mode !== 'replaced') expect(getSendTextareaValue_ACU()).toBe('最终写作指导\n开始正文');
     expect(onInput).toHaveBeenCalledOnce();
-    expect(onSend).toHaveBeenCalledOnce();
+    expect(onSend).toHaveBeenCalledTimes(mode === 'replaced' ? 0 : 1);
   });
 
   it.each(['empty', 'throwing'])('宿主原生输入框在 jQuery %s 时仍能读写并通知原生监听器', mode => {

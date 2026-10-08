@@ -16,7 +16,8 @@ export interface ContinuationHostTurnAdapter_ACU {
 export class SillyTavernHostTurnAdapter_ACU implements ContinuationHostTurnAdapter_ACU {
   send(instruction: string): boolean {
     if (typeof instruction !== 'string' || !instruction.trim()) return false;
-    if (!setSendTextareaValue_ACU(instruction)) return false;
+    // 与剧情最终指令共用一次同步恢复；只有完整指令留在原控件中才触发宿主发送。
+    if (!setSendTextareaValue_ACU(instruction, undefined, { restoreAfterInput: true })) return false;
     return clickSendButton_ACU();
   }
 

@@ -1,12 +1,12 @@
 {
-    "display_name": "龙血玄黄·数据库 1.2.7",
+    "display_name": "龙血玄黄·数据库 1.5.8",
     "loading_order": 200,
     "requires": [],
     "optional": [],
     "js": "index.js",
     "css": "",
     "author": "Cline (AI Assisted)",
-    "version": "1.2.7",
+    "version": "1.5.8",
     "homePage": "",
     "auto_update": false
 }
