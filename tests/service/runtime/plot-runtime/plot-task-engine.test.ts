@@ -2449,42 +2449,35 @@ describe('runPlotTasksRuntime_ACU', () => {
     ))).toBe(false);
     expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
   });
-  it.each([false, true])('长度不足后标签缺失，重试只说明最新原因（隔离调用=%s）', async isolated => {
+  it.each([
+    { isolated: false, acceptedTag: 'plot' },
+    { isolated: true, acceptedTag: 'plot' },
+    { isolated: false, acceptedTag: 'memory' },
+    { isolated: true, acceptedTag: 'memory' },
+  ])('重试只说明最新原因，任一配置标签闭合即通过（隔离调用=$isolated，标签=$acceptedTag）', async ({ isolated, acceptedTag }) => {
     const plotSettings = {
       tasks: [{
         id: 'tag-retry', name: '标签重试任务', stage: 1, order: 1, maxRetries: 3, minLength: 100,
-        extractTags: 'plot', promptGroup: [{ role: 'user', content: 'tag-retry-prompt' }],
+        extractTags: 'plot,unused', extractInjectTags: 'memory',
+        promptGroup: [{ role: 'user', content: 'tag-retry-prompt' }],
       }],
     };
-    const acceptedResponse = `<plot>${'有效剧情'.repeat(30)}</plot>`;
+    const acceptedContent = acceptedTag === 'memory' ? '' : '有效剧情'.repeat(30);
+    const acceptedResponse = `${'足够长度的任务结果'.repeat(10)}<${acceptedTag}>${acceptedContent}</${acceptedTag}><unused>未闭合`;
     const shortResponse = '第一次没有标签';
     mockCallApiWithPlotPreset.mockResolvedValueOnce(shortResponse)
-      .mockResolvedValueOnce('第二次长度足够但缺少标签'.repeat(10)).mockResolvedValueOnce(acceptedResponse);
+      .mockResolvedValueOnce(`${'第二次长度足够但无完整配置标签'.repeat(10)}<plot>未闭合<memory>未闭合<unknown>非配置标签</unknown>`)
+      .mockResolvedValueOnce(acceptedResponse);
     const contextCall = vi.fn((messages: any[], preset: string) => mockCallApiWithPlotPreset(messages, preset));
     const requestContext = isolated ? {
       history: [], tableData: {}, presetName: '', signal: new AbortController().signal,
       sqlReadContext: null, ejsContext: {}, finalPromptEntries: [], assertCurrent: vi.fn(),
       resolveTaskApiPreset: () => '', callApi: contextCall,
     } : undefined;
-    mockExtractPlotTagsFromResponse.mockImplementation((rawText: string) => (
-      String(rawText).includes('<plot>')
-        ? {
-            tagNames: ['plot'],
-            extractedTags: { plot: '有效剧情' },
-            injectedFragments: ['<plot>有效剧情</plot>'],
-            injectOnlyTags: {},
-            injectOnlyFragments: [],
-            injectOnlyTagNames: [],
-          }
-        : {
-            tagNames: ['plot'],
-            extractedTags: {},
-            injectedFragments: [],
-            injectOnlyTags: {},
-            injectOnlyFragments: [],
-            injectOnlyTagNames: [],
-          }
-    ));
+    const { extractPlotTagsFromResponse_ACU } = await vi.importActual<
+      typeof import('../../../../src/service/runtime/plot-runtime/plot-tag-utils')
+    >('../../../../src/service/runtime/plot-runtime/plot-tag-utils');
+    mockExtractPlotTagsFromResponse.mockImplementation(extractPlotTagsFromResponse_ACU);
 
     const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入', { requestContext });
 
@@ -2503,7 +2496,9 @@ describe('runPlotTasksRuntime_ACU', () => {
     expect(finalMessages.slice(0, -1)).toEqual(firstMessages);
     expect(finalMessages).toHaveLength(2);
     expect(finalMessages.at(-1).content).toContain('第 3/3 次尝试');
-    expect(finalMessages.at(-1).content).toContain('未提取到这些配置标签：plot');
+    expect(finalMessages.at(-1).content).toContain('未提取到任何完整闭合的配置标签（可选：plot、unused、memory）');
+    expect(finalMessages.at(-1).content).toContain('至少完整闭合一对配置标签');
+    expect(finalMessages.at(-1).content).toContain('无需补齐所有配置标签');
     expect(finalMessages.at(-1).content).not.toContain(`实际 ${shortResponse.length}，最低要求 100`);
     expect(finalMessages.at(-1).content).not.toContain('回复长度不足');
     expect(mockExtractPlotTagsFromResponse).toHaveBeenCalledTimes(2);
@@ -2513,7 +2508,7 @@ describe('runPlotTasksRuntime_ACU', () => {
       expect.objectContaining({
         taskId: 'tag-retry',
         rawResponse: acceptedResponse,
-        extractedTags: { plot: '有效剧情' },
+        extractedTags: { [acceptedTag]: acceptedContent },
       }),
     ]);
   });
@@ -2553,7 +2548,8 @@ describe('runPlotTasksRuntime_ACU', () => {
     expect(mockCallApiWithPlotPreset.mock.calls[0][0]).toHaveLength(1);
     expect(retryMessages).toHaveLength(2);
     expect(retryMessages.at(-1)).toMatchObject({ role: 'system' });
-    expect(retryMessages.at(-1).content).toContain('未提取到这些配置标签：plot');
+    expect(retryMessages.at(-1).content).toContain('未提取到任何完整闭合的配置标签（可选：plot）');
+    expect(retryMessages.at(-1).content).toContain('至少完整闭合一对配置标签');
     expect(retryMessages.at(-1).content).toContain('<plot></plot>');
     expect(retryMessages.at(-1).content).toContain('保留对应的闭合空标签');
     expect(retryMessages.at(-1).content).toContain('不要只补写残片');

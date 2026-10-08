@@ -561,15 +561,15 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
   function buildPlotTaskRetryFeedback_ACU(failure: PlotTaskRetryFailure_ACU): string {
     switch (failure.kind) {
       case 'empty_response':
-        return '失败原因：上一轮没有返回非空文本。\n修正要求：重新输出本任务的完整结果，不要只输出空白；原任务要求的标签必须完整闭合。';
+        return '失败原因：上一轮没有返回非空文本。\n修正要求：重新输出本任务的完整结果，不要只输出空白；若配置了提取标签，至少完整闭合其中一对。';
       case 'too_short':
         return `失败原因：上一轮回复长度不足，实际 ${failure.actualLength}，最低要求 ${failure.minLength}（按字符串长度计）。\n修正要求：在原任务与已有资料范围内补充必要内容，完整回复至少达到 ${failure.minLength}；不要用重复文本凑长度，也不要编造记忆或事实。`;
       case 'missing_tags': {
         const examples = failure.tags.map(tag => `<${tag}></${tag}>`).join('、');
-        return `失败原因：上一轮未提取到这些配置标签：${failure.tags.join('、')}（缺失或未完整闭合）。\n修正要求：重新输出完整结果，补齐这些成对标签：${examples}，同时保留原任务要求的其他标签；不要只补写残片。若原任务允许空召回且确实无可用记忆或资料，保留对应的闭合空标签，不省略标签、不编造内容；原有最小长度要求仍需满足。`;
+        return `失败原因：上一轮未提取到任何完整闭合的配置标签（可选：${failure.tags.join('、')}）。\n修正要求：重新输出完整结果，至少完整闭合一对配置标签，可选示例：${examples}；无需补齐所有配置标签，不要只补写残片。若原任务允许空召回且确实无可用记忆或资料，保留对应的闭合空标签，不省略标签、不编造内容；原有最小长度要求仍需满足。`;
       }
       case 'extraction_error':
-        return '失败原因：上一轮回复的标签提取发生异常，结果未通过验收。\n修正要求：重新输出完整结果，严格使用原任务约定的成对标签并完整闭合，不要只返回说明或续写残片；无需也无法通过编造内容修复提取器。';
+        return '失败原因：上一轮回复的标签提取发生异常，结果未通过验收。\n修正要求：重新输出完整结果；若配置了提取标签，至少完整闭合其中一对，不要只返回说明或续写残片；无需也无法通过编造内容修复提取器。';
       case 'api_error':
         return `失败原因：${failure.reason}\n处理要求：这是请求或服务故障，不是回复内容验收失败；鉴权、配额、配置与服务问题需要由调用方处理，不能靠修改任务内容解决。本次仍按原任务和已有资料完整作答，不要把接口故障编入剧情或记忆。`;
     }
@@ -748,13 +748,13 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
               retryFeedback = buildPlotTaskRetryFeedback_ACU({ kind: 'too_short', actualLength: rawResponse.length, minLength });
             } else {
               const extraction = extractPlotTagsFromResponse_ACU(rawResponse, normalizedTask.extractTags, normalizedTask.extractInjectTags);
-              const requiredTags = [...new Set(`${normalizedTask.extractTags || ''},${normalizedTask.extractInjectTags || ''}`
+              const configuredTags = [...new Set(`${normalizedTask.extractTags || ''},${normalizedTask.extractInjectTags || ''}`
                 .split(',').map(tag => tag.trim().toLowerCase()).filter(Boolean))];
               const extractedTagNames = new Set(Object.keys(extraction.extractedTags).map(tag => tag.toLowerCase()));
-              const missingTags = requiredTags.filter(tag => !extractedTagNames.has(tag));
-              if (missingTags.length) {
-                lastErrorMessage = `任务回复缺少配置标签：${missingTags.join('、')}。`;
-                retryFeedback = buildPlotTaskRetryFeedback_ACU({ kind: 'missing_tags', tags: missingTags });
+              const hasCompleteTag = configuredTags.some(tag => extractedTagNames.has(tag));
+              if (configuredTags.length > 0 && !hasCompleteTag) {
+                lastErrorMessage = `任务回复未包含任何完整闭合的配置标签（可选：${configuredTags.join('、')}）。`;
+                retryFeedback = buildPlotTaskRetryFeedback_ACU({ kind: 'missing_tags', tags: configuredTags });
               } else {
                 acceptedTagExtraction = extraction;
                 apiSucceeded = true;
