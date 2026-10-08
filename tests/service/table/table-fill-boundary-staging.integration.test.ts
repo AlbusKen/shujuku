@@ -421,3 +421,23 @@ describe('commitStagedSheetsAtFullBoundaryAtomic_ACU 边界汇合（计划 5.4�
     expect(replayHead?.data?.sheet_b?.content?.[1]?.[1]).toBe('b-at-suffix');
   });
 });
+
+
+describe('跨根汇合取消边界', () => {
+  it('已取消的计划不写聊天、不调用宿主保存', async () => {
+    mocks.chat.splice(0, mocks.chat.length, ...buildV2ChatWithFormalFull());
+    mocks.chatIdentifier = 'boundary-staging-test-chat';
+    mocks.isolationKey = '';
+    mocks.saveChatStrict.mockClear();
+    const before = JSON.stringify(mocks.chat);
+    const controller = new AbortController();
+    controller.abort();
+    await expect(commitStagedSheetsAtFullBoundaryAtomic_ACU('cancelled-boundary', {
+      originalFullIndex: 6,
+      stagedSnapshot: { sheet_a: sheet('表A', [['row_id', '值'], ['3', '未提交']]) },
+      targetSheetKeys: ['sheet_a'], signal: controller.signal,
+    })).rejects.toMatchObject({ name: 'AbortError' });
+    expect(JSON.stringify(mocks.chat)).toBe(before);
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+  });
+});

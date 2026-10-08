@@ -648,6 +648,7 @@ export async function commitStagedSheetsAtFullBoundaryAtomic_ACU(
     /** 仅含目标表的 overlay 快照。 */
     stagedSnapshot: Record<string, any>;
     targetSheetKeys: readonly string[];
+    signal?: AbortSignal;
   },
 ): Promise<TableFillBoundaryCommitResult_ACU> {
   const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
@@ -661,6 +662,7 @@ export async function commitStagedSheetsAtFullBoundaryAtomic_ACU(
     writeSet: targetSheetKeys.map(sheetKey => ({ kind: 'sheet' as const, sheetKey })),
     maintenanceMode: 'exclusive',
   }, async () => {
+    if (options.signal?.aborted) throw new DOMException('填表任务已取消。', 'AbortError');
     if (String(currentChatFileIdentifier_ACU || '') !== String(chatKey || '')
       || String(getCurrentIsolationKey_ACU() || '') !== String(isolationKey || '')) {
       return failBoundary_ACU('staging_scope_changed', 'boundary commit 复检失败：chatKey 或 isolationKey 已切换。');
@@ -851,6 +853,7 @@ export async function commitStagedSheetsAtFullBoundaryAtomic_ACU(
       return failBoundary_ACU('boundary_replay_mismatch', `boundary commit 候选 replay 验证异常：${error?.message || String(error)}`);
     }
 
+    if (options.signal?.aborted) throw new DOMException('填表任务已取消。', 'AbortError');
     const before = JSON.parse(JSON.stringify(chat));
     try {
       chat.length = 0;

@@ -1,4 +1,6 @@
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
+import { assertTableFillRequestCurrent_ACU, type TableFillRequestGuard_ACU } from './table-fill-request-guard';
+import { TableFillTargetStaleError_ACU } from '../../data/gateways/chat-message-snapshot';
 import type { SqlMutationResult } from '../../shared/table-storage-provider';
 import { logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, isAutoUpdatingCard_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
@@ -53,7 +55,7 @@ export interface TableUpdateCommitApplyResult_ACU<T> {
   errorCategory?: TableUpdateCommitErrorCategory_ACU;
 }
 
-export interface RunTableUpdateCommitOptions_ACU {
+export interface RunTableUpdateCommitOptions_ACU extends TableFillRequestGuard_ACU {
   source: TableMutationSourceV2_ACU;
   reason: string;
   chatKey?: string;
@@ -102,6 +104,8 @@ export interface RunTableUpdateCommitOptions_ACU {
 
 export interface RunTableUpdateCommitResult_ACU<T> {
   success: boolean;
+  aborted?: boolean;
+  diagnosticCode?: 'table_fill_target_stale';
   value?: T;
   tableData?: TableDataObject_ACU;
   mutationResult?: SqlMutationResult;
@@ -238,6 +242,7 @@ function assertNoActiveFillForExternalMutation_ACU(options: RunTableUpdateCommit
 }
 
 function assertExpectedCommitScope_ACU(options: RunTableUpdateCommitOptions_ACU, phase: string): void {
+  assertTableFillRequestCurrent_ACU(options, options.targetMessageIndex);
   if (options.chatKey === undefined && options.isolationKey === undefined) return;
   const currentChatKey = String(currentChatFileIdentifier_ACU || 'current-chat');
   const expectedChatKey = String(options.chatKey ?? currentChatKey);
@@ -280,6 +285,7 @@ export async function runTableUpdateCommit_ACU<T>(
           if (!applied.success || !applied.tableData) {
             throw new TableUpdateCommitError_ACU(applied.error || `${options.reason}: stage apply failed`, applied.errorCategory || 'infrastructure');
           }
+          assertExpectedCommitScope_ACU(options, 'stage 发布前');
           commitRevisionWriteSet = applied.persist?.revisionWriteSet ?? options.revisionWriteSet;
           _set_currentJsonTableData_ACU(cloneTableData_ACU(applied.tableData));
           return {
@@ -338,7 +344,9 @@ export async function runTableUpdateCommit_ACU<T>(
         let rollbackBeforePersist: (() => void | Promise<void>) | undefined;
         try {
           assertExpectedCommitScope_ACU(options, '应用前');
+          requiresRuntimeReload = Boolean(options.signal || options.targetSnapshot);
           const applied = await apply({ transactionContext, workingData });
+          assertExpectedCommitScope_ACU(options, '应用后');
           if (!applied.success || !applied.tableData) {
             throw new TableUpdateCommitError_ACU(applied.error || `${options.reason}: update apply failed`, applied.errorCategory || 'infrastructure');
           }
@@ -361,6 +369,8 @@ export async function runTableUpdateCommit_ACU<T>(
             assertPersistableRowIdentities_ACU(applied.tableData, options.reason, targetSheetKeys);
             const saveResult = await persistTablesToChatMessage_ACU({
               targetMessageIndex: persistOptions.targetMessageIndex ?? options.targetMessageIndex,
+              signal: options.signal,
+              targetSnapshot: options.targetSnapshot,
               targetSheetKeys,
               updateGroupKeys: persistOptions.updateGroupKeys !== undefined ? persistOptions.updateGroupKeys : (options.updateGroupKeys ?? null),
               trackingSheetKeys: persistOptions.trackingSheetKeys !== undefined ? persistOptions.trackingSheetKeys : (options.trackingSheetKeys ?? []),
@@ -418,6 +428,12 @@ export async function runTableUpdateCommit_ACU<T>(
       }
     }
     const message = error?.message || String(error);
+    if (error?.name === 'AbortError') {
+      return { success: false, aborted: true, error: message, errorCategory: 'precondition' };
+    }
+    if (error instanceof TableFillTargetStaleError_ACU) {
+      return { success: false, error: message, errorCategory: 'precondition', diagnosticCode: error.code };
+    }
     const errorCategory: TableUpdateCommitErrorCategory_ACU = error instanceof TableUpdateCommitError_ACU
       ? error.category
       : 'infrastructure';
@@ -442,6 +458,7 @@ export async function runSqliteRuntimeMutationCommit_ACU<T>(
 ): Promise<RunTableUpdateCommitResult_ACU<T>> {
   return runTableUpdateCommit_ACU(options, async ({ workingData }) => {
     const provider = await ensureStorageProviderReady_ACU();
+    assertExpectedCommitScope_ACU(options, 'SQL 应用前');
     const runtimeData = (workingData || currentJsonTableData_ACU) as TableDataObject_ACU | null;
     const runtimeSql = runtimeData
       ? rebindSqlMutationIdentifiers_ACU([options.sql], runtimeData)[0]

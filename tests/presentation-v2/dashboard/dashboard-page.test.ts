@@ -1054,7 +1054,7 @@ describe("DashboardPage", () => {
 
     expect(
       document.querySelector(".acu-v2-sidebar")?.textContent || "",
-    ).not.toContain("剧情推进");
+    ).toContain("剧情推进");
     expect(
       document.querySelector(".acu-v2-sidebar")?.textContent || "",
     ).toContain("智能续写");
@@ -1105,7 +1105,8 @@ describe("DashboardPage", () => {
     expect(saveSettings).toHaveBeenCalledTimes(savesBeforeDisablingWorldSimulation + 1);
     expect(worldSimulationToggle.getAttribute("aria-checked")).toBe("false");
     text = document.querySelector(".acu-v2-sidebar")?.textContent || "";
-    expect(text).not.toContain("功能");
+    expect(text).toContain("功能");
+    expect(text).toContain("剧情推进");
     expect(text).not.toContain("格林推演");
 
     mount.__resetAcuV2MountForTests();

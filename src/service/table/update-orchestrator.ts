@@ -14,6 +14,8 @@ import { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMerg
 import { ensureStableRowIdsForSheetContent_ACU, filterSheetKeysByTemplateScope_ACU, getChatSheetGuideDataForIsolationKey_ACU, getCurrentChatTemplateScopeState_ACU, getEffectiveSeedRowsForSheet_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, resolveTemplateScope_ACU, sanitizeTemplateSnapshotForChat_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
 import type { TemplateScope_ACU } from '../template/chat-scope';
 import { saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
+import { captureAiMessageSnapshot_ACU, TableFillTargetStaleError_ACU, type AiMessageSnapshot_ACU } from '../../data/gateways/chat-message-snapshot';
+import { assertTableFillRequestCurrent_ACU } from './table-fill-request-guard';
 import { loadAllChatMessages_ACU, updateReadableLorebookEntry_ACU } from '../worldbook/pipeline';
 import {
     enqueueSummaryVectorIndexFlush_ACU,
@@ -358,6 +360,7 @@ export interface CardUpdateResult {
 /** processUpdatesBatch 的返回值 */
 export interface BatchUpdateResult {
     success: boolean;
+    aborted?: boolean;
     failedBatch?: number;
     error?: string;
     /** 稳定失败分类，供 UI 与日志按 code 判断，不解析 error 文案。 */
@@ -368,6 +371,7 @@ export interface BatchUpdateResult {
 
 /** 写目标回放根准入诊断码（稳定契约，禁止改字符串值）。 */
 export type WriteTargetAdmissionDiagnosticCode_ACU =
+    | 'table_fill_target_stale'
     | 'write_target_before_replay_root'
     | 'staging_runner_unavailable';
 
@@ -416,6 +420,7 @@ async function settleStagedBoundaryAndPublish_ACU(
     stagingRun: TableFillStagingRunContext_ACU,
     originalFullIndex: number,
     session: TableFillStagingSession_ACU | null,
+    signal?: AbortSignal,
 ): Promise<{ ok: true } | { ok: false; error: string; diagnosticCode?: ManualUpdateResult['diagnosticCode'] }> {
     const commitResult = await commitStagedSheetsAtFullBoundaryAtomic_ACU(stagingRun.runId, {
         chatKey: stagingRun.chatKey,
@@ -425,6 +430,7 @@ async function settleStagedBoundaryAndPublish_ACU(
         templateFingerprint: stagingRun.templateFingerprint,
         stagedSnapshot: stagingRun.overlay.sheets,
         targetSheetKeys: stagingRun.targetSheetKeys,
+        signal,
     });
     if (commitResult.ok === false) {
         await session?.discard();
@@ -1691,8 +1697,10 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
         stagingSession?: TableFillStagingSession_ACU;
         performanceRunId?: string;
         performanceParentSpanId?: string;
+        signal?: AbortSignal;
     }
 ): Promise<CardUpdateResult> {
+    if (options.signal?.aborted) return { success: false, modifiedKeys: [], aborted: true };
     if (!Array.isArray(responses) || responses.length === 0) {
         return { success: false, modifiedKeys: [], error: '统一提交失败：responses 为空。', errorCategory: 'precondition' };
     }
@@ -1907,6 +1915,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
         const commitResult = await runTableUpdateCommit_ACU<{ modifiedKeys: string[] }>({
             source: 'group_fill',
             reason: 'applyUnifiedGroupFillResponses:runtime_sql',
+            signal: options.signal,
             chatKey: capturedChatKey,
             isolationKey: capturedIsolationKey,
             writeSet: buildWriteSetForSheetKeys_ACU([...allTargetSheetKeySet].filter(sheetKey => sqlScopedKeys([sheetKey]).length > 0), baseSnapshot),
@@ -1925,6 +1934,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
             skipChatSave: options.isImportMode,
         }, async () => {
             const provider = await ensureStorageProviderReady_ACU();
+            assertTableFillRequestCurrent_ACU({ signal: options.signal });
             if (typeof provider.applyEditsWithSystemRowIds !== 'function') {
                 return {
                     success: false,
@@ -2045,6 +2055,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
             _set_currentJsonTableData_ACU(JSON.parse(JSON.stringify(baseSnapshot || {})) as any);
             return {
                 success: false,
+                ...(commitResult.aborted ? { aborted: true } : {}),
                 modifiedKeys: [],
                 error: sanitizeRetryFeedback_ACU(commitResult.error || '统一提交失败。', MAX_WARN_ERROR_LENGTH_ACU),
                 errorCategory: commitResult.errorCategory || 'infrastructure',
@@ -2194,6 +2205,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
         const commitResult = await runTableUpdateCommit_ACU<{ modifiedKeys: string[] }>({
             source: 'group_fill',
             reason: 'applyUnifiedGroupFillResponses:snapshot',
+            signal: options.signal,
             chatKey: capturedChatKey,
             isolationKey: capturedIsolationKey,
             writeSet: buildWriteSetForSheetKeys_ACU([...allTargetSheetKeySet], baseSnapshot),
@@ -2224,6 +2236,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
         if (!commitResult.success) {
             return {
                 success: false,
+                ...(commitResult.aborted ? { aborted: true } : {}),
                 modifiedKeys,
                 error: sanitizeRetryFeedback_ACU(commitResult.error || '统一提交失败：保存聊天记录失败。', MAX_WARN_ERROR_LENGTH_ACU),
                 errorCategory: commitResult.errorCategory || 'infrastructure',
@@ -2767,6 +2780,7 @@ async function processGroupedRuntimeChunkCore_ACU(
             const replacementMessageIndices = [...new Set(bucket.plannedJobs.flatMap(job => job.messageIndices))].sort((left, right) => left - right);
             const replacementSheetKeys = [...new Set(bucket.plannedJobs.flatMap(job => job.group.sheetKeys || []))].sort();
             const applyResult = await applyUnifiedGroupFillResponses_ACU(responses, baseSnapshot, {
+                signal: options.abortController?.signal,
                 saveTargetIndex: bucket.saveTargetIndex,
                 updateMode: bucket.updateMode,
                 isImportMode: options.isImportMode === true,
@@ -2813,6 +2827,7 @@ async function processGroupedRuntimeChunkCore_ACU(
                 break;
             }
 
+            if (applyResult.aborted) { aborted = true; break; }
             const safeApplyError = sanitizeRetryFeedback_ACU(applyResult.error || '统一提交失败。', MAX_WARN_ERROR_LENGTH_ACU);
             if (applyResult.errorCategory !== 'model') {
                 jobs.forEach(job => failedGroups.add(job.groupKey));
@@ -3009,13 +3024,14 @@ export async function executeAutoFillStagingGroups_ACU(
             await stagingSession?.discard();
             return { ok: true };
         }
-        const settleResult = await settleStagedBoundaryAndPublish_ACU(stagingRun, fullIndex, stagingSession);
+        const settleResult = await settleStagedBoundaryAndPublish_ACU(stagingRun, fullIndex, stagingSession, options.abortController?.signal);
         if (!settleResult.ok) return settleResult;
         boundaryCommitted = true;
         stagingSession = null;
         return { ok: true };
     };
 
+    try {
     for (const group of normalizedGroups) {
         if (options.abortController?.signal.aborted) {
             return { success: false, failedGroups: [...failedGroups, ...normalizedGroups.map(g => g.key)], error: '自动填表已终止。', aborted: true, committedBucketCount };
@@ -3046,6 +3062,7 @@ export async function executeAutoFillStagingGroups_ACU(
                 performanceParentSpanId: options.performanceParentSpanId,
             });
             committedBucketCount += preResult.committedBucketCount;
+            if (preResult.aborted) return { success: false, failedGroups: [...failedGroups], aborted: true, committedBucketCount };
             if (!preResult.success) {
                 failedGroups.add(group.key);
                 firstError = firstError || preResult.error || '边界前 staging 提交失败。';
@@ -3085,6 +3102,7 @@ export async function executeAutoFillStagingGroups_ACU(
                 performanceParentSpanId: options.performanceParentSpanId,
             });
             committedBucketCount += postResult.committedBucketCount;
+            if (postResult.aborted) return { success: false, failedGroups: [...failedGroups], aborted: true, committedBucketCount };
             if (!postResult.success) {
                 failedGroups.add(group.key);
                 firstError = firstError || postResult.error || '边界后持久化提交失败。';
@@ -3094,6 +3112,9 @@ export async function executeAutoFillStagingGroups_ACU(
     }
 
     // 所有组都只有 pre-boundary 段（未触发循环内汇合）：正常收尾时仍须把 staging 汇合回原根。
+    if (options.abortController?.signal.aborted) {
+        return { success: false, failedGroups: [...failedGroups], aborted: true, committedBucketCount };
+    }
     if (!boundaryCommitted && stagingRun && stagingRun.overlay.stagedBucketCount > 0) {
         const settleResult = await settleStagingBoundary();
         if (!settleResult.ok) {
@@ -3101,11 +3122,15 @@ export async function executeAutoFillStagingGroups_ACU(
             firstError = firstError || `跨根 staging 收尾汇合失败：${(settleResult as { ok: false; error: string }).error}`;
         }
     }
-    await stagingSession?.discard();
-
     return failedGroups.size > 0
         ? { success: false, failedGroups: [...failedGroups], error: firstError || '跨根 staging 执行失败。', committedBucketCount }
         : { success: true, failedGroups: [], committedBucketCount };
+    } catch (error: any) {
+        if (error?.name === 'AbortError') return { success: false, failedGroups: [...failedGroups], aborted: true, committedBucketCount };
+        throw error;
+    } finally {
+        await stagingSession?.discard();
+    }
 }
 
 
@@ -3128,6 +3153,7 @@ export async function executeCardUpdateCore_ACU(
     admissionContext?: {
         /** 跳过写目标回放根准入（import/内部合法路径显式声明，不得由普通自动入口使用）。 */
         skipWriteTargetAdmission?: boolean;
+        targetSnapshot?: AiMessageSnapshot_ACU;
     },
 ): Promise<CardUpdateResult> {
     // 向后兼容：历史调用可能把 onProgress 作为第9参传入
@@ -3164,14 +3190,18 @@ export async function executeCardUpdateCore_ACU(
     let success = false;
     let modifiedKeys: string[] = [];
     const maxRetries = settings_ACU.tableMaxRetries || 3;
-    const executionScope = await captureFillExecutionScope_ACU();
-    const writeTargetAdmission = assertWriteTargetNotBeforeReplayRoot_ACU({
-        chat: getChatArray_ACU() || [],
-        isolationKey: executionScope.isolationKey,
-        targetMessageIndex: saveTargetIndex,
-    });
 
     try {
+        const targetSnapshot = isImportMode ? undefined
+            : admissionContext?.targetSnapshot ?? captureAiMessageSnapshot_ACU(getChatArray_ACU(), saveTargetIndex);
+        if (targetSnapshot) saveTargetIndex = targetSnapshot.index;
+        const requestGuard = { signal: effectiveAbortController.signal, targetSnapshot };
+        assertTableFillRequestCurrent_ACU(requestGuard, saveTargetIndex, getChatArray_ACU());
+        const executionScope = await captureFillExecutionScope_ACU();
+        assertTableFillRequestCurrent_ACU(requestGuard, saveTargetIndex, getChatArray_ACU());
+        const writeTargetAdmission = assertWriteTargetNotBeforeReplayRoot_ACU({
+            chat: getChatArray_ACU() || [], isolationKey: executionScope.isolationKey, targetMessageIndex: saveTargetIndex,
+        });
         // V2 replay-root 准入（spv8.9）：任何写目标早于最新 full checkpoint 的
         // 自动/legacy 填表必须在 AI 调用（collectGroupFillResponse_ACU →
         // prepareAIInput/callCustomOpenAI）之前被结构化阻断，否则 AI 先消耗 token，
@@ -3205,6 +3235,7 @@ export async function executeCardUpdateCore_ACU(
         let lastSqlError: string | null = null;
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            assertTableFillRequestCurrent_ACU(requestGuard, saveTargetIndex, getChatArray_ACU());
             const attemptReadContext = createLorebookReadContext_ACU({ source: 'form_fill_legacy', isActive: () => !effectiveAbortController?.signal.aborted, isAborted: () => effectiveAbortController?.signal.aborted === true });
             try {
                 let rawBaseSnapshot: Record<string, any> = getRuntimeTableDataSnapshot_ACU(progressContext?.batchBaseSnapshot || null) || {};
@@ -3247,6 +3278,7 @@ export async function executeCardUpdateCore_ACU(
                 }
 
                 emitProgress({ phase: 'parsing' });
+                assertTableFillRequestCurrent_ACU(requestGuard, saveTargetIndex, getChatArray_ACU());
                 const aiResponse = collectResult.aiResponse;
 
                 const isSqlTableEdit = isSqliteMode() && typeof collectResult.tableEditText === 'string' && isSqlContent(collectResult.tableEditText);
@@ -3258,6 +3290,7 @@ export async function executeCardUpdateCore_ACU(
                     const commitResult = await runTableUpdateCommit_ACU<CardUpdateResult>({
                         source: 'group_fill',
                         reason: 'executeCardUpdateCore',
+                        ...requestGuard,
                         chatKey: executionScope.chatKey,
                         isolationKey: executionScope.isolationKey,
                         writeSet,
@@ -3272,6 +3305,7 @@ export async function executeCardUpdateCore_ACU(
                         skipChatSave: isImportMode,
                     }, async () => {
                         const provider = await ensureStorageProviderReady_ACU();
+                        assertTableFillRequestCurrent_ACU(requestGuard, saveTargetIndex, getChatArray_ACU());
                         if (typeof provider.applyEditsWithSystemRowIds !== 'function') {
                             return {
                                 success: false,
@@ -3386,6 +3420,8 @@ export async function executeCardUpdateCore_ACU(
                     });
 
                     if (!commitResult.success || !commitResult.value) {
+                        if (commitResult.aborted) return { success: false, modifiedKeys: [], aborted: true };
+                        if (commitResult.diagnosticCode) return { success: false, modifiedKeys: [], error: commitResult.error, errorCategory: 'precondition', diagnosticCode: commitResult.diagnosticCode };
                         if (autoFill) logAutoFillSkip_ACU('commit_failed', {
                             ...diagnosticContext, stage: 'commit', attempt,
                             errorCategory: commitResult.errorCategory, diagnosticCode: 'legacy_commit_rejected',
@@ -3409,6 +3445,7 @@ export async function executeCardUpdateCore_ACU(
                 const updateOutcome = await runTableUpdateCommit_ACU<CardUpdateResult>({
                     source: 'group_fill',
                     reason: 'executeCardUpdateCore:snapshot',
+                    ...requestGuard,
                     chatKey: executionScope.chatKey,
                     isolationKey: executionScope.isolationKey,
                     writeSet,
@@ -3526,6 +3563,8 @@ export async function executeCardUpdateCore_ACU(
                 });
 
                 if (!updateOutcome.success || !updateOutcome.value) {
+                    if (updateOutcome.aborted) return { success: false, modifiedKeys: [], aborted: true };
+                    if (updateOutcome.diagnosticCode) return { success: false, modifiedKeys: [], error: updateOutcome.error, errorCategory: 'precondition', diagnosticCode: updateOutcome.diagnosticCode };
                     if (autoFill) logAutoFillSkip_ACU('commit_failed', {
                         ...diagnosticContext, stage: 'commit', attempt,
                         errorCategory: updateOutcome.errorCategory, diagnosticCode: 'legacy_commit_rejected',
@@ -3553,6 +3592,9 @@ export async function executeCardUpdateCore_ACU(
                 const safeError = sanitizeRetryFeedback_ACU(error?.message || String(error), MAX_WARN_ERROR_LENGTH_ACU);
                 logWarn_ACU(`第 ${attempt} 次尝试失败: ${safeError}`);
 
+                if (error instanceof TableFillTargetStaleError_ACU) {
+                    return { success: false, modifiedKeys: [], error: safeError, errorCategory: 'precondition', diagnosticCode: error.code };
+                }
                 if (error?.name === 'AbortError' || String(error?.message || '').toLowerCase().includes('aborted') || wasStoppedByUser_ACU) {
                     return { success: false, modifiedKeys: [], aborted: true };
                 }
@@ -3620,6 +3662,9 @@ export async function executeCardUpdateCore_ACU(
         return { success, modifiedKeys };
 
     } catch (error: any) {
+        if (error instanceof TableFillTargetStaleError_ACU) {
+            return { success: false, modifiedKeys: [], error: error.message, errorCategory: 'precondition', diagnosticCode: error.code };
+        }
         if (error.name === 'AbortError') {
             logDebug_ACU('Fetch request was aborted by the user.');
             return { success: false, modifiedKeys: [], aborted: true };
@@ -3645,7 +3690,8 @@ export async function processUpdatesBatch_ACU(
         isSilentMode: boolean,
         targetSheetKeys: string[] | null,
         requestOptions: Record<string, any> | null,
-        progressContext: BatchUpdateProgressContext
+        progressContext: BatchUpdateProgressContext,
+        abortController?: AbortController,
     ) => Promise<CardUpdateResult>
 ): Promise<BatchUpdateResult> {
     if (!indicesToUpdate || indicesToUpdate.length === 0) {
@@ -3653,6 +3699,10 @@ export async function processUpdatesBatch_ACU(
     }
 
     const { targetSheetKeys, batchSize: specificBatchSize, requestOptions } = options;
+    const batchAbortController: AbortController = options.abortController ?? new AbortController();
+    const isStopped = () => batchAbortController.signal.aborted || wasStoppedByUser_ACU;
+    if (batchAbortController.signal.aborted) return { success: false, aborted: true };
+    if (!options.planManaged) _set_wasStoppedByUser_ACU(false);
     const schedulingIdentitySnapshot = cloneTableDataSnapshot_ACU(currentJsonTableData_ACU);
 
     const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU('processUpdatesBatch');
@@ -3664,8 +3714,8 @@ export async function processUpdatesBatch_ACU(
     }
     await flushRuntimeOnlyChangesBeforeFill_ACU('processUpdatesBatch');
 
-    _set_wasStoppedByUser_ACU(false);
-    _set_isAutoUpdatingCard_ACU(true);
+    if (isStopped()) return { success: false, aborted: true };
+    if (!options.planManaged) _set_isAutoUpdatingCard_ACU(true);
 
     try {
         const isSummaryMode = (mode && (mode.includes('summary') || mode === 'manual_summary')) || false;
@@ -3688,6 +3738,7 @@ export async function processUpdatesBatch_ACU(
         // run-scoped session 语义（需从已提交 snapshot 增量前进），不能用同 boundary evidence 冒充。
 
         for (let i = 0; i < batches.length; i++) {
+            if (isStopped()) return { success: false, aborted: true };
             const batchIndices = batches[i];
             const batchNumber = i + 1;
             const firstMessageIndexOfBatch = batchIndices[0];
@@ -3710,6 +3761,7 @@ export async function processUpdatesBatch_ACU(
                 return { success: false, failedBatch: batchNumber, error: baseResult.error || '无法构建合并基底，操作已终止。' };
             }
             const mergedBatchData = baseResult.data;
+            if (isStopped()) return { success: false, aborted: true };
             let effectiveTargetSheetKeys = targetSheetKeys;
             if (Array.isArray(targetSheetKeys) && targetSheetKeys.length > 0) {
                 try {
@@ -3786,13 +3838,15 @@ export async function processUpdatesBatch_ACU(
                     currentBatch: batchNumber,
                     totalBatches: batches.length,
                     batchBaseSnapshot: JSON.parse(JSON.stringify(mergedBatchData)),
-                }
+                },
+                batchAbortController,
             );
 
             if (!result.success) {
                 return {
                     success: false,
                     failedBatch: batchNumber,
+                    ...(result.aborted ? { aborted: true } : {}),
                     error: result.error || `批处理在第 ${batchNumber} 批时失败或被终止。`,
                     ...(result.diagnosticCode ? { diagnosticCode: result.diagnosticCode } : {}),
                     ...(result.diagnostic ? { diagnostic: result.diagnostic } : {}),
@@ -3802,8 +3856,10 @@ export async function processUpdatesBatch_ACU(
 
         return { success: true };
     } finally {
-        _set_isAutoUpdatingCard_ACU(false);
-        _set_wasStoppedByUser_ACU(false);
+        if (!options.planManaged) {
+            _set_isAutoUpdatingCard_ACU(false);
+            _set_wasStoppedByUser_ACU(false);
+        }
     }
 }
 

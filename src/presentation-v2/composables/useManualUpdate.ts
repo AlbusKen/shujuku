@@ -523,6 +523,7 @@ export function useManualUpdate(): ManualUpdateState {
           targetSheetKeys: string[] | null,
           requestOptions: Record<string, any> | null,
           progressContext: BatchUpdateProgressContext,
+          abortController?: AbortController,
         ) => executeCardUpdateCore_ACU(
           messagesToUse,
           saveTargetIndex,
@@ -531,7 +532,7 @@ export function useManualUpdate(): ManualUpdateState {
           isSilentMode,
           targetSheetKeys,
           requestOptions,
-          new AbortController(),
+          abortController ?? new AbortController(),
           progressContext,
           handleProgress,
         ));

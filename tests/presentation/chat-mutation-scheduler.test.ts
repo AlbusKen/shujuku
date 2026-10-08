@@ -57,6 +57,9 @@ vi.mock('../../src/service/vector/summary-vector-index-chat-deletion-gc', () => 
 vi.mock('../../src/data/repositories/profile-repo', () => ({
   globalMeta_ACU: { summaryVectorIndexModeGlobal: true },
 }));
+vi.mock('../../src/service/fill-mode/fill-mode-gate', () => ({
+  isVectorPipelineEnabledForCurrentChat_ACU: () => true,
+}));
 vi.mock('../../src/shared/utils', () => ({ logDebug_ACU: vi.fn(), logError_ACU: vi.fn(), logWarn_ACU: vi.fn() }));
 
 import {

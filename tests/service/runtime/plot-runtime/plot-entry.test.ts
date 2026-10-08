@@ -274,6 +274,11 @@ describe('runOptimizationLogic_ACU', () => {
     const result = await runOptimizationLogic_ACU('继续');
     expect(result).toMatchObject({ success: false, blocked: true, errorType: 'partial_failure' });
     expect(result.finalMessage).toBeUndefined();
+    const compatible = await runOptimizationLogic_ACU('继续', { unmaskedCompatibility: true });
+    expect(compatible).toMatchObject({
+      success: true, finalMessage: '结果', hasPartialFailure: true,
+      successCount: 1, failCount: 1, enabledTaskCount: 2,
+    });
   });
 
   it('finally 块重置 planningGuard 和 __inFlight', async () => {

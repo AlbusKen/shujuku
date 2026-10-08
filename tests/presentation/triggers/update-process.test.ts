@@ -204,3 +204,41 @@ describe('update error toast ownership', () => {
     expect(showToastr_ACU.mock.calls.filter(call => call[0] === 'error')).toEqual([['error', '静默批失败']]);
   });
 });
+
+
+describe('填表终止控制器接线', () => {
+  it('请求返回后通知终止仍直接取消执行控制器，不提前释放运行状态', async () => {
+    const { proceedWithCardUpdate_ACU, executeCardUpdateCore_ACU, beginTask, endTask } = await importTrigger();
+    const state = await import('../../../src/service/runtime/state-manager');
+    executeCardUpdateCore_ACU.mockImplementationOnce(async (...args: any[]) => {
+      const controller = args[7];
+      args[9]({ phase: 'calling_ai' });
+      // 模型返回后已不依赖请求登记表，仍由真实通知动作取消任务。
+      beginTask.mock.calls[0][1].action.run();
+      expect(controller.signal.aborted).toBe(true);
+      expect(state._set_isAutoUpdatingCard_ACU).not.toHaveBeenCalledWith(false);
+      return { success: false, modifiedKeys: [], aborted: true };
+    });
+    expect(await proceedWithCardUpdate_ACU([{ is_user: false, mes: 'AI' }])).toMatchObject({ aborted: true });
+    expect(endTask).toHaveBeenCalledOnce();
+  });
+  it('计划管理批次沿用共享控制器和进度回调，不另建通知', async () => {
+    const { processUpdates_ACU, processUpdatesBatch_ACU, executeCardUpdateCore_ACU, beginTask, showToastr_ACU } = await importTrigger();
+    const controller = new AbortController();
+    const onProgress = vi.fn();
+    processUpdatesBatch_ACU.mockImplementationOnce(async (_indices, _mode, _options, execute) => execute(
+      [{ is_user: false, mes: 'AI' }], 0, 'auto_standard', false, ['sheet_0'], null,
+      { currentBatch: 1, totalBatches: 1 }, controller,
+    ));
+    executeCardUpdateCore_ACU.mockImplementationOnce(async (...args: any[]) => {
+      expect(args[7]).toBe(controller);
+      args[9]({ phase: 'calling_ai' });
+      controller.abort();
+      return { success: false, modifiedKeys: [], aborted: true, error: '已终止' };
+    });
+    await processUpdates_ACU([0], 'auto', { planManaged: true, abortController: controller, onProgress });
+    expect(onProgress).toHaveBeenCalledOnce();
+    expect(beginTask).not.toHaveBeenCalled();
+    expect(showToastr_ACU).not.toHaveBeenCalled();
+  });
+});

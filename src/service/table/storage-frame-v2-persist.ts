@@ -1,4 +1,5 @@
 import { getChatArray_ACU, saveChatToHost_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
+import { assertTableFillRequestCurrent_ACU, type TableFillRequestGuard_ACU } from './table-fill-request-guard';
 import { beginMaterialCheckpointSync_ACU } from '../chat/material-checkpoint-sync';
 import { advanceProvisionalBridgeCommitProgress_ACU, authorizeManualCatchUpBucketWrite_ACU, readActiveProvisionalBridge_ACU } from './manual-catch-up-provisional-bridge';
 import { cloneIsolatedData_ACU, collectSheetIdentityAliasesForPurge_ACU, purgeManualRefillIncrementalSheetKeysFromStorageFrameV2_ACU, purgeSheetKeysFromMessage_ACU, readIsolatedDataContainer_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
@@ -53,7 +54,7 @@ export interface ReplaceExistingIncrementalOptions_ACU {
   targetSheetKeys: string[];
 }
 
-export interface PersistTableMutationV2Options_ACU {
+export interface PersistTableMutationV2Options_ACU extends TableFillRequestGuard_ACU {
   targetMessageIndex?: number;
   source: TableMutationSourceV2_ACU;
   /**
@@ -2218,6 +2219,7 @@ async function persistTableMutationLogV2Core_ACU(
     return { saved: false, error: 'no AI message found' };
   }
 
+  assertTableFillRequestCurrent_ACU(options, target.index, chat);
   options.transactionContext?.assertFresh?.('persistTableMutationLogV2:before_persist');
   if (!chat[target.index] || chat[target.index] !== target.message || target.message.is_user) {
     return { saved: false, error: 'target AI message changed before persist; abort stale table write.' };
@@ -2754,6 +2756,8 @@ async function persistTableMutationLogV2Core_ACU(
     );
     if (mirrorViolation) return { saved: false, error: mirrorViolation };
   }
+  // 所有异步候选校验结束后，在第一笔聊天帧变更之前复核请求与目标。
+  assertTableFillRequestCurrent_ACU(options, target.index);
   const previousMessageState = [...replacementIsolatedDataByMessageIndex.keys()].map(messageIndex => {
     const message = chat[messageIndex];
     return {

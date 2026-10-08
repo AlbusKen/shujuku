@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { HostInputWriteFailureReporter_ACU, HostInputWriteOptions_ACU } from '../../../src/shared/host-input';
 
 const m = vi.hoisted(() => ({
   chatChanged: undefined as undefined | ((name: string) => Promise<void>),
@@ -85,7 +86,8 @@ vi.mock('../../../src/service/runtime/plot-runtime/plot-history-preset', () => (
 vi.mock('../../../src/shared/host-input', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../../src/shared/host-input')>(),
   getSendTextareaValue_ACU: () => m.getInput(),
-  setSendTextareaValue_ACU: (text: string) => m.setInput(text),
+  setSendTextareaValue_ACU: (text: string, reportFailure?: HostInputWriteFailureReporter_ACU, options?: HostInputWriteOptions_ACU) =>
+    m.setInput(text, reportFailure, options),
 
 }));
 vi.mock('../../../src/presentation/components/plot-pending-disguise', async (importOriginal) => ({
@@ -253,7 +255,8 @@ beforeEach(() => {
   document.querySelector('#chat')?.replaceChildren();
   m.getInput.mockImplementation(() => m.input);
   m.setInput.mockImplementation((text: string) => { m.input = text; return true; });
-  m.beginDisguise.mockImplementation(() => ({ deliver: (text: string) => m.setInput(text), release: m.finishDisguise }));
+  m.beginDisguise.mockImplementation(() => ({ deliver: (text: string, reportFailure?: HostInputWriteFailureReporter_ACU) =>
+    m.setInput(text, reportFailure, { restoreAfterInput: true }), release: m.finishDisguise }));
   m.shouldProcessSummary.mockReturnValue(false);
   m.continuationRuntimeInitialize.mockResolvedValue(undefined);
   m.consumeInternalGeneration.mockReturnValue(null);
@@ -761,6 +764,56 @@ describe('mainInitialize_ACU TavernHelper.generate 独立入口契约', () => {
 
 // 钩子由 mainInitialize_ACU 在 beforeAll 时安装（window.TavernHelper 已就绪）。
 describe('发送前处理楼层生命周期', () => {
+  it.each([false, true])('同步input改写675→673后宿主保存完整最终指令（解除伪装=%s）', async unmasked => {
+    m.shouldProcessPlot.mockReturnValue(true);
+    m.settings.plotSendDisguiseDisabled = unmasked;
+    const hostInput = await vi.importActual<typeof import('../../../src/shared/host-input')>('../../../src/shared/host-input');
+    const pendingUi = await vi.importActual<typeof import('../../../src/presentation/components/plot-pending-disguise')>('../../../src/presentation/components/plot-pending-disguise');
+    const input = document.querySelector<HTMLTextAreaElement>('#send_textarea')!;
+    m.input = input.value = '本轮原输入';
+    m.getInput.mockImplementation(() => input.value);
+    m.setInput.mockImplementation((text: string, reportFailure?: HostInputWriteFailureReporter_ACU, options?: HostInputWriteOptions_ACU) => {
+      const written = hostInput.setSendTextareaValue_ACU(text, reportFailure, options);
+      m.input = input.value;
+      return written;
+    });
+    m.beginDisguise.mockImplementation(pendingUi.beginPlotSendDisguise_ACU);
+    const finalMessage = `<plot>${'x'.repeat(662)}</plot>`;
+    const rewrittenLengths: number[] = [];
+    const onInput = () => {
+      if (input.value === finalMessage) {
+        input.value = input.value.slice(0, -2);
+        rewrittenLengths.push(input.value.length);
+      }
+    };
+    input.addEventListener('input', onInput);
+    const previous = { is_user: false, mes: '历史回复' };
+    m.api.chat = [previous];
+    m.strategy2.mockResolvedValueOnce({ action: 'planned', finalMessage });
+    const params: any = {};
+    try {
+      await m.api.eventSource.emit('after_commands', 'normal', params, false);
+      const user = { is_user: true, mes: input.value, name: '用户' };
+      m.input = input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      m.api.chat.push(user);
+      await m.saveChat();
+      await m.api.eventSource.emit('message_sent', 1);
+      m.api.addOneMessage(user);
+      await m.api.eventSource.emit('user_message_rendered', 1);
+      expect(rewrittenLengths).toEqual([673]);
+      expect(params.prompt).toBe(finalMessage);
+      expect(user.mes).toBe(unmasked ? finalMessage.slice(0, -2) : finalMessage);
+      expect(m.persistedChat).toEqual([previous, user]);
+      expect(m.generate).not.toHaveBeenCalled();
+      expect(document.querySelector('#chat [data-acu-virtual-floor]')).toBeNull();
+      const { logError_ACU } = await import('../../../src/shared/utils');
+      expect(logError_ACU).not.toHaveBeenCalled();
+    } finally {
+      input.removeEventListener('input', onInput);
+    }
+  });
+
   it.each([false, true])('发送等待与成功路径遵循伪装开关（解除伪装=%s）', async unmasked => {
     vi.useFakeTimers();
     m.shouldProcessPlot.mockReturnValue(true);
@@ -827,7 +880,12 @@ describe('发送前处理楼层生命周期', () => {
     expect(consume).toHaveBeenCalledExactlyOnceWith('最终剧情正文');
     expect(m.persistedChat).toEqual([previous, { is_user: true, mes: '最终剧情正文', name: '用户' }]);
     expect(m.api.addOneMessage).toHaveBeenCalledOnce();
-    expect(m.strategy1).not.toHaveBeenCalled();
+    if (unmasked) {
+      expect(m.strategy1).toHaveBeenCalledExactlyOnceWith(previous, 0, expect.any(Function), true);
+      expect(m.strategy1).toHaveBeenCalledBefore(m.strategy2 as any);
+    } else {
+      expect(m.strategy1).not.toHaveBeenCalled();
+    }
     expect(m.strategy2).toHaveBeenCalledOnce();
     expect(m.processBeforeGen).toHaveBeenCalledOnce();
     expect(bridge.prepareHostGenerationRedirect).not.toHaveBeenCalled();
@@ -839,7 +897,7 @@ describe('发送前处理楼层生命周期', () => {
     expect(m.generate).not.toHaveBeenCalled();
   });
 
-  it.each([false, true])('任务失败或手动终止恢复原输入，保存失败继续（解除伪装=%s）', async unmasked => {
+  it.each([false, true])('任务失败按发送契约处理，手动终止与成功通知遵循伪装开关（解除伪装=%s）', async unmasked => {
     vi.useFakeTimers();
     m.shouldProcessPlot.mockReturnValue(true);
     m.settings.plotSendDisguiseDisabled = unmasked;
@@ -854,7 +912,10 @@ describe('发送前处理楼层生命周期', () => {
     for (const result of stopResults) {
       m.input = '失败轮原输入';
       m.strategy2.mockResolvedValueOnce(result);
-      await expect(m.api.eventSource.emit('after_commands', 'normal', {}, false)).rejects.toMatchObject({ name: 'AbortError' });
+      const request = m.api.eventSource.emit('after_commands', 'normal', {}, false);
+      if (unmasked) await expect(request).resolves.toBeUndefined();
+      else await expect(request).rejects.toMatchObject({ name: 'AbortError' });
+      expect(m.stopGeneration).toHaveBeenCalledTimes(unmasked && result.action === 'aborted' ? 1 : 0);
       expect(m.api.chat).toEqual([previous]);
       expect(document.querySelector('#chat .mes[mesid="1"]')).toBeNull();
       expect(document.querySelector('#chat .acu-plot-pending-mes')).toBeNull();
@@ -870,23 +931,53 @@ describe('发送前处理楼层生命周期', () => {
     const user = { is_user: true, mes: '任务后保存失败原输入' };
     m.api.chat.push(user);
     m.api.addOneMessage(user);
-    m.input = '';
-    m.strategy1.mockResolvedValueOnce({ action: 'planned', finalMessage: '任务已完成的提示词' });
+    m.input = unmasked ? user.mes : '';
+    m.strategy1.mockResolvedValueOnce({ action: 'planned', finalMessage: '任务已完成的提示词', originalMessage: user.mes });
     m.saveChat.mockRejectedValueOnce(new Error('保存失败'));
     await expect(m.api.eventSource.emit('after_commands', 'normal', {}, false)).resolves.toBeUndefined();
-    expect(m.strategy1).toHaveBeenCalledOnce();
+    expect(m.strategy1).toHaveBeenCalledTimes(unmasked ? stopResults.length + 1 : 1);
     expect(m.api.chat[0]).toBe(previous);
     expect(m.api.chat[1]).toBe(user);
     expect(user.mes).toBe('任务已完成的提示词');
     expect(m.api.chat).toHaveLength(2);
-    expect(m.api.updateMessageBlock).toHaveBeenCalledExactlyOnceWith(1, user, { rerenderMessage: true });
-    expect(document.querySelector('#chat .mes[mesid="1"] .mes_text')?.textContent).toBe('任务已完成的提示词');
+    if (unmasked) {
+      expect(m.hostEmit).toHaveBeenCalledWith('message_updated', 1);
+      expect(m.api.updateMessageBlock).not.toHaveBeenCalled();
+      expect(m.saveChat).not.toHaveBeenCalled();
+      expect(m.strategy1).toHaveBeenLastCalledWith(user, 1, expect.any(Function), true);
+      expect(m.strategy2).toHaveBeenCalledTimes(stopResults.length);
+    } else {
+      expect(m.api.updateMessageBlock).toHaveBeenCalledExactlyOnceWith(1, user, { rerenderMessage: true });
+      expect(document.querySelector('#chat .mes[mesid="1"] .mes_text')?.textContent).toBe('任务已完成的提示词');
+    }
     expect(m.input).toBe('');
     expect(document.body.dataset.generating).toBeUndefined();
     expect(document.querySelector<HTMLElement>('#mes_stop')!.style.display).toBe('none');
     expect(fetch).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(0);
     expect(m.generate).not.toHaveBeenCalled();
+    if (unmasked) {
+      const deleteLastMessage = m.api.deleteLastMessage;
+      const remove = vi.fn(async () => { m.api.chat.pop(); });
+      m.api.deleteLastMessage = remove;
+      m.strategy1.mockResolvedValueOnce({
+        action: 'aborted', manual: true, originalMessage: user.mes, restoreText: '恢复的输入',
+      });
+      m.input = '等待中的草稿';
+      try {
+        await expect(m.api.eventSource.emit('after_commands', 'normal', {}, false)).resolves.toBeUndefined();
+        expect(m.stopGeneration).toHaveBeenCalledTimes(2);
+        expect(remove).toHaveBeenCalledOnce();
+        expect(m.stopGeneration).toHaveBeenCalledBefore(remove as any);
+        expect(m.api.chat).toEqual([previous]);
+        expect(m.input).toBe('恢复的输入');
+        expect(m.strategy2).toHaveBeenCalledTimes(stopResults.length);
+        expect(m.beginDisguise).not.toHaveBeenCalled();
+        expect(m.generate).not.toHaveBeenCalled();
+      } finally {
+        m.api.deleteLastMessage = deleteLastMessage;
+      }
+    }
   });
 
   it('仅交火召回恢复缓存原文，召回失败仍沿原请求继续正文', async () => {
@@ -977,6 +1068,53 @@ describe('发送前处理楼层生命周期', () => {
       await vi.advanceTimersByTimeAsync(0);
     }
     expect(m.generate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [false, 'rejected'], [false, 'exception'],
+  ])('规划成功但交接%s/%s失败时停发、清理等待展示且诊断不含正文', async (unmasked, failure) => {
+    m.shouldProcessPlot.mockReturnValue(true);
+    m.settings.plotSendDisguiseDisabled = unmasked as boolean;
+    const pendingUi = await vi.importActual<typeof import('../../../src/presentation/components/plot-pending-disguise')>('../../../src/presentation/components/plot-pending-disguise');
+    m.beginDisguise.mockImplementation(pendingUi.beginPlotSendDisguise_ACU);
+    m.input = '本轮原输入';
+    const finalMessage = '不可进入日志的最终正文';
+    m.strategy2.mockResolvedValueOnce({ action: 'planned', finalMessage });
+    const inputWriteFailure = {
+      reason: 'input_changed_value' as const, phase: 'verify' as const, access: 'native' as const,
+      expectedLength: finalMessage.length, assignedLength: finalMessage.length, actualLength: 0,
+    };
+    m.setInput.mockImplementation((text: string, reportFailure?: HostInputWriteFailureReporter_ACU) => {
+      if (text === finalMessage) {
+        if (failure === 'exception') throw new TypeError(`敏感载荷：${finalMessage}`);
+        reportFailure?.(inputWriteFailure);
+        return false;
+      }
+      m.input = text;
+      return true;
+    });
+    const consume = vi.fn();
+    const request = (async () => {
+      await m.api.eventSource.emit('after_commands', 'normal', {}, false);
+      consume(m.input);
+    })();
+    await expect(request).rejects.toMatchObject({ name: 'AbortError' });
+    expect(consume).not.toHaveBeenCalled();
+    expect(m.generate).not.toHaveBeenCalled();
+    expect(m.input).toBe('本轮原输入');
+    expect(m.api.chat).toHaveLength(0);
+    expect(document.querySelector('#chat [data-acu-virtual-floor]')).toBeNull();
+    expect(document.body.dataset.generating).toBeUndefined();
+    const { logError_ACU } = await import('../../../src/shared/utils');
+    expect(logError_ACU).toHaveBeenCalledExactlyOnceWith('[剧情推进] 发送前处理失败:', {
+      phase: 'input_writeback', inputPath: 'pending_input', needsPlan: true,
+      disguised: !unmasked, errorType: failure === 'exception' ? 'TypeError' : 'Error',
+      ...(failure === 'rejected' ? { inputWriteFailure } : {}),
+    });
+    expect(JSON.stringify(vi.mocked(logError_ACU).mock.calls)).not.toContain(finalMessage);
+    expect(JSON.stringify(vi.mocked(logError_ACU).mock.calls)).not.toContain('敏感载荷');
+    const { showToastr_ACU } = await import('../../../src/presentation/theme/toast');
+    expect(showToastr_ACU).toHaveBeenCalledWith('warning', '剧情最终指令未能写入输入框，正文发送已停止。', '剧情推进');
   });
 
   it.each(['textarea', 'floor'])('伪装建不起来（%s）时按解除伪装继续：原文留在输入框，规划照常沿原请求发送', async failure => {
@@ -1330,4 +1468,85 @@ describe('向量模式宿主普通发送', () => {
     expect(m.api.chat).toHaveLength(1);
   });
 
+});
+
+describe('零层真实宿主发送接管', () => {
+  it('bootstrap 包装主窗口事件源，普通发送不入楼，quiet 请求仍可装配', async () => {
+    vi.resetModules();
+    const listeners = new Map<string, Array<(...args: any[]) => unknown>>();
+    const nativeSource = {
+      on: vi.fn((event: string, callback: (...args: any[]) => unknown) => {
+        listeners.set(event, [...(listeners.get(event) ?? []), callback]);
+      }),
+      removeListener: vi.fn((event: string, callback: (...args: any[]) => unknown) => {
+        listeners.set(event, (listeners.get(event) ?? []).filter(item => item !== callback));
+      }),
+      // 对照酒馆 EventEmitter：监听器异常会被吞掉，外层 emit 拒绝才会停止 Generate。
+      emit: vi.fn(async (event: string, ...args: any[]) => {
+        for (const callback of [...(listeners.get(event) ?? [])]) {
+          try { await callback(...args); } catch { /* 宿主监听器隔离 */ }
+        }
+      }),
+    };
+    const originalEmit = nativeSource.emit;
+    const proxyEmit = m.api.eventSource.emit;
+    const envelope = { enabled: true, sessionId: 'session-native', activeBranchId: 'branch-native', revision: 1 };
+    const context = { key: 'native-scope' };
+    const runtime = { install: vi.fn(), invalidate: vi.fn(), dispose: vi.fn(), cancel: vi.fn(),
+      session: { hasActiveTurn: () => false, bindPrompt: vi.fn(), bindSettings: vi.fn() },
+      submit: vi.fn(async () => envelope),
+    };
+    class StableView {
+      isMounted = false;
+      mount = vi.fn(async () => { this.isMounted = true; });
+      resync = vi.fn(async () => {});
+      dispose = vi.fn(() => { this.isMounted = false; });
+      setBusy = vi.fn();
+      isSourceCurrent = () => true;
+    }
+    vi.doMock('../../../src/service/zero-layer/carrier-context', () => ({
+      hasZeroLayerCarrierField_ACU: () => true,
+      captureZeroLayerCarrier_ACU: () => context,
+      assertZeroLayerCarrier_ACU: vi.fn(), readZeroLayerCarrier_ACU: () => envelope,
+    }));
+    vi.doMock('../../../src/service/zero-layer/ordinary-context', () => ({
+      bindOrdinaryZeroLayerContext_ACU: vi.fn(), invalidateOrdinaryZeroLayerRequests_ACU: vi.fn(),
+      assertOrdinaryZeroLayerRequest_ACU: vi.fn(),
+    }));
+    vi.doMock('../../../src/presentation/components/zero-layer-stable-view', () => ({ ZeroLayerStableView_ACU: StableView }));
+    vi.doMock('../../../src/service/zero-layer/history-read', () => ({ zeroLayerHistoryReader_ACU: { invalidate: vi.fn() } }));
+    vi.doMock('../../../src/service/zero-layer/notifications', () => ({ subscribeZeroLayerChanges_ACU: () => () => {} }));
+    vi.doMock('../../../src/service/zero-layer/runtime', () => ({ getZeroLayerRuntime_ACU: () => runtime }));
+    const nativeApi = { eventSource: nativeSource, eventTypes: { ...m.api.eventTypes,
+      CHAT_COMPLETION_PROMPT_READY: 'native-prompt', CHAT_COMPLETION_SETTINGS_READY: 'native-settings' } };
+    vi.stubGlobal('SillyTavern', { getContext: () => nativeApi });
+    const input = document.querySelector<HTMLTextAreaElement>('#send_textarea')!;
+    input.value = '零层行动';
+    m.input = input.value;
+    try {
+      const { installZeroLayerBootstrap_ACU } = await import('../../../src/presentation/bootstrap/zero-layer-bootstrap');
+      installZeroLayerBootstrap_ACU();
+      expect(nativeSource.emit).not.toBe(originalEmit);
+      expect(m.api.eventSource.emit).toBe(proxyEmit);
+      const physicalWrite = vi.fn();
+      const hostSend = async () => {
+        await nativeSource.emit('after_commands', 'normal', {}, false);
+        physicalWrite();
+      };
+      await expect(hostSend()).rejects.toMatchObject({ name: 'AbortError' });
+      expect(physicalWrite).not.toHaveBeenCalled();
+      expect(input.value).toBe('零层行动');
+      await vi.waitFor(() => expect(runtime.submit).toHaveBeenCalledWith('零层行动', ['table']));
+      await expect(nativeSource.emit('after_commands', 'quiet', {}, false)).resolves.toBeUndefined();
+      expect(originalEmit).toHaveBeenCalledWith('after_commands', 'quiet', {}, false);
+    } finally {
+      window.dispatchEvent(new Event('pagehide'));
+      for (const path of ['service/zero-layer/carrier-context', 'service/zero-layer/ordinary-context',
+        'presentation/components/zero-layer-stable-view', 'service/zero-layer/history-read',
+        'service/zero-layer/notifications', 'service/zero-layer/runtime']) {
+        vi.doUnmock(`../../../src/${path}`);
+      }
+      vi.resetModules();
+    }
+  });
 });

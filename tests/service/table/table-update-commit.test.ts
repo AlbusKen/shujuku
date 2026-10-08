@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
+  chat: [] as any[],
   migration: vi.fn(),
   reload: vi.fn(),
   transaction: vi.fn(),
@@ -15,6 +16,7 @@ vi.mock('../../../src/shared/utils', () => ({
   logError_ACU: vi.fn(),
   logWarn_ACU: vi.fn(),
 }));
+vi.mock('../../../src/data/gateways/chat-gateway', () => ({ getChatArray_ACU: () => mocks.chat }));
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   get currentChatFileIdentifier_ACU() { return mocks.currentChatKey; },
   currentJsonTableData_ACU: null,
@@ -38,6 +40,7 @@ vi.mock('../../../src/service/table/manual-catch-up-provisional-bridge', () => (
 }));
 
 import { runSqliteRuntimeMutationCommit_ACU, runTableUpdateCommit_ACU } from '../../../src/service/table/table-update-commit';
+import { captureAiMessageSnapshot_ACU } from '../../../src/data/gateways/chat-message-snapshot';
 import {
   clearRuntimeOnlyPendingSheets_ACU,
   readRuntimeOnlyPendingSheets_ACU,
@@ -556,5 +559,56 @@ describe('runTableUpdateCommit_ACU stage_only 判别联合（计划 5.3）', () 
     });
     expect(mocks.persist).not.toHaveBeenCalled();
     expect(mocks.setCurrentData).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('填表请求提交边界', () => {
+  const data: any = { sheet_a: { content: [['row_id'], ['1']] } };
+  beforeEach(() => {
+    mocks.chat.splice(0, mocks.chat.length, { is_user: false, mes: '原回复', swipe_id: 0 });
+    mocks.currentChatKey = 'chat-a';
+    mocks.currentIsolationKey = 'scope-a';
+    mocks.migration.mockReset().mockResolvedValue({ success: true, migrated: false });
+    mocks.reload.mockReset();
+    mocks.setCurrentData.mockReset();
+    mocks.persist.mockReset().mockResolvedValue({ saved: true, messageIndex: 0 });
+    mocks.transaction.mockReset().mockImplementation(async (_opts, task) => task({ runCommit: async (commit: any) => commit() }, null));
+    clearRuntimeOnlyPendingSheets_ACU();
+    registerRuntimeOnlyPendingFlusher_ACU(null);
+  });
+  it.each(['before', 'lock', 'apply', 'staged'] as const)('取消发生于 %s 时不保存、不发布结果', async phase => {
+    const controller = new AbortController();
+    const apply = vi.fn(async () => {
+      if (phase === 'apply') controller.abort();
+      return { success: true, tableData: data, persist: { beforePersist: () => {
+        if (phase === 'staged') controller.abort();
+        return { rollback };
+      } } };
+    });
+    const rollback = vi.fn();
+    if (phase === 'before') controller.abort();
+    if (phase === 'lock') mocks.transaction.mockImplementationOnce(async (_opts, task) => {
+      controller.abort();
+      return task({ runCommit: async (commit: any) => commit() }, null);
+    });
+    const result = await runTableUpdateCommit_ACU({ ...options('cancel'), signal: controller.signal }, apply);
+    expect(result).toMatchObject({ success: false, aborted: true });
+    expect(mocks.persist).not.toHaveBeenCalled();
+    expect(mocks.setCurrentData).not.toHaveBeenCalled();
+    if (phase === 'before' || phase === 'lock') expect(apply).not.toHaveBeenCalled();
+    if (phase === 'staged') expect(rollback).toHaveBeenCalledOnce();
+  });
+  it('等待提交锁期间目标被替换时在 apply 前拒绝', async () => {
+    const targetSnapshot = captureAiMessageSnapshot_ACU(mocks.chat, 0);
+    mocks.transaction.mockImplementationOnce(async (_opts, task) => {
+      mocks.chat[0] = { ...mocks.chat[0] };
+      return task({ runCommit: async (commit: any) => commit() }, null);
+    });
+    const apply = vi.fn();
+    const result = await runTableUpdateCommit_ACU({ ...options('stale'), targetMessageIndex: 0, targetSnapshot }, apply);
+    expect(result).toMatchObject({ success: false, diagnosticCode: 'table_fill_target_stale', errorCategory: 'precondition' });
+    expect(apply).not.toHaveBeenCalled();
+    expect(mocks.persist).not.toHaveBeenCalled();
   });
 });

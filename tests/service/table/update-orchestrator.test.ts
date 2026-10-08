@@ -384,6 +384,7 @@ vi.mock('../../../src/data/gateways/chat-gateway', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../src/data/gateways/chat-gateway')>();
   return {
     ...actual,
+    getChatArray_ACU: (...args: any[]) => mockGetChatArray_ACU(...args),
     saveChatToHostStrict_ACU: (...args: any[]) => mockSaveChatToHostStrict(...args),
   };
 });
@@ -1517,6 +1518,7 @@ describe('processUpdatesBatch_ACU', () => {
 // ═══════════════════════════════════════════════════════════════
 describe('executeCardUpdateCore_ACU', () => {
   beforeEach(async () => {
+    mockGetChatArray_ACU.mockReturnValue([{ is_user: false, mes: 'AI回复' }]);
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     const { disposeStorageProvider } = await import('../../../src/service/table/table-storage-strategy');
     vi.mocked(isSqliteMode).mockReturnValue(false);
@@ -1539,6 +1541,55 @@ describe('executeCardUpdateCore_ACU', () => {
     mockPersistTablesToChatMessage.mockResolvedValue({ saved: true, messageIndex: 0 });
     mockEnsureBoundaryCheckpoint.mockResolvedValue({ success: true, changed: false, skipped: true });
     mockShouldRotateBoundaryCheckpoint.mockReturnValue(false);
+  });
+
+  it.each(['replace', 'delete', 'swipe', 'body', 'missing', 'user'] as const)(
+    'AI 等待期间目标 %s 时拒绝旧结果且不解析、不保存、不重试', async changed => {
+      const chat: any[] = [{ is_user: false, mes: '原回复', swipe_id: 0 }, { is_user: false, mes: '后续回复' }];
+      mockGetChatArray_ACU.mockReturnValue(chat);
+      mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
+      mockCallCustomOpenAI.mockImplementationOnce(async () => {
+        if (changed === 'replace') chat[0] = { ...chat[0] };
+        if (changed === 'delete') chat.splice(0, 1);
+        if (changed === 'swipe') chat[0].swipe_id = 1;
+        if (changed === 'body') chat[0].mes = '重新生成的回复';
+        if (changed === 'missing') chat.length = 0;
+        if (changed === 'user') chat[0].is_user = true;
+        return '<tableEdit>有效内容</tableEdit>';
+      });
+      const result = await executeCardUpdateCore_ACU(chat.slice(), 0, false, 'auto_standard', false, ['sheet_0'], null);
+      expect(result).toMatchObject({ success: false, errorCategory: 'precondition', diagnosticCode: 'table_fill_target_stale' });
+      expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
+      expect(mockParseAndApplyTableEdits).not.toHaveBeenCalled();
+      expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([0, -1])('目标未变而追加新楼时仍提交到请求前解析的目标（index=%s）', async index => {
+    const chat: any[] = [{ is_user: false, mes: '原回复' }];
+    mockGetChatArray_ACU.mockReturnValue(chat);
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
+    mockCallCustomOpenAI.mockImplementationOnce(async () => {
+      chat.push({ is_user: true, mes: '新用户楼' }, { is_user: false, mes: '新回复' });
+      return '<tableEdit>有效内容</tableEdit>';
+    });
+    mockParseAndApplyTableEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'] });
+    mockCheckIfFirstTimeInit.mockResolvedValue(false);
+    const result = await executeCardUpdateCore_ACU(chat.slice(), index, false, 'auto_standard', false, ['sheet_0'], null);
+    expect(result.success, result.error).toBe(true);
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledWith(expect.objectContaining({ targetMessageIndex: 0 }));
+  });
+
+  it('请求返回后在 parsing 回调终止仍拒绝提交，且不重试模型', async () => {
+    const controller = new AbortController();
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>有效内容</tableEdit>');
+    const result = await executeCardUpdateCore_ACU([], 0, false, 'auto_standard', false, ['sheet_0'], null, controller, null,
+      event => { if (event.phase === 'parsing') controller.abort(); });
+    expect(result).toMatchObject({ success: false, aborted: true });
+    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
+    expect(mockParseAndApplyTableEdits).not.toHaveBeenCalled();
+    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
   });
 
   it('正常流程：AI 返回有效响应，解析成功，保存成功', async () => {
@@ -4234,6 +4285,7 @@ describe('executeCardUpdateCore_ACU — SQL 错误反馈重试', () => {
   let setTimeoutSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(async () => {
+    mockGetChatArray_ACU.mockReturnValue([{ is_user: false, mes: 'AI回复' }]);
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     const { disposeStorageProvider } = await import('../../../src/service/table/table-storage-strategy');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
@@ -4479,7 +4531,7 @@ describe('executeCardUpdateCore_ACU — V2 replay-root 准入', () => {
     // index 24 为 AI 楼层，携带真实 V2 full checkpoint 隔离标签（isolationKey=''）。
     // TavernDB_ACU_IsolatedData 结构与 chat-message-data-repo 的读取约定一致。
     return Array.from({ length: 25 }, (_, i) => {
-      const message: any = { is_user: i % 2 === 0, mes: `楼层${i}` };
+      const message: any = { is_user: i === 24 ? false : i % 2 === 0, mes: `楼层${i}` };
       if (i === 24) {
         message.TavernDB_ACU_IsolatedData = {
           '': {

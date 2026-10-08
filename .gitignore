@@ -21,6 +21,9 @@ dist/
 # 本地 SillyTavern 参考源码
 SillyTavern-1.13.1/
 
+# 本地 SillyTavern 部署（源码、依赖、配置及用户数据）
+/SillyTavern/
+
 
 # 本地分析缓存/归档
 .analysis-cache.md

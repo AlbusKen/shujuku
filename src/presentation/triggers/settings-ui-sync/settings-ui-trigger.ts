@@ -171,6 +171,7 @@ let autoUpdateQueueId_ACU = 0;
     // 实际开始填表请求后才登记任务；同一调度的分组与批次共用一个进度框。
     let autoProgressTask: NoticeTaskHandle_ACU | null = null;
     const onAutoGroupedProgress = (event: CardUpdateProgressEvent): void => {
+      if (autoGroupedAbortController.signal.aborted) return;
       logAutoFillStage_ACU(event.phase, {
         ...context, batchNumber: event.currentBatch, attempt: event.attempt,
       });
@@ -190,7 +191,6 @@ let autoUpdateQueueId_ACU = 0;
                     _set_wasStoppedByUser_ACU(true);
                     autoGroupedAbortController.abort();
                     abortAllActiveRequests_ACU();
-                    _set_isAutoUpdatingCard_ACU(false);
                     autoProgressTask?.update('填表任务已终止，正在停止当前任务与后续批次...', { action: null });
                     showToastr_ACU('warning', '填表任务已由用户终止，当前任务与后续批次将立即停止。');
                 },
@@ -208,7 +208,9 @@ let autoUpdateQueueId_ACU = 0;
             settings_ACU,
             _set_isAutoUpdatingCard_ACU,
             {
-                processUpdates: (indices, mode, options) => processUpdates_ACU(indices, mode, options),
+                processUpdates: (indices, mode, options) => processUpdates_ACU(indices, mode, {
+                    ...options, abortController: autoGroupedAbortController, onProgress: onAutoGroupedProgress, planManaged: true,
+                }),
                 ...(useGroupedAutoUpdates
                     ? {
                         processGroupedUpdates: (groups, mode, options) => {
@@ -252,9 +254,12 @@ let autoUpdateQueueId_ACU = 0;
                 purgeOldLayerData: () => purgeOldLayerData_ACU(),
             },
             { runId: performanceContext?.runId || performanceSpan.id, parentSpanId: performanceSpan.id },
+            autoGroupedAbortController,
         );
     } finally {
         autoProgressTask?.end();
+        _set_wasStoppedByUser_ACU(false);
+        syncManualUpdateButtonAvailability_ACU();
     }
 
     // UI：根据返回值显示结果
@@ -269,7 +274,7 @@ let autoUpdateQueueId_ACU = 0;
         failedGroupCount: result.failedGroups, diagnosticCode: result.diagnosticCode,
       });
     }
-    if (result.failedGroups > 0) {
+    if (!result.aborted && result.failedGroups > 0) {
         const firstError = Array.isArray(result.errors) && result.errors.length > 0 ? result.errors[0] : '';
         showToastr_ACU('warning', firstError
             ? `并发分组更新有 ${result.failedGroups} 组失败：${firstError}`

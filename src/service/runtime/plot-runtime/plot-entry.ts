@@ -75,7 +75,7 @@ function isTaskAbortedError_ACU(error: unknown): boolean {
         reportWarning: options.reportWarning,
       });
 
-      if (runtimeResult?.failedResults?.length && runtimeResult.finalMessage) {
+      if (options.unmaskedCompatibility !== true && runtimeResult?.failedResults?.length && runtimeResult.finalMessage) {
         return {
           success: false, blocked: true, errorType: 'partial_failure',
           errorMessage: '剧情任务未全部通过验收，正文发送已停止。',

@@ -236,6 +236,7 @@ export function checkAutoUpdatePreConditions_ACU(
  */
 export interface AutoUpdateResult {
     success: boolean;
+    aborted?: boolean;
     failedGroups: number;
     totalGroups: number;
     errors?: string[];
@@ -277,6 +278,7 @@ export async function executeAutoUpdatePlan_ACU(
     setAutoUpdating: (v: boolean) => void,
     ops: AutoUpdateOperations,
     performanceContext?: { runId?: string; parentSpanId?: string },
+    abortController: AbortController = new AbortController(),
 ): Promise<AutoUpdateResult> {
     const { tablesToUpdate, updateGroups } = plan;
     const groupKeys = Object.keys(updateGroups);
@@ -288,6 +290,9 @@ export async function executeAutoUpdatePlan_ACU(
     });
 
     const totalGroups = groupKeys.length;
+    const cancelledResult = (): AutoUpdateResult => ({
+        success: false, aborted: true, failedGroups: failedGroupKeys.length, totalGroups, errors: failedGroupErrors,
+    });
     const maxConcurrentGroups = Math.max(1, settings.maxConcurrentGroups || 1);
     const failedGroupKeys: string[] = [];
     const failedGroupErrors: string[] = [];
@@ -324,7 +329,8 @@ export async function executeAutoUpdatePlan_ACU(
                 performanceParentSpanId: performanceSpan.id,
             }
             : {};
-        const groupedResult = await runner(groupedChunk, 'auto_independent', groupedOptions);
+        const groupedResult = await runner(groupedChunk, 'auto_independent', { ...groupedOptions, abortController });
+        if ((groupedResult as { aborted?: boolean }).aborted) abortController.abort();
         logAutoFillStage_ACU('chunk_result', {
             runId: performanceContext?.runId, groupCount: chunkKeys.length, success: groupedResult.success,
         });
@@ -344,6 +350,7 @@ export async function executeAutoUpdatePlan_ACU(
     // 调度顺序：先普通组（现有并发语义），再 staging 组（边界分段 + 原子汇合）。
     // staging 组不与普通组并发：边界汇合需要独占 run 级写集，混跑会破坏原子性。
     for (let start = 0; start < normalGroupKeys.length; start += maxConcurrentGroups) {
+        if (abortController.signal.aborted) break;
         const chunkKeys = normalGroupKeys.slice(start, start + maxConcurrentGroups);
         if (ops.processGroupedUpdates) {
             await executeGroupChunk(chunkKeys, ops.processGroupedUpdates);
@@ -353,12 +360,15 @@ export async function executeAutoUpdatePlan_ACU(
                 logDebug_ACU(`[Parallel] Processing group update for groupId=${group.groupId}, sheets: ${group.sheetNames.join(', ')}`);
 
                 const success = await ops.processUpdates(group.indices, 'auto_independent', {
+                    abortController,
+                    planManaged: true,
                     targetSheetKeys: group.sheetKeys,
                     batchSize: group.batchSize,
                     ...(performanceContext?.runId ? { performanceRunId: performanceContext.runId } : {}),
                     requestOptions: { skipProfileSwitch: true, forceDirectApi: true }
                 });
 
+                if (success && typeof success === 'object' && success.aborted) abortController.abort();
                 return { key, success, sheetNames: group.sheetNames };
             })());
 
@@ -391,6 +401,7 @@ export async function executeAutoUpdatePlan_ACU(
     // 必须把 staging 组记为稳定失败（staging_runner_unavailable），而不是退回普通执行。
     // 调用方（presentation）负责为 staging 提供 processStagingGroupedUpdates 接线。
     for (let start = 0; start < stagingGroupKeys.length; start += maxConcurrentGroups) {
+        if (abortController.signal.aborted) break;
         const chunkKeys = stagingGroupKeys.slice(start, start + maxConcurrentGroups);
         const stagingRunner = ops.processStagingGroupedUpdates || ops.processGroupedUpdates;
         if (stagingRunner) {
@@ -419,8 +430,11 @@ export async function executeAutoUpdatePlan_ACU(
     await ops.loadAllChatMessages();
     await ops.refreshData();
 
-    setAutoUpdating(false);
-    await ops.refreshData();
+    if (abortController.signal.aborted) {
+        const result = cancelledResult();
+        performanceSpan.end({ success: false, failedGroupCount: result.failedGroups });
+        return result;
+    }
 
     // 【已封存】自动合并纪要功能已遗弃：checkAutoMergeTrigger_ACU 恒返回不触发，
     // 本块永不进入合并流程，保留为存档（原因见 service/summary/merge-logic.ts 文件头）。
@@ -481,5 +495,7 @@ export async function executeAutoUpdatePlan_ACU(
           runId: performanceContext?.runId, stage: executionStage,
       });
       throw error;
+    } finally {
+      setAutoUpdating(false);
     }
 }

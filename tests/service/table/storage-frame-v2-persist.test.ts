@@ -5393,3 +5393,47 @@ describe('demoteTemplateOnlyRootToScopeOnly_ACU 契约（四行真值表）', ()
   });
 });
 
+
+describe('填表请求 V2 最终写入边界', () => {
+  beforeEach(() => {
+    mocks.saveChat.mockReset().mockResolvedValue(undefined);
+    mocks.saveChatStrict.mockReset().mockResolvedValue(undefined);
+    mocks.loadReplayState.mockReset();
+    mocks.loadReplayDetailed.mockReset();
+    mocks.settings.dataIsolationEnabled = false;
+    mocks.settings.dataIsolationCode = '';
+  });
+
+  it.each(['replace', 'swipe', 'body', 'cancel'] as const)(
+    '异步候选校验期间 %s 时不写聊天帧、不保存', async changed => {
+      const { captureAiMessageSnapshot_ACU } = await import('../../../src/data/gateways/chat-message-snapshot');
+      const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+      const message = seedFrame({ manualRefillProgress: undefined });
+      const isolatedBefore = JSON.stringify(message.TavernDB_ACU_IsolatedData);
+      const targetSnapshot = captureAiMessageSnapshot_ACU(mocks.chat, 0);
+      const controller = new AbortController();
+      const data = { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } as any;
+      let changedDuringValidation = false;
+      mocks.loadReplayDetailed.mockImplementation(async () => {
+        changedDuringValidation = true;
+        if (changed === 'replace') mocks.chat[0] = { ...message };
+        if (changed === 'swipe') message.swipe_id = 1;
+        if (changed === 'body') message.mes = '重新生成的正文';
+        if (changed === 'cancel') controller.abort();
+        return { baseKind: 'full_checkpoint', data };
+      });
+      await expect(persistTableMutationLogV2_ACU({
+        targetMessageIndex: 0, source: 'group_fill', afterData: data,
+        operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_a', sheet: sheetA, reason: 'system' }],
+        filledSheetKeys: ['sheet_a'], candidateChangedSheetKeys: ['sheet_a'],
+        transactionContext: makeTransaction(), assumeCommitLock: true,
+        targetSnapshot, signal: controller.signal,
+      })).rejects.toMatchObject({ name: changed === 'cancel' ? 'AbortError' : 'TableFillTargetStaleError' });
+      expect(changedDuringValidation).toBe(true);
+      expect(JSON.stringify(message.TavernDB_ACU_IsolatedData)).toBe(isolatedBefore);
+      expect(JSON.stringify(mocks.chat[0].TavernDB_ACU_IsolatedData)).toBe(isolatedBefore);
+      expect(mocks.saveChat).not.toHaveBeenCalled();
+      expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+    },
+  );
+});

@@ -137,9 +137,9 @@ function buildProgressMessage(event: CardUpdateProgressEvent): string {
 }
 
 /**
- * 登记一个可停止的填表进度任务。停止只作用于填表：标记用户终止、中断在途请求并复位填表状态。
+ * 登记可停止的填表任务；终止请求后由执行器收尾，不提前释放填表运行状态。
  */
-function beginTableFillTask(feature: string, detail: string): NoticeTaskHandle_ACU {
+function beginTableFillTask(feature: string, detail: string, abortController?: AbortController): NoticeTaskHandle_ACU {
     const task: NoticeTaskHandle_ACU = beginNoticeTask_ACU(feature, {
         detail,
         action: {
@@ -148,8 +148,8 @@ function beginTableFillTask(feature: string, detail: string): NoticeTaskHandle_A
             run: () => {
                 syncManualUpdateButtonAvailability_ACU();
                 _set_wasStoppedByUser_ACU(true);
+                abortController?.abort();
                 abortAllActiveRequests_ACU();
-                _set_isAutoUpdatingCard_ACU(false);
                 updateStatusText('填表任务已终止，正在停止当前任务与后续批次...', false);
                 task.update('填表任务已终止，正在停止当前任务与后续批次...', { action: null });
                 showToastr_ACU('warning', '填表任务已由用户终止，当前任务与后续批次将立即停止。');
@@ -201,9 +201,10 @@ export async function proceedWithCardUpdate_ACU(
     requestOptions: Record<string, any> | null = null,
     progressContext: BatchUpdateProgressContext | null = null,
     showFinalErrorToast = true,
+    executionOptions: { abortController?: AbortController; onProgress?: (event: CardUpdateProgressEvent) => void; planManaged?: boolean } = {},
 ): Promise<CardUpdateResult> {
     logDebug_ACU(`[更新流程] proceedWithCardUpdate: 消息数=${messagesToUse.length}, 模式=${updateMode}, 静默=${isSilentMode}, 目标表=${targetSheetKeys?.join(',') || '全部'}`);
-    const localAbortController = new AbortController();
+    const localAbortController = executionOptions.abortController ?? new AbortController();
     let progressTask: NoticeTaskHandle_ACU | null = null;
 
     try {
@@ -219,15 +220,16 @@ export async function proceedWithCardUpdate_ACU(
             localAbortController,
             progressContext,
             (event) => {
+                executionOptions.onProgress?.(event);
                 // 仅准备输入或合法无工作返回不创建提示框。
-                if (!isSilentMode && !progressTask && event.phase === 'calling_ai') {
+                if (!executionOptions.planManaged && !isSilentMode && !progressTask && event.phase === 'calling_ai') {
                     notifyTableFillStart();
                     const initialMessage = progressContext
                         ? `${buildBatchProgressLabel(progressContext)}：${batchToastMessage || '正在填表，请稍候...'}`
                         : (batchToastMessage || '正在填表，请稍候...');
-                    progressTask = beginTableFillTask(isImportMode ? '外部导入' : '填表', initialMessage);
+                    progressTask = beginTableFillTask(isImportMode ? '外部导入' : '填表', initialMessage, localAbortController);
                 }
-                handleProgressEvent(event, isSilentMode, progressTask);
+                if (!executionOptions.planManaged) handleProgressEvent(event, isSilentMode, progressTask);
             }
         );
 
@@ -256,7 +258,7 @@ export async function processUpdates_ACU(indicesToUpdate: number[], mode = 'auto
         indicesToUpdate,
         mode,
         options,
-        // executeUpdate 回调：创建 AbortController 并调用 presentation 层的 proceedWithCardUpdate
+        // 透传批处理控制器；请求返回后仍能取消当前任务及后续批次。
         async (
             messagesToUse: any[],
             saveTargetIndex: number,
@@ -264,14 +266,17 @@ export async function processUpdates_ACU(indicesToUpdate: number[], mode = 'auto
             isSilentMode: boolean,
             targetSheetKeys: string[] | null,
             requestOptions: Record<string, any> | null,
-            progressContext: BatchUpdateProgressContext
+            progressContext: BatchUpdateProgressContext,
+            abortController?: AbortController,
         ): Promise<CardUpdateResult> => {
-            return proceedWithCardUpdate_ACU(messagesToUse, '', saveTargetIndex, false, updateMode, isSilentMode, targetSheetKeys, requestOptions, progressContext, false);
+            return proceedWithCardUpdate_ACU(messagesToUse, '', saveTargetIndex, false, updateMode, isSilentMode, targetSheetKeys, requestOptions, progressContext, false, {
+                abortController, onProgress: options.onProgress, planManaged: options.planManaged,
+            });
         }
     );
 
     // UI：根据返回值显示错误 toast
-    if (!result.success && result.error) {
+    if (!result.success && !result.aborted && result.error) {
         showToastr_ACU('error', result.error);
     }
 

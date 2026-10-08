@@ -312,6 +312,59 @@ describe('beginPlotSendDisguise_ACU', () => {
     expect(sendBox().value).toBe('下一轮草稿');
   });
 
+  it.each([true, false])('恢复写入失败时诊断沿句柄转发，保留草稿并清理外观（代管输入=%s）', holdsInput => {
+    const handle = holdsInput ? begin()! : beginPlotSendDisguise_ACU()!;
+    typeInSendBox('下一轮草稿');
+    const nativeSet = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(sendBox()), 'value')!.set!;
+    const setter = vi.spyOn(sendBox(), 'value', 'set');
+    setter.mockImplementationOnce(value => { nativeSet.call(sendBox(), value); })
+      .mockImplementation(() => {});
+    const reportFailure = vi.fn();
+    const onInput = () => { nativeSet.call(sendBox(), '下一轮草稿'); };
+    sendBox().addEventListener('input', onInput);
+    try {
+      expect(handle.deliver('最终指令', reportFailure)).toBe(false);
+      expect(reportFailure).toHaveBeenCalledExactlyOnceWith({
+        reason: 'input_changed_value', phase: 'verify', access: 'native',
+        expectedLength: 4, assignedLength: 4, actualLength: 5,
+      });
+      expect(JSON.stringify(reportFailure.mock.calls)).not.toContain('最终指令');
+      expect(JSON.stringify(reportFailure.mock.calls)).not.toContain('下一轮草稿');
+      handle.release(false);
+      expect(sendBox().value).toBe('下一轮草稿');
+      expect(virtualFloors()).toHaveLength(0);
+      expect(document.body.dataset.generating).toBeUndefined();
+      expect(stopButton().style.display).toBe('none');
+      vi.advanceTimersByTime(60_000);
+      expect(sendBox().value).toBe('下一轮草稿');
+    } finally {
+      sendBox().removeEventListener('input', onInput);
+      setter.mockRestore();
+    }
+  });
+
+  it('同步input改写后交付完整指令，宿主读走后仍放回原草稿', () => {
+    const handle = begin()!;
+    typeInSendBox('下一轮草稿');
+    const onInput = vi.fn(() => {
+      if (sendBox().value === '最终指令') sendBox().value = '最终';
+    });
+    sendBox().addEventListener('input', onInput);
+    const reportFailure = vi.fn();
+    try {
+      expect(handle.deliver('最终指令', reportFailure)).toBe(true);
+      expect(reportFailure).not.toHaveBeenCalled();
+      expect(onInput).toHaveBeenCalledOnce();
+      handle.release(true);
+      expect(hostReadsSendBox()).toBe('最终指令');
+      vi.advanceTimersByTime(0);
+      expect(sendBox().value).toBe('下一轮草稿');
+      expect(virtualFloors()).toHaveLength(0);
+    } finally {
+      sendBox().removeEventListener('input', onInput);
+    }
+  });
+
   it('不交付时宿主读到原文而不是草稿，读走后草稿放回', () => {
     const handle = begin()!;
     typeInSendBox('下一轮草稿');

@@ -12,7 +12,7 @@ import { attemptToLoadCoreApis_ACU } from '../triggers/settings-ui-sync/settings
 import { formatHostCapabilities_ACU, getLastHostCapabilities_ACU } from '../../shared/host-compat/tavern-helper-compat';
 import { ensureInitialSeedCheckpoint_ACU, handleChatCompletionReady_ACU, loadPresetAndCleanCharacterData_ACU } from '../../service/runtime/helpers-remaining';
 import { SillyTavern_API_ACU, type ACUMessage } from '../../shared/host-api';
-import { consumeGenerationContextForEnded_ACU, currentChatFileIdentifier_ACU, discardLatestGenerationContext_ACU, generationGate_ACU, getCurrentIsolationKey_ACU, markUserSendIntent_ACU, isProcessing_Plot_ACU, isQuietLikeGeneration_ACU, recordGenerationContext_ACU, recordLastUserSend_ACU, settings_ACU, shouldProcessPlotForGeneration_ACU, shouldProcessSummaryVectorIndexForGeneration_ACU, _set_allChatMessages_ACU, _set_currentChatFileIdentifier_ACU, _set_currentJsonTableData_ACU, _set_independentTableStates_ACU, _set_lastTotalAiMessages_ACU, _set_tempPlotToSave_ACU, _set_wasStoppedByUser_ACU} from '../../service/runtime/state-manager';
+import { consumeGenerationContextForEnded_ACU, currentChatFileIdentifier_ACU, discardLatestGenerationContext_ACU, generationGate_ACU, getCurrentIsolationKey_ACU, markUserSendIntent_ACU, isProcessing_Plot_ACU, isQuietLikeGeneration_ACU, isRecentUserSendIntent_ACU, loopState_ACU, recordGenerationContext_ACU, recordLastUserSend_ACU, settings_ACU, shouldProcessPlotForGeneration_ACU, shouldProcessSummaryVectorIndexForGeneration_ACU, _set_allChatMessages_ACU, _set_currentChatFileIdentifier_ACU, _set_currentJsonTableData_ACU, _set_independentTableStates_ACU, _set_lastTotalAiMessages_ACU, _set_tempPlotToSave_ACU, _set_wasStoppedByUser_ACU} from '../../service/runtime/state-manager';
 import { applyTemplateScopeForCurrentChat_ACU, loadSettings_ACU } from '../../service/settings/settings-service';
 import { resetScriptStateForNewChat_ACU } from '../../service/worldbook/injection-engine';
 import { resetPlotAgentWorldbookSessionSnapshot_ACU } from '../../service/agent/agent-worldbook-takeover';
@@ -31,10 +31,12 @@ import { markPlotIntercept_ACU, shouldSkipPlotIntercept_ACU } from '../../servic
 import { orchestrateTavernHelperHook_ACU, orchestrateAfterCommandsStrategy1_ACU, orchestrateAfterCommandsStrategy2_ACU } from '../../service/plot/plot-orchestrator';
 import { flushPlotPendingSave_ACU } from '../../service/runtime/plot-runtime/plot-history-preset';
 import { refreshMessageBlock_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
-import { beginHostGenerationUi_ACU, getSendTextareaValue_ACU, setSendTextareaValue_ACU } from '../../shared/host-input';
+import { beginHostGenerationUi_ACU, getSendTextareaValue_ACU, setSendTextareaValue_ACU, type HostInputWriteFailure_ACU } from '../../shared/host-input';
 import { handleContentOptimizationEvent_ACU } from '../triggers/settings-ui-sync/settings-ui-connect';
 import { triggerAutomaticUpdateIfNeeded_ACU } from '../triggers/settings-ui-sync/settings-ui-trigger';
 import { abortActivePlotPlanning_ACU, runOptimizationLogicWithUI_ACU } from '../components/plot-planning-ui';
+import { enterLoopRetryFlow_ACU } from '../triggers/auto-loop';
+import { DEFAULT_PLOT_SETTINGS_ACU } from '../../shared/defaults-json.js';
 import { beginPlotSendDisguise_ACU, isPendingDisguiseGenerationType_ACU, type PlotSendDisguiseHandle_ACU } from '../components/plot-pending-disguise';
 import { processSummaryVectorIndexBeforeGenerationWithUI_ACU, rebuildCurrentSummaryVectorIndexWithUI_ACU, rebuildOutdatedSummaryVectorIndexInBackground_ACU, shouldRebuildSummaryVectorIndexWithUI_ACU } from '../components/summary-vector-index-ui';
 import { preloadSummaryVectorIndexCacheForCurrentChat_ACU } from '../../service/vector/summary-vector-index-cache-service';
@@ -82,6 +84,90 @@ async function ensureInitialSeedCheckpointBeforeGeneration_ACU(reason: string, {
     return false;
   }
 }
+
+/** 关闭伪装的宿主发送契约，按 spv8.9.2 的策略顺序与消息通知执行。 */
+async function runUnmaskedPlotAfterCommands_ACU(type: any, params: any, dryRun: any): Promise<void> {
+  if (params?._qrf_processed_by_hook) return;
+  const recall = shouldProcessSummaryVectorIndexForGeneration_ACU(type, params, dryRun);
+  const plan = shouldProcessPlotForGeneration_ACU(type, params, dryRun);
+  const ensureSeed = !dryRun && type !== 'regenerate' && !params?.automatic_trigger
+    && !isQuietLikeGeneration_ACU(type, params) && (isRecentUserSendIntent_ACU() || recall || plan);
+  if (ensureSeed) {
+    await ensureInitialSeedCheckpointBeforeGeneration_ACU('generation_after_commands_before_ai', { allowPendingFirstUserMessage: true });
+  }
+  if (!recall && !plan) return;
+  if (recall) {
+    try {
+      const chat = SillyTavern_API_ACU.chat;
+      const userInput = chat?.length && chat[chat.length - 1]?.is_user
+        ? String(chat[chat.length - 1].mes || '') : String(getSendTextareaValue_ACU() || params?.prompt || '');
+      await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput, source: 'generation_after_commands' });
+    } catch {
+      showToastr_ACU('warning', '纪要召回异常，继续原始生成。', '剧情推进');
+    }
+  }
+  if (!plan || type === 'regenerate' || isProcessing_Plot_ACU) return;
+  try {
+    const chat = SillyTavern_API_ACU.chat;
+    const lastText = chat?.length && chat[chat.length - 1]?.is_user ? String(chat[chat.length - 1].mes || '') : '';
+    if (shouldSkipPlotIntercept_ACU(lastText) || shouldSkipPlotIntercept_ACU(String(getSendTextareaValue_ACU() || ''))) return;
+  } catch { /* 去重读取失败不改变宿主发送 */ }
+  const chat = SillyTavern_API_ACU.chat;
+  if (!chat?.length) return;
+  const index = chat.length - 1;
+  const message = chat[index];
+  const s1 = await orchestrateAfterCommandsStrategy1_ACU(message, index, runOptimizationLogicWithUI_ACU, true);
+  if (s1.action !== 'no_match') {
+    switch (s1.action) {
+      case 'aborted':
+        if (s1.manual) {
+          try {
+            if (typeof SillyTavern_API_ACU.stopGeneration === 'function') SillyTavern_API_ACU.stopGeneration();
+            else (window as any).SillyTavern?.stopGeneration?.();
+          } catch { /* 保留后续清理 */ }
+          try {
+            const chatNow = SillyTavern_API_ACU.chat;
+            const tail = chatNow?.length ? chatNow[chatNow.length - 1] : null;
+            if (tail?.is_user && String(tail.mes || '') === String(s1.originalMessage || '')) {
+              if (typeof SillyTavern_API_ACU.deleteLastMessage === 'function') await SillyTavern_API_ACU.deleteLastMessage();
+              else await (window as any).SillyTavern?.deleteLastMessage?.();
+            }
+          } catch { /* 删除失败仍恢复输入 */ }
+          try { setSendTextareaValue_ACU(s1.restoreText || ''); } catch { /* 宿主不可用 */ }
+        }
+        break;
+      case 'planned':
+        params.prompt = s1.finalMessage;
+        message.mes = s1.finalMessage;
+        SillyTavern_API_ACU.eventSource.emit(SillyTavern_API_ACU.eventTypes.MESSAGE_UPDATED, index);
+        if (getSendTextareaValue_ACU() === s1.originalMessage) setSendTextareaValue_ACU('');
+        break;
+      case 'loop_retry':
+        loopState_ACU.awaitingReply = false;
+        await enterLoopRetryFlow_ACU({ loopSettings: settings_ACU.plotSettings.loopSettings || DEFAULT_PLOT_SETTINGS_ACU.loopSettings, shouldDeleteAiReply: false });
+        break;
+    }
+    return;
+  }
+  if (!plan && !isRecentUserSendIntent_ACU()) return;
+  const s2 = await orchestrateAfterCommandsStrategy2_ACU(String(getSendTextareaValue_ACU() || ''), runOptimizationLogicWithUI_ACU, true);
+  switch (s2.action) {
+    case 'aborted':
+      if (s2.manual) {
+        try {
+          if (typeof SillyTavern_API_ACU.stopGeneration === 'function') SillyTavern_API_ACU.stopGeneration();
+          else (window as any).SillyTavern?.stopGeneration?.();
+        } catch { /* 宿主不可用 */ }
+      }
+      break;
+    case 'planned':
+      setSendTextareaValue_ACU(s2.finalMessage!);
+      try { params.prompt = s2.finalMessage; } catch { /* 保留原宿主请求 */ }
+      break;
+  }
+  generationGate_ACU.lastUserSendIntentAt = 0;
+}
+
 
 function isValidChatFileName_ACU(chatFileName: unknown): boolean {
   return typeof chatFileName === 'string' && chatFileName.trim() !== '' && chatFileName.trim() !== 'null';
@@ -317,7 +403,29 @@ export   function mainInitialize_ACU() {
                 }
 
                 // [重构] 调用 service 层编排函数，传入 UI 规划回调
-                const result = await orchestrateTavernHelperHook_ACU(options, runOptimizationLogicWithUI_ACU);
+                const unmaskedCompatibility = settings_ACU.plotSendDisguiseDisabled === true;
+                const result = await orchestrateTavernHelperHook_ACU(options, runOptimizationLogicWithUI_ACU, unmaskedCompatibility);
+
+                if (unmaskedCompatibility) {
+                  // spv8.9.2：规划写回后继续原 generate；失败/跳过不接管宿主请求。
+                  switch (result.action) {
+                    case 'loop_retry': {
+                      const loopSettings = settings_ACU.plotSettings.loopSettings || DEFAULT_PLOT_SETTINGS_ACU.loopSettings;
+                      loopState_ACU.awaitingReply = false;
+                      await enterLoopRetryFlow_ACU({ loopSettings, shouldDeleteAiReply: false });
+                      return;
+                    }
+                    case 'planned':
+                      if (result.writeBack) {
+                        if (result.writeBack.target === 'injects') options.injects[0].content = result.writeBack.value;
+                        else if (result.writeBack.target === 'prompt') options.prompt = result.writeBack.value;
+                        else options.user_input = result.writeBack.value;
+                      }
+                      options._qrf_processed_by_hook = true;
+                      break;
+                  }
+                  return await (window as any).original_TavernHelper_generate_ACU.apply(this, args);
+                }
 
                 switch (result.action) {
                   case 'planned': {
@@ -874,6 +982,10 @@ export   function mainInitialize_ACU() {
             catch (error) { releaseVectorSend(pending); throw error; }
           });
           source.on(eventType, async (type: any, params: any, dryRun: any) => {
+            if (settings_ACU.plotSendDisguiseDisabled === true && getVectorPipelinePlanForCurrentChat_ACU()?.kind !== 'vector') {
+              await runUnmaskedPlotAfterCommands_ACU(type, params, dryRun);
+              return;
+            }
             // 内部生成继续自己的请求；普通用户发送不能借忙碌早退绕过规划。
             if (dryRun || type === 'regenerate' || params?._qrf_processed_by_hook) return;
             if (isProcessing_Plot_ACU) {
@@ -936,9 +1048,12 @@ export   function mainInitialize_ACU() {
               redirectPlotSendEvent_ACU(params);
             };
             const warn = (text: string) => showToastr_ACU('warning', text, '剧情推进');
+            let preSendPhase = 'initial_seed';
+            let inputWriteFailure: HostInputWriteFailure_ACU | undefined;
             try {
               await ensureInitialSeedCheckpointBeforeGeneration_ACU('generation_after_commands_before_ai', { allowPendingFirstUserMessage: true });
               if (disguised) {
+                preSendPhase = 'disguise_setup';
                 disguise = beginPlotSendDisguise_ACU({
                   userInput: pendingInput ? originalText : undefined,
                   onStop: () => {
@@ -948,6 +1063,7 @@ export   function mainInitialize_ACU() {
                 });
               }
               if (recall) {
+                preSendPhase = 'summary_recall';
                 try {
                   const result = await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput: originalText, source: 'generation_after_commands' });
                   if (!result.success && !result.skipped) warn('纪要召回未完成，继续剧情任务与发送。');
@@ -960,6 +1076,7 @@ export   function mainInitialize_ACU() {
                 return;
               }
               if (needsPlan) {
+                preSendPhase = 'planning';
                 const result = userFloor
                   ? await orchestrateAfterCommandsStrategy1_ACU(userFloor.message, userFloor.index, runOptimizationLogicWithUI_ACU)
                   : await orchestrateAfterCommandsStrategy2_ACU(originalText, runOptimizationLogicWithUI_ACU);
@@ -975,16 +1092,24 @@ export   function mainInitialize_ACU() {
                   return;
                 }
                 if (result.action === 'planned' && result.finalMessage?.trim()) {
+                  preSendPhase = 'message_writeback';
                   params.prompt = result.finalMessage;
                   if (userFloor) {
                     userFloor.message.mes = result.finalMessage;
                     (userFloor.message as ACUMessage)._plot_processed = true;
-                  } else if (!(disguise ? disguise.deliver(result.finalMessage) : setSendTextareaValue_ACU(result.finalMessage))) {
-                    throw new Error('最终指令无法写入酒馆输入框');
+                  } else {
+                    preSendPhase = 'input_writeback';
+                    const reportFailure = (failure: HostInputWriteFailure_ACU) => { inputWriteFailure = failure; };
+                    const written = disguise ? disguise.deliver(result.finalMessage, reportFailure)
+                      : setSendTextareaValue_ACU(result.finalMessage, reportFailure, { restoreAfterInput: true });
+                    if (!written) {
+                      throw new Error('最终指令无法写入酒馆输入框');
+                    }
                   }
                 }
               }
               if (userFloor) {
+                preSendPhase = 'plot_save';
                 try {
                   const saved = await flushPlotPendingSave_ACU();
                   if (saved?.status === 'failed') warn('剧情反馈保存未完成，保留结果并继续发送。');
@@ -992,12 +1117,27 @@ export   function mainInitialize_ACU() {
                 } catch {
                   warn('聊天保存异常，保留楼层并继续发送。');
                 }
+                preSendPhase = 'message_refresh';
                 await refreshMessageBlock_ACU(userFloor.index);
               }
-            } catch {
+            } catch (error) {
+              // 异常消息可能夹带用户输入或第三方载荷，只记录固定阶段与白名单错误类别。
+              const errorType = error instanceof Error
+                && ['Error', 'TypeError', 'ReferenceError', 'RangeError', 'SyntaxError', 'AbortError'].includes(error.name)
+                ? error.name : 'unknown';
+              logError_ACU('[剧情推进] 发送前处理失败:', {
+                phase: preSendPhase,
+                inputPath: userFloor ? 'existing_message' : 'pending_input',
+                needsPlan,
+                disguised: !!disguise,
+                errorType,
+                ...(inputWriteFailure ? { inputWriteFailure } : {}),
+              });
               if (needsPlan) {
                 stopSend();
-                warn('剧情发送前处理异常，正文发送已停止。');
+                warn(preSendPhase === 'input_writeback'
+                  ? '剧情最终指令未能写入输入框，正文发送已停止。'
+                  : '剧情发送前处理异常，正文发送已停止。');
                 return;
               }
               warn('发送前处理异常，保留当前内容并继续发送。');

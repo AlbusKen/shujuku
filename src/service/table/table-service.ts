@@ -4,6 +4,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import { getChatArray_ACU, saveChatToHost_ACU } from '../../data/gateways/chat-gateway';
+import { assertTableFillRequestCurrent_ACU, type TableFillRequestGuard_ACU } from './table-fill-request-guard';
 import { logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 import { currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
 import { applyTemplateScopeForCurrentChat_ACU } from '../settings/settings-service';
@@ -25,7 +26,7 @@ import type { ManualRefillProgressV2_ACU, TableCheckpointV2_ACU, TableMutationOp
 import type { TableWriteTransactionContext_ACU } from './table-write-transaction';
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
 
-export interface TableChatPersistOptions_ACU {
+export interface TableChatPersistOptions_ACU extends TableFillRequestGuard_ACU {
   targetMessageIndex?: number;
   targetSheetKeys?: string[] | null;
   updateGroupKeys?: string[] | null;
@@ -162,6 +163,7 @@ async function persistTablesToChatMessageWithLockOption_ACU(
 
   const persistCore = async () => {
     const chat = getChatArray_ACU();
+    assertTableFillRequestCurrent_ACU(options, targetMessageIndex, chat);
     if (!chat || chat.length === 0) {
       logError_ACU('Save failed: Chat history is empty.');
       return { saved: false, error: 'chat history is empty' };
@@ -234,6 +236,8 @@ async function persistTablesToChatMessageWithLockOption_ACU(
     const persistV2InTransaction = async (transactionContext: TableWriteTransactionContext_ACU) => {
       const result = await persistTableMutationLogV2_ACU({
         targetMessageIndex,
+        signal: options.signal,
+        targetSnapshot: options.targetSnapshot,
         source: persistSource,
         afterData: effectiveTableData,
         operations: persistedOperations,

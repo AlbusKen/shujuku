@@ -1,5 +1,4 @@
 import { getHostWindow } from '../../shared/runtime-env';
-import { SillyTavern_API_ACU } from '../../shared/host-api';
 import type { ZeroLayerRuntime_ACU } from '../../service/zero-layer/runtime';
 import type { ZeroLayerBranchCommand_ACU } from '../../service/zero-layer/branch-command';
 import type { ZeroLayerExitSelection_ACU } from '../../service/zero-layer/exit-model';
@@ -14,7 +13,7 @@ import { installZeroLayerInputGate_ACU } from './zero-layer-input';
 import { captureZeroLayerCarrier_ACU, assertZeroLayerCarrier_ACU, readZeroLayerCarrier_ACU,
   hasZeroLayerCarrierField_ACU } from '../../service/zero-layer/carrier-context';
 import { ZeroLayerError_ACU } from '../../service/zero-layer/model';
-import { requireZeroLayerHostGeneration_ACU } from '../../service/zero-layer/host-generation';
+import { getZeroLayerHostContext_ACU, requireZeroLayerHostGeneration_ACU } from '../../service/zero-layer/host-generation';
 import { registerZeroLayerPageOperations_ACU } from '../../service/zero-layer/page-operations';
 
 let runtime_ACU: ZeroLayerRuntime_ACU | null = null;
@@ -92,10 +91,10 @@ async function syncConfirmedZeroLayerView_ACU(): Promise<void> {
 
 /** 两种入口共用；能力缺失时不改变普通发送，不创建聊天存档。 */
 export function installZeroLayerBootstrap_ACU(): void {
-  const api = SillyTavern_API_ACU;
+  const api = getZeroLayerHostContext_ACU();
   const source = api?.eventSource;
   const events = api?.eventTypes;
-  if (!source || !events?.CHAT_COMPLETION_PROMPT_READY || !events.CHAT_COMPLETION_SETTINGS_READY
+  if (!source || typeof source.emit !== 'function' || !events?.CHAT_COMPLETION_PROMPT_READY || !events.CHAT_COMPLETION_SETTINGS_READY
     || typeof getHostWindow().fetch !== 'function' || installedSource_ACU === source) return;
   releaseBootstrap_ACU?.();
   installedSource_ACU = source;
@@ -200,8 +199,8 @@ export async function setZeroLayerEnabledForPage_ACU(enabled: boolean, apiPreset
   if (typeof enabled !== 'boolean') throw new ZeroLayerError_ACU('invalid-transition', '开启意图必须为布尔值。');
   if (!enabled) inputGate_ACU?.cancel();
   else {
-    requireZeroLayerHostGeneration_ACU();
-    if (!SillyTavern_API_ACU?.eventTypes.GENERATION_AFTER_COMMANDS) {
+    const api = requireZeroLayerHostGeneration_ACU();
+    if (!api.eventTypes.GENERATION_AFTER_COMMANDS) {
       throw new ZeroLayerError_ACU('invalid-transition', '宿主缺少入楼前输入分流事件，不能启用零层。');
     }
   }

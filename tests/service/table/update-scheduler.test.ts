@@ -581,7 +581,7 @@ describe('executeAutoUpdatePlan_ACU', () => {
     expect(mockGrouped).toHaveBeenCalledWith([
       expect.objectContaining({ key: 'group_a', groupId: 0, indices: [1], batchSize: 2, sheetKeys: ['sheet_0'], requestOptions: { skipProfileSwitch: true, forceDirectApi: true } }),
       expect.objectContaining({ key: 'group_b', groupId: 1, indices: [2], batchSize: 2, sheetKeys: ['sheet_1'], requestOptions: { skipProfileSwitch: true, forceDirectApi: true } }),
-    ], 'auto_independent', {});
+    ], 'auto_independent', expect.objectContaining({ abortController: expect.any(AbortController) }));
     expect(mockProcess).not.toHaveBeenCalled();
   });
 
@@ -766,5 +766,56 @@ describe('executeAutoUpdatePlan_ACU', () => {
     expect(getRecentRuntimePerformanceSpans_ACU()).toContainEqual(expect.objectContaining({
       name: 'auto-update-execute', runId: 'run-failure', parentSpanId: 'parent-failure', metrics: expect.objectContaining({ success: false }),
     }));
+  });
+});
+
+
+describe('自动填表计划级取消', () => {
+  function plan(): any {
+    return { tablesToUpdate: [], updateGroups: Object.fromEntries([0, 1, 2].map(i => [String(i), {
+      indices: [i], batchSize: 1, groupId: i, sheetKeys: [`sheet_${i}`], sheetNames: [`表${i}`],
+    }])) };
+  }
+  function ops(processUpdates: any) {
+    return { processUpdates, loadAllChatMessages: vi.fn(async () => {}), refreshData: vi.fn(async () => {}), purgeOldLayerData: vi.fn(async () => {}) };
+  }
+  it('串行组返回 aborted 后不启动后续组，并跳过清理', async () => {
+    const controller = new AbortController();
+    const process = vi.fn(async (_indices, _mode, options) => {
+      expect(options.abortController).toBe(controller);
+      expect(options.planManaged).toBe(true);
+      return { success: false, aborted: true };
+    });
+    const operations = ops(process);
+    const updating = vi.fn();
+    const result = await executeAutoUpdatePlan_ACU(plan(), { maxConcurrentGroups: 1 }, updating, operations, undefined, controller);
+    expect(result).toMatchObject({ success: false, aborted: true, totalGroups: 3 });
+    expect(process).toHaveBeenCalledOnce();
+    expect(controller.signal.aborted).toBe(true);
+    expect(operations.purgeOldLayerData).not.toHaveBeenCalled();
+    expect(updating.mock.calls).toEqual([[true], [false]]);
+  });
+  it('并发准备中的组共享取消信号，等待全部收尾后才释放状态', async () => {
+    const controller = new AbortController();
+    let release!: () => void;
+    const preparing = new Promise<void>(resolve => { release = resolve; });
+    const requests: number[] = [];
+    const updating = vi.fn();
+    const process = vi.fn(async (indices, _mode, options) => {
+      expect(options.abortController).toBe(controller);
+      if (indices[0] === 0) { controller.abort(); return { success: false, aborted: true }; }
+      await preparing;
+      if (options.abortController.signal.aborted) return { success: false, aborted: true };
+      requests.push(indices[0]);
+      return { success: true };
+    });
+    const task = executeAutoUpdatePlan_ACU(plan(), { maxConcurrentGroups: 2 }, updating, ops(process), undefined, controller);
+    await Promise.resolve();
+    expect(updating.mock.calls).toEqual([[true]]);
+    release();
+    expect(await task).toMatchObject({ success: false, aborted: true });
+    expect(process).toHaveBeenCalledTimes(2);
+    expect(requests).toEqual([]);
+    expect(updating.mock.calls).toEqual([[true], [false]]);
   });
 });
