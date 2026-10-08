@@ -76,7 +76,7 @@ beforeEach(() => {
   harness.read.mockReturnValue(envelope);
   harness.initialize.mockResolvedValue(null);
   harness.bridgeSend.mockResolvedValue(true);
-  harness.continueTask.mockResolvedValue(result);
+  harness.continueTask.mockReset().mockResolvedValue(result);
   harness.createTask.mockResolvedValue(result);
   harness.stopTask.mockResolvedValue(result);
   harness.replanRemaining.mockResolvedValue(result);
@@ -98,15 +98,44 @@ beforeEach(() => {
 
 describe('useContinuationRuntime', () => {
   it('仅将 orchestrator 返回的 preparedTurn 交给 runtime bridge', async () => {
-    harness.continueTask.mockResolvedValue({ ...result, preparedTurn });
+    const { effectScope } = await import('vue');
     const { useContinuationRuntime } = await import('../../../src/presentation-v2/composables/useContinuationRuntime');
-    const continuation = useContinuationRuntime();
-
-    await continuation.continueTask();
-
-    expect(harness.continueTask).toHaveBeenCalledOnce();
-    expect(harness.bridgeSend).toHaveBeenCalledOnce();
-    expect(harness.bridgeSend).toHaveBeenCalledWith(preparedTurn);
+    const sessionLog = await import('../../../src/service/continuation/agent/agent-session-log');
+    const { useChatChangedTick } = await import('../../../src/presentation-v2/composables/useChatChangedListener');
+    for (const lifecycle of ['mounted', 'unmounted', 'chat_changed']) {
+      sessionLog.resetAgentSessionLogForTests_ACU();
+      harness.continueTask.mockClear();
+      harness.bridgeSend.mockClear();
+      let release!: (value: unknown) => void;
+      const instruction = { ...preparedTurn };
+      harness.continueTask.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+      const scope = effectScope();
+      const continuation = scope.run(() => useContinuationRuntime())!;
+      const pending = continuation.continueTask();
+      await vi.waitFor(() => expect(release).toBeDefined());
+      if (lifecycle !== 'mounted') scope.stop();
+      if (lifecycle === 'chat_changed') useChatChangedTick().value += 1;
+      const reads = harness.read.mock.calls.length;
+      release({ ...result, preparedTurn: instruction });
+      await expect(pending).resolves.toBe(lifecycle !== 'chat_changed');
+      expect(harness.continueTask).toHaveBeenCalledOnce();
+      const debug = sessionLog.readAgentSessionLog_ACU().find(entry => entry.title.includes('[续写 DEBUG #'));
+      if (lifecycle === 'chat_changed') {
+        expect(harness.bridgeSend).not.toHaveBeenCalled();
+        expect(debug?.detail).toContain('page_discarded');
+        expect(debug?.detail).toContain('page_scope_changed');
+        expect(debug?.detail).not.toContain('page_handoff');
+      } else {
+        expect(harness.bridgeSend).toHaveBeenCalledExactlyOnceWith(instruction);
+        expect(debug?.detail).toContain('page_handoff');
+        expect(debug?.detail).not.toContain('page_discarded');
+      }
+      if (lifecycle !== 'mounted') expect(harness.read).toHaveBeenCalledTimes(reads);
+      scope.stop();
+      const { getContinuationGenerationDebug_ACU } = await import('../../../src/service/continuation/generation-debug');
+      getContinuationGenerationDebug_ACU(instruction).cancel();
+    }
+    sessionLog.resetAgentSessionLogForTests_ACU();
   });
 
   it('没有 preparedTurn 时不触发宿主发送', async () => {
@@ -236,22 +265,30 @@ describe('useContinuationRuntime', () => {
   });
 
   it('停止不经 busy 闸：循环在跑（busy 为 true）时 stopTask 仍直达编排器、打断宿主生成并刷新状态', async () => {
+    const { effectScope } = await import('vue');
     const { useContinuationRuntime } = await import('../../../src/presentation-v2/composables/useContinuationRuntime');
-    const continuation = useContinuationRuntime();
+    const oldScope = effectScope();
+    const continuation = oldScope.run(() => useContinuationRuntime())!;
     let release!: (value: unknown) => void;
     harness.continueTask.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
 
     const inflight = continuation.continueTask();
     expect(continuation.busy.value).toBe(true);
+    await vi.waitFor(() => expect(harness.continueTask).toHaveBeenCalledOnce());
+    oldScope.stop();
+    const newScope = effectScope();
+    const reopened = newScope.run(() => useContinuationRuntime())!;
 
-    await continuation.stopTask();
+    await reopened.stopTask();
     expect(harness.stopTask).toHaveBeenCalledOnce();
     expect(harness.stopHostGeneration).toHaveBeenCalledOnce();
     expect(harness.read).toHaveBeenCalled();
 
-    release(result);
-    await inflight;
+    release({ ...result, preparedTurn: { ...preparedTurn } });
+    await expect(inflight).resolves.toBe(false);
+    expect(harness.bridgeSend).not.toHaveBeenCalled();
     expect(continuation.busy.value).toBe(false);
+    newScope.stop();
   });
 
   it('宿主直接重发通道：留会话痕迹并弹提示说明消息将在下一轮被读取', async () => {
@@ -301,27 +338,44 @@ describe('useContinuationRuntime', () => {
   });
 
   it('由消息启动的新动作替换旧动作后，旧动作完成不会提前清除 busy', async () => {
-    let releaseFirst!: () => void;
-    let releaseSecond!: () => void;
-    harness.continueTask
-      .mockImplementationOnce(() => new Promise(resolve => { releaseFirst = () => resolve(result); }))
-      .mockImplementationOnce(() => new Promise(resolve => { releaseSecond = () => resolve(result); }));
-    harness.sendAgentMessage.mockResolvedValue({ ...result, disposition: 'continue_now', shouldContinue: true });
+    const { effectScope } = await import('vue');
     const { useContinuationRuntime } = await import('../../../src/presentation-v2/composables/useContinuationRuntime');
-    const continuation = useContinuationRuntime();
+    const { getContinuationGenerationDebug_ACU } = await import('../../../src/service/continuation/generation-debug');
+    for (const remount of [false, true]) {
+      harness.continueTask.mockClear();
+      harness.bridgeSend.mockClear();
+      const oldInstruction = { ...preparedTurn };
+      const newInstruction = { ...preparedTurn };
+      let releaseFirst!: () => void;
+      let releaseSecond!: () => void;
+      harness.continueTask
+        .mockImplementationOnce(() => new Promise(resolve => { releaseFirst = () => resolve({ ...result, preparedTurn: oldInstruction }); }))
+        .mockImplementationOnce(() => new Promise(resolve => { releaseSecond = () => resolve({ ...result, preparedTurn: newInstruction }); }));
+      harness.sendAgentMessage.mockResolvedValue({ ...result, disposition: 'continue_now', shouldContinue: true });
+      const oldScope = effectScope();
+      const continuation = oldScope.run(() => useContinuationRuntime())!;
+      const first = continuation.continueTask();
+      await vi.waitFor(() => { expect(harness.continueTask).toHaveBeenCalledTimes(1); });
+      const newScope = effectScope();
+      if (remount) oldScope.stop();
+      const replacement = remount ? newScope.run(() => useContinuationRuntime())! : continuation;
+      const message = replacement.sendAgentMessage('用新消息替换旧动作');
+      await vi.waitFor(() => { expect(harness.continueTask).toHaveBeenCalledTimes(2); });
 
-    const first = continuation.continueTask();
-    await vi.waitFor(() => { expect(harness.continueTask).toHaveBeenCalledTimes(1); });
-    const message = continuation.sendAgentMessage('用新消息替换旧动作');
-    await vi.waitFor(() => { expect(harness.continueTask).toHaveBeenCalledTimes(2); });
+      releaseFirst();
+      await expect(first).resolves.toBe(false);
+      expect(harness.bridgeSend).not.toHaveBeenCalled();
+      expect(replacement.busy.value).toBe(true);
 
-    releaseFirst();
-    await first;
-    expect(continuation.busy.value).toBe(true);
-
-    releaseSecond();
-    await expect(message).resolves.toBe(true);
-    expect(continuation.busy.value).toBe(false);
+      releaseSecond();
+      await expect(message).resolves.toBe(true);
+      expect(harness.bridgeSend).toHaveBeenCalledExactlyOnceWith(newInstruction);
+      expect(replacement.busy.value).toBe(false);
+      oldScope.stop();
+      newScope.stop();
+      getContinuationGenerationDebug_ACU(oldInstruction).cancel();
+      getContinuationGenerationDebug_ACU(newInstruction).cancel();
+    }
   });
 
   it('会话发送：空白不派发，continue_now 时紧接着跑一轮', async () => {
