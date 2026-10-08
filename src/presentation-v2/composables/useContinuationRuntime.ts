@@ -13,6 +13,7 @@ import { buildDefaultContinuationAgentPrompts_ACU } from '../../service/continua
 import { adaptContinuationAgentPromptsToToolMode_ACU, adaptContinuationPromptSegmentsToToolMode_ACU } from '../../service/continuation/agent/agent-prompt-mode';
 import { useAgentToolMode } from './useAgentToolMode';
 import { useToastStore } from '../stores/toast-store';
+import { getContinuationGenerationDebug_ACU, continuationDebugErrorType_ACU, type ContinuationGenerationDebug_ACU } from '../../service/continuation/generation-debug';
 
 /** 连续高压轮上限的可配置上界。页面是 .vue，不能直接 import 服务层常量，由本组合式函数中转。 */
 export const CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_UI_ACU = CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_MAX_ACU;
@@ -173,13 +174,23 @@ export function useContinuationRuntime() {
     const actionStopEpoch = stopEpoch;
     if (busy.value && !replaceActive) return Promise.resolve(false);
     busy.value = true;
+    let debug: ContinuationGenerationDebug_ACU | undefined;
     const completion = Promise.resolve()
       .then(() => {
         if (!isCurrent(current, epoch)) throw new Error('续写操作所属页面已切换');
         return action(current);
       })
       .then(async result => {
-      if (!isCurrent(current, epoch) || activeAction !== completion || stopEpoch !== actionStopEpoch) return false;
+      if ('preparedTurn' in result && result.preparedTurn) {
+        debug = getContinuationGenerationDebug_ACU(result.preparedTurn);
+        debug.step('page_ready', { mode: current.mode, chars: result.preparedTurn.instruction.instruction.length });
+      }
+      const currentPage = isCurrent(current, epoch);
+      if (!currentPage || activeAction !== completion || stopEpoch !== actionStopEpoch) {
+        debug?.finish('page_discarded', { reason: disposed ? 'page_unmounted' : !currentPage ? 'page_scope_changed'
+          : stopEpoch !== actionStopEpoch ? 'user_stopped' : 'action_replaced' }, false);
+        return false;
+      }
       if ('retryHostGeneration' in result && result.retryHostGeneration) {
         // 上一轮正文中断/失败后的恢复走酒馆自己的重发，不经过 Agent。此分支只由用户
         // 动作到达（自动重试链走桥内部，不经 run_ACU），必须留痕并解释消息去向——
@@ -189,7 +200,11 @@ export function useContinuationRuntime() {
         const sent = await current.retryHostGeneration();
         if (!sent) toast.error('宿主重新生成不可用，智能续写已暂停。', { muteable: false });
       } else if ('preparedTurn' in result && result.preparedTurn) {
+        debug?.step('page_handoff', { mode: current.mode });
+        debug?.watch(() => isCurrent(current, epoch) && stopEpoch === actionStopEpoch);
         const sent = await current.send(result.preparedTurn);
+        debug?.step('send_returned', { sent });
+        if (!sent) debug?.finish('failed', { sent: false, reason: 'input_unavailable' }, false);
         if (!sent) toast.error('宿主输入不可用，智能续写已暂停。', { muteable: false });
       }
       if (!isCurrent(current, epoch) || activeAction !== completion) return false;
@@ -198,6 +213,7 @@ export function useContinuationRuntime() {
       return true;
       })
       .catch(error => {
+      debug?.finish('failed', { reason: 'exception', errorType: continuationDebugErrorType_ACU(error) }, false);
       if (!isCurrent(current, epoch) || activeAction !== completion) return false;
       onError?.(error);
       if (suppressErrorToast) {

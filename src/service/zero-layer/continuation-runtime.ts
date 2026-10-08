@@ -14,6 +14,7 @@ import { createZeroLayerContinuationAgentStorage_ACU, clearZeroLayerContinuation
 import { getZeroLayerRuntime_ACU } from './runtime';
 import { ZeroLayerError_ACU } from './model';
 import { logAgentSession_ACU } from '../continuation/agent/agent-session-log';
+import { getContinuationGenerationDebug_ACU, continuationDebugErrorType_ACU, type ContinuationGenerationDebug_ACU } from '../continuation/generation-debug';
 
 type Storage_ACU = NonNullable<ContinuationAgentTurnPlanRequest_ACU['storage']>;
 interface Dependencies_ACU {
@@ -31,6 +32,7 @@ export function createZeroLayerContinuationRuntime_ACU(dependencies: Dependencie
   const listeners = new Set<() => void>();
   let disposed = false;
   let sending = false;
+  let activeDebug: ContinuationGenerationDebug_ACU | undefined;
   let autoContinueTimer: ReturnType<typeof setTimeout> | null = null;
   let autoContinueEpoch = 0;
   const cancelAutoContinue = () => {
@@ -141,33 +143,50 @@ export function createZeroLayerContinuationRuntime_ACU(dependencies: Dependencie
     }, state.delaySeconds * 1_000);
   };
   const send = async (prepared: ContinuationPreparedTurnInstruction_ACU): Promise<boolean> => {
-    assertCurrent();
-    if (sending) throw new ZeroLayerError_ACU('pending-turn', '零层续写已有在途正文。');
+    const debug = getContinuationGenerationDebug_ACU(prepared);
+    debug.step('logical_entered', { mode: 'logical', chars: prepared.instruction.instruction.length });
+    try {
+      assertCurrent();
+      if (sending) throw new ZeroLayerError_ACU('pending-turn', '零层续写已有在途正文。');
+    } catch (error) {
+      debug.finish('failed', { reason: 'pending_snapshot', errorType: continuationDebugErrorType_ACU(error) }, false);
+      throw error;
+    }
     const frozen = structuredClone(prepared);
     if (frozen.identity.chatIdentity !== store.getChatIdentity()) {
+      debug.finish('failed', { reason: 'chat_mismatch' }, false);
       throw new ZeroLayerError_ACU('scope-changed', '规划结果不属于当前零层续写。');
     }
     cancelAutoContinue();
     sending = true;
     let published = false;
     let logicalRef: ContinuationLogicalRef_ACU | undefined;
+    activeDebug = debug;
+    debug.setScope(() => !disposed && activeDebug === debug && store.getChatIdentity() === frozen.identity.chatIdentity);
+    debug.watch(() => sending && !disposed);
     try {
+      debug.step('logical_loading');
       await loadZeroLayerRuntimeForPage_ACU();
       assertCurrent();
+      debug.step('logical_preparing');
       await zero.submit(frozen.instruction.instruction, ['table'], frozen.identity, async ref => {
         assertCurrent();
         logicalRef = ref;
         await orchestrator.recordLogicalTurn(frozen.identity, ref);
+        debug.step('logical_recorded');
         notify();
       });
       assertCurrent();
       published = true;
+      debug.finish('logical_published');
       return true;
     } catch (error) {
+      debug.finish('failed', { reason: 'exception', errorType: continuationDebugErrorType_ACU(error) }, false);
       await pauseFailure(error, frozen.identity, logicalRef);
       throw error;
     } finally {
       sending = false;
+      if (activeDebug === debug) activeDebug = undefined;
       notify();
       if (published) scheduleAutoContinue();
     }
@@ -244,7 +263,7 @@ export function createZeroLayerContinuationRuntime_ACU(dependencies: Dependencie
     retryHostGeneration: async () => {
       throw new ZeroLayerError_ACU('invalid-transition', '零层正文不使用酒馆物理重发，请通过继续恢复已保存回合。');
     },
-    stopGeneration: () => { cancelAutoContinue(); zero.cancel(); },
+    stopGeneration: () => { activeDebug?.finish('stopped', { reason: 'user_stopped' }); cancelAutoContinue(); zero.cancel(); },
     subscribeStateChanges: listener => {
       listeners.add(listener);
       return () => { listeners.delete(listener); };
@@ -263,6 +282,7 @@ export function createZeroLayerContinuationRuntime_ACU(dependencies: Dependencie
     dispose: () => {
       if (disposed) return;
       disposed = true;
+      activeDebug?.cancel();
       cancelAutoContinue();
       if (sending) zero.cancel();
       unregister();

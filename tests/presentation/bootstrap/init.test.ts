@@ -660,7 +660,9 @@ describe('mainInitialize_ACU continuation host generation isolation', () => {
   beforeEach(() => { vi.useFakeTimers(); });
 
   it('claimed host generation runs the bridge and the normal auto-update pipeline in parallel', async () => {
-    const bridge = { onGenerationStarted: vi.fn(() => true), claimsGenerationEnded: vi.fn(() => true), onGenerationEnded: vi.fn() };
+    const debug = { step: vi.fn(), finish: vi.fn() };
+    const bridge = { onGenerationStarted: vi.fn(() => true), claimsGenerationEnded: vi.fn(() => true),
+      onGenerationEnded: vi.fn(), captureGenerationDebug: vi.fn(() => debug) };
     m.continuationBridge = bridge;
     expect(reinitialize_ACU).not.toBeNull();
     reinitialize_ACU!();
@@ -668,6 +670,13 @@ describe('mainInitialize_ACU continuation host generation isolation', () => {
     expect(m.getContinuationRuntime).toHaveBeenCalled();
 
     m.generationStarted!('normal', {}, false);
+    const sequence = m.gate.generationSeq;
+    m.gate.lastGeneration = { seq: sequence + 1000, type: 'normal', dryRun: false };
+    await m.afterCommands!('normal', { _qrf_processed_by_hook: true }, false);
+    expect(bridge.captureGenerationDebug).toHaveBeenCalledExactlyOnceWith(sequence);
+    expect(debug.step).toHaveBeenCalledWith('after_commands', {
+      seq: sequence, quietLike: false, dryRun: false, automatic: false,
+    });
     m.generationEnded!(42);
     await dispatchCompletionTasks_ACU();
 
@@ -683,10 +692,16 @@ describe('mainInitialize_ACU continuation host generation isolation', () => {
     expect(m.autoUpdate).toHaveBeenCalledTimes(1);
     expect(m.handleNewMessage).toHaveBeenCalledWith('GENERATION_ENDED', expect.objectContaining({ eventMessageId: 42 }));
     expect(m.flushPlot).toHaveBeenCalledOnce();
+    bridge.captureGenerationDebug.mockClear();
+    debug.step.mockClear();
+    await m.afterCommands!('normal', { _qrf_processed_by_hook: true }, false);
+    expect(bridge.captureGenerationDebug).not.toHaveBeenCalled();
+    expect(debug.step).not.toHaveBeenCalled();
   });
 
   it('leaves an unclaimed host generation on the normal auto-update path', async () => {
-    const bridge = { onGenerationStarted: vi.fn(() => false), claimsGenerationEnded: vi.fn(() => false), onGenerationEnded: vi.fn() };
+    const bridge = { onGenerationStarted: vi.fn(() => false), claimsGenerationEnded: vi.fn(() => false),
+      onGenerationEnded: vi.fn(), captureGenerationDebug: vi.fn(() => undefined) };
     m.continuationBridge = bridge;
 
     expect(reinitialize_ACU).not.toBeNull();
@@ -698,6 +713,7 @@ describe('mainInitialize_ACU continuation host generation isolation', () => {
     expect(bridge.onGenerationStarted).toHaveBeenCalledWith(m.gate.generationSeq, { allowOrdinaryLooseClaim: true, automaticTrigger: false, quietLike: false, dryRun: false });
     expect(bridge.claimsGenerationEnded).toHaveBeenCalledWith(m.gate.generationSeq, { allowOrdinaryLooseClaim: true, automaticTrigger: false, quietLike: false, dryRun: false });
     expect(bridge.onGenerationEnded).not.toHaveBeenCalled();
+    expect(bridge.captureGenerationDebug).toHaveBeenCalledExactlyOnceWith(m.gate.generationSeq);
     expect(m.autoUpdate).toHaveBeenCalledExactlyOnceWith(undefined, {
       eventType: 'GENERATION_ENDED', messageId: 42, chatKey: '', isolationKey: 'test-isolation',
       isCurrentChat: expect.any(Function),

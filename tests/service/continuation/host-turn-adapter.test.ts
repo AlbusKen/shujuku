@@ -55,10 +55,10 @@ describe('SillyTavernHostTurnAdapter_ACU', () => {
     const adapter = new SillyTavernHostTurnAdapter_ACU();
     for (const instruction of ['首轮写作指导', '下一轮写作指导']) {
       expect(adapter.send(instruction)).toBe(true);
-      expect(h.setTextarea).toHaveBeenLastCalledWith(instruction, undefined, { restoreAfterInput: true });
+      expect(h.setTextarea).toHaveBeenLastCalledWith(instruction, expect.any(Function), { restoreAfterInput: true });
     }
     expect(h.triggerGenerate).toHaveBeenCalledTimes(2);
-    expect(h.triggerGenerate.mock.calls).toEqual([['normal'], ['normal']]);
+    expect(h.triggerGenerate.mock.calls).toEqual([['normal', undefined], ['normal', undefined]]);
     expect(h.markSendIntent).toHaveBeenCalledTimes(2);
     expect(h.setTextarea).toHaveBeenCalledBefore(h.markSendIntent);
     expect(h.markSendIntent).toHaveBeenCalledBefore(h.triggerGenerate);
@@ -74,7 +74,7 @@ describe('SillyTavernHostTurnAdapter_ACU', () => {
 
     h.triggerGenerate.mockReturnValueOnce(false);
     expect(adapter.send('宿主不可用时的指导')).toBe(false);
-    expect(h.triggerGenerate).toHaveBeenCalledExactlyOnceWith('normal');
+    expect(h.triggerGenerate).toHaveBeenCalledExactlyOnceWith('normal', undefined);
     expect(h.clickSend).not.toHaveBeenCalled();
 
     h.triggerGenerate.mockClear();

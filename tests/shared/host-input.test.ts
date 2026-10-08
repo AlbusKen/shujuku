@@ -18,6 +18,7 @@ vi.mock('../../src/shared/runtime-env', () => ({
 import {
   clickSendButton_ACU,
   getSendTextareaValue_ACU,
+  triggerHostGenerate_ACU,
   setSendTextareaValue_ACU,
 } from '../../src/shared/host-input';
 import { SillyTavernHostTurnAdapter_ACU } from '../../src/service/continuation/host-turn-adapter';
@@ -318,4 +319,41 @@ describe('host input helpers', () => {
     });
     expect(clickSendButton_ACU()).toBe(false);
   });
+
+describe('宿主生成调用诊断', () => {
+  it('区分发出调用与异步失败，不输出异常正文，诊断回调异常不影响布尔契约', async () => {
+    const report = vi.fn();
+    h.generate.mockImplementationOnce(() => Promise.reject(new TypeError('敏感正文和 API 密钥')));
+    expect(triggerHostGenerate_ACU('normal', report)).toBe(true);
+    expect(report.mock.calls.map(([event]) => event.stage)).toEqual(['calling', 'dispatched']);
+    await Promise.resolve();
+    expect(report).toHaveBeenLastCalledWith({ stage: 'rejected', source: 'api', errorType: 'TypeError' });
+    expect(JSON.stringify(report.mock.calls)).not.toMatch(/敏感正文|密钥/);
+
+    h.generate.mockImplementationOnce(() => { throw new RangeError('私有载荷'); });
+    expect(triggerHostGenerate_ACU('normal', report)).toBe(false);
+    expect(report).toHaveBeenLastCalledWith({ stage: 'rejected', source: 'api', errorType: 'RangeError' });
+
+    h.generate.mockImplementationOnce(() => Promise.resolve());
+    const broken = vi.fn(() => { throw new Error('观察失败'); });
+    expect(triggerHostGenerate_ACU('normal', broken)).toBe(true);
+    await Promise.resolve();
+    expect(broken).toHaveBeenCalledTimes(3);
+  });
+
+  it('生成 Promise 正常结束也只报告 resolved，不宣称正文完成', async () => {
+    const report = vi.fn();
+    h.generate.mockImplementationOnce(() => Promise.resolve());
+    expect(triggerHostGenerate_ACU('normal', report)).toBe(true);
+    await Promise.resolve();
+    expect(report.mock.calls.map(([event]) => event.stage)).toEqual(['calling', 'dispatched', 'resolved']);
+
+    // 无诊断调用保持原契约，不读取或消费宿主返回的 thenable。
+    const then = vi.fn();
+    h.generate.mockImplementationOnce(() => ({ then }));
+    expect(triggerHostGenerate_ACU('normal')).toBe(true);
+    await Promise.resolve();
+    expect(then).not.toHaveBeenCalled();
+  });
+});
 });

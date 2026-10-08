@@ -180,15 +180,43 @@ export function clickRegenerateButton_ACU(): boolean {
 /**
  * 直接调用宿主 Generate。无新楼层的失败重试用 'normal'：针对已有用户楼生成回复，不会删上一轮 AI 楼。
  */
-export function triggerHostGenerate_ACU(type: 'regenerate' | 'normal'): boolean {
+export interface HostGenerateDiagnostic_ACU {
+    stage: 'calling' | 'dispatched' | 'resolved' | 'rejected' | 'unavailable';
+    source: 'api' | 'window' | 'none';
+    errorType?: HostInputWriteFailure_ACU['errorType'];
+}
+
+export function triggerHostGenerate_ACU(type: 'regenerate' | 'normal',
+    report?: (event: HostGenerateDiagnostic_ACU) => void): boolean {
+    let source: HostGenerateDiagnostic_ACU['source'] = 'none';
+    const notify = (stage: HostGenerateDiagnostic_ACU['stage'], error?: unknown) => {
+        // 观察者异常和第三方异常正文均不得进入生成链。
+        try {
+            const name = error instanceof Error ? error.name : '';
+            const errorType = ['Error', 'TypeError', 'ReferenceError', 'RangeError', 'SyntaxError', 'AbortError'].includes(name)
+                ? name as HostInputWriteFailure_ACU['errorType'] : 'unknown';
+            report?.({ stage, source, ...(stage === 'rejected' ? { errorType } : {}) });
+        } catch { /* 诊断不可影响宿主调用 */ }
+    };
     try {
         const fromApi = (SillyTavern_API_ACU as { generate?: unknown } | undefined)?.generate;
         const fromWindow = (globalThis as { Generate?: unknown }).Generate;
         const generate = typeof fromApi === 'function' ? fromApi : typeof fromWindow === 'function' ? fromWindow : null;
-        if (!generate) return false;
-        void generate.call(typeof fromApi === 'function' ? SillyTavern_API_ACU : globalThis, type);
+        source = typeof fromApi === 'function' ? 'api' : generate ? 'window' : 'none';
+        if (!generate) { notify('unavailable'); return false; }
+        notify('calling');
+        const result = generate.call(typeof fromApi === 'function' ? SillyTavern_API_ACU : globalThis, type);
+        notify('dispatched');
+        // Boolean 仍仅表示调用已发出；异步结果旁路报告，不代替正文完成事件。
+        if (report) {
+            void Promise.resolve(result).then(
+                () => notify('resolved'),
+                error => notify('rejected', error),
+            );
+        }
         return true;
-    } catch {
+    } catch (error) {
+        notify('rejected', error);
         return false;
     }
 }

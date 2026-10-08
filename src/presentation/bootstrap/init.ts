@@ -51,6 +51,7 @@ import { getUiSurface_ACU, showUiSurfaceToast_ACU } from '../../shared/ui-surfac
 import { bindContinuationInternalAiGenerationStarted_ACU, consumeContinuationInternalAiGenerationEnded_ACU } from '../../service/continuation/internal-ai-events';
 import { getContinuationHostGenerationBridge_ACU } from '../../service/continuation/host-generation-bridge-registry';
 import { getContinuationRuntime_ACU } from '../../service/continuation/continuation-runtime';
+import { continuationDebugErrorType_ACU, type ContinuationGenerationDebug_ACU } from '../../service/continuation/generation-debug';
 import { bindWorldSimulationInternalAiGenerationStarted_ACU, consumeWorldSimulationInternalAiGenerationEnded_ACU, hasWorldSimulationInternalAiInflight_ACU } from '../../service/simulation/simulation-internal-ai-events';
 import { createWorldSimulationCompletionIntentForCurrentChat_ACU, getWorldSimulationRuntime_ACU } from '../../service/simulation/simulation-runtime';
 import { autoEnableFlightModeForNewChatIfNeeded_ACU } from '../../service/fill-mode/fill-mode-auto-enable';
@@ -86,16 +87,17 @@ async function ensureInitialSeedCheckpointBeforeGeneration_ACU(reason: string, {
 }
 
 /** 关闭伪装的宿主发送契约，按 spv8.9.2 的策略顺序与消息通知执行。 */
-async function runUnmaskedPlotAfterCommands_ACU(type: any, params: any, dryRun: any): Promise<void> {
-  if (params?._qrf_processed_by_hook) return;
+async function runUnmaskedPlotAfterCommands_ACU(type: any, params: any, dryRun: any, debug?: ContinuationGenerationDebug_ACU): Promise<void> {
+  if (params?._qrf_processed_by_hook) { debug?.step('plot_skip', { reason: 'already_processed' }); return; }
   const recall = shouldProcessSummaryVectorIndexForGeneration_ACU(type, params, dryRun);
   const plan = shouldProcessPlotForGeneration_ACU(type, params, dryRun);
+  debug?.step('plot_start', { plan, recall, freshIntent: isRecentUserSendIntent_ACU() });
   const ensureSeed = !dryRun && type !== 'regenerate' && !params?.automatic_trigger
     && !isQuietLikeGeneration_ACU(type, params) && (isRecentUserSendIntent_ACU() || recall || plan);
   if (ensureSeed) {
     await ensureInitialSeedCheckpointBeforeGeneration_ACU('generation_after_commands_before_ai', { allowPendingFirstUserMessage: true });
   }
-  if (!recall && !plan) return;
+  if (!recall && !plan) { debug?.step('plot_skip', { reason: 'disabled_or_ineligible' }); return; }
   if (recall) {
     try {
       const chat = SillyTavern_API_ACU.chat;
@@ -106,17 +108,18 @@ async function runUnmaskedPlotAfterCommands_ACU(type: any, params: any, dryRun: 
       showToastr_ACU('warning', '纪要召回异常，继续原始生成。', '剧情推进');
     }
   }
-  if (!plan || type === 'regenerate' || isProcessing_Plot_ACU) return;
+  if (!plan || type === 'regenerate' || isProcessing_Plot_ACU) { debug?.step('plot_skip', { reason: isProcessing_Plot_ACU ? 'busy' : 'disabled_or_ineligible' }); return; }
   try {
     const chat = SillyTavern_API_ACU.chat;
     const lastText = chat?.length && chat[chat.length - 1]?.is_user ? String(chat[chat.length - 1].mes || '') : '';
-    if (shouldSkipPlotIntercept_ACU(lastText) || shouldSkipPlotIntercept_ACU(String(getSendTextareaValue_ACU() || ''))) return;
+    if (shouldSkipPlotIntercept_ACU(lastText) || shouldSkipPlotIntercept_ACU(String(getSendTextareaValue_ACU() || ''))) { debug?.step('plot_skip', { reason: 'already_processed' }); return; }
   } catch { /* 去重读取失败不改变宿主发送 */ }
   const chat = SillyTavern_API_ACU.chat;
-  if (!chat?.length) return;
+  if (!chat?.length) { debug?.step('plot_skip', { reason: 'no_input' }); return; }
   const index = chat.length - 1;
   const message = chat[index];
   const s1 = await orchestrateAfterCommandsStrategy1_ACU(message, index, runOptimizationLogicWithUI_ACU, true);
+  debug?.step('plot_result', { reason: s1.action });
   if (s1.action !== 'no_match') {
     switch (s1.action) {
       case 'aborted':
@@ -151,6 +154,7 @@ async function runUnmaskedPlotAfterCommands_ACU(type: any, params: any, dryRun: 
   }
   if (!plan && !isRecentUserSendIntent_ACU()) return;
   const s2 = await orchestrateAfterCommandsStrategy2_ACU(String(getSendTextareaValue_ACU() || ''), runOptimizationLogicWithUI_ACU, true);
+  debug?.step('plot_result', { reason: s2.action });
   switch (s2.action) {
     case 'aborted':
       if (s2.manual) {
@@ -746,6 +750,11 @@ export   function mainInitialize_ACU() {
                     if (!isCurrent()) return;
                     return continuationBridge.onGenerationEnded(message_id, generationContext?.seq, continuationEventContext);
                   });
+                } else {
+                  continuationBridge?.captureGenerationDebug?.(generationContext?.seq)?.step('generation_ignored', {
+                    seq: generationContext?.seq, claimed: false, reason: 'event_filtered',
+                    quietLike, automatic: automaticTrigger, dryRun: Boolean(generationContext?.dryRun),
+                  });
                 }
                 // [触发修复] 原子捕获完整意图快照：事件参数只作为锚点，不承诺是 AI 数组下标。
                 // makeFirst 可能早于宿主把本轮 AI 回复追加进 chat，因此必须记录捕获时边界，
@@ -982,14 +991,31 @@ export   function mainInitialize_ACU() {
             catch (error) { releaseVectorSend(pending); throw error; }
           });
           source.on(eventType, async (type: any, params: any, dryRun: any) => {
+            // 固定本次事件的观察器，规划期间的内部生成不得把后续结果串到别轮。
+            const generationContext = generationGate_ACU.activeGenerations[generationGate_ACU.activeGenerations.length - 1];
+            const debug = generationContext && generationContext.type === type
+              && Boolean(generationContext.dryRun) === Boolean(dryRun)
+              ? getContinuationHostGenerationBridge_ACU()?.captureGenerationDebug?.(generationContext.seq)
+              : undefined;
+            debug?.step('after_commands', { seq: generationContext?.seq,
+              quietLike: isQuietLikeGeneration_ACU(type, params), dryRun: Boolean(dryRun), automatic: Boolean(params?.automatic_trigger) });
             if (settings_ACU.plotSendDisguiseDisabled === true && getVectorPipelinePlanForCurrentChat_ACU()?.kind !== 'vector') {
-              await runUnmaskedPlotAfterCommands_ACU(type, params, dryRun);
+              try { await runUnmaskedPlotAfterCommands_ACU(type, params, dryRun, debug); }
+              catch (error) {
+                debug?.finish('failed', { reason: 'exception', errorType: continuationDebugErrorType_ACU(error) }, false);
+                throw error;
+              }
               return;
             }
             // 内部生成继续自己的请求；普通用户发送不能借忙碌早退绕过规划。
-            if (dryRun || type === 'regenerate' || params?._qrf_processed_by_hook) return;
+            if (dryRun || type === 'regenerate' || params?._qrf_processed_by_hook) {
+              debug?.step('plot_skip', { reason: params?._qrf_processed_by_hook ? 'already_processed' : 'event_filtered' });
+              return;
+            }
             if (isProcessing_Plot_ACU) {
+              debug?.step('plot_skip', { reason: 'busy' });
               if (shouldProcessPlotForGeneration_ACU(type, params, dryRun)) {
+                debug?.finish('plot_blocked', { reason: 'busy' }, false);
                 redirectPlotSendEvent_ACU(params);
               }
               return;
@@ -997,14 +1023,16 @@ export   function mainInitialize_ACU() {
             const recall = shouldProcessSummaryVectorIndexForGeneration_ACU(type, params, dryRun);
             const vectorOnly = getVectorPipelinePlanForCurrentChat_ACU()?.kind === 'vector';
             const plan = !vectorOnly && shouldProcessPlotForGeneration_ACU(type, params, dryRun);
-            if (!recall && !plan) return;
+            debug?.step('plot_start', { plan, recall, freshIntent: isRecentUserSendIntent_ACU() });
+            if (!recall && !plan) { debug?.step('plot_skip', { reason: 'disabled_or_ineligible' }); return; }
             const input = getSendTextareaValue_ACU();
             const pendingInput = isPendingDisguiseGenerationType_ACU(type) && !!input.trim();
             const chat = SillyTavern_API_ACU.chat;
             const existing = chat[chat.length - 1];
-            if (!pendingInput && !existing?.is_user) return;
+            if (!pendingInput && !existing?.is_user) { debug?.step('plot_skip', { reason: 'no_input' }); return; }
             const originalText = pendingInput ? input : String(existing.mes || '');
             if (vectorOnly) {
+              debug?.step('plot_skip', { reason: 'vector_only' });
               // 让原普通发送创建用户楼层，不清空输入框、不建立 AI 占位或重生成。
               // 宿主在入楼前终止时可能不再派发渲染事件；新发送释放已取消的旧租约。
               if (vectorGenerationSend?.controller.signal.aborted) {
@@ -1037,6 +1065,7 @@ export   function mainInitialize_ACU() {
             const needsPlan = plan && !shouldSkipPlotIntercept_ACU(originalText)
               && (pendingInput || !(existing as ACUMessage)._plot_processed);
             const disguised = settings_ACU.plotSendDisguiseDisabled !== true;
+            if (!needsPlan) debug?.step('plot_skip', { reason: 'already_processed' });
             const userFloor = pendingInput ? null : { chat, message: existing, index: chat.length - 1 };
             // 伪装只换等待动画，其余步骤与解除伪装相同；建不起来时没有句柄，中途失效时句柄自行撤回，都按解除伪装继续。
             let disguise: PlotSendDisguiseHandle_ACU | undefined;
@@ -1044,6 +1073,7 @@ export   function mainInitialize_ACU() {
             let stopRequested = false;
             let hostReads = true;
             const stopSend = () => {
+              debug?.finish('plot_blocked', { reason: stopRequested ? 'user_stopped' : 'failed' }, false);
               hostReads = false;
               redirectPlotSendEvent_ACU(params);
             };
@@ -1080,6 +1110,7 @@ export   function mainInitialize_ACU() {
                 const result = userFloor
                   ? await orchestrateAfterCommandsStrategy1_ACU(userFloor.message, userFloor.index, runOptimizationLogicWithUI_ACU)
                   : await orchestrateAfterCommandsStrategy2_ACU(originalText, runOptimizationLogicWithUI_ACU);
+                debug?.step('plot_result', { reason: result.action });
                 if (result.action === 'busy') {
                   stopSend();
                   return;
@@ -1121,6 +1152,7 @@ export   function mainInitialize_ACU() {
                 await refreshMessageBlock_ACU(userFloor.index);
               }
             } catch (error) {
+              debug?.step('failed', { reason: 'exception', errorType: continuationDebugErrorType_ACU(error) });
               // 异常消息可能夹带用户输入或第三方载荷，只记录固定阶段与白名单错误类别。
               const errorType = error instanceof Error
                 && ['Error', 'TypeError', 'ReferenceError', 'RangeError', 'SyntaxError', 'AbortError'].includes(error.name)

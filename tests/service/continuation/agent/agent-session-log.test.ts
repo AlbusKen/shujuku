@@ -9,6 +9,7 @@ import {
   subscribeAgentSessionLog_ACU,
   updateAgentSession_ACU,
 } from '../../../../src/service/continuation/agent/agent-session-log';
+import { ContinuationGenerationDebug_ACU, CONTINUATION_DEBUG_WAIT_MS_ACU, continuationDebugErrorType_ACU } from '../../../../src/service/continuation/generation-debug';
 
 beforeEach(() => { resetAgentSessionLogForTests_ACU(); });
 
@@ -119,4 +120,57 @@ describe('Agent 会话日志', () => {
     expect(listener).toHaveBeenCalledTimes(1);
     expect(readAgentSessionLog_ACU()).toHaveLength(2);
   });
+
+describe('续写生成旁路诊断', () => {
+  it('同轮更新一个卡片，只输出白名单字段，失败后不被迟到成功覆盖', () => {
+    beginAgentSessionRun_ACU('运行');
+    const debug = new ContinuationGenerationDebug_ACU();
+    debug.step('page_ready', { mode: 'host', chars: 8 });
+    debug.step('host_call', { reason: '敏感指导与密钥', errorType: '敏感错误', chars: Number.NaN,
+      prompt: '私有正文', token: 'secret' } as any);
+    const error = new TypeError('包含凭据的异常正文');
+    debug.finish('host_rejected', { errorType: continuationDebugErrorType_ACU(error) }, false);
+    const before = JSON.stringify(readAgentSessionLog_ACU());
+    debug.step('host_resolved');
+    expect(JSON.stringify(readAgentSessionLog_ACU())).toBe(before);
+    const entries = readAgentSessionLog_ACU().filter(entry => entry.title.includes('续写 DEBUG'));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ kind: 'handoff', status: 'failed', ok: false });
+    expect(entries[0].detail).toContain('page_ready');
+    expect(entries[0].detail).toContain('TypeError');
+    expect(before).not.toMatch(/私有正文|secret|敏感指导|敏感错误|包含凭据/);
+    expect(isAgentSessionRunning_ACU()).toBe(true);
+  });
+
+  it('等待只提示最后阶段，完成清理计时，失效作用域不接收迟到回调', () => {
+    vi.useFakeTimers();
+    const debug = new ContinuationGenerationDebug_ACU();
+    const stale = new ContinuationGenerationDebug_ACU();
+    try {
+      beginAgentSessionRun_ACU('运行');
+      debug.step('host_dispatched');
+      debug.watch(() => true);
+      debug.step('after_commands', { seq: 7 });
+      vi.advanceTimersByTime(CONTINUATION_DEBUG_WAIT_MS_ACU);
+      expect(readAgentSessionLog_ACU().at(-1)).toMatchObject({ status: 'running', ok: true });
+      expect(readAgentSessionLog_ACU().at(-1)!.title).toContain('仍在等待：到达 GENERATION_AFTER_COMMANDS');
+      expect(isAgentSessionRunning_ACU()).toBe(true);
+      debug.watch(() => true);
+      debug.finish('confirmed');
+      expect(vi.getTimerCount()).toBe(0);
+
+      let current = true;
+      stale.setScope(() => current);
+      stale.step('host_call');
+      stale.watch(() => true);
+      const before = JSON.stringify(readAgentSessionLog_ACU());
+      current = false;
+      vi.advanceTimersByTime(CONTINUATION_DEBUG_WAIT_MS_ACU);
+      stale.finish('host_rejected', { errorType: 'Error' }, false);
+      expect(JSON.stringify(readAgentSessionLog_ACU())).toBe(before);
+    } finally {
+      debug.cancel(); stale.cancel(); vi.useRealTimers();
+    }
+  });
+});
 });

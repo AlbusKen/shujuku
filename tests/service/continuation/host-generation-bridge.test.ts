@@ -291,7 +291,7 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
     expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(1);
     expect(h.wait).toHaveBeenCalledWith(5_000);
     expect(h.continueTask).toHaveBeenCalledOnce();
-    expect(h.hostInput.send).toHaveBeenLastCalledWith('自动续写的下一轮文本');
+    expect(h.hostInput.send).toHaveBeenLastCalledWith('自动续写的下一轮文本', expect.objectContaining({ step: expect.any(Function), finish: expect.any(Function) }));
   });
 
   it('abandons the auto-continue when eligibility is lost during the delay', async () => {
@@ -339,22 +339,34 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
 
   it('binds a loosely claimed generation start so the strict ended path matches later', async () => {
     const h = createHarness();
-    await h.bridge.send(prepared);
+    await h.bridge.send({ ...prepared });
+    const debug = h.bridge.captureGenerationDebug();
+    expect(debug).toBeDefined();
+    expect(h.bridge.captureGenerationDebug(7)).toBeUndefined();
 
     expect(h.bridge.onGenerationStarted(7, true)).toBe(true);
     expect(h.runtime.bindHostTurnGeneration).toHaveBeenCalledWith(7);
     expect(h.bridge.hasLiveClaim('chat-a')).toBe(true);
     expect(h.bridge.claimsGenerationEnded(7)).toBe(true);
+    expect(h.bridge.captureGenerationDebug(7)).toBe(debug);
+    expect(h.bridge.captureGenerationDebug(8)).toBeUndefined();
+    h.setChatIdentity('chat-b');
+    expect(h.bridge.captureGenerationDebug(7)).toBeUndefined();
+    h.bridge.disposeDiagnostics();
   });
 
   it('rejects a loose claim whose sequence conflicts with the bound generation', async () => {
     const h = createHarness();
     h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(7); return true; });
-    await h.bridge.send(prepared);
+    await h.bridge.send({ ...prepared });
+    const debug = h.bridge.captureGenerationDebug(7)!;
+    const step = vi.spyOn(debug, 'step');
 
     expect(h.bridge.claimsGenerationEnded(8, true)).toBe(false);
     await h.bridge.onGenerationEnded(9, 8, true);
     expect(h.runtime.confirmCurrentTurn).not.toHaveBeenCalled();
+    expect(step).not.toHaveBeenCalled();
+    h.bridge.disposeDiagnostics();
   });
 
   it('converts an awaiting turn to retry-ready when its host generation is stopped', async () => {

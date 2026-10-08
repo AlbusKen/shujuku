@@ -6,6 +6,7 @@ import { resolveHostRetryMode_ACU } from './host-retry-mode';
 import type { ContinuationPreparedTurnInstruction_ACU } from './stage-execution-engine';
 import type { ContinuationHostGenerationCapture_ACU, TurnAttemptIdentity_ACU } from './model';
 import type { ContinuationHostTurnAdapter_ACU } from './host-turn-adapter';
+import { getContinuationGenerationDebug_ACU, continuationDebugErrorType_ACU, type ContinuationGenerationDebug_ACU } from './generation-debug';
 
 export interface ContinuationHostTurnRuntime_ACU {
   getChatIdentity(): string;
@@ -81,6 +82,7 @@ export class ContinuationHostGenerationBridge_ACU {
   private readonly redirectsByChat = new Map<string, RedirectClaim_ACU>();
   private readonly stateListeners = new Set<() => void>();
   private localRetryClaim: LocalRetryClaim_ACU | null = null;
+  private readonly debugByChat = new Map<string, { attemptId: string; trace: ContinuationGenerationDebug_ACU }>();
   private static readonly LOCAL_RETRY_CLAIM_TTL_MS = 60_000;
 
   constructor(private readonly dependencies: ContinuationHostGenerationBridgeDependencies_ACU) {}
@@ -97,8 +99,28 @@ export class ContinuationHostGenerationBridge_ACU {
     }
   }
 
+  /** 只返回当前等待轮的观察器；调用者可记录阶段，不取得任务写权限。 */
+  captureGenerationDebug(sequence?: number): ContinuationGenerationDebug_ACU | undefined {
+    try {
+      const runtime = this.dependencies.runtime;
+      const chatIdentity = runtime.getChatIdentity();
+      const record = this.debugByChat.get(chatIdentity);
+      const pending = runtime.readPendingHostTurn()?.pending;
+      if (!record || pending?.identity.attemptId !== record.attemptId || pending.status !== 'awaiting_generation') return;
+      const bound = this.startedByChat.get(chatIdentity)?.sequence ?? pending.capture.generationSeq;
+      if (sequence !== undefined && sequence !== bound) return;
+      return record.trace;
+    } catch { /* 观察失败不能改变事件处理 */ }
+  }
+
+  disposeDiagnostics(): void {
+    for (const record of this.debugByChat.values()) record.trace.cancel();
+    this.debugByChat.clear();
+  }
+
   /** 打断酒馆正在进行的正文生成。用户点停止时必须先走这里，否则正文写完仍会确认并自动续写。 */
   stopHostGeneration(): void {
+    this.captureGenerationDebug()?.finish('stopped', { reason: 'user_stopped' });
     this.dependencies.hostInput.stopGeneration();
   }
 
@@ -206,7 +228,13 @@ export class ContinuationHostGenerationBridge_ACU {
 
   async send(prepared: ContinuationPreparedTurnInstruction_ACU): Promise<boolean> {
     const runtime = this.dependencies.runtime;
-    if (prepared.identity.chatIdentity !== runtime.getChatIdentity()) return false;
+    const debug = getContinuationGenerationDebug_ACU(prepared);
+    debug.step('bridge_entered', { mode: 'host', chars: prepared.instruction.instruction.length });
+    if (prepared.identity.chatIdentity !== runtime.getChatIdentity()) {
+      debug.finish('failed', { reason: 'chat_mismatch' }, false);
+      return false;
+    }
+    const chatIdentity = prepared.identity.chatIdentity;
     const chat = runtime.getChat();
     const capture: ContinuationHostGenerationCapture_ACU = {
       capturedAt: this.dependencies.now(),
@@ -214,19 +242,35 @@ export class ContinuationHostGenerationBridge_ACU {
       capturedAiFloorCount: Array.isArray(chat) ? chat.filter(message => message && !message.is_user && message?.extra?.type !== 'narrator').length : 0,
       generationSeq: null,
     };
-    await runtime.recordHostTurn({ capture });
+    debug.step('host_turn_recording');
+    debug.watch(() => runtime.getChatIdentity() === chatIdentity);
+    try { await runtime.recordHostTurn({ capture }); }
+    catch (error) {
+      debug.finish('failed', { reason: 'exception', errorType: continuationDebugErrorType_ACU(error) }, false);
+      throw error;
+    }
     const snapshot = runtime.readPendingHostTurn();
-    if (!snapshot) return false;
+    if (!snapshot) { debug.finish('failed', { reason: 'snapshot_missing' }, false); return false; }
+    this.debugByChat.get(chatIdentity)?.trace.cancel();
+    this.debugByChat.set(chatIdentity, { attemptId: snapshot.pending.identity.attemptId, trace: debug });
+    debug.setScope(() => runtime.getChatIdentity() === chatIdentity && this.debugByChat.get(chatIdentity)?.trace === debug);
+    debug.step('host_turn_recorded');
+    debug.watch(() => runtime.getChatIdentity() === chatIdentity
+      && runtime.readPendingHostTurn()?.pending.identity.attemptId === snapshot.pending.identity.attemptId);
     this.sendingAttemptId = snapshot.pending.identity.attemptId;
     this.dispatchedByChat.set(prepared.identity.chatIdentity, snapshot.pending.identity.attemptId);
     this.notifyStateChanges_ACU();
     try {
-      if (!this.dependencies.hostInput.send(prepared.instruction.instruction)) {
+      if (!this.dependencies.hostInput.send(prepared.instruction.instruction, debug)) {
+        debug.finish('failed', { reason: 'input_unavailable' }, false);
         this.dispatchedByChat.delete(prepared.identity.chatIdentity);
         await runtime.pauseForHostInputFailure();
         return false;
       }
       return true;
+    } catch (error) {
+      debug.finish('failed', { reason: 'exception', errorType: continuationDebugErrorType_ACU(error) }, false);
+      throw error;
     } finally {
       this.sendingAttemptId = null;
     }
@@ -244,29 +288,49 @@ export class ContinuationHostGenerationBridge_ACU {
     const runtime = this.dependencies.runtime;
     const chatIdentity = runtime.getChatIdentity();
     const redirect = this.redirectsByChat.get(chatIdentity);
-    if (redirect && (redirect.completionStarted || redirect.phase !== 'resuming' || !this.isCurrentRedirect_ACU(chatIdentity, redirect) || context.quietLike || context.dryRun || sequence === redirect.sourceSequence)) return false;
+    const debug = this.captureGenerationDebug();
+    const ignored = (reason: string): false => {
+      debug?.step('generation_ignored', { reason, seq: sequence, quietLike: context.quietLike,
+        dryRun: context.dryRun, automatic: context.automaticTrigger });
+      return false;
+    };
+    if (redirect && (redirect.completionStarted || redirect.phase !== 'resuming' || !this.isCurrentRedirect_ACU(chatIdentity, redirect) || context.quietLike || context.dryRun || sequence === redirect.sourceSequence)) return ignored('event_filtered');
     const sendingAttemptId = this.sendingAttemptId;
     if (sendingAttemptId) {
       const snapshot = runtime.readPendingHostTurn();
-      if (!snapshot || snapshot.pending.identity.attemptId !== sendingAttemptId || snapshot.pending.capture.generationSeq !== null) return false;
+      if (!snapshot || snapshot.pending.identity.attemptId !== sendingAttemptId || snapshot.pending.capture.generationSeq !== null) return ignored('pending_snapshot');
       this.startedByChat.set(chatIdentity, { attemptId: sendingAttemptId, sequence, bind: runtime.bindHostTurnGeneration(sequence) });
+      this.observeStartedBinding_ACU(chatIdentity, sequence);
       this.dispatchedByChat.delete(chatIdentity);
       if (this.localRetryClaim?.attemptId === sendingAttemptId) this.localRetryClaim = null;
       this.notifyStateChanges_ACU();
       return true;
     }
     const localRetryClaim = this.getMatchingLocalRetryClaim_ACU(context, sequence);
-    if (!context.allowOrdinaryLooseClaim && !localRetryClaim) return false;
-    if (this.startedByChat.has(chatIdentity)) return false;
+    if (!context.allowOrdinaryLooseClaim && !localRetryClaim) return ignored('event_filtered');
+    if (this.startedByChat.has(chatIdentity)) return ignored('sequence_conflict');
     const snapshot = runtime.readPendingHostTurn();
-    if (!snapshot || snapshot.pending.status !== 'awaiting_generation' || snapshot.pending.capture.generationSeq !== null) return false;
+    if (!snapshot || snapshot.pending.status !== 'awaiting_generation' || snapshot.pending.capture.generationSeq !== null) return ignored('pending_snapshot');
     const attemptId = snapshot.pending.identity.attemptId;
-    if (localRetryClaim && attemptId !== localRetryClaim.attemptId) return false;
+    if (localRetryClaim && attemptId !== localRetryClaim.attemptId) return ignored('pending_snapshot');
     this.startedByChat.set(chatIdentity, { attemptId, sequence, bind: runtime.bindHostTurnGeneration(sequence) });
+    this.observeStartedBinding_ACU(chatIdentity, sequence);
     this.dispatchedByChat.delete(chatIdentity);
     if (localRetryClaim) this.localRetryClaim = null;
     this.notifyStateChanges_ACU();
     return true;
+  }
+
+  private observeStartedBinding_ACU(chatIdentity: string, sequence: number): void {
+    const started = this.startedByChat.get(chatIdentity);
+    const debug = this.captureGenerationDebug(sequence);
+    debug?.step('generation_started', { seq: sequence, claimed: true });
+    debug?.watch(() => this.dependencies.runtime.getChatIdentity() === chatIdentity
+      && this.dependencies.runtime.readPendingHostTurn()?.pending.identity.attemptId === started?.attemptId);
+    // 旁路观察原 Promise；结束事件仍等待原绑定结果并执行既有失败处理。
+    void started?.bind.catch(error => debug?.finish('binding_failed', {
+      errorType: continuationDebugErrorType_ACU(error), seq: sequence,
+    }, false));
   }
 
   /**
@@ -293,7 +357,12 @@ export class ContinuationHostGenerationBridge_ACU {
   async onGenerationEnded(eventMessageId: unknown, sequence: number | undefined, contextInput: ContinuationHostGenerationEventContextInput_ACU = undefined): Promise<void> {
     const context = normalizeGenerationEventContext_ACU(contextInput);
     const endedOnlyLocalRetryClaim = this.getMatchingLocalRetryClaim_ACU(context, sequence);
-    if (!this.claimsGenerationEnded(sequence, context)) return;
+    const debug = this.captureGenerationDebug(sequence);
+    if (!this.claimsGenerationEnded(sequence, context)) {
+      debug?.step('generation_ignored', { seq: sequence, claimed: false, reason: 'event_filtered' });
+      return;
+    }
+    debug?.step('ended_signal', { seq: sequence, claimed: true });
     const chatIdentity = this.dependencies.runtime.getChatIdentity();
     const redirect = this.redirectsByChat.get(chatIdentity);
     if (redirect) redirect.completionStarted = true;
@@ -310,35 +379,47 @@ export class ContinuationHostGenerationBridge_ACU {
     try {
       if (started) await started.bind;
       const snapshot = this.dependencies.runtime.readPendingHostTurn();
-      if (!snapshot || snapshot.pending.status !== 'awaiting_generation' || snapshot.pending.identity.attemptId !== claimedAttemptId) return;
+      if (!snapshot || snapshot.pending.status !== 'awaiting_generation' || snapshot.pending.identity.attemptId !== claimedAttemptId) {
+        debug?.finish('result_rejected', { reason: 'pending_snapshot' }, false);
+        return;
+      }
       const boundSequence = snapshot.pending.capture.generationSeq;
-      if (boundSequence !== null && sequence !== undefined && boundSequence !== sequence) return;
+      if (boundSequence !== null && sequence !== undefined && boundSequence !== sequence) {
+        debug?.finish('result_rejected', { reason: 'sequence_conflict', seq: sequence }, false);
+        return;
+      }
       const resolution = await this.resolveMessageIndex_ACU(eventMessageId, snapshot.pending.capture, chatIdentity);
       if (resolution.kind === 'no_reply') {
+        debug?.finish('result_rejected', { reason: 'no_reply' }, false);
         // 生成失败/未产出正文：没有新楼层，走酒馆 Generate 对已有用户楼要回复，不重跑 Agent。
         await this.dependencies.runtime.rejectHostTurnForFailedGeneration();
         await this.autoRetryHostGenerationIfReady_ACU(snapshot.settings.retryDelaySeconds ?? 0);
         return;
       }
       if (resolution.kind === 'unsafe') {
+        debug?.finish('result_rejected', { reason: 'unsafe' }, false);
         // 归属不安全（多候选歧义/快照失效）：自动重试可能删错楼，fail closed 交人工。
         await this.dependencies.runtime.pauseForHostResultFailure();
         return;
       }
       const messageIndex = resolution.messageIndex;
+      debug?.step('body_resolved', { messageIndex });
       const chat = this.dependencies.runtime.getChat();
       if (messageIndex !== chat.length - 1) {
+        debug?.finish('result_rejected', { reason: 'not_tail', messageIndex }, false);
         await this.dependencies.runtime.pauseForHostResultFailure();
         return;
       }
       const message = chat[messageIndex];
       const body = String(message?.mes ?? '');
       if (!body.trim()) {
+        debug?.finish('result_rejected', { reason: 'empty_body', messageIndex }, false);
         await this.dependencies.runtime.rejectHostTurnForFailedGeneration();
         await this.autoRetryHostGenerationIfReady_ACU(snapshot.settings.retryDelaySeconds ?? 0);
         return;
       }
       if (!message || !validateLoopTags_ACU(body, snapshot.settings.loopTags)) {
+        debug?.finish('result_rejected', { reason: 'missing_tags', messageIndex }, false);
         await this.dependencies.runtime.rejectHostTurnForMissingTags({ messageIndex });
         await this.autoRetryHostGenerationIfReady_ACU(snapshot.settings.retryDelaySeconds ?? 0);
         return;
@@ -348,13 +429,17 @@ export class ContinuationHostGenerationBridge_ACU {
         const countTokens = this.dependencies.countTokens ?? countAgentTokens_ACU;
         const tokenCount = await countTokens(body);
         if (tokenCount < minTokens) {
+          debug?.finish('result_rejected', { reason: 'short_body', messageIndex }, false);
           await this.dependencies.runtime.rejectHostTurnForShortGeneration({ messageIndex, tokenCount, threshold: minTokens });
           await this.autoRetryHostGenerationIfReady_ACU(snapshot.settings.retryDelaySeconds ?? 0);
           return;
         }
       }
+      debug?.step('confirm_start', { messageIndex });
       await this.dependencies.runtime.confirmCurrentTurn(messageIndex);
-    } catch {
+      debug?.finish('confirmed', { messageIndex });
+    } catch (error) {
+      debug?.finish('failed', { reason: 'exception', errorType: continuationDebugErrorType_ACU(error) }, false);
       // A bridge failure must not leave an attributable turn indefinitely running.
       // The guarded fallback preserves a stale/persistence error when it can no
       // longer safely write the original task identity.
@@ -385,6 +470,7 @@ export class ContinuationHostGenerationBridge_ACU {
     if (!snapshot || snapshot.pending.status !== 'awaiting_generation') return;
     const boundSequence = snapshot.pending.capture.generationSeq ?? started?.sequence ?? null;
     if (boundSequence !== null && sequence !== undefined && boundSequence !== sequence) return;
+    this.captureGenerationDebug(sequence)?.finish('stopped', { seq: sequence });
     if (redirect) redirect.completionStarted = true;
     this.startedByChat.delete(chatIdentity);
     this.dispatchedByChat.delete(chatIdentity);

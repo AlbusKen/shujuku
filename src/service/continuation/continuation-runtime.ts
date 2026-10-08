@@ -328,6 +328,7 @@ function createRuntime_ACU(): ContinuationRuntime_ACU {
       return store.read();
     },
     dispose: () => {
+      bridge.disposeDiagnostics();
       unregister();
       if (runtime_ACU?.orchestrator === orchestrator) runtime_ACU = null;
     },
