@@ -42,7 +42,7 @@ describe('格林推演触发适配器', () => {
     expect(resolveLatestWorldSimulationAssistant_ACU([user(), narrator()])).toEqual({ kind: 'blocked', reason: 'no_assistant' });
   });
 
-  it('冻结锚点不受新增楼层影响，但正文或 active swipe 变化会 stale', () => {
+  it('冻结锚点不受新增楼层与正文后处理影响，但 swipe、消息身份和聊天切换会 stale', () => {
     const chat: any[] = [user(), assistant(9, 'frozen')];
     bindChat_ACU(chat);
     const resolved = resolveLatestWorldSimulationAssistant_ACU(chat);
@@ -57,6 +57,18 @@ describe('格林推演触发适配器', () => {
     chat.push(user('new floor'));
     expect(restoreWorldSimulationAnchor_ACU(identity, chat)).toEqual(resolved.anchor);
     chat[1].mes = 'changed';
+    expect(restoreWorldSimulationAnchor_ACU(identity, chat)).toMatchObject({
+      messageKey: resolved.anchor.messageKey, contentDigest: sha256HexSync_ACU('changed'),
+    });
+    chat[1] = { ...chat[1], mes: 'post-processed' };
+    expect(restoreWorldSimulationAnchor_ACU(identity, chat).contentDigest).toBe(sha256HexSync_ACU('post-processed'));
+    chat[1].swipe_id = 1;
+    expect(() => restoreWorldSimulationAnchor_ACU(identity, chat)).toThrow('WORLD_SIMULATION_ANCHOR_STALE');
+    chat[1].swipe_id = 0;
+    chat[1].message_id = 10;
+    expect(() => restoreWorldSimulationAnchor_ACU(identity, chat)).toThrow('WORLD_SIMULATION_ANCHOR_STALE');
+    chat[1].message_id = 9;
+    bindChat_ACU(chat, () => 'chat-b');
     expect(() => restoreWorldSimulationAnchor_ACU(identity, chat)).toThrow('WORLD_SIMULATION_ANCHOR_STALE');
   });
 

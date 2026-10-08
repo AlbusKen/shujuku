@@ -327,7 +327,7 @@ describe('T9 格林推演隔离 API replay', () => {
     expect(readWorldSimulationSessionLog_ACU('chat-replay').map(item => item.kind)).toEqual(expect.arrayContaining(['run_started', 'tool_read', 'delegation', 'run_completed']));
   });
 
-  it('Agent 手动发送在 strict commit 后保留 D0，并把会话 segment 迁移到当前 D1', async () => {
+  it('Agent 手动发送在 strict commit 后按同楼层身份保留会话 segment', async () => {
     const replay = buildReplay({ mode: 'commit_partial', entry: 'agent' });
     const oldKey = buildWorldSimulationBucketKey_ACU(replay.initialAnchor);
 
@@ -338,8 +338,8 @@ describe('T9 格林推演隔离 API replay', () => {
     const newKey = buildWorldSimulationBucketKey_ACU(currentAnchor);
     const bucket = replay.chat[0][WORLD_SIMULATION_CONVERSATION_FIELD_ACU];
     expect(currentAnchor.contentDigest).not.toBe(replay.initialAnchor.contentDigest);
-    expect(newKey).not.toBe(oldKey);
-    expect(bucket.entries[oldKey]).toBeDefined();
+    expect(newKey).toBe(oldKey);
+    expect(Object.keys(bucket.entries)).toEqual([oldKey]);
     expect(bucket.entries[newKey]).toMatchObject({ anchor: currentAnchor, value: { segments: [{ segmentId: expect.stringMatching(/^user:run-replay-/) }] } });
     expect(readWorldSimulationConversation_ACU(replay.chat)).toMatchObject({
       diagnostics: [],

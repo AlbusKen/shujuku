@@ -7,6 +7,8 @@ import {
 } from '../model';
 import {
   buildWorldSimulationBucketKey_ACU,
+  buildWorldSimulationBucketEntries_ACU,
+  resolveWorldSimulationBucketEntry_ACU,
   readWorldSimulationBucketEntry_ACU,
   resolveCurrentWorldSimulationAnchor_ACU,
   resolveWorldSimulationAnchor_ACU,
@@ -575,9 +577,9 @@ async function appendWorldSimulationConversationSegmentUnlocked_ACU(
   else if (isRecord_ACU(previous) && previous.schemaVersion === 1 && isRecord_ACU(previous.entries)) {
     currentBucket = previous as unknown as WorldSimulationBucket_ACU<WorldSimulationConversationFloorRecord_ACU>;
   } else reject_ACU(`${WORLD_SIMULATION_CONVERSATION_FIELD_ACU} 分桶结构损坏`);
-  const key = buildWorldSimulationBucketKey_ACU(currentAnchor);
-  const existing = currentBucket.entries[key]
-    ? validateWorldSimulationConversationFloorRecord_ACU(currentBucket.entries[key].value)
+  const entry = resolveWorldSimulationBucketEntry_ACU(currentBucket.entries, currentAnchor, WORLD_SIMULATION_CONVERSATION_FIELD_ACU);
+  const existing = entry
+    ? validateWorldSimulationConversationFloorRecord_ACU(entry.value)
     : { schemaVersion: WORLD_SIMULATION_CONVERSATION_SCHEMA_VERSION_ACU, segments: [], updatedAt: 0 };
   const incomingFingerprint = conversationAppendFingerprint_ACU(added);
   const sameId = existing.segments.find(segment => segment.segmentId === input.segmentId);
@@ -605,14 +607,8 @@ async function appendWorldSimulationConversationSegmentUnlocked_ACU(
   };
   const candidate: WorldSimulationBucket_ACU<WorldSimulationConversationFloorRecord_ACU> = {
     schemaVersion: 1,
-    entries: {
-      ...currentBucket.entries,
-      [key]: {
-        anchor: { ...currentAnchor },
-        value: { ...existing, segments: [...existing.segments, segment], updatedAt: at },
-        updatedAt: at,
-      },
-    },
+    entries: buildWorldSimulationBucketEntries_ACU(currentBucket.entries, currentAnchor,
+      { ...existing, segments: [...existing.segments, segment], updatedAt: at }, at),
   };
   try {
     hostMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU] = candidate;
@@ -748,9 +744,9 @@ export async function writeWorldSimulationConversationCompaction_ACU(
     else if (isRecord_ACU(previous) && previous.schemaVersion === 1 && isRecord_ACU(previous.entries)) {
       currentBucket = previous as unknown as WorldSimulationBucket_ACU<WorldSimulationConversationFloorRecord_ACU>;
     } else reject_ACU(`${WORLD_SIMULATION_CONVERSATION_FIELD_ACU} 分桶结构损坏`);
-    const key = buildWorldSimulationBucketKey_ACU(currentAnchor);
-    const existing = currentBucket.entries[key]
-      ? validateWorldSimulationConversationFloorRecord_ACU(currentBucket.entries[key].value)
+    const entry = resolveWorldSimulationBucketEntry_ACU(currentBucket.entries, currentAnchor, WORLD_SIMULATION_CONVERSATION_FIELD_ACU);
+    const existing = entry
+      ? validateWorldSimulationConversationFloorRecord_ACU(entry.value)
       : { schemaVersion: WORLD_SIMULATION_CONVERSATION_SCHEMA_VERSION_ACU, segments: [], updatedAt: 0 };
     if (!existing.segments.length) return false;
     if (readWorldSimulationDirectorCompactionSource_ACU(messages).view.compaction?.compactedThroughId >= input.compaction.compactedThroughId) return false;
@@ -767,14 +763,8 @@ export async function writeWorldSimulationConversationCompaction_ACU(
     };
     const candidate: WorldSimulationBucket_ACU<WorldSimulationConversationFloorRecord_ACU> = {
       schemaVersion: 1,
-      entries: {
-        ...currentBucket.entries,
-        [key]: {
-          anchor: { ...currentAnchor },
-          value: { ...existing, segments: [...existing.segments.slice(0, -1), updated], updatedAt: at },
-          updatedAt: at,
-        },
-      },
+      entries: buildWorldSimulationBucketEntries_ACU(currentBucket.entries, currentAnchor,
+        { ...existing, segments: [...existing.segments.slice(0, -1), updated], updatedAt: at }, at),
     };
     try {
       hostMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU] = candidate;

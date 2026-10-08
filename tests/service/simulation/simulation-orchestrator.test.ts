@@ -95,7 +95,7 @@ describe('WorldSimulationOrchestrator_ACU', () => {
     expect(f.getEnvelope().ledger).toBe(f.initialLedger);
   });
 
-  it('自动运行结算后重复完成事件不新建运行，同楼新正文和新楼允许新运行', async () => {
+  it('自动结算后同楼正文后处理不重复推演，新楼允许新运行', async () => {
     const f = fixture();
     const first = await f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' });
     expect(first).toMatchObject({ status: 'completed' });
@@ -105,11 +105,11 @@ describe('WorldSimulationOrchestrator_ACU', () => {
     expect(f.prepare).toHaveBeenCalledOnce();
     const edited = { ...anchor(), contentDigest: 'new-body' };
     expect(await f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: edited, instruction: '新正文' }))
-      .toMatchObject({ status: 'completed' });
+      .toEqual({ status: 'skipped', reason: 'duplicate' });
     const nextFloor = { ...anchor(), messageIndex: 2, messageId: 2, messageKey: 'number:2', contentDigest: 'next-body' };
     expect(await f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: nextFloor, instruction: '下一楼' }))
       .toMatchObject({ status: 'completed' });
-    expect(f.prepare).toHaveBeenCalledTimes(3);
+    expect(f.prepare).toHaveBeenCalledTimes(2);
   });
 
   it('在途运行期间同锚点触发返回 duplicate、其他触发返回 busy，释放后下一轮触发正常完成', async () => {

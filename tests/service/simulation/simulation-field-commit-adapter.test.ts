@@ -341,9 +341,18 @@ describe('world simulation field commit batching', () => {
 describe('world simulation field commit identity and no-op', () => {
   beforeEach(() => { _set_SillyTavern_API_ACU(null as any); });
 
-  it('过期锚点与聊天切换在落盘前拒绝', async () => {
+  it('正文后处理不阻断逐栏保存，swipe 与聊天切换在落盘前拒绝', async () => {
+    const edited = fixture();
+    edited.chat[2].mes = '第三方后处理正文';
+    expect(await commitWorldSimulationFieldWrites_ACU(edited.input)).toMatchObject({
+      status: 'committed', accepted: [expect.objectContaining({ id: 'dim-a', field: 'name' })],
+    });
+    expect(edited.chat[2].mes).toBe('第三方后处理正文');
+    expect(foldWorldSimulationLedger_ACU(edited.chat)?.fields.records.dimensions?.['dim-a'].fields.name.value).toBe('风暴');
+    expect(edited.saveChat).toHaveBeenCalledOnce();
     const stale = fixture();
-    stale.chat[2].mes = '更新后的正文';
+    stale.chat[2].swipe_id = 1;
+    stale.chat[2].mes = '另一 swipe 的正文';
     await expect(commitWorldSimulationFieldWrites_ACU(stale.input)).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_ANCHOR_STALE' } });
     expect(stale.saveChat).not.toHaveBeenCalled();
     const changed = fixture();

@@ -4,6 +4,7 @@ import {
   FirstFloorWorldSimulationStore_ACU,
   WORLD_SIMULATION_STATE_FIELD_ACU,
   buildEmptyWorldChronicleArchiveSnapshot_ACU,
+  buildWorldSimulationBucketKey_ACU,
   readWorldSimulationBucketEntry_ACU,
   resolveCurrentWorldSimulationAnchor_ACU,
   resolveWorldSimulationAnchor_ACU,
@@ -17,6 +18,7 @@ import {
 import { WORLD_CHRONICLE_OVERVIEW_CAP_ACU, WORLD_LEDGER_SCHEMA_VERSION_ACU, WorldSimulationValidationError_ACU } from '../../../src/service/simulation/model';
 import { WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU } from '../../../src/service/simulation/agent/agent-model';
 import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
+import { sha256HexSync_ACU } from '../../../src/shared/sha256-sync';
 import { buildV16WorldSimulationAgentPrompt_ACU, buildV21WorldSimulationAgentPrompt_ACU, buildDefaultWorldSimulationAgentPrompts_ACU, WORLD_SIMULATION_PROMPT_VERSION_ACU, WORLD_SIMULATION_PROMPT_VERSION_V21_ACU } from '../../../src/service/simulation/agent/agent-defaults';
 import { WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU } from '../../../src/service/simulation/simulation-ledger-fold';
 
@@ -350,7 +352,7 @@ describe('world simulation anchor rescan', () => {
     expect(chat[1][WORLD_SIMULATION_STATE_FIELD_ACU]).toBeUndefined();
   });
 
-  it('锚点楼层 digest 变化时重扫 fail-closed', async () => {
+  it('插件改写正文或替换同身份对象后仍读取旧摘要桶，保存时归并楼层桶', async () => {
     const chat: any[] = [
       { message_id: 1, mes: 'first-floor', swipe_id: 0 },
       { message_id: 20, mes: 'anchor-body', swipe_id: 0 },
@@ -359,12 +361,32 @@ describe('world simulation anchor rescan', () => {
     const staleAnchor = resolveWorldSimulationAnchor_ACU(1, chat);
     await writeWorldSimulationBucketEntry_ACU(WORLD_SIMULATION_STATE_FIELD_ACU, staleAnchor, { token: 'kept' }, chat);
 
-    chat[1].mes = 'anchor-body-edited';
+    const key = buildWorldSimulationBucketKey_ACU(staleAnchor);
+    const legacyKey = sha256HexSync_ACU([staleAnchor.chatIdentity, staleAnchor.messageKey, staleAnchor.swipeId, staleAnchor.contentDigest].join('\n'));
+    const entry = chat[1][WORLD_SIMULATION_STATE_FIELD_ACU].entries[key];
+    const legacy = { schemaVersion: 1, entries: { [legacyKey]: entry } };
+    chat[1][WORLD_SIMULATION_STATE_FIELD_ACU] = legacy;
+    chat[1] = { ...chat[1], mes: 'anchor-body-edited' };
 
+    const current = resolveCurrentWorldSimulationAnchor_ACU(staleAnchor, chat);
+    expect(current.contentDigest).not.toBe(staleAnchor.contentDigest);
+    expect(buildWorldSimulationBucketKey_ACU(current)).toBe(key);
+    expect(readWorldSimulationBucketEntry_ACU(WORLD_SIMULATION_STATE_FIELD_ACU, staleAnchor, raw => raw, chat))
+      .toEqual({ token: 'kept' });
+    expect(chat[1][WORLD_SIMULATION_STATE_FIELD_ACU]).toBe(legacy);
+    await writeWorldSimulationBucketEntry_ACU(WORLD_SIMULATION_STATE_FIELD_ACU, staleAnchor, { token: 'updated' }, chat);
+    expect(Object.keys(chat[1][WORLD_SIMULATION_STATE_FIELD_ACU].entries)).toEqual([key]);
+    expect(readWorldSimulationBucketEntry_ACU(WORLD_SIMULATION_STATE_FIELD_ACU, current, raw => raw, chat))
+      .toEqual({ token: 'updated' });
+
+    chat[1].swipe_id = 1;
     expect(() => resolveCurrentWorldSimulationAnchor_ACU(staleAnchor, chat)).toThrow(WorldSimulationValidationError_ACU);
-    expect(() => resolveCurrentWorldSimulationAnchor_ACU(staleAnchor, chat)).toThrow(/WORLD_SIMULATION_ANCHOR_STALE|冻结锚点已变化/);
-    expect(() => readWorldSimulationBucketEntry_ACU(WORLD_SIMULATION_STATE_FIELD_ACU, staleAnchor, raw => raw, chat))
-      .toThrow(WorldSimulationValidationError_ACU);
+    chat[1].swipe_id = 0;
+    chat[1].message_id = 21;
+    expect(() => resolveCurrentWorldSimulationAnchor_ACU(staleAnchor, chat)).toThrow(WorldSimulationValidationError_ACU);
+    chat[1].message_id = 20;
+    chat.push({ ...chat[1] });
+    expect(() => resolveCurrentWorldSimulationAnchor_ACU(staleAnchor, chat)).toThrow(/无法唯一定位/);
   });
 
   it('归档桶随 swipe 分桶，切换 swipe 后读不到旧条目', async () => {

@@ -93,7 +93,7 @@ describe('world simulation commit adapter', () => {
     }
   });
 
-  it('正文 digest 改变时保留旧会话 entry，并把当前 segment 复制到新锚点', async () => {
+  it('插件后处理与终局投影改变正文时保留同楼层会话，不产生正文版本桶', async () => {
     const { chat, anchor, identity, commitInput, saveChat } = fixture();
     await appendWorldSimulationConversationSegment_ACU({
       anchor,
@@ -106,14 +106,17 @@ describe('world simulation commit adapter', () => {
     }, chat);
     saveChat.mockClear();
     const oldKey = buildWorldSimulationBucketKey_ACU(anchor);
+    chat[1].mes = '第三方后处理正文';
+    chat[1].swipes[0] = chat[1].mes;
 
     await commitWorldSimulationProjection_ACU(commitInput);
 
     const persistedAnchor = resolveWorldSimulationAnchor_ACU(1, chat);
     const newKey = buildWorldSimulationBucketKey_ACU(persistedAnchor);
     const bucket = chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU];
-    expect(newKey).not.toBe(oldKey);
-    expect(bucket.entries[oldKey]).toBeDefined();
+    expect(newKey).toBe(oldKey);
+    expect(Object.keys(bucket.entries)).toEqual([oldKey]);
+    expect(chat[1].mes).toContain('第三方后处理正文');
     expect(bucket.entries[newKey]).toMatchObject({
       anchor: persistedAnchor,
       value: { segments: [{ segmentId: 'user:run-1' }] },
@@ -124,7 +127,7 @@ describe('world simulation commit adapter', () => {
     expect(saveChat).toHaveBeenCalledTimes(1);
   });
 
-  it('联合提交会把母版 version=1 会话升级为当前 bucket，并迁移到新 digest 锚点', async () => {
+  it('联合提交会把母版 version=1 会话升级为当前楼层 bucket', async () => {
     const { chat, anchor, commitInput, saveChat } = fixture();
     chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU] = {
       version: 1,
@@ -196,20 +199,20 @@ describe('world simulation commit adapter', () => {
     expect(chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU].entries['forged-history-key'].anchor).toEqual(historicalAnchor);
   });
 
-  it('重复提交因原锚点已 stale 而在保存前失败', async () => {
+  it('重复提交因运行租约已结束而在保存前失败', async () => {
     const { commitInput, saveChat } = fixture();
     await commitWorldSimulationProjection_ACU(commitInput);
 
     await expect(commitWorldSimulationProjection_ACU(commitInput)).rejects.toMatchObject({
-      error: { code: 'WORLD_SIMULATION_ANCHOR_STALE' },
+      error: { code: 'WORLD_SIMULATION_REVISION_CONFLICT' },
     });
     expect(saveChat).toHaveBeenCalledTimes(1);
   });
 
-  it('stale anchor 与基础账本 revision 冲突均零保存', async () => {
+  it('swipe 身份与基础账本 revision 冲突均零保存', async () => {
     const stale = fixture();
-    stale.chat[1].mes = '正文已变化';
-    stale.chat[1].swipes[0] = '正文已变化';
+    stale.chat[1].swipe_id = 1;
+    stale.chat[1].mes = '另一 swipe';
     await expect(commitWorldSimulationProjection_ACU(stale.commitInput)).rejects.toBeTruthy();
     expect(stale.saveChat).not.toHaveBeenCalled();
 
@@ -614,6 +617,9 @@ describe('world simulation durable run write proof', () => {
     const { chat, anchor, identity, read, write, saveChat, commitInput, commitCandidate } = resumeFixture();
     expect((await write("INSERT INTO dimensions (id, name, expected_revision) VALUES ('dim-reload', '山雨', 0)")).status).toBe('committed');
     const saved = structuredClone(chat);
+    chat[1] = { ...chat[1], mes: '插件在逐栏保存后改写的正文' };
+    chat[1].swipes[0] = chat[1].mes;
+    expect(foldWorldSimulationLedger_ACU(chat)?.fields.records.dimensions?.['dim-reload'].status).toBe('partial');
     expect(readWorldSimulationRunWriteProof_ACU(anchor, chat)).toMatchObject({ runId: identity.runId,
       baseLedgerRevision: 0, ledgerRevision: 0, confirmedWrites: 1, written: { dimensions: ['dim-reload'] } });
     expect(saved[anchor.messageIndex]._qrf_world_simulation_run_writes).toBeDefined();

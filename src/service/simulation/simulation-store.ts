@@ -41,7 +41,7 @@ import {
   WORLD_SIMULATION_WEB_PROVIDERS_ACU,
 } from './model';
 import { WORLD_ACTOR_EXPERIENCE_CAP_ACU, WORLD_ACTOR_LONG_TERM_STATUSES_ACU, type WorldActorAction_ACU, type WorldActorExperience_ACU, type WorldActorLongTermAction_ACU } from './model';
-import { assertWorldSimulationHostEnvelope_ACU, requireWorldSimulationHostAnchor_ACU } from './simulation-identity';
+import { assertWorldSimulationHostEnvelope_ACU, requireWorldSimulationHostAnchor_ACU, sameWorldSimulationTargetRef_ACU } from './simulation-identity';
 import { worldSimulationProjectionTemplateError_ACU } from './simulation-projection';
 
 export { WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU } from './model';
@@ -875,11 +875,56 @@ function isAssistantMessage_ACU(message: Record<string, unknown>): boolean {
 
 export function buildWorldSimulationBucketKey_ACU(anchor: WorldSimulationAnchorIdentity_ACU): string {
   requireWorldSimulationHostAnchor_ACU(anchor);
-  return sha256HexSync_ACU([anchor.chatIdentity, anchor.messageKey, anchor.swipeId, anchor.contentDigest].join('\n'));
+  return sha256HexSync_ACU([anchor.chatIdentity, anchor.messageKey, anchor.swipeId].join('\n'));
 }
 
-/** Only the raw content digest is cached; chat and swipe identity remain live. */
-const anchorContentDigests_ACU = new WeakMap<object, { content: string; digest: string }>();
+/** 只兼容已存储的正文摘要键，不再用它标识当前楼层。 */
+export function isWorldSimulationBucketKey_ACU(key: string, anchor: WorldSimulationAnchorIdentity_ACU): boolean {
+  return key === buildWorldSimulationBucketKey_ACU(anchor)
+    || key === sha256HexSync_ACU([anchor.chatIdentity, anchor.messageKey, anchor.swipeId, anchor.contentDigest].join('\n'));
+}
+
+/** 新楼层键优先；旧摘要桶按最后保存时间只读恢复，不猜测同时间的冲突值。 */
+export function resolveWorldSimulationBucketEntry_ACU<T>(
+  entries: Record<string, unknown>, anchor: WorldSimulationAnchorIdentity_ACU, field: string,
+): WorldSimulationBucket_ACU<T>['entries'][string] | undefined {
+  const key = buildWorldSimulationBucketKey_ACU(anchor);
+  const validate = (raw: unknown, entryKey: string) => {
+    if (!isRecord_ACU(raw) || !isRecord_ACU(raw.anchor) || !Object.prototype.hasOwnProperty.call(raw, 'value')
+      || !sameWorldSimulationTargetRef_ACU(raw.anchor as unknown as WorldSimulationAnchorIdentity_ACU, anchor)
+      || !isWorldSimulationBucketKey_ACU(entryKey, raw.anchor as unknown as WorldSimulationAnchorIdentity_ACU)
+      || !Number.isInteger(raw.updatedAt) || (raw.updatedAt as number) < 0) {
+      reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', 'load', `${field} 当前 swipe 条目或身份损坏`);
+    }
+    return raw as unknown as WorldSimulationBucket_ACU<T>['entries'][string];
+  };
+  if (Object.prototype.hasOwnProperty.call(entries, key)) return validate(entries[key], key);
+  let selected: WorldSimulationBucket_ACU<T>['entries'][string] | undefined;
+  for (const [entryKey, raw] of Object.entries(entries)) {
+    if (!isRecord_ACU(raw) || !isRecord_ACU(raw.anchor)
+      || !sameWorldSimulationTargetRef_ACU(raw.anchor as unknown as WorldSimulationAnchorIdentity_ACU, anchor)) continue;
+    const candidate = validate(raw, entryKey);
+    if (!selected || candidate.updatedAt > selected.updatedAt) selected = candidate;
+    else if (candidate.updatedAt === selected.updatedAt && JSON.stringify(candidate.value) !== JSON.stringify(selected.value)) {
+      reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', 'load', `${field} 同楼层旧摘要桶存在冲突，不能确定权威条目`);
+    }
+  }
+  return selected;
+}
+
+/** 仅在正常保存中归并当前楼层旧键；调用方保留原容器以便失败回滚。 */
+export function buildWorldSimulationBucketEntries_ACU<T>(
+  previous: Record<string, unknown>, anchor: WorldSimulationAnchorIdentity_ACU, value: T, updatedAt: number,
+): WorldSimulationBucket_ACU<T>['entries'] {
+  resolveWorldSimulationBucketEntry_ACU(previous, anchor, '格林推演分桶');
+  const entries = { ...previous } as WorldSimulationBucket_ACU<T>['entries'];
+  for (const [key, entry] of Object.entries(entries)) {
+    if (isRecord_ACU(entry) && isRecord_ACU(entry.anchor)
+      && sameWorldSimulationTargetRef_ACU(entry.anchor as unknown as WorldSimulationAnchorIdentity_ACU, anchor)) delete entries[key];
+  }
+  entries[buildWorldSimulationBucketKey_ACU(anchor)] = { anchor: { ...anchor }, value, updatedAt };
+  return entries;
+}
 
 export function resolveWorldSimulationAnchor_ACU(messageIndex: number, chat?: any[]): WorldSimulationAnchorIdentity_ACU {
   const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
@@ -895,10 +940,7 @@ export function resolveWorldSimulationAnchor_ACU(messageIndex: number, chat?: an
   const swipeId = typeof message.swipe_id === 'number' && Number.isInteger(message.swipe_id) && message.swipe_id >= 0
     ? String(message.swipe_id)
     : '0';
-  const content = readMessageContent_ACU(message);
-  const cached = anchorContentDigests_ACU.get(message);
-  const contentDigest = cached?.content === content ? cached.digest : sha256HexSync_ACU(content);
-  if (cached?.content !== content) anchorContentDigests_ACU.set(message, { content, digest: contentDigest });
+  const contentDigest = sha256HexSync_ACU(readMessageContent_ACU(message));
   const messageKey = `${typeof messageId}:${String(messageId)}`;
   return { chatIdentity, messageIndex, messageId, messageKey, swipeId, contentDigest };
 }
@@ -906,10 +948,7 @@ export function resolveWorldSimulationAnchor_ACU(messageIndex: number, chat?: an
 export function assertWorldSimulationAnchorCurrent_ACU(anchor: WorldSimulationAnchorIdentity_ACU, chat?: any[]): WorldSimulationAnchorIdentity_ACU {
   requireWorldSimulationHostAnchor_ACU(anchor);
   const current = resolveWorldSimulationAnchor_ACU(anchor.messageIndex, chat);
-  if (current.chatIdentity !== anchor.chatIdentity
-    || current.messageKey !== anchor.messageKey
-    || current.swipeId !== anchor.swipeId
-    || current.contentDigest !== anchor.contentDigest) {
+  if (!sameWorldSimulationTargetRef_ACU(current, anchor)) {
     reject_ACU('WORLD_SIMULATION_ANCHOR_STALE', 'anchor', '格林推演冻结锚点已变化，拒绝继续写入', {
       expected: anchor,
       actual: current,
@@ -918,25 +957,28 @@ export function assertWorldSimulationAnchorCurrent_ACU(anchor: WorldSimulationAn
   return current;
 }
 
-/** 按身份四元组重扫当前下标；正文 digest / swipe 变化时仍 fail-closed。 */
+/** 楼层位置是定位提示；消息键和 swipe 才是身份，正文后处理不使锚点失效。 */
 export function resolveCurrentWorldSimulationAnchor_ACU(anchor: WorldSimulationAnchorIdentity_ACU, chat?: any[]): WorldSimulationAnchorIdentity_ACU {
   requireWorldSimulationHostAnchor_ACU(anchor);
   const messages = Array.isArray(chat) ? chat : getChatArray_ACU();
   const chatIdentity = getActiveChatStorageIdentity_ACU(messages);
+  let matchedIndex: number | undefined;
   if (!chatIdentity) {
     reject_ACU('WORLD_SIMULATION_ANCHOR_INVALID', 'anchor', '格林推演锚点必须是当前聊天中的 assistant 楼层', { messageIndex: anchor.messageIndex });
   }
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index];
     if (!isRecord_ACU(message) || !isAssistantMessage_ACU(message)) continue;
-    const current = resolveWorldSimulationAnchor_ACU(index, messages);
-    if (current.chatIdentity === anchor.chatIdentity
-      && current.messageKey === anchor.messageKey
-      && current.swipeId === anchor.swipeId
-      && current.contentDigest === anchor.contentDigest) {
-      return current;
+    const messageId = typeof message.message_id === 'string' || typeof message.message_id === 'number' ? message.message_id : index;
+    const swipeId = typeof message.swipe_id === 'number' && Number.isInteger(message.swipe_id) && message.swipe_id >= 0 ? String(message.swipe_id) : '0';
+    if (chatIdentity === anchor.chatIdentity && `${typeof messageId}:${String(messageId)}` === anchor.messageKey && swipeId === anchor.swipeId) {
+      if (matchedIndex !== undefined) {
+        reject_ACU('WORLD_SIMULATION_ANCHOR_STALE', 'anchor', '格林推演冻结锚点无法唯一定位，拒绝继续写入', { expected: anchor });
+      }
+      matchedIndex = index;
     }
   }
+  if (matchedIndex !== undefined) return resolveWorldSimulationAnchor_ACU(matchedIndex, messages);
   reject_ACU('WORLD_SIMULATION_ANCHOR_STALE', 'anchor', '格林推演冻结锚点已变化，拒绝继续写入', { expected: anchor });
 }
 
@@ -954,16 +996,8 @@ export function readWorldSimulationBucketEntry_ACU<T>(
   if (!isRecord_ACU(rawBucket) || rawBucket.schemaVersion !== 1 || !isRecord_ACU(rawBucket.entries)) {
     reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', 'load', `${field} 分桶结构损坏`);
   }
-  const rawEntry = rawBucket.entries[buildWorldSimulationBucketKey_ACU(currentAnchor)];
+  const rawEntry = resolveWorldSimulationBucketEntry_ACU<T>(rawBucket.entries, currentAnchor, field);
   if (rawEntry === undefined) return null;
-  if (!isRecord_ACU(rawEntry) || !isRecord_ACU(rawEntry.anchor) || !Object.prototype.hasOwnProperty.call(rawEntry, 'value')) {
-    reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', 'load', `${field} 当前 swipe 条目损坏`);
-  }
-  const storedAnchor = rawEntry.anchor as unknown as WorldSimulationAnchorIdentity_ACU;
-  if (storedAnchor.chatIdentity !== currentAnchor.chatIdentity || storedAnchor.messageKey !== currentAnchor.messageKey
-    || storedAnchor.swipeId !== currentAnchor.swipeId || storedAnchor.contentDigest !== currentAnchor.contentDigest) {
-    reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', 'load', `${field} 当前 swipe 身份不一致`);
-  }
   return validateValue(rawEntry.value);
 }
 
@@ -980,10 +1014,9 @@ export async function writeWorldSimulationBucketEntry_ACU<T>(
   const previousBucket = isRecord_ACU(previous) && previous.schemaVersion === 1 && isRecord_ACU(previous.entries)
     ? previous as unknown as WorldSimulationBucket_ACU<T>
     : { schemaVersion: 1 as const, entries: {} };
-  const key = buildWorldSimulationBucketKey_ACU(currentAnchor);
   const candidate: WorldSimulationBucket_ACU<T> = {
     schemaVersion: 1,
-    entries: { ...previousBucket.entries, [key]: { anchor: { ...currentAnchor }, value, updatedAt: Date.now() } },
+    entries: buildWorldSimulationBucketEntries_ACU(previousBucket.entries, currentAnchor, value, Date.now()),
   };
   try {
     message[field] = candidate;

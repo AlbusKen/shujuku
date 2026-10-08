@@ -76,8 +76,7 @@ export function buildBridgeSimulation_ACU(chat: Record<string, unknown>[], cut: 
   if (completed) {
     if (completed.kind === 'logical') fail('旧推演完成锚点不能借用其他逻辑会话。');
     const matches = [...anchors].filter(([, anchor]) => anchor.chatIdentity === completed.chatIdentity
-      && anchor.messageKey === completed.messageKey && anchor.swipeId === completed.swipeId
-      && anchor.contentDigest === completed.contentDigest);
+      && anchor.messageKey === completed.messageKey && anchor.swipeId === completed.swipeId);
     if (matches.length !== 1) fail('旧推演完成锚点不能唯一映射到桥接来源。');
     hostCompletion = { taskId: envelope!.task!.taskId,
       ref: structuredClone(cut.refs[matches[0][0]]), anchor: structuredClone(completed) };

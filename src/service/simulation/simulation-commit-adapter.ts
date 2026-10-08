@@ -36,7 +36,7 @@ import { applyWorldSimulationCandidatesDetailedViaSql_ACU } from './simulation-t
 import { appendWorldSimulationCommitChain_ACU, extractWorldSimulationPartialFields_ACU, foldWorldSimulationArchive_ACU, foldWorldSimulationLedger_ACU } from './simulation-ledger-fold';
 import { commitWorldSimulationFieldWritesWithinQueue_ACU, type WorldSimulationFieldCommitInput_ACU, type WorldSimulationFieldCommitReceipt_ACU } from './simulation-field-commit-adapter';
 import { hasPartialWorldSimulationRunWrites_ACU, readWorldSimulationRunWriteProof_ACU, rebaseWorldSimulationRunWriteProof_ACU, stageWorldSimulationRunWriteProof_ACU, type WorldSimulationRunWriteState_ACU } from './simulation-run-write-state';
-import { WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU, buildWorldSimulationBucketKey_ACU, resolveCurrentWorldSimulationAnchor_ACU, validateWorldSimulationEnvelope_ACU } from './simulation-store';
+import { WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU, buildWorldSimulationBucketEntries_ACU, isWorldSimulationBucketKey_ACU, resolveWorldSimulationBucketEntry_ACU, resolveCurrentWorldSimulationAnchor_ACU, validateWorldSimulationEnvelope_ACU } from './simulation-store';
 import { assertWorldSimulationHostEnvelope_ACU, assertWorldSimulationHostRun_ACU, requireWorldSimulationHostAnchor_ACU } from './simulation-identity';
 
 interface CommitInput_ACU {
@@ -142,7 +142,7 @@ function conversationBucketWithMigratedEntry_ACU(
     if (!isRecord_ACU(candidate)) reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', `${path} 必须是对象`);
     exactKeys_ACU(candidate, ['anchor', 'value', 'updatedAt'], path);
     const anchor = validateConversationAnchor_ACU(candidate.anchor, `${path}.anchor`);
-    if (buildWorldSimulationBucketKey_ACU(anchor) !== key) {
+    if (!isWorldSimulationBucketKey_ACU(key, anchor)) {
       reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', `${path} 的 key 与 anchor 不一致`);
     }
     if (typeof candidate.updatedAt !== 'number' || !Number.isInteger(candidate.updatedAt) || candidate.updatedAt < 0) {
@@ -154,22 +154,11 @@ function conversationBucketWithMigratedEntry_ACU(
       updatedAt: candidate.updatedAt,
     };
   }
-  const source = entries[buildWorldSimulationBucketKey_ACU(sourceAnchor)];
+  const source = resolveWorldSimulationBucketEntry_ACU<WorldSimulationConversationFloorRecord_ACU>(entries, sourceAnchor, WORLD_SIMULATION_CONVERSATION_FIELD_ACU);
   if (source === undefined) return { schemaVersion: 1, entries };
-  const storedAnchor = source.anchor;
-  if (storedAnchor.chatIdentity !== sourceAnchor.chatIdentity
-    || storedAnchor.messageId !== sourceAnchor.messageId
-    || storedAnchor.messageKey !== sourceAnchor.messageKey
-    || storedAnchor.swipeId !== sourceAnchor.swipeId
-    || storedAnchor.contentDigest !== sourceAnchor.contentDigest) {
-    reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', `${WORLD_SIMULATION_CONVERSATION_FIELD_ACU} 当前锚点身份不一致`);
-  }
   return {
     schemaVersion: 1,
-    entries: {
-      ...entries,
-      [buildWorldSimulationBucketKey_ACU(persistedAnchor)]: { anchor: { ...persistedAnchor }, value: source.value, updatedAt },
-    },
+    entries: buildWorldSimulationBucketEntries_ACU(entries, persistedAnchor, source.value, updatedAt),
   };
 }
 
@@ -423,7 +412,7 @@ async function persistHostFinalCommit_ACU(
       checkpointIndex: foldedBefore?.checkpointIndex ?? null,
       beforeArchive: archiveBefore,
       nextArchive: archiveSnapshot,
-      // 必须取改写锚点正文前的折叠：分桶键含正文摘要，改写后旧键下的逐栏草稿不可再读。
+      // 提交前的分栏与草稿必须沿用同一账本基线，不在提交期间重新猜测。
       beforeFields: foldedBefore?.fields,
       beforePartials: foldedBefore ? extractWorldSimulationPartialFields_ACU(foldedBefore.fields) : {},
     });
@@ -498,7 +487,7 @@ async function persistHostFinalCommit_ACU(
       try {
         currentRefreshIndex = resolveCurrentWorldSimulationAnchor_ACU(persistedAnchor, chat).messageIndex;
       } catch {
-        // 延时期间正文或 swipe 已变化，放弃旧锚点的刷新。
+        // 延时期间楼层身份或 swipe 已变化，放弃旧锚点的刷新。
         return;
       }
       void refreshMessageBlock_ACU(currentRefreshIndex, { notify: false });

@@ -33,7 +33,8 @@ import {
 } from './model';
 import { findLatestTableFullCheckpointIndex_ACU } from '../chat/material-checkpoint-sync';
 import {
-  buildWorldSimulationBucketKey_ACU,
+  buildWorldSimulationBucketEntries_ACU,
+  resolveWorldSimulationBucketEntry_ACU,
   registerWorldSimulationLedgerOverlay_ACU,
   resolveWorldSimulationAnchor_ACU,
   validateWorldSimulationChronicleArchiveSnapshot_ACU,
@@ -197,14 +198,8 @@ function bucketEntries_ACU(message: Record<string, unknown>, field: string): Rec
 
 function entryValue_ACU(message: unknown, field: string, anchor: WorldSimulationAnchorIdentity_ACU): unknown {
   if (!isRecord_ACU(message)) return undefined;
-  const entry = bucketEntries_ACU(message, field)[buildWorldSimulationBucketKey_ACU(anchor)];
+  const entry = resolveWorldSimulationBucketEntry_ACU<unknown>(bucketEntries_ACU(message, field), anchor, field);
   if (entry === undefined) return undefined;
-  if (isStrictFoldField_ACU(field)) {
-    if (!isRecord_ACU(entry) || !isRecord_ACU(entry.anchor) || !Object.prototype.hasOwnProperty.call(entry, 'value')) invalidFloorValue_ACU(field);
-    const stored = entry.anchor;
-    if (stored.chatIdentity !== anchor.chatIdentity || stored.messageKey !== anchor.messageKey
-      || stored.swipeId !== anchor.swipeId || stored.contentDigest !== anchor.contentDigest) invalidFloorValue_ACU(field);
-  }
   return entry.value;
 }
 
@@ -213,8 +208,8 @@ function writeEntry_ACU(message: Record<string, unknown>, field: string, anchor:
   const entries = isRecord_ACU(previous) && previous.schemaVersion === 1 && isRecord_ACU(previous.entries)
     ? { ...previous.entries }
     : {};
-  entries[buildWorldSimulationBucketKey_ACU(anchor)] = { anchor: { ...anchor }, value, updatedAt };
-  message[field] = { schemaVersion: 1, entries };
+  message[field] = { schemaVersion: 1,
+    entries: buildWorldSimulationBucketEntries_ACU(entries, anchor, value, updatedAt) };
 }
 
 function isLedgerValue_ACU(value: unknown): value is WorldSimulationLedger_ACU {
@@ -682,7 +677,7 @@ function checkpointFrame_ACU(
 
 /**
  * 提交链：按需把基线重建为提交前的完整账本（连同草稿），再在锚点楼追加本次提交的 delta。
- * beforePartials 必须取自改写锚点正文之前的折叠——分桶键含正文摘要，改写后旧键下的逐栏草稿不再可读；
+ * beforePartials 与 beforeFields 使用提交前的同一账本快照，避免提交期间重新折叠造成基线漂移；
  * 调用方未提供时在改动聊天前自行折叠。
  */
 export function appendWorldSimulationCommitChain_ACU(input: {
@@ -697,7 +692,7 @@ export function appendWorldSimulationCommitChain_ACU(input: {
   beforeArchive: WorldChronicleArchiveSnapshot_ACU;
   nextArchive: WorldChronicleArchiveSnapshot_ACU;
   beforePartials?: WorldSimulationLedgerFieldUpserts_ACU;
-  /** 正文摘要变化前捕获的分栏快照；不得在改写后重新猜测。 */
+  /** 提交前捕获的分栏快照，与 beforeLedger 保持同一基线。 */
   beforeFields?: WorldSimulationLedgerFieldSnapshot_ACU;
 }): void {
   const message = input.chat[input.messageIndex];

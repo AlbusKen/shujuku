@@ -203,7 +203,7 @@ describe('world simulation conversation segments', () => {
     expect(chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU]).toBeUndefined();
   });
 
-  it('锚点楼层 digest 变化时会话段追加 fail-closed', async () => {
+  it('正文后处理后会话段继续追加，仍保留同楼层之前的指令', async () => {
     const chat: any[] = [
       { message_id: 1, mes: 'first-floor', swipe_id: 0 },
       { message_id: 20, mes: 'anchor-body', swipe_id: 0 },
@@ -230,10 +230,12 @@ describe('world simulation conversation segments', () => {
       taskId: 'task-digest',
       stageId: 'stage-digest',
       stageRevision: 1,
-      appends: [{ kind: 'user', text: 'must-not-write' }],
-    }, chat)).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_ANCHOR_STALE' } });
-    expect(chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU]).toBe(previous);
-    expect(saveChat).not.toHaveBeenCalled();
+      appends: [{ kind: 'user', text: 'instruction-after-edit' }],
+    }, chat)).resolves.toBe(true);
+    expect(chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU]).not.toBe(previous);
+    expect(readWorldSimulationConversation_ACU(chat).messages.map(item => item.text))
+      .toEqual(['kept-instruction', 'instruction-after-edit']);
+    expect(saveChat).toHaveBeenCalledOnce();
   });
 
   it('同一 runId 连续三次用户指令生成独立段', async () => {
@@ -329,7 +331,7 @@ describe('world simulation conversation segments', () => {
     expect(readWorldSimulationDirectorHistory_ACU(chat)).toEqual([{ role: 'user', content: '先调查' }]);
   });
 
-  it('导演楼层保存失败回滚；聊天切换和过期正文均不污染新聊天', async () => {
+  it('导演楼层保存失败回滚，聊天切换拒绝写入，同楼层正文后处理允许接续', async () => {
     const chat: any[] = [{ message_id: 1, mes: '正文', swipe_id: 0 }];
     _set_SillyTavern_API_ACU({ chat, chatId: 'chat-history-fail', getCurrentChatId: () => 'chat-history-fail', saveChat } as any);
     const anchor = resolveWorldSimulationAnchor_ACU(0, chat);
@@ -347,8 +349,12 @@ describe('world simulation conversation segments', () => {
     expect(otherChat[0][WORLD_SIMULATION_CONVERSATION_FIELD_ACU]).toBeUndefined();
     _set_SillyTavern_API_ACU({ chat, chatId: 'chat-history-fail', getCurrentChatId: () => 'chat-history-fail', saveChat } as any);
     chat[0].mes = '被编辑的正文';
+    await expect(appendWorldSimulationDirectorHistory_ACU(input, chat)).resolves.toBe(true);
+    expect(readWorldSimulationDirectorHistory_ACU(chat)).toHaveLength(4);
+    expect(saveChat).toHaveBeenCalledTimes(3);
+    chat[0].swipe_id = 1;
     await expect(appendWorldSimulationDirectorHistory_ACU(input, chat)).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_ANCHOR_STALE' } });
-    expect(saveChat).toHaveBeenCalledTimes(2);
+    expect(saveChat).toHaveBeenCalledTimes(3);
   });
 
   it('压缩标记核对源快照，遇并发追加和宿主保存失败不覆盖历史', async () => {

@@ -2,7 +2,7 @@ import { countAiMessages_ACU, isAiMessage_ACU, resolveGeneratedAiMessageIndex_AC
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
 import { sha256HexSync_ACU } from '../../shared/sha256-sync';
 import type { WorldSimulationRunIdentity_ACU } from './model';
-import { resolveWorldSimulationAnchor_ACU } from './simulation-store';
+import { resolveCurrentWorldSimulationAnchor_ACU, resolveWorldSimulationAnchor_ACU } from './simulation-store';
 import type { WorldSimulationAnchorIdentity_ACU } from './agent/agent-model';
 import { assertWorldSimulationHostRun_ACU } from './simulation-identity';
 
@@ -92,7 +92,7 @@ export async function resolveWorldSimulationAssistantCompletion_ACU(
   // 原地重新生成不新增楼层：捕获长度与 AI 数都没变，intent 的候选区间必然为空；宿主若同时换掉
   // message_id，事件携带的旧 id 也命中不了，于是上面每一轮都只能拿到 pending_materialization。
   // 这种情形下回退到当前最新 assistant 楼层，让重新生成后的正文能接着推演；若它其实就是上一轮
-  // 已结算的同一楼层，orchestrator 会按锚点四元组判重跳过，不会重复跑。
+  // 已结算的同一楼层和 swipe，orchestrator 会按楼层身份判重跳过，不会重复跑。
   const settled = dependencies.getChat();
   if (getActiveChatStorageIdentity_ACU(settled) !== chatIdentity) return { kind: 'blocked', reason: 'chat_changed' };
   const latest = resolveLatestWorldSimulationAssistant_ACU(settled);
@@ -116,8 +116,7 @@ export function restoreWorldSimulationAnchor_ACU(
     const anchor = resolveWorldSimulationAnchor_ACU(index, chat);
     if (anchor.chatIdentity === identity.chatIdentity
       && anchor.messageKey === identity.anchorMessageKey
-      && anchor.swipeId === identity.anchorSwipeId
-      && anchor.contentDigest === identity.anchorContentDigest) return anchor;
+      && anchor.swipeId === identity.anchorSwipeId) return resolveCurrentWorldSimulationAnchor_ACU(anchor, chat);
   }
   throw new Error('WORLD_SIMULATION_ANCHOR_STALE');
 }

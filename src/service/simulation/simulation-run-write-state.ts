@@ -1,6 +1,6 @@
 import { WORLD_SIMULATION_RUN_WRITE_FIELD_ACU, type WorldChronicleArchiveSnapshot_ACU, type WorldSimulationAnchorIdentity_ACU, type WorldSimulationCandidate_ACU } from './agent/agent-model';
 import { WorldSimulationValidationError_ACU, createWorldSimulationError_ACU, type WorldSimulationLedger_ACU, type WorldSimulationLedgerFieldSnapshot_ACU, type WorldSimulationRunIdentity_ACU } from './model';
-import { buildWorldSimulationBucketKey_ACU, readWorldSimulationBucketEntry_ACU } from './simulation-store';
+import { buildWorldSimulationBucketEntries_ACU, readWorldSimulationBucketEntry_ACU } from './simulation-store';
 import { sha256HexSync_ACU } from '../../shared/sha256-sync';
 import { assertWorldSimulationHostRun_ACU, requireWorldSimulationHostAnchor_ACU } from './simulation-identity';
 
@@ -60,8 +60,8 @@ export function stageWorldSimulationRunWriteProof_ACU(chat: unknown[], anchor: W
   const previous = message[WORLD_SIMULATION_RUN_WRITE_FIELD_ACU];
   const entries = previous && typeof previous === 'object' && !Array.isArray(previous)
     ? (previous as { entries: Record<string, unknown> }).entries : {};
-  message[WORLD_SIMULATION_RUN_WRITE_FIELD_ACU] = { schemaVersion: 1, entries: { ...entries,
-    [buildWorldSimulationBucketKey_ACU(anchor)]: { anchor: { ...anchor }, value: proof, updatedAt } } };
+  message[WORLD_SIMULATION_RUN_WRITE_FIELD_ACU] = { schemaVersion: 1,
+    entries: buildWorldSimulationBucketEntries_ACU(entries, anchor, proof, updatedAt) };
 }
 
 function canonical_ACU(value: unknown): string {
