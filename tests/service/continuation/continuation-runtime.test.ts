@@ -42,6 +42,7 @@ async function createHarness(saveResult: { saved: boolean } = { saved: true }): 
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.doUnmock('../../../src/service/runtime/state-manager');
   vi.doUnmock('../../../src/service/settings/settings-service');
   vi.resetModules();
@@ -201,5 +202,133 @@ describe('全局续写设置副本', () => {
     h.saveSettings.mockReturnValueOnce({ saved: false });
     h.runtime.writeGlobalContinuationSettings_ACU({ ...original, generationRetryLimit: 2 });
     expect(h.settings.continuationGlobalSettings.generationRetryLimit).toBe(9);
+  });
+});
+
+async function createFirstTurnHarness_ACU(preview = false) {
+  const h = await createHarness();
+  const [{ ContinuationAgentTurnPlanner_ACU }, { ContinuationOutlinePlanner_ACU }, { SillyTavernHostTurnAdapter_ACU }, { FirstFloorContinuationStore_ACU }] = await Promise.all([
+    import('../../../src/service/continuation/agent/agent-main-loop'),
+    import('../../../src/service/continuation/outline-planner'),
+    import('../../../src/service/continuation/host-turn-adapter'),
+    import('../../../src/service/continuation/continuation-store'),
+  ]);
+  const outline = stage_ACU(1, 6).revisions[1].outline;
+  outline.tempo = 'mixed';
+  outline.role = 'development';
+  outline.nodes[0].turns = outline.nodes[0].turns.map((turn: any, index: number) => ({
+    ...turn, pacing: index % 3 === 0 ? 'setup' : 'pressure',
+    function: index % 3 === 0 ? 'transition' : 'conflict',
+    mainlineDelta: index % 3 === 0 ? 'hold' : 'step',
+    timeAdvance: index % 3 === 0 ? 'same_day' : 'continuous',
+  }));
+  const apiPreset = { presetName: '', source: 'current' as const, reason: 'current_configuration' as const };
+  const outlinePlan = vi.spyOn(ContinuationOutlinePlanner_ACU.prototype, 'plan').mockResolvedValue({ outline, attempts: 1, requiresReview: preview, apiPreset });
+  const agentPlan = vi.spyOn(ContinuationAgentTurnPlanner_ACU.prototype, 'plan').mockImplementation(async request => {
+    const identity = request.createInternalRequestIdentity(0);
+    expect(request.isInternalRequestCurrent(identity)).toBe(true);
+    if (!request.readContext().turn) {
+      expect(request.directOpening).toBe(true);
+      const result = await request.applyOutline!('创建首个阶段');
+      if (result.requiresReview) {
+        const { ContinuationValidationError_ACU, createContinuationError_ACU } = await import('../../../src/service/continuation/model');
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_OUTLINE_REPLANNED', 'agent_loop', '等待大纲确认', false));
+      }
+      expect(request.isInternalRequestCurrent(identity)).toBe(true);
+    }
+    return { instruction: '首轮写作指导', attempts: 1, apiPreset };
+  });
+  const send = vi.spyOn(SillyTavernHostTurnAdapter_ACU.prototype, 'send').mockImplementation(text => {
+    h.chat.push({ is_user: true, mes: text });
+    return true;
+  });
+  const runtime = h.runtime.getContinuationRuntime_ACU();
+  await runtime.initialize();
+  await runtime.orchestrator.replaceSettings({ settings: {
+    ...h.runtime.buildInitialContinuationSettings_ACU(), loopTags: '', minGenerationTokens: 0,
+    loopDelaySeconds: 0, totalDurationMinutes: 0,
+  } });
+  await runtime.orchestrator.sendAgentMessage({ text: '推进首轮剧情' });
+  return { ...h, runtimeModule: h.runtime, runtime, store: new FirstFloorContinuationStore_ACU(), agentPlan, outlinePlan, send };
+}
+
+describe('首轮宿主异步交接', () => {
+  it('首轮发送后保持运行，异步开始后确认正文并正常交接下一轮', async () => {
+    const h = await createFirstTurnHarness_ACU();
+    try {
+      const result = await h.runtime.continueTask();
+      expect(result.preparedTurn).toBeDefined();
+      expect(h.store.readPersisted()!.activeTask!.stages[0].revisions[0].frozen).toBe(true);
+      await expect(h.runtime.send(result.preparedTurn!)).resolves.toBe(true);
+      const first = h.store.readPersisted()!.activeTask!.pendingHostTurn!;
+      const chatIdentity = first.identity.chatIdentity;
+      expect(h.runtime.bridge!.hasLiveClaim(chatIdentity)).toBe(true);
+      expect(h.runtime.read()!.activeTask).toMatchObject({ status: 'running', pendingHostTurn: { status: 'awaiting_generation' } });
+      await expect(h.runtime.continueTask()).rejects.toMatchObject({ error: { code: 'CONTINUATION_OPERATION_BUSY' } });
+      const queued = await h.runtime.orchestrator.sendAgentMessage({ text: '下一轮继续试探' });
+      expect(queued.disposition).toBe('queued_after_host');
+      expect(h.store.readPersisted()!.activeTask!.pendingHostTurn!.identity).toEqual(first.identity);
+      const listener = vi.fn();
+      const unsubscribe = h.runtime.subscribeStateChanges(listener);
+      expect(h.runtime.bridge!.onGenerationStarted(7, true)).toBe(true);
+      expect(listener).toHaveBeenCalledOnce();
+      unsubscribe();
+      h.chat.push({ is_user: false, mes: '首轮正文已生成', message_id: 9 });
+      await h.runtime.bridge!.onGenerationEnded(9, 7);
+      const next = h.store.readPersisted()!.activeTask!;
+      expect(next.stages[0]).toMatchObject({ completedTurns: 1, activeTurnIndex: 1 });
+      expect(next.pendingHostTurn!.identity.turnId).not.toBe(first.identity.turnId);
+      expect(h.runtime.read()!.activeTask!.status).toBe('running');
+      expect(h.agentPlan).toHaveBeenCalledTimes(2);
+      expect(h.outlinePlan).toHaveBeenCalledOnce();
+      expect(h.send).toHaveBeenCalledTimes(2);
+    } finally { h.runtimeModule.resetContinuationRuntimeForTests_ACU(); }
+  });
+
+  it('首轮大纲需要确认时不发送正文，也不穿透确认门禁', async () => {
+    const h = await createFirstTurnHarness_ACU(true);
+    try {
+      const result = await h.runtime.continueTask();
+      expect(result.preparedTurn).toBeUndefined();
+      expect(h.store.readPersisted()!.activeTask!.status).toBe('awaiting_outline_review');
+      expect(h.runtime.read()!.activeTask!.status).toBe('awaiting_outline_review');
+      expect(h.send).not.toHaveBeenCalled();
+    } finally { h.runtimeModule.resetContinuationRuntimeForTests_ACU(); }
+  });
+
+  it('首轮交接期间停止使认领失效，迟到开始事件不能恢复任务', async () => {
+    const h = await createFirstTurnHarness_ACU();
+    try {
+      const result = await h.runtime.continueTask();
+      await h.runtime.send(result.preparedTurn!);
+      const chatIdentity = h.store.readPersisted()!.activeTask!.pendingHostTurn!.identity.chatIdentity;
+      await h.runtime.orchestrator.stopTask();
+
+      expect(h.runtime.bridge!.hasLiveClaim(chatIdentity)).toBe(false);
+      expect(h.runtime.bridge!.onGenerationStarted(7, true)).toBe(false);
+      expect(h.store.readPersisted()!.activeTask).toMatchObject({ status: 'paused', stopReason: 'manual', pendingHostTurn: null });
+      expect(h.runtime.read()!.activeTask!.status).toBe('paused');
+      expect(h.send).toHaveBeenCalledOnce();
+    } finally { h.runtimeModule.resetContinuationRuntimeForTests_ACU(); }
+  });
+
+  it('重建运行时不继承首轮交接认领，派生暂停不改写持久状态且可重新继续', async () => {
+    const h = await createFirstTurnHarness_ACU();
+    try {
+      const result = await h.runtime.continueTask();
+      await h.runtime.send(result.preparedTurn!);
+      const persisted = h.store.readPersisted()!;
+      const chatIdentity = persisted.activeTask!.pendingHostTurn!.identity.chatIdentity;
+      h.runtimeModule.resetContinuationRuntimeForTests_ACU();
+      const reloaded = h.runtimeModule.getContinuationRuntime_ACU();
+
+      expect(reloaded.bridge!.hasLiveClaim(chatIdentity)).toBe(false);
+      expect(reloaded.read()!.activeTask).toMatchObject({ status: 'paused', pendingHostTurn: null });
+      expect(h.store.readPersisted()).toEqual(persisted);
+      const resumed = await reloaded.continueTask();
+      expect(resumed.preparedTurn).toBeDefined();
+      expect(h.store.readPersisted()!.activeTask!.pendingHostTurn).toBeNull();
+      expect(h.outlinePlan).toHaveBeenCalledOnce();
+    } finally { h.runtimeModule.resetContinuationRuntimeForTests_ACU(); }
   });
 });

@@ -310,7 +310,7 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
     const h = createHarness();
     // 宿主 GENERATION_STARTED 在发送返回后的微任务里才送达：不模拟同步配对。
     await expect(h.bridge.send(prepared)).resolves.toBe(true);
-    expect(h.bridge.hasLiveClaim('chat-a')).toBe(false);
+    expect(h.bridge.hasLiveClaim('chat-a')).toBe(true);
     h.setChat([{ is_user: true }, { is_user: false, mes: '<ok>正文', message_id: 9 }]);
 
     expect(h.bridge.claimsGenerationEnded(7, false)).toBe(false);
@@ -319,6 +319,22 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
 
     expect(h.runtime.confirmCurrentTurn).toHaveBeenCalledWith(1);
     expect(h.runtime.pauseForHostResultFailure).not.toHaveBeenCalled();
+  });
+
+  it('异步开始事件接手发送认领并通知页面，停止后不再保留活认领', async () => {
+    const h = createHarness();
+    const listener = vi.fn();
+    h.bridge.subscribeStateChanges(listener);
+    await h.bridge.send(prepared);
+    expect(h.bridge.hasLiveClaim('chat-a')).toBe(true);
+    listener.mockClear();
+
+    expect(h.bridge.onGenerationStarted(7, true)).toBe(true);
+    expect(listener).toHaveBeenCalledOnce();
+    expect(h.bridge.hasLiveClaim('chat-a')).toBe(true);
+    await h.bridge.onGenerationStopped(7);
+    expect(h.bridge.hasLiveClaim('chat-a')).toBe(false);
+    expect(h.runtime.readPendingHostTurn()!.pending.status).toBe('retry_ready');
   });
 
   it('binds a loosely claimed generation start so the strict ended path matches later', async () => {

@@ -75,6 +75,8 @@ export interface ContinuationHostGenerationRedirect_ACU {
  */
 export class ContinuationHostGenerationBridge_ACU {
   private sendingAttemptId: string | null = null;
+  /** 点击已返回但宿主尚未派发开始事件；不用于放宽事件认领条件。 */
+  private readonly dispatchedByChat = new Map<string, string>();
   private readonly startedByChat = new Map<string, StartedHostGeneration_ACU>();
   private readonly redirectsByChat = new Map<string, RedirectClaim_ACU>();
   private readonly stateListeners = new Set<() => void>();
@@ -100,17 +102,26 @@ export class ContinuationHostGenerationBridge_ACU {
     this.dependencies.hostInput.stopGeneration();
   }
 
-  /** 桥内存中是否持有该聊天的活认领（发送窗口内或已认领生成开始）。用于区分真在飞与重载后的滞留态。 */
+  /** 活认领覆盖同步发送、异步交接与生成开始；重建桥后仍按滞留态恢复。 */
   hasLiveClaim(chatIdentity: string): boolean {
-    if (this.sendingAttemptId !== null) {
-      const snapshot = this.dependencies.runtime.readPendingHostTurn();
-      if (snapshot?.pending.identity.chatIdentity === chatIdentity && snapshot.pending.identity.attemptId === this.sendingAttemptId) {
-        return true;
-      }
+    const runtime = this.dependencies.runtime;
+    const pending = runtime.readPendingHostTurn()?.pending;
+    if (runtime.getChatIdentity() !== chatIdentity || pending?.status !== 'awaiting_generation'
+      || pending.identity.chatIdentity !== chatIdentity) {
+      this.dispatchedByChat.delete(chatIdentity);
+      return false;
+    }
+    const dispatched = this.dispatchedByChat.get(chatIdentity);
+    if (dispatched !== undefined && dispatched !== pending.identity.attemptId) {
+      this.dispatchedByChat.delete(chatIdentity);
+    }
+    if (this.sendingAttemptId === pending.identity.attemptId
+      || dispatched === pending.identity.attemptId) {
+      return true;
     }
     const redirect = this.redirectsByChat.get(chatIdentity);
     if (redirect && this.isCurrentRedirect_ACU(chatIdentity, redirect)) return true;
-    return this.startedByChat.has(chatIdentity);
+    return this.startedByChat.get(chatIdentity)?.attemptId === pending.identity.attemptId;
   }
 
   /** 明确认领发送前处理的替代请求，不把任意新生成当作原轮次的延续。 */
@@ -126,6 +137,7 @@ export class ContinuationHostGenerationBridge_ACU {
     const claim: RedirectClaim_ACU = { attemptId: snapshot.pending.identity.attemptId, sourceSequence: sourceSequence ?? boundSequence, phase: 'preparing', completionStarted: false };
     // 在首次 await 前屏蔽原请求的终态和处理期间的内部生成。
     this.redirectsByChat.set(chatIdentity, claim);
+    this.dispatchedByChat.delete(chatIdentity);
     const handoff: ContinuationHostGenerationRedirect_ACU = {
       resume: async generate => {
         if (!this.isCurrentRedirect_ACU(chatIdentity, claim)) {
@@ -206,9 +218,11 @@ export class ContinuationHostGenerationBridge_ACU {
     const snapshot = runtime.readPendingHostTurn();
     if (!snapshot) return false;
     this.sendingAttemptId = snapshot.pending.identity.attemptId;
+    this.dispatchedByChat.set(prepared.identity.chatIdentity, snapshot.pending.identity.attemptId);
     this.notifyStateChanges_ACU();
     try {
       if (!this.dependencies.hostInput.send(prepared.instruction.instruction)) {
+        this.dispatchedByChat.delete(prepared.identity.chatIdentity);
         await runtime.pauseForHostInputFailure();
         return false;
       }
@@ -236,7 +250,9 @@ export class ContinuationHostGenerationBridge_ACU {
       const snapshot = runtime.readPendingHostTurn();
       if (!snapshot || snapshot.pending.identity.attemptId !== sendingAttemptId || snapshot.pending.capture.generationSeq !== null) return false;
       this.startedByChat.set(chatIdentity, { attemptId: sendingAttemptId, sequence, bind: runtime.bindHostTurnGeneration(sequence) });
+      this.dispatchedByChat.delete(chatIdentity);
       if (this.localRetryClaim?.attemptId === sendingAttemptId) this.localRetryClaim = null;
+      this.notifyStateChanges_ACU();
       return true;
     }
     const localRetryClaim = this.getMatchingLocalRetryClaim_ACU(context, sequence);
@@ -247,7 +263,9 @@ export class ContinuationHostGenerationBridge_ACU {
     const attemptId = snapshot.pending.identity.attemptId;
     if (localRetryClaim && attemptId !== localRetryClaim.attemptId) return false;
     this.startedByChat.set(chatIdentity, { attemptId, sequence, bind: runtime.bindHostTurnGeneration(sequence) });
+    this.dispatchedByChat.delete(chatIdentity);
     if (localRetryClaim) this.localRetryClaim = null;
+    this.notifyStateChanges_ACU();
     return true;
   }
 
@@ -281,6 +299,7 @@ export class ContinuationHostGenerationBridge_ACU {
     if (redirect) redirect.completionStarted = true;
     const started = this.startedByChat.get(chatIdentity) ?? null;
     this.startedByChat.delete(chatIdentity);
+    this.dispatchedByChat.delete(chatIdentity);
     if (endedOnlyLocalRetryClaim) {
       endedOnlyLocalRetryClaim.consumed = true;
       this.localRetryClaim = null;
@@ -368,6 +387,7 @@ export class ContinuationHostGenerationBridge_ACU {
     if (boundSequence !== null && sequence !== undefined && boundSequence !== sequence) return;
     if (redirect) redirect.completionStarted = true;
     this.startedByChat.delete(chatIdentity);
+    this.dispatchedByChat.delete(chatIdentity);
     if (this.localRetryClaim?.attemptId === snapshot.pending.identity.attemptId) this.localRetryClaim = null;
     if (started) {
       try { await started.bind; } catch { /* 绑定失败不阻碍中止转换 */ }
