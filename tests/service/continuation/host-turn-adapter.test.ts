@@ -5,6 +5,7 @@ const h = vi.hoisted(() => ({
   clickSend: vi.fn(() => true),
   clickRegenerate: vi.fn(() => true),
   triggerGenerate: vi.fn(() => true),
+  markSendIntent: vi.fn(),
   host: { deleteLastMessage: vi.fn(async () => undefined) } as any,
 }));
 
@@ -16,6 +17,9 @@ vi.mock('../../../src/shared/host-input', () => ({
 }));
 vi.mock('../../../src/shared/host-api', () => ({
   get SillyTavern_API_ACU() { return h.host; },
+}));
+vi.mock('../../../src/service/runtime/state-manager', () => ({
+  markUserSendIntent_ACU: () => h.markSendIntent(),
 }));
 
 import { SillyTavernHostTurnAdapter_ACU } from '../../../src/service/continuation/host-turn-adapter';
@@ -47,8 +51,33 @@ describe('SillyTavernHostTurnAdapter_ACU', () => {
     await expect(adapter.removeLastMessage()).resolves.toBe(false);
   });
 
-  it('routes regenerate and generate retries to the corresponding host primitives', () => {
+  it('每轮指导直接生成一次，写入失败不生成，正文重试使用对应宿主入口', () => {
     const adapter = new SillyTavernHostTurnAdapter_ACU();
+    for (const instruction of ['首轮写作指导', '下一轮写作指导']) {
+      expect(adapter.send(instruction)).toBe(true);
+      expect(h.setTextarea).toHaveBeenLastCalledWith(instruction, undefined, { restoreAfterInput: true });
+    }
+    expect(h.triggerGenerate).toHaveBeenCalledTimes(2);
+    expect(h.triggerGenerate.mock.calls).toEqual([['normal'], ['normal']]);
+    expect(h.markSendIntent).toHaveBeenCalledTimes(2);
+    expect(h.setTextarea).toHaveBeenCalledBefore(h.markSendIntent);
+    expect(h.markSendIntent).toHaveBeenCalledBefore(h.triggerGenerate);
+    expect(h.clickSend).not.toHaveBeenCalled();
+
+    h.triggerGenerate.mockClear();
+    h.markSendIntent.mockClear();
+    expect(adapter.send('   ')).toBe(false);
+    h.setTextarea.mockReturnValueOnce(false);
+    expect(adapter.send('写入失败的指导')).toBe(false);
+    expect(h.markSendIntent).not.toHaveBeenCalled();
+    expect(h.triggerGenerate).not.toHaveBeenCalled();
+
+    h.triggerGenerate.mockReturnValueOnce(false);
+    expect(adapter.send('宿主不可用时的指导')).toBe(false);
+    expect(h.triggerGenerate).toHaveBeenCalledExactlyOnceWith('normal');
+    expect(h.clickSend).not.toHaveBeenCalled();
+
+    h.triggerGenerate.mockClear();
     expect(adapter.retryGeneration('regenerate')).toBe(true);
     expect(h.clickRegenerate).toHaveBeenCalledOnce();
     expect(adapter.retryGeneration('generate')).toBe(true);

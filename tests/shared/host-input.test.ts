@@ -2,10 +2,14 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const h = vi.hoisted(() => ({ jquery: vi.fn(), hostDocument: undefined as Document | undefined }));
+const h = vi.hoisted(() => ({ jquery: vi.fn(), generate: vi.fn(), markSendIntent: vi.fn(), hostDocument: undefined as Document | undefined }));
 
 vi.mock('../../src/shared/host-api', () => ({
   get jQuery_API_ACU() { return h.jquery; },
+  SillyTavern_API_ACU: { generate: h.generate },
+}));
+vi.mock('../../src/service/runtime/state-manager', () => ({
+  markUserSendIntent_ACU: () => h.markSendIntent(),
 }));
 vi.mock('../../src/shared/runtime-env', () => ({
   getHostWindow: () => ({ document: h.hostDocument }),
@@ -72,7 +76,7 @@ describe('host input helpers', () => {
     expect(empty.click).not.toHaveBeenCalled();
   });
 
-  it.each(['unchanged', 'rewritten', 'replaced'])('智能续写初始指令经宿主 input %s 后，只交接完整文本', mode => {
+  it.each(['unchanged', 'rewritten', 'replaced'])('每轮写作指导经宿主 input %s 后，直接生成并消费完整文本', mode => {
     const doc = h.hostDocument!;
     doc.body.innerHTML = '<textarea id="send_textarea"></textarea><button id="send_but"></button>';
     const input = doc.querySelector<HTMLTextAreaElement>('#send_textarea')!;
@@ -81,7 +85,8 @@ describe('host input helpers', () => {
       if (mode === 'rewritten') input.value = input.value.slice(0, -2);
       if (mode === 'replaced') input.replaceWith(input.cloneNode() as HTMLTextAreaElement);
     });
-    const onSend = vi.fn(() => { expect(input.value).toBe('最终写作指导\n开始正文'); });
+    const onSend = vi.fn();
+    h.generate.mockImplementation(type => { expect(type).toBe('normal'); expect(input.value).toBe('最终写作指导\n开始正文'); });
     input.addEventListener('input', onInput);
     button.addEventListener('click', onSend);
     h.jquery.mockImplementation((selector: string, context: Document = document) => {
@@ -98,7 +103,10 @@ describe('host input helpers', () => {
     expect(new SillyTavernHostTurnAdapter_ACU().send('最终写作指导\r\n开始正文')).toBe(mode !== 'replaced');
     if (mode !== 'replaced') expect(getSendTextareaValue_ACU()).toBe('最终写作指导\n开始正文');
     expect(onInput).toHaveBeenCalledOnce();
-    expect(onSend).toHaveBeenCalledTimes(mode === 'replaced' ? 0 : 1);
+    expect(h.generate).toHaveBeenCalledTimes(mode === 'replaced' ? 0 : 1);
+    expect(h.markSendIntent).toHaveBeenCalledTimes(mode === 'replaced' ? 0 : 1);
+    if (mode !== 'replaced') expect(h.markSendIntent).toHaveBeenCalledBefore(h.generate);
+    expect(onSend).not.toHaveBeenCalled();
   });
 
   it.each(['empty', 'throwing'])('宿主原生输入框在 jQuery %s 时仍能读写并通知原生监听器', mode => {

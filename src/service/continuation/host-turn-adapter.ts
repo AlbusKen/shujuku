@@ -1,5 +1,6 @@
-import { clickRegenerateButton_ACU, clickSendButton_ACU, setSendTextareaValue_ACU, triggerHostGenerate_ACU } from '../../shared/host-input';
+import { clickRegenerateButton_ACU, setSendTextareaValue_ACU, triggerHostGenerate_ACU } from '../../shared/host-input';
 import { SillyTavern_API_ACU } from '../../shared/host-api';
+import { markUserSendIntent_ACU } from '../runtime/state-manager';
 
 export type ContinuationHostRetryMode_ACU = 'regenerate' | 'generate';
 
@@ -16,9 +17,10 @@ export interface ContinuationHostTurnAdapter_ACU {
 export class SillyTavernHostTurnAdapter_ACU implements ContinuationHostTurnAdapter_ACU {
   send(instruction: string): boolean {
     if (typeof instruction !== 'string' || !instruction.trim()) return false;
-    // 与剧情最终指令共用一次同步恢复；只有完整指令留在原控件中才触发宿主发送。
+    // 每轮指导写入后直接启动宿主生成，正文完成由生成桥统一确认。
     if (!setSendTextareaValue_ACU(instruction, undefined, { restoreAfterInput: true })) return false;
-    return clickSendButton_ACU();
+    markUserSendIntent_ACU();
+    return triggerHostGenerate_ACU('normal');
   }
 
   async removeLastMessage(): Promise<boolean> {
