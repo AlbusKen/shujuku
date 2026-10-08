@@ -31,7 +31,7 @@ import { markPlotIntercept_ACU, shouldSkipPlotIntercept_ACU } from '../../servic
 import { orchestrateTavernHelperHook_ACU, orchestrateAfterCommandsStrategy1_ACU, orchestrateAfterCommandsStrategy2_ACU } from '../../service/plot/plot-orchestrator';
 import { flushPlotPendingSave_ACU } from '../../service/runtime/plot-runtime/plot-history-preset';
 import { refreshMessageBlock_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
-import { beginHostGenerationUi_ACU, getSendTextareaValue_ACU, setSendTextareaValue_ACU } from '../../shared/host-input';
+import { beginHostGenerationUi_ACU, getSendTextareaValue_ACU, setSendTextareaValue_ACU, type HostInputWriteFailure_ACU } from '../../shared/host-input';
 import { handleContentOptimizationEvent_ACU } from '../triggers/settings-ui-sync/settings-ui-connect';
 import { triggerAutomaticUpdateIfNeeded_ACU } from '../triggers/settings-ui-sync/settings-ui-trigger';
 import { abortActivePlotPlanning_ACU, runOptimizationLogicWithUI_ACU } from '../components/plot-planning-ui';
@@ -936,9 +936,12 @@ export   function mainInitialize_ACU() {
               redirectPlotSendEvent_ACU(params);
             };
             const warn = (text: string) => showToastr_ACU('warning', text, '剧情推进');
+            let preSendPhase = 'initial_seed';
+            let inputWriteFailure: HostInputWriteFailure_ACU | undefined;
             try {
               await ensureInitialSeedCheckpointBeforeGeneration_ACU('generation_after_commands_before_ai', { allowPendingFirstUserMessage: true });
               if (disguised) {
+                preSendPhase = 'disguise_setup';
                 disguise = beginPlotSendDisguise_ACU({
                   userInput: pendingInput ? originalText : undefined,
                   onStop: () => {
@@ -948,6 +951,7 @@ export   function mainInitialize_ACU() {
                 });
               }
               if (recall) {
+                preSendPhase = 'summary_recall';
                 try {
                   const result = await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput: originalText, source: 'generation_after_commands' });
                   if (!result.success && !result.skipped) warn('纪要召回未完成，继续剧情任务与发送。');
@@ -960,6 +964,7 @@ export   function mainInitialize_ACU() {
                 return;
               }
               if (needsPlan) {
+                preSendPhase = 'planning';
                 const result = userFloor
                   ? await orchestrateAfterCommandsStrategy1_ACU(userFloor.message, userFloor.index, runOptimizationLogicWithUI_ACU)
                   : await orchestrateAfterCommandsStrategy2_ACU(originalText, runOptimizationLogicWithUI_ACU);
@@ -975,16 +980,24 @@ export   function mainInitialize_ACU() {
                   return;
                 }
                 if (result.action === 'planned' && result.finalMessage?.trim()) {
+                  preSendPhase = 'message_writeback';
                   params.prompt = result.finalMessage;
                   if (userFloor) {
                     userFloor.message.mes = result.finalMessage;
                     (userFloor.message as ACUMessage)._plot_processed = true;
-                  } else if (!(disguise ? disguise.deliver(result.finalMessage) : setSendTextareaValue_ACU(result.finalMessage))) {
-                    throw new Error('最终指令无法写入酒馆输入框');
+                  } else {
+                    preSendPhase = 'input_writeback';
+                    const reportFailure = (failure: HostInputWriteFailure_ACU) => { inputWriteFailure = failure; };
+                    const written = disguise ? disguise.deliver(result.finalMessage, reportFailure)
+                      : setSendTextareaValue_ACU(result.finalMessage, reportFailure, { restoreAfterInput: true });
+                    if (!written) {
+                      throw new Error('最终指令无法写入酒馆输入框');
+                    }
                   }
                 }
               }
               if (userFloor) {
+                preSendPhase = 'plot_save';
                 try {
                   const saved = await flushPlotPendingSave_ACU();
                   if (saved?.status === 'failed') warn('剧情反馈保存未完成，保留结果并继续发送。');
@@ -992,12 +1005,27 @@ export   function mainInitialize_ACU() {
                 } catch {
                   warn('聊天保存异常，保留楼层并继续发送。');
                 }
+                preSendPhase = 'message_refresh';
                 await refreshMessageBlock_ACU(userFloor.index);
               }
-            } catch {
+            } catch (error) {
+              // 异常消息可能夹带用户输入或第三方载荷，只记录固定阶段与白名单错误类别。
+              const errorType = error instanceof Error
+                && ['Error', 'TypeError', 'ReferenceError', 'RangeError', 'SyntaxError', 'AbortError'].includes(error.name)
+                ? error.name : 'unknown';
+              logError_ACU('[剧情推进] 发送前处理失败:', {
+                phase: preSendPhase,
+                inputPath: userFloor ? 'existing_message' : 'pending_input',
+                needsPlan,
+                disguised: !!disguise,
+                errorType,
+                ...(inputWriteFailure ? { inputWriteFailure } : {}),
+              });
               if (needsPlan) {
                 stopSend();
-                warn('剧情发送前处理异常，正文发送已停止。');
+                warn(preSendPhase === 'input_writeback'
+                  ? '剧情最终指令未能写入输入框，正文发送已停止。'
+                  : '剧情发送前处理异常，正文发送已停止。');
                 return;
               }
               warn('发送前处理异常，保留当前内容并继续发送。');

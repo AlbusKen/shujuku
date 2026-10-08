@@ -26,29 +26,111 @@ export function beginHostGenerationUi_ACU(): () => void {
     };
 }
 
+/** 跨 iframe 查询宿主原生输入框，不依赖脚本侧 jQuery 的状态。 */
+function getNativeSendTextarea_ACU(): HTMLTextAreaElement | undefined {
+    const element = getHostWindow().document?.getElementById('send_textarea');
+    return element?.tagName === 'TEXTAREA' ? element as HTMLTextAreaElement : undefined;
+}
+
 /** 宿主发送框操作，不属于任何 V1 popup。 */
 export function getSendTextareaValue_ACU(): string {
     try {
+        const textarea = getNativeSendTextarea_ACU();
+        if (textarea) return textarea.value;
         return String(selectHostControl_ACU('#send_textarea')?.val() || '');
     } catch {
         return '';
     }
 }
 
-/** 写回宿主发送框，并在 input 监听执行后回读确认，不能把空选择器或被改写当作成功。 */
-export function setSendTextareaValue_ACU(text: string): boolean {
+/** 写回失败的脱敏诊断：只含固定分类及字符数，不携带正文或原始异常。 */
+export interface HostInputWriteFailure_ACU {
+    reason: 'control_unavailable' | 'assignment_mismatch' | 'input_changed_value' | 'control_replaced' | 'exception';
+    phase: 'lookup' | 'assign' | 'notify' | 'restore' | 'verify';
+    access: 'native' | 'jquery';
+    expectedLength: number;
+    assignedLength?: number;
+    actualLength?: number;
+    errorType?: 'Error' | 'TypeError' | 'ReferenceError' | 'RangeError' | 'SyntaxError' | 'AbortError' | 'unknown';
+}
+
+export type HostInputWriteFailureReporter_ACU = (failure: HostInputWriteFailure_ACU) => void;
+
+/** 仅最终指令交接启用：同步 input 改写后在同一控件恢复一次，不重复通知。 */
+export interface HostInputWriteOptions_ACU {
+    restoreAfterInput?: boolean;
+}
+
+/** 优先原生写入；input 监听执行后回读确认，不能把空选择器或被改写当作成功。 */
+export function setSendTextareaValue_ACU(text: string, reportFailure?: HostInputWriteFailureReporter_ACU,
+    options: HostInputWriteOptions_ACU = {}): boolean {
+    let phase: HostInputWriteFailure_ACU['phase'] = 'lookup';
+    let access: HostInputWriteFailure_ACU['access'] = 'native';
+    let expectedLength = 0;
+    let assignedLength: number | undefined;
+    const fail = (reason: HostInputWriteFailure_ACU['reason'], actualLength?: number,
+        errorType?: HostInputWriteFailure_ACU['errorType']): false => {
+        // 诊断接收方的错误不能改变原有写回布尔契约。
+        try {
+            reportFailure?.({ reason, phase, access, expectedLength,
+                ...(assignedLength === undefined ? {} : { assignedLength }),
+                ...(actualLength === undefined ? {} : { actualLength }),
+                ...(errorType === undefined ? {} : { errorType }),
+            });
+        } catch { /* 仍如实返回写回失败 */ }
+        return false;
+    };
     try {
-        const $textarea = selectHostControl_ACU('#send_textarea');
-        if (!$textarea || typeof $textarea.val !== 'function' || typeof $textarea.trigger !== 'function') return false;
-        if (typeof $textarea.length === 'number' && $textarea.length === 0) return false;
-        $textarea.val(text);
-        notifySendTextareaInput_ACU($textarea);
         // textarea 会把 CRLF 归一化为 LF；这不是提示词内容丢失。
         const expected = String(text).replace(/\r\n?/g, '\n');
+        expectedLength = expected.length;
+        const textarea = getNativeSendTextarea_ACU();
+        if (textarea) {
+            phase = 'assign';
+            textarea.value = text;
+            const assigned = textarea.value.replace(/\r\n?/g, '\n');
+            assignedLength = assigned.length;
+            phase = 'notify';
+            const EventCtor = textarea.ownerDocument.defaultView?.Event ?? Event;
+            textarea.dispatchEvent(new EventCtor('input', { bubbles: true }));
+            phase = 'verify';
+            // 监听器替换控件也算交接失败，不能只验证已经脱离宿主的旧节点。
+            const current = getNativeSendTextarea_ACU();
+            if (current !== textarea) return fail('control_replaced');
+            let actual = textarea.value.replace(/\r\n?/g, '\n');
+            if (actual !== expected && assigned === expected && options.restoreAfterInput === true) {
+                // 最终指令由本轮规划持有；先让宿主完成通知，再恢复同步监听改写的正文。
+                // 只恢复一次且不重发 input，避免重复触发同一改写者；恢复后仍严格校验。
+                phase = 'restore';
+                textarea.value = text;
+                phase = 'verify';
+                if (getNativeSendTextarea_ACU() !== textarea) return fail('control_replaced');
+                actual = textarea.value.replace(/\r\n?/g, '\n');
+            }
+            if (actual !== expected) return fail(assigned === expected ? 'input_changed_value' : 'assignment_mismatch', actual.length);
+            return true;
+        }
+        access = 'jquery';
+        const $textarea = selectHostControl_ACU('#send_textarea');
+        if (!$textarea || typeof $textarea.val !== 'function' || typeof $textarea.trigger !== 'function') return fail('control_unavailable');
+        if (typeof $textarea.length === 'number' && $textarea.length === 0) return fail('control_unavailable');
+        phase = 'assign';
+        $textarea.val(text);
+        const assigned = String($textarea.val() ?? '').replace(/\r\n?/g, '\n');
+        assignedLength = assigned.length;
+        phase = 'notify';
+        notifySendTextareaInput_ACU($textarea);
+        phase = 'verify';
         const actual = String($textarea.val() ?? '').replace(/\r\n?/g, '\n');
-        return actual === expected;
-    } catch {
-        return false;
+        if (actual !== expected) return fail(assigned === expected ? 'input_changed_value' : 'assignment_mismatch', actual.length);
+        return true;
+    } catch (error) {
+        // 不序列化异常 message/stack，第三方异常可能包含用户正文。
+        const errorType: HostInputWriteFailure_ACU['errorType'] = error instanceof TypeError ? 'TypeError'
+            : error instanceof ReferenceError ? 'ReferenceError' : error instanceof RangeError ? 'RangeError'
+            : error instanceof SyntaxError ? 'SyntaxError' : typeof DOMException !== 'undefined' && error instanceof DOMException && error.name === 'AbortError' ? 'AbortError'
+            : error instanceof Error ? 'Error' : 'unknown';
+        return fail('exception', undefined, errorType);
     }
 }
 

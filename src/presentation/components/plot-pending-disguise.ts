@@ -1,6 +1,6 @@
 /** 剧情推进等待期的伪装：只替换等待动画，写入流程与解除伪装相同，展示出问题时退回解除伪装的等待方式。 */
 import { jQuery_API_ACU, SillyTavern_API_ACU } from '../../shared/host-api';
-import { beginHostGenerationUi_ACU, getSendTextareaValue_ACU, setSendTextareaValue_ACU } from '../../shared/host-input';
+import { beginHostGenerationUi_ACU, getSendTextareaValue_ACU, setSendTextareaValue_ACU, type HostInputWriteFailureReporter_ACU } from '../../shared/host-input';
 import { getHostWindow } from '../../shared/runtime-env';
 import { logWarn_ACU } from '../../shared/utils';
 
@@ -409,7 +409,7 @@ function installDisguiseGuards_ACU(doc: Document, onStop?: () => void): () => vo
 
 export interface PlotSendDisguiseHandle_ACU {
   /** 写入交给宿主的最终指令；伪装期间新写的草稿先收起，宿主读走发送框后放回。 */
-  deliver(text: string): boolean;
+  deliver(text: string, reportFailure?: HostInputWriteFailureReporter_ACU): boolean;
   /**
    * 结束伪装，幂等且不抛错。没有交付最终指令时把原文还给发送框：
    * hostReads 表示宿主随后读取发送框继续本次发送（草稿先收起，读走后放回）；
@@ -474,10 +474,10 @@ export function beginPlotSendDisguise_ACU(
   }
 
   const handle: PlotSendDisguiseHandle_ACU = {
-    deliver(text: string): boolean {
-      if (!holdsInput) return setSendTextareaValue_ACU(text);
+    deliver(text: string, reportFailure?: HostInputWriteFailureReporter_ACU): boolean {
+      if (!holdsInput) return setSendTextareaValue_ACU(text, reportFailure, { restoreAfterInput: true });
       const draft = getSendTextareaValue_ACU();
-      if (!setSendTextareaValue_ACU(text)) return false;
+      if (!setSendTextareaValue_ACU(text, reportFailure, { restoreAfterInput: true })) return false;
       holdsInput = false;
       // 最终指令已写入，放回草稿出错不能让调用方当作写入失败而停发。
       if (draft.trim()) {

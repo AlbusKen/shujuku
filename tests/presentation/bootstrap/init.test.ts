@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { HostInputWriteFailureReporter_ACU, HostInputWriteOptions_ACU } from '../../../src/shared/host-input';
 
 const m = vi.hoisted(() => ({
   chatChanged: undefined as undefined | ((name: string) => Promise<void>),
@@ -85,7 +86,8 @@ vi.mock('../../../src/service/runtime/plot-runtime/plot-history-preset', () => (
 vi.mock('../../../src/shared/host-input', async (importOriginal) => ({
   ...await importOriginal<typeof import('../../../src/shared/host-input')>(),
   getSendTextareaValue_ACU: () => m.getInput(),
-  setSendTextareaValue_ACU: (text: string) => m.setInput(text),
+  setSendTextareaValue_ACU: (text: string, reportFailure?: HostInputWriteFailureReporter_ACU, options?: HostInputWriteOptions_ACU) =>
+    m.setInput(text, reportFailure, options),
 
 }));
 vi.mock('../../../src/presentation/components/plot-pending-disguise', async (importOriginal) => ({
@@ -253,7 +255,8 @@ beforeEach(() => {
   document.querySelector('#chat')?.replaceChildren();
   m.getInput.mockImplementation(() => m.input);
   m.setInput.mockImplementation((text: string) => { m.input = text; return true; });
-  m.beginDisguise.mockImplementation(() => ({ deliver: (text: string) => m.setInput(text), release: m.finishDisguise }));
+  m.beginDisguise.mockImplementation(() => ({ deliver: (text: string, reportFailure?: HostInputWriteFailureReporter_ACU) =>
+    m.setInput(text, reportFailure, { restoreAfterInput: true }), release: m.finishDisguise }));
   m.shouldProcessSummary.mockReturnValue(false);
   m.continuationRuntimeInitialize.mockResolvedValue(undefined);
   m.consumeInternalGeneration.mockReturnValue(null);
@@ -761,6 +764,56 @@ describe('mainInitialize_ACU TavernHelper.generate 独立入口契约', () => {
 
 // 钩子由 mainInitialize_ACU 在 beforeAll 时安装（window.TavernHelper 已就绪）。
 describe('发送前处理楼层生命周期', () => {
+  it.each([false, true])('同步input改写675→673后宿主保存完整最终指令（解除伪装=%s）', async unmasked => {
+    m.shouldProcessPlot.mockReturnValue(true);
+    m.settings.plotSendDisguiseDisabled = unmasked;
+    const hostInput = await vi.importActual<typeof import('../../../src/shared/host-input')>('../../../src/shared/host-input');
+    const pendingUi = await vi.importActual<typeof import('../../../src/presentation/components/plot-pending-disguise')>('../../../src/presentation/components/plot-pending-disguise');
+    const input = document.querySelector<HTMLTextAreaElement>('#send_textarea')!;
+    m.input = input.value = '本轮原输入';
+    m.getInput.mockImplementation(() => input.value);
+    m.setInput.mockImplementation((text: string, reportFailure?: HostInputWriteFailureReporter_ACU, options?: HostInputWriteOptions_ACU) => {
+      const written = hostInput.setSendTextareaValue_ACU(text, reportFailure, options);
+      m.input = input.value;
+      return written;
+    });
+    m.beginDisguise.mockImplementation(pendingUi.beginPlotSendDisguise_ACU);
+    const finalMessage = `<plot>${'x'.repeat(662)}</plot>`;
+    const rewrittenLengths: number[] = [];
+    const onInput = () => {
+      if (input.value === finalMessage) {
+        input.value = input.value.slice(0, -2);
+        rewrittenLengths.push(input.value.length);
+      }
+    };
+    input.addEventListener('input', onInput);
+    const previous = { is_user: false, mes: '历史回复' };
+    m.api.chat = [previous];
+    m.strategy2.mockResolvedValueOnce({ action: 'planned', finalMessage });
+    const params: any = {};
+    try {
+      await m.api.eventSource.emit('after_commands', 'normal', params, false);
+      const user = { is_user: true, mes: input.value, name: '用户' };
+      m.input = input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      m.api.chat.push(user);
+      await m.saveChat();
+      await m.api.eventSource.emit('message_sent', 1);
+      m.api.addOneMessage(user);
+      await m.api.eventSource.emit('user_message_rendered', 1);
+      expect(rewrittenLengths).toEqual([673]);
+      expect(params.prompt).toBe(finalMessage);
+      expect(user.mes).toBe(finalMessage);
+      expect(m.persistedChat).toEqual([previous, user]);
+      expect(m.generate).not.toHaveBeenCalled();
+      expect(document.querySelector('#chat [data-acu-virtual-floor]')).toBeNull();
+      const { logError_ACU } = await import('../../../src/shared/utils');
+      expect(logError_ACU).not.toHaveBeenCalled();
+    } finally {
+      input.removeEventListener('input', onInput);
+    }
+  });
+
   it.each([false, true])('发送等待与成功路径遵循伪装开关（解除伪装=%s）', async unmasked => {
     vi.useFakeTimers();
     m.shouldProcessPlot.mockReturnValue(true);
@@ -977,6 +1030,53 @@ describe('发送前处理楼层生命周期', () => {
       await vi.advanceTimersByTimeAsync(0);
     }
     expect(m.generate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [false, 'rejected'], [true, 'rejected'], [false, 'exception'], [true, 'exception'],
+  ])('规划成功但交接%s/%s失败时停发、清理等待展示且诊断不含正文', async (unmasked, failure) => {
+    m.shouldProcessPlot.mockReturnValue(true);
+    m.settings.plotSendDisguiseDisabled = unmasked as boolean;
+    const pendingUi = await vi.importActual<typeof import('../../../src/presentation/components/plot-pending-disguise')>('../../../src/presentation/components/plot-pending-disguise');
+    m.beginDisguise.mockImplementation(pendingUi.beginPlotSendDisguise_ACU);
+    m.input = '本轮原输入';
+    const finalMessage = '不可进入日志的最终正文';
+    m.strategy2.mockResolvedValueOnce({ action: 'planned', finalMessage });
+    const inputWriteFailure = {
+      reason: 'input_changed_value' as const, phase: 'verify' as const, access: 'native' as const,
+      expectedLength: finalMessage.length, assignedLength: finalMessage.length, actualLength: 0,
+    };
+    m.setInput.mockImplementation((text: string, reportFailure?: HostInputWriteFailureReporter_ACU) => {
+      if (text === finalMessage) {
+        if (failure === 'exception') throw new TypeError(`敏感载荷：${finalMessage}`);
+        reportFailure?.(inputWriteFailure);
+        return false;
+      }
+      m.input = text;
+      return true;
+    });
+    const consume = vi.fn();
+    const request = (async () => {
+      await m.api.eventSource.emit('after_commands', 'normal', {}, false);
+      consume(m.input);
+    })();
+    await expect(request).rejects.toMatchObject({ name: 'AbortError' });
+    expect(consume).not.toHaveBeenCalled();
+    expect(m.generate).not.toHaveBeenCalled();
+    expect(m.input).toBe('本轮原输入');
+    expect(m.api.chat).toHaveLength(0);
+    expect(document.querySelector('#chat [data-acu-virtual-floor]')).toBeNull();
+    expect(document.body.dataset.generating).toBeUndefined();
+    const { logError_ACU } = await import('../../../src/shared/utils');
+    expect(logError_ACU).toHaveBeenCalledExactlyOnceWith('[剧情推进] 发送前处理失败:', {
+      phase: 'input_writeback', inputPath: 'pending_input', needsPlan: true,
+      disguised: !unmasked, errorType: failure === 'exception' ? 'TypeError' : 'Error',
+      ...(failure === 'rejected' ? { inputWriteFailure } : {}),
+    });
+    expect(JSON.stringify(vi.mocked(logError_ACU).mock.calls)).not.toContain(finalMessage);
+    expect(JSON.stringify(vi.mocked(logError_ACU).mock.calls)).not.toContain('敏感载荷');
+    const { showToastr_ACU } = await import('../../../src/presentation/theme/toast');
+    expect(showToastr_ACU).toHaveBeenCalledWith('warning', '剧情最终指令未能写入输入框，正文发送已停止。', '剧情推进');
   });
 
   it.each(['textarea', 'floor'])('伪装建不起来（%s）时按解除伪装继续：原文留在输入框，规划照常沿原请求发送', async failure => {
