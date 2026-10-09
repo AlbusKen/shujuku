@@ -137,6 +137,8 @@ export interface AgentModuleFieldPlan_ACU {
   snapshot: AgentModuleSnapshot_ACU;
   accepted: AgentModuleFieldAccepted_ACU[];
   alreadySaved: AgentModuleFieldAccepted_ACU[];
+  /** 只登记同一 INSERT 自身通过校验的业务栏；保存成功后才绑定系统字段拒绝。 */
+  insertRejectionTargets: Array<{ module: Module_ACU; id: string; fields: string[]; rejectedPaths: string[] }>;
   rejected: AgentModuleSqlFieldRejection_ACU[];
   partials: NonNullable<AgentModuleFieldReceipt_ACU['partials']>;
 }
@@ -312,6 +314,7 @@ export function planAgentModuleFieldCommit_ACU(
   const batches = new Map<Module_ACU, AgentModuleSqlFieldBatch_ACU>();
   const accepted: AgentModuleFieldAccepted_ACU[] = [];
   const alreadySaved: AgentModuleFieldAccepted_ACU[] = [];
+  const insertRejectionTargets: AgentModuleFieldPlan_ACU['insertRejectionTargets'] = [];
   const rejected: AgentModuleSqlFieldRejection_ACU[] = [];
   const promotionProblems = new Map<string, string>();
   const reserved = new Set<string>();
@@ -462,7 +465,14 @@ export function planAgentModuleFieldCommit_ACU(
       writes[field] = { value };
       accepted.push({ module, id, field, revision: 0 });
     }
-    if (intent.kind === 'insert') reserved.add(id);
+    if (intent.kind === 'insert') {
+      reserved.add(id);
+      if (intent.rejectedInsertPaths?.length && Object.keys(intent.fields).every(field =>
+        Object.prototype.hasOwnProperty.call(writable, field))) {
+        insertRejectionTargets.push({ module, id, fields: Object.keys(intent.fields),
+          rejectedPaths: [...intent.rejectedInsertPaths] });
+      }
+    }
   }
   const partials: NonNullable<AgentModuleFieldReceipt_ACU['partials']> = [];
   for (const [key, values] of drafts) {
@@ -471,7 +481,7 @@ export function planAgentModuleFieldCommit_ACU(
     partials.push({ module, id, missingFields: AGENT_MODULE_FIELD_MATRIX_ACU[module].required.filter(field => !Object.prototype.hasOwnProperty.call(values, field)),
       ...(promotionProblems.has(key) ? { promotionError: promotionProblems.get(key) } : {}) });
   }
-  return { snapshot: working, batches: [...batches.values()].filter(batch => Object.keys(batch.fieldWrites!).length || Object.keys(batch.domainUpserts!).length || batch.discardPartialIds!.length), accepted, alreadySaved, rejected, partials };
+  return { snapshot: working, batches: [...batches.values()].filter(batch => Object.keys(batch.fieldWrites!).length || Object.keys(batch.domainUpserts!).length || batch.discardPartialIds!.length), accepted, alreadySaved, insertRejectionTargets, rejected, partials };
 }
 
 function confirmedPartials_ACU(fields: AgentModuleFieldSnapshot_ACU, planned: NonNullable<AgentModuleFieldReceipt_ACU['partials']> = []): NonNullable<AgentModuleFieldReceipt_ACU['partials']> {
@@ -653,7 +663,6 @@ export function commitAgentModuleFieldWrites_ACU(input: {
       receipt.rejected.push({ path: 'host', reason: result.reason ?? result.status }); return receipt;
     }
     const confirmed = storage.readFold(input.chat);
-    confirmOperationOnly(confirmed);
     receipt.revisions = confirmed.snapshot.revisions;
     receipt.partials = confirmedPartials_ACU(confirmed.fields, plan.partials);
     receipt.accepted = plan.accepted.map(item => ({
@@ -662,6 +671,24 @@ export function commitAgentModuleFieldWrites_ACU(input: {
       field: item.field,
       revision: confirmed.fields.records[item.module]?.[item.id]?.fields[item.field]?.revision ?? 0,
     }));
+    if (!confirmed.salvaged && confirmed.candidates.every(item => item.valid) && isCurrent()
+      && storage.isActive(input.chat) && verifyRecords_ACU(confirmed.fields, expected)) {
+      for (const target of plan.insertRejectionTargets) {
+        const rejections = parsed.rejected.filter(item => target.rejectedPaths.includes(item.path));
+        // 显式 ID 可能让多语句产生同路径；关联不唯一时不签发身份证明。
+        if (rejections.length !== target.rejectedPaths.length || plan.insertRejectionTargets.some(other =>
+          other !== target && other.rejectedPaths.some(path => target.rejectedPaths.includes(path)))
+          || !target.fields.every(field => receipt.accepted.some(item => item.module === target.module
+            && item.id === target.id && item.field === field))) continue;
+        const record = confirmed.fields.records[target.module]?.[target.id];
+        if (!record || !target.fields.every(field => record.fields[field])) continue;
+        for (const rejection of rejections) {
+          rejection.operationOnlyTarget = { module: target.module, id: target.id,
+            expectedRevision: confirmed.snapshot.revisions[target.module] };
+        }
+      }
+    }
+    confirmOperationOnly(confirmed);
     return receipt;
   }).then(receipt => { syncRevisionWindow_ACU(input.revisionWindow, receipt); return receipt; });
   queue_ACU.set(input.chat, run.then(() => {}, () => {}));

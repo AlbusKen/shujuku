@@ -402,6 +402,25 @@ describe('逐栏 write_sql 意图解析', () => {
     }
   });
 
+  it('同语句 INSERT 的系统字段拒绝只保留关联，解析时不虚构条目身份', () => {
+    const sql = "INSERT INTO hooks (summary) VALUES ('信件'); INSERT INTO info_gap (topic, recent_floor) VALUES ('门后信件', 1); INSERT INTO info_gap (recent_floor) VALUES (1)";
+    const parsed = parseAgentModuleSqlFieldWrites_ACU(sql, 'hook-cognition-maintainer');
+    expect(parsed.intents).toEqual([
+      { kind: 'insert', module: 'hooks', id: '', fields: { summary: '信件' } },
+      { kind: 'insert', module: 'infoGap', id: '', fields: { topic: '门后信件' },
+        rejectedInsertPaths: ['sql[1].info_gap.recent_floor'] },
+    ]);
+    expect(parsed.rejected.map(item => item.path)).toEqual([
+      'sql[1].info_gap.recent_floor', 'sql[2].info_gap.recent_floor', 'sql[2].info_gap',
+    ]);
+    expect(parsed.rejected.every(item => !item.operationOnlyTarget && !item.repairTarget)).toBe(true);
+    const explicit = parseAgentModuleSqlFieldWrites_ACU(
+      "INSERT INTO info_gap (id, topic, recent_floor) VALUES ('E1', '信件', 1)", 'hook-cognition-maintainer');
+    expect(explicit.intents[0].rejectedInsertPaths).toEqual(['infoGap#E1.recent_floor']);
+    expect(explicit.rejected[0].operationOnlyTarget).toBeUndefined();
+    expect(parseAgentModuleSqlFieldWrites_ACU(sql, 'web-researcher').intents).toEqual([]);
+  });
+
   it('严格校验角色、条件与修订号；拒绝的语句不提交', () => {
     const parsed = parseAgentModuleSqlFieldWrites_ACU(
       "UPDATE web_refs SET brief='越权' WHERE id='WR-001' AND expected_revision=0; UPDATE hooks SET summary='有效' WHERE id='H1' AND expected_revision=1 AND scope='bad'; UPDATE hooks SET summary='合法' WHERE id='H1' AND expected_revision=1",

@@ -1072,6 +1072,82 @@ describe('子代理逐栏工具会话', () => {
     } finally { _set_SillyTavern_API_ACU(null as any); }
   });
 
+  it.each((['json', 'tools'] as const).flatMap(toolMode =>
+    (['complete', 'partial', 'repaired', 'legacy', 'sibling-partial'] as const).map(scenario => ({ toolMode, scenario }))))(
+    '$toolMode $scenario 新建信息差系统字段拒绝按权威身份收口，不误清真实缺栏或旧诊断', async ({ toolMode, scenario }) => {
+      const { vi } = await import('vitest');
+      const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');
+      const { commitAgentModuleFieldWrites_ACU } = await import('../../../../src/service/continuation/agent/agent-module-field-commit');
+      const { readAgentModuleSnapshot_ACU, captureAgentModuleCommitBaseline_ACU, writeAgentModuleCommitDelta_ACU } = await import('../../../../src/service/continuation/agent/agent-module-store');
+      const { runContinuationAgentWorkflow_ACU } = await import('../../../../src/service/continuation/agent/agent-workflow');
+      const input = input_ACU(); input.toolMode = toolMode;
+      const chat = input.resolveContext.chat;
+      const saveChat = vi.fn().mockResolvedValue(undefined);
+      _set_SillyTavern_API_ACU({ chat, saveChat } as any);
+      try {
+        const legacy = [{ module: 'hooks' as const, agentName: 'hook-cognition-maintainer', source: 'transaction_rejected' as const,
+          completion: 'failed' as const, attempts: 1, firstFailedAtIndex: 1, rangeStartIndex: 1, rangeEndIndex: 1,
+          acceptedKeys: [], createdAt: 1, updatedAt: 1, lastError: '旧记录无身份',
+          violations: [{ path: 'sql[1].info_gap.recent_floor', message: '旧记录无身份' }] }];
+        if (scenario === 'legacy') {
+          const saved = await writeAgentModuleCommitDelta_ACU(chat, 1, { writes: {}, revisions: {}, pendingFixes: legacy }, Date.now(),
+            folded => folded.snapshot.pendingFixes.length === 1, captureAgentModuleCommitBaseline_ACU(chat));
+          expect(saved.status).toBe('committed');
+        }
+        input.resolveContext.moduleSnapshot = readAgentModuleSnapshot_ACU(chat);
+        input.writeSql = ({ role, sql, isCurrent, revisionWindow }) =>
+          commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role, sql, isCurrent, revisionWindow });
+        const partial = scenario === 'partial' || scenario === 'repaired';
+        const hook = "INSERT INTO hooks (summary, status, importance, planted_index, planned_payoff) VALUES ('门后信件', 'planted', 'mid', 1, '')";
+        const gap = partial ? "INSERT INTO info_gap (topic, recent_floor) VALUES ('门后信件', 1)"
+          : "INSERT INTO info_gap (topic, objective_fact, reader_known, character_knowledge, reveal_status, reveal_index, recent_floor) VALUES ('门后信件', '守门人藏着信件', '读者未见', '[]', 'unrevealed', NULL, 1)";
+        const sql = `${hook}; ${gap}${scenario === 'sibling-partial' ? "; INSERT INTO info_gap (topic) VALUES ('另一封信')" : ''}`;
+        const checked = JSON.stringify({ summary: '核对本轮已保存信息差，撤回系统字段误写' });
+        const writeReply = (value: string, id: string) => toolMode === 'tools'
+          ? nativeToolTurn_ACU('write_sql', { sql: value }, id) : JSON.stringify({ action: 'write_sql', sql: value });
+        const checkedReply = toolMode === 'tools' ? nativeAgentReply_ACU(checked)! : checked;
+        const replies = [writeReply(sql, 'insert-info-gap')];
+        if (scenario === 'repaired') replies.push(writeReply(
+          "UPDATE info_gap SET objective_fact='守门人藏着信件', reader_known='读者未见', character_knowledge='[]', reveal_status='unrevealed', reveal_index=NULL WHERE id='E001' AND expected_revision=1", 'repair-info-gap'));
+        replies.push(checkedReply);
+        const runtime = new AgentSubagentRuntime_ACU({ resolveApiPreset: (() => preset_ACU) as any,
+          callInternalAi: async () => replies.shift() ?? checkedReply });
+        const before = input.resolveContext.moduleSnapshot;
+        const result = await runtime.run(input);
+        const persisted = readAgentModuleSnapshot_ACU(chat);
+        expect(persisted.hooks).toHaveLength(1);
+        expect(persisted.revisions.infoGap).toBe(scenario === 'repaired' ? 2 : 1);
+        expect(result.unresolvedIssues?.some(issue => issue.module === 'hooks')).toBe(false);
+        if (scenario === 'partial' || scenario === 'sibling-partial') {
+          expect(result.completion).toBe('failed');
+          expect(result.unresolvedIssues).toEqual(expect.arrayContaining([expect.objectContaining({ module: 'infoGap',
+            path: `infoGap#${scenario === 'partial' ? 'E001' : 'E002'}.objectiveFact` })]));
+          expect(result.operationOnlyConfirmed).toEqual([]);
+        } else {
+          expect(result.completion).toBe('complete_changed');
+          expect(result.unresolvedIssues).toEqual([]);
+          expect(result.operationOnlyConfirmed).toEqual([expect.objectContaining({ module: 'infoGap', id: 'E001',
+            revision: persisted.revisions.infoGap })]);
+        }
+        const composer = vi.fn(async () => ({ summary: '', instruction: '继续核实信件', constraints: null }));
+        const workflow = await runContinuationAgentWorkflow_ACU({ settings: input.settings, snapshot: before,
+          opening: { focus: '核实信息差', summary: '', dispatchWebResearcher: false }, hasUnsettledHistory: true, settlementStartIndex: 1,
+          beatObligation: false, turnNumber: 1, settledIndex: 1, completedStageNumbers: [], readCommittedSnapshot: () => readAgentModuleSnapshot_ACU(chat),
+          runAgent: async call => call.agentName === 'hook-cognition-maintainer' ? { ok: result.completion !== 'failed', summary: checked, ...result }
+            : { ok: true, summary: '策划完成', planner: { summary: '', recommendation: '继续核实信件', mustPreserve: [], risks: [] } },
+          runComposer: composer, runFinalReview: async () => ({ verdict: 'pass', reason: '', fixes: [] }) as any });
+        if (scenario === 'complete' || scenario === 'repaired') {
+          expect(workflow.outcome).toBe('deliver'); expect(workflow.pendingFixes).toEqual([]);
+          expect(composer).toHaveBeenCalledOnce();
+        } else {
+          expect(workflow.outcome).toBe('escalate'); expect(composer).not.toHaveBeenCalled();
+          if (scenario === 'legacy') expect(workflow.pendingFixes).toEqual(legacy);
+          else expect(workflow.pendingFixes.map(fix => fix.module)).toEqual(['infoGap']);
+        }
+      } finally { _set_SillyTavern_API_ACU(null as any); }
+    });
+
+
 
   it.each(['json', 'tools'] as const)('%s 系统字段操作拒绝后独立核对交付，无业务写入或版本推进', async toolMode => {
     const { vi } = await import('vitest');

@@ -574,6 +574,65 @@ describe('续写逐栏真实提交', () => {
       .toEqual([{ ...fix, source: 'invoke_failed' }]);
   });
 
+  it.each(['complete', 'partial', 'invalid', 'conflict', 'failed-save', 'stale', 'changed-chat', 'changed-swipe', 'ambiguous'] as const)(
+    '%s 新建系统字段拒绝仅由同语句落账及权威回读绑定身份', async scenario => {
+      const { chat, saveChat } = setup();
+      const role = 'hook-cognition-maintainer' as const;
+      const hook = "INSERT INTO hooks (id, summary, status, importance, planted_index, planned_payoff) VALUES ('H1', '信件', 'planted', 'mid', 1, '')";
+      const gap = scenario === 'partial'
+        ? "INSERT INTO info_gap (topic, recent_floor) VALUES ('门后信件', 1)"
+        : `INSERT INTO info_gap (topic, objective_fact, reader_known, character_knowledge, reveal_status, reveal_index, recent_floor${scenario === 'conflict' ? ', expected_revision' : ''}) VALUES ('门后信件', '守门人藏着信件', '读者未见', '[]', '${scenario === 'invalid' ? 'invalid' : 'unrevealed'}', NULL, 1${scenario === 'conflict' ? ', 99' : ''})`;
+      let sql = `${hook}; ${gap}`;
+      if (scenario === 'ambiguous') {
+        const explicit = gap.replace('(topic,', '(id, topic,').replace("VALUES ('门后信件'", "VALUES ('E1', '门后信件'");
+        sql = `${hook}; ${explicit}; ${explicit}`;
+      }
+      let current = true;
+      if (scenario === 'failed-save') saveChat.mockRejectedValueOnce(new Error('disk failure'));
+      if (scenario === 'stale') saveChat.mockImplementationOnce(async () => { current = false; });
+      if (scenario === 'changed-chat') saveChat.mockImplementationOnce(async () => {
+        _set_SillyTavern_API_ACU({ chat: [{ is_user: false, mes: 'new chat' }], saveChat } as any);
+      });
+      if (scenario === 'changed-swipe') {
+        chat[1].swipe_id = 0;
+        saveChat.mockImplementationOnce(async () => { chat[1].swipe_id = 1; });
+      }
+      try {
+        const receipt = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role, sql,
+          isCurrent: () => current });
+        const issue = receipt.rejected.find(item => item.path === (scenario === 'ambiguous'
+          ? 'infoGap#E1.recent_floor' : 'sql[1].info_gap.recent_floor'))!;
+        expect(issue.reason).toContain('白名单');
+        if (scenario === 'complete' || scenario === 'partial') {
+          expect(receipt.status).toBe('committed');
+          expect(issue.operationOnlyTarget).toEqual({ module: 'infoGap', id: 'E001', expectedRevision: 1 });
+          expect(readAgentModuleFieldSnapshot_ACU(chat).records.infoGap?.E001.status)
+            .toBe(scenario === 'complete' ? 'complete' : 'partial');
+          if (scenario === 'complete') {
+            expect(receipt.operationOnlyConfirmed).toEqual([{ module: 'infoGap', id: 'E001', revision: 1,
+              rejectedPaths: ['sql[1].info_gap.recent_floor'] }]);
+            expect(readAgentModuleSnapshot_ACU(chat).infoGap[0].id).toBe('E001');
+            expect(receipt.partials).toEqual([]);
+          } else {
+            expect(receipt.operationOnlyConfirmed).toBeUndefined();
+            expect(receipt.partials).toEqual([expect.objectContaining({ module: 'infoGap', id: 'E001',
+              missingFields: expect.arrayContaining(['objectiveFact', 'readerKnown', 'characterKnowledge', 'revealStatus']) })]);
+          }
+        } else {
+          expect(issue.operationOnlyTarget).toBeUndefined();
+          expect(receipt.operationOnlyConfirmed).toBeUndefined();
+          if (scenario === 'conflict') expect(receipt.rejected.some(item => item.reason.includes('revision_conflict'))).toBe(true);
+          if (scenario === 'failed-save') expect(receipt.status).toBe('persist_failed');
+          if (['stale', 'changed-chat', 'changed-swipe'].includes(scenario)) expect(receipt.status).toBe('readback_failed');
+        }
+        const { reconcileAgentOperationOnlyPending_ACU } = await import('../../../../src/service/continuation/agent/agent-module-field-commit');
+        const legacy = { module: 'hooks' as const, agentName: role, source: 'transaction_rejected' as const,
+          attempts: 1, firstFailedAtIndex: 1, lastError: '旧诊断',
+          violations: [{ path: 'sql[1].info_gap.recent_floor', message: issue.reason }] };
+        expect(reconcileAgentOperationOnlyPending_ACU([legacy], receipt.operationOnlyConfirmed ?? [])).toEqual([legacy]);
+      } finally { _set_SillyTavern_API_ACU(null as any); }
+    });
+
 
   it('完整条目退役经领域校验并在保存后回读', async () => {
     const { chat } = setup();

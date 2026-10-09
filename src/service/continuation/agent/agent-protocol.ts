@@ -1167,6 +1167,8 @@ export interface AgentModuleSqlFieldIntent_ACU {
   /** 省略时由提交规划按当前模块修订号补上。新行 INSERT 会补 0。 */
   expectedRevision?: number;
   reason?: string;
+  /** 仅关联本次解析内同一 INSERT 的系统字段拒绝；提交后才可绑定实际条目身份。 */
+  rejectedInsertPaths?: string[];
   /** 只能由本次 web-researcher 已抓取的页面句柄回填，不允许模型手写来源。 */
   pageRef?: string;
 }
@@ -1174,7 +1176,7 @@ export interface AgentModuleSqlFieldIntent_ACU {
 export interface AgentModuleSqlFieldRejection_ACU {
   path: string;
   reason: string;
-  /** 纯系统字段 UPDATE 未生成业务意图；提交口仍须核实目标完整及当前修订号。 */
+  /** 被拒系统操作的明确目标；INSERT 只能由提交口在保存并权威回读后绑定。 */
   operationOnlyTarget?: { module: AgentWritableModule_ACU; id: string; expectedRevision: number };
   /** 只关联后续纠错，不参与写入；目标必须唯一匹配且所有对应栏目均有确认回执。 */
   repairTarget?: { module: AgentWritableModule_ACU; column: string; value: RestrictedSqlValue_ACU; fields: string[] };
@@ -1308,7 +1310,13 @@ export function parseAgentModuleSqlFieldWrites_ACU(sql: string, role: AgentModul
         }
       }
     }
-    result.intents.push({ kind: statement.kind, module, id: typeof id === 'string' ? id.trim() : '', fields, ...(typeof revision === 'number' ? { expectedRevision: revision } : {}), ...(pageRef ? { pageRef } : {}) });
+    const rejectedInsertPaths = statement.kind === 'insert' && ['hooks', 'info_gap', 'chronology'].includes(statement.table)
+      ? result.rejected.slice(rejectionStart).filter(item => item.path === `${path}.recent_floor`
+        || (typeof id === 'string' && item.path === `${module}#${id.trim()}.recent_floor`)).map(item => item.path)
+      : [];
+    result.intents.push({ kind: statement.kind, module, id: typeof id === 'string' ? id.trim() : '', fields,
+      ...(typeof revision === 'number' ? { expectedRevision: revision } : {}), ...(pageRef ? { pageRef } : {}),
+      ...(rejectedInsertPaths.length ? { rejectedInsertPaths } : {}) });
   });
   return result;
 }
