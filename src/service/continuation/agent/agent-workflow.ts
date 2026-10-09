@@ -7,10 +7,11 @@
 
 import { ContinuationValidationError_ACU } from '../model';
 import type { ContinuationSettings_ACU } from '../model';
-import { reconcileAgentFieldPending_ACU, reconcileAgentOperationOnlyPending_ACU, type AgentModuleFieldReceipt_ACU } from './agent-module-field-commit';
+import { reconcileAgentFieldPending_ACU, reconcileAgentOperationOnlyPending_ACU, reconcileAgentEmptyPatchPending_ACU, type AgentModuleFieldReceipt_ACU } from './agent-module-field-commit';
 import {
   AGENT_INSTRUCTION_COMPOSER_NAME_ACU,
   type AgentComposerOutput_ACU,
+  type AgentEmptyPatchConfirmation_ACU,
   type AgentFinalReviewerOutput_ACU,
   type AgentMaterialCompletionState_ACU,
   type AgentMaintainerOutput_ACU,
@@ -44,6 +45,8 @@ export interface ContinuationWorkflowAgentCall_ACU {
   prompt: string;
   billing: ContinuationWorkflowBilling_ACU;
   targetModules?: AgentWritableModule_ACU[];
+  /** 工作流尚未统一持久化的待修身份；资料状态仍从权威帧核实。 */
+  pendingFixes?: readonly AgentPendingFix_ACU[];
 }
 
 export interface ContinuationWorkflowUnresolvedIssue_ACU {
@@ -52,6 +55,8 @@ export interface ContinuationWorkflowUnresolvedIssue_ACU {
   path: string;
   message: string;
   id?: string;
+  rejectionKind?: 'empty_patch';
+  revision?: number;
 }
 
 export interface ContinuationWorkflowAgentPayload_ACU {
@@ -71,6 +76,7 @@ export interface ContinuationWorkflowAgentPayload_ACU {
   acceptedKeys?: string[];
   usedFieldWrites?: boolean;
   operationOnlyConfirmed?: AgentModuleFieldReceipt_ACU['operationOnlyConfirmed'];
+  emptyPatchConfirmed?: AgentEmptyPatchConfirmation_ACU[];
   fieldConfirmation?: { keys: string[]; revisions: AgentModuleRevisions_ACU };
 }
 
@@ -165,9 +171,9 @@ function recordWorkflowIssues_ACU(
 ): AgentModuleSnapshot_ACU {
   if (!issues.length) return snapshot;
   const now = Date.now();
-  const pending = snapshot.pendingFixes.map(item => ({
+  const pending: AgentPendingFix_ACU[] = snapshot.pendingFixes.map(item => ({
     ...item,
-    violations: item.violations.map(violation => ({ ...violation })),
+    violations: item.violations.map(violation => ({ ...violation, source: violation.source ?? item.source })),
     acceptedKeys: [...(item.acceptedKeys ?? [])],
   }));
   const byModule = new Map<AgentWritableModule_ACU, ContinuationWorkflowUnresolvedIssue_ACU[]>();
@@ -182,7 +188,10 @@ function recordWorkflowIssues_ACU(
     const accepted = acceptedKeysForModule_ACU(acceptedKeys, module);
     const paths = new Set(moduleIssues.map(issue => issue.path));
     const violations = [...(previous?.violations ?? []).filter(issue => !paths.has(issue.path)),
-      ...moduleIssues.map(issue => ({ path: issue.path, message: issue.message }))];
+      ...moduleIssues.map(issue => ({ path: issue.path, message: issue.message, source: issue.source,
+        ...(issue.id ? { id: issue.id } : {}),
+        ...(issue.rejectionKind ? { rejectionKind: issue.rejectionKind } : {}),
+        ...(issue.revision !== undefined ? { revision: issue.revision } : {}) }))];
     const next: AgentPendingFix_ACU = {
       module,
       agentName: agentName || previous?.agentName || '',
@@ -251,6 +260,43 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
     ?? (pendingRangeStarts.length ? Math.min(...pendingRangeStarts) : Math.max(0, snapshot.settledThroughIndex + 1));
   const settlementEndIndex = input.settledIndex;
   const previousCompletion = snapshot.materialCompletion;
+  let committedPending = input.snapshot.pendingFixes;
+  const refreshCommitted_ACU = (preservePending: boolean): void => {
+    if (!input.readCommittedSnapshot) return;
+    const committed = input.readCommittedSnapshot();
+    if (!preservePending) {
+      snapshot = committed;
+    } else {
+      const pendingFixes = [...snapshot.pendingFixes];
+      const sameIssue = (left: AgentPendingFix_ACU['violations'][number], leftSource: AgentPendingFixSource_ACU,
+        right: AgentPendingFix_ACU['violations'][number], rightSource: AgentPendingFixSource_ACU): boolean =>
+        left.path === right.path && left.message === right.message && left.id === right.id
+        && (left.source ?? leftSource) === (right.source ?? rightSource)
+        && left.rejectionKind === right.rejectionKind && left.revision === right.revision;
+      for (const fix of committed.pendingFixes) {
+        const previous = committedPending.find(item => item.module === fix.module);
+        const added = fix.violations.filter(issue => !previous?.violations.some(old =>
+          sameIssue(issue, fix.source, old, previous.source)));
+        if (previous && !added.length) continue;
+        const index = pendingFixes.findIndex(item => item.module === fix.module);
+        if (index < 0) { pendingFixes.push({ ...fix, violations: added }); continue; }
+        const current = pendingFixes[index];
+        const violations = [...current.violations.map(issue => ({ ...issue, source: issue.source ?? current.source })),
+          ...added.filter(issue => !current.violations.some(old => sameIssue(issue, fix.source, old, current.source)))
+            .map(issue => ({ ...issue, source: issue.source ?? fix.source }))];
+        pendingFixes[index] = { ...current, violations,
+          attempts: Math.max(current.attempts, fix.attempts),
+          firstFailedAtIndex: Math.min(current.firstFailedAtIndex, fix.firstFailedAtIndex),
+          rangeStartIndex: Math.min(current.rangeStartIndex, fix.rangeStartIndex),
+          rangeEndIndex: Math.max(current.rangeEndIndex, fix.rangeEndIndex),
+          acceptedKeys: [...new Set([...current.acceptedKeys, ...fix.acceptedKeys])],
+          lastError: violations.map(issue => issue.message).join('；') || current.lastError,
+          updatedAt: Math.max(current.updatedAt, fix.updatedAt) };
+      }
+      snapshot = { ...committed, pendingFixes };
+    }
+    committedPending = committed.pendingFixes;
+  };
   // 事务的旧路径会按模块清账；本轮未覆盖的缺口必须原样保留。
   const outsidePending = snapshot.pendingFixes.filter(item => !pendingWithinSettlement_ACU(item, settlementStartIndex, settlementEndIndex));
   const restoreOutsidePending_ACU = () => {
@@ -277,8 +323,13 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
 
   const runSafe_ACU = async (call: ContinuationWorkflowAgentCall_ACU): Promise<ContinuationWorkflowAgentPayload_ACU> => {
     try {
-      const result = await input.runAgent(call);
-      if ((result.usedFieldWrites || result.acceptedKeys?.length || result.operationOnlyConfirmed?.length) && input.readCommittedSnapshot) snapshot = input.readCommittedSnapshot();
+      const result = await input.runAgent({ ...call,
+        ...(call.agentName === MAINTAINER_NAME_ACU ? { pendingFixes: snapshot.pendingFixes.filter(fix =>
+          pendingWithinSettlement_ACU(fix, settlementStartIndex, settlementEndIndex)) } : {}) });
+      if ((result.usedFieldWrites || result.acceptedKeys?.length || result.operationOnlyConfirmed?.length || result.emptyPatchConfirmed?.length) && input.readCommittedSnapshot) {
+        // 保留本轮未持久化的诊断与清偿，只合入权威待修记录相对上次回读的新增项。
+        refreshCommitted_ACU(!!call.targetModules);
+      }
       return result;
     } catch (error) {
       if (isStale_ACU(error)) throw error;
@@ -327,7 +378,7 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
     : null;
   const [web, firstMaintainerResult] = await Promise.all([openingWeb, firstMaintainer]);
   // 并发批次落定后统一回读权威快照：任一方的逐栏写入都不会被另一方的旧快照覆盖。
-  if (input.readCommittedSnapshot) snapshot = input.readCommittedSnapshot();
+  refreshCommitted_ACU(false);
 
   if (web) {
     steps.push({ agentName: WEB_NAME_ACU, status: web.ok ? 'ok' : 'failed', summary: web.summary });
@@ -384,9 +435,12 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
           .filter(([, state]) => state === 'complete_changed' || state === 'complete_no_change')
           .map(([module]) => module));
         const unresolvedModules = new Set(issues.map(item => item.module));
-        snapshot = { ...snapshot, pendingFixes: snapshot.pendingFixes.filter(item => item.source !== 'invoke_failed'
-          || !completed.has(item.module) || unresolvedModules.has(item.module)
-          || !pendingWithinSettlement_ACU(item, settlementStartIndex, settlementEndIndex)) };
+        snapshot = { ...snapshot, pendingFixes: snapshot.pendingFixes.flatMap(item => {
+          if (!completed.has(item.module) || unresolvedModules.has(item.module)
+            || !pendingWithinSettlement_ACU(item, settlementStartIndex, settlementEndIndex)) return [item];
+          const violations = item.violations.filter(issue => (issue.source ?? item.source) !== 'invoke_failed');
+          return violations.length === item.violations.length ? [item] : violations.length ? [{ ...item, violations }] : [];
+        }) };
       }
       if (maintainer.ok && !issues.length && maintainer.operationOnlyConfirmed?.length) {
         const proofs = maintainer.operationOnlyConfirmed.filter(proof => writes.includes(proof.module)
@@ -396,6 +450,13 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
           if (!within.includes(fix)) return [fix];
           return reconcileAgentOperationOnlyPending_ACU([fix], proofs);
         }) };
+      }
+      if (maintainer.ok && !issues.length && maintainer.emptyPatchConfirmed?.length) {
+        const proofs = maintainer.emptyPatchConfirmed.filter(proof => writes.includes(proof.module)
+          && snapshot.revisions[proof.module] === proof.revision);
+        snapshot = { ...snapshot, pendingFixes: snapshot.pendingFixes.flatMap(fix =>
+          pendingWithinSettlement_ACU(fix, settlementStartIndex, settlementEndIndex)
+            ? reconcileAgentEmptyPatchPending_ACU([fix], proofs) : [fix]) };
       }
       const transactionPending = snapshot.pendingFixes.filter(item => writes.includes(item.module)
         && pendingWithinSettlement_ACU(item, settlementStartIndex, settlementEndIndex));
@@ -460,7 +521,7 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
         prompt: [
           `上一轮资料写入仍有待修复项（第 ${repairAttempts} 次定向修正）：`,
           formatFixes_ACU(repairPending),
-          '只修复上述模块和字段；不要重发已成功保存的其它模块。先 read 对应权威模块，再提交最小 write_sql；仍无法确定时明确返回 unresolvedIssues。',
+          '只修复上述模块和字段；不要重发已成功保存的其它模块。先核对本次注入的资料与回执；确需补读且本次读取授权仍有额度时，再 read 对应权威地址。额度已用尽时不重复 read、不把读取限制解释为没有写权限；已有证据足够才提交最小 write_sql，否则如实交付未确认缺口。空 patch 不代表资料损坏，无业务变化时独立交付核对结果，不重发空 patch 或空操作。',
         ].join('\n'),
       });
     }

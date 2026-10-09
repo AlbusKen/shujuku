@@ -225,7 +225,8 @@ describe('续写固定工作流', () => {
     expect(failedMaintainerCalls[1].prompt).toContain('hooks#H1.status: 缺栏');
     expect(failedCalls.every(call => call.billing !== 'repair')).toBe(true);
     expect(failedResult).toMatchObject({ outcome: 'escalate', escalationKind: 'pending_fix' });
-    expect(failedResult.pendingFixes[0].violations).toContainEqual({ path: 'hooks#H1.status', message: '缺栏' });
+    expect(failedResult.pendingFixes[0].violations).toContainEqual({ path: 'hooks#H1.status', message: '缺栏', source: 'missing_field' });
+    expect(failedMaintainerCalls[1].prompt).toContain('额度已用尽时不重复 read');
   });
 
   it('策划完整交接进入初次编排和终审修订，失败策划不作为建议', async () => {
@@ -306,10 +307,48 @@ describe('续写固定工作流', () => {
       } else {
         expect(result.outcome).toBe('escalate'); expect(result.snapshot.settledThroughIndex).toBe(4);
         if (scenario === 'legacy') expect(result.pendingFixes[0].violations).toEqual([fix.violations[1]]);
-        else if (scenario === 'new-issue') expect(result.pendingFixes[0].violations).toEqual([{ path: 'hooks#H1.status', message: '新缺栏' }]);
+        else if (scenario === 'new-issue') expect(result.pendingFixes[0].violations).toEqual([{ path: 'hooks#H1.status', message: '新缺栏', source: 'transaction_rejected' }]);
         else expect(result.pendingFixes[0].violations).toEqual(fix.violations);
       }
     }
+    const seed = snapshot_ACU({ pendingFixes: [{ module: 'hooks', agentName: 'hook-cognition-maintainer',
+      source: 'transaction_rejected', completion: 'failed', attempts: 1, firstFailedAtIndex: 5,
+      lastError: '旧字段拒绝', rangeStartIndex: 5, rangeEndIndex: 6, acceptedKeys: [], createdAt: 1, updatedAt: 1,
+      violations: [{ path: 'hooks#H1.summary', message: '旧字段拒绝', source: 'transaction_rejected' }] }] });
+    let committed = seed;
+    const repairCalls: ContinuationWorkflowAgentCall_ACU[] = [];
+    const settings = buildDefaultContinuationSettings_ACU(); settings.workflow.reviseLimit = 2;
+    const h = harness_ACU({ settings, snapshot: seed, settlementStartIndex: 5,
+      readCommittedSnapshot: () => committed,
+      runAgent: async call => {
+        if (call.agentName !== 'hook-cognition-maintainer') return { ok: true, summary: '建议' };
+        repairCalls.push(call);
+        if (repairCalls.length === 1) return { ok: false, summary: '新状态拒绝', writes: ['hooks'],
+          unresolvedIssues: [{ module: 'hooks', source: 'contract_rejected', id: 'H1',
+            path: 'hooks#H1.status', message: '新状态拒绝', revision: 0 }] };
+        if (repairCalls.length === 2) {
+          // 回读含新拒绝，同时仍带着尚未持久化清偿的旧 summary 拒绝。
+          committed = { ...committed, pendingFixes: [{ ...seed.pendingFixes[0],
+            violations: [...seed.pendingFixes[0].violations,
+              { path: 'hooks#H2.importance', message: '其他条目新拒绝', source: 'transaction_rejected' }] }] };
+        }
+        return { ok: true, summary: 'summary 已确认', writes: ['hooks'], usedFieldWrites: true,
+          completion: 'complete_changed', moduleCompletion: { hooks: 'complete_changed' },
+          acceptedKeys: ['hooks:H1:summary'],
+          fieldConfirmation: { keys: ['hooks:H1:summary'], revisions: committed.revisions }, unresolvedIssues: [] };
+      } });
+    const result = await h.run();
+    expect(repairCalls).toHaveLength(3);
+    expect(repairCalls[1].pendingFixes?.[0].violations).toContainEqual(expect.objectContaining({
+      path: 'hooks#H1.status', id: 'H1', source: 'contract_rejected', revision: 0,
+    }));
+    expect(result.outcome).toBe('escalate');
+    expect(result.snapshot.settledThroughIndex).toBe(4);
+    expect(result.pendingFixes[0].violations).toEqual([
+      { path: 'hooks#H1.status', message: '新状态拒绝', id: 'H1', source: 'contract_rejected', revision: 0 },
+      { path: 'hooks#H2.importance', message: '其他条目新拒绝', source: 'transaction_rejected' },
+    ]);
+
   });
 
 

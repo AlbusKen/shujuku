@@ -126,6 +126,17 @@ describe('Agent 资料快照存储', () => {
       schemaVersion: 2,
       pendingFixes: [{ module: 'hooks', agentName: 'hook-cognition-maintainer', violations: [{ path: 'hooks', message: 'title 不能为空' }], attempts: 1, firstFailedAtIndex: 2, lastError: 'title 不能为空' }],
     })!.pendingFixes).toHaveLength(1);
+    const violation = { path: 'hooks#H1.emptyPatch', message: '空 patch 未写入', id: 'H1',
+      source: 'contract_rejected' as const, rejectionKind: 'empty_patch' as const, revision: 1 };
+    const withIssue = { ...legacy, schemaVersion: 2, pendingFixes: [{ module: 'hooks',
+      agentName: 'hook-cognition-maintainer', violations: [violation], attempts: 1,
+      firstFailedAtIndex: 2, lastError: violation.message }] };
+    expect(validateAgentModuleSnapshot_ACU(withIssue)!.pendingFixes[0].violations).toEqual([violation]);
+    for (const invalid of [{ id: '' }, { source: 'unknown' }, { rejectionKind: 'unknown' },
+      { revision: -1 }, { path: 'hooks[0]' }, { revision: undefined }]) {
+      expect(validateAgentModuleSnapshot_ACU({ ...withIssue,
+        pendingFixes: [{ ...withIssue.pendingFixes[0], violations: [{ ...violation, ...invalid }] }] })).toBeNull();
+    }
     const chat: any[] = [{ mes: 'a', [AGENT_MODULE_FIELD_ACU]: legacy }];
     expect(readAgentModuleSnapshot_ACU(chat).pendingFixes).toEqual([]);
     expect(readAgentModuleSnapshot_ACU(chat).schemaVersion).toBe(AGENT_MODULE_SCHEMA_VERSION_ACU);

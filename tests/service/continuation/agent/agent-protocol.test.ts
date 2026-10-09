@@ -7,6 +7,7 @@ import {
   parseAgentMainAction_ACU,
   parseAgentMainOutput_ACU,
   parseAgentMaintainerOutput_ACU,
+  parseAgentMaintainerOutputDraft_ACU,
   parseAgentResearcherOutput_ACU,
   parseAgentPlannerOutput_ACU,
   parseAgentReviewerOutput_ACU,
@@ -153,6 +154,14 @@ describe('主 Agent 动作解析', () => {
     expect(() => parseAgentMaintainerOutput_ACU({ delta: { hooks: [{ action: 'patch', id: 'H1' }] } })).toThrowError(/至少要带一个要修改的字段/);
     expect(() => parseAgentMaintainerOutput_ACU({ delta: { hooks: [{ action: 'patch', summary: '缺 id' }] } })).toThrowError(/patch 需要 id/);
     expect(() => parseAgentMaintainerOutput_ACU({ delta: { infoGap: [{ action: 'patch', id: 'E1', revealStatus: '瞎写' }] } })).toThrowError(/revealStatus 非法/);
+    const rejected = parseAgentMaintainerOutputDraft_ACU({ summary: '待修', delta: {
+      hooks: [{ action: 'patch', id: 'H004' }, { action: 'patch', id: 'H005', status: 'invalid' },
+        { action: 'patch', id: 'H006', summary: 42 }],
+    } }).rejected;
+    expect(rejected[0]).toMatchObject({ module: 'hooks', id: 'H004', rejectionKind: 'empty_patch' });
+    expect(rejected[1]).toMatchObject({ id: 'H005', field: 'status' });
+    expect(rejected[1].rejectionKind).toBeUndefined();
+    expect(rejected[2].rejectionKind).toBeUndefined();
   });
 
   it('总纲写集保留卷完成依据与续卷依据，并拒绝非法完成阶段编号', () => {

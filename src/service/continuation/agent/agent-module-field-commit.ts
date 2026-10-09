@@ -7,6 +7,7 @@ import {
   type AgentModuleDelta_ACU, type AgentModuleFieldRecord_ACU, type AgentModuleFieldSnapshot_ACU,
   type AgentModuleFloorDelta_ACU, type AgentModuleSnapshot_ACU, type AgentModuleWriterRole_ACU,
   type AgentWebRefEntry_ACU, type AgentWritableModule_ACU, type AgentResearcherOutput_ACU,
+  type AgentEmptyPatchConfirmation_ACU,
 } from './agent-model';
 import { foldAgentModuleSnapshot_ACU, planAgentModuleCommitDelta_ACU, readMessageSwipeId_ACU } from './agent-module-frame';
 import { materializeAgentModuleSqlView_ACU, type AgentModuleSqlFieldBatch_ACU } from './agent-module-sql-view';
@@ -61,8 +62,9 @@ export function reconcileAgentOperationOnlyPending_ACU(
     .map(item => `hooks#${item.id}.operationOnly`));
   if (!resolved.size) return fixes;
   return fixes.flatMap(fix => {
-    if (fix.module !== 'hooks' || fix.source !== 'transaction_rejected') return [fix];
+    if (fix.module !== 'hooks') return [fix];
     const violations = fix.violations.filter(issue => !resolved.has(issue.path)
+      || (issue.source ?? fix.source) !== 'transaction_rejected'
       || issue.message !== AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU);
     return violations.length === fix.violations.length ? [fix] : violations.length ? [{ ...fix, violations }] : [];
   });
@@ -82,8 +84,50 @@ export function reconcileAgentFieldPending_ACU(
     confirmed.add(`${module}#${id}.${field}`);
   }
   return fixes.flatMap(fix => {
-    if (fix.source !== 'transaction_rejected' && fix.source !== 'contract_rejected') return [fix];
-    const violations = fix.violations.filter(issue => !issue.path.startsWith(`${fix.module}#`) || !confirmed.has(issue.path));
+    const violations = fix.violations.filter(issue => !['transaction_rejected', 'contract_rejected'].includes(issue.source ?? fix.source)
+      || !issue.path.startsWith(`${fix.module}#`) || !confirmed.has(issue.path));
+    return violations.length === fix.violations.length ? [fix] : violations.length ? [{ ...fix, violations }] : [];
+  });
+}
+
+/** 仅为已知空 patch 核实完整目标；调用方还须确认帧完整、租约有效及本轮没有新拒绝。 */
+export function confirmAgentEmptyPatchPending_ACU(
+  snapshot: AgentModuleSnapshot_ACU,
+  fields: AgentModuleFieldSnapshot_ACU,
+  window: AgentModuleRevisionWindow_ACU,
+  additional: ReadonlyArray<{ module: AgentWritableModule_ACU; id: string; revision: number }> = [],
+): AgentEmptyPatchConfirmation_ACU[] {
+  const targets = [...additional, ...snapshot.pendingFixes.flatMap(fix => fix.violations.flatMap(issue =>
+    (issue.source ?? fix.source) === 'contract_rejected' && issue.rejectionKind === 'empty_patch'
+      && issue.id && issue.path === `${fix.module}#${issue.id}.emptyPatch` && issue.revision !== undefined
+      ? [{ module: fix.module, id: issue.id, revision: issue.revision }] : []))];
+  const proofs = new Map<string, AgentEmptyPatchConfirmation_ACU>();
+  for (const target of targets) {
+    const module = target.module;
+    if (module !== 'hooks' && module !== 'infoGap' && module !== 'storyArc' && module !== 'chronology') continue;
+    const version = window[module];
+    if (!target.id || /[.#:]/.test(target.id) || !Number.isInteger(target.revision) || target.revision < 0
+      || !version || version.base !== target.revision || version.head !== snapshot.revisions[module]) continue;
+    const row = snapshot[module].find(item => item.id === target.id);
+    const record = fields.records[module]?.[target.id];
+    if (!row || row.retired || (record && record.status !== 'complete')) continue;
+    proofs.set(`${module}:${target.id}:${target.revision}`, { module, id: target.id,
+      rejectedRevision: target.revision, revision: snapshot.revisions[module] });
+  }
+  return [...proofs.values()];
+}
+
+/** 空操作撤回不代表业务写入；只有匹配条目及拒绝版本的权威证明可以清账。 */
+export function reconcileAgentEmptyPatchPending_ACU(
+  fixes: import('./agent-model').AgentPendingFix_ACU[],
+  confirmed: readonly AgentEmptyPatchConfirmation_ACU[],
+): import('./agent-model').AgentPendingFix_ACU[] {
+  return fixes.flatMap(fix => {
+    const violations = fix.violations.filter(issue => (issue.source ?? fix.source) !== 'contract_rejected'
+      || issue.rejectionKind !== 'empty_patch' || !issue.id
+      || issue.path !== `${fix.module}#${issue.id}.emptyPatch`
+      || !confirmed.some(proof => proof.module === fix.module && proof.id === issue.id
+        && proof.rejectedRevision === issue.revision));
     return violations.length === fix.violations.length ? [fix] : violations.length ? [{ ...fix, violations }] : [];
   });
 }

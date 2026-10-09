@@ -67,7 +67,7 @@ import { planAgentHistoryCompaction_ACU } from './agent-history-compactor';
 import type { AgentConversationCompactionMarkV2_ACU } from './agent-model';
 import { renderAgentTableCatalog_ACU } from './agent-tables';
 import { applyAgentConstraintRegistrationViaSql_ACU, applyAgentModuleDeltaViaSql_ACU, applyAgentWebRefsDeltaViaSql_ACU, mergeAgentDeltaRevisions_ACU } from './agent-transaction';
-import { commitAgentModuleFieldWrites_ACU, hostAgentModuleCommitStorage_ACU, reconcileAgentFieldPending_ACU, reconcileAgentOperationOnlyPending_ACU, type AgentModuleCommitStorage_ACU, type AgentFieldPage_ACU, type AgentModuleRevisionWindow_ACU } from './agent-module-field-commit';
+import { commitAgentModuleFieldWrites_ACU, hostAgentModuleCommitStorage_ACU, reconcileAgentFieldPending_ACU, reconcileAgentOperationOnlyPending_ACU, reconcileAgentEmptyPatchPending_ACU, type AgentModuleCommitStorage_ACU, type AgentFieldPage_ACU, type AgentModuleRevisionWindow_ACU } from './agent-module-field-commit';
 import { readMessageSwipeId_ACU } from './agent-module-frame';
 import { correctAgentMaterials_ACU, renderAgentCorrectionGuide_ACU } from './agent-main-correction';
 import { compactAgentProtocolError_ACU, parseAgentMainAction_ACU, parseAgentMainOutput_ACU, parseAgentToolCall_ACU } from './agent-protocol';
@@ -1964,6 +1964,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       acceptedKeys: result.acceptedKeys,
       usedFieldWrites: result.usedFieldWrites,
       operationOnlyConfirmed: result.operationOnlyConfirmed,
+      emptyPatchConfirmed: result.emptyPatchConfirmed,
       fieldConfirmation: result.fieldConfirmation,
       noChange: result.completion === 'complete_no_change',
     });
@@ -1999,8 +2000,9 @@ export class ContinuationAgentTurnPlanner_ACU {
           toolMode,
           roundId: session.turnKey,
           targetModules: call.targetModules,
+          pendingFixes: call.pendingFixes,
           settings: request.settings,
-          resolveContext: context,
+          resolveContext: { ...context, moduleSnapshot: this.dependencies.readModuleSnapshot(chat) },
           budget,
           preset,
           createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
@@ -2386,7 +2388,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       throw stale.error;
     }
 
-    let nextSnapshot = settled.some(item => item.result?.usedFieldWrites || item.result?.operationOnlyConfirmed?.length)
+    let nextSnapshot = settled.some(item => item.result?.usedFieldWrites || item.result?.operationOnlyConfirmed?.length || item.result?.emptyPatchConfirmed?.length)
       ? this.dependencies.readModuleSnapshot(chat) : snapshot;
     let snapshotChanged = false;
 
@@ -2408,6 +2410,19 @@ export class ContinuationAgentTurnPlanner_ACU {
           fix.rangeStartIndex >= selection.startIndex && fix.rangeEndIndex <= chat.length - 1
             && fix.rangeStartIndex >= 0 && fix.rangeEndIndex >= fix.rangeStartIndex
             ? reconcileAgentFieldPending_ACU([fix], keys) : [fix]);
+        if (JSON.stringify(pendingFixes) !== JSON.stringify(nextSnapshot.pendingFixes)) {
+          nextSnapshot = { ...nextSnapshot, pendingFixes };
+          snapshotChanged = true;
+        }
+      }
+      if (result.completion !== 'failed' && result.completion !== 'partial' && !result.unresolvedIssues?.length && result.emptyPatchConfirmed?.length) {
+        const proofs = result.emptyPatchConfirmed.filter(proof => result.writes.includes(proof.module)
+          && nextSnapshot.revisions[proof.module] === proof.revision);
+        const selection = resolveAgentUnsettledStoryWindow_ACU(context);
+        const pendingFixes = nextSnapshot.pendingFixes.flatMap(fix =>
+          fix.rangeStartIndex >= selection.startIndex && fix.rangeEndIndex <= chat.length - 1
+            && fix.rangeStartIndex >= 0 && fix.rangeEndIndex >= fix.rangeStartIndex
+            ? reconcileAgentEmptyPatchPending_ACU([fix], proofs) : [fix]);
         if (JSON.stringify(pendingFixes) !== JSON.stringify(nextSnapshot.pendingFixes)) {
           nextSnapshot = { ...nextSnapshot, pendingFixes };
           snapshotChanged = true;

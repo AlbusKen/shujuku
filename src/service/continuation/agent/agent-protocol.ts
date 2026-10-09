@@ -695,16 +695,16 @@ function parseHookPatch_ACU(raw: Record<string, unknown>, index: number): AgentH
   if (typeof raw.summary === 'string' && raw.summary.trim()) patch.summary = raw.summary.trim();
   const status = readText_ACU(raw.status);
   if (status) {
-    if (!(AGENT_HOOK_STATUSES_ACU as readonly string[]).includes(status)) failProtocol_ACU(`delta.hooks[${index}] 的 patch.status 非法：${status}`);
+    if (!(AGENT_HOOK_STATUSES_ACU as readonly string[]).includes(status)) failProtocol_ACU(`delta.hooks[${index}] 的 patch.status 非法：${status}`, { field: 'status' });
     patch.status = status as AgentHookPatch_ACU['status'];
   }
   const importance = readText_ACU(raw.importance);
   if (importance) {
-    if (!(AGENT_HOOK_IMPORTANCES_ACU as readonly string[]).includes(importance)) failProtocol_ACU(`delta.hooks[${index}] 的 patch.importance 非法：${importance}`);
+    if (!(AGENT_HOOK_IMPORTANCES_ACU as readonly string[]).includes(importance)) failProtocol_ACU(`delta.hooks[${index}] 的 patch.importance 非法：${importance}`, { field: 'importance' });
     patch.importance = importance as AgentHookPatch_ACU['importance'];
   }
   if (typeof raw.plannedPayoff === 'string') patch.plannedPayoff = raw.plannedPayoff.trim();
-  if (Object.keys(patch).length === 1) failProtocol_ACU(`delta.hooks[${index}] 的 patch 至少要带一个要修改的字段`);
+  if (Object.keys(patch).length === 1) failProtocol_ACU(`delta.hooks[${index}] 的 patch 至少要带一个要修改的字段`, { rejectionKind: 'empty_patch' });
   return patch;
 }
 
@@ -718,15 +718,15 @@ function parseInfoGapPatch_ACU(raw: Record<string, unknown>, index: number): Age
   if (Array.isArray(raw.characterKnowledge)) patch.characterKnowledge = parseCharacterKnowledge_ACU(raw.characterKnowledge);
   const revealStatus = readText_ACU(raw.revealStatus);
   if (revealStatus) {
-    if (!(AGENT_REVEAL_STATUSES_ACU as readonly string[]).includes(revealStatus)) failProtocol_ACU(`delta.infoGap[${index}] 的 patch.revealStatus 非法：${revealStatus}`);
+    if (!(AGENT_REVEAL_STATUSES_ACU as readonly string[]).includes(revealStatus)) failProtocol_ACU(`delta.infoGap[${index}] 的 patch.revealStatus 非法：${revealStatus}`, { field: 'revealStatus' });
     patch.revealStatus = revealStatus as AgentInfoGapPatch_ACU['revealStatus'];
   }
   if (Object.prototype.hasOwnProperty.call(raw, 'revealIndex')) {
     if (raw.revealIndex === null) patch.revealIndex = null;
     else if (typeof raw.revealIndex === 'number' && Number.isInteger(raw.revealIndex) && raw.revealIndex >= 0) patch.revealIndex = raw.revealIndex;
-    else failProtocol_ACU(`delta.infoGap[${index}] 的 patch.revealIndex 必须是非负整数或 null`);
+    else failProtocol_ACU(`delta.infoGap[${index}] 的 patch.revealIndex 必须是非负整数或 null`, { field: 'revealIndex' });
   }
-  if (Object.keys(patch).length === 1) failProtocol_ACU(`delta.infoGap[${index}] 的 patch 至少要带一个要修改的字段`);
+  if (Object.keys(patch).length === 1) failProtocol_ACU(`delta.infoGap[${index}] 的 patch 至少要带一个要修改的字段`, { rejectionKind: 'empty_patch' });
   return patch;
 }
 
@@ -736,6 +736,9 @@ export interface AgentContractRejection_ACU {
   index: number;
   id: string;
   reason: string;
+  field?: string;
+  rejectionKind?: 'empty_patch';
+  revision?: number;
 }
 
 type RejectionSink_ACU = AgentContractRejection_ACU[] | undefined;
@@ -749,7 +752,12 @@ function collectItem_ACU(sink: RejectionSink_ACU, module: AgentContractRejection
     parse();
   } catch (error) {
     if (!sink || !(error instanceof ContinuationValidationError_ACU) || error.error.code !== 'CONTINUATION_AGENT_PROTOCOL_INVALID') throw error;
-    sink.push({ module, index, id: isRecord_ACU(raw) ? readText_ACU(raw.id) : '', reason: error.error.message });
+    const details = error.error.details;
+    sink.push({ module, index, id: isRecord_ACU(raw) ? readText_ACU(raw.id) : '', reason: error.error.message,
+      ...(typeof details?.field === 'string' ? { field: details.field } : {}),
+      ...(details?.rejectionKind === 'empty_patch' && isRecord_ACU(raw)
+        && Object.keys(raw).every(key => key === 'action' || key === 'id')
+        ? { rejectionKind: 'empty_patch' as const } : {}) });
   }
 }
 
@@ -849,7 +857,7 @@ function parseStoryArcPatch_ACU(raw: Record<string, unknown>, index: number): Ag
   if (typeof raw.withheld === 'string') patch.withheld = raw.withheld.trim();
   const status = readText_ACU(raw.status);
   if (status) {
-    if (!(AGENT_STORY_ARC_STATUSES_ACU as readonly string[]).includes(status)) failProtocol_ACU(`delta.storyArc[${index}] 的 patch.status 非法：${status}，只能是 ${AGENT_STORY_ARC_STATUSES_ACU.join(' / ')}`);
+    if (!(AGENT_STORY_ARC_STATUSES_ACU as readonly string[]).includes(status)) failProtocol_ACU(`delta.storyArc[${index}] 的 patch.status 非法：${status}，只能是 ${AGENT_STORY_ARC_STATUSES_ACU.join(' / ')}`, { field: 'status' });
     patch.status = status as AgentStoryArcPatch_ACU['status'];
   }
   if (Object.prototype.hasOwnProperty.call(raw, 'stageNumbers')) patch.stageNumbers = parseStageNumbers_ACU(raw.stageNumbers, `delta.storyArc[${index}].stageNumbers`);
@@ -872,7 +880,7 @@ function parseStoryArcPatch_ACU(raw: Record<string, unknown>, index: number): Ag
   }
   if (Object.prototype.hasOwnProperty.call(raw, 'sustainingThreads')) patch.sustainingThreads = parseStoryArcTextList_ACU(raw.sustainingThreads, `delta.storyArc[${index}].sustainingThreads`);
   if (Object.prototype.hasOwnProperty.call(raw, 'payoffTargets')) patch.payoffTargets = parseStoryArcTextList_ACU(raw.payoffTargets, `delta.storyArc[${index}].payoffTargets`);
-  if (Object.keys(patch).length === 1) failProtocol_ACU(`delta.storyArc[${index}] 的 patch 至少要带一个要修改的字段`);
+  if (Object.keys(patch).length === 1) failProtocol_ACU(`delta.storyArc[${index}] 的 patch 至少要带一个要修改的字段`, { rejectionKind: 'empty_patch' });
   return patch;
 }
 
@@ -958,12 +966,12 @@ function parseChronologyPatch_ACU(raw: Record<string, unknown>, index: number): 
   const precision = readText_ACU(raw.precision);
   if (precision) {
     if (!(AGENT_CHRONOLOGY_PRECISIONS_ACU as readonly string[]).includes(precision)) {
-      failProtocol_ACU(`delta.chronology[${index}] 的 patch.precision 必须是 ${AGENT_CHRONOLOGY_PRECISIONS_ACU.join(' / ')}，实际收到：${precision}`);
+      failProtocol_ACU(`delta.chronology[${index}] 的 patch.precision 必须是 ${AGENT_CHRONOLOGY_PRECISIONS_ACU.join(' / ')}，实际收到：${precision}`, { field: 'precision' });
     }
     patch.precision = precision as AgentChronologyPatch_ACU['precision'];
   }
   if (raw.evidenceIndexes !== undefined) patch.evidenceIndexes = parseChronologyEvidenceIndexes_ACU(raw.evidenceIndexes, `delta.chronology[${index}] 的 patch.evidenceIndexes`);
-  if (Object.keys(patch).length === 1) failProtocol_ACU(`delta.chronology[${index}] 的 patch 至少要带一个要修改的字段`);
+  if (Object.keys(patch).length === 1) failProtocol_ACU(`delta.chronology[${index}] 的 patch 至少要带一个要修改的字段`, { rejectionKind: 'empty_patch' });
   return patch;
 }
 

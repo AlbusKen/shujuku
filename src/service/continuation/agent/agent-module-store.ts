@@ -337,7 +337,18 @@ function validatePendingFixes_ACU(raw: unknown, present: boolean, legacy: boolea
     const violations: AgentPendingFix_ACU['violations'] = [];
     for (const violation of item.violations) {
       if (!isRecord_ACU(violation) || typeof violation.path !== 'string' || typeof violation.message !== 'string' || !violation.message.trim()) return null;
-      violations.push({ path: violation.path, message: violation.message });
+      if (violation.id !== undefined && (typeof violation.id !== 'string' || !violation.id.trim())) return null;
+      if (violation.source !== undefined && !AGENT_PENDING_FIX_SOURCES_ACU.includes(violation.source as any)) return null;
+      if (violation.rejectionKind !== undefined && violation.rejectionKind !== 'empty_patch') return null;
+      if (violation.revision !== undefined && (typeof violation.revision !== 'number' || !Number.isInteger(violation.revision) || violation.revision < 0)) return null;
+      if (violation.rejectionKind === 'empty_patch' && (violation.source !== 'contract_rejected'
+        || typeof violation.id !== 'string' || /[.#:]/.test(violation.id)
+        || violation.path !== `${item.module}#${violation.id}.emptyPatch` || violation.revision === undefined)) return null;
+      violations.push({ path: violation.path, message: violation.message,
+        ...(typeof violation.id === 'string' ? { id: violation.id } : {}),
+        ...(violation.source !== undefined ? { source: violation.source as AgentPendingFix_ACU['source'] } : {}),
+        ...(violation.rejectionKind === 'empty_patch' ? { rejectionKind: 'empty_patch' as const } : {}),
+        ...(typeof violation.revision === 'number' ? { revision: violation.revision } : {}) });
     }
     const source = AGENT_PENDING_FIX_SOURCES_ACU.includes(item.source as any) ? item.source as AgentPendingFix_ACU['source'] : legacy ? 'transaction_rejected' : null;
     const completion = item.completion === 'partial' || item.completion === 'failed' ? item.completion : legacy ? 'failed' : null;

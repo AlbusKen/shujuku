@@ -557,6 +557,8 @@ it('同一 agentName 与 roundId 的共享状态跨 runtime 只允许一次成�
   expect(first.expandedReads).toEqual(['$TABLE:角色表']);
   expect(second.expandedReads).toEqual([]);
   expect(sharedReadRound.successfulReadBatches.size).toBe(1);
+  expect(sent[2].map(message => message.content).join('\n')).toContain('本次读取额度已用尽');
+  expect(sent[2].map(message => message.content).join('\n')).toContain('读取限制不改变本次写入授权');
 });
 
 it('不同 roundId 的同名子代理不共享成功 read 额度', async () => {
@@ -1004,6 +1006,75 @@ describe('子代理逐栏工具会话', () => {
       expect(requests[1].map(message => message.content).join('\n')).toContain('纯系统字段操作已拒绝且未写入');
       expect(JSON.stringify(chat)).toBe(before);
       expect(saveChat).not.toHaveBeenCalled();
+      const emptyPatch = JSON.stringify({ summary: '待核对操作', delta: { hooks: [{ action: 'patch', id: 'H1' }] } });
+      const checked = JSON.stringify({ summary: 'H1 已逐项核对，没有业务字段需要修改' });
+      const emptyReplies = [emptyPatch, checked];
+      const emptyRuntime = new AgentSubagentRuntime_ACU({ resolveApiPreset: (() => preset_ACU) as any,
+        callInternalAi: async () => {
+          const reply = emptyReplies.shift() ?? checked;
+          return toolMode === 'tools' ? nativeAgentReply_ACU(reply)! : reply;
+        } });
+      const emptyResult = await emptyRuntime.run(input);
+      expect(emptyResult.iterations).toBe(2);
+      expect(emptyResult.completion).toBe('complete_no_change');
+      expect(emptyResult.emptyPatchConfirmed).toEqual([{ module: 'hooks', id: 'H1', rejectedRevision: 1, revision: 1 }]);
+      expect(emptyResult.unresolvedIssues).toEqual([]);
+      expect(JSON.stringify(chat)).toBe(before);
+      expect(saveChat).not.toHaveBeenCalled();
+      const { captureAgentModuleCommitBaseline_ACU, writeAgentModuleCommitDelta_ACU } = await import('../../../../src/service/continuation/agent/agent-module-store');
+      const pendingFixes = [{ module: 'hooks' as const, agentName: 'hook-cognition-maintainer', source: 'contract_rejected' as const,
+        completion: 'failed' as const, attempts: 1, firstFailedAtIndex: 1, lastError: '空操作与真实缺口',
+        rangeStartIndex: 1, rangeEndIndex: 1, acceptedKeys: [], createdAt: 1, updatedAt: 1, violations: [
+          { path: 'hooks#H1.emptyPatch', message: '空 patch', source: 'contract_rejected' as const,
+            id: 'H1', rejectionKind: 'empty_patch' as const, revision: 1 },
+          { path: 'hooks#H2.emptyPatch', message: '其他条目', source: 'contract_rejected' as const,
+            id: 'H2', rejectionKind: 'empty_patch' as const, revision: 1 },
+          { path: 'hooks#H1.status', message: '业务变化待核实', source: 'transaction_rejected' as const },
+          { path: 'hooks[0]', message: '历史记录无身份' },
+        ] }];
+      const seeded = await writeAgentModuleCommitDelta_ACU(chat, 1, { writes: {}, revisions: {}, pendingFixes }, Date.now(),
+        folded => JSON.stringify(folded.snapshot.pendingFixes) === JSON.stringify(pendingFixes), captureAgentModuleCommitBaseline_ACU(chat));
+      expect(seeded.status).toBe('committed');
+      const { runContinuationAgentWorkflow_ACU } = await import('../../../../src/service/continuation/agent/agent-workflow');
+      for (const repairSql of [undefined, "UPDATE hooks SET status='reinforced' WHERE id='H1' AND expected_revision=1"]) {
+        input.resolveContext.moduleSnapshot = readAgentModuleSnapshot_ACU(chat);
+        input.targetModules = ['hooks'];
+        input.writeSql = ({ role, sql, isCurrent, revisionWindow }) => commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role, sql, isCurrent, revisionWindow });
+        const repairReplies = repairSql ? [JSON.stringify({ action: 'write_sql', sql: repairSql }), checked] : [checked];
+        const repairRuntime = new AgentSubagentRuntime_ACU({ resolveApiPreset: (() => preset_ACU) as any,
+          callInternalAi: async () => {
+            const reply = repairReplies.shift() ?? checked;
+            return toolMode === 'tools' ? nativeAgentReply_ACU(reply)! : reply;
+          } });
+        const workflow = await runContinuationAgentWorkflow_ACU({ settings: { ...input.settings, workflow: { ...input.settings.workflow, reviseLimit: 0 } },
+          snapshot: readAgentModuleSnapshot_ACU(chat), readCommittedSnapshot: () => readAgentModuleSnapshot_ACU(chat),
+          opening: { focus: '核对旧空操作', summary: '', dispatchWebResearcher: false }, hasUnsettledHistory: true,
+          settlementStartIndex: 1, settledIndex: 1, turnNumber: 1, beatObligation: false, completedStageNumbers: [],
+          runAgent: async call => {
+            if (call.agentName !== 'hook-cognition-maintainer') return { ok: true, summary: '建议' };
+            const result = await repairRuntime.run({ ...input, pendingFixes: call.pendingFixes });
+            expect(result.emptyPatchConfirmed).toEqual([{ module: 'hooks', id: 'H1', rejectedRevision: 1, revision: repairSql ? 2 : 1 }]);
+            return { ...result, ok: result.completion === 'complete_changed' || result.completion === 'complete_no_change', summary: checked };
+          },
+          runComposer: async () => ({ summary: '写作指令', instruction: '继续', constraints: null }),
+          runFinalReview: async () => ({ verdict: 'pass', summary: '', emotionFindings: [], worldFindings: [], logicFindings: [], requiredFixes: [], preserve: [] }),
+        });
+        const remaining = workflow.pendingFixes[0].violations;
+        expect(remaining).toContainEqual(pendingFixes[0].violations[1]);
+        expect(remaining).toContainEqual(pendingFixes[0].violations[3]);
+        expect(remaining).not.toContainEqual(pendingFixes[0].violations[0]);
+        expect(remaining.some(issue => issue.path === 'hooks#H1.status')).toBe(!repairSql);
+        const saved = await writeAgentModuleCommitDelta_ACU(chat, 1, { writes: {}, revisions: {}, pendingFixes: workflow.pendingFixes }, Date.now(),
+          folded => JSON.stringify(folded.snapshot.pendingFixes) === JSON.stringify(workflow.pendingFixes), captureAgentModuleCommitBaseline_ACU(chat));
+        expect(saved.status).toBe('committed');
+        expect(readAgentModuleSnapshot_ACU(chat).pendingFixes).toEqual(workflow.pendingFixes);
+        // 下一场景重新挂入同一版本的空操作，不能靠上一轮的局部变量充当持久化输入。
+        if (!repairSql) {
+          const reseeded = await writeAgentModuleCommitDelta_ACU(chat, 1, { writes: {}, revisions: {}, pendingFixes }, Date.now(),
+            folded => JSON.stringify(folded.snapshot.pendingFixes) === JSON.stringify(pendingFixes), captureAgentModuleCommitBaseline_ACU(chat));
+          expect(reseeded.status).toBe('committed');
+        }
+      }
     } finally { _set_SillyTavern_API_ACU(null as any); }
   });
 
@@ -1067,6 +1138,43 @@ describe('子代理逐栏工具会话', () => {
         }
       } finally { _set_SillyTavern_API_ACU(null as any); }
     }
+    // 旧保存回执不能清偿后来提出的非法变更，也不能由其他字段修复代偿。
+    for (const repair of [false, true]) {
+      const input = input_ACU(); input.toolMode = toolMode;
+      const chat = input.resolveContext.chat;
+      _set_SillyTavern_API_ACU({ chat, saveChat: async () => {} } as any);
+      try {
+        await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role: 'hook-cognition-maintainer',
+          sql: "INSERT INTO hooks (id, summary, status, importance, planted_index, planned_payoff) VALUES ('H1', '信件', 'planted', 'mid', 1, '入城后交出')" });
+        input.resolveContext.moduleSnapshot = readAgentModuleSnapshot_ACU(chat);
+        input.writeSql = ({ role, sql, isCurrent, revisionWindow }) => commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role, sql, isCurrent, revisionWindow });
+        const reply = (payload: unknown) => toolMode === 'tools' ? nativeAgentReply_ACU(JSON.stringify(payload))! : JSON.stringify(payload);
+        const write = (sql: string, id: string) => toolMode === 'tools' ? nativeToolTurn_ACU('write_sql', { sql }, id) : JSON.stringify({ action: 'write_sql', sql });
+        const checked = reply({ summary: '独立交付当前核对结果' });
+        const replies = [
+          write("UPDATE hooks SET status='reinforced' WHERE id='H1' AND expected_revision=1", 'before-rejection'),
+          reply({ summary: '新状态变更被拒', delta: { hooks: [{ action: 'patch', id: 'H1', status: 'invalid' }] } }),
+          repair ? write("UPDATE hooks SET status='reinforced' WHERE id='H1' AND expected_revision=2", 'after-rejection')
+            : reply({ summary: '只改其他字段', delta: { hooks: [{ action: 'patch', id: 'H1', summary: '信件仍在' }] } }),
+          checked,
+        ];
+        const runtime = new AgentSubagentRuntime_ACU({ resolveApiPreset: (() => preset_ACU) as any,
+          callInternalAi: async () => replies.shift() ?? checked });
+        const result = await runtime.run(input);
+        expect(readAgentModuleSnapshot_ACU(chat).revisions.hooks).toBe(2);
+        expect(readAgentModuleSnapshot_ACU(chat).hooks[0].status).toBe('reinforced');
+        if (repair) {
+          expect(result.completion).toBe('complete_changed');
+          expect(result.unresolvedIssues).toEqual([]);
+          expect(result.fieldConfirmation?.keys).toEqual(['hooks:H1:status']);
+        } else {
+          expect(result.completion).toBe('failed');
+          expect(result.unresolvedIssues).toContainEqual(expect.objectContaining({ module: 'hooks', id: 'H1', source: 'contract_rejected', path: 'hooks#H1.status' }));
+          expect(result.fieldConfirmation?.keys).not.toContain('hooks:H1:status');
+        }
+      } finally { _set_SillyTavern_API_ACU(null as any); }
+    }
+
   });
 
 

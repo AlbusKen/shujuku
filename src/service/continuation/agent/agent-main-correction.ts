@@ -1,6 +1,6 @@
 /** 主会话纠正：领域 SQL 沿用逐栏提交；追溯边界单独保存，不推进结算水位。 */
 import type { AgentConversationSnapshot_ACU, AgentCorrectMaterialsAction_ACU, AgentModuleSnapshot_ACU, AgentPendingFix_ACU } from './agent-model';
-import { commitAgentModuleFieldWrites_ACU, hostAgentModuleCommitStorage_ACU, reconcileAgentFieldPending_ACU, reconcileAgentOperationOnlyPending_ACU, type AgentModuleCommitStorage_ACU, type AgentModuleFieldReceipt_ACU } from './agent-module-field-commit';
+import { commitAgentModuleFieldWrites_ACU, hostAgentModuleCommitStorage_ACU, reconcileAgentFieldPending_ACU, reconcileAgentOperationOnlyPending_ACU, confirmAgentEmptyPatchPending_ACU, reconcileAgentEmptyPatchPending_ACU, type AgentModuleRevisionWindow_ACU, type AgentModuleCommitStorage_ACU, type AgentModuleFieldReceipt_ACU } from './agent-module-field-commit';
 import { agentStoryEvidenceFloorIndexes_ACU } from './agent-placeholder-resolver';
 import { readMessageSwipeId_ACU } from './agent-module-frame';
 
@@ -43,6 +43,10 @@ export async function correctAgentMaterials_ACU(input: {
   if (!current() || !agentStoryEvidenceFloorIndexes_ACU(chat).has(targetIndex)) return reject('当前聊天或承载正文楼层不可用');
   let folded = storage.readFold(chat);
   if (folded.salvaged || folded.candidates.some(item => !item.valid)) return reject('资料帧损坏，不能在抢救结果上纠正');
+  const revisionWindow: AgentModuleRevisionWindow_ACU = {};
+  for (const module of ['hooks', 'infoGap', 'chronology', 'storyArc'] as const) {
+    revisionWindow[module] = { base: folded.snapshot.revisions[module], head: folded.snapshot.revisions[module] };
+  }
   if (action.settlementStartIndex !== undefined) {
     const users = input.conversation.messages.filter(message => message.kind === 'user');
     const user = users[users.length - 1];
@@ -52,7 +56,7 @@ export async function correctAgentMaterials_ACU(input: {
   }
   if (action.sql) {
     sqlReceipt = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex, dispatchTarget,
-      sql: action.sql, role: 'main', completedStages: input.completedStages, isCurrent: current, storage });
+      sql: action.sql, role: 'main', completedStages: input.completedStages, isCurrent: current, storage, revisionWindow });
     const operationPaths = new Set((sqlReceipt.operationOnlyConfirmed ?? []).flatMap(proof => proof.rejectedPaths));
     operationOnly = sqlReceipt.status === 'rejected' && operationPaths.size > 0
       && sqlReceipt.partials?.length === 0 && sqlReceipt.revisions !== null
@@ -68,6 +72,14 @@ export async function correctAgentMaterials_ACU(input: {
   const now = Date.now();
   let pendingFixes = sqlReceipt ? repairedPending_ACU(before.pendingFixes, sqlReceipt) : before.pendingFixes;
   if (sqlReceipt?.operationOnlyConfirmed) pendingFixes = reconcileAgentOperationOnlyPending_ACU(pendingFixes, sqlReceipt.operationOnlyConfirmed);
+  if (sqlReceipt?.status === 'committed' && !sqlReceipt.rejected.length && sqlReceipt.partials?.length === 0) {
+    const confirmedIds = new Set([...sqlReceipt.accepted, ...(sqlReceipt.alreadySaved ?? [])]
+      .filter(item => sqlReceipt!.revisions?.[item.module] === before.revisions[item.module])
+      .map(item => `${item.module}:${item.id}`));
+    const proofs = confirmAgentEmptyPatchPending_ACU(before, folded.fields, revisionWindow)
+      .filter(proof => confirmedIds.has(`${proof.module}:${proof.id}`));
+    pendingFixes = reconcileAgentEmptyPatchPending_ACU(pendingFixes, proofs);
+  }
   let settlementBoundary = before.settlementBoundary;
 
   if (action.settlementStartIndex !== undefined) {

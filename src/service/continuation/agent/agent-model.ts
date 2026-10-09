@@ -451,9 +451,21 @@ export interface AgentMaterialCompletionRecord_ACU {
 export interface AgentPendingFixViolation_ACU {
   path: string;
   message: string;
+  id?: string;
+  source?: AgentPendingFixSource_ACU;
+  rejectionKind?: 'empty_patch';
+  revision?: number;
 }
 
-/** 一次模块入库失败。attempts 从 1 起算，同一模块再次失败加一，成功写入后整条删除。 */
+/** 权威资料核实的空 patch 撤回：拒绝版本与当前版本分开，不能借用其它条目或版本。 */
+export interface AgentEmptyPatchConfirmation_ACU {
+  module: AgentWritableModule_ACU;
+  id: string;
+  rejectedRevision: number;
+  revision: number;
+}
+
+/** 模块待修记录。attempts 从 1 起算；只清偿有对应权威确认的问题。 */
 export interface AgentPendingFix_ACU {
   module: AgentWritableModule_ACU;
   agentName: string;

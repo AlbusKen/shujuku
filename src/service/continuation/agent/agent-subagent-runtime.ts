@@ -35,7 +35,7 @@ import { agentNativeTools_ACU, nativeToolArguments_ACU, nativeToolExchange_ACU, 
 import { resolveAgentToolMode_ACU, type AgentToolMode_ACU } from '../../ai/agent-tool-mode';
 import { AGENT_SUBMIT_TOOL_NAME_ACU, continuationSubmitTool_ACU, splitNativeDecisionCalls_ACU, submitPayloadObject_ACU, submitPayloadText_ACU } from '../../ai/agent-decision-tools';
 import { hasActiveStoryArc_ACU, readAgentModuleFoldState_ACU, readAgentModuleSnapshot_ACU } from './agent-module-store';
-import { AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU } from './agent-module-field-commit';
+import { AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU, confirmAgentEmptyPatchPending_ACU } from './agent-module-field-commit';
 import type { AgentFieldPage_ACU, AgentModuleFieldReceipt_ACU, AgentModuleRevisionWindow_ACU } from './agent-module-field-commit';
 import { findAgentSubagentDefinition_ACU, getAgentSubagentAccessProfile_ACU, getAgentSubagentReadPrefixes_ACU, renderAgentReadCatalog_ACU, renderAgentWebToolCatalog_ACU, type AgentSubagentDefinition_ACU } from './agent-catalog';
 import { renderAgentUserRequirements_ACU } from './agent-user-requirements';
@@ -95,8 +95,10 @@ import {
 import { AGENT_FINAL_REVIEWER_NAME_ACU } from './agent-model';
 import type {
   AgentComposerOutput_ACU,
+  AgentEmptyPatchConfirmation_ACU,
   AgentMaterialCompletionState_ACU,
   AgentPendingFixSource_ACU,
+  AgentPendingFix_ACU,
   AgentDelegation_ACU,
   AgentFinalReviewerOutput_ACU,
   AgentMaintainerOutput_ACU,
@@ -136,6 +138,8 @@ export interface AgentSubagentUnresolvedIssue_ACU {
   path: string;
   message: string;
   id?: string;
+  rejectionKind?: 'empty_patch';
+  revision?: number;
 }
 
 /** 一次子代理执行的结果。写集事务留给主循环应用，这里只交出解析后的输出。 */
@@ -167,6 +171,8 @@ export interface AgentSubagentRunResult_ACU {
   unresolvedIssues?: AgentSubagentUnresolvedIssue_ACU[];
   /** 仅来自提交口的无业务变更核实，不接受模型自报。 */
   operationOnlyConfirmed?: AgentModuleFieldReceipt_ACU['operationOnlyConfirmed'];
+  /** 仅由完整权威帧和本派工修订号窗口生成，不接受模型自报。 */
+  emptyPatchConfirmed?: AgentEmptyPatchConfirmation_ACU[];
   /** 当前权威帧仍确认的逐栏回执；版本变化后调用方不得用它清账。 */
   fieldConfirmation?: { keys: string[]; revisions: AgentModuleRevisions_ACU };
   /** 已通过解析并暂存的稳定条目键，供后续补足去重。 */
@@ -209,6 +215,8 @@ export interface AgentSubagentRunInput_ACU {
   signal?: AbortSignal | null;
   /** 修正轮只允许维护员触碰仍待修复的模块；首轮不传则使用职责固定写集。 */
   targetModules?: readonly AgentWritableModule_ACU[];
+  /** 主工作流传入的待修身份，不代替权威资料与版本核实。 */
+  pendingFixes?: readonly AgentPendingFix_ACU[];
   /** 同一主会话轮次内由所有同名子代理调用共享的读取额度状态。 */
   readRoundState?: AgentReadRoundState_ACU;
   writeSql?: (input: { role: AgentSubagentName_ACU; sql: string; resolvePage: (handle: string) => AgentFieldPage_ACU | null; isCurrent?: () => boolean; revisionWindow?: AgentModuleRevisionWindow_ACU }) => Promise<AgentModuleFieldReceipt_ACU>;
@@ -851,11 +859,16 @@ export class AgentSubagentRuntime_ACU {
     const hasMaintenanceFormat = maintenanceFormat !== undefined && rendered.messages.some(message =>
       message.role === 'assistant' && (message.content === maintenanceFormat('json')
         || message.content === maintenanceFormat('tools')));
+    const sharedReadExhausted = readOnceKind && readRoundState.successfulReadBatches.has(readRoundKey);
     const readScopeSnapshot = authorizedReads.length
-      ? `本角色只可 read 以下自有或强相关地址：${authorizedReads.join('、')}。${accessProfile.allowSearch ? '世界书检索限已授权范围。' : '不得做本地 search。'}${readOnceKind ? '每轮至多一个成功读取批次：确需补读时把地址放进同一次回复并发读齐；固定注入与目录足够时不读，直接交付。' : ''}`
+      ? `本角色只可 read 以下自有或强相关地址：${authorizedReads.join('、')}。${accessProfile.allowSearch ? '世界书检索限已授权范围。' : '不得做本地 search。'}${readOnceKind ? sharedReadExhausted || maxToolRounds === 0
+        ? '本次读取额度已用尽，不能再 read；重新派工不恢复同轮额度。基于已注入资料和回执交付，证据不足时如实说明未确认缺口。读取限制不改变本次写入授权。'
+        : '每轮至多一个成功读取批次：确需补读时把地址放进同一次回复并发读齐；固定注入与目录足够时不读，直接交付。' : ''}`
       : '本角色没有本地调阅工具，直接根据已备资料交付。';
-    const writableTables = definition.promptKey === 'arcArchitect' ? ' story_arc'
-      : definition.promptKey === 'webResearcher' ? ' web_refs' : ' hooks、info_gap、chronology；constraint_proposals 仅登记建议';
+    const tableNames: Partial<Record<AgentWritableModule_ACU, string>> = {
+      hooks: 'hooks', infoGap: 'info_gap', storyArc: 'story_arc', chronology: 'chronology', webRefs: 'web_refs',
+    };
+    const writableTables = ` ${writes.map(module => tableNames[module]).filter(Boolean).join('、')}${definition.kind === 'maintain' ? '；constraint_proposals 仅登记建议' : ''}`;
     // 授权随请求快照下发；历史之后只剩固定预填充，不再插入额外 system 段。
     const maintenanceAuthorization = maintenanceFormat !== undefined
       ? `【本次读取与写入授权】\n${readScopeSnapshot}\n${input.writeSql && writes.length
@@ -1085,6 +1098,20 @@ export class AgentSubagentRuntime_ACU {
     let continuationsUsed = 0;
     // 跨轮未清偿的被拒条目：模型在续写里没有重发修正版就不能算完成，否则条目会被静默丢掉。
     let outstanding: AgentContractRejection_ACU[] = [];
+    const emptyPatchProofs = new Map<string, AgentEmptyPatchConfirmation_ACU>();
+    const confirmEmptyPatches = (output: AgentMaintainerOutput_ACU, rejected: readonly AgentContractRejection_ACU[], truncated: boolean): AgentEmptyPatchConfirmation_ACU[] => {
+      if (writeStateUnknown || truncated || !output.summary.trim() || acceptedKeys(output).size
+        || output.delta.constraintProposals.length || terminalIssues().length) return [];
+      const folded = readAgentModuleFoldState_ACU(input.resolveContext.chat);
+      if (folded.salvaged || folded.candidates.some(item => !item.valid)) return [];
+      const proofSnapshot = { ...folded.snapshot,
+        pendingFixes: [...folded.snapshot.pendingFixes, ...(input.pendingFixes ?? [])] };
+      const proofs = confirmAgentEmptyPatchPending_ACU(proofSnapshot, folded.fields, revisionWindow,
+        rejected.filter(item => item.rejectionKind === 'empty_patch' && item.revision !== undefined)
+          .map(item => ({ module: item.module, id: item.id, revision: item.revision! })));
+      return proofs.filter(proof => writes.includes(proof.module) && !rejected.some(item => item.module === proof.module
+        && (item.rejectionKind !== 'empty_patch' || item.id !== proof.id)));
+    };
     const acceptedKeys = (output: AgentMaintainerOutput_ACU): Set<string> => new Set([
       ...[...output.delta.hooks, ...output.delta.hookPatches].map(item => `hooks:${item.id}`),
       ...[...output.delta.infoGap, ...output.delta.infoGapPatches].map(item => `infoGap:${item.id}`),
@@ -1107,8 +1134,9 @@ export class AgentSubagentRuntime_ACU {
           && Object.values(folded.fields.records.hooks ?? {}).every(record => record.status === 'complete')) {
           const ids = new Set<string>();
           for (const fix of folded.snapshot.pendingFixes) {
-            if (fix.module !== 'hooks' || fix.source !== 'transaction_rejected') continue;
+            if (fix.module !== 'hooks') continue;
             for (const issue of fix.violations) {
+              if ((issue.source ?? fix.source) !== 'transaction_rejected') continue;
               const match = /^hooks#([^.#]+)\.operationOnly$/.exec(issue.path);
               if (!match || issue.message !== AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU) continue;
               ids.add(match[1]);
@@ -1132,9 +1160,13 @@ export class AgentSubagentRuntime_ACU {
       const unresolvedIssues: AgentSubagentUnresolvedIssue_ACU[] = [...terminalIssues(), ...rejected.map(item => ({
         module: item.module,
         source: 'contract_rejected' as const,
-        path: `${item.module}[${item.index}]`,
+        path: item.id && !/[.#:]/.test(item.id)
+          ? `${item.module}#${item.id}${item.rejectionKind === 'empty_patch' ? '.emptyPatch' : item.field ? `.${item.field}` : ''}`
+          : `${item.module}[${item.index}]`,
         message: item.reason,
         ...(item.id ? { id: item.id } : {}),
+        ...(item.rejectionKind && item.id && !/[.#:]/.test(item.id) ? { rejectionKind: item.rejectionKind } : {}),
+        ...(item.revision !== undefined ? { revision: item.revision } : {}),
       }))];
       if (truncated) {
         for (const module of writes) {
@@ -1148,6 +1180,12 @@ export class AgentSubagentRuntime_ACU {
       }
       const issueModules = new Set(unresolvedIssues.map(item => item.module));
       const currentFold = readAgentModuleFoldState_ACU(input.resolveContext.chat);
+      const emptyPatchConfirmed = !unresolvedIssues.length
+        ? [...new Map([...emptyPatchProofs.values(), ...confirmEmptyPatches(output, [], truncated)]
+          .map(proof => [`${proof.module}:${proof.id}:${proof.rejectedRevision}`, proof] as const)).values()]
+          .filter(proof => !writeStateUnknown && !currentFold.salvaged && currentFold.candidates.every(item => item.valid)
+            && currentFold.snapshot.revisions[proof.module] === proof.revision)
+        : [];
       const fieldConfirmation = !writeStateUnknown && !currentFold.salvaged && currentFold.candidates.every(item => item.valid)
         ? { keys: [...confirmedFieldRevisions].filter(([key, revision]) => {
           const [module, id, field] = key.split(':') as [AgentWritableModule_ACU, string, string];
@@ -1183,6 +1221,7 @@ export class AgentSubagentRuntime_ACU {
       moduleCompletion,
       unresolvedIssues,
       fieldConfirmation,
+      emptyPatchConfirmed,
       operationOnlyConfirmed: [...operationOnlyProofs.values()].filter(proof => !writeStateUnknown
         && !unresolvedIssues.some(issue => issue.module === proof.module)),
       acceptedKeys: accepted,
@@ -1459,11 +1498,41 @@ export class AgentSubagentRuntime_ACU {
           const draft = parseAgentJsonPayloadDraft_ACU(contractText, nativeCalls.length ? '' : prefill, KIND_PAYLOAD_KEYS_ACU[definition.kind]);
           if (draft.payload.sql !== undefined) throw new Error(`最终交付中的 sql 不会执行；${nativeMode ? '请单独调用 write_sql 提交写入，收到回执后单独调用 submit 交付' : '请单独输出 {"action":"write_sql","sql":"语句"}，收到回执后单独输出最终交付 JSON'}`);
           const parsed = parseAgentMaintainerOutputDraft_ACU(draft.payload);
+          // 新拒绝晚于旧回执；该字段必须再次获得确认，不能复用前一次保存证明。
+          for (const item of parsed.rejected) if (item.id && item.field) {
+            confirmedFieldRevisions.delete(`${item.module}:${item.id}:${item.field}`);
+          }
           accumulated = accumulated ? mergeAgentMaintainerOutputs_ACU(accumulated, parsed.output) : parsed.output;
           // 上一轮被拒的条目：本轮重发了合法版本即清偿；没有 id 的条目无法匹配，本轮过后不再追讨。
           const nowAccepted = acceptedKeys(parsed.output);
-          outstanding = outstanding.filter(item => item.id && !nowAccepted.has(`${item.module}:${item.id}`));
-          const pending: AgentContractRejection_ACU[] = [...outstanding, ...parsed.rejected];
+          const live = readAgentModuleFoldState_ACU(input.resolveContext.chat);
+          const canConfirmFields = !writeStateUnknown && !live.salvaged && live.candidates.every(item => item.valid);
+          const currentProblems = terminalIssues();
+          const candidates = {
+            hooks: [...parsed.output.delta.hooks, ...parsed.output.delta.hookPatches],
+            infoGap: [...parsed.output.delta.infoGap, ...parsed.output.delta.infoGapPatches],
+            storyArc: [...parsed.output.delta.storyArc, ...parsed.output.delta.storyArcPatches],
+            chronology: [...parsed.output.delta.chronology, ...parsed.output.delta.chronologyPatches],
+          };
+          outstanding = outstanding.filter(item => {
+            if (!item.id) return false;
+            if (item.field && canConfirmFields) {
+              const revision = confirmedFieldRevisions.get(`${item.module}:${item.id}:${item.field}`);
+              if (revision !== undefined && live.fields.records[item.module]?.[item.id]?.fields[item.field]?.revision === revision
+                && !currentProblems.some(issue => issue.path === `${item.module}#${item.id}.${item.field}`)) return false;
+            }
+            if (!nowAccepted.has(`${item.module}:${item.id}`)) return true;
+            return !!item.field && !candidates[item.module].some(candidate => candidate.id === item.id
+              && Object.prototype.hasOwnProperty.call(candidate, item.field!));
+          });
+          // 只允许后续独立交付撤回已拒空操作；当前新拒绝、截断或未保存业务写集不能被无变化掩盖。
+          if (!parsed.rejected.length && parsed.output.summary.trim()) {
+            const proofs = confirmEmptyPatches(accumulated, outstanding, draft.truncated);
+            for (const proof of proofs) emptyPatchProofs.set(`${proof.module}:${proof.id}:${proof.rejectedRevision}`, proof);
+            outstanding = outstanding.filter(item => item.rejectionKind !== 'empty_patch'
+              || !proofs.some(proof => proof.module === item.module && proof.id === item.id && proof.rejectedRevision === item.revision));
+          }
+          const pending: AgentContractRejection_ACU[] = [...outstanding, ...parsed.rejected.map(item => ({ ...item, revision: readRevisions[item.module] }))];
           outstanding = pending;
           // 总纲尚未建立时，一份没有任何 storyArc 写入的“成功”输出等于什么都没做——模型常把卷台阶写进 summary。
           // 这种空写入不能交回主 Agent 白耗它的派工上限，先在这里索要真正的条目。
