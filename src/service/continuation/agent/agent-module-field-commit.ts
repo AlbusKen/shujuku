@@ -77,6 +77,27 @@ export function reconcileAgentOperationOnlyPending_ACU(
     return violations.length === fix.violations.length ? [fix] : violations.length ? [{ ...fix, violations }] : [];
   });
 }
+
+/** 仅以逐栏权威回执清除同条目同字段；模块级确认和无身份 SQL 诊断不具清账权限。 */
+export function reconcileAgentFieldPending_ACU(
+  fixes: import('./agent-model').AgentPendingFix_ACU[],
+  confirmedKeys: readonly string[],
+): import('./agent-model').AgentPendingFix_ACU[] {
+  const confirmed = new Set<string>();
+  for (const key of confirmedKeys) {
+    const parts = key.split(':');
+    if (parts.length !== 3) continue;
+    const [module, id, field] = parts;
+    if (!id || id.includes('#') || !AGENT_MODULE_FIELD_MATRIX_ACU[module as Module_ACU]?.fields.includes(field)) continue;
+    confirmed.add(`${module}#${id}.${field}`);
+  }
+  return fixes.flatMap(fix => {
+    if (fix.source !== 'transaction_rejected' && fix.source !== 'contract_rejected') return [fix];
+    const violations = fix.violations.filter(issue => !issue.path.startsWith(`${fix.module}#`) || !confirmed.has(issue.path));
+    return violations.length === fix.violations.length ? [fix] : violations.length ? [{ ...fix, violations }] : [];
+  });
+}
+
 export interface AgentModuleFieldPlan_ACU {
   batches: AgentModuleSqlFieldBatch_ACU[];
   snapshot: AgentModuleSnapshot_ACU;

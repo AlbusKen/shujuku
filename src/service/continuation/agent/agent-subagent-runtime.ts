@@ -167,6 +167,8 @@ export interface AgentSubagentRunResult_ACU {
   unresolvedIssues?: AgentSubagentUnresolvedIssue_ACU[];
   /** 仅来自提交口的无业务变更核实，不接受模型自报。 */
   operationOnlyConfirmed?: AgentModuleFieldReceipt_ACU['operationOnlyConfirmed'];
+  /** 当前权威帧仍确认的逐栏回执；版本变化后调用方不得用它清账。 */
+  fieldConfirmation?: { keys: string[]; revisions: AgentModuleRevisions_ACU };
   /** 已通过解析并暂存的稳定条目键，供后续补足去重。 */
   acceptedKeys?: string[];
   /** 本次派工实际发出的模型调用次数（read/search、write_sql 与协议修正均计入）。 */
@@ -921,11 +923,13 @@ export class AgentSubagentRuntime_ACU {
     const maxWriteRounds = input.writeSql && writes.length ? Math.max(1, input.budget.maxIterations) : 0;
     let usedFieldWrites = false;
     const confirmedFields = new Set<string>();
+    const confirmedFieldRevisions = new Map<string, number>();
     const writeProblems = new Map<string, AgentSubagentUnresolvedIssue_ACU>();
     const sqlRepairTargets = new Map<string, NonNullable<AgentModuleFieldReceipt_ACU['rejected'][number]['repairTarget']>>();
     let writeAttempted = false;
     let writeStateUnknown = false;
     const operationOnlyProofs = new Map<string, NonNullable<AgentModuleFieldReceipt_ACU['operationOnlyConfirmed']>[number]>();
+    const operationOnlyTargets = new Map<string, NonNullable<AgentModuleFieldReceipt_ACU['rejected'][number]['operationOnlyTarget']>>();
     const recordWriteReceipt = (receipt: AgentModuleFieldReceipt_ACU): void => {
       if (receipt.partials === null || receipt.revisions === null) writeStateUnknown = true;
       const operationPaths = new Set<string>();
@@ -942,7 +946,10 @@ export class AgentSubagentRuntime_ACU {
       for (const item of confirmed) {
         const key = `${item.module}#${item.id}.${item.field}`;
         confirmedFields.add(`${item.module}:${item.id}:${item.field}`);
-        writeProblems.delete(key);
+        if (!writeStateUnknown && (receipt.status === 'committed' || receipt.status === 'rejected')) {
+          confirmedFieldRevisions.set(`${item.module}:${item.id}:${item.field}`, item.revision);
+          writeProblems.delete(key);
+        }
       }
       for (const item of receipt.rejected) {
         // 删除目标已不存在属于幂等完成，不是待修复缺口。
@@ -950,6 +957,7 @@ export class AgentSubagentRuntime_ACU {
         if (operationPaths.has(item.path)) continue;
         if (item.operationOnlyTarget) {
           const target = item.operationOnlyTarget;
+          operationOnlyTargets.set(`${target.module}#${target.id}`, target);
           writeProblems.set(`${target.module}#${target.id}.operationOnly`, { module: target.module,
             source: 'transaction_rejected', id: target.id, path: `${target.module}#${target.id}.operationOnly`,
             message: AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU });
@@ -970,7 +978,7 @@ export class AgentSubagentRuntime_ACU {
       }
       if (receipt.partials === null || receipt.revisions === null) return;
       const folded = readAgentModuleFoldState_ACU(input.resolveContext.chat);
-      if (folded.salvaged || folded.candidates.some(item => !item.valid)) return;
+      if (writeStateUnknown || folded.salvaged || folded.candidates.some(item => !item.valid)) return;
       for (const [key, target] of sqlRepairTargets) {
         const matches = Object.values(folded.fields.records[target.module] ?? {}).filter(record =>
           target.column === 'id' ? record.id === target.value : record.fields[target.column]?.value === target.value);
@@ -999,6 +1007,18 @@ export class AgentSubagentRuntime_ACU {
       if (folded.salvaged || folded.candidates.some(item => !item.valid)) {
         issues.set('frame', { module: writes[0], source: 'invoke_failed', path: 'frame', message: '资料帧损坏，无法确认逐栏完成' });
       } else {
+        // 可唯一定位的旧 SQL 拒绝转为字段缺口，跨派工后仍能与合法回执精确对账。
+        for (const [key, target] of sqlRepairTargets) {
+          const problem = issues.get(key);
+          const matches = Object.values(folded.fields.records[target.module] ?? {}).filter(record =>
+            target.column === 'id' ? record.id === target.value : record.fields[target.column]?.value === target.value);
+          if (!problem || matches.length !== 1) continue;
+          issues.delete(key);
+          for (const field of target.fields) {
+            const path = `${target.module}#${matches[0].id}.${field}`;
+            if (!issues.has(path)) issues.set(path, { ...problem, module: target.module, id: matches[0].id, path });
+          }
+        }
         for (const [key, proof] of operationOnlyProofs) {
           const record = folded.fields.records[proof.module]?.[proof.id];
           const row = folded.snapshot.hooks.find(item => item.id === proof.id);
@@ -1081,20 +1101,31 @@ export class AgentSubagentRuntime_ACU {
       if (!writeStateUnknown && !rejected.length && !truncated && !acceptedKeys(output).size
         && !output.delta.constraintProposals.length && writes.includes('hooks')) {
         const folded = readAgentModuleFoldState_ACU(input.resolveContext.chat);
+        const window = revisionWindow.hooks;
         if (!folded.salvaged && folded.candidates.every(item => item.valid)
-          && folded.snapshot.revisions.hooks === readRevisions.hooks
+          && window?.base === readRevisions.hooks && window.head === folded.snapshot.revisions.hooks
           && Object.values(folded.fields.records.hooks ?? {}).every(record => record.status === 'complete')) {
+          const ids = new Set<string>();
           for (const fix of folded.snapshot.pendingFixes) {
             if (fix.module !== 'hooks' || fix.source !== 'transaction_rejected') continue;
             for (const issue of fix.violations) {
               const match = /^hooks#([^.#]+)\.operationOnly$/.exec(issue.path);
               if (!match || issue.message !== AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU) continue;
-              const row = folded.snapshot.hooks.find(item => item.id === match[1]);
-              if (!row || row.retired) continue;
-              operationOnlyProofs.set(`hooks#${row.id}`, {module: 'hooks', id: row.id,
-                revision: folded.snapshot.revisions.hooks, rejectedPaths: [] });
-              writeProblems.delete(issue.path);
+              ids.add(match[1]);
             }
+          }
+          for (const proof of operationOnlyProofs.values()) if (proof.module === 'hooks'
+            && proof.revision >= window.base && proof.revision <= window.head) ids.add(proof.id);
+          for (const target of operationOnlyTargets.values()) if (target.module === 'hooks'
+            && target.expectedRevision >= window.base && target.expectedRevision <= window.head) ids.add(target.id);
+          for (const id of ids) {
+            const row = folded.snapshot.hooks.find(item => item.id === id);
+            const record = folded.fields.records.hooks?.[id];
+            if (!row || row.retired || (record && record.status !== 'complete')) continue;
+            const previous = operationOnlyProofs.get(`hooks#${id}`);
+            operationOnlyProofs.set(`hooks#${id}`, { module: 'hooks', id,
+              revision: folded.snapshot.revisions.hooks, rejectedPaths: previous?.rejectedPaths ?? [] });
+            writeProblems.delete(`hooks#${id}.operationOnly`);
           }
         }
       }
@@ -1116,6 +1147,14 @@ export class AgentSubagentRuntime_ACU {
         }
       }
       const issueModules = new Set(unresolvedIssues.map(item => item.module));
+      const currentFold = readAgentModuleFoldState_ACU(input.resolveContext.chat);
+      const fieldConfirmation = !writeStateUnknown && !currentFold.salvaged && currentFold.candidates.every(item => item.valid)
+        ? { keys: [...confirmedFieldRevisions].filter(([key, revision]) => {
+          const [module, id, field] = key.split(':') as [AgentWritableModule_ACU, string, string];
+          return writes.includes(module) && currentFold.fields.records[module]?.[id]?.fields[field]?.revision === revision
+            && !unresolvedIssues.some(issue => issue.path === `${module}#${id}.${field}`);
+        }).map(([key]) => key), revisions: { ...currentFold.snapshot.revisions } }
+        : undefined;
       const moduleCompletion: AgentSubagentRunResult_ACU['moduleCompletion'] = {};
       for (const module of writes) {
         const hasAccepted = accepted.some(key => key.startsWith(`${module}:`));
@@ -1143,6 +1182,7 @@ export class AgentSubagentRuntime_ACU {
       completion,
       moduleCompletion,
       unresolvedIssues,
+      fieldConfirmation,
       operationOnlyConfirmed: [...operationOnlyProofs.values()].filter(proof => !writeStateUnknown
         && !unresolvedIssues.some(issue => issue.module === proof.module)),
       acceptedKeys: accepted,

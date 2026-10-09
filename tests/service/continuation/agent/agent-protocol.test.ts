@@ -85,6 +85,16 @@ describe('主 Agent 动作解析', () => {
     expect(() => parseAgentMainAction_ACU({ ...action, settlementStartIndex: -1 }, true)).toThrow(/非负整数/);
     expect(() => parseAgentMainAction_ACU({ ...action, settledThroughIndex: 3 }, true)).toThrow(/未声明/);
     expect(() => parseAgentMainAction_ACU({ action: 'correct_materials', reason: '没有动作' }, true)).toThrow(/必须提供/);
+    const correction = { action: 'correct_materials', reason: '已核对字段', sql: "UPDATE hooks SET status='paid' WHERE id='H1' AND expected_revision=2" };
+    expect(parseAgentMainOutput_ACU(`<think>仅是推理</think>\n${JSON.stringify(correction)}`, AGENT_PREFILLS_ACU.main, true))
+      .toEqual(parseAgentMainAction_ACU(correction, true));
+    for (const reason of [undefined, '  ', null, 7]) {
+      expect(() => parseAgentMainAction_ACU({ ...correction, reason }, true)).toThrow(/实际字段状态：reason=/);
+    }
+    expect(() => parseAgentMainAction_ACU({ action: 'correct_materials', reason: '已核对字段', sql: '' }, true))
+      .toThrow(/reason=nonempty，sql=empty，settlementStartIndex=missing/);
+    expect(() => parseAgentMainAction_ACU({ action: 'correct_materials', reason: '已核对字段', sql: {} }, true))
+      .toThrow(/sql=type:object/);
     const sql = "UPDATE hooks SET status='paid' WHERE id='H1' AND expected_revision=2; UPDATE story_arc SET title='新标题' WHERE id='VOL-01' AND expected_revision=1";
     expect(parseAgentModuleSqlFieldWrites_ACU(sql, 'main').intents.map(item => item.module)).toEqual(['hooks', 'storyArc']);
     expect(parseAgentModuleSqlFieldWrites_ACU(sql, 'hook-cognition-maintainer').rejected).toEqual([
@@ -363,6 +373,13 @@ describe('逐栏 write_sql 意图解析', () => {
     expect(systemOnly.rejected).toHaveLength(3);
     expect(systemOnly.rejected.every(item => item.operationOnlyTarget?.id === 'H1'
       && item.operationOnlyTarget.expectedRevision === 2)).toBe(true);
+    const mixed = parseAgentModuleSqlFieldWrites_ACU(
+      "UPDATE hooks SET summary='新事实', recent_floor=8, expected_revision=3 WHERE id='H1' AND expected_revision=2", 'hook-cognition-maintainer');
+    expect(mixed.rejected).toHaveLength(2);
+    for (const issue of mixed.rejected) {
+      expect(issue.operationOnlyTarget).toBeUndefined();
+      expect(issue.repairTarget).toEqual({ module: 'hooks', column: 'id', value: 'H1', fields: ['summary'] });
+    }
     for (const sql of [
       "UPDATE hooks SET recent_floor=8, summary='新事实' WHERE id='H1' AND expected_revision=2",
       "UPDATE hooks SET recent_floor=8, bogus=3 WHERE id='H1' AND expected_revision=2",

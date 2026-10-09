@@ -560,6 +560,21 @@ describe('续写逐栏真实提交', () => {
     expect(reconcileAgentOperationOnlyPending_ACU([fix], [proof])[0].violations).toEqual(fix.violations.slice(1));
   });
 
+  it('逐栏清账仅接受同模块同条目的具体字段回执', async () => {
+    const { reconcileAgentFieldPending_ACU } = await import('../../../../src/service/continuation/agent/agent-module-field-commit');
+    const fix = { module: 'hooks' as const, agentName: 'hook-cognition-maintainer', source: 'transaction_rejected' as const,
+      attempts: 1, firstFailedAtIndex: 1, lastError: '待修', violations: [
+        { path: 'hooks#H1.summary', message: '旧字段拒绝' }, { path: 'hooks#H1.status', message: '缺栏' },
+        { path: 'hooks#H1.operationOnly', message: '待核实操作' }, { path: 'sql[0].hooks', message: '无身份诊断' }] };
+    expect(reconcileAgentFieldPending_ACU([fix], ['hooks:H1:summary'])[0].violations).toEqual(fix.violations.slice(1));
+    for (const key of ['hooks:H1', 'hooks:H2:summary', 'hooks:H1:recent_floor', 'hooks:H1:operationOnly']) {
+      expect(reconcileAgentFieldPending_ACU([fix], [key])).toEqual([fix]);
+    }
+    expect(reconcileAgentFieldPending_ACU([{ ...fix, source: 'invoke_failed' }], ['hooks:H1:summary']))
+      .toEqual([{ ...fix, source: 'invoke_failed' }]);
+  });
+
+
   it('完整条目退役经领域校验并在保存后回读', async () => {
     const { chat } = setup();
     await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, sql: INSERT_PARTIAL, role: 'hook-cognition-maintainer' });

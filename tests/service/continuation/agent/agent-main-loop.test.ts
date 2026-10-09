@@ -1514,6 +1514,49 @@ describe('派工与写集落盘', () => {
     } finally { _set_SillyTavern_API_ACU(null as any); }
   });
 
+  it.each([false, true])('兼容派工合法修复后再次开局可交付，旧诊断仍阻断，原生工具=%s', async nativeTools => {
+    const { commitAgentModuleFieldWrites_ACU, AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU } = await import('../../../../src/service/continuation/agent/agent-module-field-commit');
+    const { captureAgentModuleCommitBaseline_ACU, writeAgentModuleCommitDelta_ACU } = await import('../../../../src/service/continuation/agent/agent-module-store');
+    for (const legacy of [false, true]) {
+      const plannerReply = JSON.stringify({ summary: '策划完成', recommendation: '核对信件来源', mustPreserve: [], risks: [] });
+      const delivery = JSON.stringify({ summary: '合法字段已保存，核对操作问题' });
+      const h = harness_ACU({ nativeTools, productionModules: true, productionConversation: true,
+        mainReplies: [
+          JSON.stringify({ action: 'delegate', delegations: [{ agentName: 'hook-cognition-maintainer', prompt: '合法修复已绑定条目', reads: [] }] }),
+          JSON.stringify({ action: 'open_round', focus: '核对信件来源' }),
+          JSON.stringify({ action: 'block', reason: '无身份旧诊断仍需核对', unresolved: ['旧 SQL 诊断'] }),
+        ],
+        subReplies: [JSON.stringify({ action: 'write_sql', sql: "UPDATE hooks SET summary='守门人交出了晶屑' WHERE id='H1' AND expected_revision=1" }), delivery,
+          ...(legacy ? [delivery] : []), plannerReply, plannerReply,
+          JSON.stringify({ instruction: '从交出的晶屑写起', summary: '继续核对来源', constraints: null })],
+      });
+      h.request.settings.workflow.reviseLimit = 0;
+      try {
+        await writeAgentModuleSnapshot_ACU(h.chat, 3, { ...snapshotWithArc_ACU(), settledThroughIndex: 0 });
+        const inserted = await commitAgentModuleFieldWrites_ACU({ chat: h.chat, targetIndex: 3, role: 'hook-cognition-maintainer',
+          sql: "INSERT INTO hooks (id, summary, status, importance, planted_index, planned_payoff) VALUES ('H1', '守门人藏着晶屑', 'planted', 'mid', 3, '后续核对来源')" });
+        expect(inserted.status).toBe('committed');
+        const pendingFixes = [{ module: 'hooks' as const, agentName: 'hook-cognition-maintainer', source: 'transaction_rejected' as const,
+          attempts: 1, firstFailedAtIndex: 1, lastError: '字段与操作问题待修', completion: 'failed' as const,
+          rangeStartIndex: 1, rangeEndIndex: 3, acceptedKeys: [], createdAt: 1, updatedAt: 1,
+          violations: [{ path: 'hooks#H1.summary', message: '旧字段拒绝' },
+            { path: 'hooks#H1.operationOnly', message: AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU },
+            ...(legacy ? [{ path: 'sql[0].hooks', message: '旧诊断无条目身份' }] : [])] }];
+        const seeded = await writeAgentModuleCommitDelta_ACU(h.chat, 3, { writes: {}, revisions: {}, pendingFixes }, Date.now(),
+          folded => folded.snapshot.pendingFixes[0]?.violations.length === pendingFixes[0].violations.length, captureAgentModuleCommitBaseline_ACU(h.chat));
+        expect(seeded.status).toBe('committed');
+        if (legacy) await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: { message: expect.stringContaining('无身份旧诊断仍需核对') } });
+        else expect((await h.planner.plan(h.request)).instruction).toBe('从交出的晶屑写起');
+        const persisted = readAgentModuleSnapshot_ACU(h.chat);
+        expect(persisted.hooks[0].summary).toBe('守门人交出了晶屑');
+        expect(persisted.revisions.hooks).toBe(2);
+        expect(persisted.pendingFixes.flatMap(fix => fix.violations)).toEqual(legacy ? [pendingFixes[0].violations[2]] : []);
+        expect(persisted.settledThroughIndex).toBe(legacy ? 0 : 3);
+      } finally { _set_SillyTavern_API_ACU(null as any); }
+    }
+  });
+
+
   it('维护类子代理的 delta 串行落盘，结果与约束提议回灌给主 Agent', async () => {
     const h = harness_ACU({
       mainReplies: [

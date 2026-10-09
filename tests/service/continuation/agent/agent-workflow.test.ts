@@ -281,6 +281,38 @@ describe('续写固定工作流', () => {
     }
   });
 
+  it('逐栏成功只清同字段旧拒绝，保留历史诊断、版本冲突和窗口外缺口', async () => {
+    for (const scenario of ['same', 'other-field', 'stale', 'outside', 'legacy', 'new-issue'] as const) {
+      const fix = { module: 'hooks' as const, agentName: 'hook-cognition-maintainer', source: 'transaction_rejected' as const,
+        completion: 'failed' as const, attempts: 1, firstFailedAtIndex: 5, lastError: '旧字段拒绝',
+        rangeStartIndex: scenario === 'outside' ? 1 : 5, rangeEndIndex: scenario === 'outside' ? 2 : 6,
+        violations: [{ path: 'hooks#H1.summary', message: '旧字段拒绝' },
+          ...(scenario === 'legacy' ? [{ path: 'sql[0].hooks', message: '旧诊断无条目身份' }] : [])] };
+      const base = snapshot_ACU({ pendingFixes: [fix] });
+      const settings = buildDefaultContinuationSettings_ACU(); settings.workflow.reviseLimit = 0;
+      const h = harness_ACU({ settings, snapshot: base, settlementStartIndex: 5, hasUnsettledHistory: true,
+        runAgent: async call => call.agentName === 'hook-cognition-maintainer'
+          ? { ok: scenario !== 'new-issue', summary: '业务字段已确认', usedFieldWrites: true, writes: ['hooks'],
+            completion: scenario === 'new-issue' ? 'failed' : 'complete_changed', acceptedKeys: ['hooks:H1:summary'],
+            moduleCompletion: { hooks: scenario === 'new-issue' ? 'failed' : 'complete_changed' },
+            fieldConfirmation: { keys: [scenario === 'other-field' ? 'hooks:H1:status' : 'hooks:H1:summary'],
+              revisions: { ...base.revisions, hooks: scenario === 'stale' ? 1 : 0 } },
+            unresolvedIssues: scenario === 'new-issue' ? [{ module: 'hooks', source: 'transaction_rejected', path: 'hooks#H1.status', message: '新缺栏' }] : [] }
+          : { ok: true, summary: '建议', planner: { summary: '建议', recommendation: '安静交谈', mustPreserve: [], risks: [] } },
+      });
+      const result = await h.run();
+      if (scenario === 'same') {
+        expect(result.outcome).toBe('deliver'); expect(result.pendingFixes).toEqual([]);
+      } else {
+        expect(result.outcome).toBe('escalate'); expect(result.snapshot.settledThroughIndex).toBe(4);
+        if (scenario === 'legacy') expect(result.pendingFixes[0].violations).toEqual([fix.violations[1]]);
+        else if (scenario === 'new-issue') expect(result.pendingFixes[0].violations).toEqual([{ path: 'hooks#H1.status', message: '新缺栏' }]);
+        else expect(result.pendingFixes[0].violations).toEqual(fix.violations);
+      }
+    }
+  });
+
+
   it('终审 pass 直接交付；revise 打回后修订交付；连续 3 次失败升级', async () => {
     const settings = buildDefaultContinuationSettings_ACU();
     settings.finalReview.enabled = true;

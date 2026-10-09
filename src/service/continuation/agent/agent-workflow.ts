@@ -7,7 +7,7 @@
 
 import { ContinuationValidationError_ACU } from '../model';
 import type { ContinuationSettings_ACU } from '../model';
-import { reconcileAgentOperationOnlyPending_ACU, type AgentModuleFieldReceipt_ACU } from './agent-module-field-commit';
+import { reconcileAgentFieldPending_ACU, reconcileAgentOperationOnlyPending_ACU, type AgentModuleFieldReceipt_ACU } from './agent-module-field-commit';
 import {
   AGENT_INSTRUCTION_COMPOSER_NAME_ACU,
   type AgentComposerOutput_ACU,
@@ -71,6 +71,7 @@ export interface ContinuationWorkflowAgentPayload_ACU {
   acceptedKeys?: string[];
   usedFieldWrites?: boolean;
   operationOnlyConfirmed?: AgentModuleFieldReceipt_ACU['operationOnlyConfirmed'];
+  fieldConfirmation?: { keys: string[]; revisions: AgentModuleRevisions_ACU };
 }
 
 export interface ContinuationWorkflowStep_ACU {
@@ -179,13 +180,16 @@ function recordWorkflowIssues_ACU(
     const found = pending.findIndex(item => item.module === module);
     const previous = found >= 0 ? pending[found] : null;
     const accepted = acceptedKeysForModule_ACU(acceptedKeys, module);
+    const paths = new Set(moduleIssues.map(issue => issue.path));
+    const violations = [...(previous?.violations ?? []).filter(issue => !paths.has(issue.path)),
+      ...moduleIssues.map(issue => ({ path: issue.path, message: issue.message }))];
     const next: AgentPendingFix_ACU = {
       module,
       agentName: agentName || previous?.agentName || '',
-      violations: moduleIssues.map(issue => ({ path: issue.path, message: issue.message })),
+      violations,
       attempts: (previous?.attempts ?? 0) + 1,
       firstFailedAtIndex: previous?.firstFailedAtIndex ?? rangeStartIndex,
-      lastError: moduleIssues.map(issue => issue.message).join('；'),
+      lastError: violations.map(issue => issue.message).join('；'),
       source: moduleIssues[0]?.source ?? 'protocol_failed',
       completion: accepted.length ? 'partial' : 'failed',
       rangeStartIndex: previous?.rangeStartIndex ?? rangeStartIndex,
@@ -355,6 +359,15 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
         ? await applyMaintainerLike_ACU(maintainer.usedFieldWrites ? null : maintainer.maintainer, writes, maintainer.readRevisions, MAINTAINER_NAME_ACU)
         : [];
       const issues = [...(maintainer.unresolvedIssues ?? [])];
+      if (maintainer.fieldConfirmation) {
+        const proof = maintainer.fieldConfirmation;
+        const keys = proof.keys.filter(key => writes.some(module => key.startsWith(`${module}:`)
+          && snapshot.revisions[module] === proof.revisions[module])
+          && !issues.some(issue => issue.path === key.replace(/^([^:]+):([^:]+):/, '$1#$2.')));
+        snapshot = { ...snapshot, pendingFixes: snapshot.pendingFixes.flatMap(fix =>
+          pendingWithinSettlement_ACU(fix, settlementStartIndex, settlementEndIndex)
+            ? reconcileAgentFieldPending_ACU([fix], keys) : [fix]) };
+      }
       if (!maintainer.ok && !issues.length) {
         for (const module of writes.length ? writes : [...MAINTAINER_MODULES_ACU]) {
           issues.push({ module, source: 'invoke_failed', path: module, message: maintainer.summary || '维护子代理调用失败' });
@@ -364,13 +377,6 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
       if (issues.length) {
         snapshot = recordWorkflowIssues_ACU(snapshot, issues, MAINTAINER_NAME_ACU, settlementStartIndex, settlementEndIndex, maintainer.acceptedKeys);
         completion = appliedModules.length ? 'partial' : 'failed';
-      }
-      if (maintainer.ok && maintainer.usedFieldWrites) {
-        // 逐栏写入事务保留旧 pendingFixes（见 agent-module-field-commit），delta 路径不会走到这里。
-        // 运行时已按权威折叠状态核对缺栏与拒绝，本轮没有新问题的已完成模块在此清账，避免旧缺口每轮升级。
-        const unresolvedModules = new Set<string>(issues.map(item => item.module));
-        snapshot = clearCompletedPending_ACU(snapshot, Object.fromEntries(Object.entries(modules)
-          .filter(([module]) => !unresolvedModules.has(module))) as typeof modules, settlementStartIndex, settlementEndIndex);
       }
       if (maintainer.ok && !maintainer.usedFieldWrites) {
         // 成功检查同一范围后，旧调用失败已恢复；字段拒绝不能靠无变化交付清账。

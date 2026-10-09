@@ -1,6 +1,6 @@
 /** 主会话纠正：领域 SQL 沿用逐栏提交；追溯边界单独保存，不推进结算水位。 */
 import type { AgentConversationSnapshot_ACU, AgentCorrectMaterialsAction_ACU, AgentModuleSnapshot_ACU, AgentPendingFix_ACU } from './agent-model';
-import { commitAgentModuleFieldWrites_ACU, hostAgentModuleCommitStorage_ACU, reconcileAgentOperationOnlyPending_ACU, type AgentModuleCommitStorage_ACU, type AgentModuleFieldReceipt_ACU } from './agent-module-field-commit';
+import { commitAgentModuleFieldWrites_ACU, hostAgentModuleCommitStorage_ACU, reconcileAgentFieldPending_ACU, reconcileAgentOperationOnlyPending_ACU, type AgentModuleCommitStorage_ACU, type AgentModuleFieldReceipt_ACU } from './agent-module-field-commit';
 import { agentStoryEvidenceFloorIndexes_ACU } from './agent-placeholder-resolver';
 import { readMessageSwipeId_ACU } from './agent-module-frame';
 
@@ -18,12 +18,8 @@ export function renderAgentCorrectionGuide_ACU(conversation: AgentConversationSn
 
 /** 只按回执确认为已保存的同一条目、同一栏目清除字段拒绝，不能用无关成功清空模块。 */
 function repairedPending_ACU(fixes: AgentPendingFix_ACU[], receipt: AgentModuleFieldReceipt_ACU): AgentPendingFix_ACU[] {
-  const confirmed = new Set([...receipt.accepted, ...(receipt.alreadySaved ?? [])].map(item => `${item.module}#${item.id}.${item.field}`));
-  return fixes.flatMap(fix => {
-    if (fix.source !== 'transaction_rejected' && fix.source !== 'contract_rejected') return [fix];
-    const violations = fix.violations.filter(issue => !confirmed.has(issue.path));
-    return violations.length === fix.violations.length ? [fix] : violations.length ? [{ ...fix, violations }] : [];
-  });
+  return reconcileAgentFieldPending_ACU(fixes,
+    [...receipt.accepted, ...(receipt.alreadySaved ?? [])].map(item => `${item.module}:${item.id}:${item.field}`));
 }
 
 export async function correctAgentMaterials_ACU(input: {

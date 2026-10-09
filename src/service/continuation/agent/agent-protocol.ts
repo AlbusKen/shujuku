@@ -625,7 +625,14 @@ export function parseAgentMainAction_ACU(payload: Record<string, unknown>, allow
     const sql = readText_ACU(payload.sql).trim();
     const start = payload.settlementStartIndex;
     const user = payload.userMessageId;
-    if (!reason || (!sql && start === undefined)) failProtocol_ACU('correct_materials 必须提供 reason 与 sql 或 settlementStartIndex');
+    if (!reason || (!sql && start === undefined)) {
+      const state = (value: unknown): string => value === undefined ? 'missing'
+        : value === null ? 'null' : typeof value !== 'string' ? `type:${typeof value}`
+          : value.trim() ? 'nonempty' : 'empty';
+      failProtocol_ACU(`correct_materials 必须提供 reason 与 sql 或 settlementStartIndex；实际字段状态：reason=${state(payload.reason)}，sql=${state(payload.sql)}，settlementStartIndex=${start === undefined ? 'missing' : typeof start}。`
+        + 'reason 与 sql 必须是动作顶层的非空字符串；思考文字不算参数。'
+        + '没有业务纠正时使用 open_round，不用空 SQL 或虚构追溯起点。');
+    }
     if (payload.sql !== undefined && (typeof payload.sql !== 'string' || !sql)) failProtocol_ACU('sql 必须是非空字符串');
     if (start !== undefined && (typeof start !== 'number' || !Number.isInteger(start) || start < 0)) failProtocol_ACU('settlementStartIndex 必须是非负整数');
     if (start !== undefined && (typeof user !== 'number' || !Number.isInteger(user) || user < 1)) failProtocol_ACU('改变追溯起点必须引用真实用户消息 userMessageId');
@@ -1276,6 +1283,15 @@ export function parseAgentModuleSqlFieldWrites_ACU(sql: string, role: AgentModul
         }
       }
       return;
+    }
+    // 混合写入仍拒绝坏列；只登记明确 ID 和本语句涉及的业务栏，供后续合法提交逐栏修复。
+    if (statement.kind === 'update' && statement.table === 'hooks' && typeof id === 'string'
+      && Object.keys(fields).length && !pageRef) {
+      for (const item of result.rejected) {
+        if (item.path === `${path}.recent_floor` || item.path === `${path}.expected_revision`) {
+          item.repairTarget = { module, column: 'id', value: id.trim(), fields: Object.keys(fields) };
+        }
+      }
     }
     result.intents.push({ kind: statement.kind, module, id: typeof id === 'string' ? id.trim() : '', fields, ...(typeof revision === 'number' ? { expectedRevision: revision } : {}), ...(pageRef ? { pageRef } : {}) });
   });

@@ -1007,6 +1007,69 @@ describe('子代理逐栏工具会话', () => {
     } finally { _set_SillyTavern_API_ACU(null as any); }
   });
 
+  it.each(['json', 'tools'] as const)('%s 系统字段证明在本派工合法写入推进版本后重新核实', async toolMode => {
+    const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');
+    const { commitAgentModuleFieldWrites_ACU } = await import('../../../../src/service/continuation/agent/agent-module-field-commit');
+    const { readAgentModuleSnapshot_ACU } = await import('../../../../src/service/continuation/agent/agent-module-store');
+    const input = input_ACU(); input.toolMode = toolMode;
+    const chat = input.resolveContext.chat;
+    _set_SillyTavern_API_ACU({ chat, saveChat: async () => {} } as any);
+    try {
+      await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role: 'hook-cognition-maintainer',
+        sql: "INSERT INTO hooks (id, summary, status, importance, planted_index, planned_payoff) VALUES ('H1', '门后信件', 'planted', 'mid', 1, '入城后交出')" });
+      input.resolveContext.moduleSnapshot = readAgentModuleSnapshot_ACU(chat);
+      input.writeSql = ({ role, sql, isCurrent, revisionWindow }) => commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role, sql, isCurrent, revisionWindow });
+      const sqls = ["UPDATE hooks SET recent_floor=1 WHERE id='H1' AND expected_revision=1",
+        "UPDATE hooks SET status='reinforced' WHERE id='H1' AND expected_revision=1"];
+      const delivery = JSON.stringify({ summary: '合法字段已保存，独立核对后撤回系统字段操作' });
+      const replies = sqls.map((sql, i) => toolMode === 'tools' ? nativeToolTurn_ACU('write_sql', { sql }, `refresh-${i}`) : JSON.stringify({ action: 'write_sql', sql }));
+      const runtime = new AgentSubagentRuntime_ACU({ resolveApiPreset: (() => preset_ACU) as any,
+        callInternalAi: async () => replies.shift() ?? (toolMode === 'tools' ? nativeAgentReply_ACU(delivery)! : delivery) });
+      const result = await runtime.run(input);
+      expect(result.completion).toBe('complete_changed');
+      expect(result.unresolvedIssues).toEqual([]);
+      expect(result.operationOnlyConfirmed).toEqual([expect.objectContaining({ module: 'hooks', id: 'H1', revision: 2 })]);
+      expect(result.fieldConfirmation).toMatchObject({ keys: ['hooks:H1:status'], revisions: { hooks: 2 } });
+      expect(readAgentModuleSnapshot_ACU(chat).hooks[0].status).toBe('reinforced');
+    } finally { _set_SillyTavern_API_ACU(null as any); }
+  });
+
+  it.each(['json', 'tools'] as const)('%s 混合坏列保留拒绝，后续合法同字段回执才解决旧 SQL 问题', async toolMode => {
+    const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');
+    const { commitAgentModuleFieldWrites_ACU } = await import('../../../../src/service/continuation/agent/agent-module-field-commit');
+    const { readAgentModuleSnapshot_ACU } = await import('../../../../src/service/continuation/agent/agent-module-store');
+    for (const repair of [false, true]) {
+      const input = input_ACU(); input.toolMode = toolMode;
+      const chat = input.resolveContext.chat;
+      _set_SillyTavern_API_ACU({ chat, saveChat: async () => {} } as any);
+      try {
+        await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role: 'hook-cognition-maintainer',
+          sql: "INSERT INTO hooks (id, summary, status, importance, planted_index, planned_payoff) VALUES ('H1', '门后信件', 'planted', 'mid', 1, '入城后交出')" });
+        input.resolveContext.moduleSnapshot = readAgentModuleSnapshot_ACU(chat);
+        input.writeSql = ({ role, sql, isCurrent, revisionWindow }) => commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role, sql, isCurrent, revisionWindow });
+        const sqls = ["UPDATE hooks SET summary='门后藏着信件', recent_floor=1, expected_revision=2 WHERE id='H1' AND expected_revision=1",
+          ...(repair ? ["UPDATE hooks SET summary='门后藏着信件' WHERE id='H1' AND expected_revision=2"] : [])];
+        const delivery = JSON.stringify({ summary: '独立交付当前核对结果' });
+        const replies = sqls.map((sql, i) => toolMode === 'tools' ? nativeToolTurn_ACU('write_sql', { sql }, `mixed-${i}`) : JSON.stringify({ action: 'write_sql', sql }));
+        const runtime = new AgentSubagentRuntime_ACU({ resolveApiPreset: (() => preset_ACU) as any,
+          callInternalAi: async () => replies.shift() ?? (toolMode === 'tools' ? nativeAgentReply_ACU(delivery)! : delivery) });
+        const result = await runtime.run(input);
+        expect(readAgentModuleSnapshot_ACU(chat).revisions.hooks).toBe(2);
+        expect(result.operationOnlyConfirmed).toEqual([]);
+        if (repair) {
+          expect(result.completion).toBe('complete_changed');
+          expect(result.unresolvedIssues).toEqual([]);
+          expect(result.fieldConfirmation?.keys).toEqual(['hooks:H1:summary']);
+        } else {
+          expect(result.completion).toBe('failed');
+          expect(result.unresolvedIssues).toEqual([expect.objectContaining({ module: 'hooks', id: 'H1', path: 'hooks#H1.summary' })]);
+          expect(result.fieldConfirmation?.keys ?? []).toEqual([]);
+        }
+      } finally { _set_SillyTavern_API_ACU(null as any); }
+    }
+  });
+
+
   it.each(['json', 'tools'] as const)('%s 完整权威条目的独立无变化交付只核实已绑定的操作问题', async toolMode => {
     const { vi } = await import('vitest');
     const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');

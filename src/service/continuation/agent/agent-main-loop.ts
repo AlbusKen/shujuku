@@ -67,7 +67,7 @@ import { planAgentHistoryCompaction_ACU } from './agent-history-compactor';
 import type { AgentConversationCompactionMarkV2_ACU } from './agent-model';
 import { renderAgentTableCatalog_ACU } from './agent-tables';
 import { applyAgentConstraintRegistrationViaSql_ACU, applyAgentModuleDeltaViaSql_ACU, applyAgentWebRefsDeltaViaSql_ACU, mergeAgentDeltaRevisions_ACU } from './agent-transaction';
-import { commitAgentModuleFieldWrites_ACU, hostAgentModuleCommitStorage_ACU, reconcileAgentOperationOnlyPending_ACU, type AgentModuleCommitStorage_ACU, type AgentFieldPage_ACU, type AgentModuleRevisionWindow_ACU } from './agent-module-field-commit';
+import { commitAgentModuleFieldWrites_ACU, hostAgentModuleCommitStorage_ACU, reconcileAgentFieldPending_ACU, reconcileAgentOperationOnlyPending_ACU, type AgentModuleCommitStorage_ACU, type AgentFieldPage_ACU, type AgentModuleRevisionWindow_ACU } from './agent-module-field-commit';
 import { readMessageSwipeId_ACU } from './agent-module-frame';
 import { correctAgentMaterials_ACU, renderAgentCorrectionGuide_ACU } from './agent-main-correction';
 import { compactAgentProtocolError_ACU, parseAgentMainAction_ACU, parseAgentMainOutput_ACU, parseAgentToolCall_ACU } from './agent-protocol';
@@ -1964,6 +1964,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       acceptedKeys: result.acceptedKeys,
       usedFieldWrites: result.usedFieldWrites,
       operationOnlyConfirmed: result.operationOnlyConfirmed,
+      fieldConfirmation: result.fieldConfirmation,
       noChange: result.completion === 'complete_no_change',
     });
     const workflow = await runContinuationAgentWorkflow_ACU({
@@ -2397,6 +2398,21 @@ export class ContinuationAgentTurnPlanner_ACU {
         continue;
       }
       const result = item.result;
+      if (result.fieldConfirmation) {
+        const proof = result.fieldConfirmation;
+        const keys = proof.keys.filter(key => result.writes.some(module => key.startsWith(`${module}:`)
+          && nextSnapshot.revisions[module] === proof.revisions[module])
+          && !result.unresolvedIssues?.some(issue => issue.path === key.replace(/^([^:]+):([^:]+):/, '$1#$2.')));
+        const selection = resolveAgentUnsettledStoryWindow_ACU(context);
+        const pendingFixes = nextSnapshot.pendingFixes.flatMap(fix =>
+          fix.rangeStartIndex >= selection.startIndex && fix.rangeEndIndex <= chat.length - 1
+            && fix.rangeStartIndex >= 0 && fix.rangeEndIndex >= fix.rangeStartIndex
+            ? reconcileAgentFieldPending_ACU([fix], keys) : [fix]);
+        if (JSON.stringify(pendingFixes) !== JSON.stringify(nextSnapshot.pendingFixes)) {
+          nextSnapshot = { ...nextSnapshot, pendingFixes };
+          snapshotChanged = true;
+        }
+      }
       if (result.completion === 'failed' || result.completion === 'partial') {
         const issues = result.unresolvedIssues?.map(issue => `${issue.path}: ${issue.message}`).join('；');
         settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: '', detail: '',
@@ -2419,20 +2435,25 @@ export class ContinuationAgentTurnPlanner_ACU {
               return reconcileAgentOperationOnlyPending_ACU([fix], proofs);
             }) };
           }
+          const pending = applied.pendingFixes.filter(fix => result.writes.includes(fix.module)
+            && fix.rangeStartIndex >= selection.startIndex && fix.rangeEndIndex <= settledTarget
+            && fix.rangeStartIndex >= 0 && fix.rangeEndIndex >= fix.rangeStartIndex);
+          const hasPending = pending.length > 0;
           if (selection.floors.length) {
             const previous = context.moduleSnapshot.materialCompletion;
             const mergePrevious = previous && (previous.state === 'complete_changed' || previous.state === 'complete_no_change')
               && previous.rangeStartIndex >= 0 && previous.rangeEndIndex >= previous.rangeStartIndex
               && previous.rangeEndIndex + 1 >= selection.startIndex && previous.rangeStartIndex <= settledTarget + 1;
-            const state = result.completion ?? 'complete_changed';
+            const state = hasPending ? 'partial' : result.completion ?? 'complete_changed';
             nextSnapshot = { ...applied,
-              settledThroughIndex: selection.hiddenCount === 0
+              settledThroughIndex: !hasPending && selection.hiddenCount === 0
                 ? Math.max(applied.settledThroughIndex, settledTarget) : applied.settledThroughIndex,
               materialCompletion: {
                 state,
                 rangeStartIndex: mergePrevious ? Math.min(previous.rangeStartIndex, selection.startIndex) : selection.startIndex,
                 rangeEndIndex: mergePrevious ? Math.max(previous.rangeEndIndex, settledTarget) : settledTarget,
-                modules: result.moduleCompletion ?? { hooks: state, infoGap: state, chronology: state },
+                modules: { ...(result.moduleCompletion ?? { hooks: state, infoGap: state, chronology: state }),
+                  ...Object.fromEntries(pending.map(fix => [fix.module, 'partial' as const])) },
                 updatedAt: Date.now(),
               },
             };
@@ -2444,14 +2465,14 @@ export class ContinuationAgentTurnPlanner_ACU {
           const proposals = result.maintainer.delta.constraintProposals;
           settleOutcome(item.delegation, {
             agentName: result.agentName,
-            ok: true,
+            ok: !hasPending,
             summary: result.maintainer.summary,
             detail: [
               `已结算：伏笔 ${result.maintainer.delta.hooks.length} 条、信息差 ${result.maintainer.delta.infoGap.length} 条、故事时间 ${result.maintainer.delta.chronology.length + result.maintainer.delta.chronologyPatches.length} 条`,
               proposals.length ? `约束提议（需你裁决后登记）：${proposals.join('；')}` : '',
               result.expandedReads.length ? `补充读取：${result.expandedReads.join('、')}` : '',
             ].filter(Boolean).join('\n'),
-            rejectedReason: '',
+            rejectedReason: hasPending ? `本次字段已确认，但仍有待修问题：${pending.flatMap(fix => fix.violations.map(issue => `${issue.path}: ${issue.message}`)).join('；')}` : '',
           }, result.usage);
         } catch (error) {
           settleOutcome(item.delegation, { agentName: result.agentName, ok: false, summary: result.maintainer.summary, detail: '', rejectedReason: compactAgentProtocolError_ACU(error) }, result.usage);
