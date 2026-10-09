@@ -14,16 +14,6 @@ import { agentModuleFrameDeps_ACU, captureAgentModuleCommitBaseline_ACU, readAge
 import { parseAgentModuleSqlFieldWrites_ACU, type AgentModuleSqlFieldIntent_ACU, type AgentModuleSqlFieldRejection_ACU } from './agent-protocol';
 import { applyAgentModuleDelta_ACU, applyAgentWebRefsDelta_ACU, nextAgentWebRefId_ACU } from './agent-transaction';
 import { agentStoryEvidenceFloorIndexes_ACU } from './agent-placeholder-resolver';
-import { applyWorldSimulationProjection_ACU } from '../../simulation/simulation-projection';
-
-/**
- * 派工目标正文的比对口径：剥掉格林推演写入的「与此同时」投影块再比。
- * 推演会在续写运行中把投影块追加进同一 AI 楼层的正文，那不是正文模型产出的内容变化；
- * 按原文逐字比对会让首次保存之后的每次提交都被判为「目标楼层已变化」。
- */
-function dispatchContent_ACU(value: unknown): unknown {
-  return typeof value === 'string' ? applyWorldSimulationProjection_ACU(value, null) : value;
-}
 
 type Module_ACU = 'hooks' | 'infoGap' | 'storyArc' | 'chronology' | 'webRefs';
 const ROLE_MODULES_ACU: Readonly<Partial<Record<AgentModuleWriterRole_ACU, readonly AgentWritableModule_ACU[]>>> = {
@@ -489,7 +479,8 @@ export const hostAgentModuleCommitStorage_ACU: AgentModuleCommitStorage_ACU = {
 export function commitAgentModuleFieldWrites_ACU(input: {
   chat: any[];
   targetIndex: number;
-  dispatchTarget?: { message: unknown; swipeId: string; content: unknown };
+  /** 目标按聊天内楼层及 Swipe 绑定；正文改写不改变派工归属。 */
+  dispatchTarget?: { message: unknown; swipeId: string };
   sql: string;
   role: AgentModuleWriterRole_ACU;
   completedStages?: readonly number[];
@@ -503,8 +494,7 @@ export function commitAgentModuleFieldWrites_ACU(input: {
   const prior = queue_ACU.get(input.chat) ?? Promise.resolve();
   const run = prior.catch(() => {}).then(async (): Promise<AgentModuleFieldReceipt_ACU> => {
     const dispatchTargetCurrent = () => !input.dispatchTarget || (input.chat[input.targetIndex] === input.dispatchTarget.message
-      && readMessageSwipeId_ACU(input.chat[input.targetIndex]) === input.dispatchTarget.swipeId
-      && dispatchContent_ACU(input.chat[input.targetIndex]?.mes) === dispatchContent_ACU(input.dispatchTarget.content));
+      && readMessageSwipeId_ACU(input.chat[input.targetIndex]) === input.dispatchTarget.swipeId);
     const isCurrent = () => (input.isCurrent?.() ?? true) && dispatchTargetCurrent();
     const parsed = parseAgentModuleSqlFieldWrites_ACU(input.sql, input.role);
     const folded = storage.readFold(input.chat);
@@ -522,7 +512,7 @@ export function commitAgentModuleFieldWrites_ACU(input: {
         : input.targetIndex !== input.chat.length - 1 ? '末楼位置已变化'
         : input.dispatchTarget && target !== input.dispatchTarget.message ? '目标消息对象已替换'
         : input.dispatchTarget && readMessageSwipeId_ACU(target) !== input.dispatchTarget.swipeId ? '目标 Swipe 已变化'
-        : '目标正文内容已变化';
+        : '派工目标已失效';
       receipt.rejected.push({ path: 'chat', reason: `当前聊天或目标楼层已变化：${cause}。停止旧任务，重新取得当前聊天与正文快照，不重发 SQL` });
       receipt.partials = null; receipt.revisions = null; return receipt;
     }

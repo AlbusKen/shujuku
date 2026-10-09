@@ -1829,7 +1829,7 @@ export class ContinuationAgentTurnPlanner_ACU {
   private moduleFieldWrite_ACU(chat: any[], context: AgentResolveContext_ACU) {
     const targetIndex = chat.length - 1;
     const message = chat[targetIndex];
-    const dispatchTarget = { message, swipeId: readMessageSwipeId_ACU(message), content: message?.mes };
+    const dispatchTarget = { message, swipeId: readMessageSwipeId_ACU(message) };
     const completedStages = context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber);
     return ({ role, sql, resolvePage, isCurrent, revisionWindow }: { role: AgentSubagentName_ACU; sql: string; resolvePage: (handle: string) => AgentFieldPage_ACU | null; isCurrent?: () => boolean; revisionWindow?: AgentModuleRevisionWindow_ACU }) => commitAgentModuleFieldWrites_ACU({
       chat, targetIndex, dispatchTarget, role, sql, resolvePage, isCurrent, completedStages, revisionWindow,

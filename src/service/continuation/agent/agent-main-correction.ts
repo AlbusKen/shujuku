@@ -37,7 +37,7 @@ export async function correctAgentMaterials_ACU(input: {
   const reject = (reason: string) => ({ status: 'rejected' as const, reason, ...(sqlReceipt ? { sqlReceipt } : {}) });
   const targetIndex = chat.length - 1;
   const target = chat[targetIndex];
-  const dispatchTarget = { message: target, swipeId: readMessageSwipeId_ACU(target), content: target?.mes };
+  const dispatchTarget = { message: target, swipeId: readMessageSwipeId_ACU(target) };
   const current = () => input.isCurrent() && storage.isActive(chat) && chat.length - 1 === targetIndex
     && chat[targetIndex] === target && readMessageSwipeId_ACU(target) === dispatchTarget.swipeId;
   if (!current() || !agentStoryEvidenceFloorIndexes_ACU(chat).has(targetIndex)) return reject('当前聊天或承载正文楼层不可用');

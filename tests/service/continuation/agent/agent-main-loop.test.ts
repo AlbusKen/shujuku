@@ -1438,7 +1438,7 @@ describe('派工与写集落盘', () => {
     } finally { _set_SillyTavern_API_ACU(null as any); }
   });
 
-  it('模型等待期间同一目标楼正文被改写时旧派工不得提交', async () => {
+  it('模型等待期间第三方改写同一目标楼正文不影响派工提交与继续运行', async () => {
     const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');
     const { AGENT_MODULE_FIELD_ACU } = await import('../../../../src/service/continuation/agent/agent-model');
     const saveChat = vi.fn().mockResolvedValue(undefined);
@@ -1455,20 +1455,22 @@ describe('派工与写集落盘', () => {
         _set_SillyTavern_API_ACU({ chat, saveChat } as any);
         if (calls++ === 0) {
           chat[3].mes = '新的正文版本';
-          return nativeToolTurn_ACU('write_sql', { sql: "INSERT INTO hooks (id, summary, expected_revision) VALUES ('H1', '旧剧情线索', 0)" }, 'call-stale-content');
+          return nativeToolTurn_ACU('write_sql', { sql: "INSERT INTO hooks (id, summary, status, importance, planted_index, planned_payoff, expected_revision) VALUES ('H1', '剧情线索', 'planted', 'mid', 1, '后续回收', 0)" }, 'call-floor-content');
         }
         return JSON.stringify({ summary: '结束结算', delta: {} });
       },
     });
     try {
-      await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: {
-        code: 'CONTINUATION_INTERNAL_REQUEST_STALE', message: expect.stringContaining('目标正文内容已变化'),
-      } });
-      expect(saveChat).not.toHaveBeenCalled();
-      expect(lastChat[3][AGENT_MODULE_FIELD_ACU]).toBeUndefined();
-      expect(h.subCalls).toHaveLength(1);
-      expect(h.mainCalls).toHaveLength(1);
-      expect(readAgentSessionLog_ACU().some(entry => entry.title === '写入任务已失效' && entry.detail.includes('目标正文内容已变化'))).toBe(true);
+      await h.planner.plan(h.request);
+      expect(saveChat).toHaveBeenCalled();
+      expect(lastChat[3][AGENT_MODULE_FIELD_ACU]).toBeDefined();
+      expect(readAgentModuleSnapshot_ACU(lastChat).hooks).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'H1', summary: '剧情线索' }),
+      ]));
+      expect(lastChat[3].mes).toBe('新的正文版本');
+      expect(h.subCalls.length).toBeGreaterThan(1);
+      expect(h.mainCalls.length).toBeGreaterThan(1);
+      expect(readAgentSessionLog_ACU().some(entry => entry.title === '写入任务已失效')).toBe(false);
     } finally { _set_SillyTavern_API_ACU(null as any); }
   });
 

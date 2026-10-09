@@ -17,15 +17,15 @@ function setup() {
     { is_user: false, mes: '官船抵达江南府码头。', swipe_id: 0, swipes: ['官船抵达江南府码头。'] },
   ];
   _set_SillyTavern_API_ACU({ chat, saveChat: vi.fn().mockResolvedValue(undefined) } as any);
-  // 与 agent-main-loop 的 moduleFieldWrite_ACU 一致：派工时绑定目标楼层的消息、swipe 与正文。
+  // 与 agent-main-loop 的 moduleFieldWrite_ACU 一致：派工时绑定目标楼层的消息与 swipe。
   const message = chat[1];
-  const dispatchTarget = { message, swipeId: readMessageSwipeId_ACU(message), content: message.mes };
+  const dispatchTarget = { message, swipeId: readMessageSwipeId_ACU(message) };
   return { chat, dispatchTarget };
 }
 
 beforeEach(() => _set_SillyTavern_API_ACU(null as any));
 
-describe('续写逐栏提交与格林推演投影共存', () => {
+describe('续写逐栏提交与目标楼层正文改写共存', () => {
   it('推演在续写途中把投影块写进目标楼层后，后续提交仍然成功', async () => {
     const { chat, dispatchTarget } = setup();
     const first = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, dispatchTarget, sql: INSERT_HOOK, role: 'hook-cognition-maintainer' });
@@ -39,11 +39,15 @@ describe('续写逐栏提交与格林推演投影共存', () => {
     expect(readAgentModuleSnapshot_ACU(chat).hooks.map(item => item.summary)).toEqual(expect.arrayContaining(['信件', '晶屑']));
   });
 
-  it('正文模型产出的正文真正变化时仍然拒绝，并给出原因', async () => {
+  it('第三方改写同一目标楼正文后仍提交资料，并保留改写后的正文', async () => {
     const { chat, dispatchTarget } = setup();
-    chat[1].mes = '官船改道去了临川。';
+    chat[1].mes = '官船抵达临川府码头。';
+    chat[1].swipes[0] = chat[1].mes;
     const receipt = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, dispatchTarget, sql: INSERT_HOOK, role: 'hook-cognition-maintainer' });
-    expect(receipt.status).not.toBe('committed');
-    expect(receipt.rejected).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'chat', reason: expect.stringContaining('当前聊天或目标楼层已变化：目标正文内容已变化') })]));
+    expect(receipt.status).toBe('committed');
+    expect(receipt.rejected).toEqual([]);
+    expect(readAgentModuleSnapshot_ACU(chat).hooks.map(item => item.summary)).toContain('信件');
+    expect(chat[1].mes).toBe('官船抵达临川府码头。');
+    expect(chat[1].swipes[0]).toBe(chat[1].mes);
   });
 });
