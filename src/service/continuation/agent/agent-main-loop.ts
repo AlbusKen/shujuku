@@ -67,7 +67,7 @@ import { planAgentHistoryCompaction_ACU } from './agent-history-compactor';
 import type { AgentConversationCompactionMarkV2_ACU } from './agent-model';
 import { renderAgentTableCatalog_ACU } from './agent-tables';
 import { applyAgentConstraintRegistrationViaSql_ACU, applyAgentModuleDeltaViaSql_ACU, applyAgentWebRefsDeltaViaSql_ACU, mergeAgentDeltaRevisions_ACU } from './agent-transaction';
-import { commitAgentModuleFieldWrites_ACU, hostAgentModuleCommitStorage_ACU, type AgentModuleCommitStorage_ACU, type AgentFieldPage_ACU, type AgentModuleRevisionWindow_ACU } from './agent-module-field-commit';
+import { commitAgentModuleFieldWrites_ACU, hostAgentModuleCommitStorage_ACU, reconcileAgentOperationOnlyPending_ACU, type AgentModuleCommitStorage_ACU, type AgentFieldPage_ACU, type AgentModuleRevisionWindow_ACU } from './agent-module-field-commit';
 import { readMessageSwipeId_ACU } from './agent-module-frame';
 import { correctAgentMaterials_ACU, renderAgentCorrectionGuide_ACU } from './agent-main-correction';
 import { compactAgentProtocolError_ACU, parseAgentMainAction_ACU, parseAgentMainOutput_ACU, parseAgentToolCall_ACU } from './agent-protocol';
@@ -265,35 +265,36 @@ export function evaluateArcArchitectDispatch_ACU(context: AgentResolveContext_AC
  * 快速模型对“照这个样子写”远比对“请修正”服从；样例按状态选择，避免把不合时宜的动作推给它。
  */
 export function renderMainProtocolRejection_ACU(reason: string, execution: ContinuationAgentExecutionContext_ACU, allowDelegate: boolean, toolMode: AgentToolMode_ACU = 'json'): string {
-  const hasTurn = !!execution.turn;
+  const correction = reason.includes('correct_materials') || reason.includes('settlementStartIndex');
+  const sqlExample = '<依据真实正文、真实 ID 与当前模块修订号的非空受限 SQL>';
+  const correctionGuide = 'reason 是非空纠正依据；sql 是非空受限 INSERT/UPDATE/DELETE。两者写在同一个动作里，不能把 SQL 放在 thought 或动作外。只有用户明确要求改变追溯起点时才用 settlementStartIndex，并同时给最新真实用户消息 userMessageId；不要为修复格式错误跳过历史。hooks 只写 summary、status、importance、planted_index、planned_payoff；expected_revision 只放 WHERE，不写 recent_floor 或自行递增版本。';
   if (toolMode === 'tools') {
-    // 工具模式：所有动作都是函数调用，样例只说明该调用哪个函数，不再出现 JSON 动作对象。
     const hints = [
       `你上一次的调用没有被采纳。原因：${reason}`,
       '每次回复只做一件事：要么调用 read / search 核对资料，要么调用一个决策函数。不要把动作写在正文里。',
-      '核对资料：调用 read，参数 reads 为非空地址数组，例如 ["$STORY_TAIL","$HOOKS_LEDGER"]；或调用 search，参数 query 必填。',
     ];
-    if (!hasTurn && allowDelegate) hints.push('还没有可执行的大纲轮次：调用 delegate，delegations 里派 outline-architect 先建立大纲。');
-    if (allowDelegate) hints.push('需要子代理：调用 delegate，delegations 每项给 agentName（从子代理目录复制）和 prompt。');
-    if (hasTurn) hints.push('证据已足够：调用 finalize，instruction 写完整续写指令，summary 写一句话要点。');
+    if (correction) return [...hints, correctionGuide,
+      `资料纠正最小结构：调用 correct_materials，参数 ${JSON.stringify({ reason: '已核实的纠正依据', sql: sqlExample })}。示例内容不可原样提交；没有实际纠正就不要调用 correct_materials。`].join('\n');
+    hints.push('正常续写调用 open_round，参数 focus 为本轮场景焦点；总纲、大纲、维护、策划、指导与终审由固定工作流安排，不重复委派维护和策划。');
+    hints.push('具体事实仍缺失时调用 read（reads 非空）或 search（query 非空）；不要重复读取已经完整注入的资料。');
+    if (allowDelegate) hints.push('仅在明确需要重规划时调用 delegate，复制目录中的代理名并给出依据和禁止事项。');
+    if (execution.turn) hints.push('finalize 只能确认 instruction-composer 本轮已产出的完整 instruction，不自行编造指导。');
     hints.push('关键资料缺失无法继续：调用 block，给出 reason 与 unresolved。');
     return hints.join('\n');
   }
   const lines = [
     `你上一次的输出没有被采纳。原因：${reason}`,
-    '每次只输出一个动作 JSON 对象（不要 Markdown 围栏），格式必须是下面之一：',
+    '重新输出一个完整动作 JSON 对象，不续写被拒残片、不输出裸 SQL 或 Markdown 围栏。',
   ];
-  if (!hasTurn && allowDelegate) {
-    lines.push('{"thought":"先建立大纲","action":"delegate","delegations":[{"agentName":"outline-architect","prompt":"按总纲当前 active 卷规划本阶段","reads":[]}]}');
-  }
-  lines.push('{"thought":"先核对资料","action":"read","reads":["$STORY_TAIL","$HOOKS_LEDGER"]}');
-  if (allowDelegate) {
-    lines.push('{"thought":"先结算再策划","action":"delegate","delegations":[{"agentName":"hook-cognition-maintainer","prompt":"结算未结算正文，对照上一轮目标评估达成度","reads":[]},{"agentName":"mainline-planner","prompt":"本轮 pacing=setup，允许主线 hold","reads":[]}]}');
-  }
-  if (hasTurn) {
-    lines.push('{"thought":"证据已足够","action":"finalize","instruction":"承接：……\\n本轮场景任务：……\\n必须发生的变化：……","summary":"一句话要点"}');
-  }
-  lines.push('{"thought":"关键资料缺失","action":"block","reason":"……","unresolved":["……"]}');
+  if (correction) return [...lines, correctionGuide,
+    JSON.stringify({ action: 'correct_materials', reason: '已核实的纠正依据', sql: sqlExample }),
+    '示例内容不可原样提交；没有实际纠正时改用 open_round，不用空 SQL 或伪造起点满足校验。'].join('\n');
+  lines.push('{"action":"open_round","focus":"依据本轮目标与真实正文确定的场景焦点"}');
+  lines.push('正常续写由 open_round 启动固定工作流，自动准备总纲、大纲并完成维护、策划、指导和终审，不重复委派维护或策划。');
+  lines.push('需要核对具体缺口时输出 {"action":"read","reads":["真实授权地址"]} 或 {"action":"search","query":"具体缺口"}，不要重复已完整注入的资料。');
+  if (allowDelegate) lines.push('仅在需要重规划时 delegate；delegations 每项给目录中的 agentName、prompt 与 reads。');
+  if (execution.turn) lines.push('finalize 只确认 instruction-composer 本轮已有的完整 instruction 与 summary，不自行重写。');
+  lines.push('{"action":"block","reason":"关键缺口或需要用户裁决的具体原因","unresolved":["具体缺口"]}');
   return lines.join('\n');
 }
 
@@ -1962,6 +1963,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       unresolvedIssues: result.unresolvedIssues,
       acceptedKeys: result.acceptedKeys,
       usedFieldWrites: result.usedFieldWrites,
+      operationOnlyConfirmed: result.operationOnlyConfirmed,
       noChange: result.completion === 'complete_no_change',
     });
     const workflow = await runContinuationAgentWorkflow_ACU({
@@ -2373,7 +2375,18 @@ export class ContinuationAgentTurnPlanner_ACU {
       }
     }));
 
-    let nextSnapshot = settled.some(item => item.result?.usedFieldWrites) ? this.dependencies.readModuleSnapshot(chat) : snapshot;
+    const stale = settled.find(item => item.error instanceof ContinuationValidationError_ACU
+      && item.error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE');
+    if (stale) {
+      for (const item of settled) {
+        settleOutcome(item.delegation, { agentName: item.delegation.agentName, ok: false, summary: '', detail: '',
+          rejectedReason: compactAgentProtocolError_ACU(item.error ?? stale.error) }, item.result?.usage);
+      }
+      throw stale.error;
+    }
+
+    let nextSnapshot = settled.some(item => item.result?.usedFieldWrites || item.result?.operationOnlyConfirmed?.length)
+      ? this.dependencies.readModuleSnapshot(chat) : snapshot;
     let snapshotChanged = false;
 
     for (const item of settled) {
@@ -2393,10 +2406,19 @@ export class ContinuationAgentTurnPlanner_ACU {
       if (result.maintainer) {
         try {
           const delta = mergeAgentDeltaRevisions_ACU(result.maintainer.delta, result.readRevisions);
-          const applied = result.usedFieldWrites ? nextSnapshot : (await applyAgentModuleDeltaViaSql_ACU(nextSnapshot, delta, result.writes, chat.length - 1, [], undefined, agentStoryEvidenceFloorIndexes_ACU(chat))).snapshot;
+          let applied = result.usedFieldWrites ? nextSnapshot : (await applyAgentModuleDeltaViaSql_ACU(nextSnapshot, delta, result.writes, chat.length - 1, [], undefined, agentStoryEvidenceFloorIndexes_ACU(chat))).snapshot;
           // 兼容派工也只记录实际窗口；旧正文未处理时保留连续结算水位。
           const selection = resolveAgentUnsettledStoryWindow_ACU(context);
           const settledTarget = chat.length - 1;
+          if (!result.unresolvedIssues?.length && result.operationOnlyConfirmed?.length) {
+            const proofs = result.operationOnlyConfirmed.filter(proof => result.writes.includes(proof.module)
+              && applied.revisions[proof.module] === proof.revision);
+            applied = { ...applied, pendingFixes: applied.pendingFixes.flatMap(fix => {
+              if (fix.rangeStartIndex < selection.startIndex || fix.rangeEndIndex > settledTarget
+                || fix.rangeStartIndex < 0 || fix.rangeEndIndex < fix.rangeStartIndex) return [fix];
+              return reconcileAgentOperationOnlyPending_ACU([fix], proofs);
+            }) };
+          }
           if (selection.floors.length) {
             const previous = context.moduleSnapshot.materialCompletion;
             const mergePrevious = previous && (previous.state === 'complete_changed' || previous.state === 'complete_no_change')

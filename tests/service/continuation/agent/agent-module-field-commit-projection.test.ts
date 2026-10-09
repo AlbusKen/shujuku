@@ -44,6 +44,6 @@ describe('续写逐栏提交与格林推演投影共存', () => {
     chat[1].mes = '官船改道去了临川。';
     const receipt = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, dispatchTarget, sql: INSERT_HOOK, role: 'hook-cognition-maintainer' });
     expect(receipt.status).not.toBe('committed');
-    expect(receipt.rejected).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'chat', reason: '当前聊天或目标楼层已变化' })]));
+    expect(receipt.rejected).toEqual(expect.arrayContaining([expect.objectContaining({ path: 'chat', reason: expect.stringContaining('当前聊天或目标楼层已变化：目标正文内容已变化') })]));
   });
 });

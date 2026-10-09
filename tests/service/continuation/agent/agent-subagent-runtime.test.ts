@@ -970,6 +970,79 @@ describe('子代理逐栏工具会话', () => {
     } finally { _set_SillyTavern_API_ACU(null as any); }
   });
 
+  it.each(['json', 'tools'] as const)('%s 系统字段操作拒绝后独立核对交付，无业务写入或版本推进', async toolMode => {
+    const { vi } = await import('vitest');
+    const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');
+    const { commitAgentModuleFieldWrites_ACU } = await import('../../../../src/service/continuation/agent/agent-module-field-commit');
+    const { readAgentModuleSnapshot_ACU } = await import('../../../../src/service/continuation/agent/agent-module-store');
+    const input = input_ACU();
+    input.toolMode = toolMode;
+    const chat = input.resolveContext.chat;
+    const saveChat = vi.fn().mockResolvedValue(undefined);
+    _set_SillyTavern_API_ACU({ chat, saveChat } as any);
+    try {
+      await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role: 'hook-cognition-maintainer',
+        sql: "INSERT INTO hooks (id, summary, status, importance, planted_index, planned_payoff) VALUES ('H1', '门后信件', 'planted', 'mid', 1, '入城后交出')" });
+      input.resolveContext.moduleSnapshot = readAgentModuleSnapshot_ACU(chat);
+      const before = JSON.stringify(chat);
+      saveChat.mockClear();
+      input.writeSql = ({ role, sql, isCurrent }) => commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role, sql, isCurrent });
+      const sql = "UPDATE hooks SET recent_floor=8, expected_revision=2 WHERE id='H1' AND expected_revision=1";
+      const delivery = JSON.stringify({ summary: '逐项核对完毕，没有业务变化，撤回系统字段操作' });
+      const replies = toolMode === 'tools'
+        ? [nativeToolTurn_ACU('write_sql', { sql }, 'call-operation-only'), nativeAgentReply_ACU(delivery)!]
+        : [JSON.stringify({ action: 'write_sql', sql }), delivery];
+      const requests: Array<readonly SentMessage_ACU[]> = [];
+      const runtime = new AgentSubagentRuntime_ACU({ resolveApiPreset: (() => preset_ACU) as any,
+        callInternalAi: async messages => { requests.push(messages); return replies.shift() ?? (toolMode === 'tools' ? nativeAgentReply_ACU(delivery)! : delivery); } });
+      const result = await runtime.run(input);
+      expect(result.completion).toBe('complete_no_change');
+      expect(result.unresolvedIssues).toEqual([]);
+      expect(result.usedFieldWrites).toBe(false);
+      expect(result.operationOnlyConfirmed).toEqual([expect.objectContaining({ module: 'hooks', id: 'H1', revision: 1 })]);
+      expect(requests).toHaveLength(2);
+      expect(requests[1].map(message => message.content).join('\n')).toContain('纯系统字段操作已拒绝且未写入');
+      expect(JSON.stringify(chat)).toBe(before);
+      expect(saveChat).not.toHaveBeenCalled();
+    } finally { _set_SillyTavern_API_ACU(null as any); }
+  });
+
+  it.each(['json', 'tools'] as const)('%s 完整权威条目的独立无变化交付只核实已绑定的操作问题', async toolMode => {
+    const { vi } = await import('vitest');
+    const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');
+    const { commitAgentModuleFieldWrites_ACU, AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU } = await import('../../../../src/service/continuation/agent/agent-module-field-commit');
+    const { readAgentModuleSnapshot_ACU, captureAgentModuleCommitBaseline_ACU, writeAgentModuleCommitDelta_ACU } = await import('../../../../src/service/continuation/agent/agent-module-store');
+    const input = input_ACU();
+    input.toolMode = toolMode;
+    const chat = input.resolveContext.chat;
+    const saveChat = vi.fn().mockResolvedValue(undefined);
+    _set_SillyTavern_API_ACU({ chat, saveChat } as any);
+    try {
+      await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role: 'hook-cognition-maintainer',
+        sql: "INSERT INTO hooks (id, summary, status, importance, planted_index, planned_payoff) VALUES ('H1', '门后信件', 'planted', 'mid', 1, '入城后交出')" });
+      const pendingFixes = [{ module: 'hooks' as const, agentName: 'hook-cognition-maintainer', source: 'transaction_rejected' as const,
+        attempts: 1, firstFailedAtIndex: 1, lastError: AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU, rangeStartIndex: 1, rangeEndIndex: 1,
+        completion: 'failed' as const, acceptedKeys: [], createdAt: 1, updatedAt: 1,
+        violations: [{ path: 'hooks#H1.operationOnly', message: AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU }] }];
+      const saved = await writeAgentModuleCommitDelta_ACU(chat, 1, { writes: {}, revisions: {}, pendingFixes }, Date.now(),
+        folded => folded.snapshot.pendingFixes.length === 1
+          && folded.snapshot.pendingFixes[0].violations[0]?.path === 'hooks#H1.operationOnly'
+          && folded.snapshot.pendingFixes[0].completion === 'failed', captureAgentModuleCommitBaseline_ACU(chat));
+      expect(saved.status).toBe('committed');
+      expect(readAgentModuleSnapshot_ACU(chat).pendingFixes).toEqual(pendingFixes);
+      input.resolveContext.moduleSnapshot = readAgentModuleSnapshot_ACU(chat);
+      saveChat.mockClear();
+      const delivery = JSON.stringify({ summary: '逐项核对，没有业务变化' });
+      const runtime = new AgentSubagentRuntime_ACU({ resolveApiPreset: (() => preset_ACU) as any,
+        callInternalAi: async () => toolMode === 'tools' ? nativeAgentReply_ACU(delivery)! : delivery });
+      const result = await runtime.run(input);
+      expect(result.completion).toBe('complete_no_change');
+      expect(result.operationOnlyConfirmed).toEqual([{ module: 'hooks', id: 'H1', revision: 1, rejectedPaths: [] }]);
+      expect(readAgentModuleSnapshot_ACU(chat).pendingFixes).toEqual(pendingFixes);
+      expect(saveChat).not.toHaveBeenCalled();
+    } finally { _set_SillyTavern_API_ACU(null as any); }
+  });
+
   it('逐栏提交仅有部分栏目时最终空写集不能宣称合格，回报精确缺栏', async () => {
     const { vi } = await import('vitest');
     const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');

@@ -7,6 +7,7 @@
 
 import { ContinuationValidationError_ACU } from '../model';
 import type { ContinuationSettings_ACU } from '../model';
+import { reconcileAgentOperationOnlyPending_ACU, type AgentModuleFieldReceipt_ACU } from './agent-module-field-commit';
 import {
   AGENT_INSTRUCTION_COMPOSER_NAME_ACU,
   type AgentComposerOutput_ACU,
@@ -69,6 +70,7 @@ export interface ContinuationWorkflowAgentPayload_ACU {
   unresolvedIssues?: ContinuationWorkflowUnresolvedIssue_ACU[];
   acceptedKeys?: string[];
   usedFieldWrites?: boolean;
+  operationOnlyConfirmed?: AgentModuleFieldReceipt_ACU['operationOnlyConfirmed'];
 }
 
 export interface ContinuationWorkflowStep_ACU {
@@ -230,7 +232,8 @@ function maintainerPrompt_ACU(focus: string, snapshot: AgentModuleSnapshot_ACU):
   const fixes = snapshot.pendingFixes.filter(item => (MAINTAINER_MODULES_ACU as readonly string[]).includes(item.module));
   return [
     `本轮焦点：${focus}`,
-    '只逐楼结算 $HISTORY_UNSETTLED 实际提供的窗口内正文；窗口外省略内容不得宣称已读或已结算。没有新事实时 delta 留空并在 summary 写明 no_change。',
+    '只逐楼结算 $HISTORY_UNSETTLED 实际提供的窗口内正文；窗口外省略内容不得宣称已读或已结算。没有可证实变化时不调用 write_sql，直接交付 summary 写明逐项核对结果；最终交付不携带 sql 或 delta，不用 SELECT 1 等空操作代替核对。',
+    'hooks 只可写 summary、status、importance、planted_index、planned_payoff；recent_floor 等系统字段不写。expected_revision 只用于 UPDATE/DELETE 的 WHERE 校验，不放进 SET，也不自行递增。被拒操作不等于资料损坏；按回执区分实际缺栏、未保存业务变化、系统字段误写和任务失效。',
     `待修复：${formatFixes_ACU(fixes)}`,
   ].join('\n');
 }
@@ -271,7 +274,7 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
   const runSafe_ACU = async (call: ContinuationWorkflowAgentCall_ACU): Promise<ContinuationWorkflowAgentPayload_ACU> => {
     try {
       const result = await input.runAgent(call);
-      if ((result.usedFieldWrites || result.acceptedKeys?.length) && input.readCommittedSnapshot) snapshot = input.readCommittedSnapshot();
+      if ((result.usedFieldWrites || result.acceptedKeys?.length || result.operationOnlyConfirmed?.length) && input.readCommittedSnapshot) snapshot = input.readCommittedSnapshot();
       return result;
     } catch (error) {
       if (isStale_ACU(error)) throw error;
@@ -379,6 +382,15 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
           || !completed.has(item.module) || unresolvedModules.has(item.module)
           || !pendingWithinSettlement_ACU(item, settlementStartIndex, settlementEndIndex)) };
       }
+      if (maintainer.ok && !issues.length && maintainer.operationOnlyConfirmed?.length) {
+        const proofs = maintainer.operationOnlyConfirmed.filter(proof => writes.includes(proof.module)
+          && snapshot.revisions[proof.module] === proof.revision);
+        const within = snapshot.pendingFixes.filter(fix => pendingWithinSettlement_ACU(fix, settlementStartIndex, settlementEndIndex));
+        snapshot = { ...snapshot, pendingFixes: snapshot.pendingFixes.flatMap(fix => {
+          if (!within.includes(fix)) return [fix];
+          return reconcileAgentOperationOnlyPending_ACU([fix], proofs);
+        }) };
+      }
       const transactionPending = snapshot.pendingFixes.filter(item => writes.includes(item.module)
         && pendingWithinSettlement_ACU(item, settlementStartIndex, settlementEndIndex));
       if (transactionPending.length) {
@@ -462,8 +474,14 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
   for (let index = 0; index < planners.length; index += 1) {
     const planner = planners[index];
     steps.push({ agentName: plannerCalls[index].agentName, status: planner.ok ? 'ok' : 'failed', summary: planner.summary });
-    if (planner.planner) {
-      plannerNotes.push(planner.planner.recommendation);
+    if (planner.ok && planner.planner) {
+      plannerNotes.push(JSON.stringify({
+        agentName: plannerCalls[index].agentName,
+        ...planner.planner,
+      }));
+    } else {
+      plannerNotes.push(JSON.stringify({ agentName: plannerCalls[index].agentName, status: 'failed',
+        summary: planner.summary || '本轮没有可用策划交付', recommendation: '', mustPreserve: [], risks: [] }));
     }
   }
 
@@ -472,6 +490,7 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
     input.opening.summary ? `开局摘要：${input.opening.summary}` : '',
     `策划建议：${plannerNotes.join('\n') || '无'}`,
     `待修复：${formatFixes_ACU(snapshot.pendingFixes)}`,
+    '每份策划交接保留来源、summary、recommendation、mustPreserve 和 risks。逐项核对保留条件与风险，不只摘录 recommendation；失败的策划不是可用建议。它们是待核实的建议，不高于正文、权威账本或用户要求；存在冲突时在 summary 说明取舍，不能静默丢弃保留条件或补编缺失事实。',
     '通读结算后的资料、用户要求与活跃约束，产出本轮写作指令。产出前自查：策划建议之间是否互相冲突、是否与本轮 pacing 冲突、是否与已结算的硬事实/长期约束冲突；发现冲突时取更保守的一方并在 summary 注明取舍，不得原样拼接两份矛盾建议。',
   ].filter(Boolean).join('\n');
 
@@ -548,8 +567,8 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
       let revised: AgentComposerOutput_ACU;
       try {
         revised = await input.runComposer({
-          prompt: `按反馈清单增量修订，不要全量重写。\n原指令：\n${instruction}`,
-          revisionFeedback: review.requiredFixes.join('\n'),
+          prompt: `${composerBase}\n\n按反馈清单增量修订，不要全量重写。\n原指令：\n${instruction}`,
+          revisionFeedback: `修正清单：\n${review.requiredFixes.join('\n')}\n必须保留：\n${review.preserve.join('\n') || '未另列；保留原指令未被反馈涉及的内容'}`,
           priorInstruction: instruction,
         });
       } catch (error) {

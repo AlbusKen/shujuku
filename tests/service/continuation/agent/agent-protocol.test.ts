@@ -355,6 +355,25 @@ describe('逐栏 write_sql 意图解析', () => {
     );
     expect(parsed.intents).toEqual([{ kind: 'update', module: 'hooks', id: 'H1', expectedRevision: 2, fields: { summary: '新内容', status: 'active' } }]);
     expect(parsed.rejected).toEqual([{ path: 'sql[0].hooks.bogus', reason: expect.stringContaining('白名单') }]);
+    const systemOnly = parseAgentModuleSqlFieldWrites_ACU(
+      "UPDATE hooks SET recent_floor=8, expected_revision=3 WHERE id='H1' AND expected_revision=2",
+      'hook-cognition-maintainer',
+    );
+    expect(systemOnly.intents).toEqual([]);
+    expect(systemOnly.rejected).toHaveLength(3);
+    expect(systemOnly.rejected.every(item => item.operationOnlyTarget?.id === 'H1'
+      && item.operationOnlyTarget.expectedRevision === 2)).toBe(true);
+    for (const sql of [
+      "UPDATE hooks SET recent_floor=8, summary='新事实' WHERE id='H1' AND expected_revision=2",
+      "UPDATE hooks SET recent_floor=8, bogus=3 WHERE id='H1' AND expected_revision=2",
+      "UPDATE hooks SET recent_floor=8 WHERE id='H1' AND expected_revision=2 AND scope='bad'",
+      "UPDATE hooks SET recent_floor=8 WHERE id='H1'",
+      "UPDATE hooks SET recent_floor=8 WHERE id='H1' AND expected_revision=-1",
+      "UPDATE hooks SET recent_floor=8 WHERE id='H1' AND expected_revision=2",
+    ]) {
+      const role = sql === "UPDATE hooks SET recent_floor=8 WHERE id='H1' AND expected_revision=2" ? 'web-researcher' : 'hook-cognition-maintainer';
+      expect(parseAgentModuleSqlFieldWrites_ACU(sql, role).rejected.some(item => item.operationOnlyTarget)).toBe(false);
+    }
   });
 
   it('严格校验角色、条件与修订号；拒绝的语句不提交', () => {

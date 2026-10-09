@@ -1159,6 +1159,8 @@ export interface AgentModuleSqlFieldIntent_ACU {
 export interface AgentModuleSqlFieldRejection_ACU {
   path: string;
   reason: string;
+  /** 纯系统字段 UPDATE 未生成业务意图；提交口仍须核实目标完整及当前修订号。 */
+  operationOnlyTarget?: { module: AgentWritableModule_ACU; id: string; expectedRevision: number };
   /** 只关联后续纠错，不参与写入；目标必须唯一匹配且所有对应栏目均有确认回执。 */
   repairTarget?: { module: AgentWritableModule_ACU; column: string; value: RestrictedSqlValue_ACU; fields: string[] };
 }
@@ -1261,7 +1263,20 @@ export function parseAgentModuleSqlFieldWrites_ACU(sql: string, role: AgentModul
         else pageRef = raw.trim();
       } else fields[field] = sqlProtocolValue_ACU(raw);
     }
-    if (!Object.keys(fields).length && !pageRef) { reject('', '没有可提交的栏目'); return; }
+    if (!Object.keys(fields).length && !pageRef) {
+      reject('', '没有可提交的栏目');
+      // 只识别 hooks 的已知系统字段，不把未知列、混合业务写入或非法 WHERE 当成无变化。
+      const systemOnly = statement.kind === 'update' && statement.table === 'hooks'
+        && Object.keys(values).length > 0
+        && Object.keys(values).every(column => column === 'recent_floor' || column === 'expected_revision')
+        && typeof revision === 'number';
+      if (systemOnly) for (const item of result.rejected) {
+        if (item.path === path || item.path.startsWith(`${path}.`)) {
+          item.operationOnlyTarget = { module, id: String(id).trim(), expectedRevision: revision };
+        }
+      }
+      return;
+    }
     result.intents.push({ kind: statement.kind, module, id: typeof id === 'string' ? id.trim() : '', fields, ...(typeof revision === 'number' ? { expectedRevision: revision } : {}), ...(pageRef ? { pageRef } : {}) });
   });
   return result;

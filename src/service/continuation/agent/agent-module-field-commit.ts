@@ -50,12 +50,32 @@ export interface AgentModuleFieldReceipt_ACU {
   /** 从权威基线确认的同值重发；不产生新写入或推进修订号。 */
   alreadySaved?: AgentModuleFieldAccepted_ACU[];
   rejected: AgentModuleSqlFieldRejection_ACU[];
+  /** 被拒系统字段操作的目标已完整、版本一致；不是写入成功，不推进任何版本。 */
+  operationOnlyConfirmed?: Array<{ module: Module_ACU; id: string; revision: number; rejectedPaths: string[] }>;
   /** null 表示保存/补偿后的当前状态无法确认；必须重新读取权威帧。 */
   partials: Array<{ module: Module_ACU; id: string; missingFields: string[]; promotionError?: string }> | null;
   revisions: AgentModuleSnapshot_ACU['revisions'] | null;
   constraintProposals: string[];
   sqlDiagnostics?: string;
   recovery?: 'saved' | 'failed' | 'unavailable';
+}
+
+export const AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU = '系统字段操作未写入；需核实同一条目完整及当前修订号';
+
+/** 只清理绑定同一条目的操作拒绝；没有身份的旧 SQL 诊断保留。 */
+export function reconcileAgentOperationOnlyPending_ACU(
+  fixes: import('./agent-model').AgentPendingFix_ACU[],
+  confirmed: NonNullable<AgentModuleFieldReceipt_ACU['operationOnlyConfirmed']>,
+): import('./agent-model').AgentPendingFix_ACU[] {
+  const resolved = new Set(confirmed.filter(item => item.module === 'hooks')
+    .map(item => `hooks#${item.id}.operationOnly`));
+  if (!resolved.size) return fixes;
+  return fixes.flatMap(fix => {
+    if (fix.module !== 'hooks' || fix.source !== 'transaction_rejected') return [fix];
+    const violations = fix.violations.filter(issue => !resolved.has(issue.path)
+      || issue.message !== AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU);
+    return violations.length === fix.violations.length ? [fix] : violations.length ? [{ ...fix, violations }] : [];
+  });
 }
 export interface AgentModuleFieldPlan_ACU {
   batches: AgentModuleSqlFieldBatch_ACU[];
@@ -473,7 +493,16 @@ export function commitAgentModuleFieldWrites_ACU(input: {
       revisions: { ...folded.snapshot.revisions }, constraintProposals: parsed.constraintProposals,
     };
     if (!isCurrent() || !storage.isActive(input.chat) || !input.chat[input.targetIndex] || input.chat[input.targetIndex].is_user === true || input.targetIndex !== input.chat.length - 1) {
-      receipt.rejected.push({ path: 'chat', reason: '当前聊天或目标楼层已变化' });
+      const target = input.chat[input.targetIndex];
+      const cause = input.isCurrent?.() === false ? '派工租约已失效'
+        : !storage.isActive(input.chat) ? '活动聊天身份已变化'
+        : !target ? '目标消息不存在'
+        : target.is_user === true ? '目标已不是 AI 正文'
+        : input.targetIndex !== input.chat.length - 1 ? '末楼位置已变化'
+        : input.dispatchTarget && target !== input.dispatchTarget.message ? '目标消息对象已替换'
+        : input.dispatchTarget && readMessageSwipeId_ACU(target) !== input.dispatchTarget.swipeId ? '目标 Swipe 已变化'
+        : '目标正文内容已变化';
+      receipt.rejected.push({ path: 'chat', reason: `当前聊天或目标楼层已变化：${cause}。停止旧任务，重新取得当前聊天与正文快照，不重发 SQL` });
       receipt.partials = null; receipt.revisions = null; return receipt;
     }
     if (folded.salvaged || folded.candidates.some(item => !item.valid)) {
@@ -486,6 +515,23 @@ export function commitAgentModuleFieldWrites_ACU(input: {
       if (input.revisionWindow[module]!.head !== current) input.revisionWindow[module] = { base: current, head: current };
     }
     const now = Date.now();
+    const confirmOperationOnly = (state: ReturnType<typeof storage.readFold>): void => {
+      if (state.salvaged || state.candidates.some(item => !item.valid) || !isCurrent() || !storage.isActive(input.chat)) return;
+      const confirmed = new Map<string, NonNullable<AgentModuleFieldReceipt_ACU['operationOnlyConfirmed']>[number]>();
+      for (const item of parsed.rejected) {
+        const target = item.operationOnlyTarget;
+        if (!target || target.module !== 'hooks' || state.snapshot.revisions.hooks !== target.expectedRevision) continue;
+        const row = domainRow_ACU(state.snapshot, 'hooks', target.id);
+        const record = state.fields.records.hooks?.[target.id];
+        if (!row || row.retired || (record && record.status !== 'complete')
+          || Object.values(state.fields.records.hooks ?? {}).some(entry => entry.status !== 'complete')) continue;
+        const key = `hooks#${target.id}`;
+        const entry = confirmed.get(key) ?? { module: 'hooks', id: target.id, revision: target.expectedRevision, rejectedPaths: [] };
+        entry.rejectedPaths.push(item.path);
+        confirmed.set(key, entry);
+      }
+      if (confirmed.size) receipt.operationOnlyConfirmed = [...confirmed.values()];
+    };
     // 可引用楼层上限取派工目标楼：结算分支本就以末楼为水位校验 delta，逐栏口径必须一致。
     // 只放宽引用上限，不推进结算水位；用户楼与不存在的楼仍由 evidence 集合拒绝。
     const evidenceThrough = Math.max(folded.snapshot.settledThroughIndex, input.targetIndex);
@@ -493,6 +539,7 @@ export function commitAgentModuleFieldWrites_ACU(input: {
     receipt.rejected.push(...plan.rejected);
     receipt.alreadySaved = plan.alreadySaved;
     if (!plan.batches.length) {
+      confirmOperationOnly(folded);
       // 仅有「删除目标已不存在」时删除效果已成立：按空提交确认，不留待修复缺口。
       if ((receipt.rejected.length || plan.alreadySaved.length) && receipt.rejected.every(item => item.reason.startsWith('already_absent'))) receipt.status = 'committed';
       return receipt;
@@ -537,6 +584,7 @@ export function commitAgentModuleFieldWrites_ACU(input: {
       receipt.rejected.push({ path: 'host', reason: result.reason ?? result.status }); return receipt;
     }
     const confirmed = storage.readFold(input.chat);
+    confirmOperationOnly(confirmed);
     receipt.revisions = confirmed.snapshot.revisions;
     receipt.partials = confirmedPartials_ACU(confirmed.fields, plan.partials);
     receipt.accepted = plan.accepted.map(item => ({

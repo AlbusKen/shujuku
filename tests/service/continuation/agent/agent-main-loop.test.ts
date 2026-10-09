@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { settings_ACU } from '../../../../src/service/runtime/state-manager';
 import { nativeAgentReply_ACU } from '../../../helpers/agent-mode-fixture';
 
-import { ContinuationAgentTurnPlanner_ACU, evaluateArcArchitectDispatch_ACU, renderAgentBudget_ACU } from '../../../../src/service/continuation/agent/agent-main-loop';
+import { ContinuationAgentTurnPlanner_ACU, evaluateArcArchitectDispatch_ACU, renderAgentBudget_ACU, renderMainProtocolRejection_ACU } from '../../../../src/service/continuation/agent/agent-main-loop';
 import { renderMainSessionReadAppendix_ACU, omitSnapshotSectionsForSubagent_ACU } from '../../../../src/service/continuation/agent/agent-shared-materials';
 import { AgentSubagentRuntime_ACU } from '../../../../src/service/continuation/agent/agent-subagent-runtime';
 import { buildEmptyAgentModuleSnapshot_ACU, readAgentModuleFieldSnapshot_ACU, readAgentModuleSnapshot_ACU, writeAgentModuleSnapshot_ACU } from '../../../../src/service/continuation/agent/agent-module-store';
@@ -1082,6 +1082,24 @@ describe('主 Agent 循环收敛', () => {
     // 拒绝原因与被拒的原文都进了会话：模型必须看到自己上一次到底写了什么。
     expect(h.mainCalls[1][findIndex_ACU(h.mainCalls[1], '没有被采纳')].content).toContain('不包含带 action 字段的 JSON 对象');
     expect(h.mainCalls[1].some(message => message.role === 'assistant' && message.content.includes('我不想输出 JSON'))).toBe(true);
+    for (const mode of ['json', 'tools'] as const) {
+      const rejected = renderMainProtocolRejection_ACU('correct_materials 必须提供 reason 与 sql 或 settlementStartIndex', execution_ACU(), true, mode);
+      expect(rejected).toContain('correct_materials');
+      expect(rejected).toContain('"reason":"已核实的纠正依据"');
+      expect(rejected).toContain('"sql":');
+      expect(rejected).toContain('expected_revision 只放 WHERE');
+      expect(rejected).toContain('不要为修复格式错误跳过历史');
+      expect(rejected).not.toContain('"agentName":"hook-cognition-maintainer"');
+      if (mode === 'tools') {
+        expect(rejected).toContain('调用 correct_materials');
+        expect(rejected).not.toContain('"action":');
+      } else expect(rejected).toContain('"action":"correct_materials"');
+      const generic = renderMainProtocolRejection_ACU('未知动作', execution_ACU(), true, mode);
+      expect(generic).toContain('open_round');
+      expect(generic).toContain('固定工作流');
+      expect(generic).not.toContain('"agentName":"mainline-planner"');
+      expect(generic).toContain('不自行');
+    }
   });
 
   it('预算走到尽头仍不肯交付时终止，不做任何兜底', async () => {
@@ -1248,8 +1266,7 @@ describe('open_round 固定结构工作流', () => {
       nativeTools: true,
       snapshot: snapshotWithArc_ACU(),
       context: preOutlineContext_ACU,
-      // 写入被拒后维护员没有重发 H1 而以空 delta 收尾：hooks 缺口留 pending，
-      // 固定工作流停止交付并直报主会话，由主 Agent 向用户说明缺口后 finalize。
+      // 派工目标失效即停止当前工作流，不在旧快照上修复或交付。
       mainReplies: ['{"action":"open_round","focus":"继续试探"}', '{"action":"finalize","instruction":"已向用户说明 hooks 缺口"}'],
       applyOutline: () => ({ op: 'create', requiresReview: false, stopped: null, summary: '阶段大纲已建立' }),
       onSubagentCall: (chat, _messages) => {
@@ -1266,15 +1283,14 @@ describe('open_round 固定结构工作流', () => {
     h.request.applyOutline = async instruction => { const result = await original(instruction); h.setContext(execution_ACU); return result; };
 
     try {
-      const result = await h.planner.plan(h.request);
-      expect(result.instruction).toBe('已向用户说明 hooks 缺口');
+      await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: {
+        code: 'CONTINUATION_INTERNAL_REQUEST_STALE', message: expect.stringContaining('末楼位置已变化'),
+      } });
       expect(saveChat).not.toHaveBeenCalled();
       expect(lastChat.at(-1)?.[AGENT_MODULE_FIELD_ACU]).toBeUndefined();
-      expect(toolMessageContent_ACU(h.subCalls[1] as any, message => message.role === 'tool' && message.content.includes('"status":"rejected"'))).toContain('"status":"rejected"');
-      expect(toolMessageContent_ACU(h.subCalls[1] as any, message => message.role === 'tool' && message.content.includes('"partials":null'))).toContain('"partials":null');
-      const escalation = h.mainCalls[1].map(message => message.content).join('\n');
-      expect(escalation).toContain('待修复模块需要主会话处理');
-      expect(escalation).toContain('hooks');
+      expect(h.subCalls).toHaveLength(1);
+      expect(h.mainCalls).toHaveLength(1);
+      expect(readAgentSessionLog_ACU().some(entry => entry.title === '写入任务已失效' && entry.detail.includes('末楼位置已变化'))).toBe(true);
     } finally { _set_SillyTavern_API_ACU(null as any); }
   });
 
@@ -1377,12 +1393,14 @@ describe('派工与写集落盘', () => {
       },
     });
     try {
-      await h.planner.plan(h.request);
+      await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: {
+        code: 'CONTINUATION_INTERNAL_REQUEST_STALE', message: expect.stringContaining('末楼位置已变化'),
+      } });
       expect(saveChat).not.toHaveBeenCalled();
       expect(lastChat[lastChat.length - 1][AGENT_MODULE_FIELD_ACU]).toBeUndefined();
-      expect(h.subCalls).toHaveLength(2);
-      expect(toolMessageContent_ACU(h.subCalls[1] as any, message => message.role === 'tool' && message.content.includes('"status":"rejected"'))).toContain('"status":"rejected"');
-      expect(toolMessageContent_ACU(h.subCalls[1] as any, message => message.role === 'tool' && message.content.includes('"partials":null'))).toContain('"partials":null');
+      expect(h.subCalls).toHaveLength(1);
+      expect(h.mainCalls).toHaveLength(1);
+      expect(readAgentSessionLog_ACU().some(entry => entry.title === '写入任务已失效' && entry.detail.includes('末楼位置已变化'))).toBe(true);
     } finally { _set_SillyTavern_API_ACU(null as any); }
   });
 
@@ -1409,11 +1427,14 @@ describe('派工与写集落盘', () => {
       },
     });
     try {
-      await h.planner.plan(h.request);
+      await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: {
+        code: 'CONTINUATION_INTERNAL_REQUEST_STALE', message: expect.stringContaining('目标 Swipe 已变化'),
+      } });
       expect(saveChat).not.toHaveBeenCalled();
       expect(lastChat[3][AGENT_MODULE_FIELD_ACU]).toBeUndefined();
-      expect(toolMessageContent_ACU(h.subCalls[1] as any, message => message.role === 'tool' && message.content.includes('"status":"rejected"'))).toContain('"status":"rejected"');
-      expect(toolMessageContent_ACU(h.subCalls[1] as any, message => message.role === 'tool' && message.content.includes('"partials":null'))).toContain('"partials":null');
+      expect(h.subCalls).toHaveLength(1);
+      expect(h.mainCalls).toHaveLength(1);
+      expect(readAgentSessionLog_ACU().some(entry => entry.title === '写入任务已失效' && entry.detail.includes('目标 Swipe 已变化'))).toBe(true);
     } finally { _set_SillyTavern_API_ACU(null as any); }
   });
 
@@ -1440,11 +1461,56 @@ describe('派工与写集落盘', () => {
       },
     });
     try {
-      await h.planner.plan(h.request);
+      await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: {
+        code: 'CONTINUATION_INTERNAL_REQUEST_STALE', message: expect.stringContaining('目标正文内容已变化'),
+      } });
       expect(saveChat).not.toHaveBeenCalled();
       expect(lastChat[3][AGENT_MODULE_FIELD_ACU]).toBeUndefined();
-      expect(toolMessageContent_ACU(h.subCalls[1] as any, message => message.role === 'tool' && message.content.includes('"status":"rejected"'))).toContain('"status":"rejected"');
-      expect(toolMessageContent_ACU(h.subCalls[1] as any, message => message.role === 'tool' && message.content.includes('"partials":null'))).toContain('"partials":null');
+      expect(h.subCalls).toHaveLength(1);
+      expect(h.mainCalls).toHaveLength(1);
+      expect(readAgentSessionLog_ACU().some(entry => entry.title === '写入任务已失效' && entry.detail.includes('目标正文内容已变化'))).toBe(true);
+    } finally { _set_SillyTavern_API_ACU(null as any); }
+  });
+
+  it.each([false, true])('兼容派工按生产存储清理同一条目的操作问题，原生工具=%s', async nativeTools => {
+    const { commitAgentModuleFieldWrites_ACU, AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU } = await import('../../../../src/service/continuation/agent/agent-module-field-commit');
+    const { captureAgentModuleCommitBaseline_ACU, writeAgentModuleCommitDelta_ACU } = await import('../../../../src/service/continuation/agent/agent-module-store');
+    const h = harness_ACU({ nativeTools, productionModules: true, productionConversation: true,
+      mainReplies: [
+        JSON.stringify({ action: 'delegate', delegations: [{ agentName: 'hook-cognition-maintainer', prompt: '核对当前正文和已绑定的操作问题', reads: [] }] }),
+        JSON.stringify({ action: 'block', reason: '保留的缺口需要另行处理', unresolved: ['真实业务缺口和历史诊断'] }),
+      ],
+      subReplies: [JSON.stringify({ summary: '已逐项核对，无新增业务变化' })],
+    });
+    try {
+      const chat = h.chat;
+      const role = 'hook-cognition-maintainer' as const;
+      const inserted = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 3, role,
+        sql: "INSERT INTO hooks (id, summary, status, importance, planted_index, planned_payoff) VALUES ('H1', '守门人藏着晶屑', 'planted', 'mid', 3, '后续核对来源')" });
+      expect(inserted.status).toBe('committed');
+      const pendingFixes = [{ module: 'hooks' as const, agentName: role, source: 'transaction_rejected' as const,
+        attempts: 1, firstFailedAtIndex: 1, lastError: '操作与业务缺口待核对', completion: 'failed' as const,
+        rangeStartIndex: 1, rangeEndIndex: 3, acceptedKeys: [], createdAt: 1, updatedAt: 1,
+        violations: [
+          { path: 'hooks#H1.operationOnly', message: AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU },
+          { path: 'hooks#H2.operationOnly', message: AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU },
+          { path: 'hooks#H1.status', message: '真实业务变化尚未确认' },
+          { path: 'sql[0].hooks', message: '旧诊断缺少条目身份' },
+        ] }];
+      const seeded = await writeAgentModuleCommitDelta_ACU(chat, 3, { writes: {}, revisions: {}, pendingFixes }, Date.now(),
+        folded => folded.snapshot.pendingFixes[0]?.violations.length === 4, captureAgentModuleCommitBaseline_ACU(chat));
+      expect(seeded.status).toBe('committed');
+      const baseline = readAgentModuleSnapshot_ACU(chat);
+      expect(baseline.pendingFixes).toEqual(pendingFixes);
+      h.saveChat.mockClear();
+      await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: { message: expect.stringContaining('保留的缺口需要另行处理') } });
+      const persisted = readAgentModuleSnapshot_ACU(chat);
+      expect(persisted.pendingFixes).toEqual([{ ...pendingFixes[0], violations: pendingFixes[0].violations.slice(1) }]);
+      expect(persisted.hooks).toEqual(baseline.hooks);
+      expect(persisted.revisions).toEqual(baseline.revisions);
+      expect(h.written).toHaveLength(1);
+      expect(h.subCalls).toHaveLength(1);
+      expect(h.mainCalls).toHaveLength(2);
     } finally { _set_SillyTavern_API_ACU(null as any); }
   });
 

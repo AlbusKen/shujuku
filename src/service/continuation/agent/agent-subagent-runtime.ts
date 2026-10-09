@@ -35,6 +35,7 @@ import { agentNativeTools_ACU, nativeToolArguments_ACU, nativeToolExchange_ACU, 
 import { resolveAgentToolMode_ACU, type AgentToolMode_ACU } from '../../ai/agent-tool-mode';
 import { AGENT_SUBMIT_TOOL_NAME_ACU, continuationSubmitTool_ACU, splitNativeDecisionCalls_ACU, submitPayloadObject_ACU, submitPayloadText_ACU } from '../../ai/agent-decision-tools';
 import { hasActiveStoryArc_ACU, readAgentModuleFoldState_ACU, readAgentModuleSnapshot_ACU } from './agent-module-store';
+import { AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU } from './agent-module-field-commit';
 import type { AgentFieldPage_ACU, AgentModuleFieldReceipt_ACU, AgentModuleRevisionWindow_ACU } from './agent-module-field-commit';
 import { findAgentSubagentDefinition_ACU, getAgentSubagentAccessProfile_ACU, getAgentSubagentReadPrefixes_ACU, renderAgentReadCatalog_ACU, renderAgentWebToolCatalog_ACU, type AgentSubagentDefinition_ACU } from './agent-catalog';
 import { renderAgentUserRequirements_ACU } from './agent-user-requirements';
@@ -164,6 +165,8 @@ export interface AgentSubagentRunResult_ACU {
   moduleCompletion?: Partial<Record<AgentWritableModule_ACU, Exclude<AgentMaterialCompletionState_ACU, 'legacy_unknown'>>>;
   /** 补足额度耗尽后仍未清偿的问题。 */
   unresolvedIssues?: AgentSubagentUnresolvedIssue_ACU[];
+  /** 仅来自提交口的无业务变更核实，不接受模型自报。 */
+  operationOnlyConfirmed?: AgentModuleFieldReceipt_ACU['operationOnlyConfirmed'];
   /** 已通过解析并暂存的稳定条目键，供后续补足去重。 */
   acceptedKeys?: string[];
   /** 本次派工实际发出的模型调用次数（read/search、write_sql 与协议修正均计入）。 */
@@ -591,9 +594,13 @@ function renderMissingAgentSql_ACU(
 /** 写回执以已落库的栏目为基线；保存不确定时不能根据旧号建议写入。 */
 function renderWriteSqlRepair_ACU(receipt: AgentModuleFieldReceipt_ACU): string {
   if (receipt.partials === null || receipt.revisions === null) {
+    const stale = receipt.rejected.find(item => item.path === 'chat');
+    if (stale) return `【write_sql 任务失效】${stale.reason}。这不是字段错误，不在旧任务内继续读写。`;
     return '【write_sql 补栏】保存或恢复状态不确定。先按上一次回执的 ID read $FIELD:模块:ID 权威栏目，核实已存栏目与当前 revisions；不要重发原 SQL 或猜测修订号。';
   }
   const lines: string[] = [];
+  const operationPaths = new Set((receipt.operationOnlyConfirmed ?? []).flatMap(item => item.rejectedPaths));
+  if (operationPaths.size) lines.push('纯系统字段操作已拒绝且未写入；运行时已核实目标记录完整、当前修订号一致。不要为消除报错修改业务内容，不重发系统字段；核对本轮正文后，无业务变化就单独交付 summary，有真实变化仍只写合法业务字段。');
   if (receipt.rejected.length || receipt.partials.length) lines.push(`WHERE expected_revision 使用当前模块修订号 revisions：${JSON.stringify(receipt.revisions)}；accepted / alreadySaved 的 revision 是字段修订号，不是模块修订号。`);
   if (receipt.alreadySaved?.length) lines.push(`此前已保存且本次未重复写入：${receipt.alreadySaved.map(item => `${item.module}#${item.id}.${item.field}`).join('、')}。不要再次提交这些栏目。`);
   const drafts = receipt.partials.filter(item => item.missingFields.length || item.promotionError);
@@ -616,6 +623,11 @@ function renderWriteSqlRepair_ACU(receipt: AgentModuleFieldReceipt_ACU): string 
       lines.push(`${item.path}：删除目标已不存在，视为删除已完成。不要 INSERT 重建该条目，也不要重发这条 DELETE。`);
       continue;
     }
+    if (operationPaths.has(item.path)) {
+      lines.push(`${item.path}：${item.reason}。这是已核实的错误操作，不是待补业务栏目。`);
+      continue;
+    }
+    if (item.operationOnlyTarget) lines.push('系统字段不能补写。先核对同一条目及当前模块修订号；记录不完整、版本冲突或保存未知时，仍须处理真实缺口，不能宣称无变化。');
     lines.push(`${item.path}：${item.reason}。被拒栏目尚未保存；按报错核对类型、枚举和正文证据，只补拒绝的栏目，不重发 accepted。`);
     if (item.reason === 'not_found') lines.push('UPDATE 的目标不存在：先 read 对应 $FIELD:模块:ID 核实；只有正文确实新出现该条目才用 INSERT 建新行，已有草稿必须用 UPDATE，已删除的条目不要重建。');
     if (item.reason === 'id_exists' || item.reason.startsWith('revision_conflict')) lines.push('先 read 对应 $FIELD:模块:ID 核实已存栏目，再用回执 revisions 或权威快照中的当前模块修订号补写；不要使用旧号或示例的 0。');
@@ -913,8 +925,18 @@ export class AgentSubagentRuntime_ACU {
     const sqlRepairTargets = new Map<string, NonNullable<AgentModuleFieldReceipt_ACU['rejected'][number]['repairTarget']>>();
     let writeAttempted = false;
     let writeStateUnknown = false;
+    const operationOnlyProofs = new Map<string, NonNullable<AgentModuleFieldReceipt_ACU['operationOnlyConfirmed']>[number]>();
     const recordWriteReceipt = (receipt: AgentModuleFieldReceipt_ACU): void => {
       if (receipt.partials === null || receipt.revisions === null) writeStateUnknown = true;
+      const operationPaths = new Set<string>();
+      if (!writeStateUnknown && (receipt.status === 'rejected' || receipt.status === 'committed')) {
+        for (const proof of receipt.operationOnlyConfirmed ?? []) {
+          if (!writes.includes(proof.module) || receipt.revisions?.[proof.module] !== proof.revision) continue;
+          operationOnlyProofs.set(`${proof.module}#${proof.id}`, proof);
+          for (const path of proof.rejectedPaths) operationPaths.add(path);
+          writeProblems.delete(`${proof.module}#${proof.id}.operationOnly`);
+        }
+      }
       const confirmed = [...receipt.accepted, ...(receipt.partials !== null && receipt.revisions !== null ? receipt.alreadySaved ?? [] : [])];
       const confirmedThisReceipt = new Set(confirmed.map(item => `${item.module}:${item.id}:${item.field}`));
       for (const item of confirmed) {
@@ -925,6 +947,14 @@ export class AgentSubagentRuntime_ACU {
       for (const item of receipt.rejected) {
         // 删除目标已不存在属于幂等完成，不是待修复缺口。
         if (item.reason.startsWith('already_absent')) continue;
+        if (operationPaths.has(item.path)) continue;
+        if (item.operationOnlyTarget) {
+          const target = item.operationOnlyTarget;
+          writeProblems.set(`${target.module}#${target.id}.operationOnly`, { module: target.module,
+            source: 'transaction_rejected', id: target.id, path: `${target.module}#${target.id}.operationOnly`,
+            message: AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU });
+          continue;
+        }
         const match = /^(hooks|infoGap|storyArc|chronology|webRefs)#([^.#]+)(?:\.([A-Za-z][A-Za-z0-9]*))?$/.exec(item.path);
         const module = (item.repairTarget?.module ?? match?.[1]) as AgentWritableModule_ACU | undefined;
         const key = item.repairTarget ? `sql:${JSON.stringify(item.repairTarget)}` : item.path;
@@ -969,6 +999,15 @@ export class AgentSubagentRuntime_ACU {
       if (folded.salvaged || folded.candidates.some(item => !item.valid)) {
         issues.set('frame', { module: writes[0], source: 'invoke_failed', path: 'frame', message: '资料帧损坏，无法确认逐栏完成' });
       } else {
+        for (const [key, proof] of operationOnlyProofs) {
+          const record = folded.fields.records[proof.module]?.[proof.id];
+          const row = folded.snapshot.hooks.find(item => item.id === proof.id);
+          if (writeStateUnknown || folded.snapshot.revisions[proof.module] !== proof.revision
+            || !row || row.retired || (record && record.status !== 'complete')) {
+            issues.set(`${key}.operationOnly`, { module: proof.module, id: proof.id, source: 'transaction_rejected',
+              path: `${key}.operationOnly`, message: AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU });
+          }
+        }
         for (const module of writes) for (const record of Object.values(folded.fields.records[module] ?? {})) {
           if (record.status !== 'partial') continue;
           for (const field of record.missingFields) issues.set(`${module}#${record.id}.${field}`, { module,
@@ -1038,6 +1077,27 @@ export class AgentSubagentRuntime_ACU {
       truncated = false,
     ): AgentSubagentRunResult_ACU => {
       const accepted = [...new Set([...acceptedKeys(output), ...confirmedFields])];
+      // 独立核对交付可以撤回旧的纯系统字段操作，但不能替代未保存的业务写集。
+      if (!writeStateUnknown && !rejected.length && !truncated && !acceptedKeys(output).size
+        && !output.delta.constraintProposals.length && writes.includes('hooks')) {
+        const folded = readAgentModuleFoldState_ACU(input.resolveContext.chat);
+        if (!folded.salvaged && folded.candidates.every(item => item.valid)
+          && folded.snapshot.revisions.hooks === readRevisions.hooks
+          && Object.values(folded.fields.records.hooks ?? {}).every(record => record.status === 'complete')) {
+          for (const fix of folded.snapshot.pendingFixes) {
+            if (fix.module !== 'hooks' || fix.source !== 'transaction_rejected') continue;
+            for (const issue of fix.violations) {
+              const match = /^hooks#([^.#]+)\.operationOnly$/.exec(issue.path);
+              if (!match || issue.message !== AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU) continue;
+              const row = folded.snapshot.hooks.find(item => item.id === match[1]);
+              if (!row || row.retired) continue;
+              operationOnlyProofs.set(`hooks#${row.id}`, {module: 'hooks', id: row.id,
+                revision: folded.snapshot.revisions.hooks, rejectedPaths: [] });
+              writeProblems.delete(issue.path);
+            }
+          }
+        }
+      }
       const unresolvedIssues: AgentSubagentUnresolvedIssue_ACU[] = [...terminalIssues(), ...rejected.map(item => ({
         module: item.module,
         source: 'contract_rejected' as const,
@@ -1083,6 +1143,8 @@ export class AgentSubagentRuntime_ACU {
       completion,
       moduleCompletion,
       unresolvedIssues,
+      operationOnlyConfirmed: [...operationOnlyProofs.values()].filter(proof => !writeStateUnknown
+        && !unresolvedIssues.some(issue => issue.module === proof.module)),
       acceptedKeys: accepted,
       iterations: attempt,
       attempts: attempt,
@@ -1243,6 +1305,12 @@ export class AgentSubagentRuntime_ACU {
               } });
               if (!input.isCurrent(identity) || input.signal?.aborted) throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '写入回执已失效', false));
               recordWriteReceipt(receipt);
+              const stale = receipt.rejected.find(item => item.path === 'chat');
+              if (stale) {
+                updateAgentSession_ACU(writeEntryId, { ok: false, status: 'failed', title: '写入任务已失效', detail: stale.reason });
+                throw new ContinuationValidationError_ACU(createContinuationError_ACU(
+                  'CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', stale.reason, false));
+              }
               // 路径之外必须带上原因：只显示 host / chat 时用户无从判断是租约失效、宿主保存失败还是字段非法。
               const rejectedPaths = receipt.rejected.map(item => item.reason ? `${item.path}（${item.reason}）` : item.path).join('；');
               updateAgentSession_ACU(writeEntryId, {

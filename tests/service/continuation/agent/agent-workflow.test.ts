@@ -10,6 +10,7 @@ import {
   type ContinuationWorkflowInput_ACU,
 } from '../../../../src/service/continuation/agent/agent-workflow';
 import { buildDefaultContinuationSettings_ACU } from '../../../../src/service/continuation/defaults';
+import { AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU } from '../../../../src/service/continuation/agent/agent-module-field-commit';
 import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../../../../src/service/continuation/model';
 
 function snapshot_ACU(patch: Partial<AgentModuleSnapshot_ACU> = {}): AgentModuleSnapshot_ACU {
@@ -88,6 +89,8 @@ describe('续写固定工作流', () => {
       'instruction-composer:ok',
     ]);
     expect(harness.calls[0].prompt).toContain('守门人的回避');
+    expect(harness.calls[0].prompt).toContain('不调用 write_sql');
+    expect(harness.calls[0].prompt).not.toContain('delta 留空');
     expect(harness.composerPrompts[0]).toContain('守门人的回避');
     expect(result.snapshot.revisions.hooks).toBe(1);
     const windowed = harness_ACU({
@@ -223,6 +226,59 @@ describe('续写固定工作流', () => {
     expect(failedCalls.every(call => call.billing !== 'repair')).toBe(true);
     expect(failedResult).toMatchObject({ outcome: 'escalate', escalationKind: 'pending_fix' });
     expect(failedResult.pendingFixes[0].violations).toContainEqual({ path: 'hooks#H1.status', message: '缺栏' });
+  });
+
+  it('策划完整交接进入初次编排和终审修订，失败策划不作为建议', async () => {
+    const settings = buildDefaultContinuationSettings_ACU();
+    settings.finalReview.enabled = true;
+    const verdicts = ['revise', 'pass'] as const;
+    let count = 0;
+    const h = harness_ACU({ settings, hasUnsettledHistory: false, turnNumber: 2,
+      runAgent: async call => ({ ok: call.agentName !== 'beat-planner', summary: '节拍不可用',
+        planner: call.agentName === 'mainline-planner'
+          ? { summary: '主线独有摘要', recommendation: '主线独有建议', mustPreserve: ['角色尚不知密信'], risks: ['避免提前揭示'] }
+          : { summary: '失败摘要', recommendation: '不能采纳的建议', mustPreserve: [], risks: [] } }),
+      runFinalReview: async () => ({ ...review_ACU(verdicts[count++] ?? 'pass', ['补上时间锚']), preserve: ['保留安静收尾'] }),
+    });
+    expect((await h.run()).outcome).toBe('deliver');
+    expect(h.composerPrompts).toHaveLength(2);
+    for (const prompt of h.composerPrompts) {
+      for (const text of ['mainline-planner', 'beat-planner', '主线独有摘要', '主线独有建议', '角色尚不知密信', '避免提前揭示', '节拍不可用']) expect(prompt).toContain(text);
+      expect(prompt).toContain('"status":"failed"');
+      expect(prompt).not.toContain('不能采纳的建议');
+    }
+    expect(h.composerPrompts[1]).toContain('保留安静收尾');
+  });
+
+  it('无变化仅清同一条目同版本的操作问题，真实缺栏和窗口外问题保留', async () => {
+    for (const scenario of ['same', 'other-id', 'stale', 'missing', 'outside', 'no-proof'] as const) {
+      const fix = { module: 'hooks' as const, agentName: 'hook-cognition-maintainer', source: 'transaction_rejected' as const,
+        completion: 'failed' as const, attempts: 1, firstFailedAtIndex: 5, lastError: AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU,
+        rangeStartIndex: scenario === 'outside' ? 1 : 5, rangeEndIndex: scenario === 'outside' ? 2 : 6,
+        violations: [{ path: 'hooks#H1.operationOnly', message: AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU },
+          ...(scenario === 'missing' ? [{ path: 'hooks#H1.status', message: '缺栏' }] : [])] };
+      const base = snapshot_ACU({ pendingFixes: [fix] });
+      const h = harness_ACU({ snapshot: base, settlementStartIndex: 5, hasUnsettledHistory: true,
+        runAgent: async call => call.agentName === 'hook-cognition-maintainer'
+          ? { ok: true, summary: '逐项核对无业务变化', writes: ['hooks'], completion: 'complete_no_change',
+            moduleCompletion: { hooks: 'complete_no_change' },
+            operationOnlyConfirmed: scenario === 'no-proof' ? undefined : [{ module: 'hooks', id: scenario === 'other-id' ? 'H2' : 'H1',
+              revision: scenario === 'stale' ? 1 : 0, rejectedPaths: [] }] }
+          : { ok: true, summary: '建议', planner: { summary: '建议', recommendation: '安静交谈', mustPreserve: [], risks: [] } },
+      });
+      const result = await h.run();
+      if (scenario === 'same') {
+        expect(result.outcome).toBe('deliver');
+        expect(result.pendingFixes).toEqual([]);
+        expect(result.snapshot.revisions.hooks).toBe(0);
+      } else {
+        expect(result.outcome).toBe('escalate');
+        expect(result.pendingFixes).not.toEqual([]);
+        if (scenario === 'missing') expect(result.pendingFixes[0].violations).toEqual([{ path: 'hooks#H1.status', message: '缺栏' }]);
+        else expect(result.pendingFixes[0].violations).toContainEqual(fix.violations[0]);
+        expect(result.snapshot.settledThroughIndex).toBe(4);
+      }
+    }
   });
 
   it('终审 pass 直接交付；revise 打回后修订交付；连续 3 次失败升级', async () => {

@@ -1,6 +1,6 @@
 /** 主会话纠正：领域 SQL 沿用逐栏提交；追溯边界单独保存，不推进结算水位。 */
 import type { AgentConversationSnapshot_ACU, AgentCorrectMaterialsAction_ACU, AgentModuleSnapshot_ACU, AgentPendingFix_ACU } from './agent-model';
-import { commitAgentModuleFieldWrites_ACU, hostAgentModuleCommitStorage_ACU, type AgentModuleCommitStorage_ACU, type AgentModuleFieldReceipt_ACU } from './agent-module-field-commit';
+import { commitAgentModuleFieldWrites_ACU, hostAgentModuleCommitStorage_ACU, reconcileAgentOperationOnlyPending_ACU, type AgentModuleCommitStorage_ACU, type AgentModuleFieldReceipt_ACU } from './agent-module-field-commit';
 import { agentStoryEvidenceFloorIndexes_ACU } from './agent-placeholder-resolver';
 import { readMessageSwipeId_ACU } from './agent-module-frame';
 
@@ -10,6 +10,7 @@ export function renderAgentCorrectionGuide_ACU(conversation: AgentConversationSn
   return [
     '【主会话纠正权限】可用 correct_materials 的 sql 直接纠正 hooks、info_gap、chronology、story_arc；按正文证据和当前修订号提交，只有 committed 回执证明保存。不能写用户要求、结算水位或其它表。',
     '用户明确要求跳过旧历史、从指定 AI 楼层开始时，单独给 settlementStartIndex（包含该楼）、userMessageId 与 reason。不得仅因容量失败自行跳过。旧缺口保留为跳过记录，不算已结算；成功后再 open_round，不重发同一超限范围。',
+    'hooks 只写 summary、status、importance、planted_index、planned_payoff；recent_floor 不写，expected_revision 只用于 WHERE。错误操作已拒绝不等于业务资料损坏；只有回执 operationOnlyConfirmed 明确核实的同一条目才能无业务修改收口，不能靠一句无变化清除真实缺栏。',
     `最新真实用户消息 ID：${user?.id ?? '无'}；模块修订号：${JSON.stringify(snapshot.revisions)}。`,
     snapshot.settlementBoundary ? `当前追溯起点：${snapshot.settlementBoundary.startIndex}；此前历史未结算。` : '',
   ].filter(Boolean).join('\n');
@@ -36,6 +37,7 @@ export async function correctAgentMaterials_ACU(input: {
   const { action, chat } = input;
   const storage = input.storage ?? hostAgentModuleCommitStorage_ACU;
   let sqlReceipt: AgentModuleFieldReceipt_ACU | undefined;
+  let operationOnly = false;
   const reject = (reason: string) => ({ status: 'rejected' as const, reason, ...(sqlReceipt ? { sqlReceipt } : {}) });
   const targetIndex = chat.length - 1;
   const target = chat[targetIndex];
@@ -55,13 +57,21 @@ export async function correctAgentMaterials_ACU(input: {
   if (action.sql) {
     sqlReceipt = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex, dispatchTarget,
       sql: action.sql, role: 'main', completedStages: input.completedStages, isCurrent: current, storage });
-    if (sqlReceipt.status !== 'committed') return { status: sqlReceipt.status, sqlReceipt };
+    const operationPaths = new Set((sqlReceipt.operationOnlyConfirmed ?? []).flatMap(proof => proof.rejectedPaths));
+    operationOnly = sqlReceipt.status === 'rejected' && operationPaths.size > 0
+      && sqlReceipt.partials?.length === 0 && sqlReceipt.revisions !== null
+      && sqlReceipt.rejected.every(item => operationPaths.has(item.path));
+    if (sqlReceipt.status !== 'committed' && !operationOnly) return { status: sqlReceipt.status, sqlReceipt };
     folded = storage.readFold(chat);
     if (!current() || folded.salvaged || folded.candidates.some(item => !item.valid)) return reject('纠正后权威资料状态无法确认');
+    if (operationOnly && sqlReceipt.operationOnlyConfirmed?.some(proof => folded.snapshot.revisions[proof.module] !== proof.revision)) {
+      return reject('系统字段操作核实后资料版本已变化，不能关闭旧问题');
+    }
   }
   const before = folded.snapshot;
   const now = Date.now();
   let pendingFixes = sqlReceipt ? repairedPending_ACU(before.pendingFixes, sqlReceipt) : before.pendingFixes;
+  if (sqlReceipt?.operationOnlyConfirmed) pendingFixes = reconcileAgentOperationOnlyPending_ACU(pendingFixes, sqlReceipt.operationOnlyConfirmed);
   let settlementBoundary = before.settlementBoundary;
 
   if (action.settlementStartIndex !== undefined) {
@@ -82,7 +92,7 @@ export async function correctAgentMaterials_ACU(input: {
   }
   const changed = JSON.stringify(pendingFixes) !== JSON.stringify(before.pendingFixes)
     || JSON.stringify(settlementBoundary) !== JSON.stringify(before.settlementBoundary);
-  if (!changed) return { status: 'committed' as const, sqlReceipt, settlementBoundary };
+  if (!changed) return { status: 'committed' as const, sqlReceipt, settlementBoundary, ...(operationOnly ? { operationOnly: true } : {}) };
   const baseline = storage.captureBaseline(chat);
   const result = await storage.writeDelta(chat, targetIndex, {
     writes: {}, revisions: {}, pendingFixes,
@@ -91,7 +101,7 @@ export async function correctAgentMaterials_ACU(input: {
     && readback.snapshot.settledThroughIndex === Math.max(0, before.settledThroughIndex)
     && JSON.stringify(readback.snapshot.pendingFixes) === JSON.stringify(pendingFixes)
     && JSON.stringify(readback.snapshot.settlementBoundary) === JSON.stringify(settlementBoundary), baseline, current);
-  return { ...result, sqlReceipt,
+  return { ...result, sqlReceipt, ...(operationOnly ? { operationOnly: true } : {}),
     ...(result.status === 'committed' ? { settlementBoundary, pendingFixes } : {}),
   };
 }
