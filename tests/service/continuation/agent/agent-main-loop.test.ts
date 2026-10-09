@@ -162,8 +162,9 @@ function harness_ACU(options: {
   const chat = options.chat ?? chat_ACU();
   options.mutateChat?.(chat);
   const saveChat = vi.fn(async () => undefined);
-  if (options.productionConversation) _set_SillyTavern_API_ACU({ chat, chatId: 'planner-production', getCurrentChatId: () => 'planner-production', saveChat } as any);
+  if (options.productionConversation || options.productionModules) _set_SillyTavern_API_ACU({ chat, chatId: 'planner-production', getCurrentChatId: () => 'planner-production', saveChat } as any);
   let snapshot = options.snapshot ?? snapshotWithArc_ACU();
+  if (options.productionModules && !chat.some(message => message[AGENT_MODULE_FIELD_ACU])) chat[1][AGENT_MODULE_FIELD_ACU] = { ...snapshot, settledThroughIndex: Math.max(0, snapshot.settledThroughIndex) };
   let conversation = options.conversation ?? buildEmptyAgentConversation_ACU();
   if (options.productionConversation && conversation.messages.length) chat[0][AGENT_CONVERSATION_FIELD_ACU] = { schemaVersion: 2, updatedAt: 0, segment: [...conversation.messages] };
   let persistedCompactionMark: AgentConversationCompactionMark_ACU | null = null;
@@ -1561,6 +1562,7 @@ describe('派工与写集落盘', () => {
 
   it('维护类子代理的 delta 串行落盘，结果与约束提议回灌给主 Agent', async () => {
     const h = harness_ACU({
+      productionModules: true,
       mainReplies: [
         '{"action":"delegate","delegations":[{"agentName":"hook-cognition-maintainer","prompt":"结算最近正文","reads":["$HISTORY_UNSETTLED","$HOOKS_LEDGER"],"writes":["$HOOKS_LEDGER","$INFO_GAP"]}]}',
         '{"action":"finalize","instruction":"最终指导"}',
@@ -1592,6 +1594,7 @@ describe('派工与写集落盘', () => {
 
   it('维护代理一次结算 hooks/infoGap/chronology 并落进同一份快照', async () => {
     const h = harness_ACU({
+      productionModules: true,
       mainReplies: [
         '{"action":"delegate","delegations":[{"agentName":"hook-cognition-maintainer","prompt":"结算最近正文与时间流逝","reads":["$HISTORY_UNSETTLED","$CHRONOLOGY"]}]}',
         '{"action":"finalize","instruction":"最终指导"}',
@@ -1622,6 +1625,7 @@ describe('派工与写集落盘', () => {
 
   it('第二次迭代读到的资料是落盘后的新快照', async () => {
     const h = harness_ACU({
+      productionModules: true,
       mainReplies: [
         '{"action":"delegate","delegations":[{"agentName":"hook-cognition-maintainer","prompt":"结算","reads":["$HISTORY_UNSETTLED"],"writes":["$HOOKS_LEDGER"]}]}',
         '{"action":"delegate","delegations":[{"agentName":"beat-planner","prompt":"策划","reads":["$HOOKS_LEDGER"]}]}',
@@ -1644,6 +1648,7 @@ describe('派工与写集落盘', () => {
 
   it('同波次两次写同一模块时，后者按读取时刻的修订号被判过期并如实回灌', async () => {
     const h = harness_ACU({
+      productionModules: true,
       budget: { maxSameAgent: 2, maxConcurrent: 2 },
       mainReplies: [
         '{"action":"delegate","delegations":[{"agentName":"hook-cognition-maintainer","prompt":"结算前半段","reads":["$HISTORY_UNSETTLED"],"writes":["$HOOKS_LEDGER"]},{"agentName":"hook-cognition-maintainer","prompt":"结算后半段","reads":["$HISTORY_UNSETTLED"],"writes":["$HOOKS_LEDGER"]}]}',
@@ -1667,11 +1672,12 @@ describe('派工与写集落盘', () => {
     stale.revisions.hooks = 5;
     const h = harness_ACU({
       snapshot: stale,
+      productionModules: true,
       mainReplies: [
         '{"action":"delegate","delegations":[{"agentName":"hook-cognition-maintainer","prompt":"结算","reads":["$HISTORY_UNSETTLED"],"writes":["$HOOKS_LEDGER"]}]}',
         '{"action":"finalize","instruction":"指导"}',
       ],
-      subReplies: [JSON.stringify({ summary: '基于运行时读版本', delta: { expectedRevisions: { hooks: 2 }, hooks: [{ action: 'upsert', id: 'H1', summary: '内容' }] } })],
+      subReplies: [JSON.stringify({ summary: '基于运行时读版本', delta: { expectedRevisions: { hooks: 2 }, hooks: [{ action: 'upsert', id: 'H1', summary: '内容', status: 'planted', importance: 'mid', plantedIndex: 3, plannedPayoff: '' }] } })],
     });
     await h.planner.plan(h.request);
     expect(h.written).toHaveLength(1);

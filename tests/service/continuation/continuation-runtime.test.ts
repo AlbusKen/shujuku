@@ -148,7 +148,7 @@ describe('ContinuationRuntime_ACU migration', () => {
 
     expect(h.saveChat).toHaveBeenCalledOnce();
     const persisted = h.chat[0]._qrf_continuation.settings;
-    expect(persisted.promptForceDefaultVersion).toBe(defaults.CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU);
+    expect(persisted.promptForceDefaultVersion).toBe(defaults.CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V52_ACU);
     expect(persisted.outlinePrompt[0].content).toBe(base.outlinePrompt[0].content);
     expect(persisted.agentPrompts.main[0].content).toBe(base.agentPrompts.main[0].content);
 

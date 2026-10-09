@@ -6,7 +6,7 @@ import {
   CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU,
   CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V40_ACU,
   CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V50_ACU,
-  CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU,
+  CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V52_ACU,
 } from '../../../src/service/continuation/defaults';
 import { ContinuationValidationError_ACU, type ContinuationEnvelope_ACU } from '../../../src/service/continuation/model';
 import {
@@ -236,7 +236,7 @@ describe('FirstFloorContinuationStore_ACU', () => {
 
     const loaded = new FirstFloorContinuationStore_ACU().read()!;
     const defaults = buildDefaultContinuationSettings_ACU();
-    expect(loaded.settings.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU);
+    expect(loaded.settings.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V52_ACU);
     expect(loaded.settings.outlinePrompt).toEqual(defaults.outlinePrompt);
     expect(loaded.settings.agentPrompts).toEqual(defaults.agentPrompts);
     expect(loaded.settings.agentPrompts).not.toHaveProperty('reviewer');
@@ -245,21 +245,35 @@ describe('FirstFloorContinuationStore_ACU', () => {
     expect(loaded.settings).toMatchObject({ apiPresetMode: 'fixed', fixedApiPresetName: 'p1', maxAutomaticStages: 3 });
   });
 
-  it('V51 信封里用户保存的改写、追加与停用原样保留，重复读取不再重置', () => {
+  it('V51 精确升级维护默认，保留改写、追加、停用与快照，保存后迁移幂等', async () => {
+    const { buildV51MaintainerQaPrompt_ACU, buildMaintainerQaPrompt_ACU } = await import('../../../src/service/continuation/agent/maintainer-prompt');
+    const { CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU } = await import('../../../src/service/continuation/defaults');
     const current = buildEnvelope_ACU() as any;
+    current.settings.promptForceDefaultVersion = CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU;
+    current.settings.agentPrompts.maintainer = buildV51MaintainerQaPrompt_ACU();
+    current.settings.agentPrompts.maintainer[2].enabled = false;
+    current.settings.agentPrompts.maintainer[4].content += '\n用户补充';
+    current.settings.agentPrompts.maintainer.find((segment: any) => segment.snapshotTemplate !== undefined).snapshotTemplate = '用户自定义快照';
     current.settings.outlinePrompt = [{ role: 'user', content: '用户改过的大纲提示词', enabled: true, deletable: true }];
     current.settings.agentPrompts.main[1].content = '用户改写的主控段';
     current.settings.agentPrompts.maintainer.push({ role: 'user', content: '用户追加的维护规则', enabled: true, deletable: true });
     current.settings.agentPrompts.beatPlanner[3].enabled = false;
     const expected = structuredClone(current.settings);
+    const next = buildMaintainerQaPrompt_ACU();
+    for (const index of [2, 14]) expected.agentPrompts.maintainer[index].content = next[index].content;
     _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: current }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
 
     const first = new FirstFloorContinuationStore_ACU().read()!;
     const second = new FirstFloorContinuationStore_ACU().read()!;
-    expect(first.settings.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU);
+    expect(first.settings.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V52_ACU);
     expect(first.settings.outlinePrompt).toEqual(expected.outlinePrompt);
     expect(first.settings.agentPrompts).toEqual(expected.agentPrompts);
     expect(second.settings).toEqual(first.settings);
+    expect(current.settings.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU);
+    expect(current.settings.agentPrompts.maintainer[2].content).not.toContain('优先一次交付');
+    await new FirstFloorContinuationStore_ACU().replaceAtomically(first);
+    expect(current.settings.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU);
+    expect(new FirstFloorContinuationStore_ACU().read()!.settings).toEqual(first.settings);
   });
 
   it('退役 reviewer 的提示词与渠道键读取时直接丢弃，不参与校验', () => {

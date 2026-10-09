@@ -10,7 +10,7 @@ import { USER_PREFILL_CONTENT_ACU } from '../../../src/shared/user-prefill.js';
 import { buildContinuationAgentPromptsForMode_ACU } from '../../../src/service/continuation/agent/agent-prompt-mode';
 
 import { validateContinuationSettings_ACU } from '../../../src/service/continuation/continuation-store';
-import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU } from '../../../src/service/continuation/defaults';
+import { buildDefaultContinuationSettings_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V27_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V34_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V52_ACU } from '../../../src/service/continuation/defaults';
 
 import {
   buildV33ContinuationAgentPrompts_ACU,
@@ -80,7 +80,7 @@ describe('默认提示词谱系重置', () => {
   it.each(labels)('%s 的默认组读出时整组重置为当前默认组', label => {
     const loaded = validateContinuationSettings_ACU(historicalSettings_ACU(label));
     const defaults = buildDefaultContinuationSettings_ACU();
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V52_ACU);
     expect(loaded.outlinePrompt).toEqual(defaults.outlinePrompt);
     for (const role of Object.keys(defaults.agentPrompts) as (keyof typeof defaults.agentPrompts)[]) {
       const differences = loaded.agentPrompts[role].flatMap((segment, index) => JSON.stringify(segment) === JSON.stringify(defaults.agentPrompts[role][index]) ? [] : [{ index,
@@ -147,7 +147,7 @@ describe('默认提示词谱系重置', () => {
 
     const loaded = validateContinuationSettings_ACU(settings);
 
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V52_ACU);
     expect(loaded.agentPrompts.arcArchitect).toEqual(defaults.arcArchitect);
   });
 
@@ -191,7 +191,7 @@ describe('V34 旧默认组', () => {
     settings.agentPrompts.maintainer.push({ role: 'user', content: '用户追加的独立规则', enabled: true, deletable: true });
 
     const loaded = validateContinuationSettings_ACU(settings);
-    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU);
+    expect(loaded.promptForceDefaultVersion).toBe(CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V52_ACU);
     expect(loaded.agentPrompts).toEqual(buildDefaultContinuationAgentPrompts_ACU());
     expect(loaded.agentPrompts.maintainer.at(-1)).toMatchObject({ role: 'user', content: USER_PREFILL_CONTENT_ACU });
     expect(validateContinuationSettings_ACU(structuredClone(loaded)).agentPrompts).toEqual(loaded.agentPrompts);

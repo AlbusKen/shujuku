@@ -373,7 +373,7 @@ describe('逐栏 write_sql 意图解析', () => {
       'hook-cognition-maintainer',
     );
     expect(parsed.intents).toEqual([{ kind: 'update', module: 'hooks', id: 'H1', expectedRevision: 2, fields: { summary: '新内容', status: 'active' } }]);
-    expect(parsed.rejected).toEqual([{ path: 'sql[0].hooks.bogus', reason: expect.stringContaining('白名单') }]);
+    expect(parsed.rejected).toEqual([{ path: 'hooks#H1.bogus', reason: expect.stringContaining('白名单') }]);
     const systemOnly = parseAgentModuleSqlFieldWrites_ACU(
       "UPDATE hooks SET recent_floor=8, expected_revision=3 WHERE id='H1' AND expected_revision=2",
       'hook-cognition-maintainer',

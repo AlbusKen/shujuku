@@ -919,6 +919,54 @@ describe('AgentSubagentRuntime_ACU usage 累计', () => {
 });
 
 describe('子代理逐栏工具会话', () => {
+  it.each(['json', 'tools'] as const)('%s 维护一次提交保存回读即结束，局部失败只补失败字段', async toolMode => {
+    const { vi } = await import('vitest');
+    const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');
+    const { commitAgentModuleFieldWrites_ACU } = await import('../../../../src/service/continuation/agent/agent-module-field-commit');
+    const { readAgentModuleSnapshot_ACU, readAgentModuleFieldSnapshot_ACU } = await import('../../../../src/service/continuation/agent/agent-module-store');
+    for (const partial of [false, true]) {
+      const input = input_ACU(); input.toolMode = toolMode;
+      const chat = input.resolveContext.chat;
+      const saveChat = vi.fn().mockResolvedValue(undefined);
+      const sqls: string[] = [];
+      const sent: Array<readonly SentMessage_ACU[]> = [];
+      _set_SillyTavern_API_ACU({ chat, saveChat } as any);
+      input.writeSql = ({ role, sql, isCurrent, revisionWindow }) => {
+        sqls.push(sql);
+        return commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role, sql, isCurrent, revisionWindow });
+      };
+      const replies = [{ summary: '核对并结算', delta: { hooks: [{ action: 'upsert', id: 'H1',
+        summary: partial ? '' : "门后的信件写着 O'Brien", status: 'planted', importance: 'mid', plantedIndex: 1, plannedPayoff: '' }] } },
+        ...(partial ? [{ summary: '只补未保存摘要', delta: { hooks: [{ action: 'patch', id: 'H1', summary: '门后信件' }] } }] : [])];
+      const runtime = new AgentSubagentRuntime_ACU({ resolveApiPreset: (() => preset_ACU) as any,
+        callInternalAi: async messages => {
+          sent.push(messages);
+          const reply = replies.shift();
+          if (!reply) throw new Error('成功保存后不应再次请求模型');
+          return toolMode === 'tools' ? nativeAgentReply_ACU(JSON.stringify(reply))! : JSON.stringify(reply);
+        } });
+      try {
+        const result = await runtime.run(input);
+        expect(result.completion).toBe('complete_changed');
+        expect(result.usedFieldWrites).toBe(true);
+        expect(result.unresolvedIssues).toEqual([]);
+        expect(result.iterations).toBe(partial ? 2 : 1);
+        expect(sent).toHaveLength(partial ? 2 : 1);
+        expect(saveChat).toHaveBeenCalledTimes(partial ? 2 : 1);
+        expect(readAgentModuleSnapshot_ACU(chat).hooks).toEqual([expect.objectContaining({ id: 'H1',
+          summary: partial ? '门后信件' : "门后的信件写着 O'Brien" })]);
+        expect(readAgentModuleFieldSnapshot_ACU(chat).records.hooks?.H1.status).toBe('complete');
+        expect(result.maintainer?.delta.hooks).toEqual([]);
+        if (partial) {
+          expect(sqls[1]).toContain('UPDATE hooks SET summary');
+          expect(sqls[1]).not.toMatch(/INSERT|status|importance|planted_index/);
+          expect(sent[1].map(message => message.content).join('\n')).toContain('hooks#H1.summary');
+        }
+      } finally { _set_SillyTavern_API_ACU(null as any); }
+    }
+  });
+
+
   it('连续真实请求只补缺栏，保存回读后才发 accepted；下一次派工不继承 transcript', async () => {
     const { vi } = await import('vitest');
     const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');
@@ -971,6 +1019,59 @@ describe('子代理逐栏工具会话', () => {
       expect(messages[0].map(item => item.content).join('\n')).not.toContain('"action":"write_sql","status":"committed"');
     } finally { _set_SillyTavern_API_ACU(null as any); }
   });
+
+  it.each(['json', 'tools'] as const)('%s 信息差系统字段误写按真实模块核实，不污染伏笔待修队列', async toolMode => {
+    const { vi } = await import('vitest');
+    const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');
+    const { commitAgentModuleFieldWrites_ACU } = await import('../../../../src/service/continuation/agent/agent-module-field-commit');
+    const { readAgentModuleSnapshot_ACU, captureAgentModuleCommitBaseline_ACU, writeAgentModuleCommitDelta_ACU } = await import('../../../../src/service/continuation/agent/agent-module-store');
+    const { runContinuationAgentWorkflow_ACU } = await import('../../../../src/service/continuation/agent/agent-workflow');
+    const input = input_ACU(); input.toolMode = toolMode;
+    const chat = input.resolveContext.chat;
+    const saveChat = vi.fn().mockResolvedValue(undefined);
+    _set_SillyTavern_API_ACU({ chat, saveChat } as any);
+    try {
+      const seed = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role: 'hook-cognition-maintainer',
+        sql: "INSERT INTO info_gap (id, topic, objective_fact, reader_known, character_knowledge, reveal_status, reveal_index) VALUES ('E1', '门后信件', '守门人藏着信件', '读者未见', '[]', 'unrevealed', NULL)" });
+      expect(seed.status).toBe('committed');
+      input.resolveContext.moduleSnapshot = readAgentModuleSnapshot_ACU(chat);
+      input.writeSql = ({ role, sql, isCurrent, revisionWindow }) => commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, role, sql, isCurrent, revisionWindow });
+      const sql = "UPDATE info_gap SET recent_floor=1 WHERE id='E1' AND expected_revision=1";
+      const checked = JSON.stringify({ summary: '核对信息差，无业务变化，撤回系统字段误写' });
+      const replies = toolMode === 'tools'
+        ? [nativeToolTurn_ACU('write_sql', { sql }, 'info-system-only'), nativeAgentReply_ACU(checked)!]
+        : [JSON.stringify({ action: 'write_sql', sql }), checked];
+      const runtime = new AgentSubagentRuntime_ACU({ resolveApiPreset: (() => preset_ACU) as any,
+        callInternalAi: async () => replies.shift() ?? (toolMode === 'tools' ? nativeAgentReply_ACU(checked)! : checked) });
+      saveChat.mockClear();
+      const result = await runtime.run(input);
+      expect(result.completion).toBe('complete_no_change');
+      expect(result.unresolvedIssues).toEqual([]);
+      expect(result.operationOnlyConfirmed).toEqual([expect.objectContaining({ module: 'infoGap', id: 'E1', revision: 1 })]);
+      expect(readAgentModuleSnapshot_ACU(chat).revisions.infoGap).toBe(1);
+      expect(saveChat).not.toHaveBeenCalled();
+      const pendingFixes = [{ module: 'infoGap' as const, agentName: 'hook-cognition-maintainer', source: 'transaction_rejected' as const,
+        completion: 'failed' as const, attempts: 1, firstFailedAtIndex: 1, rangeStartIndex: 1, rangeEndIndex: 1,
+        acceptedKeys: [], createdAt: 1, updatedAt: 1, lastError: '待核实操作',
+        violations: [{ path: 'infoGap#E1.operationOnly', message: '系统字段操作未写入；需核实同一条目完整及当前修订号' }] }];
+      const saved = await writeAgentModuleCommitDelta_ACU(chat, 1, { writes: {}, revisions: {}, pendingFixes }, Date.now(),
+        folded => folded.snapshot.pendingFixes.length === 1, captureAgentModuleCommitBaseline_ACU(chat));
+      expect(saved.status).toBe('committed');
+      input.resolveContext.moduleSnapshot = readAgentModuleSnapshot_ACU(chat);
+      const noChange = await runtime.run(input);
+      const workflow = await runContinuationAgentWorkflow_ACU({settings: input.settings, snapshot: input.resolveContext.moduleSnapshot,
+        opening: { focus: '核实信息差', summary: '', dispatchWebResearcher: false }, hasUnsettledHistory: false, settlementStartIndex: 1,
+        beatObligation: false, turnNumber: 1, settledIndex: 1, completedStageNumbers: [],
+        runAgent: async call => call.agentName === 'hook-cognition-maintainer' ? { ok: true, summary: checked, ...noChange }
+          : { ok: true, summary: '策划完成', planner: { summary: '', recommendation: '继续核实信件', mustPreserve: [], risks: [] } },
+        runComposer: async () => ({ summary: '', instruction: '继续核实信件', constraints: null }),
+        runFinalReview: async () => ({ verdict: 'pass', reason: '', fixes: [] }) as any });
+      expect(workflow.outcome).toBe('deliver');
+      expect(workflow.pendingFixes).toEqual([]);
+      expect(workflow.snapshot.revisions.infoGap).toBe(1);
+    } finally { _set_SillyTavern_API_ACU(null as any); }
+  });
+
 
   it.each(['json', 'tools'] as const)('%s 系统字段操作拒绝后独立核对交付，无业务写入或版本推进', async toolMode => {
     const { vi } = await import('vitest');
@@ -1161,7 +1262,8 @@ describe('子代理逐栏工具会话', () => {
         const runtime = new AgentSubagentRuntime_ACU({ resolveApiPreset: (() => preset_ACU) as any,
           callInternalAi: async () => replies.shift() ?? checked });
         const result = await runtime.run(input);
-        expect(readAgentModuleSnapshot_ACU(chat).revisions.hooks).toBe(2);
+        expect(readAgentModuleSnapshot_ACU(chat).revisions.hooks).toBe(repair ? 2 : 3);
+        if (!repair) expect(readAgentModuleSnapshot_ACU(chat).hooks[0].summary).toBe('信件仍在');
         expect(readAgentModuleSnapshot_ACU(chat).hooks[0].status).toBe('reinforced');
         if (repair) {
           expect(result.completion).toBe('complete_changed');

@@ -1237,6 +1237,7 @@ export function parseAgentModuleSqlFieldWrites_ACU(sql: string, role: AgentModul
       return;
     }
     const path = `sql[${index}].${statement.table}`;
+    const rejectionStart = result.rejected.length;
     const reject = (field: string, reason: string) => result.rejected.push({ path: `${path}${field ? `.${field}` : ''}`, reason });
     if (!allowed.includes(statement.table)) { reject('', `角色 ${role} 无权写入 ${statement.table}`); return; }
     if (statement.table === 'constraint_proposals') {
@@ -1272,7 +1273,13 @@ export function parseAgentModuleSqlFieldWrites_ACU(sql: string, role: AgentModul
         continue;
       }
       const field = columns[column];
-      if (!field) { reject(column, `栏目不在逐栏写入白名单；${statement.table} 可写 SQL 列：${Object.keys(columns).join(', ')}`); continue; }
+      if (!field) {
+        result.rejected.push({
+          path: typeof id === 'string' && id.trim() && !/[.#:]/.test(id.trim())
+            ? `${module}#${id.trim()}.${column}` : `${path}.${column}`,
+          reason: `栏目不在逐栏写入白名单；${statement.table} 可写 SQL 列：${Object.keys(columns).join(', ')}`,
+        }); continue;
+      }
       if (field === 'pageRef') {
         if (typeof raw !== 'string' || !raw.trim()) reject(column, 'page_ref 必须是本次抓取的非空页面句柄');
         else pageRef = raw.trim();
@@ -1280,23 +1287,23 @@ export function parseAgentModuleSqlFieldWrites_ACU(sql: string, role: AgentModul
     }
     if (!Object.keys(fields).length && !pageRef) {
       reject('', '没有可提交的栏目');
-      // 只识别 hooks 的已知系统字段，不把未知列、混合业务写入或非法 WHERE 当成无变化。
-      const systemOnly = statement.kind === 'update' && statement.table === 'hooks'
+      // 只识别维护模块的已知系统字段；未知列、混合写入或非法 WHERE 仍保留拒绝。
+      const systemOnly = statement.kind === 'update' && ['hooks', 'info_gap', 'chronology'].includes(statement.table)
         && Object.keys(values).length > 0
         && Object.keys(values).every(column => column === 'recent_floor' || column === 'expected_revision')
         && typeof revision === 'number';
-      if (systemOnly) for (const item of result.rejected) {
-        if (item.path === path || item.path.startsWith(`${path}.`)) {
+      if (systemOnly) for (const item of result.rejected.slice(rejectionStart)) {
+        if (item.path === path || item.path.startsWith(`${path}.`) || item.path.startsWith(`${module}#${String(id).trim()}.`)) {
           item.operationOnlyTarget = { module, id: String(id).trim(), expectedRevision: revision };
         }
       }
       return;
     }
     // 混合写入仍拒绝坏列；只登记明确 ID 和本语句涉及的业务栏，供后续合法提交逐栏修复。
-    if (statement.kind === 'update' && statement.table === 'hooks' && typeof id === 'string'
+    if (statement.kind === 'update' && ['hooks', 'info_gap', 'chronology'].includes(statement.table) && typeof id === 'string'
       && Object.keys(fields).length && !pageRef) {
-      for (const item of result.rejected) {
-        if (item.path === `${path}.recent_floor` || item.path === `${path}.expected_revision`) {
+      for (const item of result.rejected.slice(rejectionStart)) {
+        if (item.path === `${module}#${id.trim()}.recent_floor` || item.path === `${path}.expected_revision`) {
           item.repairTarget = { module, column: 'id', value: id.trim(), fields: Object.keys(fields) };
         }
       }

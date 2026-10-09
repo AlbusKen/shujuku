@@ -261,6 +261,8 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V49_ACU = 'spv5.5-continu
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V50_ACU = 'continuation-qa-layout-v50';
 /** 本次更新一次性重置全部续写提示词（含大纲），仅保留现役角色。 */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU = 'continuation-qa-reset-v51';
+/** 只升级 V51 未改写的维护默认段，不重置用户自定义提示词。 */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V52_ACU = 'continuation-maintainer-submit-v52';
 
 /**
  * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
@@ -411,7 +413,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V52_ACU,
   };
 }
 

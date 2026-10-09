@@ -227,6 +227,8 @@ describe('续写固定工作流', () => {
     expect(failedResult).toMatchObject({ outcome: 'escalate', escalationKind: 'pending_fix' });
     expect(failedResult.pendingFixes[0].violations).toContainEqual({ path: 'hooks#H1.status', message: '缺栏', source: 'missing_field' });
     expect(failedMaintainerCalls[1].prompt).toContain('额度已用尽时不重复 read');
+    expect(failedCalls).toEqual(failedMaintainerCalls);
+    expect(failed.composerPrompts).toEqual([]);
   });
 
   it('策划完整交接进入初次编排和终审修订，失败策划不作为建议', async () => {

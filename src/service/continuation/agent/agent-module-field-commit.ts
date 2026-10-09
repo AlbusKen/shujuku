@@ -58,11 +58,11 @@ export function reconcileAgentOperationOnlyPending_ACU(
   fixes: import('./agent-model').AgentPendingFix_ACU[],
   confirmed: NonNullable<AgentModuleFieldReceipt_ACU['operationOnlyConfirmed']>,
 ): import('./agent-model').AgentPendingFix_ACU[] {
-  const resolved = new Set(confirmed.filter(item => item.module === 'hooks')
-    .map(item => `hooks#${item.id}.operationOnly`));
+  const resolved = new Set(confirmed.filter(item => ['hooks', 'infoGap', 'chronology'].includes(item.module))
+    .map(item => `${item.module}#${item.id}.operationOnly`));
   if (!resolved.size) return fixes;
   return fixes.flatMap(fix => {
-    if (fix.module !== 'hooks') return [fix];
+    if (!['hooks', 'infoGap', 'chronology'].includes(fix.module)) return [fix];
     const violations = fix.violations.filter(issue => !resolved.has(issue.path)
       || (issue.source ?? fix.source) !== 'transaction_rejected'
       || issue.message !== AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU);
@@ -532,6 +532,8 @@ export function commitAgentModuleFieldWrites_ACU(input: {
   isCurrent?: () => boolean;
   /** 本次派工的修订号窗口；提交口在同一串行队列内维护，调用方只负责派工时初始化。 */
   revisionWindow?: AgentModuleRevisionWindow_ACU;
+  /** 一次维护交付绑定的读集版本；新建条目也必须在同一串行保存队列内核对。 */
+  expectedRevisions?: Partial<AgentModuleSnapshot_ACU['revisions']>;
   storage?: AgentModuleCommitStorage_ACU;
 }): Promise<AgentModuleFieldReceipt_ACU> {
   const storage = input.storage ?? hostAgentModuleCommitStorage_ACU;
@@ -564,6 +566,18 @@ export function commitAgentModuleFieldWrites_ACU(input: {
       receipt.rejected.push({ path: 'frame', reason: '资料帧损坏，拒绝在宽容抢救结果上写入' });
       receipt.partials = null; receipt.revisions = null; return receipt;
     }
+    parsed.intents = parsed.intents.filter(intent => {
+      const expected = input.expectedRevisions?.[intent.module];
+      if (expected === undefined) return true;
+      const current = folded.snapshot.revisions[intent.module];
+      const window = input.revisionWindow?.[intent.module as Module_ACU];
+      // 自身已确认保存可沿用派工读集；外部提交不能被新行 revision=0 绕过。
+      if (expected === current || (window?.head === current
+        && expected >= window.base && expected <= window.head)) return true;
+      receipt.rejected.push({ path: `${intent.module}#${intent.id || '(无 ID)'}`,
+        reason: `revision_conflict: ${intent.module} 的 revision 已变化，expected=${expected}, actual=${current}` });
+      return false;
+    });
     // 窗口 head 与当前权威修订号不符，说明有本派工之外的写入：基线重置到最新版，之后只认模型重新读到的号。
     if (input.revisionWindow) for (const module of Object.keys(input.revisionWindow) as Module_ACU[]) {
       const current = folded.snapshot.revisions[module];
@@ -575,13 +589,13 @@ export function commitAgentModuleFieldWrites_ACU(input: {
       const confirmed = new Map<string, NonNullable<AgentModuleFieldReceipt_ACU['operationOnlyConfirmed']>[number]>();
       for (const item of parsed.rejected) {
         const target = item.operationOnlyTarget;
-        if (!target || target.module !== 'hooks' || state.snapshot.revisions.hooks !== target.expectedRevision) continue;
-        const row = domainRow_ACU(state.snapshot, 'hooks', target.id);
-        const record = state.fields.records.hooks?.[target.id];
+        if (!target || !['hooks', 'infoGap', 'chronology'].includes(target.module) || state.snapshot.revisions[target.module] !== target.expectedRevision) continue;
+        const row = domainRow_ACU(state.snapshot, target.module as Module_ACU, target.id);
+        const record = state.fields.records[target.module]?.[target.id];
         if (!row || row.retired || (record && record.status !== 'complete')
-          || Object.values(state.fields.records.hooks ?? {}).some(entry => entry.status !== 'complete')) continue;
-        const key = `hooks#${target.id}`;
-        const entry = confirmed.get(key) ?? { module: 'hooks', id: target.id, revision: target.expectedRevision, rejectedPaths: [] };
+          || Object.values(state.fields.records[target.module] ?? {}).some(entry => entry.status !== 'complete')) continue;
+        const key = `${target.module}#${target.id}`;
+        const entry = confirmed.get(key) ?? { module: target.module as Module_ACU, id: target.id, revision: target.expectedRevision, rejectedPaths: [] };
         entry.rejectedPaths.push(item.path);
         confirmed.set(key, entry);
       }

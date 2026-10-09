@@ -2,6 +2,7 @@ import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
 import { agentSnapshotTemplate_ACU, assembleAgentPrompt_ACU } from '../../../shared/agent-prompt-layout';
 import { arcArchitectFormatAnswer_ACU } from './arc-architect-prompt';
 import { maintainerFormatAnswer_ACU } from './maintainer-prompt';
+import { maintainerDeltaSql_ACU } from './agent-maintainer-submit';
 import { webResearcherFormatAnswer_ACU } from './web-researcher-prompt';
 /**
  * service/continuation/agent/agent-subagent-runtime.ts — 子代理运行时
@@ -219,7 +220,7 @@ export interface AgentSubagentRunInput_ACU {
   pendingFixes?: readonly AgentPendingFix_ACU[];
   /** 同一主会话轮次内由所有同名子代理调用共享的读取额度状态。 */
   readRoundState?: AgentReadRoundState_ACU;
-  writeSql?: (input: { role: AgentSubagentName_ACU; sql: string; resolvePage: (handle: string) => AgentFieldPage_ACU | null; isCurrent?: () => boolean; revisionWindow?: AgentModuleRevisionWindow_ACU }) => Promise<AgentModuleFieldReceipt_ACU>;
+  writeSql?: (input: { role: AgentSubagentName_ACU; sql: string; resolvePage: (handle: string) => AgentFieldPage_ACU | null; isCurrent?: () => boolean; revisionWindow?: AgentModuleRevisionWindow_ACU; expectedRevisions?: Partial<AgentModuleRevisions_ACU> }) => Promise<AgentModuleFieldReceipt_ACU>;
   /** 主会话为本轮备好的世界书全文和已有检索。传入后子代理不能再读这些范围。 */
   sharedMaterials?: string;
   /** 主会话当前运行时快照。附在子代理末尾，与主会话看到的是同一份。 */
@@ -872,7 +873,9 @@ export class AgentSubagentRuntime_ACU {
     // 授权随请求快照下发；历史之后只剩固定预填充，不再插入额外 system 段。
     const maintenanceAuthorization = maintenanceFormat !== undefined
       ? `【本次读取与写入授权】\n${readScopeSnapshot}\n${input.writeSql && writes.length
-        ? `本次允许 write_sql 写入${writableTables}；只认写入回执的保存结果。`
+        ? definition.kind === 'maintain'
+          ? `本次允许用 summary + delta 一次提交维护变化，程序保存并回读；write_sql 仍可兼容写入${writableTables}。只认 status=committed 与权威回读，不重发已保存栏目。`
+          : `本次允许 write_sql 写入${writableTables}；只认写入回执的保存结果。`
         : '本次没有 write_sql 写入授权，不提交写入，仅交付核对结果与缺口。'}`
       : definition.promptKey === 'mainlinePlanner' || definition.promptKey === 'beatPlanner'
         ? `【本次读取与交付授权】\n${readScopeSnapshot}\n本角色只返回策划建议，不写入资料，不派遣其他角色。`
@@ -977,10 +980,13 @@ export class AgentSubagentRuntime_ACU {
           continue;
         }
         const match = /^(hooks|infoGap|storyArc|chronology|webRefs)#([^.#]+)(?:\.([A-Za-z][A-Za-z0-9]*))?$/.exec(item.path);
-        const module = (item.repairTarget?.module ?? match?.[1]) as AgentWritableModule_ACU | undefined;
+        const table = /^sql\[\d+\]\.(hooks|info_gap|story_arc|chronology|web_refs)(?:\.|$)/.exec(item.path)?.[1];
+        const tableModules: Record<string, AgentWritableModule_ACU> = {
+          hooks: 'hooks', info_gap: 'infoGap', story_arc: 'storyArc', chronology: 'chronology', web_refs: 'webRefs' };
+        const module = (item.repairTarget?.module ?? match?.[1] ?? (table ? tableModules[table] : undefined)) as AgentWritableModule_ACU | undefined;
         const key = item.repairTarget ? `sql:${JSON.stringify(item.repairTarget)}` : item.path;
         if (item.repairTarget) sqlRepairTargets.set(key, item.repairTarget);
-        writeProblems.set(key, { module: module && writes.includes(module) ? module : writes[0],
+        writeProblems.set(key, { module: module ?? writes[0],
           source: 'transaction_rejected', path: item.path, message: item.reason,
           ...(match ? { id: match[2] } : {}) });
       }
@@ -1034,7 +1040,7 @@ export class AgentSubagentRuntime_ACU {
         }
         for (const [key, proof] of operationOnlyProofs) {
           const record = folded.fields.records[proof.module]?.[proof.id];
-          const row = folded.snapshot.hooks.find(item => item.id === proof.id);
+          const row = folded.snapshot[proof.module].find(item => item.id === proof.id);
           if (writeStateUnknown || folded.snapshot.revisions[proof.module] !== proof.revision
             || !row || row.retired || (record && record.status !== 'complete')) {
             issues.set(`${key}.operationOnly`, { module: proof.module, id: proof.id, source: 'transaction_rejected',
@@ -1126,35 +1132,38 @@ export class AgentSubagentRuntime_ACU {
       const accepted = [...new Set([...acceptedKeys(output), ...confirmedFields])];
       // 独立核对交付可以撤回旧的纯系统字段操作，但不能替代未保存的业务写集。
       if (!writeStateUnknown && !rejected.length && !truncated && !acceptedKeys(output).size
-        && !output.delta.constraintProposals.length && writes.includes('hooks')) {
+        && !output.delta.constraintProposals.length) {
         const folded = readAgentModuleFoldState_ACU(input.resolveContext.chat);
-        const window = revisionWindow.hooks;
+        for (const module of ['hooks', 'infoGap', 'chronology'] as const) {
+        if (!writes.includes(module)) continue;
+        const window = revisionWindow[module];
         if (!folded.salvaged && folded.candidates.every(item => item.valid)
-          && window?.base === readRevisions.hooks && window.head === folded.snapshot.revisions.hooks
-          && Object.values(folded.fields.records.hooks ?? {}).every(record => record.status === 'complete')) {
+          && window?.base === readRevisions[module] && window.head === folded.snapshot.revisions[module]
+          && Object.values(folded.fields.records[module] ?? {}).every(record => record.status === 'complete')) {
           const ids = new Set<string>();
           for (const fix of folded.snapshot.pendingFixes) {
-            if (fix.module !== 'hooks') continue;
+            if (fix.module !== module) continue;
             for (const issue of fix.violations) {
               if ((issue.source ?? fix.source) !== 'transaction_rejected') continue;
-              const match = /^hooks#([^.#]+)\.operationOnly$/.exec(issue.path);
+              const match = new RegExp(`^${module}#([^.#]+)\\.operationOnly$`).exec(issue.path);
               if (!match || issue.message !== AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU) continue;
               ids.add(match[1]);
             }
           }
-          for (const proof of operationOnlyProofs.values()) if (proof.module === 'hooks'
+          for (const proof of operationOnlyProofs.values()) if (proof.module === module
             && proof.revision >= window.base && proof.revision <= window.head) ids.add(proof.id);
-          for (const target of operationOnlyTargets.values()) if (target.module === 'hooks'
+          for (const target of operationOnlyTargets.values()) if (target.module === module
             && target.expectedRevision >= window.base && target.expectedRevision <= window.head) ids.add(target.id);
           for (const id of ids) {
-            const row = folded.snapshot.hooks.find(item => item.id === id);
-            const record = folded.fields.records.hooks?.[id];
+            const row = folded.snapshot[module].find(item => item.id === id);
+            const record = folded.fields.records[module]?.[id];
             if (!row || row.retired || (record && record.status !== 'complete')) continue;
-            const previous = operationOnlyProofs.get(`hooks#${id}`);
-            operationOnlyProofs.set(`hooks#${id}`, { module: 'hooks', id,
-              revision: folded.snapshot.revisions.hooks, rejectedPaths: previous?.rejectedPaths ?? [] });
-            writeProblems.delete(`hooks#${id}.operationOnly`);
+            const previous = operationOnlyProofs.get(`${module}#${id}`);
+            operationOnlyProofs.set(`${module}#${id}`, { module, id,
+              revision: folded.snapshot.revisions[module], rejectedPaths: previous?.rejectedPaths ?? [] });
+            writeProblems.delete(`${module}#${id}.operationOnly`);
           }
+        }
         }
       }
       const unresolvedIssues: AgentSubagentUnresolvedIssue_ACU[] = [...terminalIssues(), ...rejected.map(item => ({
@@ -1498,6 +1507,56 @@ export class AgentSubagentRuntime_ACU {
           const draft = parseAgentJsonPayloadDraft_ACU(contractText, nativeCalls.length ? '' : prefill, KIND_PAYLOAD_KEYS_ACU[definition.kind]);
           if (draft.payload.sql !== undefined) throw new Error(`最终交付中的 sql 不会执行；${nativeMode ? '请单独调用 write_sql 提交写入，收到回执后单独调用 submit 交付' : '请单独输出 {"action":"write_sql","sql":"语句"}，收到回执后单独输出最终交付 JSON'}`);
           const parsed = parseAgentMaintainerOutputDraft_ACU(draft.payload);
+          let submitReceipt: AgentModuleFieldReceipt_ACU | undefined;
+          if (definition.kind === 'maintain' && input.writeSql) {
+            const delta = parsed.output.delta;
+            for (const [module, items, patches] of [
+              ['hooks', delta.hooks, delta.hookPatches], ['infoGap', delta.infoGap, delta.infoGapPatches],
+              ['storyArc', delta.storyArc, delta.storyArcPatches], ['chronology', delta.chronology, delta.chronologyPatches],
+            ] as const) {
+              if (writes.includes(module)) continue;
+              for (const [index, item] of [...items, ...patches].entries()) parsed.rejected.push({
+                module, index, id: item.id, reason: '该模块不在本次写入授权内',
+              });
+              items.length = 0; patches.length = 0;
+            }
+            const folded = readAgentModuleFoldState_ACU(input.resolveContext.chat);
+            const sql = maintainerDeltaSql_ACU(delta, folded.snapshot, folded.fields, readRevisions);
+            if (sql) {
+              if (writeRoundsUsed >= maxWriteRounds) {
+                return deliverContract(blankMaintainerOutput_ACU(parsed.output.summary),
+                  [...parsed.rejected, { module: 'hooks', index: 0, id: '', reason: '维护写入轮次已用尽，写集尚未保存' }], draft.truncated);
+              }
+              writeRoundsUsed += 1;
+              writeAttempted = true;
+              if (!input.isCurrent(identity) || input.signal?.aborted) throw new ContinuationValidationError_ACU(
+                createContinuationError_ACU('CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '维护提交已失效', false));
+              try {
+                submitReceipt = await input.writeSql({ role: definition.name, sql, revisionWindow, expectedRevisions: readRevisions,
+                  isCurrent: () => input.isCurrent(identity) && !input.signal?.aborted, resolvePage: () => null });
+                if (!input.isCurrent(identity) || input.signal?.aborted || submitReceipt.rejected.some(item => item.path === 'chat')) {
+                  throw new ContinuationValidationError_ACU(createContinuationError_ACU(
+                    'CONTINUATION_INTERNAL_REQUEST_STALE', 'agent_delegate', '维护提交目标已失效', false));
+                }
+                recordWriteReceipt(submitReceipt);
+                if (submitReceipt.status === 'committed') {
+                  committedWriteObserved = true;
+                  usedFieldWrites = true;
+                  writeProblems.delete('submit');
+                  input.resolveContext.moduleSnapshot = readAgentModuleSnapshot_ACU(input.resolveContext.chat);
+                  for (const key of gate.granted) if (/^\$(FIELD:|HOOKS_LEDGER|INFO_GAP|CHRONOLOGY)/.test(key)) gate.granted.delete(key);
+                } else if (!submitReceipt.rejected.length) {
+                  writeProblems.set('submit', { module: writes[0], source: 'invoke_failed', path: 'submit', message: '维护写集未确认保存' });
+                }
+              } catch (error) {
+                if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE') throw error;
+                writeStateUnknown = true;
+                writeProblems.set('host', { module: writes[0], source: 'invoke_failed', path: 'host', message: compactAgentProtocolError_ACU(error) });
+              }
+              // 候选不是保存证明；后续交付只凭权威字段回执，调用方不得重复应用原写集。
+              parsed.output.delta = { ...blankMaintainerOutput_ACU('').delta, constraintProposals: delta.constraintProposals };
+            }
+          }
           // 新拒绝晚于旧回执；该字段必须再次获得确认，不能复用前一次保存证明。
           for (const item of parsed.rejected) if (item.id && item.field) {
             confirmedFieldRevisions.delete(`${item.module}:${item.id}:${item.field}`);
@@ -1505,6 +1564,9 @@ export class AgentSubagentRuntime_ACU {
           accumulated = accumulated ? mergeAgentMaintainerOutputs_ACU(accumulated, parsed.output) : parsed.output;
           // 上一轮被拒的条目：本轮重发了合法版本即清偿；没有 id 的条目无法匹配，本轮过后不再追讨。
           const nowAccepted = acceptedKeys(parsed.output);
+          const savedThisSubmit = new Set((submitReceipt?.status === 'committed'
+            ? [...submitReceipt.accepted, ...(submitReceipt.alreadySaved ?? [])] : [])
+            .map(item => `${item.module}:${item.id}`));
           const live = readAgentModuleFoldState_ACU(input.resolveContext.chat);
           const canConfirmFields = !writeStateUnknown && !live.salvaged && live.candidates.every(item => item.valid);
           const currentProblems = terminalIssues();
@@ -1521,6 +1583,10 @@ export class AgentSubagentRuntime_ACU {
               if (revision !== undefined && live.fields.records[item.module]?.[item.id]?.fields[item.field]?.revision === revision
                 && !currentProblems.some(issue => issue.path === `${item.module}#${item.id}.${item.field}`)) return false;
             }
+            if (!item.field && savedThisSubmit.has(`${item.module}:${item.id}`) && canConfirmFields
+              && live.fields.records[item.module]?.[item.id]?.status === 'complete'
+              && !currentProblems.some(issue => issue.path === `${item.module}#${item.id}`
+                || issue.path.startsWith(`${item.module}#${item.id}.`))) return false;
             if (!nowAccepted.has(`${item.module}:${item.id}`)) return true;
             return !!item.field && !candidates[item.module].some(candidate => candidate.id === item.id
               && Object.prototype.hasOwnProperty.call(candidate, item.field!));
@@ -1553,6 +1619,19 @@ export class AgentSubagentRuntime_ACU {
           if (emptyArcBootstrap && !pending.length && !draft.truncated) {
             pending.push({ module: 'storyArc', index: 0, id: '', reason: '总纲尚未建立，但 delta.storyArc 为空。summary 里的文字不会写入任何东西：必须在 delta.storyArc 里给出 1 条 scope=story 的 upsert 与按【总纲卷数计划】数量的 scope=volume upsert，每条都带 title / direction / escalation / withheld / status 与卷级契约字段（id 可省略，系统自动编号）' });
           }
+          if (definition.kind === 'maintain' && submitReceipt && terminalIssues().length) {
+            if (writeStateUnknown || continuationsUsed >= maxContinuations || writeRoundsUsed >= maxWriteRounds) {
+              return deliverContract(accumulated, pending, draft.truncated);
+            }
+            continuationsUsed += 1;
+            pushFeedback([submitReceipt ? JSON.stringify({ ...submitReceipt, action: 'submit' }) : '',
+              `仅修复以下未完成项：${JSON.stringify(terminalIssues())}`,
+              pending.length ? `交付格式仍需修正：${JSON.stringify(pending)}` : '',
+              draft.truncated ? '交付尾部截断；仅补尚未提交的剩余条目。' : '',
+              '已保存栏目不得重发；按回执真实 ID 只提交失败字段的 patch。用 summary + delta 一次交付修正，程序保存成功后直接结束，无需额外确认。',
+            ].filter(Boolean).join('\n'));
+            continue;
+          }
           if (!draft.truncated && !pending.length) return deliverContract(accumulated);
           if (continuationsUsed >= maxContinuations) {
             if (pending.length) {
@@ -1562,7 +1641,14 @@ export class AgentSubagentRuntime_ACU {
             return deliverContract(accumulated, [], true);
           }
           continuationsUsed += 1;
-          pushFeedback(renderAgentContractContinuationRequest_ACU(accumulated, pending, draft.truncated, toolMode));
+          pushFeedback(definition.kind === 'maintain' && input.writeSql
+            ? [draft.truncated ? '交付尾部截断；只补尚未提交的剩余条目。' : '仅修正以下交付条目。',
+              `待修项：${JSON.stringify(pending)}`,
+              `已保存栏目：${[...confirmedFields].join('、') || '无'}；不得重发。`,
+              nativeMode ? '单独调用 submit，以 summary + delta 一次提交修正。'
+                : '单独输出 summary + delta 的完整交付对象，一次提交修正。',
+            ].join('\n')
+            : renderAgentContractContinuationRequest_ACU(accumulated, pending, draft.truncated, toolMode));
           continue;
         }
         const payload = parseAgentJsonPayload_ACU(contractText, nativeCalls.length ? '' : prefill, KIND_PAYLOAD_KEYS_ACU[definition.kind]);
@@ -1602,7 +1688,11 @@ export class AgentSubagentRuntime_ACU {
             ? '资料不足时可先调用当前授权的调阅工具，遵守尾部读取预算。'
             : `资料不足时可先输出 {"action":"read","reads":["授权地址"]}${allowSearch ? ' 或 {"action":"search","query":"关键词","scope":["worldbook"]}' : ''}${isResearch ? '，出网调阅按工具目录输出 JSON 动作' : ''}，遵守尾部读取预算。`
           : '读取额度已用尽或本角色没有调阅权限，依据已备资料处理，不再调阅。';
-        const writeRepair = input.writeSql && writes.length
+        const writeRepair = definition.kind === 'maintain' && input.writeSql && writes.length
+          ? maxWriteRounds > writeRoundsUsed
+            ? '确需维护时用 summary + delta 一次提交全部变化；只补失败字段，不重发已保存栏目。'
+            : '维护写入轮次已用尽，不再提交写集，如实报告缺口。'
+          : input.writeSql && writes.length
           ? maxWriteRounds > writeRoundsUsed
             ? nativeMode
               ? '确需写入或补栏时单独调用 write_sql，把全部语句放进同一个 sql 参数；收到回执后再交付。'

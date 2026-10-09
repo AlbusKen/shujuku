@@ -245,7 +245,7 @@ function maintainerPrompt_ACU(focus: string, snapshot: AgentModuleSnapshot_ACU):
   const fixes = snapshot.pendingFixes.filter(item => (MAINTAINER_MODULES_ACU as readonly string[]).includes(item.module));
   return [
     `本轮焦点：${focus}`,
-    '只逐楼结算 $HISTORY_UNSETTLED 实际提供的窗口内正文；窗口外省略内容不得宣称已读或已结算。没有可证实变化时不调用 write_sql，直接交付 summary 写明逐项核对结果；最终交付不携带 sql 或 delta，不用 SELECT 1 等空操作代替核对。',
+    '只逐楼结算 $HISTORY_UNSETTLED 实际提供的窗口内正文；窗口外省略内容不得宣称已读或已结算。有证据的变化优先用 summary + delta 一次交付，由程序保存并回读，完整成功后无需再次确认。没有可证实变化时不调用 write_sql，直接交付 summary 写明逐项核对结果；最终交付不携带 sql，不用 SELECT 1 等空操作代替核对。',
     'hooks 只可写 summary、status、importance、planted_index、planned_payoff；recent_floor 等系统字段不写。expected_revision 只用于 UPDATE/DELETE 的 WHERE 校验，不放进 SET，也不自行递增。被拒操作不等于资料损坏；按回执区分实际缺栏、未保存业务变化、系统字段误写和任务失效。',
     `待修复：${formatFixes_ACU(fixes)}`,
   ].join('\n');
@@ -521,10 +521,24 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
         prompt: [
           `上一轮资料写入仍有待修复项（第 ${repairAttempts} 次定向修正）：`,
           formatFixes_ACU(repairPending),
-          '只修复上述模块和字段；不要重发已成功保存的其它模块。先核对本次注入的资料与回执；确需补读且本次读取授权仍有额度时，再 read 对应权威地址。额度已用尽时不重复 read、不把读取限制解释为没有写权限；已有证据足够才提交最小 write_sql，否则如实交付未确认缺口。空 patch 不代表资料损坏，无业务变化时独立交付核对结果，不重发空 patch 或空操作。',
+          '只修复上述模块和字段；不要重发已成功保存的其它模块。先核对本次注入的资料与回执；确需补读且本次读取授权仍有额度时，再 read 对应权威地址。额度已用尽时不重复 read、不把读取限制解释为没有写权限；已有证据足够时用 summary + delta 只交付失败字段的 patch，否则如实交付未确认缺口。空 patch 不代表资料损坏，无业务变化时独立交付核对结果，不重发空 patch 或空操作。',
         ].join('\n'),
       });
     }
+  }
+
+  // 维护尚未收敛时不启动依赖结算资料的策划与编排；独立的开局检索已完成并保留。
+  if (snapshot.pendingFixes.length) {
+    return {
+      outcome: 'escalate',
+      summary: `资料维护尚未完成，已保存内容保留；仅修复待修项后再进入策划与编排：${formatFixes_ACU(snapshot.pendingFixes)}`,
+      instruction: '',
+      pendingFixes: snapshot.pendingFixes,
+      escalated: true,
+      escalationKind: 'pending_fix',
+      snapshot,
+      steps,
+    };
   }
 
   const plannerCalls: ContinuationWorkflowAgentCall_ACU[] = [

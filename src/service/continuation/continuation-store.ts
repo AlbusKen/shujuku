@@ -7,7 +7,8 @@ import { CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V46_ACU, CONTINUATION_PROMPT_
 import { withAgentPromptLayout_ACU } from '../../shared/agent-prompt-layout';
 import { withV46ProgressAdjustment_ACU, withV48EditableSnapshot_ACU, buildV48ContinuationAgentPrompts_ACU, continuationV48DefaultLineage_ACU } from './agent/agent-defaults';
 import { buildV49ContinuationAgentPrompts_ACU, withV50ContinuationQa_ACU } from './agent/agent-defaults';
-import { CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V50_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU, withV50OutlineQa_ACU } from './defaults';
+import { CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V50_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V52_ACU, withV50OutlineQa_ACU } from './defaults';
+import { migrateV51MaintainerQaPrompt_ACU } from './agent/maintainer-prompt';
 import { CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V39_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V40_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V41_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V42_ACU } from './defaults';
 import { CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V43_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V44_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V45_ACU, buildV42ContinuationOutlinePrompt_ACU, withV43OutlineCreativeIdentity_ACU } from './defaults';
 import { buildV38ContinuationAgentPrompts_ACU, withV39MainAgentSelfNarration_ACU, withV40RoleSelfNarration_ACU, withV41RoleProcedure_ACU, withV42ReadOnceContract_ACU, withV43CreativeIdentity_ACU, withV44IdAutofill_ACU, withV45MainCorrection_ACU } from './agent/agent-defaults';
@@ -1025,11 +1026,16 @@ export function validateContinuationSettings_ACU(raw: unknown): ContinuationSett
 
 function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   if (!isRecord_ACU(raw)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'settings 必须是对象');
-  // 本次更新明确重置全部提示词；新版本保存后的用户编辑不再被覆盖。
+  // V51 以前沿用已发布的整组重置；V51 只精确升级维护默认段，保留用户编辑。
   // 版本号只写进返回值，不就地改 raw：初始化落盘要凭首楼原始版本号判断是否需要写回。
-  if (raw.promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU) {
+  if (raw.promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU
+    && raw.promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V52_ACU) {
     raw.outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
     raw.agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
+  } else if (raw.promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU
+    && isRecord_ACU(raw.agentPrompts) && Array.isArray(raw.agentPrompts.maintainer)) {
+    raw.agentPrompts = { ...raw.agentPrompts,
+      maintainer: migrateV51MaintainerQaPrompt_ACU(raw.agentPrompts.maintainer) };
   }
   if (isRecord_ACU(raw.agentPrompts)) delete raw.agentPrompts.reviewer;
   if (isRecord_ACU(raw.agentApiPresets)) delete raw.agentApiPresets.reviewer;
@@ -1119,7 +1125,7 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
     promptCacheEnabled: false,
     agentApiPresets: validateAgentApiPresets_ACU(raw.agentApiPresets),
     outlinePrompt: validateContinuationPromptSegments_ACU(raw.outlinePrompt, 'load', 'CONTINUATION_ENVELOPE_INVALID'), agentPrompts: validateAgentPrompts_ACU(raw.agentPrompts),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V52_ACU,
   };
 }
 
@@ -1360,7 +1366,8 @@ function assertChatContext_ACU(context: ReturnType<typeof captureChatContext_ACU
 
 function readRawEnvelope_ACU(firstMessage: Record<string, unknown>): ContinuationEnvelope_ACU | null {
   const raw = firstMessage[CONTINUATION_FIRST_FLOOR_FIELD_ACU];
-  return raw === undefined ? null : validateContinuationEnvelope_ACU(raw);
+  // 迁移校验可修改候选；读取不能隐式改写已持久化的首楼或其旧引用。
+  return raw === undefined ? null : validateContinuationEnvelope_ACU(structuredClone(raw));
 }
 
 function restoreFirstFloorField_ACU(firstMessage: Record<string, unknown>, hadPreviousValue: boolean, previousValue: unknown): void {

@@ -73,10 +73,17 @@ describe('续写维护角色独立写入与交付', () => {
     const json = buildContinuationAgentPromptsForMode_ACU('json')[role].map(segment => segment.content).join('\n');
     const tools = buildContinuationAgentPromptsForMode_ACU('tools')[role].map(segment => segment.content).join('\n');
     expect(json).toContain('写入时单独输出 {"action":"write_sql","sql":');
-    expect(json).toContain('收到回执后再单独输出最终交付');
-    expect(json).toMatch(/我的最终交付是一个 JSON 对象：\{"summary":"[^"]*"\}/);
+    if (role === 'maintainer') {
+      expect(json).toContain('优先一次交付 summary + delta');
+      expect(json).toContain('完整保存后任务直接结束，无需再次确认');
+      expect(json).toMatch(/我的最终交付是一个 JSON 对象：\{"summary":"[^"]*","delta":/);
+      expect(tools).toMatch(/我的最终交付调用 submit，参数为：\{"summary":"[^"]*","delta":/);
+    } else {
+      expect(json).toContain('收到回执后再单独输出最终交付');
+      expect(json).toMatch(/我的最终交付是一个 JSON 对象：\{"summary":"[^"]*"\}/);
+      expect(tools).toMatch(/我的最终交付调用 submit，参数为：\{"summary":"[^"]*"\}/);
+    }
     expect(json).not.toMatch(/函数调用|submit|\{"summary":"[^"]*","sql":/);
-    expect(tools).toMatch(/我的最终交付调用 submit，参数为：\{"summary":"[^"]*"\}/);
     expect(tools).not.toMatch(/\{"summary":"[^"]*","sql":|写入时单独输出/);
   });
 });

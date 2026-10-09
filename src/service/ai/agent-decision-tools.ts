@@ -81,8 +81,12 @@ const SUBMIT_DESCRIPTION_ACU = '交付本次结果；调用后本次任务结束
 
 function continuationSubmitParameters_ACU(contract: ContinuationSubmitContract_ACU): Record<string, unknown> {
   switch (contract) {
-    case 'arc':
     case 'maintain':
+      return closed_ACU({
+        summary: text_ACU('本次结算与尚存缺口的简短总结。'),
+        delta: freeObject_ACU('可选：一次提交全部维护变化，使用角色格式说明中的 hooks / infoGap / chronology / constraintProposals。程序负责字段映射、版本校验和保存；成功后无需再次确认。'),
+      });
+    case 'arc':
     case 'research':
       return closed_ACU({
         summary: text_ACU('本次工作的简短总结。'),

@@ -1831,8 +1831,8 @@ export class ContinuationAgentTurnPlanner_ACU {
     const message = chat[targetIndex];
     const dispatchTarget = { message, swipeId: readMessageSwipeId_ACU(message) };
     const completedStages = context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber);
-    return ({ role, sql, resolvePage, isCurrent, revisionWindow }: { role: AgentSubagentName_ACU; sql: string; resolvePage: (handle: string) => AgentFieldPage_ACU | null; isCurrent?: () => boolean; revisionWindow?: AgentModuleRevisionWindow_ACU }) => commitAgentModuleFieldWrites_ACU({
-      chat, targetIndex, dispatchTarget, role, sql, resolvePage, isCurrent, completedStages, revisionWindow,
+    return ({ role, sql, resolvePage, isCurrent, revisionWindow, expectedRevisions }: { role: AgentSubagentName_ACU; sql: string; resolvePage: (handle: string) => AgentFieldPage_ACU | null; isCurrent?: () => boolean; revisionWindow?: AgentModuleRevisionWindow_ACU; expectedRevisions?: Partial<AgentModuleSnapshot_ACU['revisions']> }) => commitAgentModuleFieldWrites_ACU({
+      chat, targetIndex, dispatchTarget, role, sql, resolvePage, isCurrent, completedStages, revisionWindow, expectedRevisions,
       storage: this.dependencies.moduleCommitStorage,
     });
   }
@@ -2483,7 +2483,10 @@ export class ContinuationAgentTurnPlanner_ACU {
             ok: !hasPending,
             summary: result.maintainer.summary,
             detail: [
-              `已结算：伏笔 ${result.maintainer.delta.hooks.length} 条、信息差 ${result.maintainer.delta.infoGap.length} 条、故事时间 ${result.maintainer.delta.chronology.length + result.maintainer.delta.chronologyPatches.length} 条`,
+              result.usedFieldWrites
+                ? `已结算：${(['hooks', 'infoGap', 'chronology'] as const).map((module, index) =>
+                  `${['伏笔', '信息差', '故事时间'][index]} ${new Set((result.acceptedKeys ?? []).filter(key => key.startsWith(`${module}:`)).map(key => key.split(':')[1])).size} 条`).join('、')}`
+                : `已结算：伏笔 ${result.maintainer.delta.hooks.length} 条、信息差 ${result.maintainer.delta.infoGap.length} 条、故事时间 ${result.maintainer.delta.chronology.length + result.maintainer.delta.chronologyPatches.length} 条`,
               proposals.length ? `约束提议（需你裁决后登记）：${proposals.join('；')}` : '',
               result.expandedReads.length ? `补充读取：${result.expandedReads.join('、')}` : '',
             ].filter(Boolean).join('\n'),

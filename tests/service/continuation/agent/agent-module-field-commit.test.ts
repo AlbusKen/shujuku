@@ -489,7 +489,7 @@ describe('续写逐栏真实提交', () => {
     expect(receipt.status).toBe('rejected');
     expect(receipt.accepted).toEqual([]);
     expect(receipt.operationOnlyConfirmed).toEqual([{ module: 'hooks', id: 'H1', revision: 2,
-      rejectedPaths: ['sql[0].hooks.recent_floor', 'sql[0].hooks.expected_revision', 'sql[0].hooks'] }]);
+      rejectedPaths: ['hooks#H1.recent_floor', 'sql[0].hooks.expected_revision', 'sql[0].hooks'] }]);
     expect(JSON.stringify(chat)).toBe(before);
     expect(saveChat).not.toHaveBeenCalled();
     for (const statement of [sql.replace('expected_revision=2', 'expected_revision=1'), sql.replace("id='H1'", "id='H2'"),
