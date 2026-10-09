@@ -1,4 +1,4 @@
-import { jQuery_API_ACU } from '../../shared/host-api';
+import { getHostWindow } from '../../shared/runtime-env';
 import { captureZeroLayerCarrier_ACU, assertZeroLayerCarrier_ACU,
   type ZeroLayerCarrierContext_ACU } from '../../service/zero-layer/carrier-context';
 import { zeroLayerHistoryReader_ACU } from '../../service/zero-layer/history-read';
@@ -49,7 +49,8 @@ export class ZeroLayerStableView_ACU {
     if (epoch !== this.epoch) throw new Error('scope-changed');
     if (result.ok === false) throw new Error(result.error.code);
     assertZeroLayerCarrier_ACU(context);
-    const chat = jQuery_API_ACU?.('#chat')?.[0];
+    // 脚本 iframe 的 jQuery 默认查询自己的文档；载体楼层始终属于酒馆主窗口。
+    const chat = getHostWindow().document.querySelector('#chat');
     const root = chat?.querySelector<HTMLElement>(`.mes[mesid="${context.carrierIndex}"]`);
     if (!root) throw new Error('view-out-of-sync');
     const slot = root.ownerDocument.createElement('div');

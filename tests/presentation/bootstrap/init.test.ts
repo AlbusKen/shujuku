@@ -1487,7 +1487,7 @@ describe('向量模式宿主普通发送', () => {
 });
 
 describe('零层真实宿主发送接管', () => {
-  it('bootstrap 包装主窗口事件源，普通发送不入楼，quiet 请求仍可装配', async () => {
+  it('主窗口接管普通发送并原地替换零层正文，保留游戏 iframe 与 quiet 装配', async () => {
     vi.resetModules();
     const listeners = new Map<string, Array<(...args: any[]) => unknown>>();
     const nativeSource = {
@@ -1507,19 +1507,54 @@ describe('零层真实宿主发送接管', () => {
     const originalEmit = nativeSource.emit;
     const proxyEmit = m.api.eventSource.emit;
     const envelope = { enabled: true, sessionId: 'session-native', activeBranchId: 'branch-native', revision: 1 };
-    const context = { key: 'native-scope' };
+    const context = { key: 'native-scope', carrierIndex: 0 };
+    let snapshot: import('../../../src/service/zero-layer/history-model').ZeroLayerSessionSnapshot_ACU = {
+      protocolVersion: 1, sessionId: envelope.sessionId, branchId: envelope.activeBranchId,
+      carrierRef: { carrierId: 'carrier-native', swipeId: 0 }, revision: envelope.revision,
+      headTurnId: null, currentBody: '开场白',
+      currentPublicState: { availability: 'unavailable', value: null },
+      status: 'published', snapshotToken: 'snapshot-native-1',
+    };
+    let historyListener: ((change: import('../../../src/service/zero-layer/history-model').ZeroLayerHistoryChange_ACU) => void) | undefined;
+    const historyReader = {
+      invalidate: vi.fn(),
+      getSnapshot: vi.fn(async () => ({ ok: true, value: structuredClone(snapshot) })),
+      subscribe: vi.fn((listener: NonNullable<typeof historyListener>) => {
+        historyListener = listener;
+        listener({ kind: 'snapshot', sessionId: snapshot.sessionId, branchId: snapshot.branchId,
+          revision: snapshot.revision, headTurnId: snapshot.headTurnId });
+        return () => { if (historyListener === listener) historyListener = undefined; };
+      }),
+    };
+    const root = document.createElement('div');
+    root.className = 'mes';
+    root.setAttribute('mesid', '0');
+    root.innerHTML = '<div class="mes_block"><div class="mes_text"><iframe title="游戏壳"></iframe></div></div>';
+    document.querySelector('#chat')!.append(root);
+    const gameFrame = root.querySelector('iframe')!;
+    const gameWindow = gameFrame.contentWindow;
+    const shell = root.querySelector('.mes_text')!;
+    const shellMarkup = shell.innerHTML;
+    const scriptFrame = document.createElement('iframe');
+    document.body.append(scriptFrame);
+    const scriptDocument = scriptFrame.contentDocument!;
+    // 模拟脚本 iframe 的 jQuery：相同选择器不能作为宿主文档的定位依据。
+    scriptDocument.body.innerHTML = '<div id="chat"><div class="mes" mesid="0"><div class="mes_block"></div></div></div>';
+    m.jquery.mockImplementation((selector: string) => {
+      const nodes = Array.from(scriptDocument.querySelectorAll(selector));
+      return { ...nodes, length: nodes.length };
+    });
     const runtime = { install: vi.fn(), invalidate: vi.fn(), dispose: vi.fn(), cancel: vi.fn(),
       session: { hasActiveTurn: () => false, bindPrompt: vi.fn(), bindSettings: vi.fn() },
-      submit: vi.fn(async () => envelope),
+      submit: vi.fn(async () => {
+        envelope.revision += 1;
+        snapshot = { ...snapshot, revision: envelope.revision, headTurnId: `turn-${envelope.revision}`,
+          currentBody: `本轮正文-${envelope.revision}`, snapshotToken: `snapshot-native-${envelope.revision}` };
+        historyListener?.({ kind: 'changed', sessionId: snapshot.sessionId, branchId: snapshot.branchId,
+          revision: snapshot.revision, headTurnId: snapshot.headTurnId });
+        return envelope;
+      }),
     };
-    class StableView {
-      isMounted = false;
-      mount = vi.fn(async () => { this.isMounted = true; });
-      resync = vi.fn(async () => {});
-      dispose = vi.fn(() => { this.isMounted = false; });
-      setBusy = vi.fn();
-      isSourceCurrent = () => true;
-    }
     vi.doMock('../../../src/service/zero-layer/carrier-context', () => ({
       hasZeroLayerCarrierField_ACU: () => true,
       captureZeroLayerCarrier_ACU: () => context,
@@ -1529,8 +1564,7 @@ describe('零层真实宿主发送接管', () => {
       bindOrdinaryZeroLayerContext_ACU: vi.fn(), invalidateOrdinaryZeroLayerRequests_ACU: vi.fn(),
       assertOrdinaryZeroLayerRequest_ACU: vi.fn(),
     }));
-    vi.doMock('../../../src/presentation/components/zero-layer-stable-view', () => ({ ZeroLayerStableView_ACU: StableView }));
-    vi.doMock('../../../src/service/zero-layer/history-read', () => ({ zeroLayerHistoryReader_ACU: { invalidate: vi.fn() } }));
+    vi.doMock('../../../src/service/zero-layer/history-read', () => ({ zeroLayerHistoryReader_ACU: historyReader }));
     vi.doMock('../../../src/service/zero-layer/notifications', () => ({ subscribeZeroLayerChanges_ACU: () => () => {} }));
     vi.doMock('../../../src/service/zero-layer/runtime', () => ({ getZeroLayerRuntime_ACU: () => runtime }));
     const nativeApi = { eventSource: nativeSource, eventTypes: { ...m.api.eventTypes,
@@ -1540,10 +1574,15 @@ describe('零层真实宿主发送接管', () => {
     input.value = '零层行动';
     m.input = input.value;
     try {
-      const { installZeroLayerBootstrap_ACU } = await import('../../../src/presentation/bootstrap/zero-layer-bootstrap');
+      const { installZeroLayerBootstrap_ACU, resyncZeroLayerViewForPage_ACU } = await import('../../../src/presentation/bootstrap/zero-layer-bootstrap');
       installZeroLayerBootstrap_ACU();
       expect(nativeSource.emit).not.toBe(originalEmit);
       expect(m.api.eventSource.emit).toBe(proxyEmit);
+      await resyncZeroLayerViewForPage_ACU();
+      const slot = root.querySelector('.acu-zero-layer-body')!;
+      expect(slot).not.toBeNull();
+      expect(slot.parentElement).toBe(root.querySelector('.mes_block'));
+      expect(scriptDocument.querySelector('.acu-zero-layer-body')).toBeNull();
       const physicalWrite = vi.fn();
       const hostSend = async () => {
         await nativeSource.emit('after_commands', 'normal', {}, false);
@@ -1553,12 +1592,29 @@ describe('零层真实宿主发送接管', () => {
       expect(physicalWrite).not.toHaveBeenCalled();
       expect(input.value).toBe('零层行动');
       await vi.waitFor(() => expect(runtime.submit).toHaveBeenCalledWith('零层行动', ['table']));
+      await vi.waitFor(() => expect(slot.textContent).toBe('本轮正文-2'));
+      input.value = '第二轮行动';
+      m.input = input.value;
+      await expect(hostSend()).rejects.toMatchObject({ name: 'AbortError' });
+      await vi.waitFor(() => expect(runtime.submit).toHaveBeenCalledWith('第二轮行动', ['table']));
+      await vi.waitFor(() => expect(slot.textContent).toBe('本轮正文-3'));
+      expect(root.querySelector('.acu-zero-layer-body')).toBe(slot);
+      expect(root.querySelectorAll('.acu-zero-layer-body')).toHaveLength(1);
+      expect(slot.textContent).not.toContain('本轮正文-2');
+      expect(document.querySelectorAll('#chat .mes')).toHaveLength(1);
+      expect(physicalWrite).not.toHaveBeenCalled();
+      expect(root.querySelector('iframe')).toBe(gameFrame);
+      expect(gameFrame.isConnected).toBe(true);
+      expect(gameFrame.contentWindow).toBe(gameWindow);
+      expect(shell.innerHTML).toBe(shellMarkup);
+      expect(m.api.updateMessageBlock).not.toHaveBeenCalled();
       await expect(nativeSource.emit('after_commands', 'quiet', {}, false)).resolves.toBeUndefined();
       expect(originalEmit).toHaveBeenCalledWith('after_commands', 'quiet', {}, false);
     } finally {
       window.dispatchEvent(new Event('pagehide'));
+      scriptFrame.remove();
       for (const path of ['service/zero-layer/carrier-context', 'service/zero-layer/ordinary-context',
-        'presentation/components/zero-layer-stable-view', 'service/zero-layer/history-read',
+        'service/zero-layer/history-read',
         'service/zero-layer/notifications', 'service/zero-layer/runtime']) {
         vi.doUnmock(`../../../src/${path}`);
       }
