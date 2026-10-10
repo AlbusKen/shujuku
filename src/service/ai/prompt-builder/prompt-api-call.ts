@@ -22,6 +22,7 @@ import { chatTurnFromJson_ACU, readFetchChatTurn_ACU, type AiChatTurn_ACU } from
 import { adaptTableFillPromptSegmentsToToolMode_ACU, buildTableFillNativeTools_ACU, resolveTableFillToolTurn_ACU } from './table-fill-tools';
 import { isNativeToolChannelAvailable_ACU } from '../agent-tool-mode';
 import { logAutoFillStage_ACU, logAutoFillSkip_ACU } from '../../../shared/trigger-diagnostics';
+import { withTableFillRetryHistory_ACU } from './table-fill-retry';
 
 
 /**
@@ -32,7 +33,7 @@ import { logAutoFillStage_ACU, logAutoFillSkip_ACU } from '../../../shared/trigg
 export class RetryableAiResponseError_ACU extends Error {
   readonly code = 'empty_or_invalid_api_response';
 
-  constructor(message = 'API响应格式不正确或内容为空。') {
+  constructor(message = 'API响应格式不正确或内容为空。', readonly rawResponse = '') {
     super(message);
     this.name = 'RetryableAiResponseError';
   }
@@ -226,7 +227,11 @@ export class RetryableAiResponseError_ACU extends Error {
         options?.assertCurrent?.();
         messages.push({ role: normalizeRoleForApi_ACU(segment.role), content: finalContent });
     }
-    return messages;
+    return withTableFillRetryHistory_ACU(messages, options?.tableFillRetryHistory, {
+        sqlite: sqliteMode,
+        strictJson: strictJsonFillEnabled,
+        tools: toolChannelAvailable,
+    });
     };
 
     let messages = await renderMessages(initialToolChannelAvailable);
@@ -279,12 +284,16 @@ export class RetryableAiResponseError_ACU extends Error {
     // 自定义直连、Chat Completion 酒馆连接与 Chat Completion 主连接都挂工具；其余通道已降级为正文格式提示词。
     const tableFillTools = (strictJsonFillEnabled || !tableFillToolChannelAvailable) ? [] : buildTableFillNativeTools_ACU(sqliteMode);
     const finalizeTableFillTurn = (turn: AiChatTurn_ACU): string => {
+        // 回灌可读的原回复和工具参数，不生成未配对的原生工具历史。
+        const rawResponse = [turn.content, ...turn.toolCalls.map(call => `${call.name}(${call.arguments})`)]
+            .filter(Boolean).join('\n');
+        options?.onTableFillResponse?.(rawResponse);
         const resolved = resolveTableFillToolTurn_ACU(turn, sqliteMode);
         // 项目未开启 strictNullChecks 时布尔判别联合不收窄，显式取 error 分支。
-        if (!resolved.ok) throw new RetryableAiResponseError_ACU((resolved as { ok: false; error: string }).error);
+        if (!resolved.ok) throw new RetryableAiResponseError_ACU((resolved as { ok: false; error: string }).error, rawResponse);
         if (resolved.viaTool) options?.onTableFillToolSubmitted?.();
         const text = resolved.text.trim();
-        if (!text) throw new RetryableAiResponseError_ACU();
+        if (!text) throw new RetryableAiResponseError_ACU(undefined, rawResponse);
         return text;
     };
 

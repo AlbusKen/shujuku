@@ -441,9 +441,14 @@ describe('extractAiUsageMetadata_ACU', () => {
 
 // ═══ callCustomOpenAI_ACU — prompt 组装 ═══
 describe('callCustomOpenAI_ACU — prompt 组装', () => {
-  it('占位符 $0/$1/$4/$6/$8/$9/$U/$C 被正确替换', async () => {
+  it.each([false, true])('占位符被正确替换，纠错历史保真且原 AI 预填充保持最后（重试=$retry）', async retry => {
+    const retryHistory = [
+      { response: '第一次回复 $0\n<tableEdit>未闭合', error: '缺少闭合标签' },
+      { response: '第二次回复 $U', error: '字段索引错误' },
+    ];
     mockSettings.charCardPrompt = [
       { role: 'USER', content: '表格:$0 消息:$1 世界书:$4 剧情:$6 额外:$8 内部已排除世界书:$9/$9 用户:$U 角色:$C' },
+      { role: 'AI', content: '原始预填充' },
     ];
     mockGetApiConfigByPreset.mockReturnValue({
       apiMode: 'custom',
@@ -458,6 +463,8 @@ describe('callCustomOpenAI_ACU — prompt 组装', () => {
       worldbookContent: '世界书数据',
       worldbookDatabaseExcludedContent: '仅保留非内部条目',
       manualExtraHint: '额外提示',
+    }, null, {
+      tableFillRetryHistory: retry ? retryHistory : [],
     });
 
     expect(result).toBe('AI回复');
@@ -474,6 +481,18 @@ describe('callCustomOpenAI_ACU — prompt 组装', () => {
     expect(content).toContain('角色描述');
     expect(content).not.toContain('$0');
     expect(content).not.toContain('$U');
+    expect(calledMessages.map((message: any) => message.role)).toEqual(
+      retry ? ['user', 'assistant', 'system', 'assistant', 'system', 'assistant'] : ['user', 'assistant'],
+    );
+    expect(calledMessages[calledMessages.length - 1]).toEqual({ role: 'assistant', content: '原始预填充' });
+    if (retry) {
+      expect(calledMessages[1]).toEqual({ role: 'assistant', content: retryHistory[0].response });
+      expect(calledMessages[3]).toEqual({ role: 'assistant', content: retryHistory[1].response });
+      expect(calledMessages[2].content).toContain('具体报错：缺少闭合标签');
+      expect(calledMessages[4].content).toContain('具体报错：字段索引错误');
+      expect(calledMessages[4].content).toContain('修正要求');
+      expect(calledMessages[4].content).toContain('完整闭合的 <tableEdit>');
+    }
   });
 
   it('if seed 优先使用 prepare 阶段冻结的填表上下文范围', async () => {

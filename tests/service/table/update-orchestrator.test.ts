@@ -4319,7 +4319,7 @@ describe('executeCardUpdateCore_ACU — SQL 错误反馈重试', () => {
     setTimeoutSpy.mockRestore();
   });
 
-  it('SQL 模式下 parseAndApplyTableEdits 抛错时，错误信息注入到 tableDataText', async () => {
+  it('SQL 校验失败后回灌对应 AI 回复和错误，表格正文保持不变', async () => {
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     vi.mocked(isSqliteMode).mockReturnValue(true);
 
@@ -4330,15 +4330,17 @@ describe('executeCardUpdateCore_ACU — SQL 错误反馈重试', () => {
     };
 
     let callCount = 0;
-    mockCallCustomOpenAI.mockImplementation(async (dynamicContent: any) => {
+    mockCallCustomOpenAI.mockImplementation(async (dynamicContent: any, _controller: any, options: any) => {
       callCount++;
       if (callCount === 1) {
         return '<tableEdit>UPDATE invalid_table SET value = 1 WHERE row_id = 1;</tableEdit>';
       }
       if (callCount === 2) {
-        expect(dynamicContent.tableDataText).toContain('SQL_ERROR_FEEDBACK');
-        expect(dynamicContent.tableDataText).toContain('无法识别的目标表「invalid_table」');
-        expect(dynamicContent.tableDataText).toContain('SQL执行错误，请修正后重新输出');
+        expect(dynamicContent.tableDataText).toBe('原始数据');
+        expect(options.tableFillRetryHistory).toEqual([{
+          response: '<tableEdit>UPDATE invalid_table SET value = 1 WHERE row_id = 1;</tableEdit>',
+          error: expect.stringContaining('无法识别的目标表「invalid_table」'),
+        }]);
         return '<tableEdit>DELETE FROM test WHERE row_id = 1;</tableEdit>';
       }
       return '<tableEdit>ok</tableEdit>';
@@ -4393,7 +4395,7 @@ describe('executeCardUpdateCore_ACU — SQL 错误反馈重试', () => {
     expect(capturedTableDataText).not.toContain('SQL_ERROR_FEEDBACK');
   });
 
-  it('SQL 模式下多次重试时错误信息被替换（不累积）', async () => {
+  it('SQL 多次重试保留逐轮回复与错误，不改写表格正文', async () => {
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
     vi.mocked(isSqliteMode).mockReturnValue(true);
@@ -4411,9 +4413,11 @@ describe('executeCardUpdateCore_ACU — SQL 错误反馈重试', () => {
 
     let callCount = 0;
     const capturedTableDataTexts: string[] = [];
-    mockCallCustomOpenAI.mockImplementation(async (dynamicContent: any) => {
+    const capturedRetryHistories: any[][] = [];
+    mockCallCustomOpenAI.mockImplementation(async (dynamicContent: any, _controller: any, options: any) => {
       callCount++;
       capturedTableDataTexts.push(dynamicContent.tableDataText);
+      capturedRetryHistories.push(structuredClone(options.tableFillRetryHistory));
       if (callCount === 1) return '<tableEdit>INSERT INTO missing (value) VALUES (1);</tableEdit>';
       if (callCount === 2) return '<tableEdit>INSERT INTO t (missing_col) VALUES (1);</tableEdit>';
       return '<tableEdit>DELETE FROM t WHERE row_id = 1;</tableEdit>';
@@ -4433,12 +4437,19 @@ describe('executeCardUpdateCore_ACU — SQL 错误反馈重试', () => {
     expect(result.success, result.error).toBe(true);
     expect(callCount).toBe(3);
 
-    // 第二次调用时应包含第一次的错误信息
-    expect(capturedTableDataTexts[1]).toContain('无法识别的目标表「missing」');
-    // 第三次调用时应包含第二次的错误信息（替换了第一次的）
-    expect(capturedTableDataTexts[2]).toContain('missing_col');
-    // 第三次不应包含第一次的错误信息（被替换了）
-    expect(capturedTableDataTexts[2]).not.toContain('no such table');
+    expect(capturedTableDataTexts).toEqual(['原始数据', '原始数据', '原始数据']);
+    expect(capturedRetryHistories[0]).toEqual([]);
+    expect(capturedRetryHistories[1]).toEqual([{
+      response: '<tableEdit>INSERT INTO missing (value) VALUES (1);</tableEdit>',
+      error: expect.stringContaining('无法识别的目标表「missing」'),
+    }]);
+    expect(capturedRetryHistories[2]).toEqual([
+      ...capturedRetryHistories[1],
+      {
+        response: '<tableEdit>INSERT INTO t (missing_col) VALUES (1);</tableEdit>',
+        error: expect.stringContaining('missing_col'),
+      },
+    ]);
 
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
@@ -5020,8 +5031,12 @@ describe('collectGroupFillResponse_ACU', () => {
       mockPrepareAIInput.mockResolvedValue({ tableDataText: '原始数据' });
       mockCallCustomOpenAI
         .mockRejectedValueOnce(new RetryableAiResponseError_ACU())
-        .mockImplementationOnce(async (dynamicContent: any) => {
+        .mockImplementationOnce(async (dynamicContent: any, _controller: any, options: any) => {
           expect(dynamicContent.tableDataText).not.toContain('SQL_ERROR_FEEDBACK');
+          expect(options.tableFillRetryHistory).toEqual([{
+            response: '',
+            error: expect.stringContaining('API响应格式不正确或内容为空'),
+          }]);
           return '<tableEdit>UPDATE test SET value = 1;</tableEdit>';
         });
 
@@ -5045,8 +5060,9 @@ describe('collectGroupFillResponse_ACU', () => {
       mockPrepareAIInput.mockResolvedValue({ tableDataText: '原始数据' });
       mockCallCustomOpenAI
         .mockRejectedValueOnce(Object.assign(new Error('API 请求超时'), { name: 'TimeoutError' }))
-        .mockImplementationOnce(async (dynamicContent: any) => {
+        .mockImplementationOnce(async (dynamicContent: any, _controller: any, options: any) => {
           expect(dynamicContent.tableDataText).not.toContain('SQL_ERROR_FEEDBACK');
+          expect(options.tableFillRetryHistory).toEqual([]);
           return '<tableEdit>UPDATE test SET value = 1;</tableEdit>';
         });
       const pending = collectGroupFillResponse_ACU(job);
@@ -5091,18 +5107,24 @@ describe('collectGroupFillResponse_ACU', () => {
     }
   });
 
-  it('SQL 模式下携带上轮错误反馈时，将 SQL_ERROR_FEEDBACK 注入到 prompt', async () => {
+  it('SQL 模式下将上轮回复与脱敏错误传给独立纠错历史', async () => {
     const job = createJob();
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     vi.mocked(isSqliteMode).mockReturnValue(true);
     mockPrepareAIInput.mockResolvedValue({ tableDataText: '原始数据' });
-    mockCallCustomOpenAI.mockImplementation(async (dynamicContent: any) => {
-      expect(dynamicContent.tableDataText).toContain('SQL_ERROR_FEEDBACK');
-      expect(dynamicContent.tableDataText).toContain('no such table');
+    mockCallCustomOpenAI.mockImplementation(async (dynamicContent: any, _controller: any, options: any) => {
+      expect(dynamicContent.tableDataText).toBe('原始数据');
+      expect(options.tableFillRetryHistory).toEqual([{
+        response: '<tableEdit>INSERT INTO missing VALUES (1);</tableEdit>',
+        error: 'no such table token=[REDACTED]',
+      }]);
       return '<tableEdit>INSERT INTO test VALUES (1);</tableEdit>';
     });
 
-    const result = await collectGroupFillResponse_ACU(job, { lastSqlError: 'no such table' });
+    const result = await collectGroupFillResponse_ACU(job, {
+      lastSqlError: 'no such table token=private-token',
+      lastAiResponse: '<tableEdit>INSERT INTO missing VALUES (1);</tableEdit>',
+    });
 
     expect(result.success).toBe(true);
     vi.mocked(isSqliteMode).mockReturnValue(false);
@@ -5125,9 +5147,12 @@ describe('collectGroupFillResponse_ACU', () => {
       mockPrepareAIInput.mockResolvedValue({ tableDataText: '原始数据' });
       mockCallCustomOpenAI
         .mockResolvedValueOnce('<tableEdit>CREATE TABLE leaked (id INTEGER);</tableEdit>')
-        .mockImplementationOnce(async (dynamicContent: any) => {
-          expect(dynamicContent.tableDataText).toContain('SQL_ERROR_FEEDBACK');
-          expect(dynamicContent.tableDataText).toContain('SQLite 填表仅允许 INSERT、REPLACE、UPDATE、DELETE');
+        .mockImplementationOnce(async (dynamicContent: any, _controller: any, options: any) => {
+          expect(dynamicContent.tableDataText).toBe('原始数据');
+          expect(options.tableFillRetryHistory).toEqual([{
+            response: '<tableEdit>CREATE TABLE leaked (id INTEGER);</tableEdit>',
+            error: expect.stringContaining('SQLite 填表仅允许 INSERT、REPLACE、UPDATE、DELETE'),
+          }]);
           return "<tableEdit>UPDATE inventory SET item_name = '药水' WHERE row_id = 1;</tableEdit>";
         });
 
@@ -7275,9 +7300,11 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     } as any);
     mockCurrentJsonTableData = JSON.parse(JSON.stringify(vi.mocked(parseTableTemplateJson_ACU).getMockImplementation()?.() || {}));
     const capturedTableDataTexts: string[] = [];
+    const capturedRetryHistories: any[][] = [];
     mockPrepareAIInput.mockImplementation(async () => ({ tableDataText: '模拟数据' }));
-    mockCallCustomOpenAI.mockImplementation(async (dynamicContent: any) => {
+    mockCallCustomOpenAI.mockImplementation(async (dynamicContent: any, _controller: any, options: any) => {
       capturedTableDataTexts.push(dynamicContent.tableDataText);
+      capturedRetryHistories.push(structuredClone(options.tableFillRetryHistory));
       if (mockCallCustomOpenAI.mock.calls.length === 1) return "<tableEdit>INSERT INTO inventory (value) VALUES ('sql-a');</tableEdit>";
       if (mockCallCustomOpenAI.mock.calls.length === 2) return '<tableEdit>insertRow(1,{"0":"dsl-b"})</tableEdit>';
       return "<tableEdit>INSERT INTO quest_log (value) VALUES ('sql-b');</tableEdit>";
@@ -7291,8 +7318,13 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     expect(result.success).toBe(true);
     expect(result.failedGroups).toEqual([]);
     expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(3);
-    expect(capturedTableDataTexts[2]).toContain('UNIFIED_GROUP_ERROR_FEEDBACK');
-    expect(capturedTableDataTexts[2]).toContain('未返回 SQL tableEdit');
+    expect(capturedTableDataTexts).toEqual(['模拟数据', '模拟数据', '模拟数据']);
+    expect(capturedRetryHistories[0]).toEqual([]);
+    expect(capturedRetryHistories[1]).toEqual([]);
+    expect(capturedRetryHistories[2]).toEqual([{
+      response: '<tableEdit>insertRow(1,{"0":"dsl-b"})</tableEdit>',
+      error: expect.stringContaining('未返回 SQL tableEdit'),
+    }]);
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
     expect(mockParseAndApplyTableEditsToData).not.toHaveBeenCalled();
     vi.mocked(isSqliteMode).mockReturnValue(false);

@@ -7,6 +7,7 @@
 import { currentChatFileIdentifier_ACU, isAutoUpdatingCard_ACU, pendingFinalGenerationGreenlights_ACU, wasStoppedByUser_ACU, _set_isAutoUpdatingCard_ACU, _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU } from '../runtime/state-manager';
 import { readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import { callCustomOpenAI_ACU, RetryableAiResponseError_ACU } from '../ai/prompt-builder';
+import type { TableFillRetryTurn_ACU } from '../ai/prompt-builder/table-fill-retry';
 import { clearManualRefillSheetDataInRange_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, ensureManualCatchUpAnchorBeforeTarget_ACU, ensureV2BoundaryCheckpointForRetainedBuffer_ACU, establishManualRefillTemplateRoot_ACU, getChatArray_ACU, shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU } from '../chat/chat-service';
 import { coreApisAreReady_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
 import { resolveManualUpdateBatchSize_ACU, resolveManualUpdateContextDepth_ACU } from './manual-update-settings';
@@ -480,6 +481,8 @@ export interface GroupFillResponse_ACU {
     attempt: number;
     job: GroupFillJob_ACU;
     aiResponse?: string;
+    rawAiResponse?: string;
+    retryHistory?: TableFillRetryTurn_ACU[];
     tableEditText?: string;
     error?: string;
     rawError?: string;
@@ -624,8 +627,6 @@ interface PlannedGroupedRuntimeJob_ACU {
     updateMode: string;
 }
 
-const SQL_ERROR_MARKER_ACU = '\n\n<!-- SQL_ERROR_FEEDBACK -->\n';
-const UNIFIED_GROUP_ERROR_MARKER_ACU = '\n\n<!-- UNIFIED_GROUP_ERROR_FEEDBACK -->\n';
 const MAX_RETRY_FEEDBACK_LENGTH_ACU = 500;
 const MAX_WARN_ERROR_LENGTH_ACU = 800;
 
@@ -1294,7 +1295,12 @@ export function resolveUpdateMode_ACU(mode: string): string {
 
 export async function collectGroupFillResponse_ACU(
     job: GroupFillJob_ACU,
-    feedback?: { lastSqlError?: string | null; lastUnifiedError?: string | null },
+    feedback?: {
+        lastSqlError?: string | null;
+        lastUnifiedError?: string | null;
+        lastAiResponse?: string;
+        retryHistory?: readonly TableFillRetryTurn_ACU[];
+    },
     abortController: AbortController | null = new AbortController(),
     options: {
         onProgress?: (event: CardUpdateProgressEvent) => void;
@@ -1392,6 +1398,13 @@ export async function collectGroupFillResponse_ACU(
     }
     let lastErrorMessage = 'AI响应中未找到完整有效的 <tableEdit> 标签';
     let lastErrorCategory: TableUpdateCommitErrorCategory_ACU = 'model';
+    const retryHistory: TableFillRetryTurn_ACU[] = [...(feedback?.retryHistory || [])];
+    const previousError = feedback?.lastUnifiedError || (isSqliteMode() ? feedback?.lastSqlError : null);
+    if (previousError) retryHistory.push({
+        response: feedback?.lastAiResponse || '',
+        error: sanitizeRetryFeedback_ACU(previousError),
+    });
+    let lastAiResponse = '';
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         if (isStopped()) {
@@ -1401,21 +1414,7 @@ export async function collectGroupFillResponse_ACU(
 
         options.onProgress?.({ phase: 'calling_ai', attempt, maxRetries });
 
-        if (feedback?.lastSqlError && isSqliteMode()) {
-            const markerIndex = dynamicContent.tableDataText.indexOf(SQL_ERROR_MARKER_ACU);
-            if (markerIndex !== -1) {
-                dynamicContent.tableDataText = dynamicContent.tableDataText.substring(0, markerIndex);
-            }
-            dynamicContent.tableDataText += `${SQL_ERROR_MARKER_ACU}[SQL执行错误，请修正后重新输出]\n错误信息: ${sanitizeRetryFeedback_ACU(feedback.lastSqlError)}`;
-        }
-        if (feedback?.lastUnifiedError) {
-            const markerIndex = dynamicContent.tableDataText.indexOf(UNIFIED_GROUP_ERROR_MARKER_ACU);
-            if (markerIndex !== -1) {
-                dynamicContent.tableDataText = dynamicContent.tableDataText.substring(0, markerIndex);
-            }
-            dynamicContent.tableDataText += `${UNIFIED_GROUP_ERROR_MARKER_ACU}[统一提交失败，请修正后重新输出]\n错误信息: ${sanitizeRetryFeedback_ACU(feedback.lastUnifiedError)}`;
-        }
-
+        lastAiResponse = '';
         try {
             const aiWaitSpan = startRuntimePerformanceSpan_ACU('table-fill-ai-wait', {
                 runId: job.performanceRunId,
@@ -1435,6 +1434,8 @@ export async function collectGroupFillResponse_ACU(
                 aiResponse = await callCustomOpenAI_ACU(dynamicContent, effectiveAbortController, {
                     ...(job.requestOptions || {}),
                     attempt,
+                    tableFillRetryHistory: [...retryHistory],
+                    onTableFillResponse: (response: string) => { lastAiResponse = response; },
                     isolatedSnapshot: job.isolatedSnapshot,
                     assertCurrent: options.assertCurrent,
                     tableData: job.baseSnapshot,
@@ -1443,6 +1444,7 @@ export async function collectGroupFillResponse_ACU(
                     // 工具提交不含正文思考，回复长度阈值只约束正文提取兜底。
                     onTableFillToolSubmitted: () => { submittedViaTool = true; },
                 });
+                if (!lastAiResponse) lastAiResponse = aiResponse;
                 aiWaitSpan.end({ success: true });
             } catch (error) {
                 aiWaitSpan.end({ success: false });
@@ -1494,8 +1496,12 @@ export async function collectGroupFillResponse_ACU(
             }
 
             options.assertCurrent?.();
-            return { job, success: true, attempt, aiResponse: normalizedAiResponse, tableEditText };
+            return {
+                job, success: true, attempt, aiResponse: normalizedAiResponse, tableEditText,
+                rawAiResponse: lastAiResponse, retryHistory,
+            };
         } catch (error: any) {
+            if (!lastAiResponse && typeof error?.rawResponse === 'string') lastAiResponse = error.rawResponse;
             lastErrorMessage = error?.message || '未知错误';
             lastErrorCategory = error instanceof ModelOutputRetryError_ACU
                 || error instanceof RetryableAiResponseError_ACU
@@ -1518,10 +1524,11 @@ export async function collectGroupFillResponse_ACU(
                 };
             }
             if (attempt < maxRetries) {
-                if (isSqliteMode() && error instanceof ModelOutputRetryError_ACU) {
-                    const markerIndex = dynamicContent.tableDataText.indexOf(SQL_ERROR_MARKER_ACU);
-                    if (markerIndex !== -1) dynamicContent.tableDataText = dynamicContent.tableDataText.substring(0, markerIndex);
-                    dynamicContent.tableDataText += `${SQL_ERROR_MARKER_ACU}[上次 SQL 输出无效，请修正后重新输出]\n错误信息: ${sanitizeRetryFeedback_ACU(lastErrorMessage)}`;
+                if (lastErrorCategory === 'model') {
+                    retryHistory.push({
+                        response: lastAiResponse,
+                        error: sanitizeRetryFeedback_ACU(lastErrorMessage),
+                    });
                 }
                 options.onProgress?.({ phase: 'retry', attempt, maxRetries, message: sanitizeRetryFeedback_ACU(lastErrorMessage, 50) });
                 await new Promise(resolve => setTimeout(resolve, 5000));
@@ -1537,6 +1544,8 @@ export async function collectGroupFillResponse_ACU(
         error: `填表在 ${maxRetries} 次尝试后仍失败: ${safeError}`,
         rawError: safeError,
         errorCategory: lastErrorCategory,
+        rawAiResponse: lastAiResponse,
+        retryHistory,
     };
 }
 
@@ -2500,6 +2509,7 @@ async function processGroupedRuntimeChunkCore_ACU(
         const bucket = orderedBuckets[bucketIndex];
         const maxBucketRetries = Math.max(1, Number(settings_ACU.tableMaxRetries) || 3);
         let retryUnifiedError: string | null = null;
+        const previousResponses = new Map<string, GroupFillResponse_ACU>();
         let bucketSucceeded = false;
         // 阶段 G1：bucket 重试循环外持有 request-scoped replay evidence。
         // 同 bucket 的各次 attempt 共享同一 boundary（mergeBaseMaxMessageIndex），
@@ -2694,10 +2704,13 @@ async function processGroupedRuntimeChunkCore_ACU(
                 try { bucketReadContext.dispose(); } catch { /* dispose 幂等 */ }
             };
             try {
-            const collectFeedback = retryUnifiedError ? { lastUnifiedError: retryUnifiedError } : undefined;
             const settledResponses = await Promise.allSettled(jobs.map(job => collectGroupFillResponse_ACU(
                     job,
-                    collectFeedback,
+                    retryUnifiedError ? {
+                        lastUnifiedError: retryUnifiedError,
+                        lastAiResponse: previousResponses.get(job.groupKey)?.rawAiResponse || previousResponses.get(job.groupKey)?.aiResponse,
+                        retryHistory: previousResponses.get(job.groupKey)?.retryHistory,
+                    } : undefined,
                     options.abortController,
                     {
                         onProgress: event => emitBucketProgress(bucketIndex, event),
@@ -2745,7 +2758,11 @@ async function processGroupedRuntimeChunkCore_ACU(
                     const retryJobs = nonSqlResponses.map(response => response.job);
                     const retrySettled = await Promise.allSettled(retryJobs.map(job => collectGroupFillResponse_ACU(
                         job,
-                        { lastUnifiedError: formatError },
+                        {
+                            lastUnifiedError: formatError,
+                            lastAiResponse: responseByGroupKey.get(job.groupKey)?.rawAiResponse || responseByGroupKey.get(job.groupKey)?.aiResponse,
+                            retryHistory: responseByGroupKey.get(job.groupKey)?.retryHistory,
+                        },
                         options.abortController,
                         {
                             onProgress: event => emitBucketProgress(bucketIndex, event),
@@ -2835,6 +2852,7 @@ async function processGroupedRuntimeChunkCore_ACU(
                 break;
             }
             retryUnifiedError = safeApplyError;
+            responses.forEach(response => previousResponses.set(response.job.groupKey, response));
             if (bucketAttempt >= maxBucketRetries) {
                 jobs.forEach(job => failedGroups.add(job.groupKey));
                 firstError = firstError || `统一提交在 ${maxBucketRetries} 次尝试后仍失败: ${retryUnifiedError}`;
@@ -3232,10 +3250,12 @@ export async function executeCardUpdateCore_ACU(
             };
             }
         }
-        let lastSqlError: string | null = null;
+        const retryHistory: TableFillRetryTurn_ACU[] = [];
+        let lastAiResponse = '';
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             assertTableFillRequestCurrent_ACU(requestGuard, saveTargetIndex, getChatArray_ACU());
+            lastAiResponse = '';
             const attemptReadContext = createLorebookReadContext_ACU({ source: 'form_fill_legacy', isActive: () => !effectiveAbortController?.signal.aborted, isAborted: () => effectiveAbortController?.signal.aborted === true });
             try {
                 let rawBaseSnapshot: Record<string, any> = getRuntimeTableDataSnapshot_ACU(progressContext?.batchBaseSnapshot || null) || {};
@@ -3262,11 +3282,12 @@ export async function executeCardUpdateCore_ACU(
                 };
                 const collectResult = await collectGroupFillResponse_ACU(
                     currentJob,
-                    { lastSqlError },
+                    { retryHistory },
                     effectiveAbortController,
                     { onProgress: emitProgress, maxRetriesOverride: 1, worldbookReadContext: attemptReadContext },
                 );
 
+                lastAiResponse = collectResult.rawAiResponse || collectResult.aiResponse || '';
                 if (collectResult.aborted) {
                     return { success: false, modifiedKeys: [], aborted: true };
                 }
@@ -3605,7 +3626,7 @@ export async function executeCardUpdateCore_ACU(
                 if (errorCategory !== 'model') {
                     return { success: false, modifiedKeys: [], error: safeError, errorCategory };
                 }
-                if (isSqliteMode()) lastSqlError = safeError;
+                retryHistory.push({ response: lastAiResponse, error: sanitizeRetryFeedback_ACU(safeError) });
 
                 if (attempt < maxRetries) {
                     const waitTime = 5000;

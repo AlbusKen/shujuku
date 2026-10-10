@@ -2454,7 +2454,7 @@ describe('runPlotTasksRuntime_ACU', () => {
     { isolated: true, acceptedTag: 'plot' },
     { isolated: false, acceptedTag: 'memory' },
     { isolated: true, acceptedTag: 'memory' },
-  ])('重试只说明最新原因，任一配置标签闭合即通过（隔离调用=$isolated，标签=$acceptedTag）', async ({ isolated, acceptedTag }) => {
+  ])('重试直接重发原请求，任一配置标签闭合即通过（隔离调用=$isolated，标签=$acceptedTag）', async ({ isolated, acceptedTag }) => {
     const plotSettings = {
       tasks: [{
         id: 'tag-retry', name: '标签重试任务', stage: 1, order: 1, maxRetries: 3, minLength: 100,
@@ -2487,20 +2487,10 @@ describe('runPlotTasksRuntime_ACU', () => {
     const retryMessages = mockCallApiWithPlotPreset.mock.calls[1][0];
     const finalMessages = mockCallApiWithPlotPreset.mock.calls[2][0];
     expect(firstMessages).toEqual([{ role: 'user', content: 'tag-retry-prompt' }]);
-    expect(retryMessages.slice(0, -1)).toEqual(firstMessages);
-    expect(retryMessages.at(-1)).toMatchObject({ role: 'system' });
-    expect(retryMessages.at(-1).content).toContain('第 2/3 次尝试');
-    expect(retryMessages.at(-1).content).toContain(`实际 ${shortResponse.length}，最低要求 100`);
-    expect(retryMessages.at(-1).content).toContain('不要编造记忆或事实');
-    expect(retryMessages.at(-1).content).not.toContain('未提取到');
-    expect(finalMessages.slice(0, -1)).toEqual(firstMessages);
-    expect(finalMessages).toHaveLength(2);
-    expect(finalMessages.at(-1).content).toContain('第 3/3 次尝试');
-    expect(finalMessages.at(-1).content).toContain('未提取到任何完整闭合的配置标签（可选：plot、unused、memory）');
-    expect(finalMessages.at(-1).content).toContain('至少完整闭合一对配置标签');
-    expect(finalMessages.at(-1).content).toContain('无需补齐所有配置标签');
-    expect(finalMessages.at(-1).content).not.toContain(`实际 ${shortResponse.length}，最低要求 100`);
-    expect(finalMessages.at(-1).content).not.toContain('回复长度不足');
+    expect(retryMessages).toBe(firstMessages);
+    expect(retryMessages).toEqual(firstMessages);
+    expect(finalMessages).toBe(firstMessages);
+    expect(finalMessages).toEqual(firstMessages);
     expect(mockExtractPlotTagsFromResponse).toHaveBeenCalledTimes(2);
     expect(mockAbortableDelay).toHaveBeenCalledTimes(2);
     expect(result.apiRetriesExhausted).not.toBe(true);
@@ -2546,13 +2536,8 @@ describe('runPlotTasksRuntime_ACU', () => {
     expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(2);
     const retryMessages = mockCallApiWithPlotPreset.mock.calls[1][0];
     expect(mockCallApiWithPlotPreset.mock.calls[0][0]).toHaveLength(1);
-    expect(retryMessages).toHaveLength(2);
-    expect(retryMessages.at(-1)).toMatchObject({ role: 'system' });
-    expect(retryMessages.at(-1).content).toContain('未提取到任何完整闭合的配置标签（可选：plot）');
-    expect(retryMessages.at(-1).content).toContain('至少完整闭合一对配置标签');
-    expect(retryMessages.at(-1).content).toContain('<plot></plot>');
-    expect(retryMessages.at(-1).content).toContain('保留对应的闭合空标签');
-    expect(retryMessages.at(-1).content).toContain('不要只补写残片');
+    expect(retryMessages).toBe(mockCallApiWithPlotPreset.mock.calls[0][0]);
+    expect(retryMessages).toEqual(mockCallApiWithPlotPreset.mock.calls[0][0]);
     expect(mockCallApiWithPlotPreset.mock.calls.some((call: any[]) => call[0][0].content === 'stage-2-continue')).toBe(false);
     expect(mockSetTempPlotToSave).not.toHaveBeenCalled();
   });
@@ -2601,7 +2586,7 @@ describe('runPlotTasksRuntime_ACU', () => {
     { kind: 'api', error: { name: 'AbortError' }, expected: '被上游中断' },
     { kind: 'api', error: { name: 'TypeError' }, expected: '网络或传输异常' },
     { kind: 'api', error: {}, expected: '具体原因尚未确认' },
-  ])('未配置标签时按长度验收，重试区分 $kind：$expected', async ({ kind, error, expected }) => {
+  ])('未配置标签时按长度验收，$kind 重试原请求且诊断不进入消息：$expected', async ({ kind, error, expected }) => {
     const plotSettings = {
       tasks: [{
         id: 'no-tag-config', name: '无标签配置任务', stage: 1, order: 1, maxRetries: 2, minLength: 2,
@@ -2637,15 +2622,11 @@ describe('runPlotTasksRuntime_ACU', () => {
     expect(firstMessages).toEqual([{ role: 'user', content: 'no-tag-config-prompt' }]);
     if (kind !== 'success') {
       const retryMessages = mockCallApiWithPlotPreset.mock.calls[1][0];
-      expect(retryMessages.slice(0, -1)).toEqual(firstMessages);
-      expect(retryMessages).toHaveLength(2);
-      expect(retryMessages.at(-1)).toMatchObject({ role: 'system' });
-      expect(retryMessages.at(-1).content).toContain('失败原因：');
-      expect(retryMessages.at(-1).content).toContain(expected);
-      expect(retryMessages.at(-1).content).toContain(kind === 'api' ? '处理要求：' : '修正要求：');
+      expect(retryMessages).toBe(firstMessages);
+      expect(retryMessages).toEqual(firstMessages);
       expect(JSON.stringify(retryMessages)).not.toContain(sensitiveText);
       expect(JSON.stringify(mockLogWarn.mock.calls)).not.toContain(sensitiveText);
-      if (kind === 'api') expect(retryMessages.at(-1).content).toContain('不是回复内容验收失败');
+      if (kind === 'api') expect(JSON.stringify(mockLogWarn.mock.calls)).toContain(expected);
       expect(mockAbortableDelay).toHaveBeenCalledTimes(1);
     }
   });
