@@ -45,6 +45,7 @@ import {
   recordLastUserSend_ACU,
   recordGenerationContext_ACU,
   isQuietLikeGeneration_ACU,
+  hasActiveContentGeneration_ACU,
   isRecentUserSend_ACU,
   shouldProcessPlotForGeneration_ACU,
   consumeGenerationContextForEnded_ACU,
@@ -204,6 +205,33 @@ describe('recordGenerationContext_ACU', () => {
   });
 
 });
+
+describe('hasActiveContentGeneration_ACU', () => {
+  it.each(['normal', 'regenerate', 'continue', 'swipe'])('%s 未结束时阻止自动完成任务，结束后解除', type => {
+    recordGenerationContext_ACU(type, {}, false);
+    expect(hasActiveContentGeneration_ACU()).toBe(true);
+    consumeGenerationContextForEnded_ACU();
+    expect(hasActiveContentGeneration_ACU()).toBe(false);
+  });
+
+  it.each([
+    ['quiet', {}, false], ['normal', { quiet_prompt: '后台提示' }, false],
+    ['normal', {}, true], ['normal', { automatic_trigger: true }, false],
+  ])('后台生成 %s/%j/dryRun=%s 不占用正文完成门控', (type, params, dryRun) => {
+    recordGenerationContext_ACU(type, params, dryRun);
+    expect(hasActiveContentGeneration_ACU()).toBe(false);
+  });
+
+  it('并行后台请求结束不解除仍在生成的正文门控', () => {
+    recordGenerationContext_ACU('regenerate', {}, false);
+    recordGenerationContext_ACU('quiet', {}, false);
+    consumeGenerationContextForEnded_ACU();
+    expect(hasActiveContentGeneration_ACU()).toBe(true);
+    consumeGenerationContextForEnded_ACU();
+    expect(hasActiveContentGeneration_ACU()).toBe(false);
+  });
+});
+
 
 // ═══ isQuietLikeGeneration_ACU ═══
 describe('isQuietLikeGeneration_ACU', () => {

@@ -139,6 +139,13 @@ export function isQuietLikeGeneration_ACU(type: any, params: any) {
   return false;
 }
 
+/** 自动完成任务只等待真实正文生成；后台请求不占用正文完成门控。 */
+export function hasActiveContentGeneration_ACU(): boolean {
+  return generationGate_ACU.activeGenerations.some(context => !context.dryRun
+    && !isQuietLikeGeneration_ACU(context.type, context.params)
+    && !context.params?.automatic_trigger);
+}
+
 export function isRecentUserSend_ACU() {
   if (!generationGate_ACU.lastUserMessageAt) return false;
   return (Date.now() - generationGate_ACU.lastUserMessageAt) <= USER_SEND_TRIGGER_TTL_MS_ACU;

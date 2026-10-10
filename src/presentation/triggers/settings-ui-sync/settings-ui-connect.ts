@@ -12,7 +12,7 @@ import { isExtensionMode, getHostWindow } from '../../../shared/runtime-env';
 import { getChatArray_ACU, saveChatToHost_ACU } from '../../../service/chat/chat-service';
 import { getConnectionManagerProfiles_ACU, fetchAvailableModels_ACU } from '../../../service/ai/ai-service';
 import { getCurrentCharacterFallback_ACU } from '../../../service/host/host-state-service';
-import { AI_MATERIALIZATION_MAX_RETRIES_ACU, AI_MATERIALIZATION_RETRY_DELAY_MS_ACU, NEW_MESSAGE_DEBOUNCE_DELAY_ACU, coreApisAreReady_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, generationGate_ACU, getCurrentIsolationKey_ACU, isQuietLikeGeneration_ACU, lastTotalAiMessages_ACU, settings_ACU , _set_coreApisAreReady_ACU, _set_lastTotalAiMessages_ACU} from '../../../service/runtime/state-manager';
+import { AI_MATERIALIZATION_MAX_RETRIES_ACU, AI_MATERIALIZATION_RETRY_DELAY_MS_ACU, NEW_MESSAGE_DEBOUNCE_DELAY_ACU, coreApisAreReady_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, hasActiveContentGeneration_ACU, lastTotalAiMessages_ACU, settings_ACU , _set_coreApisAreReady_ACU, _set_lastTotalAiMessages_ACU} from '../../../service/runtime/state-manager';
 import { $popupInstance_ACU, $customApiUrlInput_ACU, $customApiKeyInput_ACU, $customApiModelInput_ACU, $customApiModelSelect_ACU, $maxTokensInput_ACU, $temperatureInput_ACU, $apiStatusDisplay_ACU, $charCardPromptSegmentsContainer_ACU, $autoUpdateThresholdInput_ACU, $autoUpdateTokenThresholdInput_ACU, $autoUpdateFrequencyInput_ACU, $updateBatchSizeInput_ACU, $maxConcurrentGroupsInput_ACU, $skipUpdateFloorsInput_ACU, $retainRecentLayersInput_ACU, $tableMaxRetriesInput_ACU, $manualExtraHintCheckbox_ACU } from '../../state/ui-refs';
 import { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } from '../../../service/summary/merge-logic';
 import { processUpdates_ACU } from '../update-process';
@@ -226,12 +226,6 @@ import { buildTavernHelperCompat_ACU, formatHostCapabilities_ACU } from '../../.
     ++contentOptimizationEventEpoch_ACU;
     clearTimeout(contentOptimizationDebounceTimer_ACU);
     _set_contentOptimizationDebounceTimer_ACU(null);
-  }
-
-  function hasActiveContentGeneration_ACU(): boolean {
-    return generationGate_ACU.activeGenerations.some(context => !context.dryRun
-      && !isQuietLikeGeneration_ACU(context.type, context.params)
-      && !context.params?.automatic_trigger);
   }
 
   // 正文优化独立处理消息定位与物化；不参与自动填表派发。

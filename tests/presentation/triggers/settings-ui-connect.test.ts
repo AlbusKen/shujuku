@@ -15,6 +15,7 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   AI_MATERIALIZATION_RETRY_DELAY_MS_ACU: 100,
   generationGate_ACU: { activeGenerations: [] },
   isQuietLikeGeneration_ACU: vi.fn(() => false),
+  hasActiveContentGeneration_ACU: vi.fn(() => false),
 }));
 
 afterEach(() => {

@@ -12,7 +12,7 @@ import { attemptToLoadCoreApis_ACU } from '../triggers/settings-ui-sync/settings
 import { formatHostCapabilities_ACU, getLastHostCapabilities_ACU } from '../../shared/host-compat/tavern-helper-compat';
 import { ensureInitialSeedCheckpoint_ACU, handleChatCompletionReady_ACU, loadPresetAndCleanCharacterData_ACU } from '../../service/runtime/helpers-remaining';
 import { SillyTavern_API_ACU, type ACUMessage } from '../../shared/host-api';
-import { consumeGenerationContextForEnded_ACU, currentChatFileIdentifier_ACU, discardLatestGenerationContext_ACU, generationGate_ACU, getCurrentIsolationKey_ACU, markUserSendIntent_ACU, isProcessing_Plot_ACU, isQuietLikeGeneration_ACU, isRecentUserSendIntent_ACU, loopState_ACU, recordGenerationContext_ACU, recordLastUserSend_ACU, settings_ACU, shouldProcessPlotForGeneration_ACU, shouldProcessSummaryVectorIndexForGeneration_ACU, _set_allChatMessages_ACU, _set_currentChatFileIdentifier_ACU, _set_currentJsonTableData_ACU, _set_independentTableStates_ACU, _set_lastTotalAiMessages_ACU, _set_tempPlotToSave_ACU, _set_wasStoppedByUser_ACU} from '../../service/runtime/state-manager';
+import { consumeGenerationContextForEnded_ACU, currentChatFileIdentifier_ACU, discardLatestGenerationContext_ACU, generationGate_ACU, getCurrentIsolationKey_ACU, hasActiveContentGeneration_ACU, markUserSendIntent_ACU, isProcessing_Plot_ACU, isQuietLikeGeneration_ACU, isRecentUserSendIntent_ACU, loopState_ACU, recordGenerationContext_ACU, recordLastUserSend_ACU, settings_ACU, shouldProcessPlotForGeneration_ACU, shouldProcessSummaryVectorIndexForGeneration_ACU, _set_allChatMessages_ACU, _set_currentChatFileIdentifier_ACU, _set_currentJsonTableData_ACU, _set_independentTableStates_ACU, _set_lastTotalAiMessages_ACU, _set_tempPlotToSave_ACU, _set_wasStoppedByUser_ACU} from '../../service/runtime/state-manager';
 import { applyTemplateScopeForCurrentChat_ACU, loadSettings_ACU } from '../../service/settings/settings-service';
 import { resetScriptStateForNewChat_ACU } from '../../service/worldbook/injection-engine';
 import { resetPlotAgentWorldbookSessionSnapshot_ACU } from '../../service/agent/agent-worldbook-takeover';
@@ -33,7 +33,7 @@ import { flushPlotPendingSave_ACU } from '../../service/runtime/plot-runtime/plo
 import { refreshMessageBlock_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { beginHostGenerationUi_ACU, getSendTextareaValue_ACU, setSendTextareaValue_ACU, type HostInputWriteFailure_ACU } from '../../shared/host-input';
 import { cancelPendingContentOptimizationEvent_ACU, captureContentOptimizationEventScope_ACU, handleContentOptimizationEvent_ACU } from '../triggers/settings-ui-sync/settings-ui-connect';
-import { triggerAutomaticUpdateIfNeeded_ACU } from '../triggers/settings-ui-sync/settings-ui-trigger';
+import { cancelPendingAutoFillEvent_ACU, captureAutoFillEventScope_ACU, triggerAutomaticUpdateIfNeeded_ACU } from '../triggers/settings-ui-sync/settings-ui-trigger';
 import { abortActivePlotPlanning_ACU, runOptimizationLogicWithUI_ACU } from '../components/plot-planning-ui';
 import { enterLoopRetryFlow_ACU } from '../triggers/auto-loop';
 import { DEFAULT_PLOT_SETTINGS_ACU } from '../../shared/defaults-json.js';
@@ -668,6 +668,7 @@ export   function mainInitialize_ACU() {
               // quiet/dryRun/后台请求不会重写正文，不取消普通回复的优化。
               if (!dryRun && !quietLike && !params?.automatic_trigger) {
                 cancelPendingContentOptimizationEvent_ACU();
+                cancelPendingAutoFillEvent_ACU();
               }
               const context = recordGenerationContext_ACU(type, params, dryRun);
               autoFillGenerationScopes.set(context, captureAutoFillChatScope());
@@ -689,6 +690,7 @@ export   function mainInitialize_ACU() {
           SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.GENERATION_STOPPED, () => {
             try {
               cancelPendingContentOptimizationEvent_ACU();
+              cancelPendingAutoFillEvent_ACU();
               const discarded = discardLatestGenerationContext_ACU();
               if (discarded) autoFillGenerationScopes.delete(discarded);
               // 被中止的生成不会再有 GENERATION_ENDED；通知桥把等待中的续写轮转为可重试，避免卡死。
@@ -701,6 +703,7 @@ export   function mainInitialize_ACU() {
             const onGenerationEnded = (message_id: any) => {
               receiver.receive('GENERATION_ENDED', dispatch => {
                 const isOptimizationCurrent = captureContentOptimizationEventScope_ACU();
+                const isAutoFillEventCurrent = captureAutoFillEventScope_ACU();
                 const chatAtCapture = SillyTavern_API_ACU.chat;
                 const chatKey = currentChatFileIdentifier_ACU;
                 const isolationKey = getCurrentIsolationKey_ACU();
@@ -712,7 +715,7 @@ export   function mainInitialize_ACU() {
                 if (generationContext) autoFillGenerationScopes.delete(generationContext);
                 // 每个信号独立登记；仅自己的后台处理受原聊天作用域约束。
                 dispatch('auto-fill', () => {
-                  if (!isAutoFillCurrent()) return;
+                  if (!isAutoFillCurrent() || !isAutoFillEventCurrent() || hasActiveContentGeneration_ACU()) return;
                   // 酒馆的停止按钮收尾也会派发 ended，不等价于一次新的正文生成。
                   if (!trackedGeneration) {
                     logAutoFillSkip_ACU('untracked_generation', {
@@ -730,6 +733,7 @@ export   function mainInitialize_ACU() {
                   return triggerAutomaticUpdateIfNeeded_ACU(undefined, {
                     eventType: 'GENERATION_ENDED', messageId: message_id, chatKey, isolationKey,
                     isCurrentChat: isAutoFillCurrent,
+                    isCurrentEvent: isAutoFillEventCurrent,
                   });
                 });
                 const internalRequest = consumeContinuationInternalAiGenerationEnded_ACU(generationContext?.seq);
@@ -841,13 +845,14 @@ export   function mainInitialize_ACU() {
           SillyTavern_API_ACU.eventSource.on(eventType, (messageId: any, messageType?: string) => {
             receiver.receive(evName, dispatch => {
               const isOptimizationCurrent = captureContentOptimizationEventScope_ACU();
+              const isAutoFillEventCurrent = captureAutoFillEventScope_ACU();
               const chatAtCapture = SillyTavern_API_ACU.chat;
               const chatKey = currentChatFileIdentifier_ACU;
               const isolationKey = getCurrentIsolationKey_ACU();
               const isAutoFillCurrent = captureAutoFillChatScope();
               // 开场白不是一次新生成，不安排自动填表或正文优化。
               dispatch('auto-fill', () => {
-                if (!isAutoFillCurrent()) return;
+                if (!isAutoFillCurrent() || !isAutoFillEventCurrent() || hasActiveContentGeneration_ACU()) return;
                 if (messageType === 'first_message') {
                   logAutoFillSkip_ACU('initial_chat_message', { eventType: evName, messageId });
                   return;
@@ -859,6 +864,7 @@ export   function mainInitialize_ACU() {
                 return triggerAutomaticUpdateIfNeeded_ACU(undefined, {
                   eventType: evName, messageId, chatKey, isolationKey,
                   isCurrentChat: isAutoFillCurrent,
+                  isCurrentEvent: isAutoFillEventCurrent,
                 });
               });
               const eventMessageId = typeof messageId === 'number' && Number.isInteger(messageId)
@@ -1212,6 +1218,9 @@ export   function mainInitialize_ACU() {
         chatModificationEvents.forEach(evName => {
             if (SillyTavern_API_ACU.eventTypes[evName as keyof typeof SillyTavern_API_ACU.eventTypes]) {
                 SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes[evName as keyof typeof SillyTavern_API_ACU.eventTypes], async (data: any) => {
+                    // 楼层删除或切换版本使旧任务的楼层锚点失效；不清除当前生成资格。
+                    cancelPendingContentOptimizationEvent_ACU();
+                    cancelPendingAutoFillEvent_ACU();
                     logDebug_ACU(`ACU ${evName} event detected. Triggering data reload and merge from chat history.`);
                     scheduleChatMutationRefresh_ACU(evName === 'MESSAGE_DELETED' ? 'chat_modified_deleted' : 'chat_modified_swiped');
                 });

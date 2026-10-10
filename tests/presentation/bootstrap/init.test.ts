@@ -6,6 +6,7 @@ import type { HostInputWriteFailureReporter_ACU, HostInputWriteOptions_ACU } fro
 const m = vi.hoisted(() => ({
   chatChanged: undefined as undefined | ((name: string) => Promise<void>),
   chatMutationHandler: undefined as undefined | ((data: any) => Promise<void>),
+  chatMutationHandlers: new Map<string, (data: any) => Promise<void>>(),
   generationStarted: undefined as undefined | ((type: any, params: any, dryRun: any) => void),
   generationEnded: undefined as undefined | ((messageId: any) => void),
   generationStopped: undefined as undefined | (() => void),
@@ -42,6 +43,8 @@ const m = vi.hoisted(() => ({
   handleNewMessage: vi.fn(),
   cancelPendingOptimization: vi.fn(),
   optimizationEventEpoch: 0,
+  cancelPendingAutoFill: vi.fn(),
+  autoFillEventEpoch: 0,
   generationStoppedHandlers: new Set<() => void>(),
   bindInternalGeneration: vi.fn(),
   consumeInternalGeneration: vi.fn(() => null),
@@ -75,11 +78,21 @@ vi.mock('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect
     return () => epoch === m.optimizationEventEpoch;
   },
 }));
-vi.mock('../../../src/presentation/triggers/settings-ui-sync/settings-ui-trigger', () => ({ triggerAutomaticUpdateIfNeeded_ACU: (...args: any[]) => m.autoUpdate(...args) }));
+vi.mock('../../../src/presentation/triggers/settings-ui-sync/settings-ui-trigger', () => ({
+  triggerAutomaticUpdateIfNeeded_ACU: (...args: any[]) => m.autoUpdate(...args),
+  cancelPendingAutoFillEvent_ACU: () => { ++m.autoFillEventEpoch; m.cancelPendingAutoFill(); },
+  captureAutoFillEventScope_ACU: () => {
+    const epoch = m.autoFillEventEpoch;
+    return () => epoch === m.autoFillEventEpoch;
+  },
+}));
 vi.mock('../../../src/service/runtime/helpers-remaining', () => ({ ensureInitialSeedCheckpoint_ACU: m.ensureSeed, handleChatCompletionReady_ACU: vi.fn(), loadPresetAndCleanCharacterData_ACU: m.loadPreset }));
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   chatMutationDebounceTimer_ACU: null, _set_chatMutationDebounceTimer_ACU: m.setChatMutationTimer, _set_wasStoppedByUser_ACU: vi.fn(), generationGate_ACU: m.gate,
-  get currentChatFileIdentifier_ACU() { return m.currentChatKey; }, currentJsonTableData_ACU: null, getCurrentIsolationKey_ACU: () => 'test-isolation', discardLatestGenerationContext_ACU: vi.fn(), markUserSendIntent_ACU: vi.fn(), get isProcessing_Plot_ACU() { return m.processingPlot; }, isQuietLikeGeneration_ACU: (...args: any[]) => m.isQuiet(...args), isRecentUserSendIntent_ACU: vi.fn(), loopState_ACU: { isLooping: false }, recordGenerationContext_ACU: (...args: any[]) => m.recordGeneration(...args), recordLastUserSend_ACU: vi.fn(), settings_ACU: m.settings, consumeGenerationContextForEnded_ACU: () => m.consumeGeneration(), shouldProcessPlotForGeneration_ACU: (...args: any[]) => m.shouldProcessPlot(...args), shouldProcessSummaryVectorIndexForGeneration_ACU: (...args: any[]) => m.shouldProcessSummary(...args),
+  hasActiveContentGeneration_ACU: () => m.gate.activeGenerations.some(context => !context.dryRun
+    && context.type !== 'quiet' && !context.params?.quiet_prompt?.trim()
+    && !context.params?.automatic_trigger),
+  get currentChatFileIdentifier_ACU() { return m.currentChatKey; }, currentJsonTableData_ACU: null, getCurrentIsolationKey_ACU: () => 'test-isolation', discardLatestGenerationContext_ACU: vi.fn(() => m.gate.activeGenerations.pop() || null), markUserSendIntent_ACU: vi.fn(), get isProcessing_Plot_ACU() { return m.processingPlot; }, isQuietLikeGeneration_ACU: (...args: any[]) => m.isQuiet(...args), isRecentUserSendIntent_ACU: vi.fn(), loopState_ACU: { isLooping: false }, recordGenerationContext_ACU: (...args: any[]) => m.recordGeneration(...args), recordLastUserSend_ACU: vi.fn(), settings_ACU: m.settings, consumeGenerationContextForEnded_ACU: () => m.consumeGeneration(), shouldProcessPlotForGeneration_ACU: (...args: any[]) => m.shouldProcessPlot(...args), shouldProcessSummaryVectorIndexForGeneration_ACU: (...args: any[]) => m.shouldProcessSummary(...args),
   _set_allChatMessages_ACU: m.setMessages, _set_currentChatFileIdentifier_ACU: (value: string) => { m.currentChatKey = value; m.setChat(value); }, _set_currentJsonTableData_ACU: m.setData, _set_independentTableStates_ACU: m.setTables, _set_isProcessing_Plot_ACU: vi.fn(), _set_lastTotalAiMessages_ACU: m.setTotal, _set_tempPlotToSave_ACU: m.clearPendingPlot,
 }));
 vi.mock('../../../src/service/settings/settings-service', () => ({ applyTemplateScopeForCurrentChat_ACU: vi.fn(), loadSettings_ACU: vi.fn() }));
@@ -165,7 +178,10 @@ beforeAll(async () => {
   m.api.eventSource.emit = m.hostEmit;
   m.api.eventSource.on.mockImplementation((event: string, callback: any) => {
     if (event === 'chat') m.chatChanged = callback;
-    if (event === 'deleted' || event === 'swiped') m.chatMutationHandler = callback;
+    if (event === 'deleted' || event === 'swiped') {
+      m.chatMutationHandler = callback;
+      m.chatMutationHandlers.set(event, callback);
+    }
     if (event === 'generation_started') m.generationStarted = callback;
     if (event === 'message_sent') m.messageSent = callback;
     if (event === 'message_received') m.messageReceived = callback;
@@ -286,7 +302,7 @@ beforeEach(() => {
   m.getSimulationRuntime.mockReturnValue({ handleAssistantCompletion: m.handleSimulationCompletion });
   m.getContinuationRuntime.mockReturnValue({ initialize: m.continuationRuntimeInitialize });
   m.continuationBridge = null;
-  Object.assign(m.gate, { lastUserMessageId: 7, lastUserMessageText: 'stale', lastUserMessageAt: 1, lastUserSendIntentAt: 2, lastGeneration: { stale: true }, generationSeq: 3, activeGenerations: [{ seq: 3 }] });
+  Object.assign(m.gate, { lastUserMessageId: 7, lastUserMessageText: 'stale', lastUserMessageAt: 1, lastUserSendIntentAt: 2, lastGeneration: { stale: true }, generationSeq: 3, activeGenerations: [] });
 });
 
 describe('mainInitialize_ACU CHAT_CHANGED 无活动聊天早退', () => {
@@ -387,16 +403,72 @@ async function dispatchCompletionTasks_ACU(): Promise<void> {
 
 describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
   beforeEach(() => { vi.useFakeTimers(); });
+  it.each(['MESSAGE_DELETED', 'MESSAGE_SWIPED'] as const)('%s 作废两条自动链的旧通知，仅保留数据刷新', async eventName => {
+    m.currentChatKey = 'chat-a';
+    m.api.chat = [{ is_user: true, mes: '用户' }, { is_user: false, mes: '旧正文' }];
+    m.messageReceived!(1, 'normal');
+    m.characterMessageRendered!(1, 'normal');
+    m.api.chat.pop();
+    await m.chatMutationHandlers.get(m.api.eventTypes[eventName])!(m.api.chat.length);
+    expect(m.cancelPendingOptimization).toHaveBeenCalledOnce();
+    expect(m.cancelPendingAutoFill).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1200);
+    expect(m.handleNewMessage).not.toHaveBeenCalled();
+    expect(m.autoUpdate).not.toHaveBeenCalled();
+    expect(m.refresh).toHaveBeenCalledOnce();
+  });
+
+  it('已派发到填表队列的通知在删楼后失效，新完成通知仍有效', async () => {
+    m.currentChatKey = 'chat-a';
+    m.api.chat = [{ is_user: true, mes: '用户' }, { is_user: false, mes: '旧正文' }];
+    m.messageReceived!(1, 'normal');
+    await dispatchCompletionTasks_ACU();
+    const oldContext = m.autoUpdate.mock.calls[0][1];
+    expect(oldContext.isCurrentEvent()).toBe(true);
+    m.api.chat.pop();
+    await m.chatMutationHandlers.get('deleted')!(m.api.chat.length);
+    expect(oldContext.isCurrentEvent()).toBe(false);
+    expect(oldContext.isCurrentChat()).toBe(true);
+    m.generationStarted!('normal', {}, false);
+    m.api.chat.push({ is_user: false, mes: '新正文' });
+    m.generationEnded!(2);
+    await dispatchCompletionTasks_ACU();
+    expect(m.autoUpdate).toHaveBeenCalledTimes(2);
+    expect(m.autoUpdate.mock.calls[1][1].isCurrentEvent()).toBe(true);
+  });
+
+  it('重新生成内部删除旧回复不清除本轮资格，生成期间不填表，完成后正常处理', async () => {
+    m.currentChatKey = 'chat-a';
+    m.api.chat = [{ is_user: true, mes: '用户' }, { is_user: false, mes: '旧正文' }];
+    m.generationStarted!('regenerate', {}, false);
+    m.api.chat.pop();
+    await m.chatMutationHandlers.get('deleted')!(m.api.chat.length);
+    m.api.chat.push({ is_user: false, mes: '尚未完成' });
+    m.messageReceived!(1, 'regenerate');
+    m.characterMessageRendered!(1, 'regenerate');
+    await dispatchCompletionTasks_ACU();
+    expect(m.autoUpdate).not.toHaveBeenCalled();
+    m.handleNewMessage.mockClear();
+    m.api.chat[1].mes = '完整新正文';
+    m.generationEnded!(2);
+    await dispatchCompletionTasks_ACU();
+    expect(m.autoUpdate).toHaveBeenCalledOnce();
+    expect(m.handleNewMessage).toHaveBeenCalledOnce();
+  });
+
+
 
   it.each(['normal', 'regenerate', 'continue', 'swipe'])('%s 开始时取消旧正文优化任务，完成后仍派发优化', async type => {
     m.currentChatKey = 'chat-a';
     m.api.chat = [{ is_user: true, mes: '用户' }, { is_user: false, mes: '正文' }];
     m.generationStarted!(type, {}, false);
     expect(m.cancelPendingOptimization).toHaveBeenCalledOnce();
+    expect(m.cancelPendingAutoFill).toHaveBeenCalledOnce();
     expect(m.handleNewMessage).not.toHaveBeenCalled();
     m.generationEnded!(2);
     await dispatchCompletionTasks_ACU();
     expect(m.handleNewMessage).toHaveBeenCalledOnce();
+    expect(m.autoUpdate).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -406,11 +478,13 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
     m.isQuiet.mockImplementation((value: string, options: any) => value === 'quiet' || Boolean(options?.quiet_prompt?.trim()));
     m.generationStarted!(type, params, dryRun);
     expect(m.cancelPendingOptimization).not.toHaveBeenCalled();
+    expect(m.cancelPendingAutoFill).not.toHaveBeenCalled();
   });
 
   it('宿主停止生成时取消待执行正文优化', () => {
     m.generationStopped!();
     expect(m.cancelPendingOptimization).toHaveBeenCalledOnce();
+    expect(m.cancelPendingAutoFill).toHaveBeenCalledOnce();
   });
 
   it.each(['GENERATION_ENDED', 'MESSAGE_RECEIVED', 'CHARACTER_MESSAGE_RENDERED'] as const)(
@@ -423,11 +497,13 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
       m.generationStopped!();
       await dispatchCompletionTasks_ACU();
       expect(m.handleNewMessage).not.toHaveBeenCalled();
+      expect(m.autoUpdate).not.toHaveBeenCalled();
 
       m.generationStarted!('regenerate', {}, false);
       m.generationEnded!(2);
       await dispatchCompletionTasks_ACU();
       expect(m.handleNewMessage).toHaveBeenCalledOnce();
+      expect(m.autoUpdate).toHaveBeenCalledOnce();
     },
   );
 
@@ -450,6 +526,7 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
     expect(m.autoUpdate).toHaveBeenCalledExactlyOnceWith(undefined, {
       eventType: eventName, messageId: 1, chatKey: 'chat-a', isolationKey: 'test-isolation',
       isCurrentChat: expect.any(Function),
+      isCurrentEvent: expect.any(Function),
     });
     expect(m.consumeGeneration).not.toHaveBeenCalled();
     expect(m.consumeInternalGeneration).not.toHaveBeenCalled();
@@ -789,6 +866,7 @@ describe('mainInitialize_ACU continuation host generation isolation', () => {
     expect(m.autoUpdate).toHaveBeenCalledExactlyOnceWith(undefined, {
       eventType: 'GENERATION_ENDED', messageId: 42, chatKey: '', isolationKey: 'test-isolation',
       isCurrentChat: expect.any(Function),
+      isCurrentEvent: expect.any(Function),
     });
     expect(m.handleNewMessage).toHaveBeenCalledWith('GENERATION_ENDED', expect.objectContaining({ eventMessageId: 42 }));
   });

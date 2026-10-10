@@ -6,6 +6,7 @@ const m = vi.hoisted(() => ({
   isolationKey: 'isolation-a',
   executePlan: vi.fn(),
   logSkip: vi.fn(),
+  contentGenerationActive: false,
   sqlite: true,
   showToast: vi.fn(),
   beginTask: vi.fn(),
@@ -26,6 +27,7 @@ vi.mock('../../../src/presentation/components/plot-editors', () => ({
 }));
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   NEW_MESSAGE_DEBOUNCE_DELAY_ACU: 500, abortAllActiveRequests_ACU: m.abortRequests,
+  hasActiveContentGeneration_ACU: () => m.contentGenerationActive,
   allChatMessages_ACU: [], coreApisAreReady_ACU: true,
   get currentChatFileIdentifier_ACU() { return m.chatKey; },
   currentJsonTableData_ACU: { sheet_0: {} }, getCurrentIsolationKey_ACU: vi.fn(() => m.isolationKey),
@@ -72,6 +74,7 @@ async function settleMicrotasks() { await Promise.resolve(); await Promise.resol
 describe('triggerAutomaticUpdateIfNeeded_ACU 逐次串行调度', () => {
   beforeEach(() => {
     m.wasStopped = false;
+    m.contentGenerationActive = false;
     m.chatKey = 'chat-a';
     m.isolationKey = '';
     m.sqlite = true;
@@ -241,4 +244,79 @@ describe('triggerAutomaticUpdateIfNeeded_ACU 逐次串行调度', () => {
       eventType: 'CHARACTER_MESSAGE_RENDERED', chatKey: 'chat-a', isolationKey: '', stage: 'dequeue',
     }));
   });
+  it('正文生成期间拒绝自动填表，完成后的新通知仍可执行', async () => {
+    const { triggerAutomaticUpdateIfNeeded_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-trigger');
+    m.contentGenerationActive = true;
+    await triggerAutomaticUpdateIfNeeded_ACU();
+    expect(m.buildPlan).not.toHaveBeenCalled();
+    expect(m.executePlan).not.toHaveBeenCalled();
+    expect(m.beginTask).not.toHaveBeenCalled();
+    expect(m.logSkip).toHaveBeenCalledExactlyOnceWith('generation_in_progress', expect.objectContaining({ stage: 'enqueue' }));
+    m.contentGenerationActive = false;
+    m.executePlan.mockResolvedValue({ failedGroups: 0, errors: [] });
+    await triggerAutomaticUpdateIfNeeded_ACU();
+    expect(m.executePlan).toHaveBeenCalledOnce();
+  });
+
+  it.each(['重新生成', '删楼', '停止生成'])('%s 作废已排队的旧填表任务，不阻断后续新通知', async action => {
+    const { triggerAutomaticUpdateIfNeeded_ACU, cancelPendingAutoFillEvent_ACU, captureAutoFillEventScope_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-trigger');
+    let releaseFirst!: () => void;
+    m.executePlan.mockImplementationOnce(() => new Promise(resolve => {
+      releaseFirst = () => resolve({ failedGroups: 0, errors: [] });
+    })).mockResolvedValue({ failedGroups: 0, errors: [] });
+    const first = triggerAutomaticUpdateIfNeeded_ACU();
+    await settleMicrotasks();
+    const oldScope = captureAutoFillEventScope_ACU();
+    const queued = triggerAutomaticUpdateIfNeeded_ACU(undefined, { eventType: action, isCurrentEvent: oldScope });
+    cancelPendingAutoFillEvent_ACU();
+    expect(oldScope()).toBe(false);
+    releaseFirst();
+    await Promise.all([first, queued]);
+    expect(m.buildPlan).toHaveBeenCalledOnce();
+    expect(m.executePlan).toHaveBeenCalledOnce();
+    expect(m.logSkip).toHaveBeenCalledExactlyOnceWith('generation_changed', expect.objectContaining({ stage: 'dequeue' }));
+    expect(m.abortRequests).not.toHaveBeenCalled();
+    await triggerAutomaticUpdateIfNeeded_ACU();
+    expect(m.executePlan).toHaveBeenCalledTimes(2);
+  });
+
+  it('出队前发现重新生成仍在进行，即使未作废代次也不执行旧任务', async () => {
+    const { triggerAutomaticUpdateIfNeeded_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-trigger');
+    const queued = triggerAutomaticUpdateIfNeeded_ACU();
+    m.contentGenerationActive = true;
+    await queued;
+    expect(m.buildPlan).not.toHaveBeenCalled();
+    expect(m.executePlan).not.toHaveBeenCalled();
+    expect(m.logSkip).toHaveBeenCalledExactlyOnceWith('generation_in_progress', expect.objectContaining({ stage: 'dequeue' }));
+  });
+
+  it('接收时捕获的旧作用域在入队前已失效，不重新建立填表任务', async () => {
+    const { triggerAutomaticUpdateIfNeeded_ACU, captureAutoFillEventScope_ACU, cancelPendingAutoFillEvent_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-trigger');
+    const oldScope = captureAutoFillEventScope_ACU();
+    cancelPendingAutoFillEvent_ACU();
+    await triggerAutomaticUpdateIfNeeded_ACU(undefined, { isCurrentEvent: oldScope });
+    expect(m.buildPlan).not.toHaveBeenCalled();
+    expect(m.executePlan).not.toHaveBeenCalled();
+    expect(m.logSkip).toHaveBeenCalledExactlyOnceWith('generation_changed', expect.objectContaining({ stage: 'enqueue' }));
+  });
+
+  it.each(['processUpdates', 'processGroupedUpdates', 'processStagingGroupedUpdates'] as const)('%s 委托前删楼使任务失效，不启动新请求且不全局取消', async operation => {
+    const { triggerAutomaticUpdateIfNeeded_ACU, cancelPendingAutoFillEvent_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-trigger');
+    m.sqlite = operation !== 'processGroupedUpdates';
+    m.executePlan.mockImplementationOnce(async (_plan, _settings, _setUpdating, ops, _performance, controller) => {
+      cancelPendingAutoFillEvent_ACU();
+      const result = await ops[operation]([], 'auto_independent', {});
+      if (operation === 'processUpdates') expect(result).toBe(false);
+      else expect(result).toEqual({ success: false, aborted: true, failedGroups: [] });
+      expect(controller.signal.aborted).toBe(true);
+      return { failedGroups: 0, errors: [], aborted: true };
+    });
+    await triggerAutomaticUpdateIfNeeded_ACU();
+    expect(m.grouped).not.toHaveBeenCalled();
+    expect(m.staging).not.toHaveBeenCalled();
+    expect(m.beginTask).not.toHaveBeenCalled();
+    expect(m.abortRequests).not.toHaveBeenCalled();
+    expect(m.logSkip).toHaveBeenCalledWith('generation_changed', expect.objectContaining({ stage: expect.stringMatching(/^process_/) }));
+  });
+
 });

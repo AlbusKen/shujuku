@@ -7,7 +7,7 @@ import { updateCardUpdateStatusDisplay_ACU } from '../../components/update-statu
 import { isAutoUpdatingCard_ACU, _set_isAutoUpdatingCard_ACU } from '../../components/plot-editors';
 import { showToastr_ACU } from '../../theme/toast';
 import { getChatArray_ACU } from '../../../service/chat/chat-service';
-import { abortAllActiveRequests_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU } from '../../../service/runtime/state-manager';
+import { abortAllActiveRequests_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, hasActiveContentGeneration_ACU, settings_ACU, _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU } from '../../../service/runtime/state-manager';
 import { $manualExtraHintCheckbox_ACU } from '../../state/ui-refs';
 import { processUpdates_ACU } from '../update-process';
 import { getSortedSheetKeys_ACU } from '../../../service/template/chat-scope';
@@ -81,6 +81,18 @@ function handleAutoGroupedProgressEvent_ACU(event: CardUpdateProgressEvent, prog
 
 let autoUpdateQueueTail_ACU: Promise<void> = Promise.resolve();
 let autoUpdateQueueId_ACU = 0;
+let autoFillEventEpoch_ACU = 0;
+
+/** 接收时绑定事件代次，与聊天作用域及生成资格分别校验。 */
+export function captureAutoFillEventScope_ACU(): () => boolean {
+    const epoch = autoFillEventEpoch_ACU;
+    return () => epoch === autoFillEventEpoch_ACU;
+}
+
+/** 作废旧通知和排队任务；不调用全局取消，也不撤销已经发出的请求。 */
+export function cancelPendingAutoFillEvent_ACU(): void {
+    ++autoFillEventEpoch_ACU;
+}
 
   // 每次调用独立排队；失败只回报当前调用，不中断后续信号。
   export function triggerAutomaticUpdateIfNeeded_ACU(
@@ -88,26 +100,41 @@ let autoUpdateQueueId_ACU = 0;
     triggerContext: AutoFillSkipContext_ACU & {
       /** 捕获事件时的宿主身份与聊天代次，在排队等待后再次验证。 */
       isCurrentChat?: () => boolean;
+      /** 捕获事件时的任务代次，重生成、停止或删楼后失效。 */
+      isCurrentEvent?: () => boolean;
     } = {},
   ): Promise<void> {
     const queueId = ++autoUpdateQueueId_ACU;
     const runId = performanceContext?.runId || `autofill-${queueId}`;
-    const { isCurrentChat, ...diagnosticContext } = triggerContext;
+    const { isCurrentChat, isCurrentEvent, ...diagnosticContext } = triggerContext;
     const context = { ...diagnosticContext, runId, queueId };
     const scoped = context.chatKey !== undefined || context.isolationKey !== undefined;
     const chatAtEnqueue = scoped ? getChatArray_ACU() : undefined;
+    const isEnqueuedEventCurrent = captureAutoFillEventScope_ACU();
+    const canProcessEvent = (stage: string): boolean => {
+      if (!isEnqueuedEventCurrent() || (isCurrentEvent && !isCurrentEvent())) {
+        logAutoFillSkip_ACU('generation_changed', { ...context, stage });
+        return false;
+      }
+      if ((isCurrentChat && !isCurrentChat()) || scoped && (getChatArray_ACU() !== chatAtEnqueue
+        || context.chatKey !== undefined && context.chatKey !== currentChatFileIdentifier_ACU
+        || context.isolationKey !== undefined && context.isolationKey !== getCurrentIsolationKey_ACU())) {
+        logAutoFillSkip_ACU('chat_changed', { ...context, stage });
+        return false;
+      }
+      if (hasActiveContentGeneration_ACU()) {
+        logAutoFillSkip_ACU('generation_in_progress', { ...context, stage });
+        return false;
+      }
+      return true;
+    };
+    if (!canProcessEvent('enqueue')) return Promise.resolve();
     logAutoFillStage_ACU('queued', context);
     const request = autoUpdateQueueTail_ACU.then(async () => {
       logAutoFillStage_ACU('dequeued', context);
       try {
-        // 正文监听延后执行；排队期间切换聊天不能把旧信号用于新聊天。
-        if ((isCurrentChat && !isCurrentChat()) || scoped && (getChatArray_ACU() !== chatAtEnqueue
-          || context.chatKey !== undefined && context.chatKey !== currentChatFileIdentifier_ACU
-          || context.isolationKey !== undefined && context.isolationKey !== getCurrentIsolationKey_ACU())) {
-          logAutoFillSkip_ACU('chat_changed', { ...context, stage: 'dequeue' });
-          return;
-        }
-        await runAutomaticUpdateIfNeeded_ACU({ ...performanceContext, runId }, context);
+        if (!canProcessEvent('dequeue')) return;
+        await runAutomaticUpdateIfNeeded_ACU({ ...performanceContext, runId }, context, canProcessEvent);
         logAutoFillStage_ACU('queue_completed', context);
       } catch (error) {
         logAutoFillSkip_ACU('execution_failed', { ...context, stage: 'dispatch' });
@@ -121,6 +148,7 @@ let autoUpdateQueueId_ACU = 0;
   async function runAutomaticUpdateIfNeeded_ACU(
     performanceContext?: { runId?: string; parentSpanId?: string },
     context: AutoFillSkipContext_ACU = {},
+    canProcessEvent: (stage: string) => boolean = () => true,
   ): Promise<void> {
     logDebug_ACU('ACU Auto-Trigger: Starting independent check...');
     // 新一轮自动填表开跑前清掉上一轮「终止」残留，避免 isStopped() 立刻把新任务掐死。
@@ -168,6 +196,14 @@ let autoUpdateQueueId_ACU = 0;
 
     const useGroupedAutoUpdates = !isSqliteMode();
     const autoGroupedAbortController = new AbortController();
+    const canExecuteAutoFill = (stage: string): boolean => {
+      if (autoGroupedAbortController.signal.aborted) return false;
+      if (canProcessEvent(stage)) return true;
+      // 只停止当前调度的后续执行委托，不影响其他功能或已经发出的请求。
+      autoGroupedAbortController.abort();
+      return false;
+    };
+    if (!canExecuteAutoFill('execute')) return;
     // 实际开始填表请求后才登记任务；同一调度的分组与批次共用一个进度框。
     let autoProgressTask: NoticeTaskHandle_ACU | null = null;
     const onAutoGroupedProgress = (event: CardUpdateProgressEvent): void => {
@@ -208,12 +244,18 @@ let autoUpdateQueueId_ACU = 0;
             settings_ACU,
             _set_isAutoUpdatingCard_ACU,
             {
-                processUpdates: (indices, mode, options) => processUpdates_ACU(indices, mode, {
-                    ...options, abortController: autoGroupedAbortController, onProgress: onAutoGroupedProgress, planManaged: true,
-                }),
+                processUpdates: (indices, mode, options) => {
+                    if (!canExecuteAutoFill('process_updates')) return Promise.resolve(false);
+                    return processUpdates_ACU(indices, mode, {
+                       ...options, abortController: autoGroupedAbortController, onProgress: onAutoGroupedProgress, planManaged: true,
+                    });
+                },
                 ...(useGroupedAutoUpdates
                     ? {
                         processGroupedUpdates: (groups, mode, options) => {
+                            if (!canExecuteAutoFill('process_grouped_updates')) {
+                                return Promise.resolve({ success: false, aborted: true, failedGroups: [] });
+                            }
                             const upstreamProgress = options?.onProgress;
                             return processGroupedRuntimeChunk_ACU(groups, mode, {
                                 ...options,
@@ -233,6 +275,9 @@ let autoUpdateQueueId_ACU = 0;
                 // processUpdates —— 那会让写目标早于 full checkpoint 的 bucket 在 AI 消耗
                 // token 后才被 persist 层 fail-fast）。
                 processStagingGroupedUpdates: (groups, mode, options) => {
+                    if (!canExecuteAutoFill('process_staging_updates')) {
+                        return Promise.resolve({ success: false, aborted: true, failedGroups: [] });
+                    }
                     // 跨 full checkpoint 边界组：共享 staging runner（pre 段 stage_only、
                     // 边界原子汇合、post 段普通持久化）。boundary 元数据来自计划构建层。
                     const upstreamProgress = options?.onProgress;

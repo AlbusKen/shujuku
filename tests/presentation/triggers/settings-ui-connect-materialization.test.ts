@@ -28,7 +28,9 @@ const m = vi.hoisted(() => {
   };
 });
 
-vi.mock('../../../src/service/runtime/state-manager', () => ({
+vi.mock('../../../src/service/runtime/state-manager', () => {
+  const gate = { lastGeneration: null, generationSeq: 0, activeGenerations: [] as any[] };
+  return {
   NEW_MESSAGE_DEBOUNCE_DELAY_ACU: 500,
   AI_MATERIALIZATION_MAX_RETRIES_ACU: 3,
   AI_MATERIALIZATION_RETRY_DELAY_MS_ACU: 100,
@@ -51,10 +53,13 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   _set_wasStoppedByUser_ACU: vi.fn(),
   _set_contentOptimizationDebounceTimer_ACU: vi.fn(),
   _set_manualExtraHint_ACU: vi.fn(),
-  generationGate_ACU: { lastGeneration: null, generationSeq: 0, activeGenerations: [] },
+  generationGate_ACU: gate,
   isQuietLikeGeneration_ACU: (type: string, params: any) => type === 'quiet'
     || Boolean(params?.quiet_prompt?.trim()),
-}));
+  hasActiveContentGeneration_ACU: () => gate.activeGenerations.some(context => !context.dryRun
+    && context.type !== 'quiet' && !context.params?.quiet_prompt?.trim() && !context.params?.automatic_trigger),
+  };
+});
 
 vi.mock('../../../src/service/chat/chat-service', () => ({
   getChatArray_ACU: () => m.getChat(),
@@ -151,6 +156,27 @@ afterEach(() => {
 });
 
 describe('handleContentOptimizationEvent_ACU 有界物化等待', () => {
+  it.each(['防抖', '物化等待'])('删楼使%s中的旧正文优化失效，不按移位后的下标优化', async stage => {
+    const { handleContentOptimizationEvent_ACU, cancelPendingContentOptimizationEvent_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect');
+    m.setChat([user, ai, { ...ai, mes: '后续正文' }]);
+    m.evaluateNewMessageAction.mockReturnValue({ action: 'optimize_parallel', lastMessageIndex: 1 });
+    m.resolveGeneratedAiMessageIndex.mockReturnValue(stage === '物化等待'
+      ? { kind: 'pending_materialization', candidates: [] }
+      : { kind: 'resolved', messageIndex: 1 });
+    await handleContentOptimizationEvent_ACU('MESSAGE_RECEIVED', { ...baseIntent });
+    await vi.advanceTimersByTimeAsync(stage === '物化等待' ? 500 : 250);
+    m.setChat([user, { ...ai, mes: '移位后的正文' }]);
+    cancelPendingContentOptimizationEvent_ACU();
+    m.resolveGeneratedAiMessageIndex.mockReturnValue({ kind: 'resolved', messageIndex: 1 });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(m.executeContentOptimization).not.toHaveBeenCalled();
+    expect(m.evaluateNewMessageAction).not.toHaveBeenCalled();
+    await handleContentOptimizationEvent_ACU('GENERATION_ENDED', { ...baseIntent });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(m.executeContentOptimization).toHaveBeenCalledExactlyOnceWith(1);
+  });
+
+
   it.each(['MESSAGE_RECEIVED', 'CHARACTER_MESSAGE_RENDERED', 'GENERATION_ENDED'])('%s 在重新生成期间不调度优化，完成后只优化最终正文', async eventType => {
     const { handleContentOptimizationEvent_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect');
     const { generationGate_ACU } = await import('../../../src/service/runtime/state-manager');
