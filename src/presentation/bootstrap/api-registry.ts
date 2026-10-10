@@ -8,6 +8,7 @@
 import { topLevelWindow_ACU } from '../../shared/env';
 import { createCallbackApi, type ApiGroupContext } from './api-groups/callback-api';
 import { createCoreDataApi } from './api-groups/core-data-api';
+import { createTableHistoryApi } from './api-groups/table-history-api';
 import { createTableCrudApi } from './api-groups/table-crud-api';
 import { createTableLockApi } from './api-groups/table-lock-api';
 import { createTemplatePresetApi } from './api-groups/template-preset-api';
@@ -41,6 +42,7 @@ const api = Object.assign(
     {},
     createCallbackApi(ctx),
     createCoreDataApi(ctx),
+    createTableHistoryApi(),
     createTableCrudApi(ctx),
     createTableLockApi(ctx),
     createTemplatePresetApi(ctx),
