@@ -262,7 +262,7 @@ export function buildCustomApiRequestBody_ACU(
   // 背景：此前写死 'strict'，酒馆后端会把提示词中部的 system 消息强制改成 user
   // （prompt-converters.js mergeMessages strict 模式），导致剧情推进等自定义
   // 提示词组里用户指定的 SYSTEM 段在发送时丢失角色。
-  // 现在：默认 'strict'（与历史行为兼容）；预设选择具体值则透传；
+  // 现在：默认 merge；预设选择具体语义值时透传；
   // 显式选择「未选择」（''）时不携带该字段，后端原样透传消息，
   // 完整保留用户配置的 system/user/assistant 结构。
   // 带原生工具时必须改用 *_tools 变体。strict/merge/semi/single 会删除 tool_calls、

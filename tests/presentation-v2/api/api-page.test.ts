@@ -123,6 +123,31 @@ describe('ApiPage', () => {
     mount.__resetAcuV2MountForTests();
   });
 
+  it('酒馆渠道的提示词后处理只展示五个语义选项', async () => {
+    const settings = createSettings();
+    settings.apiPresetBindingsByChat['chat-page'].presetName = 'alpha';
+    const { mount } = await mountApiPage(settings);
+
+    const page = document.querySelector('.acu-v2-api-page') as HTMLElement;
+    const row = Array.from(page.querySelectorAll('.acu-form-row'))
+      .find(item => (item.textContent || '').includes('提示词后处理')) as HTMLElement;
+    const trigger = row.querySelector('.acu-select__trigger') as HTMLButtonElement;
+    expect(trigger.disabled).toBe(false);
+    trigger.click();
+    await Promise.resolve();
+
+    const options = Array.from(document.querySelectorAll('.acu-select__item')) as HTMLElement[];
+    expect(options.map(option => option.textContent?.trim())).toEqual([
+      '未选择',
+      '合并相同角色连续的发言',
+      '半严格（强制对话角色交替）',
+      '严格（强制对话角色交替、用户最先）',
+      '单一用户消息',
+    ]);
+
+    mount.__resetAcuV2MountForTests();
+  });
+
   it('当前 API 配置表单可直接保存活动预设并同步当前聊天绑定', async () => {
     const { mount, settings } = await mountApiPage();
 
