@@ -393,7 +393,7 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
     expect(m.handleSimulationCompletion).not.toHaveBeenCalled();
   });
 
-  it.each(['normal', 'swipe', 'appendFinal', 'continue', 'first_message', 'quiet'])('正文事件的 %s 类型只排除开场白自动填表，保留后续真实回复', async (type) => {
+  it.each(['normal', 'swipe', 'appendFinal', 'continue', 'first_message', 'quiet'])('正文事件的 %s 类型对填表和优化一致过滤开场白，保留后续真实回复', async (type) => {
     m.autoUpdate.mockResolvedValue(undefined);
     m.isQuiet.mockReturnValue(true);
     m.generationStarted!('normal', { quiet_prompt: '附加提示', automatic_trigger: true }, false);
@@ -402,7 +402,7 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
     m.characterMessageRendered!(0, type);
     await dispatchCompletionTasks_ACU();
 
-    expect(m.handleNewMessage).toHaveBeenCalledTimes(2);
+    expect(m.handleNewMessage).toHaveBeenCalledTimes(type === 'first_message' ? 0 : 2);
     expect(m.autoUpdate).toHaveBeenCalledTimes(type === 'first_message' ? 0 : 2);
     expect(m.consumeGeneration).not.toHaveBeenCalled();
 
@@ -412,10 +412,11 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
       m.characterMessageRendered!(0, 'continue');
       await dispatchCompletionTasks_ACU();
       expect(m.autoUpdate).toHaveBeenCalledTimes(2);
-      expect(m.handleNewMessage).toHaveBeenCalledTimes(4);
+      expect(m.handleNewMessage).toHaveBeenCalledTimes(2);
       m.generationEnded!(1);
       await dispatchCompletionTasks_ACU();
       expect(m.autoUpdate).toHaveBeenCalledTimes(3);
+      expect(m.handleNewMessage).toHaveBeenCalledTimes(2);
     }
   });
 
@@ -475,14 +476,14 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
     },
   );
 
-  it('未观察到生成开始时，陈旧上下文和按钮收尾事件不触发填表', async () => {
+  it('未观察到生成开始时，陈旧上下文和按钮收尾事件不触发填表或正文优化', async () => {
     m.currentChatKey = 'chat-a';
     m.api.chat = [{ is_user: false, mes: '已有开场白' }];
     m.generationEnded!(1);
     await dispatchCompletionTasks_ACU();
 
     expect(m.autoUpdate).not.toHaveBeenCalled();
-    expect(m.handleNewMessage).toHaveBeenCalledOnce();
+    expect(m.handleNewMessage).not.toHaveBeenCalled();
   });
 
   it.each(['normal', 'continue', 'regenerate', 'swipe'])('%s 的生成结束仍填表，重复收尾不复用资格', async type => {
@@ -492,13 +493,15 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
     m.generationEnded!(1);
     await dispatchCompletionTasks_ACU();
     expect(m.autoUpdate).toHaveBeenCalledOnce();
+    expect(m.handleNewMessage).toHaveBeenCalledOnce();
 
     m.generationEnded!(1);
     await dispatchCompletionTasks_ACU();
     expect(m.autoUpdate).toHaveBeenCalledOnce();
+    expect(m.handleNewMessage).toHaveBeenCalledOnce();
   });
 
-  it.each(['切换已有聊天', '新建聊天'])('%s 不因旧生成收尾或开场白填表，下一次真实生成正常触发', async action => {
+  it.each(['切换已有聊天', '新建聊天'])('%s 不因旧生成收尾或开场白填表或优化，下一次真实生成正常触发', async action => {
     m.currentChatKey = 'chat-a';
     m.api.chat = [{ is_user: false, mes: '原聊天正文' }];
     const reusedChat = m.api.chat;
@@ -514,6 +517,7 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
     m.generationEnded!(reusedChat.length);
     await dispatchCompletionTasks_ACU();
     expect(m.autoUpdate).not.toHaveBeenCalled();
+    expect(m.handleNewMessage).not.toHaveBeenCalled();
 
     m.resetScript.mockImplementation(async (name: string) => { m.currentChatKey = name; });
     await m.chatChanged!('chat-b');
@@ -524,12 +528,14 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
     m.generationEnded!(reusedChat.length);
     await vi.advanceTimersByTimeAsync(1200);
     expect(m.autoUpdate).not.toHaveBeenCalled();
+    expect(m.handleNewMessage).not.toHaveBeenCalled();
     expect(m.api.chat).toBe(reusedChat);
 
     m.generationStarted!('continue', {}, false);
     m.generationEnded!(reusedChat.length);
     await dispatchCompletionTasks_ACU();
     expect(m.autoUpdate).toHaveBeenCalledOnce();
+    expect(m.handleNewMessage).toHaveBeenCalledOnce();
   });
 
   it.each(['GENERATION_ENDED', 'MESSAGE_RECEIVED', 'CHARACTER_MESSAGE_RENDERED'] as const)(
@@ -542,6 +548,7 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
       await m.chatChanged!('chat-a');
       await dispatchCompletionTasks_ACU();
       expect(m.autoUpdate).not.toHaveBeenCalled();
+      expect(m.handleNewMessage).not.toHaveBeenCalled();
     },
   );
 
@@ -553,6 +560,7 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
     m.generationEnded!(1);
     await dispatchCompletionTasks_ACU();
     expect(m.autoUpdate).not.toHaveBeenCalled();
+    expect(m.handleNewMessage).not.toHaveBeenCalled();
   });
 });
 

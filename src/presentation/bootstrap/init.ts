@@ -26,7 +26,7 @@ import { ensureNoActiveProvisionalBridgeForCurrentScope_ACU } from '../../servic
 import { notifyChatRuntimeReloaded_ACU } from '../../shared/chat-runtime-reload-signal';
 import { refreshMergedDataAndNotifyWithUI_ACU } from '../components/pipeline-ui-helpers';
 import { cleanChatName_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
-import { logAutoFillSkip_ACU } from '../../shared/trigger-diagnostics';
+import { logAutoFillSkip_ACU, logContentOptimizationSkip_ACU } from '../../shared/trigger-diagnostics';
 import { markPlotIntercept_ACU, shouldSkipPlotIntercept_ACU } from '../../service/plot/plot-logic';
 import { orchestrateTavernHelperHook_ACU, orchestrateAfterCommandsStrategy1_ACU, orchestrateAfterCommandsStrategy2_ACU } from '../../service/plot/plot-orchestrator';
 import { flushPlotPendingSave_ACU } from '../../service/runtime/plot-runtime/plot-history-preset';
@@ -272,7 +272,7 @@ export   function mainInitialize_ACU() {
         typeof SillyTavern_API_ACU.eventSource.on === 'function' &&
         SillyTavern_API_ACU.eventTypes
       ) {
-        // 填表资格只来自本次加载后观察到的生成；宿主 chat 数组可能被原地复用。
+        // 填表与正文优化资格只来自本次加载后观察到的生成；宿主 chat 数组可能被原地复用。
         let autoFillChatEpoch = 0;
         const autoFillGenerationScopes = new WeakMap<ReturnType<typeof recordGenerationContext_ACU>, () => boolean>();
         const captureAutoFillChatScope = (): (() => boolean) => {
@@ -800,7 +800,19 @@ export   function mainInitialize_ACU() {
                 }
                 if (!generationContext || (!generationContext.dryRun && !quietLike && !automaticTrigger)) {
                   dispatch('content-optimization', () => {
-                    if (!isCurrent()) return;
+                    if (!isAutoFillCurrent()) return;
+                    if (!trackedGeneration) {
+                      logContentOptimizationSkip_ACU('untracked_generation', {
+                        eventType: 'GENERATION_ENDED', messageId: message_id, chatKey, isolationKey,
+                      });
+                      return;
+                    }
+                    if (isZeroLayerOwnedChat_ACU()) {
+                      logContentOptimizationSkip_ACU('zero_layer_owned_chat', {
+                        eventType: 'GENERATION_ENDED', messageId: message_id, chatKey, isolationKey,
+                      });
+                      return;
+                    }
                     return handleContentOptimizationEvent_ACU('GENERATION_ENDED', optimizationIntent);
                   });
                 }
@@ -824,10 +836,8 @@ export   function mainInitialize_ACU() {
               const chatAtCapture = SillyTavern_API_ACU.chat;
               const chatKey = currentChatFileIdentifier_ACU;
               const isolationKey = getCurrentIsolationKey_ACU();
-              const isCurrent = () => SillyTavern_API_ACU?.chat === chatAtCapture
-                && currentChatFileIdentifier_ACU === chatKey && getCurrentIsolationKey_ACU() === isolationKey;
               const isAutoFillCurrent = captureAutoFillChatScope();
-              // 开场白不是一次新生成，不安排自动填表。
+              // 开场白不是一次新生成，不安排自动填表或正文优化。
               dispatch('auto-fill', () => {
                 if (!isAutoFillCurrent()) return;
                 if (messageType === 'first_message') {
@@ -859,7 +869,15 @@ export   function mainInitialize_ACU() {
                   }
                 : undefined;
               dispatch('content-optimization', () => {
-                if (!isCurrent()) return;
+                if (!isAutoFillCurrent()) return;
+                if (messageType === 'first_message') {
+                  logContentOptimizationSkip_ACU('initial_chat_message', { eventType: evName, messageId });
+                  return;
+                }
+                if (isZeroLayerOwnedChat_ACU()) {
+                  logContentOptimizationSkip_ACU('zero_layer_owned_chat', { eventType: evName, messageId });
+                  return;
+                }
                 return handleContentOptimizationEvent_ACU(evName, intent);
               });
             });
