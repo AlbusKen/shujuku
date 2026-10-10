@@ -40,6 +40,9 @@ const m = vi.hoisted(() => ({
   shouldProcessSummary: vi.fn(),
   autoUpdate: vi.fn(async () => undefined),
   handleNewMessage: vi.fn(),
+  cancelPendingOptimization: vi.fn(),
+  optimizationEventEpoch: 0,
+  generationStoppedHandlers: new Set<() => void>(),
   bindInternalGeneration: vi.fn(),
   consumeInternalGeneration: vi.fn(() => null),
   bindSimulationInternalGeneration: vi.fn(),
@@ -63,7 +66,15 @@ const m = vi.hoisted(() => ({
 vi.mock('../../../src/shared/host-api', () => ({ SillyTavern_API_ACU: m.api, jQuery_API_ACU: m.jquery }));
 vi.mock('../../../src/shared/env', () => ({ topLevelWindow_ACU: { AutoCardUpdaterAPI: { _notifyTableUpdate: m.notify } } }));
 vi.mock('../../../src/presentation/theme/toast', () => ({ showToastr_ACU: vi.fn() }));
-vi.mock('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect', () => ({ attemptToLoadCoreApis_ACU: vi.fn(() => true), handleContentOptimizationEvent_ACU: (...args: any[]) => m.handleNewMessage(...args) }));
+vi.mock('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect', () => ({
+  attemptToLoadCoreApis_ACU: vi.fn(() => true),
+  handleContentOptimizationEvent_ACU: (...args: any[]) => m.handleNewMessage(...args),
+  cancelPendingContentOptimizationEvent_ACU: () => { ++m.optimizationEventEpoch; m.cancelPendingOptimization(); },
+  captureContentOptimizationEventScope_ACU: () => {
+    const epoch = m.optimizationEventEpoch;
+    return () => epoch === m.optimizationEventEpoch;
+  },
+}));
 vi.mock('../../../src/presentation/triggers/settings-ui-sync/settings-ui-trigger', () => ({ triggerAutomaticUpdateIfNeeded_ACU: (...args: any[]) => m.autoUpdate(...args) }));
 vi.mock('../../../src/service/runtime/helpers-remaining', () => ({ ensureInitialSeedCheckpoint_ACU: m.ensureSeed, handleChatCompletionReady_ACU: vi.fn(), loadPresetAndCleanCharacterData_ACU: m.loadPreset }));
 vi.mock('../../../src/service/runtime/state-manager', () => ({
@@ -159,14 +170,24 @@ beforeAll(async () => {
     if (event === 'message_sent') m.messageSent = callback;
     if (event === 'message_received') m.messageReceived = callback;
     if (event === 'character_message_rendered') m.characterMessageRendered = callback;
-    if (event === 'generation_stopped') m.generationStopped = callback;
+    if (event === 'generation_stopped') {
+      m.generationStoppedHandlers.add(callback);
+      m.generationStopped = () => {
+        for (const handler of m.generationStoppedHandlers) {
+          try { handler(); } catch { /* 宿主逐监听器隔离异常 */ }
+        }
+      };
+    }
     if (event === 'after_commands') m.afterCommands = callback;
   });
   m.api.eventSource.makeFirst.mockImplementation((event: string, callback: any) => {
     if (event === 'generation_ended') m.generationEnded = callback;
   });
   const { mainInitialize_ACU } = await import('../../../src/presentation/bootstrap/init');
-  reinitialize_ACU = mainInitialize_ACU;
+  reinitialize_ACU = () => {
+    m.generationStoppedHandlers.clear();
+    mainInitialize_ACU();
+  };
   reinitialize_ACU();
 });
 
@@ -366,6 +387,49 @@ async function dispatchCompletionTasks_ACU(): Promise<void> {
 
 describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
   beforeEach(() => { vi.useFakeTimers(); });
+
+  it.each(['normal', 'regenerate', 'continue', 'swipe'])('%s 开始时取消旧正文优化任务，完成后仍派发优化', async type => {
+    m.currentChatKey = 'chat-a';
+    m.api.chat = [{ is_user: true, mes: '用户' }, { is_user: false, mes: '正文' }];
+    m.generationStarted!(type, {}, false);
+    expect(m.cancelPendingOptimization).toHaveBeenCalledOnce();
+    expect(m.handleNewMessage).not.toHaveBeenCalled();
+    m.generationEnded!(2);
+    await dispatchCompletionTasks_ACU();
+    expect(m.handleNewMessage).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['quiet', {}, false], ['normal', { quiet_prompt: '后台提示' }, false],
+    ['normal', {}, true], ['normal', { automatic_trigger: true }, false],
+  ])('后台生成 %s/%j/dryRun=%s 不取消已完成正文的待优化任务', (type, params, dryRun) => {
+    m.isQuiet.mockImplementation((value: string, options: any) => value === 'quiet' || Boolean(options?.quiet_prompt?.trim()));
+    m.generationStarted!(type, params, dryRun);
+    expect(m.cancelPendingOptimization).not.toHaveBeenCalled();
+  });
+
+  it('宿主停止生成时取消待执行正文优化', () => {
+    m.generationStopped!();
+    expect(m.cancelPendingOptimization).toHaveBeenCalledOnce();
+  });
+
+  it.each(['GENERATION_ENDED', 'MESSAGE_RECEIVED', 'CHARACTER_MESSAGE_RENDERED'] as const)(
+    '%s 已接收但未派发时重新生成并停止，旧通知不重建优化任务', async eventName => {
+      m.currentChatKey = 'chat-a';
+      m.api.chat = [{ is_user: true, mes: '用户' }, { is_user: false, mes: '旧正文' }];
+      if (eventName === 'GENERATION_ENDED') m.generationStarted!('normal', {}, false);
+      await m.api.eventSource.emit(m.api.eventTypes[eventName], 1, 'normal');
+      m.generationStarted!('regenerate', {}, false);
+      m.generationStopped!();
+      await dispatchCompletionTasks_ACU();
+      expect(m.handleNewMessage).not.toHaveBeenCalled();
+
+      m.generationStarted!('regenerate', {}, false);
+      m.generationEnded!(2);
+      await dispatchCompletionTasks_ACU();
+      expect(m.handleNewMessage).toHaveBeenCalledOnce();
+    },
+  );
 
   it.each(['MESSAGE_RECEIVED', 'CHARACTER_MESSAGE_RENDERED'] as const)('%s 独立唤醒检查并传递明确消息下标', async (eventName) => {
     m.currentChatKey = 'chat-a';

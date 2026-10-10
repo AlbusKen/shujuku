@@ -23,6 +23,8 @@ export type AutoFillSkipReason_ACU =
   | 'preconditions_failed'
   | 'initial_chat_message'
   | 'untracked_generation'
+  | 'generation_in_progress'
+  | 'generation_changed'
   | 'zero_layer_owned_chat'
   | 'no_tables_due'
   | 'reply_below_threshold'

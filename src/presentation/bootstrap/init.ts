@@ -32,7 +32,7 @@ import { orchestrateTavernHelperHook_ACU, orchestrateAfterCommandsStrategy1_ACU,
 import { flushPlotPendingSave_ACU } from '../../service/runtime/plot-runtime/plot-history-preset';
 import { refreshMessageBlock_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { beginHostGenerationUi_ACU, getSendTextareaValue_ACU, setSendTextareaValue_ACU, type HostInputWriteFailure_ACU } from '../../shared/host-input';
-import { handleContentOptimizationEvent_ACU } from '../triggers/settings-ui-sync/settings-ui-connect';
+import { cancelPendingContentOptimizationEvent_ACU, captureContentOptimizationEventScope_ACU, handleContentOptimizationEvent_ACU } from '../triggers/settings-ui-sync/settings-ui-connect';
 import { triggerAutomaticUpdateIfNeeded_ACU } from '../triggers/settings-ui-sync/settings-ui-trigger';
 import { abortActivePlotPlanning_ACU, runOptimizationLogicWithUI_ACU } from '../components/plot-planning-ui';
 import { enterLoopRetryFlow_ACU } from '../triggers/auto-loop';
@@ -663,6 +663,12 @@ export   function mainInitialize_ACU() {
             try {
               // 终止只作用于当次填表。新一轮宿主生成必须清掉残留，否则评估闸永久 user_aborted。
               _set_wasStoppedByUser_ACU(false);
+              const quietLike = isQuietLikeGeneration_ACU(type, params);
+              // 正文将被重写，上一轮的防抖和物化等待不能继续使用旧楼层。
+              // quiet/dryRun/后台请求不会重写正文，不取消普通回复的优化。
+              if (!dryRun && !quietLike && !params?.automatic_trigger) {
+                cancelPendingContentOptimizationEvent_ACU();
+              }
               const context = recordGenerationContext_ACU(type, params, dryRun);
               autoFillGenerationScopes.set(context, captureAutoFillChatScope());
               bindContinuationInternalAiGenerationStarted_ACU(context.seq);
@@ -670,7 +676,6 @@ export   function mainInitialize_ACU() {
               // 宿主的 GENERATION_STARTED 通常在发送点击返回后的微任务里才送达，同步配对必然错过；
               // 对非 quiet/非 dryRun/非自动触发的生成开放宽松认领（spv8.9.2 状态法），桥内部只在
               // 存在未绑定序列号的等待轮时才会认领。
-              const quietLike = isQuietLikeGeneration_ACU(type, params);
               getContinuationHostGenerationBridge_ACU()?.onGenerationStarted(context.seq, {
                 allowOrdinaryLooseClaim: !dryRun && !quietLike && !params?.automatic_trigger,
                 automaticTrigger: Boolean(params?.automatic_trigger),
@@ -683,6 +688,7 @@ export   function mainInitialize_ACU() {
         if (SillyTavern_API_ACU.eventTypes.GENERATION_STOPPED) {
           SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.GENERATION_STOPPED, () => {
             try {
+              cancelPendingContentOptimizationEvent_ACU();
               const discarded = discardLatestGenerationContext_ACU();
               if (discarded) autoFillGenerationScopes.delete(discarded);
               // 被中止的生成不会再有 GENERATION_ENDED；通知桥把等待中的续写轮转为可重试，避免卡死。
@@ -694,6 +700,7 @@ export   function mainInitialize_ACU() {
             const receiver = new PassiveCompletionReceiver_ACU();
             const onGenerationEnded = (message_id: any) => {
               receiver.receive('GENERATION_ENDED', dispatch => {
+                const isOptimizationCurrent = captureContentOptimizationEventScope_ACU();
                 const chatAtCapture = SillyTavern_API_ACU.chat;
                 const chatKey = currentChatFileIdentifier_ACU;
                 const isolationKey = getCurrentIsolationKey_ACU();
@@ -800,7 +807,7 @@ export   function mainInitialize_ACU() {
                 }
                 if (!generationContext || (!generationContext.dryRun && !quietLike && !automaticTrigger)) {
                   dispatch('content-optimization', () => {
-                    if (!isAutoFillCurrent()) return;
+                    if (!isAutoFillCurrent() || !isOptimizationCurrent()) return;
                     if (!trackedGeneration) {
                       logContentOptimizationSkip_ACU('untracked_generation', {
                         eventType: 'GENERATION_ENDED', messageId: message_id, chatKey, isolationKey,
@@ -833,6 +840,7 @@ export   function mainInitialize_ACU() {
           if (!eventType) return;
           SillyTavern_API_ACU.eventSource.on(eventType, (messageId: any, messageType?: string) => {
             receiver.receive(evName, dispatch => {
+              const isOptimizationCurrent = captureContentOptimizationEventScope_ACU();
               const chatAtCapture = SillyTavern_API_ACU.chat;
               const chatKey = currentChatFileIdentifier_ACU;
               const isolationKey = getCurrentIsolationKey_ACU();
@@ -869,7 +877,7 @@ export   function mainInitialize_ACU() {
                   }
                 : undefined;
               dispatch('content-optimization', () => {
-                if (!isAutoFillCurrent()) return;
+                if (!isAutoFillCurrent() || !isOptimizationCurrent()) return;
                 if (messageType === 'first_message') {
                   logContentOptimizationSkip_ACU('initial_chat_message', { eventType: evName, messageId });
                   return;

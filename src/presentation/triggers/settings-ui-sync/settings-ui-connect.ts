@@ -12,7 +12,7 @@ import { isExtensionMode, getHostWindow } from '../../../shared/runtime-env';
 import { getChatArray_ACU, saveChatToHost_ACU } from '../../../service/chat/chat-service';
 import { getConnectionManagerProfiles_ACU, fetchAvailableModels_ACU } from '../../../service/ai/ai-service';
 import { getCurrentCharacterFallback_ACU } from '../../../service/host/host-state-service';
-import { AI_MATERIALIZATION_MAX_RETRIES_ACU, AI_MATERIALIZATION_RETRY_DELAY_MS_ACU, NEW_MESSAGE_DEBOUNCE_DELAY_ACU, coreApisAreReady_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, lastTotalAiMessages_ACU, settings_ACU , _set_coreApisAreReady_ACU, _set_lastTotalAiMessages_ACU} from '../../../service/runtime/state-manager';
+import { AI_MATERIALIZATION_MAX_RETRIES_ACU, AI_MATERIALIZATION_RETRY_DELAY_MS_ACU, NEW_MESSAGE_DEBOUNCE_DELAY_ACU, coreApisAreReady_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, generationGate_ACU, getCurrentIsolationKey_ACU, isQuietLikeGeneration_ACU, lastTotalAiMessages_ACU, settings_ACU , _set_coreApisAreReady_ACU, _set_lastTotalAiMessages_ACU} from '../../../service/runtime/state-manager';
 import { $popupInstance_ACU, $customApiUrlInput_ACU, $customApiKeyInput_ACU, $customApiModelInput_ACU, $customApiModelSelect_ACU, $maxTokensInput_ACU, $temperatureInput_ACU, $apiStatusDisplay_ACU, $charCardPromptSegmentsContainer_ACU, $autoUpdateThresholdInput_ACU, $autoUpdateTokenThresholdInput_ACU, $autoUpdateFrequencyInput_ACU, $updateBatchSizeInput_ACU, $maxConcurrentGroupsInput_ACU, $skipUpdateFloorsInput_ACU, $retainRecentLayersInput_ACU, $tableMaxRetriesInput_ACU, $manualExtraHintCheckbox_ACU } from '../../state/ui-refs';
 import { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } from '../../../service/summary/merge-logic';
 import { processUpdates_ACU } from '../update-process';
@@ -213,13 +213,51 @@ import { buildTavernHelperCompat_ACU, formatHostCapabilities_ACU } from '../../.
     return coreApisAreReady_ACU;
   }
 
+  let contentOptimizationEventEpoch_ACU = 0;
+
+  /** 接收时捕获代次，防止尚未派发的旧通知在取消后重新建立优化任务。 */
+  export function captureContentOptimizationEventScope_ACU(): () => boolean {
+    const eventEpoch = contentOptimizationEventEpoch_ACU;
+    return () => eventEpoch === contentOptimizationEventEpoch_ACU;
+  }
+
+  /** 取消防抖并使已经进入物化等待的旧事件失效；不取消已经发出的优化请求。 */
+  export function cancelPendingContentOptimizationEvent_ACU(): void {
+    ++contentOptimizationEventEpoch_ACU;
+    clearTimeout(contentOptimizationDebounceTimer_ACU);
+    _set_contentOptimizationDebounceTimer_ACU(null);
+  }
+
+  function hasActiveContentGeneration_ACU(): boolean {
+    return generationGate_ACU.activeGenerations.some(context => !context.dryRun
+      && !isQuietLikeGeneration_ACU(context.type, context.params)
+      && !context.params?.automatic_trigger);
+  }
+
   // 正文优化独立处理消息定位与物化；不参与自动填表派发。
   export async function handleContentOptimizationEvent_ACU(eventType = 'unknown_acu', intent?: AutoFillIntent_ACU) {
+    const eventEpoch = contentOptimizationEventEpoch_ACU;
+    const canProcessEvent = (): boolean => {
+      const reason = eventEpoch !== contentOptimizationEventEpoch_ACU
+        ? 'generation_changed'
+        : hasActiveContentGeneration_ACU() ? 'generation_in_progress' : null;
+      if (!reason) return true;
+      logContentOptimizationSkip_ACU(reason, {
+        eventType,
+        eventMessageId: intent?.eventMessageId,
+        chatKey: intent?.chatKey,
+        isolationKey: intent?.isolationKey,
+      });
+      return false;
+    };
+    if (!canProcessEvent()) return;
     logDebug_ACU(
       `New message event (${eventType}) detected for ACU, debouncing for ${NEW_MESSAGE_DEBOUNCE_DELAY_ACU}ms...`,
     );
     clearTimeout(contentOptimizationDebounceTimer_ACU);
     _set_contentOptimizationDebounceTimer_ACU(setTimeout(async () => {
+      if (!canProcessEvent()) return;
+      _set_contentOptimizationDebounceTimer_ACU(null);
       const performanceSpan = startRuntimePerformanceSpan_ACU('new-message-pipeline', {
         settings: settings_ACU,
         metrics: { source: eventType },
@@ -267,6 +305,7 @@ import { buildTavernHelperCompat_ACU, formatHostCapabilities_ACU } from '../../.
         let retries = 0;
         while (resolution.kind === 'pending_materialization' && retries < AI_MATERIALIZATION_MAX_RETRIES_ACU) {
           await new Promise(resolve => setTimeout(resolve, AI_MATERIALIZATION_RETRY_DELAY_MS_ACU));
+          if (!canProcessEvent()) return;
           // 每次重试前校验 chatKey / isolationKey：等待中切聊天/切隔离立即终止。
           if (currentChatFileIdentifier_ACU !== intent.chatKey || getCurrentIsolationKey_ACU() !== intent.isolationKey) {
             logContentOptimizationSkip_ACU('chat_changed', {
@@ -328,6 +367,7 @@ import { buildTavernHelperCompat_ACU, formatHostCapabilities_ACU } from '../../.
       }
 
       // [重构] 调用 service 层的 evaluateNewMessageAction_ACU 进行决策
+      if (!canProcessEvent()) return;
       const result = evaluateNewMessageAction_ACU(
           liveChat,
           isAutoUpdatingCard_ACU,
