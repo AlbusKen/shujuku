@@ -477,8 +477,8 @@ describe('updateCustomTableExports_ACU', () => {
       const createdEntries = mockCreateLorebookEntries.mock.calls[0][1];
       expect(createdEntries).toEqual(expect.arrayContaining([
         expect.objectContaining({ comment: 'TavernDB-ACU-CustomExport-关系档案-表头', type: 'constant' }),
-        expect.objectContaining({ comment: 'TavernDB-ACU-CustomExport-关系档案-1', keys: ['艾琳'], type: 'keyword', content: '| 艾琳 | 搭档 |\n' }),
-        expect.objectContaining({ comment: 'TavernDB-ACU-CustomExport-关系档案-2', keys: ['布莱恩'], type: 'keyword', content: '| 布莱恩 | 对手 |\n' }),
+        expect.objectContaining({ comment: 'TavernDB-ACU-CustomExport-关系档案-1', keys: ['艾琳'], type: 'selective', content: '| 艾琳 | 搭档 |\n' }),
+        expect.objectContaining({ comment: 'TavernDB-ACU-CustomExport-关系档案-2', keys: ['布莱恩'], type: 'selective', content: '| 布莱恩 | 对手 |\n' }),
       ]));
       expect(createdEntries.some((entry: any) => String(entry.comment).includes('人物关系表-'))).toBe(false);
     });
@@ -628,6 +628,64 @@ describe('updateCustomTableExports_ACU', () => {
 
   // ═══ keyword 类型条目 ═══
   describe('keyword 类型条目', () => {
+    it.each([
+      { label: '按行拆分', splitByRow: true, extraIndexEnabled: false, sql: false },
+      { label: '整表合并', splitByRow: false, extraIndexEnabled: false, sql: false },
+      { label: '附加索引主条目', splitByRow: false, extraIndexEnabled: true, sql: false },
+      { label: 'SQL 模板', splitByRow: false, extraIndexEnabled: false, sql: true },
+    ])('$label：纪要常量与关键词往返导出使用合法宿主类型且不改配置', async (branch) => {
+      const config = {
+        enabled: true, splitByRow: branch.splitByRow, entryName: '纪要', entryType: 'constant',
+        keywords: branch.splitByRow ? '关键词' : '事件甲',
+        extraIndexEnabled: branch.extraIndexEnabled, extraIndexEntryName: '纪要索引',
+        extraIndexColumns: ['关键词'], sqlInjectionTemplate: branch.sql ? 'SELECT * FROM chronicle;' : '',
+      };
+      const mergedData = {
+        sheet_chronicle: {
+          name: '纪要表', content: [['row_id', '关键词', '内容'], ['1', '事件甲', '纪要正文']],
+          exportConfig: config,
+        },
+      };
+      const unrelated = { uid: 1, comment: '用户自建条目', type: 'constant' };
+      let storedEntries: any[] = [unrelated];
+      let nextUid = 2;
+      mockSettings.storageMode = branch.sql ? 'sqlite' : 'native';
+      mockGetSortedSheetKeys.mockReturnValue(['sheet_chronicle']);
+      mockEnsureExportConfigDefaults.mockImplementation((raw: any) => ({
+        preventRecursion: true, injectionTemplate: '', extraIndexColumnModes: {},
+        extraIndexInjectionTemplate: '', ...raw,
+      }));
+      mockGetLorebookEntries.mockImplementation(async () => storedEntries);
+      mockDeleteLorebookEntries.mockImplementation(async (_book: string, uids: any[]) => {
+        storedEntries = storedEntries.filter(entry => !uids.includes(entry.uid));
+        return {};
+      });
+      mockCreateLorebookEntries.mockImplementation(async (_book: string, entries: any[]) => {
+        // 模拟宿主契约校验，非法 keyword 必须导致用例失败，而不是由宽松 mock 吞掉。
+        expect(entries.every(entry => ['constant', 'selective', 'vectorized'].includes(entry.type))).toBe(true);
+        storedEntries.push(...entries.map(entry => ({ ...entry, uid: nextUid++ })));
+        return {};
+      });
+      mockSetLorebookEntries.mockImplementation(async (_book: string, patches: any[]) => {
+        storedEntries = storedEntries.map(entry => ({ ...entry, ...patches.find(patch => patch.uid === entry.uid) }));
+        return {};
+      });
+
+      for (const configuredType of ['constant', 'keyword', 'constant']) {
+        config.entryType = configuredType;
+        await updateCustomTableExports_ACU(mergedData);
+        const mainComment = branch.splitByRow ? 'TavernDB-ACU-CustomExport-纪要-1'
+          : branch.extraIndexEnabled || branch.sql ? 'TavernDB-ACU-CustomExport-纪要' : '纪要';
+        const mainEntries = storedEntries.filter(entry => entry.comment === mainComment);
+        expect(mainEntries).toHaveLength(1);
+        expect(mainEntries[0]).toMatchObject({
+          type: configuredType === 'keyword' ? 'selective' : 'constant', keys: ['事件甲'],
+        });
+        expect(config.entryType).toBe(configuredType);
+        expect(storedEntries).toContainEqual(unrelated);
+      }
+    });
+
     it('keyword 类型无关键词时跳过', async () => {
       const mergedData: any = {
         sheet_0: {

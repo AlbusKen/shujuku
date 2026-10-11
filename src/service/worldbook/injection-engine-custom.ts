@@ -321,6 +321,8 @@ export function __resetCustomTableExportStateForTests_ACU(): void {
               if (mainEntryDisabled && !hasExtraIndexEnabled) return;
 
               const config = ensureExportConfigDefaults_ACU(table.exportConfig, table.name || sheetKey);
+              // 表格配置的 keyword 对应宿主 API 的 selective；仅转换导出值，不改模板或归档。
+              const entryType = config.entryType === 'keyword' ? 'selective' : (config.entryType || 'constant');
               const tableName = table.name;
               const sqlInjectionTemplate = isSqliteMode() && typeof config.sqlInjectionTemplate === 'string'
                   ? config.sqlInjectionTemplate.trim()
@@ -391,7 +393,7 @@ export function __resetCustomTableExportStateForTests_ACU(): void {
                       content: sqlInjectionTemplate,
                       keys,
                       enabled: true,
-                      type: config.entryType || 'constant',
+                      type: entryType,
                       prevent_recursion: config.preventRecursion !== false,
                       order: mainOrder,
                   }, entryPlacement));
@@ -488,7 +490,7 @@ export function __resetCustomTableExportStateForTests_ACU(): void {
                       postCreateOrderFixPlan.push({ comment: fullComment, order: dataOrder, placement: entryPlacement });
                       rowEntries.push(applyPlacementToEntry_ACU({
                           comment: fullComment, content: finalContent, keys: keys, enabled: true,
-                          type: config.entryType || 'constant', prevent_recursion: config.preventRecursion !== false, order: dataOrder
+                          type: entryType, prevent_recursion: config.preventRecursion !== false, order: dataOrder
                       }, entryPlacement));
                   });
 
@@ -562,7 +564,7 @@ export function __resetCustomTableExportStateForTests_ACU(): void {
                       postCreateOrderFixPlan.push({ comment: fullComment, order: cursor, placement: entryPlacement });
                       blockEntries.push(applyPlacementToEntry_ACU({
                           comment: fullComment, content: mainContent, keys: keys, enabled: true,
-                          type: config.entryType || 'constant', prevent_recursion: config.preventRecursion !== false, order: cursor++
+                          type: entryType, prevent_recursion: config.preventRecursion !== false, order: cursor++
                       }, entryPlacement));
 
                       if (useWrapperBlock && hasWrapperAfter) {
@@ -597,11 +599,11 @@ export function __resetCustomTableExportStateForTests_ACU(): void {
                   if (config.entryType === 'keyword' && keys.length === 0) return;
 
                   // [合并逻辑] 检查是否可以合并
-                  const mergeKey = `${entryName}|${config.entryType || 'constant'}|${keys.sort().join(',')}${isImport ? `|${sheetKey}` : ''}`;
+                  const mergeKey = `${entryName}|${entryType}|${keys.sort().join(',')}${isImport ? `|${sheetKey}` : ''}`;
                   
                   if (!mergedEntriesMap[mergeKey]) {
                       mergedEntriesMap[mergeKey] = {
-                          entryName: entryName, entryType: config.entryType || 'constant', keywords: keys,
+                          entryName: entryName, entryType: entryType, keywords: keys,
                           preventRecursion: config.preventRecursion !== false, sheetKeys: [], tableContents: [], tableName: String(tableName || sheetKey),
                           injectionTemplate: config.injectionTemplate, wrapperParts: wrapperParts,
                           useWrapperEntries: useWrapperEntries, entryPlacement: entryPlacement
