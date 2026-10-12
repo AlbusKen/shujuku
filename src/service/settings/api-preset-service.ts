@@ -34,38 +34,43 @@ import {
 export type ApiPresetApiMode_ACU = 'custom' | 'tavern';
 
 /**
- * 提示词后处理（SillyTavern custom_prompt_post_processing）可选值。
- * '' = 未选择：请求体不带该字段，酒馆后端原样透传消息（保留中部的 system 角色）。
- * 缺失/非法值统一归一为 'merge_tools'；插件直连不应用此选项。
+ * 提示词后处理的用户语义值，仅酒馆渠道使用；插件直连保持原始消息。
+ *
+ * 五个选项：
+ * - ''：未选择，不发送 custom_prompt_post_processing，保留消息原状；
+ * - merge_tools：合并连续同角色消息，并保留原生工具事务（默认值）；
+ * - semi：整理对话交替，但不强制补 user 占位；
+ * - strict：整理对话交替，并保证 system 后首先出现 user；
+ * - single：无工具流量时压缩为一条 user 消息。
+ *
+ * semi_tools/strict_tools 是旧线格式，读取时映射回语义值；请求出口会按实际
+ * 原生工具流量自动升级。merge_tools 同时是安全默认值，避免工具事务被后处理剥离。
  */
-export type ApiPromptPostProcessingValue_ACU =
-  | ''
-  | 'merge'
-  | 'semi'
-  | 'strict'
-  | 'single'
-  | 'merge_tools'
-  | 'semi_tools'
-  | 'strict_tools';
+export type ApiPromptPostProcessingValue_ACU = '' | 'merge_tools' | 'semi' | 'strict' | 'single';
 
 export const API_PROMPT_POST_PROCESSING_VALUES_ACU: readonly ApiPromptPostProcessingValue_ACU[] = [
   '',
-  'merge',
+  'merge_tools',
   'semi',
   'strict',
   'single',
-  'merge_tools',
-  'semi_tools',
-  'strict_tools',
 ];
 
 export const API_PROMPT_POST_PROCESSING_DEFAULT_ACU: ApiPromptPostProcessingValue_ACU = 'merge_tools';
 
+const LEGACY_API_PROMPT_POST_PROCESSING_VALUES_ACU: Readonly<Record<string, ApiPromptPostProcessingValue_ACU>> = {
+  merge: 'merge_tools',
+  semi_tools: 'semi',
+  strict_tools: 'strict',
+};
+
 export function normalizePromptPostProcessing_ACU(value: unknown): ApiPromptPostProcessingValue_ACU {
-  // 显式空串保留；缺失/非字符串/非法值使用含工具的合并模式。
+  // 显式空串保留；缺失/非字符串/非法值使用合并模式，工具流量后续自动升级。
   if (typeof value !== 'string') return API_PROMPT_POST_PROCESSING_DEFAULT_ACU;
   const normalized = value.trim();
   if (normalized === '') return '';
+  const legacy = LEGACY_API_PROMPT_POST_PROCESSING_VALUES_ACU[normalized];
+  if (legacy) return legacy;
   return (API_PROMPT_POST_PROCESSING_VALUES_ACU as readonly string[]).includes(normalized)
     ? (normalized as ApiPromptPostProcessingValue_ACU)
     : API_PROMPT_POST_PROCESSING_DEFAULT_ACU;

@@ -146,13 +146,41 @@ describe('api preset draft helpers', () => {
       tavernProfile: '',
     });
 
-    // 草稿与运行时共同默认 merge_tools，显式空串仍单独保留。
+    // 草稿与运行时共同保留安全的 merge_tools 默认。
     expect(draft.promptPostProcessing).toBe('merge_tools');
     expect(draft.customApiFormat).toBe('openai_compat');
 
     const preset = apiPresetFromDraft(draft);
     expect(preset.apiConfig.promptPostProcessing).toBe('merge_tools');
     expect(preset.apiConfig.customApiFormat).toBe('openai_compat');
+  });
+
+  it('旧版含工具后处理映射回五个语义选项', () => {
+    const cases = [
+      ['merge_tools', 'merge_tools'],
+      ['semi_tools', 'semi'],
+      ['strict_tools', 'strict'],
+    ] as const;
+
+    for (const [legacy, semantic] of cases) {
+      const draft = apiPresetDraftFromPreset({
+        name: 'legacy-tools',
+        apiMode: 'custom',
+        apiConfig: {
+          url: 'https://legacy.test',
+          apiKey: '',
+          model: 'm',
+          useMainApi: false,
+          max_tokens: 1000,
+          temperature: 1,
+          promptPostProcessing: legacy,
+        } as any,
+        tavernProfile: '',
+      });
+      const preset = apiPresetFromDraft(draft);
+      expect(draft.promptPostProcessing).toBe(semantic);
+      expect(preset.apiConfig.promptPostProcessing).toBe(semantic);
+    }
   });
 
   it('提示词后处理与接口协议在草稿转换中往返保留，显式「未选择」（空串）不被改写', () => {

@@ -168,7 +168,7 @@
         </AcuFormRow>
         <AcuFormRow
           label="提示词后处理"
-          hint="仅酒馆渠道生效，默认合并相同角色连续发言（含工具）。插件直连保留消息原序，不合并消息，支持工具并保留 system 身份。"
+          hint="仅酒馆渠道生效，默认合并连续同角色；实际请求带原生工具时会自动使用含工具线格式。插件直连保留消息原序、工具事务和 system 身份。"
         >
           <AcuSelect
             :options="promptPostProcessingOptions"
@@ -274,32 +274,13 @@ const connectionModeOptions: AcuSegmentedOption[] = [
   { value: "custom", label: "自定义" },
   { value: "tavern", label: "酒馆预设" },
 ];
-// 选项与 SillyTavern「提示词后处理」下拉一致；默认 merge_tools。
+// UI 只暴露五个语义；*_tools 由请求出口按实际工具流量自动派生。
 const promptPostProcessingOptions: AcuSelectOption[] = [
   { value: "", label: "未选择" },
-  {
-    value: "merge_tools",
-    label: "合并相同角色连续的发言（含工具）",
-    group: "With Tools",
-  },
-  {
-    value: "semi_tools",
-    label: "半严格（强制对话角色交替）（含工具）",
-    group: "With Tools",
-  },
-  {
-    value: "strict_tools",
-    label: "严格（强制对话角色交替、用户最先）（含工具）",
-    group: "With Tools",
-  },
-  { value: "merge", label: "合并相同角色连续的发言", group: "No Tools" },
-  { value: "semi", label: "半严格（强制对话角色交替）", group: "No Tools" },
-  {
-    value: "strict",
-    label: "严格（强制对话角色交替、用户最先）",
-    group: "No Tools",
-  },
-  { value: "single", label: "单一用户消息（无工具）" },
+  { value: "merge_tools", label: "合并相同角色连续的发言" },
+  { value: "semi", label: "半严格（强制对话角色交替）" },
+  { value: "strict", label: "严格（强制对话角色交替、用户最先）" },
+  { value: "single", label: "单一用户消息" },
 ];
 // 接口协议选项（对齐 TT 主 API 四个「自定义」选项，custom_api_format 契约）；值集合以
 // api-preset-service 的 CUSTOM_API_FORMAT_VALUES_ACU 为唯一来源，此处只补人类可读标签。
