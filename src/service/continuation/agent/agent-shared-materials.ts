@@ -209,7 +209,7 @@ export function stripUnownedSubagentPrompt_ACU(
 export async function renderFallbackAgentSnapshot_ACU(settings: ContinuationSettings_ACU, context: AgentResolveContext_ACU, toolMode: AgentToolMode_ACU): Promise<string> {
   const worldbook = context.worldbook ?? buildEmptyAgentWorldbookSnapshot_ACU(false);
   const start = context.settledThroughIndex + 1;
-  const last = context.chat.length - 1;
+  const last = (context.storyChat ?? context.chat).length - 1;
   const rendered = await renderContinuationPrompt_ACU(
     [{ role: 'user', content: AGENT_RUNTIME_SNAPSHOT_TEMPLATE_ACU, enabled: true, deletable: false, pinned: true }],
     {

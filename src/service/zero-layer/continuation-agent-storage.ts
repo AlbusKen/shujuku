@@ -124,7 +124,8 @@ export function createZeroLayerContinuationAgentStorage_ACU(
     captureBaseline: candidate => {
       if (candidate !== chat) throw new ZeroLayerError_ACU('scope-changed', '资料基线不属于本请求。');
       refresh();
-      const baseline = { identity: store.getChatIdentity(), floors: chat.map(message => ({ message,
+      const baseline = { identity: store.getChatIdentity(), floors: chat.map(message => ({
+        floorIdentity: JSON.stringify([message?.message_id, message?.is_user, message?.is_system]),
         swipeId: readMessageSwipeId_ACU(message), existed: Object.prototype.hasOwnProperty.call(message, AGENT_MODULE_FIELD_ACU),
         content: JSON.stringify(message[AGENT_MODULE_FIELD_ACU]) })) };
       baselines.set(baseline, frameFingerprint());

@@ -5404,7 +5404,7 @@ describe('填表请求 V2 最终写入边界', () => {
     mocks.settings.dataIsolationCode = '';
   });
 
-  it.each(['replace', 'swipe', 'body', 'cancel'] as const)(
+  it.each(['missing', 'user', 'cancel'] as const)(
     '异步候选校验期间 %s 时不写聊天帧、不保存', async changed => {
       const { captureAiMessageSnapshot_ACU } = await import('../../../src/data/gateways/chat-message-snapshot');
       const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
@@ -5416,9 +5416,8 @@ describe('填表请求 V2 最终写入边界', () => {
       let changedDuringValidation = false;
       mocks.loadReplayDetailed.mockImplementation(async () => {
         changedDuringValidation = true;
-        if (changed === 'replace') mocks.chat[0] = { ...message };
-        if (changed === 'swipe') message.swipe_id = 1;
-        if (changed === 'body') message.mes = '重新生成的正文';
+        if (changed === 'missing') delete mocks.chat[0];
+        if (changed === 'user') message.is_user = true;
         if (changed === 'cancel') controller.abort();
         return { baseKind: 'full_checkpoint', data };
       });
@@ -5431,9 +5430,108 @@ describe('填表请求 V2 最终写入边界', () => {
       })).rejects.toMatchObject({ name: changed === 'cancel' ? 'AbortError' : 'TableFillTargetStaleError' });
       expect(changedDuringValidation).toBe(true);
       expect(JSON.stringify(message.TavernDB_ACU_IsolatedData)).toBe(isolatedBefore);
-      expect(JSON.stringify(mocks.chat[0].TavernDB_ACU_IsolatedData)).toBe(isolatedBefore);
+      if (mocks.chat[0]) expect(JSON.stringify(mocks.chat[0].TavernDB_ACU_IsolatedData)).toBe(isolatedBefore);
       expect(mocks.saveChat).not.toHaveBeenCalled();
       expect(mocks.saveChatStrict).not.toHaveBeenCalled();
     },
   );
+  it.each(['replace', 'swipe', 'body'] as const)(
+    '异步候选校验期间同楼层 %s 后仍写入当前对象且保留正文', async changed => {
+      const { captureAiMessageSnapshot_ACU } = await import('../../../src/data/gateways/chat-message-snapshot');
+      const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+      const message = seedFrame({ manualRefillProgress: undefined });
+      message.mes = '启动正文';
+      message.TavernDB_ACU_Identity = '旧隔离标识';
+      const targetSnapshot = captureAiMessageSnapshot_ACU(mocks.chat, 0);
+      const data = { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } as any;
+      mocks.loadReplayDetailed.mockImplementation(async () => {
+        if (changed === 'replace') mocks.chat[0] = { ...mocks.chat[0], mes: '第三方新正文' };
+        else Object.assign(mocks.chat[0], { mes: '第三方新正文', ...(changed === 'swipe' ? { swipe_id: 1 } : {}) });
+        return { baseKind: 'full_checkpoint', data };
+      });
+      const result = await persistTableMutationLogV2_ACU({
+        targetMessageIndex: 0, source: 'group_fill', afterData: data,
+        operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_a', sheet: sheetA, reason: 'system' }],
+        filledSheetKeys: ['sheet_a'], candidateChangedSheetKeys: ['sheet_a'],
+        transactionContext: makeTransaction(), assumeCommitLock: true, targetSnapshot,
+      });
+      expect(result).toMatchObject({ saved: true, messageIndex: 0 });
+      const entries = mocks.chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.logEntries;
+      expect(entries).toHaveLength(2);
+      expect(entries.at(-1)).toEqual(result.entry);
+      expect(mocks.chat[0].TavernDB_ACU_Identity).toBeUndefined();
+      expect(mocks.chat[0].mes).toBe('第三方新正文');
+      expect(targetSnapshot.body).toBe('启动正文');
+      expect(mocks.saveChat).toHaveBeenCalledOnce();
+    },
+  );
+  it.each([false, true])('保存期间重建同楼层对象后保留正文并正确处理保存结果（失败=%s）', async failed => {
+    const { captureAiMessageSnapshot_ACU } = await import('../../../src/data/gateways/chat-message-snapshot');
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+    const message = seedFrame({ manualRefillProgress: undefined });
+    message.mes = '启动正文';
+    message.TavernDB_ACU_Identity = '旧隔离标识';
+    const before = structuredClone(message.TavernDB_ACU_IsolatedData);
+    const targetSnapshot = captureAiMessageSnapshot_ACU(mocks.chat, 0);
+    const data = { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } as any;
+    const saveError = new Error('save window failed');
+    mocks.loadReplayDetailed.mockResolvedValue({ baseKind: 'full_checkpoint', data });
+    mocks.saveChat.mockImplementationOnce(async () => {
+      mocks.chat[0] = { ...structuredClone(mocks.chat[0]), mes: '保存期间第三方正文' };
+      if (failed) throw saveError;
+    });
+    const pending = persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0, source: 'group_fill', afterData: data,
+      operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_a', sheet: sheetA, reason: 'system' }],
+      filledSheetKeys: ['sheet_a'], candidateChangedSheetKeys: ['sheet_a'],
+      transactionContext: makeTransaction(), assumeCommitLock: true, targetSnapshot,
+    });
+    if (failed) {
+      await expect(pending).rejects.toBe(saveError);
+      expect(mocks.chat[0].TavernDB_ACU_IsolatedData).toEqual(before);
+      expect(mocks.chat[0].TavernDB_ACU_Identity).toBe('旧隔离标识');
+    } else {
+      expect(await pending).toMatchObject({ saved: true, messageIndex: 0 });
+      expect(mocks.chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toHaveLength(2);
+      expect(mocks.chat[0].TavernDB_ACU_Identity).toBeUndefined();
+    }
+    expect(mocks.chat[0]).not.toBe(message);
+    expect(mocks.chat[0].mes).toBe('保存期间第三方正文');
+    expect(targetSnapshot.body).toBe('启动正文');
+    expect(mocks.saveChat).toHaveBeenCalledOnce();
+  });
+
+
+  it.each(['private', 'chat'] as const)('保存窗口发生 %s 冲突时拒绝确认且不覆盖外部状态', async changed => {
+    const { captureAiMessageSnapshot_ACU } = await import('../../../src/data/gateways/chat-message-snapshot');
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+    const previousChatIdentity = mocks.chatIdentity;
+    const message = seedFrame({ manualRefillProgress: undefined });
+    message.mes = '启动正文';
+    message.TavernDB_ACU_Identity = '旧隔离标识';
+    const targetSnapshot = captureAiMessageSnapshot_ACU(mocks.chat, 0);
+    const data = { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } as any;
+    let savedState = '';
+    mocks.loadReplayDetailed.mockResolvedValue({ baseKind: 'full_checkpoint', data });
+    mocks.saveChat.mockImplementationOnce(async () => {
+      mocks.chat[0] = { ...structuredClone(mocks.chat[0]), mes: '外部最新正文' };
+      if (changed === 'private') mocks.chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.headRevision = 'external-revision';
+      else mocks.chatIdentity = 'save-window-other-chat';
+      savedState = JSON.stringify(mocks.chat[0].TavernDB_ACU_IsolatedData);
+    });
+    try {
+      await expect(persistTableMutationLogV2_ACU({
+        targetMessageIndex: 0, source: 'group_fill', afterData: data,
+        operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_a', sheet: sheetA, reason: 'system' }],
+        filledSheetKeys: ['sheet_a'], candidateChangedSheetKeys: ['sheet_a'],
+        transactionContext: makeTransaction(), assumeCommitLock: true, targetSnapshot,
+      })).rejects.toThrow('save readback conflict');
+      expect(JSON.stringify(mocks.chat[0].TavernDB_ACU_IsolatedData)).toBe(savedState);
+      expect(mocks.chat[0].mes).toBe('外部最新正文');
+      expect(mocks.chat[0].TavernDB_ACU_Identity).toBeUndefined();
+      expect(mocks.saveChat).toHaveBeenCalledOnce();
+    } finally { mocks.chatIdentity = previousChatIdentity; }
+  });
+
+
 });

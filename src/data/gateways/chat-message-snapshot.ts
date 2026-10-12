@@ -1,4 +1,4 @@
-/** 请求内只读身份快照；不生成持久化字段，也不把隔离区标识当作消息身份。 */
+/** 请求内楼层锚点与启动正文快照；正文、对象引用不参与运行结果的定位。 */
 export interface AiMessageSnapshot_ACU {
   readonly index: number;
   readonly message: any;
@@ -9,7 +9,7 @@ export interface AiMessageSnapshot_ACU {
 export class TableFillTargetStaleError_ACU extends Error {
   readonly code = 'table_fill_target_stale';
   constructor() {
-    super('填表目标消息或内容版本已变化，已拒绝旧请求结果。请重新执行填表。');
+    super('填表目标楼层不存在或已不是 AI 楼层，已拒绝旧请求结果。请重新执行填表。');
     this.name = 'TableFillTargetStaleError';
   }
 }
@@ -37,8 +37,7 @@ export function assertAiMessageSnapshotCurrent_ACU(
   chat: any[], snapshot: AiMessageSnapshot_ACU, targetIndex = snapshot.index,
 ): void {
   const message = chat[snapshot.index];
-  if (targetIndex !== snapshot.index || message !== snapshot.message || message?.is_user
-    || swipeId_ACU(message) !== snapshot.swipeId || body_ACU(message) !== snapshot.body) {
+  if (targetIndex !== snapshot.index || !Number.isInteger(snapshot.index) || snapshot.index < 0 || !message || message.is_user) {
     throw new TableFillTargetStaleError_ACU();
   }
 }

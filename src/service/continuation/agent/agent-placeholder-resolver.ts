@@ -73,6 +73,8 @@ export interface AgentContextRules_ACU {
 
 export interface AgentResolveContext_ACU {
   chat: any[];
+  /** 运行起点的正文读集；资料字段仍从 chat 实时回读。 */
+  storyChat?: any[];
   moduleSnapshot: AgentModuleSnapshot_ACU;
   settledThroughIndex: number;
   execution: ContinuationAgentExecutionContext_ACU;
@@ -96,6 +98,7 @@ export interface AgentResolveContext_ACU {
 /** 正文渲染的最小入参：AgentResolveContext 结构性满足，大纲侧可用轻量对象直接调用。 */
 export interface AgentStoryFloorSource_ACU {
   chat: any[];
+  storyChat?: any[];
   storyWindowFloors?: number;
   storyTailFloors?: number;
   contextRules?: AgentContextRules_ACU;
@@ -116,7 +119,8 @@ interface AgentStoryFloor_ACU {
 }
 
 function listAgentStoryFloors_ACU(source: AgentStoryFloorSource_ACU): AgentStoryFloor_ACU[] {
-  const chat = Array.isArray(source.chat) ? source.chat : [];
+  const messages = source.storyChat ?? source.chat;
+  const chat = Array.isArray(messages) ? messages : [];
   return chat
     .map((message, index) => ({ index, text: messageText_ACU(message, source.contextRules) }))
     .filter(item => chat[item.index] && !chat[item.index].is_user && item.text);
@@ -341,7 +345,7 @@ export function resolveAgentUnsettledStoryWindow_ACU(context: AgentResolveContex
   const floors = windowFloors.filter(isUnsettled);
   const hiddenCount = unsettledFloors.length - floors.length;
   let startIndex = hiddenCount > 0
-    ? floors[0]?.index ?? context.chat.length
+    ? floors[0]?.index ?? (context.storyChat ?? context.chat).length
     : Math.max(boundary, context.settledThroughIndex + 1);
   // 最近窗口已完成后，只处理其后新增的正文；保留连续水位与窗口完成区间的区别。
   if (floors.length && completedRange && windowFloors[0].index >= completedRange.rangeStartIndex
@@ -349,7 +353,7 @@ export function resolveAgentUnsettledStoryWindow_ACU(context: AgentResolveContex
     && floors[0].index > completedRange.rangeEndIndex) {
     startIndex = completedRange.rangeEndIndex + 1;
   }
-  if (!floors.length) startIndex = Math.max(boundary, windowFloors[0]?.index ?? context.chat.length);
+  if (!floors.length) startIndex = Math.max(boundary, windowFloors[0]?.index ?? (context.storyChat ?? context.chat).length);
   return { floors, hiddenCount, startIndex };
 }
 
@@ -367,7 +371,7 @@ function renderUnsettledWindow_ACU(selection: ReturnType<typeof resolveAgentUnse
 
 /** 已发生正文只注入可读窗口内的 AI 楼层，已结算与未结算两段共用同一个上限。 */
 export function renderAgentStoryText_ACU(context: AgentResolveContext_ACU): string {
-  if (!context.chat.length) return '当前聊天还没有任何楼层，也就没有已经发生的正文。';
+  if (!(context.storyChat ?? context.chat).length) return '当前聊天还没有任何楼层，也就没有已经发生的正文。';
   const allFloors = listAgentStoryFloors_ACU(context);
   if (!allFloors.length) return '当前聊天还没有 AI 产出的正文楼层。';
   const selection = resolveAgentUnsettledStoryWindow_ACU(context);
@@ -408,7 +412,7 @@ export function buildRecentWorldbookScanText_ACU(chat: readonly any[], rules?: A
 }
 
 export function buildAgentWorldbookScanText_ACU(context: AgentResolveContext_ACU): string {
-  return buildRecentWorldbookScanText_ACU(context.chat, context.contextRules);
+  return buildRecentWorldbookScanText_ACU(context.storyChat ?? context.chat, context.contextRules);
 }
 
 /** 四档节奏标签的语义与写作指导。低压轮的约束写成禁令，否则模型会习惯性地往每一轮里塞冲突。 */

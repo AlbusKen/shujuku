@@ -25,6 +25,7 @@ function repairedPending_ACU(fixes: AgentPendingFix_ACU[], receipt: AgentModuleF
 export async function correctAgentMaterials_ACU(input: {
   action: AgentCorrectMaterialsAction_ACU;
   chat: any[];
+  storyChat?: any[];
   conversation: AgentConversationSnapshot_ACU;
   isCurrent: () => boolean;
   completedStages: readonly number[];
@@ -37,10 +38,10 @@ export async function correctAgentMaterials_ACU(input: {
   const reject = (reason: string) => ({ status: 'rejected' as const, reason, ...(sqlReceipt ? { sqlReceipt } : {}) });
   const targetIndex = chat.length - 1;
   const target = chat[targetIndex];
-  const dispatchTarget = { message: target, swipeId: readMessageSwipeId_ACU(target) };
+  const dispatchTarget = { index: targetIndex, swipeId: readMessageSwipeId_ACU(target) };
   const current = () => input.isCurrent() && storage.isActive(chat) && chat.length - 1 === targetIndex
-    && chat[targetIndex] === target && readMessageSwipeId_ACU(target) === dispatchTarget.swipeId;
-  if (!current() || !agentStoryEvidenceFloorIndexes_ACU(chat).has(targetIndex)) return reject('当前聊天或承载正文楼层不可用');
+    && !!chat[targetIndex] && !chat[targetIndex].is_user && readMessageSwipeId_ACU(chat[targetIndex]) === dispatchTarget.swipeId;
+  if (!current() || !agentStoryEvidenceFloorIndexes_ACU(input.storyChat ?? chat).has(targetIndex)) return reject('当前聊天或承载正文楼层不可用');
   let folded = storage.readFold(chat);
   if (folded.salvaged || folded.candidates.some(item => !item.valid)) return reject('资料帧损坏，不能在抢救结果上纠正');
   const revisionWindow: AgentModuleRevisionWindow_ACU = {};
@@ -51,11 +52,12 @@ export async function correctAgentMaterials_ACU(input: {
     const users = input.conversation.messages.filter(message => message.kind === 'user');
     const user = users[users.length - 1];
     if (!user || user.id !== action.userMessageId) return reject('追溯起点必须依据最新真实用户消息');
-    if (!agentStoryEvidenceFloorIndexes_ACU(chat).has(action.settlementStartIndex)) return reject('追溯起点必须是已存在的 AI 正文楼层');
+    if (!agentStoryEvidenceFloorIndexes_ACU(input.storyChat ?? chat).has(action.settlementStartIndex)) return reject('追溯起点必须是已存在的 AI 正文楼层');
     if (action.settlementStartIndex < (folded.snapshot.settlementBoundary?.startIndex ?? 0)) return reject('不能把已跳过历史隐式恢复为待结算，请先明确恢复范围');
   }
   if (action.sql) {
     sqlReceipt = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex, dispatchTarget,
+      ...(input.storyChat ? { storyChat: input.storyChat } : {}),
       sql: action.sql, role: 'main', completedStages: input.completedStages, isCurrent: current, storage, revisionWindow });
     const operationPaths = new Set((sqlReceipt.operationOnlyConfirmed ?? []).flatMap(proof => proof.rejectedPaths));
     operationOnly = sqlReceipt.status === 'rejected' && operationPaths.size > 0

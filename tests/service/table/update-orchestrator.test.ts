@@ -1543,16 +1543,13 @@ describe('executeCardUpdateCore_ACU', () => {
     mockShouldRotateBoundaryCheckpoint.mockReturnValue(false);
   });
 
-  it.each(['replace', 'delete', 'swipe', 'body', 'missing', 'user'] as const)(
+  it.each(['missing', 'user'] as const)(
     'AI 等待期间目标 %s 时拒绝旧结果且不解析、不保存、不重试', async changed => {
       const chat: any[] = [{ is_user: false, mes: '原回复', swipe_id: 0 }, { is_user: false, mes: '后续回复' }];
       mockGetChatArray_ACU.mockReturnValue(chat);
       mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
       mockCallCustomOpenAI.mockImplementationOnce(async () => {
-        if (changed === 'replace') chat[0] = { ...chat[0] };
-        if (changed === 'delete') chat.splice(0, 1);
-        if (changed === 'swipe') chat[0].swipe_id = 1;
-        if (changed === 'body') chat[0].mes = '重新生成的回复';
+
         if (changed === 'missing') chat.length = 0;
         if (changed === 'user') chat[0].is_user = true;
         return '<tableEdit>有效内容</tableEdit>';
@@ -1564,6 +1561,25 @@ describe('executeCardUpdateCore_ACU', () => {
       expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
     },
   );
+
+  it.each(['replace', 'swipe', 'body'] as const)('AI 等待期间同楼层 %s 后仍保存，输入保持启动正文', async changed => {
+    const chat: any[] = [{ is_user: false, mes: '启动正文', swipe_id: 0 }];
+    mockGetChatArray_ACU.mockReturnValue(chat);
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
+    mockCallCustomOpenAI.mockImplementationOnce(async () => {
+      if (changed === 'replace') chat[0] = { ...chat[0], mes: '第三方新正文' };
+      if (changed === 'swipe') Object.assign(chat[0], { swipe_id: 1, mes: '第三方新正文' });
+      if (changed === 'body') chat[0].mes = '第三方新正文';
+      return '<tableEdit>有效内容</tableEdit>';
+    });
+    mockParseAndApplyTableEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'] });
+    mockCheckIfFirstTimeInit.mockResolvedValue(false);
+    const result = await executeCardUpdateCore_ACU(chat, 0, false, 'auto_standard', false, ['sheet_0'], null);
+    expect(result.success, result.error).toBe(true);
+    expect(mockPrepareAIInput.mock.calls[0][0][0].mes).toBe('启动正文');
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledWith(expect.objectContaining({ targetMessageIndex: 0 }));
+    expect(chat[0].mes).toBe('第三方新正文');
+  });
 
   it.each([0, -1])('目标未变而追加新楼时仍提交到请求前解析的目标（index=%s）', async index => {
     const chat: any[] = [{ is_user: false, mes: '原回复' }];

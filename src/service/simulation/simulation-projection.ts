@@ -60,11 +60,13 @@ export function readWorldSimulationMessageContent_ACU(message: Record<string, un
 }
 
 export function writeWorldSimulationActiveSwipeContent_ACU(message: Record<string, unknown>, content: string): void {
+  const swipeId = typeof message.swipe_id === 'number' && Number.isInteger(message.swipe_id) && message.swipe_id >= 0 ? message.swipe_id : 0;
+  if (Array.isArray(message.swipes) && swipeId >= message.swipes.length) {
+    throw new Error('WORLD_SIMULATION_ACTIVE_SWIPE_INVALID');
+  }
   if (typeof message.mes === 'string' || typeof message.message !== 'string') message.mes = content;
   else message.message = content;
-  const swipeId = typeof message.swipe_id === 'number' && Number.isInteger(message.swipe_id) && message.swipe_id >= 0 ? message.swipe_id : 0;
   if (Array.isArray(message.swipes)) {
-    if (swipeId >= message.swipes.length) throw new Error('WORLD_SIMULATION_ACTIVE_SWIPE_INVALID');
     message.swipes[swipeId] = content;
   }
 }

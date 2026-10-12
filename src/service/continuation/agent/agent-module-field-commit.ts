@@ -532,9 +532,11 @@ export const hostAgentModuleCommitStorage_ACU: AgentModuleCommitStorage_ACU = {
 /** 同聊天串行；只有宿主保存成功且楼层重新折叠验证后签发 accepted。 */
 export function commitAgentModuleFieldWrites_ACU(input: {
   chat: any[];
+  /** 本轮启动正文读集；资料帧仍从当前聊天校验和保存。 */
+  storyChat?: any[];
   targetIndex: number;
-  /** 目标按聊天内楼层及 Swipe 绑定；正文改写不改变派工归属。 */
-  dispatchTarget?: { message: unknown; swipeId: string };
+  /** 目标按楼层编号绑定；Swipe 仅保护资料分桶，正文与消息对象不参与定位。 */
+  dispatchTarget?: { index: number; swipeId: string };
   sql: string;
   role: AgentModuleWriterRole_ACU;
   completedStages?: readonly number[];
@@ -549,7 +551,7 @@ export function commitAgentModuleFieldWrites_ACU(input: {
   const storage = input.storage ?? hostAgentModuleCommitStorage_ACU;
   const prior = queue_ACU.get(input.chat) ?? Promise.resolve();
   const run = prior.catch(() => {}).then(async (): Promise<AgentModuleFieldReceipt_ACU> => {
-    const dispatchTargetCurrent = () => !input.dispatchTarget || (input.chat[input.targetIndex] === input.dispatchTarget.message
+    const dispatchTargetCurrent = () => !input.dispatchTarget || (input.targetIndex === input.dispatchTarget.index
       && readMessageSwipeId_ACU(input.chat[input.targetIndex]) === input.dispatchTarget.swipeId);
     const isCurrent = () => (input.isCurrent?.() ?? true) && dispatchTargetCurrent();
     const parsed = parseAgentModuleSqlFieldWrites_ACU(input.sql, input.role);
@@ -566,7 +568,7 @@ export function commitAgentModuleFieldWrites_ACU(input: {
         : !target ? '目标消息不存在'
         : target.is_user === true ? '目标已不是 AI 正文'
         : input.targetIndex !== input.chat.length - 1 ? '末楼位置已变化'
-        : input.dispatchTarget && target !== input.dispatchTarget.message ? '目标消息对象已替换'
+        : input.dispatchTarget && input.targetIndex !== input.dispatchTarget.index ? '目标楼层编号已变化'
         : input.dispatchTarget && readMessageSwipeId_ACU(target) !== input.dispatchTarget.swipeId ? '目标 Swipe 已变化'
         : '派工目标已失效';
       receipt.rejected.push({ path: 'chat', reason: `当前聊天或目标楼层已变化：${cause}。停止旧任务，重新取得当前聊天与正文快照，不重发 SQL` });
@@ -614,7 +616,7 @@ export function commitAgentModuleFieldWrites_ACU(input: {
     // 可引用楼层上限取派工目标楼：结算分支本就以末楼为水位校验 delta，逐栏口径必须一致。
     // 只放宽引用上限，不推进结算水位；用户楼与不存在的楼仍由 evidence 集合拒绝。
     const evidenceThrough = Math.max(folded.snapshot.settledThroughIndex, input.targetIndex);
-    const plan = planAgentModuleFieldCommit_ACU(folded.snapshot, folded.fields, parsed.intents, input.role, input.completedStages, input.resolvePage, now, agentStoryEvidenceFloorIndexes_ACU(input.chat), evidenceThrough, input.revisionWindow);
+    const plan = planAgentModuleFieldCommit_ACU(folded.snapshot, folded.fields, parsed.intents, input.role, input.completedStages, input.resolvePage, now, agentStoryEvidenceFloorIndexes_ACU(input.storyChat ?? input.chat), evidenceThrough, input.revisionWindow);
     receipt.rejected.push(...plan.rejected);
     receipt.alreadySaved = plan.alreadySaved;
     if (!plan.batches.length) {

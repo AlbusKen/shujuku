@@ -1439,12 +1439,13 @@ describe('派工与写集落盘', () => {
     } finally { _set_SillyTavern_API_ACU(null as any); }
   });
 
-  it('模型等待期间第三方改写同一目标楼正文不影响派工提交与继续运行', async () => {
+  it.each(['新的正文版本', ''])('模型等待期间第三方重建同楼层正文为 %j 后仍提交，后续读取保持启动正文', async newBody => {
     const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');
     const { AGENT_MODULE_FIELD_ACU } = await import('../../../../src/service/continuation/agent/agent-model');
     const saveChat = vi.fn().mockResolvedValue(undefined);
     let lastChat: any[] = [];
     let calls = 0;
+    let startingBody = '';
     const h = harness_ACU({
       nativeTools: true,
       mainReplies: [
@@ -1455,8 +1456,9 @@ describe('派工与写集落盘', () => {
         lastChat = chat;
         _set_SillyTavern_API_ACU({ chat, saveChat } as any);
         if (calls++ === 0) {
-          chat[3].mes = '新的正文版本';
-          return nativeToolTurn_ACU('write_sql', { sql: "INSERT INTO hooks (id, summary, status, importance, planted_index, planned_payoff, expected_revision) VALUES ('H1', '剧情线索', 'planted', 'mid', 1, '后续回收', 0)" }, 'call-floor-content');
+          startingBody = chat[3].mes;
+          chat[3] = { ...chat[3], mes: newBody };
+          return nativeToolTurn_ACU('write_sql', { sql: "INSERT INTO hooks (id, summary, status, importance, planted_index, planned_payoff, expected_revision) VALUES ('H1', '剧情线索', 'planted', 'mid', 3, '后续回收', 0)" }, 'call-floor-content');
         }
         return JSON.stringify({ summary: '结束结算', delta: {} });
       },
@@ -1468,9 +1470,11 @@ describe('派工与写集落盘', () => {
       expect(readAgentModuleSnapshot_ACU(lastChat).hooks).toEqual(expect.arrayContaining([
         expect.objectContaining({ id: 'H1', summary: '剧情线索' }),
       ]));
-      expect(lastChat[3].mes).toBe('新的正文版本');
+      expect(lastChat[3].mes).toBe(newBody);
       expect(h.subCalls.length).toBeGreaterThan(1);
       expect(h.mainCalls.length).toBeGreaterThan(1);
+      expect(h.subCalls[1].map(message => message.content).join('\n')).toContain(startingBody);
+      expect(h.subCalls[1].map(message => message.content).join('\n')).not.toContain('新的正文版本');
       expect(readAgentSessionLog_ACU().some(entry => entry.title === '写入任务已失效')).toBe(false);
     } finally { _set_SillyTavern_API_ACU(null as any); }
   });

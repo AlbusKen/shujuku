@@ -679,13 +679,17 @@ export interface AgentModuleCommitResult_ACU {
 }
 
 /** 规划前固定聊天各楼资料字段；未暂存的旧楼仍可能在保存监听器中被改动。 */
+function agentModuleFloorIdentity_ACU(message: any): string {
+  return JSON.stringify([message?.message_id, message?.is_user, message?.is_system]);
+}
+
 export function captureAgentModuleCommitBaseline_ACU(chat: any[]): {
   identity: string;
-  floors: Array<{ message: unknown; swipeId: string; existed: boolean; content: string | undefined }>;
+  floors: Array<{ floorIdentity: string; swipeId: string; existed: boolean; content: string | undefined }>;
 } {
   const asJson = (value: unknown): string | undefined => JSON.stringify(value);
   return { identity: getActiveChatStorageIdentity_ACU(chat), floors: chat.map(message => ({
-    message,
+    floorIdentity: agentModuleFloorIdentity_ACU(message),
     swipeId: readMessageSwipeId_ACU(message),
     existed: Object.prototype.hasOwnProperty.call(message, AGENT_MODULE_FIELD_ACU),
     content: asJson(message?.[AGENT_MODULE_FIELD_ACU]),
@@ -703,34 +707,38 @@ export async function writeAgentModuleCommitDelta_ACU(
   isCurrent?: () => boolean,
 ): Promise<AgentModuleCommitResult_ACU> {
   const asJson = (value: unknown): string | undefined => JSON.stringify(value);
+  const floorCurrent = (index: number): boolean => {
+    const message = chat[index];
+    const entry = baseline.floors[index];
+    return !!message && !!entry && agentModuleFloorIdentity_ACU(message) === entry.floorIdentity
+      && readMessageSwipeId_ACU(message) === entry.swipeId;
+  };
   const baselineIntact = (excluded: ReadonlySet<number> = new Set()): boolean =>
     getChatArray_ACU() === chat && getActiveChatStorageIdentity_ACU(chat) === baseline.identity
     && chat.length === baseline.floors.length && baseline.floors.every((entry, index) =>
-      chat[index] === entry.message && readMessageSwipeId_ACU(entry.message) === entry.swipeId && (excluded.has(index) || (
-        Object.prototype.hasOwnProperty.call(entry.message, AGENT_MODULE_FIELD_ACU) === entry.existed
-        && asJson((entry.message as Record<string, unknown>)[AGENT_MODULE_FIELD_ACU]) === entry.content)));
+      floorCurrent(index) && (excluded.has(index) || (
+        Object.prototype.hasOwnProperty.call(chat[index], AGENT_MODULE_FIELD_ACU) === entry.existed
+        && asJson(chat[index][AGENT_MODULE_FIELD_ACU]) === entry.content)));
   if (!baselineIntact() || isCurrent?.() === false) return { status: 'persist_failed', reason: '资料基线或派工租约在规划期间已变化', recovery: 'unavailable' };
   const plan = planAgentModuleCommitDelta_ACU(chat, targetIndex, changes, agentModuleFrameDeps_ACU(), findLatestTableFullCheckpointIndex_ACU(chat), updatedAt);
   if (!plan.changed || getChatArray_ACU() !== chat || targetIndex !== chat.length - 1) {
     return { status: 'persist_failed', reason: '提交目标或聊天身份已变化' };
   }
-  const target = chat[targetIndex];
-  const first = chat[0];
   const identity = getActiveChatStorageIdentity_ACU(chat);
-  const assigned = plan.assignments.map(assignment => ({ ...assignment, message: chat[assignment.index],
+  const assigned = plan.assignments.map(assignment => ({ ...assignment,
     expected: JSON.stringify(assignment.value) }));
-  const intact = (): boolean => getChatArray_ACU() === chat && chat[0] === first
-    && getActiveChatStorageIdentity_ACU(chat) === identity && chat[targetIndex] === target && targetIndex === chat.length - 1
-    && assigned.every(assignment => chat[assignment.index] === assignment.message)
-    && baseline.floors.every(entry => readMessageSwipeId_ACU(entry.message) === entry.swipeId);
+  const intact = (): boolean => getChatArray_ACU() === chat
+    && getActiveChatStorageIdentity_ACU(chat) === identity && targetIndex === chat.length - 1
+    && chat.length === baseline.floors.length && baseline.floors.every((_, index) => floorCurrent(index));
   const stagedIndexes = new Set(plan.assignments.map(assignment => assignment.index));
   const untouched = (): boolean => baselineIntact(stagedIndexes);
   const ours = (): boolean => assigned.every(assignment =>
-    asJson((assignment.message as Record<string, unknown>)[AGENT_MODULE_FIELD_ACU]) === assignment.expected);
+    !!chat[assignment.index] && Object.prototype.hasOwnProperty.call(chat[assignment.index], AGENT_MODULE_FIELD_ACU) === (assignment.value !== undefined)
+    && asJson(chat[assignment.index][AGENT_MODULE_FIELD_ACU]) === assignment.expected);
   const restore = (): boolean => {
     if (!intact() || !ours()) return false;
     for (const assignment of assigned) {
-      const message = assignment.message as Record<string, unknown>;
+      const message = chat[assignment.index] as Record<string, unknown>;
       if (assignment.existed) message[AGENT_MODULE_FIELD_ACU] = assignment.previous;
       else delete message[AGENT_MODULE_FIELD_ACU];
     }
@@ -739,17 +747,17 @@ export async function writeAgentModuleCommitDelta_ACU(
   const recover = async (): Promise<AgentModuleCommitResult_ACU['recovery']> => {
     const staleBaseline = !untouched();
     if (staleBaseline || isCurrent?.() === false || !restore() || !intact()) return 'unavailable';
-    const restored = assigned.map(assignment => ({ exists: Object.prototype.hasOwnProperty.call(assignment.message, AGENT_MODULE_FIELD_ACU),
-      content: asJson((assignment.message as Record<string, unknown>)[AGENT_MODULE_FIELD_ACU]) }));
+    const restored = assigned.map(assignment => ({ exists: Object.prototype.hasOwnProperty.call(chat[assignment.index], AGENT_MODULE_FIELD_ACU),
+      content: asJson(chat[assignment.index][AGENT_MODULE_FIELD_ACU]) }));
     try {
       await saveChatToHostStrict_ACU();
       return !staleBaseline && baselineIntact() && intact() && assigned.every((assignment, index) =>
-        Object.prototype.hasOwnProperty.call(assignment.message, AGENT_MODULE_FIELD_ACU) === restored[index].exists
-        && asJson((assignment.message as Record<string, unknown>)[AGENT_MODULE_FIELD_ACU]) === restored[index].content) ? 'saved' : 'unavailable';
+        Object.prototype.hasOwnProperty.call(chat[assignment.index], AGENT_MODULE_FIELD_ACU) === restored[index].exists
+        && asJson(chat[assignment.index][AGENT_MODULE_FIELD_ACU]) === restored[index].content) ? 'saved' : 'unavailable';
     } catch { return 'failed'; }
   };
   for (const assignment of assigned) {
-    const message = assignment.message as Record<string, unknown>;
+    const message = chat[assignment.index] as Record<string, unknown>;
     if (assignment.value === undefined) delete message[AGENT_MODULE_FIELD_ACU];
     else message[AGENT_MODULE_FIELD_ACU] = assignment.value;
   }

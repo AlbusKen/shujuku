@@ -1,6 +1,6 @@
 import { getChatArray_ACU, saveChatToHost_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { assertTableFillRequestCurrent_ACU, type TableFillRequestGuard_ACU } from './table-fill-request-guard';
-import { beginMaterialCheckpointSync_ACU } from '../chat/material-checkpoint-sync';
+import { beginMaterialCheckpointSync_ACU, MATERIAL_CHECKPOINT_FIELDS_ACU } from '../chat/material-checkpoint-sync';
 import { advanceProvisionalBridgeCommitProgress_ACU, authorizeManualCatchUpBucketWrite_ACU, readActiveProvisionalBridge_ACU } from './manual-catch-up-provisional-bridge';
 import { cloneIsolatedData_ACU, collectSheetIdentityAliasesForPurge_ACU, purgeManualRefillIncrementalSheetKeysFromStorageFrameV2_ACU, purgeSheetKeysFromMessage_ACU, readIsolatedDataContainer_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
 import { getActiveChatStorageIdentity_ACU, peekChatScopedConfigContainer_ACU, peekChatSheetGuideContainer_ACU, setChatScopedConfigContainer_ACU, setChatSheetGuideContainer_ACU } from '../../data/storage/chat-history';
@@ -2758,12 +2758,19 @@ async function persistTableMutationLogV2Core_ACU(
   }
   // 所有异步候选校验结束后，在第一笔聊天帧变更之前复核请求与目标。
   assertTableFillRequestCurrent_ACU(options, target.index);
+  // 插件可重建同楼层的消息对象；数据与身份字段统一写到该楼层当前对象。
+  target.message = chat[target.index];
+  const commitChatIdentity = getActiveChatStorageIdentity_ACU(chat);
+  const floorIdentities = chat.map(message => JSON.stringify([
+    !!message && typeof message === 'object', message?.message_id, message?.is_user, message?.is_system,
+  ]));
   const previousMessageState = [...replacementIsolatedDataByMessageIndex.keys()].map(messageIndex => {
     const message = chat[messageIndex];
     return {
-      message,
+      messageIndex,
       hadIsolatedData: Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_IsolatedData'),
       isolatedData: message.TavernDB_ACU_IsolatedData,
+      isolatedContent: JSON.stringify(message.TavernDB_ACU_IsolatedData),
       hadIdentity: Object.prototype.hasOwnProperty.call(message, 'TavernDB_ACU_Identity'),
       identity: message.TavernDB_ACU_Identity,
     };
@@ -2771,6 +2778,23 @@ async function persistTableMutationLogV2Core_ACU(
   const rollbackMaterialCheckpoint = materialCheckpointAnchor === null
     ? null
     : beginMaterialCheckpointSync_ACU(chat, materialCheckpointAnchor);
+  let stagedFields: Array<{ index: number; key: string; existed: boolean; content: string | undefined }> = [];
+  const fieldsIntact = (): boolean => getChatArray_ACU() === chat
+    && getActiveChatStorageIdentity_ACU(chat) === commitChatIdentity
+    && chat.length >= floorIdentities.length && floorIdentities.every((identity, index) => {
+      const message = chat[index];
+      return JSON.stringify([!!message && typeof message === 'object', message?.message_id, message?.is_user, message?.is_system]) === identity;
+    }) && stagedFields.every(field => !!chat[field.index]
+      && Object.prototype.hasOwnProperty.call(chat[field.index], field.key) === field.existed
+      && JSON.stringify(chat[field.index][field.key]) === field.content);
+  const captureStagedFields = (): typeof stagedFields => chat.flatMap((message, index) => {
+    if (!message || typeof message !== 'object') return [];
+    const keys: string[] = replacementIsolatedDataByMessageIndex.has(index)
+      ? ['TavernDB_ACU_IsolatedData', 'TavernDB_ACU_Identity'] : [];
+    if (rollbackMaterialCheckpoint) keys.push(...MATERIAL_CHECKPOINT_FIELDS_ACU);
+    return keys.map(key => ({ index, key, existed: Object.prototype.hasOwnProperty.call(message, key),
+      content: JSON.stringify(message[key]) }));
+  });
   try {
     for (const [messageIndex, nextIsolatedData] of replacementIsolatedDataByMessageIndex) {
       chat[messageIndex].TavernDB_ACU_IsolatedData = nextIsolatedData;
@@ -2779,19 +2803,27 @@ async function persistTableMutationLogV2Core_ACU(
       enabled: settings_ACU.dataIsolationEnabled,
       code: settings_ACU.dataIsolationCode,
     });
+    stagedFields = captureStagedFields();
     // 临时基线升级会替换 orphan frame、清空日志并写 recoveryBackup，必须确认宿主真实落盘。
     if (options.strictSave || replacement || temporaryBaselineUpgrade || provisionalConvergenceReplay) {
       await saveChatToHostStrict_ACU();
     } else {
       await saveChatToHost_ACU();
     }
+    assertTableFillRequestCurrent_ACU(options, target.index);
+    if (!fieldsIntact()) throw new Error('table mutation save readback conflict: chat, floor identity or private fields changed.');
   } catch (error) {
+    // 正文与对象引用不参与校验；外部私有写入或聊天切换后不能用旧快照补偿。
+    if (!fieldsIntact() || previousMessageState.some(state => JSON.stringify(state.isolatedData) !== state.isolatedContent)) {
+      throw error;
+    }
     rollbackMaterialCheckpoint?.();
     for (const state of previousMessageState) {
-      if (state.hadIsolatedData) state.message.TavernDB_ACU_IsolatedData = state.isolatedData;
-      else delete state.message.TavernDB_ACU_IsolatedData;
-      if (state.hadIdentity) state.message.TavernDB_ACU_Identity = state.identity;
-      else delete state.message.TavernDB_ACU_Identity;
+      const message = chat[state.messageIndex];
+      if (state.hadIsolatedData) message.TavernDB_ACU_IsolatedData = state.isolatedData;
+      else delete message.TavernDB_ACU_IsolatedData;
+      if (state.hadIdentity) message.TavernDB_ACU_Identity = state.identity;
+      else delete message.TavernDB_ACU_Identity;
     }
     throw error;
   }

@@ -11,6 +11,7 @@ import { readLatestWorldSimulationMaterials_ACU, readWorldSimulationLedgerAtAnch
 import { commitWorldSimulationProjection_ACU } from '../../../src/service/simulation/simulation-commit-adapter';
 import { buildWorldSimulationBucketKey_ACU, resolveWorldSimulationAnchor_ACU } from '../../../src/service/simulation/simulation-store';
 import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
+import * as simulationTransaction_ACU from '../../../src/service/simulation/simulation-transaction';
 
 function fixture(saveChat = vi.fn().mockResolvedValue(undefined)) {
   const userBlock = '<与此同时>\n用户自有内容\n</与此同时>';
@@ -126,6 +127,83 @@ describe('world simulation commit adapter', () => {
     });
     expect(saveChat).toHaveBeenCalledTimes(1);
   });
+
+  it.each([false, true])('SQL 规划期间正文改写后追加到最新末尾（重建对象=%s）', async rebuild => {
+    const { chat, commitInput, saveChat, userBlock } = fixture();
+    const originalMessage = chat[1];
+    const apply = simulationTransaction_ACU.applyWorldSimulationCandidatesDetailedViaSql_ACU;
+    const spy = vi.spyOn(simulationTransaction_ACU, 'applyWorldSimulationCandidatesDetailedViaSql_ACU').mockImplementationOnce(async (...args) => {
+      const result = await apply(...args);
+      if (rebuild) {
+        chat[0] = structuredClone(chat[0]);
+        chat[1] = structuredClone(chat[1]);
+      }
+      chat[1].mes = '第三方最新正文\n最新末尾';
+      chat[1].swipes[0] = chat[1].mes;
+      return result;
+    });
+    try {
+      const committed = await commitWorldSimulationProjection_ACU(commitInput);
+      expect(chat[1].mes).toMatch(/^第三方最新正文\n最新末尾\n\n/);
+      expect(chat[1].mes).toContain('远处钟声响起');
+      expect(chat[1].swipes[0]).toBe(chat[1].mes);
+      expect(chat[0]._qrf_world_simulation.task.status).toBe('completed');
+      expect(committed).toEqual(resolveWorldSimulationAnchor_ACU(1, chat));
+      expect(saveChat).toHaveBeenCalledOnce();
+      if (rebuild) expect(originalMessage.mes).toBe(`正文\n\n${userBlock}`);
+    } finally { spy.mockRestore(); }
+  });
+
+  it('SQL 规划期间私有数据变化仍拒绝提交且不覆盖外部变更', async () => {
+    const { chat, commitInput, saveChat } = fixture();
+    const apply = simulationTransaction_ACU.applyWorldSimulationCandidatesDetailedViaSql_ACU;
+    const spy = vi.spyOn(simulationTransaction_ACU, 'applyWorldSimulationCandidatesDetailedViaSql_ACU').mockImplementationOnce(async (...args) => {
+      const result = await apply(...args);
+      chat[0]._qrf_world_simulation.task.originInstruction = '外部新指令';
+      return result;
+    });
+    try {
+      await expect(commitWorldSimulationProjection_ACU(commitInput)).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_REVISION_CONFLICT' } });
+      expect(chat[0]._qrf_world_simulation.task.originInstruction).toBe('外部新指令');
+      expect(chat[1].mes).not.toContain('远处钟声响起');
+      expect(saveChat).not.toHaveBeenCalled();
+    } finally { spy.mockRestore(); }
+  });
+
+
+  it.each([false, true])('宿主保存期间正文后处理不使终局提交失效（重建对象=%s）', async rebuild => {
+    const saveChat = vi.fn().mockImplementationOnce(async () => {
+      if (rebuild) chat[1] = { ...chat[1] };
+      chat[1].mes = `第三方前缀\n${chat[1].mes}`;
+      chat[1].swipes[0] = chat[1].mes;
+    });
+    const { chat, commitInput } = fixture(saveChat);
+    await commitWorldSimulationProjection_ACU(commitInput);
+    expect(chat[0]._qrf_world_simulation.task.status).toBe('completed');
+    expect(chat[1].mes).toContain('第三方前缀');
+    expect(chat[1].mes).toContain('远处钟声响起');
+    expect(saveChat).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true])('主保存失败且第三方改写正文时恢复私有数据，不覆盖新正文（重建对象=%s）', async rebuild => {
+    const saveChat = vi.fn().mockImplementationOnce(async () => {
+      if (rebuild) chat[1] = { ...chat[1] };
+      chat[1].mes = '第三方新正文';
+      chat[1].swipes[0] = chat[1].mes;
+      throw new Error('primary failed');
+    }).mockResolvedValue(undefined);
+    const { chat, commitInput } = fixture(saveChat);
+    const before = structuredClone(chat[0]);
+    await expect(commitWorldSimulationProjection_ACU(commitInput)).rejects.toMatchObject({
+      error: { code: 'WORLD_SIMULATION_PERSIST_FAILED', details: { recovery: 'saved' } },
+    });
+    expect(chat[0]).toEqual(before);
+    expect(foldWorldSimulationLedger_ACU(chat, 1)).toBeNull();
+    expect(chat[1].mes).toBe('第三方新正文');
+    expect(chat[1].swipes[0]).toBe('第三方新正文');
+    expect(saveChat).toHaveBeenCalledTimes(2);
+  });
+
 
   it('联合提交会把母版 version=1 会话升级为当前楼层 bucket', async () => {
     const { chat, anchor, commitInput, saveChat } = fixture();
@@ -261,7 +339,7 @@ describe('world simulation commit adapter', () => {
     expect(f.chat).toEqual(before);
   });
 
-  it('补偿保存期间宿主改写字段时报告恢复不可确认，不覆盖宿主更新', async () => {
+  it('补偿保存期间宿主只改写正文仍确认私有字段恢复，保留宿主正文', async () => {
     const saveChat = vi.fn().mockRejectedValueOnce(new Error('primary failed')).mockImplementationOnce(async () => {
       chat[1].mes = '宿主更新的正文';
     });
@@ -269,7 +347,7 @@ describe('world simulation commit adapter', () => {
     const before = structuredClone(chat);
 
     await expect(commitWorldSimulationProjection_ACU(commitInput)).rejects.toMatchObject({
-      error: { code: 'WORLD_SIMULATION_PERSIST_FAILED', details: { recovery: 'unavailable' } },
+      error: { code: 'WORLD_SIMULATION_PERSIST_FAILED', details: { recovery: 'saved' } },
     });
     expect(chat[1].mes).toBe('宿主更新的正文');
     expect(chat[0]).toEqual(before[0]);

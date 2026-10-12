@@ -216,8 +216,8 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<WorldSimul
     reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '提交目标聊天已变化');
   }
   const currentAnchor = resolveCurrentWorldSimulationAnchor_ACU(input.anchor, chat);
-  const firstMessage = isRecord_ACU(chat[0]) ? chat[0] : null;
-  const anchorMessage = isRecord_ACU(chat[currentAnchor.messageIndex]) ? chat[currentAnchor.messageIndex] : null;
+  let firstMessage = isRecord_ACU(chat[0]) ? chat[0] : null;
+  let anchorMessage = isRecord_ACU(chat[currentAnchor.messageIndex]) ? chat[currentAnchor.messageIndex] : null;
   if (!firstMessage || !anchorMessage) reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', '提交目标楼层不可用');
 
   const rawEnvelope = firstMessage[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU];
@@ -236,7 +236,31 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<WorldSimul
   if (!input.commitCandidate.acceptedCandidates.length && !input.runWrites?.hasConfirmedWrites) {
     reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', '提交缺少已确认写入和候选');
   }
+  // SQL 规划会等待；只冻结楼层身份和私有字段，正文及消息对象可由第三方重建。
+  const planningFields = chat.map(message => isRecord_ACU(message) ? {
+    identity: JSON.stringify([message.message_id, message.swipe_id, message.is_user, message.is_system]),
+    fields: [WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU, WORLD_SIMULATION_STATE_FIELD_ACU,
+      WORLD_SIMULATION_MATERIALS_FIELD_ACU, WORLD_SIMULATION_CONVERSATION_FIELD_ACU,
+      WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU, WORLD_SIMULATION_RUN_WRITE_FIELD_ACU].map(key => ({
+        key, existed: Object.prototype.hasOwnProperty.call(message, key), content: JSON.stringify(message[key]),
+      })),
+  } : null);
   const { ledger, extraTimeline, archiveSnapshot } = await planWorldSimulationFinalCommit_ACU(envelope, input, storyText, archiveBefore);
+  if (getChatArray_ACU() !== chat || getActiveChatStorageIdentity_ACU(chat) !== input.identity.chatIdentity
+    || chat.length < planningFields.length || !planningFields.every((snapshot, index) => {
+      const message = chat[index];
+      return snapshot === null ? !isRecord_ACU(message) : isRecord_ACU(message)
+        && JSON.stringify([message.message_id, message.swipe_id, message.is_user, message.is_system]) === snapshot.identity
+        && snapshot.fields.every(field => Object.prototype.hasOwnProperty.call(message, field.key) === field.existed
+          && JSON.stringify(message[field.key]) === field.content);
+    })) {
+    reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '规划期间聊天、楼层身份或私有字段已变化');
+  }
+  const latestAnchor = resolveCurrentWorldSimulationAnchor_ACU(currentAnchor, chat);
+  if (latestAnchor.messageIndex !== currentAnchor.messageIndex) reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '规划期间目标楼层位置已变化');
+  firstMessage = isRecord_ACU(chat[0]) ? chat[0] : null;
+  anchorMessage = isRecord_ACU(chat[latestAnchor.messageIndex]) ? chat[latestAnchor.messageIndex] : null;
+  if (!firstMessage || !anchorMessage) reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', '提交目标楼层不可用');
   const projection = buildWorldSimulationProjection_ACU(ledger, envelope.settings.projection.template);
   const oldContent = readWorldSimulationMessageContent_ACU(anchorMessage);
   const newContent = applyWorldSimulationProjection_ACU(oldContent, projection);
@@ -372,6 +396,9 @@ async function persistHostFinalCommit_ACU(
     { target: anchorMessage, key: WORLD_SIMULATION_CONVERSATION_FIELD_ACU, existed: Object.prototype.hasOwnProperty.call(anchorMessage, WORLD_SIMULATION_CONVERSATION_FIELD_ACU), value: anchorMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU] },
     { target: anchorMessage, key: WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU, existed: Object.prototype.hasOwnProperty.call(anchorMessage, WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU), value: anchorMessage[WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU] },
     { target: anchorMessage, key: WORLD_SIMULATION_RUN_WRITE_FIELD_ACU, existed: Object.prototype.hasOwnProperty.call(anchorMessage, WORLD_SIMULATION_RUN_WRITE_FIELD_ACU), value: anchorMessage[WORLD_SIMULATION_RUN_WRITE_FIELD_ACU] },
+  ];
+  // 正文不属于推演私有数据；仅保留条件恢复快照，不参与提交冲突判断。
+  const bodySnapshots = [
     { target: anchorMessage, key: 'mes', existed: Object.prototype.hasOwnProperty.call(anchorMessage, 'mes'), value: anchorMessage.mes },
     { target: anchorMessage, key: 'message', existed: Object.prototype.hasOwnProperty.call(anchorMessage, 'message'), value: anchorMessage.message },
     { target: anchorMessage, key: 'swipes', existed: Object.prototype.hasOwnProperty.call(anchorMessage, 'swipes'), value: Array.isArray(anchorMessage.swipes) ? [...anchorMessage.swipes] : anchorMessage.swipes },
@@ -383,24 +410,30 @@ async function persistHostFinalCommit_ACU(
       snapshots.push({ target: message, key, existed: Object.prototype.hasOwnProperty.call(message, key), value: message[key] });
     }
   }
-  const messages = [...chat];
+  const messages = chat.map(message => isRecord_ACU(message)
+    ? JSON.stringify([message.message_id, message.swipe_id, message.is_user, message.is_system]) : null);
   const originalFields = snapshots.map(({ target, key, existed, value }) => ({ target, key, existed, value,
-    content: JSON.stringify(value) }));
-  // 只要求提交开始时的楼层前缀原样保留：生成途中宿主在尾部追加的新楼层不改变触发楼层身份，
-  // 投影仍写回触发本次运行的楼层；前缀内删楼、换楼或插楼仍视为冲突。
-  const messagesIntact = (): boolean => chat.length >= messages.length && messages.every((message, index) => chat[index] === message);
+    index: chat.indexOf(target), content: JSON.stringify(value) }));
+  // 同楼层对象重建不改变身份；前缀删楼、换身份或插楼仍拒绝。
+  const messagesIntact = (): boolean => chat.length >= messages.length && messages.every((identity, index) => {
+    const message = chat[index];
+    return identity === null ? !isRecord_ACU(message) : isRecord_ACU(message)
+      && JSON.stringify([message.message_id, message.swipe_id, message.is_user, message.is_system]) === identity;
+  });
   const fieldsIntact = (fields: Array<Omit<(typeof originalFields)[number], 'value'>>): boolean => messagesIntact() && fields.every(field =>
-    Object.prototype.hasOwnProperty.call(field.target, field.key) === field.existed
-    && JSON.stringify(field.target[field.key]) === field.content);
+    isRecord_ACU(chat[field.index]) && Object.prototype.hasOwnProperty.call(chat[field.index], field.key) === field.existed
+    && JSON.stringify(chat[field.index][field.key]) === field.content);
   let saveAttempted = false;
   /** 保存与回读均通过后才赋值；仅用于请求宿主重渲染触发楼层。 */
   let refreshIndex: number | null = null;
   let stagedFields: Array<Omit<(typeof originalFields)[number], 'value'>> | null = null;
   const currentFieldsIntact = (): boolean => stagedFields !== null && fieldsIntact(stagedFields);
+  let stagedBody: Array<{ key: string; content: string | undefined }> = [];
   try {
     firstMessage[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU] = nextEnvelope;
     if (nextConversationBucket) anchorMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU] = nextConversationBucket;
     writeWorldSimulationActiveSwipeContent_ACU(anchorMessage, newContent);
+    stagedBody = bodySnapshots.map(({ key }) => ({ key, content: JSON.stringify(anchorMessage[key]) }));
     appendWorldSimulationCommitChain_ACU({
       chat,
       messageIndex: currentAnchor.messageIndex,
@@ -429,7 +462,7 @@ async function persistHostFinalCommit_ACU(
       reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '提交前聊天或旧字段已变化');
     }
     stagedFields = snapshots.map(({ target, key }) => ({ target, key,
-      content: JSON.stringify(target[key]), existed: Object.prototype.hasOwnProperty.call(target, key) }));
+      index: chat.indexOf(target), content: JSON.stringify(target[key]), existed: Object.prototype.hasOwnProperty.call(target, key) }));
     saveAttempted = true;
     await saveChatToHostStrict_ACU();
     if (getChatArray_ACU() !== chat || getActiveChatStorageIdentity_ACU(chat) !== input.identity.chatIdentity) {
@@ -456,7 +489,14 @@ async function persistHostFinalCommit_ACU(
         message: error instanceof Error ? error.message : String(error), recovery: 'unavailable',
       });
     }
-    for (const snapshot of snapshots) restoreField_ACU(snapshot.target, snapshot.key, snapshot.existed, snapshot.value);
+    for (const snapshot of originalFields) restoreField_ACU(chat[snapshot.index], snapshot.key, snapshot.existed, snapshot.value);
+    // 保存监听器改过的正文归第三方所有，不用启动快照覆盖它。
+    const currentMessage = chat[currentAnchor.messageIndex];
+    for (const snapshot of bodySnapshots) {
+      if (isRecord_ACU(currentMessage) && stagedBody.some(field => field.key === snapshot.key && JSON.stringify(currentMessage[field.key]) === field.content)) {
+        restoreField_ACU(currentMessage, snapshot.key, snapshot.existed, snapshot.value);
+      }
+    }
     if (saveAttempted && stillActive) {
       try {
         await saveChatToHostStrict_ACU();

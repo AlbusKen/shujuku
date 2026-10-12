@@ -17,9 +17,9 @@ function setup() {
     { is_user: false, mes: '官船抵达江南府码头。', swipe_id: 0, swipes: ['官船抵达江南府码头。'] },
   ];
   _set_SillyTavern_API_ACU({ chat, saveChat: vi.fn().mockResolvedValue(undefined) } as any);
-  // 与 agent-main-loop 的 moduleFieldWrite_ACU 一致：派工时绑定目标楼层的消息与 swipe。
+  // 与 agent-main-loop 的 moduleFieldWrite_ACU 一致：派工时绑定楼层编号与资料分桶。
   const message = chat[1];
-  const dispatchTarget = { message, swipeId: readMessageSwipeId_ACU(message) };
+  const dispatchTarget = { index: 1, swipeId: readMessageSwipeId_ACU(message) };
   return { chat, dispatchTarget };
 }
 
@@ -39,9 +39,9 @@ describe('续写逐栏提交与目标楼层正文改写共存', () => {
     expect(readAgentModuleSnapshot_ACU(chat).hooks.map(item => item.summary)).toEqual(expect.arrayContaining(['信件', '晶屑']));
   });
 
-  it('第三方改写同一目标楼正文后仍提交资料，并保留改写后的正文', async () => {
+  it('第三方重建同一目标楼对象并改写正文后仍提交资料，保留最新正文', async () => {
     const { chat, dispatchTarget } = setup();
-    chat[1].mes = '官船抵达临川府码头。';
+    chat[1] = { ...chat[1], mes: '官船抵达临川府码头。' };
     chat[1].swipes[0] = chat[1].mes;
     const receipt = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, dispatchTarget, sql: INSERT_HOOK, role: 'hook-cognition-maintainer' });
     expect(receipt.status).toBe('committed');

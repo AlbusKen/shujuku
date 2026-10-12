@@ -561,6 +561,8 @@ export class ContinuationAgentTurnPlanner_ACU {
     let snapshot = this.dependencies.readModuleSnapshot(chat);
     const context: AgentResolveContext_ACU = {
       chat,
+      // 正文读集固定在首次异步等待前；第三方后处理不改变本轮已取得的输入。
+      storyChat: chat.map(message => message && typeof message === 'object' ? { ...message } : message),
       moduleSnapshot: snapshot,
       settledThroughIndex: snapshot.settledThroughIndex,
       execution: request.readContext(),
@@ -856,7 +858,7 @@ export class ContinuationAgentTurnPlanner_ACU {
 
         if (action.kind === 'correct_materials') {
           const receipt = await correctAgentMaterials_ACU({
-            action, chat, conversation: session.snapshot(),
+            action, chat, storyChat: context.storyChat, conversation: session.snapshot(),
             storage: this.dependencies.moduleCommitStorage,
             isCurrent: () => !request.signal?.aborted && request.isInternalRequestCurrent(identitySeed),
             completedStages: context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber),
@@ -1829,10 +1831,10 @@ export class ContinuationAgentTurnPlanner_ACU {
   private moduleFieldWrite_ACU(chat: any[], context: AgentResolveContext_ACU) {
     const targetIndex = chat.length - 1;
     const message = chat[targetIndex];
-    const dispatchTarget = { message, swipeId: readMessageSwipeId_ACU(message) };
+    const dispatchTarget = { index: targetIndex, swipeId: readMessageSwipeId_ACU(message) };
     const completedStages = context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber);
     return ({ role, sql, resolvePage, isCurrent, revisionWindow, expectedRevisions }: { role: AgentSubagentName_ACU; sql: string; resolvePage: (handle: string) => AgentFieldPage_ACU | null; isCurrent?: () => boolean; revisionWindow?: AgentModuleRevisionWindow_ACU; expectedRevisions?: Partial<AgentModuleSnapshot_ACU['revisions']> }) => commitAgentModuleFieldWrites_ACU({
-      chat, targetIndex, dispatchTarget, role, sql, resolvePage, isCurrent, completedStages, revisionWindow, expectedRevisions,
+      chat, storyChat: context.storyChat, targetIndex, dispatchTarget, role, sql, resolvePage, isCurrent, completedStages, revisionWindow, expectedRevisions,
       storage: this.dependencies.moduleCommitStorage,
     });
   }
@@ -1895,7 +1897,7 @@ export class ContinuationAgentTurnPlanner_ACU {
             Math.max(0, chat.length - 1),
             completedStageNumbers,
             { onViolation: () => undefined, agentName: 'arc-architect' },
-            agentStoryEvidenceFloorIndexes_ACU(chat),
+            agentStoryEvidenceFloorIndexes_ACU(context.storyChat ?? chat),
           );
           context.moduleSnapshot = applied.snapshot;
           await this.persistSnapshot_ACU(chat, applied.snapshot);
@@ -1984,7 +1986,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       settlementStartIndex: unsettled.startIndex,
       canAdvanceSettlement: unsettled.hiddenCount === 0 && !context.moduleSnapshot.settlementBoundary,
       completedStageNumbers: context.execution.task.stages.filter(stage => stage.status === 'completed').map(stage => stage.stageNumber),
-      evidenceFloorIndexes: agentStoryEvidenceFloorIndexes_ACU(chat),
+      evidenceFloorIndexes: agentStoryEvidenceFloorIndexes_ACU(context.storyChat ?? chat),
       runAgent: async call => {
         if (call.billing === 'opening') {
           const used = ledger.perAgent.get(call.agentName) ?? 0;
@@ -2072,7 +2074,7 @@ export class ContinuationAgentTurnPlanner_ACU {
   private renderUnsettledRange_ACU(context: AgentResolveContext_ACU): string {
     const selection = resolveAgentUnsettledStoryWindow_ACU(context);
     const start = selection.startIndex;
-    const last = context.chat.length - 1;
+    const last = (context.storyChat ?? context.chat).length - 1;
     const hiddenNote = selection.hiddenCount > 0
       ? `更早的 ${selection.hiddenCount} 个未结算 AI 楼层在正文可读窗口外，本轮不逐楼结算，也不推进连续结算水位；早期剧情经事件概览与纪要回溯。` : '';
     if (!selection.floors.length) return hiddenNote
@@ -2437,7 +2439,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       if (result.maintainer) {
         try {
           const delta = mergeAgentDeltaRevisions_ACU(result.maintainer.delta, result.readRevisions);
-          let applied = result.usedFieldWrites ? nextSnapshot : (await applyAgentModuleDeltaViaSql_ACU(nextSnapshot, delta, result.writes, chat.length - 1, [], undefined, agentStoryEvidenceFloorIndexes_ACU(chat))).snapshot;
+          let applied = result.usedFieldWrites ? nextSnapshot : (await applyAgentModuleDeltaViaSql_ACU(nextSnapshot, delta, result.writes, chat.length - 1, [], undefined, agentStoryEvidenceFloorIndexes_ACU(context.storyChat ?? chat))).snapshot;
           // 兼容派工也只记录实际窗口；旧正文未处理时保留连续结算水位。
           const selection = resolveAgentUnsettledStoryWindow_ACU(context);
           const settledTarget = chat.length - 1;
@@ -2503,7 +2505,7 @@ export class ContinuationAgentTurnPlanner_ACU {
           const completedStageNumbers = context.execution.task.stages
             .filter(stage => stage.status === 'completed')
             .map(stage => stage.stageNumber);
-          const applied = result.usedFieldWrites ? nextSnapshot : (await applyAgentModuleDeltaViaSql_ACU(nextSnapshot, delta, result.writes, chat.length - 1, completedStageNumbers, undefined, agentStoryEvidenceFloorIndexes_ACU(chat))).snapshot;
+          const applied = result.usedFieldWrites ? nextSnapshot : (await applyAgentModuleDeltaViaSql_ACU(nextSnapshot, delta, result.writes, chat.length - 1, completedStageNumbers, undefined, agentStoryEvidenceFloorIndexes_ACU(context.storyChat ?? chat))).snapshot;
           // 与结算分支的区别：只换快照，不推进 settledThroughIndex。
           // 立总纲不等于把未结算正文结算掉，推水位会让伏笔账本永久落后于剧情。
           if (applied !== nextSnapshot) { nextSnapshot = applied; snapshotChanged = true; }

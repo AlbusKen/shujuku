@@ -599,10 +599,25 @@ describe('填表请求提交边界', () => {
     if (phase === 'before' || phase === 'lock') expect(apply).not.toHaveBeenCalled();
     if (phase === 'staged') expect(rollback).toHaveBeenCalledOnce();
   });
-  it('等待提交锁期间目标被替换时在 apply 前拒绝', async () => {
+  it('等待提交锁期间同楼层对象和正文被改写仍提交，启动正文快照不变', async () => {
     const targetSnapshot = captureAiMessageSnapshot_ACU(mocks.chat, 0);
     mocks.transaction.mockImplementationOnce(async (_opts, task) => {
-      mocks.chat[0] = { ...mocks.chat[0] };
+      mocks.chat[0] = { ...mocks.chat[0], mes: '第三方修改后的正文', swipe_id: 1 };
+      return task({ runCommit: async (commit: any) => commit() }, null);
+    });
+    const apply = vi.fn(async () => ({ success: true, tableData: data }));
+    const result = await runTableUpdateCommit_ACU({ ...options('floor'), targetMessageIndex: 0, targetSnapshot }, apply);
+    expect(result).toMatchObject({ success: true });
+    expect(apply).toHaveBeenCalledOnce();
+    expect(mocks.persist).toHaveBeenCalledOnce();
+    expect(targetSnapshot.body).toBe('原回复');
+    expect(mocks.chat[0].mes).toBe('第三方修改后的正文');
+  });
+  it.each(['missing', 'user'] as const)('等待提交锁期间目标楼层 %s 时仍拒绝', async changed => {
+    const targetSnapshot = captureAiMessageSnapshot_ACU(mocks.chat, 0);
+    mocks.transaction.mockImplementationOnce(async (_opts, task) => {
+      if (changed === 'missing') mocks.chat.splice(0);
+      else mocks.chat[0].is_user = true;
       return task({ runCommit: async (commit: any) => commit() }, null);
     });
     const apply = vi.fn();

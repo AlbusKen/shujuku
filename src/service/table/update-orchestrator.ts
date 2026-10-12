@@ -3210,6 +3210,8 @@ export async function executeCardUpdateCore_ACU(
     const maxRetries = settings_ACU.tableMaxRetries || 3;
 
     try {
+        // 本轮与重试共用启动正文；后续插件改写只影响宿主正文，不改变已取得的输入。
+        messagesToUse = capturePromptMessageSnapshot_ACU(messagesToUse);
         const targetSnapshot = isImportMode ? undefined
             : admissionContext?.targetSnapshot ?? captureAiMessageSnapshot_ACU(getChatArray_ACU(), saveTargetIndex);
         if (targetSnapshot) saveTargetIndex = targetSnapshot.index;

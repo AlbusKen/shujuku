@@ -377,6 +377,36 @@ describe('续写逐栏真实提交', () => {
     expect(readAgentModuleFieldSnapshot_ACU(chat).records.hooks?.H1.status).toBe('partial');
   });
 
+  it.each([0, 1])('保存期间重建第 %s 楼并改写正文仍确认逐栏提交', async index => {
+    const { chat, saveChat } = setup();
+    saveChat.mockImplementationOnce(async () => {
+      chat[index] = { ...structuredClone(chat[index]), mes: '第三方最新正文' };
+    });
+    const receipt = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, sql: INSERT_PARTIAL, role: 'hook-cognition-maintainer' });
+    expect(receipt.status).toBe('committed');
+    expect(readAgentModuleFieldSnapshot_ACU(chat).records.hooks?.H1.fields.summary.value).toBe('信件');
+    expect(chat[index].mes).toBe('第三方最新正文');
+    expect(saveChat).toHaveBeenCalledOnce();
+  });
+
+  it.each([0, 1])('保存失败且第 %s 楼对象重建后恢复私有资料，保留最新正文', async index => {
+    const { chat, saveChat } = setup();
+    const before = structuredClone(chat);
+    saveChat.mockImplementationOnce(async () => {
+      chat[index] = { ...structuredClone(chat[index]), mes: '第三方最新正文' };
+      throw new Error('primary failed');
+    }).mockImplementationOnce(async () => {
+      chat[index] = { ...structuredClone(chat[index]), mes: '补偿期间的新正文' };
+    });
+    const receipt = await commitAgentModuleFieldWrites_ACU({ chat, targetIndex: 1, sql: INSERT_PARTIAL, role: 'hook-cognition-maintainer' });
+    expect(receipt).toMatchObject({ status: 'persist_failed', recovery: 'saved', accepted: [] });
+    expect(chat[0][AGENT_MODULE_FIELD_ACU]).toEqual(before[0][AGENT_MODULE_FIELD_ACU]);
+    expect(chat[1][AGENT_MODULE_FIELD_ACU]).toBeUndefined();
+    expect(chat[index].mes).toBe('补偿期间的新正文');
+    expect(saveChat).toHaveBeenCalledTimes(2);
+  });
+
+
   it('宿主保存返回前切换 active swipe 不签发旧派工 accepted', async () => {
     const { chat, saveChat } = setup();
     chat[1].swipe_id = 0;
