@@ -69,8 +69,9 @@ export function normalizePromptPostProcessing_ACU(value: unknown): ApiPromptPost
   if (typeof value !== 'string') return API_PROMPT_POST_PROCESSING_DEFAULT_ACU;
   const normalized = value.trim();
   if (normalized === '') return '';
-  const legacy = LEGACY_API_PROMPT_POST_PROCESSING_VALUES_ACU[normalized];
-  if (legacy) return legacy;
+  if (Object.prototype.hasOwnProperty.call(LEGACY_API_PROMPT_POST_PROCESSING_VALUES_ACU, normalized)) {
+    return LEGACY_API_PROMPT_POST_PROCESSING_VALUES_ACU[normalized];
+  }
   return (API_PROMPT_POST_PROCESSING_VALUES_ACU as readonly string[]).includes(normalized)
     ? (normalized as ApiPromptPostProcessingValue_ACU)
     : API_PROMPT_POST_PROCESSING_DEFAULT_ACU;

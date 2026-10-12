@@ -844,10 +844,10 @@ describe('buildCustomApiRequestBody_ACU', () => {
     expect(passthrough.messages[1]).toMatchObject({ role: 'tool', tool_call_id: 'call_0_read' });
   });
 
-  it('promptPostProcessing 非法值默认 merge_tools', () => {
+  it.each(['fake-mode', 'toString', 'constructor', '__proto__', 'hasOwnProperty'])('promptPostProcessing 非法值 %s 默认 merge_tools', value => {
     const body = buildCustomApiRequestBody_ACU(
       [{ role: 'user', content: 'test' }],
-      { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: 'fake-mode' },
+      { url: 'https://api.example.com', model: 'gpt-4', promptPostProcessing: value },
     );
     expect(body.custom_prompt_post_processing).toBe('merge_tools');
   });

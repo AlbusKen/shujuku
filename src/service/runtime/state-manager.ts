@@ -62,7 +62,6 @@ export let tempPlotToSave_ACU: any = null;
 export let pendingFinalGenerationGreenlights_ACU: any[] = [];
 
 export const USER_SEND_TRIGGER_TTL_MS_ACU = 12000;
-export const GENERATION_CONTEXT_TTL_MS_ACU = 60000;
 
 export interface GenerationContext_ACU {
   seq: number;
@@ -105,11 +104,8 @@ export function recordLastUserSend_ACU(messageId: any) {
   }
 }
 
-function removeExpiredGenerationContexts_ACU(now = Date.now()): void {
-  const earliestValidAt = now - GENERATION_CONTEXT_TTL_MS_ACU;
-  generationGate_ACU.activeGenerations = generationGate_ACU.activeGenerations.filter(context => context.at >= earliestValidAt);
-}
-
+// 未结束上下文按宿主生命周期管理，不以生成耗时判定失效。
+// 完成/停止消费最近一项，聊天切换清空；新开 quiet 等嵌套生成不能删除仍在途的正文。
 export function recordGenerationContext_ACU(type: any, params: any, dryRun: any): GenerationContext_ACU {
   const context: GenerationContext_ACU = {
     seq: ++generationGate_ACU.generationSeq,
@@ -118,7 +114,6 @@ export function recordGenerationContext_ACU(type: any, params: any, dryRun: any)
     dryRun,
     at: Date.now(),
   };
-  removeExpiredGenerationContexts_ACU(context.at);
   generationGate_ACU.activeGenerations.push(context);
   generationGate_ACU.lastGeneration = context;
   return context;
@@ -129,7 +124,6 @@ export function recordGenerationContext_ACU(type: any, params: any, dryRun: any)
  * 这比让陈旧上下文持续污染下一次 GENERATION_ENDED 更安全。
  */
 export function discardLatestGenerationContext_ACU(): GenerationContext_ACU | null {
-  removeExpiredGenerationContexts_ACU();
   return generationGate_ACU.activeGenerations.pop() || null;
 }
 
@@ -197,7 +191,6 @@ export function shouldProcessSummaryVectorIndexForGeneration_ACU(type: any, para
  * 同一 ended 回调里新开 quiet 生成后覆盖当前正文生成的判定。
  */
 export function consumeGenerationContextForEnded_ACU(): GenerationContext_ACU | null {
-  removeExpiredGenerationContexts_ACU();
   const activeContext = generationGate_ACU.activeGenerations.pop();
   // lastGeneration 仅保留给旧调用方。已有受追踪生成全部消费后，不能重复使用最后一个
   // quiet 上下文，否则下一次无关 GENERATION_ENDED 会被持续误拦截。

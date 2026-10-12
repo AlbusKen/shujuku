@@ -79,6 +79,16 @@ describe('public read-only table history API', () => {
         expect(await pending).toMatchObject({ success: false, code: 'context_changed' });
     });
 
+    it('拒绝读取期间序列化存储字段的变化', async () => {
+        const message = mocks.host.chat[0];
+        const storage = message.TavernDB_ACU_IsolatedData;
+        message.TavernDB_ACU_IsolatedData = JSON.stringify(storage);
+        const pending = read([0]);
+        storage[''].storageFrame.headRevision = '2:new';
+        message.TavernDB_ACU_IsolatedData = JSON.stringify(storage);
+        expect(await pending).toMatchObject({ success: false, code: 'context_changed' });
+    });
+
     it('returns a structured failure rather than substituting current or empty data', async () => {
         mocks.replay.mockRejectedValue(new Error('bad persisted SQL'));
         expect(await read([0])).toEqual({ success: false, code: 'replay_failed', error: 'bad persisted SQL' });

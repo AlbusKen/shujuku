@@ -44,6 +44,7 @@ export function createTableHistoryApi(): Record<string, Function> {
             const isolationKey = getCurrentIsolationKey_ACU(); // 空串是合法的默认槽。
             const owners = chat.map(message => ({
                 message, swipeId: message?.swipe_id,
+                storage: message?.TavernDB_ACU_IsolatedData,
                 frame: message?.TavernDB_ACU_IsolatedData?.[isolationKey]?.storageFrame,
             }));
             const revision = computeReplayHeadRevisionDigest_ACU(chat, isolationKey);
@@ -52,14 +53,15 @@ export function createTableHistoryApi(): Record<string, Function> {
                 && getCurrentIsolationKey_ACU() === isolationKey && chat.length === owners.length
                 && owners.every((owner, index) => chat[index] === owner.message
                     && chat[index]?.swipe_id === owner.swipeId
+                    && chat[index]?.TavernDB_ACU_IsolatedData === owner.storage
                     && chat[index]?.TavernDB_ACU_IsolatedData?.[isolationKey]?.storageFrame === owner.frame)
                 && computeReplayHeadRevisionDigest_ACU(chat, isolationKey) === revision;
             const stale = (): PublicTableHistoryResult_ACU => ({
                 success: false, code: 'context_changed', error: '历史读取期间聊天或存储修订已变化，请重新读取。',
             });
             try {
-                // Batch capture otherwise continues through the entire supplied history.
-                // A later invalid frame must not prevent reading an earlier valid floor.
+                // 批量回放只读取到最大请求索引，避免后续损坏帧阻断更早的有效快照。
+                // 原始存储字段比对同时覆盖对象与生产读取口支持的 JSON 字符串格式。
                 const lastIndex = indices.reduce((maximum, index) => Math.max(maximum, index), 0);
                 const states = await loadTableStatesAtBoundariesFromFramesV2Detailed_ACU(chat.slice(0, lastIndex + 1), isolationKey, indices, {
                     updateRuntimeState: false,

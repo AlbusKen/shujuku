@@ -49,6 +49,7 @@ import {
   isRecentUserSend_ACU,
   shouldProcessPlotForGeneration_ACU,
   consumeGenerationContextForEnded_ACU,
+  discardLatestGenerationContext_ACU,
   getCurrentIsolationKey_ACU,
   settings_ACU,
   _set_settings_ACU,
@@ -202,6 +203,34 @@ describe('recordGenerationContext_ACU', () => {
 
     recordGenerationContext_ACU('quiet', { quiet_prompt: '第三方插件后台任务' }, false);
     expect(consumeGenerationContextForEnded_ACU()).toEqual(expect.objectContaining({ type: 'quiet' }));
+  });
+
+  it.each([60001, 300000, 3600000])('生成耗时 %dms 后仍准确消费一次，不复用历史上下文', elapsed => {
+    const context = recordGenerationContext_ACU('normal', {}, false);
+    context.at -= elapsed;
+    expect(consumeGenerationContextForEnded_ACU()).toBe(context);
+    expect(hasActiveContentGeneration_ACU()).toBe(false);
+    expect(consumeGenerationContextForEnded_ACU()).toBeNull();
+  });
+
+  it('慢正文生成中新开后台任务不删除正文上下文，后台完成不解除正文门控', () => {
+    const content = recordGenerationContext_ACU('regenerate', {}, false);
+    content.at -= 300000;
+    const background = recordGenerationContext_ACU('quiet', {}, false);
+    expect(generationGate_ACU.activeGenerations).toEqual([content, background]);
+    expect(consumeGenerationContextForEnded_ACU()).toBe(background);
+    expect(hasActiveContentGeneration_ACU()).toBe(true);
+    expect(consumeGenerationContextForEnded_ACU()).toBe(content);
+    expect(hasActiveContentGeneration_ACU()).toBe(false);
+  });
+
+  it('停止慢生成准确丢弃其身份，迟到完成不能重用已停止上下文', () => {
+    const content = recordGenerationContext_ACU('normal', {}, false);
+    content.at -= 300000;
+    expect(discardLatestGenerationContext_ACU()).toBe(content);
+    expect(hasActiveContentGeneration_ACU()).toBe(false);
+    expect(consumeGenerationContextForEnded_ACU()).toBeNull();
+    expect(discardLatestGenerationContext_ACU()).toBeNull();
   });
 
 });

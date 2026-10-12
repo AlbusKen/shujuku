@@ -77,6 +77,18 @@ describe('public history API using real SQLite replay', () => {
         expect(saveChat).not.toHaveBeenCalled();
     });
 
+    it('通过生产读取口读取序列化存储，不改写原字段或当前表格', async () => {
+        chat[0].TavernDB_ACU_IsolatedData = JSON.stringify(chat[0].TavernDB_ACU_IsolatedData);
+        const beforeChat = structuredClone(chat), beforeCurrent = structuredClone(currentJsonTableData_ACU);
+        const result = await read([0, 1]);
+        expect(result.success).toBe(true);
+        expect(result.snapshots.map((snapshot: any) => Number(snapshot.data.sheet_inventory.content[1][2])))
+            .toEqual([1.75, 1.75]);
+        expect(chat).toEqual(beforeChat);
+        expect(currentJsonTableData_ACU).toEqual(beforeCurrent);
+        expect(saveChat).not.toHaveBeenCalled();
+    });
+
     it('can read a valid older state even when later SQL is invalid, and preserves failure details when that floor is requested', async () => {
         chat[2].TavernDB_ACU_IsolatedData[''].storageFrame.logEntries[0].operations[0].statements = ['UPDATE inventory SET missing_column = 5'];
         const earlier = await read([0]);
