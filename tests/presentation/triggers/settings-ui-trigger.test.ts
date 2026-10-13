@@ -14,6 +14,7 @@ const m = vi.hoisted(() => ({
   endTask: vi.fn(),
   grouped: vi.fn(),
   staging: vi.fn(),
+  refreshCommittedWorldbook: vi.fn(),
   abortRequests: vi.fn(),
   buildPlan: vi.fn(() => ({ tablesToUpdate: [{ sheetKey: 'sheet_0' }], updateGroups: { group_1: {} } })),
   getChat: vi.fn(() => [{ is_user: true }, { is_user: false }]),
@@ -67,6 +68,7 @@ vi.mock('../../../src/presentation/triggers/settings-ui-sync/settings-ui-config'
 vi.mock('../../../src/service/table/update-orchestrator', () => ({
   processGroupedRuntimeChunk_ACU: m.grouped,
   executeAutoFillStagingGroups_ACU: m.staging,
+  refreshCommittedWorldbook_ACU: m.refreshCommittedWorldbook,
 }));
 
 async function settleMicrotasks() { await Promise.resolve(); await Promise.resolve(); }
@@ -84,6 +86,7 @@ describe('triggerAutomaticUpdateIfNeeded_ACU 逐次串行调度', () => {
     m.beginTask.mockReset().mockReturnValue({ update: m.updateTask, end: m.endTask });
     m.grouped.mockReset();
     m.staging.mockReset();
+    m.refreshCommittedWorldbook.mockReset().mockResolvedValue([]);
     m.abortRequests.mockReset();
     m.executePlan.mockReset();
     m.logSkip.mockReset();
@@ -105,6 +108,25 @@ describe('triggerAutomaticUpdateIfNeeded_ACU 逐次串行调度', () => {
     expect(m.logSkip).toHaveBeenCalledTimes(1);
     expect(m.buildPlan).not.toHaveBeenCalled();
     expect(m.executePlan).not.toHaveBeenCalled();
+  });
+
+  it('自动入口最终世界书刷新失败时只报告告警，不重跑计划或误报提交失败', async () => {
+    const message = '表格已保存，但世界书刷新失败：FINAL_WORLD_BOOK_FAILED';
+    const postCommitWarnings = [{ code: 'worldbook_sync_failed', message }];
+    m.buildPlan.mockReturnValue({ tablesToUpdate: [{ sheetKey: 'sheet_0' }], updateGroups: { group_1: {} } });
+    m.refreshCommittedWorldbook.mockResolvedValueOnce(postCommitWarnings);
+    m.executePlan.mockImplementationOnce(async (_plan, _settings, _setUpdating, ops) => {
+      const result = await ops.refreshData();
+      expect(result).toEqual({ postCommitWarnings });
+      return { success: true, failedGroups: 0, errors: [], postCommitWarnings };
+    });
+    const { triggerAutomaticUpdateIfNeeded_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-trigger');
+    await triggerAutomaticUpdateIfNeeded_ACU();
+    expect(m.executePlan).toHaveBeenCalledTimes(1);
+    expect(m.refreshCommittedWorldbook).toHaveBeenCalledTimes(1);
+    expect(m.refreshCommittedWorldbook).toHaveBeenCalledWith({ sheet_0: {} });
+    expect(m.showToast.mock.calls).toEqual([['warning', message]]);
+    expect(m.logSkip).not.toHaveBeenCalled();
   });
 
   it('使用实时聊天调度，无实际请求时静默，普通与跨边界填表首次调用才显示进度', async () => {

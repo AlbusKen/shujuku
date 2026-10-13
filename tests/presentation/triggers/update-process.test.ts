@@ -108,10 +108,11 @@ describe('handleManualUpdate_ACU destructive refill confirmation', () => {
     expect(showToastr_ACU.mock.calls.some(call => call[0] === 'error')).toBe(false);
   });
 
-  it('用户确认后只调用 orchestrator 一次，且不再传 confirmBoundaryReset', async () => {
-    const { handleManualUpdate_ACU, showCustomConfirm_ACU, orchestrateManualUpdate_ACU } = await importTrigger();
+  it.each([false, true])('用户确认后只执行一次，提交后告警使用 warning 提示（warning=%s）', async warning => {
+    const { handleManualUpdate_ACU, showCustomConfirm_ACU, orchestrateManualUpdate_ACU, showToastr_ACU } = await importTrigger();
     showCustomConfirm_ACU.mockResolvedValue(true);
-    orchestrateManualUpdate_ACU.mockResolvedValue({ success: true });
+    const message = '表格已保存，但世界书刷新失败';
+    orchestrateManualUpdate_ACU.mockResolvedValue({ success: true, ...(warning ? { postCommitWarnings: [{ code: 'worldbook_sync_failed', message }] } : {}) });
 
     await handleManualUpdate_ACU();
 
@@ -120,6 +121,8 @@ describe('handleManualUpdate_ACU destructive refill confirmation', () => {
     expect(orchestrateManualUpdate_ACU.mock.calls[0][0]).toEqual(['sheet_0']);
     expect(orchestrateManualUpdate_ACU.mock.calls[0][3]).toEqual(expect.objectContaining({ clearBeforeUpdate: true }));
     expect(orchestrateManualUpdate_ACU.mock.calls[0][3]).not.toHaveProperty('confirmBoundaryReset');
+    expect(showToastr_ACU).toHaveBeenCalledWith(warning ? 'warning' : 'success', warning ? `手动更新完成！\n${message}` : '手动更新完成！');
+    expect(showToastr_ACU.mock.calls.some(call => call[0] === 'error')).toBe(false);
   });
 
   it('orchestrator 失败时展示 error toast', async () => {
@@ -135,6 +138,23 @@ describe('handleManualUpdate_ACU destructive refill confirmation', () => {
 
 
 describe('update error toast ownership', () => {
+  it.each([false, true])('提交后告警在单次或批处理最外层只提示一次（batch=%s）', async batch => {
+    const { proceedWithCardUpdate_ACU, processUpdates_ACU, executeCardUpdateCore_ACU, processUpdatesBatch_ACU, showToastr_ACU } = await importTrigger();
+    const message = '表格已保存，但世界书刷新失败';
+    const postCommitWarnings = [{ code: 'worldbook_sync_failed', message }];
+    executeCardUpdateCore_ACU.mockResolvedValue({ success: true, modifiedKeys: ['sheet_0'], postCommitWarnings });
+    processUpdatesBatch_ACU.mockImplementationOnce(async (_indices, _mode, _options, execute) => {
+      const inner = await execute([{ is_user: false, mes: 'AI' }], 0, 'auto_standard', false, ['sheet_0'], null, { currentBatch: 1, totalBatches: 1 });
+      expect(showToastr_ACU).not.toHaveBeenCalled();
+      return { success: inner.success, postCommitWarnings: inner.postCommitWarnings };
+    });
+    const result = batch ? await processUpdates_ACU([0], 'auto') : await proceedWithCardUpdate_ACU([{ is_user: false, mes: 'AI' }]);
+    expect(result.success).toBe(true);
+    expect(result.postCommitWarnings).toEqual(postCommitWarnings);
+    expect(executeCardUpdateCore_ACU).toHaveBeenCalledTimes(1);
+    expect(showToastr_ACU.mock.calls).toEqual([['warning', message]]);
+  });
+
   it('单次更新首次 AI 调用才显示进度，重试复用任务且失败只提示一次', async () => {
     const { proceedWithCardUpdate_ACU, executeCardUpdateCore_ACU, showToastr_ACU, beginTask, updateTask, endTask, notifyStart } = await importTrigger();
     executeCardUpdateCore_ACU.mockImplementation(async (...args: any[]) => {

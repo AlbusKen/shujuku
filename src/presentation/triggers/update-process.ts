@@ -234,6 +234,9 @@ export async function proceedWithCardUpdate_ACU(
         );
 
         // UI：根据返回值决定后续 UI 操作
+        if (result.postCommitWarnings?.length && !isSilentMode && showFinalErrorToast && !executionOptions.planManaged) {
+            showToastr_ACU('warning', [...new Set(result.postCommitWarnings.map(warning => warning.message))].join('\n'));
+        }
         if (result.success && !isSilentMode && progressTask) {
             setTimeout(() => {
                 notifyTableUpdate();
@@ -276,6 +279,9 @@ export async function processUpdates_ACU(indicesToUpdate: number[], mode = 'auto
     );
 
     // UI：根据返回值显示错误 toast
+    if (result.postCommitWarnings?.length && !options.planManaged) {
+        showToastr_ACU('warning', [...new Set(result.postCommitWarnings.map(warning => warning.message))].join('\n'));
+    }
     if (!result.success && !result.aborted && result.error) {
         showToastr_ACU('error', result.error);
     }
@@ -362,7 +368,9 @@ export async function handleManualUpdate_ACU(options: { skipConfirm?: boolean } 
 
         // UI：根据返回值显示 toast
         if (result.success) {
-            showToastr_ACU(result.checkpointWarning ? 'warning' : 'success', result.checkpointWarning ? `手动更新完成，但 AI 楼层保留边界 checkpoint 建立失败：${result.checkpointWarning}` : '手动更新完成！');
+            const warnings = [...new Set(result.postCommitWarnings?.map(warning => warning.message) || [])];
+            if (result.checkpointWarning) warnings.push(`AI 楼层保留边界 checkpoint 建立失败：${result.checkpointWarning}`);
+            showToastr_ACU(warnings.length ? 'warning' : 'success', ['手动更新完成！', ...warnings].join('\n'));
             updateStatusDisplay();
             notifyTableUpdate();
 

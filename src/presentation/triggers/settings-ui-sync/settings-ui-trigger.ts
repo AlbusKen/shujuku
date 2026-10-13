@@ -11,13 +11,13 @@ import { abortAllActiveRequests_ACU, currentChatFileIdentifier_ACU, currentJsonT
 import { $manualExtraHintCheckbox_ACU } from '../../state/ui-refs';
 import { processUpdates_ACU } from '../update-process';
 import { getSortedSheetKeys_ACU } from '../../../service/template/chat-scope';
-import { loadAllChatMessages_ACU, updateReadableLorebookEntry_ACU } from '../../../service/worldbook/pipeline';
+import { loadAllChatMessages_ACU } from '../../../service/worldbook/pipeline';
 import { getStorageProvider } from '../../../service/table/table-storage-strategy';
 import { topLevelWindow_ACU } from '../../../shared/env';
 import { logDebug_ACU } from '../../../shared/utils';
 import { purgeOldLayerData_ACU } from './settings-ui-config';
 import { buildAutoUpdatePlan_ACU, checkAutoUpdatePreConditions_ACU, executeAutoUpdatePlan_ACU } from '../../../service/table/update-scheduler';
-import { executeAutoFillStagingGroups_ACU, processGroupedRuntimeChunk_ACU, type CardUpdateProgressEvent } from '../../../service/table/update-orchestrator';
+import { executeAutoFillStagingGroups_ACU, processGroupedRuntimeChunk_ACU, refreshCommittedWorldbook_ACU, type CardUpdateProgressEvent, type TableUpdatePostCommitWarning_ACU } from '../../../service/table/update-orchestrator';
 import { isSqliteMode } from '../../../service/table/storage-mode';
 import { startRuntimePerformanceSpan_ACU } from '../../../shared/runtime-performance';
 import { logAutoFillSkip_ACU, logAutoFillStage_ACU, type AutoFillSkipContext_ACU } from '../../../shared/trigger-diagnostics';
@@ -53,14 +53,13 @@ function buildAutoUpdateProgressMessage_ACU(event: CardUpdateProgressEvent): str
     }
 }
 
-async function refreshRuntimeDataAndNotifyAfterAutoUpdate_ACU(): Promise<void> {
+async function refreshRuntimeDataAndNotifyAfterAutoUpdate_ACU(): Promise<{ postCommitWarnings?: TableUpdatePostCommitWarning_ACU[] }> {
     const data = getStorageProvider().getCurrentData() || currentJsonTableData_ACU;
-    if (data) {
-        await updateReadableLorebookEntry_ACU(true, false, null, data);
-    }
+    const postCommitWarnings = data ? await refreshCommittedWorldbook_ACU(data) : [];
     try {
         (topLevelWindow_ACU as any).AutoCardUpdaterAPI?._notifyTableUpdate?.();
     } catch (_) {}
+    return postCommitWarnings.length ? { postCommitWarnings } : {};
 }
 
 function handleAutoGroupedProgressEvent_ACU(event: CardUpdateProgressEvent, progressTask?: NoticeTaskHandle_ACU | null) {
@@ -324,6 +323,9 @@ export function cancelPendingAutoFillEvent_ACU(): void {
         showToastr_ACU('warning', firstError
             ? `并发分组更新有 ${result.failedGroups} 组失败：${firstError}`
             : `并发分组更新有 ${result.failedGroups} 组失败，请查看日志。`);
+    }
+    if (result.postCommitWarnings?.length) {
+        showToastr_ACU('warning', [...new Set(result.postCommitWarnings.map(warning => warning.message))].join('\n'));
     }
     if (result.autoMergeTriggered && result.autoMergeSuccess) {
         showToastr_ACU('success', '自动合并纪要完成！');

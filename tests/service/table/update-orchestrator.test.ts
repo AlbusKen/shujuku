@@ -1234,8 +1234,9 @@ describe('processUpdatesBatch_ACU', () => {
     expect(mockReloadStorageProvider).not.toHaveBeenCalled();
   });
 
-  it('执行更新回调成功时返回 success: true', async () => {
-    const mockExecute = vi.fn().mockResolvedValue({ success: true, modifiedKeys: ['sheet_0'] } as CardUpdateResult);
+  it.each([false, true])('执行更新回调成功时保留结果及提交后告警（warning=%s）', async warning => {
+    const postCommitWarnings = [{ code: 'worldbook_sync_failed' as const, message: '表格已保存，但世界书刷新失败' }];
+    const mockExecute = vi.fn().mockResolvedValue({ success: true, modifiedKeys: ['sheet_0'], ...(warning ? { postCommitWarnings } : {}) } as CardUpdateResult);
     mockCurrentJsonTableData = { sheet_0: { name: '测试' } };
 
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
@@ -1246,7 +1247,8 @@ describe('processUpdatesBatch_ACU', () => {
 
     const result = await processUpdatesBatch_ACU([1], 'auto_standard', {}, mockExecute);
     expect(result.success).toBe(true);
-    expect(mockExecute).toHaveBeenCalled();
+    expect(result.postCommitWarnings).toEqual(warning ? postCommitWarnings : undefined);
+    expect(mockExecute).toHaveBeenCalledTimes(1);
   });
 
   it('更新失败时返回 success: false 和 error', async () => {
@@ -1539,6 +1541,7 @@ describe('executeCardUpdateCore_ACU', () => {
     };
     mockCurrentJsonTableData = { sheet_0: { name: '测试表', content: [['row_id'], ['1']] } };
     mockPersistTablesToChatMessage.mockResolvedValue({ saved: true, messageIndex: 0 });
+    mockUpdateReadableLorebookEntry.mockReset().mockResolvedValue(undefined);
     mockEnsureBoundaryCheckpoint.mockResolvedValue({ success: true, changed: false, skipped: true });
     mockShouldRotateBoundaryCheckpoint.mockReturnValue(false);
   });
@@ -1635,6 +1638,34 @@ describe('executeCardUpdateCore_ACU', () => {
     expect(phases).toContain('parsing');
     expect(phases).toContain('saving');
     expect(phases).toContain('complete');
+  });
+
+  it.each(['normal', 'error', 'abort'] as const)('快照提交后刷新结果为 %s 时保留提交状态且不重跑填表', async refresh => {
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: 'fixture' });
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>fixture</tableEdit>');
+    mockParseAndApplyTableEditsToData.mockImplementation((_response: string, data: any) => {
+      data.sheet_0.content.push(['2']);
+      return { success: true, modifiedKeys: ['sheet_0'] };
+    });
+    mockCheckIfFirstTimeInit.mockResolvedValue(false);
+    if (refresh !== 'normal') {
+      mockUpdateReadableLorebookEntry.mockRejectedValueOnce(refresh === 'abort'
+        ? new DOMException('AUDIT_DERIVED_WORLD_BOOK_FAILED', 'AbortError')
+        : new Error('AUDIT_DERIVED_WORLD_BOOK_FAILED'));
+    }
+    const result = await executeCardUpdateCore_ACU(
+      [{ is_user: false, mes: 'AI回复' }], 0, false, 'auto_standard', false, ['sheet_0'], null,
+    );
+    expect(result).toMatchObject({ success: true, modifiedKeys: ['sheet_0'] });
+    expect(result.error).toBeUndefined();
+    expect(result.errorCategory).toBeUndefined();
+    expect(result.aborted).toBeUndefined();
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
+    expect(mockPersistTablesToChatMessage.mock.calls[0][0].tableData.sheet_0.content).toContainEqual(['2']);
+    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
+    expect(mockUpdateReadableLorebookEntry).toHaveBeenCalledTimes(1);
+    if (refresh === 'normal') expect(result).not.toHaveProperty('postCommitWarnings');
+    else expect(result.postCommitWarnings).toEqual([{ code: 'worldbook_sync_failed', message: expect.stringContaining('AUDIT_DERIVED_WORLD_BOOK_FAILED') }]);
   });
 
   it('将目标表转换为 sheet 级 writeSet，并把 transactionContext 传给持久化', async () => {
@@ -1848,6 +1879,10 @@ describe('executeCardUpdateCore_ACU', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('save failed');
+    expect(result.errorCategory).toBe('infrastructure');
+    expect(result).not.toHaveProperty('postCommitWarnings');
+    expect(mockUpdateReadableLorebookEntry).not.toHaveBeenCalled();
+    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
   });
 
   it('无实质数据改动但 targetSheetKeys 非空时记录填表尝试但不推进 changed tracking', async () => {
@@ -3991,7 +4026,8 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(mockEnsureBoundaryCheckpoint).toHaveBeenCalledWith({ reason: 'manual_refill', save: true });
   });
 
-  it('手动更新整体成功后建立 retained buffer boundary checkpoint', async () => {
+  it.each([false, true])('手动更新整体成功后建立 boundary checkpoint 并传播刷新告警（warning=%s）', async warning => {
+    if (warning) mockUpdateReadableLorebookEntry.mockRejectedValueOnce(new Error('MANUAL_WORLD_BOOK_FAILED'));
     const { getChatArray_ACU } = await import('../../../src/service/chat/chat-service');
     vi.mocked(getChatArray_ACU).mockReturnValue([
       { is_user: true },
@@ -4003,6 +4039,11 @@ describe('orchestrateManualUpdate_ACU', () => {
 
     expect(result.success).toBe(true);
     expect(result.checkpointWarning).toBeUndefined();
+    if (warning) {
+      expect(result.postCommitWarnings).toEqual([{ code: 'worldbook_sync_failed', message: expect.stringContaining('MANUAL_WORLD_BOOK_FAILED') }]);
+      expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
+      expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
+    } else expect(result).not.toHaveProperty('postCommitWarnings');
     expect(mockEnsureBoundaryCheckpoint).toHaveBeenCalledTimes(1);
     expect(mockEnsureBoundaryCheckpoint).toHaveBeenCalledWith({ reason: 'manual_refill', save: true });
   });
@@ -4470,7 +4511,7 @@ describe('executeCardUpdateCore_ACU — SQL 错误反馈重试', () => {
     vi.mocked(isSqliteMode).mockReturnValue(false);
   });
 
- it('SQL 直接 provider 路径在执行与 V2 operation 中使用系统物化的 row_id', async () => {
+  it.each([false, true])('SQL provider 提交使用系统 row_id，刷新失败不覆盖成功（warning=%s）', async warning => {
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
     vi.mocked(isSqliteMode).mockReturnValue(true);
@@ -4492,6 +4533,7 @@ describe('executeCardUpdateCore_ACU — SQL 错误反馈重试', () => {
     mockCheckIfFirstTimeInit.mockResolvedValue(false);
     mockSaveIndependentTable.mockResolvedValue({ saved: true });
 
+    if (warning) mockUpdateReadableLorebookEntry.mockRejectedValueOnce(new Error('SQL_WORLD_BOOK_FAILED'));
     try {
       const result = await executeCardUpdateCore_ACU(
         [{ is_user: false, mes: 'AI回复' }],
@@ -4500,6 +4542,12 @@ describe('executeCardUpdateCore_ACU — SQL 错误反馈重试', () => {
       );
 
       expect(result.success, result.error).toBe(true);
+      expect(result.modifiedKeys).toEqual(['sheet_0']);
+      expect(result.errorCategory).toBeUndefined();
+      expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
+      expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
+      if (warning) expect(result.postCommitWarnings).toEqual([{ code: 'worldbook_sync_failed', message: expect.stringContaining('SQL_WORLD_BOOK_FAILED') }]);
+      else expect(result).not.toHaveProperty('postCommitWarnings');
       const persistPayload = mockPersistTablesToChatMessage.mock.calls[0][0];
       expect(persistPayload.tableData.sheet_0.content).toEqual([
         ['row_id', 'col1'], ['1', '旧值'], ['2', '新值'],
@@ -5384,7 +5432,8 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     });
   });
 
-  it('按稳定顺序基于 baseSnapshot 合并响应，仅显式保存一次并触发一次 flush', async () => {
+  it.each([false, true])('快照统一提交保持稳定顺序，刷新失败保留修改清单（warning=%s）', async warning => {
+    if (warning) mockUpdateReadableLorebookEntry.mockRejectedValueOnce(new Error('UNIFIED_WORLD_BOOK_FAILED'));
     const baseSnapshot = {
       sheet_0: { name: '表A', content: [['row_id', '值'], ['1', 'base-a']] },
       sheet_1: { name: '表B', content: [['row_id', '值'], ['1', 'base-b']] },
@@ -5399,6 +5448,9 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
 
     expect(result.success).toBe(true);
     expect(result.modifiedKeys.sort()).toEqual(['sheet_0', 'sheet_1']);
+    expect(result.error).toBeUndefined();
+    if (warning) expect(result.postCommitWarnings).toEqual([{ code: 'worldbook_sync_failed', message: expect.stringContaining('UNIFIED_WORLD_BOOK_FAILED') }]);
+    else expect(result).not.toHaveProperty('postCommitWarnings');
     expect(mockParseAndApplyTableEditsToData.mock.calls.map(call => call[0])).toEqual(['<tableEdit>sheet_0</tableEdit>', '<tableEdit>sheet_1</tableEdit>']);
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledWith(expect.objectContaining({
@@ -5708,7 +5760,8 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     }));
   });
 
-  it('SQL 模式下基于显式 baseSnapshot 顺序统一提交，不污染全局 currentJsonTableData', async () => {
+  it.each([false, true])('SQL 统一提交基于 baseSnapshot，刷新失败保留提交结果（warning=%s）', async warning => {
+    if (warning) mockUpdateReadableLorebookEntry.mockRejectedValueOnce(new Error('UNIFIED_SQL_WORLD_BOOK_FAILED'));
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
     vi.mocked(isSqliteMode).mockReturnValue(true);
     const inventoryDDL = `CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, value TEXT NOT NULL);`;
@@ -5728,6 +5781,9 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
 
     expect(result.success).toBe(true);
     expect(result.modifiedKeys).toEqual(['sheet_0', 'sheet_1']);
+    expect(result.error).toBeUndefined();
+    if (warning) expect(result.postCommitWarnings).toEqual([{ code: 'worldbook_sync_failed', message: expect.stringContaining('UNIFIED_SQL_WORLD_BOOK_FAILED') }]);
+    else expect(result).not.toHaveProperty('postCommitWarnings');
     expect(mockParseAndApplyTableEditsToData).not.toHaveBeenCalled();
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
     const savedData = mockPersistTablesToChatMessage.mock.calls[0][0].tableData;
@@ -6579,6 +6635,25 @@ describe('processGroupedRuntimeChunk_ACU', () => {
       }
       return { success: false, modifiedKeys: [], appliedEdits: 0 };
     });
+  });
+
+  it('分组提交后世界书刷新失败仍计入已提交 bucket，且不重跑模型或保存', async () => {
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({ mate: { type: 'acu' }, sheet_0: { name: '表A', content: [['row_id', '值']] } } as any);
+    mockGetChatArray_ACU.mockReturnValue([{ is_user: true, mes: '问题' }, { is_user: false, mes: 'AI回复' }]);
+    mockCallCustomOpenAI.mockResolvedValueOnce('<tableEdit>sheet_0</tableEdit>');
+    mockUpdateReadableLorebookEntry.mockRejectedValueOnce(new Error('GROUP_WORLD_BOOK_FAILED'));
+    const onBucketCommitted = vi.fn();
+    const result = await processGroupedRuntimeChunk_ACU([
+      { key: 'group_a', groupId: 0, indices: [1], batchSize: 2, sheetKeys: ['sheet_0'], requestOptions: null },
+    ], 'manual_independent', { onBucketCommitted });
+    expect(result).toMatchObject({ success: true, failedGroups: [], committedBucketCount: 1 });
+    expect(result.postCommitWarnings).toEqual([{ code: 'worldbook_sync_failed', message: expect.stringContaining('GROUP_WORLD_BOOK_FAILED') }]);
+    expect(onBucketCommitted).toHaveBeenCalledTimes(1);
+    expect(onBucketCommitted).toHaveBeenCalledWith(expect.objectContaining({ committedBucketCount: 1 }));
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
+    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
+    expect(mockUpdateReadableLorebookEntry).toHaveBeenCalledTimes(1);
   });
 
   it('空分组直接成功且不调用 AI', async () => {

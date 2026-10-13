@@ -10,6 +10,7 @@ import { startRuntimePerformanceSpan_ACU } from '../../shared/runtime-performanc
 import { logAutoFillSkip_ACU, logAutoFillStage_ACU } from '../../shared/trigger-diagnostics';
 import { getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { getLatestV2FullCheckpointMessageIndex_ACU, resolveTableHistoryStatesFromChat_ACU } from './table-history';
+import type { TableUpdatePostCommitWarning_ACU } from './update-orchestrator';
 
 export interface TableUpdateItem {
     sheetKey: string;
@@ -240,6 +241,7 @@ export interface AutoUpdateResult {
     failedGroups: number;
     totalGroups: number;
     errors?: string[];
+    postCommitWarnings?: TableUpdatePostCommitWarning_ACU[];
     /** 稳定失败分类（spv8.9）：staging 组无可用 runner 时为 'staging_runner_unavailable'。 */
     diagnosticCode?: 'staging_runner_unavailable';
     /** 稳定结构化诊断字段：标记因缺少 staging runner 而失败的组 key；不含聊天内容。 */
@@ -254,13 +256,13 @@ export interface AutoUpdateResult {
  */
 export interface AutoUpdateOperations {
     processUpdates: (indices: number[], mode: string, options: any) => Promise<any>;
-    processGroupedUpdates?: (groups: Array<{ key: string; groupId: number; indices: number[]; batchSize: number; sheetKeys: string[]; requestOptions: Record<string, any> | null }>, mode: string, options: any) => Promise<{ success: boolean; failedGroups: string[]; error?: string }>;
+    processGroupedUpdates?: (groups: Array<{ key: string; groupId: number; indices: number[]; batchSize: number; sheetKeys: string[]; requestOptions: Record<string, any> | null }>, mode: string, options: any) => Promise<{ success: boolean; failedGroups: string[]; error?: string; postCommitWarnings?: TableUpdatePostCommitWarning_ACU[] }>;
     /**
      * 跨 full checkpoint 边界分组的执行委托（由 orchestrator 提供共享 staging runner）。
      * 传入的是 requiresBoundaryStaging=true 的组；执行器负责 pre 段 stage_only、
      * 边界原子汇合与 post 段普通持久化。缺省时降级为 processGroupedUpdates。
      */
-    processStagingGroupedUpdates?: (groups: Array<{ key: string; groupId: number; indices: number[]; batchSize: number; sheetKeys: string[]; requestOptions: Record<string, any> | null }>, mode: string, options: any) => Promise<{ success: boolean; failedGroups: string[]; error?: string }>;
+    processStagingGroupedUpdates?: (groups: Array<{ key: string; groupId: number; indices: number[]; batchSize: number; sheetKeys: string[]; requestOptions: Record<string, any> | null }>, mode: string, options: any) => Promise<{ success: boolean; failedGroups: string[]; error?: string; postCommitWarnings?: TableUpdatePostCommitWarning_ACU[] }>;
     refreshData: () => Promise<any>;
     loadAllChatMessages: () => Promise<void>;
     purgeOldLayerData: () => Promise<void>;
@@ -290,8 +292,10 @@ export async function executeAutoUpdatePlan_ACU(
     });
 
     const totalGroups = groupKeys.length;
+    const postCommitWarnings: TableUpdatePostCommitWarning_ACU[] = [];
     const cancelledResult = (): AutoUpdateResult => ({
         success: false, aborted: true, failedGroups: failedGroupKeys.length, totalGroups, errors: failedGroupErrors,
+        ...(postCommitWarnings.length ? { postCommitWarnings } : {}),
     });
     const maxConcurrentGroups = Math.max(1, settings.maxConcurrentGroups || 1);
     const failedGroupKeys: string[] = [];
@@ -309,7 +313,7 @@ export async function executeAutoUpdatePlan_ACU(
     const normalGroupKeys = groupKeys.filter(key => updateGroups[key].requiresBoundaryStaging !== true);
     const executeGroupChunk = async (
         chunkKeys: string[],
-        runner: ((groups: Array<{ key: string; groupId: number; indices: number[]; batchSize: number; sheetKeys: string[]; requestOptions: Record<string, any> | null }>, mode: string, options: any) => Promise<{ success: boolean; failedGroups: string[]; error?: string }>),
+        runner: NonNullable<AutoUpdateOperations['processGroupedUpdates']>,
     ): Promise<void> => {
         const groupedChunk = chunkKeys.map(key => {
             const group = updateGroups[key];
@@ -330,6 +334,7 @@ export async function executeAutoUpdatePlan_ACU(
             }
             : {};
         const groupedResult = await runner(groupedChunk, 'auto_independent', { ...groupedOptions, abortController });
+        postCommitWarnings.push(...(groupedResult.postCommitWarnings || []));
         if ((groupedResult as { aborted?: boolean }).aborted) abortController.abort();
         logAutoFillStage_ACU('chunk_result', {
             runId: performanceContext?.runId, groupCount: chunkKeys.length, success: groupedResult.success,
@@ -380,6 +385,9 @@ export async function executeAutoUpdatePlan_ACU(
                     return;
                 }
                 const rawResult = result.value?.success;
+                if (rawResult && typeof rawResult === 'object') {
+                    postCommitWarnings.push(...(rawResult.postCommitWarnings || []));
+                }
                 const groupSucceeded = typeof rawResult === 'object' && rawResult !== null && 'success' in rawResult
                     ? (rawResult as { success?: boolean }).success !== false
                     : !!rawResult;
@@ -428,7 +436,8 @@ export async function executeAutoUpdatePlan_ACU(
     logAutoFillStage_ACU('refresh', { runId: performanceContext?.runId });
     logDebug_ACU(`All group updates completed. Forcing data refresh...`);
     await ops.loadAllChatMessages();
-    await ops.refreshData();
+    const refreshResult = await ops.refreshData();
+    postCommitWarnings.push(...(refreshResult?.postCommitWarnings || []));
 
     if (abortController.signal.aborted) {
         const result = cancelledResult();
@@ -475,6 +484,7 @@ export async function executeAutoUpdatePlan_ACU(
         errors: failedGroupErrors,
         autoMergeTriggered,
         autoMergeSuccess,
+        ...(postCommitWarnings.length ? { postCommitWarnings } : {}),
         ...(runnerUnavailableGroupKeys.length > 0
             ? {
                 diagnosticCode: 'staging_runner_unavailable' as const,

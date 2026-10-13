@@ -544,25 +544,29 @@ describe('executeAutoUpdatePlan_ACU', () => {
     expect(result.failedGroups).toBe(0);
   });
 
-  it('单组全部成功', async () => {
+  it.each([false, true])('单组提交成功且保留刷新告警（warning=%s）', async warning => {
+    const postCommitWarnings = [{ code: 'worldbook_sync_failed' as const, message: '表格已保存，但世界书刷新失败' }];
     const plan = {
       tablesToUpdate: [{ sheetKey: 'sheet_0', sheetName: '表A', indices: [1], groupId: 0, batchSize: 2 }],
       updateGroups: {
         '0|1|2': { indices: [1], batchSize: 2, groupId: 0, sheetKeys: ['sheet_0'], sheetNames: ['表A'] },
       },
     };
-    const ops = makeOps();
+    const ops = makeOps({ processUpdates: vi.fn().mockResolvedValue({ success: true, ...(warning ? { postCommitWarnings } : {}) }) });
     const result = await executeAutoUpdatePlan_ACU(plan, baseSettings, mockSetAutoUpdating, ops);
     expect(result.success).toBe(true);
     expect(result.totalGroups).toBe(1);
     expect(result.failedGroups).toBe(0);
+    if (warning) expect(result.postCommitWarnings).toEqual(postCommitWarnings);
+    else expect(result).not.toHaveProperty('postCommitWarnings');
     expect(ops.processUpdates).toHaveBeenCalledTimes(1);
     expect(ops.loadAllChatMessages).toHaveBeenCalled();
     expect(ops.refreshData).toHaveBeenCalled();
     expect(ops.purgeOldLayerData).toHaveBeenCalled();
   });
 
-  it('提供 processGroupedUpdates 时优先走 grouped 委托', async () => {
+  it.each([false, true])('优先走 grouped 委托并保留提交后告警（warning=%s）', async warning => {
+    const postCommitWarnings = [{ code: 'worldbook_sync_failed' as const, message: 'GROUP_WORLD_BOOK_FAILED' }];
     const plan = {
       tablesToUpdate: [],
       updateGroups: {
@@ -570,19 +574,34 @@ describe('executeAutoUpdatePlan_ACU', () => {
         'group_b': { indices: [2], batchSize: 2, groupId: 1, sheetKeys: ['sheet_1'], sheetNames: ['表B'] },
       },
     };
-    const mockGrouped = vi.fn().mockResolvedValue({ success: true, failedGroups: [] });
+    const mockGrouped = vi.fn().mockResolvedValue({ success: true, failedGroups: [], ...(warning ? { postCommitWarnings } : {}) });
     const mockProcess = vi.fn().mockResolvedValue(true);
     const ops = makeOps({ processGroupedUpdates: mockGrouped, processUpdates: mockProcess });
 
     const result = await executeAutoUpdatePlan_ACU(plan, baseSettings, mockSetAutoUpdating, ops);
 
     expect(result.success).toBe(true);
+    if (warning) expect(result.postCommitWarnings).toEqual(postCommitWarnings);
+    else expect(result).not.toHaveProperty('postCommitWarnings');
     expect(mockGrouped).toHaveBeenCalledTimes(1);
     expect(mockGrouped).toHaveBeenCalledWith([
       expect.objectContaining({ key: 'group_a', groupId: 0, indices: [1], batchSize: 2, sheetKeys: ['sheet_0'], requestOptions: { skipProfileSwitch: true, forceDirectApi: true } }),
       expect.objectContaining({ key: 'group_b', groupId: 1, indices: [2], batchSize: 2, sheetKeys: ['sheet_1'], requestOptions: { skipProfileSwitch: true, forceDirectApi: true } }),
     ], 'auto_independent', expect.objectContaining({ abortController: expect.any(AbortController) }));
     expect(mockProcess).not.toHaveBeenCalled();
+  });
+
+  it('最终派生刷新返回告警时保留提交成功且不重跑分组', async () => {
+    const plan = {
+      tablesToUpdate: [],
+      updateGroups: { group_a: { indices: [1], batchSize: 2, groupId: 0, sheetKeys: ['sheet_0'], sheetNames: ['表A'] } },
+    };
+    const postCommitWarnings = [{ code: 'worldbook_sync_failed' as const, message: 'FINAL_WORLD_BOOK_FAILED' }];
+    const ops = makeOps({ refreshData: vi.fn().mockResolvedValue({ postCommitWarnings }) });
+    const result = await executeAutoUpdatePlan_ACU(plan as any, baseSettings, mockSetAutoUpdating, ops);
+    expect(result).toMatchObject({ success: true, failedGroups: 0, postCommitWarnings });
+    expect(ops.processUpdates).toHaveBeenCalledTimes(1);
+    expect(ops.refreshData).toHaveBeenCalledTimes(1);
   });
 
   it('跨边界 runner 执行失败按数量汇总，不误报为 runner 缺失', async () => {

@@ -261,9 +261,10 @@ describe('useManualUpdate destructive refill confirmation', () => {
     __resetToastStoreForTests();
   });
 
-  it('用户确认后只调用 orchestrator 一次，且不再传 confirmBoundaryReset', async () => {
-    const { useManualUpdate, dialog, orchestrateManualUpdate_ACU, __resetToastStoreForTests } = await importManualUpdate();
-    orchestrateManualUpdate_ACU.mockResolvedValue({ success: true });
+  it.each([false, true])('用户确认后只执行一次，提交后告警使用 warning 提示（warning=%s）', async warning => {
+    const { useManualUpdate, dialog, toast, orchestrateManualUpdate_ACU, __resetToastStoreForTests } = await importManualUpdate();
+    const message = '表格已保存，但世界书刷新失败';
+    orchestrateManualUpdate_ACU.mockResolvedValue({ success: true, ...(warning ? { postCommitWarnings: [{ code: 'worldbook_sync_failed', message }] } : {}) });
     const manual = useManualUpdate();
 
     const pending = manual.runManualUpdate();
@@ -275,6 +276,10 @@ describe('useManualUpdate destructive refill confirmation', () => {
     expect(orchestrateManualUpdate_ACU.mock.calls[0][0]).toEqual(['sheet_0']);
     expect(orchestrateManualUpdate_ACU.mock.calls[0][3]).toEqual(expect.objectContaining({ clearBeforeUpdate: true }));
     expect(orchestrateManualUpdate_ACU.mock.calls[0][3]).not.toHaveProperty('confirmBoundaryReset');
+    expect(toast.items.at(-1)?.kind).toBe(warning ? 'warning' : 'success');
+    expect(toast.items.at(-1)?.text).toContain('手动填表完成');
+    if (warning) expect(toast.items.at(-1)?.text).toContain(message);
+    expect(toast.items.some(item => item.kind === 'error')).toBe(false);
     __resetToastStoreForTests();
   });
 

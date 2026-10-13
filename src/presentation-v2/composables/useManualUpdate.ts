@@ -549,13 +549,15 @@ export function useManualUpdate(): ManualUpdateState {
         },
       );
       finishToast(
-        result.success ? (result.checkpointWarning ? 'warning' : 'success') : (abortRequested || result.error?.includes('终止') ? 'warning' : 'error'),
+        result.success ? (result.checkpointWarning || result.postCommitWarnings?.length ? 'warning' : 'success') : (abortRequested || result.error?.includes('终止') ? 'warning' : 'error'),
         result.success
           ? `${result.autoMergeTriggered
               ? `手动填表完成;自动合并总结${result.autoMergeSuccess ? '已完成' : '未完成'}。`
               : '手动填表完成。'}${result.checkpointWarning
                 ? ` 但 AI 楼层保留边界 checkpoint 建立失败：${result.checkpointWarning}`
-                : ''}`
+                : ''}${result.postCommitWarnings?.length
+                  ? `\n${[...new Set(result.postCommitWarnings.map(warning => warning.message))].join('\n')}`
+                  : ''}`
           : (abortRequested ? '手动填表任务已由用户终止。' : (result.error || '手动填表失败。')),
       );
     } catch (error: any) {
