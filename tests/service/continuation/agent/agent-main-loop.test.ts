@@ -1220,11 +1220,14 @@ describe('open_round 固定结构工作流', () => {
     expect(isAgentSessionRunning_ACU()).toBe(false);
   });
 
-  it('总纲和阶段大纲都缺失时，open_round 先自动立总纲、再准备大纲并交付指令', async () => {
+  it('总纲和阶段大纲都缺失时，主 Agent 先委派总纲维护，再 open_round 准备大纲并交付指令', async () => {
     const h = harness_ACU({
       snapshot: buildEmptyAgentModuleSnapshot_ACU(),
       context: preOutlineContext_ACU,
-      mainReplies: ['{"action":"open_round","focus":"接住守门人的回避"}'],
+      mainReplies: [
+        '{"action":"delegate","delegations":[{"agentName":"arc-architect","prompt":"按当前剧情建立故事总纲","reads":["$STORY_ARC"]}]}',
+        '{"action":"open_round","focus":"接住守门人的回避"}',
+      ],
       subReplies: [arcReply_ACU, maintainerReply_ACU, plannerReply_ACU, '{"summary":"本轮无节拍操作","recommendation":"no_change"}', composerReply_ACU],
       applyOutline: () => ({ op: 'create', requiresReview: false, stopped: null, summary: '已创建首个阶段大纲' }),
     });
@@ -1234,10 +1237,45 @@ describe('open_round 固定结构工作流', () => {
     const result = await h.planner.plan(h.request);
 
     expect(result.instruction).toBe('按阶段大纲先观察守门人的回避。');
+    expect(h.mainCalls).toHaveLength(2);
     expect(h.outlineCalls).toEqual(['固定工作流根据当前 active 卷准备阶段大纲。焦点：接住守门人的回避']);
     expect(h.presetRoles).toEqual(['main', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'instructionComposer']);
     expect(h.written.some(write => write.snapshot.storyArc.some(item => item.id === 'VOL-01'))).toBe(true);
     expect(h.subCalls).toHaveLength(5);
+  });
+
+  it('总纲缺口时把 open_round 交回主 Agent 修复，不由固定工作流重复维护', async () => {
+    const h = harness_ACU({
+      snapshot: (() => {
+        const snapshot = buildEmptyAgentModuleSnapshot_ACU();
+        snapshot.storyArc = [{
+          id: 'ARC-STORY', scope: 'story', title: '禁区真相', direction: '主角查明禁区吞人的真相',
+          escalation: '从个人求生抬到与守门人体系对抗', withheld: '守门人是主角失踪的兄长', status: 'active',
+          stageNumbers: [], completionStageNumber: null, completionState: '', continuationRationale: '', retired: false, retiredReason: '',
+        }];
+        snapshot.revisions.storyArc = 1;
+        return snapshot;
+      })(),
+      context: preOutlineContext_ACU,
+      mainReplies: [
+        '{"action":"open_round","focus":"接住守门人的回避"}',
+        '{"action":"delegate","delegations":[{"agentName":"arc-architect","prompt":"按楼层 4-6 补齐活动卷并登记阶段进度","reads":["$STORY_ARC"]}]}',
+        '{"action":"open_round","focus":"接住守门人的回避"}',
+      ],
+      subReplies: [arcReply_ACU, maintainerReply_ACU, plannerReply_ACU, '{"summary":"本轮无节拍操作","recommendation":"no_change"}', composerReply_ACU],
+      applyOutline: () => ({ op: 'create', requiresReview: false, stopped: null, summary: '已创建首个阶段大纲' }),
+    });
+    const original = h.request.applyOutline!;
+    h.request.applyOutline = async instruction => { const result = await original(instruction); h.setContext(execution_ACU); return result; };
+
+    const result = await h.planner.plan(h.request);
+
+    expect(result.instruction).toBe('按阶段大纲先观察守门人的回避。');
+    expect(h.mainCalls).toHaveLength(3);
+    expect(h.outlineCalls).toEqual(['固定工作流根据当前 active 卷准备阶段大纲。焦点：接住守门人的回避']);
+    expect(h.presetRoles).toEqual(['main', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'instructionComposer']);
+    expect(h.subCalls).toHaveLength(5);
+    expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('固定工作流维护故事总纲'))).toBe(false);
   });
 
   it('交付只追加权威状态回执、更新非门禁轮次标签，并停止当前主循环', async () => {

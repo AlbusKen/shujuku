@@ -260,11 +260,22 @@ export function evaluateArcArchitectDispatch_ACU(context: AgentResolveContext_AC
   };
 }
 
+function storyArcNeedsMaintenance_ACU(context: AgentResolveContext_ACU): boolean {
+  const completedStageNumbers = context.execution.task.stages
+    .filter(stage => stage.status === 'completed')
+    .map(stage => stage.stageNumber);
+  return !hasActiveStoryArc_ACU(context.moduleSnapshot)
+    || !hasActiveStoryArcVolume_ACU(context.moduleSnapshot)
+    || findUnregisteredStageNumbers_ACU(context.moduleSnapshot, completedStageNumbers).length > 0;
+}
+
+
 /**
  * 主 Agent 输出被协议层拒绝时的回灌文本：错误原因 + 按当前状态给出的最可能合法动作样例。
  * 快速模型对“照这个样子写”远比对“请修正”服从；样例按状态选择，避免把不合时宜的动作推给它。
  */
 export function renderMainProtocolRejection_ACU(reason: string, execution: ContinuationAgentExecutionContext_ACU, allowDelegate: boolean, toolMode: AgentToolMode_ACU = 'json'): string {
+  const arcMaintenance = reason.includes('故事总纲') && reason.includes('arc-architect');
   const correction = reason.includes('correct_materials') || reason.includes('settlementStartIndex');
   const sqlExample = '<依据真实正文、真实 ID 与当前模块修订号的非空受限 SQL>';
   const correctionGuide = 'reason 是非空纠正依据；sql 是非空受限 INSERT/UPDATE/DELETE。两者写在同一个动作里，不能把 SQL 放在 thought 或动作外。只有用户明确要求改变追溯起点时才用 settlementStartIndex，并同时给最新真实用户消息 userMessageId；不要为修复格式错误跳过历史。hooks 只写 summary、status、importance、planted_index、planned_payoff；expected_revision 只放 WHERE，不写 recent_floor 或自行递增版本。';
@@ -275,6 +286,11 @@ export function renderMainProtocolRejection_ACU(reason: string, execution: Conti
     ];
     if (correction) return [...hints, correctionGuide,
       `资料纠正最小结构：调用 correct_materials，参数 ${JSON.stringify({ reason: '已核实的纠正依据', sql: sqlExample })}。示例内容不可原样提交；没有实际纠正就不要调用 correct_materials。`].join('\n');
+    if (arcMaintenance) {
+      hints.push('当前故事总纲尚未具备可执行条件，不能调用 open_round；先调用 delegate arc-architect，写明剧情依据和具体缺口，修复保存成功后再 open_round。');
+      if (allowDelegate) hints.push('调用 delegate，agentName 使用 arc-architect，prompt 写明总纲缺口与剧情依据，reads 使用 $STORY_ARC。');
+      return hints.join('\n');
+    }
     hints.push('正常续写调用 open_round，参数 focus 为本轮场景焦点；总纲、大纲、维护、策划、指导与终审由固定工作流安排，不重复委派维护和策划。');
     hints.push('具体事实仍缺失时调用 read（reads 非空）或 search（query 非空）；不要重复读取已经完整注入的资料。');
     if (allowDelegate) hints.push('仅在明确需要重规划时调用 delegate，复制目录中的代理名并给出依据和禁止事项。');
@@ -289,6 +305,11 @@ export function renderMainProtocolRejection_ACU(reason: string, execution: Conti
   if (correction) return [...lines, correctionGuide,
     JSON.stringify({ action: 'correct_materials', reason: '已核实的纠正依据', sql: sqlExample }),
     '示例内容不可原样提交；没有实际纠正时改用 open_round，不用空 SQL 或伪造起点满足校验。'].join('\n');
+  if (arcMaintenance) {
+    lines.push('当前故事总纲尚未具备可执行条件，不能调用 open_round；先委派 arc-architect 修复总纲，保存成功后再输出 open_round。');
+    lines.push(JSON.stringify({ action: 'delegate', delegations: [{ agentName: 'arc-architect', prompt: '根据当前真实剧情与总纲缺口，补齐故事总纲；写明修复依据，保存成功后再继续。', reads: ['$STORY_ARC'] }] }));
+    return lines.join('\n');
+  }
   lines.push('{"action":"open_round","focus":"依据本轮目标与真实正文确定的场景焦点"}');
   lines.push('正常续写由 open_round 启动固定工作流，自动准备总纲、大纲并完成维护、策划、指导和终审，不重复委派维护或策划。');
   lines.push('需要核对具体缺口时输出 {"action":"read","reads":["真实授权地址"]} 或 {"action":"search","query":"具体缺口"}，不要重复已完整注入的资料。');
@@ -701,6 +722,7 @@ export class ContinuationAgentTurnPlanner_ACU {
       && !session.snapshot().messages.some(message => message.kind === 'user' && message.digest !== '创建续写任务')
       && (!resumedState || (resumedState.nextIteration === 1 && resumedState.ledger.delegationsUsed === 0
         && resumedState.ledger.outcomes.length === 0));
+    const storyArcNeedsMaintenance = (): boolean => storyArcNeedsMaintenance_ACU(context);
     // 换轮通告只在游标真的变了时追加：同一轮内的中断恢复不重复通告，否则模型会以为又开了一轮。
     if (session.turnKey && lastAnnouncedTurnKey_ACU(session.snapshot()) !== session.turnKey) {
       const visible = session.snapshot().messages;
@@ -777,7 +799,8 @@ export class ContinuationAgentTurnPlanner_ACU {
         const lifecycle = { outlineMaintenanceReserveAvailable, convergenceOnly: maintenanceConvergenceAvailable };
         await this.ensureRuntimeSnapshot_ACU(request, session, context, ledger, budget, iteration, toolUsage, gateConfig, toolMode, lifecycle);
         // 未执行的本轮由程序开局；已执行动作、工作流升级与终审后的裁决仍交给主 Agent。
-        const directOpening = openingAvailable && iteration === 1 && totalCalls === 1 && !postReviewDecisionAvailable;
+        const directOpening = openingAvailable && iteration === 1 && totalCalls === 1 && !postReviewDecisionAvailable
+          && !storyArcNeedsMaintenance();
         const openingFocus = context.execution.turn?.goal?.trim() || context.originInstruction.trim() || '本轮续写';
         const round = directOpening
           ? {
@@ -1451,6 +1474,14 @@ export class ContinuationAgentTurnPlanner_ACU {
           if (nativeCalls.length) throw new Error('本次没有可调用的函数，动作必须写成 JSON 对象');
           action = parseAgentMainOutput_ACU(rawText, AGENT_PREFILLS_ACU.main, allowDelegate);
         }
+        if (action.kind === 'open_round' && storyArcNeedsMaintenance_ACU(context)) {
+          throw new ContinuationValidationError_ACU(createContinuationError_ACU(
+            'CONTINUATION_AGENT_PROTOCOL_INVALID',
+            'agent_loop',
+            '故事总纲尚未完整，当前不能 open_round；请先 delegate arc-architect，写明剧情依据和具体缺口，修复保存成功后再继续。',
+            false,
+          ));
+        }
         // 没有可执行的大纲轮次就不存在「本轮」，finalize 无从谈起；拒绝并回灌，让主 Agent 先走大纲子代理。
         if (action.kind === 'finalize' && !request.readContext().turn) {
           throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', 'agent_loop', '当前没有可执行的大纲轮次，不能 finalize；请先派工 outline-architect 创建或继续大纲', false));
@@ -1854,70 +1885,6 @@ export class ContinuationAgentTurnPlanner_ACU {
     toolMode: AgentToolMode_ACU,
     apiDependencies?: ContinuationApiPresetDependencies_ACU,
   ): Promise<void> {
-    const completedStageNumbers = context.execution.task.stages
-      .filter(stage => stage.status === 'completed')
-      .map(stage => stage.stageNumber);
-    const needsArcMaintenance = !hasActiveStoryArc_ACU(context.moduleSnapshot)
-      || !hasActiveStoryArcVolume_ACU(context.moduleSnapshot)
-      || findUnregisteredStageNumbers_ACU(context.moduleSnapshot, completedStageNumbers).length > 0;
-
-    if (needsArcMaintenance) {
-      const entryId = logAgentSession_ACU({
-        kind: 'delegation',
-        agentName: 'arc-architect',
-        title: '固定工作流维护故事总纲',
-        detail: action.focus,
-        status: 'running',
-      });
-      try {
-        const preset = this.dependencies.resolveApiPreset(request.settings, 'arcArchitect', 'agent_delegate', apiDependencies);
-        const result = await this.dependencies.subagentRuntime.run({
-          delegation: { agentName: 'arc-architect', prompt: `固定工作流维护故事总纲。焦点：${action.focus}`, reads: [] },
-          toolMode,
-          roundId: session.turnKey,
-          settings: request.settings,
-          resolveContext: context,
-          budget,
-          preset,
-          createIdentity: (_agentName, attempt) => ({ ...request.createInternalRequestIdentity(attempt), source: 'agent_subagent' }),
-          isCurrent: identity => request.isInternalRequestCurrent(identity),
-          signal: request.signal,
-          readRoundState,
-          writeSql: this.moduleFieldWrite_ACU(chat, context),
-          mainSnapshot: this.subagentTail_ACU(session),
-          mainHistory: session.history().filter(message => message.content !== USER_PREFILL_CONTENT_ACU && !message.content.startsWith('【运行时快照】\n')),
-        });
-        if (result.usedFieldWrites) context.moduleSnapshot = this.dependencies.readModuleSnapshot(chat);
-        if (!result.usedFieldWrites && result.arc && (result.arc.delta.storyArc.length || result.arc.delta.storyArcPatches.length)) {
-          const delta = mergeAgentDeltaRevisions_ACU(result.arc.delta, result.readRevisions);
-          const applied = await applyAgentModuleDeltaViaSql_ACU(
-            context.moduleSnapshot,
-            delta,
-            result.writes,
-            Math.max(0, chat.length - 1),
-            completedStageNumbers,
-            { onViolation: () => undefined, agentName: 'arc-architect' },
-            agentStoryEvidenceFloorIndexes_ACU(context.storyChat ?? chat),
-          );
-          context.moduleSnapshot = applied.snapshot;
-          await this.persistSnapshot_ACU(chat, applied.snapshot);
-        }
-        const arcReady = hasActiveStoryArc_ACU(context.moduleSnapshot) && hasActiveStoryArcVolume_ACU(context.moduleSnapshot)
-          && findUnregisteredStageNumbers_ACU(context.moduleSnapshot, completedStageNumbers).length === 0;
-        if (!arcReady) {
-          const missing = (result.unresolvedIssues ?? []).map(issue => `${issue.path}：${issue.message}`).join('；');
-          failLoop_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', missing
-            ? `固定工作流的总纲还缺栏目，已写入的栏目已保留。${missing}`
-            : '固定工作流的总纲维护没有形成可执行的活跃总纲和活动卷');
-        }
-        updateAgentSession_ACU(entryId, { title: '固定工作流已维护故事总纲', detail: result.arc?.summary || '总纲已按栏目写入', ok: true });
-      } catch (error) {
-        const reason = compactAgentProtocolError_ACU(error);
-        updateAgentSession_ACU(entryId, { title: '固定工作流维护故事总纲失败', detail: reason, ok: false });
-        throw error;
-      }
-    }
-
     context.execution = request.readContext();
     if (context.execution.turn) return;
     if (!request.applyOutline) {
