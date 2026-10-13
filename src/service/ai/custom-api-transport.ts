@@ -39,7 +39,7 @@ export async function sendCustomApiRequest_ACU(
         const log = createApiRequestLog_ACU('API酒馆转发', `请求 POST ${url}（酒馆后端请求体）`, wire, { config, bridgeBody, headers });
         try {
             const response = await pristineFetch_ACU(url, { method: 'POST', headers, body: wire, signal: signal ?? undefined });
-            return observeApiResponse_ACU(response, log, signal).response;
+            return await surfaceTavernRelayError_ACU(observeApiResponse_ACU(response, log, signal).response);
         } catch (error) { log.write('请求失败', error); throw error; }
     }
     const format = normalizeCustomApiFormat_ACU(config.customApiFormat);
@@ -81,6 +81,21 @@ export async function sendCustomApiRequest_ACU(
         // 直连保留既有协议归一化与读取期限，不增加消费分支。
         return await captureProviderResponse_ACU(response, format, log, signal);
     } catch (error) { log.write('请求或响应处理失败', error); throw error; }
+}
+
+/**
+ * 宿主生成端点在上游非 2xx（429 配额、401 等）时仍回 HTTP 200，正文为 { error: { message } }。
+ * 非流式 JSON 回复先读出正文；带 error 且没有 choices 时改回 502，交给调用方按 HTTP 错误处理，
+ * 不再被解析成空回复后误判为协议失败。流式回复由宿主透传上游状态码，不在此处理。
+ */
+async function surfaceTavernRelayError_ACU(response: Response): Promise<Response> {
+    const contentType = response.headers?.get?.('content-type') ?? '';
+    if (!response.ok || !contentType.includes('application/json') || typeof response.text !== 'function') return response;
+    const raw = await response.text();
+    let json: any = null;
+    try { json = JSON.parse(raw); } catch { /* 无法解析的正文交给调用方原有解析路径报错。 */ }
+    const relayError = isRecord(json) && json.error && !Array.isArray(json.choices);
+    return new Response(raw, { status: relayError ? 502 : response.status, headers: response.headers });
 }
 
 async function captureProviderResponse_ACU(response: Response, format: ReturnType<typeof normalizeCustomApiFormat_ACU>, log: ApiRequestLog_ACU, signal?: AbortSignal | null): Promise<Response> {

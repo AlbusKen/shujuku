@@ -182,6 +182,33 @@ function input_ACU(): Parameters<AgentSubagentRuntime_ACU['run']>[0] {
 }
 
 
+it('instruction-composer 契约重试耗尽时在自动模式下用非 JSON 正文兜底交付', async () => {
+  const input = input_ACU();
+  input.toolMode = 'json';
+  input.delegation = { agentName: 'instruction-composer', prompt: '直接产出正文写作指令', reads: [] };
+  input.settings.internalAiRetryLimit = 1;
+  input.settings.autoRecoverLimit = 1;
+  const runtime = new AgentSubagentRuntime_ACU({
+    resolveApiPreset: (() => preset_ACU) as any,
+    callInternalAi: async () => '从商场门口开始，先写余波与人物关系的缓慢回落。',
+  });
+  const result = await runtime.run(input);
+  expect(result.composer).toMatchObject({ instruction: '从商场门口开始，先写余波与人物关系的缓慢回落。' });
+});
+
+it('autoRecoverLimit=0 时 instruction-composer 文本兜底关闭', async () => {
+  const input = input_ACU();
+  input.toolMode = 'json';
+  input.delegation = { agentName: 'instruction-composer', prompt: '直接产出正文写作指令', reads: [] };
+  input.settings.internalAiRetryLimit = 1;
+  input.settings.autoRecoverLimit = 0;
+  const runtime = new AgentSubagentRuntime_ACU({
+    resolveApiPreset: (() => preset_ACU) as any,
+    callInternalAi: async () => '这是一段未按契约包装的写作指令。',
+  });
+  await expect(runtime.run(input)).rejects.toThrow('instruction-composer 连续 2 次返回不符合契约');
+});
+
 it.each(['json', 'tools'] as const)('%s 总纲请求在协议错误后允许检索与补读，保存后独立交付', async toolMode => {
   const { _set_SillyTavern_API_ACU } = await import('../../../../src/shared/host-api');
   const { commitAgentModuleFieldWrites_ACU } = await import('../../../../src/service/continuation/agent/agent-module-field-commit');
@@ -1858,4 +1885,33 @@ describe('子代理最终请求容量门禁与 60% 默认上围栏', () => {
     expect(result.expandedReads).toEqual([`${narrowedAddress}（默认上围栏，原地址 $STORY_RANGE:1-9）`]);
   });
 
+});
+
+it.each([[3, true], [0, false]] as const)('工具模式连续 2 次未调用函数：autoRecoverLimit=%s 时降级为 JSON=%s', async (limit, downgrade) => {
+  const input = input_ACU();
+  input.toolMode = 'tools';
+  input.settings.autoRecoverLimit = limit;
+  input.settings.internalAiRetryLimit = 1;
+  const json = JSON.stringify({ summary: '结算完成', delta: {} });
+  const replies: unknown[] = ['我先想想', '还是没调函数', json];
+  const sent: Array<{ tools: string[]; cacheTools: string[]; text: string }> = [];
+  const runtime = new AgentSubagentRuntime_ACU({
+    resolveApiPreset: (() => preset_ACU) as any,
+    callInternalAi: async (messages, _preset, _identity, _signal, options) => {
+      sent.push({ tools: options?.tools?.map(tool => tool.function.name) ?? [], cacheTools: options?.cacheTools ?? [], text: messages.map(m => m.content).join('\n') });
+      return replies.shift() ?? json;
+    },
+  });
+  if (!downgrade) {
+    await expect(runtime.run(input)).rejects.toThrow();
+    expect(sent.every(request => request.tools.length > 0)).toBe(true);
+    return;
+  }
+  const result = await runtime.run(input);
+  expect(result.usedFieldWrites).toBe(false);
+  expect(sent).toHaveLength(3);
+  expect(sent[1].tools.length).toBeGreaterThan(0);
+  expect(sent[2].tools).toEqual([]);
+  expect(sent[2].cacheTools).toContain('mode:json');
+  expect(sent[2].text).toContain('已切换为 JSON 协议');
 });

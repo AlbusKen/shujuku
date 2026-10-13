@@ -35,6 +35,26 @@ export class AgentApiHttpError_ACU extends Error {
   }
 }
 
+/** 保留上游真实诊断，但限制长度，避免把整段 HTML/代理页面塞进会话回执。 */
+function formatApiErrorBody_ACU(raw: string): string {
+  const text = String(raw ?? '').trim();
+  if (!text) return '';
+  let detail = text;
+  try {
+    const parsed = JSON.parse(text) as any;
+    const error = parsed?.error;
+    if (typeof error === 'string') detail = error;
+    else if (error && typeof error === 'object') {
+      const parts = [error.message, error.type, error.code, error.param].filter(value => typeof value === 'string' && value.trim());
+      detail = parts.length ? parts.join(' · ') : JSON.stringify(error);
+    } else if (typeof parsed?.message === 'string') detail = parsed.message;
+    else detail = JSON.stringify(parsed);
+  } catch {
+    // 保留非 JSON 的供应商/网关正文。
+  }
+  return detail.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, ' ').trim().slice(0, 4_000);
+}
+
 /** 非空预设名无法解析到真实预设。调用方必须 fail-closed，不得回退当前渠道发请求。 */
 export class ApiPresetUnresolvedError_ACU extends Error {
   readonly code = 'API_PRESET_UNRESOLVED' as const;
@@ -404,7 +424,7 @@ export async function callApiWithPlotPreset_ACU(messages: any[], presetName?: st
 
       if (!response.ok) {
         const errTxt = await response.text();
-        throw new AgentApiHttpError_ACU(response.status, `API请求失败: ${response.status} ${errTxt}`);
+        throw new AgentApiHttpError_ACU(response.status, `API请求失败: ${response.status}${formatApiErrorBody_ACU(errTxt) ? ` ${formatApiErrorBody_ACU(errTxt)}` : ''}`);
       }
 
       const content = await handleApiResponse_ACU(response, abortSignal);
@@ -461,7 +481,7 @@ export async function callApi_ACU(messages: any[], apiSettings: any, abortSignal
 
       if (!response.ok) {
         const errTxt = await response.text();
-        throw new AgentApiHttpError_ACU(response.status, `API请求失败: ${response.status} ${errTxt}`);
+        throw new AgentApiHttpError_ACU(response.status, `API请求失败: ${response.status}${formatApiErrorBody_ACU(errTxt) ? ` ${formatApiErrorBody_ACU(errTxt)}` : ''}`);
       }
 
       // 根据streamingEnabled设置选择响应处理方式
@@ -489,10 +509,11 @@ export function getApiConfigByPreset_ACU(presetName: string) {
 }
 
 
-/** 错误正文沿原消费路径记录；读取失败不替换既有 HTTP 异常及重试分类。 */
+/** 错误正文沿原消费路径记录，并把供应商/网关诊断带回上层。 */
 async function throwApiHttpError_ACU(response: Response): Promise<never> {
-    try { await response.text(); } catch { /* 读取诊断由传输日志保留，仍抛原 HTTP 分类。 */ }
-    throw new AgentApiHttpError_ACU(response.status, `API 请求失败: ${response.status}`);
+    let detail = '';
+    try { detail = formatApiErrorBody_ACU(await response.text()); } catch { /* 保持 HTTP 分类，正文读取失败时仍抛错。 */ }
+    throw new AgentApiHttpError_ACU(response.status, `API 请求失败: ${response.status}${detail ? ` ${detail}` : ''}`);
 }
 
 export async function callCustomOpenAI_ACU_Direct(messages: any[]) {
@@ -600,7 +621,8 @@ export async function callAIWithPreset_ACU(messages: any[], presetName: string =
 
     if (!res.ok) {
         const errTxt = await res.text();
-        throw new AgentApiHttpError_ACU(res.status, `API请求失败: ${res.status} ${errTxt}`);
+        const detail = formatApiErrorBody_ACU(errTxt);
+        throw new AgentApiHttpError_ACU(res.status, `API请求失败: ${res.status}${detail ? ` ${detail}` : ''}`);
     }
 
     const content = await handleApiResponse_ACU(res, signal);

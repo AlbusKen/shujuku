@@ -739,7 +739,8 @@ describe('主 Agent 提示词装配', () => {
         expect(text).not.toMatch(/函数调用|submit/);
         expect(messages.some(message => message.role === 'tool' || message.tool_calls || message.tool_call_id)).toBe(false);
       } else {
-        expect(options.tools).toEqual(expect.arrayContaining(['read', 'search', 'open_round', 'delegate', 'finalize', 'block']));
+        expect(options.tools).toEqual(expect.arrayContaining(['read', 'search', 'open_round', 'delegate', 'finalize']));
+        expect(options.tools).not.toContain('block');
         expect(options.cacheTools).not.toContain('mode:json');
         expect(text).toContain('search 使用函数调用');
       }
@@ -1220,6 +1221,43 @@ describe('open_round 固定结构工作流', () => {
     expect(isAgentSessionRunning_ACU()).toBe(false);
   });
 
+  it('同轮恢复时，停止前遗留的工作流回执被标注为已失效', async () => {
+    const h = harness_ACU({
+      conversation: appendAgentConversation_ACU(buildEmptyAgentConversation_ACU(), [
+        { kind: 'runtime', text: '{"status":"started"}', digest: '固定工作流启动', turnKey: 'stage-1#0#turn-2' },
+        { kind: 'tool', text: '{"outcome":"escalate"}', digest: '工作流状态回执', turnKey: 'stage-1#0#turn-2' },
+        { kind: 'tool', text: '当前任务不允许生成每轮指令', digest: '工作流升级主会话', turnKey: 'stage-1#0#turn-2' },
+      ]),
+      snapshot: snapshotWithArc_ACU(),
+      mainReplies: ['{"action":"open_round","focus":"试探"}'],
+      subReplies: [maintainerReply_ACU, plannerReply_ACU, '{"summary":"本轮无节拍操作","recommendation":"no_change"}', composerReply_ACU],
+    });
+    h.request.directOpening = true;
+
+    await h.planner.plan(h.request);
+
+    const joined = h.mainCalls[0].map(message => message.content).join('\n');
+    expect(joined).toContain('已中断的运行');
+    expect(joined).toContain('不作为阻断依据');
+  });
+
+  it('同轮恢复但最后一条不是工作流回执时不追加失效说明', async () => {
+    const h = harness_ACU({
+      conversation: appendAgentConversation_ACU(buildEmptyAgentConversation_ACU(), [
+        { kind: 'agent', text: '{"action":"open_round","focus":"试探"}', digest: '开局决策', turnKey: 'stage-1#0#turn-2' },
+      ]),
+      snapshot: snapshotWithArc_ACU(),
+      mainReplies: ['{"action":"open_round","focus":"试探"}'],
+      subReplies: [maintainerReply_ACU, plannerReply_ACU, '{"summary":"本轮无节拍操作","recommendation":"no_change"}', composerReply_ACU],
+    });
+    h.request.directOpening = true;
+
+    await h.planner.plan(h.request);
+
+    const joined = h.mainCalls[0].map(message => message.content).join('\n');
+    expect(joined).not.toContain('已中断的运行');
+  });
+
   it('总纲和阶段大纲都缺失时，open_round 先自动立总纲、再准备大纲并交付指令', async () => {
     const h = harness_ACU({
       snapshot: buildEmptyAgentModuleSnapshot_ACU(),
@@ -1240,6 +1278,68 @@ describe('open_round 固定结构工作流', () => {
     expect(h.subCalls).toHaveLength(5);
   });
 
+  it('总纲维护不完整时先进行一次定向修复，修复合格后才进入阶段大纲', async () => {
+    const h = harness_ACU({
+      snapshot: (() => {
+        const snapshot = buildEmptyAgentModuleSnapshot_ACU();
+        snapshot.storyArc = [{
+          id: 'ARC-STORY', scope: 'story', title: '禁区真相', direction: '主角查明禁区吞人的真相',
+          escalation: '从个人求生抬到与守门人体系对抗', withheld: '守门人是主角失踪的兄长', status: 'active',
+          stageNumbers: [], completionStageNumber: null, completionState: '', continuationRationale: '', retired: false, retiredReason: '',
+        }];
+        snapshot.revisions.storyArc = 1;
+        return snapshot;
+      })(),
+      context: preOutlineContext_ACU,
+      mainReplies: ['{"action":"open_round","focus":"接住守门人的回避"}'],
+      subReplies: [
+        '{"summary":"仍缺少活动卷","delta":{"storyArc":[{"action":"upsert","id":"ARC-STORY","scope":"story","title":"禁区真相","direction":"主角查明禁区吞人的真相","escalation":"从个人求生抬到与守门人体系对抗","withheld":"守门人是主角失踪的兄长","status":"active","stageNumbers":[]}]}}',
+        arcReply_ACU,
+        maintainerReply_ACU,
+        plannerReply_ACU,
+        '{"summary":"本轮无节拍操作","recommendation":"no_change"}',
+        composerReply_ACU,
+      ],
+      applyOutline: () => ({ op: 'create', requiresReview: false, stopped: null, summary: '已创建首个阶段大纲' }),
+    });
+    const original = h.request.applyOutline!;
+    h.request.applyOutline = async instruction => { const result = await original(instruction); h.setContext(execution_ACU); return result; };
+
+    const result = await h.planner.plan(h.request);
+
+    expect(result.instruction).toBe('按阶段大纲先观察守门人的回避。');
+    expect(h.outlineCalls).toHaveLength(1);
+    expect(h.presetRoles).toEqual(['main', 'arcArchitect', 'arcArchitect', 'maintainer', 'mainlinePlanner', 'beatPlanner', 'instructionComposer']);
+    expect(h.subCalls).toHaveLength(6);
+  });
+
+  it('总纲连续两次维护仍不完整时停止，不沿用旧总纲进入阶段大纲', async () => {
+    const h = harness_ACU({
+      snapshot: (() => {
+        const snapshot = buildEmptyAgentModuleSnapshot_ACU();
+        snapshot.storyArc = [{
+          id: 'ARC-STORY', scope: 'story', title: '禁区真相', direction: '主角查明禁区吞人的真相',
+          escalation: '从个人求生抬到与守门人体系对抗', withheld: '守门人是主角失踪的兄长', status: 'active',
+          stageNumbers: [], completionStageNumber: null, completionState: '', continuationRationale: '', retired: false, retiredReason: '',
+        }];
+        snapshot.revisions.storyArc = 1;
+        return snapshot;
+      })(),
+      context: preOutlineContext_ACU,
+      mainReplies: ['{"action":"open_round","focus":"接住守门人的回避"}'],
+      subReplies: [
+        '{"summary":"仍缺少活动卷","delta":{"storyArc":[{"action":"upsert","id":"ARC-STORY","scope":"story","title":"禁区真相","direction":"主角查明禁区吞人的真相","escalation":"从个人求生抬到与守门人体系对抗","withheld":"守门人是主角失踪的兄长","status":"active","stageNumbers":[]}]}}',
+        '{"summary":"仍缺少活动卷","delta":{"storyArc":[{"action":"upsert","id":"ARC-STORY","scope":"story","title":"禁区真相","direction":"主角查明禁区吞人的真相","escalation":"从个人求生抬到与守门人体系对抗","withheld":"守门人是主角失踪的兄长","status":"active","stageNumbers":[]}]}}',
+      ],
+      applyOutline: () => ({ op: 'create', requiresReview: false, stopped: null, summary: '不应执行' }),
+    });
+
+    await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_PROTOCOL_INVALID' } });
+    expect(h.outlineCalls).toHaveLength(0);
+    expect(h.presetRoles).toEqual(['main', 'arcArchitect', 'arcArchitect']);
+    expect(h.subCalls).toHaveLength(2);
+    expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('总纲维护未完成') && entry.detail.includes('停止'))).toBe(true);
+  });
   it('交付只追加权威状态回执、更新非门禁轮次标签，并停止当前主循环', async () => {
     const h = harness_ACU({
       snapshot: snapshotWithArc_ACU(),
@@ -1489,6 +1589,7 @@ describe('派工与写集落盘', () => {
       ],
       subReplies: [JSON.stringify({ summary: '已逐项核对，无新增业务变化' })],
     });
+    h.request.settings.autoRecoverLimit = 0;
     try {
       const chat = h.chat;
       const role = 'hook-cognition-maintainer' as const;
@@ -1538,6 +1639,7 @@ describe('派工与写集落盘', () => {
           JSON.stringify({ instruction: '从交出的晶屑写起', summary: '继续核对来源', constraints: null })],
       });
       h.request.settings.workflow.reviseLimit = 0;
+      h.request.settings.autoRecoverLimit = 0;
       try {
         await writeAgentModuleSnapshot_ACU(h.chat, 3, { ...snapshotWithArc_ACU(), settledThroughIndex: 0 });
         const inserted = await commitAgentModuleFieldWrites_ACU({ chat: h.chat, targetIndex: 3, role: 'hook-cognition-maintainer',
@@ -2190,4 +2292,58 @@ describe('主 Agent 最终请求容量门禁与 60% 默认上围栏', () => {
     expect(toolTexts_ACU(h).filter(text => text.includes(floor_ACU(1)))).toHaveLength(1);
   });
 
+});
+
+describe('主 Agent 工具调用失效降级', () => {
+  it('工具模式连续 2 次未调用函数时本次改用 JSON 协议，后续请求不带 tools', async () => {
+    const h = harness_ACU({
+      nativeTools: true,
+      mainReplies: ['我先想想', '还是没调函数', { content: '{"action":"block","reason":"关键资料缺失","unresolved":["缺口"]}', toolCalls: [] }],
+    });
+    await h.planner.plan(h.request).catch(() => undefined);
+    expect(h.mainToolOptions.length).toBeGreaterThanOrEqual(3);
+    expect(h.mainToolOptions[1].tools.length).toBeGreaterThan(0);
+    expect(h.mainToolOptions[2].tools).toEqual([]);
+    expect(h.mainToolOptions[2].cacheTools).toEqual(['mode:json']);
+    expect(h.mainCalls[2].map(message => message.content).join('\n')).toContain('已切换为 JSON 协议');
+  });
+
+  it('autoRecoverLimit=0 时不降级，按原协议重试耗尽', async () => {
+    const h = harness_ACU({ nativeTools: true, mainReplies: ['我先想想', '还是没调函数', '仍然没有'] });
+    h.request.settings.autoRecoverLimit = 0;
+    await expect(h.planner.plan(h.request)).rejects.toThrow();
+    expect(h.mainToolOptions.every(option => option.tools.length > 0)).toBe(true);
+  });
+});
+
+describe('自动自愈模式禁用 block', () => {
+  it('模型回 block 时不 reject，下一次请求包含拒绝回灌文本', async () => {
+    const h = harness_ACU({
+      mainReplies: [
+        JSON.stringify({ action: 'block', reason: '流水线持续失败', unresolved: ['子代理 failed'] }),
+        JSON.stringify({ action: 'finalize', instruction: '从商场门口写起', summary: '自行修复后交付' }),
+      ],
+    });
+    h.request.settings.finalReview.enabled = false;
+    const result = await h.planner.plan(h.request);
+    expect(result.instruction).toBe('从商场门口写起');
+    expect(h.mainCalls.at(-1)!.map(message => message.content).join('\n')).toContain('自动自愈模式不允许 block');
+  });
+
+  it('autoRecoverLimit=0 时 block 仍以 AGENT_BLOCKED 失败', async () => {
+    const h = harness_ACU({ mainReplies: [JSON.stringify({ action: 'block', reason: '流水线持续失败', unresolved: ['子代理 failed'] })] });
+    h.request.settings.autoRecoverLimit = 0;
+    await expect(h.planner.plan(h.request)).rejects.toMatchObject({ error: { code: 'CONTINUATION_AGENT_BLOCKED' } });
+  });
+
+  it('迭代耗尽时保底交付 composer 指令，日志含保底交付', async () => {
+    const block = JSON.stringify({ action: 'block', reason: '仍然失败', unresolved: ['缺口'] });
+    const h = harness_ACU({
+      mainReplies: Array.from({ length: 12 }, () => block),
+      subReplies: [JSON.stringify({ instruction: '保底：从商场门口写起', summary: '保底交付', constraints: null })],
+    });
+    const result = await h.planner.plan(h.request);
+    expect(result.instruction).toBe('保底：从商场门口写起');
+    expect(readAgentSessionLog_ACU().some(entry => entry.title.includes('保底交付'))).toBe(true);
+  });
 });

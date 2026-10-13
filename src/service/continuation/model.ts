@@ -312,6 +312,10 @@ export interface ContinuationSettings_ACU {
   generationRetryLimit: number;
   internalAiRetryLimit: number;
   /**
+   * 非上游故障时自动恢复并继续的最多连续次数；每成功确认一轮清零。0 表示关闭自愈。
+   */
+  autoRecoverLimit: number;
+  /**
    * 酒馆正文低于该 token 数视为截断/出错并自动重试。0 表示关闭该校验。
    */
   minGenerationTokens: number;
@@ -375,6 +379,8 @@ export interface ContinuationTask_ACU {
   timeline: ContinuationTimelineEntry_ACU[];
   stopReason: ContinuationStopReason_ACU | null;
   lastError: ContinuationError_ACU | null;
+  /** 连续自动恢复失败次数；确认一轮正文成功后清零。 */
+  autoRecoverCount: number;
   pendingHostTurn?: ContinuationPendingHostTurn_ACU | null;
   /** 主会话选择的执行阶段；与各阶段完成数分开保存，选择不等于其它阶段已完结。 */
   progressSelections?: ({ stageId: string; timelineOffset: number } & ContinuationHistoryAnchor_ACU)[];
@@ -453,6 +459,8 @@ export interface ContinuationPendingHostTurn_ACU {
   identity: TurnAttemptIdentity_ACU;
   capture: ContinuationHostGenerationCapture_ACU;
   retryCount: number;
+  /** 已使用一次强化标签提醒；旧信封缺失时按 false 迁移。 */
+  tagReminderUsed: boolean;
   status: 'awaiting_generation' | 'retry_ready' | 'exhausted';
 }
 
@@ -493,6 +501,7 @@ export interface ContinuationTimelineEntry_ACU {
   messageIndex?: number;
   logicalRef?: ContinuationLogicalRef_ACU;
   errorCode?: ContinuationErrorCode_ACU;
+  warning?: 'tags_missing_accepted';
 }
 
 export interface ContinuationReplanConstraints_ACU {

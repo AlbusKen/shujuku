@@ -12,6 +12,7 @@ import {
 import { buildDefaultContinuationSettings_ACU } from '../../../../src/service/continuation/defaults';
 import { AGENT_OPERATION_ONLY_PENDING_MESSAGE_ACU } from '../../../../src/service/continuation/agent/agent-module-field-commit';
 import { ContinuationValidationError_ACU, createContinuationError_ACU } from '../../../../src/service/continuation/model';
+import { AgentApiHttpError_ACU } from '../../../../src/service/ai/api-call';
 
 function snapshot_ACU(patch: Partial<AgentModuleSnapshot_ACU> = {}): AgentModuleSnapshot_ACU {
   return { ...buildEmptyAgentModuleSnapshot_ACU(), settledThroughIndex: 4, ...patch };
@@ -74,6 +75,23 @@ describe('续写固定工作流', () => {
     expect(continuationBeatObligation_ACU({ function: 'payoff', goal: '喝茶' })).toBe(true);
     expect(continuationBeatObligation_ACU({ goal: '回收旧伏笔' })).toBe(true);
     expect(continuationBeatObligation_ACU({ function: 'daily_bond', goal: '喝茶' })).toBe(false);
+  });
+
+  it('composer 契约失败回执包含 details.lastReason 便于诊断', async () => {
+    const harness = harness_ACU({
+      runComposer: async () => {
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU(
+          'CONTINUATION_AGENT_SUBAGENT_FAILED',
+          'agent_delegate',
+          'instruction-composer 连续重试失败',
+          false,
+          { lastReason: 'instruction 字段缺失；模型返回了 summary-only JSON' },
+        ));
+      },
+    });
+    const result = await harness.run();
+    const step = result.steps.find(item => item.agentName === 'instruction-composer');
+    expect(step?.summary).toContain('instruction 字段缺失；模型返回了 summary-only JSON');
   });
 
   it('首轮无伏笔义务时跳过 beat，开局焦点进入结算与 composer', async () => {
@@ -403,6 +421,55 @@ describe('续写固定工作流', () => {
     const emptyResult = await empty.run();
     expect(emptyResult.outcome).toBe('escalate');
     expect(emptyResult.instruction).toBe('');
+  });
+
+  it('停止竞态：planner 抛 TASK_STATE_INVALID 且 signal 已 abort 时整体 reject，不记 failed', async () => {
+    const controller = new AbortController();
+    const steps: string[] = [];
+    const raced = harness_ACU({
+      hasUnsettledHistory: false,
+      signal: controller.signal,
+      runAgent: async call => {
+        steps.push(call.agentName);
+        controller.abort();
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_TASK_STATE_INVALID', 'turn_call', '当前任务不允许生成每轮指令', false));
+      },
+    });
+    await expect(raced.run()).rejects.toMatchObject({ error: { code: 'CONTINUATION_TASK_STATE_INVALID' } });
+    expect(steps.length).toBeGreaterThan(0);
+  });
+
+  it('停止竞态：composer 抛 TASK_STATE_INVALID 且任务已不在运行时整体 reject', async () => {
+    const raced = harness_ACU({
+      hasUnsettledHistory: false,
+      isRunCurrent: () => false,
+      runComposer: async () => {
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_TASK_STATE_INVALID', 'turn_call', '当前任务不允许生成每轮指令', false));
+      },
+    });
+    await expect(raced.run()).rejects.toMatchObject({ error: { code: 'CONTINUATION_TASK_STATE_INVALID' } });
+  });
+
+  it('TASK_STATE_INVALID 但 signal 未 abort、任务仍在运行时保持记 failed', async () => {
+    const live = harness_ACU({
+      hasUnsettledHistory: false,
+      signal: new AbortController().signal,
+      isRunCurrent: () => true,
+      runAgent: async () => {
+        throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_TASK_STATE_INVALID', 'turn_call', '当前阶段游标无效', false));
+      },
+    });
+    const result = await live.run();
+    expect(result.steps.some(step => step.status === 'failed')).toBe(true);
+  });
+
+  it.each(['runAgent', 'runComposer'] as const)('%s 上游 429 原样抛出，不吞成失败回执让主 Agent 反复开局', async port => {
+    const quota = new AgentApiHttpError_ACU(429, 'API 请求失败: 429');
+    const upstream = harness_ACU({
+      hasUnsettledHistory: false,
+      [port]: async () => { throw quota; },
+    });
+    await expect(upstream.run()).rejects.toBe(quota);
   });
 
 });

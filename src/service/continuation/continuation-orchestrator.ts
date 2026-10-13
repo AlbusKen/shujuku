@@ -15,6 +15,7 @@ import { clearAgentModuleField_ACU } from './agent/agent-module-store';
 import { seedAgentUserRequirementsIfEmpty_ACU } from './agent/agent-user-requirements';
 import { clearAgentRunState_ACU } from './agent/agent-run-cache';
 import { clearAgentSessionLog_ACU, isAgentSessionRunning_ACU, logAgentSession_ACU } from './agent/agent-session-log';
+import { classifyContinuationError_ACU, isAutoRecoverEnabled_ACU } from './recovery-policy';
 import type { ContinuationPromptPlaceholder_ACU } from './prompt-template';
 
 export interface SendAgentMessageInput_ACU { text: string; }
@@ -224,7 +225,7 @@ function stageForOutline_ACU(stageId: string, stageNumber: number, revision: Sta
   return { stageId, stageNumber, status, activeRevision: revision.revision, revisions: [revision], activeNodeIndex: 0, activeTurnIndex: 0, completedTurns: 0 };
 }
 
-function advanceConfirmedTurn_ACU(task: ContinuationTask_ACU, now: number, timeline: (kind: ContinuationTask_ACU['timeline'][number]['kind'], at: number, fields?: Omit<ContinuationTask_ACU['timeline'][number], 'id' | 'at' | 'kind'>) => ContinuationTask_ACU['timeline'][number], messageIndex?: number, logicalRef?: ContinuationLogicalRef_ACU): ContinuationTask_ACU {
+function advanceConfirmedTurn_ACU(task: ContinuationTask_ACU, now: number, timeline: (kind: ContinuationTask_ACU['timeline'][number]['kind'], at: number, fields?: Omit<ContinuationTask_ACU['timeline'][number], 'id' | 'at' | 'kind'>) => ContinuationTask_ACU['timeline'][number], messageIndex?: number, logicalRef?: ContinuationLogicalRef_ACU, warning?: ContinuationTask_ACU['timeline'][number]['warning']): ContinuationTask_ACU {
   const stage = getActiveStage_ACU(task);
   const revision = getActiveRevision_ACU(stage);
   const node = revision.outline.nodes[stage.activeNodeIndex];
@@ -237,7 +238,7 @@ function advanceConfirmedTurn_ACU(task: ContinuationTask_ACU, now: number, timel
     : stage.activeTurnIndex + 1 < node.turns.length
       ? { ...stage, activeTurnIndex: stage.activeTurnIndex + 1, completedTurns }
       : { ...stage, activeNodeIndex: stage.activeNodeIndex + 1, activeTurnIndex: 0, completedTurns };
-  const entries = [...task.timeline, timeline('turn_completed', now, { stageId: stage.stageId, revision: stage.activeRevision, nodeId: node.id, turnId: turn.id, ...(messageIndex !== undefined ? { messageIndex } : {}), ...(logicalRef ? { logicalRef } : {}) })];
+  const entries = [...task.timeline, timeline('turn_completed', now, { stageId: stage.stageId, revision: stage.activeRevision, nodeId: node.id, turnId: turn.id, ...(messageIndex !== undefined ? { messageIndex } : {}), ...(logicalRef ? { logicalRef } : {}), ...(warning ? { warning } : {}) })];
   if (isFinalTurn) entries.push(timeline('stage_completed', now, { stageId: stage.stageId, revision: stage.activeRevision }));
   return { ...task, updatedAt: now, stages: task.stages.map(item => item.stageId === stage.stageId ? nextStage : item), timeline: entries };
 }
@@ -265,7 +266,7 @@ export class ContinuationOrchestrator_ACU {
         settings: base.settings,
         activeTask: {
           taskId, originInstruction, status: 'paused', createdAt: now, updatedAt: now, runStartedAt: null, deadlineAt: null,
-          runStageCount: 0, stageBudgetBaseCount: 0, activeStageId: null, stages: [], timeline: [this.timeline_ACU('task_created', now)], stopReason: null, lastError: null,
+          runStageCount: 0, stageBudgetBaseCount: 0, activeStageId: null, stages: [], timeline: [this.timeline_ACU('task_created', now)], stopReason: null, lastError: null, autoRecoverCount: 0,
         },
       };
       await this.dependencies.store.replaceAtomically(candidate, guardForTask_ACU(chatIdentity, existing));
@@ -560,7 +561,7 @@ export class ContinuationOrchestrator_ACU {
             ...task,
             status: 'running',
             updatedAt: now,
-            pendingHostTurn: { identity, capture: input.capture, retryCount, status: 'awaiting_generation' },
+            pendingHostTurn: { identity, capture: input.capture, retryCount, tagReminderUsed: retrying ? existing.tagReminderUsed : false, status: 'awaiting_generation' },
             timeline: [...task.timeline, this.timeline_ACU('turn_sent', now, { stageId: identity.stageId, revision: identity.revision, nodeId: identity.nodeId, turnId: identity.turnId, attemptId: identity.attemptId })],
           },
         };
@@ -607,7 +608,7 @@ export class ContinuationOrchestrator_ACU {
         const now = this.dependencies.now();
         return { ...envelope, activeTask: { ...task, status: 'running', stopReason: null, lastError: null, updatedAt: now,
           pendingHostTurn: { identity, capture: { capturedAt: now, capturedChatLength: 0,
-            capturedAiFloorCount: 0, generationSeq: null, logicalRef: ref }, retryCount: 0, status: 'awaiting_generation' },
+            capturedAiFloorCount: 0, generationSeq: null, logicalRef: ref }, retryCount: 0, tagReminderUsed: false, status: 'awaiting_generation' },
           timeline: [...task.timeline, this.timeline_ACU('turn_sent', now, { stageId: identity.stageId,
             revision: identity.revision, nodeId: identity.nodeId, turnId: identity.turnId,
             attemptId: identity.attemptId, logicalRef: ref })] } };
@@ -671,6 +672,21 @@ export class ContinuationOrchestrator_ACU {
     return { eligible, delaySeconds: Math.max(0, envelope.settings.loopDelaySeconds) };
   }
 
+  /** 规划/编排失败后的自动恢复资格；与正常轮间自动续写分开，避免吞掉上游错误。 */
+  readAutoRecoverState(): { eligible: boolean; delaySeconds: number } {
+    const envelope = this.dependencies.store.readPersisted();
+    const task = envelope?.activeTask;
+    if (!envelope || !task || task.status !== 'paused' || task.stopReason !== null || task.pendingHostTurn) {
+      return { eligible: false, delaySeconds: 0 };
+    }
+    const details = task.lastError?.details;
+    const eligible = details?.autoRecover === true
+      && task.autoRecoverCount < envelope.settings.autoRecoverLimit;
+    return eligible
+      ? { eligible: true, delaySeconds: Math.max(0, envelope.settings.retryDelaySeconds) }
+      : { eligible: false, delaySeconds: 0 };
+  }
+
   /** Read-only bridge input; it never derives reload state or writes the envelope. */
   readPendingHostTurn(): ContinuationPendingHostTurnSnapshot_ACU | null {
     const envelope = this.dependencies.store.readPersisted();
@@ -732,6 +748,27 @@ export class ContinuationOrchestrator_ACU {
         const identity = pending.identity;
         const now = this.dependencies.now();
         const timelineFields = { stageId: identity.stageId, revision: identity.revision, nodeId: identity.nodeId, turnId: identity.turnId, attemptId: identity.attemptId, ...(messageIndex !== undefined ? { messageIndex } : {}), errorCode: error.code };
+        const autoRecover = isAutoRecoverEnabled_ACU(envelope.settings);
+        if (error.code === 'CONTINUATION_GENERATION_TAGS_MISSING' && autoRecover && pending.retryCount >= envelope.settings.generationRetryLimit) {
+          if (!pending.tagReminderUsed) {
+            result = { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, stopReason: null, lastError: error, pendingHostTurn: { ...pending, tagReminderUsed: true, status: 'retry_ready' }, timeline: [...task.timeline, this.timeline_ACU('turn_retry', now, timelineFields)] } };
+            return result;
+          }
+          const stage = getActiveStage_ACU(task);
+          const revision = getActiveRevision_ACU(stage);
+          const isLastTurn = stage.completedTurns + 1 === revision.outline.totalTurns;
+          const progressed = advanceConfirmedTurn_ACU(task, now, this.timeline_ACU.bind(this), messageIndex, undefined, 'tags_missing_accepted');
+          const completedTask: ContinuationTask_ACU = { ...progressed, status: 'paused', updatedAt: now, pendingHostTurn: null, lastError: null, stopReason: null, autoRecoverCount: 0 };
+          if (isLastTurn && task.deadlineAt !== null && now >= task.deadlineAt) {
+            result = this.stopEnvelope_ACU({ ...envelope, activeTask: completedTask }, 'duration_reached', now);
+          } else if (isLastTurn && automaticStagesInWindow_ACU(task) >= envelope.settings.maxAutomaticStages) {
+            result = this.stopEnvelope_ACU({ ...envelope, activeTask: completedTask }, 'stage_limit_reached', now);
+          } else {
+            result = { ...envelope, activeTask: completedTask };
+          }
+          logAgentSession_ACU({ kind: 'protocol_retry', title: '缺标签强化提醒后仍缺失，已接受正文继续', detail: `本轮正文缺少必需标签：${envelope.settings.loopTags || '（未配置）'}`, ok: false });
+          return result;
+        }
         if (pending.retryCount >= envelope.settings.generationRetryLimit) {
           result = { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: now, stopReason: 'generation_retry_exhausted', lastError: { ...error, retryable: false }, pendingHostTurn: { ...pending, status: 'exhausted' }, timeline: [...task.timeline, this.timeline_ACU('failed', now, timelineFields)] } };
           return result;
@@ -811,6 +848,7 @@ export class ContinuationOrchestrator_ACU {
           pendingHostTurn: null,
           lastError: null,
           stopReason: null,
+          autoRecoverCount: 0,
         };
         if (!isLastTurn) {
           // 轮边界统一落 paused：自动续写从这个可判定状态出发，页面重载后也能手动恢复。
@@ -1338,13 +1376,35 @@ export class ContinuationOrchestrator_ACU {
     if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE') {
       return;
     }
-    const lastError = error instanceof ContinuationValidationError_ACU ? error.error : createContinuationError_ACU('CONTINUATION_INTERNAL_AI_REQUEST_FAILED', phase, fallbackMessage, false);
+    const rawMessage = error instanceof Error ? error.message : String(error);
+    const lastError = error instanceof ContinuationValidationError_ACU
+      ? error.error
+      : createContinuationError_ACU('CONTINUATION_INTERNAL_AI_REQUEST_FAILED', phase, `${fallbackMessage}：${rawMessage}`, false, {
+        upstreamMessage: rawMessage,
+        ...(error && typeof error === 'object' && 'name' in error ? { errorName: String((error as { name?: unknown }).name ?? '') } : {}),
+        ...(error && typeof error === 'object' && 'status' in error ? { status: Number((error as { status?: unknown }).status) } : {}),
+      });
     try {
       await this.dependencies.store.updatePersistedAtomically(current => {
         const envelope = this.requireEnvelope_ACU(current);
         const task = this.requireTask_ACU(envelope);
         if (task.taskId !== taskId || task.stopReason !== null || !['running', 'paused', 'failed'].includes(task.status)) return envelope;
-        return { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: this.dependencies.now(), lastError, timeline: [...task.timeline, this.timeline_ACU('failed', this.dependencies.now(), { errorCode: lastError.code })] } };
+        const recoveryClass = classifyContinuationError_ACU(error);
+        const autoRecover = recoveryClass === 'recoverable' && isAutoRecoverEnabled_ACU(envelope.settings);
+        const currentCount = task.autoRecoverCount ?? 0;
+        const canRecover = autoRecover && currentCount < envelope.settings.autoRecoverLimit;
+        const nextCount = canRecover ? currentCount + 1 : currentCount;
+        const details = {
+          ...(lastError.details ?? {}),
+          ...(canRecover ? { autoRecover: true } : autoRecover ? { autoRecover: false, autoRecoverExhausted: true } : {}),
+        };
+        const persistedError: ContinuationError_ACU = Object.keys(details).length ? { ...lastError, details } : lastError;
+        if (canRecover) {
+          logAgentSession_ACU({ kind: 'protocol_retry', title: `可自愈失败，准备自动恢复（${nextCount}/${envelope.settings.autoRecoverLimit}）`, detail: lastError.message, ok: false });
+        } else if (autoRecover && currentCount >= envelope.settings.autoRecoverLimit) {
+          logAgentSession_ACU({ kind: 'run_failed', title: `已连续自愈 ${currentCount} 次仍失败，已暂停`, detail: lastError.message, ok: false });
+        }
+        return { ...envelope, activeTask: { ...task, status: 'paused', updatedAt: this.dependencies.now(), autoRecoverCount: nextCount, lastError: persistedError, timeline: [...task.timeline, this.timeline_ACU('failed', this.dependencies.now(), { errorCode: lastError.code })] } };
       }, { chatIdentity });
     } catch { /* Preserve the primary error; a later guarded operation exposes persistence failure. */ }
   }

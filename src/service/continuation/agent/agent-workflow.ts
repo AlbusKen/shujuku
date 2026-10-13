@@ -5,6 +5,7 @@
  * 主会话只提供开局参数，不再逐个派这些角色。模型调用通过端口注入，便于单测。
  */
 
+import { isRetryableAiRequestError_ACU } from '../../ai/api-call';
 import { ContinuationValidationError_ACU } from '../model';
 import type { ContinuationSettings_ACU } from '../model';
 import { reconcileAgentFieldPending_ACU, reconcileAgentOperationOnlyPending_ACU, reconcileAgentEmptyPatchPending_ACU, type AgentModuleFieldReceipt_ACU } from './agent-module-field-commit';
@@ -31,6 +32,7 @@ import {
   mergeAgentDeltaRevisions_ACU,
   type AgentModuleApplyOptions_ACU,
 } from './agent-transaction';
+import { logAgentSession_ACU } from './agent-session-log';
 
 export interface ContinuationWorkflowOpening_ACU {
   focus: string;
@@ -115,6 +117,10 @@ export interface ContinuationWorkflowInput_ACU {
   readCommittedSnapshot?: () => AgentModuleSnapshot_ACU;
   runComposer: (call: { prompt: string; revisionFeedback: string; priorInstruction: string }) => Promise<AgentComposerOutput_ACU>;
   runFinalReview: (instruction: string, summary: string) => Promise<AgentFinalReviewerOutput_ACU>;
+  /** 本次运行的中止信号；已中止时 TASK_STATE_INVALID 视为停止竞态而非失败。 */
+  signal?: AbortSignal | null;
+  /** 任务是否仍处于本次运行（running 且身份未变）；返回 false 时同上。 */
+  isRunCurrent?: () => boolean;
 }
 
 const MAINTAINER_NAME_ACU = 'hook-cognition-maintainer';
@@ -131,8 +137,25 @@ export function continuationBeatObligation_ACU(turn: { goal?: string; function?:
   return BEAT_OBLIGATION_PATTERN_ACU.test(turn.goal ?? '');
 }
 
-function isStale_ACU(error: unknown): boolean {
-  return error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE';
+/**
+ * 判定错误是否来自已失效的运行（用户停止或请求过期）。
+ * 停止竞态下子代理读取任务状态会抛 TASK_STATE_INVALID；此时任务已被停止，
+ * 不应记成子代理失败写进回执，否则恢复运行后主 Agent 会拿旧回执当阻断依据。
+ */
+function isStale_ACU(error: unknown, input?: Pick<ContinuationWorkflowInput_ACU, 'signal' | 'isRunCurrent'>): boolean {
+  if (!(error instanceof ContinuationValidationError_ACU)) return false;
+  if (error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE') return true;
+  if (error.error.code !== 'CONTINUATION_TASK_STATE_INVALID' || !input) return false;
+  if (input.signal?.aborted) return true;
+  return input.isRunCurrent ? !input.isRunCurrent() : false;
+}
+
+/**
+ * 子代理请求层的上游故障（HTTP 429/5xx、超时、网络中断）。这类错误已在传输层按设置延时重试过，
+ * 必须原样抛给编排器归为 upstream 并停下；吞成失败回执会让主 Agent 反复开局，持续消耗调用。
+ */
+function isUpstreamRequestFailure_ACU(error: unknown): boolean {
+  return !(error instanceof ContinuationValidationError_ACU) && isRetryableAiRequestError_ACU(error);
 }
 
 function errorText_ACU(error: unknown): string {
@@ -332,11 +355,13 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
       }
       return result;
     } catch (error) {
-      if (isStale_ACU(error)) throw error;
+      if (isStale_ACU(error, input) || isUpstreamRequestFailure_ACU(error)) throw error;
       const details = error instanceof ContinuationValidationError_ACU ? error.error.details : undefined;
+      const lastReason = typeof details?.lastReason === 'string' ? details.lastReason : '';
+      if (lastReason) logAgentSession_ACU({ kind: 'protocol_retry', title: `${call.agentName} 协议失败诊断`, detail: lastReason, ok: false });
       const unresolvedIssues = Array.isArray(details?.unresolvedIssues)
         ? details.unresolvedIssues as ContinuationWorkflowUnresolvedIssue_ACU[] : undefined;
-      return { ok: false, summary: errorText_ACU(error), unresolvedIssues,
+      return { ok: false, summary: [errorText_ACU(error), lastReason ? `最后一次协议原因：${lastReason}` : ''].filter(Boolean).join('；'), unresolvedIssues,
         acceptedKeys: Array.isArray(details?.acceptedKeys) ? details.acceptedKeys as string[] : undefined };
     }
   };
@@ -576,8 +601,11 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
   ].filter(Boolean).join('\n');
 
   const composer = await input.runComposer({ prompt: composerBase, revisionFeedback: '', priorInstruction: '' }).catch(error => {
-    if (isStale_ACU(error)) throw error;
-    const failed: AgentComposerOutput_ACU = { instruction: '', summary: errorText_ACU(error), constraints: null };
+    if (isStale_ACU(error, input) || isUpstreamRequestFailure_ACU(error)) throw error;
+    const details = error instanceof ContinuationValidationError_ACU ? error.error.details : undefined;
+    const lastReason = typeof details?.lastReason === 'string' ? details.lastReason : '';
+    if (lastReason) logAgentSession_ACU({ kind: 'protocol_retry', title: 'instruction-composer 协议失败诊断', detail: lastReason, ok: false });
+    const failed: AgentComposerOutput_ACU = { instruction: '', summary: [errorText_ACU(error), lastReason ? `最后一次协议原因：${lastReason}` : ''].filter(Boolean).join('；'), constraints: null };
     return failed;
   });
   steps.push({
@@ -631,7 +659,7 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
       try {
         review = await input.runFinalReview(instruction, composer.summary);
       } catch (error) {
-        if (isStale_ACU(error)) throw error;
+        if (isStale_ACU(error, input) || isUpstreamRequestFailure_ACU(error)) throw error;
         failures += 1;
         steps.push({ agentName: 'final-reviewer', status: 'failed', summary: errorText_ACU(error) });
         if (failures >= limit) break;
@@ -653,7 +681,7 @@ export async function runContinuationAgentWorkflow_ACU(input: ContinuationWorkfl
           priorInstruction: instruction,
         });
       } catch (error) {
-        if (isStale_ACU(error)) throw error;
+        if (isStale_ACU(error, input) || isUpstreamRequestFailure_ACU(error)) throw error;
         failures += 1;
         steps.push({ agentName: AGENT_INSTRUCTION_COMPOSER_NAME_ACU, status: 'failed', summary: errorText_ACU(error) });
         continue;

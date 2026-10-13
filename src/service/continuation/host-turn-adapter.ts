@@ -11,6 +11,8 @@ export interface ContinuationHostTurnAdapter_ACU {
   removeLastMessage(): Promise<boolean>;
   /** 复用酒馆自己的生成链路：regenerate 会删末 AI 楼；generate 只对已有用户楼要回复。 */
   retryGeneration(mode: ContinuationHostRetryMode_ACU): boolean;
+  /** 重试前向当前指令追加一次强制标签提醒；失败时由桥安全放弃提醒但仍保留原重试链。 */
+  appendRetryReminder(reminder: string): Promise<boolean>;
   /** 打断酒馆正在进行的正文生成；宿主 API 不可用时静默跳过。 */
   stopGeneration(): void;
 }
@@ -51,6 +53,23 @@ export class SillyTavernHostTurnAdapter_ACU implements ContinuationHostTurnAdapt
 
   retryGeneration(mode: ContinuationHostRetryMode_ACU): boolean {
     return mode === 'regenerate' ? clickRegenerateButton_ACU() : triggerHostGenerate_ACU('normal');
+  }
+
+  async appendRetryReminder(reminder: string): Promise<boolean> {
+    const api = SillyTavern_API_ACU as any;
+    const chat = Array.isArray(api?.chat) ? api.chat as any[] : [];
+    const target = [...chat].reverse().find(message => message?.is_user === true);
+    const text = String(reminder ?? '').trim();
+    if (!target || !text) return false;
+    const current = String(target.mes ?? '');
+    if (current.includes(text)) return true;
+    target.mes = current.trim() ? `${current}\n\n${text}` : text;
+    try {
+      if (typeof api.saveChat === 'function') await api.saveChat();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   stopGeneration(): void {

@@ -127,6 +127,9 @@
               <AcuFormRow label="内部 AI 重试次数" hint="Agent 自身调用 API 失败时的重试次数。">
                 <AcuInput v-model="settingsDraft.internalAiRetryLimit" type="number" :min="0" />
               </AcuFormRow>
+              <AcuFormRow label="连续自愈上限" hint="非上游故障时自动恢复并继续的最多次数，0 为关闭。">
+                <AcuInput v-model="settingsDraft.autoRecoverLimit" type="number" :min="0" />
+              </AcuFormRow>
               <AcuFormRow label="轮次延迟（秒）" hint="每轮正文完成后等待多久再开始下一轮。">
                 <AcuInput v-model="settingsDraft.loopDelaySeconds" type="number" :min="0" />
               </AcuFormRow>
@@ -706,6 +709,7 @@ function normalizeSettingsDraft(): ContinuationSettings_ACU {
     generationRetryLimit: requiredInteger(source.generationRetryLimit, '正文重试次数'),
     minGenerationTokens: requiredInteger(source.minGenerationTokens, '正文最低 token 数'),
     internalAiRetryLimit: requiredInteger(source.internalAiRetryLimit, '内部 AI 重试次数'),
+    autoRecoverLimit: requiredInteger(source.autoRecoverLimit, '连续自愈上限'),
     loopDelaySeconds: requiredInteger(source.loopDelaySeconds, '轮次延迟'),
     retryDelaySeconds: requiredInteger(source.retryDelaySeconds, '重试延迟'),
     totalDurationMinutes: requiredInteger(source.totalDurationMinutes, '总时长'),
@@ -742,7 +746,7 @@ function normalizeSettingsDraft(): ContinuationSettings_ACU {
       maxExtraReads: requiredRangeInteger(source.agentRunBudget.maxExtraReads, '子代理工具轮上限', 0, 10),
     },
   };
-  if (normalized.maxAutomaticStages < 1 || normalized.generationRetryLimit < 0 || normalized.minGenerationTokens < 0 || normalized.internalAiRetryLimit < 0 || normalized.loopDelaySeconds < 0 || normalized.retryDelaySeconds < 0 || normalized.totalDurationMinutes < 0 || normalized.storyWindowFloors < 0 || normalized.storyTailFloors < 0 || normalized.agentHistoryTokenBudget < 0 || normalized.agentReadFallbackTokens < 1) {
+  if (normalized.maxAutomaticStages < 1 || normalized.generationRetryLimit < 0 || normalized.minGenerationTokens < 0 || normalized.internalAiRetryLimit < 0 || normalized.autoRecoverLimit < 0 || normalized.loopDelaySeconds < 0 || normalized.retryDelaySeconds < 0 || normalized.totalDurationMinutes < 0 || normalized.storyWindowFloors < 0 || normalized.storyTailFloors < 0 || normalized.agentHistoryTokenBudget < 0 || normalized.agentReadFallbackTokens < 1) {
     throw new Error('续写设置中的数值不能低于允许范围');
   }
   if (normalized.webResearch.enabled && normalized.webResearch.searchProvider === 'searxng' && !normalized.webResearch.searxngBaseUrl) {

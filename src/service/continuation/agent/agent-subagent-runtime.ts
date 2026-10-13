@@ -18,6 +18,7 @@ import { webResearcherFormatAnswer_ACU } from './web-researcher-prompt';
  */
 
 import { normalizeContinuationInternalAiRetryLimit_ACU } from '../defaults';
+import { isAutoRecoverEnabled_ACU } from '../recovery-policy';
 import { callContinuationInternalAi_ACU, callContinuationInternalAiWithRetry_ACU, CONTINUATION_ROLE_OUTPUT_TOKEN_FLOORS_ACU, type AiUsageMetadata_ACU, type ContinuationInternalAiCallOptions_ACU } from '../internal-ai-call';
 import { resolveContinuationAgentApiPreset_ACU, resolveContinuationApiPreset_ACU, type ContinuationResolvedApiPreset_ACU } from '../api-preset';
 import { renderContinuationPrompt_ACU } from '../prompt-template';
@@ -336,6 +337,26 @@ function rejectDelegation_ACU(message: string, details?: Record<string, unknown>
 
 function subagentFailed_ACU(message: string, retryable: boolean, details?: Record<string, unknown>): ContinuationValidationError_ACU {
   return new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_SUBAGENT_FAILED', 'agent_delegate', message, retryable, details));
+}
+
+function extractComposerTextFallback_ACU(raw: string): string {
+  let text = raw.trim();
+  text = text.replace(/<\/?(?:think|thinking)>[\s\S]*?<\/(?:think|thinking)>/gi, '').trim();
+  text = text.replace(/^<(?:(?:think|thinking))[\s\S]*?<\/(?:think|thinking)>/i, '').trim();
+  const fenced = /^```(?:json|text|markdown)?\s*([\s\S]*?)\s*```$/i.exec(text);
+  if (fenced) text = fenced[1].trim();
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && typeof (parsed as { instruction?: unknown }).instruction === 'string') {
+      return (parsed as { instruction: string }).instruction.trim();
+    }
+    if (typeof parsed === 'string') return parsed.trim();
+    return '';
+  } catch {
+    const match = /["']instruction["']\s*:\s*(["'])([\s\S]*?)\1/.exec(text);
+    if (match?.[2]?.trim()) return match[2].trim();
+    return text.replace(/^instruction\s*[:：]\s*/i, '').trim();
+  }
 }
 
 function selectPromptSegments_ACU(settings: ContinuationSettings_ACU, definition: AgentSubagentDefinition_ACU, mode: AgentToolMode_ACU): readonly ContinuationPromptSegment_ACU[] {
@@ -807,7 +828,11 @@ export class AgentSubagentRuntime_ACU {
     });
     // 整次派工先固定协议，再映射默认正文与拆出动态任务段。
     const toolMode: AgentToolMode_ACU = input.toolMode ?? resolveAgentToolMode_ACU('continuation', input.preset);
-    const nativeMode = toolMode === 'tools';
+    // 自动模式下连续 2 次未调用函数会在本次派工内降级为 JSON，故协议可变；提示词模板仍按初始协议渲染。
+    let nativeMode = toolMode === 'tools';
+    let effectiveToolMode: AgentToolMode_ACU = toolMode;
+    let noCallStreak = 0;
+    const downgradeAllowed = isAutoRecoverEnabled_ACU(input.settings);
     const keptTokens = keptSubagentMaterialTokens_ACU(definition.kind, writes);
     const split = splitDefaultSubagentMaterials_ACU(selectPromptSegments_ACU(input.settings, definition, toolMode), definition.promptKey, toolMode);
     const promptSegments = stripUnownedSubagentPrompt_ACU(split.segments, keptTokens);
@@ -1098,7 +1123,21 @@ export class AgentSubagentRuntime_ACU {
     // 调用总数上界 = 首轮 + 读取轮 + 写轮 + 协议重试 + 额度用尽后的最后通牒轮 + 契约续写/修补轮。到界仍未交付即失败。
     const contractKind = definition.kind === 'arc' || definition.kind === 'maintain';
     const maxContinuations = contractKind ? AGENT_CONTRACT_CONTINUATION_ROUNDS_ACU : 0;
-    const maxCalls = 1 + maxToolRounds + maxWriteRounds + retries + 1 + maxContinuations;
+    // 降级为 JSON 的那次调用不计入协议重试，切换时上界加一。
+    let maxCalls = 1 + maxToolRounds + maxWriteRounds + retries + 1 + maxContinuations;
+    const jsonProtocolGuide = (): string => [
+      maintenanceFormat?.('json') ?? '',
+      input.writeSql && writes.length ? renderMaintenanceSqlGuide_ACU(definition.name, 'json') : '',
+      maintenanceFormat === undefined ? `最终交付输出一个 JSON 对象，包含 ${KIND_PAYLOAD_KEYS_ACU[definition.kind].join('、')}；需要补读时输出 {"action":"read","reads":["授权地址"]}。` : '',
+    ].filter(Boolean).join('\n');
+    const switchToJson = (): void => {
+      nativeMode = false;
+      effectiveToolMode = 'json';
+      callOptions.tools = [];
+      callOptions.cacheTools = ['mode:json', ...(input.writeSql && writes.length ? writes.map(module => `module:${module}`) : [])];
+      maxCalls += 1;
+      logAgentSession_ACU({ kind: 'protocol_retry', title: `${definition.name} · 工具调用失效，本次改用 JSON 协议`, detail: `连续 ${noCallStreak} 次未调用函数`, ok: false });
+    };
     // 契约草稿累积：截断或单条非法时不整份重来，先收下合法条目，再只向模型索要剩余/修正条目。
     let accumulated: AgentMaintainerOutput_ACU | null = null;
     let continuationsUsed = 0;
@@ -1294,7 +1333,11 @@ export class AgentSubagentRuntime_ACU {
       };
       try {
         if (nativeMode) {
-          if (!nativeCalls.length) throw new Error('工具模式下必须调用函数：读取与写入用对应函数，交付结果调用 submit，不要输出 JSON 文本');
+          if (!nativeCalls.length) {
+            noCallStreak += 1;
+            throw new Error('工具模式下必须调用函数：读取与写入用对应函数，交付结果调用 submit，不要输出 JSON 文本');
+          }
+          noCallStreak = 0;
           const split = splitNativeDecisionCalls_ACU(nativeToolArguments_ACU(nativeCalls), [AGENT_SUBMIT_TOOL_NAME_ACU]);
           if (split.decision) submitText = submitPayloadText_ACU(split.decision.payload);
           toolCalls = split.tools.length ? split.tools.map(({ call, payload }) => {
@@ -1331,6 +1374,12 @@ export class AgentSubagentRuntime_ACU {
           }
         }
       } catch (error) {
+        // 降级判定先于重试耗尽：切换本身不计入协议拒绝，模型不是写错契约，而是这条路由的函数调用失效。
+        if (nativeMode && !nativeCalls.length && downgradeAllowed && noCallStreak >= 2) {
+          switchToJson();
+          pushFeedback(`工具动作未执行：${compactAgentProtocolError_ACU(error)}。\n已切换为 JSON 协议：本次不再提供函数，按 JSON 契约输出。\n${jsonProtocolGuide()}`);
+          continue;
+        }
         protocolRejections += 1;
         if (protocolRejections > retries) {
           if (writeAttempted) throw subagentFailed_ACU('写入后工具协议重试耗尽，逐栏维护未完成', false, {
@@ -1608,7 +1657,7 @@ export class AgentSubagentRuntime_ACU {
             && !accumulated.delta.storyArcPatches.length
             && !committedWriteObserved;
           if (emptyArcBootstrap && !pending.length && !draft.truncated && input.writeSql) {
-            const request = renderArcSqlBootstrap_ACU(input.resolveContext.chat, maxWriteRounds - writeRoundsUsed, toolMode);
+            const request = renderArcSqlBootstrap_ACU(input.resolveContext.chat, maxWriteRounds - writeRoundsUsed, effectiveToolMode);
             if (continuationsUsed >= maxContinuations) {
               return deliverContract(accumulated, [{ module: 'storyArc', index: 0, id: '', reason: request }]);
             }
@@ -1648,7 +1697,7 @@ export class AgentSubagentRuntime_ACU {
               nativeMode ? '单独调用 submit，以 summary + delta 一次提交修正。'
                 : '单独输出 summary + delta 的完整交付对象，一次提交修正。',
             ].join('\n')
-            : renderAgentContractContinuationRequest_ACU(accumulated, pending, draft.truncated, toolMode));
+            : renderAgentContractContinuationRequest_ACU(accumulated, pending, draft.truncated, effectiveToolMode));
           continue;
         }
         const payload = parseAgentJsonPayload_ACU(contractText, nativeCalls.length ? '' : prefill, KIND_PAYLOAD_KEYS_ACU[definition.kind]);
@@ -1675,6 +1724,33 @@ export class AgentSubagentRuntime_ACU {
         lastReason = compactAgentProtocolError_ACU(error);
         protocolRejections += 1;
         if (protocolRejections > retries) {
+          if (definition.kind === 'compose' && isAutoRecoverEnabled_ACU(input.settings)) {
+            const instruction = extractComposerTextFallback_ACU(rawText);
+            if (instruction) {
+              logAgentSession_ACU({ kind: 'protocol_retry', title: 'instruction-composer 文本兜底', detail: `契约重试耗尽，已采用非 JSON 正文：${instruction.slice(0, 300)}`, ok: true });
+              return {
+                agentName: definition.name,
+                kind: definition.kind,
+                writes,
+                arc: null,
+                maintainer: null,
+                planner: null,
+                reviewer: null,
+                researcher: null,
+                requirements: null,
+                composer: { instruction, summary: 'composer 文本兜底', constraints: null },
+                completion: 'complete_changed',
+                moduleCompletion: {},
+                unresolvedIssues: [],
+                iterations: attempt,
+                attempts: attempt,
+                expandedReads: [...expandedReads],
+                readRevisions,
+                usage: usageTotal,
+                usedFieldWrites,
+              };
+            }
+          }
           throw subagentFailed_ACU(`${definition.name} 连续 ${retries + 1} 次返回不符合契约`, false, {
             agentName: definition.name, lastReason,
             ...(writeAttempted ? { acceptedKeys: [...confirmedFields], unresolvedIssues: [

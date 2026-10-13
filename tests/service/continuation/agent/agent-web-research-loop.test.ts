@@ -169,6 +169,7 @@ describe('开场百科检索', () => {
       JSON.stringify({ action: 'write_sql', sql }),
       '{"summary":"入库 1 条"}',
     ] });
+    h.request.settings.autoRecoverLimit = 0;
     await expect(h.planner.plan(h.request)).rejects.toBeInstanceOf(Error);
 
     // 搜 → 读 → write_sql → 回执后的独立交付。

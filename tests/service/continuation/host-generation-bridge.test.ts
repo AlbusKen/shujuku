@@ -3,11 +3,12 @@ import { ContinuationHostGenerationBridge_ACU } from '../../../src/service/conti
 
 const identity = { chatIdentity: 'chat-a', taskId: 'task-a', stageId: 'stage-a', revision: 1, nodeId: 'node-a', turnId: 'turn-a', attemptId: 'attempt-a' };
 
-function createHarness(options: { tags?: string; chat?: any[]; send?: boolean; retry?: boolean; minTokens?: number; tokens?: number; onWait?: () => void; autoContinueStates?: Array<{ eligible: boolean; delaySeconds: number }> } = {}) {
+function createHarness(options: { tags?: string; chat?: any[]; send?: boolean; retry?: boolean; minTokens?: number; tokens?: number; onWait?: () => void; autoContinueStates?: Array<{ eligible: boolean; delaySeconds: number }>; autoRecoverStates?: Array<{ eligible: boolean; delaySeconds: number }>; tagReminderUsed?: boolean } = {}) {
   let chat = options.chat ?? [{ is_user: true }];
   let chatIdentity = 'chat-a';
   let pending: any = null;
   const autoContinueStates = [...(options.autoContinueStates ?? [])];
+  const autoRecoverStates = [...(options.autoRecoverStates ?? [])];
   const continuePreparedTurn: any = { identity, instruction: { instruction: '自动续写的下一轮文本' } };
   const retryCurrentTurn = vi.fn(async () => ({ retryHostGeneration: true }));
   const continueTask = vi.fn(async () => ({ preparedTurn: continuePreparedTurn }));
@@ -15,10 +16,11 @@ function createHarness(options: { tags?: string; chat?: any[]; send?: boolean; r
     getChatIdentity: () => chatIdentity, getChat: () => chat, getGenerationSequence: () => 0,
     readPendingHostTurn: () => pending ? { settings: { loopTags: options.tags ?? '<ok>', minGenerationTokens: options.minTokens ?? 0 }, pending } : null,
     readAutoContinueState: vi.fn(() => autoContinueStates.length ? autoContinueStates.shift()! : { eligible: false, delaySeconds: 0 }),
+    readAutoRecoverState: vi.fn(() => autoRecoverStates.length ? autoRecoverStates.shift()! : { eligible: false, delaySeconds: 0 }),
     retryCurrentTurn,
     continueTask,
     // 模拟编排器按硬游标自动填身份：重试沿用已有 attemptId。
-    recordHostTurn: vi.fn(async ({ capture }) => { pending = { identity: pending?.identity ?? identity, capture, retryCount: pending?.retryCount ?? 0, status: 'awaiting_generation' }; }),
+    recordHostTurn: vi.fn(async ({ capture }) => { pending = { identity: pending?.identity ?? identity, capture, retryCount: pending?.retryCount ?? 0, tagReminderUsed: pending?.tagReminderUsed ?? options.tagReminderUsed ?? false, status: 'awaiting_generation' }; }),
     bindHostTurnGeneration: vi.fn(async (generationSeq) => { pending = { ...pending, capture: { ...pending.capture, generationSeq } }; }),
     redirectHostTurnGeneration: vi.fn(async ({ attemptId, generationSeq }) => {
       if (pending?.identity.attemptId !== attemptId || pending.capture.generationSeq !== generationSeq) throw new Error('stale redirect');
@@ -36,6 +38,7 @@ function createHarness(options: { tags?: string; chat?: any[]; send?: boolean; r
     send: vi.fn(() => options.send ?? true),
     removeLastMessage: vi.fn(async () => { chat = chat.slice(0, -1); return true; }),
     retryGeneration: vi.fn(() => options.retry ?? true),
+    appendRetryReminder: vi.fn(async () => true),
     stopGeneration: vi.fn(),
   };
   const wait = vi.fn(async () => options.onWait?.());
@@ -421,6 +424,32 @@ describe('ContinuationHostGenerationBridge_ACU', () => {
     const h = createHarness();
     h.bridge.stopHostGeneration();
     expect(h.hostInput.stopGeneration).toHaveBeenCalledOnce();
+  });
+
+  it('auto-recovers a failed continueTask while the orchestrator marks the failure recoverable', async () => {
+    const h = createHarness({
+      autoContinueStates: [{ eligible: true, delaySeconds: 0 }, { eligible: true, delaySeconds: 0 }],
+      autoRecoverStates: [{ eligible: true, delaySeconds: 0 }, { eligible: true, delaySeconds: 0 }, { eligible: false, delaySeconds: 0 }],
+    });
+    h.continueTask.mockRejectedValueOnce(new Error('第一次规划失败')).mockResolvedValueOnce({ preparedTurn: { ...prepared, instruction: { instruction: '恢复后的下一轮' } } });
+    h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(7); return true; });
+    await h.bridge.send(prepared);
+    h.setChat([{ is_user: true }, { is_user: false, mes: '<ok>正文', message_id: 9 }]);
+    await h.bridge.onGenerationEnded(9, 7);
+    expect(h.continueTask).toHaveBeenCalledTimes(2);
+    expect(h.hostInput.send).toHaveBeenCalledTimes(2);
+    expect(h.runtime.readAutoRecoverState).toHaveBeenCalled();
+  });
+
+  it('injects the configured loop tags into the one-time reinforced retry', async () => {
+    const h = createHarness({ tags: '<required>', tagReminderUsed: true });
+    h.hostInput.send.mockImplementation(() => { h.bridge.onGenerationStarted(7); return true; });
+    h.hostInput.retryGeneration.mockImplementation(() => { h.bridge.onGenerationStarted(8); return true; });
+    await h.bridge.send(prepared);
+    h.setChat([{ is_user: true }, { is_user: false, mes: '正文', message_id: 9 }]);
+    await h.bridge.onGenerationEnded(9, 7);
+    expect(h.hostInput.appendRetryReminder).toHaveBeenCalledWith('正文必须包含以下标签：<required>');
+    expect(h.hostInput.retryGeneration).toHaveBeenCalledWith('regenerate');
   });
 
   it('swallows an auto-continue failure without overwriting the recorded task state', async () => {

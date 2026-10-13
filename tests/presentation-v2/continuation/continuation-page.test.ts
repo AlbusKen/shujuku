@@ -196,7 +196,7 @@ function setSettings(): void {
     stageSize: 'standard', customTurnMin: null, customTurnMax: null,
     outlinePreview: false, autoNextStage: true, maxAutomaticStages: 6,
     loopTags: '', loopDelaySeconds: 5, totalDurationMinutes: 0,
-    retryDelaySeconds: 3, generationRetryLimit: 3, internalAiRetryLimit: 3, minGenerationTokens: 1000,
+    retryDelaySeconds: 3, generationRetryLimit: 3, internalAiRetryLimit: 3, autoRecoverLimit: 3, minGenerationTokens: 1000,
     storyWindowFloors: 20, storyTailFloors: 2, agentHistoryTokenBudget: 120000, maxConsecutivePressureTurns: 8,
     agentReadTokenBudget: '30%', agentReadFallbackTokens: 6000,
     finalReview: { enabled: false, readTokenBudget: '50%', maxExtraReads: 6 },

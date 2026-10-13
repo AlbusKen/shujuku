@@ -382,6 +382,90 @@ describe('ContinuationOrchestrator_ACU', () => {
     expect(orchestrator.readAutoContinueState().eligible).toBe(false);
   });
 
+  it('recoverable planner failure increments auto-recover count and exposes a retry state', async () => {
+    const planner = vi.fn().mockRejectedValue(new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', 'agent_loop', '协议失败', false)));
+    const { orchestrator, store } = createOrchestrator({ planner });
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await expect(orchestrator.continueTask()).rejects.toBeInstanceOf(ContinuationValidationError_ACU);
+    expect(store.readPersisted()!.activeTask).toMatchObject({
+      status: 'paused',
+      stopReason: null,
+      autoRecoverCount: 1,
+      lastError: { code: 'CONTINUATION_AGENT_PROTOCOL_INVALID', details: { autoRecover: true } },
+    });
+    expect(orchestrator.readAutoRecoverState()).toEqual({ eligible: true, delaySeconds: 3 });
+  });
+
+  it('does not expose auto-recovery after the configured consecutive limit', async () => {
+    const planner = vi.fn().mockRejectedValue(new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_AGENT_PROTOCOL_INVALID', 'agent_loop', '协议失败', false)));
+    const { orchestrator, store } = createOrchestrator({ planner });
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    const settings = buildDefaultContinuationSettings_ACU();
+    settings.autoRecoverLimit = 1;
+    await orchestrator.replaceSettings({ settings });
+    await expect(orchestrator.continueTask()).rejects.toBeInstanceOf(ContinuationValidationError_ACU);
+    expect(store.readPersisted()!.activeTask).toMatchObject({ autoRecoverCount: 1, lastError: { details: { autoRecover: true } } });
+    await expect(orchestrator.continueTask()).rejects.toBeInstanceOf(ContinuationValidationError_ACU);
+    expect(store.readPersisted()!.activeTask).toMatchObject({ autoRecoverCount: 1, lastError: { details: { autoRecover: false, autoRecoverExhausted: true } } });
+    expect(orchestrator.readAutoRecoverState()).toEqual({ eligible: false, delaySeconds: 0 });
+  });
+
+  it('does not auto-retry an upstream planner failure', async () => {
+    const planner = vi.fn().mockRejectedValue(new Error('上游请求失败'));
+    const { orchestrator, store } = createOrchestrator({ planner });
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await expect(orchestrator.continueTask()).rejects.toThrow('上游请求失败');
+    expect(store.readPersisted()!.activeTask).toMatchObject({
+      autoRecoverCount: 0,
+      lastError: {
+        code: 'CONTINUATION_INTERNAL_AI_REQUEST_FAILED',
+        message: '每轮指令生成失败：上游请求失败',
+        details: { upstreamMessage: '上游请求失败' },
+      },
+    });
+    expect(orchestrator.readAutoRecoverState()).toEqual({ eligible: false, delaySeconds: 0 });
+  });
+
+  it('resets consecutive auto-recovery count after a confirmed turn', async () => {
+    const { orchestrator, store } = createOrchestrator();
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+    await store.updatePersistedAtomically(current => ({ ...current!, activeTask: { ...current!.activeTask!, autoRecoverCount: 2, lastError: null } }), { chatIdentity: 'chat-a' });
+    await recordPendingHostTurn(orchestrator);
+    await orchestrator.confirmCurrentTurn();
+    expect(store.readPersisted()!.activeTask!.autoRecoverCount).toBe(0);
+  });
+
+  it('accepts a tag-missing body after one reinforced reminder in auto mode', async () => {
+    const { orchestrator, store } = createOrchestrator();
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+    const settings = buildDefaultContinuationSettings_ACU();
+    settings.generationRetryLimit = 0;
+    await orchestrator.replaceSettings({ settings });
+    await recordPendingHostTurn(orchestrator);
+    await orchestrator.rejectHostTurnForMissingTags({ messageIndex: 1 });
+    expect(store.readPersisted()!.activeTask).toMatchObject({ pendingHostTurn: { status: 'retry_ready', tagReminderUsed: true }, stopReason: null });
+    await orchestrator.retryCurrentTurn();
+    await orchestrator.recordHostTurn({ capture: { capturedAt: 1_000, capturedChatLength: 1, capturedAiFloorCount: 0, generationSeq: null } });
+    await orchestrator.rejectHostTurnForMissingTags({ messageIndex: 1 });
+    expect(store.readPersisted()!.activeTask).toMatchObject({ status: 'paused', pendingHostTurn: null, lastError: null });
+    expect(store.readPersisted()!.activeTask!.timeline.at(-1)).toMatchObject({ kind: 'turn_completed', warning: 'tags_missing_accepted' });
+  });
+
+  it('keeps tag-missing exhaustion unchanged when auto-recovery is disabled', async () => {
+    const { orchestrator, store } = createOrchestrator();
+    await orchestrator.createTask({ originInstruction: '推进剧情' });
+    await orchestrator.continueTask();
+    const settings = buildDefaultContinuationSettings_ACU();
+    settings.autoRecoverLimit = 0;
+    settings.generationRetryLimit = 0;
+    await orchestrator.replaceSettings({ settings });
+    await recordPendingHostTurn(orchestrator);
+    await orchestrator.rejectHostTurnForMissingTags({ messageIndex: 1 });
+    expect(store.readPersisted()!.activeTask).toMatchObject({ stopReason: 'generation_retry_exhausted', pendingHostTurn: { status: 'exhausted' } });
+  });
+
   it('pauses after the final confirmed turn; the next continue delegates the next stage outline to the agent', async () => {
     const { orchestrator, planner, store } = createOrchestrator();
     await orchestrator.createTask({ originInstruction: '推进剧情' });
@@ -456,7 +540,7 @@ describe('ContinuationOrchestrator_ACU', () => {
     const { orchestrator, store } = createOrchestrator();
     await orchestrator.createTask({ originInstruction: '推进剧情' });
     const initial = store.readPersisted()!;
-    initial.settings = { ...initial.settings, generationRetryLimit: 1 };
+    initial.settings = { ...initial.settings, generationRetryLimit: 1, autoRecoverLimit: 0 };
     await store.replaceAtomically(initial, { chatIdentity: 'chat-a' });
     await orchestrator.continueTask();
 

@@ -15,6 +15,8 @@ import {
 
 /** 酒馆正文短于该 token 数视为截断或出错，触发与报错同构的自动重试。0 表示关闭。 */
 export const CONTINUATION_MIN_GENERATION_TOKENS_DEFAULT_ACU = 1000;
+/** 非上游故障自动恢复的默认连续上限；0 关闭自愈。 */
+export const CONTINUATION_AUTO_RECOVER_LIMIT_DEFAULT_ACU = 3;
 
 export const CONTINUATION_TURN_RANGES_ACU: Readonly<Record<Exclude<ContinuationStageSize_ACU, 'custom'>, ContinuationTurnRange_ACU>> = {
   short: { min: 3, max: 5 },
@@ -393,6 +395,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     retryDelaySeconds: 3,
     generationRetryLimit: 3,
     internalAiRetryLimit: 3,
+    autoRecoverLimit: CONTINUATION_AUTO_RECOVER_LIMIT_DEFAULT_ACU,
     minGenerationTokens: CONTINUATION_MIN_GENERATION_TOKENS_DEFAULT_ACU,
     maxConsecutivePressureTurns: CONTINUATION_MAX_CONSECUTIVE_PRESSURE_TURNS_DEFAULT_ACU,
     storyWindowFloors: AGENT_STORY_WINDOW_DEFAULT_ACU,

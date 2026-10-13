@@ -206,6 +206,40 @@ export function useContinuationRuntime() {
     return runInRuntimeScope_ACU(current, captureRuntimeScope(current), action, replaceActive, suppressErrorToast, onError);
   }
 
+  async function autoRecoverAfterActionFailure_ACU(current: ContinuationRuntime_ACU, isRuntimeCurrent: () => boolean): Promise<boolean> {
+    let attempted = false;
+    while (isRuntimeCurrent()) {
+      const state = current.orchestrator.readAutoRecoverState();
+      if (!state.eligible) return attempted;
+      attempted = true;
+      if (state.delaySeconds > 0) await new Promise<void>(resolve => setTimeout(resolve, state.delaySeconds * 1_000));
+      if (!isRuntimeCurrent() || !current.orchestrator.readAutoRecoverState().eligible) return attempted;
+      try {
+        const result = await current.continueTask();
+        if (!isRuntimeCurrent()) return attempted;
+        if ('retryHostGeneration' in result && result.retryHostGeneration) {
+          return await current.retryHostGeneration();
+        }
+        if ('preparedTurn' in result && result.preparedTurn) {
+          const sent = await current.send(result.preparedTurn);
+          if (sent && isCurrent(current, pageEpoch)) {
+            envelope.value = 'envelope' in result ? result.envelope : result;
+            refresh();
+          }
+          return sent;
+        }
+        if (isCurrent(current, pageEpoch)) {
+          envelope.value = 'envelope' in result ? result.envelope : result;
+          refresh();
+        }
+        return true;
+      } catch {
+        // 编排器会在下一次 pauseWithError 中递增计数；循环重新读取资格。
+      }
+    }
+    return attempted;
+  }
+
   function runInRuntimeScope_ACU(current: ContinuationRuntime_ACU, isRuntimeCurrent: () => boolean, action: ContinuationRuntimeAction_ACU, replaceActive = false, suppressErrorToast = false, onError?: (error: unknown) => void): Promise<boolean> {
     const epoch = pageEpoch;
     const actions = getRuntimeActions_ACU(current);
@@ -253,10 +287,12 @@ export function useContinuationRuntime() {
       }
       return true;
       })
-      .catch(error => {
+      .catch(async error => {
       debug?.finish('failed', { reason: 'exception', errorType: continuationDebugErrorType_ACU(error) }, false);
       if (!isCurrent(current, epoch) || activeAction !== completion) return false;
       onError?.(error);
+      const recovered = await autoRecoverAfterActionFailure_ACU(current, isRuntimeCurrent);
+      if (recovered) return true;
       if (suppressErrorToast) {
         refresh();
         return false;

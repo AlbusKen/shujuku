@@ -308,6 +308,28 @@ describe('FirstFloorContinuationStore_ACU', () => {
     expect(buildDefaultContinuationSettings_ACU().minGenerationTokens).toBe(1000);
   });
 
+  it('存量信封缺 autoRecoverLimit 时补默认 3，显式 0 保留', () => {
+    const missing = buildEnvelope_ACU() as any;
+    delete missing.settings.autoRecoverLimit;
+    _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: missing }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    expect(new FirstFloorContinuationStore_ACU().read()!.settings.autoRecoverLimit).toBe(3);
+    expect(buildDefaultContinuationSettings_ACU().autoRecoverLimit).toBe(3);
+
+    const zero = buildEnvelope_ACU() as any;
+    zero.settings.autoRecoverLimit = 0;
+    _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: zero }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    expect(new FirstFloorContinuationStore_ACU().read()!.settings.autoRecoverLimit).toBe(0);
+  });
+
+  it('autoRecoverLimit 为负数或非整数时拒绝读取', () => {
+    for (const bad of [-1, 1.5, '3']) {
+      const invalid = buildEnvelope_ACU() as any;
+      invalid.settings.autoRecoverLimit = bad;
+      _set_SillyTavern_API_ACU({ chat: [{ _qrf_continuation: invalid }], chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+      expect(() => new FirstFloorContinuationStore_ACU().read()).toThrow(ContinuationValidationError_ACU);
+    }
+  });
+
   it('V22 信封缺终审设置与提示词时补默认值且保留用户定制提示词', () => {
     const legacy = buildEnvelope_ACU() as any;
     legacy.settings.agentPrompts.main = [{ role: 'user', content: '保留的用户主控提示词', enabled: true, deletable: true }];
@@ -512,6 +534,21 @@ describe('FirstFloorContinuationStore_ACU', () => {
     expect(chat[0]._qrf_continuation.activeTask).toMatchObject({ status: 'drafting', stages: [{ status: 'planning' }] });
   });
 
+
+  it('migrates missing automatic recovery counters and tag reminders on old task envelopes', () => {
+    const persisted = buildRunningEnvelope_ACU();
+    delete (persisted.activeTask as any).autoRecoverCount;
+    persisted.activeTask!.pendingHostTurn = {
+      identity: { chatIdentity: 'chat-a', taskId: 'task-1', stageId: 'stage-1', revision: 1, nodeId: 'node-1', turnId: 'turn-1', attemptId: 'attempt-1' },
+      capture: { capturedAt: 1, capturedChatLength: 1, capturedAiFloorCount: 0, generationSeq: null },
+      retryCount: 0,
+      status: 'retry_ready',
+    } as any;
+    const chat: any[] = [{ _qrf_continuation: persisted }];
+    _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat: vi.fn() } as any);
+    const restored = new FirstFloorContinuationStore_ACU().read();
+    expect(restored!.activeTask).toMatchObject({ autoRecoverCount: 0, pendingHostTurn: { tagReminderUsed: false } });
+  });
 
   it('migrates only retained legacy settings and never assigns prompt-array semantics', () => {
     const legacy = {

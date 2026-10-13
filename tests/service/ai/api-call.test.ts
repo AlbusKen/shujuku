@@ -277,6 +277,22 @@ describe('callAIWithPreset_ACU', () => {
     expect(result).toBe('预设B回复');
   });
 
+  it('resolved preset direct path preserves the upstream response body on HTTP failure', async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 502,
+      text: () => Promise.resolve('{"error":{"message":"context window exceeded","type":"upstream_error"}}'),
+    });
+    const error = await callAIWithResolvedPreset_ACU(
+      [{ role: 'user', content: '你好' }],
+      { apiMode: 'custom', apiConfig: { sendViaTavern: true, url: 'https://api.example.com', model: 'gpt-4', apiKey: 'test' }, tavernProfile: '' },
+    ).catch(error => error);
+    expect(error).toBeInstanceOf(AgentApiHttpError_ACU);
+    expect(error.message).toContain('502');
+    expect(error.message).toContain('context window exceeded');
+    expect(error.message).toContain('upstream_error');
+  });
+
   it('自定义 API 模式把 signal 传给 fetch', async () => {
     mockSettings.apiConfig = { sendViaTavern: true, url: 'https://api.example.com', model: 'gpt-4', apiKey: 'sk-test' };
     mockFetch.mockResolvedValue({ ok: true });
@@ -1357,8 +1373,9 @@ describe('自定义 API 酒馆转发日志', () => {
     const clone = vi.spyOn(original, 'clone');
     mockFetch.mockResolvedValueOnce(original);
     const response = await sendCustomApiRequest_ACU(config, body);
-    expect(text).not.toHaveBeenCalled();
-    expect(getAllLogs()).toHaveLength(1);
+    // 非流式 JSON 在转发层读一次正文以识别宿主 200 + error 包装；整体仍只消费一次。
+    expect(text).toHaveBeenCalledTimes(1);
+    expect(getAllLogs()).toHaveLength(2);
     expect((await response.json()).choices[0].message.content).toContain('完整转发回复');
     expect(text).toHaveBeenCalledTimes(1);
     expect(clone).not.toHaveBeenCalled();
@@ -1390,6 +1407,23 @@ describe('自定义 API 酒馆转发日志', () => {
     expect(cancel).not.toHaveBeenCalled();
     expect(original.body!.locked).toBe(false);
     expect(getAllLogs().at(-1)!.message).toContain(raw);
+  });
+});
+
+describe('酒馆转发上游错误包装', () => {
+  it.each(['resolved', 'chatTurn'] as const)('%s 宿主 200 + error 正文按 HTTP 错误抛出，不当作空回复', async mode => {
+    mockFetch.mockResolvedValueOnce(new Response('{"error":{"message":"Too Many Requests"},"quota_error":false}', { headers: { 'Content-Type': 'application/json' } }));
+    const messages = [{ role: 'user', content: '测试上游配额' }];
+    const resolved = { apiMode: 'custom' as const, apiConfig: { ...mockSettings.apiConfig, sendViaTavern: true }, tavernProfile: '' };
+    const error = await (mode === 'resolved' ? callAIWithResolvedPreset_ACU(messages, resolved) : callAIChatTurn_ACU(messages, resolved)).catch(error => error);
+    expect(error).toBeInstanceOf(AgentApiHttpError_ACU);
+    expect(isRetryableAiRequestError_ACU(error)).toBe(true);
+  });
+
+  it('正常 choices 回复不受影响', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('{"choices":[{"message":{"content":"正常正文"}}]}', { headers: { 'Content-Type': 'application/json' } }));
+    const resolved = { apiMode: 'custom' as const, apiConfig: { ...mockSettings.apiConfig, sendViaTavern: true }, tavernProfile: '' };
+    expect((await callAIChatTurn_ACU([{ role: 'user', content: '测试' }], resolved)).content).toBe('正常正文');
   });
 });
 

@@ -135,8 +135,25 @@ export function createZeroLayerContinuationRuntime_ACU(dependencies: Dependencie
         assertCurrent();
         if (result.preparedTurn) await send(result.preparedTurn);
       } catch {
-        if (!disposed) logAgentSession_ACU({ kind: 'run_failed', title: '自动续写已暂停',
-          detail: '逻辑正文或续写准备未完成，进度已保留；请检查任务状态后显式继续。', ok: false });
+        if (!disposed) {
+          let recovered = false;
+          while (!disposed) {
+            const recovery = orchestrator.readAutoRecoverState();
+            if (!recovery.eligible) break;
+            await new Promise<void>(resolve => setTimeout(resolve, recovery.delaySeconds * 1_000));
+            if (disposed || !orchestrator.readAutoRecoverState().eligible) break;
+            try {
+              const retry = await continueTask();
+              if (retry.preparedTurn) await send(retry.preparedTurn);
+              recovered = true;
+              break;
+            } catch {
+              // 编排器已按连续自愈上限记录失败；下一轮重新读取资格。
+            }
+          }
+          if (!recovered) logAgentSession_ACU({ kind: 'run_failed', title: '自动续写已暂停',
+            detail: '逻辑正文或续写准备未完成，进度已保留；请检查任务状态后显式继续。', ok: false });
+        }
       } finally {
         if (!disposed) notify();
       }

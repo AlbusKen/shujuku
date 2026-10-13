@@ -13,8 +13,9 @@ export interface ContinuationHostTurnRuntime_ACU {
   getChat(): any[];
   getGenerationSequence(): number;
   retryCurrentTurn(): Promise<{ retryHostGeneration?: boolean }>;
-  readPendingHostTurn(): { settings: { loopTags: string; retryDelaySeconds?: number; minGenerationTokens?: number }; pending: { identity: TurnAttemptIdentity_ACU; capture: ContinuationHostGenerationCapture_ACU; status: 'awaiting_generation' | 'retry_ready' | 'exhausted' } } | null;
+  readPendingHostTurn(): { settings: { loopTags: string; retryDelaySeconds?: number; minGenerationTokens?: number }; pending: { identity: TurnAttemptIdentity_ACU; capture: ContinuationHostGenerationCapture_ACU; retryCount?: number; tagReminderUsed?: boolean; status: 'awaiting_generation' | 'retry_ready' | 'exhausted' } } | null;
   readAutoContinueState(): { eligible: boolean; delaySeconds: number };
+  readAutoRecoverState(): { eligible: boolean; delaySeconds: number };
   continueTask(): Promise<{ preparedTurn?: ContinuationPreparedTurnInstruction_ACU; retryHostGeneration?: boolean }>;
   recordHostTurn(input: { capture: ContinuationHostGenerationCapture_ACU }): Promise<unknown>;
   bindHostTurnGeneration(generationSeq: number): Promise<void>;
@@ -503,12 +504,36 @@ export class ContinuationHostGenerationBridge_ACU {
       if (result.retryHostGeneration) await this.retryHostGeneration();
       else if (result.preparedTurn) await this.send(result.preparedTurn);
     } catch (error) {
-      // 状态已由 orchestrator 记录（paused+lastError 或拒绝原因），自动链到此为止；
-      // 但必须在会话流留痕——静默吞掉会让用户以为自动续写根本没触发。
-      const message = error instanceof Error ? error.message : String(error);
-      logAgentSession_ACU({ kind: 'run_failed', title: '自动续写已暂停', detail: `${message}\n进度已保留，输入新指令后发送即可继续。`, ok: false });
+      // 状态已由 orchestrator 记录；若错误被标为可自愈，则按用户上限继续尝试，
+      // 上游/数据安全错误不会满足 readAutoRecoverState，链路自然停止。
+      const recovered = await this.autoRecoverAfterFailure_ACU();
+      if (!recovered) {
+        const message = error instanceof Error ? error.message : String(error);
+        logAgentSession_ACU({ kind: 'run_failed', title: '自动续写已暂停', detail: `${message}\n进度已保留，输入新指令后发送即可继续。`, ok: false });
+      }
     } finally {
       this.notifyStateChanges_ACU();
+    }
+  }
+
+  private async autoRecoverAfterFailure_ACU(): Promise<boolean> {
+    const runtime = this.dependencies.runtime;
+    let attempted = false;
+    while (true) {
+      const state = runtime.readAutoRecoverState();
+      if (!state.eligible) return attempted;
+      attempted = true;
+      await this.dependencies.wait(state.delaySeconds * 1_000);
+      if (!runtime.readAutoRecoverState().eligible) return attempted;
+      try {
+        const result = await runtime.continueTask();
+        if (result.retryHostGeneration) await this.retryHostGeneration();
+        else if (result.preparedTurn) await this.send(result.preparedTurn);
+        return true;
+      } catch {
+        // 编排器会在下一次 pauseWithError 中递增计数；循环重新读取资格，
+        // 因而用户停止、上游错误或达到上限都会立即退出。
+      }
     }
   }
 
@@ -588,6 +613,13 @@ export class ContinuationHostGenerationBridge_ACU {
       generationSeq: null,
     };
     const attemptId = snapshot.pending.identity.attemptId;
+    const reminder = snapshot.pending.tagReminderUsed && snapshot.settings.loopTags.trim()
+      ? `正文必须包含以下标签：${snapshot.settings.loopTags}`
+      : '';
+    if (reminder) {
+      const applied = await this.dependencies.hostInput.appendRetryReminder(reminder);
+      logAgentSession_ACU({ kind: 'protocol_retry', title: '已注入标签强化提醒', detail: reminder, ok: applied });
+    }
     await runtime.recordHostTurn({ capture });
     this.localRetryClaim = { attemptId, mode, createdAt: this.dependencies.now(), sequence: null, consumed: false };
     this.sendingAttemptId = attemptId;
