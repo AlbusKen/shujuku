@@ -160,7 +160,7 @@ const props = defineProps<{
   appearance: DeskPetAppearance_ACU;
 }>();
 
-const emit = defineEmits<{ (event: "rect", rect: DeskPetRect): void }>();
+const emit = defineEmits<{ (event: "rect", rect: DeskPetRect): void; (event: "activate"): void }>();
 
 const DRAG_THRESHOLD_PX = 6;
 const EDGE_MARGIN_PX = 8;
@@ -175,6 +175,8 @@ const DOCK_SNAP_RATIO = 0.05;
 const DRAG_OVERSHOOT_RATIO = 0.5;
 /** 吸附后完整露出时离屏幕边缘的距离。 */
 const DOCK_INSET_PX = 2;
+/** 500ms 内两次非拖拽轻点视为快捷双击，用于打开仪表盘。 */
+const ACTIVATION_TAP_WINDOW_MS = 500;
 /** 短时间内连点达到该次数，从害羞变成怕痒。 */
 const TICKLE_TAP_COUNT = 3;
 const TICKLE_WINDOW_MS = 1200;
@@ -227,6 +229,7 @@ let reversals = 0;
 let lastMoveX = 0;
 let lastMoveDir = 0;
 let lastWaveAt = 0;
+let lastActivationTapAt = 0;
 
 const motion = computed(() => props.appearance.motion);
 const size = computed(() => (viewport.value.width <= NARROW_VIEWPORT_PX ? props.appearance.size.narrow : props.appearance.size.wide));
@@ -337,7 +340,7 @@ const rootClass = computed(() => ({
 
 const ariaLabel = computed(() => `桌宠：${showPeek.value ? "躲在边上偷看" : POSE_LABELS[pose.value]}`);
 const titleText = computed(() =>
-  showPeek.value ? "躲在边上偷看（悬停或点一下就探出来）" : `${POSE_LABELS[pose.value]}（可拖动，点一下有反应）`,
+  showPeek.value ? "躲在边上偷看（悬停或点一下就探出来，快速点两下打开仪表盘）" : `${POSE_LABELS[pose.value]}（可拖动，点一下有反应，快速点两下打开仪表盘）`,
 );
 
 function readViewport(): { width: number; height: number } {
@@ -640,6 +643,18 @@ function inRageSequence(): boolean {
 
 /** 点一下害羞，连点三下怕痒，戳太多会生气；睡着时被点会吓一跳。 */
 function onTap(): void {
+  const now = Date.now();
+  const isActivationTap = now - lastActivationTapAt <= ACTIVATION_TAP_WINDOW_MS;
+  lastActivationTapAt = now;
+  if (isActivationTap) {
+    lastActivationTapAt = 0;
+    tapTimes = [];
+    reactionTimer = clearTimer(reactionTimer);
+    reaction.value = null;
+    emit("activate");
+    scheduleTuck();
+    return;
+  }
   if (pressWasSnoozing) {
     tapTimes = [];
     startReaction("surprised");
@@ -647,7 +662,6 @@ function onTap(): void {
   }
   // 气头上的连段不被打断。
   if (inRageSequence()) return;
-  const now = Date.now();
   tapTimes = [...tapTimes.filter(time => now - time < ANGRY_WINDOW_MS), now];
   const recent = tapTimes.filter(time => now - time < TICKLE_WINDOW_MS).length;
   if (tapTimes.length >= ANGRY_TAP_COUNT) {

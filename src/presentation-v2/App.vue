@@ -1,6 +1,6 @@
 <template>
   <div class="acu-v2-app">
-    <DeskPetLayer />
+    <DeskPetLayer @open-dashboard="emit('openDashboard')" />
     <div v-show="rootShell.isOpen" class="acu-v2-app__shell">
       <div class="acu-v2-app__body">
         <Sidebar v-if="!visualizer.isActive" class="acu-v2-app__desktop-sidebar" />
@@ -170,7 +170,7 @@ import {
   type AcuUiScale,
 } from "./stores/appearance-store";
 
-const emit = defineEmits<{ (event: "close"): void }>();
+const emit = defineEmits<{ (event: "close"): void; (event: "openDashboard"): void }>();
 const rootShell = useRootShellStore();
 const router = useRouterStore();
 const dialogStore = useDialogStore();

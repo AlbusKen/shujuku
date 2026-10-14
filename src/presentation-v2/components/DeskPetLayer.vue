@@ -7,6 +7,7 @@
         :settings-version="hubState.snapshot.value.settingsVersion"
         :appearance="hubState.petAppearance.value"
         @rect="petRect = $event"
+        @activate="emit('openDashboard')"
       />
       <NoticeBubble
         :slide="carousel.slide.value"
@@ -39,6 +40,8 @@ import { useNoticeCarousel } from "../composables/useNoticeCarousel";
 import { useNoticeHubState, useTaskActivity, type DeskPetRect } from "../composables/useTaskActivity";
 import DeskPet from "./DeskPet.vue";
 import NoticeBubble from "./NoticeBubble.vue";
+
+const emit = defineEmits<{ (event: "openDashboard"): void }>();
 
 const hubState = useNoticeHubState();
 const activity = useTaskActivity(hubState);

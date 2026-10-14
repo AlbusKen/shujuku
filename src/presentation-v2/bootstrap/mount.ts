@@ -14,6 +14,9 @@ import { setSfcStyleHost } from '../build/sfc-style-runtime';
 import App from '../App.vue';
 import { useAppearanceStore } from '../stores/appearance-store';
 import { useRootShellStore } from '../stores/root-shell-store';
+import { useRouterStore } from '../stores/router-store';
+import { ACU_V2_DEFAULT_PAGE_ID } from '../router/page-registry';
+import { useVisualizerStore } from '../stores/visualizer-store';
 import { useThemeStore } from '../stores/theme-store';
 import { applyAppearance, __resetAppearanceInjectorForTests } from '../theme/appearance-injector';
 import { applyTheme } from '../theme/theme-injector';
@@ -77,6 +80,7 @@ function ensureMounted(): MountedState {
 
   const vueApp = createHostDocumentApp(App, {
     onClose: () => closeAcuV2App(),
+    onOpenDashboard: () => openDashboardFromDeskPet(),
   }, doc);
   vueApp.use(pinia);
   vueApp.mount(root);
@@ -86,6 +90,16 @@ function ensureMounted(): MountedState {
   state = { vueApp, pinia, root };
   logDebug_ACU(`[ACU-V2] app mounted into ${source} (id=#${ROOT_ID}, width=${hostWidth}px)`);
   return state;
+}
+
+/** 桌宠双击入口：先固定路由到仪表盘，再复用正常打开流程；不强行关闭可视化编辑器。 */
+function openDashboardFromDeskPet(): void {
+  const current = state;
+  if (!current) return;
+  const visualizer = useVisualizerStore(current.pinia);
+  if (visualizer.isActive) visualizer.setReturnTarget(ACU_V2_DEFAULT_PAGE_ID, true);
+  useRouterStore(current.pinia).setActivePage(ACU_V2_DEFAULT_PAGE_ID);
+  void openAcuV2App();
 }
 
 /** 打开新 UI：首次调用执行 mount，后续只切 display + 标记 isOpen。 */

@@ -233,6 +233,11 @@ export const useVisualizerStore = defineStore('acu-v2-visualizer', {
       this.openTick += 1;
       this.focusTick += 1;
     },
+    /** 外部入口在编辑器仍打开时改变返回页，也同步它背后的外壳状态。 */
+    setReturnTarget(pageId: string, wasShellOpen: boolean): void {
+      if (!this.entrySnapshot) return;
+      this.entrySnapshot = { ...this.entrySnapshot, previousPageId: pageId, wasShellOpen };
+    },
     setMode(mode: VisualizerMode): void {
       this.mode = mode;
     },

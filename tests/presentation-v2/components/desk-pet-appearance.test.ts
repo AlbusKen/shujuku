@@ -49,8 +49,8 @@ function petAppearance(edit: (appearance: DeskPetAppearance_ACU) => void = () =>
   return appearance;
 }
 
-function mountPet(appearance: DeskPetAppearance_ACU) {
-  const el = mountComponent(DeskPet, { busy: false, settingsVersion: 0, appearance });
+function mountPet(appearance: DeskPetAppearance_ACU, onActivate: () => void = vi.fn()) {
+  const el = mountComponent(DeskPet, { busy: false, settingsVersion: 0, appearance, onActivate });
   return {
     root: el.querySelector<HTMLElement>('.acu-desk-pet')!,
     img: () => el.querySelector<HTMLImageElement>('.acu-desk-pet__img'),
@@ -58,9 +58,9 @@ function mountPet(appearance: DeskPetAppearance_ACU) {
   };
 }
 
-function pointer(target: HTMLElement, type: string): void {
+function pointer(target: HTMLElement, type: string, x = 20, y = 20): void {
   const event = new Event(type, { bubbles: true, cancelable: true });
-  Object.assign(event, { pointerId: 1, pointerType: 'touch', button: 0, clientX: 20, clientY: 20 });
+  Object.assign(event, { pointerId: 1, pointerType: 'touch', button: 0, clientX: x, clientY: y });
   target.dispatchEvent(event);
 }
 
@@ -162,6 +162,58 @@ describe('DeskPet 外观', () => {
     expect(awake.img()!.className).toMatch(/pose-idle/);
   });
 
+  it('自定义替换图片后，500ms 内两次非拖拽轻点触发 activate', async () => {
+    const activations: number[] = [];
+    const pet = mountPet(petAppearance(appearance => {
+      appearance.images.idle = 'https://img.test/custom-idle.png';
+    }), () => activations.push(1));
+
+    expect(pet.root.title).toContain('快速点两下打开仪表盘');
+    expect(pet.img()!.getAttribute('src')).toBe('https://img.test/custom-idle.png');
+
+    pointer(pet.root, 'pointerdown');
+    pointer(pet.root, 'pointerup');
+    await nextTick();
+    expect(activations).toHaveLength(0);
+
+    pointer(pet.root, 'pointerdown');
+    pointer(pet.root, 'pointerup');
+    await nextTick();
+    expect(activations).toHaveLength(1);
+    expect(pet.img()!.getAttribute('src')).toBe('https://img.test/custom-idle.png');
+  });
+
+  it('超过窗口、拖动、长按或指针取消不会误触发 activate', async () => {
+    const activations: number[] = [];
+    const pet = mountPet(petAppearance(), () => activations.push(1));
+
+    pointer(pet.root, 'pointerdown');
+    pointer(pet.root, 'pointerup');
+    await advance(501);
+    pointer(pet.root, 'pointerdown');
+    pointer(pet.root, 'pointerup');
+    await nextTick();
+    expect(activations).toHaveLength(0);
+
+    pointer(pet.root, 'pointerdown');
+    pointer(pet.root, 'pointermove', 50);
+    pointer(pet.root, 'pointerup');
+    await nextTick();
+    expect(activations).toHaveLength(0);
+
+    pointer(pet.root, 'pointerdown');
+    await advance(550);
+    pointer(pet.root, 'pointerup');
+    await nextTick();
+    expect(activations).toHaveLength(0);
+
+    pointer(pet.root, 'pointerdown');
+    pointer(pet.root, 'pointercancel');
+    pointer(pet.root, 'pointerdown');
+    pointer(pet.root, 'pointerup');
+    await nextTick();
+    expect(activations).toHaveLength(0);
+  });
   it('待机小动作按权重抽取、按设置的间隔触发', async () => {
     const pet = mountPet(petAppearance(appearance => {
       appearance.motion.idleActionWeights.eat = 5;
