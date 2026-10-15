@@ -159,6 +159,78 @@ describe('useApiPresetStore', () => {
     }));
   });
 
+  describe.each(['default', 'matched', 'bound'] as const)('活动项来源=%s', selection => {
+    function activeSettings() {
+      const settings = createSettings();
+      settings.apiConfig = { ...settings.apiPresets[0].apiConfig };
+      if (selection === 'matched') settings.defaultApiPresetName = '';
+      if (selection === 'bound') {
+        settings.defaultApiPresetName = 'beta';
+        settings.apiPresetBindingsByChat['chat-A'] = { presetName: 'alpha', updatedAt: 1 };
+      }
+      return settings;
+    }
+
+    it.each([false, true])('保存活动项同步运行配置及持久化，重命名=%s', async rename => {
+      const settings = activeSettings();
+      const { store, saveSettings } = await importStore(settings);
+      store.refreshFromSettings();
+      expect(store.activePresetName).toBe('alpha');
+      let persisted: any;
+      saveSettings.mockImplementation(() => {
+        persisted = JSON.parse(JSON.stringify(settings));
+        return { saved: true, storageType: 'memory' };
+      });
+      const name = rename ? 'renamed' : 'alpha';
+      const edited = JSON.parse(JSON.stringify(store.activePreset));
+      edited.name = name;
+      edited.apiConfig.model = 'model-B';
+      expect(store.savePreset(edited, 'alpha')).toBe(true);
+      expect(store.activePresetName).toBe(name);
+      expect(store.currentConfigLabel).toBe('model-B');
+      expect(settings.apiConfig.model).toBe('model-B');
+      expect(settings.apiPresetBindingsByChat['chat-A'].presetName).toBe(name);
+      expect(persisted.apiConfig.model).toBe('model-B');
+      expect(persisted.apiPresets.find((p: any) => p.name === name).apiConfig.model).toBe('model-B');
+      expect(saveSettings).toHaveBeenCalledTimes(1);
+    });
+
+    it('保存失败恢复活动项、预设、当前配置、默认项和聊天绑定', async () => {
+      const settings = activeSettings();
+      const { store, saveSettings } = await importStore(settings);
+      store.refreshFromSettings();
+      const before = JSON.parse(JSON.stringify(settings));
+      saveSettings.mockReturnValueOnce({ saved: false, storageType: 'memory' });
+      const edited = JSON.parse(JSON.stringify(store.activePreset));
+      edited.name = 'renamed';
+      edited.apiConfig.model = 'model-B';
+      expect(store.savePreset(edited, 'alpha')).toBe(false);
+      expect(settings.apiConfig).toEqual(before.apiConfig);
+      expect(settings.apiPresets).toEqual(before.apiPresets);
+      expect(settings.defaultApiPresetName).toBe(before.defaultApiPresetName);
+      expect(settings.apiPresetBindingsByChat).toEqual(before.apiPresetBindingsByChat);
+      expect(store.activePresetName).toBe('alpha');
+      expect(store.activePreset?.apiConfig.model).toBe('ma');
+      expect(store.currentConfigLabel).toBe('ma');
+      expect(saveSettings).toHaveBeenCalledTimes(1);
+    });
+
+    it('编辑非活动项不切换运行配置或创建聊天绑定', async () => {
+      const settings = activeSettings();
+      const { store } = await importStore(settings);
+      store.refreshFromSettings();
+      const config = JSON.parse(JSON.stringify(settings.apiConfig));
+      const bindings = JSON.parse(JSON.stringify(settings.apiPresetBindingsByChat));
+      const edited = JSON.parse(JSON.stringify(store.presets.find(p => p.name === 'beta')));
+      edited.tavernProfile = 'profile-edited';
+      expect(store.savePreset(edited, 'beta')).toBe(true);
+      expect(settings.apiConfig).toEqual(config);
+      expect(settings.apiMode).toBe('custom');
+      expect(settings.tavernProfile).toBe('');
+      expect(settings.apiPresetBindingsByChat).toEqual(bindings);
+    });
+  });
+
   it('删除预设时清理默认、当前聊天和功能引用', async () => {
     const settings = createSettings();
     settings.apiPresetBindingsByChat['chat-A'] = { presetName: 'beta', updatedAt: 1 };

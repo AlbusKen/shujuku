@@ -29,6 +29,7 @@ vi.mock('../../../src/service/ai/prompt-builder', () => ({
 
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   settings_ACU: mockSettings,
+  currentChatFileIdentifier_ACU: 'chat-api-test',
 }));
 
 vi.mock('../../../src/data/gateways/ai-gateway', () => ({
@@ -1418,5 +1419,49 @@ describe('酒馆转发 HTTP 错误正文', () => {
     const replies = getAllLogs().filter(entry => entry.tag === 'API酒馆转发' && entry.message.includes('回复 HTTP'));
     expect(replies).toHaveLength(1);
     expect(replies[0].message).toContain(raw);
+  });
+});
+
+describe('活动 API 预设保存后的新请求', () => {
+  it.each([
+    ['default', true], ['default', false], ['matched', true], ['matched', false],
+  ] as const)('活动来源=%s，酒馆转发=%s 时当前与明确预设请求均使用新模型', async (selection, sendViaTavern) => {
+    const service = await import('../../../src/service/settings/api-preset-service');
+    const persistence = await import('../../../src/service/settings/settings-service');
+    const save = vi.spyOn(persistence, 'saveSettings_ACU').mockReturnValue({ saved: true, storageType: 'tavern' });
+    try {
+      const config = service.normalizeApiConfig_ACU({
+        url: 'https://model-sync.test/v1', model: 'model-A', useMainApi: false, sendViaTavern,
+      });
+      mockSettings.apiMode = 'custom';
+      mockSettings.tavernProfile = '';
+      mockSettings.apiConfig = structuredClone(config);
+      mockSettings.apiPresets = [{ name: 'alpha', apiMode: 'custom', apiConfig: structuredClone(config), tavernProfile: '' }];
+      mockSettings.defaultApiPresetName = selection === 'default' ? 'alpha' : '';
+      mockSettings.apiPresetBindingsByChat = {};
+      expect(service.getActiveApiPresetName_ACU()).toBe('alpha');
+      const frozen = structuredClone(getApiConfigByPreset_ACU(''));
+      const edited = structuredClone(mockSettings.apiPresets[0]);
+      edited.apiConfig.model = 'model-B';
+      expect(service.saveApiPreset_ACU(edited, 'alpha').ok).toBe(true);
+      expect(save).toHaveBeenCalledTimes(1);
+      expect(frozen.apiConfig.model).toBe('model-A');
+      mockFetch.mockImplementation(async () => new Response(
+        JSON.stringify({ choices: [{ message: { content: 'ok' } }] }),
+        { headers: { 'Content-Type': 'application/json' } },
+      ));
+      mockHandleApiResponse.mockResolvedValue('ok');
+      for (const presetName of ['', 'alpha']) {
+        await expect(callApiWithPlotPreset_ACU([{ role: 'user', content: '检查模型同步' }], presetName)).resolves.toBe('ok');
+        const [url, init] = mockFetch.mock.calls.at(-1)!;
+        expect(url).toBe(sendViaTavern ? '/api/backends/chat-completions/generate' : 'https://model-sync.test/v1/chat/completions');
+        expect(JSON.parse(init.body).model).toBe('model-B');
+      }
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    } finally {
+      save.mockRestore();
+      delete mockSettings.defaultApiPresetName;
+      delete mockSettings.apiPresetBindingsByChat;
+    }
   });
 });

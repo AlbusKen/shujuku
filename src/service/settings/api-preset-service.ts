@@ -266,6 +266,34 @@ export function getBoundPresetNameForChat_ACU(chatKey?: string): string {
   return preset ? preset.name : '';
 }
 
+/** 页面展示与编辑保存共用的活动项：聊天绑定 → 默认预设 → 当前配置匹配。 */
+export function getActiveApiPresetName_ACU(chatKey?: string): string {
+  ensureApiSettingsShape_ACU();
+  const boundName = getBoundPresetNameForChat_ACU(chatKey);
+  if (boundName) return boundName;
+  const defaultPreset = findPresetByName_ACU(settings_ACU.apiPresets, settings_ACU.defaultApiPresetName);
+  if (defaultPreset) return defaultPreset.name;
+  const current = normalizeApiConfig_ACU(settings_ACU.apiConfig);
+  const matched = settings_ACU.apiPresets.find((preset: ApiPreset_ACU) =>
+    preset.apiMode === settings_ACU.apiMode &&
+    preset.tavernProfile === settings_ACU.tavernProfile &&
+    preset.apiConfig.useMainApi === current.useMainApi &&
+    preset.apiConfig.requestTimeoutSeconds === current.requestTimeoutSeconds &&
+    preset.apiConfig.sendViaTavern === current.sendViaTavern &&
+    preset.apiConfig.url === current.url &&
+    preset.apiConfig.apiKey === current.apiKey &&
+    preset.apiConfig.model === current.model &&
+    preset.apiConfig.max_tokens === current.max_tokens &&
+    preset.apiConfig.temperature === current.temperature &&
+    preset.apiConfig.bodyParams === current.bodyParams &&
+    preset.apiConfig.excludeBodyParams === current.excludeBodyParams &&
+    preset.apiConfig.requestHeaders === current.requestHeaders &&
+    preset.apiConfig.promptPostProcessing === current.promptPostProcessing &&
+    preset.apiConfig.customApiFormat === current.customApiFormat
+  );
+  return matched?.name ?? '';
+}
+
 /** 按预设名解析运行配置；空名或悬挂引用返回可断言结果（不静默复用当前配置） */
 export function resolveApiConfigByPreset_ACU(presetName: string): {
   apiMode: ApiPresetApiMode_ACU;
@@ -547,6 +575,9 @@ export function saveApiPreset_ACU(presetInput: ApiPreset_ACU, originalName = '')
   }
   ensureApiSettingsShape_ACU();
   const snapshot = snapshotApiFields_ACU();
+  // 必须在替换预设、设置默认项及迁移名称之前判断，匹配依据是保存前的配置。
+  const activeBeforeSave = getActiveApiPresetName_ACU();
+  const boundBeforeSave = getBoundPresetNameForChat_ACU();
   const oldName = String(originalName || '').trim();
   const existingByNewName = settings_ACU.apiPresets.findIndex((p: ApiPreset_ACU) => p.name === preset.name);
   if (existingByNewName >= 0 && settings_ACU.apiPresets[existingByNewName].name !== oldName) {
@@ -563,14 +594,10 @@ export function saveApiPreset_ACU(presetInput: ApiPreset_ACU, originalName = '')
     snapshot.persistEnvelopes = renameApiPresetReferences_ACU(oldName, preset.name);
   }
 
-  // [兼容] 保存/重命名的预设是当前聊天活动预设、或当前无活动预设（保存第一个预设）时，
-  // 自动绑定到当前聊天并投影其配置到运行 apiMode/apiConfig/tavernProfile。
-  // 旧 V2 store 的 savePreset 在保存后会对 active preset 重新 setActivePresetForCurrentChat，
-  // service 迁移需保持该语义（事务式：快照之后投影，失败由 finalizeSave 回滚）。
-  const boundName = getBoundPresetNameForChat_ACU();
+  // 编辑活动项时同步运行配置；新建沿用原有自动选择语义。所有修改共用保存与回滚。
   const shouldAutoSelect = !oldName
-    ? !boundName || boundName === preset.name
-    : boundName === oldName || boundName === preset.name;
+    ? !boundBeforeSave || boundBeforeSave === preset.name
+    : activeBeforeSave === oldName || activeBeforeSave === preset.name;
   if (shouldAutoSelect && findPresetByName_ACU(settings_ACU.apiPresets, preset.name)) {
     settings_ACU.apiPresetBindingsByChat[getCurrentChatKey_ACU()] = {
       presetName: preset.name,
