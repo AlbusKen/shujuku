@@ -1,3 +1,5 @@
+import { runWithAbortSignal_ACU } from '../../shared/abort-signal';
+
 /** Rerank 请求超时上界；超时抛错由调用方回退到 embedding 排序。 */
 const VECTOR_RERANK_TIMEOUT_MS_ACU = 30_000;
 
@@ -121,39 +123,39 @@ async function requestRerankBatch_ACU(request: RerankBatchRequest_ACU): Promise<
     const abort = () => controller.abort(request.signal?.reason);
     request.signal?.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(() => controller.abort(), VECTOR_RERANK_TIMEOUT_MS_ACU);
-    let response: Response;
     try {
-        response = await fetch(request.endpoint, {
-            method: 'POST',
-            headers: buildRerankHeaders_ACU(request.apiKey),
-            body: JSON.stringify(payload),
-            signal: controller.signal,
-        });
-    } catch (error: any) {
-        request.signal?.throwIfAborted();
-        throw new Error(error?.name === 'AbortError'
-            ? `Rerank 请求超时（${VECTOR_RERANK_TIMEOUT_MS_ACU}ms，${request.batchLabel}），已中断。`
-            : `Rerank 请求网络失败（${request.batchLabel}）：${error?.message || String(error || '未知错误')}`);
+        let response: Response;
+        let rawBody: string;
+        try {
+            response = await fetch(request.endpoint, {
+                method: 'POST',
+                headers: buildRerankHeaders_ACU(request.apiKey),
+                body: JSON.stringify(payload),
+                signal: controller.signal,
+            });
+            controller.signal.throwIfAborted();
+            rawBody = await runWithAbortSignal_ACU(controller.signal, () => response.text());
+            controller.signal.throwIfAborted();
+        } catch (error: any) {
+            request.signal?.throwIfAborted();
+            throw new Error(controller.signal.aborted || error?.name === 'AbortError'
+                ? `Rerank 请求超时（${VECTOR_RERANK_TIMEOUT_MS_ACU}ms，${request.batchLabel}），已中断。`
+                : `Rerank 请求网络失败（${request.batchLabel}）：${error?.message || String(error || '未知错误')}`);
+        }
+        if (!response.ok) {
+            throw new Error(`Rerank 请求失败（${request.batchLabel}）: ${response.status} ${rawBody || response.statusText}`);
+        }
+        let responsePayload: any;
+        try {
+            responsePayload = JSON.parse(rawBody);
+        } catch (_error) {
+            throw new Error(`Rerank 响应不是合法 JSON（${request.batchLabel}，前 200 字符：${rawBody.slice(0, 200)}）。`);
+        }
+        return extractRerankResults_ACU(responsePayload);
     } finally {
         request.signal?.removeEventListener('abort', abort);
         clearTimeout(timer);
     }
-    request.signal?.throwIfAborted();
-
-    if (!response.ok) {
-        const detail = await response.text().catch(() => response.statusText);
-        throw new Error(`Rerank 请求失败（${request.batchLabel}）: ${response.status} ${detail}`);
-    }
-
-    const rawBody = await response.text().catch((): string => '');
-    request.signal?.throwIfAborted();
-    let responsePayload: any;
-    try {
-        responsePayload = JSON.parse(rawBody);
-    } catch (_error) {
-        throw new Error(`Rerank 响应不是合法 JSON（${request.batchLabel}，前 200 字符：${rawBody.slice(0, 200)}）。`);
-    }
-    return extractRerankResults_ACU(responsePayload);
 }
 
 /**

@@ -2,7 +2,7 @@
  * tests/data/gateways/vector-rerank-gateway.test.ts
  * spv9.2：rerank 分批并行请求与跨批 index 合并
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createRerankScores_ACU,
   normalizeRerankBatchSize_ACU,
@@ -157,4 +157,95 @@ describe('createRerankScores_ACU 分批', () => {
   });
 
 
+});
+
+describe('Rerank 正文阶段的期限与取消', () => {
+  const request = { endpoint: 'https://rerank.test', model: 'm', query: 'q', documents: ['x'] };
+  const validBody = JSON.stringify({ results: [{ index: 0, relevance_score: 0.8 }] });
+
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it.each([200, 503])('HTTP %i 正文挂起仍受同一 30 秒期限保护', async (status) => {
+    let finishBody!: (value: string) => void;
+    const text = vi.fn(() => new Promise<string>(resolve => { finishBody = resolve; }));
+    const fetchMock = vi.fn((_url: unknown, _init: RequestInit) => new Promise<Response>(resolve => {
+      setTimeout(() => resolve({ ok: status === 200, status, text } as unknown as Response), 5_000);
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    let settled = false;
+    const outcome = createRerankScores_ACU(request).then(
+      value => { settled = true; return value; },
+      error => { settled = true; return error; },
+    );
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(text).toHaveBeenCalledOnce();
+    const signal = fetchMock.mock.calls[0][1].signal!;
+    await vi.advanceTimersByTimeAsync(24_999);
+    expect(signal.aborted).toBe(false);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(signal.aborted).toBe(true);
+    expect(settled).toBe(true);
+    expect(await outcome).toMatchObject({ message: expect.stringMatching(/超时.*30000ms.*第 1\/1 批/) });
+    expect(vi.getTimerCount()).toBe(0);
+    finishBody(validBody);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it.each([200, 503])('HTTP %i 正文期间取消全部当前批次，不发送下一波', async (status) => {
+    const parent = new AbortController();
+    const finishBodies: Array<(value: string) => void> = [];
+    const text = vi.fn(() => new Promise<string>(resolve => finishBodies.push(resolve)));
+    const fetchMock = vi.fn(async (_url: unknown, _init: RequestInit) => ({ ok: status === 200, status, text }));
+    vi.stubGlobal('fetch', fetchMock);
+    const reason = new DOMException('用户停止', 'AbortError');
+    const rejected = expect(createRerankScores_ACU({
+      ...request, documents: Array.from({ length: 50 }, (_, i) => `d${i}`), batchSize: 10, signal: parent.signal,
+    })).rejects.toBe(reason);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(text).toHaveBeenCalledTimes(4);
+    parent.abort(reason);
+    expect(fetchMock.mock.calls.every(call => call[1].signal!.aborted)).toBe(true);
+    await rejected;
+    expect(vi.getTimerCount()).toBe(0);
+    finishBodies.forEach(finish => finish(validBody));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it.each(['success', 'http-error', 'invalid-json'])('%s 完成后移除父监听和计时器', async (kind) => {
+    const parent = new AbortController();
+    const add = vi.spyOn(parent.signal, 'addEventListener');
+    const remove = vi.spyOn(parent.signal, 'removeEventListener');
+    const response = new Response(kind === 'success' ? validBody : 'bad response', { status: kind === 'http-error' ? 401 : 200 });
+    const fetchMock = vi.fn(async (_url: unknown, _init: RequestInit) => response);
+    vi.stubGlobal('fetch', fetchMock);
+    const outcome = await createRerankScores_ACU({ ...request, signal: parent.signal }).catch(error => error);
+    if (kind === 'success') expect(outcome).toEqual([{ index: 0, relevanceScore: 0.8 }]);
+    else expect(outcome.message).toContain(kind === 'http-error' ? '401' : '不是合法 JSON');
+    expect(add).toHaveBeenCalledOnce();
+    expect(remove).toHaveBeenCalledWith('abort', add.mock.calls[0][1]);
+    expect(vi.getTimerCount()).toBe(0);
+    parent.abort();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetchMock.mock.calls[0][1].signal!.aborted).toBe(false);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('正文传输异常保留网络失败分类及批次信息', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200,
+      text: async () => { throw new TypeError('body connection reset'); },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(createRerankScores_ACU(request)).rejects.toThrow(/网络失败.*第 1\/1 批.*body connection reset/);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });

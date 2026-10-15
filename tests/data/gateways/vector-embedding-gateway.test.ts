@@ -2,7 +2,7 @@
  * tests/data/gateways/vector-embedding-gateway.test.ts
  * T3：embedding 错误结构化分类验收
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createEmbeddings_ACU,
   isVectorEmbeddingError_ACU,
@@ -291,4 +291,109 @@ describe('createEmbeddings_ACU 错误结构化分类（T3）', () => {
   });
 
 
+});
+
+describe('Embedding 正文阶段的期限与取消', () => {
+  const request = { endpoint: 'https://embedding.test', model: 'm', input: ['x'] };
+  const validBody = JSON.stringify({ data: [{ index: 0, embedding: [1, 0] }] });
+
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it.each([200, 503])('HTTP %i 正文挂起沿用请求期限，最多请求两次', async (status) => {
+    const signals: AbortSignal[] = [];
+    const finishBodies: Array<(value: string) => void> = [];
+    const text = vi.fn(() => new Promise<string>((resolve) => finishBodies.push(resolve)));
+    const fetchMock = vi.fn((_url: unknown, init: RequestInit) => {
+      signals.push(init.signal as AbortSignal);
+      return new Promise<Response>((resolve) => setTimeout(() => resolve({
+        ok: status === 200, status, text,
+      } as unknown as Response), 5_000));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    let settled = false;
+    const outcome = createEmbeddings_ACU(request).then(
+      value => { settled = true; return value; },
+      error => { settled = true; return error; },
+    );
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(text).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(39_999);
+    expect(signals[0].aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(signals[0].aborted).toBe(true);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(signals.every(signal => signal.aborted)).toBe(true);
+    expect(settled).toBe(true);
+    expect(await outcome).toMatchObject({ kind: 'retryable', message: expect.stringContaining('超时') });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+    finishBodies.forEach(finish => finish(validBody));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([200, 401])('HTTP %i 正文期间取消原样传播，不重试、不采纳迟到结果', async (status) => {
+    const parent = new AbortController();
+    const remove = vi.spyOn(parent.signal, 'removeEventListener');
+    let finishBody!: (body: string) => void;
+    const text = vi.fn(() => new Promise<string>(resolve => { finishBody = resolve; }));
+    const fetchMock = vi.fn(async (_url: unknown, _init: RequestInit) => ({ ok: status === 200, status, text }));
+    vi.stubGlobal('fetch', fetchMock);
+    const reason = new DOMException('用户停止', 'AbortError');
+    const rejected = expect(createEmbeddings_ACU({ ...request, signal: parent.signal })).rejects.toBe(reason);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(text).toHaveBeenCalledOnce();
+    parent.abort(reason);
+    expect(fetchMock.mock.calls[0][1].signal!.aborted).toBe(true);
+    await rejected;
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(remove).toHaveBeenCalledWith('abort', expect.any(Function));
+    expect(vi.getTimerCount()).toBe(0);
+    finishBody(validBody);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it.each(['success', 'http-error', 'invalid-json'])('%s 完成后移除父监听和计时器', async (kind) => {
+    const parent = new AbortController();
+    const add = vi.spyOn(parent.signal, 'addEventListener');
+    const remove = vi.spyOn(parent.signal, 'removeEventListener');
+    const response = kind === 'http-error' ? jsonResponse(401, errorBody(null, 'invalid key'))
+      : new Response(kind === 'success' ? validBody : 'invalid JSON', { status: 200 });
+    const fetchMock = vi.fn(async (_url: unknown, _init: RequestInit) => response);
+    vi.stubGlobal('fetch', fetchMock);
+    const outcome = await createEmbeddings_ACU({ ...request, signal: parent.signal }).catch(error => error);
+    if (kind === 'success') expect(outcome).toEqual([{ index: 0, embedding: [1, 0] }]);
+    else expect(outcome.kind).toBe(kind === 'http-error' ? 'credential' : 'provider-contract');
+    expect(add).toHaveBeenCalledOnce();
+    expect(remove).toHaveBeenCalledWith('abort', add.mock.calls[0][1]);
+    expect(vi.getTimerCount()).toBe(0);
+    parent.abort();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(fetchMock.mock.calls[0][1].signal!.aborted).toBe(false);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('正文传输异常属于网络失败，不误报为 provider-contract', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200,
+      text: async () => { throw new TypeError('body connection reset'); },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const rejected = expect(createEmbeddings_ACU(request)).rejects.toMatchObject({
+      kind: 'retryable', message: expect.stringContaining('body connection reset'),
+    });
+    await vi.runAllTimersAsync();
+    await rejected;
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
