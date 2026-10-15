@@ -4,9 +4,13 @@
     class="acu-desk-pet"
     :class="rootClass"
     :style="petStyle"
-    role="img"
+    role="button"
+    tabindex="0"
     :aria-label="ariaLabel"
+    :aria-haspopup="'menu'"
+    :aria-expanded="menuOpen"
     :title="titleText"
+    @keydown="onKeydown"
     @pointerdown="onPointerDown"
     @pointermove="onPointerMove"
     @pointerup="onPointerUp"
@@ -152,15 +156,22 @@ const POSE_LABELS: Record<Pose, string> = {
   knockdown: "把自己震倒了",
 };
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   busy: boolean;
   /** 设置版本：设置被加载或修改后重读已保存位置。 */
   settingsVersion: number;
   /** 外观设置的生效值：图片、尺寸与动画节奏。 */
   appearance: DeskPetAppearance_ACU;
-}>();
+  /** 动作菜单是否已显示，用于按钮语义的展开状态。 */
+  menuOpen?: boolean;
+}>(), {
+  menuOpen: false,
+});
 
-const emit = defineEmits<{ (event: "rect", rect: DeskPetRect): void; (event: "activate"): void }>();
+const emit = defineEmits<{
+  (event: "rect", rect: DeskPetRect): void;
+  (event: "menu-request", source: "pointer" | "keyboard"): void;
+}>();
 
 const DRAG_THRESHOLD_PX = 6;
 const EDGE_MARGIN_PX = 8;
@@ -175,8 +186,6 @@ const DOCK_SNAP_RATIO = 0.05;
 const DRAG_OVERSHOOT_RATIO = 0.5;
 /** 吸附后完整露出时离屏幕边缘的距离。 */
 const DOCK_INSET_PX = 2;
-/** 500ms 内两次非拖拽轻点视为快捷双击，用于打开仪表盘。 */
-const ACTIVATION_TAP_WINDOW_MS = 500;
 /** 短时间内连点达到该次数，从害羞变成怕痒。 */
 const TICKLE_TAP_COUNT = 3;
 const TICKLE_WINDOW_MS = 1200;
@@ -229,7 +238,6 @@ let reversals = 0;
 let lastMoveX = 0;
 let lastMoveDir = 0;
 let lastWaveAt = 0;
-let lastActivationTapAt = 0;
 
 const motion = computed(() => props.appearance.motion);
 const size = computed(() => (viewport.value.width <= NARROW_VIEWPORT_PX ? props.appearance.size.narrow : props.appearance.size.wide));
@@ -338,9 +346,9 @@ const rootClass = computed(() => ({
   "is-still": !motion.value.enabled,
 }));
 
-const ariaLabel = computed(() => `桌宠：${showPeek.value ? "躲在边上偷看" : POSE_LABELS[pose.value]}`);
+const ariaLabel = computed(() => `桌宠：${showPeek.value ? "躲在边上偷看" : POSE_LABELS[pose.value]}，按 Enter 打开动作菜单`);
 const titleText = computed(() =>
-  showPeek.value ? "躲在边上偷看（悬停或点一下就探出来，快速点两下打开仪表盘）" : `${POSE_LABELS[pose.value]}（可拖动，点一下有反应，快速点两下打开仪表盘）`,
+  showPeek.value ? "躲在边上偷看（点一下显示动作菜单）" : `${POSE_LABELS[pose.value]}（点一下显示动作菜单，可拖动，连点会有反应）`,
 );
 
 function readViewport(): { width: number; height: number } {
@@ -643,18 +651,8 @@ function inRageSequence(): boolean {
 
 /** 点一下害羞，连点三下怕痒，戳太多会生气；睡着时被点会吓一跳。 */
 function onTap(): void {
+  emit("menu-request", "pointer");
   const now = Date.now();
-  const isActivationTap = now - lastActivationTapAt <= ACTIVATION_TAP_WINDOW_MS;
-  lastActivationTapAt = now;
-  if (isActivationTap) {
-    lastActivationTapAt = 0;
-    tapTimes = [];
-    reactionTimer = clearTimer(reactionTimer);
-    reaction.value = null;
-    emit("activate");
-    scheduleTuck();
-    return;
-  }
   if (pressWasSnoozing) {
     tapTimes = [];
     startReaction("surprised");
@@ -681,6 +679,15 @@ function maybeWave(): void {
   if (now - lastWaveAt < motion.value.waveCooldownMs) return;
   lastWaveAt = now;
   startReaction("wave");
+}
+
+function onKeydown(event: KeyboardEvent): void {
+  if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") return;
+  event.preventDefault();
+  if (dragging.value) return;
+  markActive();
+  untuck();
+  emit("menu-request", "keyboard");
 }
 
 function onPointerDown(event: PointerEvent): void {
@@ -861,6 +868,11 @@ onBeforeUnmount(() => {
   -webkit-tap-highlight-color: transparent;
   pointer-events: auto;
   will-change: transform;
+}
+
+.acu-desk-pet:focus-visible {
+  outline: 2px solid #d4a93a;
+  outline-offset: 3px;
 }
 
 .acu-desk-pet.is-animated {

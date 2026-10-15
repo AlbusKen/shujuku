@@ -120,11 +120,7 @@ describe('mount — 当前文档场景', () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it('桌宠 500ms 内轻点两下会打开面板并切到仪表盘', async () => {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      uiTierV2: { tier: 'high' },
-      router: { activePageId: 'form-fill', bootPending: false },
-    }));
+  it('单击桌宠显示动作菜单，点击菜单按钮后打开面板并切到仪表盘', async () => {
     const { mount } = await freshImport();
     mount.ensureAcuV2AppMounted();
     await nextTick();
@@ -143,8 +139,13 @@ describe('mount — 当前文档场景', () => {
     expect(pet).not.toBeNull();
     petPointer(pet!, 'pointerdown');
     petPointer(pet!, 'pointerup');
-    petPointer(pet!, 'pointerdown');
-    petPointer(pet!, 'pointerup');
+    await nextTick();
+
+    const action = document.querySelector<HTMLButtonElement>('.acu-desk-pet-menu__action');
+    expect(action).not.toBeNull();
+    expect(action!.textContent).toContain('打开仪表盘');
+    expect(root!.style.display).toBe('none');
+    action!.click();
     await nextTick();
 
     expect(root!.style.display).toBe('');
@@ -154,7 +155,27 @@ describe('mount — 当前文档场景', () => {
     mount.__resetAcuV2MountForTests();
   }, 30000);
 
-  it('桌宠双击在可视化编辑器打开时保留编辑器，关闭后回到仪表盘', async () => {
+  it('三连点桌宠仍怕痒且不会直接打开面板', async () => {
+    const { mount } = await freshImport();
+    mount.ensureAcuV2AppMounted();
+    await nextTick();
+
+    const root = document.getElementById(ROOT_ID);
+    const pet = document.querySelector<HTMLElement>('.acu-desk-pet')!;
+    for (let index = 0; index < 3; index += 1) {
+      petPointer(pet, 'pointerdown');
+      petPointer(pet, 'pointerup');
+    }
+    await nextTick();
+
+    expect(document.querySelector('.acu-desk-pet-menu')).not.toBeNull();
+    expect(document.querySelector('.acu-desk-pet__img')!.className).toMatch(/pose-tickle/);
+    expect(root!.style.display).toBe('none');
+
+    mount.__resetAcuV2MountForTests();
+  }, 30000);
+
+  it('点击菜单打开仪表盘在可视化编辑器打开时保留编辑器，关闭后回到仪表盘', async () => {
     const { mount } = await freshImport();
     mount.ensureAcuV2AppMounted();
     await nextTick();
@@ -169,12 +190,11 @@ describe('mount — 当前文档场景', () => {
     visualizer.open({ source: 'external-api', wasShellOpen: false, previousPageId: 'form-fill' });
     await nextTick();
 
-    const pet = document.querySelector<HTMLElement>('.acu-desk-pet');
-    expect(pet).not.toBeNull();
-    petPointer(pet!, 'pointerdown');
-    petPointer(pet!, 'pointerup');
-    petPointer(pet!, 'pointerdown');
-    petPointer(pet!, 'pointerup');
+    const pet = document.querySelector<HTMLElement>('.acu-desk-pet')!;
+    petPointer(pet, 'pointerdown');
+    petPointer(pet, 'pointerup');
+    await nextTick();
+    document.querySelector<HTMLButtonElement>('.acu-desk-pet-menu__action')!.click();
     await nextTick();
 
     expect(root!.style.display).toBe('');

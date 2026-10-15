@@ -92,7 +92,7 @@ function ensureMounted(): MountedState {
   return state;
 }
 
-/** 桌宠双击入口：先固定路由到仪表盘，再复用正常打开流程；不强行关闭可视化编辑器。 */
+/** 桌宠菜单动作入口：先固定路由到仪表盘，再复用正常打开流程；不强行关闭可视化编辑器。 */
 function openDashboardFromDeskPet(): void {
   const current = state;
   if (!current) return;

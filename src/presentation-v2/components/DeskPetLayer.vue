@@ -6,8 +6,18 @@
         :busy="activity.busy.value"
         :settings-version="hubState.snapshot.value.settingsVersion"
         :appearance="hubState.petAppearance.value"
+        :menu-open="menuOpen"
         @rect="petRect = $event"
-        @activate="emit('openDashboard')"
+        @menu-request="requestMenu"
+      />
+      <DeskPetActionMenu
+        v-if="menuOpen && petRect"
+        :anchor="petRect"
+        :viewport-width="viewport.width"
+        :viewport-height="viewport.height"
+        :auto-focus="menuAutoFocus"
+        @close="menuOpen = false"
+        @open-dashboard="openDashboard"
       />
       <NoticeBubble
         :slide="carousel.slide.value"
@@ -34,11 +44,12 @@
  * 桌宠与统一浮动气泡的宿主：挂在设置外壳之外、传送到宿主 body，
  * 设置面板关闭时同样可见。通知、进度任务与冷笑话都经这里的单一气泡轮播。
  */
-import { onBeforeUnmount, onMounted, ref } from "vue";
+import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { getAcuHostDocument, getAcuHostWindow } from "../bootstrap/host-document";
 import { useNoticeCarousel } from "../composables/useNoticeCarousel";
 import { useNoticeHubState, useTaskActivity, type DeskPetRect } from "../composables/useTaskActivity";
 import DeskPet from "./DeskPet.vue";
+import DeskPetActionMenu from "./DeskPetActionMenu.vue";
 import NoticeBubble from "./NoticeBubble.vue";
 
 const emit = defineEmits<{ (event: "openDashboard"): void }>();
@@ -50,6 +61,22 @@ const carousel = useNoticeCarousel(hubState, activity.tasks);
 const portalTarget = ref<HTMLElement | null>(null);
 const petRect = ref<DeskPetRect | null>(null);
 const viewport = ref({ width: 0, height: 0 });
+const menuOpen = ref(false);
+const menuAutoFocus = ref(false);
+
+function requestMenu(source: "pointer" | "keyboard"): void {
+  menuAutoFocus.value = source === "keyboard";
+  menuOpen.value = true;
+}
+
+function openDashboard(): void {
+  menuOpen.value = false;
+  emit("openDashboard");
+}
+
+watch(() => hubState.petEnabled.value, enabled => {
+  if (!enabled) menuOpen.value = false;
+});
 
 function readViewport(): void {
   const win = getAcuHostWindow();
