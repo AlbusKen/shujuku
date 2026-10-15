@@ -59,7 +59,8 @@ export function useLogViewer() {
   const tagFilter = ref('all');
   const keyword = ref('');
   const paused = ref(false);
-  const pendingEntries = ref<LogEntry[]>([]);
+  // 暂停只冻结当前视图；新日志由全局有界缓冲区持有，不另建积压队列。
+  const pendingCount = ref(0);
   const autoScroll = ref(true);
   const debugLogEnabled = ref(false);
   const message = ref<LogViewerMessage | null>(null);
@@ -83,7 +84,6 @@ export function useLogViewer() {
 
   const visibleLogs = computed(() => filteredLogs.value.slice().reverse());
   const filteredCount = computed(() => filteredLogs.value.length);
-  const pendingCount = computed(() => pendingEntries.value.length);
   const statusLabel = computed(() => {
     if (paused.value) return pendingCount.value ? `已暂停，${pendingCount.value} 条待显示` : '已暂停';
     return '实时更新中';
@@ -94,6 +94,7 @@ export function useLogViewer() {
 
   function refresh(): void {
     logs.value = getAllLogs();
+    pendingCount.value = 0;
     knownTags.value = getKnownTags();
     totalCount.value = getLogCount();
     debugLogEnabled.value = isDebugLogEnabled();
@@ -112,15 +113,17 @@ export function useLogViewer() {
 
   function setPaused(value: boolean): void {
     paused.value = value;
+    if (value && rafId !== null) {
+      acuCancelAnimationFrame(rafId);
+      rafId = null;
+    }
     if (!value) {
-      pendingEntries.value = [];
       refresh();
     }
   }
 
   function clearAll(): void {
     clearLogs();
-    pendingEntries.value = [];
     refresh();
     message.value = null;
     toast.success('日志缓冲区已清空。');
@@ -163,11 +166,11 @@ export function useLogViewer() {
 
   onMounted(() => {
     refresh();
-    unsubscribe = subscribe(entry => {
+    unsubscribe = subscribe(() => {
       totalCount.value = getLogCount();
       knownTags.value = getKnownTags();
       if (paused.value) {
-        pendingEntries.value = [...pendingEntries.value, entry];
+        pendingCount.value = Math.min(pendingCount.value + 1, totalCount.value);
         return;
       }
       scheduleRefresh();
@@ -177,6 +180,8 @@ export function useLogViewer() {
   onBeforeUnmount(() => {
     unsubscribe?.();
     unsubscribe = null;
+    pendingCount.value = 0;
+    logs.value = [];
     if (rafId !== null) {
       acuCancelAnimationFrame(rafId);
       rafId = null;

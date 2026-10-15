@@ -413,3 +413,100 @@ describe('AdvancedToolsPage log panel', () => {
     mount.__resetAcuV2MountForTests();
   });
 });
+
+
+// 直接挂载 composable，避免容量用例为数千条日志创建 DOM；缓冲区与响应式状态保持真实。
+async function mountLogViewerFlow() {
+  vi.resetModules();
+  const vue = await import('vue');
+  const { createPinia } = await import('pinia');
+  const logBuffer = await import('../../../src/shared/log-buffer');
+  logBuffer._resetForTesting();
+  const hostEnv = await import('../../../src/presentation-v2/bootstrap/host-env');
+  const frames = new Map<number, FrameRequestCallback>();
+  let frameId = 0;
+  vi.spyOn(hostEnv, 'acuRequestAnimationFrame').mockImplementation(callback => {
+    frames.set(++frameId, callback);
+    return frameId;
+  });
+  vi.spyOn(hostEnv, 'acuCancelAnimationFrame').mockImplementation(id => { frames.delete(id); });
+  const { useLogViewer } = await import('../../../src/presentation-v2/composables/useLogViewer');
+  let viewer!: ReturnType<typeof useLogViewer>;
+  const container = document.createElement('div');
+  const app = vue.createApp(vue.defineComponent({
+    setup() { viewer = useLogViewer(); return () => vue.h('div'); },
+  }));
+  app.use(createPinia());
+  app.mount(container);
+  return { viewer, app, logBuffer, frames };
+}
+
+describe('暂停日志的有界计数与生命周期', () => {
+  it('4000 条输入仅累计有界计数，冻结视图不追加对象，恢复只读最新缓冲区', async () => {
+    const { viewer, app, logBuffer, frames } = await mountLogViewerFlow();
+    try {
+      logBuffer.pushLog('error', ['暂停前']);
+      viewer.refresh();
+      viewer.setPaused(true);
+      const frozenLogs = viewer.logs.value;
+      for (let i = 0; i < 4000; i++) logBuffer.pushLog('error', [`暂停日志 ${i}`]);
+      expect(logBuffer.getLogCount()).toBe(2000);
+      expect(viewer.pendingCount.value).toBe(2000);
+      expect(viewer.logs.value).toBe(frozenLogs);
+      expect(frozenLogs).toHaveLength(1);
+      expect(frames.size).toBe(0);
+      viewer.setPaused(false);
+      expect(viewer.pendingCount.value).toBe(0);
+      expect(viewer.logs.value).toEqual(logBuffer.getAllLogs());
+      expect(viewer.logs.value[0].message).toBe('暂停日志 2000');
+      expect(viewer.logs.value.at(-1)!.message).toBe('暂停日志 3999');
+    } finally { app.unmount(); logBuffer._resetForTesting(); }
+  });
+
+  it('字符预算淘汰同步限制待显示数量，清空后可继续暂停计数', async () => {
+    const { viewer, app, logBuffer } = await mountLogViewerFlow();
+    try {
+      viewer.setPaused(true);
+      const largeBody = 'x'.repeat(Math.floor(logBuffer.MAX_BUFFER_CHARACTERS_ACU / 2) + 1);
+      for (let i = 0; i < 4; i++) logBuffer.pushLog('error', [largeBody]);
+      expect(logBuffer.getLogCount()).toBe(1);
+      expect(viewer.pendingCount.value).toBe(1);
+      expect(viewer.logs.value).toEqual([]);
+      viewer.clearAll();
+      expect(logBuffer.getLogCount()).toBe(0);
+      expect(viewer.pendingCount.value).toBe(0);
+      expect(viewer.paused.value).toBe(true);
+      logBuffer.pushLog('error', ['清空后']);
+      expect(viewer.pendingCount.value).toBe(1);
+      viewer.setPaused(false);
+      expect(viewer.logs.value.map(entry => entry.message)).toEqual(['清空后']);
+      expect(viewer.pendingCount.value).toBe(0);
+    } finally { app.unmount(); logBuffer._resetForTesting(); }
+  });
+
+  it('暂停取消排队刷新，卸载释放订阅、视图与待显示计数', async () => {
+    const { viewer, app, logBuffer, frames } = await mountLogViewerFlow();
+    try {
+      expect(logBuffer.getSubscriberCount()).toBe(1);
+      logBuffer.pushLog('error', ['排队中']);
+      expect(frames.size).toBe(1);
+      viewer.setPaused(true);
+      expect(frames.size).toBe(0);
+      expect(viewer.logs.value).toEqual([]);
+      logBuffer.pushLog('error', ['暂停中']);
+      expect(viewer.pendingCount.value).toBe(1);
+      viewer.setPaused(false);
+      expect(viewer.logs.value).toHaveLength(2);
+      logBuffer.pushLog('error', ['卸载前排队']);
+      expect(frames.size).toBe(1);
+    } finally { app.unmount(); }
+    expect(logBuffer.getSubscriberCount()).toBe(0);
+    expect(frames.size).toBe(0);
+    expect(viewer.logs.value).toEqual([]);
+    expect(viewer.pendingCount.value).toBe(0);
+    logBuffer.pushLog('error', ['卸载后']);
+    expect(viewer.logs.value).toEqual([]);
+    expect(viewer.pendingCount.value).toBe(0);
+    logBuffer._resetForTesting();
+  });
+});
