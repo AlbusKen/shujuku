@@ -1733,6 +1733,9 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
     }
 ): Promise<CardUpdateResult> {
     if (options.signal?.aborted) return { success: false, modifiedKeys: [], aborted: true };
+    if (options.commitMode === 'stage_only' && !options.stagingSession) {
+        return { success: false, modifiedKeys: [], error: 'stage_only 提交缺少有效 staging session。', errorCategory: 'precondition' };
+    }
     if (!Array.isArray(responses) || responses.length === 0) {
         return { success: false, modifiedKeys: [], error: '统一提交失败：responses 为空。', errorCategory: 'precondition' };
     }
@@ -2392,6 +2395,14 @@ async function processGroupedRuntimeChunkCore_ACU(
 ): Promise<{ success: boolean; failedGroups: string[]; error?: string; aborted?: boolean; committedBucketCount: number; diagnosticCode?: ManualUpdateResult['diagnosticCode']; postCommitWarnings?: TableUpdatePostCommitWarning_ACU[] }> {
     if (!Array.isArray(groups) || groups.length === 0) {
         return { success: true, failedGroups: [], committedBucketCount: 0 };
+    }
+    if (options.commitMode === 'stage_only' && !options.stagingSession) {
+        return {
+            success: false,
+            failedGroups: groups.map(group => group.key),
+            error: 'stage_only 执行缺少有效 staging session。',
+            committedBucketCount: 0,
+        };
     }
     const schedulingIdentitySnapshot = cloneTableDataSnapshot_ACU(currentJsonTableData_ACU);
 
@@ -3073,18 +3084,23 @@ export async function executeAutoFillStagingGroups_ACU(
     };
 
     try {
-    for (const group of normalizedGroups) {
-        if (options.abortController?.signal.aborted) {
-            return { success: false, failedGroups: [...failedGroups, ...normalizedGroups.map(g => g.key)], error: '自动填表已终止。', aborted: true, committedBucketCount };
-        }
+    const groupPlans = normalizedGroups.map(group => {
         const groupIndices = [...(group.indices || [])].sort((a, b) => a - b);
         const segments = splitMessageIndicesAtSchemaBoundaries_ACU(groupIndices, originalFullIndex, schemaBoundaries);
-        const preSegments = segments.filter(segment => segment.indices.length > 0 && segment.indices[0] < originalFullIndex);
-        const postSegments = segments.filter(segment => segment.indices.length > 0 && segment.indices[0] >= originalFullIndex);
+        return {
+            group,
+            preSegments: segments.filter(segment => segment.indices.length > 0 && segment.indices[0] < originalFullIndex),
+            postSegments: segments.filter(segment => segment.indices.length > 0 && segment.indices[0] >= originalFullIndex),
+        };
+    });
+    const allGroupKeys = normalizedGroups.map(group => group.key);
+    let stagedBucketCount = 0;
 
+    // run 级屏障：所有组的 pre 都成功后才允许汇合；失败时整轮 overlay 丢弃。
+    for (const { group, preSegments } of groupPlans) {
         for (const preSegment of preSegments) {
             if (options.abortController?.signal.aborted) {
-                return { success: false, failedGroups: [...failedGroups, ...normalizedGroups.map(g => g.key)], error: '自动填表已终止。', aborted: true, committedBucketCount };
+                return { success: false, failedGroups: allGroupKeys, error: '自动填表已终止。', aborted: true, committedBucketCount };
             }
             const preGroups: GroupedRuntimeUpdateGroup_ACU[] = [{
                 ...group,
@@ -3102,28 +3118,31 @@ export async function executeAutoFillStagingGroups_ACU(
                 performanceRunId: options.performanceRunId,
                 performanceParentSpanId: options.performanceParentSpanId,
             });
-            committedBucketCount += preResult.committedBucketCount;
-            if (preResult.aborted) return { success: false, failedGroups: [...failedGroups], aborted: true, committedBucketCount };
+            stagedBucketCount += preResult.committedBucketCount;
+            if (preResult.aborted) return { success: false, failedGroups: allGroupKeys, aborted: true, committedBucketCount };
             if (!preResult.success) {
-                failedGroups.add(group.key);
-                firstError = firstError || preResult.error || '边界前 staging 提交失败。';
-                break;
+                return {
+                    success: false, failedGroups: allGroupKeys,
+                    error: preResult.error || '边界前 staging 提交失败。', committedBucketCount,
+                };
             }
         }
+    }
 
-        // 首个 post 段提交前收敛 staging：边界前累计快照原子折叠回原根；零 staging 则丢弃。
-        if (postSegments.length > 0) {
-            if (options.abortController?.signal.aborted) {
-                return { success: false, failedGroups: [...failedGroups, ...normalizedGroups.map(g => g.key)], error: '自动填表已终止。', aborted: true, committedBucketCount };
-            }
-            const settleResult = await settleStagingBoundary();
-            if (!settleResult.ok) {
-                failedGroups.add(group.key);
-                firstError = firstError || `跨根 staging 汇合失败：${(settleResult as { ok: false; error: string }).error}`;
-                break;
-            }
-        }
+    // 包括纯 pre 的 run：统一汇合一次，发布成功后才释放 post。
+    if (options.abortController?.signal.aborted) {
+        return { success: false, failedGroups: allGroupKeys, aborted: true, committedBucketCount };
+    }
+    const settleResult = await settleStagingBoundary();
+    if (settleResult.ok === false) {
+        return {
+            success: false, failedGroups: allGroupKeys,
+            error: `跨根 staging 汇合失败：${settleResult.error}`, committedBucketCount,
+        };
+    }
+    committedBucketCount += stagedBucketCount;
 
+    for (const { group, postSegments } of groupPlans) {
         for (const postSegment of postSegments) {
             if (options.abortController?.signal.aborted) {
                 return { success: false, failedGroups: [...failedGroups, ...normalizedGroups.map(g => g.key)], error: '自动填表已终止。', aborted: true, committedBucketCount };
@@ -3152,16 +3171,8 @@ export async function executeAutoFillStagingGroups_ACU(
         }
     }
 
-    // 所有组都只有 pre-boundary 段（未触发循环内汇合）：正常收尾时仍须把 staging 汇合回原根。
     if (options.abortController?.signal.aborted) {
         return { success: false, failedGroups: [...failedGroups], aborted: true, committedBucketCount };
-    }
-    if (!boundaryCommitted && stagingRun && stagingRun.overlay.stagedBucketCount > 0) {
-        const settleResult = await settleStagingBoundary();
-        if (!settleResult.ok) {
-            normalizedGroups.forEach(g => failedGroups.add(g.key));
-            firstError = firstError || `跨根 staging 收尾汇合失败：${(settleResult as { ok: false; error: string }).error}`;
-        }
     }
     return failedGroups.size > 0
         ? { success: false, failedGroups: [...failedGroups], error: firstError || '跨根 staging 执行失败。', committedBucketCount }

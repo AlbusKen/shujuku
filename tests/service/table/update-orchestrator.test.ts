@@ -8494,6 +8494,167 @@ describe('executeAutoFillStagingGroups_ACU', () => {
     expect(result.failedGroups).toContain('staging-group');
     expect(result.error).toContain('full checkpoint 不唯一');
   });
+
+  async function prepareMultiGroupStaging(indicesA = [1, 5], indicesB = [1, 5], reversed = false) {
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    const base = {
+      mate: { type: 'acu' },
+      sheet_0: { name: '表A', content: [['row_id', '值'], ['1', 'base-a']] },
+      sheet_1: { name: '表B', content: [['row_id', '值'], ['1', 'base-b']] },
+    };
+    mockCurrentJsonTableData = structuredClone(base);
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue(structuredClone(base) as any);
+    const groups = [
+      { ...stagingGroup(indicesA), key: 'group-a', groupId: 1 },
+      { ...stagingGroup(indicesB), key: 'group-b', groupId: 2, sheetKeys: ['sheet_1'] },
+    ];
+    if (reversed) groups.reverse();
+    mockCallCustomOpenAI.mockReset();
+    for (const phase of ['pre', 'post']) {
+      for (const group of groups) {
+        if (!group.indices.some(index => phase === 'pre' ? index < 3 : index >= 3)) continue;
+        mockCallCustomOpenAI.mockResolvedValueOnce(`<tableEdit>${group.sheetKeys[0]}:${phase}</tableEdit>`);
+      }
+    }
+    mockParseAndApplyTableEditsToData.mockImplementation((response: string, data: any) => {
+      const match = response.match(/(sheet_[01]):(pre|post)/);
+      if (!match) return { success: false, modifiedKeys: [], appliedEdits: 0 };
+      const [, key, phase] = match;
+      data[key].content.push([String(data[key].content.length), `${key}-${phase}`]);
+      return { success: true, modifiedKeys: [key], appliedEdits: 1 };
+    });
+    mockCommitStagedSheetsAtFullBoundaryAtomic.mockImplementation(async (_runId: string, options: any) => ({
+      ok: true,
+      boundaryCommitSummary: { selectedSheetKeys: options.targetSheetKeys, originalFullCheckpointIndex: 3 },
+      verifiedHeadSnapshot: structuredClone({ ...base, ...options.stagedSnapshot }),
+    }));
+    return { base, groups };
+  }
+
+  it.each([
+    { label: '同范围', a: [1, 5], b: [1, 5], reversed: false },
+    { label: '反向组序', a: [1, 5], b: [1, 5], reversed: true },
+    { label: '不同 pre 范围', a: [0, 5], b: [2, 5], reversed: false },
+    { label: '仅 pre', a: [1], b: [2], reversed: false },
+  ])('$label：所有 pre 的实际新增行进入唯一根快照，post 不提前混入', async ({ a, b, reversed }) => {
+    const { executeAutoFillStagingGroups_ACU } = await import('../../../src/service/table/update-orchestrator');
+    const { groups } = await prepareMultiGroupStaging(a, b, reversed);
+    const result = await executeAutoFillStagingGroups_ACU(groups, 'auto_independent', {
+      boundary: { fullCheckpointIndices: [3], requiresBoundaryStaging: true },
+    });
+    expect(result.success).toBe(true);
+    expect(mockCommitStagedSheetsAtFullBoundaryAtomic).toHaveBeenCalledOnce();
+    const snapshot = mockCommitStagedSheetsAtFullBoundaryAtomic.mock.calls[0][1].stagedSnapshot;
+    expect(snapshot.sheet_0.content).toEqual([['row_id', '值'], ['1', 'base-a'], ['2', 'sheet_0-pre']]);
+    expect(snapshot.sheet_1.content).toEqual([['row_id', '值'], ['1', 'base-b'], ['2', 'sheet_1-pre']]);
+    const postCount = groups.filter(group => group.indices.some(index => index >= 3)).length;
+    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(2 + postCount);
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(postCount);
+    expect(result.committedBucketCount).toBe(2 + postCount);
+    const boundaryOrder = mockCommitStagedSheetsAtFullBoundaryAtomic.mock.invocationCallOrder[0];
+    expect(boundaryOrder).toBeGreaterThan(mockCallCustomOpenAI.mock.invocationCallOrder[1]);
+    if (postCount) expect(boundaryOrder).toBeLessThan(mockCallCustomOpenAI.mock.invocationCallOrder[2]);
+  });
+
+  it('第二组 pre 失败：第一组暂存也不汇合，不调用任何 post', async () => {
+    const { executeAutoFillStagingGroups_ACU } = await import('../../../src/service/table/update-orchestrator');
+    const { base, groups } = await prepareMultiGroupStaging();
+    mockCallCustomOpenAI.mockReset()
+      .mockResolvedValueOnce('<tableEdit>sheet_0:pre</tableEdit>')
+      .mockRejectedValue(new Error('B pre 失败'));
+    const result = await executeAutoFillStagingGroups_ACU(groups, 'auto_independent', {
+      boundary: { fullCheckpointIndices: [3], requiresBoundaryStaging: true },
+    });
+    expect(result).toMatchObject({ success: false, failedGroups: ['group-a', 'group-b'], committedBucketCount: 0 });
+    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(2);
+    expect(mockCommitStagedSheetsAtFullBoundaryAtomic).not.toHaveBeenCalled();
+    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+    expect(mockCurrentJsonTableData).toEqual(base);
+  });
+
+  it('第二组 pre 期间取消：丢弃所有暂存且不汇合', async () => {
+    const { executeAutoFillStagingGroups_ACU } = await import('../../../src/service/table/update-orchestrator');
+    const { base, groups } = await prepareMultiGroupStaging();
+    const controller = new AbortController();
+    mockCallCustomOpenAI.mockReset()
+      .mockResolvedValueOnce('<tableEdit>sheet_0:pre</tableEdit>')
+      .mockImplementationOnce(async () => {
+        controller.abort();
+        throw controller.signal.reason;
+      });
+    const result = await executeAutoFillStagingGroups_ACU(groups, 'auto_independent', {
+      abortController: controller, boundary: { fullCheckpointIndices: [3], requiresBoundaryStaging: true },
+    });
+    expect(result).toMatchObject({ success: false, aborted: true, committedBucketCount: 0 });
+    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(2);
+    expect(mockCommitStagedSheetsAtFullBoundaryAtomic).not.toHaveBeenCalled();
+    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+    expect(mockCurrentJsonTableData).toEqual(base);
+  });
+
+  it('stage_only 缺少 session：在模型请求、解析及 runtime 发布之前拒绝', async () => {
+    const before = structuredClone(mockCurrentJsonTableData);
+    const chunk = await processGroupedRuntimeChunk_ACU([stagingGroup([1])], 'auto_independent', { commitMode: 'stage_only' });
+    expect(chunk).toMatchObject({ success: false, committedBucketCount: 0, error: expect.stringContaining('staging session') });
+    const response = { success: true, aiResponse: '<tableEdit>sheet_0</tableEdit>', job: {
+      groupKey: 'staging-group', groupId: 1, batchNumber: 1, saveTargetIndex: 1, targetSheetKeys: ['sheet_0'],
+      updateMode: 'auto_independent', requestOptions: null, messagesForContext: [], baseSnapshot: before, isImportMode: false,
+    } };
+    const applied = await applyUnifiedGroupFillResponses_ACU([response] as any, before, {
+      saveTargetIndex: 1, updateMode: 'auto_independent', isImportMode: false, commitMode: 'stage_only',
+    });
+    expect(applied).toMatchObject({ success: false, errorCategory: 'precondition', error: expect.stringContaining('staging session') });
+    expect(mockCallCustomOpenAI).not.toHaveBeenCalled();
+    expect(mockParseAndApplyTableEditsToData).not.toHaveBeenCalled();
+    expect(mockEnsureLegacyStorageMigratedBeforeWrite).not.toHaveBeenCalled();
+    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
+    expect(mockCurrentJsonTableData).toEqual(before);
+  });
+
+  it.each([1, 2])('调度器每块 %i 组：各块独立汇合且包含全部目标表的 pre 新行', async (maxConcurrentGroups) => {
+    const { executeAutoFillStagingGroups_ACU } = await import('../../../src/service/table/update-orchestrator');
+    const { executeAutoUpdatePlan_ACU } = await import('../../../src/service/table/update-scheduler');
+    const { groups } = await prepareMultiGroupStaging();
+    mockCallCustomOpenAI.mockReset();
+    for (let start = 0; start < groups.length; start += maxConcurrentGroups) {
+      for (const phase of ['pre', 'post']) {
+        for (const group of groups.slice(start, start + maxConcurrentGroups)) {
+          mockCallCustomOpenAI.mockResolvedValueOnce(`<tableEdit>${group.sheetKeys[0]}:${phase}</tableEdit>`);
+        }
+      }
+    }
+    const boundary = { fullCheckpointIndices: [3], requiresBoundaryStaging: true };
+    const plan = {
+      tablesToUpdate: [], boundary,
+      updateGroups: Object.fromEntries(groups.map(group => [group.key, {
+        ...group, sheetNames: group.sheetKeys, requiresBoundaryStaging: true,
+      }])),
+    };
+    const runner = vi.fn((chunk, mode, options) => executeAutoFillStagingGroups_ACU(chunk, mode, { ...options, boundary }));
+    const updating = vi.fn();
+    const result = await executeAutoUpdatePlan_ACU(plan, { maxConcurrentGroups }, updating, {
+      processUpdates: vi.fn(), processStagingGroupedUpdates: runner,
+      refreshData: vi.fn().mockResolvedValue({}), loadAllChatMessages: vi.fn(), purgeOldLayerData: vi.fn(),
+    });
+    expect(result).toMatchObject({ success: true, failedGroups: 0, totalGroups: 2 });
+    expect(runner).toHaveBeenCalledTimes(2 / maxConcurrentGroups);
+    expect(mockCommitStagedSheetsAtFullBoundaryAtomic).toHaveBeenCalledTimes(2 / maxConcurrentGroups);
+    for (const [index, call] of mockCommitStagedSheetsAtFullBoundaryAtomic.mock.calls.entries()) {
+      const keys = groups.slice(index * maxConcurrentGroups, (index + 1) * maxConcurrentGroups).flatMap(group => group.sheetKeys);
+      expect(call[1].targetSheetKeys).toEqual(keys);
+      expect(Object.keys(call[1].stagedSnapshot).sort()).toEqual(keys);
+      for (const key of keys) expect(call[1].stagedSnapshot[key].content).toContainEqual(['2', `${key}-pre`]);
+      const boundaryOrder = mockCommitStagedSheetsAtFullBoundaryAtomic.mock.invocationCallOrder[index];
+      const firstCall = index * maxConcurrentGroups * 2;
+      expect(boundaryOrder).toBeGreaterThan(mockCallCustomOpenAI.mock.invocationCallOrder[firstCall + maxConcurrentGroups - 1]);
+      expect(boundaryOrder).toBeLessThan(mockCallCustomOpenAI.mock.invocationCallOrder[firstCall + maxConcurrentGroups]);
+    }
+    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(4);
+    expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(2);
+    expect(updating).toHaveBeenLastCalledWith(false);
+  });
+
+
 });
 
 
