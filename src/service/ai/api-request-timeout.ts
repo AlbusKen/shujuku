@@ -12,7 +12,7 @@ export async function withApiRequestTimeout_ACU<T>(
     const controller = new AbortController();
     const cancel = () => controller.abort(new DOMException('请求已取消', 'AbortError'));
     if (parentSignal?.aborted) cancel();
-    else parentSignal?.addEventListener('abort', cancel, { once: true });
+    else parentSignal?.addEventListener('abort', cancel, { once: true }); // arch-ok: AbortSignal 传播请求取消，非 DOM 监听；finally 释放。
     const timer = setTimeout(() => {
         const error = new Error(`API 请求超时（${seconds} 秒），本次按错误处理并交由调用方重试。`);
         error.name = 'TimeoutError';

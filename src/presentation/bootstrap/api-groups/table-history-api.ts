@@ -1,4 +1,4 @@
-import { getChatArray_ACU } from '../../../data/gateways/chat-gateway';
+import { getChatArray_ACU } from '../../../service/chat/chat-service';
 import { SillyTavern_API_ACU } from '../../../shared/host-api';
 import type { TableDataObject_ACU } from '../../../shared/models/table-data';
 import { getCurrentIsolationKey_ACU } from '../../../service/runtime/state-manager';

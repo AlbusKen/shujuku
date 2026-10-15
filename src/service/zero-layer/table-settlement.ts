@@ -105,7 +105,7 @@ export function createZeroLayerTableSettlement_ACU(store: ZeroLayerStore_ACU): Z
 
     const controller = new AbortController();
     const abort = () => controller.abort();
-    signal.addEventListener('abort', abort, { once: true });
+    signal.addEventListener('abort', abort, { once: true }); // arch-ok: AbortSignal 取消结算请求，非 DOM 监听；finally 释放。
     if (signal.aborted) abort();
     try {
       for (const bucket of buckets) {

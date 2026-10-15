@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({ host: undefined as any, isolationKey: '', replay: vi.fn() }));
 vi.mock('../../src/shared/host-api', () => ({ get SillyTavern_API_ACU() { return mocks.host; } }));
-vi.mock('../../src/data/gateways/chat-gateway', () => ({ getChatArray_ACU: () => mocks.host?.chat || [] }));
+vi.mock('../../src/service/chat/chat-service', () => ({ getChatArray_ACU: () => mocks.host?.chat || [] }));
 vi.mock('../../src/service/runtime/state-manager', () => ({ getCurrentIsolationKey_ACU: () => mocks.isolationKey }));
 vi.mock('../../src/service/table/storage-frame-v2-replay', () => ({
     loadTableStatesAtBoundariesFromFramesV2Detailed_ACU: mocks.replay,

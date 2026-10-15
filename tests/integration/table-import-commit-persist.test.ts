@@ -43,6 +43,7 @@ vi.mock('../../src/service/template/chat-scope', () => ({
 }));
 vi.mock('../../src/service/runtime/helpers-remaining', () => ({ mergeAllIndependentTablesLegacyV1_ACU: vi.fn() }));
 vi.mock('../../src/data/storage/chat-history', () => ({
+  getActiveChatStorageIdentity_ACU: (chat: unknown[]) => chat.length > 0 ? 'p3-import-chain' : '',
   getChatScopedConfigContainer_ACU: () => null, getChatSheetGuideContainer_ACU: () => null,
   setChatScopedConfigContainer_ACU: vi.fn(), setChatSheetGuideContainer_ACU: vi.fn(),
 }));
@@ -67,7 +68,8 @@ describe('P3 import → commit → V2 persist', () => {
   });
 
   it('首次导入经真实 commit 写入 full/init，后续导入追加可回放的 import replace', async () => {
-    expect(await importTableJsonThroughCommit_ACU(JSON.stringify(data('first')))).toMatchObject({ success: true, persisted: true });
+    const firstResult = await importTableJsonThroughCommit_ACU(JSON.stringify(data('first')));
+    expect(firstResult, firstResult.error).toMatchObject({ success: true, persisted: true });
     const firstFrame = h.chat[0].TavernDB_ACU_IsolatedData[''].storageFrame;
     expect(firstFrame).toMatchObject({ checkpoint: { kind: 'full', reason: 'init', data: data('first') }, logEntries: [] });
 
@@ -84,7 +86,8 @@ describe('P3 import → commit → V2 persist', () => {
       sheet_0: { uid: 's0', name: 'P3', sourceData: {}, content: [['value']], updateConfig: {}, exportConfig: {}, orderNo: 0 },
     };
 
-    expect(await importTableJsonThroughCommit_ACU(JSON.stringify(template))).toMatchObject({ success: true, persisted: true });
+    const result = await importTableJsonThroughCommit_ACU(JSON.stringify(template));
+    expect(result, result.error).toMatchObject({ success: true, persisted: true });
 
     const checkpointData = h.chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data;
     expect(checkpointData.sheet_0.content).toEqual([['row_id', 'value']]);

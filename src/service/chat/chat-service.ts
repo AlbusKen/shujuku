@@ -16,8 +16,10 @@ export {
     deleteLastMessage_ACU,
     setChatMessages_ACU,
     emitMessageUpdated_ACU,
+    refreshMessageBlock_ACU,
 } from '../../data/gateways/chat-gateway';
 export { purgeCurrentChatDatabaseState_ACU, type ChatDatabasePurgeResult_ACU } from './chat-database-purge';
+export { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
 
 import { getChatArray_ACU, saveChatToHost_ACU, saveChatToHostStrict_ACU, setChatMessages_ACU, emitMessageUpdated_ACU } from '../../data/gateways/chat-gateway';
 import { logDebug_ACU, logError_ACU, logWarn_ACU, isSummaryOrOutlineTable_ACU } from '../../shared/utils';

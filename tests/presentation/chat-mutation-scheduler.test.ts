@@ -50,6 +50,7 @@ vi.mock('../../src/service/vector/summary-vector-mirror-rebuild', () => ({
 }));
 vi.mock('../../src/service/chat/chat-service', () => ({
   getChatArray_ACU: () => [],
+  getActiveChatStorageIdentity_ACU: () => '',
 }));
 vi.mock('../../src/service/vector/summary-vector-index-chat-deletion-gc', () => ({
   runScopedRetentionGcAfterFlush_ACU: vi.fn().mockResolvedValue(undefined),

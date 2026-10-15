@@ -1712,7 +1712,7 @@ describe('零层真实宿主发送接管', () => {
     }));
     vi.doMock('../../../src/service/zero-layer/ordinary-context', () => ({
       bindOrdinaryZeroLayerContext_ACU: vi.fn(), invalidateOrdinaryZeroLayerRequests_ACU: vi.fn(),
-      assertOrdinaryZeroLayerRequest_ACU: vi.fn(),
+      installOrdinaryZeroLayerRequestGate_ACU: vi.fn(() => () => {}),
     }));
     vi.doMock('../../../src/service/zero-layer/history-read', () => ({ zeroLayerHistoryReader_ACU: historyReader }));
     vi.doMock('../../../src/service/zero-layer/notifications', () => ({ subscribeZeroLayerChanges_ACU: () => () => {} }));

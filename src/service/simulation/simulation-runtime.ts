@@ -619,7 +619,7 @@ export class WorldSimulationRuntime_ACU {
       return;
     }
     const abort = () => { this.orchestrator.cancel(store.getChatIdentity()); };
-    signal.addEventListener('abort', abort, { once: true });
+    signal.addEventListener('abort', abort, { once: true }); // arch-ok: AbortSignal 取消逻辑结算，非 DOM 监听；finally 释放。
     try {
       readTurn();
       const outcome = run && run.kind === 'logical' && run.logicalRef.turnId === turnId

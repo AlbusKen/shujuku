@@ -219,13 +219,11 @@ import {
   applyConnectionMode,
   connectionModeFromDraft,
   createEmptyApiPresetDraft,
+  setApiPresetDraftPromptPostProcessing,
+  setApiPresetDraftCustomApiFormat,
   type ApiPresetDraft,
   type ConnectionMode,
 } from "../composables/useApiPresetManagement";
-import {
-  normalizeCustomApiFormat_ACU,
-  normalizePromptPostProcessing_ACU,
-} from "../../service/settings/api-preset-service";
 import { useUiCloseGuard } from "../composables/useUiCloseGuard";
 import { apiCopy } from "../copy/api-copy";
 import {
@@ -423,13 +421,12 @@ function setActiveConnectionMode(value: string): void {
 }
 
 function setPromptPostProcessing(value: string): void {
-  activeDraft.promptPostProcessing =
-    normalizePromptPostProcessing_ACU(value);
+  setApiPresetDraftPromptPostProcessing(activeDraft, value);
   activeDraftSavedAt.value = null;
 }
 
 function setCustomApiFormat(value: string): void {
-  activeDraft.customApiFormat = normalizeCustomApiFormat_ACU(value);
+  setApiPresetDraftCustomApiFormat(activeDraft, value);
   activeDraftSavedAt.value = null;
 }
 

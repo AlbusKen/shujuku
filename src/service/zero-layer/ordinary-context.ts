@@ -4,7 +4,16 @@ import { bindZeroLayerPromptContext_ACU, onZeroLayerTemplateReady_ACU } from './
 import { buildZeroLayerTimeline_ACU, projectZeroLayerPromptHistory_ACU, getPublishedZeroLayerPath_ACU } from './timeline';
 import { ZeroLayerError_ACU } from './model';
 import { sha256HexSync_ACU } from '../../shared/sha256-sync';
-import type { InterceptedHostRequest_ACU } from '../../data/gateways/host-generation-interceptor';
+import { installHostGenerationInterceptor_ACU, type InterceptedHostRequest_ACU } from '../../data/gateways/host-generation-interceptor';
+
+/** 普通请求只做发送前校验，不认领请求、不改变转发策略。 */
+export function installOrdinaryZeroLayerRequestGate_ACU(hasActiveTurn: () => boolean): () => void {
+  return installHostGenerationInterceptor_ACU({
+    isActive: () => false,
+    claim: () => null,
+    beforeForward: request => assertOrdinaryZeroLayerRequest_ACU(request, hasActiveTurn()),
+  });
+}
 
 const boundRequests_ACU = new WeakSet<object>();
 const permits_ACU = new Map<string, { fingerprint: string; assertCurrent: () => void }>();

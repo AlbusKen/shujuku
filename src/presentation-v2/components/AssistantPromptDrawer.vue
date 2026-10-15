@@ -79,11 +79,7 @@ import AcuInfoBanner from './_lib/AcuInfoBanner.vue';
 import AcuMessage from './_lib/AcuMessage.vue';
 import AcuPromptSegments, { type PromptSegment } from './_lib/AcuPromptSegments.vue';
 import { useDialogStore } from '../stores/dialog-store';
-import { computed } from 'vue';
-import {
-  TEMPLATE_ASSISTANT_PLACEHOLDER_DOCS_ACU,
-  TEMPLATE_ASSISTANT_PLACEHOLDER_USER_REQUEST_ACU,
-} from '../../service/template-assistant/service';
+import { useTemplateAssistantPromptDocs } from '../composables/useTemplateAssistantPromptDocs';
 
 const props = defineProps<{
   isOpen: boolean;
@@ -103,10 +99,7 @@ const emit = defineEmits<{
   (e: 'update', index: number, patch: Partial<PromptSegment>): void;
 }>();
 
-const placeholderDocs = TEMPLATE_ASSISTANT_PLACEHOLDER_DOCS_ACU;
-const dataDocs = computed(() => placeholderDocs.filter((doc) => doc.kind === 'data'));
-const referenceDocs = computed(() => placeholderDocs.filter((doc) => doc.kind === 'reference'));
-const userRequestToken = TEMPLATE_ASSISTANT_PLACEHOLDER_USER_REQUEST_ACU;
+const { placeholderDocs, dataDocs, referenceDocs, userRequestToken } = useTemplateAssistantPromptDocs();
 const dialogStore = useDialogStore();
 
 async function confirmIfDirty(): Promise<boolean> {

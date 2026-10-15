@@ -30,6 +30,14 @@ export interface ApiPresetDraft {
   customApiFormat: CustomApiFormat_ACU;
 }
 
+export function setApiPresetDraftPromptPostProcessing(draft: ApiPresetDraft, value: unknown): void {
+  draft.promptPostProcessing = normalizePromptPostProcessing_ACU(value);
+}
+
+export function setApiPresetDraftCustomApiFormat(draft: ApiPresetDraft, value: unknown): void {
+  draft.customApiFormat = normalizeCustomApiFormat_ACU(value);
+}
+
 /** Effective connection mode — flattens apiMode + useMainApi into 3 user-visible states. */
 export type ConnectionMode = 'main' | 'custom' | 'tavern';
 

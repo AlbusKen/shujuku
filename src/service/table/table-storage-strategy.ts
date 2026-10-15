@@ -158,7 +158,7 @@ async function awaitStorageFlight_ACU<T>(
       task();
     };
     const onAbort = () => finish(() => reject(createStorageWaitAbortError_ACU()));
-    signal?.addEventListener('abort', onAbort, { once: true });
+    signal?.addEventListener('abort', onAbort, { once: true }); // arch-ok: AbortSignal 取消存储就绪等待，非 DOM 监听；完成时释放。
     if (Number.isFinite(timeoutMs) && Number(timeoutMs) >= 0) {
       timeout = setTimeout(() => finish(() => reject(new Error('Storage runtime readiness wait timed out.'))), Number(timeoutMs));
     }

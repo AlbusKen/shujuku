@@ -18,8 +18,7 @@ import { markSummaryVectorIndexDirtyForRealign_ACU } from '../../service/vector/
 import { enqueueSummaryVectorIndexFlush_ACU } from '../../service/vector/summary-vector-index-flush-queue';
 import { chatHasSummaryVectorMirror_ACU } from '../../service/vector/summary-vector-mirror-rebuild';
 import { runScopedRetentionGcAfterFlush_ACU } from '../../service/vector/summary-vector-index-chat-deletion-gc';
-import { getChatArray_ACU } from '../../service/chat/chat-service';
-import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
+import { getChatArray_ACU, getActiveChatStorageIdentity_ACU } from '../../service/chat/chat-service';
 import { clearAgentRunState_ACU } from '../../service/continuation/agent/agent-run-cache';
 import { clearWorldSimulationRunState_ACU } from '../../service/simulation/agent/agent-run-cache';
 import { isVectorPipelineEnabledForCurrentChat_ACU } from '../../service/fill-mode/fill-mode-gate';
