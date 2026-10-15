@@ -9,6 +9,27 @@ import { logWarn_ACU } from '../../shared/utils';
 import { STORAGE_KEY_GLOBAL_META_ACU, normalizeIsolationCode_ACU, getProfileSettingsKey_ACU, getProfileTemplateKey_ACU } from '../../shared/data-constants';
 import { getConfigStorage_ACU } from '../storage/tavern-storage';
 import { TABLE_TEMPLATE_ACU } from '../../shared/defaults-json.js';
+import { ConfigStorageReadError_ACU, readConfigObject_ACU } from '../storage/config-read';
+
+function readStoredObject_ACU(key: string): Record<string, any> | null {
+    try {
+        return readConfigObject_ACU(getConfigStorage_ACU(), key);
+    } catch (error) {
+        if (error instanceof ConfigStorageReadError_ACU) throw error;
+        throw new ConfigStorageReadError_ACU(key, 'read_failed');
+    }
+}
+
+function readGlobalMetaObject_ACU(): Record<string, any> | null {
+    const value = readStoredObject_ACU(STORAGE_KEY_GLOBAL_META_ACU);
+    if (value && (
+        ('activeIsolationCode' in value && typeof value.activeIsolationCode !== 'string') ||
+        ('isolationCodeList' in value && (!Array.isArray(value.isolationCodeList) || value.isolationCodeList.some((code: unknown) => typeof code !== 'string'))) ||
+        ('vectorMemoryConfigGlobal' in value && value.vectorMemoryConfigGlobal !== null &&
+            (typeof value.vectorMemoryConfigGlobal !== 'object' || Array.isArray(value.vectorMemoryConfigGlobal)))
+    )) throw new ConfigStorageReadError_ACU(STORAGE_KEY_GLOBAL_META_ACU, 'corrupt');
+    return value;
+}
 
 export let globalMeta_ACU: any = {
     version: 1,
@@ -35,14 +56,8 @@ export function buildDefaultGlobalMeta_ACU(): any {
 }
 
 export function loadGlobalMeta_ACU(): any {
-    const store = getConfigStorage_ACU();
-    const raw = store?.getItem?.(STORAGE_KEY_GLOBAL_META_ACU);
-    if (!raw) {
-        globalMeta_ACU = buildDefaultGlobalMeta_ACU();
-        return globalMeta_ACU;
-    }
-    const parsed = safeJsonParse_ACU(raw, null);
-    if (!parsed || typeof parsed !== 'object') {
+    const parsed = readGlobalMetaObject_ACU();
+    if (parsed === null) {
         globalMeta_ACU = buildDefaultGlobalMeta_ACU();
         return globalMeta_ACU;
     }
@@ -54,6 +69,8 @@ export function loadGlobalMeta_ACU(): any {
 
 export function saveGlobalMeta_ACU(): boolean {
     try {
+        // 每次写入前重读，保护启动之外的直接保存路径和外部发生的损坏。
+        readGlobalMetaObject_ACU();
         const store = getConfigStorage_ACU();
         const payload = safeJsonStringify_ACU(globalMeta_ACU, '{}');
         store.setItem(STORAGE_KEY_GLOBAL_META_ACU, payload);
@@ -65,14 +82,11 @@ export function saveGlobalMeta_ACU(): boolean {
 }
 
 export function readProfileSettingsFromStorage_ACU(code: string): any {
-    const store = getConfigStorage_ACU();
-    const raw = store?.getItem?.(getProfileSettingsKey_ACU(code));
-    if (!raw) return null;
-    const parsed = safeJsonParse_ACU(raw, null);
-    return (parsed && typeof parsed === 'object') ? parsed : null;
+    return readStoredObject_ACU(getProfileSettingsKey_ACU(code));
 }
 
 export function writeProfileSettingsToStorage_ACU(code: string, settingsObj: any): void {
+    readProfileSettingsFromStorage_ACU(code);
     const store = getConfigStorage_ACU();
     store.setItem(getProfileSettingsKey_ACU(code), safeJsonStringify_ACU(settingsObj, '{}'));
 }

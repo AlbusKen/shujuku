@@ -319,6 +319,49 @@ describe('initTavernSettingsBridge_ACU（插件模式）', () => {
   });
 });
 
+describe('配置缓存读取可靠性', () => {
+  it.each(['pending', 'open-failed', 'cursor-failed'] as const)('%s 不伪装为空存储或使用部分缓存', async scenario => {
+    vi.resetModules();
+    mockIsIndexedDbAvailable.mockReturnValue(true);
+    mockIsExtensionMode.mockReturnValue(false);
+    const storage = await import('../../../src/data/storage/tavern-storage');
+    try {
+      if (scenario === 'open-failed') {
+        mockTopLevelWindow.indexedDB = { open: () => { throw new Error('unavailable'); } };
+        await storage.ensureConfigIdbCacheLoaded_ACU();
+      } else if (scenario === 'cursor-failed') {
+        const cursorRequest: any = {};
+        const openRequest: any = {
+          result: { transaction: () => ({ objectStore: () => ({ openCursor: () => {
+            queueMicrotask(() => cursorRequest.onerror());
+            return cursorRequest;
+          } }) }) },
+        };
+        mockTopLevelWindow.indexedDB = { open: () => {
+          queueMicrotask(() => openRequest.onsuccess());
+          return openRequest;
+        } };
+        await storage.ensureConfigIdbCacheLoaded_ACU();
+      }
+      storage.configIdbCache_ACU.set('partial', 'partial-value');
+      const store = storage.getConfigStorage_ACU();
+      for (const key of ['missing', 'partial']) {
+        expect(() => store.getItem(key)).toThrow(expect.objectContaining({
+          code: 'CONFIG_STORAGE_READ_FAILED', reason: 'read_failed', key,
+        }));
+      }
+      mockTopLevelWindow[TAVERN_BRIDGE_GLOBAL_KEY_ACU] = {
+        extension_settings: { __userscripts: { [TAVERN_SETTINGS_NAMESPACE_ACU]: { known: 'verified' } } },
+      };
+      expect(storage.getConfigStorage_ACU().getItem('known')).toBe('verified');
+      expect(mockStorage.getItem).not.toHaveBeenCalled();
+    } finally {
+      mockIsIndexedDbAvailable.mockReturnValue(false);
+      storage._resetTavernStorageState_ACU();
+    }
+  });
+});
+
 describe('设置桥接的请求捕获边界', () => {
   it('只装配设置读写，不导出或查询宿主生成状态', async () => {
     const script = { type: '', textContent: '' };

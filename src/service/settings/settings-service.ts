@@ -19,6 +19,7 @@ import { upgradeTimeRecallPrefill_ACU } from '../plot/time-recall-prefill';
 import { globalMeta_ACU, loadGlobalMeta_ACU, readProfileSettingsFromStorage_ACU, readProfileTemplateFromStorage_ACU, sanitizeSettingsForProfileSave_ACU, saveGlobalMeta_ACU, writeProfileSettingsToStorage_ACU, writeProfileTemplateToStorage_ACU } from '../../data/repositories/profile-repo';
 import { getCurrentTemplatePresetName_ACU, normalizeTemplatePresetSelectionValue_ACU } from '../../shared/template-preset-utils';
 import { persistSettingsToStorage_ACU } from '../../data/storage/config-storage';
+import { ConfigStorageReadError_ACU, readConfigObject_ACU } from '../../data/storage/config-read';
 import { getCurrentVectorMemoryConfig_ACU } from '../vector/vector-memory-config';
 import { isIndexedDbAvailable_ACU } from '../../shared/idb-import-temp';
 import { configIdbCacheLoaded_ACU, ensureConfigIdbCacheLoaded_ACU, getConfigStorage_ACU, initTavernSettingsBridge_ACU, migrateKeyToTavernStorageIfNeeded_ACU, pendingSettingsReloadFromIdb_ACU, _set_pendingSettingsReloadFromIdb_ACU} from '../../data/storage/tavern-storage';
@@ -43,7 +44,11 @@ export type SaveSettingsResult_ACU = {
 };
 
 let settingsStorageReadyForSave_ACU = false;
-export const _set_settingsStorageReadyForSave_ACU = (val: boolean) => { settingsStorageReadyForSave_ACU = val; };
+let settingsReadFailure_ACU: ConfigStorageReadError_ACU | null = null;
+export const _set_settingsStorageReadyForSave_ACU = (val: boolean) => {
+    settingsStorageReadyForSave_ACU = val;
+    if (val) settingsReadFailure_ACU = null;
+};
 let settingsReloadAfterIdbScheduled_ACU = false;
 
 function scheduleSettingsReloadAfterIdbReady_ACU(reason: string): void {
@@ -57,6 +62,9 @@ function scheduleSettingsReloadAfterIdbReady_ACU(reason: string): void {
           _set_pendingSettingsReloadFromIdb_ACU(false);
           loadSettings_ACU();
       }
+  }).catch(() => {
+      settingsReloadAfterIdbScheduled_ACU = false;
+      logWarn_ACU('[设置加载] 延迟重载失败，保存门禁保持关闭，请恢复配置后重新加载。');
   });
 }
 
@@ -348,6 +356,9 @@ export function syncPlotWorldbookSelectionToCharacterStore_ACU(): string {
 export const _reset_projectedPlotWorldbookScopeKey_ACU = () => { projectedPlotWorldbookScopeKey_ACU = ''; };
 
 export function saveSettings_ACU(): SaveSettingsResult_ACU {
+  if (settingsReadFailure_ACU) {
+      return { saved: false, storageType: 'memory', code: 'storage_error', error: settingsReadFailure_ACU.message };
+  }
   if (!settingsStorageReadyForSave_ACU) {
       if (isIndexedDbAvailable_ACU() && !configIdbCacheLoaded_ACU) {
           scheduleSettingsReloadAfterIdbReady_ACU('save_before_config_cache_ready');
@@ -399,7 +410,20 @@ export function saveSettings_ACU(): SaveSettingsResult_ACU {
 }
 
 
-export   function loadSettings_ACU() {
+export function loadSettings_ACU(): void {
+    settingsStorageReadyForSave_ACU = false;
+    try {
+        loadSettingsFromStorage_ACU();
+    } catch (error) {
+        settingsStorageReadyForSave_ACU = false;
+        settingsReadFailure_ACU = error instanceof ConfigStorageReadError_ACU
+            ? error : new ConfigStorageReadError_ACU('settings', 'read_failed');
+        logError_ACU('[设置加载] 已停止加载与自动写回。', settingsReadFailure_ACU);
+        throw settingsReadFailure_ACU;
+    }
+}
+
+function loadSettingsFromStorage_ACU(): void {
       // 确保酒馆设置桥接已就绪（best-effort，不阻塞）
       void initTavernSettingsBridge_ACU();
       if (!configIdbCacheLoaded_ACU && isIndexedDbAvailable_ACU()) {
@@ -408,17 +432,17 @@ export   function loadSettings_ACU() {
       }
       _set_pendingSettingsReloadFromIdb_ACU(false);
 
-      // 可选迁移：把旧 localStorage 的设置/模板搬迁到酒馆设置（迁移开关默认为 false）
-      migrateKeyToTavernStorageIfNeeded_ACU(STORAGE_KEY_ALL_SETTINGS_ACU);
-      migrateKeyToTavernStorageIfNeeded_ACU(STORAGE_KEY_CUSTOM_TEMPLATE_ACU);
-
       // 1) 读取全局元信息（跨标识共享：标识列表/当前标识）
       loadGlobalMeta_ACU();
 
       const store = getConfigStorage_ACU();
-      const legacySettingsJson = store?.getItem?.(STORAGE_KEY_ALL_SETTINGS_ACU);
-      const legacySettingsObj = legacySettingsJson ? safeJsonParse_ACU(legacySettingsJson, null) : null;
+      // 先验证当前槽位，不能在确认读取可靠前迁移、改标识或写回 GlobalMeta。
+      readProfileSettingsFromStorage_ACU(normalizeIsolationCode_ACU(globalMeta_ACU.activeIsolationCode || ''));
+      migrateKeyToTavernStorageIfNeeded_ACU(STORAGE_KEY_ALL_SETTINGS_ACU);
+      migrateKeyToTavernStorageIfNeeded_ACU(STORAGE_KEY_CUSTOM_TEMPLATE_ACU);
+      const legacySettingsObj = readConfigObject_ACU(store, STORAGE_KEY_ALL_SETTINGS_ACU);
       const legacyCode = normalizeIsolationCode_ACU(legacySettingsObj?.dataIsolationCode || '');
+      readProfileSettingsFromStorage_ACU(normalizeIsolationCode_ACU(globalMeta_ACU.activeIsolationCode || legacyCode || ''));
 
       // 2) 一次性迁移：旧版"单份设置/单份模板" -> 当前标识对应 profile
       if (!globalMeta_ACU.migratedLegacySingleStore && (legacySettingsObj || store?.getItem?.(STORAGE_KEY_CUSTOM_TEMPLATE_ACU))) {
@@ -581,10 +605,8 @@ export   function loadSettings_ACU() {
               }
           }
       } catch (error) {
-          logError_ACU('Failed to load or parse settings, using defaults:', error);
-          _set_settings_ACU(buildDefaultSettings_ACU());
-          settings_ACU.dataIsolationCode = activeCode;
-          settings_ACU.dataIsolationEnabled = (activeCode !== '');
+          // 读取失败不是首次使用；外层关闭保存门禁并向调用方保留错误。
+          throw error;
       }
 
       // [剧情推进] 世界书选择以角色卡为单位：把当前角色卡的记录投影到运行时字段。
@@ -605,6 +627,7 @@ export   function loadSettings_ACU() {
       }
 
       settingsStorageReadyForSave_ACU = true;
+      settingsReadFailure_ACU = null;
 
       // [交火模式配置] 权威配置存放在 globalMeta.vectorMemoryConfigGlobal（跨 profile 全局）。
       // settings_ACU.vectorMemoryConfig 只保留为运行时投影，兼容旧调用方。
@@ -1411,9 +1434,16 @@ export async function switchIsolationProfile_ACU(newCodeRaw: string): Promise<vo
     const newCode = normalizeIsolationCode_ACU(newCodeRaw);
     const oldCode = normalizeIsolationCode_ACU(settings_ACU?.dataIsolationCode || '');
 
-    persistSettingsToStorage_ACU(settings_ACU, oldCode);
-
     loadGlobalMeta_ACU();
+    // 先读目标，损坏不能被当作新 Profile，也不能先切换 activeIsolationCode。
+    readProfileSettingsFromStorage_ACU(newCode);
+    readProfileTemplateFromStorage_ACU(newCode);
+    if (!settingsStorageReadyForSave_ACU || settingsReadFailure_ACU) {
+        throw settingsReadFailure_ACU || new ConfigStorageReadError_ACU('settings', 'read_failed');
+    }
+    if (!persistSettingsToStorage_ACU(settings_ACU, oldCode)) {
+        throw new Error('当前配置保存失败，未切换 Profile。');
+    }
     if (oldCode) addDataIsolationHistory_ACU(oldCode, { save: false });
     if (newCode) addDataIsolationHistory_ACU(newCode, { save: false });
     globalMeta_ACU.activeIsolationCode = newCode;

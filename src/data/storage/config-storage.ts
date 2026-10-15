@@ -14,6 +14,7 @@ import { getProfileSettingsKey_ACU } from '../../shared/data-constants';
 import { sanitizeSettingsForProfileSave_ACU } from '../repositories/profile-repo';
 
 import { getConfigStorage_ACU } from './tavern-storage';
+import { readConfigObject_ACU } from './config-read';
 
 
 /**
@@ -26,6 +27,7 @@ export function persistSettingsToStorage_ACU(settingsObj?: any, isolationCode?: 
         if (!settingsObj) return false;
         const store = getConfigStorage_ACU();
         const code = isolationCode ?? '';
+        readConfigObject_ACU(store, getProfileSettingsKey_ACU(code));
         const payloadObj = sanitizeSettingsForProfileSave_ACU(settingsObj);
         payloadObj.dataIsolationCode = code;
         const payload = JSON.stringify(payloadObj);

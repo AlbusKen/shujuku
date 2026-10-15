@@ -8,6 +8,7 @@ import { topLevelWindow_ACU, FORBID_BROWSER_LOCAL_STORAGE_FOR_CONFIG_ACU, ALLOW_
 import { SCRIPT_ID_PREFIX_ACU } from '../../shared/constants';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { isExtensionMode } from '../../shared/runtime-env';
+import { ConfigStorageReadError_ACU } from './config-read';
 
 // ── 常量 ──
 import { idbRequestToPromise_ACU, isIndexedDbAvailable_ACU } from '../../shared/idb-import-temp';
@@ -326,6 +327,10 @@ export function getConfigStorage_ACU(): any {
     return {
         getItem: (key: string) => {
             if (hasTavern && Object.prototype.hasOwnProperty.call(ns, key)) return ns[key];
+            // 缓存加载失败或仍未就绪不能作为键不存在的证据（也不能使用部分读取结果）。
+            if (configIdbCacheLoadFailed_ACU || (!configIdbCacheLoaded_ACU && isIndexedDbAvailable_ACU())) {
+                throw new ConfigStorageReadError_ACU(key, 'read_failed');
+            }
             const cached = configIdbGetCached_ACU(key);
             if (cached !== null && typeof cached !== 'undefined') return cached;
             if (!FORBID_BROWSER_LOCAL_STORAGE_FOR_CONFIG_ACU && storage_ACU?.getItem) return storage_ACU.getItem(key);

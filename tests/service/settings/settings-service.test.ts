@@ -4,6 +4,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { USER_PREFILL_CONTENT_ACU } from '../../../src/shared/user-prefill.js';
+import { ConfigStorageReadError_ACU } from '../../../src/data/storage/config-read';
 
 const {
   mockSettings,
@@ -124,6 +125,9 @@ const {
 vi.mock('../../../src/shared/data-constants', () => ({
   STORAGE_KEY_ALL_SETTINGS_ACU: 'ACU_ALL_SETTINGS',
   STORAGE_KEY_CUSTOM_TEMPLATE_ACU: 'ACU_CUSTOM_TEMPLATE',
+  STORAGE_KEY_GLOBAL_META_ACU: 'ACU_GLOBAL_META',
+  getProfileSettingsKey_ACU: (code: string) => `ACU_PROFILE_${code}`,
+  getProfileTemplateKey_ACU: (code: string) => `ACU_TEMPLATE_${code}`,
   normalizeIsolationCode_ACU: (code: any) => String(code || '').trim(),
 }));
 
@@ -306,6 +310,7 @@ import {
   syncPlotWorldbookSelectionToCharacterStore_ACU,
   _reset_projectedPlotWorldbookScopeKey_ACU,
   loadSettings_ACU,
+  switchIsolationProfile_ACU,
   buildDefaultSettings_ACU,
   applyTemplateScopeForCurrentChat_ACU,
   persistCurrentTemplatePresetName_ACU,
@@ -326,6 +331,7 @@ beforeEach(() => {
   delete mockSettings.apiPostProcessingUpgradeVersion;
   delete mockSettings.apiPostProcessingUpgradeBackup;
   mockReadProfileSettings.mockReset().mockReturnValue(null);
+  mockLoadGlobalMeta.mockReset();
   mockReadProfileTemplate.mockReset().mockReturnValue(null);
   mockGetCurrentWorldbookConfig.mockReset().mockReturnValue({ zeroTkOccupyMode: false, outlineEntryEnabled: true });
   mockGetCurrentChatTemplateScopeState.mockReset().mockReturnValue(null);
@@ -1051,14 +1057,77 @@ describe('loadSettings_ACU', () => {
       .toBe('spv3.6.10-v2-writer-force-enable');
   });
 
-  it('解析异常时回退到默认设置', () => {
-    mockReadProfileSettings.mockImplementation(() => { throw new Error('解析失败'); });
-    loadSettings_ACU();
-    expect(mockSetSettings).toHaveBeenCalled();
-    // 异常路径也会调用 _set_settings_ACU(buildDefaultSettings_ACU())
-    const calledWith = mockSetSettings.mock.calls[0][0];
-    expect(calledWith.autoUpdateEnabled).toBe(true);
+  it.each(['corrupt', 'read_failed'] as const)('读取异常 %s 时停止启动和保存，可靠重载后恢复', reason => {
+    const failure = new ConfigStorageReadError_ACU('profile', reason);
+    mockReadProfileSettings.mockImplementation(() => { throw failure; });
+    expect(() => loadSettings_ACU()).toThrow(failure);
+    expect(mockSetSettings).not.toHaveBeenCalled();
+    expect(mockSaveGlobalMeta).not.toHaveBeenCalled();
+    expect(mockPersistSettingsToStorage).not.toHaveBeenCalled();
+    expect(mockMigrateKeyToTavernStorage).not.toHaveBeenCalled();
+    expect(saveSettings_ACU()).toMatchObject({ saved: false, code: 'storage_error' });
+    expect(mockPersistSettingsToStorage).not.toHaveBeenCalled();
+    mockReadProfileSettings.mockReturnValue(null);
+    expect(() => loadSettings_ACU()).not.toThrow();
+    expect(saveSettings_ACU().saved).toBe(true);
   });
+
+  it('隔离切换先校验目标，损坏时不保存旧配置、不改变活动标识', async () => {
+    mockGlobalMeta.activeIsolationCode = 'old';
+    mockReadProfileSettings.mockImplementation(() => {
+      throw new ConfigStorageReadError_ACU('target', 'corrupt');
+    });
+    await expect(switchIsolationProfile_ACU('target')).rejects.toMatchObject({ reason: 'corrupt' });
+    expect(mockGlobalMeta.activeIsolationCode).toBe('old');
+    expect(mockPersistSettingsToStorage).not.toHaveBeenCalled();
+    expect(mockSaveGlobalMeta).not.toHaveBeenCalled();
+    expect(mockEnsureProfileExists).not.toHaveBeenCalled();
+  });
+
+  it.each(['global-corrupt', 'profile-corrupt', 'migration-corrupt', 'global-read-failed', 'profile-read-failed'] as const)(
+    '真实 repository 启动保护：%s 保留原文且不写回', async scenario => {
+      const repo = await vi.importActual<typeof import('../../../src/data/repositories/profile-repo')>(
+        '../../../src/data/repositories/profile-repo',
+      );
+      const values = new Map<string, string>([
+        ['ACU_GLOBAL_META', JSON.stringify({ activeIsolationCode: 'saved', migratedLegacySingleStore: true })],
+        ['ACU_PROFILE_saved', '{"apiConfig":{"model":"saved"}}'],
+      ]);
+      if (scenario === 'global-corrupt') values.set('ACU_GLOBAL_META', '{"activeIsolationCode":"saved","vectorMemoryConfigGlobal":');
+      if (scenario === 'profile-corrupt') values.set('ACU_PROFILE_saved', '{"apiConfig":');
+      if (scenario === 'migration-corrupt') {
+        values.set('ACU_GLOBAL_META', '{"activeIsolationCode":"","migratedLegacySingleStore":false}');
+        values.set('ACU_ALL_SETTINGS', '{"dataIsolationCode":"saved"}');
+        values.set('ACU_PROFILE_saved', '{"apiConfig":');
+      }
+      const original = new Map(values);
+      const storage = {
+        _isTavern: true,
+        getItem: vi.fn((key: string) => {
+          if ((scenario === 'global-read-failed' && key === 'ACU_GLOBAL_META') ||
+              (scenario === 'profile-read-failed' && key === 'ACU_PROFILE_saved')) throw new Error('unavailable');
+          return values.get(key) ?? null;
+        }),
+        setItem: vi.fn((key: string, value: string) => values.set(key, value)),
+        removeItem: vi.fn((key: string) => values.delete(key)),
+      };
+      mockGetConfigStorage.mockReturnValue(storage);
+      mockLoadGlobalMeta.mockImplementation(() => Object.assign(mockGlobalMeta, repo.loadGlobalMeta_ACU()));
+      mockReadProfileSettings.mockImplementation(repo.readProfileSettingsFromStorage_ACU);
+      expect(() => loadSettings_ACU()).toThrow(expect.objectContaining({
+        reason: scenario.endsWith('read-failed') ? 'read_failed' : 'corrupt',
+      }));
+      expect(mockSetSettings).not.toHaveBeenCalled();
+      expect(mockSaveGlobalMeta).not.toHaveBeenCalled();
+      expect(mockWriteProfileSettings).not.toHaveBeenCalled();
+      expect(mockWriteProfileTemplate).not.toHaveBeenCalled();
+      expect(mockPersistSettingsToStorage).not.toHaveBeenCalled();
+      expect(saveSettings_ACU()).toMatchObject({ saved: false, code: 'storage_error' });
+      expect(storage.setItem).not.toHaveBeenCalled();
+      expect(storage.removeItem).not.toHaveBeenCalled();
+      expect(values).toEqual(original);
+    },
+  );
 
   it('一次性默认模板刷新会覆盖旧默认模板', () => {
     mockReadProfileTemplate.mockReturnValue(DEFAULT_TEMPLATE_STR_ACU);

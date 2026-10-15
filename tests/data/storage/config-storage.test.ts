@@ -34,11 +34,11 @@ vi.mock('../../../src/data/storage/tavern-storage', () => ({
 
 import { persistSettingsToStorage_ACU } from '../../../src/data/storage/config-storage';
 
-let mockStore: { setItem: ReturnType<typeof vi.fn> };
+let mockStore: { getItem: ReturnType<typeof vi.fn>; setItem: ReturnType<typeof vi.fn> };
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockStore = { setItem: vi.fn() };
+  mockStore = { getItem: vi.fn(() => null), setItem: vi.fn() };
   mockGetConfigStorage.mockReturnValue(mockStore);
 });
 
@@ -89,6 +89,21 @@ describe('persistSettingsToStorage_ACU', () => {
     const parsed = JSON.parse(writtenJson);
     expect(parsed.sanitized).toBe(true);
     expect(parsed.dataIsolationCode).toBe('code');
+  });
+
+  it.each(['{broken', '[]', 'null', ''])('目标配置损坏时拒绝覆盖：%s', raw => {
+    mockStore.getItem.mockReturnValue(raw);
+    expect(persistSettingsToStorage_ACU({ model: 'new' }, 'code')).toBe(false);
+    expect(mockStore.setItem).not.toHaveBeenCalled();
+  });
+
+  it('目标读取失败时拒绝覆盖，恢复后允许保存', () => {
+    mockStore.getItem.mockImplementationOnce(() => { throw new Error('offline'); });
+    expect(persistSettingsToStorage_ACU({}, 'code')).toBe(false);
+    expect(mockStore.setItem).not.toHaveBeenCalled();
+    mockStore.getItem.mockReturnValue('{}');
+    expect(persistSettingsToStorage_ACU({}, 'code')).toBe(true);
+    expect(mockStore.setItem).toHaveBeenCalledOnce();
   });
 
   it('存储抛错时记录错误日志', () => {

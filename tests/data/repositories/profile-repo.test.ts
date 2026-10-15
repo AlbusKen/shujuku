@@ -109,19 +109,25 @@ describe('loadGlobalMeta_ACU', () => {
     expect(meta.isolationCodeList).toEqual(['code_1', 'code_2']);
   });
 
-  it('存储有损坏数据时返回默认值', () => {
-    mockStore._store.set('acu_global_meta', 'not valid json');
-    const meta = loadGlobalMeta_ACU();
-    expect(meta.version).toBe(1);
-    expect(meta.activeIsolationCode).toBe('');
+  it.each(['not valid json', '', 'null', '[]', '{"isolationCodeList":"not_array"}', '{"vectorMemoryConfigGlobal":[]}'])('损坏数据不覆盖原文或当前内存：%s', raw => {
+    const before = globalMeta_ACU;
+    mockStore._store.set('acu_global_meta', raw);
+    expect(() => loadGlobalMeta_ACU()).toThrow(expect.objectContaining({
+      code: 'CONFIG_STORAGE_READ_FAILED', reason: 'corrupt', key: 'acu_global_meta',
+    }));
+    expect(globalMeta_ACU).toBe(before);
+    expect(saveGlobalMeta_ACU()).toBe(false);
+    expect(mockStore.setItem).not.toHaveBeenCalled();
+    expect(mockStore._store.get('acu_global_meta')).toBe(raw);
   });
 
-  it('isolationCodeList 非数组时重置为空数组', () => {
-    mockStore._store.set('acu_global_meta', JSON.stringify({
-      isolationCodeList: 'not_array',
-    }));
-    const meta = loadGlobalMeta_ACU();
-    expect(meta.isolationCodeList).toEqual([]);
+  it('读取异常保留分类且不泄露原始错误内容', () => {
+    mockStore.getItem.mockImplementationOnce(() => { throw new Error('secret-payload'); });
+    let error: any;
+    try { loadGlobalMeta_ACU(); } catch (caught) { error = caught; }
+    expect(error).toMatchObject({ reason: 'read_failed', key: 'acu_global_meta' });
+    expect(String(error)).not.toContain('secret-payload');
+    expect(mockStore.setItem).not.toHaveBeenCalled();
   });
 });
 
@@ -154,9 +160,21 @@ describe('readProfileSettingsFromStorage_ACU', () => {
     expect(result.theme).toBe('dark');
   });
 
-  it('无效 JSON 返回 null', () => {
-    mockStore._store.set('acu_settings_code_1', 'bad json');
-    expect(readProfileSettingsFromStorage_ACU('code_1')).toBeNull();
+  it.each(['bad json', '', 'null', '[]', 'true'])('无效配置拒绝读取和覆盖：%s', raw => {
+    mockStore._store.set('acu_settings_code_1', raw);
+    expect(() => readProfileSettingsFromStorage_ACU('code_1')).toThrow(expect.objectContaining({
+      reason: 'corrupt', key: 'acu_settings_code_1',
+    }));
+    expect(() => writeProfileSettingsToStorage_ACU('code_1', {})).toThrow();
+    expect(mockStore.setItem).not.toHaveBeenCalled();
+    expect(mockStore._store.get('acu_settings_code_1')).toBe(raw);
+  });
+
+  it('读取失败不同于缺失，恢复有效原文后可重新加载', () => {
+    mockStore.getItem.mockImplementationOnce(() => { throw new Error('offline'); });
+    expect(() => readProfileSettingsFromStorage_ACU('code_1')).toThrow(expect.objectContaining({ reason: 'read_failed' }));
+    mockStore._store.set('acu_settings_code_1', '{"model":"restored"}');
+    expect(readProfileSettingsFromStorage_ACU('code_1')).toEqual({ model: 'restored' });
   });
 });
 
