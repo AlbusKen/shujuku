@@ -155,6 +155,43 @@ describe('mount — 当前文档场景', () => {
     mount.__resetAcuV2MountForTests();
   }, 30000);
 
+  it('鼠标菜单可切换为键盘操作，关闭后焦点返回桌宠并可再次打开', async () => {
+    const { mount } = await freshImport();
+    try {
+      mount.ensureAcuV2AppMounted();
+      await nextTick();
+      const pet = document.querySelector<HTMLElement>('.acu-desk-pet')!;
+      pet.focus();
+      petPointer(pet, 'pointerdown');
+      petPointer(pet, 'pointerup');
+      await nextTick();
+      const action = document.querySelector<HTMLButtonElement>('.acu-desk-pet-menu__action')!;
+      expect(document.activeElement).toBe(pet);
+      for (let index = 0; index < 2; index += 1) {
+        pet.focus();
+        pet.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+        await nextTick();
+        await nextTick();
+        expect(document.activeElement).toBe(action);
+      }
+      action.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      await nextTick();
+      expect(document.querySelector('.acu-desk-pet-menu')).toBeNull();
+      expect(document.activeElement).toBe(pet);
+      expect(pet.getAttribute('aria-expanded')).toBe('false');
+      pet.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true }));
+      await nextTick();
+      await nextTick();
+      expect(document.activeElement).toBe(document.querySelector('.acu-desk-pet-menu__action'));
+      document.querySelector<HTMLButtonElement>('.acu-desk-pet-menu__close')!.click();
+      await nextTick();
+      expect(document.activeElement).toBe(pet);
+      expect(document.querySelector('.acu-desk-pet-menu')).toBeNull();
+    } finally {
+      mount.__resetAcuV2MountForTests();
+    }
+  }, 30000);
+
   it('三连点桌宠仍怕痒且不会直接打开面板', async () => {
     const { mount } = await freshImport();
     mount.ensureAcuV2AppMounted();
@@ -189,6 +226,12 @@ describe('mount — 当前文档场景', () => {
     router.setActivePage('form-fill');
     visualizer.open({ source: 'external-api', wasShellOpen: false, previousPageId: 'form-fill' });
     await nextTick();
+    await vi.waitFor(() => {
+      expect(visualizer.isLoading).toBe(false);
+      expect(visualizer.lastLoadedAt).toBeGreaterThan(0);
+    });
+    visualizer.assistantUserRequest = '保留未提交的编辑草稿';
+    visualizer.setDirty(true);
 
     const pet = document.querySelector<HTMLElement>('.acu-desk-pet')!;
     petPointer(pet, 'pointerdown');
@@ -199,6 +242,8 @@ describe('mount — 当前文档场景', () => {
 
     expect(root!.style.display).toBe('');
     expect(visualizer.isActive).toBe(true);
+    expect(visualizer.dirty).toBe(true);
+    expect(visualizer.assistantUserRequest).toBe('保留未提交的编辑草稿');
     expect(router.activePageId).toBe('dashboard');
     expect(visualizer.closeSurface()).toEqual({ shouldCloseShell: false, previousPageId: 'dashboard' });
     await nextTick();
@@ -517,6 +562,40 @@ describe('mount — 父文档场景（iframe 模拟）', () => {
 
     mount.__resetAcuV2MountForTests();
   });
+
+  it('桌宠菜单在父文档处理键盘焦点和外部关闭，不抢占外部控件焦点', async () => {
+    const { mount } = await freshImport();
+    try {
+      mount.ensureAcuV2AppMounted();
+      await nextTick();
+      const doc = parentDom.window.document;
+      const pet = doc.querySelector<HTMLElement>('.acu-desk-pet')!;
+      pet.focus();
+      pet.dispatchEvent(new parentDom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await nextTick();
+      await nextTick();
+      const action = doc.querySelector<HTMLButtonElement>('.acu-desk-pet-menu__action')!;
+      expect(action).not.toBeNull();
+      expect(doc.activeElement).toBe(action);
+      expect(document.querySelector('.acu-desk-pet-menu')).toBeNull();
+      action.dispatchEvent(new parentDom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await nextTick();
+      expect(doc.activeElement).toBe(pet);
+      expect(doc.querySelector('.acu-desk-pet-menu')).toBeNull();
+      pet.dispatchEvent(new parentDom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await nextTick();
+      await nextTick();
+      const outside = doc.createElement('button');
+      doc.body.appendChild(outside);
+      outside.focus();
+      outside.dispatchEvent(new parentDom.window.Event('pointerdown', { bubbles: true }));
+      await nextTick();
+      expect(doc.activeElement).toBe(outside);
+      expect(doc.querySelector('.acu-desk-pet-menu')).toBeNull();
+    } finally {
+      mount.__resetAcuV2MountForTests();
+    }
+  }, 30000);
 
   it('父文档不可访问时降级到当前文档（getter 抛错）', async () => {
     setParent({

@@ -22,7 +22,7 @@
       role="menuitem"
       title="关闭动作菜单"
       aria-label="关闭动作菜单"
-      @click="close"
+      @click="close(true)"
     >
       ×
     </button>
@@ -30,7 +30,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { DeskPetRect } from "../composables/useTaskActivity";
 
 const props = withDefaults(defineProps<{
@@ -43,7 +43,7 @@ const props = withDefaults(defineProps<{
 });
 
 const emit = defineEmits<{
-  (event: "close"): void;
+  (event: "close", restoreFocus: boolean): void;
   (event: "open-dashboard"): void;
 }>();
 
@@ -91,12 +91,12 @@ const menuStyle = computed(() => ({
   transform: `translate3d(${Math.round(menuPosition.value.x)}px, ${Math.round(menuPosition.value.y)}px, 0)`,
 }));
 
-function close(): void {
-  emit("close");
+function close(restoreFocus = false): void {
+  emit("close", restoreFocus);
 }
 
 function openDashboard(): void {
-  emit("close");
+  close();
   emit("open-dashboard");
 }
 
@@ -109,17 +109,43 @@ function onDocumentPointerDown(event: Event): void {
 }
 
 function onDocumentKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape") close();
+  if (event.key === "Escape") {
+    if (isInsideMenu(event.target)) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    close(true);
+    return;
+  }
+  if (!isInsideMenu(event.target)) return;
+  const items = Array.from(menuEl.value?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []);
+  if (!items.length) return;
+  const index = items.indexOf(ownerDocument?.activeElement as HTMLButtonElement);
+  let next: number;
+  if (event.key === "ArrowDown" || event.key === "ArrowRight") next = (index + 1) % items.length;
+  else if (event.key === "ArrowUp" || event.key === "ArrowLeft") next = (index - 1 + items.length) % items.length;
+  else if (event.key === "Home") next = 0;
+  else if (event.key === "End") next = items.length - 1;
+  else return;
+  event.preventDefault();
+  items[next].focus();
 }
 
-onMounted(async () => {
+async function focusAction(): Promise<void> {
+  await nextTick();
+  actionEl.value?.focus();
+}
+
+defineExpose({ focusAction });
+watch(() => props.autoFocus, enabled => {
+  if (enabled) void focusAction();
+});
+
+onMounted(() => {
   ownerDocument = menuEl.value?.ownerDocument ?? null;
   ownerDocument?.addEventListener("pointerdown", onDocumentPointerDown, true);
   ownerDocument?.addEventListener("keydown", onDocumentKeydown, true);
-  if (props.autoFocus) {
-    await nextTick();
-    actionEl.value?.focus();
-  }
+  if (props.autoFocus) void focusAction();
 });
 
 onBeforeUnmount(() => {

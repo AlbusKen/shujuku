@@ -2,6 +2,7 @@
   <Teleport v-if="portalTarget" :to="portalTarget">
     <div class="acu-desk-pet-layer">
       <DeskPet
+        ref="pet"
         v-if="hubState.petEnabled.value"
         :busy="activity.busy.value"
         :settings-version="hubState.snapshot.value.settingsVersion"
@@ -11,12 +12,12 @@
         @menu-request="requestMenu"
       />
       <DeskPetActionMenu
+        ref="menu"
         v-if="menuOpen && petRect"
         :anchor="petRect"
         :viewport-width="viewport.width"
         :viewport-height="viewport.height"
-        :auto-focus="menuAutoFocus"
-        @close="menuOpen = false"
+        @close="closeMenu"
         @open-dashboard="openDashboard"
       />
       <NoticeBubble
@@ -44,7 +45,7 @@
  * 桌宠与统一浮动气泡的宿主：挂在设置外壳之外、传送到宿主 body，
  * 设置面板关闭时同样可见。通知、进度任务与冷笑话都经这里的单一气泡轮播。
  */
-import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { getAcuHostDocument, getAcuHostWindow } from "../bootstrap/host-document";
 import { useNoticeCarousel } from "../composables/useNoticeCarousel";
 import { useNoticeHubState, useTaskActivity, type DeskPetRect } from "../composables/useTaskActivity";
@@ -62,11 +63,20 @@ const portalTarget = ref<HTMLElement | null>(null);
 const petRect = ref<DeskPetRect | null>(null);
 const viewport = ref({ width: 0, height: 0 });
 const menuOpen = ref(false);
-const menuAutoFocus = ref(false);
+const pet = ref<InstanceType<typeof DeskPet> | null>(null);
+const menu = ref<InstanceType<typeof DeskPetActionMenu> | null>(null);
 
-function requestMenu(source: "pointer" | "keyboard"): void {
-  menuAutoFocus.value = source === "keyboard";
+async function requestMenu(source: "pointer" | "keyboard"): Promise<void> {
   menuOpen.value = true;
+  if (source === "keyboard") {
+    await nextTick();
+    await menu.value?.focusAction();
+  }
+}
+
+function closeMenu(restoreFocus: boolean): void {
+  menuOpen.value = false;
+  if (restoreFocus) (pet.value?.$el as HTMLElement | undefined)?.focus();
 }
 
 function openDashboard(): void {

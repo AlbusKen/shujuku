@@ -250,14 +250,14 @@ describe('DeskPet 外观', () => {
 
 describe('DeskPetActionMenu 动作菜单', () => {
   function mountMenu(props: Record<string, unknown> = {}) {
-    const closeEvents: string[] = [];
+    const closeEvents: boolean[] = [];
     const openEvents: string[] = [];
     const el = mountComponent(DeskPetActionMenu, {
       anchor: { x: 500, y: 300, width: 88, height: 88 },
       viewportWidth: 1024,
       viewportHeight: 768,
       autoFocus: false,
-      onClose: () => closeEvents.push('close'),
+      onClose: (restoreFocus: boolean) => closeEvents.push(restoreFocus),
       onOpenDashboard: () => openEvents.push('dashboard'),
       ...props,
     });
@@ -277,24 +277,55 @@ describe('DeskPetActionMenu 动作菜单', () => {
     actionMenu.menu.querySelector<HTMLButtonElement>('.acu-desk-pet-menu__action')!.click();
     await nextTick();
     expect(actionMenu.openEvents).toEqual(['dashboard']);
-    expect(actionMenu.closeEvents).toEqual(['close']);
+    expect(actionMenu.closeEvents).toEqual([false]);
   });
 
   it('关闭按钮、Escape 与外部点击都请求收起', async () => {
     const closeButton = mountMenu();
     closeButton.menu.querySelector<HTMLButtonElement>('.acu-desk-pet-menu__close')!.click();
     await nextTick();
-    expect(closeButton.closeEvents).toEqual(['close']);
+    expect(closeButton.closeEvents).toEqual([true]);
 
     const escaped = mountMenu();
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     await nextTick();
-    expect(escaped.closeEvents).toEqual(['close']);
+    expect(escaped.closeEvents).toEqual([true]);
 
     const outside = mountMenu();
     document.body.dispatchEvent(new Event('pointerdown', { bubbles: true }));
     await nextTick();
-    expect(outside.closeEvents).toEqual(['close']);
+    expect(outside.closeEvents).toEqual([false]);
+  });
+
+  it('方向键循环菜单项，Home/End 定位首尾，Escape 阻止向外传播', async () => {
+    const { menu, closeEvents } = mountMenu({ autoFocus: true });
+    await nextTick();
+    const action = menu.querySelector<HTMLButtonElement>('.acu-desk-pet-menu__action')!;
+    const close = menu.querySelector<HTMLButtonElement>('.acu-desk-pet-menu__close')!;
+    const key = (value: string) => {
+      const event = new KeyboardEvent('keydown', { key: value, bubbles: true, cancelable: true });
+      document.activeElement!.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+    };
+    key('ArrowDown');
+    expect(document.activeElement).toBe(close);
+    key('ArrowRight');
+    expect(document.activeElement).toBe(action);
+    key('ArrowUp');
+    expect(document.activeElement).toBe(close);
+    key('Home');
+    expect(document.activeElement).toBe(action);
+    key('End');
+    expect(document.activeElement).toBe(close);
+    const bubbled = vi.fn();
+    document.body.addEventListener('keydown', bubbled);
+    try {
+      key('Escape');
+      expect(closeEvents).toEqual([true]);
+      expect(bubbled).not.toHaveBeenCalled();
+    } finally {
+      document.body.removeEventListener('keydown', bubbled);
+    }
   });
 
   it('右侧放不下时依序换位，视口边缘最终夹进屏幕', () => {
