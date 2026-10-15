@@ -1,7 +1,7 @@
 import { reactive, ref } from "vue";
-import { saveSettings_ACU } from "../../service/settings/settings-service";
 import {
   getCurrentVectorMemoryConfig_ACU,
+  updateGlobalVectorMemoryConfigFields_ACU,
   validateSummaryVectorIndexConfig_ACU,
 } from "../../service/vector/vector-memory-config";
 import {
@@ -63,25 +63,37 @@ export function useVectorApiConfig() {
 
   function save(): boolean {
     const config = getCurrentVectorMemoryConfig_ACU();
-    config.embeddingEndpoint = form.embeddingEndpoint.trim();
-    config.embeddingModel = form.embeddingModel.trim();
-    config.embeddingApiKey = form.embeddingApiKey;
-    config.rerankEndpoint = form.rerankEndpoint.trim();
-    config.rerankModel = form.rerankModel.trim();
-    config.rerankApiKey = form.rerankApiKey;
-    config.rerankInstruction = form.rerankInstruction.trim();
-    const batchSize = normalizeRerankBatchSize_ACU(form.rerankBatchSize);
-    form.rerankBatchSize = batchSize;
-    config.rerankBatchSize = batchSize;
+    const patch: VectorApiForm = {
+      embeddingEndpoint: form.embeddingEndpoint.trim(),
+      embeddingModel: form.embeddingModel.trim(),
+      embeddingApiKey: form.embeddingApiKey,
+      rerankEndpoint: form.rerankEndpoint.trim(),
+      rerankModel: form.rerankModel.trim(),
+      rerankApiKey: form.rerankApiKey,
+      rerankInstruction: form.rerankInstruction.trim(),
+      rerankBatchSize: normalizeRerankBatchSize_ACU(form.rerankBatchSize),
+    };
 
-    const validation = validateSummaryVectorIndexConfig_ACU(config);
+    // getter 返回权威引用；校验只能读取草稿，不能先把无效输入写入运行配置。
+    const validation = validateSummaryVectorIndexConfig_ACU({ ...config, ...patch });
     if (!validation.valid) {
       errors.value = formatVectorApiErrors(validation.errors);
       return false;
     }
 
+    try {
+      const result = updateGlobalVectorMemoryConfigFields_ACU(patch);
+      if (!result.ok) {
+        errors.value = [result.message || "向量服务配置保存失败，请稍后重试。"];
+        return false;
+      }
+    } catch (_) {
+      errors.value = ["向量服务配置保存失败，请稍后重试。"];
+      return false;
+    }
+
+    form.rerankBatchSize = patch.rerankBatchSize;
     errors.value = [];
-    saveSettings_ACU();
     savedAt.value = Date.now();
     toast.success("向量服务配置已保存。");
     return true;

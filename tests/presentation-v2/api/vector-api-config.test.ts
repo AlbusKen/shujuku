@@ -4,27 +4,26 @@
  * @vitest-environment jsdom
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { SaveSettingsResult_ACU } from "../../../src/service/settings/settings-service";
 
 async function importComposable(config: any) {
   vi.resetModules();
-  const saveSettings = vi.fn(() => ({ saved: true, storageType: "memory" }));
-  vi.doMock("../../../src/service/vector/vector-memory-config", () => ({
-    getCurrentVectorMemoryConfig_ACU: () => config,
-    validateSummaryVectorIndexConfig_ACU: (input: any) => {
-      const errors: string[] = [];
-      if (!input.embeddingEndpoint) errors.push("缺少 embeddingEndpoint");
-      if (!input.embeddingModel) errors.push("缺少 embeddingModel");
-      if (!!input.rerankEndpoint !== !!input.rerankModel) {
-        errors.push("rerankEndpoint 和 rerankModel 必须同时填写或同时留空");
-      }
-      return { valid: errors.length === 0, errors };
-    },
+  const saveSettings = vi.fn((): SaveSettingsResult_ACU => ({ saved: true, storageType: "memory" }));
+  // 保留真实 getter、校验器和配置写入口，只替换存储边界。
+  vi.doUnmock("../../../src/service/vector/vector-memory-config");
+  vi.doMock("../../../src/data/repositories/profile-repo", () => ({
+    globalMeta_ACU: { vectorMemoryConfigGlobal: config },
+    saveGlobalMeta_ACU: vi.fn(),
   }));
   vi.doMock("../../../src/service/settings/settings-service", () => ({
     saveSettings_ACU: saveSettings,
   }));
   vi.doMock("../../../src/service/runtime/state-manager", () => ({
     settings_ACU: { toastMuteEnabled: false },
+    currentChatFileIdentifier_ACU: "vector-config-test",
+  }));
+  vi.doMock("../../../src/service/settings/settings-readers", () => ({
+    getCurrentWorldbookConfig_ACU: () => ({}),
   }));
   const [{ createPinia, setActivePinia }, { useVectorApiConfig }] =
     await Promise.all([
@@ -32,7 +31,9 @@ async function importComposable(config: any) {
       import("../../../src/presentation-v2/composables/useVectorApiConfig"),
     ]);
   setActivePinia(createPinia());
-  return { vector: useVectorApiConfig(), saveSettings };
+  const { useToastStore } = await import("../../../src/presentation-v2/stores/toast-store");
+  const success = vi.spyOn(useToastStore(), "success").mockImplementation(() => "test-toast");
+  return { vector: useVectorApiConfig(), saveSettings, success };
 }
 
 beforeEach(() => {
@@ -130,4 +131,98 @@ describe("useVectorApiConfig", () => {
 
     expect(vector.form.rerankInstruction).toBe("测试指令内容");
   });
+
+  const validConfig = () => ({
+    embeddingEndpoint: "https://embed.test", embeddingModel: "valid-model", embeddingApiKey: "old-key",
+    rerankEndpoint: "https://rerank.test", rerankModel: "valid-rerank", rerankApiKey: "old-rerank-key",
+    rerankInstruction: "旧指令", rerankBatchSize: 50,
+    topK: 7, vectorNamespace: "keep-namespace", keywordGenerationEnabled: false,
+    summaryIndexV2WriteScopeAllowlist: ["scope-a"],
+  });
+
+  it.each(["embeddingEndpoint", "embeddingModel", "rerankEndpoint", "rerankModel"] as const)(
+    "清空 %s 校验失败，不污染任何权威字段", async (field) => {
+      const config = validConfig();
+      const { vector, saveSettings, success } = await importComposable(config);
+      const before = JSON.parse(JSON.stringify(config));
+      vector.form[field] = "   ";
+      vector.form.embeddingApiKey = "draft-key";
+      vector.form.rerankBatchSize = 999;
+      expect(vector.save()).toBe(false);
+      expect(config).toEqual(before);
+      expect(vector.form[field]).toBe("   ");
+      expect(vector.form.embeddingApiKey).toBe("draft-key");
+      expect(vector.form.rerankBatchSize).toBe(999);
+      expect(vector.errors.value.length).toBeGreaterThan(0);
+      expect(vector.savedAt.value).toBeNull();
+      expect(saveSettings).not.toHaveBeenCalled();
+      expect(success).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["settings_loading", "storage_error", "exception"] as const)(
+    "%s 恢复权威配置并保留草稿，重试成功才更新时间与提示", async (failure) => {
+      const config = validConfig();
+      const { vector, saveSettings, success } = await importComposable(config);
+      const { globalMeta_ACU } = await import("../../../src/data/repositories/profile-repo");
+      const { settings_ACU } = await import("../../../src/service/runtime/state-manager");
+      vi.spyOn(Date, "now").mockReturnValue(1000);
+      expect(vector.save()).toBe(true);
+      const before = JSON.parse(JSON.stringify(config));
+      success.mockClear();
+      saveSettings.mockClear();
+      vi.mocked(Date.now).mockReturnValue(2000);
+      vector.form.embeddingModel = " new-model ";
+      vector.form.embeddingApiKey = "draft-secret";
+      vector.form.rerankModel = "new-rerank";
+      vector.form.rerankBatchSize = 999;
+      if (failure === "exception") {
+        saveSettings.mockImplementationOnce(() => { throw new Error("storage payload draft-secret"); });
+      } else {
+        saveSettings.mockReturnValueOnce({
+          saved: false, storageType: "memory", code: failure,
+          ...(failure === "settings_loading" ? { warning: "设置仍在加载中，请稍后重试。" } : { error: "设置持久化失败。" }),
+        });
+      }
+      expect(vector.save()).toBe(false);
+      expect(config).toEqual(before);
+      expect(globalMeta_ACU.vectorMemoryConfigGlobal).toBe(config);
+      expect(settings_ACU.vectorMemoryConfig).toBe(config);
+      expect(vector.form.embeddingModel).toBe(" new-model ");
+      expect(vector.form.embeddingApiKey).toBe("draft-secret");
+      expect(vector.form.rerankBatchSize).toBe(999);
+      expect(vector.savedAt.value).toBe(1000);
+      expect(success).not.toHaveBeenCalled();
+      expect(vector.errors.value.join(" ")).not.toContain("draft-secret");
+      expect(vector.errors.value.join(" ")).toContain(failure === "exception" ? "存储异常" : failure === "settings_loading" ? "加载中" : "持久化失败");
+
+      expect(vector.save()).toBe(true);
+      expect(saveSettings).toHaveBeenCalledTimes(2);
+      expect(config.embeddingModel).toBe("new-model");
+      expect(config.embeddingApiKey).toBe("draft-secret");
+      expect(config.rerankModel).toBe("new-rerank");
+      expect(config.rerankBatchSize).toBe(500);
+      expect(config.topK).toBe(before.topK);
+      expect(config.vectorNamespace).toBe(before.vectorNamespace);
+      expect(config.summaryIndexV2WriteScopeAllowlist).toEqual(before.summaryIndexV2WriteScopeAllowlist);
+      expect(config.keywordGenerationEnabled).toBe(false);
+      expect(vector.errors.value).toEqual([]);
+      expect(vector.savedAt.value).toBe(2000);
+      expect(success).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("首次保存被拒绝不生成保存时间，缺少失败文案时仍显示错误", async () => {
+    const config = validConfig();
+    const { vector, saveSettings, success } = await importComposable(config);
+    const before = JSON.parse(JSON.stringify(config));
+    vector.form.embeddingModel = "new-model";
+    saveSettings.mockReturnValueOnce({ saved: false, storageType: "memory" });
+    expect(vector.save()).toBe(false);
+    expect(config).toEqual(before);
+    expect(vector.savedAt.value).toBeNull();
+    expect(vector.errors.value.join(" ")).toContain("保存失败");
+    expect(success).not.toHaveBeenCalled();
+  });
+
 });

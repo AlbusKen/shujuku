@@ -7,25 +7,35 @@ import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
 import { saveSettings_ACU } from '../settings/settings-service';
 
 /**
- * 事务式更新全局向量配置字段：快照 → 修改 → 保存 → 失败回滚。
+ * 更新全局向量配置字段：快照 → 修改 → 检查保存回执，失败恢复内存。
  * 权威配置位于 globalMeta.vectorMemoryConfigGlobal；settings_ACU.vectorMemoryConfig 同步投影。
+ * settings 保存涉及多个存储写入；此处不承诺跨存储原子性或撤销已完成的持久化。
  */
 export function updateGlobalVectorMemoryConfigFields_ACU(
   patch: Partial<VectorMemoryConfig_ACU>,
 ): { ok: boolean; message?: string } {
   const config = getCurrentVectorMemoryConfig_ACU();
-  const snapshot = JSON.parse(JSON.stringify(config));
-  Object.assign(config as unknown as Record<string, unknown>, patch);
-  const saveResult = saveSettings_ACU();
-  if (!saveResult.saved) {
-    Object.assign(config as unknown as Record<string, unknown>, snapshot);
+  const snapshot = { ...config };
+  const restore = () => {
+    // 恢复原对象身份及原有字段，移除本次新增字段，避免失败值遗留。
+    const record = config as unknown as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+      if (!Object.prototype.hasOwnProperty.call(snapshot, key)) delete record[key];
+    }
+    Object.assign(config, snapshot);
     settings_ACU.vectorMemoryConfig = config;
-    return {
-      ok: false,
-      message: saveResult.warning || saveResult.error || '保存失败，已回滚。',
-    };
+  };
+  try {
+    Object.assign(config, patch);
+    const saveResult = saveSettings_ACU();
+    if (saveResult.saved) return { ok: true };
+    restore();
+    return { ok: false, message: saveResult.warning || saveResult.error || '保存失败，已恢复原运行配置。' };
+  } catch (_) {
+    restore();
+    // 存储异常可能包含配置正文或密钥，不透出原始异常。
+    return { ok: false, message: '保存向量配置时发生存储异常，已恢复原运行配置，请重试。' };
   }
-  return { ok: true };
 }
 
 export interface VectorMemoryKeywordPromptSegment_ACU {
