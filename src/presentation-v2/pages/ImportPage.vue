@@ -11,6 +11,7 @@
           :char-primary="wb.charPrimary.value"
           :status="wb.status.value"
           :error="wb.error.value"
+          @retry="wb.refresh()"
           :filterable="true"
           @update:model-value="store.setWorldbookTarget($event)"
         />

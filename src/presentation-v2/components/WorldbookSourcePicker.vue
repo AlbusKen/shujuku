@@ -35,7 +35,7 @@
             aria-hidden="true"
           ></i>
         </button>
-        <div v-if="!filteredNames.length" class="acu-v2-wb-source-picker__empty">
+        <div v-if="!filteredNames.length && status !== 'error'" class="acu-v2-wb-source-picker__empty">
           {{ status === 'loading' ? '正在加载世界书...' : '无可选世界书' }}
         </div>
       </div>
@@ -44,6 +44,7 @@
     <AcuText v-if="status === 'error'" variant="error" class="acu-v2-wb-source-picker__error">
       {{ error || '加载失败' }}
     </AcuText>
+    <AcuButton v-if="status === 'error'" size="sm" @click="$emit('retry')">重试加载世界书</AcuButton>
   </div>
 </template>
 
@@ -53,6 +54,7 @@ import AcuFormRow from './_lib/AcuFormRow.vue';
 import AcuInput from './_lib/AcuInput.vue';
 import AcuSegmentedControl, { type AcuSegmentedOption } from './_lib/AcuSegmentedControl.vue';
 import AcuText from './_lib/AcuText.vue';
+import AcuButton from './_lib/AcuButton.vue';
 import type { WorldbookLoadStatus } from '../composables/useWorldbookSelector';
 
 type WorldbookSource = 'character' | 'manual';
@@ -71,6 +73,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   (e: 'update:source', value: WorldbookSource): void;
   (e: 'toggle-book', name: string, checked: boolean): void;
+  (e: 'retry'): void;
 }>();
 
 const filter = ref('');

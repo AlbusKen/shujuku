@@ -7,6 +7,7 @@
       :status="selectorStatus"
       :error="selectorError"
       :filterable="filterable"
+      @retry="$emit('retry')"
       @update:source="$emit('update:source', $event)"
       @toggle-book="(name: string, checked: boolean) => $emit('toggle-book', name, checked)"
     />
@@ -72,6 +73,7 @@ withDefaults(defineProps<{
 
 defineEmits<{
   (e: 'update:source', value: WorldbookSource): void;
+  (e: 'retry'): void;
   (e: 'toggle-book', name: string, checked: boolean): void;
   (e: 'update:filter', value: string): void;
   (e: 'select-all'): void;

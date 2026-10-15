@@ -29,8 +29,8 @@ export function useWorldbookSelector(): UseWorldbookSelector {
     error.value = '';
     try {
       const [list, primary] = await Promise.all([
-        getWorldbookNames_ACU().catch((): string[] => []),
-        getCurrentCharPrimaryLorebook_ACU().catch((): string | null => null),
+        getWorldbookNames_ACU(),
+        getCurrentCharPrimaryLorebook_ACU(),
       ]);
       names.value = Array.isArray(list) ? list.slice() : [];
       charPrimary.value = typeof primary === 'string' && primary ? primary : null;

@@ -13,6 +13,7 @@
           :names="worldbook.names.value"
           :status="worldbook.status.value"
           :error="worldbook.error.value"
+          @retry="worldbook.refresh()"
           @update:source="onScopeSourceChange"
           @toggle-book="onScopeBookToggle"
         />

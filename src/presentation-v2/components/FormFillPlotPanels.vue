@@ -11,6 +11,7 @@
       :names="worldbook.names.value"
       :selector-status="worldbook.status.value"
       :selector-error="worldbook.error.value"
+      @retry="worldbook.refresh()"
       :current-label="currentWorldbookLabel"
       v-model:filter="entryFilter"
       :groups="wbEntries.groups.value"

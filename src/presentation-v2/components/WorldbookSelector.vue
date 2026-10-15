@@ -13,6 +13,7 @@
       />
     </AcuFormRow>
     <AcuText v-if="status === 'error'" variant="error" class="acu-v2-wb-selector__error">{{ error || '加载失败' }}</AcuText>
+    <AcuButton v-if="status === 'error'" size="sm" @click="$emit('retry')">重试加载世界书</AcuButton>
   </div>
 </template>
 
@@ -23,6 +24,7 @@ import AcuInput from './_lib/AcuInput.vue';
 import AcuSelect from './_lib/AcuSelect.vue';
 import type { AcuSelectOption } from './_lib/AcuSelect.vue';
 import AcuText from './_lib/AcuText.vue';
+import AcuButton from './_lib/AcuButton.vue';
 import type { WorldbookLoadStatus } from '../composables/useWorldbookSelector';
 
 const props = defineProps<{
@@ -39,6 +41,7 @@ const props = defineProps<{
 
 defineEmits<{
   (e: 'update:modelValue', value: string): void;
+  (e: 'retry'): void;
 }>();
 
 const filter = ref('');

@@ -283,6 +283,7 @@
             :char-primary="injectionWb.charPrimary.value"
             :status="injectionWb.status.value"
             :error="injectionWb.error.value"
+            @retry="injectionWb.refresh()"
             show-character-option
             character-option-label="角色卡绑定世界书"
             filterable
@@ -304,6 +305,7 @@
             :names="entriesWb.names.value"
             :selector-status="entriesWb.status.value"
             :selector-error="entriesWb.error.value"
+            @retry="entriesWb.refresh()"
             :current-label="entriesSourceLabel"
             v-model:filter="entryFilter"
             :groups="entries.groups.value"
