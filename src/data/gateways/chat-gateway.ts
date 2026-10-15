@@ -296,63 +296,54 @@ export async function setChatMessages_ACU(
  * 删除，绝不能把残缺枚举当成完整集合使用。
  */
 export async function listAllHostChatNames_ACU(): Promise<Set<string> | null> {
-    const characters = SillyTavern_API_ACU?.characters;
-    if (!Array.isArray(characters)) {
-        logWarn_ACU('[ChatGateway] characters 列表不可用，无法枚举全部聊天');
-        return null;
-    }
-    const names = new Set<string>();
-    const headers = getHostRequestHeaders_ACU();
-    if (!headers['Content-Type'] && !headers['content-type']) {
-        headers['Content-Type'] = 'application/json';
-    }
-    for (const character of characters) {
-        const avatar = String(character?.avatar || '').trim();
-        if (!avatar) continue;
-        try {
+    try {
+        const characters = SillyTavern_API_ACU?.characters;
+        if (!Array.isArray(characters)) throw new Error('角色列表不可用');
+        const names = new Set<string>();
+        const headers = { ...getHostRequestHeaders_ACU() };
+        if (!headers['Content-Type'] && !headers['content-type']) {
+            headers['Content-Type'] = 'application/json';
+        }
+        for (const character of characters) {
+            const avatar = typeof character?.avatar === 'string' ? character.avatar.trim() : '';
+            if (!avatar) throw new Error('角色条目缺少有效身份');
             const response = await fetch('/api/characters/chats', {
                 method: 'POST',
                 headers,
                 body: JSON.stringify({ avatar_url: avatar, simple: true }),
             });
-            if (!response.ok) {
-                logWarn_ACU(`[ChatGateway] 枚举角色聊天失败（HTTP ${response.status}）：${avatar}`);
-                return null;
-            }
+            if (!response.ok) throw new Error('角色聊天请求失败');
             const payload = await response.json();
-            // 无聊天时部分版本返回 {error: true}，视为空集而非失败。
-            if (payload && typeof payload === 'object' && !Array.isArray(payload) && (payload as any).error) {
-                continue;
-            }
-            const entries = Array.isArray(payload) ? payload : Object.values(payload || {});
-            for (const entry of entries) {
-                const fileName = String((entry as any)?.file_name || '').trim();
-                if (!fileName) continue;
+            // 宿主 simple 成功契约为数组；{error:true} 也用于服务端异常，不能证明为空。
+            if (!Array.isArray(payload)) throw new Error('角色聊天响应格式无效');
+            for (const entry of payload) {
+                const fileName = typeof entry?.file_name === 'string' ? entry.file_name.trim() : '';
+                if (!fileName) throw new Error('聊天条目缺少文件名');
                 const normalized = cleanChatName_ACU(fileName);
-                if (normalized) names.add(normalized);
+                if (!normalized) throw new Error('聊天名称无效');
+                names.add(normalized);
             }
-        } catch (error: any) {
-            logWarn_ACU(`[ChatGateway] 枚举角色聊天异常：${avatar}: ${error?.message || error}`);
-            return null;
         }
-    }
-    try {
         const groups = (globalThis as any).SillyTavern?.getContext?.()?.groups
             ?? (SillyTavern_API_ACU as any)?.groups;
-        if (Array.isArray(groups)) {
-            for (const group of groups) {
-                const groupChats = Array.isArray(group?.chats) ? group.chats : [];
-                for (const chatId of groupChats) {
-                    const normalized = cleanChatName_ACU(String(chatId || ''));
-                    if (normalized) names.add(normalized);
+        if (!Array.isArray(groups)) throw new Error('群组列表不可用');
+        for (const group of groups) {
+            if (!Array.isArray(group?.chats)) throw new Error('群组聊天列表无效');
+            for (const chatId of group.chats) {
+                // 兼容宿主历史数字 ID，但不把对象、布尔值或空值强制转换为名称。
+                if (typeof chatId !== 'string' && !(typeof chatId === 'number' && Number.isFinite(chatId))) {
+                    throw new Error('群组聊天身份无效');
                 }
+                const normalized = cleanChatName_ACU(String(chatId).trim());
+                if (!normalized) throw new Error('群组聊天名称无效');
+                names.add(normalized);
             }
         }
-    } catch (error: any) {
-        logWarn_ACU(`[ChatGateway] 枚举群组聊天异常：${error?.message || error}`);
+        return names;
+    } catch {
+        logWarn_ACU('[ChatGateway] 无法完整枚举角色与群组聊天，本轮禁止孤儿清理。');
         return null;
     }
-    return names;
 }
 
 /**

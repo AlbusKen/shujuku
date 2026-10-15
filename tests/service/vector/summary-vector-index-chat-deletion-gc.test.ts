@@ -2,10 +2,11 @@
  * tests/service/vector/summary-vector-index-chat-deletion-gc.test.ts
  * P7：聊天删除向量清理的安全边界与清理编排验收。
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
   currentChatKey: 'current-chat-a',
+  host: {} as any,
   aliveChatNames: null as Set<string> | null,
   registryFiles: [] as any[],
   listAliveChats: vi.fn(),
@@ -18,6 +19,8 @@ const h = vi.hoisted(() => ({
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
   listAllHostChatNames_ACU: (...args: any[]) => h.listAliveChats(...args),
 }));
+vi.mock('../../../src/shared/host-api', () => ({ SillyTavern_API_ACU: h.host }));
+vi.mock('../../../src/data/gateways/ai-gateway', () => ({ getHostRequestHeaders_ACU: () => ({}) }));
 vi.mock('../../../src/data/storage/vector-index-hot-cache', () => ({
   deleteSummaryVectorHotCacheByScope_ACU: (...args: any[]) => h.deleteHotCacheByScope(...args),
   clearSummaryVectorFlushTasksByScope_ACU: (...args: any[]) => h.clearFlushTasksByScope(...args),
@@ -47,6 +50,70 @@ import {
 function registryFile(path: string, scope?: { chatKey: string; isolationKey: string; sourceTableKey: string }): any {
   return { path, role: 'snapshot', publicationState: 'published', ...(scope ? { scope } : {}) };
 }
+
+describe('真实枚举器与清理入口', () => {
+  const request = vi.fn();
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    Object.keys(h.host).forEach(key => delete h.host[key]);
+    h.host.characters = [{ avatar: 'alice.png' }];
+    h.host.groups = [];
+    h.currentChatKey = 'current-chat-a';
+    h.registryFiles = [registryFile('target-path', { chatKey: 'target', isolationKey: 'default', sourceTableKey: 'summary' })];
+    h.deleteHotCacheByScope.mockResolvedValue(undefined);
+    h.clearFlushTasksByScope.mockResolvedValue(undefined);
+    h.safeGc.mockResolvedValue({ deletedPaths: [], retainedPaths: [] });
+    h.decodeScope.mockReturnValue(null);
+    const gateway = await vi.importActual<typeof import('../../../src/data/gateways/chat-gateway')>(
+      '../../../src/data/gateways/chat-gateway',
+    );
+    h.listAliveChats.mockImplementation(gateway.listAllHostChatNames_ACU);
+    vi.stubGlobal('SillyTavern', undefined);
+    vi.stubGlobal('localStorage', undefined);
+    request.mockReset().mockResolvedValue({ ok: true, json: async () => [] });
+    vi.stubGlobal('fetch', request);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it.each(['groups-missing', 'group-chats-invalid', 'invalid-response', 'ambiguous-error', 'partial-failure'])(
+    '%s 同时阻止删除事件与启动孤儿清扫的全部删除动作', async scenario => {
+      if (scenario === 'groups-missing') delete h.host.groups;
+      if (scenario === 'group-chats-invalid') h.host.groups = [{}];
+      if (scenario === 'invalid-response') request.mockResolvedValue({ ok: true, json: async () => ({ unexpected: 'invalid payload' }) });
+      if (scenario === 'ambiguous-error') request.mockResolvedValue({ ok: true, json: async () => ({ error: true }) });
+      if (scenario === 'partial-failure') {
+        h.host.characters.push({ avatar: 'bob.png' });
+        request.mockImplementation(async (_url, init) => ({
+          ok: JSON.parse(init.body).avatar_url === 'alice.png', json: async () => [{ file_name: 'alive.jsonl' }],
+        }));
+      }
+      for (const operation of [() => cleanupSummaryVectorIndexForDeletedChat_ACU('target.jsonl'), sweepOrphanSummaryVectorIndexFiles_ACU]) {
+        expect(await operation()).toMatchObject({ performed: false, reason: 'chat_enumeration_unavailable' });
+      }
+      expect(h.deleteHotCacheByScope).not.toHaveBeenCalled();
+      expect(h.clearFlushTasksByScope).not.toHaveBeenCalled();
+      expect(h.safeGc).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['character', 'group'])('同名聊天仍在 %s 中时保护缓存与归档任务', async source => {
+    if (source === 'character') request.mockResolvedValue({ ok: true, json: async () => [{ file_name: 'target.jsonl' }] });
+    else h.host.groups = [{ chats: ['target'] }];
+    expect(await cleanupSummaryVectorIndexForDeletedChat_ACU('target.jsonl'))
+      .toMatchObject({ performed: false, reason: 'same_name_chat_alive' });
+    await sweepOrphanSummaryVectorIndexFiles_ACU();
+    expect(h.deleteHotCacheByScope).not.toHaveBeenCalled();
+    expect(h.clearFlushTasksByScope).not.toHaveBeenCalled();
+    expect(h.safeGc).not.toHaveBeenCalled();
+  });
+
+  it('完整空列表允许已确认孤儿的清理', async () => {
+    expect(await cleanupSummaryVectorIndexForDeletedChat_ACU('target.jsonl')).toMatchObject({ performed: true });
+    expect(h.deleteHotCacheByScope).toHaveBeenCalledOnce();
+    expect(h.clearFlushTasksByScope).toHaveBeenCalledOnce();
+    expect(h.safeGc).toHaveBeenCalledOnce();
+  });
+});
 
 describe('cleanupSummaryVectorIndexForDeletedChat_ACU 安全边界', () => {
   beforeEach(() => {
