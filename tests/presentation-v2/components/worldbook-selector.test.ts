@@ -11,11 +11,26 @@ import WorldbookEntryPickerBody from '../../../src/presentation-v2/components/Wo
 import { useWorldbookSelector } from '../../../src/presentation-v2/composables/useWorldbookSelector';
 
 const reads = vi.hoisted(() => ({ list: vi.fn(), primary: vi.fn() }));
+const scope = vi.hoisted(() => ({
+  chat: [{}] as unknown[], chatId: 'chat-a', characterKey: 'char:a.png', characterId: '0',
+}));
 vi.mock('../../../src/service/worldbook/pipeline', () => ({ getWorldbookNames_ACU: reads.list }));
 vi.mock('../../../src/service/worldbook/worldbook-service', () => ({ getCurrentCharPrimaryLorebook_ACU: reads.primary }));
+vi.mock('../../../src/data/gateways/chat-gateway', () => ({ getChatArray_ACU: () => scope.chat }));
+vi.mock('../../../src/data/gateways/host-state-gateway', () => ({
+  getCurrentCharacterCardKey_ACU: () => scope.characterKey,
+  getCurrentCharacterId_ACU: () => scope.characterId,
+}));
+vi.mock('../../../src/data/storage/chat-history', () => ({
+  getActiveChatStorageIdentity_ACU: () => scope.chatId,
+}));
 beforeEach(() => {
   reads.list.mockReset().mockResolvedValue([]);
   reads.primary.mockReset().mockResolvedValue(null);
+  scope.chat = [{}];
+  scope.chatId = 'chat-a';
+  scope.characterKey = 'char:a.png';
+  scope.characterId = '0';
 });
 
 interface Mounted {
@@ -162,5 +177,126 @@ describe('世界书读取失败与恢复', () => {
     expect(el.textContent).not.toContain('列表读取失败');
     expect(el.textContent).not.toContain('重试加载世界书');
     expect(reads.list).toHaveBeenCalledTimes(2);
+  });
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+function selectorState(selector: ReturnType<typeof useWorldbookSelector>) {
+  return {
+    names: [...selector.names.value], charPrimary: selector.charPrimary.value,
+    status: selector.status.value, error: selector.error.value,
+  };
+}
+
+describe('世界书刷新代次与作用域', () => {
+  it.each(['success', 'error'] as const)('旧请求迟到 %s 不覆盖新请求的成功结果', async (outcome) => {
+    const old = deferred<string | null>();
+    reads.list.mockResolvedValueOnce(['old-book']).mockResolvedValueOnce(['new-book']);
+    reads.primary.mockReturnValueOnce(old.promise).mockResolvedValueOnce('new-book');
+    const selector = useWorldbookSelector();
+    const first = selector.refresh();
+    scope.chat = [{}];
+    scope.chatId = 'chat-b';
+    scope.characterKey = 'char:b.png';
+    await selector.refresh();
+    const latest = selectorState(selector);
+    expect(latest).toEqual({ names: ['new-book'], charPrimary: 'new-book', status: 'success', error: '' });
+    if (outcome === 'success') old.resolve('old-book');
+    else old.reject(new Error('旧请求失败'));
+    await first;
+    expect(selectorState(selector)).toEqual(latest);
+  });
+
+  it('同一作用域中旧成功不能覆盖最新失败', async () => {
+    const old = deferred<string | null>();
+    reads.list.mockResolvedValue(['old-book']);
+    reads.primary.mockReturnValueOnce(old.promise).mockRejectedValueOnce(new Error('最新请求失败'));
+    const selector = useWorldbookSelector();
+    const first = selector.refresh();
+    await selector.refresh();
+    const latest = selectorState(selector);
+    expect(latest).toEqual({ names: [], charPrimary: null, status: 'error', error: '最新请求失败' });
+    old.resolve('old-book');
+    await first;
+    expect(selectorState(selector)).toEqual(latest);
+  });
+
+  it('快速连续刷新：过期成功和失败均不能结束最新请求的 loading', async () => {
+    const requests = [deferred<string | null>(), deferred<string | null>(), deferred<string | null>()];
+    reads.list.mockResolvedValueOnce(['first']).mockResolvedValueOnce(['second']).mockResolvedValueOnce(['third']);
+    requests.forEach(request => reads.primary.mockReturnValueOnce(request.promise));
+    const selector = useWorldbookSelector();
+    const tasks = requests.map(() => selector.refresh());
+    requests[1].reject(new Error('过期失败'));
+    await tasks[1];
+    requests[0].resolve('first');
+    await tasks[0];
+    expect(selectorState(selector)).toEqual({ names: [], charPrimary: null, status: 'loading', error: '' });
+    requests[2].resolve('third');
+    await tasks[2];
+    expect(selectorState(selector)).toEqual({ names: ['third'], charPrimary: 'third', status: 'success', error: '' });
+  });
+
+  it.each(['chat', 'chatId', 'characterKey', 'characterId', 'group'] as const)(
+    '%s 改变且尚未触发下一次刷新时，也不发布旧作用域结果', async (field) => {
+      const old = deferred<string | null>();
+      reads.list.mockResolvedValue(['old-book']);
+      reads.primary.mockReturnValueOnce(old.promise);
+      const selector = useWorldbookSelector();
+      const task = selector.refresh();
+      const before = selectorState(selector);
+      if (field === 'chat') scope.chat = [{}];
+      else if (field === 'group') scope.characterKey = 'group:42';
+      else scope[field] = 'changed';
+      old.resolve('old-book');
+      await task;
+      expect(selectorState(selector)).toEqual(before);
+      reads.list.mockResolvedValue(['current-book']);
+      reads.primary.mockResolvedValue('current-book');
+      await selector.refresh();
+      expect(selector.charPrimary.value).toBe('current-book');
+      expect(selector.status.value).toBe('success');
+    },
+  );
+
+  it('离开聊天作用域后迟到失败不发布错误状态', async () => {
+    const old = deferred<string[]>();
+    reads.list.mockReturnValueOnce(old.promise);
+    const selector = useWorldbookSelector();
+    const task = selector.refresh();
+    const before = selectorState(selector);
+    scope.chatId = 'chat-b';
+    old.reject(new Error('旧聊天错误'));
+    await task;
+    expect(selectorState(selector)).toEqual(before);
+  });
+
+  it.each(['success', 'error'] as const)('组件卸载后迟到 %s 不发布，保留的 refresh 引用也不再发请求', async (outcome) => {
+    const old = deferred<string | null>();
+    reads.list.mockResolvedValue(['old-book']);
+    reads.primary.mockReturnValueOnce(old.promise);
+    let selector!: ReturnType<typeof useWorldbookSelector>;
+    const el = document.createElement('div');
+    const app = createApp(defineComponent({ setup() {
+      selector = useWorldbookSelector();
+      return () => h('div');
+    } }));
+    app.mount(el);
+    const task = selector.refresh();
+    const before = selectorState(selector);
+    app.unmount();
+    if (outcome === 'success') old.resolve('old-book');
+    else old.reject(new Error('卸载后的旧请求失败'));
+    await task;
+    expect(selectorState(selector)).toEqual(before);
+    await selector.refresh();
+    expect(reads.list).toHaveBeenCalledOnce();
+    expect(reads.primary).toHaveBeenCalledOnce();
   });
 });
