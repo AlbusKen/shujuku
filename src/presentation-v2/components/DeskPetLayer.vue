@@ -17,8 +17,18 @@
         :anchor="petRect"
         :viewport-width="viewport.width"
         :viewport-height="viewport.height"
+        :busy="quickActions.busy.value"
+        :confirm="quickActions.confirm.value"
+        :config-rows="quickActions.configRows.value"
+        :colors="hubState.bubbleAppearance.value.colors"
         @close="closeMenu"
         @open-dashboard="openDashboard"
+        @open-logs="openLogs"
+        @open-visualizer="openVisualizer"
+        @catch-up="quickActions.requestCatchUp"
+        @detect="quickActions.detect"
+        @confirm-catch-up="startCatchUp"
+        @cancel-catch-up="quickActions.cancelCatchUp"
       />
       <NoticeBubble
         :slide="carousel.slide.value"
@@ -47,6 +57,7 @@
  */
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { getAcuHostDocument, getAcuHostWindow } from "../bootstrap/host-document";
+import { useDeskPetQuickActions } from "../composables/useDeskPetQuickActions";
 import { useNoticeCarousel } from "../composables/useNoticeCarousel";
 import { useNoticeHubState, useTaskActivity, type DeskPetRect } from "../composables/useTaskActivity";
 import DeskPet from "./DeskPet.vue";
@@ -58,6 +69,7 @@ const emit = defineEmits<{ (event: "openDashboard"): void }>();
 const hubState = useNoticeHubState();
 const activity = useTaskActivity(hubState);
 const carousel = useNoticeCarousel(hubState, activity.tasks);
+const quickActions = useDeskPetQuickActions();
 
 const portalTarget = ref<HTMLElement | null>(null);
 const petRect = ref<DeskPetRect | null>(null);
@@ -75,8 +87,15 @@ async function requestMenu(source: "pointer" | "keyboard"): Promise<void> {
 }
 
 function closeMenu(restoreFocus: boolean): void {
+  // 关菜单即放弃未确认的追平确认卡，避免下次点开时误触旧计划。
+  quickActions.cancelCatchUp();
   menuOpen.value = false;
   if (restoreFocus) (pet.value?.$el as HTMLElement | undefined)?.focus();
+}
+
+function runAndClose(action: () => void): void {
+  menuOpen.value = false;
+  action();
 }
 
 function openDashboard(): void {
@@ -84,8 +103,21 @@ function openDashboard(): void {
   emit("openDashboard");
 }
 
+function openLogs(): void {
+  runAndClose(quickActions.openLogs);
+}
+
+function openVisualizer(): void {
+  runAndClose(quickActions.openVisualizer);
+}
+
+function startCatchUp(): void {
+  quickActions.acceptCatchUp();
+  menuOpen.value = false;
+}
+
 watch(() => hubState.petEnabled.value, enabled => {
-  if (!enabled) menuOpen.value = false;
+  if (!enabled) closeMenu();
 });
 
 function readViewport(): void {

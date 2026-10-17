@@ -300,7 +300,9 @@ describe('DeskPetActionMenu 动作菜单', () => {
   it('方向键循环菜单项，Home/End 定位首尾，Escape 阻止向外传播', async () => {
     const { menu, closeEvents } = mountMenu({ autoFocus: true });
     await nextTick();
-    const action = menu.querySelector<HTMLButtonElement>('.acu-desk-pet-menu__action')!;
+    const actions = [...menu.querySelectorAll<HTMLButtonElement>('.acu-desk-pet-menu__action')];
+    const action = actions[0];
+    const second = actions[1];
     const close = menu.querySelector<HTMLButtonElement>('.acu-desk-pet-menu__close')!;
     const key = (value: string) => {
       const event = new KeyboardEvent('keydown', { key: value, bubbles: true, cancelable: true });
@@ -308,8 +310,8 @@ describe('DeskPetActionMenu 动作菜单', () => {
       expect(event.defaultPrevented).toBe(true);
     };
     key('ArrowDown');
-    expect(document.activeElement).toBe(close);
-    key('ArrowRight');
+    expect(document.activeElement).toBe(second);
+    key('ArrowUp');
     expect(document.activeElement).toBe(action);
     key('ArrowUp');
     expect(document.activeElement).toBe(close);
@@ -330,14 +332,92 @@ describe('DeskPetActionMenu 动作菜单', () => {
 
   it('右侧放不下时依序换位，视口边缘最终夹进屏幕', () => {
     const leftEdge = mountMenu({ anchor: { x: 8, y: 300, width: 20, height: 20 }, viewportWidth: 1024, viewportHeight: 768 });
-    expect(leftEdge.menu.style.transform).toBe('translate3d(38px, 292px, 0)');
+    expect(leftEdge.menu.style.transform).toBe('translate3d(38px, 190px, 0)');
 
     const rightEdge = mountMenu({ anchor: { x: 1000, y: -40, width: 20, height: 20 }, viewportWidth: 1024, viewportHeight: 768 });
-    expect(rightEdge.menu.style.transform).toBe('translate3d(864px, 8px, 0)');
+    expect(rightEdge.menu.style.transform).toBe('translate3d(754px, 8px, 0)');
 
     const narrow = mountMenu({ anchor: { x: 40, y: 100, width: 20, height: 20 }, viewportWidth: 100, viewportHeight: 300 });
     expect(narrow.menu.style.width).toBe('84px');
-    expect(narrow.menu.style.transform).toBe('translate3d(8px, 54px, 0)');
+    expect(narrow.menu.style.transform).toBe('translate3d(8px, 52px, 0)');
+  });
+
+  it('菜单分成跳转与功能两块，按钮各自发出动作', async () => {
+    const events: string[] = [];
+    const actionMenu = mountMenu({
+      onOpenLogs: () => events.push('logs'),
+      onOpenVisualizer: () => events.push('visualizer'),
+      onCatchUp: () => events.push('catch-up'),
+      onDetect: () => events.push('detect'),
+    });
+    await nextTick();
+
+    const titles = [...actionMenu.menu.querySelectorAll('.acu-desk-pet-menu__section-title')].map(el => el.textContent);
+    expect(titles).toEqual(['跳转', '功能']);
+
+    const buttons = [...actionMenu.menu.querySelectorAll<HTMLButtonElement>('.acu-desk-pet-menu__action')];
+    const labels = buttons.map(button => button.querySelector('.acu-desk-pet-menu__label')?.textContent);
+    expect(labels).toEqual(['打开仪表盘', '打开日志', '打开表格编辑器', '一键追平', '检测当前配置']);
+
+    buttons[1].click();
+    buttons[2].click();
+    buttons[3].click();
+    await nextTick();
+    expect(events).toEqual(['logs', 'visualizer', 'catch-up']);
+  });
+
+  it('检测当前配置展开内联结果面板并保持可收起', async () => {
+    const detects = vi.fn();
+    const actionMenu = mountMenu({
+      configRows: [
+        { label: '表格模板', value: '默认预设（全局）' },
+        { label: '填表 API', value: '酒馆主 API' },
+      ],
+      onDetect: detects,
+    });
+    await nextTick();
+    const toggle = [...actionMenu.menu.querySelectorAll<HTMLButtonElement>('.acu-desk-pet-menu__action')][4];
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(actionMenu.menu.querySelector('.acu-desk-pet-menu__detect')).toBeNull();
+
+    toggle.click();
+    await nextTick();
+    expect(detects).toHaveBeenCalledTimes(1);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    const rows = [...actionMenu.menu.querySelectorAll('.acu-desk-pet-menu__detect-row')];
+    expect(rows.map(row => row.querySelector('.acu-desk-pet-menu__detect-label')?.textContent)).toEqual(['表格模板', '填表 API']);
+    expect(rows.map(row => row.querySelector('.acu-desk-pet-menu__detect-value')?.textContent)).toEqual(['默认预设（全局）', '酒馆主 API']);
+
+    toggle.click();
+    await nextTick();
+    expect(actionMenu.menu.querySelector('.acu-desk-pet-menu__detect')).toBeNull();
+  });
+
+  it('追平执行中禁用追平按钮，确认卡替换动作列表', async () => {
+    const busyMenu = mountMenu({ busy: true });
+    await nextTick();
+    const busyActions = [...busyMenu.menu.querySelectorAll<HTMLButtonElement>('.acu-desk-pet-menu__action')];
+    expect(busyActions[3].disabled).toBe(true);
+    expect(busyActions[3].querySelector('.acu-desk-pet-menu__label')?.textContent).toBe('正在追平…');
+
+    const confirmed = vi.fn();
+    const cancelled = vi.fn();
+    const confirmMenu = mountMenu({
+      confirm: { title: '一键追平全表', message: '目标：3 张表' },
+      onConfirmCatchUp: confirmed,
+      onCancelCatchUp: cancelled,
+    });
+    await nextTick();
+    expect(confirmMenu.menu.querySelector('.acu-desk-pet-menu__confirm')).not.toBeNull();
+    expect(confirmMenu.menu.querySelectorAll('.acu-desk-pet-menu__section')).toHaveLength(0);
+    expect(confirmMenu.menu.querySelector('.acu-desk-pet-menu__confirm-text')?.textContent).toBe('目标：3 张表');
+
+    const buttons = [...confirmMenu.menu.querySelectorAll<HTMLButtonElement>('.acu-desk-pet-menu__confirm-actions button')];
+    buttons.find(button => button.textContent?.trim() === '取消')!.click();
+    buttons.find(button => button.textContent?.trim() === '开始追平')!.click();
+    await nextTick();
+    expect(cancelled).toHaveBeenCalledTimes(1);
+    expect(confirmed).toHaveBeenCalledTimes(1);
   });
 });
 
