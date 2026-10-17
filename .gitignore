@@ -9,6 +9,7 @@ docs/
 plans/
 specs/
 /*.md
+!/API_DOCUMENTATION.md
 /*.txt
 /素材/
 
