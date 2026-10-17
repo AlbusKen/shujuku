@@ -29,14 +29,13 @@ export const formFillCopy = {
     manual: {
       title: "手动填表",
       description:
-        "可按指定上下文重填所选表，也可按已提交前沿追平尚未填写的后缀楼层。填表 API 使用「自动更新设置」中的配置。",
+        "可以按指定范围重填所选表，也可以把每张表上次填完之后还没填的内容补上。填表 API 使用「自动更新设置」中的配置。",
       runLabel: "执行手动填表",
-      catchUpLabel: "一键追平所选表未填楼层",
-      catchUpBusyLabel: "追平中...",
+      catchUpLabel: "一键追平还没填的内容",
+      catchUpBusyLabel: "正在补齐…",
       catchUpBoundary:
-        "追平只补每张表已提交连续前沿之后的后缀缺口，不扫描历史前沿之前的内部空洞。",
-      syncPending:
-        "追平数据已保存，但世界书同步待重试。",
+        "只会补每张表上次填完之后的新内容，已经填好的部分不会重填。",
+      syncPending: "补填的数据已保存，但世界书还没同步好。",
       syncRetryLabel: "仅同步重试",
     },
   },

@@ -21,11 +21,11 @@
           >
             {{ dashboard.chatFileIdentifier.value || "未初始化" }}
           </strong>
-          · AI回复累计层数:
+          · AI回复累计条数:
           <strong class="acu-text__value">{{
             dashboard.aiMessageCount.value
           }}</strong>
-          · 当前 full checkpoint:
+          · 表格已填到:
           <strong class="acu-text__value acu-v2-form-fill-page__checkpoint-label">
             {{ manualUpdate.checkpointFloorsLabel.value }}
           </strong>
@@ -103,8 +103,8 @@
           </AcuFormRow>
 
           <AcuFormRow
-            label="每 N 层合并为一次填表"
-            hint="把多少层 AI 回复压缩成一次填表请求。"
+            label="每 N 条 AI 回复合并为一次填表"
+            hint="每次把多少条 AI 回复合并成一次填表。"
           >
             <AcuInput
               type="number"
@@ -117,7 +117,7 @@
         </div>
 
         <AcuMessage kind="info">
-          当前 full checkpoint：{{ manualUpdate.checkpointFloorsLabel.value }}；按当前设置预计处理范围：{{ manualUpdate.manualRefillRangeLabel.value }}。
+          表格已填到：{{ manualUpdate.checkpointFloorsLabel.value }}；按当前设置预计处理范围：{{ manualUpdate.manualRefillRangeLabel.value }}。
           选中表：{{ manualUpdate.selectedSheetSummary.value }}。
         </AcuMessage>
 

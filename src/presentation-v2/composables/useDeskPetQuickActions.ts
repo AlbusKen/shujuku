@@ -54,25 +54,25 @@ function sameKeySet(left: string[], right: string[]): boolean {
   return left.every((key) => rightSet.has(key));
 }
 
-function formatFloorRange(startAiFloor: number, endAiFloor: number): string {
+function formatReplyRange(startAiFloor: number, endAiFloor: number): string {
   return startAiFloor === endAiFloor
-    ? `AI 第 ${startAiFloor} 层`
-    : `AI 第 ${startAiFloor}~${endAiFloor} 层`;
+    ? `第 ${startAiFloor} 条 AI 回复`
+    : `第 ${startAiFloor}~${endAiFloor} 条 AI 回复`;
 }
 
 function progressLabel(event: CardUpdateProgressEvent): string {
   const prefix = event.currentBatch && event.totalBatches
-    ? `批次 ${event.currentBatch}/${event.totalBatches} · `
+    ? `第 ${event.currentBatch}/${event.totalBatches} 批 · `
     : '';
   switch (event.phase) {
-    case 'preparing': return `${prefix}准备上下文`;
-    case 'calling_ai': return `${prefix}调用 AI`;
-    case 'parsing': return `${prefix}解析填表结果`;
-    case 'saving': return `${prefix}保存表格数据`;
-    case 'chunk_done': return `${prefix}分块完成`;
+    case 'preparing': return `${prefix}正在准备聊天内容`;
+    case 'calling_ai': return `${prefix}正在让 AI 填写`;
+    case 'parsing': return `${prefix}正在整理 AI 的回复`;
+    case 'saving': return `${prefix}正在保存表格`;
+    case 'chunk_done': return `${prefix}这一批完成了`;
     case 'complete': return `${prefix}完成`;
-    case 'retry': return `${prefix}重试中`;
-    case 'error': return `${prefix}出错`;
+    case 'retry': return `${prefix}遇到问题，正在重试`;
+    case 'error': return `${prefix}出错了`;
     default: return prefix || '处理中';
   }
 }
@@ -184,43 +184,40 @@ export function useDeskPetQuickActions(): DeskPetQuickActions {
       task => task.busy && task.feature === MANUAL_CATCH_UP_FEATURE,
     );
     if (runningElsewhere) {
-      notify_ACU('warning', '已有追平任务在进行中，等它结束再试。', { title: CATCH_UP_TITLE });
+      notify_ACU('warning', '已经有一次补填在进行中，等它结束再试。', { title: CATCH_UP_TITLE });
       return;
     }
     const targetKeys = runtimeSheetKeys();
     if (!targetKeys.length) {
-      notify_ACU('warning', '当前表格运行时未就绪，无法执行一键追平。', { title: CATCH_UP_TITLE });
+      notify_ACU('warning', '表格还没加载好，暂时不能补填；等聊天里的表格出现后再试。', { title: CATCH_UP_TITLE });
       return;
     }
     planningBusy.value = true;
     try {
       const planning = await prepareManualCatchUpPlan_ACU(targetKeys);
       if (!planning.success || !planning.plan) {
-        notify_ACU('error', planning.error || '无法生成一键追平计划。', { title: CATCH_UP_TITLE });
+        notify_ACU('error', '没法生成补填计划，请稍后再试。', { title: CATCH_UP_TITLE });
         return;
       }
       const plan = planning.plan;
       if (!plan.waves.length) {
-        notify_ACU('info', '所有表都已追平，无需调用 AI 或写入数据。', { title: CATCH_UP_TITLE });
+        notify_ACU('info', '所有表都已经是最新的，不用再补了。', { title: CATCH_UP_TITLE });
         return;
       }
-      const totalBuckets = plan.waves.reduce((count, wave) => count + wave.groups.reduce(
-        (waveCount, group) => waveCount + Math.ceil(wave.messageIndices.length / group.batchSize),
-        0,
-      ), 0);
       const waveSummary = plan.waves.slice(0, 3).map((wave, index) =>
-        `Wave ${index + 1}：${formatFloorRange(wave.startAiFloor, wave.endAiFloor)}`
-      ).join('\n') + (plan.waves.length > 3 ? `\n…共 ${plan.waves.length} 个 wave` : '');
+        `第 ${index + 1} 批：${formatReplyRange(wave.startAiFloor, wave.endAiFloor)}`
+      ).join('\n') + (plan.waves.length > 3 ? `\n…共 ${plan.waves.length} 批` : '');
       const skipFloors = Number(settings_ACU.skipUpdateFloors) || 0;
+      const skipLine = skipFloors > 0 ? `· 跳过最新 ${skipFloors} 条 AI 回复（最新的先不补）\n` : '';
       pending = { snapshotKeys: targetKeys.slice(), plan };
       confirm.value = {
-        title: '一键追平全表',
-        message: `目标：${targetKeys.length} 张表，共 ${plan.waves.length} 个 wave、约 ${totalBuckets} 个 bucket。\n跳过最新 ${skipFloors} 层。\n${waveSummary}\n只补每张表已提交连续前沿之后的缺口；执行前会重新预检存储锚点，无法证明安全时会在调用 AI 前阻止。`,
+        title: '补齐还没填的内容',
+        message: `准备补齐 ${targetKeys.length} 张表还没填的内容。\n· 范围：${formatReplyRange(plan.waves[0].startAiFloor, plan.waves[plan.waves.length - 1].endAiFloor)}，分 ${plan.waves.length} 批处理\n${skipLine}· 只补上次填完之后的新内容，已经填好的部分不会重填\n\n${waveSummary}\n\n开始前会再核对一次表格状态；如果发现表格有变化、可能影响已填内容，会在开始前停下，不会改动任何数据。`,
         confirmLabel: '开始追平',
         cancelLabel: '取消',
       };
-    } catch (error: any) {
-      notify_ACU('error', error?.message || '一键追平规划异常。', { title: CATCH_UP_TITLE });
+    } catch {
+      notify_ACU('error', '补填计划生成出错了，请稍后再试。', { title: CATCH_UP_TITLE });
     } finally {
       planningBusy.value = false;
     }
@@ -238,14 +235,14 @@ export function useDeskPetQuickActions(): DeskPetQuickActions {
     // TOCTOU 复检：确认期间 runtime 可能被 purge / 删表 / 新增表。
     const targetKeys = runtimeSheetKeys();
     if (!sameKeySet(targetKeys, current.snapshotKeys)) {
-      finishCatchUp('warning', '表格运行时在确认期间发生变化，已取消本次追平，请重新确认目标。');
+      finishCatchUp('warning', '确认期间表格有变化，这次补填已取消，请重新确认。');
       return;
     }
     catchUpBusy.value = true;
     abortController = new AbortController();
     const controller = abortController;
     const task = beginNoticeTask_ACU(CATCH_UP_TITLE, {
-      detail: '正在准备追平…',
+      detail: '正在准备补填…',
       kind: 'info',
       busy: true,
       action: {
@@ -272,24 +269,24 @@ export function useDeskPetQuickActions(): DeskPetQuickActions {
         }
         const ended = result.outcome === 'complete' || result.outcome === 'no_work' || result.success;
         if (result.outcome === 'sync_pending') {
-          finishCatchUp('warning', '数据已提交，但世界书同步未完成；可到「填表工作台」仅重试同步。');
+          finishCatchUp('warning', '内容已经写入，但世界书还没同步好；可以稍后到「填表工作台」里点「仅同步重试」。');
         } else if (result.outcome === 'no_work') {
-          finishCatchUp('info', '所有表都已追平，无需调用 AI 或写入数据。');
+          finishCatchUp('info', '所有表都已经是最新的，不用再补了。');
         } else if (result.outcome === 'progress_metadata_failed') {
-          finishCatchUp('warning', `数据已提交，但完成状态记录失败：${result.error || '下次追平会重新记录状态。'}`);
+          finishCatchUp('warning', '内容已经写入表格，但进度记录没保存成功。这不影响已填的内容，下次补填时会先把进度补记上，不会重填这次写好的部分。');
         } else if (result.outcome === 'integrity_failed') {
-          finishCatchUp('error', `持久化完整性校验失败，已回载聊天中的已保存数据：${result.error || '请执行 V2 恢复诊断。'}`);
+          finishCatchUp('error', '写入后发现数据不一致，已经恢复成聊天里上次保存的内容。可以到「数据管理」里做一次数据恢复检查。');
         } else if (result.outcome === 'blocked') {
-          finishCatchUp('error', result.error || '已在调用 AI 前阻止：V2 存储锚点无法安全修复。');
+          finishCatchUp('error', '为了不覆盖已有内容，这次补填在开始前停下了。可以先到「数据管理」里的数据恢复检查看一下。');
         } else if (result.outcome === 'stopped' || controller.signal.aborted) {
-          finishCatchUp('warning', `已终止；保留了 ${result.committedBucketCount || 0} 个已提交 bucket。`);
+          finishCatchUp('warning', `已停止；已经写好的 ${result.committedBucketCount || 0} 段保留了。`);
         } else if (ended) {
-          finishCatchUp('success', `追平完成，共提交 ${result.committedBucketCount || 0} 个 bucket。`);
+          finishCatchUp('success', `补填完成，共写入 ${result.committedBucketCount || 0} 段。`);
         } else {
-          finishCatchUp('error', result.error || '一键追平失败。');
+          finishCatchUp('error', '补填没有完成，请稍后再试。');
         }
-      } catch (error: any) {
-        finishCatchUp('error', error?.message || '一键追平执行异常。');
+      } catch {
+        finishCatchUp('error', '补填过程中出错了，请稍后再试。');
       } finally {
         task.end();
         abortController = null;

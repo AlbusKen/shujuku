@@ -328,14 +328,14 @@ describe('FormFillPage', () => {
     expect(text).toContain('表格状态');
     expect(text).toContain('当前聊天');
     expect(text).toContain('chat-form-fill');
-    expect(text).toContain('AI回复累计层数');
+    expect(text).toContain('AI回复累计条数');
     expect(text).toContain('角色状态');
     expect(text).toContain('事件记录');
     expect(text).not.toContain('就绪:角色状态');
     expect(text).not.toContain('下一次:');
     const statusLine = page!.querySelector('.acu-v2-form-fill-page__status-line');
     expect(statusLine).not.toBeNull();
-    expect((statusLine!.textContent || '').replace(/\s+/g, '')).toContain('当前聊天:chat-form-fill·AI回复累计层数:3');
+    expect((statusLine!.textContent || '').replace(/\s+/g, '')).toContain('当前聊天:chat-form-fill·AI回复累计条数:3');
     expect(text).toContain('自动更新设置');
     expect(text).toContain('自动填表间隔');
     expect(text).toContain('最新层不填表');
@@ -358,9 +358,9 @@ describe('FormFillPage', () => {
     expect(text).toContain('手动填表');
     expect(text).toContain('填表 API 预设');
     expect(text).toContain('本次填表附加要求');
-    expect(text).toContain('当前 full checkpoint');
-    expect(text).toContain('AI 第 1 层（初始基线）');
-    expect(text).toContain('AI 第 3 层（历史周期基线）');
+    expect(text).toContain('表格已填到');
+    expect(text).toContain('第 1 条 AI 回复（初始）');
+    expect(text).toContain('第 3 条 AI 回复（定期）');
     expect(text).toContain('预计处理范围');
     expect(text).toContain('执行手动填表');
     expect(text).toContain('表格模板预设');
@@ -738,15 +738,15 @@ describe('FormFillPage · 手动填表面板', () => {
     const text = panel.textContent || '';
     expect(text).not.toContain('填表 API 预设');
     expect(text).toContain('手动处理最近 N 层');
-    expect(text).toContain('每 N 层合并为一次填表');
+    expect(text).toContain('每 N 条 AI 回复合并为一次填表');
     expect(text).toContain('本次填表附加要求');
-    expect(text).toContain('当前 full checkpoint');
-    expect(text).toContain('AI 第 1 层（初始基线）');
-    expect(text).toContain('AI 第 3 层（历史周期基线）');
+    expect(text).toContain('表格已填到');
+    expect(text).toContain('第 1 条 AI 回复（初始）');
+    expect(text).toContain('第 3 条 AI 回复（定期）');
     expect(text).toContain('选中表：角色状态（sheet_a）、事件记录（sheet_b）');
     expect(text).toContain('执行手动填表');
-    expect(text).toContain('一键追平所选表未填楼层');
-    expect(text).toContain('不扫描历史前沿之前的内部空洞');
+    expect(text).toContain('一键追平还没填的内容');
+    expect(text).toContain('已经填好的部分不会重填');
     expect(panel.querySelector('.acu-v2-form-fill-page__manual-extra .acu-toggle')).toBeNull();
     expect(panel.querySelector('.acu-v2-form-fill-page__manual-extra textarea')).not.toBeNull();
 
@@ -759,7 +759,7 @@ describe('FormFillPage · 手动填表面板', () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it('checkpoint reason 文案兼容历史手动、保留边界、未知和缺失 reason', async () => {
+  it('存档进度按历史原因显示可读说明，未知原因归为旧记录', async () => {
     const { mount } = await mountFormFillPage(createSettings(), 'form-fill', [
       { messageIndex: 1, aiFloor: 1, reason: 'manual', createdAt: 1 },
       { messageIndex: 2, aiFloor: 2, reason: 'compaction', createdAt: 2 },
@@ -770,10 +770,10 @@ describe('FormFillPage · 手动填表面板', () => {
     const panel = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-form-fill-page__grid > .acu-panel'))
       .find(item => item.querySelector('.acu-panel__title')?.textContent?.includes('手动填表'))!;
     const text = panel.textContent || '';
-    expect(text).toContain('AI 第 1 层（历史手动基线）');
-    expect(text).toContain('AI 第 2 层（保留边界基线）');
-    expect(text).toContain('AI 第 3 层（旧基线:weird）');
-    expect(text).toContain('AI 第 4 层（旧基线）');
+    expect(text).toContain('第 1 条 AI 回复（手动）');
+    expect(text).toContain('第 2 条 AI 回复（自动整理）');
+    expect(text).toContain('第 3 条 AI 回复（旧记录）');
+    expect(text).toContain('第 4 条 AI 回复（旧记录）');
 
     mount.__resetAcuV2MountForTests();
   });
@@ -786,7 +786,7 @@ describe('FormFillPage · 手动填表面板', () => {
     const depthRow = Array.from(panel.querySelectorAll<HTMLElement>('.acu-form-row'))
       .find(row => (row.textContent || '').includes('手动处理最近 N 层'))!;
     const batchRow = Array.from(panel.querySelectorAll<HTMLElement>('.acu-form-row'))
-      .find(row => (row.textContent || '').includes('每 N 层合并为一次填表'))!;
+      .find(row => (row.textContent || '').includes('每 N 条 AI 回复合并为一次填表'))!;
     const depthInput = depthRow.querySelector<HTMLInputElement>('input[type="number"]')!;
     const batchInput = batchRow.querySelector<HTMLInputElement>('input[type="number"]')!;
 
@@ -852,8 +852,8 @@ describe('FormFillPage · 手动填表面板', () => {
 
     const dialogText = document.querySelector('.acu-dialog-layer')?.textContent || '';
     expect(dialogText).toContain('即将执行手动填表');
-    expect(dialogText).toContain('当前 full checkpoint：AI 第 1 层（初始基线）、AI 第 3 层（历史周期基线）');
-    expect(dialogText).toContain('本次重填范围：AI 第 1~3 层');
+    expect(dialogText).toContain('表格已填到：第 1 条 AI 回复（初始）、第 3 条 AI 回复（定期）');
+    expect(dialogText).toContain('本次重填范围：第 1~3 条 AI 回复');
     expect(dialogText).toContain('选中表：角色状态（sheet_a）、事件记录（sheet_b）');
     expect(dialogText).toContain('会先删除本次重填范围内选中表的 checkpoint 与 V2 增量日志');
     expect(dialogText).toContain('此前楼层的表格数据将无法恢复');
@@ -894,9 +894,9 @@ describe('FormFillPage · 手动填表面板', () => {
 
     const panel = Array.from(document.querySelectorAll<HTMLElement>('.acu-v2-form-fill-page__grid > .acu-panel'))
       .find(item => item.querySelector('.acu-panel__title')?.textContent?.includes('手动填表'))!;
-    expect(panel.textContent || '').toContain('AI 第 1 层（初始基线）');
-    expect(panel.textContent || '').toContain('AI 第 3 层（历史周期基线）');
-    expect(panel.textContent || '').toContain('按当前设置预计处理范围：AI 第 1~3 层');
+    expect(panel.textContent || '').toContain('第 1 条 AI 回复（初始）');
+    expect(panel.textContent || '').toContain('第 3 条 AI 回复（定期）');
+    expect(panel.textContent || '').toContain('按当前设置预计处理范围：第 1~3 条 AI 回复');
     expect(panel.textContent || '').not.toContain('危险：当前聊天的所有 full checkpoint');
     expect(panel.querySelector('.acu-v2-form-fill-page__checkpoint-risk')).toBeNull();
 
@@ -908,9 +908,9 @@ describe('FormFillPage · 手动填表面板', () => {
     const danger = document.querySelector<HTMLElement>('.acu-dialog__danger-message');
     expect(danger).not.toBeNull();
     const dangerText = danger!.textContent || '';
-    expect(dangerText).toContain('所有 full checkpoint 都在本次重填范围内');
-    expect(dangerText).toContain('系统首次执行时只会做边界检查');
-    expect(dangerText).toContain('在下一步要求你单独确认是否替换本次范围内选中表的基底');
+    expect(dangerText).toContain('本次重填会覆盖当前聊天里所有存档进度');
+    expect(dangerText).toContain('系统会先做安全检查');
+    expect(dangerText).toContain('替换这些表的数据基础');
     expect(dangerText).not.toContain('首次确认后会立即替换 checkpoint 基底');
     expect(dangerText).not.toContain('空白结构');
     const confirmButton = Array.from(document.querySelectorAll<HTMLButtonElement>('.acu-dialog-layer button'))
@@ -1059,26 +1059,26 @@ describe('FormFillPage · 手动填表面板', () => {
     mount.__resetAcuV2MountForTests();
   });
 
-  it('追平入口使用真实计划展示 wave、bucket、skip 与内部空洞边界，确认后才执行', async () => {
+  it('追平入口用真实计划说明要补的范围与不重填承诺，确认后才执行', async () => {
     const { mount, prepareCatchUp, orchestrateCatchUp, orchestrate } = await mountFormFillPage();
     const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
-      .find(btn => btn.textContent?.includes('一键追平所选表未填楼层'))!;
+      .find(btn => btn.textContent?.includes('一键追平还没填的内容'))!;
 
     button.click();
     await new Promise(r => setTimeout(r, 0));
 
     const dialogText = document.querySelector('.acu-dialog-layer')?.textContent || '';
     expect(prepareCatchUp).toHaveBeenCalledWith(['sheet_a', 'sheet_b']);
-    expect(dialogText).toContain('锁定目标：AI 第 3 层');
-    expect(dialogText).toContain('预计 2 个 wave、2 个 bucket');
-    expect(dialogText).toContain('跳过最新楼层：0 层');
-    expect(dialogText).toContain('Wave 1：AI 第 2 层；角色状态');
-    expect(dialogText).toContain('Wave 2：AI 第 3 层；角色状态、事件记录');
-    expect(dialogText).toContain('不扫描或修复历史前沿之前的内部空洞');
+    expect(dialogText).toContain('补到第 3 条 AI 回复');
+    expect(dialogText).toContain('会分 2 批处理');
+    expect(dialogText).not.toContain('跳过最新');
+    expect(dialogText).toContain('第 1 批：第 2 条 AI 回复；角色状态');
+    expect(dialogText).toContain('第 2 批：第 3 条 AI 回复；角色状态、事件记录');
+    expect(dialogText).toContain('不会回头修改已经填好的部分');
     expect(orchestrateCatchUp).not.toHaveBeenCalled();
     expect(orchestrate).not.toHaveBeenCalled();
 
-    await clickDialogButton('确认追平');
+    await clickDialogButton('开始追平');
     await new Promise(r => setTimeout(r, 0));
 
     expect(orchestrateCatchUp).toHaveBeenCalledTimes(1);
@@ -1100,13 +1100,13 @@ describe('FormFillPage · 手动填表面板', () => {
       plan: { targetAiFloor: 3, targetMessageIndex: 4, planSignature: 'none', waves: [] },
     });
     const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
-      .find(btn => btn.textContent?.includes('一键追平所选表未填楼层'))!;
+      .find(btn => btn.textContent?.includes('一键追平还没填的内容'))!;
 
     button.click();
     await new Promise(r => setTimeout(r, 0));
 
     expect(document.querySelector('.acu-dialog-layer')).toBeNull();
-    expect(await readToastText(mount)).toContain('所选表已追平');
+    expect(await readToastText(mount)).toContain('所选表都已经是最新的');
     expect(orchestrateCatchUp).not.toHaveBeenCalled();
     expect(refreshMergedData).not.toHaveBeenCalled();
 
@@ -1123,14 +1123,14 @@ describe('FormFillPage · 手动填表面板', () => {
       return { success: false, outcome: 'stopped', committedBucketCount: 1 };
     });
     const catchUpButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
-      .find(btn => btn.textContent?.includes('一键追平所选表未填楼层'))!;
+      .find(btn => btn.textContent?.includes('一键追平还没填的内容'))!;
     const manualButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
       .find(btn => btn.textContent?.includes('执行手动填表'))!;
 
     catchUpButton.click();
     await new Promise(r => setTimeout(r, 0));
     expect(manualButton.disabled).toBe(true);
-    await clickDialogButton('确认追平');
+    await clickDialogButton('开始追平');
     await new Promise(r => setTimeout(r, 0));
     expect(capturedController?.signal.aborted).toBe(false);
     expect(manualButton.disabled).toBe(true);
@@ -1146,7 +1146,7 @@ describe('FormFillPage · 手动填表面板', () => {
 
     releaseCatchUp();
     await new Promise(r => setTimeout(r, 0));
-    expect(await readToastText(mount)).toContain('已保留 1 个已提交 bucket');
+    expect(await readToastText(mount)).toContain('已经写好的 1 段保留了');
 
     mount.__resetAcuV2MountForTests();
   });
@@ -1160,16 +1160,16 @@ describe('FormFillPage · 手动填表面板', () => {
       error: '终态进度保存失败：strict save failed',
     });
     const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
-      .find(btn => btn.textContent?.includes('一键追平所选表未填楼层'))!;
+      .find(btn => btn.textContent?.includes('一键追平还没填的内容'))!;
 
     button.click();
     await new Promise(r => setTimeout(r, 0));
-    await clickDialogButton('确认追平');
+    await clickDialogButton('开始追平');
     await new Promise(r => setTimeout(r, 0));
 
     const toastText = await readToastText(mount);
-    expect(toastText).toContain('手动追平数据已提交，但完成状态记录失败');
-    expect(toastText).toContain('strict save failed');
+    expect(toastText).toContain('进度记录没保存成功');
+    expect(toastText).toContain('不会重填这次写好的部分');
 
     mount.__resetAcuV2MountForTests();
   });
@@ -1183,17 +1183,16 @@ describe('FormFillPage · 手动填表面板', () => {
       error: 'V2 replay 未恢复所选表：sheet_a；已从聊天持久化状态回载运行时。',
     });
     const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
-      .find(btn => btn.textContent?.includes('一键追平所选表未填楼层'))!;
+      .find(btn => btn.textContent?.includes('一键追平还没填的内容'))!;
 
     button.click();
     await new Promise(r => setTimeout(r, 0));
-    await clickDialogButton('确认追平');
+    await clickDialogButton('开始追平');
     await new Promise(r => setTimeout(r, 0));
 
     const toastText = await readToastText(mount);
-    expect(toastText).toContain('持久化完整性校验失败');
-    expect(toastText).toContain('已回载聊天中的已保存数据');
-    expect(toastText).toContain('V2 replay 未恢复所选表');
+    expect(toastText).toContain('写入后发现数据不一致');
+    expect(toastText).toContain('已经恢复成聊天里上次保存的内容');
 
     mount.__resetAcuV2MountForTests();
   });
@@ -1207,14 +1206,14 @@ describe('FormFillPage · 手动填表面板', () => {
       error: '手动追平目标早于未知 V2 checkpoint；请先执行 V2 恢复诊断。',
     });
     const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
-      .find(btn => btn.textContent?.includes('一键追平所选表未填楼层'))!;
+      .find(btn => btn.textContent?.includes('一键追平还没填的内容'))!;
 
     button.click();
     await new Promise(r => setTimeout(r, 0));
-    await clickDialogButton('确认追平');
+    await clickDialogButton('开始追平');
     await new Promise(r => setTimeout(r, 0));
 
-    expect(await readToastText(mount)).toContain('请先执行 V2 恢复诊断');
+    expect(await readToastText(mount)).toContain('为了不覆盖已有内容');
 
     mount.__resetAcuV2MountForTests();
   });
@@ -1223,13 +1222,13 @@ describe('FormFillPage · 手动填表面板', () => {
     const { mount, orchestrateCatchUp, refreshMergedData } = await mountFormFillPage();
     orchestrateCatchUp.mockResolvedValueOnce({ success: true, outcome: 'sync_pending', committedBucketCount: 2 });
     const button = Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
-      .find(btn => btn.textContent?.includes('一键追平所选表未填楼层'))!;
+      .find(btn => btn.textContent?.includes('一键追平还没填的内容'))!;
     button.click();
     await new Promise(r => setTimeout(r, 0));
-    await clickDialogButton('确认追平');
+    await clickDialogButton('开始追平');
     await new Promise(r => setTimeout(r, 0));
 
-    expect(await readToastText(mount)).toContain('世界书同步待重试');
+    expect(await readToastText(mount)).toContain('世界书还没同步好');
     await clickToastAction(mount, '仅同步重试');
     await new Promise(r => setTimeout(r, 0));
 

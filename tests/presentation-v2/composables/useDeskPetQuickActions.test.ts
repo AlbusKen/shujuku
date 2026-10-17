@@ -144,9 +144,9 @@ describe('useDeskPetQuickActions', () => {
 
     await actions.requestCatchUp();
     await waitForCondition(() => actions.confirm.value !== null, '追平确认卡');
-    expect(actions.confirm.value?.title).toBe('一键追平全表');
+    expect(actions.confirm.value?.title).toBe('补齐还没填的内容');
     expect(actions.confirm.value?.message).toContain('2 张表');
-    expect(actions.confirm.value?.message).toContain('AI 第 3~5 层');
+    expect(actions.confirm.value?.message).toContain('第 3~5 条 AI 回复');
 
     actions.acceptCatchUp();
     await waitForCondition(() => getNoticeHubSnapshot_ACU().notices.length > 0, '追平结果通知');
@@ -154,7 +154,7 @@ describe('useDeskPetQuickActions', () => {
     const call = orchestrateManualCatchUp_ACU.mock.calls[0] as any[];
     expect(call[0]).toEqual(['sheet_0', 'sheet_1']);
     expect(call[2].executionSnapshot).toEqual({ sheetKeys: ['sheet_0', 'sheet_1'] });
-    expect(getNoticeHubSnapshot_ACU().notices[0].text).toContain('共提交 2 个 bucket');
+    expect(getNoticeHubSnapshot_ACU().notices[0].text).toContain('共写入 2 段');
     expect(getNoticeHubSnapshot_ACU().tasks).toHaveLength(0);
     scope.stop();
   });
@@ -164,7 +164,7 @@ describe('useDeskPetQuickActions', () => {
     runtimeReady = false;
     await actions.requestCatchUp();
     expect(actions.confirm.value).toBeNull();
-    expect(getNoticeHubSnapshot_ACU().notices[0].text).toContain('运行时未就绪');
+    expect(getNoticeHubSnapshot_ACU().notices[0].text).toContain('表格还没加载好');
     scope.stop();
   });
 
@@ -176,11 +176,11 @@ describe('useDeskPetQuickActions', () => {
     actions.acceptCatchUp();
     await waitForCondition(() => getNoticeHubSnapshot_ACU().notices.length > 0, '取消提示');
     expect(orchestrateManualCatchUp_ACU).not.toHaveBeenCalled();
-    expect(getNoticeHubSnapshot_ACU().notices[0].text).toContain('发生变化');
+    expect(getNoticeHubSnapshot_ACU().notices[0].text).toContain('确认期间表格有变化');
     scope.stop();
   });
 
-  it('执行中被终止时播报保留的已提交 bucket，并恢复空闲状态', async () => {
+  it('执行中被终止时播报保留的已写入内容，并恢复空闲状态', async () => {
     let release!: () => void;
     orchestrateGate = new Promise<void>(resolve => { release = resolve; });
     orchestrateResult = { success: false, outcome: 'stopped', committedBucketCount: 1, dataCommitted: false };
@@ -192,7 +192,7 @@ describe('useDeskPetQuickActions', () => {
     expect(actions.busy.value).toBe(true);
     release();
     await waitForCondition(() => !actions.busy.value, '追平结束');
-    expect(getNoticeHubSnapshot_ACU().notices[0].text).toContain('保留了 1 个已提交 bucket');
+    expect(getNoticeHubSnapshot_ACU().notices[0].text).toContain('已经写好的 1 段保留了');
     scope.stop();
   });
 
@@ -201,7 +201,7 @@ describe('useDeskPetQuickActions', () => {
     const running = beginNoticeTask_ACU('手动追平', { detail: '正在填表…' });
     await actions.requestCatchUp();
     expect(actions.confirm.value).toBeNull();
-    expect(getNoticeHubSnapshot_ACU().notices[0].text).toContain('已有追平任务在进行中');
+    expect(getNoticeHubSnapshot_ACU().notices[0].text).toContain('已经有一次补填在进行中');
     running.end();
     scope.stop();
   });

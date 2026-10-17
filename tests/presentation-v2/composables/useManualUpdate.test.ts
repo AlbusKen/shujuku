@@ -542,7 +542,7 @@ describe('useManualUpdate purge 后执行边界守卫', () => {
     manual.setManualSelectedKeys(['sheet_0']);
 
     const pending = manual.runManualCatchUp();
-    await waitForCondition(() => dialog.active?.title === '追平所选表未填楼层', '追平确认弹窗出现');
+    await waitForCondition(() => dialog.active?.title === '一键追平还没填的内容', '追平确认弹窗出现');
     const confirmMessage = dialog.active?.message || '';
     manual.selectedManualTableKeys.value = ['sheet_1'];
     dialog.submitActive();
@@ -597,7 +597,7 @@ describe('useManualUpdate purge 后执行边界守卫', () => {
 
     expect(manual.catchUpBusy.value).toBe(false);
     expect(orchestrateManualCatchUp_ACU).not.toHaveBeenCalled();
-    expect(toast.items.some(item => item.kind === 'error' && item.text.includes('dialog store crashed'))).toBe(true);
+    expect(toast.items.some(item => item.kind === 'error' && item.text.includes('追平过程中出错了'))).toBe(true);
     // finally 中 refresh() 会把 selection 恢复为当前 runtime 合法集合（sheet_0）
     expect(manual.selectedManualTableKeys.value).toEqual(['sheet_0']);
     __resetToastStoreForTests();
@@ -627,8 +627,8 @@ describe('useManualUpdate purge 后执行边界守卫', () => {
 
     await manual.runManualCatchUp();
     expect(dialog.active).toBeNull();
-    expect(toast.items.some(item => item.kind === 'warning' && item.text.includes('未选择需要追平的表格'))).toBe(true);
-    expect(toast.items.some(item => item.text.includes('运行时未就绪'))).toBe(false);
+    expect(toast.items.some(item => item.kind === 'warning' && item.text.includes('请先选择要补填的表格'))).toBe(true);
+    expect(toast.items.some(item => item.text.includes('表格还没准备好'))).toBe(false);
     __resetToastStoreForTests();
   });
 
@@ -654,14 +654,14 @@ describe('useManualUpdate purge 后执行边界守卫', () => {
     const manual = useManualUpdate();
 
     const pending = manual.runManualCatchUp();
-    await waitForCondition(() => dialog.active?.title === '追平所选表未填楼层', '追平确认弹窗出现');
+    await waitForCondition(() => dialog.active?.title === '一键追平还没填的内容', '追平确认弹窗出现');
     // 用户在确认弹窗停留期间发生 purge
     displayTableData = null;
     dialog.submitActive();
     await pending;
 
     expect(orchestrateManualCatchUp_ACU).not.toHaveBeenCalled();
-    expect(toast.items.some(item => item.kind === 'warning' && item.text.includes('确认期间发生变化'))).toBe(true);
+    expect(toast.items.some(item => item.kind === 'warning' && item.text.includes('确认期间表格有变化'))).toBe(true);
     __resetToastStoreForTests();
   });
 
@@ -686,7 +686,7 @@ describe('useManualUpdate purge 后执行边界守卫', () => {
     const manual = useManualUpdate();
 
     const pending = manual.runManualCatchUp();
-    await waitForCondition(() => dialog.active?.title === '追平所选表未填楼层', '追平确认弹窗出现');
+    await waitForCondition(() => dialog.active?.title === '一键追平还没填的内容', '追平确认弹窗出现');
     // 确认期间 runtime 表集合变化（sheet_0 被删、新增 sheet_9）
     displayTableData = {
       sheet_9: { name: '另一表', content: [['row_id', '名称']] },
@@ -695,7 +695,7 @@ describe('useManualUpdate purge 后执行边界守卫', () => {
     await pending;
 
     expect(orchestrateManualCatchUp_ACU).not.toHaveBeenCalled();
-    expect(toast.items.some(item => item.kind === 'warning' && item.text.includes('确认期间发生变化'))).toBe(true);
+    expect(toast.items.some(item => item.kind === 'warning' && item.text.includes('确认期间表格有变化'))).toBe(true);
     __resetToastStoreForTests();
   });
 
@@ -733,7 +733,7 @@ describe('useManualUpdate 手动追平表更新通知', () => {
     const manual = useManualUpdate();
 
     const pending = manual.runManualCatchUp();
-    await waitForCondition(() => dialog.active?.title === '追平所选表未填楼层', '追平确认弹窗出现');
+    await waitForCondition(() => dialog.active?.title === '一键追平还没填的内容', '追平确认弹窗出现');
     dialog.submitActive();
     await pending;
 
