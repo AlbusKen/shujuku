@@ -300,7 +300,9 @@ describe('DeskPetActionMenu 动作菜单', () => {
   it('方向键循环菜单项，Home/End 定位首尾，Escape 阻止向外传播', async () => {
     const { menu, closeEvents } = mountMenu({ autoFocus: true });
     await nextTick();
-    const action = menu.querySelector<HTMLButtonElement>('.acu-desk-pet-menu__action')!;
+    const actions = [...menu.querySelectorAll<HTMLButtonElement>('.acu-desk-pet-menu__action')];
+    const action = actions[0];
+    const second = actions[1];
     const close = menu.querySelector<HTMLButtonElement>('.acu-desk-pet-menu__close')!;
     const key = (value: string) => {
       const event = new KeyboardEvent('keydown', { key: value, bubbles: true, cancelable: true });
@@ -308,8 +310,8 @@ describe('DeskPetActionMenu 动作菜单', () => {
       expect(event.defaultPrevented).toBe(true);
     };
     key('ArrowDown');
-    expect(document.activeElement).toBe(close);
-    key('ArrowRight');
+    expect(document.activeElement).toBe(second);
+    key('ArrowUp');
     expect(document.activeElement).toBe(action);
     key('ArrowUp');
     expect(document.activeElement).toBe(close);

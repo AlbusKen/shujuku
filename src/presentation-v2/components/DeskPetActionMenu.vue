@@ -8,18 +8,6 @@
     :style="menuStyle"
   >
     <div class="acu-desk-pet-menu__panel" :style="paletteStyle">
-      <button
-        type="button"
-        class="acu-desk-pet-menu__close"
-        title="关闭动作菜单"
-        aria-label="关闭动作菜单"
-        @click="close(true)"
-      >
-        <svg viewBox="0 0 16 16" aria-hidden="true">
-          <path d="M4 4l8 8M12 4l-8 8" />
-        </svg>
-      </button>
-
       <div v-if="confirm" class="acu-desk-pet-menu__confirm" role="group" :aria-label="confirm.title">
         <p class="acu-desk-pet-menu__confirm-title">{{ confirm.title }}</p>
         <p class="acu-desk-pet-menu__confirm-text">{{ confirm.message }}</p>
@@ -122,6 +110,19 @@
           </div>
         </div>
       </template>
+
+      <button
+        type="button"
+        class="acu-desk-pet-menu__close"
+        role="menuitem"
+        title="关闭动作菜单"
+        aria-label="关闭动作菜单"
+        @click="close(true)"
+      >
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M4 4l8 8M12 4l-8 8" />
+        </svg>
+      </button>
     </div>
   </div>
 </template>
