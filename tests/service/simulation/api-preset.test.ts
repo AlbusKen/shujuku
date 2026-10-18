@@ -22,4 +22,35 @@ describe('格林推演 API preset', () => {
       throw new Error('expected preset failure');
     }
   });
+
+  it.each(['fixed', 'current'] as const)('%s 渠道在配置被替换后读取新 URL 和模型', mode => {
+    const deps = dependencies();
+    let channel = deps.resolvePreset(mode === 'fixed' ? 'review' : '');
+    deps.resolvePreset.mockImplementation(() => channel);
+    const input = { ...settings, agentApiPresets: { reviewer: { mode, presetName: 'review' } } };
+    const preset = resolveWorldSimulationAgentApiPreset_ACU(input, 'reviewer', 'agent_delegate', deps);
+    const oldConfig = preset.apiConfig;
+    channel = { ...channel, apiConfig: { ...channel.apiConfig, url: 'https://updated.invalid/v1', model: 'updated-model' } };
+
+    expect(preset.apiConfig).toBe(channel.apiConfig);
+    expect(preset.apiConfig).not.toBe(oldConfig);
+    expect(preset.apiConfig).toMatchObject({ url: 'https://updated.invalid/v1', model: 'updated-model' });
+    expect(preset.presetName).toBe(mode === 'fixed' ? 'review' : '');
+  });
+
+  it('固定预设回读原名称，与当前渠道无关', () => {
+    const deps = dependencies();
+    const preset = resolveWorldSimulationAgentApiPreset_ACU(settings, 'reviewer', 'agent_delegate', deps);
+    deps.resolvePreset.mockClear();
+    expect(preset.apiConfig.model).toBe('review');
+    expect(deps.resolvePreset).toHaveBeenCalledWith('review');
+    expect(deps.resolvePreset).not.toHaveBeenCalledWith('');
+  });
+
+  it('固定预设解析后失效时不复用旧值', () => {
+    const deps = dependencies();
+    const preset = resolveWorldSimulationAgentApiPreset_ACU(settings, 'reviewer', 'agent_delegate', deps);
+    deps.resolvePreset.mockReturnValue({ ...deps.resolvePreset(''), resolved: false });
+    expect(() => preset.apiConfig).toThrow(WorldSimulationValidationError_ACU);
+  });
 });

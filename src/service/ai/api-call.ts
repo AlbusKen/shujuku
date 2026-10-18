@@ -714,6 +714,9 @@ export async function callAIWithResolvedPreset_ACU(
     if (!Array.isArray(messages) || messages.length === 0) {
         throw new Error('内部 AI 消息必须是非空数组。');
     }
+    // 活渠道只在请求入口取值；超时、路由与请求体共用本次副本，异步等待期间不再漂移。
+    resolved = { ...resolved };
+    resolved.apiConfig = { ...resolved.apiConfig };
     return withApiRequestTimeout_ACU(resolved.apiConfig, signal, async (signal) => {
     const reportUsage = (raw: unknown): void => {
         if (!lifecycle?.onUsage) return;
@@ -865,6 +868,9 @@ export async function callAIChatTurn_ACU(
     extras?: ResolvedPresetCallExtras_ACU,
 ): Promise<AiChatTurn_ACU> {
     if (!Array.isArray(messages) || messages.length === 0) throw new Error('内部 AI 消息必须是非空数组。');
+    // 与文本请求一致：一次调用使用同一份渠道配置，下一次调用再读取最新预设。
+    resolved = { ...resolved };
+    resolved.apiConfig = { ...resolved.apiConfig };
     return withApiRequestTimeout_ACU(resolved.apiConfig, signal, async (signal) => {
     const reportUsage = (raw: unknown): void => {
         if (!lifecycle?.onUsage) return;

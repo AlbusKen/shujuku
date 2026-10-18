@@ -75,6 +75,7 @@ import { agentNativeTools_ACU } from '../../../src/service/ai/native-tool';
 import { getAgentSubagentAccessProfile_ACU } from '../../../src/service/continuation/agent/agent-catalog';
 import { worldSimulationAgentNativeTools_ACU } from '../../../src/service/simulation/agent/agent-catalog';
 import { isMainApiChatCompletionAvailable_ACU, sendMainApiChatCompletionRequest_ACU } from '../../../src/data/gateways/ai-gateway';
+import { withLiveCurrentChannel_ACU } from '../../../src/service/settings/live-current-channel';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -986,6 +987,34 @@ describe('剧情 API 传输路由', () => {
       expect(sendMainApiChatCompletionRequest_ACU).toHaveBeenCalledTimes(expected === 'main-chat-completion' ? 1 : 0);
       expect(mockFetch).toHaveBeenCalledTimes(expected === 'custom' ? 1 : 0);
     }
+  });
+});
+
+describe('解析渠道的请求级快照', () => {
+  it.each(['text', 'tools'] as const)('%s 请求只读取一次配置，超时与实际请求使用同一份参数', async kind => {
+    const apiConfig = {
+      sendViaTavern: true, url: 'https://snapshot.example/v1', model: 'snapshot-model',
+      apiKey: '', useMainApi: false, max_tokens: 222, temperature: 0,
+      bodyParams: '', excludeBodyParams: '', requestHeaders: '',
+    };
+    const readChannel = vi.fn(() => ({ apiMode: 'custom' as const, apiConfig, tavernProfile: '' }));
+    const preset = withLiveCurrentChannel_ACU(readChannel(), readChannel);
+    readChannel.mockClear();
+    mockHandleApiResponse.mockResolvedValue('reply');
+    mockFetch.mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: 'reply' } }] })));
+
+    const operation = kind === 'text'
+      ? callAIWithResolvedPreset_ACU([{ role: 'user', content: 'snapshot' }], preset)
+      : callAIChatTurn_ACU([{ role: 'user', content: 'snapshot' }], preset);
+    // 请求入口已捕获配置；异步发送前改动原对象也不能混入本次请求。
+    apiConfig.url = 'https://later.example/v1';
+    apiConfig.model = 'later-model';
+    apiConfig.max_tokens = 999;
+    await operation;
+
+    expect(readChannel).toHaveBeenCalledTimes(3);
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body).toMatchObject({ custom_url: 'https://snapshot.example/v1', model: 'snapshot-model', max_tokens: 222 });
   });
 });
 

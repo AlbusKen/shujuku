@@ -49,10 +49,9 @@ function normalizeCharacterWorldbookBinding_ACU(raw: unknown, apiSource: Charact
     if (!Array.isArray(additional) || additional.some(name => typeof name !== 'string')) {
         throw new CharacterWorldbookBindingError_ACU('CharacterWorldbookBindingContractError_ACU');
     }
-    const normalizedPrimary = typeof primary === 'string' && primary.trim() ? primary.trim() : null;
+    const normalizedPrimary = typeof primary === 'string' && primary.trim() ? primary : null;
     const normalizedAdditional = additional
-        .map(name => name.trim())
-        .filter(Boolean);
+        .filter(name => name.trim());
     const orderedNames = [...new Set([normalizedPrimary, ...normalizedAdditional].filter((name): name is string => !!name))];
     return { primary: normalizedPrimary, additional: [...new Set(normalizedAdditional)], orderedNames, apiSource };
 }

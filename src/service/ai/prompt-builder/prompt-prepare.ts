@@ -398,12 +398,7 @@ function resolvePromptRowWindow_ACU(
     const readContext = options?.worldbookReadContext ?? ownedReadContext;
     const worldbookConfig = getCurrentWorldbookConfig_ACU();
     const syncReadScopeNames = buildTableCandidateScope_ACU([
-      () => Array.isArray(worldbookConfig?.manualSelection) ? worldbookConfig.manualSelection : [],
-      () => {
-        const enabled = worldbookConfig?.enabledEntries;
-        return enabled && typeof enabled === 'object' ? Object.keys(enabled) : [];
-      },
-      () => Array.isArray(options?.agentGreenlights) ? options.agentGreenlights.map((g: any) => String(g?.bookName || '').trim()).filter(Boolean) : [],
+      () => worldbookConfig?.source === 'manual' && Array.isArray(worldbookConfig.manualSelection) ? worldbookConfig.manualSelection : [],
     ]);
     const asyncReadScopeNames = await collectAsyncTableCandidateScope_ACU([
       // 来源 4：当前数据注入目标世界书（内部已做宿主存在性验证，失败静默返回 null）

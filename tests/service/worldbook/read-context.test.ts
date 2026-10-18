@@ -117,9 +117,11 @@ describe('abort / scope_changed / dispose', () => {
     expect(mockGetLorebookEntries).toHaveBeenCalledTimes(4);
 
     aborted = true;
+    const settled = Promise.allSettled([...firstFour, queued]);
     releases.forEach(release => release());
-    await Promise.all(firstFour);
-    await expect(queued).rejects.toThrow('TaskAbortedByUser');
+    const results = await settled;
+    expect(results.every(result => result.status === 'rejected'
+      && result.reason.message === 'TaskAbortedByUser')).toBe(true);
     expect(mockGetLorebookEntries).toHaveBeenCalledTimes(4);
   });
 
@@ -184,10 +186,10 @@ describe('abort / scope_changed / dispose', () => {
 
 describe('候选作用域工具', () => {
   it('buildLorebookReadScope_ACU 保序去重并跳过空值', () => {
-    expect(buildLorebookReadScope_ACU([' 书A ', '书B', '书A', '', null as any, 1 as any])).toEqual(['书A', '书B']);
+    expect(buildLorebookReadScope_ACU([' 书A ', '书B', '书A', '', null as any, 1 as any])).toEqual([' 书A ', '书B', '书A']);
   });
 
-  it('dedupeLorebookHostNames_ACU 按物理身份去重归一化别名', () => {
-    expect(dedupeLorebookHostNames_ACU(['书⚔', '书⚔\uFE0F', '书⚔\uFE0E', '书B'])).toEqual(['书⚔', '书B']);
+  it('dedupeLorebookHostNames_ACU 保留视觉相似但身份不同的世界书', () => {
+    expect(dedupeLorebookHostNames_ACU(['书⚔', '书⚔\uFE0F', '书⚔\uFE0E', '书B'])).toEqual(['书⚔', '书⚔\uFE0F', '书⚔\uFE0E', '书B']);
   });
 });

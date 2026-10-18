@@ -202,10 +202,15 @@ export function buildTavernHelperCompat_ACU(rawTH: any, getStApi: GetStApi_ACU):
         delete api[name];
     }
 
-    // ═══ 世界书后端组：只在初始化时选择一次来源 ═══
+    // 读取统一直达宿主；写入保留酒馆助手/原生保存契约，不做运行时错误回退。
+    const reader = createFreshWorldbookReader_ACU(getStApi);
     const rawWorldbook = rawTH && typeof rawTH === 'object' ? createRawTavernHelperWorldbookBackend_ACU(rawTH) : null;
-    const worldbookBackend: WorldbookHostBackend_ACU | null = rawWorldbook?.backend ?? (nativeUsable ? native : null);
-    const worldbookCapabilities = rawWorldbook?.capabilities ?? {};
+    const worldbookBackend: WorldbookHostBackend_ACU = {
+        ...(rawWorldbook?.backend ?? (nativeUsable ? native : {})), ...reader,
+    };
+    const worldbookCapabilities = { ...rawWorldbook?.capabilities,
+        getLorebooks: 'native', getLorebookEntries: 'native', getCharWorldbookNames: 'native',
+    } as Partial<Record<WorldbookBackendMethodName_ACU, HostCapabilityBackend_ACU>>;
     const mountWorldbook = (name: WorldbookBackendMethodName_ACU): void => {
         const implementation = worldbookBackend?.[name];
         if (typeof implementation !== 'function') {

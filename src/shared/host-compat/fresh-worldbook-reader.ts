@@ -20,7 +20,21 @@ export function createFreshWorldbookReader_ACU(getStApi: GetStApi_ACU, loadWorld
         if (loadWorldInfoModule) return loadWorldInfoModule();
         // 绝对宿主 URL 避免 iframe/扩展 bundle 的相对模块路径；仅缓存模块，不缓存绑定值。
         const url = new URL('/scripts/world-info.js', host().location.href).href;
-        modulePromise ??= import(/* @vite-ignore */ url).catch(() => {
+        // 在主窗口执行 import，避免 iframe 创建另一份 world-info 模块状态。
+        modulePromise ??= new Promise<WorldInfoModule_ACU>((resolve, reject) => {
+            const win = host();
+            const key = `__ACU_WI_MODULE_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+            const script = win.document.createElement('script');
+            const cleanup = () => { clearTimeout(timer); delete win[key]; script.remove(); };
+            const fail = () => { cleanup(); reject(new WorldbookReadError_ACU('api_unavailable', 'bindings')); };
+            const timer = setTimeout(fail, 15000);
+            win[key] = { resolve: (module: WorldInfoModule_ACU) => { cleanup(); resolve(module); }, reject: fail };
+            script.type = 'module';
+            script.onerror = fail;
+            script.textContent = `import(${JSON.stringify(url)}).then(m => window[${JSON.stringify(key)}]?.resolve(m), () => window[${JSON.stringify(key)}]?.reject());`;
+            try { (win.document.head || win.document.documentElement).appendChild(script); }
+            catch { fail(); }
+        }).catch(() => {
             modulePromise = undefined;
             throw new WorldbookReadError_ACU('api_unavailable', 'bindings');
         });
@@ -35,7 +49,7 @@ export function createFreshWorldbookReader_ACU(getStApi: GetStApi_ACU, loadWorld
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 15000);
         try {
-            const response = await fetcher(url, { method: 'POST', headers: api.getRequestHeaders(),
+            const response = await fetcher(url, { method: 'POST', headers: { ...api.getRequestHeaders(), 'Content-Type': 'application/json' },
                 body: JSON.stringify(body), cache: 'no-store', credentials: 'same-origin', signal: controller.signal });
             if (!response.ok) throw new WorldbookReadError_ACU('unknown', path);
             return await response.json();

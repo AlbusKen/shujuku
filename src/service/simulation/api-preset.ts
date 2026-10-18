@@ -16,9 +16,17 @@ export function resolveWorldSimulationApiPreset_ACU(settings: Pick<Settings_ACU,
   if (settings.apiPresetMode === 'fixed') {
     const presetName = settings.fixedApiPresetName.trim();
     if (!presetName) fail_ACU(phase, 'WORLD_SIMULATION_API_PRESET_MISSING', '固定格林推演 API 预设不能为空');
-    const resolved = dependencies.resolvePreset(presetName);
-    if (!resolved.resolved) fail_ACU(phase, 'WORLD_SIMULATION_API_PRESET_MISSING', '格林推演 API 预设不存在或已失效');
-    return { presetName, source: 'fixed', reason: 'fixed_preset', apiMode: resolved.apiMode, apiConfig: resolved.apiConfig, tavernProfile: resolved.tavernProfile };
+    // 固定预设名称，配置按该名称回读；失效时拒绝发送而不是沿用旧对象。
+    const readPreset = (): Resolution_ACU => {
+      const resolved = dependencies.resolvePreset(presetName);
+      if (!resolved.resolved) fail_ACU(phase, 'WORLD_SIMULATION_API_PRESET_MISSING', '格林推演 API 预设不存在或已失效');
+      return resolved;
+    };
+    const resolved = readPreset();
+    return withLiveCurrentChannel_ACU(
+      { presetName, source: 'fixed', reason: 'fixed_preset', apiMode: resolved.apiMode, apiConfig: resolved.apiConfig, tavernProfile: resolved.tavernProfile },
+      readPreset,
+    );
   }
   if (settings.apiPresetMode !== 'current') fail_ACU(phase, 'WORLD_SIMULATION_CONFIG_INVALID', '格林推演 API 预设模式非法');
   const resolved = dependencies.resolvePreset('');

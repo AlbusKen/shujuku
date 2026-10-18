@@ -38,8 +38,8 @@ function normalizeSelection(names: unknown): string[] {
   if (!Array.isArray(names)) return [];
   const result: string[] = [];
   for (const name of names) {
-    const trimmed = String(name || '').trim();
-    if (trimmed && !result.includes(trimmed)) result.push(trimmed);
+    const trimmed = typeof name === 'string' ? name : '';
+    if (trimmed.trim() && !result.includes(trimmed)) result.push(trimmed);
   }
   return result;
 }
@@ -52,9 +52,8 @@ export function usePlotWorldbookConfig() {
 
   function refreshFromSettings(): void {
     const cfg = ensureConfig();
-    cfg.manualSelection = normalizeSelection(cfg.manualSelection);
     source.value = cfg.source;
-    manualSelection.value = [...cfg.manualSelection];
+    manualSelection.value = normalizeSelection(cfg.manualSelection);
   }
 
   function setSource(next: PlotWorldbookSource): void {
@@ -75,8 +74,8 @@ export function usePlotWorldbookConfig() {
   }
 
   function toggleManualBook(name: string, checked: boolean): void {
-    const trimmed = String(name || '').trim();
-    if (!trimmed) return;
+    const trimmed = String(name || '');
+    if (!trimmed.trim()) return;
     const current = normalizeSelection(manualSelection.value);
     const next = checked
       ? (current.includes(trimmed) ? current : [...current, trimmed])

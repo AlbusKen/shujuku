@@ -27,8 +27,8 @@ export async function resolveLorebookReadTargets_ACU(
   const seenHosts = new Set<string>();
   const targets: LorebookReadTarget_ACU[] = [];
   for (const raw of requestedNames) {
-    const requested = String(raw ?? '').trim();
-    if (!requested || seenRequested.has(requested)) continue;
+    const requested = String(raw ?? '');
+    if (!requested.trim() || seenRequested.has(requested)) continue;
     seenRequested.add(requested);
     let hostName: string | null = null;
     if (context) {
@@ -52,8 +52,8 @@ export function buildTableCandidateScope_ACU(collectors: Array<() => Iterable<st
   const names: string[] = [];
   for (const collect of collectors) {
     for (const raw of collect()) {
-      const name = String(raw ?? '').trim();
-      if (name && !seen.has(name)) {
+      const name = String(raw ?? '');
+      if (name.trim() && !seen.has(name)) {
         seen.add(name);
         names.push(name);
       }
@@ -80,8 +80,8 @@ export async function collectAsyncTableCandidateScope_ACU(
       continue;
     }
     for (const raw of values) {
-      const name = String(raw ?? '').trim();
-      if (name && !seen.has(name)) {
+      const name = String(raw ?? '');
+      if (name.trim() && !seen.has(name)) {
         seen.add(name);
         names.push(name);
       }

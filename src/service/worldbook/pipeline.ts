@@ -775,8 +775,8 @@ export   async function loadAllChatMessages_ACU() {
 function normalizeWorldbookListNames_ACU(bookList: unknown): string[] {
       if (!Array.isArray(bookList)) return [];
       return bookList
-          .map(item => String(typeof item === 'object' && item !== null ? (item as any).name || '' : item || '').trim())
-          .filter(Boolean);
+          .map(item => String(typeof item === 'object' && item !== null ? (item as any).name || '' : item || ''))
+          .filter(name => name.trim());
 }
 
 export   async function getWorldbookNames_ACU() {
@@ -875,8 +875,8 @@ export function summarizeStrictLorebookReadError_ACU(error: unknown) {
 
 function normalizeRequestedLorebookNames_ACU(bookNames: unknown): string[] {
   return [...new Set((Array.isArray(bookNames) ? bookNames : [])
-    .map(name => String(name || '').trim())
-    .filter(Boolean))];
+    .map(name => String(name || ''))
+    .filter(name => name.trim()))];
 }
 
 function cloneLorebookReadValue_ACU(value: any): any {
@@ -920,6 +920,8 @@ async function readStrictLorebookBook_ACU(bookName: string, context?: StrictLore
   } catch (error) {
     const failureStatus = getStrictLorebookContextStatus_ACU(context);
     if (failureStatus) return { bookName, status: failureStatus, entries: [] };
+    const category = classifyLorebookReadError_ACU(error);
+    if (category === 'aborted' || category === 'scope_changed') return { bookName, status: category, entries: [] };
     return { bookName, status: 'read_failed', entries: [], errorCategory: classifyStrictLorebookReadError_ACU(error) };
   }
 }
@@ -1013,7 +1015,7 @@ export async function getLorebookEntriesStrict_ACU(bookNames: string[] = [], opt
 
 
 export   async function getLorebookEntriesByNames_ACU(bookNames: string[] = []) {
-      const uniqueNames = [...new Set((Array.isArray(bookNames) ? bookNames : []).map((name: string) => String(name || '').trim()).filter(Boolean))];
+      const uniqueNames = normalizeRequestedLorebookNames_ACU(bookNames);
       let readTargets = uniqueNames.map(requestedName => ({ requestedName, hostName: requestedName }));
       const entriesMap: Record<string, any[]> = {};
       const canUseTavernHelper = isWorldbookApiAvailable_ACU();
@@ -1038,7 +1040,7 @@ export   async function getLorebookEntriesByNames_ACU(bookNames: string[] = []) 
               });
           }
       } catch (_e) {
-          // listLorebooks_ACU 失败时降级为不过滤，让下方原有的 try-catch 兜底
+          throw _e;
       }
 
       if (!canUseTavernHelper) {
@@ -1060,14 +1062,14 @@ export   async function getLorebookEntriesByNames_ACU(bookNames: string[] = []) 
               }
               // 返回键保留调用方请求名称以兼容现有接口；条目 book 使用真实宿主名称。
               entriesMap[requestedName] = Array.isArray(entries) ? entries.map((entry: any) => ({ ...entry, book: hostName })) : [];
-          } catch {
+          } catch (error) {
               logWarn_ACU('[Worldbook] 获取世界书条目失败，忽略该书并继续。', {
                   phase: 'read_entries',
                   attempt: 1,
                   bookName: requestedName,
                   error: { category: 'read_failed' },
               });
-              entriesMap[requestedName] = [];
+              throw error;
           }
       }
       return entriesMap;
@@ -1195,7 +1197,7 @@ function decorateWorldbookEntryStateView_ACU(
 
 export   async function collectCombinedWorldbookEntriesByStrategy_ACU(options: any = {}) {
       const logPrefix = String(options?.logPrefix || '[Worldbook]');
-      const bookNames: string[] = [...new Set<string>((Array.isArray(options?.bookNames) ? options.bookNames : []).map((name: any) => String(name || '').trim()).filter(Boolean))];
+      const bookNames = normalizeRequestedLorebookNames_ACU(options?.bookNames);
       const excludeEntry = typeof options?.excludeEntry === 'function' ? options.excludeEntry : () => false;
       const entryScope = typeof options?.entryScope === 'function' ? options.entryScope : () => true;
       const includeEntry = typeof options?.includeEntry === 'function' ? options.includeEntry : () => true;
