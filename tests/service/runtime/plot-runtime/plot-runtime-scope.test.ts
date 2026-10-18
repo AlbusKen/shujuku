@@ -24,11 +24,11 @@ import {
 } from '../../../../src/service/runtime/plot-runtime/plot-runtime-scope';
 
 describe('plot-runtime-scope', () => {
-  it('规范化角色世界书名称：仅字符串、trim、保序去重与 Unicode 名称', () => {
+  it('角色世界书名称保留原值，只过滤空白并按精确身份去重', () => {
     expect(normalizeLorebookNames_ACU({
       primary: ' Sakura - Neglected Roommate ',
       additional: ['外部导入-', 'Sakura - Neglected Roommate', '  红莉栖の世界书  ', 1, '', null],
-    })).toEqual(['Sakura - Neglected Roommate', '外部导入-', '红莉栖の世界书']);
+    })).toEqual([' Sakura - Neglected Roommate ', '外部导入-', 'Sakura - Neglected Roommate', '  红莉栖の世界书  ']);
   });
 
   it('unknown_chat_init 不构成可靠 scope，隔离为空仍是合法值', () => {

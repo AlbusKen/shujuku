@@ -37,6 +37,7 @@ const {
 }));
 
 vi.mock('../../../src/data/gateways/worldbook-gateway', () => ({
+  createLorebookReadGuard_ACU: vi.fn(async () => async (_names?: string[]) => {}),
   listLorebooks_ACU: vi.fn(async () => []),
   getCurrentCharacterWorldbookBinding_ACU: mockGetCurrentCharacterWorldbookBinding,
   getCharLorebooks_ACU: mockGetCharLorebooks,

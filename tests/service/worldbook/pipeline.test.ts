@@ -159,6 +159,7 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
 }));
 
 vi.mock('../../../src/data/gateways/worldbook-gateway', () => ({
+  createLorebookReadGuard_ACU: vi.fn(async () => async (_names?: string[]) => {}),
   isWorldbookApiAvailable_ACU: mockIsWorldbookApiAvailable,
   getLorebookEntries_ACU: mockGwGetLorebookEntries,
   getLorebookEntriesRequired_ACU: mockGwGetLorebookEntries,
@@ -512,11 +513,11 @@ describe('getLorebookEntriesByNames_ACU', () => {
     expect(mockGwGetLorebookEntries).toHaveBeenCalledTimes(2);
   });
 
-  it('获取失败时返回空数组', async () => {
+  it('获取失败时传播异常，不伪装为空书且不记录正文', async () => {
     const sensitiveText = '用户输入、提示词和世界书正文都不能泄露';
-    mockGwGetLorebookEntries.mockRejectedValue(new Error(sensitiveText));
-    const result = await getLorebookEntriesByNames_ACU(['书A']);
-    expect(result['书A']).toEqual([]);
+    const error = new Error(sensitiveText);
+    mockGwGetLorebookEntries.mockRejectedValue(error);
+    await expect(getLorebookEntriesByNames_ACU(['书A'])).rejects.toBe(error);
     expect(mockLogWarn).toHaveBeenCalledWith('[Worldbook] 获取世界书条目失败，忽略该书并继续。', {
       phase: 'read_entries',
       attempt: 1,
@@ -534,23 +535,22 @@ describe('getLorebookEntriesByNames_ACU', () => {
     expect(result['书A']).toHaveLength(1);
   });
 
-  it('可用列表读取失败时仍逐书读取', async () => {
-    mockListLorebooks.mockRejectedValue(new Error('list unavailable'));
+  it('可用列表读取失败时停止，不使用未经验证的引用', async () => {
+    const error = new Error('list unavailable');
+    mockListLorebooks.mockRejectedValue(error);
     mockGwGetLorebookEntries.mockResolvedValue([{ uid: 1 }]);
-    const result = await getLorebookEntriesByNames_ACU(['书A']);
-    expect(mockGwGetLorebookEntries).toHaveBeenCalledWith('书A');
-    expect(result['书A']).toHaveLength(1);
+    await expect(getLorebookEntriesByNames_ACU(['书A'])).rejects.toBe(error);
+    expect(mockGwGetLorebookEntries).not.toHaveBeenCalled();
   });
 
-  it('单本读取失败不阻断其他世界书', async () => {
+  it('单本读取失败时不返回部分成功结果', async () => {
     mockListLorebooks.mockResolvedValue(['书A', '书B']);
     mockGwGetLorebookEntries.mockImplementation(async (name: string) => {
       if (name === '书A') throw new Error('not found');
       return [{ uid: 2 }];
     });
-    const result = await getLorebookEntriesByNames_ACU(['书A', '书B']);
-    expect(result['书A']).toEqual([]);
-    expect(result['书B']).toHaveLength(1);
+    await expect(getLorebookEntriesByNames_ACU(['书A', '书B'])).rejects.toThrow('not found');
+    expect(mockGwGetLorebookEntries).not.toHaveBeenCalledWith('书B');
   });
 
   it('空输入返回空对象', async () => {
@@ -666,8 +666,8 @@ describe('getLorebookEntriesStrict_ACU', () => {
     const second = getLorebookEntriesStrict_ACU(['剧情书'], {
       source: 'agent_runtime', validationPolicy: 'trusted_direct', runId: 'run-1', context,
     });
-    await Promise.resolve();
-    releaseRead?.();
+    await vi.waitFor(() => expect(releaseRead).toBeTypeOf('function'));
+    releaseRead!();
     const [firstResult, secondResult] = await Promise.all([first, second]);
 
     expect(mockGwGetLorebookEntries).toHaveBeenCalledTimes(1);
@@ -1904,10 +1904,11 @@ describe('buildCombinedWorldbookContentByStrategy_ACU', () => {
 });
 
 describe('getCombinedWorldbookContent_ACU', () => {
-  it('API 不可用时返回空字符串', async () => {
+  it('API 不可用时明确拒绝读取，不伪装成空书', async () => {
     mockIsWorldbookApiAvailable.mockReturnValue(false);
-    const result = await getCombinedWorldbookContent_ACU();
-    expect(result).toBe('');
+    await expect(getCombinedWorldbookContent_ACU()).rejects.toMatchObject({
+      name: 'WorldbookReadError_ACU', category: 'api_unavailable',
+    });
   });
 
   it('character 模式获取角色世界书', async () => {
@@ -1927,9 +1928,10 @@ describe('getCombinedWorldbookContent_ACU', () => {
       source: 'character',
       enabledEntries: {},
     });
-    mockGetCharLorebooks.mockRejectedValue(new Error(sensitiveText));
+    const error = new Error(sensitiveText);
+    mockGetCharLorebooks.mockRejectedValue(error);
 
-    await expect(getCombinedWorldbookContent_ACU()).resolves.toBe('');
+    await expect(getCombinedWorldbookContent_ACU()).rejects.toBe(error);
     expect(mockLogError).toHaveBeenCalledWith('[Worldbook] 获取角色世界书失败:', {
       phase: 'resolve_character',
       error: { category: 'read_failed' },
@@ -2138,10 +2140,27 @@ describe('getCombinedWorldbookContent_ACU', () => {
     expect(result).toBe('');
   });
 
-  it('异常时返回空字符串', async () => {
-    mockGetCurrentWorldbookConfig.mockReturnValue({ source: 'character', enabledEntries: {} });
-    mockGetCharLorebooks.mockRejectedValue(new Error('网络错误'));
-    const result = await getCombinedWorldbookContent_ACU();
-    expect(result).toBe('');
+  it.each(['scope_changed', 'aborted', 'lorebook_not_found', 'unknown'])('条目读取 %s 时原样透传失败', async category => {
+    mockGetCurrentWorldbookConfig.mockReturnValue({ source: 'manual', manualSelection: ['书A'], enabledEntries: {} });
+    const error = Object.assign(new Error('敏感宿主错误正文'), {
+      name: category === 'aborted' ? 'AbortError' : 'WorldbookReadError_ACU', category,
+    });
+    mockGwGetLorebookEntries.mockRejectedValue(error);
+    await expect(getCombinedWorldbookContent_ACU()).rejects.toBe(error);
+    expect(JSON.stringify(mockLogError.mock.calls)).not.toContain('敏感宿主错误正文');
+  });
+
+  it.each(['书A', ' 书A ', 'Ａ / "引号" & # + \u200b'])('绿灯以宿主原名 %s 匹配，不合并不同书名', async bookName => {
+    mockGetCurrentWorldbookConfig.mockReturnValue({ source: 'manual', manualSelection: [bookName], enabledEntries: {} });
+    mockGwGetLorebookEntries.mockResolvedValue([{
+      uid: 1, comment: '用户条目', content: '仅精确书名可放行', enabled: false,
+      type: 'selective', key: ['不匹配'], keys: [],
+    }]);
+    const content = await getCombinedWorldbookContent_ACU('', { agentGreenlights: [{ bookName, uid: 1 }] });
+    expect(content).toBe('仅精确书名可放行');
+    const differentName = bookName.trim() === bookName ? ` ${bookName} ` : bookName.trim();
+    await expect(getCombinedWorldbookContent_ACU('', {
+      agentGreenlights: [{ bookName: differentName, uid: 1 }],
+    })).resolves.toBe('');
   });
 });

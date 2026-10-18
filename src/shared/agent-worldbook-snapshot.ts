@@ -3,7 +3,7 @@ import { hashUserInput_ACU } from './utils';
 
 export function normalizeAgentWorldbookSnapshotBookNames_ACU(bookNames: unknown): string[] {
   if (!Array.isArray(bookNames)) return [];
-  return [...new Set(bookNames.map(name => String(name || '').trim()).filter(Boolean))]
+  return [...new Set<string>(bookNames.filter((name): name is string => typeof name === 'string' && !!name.trim()))]
     .sort((left, right) => left.localeCompare(right));
 }
 

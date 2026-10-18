@@ -73,7 +73,7 @@ export function useAgentWorldbookEntries(options: UseAgentWorldbookEntriesOption
     try {
       const bookNames = await resolveAgentWorldbookScopeBookNames_ACU();
       if (isStale()) return null;
-      const uniqueBookNames = [...new Set(bookNames.map(name => String(name || '').trim()).filter(Boolean))];
+      const uniqueBookNames = [...new Set(bookNames.filter(name => typeof name === 'string' && !!name.trim()))];
       if (uniqueBookNames.length === 0) {
         groups.value = [];
         selected.value = new Map();

@@ -1,5 +1,6 @@
 import { createStrictLorebookReadError_ACU, getLorebookEntriesStrict_ACU, type StrictLorebookReadContext_ACU } from '../../worldbook/pipeline';
-import { listLorebooks_ACU } from '../../../data/gateways/worldbook-gateway';
+import { createLorebookReadGuard_ACU, listLorebooks_ACU, type LorebookReadGuard_ACU } from '../../../data/gateways/worldbook-gateway';
+import { WorldbookReadError_ACU } from '../../../shared/host-compat/fresh-worldbook-reader';
 import { resolveGeneratedEntriesForTable_ACU } from '../../worldbook/worldbook-placeholder-classification';
 import { capturePlotRuntimeScope_ACU, isSamePlotRuntimeScope_ACU, type PlotRuntimeScope_ACU } from './plot-runtime-scope';
 import { logWarn_ACU } from '../../../shared/utils';
@@ -29,6 +30,7 @@ export function createPlotWorldbookReadContext_ACU(
 ): PlotWorldbookReadContext_ACU {
   const initialScope = capturePlotRuntimeScope_ACU();
   let disposed = false;
+  let readGuardPromise: Promise<LorebookReadGuard_ACU> | undefined;
   let characterLorebookNamesPromise: Promise<string[]> | undefined;
   let availableBookNamesPromise: Promise<string[]> | undefined;
   let tableWorldbookIndexPromise: Promise<PlotTableWorldbookIndex_ACU> | undefined;
@@ -39,6 +41,17 @@ export function createPlotWorldbookReadContext_ACU(
     runId: `plot-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
     initialScope,
     bookEntriesPromises: new Map(),
+    async assertCurrent(bookNames: string[] = []) {
+      const assertLocal = () => {
+        if (context.isAborted?.()) throw new Error('TaskAbortedByUser');
+        if (!context.isActive?.()) throw new WorldbookReadError_ACU('scope_changed', 'plot_context');
+      };
+      assertLocal();
+      readGuardPromise ??= createLorebookReadGuard_ACU();
+      const guard = await readGuardPromise;
+      await guard(bookNames);
+      assertLocal();
+    },
     get tableIndexBuildCount() {
       return tableIndexBuildCount;
     },
@@ -88,7 +101,10 @@ export function createPlotWorldbookReadContext_ACU(
           return { entriesByBook: result.entriesByBook, entries };
         });
       }
-      return tableWorldbookIndexPromise;
+      return tableWorldbookIndexPromise.then(async index => {
+        await context.assertCurrent!(Object.keys(index.entriesByBook));
+        return index;
+      });
     },
     getTableWorldbookScopedKeys: (tableName, tableData) => {
       const normalizedTableName = String(tableName || '').trim();
@@ -98,10 +114,13 @@ export function createPlotWorldbookReadContext_ACU(
         tableWorldbookScopedKeysPromises.set(tableData, scopedKeysByTableName);
       }
       const existing = scopedKeysByTableName.get(normalizedTableName);
-      if (existing) return existing;
+      if (existing) return existing.then(async keys => {
+        await context.tableWorldbookIndexPromise;
+        return keys;
+      });
       const promise = context.tableWorldbookIndexPromise.then(index => new Set(
         resolveGeneratedEntriesForTable_ACU(index.entries, normalizedTableName, tableData)
-          .map((entry: any) => `${String(entry.bookName || '').trim()}\u0000${String(entry.uid || '').trim()}`),
+          .map((entry: any) => `${String(entry.bookName || '')}\u0000${String(entry.uid || '').trim()}`),
       ));
       scopedKeysByTableName.set(normalizedTableName, promise);
       return promise;

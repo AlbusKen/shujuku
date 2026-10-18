@@ -1,4 +1,5 @@
 import { resolvePlotApiTransport_ACU } from '../../ai/plot-api-route';
+import { classifyLorebookReadError_ACU } from '../../../shared/lorebook-read-error';
 import type { PlotRequestContext_ACU } from './plot-request-context';
 import { withSqlTemplateReadContext_ACU } from '../template-vars/sql-query-var';
 
@@ -237,7 +238,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         } catch (e) { logWarn_ACU('[剧情任务] 合并表格数据失败, 剧情推进可能使用过时数据:', e); }
       }
 
-      const summaryIndexWorldbookContent = requestContext ? '' : await getSummaryIndexContentForPlot_ACU(plotSettings);
+      const summaryIndexWorldbookContent = requestContext ? '' : await getSummaryIndexContentForPlot_ACU(plotSettings, readContext);
       if (typeof summaryIndexWorldbookContent === 'string' && summaryIndexWorldbookContent.trim()) {
         outlineTableContent = summaryIndexWorldbookContent;
         logDebug_ACU('[剧情推进] $5 使用世界书纪要索引条目内容');
@@ -255,9 +256,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         outlineTableContent = '纪要索引：当前未加载到数据库数据。';
       }
     } catch (error) {
-      if (requestContext) throw error;
-      logError_ACU('[剧情推进] 生成纪要索引($5)时出错:', error);
-      outlineTableContent = '{"error": "加载表格数据时发生错误"}';
+      throw error;
     }
 
     const plotExcludeTags = (plotSettings.contextExcludeTags || '').trim();
@@ -311,14 +310,14 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         const content = await getWorldbookContentForPlot_ACU(plotSettings, userMessage, extraBaseText, {
           ...worldbookOptions,
           includeGeneratedEntries: true,
-          entryScope: (entry: any) => scopedKeys.has(`${String(entry.bookName || '').trim()}\u0000${String(entry.uid || '').trim()}`),
+          entryScope: (entry: any) => scopedKeys.has(`${String(entry.bookName || '')}\u0000${String(entry.uid || '').trim()}`),
           readContext,
           entriesByBook: index.entriesByBook,
           history: requestContext?.history,
         });
         return wrapWorldbookContext(content, '$1');
       } catch (error) {
-        if (String((error as any)?.message || '').startsWith('StrictLorebookRead:')) throw error;
+        if (isStrictLorebookReadError_ACU(error) || classifyLorebookReadError_ACU(error) !== 'unknown') throw error;
         logWarn_ACU('[剧情推进][世界书] 表名占位符解析失败，保留原 token。', {
           phase: 'table_token',
           scope: summarizePlotRuntimeScope_ACU(capturePlotRuntimeScope_ACU()),
@@ -498,6 +497,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       } catch (error) {
         if (sharedContext.requestContext) throw error;
         if (isManualPlotAbort_ACU(error)) throw error;
+        if (isStrictLorebookReadError_ACU(error) || classifyLorebookReadError_ACU(error) !== 'unknown') throw error;
         sharedContext.reportWarning?.('提示词段处理未完成，保留已处理的文本并继续任务。');
         logWarn_ACU('[剧情推进] 提示词段处理异常，继续任务。', {
           error: summarizePlotRuntimeError_ACU(error),
@@ -632,14 +632,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         taskWorldbookOptions,
       );
     } catch (wbError) {
-      if (sharedContext.requestContext) throw wbError;
-      if (isManualPlotAbort_ACU(wbError)) throw wbError;
-      sharedContext.reportWarning?.(`任务「${taskLabel}」的世界书处理失败，使用已取得的资料继续。`);
-      logWarn_ACU(`[剧情推进] [任务:${taskLabel}] 世界书处理失败，继续 AI 调用。`, {
-        phase: 'strict_worldbook_read',
-        runId: sharedContext.worldbookReadContext?.runId || '',
-        error: summarizeStrictLorebookReadError_ACU(wbError) || summarizePlotRuntimeError_ACU(wbError),
-      });
+      throw wbError;
     }
 
     // 构建任务级共享上下文：覆盖 $1/$9 替换值，并在 EJS 前解析表名占位符。
@@ -777,6 +770,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
     } catch (error) {
       if (requestContext) throw error;
       if (isManualPlotAbort_ACU(error)) throw error;
+      if (['scope_changed', 'aborted'].includes(classifyLorebookReadError_ACU(error))) throw error;
       if (isStrictLorebookReadError_ACU(error) || String((error as any)?.message || '').startsWith('StrictLorebookRead:')) {
         sharedContext.reportWarning?.(`任务「${taskLabel}」的提示词处理失败，继续后续任务。`);
         logWarn_ACU(`[剧情推进] [任务:${taskLabel}] 提示词处理失败，继续后续任务。`, {
@@ -856,19 +850,15 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
     let agentDecisionPromise: Promise<AgentDecisionResult_ACU> | null = null;
     try {
       if (!requestContext) {
-      _set_pendingFinalGenerationGreenlights_ACU([]);
-      try {
+        _set_pendingFinalGenerationGreenlights_ACU([]);
         const clearGreenlightsOutcome = await clearFinalGenerationGreenlights_ACU(worldbookReadContext);
         checkPlotAbortRequested_ACU();
         if (clearGreenlightsOutcome.status === 'failed') {
-          reportWarning('世界书绿灯清理未完成，继续剧情任务。');
+          throw Object.assign(new Error('世界书绿灯清理失败'), clearGreenlightsOutcome.error,
+            { name: 'PlotWorldbookPreflightError_ACU' });
         } else if (clearGreenlightsOutcome.status === 'isolated_stale' && clearGreenlightsOutcome.staleBookNames.length > 0) {
           reportWarning('部分世界书已失效，使用其余资料继续剧情任务。');
         }
-      } catch (error) {
-        if (isManualPlotAbort_ACU(error)) throw error;
-        reportWarning('世界书绿灯清理异常，继续剧情任务。');
-      }
       }
 
       ensurePlotTasksCompat_ACU(plotSettings, { syncLegacy: true });
@@ -895,12 +885,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       sharedContext.reportWarning = reportWarning;
     checkCurrent();
 
-    const agentAvailability = await resolveAgentWorldbookFilterAvailability_ACU(worldbookReadContext).catch((error): { available: false; control: null } => {
-      if (requestContext) throw error;
-      if (isManualPlotAbort_ACU(error)) throw error;
-      reportWarning('世界书 Agent 状态读取失败，继续普通剧情任务。');
-      return { available: false, control: null };
-    });
+    const agentAvailability = await resolveAgentWorldbookFilterAvailability_ACU(worldbookReadContext);
     const agentWorldbookControl = agentAvailability.available ? agentAvailability.control : null;
     if (requestContext && agentWorldbookControl && 'bookNames' in agentAvailability) {
       const read = await getLorebookEntriesStrict_ACU(agentAvailability.bookNames, {
@@ -1267,7 +1252,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
             error: summarizePlotRuntimeError_ACU(error),
           });
           throw createStrictLorebookReadError_ACU({
-            status: error instanceof CharacterLorebookScopeChangedError_ACU ? 'scope_changed' : 'read_failed',
+            status: error instanceof CharacterLorebookScopeChangedError_ACU || classifyLorebookReadError_ACU(error) === 'scope_changed' ? 'scope_changed' : 'read_failed',
             source: 'plot_runtime',
             validationPolicy: 'trusted_direct',
             runId: worldbookOptions.readContext?.runId || '',
@@ -1315,7 +1300,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         entriesByBook = strictRead.entriesByBook;
       }
       const agentGreenlightKeySet = new Set(worldbookOptions.agentGreenlights
-        .map(ref => `${String(ref?.bookName || '').trim()}\u0000${String(ref?.uid || '').trim()}`)
+        .map(ref => `${String(ref?.bookName || '')}\u0000${String(ref?.uid || '').trim()}`)
         .filter(key => !key.startsWith('\u0000') && !key.endsWith('\u0000')));
       const isAgentControlledWorldbook = worldbookOptions.agentMode === 'agent-controlled';
       const entryStateView = isAgentControlledWorldbook ? 'live' : 'pre_takeover';
@@ -1328,12 +1313,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
           entryStateSnapshot = resolvedSnapshot.snapshot;
           entryStateSnapshotSignature = resolvedSnapshot.expectedSignature;
         } catch (error) {
-          if (worldbookOptions.history !== undefined) throw error;
-          logWarn_ACU('[剧情推进] 无法读取 Agent 世界书接管快照，普通剧情世界书将使用 live 状态。', {
-            phase: 'read_pre_takeover_snapshot',
-            scope: summarizePlotRuntimeScope_ACU(capturePlotRuntimeScope_ACU()),
-            error: summarizePlotRuntimeError_ACU(error),
-          });
+          throw error;
         }
       }
 
@@ -1352,7 +1332,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         includeGeneratedEntries: worldbookOptions.includeGeneratedEntries,
         includeEntry: (entry: any) => {
           const normalizedComment = entry.normalizedComment || '';
-          const isAgentGreenlight = agentGreenlightKeySet.has(`${String(entry.bookName || '').trim()}\u0000${String(entry.uid || '').trim()}`);
+          const isAgentGreenlight = agentGreenlightKeySet.has(`${String(entry.bookName || '')}\u0000${String(entry.uid || '').trim()}`);
           if (isAgentGreenlight) return true;
           const isOutlineEntry = normalizedComment.startsWith('TavernDB-ACU-OutlineTable');
           const isSummaryIndexEntry = normalizedComment.startsWith('TavernDB-ACU-CustomExport-纪要索引');
@@ -1378,7 +1358,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
             normalizedComment.startsWith('总结条目') ||
             normalizedComment.startsWith('小总结条目') ||
             normalizedComment.startsWith('重要人物条目');
-          const isAgentGreenlight = agentGreenlightKeySet.has(`${String(entry.bookName || '').trim()}\u0000${String(entry.uid || '').trim()}`);
+          const isAgentGreenlight = agentGreenlightKeySet.has(`${String(entry.bookName || '')}\u0000${String(entry.uid || '').trim()}`);
           if (isAgentGreenlight) return true;
           if (isAgentControlledWorldbook && isAgentControlledWorldbookEntryForPlot_ACU(entry)) return false;
           if (!isAgentControlledWorldbook && entry?._acuPreTakeoverSnapshotHit === true && entry.enabled !== false) return true;
@@ -1390,7 +1370,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
           return list.includes(entry.uid);
         },
         forceIncludeEntry: (entry: any) => {
-          return agentGreenlightKeySet.has(`${String(entry.bookName || '').trim()}\u0000${String(entry.uid || '').trim()}`);
+          return agentGreenlightKeySet.has(`${String(entry.bookName || '')}\u0000${String(entry.uid || '').trim()}`);
         },
         onEntriesFiltered: (entries: any[]) => {
           logDebug_ACU('[剧情推进] 过滤后的条目总数:', entries.length);
@@ -1409,7 +1389,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         scope: summarizePlotRuntimeScope_ACU(capturePlotRuntimeScope_ACU()),
         error: summarizePlotRuntimeError_ACU(error),
       });
-      return '';
+      throw error;
     }
   }
 
@@ -1424,7 +1404,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       bookNames = await resolveCharacterLorebookNamesStable_ACU();
     }
 
-    return [...new Set((Array.isArray(bookNames) ? bookNames : []).filter(Boolean).map(name => String(name).trim()).filter(Boolean))];
+    return [...new Set<string>((Array.isArray(bookNames) ? bookNames : []).filter((name): name is string => typeof name === 'string' && !!name.trim()))];
   }
 
   /**
@@ -1495,7 +1475,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
     }
 
     const agentGreenlightKeySet = new Set((Array.isArray(agentGreenlights) ? agentGreenlights : [])
-      .map(ref => `${String(ref?.bookName || '').trim()}\u0000${String(ref?.uid || '').trim()}`)
+      .map(ref => `${String(ref?.bookName || '')}\u0000${String(ref?.uid || '').trim()}`)
       .filter(key => !key.startsWith('\u0000') && !key.endsWith('\u0000')));
     if (agentGreenlightKeySet.size === 0) return [];
 
@@ -1520,13 +1500,13 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         baseScanText: '',
         includeConstantEntriesInBaseScan: false,
         includeEntry: (entry: any) => {
-          return agentGreenlightKeySet.has(`${String(entry.bookName || '').trim()}\u0000${String(entry.uid || '').trim()}`);
+          return agentGreenlightKeySet.has(`${String(entry.bookName || '')}\u0000${String(entry.uid || '').trim()}`);
         },
         isSelected: (entry: any) => {
-          return agentGreenlightKeySet.has(`${String(entry.bookName || '').trim()}\u0000${String(entry.uid || '').trim()}`);
+          return agentGreenlightKeySet.has(`${String(entry.bookName || '')}\u0000${String(entry.uid || '').trim()}`);
         },
         forceIncludeEntry: (entry: any) => {
-          return agentGreenlightKeySet.has(`${String(entry.bookName || '').trim()}\u0000${String(entry.uid || '').trim()}`);
+          return agentGreenlightKeySet.has(`${String(entry.bookName || '')}\u0000${String(entry.uid || '').trim()}`);
         },
         onEntriesFiltered: (entries: any[]) => {
           logDebug_ACU('[剧情推进][Agent正文绿灯] Agent 放行条目候选数量:', entries.length);

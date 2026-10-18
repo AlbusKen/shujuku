@@ -5,7 +5,8 @@
  */
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../../shared/utils';
 import { getCharLorebooks_ACU } from '../../../data/gateways/character-gateway';
-import { getLorebookEntries_ACU } from '../../../data/gateways/worldbook-gateway';
+import { createStrictLorebookReadError_ACU, getLorebookEntriesStrict_ACU } from '../../worldbook/pipeline';
+import { createPlotWorldbookReadContext_ACU, type PlotWorldbookReadContext_ACU } from './plot-worldbook-read-context';
 import { getIsolationPrefix_ACU } from '../../worldbook/injection-engine';
 
   export function formatTableDataForLLM_ACU(jsonData: any) {
@@ -47,34 +48,34 @@ import { getIsolationPrefix_ACU } from '../../worldbook/injection-engine';
   }
 
   /** 从世界书获取"纪要索引"条目内容（用于$5优先替换） */
-  export async function getSummaryIndexContentForPlot_ACU(plotSettings: any) {
+  export async function getSummaryIndexContentForPlot_ACU(plotSettings: any, readContext?: PlotWorldbookReadContext_ACU) {
+    if (!plotSettings) return null;
+    const context = readContext ?? createPlotWorldbookReadContext_ACU({
+      resolveCharacterLorebookNames: async () => {
+        const binding = await getCharLorebooks_ACU({ type: 'all' });
+        return [binding?.primary, binding?.secondary, ...(binding?.additional || [])]
+          .filter((name): name is string => typeof name === 'string' && !!name.trim());
+      },
+    });
     try {
       const plotCfg = plotSettings?.plotWorldbookConfig;
-      const worldbookSource = plotCfg?.source || 'character';
-      let bookNames: string[] = [];
-      
-      if (worldbookSource === 'manual' && Array.isArray(plotCfg?.manualSelection) && plotCfg.manualSelection.length) {
-        bookNames = plotCfg.manualSelection;
-      } else {
-        try {
-          const charLorebooks = await getCharLorebooks_ACU({ type: 'all' });
-          if (charLorebooks.primary) bookNames.push(charLorebooks.primary);
-          if (charLorebooks.secondary) bookNames.push(charLorebooks.secondary);
-          if (Array.isArray(charLorebooks.additional)) bookNames.push(...charLorebooks.additional);
-        } catch (e) {
-          return null;
-        }
-      }
-      bookNames = [...new Set(bookNames.map((name: any) => String(name || '').trim()).filter(Boolean))];
-      
-      const isoPrefix = getIsolationPrefix_ACU();
+      const worldbookSource = plotCfg?.source || plotSettings.worldbookSource || 'character';
+      const candidates = worldbookSource === 'manual'
+        ? (plotCfg?.manualSelection ?? plotSettings.selectedWorldbooks ?? [])
+        : await context.characterLorebookNamesPromise;
+      const bookNames = [...new Set<string>((Array.isArray(candidates) ? candidates : [])
+        .filter((name): name is string => typeof name === 'string' && !!name.trim()))];
+      const result = await getLorebookEntriesStrict_ACU(bookNames, {
+        source: 'plot_runtime',
+        validationPolicy: worldbookSource === 'manual' ? 'validate_list' : 'trusted_direct',
+        runId: context.runId,
+        context,
+      });
+      if (result.status !== 'success') throw createStrictLorebookReadError_ACU(result);
       const baseComment = 'TavernDB-ACU-CustomExport-纪要索引';
-      const targetComment = isoPrefix + baseComment;
-      
+      const targetComment = getIsolationPrefix_ACU() + baseComment;
       for (const bookName of bookNames) {
-        try {
-          const entries = await getLorebookEntries_ACU(bookName);
-          const indexEntry = entries?.find((entry: any) => {
+          const indexEntry = result.entriesByBook[bookName]?.find((entry: any) => {
             const comment = String(entry?.comment || '').trim();
             return comment === targetComment || comment.endsWith(baseComment);
           });
@@ -82,14 +83,10 @@ import { getIsolationPrefix_ACU } from '../../worldbook/injection-engine';
             logDebug_ACU('[剧情推进] $5 从世界书纪要索引条目获取成功' + (indexEntry.enabled ? '' : '(条目已禁用)'));
             return indexEntry.content;
           }
-        } catch (e) {
-          continue;
-        }
       }
       return null;
-    } catch (error) {
-      logError_ACU('[剧情推进] 获取纪要索引条目失败:', error);
-      return null;
+    } finally {
+      if (!readContext) context.dispose();
     }
   }
 
@@ -145,12 +142,12 @@ import { getIsolationPrefix_ACU } from '../../worldbook/injection-engine';
         const name = String(s.name || '').trim();
         return name === '纪要表' || name === '总结表';
       });
-      
+
       if (!summaryTable) {
         logDebug_ACU('[剧情推进] formatSummaryIndexForPlot_ACU: 未找到纪要表，可用表格:', sheets.map(s => s.name));
         return { success: false, content: '纪要索引：未找到纪要表。' };
       }
-      
+
       if (!Array.isArray(summaryTable.content) || summaryTable.content.length <= 1) {
         logDebug_ACU('[剧情推进] formatSummaryIndexForPlot_ACU: 纪要表为空，content长度:', summaryTable.content?.length);
         return { success: false, content: '纪要索引：纪要表为空。' };
@@ -158,13 +155,13 @@ import { getIsolationPrefix_ACU } from '../../worldbook/injection-engine';
 
       const headerRow = Array.isArray(summaryTable.content[0]) ? summaryTable.content[0] : [];
       logDebug_ACU('[剧情推进] formatSummaryIndexForPlot_ACU: 纪要表表头:', JSON.stringify(headerRow));
-      
+
       const summaryColIdx = headerRow.findIndex((h: any) => {
         const name = String(h ?? '').trim();
         return name === '概览' || name === '概要';
       });
       const indexColIdx = headerRow.findIndex((h: any) => String(h ?? '').trim() === '编码索引');
-      
+
       if (summaryColIdx === -1 || indexColIdx === -1) {
         logWarn_ACU('[剧情推进] formatSummaryIndexForPlot_ACU: 未找到概要列或编码索引列，概要列索引=', summaryColIdx, ', 编码索引列索引=', indexColIdx);
         return { success: false, content: '纪要索引：未找到概要列或编码索引列。' };

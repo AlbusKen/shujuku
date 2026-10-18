@@ -204,12 +204,19 @@ export function buildTavernHelperCompat_ACU(rawTH: any, getStApi: GetStApi_ACU):
 
     // 读取统一直达宿主；写入保留酒馆助手/原生保存契约，不做运行时错误回退。
     const reader = createFreshWorldbookReader_ACU(getStApi);
+    api.createWorldbookReadGuard = reader.createReadGuard;
+    const readCapabilities = reader.getCapabilities();
     const rawWorldbook = rawTH && typeof rawTH === 'object' ? createRawTavernHelperWorldbookBackend_ACU(rawTH) : null;
     const worldbookBackend: WorldbookHostBackend_ACU = {
-        ...(rawWorldbook?.backend ?? (nativeUsable ? native : {})), ...reader,
+        ...(rawWorldbook?.backend ?? (nativeUsable ? native : {})),
+        getLorebooks: readCapabilities.entries ? reader.getLorebooks : undefined,
+        getLorebookEntries: readCapabilities.entries ? reader.getLorebookEntries : undefined,
+        getCharWorldbookNames: readCapabilities.bindings ? reader.getCharWorldbookNames : undefined,
     };
     const worldbookCapabilities = { ...rawWorldbook?.capabilities,
-        getLorebooks: 'native', getLorebookEntries: 'native', getCharWorldbookNames: 'native',
+        getLorebooks: readCapabilities.entries ? 'native' : 'missing',
+        getLorebookEntries: readCapabilities.entries ? 'native' : 'missing',
+        getCharWorldbookNames: readCapabilities.bindings ? 'native' : 'missing',
     } as Partial<Record<WorldbookBackendMethodName_ACU, HostCapabilityBackend_ACU>>;
     const mountWorldbook = (name: WorldbookBackendMethodName_ACU): void => {
         const implementation = worldbookBackend?.[name];
@@ -219,7 +226,7 @@ export function buildTavernHelperCompat_ACU(rawTH: any, getStApi: GetStApi_ACU):
             return;
         }
         api[name] = implementation;
-        capabilities[name] = rawWorldbook ? (worldbookCapabilities[name] ?? 'missing') : 'native';
+        capabilities[name] = worldbookCapabilities[name] ?? (nativeUsable ? 'native' : 'missing');
     };
     for (const name of ['getLorebookEntries', 'setLorebookEntries', 'createLorebookEntries', 'deleteLorebookEntries', 'getLorebooks', 'getCharWorldbookNames'] as WorldbookBackendMethodName_ACU[]) {
         mountWorldbook(name);

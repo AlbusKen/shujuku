@@ -377,13 +377,9 @@ function resolvePromptRowWindow_ACU(
     const excludeImportTaggedWorldbookEntries = options?.excludeImportTaggedWorldbookEntries === true;
     let entryStateSnapshot;
     let entryStateSnapshotSignature = '';
-    try {
-        const resolvedSnapshot = await resolvePreTakeoverWorldbookSnapshot_ACU();
-        entryStateSnapshot = resolvedSnapshot.snapshot;
-        entryStateSnapshotSignature = resolvedSnapshot.expectedSignature;
-    } catch (error) {
-        logWarn_ACU('[Worldbook] 无法读取 Agent 世界书接管快照，填表世界书将使用 live 状态。', error);
-    }
+    const resolvedSnapshot = await resolvePreTakeoverWorldbookSnapshot_ACU();
+    entryStateSnapshot = resolvedSnapshot.snapshot;
+    entryStateSnapshotSignature = resolvedSnapshot.expectedSignature;
     const worldbookOptions = {
         excludeImportTaggedEntries: excludeImportTaggedWorldbookEntries,
         agentGreenlights: Array.isArray(options?.agentGreenlights) ? options.agentGreenlights : [],
@@ -449,19 +445,17 @@ function resolvePromptRowWindow_ACU(
                 workingTableData,
             );
             if (scopedEntries.length === 0) return null;
-            const scopedKeys = new Set(scopedEntries.map((entry: any) => `${String(entry.bookName || '').trim()}\u0000${String(entry.uid || '').trim()}`));
+            const scopedKeys = new Set(scopedEntries.map((entry: any) => `${String(entry.bookName || '')}\u0000${String(entry.uid || '').trim()}`));
             const content = await getCombinedWorldbookContent_ACU(worldbookScanText, {
                 ...worldbookOptions,
                 readContext,
                 entriesByBook: await buildSharedEntriesByBook_ACU(readContext, readScopeNames),
                 includeGeneratedEntries: true,
-                entryScope: (entry: any) => scopedKeys.has(`${String(entry.bookName || '').trim()}\u0000${String(entry.uid || '').trim()}`),
+                entryScope: (entry: any) => scopedKeys.has(`${String(entry.bookName || '')}\u0000${String(entry.uid || '').trim()}`),
             });
             return `<worldbook_context>\n${content}\n</worldbook_context>`;
         } catch (error) {
-            if (String((error as any)?.message || '').startsWith('StrictLorebookRead:')) throw error;
-            logWarn_ACU(`[Worldbook] 无法解析填表表名占位符 "${normalizedTableName}"，保留原 token。`, { phase: 'table_token', error: { category: 'read_failed' } });
-            return null;
+            throw error;
         }
     };
     const manualExtraHintText = manualExtraHint_ACU || '';

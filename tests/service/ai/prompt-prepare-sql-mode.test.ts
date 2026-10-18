@@ -80,6 +80,7 @@ vi.mock('../../../src/data/gateways/worldbook-gateway', async (importOriginal) =
   const actual = await importOriginal<typeof import('../../../src/data/gateways/worldbook-gateway')>();
   return {
     ...actual,
+    createLorebookReadGuard_ACU: vi.fn(async () => async (_names?: string[]) => {}),
     listLorebooks_ACU: (...args: any[]) => mockLorebookList(...args),
     getLorebookEntries_ACU: (...args: any[]) => mockLorebookEntries(...args),
   };

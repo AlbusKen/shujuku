@@ -138,8 +138,8 @@ function normalizeBookNameList_ACU(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   const result: string[] = [];
   for (const item of value) {
-    const name = String(item || '').trim();
-    if (name && !result.includes(name)) result.push(name);
+    const name = typeof item === 'string' ? item : '';
+    if (name.trim() && !result.includes(name)) result.push(name);
   }
   return result;
 }
@@ -279,8 +279,8 @@ function normalizeAgentWorldbookSnapshotForCardState_ACU(value: unknown): AgentW
     : {};
   const books: Record<string, AgentWorldbookControlSnapshotEntry_ACU[]> = {};
   for (const [rawBookName, rawEntries] of Object.entries(booksSource)) {
-    const bookName = String(rawBookName || '').trim();
-    if (!bookName || !Array.isArray(rawEntries)) continue;
+    const bookName = rawBookName;
+    if (!bookName.trim() || !Array.isArray(rawEntries)) continue;
     const entries = rawEntries
       .map(entry => normalizeSnapshotEntry_ACU(entry))
       .filter(Boolean) as AgentWorldbookControlSnapshotEntry_ACU[];
@@ -303,7 +303,7 @@ function normalizeAgentWorldbookStateIdentity_ACU(value: unknown): AgentWorldboo
   if (marker !== AGENT_WORLDBOOK_CONFIG_COMMENT_ACU) return undefined;
   const stateEntryUid = hasValidWorldbookUid_ACU(source.stateEntryUid) ? source.stateEntryUid : undefined;
   const hostBookName = typeof source.hostBookName === 'string' && source.hostBookName.trim()
-    ? source.hostBookName.trim()
+    ? source.hostBookName
     : undefined;
   return { marker, ...(stateEntryUid !== undefined ? { stateEntryUid } : {}), ...(hostBookName ? { hostBookName } : {}) };
 }
@@ -312,7 +312,7 @@ function buildAgentWorldbookStateIdentity_ACU(hostBookName: string, stateEntryUi
   return {
     marker: AGENT_WORLDBOOK_CONFIG_COMMENT_ACU,
     ...(hasValidWorldbookUid_ACU(stateEntryUid) ? { stateEntryUid } : {}),
-    ...(hostBookName.trim() ? { hostBookName: hostBookName.trim() } : {}),
+    ...(hostBookName.trim() ? { hostBookName } : {}),
   };
 }
 
@@ -855,7 +855,7 @@ async function resolveAgentWorldbookStateCleanupBookNames_ACU(explicitBookName: 
 }
 
 export async function deleteAgentWorldbookStateEntry_ACU(bookName?: string): Promise<number> {
-  const explicitBookName = String(bookName || '').trim();
+  const explicitBookName = typeof bookName === 'string' && bookName.trim() ? bookName : '';
   const scanBookNames = await resolveAgentWorldbookStateCleanupBookNames_ACU(explicitBookName);
   let deleted = 0;
   for (const targetBookName of scanBookNames) {

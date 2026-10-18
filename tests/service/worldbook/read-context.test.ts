@@ -4,7 +4,8 @@
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
-const { mockGetLorebookEntries, mockListLorebooks } = vi.hoisted(() => ({
+const { mockGetLorebookEntries, mockListLorebooks, mockReadGuard } = vi.hoisted(() => ({
+  mockReadGuard: vi.fn(async (_names?: string[]) => {}),
   mockGetLorebookEntries: vi.fn(),
   mockListLorebooks: vi.fn(),
 }));
@@ -13,6 +14,7 @@ vi.mock('../../../src/data/gateways/worldbook-gateway', async () => {
   const actual = await vi.importActual('../../../src/data/gateways/worldbook-gateway');
   return {
     ...actual,
+    createLorebookReadGuard_ACU: vi.fn(async () => mockReadGuard),
     getLorebookEntries_ACU: mockGetLorebookEntries,
     listLorebooks_ACU: mockListLorebooks,
   };
@@ -26,6 +28,7 @@ import {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockReadGuard.mockReset().mockResolvedValue(undefined);
   mockListLorebooks.mockResolvedValue(['书A', '书B', '书C']);
 });
 
@@ -113,8 +116,7 @@ describe('abort / scope_changed / dispose', () => {
 
     const firstFour = Array.from({ length: 4 }, (_, i) => context.readBookEntries(`书${i}`));
     const queued = context.readBookEntries('书X');
-    await Promise.resolve();
-    expect(mockGetLorebookEntries).toHaveBeenCalledTimes(4);
+    await vi.waitFor(() => expect(mockGetLorebookEntries).toHaveBeenCalledTimes(4));
 
     aborted = true;
     const settled = Promise.allSettled([...firstFour, queued]);
@@ -125,14 +127,15 @@ describe('abort / scope_changed / dispose', () => {
     expect(mockGetLorebookEntries).toHaveBeenCalledTimes(4);
   });
 
-  it('scope_changed 后新读取失败，旧 context 结果仍保留', async () => {
+  it('scope_changed 后新读取与缓存命中均拒绝交付', async () => {
     let active = true;
     mockGetLorebookEntries.mockResolvedValue([{ uid: 1 }]);
     const context = createContext({ isActive: () => active });
 
     await context.readBookEntries('书A');
     active = false;
-    await expect(context.readBookEntries('书B')).rejects.toThrow('TaskAbortedByUser');
+    await expect(context.readBookEntries('书B')).rejects.toMatchObject({ category: 'scope_changed' });
+    await expect(context.readBookEntries('书A')).rejects.toMatchObject({ category: 'scope_changed' });
     expect(context.getStats().physicalReadCount).toBe(1);
   });
 
