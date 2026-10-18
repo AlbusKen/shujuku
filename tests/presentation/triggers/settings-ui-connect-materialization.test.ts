@@ -2,7 +2,7 @@
  * tests/presentation/triggers/settings-ui-connect-materialization.test.ts
  * handleContentOptimizationEvent_ACU 有界物化等待集成测试
  *
- * 核心回归场景（计划 T3.1）：GENERATION_ENDED 捕获时 chat 尾部是用户楼层，
+ * 核心回归场景（计划 T3.1）：MESSAGE_RECEIVED 捕获时 chat 尾部是用户楼层，
  * 防抖回调执行后 AI 楼层才追加进 chat → 必须解析到 AI 并进入 update_only，
  * 而不是旧代码的 last_message_not_ai skip。
  */
@@ -171,36 +171,27 @@ describe('handleContentOptimizationEvent_ACU 有界物化等待', () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(m.executeContentOptimization).not.toHaveBeenCalled();
     expect(m.evaluateNewMessageAction).not.toHaveBeenCalled();
-    await handleContentOptimizationEvent_ACU('GENERATION_ENDED', { ...baseIntent });
+    await handleContentOptimizationEvent_ACU('MESSAGE_RECEIVED', { ...baseIntent });
     await vi.advanceTimersByTimeAsync(500);
     expect(m.executeContentOptimization).toHaveBeenCalledExactlyOnceWith(1);
   });
 
 
-  it.each(['MESSAGE_RECEIVED', 'CHARACTER_MESSAGE_RENDERED', 'GENERATION_ENDED'])('%s 在重新生成期间不调度优化，完成后只优化最终正文', async eventType => {
+  it('正文交付后即使生成上下文残留，也按明确消息下标优化', async () => {
     const { handleContentOptimizationEvent_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect');
     const { generationGate_ACU } = await import('../../../src/service/runtime/state-manager');
     generationGate_ACU.activeGenerations = [{ seq: 1, type: 'regenerate', params: {}, dryRun: false, at: Date.now() }];
-    m.setChat([user, { ...ai, mes: '尚未生成完的正文' }]);
+    m.setChat([user, ai]);
     const intent = { ...baseIntent, eventMessageIdKind: 'index' as const };
     m.resolveGeneratedAiMessageIndex.mockReturnValue({ kind: 'resolved', messageIndex: 1 });
     m.evaluateNewMessageAction.mockReturnValue({ action: 'optimize_parallel', lastMessageIndex: 1 });
 
-    await handleContentOptimizationEvent_ACU(eventType, intent);
-    await vi.advanceTimersByTimeAsync(1500);
-    expect(m.setAutoFillTimer).not.toHaveBeenCalled();
-    expect(m.evaluateNewMessageAction).not.toHaveBeenCalled();
-    expect(m.executeContentOptimization).not.toHaveBeenCalled();
-    expect(m.logAutoFillSkip).toHaveBeenCalledWith('generation_in_progress', expect.objectContaining({ eventType }));
-
-    generationGate_ACU.activeGenerations = [];
-    m.setChat([user, ai]);
-    await handleContentOptimizationEvent_ACU('GENERATION_ENDED', intent);
     await handleContentOptimizationEvent_ACU('MESSAGE_RECEIVED', intent);
-    await handleContentOptimizationEvent_ACU('CHARACTER_MESSAGE_RENDERED', intent);
     await vi.advanceTimersByTimeAsync(500);
     expect(m.evaluateNewMessageAction).toHaveBeenCalledExactlyOnceWith([user, ai], false, true, false, {}, 1);
     expect(m.executeContentOptimization).toHaveBeenCalledExactlyOnceWith(1);
+    expect(generationGate_ACU.activeGenerations).toHaveLength(1);
+    expect(m.logAutoFillSkip).not.toHaveBeenCalled();
   });
 
   it('重新生成取消上一轮防抖，旧任务不执行且不阻断新正文完成后的优化', async () => {
@@ -220,18 +211,17 @@ describe('handleContentOptimizationEvent_ACU 有界物化等待', () => {
     expect(m.executeContentOptimization).not.toHaveBeenCalled();
 
     generationGate_ACU.activeGenerations = [];
-    await handleContentOptimizationEvent_ACU('GENERATION_ENDED', { ...baseIntent });
+    await handleContentOptimizationEvent_ACU('MESSAGE_RECEIVED', { ...baseIntent });
     await vi.advanceTimersByTimeAsync(500);
     expect(m.executeContentOptimization).toHaveBeenCalledExactlyOnceWith(1);
   });
 
-  it('防抖回调执行前开始重新生成，即使未取消 timer 也不优化部分正文', async () => {
-    const { handleContentOptimizationEvent_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect');
-    const { generationGate_ACU } = await import('../../../src/service/runtime/state-manager');
+  it('防抖回调执行前重新生成作废消息代次，不优化旧正文', async () => {
+    const { handleContentOptimizationEvent_ACU, cancelPendingContentOptimizationEvent_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect');
     m.setChat([user, ai]);
     m.evaluateNewMessageAction.mockReturnValue({ action: 'optimize_parallel', lastMessageIndex: 1 });
     await handleContentOptimizationEvent_ACU('MESSAGE_RECEIVED', { ...baseIntent });
-    generationGate_ACU.activeGenerations = [{ seq: 1, type: 'regenerate', params: {}, dryRun: false, at: Date.now() }];
+    cancelPendingContentOptimizationEvent_ACU();
     await vi.advanceTimersByTimeAsync(500);
     expect(m.evaluateNewMessageAction).not.toHaveBeenCalled();
     expect(m.executeContentOptimization).not.toHaveBeenCalled();
@@ -241,7 +231,7 @@ describe('handleContentOptimizationEvent_ACU 有界物化等待', () => {
     const { handleContentOptimizationEvent_ACU, cancelPendingContentOptimizationEvent_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect');
     m.resolveGeneratedAiMessageIndex.mockReturnValue({ kind: 'pending_materialization', candidates: [] });
     m.evaluateNewMessageAction.mockReturnValue({ action: 'optimize_parallel', lastMessageIndex: 2 });
-    await handleContentOptimizationEvent_ACU('GENERATION_ENDED', { ...baseIntent });
+    await handleContentOptimizationEvent_ACU('MESSAGE_RECEIVED', { ...baseIntent });
     await vi.advanceTimersByTimeAsync(500);
     expect(m.resolveGeneratedAiMessageIndex).toHaveBeenCalledOnce();
 
@@ -252,20 +242,19 @@ describe('handleContentOptimizationEvent_ACU 有界物化等待', () => {
     expect(m.resolveGeneratedAiMessageIndex).toHaveBeenCalledOnce();
     expect(m.evaluateNewMessageAction).not.toHaveBeenCalled();
     expect(m.executeContentOptimization).not.toHaveBeenCalled();
-    expect(m.logAutoFillSkip).toHaveBeenCalledWith('generation_changed', expect.objectContaining({ eventType: 'GENERATION_ENDED' }));
+    expect(m.logAutoFillSkip).toHaveBeenCalledWith('generation_changed', expect.objectContaining({ eventType: 'MESSAGE_RECEIVED' }));
 
-    await handleContentOptimizationEvent_ACU('GENERATION_ENDED', { ...baseIntent });
+    await handleContentOptimizationEvent_ACU('MESSAGE_RECEIVED', { ...baseIntent });
     await vi.advanceTimersByTimeAsync(500);
     expect(m.executeContentOptimization).toHaveBeenCalledExactlyOnceWith(2);
   });
 
-  it('物化重试时发现正文生成仍在进行，不继续解析或优化', async () => {
-    const { handleContentOptimizationEvent_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect');
-    const { generationGate_ACU } = await import('../../../src/service/runtime/state-manager');
+  it('物化重试前消息代次失效，不继续解析或优化', async () => {
+    const { handleContentOptimizationEvent_ACU, cancelPendingContentOptimizationEvent_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect');
     m.resolveGeneratedAiMessageIndex.mockReturnValue({ kind: 'pending_materialization', candidates: [] });
-    await handleContentOptimizationEvent_ACU('GENERATION_ENDED', { ...baseIntent });
+    await handleContentOptimizationEvent_ACU('MESSAGE_RECEIVED', { ...baseIntent });
     await vi.advanceTimersByTimeAsync(500);
-    generationGate_ACU.activeGenerations = [{ seq: 1, type: 'regenerate', params: {}, dryRun: false, at: Date.now() }];
+    cancelPendingContentOptimizationEvent_ACU();
     await vi.advanceTimersByTimeAsync(100);
     expect(m.resolveGeneratedAiMessageIndex).toHaveBeenCalledOnce();
     expect(m.evaluateNewMessageAction).not.toHaveBeenCalled();
@@ -282,7 +271,7 @@ describe('handleContentOptimizationEvent_ACU 有界物化等待', () => {
     m.setChat([user, ai]);
     m.resolveGeneratedAiMessageIndex.mockReturnValue({ kind: 'resolved', messageIndex: 1 });
     m.evaluateNewMessageAction.mockReturnValue({ action: 'optimize_parallel', lastMessageIndex: 1 });
-    await handleContentOptimizationEvent_ACU('GENERATION_ENDED', { ...baseIntent });
+    await handleContentOptimizationEvent_ACU('MESSAGE_RECEIVED', { ...baseIntent });
     await vi.advanceTimersByTimeAsync(500);
     expect(m.executeContentOptimization).toHaveBeenCalledExactlyOnceWith(1);
   });
@@ -296,7 +285,7 @@ describe('handleContentOptimizationEvent_ACU 有界物化等待', () => {
     m.resolveGeneratedAiMessageIndex.mockReturnValueOnce({ kind: 'resolved', messageIndex: 2 });
 
     // 触发防抖，执行回调时 chat 仍为 [user, user]，之后（重试间隙）追加 AI
-    const promise = handleContentOptimizationEvent_ACU('GENERATION_ENDED', { ...baseIntent });
+    const promise = handleContentOptimizationEvent_ACU('MESSAGE_RECEIVED', { ...baseIntent });
 
     // 防抖 500ms
     await vi.advanceTimersByTimeAsync(500);
@@ -322,7 +311,7 @@ describe('handleContentOptimizationEvent_ACU 有界物化等待', () => {
 
     m.resolveGeneratedAiMessageIndex.mockReturnValue({ kind: 'pending_materialization', candidates: [] });
 
-    const promise = handleContentOptimizationEvent_ACU('GENERATION_ENDED', { ...baseIntent });
+    const promise = handleContentOptimizationEvent_ACU('MESSAGE_RECEIVED', { ...baseIntent });
     await vi.advanceTimersByTimeAsync(500 + 3 * 100);
     await promise;
 
@@ -341,7 +330,7 @@ describe('handleContentOptimizationEvent_ACU 有界物化等待', () => {
 
     m.resolveGeneratedAiMessageIndex.mockReturnValue({ kind: 'ambiguous', candidates: [2, 3] });
 
-    const promise = handleContentOptimizationEvent_ACU('GENERATION_ENDED', { ...baseIntent });
+    const promise = handleContentOptimizationEvent_ACU('MESSAGE_RECEIVED', { ...baseIntent });
     await vi.advanceTimersByTimeAsync(500);
     await promise;
 
@@ -354,17 +343,16 @@ describe('handleContentOptimizationEvent_ACU 有界物化等待', () => {
     expect(m.triggerAutomaticUpdateIfNeeded).not.toHaveBeenCalled();
   });
 
-  it('结束、接收和渲染通知共用防抖，合并为一次按需检查', async () => {
+  it('连续消息交付共用防抖，合并为一次按需检查', async () => {
     const { handleContentOptimizationEvent_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect');
     m.setChat([user, ai]);
     m.resolveGeneratedAiMessageIndex.mockReturnValue({ kind: 'resolved', messageIndex: 1 });
     m.evaluateNewMessageAction.mockReturnValue({ action: 'update_only', lastMessageIndex: 1 });
     const messageIntent = { ...baseIntent, eventMessageIdKind: 'index' as const, capturedAiFloorCount: 1 };
 
-    await handleContentOptimizationEvent_ACU('GENERATION_ENDED', { ...baseIntent, eventMessageId: 2 });
     await handleContentOptimizationEvent_ACU('MESSAGE_RECEIVED', messageIntent);
     await vi.advanceTimersByTimeAsync(250);
-    await handleContentOptimizationEvent_ACU('CHARACTER_MESSAGE_RENDERED', messageIntent);
+    await handleContentOptimizationEvent_ACU('MESSAGE_RECEIVED', messageIntent);
     await vi.advanceTimersByTimeAsync(499);
     expect(m.loadAllChatMessages).not.toHaveBeenCalled();
     expect(m.triggerAutomaticUpdateIfNeeded).not.toHaveBeenCalled();
@@ -388,7 +376,7 @@ describe('handleContentOptimizationEvent_ACU 有界物化等待', () => {
     expect(m.triggerAutomaticUpdateIfNeeded).not.toHaveBeenCalled();
 
     m.setChat([user, { ...ai, mes: '续写后的正文' }]);
-    await handleContentOptimizationEvent_ACU('CHARACTER_MESSAGE_RENDERED', messageIntent);
+    await handleContentOptimizationEvent_ACU('MESSAGE_RECEIVED', messageIntent);
     await vi.advanceTimersByTimeAsync(500);
     expect(m.triggerAutomaticUpdateIfNeeded).not.toHaveBeenCalled();
     expect(m.evaluateNewMessageAction).toHaveBeenLastCalledWith(
@@ -414,7 +402,7 @@ describe('handleContentOptimizationEvent_ACU 有界物化等待', () => {
     const { handleContentOptimizationEvent_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect');
     m.resolveGeneratedAiMessageIndex.mockReturnValue({ kind: 'invalid_intent', reason: 'missing_chat_or_intent' });
 
-    await handleContentOptimizationEvent_ACU('GENERATION_ENDED', { ...baseIntent });
+    await handleContentOptimizationEvent_ACU('MESSAGE_RECEIVED', { ...baseIntent });
     await vi.advanceTimersByTimeAsync(500);
 
     expect(m.evaluateNewMessageAction).not.toHaveBeenCalled();
@@ -427,7 +415,7 @@ describe('handleContentOptimizationEvent_ACU 有界物化等待', () => {
     m.setChat([user, ai, user]);
     m.evaluateNewMessageAction.mockReturnValue({ action: 'skip', skipReason });
 
-    await handleContentOptimizationEvent_ACU('GENERATION_ENDED');
+    await handleContentOptimizationEvent_ACU('MESSAGE_RECEIVED');
     await vi.advanceTimersByTimeAsync(500);
 
     expect(m.executeContentOptimization).not.toHaveBeenCalled();
@@ -438,7 +426,7 @@ describe('handleContentOptimizationEvent_ACU 有界物化等待', () => {
     const { handleContentOptimizationEvent_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect');
     m.evaluateNewMessageAction.mockReturnValue({ action: 'skip', skipReason });
 
-    await handleContentOptimizationEvent_ACU('GENERATION_ENDED');
+    await handleContentOptimizationEvent_ACU('MESSAGE_RECEIVED');
     await vi.advanceTimersByTimeAsync(500);
 
     expect(m.executeContentOptimization).not.toHaveBeenCalled();
@@ -490,7 +478,7 @@ describe('handleContentOptimizationEvent_ACU 有界物化等待', () => {
     // 第一次解析 pending，等待中模拟切聊天（currentChatFileIdentifier_ACU 变化）
     m.resolveGeneratedAiMessageIndex.mockReturnValueOnce({ kind: 'pending_materialization', candidates: [] });
 
-    const promise = handleContentOptimizationEvent_ACU('GENERATION_ENDED', { ...baseIntent });
+    const promise = handleContentOptimizationEvent_ACU('MESSAGE_RECEIVED', { ...baseIntent });
     await vi.advanceTimersByTimeAsync(500);
 
     // 修改 state-manager mock 的 currentChatFileIdentifier_ACU 需要重新 import，这里用 chatKey 不匹配验证

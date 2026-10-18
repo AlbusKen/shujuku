@@ -20,6 +20,7 @@ import {
     type OldFlatLorebookEntry_ACU,
 } from './entry-format';
 import { createNativeStBackend_ACU, type GetStApi_ACU, type NativeStBackend_ACU } from './native-st-backend';
+import { createFreshWorldbookReader_ACU } from './fresh-worldbook-reader';
 
 export type HostCapabilityBackend_ACU = 'passthrough' | 'mapped' | 'native' | 'missing';
 
@@ -231,8 +232,8 @@ export function buildTavernHelperCompat_ACU(rawTH: any, getStApi: GetStApi_ACU):
             if (options.type === 'additional') return { primary: null, additional };
             return { primary, additional };
         };
-        capabilities.getCurrentCharPrimaryLorebook = rawWorldbook ? 'mapped' : 'native';
-        capabilities.getCharLorebooks = rawWorldbook ? 'mapped' : 'native';
+        capabilities.getCurrentCharPrimaryLorebook = 'native';
+        capabilities.getCharLorebooks = 'native';
     } else {
         capabilities.getCurrentCharPrimaryLorebook = 'missing';
         capabilities.getCharLorebooks = 'missing';

@@ -7,7 +7,7 @@ import { updateCardUpdateStatusDisplay_ACU } from '../../components/update-statu
 import { isAutoUpdatingCard_ACU, _set_isAutoUpdatingCard_ACU } from '../../components/plot-editors';
 import { showToastr_ACU } from '../../theme/toast';
 import { getChatArray_ACU } from '../../../service/chat/chat-service';
-import { abortAllActiveRequests_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, hasActiveContentGeneration_ACU, settings_ACU, _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU } from '../../../service/runtime/state-manager';
+import { abortAllActiveRequests_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU } from '../../../service/runtime/state-manager';
 import { $manualExtraHintCheckbox_ACU } from '../../state/ui-refs';
 import { processUpdates_ACU } from '../update-process';
 import { getSortedSheetKeys_ACU } from '../../../service/template/chat-scope';
@@ -82,7 +82,7 @@ let autoUpdateQueueTail_ACU: Promise<void> = Promise.resolve();
 let autoUpdateQueueId_ACU = 0;
 let autoFillEventEpoch_ACU = 0;
 
-/** 接收时绑定事件代次，与聊天作用域及生成资格分别校验。 */
+/** 接收时绑定消息任务代次，并独立校验聊天作用域。 */
 export function captureAutoFillEventScope_ACU(): () => boolean {
     const epoch = autoFillEventEpoch_ACU;
     return () => epoch === autoFillEventEpoch_ACU;
@@ -119,10 +119,6 @@ export function cancelPendingAutoFillEvent_ACU(): void {
         || context.chatKey !== undefined && context.chatKey !== currentChatFileIdentifier_ACU
         || context.isolationKey !== undefined && context.isolationKey !== getCurrentIsolationKey_ACU())) {
         logAutoFillSkip_ACU('chat_changed', { ...context, stage });
-        return false;
-      }
-      if (hasActiveContentGeneration_ACU()) {
-        logAutoFillSkip_ACU('generation_in_progress', { ...context, stage });
         return false;
       }
       return true;

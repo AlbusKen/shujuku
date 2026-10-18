@@ -407,7 +407,7 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
     m.currentChatKey = 'chat-a';
     m.api.chat = [{ is_user: true, mes: '用户' }, { is_user: false, mes: '旧正文' }];
     m.messageReceived!(1, 'normal');
-    m.characterMessageRendered!(1, 'normal');
+    await m.api.eventSource.emit('character_message_rendered', 1, 'normal');
     m.api.chat.pop();
     await m.chatMutationHandlers.get(m.api.eventTypes[eventName])!(m.api.chat.length);
     expect(m.cancelPendingOptimization).toHaveBeenCalledOnce();
@@ -431,25 +431,26 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
     expect(oldContext.isCurrentChat()).toBe(true);
     m.generationStarted!('normal', {}, false);
     m.api.chat.push({ is_user: false, mes: '新正文' });
+    m.messageReceived!(1, 'normal');
     m.generationEnded!(2);
     await dispatchCompletionTasks_ACU();
     expect(m.autoUpdate).toHaveBeenCalledTimes(2);
     expect(m.autoUpdate.mock.calls[1][1].isCurrentEvent()).toBe(true);
   });
 
-  it('重新生成内部删除旧回复不清除本轮资格，生成期间不填表，完成后正常处理', async () => {
+  it('重新生成内部删除旧回复不唤醒填表，最终消息交付后正常处理', async () => {
     m.currentChatKey = 'chat-a';
     m.api.chat = [{ is_user: true, mes: '用户' }, { is_user: false, mes: '旧正文' }];
     m.generationStarted!('regenerate', {}, false);
     m.api.chat.pop();
     await m.chatMutationHandlers.get('deleted')!(m.api.chat.length);
     m.api.chat.push({ is_user: false, mes: '尚未完成' });
-    m.messageReceived!(1, 'regenerate');
-    m.characterMessageRendered!(1, 'regenerate');
+    await m.api.eventSource.emit('character_message_rendered', 1, 'regenerate');
     await dispatchCompletionTasks_ACU();
     expect(m.autoUpdate).not.toHaveBeenCalled();
     m.handleNewMessage.mockClear();
     m.api.chat[1].mes = '完整新正文';
+    m.messageReceived!(1, 'regenerate');
     m.generationEnded!(2);
     await dispatchCompletionTasks_ACU();
     expect(m.autoUpdate).toHaveBeenCalledOnce();
@@ -458,13 +459,14 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
 
 
 
-  it.each(['normal', 'regenerate', 'continue', 'swipe'])('%s 开始时取消旧正文优化任务，完成后仍派发优化', async type => {
+  it.each(['normal', 'regenerate', 'continue', 'swipe'])('%s 开始时取消旧任务，消息交付后派发填表和优化', async type => {
     m.currentChatKey = 'chat-a';
     m.api.chat = [{ is_user: true, mes: '用户' }, { is_user: false, mes: '正文' }];
     m.generationStarted!(type, {}, false);
     expect(m.cancelPendingOptimization).toHaveBeenCalledOnce();
     expect(m.cancelPendingAutoFill).toHaveBeenCalledOnce();
     expect(m.handleNewMessage).not.toHaveBeenCalled();
+    m.messageReceived!(1, type);
     m.generationEnded!(2);
     await dispatchCompletionTasks_ACU();
     expect(m.handleNewMessage).toHaveBeenCalledOnce();
@@ -500,6 +502,7 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
       expect(m.autoUpdate).not.toHaveBeenCalled();
 
       m.generationStarted!('regenerate', {}, false);
+      m.messageReceived!(1, 'regenerate');
       m.generationEnded!(2);
       await dispatchCompletionTasks_ACU();
       expect(m.handleNewMessage).toHaveBeenCalledOnce();
@@ -507,11 +510,11 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
     },
   );
 
-  it.each(['MESSAGE_RECEIVED', 'CHARACTER_MESSAGE_RENDERED'] as const)('%s 独立唤醒检查并传递明确消息下标', async (eventName) => {
+  it.each(['MESSAGE_RECEIVED'] as const)('%s 独立唤醒检查并传递明确消息下标', async (eventName) => {
     m.currentChatKey = 'chat-a';
     m.api.chat = [{ is_user: true, mes: '用户' }, { is_user: false, mes: '正文' }];
     m.autoUpdate.mockResolvedValue(undefined);
-    const callback = eventName === 'MESSAGE_RECEIVED' ? m.messageReceived : m.characterMessageRendered;
+    const callback = m.messageReceived;
 
     expect(callback).toBeTypeOf('function');
     expect(callback!(1, 'normal')).toBeUndefined();
@@ -540,34 +543,34 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
     m.generationStarted!('normal', { quiet_prompt: '附加提示', automatic_trigger: true }, false);
 
     m.messageReceived!(0, type);
-    m.characterMessageRendered!(0, type);
+    await m.api.eventSource.emit('character_message_rendered', 0, type);
     await dispatchCompletionTasks_ACU();
 
-    expect(m.handleNewMessage).toHaveBeenCalledTimes(type === 'first_message' ? 0 : 2);
-    expect(m.autoUpdate).toHaveBeenCalledTimes(type === 'first_message' ? 0 : 2);
+    expect(m.handleNewMessage).toHaveBeenCalledTimes(type === 'first_message' ? 0 : 1);
+    expect(m.autoUpdate).toHaveBeenCalledTimes(type === 'first_message' ? 0 : 1);
     expect(m.consumeGeneration).not.toHaveBeenCalled();
 
     if (type === 'first_message') {
       // 开场白过滤不建立冷却期，也不按下标永久禁用首条消息的真实续写。
       m.messageReceived!(0, 'continue');
-      m.characterMessageRendered!(0, 'continue');
+      await m.api.eventSource.emit('character_message_rendered', 0, 'continue');
       await dispatchCompletionTasks_ACU();
-      expect(m.autoUpdate).toHaveBeenCalledTimes(2);
-      expect(m.handleNewMessage).toHaveBeenCalledTimes(2);
+      expect(m.autoUpdate).toHaveBeenCalledTimes(1);
+      expect(m.handleNewMessage).toHaveBeenCalledTimes(1);
       m.generationEnded!(1);
       await dispatchCompletionTasks_ACU();
-      expect(m.autoUpdate).toHaveBeenCalledTimes(3);
-      expect(m.handleNewMessage).toHaveBeenCalledTimes(2);
+      expect(m.autoUpdate).toHaveBeenCalledTimes(1);
+      expect(m.handleNewMessage).toHaveBeenCalledTimes(1);
     }
   });
 
   it('无消息参数仍唤醒已有兼容检查，不增加拒绝条件', async () => {
     m.messageReceived!();
-    m.characterMessageRendered!('unknown');
+    await m.api.eventSource.emit('character_message_rendered', 'unknown');
     await dispatchCompletionTasks_ACU();
 
     expect(m.handleNewMessage).toHaveBeenNthCalledWith(1, 'MESSAGE_RECEIVED', undefined);
-    expect(m.handleNewMessage).toHaveBeenNthCalledWith(2, 'CHARACTER_MESSAGE_RENDERED', undefined);
+    expect(m.handleNewMessage).toHaveBeenCalledTimes(1);
   });
 
   it.each(['GENERATION_ENDED', 'MESSAGE_RECEIVED', 'CHARACTER_MESSAGE_RENDERED'] as const)(
@@ -589,8 +592,8 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
       expect(source.emit).toBe(emit);
       await dispatchCompletionTasks_ACU();
 
-      expect(m.autoUpdate).toHaveBeenCalledOnce();
-      expect(m.handleNewMessage).toHaveBeenCalledOnce();
+      expect(m.autoUpdate).toHaveBeenCalledTimes(eventName === 'MESSAGE_RECEIVED' ? 1 : 0);
+      expect(m.handleNewMessage).toHaveBeenCalledTimes(eventName === 'MESSAGE_RECEIVED' ? 1 : 0);
       expect(m.hostEmit).toHaveBeenCalledExactlyOnceWith(event, 0, 'normal');
       expect(m.publicCompletionObserver).toHaveBeenCalledOnce();
       expect(m.api.chat).toEqual([message]);
@@ -627,44 +630,61 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
     expect(m.handleNewMessage).not.toHaveBeenCalled();
   });
 
-  it.each(['normal', 'continue', 'regenerate', 'swipe'])('%s 的生成结束仍填表，重复收尾不复用资格', async type => {
+  it('两次开始一次结束及后续 dryRun 不影响已交付正文的单次填表和优化', async () => {
+    m.currentChatKey = 'chat-a';
+    m.api.chat = [{ is_user: true, mes: '用户' }, { is_user: false, mes: '完整正文' }];
+    m.generationStarted!(undefined, {}, false);
+    m.generationStarted!(undefined, {}, false);
+    m.messageReceived!(1);
+    await m.api.eventSource.emit('character_message_rendered', 1);
+    m.generationEnded!(2);
+    m.generationStarted!('normal', {}, true);
+    await dispatchCompletionTasks_ACU();
+    expect(m.gate.activeGenerations).toHaveLength(2);
+    expect(m.autoUpdate).toHaveBeenCalledOnce();
+    expect(m.handleNewMessage).toHaveBeenCalledExactlyOnceWith('MESSAGE_RECEIVED', expect.objectContaining({ eventMessageId: 1 }));
+  });
+
+  it.each(['normal', 'continue', 'regenerate', 'swipe'])('%s 的消息交付填表，生成和渲染收尾不重复唤醒', async type => {
     m.currentChatKey = 'chat-a';
     m.api.chat = [{ is_user: false, mes: '正文' }];
     m.generationStarted!(type, {}, false);
+    m.messageReceived!(0, type);
     m.generationEnded!(1);
     await dispatchCompletionTasks_ACU();
     expect(m.autoUpdate).toHaveBeenCalledOnce();
     expect(m.handleNewMessage).toHaveBeenCalledOnce();
 
     m.generationEnded!(1);
+    await m.api.eventSource.emit('character_message_rendered', 0, type);
     await dispatchCompletionTasks_ACU();
     expect(m.autoUpdate).toHaveBeenCalledOnce();
     expect(m.handleNewMessage).toHaveBeenCalledOnce();
   });
 
-  it.each(['切换已有聊天', '新建聊天'])('%s 不因旧生成收尾或开场白填表或优化，下一次真实生成正常触发', async action => {
+  it.each(['切换已有聊天', '新建聊天', '同名聊天重载'])('%s 不因旧生成收尾或开场白填表或优化，下一次消息交付正常触发', async action => {
     m.currentChatKey = 'chat-a';
     m.api.chat = [{ is_user: false, mes: '原聊天正文' }];
     const reusedChat = m.api.chat;
     m.generationStarted!('normal', {}, false);
+    m.messageReceived!(0, 'normal');
 
-    // 宿主先改变聊天身份和原地加载消息，再派发 CHAT_CHANGED。
-    m.api.chatId = 'chat-b';
-    m.api.characterId = '1';
+    // 同名重载保留身份及数组，仍通过 CHAT_CHANGED 作废旧任务。
+    if (action !== '同名聊天重载') {
+      m.api.chatId = 'chat-b';
+      m.api.characterId = '1';
+    }
     const messages = action === '新建聊天'
       ? [{ is_user: false, mes: '新开场白' }]
       : [{ is_user: true, mes: '旧用户消息' }, { is_user: false, mes: '旧回复' }];
     reusedChat.splice(0, reusedChat.length, ...messages);
     m.generationEnded!(reusedChat.length);
-    await dispatchCompletionTasks_ACU();
-    expect(m.autoUpdate).not.toHaveBeenCalled();
-    expect(m.handleNewMessage).not.toHaveBeenCalled();
 
     m.resetScript.mockImplementation(async (name: string) => { m.currentChatKey = name; });
-    await m.chatChanged!('chat-b');
+    await m.chatChanged!(action === '同名聊天重载' ? 'chat-a' : 'chat-b');
     if (action === '新建聊天') {
       m.messageReceived!(0, 'first_message');
-      m.characterMessageRendered!(0, 'first_message');
+      await m.api.eventSource.emit('character_message_rendered', 0, 'first_message');
     }
     m.generationEnded!(reusedChat.length);
     await vi.advanceTimersByTimeAsync(1200);
@@ -673,6 +693,7 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
     expect(m.api.chat).toBe(reusedChat);
 
     m.generationStarted!('continue', {}, false);
+    m.messageReceived!(reusedChat.length - 1, 'continue');
     m.generationEnded!(reusedChat.length);
     await dispatchCompletionTasks_ACU();
     expect(m.autoUpdate).toHaveBeenCalledOnce();
@@ -696,7 +717,7 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
   it.each(['chatId', 'characterId', 'groupId'] as const)('生成开始后宿主 %s 改变，即使数组和插件聊天名未变也不填表', async field => {
     m.currentChatKey = 'chat-a';
     m.api.chat = [{ is_user: false, mes: '原正文' }];
-    m.generationStarted!('normal', {}, false);
+    m.messageReceived!(0, 'normal');
     m.api[field] = 'another';
     m.generationEnded!(1);
     await dispatchCompletionTasks_ACU();
@@ -708,7 +729,7 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
 describe('mainInitialize_ACU continuation internal AI event isolation', () => {
   beforeEach(() => { vi.useFakeTimers(); });
 
-  it('内部生成只隔离续写和优化，不阻断填表信号', async () => {
+  it('内部生成结束只处理归属，不创建填表或优化任务', async () => {
     const identity = { source: 'turn_instruction' as const, requestId: 'request-a', chatIdentity: 'chat-a', taskId: 'task-a', stageId: 'stage-a', revision: 1, nodeId: 'node-a', turnId: 'turn-a', attemptId: 'attempt-a' };
     m.consumeInternalGeneration.mockReturnValueOnce(identity);
 
@@ -723,7 +744,7 @@ describe('mainInitialize_ACU continuation internal AI event isolation', () => {
     expect(m.consumeInternalGeneration).toHaveBeenCalledWith(m.gate.generationSeq);
     expect(m.consumeSimulationInternalGeneration).not.toHaveBeenCalled();
     expect(m.handleSimulationCompletion).not.toHaveBeenCalled();
-    expect(m.autoUpdate).toHaveBeenCalledTimes(1);
+    expect(m.autoUpdate).not.toHaveBeenCalled();
     expect(m.handleNewMessage).not.toHaveBeenCalled();
   });
 });
@@ -731,7 +752,7 @@ describe('mainInitialize_ACU continuation internal AI event isolation', () => {
 describe('mainInitialize_ACU world simulation generation isolation', () => {
   beforeEach(() => { vi.useFakeTimers(); });
 
-  it('simulation 内部生成结束时仅短路推演和优化，仍派发填表', async () => {
+  it('simulation 内部生成结束不派发推演、填表或优化', async () => {
     m.consumeSimulationInternalGeneration.mockReturnValueOnce({ requestId: 'simulation-request', runId: 'run-a', role: 'world-director' });
 
     m.generationStarted!('normal', {}, false);
@@ -741,7 +762,7 @@ describe('mainInitialize_ACU world simulation generation isolation', () => {
     expect(m.bindSimulationInternalGeneration).toHaveBeenCalledWith(m.gate.generationSeq);
     expect(m.consumeSimulationInternalGeneration).toHaveBeenCalledWith(m.gate.generationSeq);
     expect(m.handleSimulationCompletion).not.toHaveBeenCalled();
-    expect(m.autoUpdate).toHaveBeenCalledTimes(1);
+    expect(m.autoUpdate).not.toHaveBeenCalled();
     expect(m.handleNewMessage).not.toHaveBeenCalled();
   });
 
@@ -754,7 +775,7 @@ describe('mainInitialize_ACU world simulation generation isolation', () => {
     await dispatchCompletionTasks_ACU();
     expect(m.createSimulationIntent).not.toHaveBeenCalled();
     expect(m.getSimulationRuntime).not.toHaveBeenCalled();
-    expect(m.handleNewMessage).toHaveBeenCalledTimes(1);
+    expect(m.handleNewMessage).not.toHaveBeenCalled();
 
     m.settings.worldSimulationPageEnabled = true;
     m.generationStarted!('normal', {}, false);
@@ -768,7 +789,7 @@ describe('mainInitialize_ACU world simulation generation isolation', () => {
     await dispatchCompletionTasks_ACU();
     expect(m.createSimulationIntent).toHaveBeenCalledTimes(1);
     expect(m.handleSimulationCompletion).toHaveBeenCalledTimes(1);
-    expect(m.handleNewMessage).toHaveBeenCalledTimes(3);
+    expect(m.handleNewMessage).not.toHaveBeenCalled();
   });
 
   it('普通最终 assistant 正文构造冻结意图并派发一次格林推演', async () => {
@@ -801,14 +822,14 @@ describe('mainInitialize_ACU world simulation generation isolation', () => {
 
     expect(m.createSimulationIntent).not.toHaveBeenCalled();
     expect(m.handleSimulationCompletion).not.toHaveBeenCalled();
-    expect(m.autoUpdate).toHaveBeenCalledTimes(3);
+    expect(m.autoUpdate).not.toHaveBeenCalled();
   });
 });
 
 describe('mainInitialize_ACU continuation host generation isolation', () => {
   beforeEach(() => { vi.useFakeTimers(); });
 
-  it('claimed host generation runs the bridge and the normal auto-update pipeline in parallel', async () => {
+  it('续写桥处理宿主收尾，正文消息独立启动填表和优化', async () => {
     const debug = { step: vi.fn(), finish: vi.fn() };
     const bridge = { onGenerationStarted: vi.fn(() => true), claimsGenerationEnded: vi.fn(() => true),
       onGenerationEnded: vi.fn(), captureGenerationDebug: vi.fn(() => debug) };
@@ -832,15 +853,17 @@ describe('mainInitialize_ACU continuation host generation isolation', () => {
     // 第二个参数是宽松认领开关：普通生成（非 quiet、非 dryRun、非自动触发）才允许，
     // 因为宿主的 GENERATION_STARTED 常在发送返回后的微任务里才到，严格同步配对必然错过。
     expect(bridge.onGenerationStarted).toHaveBeenCalledWith(m.gate.generationSeq, { allowOrdinaryLooseClaim: true, automaticTrigger: false, quietLike: false, dryRun: false });
-    // 生成结束侧的宽松认领沿用自动填表门控的判定结果：会产生正文楼层的生成才允许。
+    // 宿主上下文只决定续写桥的归属。
     expect(bridge.claimsGenerationEnded).toHaveBeenCalledWith(m.gate.generationSeq, { allowOrdinaryLooseClaim: true, automaticTrigger: false, quietLike: false, dryRun: false });
     expect(bridge.onGenerationEnded).toHaveBeenCalledWith(42, m.gate.generationSeq, { allowOrdinaryLooseClaim: true, automaticTrigger: false, quietLike: false, dryRun: false });
-    // 解耦语义：桥只管续写轮次的归属确认/标签校验/自动续轮，不再短路常规管线；
-    // 桥的事件分类直接使用宿主上下文；自动填表门控只负责一次常规派发，
-    // handleNewMessage 仍照常收到完整意图快照。
-    expect(m.autoUpdate).toHaveBeenCalledTimes(1);
-    expect(m.handleNewMessage).toHaveBeenCalledWith('GENERATION_ENDED', expect.objectContaining({ eventMessageId: 42 }));
+    expect(m.autoUpdate).not.toHaveBeenCalled();
+    expect(m.handleNewMessage).not.toHaveBeenCalled();
     expect(m.flushPlot).toHaveBeenCalledOnce();
+    m.api.chat = [{ is_user: false, mes: '正文' }];
+    m.messageReceived!(0, 'normal');
+    await dispatchCompletionTasks_ACU();
+    expect(m.autoUpdate).toHaveBeenCalledOnce();
+    expect(m.handleNewMessage).toHaveBeenCalledWith('MESSAGE_RECEIVED', expect.objectContaining({ eventMessageId: 0 }));
     bridge.captureGenerationDebug.mockClear();
     debug.step.mockClear();
     await m.afterCommands!('normal', { _qrf_processed_by_hook: true }, false);
@@ -848,7 +871,7 @@ describe('mainInitialize_ACU continuation host generation isolation', () => {
     expect(debug.step).not.toHaveBeenCalled();
   });
 
-  it('leaves an unclaimed host generation on the normal auto-update path', async () => {
+  it('未被续写桥认领的收尾不创建填表任务，消息交付独立处理', async () => {
     const bridge = { onGenerationStarted: vi.fn(() => false), claimsGenerationEnded: vi.fn(() => false),
       onGenerationEnded: vi.fn(), captureGenerationDebug: vi.fn(() => undefined) };
     m.continuationBridge = bridge;
@@ -863,12 +886,17 @@ describe('mainInitialize_ACU continuation host generation isolation', () => {
     expect(bridge.claimsGenerationEnded).toHaveBeenCalledWith(m.gate.generationSeq, { allowOrdinaryLooseClaim: true, automaticTrigger: false, quietLike: false, dryRun: false });
     expect(bridge.onGenerationEnded).not.toHaveBeenCalled();
     expect(bridge.captureGenerationDebug).toHaveBeenCalledExactlyOnceWith(m.gate.generationSeq);
+    expect(m.autoUpdate).not.toHaveBeenCalled();
+    expect(m.handleNewMessage).not.toHaveBeenCalled();
+    m.api.chat = [{ is_user: false, mes: '正文' }];
+    m.messageReceived!(0, 'normal');
+    await dispatchCompletionTasks_ACU();
     expect(m.autoUpdate).toHaveBeenCalledExactlyOnceWith(undefined, {
-      eventType: 'GENERATION_ENDED', messageId: 42, chatKey: '', isolationKey: 'test-isolation',
+      eventType: 'MESSAGE_RECEIVED', messageId: 0, chatKey: '', isolationKey: 'test-isolation',
       isCurrentChat: expect.any(Function),
       isCurrentEvent: expect.any(Function),
     });
-    expect(m.handleNewMessage).toHaveBeenCalledWith('GENERATION_ENDED', expect.objectContaining({ eventMessageId: 42 }));
+    expect(m.handleNewMessage).toHaveBeenCalledWith('MESSAGE_RECEIVED', expect.objectContaining({ eventMessageId: 0 }));
   });
 
   it('quiet、dryRun 与自动触发的生成不开放宽松认领', async () => {

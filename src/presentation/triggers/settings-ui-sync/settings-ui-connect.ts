@@ -12,7 +12,7 @@ import { isExtensionMode, getHostWindow } from '../../../shared/runtime-env';
 import { getChatArray_ACU, saveChatToHost_ACU } from '../../../service/chat/chat-service';
 import { getConnectionManagerProfiles_ACU, fetchAvailableModels_ACU } from '../../../service/ai/ai-service';
 import { getCurrentCharacterFallback_ACU } from '../../../service/host/host-state-service';
-import { AI_MATERIALIZATION_MAX_RETRIES_ACU, AI_MATERIALIZATION_RETRY_DELAY_MS_ACU, NEW_MESSAGE_DEBOUNCE_DELAY_ACU, coreApisAreReady_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, hasActiveContentGeneration_ACU, lastTotalAiMessages_ACU, settings_ACU , _set_coreApisAreReady_ACU, _set_lastTotalAiMessages_ACU} from '../../../service/runtime/state-manager';
+import { AI_MATERIALIZATION_MAX_RETRIES_ACU, AI_MATERIALIZATION_RETRY_DELAY_MS_ACU, NEW_MESSAGE_DEBOUNCE_DELAY_ACU, coreApisAreReady_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, lastTotalAiMessages_ACU, settings_ACU , _set_coreApisAreReady_ACU, _set_lastTotalAiMessages_ACU} from '../../../service/runtime/state-manager';
 import { $popupInstance_ACU, $customApiUrlInput_ACU, $customApiKeyInput_ACU, $customApiModelInput_ACU, $customApiModelSelect_ACU, $maxTokensInput_ACU, $temperatureInput_ACU, $apiStatusDisplay_ACU, $charCardPromptSegmentsContainer_ACU, $autoUpdateThresholdInput_ACU, $autoUpdateTokenThresholdInput_ACU, $autoUpdateFrequencyInput_ACU, $updateBatchSizeInput_ACU, $maxConcurrentGroupsInput_ACU, $skipUpdateFloorsInput_ACU, $retainRecentLayersInput_ACU, $tableMaxRetriesInput_ACU, $manualExtraHintCheckbox_ACU } from '../../state/ui-refs';
 import { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } from '../../../service/summary/merge-logic';
 import { processUpdates_ACU } from '../update-process';
@@ -232,11 +232,8 @@ import { buildTavernHelperCompat_ACU, formatHostCapabilities_ACU } from '../../.
   export async function handleContentOptimizationEvent_ACU(eventType = 'unknown_acu', intent?: AutoFillIntent_ACU) {
     const eventEpoch = contentOptimizationEventEpoch_ACU;
     const canProcessEvent = (): boolean => {
-      const reason = eventEpoch !== contentOptimizationEventEpoch_ACU
-        ? 'generation_changed'
-        : hasActiveContentGeneration_ACU() ? 'generation_in_progress' : null;
-      if (!reason) return true;
-      logContentOptimizationSkip_ACU(reason, {
+      if (eventEpoch === contentOptimizationEventEpoch_ACU) return true;
+      logContentOptimizationSkip_ACU('generation_changed', {
         eventType,
         eventMessageId: intent?.eventMessageId,
         chatKey: intent?.chatKey,
