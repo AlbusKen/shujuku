@@ -14,6 +14,8 @@ import { captureZeroLayerCarrier_ACU, assertZeroLayerCarrier_ACU, readZeroLayerC
 import { ZeroLayerError_ACU } from '../../service/zero-layer/model';
 import { getZeroLayerHostContext_ACU, requireZeroLayerHostGeneration_ACU } from '../../service/zero-layer/host-generation';
 import { registerZeroLayerPageOperations_ACU } from '../../service/zero-layer/page-operations';
+import { assertZeroLayerFeatureEnabled_ACU, isZeroLayerFeatureEnabled_ACU } from '../../service/zero-layer/feature-policy';
+import { installZeroLayerRetirement_ACU } from './zero-layer-retirement';
 
 let runtime_ACU: ZeroLayerRuntime_ACU | null = null;
 let releaseOrdinaryGate_ACU: (() => void) | null = null;
@@ -27,6 +29,7 @@ let mountingView_ACU: Promise<void> | null = null;
 
 /** 展示失败保留已发布数据；重同步只回读，不重新生成或重载 shell。 */
 export async function resyncZeroLayerViewForPage_ACU(): Promise<void> {
+  assertZeroLayerFeatureEnabled_ACU();
   if (stableView_ACU.isMounted) return stableView_ACU.resync();
   if (mountingView_ACU) return mountingView_ACU;
   const operation = stableView_ACU.mount();
@@ -90,6 +93,10 @@ async function syncConfirmedZeroLayerView_ACU(): Promise<void> {
 
 /** 两种入口共用；能力缺失时不改变普通发送，不创建聊天存档。 */
 export function installZeroLayerBootstrap_ACU(): void {
+  if (!isZeroLayerFeatureEnabled_ACU()) {
+    installZeroLayerRetirement_ACU();
+    return;
+  }
   const api = getZeroLayerHostContext_ACU();
   const source = api?.eventSource;
   const events = api?.eventTypes;
@@ -178,6 +185,7 @@ export function installZeroLayerBootstrap_ACU(): void {
 
 /** 延迟装配避免启动时的 IO/默认值写回；未加载完成不能启动生成。 */
 export async function loadZeroLayerRuntimeForPage_ACU(): Promise<ZeroLayerRuntime_ACU> {
+  assertZeroLayerFeatureEnabled_ACU();
   installZeroLayerBootstrap_ACU();
   if (!installedSource_ACU) throw new Error('宿主缺少零层 bootstrap 所需的事件或 fetch 能力。');
   const epoch = lifecycleEpoch_ACU;

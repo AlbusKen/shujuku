@@ -13,6 +13,7 @@ import { applyZeroLayerBridgeCommand_ACU, type ZeroLayerBridgeCommand_ACU } from
 import { assertBridgeSource_ACU } from './bridge-source';
 import { applyZeroLayerBranchCommand_ACU, type ZeroLayerBranchCommand_ACU } from './branch-command';
 import { abandonZeroLayerTurn_ACU, suspendZeroLayerEnvelope_ACU } from './lifecycle-command';
+import { assertZeroLayerFeatureEnabled_ACU } from './feature-policy';
 
 export type ZeroLayerCommand_ACU =
   | { type: 'initialize'; apiPresetName: string }
@@ -86,6 +87,7 @@ export function applyZeroLayerCommand_ACU(
   context: ZeroLayerCarrierContext_ACU,
   fingerprint: string,
 ): ZeroLayerEnvelope_ACU {
+  if (command.type !== 'set-enabled' || command.enabled) assertZeroLayerFeatureEnabled_ACU();
   if (command.type === 'initialize') {
     if (current) throw new ZeroLayerError_ACU('revision-conflict', '零层存档已存在，禁止覆盖初始化。');
     const branchId = crypto.randomUUID();

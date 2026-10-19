@@ -4,6 +4,7 @@ import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-histor
 import { ZERO_LAYER_CARRIER_FIELD_ACU } from '../../service/zero-layer/model';
 import { ZeroLayerStore_ACU } from '../../service/zero-layer/store';
 import { subscribeZeroLayerChanges_ACU } from '../../service/zero-layer/notifications';
+import { isZeroLayerFeatureEnabled_ACU } from '../../service/zero-layer/feature-policy';
 import { useChatChangedTick, useChatMutationTick } from './useChatChangedListener';
 import {
   readAgentModuleFieldSnapshot_ACU,
@@ -92,7 +93,7 @@ export function useContinuationMaterials() {
   let draftSource: DraftSource | null = null;
   function readSource(): DraftSource {
     const chat = getChatArray_ACU();
-    const source = chat.some(message => message
+    const source = isZeroLayerFeatureEnabled_ACU() && chat.some(message => message
       && Object.prototype.hasOwnProperty.call(message, ZERO_LAYER_CARRIER_FIELD_ACU))
       ? new ZeroLayerStore_ACU().readSnapshot() : null;
     return { chat, key: JSON.stringify([getActiveChatStorageIdentity_ACU(chat), chatChangedTick.value, mutationTick.value,

@@ -64,6 +64,7 @@ import { assertWorldSimulationHostRun_ACU, requireWorldSimulationHostAnchor_ACU 
 import { ZeroLayerStore_ACU } from '../zero-layer/store';
 import { ZERO_LAYER_CARRIER_FIELD_ACU, ZeroLayerError_ACU, type ZeroLayerEnvelope_ACU } from '../zero-layer/model';
 import { ZeroLayerSimulationStore_ACU, emptyZeroLayerSimulation_ACU } from '../zero-layer/simulation-store';
+import { isZeroLayerFeatureEnabled_ACU } from '../zero-layer/feature-policy';
 import { appendZeroLayerSimulationSessionEvent_ACU, appendZeroLayerSimulationUserInstruction_ACU, createZeroLayerSimulationAgentStorage_ACU } from '../zero-layer/simulation-agent-storage';
 import { commitZeroLayerSimulationFields_ACU, commitZeroLayerSimulationFinal_ACU } from '../zero-layer/simulation-commit';
 import { validateZeroLayerSimulationReceipt_ACU } from '../zero-layer/simulation-validation';
@@ -825,6 +826,7 @@ let runtime_ACU: WorldSimulationRuntime_ACU | null = null;
 let logicalRuntimeKey_ACU: string | null = null;
 let logicalRuntimeChat_ACU: any[] | null = null;
 function readEnabledSimulationCarrier_ACU(chat: any[]): ZeroLayerEnvelope_ACU | null {
+  if (!isZeroLayerFeatureEnabled_ACU()) return null;
   const source = chat.some(message => message && Object.prototype.hasOwnProperty.call(message, ZERO_LAYER_CARRIER_FIELD_ACU))
     ? new ZeroLayerStore_ACU().readSnapshot() : null;
   return source?.enabled ? source : null;

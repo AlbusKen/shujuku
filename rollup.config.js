@@ -144,6 +144,8 @@ const userscriptConfig = {
   output: {
     file: 'dist/index.bundle.js',
     format: 'iife',
+    // userscript 以单文件安装，动态导入必须内联，不能生成独立 chunk。
+    inlineDynamicImports: true,
     banner: USER_SCRIPT_BANNER,
     sourcemap: false,
   },

@@ -392,6 +392,8 @@ describe("DashboardPage", () => {
     expect(text).toContain("桌面宠物");
     expect(text).toContain("开启流式输出");
     expect(text).toContain("0TK 占用模式");
+    expect(text).not.toContain("零层卡模式");
+    expect(page!.querySelector('#acu-zero-layer-send-hint')).toBeNull();
 
     const visibleToggleKeys = Array.from(
       document.querySelectorAll<HTMLButtonElement>(

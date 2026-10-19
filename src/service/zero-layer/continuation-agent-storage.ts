@@ -14,11 +14,13 @@ import { emptyZeroLayerContinuation_ACU } from './continuation-store';
 import { projectWorkingContinuation_ACU } from './checkpoint-projection';
 import { checkpointFingerprint_ACU, continuationCheckpointPayload_ACU } from './checkpoint-payload';
 import type { ZeroLayerContinuationState_ACU } from './model';
+import { isZeroLayerFeatureEnabled_ACU } from './feature-policy';
 
 type Storage_ACU = NonNullable<ContinuationAgentTurnPlanRequest_ACU['storage']>;
 
 /** 普通聊天不要求 carrier 能力；存在零层字段时严格读取，异常不得回落物理写口。 */
 export function getZeroLayerContinuationAgentStorage_ACU(): Storage_ACU | null {
+  if (!isZeroLayerFeatureEnabled_ACU()) return null;
   if (!getChatArray_ACU().some(message => message
     && Object.prototype.hasOwnProperty.call(message, ZERO_LAYER_CARRIER_FIELD_ACU))) return null;
   const store = new ZeroLayerStore_ACU();
@@ -30,6 +32,7 @@ export function getZeroLayerContinuationAgentStorage_ACU(): Storage_ACU | null {
 
 /** 页面只读资料不持有工作状态的写权限；在途时从已保存基底折叠。 */
 export function readZeroLayerPublishedContinuationFold_ACU(): ReturnType<typeof readAgentModuleFoldState_ACU> | null {
+  if (!isZeroLayerFeatureEnabled_ACU()) return null;
   if (!getChatArray_ACU().some(message => message
     && Object.prototype.hasOwnProperty.call(message, ZERO_LAYER_CARRIER_FIELD_ACU))) return null;
   const store = new ZeroLayerStore_ACU();

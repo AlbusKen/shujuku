@@ -575,14 +575,13 @@ describe('continuation API preset reference cascade helpers', () => {
   });
 });
 
-describe('零层初始化与源历史校验', () => {
+describe('零层停用与源历史校验', () => {
   beforeEach(() => { _set_SillyTavern_API_ACU(undefined); });
 
-  it('无宿主生成状态接口时可初始化零层并冻结启用切点', async () => {
+  it('停用后拒绝初始化和重新启用，保留源历史切点的只读能力', async () => {
     const { applyZeroLayerCommand_ACU } = await import('../../../src/service/zero-layer/store-command');
     const { captureBridgeActivationCut_ACU } = await import('../../../src/service/zero-layer/bridge-source');
     const { physicalHistorySnapshot_ACU } = await import('../../../src/service/zero-layer/carrier-context');
-    const { ZERO_LAYER_SCHEMA_VERSION_ACU } = await import('../../../src/service/zero-layer/model');
     const carrier = { is_user: false, mes: '开场', swipe_id: 0 };
     const chat = [carrier];
     const scope = { characterKey: 'card:test', chatId: 'chat-test' };
@@ -590,12 +589,12 @@ describe('零层初始化与源历史校验', () => {
       key: JSON.stringify([scope.characterKey, scope.chatId]),
       source: physicalHistorySnapshot_ACU(chat), messageRefs: [...chat] };
     const fingerprint = 'sha256:activation';
-    const initialized = applyZeroLayerCommand_ACU(null,
-      { type: 'initialize', apiPresetName: 'database-direct' }, context, fingerprint);
-    expect(initialized.schemaVersion).toBe(ZERO_LAYER_SCHEMA_VERSION_ACU);
-    expect(initialized.enabled).toBe(false);
-    expect(initialized.apiPresetName).toBe('database-direct');
-    expect(initialized.scope).toEqual(scope);
+    expect(() => applyZeroLayerCommand_ACU(null,
+      { type: 'initialize', apiPresetName: 'database-direct' }, context, fingerprint))
+      .toThrow('零层功能已关闭');
+    expect(() => applyZeroLayerCommand_ACU(null,
+      { type: 'set-enabled', enabled: true }, context, fingerprint))
+      .toThrow('零层功能已关闭');
     const cut = captureBridgeActivationCut_ACU(context, fingerprint);
     expect(cut.messageCount).toBe(1);
     expect(cut.completedAiCount).toBe(1);
