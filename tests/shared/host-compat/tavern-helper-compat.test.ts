@@ -4,8 +4,9 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const { mockHost, mockLogWarn, mockLogDebug } = vi.hoisted(() => ({
+const { mockHost, mockWorldInfoModule, mockLogWarn, mockLogDebug } = vi.hoisted(() => ({
   mockHost: {} as any,
+  mockWorldInfoModule: {} as any,
   mockLogWarn: vi.fn(),
   mockLogDebug: vi.fn(),
 }));
@@ -26,7 +27,7 @@ import {
 /** 原生后端可用的最小 ST context */
 function makeUsableStApi(overrides: Record<string, any> = {}) {
   return {
-    loadWorldInfo: vi.fn(),
+    loadWorldInfo: vi.fn().mockResolvedValue({ entries: {} }),
     saveWorldInfo: vi.fn(),
     executeSlashCommandsWithOptions: vi.fn().mockResolvedValue({ pipe: '' }),
     getRequestHeaders: () => ({ 'X-CSRF-Token': 'test' }),
@@ -39,13 +40,15 @@ function makeUsableStApi(overrides: Record<string, any> = {}) {
 beforeEach(() => {
   vi.clearAllMocks();
   Object.keys(mockHost).forEach(key => delete mockHost[key]);
-  mockHost.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ world_names: ['书'], entries: {} }) });
+  Object.keys(mockWorldInfoModule).forEach(key => delete mockWorldInfoModule[key]);
+  Object.assign(mockWorldInfoModule, { world_info: {}, world_names: ['书'] });
+  mockHost.fetch = vi.fn(() => { throw new Error('原生适配不应另发 HTTP 请求'); });
   mockHost.location = { href: 'https://tavern.test/', origin: 'https://tavern.test' };
   mockHost.document = {
     createElement: () => ({ remove: vi.fn() }),
     head: { appendChild: () => {
       const key = Object.keys(mockHost).find(key => key.startsWith('__ACU_WI_MODULE_'))!;
-      mockHost[key].resolve({ world_info: {} });
+      mockHost[key].resolve(mockWorldInfoModule);
     } },
   };
 });
@@ -53,7 +56,7 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('passthrough（旧版酒馆助手全量 API）', () => {
-  it('旧版写入继续透传，读取不使用酒馆助手缓存', async () => {
+  it('旧版写入继续透传，读取直接使用 SillyTavern 原生能力', async () => {
     const rawTH = {
       getLorebookEntries: vi.fn().mockResolvedValue([{ uid: 1 }]),
       setLorebookEntries: vi.fn(),
@@ -106,11 +109,11 @@ describe('mapped（新版改名 API）', () => {
     effect: { sticky: null, cooldown: null, delay: null },
   };
 
-  it('新版助手存在时仍读取宿主新鲜条目，输出旧版扁平格式', async () => {
+  it('新版助手存在时仍读取原生条目，输出旧版扁平格式', async () => {
     const rawTH = { getWorldbook: vi.fn().mockResolvedValue([newEntry]) };
-    mockHost.fetch.mockResolvedValue({ ok: true, json: async () => ({ world_names: ['书'], entries: {
+    mockWorldInfoModule.loadWorldInfo = vi.fn().mockResolvedValue({ entries: {
       5: { uid: 5, comment: '新条目', content: 'C', position: 4, role: 1, depth: 3, order: 10, preventRecursion: true },
-    } }) });
+    } });
     const { api, capabilities } = buildTavernHelperCompat_ACU(rawTH, () => makeUsableStApi());
     expect(capabilities.getLorebookEntries).toBe('native');
     const entries = await api.getLorebookEntries('书');
@@ -181,10 +184,9 @@ describe('mapped（新版改名 API）', () => {
       getWorldbookNames: vi.fn().mockReturnValue(['A', 'B']),
       getCharWorldbookNames: vi.fn().mockReturnValue({ primary: '主书', additional: ['附1'] }),
     };
-    mockHost.fetch.mockResolvedValue({ ok: true, json: async () => ({ world_names: ['A', 'B'] }) });
     mockHost.document.head.appendChild = () => {
       const key = Object.keys(mockHost).find(key => key.startsWith('__ACU_WI_MODULE_'))!;
-      mockHost[key].resolve({ world_info: { charLore: [{ name: '角色', extraBooks: ['附1'] }] } });
+      mockHost[key].resolve({ world_names: ['A', 'B'], world_info: { charLore: [{ name: '角色', extraBooks: ['附1'] }] } });
     };
     const st = makeUsableStApi({ characterId: 0, characters: [{ avatar: '角色.png', data: { extensions: { world: '主书' } } }] });
     const { api, capabilities } = buildTavernHelperCompat_ACU(rawTH, () => st);
@@ -208,9 +210,10 @@ describe('mapped（新版改名 API）', () => {
 });
 
 describe('世界书后端组', () => {
-  it('助手缺少条目读取不影响宿主新鲜读取，且不调用 loadWorldInfo', async () => {
+  it('context 未导出 loader 时仍可使用原生模块 loadWorldInfo', async () => {
+    mockWorldInfoModule.loadWorldInfo = vi.fn().mockResolvedValue({ entries: { 1: { uid: 1 } } });
     const stApi = makeUsableStApi({
-      loadWorldInfo: vi.fn().mockResolvedValue({ entries: { 1: { uid: 1 } } }),
+      loadWorldInfo: undefined,
     });
     const rawTH = {
       getCharWorldbookNames: vi.fn().mockResolvedValue({ primary: '主书', additional: [] }),
@@ -220,9 +223,11 @@ describe('世界书后端组', () => {
 
     expect(capabilities.getCharWorldbookNames).toBe('native');
     expect(capabilities.getLorebookEntries).toBe('native');
-    expect(await api.getLorebookEntries('书')).toEqual([]);
+    expect(capabilities.getLorebooks).toBe('native');
+    expect(await api.getLorebookEntries('书')).toMatchObject([{ uid: 1 }]);
     expect(await api.getCharWorldbookNames('current')).toEqual({ primary: null, additional: [] });
-    expect(stApi.loadWorldInfo).not.toHaveBeenCalled();
+    expect(mockWorldInfoModule.loadWorldInfo).toHaveBeenCalledWith('书');
+    expect(mockHost.fetch).not.toHaveBeenCalled();
   });
 
   it('派生绑定视图复用同一个 getCharWorldbookNames 来源', async () => {
@@ -266,17 +271,14 @@ describe('native（无酒馆助手，SillyTavern 原生兜底）', () => {
     expect(await api.triggerSlash('/trigger')).toBe('p');
   });
 
-  it('目录每次重新拉取，不依赖快照失效调用', async () => {
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ world_names: ['旧书'], settings: '{}' }) })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ world_names: ['新书'], settings: '{}' }) });
-    mockHost.fetch = fetchMock;
-      const { api } = buildTavernHelperCompat_ACU(undefined, () => makeUsableStApi());
-      expect(await api.getLorebooks()).toEqual(['旧书']);
-      api.invalidateLorebookListSnapshot();
-      expect(await api.getLorebooks()).toEqual(['新书']);
-      expect(fetchMock).toHaveBeenCalledTimes(2);
-
+  it('目录每次读取原生实时导出，不依赖快照失效调用', async () => {
+    mockWorldInfoModule.world_names = ['旧书'];
+    const { api } = buildTavernHelperCompat_ACU(undefined, () => makeUsableStApi());
+    expect(await api.getLorebooks()).toEqual(['旧书']);
+    mockWorldInfoModule.world_names = ['新书'];
+    api.invalidateLorebookListSnapshot();
+    expect(await api.getLorebooks()).toEqual(['新书']);
+    expect(mockHost.fetch).not.toHaveBeenCalled();
   });
 
   it('rawTH 与 ST 都不可用时全部记为 missing', () => {
@@ -299,80 +301,95 @@ describe('能力表诊断', () => {
   });
 });
 
-describe('新鲜读取边界', () => {
-  const response = (data: unknown) => ({ ok: true, json: async () => data });
-
-  it('特殊名称原样进入宿主 JSON 请求，连续操作不复用旧内容', async () => {
+describe('原生读取边界', () => {
+  it('特殊书名原样传给 loadWorldInfo，每次操作重新调用原生加载器', async () => {
     const name = '  全角Ａ / "引号" & # + \u200b ';
+    mockWorldInfoModule.world_names = [name];
     let revision = 0;
-    mockHost.fetch.mockImplementation(async (url: string) => response(url.endsWith('/api/settings/get')
-      ? { world_names: [name] }
-      : { entries: { 1: { uid: 1, content: `版本${++revision}` } } }));
-    const { api } = buildTavernHelperCompat_ACU(undefined, () => makeUsableStApi());
+    const loadWorldInfo = vi.fn(async () => ({ entries: { 1: { uid: 1, content: `版本${++revision}` } } }));
+    const { api } = buildTavernHelperCompat_ACU(undefined, () => makeUsableStApi({ loadWorldInfo }));
     expect(await api.getLorebooks()).toEqual([name]);
     expect(await api.getLorebookEntries(name)).toMatchObject([{ content: '版本1' }]);
     expect(await api.getLorebookEntries(name)).toMatchObject([{ content: '版本2' }]);
-    const calls = mockHost.fetch.mock.calls.filter(([url]: [string]) => url.endsWith('/api/worldinfo/get'));
-    expect(calls).toHaveLength(2);
-    for (const [url, init] of calls) {
-      expect(url).toBe('https://tavern.test/api/worldinfo/get');
-      expect(JSON.parse(init.body)).toEqual({ name });
-      expect(init).toMatchObject({ cache: 'no-store', credentials: 'same-origin', headers: { 'X-CSRF-Token': 'test' } });
-    }
+    expect(loadWorldInfo.mock.calls).toEqual([[name], [name]]);
+    expect(mockHost.fetch).not.toHaveBeenCalled();
   });
 
-  it('合法空书返回空数组，目录删除前后均明确报不存在', async () => {
-    const { api } = buildTavernHelperCompat_ACU(undefined, () => makeUsableStApi());
+  it('合法空书与目录中不存在的书可区分，不调用失效书的加载器', async () => {
+    const st = makeUsableStApi();
+    const { api } = buildTavernHelperCompat_ACU(undefined, () => st);
     await expect(api.getLorebookEntries('书')).resolves.toEqual([]);
-    mockHost.fetch.mockResolvedValue(response({ world_names: [] }));
+    mockWorldInfoModule.world_names = [];
     await expect(api.getLorebookEntries('书')).rejects.toMatchObject({ category: 'lorebook_not_found' });
-    mockHost.fetch.mockReset()
-      .mockResolvedValueOnce(response({ world_names: ['书'] }))
-      .mockResolvedValueOnce(response({ entries: {} }))
-      .mockResolvedValueOnce(response({ world_names: [] }));
-    await expect(api.getLorebookEntries('书')).rejects.toMatchObject({ category: 'lorebook_not_found' });
+    expect(st.loadWorldInfo).toHaveBeenCalledTimes(1);
   });
 
-  it.each([{ ok: false }, { ok: true, json: async () => ({ entries: [] }) }])('响应失败不伪装成空书', async reply => {
-    mockHost.fetch.mockResolvedValueOnce(response({ world_names: ['书'] })).mockResolvedValueOnce(reply);
-    const { api } = buildTavernHelperCompat_ACU(undefined, () => makeUsableStApi());
-    await expect(api.getLorebookEntries('书')).rejects.toMatchObject({ category: 'unknown' });
+  it.each([null, {}, { entries: [] }, { entries: null }])('原生返回无效数据时不伪装成空书：%j', async data => {
+    const st = makeUsableStApi({ loadWorldInfo: vi.fn().mockResolvedValue(data) });
+    const { api } = buildTavernHelperCompat_ACU(undefined, () => st);
+    await expect(api.getLorebookEntries('书')).rejects.toMatchObject({ category: 'unknown', reason: 'invalid_payload' });
   });
 
-  it.each(['primary', 'additional', 'chat'])('读取期间 %s 变化时拒绝迟到结果', async kind => {
+  it.each(['Error', 'AbortError'])('原生加载器拒绝时原样传递 %s，不切换读取来源', async name => {
+    const error = Object.assign(new Error('原生加载失败'), { name });
+    const st = makeUsableStApi({ loadWorldInfo: vi.fn().mockRejectedValue(error) });
+    const raw = { getLorebookEntries: vi.fn() };
+    const { api } = buildTavernHelperCompat_ACU(raw, () => st);
+    await expect(api.getLorebookEntries('书')).rejects.toBe(error);
+    expect(raw.getLorebookEntries).not.toHaveBeenCalled();
+    expect(mockHost.fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(['primary', 'additional', 'chat', 'deleted'])('原生读取期间 %s 变化时拒绝迟到结果', async kind => {
     const st = makeUsableStApi({ characterId: 0, chatId: 'chat-1', characters: [
       { avatar: '角色.png', data: { extensions: { world: '书' } } },
     ] });
-    const module = { world_info: { charLore: [{ name: '角色', extraBooks: ['书'] }] } };
-    mockHost.document.head.appendChild = () => {
-      const key = Object.keys(mockHost).find(key => key.startsWith('__ACU_WI_MODULE_'))!;
-      mockHost[key].resolve(module);
-    };
-    const { api } = buildTavernHelperCompat_ACU(undefined, () => st);
-    await api.getCharWorldbookNames('current');
-    mockHost.fetch.mockImplementation(async (url: string) => {
-      if (url.endsWith('/api/settings/get')) return response({ world_names: ['书'] });
+    mockWorldInfoModule.world_info = { charLore: [{ name: '角色', extraBooks: ['书'] }] };
+    st.loadWorldInfo.mockImplementation(async () => {
       if (kind === 'primary') st.characters[0].data.extensions.world = '';
-      if (kind === 'additional') module.world_info.charLore[0].extraBooks = [];
+      if (kind === 'additional') mockWorldInfoModule.world_info.charLore[0].extraBooks = [];
       if (kind === 'chat') st.chatId = 'chat-2';
-      return response({ entries: { 1: { uid: 1, content: '迟到内容' } } });
+      if (kind === 'deleted') mockWorldInfoModule.world_names = [];
+      return { entries: { 1: { uid: 1, content: '迟到内容' } } };
     });
-    await expect(api.getLorebookEntries('书')).rejects.toMatchObject({ category: 'scope_changed' });
+    const { api } = buildTavernHelperCompat_ACU(undefined, () => st);
+    await expect(api.getLorebookEntries('书')).rejects.toMatchObject({
+      category: kind === 'deleted' ? 'lorebook_not_found' : 'scope_changed',
+    });
   });
 
-  it('宿主模块加载失败后清理桥接并允许下一次重试，不退回助手绑定', async () => {
-    const st = makeUsableStApi({ characterId: 0, characters: [{ avatar: '角色.png' }] });
+  it('保留宿主待保存编辑，不清除或改写原生缓存', async () => {
+    const cached = { entries: { 1: { uid: 1, content: '待保存编辑', key: ['关键词'] } } };
+    const cache = { delete: vi.fn(), clear: vi.fn(), set: vi.fn() };
+    mockWorldInfoModule.worldInfoCache = cache;
+    mockWorldInfoModule.loadWorldInfo = vi.fn(async () => cached);
+    const st = makeUsableStApi();
+    const { api } = buildTavernHelperCompat_ACU(undefined, () => st);
+    expect(await api.getLorebookEntries('书')).toMatchObject([{ content: '待保存编辑' }]);
+    expect(cached.entries[1]).toEqual({ uid: 1, content: '待保存编辑', key: ['关键词'] });
+    expect(cache.delete).not.toHaveBeenCalled();
+    expect(cache.clear).not.toHaveBeenCalled();
+    expect(cache.set).not.toHaveBeenCalled();
+    expect(st.saveWorldInfo).not.toHaveBeenCalled();
+    expect(st.loadWorldInfo).not.toHaveBeenCalled();
+    expect(mockHost.fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, null, {}, ['书', 1], [' ']])('原生目录无效时拒绝读取：%j', async names => {
+    mockWorldInfoModule.world_names = names;
+    const { api } = buildTavernHelperCompat_ACU(undefined, () => makeUsableStApi());
+    await expect(api.getLorebooks()).rejects.toMatchObject({ category: 'unknown', operation: 'catalog' });
+  });
+
+  it('宿主模块加载失败后清理桥接，并允许重新加载', async () => {
     mockHost.document.head.appendChild = (script: any) => script.onerror();
-    const raw = { getCharWorldbookNames: vi.fn() };
-    const { api } = buildTavernHelperCompat_ACU(raw, () => st);
-    await expect(api.getCharWorldbookNames()).rejects.toMatchObject({ category: 'api_unavailable' });
+    const { api } = buildTavernHelperCompat_ACU(undefined, () => makeUsableStApi());
+    await expect(api.getLorebooks()).rejects.toMatchObject({ category: 'api_unavailable' });
     expect(Object.keys(mockHost).some(key => key.startsWith('__ACU_WI_MODULE_'))).toBe(false);
     mockHost.document.head.appendChild = () => {
       const key = Object.keys(mockHost).find(key => key.startsWith('__ACU_WI_MODULE_'))!;
-      mockHost[key].resolve({ world_info: {} });
+      mockHost[key].resolve(mockWorldInfoModule);
     };
-    await expect(api.getCharWorldbookNames()).resolves.toEqual({ primary: null, additional: [] });
-    expect(raw.getCharWorldbookNames).not.toHaveBeenCalled();
+    await expect(api.getLorebooks()).resolves.toEqual(['书']);
   });
-
 });

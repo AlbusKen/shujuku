@@ -9,14 +9,14 @@
  * - 聊天与角色：ctx.chat / ctx.characters / ctx.characterId
  * - Slash 命令：ctx.executeSlashCommandsWithOptions
  * - 世界书名称列表与角色附加书（charLore）不在 context 中，
- *   经 POST /api/settings/get 获取（带 TTL 缓存）。
+ *   复用原生 world-info 模块读取，不保留目录或绑定快照。
  *
  * generateRaw 在原生 context 中不存在，本后端不提供（保持"方法缺失"语义，
  * 让调用方既有的可用性检查与降级路径自然生效）。
  */
 
 import { logDebug_ACU, logWarn_ACU } from '../utils';
-import { isLorebookReadNotFoundError_ACU } from '../lorebook-read-error';
+import { createFreshWorldbookReader_ACU } from './fresh-worldbook-reader';
 import {
     buildNativeEntryDefaults_ACU,
     nativeToOldEntry_ACU,
@@ -26,14 +26,6 @@ import {
 
 /** 返回 SillyTavern context 对象（插件模式下为 getContext() 的 Proxy 快照） */
 export type GetStApi_ACU = () => any;
-
-const SETTINGS_SNAPSHOT_TTL_MS_ACU = 8000;
-
-interface StSettingsSnapshot_ACU {
-    worldNames: string[];
-    /** charLore: [{ name: 角色头像文件基名, extraBooks: string[] }] */
-    charLore: Array<{ name: string; extraBooks: string[] }>;
-}
 
 export interface NativeStBackend_ACU {
     getLorebooks: (options?: { forceRefresh?: boolean }) => Promise<string[]>;
@@ -55,8 +47,7 @@ export interface NativeStBackend_ACU {
 }
 
 export function createNativeStBackend_ACU(getStApi: GetStApi_ACU): NativeStBackend_ACU {
-    let settingsSnapshot: StSettingsSnapshot_ACU | null = null;
-    let settingsSnapshotAt = 0;
+    const reader = createFreshWorldbookReader_ACU(getStApi);
 
     function ctx(): any {
         try {
@@ -66,58 +57,8 @@ export function createNativeStBackend_ACU(getStApi: GetStApi_ACU): NativeStBacke
         }
     }
 
-    function invalidateSettingsSnapshot(): void {
-        settingsSnapshot = null;
-        settingsSnapshotAt = 0;
-    }
-
-    async function fetchSettingsSnapshot(forceRefresh = false): Promise<StSettingsSnapshot_ACU | null> {
-        if (forceRefresh) invalidateSettingsSnapshot();
-        const now = Date.now();
-        if (settingsSnapshot && now - settingsSnapshotAt < SETTINGS_SNAPSHOT_TTL_MS_ACU) {
-            return settingsSnapshot;
-        }
-        const api = ctx();
-        try {
-            const headers: Record<string, string> = typeof api?.getRequestHeaders === 'function'
-                ? api.getRequestHeaders()
-                : { 'Content-Type': 'application/json' };
-            const res = await fetch('/api/settings/get', {
-                method: 'POST',
-                headers: { ...headers, 'Content-Type': 'application/json' },
-                body: '{}',
-            });
-            if (!res.ok) {
-                logWarn_ACU(`[NativeStBackend] /api/settings/get 返回 ${res.status}，世界书列表暂不可用`);
-                return null;
-            }
-            const payload = await res.json();
-            const worldNames = Array.isArray(payload?.world_names)
-                ? payload.world_names.map((n: unknown) => String(n))
-                : [];
-            let charLore: Array<{ name: string; extraBooks: string[] }> = [];
-            try {
-                const parsed = typeof payload?.settings === 'string' ? JSON.parse(payload.settings) : payload?.settings;
-                const rawCharLore = parsed?.world_info?.charLore;
-                if (Array.isArray(rawCharLore)) {
-                    charLore = rawCharLore
-                        .filter((item: any) => item && typeof item.name === 'string')
-                        .map((item: any) => ({
-                            name: item.name,
-                            extraBooks: Array.isArray(item.extraBooks) ? item.extraBooks.map((b: unknown) => String(b)) : [],
-                        }));
-                }
-            } catch (e) {
-                logWarn_ACU('[NativeStBackend] 解析 settings.world_info.charLore 失败，附加世界书降级为空', e);
-            }
-            settingsSnapshot = { worldNames, charLore };
-            settingsSnapshotAt = now;
-            return settingsSnapshot;
-        } catch (e) {
-            logWarn_ACU('[NativeStBackend] 获取 /api/settings/get 失败', e);
-            return null;
-        }
-    }
+    /** 兼容既有失效通知；目录与绑定直接读取宿主实时导出，无快照可清。 */
+    function invalidateSettingsSnapshot(): void {}
 
     // ═══ 世界书条目 CRUD ═══
 
@@ -126,20 +67,11 @@ export function createNativeStBackend_ACU(getStApi: GetStApi_ACU): NativeStBacke
         if (!api || typeof api.loadWorldInfo !== 'function') {
             throw new Error('SillyTavern loadWorldInfo 接口不可用');
         }
-        try {
-            const data = await api.loadWorldInfo(bookName);
-            // 不存在时的文案必须匹配 classifyLorebookReadError_ACU 的中文 not-found 正则
-            if (!data || typeof data !== 'object' || !data.entries) {
-                invalidateSettingsSnapshot();
-                throw new Error(`世界书 "${bookName}" 不存在`);
-            }
-            return data;
-        } catch (error) {
-            if (isLorebookReadNotFoundError_ACU(error)) {
-                invalidateSettingsSnapshot();
-            }
-            throw error;
+        const data = await api.loadWorldInfo(bookName);
+        if (!data || typeof data !== 'object' || !data.entries) {
+            throw new Error(`世界书 "${bookName}" 不存在`);
         }
+        return data;
     }
 
     async function saveBook(bookName: string, data: any): Promise<void> {
@@ -156,8 +88,7 @@ export function createNativeStBackend_ACU(getStApi: GetStApi_ACU): NativeStBacke
     }
 
     async function getLorebookEntries(bookName: string): Promise<OldFlatLorebookEntry_ACU[]> {
-        const data = await loadBookOrThrow(bookName);
-        return entriesDictToOldArray(data);
+        return reader.getLorebookEntries(bookName);
     }
 
     async function setLorebookEntries(bookName: string, entries: Array<Record<string, any>>): Promise<void> {
@@ -216,9 +147,8 @@ export function createNativeStBackend_ACU(getStApi: GetStApi_ACU): NativeStBacke
 
     // ═══ 世界书列表与角色绑定 ═══
 
-    async function getLorebooks(options?: { forceRefresh?: boolean }): Promise<string[]> {
-        const snapshot = await fetchSettingsSnapshot(!!options?.forceRefresh);
-        return snapshot?.worldNames ?? [];
+    async function getLorebooks(_options?: { forceRefresh?: boolean }): Promise<string[]> {
+        return reader.getLorebooks();
     }
 
     function resolveCharacter(characterName?: string): any | null {
@@ -234,20 +164,7 @@ export function createNativeStBackend_ACU(getStApi: GetStApi_ACU): NativeStBacke
     }
 
     async function getCharWorldbookNames(characterName?: string): Promise<{ primary: string | null; additional: string[] }> {
-        const character = resolveCharacter(characterName);
-        if (!character) return { primary: null, additional: [] };
-        const primary = typeof character?.data?.extensions?.world === 'string' && character.data.extensions.world
-            ? character.data.extensions.world
-            : null;
-        let additional: string[] = [];
-        const avatar = typeof character?.avatar === 'string' ? character.avatar : '';
-        if (avatar) {
-            const avatarBase = avatar.replace(/\.[^.]+$/, '');
-            const snapshot = await fetchSettingsSnapshot();
-            const loreEntry = snapshot?.charLore?.find(item => item.name === avatarBase);
-            additional = loreEntry?.extraBooks ?? [];
-        }
-        return { primary, additional };
+        return reader.getCharWorldbookNames(characterName);
     }
 
     async function getCharLorebooks(

@@ -157,6 +157,25 @@ describe('classifyLorebookReadError_ACU with strict-wrapped errors', () => {
     expect(summary).toEqual({ category: 'api_unavailable', operation: 'get_entries' });
   });
 
+  it('宿主读取诊断仅透传安全阶段和 HTTP 状态，不复制敏感载荷', () => {
+    const error = Object.assign(new Error('敏感响应正文'), {
+      name: 'WorldbookReadError_ACU', category: 'unknown', operation: '/api/worldinfo/list',
+      reason: 'http', httpStatus: 403, responseBody: '敏感响应正文', token: '敏感凭据',
+    });
+    expect(summarizeLorebookRuntimeError_ACU(error)).toEqual({
+      category: 'unknown', operation: '/api/worldinfo/list', reason: 'http', httpStatus: 403,
+    });
+  });
+
+  it.each([
+    { reason: '敏感响应正文', httpStatus: 99 },
+    { reason: '敏感响应正文', httpStatus: 600 },
+    { reason: '敏感响应正文', httpStatus: 403.5 },
+  ])('拒绝任意原因文本和非法 HTTP 状态：%j', details => {
+    expect(summarizeLorebookRuntimeError_ACU({ category: 'unknown', ...details })).toEqual({ category: 'unknown' });
+  });
+
+
   it('已安全摘要对象规范化：不再次压缩为 unknown', () => {
     const safeSummary = {
       category: 'strict_lorebook_read',

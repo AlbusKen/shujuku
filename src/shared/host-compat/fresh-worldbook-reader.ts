@@ -1,17 +1,30 @@
-/** 世界书权威读取：不经过 loadWorldInfo/酒馆助手的内容缓存，不保留跨操作快照。 */
+/** 世界书原生读取：沿用 SillyTavern 模块与编辑状态，本插件不保留跨操作正文快照。 */
 import { getHostWindow } from '../runtime-env';
 import { nativeToOldEntry_ACU } from './entry-format';
-import { classifyLorebookReadError_ACU } from '../lorebook-read-error';
 import type { GetStApi_ACU } from './native-st-backend';
 
+type WorldbookReadFailureReason_ACU = 'http' | 'network' | 'timeout' | 'invalid_json' | 'invalid_payload' | 'host_origin' | 'request_headers';
+
 export class WorldbookReadError_ACU extends Error {
-    constructor(readonly category: 'lorebook_not_found' | 'api_unavailable' | 'scope_changed' | 'unknown', readonly operation: string) {
-        super(`世界书读取失败（${operation} / ${category}）`);
+    readonly reason?: WorldbookReadFailureReason_ACU;
+    readonly httpStatus?: number;
+
+    constructor(readonly category: 'lorebook_not_found' | 'api_unavailable' | 'scope_changed' | 'unknown', readonly operation: string,
+        details: { reason?: WorldbookReadFailureReason_ACU; httpStatus?: number } = {}) {
+        const status = Number.isInteger(details.httpStatus) && details.httpStatus! >= 100 && details.httpStatus! <= 599
+            ? details.httpStatus : undefined;
+        super(`世界书读取失败（${operation} / ${category}${details.reason ? ` / ${details.reason}` : ''}${status ? ` / HTTP ${status}` : ''}）`);
         this.name = 'WorldbookReadError_ACU';
+        this.reason = details.reason;
+        this.httpStatus = status;
     }
 }
 
-type WorldInfoModule_ACU = { world_info: { charLore?: Array<{ name: string; extraBooks: string[] }> } };
+type WorldInfoModule_ACU = {
+    world_info: { charLore?: Array<{ name: string; extraBooks: string[] }> };
+    world_names?: string[];
+    loadWorldInfo?: (name: string) => Promise<unknown>;
+};
 
 export function createFreshWorldbookReader_ACU(getStApi: GetStApi_ACU, loadWorldInfoModule?: () => Promise<WorldInfoModule_ACU>) {
     const host = () => getHostWindow() as any;
@@ -21,20 +34,24 @@ export function createFreshWorldbookReader_ACU(getStApi: GetStApi_ACU, loadWorld
     };
     function getCapabilities() {
         try {
-            const win = host();
             const api = context();
+            const moduleAvailable = !!api && canLoadModule();
             return {
-                entries: typeof api?.getRequestHeaders === 'function' && typeof win?.fetch === 'function',
-                bindings: Array.isArray(api?.characters) && (!!loadWorldInfoModule
-                    || (typeof win?.document?.createElement === 'function' && !!win?.location?.href)),
+                entries: moduleAvailable,
+                bindings: Array.isArray(api?.characters) && moduleAvailable,
             };
         } catch { return { entries: false, bindings: false }; }
+    }
+    function canLoadModule(): boolean {
+        try {
+            return !!loadWorldInfoModule || (typeof host()?.document?.createElement === 'function' && !!getHostOrigin());
+        } catch { return false; }
     }
     let modulePromise: Promise<WorldInfoModule_ACU> | undefined;
     let loadedModule: WorldInfoModule_ACU | undefined;
     const loadModule = () => {
         if (loadWorldInfoModule) return loadWorldInfoModule().then(module => (loadedModule = module));
-        if (!getCapabilities().bindings) return Promise.reject(new WorldbookReadError_ACU('api_unavailable', 'bindings'));
+        if (!canLoadModule()) return Promise.reject(new WorldbookReadError_ACU('api_unavailable', 'module'));
         // 绝对宿主 URL 避免 iframe/扩展 bundle 的相对模块路径；仅缓存模块，不缓存绑定值。
         const url = new URL('/scripts/world-info.js', host().location.href).href;
         // 在主窗口执行 import，避免 iframe 创建另一份 world-info 模块状态。
@@ -57,41 +74,26 @@ export function createFreshWorldbookReader_ACU(getStApi: GetStApi_ACU, loadWorld
         });
         return modulePromise;
     };
-    async function post(path: string, body: object): Promise<any> {
-        const api = context();
-        if (typeof api?.getRequestHeaders !== 'function') throw new WorldbookReadError_ACU('api_unavailable', path);
-        const win = host();
-        if (typeof win?.fetch !== 'function') throw new WorldbookReadError_ACU('api_unavailable', path);
-        const fetcher = win.fetch.bind(win);
-        const url = win?.location?.origin && win.location.origin !== 'null' ? new URL(path, win.location.origin).href : path;
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 15000);
+    function getHostOrigin(): string | null {
         try {
-            const response = await fetcher(url, { method: 'POST', headers: { ...api.getRequestHeaders(), 'Content-Type': 'application/json' },
-                body: JSON.stringify(body), cache: 'no-store', credentials: 'same-origin', signal: controller.signal });
-            if (!response.ok) throw new WorldbookReadError_ACU('unknown', path);
-            return await response.json();
-        } catch (error) {
-            if (error instanceof WorldbookReadError_ACU) throw error;
-            if (!controller.signal.aborted && classifyLorebookReadError_ACU(error) === 'aborted') throw error;
-            // 本地超时是读取失败，不是用户取消；不携带宿主响应正文。
-            throw new WorldbookReadError_ACU('unknown', path);
-        } finally { clearTimeout(timer); }
+            const url = new URL(host()?.location?.href);
+            return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : null;
+        } catch { return null; }
     }
     async function getLorebooks(): Promise<string[]> {
-        const payload = await post('/api/settings/get', {});
-        if (!Array.isArray(payload?.world_names) || payload.world_names.some((name: unknown) => typeof name !== 'string')) {
-            throw new WorldbookReadError_ACU('unknown', 'catalog');
+        const module = await loadModule();
+        const names = module.world_names;
+        if (!Array.isArray(names) || names.some(name => typeof name !== 'string' || !name.trim())) {
+            throw new WorldbookReadError_ACU('unknown', 'catalog', { reason: 'invalid_payload' });
         }
-        return [...new Set<string>(payload.world_names)];
+        // 与原生选择页读取同一个 live binding；每次返回副本，不保存目录快照。
+        return [...new Set<string>(names)];
     }
 
     /** 操作级租约只保留身份，不保留正文；缓存命中交付时仍复核绑定和目录。 */
     async function createReadGuard() {
         const before = captureScope(false);
-        const api = context();
-        const id = api?.characterId ?? api?.this_chid;
-        if (id !== undefined && id !== null && id !== '' && api?.characters?.[Number(id)]) await loadModule();
+        await loadModule();
         if (captureScope(false) !== before) throw new WorldbookReadError_ACU('scope_changed', 'scope');
         const scope = captureScope();
         return async (bookNames: string[] = []) => {
@@ -109,12 +111,18 @@ export function createFreshWorldbookReader_ACU(getStApi: GetStApi_ACU, loadWorld
     async function getLorebookEntries(bookName: string) {
         const assertCurrent = await createReadGuard();
         await assertCurrent([bookName]);
-        const data = await post('/api/worldinfo/get', { name: bookName });
-        if (!data || typeof data.entries !== 'object' || data.entries === null || Array.isArray(data.entries)) {
-            throw new WorldbookReadError_ACU('unknown', 'entries');
-        }
-        // /get 对已删除文件也返回空字典，复核目录以区分合法空书与删除竞态。
+        const api = context();
+        const module = loadedModule!;
+        const loader = typeof module.loadWorldInfo === 'function' ? module.loadWorldInfo.bind(module)
+            : typeof api?.loadWorldInfo === 'function' ? api.loadWorldInfo.bind(api) : null;
+        if (!loader) throw new WorldbookReadError_ACU('api_unavailable', 'loadWorldInfo');
+        // 原生保存先更新缓存、再延迟落盘；读取必须保留宿主尚未落盘的编辑。
+        // 不清缓存、不自行写回，也不另建条目 HTTP 通道。
+        const data: any = await loader(bookName);
         await assertCurrent([bookName]);
+        if (!data || typeof data.entries !== 'object' || data.entries === null || Array.isArray(data.entries)) {
+            throw new WorldbookReadError_ACU('unknown', 'entries', { reason: 'invalid_payload' });
+        }
         return Object.values(data.entries).map(nativeToOldEntry_ACU);
     }
     function captureScope(includeBindings = true): string {
