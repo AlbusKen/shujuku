@@ -302,6 +302,49 @@ describe('能力表诊断', () => {
 });
 
 describe('原生读取边界', () => {
+  it.each(['tauri://localhost/', 'tauri://localhost/index.html'])('桌面宿主 %s 使用同一窗口的原生模块读取', async href => {
+    mockHost.location = { href, origin: 'null' };
+    mockWorldInfoModule.world_info = { charLore: [{ name: '角色', extraBooks: ['附加书'] }] };
+    mockWorldInfoModule.loadWorldInfo = vi.fn().mockResolvedValue({ entries: { 1: { uid: 1, content: '宿主编辑' } } });
+    const appendChild = vi.fn((script: any) => {
+      expect(script.type).toBe('module');
+      expect(script.textContent).toContain('import("tauri://localhost/scripts/world-info.js")');
+      const key = Object.keys(mockHost).find(key => key.startsWith('__ACU_WI_MODULE_'))!;
+      mockHost[key].resolve(mockWorldInfoModule);
+    });
+    mockHost.document.head.appendChild = appendChild;
+    const st = makeUsableStApi({ characterId: 0, characters: [
+      { avatar: '角色.png', data: { extensions: { world: '书' } } },
+    ] });
+    const raw = { getLorebookEntries: vi.fn(), getCharWorldbookNames: vi.fn(),
+      setLorebookEntries: vi.fn(), getChatMessages: vi.fn() };
+    const { api, capabilities } = buildTavernHelperCompat_ACU(raw, () => st);
+
+    for (const name of ['getLorebooks', 'getLorebookEntries', 'getCharWorldbookNames', 'getCurrentCharPrimaryLorebook']) {
+      expect(capabilities[name]).toBe('native');
+    }
+    expect(capabilities.setLorebookEntries).toBe('passthrough');
+    expect(capabilities.getChatMessages).toBe('passthrough');
+    await expect(api.getLorebooks()).resolves.toEqual(['书']);
+    await expect(api.getCurrentCharPrimaryLorebook()).resolves.toBe('书');
+    await expect(api.getCharLorebooks()).resolves.toEqual({ primary: '书', additional: ['附加书'] });
+    await expect(api.getLorebookEntries('书')).resolves.toMatchObject([{ uid: 1, content: '宿主编辑' }]);
+    expect(appendChild).toHaveBeenCalledTimes(1);
+    expect(raw.getLorebookEntries).not.toHaveBeenCalled();
+    expect(raw.getCharWorldbookNames).not.toHaveBeenCalled();
+    expect(st.loadWorldInfo).not.toHaveBeenCalled();
+    expect(mockHost.fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(['about:blank', 'data:text/html,host', 'file:///tavern/index.html', 'javascript:void(0)', 'invalid-url'])('不可用宿主地址 %s 不挂载读取能力', href => {
+    mockHost.location = { href };
+    const { api, capabilities } = buildTavernHelperCompat_ACU(undefined, () => makeUsableStApi());
+    expect(capabilities.getLorebooks).toBe('missing');
+    expect(capabilities.getLorebookEntries).toBe('missing');
+    expect(capabilities.getCharWorldbookNames).toBe('missing');
+    expect(api.getLorebookEntries).toBeUndefined();
+  });
+
   it('特殊书名原样传给 loadWorldInfo，每次操作重新调用原生加载器', async () => {
     const name = '  全角Ａ / "引号" & # + \u200b ';
     mockWorldInfoModule.world_names = [name];

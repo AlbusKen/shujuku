@@ -44,16 +44,16 @@ export function createFreshWorldbookReader_ACU(getStApi: GetStApi_ACU, loadWorld
     }
     function canLoadModule(): boolean {
         try {
-            return !!loadWorldInfoModule || (typeof host()?.document?.createElement === 'function' && !!getHostOrigin());
+            return !!loadWorldInfoModule || (typeof host()?.document?.createElement === 'function' && !!getWorldInfoModuleUrl());
         } catch { return false; }
     }
     let modulePromise: Promise<WorldInfoModule_ACU> | undefined;
     let loadedModule: WorldInfoModule_ACU | undefined;
     const loadModule = () => {
         if (loadWorldInfoModule) return loadWorldInfoModule().then(module => (loadedModule = module));
-        if (!canLoadModule()) return Promise.reject(new WorldbookReadError_ACU('api_unavailable', 'module'));
         // 绝对宿主 URL 避免 iframe/扩展 bundle 的相对模块路径；仅缓存模块，不缓存绑定值。
-        const url = new URL('/scripts/world-info.js', host().location.href).href;
+        const url = getWorldInfoModuleUrl();
+        if (!url || !canLoadModule()) return Promise.reject(new WorldbookReadError_ACU('api_unavailable', 'module'));
         // 在主窗口执行 import，避免 iframe 创建另一份 world-info 模块状态。
         modulePromise ??= new Promise<WorldInfoModule_ACU>((resolve, reject) => {
             const win = host();
@@ -74,10 +74,13 @@ export function createFreshWorldbookReader_ACU(getStApi: GetStApi_ACU, loadWorld
         });
         return modulePromise;
     };
-    function getHostOrigin(): string | null {
+    function getWorldInfoModuleUrl(): string | null {
         try {
             const url = new URL(host()?.location?.href);
-            return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : null;
+            // Tauri 应用地址的 URL.origin 为 "null"，但仍能解析同一宿主的原生模块。
+            const supported = url.protocol === 'http:' || url.protocol === 'https:'
+                || (url.protocol === 'tauri:' && url.hostname === 'localhost');
+            return supported ? new URL('/scripts/world-info.js', url).href : null;
         } catch { return null; }
     }
     async function getLorebooks(): Promise<string[]> {
