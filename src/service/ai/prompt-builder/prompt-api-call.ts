@@ -23,6 +23,7 @@ import { adaptTableFillPromptSegmentsToToolMode_ACU, buildTableFillNativeTools_A
 import { isNativeToolChannelAvailable_ACU } from '../agent-tool-mode';
 import { logAutoFillStage_ACU, logAutoFillSkip_ACU } from '../../../shared/trigger-diagnostics';
 import { withTableFillRetryHistory_ACU } from './table-fill-retry';
+import { runWithAbortSignal_ACU } from '../../../shared/abort-signal';
 
 
 /**
@@ -78,6 +79,7 @@ export class RetryableAiResponseError_ACU extends Error {
     const forceDirectApi = !!options?.forceDirectApi;
 
     try {
+    abortSignal.throwIfAborted();
     options?.assertCurrent?.();
     if (options?.isolatedSnapshot && (!forceDirectApi || !skipProfileSwitch)) {
         throw new Error('隔离填表必须使用数据库独立 API，禁止宿主预设切换。');
@@ -197,13 +199,18 @@ export class RetryableAiResponseError_ACU extends Error {
 
         if (typeof (globalThis as any).EjsTemplate?.evalTemplate === 'function') {
           try {
-            finalContent = await (globalThis as any).EjsTemplate.evalTemplate(finalContent);
+            // 插件未必支持物理取消；只停止本轮等待，迟到结果不得继续组装或发送请求。
+            finalContent = await runWithAbortSignal_ACU(abortSignal, () =>
+              (globalThis as any).EjsTemplate.evalTemplate(finalContent));
             logDebug_ACU('[填表] 已通过 st-prompt-template 处理提示词');
           } catch (e) {
+            abortSignal.throwIfAborted();
+            if ((e as { name?: string })?.name === 'AbortError') throw e;
             logWarn_ACU('[填表] st-prompt-template 处理失败，使用原始内容:', e);
           }
         }
 
+        abortSignal.throwIfAborted();
         finalContent = parseRandomTags_ACU(finalContent);
         finalContent = replaceRandomVariables_ACU(finalContent);
 

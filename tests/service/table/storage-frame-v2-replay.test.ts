@@ -5924,6 +5924,17 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
     expect(yielded?.metrics?.yieldCount).toBeGreaterThan(0);
     // 基线不传预算：yieldCount 恒为 0（零开销，不产生额外宏任务）。
     expect(baseline?.metrics?.yieldCount).toBe(0);
+    // 保存链启用让步仍须保留同轮 evidence 复用，不能增加重复冷回放。
+    const evidence = {} as import('../../../src/service/table/v2-replay-session').V2ReplayEvidence_ACU;
+    await loadTableStateFromFramesV2Detailed_ACU(chat, '', {
+      updateRuntimeState: false, enableAliasContext: false, yieldBudgetMs: 8, replayEvidence: evidence,
+    });
+    const reused = await loadTableStateFromFramesV2Detailed_ACU(chat, '', {
+      updateRuntimeState: false, enableAliasContext: false, yieldBudgetMs: 8, replayEvidence: evidence,
+    });
+    expect(reused?.data).toEqual(baseline?.data);
+    expect(reused?.metrics?.replayReuseCount).toBe(1);
+    expect(reused?.metrics?.sqliteHydrateCount).toBe(0);
   });
 
   it('阶段 I：updateRuntimeState:true（副作用路径）即使传 yieldBudgetMs 也不让出', async () => {

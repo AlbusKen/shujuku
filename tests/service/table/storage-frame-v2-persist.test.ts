@@ -448,6 +448,9 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
     // 阶段 F：单目标 persist 内部两次同 boundary replay 会透传去重 evidence，
     // 故只断言 boundary 与只读语义，不锁定完整选项对象。
     expect(mocks.loadReplayDetailed).toHaveBeenCalledWith(mocks.chat, '', expect.objectContaining({ maxMessageIndex: 0, updateRuntimeState: false }));
+    for (const call of mocks.loadReplayDetailed.mock.calls) {
+      expect(call[2]).toMatchObject({ updateRuntimeState: false, yieldBudgetMs: 8 });
+    }
     // 去重通道保护：两次同 boundary replay 必须收到同一个 evidence 对象引用。
     // mock 不会写回 evidence，因此引用共享是「第二次能复用第一次结果」的唯一可验证信号；
     // 若哪次重构把它拆成两个独立对象，去重会静默退回两次冷回放而测试仍全绿。
@@ -4228,6 +4231,7 @@ describe('persistTableMutationLogBatchV2_ACU', () => {
     }));
     expect(mocks.loadReplayDetailed).toHaveBeenCalledWith(expect.any(Array), '', {
       updateRuntimeState: false,
+      yieldBudgetMs: 8,
       compatibilityMode: 'disabled',
     });
     expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
@@ -5402,6 +5406,36 @@ describe('填表请求 V2 最终写入边界', () => {
     mocks.loadReplayDetailed.mockReset();
     mocks.settings.dataIsolationEnabled = false;
     mocks.settings.dataIsolationCode = '';
+  });
+
+  it.each(['single', 'batch'])('%s 保存回放期间切换聊天不写入旧帧', async mode => {
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+    const previousIdentity = mocks.chatIdentity;
+    const message = seedFrame({ logEntries: [], manualRefillProgress: undefined });
+    const before = JSON.stringify(message.TavernDB_ACU_IsolatedData);
+    const data = { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } as any;
+    const operations = [{ kind: 'sheet_replace', sheetKey: 'sheet_a', sheet: sheetA, reason: 'system' }] as any;
+    mocks.loadReplayDetailed.mockImplementation(async () => {
+      mocks.chatIdentity = 'other-chat-during-replay';
+      return { baseKind: 'full_checkpoint', data };
+    });
+    try {
+      const pending = mode === 'single' ? persistTableMutationLogV2_ACU({
+        targetMessageIndex: 0, source: 'group_fill', afterData: data, operations,
+        candidateChangedSheetKeys: ['sheet_a'], transactionContext: makeTransaction(),
+      }) : persistTableMutationLogBatchV2_ACU({
+        source: 'group_fill', afterData: data,
+        targets: [{ targetMessageIndex: 0, operations, changedSheetKeys: ['sheet_a'] }],
+        transactionContext: makeTransaction(),
+      });
+      await expect(pending).rejects.toThrow('目标聊天已切换');
+      expect(JSON.stringify(message.TavernDB_ACU_IsolatedData)).toBe(before);
+      expect(mocks.saveChat).not.toHaveBeenCalled();
+      expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+      for (const call of mocks.loadReplayDetailed.mock.calls) {
+        expect(call[2]).toMatchObject({ updateRuntimeState: false, yieldBudgetMs: 8 });
+      }
+    } finally { mocks.chatIdentity = previousIdentity; }
   });
 
   it.each(['missing', 'user', 'cancel'] as const)(

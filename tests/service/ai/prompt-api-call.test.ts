@@ -591,6 +591,60 @@ describe('callCustomOpenAI_ACU — prompt 组装', () => {
     delete (globalThis as any).EjsTemplate;
   });
 
+  it.each(['resolve', 'reject'])('取消挂起的 EJS 等待，迟到 %s 不再发请求', async outcome => {
+    const controller = new AbortController();
+    let release!: (value: string) => void;
+    let fail!: (error: Error) => void;
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const pending = new Promise<string>((resolve, reject) => { release = resolve; fail = reject; });
+    vi.stubGlobal('EjsTemplate', { evalTemplate: vi.fn(() => { entered(); return pending; }) });
+    try {
+      const request = callCustomOpenAI_ACU({}, controller);
+      const rejected = expect(request).rejects.toMatchObject({ name: 'AbortError' });
+      await started;
+      controller.abort();
+      await rejected;
+      expect(mockUntrackAbortController).toHaveBeenCalledWith(controller);
+      if (outcome === 'resolve') release('迟到模板');
+      else fail(new Error('迟到失败'));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(mockGenerateRaw).not.toHaveBeenCalled();
+      expect(mockFetch).not.toHaveBeenCalled();
+    } finally {
+      delete (globalThis as any).EjsTemplate;
+    }
+  });
+
+  it('已取消的调用不启动模板或网络', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const evaluate = vi.fn();
+    vi.stubGlobal('EjsTemplate', { evalTemplate: evaluate });
+    try {
+      await expect(callCustomOpenAI_ACU({}, controller)).rejects.toMatchObject({ name: 'AbortError' });
+      expect(evaluate).not.toHaveBeenCalled();
+      expect(mockGenerateRaw).not.toHaveBeenCalled();
+    } finally {
+      delete (globalThis as any).EjsTemplate;
+    }
+  });
+
+  it.each(['Error', 'AbortError'])('模板 %s 保留普通回退与取消分类', async name => {
+    const error = Object.assign(new Error('模板失败'), { name });
+    vi.stubGlobal('EjsTemplate', { evalTemplate: vi.fn().mockRejectedValue(error) });
+    mockGenerateRaw.mockResolvedValue('AI回复');
+    try {
+      if (name === 'AbortError') {
+        await expect(callCustomOpenAI_ACU({})).rejects.toBe(error);
+        expect(mockGenerateRaw).not.toHaveBeenCalled();
+      } else await expect(callCustomOpenAI_ACU({})).resolves.toBe('AI回复');
+    } finally {
+      delete (globalThis as any).EjsTemplate;
+    }
+  });
+
   it('$9 按填表上下文排除规则过滤', async () => {
     mockSettings.charCardPrompt = [{ role: 'USER', content: '$9' }];
     mockSettings.tableContextExcludeRules = ['已排除'];

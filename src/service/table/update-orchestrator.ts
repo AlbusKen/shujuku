@@ -60,6 +60,7 @@ import { startRuntimePerformanceSpan_ACU } from '../../shared/runtime-performanc
 import { logAutoFillSkip_ACU, logAutoFillStage_ACU } from '../../shared/trigger-diagnostics';
 import { showUiSurfaceToast_ACU } from '../../shared/ui-surface-registry';
 import { createLorebookReadContext_ACU, type LorebookReadContext_ACU } from '../worldbook/read-context';
+import { abortableDelay } from '../../shared/abortable-delay';
 
 import { applyTableDelta_ACU, isDeltaTagData_ACU } from './table-delta';
 /**
@@ -1554,7 +1555,8 @@ export async function collectGroupFillResponse_ACU(
                     });
                 }
                 options.onProgress?.({ phase: 'retry', attempt, maxRetries, message: sanitizeRetryFeedback_ACU(lastErrorMessage, 50) });
-                await new Promise(resolve => setTimeout(resolve, 5000));
+                await abortableDelay(5000, effectiveAbortController.signal);
+                if (isStopped()) return { job, success: false, attempt, aborted: true };
             }
         }
     }
@@ -3669,7 +3671,10 @@ export async function executeCardUpdateCore_ACU(
                     const waitTime = 5000;
                     logDebug_ACU(`等待 ${waitTime}ms 后重试...`);
                     emitProgress({ phase: 'retry', attempt, maxRetries, message: sanitizeRetryFeedback_ACU(safeError, 50) });
-                    await new Promise(resolve => setTimeout(resolve, waitTime));
+                    await abortableDelay(waitTime, effectiveAbortController.signal);
+                    if (effectiveAbortController.signal.aborted || wasStoppedByUser_ACU) {
+                        return { success: false, modifiedKeys: [], aborted: true };
+                    }
                     continue;
                 } else {
                     return { success: false, modifiedKeys: [], error: `填表在 ${maxRetries} 次尝试后仍失败: ${safeError}`, errorCategory };

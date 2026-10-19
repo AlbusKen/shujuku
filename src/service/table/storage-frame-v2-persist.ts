@@ -27,6 +27,10 @@ import { reconcileRevealedSheetWithTemplate_ACU } from '../template/chat-templat
 import { assertSummaryVectorMirrorFrameInvariantsV2_ACU } from '../vector/summary-vector-mirror-resolver';
 import { scheduleSummaryVectorMirrorFlushAfterPersist_ACU } from '../vector/summary-vector-index-flush-queue';
 
+// 保存仍持有提交锁；只读回放仅在完整 frame/entry 边界让步，不跳过严格校验。
+// 同轮 replayEvidence 仍可复用，避免把主线程让步变成重复冷回放。
+const PERSIST_REPLAY_YIELD_BUDGET_MS_ACU = 8;
+
 export interface TableCheckpointGenerationConfig_ACU {
   maxEntriesAfterCheckpoint: number;
   maxOperationKbAfterCheckpoint: number;
@@ -626,6 +630,7 @@ async function validateTemporaryBaselineUpgradeCandidate_ACU(
       replay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
         ...options,
         updateRuntimeState: false,
+        yieldBudgetMs: PERSIST_REPLAY_YIELD_BUDGET_MS_ACU,
         compatibilityMode: 'disabled',
       });
     } catch (error) {
@@ -680,6 +685,7 @@ async function validateAppendedOperationsReplayCandidate_ACU(
     replay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
       maxMessageIndex: targetMessageIndex,
       updateRuntimeState: false,
+      yieldBudgetMs: PERSIST_REPLAY_YIELD_BUDGET_MS_ACU,
       compatibilityMode: 'disabled',
     });
   } catch (error) {
@@ -715,6 +721,7 @@ async function validateProvisionalConvergenceCandidate_ACU(
       const replay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, isolationKey, {
         ...options,
         updateRuntimeState: false,
+        yieldBudgetMs: PERSIST_REPLAY_YIELD_BUDGET_MS_ACU,
         compatibilityMode: 'disabled',
       });
       if (!replay || replay.baseKind !== 'full_checkpoint') {
@@ -2219,6 +2226,7 @@ async function persistTableMutationLogV2Core_ACU(
     return { saved: false, error: 'no AI message found' };
   }
 
+  const preparationChatIdentity = getActiveChatStorageIdentity_ACU(chat);
   assertTableFillRequestCurrent_ACU(options, target.index, chat);
   options.transactionContext?.assertFresh?.('persistTableMutationLogV2:before_persist');
   if (!chat[target.index] || chat[target.index] !== target.message || target.message.is_user) {
@@ -2294,6 +2302,7 @@ async function persistTableMutationLogV2Core_ACU(
     const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
       maxMessageIndex: target.index,
       updateRuntimeState: false,
+      yieldBudgetMs: PERSIST_REPLAY_YIELD_BUDGET_MS_ACU,
       ...(options.performanceRunId ? { performanceRunId: options.performanceRunId } : {}),
       ...(options.performanceParentSpanId
         ? { performanceParentSpanId: options.performanceParentSpanId }
@@ -2335,6 +2344,7 @@ async function persistTableMutationLogV2Core_ACU(
       replay = await loadTableStateFromFramesV2Detailed_ACU(preWriteChat, isolationKey, {
         maxMessageIndex: target.index,
         updateRuntimeState: false,
+        yieldBudgetMs: PERSIST_REPLAY_YIELD_BUDGET_MS_ACU,
         ...(boundaryReplayEvidence ? { replayEvidence: boundaryReplayEvidence } : {}),
         ...(options.performanceRunId ? { performanceRunId: options.performanceRunId } : {}),
         ...(options.performanceParentSpanId
@@ -2586,6 +2596,7 @@ async function persistTableMutationLogV2Core_ACU(
         replayBeforeAppend = await loadTableStateFromFramesV2Detailed_ACU(preWriteChat, isolationKey, {
           maxMessageIndex: target.index,
           updateRuntimeState: false,
+          yieldBudgetMs: PERSIST_REPLAY_YIELD_BUDGET_MS_ACU,
           ...(boundaryReplayEvidence ? { replayEvidence: boundaryReplayEvidence } : {}),
           ...(options.performanceRunId ? { performanceRunId: options.performanceRunId } : {}),
           ...(options.performanceParentSpanId
@@ -2758,6 +2769,10 @@ async function persistTableMutationLogV2Core_ACU(
   }
   // 所有异步候选校验结束后，在第一笔聊天帧变更之前复核请求与目标。
   assertTableFillRequestCurrent_ACU(options, target.index);
+  if (getChatArray_ACU() !== chat || getActiveChatStorageIdentity_ACU(chat) !== preparationChatIdentity) {
+    throw new Error('目标聊天已切换，已拒绝旧的表格保存。');
+  }
+  options.transactionContext?.assertFresh?.('persistTableMutationLogV2:after_replay');
   // 插件可重建同楼层的消息对象；数据与身份字段统一写到该楼层当前对象。
   target.message = chat[target.index];
   const commitChatIdentity = getActiveChatStorageIdentity_ACU(chat);
@@ -2960,6 +2975,7 @@ async function persistTableMutationLogBatchV2Core_ACU(
   if (!Array.isArray(chat) || chat.length === 0) return { saved: false, error: 'chat history is empty' };
   if (!Array.isArray(options.targets) || options.targets.length === 0) return { saved: false, error: 'V2 batch write requires at least one target.' };
 
+  const preparationChatIdentity = getActiveChatStorageIdentity_ACU(chat);
   const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
   const latestCheckpoint = findLatestFullCheckpoint_ACU(chat, isolationKey);
   const latestReplayRootIndex = findLatestReplayRootMessageIndex_ACU(chat, isolationKey);
@@ -2983,6 +2999,7 @@ async function persistTableMutationLogBatchV2Core_ACU(
     const replay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, {
       maxMessageIndex: convergenceTargetIndex,
       updateRuntimeState: false,
+      yieldBudgetMs: PERSIST_REPLAY_YIELD_BUDGET_MS_ACU,
     });
     if (replay?.requiresCheckpointConvergence || replay?.compatibilityRepairs?.length) {
       // F2：同单写入门——宽容回放结果不是严格可写历史，直接拒绝 batch 写入。
@@ -3127,6 +3144,13 @@ async function persistTableMutationLogBatchV2Core_ACU(
     if (mirrorViolation) return { saved: false, error: mirrorViolation };
   }
 
+  if (getChatArray_ACU() !== chat || getActiveChatStorageIdentity_ACU(chat) !== preparationChatIdentity) {
+    throw new Error('目标聊天已切换，已拒绝旧的批量表格保存。');
+  }
+  for (const index of targetByIndex.keys()) {
+    if (!chat[index] || chat[index].is_user) throw new Error('批量保存目标已变化，已拒绝旧结果。');
+  }
+  options.transactionContext?.assertFresh?.('persistTableMutationLogBatchV2:after_replay');
   // convergence 会把锚点写入根帧（latestCheckpoint.index）；若根帧不是 batch target，
   // 必须把根帧一并纳入原子落盘集合，否则锚点只在内存候选里、落盘即丢失。
   const persistIndices = provisionalConvergenceReplay && !targetByIndex.has(latestCheckpoint.index)
