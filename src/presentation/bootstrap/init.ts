@@ -35,8 +35,6 @@ import { beginHostGenerationUi_ACU, getSendTextareaValue_ACU, setSendTextareaVal
 import { cancelPendingContentOptimizationEvent_ACU, captureContentOptimizationEventScope_ACU, handleContentOptimizationEvent_ACU } from '../triggers/settings-ui-sync/settings-ui-connect';
 import { cancelPendingAutoFillEvent_ACU, captureAutoFillEventScope_ACU, triggerAutomaticUpdateIfNeeded_ACU } from '../triggers/settings-ui-sync/settings-ui-trigger';
 import { abortActivePlotPlanning_ACU, runOptimizationLogicWithUI_ACU } from '../components/plot-planning-ui';
-import { enterLoopRetryFlow_ACU } from '../triggers/auto-loop';
-import { DEFAULT_PLOT_SETTINGS_ACU } from '../../shared/defaults-json.js';
 import { beginPlotSendDisguise_ACU, isPendingDisguiseGenerationType_ACU, type PlotSendDisguiseHandle_ACU } from '../components/plot-pending-disguise';
 import { processSummaryVectorIndexBeforeGenerationWithUI_ACU, rebuildCurrentSummaryVectorIndexWithUI_ACU, rebuildOutdatedSummaryVectorIndexInBackground_ACU, shouldRebuildSummaryVectorIndexWithUI_ACU } from '../components/summary-vector-index-ui';
 import { preloadSummaryVectorIndexCacheForCurrentChat_ACU } from '../../service/vector/summary-vector-index-cache-service';
@@ -51,7 +49,7 @@ import { getUiSurface_ACU, showUiSurfaceToast_ACU } from '../../shared/ui-surfac
 import { bindContinuationInternalAiGenerationStarted_ACU, consumeContinuationInternalAiGenerationEnded_ACU } from '../../service/continuation/internal-ai-events';
 import { getContinuationHostGenerationBridge_ACU } from '../../service/continuation/host-generation-bridge-registry';
 import { getContinuationRuntime_ACU } from '../../service/continuation/continuation-runtime';
-import { continuationDebugErrorType_ACU, type ContinuationGenerationDebug_ACU } from '../../service/continuation/generation-debug';
+import { continuationDebugErrorType_ACU } from '../../service/continuation/generation-debug';
 import { bindWorldSimulationInternalAiGenerationStarted_ACU, consumeWorldSimulationInternalAiGenerationEnded_ACU, hasWorldSimulationInternalAiInflight_ACU } from '../../service/simulation/simulation-internal-ai-events';
 import { createWorldSimulationCompletionIntentForCurrentChat_ACU, getWorldSimulationRuntime_ACU } from '../../service/simulation/simulation-runtime';
 import { autoEnableFlightModeForNewChatIfNeeded_ACU } from '../../service/fill-mode/fill-mode-auto-enable';
@@ -86,91 +84,6 @@ async function ensureInitialSeedCheckpointBeforeGeneration_ACU(reason: string, {
   }
 }
 
-/** 关闭伪装的宿主发送契约，按 spv8.9.2 的策略顺序与消息通知执行。 */
-async function runUnmaskedPlotAfterCommands_ACU(type: any, params: any, dryRun: any, debug?: ContinuationGenerationDebug_ACU): Promise<void> {
-  if (params?._qrf_processed_by_hook) { debug?.step('plot_skip', { reason: 'already_processed' }); return; }
-  const recall = shouldProcessSummaryVectorIndexForGeneration_ACU(type, params, dryRun);
-  const plan = shouldProcessPlotForGeneration_ACU(type, params, dryRun);
-  debug?.step('plot_start', { plan, recall, freshIntent: isRecentUserSendIntent_ACU() });
-  const ensureSeed = !dryRun && type !== 'regenerate' && !params?.automatic_trigger
-    && !isQuietLikeGeneration_ACU(type, params) && (isRecentUserSendIntent_ACU() || recall || plan);
-  if (ensureSeed) {
-    await ensureInitialSeedCheckpointBeforeGeneration_ACU('generation_after_commands_before_ai', { allowPendingFirstUserMessage: true });
-  }
-  if (!recall && !plan) { debug?.step('plot_skip', { reason: 'disabled_or_ineligible' }); return; }
-  if (recall) {
-    try {
-      const chat = SillyTavern_API_ACU.chat;
-      const userInput = chat?.length && chat[chat.length - 1]?.is_user
-        ? String(chat[chat.length - 1].mes || '') : String(getSendTextareaValue_ACU() || params?.prompt || '');
-      await processSummaryVectorIndexBeforeGenerationWithUI_ACU({ userInput, source: 'generation_after_commands' });
-    } catch {
-      showToastr_ACU('warning', '纪要召回异常，继续原始生成。', '剧情推进');
-    }
-  }
-  if (!plan || type === 'regenerate' || isProcessing_Plot_ACU) { debug?.step('plot_skip', { reason: isProcessing_Plot_ACU ? 'busy' : 'disabled_or_ineligible' }); return; }
-  try {
-    const chat = SillyTavern_API_ACU.chat;
-    const lastText = chat?.length && chat[chat.length - 1]?.is_user ? String(chat[chat.length - 1].mes || '') : '';
-    if (shouldSkipPlotIntercept_ACU(lastText) || shouldSkipPlotIntercept_ACU(String(getSendTextareaValue_ACU() || ''))) { debug?.step('plot_skip', { reason: 'already_processed' }); return; }
-  } catch { /* 去重读取失败不改变宿主发送 */ }
-  const chat = SillyTavern_API_ACU.chat;
-  if (!chat?.length) { debug?.step('plot_skip', { reason: 'no_input' }); return; }
-  const index = chat.length - 1;
-  const message = chat[index];
-  const s1 = await orchestrateAfterCommandsStrategy1_ACU(message, index, runOptimizationLogicWithUI_ACU, true);
-  debug?.step('plot_result', { reason: s1.action });
-  if (s1.action !== 'no_match') {
-    switch (s1.action) {
-      case 'aborted':
-        if (s1.manual) {
-          try {
-            if (typeof SillyTavern_API_ACU.stopGeneration === 'function') SillyTavern_API_ACU.stopGeneration();
-            else (window as any).SillyTavern?.stopGeneration?.();
-          } catch { /* 保留后续清理 */ }
-          try {
-            const chatNow = SillyTavern_API_ACU.chat;
-            const tail = chatNow?.length ? chatNow[chatNow.length - 1] : null;
-            if (tail?.is_user && String(tail.mes || '') === String(s1.originalMessage || '')) {
-              if (typeof SillyTavern_API_ACU.deleteLastMessage === 'function') await SillyTavern_API_ACU.deleteLastMessage();
-              else await (window as any).SillyTavern?.deleteLastMessage?.();
-            }
-          } catch { /* 删除失败仍恢复输入 */ }
-          try { setSendTextareaValue_ACU(s1.restoreText || ''); } catch { /* 宿主不可用 */ }
-        }
-        break;
-      case 'planned':
-        params.prompt = s1.finalMessage;
-        message.mes = s1.finalMessage;
-        SillyTavern_API_ACU.eventSource.emit(SillyTavern_API_ACU.eventTypes.MESSAGE_UPDATED, index);
-        if (getSendTextareaValue_ACU() === s1.originalMessage) setSendTextareaValue_ACU('');
-        break;
-      case 'loop_retry':
-        loopState_ACU.awaitingReply = false;
-        await enterLoopRetryFlow_ACU({ loopSettings: settings_ACU.plotSettings.loopSettings || DEFAULT_PLOT_SETTINGS_ACU.loopSettings, shouldDeleteAiReply: false });
-        break;
-    }
-    return;
-  }
-  if (!plan && !isRecentUserSendIntent_ACU()) return;
-  const s2 = await orchestrateAfterCommandsStrategy2_ACU(String(getSendTextareaValue_ACU() || ''), runOptimizationLogicWithUI_ACU, true);
-  debug?.step('plot_result', { reason: s2.action });
-  switch (s2.action) {
-    case 'aborted':
-      if (s2.manual) {
-        try {
-          if (typeof SillyTavern_API_ACU.stopGeneration === 'function') SillyTavern_API_ACU.stopGeneration();
-          else (window as any).SillyTavern?.stopGeneration?.();
-        } catch { /* 宿主不可用 */ }
-      }
-      break;
-    case 'planned':
-      setSendTextareaValue_ACU(s2.finalMessage!);
-      try { params.prompt = s2.finalMessage; } catch { /* 保留原宿主请求 */ }
-      break;
-  }
-  generationGate_ACU.lastUserSendIntentAt = 0;
-}
 
 
 function isValidChatFileName_ACU(chatFileName: unknown): boolean {
@@ -289,6 +202,16 @@ export   function mainInitialize_ACU() {
             && currentChatFileIdentifier_ACU === chatKey && getCurrentIsolationKey_ACU() === isolationKey;
         };
 
+        // 正文结束上下文可能先于停止信号被消费；独立保留本轮资格直到新正文或聊天重载。
+        type AutoFillBodyGeneration = {
+          seq: number;
+          stopped: boolean;
+          isCurrentChat: () => boolean;
+        };
+        let autoFillBodyGeneration: AutoFillBodyGeneration | null = null;
+        // 最近一次开始/结束的生命周期身份，用于区分嵌套 quiet 的停止与正文停止。
+        let autoFillStopCandidateSeq: number | undefined;
+
         // [调试] 检查可用的事件类型
         logDebug_ACU('[提示词模板] 可用的事件类型:', Object.keys(SillyTavern_API_ACU.eventTypes));
         installZeroLayerBootstrap_ACU();
@@ -341,6 +264,8 @@ export   function mainInitialize_ACU() {
 
         SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.CHAT_CHANGED, async (chatFileName: string) => {
           ++autoFillChatEpoch;
+          autoFillBodyGeneration = null;
+          autoFillStopCandidateSeq = undefined;
           cancelPendingAutoFillEvent_ACU();
           cancelPendingContentOptimizationEvent_ACU();
           logDebug_ACU(`ACU CHAT_CHANGED event: ${chatFileName}`);
@@ -408,29 +333,7 @@ export   function mainInitialize_ACU() {
                 }
 
                 // [重构] 调用 service 层编排函数，传入 UI 规划回调
-                const unmaskedCompatibility = settings_ACU.plotSendDisguiseDisabled === true;
-                const result = await orchestrateTavernHelperHook_ACU(options, runOptimizationLogicWithUI_ACU, unmaskedCompatibility);
-
-                if (unmaskedCompatibility) {
-                  // spv8.9.2：规划写回后继续原 generate；失败/跳过不接管宿主请求。
-                  switch (result.action) {
-                    case 'loop_retry': {
-                      const loopSettings = settings_ACU.plotSettings.loopSettings || DEFAULT_PLOT_SETTINGS_ACU.loopSettings;
-                      loopState_ACU.awaitingReply = false;
-                      await enterLoopRetryFlow_ACU({ loopSettings, shouldDeleteAiReply: false });
-                      return;
-                    }
-                    case 'planned':
-                      if (result.writeBack) {
-                        if (result.writeBack.target === 'injects') options.injects[0].content = result.writeBack.value;
-                        else if (result.writeBack.target === 'prompt') options.prompt = result.writeBack.value;
-                        else options.user_input = result.writeBack.value;
-                      }
-                      options._qrf_processed_by_hook = true;
-                      break;
-                  }
-                  return await (window as any).original_TavernHelper_generate_ACU.apply(this, args);
-                }
+                const result = await orchestrateTavernHelperHook_ACU(options, runOptimizationLogicWithUI_ACU);
 
                 switch (result.action) {
                   case 'planned': {
@@ -672,6 +575,14 @@ export   function mainInitialize_ACU() {
                 cancelPendingAutoFillEvent_ACU();
               }
               const context = recordGenerationContext_ACU(type, params, dryRun);
+              autoFillStopCandidateSeq = context.seq;
+              if (!dryRun && !quietLike && !params?.automatic_trigger) {
+                autoFillBodyGeneration = {
+                  seq: context.seq,
+                  stopped: false,
+                  isCurrentChat: captureAutoFillChatScope(),
+                };
+              }
               bindContinuationInternalAiGenerationStarted_ACU(context.seq);
               bindWorldSimulationInternalAiGenerationStarted_ACU(context.seq);
               // 宿主的 GENERATION_STARTED 通常在发送点击返回后的微任务里才送达，同步配对必然错过；
@@ -691,8 +602,12 @@ export   function mainInitialize_ACU() {
             try {
               cancelPendingContentOptimizationEvent_ACU();
               cancelPendingAutoFillEvent_ACU();
+              if (autoFillBodyGeneration?.isCurrentChat()
+                && autoFillStopCandidateSeq === autoFillBodyGeneration.seq) {
+                autoFillBodyGeneration.stopped = true;
+              }
               const discarded = discardLatestGenerationContext_ACU();
-              // 被中止的生成不会再有 GENERATION_ENDED；通知桥把等待中的续写轮转为可重试，避免卡死。
+              // ENDED 可能已先到；仍通知桥把等待中的续写轮转为可重试。
               void getContinuationHostGenerationBridge_ACU()?.onGenerationStopped(discarded?.seq);
             } catch (e) {}
           });
@@ -707,6 +622,7 @@ export   function mainInitialize_ACU() {
                 const isCurrent = () => SillyTavern_API_ACU?.chat === chatAtCapture
                   && currentChatFileIdentifier_ACU === chatKey && getCurrentIsolationKey_ACU() === isolationKey;
                 const generationContext = consumeGenerationContextForEnded_ACU();
+                if (generationContext) autoFillStopCandidateSeq = generationContext.seq;
                 const internalRequest = consumeContinuationInternalAiGenerationEnded_ACU(generationContext?.seq);
                 if (internalRequest) {
                   return;
@@ -786,13 +702,21 @@ export   function mainInitialize_ACU() {
           SillyTavern_API_ACU.eventSource.on(eventType, (messageId: any, messageType?: string) => {
             receiver.receive(evName, dispatch => {
               const isOptimizationCurrent = captureContentOptimizationEventScope_ACU();
-              const isAutoFillEventCurrent = captureAutoFillEventScope_ACU();
+              const isAutoFillEpochCurrent = captureAutoFillEventScope_ACU();
+              const bodyGeneration = autoFillBodyGeneration?.isCurrentChat() ? autoFillBodyGeneration : null;
+              // 同一个闭包同时交给接收器和队列，停止前排队、停止后晚到均不能重建资格。
+              const isAutoFillEventCurrent = () => isAutoFillEpochCurrent()
+                && bodyGeneration?.stopped !== true;
               const chatAtCapture = SillyTavern_API_ACU.chat;
               const chatKey = currentChatFileIdentifier_ACU;
               const isolationKey = getCurrentIsolationKey_ACU();
               const isAutoFillCurrent = captureAutoFillChatScope();
               // 开场白不是一次新生成，不安排自动填表或正文优化。
               dispatch('auto-fill', () => {
+                if (bodyGeneration?.stopped === true) {
+                  logAutoFillSkip_ACU('generation_stopped', { eventType: evName, messageId });
+                  return;
+                }
                 if (!isAutoFillCurrent() || !isAutoFillEventCurrent()) return;
                 if (messageType === 'first_message') {
                   logAutoFillSkip_ACU('initial_chat_message', { eventType: evName, messageId });
@@ -972,14 +896,6 @@ export   function mainInitialize_ACU() {
               : undefined;
             debug?.step('after_commands', { seq: generationContext?.seq,
               quietLike: isQuietLikeGeneration_ACU(type, params), dryRun: Boolean(dryRun), automatic: Boolean(params?.automatic_trigger) });
-            if (settings_ACU.plotSendDisguiseDisabled === true && getVectorPipelinePlanForCurrentChat_ACU()?.kind !== 'vector') {
-              try { await runUnmaskedPlotAfterCommands_ACU(type, params, dryRun, debug); }
-              catch (error) {
-                debug?.finish('failed', { reason: 'exception', errorType: continuationDebugErrorType_ACU(error) }, false);
-                throw error;
-              }
-              return;
-            }
             // 内部生成继续自己的请求；普通用户发送不能借忙碌早退绕过规划。
             if (dryRun || type === 'regenerate' || params?._qrf_processed_by_hook) {
               debug?.step('plot_skip', { reason: params?._qrf_processed_by_hook ? 'already_processed' : 'event_filtered' });

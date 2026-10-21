@@ -25,6 +25,7 @@ export type AutoFillSkipReason_ACU =
   | 'untracked_generation'
   | 'generation_in_progress'
   | 'generation_changed'
+  | 'generation_stopped'
   | 'zero_layer_owned_chat'
   | 'no_tables_due'
   | 'reply_below_threshold'

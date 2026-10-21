@@ -2468,6 +2468,16 @@ describe('runPlotTasksRuntime_ACU', () => {
     expect(result.apiRetriesExhausted).not.toBe(true);
     expect(result.finalMessage).toBeNull();
     expect(result.failedResults).toEqual([expect.objectContaining({ taskId: 'tag-fail', validationRetriesExhausted: true })]);
+    expect(mockLogError).toHaveBeenCalledExactlyOnceWith('[剧情推进] 任务回复验收重试耗尽，本轮剧情推进失败。', {
+      stage: 1,
+      tasks: [{
+        taskId: 'tag-fail',
+        taskName: '标签失败任务',
+        attempts: 2,
+        reason: expect.stringContaining('任务回复未包含任何完整闭合的配置标签'),
+      }],
+    });
+    expect(JSON.stringify(mockLogError.mock.calls)).not.toContain('始终无标签');
     expect(result.successfulResults).toHaveLength(0);
     expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(2);
     const retryMessages = mockCallApiWithPlotPreset.mock.calls[1][0];
@@ -2501,6 +2511,10 @@ describe('runPlotTasksRuntime_ACU', () => {
     expect(result.apiRetriesExhausted).not.toBe(true);
     expect(result.finalMessage).toBeNull();
     expect(result.failedResults).toEqual([expect.objectContaining({ taskId: 'inject-tag-fail', validationRetriesExhausted: true })]);
+    expect(mockLogError).toHaveBeenCalledTimes(1);
+    expect(mockLogError.mock.calls[0][1]).toMatchObject({
+      stage: 1, tasks: [{ taskId: 'inject-tag-fail', attempts: 1 }],
+    });
     expect(result.successfulResults).toHaveLength(0);
     expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
   });

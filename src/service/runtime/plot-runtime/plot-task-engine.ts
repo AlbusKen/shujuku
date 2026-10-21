@@ -743,6 +743,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
           error: lastAttemptApiFailed ? 'API 调用失败且已耗尽重试次数。' : `任务回复验收失败且已耗尽重试次数：${lastErrorMessage}`,
           apiRetriesExhausted: lastAttemptApiFailed,
           validationRetriesExhausted: !lastAttemptApiFailed,
+          attempts: maxRetries,
           stage: taskStage,
           order: normalizedTask.order ?? 0,
         };
@@ -1029,6 +1030,18 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
           logWarn_ACU(
             `[剧情推进] [阶段:${result.stage ?? stageGroup.stage}] [任务:${result.taskName || result.taskId || '未命名任务'}] 未产出有效结果: ${result.error || '未知错误'}`,
           );
+        });
+      }
+      const validationFailures = stageFailedResults.filter((result: any) => result.validationRetriesExhausted === true);
+      if (validationFailures.length > 0) {
+        logError_ACU('[剧情推进] 任务回复验收重试耗尽，本轮剧情推进失败。', {
+          stage: stageGroup.stage,
+          tasks: validationFailures.map((result: any) => ({
+            taskId: result.taskId,
+            taskName: result.taskName,
+            attempts: result.attempts,
+            reason: result.error,
+          })),
         });
       }
       const exhaustedTasks = stageFailedResults.filter((result: any) => result.apiRetriesExhausted === true);
