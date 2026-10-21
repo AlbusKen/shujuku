@@ -9,12 +9,14 @@ import { ACU_TOAST_CATEGORY_ACU } from '../../shared/constants';
 import { runOptimizationLogic_ACU } from '../../service/runtime/helpers-remaining';
 import { logDebug_ACU } from '../../shared/utils';
 
-let abortActivePlanning_ACU: (() => void) | null = null;
+type PlotPlanningAbortSource_ACU = 'task_action' | 'host_stop';
+
+let abortActivePlanning_ACU: ((source: PlotPlanningAbortSource_ACU) => void) | null = null;
 
 /** 与规划任务的「终止」按钮相同，只中止进行中的这次规划；没有进行中的规划时返回 false。 */
 export function abortActivePlotPlanning_ACU(): boolean {
   if (!abortActivePlanning_ACU) return false;
-  abortActivePlanning_ACU();
+  abortActivePlanning_ACU('host_stop');
   return true;
 }
 
@@ -28,20 +30,20 @@ export function abortActivePlotPlanning_ACU(): boolean {
  */
 export async function runOptimizationLogicWithUI_ACU(userMessage: any, options: any = {}) {
   let manuallyAborted = false;
-  const abort = () => {
-    if (manuallyAborted) return;
+  let finished = false;
+  const abort = (source: PlotPlanningAbortSource_ACU) => {
+    if (manuallyAborted || finished) return;
     manuallyAborted = true;
-    logDebug_ACU('[剧情推进] 用户点击了中止按钮。');
+    logDebug_ACU('[剧情推进] 收到规划中止请求。', { source });
     if (abortController_ACU) {
       abortController_ACU.abort();
-      logDebug_ACU('[剧情推进] 用户手动中止了规划任务。');
     }
-    task.end({ kind: 'info', text: '规划任务已被用户中止。' });
+    task.end({ kind: 'info', text: '规划任务已中止。' });
   };
   // 1. 登记带中止按钮的规划任务；中止只作用于本次规划
   const task = beginNoticeTask_ACU('剧情规划', {
     detail: '正在读取过往的记忆并分析，请稍后...',
-    action: { label: '终止', variant: 'danger', run: abort },
+    action: { label: '终止', variant: 'danger', run: () => abort('task_action') },
   });
   abortActivePlanning_ACU = abort;
 
@@ -60,6 +62,7 @@ export async function runOptimizationLogicWithUI_ACU(userMessage: any, options: 
     return { blocked: true };
   } finally {
     // 3. 结束进度任务
+    finished = true;
     task.end();
     if (abortActivePlanning_ACU === abort) abortActivePlanning_ACU = null;
   }

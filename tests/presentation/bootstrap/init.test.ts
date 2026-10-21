@@ -306,6 +306,46 @@ beforeEach(() => {
   Object.assign(m.gate, { lastUserMessageId: 7, lastUserMessageText: 'stale', lastUserMessageAt: 1, lastUserSendIntentAt: 2, lastGeneration: { stale: true }, generationSeq: 3, activeGenerations: [] });
 });
 
+describe('发送意图捕获', () => {
+  it('发送控件重建后仍捕获意图，重复安装不重复绑定', async () => {
+    const { markUserSendIntent_ACU } = await import('../../../src/service/runtime/state-manager');
+    const button = document.getElementById('send_but')!;
+    const textarea = document.getElementById('send_textarea')!;
+    const replacementButton = button.cloneNode(false) as HTMLElement;
+    const replacementTextarea = textarea.cloneNode(false) as HTMLTextAreaElement;
+    replacementButton.innerHTML = '<span>发送</span>';
+    button.replaceWith(replacementButton);
+    textarea.replaceWith(replacementTextarea);
+    try {
+      replacementButton.firstElementChild!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      expect(markUserSendIntent_ACU).toHaveBeenCalledOnce();
+      for (const type of ['pointerup', 'touchend']) {
+        replacementButton.dispatchEvent(new Event(type, { bubbles: true }));
+      }
+      replacementTextarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      expect(markUserSendIntent_ACU).toHaveBeenCalledTimes(4);
+
+      replacementTextarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true }));
+      replacementTextarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true }));
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      expect(markUserSendIntent_ACU).toHaveBeenCalledTimes(4);
+
+      m.api.chat = [{ is_user: false, mes: '已有正文' }];
+      await m.chatChanged!('chat-a');
+      await m.chatChanged!('chat-a');
+      vi.mocked(markUserSendIntent_ACU).mockClear();
+      replacementButton.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      expect(markUserSendIntent_ACU).toHaveBeenCalledOnce();
+      replacementTextarea.dispatchEvent(new KeyboardEvent('keydown', { code: 'NumpadEnter', bubbles: true }));
+      expect(markUserSendIntent_ACU).toHaveBeenCalledTimes(2);
+    } finally {
+      replacementButton.replaceWith(button);
+      replacementTextarea.replaceWith(textarea);
+    }
+  });
+});
+
 describe('mainInitialize_ACU CHAT_CHANGED 无活动聊天早退', () => {
   it('无效聊天名且无消息时清理运行时，并阻止后续聊天加载', async () => {
     expect(m.chatChanged).toBeTypeOf('function');

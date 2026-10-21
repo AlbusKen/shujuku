@@ -44,6 +44,7 @@ import {
   sweepOrphanSummaryVectorIndexFiles_ACU,
 } from '../../service/vector/summary-vector-index-chat-deletion-gc';
 import { topLevelWindow_ACU } from '../../shared/env';
+import { getHostWindow } from '../../shared/runtime-env';
 import { getUiSurface_ACU, showUiSurfaceToast_ACU } from '../../shared/ui-surface-registry';
 
 import { bindContinuationInternalAiGenerationStarted_ACU, consumeContinuationInternalAiGenerationEnded_ACU } from '../../service/continuation/internal-ai-events';
@@ -123,43 +124,27 @@ function clearRuntimeForNoActiveChat_ACU(chatFileName: unknown): void {
   logDebug_ACU(`ACU: No active chat after CHAT_CHANGED (${String(chatFileName)}), runtime table state cleared.`);
 }
 
+const sendIntentDocuments_ACU = new WeakSet<Document>();
+
 function installSendIntentCaptureHooks_ACU() {
   try {
-    const parentDoc = (window.parent || window).document;
-    const doc = parentDoc || document;
-
-    if (!(window as any).__ACU_sendIntentHooksInstalled) {
-      (window as any).__ACU_sendIntentHooksInstalled = { send: false, enter: false };
+    const doc = getHostWindow().document;
+    if (!doc || sendIntentDocuments_ACU.has(doc)) return;
+    // 文档级捕获不依赖发送控件的节点身份，宿主重建控件后仍然有效。
+    const onSend = (event: Event): void => {
+      const target = event.target as Element | null;
+      if (target?.closest?.('#send_but')) markUserSendIntent_ACU();
+    };
+    for (const eventType of ['click', 'pointerup', 'touchend']) {
+      doc.addEventListener(eventType, onSend, true);
     }
-
-    const sendBtn = doc.getElementById('send_but');
-    if (sendBtn && !(window as any).__ACU_sendIntentHooksInstalled.send) {
-      sendBtn.addEventListener('click', () => markUserSendIntent_ACU(), true);
-      sendBtn.addEventListener('pointerup', () => markUserSendIntent_ACU(), true);
-      sendBtn.addEventListener('touchend', () => markUserSendIntent_ACU(), true);
-      (window as any).__ACU_sendIntentHooksInstalled.send = true;
-    }
-
-    const ta = doc.getElementById('send_textarea');
-    if (ta && !(window as any).__ACU_sendIntentHooksInstalled.enter) {
-      ta.addEventListener('keydown', (e: Event) => {
-        try {
-          const key = (e as KeyboardEvent).key || (e as KeyboardEvent).code;
-          if ((key === 'Enter' || key === 'NumpadEnter') && !(e as KeyboardEvent).shiftKey) {
-            markUserSendIntent_ACU();
-          }
-        } catch (err) {}
-      }, true);
-      (window as any).__ACU_sendIntentHooksInstalled.enter = true;
-    }
-
-    if ((!sendBtn || !ta) && !(window as any).__ACU_sendIntentHooksRetryScheduled) {
-      (window as any).__ACU_sendIntentHooksRetryScheduled = true;
-      setTimeout(() => {
-        (window as any).__ACU_sendIntentHooksRetryScheduled = false;
-        installSendIntentCaptureHooks_ACU();
-      }, 1200);
-    }
+    doc.addEventListener('keydown', (event: KeyboardEvent) => {
+      const target = event.target as Element | null;
+      if (!target?.closest?.('#send_textarea') || event.isComposing || event.shiftKey) return;
+      const key = event.key || event.code;
+      if (key === 'Enter' || key === 'NumpadEnter') markUserSendIntent_ACU();
+    }, true);
+    sendIntentDocuments_ACU.add(doc);
   } catch (e) {
     // ignore
   }

@@ -5,13 +5,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { markPlotIntercept_ACU } from '../../../src/service/plot/plot-logic';
 
-const { mockSettings, mockLoopState, mockIsProcessing, mockSetIsProcessing, mockFlightModeActive, mockRunOptimization } = vi.hoisted(() => ({
+const { mockSettings, mockLoopState, mockIsProcessing, mockSetIsProcessing, mockFlightModeActive, mockRunOptimization, mockAbort } = vi.hoisted(() => ({
   mockSettings: { plotSettings: { enabled: true } } as any,
   mockLoopState: { isLooping: false, isRetrying: false, awaitingReply: false } as any,
   mockIsProcessing: false,
   mockSetIsProcessing: vi.fn(),
   mockFlightModeActive: vi.fn(() => false),
   mockRunOptimization: vi.fn(),
+  mockAbort: vi.fn(),
 }));
 
 vi.mock('../../../src/service/runtime/state-manager', () => ({
@@ -19,7 +20,7 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   loopState_ACU: mockLoopState,
   get isProcessing_Plot_ACU() { return mockIsProcessing; },
   _set_isProcessing_Plot_ACU: mockSetIsProcessing,
-  abortController_ACU: null,
+  abortController_ACU: { abort: mockAbort },
 }));
 
 vi.mock('../../../src/service/plot/plot-logic', () => ({
@@ -54,7 +55,9 @@ vi.mock('../../../src/shared/notice-hub', () => ({
 }));
 vi.mock('../../../src/presentation/theme/toast', () => ({ showToastr_ACU: vi.fn() }));
 
-import { runOptimizationLogicWithUI_ACU } from '../../../src/presentation/components/plot-planning-ui';
+import { abortActivePlotPlanning_ACU, runOptimizationLogicWithUI_ACU } from '../../../src/presentation/components/plot-planning-ui';
+import { beginNoticeTask_ACU } from '../../../src/shared/notice-hub';
+import { logDebug_ACU } from '../../../src/shared/utils';
 
 import {
   shouldProcessTavernHelperHook_ACU,
@@ -372,5 +375,41 @@ describe('orchestrateAfterCommandsStrategy2_ACU', () => {
       const result = await orchestrateAfterCommandsStrategy2_ACU('继续', runPlanning);
       expect(result.action).toBe('failed');
     }
+  });
+});
+
+describe('剧情规划中止来源与任务生命周期', () => {
+  it.each(['task_action', 'host_stop'] as const)('%s 只中止当前任务并准确记录来源', async source => {
+    let complete!: (value: any) => void;
+    mockRunOptimization.mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+    const pending = runOptimizationLogicWithUI_ACU('本轮原文');
+    const action = vi.mocked(beginNoticeTask_ACU).mock.calls.at(-1)![1]!.action!;
+    expect(mockAbort).not.toHaveBeenCalled();
+    if (source === 'task_action') await action.run();
+    else expect(abortActivePlotPlanning_ACU()).toBe(true);
+    expect(mockAbort).toHaveBeenCalledOnce();
+    expect(logDebug_ACU).toHaveBeenCalledExactlyOnceWith('[剧情推进] 收到规划中止请求。', { source });
+    complete({ success: true, finalMessage: '迟到结果', successCount: 1 });
+    await expect(pending).resolves.toEqual({ aborted: true, manual: true, restoreText: '本轮原文' });
+    expect(abortActivePlotPlanning_ACU()).toBe(false);
+    await action.run();
+    expect(mockAbort).toHaveBeenCalledOnce();
+  });
+
+  it('已结束任务的旧操作不能中止新规划', async () => {
+    mockRunOptimization.mockResolvedValueOnce({ success: true, finalMessage: '第一轮结果', successCount: 1 });
+    await expect(runOptimizationLogicWithUI_ACU('第一轮')).resolves.toBe('第一轮结果');
+    const staleAction = vi.mocked(beginNoticeTask_ACU).mock.calls.at(-1)![1]!.action!;
+    let complete!: (value: any) => void;
+    mockRunOptimization.mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+    const pending = runOptimizationLogicWithUI_ACU('第二轮');
+    await staleAction.run();
+    expect(mockAbort).not.toHaveBeenCalled();
+    expect(logDebug_ACU).not.toHaveBeenCalled();
+    expect(abortActivePlotPlanning_ACU()).toBe(true);
+    expect(mockAbort).toHaveBeenCalledOnce();
+    complete({ success: false, aborted: true, manual: true });
+    await expect(pending).resolves.toEqual({ aborted: true, manual: true, restoreText: '第二轮' });
+    expect(abortActivePlotPlanning_ACU()).toBe(false);
   });
 });
