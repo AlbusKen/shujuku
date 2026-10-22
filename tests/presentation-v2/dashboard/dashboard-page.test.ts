@@ -927,6 +927,11 @@ describe("DashboardPage", () => {
     expect(document.querySelector('.acu-notice-bubble')?.getAttribute('role')).toBe('alert');
     expect(document.querySelector('.acu-notice-bubble__detail')).toBeNull();
     expect(document.querySelector('.acu-notice-bubble__body')?.classList.contains('is-expandable')).toBe(false);
+    const errorHint = document.querySelector<HTMLDetailsElement>('.acu-notice-bubble__hint');
+    expect(errorHint?.dataset.hintId).toBe('network-reset');
+    expect(errorHint?.open).toBe(false);
+    expect(errorHint?.querySelector('.acu-notice-bubble__hint-code')?.textContent).toBe('NETWORK_RESET');
+    expect(errorHint?.querySelectorAll('.acu-notice-bubble__hint-steps li').length).toBeGreaterThan(0);
     toggle().click();
     await tick();
     expect(body()).toBe(errorText);
@@ -943,6 +948,22 @@ describe("DashboardPage", () => {
     expect(document.querySelector('.acu-notice-bubble__heading')?.textContent).toBe('纪要召回失败');
     document.querySelector<HTMLButtonElement>('[data-acu-toggle-key="desktopPetEnabled"]')!.click();
     await tick();
+
+    hub.notify_ACU('error', '续写状态保存失败', { code: 'CONTINUATION_PERSIST_FAILED' });
+    document.querySelector<HTMLButtonElement>('.acu-notice-bubble__close')!.click();
+    await tick();
+    expect(body()).toBe('续写状态保存失败');
+    // 命中处理建议时，业务错误码排在规则错误码之前。
+    expect(document.querySelector('.acu-notice-bubble__hint-code')?.textContent).toBe('CONTINUATION_PERSIST_FAILED · CONTINUATION');
+    expect(document.querySelector('.acu-notice-bubble__code')).toBeNull();
+
+    hub.notify_ACU('error', '未知故障', { code: 'CONTINUATION_TASK_NOT_FOUND' });
+    document.querySelector<HTMLButtonElement>('.acu-notice-bubble__close')!.click();
+    await tick();
+    expect(body()).toBe('未知故障');
+    // 只命中通用兜底时不显示处理建议，但业务错误码仍单独展示。
+    expect(document.querySelector('.acu-notice-bubble__hint')).toBeNull();
+    expect(document.querySelector('.acu-notice-bubble__code')?.textContent).toBe('CONTINUATION_TASK_NOT_FOUND');
 
     const task = hub.beginNoticeTask_ACU('剧情推进', { detail: '分析记忆目录', busy: true });
     document.querySelector<HTMLButtonElement>('.acu-notice-bubble__close')!.click();

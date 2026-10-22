@@ -38,6 +38,8 @@ export interface ToastOptions {
   feature?: string;
   /** 常驻提示是否代表正在干活（驱动桌宠工作动画）；待处理类提示传 false。默认 true。 */
   busy?: boolean;
+  /** 业务错误码（如续写的 CONTINUATION_*），随一次性通知传给桌宠气泡展示。 */
+  code?: string;
 }
 
 const DEFAULT_DURATION_BY_KIND: Record<ToastKind, number> = {
@@ -195,7 +197,10 @@ export const useToastStore = defineStore("acu-v2-toast", {
         endTask(id, { kind: item.kind, text: item.text });
         return;
       }
-      notify_ACU(item.kind, item.text, action ? { actions: [action] } : {});
+      const hubOptions: { actions?: NoticeAction_ACU[]; code?: string } = {};
+      if (action) hubOptions.actions = [action];
+      if (options.code) hubOptions.code = options.code;
+      notify_ACU(item.kind, item.text, hubOptions);
     },
     toHubAction(id: string, action: ToastAction): NoticeAction_ACU {
       return {

@@ -546,7 +546,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
     if (Number.isInteger(status) && status >= 400 && status <= 499) return `API 拒绝了请求（HTTP ${status}）。`;
     if (candidate.code === 'API_PRESET_UNRESOLVED') return 'API 预设无法解析，未取得有效响应。';
     if (candidate.name === 'TimeoutError') return 'API 请求超时，未取得有效响应。';
-    if (candidate.name === 'AbortError') return 'API 请求被上游中断，未取得有效响应。';
+    if (candidate.name === 'AbortError') return 'API 请求被中止（停止生成、切换聊天或宿主取消），未取得有效响应。';
     if (candidate.name === 'TypeError') return 'API 请求出现网络或传输异常，未取得有效响应。';
     return 'API 调用失败，未取得有效响应；具体原因尚未确认。';
   }

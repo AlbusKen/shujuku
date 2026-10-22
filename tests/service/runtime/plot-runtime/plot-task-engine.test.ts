@@ -2533,7 +2533,7 @@ describe('runPlotTasksRuntime_ACU', () => {
     { kind: 'api', error: { status: 400 }, expected: '拒绝了请求（HTTP 400）' },
     { kind: 'api', error: { code: 'API_PRESET_UNRESOLVED' }, expected: '预设无法解析' },
     { kind: 'api', error: { name: 'TimeoutError' }, expected: '请求超时，未取得有效响应' },
-    { kind: 'api', error: { name: 'AbortError' }, expected: '被上游中断' },
+    { kind: 'api', error: { name: 'AbortError' }, expected: '请求被中止（停止生成、切换聊天或宿主取消）' },
     { kind: 'api', error: { name: 'TypeError' }, expected: '网络或传输异常' },
     { kind: 'api', error: {}, expected: '具体原因尚未确认' },
   ])('未配置标签时按长度验收，$kind 重试原请求且诊断不进入消息：$expected', async ({ kind, error, expected }) => {

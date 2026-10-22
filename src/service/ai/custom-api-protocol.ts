@@ -58,10 +58,31 @@ export function buildProviderRequest_ACU(body: Record<string, any>, format: Cust
         ...(response_format ? { response_format: { type: 'json', schema: response_format.json_schema?.schema ?? { type: 'object' } } } : {}) };
 }
 
+const UPSTREAM_ERROR_MESSAGE_LIMIT_ACU = 300;
+
+/** 只取上游错误对象的 type / code / message，供日志分类与用户排查；原始 wire 已由请求日志完整记录。 */
+export function describeProviderUpstreamError_ACU(data: any): string {
+    const raw = data?.error ?? (Array.isArray(data?.errors) ? data.errors[0] : undefined);
+    const fields: string[] = [];
+    let message = '';
+    if (raw && typeof raw === 'object') {
+        const type = raw.type ?? raw.status;
+        if (typeof type === 'string' || typeof type === 'number') fields.push(`type=${type}`);
+        if (typeof raw.code === 'string' || typeof raw.code === 'number') fields.push(`code=${raw.code}`);
+        if (typeof raw.message === 'string') message = raw.message;
+    } else if (typeof raw === 'string') {
+        message = raw;
+    }
+    if (!raw && typeof data?.status === 'string') fields.push(`status=${data.status}`);
+    const trimmed = message.trim();
+    const shown = trimmed.length > UPSTREAM_ERROR_MESSAGE_LIMIT_ACU ? `${trimmed.slice(0, UPSTREAM_ERROR_MESSAGE_LIMIT_ACU)}…` : trimmed;
+    return `直连 API 返回上游错误${fields.length ? `（${fields.join(', ')}）` : ''}${shown ? `：${shown}` : '。'}`;
+}
+
 /** 原始非流式回复归一到现有 OpenAI 回复契约，原始 wire 另行完整记录。 */
 export function normalizeProviderReply_ACU(data: any, format: CustomApiFormat_ACU): any {
     if (format === 'openai_compat' || data?.choices) return data;
-    if (data?.error || data?.errors?.length || ['failed', 'cancelled'].includes(data?.status)) throw new Error('直连 API 返回上游错误。');
+    if (data?.error || data?.errors?.length || ['failed', 'cancelled'].includes(data?.status)) throw new Error(describeProviderUpstreamError_ACU(data));
     const blocks = format === 'claude_messages' ? data.content ?? []
         : format === 'openai_responses' ? data.output ?? [] : data.steps ?? data.outputs ?? [];
     const content = blocks.map((b: any) => b.type === 'text' ? b.text : text(b.content)).join('');

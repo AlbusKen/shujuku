@@ -337,6 +337,24 @@ describe('useContinuationRuntime', () => {
     expect(harness.toastError).not.toHaveBeenCalled();
   });
 
+  it('续写结构化错误弹窗保留错误码，普通异常不附带 code 字段', async () => {
+    const { useContinuationRuntime } = await import('../../../src/presentation-v2/composables/useContinuationRuntime');
+    const { ContinuationValidationError_ACU, createContinuationError_ACU } = await import('../../../src/service/continuation/model');
+    const continuation = useContinuationRuntime();
+
+    harness.continueTask.mockRejectedValueOnce(new ContinuationValidationError_ACU(
+      createContinuationError_ACU('CONTINUATION_PERSIST_FAILED', 'persist', '续写状态保存失败', true),
+    ));
+    await continuation.continueTask();
+    expect(harness.toastError).toHaveBeenLastCalledWith('续写状态保存失败', { muteable: false, code: 'CONTINUATION_PERSIST_FAILED' });
+
+    harness.continueTask.mockRejectedValueOnce(new Error('普通失败'));
+    await continuation.continueTask();
+    const options = harness.toastError.mock.calls.at(-1)![1];
+    expect(options).toEqual({ muteable: false });
+    expect('code' in options).toBe(false);
+  });
+
   it('由消息启动的新动作替换旧动作后，旧动作完成不会提前清除 busy', async () => {
     const { effectScope } = await import('vue');
     const { useContinuationRuntime } = await import('../../../src/presentation-v2/composables/useContinuationRuntime');

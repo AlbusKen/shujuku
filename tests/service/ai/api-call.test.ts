@@ -268,6 +268,22 @@ describe('callAIWithPreset_ACU', () => {
     expect(isRetryableAiRequestError_ACU(new AgentApiHttpError_ACU(401, 'unauthorized'))).toBe(false);
   });
 
+  it.each([
+    ['浏览器 fetch 失败', new TypeError('Failed to fetch'), true],
+    ['Safari fetch 失败', new TypeError('Load failed'), true],
+    ['undici 连接中断', new TypeError('terminated'), true],
+    ['cause 带连接拒绝码', Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('connect'), { code: 'ECONNREFUSED' }) }), true],
+    ['顶层带 DNS 错误码', Object.assign(new Error('getaddrinfo failed'), { code: 'ENOTFOUND' }), true],
+    ['消息里只有 ECONNREFUSED', new Error('connect ECONNREFUSED 127.0.0.1:5001'), true],
+    ['消息里只有 EAI_AGAIN', new Error('getaddrinfo EAI_AGAIN api.example.com'), true],
+    ['程序错误 TypeError', new TypeError('x is not a function'), false],
+    ['读取 undefined 属性', new TypeError("Cannot read properties of undefined (reading 'map')"), false],
+    ['用户中止', new DOMException('请求已取消', 'AbortError'), false],
+    ['请求超时', Object.assign(new Error('API 请求超时（300 秒）'), { name: 'TimeoutError' }), true],
+  ])('瞬时故障判定：%s → %s', (_label, error, expected) => {
+    expect(isRetryableAiRequestError_ACU(error)).toBe(expected);
+  });
+
   it('指定预设名使用对应预设', async () => {
     mockSettings.apiPresets = [
       { name: '预设B', apiMode: 'tavern', apiConfig: { sendViaTavern: true,}, tavernProfile: 'profileB' },
@@ -1338,6 +1354,18 @@ describe('直连接口协议适配', () => {
     for (const format of ['openai_responses', 'claude_messages', 'gemini_interactions'] as const) {
       expect(normalizeProviderReply_ACU({}, format).choices[0].finish_reason).toBeNull();
     }
+  });
+
+  it('原生回复为上游错误对象时保留 type / code / message，便于日志分类', async () => {
+    const { normalizeProviderReply_ACU } = await import('../../../src/service/ai/custom-api-protocol');
+    expect(() => normalizeProviderReply_ACU({ type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } }, 'claude_messages'))
+      .toThrow('直连 API 返回上游错误（type=overloaded_error）：Overloaded');
+    expect(() => normalizeProviderReply_ACU({ error: { code: 429, status: 'RESOURCE_EXHAUSTED', message: 'Quota exceeded' } }, 'gemini_interactions'))
+      .toThrow('直连 API 返回上游错误（type=RESOURCE_EXHAUSTED, code=429）：Quota exceeded');
+    expect(() => normalizeProviderReply_ACU({ status: 'failed' }, 'openai_responses'))
+      .toThrow('直连 API 返回上游错误（status=failed）。');
+    expect(() => normalizeProviderReply_ACU({ error: 'x'.repeat(400) }, 'openai_responses'))
+      .toThrow(`直连 API 返回上游错误：${'x'.repeat(300)}…`);
   });
 });
 

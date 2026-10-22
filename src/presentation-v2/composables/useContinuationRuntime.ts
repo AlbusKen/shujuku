@@ -64,6 +64,12 @@ function errorMessage_ACU(error: unknown): string {
   return error instanceof Error ? error.message : '智能续写操作失败';
 }
 
+/** 续写结构化错误保留 code 给桌宠气泡展示；其他异常维持原有选项形状。 */
+function errorToastOptions_ACU(error: unknown): { muteable: false; code?: string } {
+  if (error instanceof ContinuationValidationError_ACU && error.error.code) return { muteable: false, code: error.error.code };
+  return { muteable: false };
+}
+
 export function useContinuationRuntime() {
   const toast = useToastStore();
   const toolMode = useAgentToolMode('continuation');
@@ -162,7 +168,7 @@ export function useContinuationRuntime() {
       envelope.value = resolveRuntime().read();
     } catch (error) {
       envelope.value = null;
-      toast.error(errorMessage_ACU(error), { muteable: false });
+      toast.error(errorMessage_ACU(error), errorToastOptions_ACU(error));
     }
   }
 
@@ -175,7 +181,7 @@ export function useContinuationRuntime() {
       .then(() => { if (isCurrent(current, epoch)) refresh(); })
       .catch(error => {
         if (!isCurrent(current, epoch)) return;
-        toast.error(errorMessage_ACU(error), { muteable: false });
+        toast.error(errorMessage_ACU(error), errorToastOptions_ACU(error));
         refresh();
       })
       .finally(() => {
@@ -200,7 +206,7 @@ export function useContinuationRuntime() {
     try { current = resolveRuntime(); }
     catch (error) {
       onError?.(error);
-      if (!suppressErrorToast) toast.error(errorMessage_ACU(error), { muteable: false });
+      if (!suppressErrorToast) toast.error(errorMessage_ACU(error), errorToastOptions_ACU(error));
       return Promise.resolve(false);
     }
     return runInRuntimeScope_ACU(current, captureRuntimeScope(current), action, replaceActive, suppressErrorToast, onError);
@@ -266,7 +272,7 @@ export function useContinuationRuntime() {
       if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_INTERNAL_REQUEST_STALE') {
         toast.info(error.error.message);
       } else {
-        toast.error(errorMessage_ACU(error), { muteable: false });
+        toast.error(errorMessage_ACU(error), errorToastOptions_ACU(error));
       }
       refresh();
       return false;
@@ -332,7 +338,7 @@ export function useContinuationRuntime() {
     if (!text.trim()) return false;
     let current: ContinuationRuntime_ACU;
     try { current = resolveRuntime(); }
-    catch (error) { toast.error(errorMessage_ACU(error), { muteable: false }); return false; }
+    catch (error) { toast.error(errorMessage_ACU(error), errorToastOptions_ACU(error)); return false; }
     const epoch = pageEpoch;
     const actions = getRuntimeActions_ACU(current);
     const actionBeforeMessage = actions.activeAction;
@@ -371,7 +377,7 @@ export function useContinuationRuntime() {
       return true;
     } catch (error) {
       if (!isCurrent(current, epoch)) return false;
-      toast.error(errorMessage_ACU(error), { muteable: false });
+      toast.error(errorMessage_ACU(error), errorToastOptions_ACU(error));
       refresh();
       return false;
     }
@@ -391,7 +397,7 @@ export function useContinuationRuntime() {
   async function stopTask(): Promise<void> {
     let current: ContinuationRuntime_ACU;
     try { current = resolveRuntime(); }
-    catch (error) { toast.error(errorMessage_ACU(error), { muteable: false }); return; }
+    catch (error) { toast.error(errorMessage_ACU(error), errorToastOptions_ACU(error)); return; }
     const epoch = pageEpoch;
     const isRuntimeCurrent = captureRuntimeScope(current);
     getRuntimeActions_ACU(current).stopEpoch += 1;
@@ -402,7 +408,7 @@ export function useContinuationRuntime() {
       const result = await current.orchestrator.stopTask();
       if (isCurrent(current, epoch)) envelope.value = result.envelope;
     } catch (error) {
-      if (isCurrent(current, epoch)) toast.error(errorMessage_ACU(error), { muteable: false });
+      if (isCurrent(current, epoch)) toast.error(errorMessage_ACU(error), errorToastOptions_ACU(error));
     } finally {
       try {
         if (isRuntimeCurrent()) current.stopGeneration();
@@ -451,7 +457,7 @@ export function useContinuationRuntime() {
   async function saveSettings(settings: ContinuationSettings_ACU): Promise<'saved' | 'busy' | 'failed'> {
     let current: ContinuationRuntime_ACU;
     try { current = resolveRuntime(); }
-    catch (error) { toast.error(errorMessage_ACU(error), { muteable: false }); return 'failed'; }
+    catch (error) { toast.error(errorMessage_ACU(error), errorToastOptions_ACU(error)); return 'failed'; }
     const epoch = pageEpoch;
     if (busy.value) return 'busy';
     busy.value = true;
@@ -464,7 +470,7 @@ export function useContinuationRuntime() {
     } catch (error) {
       if (!isCurrent(current, epoch)) return 'failed';
       if (error instanceof ContinuationValidationError_ACU && error.error.code === 'CONTINUATION_OPERATION_BUSY') return 'busy';
-      toast.error(errorMessage_ACU(error), { muteable: false });
+      toast.error(errorMessage_ACU(error), errorToastOptions_ACU(error));
       refresh();
       return 'failed';
     } finally {
@@ -537,7 +543,7 @@ export function useContinuationRuntime() {
   async function clearData(): Promise<boolean> {
     let current: ContinuationRuntime_ACU;
     try { current = resolveRuntime(); }
-    catch (error) { toast.error(errorMessage_ACU(error), { muteable: false }); return false; }
+    catch (error) { toast.error(errorMessage_ACU(error), errorToastOptions_ACU(error)); return false; }
     const epoch = pageEpoch;
     if (busy.value) return false;
     busy.value = true;
@@ -550,7 +556,7 @@ export function useContinuationRuntime() {
       return true;
     } catch (error) {
       if (!isCurrent(current, epoch)) return false;
-      toast.error(errorMessage_ACU(error), { muteable: false });
+      toast.error(errorMessage_ACU(error), errorToastOptions_ACU(error));
       refresh();
       return false;
     } finally {

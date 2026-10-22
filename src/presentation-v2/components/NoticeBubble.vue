@@ -31,6 +31,24 @@
         <p v-if="detailTitle" class="acu-notice-bubble__detail-title">{{ detailTitle }}</p>
         <p v-if="detailText" class="acu-notice-bubble__detail-text">{{ detailText }}</p>
       </div>
+      <details
+        v-if="errorHint"
+        :key="slide.key"
+        class="acu-notice-bubble__hint"
+        :data-hint-id="errorHint.id"
+        @toggle="onHintToggle"
+        @keydown.stop
+      >
+        <summary class="acu-notice-bubble__hint-summary">
+          <code class="acu-notice-bubble__hint-code">{{ errorCodeLabel }}</code>
+          <span class="acu-notice-bubble__hint-text">{{ errorHint.summary }}</span>
+          <span class="acu-notice-bubble__hint-toggle">怎么处理</span>
+        </summary>
+        <ol class="acu-notice-bubble__hint-steps">
+          <li v-for="(step, index) in errorHint.steps" :key="index">{{ step }}</li>
+        </ol>
+      </details>
+      <p v-else-if="noticeCode" class="acu-notice-bubble__hint-code acu-notice-bubble__code">{{ noticeCode }}</p>
     </div>
     <div v-if="actionButtons.length || closable" class="acu-notice-bubble__tools">
       <button
@@ -65,6 +83,7 @@ import type { NoticeBubbleAppearance_ACU, NoticeBubbleSide_ACU } from "../../sha
 import type { NoticeAction_ACU } from "../../shared/notice-hub";
 import type { NoticeSlide } from "../composables/useNoticeCarousel";
 import type { ActivityTask, DeskPetRect } from "../composables/useTaskActivity";
+import { resolveErrorTextHint, type LogErrorHint } from "../composables/log-error-hints";
 
 const props = defineProps<{
   slide: NoticeSlide | null;
@@ -105,6 +124,41 @@ const tone = computed(() => {
 
 /** 错误始终显示真实内容，不受桌宠工作内容开关影响。 */
 const showRealContent = computed(() => props.showRealWork || tone.value === "error");
+
+/**
+ * 错误气泡附带与运行日志同一套规则的错误代码与处理步骤；
+ * 只命中通用兜底时不显示，避免给出与实际原因无关的建议。
+ */
+const errorHint = computed<LogErrorHint | null>(() => {
+  const current = props.slide;
+  if (!current || tone.value !== "error") return null;
+  let source = "";
+  if (current.type === "notice") source = `${current.notice.title} ${current.notice.text}`;
+  else if (current.type === "task") source = `${props.task?.feature || ""} ${props.task?.detail || ""}`;
+  if (!source.trim()) return null;
+  const hint = resolveErrorTextHint(source);
+  return hint.id === "generic" ? null : hint;
+});
+
+/** 调用方随通知传入的业务错误码（如续写的 CONTINUATION_*），只在错误气泡展示。 */
+const noticeCode = computed(() => {
+  const current = props.slide;
+  if (!current || current.type !== "notice" || tone.value !== "error") return "";
+  return current.notice.code || "";
+});
+
+/** 业务错误码在前、规则错误码与 HTTP 状态码在后，例如「CONTINUATION_PERSIST_FAILED · NETWORK_RESET」。 */
+const errorCodeLabel = computed(() => {
+  const hint = errorHint.value;
+  if (!hint) return noticeCode.value;
+  const parts = [noticeCode.value, hint.code, hint.httpStatus ? `HTTP ${hint.httpStatus}` : ""];
+  return parts.filter(Boolean).join(" · ");
+});
+
+/** 展开处理步骤时暂停轮播，方便看完；收起后继续。 */
+function onHintToggle(event: Event): void {
+  emit((event.target as HTMLDetailsElement).open ? "pause" : "resume");
+}
 
 const heading = computed(() => {
   const current = props.slide;
@@ -465,6 +519,86 @@ onBeforeUnmount(() => {
   margin: 0;
   color: var(--bubble-text);
   white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+/* 错误处理建议：扁平底色，不加描边，与正文同一列。 */
+.acu-notice-bubble__hint {
+  margin-top: 7px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bubble-tone) 7%, transparent);
+}
+
+.acu-notice-bubble__hint-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 6px;
+  padding: 5px 8px;
+  color: var(--bubble-text);
+  font-size: calc(var(--acu-nb-font-size) - 1px);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.acu-notice-bubble__hint-summary::-webkit-details-marker {
+  display: none;
+}
+
+.acu-notice-bubble__hint-summary:focus-visible {
+  outline: 2px solid var(--bubble-tone);
+  outline-offset: 1px;
+  border-radius: 6px;
+}
+
+.acu-notice-bubble__hint-code {
+  color: var(--bubble-tone);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: calc(var(--acu-nb-font-size) - 2px);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+/* 只有业务错误码、没有匹配到具体处理建议时，单独一行展示错误码。 */
+.acu-notice-bubble__code {
+  margin: 4px 0 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.acu-notice-bubble__hint-text {
+  flex: 1 1 12em;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.acu-notice-bubble__hint-toggle {
+  flex: 0 0 auto;
+  color: var(--bubble-muted);
+  white-space: nowrap;
+}
+
+.acu-notice-bubble__hint-toggle::after {
+  content: " ▾";
+}
+
+.acu-notice-bubble__hint[open] .acu-notice-bubble__hint-toggle::after {
+  content: " ▴";
+}
+
+.acu-notice-bubble__hint-steps {
+  margin: 0;
+  padding: 0 8px 7px 26px;
+  max-height: var(--acu-nb-detail-max-height);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  color: var(--bubble-text);
+  font-size: calc(var(--acu-nb-font-size) - 1px);
+}
+
+.acu-notice-bubble__hint-steps li {
+  margin: 2px 0;
   overflow-wrap: anywhere;
 }
 

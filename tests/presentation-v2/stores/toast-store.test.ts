@@ -119,6 +119,20 @@ describe("toast-store", () => {
     expect(store.items).toHaveLength(0);
   });
 
+  it("把业务错误码随一次性通知转发给 notice-hub，未提供时不带 code 字段", async () => {
+    const { store } = await freshStore();
+    const hub = await import("../../../src/shared/notice-hub");
+    hub.__resetNoticeHubForTests_ACU();
+
+    store.error("续写状态保存失败", { code: "CONTINUATION_PERSIST_FAILED" });
+    store.error("普通失败");
+
+    const [withCode, withoutCode] = hub.getNoticeHubSnapshot_ACU().notices;
+    expect(withCode).toMatchObject({ kind: "error", text: "续写状态保存失败", code: "CONTINUATION_PERSIST_FAILED" });
+    expect(withoutCode.text).toBe("普通失败");
+    expect("code" in withoutCode).toBe(false);
+  });
+
   it("静默模式丢弃一次性通知，常驻进度仍登记为任务", async () => {
     const { store } = await freshStore();
     const hub = await import("../../../src/shared/notice-hub");

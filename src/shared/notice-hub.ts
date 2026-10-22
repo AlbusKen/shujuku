@@ -27,6 +27,8 @@ export interface Notice_ACU {
   text: string;
   createdAt: number;
   actions: NoticeAction_ACU[];
+  /** 业务错误码（如 CONTINUATION_PERSIST_FAILED）；调用方提供时才有该字段。 */
+  code?: string;
 }
 
 export interface NoticeTask_ACU {
@@ -77,6 +79,8 @@ export interface NoticeTaskHandle_ACU {
 export interface NotifyOptions_ACU {
   title?: string;
   actions?: NoticeAction_ACU[];
+  /** 业务错误码，原样随通知传给气泡展示。 */
+  code?: string;
 }
 
 export interface NoticeHubSnapshot_ACU {
@@ -199,6 +203,8 @@ export function notify_ACU(kind: NoticeKind_ACU, rawText: unknown, options: Noti
     createdAt: now,
     actions: Array.isArray(options.actions) ? options.actions.filter(action => action && action.label) : [],
   };
+  const code = typeof options.code === 'string' ? options.code.trim() : '';
+  if (code) notice.code = code;
   notices_ACU = [...notices_ACU, notice];
   if (notices_ACU.length > NOTICE_QUEUE_LIMIT_ACU) {
     const dropped = notices_ACU.slice(0, notices_ACU.length - NOTICE_QUEUE_LIMIT_ACU);
