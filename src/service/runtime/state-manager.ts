@@ -223,7 +223,7 @@ export let settings_ACU: any = {
     // 续写 / 推演的工具方案全局开关；关闭时请求不带 tools，提示词为纯 JSON 版。
     continuationNativeToolEnabled: false,
     worldSimulationNativeToolEnabled: false,
-    // 上下文工具化传输默认开启；渠道不支持函数调用时在 API 设置里关闭。
+    // 上下文工具化传输默认开启；渠道不支持函数调用时在填表模式页关闭。
     contextToolTransportEnabled: true,
     discardUnauthorizedTableEditsEnabled: true,
     // [剧情推进] 按剧情任务ID保存的任务级 API 预设覆盖（key=taskId, value=presetName）

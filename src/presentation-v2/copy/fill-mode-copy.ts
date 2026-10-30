@@ -88,6 +88,9 @@ export const fillModeCopy = {
       nativeToolLabel: '填表使用工具调用',
       nativeToolHint:
         '默认关闭，四种模式通用。开启后填表改走 table_edit / table_sql 原生工具提交，默认提示词同步切换；部分渠道不支持工具调用，收到 tools 字段会直接报错。',
+      contextToolTransportLabel: '上下文函数化传输',
+      contextToolTransportHint:
+        '默认开启，全局生效。开启后首条身份消息之后的上下文会转为函数描述发送，并在收到回复后还原为普通正文；部分渠道不支持函数调用时，可关闭后按原请求发送。',
     },
     plot: {
       title: '剧情推进',

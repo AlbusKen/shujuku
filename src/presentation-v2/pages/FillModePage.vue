@@ -96,6 +96,18 @@
             @update:model-value="formFillSettings.setTableFillNativeToolEnabled($event)"
           />
         </AcuFormRow>
+
+        <AcuFormRow
+          :label="fillModeCopy.panels.mode.contextToolTransportLabel"
+          :hint="fillModeCopy.panels.mode.contextToolTransportHint"
+        >
+          <AcuToggle
+            :model-value="formFillSettings.contextToolTransportEnabled.value"
+            :aria-label="fillModeCopy.panels.mode.contextToolTransportLabel"
+            data-acu-context-tool-transport-toggle="1"
+            @update:model-value="formFillSettings.setContextToolTransportEnabled($event)"
+          />
+        </AcuFormRow>
       </AcuPanel>
     </AcuPanelGrid>
 

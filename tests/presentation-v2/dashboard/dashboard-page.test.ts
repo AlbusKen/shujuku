@@ -759,6 +759,8 @@ describe("DashboardPage", () => {
     expect(text).toContain("智能续写");
     expect(text).toContain("格林推演");
     expect(text).toContain("外部导入");
+    expect(text).not.toContain("上下文函数化传输");
+    expect(text).not.toContain("API工具调用");
     expect(document.querySelector('button[data-acu-toggle-key="summaryVectorIndexModeEnabled"]')).toBeNull();
     expect(text).toContain("存储模式");
     expect(text).toContain("原生 JSON");
@@ -776,25 +778,12 @@ describe("DashboardPage", () => {
       ),
     ).map((button) => button.dataset.acuToggleKey);
     expect(visibleToggleKeys).toEqual([
-      "contextToolTransportEnabled",
       "continuationPageEnabled",
       "worldSimulationPageEnabled",
       "externalImportPageEnabled",
       "contentReplaceEnabled",
       "developerOptionsEnabled",
     ]);
-
-    const apiToolToggle = document.querySelector<HTMLButtonElement>(
-      'button[data-acu-toggle-key="contextToolTransportEnabled"]',
-    )!;
-    expect(apiToolToggle.getAttribute("aria-label")).toBe("API工具调用");
-    expect(apiToolToggle.getAttribute("aria-checked")).toBe("true");
-    expect(apiToolToggle.closest(".acu-dashboard-toggle-row")?.querySelector(".acu-dashboard-toggle-row__desc")).toBeNull();
-    apiToolToggle.click();
-    await new Promise((r) => setTimeout(r, 0));
-    expect(settings.contextToolTransportEnabled).toBe(false);
-    expect(apiToolToggle.getAttribute("aria-checked")).toBe("false");
-    expect(saveSettings).toHaveBeenCalled();
 
     const storageGroup = document.querySelector(
       'div[role="radiogroup"][aria-label="存储模式"]',
@@ -1177,7 +1166,6 @@ describe("DashboardPage", () => {
       ),
     ).map((button) => button.dataset.acuToggleKey);
     expect(visibleToggleKeys).toEqual([
-      "contextToolTransportEnabled",
       "continuationPageEnabled",
       "worldSimulationPageEnabled",
       "externalImportPageEnabled",

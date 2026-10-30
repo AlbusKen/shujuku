@@ -53,6 +53,7 @@ async function mountPlotPage(opts: {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
 
   const settings = opts.settings ?? createSettings();
+  const saveSettings = vi.fn(() => ({ saved: true, storageType: 'memory' }));
   const mockGetCurrentCharacterWorldbookBinding = vi.fn(
     opts.resolveCharacterBinding ?? (async () => ({
       primary: 'CharBook',
@@ -70,7 +71,7 @@ async function mountPlotPage(opts: {
     coreApisAreReady_ACU: true,
   }));
   vi.doMock('../../../src/service/settings/settings-service', () => ({
-    saveSettings_ACU: vi.fn(),
+    saveSettings_ACU: saveSettings,
     setGlobalPlotEnabled_ACU: vi.fn((val: boolean) => { settings.plotSettings.enabled = val; return val; }),
   }));
   vi.doMock('../../../src/service/ai/ai-service', () => ({
@@ -108,7 +109,7 @@ async function mountPlotPage(opts: {
   const mount = await import('../../../src/presentation-v2/bootstrap/mount');
   await mount.openAcuV2App();
   await new Promise(r => setTimeout(r, 0));
-  return { mount, settings, mockGetCurrentCharacterWorldbookBinding };
+  return { mount, settings, saveSettings, mockGetCurrentCharacterWorldbookBinding };
 }
 
 beforeEach(() => {
@@ -183,6 +184,32 @@ describe('PlotPage', () => {
     await nextTick();
     expect(document.querySelector('.acu-v2-plot-page')).not.toBeNull();
     expect(document.querySelector('#plot-preset-panel')).not.toBeNull();
+
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it('轻量模式在填表模式页提供上下文函数化传输开关', async () => {
+    const { mount, settings, saveSettings } = await mountPlotPage({ uiTier: 'low' });
+
+    document.querySelector<HTMLButtonElement>('.acu-v2-sidebar [data-page-id="fill-mode"]')!.click();
+    await new Promise(r => setTimeout(r, 0));
+
+    const page = document.querySelector('.acu-v2-fill-mode-page')!;
+    expect(page).not.toBeNull();
+    expect(page.textContent || '').toContain('上下文函数化传输');
+    const contextToggle = page.querySelector<HTMLButtonElement>('[data-acu-context-tool-transport-toggle]')!;
+    expect(contextToggle).not.toBeNull();
+    expect(contextToggle.getAttribute('aria-label')).toBe('上下文函数化传输');
+    expect(contextToggle.getAttribute('aria-checked')).toBe('true');
+    contextToggle.click();
+    await new Promise(r => setTimeout(r, 0));
+    expect(settings.contextToolTransportEnabled).toBe(false);
+    expect(contextToggle.getAttribute('aria-checked')).toBe('false');
+    expect(saveSettings).toHaveBeenCalled();
+
+    document.querySelector<HTMLButtonElement>('.acu-v2-sidebar [data-page-id="plot"]')!.click();
+    await new Promise(r => setTimeout(r, 0));
+    expect(document.querySelector('.acu-v2-plot-page')).not.toBeNull();
 
     mount.__resetAcuV2MountForTests();
   });

@@ -70,6 +70,7 @@ export interface FormFillSettingsState {
   tableEditLastPairOnly: Ref<boolean>;
   strictJsonTableFillEnabled: Ref<boolean>;
   tableFillNativeToolEnabled: Ref<boolean>;
+  contextToolTransportEnabled: Ref<boolean>;
   discardUnauthorizedTableEditsEnabled: Ref<boolean>;
   extractRules: Ref<FormFillRulePair[]>;
   excludeRules: Ref<FormFillRulePair[]>;
@@ -86,6 +87,7 @@ export interface FormFillSettingsState {
   setTableEditLastPairOnly: (value: boolean) => void;
   setStrictJsonTableFillEnabled: (value: boolean) => void;
   setTableFillNativeToolEnabled: (value: boolean) => void;
+  setContextToolTransportEnabled: (value: boolean) => void;
   setDiscardUnauthorizedTableEditsEnabled: (value: boolean) => void;
   setExtractRules: (rules: FormFillRulePair[]) => void;
   setExcludeRules: (rules: FormFillRulePair[]) => void;
@@ -329,6 +331,9 @@ export function useFormFillSettings(): FormFillSettingsState {
   const tableFillNativeToolEnabled = ref(
     settings_ACU.tableFillNativeToolEnabled === true,
   );
+  const contextToolTransportEnabled = ref(
+    settings_ACU.contextToolTransportEnabled !== false,
+  );
   const discardUnauthorizedTableEditsEnabled = ref(
     settings_ACU.discardUnauthorizedTableEditsEnabled !== false,
   );
@@ -363,6 +368,7 @@ export function useFormFillSettings(): FormFillSettingsState {
     tableEditLastPairOnly.value = settings_ACU.tableEditLastPairOnly !== false;
     strictJsonTableFillEnabled.value = settings_ACU.strictJsonTableFillEnabled === true;
     tableFillNativeToolEnabled.value = settings_ACU.tableFillNativeToolEnabled === true;
+    contextToolTransportEnabled.value = settings_ACU.contextToolTransportEnabled !== false;
     discardUnauthorizedTableEditsEnabled.value = settings_ACU.discardUnauthorizedTableEditsEnabled !== false;
     extractRules.value = normalizeRules(
       settings_ACU.tableContextExtractRules,
@@ -436,6 +442,13 @@ export function useFormFillSettings(): FormFillSettingsState {
       promptSegments.value = currentDefaultPromptSegments();
       promptDirty.value = false;
     }
+    saveSettings_ACU();
+    message.value = null;
+  }
+
+  function setContextToolTransportEnabled(value: boolean): void {
+    contextToolTransportEnabled.value = !!value;
+    settings_ACU.contextToolTransportEnabled = contextToolTransportEnabled.value;
     saveSettings_ACU();
     message.value = null;
   }
@@ -636,6 +649,7 @@ export function useFormFillSettings(): FormFillSettingsState {
     tableEditLastPairOnly,
     strictJsonTableFillEnabled,
     tableFillNativeToolEnabled,
+    contextToolTransportEnabled,
     discardUnauthorizedTableEditsEnabled,
     extractRules,
     excludeRules,
@@ -650,6 +664,7 @@ export function useFormFillSettings(): FormFillSettingsState {
     setTableEditLastPairOnly,
     setStrictJsonTableFillEnabled,
     setTableFillNativeToolEnabled,
+    setContextToolTransportEnabled,
     setDiscardUnauthorizedTableEditsEnabled,
     setExtractRules,
     setExcludeRules,
