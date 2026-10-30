@@ -2441,6 +2441,16 @@ function cloneCandidateChat_ACU(chat: any[]): any[] {
     return JSON.parse(JSON.stringify(chat));
 }
 
+function prepareManualRefillDataContainer_ACU(message: any): void {
+    const container = readIsolatedDataContainer_ACU(message);
+    if (!container && message.TavernDB_ACU_IsolatedData != null) {
+        throw new Error('手动重填失败：存档容器无法解析，已保留原始数据。');
+    }
+    // 与存档枚举共用 string/object 解析契约，保留既有 checkpoint 及其他隔离槽。
+    // 调用方负责候选克隆或消息快照回滚，不在读取时改写宿主数据。
+    message.TavernDB_ACU_IsolatedData = container || {};
+}
+
 function applyCandidateMessageFields_ACU(liveMessage: any, candidateMessage: any): void {
     if (Object.prototype.hasOwnProperty.call(candidateMessage, 'TavernDB_ACU_IsolatedData')) {
         liveMessage.TavernDB_ACU_IsolatedData = candidateMessage.TavernDB_ACU_IsolatedData;
@@ -2633,8 +2643,7 @@ export async function commitManualRefillSheetSnapshotInRangeAtomic_ACU(
             const candidateChat = cloneCandidateChat_ACU(chat);
             const createdAt = Date.now();
             const rootMessage = candidateChat[rootMessageIndex];
-            rootMessage.TavernDB_ACU_IsolatedData = rootMessage.TavernDB_ACU_IsolatedData && typeof rootMessage.TavernDB_ACU_IsolatedData === 'object' && !Array.isArray(rootMessage.TavernDB_ACU_IsolatedData)
-                ? rootMessage.TavernDB_ACU_IsolatedData : {};
+            prepareManualRefillDataContainer_ACU(rootMessage);
             const rootTagData = rootMessage.TavernDB_ACU_IsolatedData[options.isolationKey];
             const rootFrame: TableStorageFrameV2_ACU = isV2TagData_ACU(rootTagData)
                 ? rootTagData.storageFrame
@@ -2665,8 +2674,7 @@ export async function commitManualRefillSheetSnapshotInRangeAtomic_ACU(
             }
 
             const finalMessage = candidateChat[completedMessageIndex];
-            finalMessage.TavernDB_ACU_IsolatedData = finalMessage.TavernDB_ACU_IsolatedData && typeof finalMessage.TavernDB_ACU_IsolatedData === 'object' && !Array.isArray(finalMessage.TavernDB_ACU_IsolatedData)
-                ? finalMessage.TavernDB_ACU_IsolatedData : {};
+            prepareManualRefillDataContainer_ACU(finalMessage);
             const finalTagData = finalMessage.TavernDB_ACU_IsolatedData[options.isolationKey];
             const finalFrame: TableStorageFrameV2_ACU = isV2TagData_ACU(finalTagData)
                 ? finalTagData.storageFrame
@@ -2818,9 +2826,7 @@ export async function establishManualRefillTemplateRoot_ACU(options: {
     try {
         const candidateChat = cloneCandidateChat_ACU(chat);
         const rootMessage = candidateChat[rootMessageIndex];
-        rootMessage.TavernDB_ACU_IsolatedData = rootMessage.TavernDB_ACU_IsolatedData && typeof rootMessage.TavernDB_ACU_IsolatedData === 'object' && !Array.isArray(rootMessage.TavernDB_ACU_IsolatedData)
-            ? rootMessage.TavernDB_ACU_IsolatedData
-            : {};
+        prepareManualRefillDataContainer_ACU(rootMessage);
         const rootTagData = rootMessage.TavernDB_ACU_IsolatedData[isolationKey];
         const rootFrame: TableStorageFrameV2_ACU = isV2TagData_ACU(rootTagData)
             ? rootTagData.storageFrame
@@ -2905,9 +2911,7 @@ export async function replaceManualRefillSheetBaselineInRangeAtomic_ACU(
                 if (removedBaseline || removedIncremental) clearedCount += 1;
             }
 
-            if (!targetMsg.TavernDB_ACU_IsolatedData || typeof targetMsg.TavernDB_ACU_IsolatedData !== 'object' || Array.isArray(targetMsg.TavernDB_ACU_IsolatedData)) {
-                targetMsg.TavernDB_ACU_IsolatedData = {};
-            }
+            prepareManualRefillDataContainer_ACU(targetMsg);
             const existingTagData = targetMsg.TavernDB_ACU_IsolatedData[options.isolationKey];
             const existingFrame = isV2TagData_ACU(existingTagData) ? existingTagData.storageFrame : null;
             if (!existingFrame?.checkpoint || existingFrame.checkpoint.kind !== 'full') {

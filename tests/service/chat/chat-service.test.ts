@@ -4141,8 +4141,8 @@ describe('commitManualRefillSheetSnapshotInRangeAtomic_ACU', () => {
     },
   });
 
-  it('在既有 full checkpoint 楼层写入完整快照，清理目标表旧数据并保留非目标表', async () => {
-    const chat = [
+  it.each(['object', 'string'])('在既有 full checkpoint 楼层写入完整快照并保留非目标表（%s 容器）', async (format) => {
+    const chat: any[] = [
       makeFrameMessage({
         version: 2,
         checkpoint: {
@@ -4169,11 +4169,24 @@ describe('commitManualRefillSheetSnapshotInRangeAtomic_ACU', () => {
         }],
       }),
     ];
+    const otherSlot = { marker: '保留隔离槽' };
+    for (const message of [chat[0], chat[2]]) {
+      message.TavernDB_ACU_IsolatedData.other = otherSlot;
+      if (format === 'string') {
+        message.TavernDB_ACU_IsolatedData = JSON.stringify(message.TavernDB_ACU_IsolatedData);
+      }
+    }
     mockGetChatArray.mockReturnValue(chat);
+    const before = JSON.parse(JSON.stringify(chat));
+    const replay = mockLoadTableStateFromFramesV2Detailed.getMockImplementation()!;
+    mockLoadTableStateFromFramesV2Detailed.mockImplementationOnce(async (...args: any[]) => {
+      expect(chat).toEqual(before);
+      return replay(...args);
+    });
 
     const result = await commitManualRefillSheetSnapshotInRangeAtomic_ACU({
       isolationKey: '',
-      targetMessageIndices: [0, 1, 2],
+      targetMessageIndices: [2],
       targetSheetKeys: ['sheet_0'],
       snapshotData: {
         sheet_0: {
@@ -4195,6 +4208,14 @@ describe('commitManualRefillSheetSnapshotInRangeAtomic_ACU', () => {
         content: [['row_id', '事件'], ['1', '重填事件'], ['30', '重填末层事件']],
       },
     }));
+    expect(chat[0].TavernDB_ACU_IsolatedData.other).toEqual(otherSlot);
+    expect(chat[2].TavernDB_ACU_IsolatedData.other).toEqual(otherSlot);
+    const candidate = mockLoadTableStateFromFramesV2Detailed.mock.calls[0][0];
+    expect(candidate[0].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.kind).toBe('full');
+    expect(mockLoadTableStateFromFramesV2Detailed).toHaveBeenCalledWith(candidate, '', {
+      updateRuntimeState: false, compatibilityMode: 'disabled',
+    });
+    expect(candidate).not.toBe(chat);
     expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
   });
 
@@ -4486,8 +4507,8 @@ describe('commitManualRefillSheetSnapshotInRangeAtomic_ACU', () => {
     expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
   });
 
-  it('严格保存失败时还原本轮范围，避免留下清理后但未提交的快照状态', async () => {
-    const chat = [
+  it.each(['object', 'string'])('严格保存失败时还原本轮范围（%s 容器）', async (format) => {
+    const chat: any[] = [
       makeFrameMessage({
         version: 2,
         checkpoint:{
@@ -4503,6 +4524,11 @@ describe('commitManualRefillSheetSnapshotInRangeAtomic_ACU', () => {
         logEntries: [{ seq: 1, operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '30', cells: ['30'] }], filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'], groupKeys: [] }],
       }),
     ];
+    if (format === 'string') {
+      chat.forEach(message => {
+        message.TavernDB_ACU_IsolatedData = JSON.stringify(message.TavernDB_ACU_IsolatedData);
+      });
+    }
     mockGetChatArray.mockReturnValue(chat);
     const before = JSON.parse(JSON.stringify(chat));
     mockSaveChatToHostStrict.mockRejectedValueOnce(new Error('save failed'));
@@ -4517,6 +4543,7 @@ describe('commitManualRefillSheetSnapshotInRangeAtomic_ACU', () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain('save failed');
     expect(JSON.parse(JSON.stringify(chat))).toEqual(before);
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
   });
 
 });
@@ -4542,11 +4569,18 @@ describe('establishManualRefillTemplateRoot_ACU', () => {
     mockSaveChatToHostStrict.mockResolvedValue(undefined);
   });
 
-  it('清理后全局无 full checkpoint 时，在 earliestV2FrameIndex 建立模板临时根', async () => {
+  it.each(['object', 'string'])('清理后全局无 full checkpoint 时建立临时根并保留容器数据（%s）', async (format) => {
     const chat = [
       makeEmptyFrameMessage('AI楼层0'),
       makeEmptyFrameMessage('AI楼层1'),
     ];
+    const otherSlot = { marker: '保留隔离槽' };
+    const manifest = { indexId: 'retained-index' };
+    chat[0].TavernDB_ACU_IsolatedData.other = otherSlot;
+    chat[0].TavernDB_ACU_IsolatedData[''].summaryVectorIndexManifest = manifest;
+    if (format === 'string') {
+      chat[0].TavernDB_ACU_IsolatedData = JSON.stringify(chat[0].TavernDB_ACU_IsolatedData);
+    }
     mockGetChatArray.mockReturnValue(chat);
 
     const result = await establishManualRefillTemplateRoot_ACU({
@@ -4566,6 +4600,8 @@ describe('establishManualRefillTemplateRoot_ACU', () => {
     expect(rootFrame.checkpoint.fallbackProvenance.rangeStartMessageIndex).toBe(0);
     expect(rootFrame.checkpoint.fallbackProvenance.rangeEndMessageIndex).toBe(1);
     expect(rootFrame.checkpoint.fallbackProvenance.targetSheetKeys).toEqual(['sheet_0']);
+    expect(chat[0].TavernDB_ACU_IsolatedData.other).toEqual(otherSlot);
+    expect(chat[0].TavernDB_ACU_IsolatedData[''].summaryVectorIndexManifest).toEqual(manifest);
     expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
     // 落点：earliestV2FrameIndex（与末尾 commit 同口径）
     expect(chat[1].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint).toBeUndefined();
@@ -4627,8 +4663,11 @@ describe('establishManualRefillTemplateRoot_ACU', () => {
     expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
   });
 
-  it('严格保存失败时原位恢复聊天内存状态', async () => {
+  it.each(['object', 'string'])('严格保存失败时原位恢复聊天内存状态（%s 容器）', async (format) => {
     const chat = [makeEmptyFrameMessage('AI楼层0')];
+    if (format === 'string') {
+      chat[0].TavernDB_ACU_IsolatedData = JSON.stringify(chat[0].TavernDB_ACU_IsolatedData);
+    }
     mockGetChatArray.mockReturnValue(chat);
     const before = JSON.parse(JSON.stringify(chat));
     mockSaveChatToHostStrict.mockRejectedValueOnce(new Error('save failed'));
@@ -4643,6 +4682,7 @@ describe('establishManualRefillTemplateRoot_ACU', () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain('save failed');
     expect(JSON.parse(JSON.stringify(chat))).toEqual(before);
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
   });
 
   it('runId 与末尾 commit 同公式：isolationKey+范围+模板指纹', async () => {
