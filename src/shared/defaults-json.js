@@ -808,6 +808,7 @@ $CONTENT
   // --- [创作身份声明] 各默认提示词第一条身份句融入虚拟创作声明 ---
   // 先冻结声明前的默认快照，供一次性升级识别「用户未改写的旧默认段」；再在导出默认上原位融入声明。
   import { withCreativeIdentity_ACU } from "./creative-identity.js";
+  import { withContentSafetyIdentity_ACU } from "./content-safety.js";
 
   function cloneLegacyPrompt_ACU(value) {
     return JSON.parse(JSON.stringify(value));
@@ -829,7 +830,7 @@ $CONTENT
   /** 原位给提示词组的第一条身份段（首个含「你是」的段）融入声明；已融入时不变，共享段对象重复调用也安全。 */
   function applyFirstCreativeIdentity_ACU(segments, goal) {
     const target = segments.find(segment => segment && typeof segment.content === 'string' && segment.content.includes('你是'));
-    if (target) target.content = withCreativeIdentity_ACU(target.content, goal);
+    if (target) target.content = withContentSafetyIdentity_ACU(withCreativeIdentity_ACU(target.content, goal));
   }
 
   applyFirstCreativeIdentity_ACU(DEFAULT_CHAR_CARD_PROMPT_ACU, '表格数据');
@@ -841,8 +842,8 @@ $CONTENT
   applyFirstCreativeIdentity_ACU(DEFAULT_TIME_RECALL_PLOT_PRESET_ACU.promptGroup, '记忆召回');
   applyFirstCreativeIdentity_ACU(DEFAULT_CONTENT_OPTIMIZATION_PROMPT_GROUP_ACU, '正文');
 
-  export const DEFAULT_MERGE_SUMMARY_PROMPT_ACU = withCreativeIdentity_ACU(LEGACY_MERGE_SUMMARY_PROMPT_ACU, '剧情纪要');
-  export const DEFAULT_MERGE_SUMMARY_PROMPT_SQL_ACU = withCreativeIdentity_ACU(LEGACY_MERGE_SUMMARY_PROMPT_SQL_ACU, '剧情纪要');
+  export const DEFAULT_MERGE_SUMMARY_PROMPT_ACU = withContentSafetyIdentity_ACU(withCreativeIdentity_ACU(LEGACY_MERGE_SUMMARY_PROMPT_ACU, '剧情纪要'));
+  export const DEFAULT_MERGE_SUMMARY_PROMPT_SQL_ACU = withContentSafetyIdentity_ACU(withCreativeIdentity_ACU(LEGACY_MERGE_SUMMARY_PROMPT_SQL_ACU, '剧情纪要'));
 
 
 

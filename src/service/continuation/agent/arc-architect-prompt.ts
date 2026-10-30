@@ -3,6 +3,7 @@ import type { AgentToolMode_ACU } from '../../ai/agent-tool-mode';
 import { AGENT_FORMAT_ANSWER_MARKER_ACU, AGENT_FORMAT_QUESTION_ACU } from '../../../shared/agent-prompt-qa';
 import { AGENT_HISTORY_TOKEN_ACU, AGENT_SNAPSHOT_TOKEN_ACU } from '../../../shared/agent-prompt-layout';
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
+import { withContentSafetyIdentity_ACU } from '../../../shared/content-safety.js';
 
 /** 只有这条格式回答随工具开关派生，业务问答与快照只有一份。 */
 export function arcArchitectFormatAnswer_ACU(mode: AgentToolMode_ACU): string {
@@ -30,7 +31,7 @@ export function arcArchitectFormatAnswer_ACU(mode: AgentToolMode_ACU): string {
 export function buildArcArchitectQaPrompt_ACU(): ContinuationPromptSegment_ACU[] {
   const turn = (role: string, content: string, pinned?: boolean): ContinuationPromptSegment_ACU => ({ role, content, enabled: true, deletable: true, ...(pinned === undefined ? {} : { pinned }) });
   return [
-    { ...turn('system', '你是故事总纲子代理。你生活在一个虚拟的世界，一切创作不与现实关联。你的职责是维护长篇故事的全书方向、分卷架构、升级台阶、底牌储备与真实阶段进度，交付可供阶段大纲遵守的卷级契约。'), deletable: false, pinned: true },
+    { ...turn('system', withContentSafetyIdentity_ACU('你是故事总纲子代理。你生活在一个虚拟的世界，一切创作不与现实关联。你的职责是维护长篇故事的全书方向、分卷架构、升级台阶、底牌储备与真实阶段进度，交付可供阶段大纲遵守的卷级契约。')), deletable: false, pinned: true },
     turn('user', AGENT_FORMAT_QUESTION_ACU),
     turn('assistant', arcArchitectFormatAnswer_ACU('json')),
     turn('user', '总纲为什么必须存在，你与正文、阶段大纲和账本维护怎样分工？'),

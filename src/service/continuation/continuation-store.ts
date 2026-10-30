@@ -7,8 +7,7 @@ import { CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V46_ACU, CONTINUATION_PROMPT_
 import { withAgentPromptLayout_ACU } from '../../shared/agent-prompt-layout';
 import { withV46ProgressAdjustment_ACU, withV48EditableSnapshot_ACU, buildV48ContinuationAgentPrompts_ACU, continuationV48DefaultLineage_ACU } from './agent/agent-defaults';
 import { buildV49ContinuationAgentPrompts_ACU, withV50ContinuationQa_ACU } from './agent/agent-defaults';
-import { CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V50_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V52_ACU, withV50OutlineQa_ACU } from './defaults';
-import { migrateV51MaintainerQaPrompt_ACU } from './agent/maintainer-prompt';
+import { CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V50_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V53_ACU, withV50OutlineQa_ACU } from './defaults';
 import { CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V39_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V40_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V41_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V42_ACU } from './defaults';
 import { CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V43_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V44_ACU, CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V45_ACU, buildV42ContinuationOutlinePrompt_ACU, withV43OutlineCreativeIdentity_ACU } from './defaults';
 import { buildV38ContinuationAgentPrompts_ACU, withV39MainAgentSelfNarration_ACU, withV40RoleSelfNarration_ACU, withV41RoleProcedure_ACU, withV42ReadOnceContract_ACU, withV43CreativeIdentity_ACU, withV44IdAutofill_ACU, withV45MainCorrection_ACU } from './agent/agent-defaults';
@@ -1026,16 +1025,19 @@ export function validateContinuationSettings_ACU(raw: unknown): ContinuationSett
 
 function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   if (!isRecord_ACU(raw)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'settings 必须是对象');
-  // V51 以前沿用已发布的整组重置；V51 只精确升级维护默认段，保留用户编辑。
+  // 内容声明版本强制刷新提示词一次；旧正文随同一信封备份，其余设置不变。
   // 版本号只写进返回值，不就地改 raw：初始化落盘要凭首楼原始版本号判断是否需要写回。
-  if (raw.promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU
-    && raw.promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V52_ACU) {
+  if (raw.contentSafetyPromptBackup !== undefined && typeof raw.contentSafetyPromptBackup !== 'string') {
+    fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'contentSafetyPromptBackup 必须是字符串');
+  }
+  if (raw.promptForceDefaultVersion !== CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V53_ACU) {
+    raw.contentSafetyPromptBackup ??= JSON.stringify({
+      previousVersion: raw.promptForceDefaultVersion,
+      outlinePrompt: raw.outlinePrompt,
+      agentPrompts: raw.agentPrompts,
+    });
     raw.outlinePrompt = buildDefaultContinuationOutlinePrompt_ACU();
     raw.agentPrompts = buildDefaultContinuationAgentPrompts_ACU();
-  } else if (raw.promptForceDefaultVersion === CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU
-    && isRecord_ACU(raw.agentPrompts) && Array.isArray(raw.agentPrompts.maintainer)) {
-    raw.agentPrompts = { ...raw.agentPrompts,
-      maintainer: migrateV51MaintainerQaPrompt_ACU(raw.agentPrompts.maintainer) };
   }
   if (isRecord_ACU(raw.agentPrompts)) delete raw.agentPrompts.reviewer;
   if (isRecord_ACU(raw.agentApiPresets)) delete raw.agentApiPresets.reviewer;
@@ -1096,7 +1098,7 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
   if (!Object.prototype.hasOwnProperty.call(raw, 'storyArcVolumePlan')) raw.storyArcVolumePlan = 'medium';
   if (!Object.prototype.hasOwnProperty.call(raw, 'customStoryArcVolumeCount')) raw.customStoryArcVolumeCount = null;
   const keys = ['stageSize', 'customTurnMin', 'customTurnMax', 'storyArcVolumePlan', 'customStoryArcVolumeCount', 'outlinePreview', 'autoNextStage', 'maxAutomaticStages', 'loopTags', 'loopDelaySeconds', 'totalDurationMinutes', 'retryDelaySeconds', 'generationRetryLimit', 'internalAiRetryLimit', 'minGenerationTokens', 'maxConsecutivePressureTurns', 'storyWindowFloors', 'agentHistoryTokenBudget', 'storyTailFloors', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'finalReview', 'workflow', 'webResearch', 'contextExtractRules', 'contextExcludeRules', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'promptCacheEnabled', 'agentApiPresets', 'outlinePrompt', 'agentPrompts'];
-  requireKeys_ACU(raw, keys, 'settings', ['promptForceDefaultVersion']);
+  requireKeys_ACU(raw, keys, 'settings', ['promptForceDefaultVersion', 'contentSafetyPromptBackup']);
   if (!['short', 'standard', 'long', 'custom'].includes(raw.stageSize as string)) fail_ACU('CONTINUATION_ENVELOPE_INVALID', 'stageSize 非法');
   const customTurnMin = raw.customTurnMin === null ? null : requireInteger_ACU(raw.customTurnMin, 'settings.customTurnMin', 1);
   const customTurnMax = raw.customTurnMax === null ? null : requireInteger_ACU(raw.customTurnMax, 'settings.customTurnMax', 1);
@@ -1125,7 +1127,8 @@ function validateSettings_ACU(raw: unknown): ContinuationSettings_ACU {
     promptCacheEnabled: false,
     agentApiPresets: validateAgentApiPresets_ACU(raw.agentApiPresets),
     outlinePrompt: validateContinuationPromptSegments_ACU(raw.outlinePrompt, 'load', 'CONTINUATION_ENVELOPE_INVALID'), agentPrompts: validateAgentPrompts_ACU(raw.agentPrompts),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V52_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V53_ACU,
+    ...(raw.contentSafetyPromptBackup !== undefined ? { contentSafetyPromptBackup: raw.contentSafetyPromptBackup as string } : {}),
   };
 }
 

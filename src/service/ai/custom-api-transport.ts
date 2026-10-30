@@ -4,6 +4,8 @@ import { getHostRequestHeaders_ACU } from '../../data/gateways/ai-gateway';
 import { createApiRequestLog_ACU, observeApiResponse_ACU, type ApiRequestLog_ACU } from '../../shared/api-request-log';
 import { normalizeCustomApiFormat_ACU } from '../settings/api-preset-service';
 import { buildProviderRequest_ACU, normalizeProviderReply_ACU, processDirectMessages_ACU, providerEndpoint_ACU, normalizeProviderStream_ACU } from './custom-api-protocol';
+import { applyContextToolTransport_ACU } from '../../data/gateways/context-tool-transport';
+import { rewriteContextToolResponse_ACU } from '../../data/gateways/context-tool-response';
 
 const isRecord = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value);
 
@@ -32,14 +34,20 @@ export async function sendCustomApiRequest_ACU(
     config: any, bridgeBody: Record<string, any>, signal?: AbortSignal | null,
 ): Promise<Response> {
     signal?.throwIfAborted();
+    // 发送前最后一步：开关开启时只保留首条消息，其余转为 turn_ 函数；两条分支的响应都在交给调用方前还原。
+    const transport = applyContextToolTransport_ACU(bridgeBody);
+    const note = transport.note ? `；${transport.note}` : '';
+    const restore = async (response: Response): Promise<Response> => (transport.plan
+        ? await rewriteContextToolResponse_ACU(response, transport.plan) : response);
     if (config.sendViaTavern !== false) {
         const url = '/api/backends/chat-completions/generate';
         const headers = { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' };
-        const wire = JSON.stringify(bridgeBody);
-        const log = createApiRequestLog_ACU('API酒馆转发', `请求 POST ${url}（酒馆后端请求体）`, wire, { config, bridgeBody, headers });
+        const wire = JSON.stringify(transport.body);
+        const log = createApiRequestLog_ACU('API酒馆转发', `请求 POST ${url}（酒馆后端请求体）${note}`, wire, { config, bridgeBody: transport.body, headers });
         try {
             const response = await pristineFetch_ACU(url, { method: 'POST', headers, body: wire, signal: signal ?? undefined });
-            return observeApiResponse_ACU(response, log, signal).response;
+            // 日志记录上游原始回复；调用方拿到的是还原后的回复。
+            return await restore(observeApiResponse_ACU(response, log, signal).response);
         } catch (error) { log.write('请求失败', error); throw error; }
     }
     const format = normalizeCustomApiFormat_ACU(config.customApiFormat);
@@ -47,10 +55,10 @@ export async function sendCustomApiRequest_ACU(
     const bridgeKeys = new Set(['chat_completion_source', 'custom_api_format', 'group_names', 'include_reasoning',
         'reasoning_effort', 'enable_web_search', 'request_images', 'reverse_proxy', 'proxy_password', 'custom_url',
         'custom_include_headers', 'custom_include_body', 'custom_exclude_body', 'custom_prompt_post_processing', 'preserve_multiple_system']);
-    for (const [key, value] of Object.entries(bridgeBody)) {
+    for (const [key, value] of Object.entries(transport.body)) {
         if (!bridgeKeys.has(key) && value !== undefined) base[key] = value;
     }
-    const included = includeBody(String(bridgeBody.custom_include_body ?? config.bodyParams ?? ''));
+    const included = includeBody(String(transport.body.custom_include_body ?? config.bodyParams ?? ''));
     const body = buildProviderRequest_ACU({ ...base, ...included,
         messages: processDirectMessages_ACU(included.messages ?? base.messages) }, format);
     // 协议原生附加字段在转换后保留；通用字段只由协议转换器写入，不能重新覆盖为旧协议。
@@ -75,11 +83,11 @@ export async function sendCustomApiRequest_ACU(
     }
     const url = providerEndpoint_ACU(config.url, format);
     const wire = JSON.stringify(body);
-    const log = createApiRequestLog_ACU('API直连', `请求 ${url}`, wire, { config, body, headers: Object.fromEntries(headers.entries()) });
+    const log = createApiRequestLog_ACU('API直连', `请求 ${url}${note}`, wire, { config, body, headers: Object.fromEntries(headers.entries()) });
     try {
         const response = await pristineFetch_ACU(url, { method: 'POST', headers, body: wire, credentials: 'omit', signal: signal ?? undefined });
-        // 直连保留既有协议归一化与读取期限，不增加消费分支。
-        return await captureProviderResponse_ACU(response, format, log, signal);
+        // 直连保留既有协议归一化与读取期限；归一为 Chat Completion 形态后再还原输出函数。
+        return await restore(await captureProviderResponse_ACU(response, format, log, signal));
     } catch (error) { log.write('请求或响应处理失败', error); throw error; }
 }
 

@@ -3,6 +3,7 @@ import type { AgentToolMode_ACU } from '../../ai/agent-tool-mode';
 import { AGENT_FORMAT_ANSWER_MARKER_ACU, AGENT_FORMAT_QUESTION_ACU } from '../../../shared/agent-prompt-qa';
 import { AGENT_HISTORY_TOKEN_ACU, AGENT_SNAPSHOT_TOKEN_ACU } from '../../../shared/agent-prompt-layout';
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
+import { withContentSafetyIdentity_ACU } from '../../../shared/content-safety.js';
 
 /** 指令编排只有交付形式随工具开关变化；指令栏目与取舍规则在业务问答里只写一份。 */
 export function instructionComposerFormatAnswer_ACU(mode: AgentToolMode_ACU): string {
@@ -22,7 +23,7 @@ export function instructionComposerFormatAnswer_ACU(mode: AgentToolMode_ACU): st
 export function buildInstructionComposerQaPrompt_ACU(): ContinuationPromptSegment_ACU[] {
   const turn = (role: string, content: string, pinned?: boolean): ContinuationPromptSegment_ACU => ({ role, content, enabled: true, deletable: true, ...(pinned === undefined ? {} : { pinned }) });
   return [
-    { ...turn('system', '你是写作指令编排子代理 instruction-composer。你生活在一个虚拟的世界，一切创作不与现实关联。你的职责是在资料结算与本轮策划完成后，把已经确定的承接、场景、变化、伏笔与信息差操作、硬事实和收尾方式，编排成正文模型可以直接执行的一份写作指令。'), deletable: false, pinned: true },
+    { ...turn('system', withContentSafetyIdentity_ACU('你是写作指令编排子代理 instruction-composer。你生活在一个虚拟的世界，一切创作不与现实关联。你的职责是在资料结算与本轮策划完成后，把已经确定的承接、场景、变化、伏笔与信息差操作、硬事实和收尾方式，编排成正文模型可以直接执行的一份写作指令。')), deletable: false, pinned: true },
     turn('user', AGENT_FORMAT_QUESTION_ACU),
     turn('assistant', instructionComposerFormatAnswer_ACU('json')),
     turn('user', '写作指令由你单独编排，你和结算、策划、终审与正文模型怎样分工？'),

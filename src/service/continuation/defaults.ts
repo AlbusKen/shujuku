@@ -2,6 +2,7 @@ import { CONTINUATION_AGENT_API_PRESET_ROLES_ACU, ContinuationValidationError_AC
 import { buildDefaultContinuationAgentPrompts_ACU } from './agent/agent-defaults';
 import { USER_PREFILL_CONTENT_ACU } from '../../shared/user-prefill.js';
 import { withCreativeIdentity_ACU } from '../../shared/creative-identity.js';
+import { withContentSafetyIdentity_ACU } from '../../shared/content-safety.js';
 import { isAgentSnapshotSlot_ACU, withAgentPromptLayout_ACU } from '../../shared/agent-prompt-layout';
 import { buildAgentQaLayout_ACU, migrateAgentQaLayout_ACU, type AgentQaOptions_ACU } from '../../shared/agent-prompt-qa';
 import {
@@ -263,6 +264,8 @@ export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V50_ACU = 'continuation-q
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V51_ACU = 'continuation-qa-reset-v51';
 /** 只升级 V51 未改写的维护默认段，不重置用户自定义提示词。 */
 export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V52_ACU = 'continuation-maintainer-submit-v52';
+/** 首条身份加入内容禁令，一次性强制恢复全部续写默认提示词（含大纲）。 */
+export const CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V53_ACU = 'continuation-content-safety-v53';
 
 /**
  * 连续高压轮上限的默认值。8 轮约等于 8000 字全程没有喘息——这才是病态；
@@ -361,7 +364,8 @@ export function withV50OutlineQa_ACU(segments: readonly ContinuationPromptSegmen
 
 export function buildDefaultContinuationOutlinePrompt_ACU(): ContinuationPromptSegment_ACU[] {
   const previous = buildV49ContinuationOutlinePrompt_ACU();
-  return buildAgentQaLayout_ACU(previous, outlineQaOptions_ACU(previous));
+  const options = outlineQaOptions_ACU(previous);
+  return buildAgentQaLayout_ACU(previous, { ...options, identity: withContentSafetyIdentity_ACU(options.identity) });
 }
 
 export function buildDefaultContinuationWorkflowSettings_ACU(): ContinuationSettings_ACU['workflow'] {
@@ -413,7 +417,7 @@ export function buildDefaultContinuationSettings_ACU(): ContinuationSettings_ACU
     agentApiPresets: buildDefaultContinuationAgentApiPresets_ACU(),
     outlinePrompt: buildDefaultContinuationOutlinePrompt_ACU(),
     agentPrompts: buildDefaultContinuationAgentPrompts_ACU(),
-    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V52_ACU,
+    promptForceDefaultVersion: CONTINUATION_PROMPT_FORCE_DEFAULT_VERSION_V53_ACU,
   };
 }
 

@@ -964,6 +964,12 @@ export function useDashboardPage(): DashboardPageState {
     void dataRefreshTick.value;
     const items: DashboardToggleItem[] = [
       {
+        key: "contextToolTransportEnabled",
+        label: dashboardCopy.toggles.contextToolTransport.label,
+        description: "",
+        value: settings_ACU.contextToolTransportEnabled !== false,
+      },
+      {
         key: "continuationPageEnabled",
         label: dashboardCopy.toggles.continuation.label,
         description: dashboardCopy.toggles.continuation.description,
@@ -1079,6 +1085,9 @@ export function useDashboardPage(): DashboardPageState {
       setAutoUpdateEnabled_ACU(!!value);
     } else if (key === "streamingEnabled") {
       useApiPresetStore().setStreamingEnabled(!!value);
+    } else if (key === "contextToolTransportEnabled") {
+      settings_ACU.contextToolTransportEnabled = !!value;
+      saveSettings_ACU();
     } else if (
       key === "silentModeEnabled" ||
       key === "desktopPetEnabled" ||

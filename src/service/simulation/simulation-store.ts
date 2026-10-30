@@ -465,7 +465,7 @@ function validateRumors_ACU(raw: unknown, actorIds: ReadonlySet<string>, phase: 
 
 function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU): WorldSimulationEnvelope_ACU['settings'] {
   if (!isRecord_ACU(raw)) fail_ACU('settings 必须是对象', phase, { path: 'settings' });
-  exactKeys_ACU(raw, ['autoTriggerEnabled', 'agentHistoryTokenBudget', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'agentPrompts'], ['webResearch', 'promptForceDefaultVersion', 'planPreview', 'dynamics', 'workflow', 'projection'], 'settings', phase);
+  exactKeys_ACU(raw, ['autoTriggerEnabled', 'agentHistoryTokenBudget', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets', 'agentPrompts'], ['webResearch', 'promptForceDefaultVersion', 'contentSafetyPromptBackup', 'planPreview', 'dynamics', 'workflow', 'projection'], 'settings', phase);
   if (!isRecord_ACU(raw.agentRunBudget)) fail_ACU('settings.agentRunBudget 必须是对象', phase);
   exactKeys_ACU(raw.agentRunBudget, ['maxIterations', 'maxDelegations', 'maxSameAgent', 'maxConcurrent', 'maxReads', 'maxExtraReads'], [], 'settings.agentRunBudget', phase);
   const budget = {
@@ -486,6 +486,15 @@ function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU
     exactKeys_ACU(value, ['mode', 'presetName'], [], `settings.agentApiPresets.${key}`, phase);
     agentApiPresets[key] = { mode: enum_ACU(value.mode, ['current', 'fixed'] as const, `settings.agentApiPresets.${key}.mode`, phase), presetName: string_ACU(value.presetName, `settings.agentApiPresets.${key}.presetName`, phase, true) };
   }
+  if (raw.contentSafetyPromptBackup !== undefined && typeof raw.contentSafetyPromptBackup !== 'string') {
+    fail_ACU('settings.contentSafetyPromptBackup 必须是字符串', phase);
+  }
+  const contentSafetyPromptBackup = raw.contentSafetyPromptBackup ?? (
+    raw.promptForceDefaultVersion !== WORLD_SIMULATION_PROMPT_VERSION_ACU
+      ? JSON.stringify({ previousVersion: raw.promptForceDefaultVersion, agentPrompts: raw.agentPrompts })
+      : undefined
+  );
+
   // requirements-maintainer 已退役。存量提示词组里的该键在校验前就地丢弃，避免严格键校验以「未知角色」拒绝整包。
   if (Object.prototype.hasOwnProperty.call(raw.agentPrompts, 'requirements-maintainer')) delete raw.agentPrompts['requirements-maintainer'];
   // 旧版本直接重置全部提示词，不依赖旧正文或指纹；当前版本仍严格校验用户编辑。
@@ -562,6 +571,7 @@ function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU
     agentApiPresets,
     agentPrompts,
     promptForceDefaultVersion: WORLD_SIMULATION_PROMPT_VERSION_ACU,
+    ...(contentSafetyPromptBackup !== undefined ? { contentSafetyPromptBackup: contentSafetyPromptBackup as string } : {}),
     dynamics,
     workflow,
     projection,

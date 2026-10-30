@@ -13,8 +13,9 @@ import { addDataIsolationHistory_ACU, ensureProfileExists_ACU, normalizeDataIsol
 import { TABLE_FILL_MAIN_PROMPT_HISTORY_ACU } from '../../shared/defaults-json.js';
 import { STREAMING_FORCE_DISABLE_VERSION_ACU, TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU, TABLE_FILL_TOOL_DEFAULT_OFF_VERSION_ACU } from '../../shared/defaults';
 import { adaptTableFillPromptSegmentsToToolMode_ACU } from '../ai/prompt-builder/table-fill-tools';
-import { CREATIVE_IDENTITY_PROMPT_UPGRADE_VERSION_ACU } from '../../shared/defaults';
+import { CREATIVE_IDENTITY_PROMPT_UPGRADE_VERSION_ACU, CONTENT_SAFETY_PROMPT_FORCE_DEFAULT_VERSION_ACU } from '../../shared/defaults';
 import { applyCreativeIdentityProfileUpgrade_ACU, applyCreativeIdentityVectorUpgrade_ACU } from './creative-identity-upgrade';
+import { applyContentSafetyProfileDefaults_ACU, CONTENT_SAFETY_PROFILE_PROMPT_KEYS_ACU } from './content-safety-upgrade';
 import { upgradeTimeRecallPrefill_ACU } from '../plot/time-recall-prefill';
 import { globalMeta_ACU, loadGlobalMeta_ACU, readProfileSettingsFromStorage_ACU, readProfileTemplateFromStorage_ACU, sanitizeSettingsForProfileSave_ACU, saveGlobalMeta_ACU, writeProfileSettingsToStorage_ACU, writeProfileTemplateToStorage_ACU } from '../../data/repositories/profile-repo';
 import { getCurrentTemplatePresetName_ACU, normalizeTemplatePresetSelectionValue_ACU } from '../../shared/template-preset-utils';
@@ -812,6 +813,26 @@ function loadSettingsFromStorage_ACU(): void {
                   logWarn_ACU('[创作身份声明] 交火提示词升级未保存，下一次加载重试:', error);
               }
           }
+          if (vectorConfig.contentSafetyPromptForceDefaultVersion !== CONTENT_SAFETY_PROMPT_FORCE_DEFAULT_VERSION_ACU) {
+              const keys = ['keywordPromptGroup', 'summaryPromptGroup', 'contentSafetyPromptBackup', 'contentSafetyPromptForceDefaultVersion'] as const;
+              const previous = keys.map(key => ({ key, had: Object.prototype.hasOwnProperty.call(vectorConfig, key), value: vectorConfig[key] }));
+              try {
+                  vectorConfig.contentSafetyPromptBackup ??= JSON.stringify({
+                      keywordPromptGroup: vectorConfig.keywordPromptGroup,
+                      summaryPromptGroup: vectorConfig.summaryPromptGroup,
+                  });
+                  vectorConfig.keywordPromptGroup = cloneDefaultValue_ACU(defaultVectorMemoryConfig_ACU.keywordPromptGroup);
+                  vectorConfig.summaryPromptGroup = cloneDefaultValue_ACU(defaultVectorMemoryConfig_ACU.summaryPromptGroup);
+                  vectorConfig.contentSafetyPromptForceDefaultVersion = CONTENT_SAFETY_PROMPT_FORCE_DEFAULT_VERSION_ACU;
+                  if (!saveGlobalMeta_ACU()) throw new Error('全局元数据保存失败');
+              } catch (error) {
+                  for (const item of previous) {
+                      if (item.had) vectorConfig[item.key] = item.value;
+                      else delete vectorConfig[item.key];
+                  }
+                  logWarn_ACU('[内容声明] 交火默认提示词更新未保存，下一次加载重试:', error);
+              }
+          }
       }
 
       settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
@@ -832,6 +853,7 @@ function loadSettingsFromStorage_ACU(): void {
           settings_ACU.plotSettings = upgradedPlotSettings;
           shouldPersistSettingsAfterLoad_ACU = true;
       }
+      forceContentSafetyProfilePromptsOnce_ACU();
 
       if (shouldPersistSettingsAfterLoad_ACU) {
           saveGlobalMeta_ACU();
@@ -1127,6 +1149,30 @@ function upgradeCreativeIdentityPromptsOnce_ACU() {
       }
   }
 
+function forceContentSafetyProfilePromptsOnce_ACU(): void {
+      if (!settings_ACU || typeof settings_ACU !== 'object') return;
+      if (settings_ACU.contentSafetyPromptForceDefaultVersion === CONTENT_SAFETY_PROMPT_FORCE_DEFAULT_VERSION_ACU) return;
+      const settings = settings_ACU as Record<string, any>;
+      const keys = [...CONTENT_SAFETY_PROFILE_PROMPT_KEYS_ACU, 'contentSafetyPromptBackup', 'contentSafetyPromptForceDefaultVersion'];
+      const previous = keys.map(key => ({ key, had: Object.prototype.hasOwnProperty.call(settings, key), value: settings[key] }));
+      try {
+          settings.contentSafetyPromptBackup ??= JSON.stringify(Object.fromEntries(
+              CONTENT_SAFETY_PROFILE_PROMPT_KEYS_ACU.map(key => [key, settings[key]]),
+          ));
+          applyContentSafetyProfileDefaults_ACU(settings);
+          settings.contentSafetyPromptForceDefaultVersion = CONTENT_SAFETY_PROMPT_FORCE_DEFAULT_VERSION_ACU;
+          const saved = saveSettings_ACU();
+          if (!saved.saved) throw new Error(saved.error || saved.warning || '设置未保存');
+          logDebug_ACU(`[内容声明] 默认提示词一次性更新完成: ${CONTENT_SAFETY_PROMPT_FORCE_DEFAULT_VERSION_ACU}`);
+      } catch (error) {
+          for (const item of previous) {
+              if (item.had) settings[item.key] = item.value;
+              else delete settings[item.key];
+          }
+          logWarn_ACU('[内容声明] 默认提示词更新未保存，下一次加载重试:', error);
+      }
+  }
+
 function forceUserPrefillProfilePromptsOnce_ACU() {
       if (!settings_ACU || typeof settings_ACU !== 'object') return;
       if (settings_ACU.userPrefillProfileForceDefaultVersion === USER_PREFILL_PROFILE_FORCE_DEFAULT_VERSION_ACU) return;
@@ -1272,6 +1318,8 @@ export   function buildDefaultSettings_ACU() {
           // 续写 / 推演的工具方案全局开关；关闭时请求不带 tools，提示词为纯 JSON 版。
           continuationNativeToolEnabled: false,
           worldSimulationNativeToolEnabled: false,
+          // 上下文工具化传输默认开启；渠道不支持函数调用时在 API 设置里关闭。
+          contextToolTransportEnabled: true,
           discardUnauthorizedTableEditsEnabled: true,
           // [剧情推进] 按剧情任务ID保存的任务级 API 预设覆盖（key=taskId, value=presetName）
           // 不保存入聊天记录或剧情推进预设，只写进插件全局设置。

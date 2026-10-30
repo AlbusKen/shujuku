@@ -119,7 +119,7 @@ function withFirstIdentitySegment_ACU<T extends { content: string }>(segments: T
     if (applied || typeof segment.content !== 'string') return segment;
     if (!fallbackName && !segment.content.includes('你是')) return segment;
     applied = true;
-    return { ...segment, content: withCreativeIdentity_ACU(segment.content, goal, fallbackName) };
+    return { ...segment, content: withContentSafetyIdentity_ACU(withCreativeIdentity_ACU(segment.content, goal, fallbackName)) };
   });
 }
 
@@ -244,6 +244,8 @@ export const STREAMING_FORCE_DISABLE_VERSION_ACU = 'spv9.5-force-disable-streami
 // 各默认提示词第一条身份句融入创作身份声明的一次性升级：只替换与声明前默认段逐字相同的段，用户改写保留。
 // profile 域与交火全局配置各自记录标记。
 export const CREATIVE_IDENTITY_PROMPT_UPGRADE_VERSION_ACU = 'spv9.6-creative-identity-prompt';
+/** 各存储域一次性强制更新默认提示词，首条身份段加入内容禁令。 */
+export const CONTENT_SAFETY_PROMPT_FORCE_DEFAULT_VERSION_ACU = 'spv9.8-content-safety-default-prompts';
 // 填表工具调用改为默认关闭（部分渠道带 tools 字段直接报错）：仍是工具版默认主段的提示词一次性降级回正文
 // <tableEdit> 默认；用户改写过的主段保留，开关本身用户可再次手动开启。
 export const TABLE_FILL_TOOL_DEFAULT_OFF_VERSION_ACU = 'spv9.7-table-fill-tool-default-off';
@@ -388,6 +390,7 @@ export const defaultWorldbookConfig_ACU = {
 import { DEFAULT_CONTENT_OPTIMIZATION_PROMPT_GROUP_ACU } from './defaults-json.js';
 import { USER_PREFILL_CONTENT_ACU } from './user-prefill.js';
 import { withCreativeIdentity_ACU } from './creative-identity.js';
+import { withContentSafetyIdentity_ACU } from './content-safety.js';
 
 /** 构建默认正文优化提示词组（纯数据构造，无运行时依赖） */
 export function buildDefaultContentOptimizationPromptGroup_ACU({ mainContent = '' } = {}) {

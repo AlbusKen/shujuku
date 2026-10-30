@@ -1,5 +1,6 @@
 import type { AgentConversationMessage_ACU, AgentHandoffSummaryStateV2_ACU } from './agent-model';
 import type { TokenCounter_ACU } from './agent-token-budget';
+import { withContentSafetyIdentity_ACU } from '../../../shared/content-safety.js';
 
 type AgentHandoffSemanticCall_ACU = (messages: Array<{ role: string; content: string }>) => Promise<string | null>;
 
@@ -52,7 +53,7 @@ export function createAgentHandoffSemanticSummaryAdapter_ACU(call: AgentHandoffS
       const request = (repair: boolean): Array<{ role: string; content: string }> => [
         {
           role: 'system',
-          content: '你只负责把输入会话事实压缩成 JSON。不得调用工具、不得计划、不得写小说。输出必须是单个 JSON 对象，字段恰好为 currentGoal、effectiveConstraints、decisions、completedItems、pendingItems、blockers、continuityFacts、readKeys、recentTurns；currentGoal 是字符串，其余字段都是字符串数组。不得编造读取地址或轮次指纹。',
+          content: withContentSafetyIdentity_ACU('你是会话事实压缩助手。你只负责把输入会话事实压缩成 JSON。不得调用工具、不得计划、不得写小说。输出必须是单个 JSON 对象，字段恰好为 currentGoal、effectiveConstraints、decisions、completedItems、pendingItems、blockers、continuityFacts、readKeys、recentTurns；currentGoal 是字符串，其余字段都是字符串数组。不得编造读取地址或轮次指纹。'),
         },
         { role: 'user', content: repair ? `上一次输出不符合 JSON 契约。只输出符合契约的 JSON，不要解释。\n来源：${source}` : `来源：${source}` },
       ];

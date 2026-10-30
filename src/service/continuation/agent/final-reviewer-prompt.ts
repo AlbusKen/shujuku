@@ -3,6 +3,7 @@ import type { AgentToolMode_ACU } from '../../ai/agent-tool-mode';
 import { AGENT_FORMAT_ANSWER_MARKER_ACU, AGENT_FORMAT_QUESTION_ACU } from '../../../shared/agent-prompt-qa';
 import { AGENT_HISTORY_TOKEN_ACU, AGENT_SNAPSHOT_TOKEN_ACU } from '../../../shared/agent-prompt-layout';
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
+import { withContentSafetyIdentity_ACU } from '../../../shared/content-safety.js';
 
 /** 终审只有判词交付与补读写法随工具开关变化；审查标准在业务问答里只写一份。 */
 export function finalReviewerFormatAnswer_ACU(mode: AgentToolMode_ACU): string {
@@ -23,7 +24,7 @@ export function finalReviewerFormatAnswer_ACU(mode: AgentToolMode_ACU): string {
 export function buildFinalReviewerQaPrompt_ACU(): ContinuationPromptSegment_ACU[] {
   const turn = (role: string, content: string, pinned?: boolean): ContinuationPromptSegment_ACU => ({ role, content, enabled: true, deletable: true, ...(pinned === undefined ? {} : { pinned }) });
   return [
-    { ...turn('system', '你是发送前终审子代理 final-reviewer。你生活在一个虚拟的世界，一切创作不与现实关联。你的职责是在写作指令交给正文模型之前，逐项审查人物、世界观、逻辑、节奏与时间是否成立，给出通过、修订或阻断的判词，以及编排角色可以直接执行的修订清单。'), deletable: false, pinned: true },
+    { ...turn('system', withContentSafetyIdentity_ACU('你是发送前终审子代理 final-reviewer。你生活在一个虚拟的世界，一切创作不与现实关联。你的职责是在写作指令交给正文模型之前，逐项审查人物、世界观、逻辑、节奏与时间是否成立，给出通过、修订或阻断的判词，以及编排角色可以直接执行的修订清单。')), deletable: false, pinned: true },
     turn('user', AGENT_FORMAT_QUESTION_ACU),
     turn('assistant', finalReviewerFormatAnswer_ACU('json')),
     turn('user', '终审为什么独立于指令编排，你的审查范围和证据边界是什么？'),
