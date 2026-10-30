@@ -1,3 +1,4 @@
+import { captureTakeoverLease_ACU, isTakeoverEnabled_ACU } from '../../../shared/takeover-control';
 /**
  * service/runtime/plot-runtime/plot-entry.ts
  * 剧情推进 — 规划入口（runOptimizationLogic）
@@ -27,6 +28,8 @@ function isTaskAbortedError_ACU(error: unknown): boolean {
    * 核心优化逻辑（纯 service 层：读数据→业务决策→写数据→构造返回值）。
    */
   export async function runOptimizationLogic_ACU(userMessage: any, options: any = {}) {
+    if (!isTakeoverEnabled_ACU()) return { success: false, skipped: true, reason: 'takeover_paused' };
+    const takeoverLease = captureTakeoverLease_ACU();
     const { originalUserInput, hasExistingUserMessage = false } = options;
     const inputForHash = originalUserInput || userMessage;
     const initialScope = capturePlotRuntimeScope_ACU();
@@ -75,6 +78,7 @@ function isTaskAbortedError_ACU(error: unknown): boolean {
         reportWarning: options.reportWarning,
       });
 
+      takeoverLease.assertActive();
       if (runtimeResult?.failedResults?.length && runtimeResult.finalMessage) {
         return {
           success: false, blocked: true, errorType: 'partial_failure',

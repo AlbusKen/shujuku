@@ -1,3 +1,4 @@
+import { isTakeoverEnabled_ACU } from '../../shared/takeover-control';
 /**
  * presentation/triggers/auto-loop.ts — 自动化循环 UI 壳（presentation 层）
  * 业务逻辑委托给 service/loop/loop-controller.ts。
@@ -61,6 +62,7 @@ export function stopAutoLoop_ACU() {
 }
 
 async function triggerLoopGeneration_ACU() {
+    if (!isTakeoverEnabled_ACU()) { stopAutoLoop_ACU(); return; }
     // [重构] 调用 service 层获取下一个提示词
     const prompt = getNextLoopPrompt_ACU();
     if (prompt === null) {
@@ -71,7 +73,7 @@ async function triggerLoopGeneration_ACU() {
     // UI 操作：写入输入框并点击发送
     setSendTextareaValue_ACU(prompt);
     setTimeout(() => {
-        if (loopState_ACU.isLooping) {
+        if (loopState_ACU.isLooping && isTakeoverEnabled_ACU()) {
             if (typeof clickSendButton_ACU === 'function') clickSendButton_ACU();
         }
     }, 100);
@@ -116,7 +118,7 @@ export async function enterLoopRetryFlow_ACU({ loopSettings, shouldDeleteAiReply
             await triggerDirectRegenerateForLoop_ACU(loopSettings);
         } catch (err) {
             logError_ACU('[剧情推进] [重试] 触发生成失败:', err);
-            if (loopState_ACU.isLooping) {
+            if (loopState_ACU.isLooping && isTakeoverEnabled_ACU()) {
                 await enterLoopRetryFlow_ACU({ loopSettings, shouldDeleteAiReply: false });
             }
         }

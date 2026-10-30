@@ -1,3 +1,4 @@
+import { isTakeoverEnabled_ACU } from '../../shared/takeover-control';
 /**
  * service/runtime/state-manager.ts — Re-export 门面
  * 
@@ -156,6 +157,7 @@ function hasFreshUserGenerationTrigger_ACU() {
 }
 
 export function shouldProcessPlotForGeneration_ACU(type: any, params: any, dryRun: any) {
+  if (!isTakeoverEnabled_ACU()) return false;
   if (dryRun) return false;
   if (!settings_ACU?.plotSettings?.enabled) return false;
   // 与规划内层和 TavernHelper 入口一致：经典/飞行模式以及重试不接管普通发送。
@@ -170,6 +172,7 @@ export function shouldProcessPlotForGeneration_ACU(type: any, params: any, dryRu
 }
 
 export function shouldProcessSummaryVectorIndexForGeneration_ACU(type: any, params: any, dryRun: any) {
+  if (!isTakeoverEnabled_ACU()) return false;
   if (dryRun) return false;
   if (type === 'regenerate') return false;
   if (isQuietLikeGeneration_ACU(type, params)) return false;

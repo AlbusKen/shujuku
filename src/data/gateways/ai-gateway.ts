@@ -1,3 +1,4 @@
+import { runTakeoverRequest_ACU } from '../../shared/takeover-control';
 /**
  * data/gateways/ai-gateway.ts — AI 调用网关
  *
@@ -52,7 +53,7 @@ function unsupportedTransportNote_ACU(): string {
  * @returns 生成的文本
  * @throws 如果 generateRaw 不可用
  */
-export async function generateRaw_ACU(options: {
+async function generateRawImpl_ACU(options: {
     ordered_prompts: any[];
     should_stream?: boolean;
     [key: string]: any;
@@ -79,7 +80,7 @@ export async function generateRaw_ACU(options: {
  * @returns API 响应结果
  * @throws 如果 ConnectionManagerRequestService 不可用
  */
-export async function sendConnectionManagerRequest_ACU(
+async function sendConnectionManagerRequestImpl_ACU(
     profileId: string,
     messages: any[],
     maxTokens: number,
@@ -233,7 +234,7 @@ const CHAT_COMPLETION_GENERATE_URL_ACU = '/api/backends/chat-completions/generat
  * @param signal 中止信号
  * @returns 生成端点返回的原始 JSON
  */
-export async function postChatCompletionDirect_ACU(
+async function postChatCompletionDirectImpl_ACU(
     payload: Record<string, unknown>,
     signal?: AbortSignal | null,
     options?: DirectChatCompletionOptions_ACU,
@@ -366,7 +367,7 @@ export async function sendProfileChatCompletionRequest_ACU(
  * @param command 斜杠命令字符串
  * @returns 命令执行结果
  */
-export async function triggerSlash_ACU(command: string): Promise<string> {
+async function triggerSlashImpl_ACU(command: string): Promise<string> {
     if (!isTriggerSlashAvailable_ACU()) {
         logWarn_ACU('[AIGateway] triggerSlash 不可用，返回空字符串');
         return '';
@@ -413,3 +414,12 @@ export function getHostRequestHeaders_ACU(): Record<string, string> {
         return {};
     }
 }
+
+export const generateRaw_ACU: typeof generateRawImpl_ACU = options =>
+    runTakeoverRequest_ACU(() => generateRawImpl_ACU(options));
+export const sendConnectionManagerRequest_ACU: typeof sendConnectionManagerRequestImpl_ACU = (...args) =>
+    runTakeoverRequest_ACU(() => sendConnectionManagerRequestImpl_ACU(...args));
+export const postChatCompletionDirect_ACU: typeof postChatCompletionDirectImpl_ACU = (body, signal, options, logTag) =>
+    runTakeoverRequest_ACU(merged => postChatCompletionDirectImpl_ACU(body, merged, options, logTag), signal);
+export const triggerSlash_ACU: typeof triggerSlashImpl_ACU = command =>
+    runTakeoverRequest_ACU(() => triggerSlashImpl_ACU(command));

@@ -10,6 +10,7 @@ import { STORAGE_KEY_GLOBAL_META_ACU, normalizeIsolationCode_ACU, getProfileSett
 import { getConfigStorage_ACU } from '../storage/tavern-storage';
 import { TABLE_TEMPLATE_ACU } from '../../shared/defaults-json.js';
 import { ConfigStorageReadError_ACU, readConfigObject_ACU } from '../storage/config-read';
+import { setTakeoverRuntimeEnabled_ACU } from '../../shared/takeover-control';
 
 function readStoredObject_ACU(key: string): Record<string, any> | null {
     try {
@@ -23,6 +24,7 @@ function readStoredObject_ACU(key: string): Record<string, any> | null {
 function readGlobalMetaObject_ACU(): Record<string, any> | null {
     const value = readStoredObject_ACU(STORAGE_KEY_GLOBAL_META_ACU);
     if (value && (
+        ('takeoverEnabledGlobal' in value && typeof value.takeoverEnabledGlobal !== 'boolean') ||
         ('activeIsolationCode' in value && typeof value.activeIsolationCode !== 'string') ||
         ('isolationCodeList' in value && (!Array.isArray(value.isolationCodeList) || value.isolationCodeList.some((code: unknown) => typeof code !== 'string'))) ||
         ('vectorMemoryConfigGlobal' in value && value.vectorMemoryConfigGlobal !== null &&
@@ -39,6 +41,7 @@ export let globalMeta_ACU: any = {
     zeroTkOccupyModeGlobal: false,
     summaryVectorIndexModeGlobal: false,
     plotEnabledGlobal: true,
+    takeoverEnabledGlobal: true,
     vectorMemoryConfigGlobal: null,
 };
 
@@ -51,6 +54,7 @@ export function buildDefaultGlobalMeta_ACU(): any {
         zeroTkOccupyModeGlobal: false,
         summaryVectorIndexModeGlobal: false,
         plotEnabledGlobal: true,
+        takeoverEnabledGlobal: true,
         vectorMemoryConfigGlobal: null,
     };
 }
@@ -59,9 +63,11 @@ export function loadGlobalMeta_ACU(): any {
     const parsed = readGlobalMetaObject_ACU();
     if (parsed === null) {
         globalMeta_ACU = buildDefaultGlobalMeta_ACU();
+        setTakeoverRuntimeEnabled_ACU(true);
         return globalMeta_ACU;
     }
     globalMeta_ACU = { ...buildDefaultGlobalMeta_ACU(), ...parsed };
+    setTakeoverRuntimeEnabled_ACU(globalMeta_ACU.takeoverEnabledGlobal !== false);
     globalMeta_ACU.activeIsolationCode = normalizeIsolationCode_ACU(globalMeta_ACU.activeIsolationCode);
     if (!Array.isArray(globalMeta_ACU.isolationCodeList)) globalMeta_ACU.isolationCodeList = [];
     return globalMeta_ACU;

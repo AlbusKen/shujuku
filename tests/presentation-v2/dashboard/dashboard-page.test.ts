@@ -133,6 +133,10 @@ async function mountDashboardPage(
   } = {},
 ) {
   vi.resetModules();
+  const takeover = await import("../../../src/shared/takeover-control");
+  takeover.setTakeoverRuntimeEnabled_ACU(true);
+  const setTakeover = vi.fn((enabled: boolean) => takeover.setTakeoverRuntimeEnabled_ACU(enabled));
+  vi.doMock("../../../src/service/settings/takeover-control-service", () => ({ setTakeoverEnabled_ACU: setTakeover }));
   document.body.innerHTML = "";
   document.head.innerHTML = "";
   m.parseTableTemplateJson_ACU.mockReset();
@@ -282,7 +286,7 @@ async function mountDashboardPage(
   expect(document.querySelector('.acu-v2-dashboard-page')).not.toBeNull();
   const { useDashboardPage } = await import("../../../src/presentation-v2/composables/useDashboardPage");
   const dashboard = useDashboardPage();
-  return { mount, settings, saveSettings, enableFlightMode, disableFlightMode, dashboard };
+  return { mount, settings, saveSettings, enableFlightMode, disableFlightMode, dashboard, setTakeover };
 }
 
 beforeEach(() => {
@@ -401,6 +405,7 @@ describe("DashboardPage", () => {
       ),
     ).map((button) => button.dataset.acuToggleKey);
     expect(visibleToggleKeys).toEqual([
+      "takeoverEnabled",
       "autoUpdateEnabled",
       "silentModeEnabled",
       "desktopPetEnabled",
@@ -718,6 +723,22 @@ describe("DashboardPage", () => {
     expect(document.querySelector('button[data-acu-toggle-key="flightMode"]')).toBeNull();
     expect(document.querySelector(".acu-v2-dashboard-page")?.textContent || "").not.toContain("飞行模式");
 
+    mount.__resetAcuV2MountForTests();
+  });
+
+  it("接管总开关可关闭再开启且不修改原有功能配置", async () => {
+    const { mount, settings, setTakeover } = await mountDashboardPage();
+    const original = JSON.stringify(settings);
+    const toggle = document.querySelector('button[data-acu-toggle-key="takeoverEnabled"]') as HTMLButtonElement;
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    toggle.click(); await new Promise(r => setTimeout(r, 0));
+    expect(setTakeover).toHaveBeenLastCalledWith(false);
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    expect(JSON.stringify(settings)).toBe(original);
+    toggle.click(); await new Promise(r => setTimeout(r, 0));
+    expect(setTakeover).toHaveBeenLastCalledWith(true);
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    expect(JSON.stringify(settings)).toBe(original);
     mount.__resetAcuV2MountForTests();
   });
 

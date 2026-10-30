@@ -1,3 +1,4 @@
+import { setTakeoverRuntimeEnabled_ACU } from '../../../src/shared/takeover-control';
 /**
  * tests/data/gateways/ai-gateway.test.ts
  * AI 调用网关 单元测试
@@ -330,7 +331,9 @@ describe('酒馆响应单次消费与取消', () => {
         finally { reader.releaseLock(); }
       },
     })).rejects.toBe(reason);
-    expect(mockFetch.mock.calls[0][1].signal).toBe(controller.signal);
+    // The transport now combines parent cancellation with the global pause signal.
+    expect(mockFetch.mock.calls[0][1].signal.aborted).toBe(true);
+    expect(mockFetch.mock.calls[0][1].signal.reason).toBe(reason);
     expect(cancel).not.toHaveBeenCalled();
     expect(original.body!.locked).toBe(false);
     const reply = getAllLogs().find(entry => entry.message.includes('回复 HTTP'))!;
@@ -347,4 +350,26 @@ describe('酒馆响应单次消费与取消', () => {
       expect(getAllLogs().find(entry => entry.message.includes('回复 HTTP'))!.message).toContain(expectedBody);
     },
   );
+});
+
+
+describe('接管暂停后的插件LLM入口', () => {
+  it('主连接、连接预设、直发和slash均不触发请求，重新开启后恢复', async () => {
+    mockTavernHelper.generateRaw = vi.fn(async () => 'restored');
+    mockTavernHelper.triggerSlash = vi.fn();
+    mockSillyTavern.ConnectionManagerRequestService = { sendRequest: vi.fn() };
+    setTakeoverRuntimeEnabled_ACU(false);
+    try {
+      for (const run of [() => generateRaw_ACU({ ordered_prompts: [] }),
+        () => sendConnectionManagerRequest_ACU('profile', [], 100),
+        () => postChatCompletionDirect_ACU({ messages: [] }), () => triggerSlash_ACU('/gen')]) {
+        await expect(run()).rejects.toMatchObject({ name: 'AbortError' });
+      }
+      expect(mockTavernHelper.generateRaw).not.toHaveBeenCalled();
+      expect(mockTavernHelper.triggerSlash).not.toHaveBeenCalled();
+      expect(mockSillyTavern.ConnectionManagerRequestService.sendRequest).not.toHaveBeenCalled();
+      expect(mockFetch).not.toHaveBeenCalled();
+    } finally { setTakeoverRuntimeEnabled_ACU(true); }
+    await expect(generateRaw_ACU({ ordered_prompts: [] })).resolves.toBe('restored');
+  });
 });

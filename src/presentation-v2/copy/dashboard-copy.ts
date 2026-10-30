@@ -215,6 +215,7 @@ export const dashboardCopy = {
     pendingInitial: "待初始",
   },
   toggles: {
+    takeover: { label: "启用数据库接管", description: "接管总开关：关闭即暂停插件的 LLM、Embedding、Rerank 和自动填表；保留原配置，重新开启后恢复后续处理。酒馆正文、MVU 和本地战斗不受此开关控制。" },
     autoUpdate: {
       label: "自动更新",
       description:

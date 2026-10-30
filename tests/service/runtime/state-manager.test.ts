@@ -1,3 +1,5 @@
+import { setTakeoverRuntimeEnabled_ACU } from '../../../src/shared/takeover-control';
+import { shouldProcessSummaryVectorIndexForGeneration_ACU } from '../../../src/service/runtime/state-manager';
 /**
  * tests/service/runtime/state-manager.test.ts
  * 运行时状态管理器 单元测试
@@ -490,4 +492,17 @@ describe('planningGuard_ACU', () => {
     expect(planningGuard_ACU.inProgress).toBe(true);
     expect(planningGuard_ACU.ignoreNextGenerationEndedCount).toBe(2);
   });
+});
+
+
+it('暂停时剧情与召回门控均放弃接管，恢复不改原配置', () => {
+  settings_ACU.plotSettings = { enabled: true };
+  markUserSendIntent_ACU();
+  const original = structuredClone(settings_ACU.plotSettings);
+  setTakeoverRuntimeEnabled_ACU(false);
+  try {
+    expect(shouldProcessPlotForGeneration_ACU('normal', {}, false)).toBe(false);
+    expect(shouldProcessSummaryVectorIndexForGeneration_ACU('normal', {}, false)).toBe(false);
+    expect(settings_ACU.plotSettings).toEqual(original);
+  } finally { setTakeoverRuntimeEnabled_ACU(true); }
 });
