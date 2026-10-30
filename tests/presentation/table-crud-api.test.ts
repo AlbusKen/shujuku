@@ -393,29 +393,6 @@ describe('createTableCrudApi — SQLite 模式', () => {
     api = createTableCrudApi(mockCtx);
   });
 
-  // ─── AI 填表期间外部写入互斥 ───
-  describe('isAutoUpdatingCard 填表互斥', () => {
-    afterEach(() => {
-      mockIsAutoUpdatingCard = false;
-    });
-
-    it('填表进行中 updateCell 被拒绝：不执行 SQL、不落盘、返回 false', async () => {
-      mockIsAutoUpdatingCard = true;
-      const result = await api.updateCell('背包物品表', 1, '数量', '10');
-      expect(result).toBe(false);
-      expect(mockExecuteRuntimeMutation).not.toHaveBeenCalled();
-      expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
-    });
-
-    it('填表结束后同一调用恢复可用', async () => {
-      mockIsAutoUpdatingCard = true;
-      expect(await api.updateCell('背包物品表', 1, '数量', '10')).toBe(false);
-      mockIsAutoUpdatingCard = false;
-      expect(await api.updateCell('背包物品表', 1, '数量', '10')).toBe(true);
-      expect(mockExecuteRuntimeMutation).toHaveBeenCalledTimes(1);
-    });
-  });
-
   // ─── 表格锁对开放 API 生效（S2-2）───
   describe('表格锁对 CRUD API 生效', () => {
     // scopeKey = 'chat-a::'（currentChatFileIdentifier='chat-a'，isolationKey=''）

@@ -91,7 +91,7 @@ import { isSqlContent } from '../ai/prompt-builder/table-edit-parser';
 import { buildGuidedBaseDataFromSheetGuide_ACU, getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { isSqliteMode } from './storage-mode';
 import type { TableMutationOperationV2_ACU } from './storage-frame-v2-types';
-import { applySqlEditsToTableDataSnapshot_ACU, assertNoHiddenPhysicalColumnMutations_ACU, buildSqlSheetBatchOperations_ACU, captureSqlTableApplyScope_ACU, extractRowIdsFromSqlSheetBatch_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, normalizeSqlStatementsForRuntimeLog_ACU, rebindSqlMutationIdentifiers_ACU, splitSqlStatements, SqlRowIdMaterializationError_ACU, SqlRuntimeSchemaInvalidError_ACU, SqlRuntimeSchemaStaleError_ACU, SqlRuntimeSnapshotError_ACU } from './sql-table-service';
+import { applySqlEditsToTableDataSnapshot_ACU, assertNoHiddenPhysicalColumnMutations_ACU, buildSqlSheetBatchOperations_ACU, captureSqlTableApplyScope_ACU, extractRowIdsFromSqlSheetBatch_ACU, extractTableNamesFromStatements, mapSqlTableNamesToSheetKeys_ACU, normalizeSqlStatementsForRuntimeLog_ACU, rebindSqlMutationIdentifiers_ACU, splitSqlStatements, SqlRowIdMaterializationError_ACU, SqlRuntimeSchemaInvalidError_ACU, SqlRuntimeSnapshotError_ACU } from './sql-table-service';
 import { hasStructuralReplayCompatibilityRepairs_ACU, hasUnanchoredReplayArtifactsForChatV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from './storage-frame-v2-replay';
 import { ensureStorageProviderReady_ACU, getStorageProvider, reloadStorageProvider } from './table-storage-strategy';
 import { applySpecialIndexSequenceToSummaryTables_ACU } from '../runtime/helpers-remaining';
@@ -1860,12 +1860,10 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
                 // 歧义英文表名属于前置条件失败：AI 无法通过重试解决，回灌错误只会浪费模型调用并等待 5 秒。
                 // 分类为 precondition，不包装 ModelOutputRetryError_ACU、不回灌、不重试。
                 const isAliasAmbiguous = error?.code === 'SQL_ALIAS_AMBIGUOUS_ACU';
-                // 本地 runtime schema 问题（冻结失败/漂移）也是前置条件/infrastructure 失败：
+                // 本地 runtime schema 冻结失败也是前置条件/infrastructure 失败：
                 // 模型无法修复，禁止回灌 UNIFIED_GROUP_ERROR_FEEDBACK。
                 const isRuntimeSchemaError = error instanceof SqlRuntimeSchemaInvalidError_ACU
-                    || error instanceof SqlRuntimeSchemaStaleError_ACU
-                    || error?.code === 'SQL_RUNTIME_SCHEMA_INVALID_ACU'
-                    || error?.code === 'SQL_RUNTIME_SCHEMA_STALE_ACU';
+                    || error?.code === 'SQL_RUNTIME_SCHEMA_INVALID_ACU';
                 return {
                     success: false,
                     modifiedKeys: [],
@@ -1956,7 +1954,6 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
             chatKey: capturedChatKey,
             isolationKey: capturedIsolationKey,
             writeSet: buildWriteSetForSheetKeys_ACU([...allTargetSheetKeySet].filter(sheetKey => sqlScopedKeys([sheetKey]).length > 0), baseSnapshot),
-            baseRevision: options.baseRevision,
             workingDataMode: 'none',
             initialData: baseSnapshot as any,
             targetMessageIndex: options.saveTargetIndex,
@@ -1986,8 +1983,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
             } catch (error: any) {
                 const rawErrorMessage = error?.message || String(error);
                 const isInfrastructureError = error instanceof SqlRuntimeSnapshotError_ACU
-                    || error instanceof SqlRuntimeSchemaInvalidError_ACU
-                    || error instanceof SqlRuntimeSchemaStaleError_ACU;
+                    || error instanceof SqlRuntimeSchemaInvalidError_ACU;
                 const failedGroupKey = findSqlFailureGroupKey_ACU(sqlTexts, sortedResponses, rawErrorMessage);
                 return {
                     success: false,
@@ -3354,7 +3350,6 @@ export async function executeCardUpdateCore_ACU(
                         chatKey: executionScope.chatKey,
                         isolationKey: executionScope.isolationKey,
                         writeSet,
-                        baseRevision,
                         workingDataMode: 'none',
                         initialData: rawBaseSnapshot as any,
                         targetMessageIndex: saveTargetIndex,
@@ -3382,8 +3377,7 @@ export async function executeCardUpdateCore_ACU(
                             );
                         } catch (error: any) {
                             const isRuntimeSchemaError = error instanceof SqlRuntimeSnapshotError_ACU
-                                || error instanceof SqlRuntimeSchemaInvalidError_ACU
-                                || error instanceof SqlRuntimeSchemaStaleError_ACU;
+                                || error instanceof SqlRuntimeSchemaInvalidError_ACU;
                             const errorCategory = isRuntimeSchemaError ? 'infrastructure' as const : 'model' as const;
                             return { success: false, error: sanitizeRetryFeedback_ACU(error?.message || String(error)), errorCategory };
                         }
