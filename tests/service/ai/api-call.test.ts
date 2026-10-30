@@ -662,11 +662,13 @@ describe('buildCustomApiRequestBody_ACU', () => {
     expect(body).not.toHaveProperty('parallel_tool_calls');
   });
 
-  it('overrides.responseFormat 作为结构化对象注入 custom_include_body', () => {
-    const responseFormat = {
+  it.each([
+    {
       type: 'json_schema',
       json_schema: { name: 'table_edit_ops_response', strict: true, schema: { type: 'object' } },
-    };
+    },
+    { type: 'json_object' },
+  ])('overrides.responseFormat ($type) 作为结构化对象注入 custom_include_body', (responseFormat) => {
     const body = buildCustomApiRequestBody_ACU(
       [{ role: 'user', content: 'test' }],
       { url: 'https://api.example.com', model: 'gpt-4' },
@@ -677,11 +679,13 @@ describe('buildCustomApiRequestBody_ACU', () => {
     expect(body).not.toHaveProperty('response_format');
   });
 
-  it('overrides.responseFormat 与 YAML mapping 共存时按对象语义合并', () => {
-    const responseFormat = { type: 'json_schema', json_schema: { name: 'x', strict: true, schema: {} } };
+  it.each([
+    { type: 'json_schema', json_schema: { name: 'x', strict: true, schema: {} } },
+    { type: 'json_object' },
+  ])('overrides.responseFormat ($type) 与 YAML mapping 共存时覆盖同名字段', (responseFormat) => {
     const body = buildCustomApiRequestBody_ACU(
       [{ role: 'user', content: 'test' }],
-      { url: 'https://api.example.com', model: 'gpt-4', bodyParams: 'temperature: 0.3' },
+      { url: 'https://api.example.com', model: 'gpt-4', bodyParams: 'temperature: 0.3\nresponse_format:\n  type: text' },
       { responseFormat },
     );
     expect(parse(body.custom_include_body)).toEqual({ temperature: 0.3, response_format: responseFormat });

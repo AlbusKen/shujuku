@@ -781,7 +781,42 @@ describe('callCustomOpenAI_ACU — custom fetch 模式', () => {
     expect(JSON.stringify(overrides.responseFormat)).toContain('"table_edit_ops_v1"');
   });
 
-  it('非 strict 模式不传 responseFormat', async () => {
+  it.each([
+    { model: 'deepseek-chat', customApiFormat: undefined, expected: 'json_object' },
+    { model: 'deepseek-reasoner', customApiFormat: 'openai_compat', expected: 'json_object' },
+    { model: 'models/deepseek-ai/DeepSeek-V3', customApiFormat: 'openai_compat', expected: 'json_object' },
+    { model: 'DeepSeek-R1', customApiFormat: 'openai_responses', expected: 'json_object' },
+    { model: 'gpt-4', customApiFormat: 'openai_compat', expected: 'json_schema' },
+    { model: 'deepseek-chat', customApiFormat: 'claude_messages', expected: 'json_schema' },
+    { model: 'deepseek-chat', customApiFormat: 'gemini_interactions', expected: 'json_schema' },
+  ])('strict JSON 按模型 $model 与协议 $customApiFormat 使用 $expected', async ({ model, customApiFormat, expected }) => {
+    mockSettings.strictJsonTableFillEnabled = true;
+    mockGetApiConfigByPreset.mockReturnValue({
+      apiMode: 'custom',
+      apiConfig: { sendViaTavern: true, useMainApi: false, url: 'https://api.example.com', model, customApiFormat },
+      tavernProfile: '',
+    });
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: '{"format":"table_edit_ops_v1","ops":[]}' } }] }),
+    });
+    await callCustomOpenAI_ACU({ tableDataText: '表格' }, null, null);
+    const overrides = mockBuildCustomBody.mock.calls[mockBuildCustomBody.mock.calls.length - 1][2];
+    if (expected === 'json_object') {
+      expect(overrides.responseFormat).toEqual({ type: 'json_object' });
+    } else {
+      expect(overrides.responseFormat).toMatchObject({ type: 'json_schema' });
+      expect(overrides.responseFormat.json_schema.name).toBe('table_edit_ops_response');
+    }
+    expect(overrides.tools).toBeUndefined();
+  });
+
+  it.each(['gpt-4', 'deepseek-chat'])('非 strict 模式下 %s 不传 responseFormat', async (model) => {
+    mockGetApiConfigByPreset.mockReturnValue({
+      apiMode: 'custom',
+      apiConfig: { sendViaTavern: true, useMainApi: false, url: 'https://api.example.com', model },
+      tavernProfile: '',
+    });
     mockFetch.mockResolvedValue({
       ok: true,
       json: async () => ({ choices: [{ message: { content: 'fetch回复' } }] }),

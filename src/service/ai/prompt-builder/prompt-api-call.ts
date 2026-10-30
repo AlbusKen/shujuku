@@ -269,19 +269,26 @@ export class RetryableAiResponseError_ACU extends Error {
         warnIfStrictJsonPromptPolluted_ACU(messages);
     }
 
-    // 严格 JSON 填表：构建 json_schema response_format，让支持 structured outputs 的后端
-    // 在协议层强制输出结构，而不是只靠提示词软约束。
+    // 严格 JSON 填表：默认使用 json_schema；DeepSeek 的 OpenAI 协议渠道使用 json_object，
+    // JSON 内部结构仍由既有提示词契约和响应校验约束。
     // 仅自定义 chat-completions 直连路径能携带（经 custom_include_body 合并进上游请求体）；
     // tavern 连接预设与主 API（generateRaw）无请求体扩展通道，维持提示词约束。
     // 后端不支持 response_format 时，用户可在 excludeBodyParams 中填 response_format 剔除。
     let strictJsonResponseFormat: Record<string, any> | undefined;
     if (strictJsonFillEnabled) {
         try {
-            strictJsonResponseFormat = buildStrictJsonTableFillResponseFormatForData_ACU(
-                sqliteMode,
-                options?.tableData,
-                options?.targetSheetKeys,
-            ).responseFormat;
+            const apiFormat = effectiveApiConfig.customApiFormat || 'openai_compat';
+            const useJsonObject = /deepseek/i.test(String(effectiveApiConfig.model ?? ''))
+                && (apiFormat === 'openai_compat' || apiFormat === 'openai_responses');
+            if (useJsonObject) {
+                strictJsonResponseFormat = { type: 'json_object' };
+            } else {
+                strictJsonResponseFormat = buildStrictJsonTableFillResponseFormatForData_ACU(
+                    sqliteMode,
+                    options?.tableData,
+                    options?.targetSheetKeys,
+                ).responseFormat;
+            }
         } catch (error) {
             // schema 构建失败不阻断填表：回退到纯提示词约束。
             logWarn_ACU('[严格JSON填表] response_format schema 构建失败，本次请求不附加：', error);
@@ -512,7 +519,7 @@ export class RetryableAiResponseError_ACU extends Error {
                 ...(tableFillTools.length ? { tools: tableFillTools } : {}),
             });
             if (strictJsonResponseFormat) {
-                logDebug_ACU('[严格JSON填表] 已在请求体附加 json_schema response_format。');
+                logDebug_ACU(`[严格JSON填表] 已在请求体附加 ${strictJsonResponseFormat.type} response_format。`);
             }
 
             logDebug_ACU('ACU: 调用新的后端生成API:', generateUrl, 'Model:', effectiveApiConfig.model);
