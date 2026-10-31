@@ -223,8 +223,6 @@ export let settings_ACU: any = {
     // 续写 / 推演的工具方案全局开关；关闭时请求不带 tools，提示词为纯 JSON 版。
     continuationNativeToolEnabled: false,
     worldSimulationNativeToolEnabled: false,
-    // 上下文工具化传输默认开启；渠道不支持函数调用时在 API 设置里关闭。
-    contextToolTransportEnabled: true,
     discardUnauthorizedTableEditsEnabled: true,
     // [剧情推进] 按剧情任务ID保存的任务级 API 预设覆盖（key=taskId, value=presetName）
     // 不保存入聊天记录或剧情推进预设，只写进插件全局设置。
@@ -257,6 +255,7 @@ export let settings_ACU: any = {
     tableFillPromptForceDefaultVersion: '',
     tableFillToolPromptUpgradeVersion: '',
     tableFillToolDefaultOffVersion: '',
+    apiPresetContextToolBackfillVersion: '',
     creativeIdentityPromptUpgradeVersion: '',
     templateAssistantPromptForceDefaultVersion: '',
     strictJsonTableFillForceDisableVersion: '',
@@ -304,8 +303,8 @@ export let settings_ACU: any = {
 
 // 静默模式判定交给通知汇流口；读取 live binding，settings_ACU 被整体替换后仍生效。
 configureNoticeHub_ACU({ isSilent: () => settings_ACU?.silentModeEnabled === true });
-// 发送出口的上下文工具化开关；旧设置没有该字段时按开启处理。
-configureContextToolTransport_ACU(() => settings_ACU?.contextToolTransportEnabled !== false);
+// 服务层装配上下文工具化；是否改写由每次请求所用 API 预设的开关决定（旧预设缺省开启）。
+configureContextToolTransport_ACU(() => true);
 
 /**
  * 当前聊天的隔离槽位键。

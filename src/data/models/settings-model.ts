@@ -59,8 +59,6 @@ export interface Settings_ACU {
   continuationNativeToolEnabled: boolean;
   /** 格林推演走纯工具方案（决策与交付都用函数调用）；全局开关，不随对话保存，默认关闭即纯 JSON。 */
   worldSimulationNativeToolEnabled: boolean;
-  /** 上下文工具化传输：发送前只保留首条消息，其余提示词改为 turn_ 函数；缺省视为开启，渠道不支持函数调用时需关闭。 */
-  contextToolTransportEnabled?: boolean;
   worldbookConfig: WorldbookConfig_ACU;
   /** 解除剧情推进发送伪装，原文留在输入框等待结果；默认关闭，不随预设切换。 */
   plotSendDisguiseDisabled?: boolean;

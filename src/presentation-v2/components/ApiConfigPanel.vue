@@ -56,6 +56,10 @@
           <AcuInput v-model="activeDraft.requestTimeoutSeconds" type="number" :min="1" :step="1" />
         </AcuFormRow>
 
+        <AcuFormRow label="API工具调用">
+          <AcuToggle v-model="activeDraft.contextToolTransportEnabled" aria-label="API工具调用" data-acu-api-context-tool-toggle="1" />
+        </AcuFormRow>
+
         <template v-if="activeConnectionMode === 'custom'">
           <AcuFormRow label="通过酒馆渠道发送" hint="默认开启，由酒馆后端转发；关闭后由插件直连预设端点，需端点允许跨域。运行日志可检查实际渠道，分享前请检查隐私。">
             <AcuToggle v-model="activeDraft.sendViaTavern" aria-label="通过酒馆渠道发送" />

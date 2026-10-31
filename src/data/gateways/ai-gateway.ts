@@ -173,6 +173,8 @@ export interface DirectChatCompletionOptions_ACU {
     /** 请求已经完成装配，不再次归一化或裁剪字段。 */
     preservePayload?: boolean;
     readResponse?(response: Response): Promise<any>;
+    /** 本次请求所用 API 预设关闭「API工具调用」时为 false；缺省按开启处理。 */
+    contextToolTransport?: boolean;
 }
 
 export async function sendMainApiChatCompletionRequest_ACU(
@@ -255,8 +257,8 @@ export async function postChatCompletionDirect_ACU(
             delete request.tool_choice;
         }
     }
-    // 发送前最后一步：开关开启时只保留首条消息，其余转为 turn_ 函数；响应在交给调用方前还原。
-    const transport = applyContextToolTransport_ACU(request);
+    // 发送前最后一步：预设开关开启时只保留首条消息，其余转为 turn_ 函数；响应在交给调用方前还原。
+    const transport = applyContextToolTransport_ACU(request, options?.contextToolTransport);
     const headers = { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' };
     const wire = JSON.stringify(transport.body);
     const phase = `请求 POST ${CHAT_COMPLETION_GENERATE_URL_ACU}（酒馆后端请求体）${transport.note ? `；${transport.note}` : ''}`;

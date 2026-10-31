@@ -41,7 +41,7 @@ export type ContextToolTransportResult_ACU =
 
 let enabledProvider_ACU: () => boolean = () => false;
 
-/** 服务层启动时注入开关读取函数；未注入时视为关闭，请求原样发送。 */
+/** 服务层启动时注入可用性读取函数；未注入时视为关闭，请求原样发送。是否改写另由本次请求所用 API 预设的开关决定。 */
 export function configureContextToolTransport_ACU(provider: () => boolean): void {
   enabledProvider_ACU = provider;
 }
@@ -241,9 +241,9 @@ export interface ContextToolTransportApplied_ACU {
   note: string;
 }
 
-/** 发送出口统一入口：开关关闭或无法改写时原样返回请求体。 */
-export function applyContextToolTransport_ACU(body: Record<string, any>): ContextToolTransportApplied_ACU {
-  if (!isContextToolTransportEnabled_ACU()) return { body, plan: null, note: '' };
+/** 发送出口统一入口：预设关闭开关、服务层未装配或无法改写时原样返回请求体。presetEnabled 缺省按开启处理。 */
+export function applyContextToolTransport_ACU(body: Record<string, any>, presetEnabled = true): ContextToolTransportApplied_ACU {
+  if (presetEnabled === false || !isContextToolTransportEnabled_ACU()) return { body, plan: null, note: '' };
   const result = prepareContextToolRequest_ACU(body);
   if (result.kind === 'bypass') {
     return { body, plan: null, note: `上下文工具化未改写：${BYPASS_TEXT_ACU[result.reason] ?? result.reason}` };
@@ -254,3 +254,23 @@ export function applyContextToolTransport_ACU(body: Record<string, any>): Contex
 
 /** 不能携带 tools 的通道（文本补全连接、generateRaw）写入日志的固定说明。 */
 export const CONTEXT_TOOL_UNSUPPORTED_NOTE_ACU = '上下文工具化未生效：该通道不支持携带 tools，按原样发送';
+
+
+/**
+ * 按本次请求所用 API 预设合并直发选项：只有预设关闭「API工具调用」时才附加 contextToolTransport: false；
+ * 开启（含旧预设缺省）时原样返回，不改变调用方的选项对象。
+ */
+export function presetContextToolOptions_ACU<T extends object>(
+  config: { contextToolTransportEnabled?: boolean } | null | undefined,
+  options?: T,
+): (T & { contextToolTransport?: boolean }) | undefined {
+  if (config?.contextToolTransportEnabled !== false) return options;
+  return { ...(options ?? {}), contextToolTransport: false } as T & { contextToolTransport?: boolean };
+}
+
+/** 供原本不传直发选项的调用点展开：开启时为空数组，参数个数保持不变。 */
+export function presetContextToolArgs_ACU(
+  config: { contextToolTransportEnabled?: boolean } | null | undefined,
+): [] | [{ contextToolTransport: boolean }] {
+  return config?.contextToolTransportEnabled === false ? [{ contextToolTransport: false }] : [];
+}

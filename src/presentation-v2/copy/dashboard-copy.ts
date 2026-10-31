@@ -249,9 +249,6 @@ export const dashboardCopy = {
       description:
         "开启后，支持流式的文本生成会边生成边返回；关闭后会等完整结果返回。",
     },
-    contextToolTransport: {
-      label: "API工具调用",
-    },
     continuation: {
       label: "智能续写",
       description: "手动功能。代替你自动发送提示词，AI 根据内容持续续写。",

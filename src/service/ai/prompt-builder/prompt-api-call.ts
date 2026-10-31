@@ -17,6 +17,7 @@ import { buildStrictJsonTableFillResponseFormatForData_ACU, cloneStrictPromptSeg
 import { preserveNativeToolPostProcessing_ACU, callMainApiChatCompletionText_ACU } from '../api-call';
 import { isConnectionProfileChatCompletion_ACU, isMainApiChatCompletionAvailable_ACU, readMainApiChatCompletionRouting_ACU, sendMainApiChatCompletionRequest_ACU, sendProfileChatCompletionRequest_ACU } from '../../../data/gateways/ai-gateway';
 import { sendCustomApiRequest_ACU } from '../custom-api-transport';
+import { presetContextToolArgs_ACU } from '../../../data/gateways/context-tool-transport';
 import { withApiRequestTimeout_ACU } from '../api-request-timeout';
 import { chatTurnFromJson_ACU, readFetchChatTurn_ACU, type AiChatTurn_ACU } from '../native-tool';
 import { adaptTableFillPromptSegmentsToToolMode_ACU, buildTableFillNativeTools_ACU, resolveTableFillToolTurn_ACU } from './table-fill-tools';
@@ -380,11 +381,11 @@ export class RetryableAiResponseError_ACU extends Error {
                 const rawPostProcessing = String(targetProfile['prompt-post-processing'] ?? '');
                 const toolPostProcessing = preserveNativeToolPostProcessing_ACU(rawPostProcessing, true);
                 if (toolPostProcessing !== rawPostProcessing) overridePayload.custom_prompt_post_processing = toolPostProcessing;
-                responsePromise = sendProfileChatCompletionRequest_ACU(targetProfile, messages, tavernMaxTokens, overridePayload, abortSignal);
+                responsePromise = sendProfileChatCompletionRequest_ACU(targetProfile, messages, tavernMaxTokens, overridePayload, abortSignal, ...presetContextToolArgs_ACU(effectiveApiConfig));
             } else if (isConnectionProfileChatCompletion_ACU(targetProfile)) {
                 // 不挂工具的 Chat Completion 预设同样直发生成端点，避开第三方脚本对宿主 fetch 的请求改写。
                 useTavernDirectText = true;
-                responsePromise = sendProfileChatCompletionRequest_ACU(targetProfile, messages, tavernMaxTokens, {}, abortSignal);
+                responsePromise = sendProfileChatCompletionRequest_ACU(targetProfile, messages, tavernMaxTokens, {}, abortSignal, ...presetContextToolArgs_ACU(effectiveApiConfig));
             } else {
                 responsePromise = sendConnectionManagerRequest_ACU(profileId, messages, tavernMaxTokens);
             }
@@ -456,13 +457,13 @@ export class RetryableAiResponseError_ACU extends Error {
                 };
                 const mainToolPostProcessing = preserveNativeToolPostProcessing_ACU(routing.postProcessing, true);
                 if (mainToolPostProcessing !== routing.postProcessing) mainOverridePayload.custom_prompt_post_processing = mainToolPostProcessing;
-                const rawMainResult = await sendMainApiChatCompletionRequest_ACU(messages, mainOverridePayload, abortSignal);
+                const rawMainResult = await sendMainApiChatCompletionRequest_ACU(messages, mainOverridePayload, abortSignal, ...presetContextToolArgs_ACU(effectiveApiConfig));
                 return finalizeTableFillTurn(chatTurnFromJson_ACU(rawMainResult).turn);
             }
             logDebug_ACU('ACU: 通过酒馆主API发送请求（流式传输）...');
             if (isMainApiChatCompletionAvailable_ACU()) {
                 // 不挂工具的 Chat Completion 主连接同样直发生成端点，避开 generateRaw 经过的第三方脚本 fetch 包装。
-                const directMainText = await callMainApiChatCompletionText_ACU(messages, abortSignal);
+                const directMainText = await callMainApiChatCompletionText_ACU(messages, abortSignal, undefined, effectiveApiConfig);
                 if (directMainText) return directMainText;
                 throw new RetryableAiResponseError_ACU();
             }
@@ -488,7 +489,7 @@ export class RetryableAiResponseError_ACU extends Error {
                 } else {
                     logWarn_ACU('ACU: 并发模式要求独立API，但URL或模型未配置，回退主API。');
                     if (isMainApiChatCompletionAvailable_ACU()) {
-                        const directFallbackText = await callMainApiChatCompletionText_ACU(messages, abortSignal);
+                        const directFallbackText = await callMainApiChatCompletionText_ACU(messages, abortSignal, undefined, effectiveApiConfig);
                         if (directFallbackText) return directFallbackText;
                         throw new RetryableAiResponseError_ACU();
                     }

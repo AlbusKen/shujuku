@@ -155,6 +155,7 @@ vi.mock('../../../src/shared/defaults', () => ({
   TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU: 'test-prompt-force-default',
   TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU: 'test-table-fill-tool-prompt-upgrade',
   TABLE_FILL_TOOL_DEFAULT_OFF_VERSION_ACU: 'test-table-fill-tool-default-off',
+  API_PRESET_CONTEXT_TOOL_BACKFILL_VERSION_ACU: 'test-api-preset-context-tool-backfill',
   TEMPLATE_ASSISTANT_PROMPT_FORCE_DEFAULT_VERSION_ACU: 'test-template-assistant-prompt-force-default',
   STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU: 'test-strict-json-force-disable',
   STREAMING_FORCE_DISABLE_VERSION_ACU: 'test-streaming-force-disable',

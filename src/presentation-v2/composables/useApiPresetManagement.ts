@@ -28,6 +28,8 @@ export interface ApiPresetDraft {
   promptPostProcessing: ApiPromptPostProcessingValue_ACU;
   /** 接口协议（预设级）：openai_compat / openai_responses / claude_messages / gemini_interactions */
   customApiFormat: CustomApiFormat_ACU;
+  /** API工具调用（预设级），默认开启。 */
+  contextToolTransportEnabled: boolean;
 }
 
 export function setApiPresetDraftPromptPostProcessing(draft: ApiPresetDraft, value: unknown): void {
@@ -77,6 +79,7 @@ export function createEmptyApiPresetDraft(): ApiPresetDraft {
     requestHeaders: '',
     promptPostProcessing: API_PROMPT_POST_PROCESSING_DEFAULT_ACU,
     customApiFormat: CUSTOM_API_FORMAT_DEFAULT_ACU,
+    contextToolTransportEnabled: true,
   };
 }
 
@@ -100,6 +103,7 @@ export function apiPresetDraftFromPreset(preset: AcuV2ApiPreset): ApiPresetDraft
     // 草稿若显示为「未选择」，用户直接保存就会把行为静默改成 none。
     promptPostProcessing: normalizePromptPostProcessing_ACU(preset.apiConfig.promptPostProcessing),
     customApiFormat: normalizeCustomApiFormat_ACU(preset.apiConfig.customApiFormat),
+    contextToolTransportEnabled: preset.apiConfig.contextToolTransportEnabled !== false,
   };
 }
 
@@ -122,6 +126,7 @@ export function apiPresetFromDraft(draft: ApiPresetDraft): AcuV2ApiPreset {
       requestHeaders: draft.requestHeaders || '',
       promptPostProcessing: normalizePromptPostProcessing_ACU(draft.promptPostProcessing),
       customApiFormat: normalizeCustomApiFormat_ACU(draft.customApiFormat),
+      contextToolTransportEnabled: draft.contextToolTransportEnabled !== false,
     },
   };
 }

@@ -134,7 +134,6 @@ const groupOptions = [
  * 只裁剪渲染；featureGate 同步仍基于完整列表，避免隐藏开关后已开启的页面状态被改写。
  */
 const ADVANCED_TOGGLE_MIN_TIER: Record<string, AcuUiTier> = {
-  contextToolTransportEnabled: "high",
   continuationPageEnabled: "medium",
   externalImportPageEnabled: "medium",
   worldSimulationPageEnabled: "high",

@@ -117,6 +117,8 @@ export interface ApiPresetApiConfig_ACU {
   promptPostProcessing: ApiPromptPostProcessingValue_ACU;
   /** 接口协议（预设级），见 CustomApiFormat_ACU。 */
   customApiFormat: CustomApiFormat_ACU;
+  /** API工具调用（预设级）：发送前只保留首条消息，其余提示词转为 turn_ 函数；缺省视为开启。 */
+  contextToolTransportEnabled?: boolean;
 }
 
 export interface ApiPreset_ACU {
@@ -168,9 +170,10 @@ export function normalizeApiConfig_ACU(value: any): ApiPresetApiConfig_ACU {
     requestHeaders: typeof source.requestHeaders === 'string' ? source.requestHeaders : '',
     promptPostProcessing: normalizePromptPostProcessing_ACU(source.promptPostProcessing),
     customApiFormat: normalizeCustomApiFormat_ACU(source.customApiFormat),
+    contextToolTransportEnabled: source.contextToolTransportEnabled !== false,
     ...Object.fromEntries(
       Object.entries(source).filter(([key]) =>
-        !['url', 'apiKey', 'model', 'useMainApi', 'requestTimeoutSeconds', 'sendViaTavern', 'max_tokens', 'maxTokens', 'temperature', 'bodyParams', 'excludeBodyParams', 'requestHeaders', 'promptPostProcessing', 'customApiFormat'].includes(key)
+        !['url', 'apiKey', 'model', 'useMainApi', 'requestTimeoutSeconds', 'sendViaTavern', 'max_tokens', 'maxTokens', 'temperature', 'bodyParams', 'excludeBodyParams', 'requestHeaders', 'promptPostProcessing', 'customApiFormat', 'contextToolTransportEnabled'].includes(key)
       )
     ),
   };
@@ -289,7 +292,8 @@ export function getActiveApiPresetName_ACU(chatKey?: string): string {
     preset.apiConfig.excludeBodyParams === current.excludeBodyParams &&
     preset.apiConfig.requestHeaders === current.requestHeaders &&
     preset.apiConfig.promptPostProcessing === current.promptPostProcessing &&
-    preset.apiConfig.customApiFormat === current.customApiFormat
+    preset.apiConfig.customApiFormat === current.customApiFormat &&
+    preset.apiConfig.contextToolTransportEnabled === current.contextToolTransportEnabled
   );
   return matched?.name ?? '';
 }

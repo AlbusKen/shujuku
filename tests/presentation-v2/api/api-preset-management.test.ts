@@ -149,10 +149,12 @@ describe('api preset draft helpers', () => {
     // 草稿与运行时共同保留安全的 merge_tools 默认。
     expect(draft.promptPostProcessing).toBe('merge_tools');
     expect(draft.customApiFormat).toBe('openai_compat');
+    expect(draft.contextToolTransportEnabled).toBe(true);
 
     const preset = apiPresetFromDraft(draft);
     expect(preset.apiConfig.promptPostProcessing).toBe('merge_tools');
     expect(preset.apiConfig.customApiFormat).toBe('openai_compat');
+    expect(preset.apiConfig.contextToolTransportEnabled).toBe(true);
   });
 
   it('旧版含工具后处理映射回五个语义选项', () => {

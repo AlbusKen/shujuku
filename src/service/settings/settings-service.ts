@@ -11,7 +11,7 @@ import { DEFAULT_BUILTIN_PLOT_PRESETS_ACU, DEFAULT_CHAR_CARD_PROMPT_ACU, DEFAULT
 import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU, STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU, SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU, TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU, USER_PREFILL_PROFILE_FORCE_DEFAULT_VERSION_ACU, USER_PREFILL_VECTOR_FORCE_DEFAULT_VERSION_ACU, TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU, TEMPLATE_ASSISTANT_PROMPT_FORCE_DEFAULT_VERSION_ACU, VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU, VECTOR_MEMORY_LEGACY_MIN_SCORE_DEFAULTS_ACU, VECTOR_MEMORY_RECALL_PARAM_KEYS_ACU, VECTOR_MEMORY_RECALL_PARAMS_FORCE_OVERRIDE_VERSION_ACU, VECTOR_MEMORY_SOURCE_TEXT_UPGRADE_VERSION_ACU, buildDefaultAgentWorldbookControl_ACU, buildDefaultAgentWorldbookPromptTemplates_ACU, buildDefaultPlotWorldbookConfig_ACU, buildDefaultContentOptimizationPromptGroup_ACU, defaultWorldbookConfig_ACU, defaultVectorMemoryConfig_ACU } from '../../shared/defaults';
 import { addDataIsolationHistory_ACU, ensureProfileExists_ACU, normalizeDataIsolationHistory_ACU } from '../../data/repositories/isolation-repo';
 import { TABLE_FILL_MAIN_PROMPT_HISTORY_ACU } from '../../shared/defaults-json.js';
-import { STREAMING_FORCE_DISABLE_VERSION_ACU, TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU, TABLE_FILL_TOOL_DEFAULT_OFF_VERSION_ACU } from '../../shared/defaults';
+import { STREAMING_FORCE_DISABLE_VERSION_ACU, TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU, TABLE_FILL_TOOL_DEFAULT_OFF_VERSION_ACU, API_PRESET_CONTEXT_TOOL_BACKFILL_VERSION_ACU } from '../../shared/defaults';
 import { adaptTableFillPromptSegmentsToToolMode_ACU } from '../ai/prompt-builder/table-fill-tools';
 import { CREATIVE_IDENTITY_PROMPT_UPGRADE_VERSION_ACU, CONTENT_SAFETY_PROMPT_FORCE_DEFAULT_VERSION_ACU } from '../../shared/defaults';
 import { applyCreativeIdentityProfileUpgrade_ACU, applyCreativeIdentityVectorUpgrade_ACU } from './creative-identity-upgrade';
@@ -854,6 +854,7 @@ function loadSettingsFromStorage_ACU(): void {
           shouldPersistSettingsAfterLoad_ACU = true;
       }
       forceContentSafetyProfilePromptsOnce_ACU();
+      backfillPresetContextToolTransportOnce_ACU();
 
       if (shouldPersistSettingsAfterLoad_ACU) {
           saveGlobalMeta_ACU();
@@ -1262,6 +1263,42 @@ function forceDisableStreamingOnce_ACU() {
       }
   }
 
+/**
+ * 「API工具调用」开关移入各 API 预设后的一次性迁移：把旧预设缺失（或非布尔）的
+ * apiConfig.contextToolTransportEnabled 补为 true 并落盘。已保存的布尔值（含 false）原样保留，
+ * 不读取已移除的全局开关。保存失败时恢复各预设原值与 marker，下一次加载重试。
+ */
+function backfillPresetContextToolTransportOnce_ACU() {
+      if (!settingsStorageReadyForSave_ACU || !settings_ACU || typeof settings_ACU !== 'object') return;
+      if (settings_ACU.apiPresetContextToolBackfillVersion === API_PRESET_CONTEXT_TOOL_BACKFILL_VERSION_ACU) return;
+      const markerHad = Object.prototype.hasOwnProperty.call(settings_ACU, 'apiPresetContextToolBackfillVersion');
+      const marker = settings_ACU.apiPresetContextToolBackfillVersion;
+      const restorePresets: Array<{ config: Record<string, any>; had: boolean; value: unknown }> = [];
+      try {
+          if (Array.isArray(settings_ACU.apiPresets)) {
+              for (const preset of settings_ACU.apiPresets) {
+                  const config = preset?.apiConfig;
+                  if (!config || typeof config !== 'object' || Array.isArray(config)) continue;
+                  if (typeof config.contextToolTransportEnabled === 'boolean') continue;
+                  restorePresets.push({ config, had: Object.prototype.hasOwnProperty.call(config, 'contextToolTransportEnabled'), value: config.contextToolTransportEnabled });
+                  config.contextToolTransportEnabled = true;
+              }
+          }
+          settings_ACU.apiPresetContextToolBackfillVersion = API_PRESET_CONTEXT_TOOL_BACKFILL_VERSION_ACU;
+          const saved = saveSettings_ACU();
+          if (!saved.saved) throw new Error(saved.error || saved.warning || '设置未保存');
+          logDebug_ACU(`[API预设] API工具调用开关已补齐到 ${restorePresets.length} 个旧预设并记录版本: ${API_PRESET_CONTEXT_TOOL_BACKFILL_VERSION_ACU}`);
+      } catch (error) {
+          for (const item of restorePresets) {
+              if (item.had) item.config.contextToolTransportEnabled = item.value;
+              else delete item.config.contextToolTransportEnabled;
+          }
+          if (markerHad) settings_ACU.apiPresetContextToolBackfillVersion = marker;
+          else delete settings_ACU.apiPresetContextToolBackfillVersion;
+          logWarn_ACU('[API预设] API工具调用开关补齐未保存，下一次加载重试:', error);
+      }
+  }
+
 
 export const API_POST_PROCESSING_UPGRADE_VERSION_ACU = 'api-merge-tools-v1';
 
@@ -1318,8 +1355,6 @@ export   function buildDefaultSettings_ACU() {
           // 续写 / 推演的工具方案全局开关；关闭时请求不带 tools，提示词为纯 JSON 版。
           continuationNativeToolEnabled: false,
           worldSimulationNativeToolEnabled: false,
-          // 上下文工具化传输默认开启；渠道不支持函数调用时在 API 设置里关闭。
-          contextToolTransportEnabled: true,
           discardUnauthorizedTableEditsEnabled: true,
           // [剧情推进] 按剧情任务ID保存的任务级 API 预设覆盖（key=taskId, value=presetName）
           // 不保存入聊天记录或剧情推进预设，只写进插件全局设置。
@@ -1356,6 +1391,7 @@ export   function buildDefaultSettings_ACU() {
           tableFillPromptForceDefaultVersion: '', // [填表提示词] 一次性强制恢复默认提示词版本
           tableFillToolPromptUpgradeVersion: '', // [填表提示词] 工具化默认提示词一次性升级版本
           tableFillToolDefaultOffVersion: '', // [填表提示词] 工具调用默认关闭后的提示词降级版本
+          apiPresetContextToolBackfillVersion: '', // [API预设] API工具调用开关补齐到各预设的一次性迁移版本
           creativeIdentityPromptUpgradeVersion: '', // [创作身份声明] 默认提示词身份句一次性升级版本
           templateAssistantPromptForceDefaultVersion: '', // [AI 改表助手] 一次性强制恢复默认提示词版本
           strictJsonTableFillForceDisableVersion: '', // [填表功能] 一次性关闭严格 JSON 填表版本

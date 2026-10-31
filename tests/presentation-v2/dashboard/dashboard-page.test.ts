@@ -776,25 +776,12 @@ describe("DashboardPage", () => {
       ),
     ).map((button) => button.dataset.acuToggleKey);
     expect(visibleToggleKeys).toEqual([
-      "contextToolTransportEnabled",
       "continuationPageEnabled",
       "worldSimulationPageEnabled",
       "externalImportPageEnabled",
       "contentReplaceEnabled",
       "developerOptionsEnabled",
     ]);
-
-    const apiToolToggle = document.querySelector<HTMLButtonElement>(
-      'button[data-acu-toggle-key="contextToolTransportEnabled"]',
-    )!;
-    expect(apiToolToggle.getAttribute("aria-label")).toBe("API工具调用");
-    expect(apiToolToggle.getAttribute("aria-checked")).toBe("true");
-    expect(apiToolToggle.closest(".acu-dashboard-toggle-row")?.querySelector(".acu-dashboard-toggle-row__desc")).toBeNull();
-    apiToolToggle.click();
-    await new Promise((r) => setTimeout(r, 0));
-    expect(settings.contextToolTransportEnabled).toBe(false);
-    expect(apiToolToggle.getAttribute("aria-checked")).toBe("false");
-    expect(saveSettings).toHaveBeenCalled();
 
     const storageGroup = document.querySelector(
       'div[role="radiogroup"][aria-label="存储模式"]',
@@ -1177,7 +1164,6 @@ describe("DashboardPage", () => {
       ),
     ).map((button) => button.dataset.acuToggleKey);
     expect(visibleToggleKeys).toEqual([
-      "contextToolTransportEnabled",
       "continuationPageEnabled",
       "worldSimulationPageEnabled",
       "externalImportPageEnabled",

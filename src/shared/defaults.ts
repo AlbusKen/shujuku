@@ -249,6 +249,9 @@ export const CONTENT_SAFETY_PROMPT_FORCE_DEFAULT_VERSION_ACU = 'spv9.8-content-s
 // 填表工具调用改为默认关闭（部分渠道带 tools 字段直接报错）：仍是工具版默认主段的提示词一次性降级回正文
 // <tableEdit> 默认；用户改写过的主段保留，开关本身用户可再次手动开启。
 export const TABLE_FILL_TOOL_DEFAULT_OFF_VERSION_ACU = 'spv9.7-table-fill-tool-default-off';
+// 「API工具调用」开关移入各 API 预设后的一次性迁移：旧预设缺失该字段时补为开启并落盘；
+// 已保存的值（含 false）保留，不读取已移除的全局开关。
+export const API_PRESET_CONTEXT_TOOL_BACKFILL_VERSION_ACU = 'spv9.9-api-preset-context-tool-backfill';
 
 
 

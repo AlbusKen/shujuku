@@ -34,8 +34,8 @@ export async function sendCustomApiRequest_ACU(
     config: any, bridgeBody: Record<string, any>, signal?: AbortSignal | null,
 ): Promise<Response> {
     signal?.throwIfAborted();
-    // 发送前最后一步：开关开启时只保留首条消息，其余转为 turn_ 函数；两条分支的响应都在交给调用方前还原。
-    const transport = applyContextToolTransport_ACU(bridgeBody);
+    // 发送前最后一步：预设开关开启时只保留首条消息，其余转为 turn_ 函数；两条分支的响应都在交给调用方前还原。
+    const transport = applyContextToolTransport_ACU(bridgeBody, config?.contextToolTransportEnabled);
     const note = transport.note ? `；${transport.note}` : '';
     const restore = async (response: Response): Promise<Response> => (transport.plan
         ? await rewriteContextToolResponse_ACU(response, transport.plan) : response);
