@@ -1,3 +1,4 @@
+import { runTakeoverRequest_ACU } from '../../shared/takeover-control';
 import { parse as parseYaml } from 'yaml';
 import { pristineFetch_ACU } from '../../data/gateways/pristine-fetch';
 import { getHostRequestHeaders_ACU } from '../../data/gateways/ai-gateway';
@@ -30,7 +31,7 @@ function exclusions(raw: string): string[] {
 
 
 /** 统一自定义发送口；关闭酒馆渠道时只访问预设端点，不作隐式回退。 */
-export async function sendCustomApiRequest_ACU(
+async function sendCustomApiRequestImpl_ACU(
     config: any, bridgeBody: Record<string, any>, signal?: AbortSignal | null,
 ): Promise<Response> {
     signal?.throwIfAborted();
@@ -100,3 +101,6 @@ async function captureProviderResponse_ACU(response: Response, format: ReturnTyp
     const normalized = isSse ? normalizeProviderStream_ACU(raw, format) : JSON.stringify(normalizeProviderReply_ACU(JSON.parse(raw), format));
     return new Response(normalized, { status: response.status, headers: { 'Content-Type': isSse ? 'text/event-stream' : 'application/json' } });
 }
+
+export const sendCustomApiRequest_ACU: typeof sendCustomApiRequestImpl_ACU = (config, body, signal) =>
+    runTakeoverRequest_ACU(merged => sendCustomApiRequestImpl_ACU(config, body, merged), signal);

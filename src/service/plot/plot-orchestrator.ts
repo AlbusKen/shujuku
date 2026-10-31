@@ -1,3 +1,4 @@
+import { isTakeoverEnabled_ACU } from '../../shared/takeover-control';
 /**
  * service/plot/plot-orchestrator.ts — 剧情推进编排逻辑（service 层：纯业务决策）
  * 从 presentation/bootstrap/init.ts 的 GENERATION_AFTER_COMMANDS 回调提取。
@@ -40,6 +41,7 @@ export interface PlotOrchestrationResult {
  * 纯业务逻辑
  */
 export function shouldProcessTavernHelperHook_ACU(options: any): boolean {
+    if (!isTakeoverEnabled_ACU()) return false;
     if (!settings_ACU.plotSettings.enabled || isFlightModeActive_ACU() || isProcessing_Plot_ACU || loopState_ACU.isRetrying || options.should_stream) {
         return false;
     }
@@ -202,6 +204,7 @@ export async function orchestrateTavernHelperHook_ACU(
     options: any,
     runPlanning: PlanningFn,
 ): Promise<TavernHelperHookResult> {
+    if (!isTakeoverEnabled_ACU()) return { action: 'passthrough' };
     // 1. 判断是否应该处理
     if (isProcessing_Plot_ACU && settings_ACU.plotSettings.enabled
         && !isFlightModeActive_ACU() && !isPlotSuppressedByFillModeForCurrentChat_ACU()

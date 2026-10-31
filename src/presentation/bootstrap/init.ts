@@ -1,3 +1,6 @@
+import { captureTakeoverLease_ACU, isTakeoverEnabled_ACU, subscribeTakeoverControl_ACU } from '../../shared/takeover-control';
+import { abortAllActiveRequests_ACU } from '../../service/runtime/state-manager';
+import { stopLoopState_ACU } from '../../service/loop/loop-controller';
 // init.ts — 初始化编排（presentation 层：负责事件绑定、UI 初始化、模块串联）
 // 从 05_core_tail.js 迁入
 
@@ -287,6 +290,8 @@ export   function mainInitialize_ACU() {
               (window as any).original_TavernHelper_generate_ACU = (window as any).TavernHelper.generate;
               (window as any).TavernHelper.generate = async function (...args: any[]) {
                 const options = args[0] || {};
+                if (!isTakeoverEnabled_ACU()) return (window as any).original_TavernHelper_generate_ACU.apply(this, args);
+                const takeoverLease = captureTakeoverLease_ACU();
 
                 // quiet/automatic_trigger 直接透传
                 if (isQuietLikeGeneration_ACU('tavernhelper', { quiet_prompt: options.quiet_prompt }) || options.automatic_trigger) {
@@ -318,7 +323,9 @@ export   function mainInitialize_ACU() {
                 }
 
                 // [重构] 调用 service 层编排函数，传入 UI 规划回调
+                takeoverLease.assertActive();
                 const result = await orchestrateTavernHelperHook_ACU(options, runOptimizationLogicWithUI_ACU);
+                takeoverLease.assertActive();
 
                 switch (result.action) {
                   case 'planned': {
@@ -762,6 +769,7 @@ export   function mainInitialize_ACU() {
           // 保留到正文请求边界，世界书加载层可能吞掉等待取消异常。
           let vectorGenerationSend: VectorSend | null = null;
           const assertVectorSend = (send: VectorSend) => {
+            if (!isTakeoverEnabled_ACU()) send.controller.abort();
             if (send.chat !== SillyTavern_API_ACU.chat || send.chatKey !== currentChatFileIdentifier_ACU
               || send.isolationKey !== getCurrentIsolationKey_ACU()) send.controller.abort();
             send.controller.signal.throwIfAborted();
@@ -784,6 +792,7 @@ export   function mainInitialize_ACU() {
               send.controller.abort();
             }
           };
+          subscribeTakeoverControl_ACU(enabled => { if (!enabled) cancelVectorSend(); });
           const waitForVectorRecall = async (send: VectorSend, userInput: string, lores?: Record<string, any[]>) => {
             activeVectorWait = send;
             try {
@@ -873,6 +882,8 @@ export   function mainInitialize_ACU() {
             catch (error) { releaseVectorSend(pending); throw error; }
           });
           source.on(eventType, async (type: any, params: any, dryRun: any) => {
+            if (!isTakeoverEnabled_ACU()) return;
+            const takeoverLease = captureTakeoverLease_ACU();
             // 固定本次事件的观察器，规划期间的内部生成不得把后续结果串到别轮。
             const generationContext = generationGate_ACU.activeGenerations[generationGate_ACU.activeGenerations.length - 1];
             const debug = generationContext && generationContext.type === type
@@ -975,6 +986,7 @@ export   function mainInitialize_ACU() {
                   warn('纪要召回异常，继续剧情任务与发送。');
                 }
               }
+              takeoverLease.assertActive();
               if (stopRequested) {
                 stopSend();
                 return;
@@ -984,6 +996,7 @@ export   function mainInitialize_ACU() {
                 const result = userFloor
                   ? await orchestrateAfterCommandsStrategy1_ACU(userFloor.message, userFloor.index, runOptimizationLogicWithUI_ACU)
                   : await orchestrateAfterCommandsStrategy2_ACU(originalText, runOptimizationLogicWithUI_ACU);
+                takeoverLease.assertActive();
                 debug?.step('plot_result', { reason: result.action });
                 if (result.action === 'busy') {
                   stopSend();
@@ -1199,3 +1212,13 @@ export   function mainInitialize_ACU() {
       console.error(`数据库自动更新脚本初始化失败：核心API加载失败。宿主能力: ${capabilityDiagnostics}`);
     }
   }
+
+// Pause only this plugin's tasks, never call the host's stop-generation command.
+subscribeTakeoverControl_ACU(enabled => {
+  if (enabled) return;
+  cancelPendingAutoFillEvent_ACU();
+  cancelPendingContentOptimizationEvent_ACU();
+  abortActivePlotPlanning_ACU();
+  abortAllActiveRequests_ACU();
+  stopLoopState_ACU();
+});

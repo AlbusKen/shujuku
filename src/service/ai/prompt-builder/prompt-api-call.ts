@@ -1,3 +1,4 @@
+import { captureTakeoverLease_ACU } from '../../../shared/takeover-control';
 /**
  * service/ai/prompt-builder/prompt-api-call.ts
  * AI API 调用 — prompt 组装 + API 调用 + 流式/非流式响应处理
@@ -72,7 +73,11 @@ export class RetryableAiResponseError_ACU extends Error {
   }
 
   export async function callCustomOpenAI_ACU(dynamicContent: any, abortController: AbortController | null = null, options: any = null) {
+    const takeoverLease = captureTakeoverLease_ACU();
+    takeoverLease.assertActive();
     const localAbortController = abortController || new AbortController();
+    const pauseRequest = () => localAbortController.abort();
+    takeoverLease.signal.addEventListener('abort', pauseRequest, { once: true });
     _set_currentAbortController_ACU(localAbortController);
     trackAbortController_ACU(localAbortController);
     const abortSignal = localAbortController.signal;
@@ -557,6 +562,7 @@ export class RetryableAiResponseError_ACU extends Error {
         });
         throw error;
     } finally {
+        takeoverLease.signal.removeEventListener('abort', pauseRequest);
         untrackAbortController_ACU(localAbortController);
         if (currentAbortController_ACU === localAbortController) {
             _set_currentAbortController_ACU(null);

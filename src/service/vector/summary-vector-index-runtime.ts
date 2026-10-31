@@ -1,3 +1,4 @@
+import { captureTakeoverLease_ACU, isTakeoverEnabled_ACU } from '../../shared/takeover-control';
 import { createEmbeddings_ACU } from '../../data/gateways/vector-embedding-gateway';
 import { createRerankScores_ACU } from '../../data/gateways/vector-rerank-gateway';
 import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
@@ -946,7 +947,10 @@ async function tryRealignSummaryVectorIndexPointerFromDisk_ACU(params: {
 export async function processSummaryVectorIndexBeforeGeneration_ACU(
     options: SummaryVectorIndexRuntimeOptions_ACU = {},
 ): Promise<SummaryVectorIndexRuntimeResult_ACU> {
+    if (!isTakeoverEnabled_ACU()) return { success: false, skipped: true, reason: 'takeover_paused' };
+    const takeoverLease = captureTakeoverLease_ACU(options.signal);
     const assertActive = () => {
+        takeoverLease.assertActive();
         options.signal?.throwIfAborted();
         options.assertActive?.();
     };

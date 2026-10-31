@@ -1,3 +1,4 @@
+import { isTakeoverEnabled_ACU } from '../../shared/takeover-control';
 /**
  * service/table/update-scheduler.ts — 自动更新调度核心逻辑
  * 从 presentation/triggers/settings-ui-sync/settings-ui-trigger.ts 的 triggerAutomaticUpdateIfNeeded_ACU 中提取
@@ -221,6 +222,7 @@ export function checkAutoUpdatePreConditions_ACU(
     /** 稳定原因码：供诊断日志区分失败分支，不承诺为面向用户的文案 */
     code?: 'auto_update_disabled';
 } {
+    if (!isTakeoverEnabled_ACU()) return { canProceed: false, reason: "数据库接管已暂停。", code: 'auto_update_disabled' };
     if (!settings.autoUpdateEnabled) {
         return { canProceed: false, reason: 'Auto update is disabled via settings.', code: 'auto_update_disabled' };
     }

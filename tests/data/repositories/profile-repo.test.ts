@@ -1,3 +1,4 @@
+import { isTakeoverEnabled_ACU, setTakeoverRuntimeEnabled_ACU } from '../../../src/shared/takeover-control';
 /**
  * tests/data/repositories/profile-repo.test.ts
  * Profile 与 GlobalMeta 管理 单元测试
@@ -270,5 +271,24 @@ describe('sanitizeSettingsForProfileSave_ACU', () => {
     expect(result.nested.value).toBe(1);
     result.nested.value = 2;
     expect(input.nested.value).toBe(1);
+  });
+});
+
+
+describe('接管暂停状态冷启动恢复', () => {
+  it('缺失字段保持兼容开启，已保存的false跨重载仍暂停', () => {
+    try {
+      mockStore._store.set('acu_global_meta', JSON.stringify({ takeoverEnabledGlobal: false, plotEnabledGlobal: true }));
+      loadGlobalMeta_ACU();
+      expect(isTakeoverEnabled_ACU()).toBe(false);
+      expect(globalMeta_ACU.plotEnabledGlobal).toBe(true);
+      mockStore._store.set('acu_global_meta', JSON.stringify({ plotEnabledGlobal: true }));
+      loadGlobalMeta_ACU();
+      expect(isTakeoverEnabled_ACU()).toBe(true);
+    } finally { setTakeoverRuntimeEnabled_ACU(true); }
+  });
+  it('损坏的暂停标记不能静默回落为开启', () => {
+    mockStore._store.set('acu_global_meta', JSON.stringify({ takeoverEnabledGlobal: 'false' }));
+    expect(() => loadGlobalMeta_ACU()).toThrow();
   });
 });
