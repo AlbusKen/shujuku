@@ -13,9 +13,9 @@ import { addDataIsolationHistory_ACU, ensureProfileExists_ACU, normalizeDataIsol
 import { TABLE_FILL_MAIN_PROMPT_HISTORY_ACU } from '../../shared/defaults-json.js';
 import { STREAMING_FORCE_DISABLE_VERSION_ACU, TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU, TABLE_FILL_TOOL_DEFAULT_OFF_VERSION_ACU, API_PRESET_CONTEXT_TOOL_BACKFILL_VERSION_ACU } from '../../shared/defaults';
 import { adaptTableFillPromptSegmentsToToolMode_ACU } from '../ai/prompt-builder/table-fill-tools';
-import { CREATIVE_IDENTITY_PROMPT_UPGRADE_VERSION_ACU, CONTENT_SAFETY_PROMPT_FORCE_DEFAULT_VERSION_ACU } from '../../shared/defaults';
+import { CREATIVE_IDENTITY_PROMPT_UPGRADE_VERSION_ACU, CONTENT_SAFETY_PROMPT_FORCE_DEFAULT_VERSION_ACU, CONTENT_SAFETY_PLOT_PRESET_RESTORE_VERSION_ACU } from '../../shared/defaults';
 import { applyCreativeIdentityProfileUpgrade_ACU, applyCreativeIdentityVectorUpgrade_ACU } from './creative-identity-upgrade';
-import { applyContentSafetyProfileDefaults_ACU, CONTENT_SAFETY_PROFILE_PROMPT_KEYS_ACU } from './content-safety-upgrade';
+import { applyContentSafetyProfileDefaults_ACU, CONTENT_SAFETY_PROFILE_PROMPT_KEYS_ACU, restoreCustomPlotPromptGroups_ACU } from './content-safety-upgrade';
 import { upgradeTimeRecallPrefill_ACU } from '../plot/time-recall-prefill';
 import { globalMeta_ACU, loadGlobalMeta_ACU, readProfileSettingsFromStorage_ACU, readProfileTemplateFromStorage_ACU, sanitizeSettingsForProfileSave_ACU, saveGlobalMeta_ACU, writeProfileSettingsToStorage_ACU, writeProfileTemplateToStorage_ACU } from '../../data/repositories/profile-repo';
 import { getCurrentTemplatePresetName_ACU, normalizeTemplatePresetSelectionValue_ACU } from '../../shared/template-preset-utils';
@@ -854,6 +854,7 @@ function loadSettingsFromStorage_ACU(): void {
           shouldPersistSettingsAfterLoad_ACU = true;
       }
       forceContentSafetyProfilePromptsOnce_ACU();
+      restoreContentSafetyPlotPresetsOnce_ACU();
       backfillPresetContextToolTransportOnce_ACU();
 
       if (shouldPersistSettingsAfterLoad_ACU) {
@@ -1171,6 +1172,50 @@ function forceContentSafetyProfilePromptsOnce_ACU(): void {
               else delete settings[item.key];
           }
           logWarn_ACU('[内容声明] 默认提示词更新未保存，下一次加载重试:', error);
+      }
+  }
+
+/**
+ * 1.3.1 内容声明迁移曾把剧情预设的自定义提示词组整组换成默认组，任务标签要求却保留原值，切换预设后验收必然失败。
+ * 迁移已完成且备份存在时，从备份恢复仍保持迁移结果的自定义组；之后改动过的组与内置默认组不变。
+ */
+function restoreContentSafetyPlotPresetsOnce_ACU(): void {
+      if (!settings_ACU || typeof settings_ACU !== 'object') return;
+      const settings = settings_ACU as Record<string, any>;
+      const markerKey = 'contentSafetyPlotPresetRestoreVersion';
+      if (settings[markerKey] === CONTENT_SAFETY_PLOT_PRESET_RESTORE_VERSION_ACU) return;
+      if (settings.contentSafetyPromptForceDefaultVersion !== CONTENT_SAFETY_PROMPT_FORCE_DEFAULT_VERSION_ACU) return;
+      const currentPlot = settings.plotSettings;
+      if (!currentPlot || typeof currentPlot !== 'object' || typeof settings.contentSafetyPromptBackup !== 'string') {
+          logDebug_ACU('[内容声明] 无迁移备份，剧情预设提示词保持不变。');
+          return;
+      }
+      let backupPlot: unknown;
+      try {
+          backupPlot = JSON.parse(settings.contentSafetyPromptBackup)?.plotSettings;
+      } catch (error) {
+          logWarn_ACU('[内容声明] 迁移备份无法解析，剧情预设提示词未恢复:', error);
+          return;
+      }
+      if (!backupPlot || typeof backupPlot !== 'object' || Array.isArray(backupPlot)) {
+          logDebug_ACU('[内容声明] 迁移备份不含剧情设置，剧情预设提示词保持不变。');
+          return;
+      }
+      const markerHad = Object.prototype.hasOwnProperty.call(settings, markerKey);
+      const previousMarker = settings[markerKey];
+      const { plotSettings, restoredCount } = restoreCustomPlotPromptGroups_ACU(currentPlot, backupPlot as Record<string, any>);
+      settings[markerKey] = CONTENT_SAFETY_PLOT_PRESET_RESTORE_VERSION_ACU;
+      if (restoredCount === 0) return;
+      try {
+          settings.plotSettings = plotSettings;
+          const saved = saveSettings_ACU();
+          if (!saved.saved) throw new Error(saved.error || saved.warning || '设置未保存');
+          logDebug_ACU(`[内容声明] 已从迁移备份恢复 ${restoredCount} 组剧情预设提示词。`);
+      } catch (error) {
+          settings.plotSettings = currentPlot;
+          if (markerHad) settings[markerKey] = previousMarker;
+          else delete settings[markerKey];
+          logWarn_ACU('[内容声明] 剧情预设提示词恢复未保存，下一次加载重试:', error);
       }
   }
 

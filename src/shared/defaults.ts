@@ -252,6 +252,9 @@ export const TABLE_FILL_TOOL_DEFAULT_OFF_VERSION_ACU = 'spv9.7-table-fill-tool-d
 // 「API工具调用」开关移入各 API 预设后的一次性迁移：旧预设缺失该字段时补为开启并落盘；
 // 已保存的值（含 false）保留，不读取已移除的全局开关。
 export const API_PRESET_CONTEXT_TOOL_BACKFILL_VERSION_ACU = 'spv9.9-api-preset-context-tool-backfill';
+// 1.3.1 内容声明迁移曾把剧情预设的自定义提示词组整组换成默认组：从迁移备份一次性恢复仍保持迁移结果的自定义组，
+// 之后用户改动过的组与内置默认组不变。
+export const CONTENT_SAFETY_PLOT_PRESET_RESTORE_VERSION_ACU = 'spv9.10-content-safety-plot-preset-restore';
 
 
 

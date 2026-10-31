@@ -169,6 +169,7 @@ vi.mock('../../../src/shared/defaults', () => ({
   USER_PREFILL_VECTOR_FORCE_DEFAULT_VERSION_ACU: 'test-user-prefill-vector-force-default',
   CREATIVE_IDENTITY_PROMPT_UPGRADE_VERSION_ACU: 'spv9.6-creative-identity-prompt',
   CONTENT_SAFETY_PROMPT_FORCE_DEFAULT_VERSION_ACU: 'test-content-safety-default-prompts',
+  CONTENT_SAFETY_PLOT_PRESET_RESTORE_VERSION_ACU: 'test-content-safety-plot-preset-restore',
 
   defaultWorldbookConfig_ACU: {
     zeroTkOccupyMode: false,
