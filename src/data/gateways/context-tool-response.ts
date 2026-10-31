@@ -2,6 +2,7 @@
  * data/gateways/context-tool-response.ts — 上下文工具化传输（响应侧）
  *
  * emit 模式：把输出函数的 content 参数还原成普通正文并去掉这次调用，下游现有的文本解析链照常读取。
+ * 参数里没有可用的 content 时，退回参数中全部字符串值（按出现顺序换行拼接），避免回复正文随调用一起丢失。
  * 模型在函数之外另写的正文先暂存，只有输出函数没有给出正文时才采用。
  * passthrough 模式：正文与原有工具原样保留，只去掉对 turn_ 函数的误调用。
  * 覆盖 OpenAI 兼容、Anthropic Messages、Gemini 三种形态的流式与非流式响应。
@@ -183,9 +184,55 @@ export function readEmitContent_ACU(args: unknown): string {
   return '';
 }
 
-/** 输出函数给出非空白正文时以它为准，否则采用函数之外的正文。 */
-function pickReply_ACU(emitted: string, plain: string): string {
-  return emitted.trim() ? emitted : plain;
+/** 读出 JSON 源码里全部字符串值（跳过键名），按出现顺序返回；末尾截断的字符串取已到达的部分。 */
+function collectJsonStringValues_ACU(source: string): string[] {
+  const values: string[] = [];
+  let at = 0;
+  while (at < source.length) {
+    if (source[at] !== '"') { at += 1; continue; }
+    let end = at + 1;
+    let escaped = false;
+    while (end < source.length && (escaped || source[end] !== '"')) {
+      escaped = !escaped && source[end] === '\\';
+      end += 1;
+    }
+    let next = end + 1;
+    while (next < source.length && /\s/.test(source[next])) next += 1;
+    if (source[next] !== ':') {
+      const decoded = decodeJsonStringBody_ACU(source.slice(at + 1, end));
+      if (decoded) values.push(decoded);
+    }
+    at = end + 1;
+  }
+  return values;
+}
+
+/** 规范转义按 JSON 解码；截断、裸换行等不规范写法交给增量解码器逐字还原。 */
+function decodeJsonStringBody_ACU(body: string): string {
+  try { return JSON.parse(`"${body}"`); } catch { /* 交给增量解码器。 */ }
+  const decoder = new ContentArgumentDecoder_ACU();
+  return decoder.feed(`{"content":"${body}`) + decoder.finish();
+}
+
+/** content 缺失时的退回正文：JSON 参数取全部字符串值按出现顺序换行拼接；非 JSON 参数整段即回复。 */
+export function readEmitFallbackText_ACU(args: unknown): string {
+  let source = '';
+  if (typeof args === 'string') source = args;
+  else if (args && typeof args === 'object') {
+    try { source = JSON.stringify(args); } catch { return ''; }
+  }
+  const trimmed = source.trimStart();
+  if (!trimmed) return '';
+  if (!/^[{["]/.test(trimmed)) return source;
+  return collectJsonStringValues_ACU(trimmed).join('\n');
+}
+
+/** 输出函数的 content 优先；没有时采用参数里的其余字符串值；都没有才采用函数之外的正文。 */
+function pickReply_ACU(emitted: readonly string[], fallbacks: readonly string[], plain: string): string {
+  const content = longest_ACU(emitted);
+  if (content.trim()) return content;
+  const fallback = longest_ACU(fallbacks);
+  return fallback.trim() ? fallback : plain;
 }
 
 /** 模型偶尔重复调用输出函数，取最长的一次。 */
@@ -201,14 +248,18 @@ function rewriteOpenAiChoices_ACU(choices: unknown[], plan: ContextToolTransport
     if (!message || typeof message !== 'object' || !Array.isArray(message.tool_calls)) continue;
     const kept: unknown[] = [];
     const emitted: string[] = [];
+    const fallbacks: string[] = [];
     for (const call of message.tool_calls) {
       const kind = toolKind_ACU(call?.function?.name, plan);
       if (kind === 'keep') kept.push(call);
-      else if (kind === 'emit') emitted.push(readEmitContent_ACU(call?.function?.arguments));
+      else if (kind === 'emit') {
+        emitted.push(readEmitContent_ACU(call?.function?.arguments));
+        fallbacks.push(readEmitFallbackText_ACU(call?.function?.arguments));
+      }
     }
     if (kept.length === message.tool_calls.length) continue;
     if (emitted.length > 0) {
-      message.content = pickReply_ACU(longest_ACU(emitted), typeof message.content === 'string' ? message.content : '');
+      message.content = pickReply_ACU(emitted, fallbacks, typeof message.content === 'string' ? message.content : '');
     }
     if (kept.length > 0) {
       message.tool_calls = kept;
@@ -223,6 +274,7 @@ function rewriteOpenAiChoices_ACU(choices: unknown[], plan: ContextToolTransport
 function rewriteAnthropicMessage_ACU(record: Record<string, any>, plan: ContextToolTransportPlan_ACU): string | undefined {
   const kept: unknown[] = [];
   const emitted: string[] = [];
+  const fallbacks: string[] = [];
   let plain = '';
   let touched = false;
   let clientCalls = 0;
@@ -232,7 +284,10 @@ function rewriteAnthropicMessage_ACU(record: Record<string, any>, plan: ContextT
       const kind = toolKind_ACU(block.name, plan);
       if (kind !== 'keep') {
         touched = true;
-        if (kind === 'emit') emitted.push(readEmitContent_ACU(block.input));
+        if (kind === 'emit') {
+          emitted.push(readEmitContent_ACU(block.input));
+          fallbacks.push(readEmitFallbackText_ACU(block.input));
+        }
         continue;
       }
       clientCalls += 1;
@@ -246,7 +301,7 @@ function rewriteAnthropicMessage_ACU(record: Record<string, any>, plan: ContextT
     record.content = kept;
     return undefined;
   }
-  const text = pickReply_ACU(longest_ACU(emitted), plain);
+  const text = pickReply_ACU(emitted, fallbacks, plain);
   record.content = [{ type: 'text', text }, ...kept.filter((block: any) => block?.type !== 'text')];
   return text;
 }
@@ -255,6 +310,7 @@ function rewriteAnthropicMessage_ACU(record: Record<string, any>, plan: ContextT
 function rewriteGeminiParts_ACU(parts: unknown[], plan: ContextToolTransportPlan_ACU): { parts: unknown[]; reply: string | undefined } {
   const kept: unknown[] = [];
   const emitted: string[] = [];
+  const fallbacks: string[] = [];
   let plain = '';
   let signature: unknown;
   let touched = false;
@@ -267,6 +323,7 @@ function rewriteGeminiParts_ACU(parts: unknown[], plan: ContextToolTransportPlan
         touched = true;
         if (kind === 'emit') {
           emitted.push(readEmitContent_ACU(call.args));
+          fallbacks.push(readEmitFallbackText_ACU(call.args));
           if (signature === undefined && part?.thoughtSignature !== undefined) signature = part.thoughtSignature;
         }
         continue;
@@ -277,7 +334,7 @@ function rewriteGeminiParts_ACU(parts: unknown[], plan: ContextToolTransportPlan
   }
   if (!touched) return { parts, reply: undefined };
   if (emitted.length === 0) return { parts: kept, reply: undefined };
-  const reply = pickReply_ACU(longest_ACU(emitted), plain);
+  const reply = pickReply_ACU(emitted, fallbacks, plain);
   const textPart: Record<string, unknown> = { text: reply };
   if (signature !== undefined) textPart.thoughtSignature = signature;
   const isPlainText = (value: unknown): boolean => !!value && typeof value === 'object'
@@ -318,6 +375,10 @@ interface StreamSlot_ACU {
   named: boolean;
   /** 已解出的正文，用于对整段下发的参数去重。 */
   received: string;
+  /** 参数原文：字符串片段依次拼接，整段对象取最新一份；content 缺失时据此退回正文。 */
+  rawArgs: string;
+  /** Gemini 流式参数里 $.content 之外路径的字符串片段。 */
+  partialOther: string;
 }
 
 interface StreamChoiceState_ACU {
@@ -397,7 +458,7 @@ export class ContextToolStreamRewriter_ACU {
     const named = typeof name === 'string' && name !== '';
     if (existing && (existing.named || !named)) return existing;
     const kind: TransportToolKind_ACU = named ? toolKind_ACU(name, this.plan) : this.plan.mode === 'emit' ? 'drop' : 'keep';
-    const slot: StreamSlot_ACU = { kind, decoder: new ContentArgumentDecoder_ACU(), named, received: '' };
+    const slot: StreamSlot_ACU = { kind, decoder: new ContentArgumentDecoder_ACU(), named, received: '', rawArgs: '', partialOther: '' };
     state.slots.set(index, slot);
     if (kind === 'keep') state.keptCalls += 1;
     return slot;
@@ -409,9 +470,28 @@ export class ContextToolStreamRewriter_ACU {
     let out = '';
     for (const slot of state.slots.values()) if (slot.kind === 'emit') out += slot.decoder.finish();
     state.emitted += out;
-    if (this.plan.mode === 'emit' && !state.emitted.trim()) out += state.held;
+    if (this.plan.mode === 'emit' && !state.emitted.trim()) {
+      const fallback = this.emitFallback(state);
+      if (fallback) {
+        out += fallback;
+        state.emitted += fallback;
+      } else {
+        out += state.held;
+      }
+    }
     state.held = '';
     return out;
+  }
+
+  /** 输出函数没有给出 content 时，取参数里其余字符串值；多次调用取最长一份。 */
+  private emitFallback(state: StreamChoiceState_ACU): string {
+    let best = '';
+    for (const slot of state.slots.values()) {
+      if (slot.kind !== 'emit') continue;
+      const text = readEmitFallbackText_ACU(slot.rawArgs) || slot.partialOther;
+      if (text.trim() && text.length > best.length) best = text;
+    }
+    return best;
   }
 
   private tailEvents(state: StreamChoiceState_ACU, index: number): InjectedSseEvent_ACU[] {
@@ -430,8 +510,10 @@ export class ContextToolStreamRewriter_ACU {
   private absorbEmit(state: StreamChoiceState_ACU, slot: StreamSlot_ACU, args: unknown): string {
     let text = '';
     if (typeof args === 'string') {
+      slot.rawArgs += args;
       text = slot.decoder.feed(args);
     } else if (args && typeof args === 'object') {
+      try { slot.rawArgs = JSON.stringify(args); } catch { /* 无法序列化的参数不参与退回。 */ }
       const full = readEmitContent_ACU(args);
       if (full.startsWith(slot.received)) text = full.slice(slot.received.length);
       else if (!slot.received.startsWith(full)) text = full;
@@ -516,7 +598,9 @@ export class ContextToolStreamRewriter_ACU {
   private geminiSlot(state: StreamChoiceState_ACU, call: Record<string, any>): StreamSlot_ACU | undefined {
     if (typeof call.name !== 'string' || !call.name) return state.activeGemini;
     const kind = toolKind_ACU(call.name, this.plan);
-    const slot: StreamSlot_ACU = { kind, decoder: new ContentArgumentDecoder_ACU(), named: true, received: '' };
+    const slot: StreamSlot_ACU = { kind, decoder: new ContentArgumentDecoder_ACU(), named: true, received: '', rawArgs: '', partialOther: '' };
+    // 登记到 slots，流结束时与其他方言一样统一收尾和退回。
+    state.slots.set(state.slots.size, slot);
     if (kind === 'keep') state.keptCalls += 1;
     state.activeGemini = slot;
     return slot;
@@ -546,6 +630,7 @@ export class ContextToolStreamRewriter_ACU {
               state.emitted += partial;
               out += partial;
             }
+            slot.partialOther += readPartialOtherStrings_ACU(call.partialArgs);
             if (call.args !== undefined) out += this.absorbEmit(state, slot, call.args);
           }
           if (call.willContinue !== true) state.activeGemini = undefined;
@@ -578,6 +663,20 @@ function readPartialContent_ACU(partialArgs: unknown): string {
     if (!fragment || typeof fragment !== 'object') continue;
     const record = fragment as Record<string, unknown>;
     if (typeof record.jsonPath === 'string' && record.jsonPath.trim() === '$.content' && typeof record.stringValue === 'string') {
+      text += record.stringValue;
+    }
+  }
+  return text;
+}
+
+/** Gemini 流式参数片段里 $.content 之外路径的字符串值，content 缺失时退回使用。 */
+function readPartialOtherStrings_ACU(partialArgs: unknown): string {
+  if (!Array.isArray(partialArgs)) return '';
+  let text = '';
+  for (const fragment of partialArgs) {
+    if (!fragment || typeof fragment !== 'object') continue;
+    const record = fragment as Record<string, unknown>;
+    if (typeof record.jsonPath === 'string' && record.jsonPath.trim() !== '$.content' && typeof record.stringValue === 'string') {
       text += record.stringValue;
     }
   }
