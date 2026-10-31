@@ -379,14 +379,14 @@ describe('orchestrateAfterCommandsStrategy2_ACU', () => {
 });
 
 describe('剧情规划中止来源与任务生命周期', () => {
-  it.each(['task_action', 'host_stop'] as const)('%s 只中止当前任务并准确记录来源', async source => {
+  it.each(['task_action', 'host_stop', 'takeover_paused'] as const)('%s 只中止当前任务并准确记录来源', async source => {
     let complete!: (value: any) => void;
     mockRunOptimization.mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
     const pending = runOptimizationLogicWithUI_ACU('本轮原文');
     const action = vi.mocked(beginNoticeTask_ACU).mock.calls.at(-1)![1]!.action!;
     expect(mockAbort).not.toHaveBeenCalled();
     if (source === 'task_action') await action.run();
-    else expect(abortActivePlotPlanning_ACU()).toBe(true);
+    else expect(abortActivePlotPlanning_ACU(source)).toBe(true);
     expect(mockAbort).toHaveBeenCalledOnce();
     expect(logDebug_ACU).toHaveBeenCalledExactlyOnceWith('[剧情推进] 收到规划中止请求。', { source });
     complete({ success: true, finalMessage: '迟到结果', successCount: 1 });

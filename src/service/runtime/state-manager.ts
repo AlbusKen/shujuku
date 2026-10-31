@@ -151,24 +151,58 @@ function hasFreshUserGenerationTrigger_ACU() {
   const chat = getChatArray_ACU();
   const id = generationGate_ACU.lastUserMessageId;
   const msg = (chat && typeof id === 'number') ? chat[id] : null;
-  const hasFreshUserMessage = !!(msg && msg.is_user && id === (chat.length - 1) && isRecentUserSend_ACU());
+  const isCurrentRecordedUserMessage = !!(msg && msg.is_user && id === (chat.length - 1));
+  const hasFreshUserMessage = isCurrentRecordedUserMessage && isRecentUserSend_ACU();
   const hasFreshIntent = isRecentUserSendIntent_ACU();
-  return { hasFreshUserMessage, hasFreshIntent, result: hasFreshUserMessage || hasFreshIntent };
+  const lastFloorIsUser = !!(chat && chat.length > 0 && chat[chat.length - 1]?.is_user);
+  return { hasFreshUserMessage, hasFreshIntent, isCurrentRecordedUserMessage, lastFloorIsUser, result: hasFreshUserMessage || hasFreshIntent };
+}
+
+/**
+ * 剧情推进门控原因：fresh_* 表示进入规划，其余为跳过原因。
+ * stale_user_message：最后一楼是已记录的用户发送，但已超出触发时间窗；
+ * untracked_user_message：最后一楼是用户消息，但不是最近记录的那次发送。
+ */
+export type PlotGenerationGateReason_ACU =
+  | 'fresh_user_message'
+  | 'fresh_send_intent'
+  | 'takeover_paused'
+  | 'dry_run'
+  | 'plot_disabled'
+  | 'flight_mode_or_retrying'
+  | 'fill_mode_vector'
+  | 'quiet_generation'
+  | 'automatic_trigger'
+  | 'stale_user_message'
+  | 'untracked_user_message'
+  | 'no_user_trigger';
+
+export interface PlotGenerationGateDecision_ACU { process: boolean; reason: PlotGenerationGateReason_ACU }
+
+export function evaluatePlotForGeneration_ACU(type: any, params: any, dryRun: any): PlotGenerationGateDecision_ACU {
+  const skip = (reason: PlotGenerationGateReason_ACU): PlotGenerationGateDecision_ACU => ({ process: false, reason });
+  if (!isTakeoverEnabled_ACU()) return skip('takeover_paused');
+  if (dryRun) return skip('dry_run');
+  if (!settings_ACU?.plotSettings?.enabled) return skip('plot_disabled');
+  // 与规划内层和 TavernHelper 入口一致：经典/飞行模式以及重试不接管普通发送。
+  if (isFlightModeActive_ACU() || loopState_ACU.isRetrying) return skip('flight_mode_or_retrying');
+  // 向量表格模式只做向量召回，不触发剧情推进。
+  if (isPlotSuppressedByFillModeForCurrentChat_ACU()) return skip('fill_mode_vector');
+  if (isQuietLikeGeneration_ACU(type, params)) return skip('quiet_generation');
+  if (params?.automatic_trigger) return skip('automatic_trigger');
+  const fresh = hasFreshUserGenerationTrigger_ACU();
+  let decision: PlotGenerationGateDecision_ACU;
+  if (fresh.hasFreshUserMessage) decision = { process: true, reason: 'fresh_user_message' };
+  else if (fresh.hasFreshIntent) decision = { process: true, reason: 'fresh_send_intent' };
+  else if (fresh.isCurrentRecordedUserMessage) decision = skip('stale_user_message');
+  else if (fresh.lastFloorIsUser) decision = skip('untracked_user_message');
+  else decision = skip('no_user_trigger');
+  logDebug_ACU(`[状态管理] shouldProcessPlot: type=${type}, dryRun=${dryRun}, freshMsg=${fresh.hasFreshUserMessage}, freshIntent=${fresh.hasFreshIntent}, result=${decision.process}, reason=${decision.reason}`);
+  return decision;
 }
 
 export function shouldProcessPlotForGeneration_ACU(type: any, params: any, dryRun: any) {
-  if (!isTakeoverEnabled_ACU()) return false;
-  if (dryRun) return false;
-  if (!settings_ACU?.plotSettings?.enabled) return false;
-  // 与规划内层和 TavernHelper 入口一致：经典/飞行模式以及重试不接管普通发送。
-  if (isFlightModeActive_ACU() || loopState_ACU.isRetrying) return false;
-  // 向量表格模式只做向量召回，不触发剧情推进。
-  if (isPlotSuppressedByFillModeForCurrentChat_ACU()) return false;
-  if (isQuietLikeGeneration_ACU(type, params)) return false;
-  if (params?.automatic_trigger) return false;
-  const fresh = hasFreshUserGenerationTrigger_ACU();
-  logDebug_ACU(`[状态管理] shouldProcessPlot: type=${type}, dryRun=${dryRun}, freshMsg=${fresh.hasFreshUserMessage}, freshIntent=${fresh.hasFreshIntent}, result=${fresh.result}`);
-  return fresh.result;
+  return evaluatePlotForGeneration_ACU(type, params, dryRun).process;
 }
 
 export function shouldProcessSummaryVectorIndexForGeneration_ACU(type: any, params: any, dryRun: any) {

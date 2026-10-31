@@ -4,7 +4,7 @@ import { stopLoopState_ACU } from '../../service/loop/loop-controller';
 // init.ts — 初始化编排（presentation 层：负责事件绑定、UI 初始化、模块串联）
 // 从 05_core_tail.js 迁入
 
-import { cancelPendingChatMutationRefresh_ACU, scheduleChatMutationRefresh_ACU } from './chat-mutation-scheduler';
+import { cancelPendingChatMutationRefresh_ACU, flushChatMutationRefresh_ACU, scheduleChatMutationRefresh_ACU } from './chat-mutation-scheduler';
 import { installHostEventWaitGate_ACU, installPlotSendEventGate_ACU, redirectPlotSendEvent_ACU } from './plot-send-event-gate';
 import { PassiveCompletionReceiver_ACU } from './passive-completion-receiver';
 import { runWithAbortSignal_ACU } from '../../shared/abort-signal';
@@ -15,7 +15,7 @@ import { attemptToLoadCoreApis_ACU } from '../triggers/settings-ui-sync/settings
 import { formatHostCapabilities_ACU, getLastHostCapabilities_ACU } from '../../shared/host-compat/tavern-helper-compat';
 import { ensureInitialSeedCheckpoint_ACU, handleChatCompletionReady_ACU, loadPresetAndCleanCharacterData_ACU } from '../../service/runtime/helpers-remaining';
 import { SillyTavern_API_ACU, type ACUMessage } from '../../shared/host-api';
-import { consumeGenerationContextForEnded_ACU, currentChatFileIdentifier_ACU, discardLatestGenerationContext_ACU, generationGate_ACU, getCurrentIsolationKey_ACU, markUserSendIntent_ACU, isProcessing_Plot_ACU, isQuietLikeGeneration_ACU, isRecentUserSendIntent_ACU, loopState_ACU, recordGenerationContext_ACU, recordLastUserSend_ACU, settings_ACU, shouldProcessPlotForGeneration_ACU, shouldProcessSummaryVectorIndexForGeneration_ACU, _set_allChatMessages_ACU, _set_currentChatFileIdentifier_ACU, _set_currentJsonTableData_ACU, _set_independentTableStates_ACU, _set_lastTotalAiMessages_ACU, _set_tempPlotToSave_ACU, _set_wasStoppedByUser_ACU} from '../../service/runtime/state-manager';
+import { consumeGenerationContextForEnded_ACU, currentChatFileIdentifier_ACU, discardLatestGenerationContext_ACU, generationGate_ACU, getCurrentIsolationKey_ACU, markUserSendIntent_ACU, isProcessing_Plot_ACU, isQuietLikeGeneration_ACU, isRecentUserSendIntent_ACU, loopState_ACU, recordGenerationContext_ACU, recordLastUserSend_ACU, settings_ACU, evaluatePlotForGeneration_ACU, shouldProcessPlotForGeneration_ACU, shouldProcessSummaryVectorIndexForGeneration_ACU, _set_allChatMessages_ACU, _set_currentChatFileIdentifier_ACU, _set_currentJsonTableData_ACU, _set_independentTableStates_ACU, _set_lastTotalAiMessages_ACU, _set_tempPlotToSave_ACU, _set_wasStoppedByUser_ACU} from '../../service/runtime/state-manager';
 import { applyTemplateScopeForCurrentChat_ACU, loadSettings_ACU } from '../../service/settings/settings-service';
 import { resetScriptStateForNewChat_ACU } from '../../service/worldbook/injection-engine';
 import { resetPlotAgentWorldbookSessionSnapshot_ACU } from '../../service/agent/agent-worldbook-takeover';
@@ -907,9 +907,12 @@ export   function mainInitialize_ACU() {
             }
             const recall = shouldProcessSummaryVectorIndexForGeneration_ACU(type, params, dryRun);
             const vectorOnly = getVectorPipelinePlanForCurrentChat_ACU()?.kind === 'vector';
-            const plan = !vectorOnly && shouldProcessPlotForGeneration_ACU(type, params, dryRun);
-            debug?.step('plot_start', { plan, recall, freshIntent: isRecentUserSendIntent_ACU() });
-            if (!recall && !plan) { debug?.step('plot_skip', { reason: 'disabled_or_ineligible' }); return; }
+            const planGate = vectorOnly ? null : evaluatePlotForGeneration_ACU(type, params, dryRun);
+            const plan = planGate?.process === true;
+            debug?.step('plot_start', { plan, recall, freshIntent: isRecentUserSendIntent_ACU(), ...(planGate ? { reason: planGate.reason } : {}) });
+            // #59：最后一楼是本次记录的用户发送但已超出触发时间窗时，提示本轮未执行剧情推进。
+            if (planGate?.reason === 'stale_user_message') showToastr_ACU('warning', '距离本次发送已超过触发时间窗，本轮未执行剧情推进。', '剧情推进');
+            if (!recall && !plan) { debug?.step('plot_skip', { reason: vectorOnly ? 'vector_only' : (planGate?.reason ?? 'disabled_or_ineligible') }); return; }
             const input = getSendTextareaValue_ACU();
             const pendingInput = isPendingDisguiseGenerationType_ACU(type) && !!input.trim();
             const chat = SillyTavern_API_ACU.chat;
@@ -1077,7 +1080,16 @@ export   function mainInitialize_ACU() {
                     cancelPendingContentOptimizationEvent_ACU();
                     cancelPendingAutoFillEvent_ACU();
                     logDebug_ACU(`ACU ${evName} event detected. Triggering data reload and merge from chat history.`);
-                    scheduleChatMutationRefresh_ACU(evName === 'MESSAGE_DELETED' ? 'chat_modified_deleted' : 'chat_modified_swiped');
+                    if (evName !== 'MESSAGE_DELETED') {
+                        scheduleChatMutationRefresh_ACU('chat_modified_swiped');
+                        return;
+                    }
+                    // #56：宿主重生成删除旧回复后 await 本事件，随后才读取世界书组装正文；
+                    // 这里等回滚与世界书刷新完成，避免新请求携带被替换回复派生的表格条目。
+                    const refreshed = await flushChatMutationRefresh_ACU('chat_modified_deleted');
+                    if (!refreshed.ok || refreshed.worldbookFailed) {
+                        showToastr_ACU('warning', '楼层删除后数据库世界书未能刷新，接下来的生成可能仍携带旧的表格内容。', '数据库');
+                    }
                 });
             }
         });
@@ -1218,7 +1230,7 @@ subscribeTakeoverControl_ACU(enabled => {
   if (enabled) return;
   cancelPendingAutoFillEvent_ACU();
   cancelPendingContentOptimizationEvent_ACU();
-  abortActivePlotPlanning_ACU();
+  abortActivePlotPlanning_ACU('takeover_paused');
   abortAllActiveRequests_ACU();
   stopLoopState_ACU();
 });

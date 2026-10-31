@@ -50,6 +50,7 @@ import {
   hasActiveContentGeneration_ACU,
   isRecentUserSend_ACU,
   shouldProcessPlotForGeneration_ACU,
+  evaluatePlotForGeneration_ACU,
   consumeGenerationContextForEnded_ACU,
   discardLatestGenerationContext_ACU,
   getCurrentIsolationKey_ACU,
@@ -361,6 +362,24 @@ describe('shouldProcessPlotForGeneration_ACU', () => {
     generationGate_ACU.lastUserMessageAt = 0;
     generationGate_ACU.lastUserSendIntentAt = 0;
     expect(shouldProcessPlotForGeneration_ACU('normal', {}, false)).toBe(false);
+  });
+
+  it('跳过时给出可区分的原因码，触发时间窗过期单独标识', () => {
+    _set_settings_ACU({ plotSettings: { enabled: true } });
+    mockGetChatArray.mockReturnValue([{ is_user: false, mes: '开场' }, { is_user: true, mes: '你好' }]);
+    generationGate_ACU.lastUserSendIntentAt = 0;
+    generationGate_ACU.lastUserMessageId = 1;
+    generationGate_ACU.lastUserMessageAt = Date.now() - USER_SEND_TRIGGER_TTL_MS_ACU - 1;
+    expect(evaluatePlotForGeneration_ACU('normal', {}, false)).toEqual({ process: false, reason: 'stale_user_message' });
+    generationGate_ACU.lastUserMessageId = 0;
+    expect(evaluatePlotForGeneration_ACU('normal', {}, false)).toEqual({ process: false, reason: 'untracked_user_message' });
+    mockGetChatArray.mockReturnValue([{ is_user: false, mes: '开场' }]);
+    expect(evaluatePlotForGeneration_ACU('normal', {}, false)).toEqual({ process: false, reason: 'no_user_trigger' });
+    expect(evaluatePlotForGeneration_ACU('normal', {}, true)).toEqual({ process: false, reason: 'dry_run' });
+    expect(evaluatePlotForGeneration_ACU('quiet', {}, false)).toEqual({ process: false, reason: 'quiet_generation' });
+    expect(evaluatePlotForGeneration_ACU('normal', { automatic_trigger: true }, false)).toEqual({ process: false, reason: 'automatic_trigger' });
+    generationGate_ACU.lastUserSendIntentAt = Date.now();
+    expect(evaluatePlotForGeneration_ACU('normal', {}, false)).toEqual({ process: true, reason: 'fresh_send_intent' });
   });
 });
 

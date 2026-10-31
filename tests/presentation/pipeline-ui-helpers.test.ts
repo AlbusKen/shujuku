@@ -138,4 +138,14 @@ describe('refreshMergedDataAndNotifyWithUI_ACU UI 可见性裁剪', () => {
     await runWithTimers(refreshMergedDataAndNotifyWithUI_ACU());
     expect(notify).toHaveBeenCalledTimes(1);
   });
+
+  it('awaitFrontendReadback: false 时照常通知前端但不等待回读窗口', async () => {
+    let settled = false;
+    const operation = refreshMergedDataAndNotifyWithUI_ACU({ awaitFrontendReadback: false }).finally(() => { settled = true; });
+    await vi.runAllTicks();
+    await operation;
+    expect(settled).toBe(true);
+    expect(notify).toHaveBeenCalledTimes(1);
+  });
+
 });

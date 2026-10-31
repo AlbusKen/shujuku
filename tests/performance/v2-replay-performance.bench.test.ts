@@ -122,6 +122,32 @@ describe('阶段 J：长历史 replay 性能基准（本地可复现）', () => 
     console.table({ yield_run: { elapsedMs: elapsed.toFixed(1), yieldCount: m?.yieldCount, frameCount: m?.frameCount } });
   });
 
+  it('#58：400 帧规模冷 replay 与 62 帧对照的耗时与计数', async () => {
+    const large = buildLongHistoryFixture_ACU(400);
+    // warm-up 后各跑一次冷 replay；每帧耗时显著上升说明存在非线性增长。
+    await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+    const startBase = performance.now();
+    const base = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+    const baseElapsed = performance.now() - startBase;
+    const startLarge = performance.now();
+    const scaled = await loadTableStateFromFramesV2Detailed_ACU(large.chat, '', { updateRuntimeState: false });
+    const largeElapsed = performance.now() - startLarge;
+    const row = (elapsed: number, frames: number, m: any) => ({
+      elapsedMs: elapsed.toFixed(1),
+      perFrameMs: (elapsed / frames).toFixed(2),
+      frameCount: m?.frameCount,
+      sqlOperationCount: m?.sqlOperationCount,
+      tableAliasBuildCount: m?.tableAliasBuildCount,
+      aliasInvalidateCount: m?.aliasInvalidateCount,
+    });
+    // eslint-disable-next-line no-console
+    console.table({
+      frames_62: row(baseElapsed, chat.length, base?.metrics),
+      frames_400: row(largeElapsed, large.chat.length, scaled?.metrics),
+    });
+  }, 120_000);
+
+
   it('宿主当前聊天回放缓存：命中结果与冷回放一致、副作用调用重放 schedule、帧原地改写后失效', async () => {
     const hostChat = buildLongHistoryFixture_ACU().chat;
     // 夹具日志不带填表事件；为尾部两帧补上事件，使 schedule 重放有可比内容。

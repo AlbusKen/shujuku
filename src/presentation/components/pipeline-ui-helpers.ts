@@ -22,8 +22,9 @@ import { loadPlotSettingsToUI_ACU } from '../pages/popup-helpers';
 /** 通知前端后等待其完成数据读取的窗口；仅在确实发出通知时才等待。 */
 const FRONTEND_READBACK_WAIT_MS_ACU = 800;
 
+/** awaitFrontendReadback=false：照常通知前端，但不等待回读窗口（宿主正在等待本次刷新时使用）。 */
 export async function refreshMergedDataAndNotifyWithUI_ACU(
-    { skipNotify = false, notifyMeta }: { skipNotify?: boolean; notifyMeta?: { persisted?: boolean } } = {},
+    { skipNotify = false, notifyMeta, awaitFrontendReadback = true }: { skipNotify?: boolean; notifyMeta?: { persisted?: boolean }; awaitFrontendReadback?: boolean } = {},
 ) {
     const result = await refreshMergedDataAndNotify_ACU();
 
@@ -71,8 +72,8 @@ export async function refreshMergedDataAndNotifyWithUI_ACU(
         }
     }
 
-    // 4. 仅当本次确实通知了前端读取方时才等待回读窗口，避免无读取方时白等
-    if (didNotifyFrontend) {
+    // 4. 仅当本次确实通知了前端读取方且调用方需要时才等待回读窗口，避免无读取方时白等
+    if (didNotifyFrontend && awaitFrontendReadback) {
         await new Promise(resolve => setTimeout(resolve, FRONTEND_READBACK_WAIT_MS_ACU));
     }
 

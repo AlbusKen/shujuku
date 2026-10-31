@@ -9,14 +9,14 @@ import { ACU_TOAST_CATEGORY_ACU } from '../../shared/constants';
 import { runOptimizationLogic_ACU } from '../../service/runtime/helpers-remaining';
 import { logDebug_ACU } from '../../shared/utils';
 
-type PlotPlanningAbortSource_ACU = 'task_action' | 'host_stop';
+type PlotPlanningAbortSource_ACU = 'task_action' | 'host_stop' | 'takeover_paused';
 
 let abortActivePlanning_ACU: ((source: PlotPlanningAbortSource_ACU) => void) | null = null;
 
-/** 与规划任务的「终止」按钮相同，只中止进行中的这次规划；没有进行中的规划时返回 false。 */
-export function abortActivePlotPlanning_ACU(): boolean {
+/** 与规划任务的「终止」按钮相同，只中止进行中的这次规划；source 记录中止来源（宿主停止键或接管暂停）。没有进行中的规划时返回 false。 */
+export function abortActivePlotPlanning_ACU(source: Exclude<PlotPlanningAbortSource_ACU, 'task_action'> = 'host_stop'): boolean {
   if (!abortActivePlanning_ACU) return false;
-  abortActivePlanning_ACU('host_stop');
+  abortActivePlanning_ACU(source);
   return true;
 }
 

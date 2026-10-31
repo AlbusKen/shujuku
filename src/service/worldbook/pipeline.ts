@@ -725,11 +725,13 @@ export async function refreshMergedDataAndNotify_ACU(options: { canonicalData?: 
     }
           
     // 更新世界书
+    let worldbookRefreshFailed = false;
     try {
         await updateReadableLorebookEntry_ACU(true, false, null, mergedData);
         logDebug_ACU('Updated worldbook entries with merged data.');
     } catch (error) {
         degraded = true;
+        worldbookRefreshFailed = true;
         logWarn_ACU('[数据恢复] 表格数据已加载到内存，但世界书刷新失败；保留可读和可导出数据。', error);
     }
 
@@ -743,6 +745,7 @@ export async function refreshMergedDataAndNotify_ACU(options: { canonicalData?: 
         nullRowCleanupPersisted,
         ...(nullRowCleanupError ? { nullRowCleanupError } : {}),
         ...(nullRowCleanupMessageIndex !== undefined ? { nullRowCleanupMessageIndex } : {}),
+        ...(worldbookRefreshFailed ? { worldbookRefreshFailed } : {}),
     };
   }
 
