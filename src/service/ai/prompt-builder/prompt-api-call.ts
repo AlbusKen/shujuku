@@ -8,7 +8,7 @@ import { currentAbortController_ACU, trackAbortController_ACU, untrackAbortContr
 import { getApiConfigByPreset_ACU, buildCustomApiRequestBody_ACU, requireResolvedApiPreset_ACU } from '../api-call';
 import { currentJsonTableData_ACU, settings_ACU } from '../../runtime/state-manager';
 import { getPersonaDescription_ACU, getCharDescription_ACU } from '../../../data/gateways/host-state-gateway';
-import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, triggerSlash_ACU, getConnectionManagerProfiles_ACU, getHostRequestHeaders_ACU } from '../../../data/gateways/ai-gateway';
+import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, triggerSlash_ACU, triggerSlashBypassTakeover_ACU, getConnectionManagerProfiles_ACU, getHostRequestHeaders_ACU } from '../../../data/gateways/ai-gateway';
 import { logDebug_ACU, logError_ACU, logWarn_ACU, normalizeExcludeRules_ACU } from '../../../shared/utils';
 import { applyExcludeRulesToText_ACU, getLatestAIMessageContent_ACU, getPlotFromHistory_ACU, parseIfBlocksInContent_ACU, parseRandomTags_ACU, replaceRandomVariables_ACU } from '../../runtime/helpers-remaining';
 import { replaceDbSqlVariables, withSqlTemplateReadContext_ACU } from '../../runtime/template-vars/sql-query-var';
@@ -402,10 +402,10 @@ export class RetryableAiResponseError_ACU extends Error {
             logError_ACU(`ACU: 调用酒馆连接预设时出错:`, error);
             try {
                 if (originalProfile && !skipProfileSwitch) {
-                    const currentProfileAfterCall = await triggerSlash_ACU('/profile');
+                    const currentProfileAfterCall = await triggerSlashBypassTakeover_ACU('/profile');
                     if (originalProfile !== currentProfileAfterCall) {
                         const escapedOriginalProfile = originalProfile.replace(/"/g, '\\"');
-                        await triggerSlash_ACU(`/profile await=true "${escapedOriginalProfile}"`);
+                        await triggerSlashBypassTakeover_ACU(`/profile await=true "${escapedOriginalProfile}"`);
                         logDebug_ACU(`ACU: 已恢复原酒馆连接预设: "${originalProfile}"`);
                     }
                 }
@@ -417,10 +417,10 @@ export class RetryableAiResponseError_ACU extends Error {
             if (rawResult !== undefined) {
                 try {
                     if (!skipProfileSwitch) {
-                        const currentProfileAfterCall = await triggerSlash_ACU('/profile');
+                        const currentProfileAfterCall = await triggerSlashBypassTakeover_ACU('/profile');
                         if (originalProfile && originalProfile !== currentProfileAfterCall) {
                             const escapedOriginalProfile = originalProfile.replace(/"/g, '\\"');
-                            await triggerSlash_ACU(`/profile await=true "${escapedOriginalProfile}"`);
+                            await triggerSlashBypassTakeover_ACU(`/profile await=true "${escapedOriginalProfile}"`);
                             logDebug_ACU(`ACU: 已恢复原酒馆连接预设: "${originalProfile}"`);
                         }
                     }

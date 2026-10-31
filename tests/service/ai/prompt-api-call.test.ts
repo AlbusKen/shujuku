@@ -102,6 +102,7 @@ vi.mock('../../../src/data/gateways/ai-gateway', () => ({
   generateRaw_ACU: mockGenerateRaw,
   sendConnectionManagerRequest_ACU: mockSendConnectionManagerRequest,
   triggerSlash_ACU: mockTriggerSlash,
+  triggerSlashBypassTakeover_ACU: mockTriggerSlash,
   getConnectionManagerProfiles_ACU: mockGetConnectionManagerProfiles,
   getHostRequestHeaders_ACU: mockGetHostRequestHeaders,
   // 原有酒馆连接用例断言三参调用，默认视为不可携带工具的配置。

@@ -33,6 +33,7 @@ import {
   generateRaw_ACU,
   sendConnectionManagerRequest_ACU,
   triggerSlash_ACU,
+  triggerSlashBypassTakeover_ACU,
   getConnectionManagerProfiles_ACU,
   getHostRequestHeaders_ACU,
   postChatCompletionDirect_ACU,
@@ -371,5 +372,19 @@ describe('接管暂停后的插件LLM入口', () => {
       expect(mockFetch).not.toHaveBeenCalled();
     } finally { setTakeoverRuntimeEnabled_ACU(true); }
     await expect(generateRaw_ACU({ ordered_prompts: [] })).resolves.toBe('restored');
+  });
+});
+
+
+describe('接管暂停期间还原宿主连接预设', () => {
+  it('还原用 slash 不经暂停门控，普通 slash 仍被拦截', async () => {
+    mockTavernHelper.triggerSlash = vi.fn(async () => '原始预设');
+    setTakeoverRuntimeEnabled_ACU(false);
+    try {
+      await expect(triggerSlash_ACU('/profile')).rejects.toMatchObject({ name: 'AbortError' });
+      expect(mockTavernHelper.triggerSlash).not.toHaveBeenCalled();
+      await expect(triggerSlashBypassTakeover_ACU('/profile await=true "原始预设"')).resolves.toBe('原始预设');
+      expect(mockTavernHelper.triggerSlash).toHaveBeenCalledWith('/profile await=true "原始预设"');
+    } finally { setTakeoverRuntimeEnabled_ACU(true); }
   });
 });

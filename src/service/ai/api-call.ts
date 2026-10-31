@@ -6,7 +6,7 @@ import { handleApiResponse_ACU, extractAiUsageMetadata_ACU, type AiUsageMetadata
 import { readFetchChatTurn_ACU, chatTurnFromJson_ACU, type AiChatTurn_ACU, type AiNativeToolDefinition_ACU } from './native-tool';
 export type { AiUsageMetadata_ACU };
 import { settings_ACU } from '../runtime/state-manager';
-import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, getHostRequestHeaders_ACU, getConnectionManagerProfiles_ACU, triggerSlash_ACU } from '../../data/gateways/ai-gateway';
+import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, getHostRequestHeaders_ACU, getConnectionManagerProfiles_ACU, triggerSlash_ACU, triggerSlashBypassTakeover_ACU } from '../../data/gateways/ai-gateway';
 import { sendCustomApiRequest_ACU } from './custom-api-transport';
 import { presetContextToolArgs_ACU, presetContextToolOptions_ACU } from '../../data/gateways/context-tool-transport';
 import { withApiRequestTimeout_ACU } from './api-request-timeout';
@@ -704,9 +704,9 @@ async function runWithTavernProfile_ACU<T>(profileId: string, action: (profile: 
         } finally {
             if (needSwitch) {
                 try {
-                    const current = await triggerSlash_ACU('/profile');
+                    const current = await triggerSlashBypassTakeover_ACU('/profile');
                     if (current !== originalProfile) {
-                        await triggerSlash_ACU(`/profile await=true "${originalProfile.replace(/"/g, '\\"')}"`);
+                        await triggerSlashBypassTakeover_ACU(`/profile await=true "${originalProfile.replace(/"/g, '\\"')}"`);
                     }
                 } catch (restoreError) {
                     logWarn_ACU('恢复原酒馆连接预设失败:', restoreError);

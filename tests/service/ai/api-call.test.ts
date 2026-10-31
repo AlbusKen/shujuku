@@ -39,6 +39,7 @@ vi.mock('../../../src/data/gateways/ai-gateway', () => ({
   getHostRequestHeaders_ACU: mockGetHeaders,
   getConnectionManagerProfiles_ACU: mockGetProfiles,
   triggerSlash_ACU: mockTriggerSlash,
+  triggerSlashBypassTakeover_ACU: mockTriggerSlash,
   // 宿主通道工具能力默认不可用：既有用例覆盖非 Chat Completion 时的 fail-closed 行为。
   isConnectionProfileChatCompletion_ACU: vi.fn(() => false),
   isMainApiChatCompletionAvailable_ACU: vi.fn(() => false),

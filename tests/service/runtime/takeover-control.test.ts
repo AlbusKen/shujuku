@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  captureTakeoverLease_ACU, isTakeoverEnabled_ACU, runTakeoverRequest_ACU,
+  anyAbortSignal_ACU, captureTakeoverLease_ACU, isTakeoverEnabled_ACU, runTakeoverRequest_ACU,
   setTakeoverRuntimeEnabled_ACU, subscribeTakeoverControl_ACU,
 } from '../../../src/shared/takeover-control';
 import { createEmbeddings_ACU } from '../../../src/data/gateways/vector-embedding-gateway';
@@ -79,4 +79,43 @@ describe('数据库接管总开关', () => {
     expect(fetch).toHaveBeenCalledOnce();
     expect(isTakeoverEnabled_ACU()).toBe(true);
   });
+});
+
+
+describe('AbortSignal.any 不可用时的信号合并回退', () => {
+  const withoutNativeAny = (run: () => void) => {
+    const original = (AbortSignal as any).any;
+    (AbortSignal as any).any = undefined;
+    try { run(); } finally { (AbortSignal as any).any = original; }
+  };
+  it('任一来源中止即以其 reason 中止，并移除对其余来源的监听', () => withoutNativeAny(() => {
+    const a = new AbortController();
+    const b = new AbortController();
+    const removeA = vi.spyOn(a.signal, 'removeEventListener');
+    const merged = anyAbortSignal_ACU([a.signal, b.signal]);
+    expect(merged.aborted).toBe(false);
+    const reason = new DOMException('stop', 'AbortError');
+    b.abort(reason);
+    expect(merged.aborted).toBe(true);
+    expect(merged.reason).toBe(reason);
+    expect(removeA).toHaveBeenCalledWith('abort', expect.any(Function));
+  }));
+  it('已中止的来源直接返回已中止信号', () => withoutNativeAny(() => {
+    const a = new AbortController();
+    a.abort('done');
+    const merged = anyAbortSignal_ACU([a.signal, new AbortController().signal]);
+    expect(merged.aborted).toBe(true);
+    expect(merged.reason).toBe('done');
+  }));
+  it('带父信号的租约在回退下仍响应父中止与接管暂停', () => withoutNativeAny(() => {
+    const parent = new AbortController();
+    const byParent = captureTakeoverLease_ACU(parent.signal);
+    parent.abort('parent');
+    expect(byParent.signal.aborted).toBe(true);
+    expect(byParent.signal.reason).toBe('parent');
+    const byPause = captureTakeoverLease_ACU(new AbortController().signal);
+    setTakeoverRuntimeEnabled_ACU(false);
+    expect(byPause.signal.aborted).toBe(true);
+    expect(byPause.signal.reason).toMatchObject({ name: 'AbortError' });
+  }));
 });

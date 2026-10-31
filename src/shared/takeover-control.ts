@@ -20,9 +20,32 @@ export function subscribeTakeoverControl_ACU(listener: (enabled: boolean) => voi
     listeners_ACU.add(listener);
     return () => { listeners_ACU.delete(listener); };
 }
+/**
+ * 合并多个中止信号。AbortSignal.any 在 Chrome 116 / Safari 17.4 之前不可用，此时手动合并：
+ * 任一来源中止即以其 reason 中止，并移除对其余来源的监听。
+ */
+export function anyAbortSignal_ACU(signals: AbortSignal[]): AbortSignal {
+    const native = (AbortSignal as unknown as { any?: (list: AbortSignal[]) => AbortSignal }).any;
+    if (typeof native === 'function') return native.call(AbortSignal, signals);
+    const controller = new AbortController();
+    const aborted = signals.find(signal => signal.aborted);
+    if (aborted) {
+        controller.abort(aborted.reason);
+        return controller.signal;
+    }
+    const cleanup = () => {
+        for (const signal of signals) signal.removeEventListener('abort', onAbort);
+    };
+    function onAbort(this: AbortSignal): void {
+        cleanup();
+        controller.abort(this.reason);
+    }
+    for (const signal of signals) signal.addEventListener('abort', onAbort, { once: true });
+    return controller.signal;
+}
 export function captureTakeoverLease_ACU(parent?: AbortSignal | null) {
     const epoch = epoch_ACU;
-    const signal = parent ? AbortSignal.any([controller_ACU.signal, parent]) : controller_ACU.signal;
+    const signal = parent ? anyAbortSignal_ACU([controller_ACU.signal, parent]) : controller_ACU.signal;
     const assertActive = () => {
         signal.throwIfAborted();
         if (!enabled_ACU || epoch !== epoch_ACU) {

@@ -425,3 +425,6 @@ export const postChatCompletionDirect_ACU: typeof postChatCompletionDirectImpl_A
     runTakeoverRequest_ACU(merged => postChatCompletionDirectImpl_ACU(body, merged, options, logTag), signal);
 export const triggerSlash_ACU: typeof triggerSlashImpl_ACU = command =>
     runTakeoverRequest_ACU(() => triggerSlashImpl_ACU(command));
+/** 只用于还原插件自己切换过的宿主状态（如连接预设）；接管暂停后仍须执行，故不经暂停门控。 */
+export const triggerSlashBypassTakeover_ACU: typeof triggerSlashImpl_ACU = command =>
+    triggerSlashImpl_ACU(command);
