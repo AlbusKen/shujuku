@@ -16,6 +16,7 @@ import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../..
 import { applySheetSchemaMigrationOperation_ACU } from './table-schema-migration';
 import { canonicalizeDisplayName_ACU, getPhysicalTableNameFromResolvedMap_ACU, getPhysicalTableNameForSheet_ACU, resolvePhysicalTableNames_ACU } from '../../shared/sheet-identity';
 import { parseDDLTableName } from '../../shared/ddl-utils';
+import { isSqlActiveTemplateSheet_ACU } from '../../shared/sql-active-template';
 import { decodeSqlIdentifier_ACU, rebindSqlMutationColumnReferences_ACU, rebindSqlMutationTableReferences_ACU } from '../../shared/sql-mutation-table-rebind';
 import { buildSheetColumnAliasMap_ACU, buildSheetTableAliasMap_ACU, type SheetAliasMapResult_ACU, type SheetColumnAliasMapResult_ACU, type SheetColumnAliasEvidence_ACU } from '../../shared/sql-read-resolver';
 import { auditTableDataForUpgrade_ACU, getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
@@ -566,6 +567,36 @@ export interface V2ReplayOperationFailurePoint_ACU {
 }
 
 /**
+ * 回放 SQL 来自历史聊天，INSERT/UPDATE 的 VALUES 是用户剧情数据，不得进入错误文本（日志 / UI）。
+ * 保留「第 N 条语句失败: <语句摘要> → <SQLite 错误>」结构，下游按该格式解析序号与错误的逻辑不受影响。
+ */
+function redactReplaySqlFailureMessage_ACU(message: string): string {
+  const failure = /^([\s\S]*?第 \d+ 条语句失败:\s*)([\s\S]*)\s→\s([\s\S]+)$/.exec(message);
+  if (!failure) return message;
+  const [, prefix, statement, sqliteError] = failure;
+  const head = /^\s*(INSERT\s+(?:OR\s+[A-Za-z]+\s+)?INTO|REPLACE\s+INTO|UPDATE(?:\s+OR\s+[A-Za-z]+)?|DELETE\s+FROM|CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|ALTER\s+TABLE|DROP\s+TABLE(?:\s+IF\s+EXISTS)?)\s+("(?:[^"]|"")*"|`[^`]*`|\[[^\]]*\]|[^\s(,;]+)/i.exec(statement);
+  const summary = head
+    ? `${head[1].replace(/\s+/g, ' ').toUpperCase()} ${head[2]}`
+    : /^\s*WITH\b/i.test(statement) ? 'WITH …' : 'SQL 语句';
+  return `${prefix}${summary} → ${sqliteError}`;
+}
+
+/**
+ * log-buffer 与 console 会连同 cause 一起序列化；SQL 失败的 cause 携带完整 VALUES，
+ * 必须换成同名、同 code 的脱敏副本。其他 cause（非 SQL 失败）保持原对象不变。
+ */
+function redactReplaySqlFailureCause_ACU(cause: unknown): unknown {
+  if (!(cause instanceof Error)) return cause;
+  const redacted = redactReplaySqlFailureMessage_ACU(cause.message);
+  if (redacted === cause.message) return cause;
+  const sanitized = new Error(redacted);
+  sanitized.name = cause.name;
+  const code = (cause as { code?: unknown }).code;
+  if (code !== undefined) Object.defineProperty(sanitized, 'code', { value: code, enumerable: false });
+  return sanitized;
+}
+
+/**
  * 严格回放 operation 级失败。message 与历史字符串格式完全一致（日志/测试/错误提示
  * 均按该格式匹配），额外携带结构化定位字段，供固化与恢复直接消费而不必解析字符串。
  */
@@ -578,13 +609,13 @@ export class V2ReplayOperationError_ACU extends Error implements V2ReplayOperati
   readonly cause: unknown;
   constructor(point: V2ReplayOperationFailurePoint_ACU, cause: unknown) {
     const causeMessage = cause instanceof Error ? cause.message : String(cause);
-    super(`[V2 Replay] operation failed: messageIndex=${point.messageIndex}, seq=${point.seq}, operationIndex=${point.operationIndex}, kind=${point.kind}: ${causeMessage}`);
+    super(`[V2 Replay] operation failed: messageIndex=${point.messageIndex}, seq=${point.seq}, operationIndex=${point.operationIndex}, kind=${point.kind}: ${redactReplaySqlFailureMessage_ACU(causeMessage)}`);
     this.name = 'V2ReplayOperationError_ACU';
     this.messageIndex = point.messageIndex;
     this.seq = point.seq;
     this.operationIndex = point.operationIndex;
     this.kind = point.kind;
-    this.cause = cause;
+    this.cause = redactReplaySqlFailureCause_ACU(cause);
   }
 }
 
@@ -1912,6 +1943,32 @@ async function applySheetCheckpointsForReplay_ACU(
   replaceState_ACU(state, candidate);
 }
 
+/**
+ * 休眠表（非首列空业务表头）在 SQL 活动路径中不建表，其历史 sql_sheet_batch 写入已无保留价值。
+ * 目标表在当前 replay state 中处于休眠，或缺失且当前模板同 key 表处于休眠时跳过（也不补锚）。
+ * 含结构 SQL 的 operation、以及缺失且模板中也无法确认休眠的目标表，仍按原语义执行（fail-closed）。
+ */
+function shouldSkipDormantSqlSheetBatchForReplay_ACU(
+  state: TableDataObject_ACU,
+  operation: TableMutationOperationV2_ACU,
+  identity: ReplayIdentityMergeContext_ACU,
+  template: TableDataObject_ACU | null | undefined,
+): boolean {
+  if (!operation || operation.kind !== 'sql_sheet_batch' || typeof operation.sheetKey !== 'string') return false;
+  const statements = Array.isArray(operation.statements) ? operation.statements : [];
+  if (statements.some(statement => /^\s*(CREATE|ALTER|DROP|RENAME)\b/i.test(String(statement || '')))) return false;
+  const resolvedKey = redirectReplaySheetKey_ACU(identity, operation.sheetKey);
+  const sheet = (state as Record<string, unknown>)[resolvedKey] as Sheet_ACU | undefined;
+  if (sheet && typeof sheet === 'object' && !Array.isArray(sheet)) return !isSqlActiveTemplateSheet_ACU(sheet);
+  // 被同名归并的 loser key：数据在 winner 表里，按原语义经别名回放。
+  if (identity.loserKeys.has(operation.sheetKey)) return false;
+  const templateSheet = (template as Record<string, unknown> | null | undefined)?.[operation.sheetKey] as Sheet_ACU | undefined;
+  return !!templateSheet
+    && typeof templateSheet === 'object'
+    && !Array.isArray(templateSheet)
+    && !isSqlActiveTemplateSheet_ACU(templateSheet);
+}
+
 function buildReplaySqlTableAliases_ACU(
   state: TableDataObject_ACU,
   operation: Extract<TableMutationOperationV2_ACU, { kind: 'sql_batch' | 'sql_sheet_batch' }>,
@@ -2857,6 +2914,11 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
                 continue;
               }
               try {
+                if (shouldSkipDormantSqlSheetBatchForReplay_ACU(state, operation, identity, headerOnlyTemplate)) {
+                  const skippedSheetKey = String((operation as { sheetKey?: unknown }).sheetKey ?? '');
+                  logWarn_ACU(`[V2 Replay] 跳过休眠表的历史 SQL 写入：sheetKey=${skippedSheetKey}, messageIndex=${ref.messageIndex}, seq=${entry.seq}, operationIndex=${operationIndex}。`);
+                  continue;
+                }
                 // 目标 key 若已被同名归并掉（loser），它的数据就在 winner 表里，SQL 经
                 // 历史 tableName / 别名直达 winner 物理表；此时绝不能再从模板补一个同名锚点。
                 if (options.compatibilityMode !== 'disabled'
@@ -3041,7 +3103,7 @@ async function recoverWithLegacyTolerantReplay_ACU(
   // 提交"的失败信号。Tier-1 宽容回放也是一种兼容修复，纳入同一开关豁免，
   // 保证写门闸的失败信号不被降级链吞掉（读永远宽容，写才严格）。
   if (options.compatibilityMode === 'disabled') throw originalError;
-  const originalMessage = originalError instanceof Error ? originalError.message : String(originalError);
+  const originalMessage = redactReplaySqlFailureMessage_ACU(originalError instanceof Error ? originalError.message : String(originalError));
   let tolerant: LegacyTolerantReplayResult_ACU;
   try {
     tolerant = await replayWithLegacyTolerances_ACU(chat, isolationKey, {
@@ -3050,7 +3112,7 @@ async function recoverWithLegacyTolerantReplay_ACU(
   } catch (tolerantError) {
     logError_ACU(
       `[V2 Compat Replay] Tier-1 兼容回放也失败，保留原始错误。兼容回放错误：`
-      + `${tolerantError instanceof Error ? tolerantError.message : String(tolerantError)}`,
+      + `${redactReplaySqlFailureMessage_ACU(tolerantError instanceof Error ? tolerantError.message : String(tolerantError))}`,
     );
     throw originalError;
   }

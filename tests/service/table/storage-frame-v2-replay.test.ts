@@ -1072,6 +1072,80 @@ describe('loadTableStateFromFramesV2_ACU', () => {
   });
 
 
+  it('休眠表（非首列空业务表头）的历史 sql_sheet_batch 写入被跳过，不再撞 no such table', async () => {
+    const data = makeCheckpointData();
+    data.sheet_dormant = {
+      uid: 'dazongjie',
+      name: '大总结',
+      content: [['row_id', 'summary_text', ''], ['1', '旧摘要', '']],
+      sourceData: { ddl: 'CREATE TABLE dazongjie (row_id INTEGER PRIMARY KEY, summary_text TEXT, extra TEXT);' },
+      updateConfig: {}, exportConfig: {}, orderNo: 1,
+    };
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data },
+            logEntries: [{
+              seq: 1, entryId: 'dormant-write', createdAt: 2, source: 'auto_fill', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: ['sheet_dormant'], changedSheetKeys: ['sheet_dormant'], groupKeys: [],
+              operations: [
+                {
+                  kind: 'sql_sheet_batch', sheetKey: 'sheet_dormant', tableName: 'dazongjie', reason: 'system',
+                  statements: ["INSERT INTO dazongjie (row_id, summary_text) VALUES (2, '机密剧情')"],
+                },
+                {
+                  kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'inventory', reason: 'system',
+                  statements: ["UPDATE inventory SET name = '钢剑' WHERE row_id = 1"],
+                },
+              ],
+            }],
+          },
+        },
+      },
+    }];
+
+    const result = await loadTableStateFromFramesV2_ACU(chat, '');
+
+    expect(result?.sheet_0.content).toEqual([['row_id', 'name'], ['1', '钢剑']]);
+    expect(mockLogWarn.mock.calls.some(call => String(call[0]).includes('跳过休眠表的历史 SQL 写入：sheetKey=sheet_dormant'))).toBe(true);
+  });
+
+  it('回放 SQL 失败的错误信息保留语句摘要与 SQLite 错误，但不包含 VALUES 业务数据', async () => {
+    const chat = [{
+      is_user: false,
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: makeCheckpointData() },
+            logEntries: [{
+              seq: 1, entryId: 'redact', createdAt: 2, source: 'auto_fill', targetMessageIndex: 0, aiFloor: 1,
+              filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'], groupKeys: [],
+              operations: [{
+                kind: 'sql_sheet_batch', sheetKey: 'sheet_0', tableName: 'inventory', reason: 'system',
+                statements: ["INSERT INTO inventory (row_id, missing_col) VALUES (2, '机密剧情')"],
+              }],
+            }],
+          },
+        },
+      },
+    }];
+
+    const error = await loadTableStateFromFramesV2_ACU(chat, '').then(() => null, (reason: unknown) => reason as Error);
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error!.message).toMatch(/kind=sql_sheet_batch: 第 1 条语句失败: INSERT INTO inventory → .*missing_col/);
+    expect(error!.message).not.toContain('机密剧情');
+    expect(String((error as any).cause?.message)).toMatch(/第 1 条语句失败: INSERT INTO inventory → .*missing_col/);
+    expect(String((error as any).cause?.message)).not.toContain('机密剧情');
+  });
+
+
   it('直接执行历史 WITH SQL、参数与混合 SQL operation，不消费 sheet 元数据', async () => {
     const chat = [{
       is_user: false,

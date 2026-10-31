@@ -3,9 +3,11 @@ import {
   getSheetColumnProjection_ACU,
   validateDDLTextAgainstHeaders_ACU,
   parseDDLColumnNames,
+  appendDDLColumn_ACU,
   removeDDLColumnAtIndex_ACU,
   updateDDLColumnComment,
 } from '../../../shared/ddl-utils';
+import { toSqlIdentifierBase_ACU } from '../../../shared/sql-identifier-mapper';
 import { isSummaryOrOutlineTable_ACU } from '../../../shared/utils';
 import { canonicalizeDisplayName_ACU } from '../../../shared/sheet-identity';
 import { settings_ACU } from '../../../service/runtime/state-manager';
@@ -57,6 +59,26 @@ function ensureSheetContent(sheet: any): any[][] {
   if (!Array.isArray(sheet.content)) sheet.content = [[null, '列1']];
   if (!Array.isArray(sheet.content[0])) sheet.content[0] = [null, '列1'];
   return sheet.content;
+}
+
+function normalizeSqlIdentifierKey(value: unknown): string {
+  const text = String(value ?? '').trim();
+  const first = text[0];
+  const last = text[text.length - 1];
+  const quoted = text.length >= 2 && ((first === '"' && last === '"') || (first === '`' && last === '`') || (first === '[' && last === ']'));
+  return (quoted ? text.slice(1, -1) : text).toLowerCase();
+}
+
+function allocateAppendedColumnSqlName(ddl: string, displayName: string, sourceIndex: number): string {
+  const used = new Set(parseDDLColumnNames(ddl).map(normalizeSqlIdentifierKey));
+  const base = toSqlIdentifierBase_ACU(displayName, sourceIndex - 1);
+  let candidate = base;
+  let suffix = 2;
+  while (used.has(candidate.toLowerCase())) {
+    candidate = `${base}_${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
 }
 
 function clonePlacement(value: any, fallback: any): VisualizerPlacementDraft {
@@ -257,10 +279,37 @@ export function useVisualizerConfigEditing() {
   function addColumn(name: string): void {
     const normalizedName = name.trim();
     if (!normalizedName) return;
-    withSheet(sheet => {
-      const content = ensureSheetContent(sheet);
-      content[0].push(normalizedName);
-      content.slice(1).forEach((row: any) => {
+    const sheet = currentSheet.value;
+    if (!sheet) return;
+    assertVisualizerDataOpsEditable_ACU(visualizer);
+    const content = ensureSheetContent(sheet);
+
+    // 有显式 DDL 时新增列必须同步写入 DDL，否则保存时的列数校验必然拒绝。
+    let nextDDL: string | null = null;
+    const ddl = String(sheet.sourceData?.ddl || '');
+    if (ddl.trim()) {
+      const currentValidation = validateDDLTextAgainstHeaders_ACU(ddl, content[0]);
+      if (!currentValidation.valid) {
+        toastStore.error(`新增列已拒绝：当前 DDL 与表头不一致：${currentValidation.message}`, { muteable: false });
+        return;
+      }
+      try {
+        const sqlName = allocateAppendedColumnSqlName(ddl, normalizedName, content[0].length);
+        nextDDL = appendDDLColumn_ACU(ddl, sqlName, normalizedName);
+      } catch (error: any) {
+        toastStore.error(`新增列已拒绝：${error?.message || String(error)}`, { muteable: false });
+        return;
+      }
+    }
+
+    withSheet(current => {
+      const currentContent = ensureSheetContent(current);
+      if (nextDDL !== null) {
+        if (!current.sourceData || typeof current.sourceData !== 'object') current.sourceData = {};
+        current.sourceData.ddl = nextDDL;
+      }
+      currentContent[0].push(normalizedName);
+      currentContent.slice(1).forEach((row: any) => {
         if (Array.isArray(row)) row.push(null);
       });
     });
@@ -275,6 +324,8 @@ export function useVisualizerConfigEditing() {
     if (targetIndex < 1 || targetIndex >= content[0].length) return;
 
     let nextDDL: string | null = null;
+    // 隐藏集合的身份：有 DDL 时为物理列名，native 无 DDL 时为表头名。
+    let removedColumnKey = normalizeSqlIdentifierKey(content[0][targetIndex]);
     if (String(sheet.sourceData?.ddl || '').trim()) {
       const currentValidation = validateDDLTextAgainstHeaders_ACU(sheet.sourceData.ddl, content[0]);
       if (!currentValidation.valid) {
@@ -287,6 +338,8 @@ export function useVisualizerConfigEditing() {
         toastStore.error(`删除列已拒绝：${error?.message || String(error)}`, { muteable: false });
         return;
       }
+      // 上方校验已保证 DDL 列与表头按下标对齐，可直接取同下标的物理列名。
+      removedColumnKey = normalizeSqlIdentifierKey(parseDDLColumnNames(sheet.sourceData.ddl)[targetIndex]);
     }
 
     withSheet(current => {
@@ -294,6 +347,14 @@ export function useVisualizerConfigEditing() {
       if (nextDDL !== null) {
         if (!current.sourceData || typeof current.sourceData !== 'object') current.sourceData = {};
         current.sourceData.ddl = nextDDL;
+      }
+      const hidden = current.sourceData?.hiddenPhysicalColumns;
+      if (Array.isArray(hidden) && removedColumnKey) {
+        const remaining = hidden.filter((value: unknown) => normalizeSqlIdentifierKey(value) !== removedColumnKey);
+        if (remaining.length !== hidden.length) {
+          if (remaining.length > 0) current.sourceData.hiddenPhysicalColumns = remaining;
+          else delete current.sourceData.hiddenPhysicalColumns;
+        }
       }
       currentContent.forEach((row: any) => {
         if (Array.isArray(row)) row.splice(targetIndex, 1);

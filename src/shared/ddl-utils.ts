@@ -887,6 +887,61 @@ export function removeDDLColumnAtIndex_ACU(ddl: string, sourceIndex: number): st
   return next;
 }
 
+/**
+ * Appends one nullable TEXT business column (`sqlName TEXT -- comment`) after the
+ * last column definition. Mirrors removeDDLColumnAtIndex_ACU: only
+ * one-column-per-line DDL without table constraints is accepted and every other
+ * authored byte is preserved; anything ambiguous fails closed.
+ */
+export function appendDDLColumn_ACU(ddl: string, sqlName: string, comment: string): string {
+  const value = String(ddl || '');
+  const physicalName = String(sqlName || '').trim();
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(physicalName)) {
+    throw new Error(`新增列的物理列名「${physicalName}」不是合法的 SQLite 标识符。`);
+  }
+  const label = String(comment ?? '').replace(/[\r\n]+/g, ' ').trim();
+  if (!label) throw new Error('新增列缺少列名。');
+  const bounds = findCreateTableDefinitionBounds_ACU(value);
+  if (!bounds) throw new Error('无法解析 CREATE TABLE 语句，不能安全新增列。');
+  const columns = parseDDLColumnInfos_ACU(value);
+  if (columns.length === 0 || columns[0].sqlName.toLowerCase() !== 'row_id') {
+    throw new Error('DDL 首列不是 row_id，不能安全新增列。');
+  }
+  if (columns.some(column => canonicalSqlIdentifier_ACU(column.sqlName) === physicalName.toLowerCase())) {
+    throw new Error(`DDL 已存在物理列「${physicalName}」。`);
+  }
+  const body = value.slice(bounds.openingIndex + 1, bounds.closingIndex);
+  const hasTableConstraint = splitColumnDefinitions(body).some(definition =>
+    /^(?:PRIMARY\s+KEY|FOREIGN\s+KEY|UNIQUE|CHECK|CONSTRAINT)\b/i.test(stripSqlLineComments_ACU(definition).trim()),
+  );
+  if (hasTableConstraint) throw new Error('DDL 含表级约束，不能安全自动新增列。');
+  const lines = body.split('\n');
+  const columnLines = lines.map((line, index) => {
+    const name = stripSqlLineComments_ACU(line).trim().match(/^([^\s,()]+)/)?.[1];
+    return name ? index : -1;
+  }).filter(index => index >= 0);
+  if (columnLines.length !== columns.length) throw new Error('DDL 含多行列定义，不能安全自动新增列。');
+  const lastIndex = columnLines[columnLines.length - 1];
+  const lineEnding = lines[lastIndex].endsWith('\r') ? '\r' : '';
+  const lastLine = lineEnding ? lines[lastIndex].slice(0, -1) : lines[lastIndex];
+  const code = stripSqlLineComments_ACU(lastLine);
+  if (!lastLine.startsWith(code)) throw new Error('DDL 末列含块注释，不能安全自动新增列。');
+  const codeBody = code.replace(/\s+$/, '');
+  const separator = codeBody.endsWith(',') ? '' : ',';
+  lines[lastIndex] = `${codeBody}${separator}${code.slice(codeBody.length)}${lastLine.slice(code.length)}${lineEnding}`;
+  const indent = lastLine.match(/^\s*/)?.[0] || '  ';
+  // 末列与右括号同行时，新列后补换行，避免右括号落进行注释。
+  const tail = lastIndex === lines.length - 1 ? '\n' : '';
+  lines.splice(lastIndex + 1, 0, `${indent}${physicalName} TEXT -- ${label}${lineEnding}${tail}`);
+  const next = `${value.slice(0, bounds.openingIndex + 1)}${lines.join('\n')}${value.slice(bounds.closingIndex)}`;
+  const validation = validateDDLTextAgainstHeaders_ACU(next, [
+    ...columns.map(column => column.sqlName.toLowerCase() === 'row_id' ? 'row_id' : (column.comment || column.sqlName)),
+    label,
+  ]);
+  if (!validation.valid) throw new Error(`新增列后的 DDL 非法：${validation.message}`);
+  return next;
+}
+
 function canonicalSqlIdentifier_ACU(value: string): string {
   const raw = String(value || '').trim();
   if (raw.startsWith('"') && raw.endsWith('"')) return raw.slice(1, -1).replace(/""/g, '"').toLowerCase();
