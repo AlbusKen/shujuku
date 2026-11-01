@@ -39,8 +39,8 @@ export function normalizeLorebookNames_ACU(raw: any): string[] {
   const seen = new Set<string>();
   return candidates.reduce<string[]>((names, candidate) => {
     if (typeof candidate !== 'string') return names;
-    const name = candidate.trim();
-    if (name && !seen.has(name)) {
+    const name = candidate;
+    if (name.trim() && !seen.has(name)) {
       seen.add(name);
       names.push(name);
     }

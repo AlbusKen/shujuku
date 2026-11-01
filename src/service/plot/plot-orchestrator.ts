@@ -1,3 +1,4 @@
+import { isTakeoverEnabled_ACU } from '../../shared/takeover-control';
 /**
  * service/plot/plot-orchestrator.ts — 剧情推进编排逻辑（service 层：纯业务决策）
  * 从 presentation/bootstrap/init.ts 的 GENERATION_AFTER_COMMANDS 回调提取。
@@ -11,7 +12,6 @@ import { logDebug_ACU, logError_ACU, logWarn_ACU, hashUserInput_ACU } from '../.
 import { DEFAULT_PLOT_SETTINGS_ACU } from '../../shared/defaults-json.js';
 import { isFlightModeActive_ACU } from '../flight-mode/flight-mode-state';
 import { isPlotSuppressedByFillModeForCurrentChat_ACU } from '../fill-mode/fill-mode-gate';
-import { markPlotIntercept_ACU } from './plot-logic';
 
 // ============================================================
 // 类型定义
@@ -41,6 +41,7 @@ export interface PlotOrchestrationResult {
  * 纯业务逻辑
  */
 export function shouldProcessTavernHelperHook_ACU(options: any): boolean {
+    if (!isTakeoverEnabled_ACU()) return false;
     if (!settings_ACU.plotSettings.enabled || isFlightModeActive_ACU() || isProcessing_Plot_ACU || loopState_ACU.isRetrying || options.should_stream) {
         return false;
     }
@@ -202,10 +203,10 @@ export interface Strategy2Result {
 export async function orchestrateTavernHelperHook_ACU(
     options: any,
     runPlanning: PlanningFn,
-    unmaskedCompatibility = false,
 ): Promise<TavernHelperHookResult> {
+    if (!isTakeoverEnabled_ACU()) return { action: 'passthrough' };
     // 1. 判断是否应该处理
-    if (!unmaskedCompatibility && isProcessing_Plot_ACU && settings_ACU.plotSettings.enabled
+    if (isProcessing_Plot_ACU && settings_ACU.plotSettings.enabled
         && !isFlightModeActive_ACU() && !isPlotSuppressedByFillModeForCurrentChat_ACU()
         && !loopState_ACU.isRetrying && !options.should_stream) {
         return { action: 'busy' };
@@ -215,14 +216,11 @@ export async function orchestrateTavernHelperHook_ACU(
     }
 
     // 2. 提取用户消息
-    const userMessage = unmaskedCompatibility
-        ? options.injects?.[0]?.content || options.user_input || options.prompt || null
-        : extractUserMessageFromOptions_ACU(options);
+    const userMessage = extractUserMessageFromOptions_ACU(options);
     if (!userMessage) {
         return { action: 'passthrough' };
     }
 
-    if (unmaskedCompatibility) markPlotIntercept_ACU(userMessage);
     // 4. 调用规划
     _set_isProcessing_Plot_ACU(true);
     let planningBusy = false;
@@ -230,15 +228,13 @@ export async function orchestrateTavernHelperHook_ACU(
         const finalMessage = await runPlanning(userMessage, {
             originalUserInput: userMessage,
             hasExistingUserMessage: false,
-            ...(unmaskedCompatibility ? { unmaskedCompatibility: true } : {}),
         });
-        if (!unmaskedCompatibility && finalMessage && typeof finalMessage === 'object' && (finalMessage.blocked === true || finalMessage.apiRetriesExhausted === true)) {
+        if (finalMessage && typeof finalMessage === 'object' && (finalMessage.blocked === true || finalMessage.apiRetriesExhausted === true)) {
             return { action: 'failed', blocked: true, apiRetriesExhausted: finalMessage.apiRetriesExhausted === true };
         }
 
         // 5. 处理跳过
         if (finalMessage && (finalMessage as any).skipped) {
-            if (unmaskedCompatibility) return { action: 'skipped' };
             if (isPlanningBusy_ACU(finalMessage)) {
                 planningBusy = true;
                 return { action: 'busy' };
@@ -251,7 +247,7 @@ export async function orchestrateTavernHelperHook_ACU(
         // 6. 处理中止
         if (finalMessage && (finalMessage as any).aborted) {
             logDebug_ACU('[剧情推进] Planning returned an abort result.');
-            return unmaskedCompatibility ? { action: 'aborted' } : { action: 'aborted', manual: (finalMessage as any).manual === true };
+            return { action: 'aborted', manual: (finalMessage as any).manual === true };
         }
 
         // 7. 判断循环模式下规划失败
@@ -261,18 +257,16 @@ export async function orchestrateTavernHelperHook_ACU(
         }
 
         // 8. 规划成功，决定写回位置
-        if (typeof finalMessage === 'string' && (unmaskedCompatibility ? !!finalMessage : !!finalMessage.trim())) {
-            const writeBack = unmaskedCompatibility
-                ? { target: options.injects?.[0]?.content ? 'injects' as const : options.prompt ? 'prompt' as const : 'user_input' as const, value: finalMessage }
-                : applyPlanningResultToOptions_ACU(options, finalMessage);
+        if (typeof finalMessage === 'string' && finalMessage.trim()) {
+            const writeBack = applyPlanningResultToOptions_ACU(options, finalMessage);
             return { action: 'planned', finalMessage, writeBack };
         }
 
         // 已执行的规划没有有效结果时，发送层必须阻断本次正文。
-        return { action: unmaskedCompatibility ? 'passthrough' : 'failed' };
+        return { action: 'failed' };
     } catch (error) {
         logError_ACU('[剧情推进] Error in TavernHelper.generate hook orchestration:', error);
-        return { action: unmaskedCompatibility ? 'passthrough' : 'failed' };
+        return { action: 'failed' };
     } finally {
         if (!planningBusy) _set_isProcessing_Plot_ACU(false);
     }
@@ -292,9 +286,8 @@ export async function orchestrateAfterCommandsStrategy1_ACU(
     lastMessage: any,
     lastMessageIndex: number,
     runPlanning: PlanningFn,
-    unmaskedCompatibility = false,
 ): Promise<Strategy1Result> {
-    if (!unmaskedCompatibility && isProcessing_Plot_ACU) return { action: 'busy' };
+    if (isProcessing_Plot_ACU) return { action: 'busy' };
     // 1. 准备策略1上下文
     const context = prepareStrategy1Context_ACU(lastMessage);
     if (!context) {
@@ -317,15 +310,13 @@ export async function orchestrateAfterCommandsStrategy1_ACU(
         const finalMessage = await runPlanning(messageToProcess, {
             originalUserInput: messageToProcess,
             hasExistingUserMessage: true,
-            ...(unmaskedCompatibility ? { unmaskedCompatibility: true } : {}),
         });
-        if (!unmaskedCompatibility && finalMessage && typeof finalMessage === 'object' && (finalMessage.blocked === true || finalMessage.apiRetriesExhausted === true)) {
+        if (finalMessage && typeof finalMessage === 'object' && (finalMessage.blocked === true || finalMessage.apiRetriesExhausted === true)) {
             return { action: 'failed', blocked: true, apiRetriesExhausted: finalMessage.apiRetriesExhausted === true };
         }
 
         // 4. 处理跳过
         if (finalMessage && (finalMessage as any).skipped) {
-            if (unmaskedCompatibility) return { action: 'skipped' };
             if (isPlanningBusy_ACU(finalMessage)) {
                 planningBusy = true;
                 return { action: 'busy' };
@@ -354,7 +345,7 @@ export async function orchestrateAfterCommandsStrategy1_ACU(
         }
 
         // 7. 规划成功
-        if (typeof finalMessage === 'string' && (unmaskedCompatibility ? !!finalMessage : !!finalMessage.trim())) {
+        if (typeof finalMessage === 'string' && finalMessage.trim()) {
             return {
                 action: 'planned',
                 finalMessage,
@@ -364,15 +355,13 @@ export async function orchestrateAfterCommandsStrategy1_ACU(
         }
 
         // no_match 只表示未选择该路径，不得表示已经执行的规划失败。
-        if (unmaskedCompatibility) return { action: 'no_match' };
         return { action: 'failed', originalMessage: messageToProcess, lastMessageIndex };
     } catch (error) {
         logError_ACU('[剧情推进] Error processing last chat message:', error);
-        if (unmaskedCompatibility) { delete lastMessage._plot_processed; return { action: 'no_match' }; }
         return { action: 'failed', originalMessage: messageToProcess, lastMessageIndex };
     } finally {
         // 只有最终提示词真正写回楼层后，调用方才登记已处理。
-        if (!unmaskedCompatibility) delete lastMessage._plot_processed;
+        delete lastMessage._plot_processed;
         if (!planningBusy) _set_isProcessing_Plot_ACU(false);
     }
 }
@@ -390,13 +379,12 @@ export async function orchestrateAfterCommandsStrategy1_ACU(
 export async function orchestrateAfterCommandsStrategy2_ACU(
     textInBox: string,
     runPlanning: PlanningFn,
-    unmaskedCompatibility = false,
 ): Promise<Strategy2Result> {
     if (!textInBox || !String(textInBox).trim()) {
         return { action: 'skip' };
     }
 
-    if (!unmaskedCompatibility && isProcessing_Plot_ACU) return { action: 'busy' };
+    if (isProcessing_Plot_ACU) return { action: 'busy' };
     const originalInputText = String(textInBox);
 
     _set_isProcessing_Plot_ACU(true);
@@ -405,15 +393,13 @@ export async function orchestrateAfterCommandsStrategy2_ACU(
         const finalMessage = await runPlanning(originalInputText, {
             originalUserInput: originalInputText,
             hasExistingUserMessage: false,
-            ...(unmaskedCompatibility ? { unmaskedCompatibility: true } : {}),
         });
-        if (!unmaskedCompatibility && finalMessage && typeof finalMessage === 'object' && (finalMessage.blocked === true || finalMessage.apiRetriesExhausted === true)) {
+        if (finalMessage && typeof finalMessage === 'object' && (finalMessage.blocked === true || finalMessage.apiRetriesExhausted === true)) {
             return { action: 'failed', blocked: true, apiRetriesExhausted: finalMessage.apiRetriesExhausted === true };
         }
 
         // 处理跳过
         if (finalMessage && (finalMessage as any).skipped) {
-            if (unmaskedCompatibility) return { action: 'skip' };
             if (isPlanningBusy_ACU(finalMessage)) {
                 planningBusy = true;
                 return { action: 'busy' };
@@ -430,14 +416,14 @@ export async function orchestrateAfterCommandsStrategy2_ACU(
         }
 
         // 规划成功
-        if (typeof finalMessage === 'string' && (unmaskedCompatibility ? !!finalMessage : !!finalMessage.trim())) {
+        if (typeof finalMessage === 'string' && finalMessage.trim()) {
             return { action: 'planned', finalMessage };
         }
 
-        return { action: unmaskedCompatibility ? 'skip' : 'failed' };
+        return { action: 'failed' };
     } catch (error) {
         logError_ACU('[剧情推进] Error processing textarea input (Strategy 2):', error);
-        return { action: unmaskedCompatibility ? 'skip' : 'failed' };
+        return { action: 'failed' };
     } finally {
         if (!planningBusy) _set_isProcessing_Plot_ACU(false);
         // 消费掉本次发送意图，避免同一次生成链路重复触发

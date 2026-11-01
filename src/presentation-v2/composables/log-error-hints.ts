@@ -10,18 +10,34 @@ import type { LogEntry } from '../../shared/log-buffer';
 export interface LogErrorHint {
   /** 规则 ID，便于测试与后续针对性调整文案。 */
   id: string;
+  /** 面向用户展示的错误代码（规则 ID 的大写形式，如 NETWORK_DNS、HTTP_429）。 */
+  code: string;
+  /** 从报错文本中识别出的 HTTP 状态码；识别不到时不带该字段。 */
+  httpStatus?: number;
   /** 一句话说明这条报错大致意味着什么。 */
   summary: string;
   /** 用户可以直接照做的处理步骤，按先后顺序排列。 */
   steps: string[];
 }
 
+interface HintContext {
+  /** 小写化后的 `tag + message`。 */
+  text: string;
+  /** 可信的 HTTP 状态码（4xx / 5xx）；没有时为 null。 */
+  status: number | null;
+}
+
 interface HintRule {
   id: string;
-  /** 在小写化后的 `tag + message` 上匹配。 */
-  test: RegExp | ((haystack: string) => boolean);
+  /** 正则在小写化后的 `tag + message` 上匹配；函数可同时使用识别出的 HTTP 状态码。 */
+  test: RegExp | ((context: HintContext) => boolean);
   summary: string;
   steps: string[];
+}
+
+/** 有可信状态码时只按状态码判定；没有状态码时才用关键词兜底，避免正文里的词把状态码盖掉。 */
+function httpRule(statusTest: (status: number) => boolean, fallback?: RegExp): (context: HintContext) => boolean {
+  return ({ status, text }) => (status !== null ? statusTest(status) : !!fallback && fallback.test(text));
 }
 
 const RETRY_LATER = '稍等片刻后重试一次，很多问题是服务商偶发抖动。';
@@ -118,61 +134,175 @@ const RULES: HintRule[] = [
     ],
   },
 
-  // ─── HTTP 状态码 ───
+  // ─── 网络：带明确错误码的连接层故障 ───
+  // 排在 HTTP 状态码之前：酒馆后端转发失败时会以 500 把 ECONNREFUSED 等原始原因带回来，
+  // 这时连接层原因比「服务器 5xx」更准确。
+  {
+    id: 'network-offline',
+    test: /err_internet_disconnected|err_network_changed|网络已断开|网络连接已断开|设备离线/,
+    summary: '本机网络已断开，或请求途中网络发生了切换。',
+    steps: [
+      '确认电脑 / 手机已经连上网络。',
+      '切换过 Wi-Fi、有线或 VPN 后，刷新酒馆页面再重试。',
+    ],
+  },
+  {
+    id: 'network-blocked-by-client',
+    test: /err_blocked_by_client|blocked by client|被扩展拦截/,
+    summary: '请求被浏览器扩展（广告拦截 / 隐私保护类）拦截，没有发出去。',
+    steps: [
+      '把酒馆所在网址加入广告拦截扩展的白名单，或临时停用该扩展后刷新页面。',
+      '也可以开启该 API 预设的「通过酒馆渠道发送」，由酒馆后端代发请求。',
+    ],
+  },
+  {
+    id: 'network-mixed-content',
+    test: /mixed content|混合内容/,
+    summary: '酒馆页面是 https，而接口地址是 http，浏览器按「混合内容」规则拦截了请求。',
+    steps: [
+      '把接口地址改成 https 开头的地址。',
+      '或者开启该 API 预设的「通过酒馆渠道发送」，由酒馆后端转发。',
+    ],
+  },
+  {
+    id: 'network-cors',
+    test: /\bcors\b|cross-origin|access-control-allow-origin|preflight/,
+    summary: '浏览器跨域被拦截（CORS）：该服务商不允许网页直接调用。',
+    steps: [
+      '开启该 API 预设的「通过酒馆渠道发送」，由酒馆后端代为转发（推荐）。',
+      '或者改用明确支持浏览器直连（返回 Access-Control-Allow-Origin）的中转服务。',
+    ],
+  },
+  {
+    id: 'network-dns',
+    test: /enotfound|eai_again|getaddrinfo|err_name_not_resolved|name not resolved|\bdns\b|域名解析/,
+    summary: '域名解析失败：接口地址里的域名找不到对应的服务器。',
+    steps: [
+      '检查接口地址里的域名有没有拼错、是否多了空格或少了字母。',
+      '把地址复制到浏览器打开；打不开时更换 DNS 或检查代理 / VPN。',
+      '开启了「通过酒馆渠道发送」时，是酒馆所在的服务器解析不了该域名，需要在那台服务器上检查网络与 DNS。',
+    ],
+  },
+  {
+    id: 'network-refused',
+    test: /econnrefused|err_connection_refused|connection refused|连接被拒绝|拒绝连接/,
+    summary: '目标地址拒绝连接：该地址和端口上没有服务在运行。',
+    steps: [
+      '本地模型（Ollama、KoboldCpp、LM Studio 等）：确认程序已经启动，端口号与接口地址里的一致。',
+      '检查地址开头的 http / https 是否与服务实际协议一致。',
+      '酒馆部署在远程服务器或 Docker 中时，地址里的 127.0.0.1 / localhost 指的是那台服务器自己，需要改成它能访问到的地址。',
+    ],
+  },
+  {
+    id: 'network-reset',
+    test: /econnreset|err_connection_reset|err_connection_closed|err_empty_response|socket hang up|connection reset|other side closed|typeerror: terminated|连接被重置|连接中断/,
+    summary: '连接建立后被中途断开（连接被重置），通常是代理、中转站或服务商主动断开。',
+    steps: [
+      RETRY_LATER,
+      '长时间没有数据的流式请求容易被中间代理掐断：可关闭该预设的流式输出，或换一条更稳定的线路。',
+      '持续出现时换一条 API 渠道，或联系中转站确认服务是否稳定。',
+    ],
+  },
+  {
+    id: 'network-connect-timeout',
+    test: /etimedout|err_connection_timed_out|err_timed_out|connect ?timeout|und_err_connect_timeout|连接超时/,
+    summary: '连接目标服务器超时：服务器一直没有应答，多为网络不通、被防火墙或地区网络封锁。',
+    steps: [
+      '把接口地址复制到浏览器打开，确认当前网络能访问；访问海外服务通常需要代理。',
+      '开启了「通过酒馆渠道发送」时，是酒馆所在的服务器连不上该地址，需要给服务器配置网络代理。',
+      '这不是模型回复慢：调大「请求超时」不能解决连接超时。',
+    ],
+  },
+  {
+    id: 'network-ssl',
+    test: /err_cert|err_ssl|certificate|self[ _-]signed|unable_to_verify|\bssl\b|\btls\b|证书/,
+    summary: 'HTTPS 证书校验失败：服务器证书过期、自签名或与域名不匹配。',
+    steps: [
+      '把接口地址复制到浏览器打开，看是否出现证书警告。',
+      '检查电脑系统时间是否正确，时间错误也会导致证书失效。',
+      '自建服务请换用有效证书；中转站证书问题请联系站方。',
+    ],
+  },
+  {
+    id: 'network-proxy',
+    test: ({ status, text }) => status === 407 || /err_proxy|err_tunnel|proxy connection|tunneling socket|proxy authentication|代理服务器/.test(text),
+    summary: '代理服务器连接失败，或代理要求身份认证（407）。',
+    steps: [
+      '检查系统 / 浏览器的代理设置：代理软件是否在运行、端口是否正确。',
+      '开启了「通过酒馆渠道发送」时，检查酒馆服务器 config.yaml 里的代理配置。',
+      '临时关闭代理重试，确认问题是否出在代理上。',
+    ],
+  },
+
+  // ─── 服务商账户 / 地区 ───
+  {
+    id: 'api-region-blocked',
+    test: /unsupported_country|country, region,? or territory|location is not supported|user location|地区不支持|所在地区/,
+    summary: '服务商不对当前所在地区提供服务（按发出请求的出口 IP 判断）。',
+    steps: [
+      '换用支持当前地区的中转线路，或通过代理从受支持地区发出请求。',
+      '开启了「通过酒馆渠道发送」时，判断依据是酒馆服务器的出口 IP，而不是你本机。',
+    ],
+  },
+  {
+    id: 'api-quota',
+    // 429 + 「quota exceeded」在 Gemini 等服务商是「每分钟配额」限流，归 http-429；只有明确的计费/余额措辞才算额度耗尽。
+    test: ({ status, text }) => status === 402
+      || /insufficient[ _]quota|exceeded your current quota|insufficient[ _](balance|funds|credits?)|billing[ _](hard[ _])?limit|billing_not_active|余额不足|额度不足|额度已用完|欠费|账户余额/.test(text)
+      || (status !== 429 && /quota (exceeded|exhausted)/.test(text)),
+    summary: '账户额度或余额已用完（与请求频率无关，等待不会自动恢复）。',
+    steps: [
+      '登录服务商 / 中转站后台查看余额与账单，充值或更换有余额的 API Key。',
+      '免费额度通常按日或按月重置，可等待重置后再用。',
+      '确认当前预设填的是你以为的那个 Key（多个预设时容易用错）。',
+    ],
+  },
+
+  // ─── HTTP 状态码（识别到状态码时只按状态码判定）───
   {
     id: 'http-401',
-    test: /\b401\b|unauthorized|invalid[ _-]?api[ _-]?key|incorrect api key|invalid x-api-key|authentication[ _-]?error|invalid_api_key|no auth credentials|令牌无效|密钥无效|api key 无效/,
+    test: httpRule(status => status === 401, /unauthorized|invalid[ _-]?api[ _-]?key|incorrect api key|invalid x-api-key|authentication[ _-]?error|no auth credentials|令牌无效|密钥无效|api key 无效/),
     summary: 'API 拒绝了请求：密钥无效、填错或已过期（401）。',
     steps: [
       '到「API」页打开当前使用的预设，检查 API Key 是否完整、有没有多余空格。',
-      '确认这个 Key 对应的服务商与接口地址一致（比如 OpenAI 的 Key 不能填到 Claude 地址）。',
-      '如果是中转站，登录站点确认 Key 仍然有效、余额充足。',
+      '确认这个 Key 对应的服务商与接口地址、「API 格式」一致（比如 OpenAI 的 Key 不能填到 Claude 地址）。',
+      '如果是中转站，登录站点确认 Key 仍然有效、没有被禁用。',
     ],
   },
   {
     id: 'http-403',
-    test: /\b403\b|forbidden|permission[ _-]?denied|not allowed to|access denied|无权访问|权限不足/,
-    summary: '服务商拒绝访问（403）：Key 没有权限，或请求来源被限制。',
+    test: httpRule(status => status === 403, /forbidden|permission[ _-]?denied|not allowed to|access denied|无权访问|权限不足/),
+    summary: '服务商拒绝访问（403）：Key 没有该模型的权限，或请求来源被限制。',
     steps: [
-      '确认该 Key 有权使用所选模型（部分模型需要单独开通）。',
-      '一些服务商会拒绝来自浏览器的直连请求：把该 API 预设改为走「酒馆连接预设」由酒馆后端转发。',
-      '如果是中转站，联系站方确认账号是否被限制。',
+      '确认该 Key 有权使用所选模型（部分模型需要单独开通或更高的账户等级）。',
+      '一些服务商会拒绝来自浏览器的直连请求：开启该预设的「通过酒馆渠道发送」。',
+      '如果是中转站，联系站方确认账号或 IP 是否被限制。',
     ],
   },
   {
     id: 'http-404',
-    test: /\b404\b|not[ _]found.*(model|endpoint|route)|model.*(not found|does not exist|not exist)|no such model|unknown model|invalid model|模型不存在|找不到模型/,
-    summary: '接口地址或模型名不存在（404）。',
+    test: httpRule(status => status === 404 || status === 405, /not[ _]found.*(model|endpoint|route)|model.*(not found|does not exist|not exist)|no such model|unknown model|invalid model|模型不存在|找不到模型/),
+    summary: '接口地址或模型名不存在（404 / 405）。',
     steps: [
-      '到「API」页检查接口地址是否完整，不同服务商对结尾是否带 /v1 要求不同，按服务商文档填写。',
+      '到「API」页检查接口地址：不同服务商对结尾是否带 /v1 要求不同，不要手动加上 /chat/completions 等具体路径，按服务商文档填写。',
       '点击「拉取模型列表」重新选择模型，避免手写模型名拼错。',
       '确认服务商仍然提供该模型，旧模型可能已下线。',
     ],
   },
   {
-    id: 'http-429',
-    test: /\b429\b|rate[ _-]?limit|too many requests|\bquota\b|insufficient (balance|funds)|exceeded your current|resource[ _-]?exhausted|请求过于频繁|限流|额度不足|余额不足|欠费|配额/,
-    summary: '请求过于频繁被限流，或账户额度 / 余额已用完（429）。',
+    id: 'api-timeout',
+    test: httpRule(status => status === 408 || status === 504 || status === 524, /timeouterror|timed out|\btimeout\b|gateway time-?out|请求超时|响应超时|读取超时/),
+    summary: '等待回复超时：服务器已经连上，但在期限内没有返回完整回复（插件请求超时，或网关 408 / 504 / 524）。',
     steps: [
-      '先等 1–2 分钟再重试；短时间内连续重试只会让限流更久。',
-      '登录服务商后台确认余额与额度是否充足。',
-      '在对应功能的设置里调大「重试延迟」/「轮次延迟」，或调小并发数、批处理大小。',
-      '智能续写会连续发起大量请求，请使用支持高 RPM 的 API，不要用公益站。',
-    ],
-  },
-  {
-    id: 'http-5xx',
-    test: /\b(500|502|503|504|529)\b|bad gateway|service unavailable|gateway time-?out|internal server error|overloaded|server error|服务器错误|服务不可用|上游.*(错误|超时)/,
-    summary: '服务商服务器出错或过载（5xx），不是本地配置问题。',
-    steps: [
-      RETRY_LATER,
-      '持续出现时换一个模型或换一条 API 渠道。',
-      '如果用的是中转站，查看站方公告确认是否在维护。',
+      '到「API」页调大该预设的「请求超时（秒）」（默认 300 秒），推理模型和长输出需要更久。',
+      '调小输出长度或批处理大小，让单次回复更快结束。',
+      '504 / 524 是中转站或 Cloudflare 等网关先等不及了，插件这边调大超时无效：换一条线路或联系站方。',
     ],
   },
   {
     id: 'context-length',
-    test: /context[ _-]?length|maximum context|context window|too many tokens|tokens? (exceed|limit|too long)|prompt is too long|input is too long|max_tokens.*(exceed|invalid)|超出.*(上下文|长度)|上下文.*(超限|过长)|token.*超/,
+    test: ({ status, text }) => status !== 429
+      && /context[ _-]?length|maximum context|context window|too many tokens|tokens? (exceed|limit|too long)|prompt is too long|input is too long|max_tokens.*(exceed|invalid)|超出.*(上下文|长度)|上下文.*(超限|过长)|token.*超/.test(text),
     summary: '发送给模型的内容太长，超出了模型的上下文上限。',
     steps: [
       '填表：到「填表规则」把「批处理大小」/「上下文楼层数」调小一些。',
@@ -181,34 +311,34 @@ const RULES: HintRule[] = [
     ],
   },
   {
-    id: 'http-400',
-    test: /\b400\b|bad request|invalid_request_error|unsupported parameter|invalid parameter|unrecognized request argument|unknown parameter|参数错误|请求参数无效/,
-    summary: '服务商认为请求内容有问题（400）：通常是模型名或某个参数不被支持。',
+    id: 'http-413',
+    test: httpRule(status => status === 413, /payload too large|request entity too large|请求体过大/),
+    summary: '请求体太大，被服务商或中间代理拒收（413）。',
     steps: [
-      '到「API」页确认模型名拼写正确，最好通过「拉取模型列表」选择。',
-      '如果调整过 temperature / top_p 等高级参数或开启了「严格 JSON」，先恢复默认再试。',
-      '换一个模型试试：部分模型不支持 system 角色或某些字段。',
+      '调小批处理大小、上下文楼层数等，让单次请求更小。',
+      '自建反向代理（如 nginx）时调大 client_max_body_size；中转站限制请联系站方。',
     ],
   },
 
-  // ─── 网络 ───
   {
-    id: 'network-cors',
-    test: /\bcors\b|cross-origin|access-control-allow-origin|preflight/,
-    summary: '浏览器跨域被拦截（CORS）：该服务商不允许网页直接调用。',
+    id: 'http-429',
+    test: httpRule(status => status === 429, /rate[ _-]?limit|too many requests|\bquota\b|resource[ _-]?exhausted|请求过于频繁|限流|配额/),
+    summary: '请求过于频繁被限流（429）：短时间内的请求数或 Token 用量超过了服务商上限。',
     steps: [
-      '把该 API 预设改为走「酒馆连接预设」，由酒馆后端代为转发。',
-      '或者使用支持浏览器直连的中转服务。',
+      '先等 1–2 分钟再重试；短时间内连续重试只会让限流更久。',
+      '在对应功能的设置里调大「重试延迟」/「轮次延迟」，或调小并发数、批处理大小。',
+      '智能续写会连续发起大量请求，请使用支持高 RPM 的 API，不要用公益站。',
+      '如果报错写的是额度（quota）用完而不是频率，登录服务商后台确认余额。',
     ],
   },
   {
-    id: 'network',
-    test: /failed to fetch|networkerror|network error|net::err|econnrefused|econnreset|enotfound|etimedout|getaddrinfo|socket hang up|fetch failed|timed? ?out|timeout|无法连接|连接被拒绝|网络错误|请求超时|超时/,
-    summary: '网络连不上目标服务，或者等待响应超时。',
+    id: 'http-5xx',
+    test: httpRule(status => status >= 500 && status <= 599, /bad gateway|service unavailable|internal server error|overloaded|server error|服务器错误|服务不可用/),
+    summary: '服务商服务器出错或过载（5xx），不是本地配置问题。',
     steps: [
-      '检查本机网络、代理 / VPN 是否正常；把接口地址复制到浏览器地址栏，确认能打开。',
-      '超时多半是模型响应太慢：稍后重试，或换用响应更快的模型。',
-      '酒馆若部署在远程服务器，确认服务器本身能访问该 API 地址。',
+      RETRY_LATER,
+      '持续出现时换一个模型或换一条 API 渠道；中转站请查看站方公告确认是否在维护。',
+      '开启了「通过酒馆渠道发送」时，500 也可能是酒馆后端转发出错：到酒馆服务器的控制台窗口查看具体报错。',
     ],
   },
 
@@ -223,6 +353,49 @@ const RULES: HintRule[] = [
       '如果是填表被拦截，可先手动填表跳过这一层。',
     ],
   },
+  {
+    id: 'http-400',
+    test: httpRule(status => status === 400, /bad request|invalid_request_error|unsupported parameter|invalid parameter|unrecognized request argument|unknown parameter|参数错误|请求参数无效/),
+    summary: '服务商认为请求内容有问题（400）：通常是模型名或某个参数不被支持。',
+    steps: [
+      '到「API」页确认模型名拼写正确，最好通过「拉取模型列表」选择。',
+      '如果调整过 temperature / top_p 等高级参数或开启了「严格 JSON」，先恢复默认再试。',
+      '换一个模型试试：部分模型不支持 system 角色或某些字段。',
+    ],
+  },
+  {
+    id: 'http-4xx',
+    test: httpRule(status => status >= 400 && status <= 499),
+    summary: '服务商拒绝了这次请求（4xx），具体原因写在报错正文里。',
+    steps: [
+      '阅读报错里服务商返回的 message / code 字段，按提示修改模型名、参数或接口地址。',
+      '确认「API」页的「API 格式」与服务商一致，模型名通过「拉取模型列表」选择。',
+      SEE_PREVIOUS_LOG,
+    ],
+  },
+  {
+    id: 'api-upstream-error',
+    test: /返回上游错误/,
+    summary: '服务商在响应里返回了错误对象（HTTP 状态码正常，但内容是错误而不是回复）。',
+    steps: [
+      '看报错里附带的 type / code / message，按含义处理（额度、模型、参数等）。',
+      '确认「API」页的「API 格式」与服务商一致：格式选错时服务商常会返回错误对象。',
+      RETRY_LATER,
+    ],
+  },
+
+  // ─── 网络（无状态码的兜底）───
+  {
+    id: 'network-fetch-failed',
+    test: /failed to fetch|network ?error|load failed|fetch failed|net::err|网络错误|网络失败|网络不可达|无法连接/,
+    summary: '请求没能发出去或没收到任何回应（Failed to fetch）。浏览器出于安全不给出具体原因，最常见是跨域被拦、地址打不开或被扩展拦截。',
+    steps: [
+      '直连时（关闭了「通过酒馆渠道发送」）最常见的原因是跨域被拦：开启该预设的「通过酒馆渠道发送」再试。',
+      '把接口地址复制到浏览器新标签页打开，确认能访问、没有证书警告。',
+      '检查代理 / VPN 与广告拦截扩展；按 F12 打开控制台，红色报错里的 net::ERR_… 就是具体原因。',
+    ],
+  },
+
 
   // ─── 模板变量 / 表达式 ───
   {
@@ -391,7 +564,7 @@ const RULES: HintRule[] = [
   {
     id: 'json-import',
     // 第二组限定「文件导入」语境：TemplateAssistant 这类 AI 草稿解析失败不算导入问题。
-    test: haystack => /json|parse|解析|unexpected token|unexpected end/.test(haystack)
+    test: ({ text: haystack }) => /json|parse|解析|unexpected token|unexpected end/.test(haystack)
       && /导入|import|\[模板|模板文件|template (file|json)|预设|preset|主题|theme|合并配置/.test(haystack),
     summary: '导入的文件不是合法 JSON，或结构与本插件要求的不一致。',
     steps: [
@@ -590,16 +763,57 @@ const RULES: HintRule[] = [
 ];
 
 /**
+ * 从报错文本中取出 HTTP 状态码：只认紧跟在「HTTP / status / 状态码 / 失败 / 错误」之后的三位数，
+ * 避免把堆栈行号、row_id、楼层号、Token 数等普通数字误判成状态码。
+ */
+const HTTP_STATUS_PATTERNS: readonly RegExp[] = [
+  /\bhttp(?:\s*状态码?)?\s*[:：=/]?\s*([1-5]\d\d)\b/g,
+  /\bstatus(?:[ _]?code)?["'\s]*[:：=]\s*([1-5]\d\d)\b/g,
+  /状态码[\s:：=]*([1-5]\d\d)\b/g,
+  /(?:失败|错误|error|failed)\s*(?:[（(][^）)\n]{0,80}[）)])?\s*[:：]?\s*([1-5]\d\d)\b/g,
+];
+
+/** 返回文本里第一个 4xx / 5xx 状态码；没有可信的状态码时返回 null。 */
+export function extractLogHttpStatus(text: string): number | null {
+  const haystack = text.toLowerCase();
+  let best: { index: number; status: number } | null = null;
+  for (const pattern of HTTP_STATUS_PATTERNS) {
+    for (const match of haystack.matchAll(pattern)) {
+      const status = Number(match[1]);
+      if (status < 400 || status > 599) continue;
+      if (!best || (match.index ?? 0) < best.index) best = { index: match.index ?? 0, status };
+      break;
+    }
+  }
+  return best ? best.status : null;
+}
+
+function toHint(rule: HintRule, status: number | null): LogErrorHint {
+  const hint: LogErrorHint = { id: rule.id, code: rule.id.toUpperCase().replace(/-/g, '_'), summary: rule.summary, steps: rule.steps };
+  if (status !== null) hint.httpStatus = status;
+  return hint;
+}
+
+/**
+ * 为任意一段报错文本匹配处理建议；桌宠错误气泡等非日志入口使用。
+ * 总会返回一条建议，未命中任何具体规则时返回通用兜底（id = generic）。
+ */
+export function resolveErrorTextHint(text: string): LogErrorHint {
+  const haystack = String(text ?? '').toLowerCase();
+  const context: HintContext = { text: haystack, status: extractLogHttpStatus(haystack) };
+  for (const rule of RULES) {
+    const matched = typeof rule.test === 'function' ? rule.test(context) : rule.test.test(haystack);
+    if (matched) return toHint(rule, context.status);
+  }
+  return toHint(RULES[RULES.length - 1], context.status);
+}
+
+/**
  * 为一条日志匹配处理建议。只对 error 级日志给建议；warn / debug 返回 null。
  */
 export function resolveLogErrorHint(entry: Pick<LogEntry, 'level' | 'tag' | 'message'>): LogErrorHint | null {
   if (entry.level !== 'error') return null;
-  const haystack = `${entry.tag} ${entry.message}`.toLowerCase();
-  for (const rule of RULES) {
-    const matched = typeof rule.test === 'function' ? rule.test(haystack) : rule.test.test(haystack);
-    if (matched) return { id: rule.id, summary: rule.summary, steps: rule.steps };
-  }
-  return null;
+  return resolveErrorTextHint(`${entry.tag} ${entry.message}`);
 }
 
 /** 供测试与调试使用：规则 ID 列表（按匹配优先级排序）。 */

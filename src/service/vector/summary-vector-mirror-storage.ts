@@ -65,7 +65,42 @@ export function encodeSummaryVectorMirrorVector_ACU(vector: number[]): string {
     return encodeVectorToF32B64_ACU(vector);
 }
 
+/**
+ * 解码结果缓存：同一 f32b64 字符串必然解码出同一向量。命中时返回副本（memcpy），
+ * 调用方修改返回值不会污染缓存。按 float 总量做 LRU 上限。
+ */
+const DECODED_VECTOR_CACHE_MAX_FLOATS_ACU = 1_000_000;
+const decodedVectorCache_ACU = new Map<string, Float32Array>();
+let decodedVectorCacheFloats_ACU = 0;
+
+/** 仅供测试隔离：清空解码缓存。 */
+export function clearSummaryVectorMirrorDecodeCache_ACU(): void {
+    decodedVectorCache_ACU.clear();
+    decodedVectorCacheFloats_ACU = 0;
+}
+
 export function decodeSummaryVectorMirrorVector_ACU(encoded: string): Float32Array {
+    const key = String(encoded || '');
+    const cached = decodedVectorCache_ACU.get(key);
+    if (cached) {
+        decodedVectorCache_ACU.delete(key);
+        decodedVectorCache_ACU.set(key, cached);
+        return new Float32Array(cached);
+    }
+    const vector = decodeSummaryVectorMirrorVectorUncached_ACU(key);
+    if (vector.length > 0 && vector.length <= DECODED_VECTOR_CACHE_MAX_FLOATS_ACU) {
+        decodedVectorCache_ACU.set(key, new Float32Array(vector));
+        decodedVectorCacheFloats_ACU += vector.length;
+        while (decodedVectorCacheFloats_ACU > DECODED_VECTOR_CACHE_MAX_FLOATS_ACU && decodedVectorCache_ACU.size > 0) {
+            const [oldestKey, oldest] = decodedVectorCache_ACU.entries().next().value as [string, Float32Array];
+            decodedVectorCache_ACU.delete(oldestKey);
+            decodedVectorCacheFloats_ACU -= oldest.length;
+        }
+    }
+    return vector;
+}
+
+function decodeSummaryVectorMirrorVectorUncached_ACU(encoded: string): Float32Array {
     if (typeof globalThis.atob !== 'function') throw new Error('当前环境缺少 atob，无法解码镜像向量。');
     const binary = globalThis.atob(String(encoded || ''));
     if (binary.length % 4 !== 0) {
@@ -207,10 +242,70 @@ export async function persistSummaryVectorMirrorManifestPrepared_ACU(params: {
     };
 }
 
-export async function loadSummaryVectorMirrorPack_ACU(
+
+/**
+ * 内容寻址 pack 的内存缓存。
+ * pack 路径主体即内容 sha256，且写入端对同路径不同内容直接抛错，因此「路径 + packHash」
+ * 唯一确定内容，命中无需失效。只缓存校验通过的结果；读取失败、schema/packKey 不符都不入缓存，
+ * 下次照常重新读取（不把失败伪装成空索引）。按字符量做 LRU 上限，避免手机端内存膨胀。
+ */
+const MIRROR_PACK_CACHE_MAX_CHARS_ACU = 8_000_000;
+interface MirrorPackCacheEntry_ACU {
+    blob: SummaryVectorIndexContentPackBlob_ACU;
+    chars: number;
+}
+const mirrorPackCache_ACU = new Map<string, MirrorPackCacheEntry_ACU>();
+const mirrorPackInflight_ACU = new Map<string, Promise<SummaryVectorIndexContentPackBlob_ACU | null>>();
+let mirrorPackCacheChars_ACU = 0;
+
+function estimatePackChars_ACU(blob: SummaryVectorIndexContentPackBlob_ACU): number {
+    let total = 256;
+    for (const chunk of blob.chunks) {
+        total += 128 + String(chunk?.vector || '').length + String(chunk?.text || '').length;
+    }
+    return total;
+}
+
+function storeMirrorPack_ACU(key: string, blob: SummaryVectorIndexContentPackBlob_ACU): void {
+    const chars = estimatePackChars_ACU(blob);
+    if (chars > MIRROR_PACK_CACHE_MAX_CHARS_ACU) return;
+    const previous = mirrorPackCache_ACU.get(key);
+    if (previous) {
+        mirrorPackCacheChars_ACU -= previous.chars;
+        mirrorPackCache_ACU.delete(key);
+    }
+    mirrorPackCache_ACU.set(key, { blob, chars });
+    mirrorPackCacheChars_ACU += chars;
+    while (mirrorPackCacheChars_ACU > MIRROR_PACK_CACHE_MAX_CHARS_ACU && mirrorPackCache_ACU.size > 0) {
+        const [oldestKey, oldest] = mirrorPackCache_ACU.entries().next().value as [string, MirrorPackCacheEntry_ACU];
+        mirrorPackCache_ACU.delete(oldestKey);
+        mirrorPackCacheChars_ACU -= oldest.chars;
+    }
+}
+
+/** 返回浅副本：调用方可重排/增删 chunks 数组而不影响缓存；chunk 对象按只读约定共享。 */
+function clonePackShell_ACU(blob: SummaryVectorIndexContentPackBlob_ACU): SummaryVectorIndexContentPackBlob_ACU {
+    return { ...blob, chunks: blob.chunks.slice() };
+}
+
+/** 仅供测试隔离：清空 pack 内存缓存。 */
+export function clearSummaryVectorMirrorPackCache_ACU(): void {
+    mirrorPackCache_ACU.clear();
+    mirrorPackInflight_ACU.clear();
+    mirrorPackCacheChars_ACU = 0;
+    mirrorManifestCache_ACU.clear();
+}
+
+/**
+ * checkpoint manifest 缓存：路径含 manifestHash，且读取时已按 manifestHash 复核 sha256，
+ * 只缓存复核通过的结果；未带 manifestHash 的引用不缓存。条目数有界（LRU）。
+ */
+const MIRROR_MANIFEST_CACHE_MAX_ENTRIES_ACU = 16;
+const mirrorManifestCache_ACU = new Map<string, SummaryVectorMirrorManifestRows_ACU>();
+
+async function readSummaryVectorMirrorPackUncached_ACU(
     ref: SummaryVectorPackRef_ACU,
 ): Promise<SummaryVectorIndexContentPackBlob_ACU | null> {
-    if (!ref?.path) return null;
     const loaded = await readVectorIndexJsonFile_ACU<SummaryVectorIndexContentPackBlob_ACU>(ref.path);
     if (!loaded.ok || !loaded.data) return null;
     if (loaded.data.schema !== SUMMARY_VECTOR_INDEX_CONTENT_PACK_SCHEMA_ACU || !Array.isArray(loaded.data.chunks)) {
@@ -220,10 +315,44 @@ export async function loadSummaryVectorMirrorPack_ACU(
     return loaded.data;
 }
 
+export async function loadSummaryVectorMirrorPack_ACU(
+    ref: SummaryVectorPackRef_ACU,
+): Promise<SummaryVectorIndexContentPackBlob_ACU | null> {
+    if (!ref?.path) return null;
+    // 只有带 packHash 的引用才是内容寻址的，可安全缓存；其余保持每次直读。
+    if (!ref.packHash) return readSummaryVectorMirrorPackUncached_ACU(ref);
+    const key = `${ref.path}\u0000${ref.packHash}`;
+    const cached = mirrorPackCache_ACU.get(key);
+    if (cached) {
+        mirrorPackCache_ACU.delete(key);
+        mirrorPackCache_ACU.set(key, cached);
+        return clonePackShell_ACU(cached.blob);
+    }
+    let pending = mirrorPackInflight_ACU.get(key);
+    if (!pending) {
+        pending = readSummaryVectorMirrorPackUncached_ACU(ref)
+            .then((blob) => {
+                if (blob) storeMirrorPack_ACU(key, blob);
+                return blob;
+            })
+            .finally(() => { mirrorPackInflight_ACU.delete(key); });
+        mirrorPackInflight_ACU.set(key, pending);
+    }
+    const blob = await pending;
+    return blob ? clonePackShell_ACU(blob) : null;
+}
+
 export async function loadSummaryVectorMirrorManifest_ACU(
     ref: SummaryVectorManifestRef_ACU,
 ): Promise<SummaryVectorMirrorManifestRows_ACU | null> {
     if (!ref?.path) return null;
+    const cacheKey = ref.manifestHash ? `${ref.path}\u0000${ref.manifestHash}` : '';
+    const cached = cacheKey ? mirrorManifestCache_ACU.get(cacheKey) : undefined;
+    if (cached) {
+        mirrorManifestCache_ACU.delete(cacheKey);
+        mirrorManifestCache_ACU.set(cacheKey, cached);
+        return { ...cached, rows: cached.rows.slice() };
+    }
     const loaded = await readVectorIndexJsonFile_ACU<SummaryVectorMirrorManifestRows_ACU>(ref.path);
     if (!loaded.ok || !loaded.data) return null;
     if (loaded.data.schema !== 'summary_vector_mirror_manifest' || !Array.isArray(loaded.data.rows)) return null;
@@ -235,6 +364,13 @@ export async function loadSummaryVectorMirrorManifest_ACU(
             rows: loaded.data.rows,
         }));
         if (actualHash !== ref.manifestHash) return null;
+        mirrorManifestCache_ACU.set(cacheKey, loaded.data);
+        while (mirrorManifestCache_ACU.size > MIRROR_MANIFEST_CACHE_MAX_ENTRIES_ACU) {
+            const oldestKey = mirrorManifestCache_ACU.keys().next().value;
+            if (oldestKey === undefined) break;
+            mirrorManifestCache_ACU.delete(oldestKey);
+        }
+        return { ...loaded.data, rows: loaded.data.rows.slice() };
     }
     return loaded.data;
 }

@@ -1,5 +1,6 @@
 import { SillyTavern_API_ACU, type SillyTavernAPI_Type } from '../../shared/host-api';
 import { getHostWindow, isExtensionMode } from '../../shared/runtime-env';
+import { runTakeoverRequest_ACU } from '../../shared/takeover-control';
 
 const invocations_ACU = new Set<{ quiet_prompt: string; signal: AbortSignal }>();
 
@@ -40,7 +41,7 @@ export function requireZeroLayerHostGeneration_ACU(): SillyTavernAPI_Type {
 const WORLD_INFO_SCAN_PROMPT_KEY_ACU = 'acu_zero_layer_world_info_scan';
 
 /** 只请求装配并走宿主实际 fetch；最终原请求由零层拦截器阻断。 */
-export async function invokeZeroLayerHostGeneration_ACU(quietPrompt: string, signal: AbortSignal, worldInfoScanText = ''): Promise<void> {
+async function invokeZeroLayerHostGenerationImpl_ACU(quietPrompt: string, signal: AbortSignal, worldInfoScanText = ''): Promise<void> {
   const api = requireZeroLayerHostGeneration_ACU();
   if (signal.aborted) throw new DOMException('本轮已停止。', 'AbortError');
   const options = {
@@ -61,3 +62,6 @@ export async function invokeZeroLayerHostGeneration_ACU(quietPrompt: string, sig
     }
   }
 }
+
+export const invokeZeroLayerHostGeneration_ACU: typeof invokeZeroLayerHostGenerationImpl_ACU = (prompt, signal, scanText = '') =>
+  runTakeoverRequest_ACU(merged => invokeZeroLayerHostGenerationImpl_ACU(prompt, merged, scanText), signal);

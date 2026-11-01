@@ -1,3 +1,4 @@
+import { runTakeoverRequest_ACU } from '../../shared/takeover-control';
 import { runWithAbortSignal_ACU } from '../../shared/abort-signal';
 
 /** Rerank 请求超时上界；超时抛错由调用方回退到 embedding 排序。 */
@@ -163,7 +164,7 @@ async function requestRerankBatch_ACU(request: RerankBatchRequest_ACU): Promise<
  * documents 超过 batchSize 时自动分批并行请求并把批内 index 还原为全局 index；
  * 任一批失败整体抛错，由调用方回退到 embedding 排序（不接受"半批有分、半批无分"的混合排序）。
  */
-export async function createRerankScores_ACU(request: VectorRerankRequest_ACU): Promise<VectorRerankResult_ACU[]> {
+async function createRerankScoresImpl_ACU(request: VectorRerankRequest_ACU): Promise<VectorRerankResult_ACU[]> {
     request.signal?.throwIfAborted();
     const endpoint = normalizeEndpoint_ACU(request.endpoint);
     const model = String(request.model || '').trim();
@@ -213,4 +214,8 @@ export async function createRerankScores_ACU(request: VectorRerankRequest_ACU): 
         });
     }
     return merged;
+}
+
+export function createRerankScores_ACU(request: VectorRerankRequest_ACU): Promise<VectorRerankResult_ACU[]> {
+    return runTakeoverRequest_ACU(signal => createRerankScoresImpl_ACU({ ...request, signal }), request.signal);
 }

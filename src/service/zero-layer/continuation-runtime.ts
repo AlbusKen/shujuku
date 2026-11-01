@@ -8,7 +8,7 @@ import { renderAgentConversationMessages_ACU } from '../continuation/agent/agent
 import type { ContinuationAgentTurnPlanRequest_ACU } from '../continuation/agent/agent-model';
 import type { ContinuationSettings_ACU, ContinuationLogicalRef_ACU, TurnAttemptIdentity_ACU } from '../continuation/model';
 import type { ContinuationPromptPlaceholder_ACU } from '../continuation/prompt-template';
-import { loadZeroLayerRuntimeForPage_ACU } from '../../presentation/bootstrap/zero-layer-bootstrap';
+import { getZeroLayerPageOperations_ACU } from './page-operations';
 import { ZeroLayerContinuationStore_ACU, emptyZeroLayerContinuation_ACU } from './continuation-store';
 import { createZeroLayerContinuationAgentStorage_ACU, clearZeroLayerContinuationModules_ACU } from './continuation-agent-storage';
 import { getZeroLayerRuntime_ACU } from './runtime';
@@ -166,7 +166,7 @@ export function createZeroLayerContinuationRuntime_ACU(dependencies: Dependencie
     debug.watch(() => sending && !disposed);
     try {
       debug.step('logical_loading');
-      await loadZeroLayerRuntimeForPage_ACU();
+      await getZeroLayerPageOperations_ACU().loadRuntime();
       assertCurrent();
       debug.step('logical_preparing');
       await zero.submit(frozen.instruction.instruction, ['table'], frozen.identity, async ref => {
@@ -226,7 +226,7 @@ export function createZeroLayerContinuationRuntime_ACU(dependencies: Dependencie
         }
         await zero.recoverSettlement(turn.turnId, turn.attemptId);
       } else if (turn.phase === 'prepared' && turn.plotCandidate) {
-        await loadZeroLayerRuntimeForPage_ACU();
+        await getZeroLayerPageOperations_ACU().loadRuntime();
         assertCurrent();
         await zero.resumePrepared(turn.turnId, turn.attemptId, ref =>
           orchestrator.recordLogicalTurn(turn.continuationIdentity!, ref, true));

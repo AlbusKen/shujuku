@@ -3,7 +3,7 @@ import { assertTableFillRequestCurrent_ACU, type TableFillRequestGuard_ACU } fro
 import { TableFillTargetStaleError_ACU } from '../../data/gateways/chat-message-snapshot';
 import type { SqlMutationResult } from '../../shared/table-storage-provider';
 import { logError_ACU, logWarn_ACU } from '../../shared/utils';
-import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, isAutoUpdatingCard_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
+import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
 import { ensureLegacyStorageMigratedBeforeWrite_ACU, persistTablesToChatMessage_ACU } from './table-service';
 import { ensureStorageProviderReady_ACU, reloadStorageProvider } from './table-storage-strategy';
 import { runTableWriteTransaction_ACU, type TableWriteTransactionContext_ACU } from './table-write-transaction';
@@ -184,9 +184,9 @@ function assertPersistableRowIdentities_ACU(
 }
 
 /**
- * 填表期间会拒绝的外部变更来源：开放 API 的 CRUD/SQL 与可视化编辑器/SQL 控制台。
- * 填表自身（auto_fill/manual_fill/group_fill）、导入（import）与模板提交不受影响。
- * 拒绝而非排队：排队的写入基于陈旧快照，醒来后仍会与填表结果冲突。
+ * 外部变更来源：开放 API 的 CRUD/SQL 与可视化编辑器/SQL 控制台。
+ * 这些来源的 skipChatSave 提交会登记为「运行时未落盘变更」，由下一次普通持久化提交写回聊天。
+ * 外部写入不受 AI 填表状态限制，冲突判断由调用方自行负责。
  */
 const EXTERNAL_MUTATION_SOURCES_ACU: ReadonlySet<TableMutationSourceV2_ACU> = new Set([
   'manual_crud',
@@ -232,15 +232,6 @@ async function flushRuntimeOnlyPendingBeforeCommit_ACU(options: RunTableUpdateCo
   }
 }
 
-function assertNoActiveFillForExternalMutation_ACU(options: RunTableUpdateCommitOptions_ACU): void {
-  if (!EXTERNAL_MUTATION_SOURCES_ACU.has(options.source)) return;
-  if (!isAutoUpdatingCard_ACU) return;
-  throw new TableUpdateCommitError_ACU(
-    `[TableUpdateCommit] ${options.reason}: AI 填表正在进行中，已拒绝外部表格写入（source=${options.source}），请等待填表完成后重试。`,
-    'precondition',
-  );
-}
-
 function assertExpectedCommitScope_ACU(options: RunTableUpdateCommitOptions_ACU, phase: string): void {
   assertTableFillRequestCurrent_ACU(options, options.targetMessageIndex);
   if (options.chatKey === undefined && options.isolationKey === undefined) return;
@@ -262,7 +253,6 @@ export async function runTableUpdateCommit_ACU<T>(
 ): Promise<RunTableUpdateCommitResult_ACU<T>> {
   let requiresRuntimeReload = false;
   try {
-    assertNoActiveFillForExternalMutation_ACU(options);
     assertExpectedCommitScope_ACU(options, '提交前');
     const commitMode = options.commitMode ?? 'persist_v2';
     if (commitMode === 'stage_only') {

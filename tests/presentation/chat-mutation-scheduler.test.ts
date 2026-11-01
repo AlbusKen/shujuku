@@ -50,6 +50,7 @@ vi.mock('../../src/service/vector/summary-vector-mirror-rebuild', () => ({
 }));
 vi.mock('../../src/service/chat/chat-service', () => ({
   getChatArray_ACU: () => [],
+  getActiveChatStorageIdentity_ACU: () => '',
 }));
 vi.mock('../../src/service/vector/summary-vector-index-chat-deletion-gc', () => ({
   runScopedRetentionGcAfterFlush_ACU: vi.fn().mockResolvedValue(undefined),
@@ -65,6 +66,7 @@ vi.mock('../../src/shared/utils', () => ({ logDebug_ACU: vi.fn(), logError_ACU: 
 import {
   scheduleChatMutationRefresh_ACU,
   cancelPendingChatMutationRefresh_ACU,
+  flushChatMutationRefresh_ACU,
   __resetChatMutationSchedulerForTests_ACU,
 } from '../../src/presentation/bootstrap/chat-mutation-scheduler';
 
@@ -207,4 +209,64 @@ describe('chat mutation scheduler', () => {
     expect(h.recoverDeleted).toHaveBeenCalledTimes(1);
     expect(h.refreshUI).toHaveBeenCalledTimes(2);
   });
+
+describe('#56 删楼刷新可等待', () => {
+  it('flush 不等防抖立即执行删楼轮次，并清除已排队的定时器', async () => {
+    scheduleChatMutationRefresh_ACU('chat_modified_swiped');
+    const result = await flushChatMutationRefresh_ACU('chat_modified_deleted');
+    expect(result).toEqual({ ok: true, degraded: false, worldbookFailed: false });
+    expect(h.recoverDeleted).toHaveBeenCalledTimes(1);
+    expect(h.refreshUI).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(h.refreshUI).toHaveBeenCalledTimes(1);
+  });
+
+  it('已有轮次在途时先等它结束，再补跑一轮删楼刷新', async () => {
+    let resolveFirst!: (v: any) => void;
+    h.refreshUI.mockImplementationOnce(() => new Promise(res => { resolveFirst = res; }));
+    scheduleChatMutationRefresh_ACU('chat_modified_swiped');
+    await vi.advanceTimersByTimeAsync(1200);
+    expect(h.refreshUI).toHaveBeenCalledTimes(1);
+
+    let settled = false;
+    const flushed = flushChatMutationRefresh_ACU('chat_modified_deleted').finally(() => { settled = true; });
+    await vi.runAllTicks();
+    expect(settled).toBe(false);
+
+    resolveFirst({ ok: true });
+    await expect(flushed).resolves.toEqual({ ok: true, degraded: false, worldbookFailed: false });
+    expect(h.refreshUI).toHaveBeenCalledTimes(2);
+    expect(h.recoverDeleted).toHaveBeenCalledTimes(1);
+  });
+
+  it('世界书刷新失败与合并抛错都回报给调用方', async () => {
+    h.refreshUI.mockResolvedValueOnce({ degraded: true, worldbookRefreshFailed: true });
+    await expect(flushChatMutationRefresh_ACU('chat_modified_deleted'))
+      .resolves.toEqual({ ok: true, degraded: true, worldbookFailed: true });
+
+    h.refreshUI.mockRejectedValueOnce(new Error('merge boom'));
+    await expect(flushChatMutationRefresh_ACU('chat_modified_deleted'))
+      .resolves.toEqual({ ok: false, degraded: true, worldbookFailed: true });
+    // 合并抛错仍保留向量索引 dirty 标记
+    expect(h.markDirty).toHaveBeenCalledTimes(2);
+  });
+
+  it('数据降级但世界书已更新时不报告世界书失败', async () => {
+    h.refreshUI.mockResolvedValueOnce({ degraded: true });
+    await expect(flushChatMutationRefresh_ACU('chat_modified_deleted'))
+      .resolves.toEqual({ ok: true, degraded: true, worldbookFailed: false });
+  });
+
+  it('flush 轮不等待前端回读窗口，防抖轮保持默认等待', async () => {
+    scheduleChatMutationRefresh_ACU('chat_modified_swiped');
+    await vi.advanceTimersByTimeAsync(1200);
+    await vi.runAllTicks();
+    expect(h.refreshUI).toHaveBeenNthCalledWith(1);
+
+    await flushChatMutationRefresh_ACU('chat_modified_deleted');
+    expect(h.refreshUI).toHaveBeenNthCalledWith(2, { awaitFrontendReadback: false });
+  });
+
+});
+
 });

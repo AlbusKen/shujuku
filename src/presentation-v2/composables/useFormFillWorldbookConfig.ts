@@ -19,8 +19,8 @@ function normalizeSelection(names: unknown): string[] {
   if (!Array.isArray(names)) return [];
   const result: string[] = [];
   for (const name of names) {
-    const trimmed = String(name || '').trim();
-    if (trimmed && !result.includes(trimmed)) result.push(trimmed);
+    const trimmed = typeof name === 'string' ? name : '';
+    if (trimmed.trim() && !result.includes(trimmed)) result.push(trimmed);
   }
   return result;
 }
@@ -33,8 +33,7 @@ export function useFormFillWorldbookConfig() {
   function refreshFromSettings(): void {
     const cfg = getCurrentWorldbookConfig_ACU();
     source.value = cfg.source === 'manual' ? 'manual' : 'character';
-    cfg.manualSelection = normalizeSelection(cfg.manualSelection);
-    manualSelection.value = [...cfg.manualSelection];
+    manualSelection.value = normalizeSelection(cfg.manualSelection);
   }
 
   function setSource(next: FormFillWorldbookSource): void {
@@ -55,8 +54,8 @@ export function useFormFillWorldbookConfig() {
   }
 
   function toggleManualBook(name: string, checked: boolean): void {
-    const trimmed = String(name || '').trim();
-    if (!trimmed) return;
+    const trimmed = String(name || '');
+    if (!trimmed.trim()) return;
     const current = normalizeSelection(manualSelection.value);
     const next = checked
       ? (current.includes(trimmed) ? current : [...current, trimmed])
@@ -70,12 +69,10 @@ export function useFormFillWorldbookConfig() {
       return normalizeSelection(cfg.manualSelection);
     }
     const names: string[] = [];
-    try {
-      const charLorebooks = await getCharLorebooks_ACU({ type: 'all' });
-      if (charLorebooks.primary) names.push(charLorebooks.primary);
-      if (charLorebooks.additional?.length) names.push(...charLorebooks.additional);
-    } catch { /* empty */ }
-    return [...new Set(names.filter(Boolean))];
+    const charLorebooks = await getCharLorebooks_ACU({ type: 'all' });
+    if (charLorebooks.primary) names.push(charLorebooks.primary);
+    if (charLorebooks.additional?.length) names.push(...charLorebooks.additional);
+    return normalizeSelection(names);
   }
 
   return {

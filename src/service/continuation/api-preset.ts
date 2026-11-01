@@ -40,9 +40,17 @@ export function resolveContinuationApiPreset_ACU(settings: Pick<ContinuationSett
   if (settings.apiPresetMode === 'fixed') {
     const presetName = settings.fixedApiPresetName.trim();
     if (!presetName) failPreset_ACU(phase, 'empty');
-    const resolved = dependencies.resolvePreset(presetName);
-    if (!resolved.resolved) failPreset_ACU(phase, 'missing');
-    return { presetName, source: 'fixed', reason: 'fixed_preset', apiMode: resolved.apiMode, apiConfig: resolved.apiConfig, tavernProfile: resolved.tavernProfile };
+    // 固定的是预设身份，不是旧配置对象；同名预设保存后，后续请求必须跟随更新。
+    const readPreset = (): ApiPresetResolution_ACU => {
+      const resolved = dependencies.resolvePreset(presetName);
+      if (!resolved.resolved) failPreset_ACU(phase, 'missing');
+      return resolved;
+    };
+    const resolved = readPreset();
+    return withLiveCurrentChannel_ACU(
+      { presetName, source: 'fixed', reason: 'fixed_preset', apiMode: resolved.apiMode, apiConfig: resolved.apiConfig, tavernProfile: resolved.tavernProfile },
+      readPreset,
+    );
   }
   if (settings.apiPresetMode !== 'current') {
     throw new ContinuationValidationError_ACU(createContinuationError_ACU('CONTINUATION_CONFIG_MISSING', phase, '智能续写 API 预设模式非法', false));

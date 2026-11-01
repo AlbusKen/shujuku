@@ -13,7 +13,9 @@
 
 import { describe, it, beforeAll, expect, vi } from 'vitest';
 import { buildLongHistoryFixture_ACU } from '../service/table/v2-long-history-fixture';
-import { loadTableStateFromFramesV2Detailed_ACU, loadTableStatesAtBoundariesFromFramesV2Detailed_ACU } from '../../src/service/table/storage-frame-v2-replay';
+import { clearLiveReplayCache_ACU, loadTableStateFromFramesV2Detailed_ACU, loadTableStatesAtBoundariesFromFramesV2Detailed_ACU } from '../../src/service/table/storage-frame-v2-replay';
+import { _set_SillyTavern_API_ACU, SillyTavern_API_ACU } from '../../src/shared/host-api';
+import { _set_independentTableStates_ACU, independentTableStates_ACU } from '../../src/service/runtime/state-manager';
 
 // 复用既有测试的模块解析方式：真实 state-manager/chat-gateway，仅静音 log。
 vi.mock('../../../src/shared/utils', async () => {
@@ -119,4 +121,89 @@ describe('阶段 J：长历史 replay 性能基准（本地可复现）', () => 
     // eslint-disable-next-line no-console
     console.table({ yield_run: { elapsedMs: elapsed.toFixed(1), yieldCount: m?.yieldCount, frameCount: m?.frameCount } });
   });
+
+  it('#58：400 帧规模冷 replay 与 62 帧对照的耗时与计数', async () => {
+    const large = buildLongHistoryFixture_ACU(400);
+    // warm-up 后各跑一次冷 replay；每帧耗时显著上升说明存在非线性增长。
+    await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+    const startBase = performance.now();
+    const base = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+    const baseElapsed = performance.now() - startBase;
+    const startLarge = performance.now();
+    const scaled = await loadTableStateFromFramesV2Detailed_ACU(large.chat, '', { updateRuntimeState: false });
+    const largeElapsed = performance.now() - startLarge;
+    const row = (elapsed: number, frames: number, m: any) => ({
+      elapsedMs: elapsed.toFixed(1),
+      perFrameMs: (elapsed / frames).toFixed(2),
+      frameCount: m?.frameCount,
+      sqlOperationCount: m?.sqlOperationCount,
+      tableAliasBuildCount: m?.tableAliasBuildCount,
+      aliasInvalidateCount: m?.aliasInvalidateCount,
+    });
+    // eslint-disable-next-line no-console
+    console.table({
+      frames_62: row(baseElapsed, chat.length, base?.metrics),
+      frames_400: row(largeElapsed, large.chat.length, scaled?.metrics),
+    });
+  }, 120_000);
+
+
+  it('宿主当前聊天回放缓存：命中结果与冷回放一致、副作用调用重放 schedule、帧原地改写后失效', async () => {
+    const hostChat = buildLongHistoryFixture_ACU().chat;
+    // 夹具日志不带填表事件；为尾部两帧补上事件，使 schedule 重放有可比内容。
+    const framesWithEntries = hostChat
+      .map((message: any) => message?.TavernDB_ACU_IsolatedData?.['']?.storageFrame)
+      .filter((frame: any) => Array.isArray(frame?.logEntries) && frame.logEntries.length > 0);
+    framesWithEntries.slice(-2).forEach((frame: any, index: number) => {
+      const entry = frame.logEntries[frame.logEntries.length - 1];
+      entry.filledSheetKeys = [`sheet_schedule_${index}`];
+      entry.groupKeys = ['sheet_schedule_group'];
+    });
+    const previousHostApi = SillyTavern_API_ACU;
+    const previousStates = independentTableStates_ACU;
+    clearLiveReplayCache_ACU();
+    try {
+      _set_SillyTavern_API_ACU({ chat: hostChat } as any);
+      const startCold = performance.now();
+      const cold = await loadTableStateFromFramesV2Detailed_ACU(hostChat, '', { updateRuntimeState: false });
+      const coldElapsed = performance.now() - startCold;
+      const startHit = performance.now();
+      const hit = await loadTableStateFromFramesV2Detailed_ACU(hostChat, '', { updateRuntimeState: false });
+      const hitElapsed = performance.now() - startHit;
+      expect(cold?.metrics?.replayReuseCount).toBe(0);
+      expect(hit?.metrics?.replayReuseCount).toBe(1);
+      expect(hit?.metrics?.sqliteHydrateCount).toBe(0);
+      expect(hit?.data).toEqual(cold?.data);
+      expect(hit?.data).not.toBe(cold?.data);
+
+      // 副作用调用：命中缓存时 schedule 写入必须与冷回放完全一致。
+      _set_independentTableStates_ACU({});
+      clearLiveReplayCache_ACU();
+      await loadTableStateFromFramesV2Detailed_ACU(hostChat, '', { updateRuntimeState: true });
+      const coldSchedule = JSON.parse(JSON.stringify(independentTableStates_ACU));
+      _set_independentTableStates_ACU({});
+      const sideEffectHit = await loadTableStateFromFramesV2Detailed_ACU(hostChat, '', { updateRuntimeState: true });
+      expect(sideEffectHit?.metrics?.replayReuseCount).toBe(1);
+      expect(independentTableStates_ACU).toEqual(coldSchedule);
+      expect(Object.keys(coldSchedule).length).toBeGreaterThan(0);
+
+      // 不改 headRevision 的原地帧改写（如删楼嫁接/降级）必须使缓存失效。
+      const lastFrameMessage = [...hostChat].reverse()
+        .find((message: any) => message?.TavernDB_ACU_IsolatedData?.['']?.storageFrame?.logEntries?.length > 0);
+      const frame = lastFrameMessage.TavernDB_ACU_IsolatedData[''].storageFrame;
+      const removedEntry = frame.logEntries.pop();
+      const afterMutation = await loadTableStateFromFramesV2Detailed_ACU(hostChat, '', { updateRuntimeState: false });
+      expect(afterMutation?.metrics?.replayReuseCount).toBe(0);
+      frame.logEntries.push(removedEntry);
+      const restored = await loadTableStateFromFramesV2Detailed_ACU(hostChat, '', { updateRuntimeState: false });
+      expect(restored?.data).toEqual(cold?.data);
+
+      // eslint-disable-next-line no-console
+      console.table({ live_cache: { coldMs: coldElapsed.toFixed(1), hitMs: hitElapsed.toFixed(1) } });
+    } finally {
+      clearLiveReplayCache_ACU();
+      _set_SillyTavern_API_ACU(previousHostApi);
+      _set_independentTableStates_ACU(previousStates);
+    }
+  }, 60_000);
 });

@@ -81,8 +81,8 @@ async function forward_ACU(
 ): Promise<void> {
   const controller = new AbortController();
   const abort = () => controller.abort();
-  lease.signal.addEventListener('abort', abort, { once: true });
-  request.signal?.addEventListener('abort', abort, { once: true });
+  lease.signal.addEventListener('abort', abort, { once: true }); // arch-ok: AbortSignal 撤销发送租约，非 DOM 监听；finally 释放。
+  request.signal?.addEventListener('abort', abort, { once: true }); // arch-ok: AbortSignal 传播宿主请求取消，非 DOM 监听；finally 释放。
   try {
     assertCurrent_ACU(lease, request.signal);
     const payload = await request.readPayload();

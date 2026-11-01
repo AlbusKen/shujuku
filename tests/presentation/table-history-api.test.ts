@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({ host: undefined as any, isolationKey: '', replay: vi.fn() }));
 vi.mock('../../src/shared/host-api', () => ({ get SillyTavern_API_ACU() { return mocks.host; } }));
-vi.mock('../../src/data/gateways/chat-gateway', () => ({ getChatArray_ACU: () => mocks.host?.chat || [] }));
+vi.mock('../../src/service/chat/chat-service', () => ({ getChatArray_ACU: () => mocks.host?.chat || [] }));
 vi.mock('../../src/service/runtime/state-manager', () => ({ getCurrentIsolationKey_ACU: () => mocks.isolationKey }));
 vi.mock('../../src/service/table/storage-frame-v2-replay', () => ({
     loadTableStatesAtBoundariesFromFramesV2Detailed_ACU: mocks.replay,
@@ -29,7 +29,8 @@ describe('public read-only table history API', () => {
         expect(result.snapshots.map((snapshot: any) => snapshot.messageIndex)).toEqual([2, 0]);
         expect(mocks.replay).toHaveBeenCalledExactlyOnceWith(mocks.host.chat, '', [2, 0], {
             updateRuntimeState: false, compatibilityMode: 'disabled', allowTemporaryTemplateBaseline: false,
-        });
+            yieldBudgetMs: 8,
+        }, { inheritFramelessBoundaries: true });
     });
 
     it('returns independent copies, including snapshots sharing an engine result', async () => {

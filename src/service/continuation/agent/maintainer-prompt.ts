@@ -3,6 +3,7 @@ import type { AgentToolMode_ACU } from '../../ai/agent-tool-mode';
 import { AGENT_FORMAT_ANSWER_MARKER_ACU, AGENT_FORMAT_QUESTION_ACU } from '../../../shared/agent-prompt-qa';
 import { AGENT_HISTORY_TOKEN_ACU, AGENT_SNAPSHOT_TOKEN_ACU } from '../../../shared/agent-prompt-layout';
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
+import { withContentSafetyIdentity_ACU } from '../../../shared/content-safety.js';
 
 /** V51 格式正文冻结，仅供精确迁移；不得随当前契约变化。 */
 export function maintainerV51FormatAnswer_ACU(mode: AgentToolMode_ACU): string {
@@ -92,6 +93,7 @@ export function maintainerFormatAnswer_ACU(mode: AgentToolMode_ACU): string {
 /** 当前默认只更新格式与保存核对段，其余职责、资料和元数据保持不变。 */
 export function buildMaintainerQaPrompt_ACU(): ContinuationPromptSegment_ACU[] {
   return buildV51MaintainerQaPrompt_ACU().map(segment => {
+    if (segment.content.startsWith('你是伏笔、认知信息差与故事年代学的结算维护子代理。')) return { ...segment, content: withContentSafetyIdentity_ACU(segment.content) };
     if (segment.content === maintainerV51FormatAnswer_ACU('json')) return { ...segment, content: maintainerFormatAnswer_ACU('json') };
     if (segment.role === 'assistant' && segment.content.startsWith('我以当前授权与权威模块修订号写入。')) return { ...segment,
       content: '我按本次授权一次交付 summary + delta，程序以本次读取版本校验并保存回读；新增用 upsert，修改只 patch 变化栏目，退役带真实 id 与 reason。年代学修改提交完整时间字段，信息差揭示状态与楼层保持一致。\n只有 status=committed 且权威回读确认完整保存后直接结束，不额外确认；局部失败只按回执真实 ID 补 missingFields 或被拒字段，不重发已保存栏目、新行或成功模块。兼容 write_sql 路径仍独立写入，收到回执后交付摘要。保存状态未知时不猜成功，仍有读取授权才核对权威资料，否则如实报告未知与缺口。\n每条新增事实必须有真实正文出处；角色所知保留渠道，年代学证据合法、精度不夸大。未获写入授权时不提交写集，预算用尽且仍缺必需栏目时报告缺口，不能称无变化。summary 不能替代实际保存。' };

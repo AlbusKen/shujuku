@@ -116,13 +116,14 @@ export interface LongHistoryFixture_ACU {
 }
 
 /**
- * 生成 62 帧长历史：首帧 full checkpoint（17 表），后 61 帧各 11 条 operation。
+ * 生成长历史（默认 62 帧）：首帧 full checkpoint（17 表），其余帧各 11 条 operation。
  * 每帧：8 条 sql_sheet_batch（op=0..3,5..8）+ 2 条 row_upsert（op=4,9）
  * + 1 条 data_replace（op=10）。
+ * frameCount 用于规模基准（如 #58 的 400 帧），帧内容只依赖帧索引。
  */
-export function buildLongHistoryFixture_ACU(): LongHistoryFixture_ACU {
+export function buildLongHistoryFixture_ACU(frameCount: number = FRAME_COUNT): LongHistoryFixture_ACU {
   const chat: any[] = [];
-  for (let i = 0; i < FRAME_COUNT; i += 1) {
+  for (let i = 0; i < frameCount; i += 1) {
     chat.push({
       is_user: false,
       mes: `消息 ${i}`,
@@ -138,15 +139,15 @@ export function buildLongHistoryFixture_ACU(): LongHistoryFixture_ACU {
   const sqlBatchPerFrame = OPERATIONS_PER_FRAME - 3; // 8（op=4、op=9 是 row_upsert）
   const rowUpsertPerFrame = 2;
   const dataReplacePerFrame = 1;
-  const totalOperations = (FRAME_COUNT - 1) * OPERATIONS_PER_FRAME;
-  const totalSqlOperations = (FRAME_COUNT - 1) * sqlBatchPerFrame;
+  const totalOperations = (frameCount - 1) * OPERATIONS_PER_FRAME;
+  const totalSqlOperations = (frameCount - 1) * sqlBatchPerFrame;
 
   return {
     chat,
     sqlBatchPerFrame,
     rowUpsertPerFrame,
     dataReplacePerFrame,
-    frameCount: FRAME_COUNT,
+    frameCount,
     sheetCount: SHEET_COUNT,
     totalOperations,
     totalSqlOperations,

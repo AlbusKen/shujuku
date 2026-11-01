@@ -3,6 +3,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
+import { validateDDLTextAgainstHeaders_ACU } from '../../../src/shared/ddl-utils';
 
 const runtimeMock = vi.hoisted(() => ({
   settings_ACU: {
@@ -114,6 +115,33 @@ describe('useVisualizerConfigEditing', () => {
     config.addColumn('品质');
     expect(store.currentSheet.content[0]).toEqual([null, '旧物品', '数量', '品质']);
     expect(store.currentSheet.content[1]).toEqual([null, '苹果', '2', null]);
+    const ddl = store.currentSheet.sourceData.ddl;
+    expect(ddl).toContain('quantity INTEGER, -- 数量');
+    expect(ddl).toMatch(/\n  [a-z][a-z0-9_]* TEXT -- 品质\n\);$/);
+    expect(validateDDLTextAgainstHeaders_ACU(ddl, store.currentSheet.content[0]).valid).toBe(true);
+  });
+
+  it('新增列与既有表头重复时拒绝且草稿不变', async () => {
+    const store = await loadSheet();
+    const { useVisualizerConfigEditing } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerConfigEditing');
+    const config = useVisualizerConfigEditing();
+    const before = JSON.stringify(store.tempData);
+
+    config.addColumn('数量');
+
+    expect(JSON.stringify(store.tempData)).toBe(before);
+  });
+
+  it('删除列时同步移除该物理列的隐藏标记', async () => {
+    const store = await loadSheet();
+    const { useVisualizerConfigEditing } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerConfigEditing');
+    const config = useVisualizerConfigEditing();
+    store.currentSheet.sourceData.hiddenPhysicalColumns = ['item_name', 'quantity'];
+
+    config.deleteColumn(1);
+
+    expect(store.currentSheet.sourceData.hiddenPhysicalColumns).toEqual(['item_name']);
+    expect(store.currentSheet.sourceData.ddl).not.toContain('quantity');
   });
 
   it('删除 SQLite 业务列时原子同步 DDL、表头和所有数据行', async () => {

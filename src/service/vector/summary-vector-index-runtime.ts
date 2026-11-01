@@ -1,3 +1,4 @@
+import { captureTakeoverLease_ACU, isTakeoverEnabled_ACU } from '../../shared/takeover-control';
 import { createEmbeddings_ACU } from '../../data/gateways/vector-embedding-gateway';
 import { createRerankScores_ACU } from '../../data/gateways/vector-rerank-gateway';
 import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
@@ -30,6 +31,10 @@ import {
     loadSummaryVectorMirrorManifest_ACU,
     loadSummaryVectorMirrorPack_ACU,
 } from './summary-vector-mirror-storage';
+import { mapWithBoundedConcurrency_ACU } from '../../shared/bounded-concurrency';
+
+/** 召回时并行读取镜像 pack 的上限：兼顾手机网络往返与瞬时内存/服务端压力。 */
+const SUMMARY_VECTOR_MIRROR_PACK_READ_CONCURRENCY_ACU = 4;
 import { buildCurrentSummaryVectorEmbeddingIdentity_ACU } from './summary-vector-mirror-writer';
 import {
     logSummaryVectorIndexIdentityEvent_ACU,
@@ -666,10 +671,14 @@ async function materializeSummaryVectorMirrorHead_ACU(
     live: LiveSummaryVectorRows_ACU | null,
 ): Promise<{ rows: ChatSummaryVectorIndexRow_ACU[]; chunks: ChatSummaryVectorIndexChunk_ACU[] }> {
     const packByHash = new Map<string, Awaited<ReturnType<typeof loadSummaryVectorMirrorPack_ACU>>>();
-    for (const packRef of head.packRefs) {
-        const pack = await loadSummaryVectorMirrorPack_ACU(packRef);
+    // 有界并发读取（内容寻址 pack 另有内存缓存）；失败语义与原串行循环一致：读不到的 pack 跳过。
+    const loadedPacks = await mapWithBoundedConcurrency_ACU(
+        head.packRefs, SUMMARY_VECTOR_MIRROR_PACK_READ_CONCURRENCY_ACU, (packRef) => loadSummaryVectorMirrorPack_ACU(packRef),
+    );
+    head.packRefs.forEach((packRef, index) => {
+        const pack = loadedPacks[index];
         if (pack) packByHash.set(packRef.packHash, pack);
-    }
+    });
     const rows: ChatSummaryVectorIndexRow_ACU[] = [];
     const chunks: ChatSummaryVectorIndexChunk_ACU[] = [];
     let fallbackOrder = 0;
@@ -938,7 +947,10 @@ async function tryRealignSummaryVectorIndexPointerFromDisk_ACU(params: {
 export async function processSummaryVectorIndexBeforeGeneration_ACU(
     options: SummaryVectorIndexRuntimeOptions_ACU = {},
 ): Promise<SummaryVectorIndexRuntimeResult_ACU> {
+    if (!isTakeoverEnabled_ACU()) return { success: false, skipped: true, reason: 'takeover_paused' };
+    const takeoverLease = captureTakeoverLease_ACU(options.signal);
     const assertActive = () => {
+        takeoverLease.assertActive();
         options.signal?.throwIfAborted();
         options.assertActive?.();
     };

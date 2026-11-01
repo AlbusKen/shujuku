@@ -133,6 +133,10 @@ async function mountDashboardPage(
   } = {},
 ) {
   vi.resetModules();
+  const takeover = await import("../../../src/shared/takeover-control");
+  takeover.setTakeoverRuntimeEnabled_ACU(true);
+  const setTakeover = vi.fn((enabled: boolean) => takeover.setTakeoverRuntimeEnabled_ACU(enabled));
+  vi.doMock("../../../src/service/settings/takeover-control-service", () => ({ setTakeoverEnabled_ACU: setTakeover }));
   document.body.innerHTML = "";
   document.head.innerHTML = "";
   m.parseTableTemplateJson_ACU.mockReset();
@@ -282,7 +286,7 @@ async function mountDashboardPage(
   expect(document.querySelector('.acu-v2-dashboard-page')).not.toBeNull();
   const { useDashboardPage } = await import("../../../src/presentation-v2/composables/useDashboardPage");
   const dashboard = useDashboardPage();
-  return { mount, settings, saveSettings, enableFlightMode, disableFlightMode, dashboard };
+  return { mount, settings, saveSettings, enableFlightMode, disableFlightMode, dashboard, setTakeover };
 }
 
 beforeEach(() => {
@@ -392,6 +396,8 @@ describe("DashboardPage", () => {
     expect(text).toContain("桌面宠物");
     expect(text).toContain("开启流式输出");
     expect(text).toContain("0TK 占用模式");
+    expect(text).not.toContain("零层卡模式");
+    expect(page!.querySelector('#acu-zero-layer-send-hint')).toBeNull();
 
     const visibleToggleKeys = Array.from(
       document.querySelectorAll<HTMLButtonElement>(
@@ -399,6 +405,7 @@ describe("DashboardPage", () => {
       ),
     ).map((button) => button.dataset.acuToggleKey);
     expect(visibleToggleKeys).toEqual([
+      "takeoverEnabled",
       "autoUpdateEnabled",
       "silentModeEnabled",
       "desktopPetEnabled",
@@ -719,6 +726,22 @@ describe("DashboardPage", () => {
     mount.__resetAcuV2MountForTests();
   });
 
+  it("接管总开关可关闭再开启且不修改原有功能配置", async () => {
+    const { mount, settings, setTakeover } = await mountDashboardPage();
+    const original = JSON.stringify(settings);
+    const toggle = document.querySelector('button[data-acu-toggle-key="takeoverEnabled"]') as HTMLButtonElement;
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    toggle.click(); await new Promise(r => setTimeout(r, 0));
+    expect(setTakeover).toHaveBeenLastCalledWith(false);
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    expect(JSON.stringify(settings)).toBe(original);
+    toggle.click(); await new Promise(r => setTimeout(r, 0));
+    expect(setTakeover).toHaveBeenLastCalledWith(true);
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    expect(JSON.stringify(settings)).toBe(original);
+    mount.__resetAcuV2MountForTests();
+  });
+
   it("修改自动填表开关会保存 settings", async () => {
     const { mount, settings, saveSettings } = await mountDashboardPage();
 
@@ -738,7 +761,7 @@ describe("DashboardPage", () => {
   });
 
   it("切换到高级设置后显示高级开关、存储模式选择与开发者总开关", async () => {
-    const { mount } = await mountDashboardPage();
+    const { mount, settings, saveSettings } = await mountDashboardPage();
 
     // 找到 segmented control 的"高级设置"按钮
     const segmentedButtons = Array.from(
@@ -925,6 +948,11 @@ describe("DashboardPage", () => {
     expect(document.querySelector('.acu-notice-bubble')?.getAttribute('role')).toBe('alert');
     expect(document.querySelector('.acu-notice-bubble__detail')).toBeNull();
     expect(document.querySelector('.acu-notice-bubble__body')?.classList.contains('is-expandable')).toBe(false);
+    const errorHint = document.querySelector<HTMLDetailsElement>('.acu-notice-bubble__hint');
+    expect(errorHint?.dataset.hintId).toBe('network-reset');
+    expect(errorHint?.open).toBe(false);
+    expect(errorHint?.querySelector('.acu-notice-bubble__hint-code')?.textContent).toBe('NETWORK_RESET');
+    expect(errorHint?.querySelectorAll('.acu-notice-bubble__hint-steps li').length).toBeGreaterThan(0);
     toggle().click();
     await tick();
     expect(body()).toBe(errorText);
@@ -941,6 +969,22 @@ describe("DashboardPage", () => {
     expect(document.querySelector('.acu-notice-bubble__heading')?.textContent).toBe('纪要召回失败');
     document.querySelector<HTMLButtonElement>('[data-acu-toggle-key="desktopPetEnabled"]')!.click();
     await tick();
+
+    hub.notify_ACU('error', '续写状态保存失败', { code: 'CONTINUATION_PERSIST_FAILED' });
+    document.querySelector<HTMLButtonElement>('.acu-notice-bubble__close')!.click();
+    await tick();
+    expect(body()).toBe('续写状态保存失败');
+    // 命中处理建议时，业务错误码排在规则错误码之前。
+    expect(document.querySelector('.acu-notice-bubble__hint-code')?.textContent).toBe('CONTINUATION_PERSIST_FAILED · CONTINUATION');
+    expect(document.querySelector('.acu-notice-bubble__code')).toBeNull();
+
+    hub.notify_ACU('error', '未知故障', { code: 'CONTINUATION_TASK_NOT_FOUND' });
+    document.querySelector<HTMLButtonElement>('.acu-notice-bubble__close')!.click();
+    await tick();
+    expect(body()).toBe('未知故障');
+    // 只命中通用兜底时不显示处理建议，但业务错误码仍单独展示。
+    expect(document.querySelector('.acu-notice-bubble__hint')).toBeNull();
+    expect(document.querySelector('.acu-notice-bubble__code')?.textContent).toBe('CONTINUATION_TASK_NOT_FOUND');
 
     const task = hub.beginNoticeTask_ACU('剧情推进', { detail: '分析记忆目录', busy: true });
     document.querySelector<HTMLButtonElement>('.acu-notice-bubble__close')!.click();

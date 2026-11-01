@@ -352,6 +352,8 @@ export interface ContinuationSettings_ACU {
   outlinePrompt: ContinuationPromptSegment_ACU[];
   agentPrompts: ContinuationAgentPrompts_ACU;
   promptForceDefaultVersion?: string;
+  /** 一次性内容声明升级前的提示词 JSON 备份，不参与模型请求。 */
+  contentSafetyPromptBackup?: string;
 }
 
 export interface ContinuationEnvelope_ACU {

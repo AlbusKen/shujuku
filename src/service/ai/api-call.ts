@@ -6,8 +6,9 @@ import { handleApiResponse_ACU, extractAiUsageMetadata_ACU, type AiUsageMetadata
 import { readFetchChatTurn_ACU, chatTurnFromJson_ACU, type AiChatTurn_ACU, type AiNativeToolDefinition_ACU } from './native-tool';
 export type { AiUsageMetadata_ACU };
 import { settings_ACU } from '../runtime/state-manager';
-import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, getHostRequestHeaders_ACU, getConnectionManagerProfiles_ACU, triggerSlash_ACU } from '../../data/gateways/ai-gateway';
+import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, getHostRequestHeaders_ACU, getConnectionManagerProfiles_ACU, triggerSlash_ACU, triggerSlashBypassTakeover_ACU } from '../../data/gateways/ai-gateway';
 import { sendCustomApiRequest_ACU } from './custom-api-transport';
+import { presetContextToolArgs_ACU, presetContextToolOptions_ACU } from '../../data/gateways/context-tool-transport';
 import { withApiRequestTimeout_ACU } from './api-request-timeout';
 import { isConnectionProfileChatCompletion_ACU, isMainApiChatCompletionAvailable_ACU, readMainApiChatCompletionRouting_ACU, sendMainApiChatCompletionRequest_ACU, sendProfileChatCompletionRequest_ACU } from '../../data/gateways/ai-gateway';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
@@ -58,18 +59,32 @@ export function requireResolvedApiPreset_ACU(presetName: string, config: { resol
   throw new ApiPresetUnresolvedError_ACU(name);
 }
 
-/** Only transient request failures are safe to retry. Response-content validation stays with callers. */
+/** 连接层瞬时故障的错误码（Node / undici / 宿主转发会带出）。 */
+const RETRYABLE_NETWORK_CODES_ACU = /^(?:ECONNREFUSED|ECONNRESET|ECONNABORTED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|EPIPE|EHOSTUNREACH|ENETUNREACH|ENETDOWN|UND_ERR_[A-Z_]+)$/;
+/** 报错文本里的瞬时网络失败特征；浏览器 fetch 失败只给 TypeError + 这类文本。 */
+const RETRYABLE_NETWORK_TEXT_ACU = /failed to fetch|fetch failed|load failed|networkerror|network ?error|net::err_|\btimeout\b|timed out|connection reset|socket hang up|other side closed|\bterminated\b|econnrefused|econnreset|econnaborted|enotfound|eai_again|etimedout|epipe|ehostunreach|enetunreach/i;
+
+function readErrorCode_ACU(value: unknown): string {
+  if (!value || typeof value !== 'object') return '';
+  const code = (value as { code?: unknown }).code;
+  return typeof code === 'string' ? code.toUpperCase() : '';
+}
+
+/**
+ * 只有瞬时请求失败才可重试；响应内容校验仍由调用方负责。
+ * TypeError 只在带网络失败特征时才算瞬时故障——`x is not a function` 这类程序错误重试也不会好。
+ */
 export function isRetryableAiRequestError_ACU(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false;
-  const candidate = error as { name?: unknown; message?: unknown; status?: unknown };
+  const candidate = error as { name?: unknown; message?: unknown; status?: unknown; cause?: unknown };
   const name = String(candidate.name || '');
-  const message = String(candidate.message || '');
   const status = Number(candidate.status);
   if (name === 'AbortError') return false;
   if (Number.isFinite(status)) return status === 429 || (status >= 500 && status <= 599);
   if (name === 'TimeoutError') return true;
-  if (error instanceof TypeError) return true;
-  return /(?:timeout|timed out|network(?:\s+error)?|connection reset|socket hang up)/i.test(message);
+  if (RETRYABLE_NETWORK_CODES_ACU.test(readErrorCode_ACU(error)) || RETRYABLE_NETWORK_CODES_ACU.test(readErrorCode_ACU(candidate.cause))) return true;
+  const cause = candidate.cause && typeof candidate.cause === 'object' ? String((candidate.cause as { message?: unknown }).message || '') : '';
+  return RETRYABLE_NETWORK_TEXT_ACU.test(`${String(candidate.message || '')} ${cause}`);
 }
 
 function isRecord_ACU(value: unknown): value is Record<string, unknown> {
@@ -379,7 +394,7 @@ export async function callApiWithPlotPreset_ACU(messages: any[], presetName?: st
     if (transport !== 'custom') {
       if (transport === 'main-chat-completion') {
         // Chat Completion 主连接直发生成端点，避开 generateRaw 经过的第三方脚本 fetch 包装。
-        return await callMainApiChatCompletionText_ACU(messages, abortSignal);
+        return await callMainApiChatCompletionText_ACU(messages, abortSignal, undefined, effectiveApiConfig);
       }
       logDebug_ACU('[剧情推进] 通过酒馆主API发送请求（流式传输）...');
       if (!isGenerateRawAvailable_ACU()) {
@@ -435,7 +450,7 @@ export async function callApi_ACU(messages: any[], apiSettings: any, abortSignal
       // 使用主API或酒馆预设（流式传输）
       if (transport === 'main-chat-completion') {
         // Chat Completion 主连接直发生成端点，避开 generateRaw 经过的第三方脚本 fetch 包装。
-        return await callMainApiChatCompletionText_ACU(messages, abortSignal);
+        return await callMainApiChatCompletionText_ACU(messages, abortSignal, undefined, effectiveApiConfig);
       }
       logDebug_ACU('[剧情推进] 通过酒馆主API发送请求（流式传输）...');
       if (!isGenerateRawAvailable_ACU()) {
@@ -557,7 +572,7 @@ export async function callAIWithPreset_ACU(messages: any[], presetName: string =
         const directProfile = getConnectionManagerProfiles_ACU().find(item => item.id === profileId);
         if (directProfile && isConnectionProfileChatCompletion_ACU(directProfile)) {
             // Chat Completion 预设直发生成端点：宿主连接管理器经被第三方脚本包装的全局 fetch 发送。
-            const raw = await runWithTavernProfile_ACU(profileId, target => sendProfileChatCompletionRequest_ACU(target, toWireMessages_ACU(messages), maxTokens, {}, signal));
+            const raw = await runWithTavernProfile_ACU(profileId, target => sendProfileChatCompletionRequest_ACU(target, toWireMessages_ACU(messages), maxTokens, {}, signal, ...presetContextToolArgs_ACU(effectiveApiConfig)));
             assertNotAborted_ACU(signal);
             const directContent = chatTurnFromJson_ACU(raw).turn.content;
             return directContent ? directContent : null;
@@ -577,7 +592,7 @@ export async function callAIWithPreset_ACU(messages: any[], presetName: string =
     if (effectiveApiConfig.useMainApi) {
         if (isMainApiChatCompletionAvailable_ACU()) {
             // Chat Completion 主连接直发生成端点，避开 generateRaw 经过的第三方脚本 fetch 包装。
-            const directText = await callMainApiChatCompletionText_ACU(messages, signal, maxTokens);
+            const directText = await callMainApiChatCompletionText_ACU(messages, signal, maxTokens, effectiveApiConfig);
             return directText || null;
         }
         if (!isGenerateRawAvailable_ACU()) {
@@ -691,9 +706,9 @@ async function runWithTavernProfile_ACU<T>(profileId: string, action: (profile: 
         } finally {
             if (needSwitch) {
                 try {
-                    const current = await triggerSlash_ACU('/profile');
+                    const current = await triggerSlashBypassTakeover_ACU('/profile');
                     if (current !== originalProfile) {
-                        await triggerSlash_ACU(`/profile await=true "${originalProfile.replace(/"/g, '\\"')}"`);
+                        await triggerSlashBypassTakeover_ACU(`/profile await=true "${originalProfile.replace(/"/g, '\\"')}"`);
                     }
                 } catch (restoreError) {
                     logWarn_ACU('恢复原酒馆连接预设失败:', restoreError);
@@ -720,6 +735,9 @@ export async function callAIWithResolvedPreset_ACU(
         || extras.requireDirectTransport !== true || extras.streaming !== false || extras.onTextPreview)) {
         throw new Error('内部私有资料只允许无预览的独立非流式请求。');
     }
+    // 活渠道只在请求入口取值；超时、路由与请求体共用本次副本，异步等待期间不再漂移。
+    resolved = { ...resolved };
+    resolved.apiConfig = { ...resolved.apiConfig };
     return withApiRequestTimeout_ACU(resolved.apiConfig, signal, async (signal) => {
     const reportUsage = (raw: unknown): void => {
         if (!lifecycle?.onUsage) return;
@@ -752,7 +770,7 @@ export async function callAIWithResolvedPreset_ACU(
             // 宿主连接管理器经被第三方脚本包装的全局 fetch 发送；Chat Completion 预设改为直发生成端点。
             const raw = await runWithTavernProfile_ACU(resolved.tavernProfile, target => {
                 if (extras?.requireDirectTransport) assertResolvedPresetDirectTransport_ACU(resolved);
-                return sendProfileChatCompletionRequest_ACU(target, wireMessages, maxTokens, extras?.generationParameters ?? {}, signal, directOptions);
+                return sendProfileChatCompletionRequest_ACU(target, wireMessages, maxTokens, extras?.generationParameters ?? {}, signal, presetContextToolOptions_ACU(resolved.apiConfig, directOptions));
             });
             assertNotAborted_ACU(signal);
             const parsed = chatTurnFromJson_ACU(raw);
@@ -769,7 +787,7 @@ export async function callAIWithResolvedPreset_ACU(
     if (resolved.apiConfig.useMainApi) {
         if (isMainApiChatCompletionAvailable_ACU()) {
             // Chat Completion 主连接直发生成端点，避开 generateRaw 经过的脚本 fetch 包装。
-            const raw = await sendMainApiChatCompletionRequest_ACU(wireMessages, { ...extras?.generationParameters, max_tokens: maxTokens }, signal, directOptions);
+            const raw = await sendMainApiChatCompletionRequest_ACU(wireMessages, { ...extras?.generationParameters, max_tokens: maxTokens }, signal, presetContextToolOptions_ACU(resolved.apiConfig, directOptions));
             assertNotAborted_ACU(signal);
             const parsed = chatTurnFromJson_ACU(raw);
             reportUsage(parsed.usage ?? raw?.usage);
@@ -853,10 +871,11 @@ function toWireMessages_ACU(messages: any[]): any[] {
  * @param messages 消息序列
  * @param signal 中止信号
  * @param maxTokens 最大输出 token；省略时沿用主连接设置
+ * @param config 本次请求所用 API 预设的 apiConfig；关闭「API工具调用」时不做上下文工具化
  * @returns 去首尾空白的回复正文，可能为空串
  */
-export async function callMainApiChatCompletionText_ACU(messages: any[], signal?: AbortSignal | null, maxTokens?: number): Promise<string> {
-    const raw = await sendMainApiChatCompletionRequest_ACU(toWireMessages_ACU(messages), maxTokens === undefined ? {} : { max_tokens: maxTokens }, signal);
+export async function callMainApiChatCompletionText_ACU(messages: any[], signal?: AbortSignal | null, maxTokens?: number, config?: { contextToolTransportEnabled?: boolean } | null): Promise<string> {
+    const raw = await sendMainApiChatCompletionRequest_ACU(toWireMessages_ACU(messages), maxTokens === undefined ? {} : { max_tokens: maxTokens }, signal, ...presetContextToolArgs_ACU(config));
     assertNotAborted_ACU(signal);
     const content = chatTurnFromJson_ACU(raw).turn.content;
     return typeof content === 'string' ? content.trim() : '';
@@ -871,6 +890,9 @@ export async function callAIChatTurn_ACU(
     extras?: ResolvedPresetCallExtras_ACU,
 ): Promise<AiChatTurn_ACU> {
     if (!Array.isArray(messages) || messages.length === 0) throw new Error('内部 AI 消息必须是非空数组。');
+    // 与文本请求一致：一次调用使用同一份渠道配置，下一次调用再读取最新预设。
+    resolved = { ...resolved };
+    resolved.apiConfig = { ...resolved.apiConfig };
     return withApiRequestTimeout_ACU(resolved.apiConfig, signal, async (signal) => {
     const reportUsage = (raw: unknown): void => {
         if (!lifecycle?.onUsage) return;
@@ -890,7 +912,7 @@ export async function callAIChatTurn_ACU(
             const overridePayload = hasNativeToolTraffic
                 ? buildHostNativeToolOverridePayload_ACU(extras?.tools, String(profile['prompt-post-processing'] ?? ''))
                 : {};
-            const raw = await runWithTavernProfile_ACU(resolved.tavernProfile, target => sendProfileChatCompletionRequest_ACU(target, toWireMessages_ACU(messages), maxTokens, overridePayload, signal));
+            const raw = await runWithTavernProfile_ACU(resolved.tavernProfile, target => sendProfileChatCompletionRequest_ACU(target, toWireMessages_ACU(messages), maxTokens, overridePayload, signal, ...presetContextToolArgs_ACU(resolved.apiConfig)));
             assertNotAborted_ACU(signal);
             const parsed = chatTurnFromJson_ACU(raw);
             reportUsage(parsed.usage ?? raw?.usage);
@@ -914,7 +936,7 @@ export async function callAIChatTurn_ACU(
                 ...(hasNativeToolTraffic ? buildHostNativeToolOverridePayload_ACU(extras?.tools, routing.postProcessing) : {}),
                 max_tokens: maxTokens,
             };
-            const raw = await sendMainApiChatCompletionRequest_ACU(toWireMessages_ACU(messages), overridePayload, signal);
+            const raw = await sendMainApiChatCompletionRequest_ACU(toWireMessages_ACU(messages), overridePayload, signal, ...presetContextToolArgs_ACU(resolved.apiConfig));
             assertNotAborted_ACU(signal);
             const parsed = chatTurnFromJson_ACU(raw);
             reportUsage(parsed.usage ?? raw?.usage);

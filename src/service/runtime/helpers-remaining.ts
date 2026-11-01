@@ -1,3 +1,4 @@
+import { isTakeoverEnabled_ACU } from '../../shared/takeover-control';
 /**
  * service/runtime/helpers-remaining.ts — 辅助函数集入口文件
  * 原 4,263 行代码已按职责拆分为以下子模块：
@@ -221,6 +222,7 @@ export {
   }
 
   export async function handleChatCompletionReady_ACU(data: any, requestContext?: ChatCompletionPromptContext_ACU) {
+    if (!isTakeoverEnabled_ACU()) return;
     const boundContext = requestContext ?? getZeroLayerPromptContext_ACU(data);
     if (boundContext) {
       boundContext.assertCurrent?.();

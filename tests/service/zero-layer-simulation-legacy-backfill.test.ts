@@ -1,4 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+// 上游已停用零层；这里打开功能开关，以继续验证零层存储逻辑。
+vi.mock('../../src/service/zero-layer/feature-policy', () => ({
+  isZeroLayerFeatureEnabled_ACU: () => true,
+  assertZeroLayerFeatureEnabled_ACU: () => undefined,
+}));
 import { buildDefaultWorldSimulationEnvelope_ACU } from '../../src/service/simulation/defaults';
 import { seedLedgerFieldView_ACU } from '../../src/service/simulation/simulation-ledger-fold';
 import { legacyBackfillFingerprint_ACU } from '../../src/service/simulation/world-legacy-backfill';

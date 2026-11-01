@@ -102,6 +102,7 @@ vi.mock('../../../src/data/gateways/ai-gateway', () => ({
   generateRaw_ACU: mockGenerateRaw,
   sendConnectionManagerRequest_ACU: mockSendConnectionManagerRequest,
   triggerSlash_ACU: mockTriggerSlash,
+  triggerSlashBypassTakeover_ACU: mockTriggerSlash,
   getConnectionManagerProfiles_ACU: mockGetConnectionManagerProfiles,
   getHostRequestHeaders_ACU: mockGetHostRequestHeaders,
   // 原有酒馆连接用例断言三参调用，默认视为不可携带工具的配置。
@@ -591,6 +592,60 @@ describe('callCustomOpenAI_ACU — prompt 组装', () => {
     delete (globalThis as any).EjsTemplate;
   });
 
+  it.each(['resolve', 'reject'])('取消挂起的 EJS 等待，迟到 %s 不再发请求', async outcome => {
+    const controller = new AbortController();
+    let release!: (value: string) => void;
+    let fail!: (error: Error) => void;
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const pending = new Promise<string>((resolve, reject) => { release = resolve; fail = reject; });
+    vi.stubGlobal('EjsTemplate', { evalTemplate: vi.fn(() => { entered(); return pending; }) });
+    try {
+      const request = callCustomOpenAI_ACU({}, controller);
+      const rejected = expect(request).rejects.toMatchObject({ name: 'AbortError' });
+      await started;
+      controller.abort();
+      await rejected;
+      expect(mockUntrackAbortController).toHaveBeenCalledWith(controller);
+      if (outcome === 'resolve') release('迟到模板');
+      else fail(new Error('迟到失败'));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(mockGenerateRaw).not.toHaveBeenCalled();
+      expect(mockFetch).not.toHaveBeenCalled();
+    } finally {
+      delete (globalThis as any).EjsTemplate;
+    }
+  });
+
+  it('已取消的调用不启动模板或网络', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const evaluate = vi.fn();
+    vi.stubGlobal('EjsTemplate', { evalTemplate: evaluate });
+    try {
+      await expect(callCustomOpenAI_ACU({}, controller)).rejects.toMatchObject({ name: 'AbortError' });
+      expect(evaluate).not.toHaveBeenCalled();
+      expect(mockGenerateRaw).not.toHaveBeenCalled();
+    } finally {
+      delete (globalThis as any).EjsTemplate;
+    }
+  });
+
+  it.each(['Error', 'AbortError'])('模板 %s 保留普通回退与取消分类', async name => {
+    const error = Object.assign(new Error('模板失败'), { name });
+    vi.stubGlobal('EjsTemplate', { evalTemplate: vi.fn().mockRejectedValue(error) });
+    mockGenerateRaw.mockResolvedValue('AI回复');
+    try {
+      if (name === 'AbortError') {
+        await expect(callCustomOpenAI_ACU({})).rejects.toBe(error);
+        expect(mockGenerateRaw).not.toHaveBeenCalled();
+      } else await expect(callCustomOpenAI_ACU({})).resolves.toBe('AI回复');
+    } finally {
+      delete (globalThis as any).EjsTemplate;
+    }
+  });
+
   it('$9 按填表上下文排除规则过滤', async () => {
     mockSettings.charCardPrompt = [{ role: 'USER', content: '$9' }];
     mockSettings.tableContextExcludeRules = ['已排除'];
@@ -727,7 +782,42 @@ describe('callCustomOpenAI_ACU — custom fetch 模式', () => {
     expect(JSON.stringify(overrides.responseFormat)).toContain('"table_edit_ops_v1"');
   });
 
-  it('非 strict 模式不传 responseFormat', async () => {
+  it.each([
+    { model: 'deepseek-chat', customApiFormat: undefined, expected: 'json_object' },
+    { model: 'deepseek-reasoner', customApiFormat: 'openai_compat', expected: 'json_object' },
+    { model: 'models/deepseek-ai/DeepSeek-V3', customApiFormat: 'openai_compat', expected: 'json_object' },
+    { model: 'DeepSeek-R1', customApiFormat: 'openai_responses', expected: 'json_object' },
+    { model: 'gpt-4', customApiFormat: 'openai_compat', expected: 'json_schema' },
+    { model: 'deepseek-chat', customApiFormat: 'claude_messages', expected: 'json_schema' },
+    { model: 'deepseek-chat', customApiFormat: 'gemini_interactions', expected: 'json_schema' },
+  ])('strict JSON 按模型 $model 与协议 $customApiFormat 使用 $expected', async ({ model, customApiFormat, expected }) => {
+    mockSettings.strictJsonTableFillEnabled = true;
+    mockGetApiConfigByPreset.mockReturnValue({
+      apiMode: 'custom',
+      apiConfig: { sendViaTavern: true, useMainApi: false, url: 'https://api.example.com', model, customApiFormat },
+      tavernProfile: '',
+    });
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: '{"format":"table_edit_ops_v1","ops":[]}' } }] }),
+    });
+    await callCustomOpenAI_ACU({ tableDataText: '表格' }, null, null);
+    const overrides = mockBuildCustomBody.mock.calls[mockBuildCustomBody.mock.calls.length - 1][2];
+    if (expected === 'json_object') {
+      expect(overrides.responseFormat).toEqual({ type: 'json_object' });
+    } else {
+      expect(overrides.responseFormat).toMatchObject({ type: 'json_schema' });
+      expect(overrides.responseFormat.json_schema.name).toBe('table_edit_ops_response');
+    }
+    expect(overrides.tools).toBeUndefined();
+  });
+
+  it.each(['gpt-4', 'deepseek-chat'])('非 strict 模式下 %s 不传 responseFormat', async (model) => {
+    mockGetApiConfigByPreset.mockReturnValue({
+      apiMode: 'custom',
+      apiConfig: { sendViaTavern: true, useMainApi: false, url: 'https://api.example.com', model },
+      tavernProfile: '',
+    });
     mockFetch.mockResolvedValue({
       ok: true,
       json: async () => ({ choices: [{ message: { content: 'fetch回复' } }] }),

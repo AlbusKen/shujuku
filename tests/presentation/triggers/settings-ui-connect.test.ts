@@ -29,7 +29,7 @@ describe('handleContentOptimizationEvent_ACU 防抖隔离', () => {
     vi.useFakeTimers();
     const { handleContentOptimizationEvent_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect');
 
-    await handleContentOptimizationEvent_ACU('GENERATION_ENDED');
+    await handleContentOptimizationEvent_ACU('MESSAGE_RECEIVED');
 
     expect(m.setAutoFillTimer).toHaveBeenCalledOnce();
     expect(m.autoFillTimer).not.toBeNull();
@@ -38,7 +38,7 @@ describe('handleContentOptimizationEvent_ACU 防抖隔离', () => {
   it('取消使已捕获的通知作用域失效，新通知不受旧取消影响', async () => {
     vi.useFakeTimers();
     const { captureContentOptimizationEventScope_ACU, cancelPendingContentOptimizationEvent_ACU, handleContentOptimizationEvent_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect');
-    await handleContentOptimizationEvent_ACU('GENERATION_ENDED');
+    await handleContentOptimizationEvent_ACU('MESSAGE_RECEIVED');
     const isOldEventCurrent = captureContentOptimizationEventScope_ACU();
     expect(isOldEventCurrent()).toBe(true);
 

@@ -10,6 +10,7 @@ import { getImportBatchPrefix_ACU, getImportStablePrefix_ACU } from '../../share
 import { logDebug_ACU, logError_ACU, logWarn_ACU, parseTableTemplateJson_ACU } from '../../shared/utils';
 import { isEntryBlocked_ACU } from '../../shared/utils';
 import { classifyLorebookReadError_ACU, summarizeStrictLorebookReadError_ACU as sharedSummarizeStrictLorebookReadError_ACU } from '../../shared/lorebook-read-error';
+import { WorldbookReadError_ACU } from '../../shared/host-compat/fresh-worldbook-reader';
 import { resolveLorebookReadTargets_ACU } from './read-scope';
 import { consumeLastMergeQuarantinedSheetKeys_ACU, consumeLastMergeWarnings_ACU, formatJsonToReadable_ACU, maybeLiftWorldbookSuppression_ACU, mergeAllIndependentTables_ACU, shouldSuppressWorldbookInjection_ACU } from '../runtime/helpers-remaining';
 import { normalizeCanonicalTableRows_ACU, repairLegacyAutoMergedRowTails_ACU } from '../../shared/canonical-row-normalizer';
@@ -724,11 +725,13 @@ export async function refreshMergedDataAndNotify_ACU(options: { canonicalData?: 
     }
           
     // 更新世界书
+    let worldbookRefreshFailed = false;
     try {
         await updateReadableLorebookEntry_ACU(true, false, null, mergedData);
         logDebug_ACU('Updated worldbook entries with merged data.');
     } catch (error) {
         degraded = true;
+        worldbookRefreshFailed = true;
         logWarn_ACU('[数据恢复] 表格数据已加载到内存，但世界书刷新失败；保留可读和可导出数据。', error);
     }
 
@@ -742,6 +745,7 @@ export async function refreshMergedDataAndNotify_ACU(options: { canonicalData?: 
         nullRowCleanupPersisted,
         ...(nullRowCleanupError ? { nullRowCleanupError } : {}),
         ...(nullRowCleanupMessageIndex !== undefined ? { nullRowCleanupMessageIndex } : {}),
+        ...(worldbookRefreshFailed ? { worldbookRefreshFailed } : {}),
     };
   }
 
@@ -775,8 +779,8 @@ export   async function loadAllChatMessages_ACU() {
 function normalizeWorldbookListNames_ACU(bookList: unknown): string[] {
       if (!Array.isArray(bookList)) return [];
       return bookList
-          .map(item => String(typeof item === 'object' && item !== null ? (item as any).name || '' : item || '').trim())
-          .filter(Boolean);
+          .map(item => String(typeof item === 'object' && item !== null ? (item as any).name || '' : item || ''))
+          .filter(name => name.trim());
 }
 
 export   async function getWorldbookNames_ACU() {
@@ -805,6 +809,7 @@ export interface StrictLorebookReadContext_ACU {
   runId: string;
   bookEntriesPromises: Map<string, Promise<StrictLorebookBookReadResult_ACU>>;
   availableBookNamesPromise?: Promise<string[]>;
+  assertCurrent?: (bookNames?: string[]) => Promise<void>;
   isActive?: () => boolean;
   isAborted?: () => boolean;
 }
@@ -875,8 +880,8 @@ export function summarizeStrictLorebookReadError_ACU(error: unknown) {
 
 function normalizeRequestedLorebookNames_ACU(bookNames: unknown): string[] {
   return [...new Set((Array.isArray(bookNames) ? bookNames : [])
-    .map(name => String(name || '').trim())
-    .filter(Boolean))];
+    .map(name => String(name || ''))
+    .filter(name => name.trim()))];
 }
 
 function cloneLorebookReadValue_ACU(value: any): any {
@@ -913,6 +918,7 @@ async function readStrictLorebookBook_ACU(bookName: string, context?: StrictLore
   const beforeStatus = getStrictLorebookContextStatus_ACU(context);
   if (beforeStatus) return { bookName, status: beforeStatus, entries: [] };
   try {
+    await context?.assertCurrent?.();
     const entries = await gwGetLorebookEntriesRequired_ACU(bookName);
     const afterStatus = getStrictLorebookContextStatus_ACU(context);
     if (afterStatus) return { bookName, status: afterStatus, entries: [] };
@@ -920,17 +926,32 @@ async function readStrictLorebookBook_ACU(bookName: string, context?: StrictLore
   } catch (error) {
     const failureStatus = getStrictLorebookContextStatus_ACU(context);
     if (failureStatus) return { bookName, status: failureStatus, entries: [] };
+    const category = classifyLorebookReadError_ACU(error);
+    if (category === 'aborted' || category === 'scope_changed') return { bookName, status: category, entries: [] };
     return { bookName, status: 'read_failed', entries: [], errorCategory: classifyStrictLorebookReadError_ACU(error) };
   }
 }
 
 async function getStrictLorebookBookRead_ACU(bookName: string, context?: StrictLorebookReadContext_ACU): Promise<StrictLorebookBookReadResult_ACU> {
   if (!context) return readStrictLorebookBook_ACU(bookName);
-  const existing = context.bookEntriesPromises.get(bookName);
-  if (existing) return existing;
-  const promise = readStrictLorebookBook_ACU(bookName, context);
-  context.bookEntriesPromises.set(bookName, promise);
-  return promise;
+  try {
+    await context.assertCurrent?.();
+    let promise = context.bookEntriesPromises.get(bookName);
+    if (!promise) {
+      promise = readStrictLorebookBook_ACU(bookName, context);
+      context.bookEntriesPromises.set(bookName, promise);
+    }
+    const result = await promise;
+    if (result.status === 'success') await context.assertCurrent?.([bookName]);
+    const status = getStrictLorebookContextStatus_ACU(context);
+    return status ? { bookName, status, entries: [] } : result;
+  } catch (error) {
+    const category = classifyLorebookReadError_ACU(error);
+    const status = getStrictLorebookContextStatus_ACU(context);
+    if (status) return { bookName, status, entries: [] };
+    if (category === 'scope_changed' || category === 'aborted') return { bookName, status: category, entries: [] };
+    return { bookName, status: 'read_failed', entries: [], errorCategory: classifyStrictLorebookReadError_ACU(error) };
+  }
 }
 
 async function getStrictLorebookAvailableBookNames_ACU(context?: StrictLorebookReadContext_ACU): Promise<string[]> {
@@ -1013,7 +1034,7 @@ export async function getLorebookEntriesStrict_ACU(bookNames: string[] = [], opt
 
 
 export   async function getLorebookEntriesByNames_ACU(bookNames: string[] = []) {
-      const uniqueNames = [...new Set((Array.isArray(bookNames) ? bookNames : []).map((name: string) => String(name || '').trim()).filter(Boolean))];
+      const uniqueNames = normalizeRequestedLorebookNames_ACU(bookNames);
       let readTargets = uniqueNames.map(requestedName => ({ requestedName, hostName: requestedName }));
       const entriesMap: Record<string, any[]> = {};
       const canUseTavernHelper = isWorldbookApiAvailable_ACU();
@@ -1038,7 +1059,7 @@ export   async function getLorebookEntriesByNames_ACU(bookNames: string[] = []) 
               });
           }
       } catch (_e) {
-          // listLorebooks_ACU 失败时降级为不过滤，让下方原有的 try-catch 兜底
+          throw _e;
       }
 
       if (!canUseTavernHelper) {
@@ -1060,14 +1081,14 @@ export   async function getLorebookEntriesByNames_ACU(bookNames: string[] = []) 
               }
               // 返回键保留调用方请求名称以兼容现有接口；条目 book 使用真实宿主名称。
               entriesMap[requestedName] = Array.isArray(entries) ? entries.map((entry: any) => ({ ...entry, book: hostName })) : [];
-          } catch {
+          } catch (error) {
               logWarn_ACU('[Worldbook] 获取世界书条目失败，忽略该书并继续。', {
                   phase: 'read_entries',
                   attempt: 1,
                   bookName: requestedName,
                   error: { category: 'read_failed' },
               });
-              entriesMap[requestedName] = [];
+              throw error;
           }
       }
       return entriesMap;
@@ -1195,7 +1216,7 @@ function decorateWorldbookEntryStateView_ACU(
 
 export   async function collectCombinedWorldbookEntriesByStrategy_ACU(options: any = {}) {
       const logPrefix = String(options?.logPrefix || '[Worldbook]');
-      const bookNames: string[] = [...new Set<string>((Array.isArray(options?.bookNames) ? options.bookNames : []).map((name: any) => String(name || '').trim()).filter(Boolean))];
+      const bookNames = normalizeRequestedLorebookNames_ACU(options?.bookNames);
       const excludeEntry = typeof options?.excludeEntry === 'function' ? options.excludeEntry : () => false;
       const entryScope = typeof options?.entryScope === 'function' ? options.entryScope : () => true;
       const includeEntry = typeof options?.includeEntry === 'function' ? options.includeEntry : () => true;
@@ -1396,12 +1417,11 @@ export   async function getCombinedWorldbookContent_ACU(initialScanTextOverride 
     const excludeImportTaggedEntries = options?.excludeImportTaggedEntries === true;
     const includeGeneratedEntries = options?.includeGeneratedEntries === true;
     const agentGreenlightKeySet = new Set((Array.isArray(options?.agentGreenlights) ? options.agentGreenlights : [])
-        .map((ref: any) => `${String(ref?.bookName || '').trim()}\u0000${String(ref?.uid || '').trim()}`)
+        .map((ref: any) => `${String(ref?.bookName || '')}\u0000${String(ref?.uid || '').trim()}`)
         .filter((key: string) => !key.startsWith('\u0000') && !key.endsWith('\u0000')));
 
     if (!isWorldbookApiAvailable_ACU()) {
-        logWarn_ACU('[ACU] Worldbook API not available, cannot get worldbook content.');
-        return '';
+        throw new WorldbookReadError_ACU('api_unavailable', 'entries');
     }
 
     try {
@@ -1414,12 +1434,12 @@ export   async function getCombinedWorldbookContent_ACU(initialScanTextOverride 
                 const charLorebooks = await getCharLorebooks_ACU({ type: 'all' });
                 if (charLorebooks.primary) bookNames.push(charLorebooks.primary);
                 if (charLorebooks.additional?.length) bookNames.push(...charLorebooks.additional);
-            } catch {
+            } catch (error) {
                 logError_ACU('[Worldbook] 获取角色世界书失败:', {
                     phase: 'resolve_character',
                     error: { category: 'read_failed' },
                 });
-                return '';
+                throw error;
             }
         }
 
@@ -1441,7 +1461,7 @@ export   async function getCombinedWorldbookContent_ACU(initialScanTextOverride 
             entryScope: typeof options?.entryScope === 'function' ? options.entryScope : undefined,
             includeEntry: (entry: any) => {
                 const comment = entry.comment || '';
-                const isAgentGreenlight = agentGreenlightKeySet.has(`${String(entry.bookName || '').trim()}\u0000${String(entry.uid || '').trim()}`);
+                const isAgentGreenlight = agentGreenlightKeySet.has(`${String(entry.bookName || '')}\u0000${String(entry.uid || '').trim()}`);
                 if (isAgentGreenlight) return true;
                 if (!includeGeneratedEntries && comment.startsWith('TavernDB-ACU-')) return false;
                 if (!includeGeneratedEntries && comment.startsWith('重要人物条目')) return false;
@@ -1451,7 +1471,7 @@ export   async function getCombinedWorldbookContent_ACU(initialScanTextOverride 
                 return true;
             },
             isSelected: (entry: any) => {
-                const isAgentGreenlight = agentGreenlightKeySet.has(`${String(entry.bookName || '').trim()}\u0000${String(entry.uid || '').trim()}`);
+                const isAgentGreenlight = agentGreenlightKeySet.has(`${String(entry.bookName || '')}\u0000${String(entry.uid || '').trim()}`);
                 if (isAgentGreenlight) return true;
                 if (!hasAnySelection) return true;
                 const list = enabledEntriesMap?.[entry.bookName];
@@ -1460,7 +1480,7 @@ export   async function getCombinedWorldbookContent_ACU(initialScanTextOverride 
                 return list.includes(entry.uid);
             },
             forceIncludeEntry: (entry: any) => {
-                return agentGreenlightKeySet.has(`${String(entry.bookName || '').trim()}\u0000${String(entry.uid || '').trim()}`);
+                return agentGreenlightKeySet.has(`${String(entry.bookName || '')}\u0000${String(entry.uid || '').trim()}`);
             },
             onEntriesFiltered: (entries: any[]) => {
                 if (excludeImportTaggedEntries) {
@@ -1470,7 +1490,10 @@ export   async function getCombinedWorldbookContent_ACU(initialScanTextOverride 
         });
 
     } catch (error) {
-        logError_ACU(`[ACU] An error occurred while processing worldbook logic:`, error);
-        return ''; // Return empty string on error to prevent breaking the generation.
+        logError_ACU('[Worldbook] 世界书内容读取失败:', {
+            phase: 'worldbook_content',
+            error: sharedSummarizeStrictLorebookReadError_ACU(error) ?? { category: classifyLorebookReadError_ACU(error) },
+        });
+        throw error;
     }
   }

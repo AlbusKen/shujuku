@@ -266,18 +266,15 @@ describe('triggerAutomaticUpdateIfNeeded_ACU 逐次串行调度', () => {
       eventType: 'CHARACTER_MESSAGE_RENDERED', chatKey: 'chat-a', isolationKey: '', stage: 'dequeue',
     }));
   });
-  it('正文生成期间拒绝自动填表，完成后的新通知仍可执行', async () => {
+  it('消息交付后的填表不依赖生成计数，残留上下文不阻断执行', async () => {
     const { triggerAutomaticUpdateIfNeeded_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-trigger');
     m.contentGenerationActive = true;
-    await triggerAutomaticUpdateIfNeeded_ACU();
-    expect(m.buildPlan).not.toHaveBeenCalled();
-    expect(m.executePlan).not.toHaveBeenCalled();
-    expect(m.beginTask).not.toHaveBeenCalled();
-    expect(m.logSkip).toHaveBeenCalledExactlyOnceWith('generation_in_progress', expect.objectContaining({ stage: 'enqueue' }));
-    m.contentGenerationActive = false;
     m.executePlan.mockResolvedValue({ failedGroups: 0, errors: [] });
-    await triggerAutomaticUpdateIfNeeded_ACU();
+    await triggerAutomaticUpdateIfNeeded_ACU(undefined, { eventType: 'MESSAGE_RECEIVED', messageId: 1 });
+    expect(m.buildPlan).toHaveBeenCalledOnce();
     expect(m.executePlan).toHaveBeenCalledOnce();
+    expect(m.beginTask).not.toHaveBeenCalled();
+    expect(m.logSkip).not.toHaveBeenCalled();
   });
 
   it.each(['重新生成', '删楼', '停止生成'])('%s 作废已排队的旧填表任务，不阻断后续新通知', async action => {
@@ -302,14 +299,14 @@ describe('triggerAutomaticUpdateIfNeeded_ACU 逐次串行调度', () => {
     expect(m.executePlan).toHaveBeenCalledTimes(2);
   });
 
-  it('出队前发现重新生成仍在进行，即使未作废代次也不执行旧任务', async () => {
-    const { triggerAutomaticUpdateIfNeeded_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-trigger');
+  it('出队前聊天重载作废代次，不执行旧任务', async () => {
+    const { triggerAutomaticUpdateIfNeeded_ACU, cancelPendingAutoFillEvent_ACU } = await import('../../../src/presentation/triggers/settings-ui-sync/settings-ui-trigger');
     const queued = triggerAutomaticUpdateIfNeeded_ACU();
-    m.contentGenerationActive = true;
+    cancelPendingAutoFillEvent_ACU();
     await queued;
     expect(m.buildPlan).not.toHaveBeenCalled();
     expect(m.executePlan).not.toHaveBeenCalled();
-    expect(m.logSkip).toHaveBeenCalledExactlyOnceWith('generation_in_progress', expect.objectContaining({ stage: 'dequeue' }));
+    expect(m.logSkip).toHaveBeenCalledExactlyOnceWith('generation_changed', expect.objectContaining({ stage: 'dequeue' }));
   });
 
   it('接收时捕获的旧作用域在入队前已失效，不重新建立填表任务', async () => {

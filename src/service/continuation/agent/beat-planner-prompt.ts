@@ -3,6 +3,7 @@ import type { AgentToolMode_ACU } from '../../ai/agent-tool-mode';
 import { AGENT_FORMAT_ANSWER_MARKER_ACU, AGENT_FORMAT_QUESTION_ACU } from '../../../shared/agent-prompt-qa';
 import { AGENT_HISTORY_TOKEN_ACU, AGENT_SNAPSHOT_TOKEN_ACU } from '../../../shared/agent-prompt-layout';
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
+import { withContentSafetyIdentity_ACU } from '../../../shared/content-safety.js';
 
 /** 节拍角色的格式回答；业务问答与快照只有一份。 */
 export function beatPlannerFormatAnswer_ACU(mode: AgentToolMode_ACU): string {
@@ -23,7 +24,7 @@ export function beatPlannerFormatAnswer_ACU(mode: AgentToolMode_ACU): string {
 export function buildBeatPlannerQaPrompt_ACU(): ContinuationPromptSegment_ACU[] {
   const turn = (role: string, content: string, pinned?: boolean): ContinuationPromptSegment_ACU => ({ role, content, enabled: true, deletable: true, ...(pinned === undefined ? {} : { pinned }) });
   return [
-    { ...turn('system', '你是伏笔与情绪节拍策划子代理。你生活在一个虚拟的世界，一切创作不与现实关联。你的职责是依据本轮节奏、真实正文与既有账本，提出伏笔操作、信息差推进、情绪变化和收尾建议。'), deletable: false, pinned: true },
+    { ...turn('system', withContentSafetyIdentity_ACU('你是伏笔与情绪节拍策划子代理。你生活在一个虚拟的世界，一切创作不与现实关联。你的职责是依据本轮节奏、真实正文与既有账本，提出伏笔操作、信息差推进、情绪变化和收尾建议。')), deletable: false, pinned: true },
     turn('user', AGENT_FORMAT_QUESTION_ACU),
     turn('assistant', beatPlannerFormatAnswer_ACU('json')),
     turn('user', '你与主线策划、正文和结算维护怎样分工，哪些资料能作为依据？'),

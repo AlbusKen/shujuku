@@ -2,7 +2,7 @@
  * log-error-hints — 报错文本到「原因 + 处理建议」的规则匹配。
  */
 import { describe, expect, it } from 'vitest';
-import { LOG_ERROR_HINT_RULE_IDS, resolveLogErrorHint } from '../../../src/presentation-v2/composables/log-error-hints';
+import { LOG_ERROR_HINT_RULE_IDS, extractLogHttpStatus, resolveErrorTextHint, resolveLogErrorHint } from '../../../src/presentation-v2/composables/log-error-hints';
 
 function hintIdFor(message: string, tag = '未分类'): string | undefined {
   return resolveLogErrorHint({ level: 'error', tag, message })?.id;
@@ -35,7 +35,7 @@ describe('resolveLogErrorHint', () => {
     ["API请求失败: 400 This model's maximum context length is 128000 tokens", 'context-length'],
     ['API请求失败: 400 {"error":{"type":"invalid_request_error","message":"Unsupported parameter: top_k"}}', 'http-400'],
     // 网络
-    ['ACU: 调用酒馆连接预设时出错: TypeError: Failed to fetch', 'network'],
+    ['ACU: 调用酒馆连接预设时出错: TypeError: Failed to fetch', 'network-fetch-failed'],
     ['Access to fetch has been blocked by CORS policy', 'network-cors'],
     // 酒馆侧配置
     ['ACU: 调用酒馆连接预设时出错: Error: 未选择酒馆连接预设。', 'tavern-profile'],
@@ -106,6 +106,56 @@ describe('resolveLogErrorHint', () => {
     ['导出JSON数据失败: Error: boom', 'export'],
   ])('%s → %s', (message, expectedId) => {
     expect(hintIdFor(message)).toBe(expectedId);
+  });
+
+  it.each([
+    // 连接层：带明确错误码，即使被酒馆后端包成 500 也按连接层原因归类
+    ['API请求失败: 500 {"error":"connect ECONNREFUSED 127.0.0.1:5001"}', 'network-refused'],
+    ['Embedding 请求网络失败：getaddrinfo ENOTFOUND api.example.com', 'network-dns'],
+    ['API请求失败: 502 {"error":"socket hang up"}', 'network-reset'],
+    ['FetchError: connect ETIMEDOUT 203.0.113.1:443', 'network-connect-timeout'],
+    ['GET https://api.example.com net::ERR_CERT_DATE_INVALID', 'network-ssl'],
+    ['POST https://api.example.com net::ERR_BLOCKED_BY_CLIENT', 'network-blocked-by-client'],
+    ['POST https://api.example.com net::ERR_INTERNET_DISCONNECTED', 'network-offline'],
+    ['Mixed Content: The page was loaded over HTTPS, but requested an insecure resource http://10.0.0.2:5000/v1', 'network-mixed-content'],
+    ['API请求失败: 407 Proxy Authentication Required', 'network-proxy'],
+    ['Rerank 请求网络失败（batch 1）：TypeError: Failed to fetch', 'network-fetch-failed'],
+    // 超时：读取超时与网关超时归 api-timeout，不与连接超时混淆
+    ['[API超时] TimeoutError: API 请求超时（300 秒），本次按错误处理并交由调用方重试。', 'api-timeout'],
+    ['API请求失败: 504 Gateway Timeout', 'api-timeout'],
+    ['API 请求失败: HTTP 524 A timeout occurred', 'api-timeout'],
+    ['Embedding 请求超时（45000ms），已中断。', 'api-timeout'],
+    // 额度与限流分开
+    ['API请求失败: 429 {"error":{"code":"insufficient_quota","message":"You exceeded your current quota"}}', 'api-quota'],
+    ['API请求失败: 402 Payment Required', 'api-quota'],
+    ['API请求失败: 429 {"error":{"status":"RESOURCE_EXHAUSTED","message":"Quota exceeded for metric"}}', 'http-429'],
+    // 其他状态码
+    ['API请求失败: 400 {"error":{"code":"unsupported_country_region_territory"}}', 'api-region-blocked'],
+    ['API请求失败: 413 Payload Too Large', 'http-413'],
+    ['API请求失败: 405 Method Not Allowed', 'http-404'],
+    ['API请求失败: 422 {"error":"unprocessable entity"}', 'http-4xx'],
+    ['API 请求失败: HTTP 503', 'http-5xx'],
+    ['Error: 直连 API 返回上游错误（type=server_error）：boom', 'api-upstream-error'],
+  ])('网络 / HTTP 错误分类：%s → %s', (message, expectedId) => {
+    expect(hintIdFor(message)).toBe(expectedId);
+  });
+
+  it('状态码只从「HTTP / status / 失败」等上下文中提取，不把堆栈行号、楼层号当状态码', () => {
+    expect(extractLogHttpStatus('API请求失败: 429 rate limit')).toBe(429);
+    expect(extractLogHttpStatus('{"status": 503, "message": "x"}')).toBe(503);
+    expect(extractLogHttpStatus('something broke at bundle.js:500:12')).toBeNull();
+    expect(extractLogHttpStatus('第 404 楼读取失败')).toBeNull();
+    expect(hintIdFor('something broke at bundle.js:500:12')).toBe('generic');
+    expect(hintIdFor('[V2 Replay] 应用日志失败: messageIndex=404, seq=2')).toBe('checkpoint-replay');
+  });
+
+  it('建议带有展示用错误代码与识别出的 HTTP 状态码', () => {
+    const hint = resolveErrorTextHint('API请求失败: 401 {"error":{"message":"Incorrect API key provided"}}');
+    expect(hint).toMatchObject({ id: 'http-401', code: 'HTTP_401', httpStatus: 401 });
+    const network = resolveErrorTextHint('TypeError: Failed to fetch');
+    expect(network.code).toBe('NETWORK_FETCH_FAILED');
+    expect('httpStatus' in network).toBe(false);
+    expect(resolveErrorTextHint('').id).toBe('generic');
   });
 
   it('tag 也参与匹配：仅凭 tag 就能落到对应模块的建议', () => {

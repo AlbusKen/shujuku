@@ -62,16 +62,16 @@ describe('getCharLorebooks_ACU', () => {
 });
 
 describe('getCurrentCharacterWorldbookBinding_ACU', () => {
-  it('优先使用新 API，并标准化 primary 与 additional 的有序集合', async () => {
+  it('保留宿主原始名称，仅过滤空白并按精确身份去重', async () => {
     mockTavernHelper.getCharWorldbookNames = vi.fn().mockResolvedValue({
       primary: ' 主书 ', additional: [' 副书 ', '', '主书', '副书'],
     });
     mockTavernHelper.getCharLorebooks = vi.fn();
 
     await expect(getCurrentCharacterWorldbookBinding_ACU()).resolves.toEqual({
-      primary: '主书',
-      additional: ['副书', '主书'],
-      orderedNames: ['主书', '副书'],
+      primary: ' 主书 ',
+      additional: [' 副书 ', '主书', '副书'],
+      orderedNames: [' 主书 ', ' 副书 ', '主书', '副书'],
       apiSource: 'getCharWorldbookNames',
     });
     expect(mockTavernHelper.getCharWorldbookNames).toHaveBeenCalledWith('current');

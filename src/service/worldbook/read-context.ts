@@ -7,7 +7,8 @@
  * 同一 hostName 无论由哪个 requestedName 或哪条链路触发，只发起一次物理读取。
  * 失败 Promise 在本 context 内保持一致；下一 context 才允许重试。
  */
-import { getLorebookEntries_ACU, listLorebooks_ACU, normalizeLorebookNameForMatch_ACU, resolveLorebookNameFromList_ACU } from '../../data/gateways/worldbook-gateway';
+import { createLorebookReadGuard_ACU, getLorebookEntries_ACU, listLorebooks_ACU, resolveLorebookNameFromList_ACU, type LorebookReadGuard_ACU } from '../../data/gateways/worldbook-gateway';
+import { WorldbookReadError_ACU } from '../../shared/host-compat/fresh-worldbook-reader';
 
 const LOREBOOK_READ_CONCURRENCY_LIMIT_ACU = 4;
 
@@ -44,12 +45,12 @@ export interface LorebookReadContext_ACU {
 }
 
 function getLorebookListName_ACU(item: unknown): string {
-  if (item && typeof item === 'object') return String((item as any).name ?? '').trim();
-  return String(item ?? '').trim();
+  if (item && typeof item === 'object') return String((item as any).name ?? '');
+  return String(item ?? '');
 }
 
 function cloneEntriesForRead_ACU(entries: any[], bookName: string): any[] {
-  return (Array.isArray(entries) ? entries : []).map(entry => ({ ...entry, book: bookName }));
+  return (Array.isArray(entries) ? structuredClone(entries) : []).map(entry => ({ ...entry, book: bookName }));
 }
 
 export interface CreateLorebookReadContextOptions_ACU {
@@ -65,6 +66,7 @@ export function createLorebookReadContext_ACU(options: CreateLorebookReadContext
   const createdAt = Date.now();
   let disposed = false;
   let availableBookNamesPromise: Promise<string[]> | undefined;
+  let readGuardPromise: Promise<LorebookReadGuard_ACU> | undefined;
   const bookEntriesPromises = new Map<string, Promise<any[]>>();
   const queue: Array<() => void> = [];
   let activeCount = 0;
@@ -76,8 +78,21 @@ export function createLorebookReadContext_ACU(options: CreateLorebookReadContext
   let invalidatedCount = 0;
   let failedCount = 0;
 
-  const getIsActive = () => (options.isActive ? options.isActive() : !disposed);
-  const getIsAborted = () => (options.isAborted ? options.isAborted() : disposed);
+  const getIsActive = () => !disposed && (options.isActive ? options.isActive() : true);
+  const getIsAborted = () => disposed || (options.isAborted ? options.isAborted() : false);
+
+  function assertLocalCurrent(): void {
+    if (getIsAborted()) throw new Error('TaskAbortedByUser');
+    if (!getIsActive()) throw new WorldbookReadError_ACU('scope_changed', 'context');
+  }
+
+  async function assertCurrent(bookNames: string[] = []): Promise<void> {
+    assertLocalCurrent();
+    readGuardPromise ??= createLorebookReadGuard_ACU();
+    const guard = await readGuardPromise;
+    await guard(bookNames);
+    assertLocalCurrent();
+  }
 
   function acquire(): Promise<void> {
     if (activeCount < LOREBOOK_READ_CONCURRENCY_LIMIT_ACU) {
@@ -98,13 +113,15 @@ export function createLorebookReadContext_ACU(options: CreateLorebookReadContext
   }
 
   async function runPhysicalRead(hostName: string): Promise<any[]> {
-    if (disposed || getIsAborted() || !getIsActive()) throw new Error('TaskAbortedByUser');
+    assertLocalCurrent();
     await acquire();
     try {
-      if (disposed || getIsAborted() || !getIsActive()) throw new Error('TaskAbortedByUser');
+      await assertCurrent();
       physicalReadCount += 1;
       try {
-        return await getLorebookEntries_ACU(hostName);
+        const entries = await getLorebookEntries_ACU(hostName);
+        assertLocalCurrent();
+        return entries;
       } catch (error) {
         failedCount += 1;
         throw error;
@@ -120,33 +137,43 @@ export function createLorebookReadContext_ACU(options: CreateLorebookReadContext
     get availableBookNamesPromise() {
       if (!availableBookNamesPromise) {
         catalogCalls += 1;
-        availableBookNamesPromise = Promise.resolve().then(() => listLorebooks_ACU());
+        availableBookNamesPromise = assertCurrent().then(() => listLorebooks_ACU()).then(names => {
+          assertLocalCurrent();
+          return names;
+        });
       }
       return availableBookNamesPromise;
     },
     async readBookEntries(hostName: string) {
       logicalRequestCount += 1;
-      const normalizedHost = String(hostName || '').trim();
-      if (!normalizedHost) return [];
+      assertLocalCurrent();
+      const normalizedHost = String(hostName || '');
+      if (!normalizedHost.trim()) return [];
       const existing = bookEntriesPromises.get(normalizedHost);
+      const deliver = async (entries: any[]) => {
+        await assertCurrent([normalizedHost]);
+        return cloneEntriesForRead_ACU(entries, normalizedHost);
+      };
       if (existing) {
         cacheHits += 1;
-        return existing.then(entries => cloneEntriesForRead_ACU(entries, normalizedHost));
+        return existing.then(deliver);
       }
       const promise = runPhysicalRead(normalizedHost);
       bookEntriesPromises.set(normalizedHost, promise);
-      return promise.then(entries => cloneEntriesForRead_ACU(entries, normalizedHost));
+      return promise.then(deliver);
     },
     async resolveBookName(requestedName: string) {
-      const requested = String(requestedName ?? '').trim();
-      if (!requested) return null;
+      await assertCurrent();
+      const requested = String(requestedName ?? '');
+      if (!requested.trim()) return null;
       const availableNames = (await this.availableBookNamesPromise)
         .map(getLorebookListName_ACU)
         .filter(Boolean);
+      await assertCurrent();
       return resolveLorebookNameFromList_ACU(requested, availableNames);
     },
     invalidateBook(hostName: string) {
-      const normalizedHost = String(hostName || '').trim();
+      const normalizedHost = String(hostName || '');
       if (normalizedHost && bookEntriesPromises.delete(normalizedHost)) {
         invalidatedCount += 1;
       }
@@ -180,7 +207,7 @@ export function createLorebookReadContext_ACU(options: CreateLorebookReadContext
         options.onDisposeSummary(stats, { runId, source: options.source });
       }
       bookEntriesPromises.clear();
-      queue.length = 0;
+      queue.splice(0).forEach(resume => resume());
       availableBookNamesPromise = undefined;
     },
   };
@@ -196,8 +223,8 @@ export function buildLorebookReadScope_ACU(requestedNames: Iterable<string>): st
   const seen = new Set<string>();
   const names: string[] = [];
   for (const raw of requestedNames) {
-    const name = typeof raw === 'string' ? raw.trim() : '';
-    if (name && !seen.has(name)) {
+    const name = typeof raw === 'string' ? raw : '';
+    if (name.trim() && !seen.has(name)) {
       seen.add(name);
       names.push(name);
     }
@@ -205,16 +232,14 @@ export function buildLorebookReadScope_ACU(requestedNames: Iterable<string>): st
   return names;
 }
 
-/** 对宿主真实名称按物理身份去重（hostName 去重；归一化别名视为同一物理书）。 */
+/** 宿主原始名称是物理身份，视觉相似名称不可合并。 */
 export function dedupeLorebookHostNames_ACU(hostNames: Iterable<string>): string[] {
   const seen = new Set<string>();
   const names: string[] = [];
   for (const raw of hostNames) {
-    const name = String(raw ?? '').trim();
-    if (!name) continue;
-    const key = normalizeLorebookNameForMatch_ACU(name);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
+    const name = String(raw ?? '');
+    if (!name.trim() || seen.has(name)) continue;
+    seen.add(name);
     names.push(name);
   }
   return names;

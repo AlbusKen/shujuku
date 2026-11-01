@@ -66,6 +66,44 @@ describe('resolveContinuationAgentApiPreset_ACU', () => {
     }
     throw new Error('Expected CONTINUATION_API_PRESET_MISSING');
   });
+
+  it.each(['fixed', 'current'] as const)('%s 渠道在配置对象被替换后读取最新 URL 和模型', mode => {
+    const deps = dependencies_ACU();
+    let channel = deps.resolvePreset(mode === 'fixed' ? 'global-preset' : '');
+    deps.resolvePreset.mockImplementation(() => channel);
+    const preset = resolveContinuationAgentApiPreset_ACU(settings_ACU({ apiPresetMode: mode }), 'main', 'turn_call', deps);
+    const oldConfig = preset.apiConfig;
+    channel = { ...channel, apiConfig: { ...channel.apiConfig, url: 'https://updated.invalid/v1', model: 'updated-model' } };
+
+    expect(preset.apiConfig).toBe(channel.apiConfig);
+    expect(preset.apiConfig).not.toBe(oldConfig);
+    expect(preset.apiConfig).toMatchObject({ url: 'https://updated.invalid/v1', model: 'updated-model' });
+    expect(preset.presetName).toBe(mode === 'fixed' ? 'global-preset' : '');
+  });
+
+  it('固定预设始终按原名称回读，不跟随当前渠道切换', () => {
+    const deps = dependencies_ACU();
+    const preset = resolveContinuationAgentApiPreset_ACU(settings_ACU(), 'main', 'turn_call', deps);
+    deps.resolvePreset.mockClear();
+    expect(preset.apiConfig.url).toBe('https://example.invalid/global-preset');
+    expect(deps.resolvePreset).toHaveBeenCalledWith('global-preset');
+    expect(deps.resolvePreset).not.toHaveBeenCalledWith('');
+  });
+
+  it('固定预设解析后被删除时拒绝回读，不沿用旧配置', () => {
+    const deps = dependencies_ACU();
+    const preset = resolveContinuationAgentApiPreset_ACU(settings_ACU(), 'main', 'turn_call', deps);
+    deps.resolvePreset.mockReturnValue({ ...deps.resolvePreset(''), resolved: false });
+    expect(() => preset.apiConfig).toThrow(ContinuationValidationError_ACU);
+    try { void preset.apiMode; }
+    catch (error) {
+      expect((error as ContinuationValidationError_ACU).error).toMatchObject({
+        code: 'CONTINUATION_API_PRESET_MISSING', phase: 'turn_call',
+      });
+      return;
+    }
+    throw new Error('Expected CONTINUATION_API_PRESET_MISSING');
+  });
 });
 
 describe('effectiveAgentApiPresetMode_ACU', () => {

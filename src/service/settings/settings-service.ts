@@ -11,10 +11,11 @@ import { DEFAULT_BUILTIN_PLOT_PRESETS_ACU, DEFAULT_CHAR_CARD_PROMPT_ACU, DEFAULT
 import { DEFAULT_AUTO_UPDATE_FREQUENCY_ACU, DEFAULT_AUTO_UPDATE_THRESHOLD_ACU, DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU, STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU, SUMMARY_INDEX_V2_WRITER_FORCE_ENABLE_VERSION_ACU, TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU, USER_PREFILL_PROFILE_FORCE_DEFAULT_VERSION_ACU, USER_PREFILL_VECTOR_FORCE_DEFAULT_VERSION_ACU, TABLE_TEMPLATE_DEFAULTS_REFRESH_VERSION_ACU, TEMPLATE_ASSISTANT_PROMPT_FORCE_DEFAULT_VERSION_ACU, VECTOR_MEMORY_DEFAULTS_REFRESH_VERSION_ACU, VECTOR_MEMORY_LEGACY_MIN_SCORE_DEFAULTS_ACU, VECTOR_MEMORY_RECALL_PARAM_KEYS_ACU, VECTOR_MEMORY_RECALL_PARAMS_FORCE_OVERRIDE_VERSION_ACU, VECTOR_MEMORY_SOURCE_TEXT_UPGRADE_VERSION_ACU, buildDefaultAgentWorldbookControl_ACU, buildDefaultAgentWorldbookPromptTemplates_ACU, buildDefaultPlotWorldbookConfig_ACU, buildDefaultContentOptimizationPromptGroup_ACU, defaultWorldbookConfig_ACU, defaultVectorMemoryConfig_ACU } from '../../shared/defaults';
 import { addDataIsolationHistory_ACU, ensureProfileExists_ACU, normalizeDataIsolationHistory_ACU } from '../../data/repositories/isolation-repo';
 import { TABLE_FILL_MAIN_PROMPT_HISTORY_ACU } from '../../shared/defaults-json.js';
-import { STREAMING_FORCE_DISABLE_VERSION_ACU, TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU, TABLE_FILL_TOOL_DEFAULT_OFF_VERSION_ACU } from '../../shared/defaults';
+import { STREAMING_FORCE_DISABLE_VERSION_ACU, TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU, TABLE_FILL_TOOL_DEFAULT_OFF_VERSION_ACU, API_PRESET_CONTEXT_TOOL_BACKFILL_VERSION_ACU } from '../../shared/defaults';
 import { adaptTableFillPromptSegmentsToToolMode_ACU } from '../ai/prompt-builder/table-fill-tools';
-import { CREATIVE_IDENTITY_PROMPT_UPGRADE_VERSION_ACU } from '../../shared/defaults';
+import { CREATIVE_IDENTITY_PROMPT_UPGRADE_VERSION_ACU, CONTENT_SAFETY_PROMPT_FORCE_DEFAULT_VERSION_ACU, CONTENT_SAFETY_PLOT_PRESET_RESTORE_VERSION_ACU } from '../../shared/defaults';
 import { applyCreativeIdentityProfileUpgrade_ACU, applyCreativeIdentityVectorUpgrade_ACU } from './creative-identity-upgrade';
+import { applyContentSafetyProfileDefaults_ACU, CONTENT_SAFETY_PROFILE_PROMPT_KEYS_ACU, restoreCustomPlotPromptGroups_ACU } from './content-safety-upgrade';
 import { upgradeTimeRecallPrefill_ACU } from '../plot/time-recall-prefill';
 import { globalMeta_ACU, loadGlobalMeta_ACU, readProfileSettingsFromStorage_ACU, readProfileTemplateFromStorage_ACU, sanitizeSettingsForProfileSave_ACU, saveGlobalMeta_ACU, writeProfileSettingsToStorage_ACU, writeProfileTemplateToStorage_ACU } from '../../data/repositories/profile-repo';
 import { getCurrentTemplatePresetName_ACU, normalizeTemplatePresetSelectionValue_ACU } from '../../shared/template-preset-utils';
@@ -22,7 +23,7 @@ import { persistSettingsToStorage_ACU } from '../../data/storage/config-storage'
 import { ConfigStorageReadError_ACU, readConfigObject_ACU } from '../../data/storage/config-read';
 import { getCurrentVectorMemoryConfig_ACU } from '../vector/vector-memory-config';
 import { isIndexedDbAvailable_ACU } from '../../shared/idb-import-temp';
-import { configIdbCacheLoaded_ACU, ensureConfigIdbCacheLoaded_ACU, getConfigStorage_ACU, initTavernSettingsBridge_ACU, migrateKeyToTavernStorageIfNeeded_ACU, pendingSettingsReloadFromIdb_ACU, _set_pendingSettingsReloadFromIdb_ACU} from '../../data/storage/tavern-storage';
+import { configIdbCacheLoaded_ACU, ensureConfigIdbCacheLoaded_ACU, getConfigStorage_ACU, initTavernSettingsBridge_ACU, isConfigLoadBackendStale_ACU, isTavernBridgeInitSettled_ACU, markConfigLoadBackend_ACU, migrateKeyToTavernStorageIfNeeded_ACU, pendingSettingsReloadFromIdb_ACU, setConfigBackendStaleHandler_ACU, _set_pendingSettingsReloadFromIdb_ACU} from '../../data/storage/tavern-storage';
 import { ensureTagRulesCompat_ACU } from '../plot/plot-logic';
 import { getDefaultTemplateSnapshot_ACU, getTemplatePreset_ACU } from '../template/template-preset-service';
 import { getCurrentIsolationKey_ACU, settings_ACU, _set_settings_ACU} from '../runtime/state-manager';
@@ -66,6 +67,36 @@ function scheduleSettingsReloadAfterIdbReady_ACU(reason: string): void {
       settingsReloadAfterIdbScheduled_ACU = false;
       logWarn_ACU('[设置加载] 延迟重载失败，保存门禁保持关闭，请恢复配置后重新加载。');
   });
+}
+
+let settingsReloadAfterBridgeScheduled_ACU = false;
+let localConfigBackendWarned_ACU = false;
+
+/**
+ * 酒馆设置桥接尚未结束时读不到酒馆设置，不能据此判定“没有配置”：
+ * 否则无痕窗口（本地副本为空）会加载默认值，随后保存会覆盖酒馆服务端的真实配置。
+ */
+function scheduleSettingsReloadAfterBridgeReady_ACU(reason: string): void {
+  if (settingsReloadAfterBridgeScheduled_ACU) return;
+  settingsReloadAfterBridgeScheduled_ACU = true;
+  logDebug_ACU(`[设置加载] 酒馆设置桥接尚未就绪，暂停本轮加载并等待重载：${reason}`);
+  void initTavernSettingsBridge_ACU().catch(() => false).then(() => {
+      settingsReloadAfterBridgeScheduled_ACU = false;
+      try {
+          loadSettings_ACU();
+      } catch (error) {
+          logWarn_ACU('[设置加载] 桥接就绪后重载失败，保存门禁保持关闭。', error);
+      }
+  });
+}
+
+function reloadSettingsFromTavernBackend_ACU(): void {
+  logWarn_ACU('[设置加载] 酒馆设置已可用，丢弃本地副本并从酒馆设置重新加载。');
+  try {
+      loadSettings_ACU();
+  } catch (error) {
+      logWarn_ACU('[设置加载] 从酒馆设置重新加载失败，保存门禁保持关闭。', error);
+  }
 }
 
 function applyGlobalPlotEnabledSetting_ACU(): boolean {
@@ -373,6 +404,18 @@ export function saveSettings_ACU(): SaveSettingsResult_ACU {
           warning: '设置仍在加载中，本次保存已被阻止以避免覆盖原配置。请稍后重试。',
       };
   }
+  // 内存配置来自本地副本，但酒馆设置现已可用：保存会用本地副本覆盖酒馆中的真实配置。
+  // isConfigLoadBackendStale_ACU 返回 true 时已安排从酒馆设置重新加载。
+  if (isConfigLoadBackendStale_ACU()) {
+      settingsStorageReadyForSave_ACU = false;
+      logWarn_ACU('[设置保存] 已连接酒馆设置，但当前配置来自本地副本；已拒绝保存并从酒馆设置重新加载。');
+      return {
+          saved: false,
+          storageType: 'memory',
+          code: 'settings_loading',
+          warning: '已连接酒馆设置，正在从酒馆重新加载配置，本次保存已被阻止以避免覆盖酒馆中的配置。请稍后重试。',
+      };
+  }
 
   // [剧情推进] 运行时世界书选择回写到当前角色卡槽位
   syncPlotWorldbookSelectionToCharacterStore_ACU();
@@ -431,6 +474,24 @@ function loadSettingsFromStorage_ACU(): void {
           return;
       }
       _set_pendingSettingsReloadFromIdb_ACU(false);
+
+      // 桥接未结束前读不到酒馆设置，不能当作“没有配置”而回落到本地副本或默认值。
+      const backendProbe = getConfigStorage_ACU();
+      if (!backendProbe?._isTavern && !isTavernBridgeInitSettled_ACU()) {
+          scheduleSettingsReloadAfterBridgeReady_ACU('load_before_tavern_bridge_ready');
+          return;
+      }
+      if (backendProbe?._isTavern) {
+          markConfigLoadBackend_ACU('tavern');
+      } else {
+          markConfigLoadBackend_ACU('local');
+          // 酒馆设置稍后可用时，丢弃本地副本并从酒馆设置重新加载。
+          setConfigBackendStaleHandler_ACU(reloadSettingsFromTavernBackend_ACU);
+          if (!localConfigBackendWarned_ACU) {
+              localConfigBackendWarned_ACU = true;
+              logWarn_ACU('[设置加载] 未连接酒馆设置，本次使用本浏览器的本地副本（IndexedDB）；该副本在其他浏览器或无痕窗口中不可见。');
+          }
+      }
 
       // 1) 读取全局元信息（跨标识共享：标识列表/当前标识）
       loadGlobalMeta_ACU();
@@ -812,6 +873,26 @@ function loadSettingsFromStorage_ACU(): void {
                   logWarn_ACU('[创作身份声明] 交火提示词升级未保存，下一次加载重试:', error);
               }
           }
+          if (vectorConfig.contentSafetyPromptForceDefaultVersion !== CONTENT_SAFETY_PROMPT_FORCE_DEFAULT_VERSION_ACU) {
+              const keys = ['keywordPromptGroup', 'summaryPromptGroup', 'contentSafetyPromptBackup', 'contentSafetyPromptForceDefaultVersion'] as const;
+              const previous = keys.map(key => ({ key, had: Object.prototype.hasOwnProperty.call(vectorConfig, key), value: vectorConfig[key] }));
+              try {
+                  vectorConfig.contentSafetyPromptBackup ??= JSON.stringify({
+                      keywordPromptGroup: vectorConfig.keywordPromptGroup,
+                      summaryPromptGroup: vectorConfig.summaryPromptGroup,
+                  });
+                  vectorConfig.keywordPromptGroup = cloneDefaultValue_ACU(defaultVectorMemoryConfig_ACU.keywordPromptGroup);
+                  vectorConfig.summaryPromptGroup = cloneDefaultValue_ACU(defaultVectorMemoryConfig_ACU.summaryPromptGroup);
+                  vectorConfig.contentSafetyPromptForceDefaultVersion = CONTENT_SAFETY_PROMPT_FORCE_DEFAULT_VERSION_ACU;
+                  if (!saveGlobalMeta_ACU()) throw new Error('全局元数据保存失败');
+              } catch (error) {
+                  for (const item of previous) {
+                      if (item.had) vectorConfig[item.key] = item.value;
+                      else delete vectorConfig[item.key];
+                  }
+                  logWarn_ACU('[内容声明] 交火默认提示词更新未保存，下一次加载重试:', error);
+              }
+          }
       }
 
       settings_ACU.vectorMemoryConfig = globalMeta_ACU.vectorMemoryConfigGlobal;
@@ -832,6 +913,9 @@ function loadSettingsFromStorage_ACU(): void {
           settings_ACU.plotSettings = upgradedPlotSettings;
           shouldPersistSettingsAfterLoad_ACU = true;
       }
+      forceContentSafetyProfilePromptsOnce_ACU();
+      restoreContentSafetyPlotPresetsOnce_ACU();
+      backfillPresetContextToolTransportOnce_ACU();
 
       if (shouldPersistSettingsAfterLoad_ACU) {
           saveGlobalMeta_ACU();
@@ -1127,6 +1211,74 @@ function upgradeCreativeIdentityPromptsOnce_ACU() {
       }
   }
 
+function forceContentSafetyProfilePromptsOnce_ACU(): void {
+      if (!settings_ACU || typeof settings_ACU !== 'object') return;
+      if (settings_ACU.contentSafetyPromptForceDefaultVersion === CONTENT_SAFETY_PROMPT_FORCE_DEFAULT_VERSION_ACU) return;
+      const settings = settings_ACU as Record<string, any>;
+      const keys = [...CONTENT_SAFETY_PROFILE_PROMPT_KEYS_ACU, 'contentSafetyPromptBackup', 'contentSafetyPromptForceDefaultVersion'];
+      const previous = keys.map(key => ({ key, had: Object.prototype.hasOwnProperty.call(settings, key), value: settings[key] }));
+      try {
+          settings.contentSafetyPromptBackup ??= JSON.stringify(Object.fromEntries(
+              CONTENT_SAFETY_PROFILE_PROMPT_KEYS_ACU.map(key => [key, settings[key]]),
+          ));
+          applyContentSafetyProfileDefaults_ACU(settings);
+          settings.contentSafetyPromptForceDefaultVersion = CONTENT_SAFETY_PROMPT_FORCE_DEFAULT_VERSION_ACU;
+          const saved = saveSettings_ACU();
+          if (!saved.saved) throw new Error(saved.error || saved.warning || '设置未保存');
+          logDebug_ACU(`[内容声明] 默认提示词一次性更新完成: ${CONTENT_SAFETY_PROMPT_FORCE_DEFAULT_VERSION_ACU}`);
+      } catch (error) {
+          for (const item of previous) {
+              if (item.had) settings[item.key] = item.value;
+              else delete settings[item.key];
+          }
+          logWarn_ACU('[内容声明] 默认提示词更新未保存，下一次加载重试:', error);
+      }
+  }
+
+/**
+ * 1.3.1 内容声明迁移曾把剧情预设的自定义提示词组整组换成默认组，任务标签要求却保留原值，切换预设后验收必然失败。
+ * 迁移已完成且备份存在时，从备份恢复仍保持迁移结果的自定义组；之后改动过的组与内置默认组不变。
+ */
+function restoreContentSafetyPlotPresetsOnce_ACU(): void {
+      if (!settings_ACU || typeof settings_ACU !== 'object') return;
+      const settings = settings_ACU as Record<string, any>;
+      const markerKey = 'contentSafetyPlotPresetRestoreVersion';
+      if (settings[markerKey] === CONTENT_SAFETY_PLOT_PRESET_RESTORE_VERSION_ACU) return;
+      if (settings.contentSafetyPromptForceDefaultVersion !== CONTENT_SAFETY_PROMPT_FORCE_DEFAULT_VERSION_ACU) return;
+      const currentPlot = settings.plotSettings;
+      if (!currentPlot || typeof currentPlot !== 'object' || typeof settings.contentSafetyPromptBackup !== 'string') {
+          logDebug_ACU('[内容声明] 无迁移备份，剧情预设提示词保持不变。');
+          return;
+      }
+      let backupPlot: unknown;
+      try {
+          backupPlot = JSON.parse(settings.contentSafetyPromptBackup)?.plotSettings;
+      } catch (error) {
+          logWarn_ACU('[内容声明] 迁移备份无法解析，剧情预设提示词未恢复:', error);
+          return;
+      }
+      if (!backupPlot || typeof backupPlot !== 'object' || Array.isArray(backupPlot)) {
+          logDebug_ACU('[内容声明] 迁移备份不含剧情设置，剧情预设提示词保持不变。');
+          return;
+      }
+      const markerHad = Object.prototype.hasOwnProperty.call(settings, markerKey);
+      const previousMarker = settings[markerKey];
+      const { plotSettings, restoredCount } = restoreCustomPlotPromptGroups_ACU(currentPlot, backupPlot as Record<string, any>);
+      settings[markerKey] = CONTENT_SAFETY_PLOT_PRESET_RESTORE_VERSION_ACU;
+      if (restoredCount === 0) return;
+      try {
+          settings.plotSettings = plotSettings;
+          const saved = saveSettings_ACU();
+          if (!saved.saved) throw new Error(saved.error || saved.warning || '设置未保存');
+          logDebug_ACU(`[内容声明] 已从迁移备份恢复 ${restoredCount} 组剧情预设提示词。`);
+      } catch (error) {
+          settings.plotSettings = currentPlot;
+          if (markerHad) settings[markerKey] = previousMarker;
+          else delete settings[markerKey];
+          logWarn_ACU('[内容声明] 剧情预设提示词恢复未保存，下一次加载重试:', error);
+      }
+  }
+
 function forceUserPrefillProfilePromptsOnce_ACU() {
       if (!settings_ACU || typeof settings_ACU !== 'object') return;
       if (settings_ACU.userPrefillProfileForceDefaultVersion === USER_PREFILL_PROFILE_FORCE_DEFAULT_VERSION_ACU) return;
@@ -1213,6 +1365,42 @@ function forceDisableStreamingOnce_ACU() {
               if (item.had) item.config.streamingEnabled = item.value;
           }
           logWarn_ACU('[流式传输] 一次性强制关闭未保存，下一次加载重试:', error);
+      }
+  }
+
+/**
+ * 「API工具调用」开关移入各 API 预设后的一次性迁移：把旧预设缺失（或非布尔）的
+ * apiConfig.contextToolTransportEnabled 补为 true 并落盘。已保存的布尔值（含 false）原样保留，
+ * 不读取已移除的全局开关。保存失败时恢复各预设原值与 marker，下一次加载重试。
+ */
+function backfillPresetContextToolTransportOnce_ACU() {
+      if (!settingsStorageReadyForSave_ACU || !settings_ACU || typeof settings_ACU !== 'object') return;
+      if (settings_ACU.apiPresetContextToolBackfillVersion === API_PRESET_CONTEXT_TOOL_BACKFILL_VERSION_ACU) return;
+      const markerHad = Object.prototype.hasOwnProperty.call(settings_ACU, 'apiPresetContextToolBackfillVersion');
+      const marker = settings_ACU.apiPresetContextToolBackfillVersion;
+      const restorePresets: Array<{ config: Record<string, any>; had: boolean; value: unknown }> = [];
+      try {
+          if (Array.isArray(settings_ACU.apiPresets)) {
+              for (const preset of settings_ACU.apiPresets) {
+                  const config = preset?.apiConfig;
+                  if (!config || typeof config !== 'object' || Array.isArray(config)) continue;
+                  if (typeof config.contextToolTransportEnabled === 'boolean') continue;
+                  restorePresets.push({ config, had: Object.prototype.hasOwnProperty.call(config, 'contextToolTransportEnabled'), value: config.contextToolTransportEnabled });
+                  config.contextToolTransportEnabled = true;
+              }
+          }
+          settings_ACU.apiPresetContextToolBackfillVersion = API_PRESET_CONTEXT_TOOL_BACKFILL_VERSION_ACU;
+          const saved = saveSettings_ACU();
+          if (!saved.saved) throw new Error(saved.error || saved.warning || '设置未保存');
+          logDebug_ACU(`[API预设] API工具调用开关已补齐到 ${restorePresets.length} 个旧预设并记录版本: ${API_PRESET_CONTEXT_TOOL_BACKFILL_VERSION_ACU}`);
+      } catch (error) {
+          for (const item of restorePresets) {
+              if (item.had) item.config.contextToolTransportEnabled = item.value;
+              else delete item.config.contextToolTransportEnabled;
+          }
+          if (markerHad) settings_ACU.apiPresetContextToolBackfillVersion = marker;
+          else delete settings_ACU.apiPresetContextToolBackfillVersion;
+          logWarn_ACU('[API预设] API工具调用开关补齐未保存，下一次加载重试:', error);
       }
   }
 
@@ -1308,6 +1496,7 @@ export   function buildDefaultSettings_ACU() {
           tableFillPromptForceDefaultVersion: '', // [填表提示词] 一次性强制恢复默认提示词版本
           tableFillToolPromptUpgradeVersion: '', // [填表提示词] 工具化默认提示词一次性升级版本
           tableFillToolDefaultOffVersion: '', // [填表提示词] 工具调用默认关闭后的提示词降级版本
+          apiPresetContextToolBackfillVersion: '', // [API预设] API工具调用开关补齐到各预设的一次性迁移版本
           creativeIdentityPromptUpgradeVersion: '', // [创作身份声明] 默认提示词身份句一次性升级版本
           templateAssistantPromptForceDefaultVersion: '', // [AI 改表助手] 一次性强制恢复默认提示词版本
           strictJsonTableFillForceDisableVersion: '', // [填表功能] 一次性关闭严格 JSON 填表版本

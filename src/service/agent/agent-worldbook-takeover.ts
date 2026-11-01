@@ -97,7 +97,7 @@ interface AgentWorldbookTakeoverMeta_ACU {
 
 function normalizeBookNamesForTakeover_ACU(bookNames: unknown): string[] {
   if (!Array.isArray(bookNames)) return [];
-  return [...new Set(bookNames.map(name => String(name || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  return [...new Set<string>(bookNames.filter((name): name is string => typeof name === 'string' && !!name.trim()))].sort((a, b) => a.localeCompare(b));
 }
 
 function normalizeCommentText_ACU(comment: unknown): string {
@@ -149,7 +149,7 @@ function normalizeAgentWorldbookRefs_ACU(greenlights: unknown): AgentWorldbookFi
 
   for (const ref of greenlights) {
     if (!ref || typeof ref !== 'object') continue;
-    const bookName = String((ref as any).bookName || '').trim();
+    const bookName = String((ref as any).bookName || '');
     const uid = (ref as any).uid;
     if (!bookName || !hasValidWorldbookUid_ACU(uid)) continue;
     const key = `${bookName}\u0000${String(uid).trim()}`;
@@ -167,7 +167,7 @@ function buildSnapshotUidSetByBook_ACU(snapshot: AgentWorldbookControlSnapshot_A
   if (snapshot.active !== true) return uidSetByBook;
 
   for (const [bookName, entries] of Object.entries(snapshot.books || {})) {
-    const normalizedBookName = String(bookName || '').trim();
+    const normalizedBookName = String(bookName || '');
     if (!normalizedBookName || !Array.isArray(entries)) continue;
     const uidSet = new Set<string>();
     for (const entry of entries) {
@@ -183,7 +183,7 @@ function buildSnapshotUidSetByBook_ACU(snapshot: AgentWorldbookControlSnapshot_A
 function buildAllowedFinalGreenlightKeySet_ACU(greenlights: AgentWorldbookFinalGreenlightRef_ACU[], snapshotUidSetByBook: Map<string, Set<string>>): Set<string> {
   const allowed = new Set<string>();
   for (const ref of greenlights) {
-    const bookName = String(ref.bookName || '').trim();
+    const bookName = String(ref.bookName || '');
     const uid = String(ref.uid).trim();
     if (!snapshotUidSetByBook.get(bookName)?.has(uid)) continue;
     allowed.add(`${bookName}\u0000${uid}`);
@@ -206,7 +206,7 @@ function isFinalGenerationBlueLightEntry_ACU(entry: Record<string, any>): boolea
 }
 
 function buildFinalGreenlightKey_ACU(bookName: string, uid: unknown): string {
-  return `${String(bookName || '').trim()}\u0000${String(uid ?? '').trim()}`;
+  return `${String(bookName || '')}\u0000${String(uid ?? '').trim()}`;
 }
 
 /**
@@ -287,7 +287,7 @@ function mergeSnapshotBooks_ACU(
   const mergedBooks: Record<string, AgentWorldbookControlSnapshotEntry_ACU[]> = {};
   for (const books of [existingBooks, candidateBooks]) {
     for (const [bookName, entries] of Object.entries(books || {})) {
-      const normalizedBookName = String(bookName || '').trim();
+      const normalizedBookName = String(bookName || '');
       if (!normalizedBookName || !Array.isArray(entries)) continue;
       const mergedEntries = mergedBooks[normalizedBookName] || (mergedBooks[normalizedBookName] = []);
       const entryIndexByUid = new Map(mergedEntries.map((entry, index) => [String(entry?.uid), index]));
@@ -313,7 +313,7 @@ function setSnapshotEntryStatusByUpdates_ACU(
 ): Record<string, AgentWorldbookControlSnapshotEntry_ACU[]> {
   const uidsByBook = new Map<string, Set<string>>();
   for (const update of updates) {
-    const bookName = String(update.bookName || '').trim();
+    const bookName = String(update.bookName || '');
     if (!bookName || !hasValidWorldbookUid_ACU(update.uid)) continue;
     const uids = uidsByBook.get(bookName) || new Set<string>();
     uids.add(String(update.uid));
@@ -789,7 +789,7 @@ async function reconcileExistingTakeoverSnapshotWithSkillMeta_ACU(
   let pruned = 0;
 
   for (const [bookName, snapshotEntries] of Object.entries(existingSnapshot.books || {})) {
-    const normalizedBookName = String(bookName || '').trim();
+    const normalizedBookName = String(bookName || '');
     const entriesToCheck = Array.isArray(snapshotEntries) ? snapshotEntries : [];
     if (!normalizedBookName || entriesToCheck.length === 0) continue;
     const currentEntries = await getLorebookEntries_ACU(normalizedBookName);
@@ -839,7 +839,7 @@ function filterSnapshotBooksByUpdates_ACU(
 ): Record<string, AgentWorldbookControlSnapshotEntry_ACU[]> {
   const allowedByBook = new Map<string, Set<string>>();
   for (const update of updates) {
-    const bookName = String(update?.bookName || '').trim();
+    const bookName = String(update?.bookName || '');
     if (!bookName || !hasValidWorldbookUid_ACU(update?.uid)) continue;
     const allowed = allowedByBook.get(bookName) || new Set<string>();
     allowed.add(String(update.uid));
@@ -858,7 +858,7 @@ function excludeSnapshotEntriesByUpdates_ACU(
 ): Record<string, AgentWorldbookControlSnapshotEntry_ACU[]> {
   const excludedByBook = new Map<string, Set<string>>();
   for (const update of updates) {
-    const bookName = String(update?.bookName || '').trim();
+    const bookName = String(update?.bookName || '');
     if (!bookName || !hasValidWorldbookUid_ACU(update?.uid)) continue;
     const excluded = excludedByBook.get(bookName) || new Set<string>();
     excluded.add(String(update.uid));
@@ -939,7 +939,7 @@ async function restoreSnapshotEntries_ACU(snapshot: AgentWorldbookControlSnapsho
   const report: AgentWorldbookEntryPatchReport_ACU = { applied: [], failed: [] };
 
   for (const [bookName, snapshotEntries] of Object.entries(snapshot.books || {})) {
-    const normalizedBookName = String(bookName || '').trim();
+    const normalizedBookName = String(bookName || '');
     const entriesToRestore = Array.isArray(snapshotEntries)
       ? snapshotEntries.filter(entry => entry.takeoverStatus !== 'pending') : [];
     if (!normalizedBookName || entriesToRestore.length === 0) continue;

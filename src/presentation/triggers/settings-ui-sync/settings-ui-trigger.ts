@@ -1,3 +1,4 @@
+import { captureTakeoverLease_ACU, isTakeoverEnabled_ACU } from '../../../shared/takeover-control';
 /**
  * presentation/triggers/settings-ui-sync/settings-ui-trigger.ts
  */
@@ -7,7 +8,7 @@ import { updateCardUpdateStatusDisplay_ACU } from '../../components/update-statu
 import { isAutoUpdatingCard_ACU, _set_isAutoUpdatingCard_ACU } from '../../components/plot-editors';
 import { showToastr_ACU } from '../../theme/toast';
 import { getChatArray_ACU } from '../../../service/chat/chat-service';
-import { abortAllActiveRequests_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, hasActiveContentGeneration_ACU, settings_ACU, _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU } from '../../../service/runtime/state-manager';
+import { abortAllActiveRequests_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_manualExtraHint_ACU, _set_wasStoppedByUser_ACU } from '../../../service/runtime/state-manager';
 import { $manualExtraHintCheckbox_ACU } from '../../state/ui-refs';
 import { processUpdates_ACU } from '../update-process';
 import { getSortedSheetKeys_ACU } from '../../../service/template/chat-scope';
@@ -82,10 +83,11 @@ let autoUpdateQueueTail_ACU: Promise<void> = Promise.resolve();
 let autoUpdateQueueId_ACU = 0;
 let autoFillEventEpoch_ACU = 0;
 
-/** 接收时绑定事件代次，与聊天作用域及生成资格分别校验。 */
+/** 接收时绑定消息任务代次，并独立校验聊天作用域。 */
 export function captureAutoFillEventScope_ACU(): () => boolean {
     const epoch = autoFillEventEpoch_ACU;
-    return () => epoch === autoFillEventEpoch_ACU;
+    const lease = captureTakeoverLease_ACU();
+    return () => epoch === autoFillEventEpoch_ACU && lease.isCurrent();
 }
 
 /** 作废旧通知和排队任务；不调用全局取消，也不撤销已经发出的请求。 */
@@ -111,7 +113,7 @@ export function cancelPendingAutoFillEvent_ACU(): void {
     const chatAtEnqueue = scoped ? getChatArray_ACU() : undefined;
     const isEnqueuedEventCurrent = captureAutoFillEventScope_ACU();
     const canProcessEvent = (stage: string): boolean => {
-      if (!isEnqueuedEventCurrent() || (isCurrentEvent && !isCurrentEvent())) {
+      if (!isTakeoverEnabled_ACU() || !isEnqueuedEventCurrent() || (isCurrentEvent && !isCurrentEvent())) {
         logAutoFillSkip_ACU('generation_changed', { ...context, stage });
         return false;
       }
@@ -119,10 +121,6 @@ export function cancelPendingAutoFillEvent_ACU(): void {
         || context.chatKey !== undefined && context.chatKey !== currentChatFileIdentifier_ACU
         || context.isolationKey !== undefined && context.isolationKey !== getCurrentIsolationKey_ACU())) {
         logAutoFillSkip_ACU('chat_changed', { ...context, stage });
-        return false;
-      }
-      if (hasActiveContentGeneration_ACU()) {
-        logAutoFillSkip_ACU('generation_in_progress', { ...context, stage });
         return false;
       }
       return true;
@@ -195,6 +193,10 @@ export function cancelPendingAutoFillEvent_ACU(): void {
 
     const useGroupedAutoUpdates = !isSqliteMode();
     const autoGroupedAbortController = new AbortController();
+    const takeoverSignal = captureTakeoverLease_ACU().signal;
+    const pauseAutoFill = () => autoGroupedAbortController.abort();
+    takeoverSignal.addEventListener('abort', pauseAutoFill, { once: true });
+    if (takeoverSignal.aborted || !isTakeoverEnabled_ACU()) pauseAutoFill();
     const canExecuteAutoFill = (stage: string): boolean => {
       if (autoGroupedAbortController.signal.aborted) return false;
       if (canProcessEvent(stage)) return true;
@@ -301,6 +303,7 @@ export function cancelPendingAutoFillEvent_ACU(): void {
             autoGroupedAbortController,
         );
     } finally {
+        takeoverSignal.removeEventListener('abort', pauseAutoFill);
         autoProgressTask?.end();
         _set_wasStoppedByUser_ACU(false);
         syncManualUpdateButtonAvailability_ACU();

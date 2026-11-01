@@ -2,8 +2,8 @@
  * service/worldbook/read-scope.ts
  * 表格候选作用域：requested→host 目标解析、候选集合构建与顺序稳定去重。
  *
- * 候选集合只保留本次逻辑阶段的显式目标（当前选择 / enabledEntries 键 /
- * Agent greenlight / 注入目标 / 角色绑定），禁止用于全库扫描。
+ * 候选集合只保留本次逻辑阶段的显式目标（当前选择 / 注入目标 / 角色绑定），
+ * 历史条目配置与 Agent 条目绿灯不扩大书级范围，禁止用于全库扫描。
  */
 import { resolveLorebookNameFromList_ACU, listLorebooks_ACU } from '../../data/gateways/worldbook-gateway';
 import type { LorebookReadContext_ACU } from './read-context';
@@ -27,8 +27,8 @@ export async function resolveLorebookReadTargets_ACU(
   const seenHosts = new Set<string>();
   const targets: LorebookReadTarget_ACU[] = [];
   for (const raw of requestedNames) {
-    const requested = String(raw ?? '').trim();
-    if (!requested || seenRequested.has(requested)) continue;
+    const requested = String(raw ?? '');
+    if (!requested.trim() || seenRequested.has(requested)) continue;
     seenRequested.add(requested);
     let hostName: string | null = null;
     if (context) {
@@ -52,8 +52,8 @@ export function buildTableCandidateScope_ACU(collectors: Array<() => Iterable<st
   const names: string[] = [];
   for (const collect of collectors) {
     for (const raw of collect()) {
-      const name = String(raw ?? '').trim();
-      if (name && !seen.has(name)) {
+      const name = String(raw ?? '');
+      if (name.trim() && !seen.has(name)) {
         seen.add(name);
         names.push(name);
       }
@@ -64,8 +64,7 @@ export function buildTableCandidateScope_ACU(collectors: Array<() => Iterable<st
 
 /**
  * 收集异步来源的候选书名（注入目标 / 角色绑定等），与 buildTableCandidateScope_ACU
- * 保持相同的保序去重语义。单个来源失败时静默跳过：这些是可选来源，不阻断填表主流程，
- * 失败仅意味着该书本次不进入候选作用域（后续仍可通过来源 1-3 进入）。
+ * 保持相同的保序去重语义；来源失败向上传播，不伪装成合法空绑定。
  */
 export async function collectAsyncTableCandidateScope_ACU(
   collectors: Array<() => Promise<Iterable<string>> | Iterable<string>>,
@@ -73,15 +72,10 @@ export async function collectAsyncTableCandidateScope_ACU(
   const seen = new Set<string>();
   const names: string[] = [];
   for (const collect of collectors) {
-    let values: Iterable<string>;
-    try {
-      values = await collect();
-    } catch {
-      continue;
-    }
+    const values = await collect();
     for (const raw of values) {
-      const name = String(raw ?? '').trim();
-      if (name && !seen.has(name)) {
+      const name = String(raw ?? '');
+      if (name.trim() && !seen.has(name)) {
         seen.add(name);
         names.push(name);
       }

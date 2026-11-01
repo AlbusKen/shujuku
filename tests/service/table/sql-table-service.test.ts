@@ -127,7 +127,6 @@ import {
   materializeSystemRowIdsForSqlInserts_ACU,
   rebindSqlMutationTableIdentifiers_ACU,
   SqlRuntimeSnapshotError_ACU,
-  SqlRuntimeSchemaStaleError_ACU,
   SqlTableService,
   splitSqlStatements,
   extractTableNamesFromStatements,
@@ -2110,72 +2109,6 @@ describe('SqlTableService', () => {
       expect(result.success).toBe(true);
       expect(result.appliedEdits).toBe(1);
       expect(service.executeQuery("SELECT COUNT(*) AS cnt FROM inventory WHERE item_name = '一致路径写入'").values[0][0]).toBe(1);
-    });
-
-    it('AI 等待期间 live SQLite schema 漂移时提交前 fail-closed：抛 SQL_RUNTIME_SCHEMA_STALE_ACU 且零 mutation', async () => {
-      // 顶层 utils mock 把 hashUserInput_ACU 固定成常量 digest，无法区分 schema 差异。
-      // 本测试临时改为基于输入的可变 digest，验证后立即恢复，避免影响其他测试。
-      const utilsModule = await import('../../../src/shared/utils');
-      const originalHashImpl = (utilsModule as any).hashUserInput_ACU.getMockImplementation();
-      (utilsModule as any).hashUserInput_ACU.mockImplementation((text: string) => (text ? `digest:${text}` : ''));
-
-      mockGetCurrentChatTemplateScopeState.mockReturnValue({
-        mode: 'chat_override',
-        templateStr: JSON.stringify({
-          mate: { type: 'acu', version: 1 },
-          sheet_0: {
-            uid: 'inventory', name: 'inventory',
-            sourceData: { ddl: TEST_DDL },
-            content: [['row_id', 'item_name', 'quantity']],
-            updateConfig: {}, exportConfig: {}, orderNo: 0,
-          },
-        }),
-      });
-      const runtimeData = service.getCurrentData() as any;
-      const scope = captureSqlTableApplyScope_ACU({
-        chat: [{ mes: 'stale-drift' }],
-        isolationKey: 'stale-drift',
-        runtimeData,
-      });
-      const frozenDigest = scope.runtimeSchema?.digest;
-      expect(frozenDigest).toBeTruthy();
-
-      // 模拟 AI 请求等待期间另一实例/用户修改了 live SQLite schema：
-      // 重新 load 一份「DDL 增加新列」的数据，刷新 runtime descriptor → digest 变化。
-      const driftedData = JSON.parse(JSON.stringify(await mockMergeAll()));
-      driftedData.sheet_0.sourceData.ddl = `CREATE TABLE inventory (\n  row_id INTEGER PRIMARY KEY, -- 行号\n  item_name TEXT, -- 物品名\n  quantity INTEGER, -- 数量\n  extra_col TEXT -- 新增列\n);`;
-      driftedData.sheet_0.content = [
-        ['row_id', '物品名', '数量', '新增列'],
-        ['1', '铁剑', '3', 'x'],
-      ];
-      const reload = await service.loadFromData(driftedData);
-      expect(reload.loaded).toBe(true);
-      // 诊断：reload 后 live descriptor 的 digest 应与冻结 digest 不同。
-      const afterReloadData = service.getCurrentData() as any;
-      const afterReloadScope = captureSqlTableApplyScope_ACU({
-        chat: [{ mes: 'stale-drift-after' }],
-        isolationKey: 'stale-drift-after',
-        runtimeData: afterReloadData,
-      });
-      expect(afterReloadScope.runtimeSchema?.digest).not.toBe(frozenDigest);
-
-      let caught: unknown;
-      try {
-        service.applyEditsWithSystemRowIds([
-          "INSERT INTO inventory (item_name, quantity) VALUES ('不应写入', 1);",
-        ], 'auto_standard', scope);
-      } catch (error: any) {
-        caught = error;
-      } finally {
-        // 确保无论断言结果如何都恢复 hash mock，避免泄漏到后续测试。
-        (utilsModule as any).hashUserInput_ACU.mockImplementation(originalHashImpl);
-      }
-
-      expect(caught).toBeInstanceOf(SqlRuntimeSchemaStaleError_ACU);
-      expect(caught instanceof Error && String((caught as any).code)).toBe('SQL_RUNTIME_SCHEMA_STALE_ACU');
-      // 零 mutation：stale gate 阻止了本轮 AI SQL 写入（reload 自带的数据行不算）。
-      expect(service.executeQuery('SELECT COUNT(*) AS cnt FROM inventory WHERE item_name = \'不应写入\'').values[0][0]).toBe(0);
-      expect(service.executeQuery('SELECT COUNT(*) AS cnt FROM inventory').values[0][0]).toBe(1);
     });
   });
   // ═══════════════════════════════════════════════════════════════

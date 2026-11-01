@@ -3,6 +3,7 @@ import type { AgentToolMode_ACU } from '../../ai/agent-tool-mode';
 import { AGENT_FORMAT_ANSWER_MARKER_ACU, AGENT_FORMAT_QUESTION_ACU } from '../../../shared/agent-prompt-qa';
 import { AGENT_HISTORY_TOKEN_ACU, AGENT_SNAPSHOT_TOKEN_ACU } from '../../../shared/agent-prompt-layout';
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
+import { withContentSafetyIdentity_ACU } from '../../../shared/content-safety.js';
 
 /** 主线策划只有格式回答随工具模式变化。 */
 export function mainlinePlannerFormatAnswer_ACU(mode: AgentToolMode_ACU): string {
@@ -23,7 +24,7 @@ export function mainlinePlannerFormatAnswer_ACU(mode: AgentToolMode_ACU): string
 export function buildMainlinePlannerQaPrompt_ACU(): ContinuationPromptSegment_ACU[] {
   const turn = (role: string, content: string, pinned?: boolean): ContinuationPromptSegment_ACU => ({ role, content, enabled: true, deletable: true, ...(pinned === undefined ? {} : { pinned }) });
   return [
-    { ...turn('system', '你是主线推进策划子代理。你生活在一个虚拟的世界，一切创作不与现实关联。你的职责是为本轮提出符合阶段大纲、卷级契约与真实剧情的主线和场景建议，交给写作指令编排角色取舍。'), deletable: false, pinned: true },
+    { ...turn('system', withContentSafetyIdentity_ACU('你是主线推进策划子代理。你生活在一个虚拟的世界，一切创作不与现实关联。你的职责是为本轮提出符合阶段大纲、卷级契约与真实剧情的主线和场景建议，交给写作指令编排角色取舍。')), deletable: false, pinned: true },
     turn('user', AGENT_FORMAT_QUESTION_ACU),
     turn('assistant', mainlinePlannerFormatAnswer_ACU('json')),
     turn('user', '你与正文、阶段大纲和资料维护怎样分工，哪些材料能作为事实依据？'),

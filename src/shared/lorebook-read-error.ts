@@ -33,6 +33,11 @@ export function classifyLorebookReadError_ACU(error: unknown): LorebookReadError
   }
 
   // 2. 命名 host API 缺失错误：required gateway 的唯一失败形态。
+  if (error && typeof error === 'object' && (error as { name?: unknown }).name === 'WorldbookReadError_ACU') {
+    const category = (error as { category?: unknown }).category;
+    if (category === 'lorebook_not_found' || category === 'api_unavailable'
+      || category === 'scope_changed' || category === 'unknown') return category;
+  }
   if (error && typeof error === 'object' && (error as { name?: unknown }).name === 'WorldbookHostApiUnavailableError_ACU') {
     return 'api_unavailable';
   }
@@ -153,6 +158,12 @@ export function normalizeSafePreflightSummary_ACU(error: unknown): Record<string
   }
   for (const [key, value] of arrayFields) {
     if (Array.isArray(value) && value.every(item => typeof item === 'string')) normalized[key] = [...value];
+  }
+  const reasons = ['http', 'network', 'timeout', 'invalid_json', 'invalid_payload', 'host_origin', 'request_headers'];
+  if (typeof candidate.reason === 'string' && reasons.includes(candidate.reason)) normalized.reason = candidate.reason;
+  if (typeof candidate.httpStatus === 'number' && Number.isInteger(candidate.httpStatus)
+    && candidate.httpStatus >= 100 && candidate.httpStatus <= 599) {
+    normalized.httpStatus = candidate.httpStatus;
   }
   return normalized;
 }

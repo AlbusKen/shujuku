@@ -4,9 +4,11 @@ import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-histor
 import { captureZeroLayerCarrier_ACU, readZeroLayerCarrier_ACU } from './carrier-context';
 import { ZERO_LAYER_CARRIER_FIELD_ACU, ZeroLayerError_ACU } from './model';
 import { pendingZeroLayerPersistence_ACU } from './persistence-state';
+import { isZeroLayerFeatureEnabled_ACU } from './feature-policy';
 
 /** 无零层字段的普通聊天不进入零层校验；未知保存即使本地字段已回滚也不能放行。 */
 export function readOrdinaryZeroLayerState_ACU(allowActive = false) {
+  if (!isZeroLayerFeatureEnabled_ACU()) return null;
   const chat = getChatArray_ACU();
   const key = JSON.stringify([getCurrentCharacterCardKey_ACU(), getActiveChatStorageIdentity_ACU(chat)]);
   if (pendingZeroLayerPersistence_ACU.has(key)) {

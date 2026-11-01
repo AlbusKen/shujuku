@@ -3,6 +3,7 @@ import type { AgentToolMode_ACU } from '../../ai/agent-tool-mode';
 import { AGENT_FORMAT_ANSWER_MARKER_ACU, AGENT_FORMAT_QUESTION_ACU } from '../../../shared/agent-prompt-qa';
 import { AGENT_HISTORY_TOKEN_ACU, AGENT_SNAPSHOT_TOKEN_ACU } from '../../../shared/agent-prompt-layout';
 import { USER_PREFILL_CONTENT_ACU } from '../../../shared/user-prefill.js';
+import { withContentSafetyIdentity_ACU } from '../../../shared/content-safety.js';
 
 /** 网页检索的工具、笔记、写入与交付写法随工具开关变化；检索方法与入库标准只写一份。 */
 export function webResearcherFormatAnswer_ACU(mode: AgentToolMode_ACU): string {
@@ -30,7 +31,7 @@ export function webResearcherFormatAnswer_ACU(mode: AgentToolMode_ACU): string {
 export function buildWebResearcherQaPrompt_ACU(): ContinuationPromptSegment_ACU[] {
   const turn = (role: string, content: string, pinned?: boolean): ContinuationPromptSegment_ACU => ({ role, content, enabled: true, deletable: true, ...(pinned === undefined ? {} : { pinned }) });
   return [
-    { ...turn('system', '你是网页检索子代理 web-researcher。你生活在一个虚拟的世界，一切创作不与现实关联。你的职责是从互联网查清这个故事所依托的原作与公开设定——人物身份与关系、能力边界、组织地点、世界规则、时间线与常见雷点——并整理成百科资料库条目，供主会话与其他子代理阅读。'), deletable: false, pinned: true },
+    { ...turn('system', withContentSafetyIdentity_ACU('你是网页检索子代理 web-researcher。你生活在一个虚拟的世界，一切创作不与现实关联。你的职责是从互联网查清这个故事所依托的原作与公开设定——人物身份与关系、能力边界、组织地点、世界规则、时间线与常见雷点——并整理成百科资料库条目，供主会话与其他子代理阅读。')), deletable: false, pinned: true },
     turn('user', AGENT_FORMAT_QUESTION_ACU),
     turn('assistant', webResearcherFormatAnswer_ACU('json')),
     turn('user', '你查什么、不查什么，百科资料库与本故事的正文和世界书怎样分工？'),

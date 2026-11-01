@@ -37,6 +37,9 @@ const reasons_ACU = new Set([
   'no_reply', 'unsafe', 'not_tail', 'empty_body', 'missing_tags', 'short_body',
   'disabled_or_ineligible', 'already_processed', 'busy', 'planned', 'failed', 'skipped',
   'aborted', 'loop_retry', 'no_match', 'no_input', 'vector_only', 'pending_snapshot',
+  'fresh_user_message', 'fresh_send_intent', 'takeover_paused', 'dry_run', 'plot_disabled',
+  'flight_mode_or_retrying', 'fill_mode_vector', 'quiet_generation', 'automatic_trigger',
+  'stale_user_message', 'untracked_user_message', 'no_user_trigger',
 ]);
 const errorTypes_ACU = new Set(['Error', 'TypeError', 'ReferenceError', 'RangeError', 'SyntaxError', 'AbortError', 'unknown']);
 export const CONTINUATION_DEBUG_WAIT_MS_ACU = 15_000;

@@ -243,6 +243,7 @@
             >
               <summary class="acu-v2-advanced-tools-page__log-hint-summary">
                 <i class="fa-solid fa-lightbulb acu-v2-advanced-tools-page__log-hint-icon" aria-hidden="true"></i>
+                <code class="acu-v2-advanced-tools-page__log-hint-code">{{ hintFor(entry)!.code }}{{ hintFor(entry)!.httpStatus ? ` · HTTP ${hintFor(entry)!.httpStatus}` : '' }}</code>
                 <span class="acu-v2-advanced-tools-page__log-hint-text">{{ hintFor(entry)!.summary }}</span>
                 <span class="acu-v2-advanced-tools-page__log-hint-toggle">怎么处理</span>
               </summary>
@@ -740,6 +741,14 @@ watch(() => logFlow.visibleLogs.value.length, scrollLogListToTop, { flush: 'post
   flex: 1 1 auto;
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.acu-v2-advanced-tools-page__log-hint-code {
+  flex: 0 0 auto;
+  color: var(--acu-text-3, var(--acu-text-2));
+  font-family: var(--acu-font-mono, monospace);
+  font-size: var(--acu-font-size-caption, 11px);
+  white-space: nowrap;
 }
 
 .acu-v2-advanced-tools-page__log-hint-toggle {

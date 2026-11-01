@@ -136,8 +136,8 @@ export function isLorebookNotFoundError_ACU(error: unknown): boolean {
  * 仅 strict pipeline 与清绿灯预检使用；不改变现有宽松 CRUD 语义。
  */
 export class WorldbookHostApiUnavailableError_ACU extends Error {
-    readonly operation: 'get_entries' | 'set_entries' | 'delete_entries';
-    constructor(operation: 'get_entries' | 'set_entries' | 'delete_entries') {
+    readonly operation: 'get_entries' | 'set_entries' | 'delete_entries' | 'read_scope';
+    constructor(operation: 'get_entries' | 'set_entries' | 'delete_entries' | 'read_scope') {
         super(`WorldbookHostApiUnavailable:${operation}`);
         this.name = 'WorldbookHostApiUnavailableError_ACU';
         this.operation = operation;
@@ -148,6 +148,19 @@ function requireTavernHelperApi_ACU(operation: 'get_entries' | 'set_entries' | '
     if (!TavernHelper_API_ACU || typeof TavernHelper_API_ACU[method] !== 'function') {
         throw new WorldbookHostApiUnavailableError_ACU(operation);
     }
+}
+
+/** 仅保留本次操作的身份租约，交付前重新校验，不缓存宿主条目。 */
+export type LorebookReadGuard_ACU = (bookNames?: string[]) => Promise<void>;
+
+export async function createLorebookReadGuard_ACU(): Promise<LorebookReadGuard_ACU> {
+    const api = TavernHelper_API_ACU as unknown as {
+        createWorldbookReadGuard?: () => Promise<LorebookReadGuard_ACU>;
+    } | undefined;
+    if (typeof api?.createWorldbookReadGuard !== 'function') {
+        throw new WorldbookHostApiUnavailableError_ACU('read_scope');
+    }
+    return api.createWorldbookReadGuard();
 }
 
 /**

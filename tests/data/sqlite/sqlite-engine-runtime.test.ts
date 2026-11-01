@@ -23,7 +23,7 @@ vi.mock('sql.js/dist/sql-wasm.js', () => ({
   default: h.initSqlJs,
 }));
 
-import { SqliteEngine } from '../../../src/data/sqlite/sqlite-engine';
+import { resetSqliteRuntimeCacheForTests_ACU, SqliteEngine } from '../../../src/data/sqlite/sqlite-engine';
 
 function fakeRuntime() {
   const dbInstances: any[] = [];
@@ -41,6 +41,7 @@ let runtime: ReturnType<typeof fakeRuntime>;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  resetSqliteRuntimeCacheForTests_ACU();
   runtime = fakeRuntime();
   h.initSqlJs.mockResolvedValue(runtime);
   // 注入构建期常量：真实读取 node_modules wasm 编码为 base64，
@@ -127,5 +128,26 @@ describe('SqliteEngine T5 运行时初始化收敛', () => {
     expect(h.initSqlJs).toHaveBeenCalledTimes(1);
     expect(runtime.dbInstances.length).toBe(2); // 两次 init 各建一个 db
     engine.dispose();
+  });
+
+  it('运行时为模块级单例：多个引擎实例只解码 wasm 并初始化 sql.js 一次', async () => {
+    const engines = [new SqliteEngine(), new SqliteEngine(), new SqliteEngine()];
+    await Promise.all(engines.map(engine => engine.init()));
+    const later = new SqliteEngine();
+    await later.loadFromBinary(new Uint8Array([7]));
+    expect(h.initSqlJs).toHaveBeenCalledTimes(1);
+    expect(runtime.dbInstances.length).toBe(4);
+    [...engines, later].forEach(engine => engine.dispose());
+  });
+
+  it('模块级初始化失败后，新实例可以重试成功', async () => {
+    h.initSqlJs.mockRejectedValueOnce(new Error('engine load fail'));
+    await expect(new SqliteEngine().init()).rejects.toThrow('sql.js 初始化失败');
+    h.initSqlJs.mockResolvedValue(runtime);
+    const retry = new SqliteEngine();
+    await expect(retry.init()).resolves.toBeUndefined();
+    expect(h.initSqlJs).toHaveBeenCalledTimes(2);
+    expect(retry.isReady).toBe(true);
+    retry.dispose();
   });
 });

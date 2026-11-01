@@ -21,13 +21,17 @@ vi.mock('../../../../src/data/gateways/character-gateway', () => ({
 }));
 
 vi.mock('../../../../src/data/gateways/worldbook-gateway', () => ({
+  createLorebookReadGuard_ACU: vi.fn(async () => async (_names?: string[]) => {}),
   getLorebookEntries_ACU: vi.fn(async () => []),
+  getLorebookEntriesRequired_ACU: (...args: any[]) => getLorebookEntries_ACU(...args as [string]),
+  listLorebooks_ACU: vi.fn(async () => ['book1']),
 }));
 
 vi.mock('../../../../src/service/worldbook/injection-engine', () => ({
   getIsolationPrefix_ACU: vi.fn(() => 'ACU_'),
 }));
 
+import { getLorebookEntries_ACU } from '../../../../src/data/gateways/worldbook-gateway';
 import {
   formatTableDataForLLM_ACU,
   formatOutlineTableForPlot_ACU,
@@ -124,13 +128,12 @@ describe('getSummaryIndexContentForPlot_ACU', () => {
     });
     expect(result).toBeNull();
   });
-  it('character 模式且 getCharLorebooks 失败时返回 null', async () => {
+  it('character 模式绑定读取失败时向上传播，不伪装成没有索引', async () => {
     const { getCharLorebooks_ACU } = await import('../../../../src/data/gateways/character-gateway');
     vi.mocked(getCharLorebooks_ACU).mockRejectedValue(new Error('fail'));
-    const result = await getSummaryIndexContentForPlot_ACU({
+    await expect(getSummaryIndexContentForPlot_ACU({
       plotWorldbookConfig: { source: 'character' },
-    });
-    expect(result).toBeNull();
+    })).rejects.toThrow('fail');
   });
   it('找到纪要索引条目时返回内容', async () => {
     const { getCharLorebooks_ACU } = await import('../../../../src/data/gateways/character-gateway');

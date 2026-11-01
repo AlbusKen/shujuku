@@ -683,7 +683,7 @@ function validateRumors_ACU(raw: unknown, actorIds: ReadonlySet<string>, phase: 
 
 function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU): WorldSimulationEnvelope_ACU['settings'] {
   if (!isRecord_ACU(raw)) fail_ACU('settings 必须是对象', phase, { path: 'settings' });
-  exactKeys_ACU(raw, ['autoTriggerEnabled', 'agentHistoryTokenBudget', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets'], ['agentPrompts', 'webResearch', 'promptForceDefaultVersion', 'planPreview', 'dynamics', 'workflow', 'projection', 'deliveryTarget', 'workflowMode', 'worldRoundPrompts'], 'settings', phase);
+  exactKeys_ACU(raw, ['autoTriggerEnabled', 'agentHistoryTokenBudget', 'agentReadTokenBudget', 'agentReadFallbackTokens', 'agentRunBudget', 'apiPresetMode', 'fixedApiPresetName', 'agentApiPresets'], ['agentPrompts', 'webResearch', 'promptForceDefaultVersion', 'planPreview', 'dynamics', 'workflow', 'projection', 'deliveryTarget', 'workflowMode', 'worldRoundPrompts', 'contentSafetyPromptBackup'], 'settings', phase);
   if (!isRecord_ACU(raw.agentRunBudget)) fail_ACU('settings.agentRunBudget 必须是对象', phase);
   exactKeys_ACU(raw.agentRunBudget, ['maxIterations', 'maxDelegations', 'maxSameAgent', 'maxConcurrent', 'maxReads', 'maxExtraReads'], [], 'settings.agentRunBudget', phase);
   const budget = {
@@ -713,6 +713,15 @@ function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU
   const worldRoundPrompts = validatedWorldRoundPrompts === undefined ? undefined
     : Object.fromEntries(Object.entries(validatedWorldRoundPrompts).filter(([role]) =>
       ['clock-recaller', 'world-simulator', 'world-event-analyst', 'actor-simulator', 'joint-reviewer'].includes(role))) as typeof validatedWorldRoundPrompts;
+  if (raw.contentSafetyPromptBackup !== undefined && typeof raw.contentSafetyPromptBackup !== 'string') {
+    fail_ACU('settings.contentSafetyPromptBackup 必须是字符串', phase);
+  }
+  // 本版不再读取 agentPrompts；存档里确有旧提示词时，丢弃前先留存原文。
+  const contentSafetyPromptBackup = raw.contentSafetyPromptBackup ?? (
+    isRecord_ACU(raw.agentPrompts) && Object.keys(raw.agentPrompts).length
+      ? JSON.stringify({ previousVersion: raw.promptForceDefaultVersion, agentPrompts: raw.agentPrompts })
+      : undefined
+  );
   const readBudget = typeof raw.agentReadTokenBudget === 'string'
     ? (/^(?:100|[1-9]?\d)%$/.test(raw.agentReadTokenBudget) ? raw.agentReadTokenBudget : fail_ACU('settings.agentReadTokenBudget 百分比非法', phase))
     : integer_ACU(raw.agentReadTokenBudget, 'settings.agentReadTokenBudget', phase, 1, 1000000);
@@ -783,6 +792,7 @@ function validateSettings_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU
     agentApiPresets,
     agentPrompts,
     ...(worldRoundPrompts === undefined ? {} : { worldRoundPrompts }),
+    ...(contentSafetyPromptBackup !== undefined ? { contentSafetyPromptBackup: contentSafetyPromptBackup as string } : {}),
     dynamics,
     workflow,
     projection,

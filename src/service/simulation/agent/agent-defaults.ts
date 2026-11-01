@@ -48,7 +48,9 @@ export const WORLD_SIMULATION_PROMPT_VERSION_V35_ACU = 'world-simulation-v35';
 export const WORLD_SIMULATION_PROMPT_VERSION_V36_ACU = 'world-simulation-v36';
 /** v37：本次更新一次性重置全部推演提示词，仅保留现役角色。 */
 export const WORLD_SIMULATION_PROMPT_VERSION_V37_ACU = 'world-simulation-qa-reset-v37';
-export const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V37_ACU;
+/** v38：首条身份加入内容禁令，一次性强制恢复全部推演默认提示词。 */
+export const WORLD_SIMULATION_PROMPT_VERSION_V38_ACU = 'world-simulation-content-safety-v38';
+export const WORLD_SIMULATION_PROMPT_VERSION_ACU = WORLD_SIMULATION_PROMPT_VERSION_V38_ACU;
 export const WORLD_SIMULATION_ENGINE_SEAMS_ACU = ['ROOT', 'ROLE_RULES', 'PROTOCOL', 'WORKFLOW', 'HISTORY', 'RUNTIME_CONTEXT', 'ACKNOWLEDGEMENT', 'EXECUTION_BOUNDARY'] as const;
 export type WorldSimulationEngineSeam_ACU = typeof WORLD_SIMULATION_ENGINE_SEAMS_ACU[number];
 export type WorldSimulationAgentPrompts_ACU = Record<WorldSimulationAgentName_ACU, WorldSimulationPromptSegment_ACU[]>;

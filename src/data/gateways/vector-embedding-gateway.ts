@@ -1,3 +1,4 @@
+import { runTakeoverRequest_ACU } from '../../shared/takeover-control';
 import { runWithAbortSignal_ACU } from '../../shared/abort-signal';
 
 export type VectorEmbeddingErrorKind_ACU =
@@ -216,7 +217,7 @@ async function requestEmbeddingsOnce_ACU(
     }
 }
 
-export async function createEmbeddings_ACU(request: VectorEmbeddingRequest_ACU): Promise<VectorEmbeddingResult_ACU[]> {
+async function createEmbeddingsImpl_ACU(request: VectorEmbeddingRequest_ACU): Promise<VectorEmbeddingResult_ACU[]> {
     request.signal?.throwIfAborted();
     const endpoint = String(request.endpoint || '').trim();
     const model = String(request.model || '').trim();
@@ -259,4 +260,8 @@ export async function createEmbeddings_ACU(request: VectorEmbeddingRequest_ACU):
         }
     }
     throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Embedding 请求失败'));
+}
+
+export function createEmbeddings_ACU(request: VectorEmbeddingRequest_ACU): Promise<VectorEmbeddingResult_ACU[]> {
+    return runTakeoverRequest_ACU(signal => createEmbeddingsImpl_ACU({ ...request, signal }), request.signal);
 }

@@ -111,7 +111,12 @@ describe('ApiPage', () => {
     const apiPanel = Array.from(page!.querySelectorAll<HTMLElement>('.acu-panel'))
       .find(panel => panel.querySelector('.acu-panel__title')?.textContent?.includes('API 预设'))!;
     expect(Array.from(page!.querySelectorAll<HTMLElement>('.acu-panel'))[0]).toBe(apiPanel);
-    expect(apiPanel.querySelector('.acu-toggle')).toBeNull();
+    // 面板里唯一的开关是预设级「API工具调用」；旧预设缺少该字段时按开启显示。
+    const panelToggles = apiPanel.querySelectorAll<HTMLButtonElement>('.acu-toggle');
+    expect(panelToggles).toHaveLength(1);
+    expect(panelToggles[0].dataset.acuApiContextToolToggle).toBe('1');
+    expect(panelToggles[0].getAttribute('aria-label')).toBe('API工具调用');
+    expect(panelToggles[0].getAttribute('aria-checked')).toBe('true');
     expect(apiPanel.querySelector('button[title="新建预设"]')).not.toBeNull();
     expect(apiPanel.querySelector('button[title="删除当前预设"]')).not.toBeNull();
     expect(document.body.textContent).not.toContain('管理 API 预设');

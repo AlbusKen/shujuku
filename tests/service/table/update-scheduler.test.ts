@@ -1,3 +1,4 @@
+import { setTakeoverRuntimeEnabled_ACU } from '../../../src/shared/takeover-control';
 /**
  * tests/service/table/update-scheduler.test.ts
  * 自动更新调度器单元测试
@@ -837,4 +838,15 @@ describe('自动填表计划级取消', () => {
     expect(requests).toEqual([]);
     expect(updating.mock.calls).toEqual([[true], [false]]);
   });
+});
+
+
+it('暂停时自动填表前置检查失败，原自动填表配置保持开启', () => {
+  const config = { autoUpdateEnabled: true };
+  setTakeoverRuntimeEnabled_ACU(false);
+  try {
+    expect(checkAutoUpdatePreConditions_ACU(config).canProceed).toBe(false);
+    expect(config.autoUpdateEnabled).toBe(true);
+  } finally { setTakeoverRuntimeEnabled_ACU(true); }
+  expect(checkAutoUpdatePreConditions_ACU(config).canProceed).toBe(true);
 });

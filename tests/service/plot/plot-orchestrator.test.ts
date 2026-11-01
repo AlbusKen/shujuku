@@ -5,13 +5,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { markPlotIntercept_ACU } from '../../../src/service/plot/plot-logic';
 
-const { mockSettings, mockLoopState, mockIsProcessing, mockSetIsProcessing, mockFlightModeActive, mockRunOptimization } = vi.hoisted(() => ({
+const { mockSettings, mockLoopState, mockIsProcessing, mockSetIsProcessing, mockFlightModeActive, mockRunOptimization, mockAbort } = vi.hoisted(() => ({
   mockSettings: { plotSettings: { enabled: true } } as any,
   mockLoopState: { isLooping: false, isRetrying: false, awaitingReply: false } as any,
   mockIsProcessing: false,
   mockSetIsProcessing: vi.fn(),
   mockFlightModeActive: vi.fn(() => false),
   mockRunOptimization: vi.fn(),
+  mockAbort: vi.fn(),
 }));
 
 vi.mock('../../../src/service/runtime/state-manager', () => ({
@@ -19,7 +20,7 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   loopState_ACU: mockLoopState,
   get isProcessing_Plot_ACU() { return mockIsProcessing; },
   _set_isProcessing_Plot_ACU: mockSetIsProcessing,
-  abortController_ACU: null,
+  abortController_ACU: { abort: mockAbort },
 }));
 
 vi.mock('../../../src/service/plot/plot-logic', () => ({
@@ -54,7 +55,9 @@ vi.mock('../../../src/shared/notice-hub', () => ({
 }));
 vi.mock('../../../src/presentation/theme/toast', () => ({ showToastr_ACU: vi.fn() }));
 
-import { runOptimizationLogicWithUI_ACU } from '../../../src/presentation/components/plot-planning-ui';
+import { abortActivePlotPlanning_ACU, runOptimizationLogicWithUI_ACU } from '../../../src/presentation/components/plot-planning-ui';
+import { beginNoticeTask_ACU } from '../../../src/shared/notice-hub';
+import { logDebug_ACU } from '../../../src/shared/utils';
 
 import {
   shouldProcessTavernHelperHook_ACU,
@@ -188,14 +191,13 @@ describe('orchestrateTavernHelperHook_ACU', () => {
     expect(markPlotIntercept_ACU).not.toHaveBeenCalled();
     runPlanning.mockClear();
     const options = { user_input: '用户输入', prompt: '提示词', injects: [{ content: '注入内容' }] };
-    expect(await orchestrateTavernHelperHook_ACU(options, runPlanning, true)).toEqual({
-      action: 'planned', finalMessage: '规划结果', writeBack: { target: 'injects', value: '规划结果' },
+    expect(await orchestrateTavernHelperHook_ACU(options, runPlanning)).toEqual({
+      action: 'planned', finalMessage: '规划结果', writeBack: { target: 'user_input', value: '规划结果' },
     });
-    expect(runPlanning).toHaveBeenLastCalledWith('注入内容', {
-      originalUserInput: '注入内容', hasExistingUserMessage: false, unmaskedCompatibility: true,
+    expect(runPlanning).toHaveBeenLastCalledWith('用户输入', {
+      originalUserInput: '用户输入', hasExistingUserMessage: false,
     });
-    expect(markPlotIntercept_ACU).toHaveBeenCalledExactlyOnceWith('注入内容');
-    expect(markPlotIntercept_ACU).toHaveBeenCalledBefore(runPlanning as any);
+    expect(markPlotIntercept_ACU).not.toHaveBeenCalled();
   });
   it('未启用时透传', async () => {
     mockSettings.plotSettings.enabled = false;
@@ -225,16 +227,13 @@ describe('orchestrateTavernHelperHook_ACU', () => {
     expect(result.action).toBe('loop_retry');
   });
   it('已进入规划后异常或没有最终提示词均返回 failed', async () => {
-    for (const [runPlanning, compatibleAction] of [
-      [vi.fn().mockRejectedValue(new Error('规划失败')), 'passthrough'],
-      [vi.fn().mockResolvedValue(null), 'passthrough'],
-      [vi.fn().mockResolvedValue('   '), 'planned'],
-    ] as const) {
+    for (const runPlanning of [
+      vi.fn().mockRejectedValue(new Error('规划失败')),
+      vi.fn().mockResolvedValue(null),
+      vi.fn().mockResolvedValue('   '),
+    ]) {
       const result = await orchestrateTavernHelperHook_ACU({ user_input: '继续' }, runPlanning);
       expect(result.action).toBe('failed');
-      const compatible = await orchestrateTavernHelperHook_ACU({ user_input: '继续' }, runPlanning, true);
-      expect(compatible.action).toBe(compatibleAction);
-      if (compatibleAction === 'planned') expect(compatible.finalMessage).toBe('   ');
     }
   });
 });
@@ -249,14 +248,8 @@ describe('orchestrateAfterCommandsStrategy1_ACU', () => {
     expect(result.finalMessage).toBe('规划结果');
     expect(result.lastMessageIndex).toBe(5);
     expect((msg as any)._plot_processed).toBeUndefined();
-    const compatible = { is_user: true, mes: '你好' } as any;
-    expect(await orchestrateAfterCommandsStrategy1_ACU(compatible, 5, runPlanning, true)).toMatchObject({
-      action: 'planned', finalMessage: '规划结果', originalMessage: '你好', lastMessageIndex: 5,
-    });
-    expect(compatible._plot_processed).toBe(true);
-    expect(compatible._qrf_plot_pending_hash).toBe('hash_你好');
     expect(runPlanning).toHaveBeenLastCalledWith('你好', {
-      originalUserInput: '你好', hasExistingUserMessage: true, unmaskedCompatibility: true,
+      originalUserInput: '你好', hasExistingUserMessage: true,
     });
   });
   it('非用户消息返回 no_match', async () => {
@@ -270,23 +263,15 @@ describe('orchestrateAfterCommandsStrategy1_ACU', () => {
     expect(result.action).toBe('aborted');
     expect(result.manual).toBe(true);
     expect((msg as any)._plot_processed).toBeUndefined();
-    for (const [run, compatibleProcessed] of [
-      [vi.fn().mockResolvedValue(null), true],
-      [vi.fn().mockRejectedValue(new Error('失败')), undefined],
-    ] as const) {
+    for (const run of [
+      vi.fn().mockResolvedValue(null),
+      vi.fn().mockRejectedValue(new Error('失败')),
+    ]) {
       expect(await orchestrateAfterCommandsStrategy1_ACU(msg, 5, run)).toMatchObject({
         action: 'failed', originalMessage: '你好', lastMessageIndex: 5,
       });
       expect((msg as any)._plot_processed).toBeUndefined();
-      const compatible = { is_user: true, mes: '你好' } as any;
-      expect(await orchestrateAfterCommandsStrategy1_ACU(compatible, 5, run, true)).toEqual({ action: 'no_match' });
-      expect(compatible._plot_processed).toBe(compatibleProcessed);
     }
-    const compatible = { is_user: true, mes: '你好' } as any;
-    expect(await orchestrateAfterCommandsStrategy1_ACU(compatible, 5, runPlanning, true)).toMatchObject({
-      action: 'aborted', manual: true, restoreText: '你好', originalMessage: '你好',
-    });
-    expect(compatible._plot_processed).toBe(true);
   });
 });
 
@@ -350,33 +335,33 @@ describe('orchestrateAfterCommandsStrategy2_ACU', () => {
     mockRunOptimization.mockRejectedValueOnce(new Error('意外异常'));
     expect(await orchestrateAfterCommandsStrategy2_ACU('继续', runOptimizationLogicWithUI_ACU))
       .toMatchObject({ action: 'failed', blocked: true });
-    for (const errorType of ['exception', 'worldbook_preflight_failure', 'stage_failure', 'all_failed', 'no_tasks', 'api_retries_exhausted']) {
+    for (const errorType of ['exception', 'worldbook_preflight_failure', 'stage_failure', 'all_failed', 'api_retries_exhausted']) {
       mockRunOptimization.mockResolvedValue({ success: false, blocked: true, apiRetriesExhausted: errorType === 'api_retries_exhausted', errorType });
-      expect(await orchestrateTavernHelperHook_ACU({ user_input: '继续' }, runOptimizationLogicWithUI_ACU, true))
-        .toEqual({ action: 'passthrough' });
-      expect(await orchestrateAfterCommandsStrategy1_ACU({ is_user: true, mes: '继续' }, 0, runOptimizationLogicWithUI_ACU, true))
-        .toEqual({ action: 'no_match' });
-      expect(await orchestrateAfterCommandsStrategy2_ACU('继续', runOptimizationLogicWithUI_ACU, true))
-        .toEqual({ action: 'skip' });
-      expect(mockRunOptimization).toHaveBeenLastCalledWith('继续', expect.objectContaining({ unmaskedCompatibility: true }));
+      for (const call of [
+        () => orchestrateTavernHelperHook_ACU({ user_input: '继续' }, runOptimizationLogicWithUI_ACU),
+        () => orchestrateAfterCommandsStrategy1_ACU({ is_user: true, mes: '继续' }, 0, runOptimizationLogicWithUI_ACU),
+        () => orchestrateAfterCommandsStrategy2_ACU('继续', runOptimizationLogicWithUI_ACU),
+      ]) {
+        expect(await call()).toEqual({ action: 'failed', blocked: true, apiRetriesExhausted: errorType === 'api_retries_exhausted' });
+      }
     }
     mockRunOptimization.mockResolvedValue({ success: true, hasPartialFailure: true, finalMessage: '部分成功结果', successCount: 1, enabledTaskCount: 2 });
-    expect(await orchestrateAfterCommandsStrategy2_ACU('继续', runOptimizationLogicWithUI_ACU, true))
-      .toEqual({ action: 'planned', finalMessage: '部分成功结果' });
+    expect(await orchestrateAfterCommandsStrategy2_ACU('继续', runOptimizationLogicWithUI_ACU))
+      .toMatchObject({ action: 'failed', blocked: true });
     for (const reason of ['disabled', 'retrying', 'inflight']) {
       mockRunOptimization.mockResolvedValue({ success: false, skipped: true, reason });
-      expect(await orchestrateAfterCommandsStrategy1_ACU({ is_user: true, mes: '继续' }, 0, runOptimizationLogicWithUI_ACU, true))
-        .toEqual({ action: reason === 'inflight' ? 'skipped' : 'no_match' });
-      expect(await orchestrateAfterCommandsStrategy2_ACU('继续', runOptimizationLogicWithUI_ACU, true))
-        .toEqual({ action: 'skip' });
+      expect(await orchestrateAfterCommandsStrategy1_ACU({ is_user: true, mes: '继续' }, 0, runOptimizationLogicWithUI_ACU))
+        .toEqual({ action: reason === 'inflight' ? 'busy' : 'passthrough' });
+      expect(await orchestrateAfterCommandsStrategy2_ACU('继续', runOptimizationLogicWithUI_ACU))
+        .toEqual({ action: reason === 'inflight' ? 'busy' : 'skip' });
     }
     mockRunOptimization.mockRejectedValue(new Error('意外异常'));
-    expect(await orchestrateTavernHelperHook_ACU({ user_input: '继续' }, runOptimizationLogicWithUI_ACU, true))
-      .toEqual({ action: 'passthrough' });
-    expect(await orchestrateAfterCommandsStrategy1_ACU({ is_user: true, mes: '继续' }, 0, runOptimizationLogicWithUI_ACU, true))
-      .toEqual({ action: 'no_match' });
-    expect(await orchestrateAfterCommandsStrategy2_ACU('继续', runOptimizationLogicWithUI_ACU, true))
-      .toEqual({ action: 'skip' });
+    expect(await orchestrateTavernHelperHook_ACU({ user_input: '继续' }, runOptimizationLogicWithUI_ACU))
+      .toMatchObject({ action: 'failed', blocked: true });
+    expect(await orchestrateAfterCommandsStrategy1_ACU({ is_user: true, mes: '继续' }, 0, runOptimizationLogicWithUI_ACU))
+      .toMatchObject({ action: 'failed', blocked: true });
+    expect(await orchestrateAfterCommandsStrategy2_ACU('继续', runOptimizationLogicWithUI_ACU))
+      .toMatchObject({ action: 'failed', blocked: true });
   });
   it('用户中止返回 aborted', async () => {
     const runPlanning = vi.fn().mockResolvedValue({ aborted: true, manual: true });
@@ -390,5 +375,41 @@ describe('orchestrateAfterCommandsStrategy2_ACU', () => {
       const result = await orchestrateAfterCommandsStrategy2_ACU('继续', runPlanning);
       expect(result.action).toBe('failed');
     }
+  });
+});
+
+describe('剧情规划中止来源与任务生命周期', () => {
+  it.each(['task_action', 'host_stop', 'takeover_paused'] as const)('%s 只中止当前任务并准确记录来源', async source => {
+    let complete!: (value: any) => void;
+    mockRunOptimization.mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+    const pending = runOptimizationLogicWithUI_ACU('本轮原文');
+    const action = vi.mocked(beginNoticeTask_ACU).mock.calls.at(-1)![1]!.action!;
+    expect(mockAbort).not.toHaveBeenCalled();
+    if (source === 'task_action') await action.run();
+    else expect(abortActivePlotPlanning_ACU(source)).toBe(true);
+    expect(mockAbort).toHaveBeenCalledOnce();
+    expect(logDebug_ACU).toHaveBeenCalledExactlyOnceWith('[剧情推进] 收到规划中止请求。', { source });
+    complete({ success: true, finalMessage: '迟到结果', successCount: 1 });
+    await expect(pending).resolves.toEqual({ aborted: true, manual: true, restoreText: '本轮原文' });
+    expect(abortActivePlotPlanning_ACU()).toBe(false);
+    await action.run();
+    expect(mockAbort).toHaveBeenCalledOnce();
+  });
+
+  it('已结束任务的旧操作不能中止新规划', async () => {
+    mockRunOptimization.mockResolvedValueOnce({ success: true, finalMessage: '第一轮结果', successCount: 1 });
+    await expect(runOptimizationLogicWithUI_ACU('第一轮')).resolves.toBe('第一轮结果');
+    const staleAction = vi.mocked(beginNoticeTask_ACU).mock.calls.at(-1)![1]!.action!;
+    let complete!: (value: any) => void;
+    mockRunOptimization.mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+    const pending = runOptimizationLogicWithUI_ACU('第二轮');
+    await staleAction.run();
+    expect(mockAbort).not.toHaveBeenCalled();
+    expect(logDebug_ACU).not.toHaveBeenCalled();
+    expect(abortActivePlotPlanning_ACU()).toBe(true);
+    expect(mockAbort).toHaveBeenCalledOnce();
+    complete({ success: false, aborted: true, manual: true });
+    await expect(pending).resolves.toEqual({ aborted: true, manual: true, restoreText: '第二轮' });
+    expect(abortActivePlotPlanning_ACU()).toBe(false);
   });
 });

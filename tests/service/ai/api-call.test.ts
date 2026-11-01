@@ -39,6 +39,7 @@ vi.mock('../../../src/data/gateways/ai-gateway', () => ({
   getHostRequestHeaders_ACU: mockGetHeaders,
   getConnectionManagerProfiles_ACU: mockGetProfiles,
   triggerSlash_ACU: mockTriggerSlash,
+  triggerSlashBypassTakeover_ACU: mockTriggerSlash,
   // 宿主通道工具能力默认不可用：既有用例覆盖非 Chat Completion 时的 fail-closed 行为。
   isConnectionProfileChatCompletion_ACU: vi.fn(() => false),
   isMainApiChatCompletionAvailable_ACU: vi.fn(() => false),
@@ -75,6 +76,7 @@ import { agentNativeTools_ACU } from '../../../src/service/ai/native-tool';
 import { getAgentSubagentAccessProfile_ACU } from '../../../src/service/continuation/agent/agent-catalog';
 import { worldSimulationAgentNativeTools_ACU } from '../../../src/service/simulation/agent/agent-catalog';
 import { isMainApiChatCompletionAvailable_ACU, sendMainApiChatCompletionRequest_ACU } from '../../../src/data/gateways/ai-gateway';
+import { withLiveCurrentChannel_ACU } from '../../../src/service/settings/live-current-channel';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -265,6 +267,22 @@ describe('callAIWithPreset_ACU', () => {
     expect(error.message).toBe('API请求失败: 429 rate limited');
     expect(isRetryableAiRequestError_ACU(new AgentApiHttpError_ACU(429, 'rate limited'))).toBe(true);
     expect(isRetryableAiRequestError_ACU(new AgentApiHttpError_ACU(401, 'unauthorized'))).toBe(false);
+  });
+
+  it.each([
+    ['浏览器 fetch 失败', new TypeError('Failed to fetch'), true],
+    ['Safari fetch 失败', new TypeError('Load failed'), true],
+    ['undici 连接中断', new TypeError('terminated'), true],
+    ['cause 带连接拒绝码', Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('connect'), { code: 'ECONNREFUSED' }) }), true],
+    ['顶层带 DNS 错误码', Object.assign(new Error('getaddrinfo failed'), { code: 'ENOTFOUND' }), true],
+    ['消息里只有 ECONNREFUSED', new Error('connect ECONNREFUSED 127.0.0.1:5001'), true],
+    ['消息里只有 EAI_AGAIN', new Error('getaddrinfo EAI_AGAIN api.example.com'), true],
+    ['程序错误 TypeError', new TypeError('x is not a function'), false],
+    ['读取 undefined 属性', new TypeError("Cannot read properties of undefined (reading 'map')"), false],
+    ['用户中止', new DOMException('请求已取消', 'AbortError'), false],
+    ['请求超时', Object.assign(new Error('API 请求超时（300 秒）'), { name: 'TimeoutError' }), true],
+  ])('瞬时故障判定：%s → %s', (_label, error, expected) => {
+    expect(isRetryableAiRequestError_ACU(error)).toBe(expected);
   });
 
   it('指定预设名使用对应预设', async () => {
@@ -645,11 +663,13 @@ describe('buildCustomApiRequestBody_ACU', () => {
     expect(body).not.toHaveProperty('parallel_tool_calls');
   });
 
-  it('overrides.responseFormat 作为结构化对象注入 custom_include_body', () => {
-    const responseFormat = {
+  it.each([
+    {
       type: 'json_schema',
       json_schema: { name: 'table_edit_ops_response', strict: true, schema: { type: 'object' } },
-    };
+    },
+    { type: 'json_object' },
+  ])('overrides.responseFormat ($type) 作为结构化对象注入 custom_include_body', (responseFormat) => {
     const body = buildCustomApiRequestBody_ACU(
       [{ role: 'user', content: 'test' }],
       { url: 'https://api.example.com', model: 'gpt-4' },
@@ -660,11 +680,13 @@ describe('buildCustomApiRequestBody_ACU', () => {
     expect(body).not.toHaveProperty('response_format');
   });
 
-  it('overrides.responseFormat 与 YAML mapping 共存时按对象语义合并', () => {
-    const responseFormat = { type: 'json_schema', json_schema: { name: 'x', strict: true, schema: {} } };
+  it.each([
+    { type: 'json_schema', json_schema: { name: 'x', strict: true, schema: {} } },
+    { type: 'json_object' },
+  ])('overrides.responseFormat ($type) 与 YAML mapping 共存时覆盖同名字段', (responseFormat) => {
     const body = buildCustomApiRequestBody_ACU(
       [{ role: 'user', content: 'test' }],
-      { url: 'https://api.example.com', model: 'gpt-4', bodyParams: 'temperature: 0.3' },
+      { url: 'https://api.example.com', model: 'gpt-4', bodyParams: 'temperature: 0.3\nresponse_format:\n  type: text' },
       { responseFormat },
     );
     expect(parse(body.custom_include_body)).toEqual({ temperature: 0.3, response_format: responseFormat });
@@ -986,6 +1008,34 @@ describe('剧情 API 传输路由', () => {
       expect(sendMainApiChatCompletionRequest_ACU).toHaveBeenCalledTimes(expected === 'main-chat-completion' ? 1 : 0);
       expect(mockFetch).toHaveBeenCalledTimes(expected === 'custom' ? 1 : 0);
     }
+  });
+});
+
+describe('解析渠道的请求级快照', () => {
+  it.each(['text', 'tools'] as const)('%s 请求只读取一次配置，超时与实际请求使用同一份参数', async kind => {
+    const apiConfig = {
+      sendViaTavern: true, url: 'https://snapshot.example/v1', model: 'snapshot-model',
+      apiKey: '', useMainApi: false, max_tokens: 222, temperature: 0,
+      bodyParams: '', excludeBodyParams: '', requestHeaders: '',
+    };
+    const readChannel = vi.fn(() => ({ apiMode: 'custom' as const, apiConfig, tavernProfile: '' }));
+    const preset = withLiveCurrentChannel_ACU(readChannel(), readChannel);
+    readChannel.mockClear();
+    mockHandleApiResponse.mockResolvedValue('reply');
+    mockFetch.mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: 'reply' } }] })));
+
+    const operation = kind === 'text'
+      ? callAIWithResolvedPreset_ACU([{ role: 'user', content: 'snapshot' }], preset)
+      : callAIChatTurn_ACU([{ role: 'user', content: 'snapshot' }], preset);
+    // 请求入口已捕获配置；异步发送前改动原对象也不能混入本次请求。
+    apiConfig.url = 'https://later.example/v1';
+    apiConfig.model = 'later-model';
+    apiConfig.max_tokens = 999;
+    await operation;
+
+    expect(readChannel).toHaveBeenCalledTimes(3);
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body).toMatchObject({ custom_url: 'https://snapshot.example/v1', model: 'snapshot-model', max_tokens: 222 });
   });
 });
 
@@ -1363,6 +1413,18 @@ describe('直连接口协议适配', () => {
     for (const format of ['openai_responses', 'claude_messages', 'gemini_interactions'] as const) {
       expect(normalizeProviderReply_ACU({}, format).choices[0].finish_reason).toBeNull();
     }
+  });
+
+  it('原生回复为上游错误对象时保留 type / code / message，便于日志分类', async () => {
+    const { normalizeProviderReply_ACU } = await import('../../../src/service/ai/custom-api-protocol');
+    expect(() => normalizeProviderReply_ACU({ type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } }, 'claude_messages'))
+      .toThrow('直连 API 返回上游错误（type=overloaded_error）：Overloaded');
+    expect(() => normalizeProviderReply_ACU({ error: { code: 429, status: 'RESOURCE_EXHAUSTED', message: 'Quota exceeded' } }, 'gemini_interactions'))
+      .toThrow('直连 API 返回上游错误（type=RESOURCE_EXHAUSTED, code=429）：Quota exceeded');
+    expect(() => normalizeProviderReply_ACU({ status: 'failed' }, 'openai_responses'))
+      .toThrow('直连 API 返回上游错误（status=failed）。');
+    expect(() => normalizeProviderReply_ACU({ error: 'x'.repeat(400) }, 'openai_responses'))
+      .toThrow(`直连 API 返回上游错误：${'x'.repeat(300)}…`);
   });
 });
 

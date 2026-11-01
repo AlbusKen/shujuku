@@ -58,6 +58,7 @@ vi.mock('../../../src/data/gateways/worldbook-gateway', async (importOriginal) =
   const actual = await importOriginal<typeof import('../../../src/data/gateways/worldbook-gateway')>();
   return {
     ...actual,
+    createLorebookReadGuard_ACU: vi.fn(async () => async (_names?: string[]) => {}),
     listLorebooks_ACU: (...args: any[]) => mockLorebookList(...args),
     getLorebookEntries_ACU: (...args: any[]) => mockLorebookEntries(...args),
   };
@@ -804,7 +805,7 @@ describe('prepareAIInput_ACU — 显式 tableData 模式', () => {
     );
   });
 
-  it('hydration 失败时继续准备填表输入，并以空签名让管线退化 live', async () => {
+  it('hydration 失败时阻断填表输入准备，不退化为空资料', async () => {
     const explicitTableData = {
       sheet_0: {
         uid: 'sheet_0',
@@ -815,15 +816,7 @@ describe('prepareAIInput_ACU — 显式 tableData 模式', () => {
     };
     mockResolvePreTakeoverSnapshot.mockRejectedValue(new Error('snapshot unavailable'));
 
-    await expect(prepareAIInput_ACU([], 'standard', null, { tableData: explicitTableData })).resolves.toBeTruthy();
-
-    expect(getCombinedWorldbookContent_ACU).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.objectContaining({
-        entryStateView: 'pre_takeover',
-        entryStateSnapshot: undefined,
-        entryStateSnapshotSignature: '',
-      }),
-    );
+    await expect(prepareAIInput_ACU([], 'standard', null, { tableData: explicitTableData })).rejects.toThrow('snapshot unavailable');
+    expect(getCombinedWorldbookContent_ACU).not.toHaveBeenCalled();
   });
 });

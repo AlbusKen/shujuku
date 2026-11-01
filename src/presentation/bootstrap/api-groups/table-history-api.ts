@@ -1,9 +1,12 @@
-import { getChatArray_ACU } from '../../../data/gateways/chat-gateway';
+import { getChatArray_ACU } from '../../../service/chat/chat-service';
 import { SillyTavern_API_ACU } from '../../../shared/host-api';
 import type { TableDataObject_ACU } from '../../../shared/models/table-data';
 import { getCurrentIsolationKey_ACU } from '../../../service/runtime/state-manager';
 import { loadTableStatesAtBoundariesFromFramesV2Detailed_ACU, V2ReplayOperationError_ACU, type V2ReplayOperationFailurePoint_ACU } from '../../../service/table/storage-frame-v2-replay';
 import { computeReplayHeadRevisionDigest_ACU } from '../../../service/table/v2-replay-session';
+
+/** 公共历史读取的主线程让步预算（毫秒），与保存链回放同口径。 */
+const PUBLIC_HISTORY_REPLAY_YIELD_BUDGET_MS_ACU = 8;
 
 export type PublicTableHistoryResult_ACU =
     | { success: true; snapshots: Array<{ messageIndex: number; data: TableDataObject_ACU }> }
@@ -62,12 +65,15 @@ export function createTableHistoryApi(): Record<string, Function> {
             try {
                 // 批量回放只读取到最大请求索引，避免后续损坏帧阻断更早的有效快照。
                 // 原始存储字段比对同时覆盖对象与生产读取口支持的 JSON 字符串格式。
+                // 无帧楼层按此前最后一个帧参与同一次前向回放，避免整批退回逐层冷回放；
+                // 让出预算与保存链同口径，长回放期间不连续占用主线程。
                 const lastIndex = indices.reduce((maximum, index) => Math.max(maximum, index), 0);
                 const states = await loadTableStatesAtBoundariesFromFramesV2Detailed_ACU(chat.slice(0, lastIndex + 1), isolationKey, indices, {
                     updateRuntimeState: false,
                     compatibilityMode: 'disabled',
                     allowTemporaryTemplateBaseline: false,
-                });
+                    yieldBudgetMs: PUBLIC_HISTORY_REPLAY_YIELD_BUDGET_MS_ACU,
+                }, { inheritFramelessBoundaries: true });
                 if (!isCurrent()) return stale();
                 const snapshots = indices.map(messageIndex => {
                     const state = states.get(messageIndex);

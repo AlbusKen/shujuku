@@ -155,6 +155,7 @@ vi.mock('../../../src/shared/defaults', () => ({
   TABLE_FILL_PROMPT_FORCE_DEFAULT_VERSION_ACU: 'test-prompt-force-default',
   TABLE_FILL_TOOL_PROMPT_UPGRADE_VERSION_ACU: 'test-table-fill-tool-prompt-upgrade',
   TABLE_FILL_TOOL_DEFAULT_OFF_VERSION_ACU: 'test-table-fill-tool-default-off',
+  API_PRESET_CONTEXT_TOOL_BACKFILL_VERSION_ACU: 'test-api-preset-context-tool-backfill',
   TEMPLATE_ASSISTANT_PROMPT_FORCE_DEFAULT_VERSION_ACU: 'test-template-assistant-prompt-force-default',
   STRICT_JSON_TABLE_FILL_FORCE_DISABLE_VERSION_ACU: 'test-strict-json-force-disable',
   STREAMING_FORCE_DISABLE_VERSION_ACU: 'test-streaming-force-disable',
@@ -167,6 +168,8 @@ vi.mock('../../../src/shared/defaults', () => ({
   USER_PREFILL_PROFILE_FORCE_DEFAULT_VERSION_ACU: 'test-user-prefill-profile-force-default',
   USER_PREFILL_VECTOR_FORCE_DEFAULT_VERSION_ACU: 'test-user-prefill-vector-force-default',
   CREATIVE_IDENTITY_PROMPT_UPGRADE_VERSION_ACU: 'spv9.6-creative-identity-prompt',
+  CONTENT_SAFETY_PROMPT_FORCE_DEFAULT_VERSION_ACU: 'test-content-safety-default-prompts',
+  CONTENT_SAFETY_PLOT_PRESET_RESTORE_VERSION_ACU: 'test-content-safety-plot-preset-restore',
 
   defaultWorldbookConfig_ACU: {
     zeroTkOccupyMode: false,
@@ -187,6 +190,7 @@ vi.mock('../../../src/shared/defaults', () => ({
     summaryIndexV2WriteEnabled: true,
     summaryIndexV2WriteScopeAllowlist: [],
     summaryPromptGroup: [],
+    keywordPromptGroup: [],
     keywordGenerationEnabled: true,
     rerankBatchSize: 300,
     summaryIndexChunkChronicleBySentence: false,
@@ -246,6 +250,10 @@ vi.mock('../../../src/data/storage/tavern-storage', () => ({
   ensureConfigIdbCacheLoaded_ACU: mockEnsureConfigIdbCacheLoaded,
   getConfigStorage_ACU: mockGetConfigStorage,
   initTavernSettingsBridge_ACU: mockInitTavernSettingsBridge,
+  isTavernBridgeInitSettled_ACU: vi.fn(() => true),
+  isConfigLoadBackendStale_ACU: vi.fn(() => false),
+  markConfigLoadBackend_ACU: vi.fn(),
+  setConfigBackendStaleHandler_ACU: vi.fn(),
   migrateKeyToTavernStorageIfNeeded_ACU: mockMigrateKeyToTavernStorage,
   pendingSettingsReloadFromIdb_ACU: false,
   _set_pendingSettingsReloadFromIdb_ACU: mockSetPendingSettingsReloadFromIdb,
@@ -326,6 +334,8 @@ beforeEach(() => {
   mockGetConfigStorage.mockReset().mockReturnValue(undefined);
   mockIsIndexedDbAvailable.mockReset().mockReturnValue(false);
   mockPersistSettingsToStorage.mockReset().mockReturnValue(true);
+  delete mockSettings.contentSafetyPromptForceDefaultVersion;
+  delete mockSettings.contentSafetyPromptBackup;
   delete mockSettings.apiConfig;
   delete mockSettings.apiPresets;
   delete mockSettings.apiPostProcessingUpgradeVersion;
@@ -866,6 +876,7 @@ describe('loadSettings_ACU', () => {
       autoUpdateEnabled: false,
       customField: '自定义值',
       userPrefillProfileForceDefaultVersion: 'test-user-prefill-profile-force-default',
+      contentSafetyPromptForceDefaultVersion: 'test-content-safety-default-prompts',
       creativeIdentityPromptUpgradeVersion: 'spv9.6-creative-identity-prompt',
       plotSettings: {
         enabled: true,
@@ -909,6 +920,7 @@ describe('loadSettings_ACU', () => {
   it('当前 defaults marker 下仍补齐缺失的 V2 rollout 字段并持久化，不触发关键词默认值覆盖', () => {
     mockGlobalMeta.vectorMemoryConfigGlobal = {
       defaultsRefreshVersion: 'spv3.6.3-keyword-prompt-content-based-refresh',
+      contentSafetyPromptForceDefaultVersion: 'test-content-safety-default-prompts',
       keywordPromptGroup: [{ content: '用户自定义关键词提示词' }],
     };
 
@@ -924,6 +936,7 @@ describe('loadSettings_ACU', () => {
     mockGlobalMeta.vectorMemoryConfigGlobal = {
       defaultsRefreshVersion: 'spv3.6.3-keyword-prompt-content-based-refresh',
       minScore: 0.45,
+      contentSafetyPromptForceDefaultVersion: 'test-content-safety-default-prompts',
       keywordPromptGroup: [{ content: '用户自定义关键词提示词' }],
     };
 
@@ -982,6 +995,7 @@ describe('loadSettings_ACU', () => {
       vectorNamespace: 'my-space',
       keywordApiPreset: 'kw-preset',
       keywordGenerationEnabled: false,
+      contentSafetyPromptForceDefaultVersion: 'test-content-safety-default-prompts',
       keywordPromptGroup: [{ content: '用户自定义关键词提示词' }],
     };
 
@@ -1220,6 +1234,7 @@ describe('loadSettings_ACU', () => {
   it('已记录强制恢复版本时不再改写用户后续自定义提示词', () => {
     mockReadProfileSettings.mockReturnValue({
       tableFillPromptForceDefaultVersion: 'test-prompt-force-default',
+      contentSafetyPromptForceDefaultVersion: 'test-content-safety-default-prompts',
       charCardPrompt: [{ role: 'USER', content: '迁移后再次自定义' }],
     });
 
@@ -1250,6 +1265,7 @@ describe('loadSettings_ACU', () => {
     ];
     mockReadProfileSettings.mockReturnValue({
       templateAssistantPromptForceDefaultVersion: 'test-template-assistant-prompt-force-default',
+      contentSafetyPromptForceDefaultVersion: 'test-content-safety-default-prompts',
       templateAssistantPromptSegments: customized,
     });
 

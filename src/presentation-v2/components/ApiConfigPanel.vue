@@ -56,6 +56,10 @@
           <AcuInput v-model="activeDraft.requestTimeoutSeconds" type="number" :min="1" :step="1" />
         </AcuFormRow>
 
+        <AcuFormRow label="API工具调用">
+          <AcuToggle v-model="activeDraft.contextToolTransportEnabled" aria-label="API工具调用" data-acu-api-context-tool-toggle="1" />
+        </AcuFormRow>
+
         <template v-if="activeConnectionMode === 'custom'">
           <AcuFormRow label="通过酒馆渠道发送" hint="默认开启，由酒馆后端转发；关闭后由插件直连预设端点，需端点允许跨域。运行日志可检查实际渠道，分享前请检查隐私。">
             <AcuToggle v-model="activeDraft.sendViaTavern" aria-label="通过酒馆渠道发送" />
@@ -219,13 +223,11 @@ import {
   applyConnectionMode,
   connectionModeFromDraft,
   createEmptyApiPresetDraft,
+  setApiPresetDraftPromptPostProcessing,
+  setApiPresetDraftCustomApiFormat,
   type ApiPresetDraft,
   type ConnectionMode,
 } from "../composables/useApiPresetManagement";
-import {
-  normalizeCustomApiFormat_ACU,
-  normalizePromptPostProcessing_ACU,
-} from "../../service/settings/api-preset-service";
 import { useUiCloseGuard } from "../composables/useUiCloseGuard";
 import { apiCopy } from "../copy/api-copy";
 import {
@@ -423,13 +425,12 @@ function setActiveConnectionMode(value: string): void {
 }
 
 function setPromptPostProcessing(value: string): void {
-  activeDraft.promptPostProcessing =
-    normalizePromptPostProcessing_ACU(value);
+  setApiPresetDraftPromptPostProcessing(activeDraft, value);
   activeDraftSavedAt.value = null;
 }
 
 function setCustomApiFormat(value: string): void {
-  activeDraft.customApiFormat = normalizeCustomApiFormat_ACU(value);
+  setApiPresetDraftCustomApiFormat(activeDraft, value);
   activeDraftSavedAt.value = null;
 }
 

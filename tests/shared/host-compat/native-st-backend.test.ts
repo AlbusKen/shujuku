@@ -4,11 +4,14 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const { mockLogWarn, mockLogDebug } = vi.hoisted(() => ({
+const { mockLogWarn, mockLogDebug, mockHost, mockWorldInfoModule } = vi.hoisted(() => ({
   mockLogWarn: vi.fn(),
   mockLogDebug: vi.fn(),
+  mockHost: {} as any,
+  mockWorldInfoModule: {} as any,
 }));
 
+vi.mock('../../../src/shared/runtime-env', () => ({ getHostWindow: () => mockHost }));
 vi.mock('../../../src/shared/utils', () => ({
   logWarn_ACU: mockLogWarn,
   logDebug_ACU: mockLogDebug,
@@ -38,6 +41,19 @@ const originalFetch = globalThis.fetch;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  Object.keys(mockHost).forEach(key => delete mockHost[key]);
+  Object.keys(mockWorldInfoModule).forEach(key => delete mockWorldInfoModule[key]);
+  Object.assign(mockWorldInfoModule, { world_names: ['书'], world_info: {} });
+  globalThis.fetch = vi.fn(() => { throw new Error('不得自行读取 HTTP 接口'); });
+  mockHost.fetch = globalThis.fetch;
+  mockHost.location = { href: 'https://tavern.test/' };
+  mockHost.document = {
+    createElement: () => ({ remove: vi.fn() }),
+    head: { appendChild: () => {
+      const key = Object.keys(mockHost).find(key => key.startsWith('__ACU_WI_MODULE_'))!;
+      mockHost[key].resolve(mockWorldInfoModule);
+    } },
+  };
 });
 
 afterEach(() => {
@@ -121,54 +137,44 @@ describe('世界书条目 CRUD', () => {
   });
 });
 
-describe('世界书列表与角色绑定（经 /api/settings/get）', () => {
-  it('getLorebooks：返回 world_names；请求失败时返回空数组', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ world_names: ['书A', '书B'], settings: '{}' }),
-    }) as any;
+describe('世界书列表与角色绑定（原生模块）', () => {
+  it('getLorebooks：读取 world_names；模块失败时拒绝而非伪装为空', async () => {
+    mockWorldInfoModule.world_names = ['书A', '书B'];
     const backend = createNativeStBackend_ACU(() => makeStApi());
     expect(await backend.getLorebooks()).toEqual(['书A', '书B']);
 
-    globalThis.fetch = vi.fn().mockRejectedValue(new Error('network')) as any;
+    mockHost.document.head.appendChild = (script: any) => script.onerror();
     const failing = createNativeStBackend_ACU(() => makeStApi());
-    expect(await failing.getLorebooks()).toEqual([]);
+    await expect(failing.getLorebooks()).rejects.toMatchObject({ category: 'api_unavailable' });
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
-  it('getLorebooks 在 TTL 内复用快照，forceRefresh 强制重新拉取', async () => {
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ world_names: ['旧书'], settings: '{}' }) })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ world_names: ['新书'], settings: '{}' }) });
-    globalThis.fetch = fetchMock as any;
+  it('getLorebooks 每次读取实时导出，不依赖 TTL 或 forceRefresh', async () => {
+    mockWorldInfoModule.world_names = ['旧书'];
     const backend = createNativeStBackend_ACU(() => makeStApi());
     expect(await backend.getLorebooks()).toEqual(['旧书']);
-    expect(await backend.getLorebooks()).toEqual(['旧书']);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    mockWorldInfoModule.world_names = ['新书'];
+    expect(await backend.getLorebooks()).toEqual(['新书']);
+    backend.invalidateSettingsSnapshot();
     expect(await backend.getLorebooks({ forceRefresh: true })).toEqual(['新书']);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
-  it('loadWorldInfo not-found 会使名单快照失效，下一次 getLorebooks 重新拉取', async () => {
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ world_names: ['旧书'], settings: '{}' }) })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ world_names: ['新书'], settings: '{}' }) });
-    globalThis.fetch = fetchMock as any;
-    const stApi = makeStApi({ loadWorldInfo: vi.fn().mockResolvedValue(null) });
+  it('目录移除的书不能继续读取，后续列表直接反映原生变更', async () => {
+    mockWorldInfoModule.world_names = ['旧书'];
+    const stApi = makeStApi({ loadWorldInfo: vi.fn().mockResolvedValue({ entries: {} }) });
     const backend = createNativeStBackend_ACU(() => stApi);
     expect(await backend.getLorebooks()).toEqual(['旧书']);
-    await expect(backend.getLorebookEntries('旧书')).rejects.toThrow('不存在');
+    await expect(backend.getLorebookEntries('旧书')).resolves.toEqual([]);
+    mockWorldInfoModule.world_names = ['新书'];
+    await expect(backend.getLorebookEntries('旧书')).rejects.toMatchObject({ category: 'lorebook_not_found' });
     expect(await backend.getLorebooks()).toEqual(['新书']);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(stApi.loadWorldInfo).toHaveBeenCalledTimes(1);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
   it('getCharWorldbookNames：primary 取角色卡 extensions.world，additional 按头像基名匹配 charLore', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        world_names: [],
-        settings: JSON.stringify({ world_info: { charLore: [{ name: 'Alice', extraBooks: ['附加书1', '附加书2'] }] } }),
-      }),
-    }) as any;
+    mockWorldInfoModule.world_info = { charLore: [{ name: 'Alice', extraBooks: ['附加书1', '附加书2'] }] };
     const stApi = makeStApi({
       characters: [{ name: 'Alice', avatar: 'Alice.png', data: { extensions: { world: '主书' } } }],
       characterId: 0,
@@ -184,10 +190,7 @@ describe('世界书列表与角色绑定（经 /api/settings/get）', () => {
   });
 
   it('getCharLorebooks：type 过滤', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ world_names: [], settings: JSON.stringify({ world_info: { charLore: [{ name: 'Bob', extraBooks: ['附'] }] } }) }),
-    }) as any;
+    mockWorldInfoModule.world_info = { charLore: [{ name: 'Bob', extraBooks: ['附'] }] };
     const stApi = makeStApi({
       characters: [{ name: 'Bob', avatar: 'Bob.png', data: { extensions: { world: '主' } } }],
       characterId: 0,

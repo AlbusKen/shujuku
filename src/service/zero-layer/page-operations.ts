@@ -1,9 +1,11 @@
 import type { ZeroLayerBranchCommand_ACU } from './branch-command';
 import type { ZeroLayerExitSelection_ACU } from './exit-model';
 import { ZeroLayerError_ACU } from './model';
+import type { ZeroLayerRuntime_ACU } from './runtime';
 
 /** 页面级零层操作端口：展示层 bootstrap 注册实现，presentation-v2 只经此调用。 */
 export interface ZeroLayerPageOperations_ACU {
+  loadRuntime(): Promise<ZeroLayerRuntime_ACU>;
   setEnabled(enabled: boolean, apiPresetName?: string): Promise<unknown>;
   submit(input: string): Promise<unknown>;
   recover(): Promise<unknown>;

@@ -18,8 +18,7 @@ import { markSummaryVectorIndexDirtyForRealign_ACU } from '../../service/vector/
 import { enqueueSummaryVectorIndexFlush_ACU } from '../../service/vector/summary-vector-index-flush-queue';
 import { chatHasSummaryVectorMirror_ACU } from '../../service/vector/summary-vector-mirror-rebuild';
 import { runScopedRetentionGcAfterFlush_ACU } from '../../service/vector/summary-vector-index-chat-deletion-gc';
-import { getChatArray_ACU } from '../../service/chat/chat-service';
-import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
+import { getChatArray_ACU, getActiveChatStorageIdentity_ACU } from '../../service/chat/chat-service';
 import { clearAgentRunState_ACU } from '../../service/continuation/agent/agent-run-cache';
 import { clearWorldSimulationRunState_ACU } from '../../service/simulation/agent/agent-run-cache';
 import { isVectorPipelineEnabledForCurrentChat_ACU } from '../../service/fill-mode/fill-mode-gate';
@@ -37,6 +36,13 @@ let running_ACU = false;
 let pendingAfterRun_ACU = false;
 /** 最近一次调度原因；事件流里取最新一条标记 dirty，避免旧原因覆盖新原因。 */
 let latestReason_ACU: 'chat_modified_deleted' | 'chat_modified_swiped' = 'chat_modified_swiped';
+/** 一轮刷新的结果：ok=false 表示合并刷新抛错；degraded=true 表示数据或世界书刷新降级；worldbookFailed 专指世界书条目未更新。 */
+export interface ChatMutationRoundResult_ACU { ok: boolean; degraded: boolean; worldbookFailed: boolean }
+/** 当前执行中的轮次；flush 据此等待在途刷新。 */
+let activeRun_ACU: Promise<ChatMutationRoundResult_ACU> | null = null;
+/** 最近完成轮次开始时的代次及其结果；flush 据此判断请求是否已被在途轮次覆盖。 */
+let lastCompletedGeneration_ACU = 0;
+let lastResult_ACU: ChatMutationRoundResult_ACU | null = null;
 
 /**
  * 触发一次聊天变更刷新请求。同一时刻最多一轮执行；
@@ -52,14 +58,14 @@ export function scheduleChatMutationRefresh_ACU(reason: 'chat_modified_deleted' 
   if (now - firstRequestAt_ACU >= MAX_WAIT_MS_ACU) {
     clearTimeout(chatMutationDebounceTimer_ACU);
     _set_chatMutationDebounceTimer_ACU(null);
-    void runMutationRound_ACU();
+    void startMutationRound_ACU();
     return;
   }
 
   clearTimeout(chatMutationDebounceTimer_ACU);
   const timer = setTimeout(() => {
     _set_chatMutationDebounceTimer_ACU(null);
-    void runMutationRound_ACU();
+    void startMutationRound_ACU();
   }, TRAILING_DELAY_MS_ACU);
   _set_chatMutationDebounceTimer_ACU(timer);
 }
@@ -72,14 +78,50 @@ export function cancelPendingChatMutationRefresh_ACU(): void {
   firstRequestAt_ACU = 0;
 }
 
-async function runMutationRound_ACU(): Promise<void> {
+/**
+ * 立即执行一轮刷新并等待完成（#56）：宿主重生成在 await MESSAGE_DELETED 之后才读取世界书，
+ * 监听器等待本函数即可保证回滚与世界书刷新先于正文提示词组装。
+ * 清除待执行的防抖定时器；已有轮次在途时先等它结束，若在途轮次已覆盖本次请求则复用其结果。
+ */
+export async function flushChatMutationRefresh_ACU(
+  reason: 'chat_modified_deleted' | 'chat_modified_swiped',
+): Promise<ChatMutationRoundResult_ACU> {
+  latestReason_ACU = reason;
+  generation_ACU += 1;
+  const targetGeneration = generation_ACU;
+  clearTimeout(chatMutationDebounceTimer_ACU);
+  _set_chatMutationDebounceTimer_ACU(null);
+  firstRequestAt_ACU = 0;
+  while (activeRun_ACU) {
+    await activeRun_ACU.catch((): void => undefined);
+    if (lastResult_ACU && lastCompletedGeneration_ACU >= targetGeneration) return lastResult_ACU;
+  }
+  // 宿主在等待本轮；世界书在通知前端之前已写完，本轮不再等待前端回读窗口。
+  const run = startMutationRound_ACU(false);
+  if (!run) return { ok: false, degraded: true, worldbookFailed: true };
+  return run;
+}
+
+/** 同一时刻最多一轮；执行中再次请求只登记补跑。awaitFrontendReadback=false 时本轮不等待前端回读窗口。 */
+function startMutationRound_ACU(awaitFrontendReadback = true): Promise<ChatMutationRoundResult_ACU> | null {
   if (running_ACU) {
     pendingAfterRun_ACU = true;
-    return;
+    return null;
   }
+  const run = executeMutationRound_ACU(awaitFrontendReadback);
+  activeRun_ACU = run;
+  const clear = (): void => { if (activeRun_ACU === run) activeRun_ACU = null; };
+  run.then(clear, clear);
+  return run;
+}
+
+async function executeMutationRound_ACU(awaitFrontendReadback: boolean): Promise<ChatMutationRoundResult_ACU> {
   running_ACU = true;
   const startedGeneration = generation_ACU;
   firstRequestAt_ACU = 0;
+  let ok = true;
+  let degraded = false;
+  let worldbookFailed = false;
 
   try {
     const chatIdentity = getActiveChatStorageIdentity_ACU(getChatArray_ACU());
@@ -111,8 +153,15 @@ async function runMutationRound_ACU(): Promise<void> {
 
     // UI 刷新失败不允许吞掉向量索引 dirty 标记（否则索引永远不对齐）
     try {
-      await refreshMergedDataAndNotifyWithUI_ACU();
+      const refreshed = awaitFrontendReadback
+        ? await refreshMergedDataAndNotifyWithUI_ACU()
+        : await refreshMergedDataAndNotifyWithUI_ACU({ awaitFrontendReadback: false });
+      if (refreshed?.degraded) degraded = true;
+      if (refreshed?.worldbookRefreshFailed) worldbookFailed = true;
     } catch (e: any) {
+      ok = false;
+      degraded = true;
+      worldbookFailed = true;
       logError_ACU(`[聊天变更] 合并数据与 UI 刷新失败: ${e?.message}`);
     }
 
@@ -151,13 +200,18 @@ async function runMutationRound_ACU(): Promise<void> {
     running_ACU = false;
   }
 
+  const result: ChatMutationRoundResult_ACU = { ok, degraded, worldbookFailed };
+  lastCompletedGeneration_ACU = startedGeneration;
+  lastResult_ACU = result;
+
   // 执行期间又有新请求（或旧代次被取消但又有新请求）→ 按最新 generation 再跑一轮
   if (pendingAfterRun_ACU) {
     pendingAfterRun_ACU = false;
     if (generation_ACU > startedGeneration) {
-      void runMutationRound_ACU();
+      void startMutationRound_ACU();
     }
   }
+  return result;
 }
 
 /** 仅供测试重置内部状态。 */
@@ -168,4 +222,7 @@ export function __resetChatMutationSchedulerForTests_ACU(): void {
   firstRequestAt_ACU = 0;
   running_ACU = false;
   pendingAfterRun_ACU = false;
+  activeRun_ACU = null;
+  lastCompletedGeneration_ACU = 0;
+  lastResult_ACU = null;
 }

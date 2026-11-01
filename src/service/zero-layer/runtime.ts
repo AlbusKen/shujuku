@@ -9,6 +9,7 @@ import { getWorldSimulationRuntime_ACU } from '../simulation/simulation-runtime'
 import type { ZeroLayerBranchCommand_ACU } from './branch-command';
 import { captureZeroLayerCarrier_ACU, assertZeroLayerCarrier_ACU, type ZeroLayerCarrierContext_ACU } from './carrier-context';
 import type { ZeroLayerExitSelection_ACU } from './exit-model';
+import { assertZeroLayerFeatureEnabled_ACU } from './feature-policy';
 
 /** 页面拥有的装配；初始化只注册拦截器，不创建或启用聊天存档。 */
 export class ZeroLayerRuntime_ACU {
@@ -46,6 +47,7 @@ export class ZeroLayerRuntime_ACU {
   }
 
   install(): void {
+    assertZeroLayerFeatureEnabled_ACU();
     if (this.uninstall) return;
     this.uninstall = installZeroLayerRequestForwarder_ACU({
       isActive: () => this.session.hasActiveTurn(),
@@ -117,6 +119,7 @@ export class ZeroLayerRuntime_ACU {
 
   /** 显式启停共用 session 写租约；首次启用先严格确认桥接首基线。 */
   async setEnabled(enabled: boolean, apiPresetName?: string): Promise<ZeroLayerEnvelope_ACU> {
+    if (enabled) assertZeroLayerFeatureEnabled_ACU();
     if (enabled) return this.runExclusive(() => this.session.setEnabled(true, apiPresetName));
     if (this.closing) throw new ZeroLayerError_ACU('pending-turn', '零层关闭正在收尾。');
     const context = captureZeroLayerCarrier_ACU();
@@ -197,6 +200,7 @@ export class ZeroLayerRuntime_ACU {
   }
 
   private async runExclusive<T>(work: () => Promise<T>, access: 'normal' | 'close' | 'recover' = 'normal'): Promise<T> {
+    if (access !== 'close') assertZeroLayerFeatureEnabled_ACU();
     if (this.submitting || this.closing && access !== 'close') {
       throw new ZeroLayerError_ACU('pending-turn', '已有零层操作正在执行或关闭收尾。');
     }

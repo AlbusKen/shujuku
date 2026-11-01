@@ -24,6 +24,7 @@ import {
     persistSummaryVectorMirrorPackPrepared_ACU,
 } from './summary-vector-mirror-storage';
 import { buildCurrentSummaryVectorEmbeddingIdentity_ACU } from './summary-vector-mirror-writer';
+import { mapWithBoundedConcurrency_ACU } from '../../shared/bounded-concurrency';
 import type { SummaryVectorIndexContentPackChunk_ACU, SummaryVectorIndexExternalFileRef_ACU } from './summary-vector-index-types';
 
 export interface FoldSummaryVectorMirrorResult_ACU {
@@ -75,11 +76,15 @@ export async function foldSummaryVectorMirrorAtBoundary_ACU(params: {
 
     const embedding = head.checkpoint?.embedding || buildCurrentSummaryVectorEmbeddingIdentity_ACU();
     const packByHash = new Map<string, Awaited<ReturnType<typeof loadSummaryVectorMirrorPack_ACU>>>();
-    for (const packRef of head.packRefs) {
-        const pack = await loadSummaryVectorMirrorPack_ACU(packRef);
+    // 有界并发读取；任一 pack 读不到仍按原语义抛错（按 packRefs 顺序报告首个失败）。
+    const loadedPacks = await mapWithBoundedConcurrency_ACU(
+        head.packRefs, 4, (packRef) => loadSummaryVectorMirrorPack_ACU(packRef),
+    );
+    head.packRefs.forEach((packRef, index) => {
+        const pack = loadedPacks[index];
         if (!pack) throw new Error(`向量镜像折叠失败：无法读取 pack ${packRef.packHash}`);
         packByHash.set(packRef.packHash, pack);
-    }
+    });
 
     const mergedChunks: SummaryVectorIndexContentPackChunk_ACU[] = [];
     const rows: Array<{ rowId: string; chunks: SummaryVectorChunkRef_ACU[] }> = [];

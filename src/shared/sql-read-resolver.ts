@@ -1,7 +1,7 @@
 import type { TableDataObject_ACU } from './models/table-data';
 import { getRuntimeEffectiveSchema_ACU, parseDDLColumnInfos_ACU, parseDDLTableName } from './ddl-utils';
 import { canonicalizeDisplayName_ACU, getPhysicalTableNameFromResolvedMap_ACU, resolvePhysicalTableNames_ACU } from './sheet-identity';
-import { resolveEffectiveDDL } from '../data/sqlite/schema-mapper';
+import { resolveEffectiveDDL } from './effective-ddl';
 import { rebindSqlReadIdentifiers_ACU } from './sql-mutation-table-rebind';
 import { mapSqlColumnIdentifiers_ACU } from './sql-identifier-mapper';
 import { logWarn_ACU } from './utils';

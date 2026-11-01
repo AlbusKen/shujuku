@@ -35,6 +35,7 @@ import type { ContinuationAgentTurnPlanRequest_ACU } from './agent/agent-model';
 import { ZERO_LAYER_CARRIER_FIELD_ACU } from '../zero-layer/model';
 import { ZeroLayerStore_ACU } from '../zero-layer/store';
 import { createZeroLayerContinuationRuntime_ACU } from '../zero-layer/continuation-runtime';
+import { isZeroLayerFeatureEnabled_ACU } from '../zero-layer/feature-policy';
 
 export interface ContinuationRuntime_ACU {
   readonly mode: 'host' | 'logical';
@@ -337,8 +338,8 @@ function createRuntime_ACU(): ContinuationRuntime_ACU {
 
 export function getContinuationRuntime_ACU(): ContinuationRuntime_ACU {
   const chat = getChatArray_ACU();
-  // 无零层字段的普通聊天不要求载体能力；有字段则严格读取，损坏或保存未知不能回落普通写口。
-  const source = chat.some(message => message && Object.prototype.hasOwnProperty.call(message, ZERO_LAYER_CARRIER_FIELD_ACU))
+  // 停用后不再依据保留存档选择零层运行时。
+  const source = isZeroLayerFeatureEnabled_ACU() && chat.some(message => message && Object.prototype.hasOwnProperty.call(message, ZERO_LAYER_CARRIER_FIELD_ACU))
     ? new ZeroLayerStore_ACU().readSnapshot() : null;
   const key = source?.enabled ? JSON.stringify([source.scope.characterKey, source.scope.chatId,
     source.sessionId, source.activeBranchId, source.carrierSwipeId]) : null;

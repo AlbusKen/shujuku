@@ -47,8 +47,8 @@ export async function rollbackAgentWorldbookSnapshotRestore_ACU(
 ): Promise<boolean> {
   let succeeded = true;
   for (const [rawBookName, patches] of Object.entries(rollbackPatchesByBook || {})) {
-    const bookName = String(rawBookName || '').trim();
-    if (!bookName || !Array.isArray(patches) || patches.length === 0) continue;
+    const bookName = rawBookName;
+    if (!bookName.trim() || !Array.isArray(patches) || patches.length === 0) continue;
     try {
       const restoredPatches = restoredPatchesByBook?.[bookName];
       if (!Array.isArray(restoredPatches) || restoredPatches.length === 0) {
@@ -128,9 +128,9 @@ export async function restoreAgentWorldbookSnapshotEntries_ACU(
   const rollbackPatchesByBook: Record<string, Record<string, any>[]> = {};
   const restoredPatchesByBook: Record<string, Record<string, any>[]> = {};
   for (const [rawBookName, rawSnapshotEntries] of Object.entries(snapshot.books || {})) {
-    const bookName = String(rawBookName || '').trim();
+    const bookName = rawBookName;
     const snapshotEntries = Array.isArray(rawSnapshotEntries) ? rawSnapshotEntries : [];
-    if (!bookName || snapshotEntries.length === 0) continue;
+    if (!bookName.trim() || snapshotEntries.length === 0) continue;
     try {
       const entries = await getLorebookEntries_ACU(bookName);
       const currentByUid = new Map((entries || []).map(entry => [String(entry?.uid), entry]));

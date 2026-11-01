@@ -1,3 +1,4 @@
+import { runTakeoverRequest_ACU } from '../../shared/takeover-control';
 /**
  * data/gateways/ai-gateway.ts — AI 调用网关
  *
@@ -12,6 +13,8 @@ import { TavernHelper_API_ACU, SillyTavern_API_ACU } from '../../shared/host-api
 import { logWarn_ACU } from '../../shared/utils';
 import { pristineFetch_ACU } from './pristine-fetch';
 import { createApiRequestLog_ACU, observeApiResponse_ACU } from '../../shared/api-request-log';
+import { applyContextToolTransport_ACU, CONTEXT_TOOL_UNSUPPORTED_NOTE_ACU, isContextToolTransportEnabled_ACU } from './context-tool-transport';
+import { rewriteContextToolResponse_ACU } from './context-tool-response';
 
 // ═══ 可用性检查 ═══
 
@@ -37,6 +40,11 @@ export function isTriggerSlashAvailable_ACU(): boolean {
     return !!(TavernHelper_API_ACU && typeof TavernHelper_API_ACU.triggerSlash === 'function');
 }
 
+/** 不能携带 tools 的通道在开关开启时附加说明，便于从日志确认这次没有工具化。 */
+function unsupportedTransportNote_ACU(): string {
+    return isContextToolTransportEnabled_ACU() ? `；${CONTEXT_TOOL_UNSUPPORTED_NOTE_ACU}` : '';
+}
+
 // ═══ AI 生成 ═══
 
 /**
@@ -45,7 +53,7 @@ export function isTriggerSlashAvailable_ACU(): boolean {
  * @returns 生成的文本
  * @throws 如果 generateRaw 不可用
  */
-export async function generateRaw_ACU(options: {
+async function generateRawImpl_ACU(options: {
     ordered_prompts: any[];
     should_stream?: boolean;
     [key: string]: any;
@@ -53,7 +61,7 @@ export async function generateRaw_ACU(options: {
     if (!isGenerateRawAvailable_ACU()) {
         throw new Error('主API生成不可用：未检测到酒馆助手（TavernHelper.generateRaw）。请安装酒馆助手（JS-Slash-Runner），或在设置中改用自定义API。');
     }
-    const log = createApiRequestLog_ACU('API主连接', '宿主 generateRaw 调用参数（非最终网络请求）', options);
+    const log = createApiRequestLog_ACU('API主连接', `宿主 generateRaw 调用参数（非最终网络请求）${unsupportedTransportNote_ACU()}`, options);
     try {
         const response = await TavernHelper_API_ACU.generateRaw(options);
         log.write('宿主 generateRaw 返回值', response);
@@ -72,7 +80,7 @@ export async function generateRaw_ACU(options: {
  * @returns API 响应结果
  * @throws 如果 ConnectionManagerRequestService 不可用
  */
-export async function sendConnectionManagerRequest_ACU(
+async function sendConnectionManagerRequestImpl_ACU(
     profileId: string,
     messages: any[],
     maxTokens: number,
@@ -83,7 +91,7 @@ export async function sendConnectionManagerRequest_ACU(
         throw new Error('ConnectionManagerRequestService 不可用。请检查酒馆版本或连接管理器配置。');
     }
     const service = SillyTavern_API_ACU.ConnectionManagerRequestService;
-    const log = createApiRequestLog_ACU('API连接预设', '宿主 ConnectionManager 调用参数（非最终网络请求）',
+    const log = createApiRequestLog_ACU('API连接预设', `宿主 ConnectionManager 调用参数（非最终网络请求）${unsupportedTransportNote_ACU()}`,
         { profileId, messages, maxTokens, custom, overridePayload });
     try {
         // 未传扩展参数时保持三参调用，旧调用方的请求形态不变。
@@ -166,6 +174,8 @@ export interface DirectChatCompletionOptions_ACU {
     /** 请求已经完成装配，不再次归一化或裁剪字段。 */
     preservePayload?: boolean;
     readResponse?(response: Response): Promise<any>;
+    /** 本次请求所用 API 预设关闭「API工具调用」时为 false；缺省按开启处理。 */
+    contextToolTransport?: boolean;
 }
 
 export async function sendMainApiChatCompletionRequest_ACU(
@@ -226,7 +236,7 @@ const CHAT_COMPLETION_GENERATE_URL_ACU = '/api/backends/chat-completions/generat
  * @param signal 中止信号
  * @returns 生成端点返回的原始 JSON
  */
-export async function postChatCompletionDirect_ACU(
+async function postChatCompletionDirectImpl_ACU(
     payload: Record<string, unknown>,
     signal?: AbortSignal | null,
     options?: DirectChatCompletionOptions_ACU,
@@ -248,9 +258,12 @@ export async function postChatCompletionDirect_ACU(
             delete request.tool_choice;
         }
     }
+    // 发送前最后一步：预设开关开启时只保留首条消息，其余转为 turn_ 函数；响应在交给调用方前还原。
+    const transport = applyContextToolTransport_ACU(request, options?.contextToolTransport);
     const headers = { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' };
-    const wire = JSON.stringify(request);
-    const log = createApiRequestLog_ACU(logTag, `请求 POST ${CHAT_COMPLETION_GENERATE_URL_ACU}（酒馆后端请求体）`, wire, { request, headers });
+    const wire = JSON.stringify(transport.body);
+    const phase = `请求 POST ${CHAT_COMPLETION_GENERATE_URL_ACU}（酒馆后端请求体）${transport.note ? `；${transport.note}` : ''}`;
+    const log = createApiRequestLog_ACU(logTag, phase, wire, { request: transport.body, headers });
     try {
         const rawResponse = await pristineFetch_ACU(CHAT_COMPLETION_GENERATE_URL_ACU, {
             method: 'POST',
@@ -260,7 +273,9 @@ export async function postChatCompletionDirect_ACU(
             signal: signal ?? undefined,
         });
         const observed = observeApiResponse_ACU(rawResponse, log, signal);
-        const response = observed.response;
+        // 日志记录上游原始回复；调用方拿到的是还原后的回复。
+        const response = transport.plan
+            ? await rewriteContextToolResponse_ACU(observed.response, transport.plan) : observed.response;
         try {
             if (response.ok && options?.readResponse) return await options.readResponse(response);
             const text = await response.text();
@@ -354,7 +369,7 @@ export async function sendProfileChatCompletionRequest_ACU(
  * @param command 斜杠命令字符串
  * @returns 命令执行结果
  */
-export async function triggerSlash_ACU(command: string): Promise<string> {
+async function triggerSlashImpl_ACU(command: string): Promise<string> {
     if (!isTriggerSlashAvailable_ACU()) {
         logWarn_ACU('[AIGateway] triggerSlash 不可用，返回空字符串');
         return '';
@@ -401,3 +416,15 @@ export function getHostRequestHeaders_ACU(): Record<string, string> {
         return {};
     }
 }
+
+export const generateRaw_ACU: typeof generateRawImpl_ACU = options =>
+    runTakeoverRequest_ACU(() => generateRawImpl_ACU(options));
+export const sendConnectionManagerRequest_ACU: typeof sendConnectionManagerRequestImpl_ACU = (...args) =>
+    runTakeoverRequest_ACU(() => sendConnectionManagerRequestImpl_ACU(...args));
+export const postChatCompletionDirect_ACU: typeof postChatCompletionDirectImpl_ACU = (body, signal, options, logTag) =>
+    runTakeoverRequest_ACU(merged => postChatCompletionDirectImpl_ACU(body, merged, options, logTag), signal);
+export const triggerSlash_ACU: typeof triggerSlashImpl_ACU = command =>
+    runTakeoverRequest_ACU(() => triggerSlashImpl_ACU(command));
+/** 只用于还原插件自己切换过的宿主状态（如连接预设）；接管暂停后仍须执行，故不经暂停门控。 */
+export const triggerSlashBypassTakeover_ACU: typeof triggerSlashImpl_ACU = command =>
+    triggerSlashImpl_ACU(command);

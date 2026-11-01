@@ -65,14 +65,24 @@ export class SqliteRuntimeUnavailableError_ACU extends Error {
   }
 }
 
+/**
+ * 模块级 sql.js 运行时单例。
+ * 每次回放都会 new SqliteEngine()；若运行时只挂在实例上，每个实例都会重新解码
+ * 内联 wasm base64 并重新走 initSqlJs。运行时本身无状态（Database 才有状态），
+ * 因此全进程共享一份：成功后永久复用，失败时清空 Promise 以便下次重试。
+ */
+let sharedSqlJsRuntime_ACU: SqlJsStatic | null = null;
+let sharedSqlJsInitPromise_ACU: Promise<SqlJsStatic> | null = null;
+
+/** 仅供测试隔离：清空模块级运行时缓存。 */
+export function resetSqliteRuntimeCacheForTests_ACU(): void {
+  sharedSqlJsRuntime_ACU = null;
+  sharedSqlJsInitPromise_ACU = null;
+}
+
 export class SqliteEngine {
   private db: SqlJsDatabase | null = null;
   private sqlJs: SqlJsStatic | null = null;
-  /**
-   * 单一运行时初始化 Promise：并发调用 init()/loadFromBinary() 时只初始化一次 sql.js。
-   * 失败后置 null，保证下次调用可重试（不会把失败的 Promise 永久缓存）。
-   */
-  private sqlJsInitPromise: Promise<SqlJsStatic> | null = null;
 
   /** 是否已初始化 */
   get isReady(): boolean {
@@ -123,12 +133,16 @@ export class SqliteEngine {
 
   /**
    * 初始化 sql.js 运行时（单一入口，init/loadFromBinary 共用）。
-   * - 已初始化过运行时直接返回；
-   * - 否则复用/创建 sqlJsInitPromise，并发调用只初始化一次；
-   * - 失败时把 Promise 置 null 后重抛，保证下次可重试。
+   * - 本实例或模块级已有运行时直接返回；
+   * - 否则复用/创建模块级初始化 Promise，跨实例并发调用只初始化一次；
+   * - 失败时把模块级 Promise 置 null 后重抛，保证下次可重试。
    */
   private async initializeRuntime(): Promise<SqlJsStatic> {
     if (this.sqlJs) return this.sqlJs;
+    if (sharedSqlJsRuntime_ACU) {
+      this.sqlJs = sharedSqlJsRuntime_ACU;
+      return this.sqlJs;
+    }
 
     // [6.7.2] 检测 sql.js 是否可用（CDN @require 可能加载失败）
     if (typeof initSqlJs !== 'function') {
@@ -139,8 +153,8 @@ export class SqliteEngine {
       );
     }
 
-    if (!this.sqlJsInitPromise) {
-      this.sqlJsInitPromise = (async () => {
+    if (!sharedSqlJsInitPromise_ACU) {
+      sharedSqlJsInitPromise_ACU = (async () => {
         try {
           logDebug_ACU('[SQLite引擎] 正在初始化 sql.js...');
           const runtime = await initSqlJs(this.buildInitConfig_ACU());
@@ -158,10 +172,14 @@ export class SqliteEngine {
       })();
     }
 
+    const pending = sharedSqlJsInitPromise_ACU;
     try {
-      this.sqlJs = await this.sqlJsInitPromise;
+      const runtime = await pending;
+      sharedSqlJsRuntime_ACU = runtime;
+      this.sqlJs = runtime;
     } catch (error) {
-      this.sqlJsInitPromise = null;
+      // 只清理本次失败的 Promise；若期间已被重置/替换，不覆盖新的初始化。
+      if (sharedSqlJsInitPromise_ACU === pending) sharedSqlJsInitPromise_ACU = null;
       throw error;
     }
     return this.sqlJs;

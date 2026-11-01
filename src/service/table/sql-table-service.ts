@@ -649,18 +649,6 @@ export class SqlRuntimeSchemaInvalidError_ACU extends Error {
 }
 
 /**
- * 提交时检测到 live SQLite runtime schema 与请求前冻结 schema 不一致。
- * 必须在任何 SQLite mutation 前中止（零写入），并分类为 infrastructure/precondition。
- */
-export class SqlRuntimeSchemaStaleError_ACU extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'SqlRuntimeSchemaStaleError_ACU';
-    Object.defineProperty(this, 'code', { value: 'SQL_RUNTIME_SCHEMA_STALE_ACU', enumerable: false });
-  }
-}
-
-/**
  * 计算请求级 runtime schema 的稳定 digest。
  *
  * 输入只取 effectiveDDL（规范化空白）与 columnMap（稳定排序），不包含业务行、
@@ -1749,9 +1737,6 @@ export class SqlTableService implements ITableStorageProvider {
     _updateMode?: string,
     scope?: SqlTableApplyScope_ACU,
   ): ApplyEditsWithRowIdMaterializationResult_ACU {
-    // 请求级冻结 runtime schema 是本轮写路径的 schema 权威；提交前必须确认
-    // live SQLite 与其一致。若 AI 等待期间 schema 漂移，零 mutation 中止。
-    this._assertRuntimeSchemaCurrent(scope);
     this._ensureInitialized();
     this._ensureTablesFromTemplate(scope);
 
@@ -2134,35 +2119,6 @@ export class SqlTableService implements ITableStorageProvider {
   private _ensureInitialized(): void {
     if (!this._initialized || !this.engine.isReady) {
       throw new Error('[SqlTableService] SQLite 引擎未初始化，请先调用 loadFromChat()');
-    }
-  }
-
-  /**
-   * 提交前 schema 一致性 gate：live SQLite runtime 与请求前冻结的 runtime schema
-   * 必须一致，否则任何 SQLite mutation 都不得执行（fail-closed，零写入）。
-   *
-   * 比较依据是冻结 digest 与当前实时导出（仅 activeSheetKeys 参与）的 digest。
-   * 无冻结 scope 时跳过（旧调用方/低层工具路径），不收紧 Native 与历史 replay。
-   */
-  private _assertRuntimeSchemaCurrent(scope?: SqlTableApplyScope_ACU): void {
-    const frozenDigest = scope?.runtimeSchema?.digest;
-    if (!frozenDigest) return; // 无冻结 schema：兼容旧调用方，不做 gate。
-    if (!this._initialized || !this.engine.isReady) {
-      throw new SqlRuntimeSchemaInvalidError_ACU('SQLite 运行时未就绪，无法验证冻结 schema 一致性，已阻止本轮写入。');
-    }
-    let currentData: TableDataObject_ACU | null;
-    try {
-      const mate = (this._readCanonicalView_ACU()?.mate as Mate_ACU) || DEFAULT_MATE_ACU;
-      currentData = this.syncBridge.exportToTableData(mate);
-    } catch (error: any) {
-      throw new SqlRuntimeSchemaInvalidError_ACU(`无法导出当前 SQLite schema 用于一致性验证：${String(error?.message || error)}`);
-    }
-    const activeSheetKeys = scope?.activeSheetKeys ? new Set(scope.activeSheetKeys) : undefined;
-    const current = freezeRuntimeSchemaFromData_ACU(currentData, activeSheetKeys);
-    if (!current || current.digest !== frozenDigest) {
-      throw new SqlRuntimeSchemaStaleError_ACU(
-        'SQLite runtime schema 在 AI 请求等待期间发生变化，与请求前冻结的 schema 不一致，已阻止本轮写入（零 mutation）。请重新发起本轮填表。',
-      );
     }
   }
 

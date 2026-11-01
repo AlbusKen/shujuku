@@ -16,6 +16,11 @@ vi.mock('../../src/service/simulation/agent/agent-token-budget', async importOri
   countWorldSimulationTokens_ACU: mockCountWorldSimulationTokens_ACU,
 }));
 // 世界书 Agent 发现不属于普通剧情因果桥的验收边界；其余 store/parser/scene/bridge 均使用真实实现。
+vi.mock('../../src/service/agent/agent-worldbook-takeover', async importOriginal => ({
+  ...await importOriginal<typeof import('../../src/service/agent/agent-worldbook-takeover')>(),
+  clearFinalGenerationGreenlights_ACU: vi.fn(async () => ({ status: 'cleared', patched: 0, staleBookNames: [] })),
+  writeFinalGenerationGreenlights_ACU: vi.fn(async () => true),
+}));
 vi.mock('../../src/service/agent/agent-worldbook-skill-meta', async importOriginal => ({
   ...await importOriginal<typeof import('../../src/service/agent/agent-worldbook-skill-meta')>(),
   resolveAgentWorldbookFilterAvailability_ACU: vi.fn(async () => ({ available: false, control: null })),
@@ -157,8 +162,9 @@ beforeEach(() => {
   });
   setOrdinaryPlotSettings(true);
   settings_ACU.apiPresets = [{ name: 'ordinary-plot-production', apiMode: 'custom', tavernProfile: '',
+    // 本文件按原始请求体核对背景消息；上游默认的「API工具调用」会把首条之后的消息改写为 turn_ 函数，这里关闭。
     apiConfig: { url: 'http://127.0.0.1:43111/v1/chat/completions', model: 'test-model', apiKey: 'test-key', useMainApi: false,
-      sendViaTavern: false, max_tokens: 64, temperature: 0.1, customApiFormat: 'openai_compat' } }];
+      sendViaTavern: false, max_tokens: 64, temperature: 0.1, customApiFormat: 'openai_compat', contextToolTransportEnabled: false } }];
   settings_ACU.plotApiPreset = 'ordinary-plot-production';
   settings_ACU.streamingEnabled = false;
   settings_ACU.plotTaskApiPresetOverridesById = {};

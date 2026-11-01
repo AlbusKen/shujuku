@@ -20,6 +20,7 @@ import {
     type OldFlatLorebookEntry_ACU,
 } from './entry-format';
 import { createNativeStBackend_ACU, type GetStApi_ACU, type NativeStBackend_ACU } from './native-st-backend';
+import { createFreshWorldbookReader_ACU } from './fresh-worldbook-reader';
 
 export type HostCapabilityBackend_ACU = 'passthrough' | 'mapped' | 'native' | 'missing';
 
@@ -201,10 +202,22 @@ export function buildTavernHelperCompat_ACU(rawTH: any, getStApi: GetStApi_ACU):
         delete api[name];
     }
 
-    // ═══ 世界书后端组：只在初始化时选择一次来源 ═══
+    // 读取统一直达宿主；写入保留酒馆助手/原生保存契约，不做运行时错误回退。
+    const reader = createFreshWorldbookReader_ACU(getStApi);
+    api.createWorldbookReadGuard = reader.createReadGuard;
+    const readCapabilities = reader.getCapabilities();
     const rawWorldbook = rawTH && typeof rawTH === 'object' ? createRawTavernHelperWorldbookBackend_ACU(rawTH) : null;
-    const worldbookBackend: WorldbookHostBackend_ACU | null = rawWorldbook?.backend ?? (nativeUsable ? native : null);
-    const worldbookCapabilities = rawWorldbook?.capabilities ?? {};
+    const worldbookBackend: WorldbookHostBackend_ACU = {
+        ...(rawWorldbook?.backend ?? (nativeUsable ? native : {})),
+        getLorebooks: readCapabilities.entries ? reader.getLorebooks : undefined,
+        getLorebookEntries: readCapabilities.entries ? reader.getLorebookEntries : undefined,
+        getCharWorldbookNames: readCapabilities.bindings ? reader.getCharWorldbookNames : undefined,
+    };
+    const worldbookCapabilities = { ...rawWorldbook?.capabilities,
+        getLorebooks: readCapabilities.entries ? 'native' : 'missing',
+        getLorebookEntries: readCapabilities.entries ? 'native' : 'missing',
+        getCharWorldbookNames: readCapabilities.bindings ? 'native' : 'missing',
+    } as Partial<Record<WorldbookBackendMethodName_ACU, HostCapabilityBackend_ACU>>;
     const mountWorldbook = (name: WorldbookBackendMethodName_ACU): void => {
         const implementation = worldbookBackend?.[name];
         if (typeof implementation !== 'function') {
@@ -213,7 +226,7 @@ export function buildTavernHelperCompat_ACU(rawTH: any, getStApi: GetStApi_ACU):
             return;
         }
         api[name] = implementation;
-        capabilities[name] = rawWorldbook ? (worldbookCapabilities[name] ?? 'missing') : 'native';
+        capabilities[name] = worldbookCapabilities[name] ?? (nativeUsable ? 'native' : 'missing');
     };
     for (const name of ['getLorebookEntries', 'setLorebookEntries', 'createLorebookEntries', 'deleteLorebookEntries', 'getLorebooks', 'getCharWorldbookNames'] as WorldbookBackendMethodName_ACU[]) {
         mountWorldbook(name);
@@ -231,8 +244,8 @@ export function buildTavernHelperCompat_ACU(rawTH: any, getStApi: GetStApi_ACU):
             if (options.type === 'additional') return { primary: null, additional };
             return { primary, additional };
         };
-        capabilities.getCurrentCharPrimaryLorebook = rawWorldbook ? 'mapped' : 'native';
-        capabilities.getCharLorebooks = rawWorldbook ? 'mapped' : 'native';
+        capabilities.getCurrentCharPrimaryLorebook = 'native';
+        capabilities.getCharLorebooks = 'native';
     } else {
         capabilities.getCurrentCharPrimaryLorebook = 'missing';
         capabilities.getCharLorebooks = 'missing';

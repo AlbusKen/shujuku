@@ -1,3 +1,4 @@
+import { captureTakeoverLease_ACU } from '../../../shared/takeover-control';
 /**
  * service/ai/prompt-builder/prompt-api-call.ts
  * AI API 调用 — prompt 组装 + API 调用 + 流式/非流式响应处理
@@ -7,7 +8,7 @@ import { currentAbortController_ACU, trackAbortController_ACU, untrackAbortContr
 import { getApiConfigByPreset_ACU, buildCustomApiRequestBody_ACU, requireResolvedApiPreset_ACU } from '../api-call';
 import { currentJsonTableData_ACU, settings_ACU } from '../../runtime/state-manager';
 import { getPersonaDescription_ACU, getCharDescription_ACU } from '../../../data/gateways/host-state-gateway';
-import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, triggerSlash_ACU, getConnectionManagerProfiles_ACU, getHostRequestHeaders_ACU } from '../../../data/gateways/ai-gateway';
+import { isGenerateRawAvailable_ACU, generateRaw_ACU, sendConnectionManagerRequest_ACU, triggerSlash_ACU, triggerSlashBypassTakeover_ACU, getConnectionManagerProfiles_ACU, getHostRequestHeaders_ACU } from '../../../data/gateways/ai-gateway';
 import { logDebug_ACU, logError_ACU, logWarn_ACU, normalizeExcludeRules_ACU } from '../../../shared/utils';
 import { applyExcludeRulesToText_ACU, getLatestAIMessageContent_ACU, getPlotFromHistory_ACU, parseIfBlocksInContent_ACU, parseRandomTags_ACU, replaceRandomVariables_ACU } from '../../runtime/helpers-remaining';
 import { replaceDbSqlVariables, withSqlTemplateReadContext_ACU } from '../../runtime/template-vars/sql-query-var';
@@ -17,12 +18,14 @@ import { buildStrictJsonTableFillResponseFormatForData_ACU, cloneStrictPromptSeg
 import { preserveNativeToolPostProcessing_ACU, callMainApiChatCompletionText_ACU } from '../api-call';
 import { isConnectionProfileChatCompletion_ACU, isMainApiChatCompletionAvailable_ACU, readMainApiChatCompletionRouting_ACU, sendMainApiChatCompletionRequest_ACU, sendProfileChatCompletionRequest_ACU } from '../../../data/gateways/ai-gateway';
 import { sendCustomApiRequest_ACU } from '../custom-api-transport';
+import { presetContextToolArgs_ACU } from '../../../data/gateways/context-tool-transport';
 import { withApiRequestTimeout_ACU } from '../api-request-timeout';
 import { chatTurnFromJson_ACU, readFetchChatTurn_ACU, type AiChatTurn_ACU } from '../native-tool';
 import { adaptTableFillPromptSegmentsToToolMode_ACU, buildTableFillNativeTools_ACU, resolveTableFillToolTurn_ACU } from './table-fill-tools';
 import { isNativeToolChannelAvailable_ACU } from '../agent-tool-mode';
 import { logAutoFillStage_ACU, logAutoFillSkip_ACU } from '../../../shared/trigger-diagnostics';
 import { withTableFillRetryHistory_ACU } from './table-fill-retry';
+import { runWithAbortSignal_ACU } from '../../../shared/abort-signal';
 
 
 /**
@@ -70,7 +73,11 @@ export class RetryableAiResponseError_ACU extends Error {
   }
 
   export async function callCustomOpenAI_ACU(dynamicContent: any, abortController: AbortController | null = null, options: any = null) {
+    const takeoverLease = captureTakeoverLease_ACU();
+    takeoverLease.assertActive();
     const localAbortController = abortController || new AbortController();
+    const pauseRequest = () => localAbortController.abort();
+    takeoverLease.signal.addEventListener('abort', pauseRequest, { once: true });
     _set_currentAbortController_ACU(localAbortController);
     trackAbortController_ACU(localAbortController);
     const abortSignal = localAbortController.signal;
@@ -78,6 +85,7 @@ export class RetryableAiResponseError_ACU extends Error {
     const forceDirectApi = !!options?.forceDirectApi;
 
     try {
+    abortSignal.throwIfAborted();
     options?.assertCurrent?.();
     if (options?.isolatedSnapshot && (!forceDirectApi || !skipProfileSwitch)) {
         throw new Error('隔离填表必须使用数据库独立 API，禁止宿主预设切换。');
@@ -197,13 +205,18 @@ export class RetryableAiResponseError_ACU extends Error {
 
         if (typeof (globalThis as any).EjsTemplate?.evalTemplate === 'function') {
           try {
-            finalContent = await (globalThis as any).EjsTemplate.evalTemplate(finalContent);
+            // 插件未必支持物理取消；只停止本轮等待，迟到结果不得继续组装或发送请求。
+            finalContent = await runWithAbortSignal_ACU(abortSignal, () =>
+              (globalThis as any).EjsTemplate.evalTemplate(finalContent));
             logDebug_ACU('[填表] 已通过 st-prompt-template 处理提示词');
           } catch (e) {
+            abortSignal.throwIfAborted();
+            if ((e as { name?: string })?.name === 'AbortError') throw e;
             logWarn_ACU('[填表] st-prompt-template 处理失败，使用原始内容:', e);
           }
         }
 
+        abortSignal.throwIfAborted();
         finalContent = parseRandomTags_ACU(finalContent);
         finalContent = replaceRandomVariables_ACU(finalContent);
 
@@ -262,19 +275,26 @@ export class RetryableAiResponseError_ACU extends Error {
         warnIfStrictJsonPromptPolluted_ACU(messages);
     }
 
-    // 严格 JSON 填表：构建 json_schema response_format，让支持 structured outputs 的后端
-    // 在协议层强制输出结构，而不是只靠提示词软约束。
+    // 严格 JSON 填表：默认使用 json_schema；DeepSeek 的 OpenAI 协议渠道使用 json_object，
+    // JSON 内部结构仍由既有提示词契约和响应校验约束。
     // 仅自定义 chat-completions 直连路径能携带（经 custom_include_body 合并进上游请求体）；
     // tavern 连接预设与主 API（generateRaw）无请求体扩展通道，维持提示词约束。
     // 后端不支持 response_format 时，用户可在 excludeBodyParams 中填 response_format 剔除。
     let strictJsonResponseFormat: Record<string, any> | undefined;
     if (strictJsonFillEnabled) {
         try {
-            strictJsonResponseFormat = buildStrictJsonTableFillResponseFormatForData_ACU(
-                sqliteMode,
-                options?.tableData,
-                options?.targetSheetKeys,
-            ).responseFormat;
+            const apiFormat = effectiveApiConfig.customApiFormat || 'openai_compat';
+            const useJsonObject = /deepseek/i.test(String(effectiveApiConfig.model ?? ''))
+                && (apiFormat === 'openai_compat' || apiFormat === 'openai_responses');
+            if (useJsonObject) {
+                strictJsonResponseFormat = { type: 'json_object' };
+            } else {
+                strictJsonResponseFormat = buildStrictJsonTableFillResponseFormatForData_ACU(
+                    sqliteMode,
+                    options?.tableData,
+                    options?.targetSheetKeys,
+                ).responseFormat;
+            }
         } catch (error) {
             // schema 构建失败不阻断填表：回退到纯提示词约束。
             logWarn_ACU('[严格JSON填表] response_format schema 构建失败，本次请求不附加：', error);
@@ -366,11 +386,11 @@ export class RetryableAiResponseError_ACU extends Error {
                 const rawPostProcessing = String(targetProfile['prompt-post-processing'] ?? '');
                 const toolPostProcessing = preserveNativeToolPostProcessing_ACU(rawPostProcessing, true);
                 if (toolPostProcessing !== rawPostProcessing) overridePayload.custom_prompt_post_processing = toolPostProcessing;
-                responsePromise = sendProfileChatCompletionRequest_ACU(targetProfile, messages, tavernMaxTokens, overridePayload, abortSignal);
+                responsePromise = sendProfileChatCompletionRequest_ACU(targetProfile, messages, tavernMaxTokens, overridePayload, abortSignal, ...presetContextToolArgs_ACU(effectiveApiConfig));
             } else if (isConnectionProfileChatCompletion_ACU(targetProfile)) {
                 // 不挂工具的 Chat Completion 预设同样直发生成端点，避开第三方脚本对宿主 fetch 的请求改写。
                 useTavernDirectText = true;
-                responsePromise = sendProfileChatCompletionRequest_ACU(targetProfile, messages, tavernMaxTokens, {}, abortSignal);
+                responsePromise = sendProfileChatCompletionRequest_ACU(targetProfile, messages, tavernMaxTokens, {}, abortSignal, ...presetContextToolArgs_ACU(effectiveApiConfig));
             } else {
                 responsePromise = sendConnectionManagerRequest_ACU(profileId, messages, tavernMaxTokens);
             }
@@ -382,10 +402,10 @@ export class RetryableAiResponseError_ACU extends Error {
             logError_ACU(`ACU: 调用酒馆连接预设时出错:`, error);
             try {
                 if (originalProfile && !skipProfileSwitch) {
-                    const currentProfileAfterCall = await triggerSlash_ACU('/profile');
+                    const currentProfileAfterCall = await triggerSlashBypassTakeover_ACU('/profile');
                     if (originalProfile !== currentProfileAfterCall) {
                         const escapedOriginalProfile = originalProfile.replace(/"/g, '\\"');
-                        await triggerSlash_ACU(`/profile await=true "${escapedOriginalProfile}"`);
+                        await triggerSlashBypassTakeover_ACU(`/profile await=true "${escapedOriginalProfile}"`);
                         logDebug_ACU(`ACU: 已恢复原酒馆连接预设: "${originalProfile}"`);
                     }
                 }
@@ -397,10 +417,10 @@ export class RetryableAiResponseError_ACU extends Error {
             if (rawResult !== undefined) {
                 try {
                     if (!skipProfileSwitch) {
-                        const currentProfileAfterCall = await triggerSlash_ACU('/profile');
+                        const currentProfileAfterCall = await triggerSlashBypassTakeover_ACU('/profile');
                         if (originalProfile && originalProfile !== currentProfileAfterCall) {
                             const escapedOriginalProfile = originalProfile.replace(/"/g, '\\"');
-                            await triggerSlash_ACU(`/profile await=true "${escapedOriginalProfile}"`);
+                            await triggerSlashBypassTakeover_ACU(`/profile await=true "${escapedOriginalProfile}"`);
                             logDebug_ACU(`ACU: 已恢复原酒馆连接预设: "${originalProfile}"`);
                         }
                     }
@@ -442,13 +462,13 @@ export class RetryableAiResponseError_ACU extends Error {
                 };
                 const mainToolPostProcessing = preserveNativeToolPostProcessing_ACU(routing.postProcessing, true);
                 if (mainToolPostProcessing !== routing.postProcessing) mainOverridePayload.custom_prompt_post_processing = mainToolPostProcessing;
-                const rawMainResult = await sendMainApiChatCompletionRequest_ACU(messages, mainOverridePayload, abortSignal);
+                const rawMainResult = await sendMainApiChatCompletionRequest_ACU(messages, mainOverridePayload, abortSignal, ...presetContextToolArgs_ACU(effectiveApiConfig));
                 return finalizeTableFillTurn(chatTurnFromJson_ACU(rawMainResult).turn);
             }
             logDebug_ACU('ACU: 通过酒馆主API发送请求（流式传输）...');
             if (isMainApiChatCompletionAvailable_ACU()) {
                 // 不挂工具的 Chat Completion 主连接同样直发生成端点，避开 generateRaw 经过的第三方脚本 fetch 包装。
-                const directMainText = await callMainApiChatCompletionText_ACU(messages, abortSignal);
+                const directMainText = await callMainApiChatCompletionText_ACU(messages, abortSignal, undefined, effectiveApiConfig);
                 if (directMainText) return directMainText;
                 throw new RetryableAiResponseError_ACU();
             }
@@ -474,7 +494,7 @@ export class RetryableAiResponseError_ACU extends Error {
                 } else {
                     logWarn_ACU('ACU: 并发模式要求独立API，但URL或模型未配置，回退主API。');
                     if (isMainApiChatCompletionAvailable_ACU()) {
-                        const directFallbackText = await callMainApiChatCompletionText_ACU(messages, abortSignal);
+                        const directFallbackText = await callMainApiChatCompletionText_ACU(messages, abortSignal, undefined, effectiveApiConfig);
                         if (directFallbackText) return directFallbackText;
                         throw new RetryableAiResponseError_ACU();
                     }
@@ -505,7 +525,7 @@ export class RetryableAiResponseError_ACU extends Error {
                 ...(tableFillTools.length ? { tools: tableFillTools } : {}),
             });
             if (strictJsonResponseFormat) {
-                logDebug_ACU('[严格JSON填表] 已在请求体附加 json_schema response_format。');
+                logDebug_ACU(`[严格JSON填表] 已在请求体附加 ${strictJsonResponseFormat.type} response_format。`);
             }
 
             logDebug_ACU('ACU: 调用新的后端生成API:', generateUrl, 'Model:', effectiveApiConfig.model);
@@ -542,6 +562,7 @@ export class RetryableAiResponseError_ACU extends Error {
         });
         throw error;
     } finally {
+        takeoverLease.signal.removeEventListener('abort', pauseRequest);
         untrackAbortController_ACU(localAbortController);
         if (currentAbortController_ACU === localAbortController) {
             _set_currentAbortController_ACU(null);

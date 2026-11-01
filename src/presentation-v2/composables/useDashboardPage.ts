@@ -1,3 +1,5 @@
+import { isTakeoverEnabled_ACU } from '../../shared/takeover-control';
+import { setTakeoverEnabled_ACU } from '../../service/settings/takeover-control-service';
 import {
   computed,
   onBeforeUnmount,
@@ -908,6 +910,8 @@ export function useDashboardPage(): DashboardPageState {
   const basicToggles = computed<DashboardToggleItem[]>(() => {
     void dataRefreshTick.value;
     return [
+      { key: "takeoverEnabled", label: dashboardCopy.toggles.takeover.label,
+        description: dashboardCopy.toggles.takeover.description, value: isTakeoverEnabled_ACU() },
       {
         key: "autoUpdateEnabled",
         label: dashboardCopy.toggles.autoUpdate.label,
@@ -1061,7 +1065,10 @@ export function useDashboardPage(): DashboardPageState {
   }
 
   function setToggle(key: string, value: boolean): void {
-    if (key === "zeroTkOccupyModeDefault") {
+    if (key === "takeoverEnabled") {
+      try { setTakeoverEnabled_ACU(!!value); }
+      catch (error) { toast.error(error instanceof Error ? error.message : "接管开关保存失败"); }
+    } else if (key === "zeroTkOccupyModeDefault") {
       setZeroTkOccupyMode_ACU(!!value);
     } else if (key === "developerOptionsEnabled") {
       setDeveloperOptionsEnabled(!!value);
