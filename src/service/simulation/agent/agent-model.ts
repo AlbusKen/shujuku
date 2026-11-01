@@ -1,3 +1,4 @@
+import type { WorldRoundCandidate_ACU } from '../world-candidate';
 import type {
   WorldCollisionReport_ACU,
   WorldSimulationLedger_ACU,
@@ -8,6 +9,8 @@ import type {
   WorldSimulationPendingFixSource_ACU,
   WorldSimulationLogicalRef_ACU,
 } from '../model';
+
+import type { WorldBodyProjectionProof_ACU, WorldFactRevealProof_ACU } from './world-projection-stage';
 
 export const WORLD_SIMULATION_STATE_FIELD_ACU = '_qrf_world_simulation_state';
 export const WORLD_SIMULATION_CONVERSATION_FIELD_ACU = '_qrf_world_simulation_agent_chat';
@@ -196,11 +199,20 @@ export interface WorldSimulationCommitCandidate_ACU {
 }
 export interface WorldSimulationFinalProjection_ACU {
   content: string | null;
-  sourceAgent: 'guidance-composer' | 'current-ledger';
+  sourceAgent: 'guidance-composer' | 'current-ledger' | 'world-round';
   sourceRevision: number;
   deliverable: boolean;
 }
 export type WorldSimulationMainLoopResult_ACU =
+  | {
+    outcome: 'world_round'; summary: string; roundCandidate: WorldRoundCandidate_ACU; outcomes: WorldSimulationSubagentOutcome_ACU[];
+    finalProjection: WorldSimulationFinalProjection_ACU;
+    /** 仅 ID/摘要元数据，不包含任何受审事实正文。 */
+    reviewedProjection?: { factIds: string[]; revealFactIds: string[]; summary: string };
+    bodyProjection?: { proof: WorldBodyProjectionProof_ACU };
+    /** 最终提交入口一次性领取；运行器未预先消费。 */
+    reviewedReveal?: { proof: WorldFactRevealProof_ACU; factIds: string[] };
+  }
   | { outcome: 'commit'; summary: string; commitCandidate: WorldSimulationCommitCandidate_ACU; outcomes: WorldSimulationSubagentOutcome_ACU[]; finalProjection?: WorldSimulationFinalProjection_ACU }
   | { outcome: 'no_change'; summary: string; outcomes: WorldSimulationSubagentOutcome_ACU[]; finalProjection?: WorldSimulationFinalProjection_ACU }
   | { outcome: 'blocked'; summary: string; unresolved: string[]; outcomes: WorldSimulationSubagentOutcome_ACU[] }

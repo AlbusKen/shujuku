@@ -2389,8 +2389,8 @@ describe('格林推演 Agent runtime', () => {
 
     expect(result).toMatchObject({ outcome: 'commit', summary: '取证后提交' });
     expect(subagents.runReviewer).toHaveBeenCalledTimes(2);
-    // 默认上围栏：无显式围栏时，以本地 120000 输入限制减去已占用量计算。
-    expect(liveTools.read).toHaveBeenCalledWith('ledger:current', undefined, 71999);
+    expect(liveTools.read).toHaveBeenCalledWith('ledger:current', undefined,
+      Math.floor((runSettings.agentHistoryTokenBudget - 1) * 0.6));
   });
 
   it('原生 tool_calls 的回执以 role=tool 进入下一次请求', async () => {

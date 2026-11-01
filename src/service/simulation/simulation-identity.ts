@@ -23,9 +23,8 @@ export function worldSimulationRunTargetRef_ACU(run: WorldSimulationRunIdentity_
 export function sameWorldSimulationTargetRef_ACU(left: WorldSimulationCompletedAnchor_ACU, right: WorldSimulationCompletedAnchor_ACU): boolean {
   if (left.chatIdentity !== right.chatIdentity) return false;
   if (left.kind === 'logical') return right.kind === 'logical'
-    && left.contentDigest === right.contentDigest
     && sameWorldSimulationLogicalRef_ACU(left.logicalRef, right.logicalRef);
-  // 宿主正文允许后处理；逻辑楼层仍按冻结的内容版本验证。
+  // 楼层身份不随正文后处理变化。
   return right.kind !== 'logical' && left.messageKey === right.messageKey && left.swipeId === right.swipeId;
 }
 

@@ -1,7 +1,9 @@
+import type { WorldRunMaterials_ACU } from './world-run-materials';
+
 export const WORLD_SIMULATION_SCHEMA_VERSION_ACU = 1 as const;
 /** 首楼持久化字段属于数据契约，不能依赖 Store 的模块初始化。 */
 export const WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU = '_qrf_world_simulation';
-export const WORLD_LEDGER_SCHEMA_VERSION_ACU = 6 as const;
+export const WORLD_LEDGER_SCHEMA_VERSION_ACU = 7 as const;
 export const WORLD_CHRONICLE_OVERVIEW_CAP_ACU = 512 as const;
 export const WORLD_CHRONICLE_HOT_WINDOW_ACU = 32 as const;
 export const WORLD_GUIDANCE_SIGNAL_MAX_CHARS_ACU = 80 as const;
@@ -29,6 +31,27 @@ export class WorldSimulationValidationError_ACU extends Error { readonly error: 
 export function createWorldSimulationError_ACU(code: WorldSimulationErrorCode_ACU, phase: WorldSimulationErrorPhase_ACU, message: string, retryable = false, details?: Record<string, unknown>): WorldSimulationError_ACU { return details ? { code, phase, message, retryable, details } : { code, phase, message, retryable }; }
 
 export interface WorldSimulationPromptSegment_ACU { role: string; content: string; snapshotTemplate?: string; enabled: boolean; deletable: boolean; pinned: boolean; }
+/** 整轮工作流可附加自定义提示词的固定角色；与旧 agentPrompts 完全隔离。 */
+export const WORLD_ROUND_PROMPT_ROLES_ACU = ['clock-recaller', 'world-simulator', 'world-event-analyst', 'actor-simulator', 'worldbook-registrar', 'joint-reviewer', 'scene-review', 'projection-review', 'adoption-review'] as const;
+export type WorldRoundPromptRole_ACU = typeof WORLD_ROUND_PROMPT_ROLES_ACU[number];
+
+/** 正式业务稿中唯一允许由运行期资料展开的名称（模板文字中以 `$${名称}` 书写）。 */
+export type WorldRoundPlaceholder_ACU =
+  | 'WORLD_TASK'
+  | 'WORLD_USER_REQUIREMENTS'
+  | 'ANCHOR_MESSAGE'
+  | 'WORLD_RUNTIME_CONTEXT'
+  | 'WORLD_CHRONICLE'
+  | 'WORLD_TABLES'
+  | 'WORLDBOOK_CATALOG'
+  | 'WORLDBOOK_HITS'
+  | 'READ_BUDGET';
+
+/** 仅供整轮提示词装配的阶段资料；内容不做模板、EJS 或 SQL 解释。 */
+export interface WorldRoundPromptContext_ACU {
+  stage?: string;
+  materials?: Partial<Record<WorldRoundPlaceholder_ACU, unknown>>;
+}
 export interface WorldSimulationRunBudget_ACU { maxIterations: number; maxDelegations: number; maxSameAgent: number; maxConcurrent: number; maxReads: number; maxExtraReads: number; }
 export const WORLD_SIMULATION_WEB_PROVIDERS_ACU = ['duckduckgo', 'serper', 'tavily', 'searxng'] as const;
 export type WorldSimulationWebProvider_ACU = typeof WORLD_SIMULATION_WEB_PROVIDERS_ACU[number];
@@ -42,7 +65,9 @@ export interface WorldSimulationWebResearchSettings_ACU {
 }
 export interface WorldSimulationDynamicsSettings_ACU { rumorTTLDays: number; maxClockAdvanceDays: number; collisionEnforcement: 'strict' | 'relaxed'; missedSweepEnabled: boolean; }
 export interface WorldSimulationWorkflowSettings_ACU { chroniclerHotThreshold: number; }
-export interface WorldSimulationSettings_ACU { autoTriggerEnabled: boolean; agentHistoryTokenBudget: number; agentReadTokenBudget: number | string; agentReadFallbackTokens: number; agentRunBudget: WorldSimulationRunBudget_ACU; webResearch: WorldSimulationWebResearchSettings_ACU; apiPresetMode: 'current' | 'fixed'; fixedApiPresetName: string; agentApiPresets: Record<string, { mode: 'current' | 'fixed'; presetName: string }>; agentPrompts: Record<string, WorldSimulationPromptSegment_ACU[]>; dynamics: WorldSimulationDynamicsSettings_ACU; workflow: WorldSimulationWorkflowSettings_ACU; projection: WorldSimulationProjectionSettings_ACU; promptForceDefaultVersion?: string; contentSafetyPromptBackup?: string; }
+export type WorldSimulationDeliveryTarget_ACU = 'body' | 'plot';
+export type WorldSimulationWorkflowMode_ACU = 'single' | 'layered';
+export interface WorldSimulationSettings_ACU { autoTriggerEnabled: boolean; deliveryTarget: WorldSimulationDeliveryTarget_ACU; workflowMode: WorldSimulationWorkflowMode_ACU; agentHistoryTokenBudget: number; agentReadTokenBudget: number | string; agentReadFallbackTokens: number; agentRunBudget: WorldSimulationRunBudget_ACU; webResearch: WorldSimulationWebResearchSettings_ACU; apiPresetMode: 'current' | 'fixed'; fixedApiPresetName: string; agentApiPresets: Record<string, { mode: 'current' | 'fixed'; presetName: string }>; agentPrompts: Record<string, WorldSimulationPromptSegment_ACU[]>; /** 缺失表示尚未配置；不从旧 agentPrompts 迁移。 */ worldRoundPrompts?: Partial<Record<WorldRoundPromptRole_ACU, WorldSimulationPromptSegment_ACU[]>>; dynamics: WorldSimulationDynamicsSettings_ACU; workflow: WorldSimulationWorkflowSettings_ACU; projection: WorldSimulationProjectionSettings_ACU; promptForceDefaultVersion?: string; contentSafetyPromptBackup?: string; }
 /** 场外信号写进正文的格式：template 是插件起止标记之内的全部内容，$WORLD_SIGNALS 处替换为分组信号。 */
 export interface WorldSimulationProjectionSettings_ACU { template: string; }
 
@@ -60,6 +85,8 @@ export const WORLD_ACTOR_LONG_TERM_STATUSES_ACU = ['ongoing', 'done', 'abandoned
 export type WorldActorLongTermStatus_ACU = typeof WORLD_ACTOR_LONG_TERM_STATUSES_ACU[number];
 /** 人物经历上限：超出时从最早的经历开始覆盖。 */
 export const WORLD_ACTOR_EXPERIENCE_CAP_ACU = 30 as const;
+/** 账本安全上限与单次 Agent 批次预算分离；活跃人物由稳定 ID 分页。 */
+export const WORLD_ACTOR_LEDGER_CAP_ACU = 4096 as const;
 /** 注入子代理时每个人物只带最近若干条经历。 */
 export const WORLD_ACTOR_EXPERIENCE_INJECT_ACU = 20 as const;
 /** 人物行为：text/expectedDuration 由模型写；startedAtDay/startedAt 由程序按提交时的 clock 盖戳。 */
@@ -81,11 +108,48 @@ export interface WorldCollisionReport_ACU { playerRegion: string | null; playerC
 export interface WorldClock_ACU { day: number; slot: string; storyTime: string; precision: 'exact' | 'approximate' | 'unknown'; evidenceRefs: string[]; }
 export interface WorldDimension_ACU { id: string; name: string; kind: 'pressure' | 'growth'; value: number; trend: 'rising' | 'stable' | 'falling'; rationale: string; evidenceRefs: string[]; revision: number; }
 export interface WorldSeed_ACU { id: string; title: string; status: 'established' | 'incubating' | 'active' | 'converging' | 'resolved' | 'retired'; level: number; catalyst: string; visibility: 'hidden' | 'limited' | 'public'; actorIds: string[]; location: WorldLocationRef_ACU | null; expiresAtDay: number | null; missedOutcome: string | null; exposePolicy: WorldSeedExposePolicy_ACU; evidenceRefs: string[]; retiredReason: string | null; revision: number; }
-export interface WorldActor_ACU { id: string; name: string; interests: string[]; location: string; locationRef: WorldLocationRef_ACU | null; life: WorldActorLife_ACU; diedAtDay: number | null; deathSummary: string | null; resources: string[]; goals: string[]; constraints: string[]; informationSources: string[]; knownFacts: string[]; visibility: 'hidden' | 'limited' | 'public'; currentAction: WorldActorAction_ACU | null; longTermAction: WorldActorLongTermAction_ACU | null; experiences: WorldActorExperience_ACU[]; revision: number; }
+export interface WorldActor_ACU { id: string; name: string; interests: string[]; location: string; locationRef: WorldLocationRef_ACU | null; life: WorldActorLife_ACU; diedAtDay: number | null; deathSummary: string | null; resources: string[]; goals: string[]; constraints: string[]; informationSources: string[]; knownFacts: string[]; visibility: 'hidden' | 'limited' | 'public'; currentAction: WorldActorAction_ACU | null; longTermAction: WorldActorLongTermAction_ACU | null; shortTermAction?: WorldActorLongTermAction_ACU | null; previousActionResult?: string; simulationStatus?: 'active' | 'archived'; loreRefs?: string[]; experiences: WorldActorExperience_ACU[]; revision: number; }
 /** missedNote：维护 AI 判定为「主角错过的重要幕后事件」时写明错过了什么；普通纪要为 null。 */
 export interface WorldChronicleEntry_ACU { id: string; at: string; summary: string; relatedIds: string[]; evidenceRefs: string[]; missedNote: string | null; }
 export interface WorldChronicleOverviewRow_ACU { fingerprint: string; day: number; oneLine: string; archiveRef: string; }
 export interface WorldGuidance_ACU { signals: WorldGuidanceSignal_ACU[]; excludedFacts: string[]; evidenceRefs: string[]; }
+
+/** v7 账本领域在旧运行链退役前只开放严格读取；写入由后续候选协议接管。 */
+export interface WorldTime_ACU { day: number; slot: string; }
+export interface WorldNextCheck_ACU extends WorldTime_ACU { reason: string; }
+export interface WorldEvent_ACU {
+  id: string; title: string; state: string; status: 'scheduled' | 'active' | 'paused' | 'resolved' | 'cancelled';
+  actorIds: string[]; organizationIds: string[]; locationRefs: WorldLocationRef_ACU[];
+  startedAt: WorldTime_ACU | null; deadline: WorldTime_ACU | null; nextCheck: WorldNextCheck_ACU | null;
+  relatedEventIds: string[]; loreRefs: string[]; evidenceRefs: string[]; tags: string[]; revision: number;
+  legacy: Record<string, unknown> | null;
+}
+export interface WorldFact_ACU {
+  id: string; summary: string; temporalKind: 'occurrence' | 'condition';
+  happenedAt: WorldTime_ACU | null; validFrom: WorldTime_ACU | null; validUntil: WorldTime_ACU | null;
+  locationRef: WorldLocationRef_ACU | null; actorIds: string[]; worldEventIds: string[];
+  projectionPolicy: 'scene' | 'gated' | 'internal'; revealState: 'locked' | 'unlocked';
+  revealGate: Record<string, unknown> | null; nextCheck: WorldNextCheck_ACU | null;
+  sourceRefs: string[]; evidenceRefs: string[]; supersedesFactIds: string[]; revision: number;
+}
+export interface WorldHistoryMilestone_ACU {
+  id: string; summary: string; happenedAt: WorldTime_ACU; actorIds: string[];
+  worldEventIds: string[]; locationRef: WorldLocationRef_ACU | null; sourceFactIds: string[];
+  importance: number; category: string; visibility: 'internal'; revision: number;
+  legacyRefs: string[];
+  /** 正文真实记载的独立标记，不改变事实可见性或人物认知。 */
+  narrativeRecord?: { status: 'recorded'; recordedAt: WorldTime_ACU; anchorDigest: string; deliveryQuote: string; evidenceQuote: string };
+}
+export interface WorldProjectionDelivery_ACU {
+  factId: string; status: 'delivered' | 'acknowledged' | 'expired'; attempts: number;
+}
+export interface WorldProjection_ACU { anchor: string | null; deliveries: WorldProjectionDelivery_ACU[]; }
+export interface WorldLegacyMigrationIssue_ACU {
+  source: 'dimension' | 'seed' | 'chronicle' | 'rumor' | 'chronicleArchive';
+  sourceId: string;
+  reason: 'requires_review' | 'missing_evidence' | 'unparseable_time' | 'archive_detail_unavailable';
+}
+export interface WorldLegacyMigration_ACU { issues: WorldLegacyMigrationIssue_ACU[]; }
 
 export const WORLD_SIMULATION_LEDGER_MODULES_ACU = ['clock', 'dimensions', 'seeds', 'actors', 'chronicle', 'guidance', 'rumors', 'player'] as const;
 export type WorldSimulationLedgerModule_ACU = typeof WORLD_SIMULATION_LEDGER_MODULES_ACU[number];
@@ -152,17 +216,27 @@ export interface WorldSimulationLedger_ACU {
   schemaVersion: typeof WORLD_LEDGER_SCHEMA_VERSION_ACU;
   revision: number;
   clock: WorldClock_ACU; dimensions: WorldDimension_ACU[]; seeds: WorldSeed_ACU[]; actors: WorldActor_ACU[];
+  worldEvents: WorldEvent_ACU[]; facts: WorldFact_ACU[];
+  /** 确定事实冷层；旧 v7 缺失时保持缺失，且不代表独立宿主归档。 */
+  factArchive?: WorldFact_ACU[];
+  /** 成功保存的推演轮次及冷事实首次入档轮次；由程序维护，旧存档可缺失。 */
+  factArchiveRetention?: { completedRounds: number; enteredAtRound: Record<string, number> };
+  historyMilestones: WorldHistoryMilestone_ACU[];
+  /** 历史纪要冷层；旧 v7 缺失时保持缺失，且不代表独立宿主归档。 */
+  historyArchive?: WorldHistoryMilestone_ACU[];
+  projection: WorldProjection_ACU; legacyMigration: WorldLegacyMigration_ACU;
   chronicle: WorldChronicleEntry_ACU[]; rumors: WorldRumor_ACU[]; player: WorldPlayer_ACU; guidance: WorldGuidance_ACU;
   chronicleOverview: WorldChronicleOverviewRow_ACU[];
   materialCompletion: WorldSimulationMaterialCompletionRecord_ACU;
   pendingFixes: WorldSimulationPendingFix_ACU[];
 }
 
+export const WORLD_SIMULATION_LEDGER_ACTOR_OPTIONAL_FIELDS_ACU = ['previousActionResult'] as const;
 export const WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU = {
   clock: ['day', 'slot', 'storyTime', 'precision', 'evidenceRefs'],
   dimensions: ['id', 'name', 'kind', 'value', 'trend', 'rationale', 'evidenceRefs', 'revision'],
   seeds: ['id', 'title', 'status', 'level', 'catalyst', 'visibility', 'actorIds', 'location', 'expiresAtDay', 'missedOutcome', 'exposePolicy', 'evidenceRefs', 'retiredReason', 'revision'],
-  actors: ['id', 'name', 'interests', 'location', 'locationRef', 'life', 'diedAtDay', 'deathSummary', 'resources', 'goals', 'constraints', 'informationSources', 'knownFacts', 'visibility', 'currentAction', 'longTermAction', 'experiences', 'revision'],
+  actors: ['id', 'name', 'interests', 'location', 'locationRef', 'life', 'diedAtDay', 'deathSummary', 'resources', 'goals', 'constraints', 'informationSources', 'knownFacts', 'visibility', 'currentAction', 'longTermAction', 'shortTermAction', 'simulationStatus', 'loreRefs', 'experiences', 'revision'],
   chronicle: ['id', 'at', 'summary', 'relatedIds', 'evidenceRefs', 'missedNote'],
   guidance: ['signals', 'excludedFacts', 'evidenceRefs'],
   rumors: ['id', 'fact', 'originDay', 'earliestRevealDay', 'channels', 'relatedActorIds', 'status', 'revealedAtDay', 'revision'],
@@ -228,7 +302,7 @@ export const WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU: Record<WorldSimulationLed
   clock: { fields: ['day', 'slot', 'storyTime', 'precision', 'evidenceRefs'], required: ['day', 'slot', 'storyTime', 'precision', 'evidenceRefs'], consistencyGroups: [] },
   dimensions: { fields: ['name', 'kind', 'value', 'trend', 'rationale', 'evidenceRefs', 'revision'], required: ['name', 'kind', 'value', 'trend', 'rationale', 'evidenceRefs'], consistencyGroups: [] },
   seeds: { fields: ['title', 'status', 'level', 'catalyst', 'visibility', 'actorIds', 'location', 'expiresAtDay', 'missedOutcome', 'exposePolicy', 'evidenceRefs', 'retiredReason', 'revision'], required: ['title', 'status', 'level', 'catalyst', 'visibility', 'location', 'evidenceRefs'], consistencyGroups: [['status', 'retiredReason']] },
-  actors: { fields: ['name', 'interests', 'location', 'locationRef', 'life', 'diedAtDay', 'deathSummary', 'resources', 'goals', 'constraints', 'informationSources', 'knownFacts', 'visibility', 'currentAction', 'longTermAction', 'revision'], required: ['name', 'interests', 'location', 'goals', 'informationSources', 'knownFacts'], consistencyGroups: [['life', 'diedAtDay', 'deathSummary']] },
+  actors: { fields: ['name', 'interests', 'location', 'locationRef', 'life', 'diedAtDay', 'deathSummary', 'resources', 'goals', 'constraints', 'informationSources', 'knownFacts', 'visibility', 'currentAction', 'longTermAction', 'previousActionResult', 'revision'], required: ['name', 'interests', 'location', 'goals', 'informationSources', 'knownFacts'], consistencyGroups: [['life', 'diedAtDay', 'deathSummary']] },
   chronicle: { fields: ['at', 'summary', 'relatedIds', 'evidenceRefs', 'missedNote'], required: ['summary'], consistencyGroups: [] },
   guidance: { fields: ['signals', 'excludedFacts', 'evidenceRefs'], required: ['signals', 'excludedFacts', 'evidenceRefs'], consistencyGroups: [] },
   rumors: { fields: ['fact', 'originDay', 'earliestRevealDay', 'channels', 'relatedActorIds', 'status', 'revealedAtDay', 'revision'], required: ['fact', 'originDay', 'channels'], consistencyGroups: [['originDay', 'earliestRevealDay'], ['status', 'revealedAtDay']] },
@@ -289,6 +363,11 @@ interface WorldSimulationRunIdentityBase_ACU {
   taskId: string;
   stageId: string;
   stageRevision: number;
+  /** 运行预留时冻结；旧运行缺字段按原正文目标读取。 */
+  deliveryTarget?: WorldSimulationDeliveryTarget_ACU;
+  workflowMode?: WorldSimulationWorkflowMode_ACU;
+  /** 新整轮协议的运行身份；缺失表示历史 SQL/导演运行，禁止与新候选混用。 */
+  workflowProtocol?: 'world-round-v1';
 }
 
 /** 旧存档省略 kind；保存普通模式时保持原有字段形状。 */
@@ -316,7 +395,10 @@ export interface WorldSimulationTask_ACU {
   createdAt: number;
   updatedAt: number;
   activeRun: WorldSimulationRunIdentity_ACU | null;
+  completedRun?: WorldSimulationRunIdentity_ACU;
   stopReason: string | null;
+  /** world-round-v1 运行冻结的材料摘要；无运行的历史终态可保留。 */
+  runMaterials?: WorldRunMaterials_ACU;
   /** 已结算的自动触发锚点；提交改写正文时记录改写后的摘要，防止完成事件重放。 */
   completedAutoAnchor?: WorldSimulationCompletedAnchor_ACU;
 }

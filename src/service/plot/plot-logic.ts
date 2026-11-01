@@ -165,6 +165,17 @@ function normalizeBooleanField_ACU(source: Record<string, any>, fallback: Record
     return defaultValue;
 }
 
+function normalizeInternalCausalRead_ACU(source: Record<string, any>, fallback: Record<string, any>) {
+    const owner = hasOwnField_ACU(source, 'internalCausalRead')
+      ? source
+      : (hasOwnField_ACU(fallback, 'internalCausalRead') ? fallback : null);
+    if (!owner) return false;
+    if (typeof owner.internalCausalRead !== 'boolean') {
+      throw new Error('剧情任务内部因果读取设置无效。');
+    }
+    return owner.internalCausalRead === true;
+}
+
 function normalizePlotTaskAgentControl_ACU(value: any, fallbackValue: any = null) {
     const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
     const fallback = fallbackValue && typeof fallbackValue === 'object' && !Array.isArray(fallbackValue) ? fallbackValue : {};
@@ -213,6 +224,7 @@ export function normalizePlotTask_ACU(task: Record<string, any> | null, { index 
       order: normalizeNonNegativeInteger_ACU(cloned.order, fallback?.order ?? index),
       description: normalizeOptionalString_ACU(cloned.description, fallback?.description),
       triggerWhen: normalizeOptionalString_ACU(cloned.triggerWhen, fallback?.triggerWhen),
+      internalCausalRead: normalizeInternalCausalRead_ACU(cloned, fallback || {}),
       agentControl: normalizePlotTaskAgentControl_ACU(cloned.agentControl, fallback?.agentControl),
     };
 }

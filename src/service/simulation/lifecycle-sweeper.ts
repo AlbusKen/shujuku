@@ -59,6 +59,8 @@ export function sweepWorldLifecycle_ACU(
   });
 
   next.actors = next.actors.filter(actor => {
+    // 新人物谱无论 active/archived 都保留可检索身份；只清理尚无该状态的旧兼容行。
+    if (actor.simulationStatus !== undefined) return true;
     if (actor.life !== 'dead' || actor.diedAtDay === null || day - actor.diedAtDay <= ttl * 2) return true;
     if (!factRegistered_ACU(next, [actor.id, actor.name, actor.deathSummary ?? ''])) {
       skipped.push({ kind: 'actor', id: actor.id, reason: '死亡行动者缺少 chronicle/overview 事实登记' });

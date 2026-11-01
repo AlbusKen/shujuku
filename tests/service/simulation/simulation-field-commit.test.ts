@@ -142,6 +142,29 @@ describe('格林推演逐栏批次边界', () => {
     expect(result.accepted).toEqual([]);
   });
 
+  it('逐栏写入已有角色时旧事务和新短期字段随盖戳保持同步', () => {
+    const ledger = buildEmptyWorldSimulationLedger_ACU();
+    ledger.actors = [{
+      id: 'actor-a', name: '策划人', interests: [], location: '港口', locationRef: null,
+      life: 'alive', diedAtDay: null, deathSummary: null, resources: [], goals: [], constraints: [],
+      informationSources: [], knownFacts: ['昨天已联系家人'], visibility: 'hidden',
+      currentAction: null, longTermAction: null, shortTermAction: null,
+      simulationStatus: 'active', loreRefs: [], experiences: [], revision: 1,
+    }];
+    const sql = "UPDATE actors SET long_term_action = '{\"text\":\"筹备演出\",\"expected_duration\":\"五日\",\"status\":\"ongoing\"}' WHERE id = 'actor-a' AND expected_revision = 1";
+    const result = plan(sql, 'dramatis-keeper', { ledger });
+    expect(result.rejected).toEqual([]);
+    expect(result.ledger.actors[0].shortTermAction).toEqual(result.ledger.actors[0].longTermAction);
+    expect(result.ledger.actors[0].shortTermAction).toMatchObject({ text: '筹备演出', startedAtDay: 1 });
+    expect(result.ledger.actors[0].knownFacts).toEqual(['昨天已联系家人']);
+    expect(result.ledger.actors[0].simulationStatus).toBe('active');
+    const ended = plan("UPDATE actors SET long_term_action = '{\"text\":\"筹备演出\",\"expected_duration\":\"五日\",\"status\":\"done\",\"outcome\":\"完成彩排\"}' WHERE id = 'actor-a' AND expected_revision = 2", 'dramatis-keeper', { ledger: result.ledger });
+    expect(ended.rejected).toEqual([]);
+    expect(ended.ledger.actors[0].shortTermAction).toBeNull();
+    expect(ended.ledger.actors[0].longTermAction).toBeNull();
+    expect(ended.ledger.actors[0].experiences).toMatchObject([{ text: '筹备演出', status: 'done', outcome: '完成彩排', endedAtDay: 1 }]);
+  });
+
   it('同批两个单例 UPDATE 用同一个提交前账本 revision 并只推进一次', () => {
     const ledger = buildEmptyWorldSimulationLedger_ACU();
     const result = plan("UPDATE player SET contact = 'open' WHERE expected_revision = 0; UPDATE player SET contact = 'secluded' WHERE expected_revision = 0", 'dramatis-keeper', { ledger });

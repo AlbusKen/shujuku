@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { WORLD_SIMULATION_PROMPT_VERSION_V25_ACU, WORLD_SIMULATION_PROMPT_VERSION_V26_ACU, WORLD_SIMULATION_PROMPT_VERSION_V27_ACU, WORLD_SIMULATION_PROMPT_VERSION_V28_ACU, WORLD_SIMULATION_PROMPT_VERSION_V29_ACU, WORLD_SIMULATION_PROMPT_VERSION_V30_ACU, WORLD_SIMULATION_PROMPT_VERSION_V31_ACU, WORLD_SIMULATION_PROMPT_VERSION_V32_ACU, WORLD_SIMULATION_PROMPT_VERSION_V33_ACU, WORLD_SIMULATION_PROMPT_VERSION_V34_ACU, WORLD_SIMULATION_PROMPT_VERSION_V35_ACU, WORLD_SIMULATION_PROMPT_VERSION_V37_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
+import { WORLD_SIMULATION_PROMPT_VERSION_V25_ACU, WORLD_SIMULATION_PROMPT_VERSION_V26_ACU, WORLD_SIMULATION_PROMPT_VERSION_V27_ACU, WORLD_SIMULATION_PROMPT_VERSION_V28_ACU, WORLD_SIMULATION_PROMPT_VERSION_V29_ACU, WORLD_SIMULATION_PROMPT_VERSION_V30_ACU, WORLD_SIMULATION_PROMPT_VERSION_V31_ACU, WORLD_SIMULATION_PROMPT_VERSION_V32_ACU, WORLD_SIMULATION_PROMPT_VERSION_V33_ACU, WORLD_SIMULATION_PROMPT_VERSION_V34_ACU, WORLD_SIMULATION_PROMPT_VERSION_V35_ACU, WORLD_SIMULATION_PROMPT_VERSION_V37_ACU, WORLD_SIMULATION_PROMPT_VERSION_V38_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
 import { USER_PREFILL_CONTENT_ACU } from '../../../../src/shared/user-prefill.js';
 import { buildDefaultWorldSimulationEnvelope_ACU, buildDefaultWorldSimulationSettings_ACU } from '../../../../src/service/simulation/defaults';
 import { validateWorldSimulationEnvelope_ACU } from '../../../../src/service/simulation/simulation-store';
@@ -71,7 +71,7 @@ describe('格林推演提示词装配契约', () => {
     const guidanceIndex = custom['world-director'].findIndex(isAgentSnapshotSlot_ACU);
     custom['world-director'][guidanceIndex].snapshotTemplate = '用户 guidance：自定义';
     expect(migrateWorldSimulationAgentPrompts_ACU(custom, {} as any)['world-director'][guidanceIndex].snapshotTemplate).toBe('用户 guidance：自定义');
-    expect(buildDefaultWorldSimulationSettings_ACU().agentPrompts).toEqual(defaults);
+    expect(buildDefaultWorldSimulationSettings_ACU().agentPrompts).toEqual({});
     expect(parseWorldSimulationMainAction_ACU(WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU.main)).toMatchObject({ kind: 'open_round', focus: '时间推进与暗流压力' });
     expect(parseWorldSimulationPlannerOutput_ACU(WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU.planner)).toMatchObject({ action: 'plan' });
     expect(parseWorldSimulationSpecialistResult_ACU(WORLD_SIMULATION_PROTOCOL_EXAMPLES_ACU.specialist, snapshot)).toMatchObject({ status: 'candidate' });
@@ -116,7 +116,7 @@ describe('格林推演提示词装配契约', () => {
   });
 
   it('提示词完整覆盖角色职责，同时保留时间先行、历史默认指纹与信息渠道纪律', () => {
-    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe(WORLD_SIMULATION_PROMPT_VERSION_V37_ACU);
+    expect(WORLD_SIMULATION_PROMPT_VERSION_ACU).toBe(WORLD_SIMULATION_PROMPT_VERSION_V38_ACU);
     expect(buildDefaultWorldSimulationSettings_ACU().agentRunBudget).toMatchObject({ maxIterations: 4, maxExtraReads: 1, maxConcurrent: 5 });
     expect(WORLD_SIMULATION_PROMPT_DEFAULT_LINEAGE_ACU['world-director'].map(item => item.version)).toEqual([
       'world-simulation-v3', 'world-simulation-v4', 'world-simulation-v5', 'world-simulation-v6', 'world-simulation-v7', 'world-simulation-v8', 'world-simulation-v9', 'world-simulation-v10', 'world-simulation-v11', 'world-simulation-v12', 'world-simulation-v13', 'world-simulation-v14', 'world-simulation-v15', 'world-simulation-v16', 'world-simulation-v17', 'world-simulation-v18', 'world-simulation-v19', 'world-simulation-v20', 'world-simulation-v21', 'world-simulation-v22', 'world-simulation-v23', 'world-simulation-v24',
@@ -312,21 +312,22 @@ describe('格林推演提示词装配契约', () => {
 
     const loaded = validateWorldSimulationEnvelope_ACU(envelope);
 
-    expect(loaded.settings.promptForceDefaultVersion).toBe(WORLD_SIMULATION_PROMPT_VERSION_ACU);
-    expect(loaded.settings.agentPrompts).toEqual(buildDefaultWorldSimulationAgentPrompts_ACU());
+    expect(loaded.settings.promptForceDefaultVersion).toBeUndefined();
+    expect(loaded.settings.agentPrompts).toEqual({});
   });
 
-  it('当前版本信封里用户改写的提示词原样保留，重复读取不再重置', () => {
+  it('旧提示词输入不再回读或自动恢复，重复读取稳定', () => {
     const envelope = buildDefaultWorldSimulationEnvelope_ACU() as any;
+    envelope.settings.agentPrompts = buildDefaultWorldSimulationAgentPrompts_ACU();
     const director = envelope.settings.agentPrompts['world-director'];
     const snapshot = director.findIndex(isAgentSnapshotSlot_ACU);
     director[snapshot].snapshotTemplate = `${director[snapshot].snapshotTemplate}\n用户附加：自定义动态世界`;
     director.splice(1, 0, { role: 'user', content: '用户追加规则', enabled: true, deletable: true, pinned: false });
-
-    const first = validateWorldSimulationEnvelope_ACU(structuredClone(envelope));
-
-    expect(first.settings.agentPrompts['world-director']).toEqual(director);
-    expect(validateWorldSimulationEnvelope_ACU(structuredClone(first)).settings.agentPrompts).toEqual(first.settings.agentPrompts);
+    const original = structuredClone(envelope);
+    const first = validateWorldSimulationEnvelope_ACU(envelope);
+    expect(first.settings.agentPrompts).toEqual({});
+    expect(validateWorldSimulationEnvelope_ACU(first).settings.agentPrompts).toEqual({});
+    expect(envelope).toEqual(original);
   });
 
   it('两次真实渲染的静态前缀不随用户要求、历史与当前锚点变化', async () => {

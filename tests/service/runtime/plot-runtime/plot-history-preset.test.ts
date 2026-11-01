@@ -609,6 +609,7 @@ describe('savePlotToLatestMessage_ACU', () => {
     mockGetChatArray.mockReturnValue([target]);
     mockTempPlotToSaveRef.value = {
       content: '本轮推进',
+      finalMessage: '<personnel>人物已完成约定</personnel>',
       userInputHash: 'hash_用户原文',
       finalMessageHash: 'hash_最终注入内容',
       roundId: 'round-2',
@@ -621,6 +622,9 @@ describe('savePlotToLatestMessage_ACU', () => {
     expect(out).toEqual({ status: 'committed', targetIndex: 0 });
     expect(target.qrf_plot).toBe('本轮推进');
     expect(target._qrf_plot_round_id).toBe('round-2');
+    expect(target._qrf_plot_final_message).toBe('<personnel>人物已完成约定</personnel>');
+    expect(target.mes).toBe('用户原文');
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledOnce();
   });
 
   it('roundId 重试：保存失败后 flush 按 roundId 精确命中同一层，即便已出现新用户层', async () => {

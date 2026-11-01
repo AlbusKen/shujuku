@@ -2,6 +2,8 @@ import type { ZeroLayerEnvelope_ACU, ZeroLayerScope_ACU, ZeroLayerTurn_ACU } fro
 import { ZeroLayerError_ACU } from './model';
 import { validateZeroLayerEnvelope_ACU } from './validation';
 import { carrierSwipeId_ACU } from './carrier-context';
+import { applyWorldSimulationProjection_ACU } from '../simulation/simulation-projection';
+import type { ZeroLayerSimulationResult_ACU } from './model';
 
 /** 物理位置与逻辑身份不能互换；物理定位只在同一源快照中有效。 */
 export type ZeroLayerFloorRef_ACU =
@@ -85,7 +87,11 @@ export function buildZeroLayerTimeline_ACU(
       floors.push({
         ref: { kind: 'logical', sessionId: source.sessionId, branchId: turn.branchId,
           turnId: turn.turnId, floorId: floor.floorId, role: floor.role },
-        role: floor.role, body: floor.role === 'user' ? turn.input : turn.body!,
+        role: floor.role, body: floor.role === 'user' ? turn.input : (() => {
+          const simulation = floor.data.simulation as ZeroLayerSimulationResult_ACU | undefined;
+          return simulation?.delivery === 'body'
+            ? applyWorldSimulationProjection_ACU(turn.body!, simulation.projection) : turn.body!;
+        })(),
         aiOrdinal: floor.role === 'assistant' ? ++completedAiCount : null,
         data: structuredClone(floor.data),
       });

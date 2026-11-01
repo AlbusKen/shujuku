@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildDefaultWorldSimulationEnvelope_ACU } from '../../../src/service/simulation/defaults';
+import { createWorldSimulationError_ACU, WorldSimulationValidationError_ACU } from '../../../src/service/simulation/model';
 import type { WorldSimulationEnvelope_ACU, WorldSimulationStagePlan_ACU, WorldSimulationStageRevision_ACU } from '../../../src/service/simulation/model';
 import type { WorldSimulationMainLoopResult_ACU } from '../../../src/service/simulation/agent/agent-model';
 import { WorldSimulationOrchestrator_ACU, resetWorldSimulationOrchestratorStateForTests_ACU, type WorldSimulationPreparedRun_ACU } from '../../../src/service/simulation/simulation-orchestrator';
 import { beginWorldSimulationSessionRun_ACU, isWorldSimulationSessionRunning_ACU, resetWorldSimulationSessionLogForTests_ACU } from '../../../src/service/simulation/agent/agent-session-log';
+import { buildWorldRunMaterials_ACU } from '../../../src/service/simulation/world-run-materials';
 
 const anchor = (chatIdentity = 'chat-a') => ({
   chatIdentity, messageIndex: 1, messageId: 1, messageKey: 'number:1', swipeId: '0', contentDigest: 'digest',
@@ -53,6 +55,21 @@ function fixture(options: {
   return { orchestrator, store, prepare, execute, commitProjection, getEnvelope: () => envelope!, initialLedger };
 }
 
+function seedPausedWorldRound(f: ReturnType<typeof fixture>, withMaterials = true) {
+  const identity: any = {
+    runId: 'round-run', chatIdentity: 'chat-a', triggerKind: 'agent_chat_message', triggerConversationMessageId: 'turn-1',
+    anchorMessageId: 1, anchorMessageKey: 'number:1', anchorSwipeId: '0', anchorContentDigest: 'digest',
+    baseLedgerRevision: 0, deliveryTarget: 'body', workflowMode: 'layered', workflowProtocol: 'world-round-v1',
+    taskId: 'round-task', stageId: 'round-stage', stageRevision: 1,
+  };
+  const envelope = f.getEnvelope();
+  envelope.task = { taskId: identity.taskId, originInstruction: '原始意图', status: 'paused', createdAt: 1, updatedAt: 1,
+    activeRun: identity, stopReason: 'manual', ...(withMaterials ? { runMaterials: buildWorldRunMaterials_ACU({ instruction: '原始意图', worldbookSnapshot: { available: true, entries: [] } }) } : {}) };
+  envelope.activeStageId = identity.stageId;
+  envelope.stages = [{ stageId: identity.stageId, stageNumber: 1, status: 'planning', activeRevision: 1, revisions: [revision(true)] }];
+  return identity;
+}
+
 /** 构造"首次 prepare 挂起直到 abort、之后正常返回"的 prepare，并暴露首次进入的信号。 */
 function abortableFirstPrepare(execute: WorldSimulationPreparedRun_ACU['execute']) {
   let entered!: () => void;
@@ -73,6 +90,327 @@ function abortableFirstPrepare(execute: WorldSimulationPreparedRun_ACU['execute'
 describe('WorldSimulationOrchestrator_ACU', () => {
   beforeEach(() => {
     resetWorldSimulationOrchestratorStateForTests_ACU();
+  });
+
+  it('plot 目标在 legacy 工作流下仍拒绝旧正文提交', async () => {
+    const f = fixture();
+    f.getEnvelope().settings.deliveryTarget = 'plot';
+    await expect(f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' }))
+      .rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_CONFIG_INVALID' } });
+    expect(f.prepare).not.toHaveBeenCalled();
+    expect(f.store.updateAtomically).not.toHaveBeenCalled();
+    expect(f.commitProjection).not.toHaveBeenCalled();
+  });
+
+  it('plot 目标的新协议启动不创建正文投影', async () => {
+    const f = fixture({ prepare: async () => ({ revision: revision(), execute: async identity => ({
+      outcome: 'world_round' as const, summary: '账本完成', outcomes: [],
+      roundCandidate: { baseRevision: identity.baseLedgerRevision, candidateClock: f.getEnvelope().ledger.clock,
+        worldEventWrites: [], actorWrites: [], factWrites: [], historyMilestoneWrites: [], actorCompletions: [],
+        projection: { anchor: null, deliveries: [] }, completion: 'no_change' as const },
+      finalProjection: { content: '不应投送', sourceAgent: 'world-round' as const, sourceRevision: 0, deliverable: true },
+    }) }) });
+    f.getEnvelope().settings.deliveryTarget = 'plot';
+    const commitRound = vi.fn(async ({ identity }: any) => {
+      const envelope = f.getEnvelope();
+      envelope.ledger = { ...envelope.ledger, revision: identity.baseLedgerRevision + 1 };
+      envelope.task = { ...envelope.task!, status: 'completed', activeRun: null, stopReason: null };
+      envelope.stages = envelope.stages.map(stage => ({ ...stage, status: 'completed' }));
+    });
+    const orchestrator = new WorldSimulationOrchestrator_ACU({ store: f.store, now: () => 10,
+      allocateId: kind => `${kind}-plot`, prepare: f.prepare as any, assertAnchorCurrent: vi.fn(),
+      commitProjection: f.commitProjection, workflowProtocol: 'world-round-v1', commitRound });
+    const result = await orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' });
+    expect(result).toMatchObject({ status: 'completed', result: { finalProjection: { content: null, deliverable: false } } });
+    expect(f.commitProjection).not.toHaveBeenCalled();
+  });
+
+  it('显式 single 模式尚未接通时不沿旧导演流程启动', async () => {
+    const f = fixture();
+    f.getEnvelope().settings.workflowMode = 'single';
+    await expect(f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' }))
+      .rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_CONFIG_INVALID' } });
+    expect(f.prepare).not.toHaveBeenCalled();
+    expect(f.store.updateAtomically).not.toHaveBeenCalled();
+  });
+
+  it('仅有 commitRound 端口不标记新协议，single 仍在任务预留前阻断', async () => {
+    const f = fixture();
+    const commitRound = vi.fn(async () => undefined);
+    const orchestrator = new WorldSimulationOrchestrator_ACU({
+      store: f.store, now: () => 10, allocateId: kind => `${kind}-legacy`, prepare: f.prepare as any,
+      assertAnchorCurrent: vi.fn(), commitProjection: f.commitProjection, commitRound,
+    });
+    const layered = await orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' });
+    expect(layered).toMatchObject({ status: 'completed', identity: { workflowMode: 'layered' } });
+    expect('workflowProtocol' in (layered as any).identity).toBe(false);
+    expect(commitRound).not.toHaveBeenCalled();
+
+    const blocked = fixture();
+    blocked.getEnvelope().settings.workflowMode = 'single';
+    const single = new WorldSimulationOrchestrator_ACU({
+      store: blocked.store, now: () => 10, allocateId: kind => `${kind}-single`, prepare: blocked.prepare as any,
+      assertAnchorCurrent: vi.fn(), commitProjection: blocked.commitProjection, commitRound,
+    });
+    await expect(single.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' }))
+      .rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_CONFIG_INVALID' } });
+    expect(blocked.store.updateAtomically).not.toHaveBeenCalled();
+  });
+
+  it('显式新协议缺端口不预留任务，旧结果也不能冒充新身份', async () => {
+    const missing = fixture();
+    const missingPort = new WorldSimulationOrchestrator_ACU({
+      store: missing.store, now: () => 10, allocateId: kind => `${kind}-missing`, prepare: missing.prepare as any,
+      assertAnchorCurrent: vi.fn(), commitProjection: missing.commitProjection, workflowProtocol: 'world-round-v1',
+    });
+    await expect(missingPort.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' }))
+      .rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_CONFIG_INVALID' } });
+    expect(missing.store.updateAtomically).not.toHaveBeenCalled();
+
+    const f = fixture();
+    const commitRound = vi.fn(async () => undefined);
+    const newWorkflow = new WorldSimulationOrchestrator_ACU({
+      store: f.store, now: () => 10, allocateId: kind => `${kind}-round`, prepare: f.prepare as any,
+      assertAnchorCurrent: vi.fn(), commitProjection: f.commitProjection, workflowProtocol: 'world-round-v1', commitRound,
+    });
+    const result = await newWorkflow.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' });
+    expect(result).toMatchObject({ status: 'failed', error: { message: 'WORLD_SIMULATION_PROTOCOL_RESULT_MISMATCH' } });
+    expect(commitRound).not.toHaveBeenCalled();
+    expect(f.commitProjection).not.toHaveBeenCalled();
+    expect(f.getEnvelope().ledger).toBe(f.initialLedger);
+  });
+
+  it.each(['single', 'layered'] as const)('显式 %s plot 新协议以 ledger-only world_round 提交', async workflowMode => {
+    const f = fixture({ prepare: async () => ({ revision: revision(), execute: async identity => ({
+      outcome: 'world_round' as const, summary: 'plot 账本完成', outcomes: [],
+      roundCandidate: { baseRevision: identity.baseLedgerRevision, candidateClock: f.getEnvelope().ledger.clock,
+        worldEventWrites: [], actorWrites: [], factWrites: [], historyMilestoneWrites: [], actorCompletions: [],
+        projection: { anchor: null, deliveries: [] }, completion: 'no_change' as const },
+      finalProjection: { content: null, sourceAgent: 'world-round' as const, sourceRevision: 1, deliverable: false },
+    }) }) });
+    f.getEnvelope().settings.workflowMode = workflowMode;
+    f.getEnvelope().settings.deliveryTarget = 'plot';
+    const commitRound = vi.fn(async ({ identity }: any) => {
+      const envelope = f.getEnvelope();
+      envelope.ledger = { ...envelope.ledger, revision: identity.baseLedgerRevision + 1 };
+      envelope.task = { ...envelope.task!, status: 'completed', activeRun: null, stopReason: null };
+      envelope.stages = envelope.stages.map(stage => stage.stageId === identity.stageId
+        ? { ...stage, status: 'completed', activeRevision: identity.stageRevision } : stage);
+    });
+    const orchestrator = new WorldSimulationOrchestrator_ACU({
+      store: f.store, now: () => 10, allocateId: kind => `${kind}-plot-round`, prepare: f.prepare as any,
+      assertAnchorCurrent: vi.fn(), commitProjection: f.commitProjection, workflowProtocol: 'world-round-v1', commitRound,
+    });
+    await expect(orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' }))
+      .resolves.toMatchObject({ status: 'completed', identity: { deliveryTarget: 'plot', workflowProtocol: 'world-round-v1' },
+        result: { outcome: 'world_round', finalProjection: { content: null, deliverable: false } } });
+    expect(commitRound).toHaveBeenCalledOnce();
+    expect(f.commitProjection).not.toHaveBeenCalled();
+  });
+
+  it.each(['single', 'layered'] as const)('显式 %s 新协议以 world_round 经权威回读完成', async workflowMode => {
+    const f = fixture({ prepare: async () => ({ revision: revision(), execute: async identity => ({
+      outcome: 'world_round' as const, summary: '整轮完成', outcomes: [],
+      roundCandidate: { baseRevision: identity.baseLedgerRevision, candidateClock: f.getEnvelope().ledger.clock,
+        worldEventWrites: [], actorWrites: [], factWrites: [], historyMilestoneWrites: [], actorCompletions: [],
+        projection: { anchor: null, deliveries: [] }, completion: 'no_change' as const },
+      finalProjection: { content: null, sourceAgent: 'world-round' as const, sourceRevision: 1, deliverable: false },
+    }) }) });
+    f.getEnvelope().settings.workflowMode = workflowMode;
+    const commitRound = vi.fn(async ({ identity }: any) => {
+      const envelope = f.getEnvelope();
+      envelope.ledger = { ...envelope.ledger, revision: identity.baseLedgerRevision + 1 };
+      envelope.task = { ...envelope.task!, status: 'completed', activeRun: null, stopReason: null };
+      envelope.stages = envelope.stages.map(stage => stage.stageId === identity.stageId
+        ? { ...stage, status: 'completed', activeRevision: identity.stageRevision } : stage);
+      return undefined;
+    });
+    const orchestrator = new WorldSimulationOrchestrator_ACU({
+      store: f.store, now: () => 10, allocateId: kind => `${kind}-round`, prepare: f.prepare as any,
+      assertAnchorCurrent: vi.fn(), commitProjection: f.commitProjection, workflowProtocol: 'world-round-v1', commitRound,
+    });
+    const result = await orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' });
+    expect(result).toMatchObject({ status: 'completed', identity: { workflowProtocol: 'world-round-v1', workflowMode },
+      result: { outcome: 'world_round', finalProjection: { deliverable: false, sourceRevision: 1 } } });
+    expect(commitRound).toHaveBeenCalledOnce();
+    expect(f.commitProjection).not.toHaveBeenCalled();
+  });
+
+  it('暂停的新协议运行恢复时缺少显式能力拒绝且不调用 prepare', async () => {
+    const execute = vi.fn(async () => completed);
+    const { prepare, prepareEntered } = abortableFirstPrepare(execute);
+    const f = fixture({ prepare });
+    const capability = new WorldSimulationOrchestrator_ACU({
+      store: f.store, now: () => 10, allocateId: kind => `${kind}-round`, prepare: f.prepare as any,
+      assertAnchorCurrent: vi.fn(), commitProjection: f.commitProjection, workflowProtocol: 'world-round-v1', commitRound: vi.fn(),
+    });
+    const running = capability.start({ triggerKind: 'agent_chat_message', anchor: anchor(), instruction: '推进', triggerConversationMessageId: 'turn-1' });
+    await prepareEntered;
+    await capability.interrupt('chat-a');
+    await running;
+    const prepareCalls = f.prepare.mock.calls.length;
+    const withoutCapability = new WorldSimulationOrchestrator_ACU({
+      store: f.store, now: () => 10, allocateId: kind => `${kind}-legacy`, prepare: f.prepare as any,
+      assertAnchorCurrent: vi.fn(), commitProjection: f.commitProjection,
+    });
+    await expect(withoutCapability.resume({ anchor: anchor() })).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_CONFIG_INVALID' } });
+    expect(f.prepare).toHaveBeenCalledTimes(prepareCalls);
+  });
+
+  it('暂停任务缺少进度资料时重新开始，不清空已保存账本和设置', async () => {
+    const f = fixture();
+    const previous = seedPausedWorldRound(f, false);
+    const initialLedger = f.getEnvelope().ledger;
+    const initialSettings = f.getEnvelope().settings;
+    const prepare = vi.fn(async ({ identity }: any) => ({ revision: revision(), execute: async () => ({
+      outcome: 'world_round' as const, summary: '重新开始完成', outcomes: [],
+      roundCandidate: { baseRevision: identity.baseLedgerRevision, candidateClock: initialLedger.clock,
+        worldEventWrites: [], actorWrites: [], factWrites: [], historyMilestoneWrites: [], actorCompletions: [],
+        projection: initialLedger.projection, completion: 'no_change' as const },
+      finalProjection: { content: null, sourceAgent: 'world-round' as const, sourceRevision: 1, deliverable: false },
+    }) }));
+    const commitRound = vi.fn(async ({ identity }: any) => {
+      const current = f.getEnvelope();
+      current.ledger = { ...current.ledger, revision: identity.baseLedgerRevision + 1 };
+      current.task = { ...current.task!, status: 'completed', activeRun: null };
+      current.stages = current.stages.map(stage => ({ ...stage, status: 'completed' }));
+    });
+    const orchestrator = new WorldSimulationOrchestrator_ACU({ store: f.store, now: () => 10,
+      allocateId: kind => `${kind}-restarted`, prepare, assertAnchorCurrent: vi.fn(),
+      commitProjection: f.commitProjection, workflowProtocol: 'world-round-v1', commitRound });
+    const result = await orchestrator.resume({ anchor: anchor(), instruction: '继续' });
+    expect(result).toMatchObject({ status: 'completed', identity: { runId: 'run-restarted', taskId: 'task-restarted' } });
+    expect(prepare.mock.calls[0][0]).toMatchObject({ instruction: '原始意图' });
+    expect(f.getEnvelope().settings).toEqual(initialSettings);
+    expect(f.getEnvelope().ledger).toEqual({ ...initialLedger, revision: 1 });
+    expect(f.getEnvelope().timeline).toContainEqual(expect.objectContaining({ taskId: previous.taskId, kind: 'stopped' }));
+  });
+
+  it('已有完整进度时不把新指令混入原冻结运行', async () => {
+    const appendUserMessage = vi.fn(async () => undefined);
+    const f = fixture({ appendUserMessage });
+    seedPausedWorldRound(f);
+    const orchestrator = new WorldSimulationOrchestrator_ACU({
+      store: f.store, now: () => 10, allocateId: kind => `${kind}-round`, prepare: f.prepare as any,
+      assertAnchorCurrent: vi.fn(), commitProjection: f.commitProjection, workflowProtocol: 'world-round-v1', commitRound: vi.fn(),
+      checkResumeMaterials: vi.fn(async () => undefined),
+    });
+    await expect(orchestrator.resume({ anchor: anchor(), instruction: '改写意图' })).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_CONFIG_INVALID' } });
+    expect(appendUserMessage).not.toHaveBeenCalled();
+    expect(f.prepare).not.toHaveBeenCalled();
+  });
+
+  it.each(['body', 'plot'] as const)('冻结 %s 的整轮相同资料以 originInstruction 恢复且不换 identity', async deliveryTarget => {
+    const f = fixture(); const identity = seedPausedWorldRound(f);
+    identity.deliveryTarget = deliveryTarget;
+    f.getEnvelope().settings.deliveryTarget = deliveryTarget === 'plot' ? 'body' : 'plot';
+    const checkResumeMaterials = vi.fn(async () => undefined);
+    const commitRound = vi.fn(async ({ identity: active }: any) => {
+      const envelope = f.getEnvelope(); envelope.ledger = { ...envelope.ledger, revision: 1 };
+      envelope.task = { ...envelope.task!, status: 'completed', activeRun: null, stopReason: null };
+      envelope.stages[0].status = 'completed'; envelope.stages[0].activeRevision = active.stageRevision;
+    });
+    const prepare = vi.fn(async () => ({ revision: revision(true), execute: async () => ({ outcome: 'world_round' as const, summary: '完成', outcomes: [],
+      roundCandidate: { baseRevision: 0, candidateClock: f.getEnvelope().ledger.clock, worldEventWrites: [], actorWrites: [], factWrites: [], historyMilestoneWrites: [], actorCompletions: [], projection: { anchor: null, deliveries: [] }, completion: 'no_change' as const },
+      finalProjection: { content: null, sourceAgent: 'world-round' as const, sourceRevision: 1, deliverable: false },
+    }) }));
+    const orchestrator = new WorldSimulationOrchestrator_ACU({ store: f.store, now: () => 10, allocateId: kind => `${kind}-round`, prepare: prepare as any,
+      assertAnchorCurrent: vi.fn(), commitProjection: f.commitProjection, workflowProtocol: 'world-round-v1', commitRound, checkResumeMaterials });
+    await expect(orchestrator.resume({ anchor: anchor(), instruction: '继续' })).resolves.toMatchObject({ status: 'completed', identity: { runId: identity.runId, taskId: identity.taskId } });
+    expect(checkResumeMaterials).toHaveBeenCalledOnce();
+    expect(prepare.mock.calls[0][0]).toMatchObject({ instruction: '原始意图', identity: { runId: identity.runId } });
+  });
+
+  it('整轮资料预检异步期间身份或账本漂移时拒绝且保留 paused', async () => {
+    const f = fixture(); seedPausedWorldRound(f);
+    const checkResumeMaterials = vi.fn(async () => { f.getEnvelope().ledger = { ...f.getEnvelope().ledger, revision: 1 }; });
+    const orchestrator = new WorldSimulationOrchestrator_ACU({ store: f.store, now: () => 10, allocateId: kind => `${kind}-round`, prepare: f.prepare as any,
+      assertAnchorCurrent: vi.fn(), commitProjection: f.commitProjection, workflowProtocol: 'world-round-v1', commitRound: vi.fn(), checkResumeMaterials });
+    await expect(orchestrator.resume({ anchor: anchor() })).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_REVISION_CONFLICT' } });
+    expect(f.prepare).not.toHaveBeenCalled();
+    expect(f.getEnvelope().task).toMatchObject({ status: 'paused', activeRun: { runId: 'round-run' } });
+  });
+
+  it('旧身份拒绝 world_round 结果，失败前不调用提交端口', async () => {
+    const f = fixture({ prepare: async () => ({ revision: revision(), execute: async () => ({
+      outcome: 'world_round' as const, summary: '错误协议', outcomes: [],
+      roundCandidate: { baseRevision: 0, candidateClock: f.getEnvelope().ledger.clock, worldEventWrites: [], actorWrites: [],
+        factWrites: [], historyMilestoneWrites: [], actorCompletions: [], projection: { anchor: null, deliveries: [] }, completion: 'no_change' as const },
+      finalProjection: { content: null, sourceAgent: 'world-round' as const, sourceRevision: 0, deliverable: false },
+    }) }) });
+    const result = await f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' });
+    expect(result).toMatchObject({ status: 'failed', error: { message: 'WORLD_SIMULATION_PROTOCOL_RESULT_MISMATCH' } });
+    expect(f.commitProjection).not.toHaveBeenCalled();
+    expect(f.getEnvelope().ledger).toBe(f.initialLedger);
+  });
+
+  it('已冻结 layered 的暂停运行不因后来改为 single 而重启另一条工作流', async () => {
+    const execute = vi.fn(async () => completed);
+    const { prepare, prepareEntered } = abortableFirstPrepare(execute);
+    const f = fixture({ prepare });
+    const running = f.orchestrator.start({ triggerKind: 'agent_chat_message', anchor: anchor(), instruction: '推进', triggerConversationMessageId: 'turn-1' });
+    await prepareEntered;
+    await f.orchestrator.interrupt('chat-a');
+    await running;
+    expect(f.getEnvelope().task?.activeRun?.workflowMode).toBe('layered');
+    f.getEnvelope().settings.workflowMode = 'single';
+    const resumed = await f.orchestrator.resume({ anchor: anchor() });
+    expect(resumed).toMatchObject({ status: 'completed', identity: { workflowMode: 'layered' } });
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it('预留期间执行模式切换时拒绝过期冻结', async () => {
+    const f = fixture();
+    f.store.updateAtomically.mockImplementationOnce(async (mutator: (current: WorldSimulationEnvelope_ACU | null) => WorldSimulationEnvelope_ACU) => {
+      f.getEnvelope().settings.workflowMode = 'single';
+      mutator(f.getEnvelope());
+    });
+    const result = await f.orchestrator.start({ triggerKind: 'agent_chat_message', anchor: anchor(), instruction: '推进' });
+    expect(result).toMatchObject({ status: 'failed', error: { code: 'WORLD_SIMULATION_REVISION_CONFLICT' } });
+    expect(f.prepare).not.toHaveBeenCalled();
+  });
+
+  it('预留期间长期投送偏好被别的写入改变时拒绝冻结过期目标', async () => {
+    const f = fixture();
+    const update = f.store.updateAtomically;
+    update.mockImplementationOnce(async (mutator: (current: WorldSimulationEnvelope_ACU | null) => WorldSimulationEnvelope_ACU) => {
+      f.getEnvelope().settings.deliveryTarget = 'plot';
+      mutator(f.getEnvelope());
+    });
+    const result = await f.orchestrator.start({ triggerKind: 'agent_chat_message', anchor: anchor(), instruction: '推进' });
+    expect(result).toMatchObject({ status: 'failed', error: { code: 'WORLD_SIMULATION_REVISION_CONFLICT' } });
+    expect(f.prepare).not.toHaveBeenCalled();
+    expect(f.commitProjection).not.toHaveBeenCalled();
+  });
+
+  it('冻结 body 的旧运行在长期偏好改为 plot 后仍可按原目标恢复', async () => {
+    const execute = vi.fn(async () => completed);
+    const { prepare, prepareEntered } = abortableFirstPrepare(execute);
+    const f = fixture({ prepare });
+    const running = f.orchestrator.start({ triggerKind: 'agent_chat_message', anchor: anchor(), instruction: '推进', triggerConversationMessageId: 'turn-1' });
+    await prepareEntered;
+    await f.orchestrator.interrupt('chat-a');
+    await running;
+    expect(f.getEnvelope().task?.activeRun?.deliveryTarget).toBe('body');
+    f.getEnvelope().settings.deliveryTarget = 'plot';
+    const resumed = await f.orchestrator.resume({ anchor: anchor() });
+    expect(resumed).toMatchObject({ status: 'completed', identity: { deliveryTarget: 'body' } });
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it('旧运行缺少冻结目标且长期设置为 plot 时禁止沿旧正文路径恢复', async () => {
+    const execute = vi.fn(async () => completed);
+    const { prepare, prepareEntered } = abortableFirstPrepare(execute);
+    const f = fixture({ prepare });
+    const running = f.orchestrator.start({ triggerKind: 'agent_chat_message', anchor: anchor(), instruction: '推进', triggerConversationMessageId: 'turn-1' });
+    await prepareEntered;
+    await f.orchestrator.interrupt('chat-a');
+    await running;
+    delete f.getEnvelope().task?.activeRun?.deliveryTarget;
+    f.getEnvelope().settings.deliveryTarget = 'plot';
+    await expect(f.orchestrator.resume({ anchor: anchor() }))
+      .rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_CONFIG_INVALID' } });
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it('自动触发关闭时不预留任务且模型调用为 0', async () => {
@@ -324,6 +662,69 @@ describe('WorldSimulationOrchestrator_ACU', () => {
     await expect(running).resolves.toMatchObject({ status: 'failed', error: { code: 'WORLD_SIMULATION_REVISION_CONFLICT' } });
     expect(f.getEnvelope().ledger).toBe(driftedLedger);
     expect(f.getEnvelope().task).toMatchObject({ status: 'failed', activeRun: null });
+  });
+
+  it('prepare 真实失败写入 error 级定位日志，且不输出资料对象', async () => {
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const f = fixture({ prepare: async () => { throw new Error('prepare 持久化失败'); } });
+      const result = await f.orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' });
+      expect(result).toMatchObject({ status: 'failed' });
+      expect(errorLog).toHaveBeenCalledWith(expect.any(String), '格林推演失败', expect.objectContaining({
+        runId: 'run-3', taskId: 'task-1', stageId: 'stage-2', chatIdentity: 'chat-a',
+        operation: 'finish_failure', phase: 'agent_loop', code: 'WORLD_SIMULATION_REVISION_CONFLICT', message: 'prepare 持久化失败',
+      }));
+      expect(JSON.stringify(errorLog.mock.calls)).not.toContain('推进');
+    } finally { errorLog.mockRestore(); }
+  });
+
+  it('整轮保存失败保留原错误卡文案并将主错误和补偿错误记录为 error', async () => {
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const f = fixture({ prepare: async () => ({ revision: revision(), execute: async identity => ({
+        outcome: 'world_round' as const, summary: '保存候选', outcomes: [],
+        roundCandidate: { baseRevision: identity.baseLedgerRevision, candidateClock: f.getEnvelope().ledger.clock,
+          worldEventWrites: [], actorWrites: [], factWrites: [], historyMilestoneWrites: [], actorCompletions: [],
+          projection: { anchor: null, deliveries: [] }, completion: 'no_change' as const },
+      }) }) });
+      const commitRound = vi.fn(async () => { throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(
+        'WORLD_SIMULATION_PERSIST_FAILED', 'persist', '宿主保存失败', false,
+        { primaryMessage: '主保存失败', rollbackMessage: '补偿保存失败', materials: '绝不记录的资料' },
+      )); });
+      const store = f.store;
+      const originalUpdate = store.updateAtomically.getMockImplementation()!;
+      let calls = 0;
+      store.updateAtomically.mockImplementation(async (...args: any[]) => {
+        calls += 1;
+        if (calls === 3) throw new Error('失败落盘失败');
+        return originalUpdate(...args);
+      });
+      const orchestrator = new WorldSimulationOrchestrator_ACU({ store, now: () => 10,
+        allocateId: kind => `${kind}-save`, prepare: f.prepare as any, assertAnchorCurrent: vi.fn(),
+        commitProjection: f.commitProjection, workflowProtocol: 'world-round-v1', commitRound });
+      const result = await orchestrator.start({ triggerKind: 'assistant_completed', anchor: anchor(), instruction: '推进' });
+      expect(result).toMatchObject({ status: 'failed', error: { message: '宿主保存失败' } });
+      expect(errorLog.mock.calls.map(call => call[2])).toEqual(expect.arrayContaining([
+        expect.objectContaining({ operation: 'finish_failure', message: '宿主保存失败',
+          phase: 'persist', code: 'WORLD_SIMULATION_PERSIST_FAILED', primaryMessage: '主保存失败', rollbackMessage: '补偿保存失败',
+          runId: 'run-save', taskId: 'task-save', stageId: 'stage-save' }),
+        expect.objectContaining({ operation: 'persist_failure', message: '失败落盘失败', runId: 'run-save' }),
+      ]));
+      expect(JSON.stringify(errorLog.mock.calls)).not.toContain('绝不记录的资料');
+    } finally { errorLog.mockRestore(); }
+  });
+
+  it('用户正常取消不产生 error 级日志', async () => {
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const { prepare, prepareEntered } = abortableFirstPrepare(async () => completed);
+      const f = fixture({ prepare });
+      const running = f.orchestrator.start({ triggerKind: 'agent_chat_message', anchor: anchor(), instruction: '推进' });
+      await prepareEntered;
+      expect(f.orchestrator.cancel('chat-a')).toBe(true);
+      await expect(running).resolves.toMatchObject({ status: 'cancelled' });
+      expect(errorLog).not.toHaveBeenCalled();
+    } finally { errorLog.mockRestore(); }
   });
 
   it('异常失败终局强制关闭会话流 running 标记，UI 停止按钮不再卡死', async () => {
