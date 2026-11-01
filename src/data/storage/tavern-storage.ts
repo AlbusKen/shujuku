@@ -8,7 +8,7 @@ import { topLevelWindow_ACU, FORBID_BROWSER_LOCAL_STORAGE_FOR_CONFIG_ACU, ALLOW_
 import { SCRIPT_ID_PREFIX_ACU } from '../../shared/constants';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { isExtensionMode } from '../../shared/runtime-env';
-import { ConfigStorageReadError_ACU } from './config-read';
+import { ConfigStorageReadError_ACU, ConfigStorageWriteBlockedError_ACU } from './config-read';
 
 // ── 常量 ──
 import { idbRequestToPromise_ACU, isIndexedDbAvailable_ACU } from '../../shared/idb-import-temp';
@@ -29,7 +29,25 @@ let _tavernBridgeInitCompleted_ACU = false;
 let _tavernRootUnavailableWarnReported_ACU = false;
 
 // ── 桥接函数 ──
+/**
+ * 直接从宿主窗口的 SillyTavern.getContext() 同步读取设置根对象。
+ * getContext().extensionSettings 与 scripts/extensions.js 导出的 extension_settings 是同一对象，
+ * 由酒馆写入服务端 settings.json；同步读取可避免油猴模式启动时等待注入脚本造成的竞态。
+ */
+function tryReadHostContextSettings_ACU(): void {
+    try {
+        const st = (topLevelWindow_ACU as any)?.SillyTavern;
+        if (!st || typeof st.getContext !== 'function') return;
+        const ctx = st.getContext();
+        if (ctx?.extensionSettings && !tavernExtensionSettingsRoot_ACU) tavernExtensionSettingsRoot_ACU = ctx.extensionSettings;
+        if (!tavernSaveSettingsFn_ACU && typeof ctx?.saveSettingsDebounced === 'function') {
+            tavernSaveSettingsFn_ACU = ctx.saveSettingsDebounced;
+        }
+    } catch (e) { /* ignore */ }
+}
+
 export function tryReadBridgeFromTop_ACU(): boolean {
+    if (!tavernExtensionSettingsRoot_ACU) tryReadHostContextSettings_ACU();
     try {
         const bridge = (topLevelWindow_ACU as any)?.[TAVERN_BRIDGE_GLOBAL_KEY_ACU];
         if (bridge && typeof bridge === 'object') {
@@ -42,7 +60,7 @@ export function tryReadBridgeFromTop_ACU(): boolean {
             return !!(tavernExtensionSettingsRoot_ACU);
         }
     } catch (e) { /* ignore */ }
-    return false;
+    return !!tavernExtensionSettingsRoot_ACU;
 }
 
 export async function injectTavernBridgeIntoTopWindow_ACU(): Promise<boolean> {
@@ -77,7 +95,70 @@ export async function injectTavernBridgeIntoTopWindow_ACU(): Promise<boolean> {
     }
 }
 
-export async function initTavernSettingsBridge_ACU(): Promise<boolean> {
+// ── 桥接初始化去重与加载后端追踪 ──
+let _tavernBridgeInitPromise_ACU: Promise<boolean> | null = null;
+/** 至少一次桥接初始化已结束（无论成功或失败） */
+let _tavernBridgeInitSettled_ACU = false;
+/** 最近一次设置加载实际读取的后端：酒馆设置或本浏览器本地副本 */
+let _configLoadBackend_ACU: 'tavern' | 'local' | null = null;
+let _configBackendStaleNotified_ACU = false;
+let _configBackendStaleHandler_ACU: (() => void) | null = null;
+
+/** 并发调用共享同一次初始化，避免重复注入和重复轮询。 */
+export function initTavernSettingsBridge_ACU(): Promise<boolean> {
+    if (_tavernBridgeInitPromise_ACU) return _tavernBridgeInitPromise_ACU;
+    const pending: Promise<boolean> = runTavernSettingsBridgeInit_ACU().finally(() => {
+        _tavernBridgeInitSettled_ACU = true;
+        if (_tavernBridgeInitPromise_ACU === pending) _tavernBridgeInitPromise_ACU = null;
+        notifyConfigBackendStaleIfNeeded_ACU();
+    });
+    _tavernBridgeInitPromise_ACU = pending;
+    return pending;
+}
+
+/** 是否已有一次桥接初始化结束；未结束前读不到酒馆设置不能当作“没有酒馆设置”。 */
+export function isTavernBridgeInitSettled_ACU(): boolean {
+    return _tavernBridgeInitSettled_ACU;
+}
+
+/** 由设置加载在读取存储前登记本轮实际使用的后端。 */
+export function markConfigLoadBackend_ACU(backend: 'tavern' | 'local'): void {
+    _configLoadBackend_ACU = backend;
+    _configBackendStaleNotified_ACU = false;
+}
+
+/** 酒馆设置可用后，用于从酒馆设置重新加载的回调（由 service 层注册）。 */
+export function setConfigBackendStaleHandler_ACU(handler: (() => void) | null): void {
+    _configBackendStaleHandler_ACU = handler;
+}
+
+function isTavernRootAvailable_ACU(): boolean {
+    tryReadBridgeFromTop_ACU();
+    return !!tavernExtensionSettingsRoot_ACU;
+}
+
+function notifyConfigBackendStaleIfNeeded_ACU(): void {
+    if (_configLoadBackend_ACU !== 'local' || _configBackendStaleNotified_ACU) return;
+    if (!isTavernRootAvailable_ACU()) return;
+    _configBackendStaleNotified_ACU = true;
+    const handler = _configBackendStaleHandler_ACU;
+    if (typeof handler !== 'function') return;
+    setTimeout(() => {
+        try { handler(); } catch (e) { logWarn_ACU('[TavernStorage] 从酒馆设置重新加载失败:', e); }
+    }, 0);
+}
+
+/**
+ * 内存中的配置来自本地副本，但酒馆设置现已可用：此时任何写入都会覆盖酒馆中的真实配置。
+ * 返回 true 时会同时安排一次从酒馆设置的重新加载。
+ */
+export function isConfigLoadBackendStale_ACU(): boolean {
+    if (_configLoadBackend_ACU !== 'local' || !isTavernRootAvailable_ACU()) return false;
+    notifyConfigBackendStaleIfNeeded_ACU();
+    return true;
+}
+
+async function runTavernSettingsBridgeInit_ACU(): Promise<boolean> {
     if (!USE_TAVERN_SETTINGS_STORAGE_ACU) return false;
     logDebug_ACU('[TavernStorage] 开始初始化酒馆设置桥接...');
 
@@ -339,6 +420,11 @@ export function getConfigStorage_ACU(): any {
         setItem: (key: string, value: any) => {
             const v = String(value);
             if (hasTavern) {
+                // 内存配置来自本地副本时写入酒馆设置，会用本地副本（无痕窗口里通常是默认值）覆盖服务端真实配置。
+                if (_configLoadBackend_ACU === 'local') {
+                    notifyConfigBackendStaleIfNeeded_ACU();
+                    throw new ConfigStorageWriteBlockedError_ACU(key);
+                }
                 ns[key] = v;
                 persistTavernSettings_ACU();
             } else if (!FORBID_BROWSER_LOCAL_STORAGE_FOR_CONFIG_ACU && storage_ACU?.setItem) {
@@ -348,6 +434,10 @@ export function getConfigStorage_ACU(): any {
         },
         removeItem: (key: string) => {
             if (hasTavern) {
+                if (_configLoadBackend_ACU === 'local') {
+                    notifyConfigBackendStaleIfNeeded_ACU();
+                    throw new ConfigStorageWriteBlockedError_ACU(key);
+                }
                 delete ns[key];
                 persistTavernSettings_ACU();
             } else if (!FORBID_BROWSER_LOCAL_STORAGE_FOR_CONFIG_ACU && storage_ACU?.removeItem) {
@@ -383,4 +473,9 @@ export function _resetTavernStorageState_ACU(): void {
     tavernBridgeErrorReported_ACU = false;
     _tavernBridgeInitCompleted_ACU = false;
     _tavernRootUnavailableWarnReported_ACU = false;
+    _tavernBridgeInitPromise_ACU = null;
+    _tavernBridgeInitSettled_ACU = false;
+    _configLoadBackend_ACU = null;
+    _configBackendStaleNotified_ACU = false;
+    _configBackendStaleHandler_ACU = null;
 }

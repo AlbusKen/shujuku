@@ -23,7 +23,7 @@ import { persistSettingsToStorage_ACU } from '../../data/storage/config-storage'
 import { ConfigStorageReadError_ACU, readConfigObject_ACU } from '../../data/storage/config-read';
 import { getCurrentVectorMemoryConfig_ACU } from '../vector/vector-memory-config';
 import { isIndexedDbAvailable_ACU } from '../../shared/idb-import-temp';
-import { configIdbCacheLoaded_ACU, ensureConfigIdbCacheLoaded_ACU, getConfigStorage_ACU, initTavernSettingsBridge_ACU, migrateKeyToTavernStorageIfNeeded_ACU, pendingSettingsReloadFromIdb_ACU, _set_pendingSettingsReloadFromIdb_ACU} from '../../data/storage/tavern-storage';
+import { configIdbCacheLoaded_ACU, ensureConfigIdbCacheLoaded_ACU, getConfigStorage_ACU, initTavernSettingsBridge_ACU, isConfigLoadBackendStale_ACU, isTavernBridgeInitSettled_ACU, markConfigLoadBackend_ACU, migrateKeyToTavernStorageIfNeeded_ACU, pendingSettingsReloadFromIdb_ACU, setConfigBackendStaleHandler_ACU, _set_pendingSettingsReloadFromIdb_ACU} from '../../data/storage/tavern-storage';
 import { ensureTagRulesCompat_ACU } from '../plot/plot-logic';
 import { getDefaultTemplateSnapshot_ACU, getTemplatePreset_ACU } from '../template/template-preset-service';
 import { getCurrentIsolationKey_ACU, settings_ACU, _set_settings_ACU} from '../runtime/state-manager';
@@ -67,6 +67,36 @@ function scheduleSettingsReloadAfterIdbReady_ACU(reason: string): void {
       settingsReloadAfterIdbScheduled_ACU = false;
       logWarn_ACU('[设置加载] 延迟重载失败，保存门禁保持关闭，请恢复配置后重新加载。');
   });
+}
+
+let settingsReloadAfterBridgeScheduled_ACU = false;
+let localConfigBackendWarned_ACU = false;
+
+/**
+ * 酒馆设置桥接尚未结束时读不到酒馆设置，不能据此判定“没有配置”：
+ * 否则无痕窗口（本地副本为空）会加载默认值，随后保存会覆盖酒馆服务端的真实配置。
+ */
+function scheduleSettingsReloadAfterBridgeReady_ACU(reason: string): void {
+  if (settingsReloadAfterBridgeScheduled_ACU) return;
+  settingsReloadAfterBridgeScheduled_ACU = true;
+  logDebug_ACU(`[设置加载] 酒馆设置桥接尚未就绪，暂停本轮加载并等待重载：${reason}`);
+  void initTavernSettingsBridge_ACU().catch(() => false).then(() => {
+      settingsReloadAfterBridgeScheduled_ACU = false;
+      try {
+          loadSettings_ACU();
+      } catch (error) {
+          logWarn_ACU('[设置加载] 桥接就绪后重载失败，保存门禁保持关闭。', error);
+      }
+  });
+}
+
+function reloadSettingsFromTavernBackend_ACU(): void {
+  logWarn_ACU('[设置加载] 酒馆设置已可用，丢弃本地副本并从酒馆设置重新加载。');
+  try {
+      loadSettings_ACU();
+  } catch (error) {
+      logWarn_ACU('[设置加载] 从酒馆设置重新加载失败，保存门禁保持关闭。', error);
+  }
 }
 
 function applyGlobalPlotEnabledSetting_ACU(): boolean {
@@ -374,6 +404,18 @@ export function saveSettings_ACU(): SaveSettingsResult_ACU {
           warning: '设置仍在加载中，本次保存已被阻止以避免覆盖原配置。请稍后重试。',
       };
   }
+  // 内存配置来自本地副本，但酒馆设置现已可用：保存会用本地副本覆盖酒馆中的真实配置。
+  // isConfigLoadBackendStale_ACU 返回 true 时已安排从酒馆设置重新加载。
+  if (isConfigLoadBackendStale_ACU()) {
+      settingsStorageReadyForSave_ACU = false;
+      logWarn_ACU('[设置保存] 已连接酒馆设置，但当前配置来自本地副本；已拒绝保存并从酒馆设置重新加载。');
+      return {
+          saved: false,
+          storageType: 'memory',
+          code: 'settings_loading',
+          warning: '已连接酒馆设置，正在从酒馆重新加载配置，本次保存已被阻止以避免覆盖酒馆中的配置。请稍后重试。',
+      };
+  }
 
   // [剧情推进] 运行时世界书选择回写到当前角色卡槽位
   syncPlotWorldbookSelectionToCharacterStore_ACU();
@@ -432,6 +474,24 @@ function loadSettingsFromStorage_ACU(): void {
           return;
       }
       _set_pendingSettingsReloadFromIdb_ACU(false);
+
+      // 桥接未结束前读不到酒馆设置，不能当作“没有配置”而回落到本地副本或默认值。
+      const backendProbe = getConfigStorage_ACU();
+      if (!backendProbe?._isTavern && !isTavernBridgeInitSettled_ACU()) {
+          scheduleSettingsReloadAfterBridgeReady_ACU('load_before_tavern_bridge_ready');
+          return;
+      }
+      if (backendProbe?._isTavern) {
+          markConfigLoadBackend_ACU('tavern');
+      } else {
+          markConfigLoadBackend_ACU('local');
+          // 酒馆设置稍后可用时，丢弃本地副本并从酒馆设置重新加载。
+          setConfigBackendStaleHandler_ACU(reloadSettingsFromTavernBackend_ACU);
+          if (!localConfigBackendWarned_ACU) {
+              localConfigBackendWarned_ACU = true;
+              logWarn_ACU('[设置加载] 未连接酒馆设置，本次使用本浏览器的本地副本（IndexedDB）；该副本在其他浏览器或无痕窗口中不可见。');
+          }
+      }
 
       // 1) 读取全局元信息（跨标识共享：标识列表/当前标识）
       loadGlobalMeta_ACU();

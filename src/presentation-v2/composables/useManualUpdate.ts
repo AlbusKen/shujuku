@@ -283,21 +283,16 @@ export function useManualUpdate(): ManualUpdateState {
     _set_wasStoppedByUser_ACU(true);
     abortAllActiveRequests_ACU();
     _set_isAutoUpdatingCard_ACU(false);
-    if (progressToastId) {
-      toast.update(progressToastId, 'warning', '手动填表已终止，正在停止当前任务与后续批次...', {
-        durationMs: 0,
-        muteable: false,
-        dismissible: false,
-        feature: MANUAL_UPDATE_TASK_FEATURE,
-      });
-    } else {
-      toast.warning('手动填表已终止，正在停止当前任务与后续批次...', {
-        durationMs: 0,
-        muteable: false,
-        dismissible: false,
-        feature: MANUAL_UPDATE_TASK_FEATURE,
-      });
+    // 终止后改为一次性提示：常驻任务只能等编排器返回才关闭，收尾慢或卡住时气泡会一直停留。
+    // 最终结果由 finishToast 另发；manualUpdateBusy 仍保持到编排器真正返回。
+    const text = '手动填表已终止，正在停止当前任务与后续批次...';
+    const options = { muteable: false };
+    if (progressToastId && toast.update(progressToastId, 'warning', text, options)) {
+      progressToastId = null;
+      return;
     }
+    progressToastId = null;
+    toast.warning(text, options);
   }
 
   function requestCatchUpAbort(): void {
@@ -508,7 +503,8 @@ export function useManualUpdate(): ManualUpdateState {
       const extra = manualExtraHint.value.trim();
       if (extra) _set_manualExtraHint_ACU(`以下为用户的额外填表要求,请严格遵守:\n${extra}`);
       const handleProgress = (event: CardUpdateProgressEvent) => {
-        notifyProgress(progressLabel(event));
+        // 终止后迟到的进度事件不得重建常驻气泡；结果仍由 finishToast 汇报。
+        if (!abortRequested) notifyProgress(progressLabel(event));
         if (event.phase === 'complete') {
           try { (topLevelWindow_ACU as any).AutoCardUpdaterAPI?._notifyTableUpdate?.(); } catch (_) {}
           refreshTick.value++;

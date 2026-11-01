@@ -1,9 +1,9 @@
 {
   "name": "acu-star-database-iii",
-  "version": "1.0.0",
+  "version": "1.3.3",
   "private": true,
   "type": "module",
-  "description": "龙血玄黄·数据库 1.0.0 (AutoCardUpdater) - SillyTavern 数据库自动更新脚本",
+  "description": "龙血玄黄·数据库 1.3.3 (AutoCardUpdater) - SillyTavern 数据库自动更新脚本",
   "scripts": {
     "build": "rollup -c && node scripts/fix-generated-whitespace.mjs && node scripts/sync-userscript-json.mjs",
     "build:nocheck": "rollup -c && node scripts/fix-generated-whitespace.mjs && node scripts/sync-userscript-json.mjs",
