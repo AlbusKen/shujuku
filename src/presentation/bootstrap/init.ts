@@ -290,6 +290,12 @@ export   function mainInitialize_ACU() {
               (window as any).original_TavernHelper_generate_ACU = (window as any).TavernHelper.generate;
               (window as any).TavernHelper.generate = async function (...args: any[]) {
                 const options = args[0] || {};
+                // [幂等闸] 同一 options 被二次 generate 时（如卡片脚本回灌），带标记的已规划请求
+                // 直接透传原始 generate，不再进规划；与 GENERATION_AFTER_COMMANDS 的
+                // _qrf_processed_by_hook 早退同口径，防止每调用一次多包一层。
+                if (options && options._qrf_processed_by_hook === true) {
+                  return (window as any).original_TavernHelper_generate_ACU.apply(this, args);
+                }
                 if (!isTakeoverEnabled_ACU()) return (window as any).original_TavernHelper_generate_ACU.apply(this, args);
                 const takeoverLease = captureTakeoverLease_ACU();
 
