@@ -3473,11 +3473,22 @@ export async function loadTableStateFromFramesV2Detailed_ACU(
  * @returns Map<boundary, TableReplayResultV2_ACU>，key 严格递增，每个结果的
  *   capturedBoundary 标记对应 boundary。
  */
+export interface LoadTableStatesAtBoundariesBatchOptions_ACU {
+  /**
+   * 无帧 boundary（用户消息、未落帧 AI 层、尾部无帧消息）按「≤ boundary 的最后一个帧」
+   * 参与前向捕获。两者处理的帧集合相同，起算根、repair 与损坏帧语义与冷回放一致；
+   * 结果仍按原 boundary 建 key。boundary 之前没有任何帧时保持原值，照旧回退并报错。
+   * 仅只读读取调用方开启；写路径的候选校验维持逐边界原语义。
+   */
+  inheritFramelessBoundaries?: boolean;
+}
+
 export async function loadTableStatesAtBoundariesFromFramesV2Detailed_ACU(
   chatArg: any[] | null | undefined,
   isolationKeyArg: string,
   boundaries: readonly number[],
   options: Omit<LoadTableStateFromFramesV2Options_ACU, 'captureBoundaries' | 'maxMessageIndex'> = {},
+  batchOptions: LoadTableStatesAtBoundariesBatchOptions_ACU = {},
 ): Promise<Map<number, TableReplayResultV2_ACU>> {
   const chat = chatArg || getChatArray_ACU();
   if (!Array.isArray(chat) || chat.length === 0) return new Map();
@@ -3493,6 +3504,19 @@ export async function loadTableStatesAtBoundariesFromFramesV2Detailed_ACU(
   // 不晚于它的最后一个帧。因此**不做**越界拒绝——超出最大帧的 boundary 等价于
   // 不设上限（处理全量），与既有 maxMessageIndex 语义完全一致。
   const allFrameRefs = getV2FrameRefs_ACU(chat, isolationKey);
+  // 每个 boundary 的捕获目标：默认就是 boundary 本身；开启继承时取 ≤ boundary 的最后一个帧，
+  // 否则无帧 boundary 永远不会被 core 捕获，整批会在一次前向回放后再退回逐次冷回放。
+  const captureTargetOf = new Map<number, number>();
+  for (const boundary of boundaries) {
+    let target = boundary;
+    if (batchOptions.inheritFramelessBoundaries === true) {
+      for (const ref of allFrameRefs) {
+        if (ref.messageIndex > boundary) break;
+        target = ref.messageIndex;
+      }
+    }
+    captureTargetOf.set(boundary, target);
+  }
   // 每个 boundary 的起算 checkpoint：该 boundary 的 frameRefs 中最后一个 full checkpoint。
   // 全部相同才允许前向捕获；否则回退逐次冷 replay。
   const roots = new Map<number, number | null>();
@@ -3507,7 +3531,7 @@ export async function loadTableStatesAtBoundariesFromFramesV2Detailed_ACU(
 
   if (allShareRoot) {
     // 前向捕获：单次 replay，captureBoundaries 驱动中间快照。
-    const sorted = [...boundaries].sort((a, b) => a - b);
+    const sorted = [...new Set(captureTargetOf.values())].sort((a, b) => a - b);
     // 调用方传入的可写容器：core 在捕获时写入，此处读回各 boundary 快照。
     // 若不传容器，core 使用内部临时 Map（结果随调用结束丢弃），本函数将读不到
     // 中间快照——因此必须显式传入，杜绝「静默只返回最终态」的错误语义。
@@ -3534,7 +3558,11 @@ export async function loadTableStatesAtBoundariesFromFramesV2Detailed_ACU(
     );
     if (missing.length === 0 && invalid.length === 0) {
       const results = new Map<number, TableReplayResultV2_ACU>();
-      for (const boundary of sorted) results.set(boundary, captureSink.get(boundary)!);
+      for (const boundary of [...boundaries].sort((a, b) => a - b)) {
+        const target = captureTargetOf.get(boundary)!;
+        const snapshot = captureSink.get(target)!;
+        results.set(boundary, target === boundary ? snapshot : { ...snapshot, capturedBoundary: boundary });
+      }
       return results;
     }
     // 覆盖不全或有 repair：回退逐次冷 replay（下方共用回退路径）。
