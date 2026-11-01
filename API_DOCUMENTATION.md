@@ -203,6 +203,22 @@ console.log("表格数据:", JSON.stringify(tableData, null, 2));
 
 ---
 
+### `getTableHistoryContext()`
+
+同步读取当前历史数据来源身份。聊天尚未就绪时返回 `null`；否则返回独立的轻量对象：
+
+```javascript
+const context = window.AutoCardUpdaterAPI.getTableHistoryContext();
+// { version: 1, chatId: 'chat-a', characterId: 0, groupId: null, isolationKey: '' }
+```
+
+- `isolationKey` 来自数据库实际使用的当前隔离标识；空字符串是合法的默认槽。
+- 不回放历史、不复制表格、不保存聊天、不发布运行时或通知前端。
+- 可供状态栏、历史浏览器等外部调用者区分缓存来源；正常表格对象重新发布不会单独改变该身份。
+- **来源身份不是内容修订。** 调用者仍须检查存储帧变化、swipe和自身布局／会话生命周期；非空结果也不保证历史基底完整，历史读取仍以导出接口结果为准。
+
+---
+
 ### `importTableAsJson(jsonString, options?)`
 
 导入并覆盖当前表格数据。默认作为外部 JSON 导入，会写入当前聊天持久化；如果用于删除楼层后的备份恢复，应传入运行时恢复模式，避免制造新的持久化事件。
