@@ -129,6 +129,11 @@ function clearRuntimeForNoActiveChat_ACU(chatFileName: unknown): void {
 
 const sendIntentDocuments_ACU = new WeakSet<Document>();
 
+// MESSAGE_SENT 监听器里用户楼层补写的等待上限：补写经宿主串行保存队列提交，
+// 队列挂起时永不返回；宿主 eventSource.emit 对监听器逐个 await，监听器不返回
+// 会让其后的 addOneMessage 渲染与正文请求整条链冻结。超时只放行宿主，不清 pending。
+const PLOT_PENDING_FLUSH_TIMEOUT_MS_ACU = 8000;
+
 function installSendIntentCaptureHooks_ACU() {
   try {
     const doc = getHostWindow().document;
@@ -290,6 +295,12 @@ export   function mainInitialize_ACU() {
               (window as any).original_TavernHelper_generate_ACU = (window as any).TavernHelper.generate;
               (window as any).TavernHelper.generate = async function (...args: any[]) {
                 const options = args[0] || {};
+                // [幂等闸] 同一 options 被二次 generate 时（如卡片脚本回灌），带标记的已规划请求
+                // 直接透传原始 generate，不再进规划；与 GENERATION_AFTER_COMMANDS 的
+                // _qrf_processed_by_hook 早退同口径，防止每调用一次多包一层。
+                if (options && options._qrf_processed_by_hook === true) {
+                  return (window as any).original_TavernHelper_generate_ACU.apply(this, args);
+                }
                 if (!isTakeoverEnabled_ACU()) return (window as any).original_TavernHelper_generate_ACU.apply(this, args);
                 const takeoverLease = captureTakeoverLease_ACU();
 
@@ -542,8 +553,25 @@ export   function mainInitialize_ACU() {
               recordLastUserSend_ACU(messageId);
             } catch (e) {}
             // 宿主真实入楼后补写；不依赖伪装期间启动的短轮询是否已耗尽。
+            // 宿主 eventSource.emit 对监听器逐个 await，addOneMessage 在其后：本监听器不返回，
+            // 用户楼渲染与正文请求整条链冻结。补写经宿主串行保存队列提交，队列挂起时永不返回，
+            // 故加超时上限——超时只放行宿主渲染，不清 pending，由正文结束/下一轮发送的既有
+            // 补写入口接手（roundRef 复检保证多入口补写幂等，不双写）。
             try {
-              await flushPlotPendingSave_ACU();
+              let flushTimer: ReturnType<typeof setTimeout> | undefined;
+              try {
+                const flushOutcome = await Promise.race([
+                  flushPlotPendingSave_ACU(),
+                  new Promise<'timeout'>((resolve) => {
+                    flushTimer = setTimeout(() => resolve('timeout'), PLOT_PENDING_FLUSH_TIMEOUT_MS_ACU);
+                  }),
+                ]);
+                if (flushOutcome === 'timeout') {
+                  logWarn_ACU(`[剧情推进] 用户楼层补写超${PLOT_PENDING_FLUSH_TIMEOUT_MS_ACU / 1000}秒未返回，已放行宿主渲染，pending 保留待后续补写`);
+                }
+              } finally {
+                clearTimeout(flushTimer);
+              }
             } catch (error) {
               logWarn_ACU('[剧情推进] 用户楼层创建后补写失败，保留待保存数据:', error);
             }
@@ -901,6 +929,8 @@ export   function mainInitialize_ACU() {
               debug?.step('plot_skip', { reason: 'busy' });
               if (shouldProcessPlotForGeneration_ACU(type, params, dryRun)) {
                 debug?.finish('plot_blocked', { reason: 'busy' }, false);
+                // 静默让路用户不可见，至少给出可感知的延后原因。
+                showToastr_ACU('warning', '上一次剧情推进仍在进行，本次发送已延后，请稍候或稍后手动重发', '剧情推进');
                 redirectPlotSendEvent_ACU(params);
               }
               return;
@@ -926,7 +956,12 @@ export   function mainInitialize_ACU() {
               if (vectorGenerationSend?.controller.signal.aborted) {
                 finishVectorGeneration(vectorGenerationSend);
               }
-              if (pendingVectorSend || activeVectorWait) { redirectPlotSendEvent_ACU(params); return; }
+              if (pendingVectorSend || activeVectorWait) {
+                // 静默让路用户不可见，至少给出可感知的延后原因。
+                showToastr_ACU('warning', '上一次剧情向量索引仍在进行，本次发送已延后，请稍候或稍后手动重发', '剧情推进');
+                redirectPlotSendEvent_ACU(params);
+                return;
+              }
               const controller = new AbortController();
               const signal: AbortSignal | undefined = params?.signal;
               const abort = () => controller.abort();
@@ -943,6 +978,8 @@ export   function mainInitialize_ACU() {
               };
               if (!pendingInput && !SillyTavern_API_ACU.eventTypes.WORLDINFO_ENTRIES_LOADED) {
                 finishVectorGeneration(send);
+                // 静默放弃用户不可见，至少给出可感知的原因；本轮按普通发送继续。
+                showToastr_ACU('warning', '世界书条目尚未就绪，本轮剧情向量索引未处理，本次发送已按普通发送继续', '剧情推进');
                 redirectPlotSendEvent_ACU(params);
                 return;
               }
