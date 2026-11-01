@@ -21,6 +21,12 @@ export function emptyZeroLayerSimulation_ACU(): ZeroLayerSimulationState_ACU {
     runState: null, runProof: null, confirmed: [] };
 }
 
+const canonicalLedger_ACU = (value: unknown): string => Array.isArray(value)
+  ? `[${value.map(canonicalLedger_ACU).join(',')}]`
+  : value && typeof value === 'object'
+    ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalLedger_ACU((value as Record<string, unknown>)[key])}`).join(',')}}`
+    : JSON.stringify(value);
+
 /** 固定会话/分支的权威存储；不缓存候选，不借用普通模式私有字段。 */
 export class ZeroLayerSimulationStore_ACU implements WorldSimulationStorePort_ACU {
   readonly context: ZeroLayerCarrierContext_ACU;
@@ -76,10 +82,12 @@ export class ZeroLayerSimulationStore_ACU implements WorldSimulationStorePort_AC
         throw new ZeroLayerError_ACU('revision-conflict', '推演任务或阶段守卫不匹配。');
       }
       const next = validateWorldSimulationEnvelope_ACU(mutator(structuredClone(current)), 'persist');
-      if (current && JSON.stringify(current.ledger) !== JSON.stringify(next.ledger)) {
+      if (current && canonicalLedger_ACU(current.ledger) !== canonicalLedger_ACU(next.ledger)) {
         throw new ZeroLayerError_ACU('invalid-transition', '账本更新必须通过推演联合提交写口。');
       }
-      if (!current) state.fields = seedLedgerFieldView_ACU(next.ledger, next.updatedAt);
+      // 元数据写口只确认账本语义未变；保留既有持久账本的原始顺序和值，不能借校验过程隐式迁移。
+      if (current) next.ledger = structuredClone(current.ledger);
+      else state.fields = seedLedgerFieldView_ACU(next.ledger, next.updatedAt);
       const run = next.task?.activeRun;
       if (state.runState && (!run || state.runState.taskId !== run.taskId
         || state.runState.cursorKey !== `${run.stageId}#${run.stageRevision}#${run.baseLedgerRevision}`)) state.runState = null;
@@ -111,7 +119,8 @@ export class ZeroLayerSimulationStore_ACU implements WorldSimulationStorePort_AC
       validateZeroLayerSimulationReceipt_ACU(turn, this.sessionId);
       return;
     }
-    await this.updateState(() => {}, buildZeroLayerSimulationEffect_ACU(state, anchor, 'skipped-by-config', '自动推演已关闭'));
+    await this.updateState(() => {}, buildZeroLayerSimulationEffect_ACU(state, anchor, 'skipped-by-config', '自动推演已关闭',
+      turn.simulationDeliveryTarget === 'plot' ? 'ledger-only' : undefined));
   }
   anchorForTurn(turnId: string, source = this.readSource()): WorldSimulationLogicalAnchorIdentity_ACU {
     const turn = source.turns.find(item => item.turnId === turnId && (item.branchId === this.branchId
@@ -128,7 +137,7 @@ export class ZeroLayerSimulationStore_ACU implements WorldSimulationStorePort_AC
       throw new ZeroLayerError_ACU('scope-changed', '逻辑推演不接受宿主锚点或其他会话。');
     }
     const actual = this.anchorForTurn(anchor.logicalRef.turnId, source);
-    if (actual.contentDigest !== anchor.contentDigest || !(['sessionId', 'branchId', 'turnId', 'attemptId', 'floorId'] as const)
+    if (!(['sessionId', 'branchId', 'turnId', 'attemptId', 'floorId'] as const)
       .every(key => actual.logicalRef[key] === anchor.logicalRef[key])) {
       throw new ZeroLayerError_ACU('revision-conflict', '推演逻辑锚点已变化。');
     }

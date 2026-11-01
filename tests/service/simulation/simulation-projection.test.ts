@@ -3,11 +3,46 @@ import { buildDefaultWorldSimulationEnvelope_ACU, buildEmptyWorldSimulationLedge
 import {
   DEFAULT_WORLD_SIMULATION_PROJECTION_TEMPLATE_ACU,
   applyWorldSimulationProjection_ACU,
+  buildWorldFactBodyProjection_ACU,
   buildWorldSimulationProjection_ACU,
   worldSimulationProjectionTemplateError_ACU,
   writeWorldSimulationActiveSwipeContent_ACU,
 } from '../../../src/service/simulation/simulation-projection';
 import { validateWorldSimulationEnvelope_ACU } from '../../../src/service/simulation/simulation-store';
+
+describe('world fact body projection', () => {
+  it('仅渲染已授权且解锁的 scene/gated 摘要，不使用 guidance 或泄露 locked/internal', () => {
+    const ledger = buildEmptyWorldSimulationLedger_ACU();
+    ledger.guidance.signals = [{ text: '旧信号绝不复活', voice: 'encounter' }];
+    ledger.facts = [
+      { id: 'scene', summary: '场景摘要', projectionPolicy: 'scene', revealState: 'unlocked' },
+      { id: 'gate', summary: '已解锁摘要', projectionPolicy: 'gated', revealState: 'unlocked' },
+      { id: 'locked', summary: '未解锁秘密', projectionPolicy: 'gated', revealState: 'locked' },
+      { id: 'internal', summary: '内层秘密', projectionPolicy: 'internal', revealState: 'unlocked' },
+    ] as typeof ledger.facts;
+    expect(buildWorldFactBodyProjection_ACU(ledger, [])).toBeNull();
+    expect(buildWorldFactBodyProjection_ACU(ledger, ['missing', 'locked', 'internal'])).toBeNull();
+    const projection = buildWorldFactBodyProjection_ACU(ledger, ['gate', 'scene', 'gate', 'locked', 'internal', 'missing'])!;
+    expect(projection).toContain('【当前场景的确定事实】\n- 场景摘要');
+    expect(projection).toContain('【已满足条件的确定事实】\n- 已解锁摘要');
+    expect(projection).toContain('<div hidden class="qrf-world-simulation-projection" style="display:none">');
+    expect(projection).toContain('<与此同时>');
+    expect(projection).not.toMatch(/旧信号|未解锁秘密|内层秘密|世界暗流|此地此刻/);
+    expect(buildWorldFactBodyProjection_ACU(ledger, ['scene'], '<p>$WORLD_SIGNALS</p>')).toContain('<p>【当前场景的确定事实】\n- 场景摘要</p>');
+    expect(buildWorldFactBodyProjection_ACU(ledger, ['scene'], '坏格式')).toContain('<与此同时>');
+    expect(applyWorldSimulationProjection_ACU(applyWorldSimulationProjection_ACU('正文', projection), null)).toBe('正文');
+  });
+
+  it('字符串 swipe_id 只同步活动 swipe，mes 优先于 message', () => {
+    const message: Record<string, any> = { mes: '旧', message: '备用', swipe_id: '1', swipes: ['其他楼层', '旧'] };
+    writeWorldSimulationActiveSwipeContent_ACU(message, '正文');
+    expect(message).toEqual({ mes: '正文', message: '备用', swipe_id: '1', swipes: ['其他楼层', '正文'] });
+    const first: Record<string, any> = { message: '旧', swipe_id: '0', swipes: ['旧', '另一楼层'] };
+    writeWorldSimulationActiveSwipeContent_ACU(first, '首楼层');
+    expect(first).toEqual({ message: '首楼层', swipe_id: '0', swipes: ['首楼层', '另一楼层'] });
+    expect(() => writeWorldSimulationActiveSwipeContent_ACU({ mes: '旧', swipe_id: '2', swipes: ['a', 'b'] }, '新')).toThrow(/ACTIVE_SWIPE_INVALID/);
+  });
+});
 
 describe('world simulation projection format', () => {
   const ledger = () => {

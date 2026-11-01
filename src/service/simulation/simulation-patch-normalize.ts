@@ -6,6 +6,7 @@ import {
   WORLD_RUMOR_STATUSES_ACU,
   WORLD_SEED_EXPOSE_POLICIES_ACU,
   WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU,
+  WORLD_SIMULATION_LEDGER_ACTOR_OPTIONAL_FIELDS_ACU,
   type WorldLocationRef_ACU,
 } from './model';
 
@@ -395,7 +396,9 @@ function normalizeActor_ACU(
   if (!applyEnum_ACU(next, 'visibility', item.visibility, path, notes, VISIBILITY_ACU)) return null;
   if (!applyActorAction_ACU(next, 'currentAction', item.currentAction, path, notes)) return null;
   if (!applyActorAction_ACU(next, 'longTermAction', item.longTermAction, path, notes)) return null;
-  if (!existing) fillMissing_ACU(next, { interests: [], location: '', locationRef: null, life: 'alive', diedAtDay: null, deathSummary: null, resources: [], goals: [], constraints: [], informationSources: [], knownFacts: [], visibility: 'hidden', currentAction: null, longTermAction: null, experiences: [] }, path, notes);
+  if (!applyString_ACU(next, 'previousActionResult', item.previousActionResult, path, notes, true)) return null;
+  if (item.longTermAction !== undefined) next.shortTermAction = next.longTermAction;
+  if (!existing) fillMissing_ACU(next, { interests: [], location: '', locationRef: null, life: 'alive', diedAtDay: null, deathSummary: null, resources: [], goals: [], constraints: [], informationSources: [], knownFacts: [], visibility: 'hidden', currentAction: null, longTermAction: null, shortTermAction: null, simulationStatus: 'active', loreRefs: [], experiences: [] }, path, notes);
   if (next.life === 'dead') {
     if (next.diedAtDay === null || !next.deathSummary) {
       note_ACU(notes, 'blocking', path, `${path} dead 状态必须提供 diedAtDay 与 deathSummary`);
@@ -405,7 +408,7 @@ function normalizeActor_ACU(
     note_ACU(notes, 'blocking', path, `${path} 非 dead 状态不能携带死亡字段`);
     return null;
   }
-  return finishItem_ACU(next, WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors, existing ? Number(existing.revision) : 0, path, notes);
+  return finishItem_ACU(next, [...WORLD_SIMULATION_LEDGER_REQUIRED_FIELDS_ACU.actors, ...WORLD_SIMULATION_LEDGER_ACTOR_OPTIONAL_FIELDS_ACU], existing ? Number(existing.revision) : 0, path, notes);
 }
 
 function normalizeRumor_ACU(

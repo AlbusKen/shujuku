@@ -39,11 +39,14 @@ import {
   type WorldChronicleArchiveSnapshot_ACU,
 } from './agent/agent-model';
 
-/** 六个按 id/fingerprint 行级维护的数组模块及其主键字段。 */
+/** 账本数组模块按 id/fingerprint 行级维护；新领域在旧 Agent 写入口切换前只读。 */
 const ARRAY_MODULES_ACU = [
   ['dimensions', 'id'],
   ['seeds', 'id'],
   ['actors', 'id'],
+  ['worldEvents', 'id'],
+  ['facts', 'id'],
+  ['historyMilestones', 'id'],
   ['chronicle', 'id'],
   ['rumors', 'id'],
   ['chronicleOverview', 'fingerprint'],
@@ -436,6 +439,8 @@ function loadLedger_ACU(engine: SqliteEngine, ledger: WorldSimulationLedger_ACU)
   engine.run(`INSERT INTO ${SINGLETON_TABLE_ACU} (module, payload) VALUES ('player', ?)`, [JSON.stringify(ledger.player)]);
   engine.run(`INSERT INTO ${SINGLETON_TABLE_ACU} (module, payload) VALUES ('guidance', ?)`, [JSON.stringify(ledger.guidance)]);
   engine.run(`INSERT INTO ${META_TABLE_ACU} (key, value) VALUES ('revision', ?)`, [ledger.revision]);
+  engine.run(`INSERT INTO ${BASE_TABLE_ACU} (key, value) VALUES ('projection', ?)`, [JSON.stringify(ledger.projection)]);
+  engine.run(`INSERT INTO ${BASE_TABLE_ACU} (key, value) VALUES ('legacyMigration', ?)`, [JSON.stringify(ledger.legacyMigration)]);
   engine.run(`INSERT INTO ${BASE_TABLE_ACU} (key, value) VALUES ('materialCompletion', ?)`, [JSON.stringify(ledger.materialCompletion)]);
   engine.run(`INSERT INTO ${BASE_TABLE_ACU} (key, value) VALUES ('pendingFixes', ?)`, [JSON.stringify(ledger.pendingFixes)]);
 }
@@ -802,6 +807,11 @@ function readLedger_ACU(engine: SqliteEngine): WorldSimulationLedger_ACU {
     dimensions: [],
     seeds: [],
     actors: [],
+    worldEvents: [],
+    facts: [],
+    historyMilestones: [],
+    projection: JSON.parse(base.get('projection') ?? 'null'),
+    legacyMigration: JSON.parse(base.get('legacyMigration') ?? 'null'),
     chronicle: [],
     rumors: [],
     player: JSON.parse(singletons.get('player') ?? 'null'),

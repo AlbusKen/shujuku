@@ -8,7 +8,7 @@ import { WORLD_SIMULATION_LEDGER_FIELD_MATRIX_ACU, WORLD_SIMULATION_SINGLETON_ID
 import { reconcileLedgerFieldViewWithLedger_ACU } from '../simulation/simulation-ledger-fold';
 import { sha256HexSync_ACU } from '../../shared/sha256-sync';
 import { validateWorldSimulationLedger_ACU } from '../simulation/simulation-store';
-import { buildWorldSimulationProjection_ACU } from '../simulation/simulation-projection';
+import { buildWorldFactBodyProjection_ACU, buildWorldSimulationProjection_ACU, worldSimulationProjectionTemplateError_ACU } from '../simulation/simulation-projection';
 import { getTableDataFingerprint_ACU } from '../table/table-data-upgrade-audit';
 import type { ZeroLayerBridgeHostCompletion_ACU } from './bridge-model';
 
@@ -52,8 +52,89 @@ const canonical = (value: unknown): string => Array.isArray(value)
 /** 结构校验与跨载体引用校验分开；后者必须在所有逻辑回合校验完成后调用。 */
 export function validateZeroLayerSimulationState_ACU(raw: unknown): asserts raw is ZeroLayerSimulationState_ACU {
   requireValue(record(raw) && raw.schemaVersion === 1 && Array.isArray(raw.confirmed), '零层推演状态无效。');
-  exact(raw, ['schemaVersion', 'envelope', 'fields', 'archive', 'conversation', 'userRequirements', 'runState', 'runProof', 'confirmed']);
+  exact(raw, ['schemaVersion', 'envelope', 'fields', 'archive', 'conversation', 'userRequirements', 'runState', 'runProof', 'confirmed',
+    ...(raw.legacyBackfill === undefined ? [] : ['legacyBackfill']),
+    ...(raw.actorRemoval === undefined ? [] : ['actorRemoval']),
+    ...(raw.actorImport === undefined ? [] : ['actorImport']),
+    ...(raw.eventRemoval === undefined ? [] : ['eventRemoval']),
+    ...(raw.historyRemoval === undefined ? [] : ['historyRemoval'])]);
   const envelope = raw.envelope === null ? null : validateWorldSimulationEnvelope_ACU(raw.envelope, 'load');
+  if (raw.legacyBackfill !== undefined) {
+    const backfill = raw.legacyBackfill;
+    requireValue(record(backfill), '旧资料补迁来源无效。');
+    exact(backfill, ['sourceRef', 'baseLedgerRevision', 'baseLedgerFingerprint', 'ledgerRevision', 'ledgerFingerprint']);
+    if (backfill.sourceRef !== null) validateWorldSimulationLogicalRef_ACU(backfill.sourceRef, 'simulation.legacyBackfill.sourceRef', 'load');
+    requireValue(integer(backfill.baseLedgerRevision) && integer(backfill.ledgerRevision)
+      && backfill.ledgerRevision > backfill.baseLedgerRevision
+      && typeof backfill.baseLedgerFingerprint === 'string' && /^[a-f0-9]{64}$/.test(backfill.baseLedgerFingerprint)
+      && typeof backfill.ledgerFingerprint === 'string' && /^[a-f0-9]{64}$/.test(backfill.ledgerFingerprint)
+      && envelope && envelope.ledger.revision >= backfill.ledgerRevision, '旧资料补迁账本身份无效。');
+    if (envelope.ledger.revision === backfill.ledgerRevision) {
+      requireValue(sha256HexSync_ACU(canonical(envelope.ledger)) === backfill.ledgerFingerprint, '旧资料补迁账本指纹不匹配。');
+    }
+  }
+  if (raw.actorRemoval !== undefined) {
+    const removal = raw.actorRemoval;
+    requireValue(record(removal), '人物删除维护来源无效。');
+    exact(removal, ['sourceRef', 'baseLedgerRevision', 'baseLedgerFingerprint', 'ledgerRevision', 'ledgerFingerprint']);
+    if (removal.sourceRef !== null) validateWorldSimulationLogicalRef_ACU(removal.sourceRef, 'simulation.actorRemoval.sourceRef', 'load');
+    requireValue(integer(removal.baseLedgerRevision) && integer(removal.ledgerRevision)
+      && removal.ledgerRevision > removal.baseLedgerRevision
+      && typeof removal.baseLedgerFingerprint === 'string' && /^[a-f0-9]{64}$/.test(removal.baseLedgerFingerprint)
+      && typeof removal.ledgerFingerprint === 'string' && /^[a-f0-9]{64}$/.test(removal.ledgerFingerprint)
+      && envelope && envelope.ledger.revision >= removal.ledgerRevision,
+    '人物删除维护账本身份无效。');
+    if (envelope.ledger.revision === removal.ledgerRevision) {
+      requireValue(sha256HexSync_ACU(canonical(envelope.ledger)) === removal.ledgerFingerprint,
+        '人物删除维护账本指纹不匹配。');
+    }
+  }
+  if (raw.actorImport !== undefined) {
+    const imported = raw.actorImport;
+    requireValue(record(imported), '人物入册维护来源无效。');
+    exact(imported, ['sourceRef', 'baseLedgerRevision', 'baseLedgerFingerprint', 'ledgerRevision', 'ledgerFingerprint']);
+    if (imported.sourceRef !== null) validateWorldSimulationLogicalRef_ACU(imported.sourceRef, 'simulation.actorImport.sourceRef', 'load');
+    requireValue(integer(imported.baseLedgerRevision) && integer(imported.ledgerRevision)
+      && imported.ledgerRevision > imported.baseLedgerRevision
+      && typeof imported.baseLedgerFingerprint === 'string' && /^[a-f0-9]{64}$/.test(imported.baseLedgerFingerprint)
+      && typeof imported.ledgerFingerprint === 'string' && /^[a-f0-9]{64}$/.test(imported.ledgerFingerprint)
+      && envelope && envelope.ledger.revision >= imported.ledgerRevision,
+    '人物入册维护账本身份无效。');
+    if (envelope.ledger.revision === imported.ledgerRevision) {
+      requireValue(sha256HexSync_ACU(canonical(envelope.ledger)) === imported.ledgerFingerprint,
+        '人物入册维护账本指纹不匹配。');
+    }
+  }
+  if (raw.eventRemoval !== undefined) {
+    const removal = raw.eventRemoval;
+    requireValue(record(removal), '事件删除维护来源无效。');
+    exact(removal, ['sourceRef', 'baseLedgerRevision', 'baseLedgerFingerprint', 'ledgerRevision', 'ledgerFingerprint']);
+    if (removal.sourceRef !== null) validateWorldSimulationLogicalRef_ACU(removal.sourceRef, 'simulation.eventRemoval.sourceRef', 'load');
+    requireValue(integer(removal.baseLedgerRevision) && integer(removal.ledgerRevision)
+      && removal.ledgerRevision > removal.baseLedgerRevision
+      && typeof removal.baseLedgerFingerprint === 'string' && /^[a-f0-9]{64}$/.test(removal.baseLedgerFingerprint)
+      && typeof removal.ledgerFingerprint === 'string' && /^[a-f0-9]{64}$/.test(removal.ledgerFingerprint)
+      && envelope && envelope.ledger.revision >= removal.ledgerRevision, '事件删除维护账本身份无效。');
+    if (envelope.ledger.revision === removal.ledgerRevision) {
+      requireValue(sha256HexSync_ACU(canonical(envelope.ledger)) === removal.ledgerFingerprint,
+        '事件删除维护账本指纹不匹配。');
+    }
+  }
+  if (raw.historyRemoval !== undefined) {
+    const removal = raw.historyRemoval;
+    requireValue(record(removal), '历史删除维护来源无效。');
+    exact(removal, ['sourceRef', 'baseLedgerRevision', 'baseLedgerFingerprint', 'ledgerRevision', 'ledgerFingerprint']);
+    if (removal.sourceRef !== null) validateWorldSimulationLogicalRef_ACU(removal.sourceRef, 'simulation.historyRemoval.sourceRef', 'load');
+    requireValue(integer(removal.baseLedgerRevision) && integer(removal.ledgerRevision)
+      && removal.ledgerRevision > removal.baseLedgerRevision
+      && typeof removal.baseLedgerFingerprint === 'string' && /^[a-f0-9]{64}$/.test(removal.baseLedgerFingerprint)
+      && typeof removal.ledgerFingerprint === 'string' && /^[a-f0-9]{64}$/.test(removal.ledgerFingerprint)
+      && envelope && envelope.ledger.revision >= removal.ledgerRevision, '历史删除维护账本身份无效。');
+    if (envelope.ledger.revision === removal.ledgerRevision) {
+      requireValue(sha256HexSync_ACU(canonical(envelope.ledger)) === removal.ledgerFingerprint,
+        '历史删除维护账本指纹不匹配。');
+    }
+  }
   validateZeroLayerSimulationFields_ACU(raw.fields);
   validateWorldSimulationChronicleArchiveSnapshot_ACU(raw.archive, 'load');
   const conversation = validateWorldSimulationConversationFloorRecord_ACU(raw.conversation);
@@ -130,6 +211,64 @@ export function validateZeroLayerSimulationRefs_ACU(
     requireValue('logicalRef' in fix.anchor && fix.anchor.logicalRef, '零层推演不能保存宿主待修复锚点。');
     assertRef(fix.anchor.logicalRef, fix.anchor.contentDigest);
   }
+  const backfill = state.legacyBackfill;
+  if (backfill?.sourceRef) {
+    assertRef(backfill.sourceRef);
+    const origin = turns.get(backfill.sourceRef.turnId)!;
+    validateZeroLayerSimulationReceipt_ACU(origin, sessionId);
+    const originalLedger = (origin.assistantFloor.data.simulation as ZeroLayerSimulationResult_ACU).ledger;
+    requireValue(originalLedger?.revision === backfill.baseLedgerRevision
+      && sha256HexSync_ACU(canonical(originalLedger)) === backfill.baseLedgerFingerprint,
+    '旧资料补迁来源与原推演回执不一致。');
+  }
+  const removal = state.actorRemoval;
+  if (removal?.sourceRef) {
+    assertRef(removal.sourceRef);
+    const origin = turns.get(removal.sourceRef.turnId)!;
+    requireValue(origin.phase === 'published' && state.confirmed.some(item => canonical(item.ref) === canonical(removal.sourceRef)
+      && item.ledgerRevision === removal.baseLedgerRevision), '人物删除维护必须来自已发布确认。');
+    validateZeroLayerSimulationReceipt_ACU(origin, sessionId);
+    const originalLedger = (origin.assistantFloor.data.simulation as ZeroLayerSimulationResult_ACU).ledger;
+    requireValue(originalLedger?.revision === removal.baseLedgerRevision
+      && sha256HexSync_ACU(canonical(originalLedger)) === removal.baseLedgerFingerprint,
+    '人物删除维护来源与原推演回执不一致。');
+  }
+  const imported = state.actorImport;
+  if (imported?.sourceRef) {
+    assertRef(imported.sourceRef);
+    const origin = turns.get(imported.sourceRef.turnId)!;
+    requireValue(origin.phase === 'published' && state.confirmed.some(item => canonical(item.ref) === canonical(imported.sourceRef)
+      && item.ledgerRevision === imported.baseLedgerRevision), '人物入册维护必须来自已发布确认。');
+    validateZeroLayerSimulationReceipt_ACU(origin, sessionId);
+    const originalLedger = (origin.assistantFloor.data.simulation as ZeroLayerSimulationResult_ACU).ledger;
+    requireValue(originalLedger?.revision === imported.baseLedgerRevision
+      && sha256HexSync_ACU(canonical(originalLedger)) === imported.baseLedgerFingerprint,
+    '人物入册维护来源与原推演回执不一致。');
+  }
+  const eventRemoval = state.eventRemoval;
+  if (eventRemoval?.sourceRef) {
+    assertRef(eventRemoval.sourceRef);
+    const origin = turns.get(eventRemoval.sourceRef.turnId)!;
+    requireValue(origin.phase === 'published' && state.confirmed.some(item => canonical(item.ref) === canonical(eventRemoval.sourceRef)
+      && item.ledgerRevision === eventRemoval.baseLedgerRevision), '事件删除维护必须来自已发布确认。');
+    validateZeroLayerSimulationReceipt_ACU(origin, sessionId);
+    const originalLedger = (origin.assistantFloor.data.simulation as ZeroLayerSimulationResult_ACU).ledger;
+    requireValue(originalLedger?.revision === eventRemoval.baseLedgerRevision
+      && sha256HexSync_ACU(canonical(originalLedger)) === eventRemoval.baseLedgerFingerprint,
+    '事件删除维护来源与原推演回执不一致。');
+  }
+  const historyRemoval = state.historyRemoval;
+  if (historyRemoval?.sourceRef) {
+    assertRef(historyRemoval.sourceRef);
+    const origin = turns.get(historyRemoval.sourceRef.turnId)!;
+    requireValue(origin.phase === 'published' && state.confirmed.some(item => canonical(item.ref) === canonical(historyRemoval.sourceRef)
+      && item.ledgerRevision === historyRemoval.baseLedgerRevision), '历史删除维护必须来自已发布确认。');
+    validateZeroLayerSimulationReceipt_ACU(origin, sessionId);
+    const originalLedger = (origin.assistantFloor.data.simulation as ZeroLayerSimulationResult_ACU).ledger;
+    requireValue(originalLedger?.revision === historyRemoval.baseLedgerRevision
+      && sha256HexSync_ACU(canonical(originalLedger)) === historyRemoval.baseLedgerFingerprint,
+    '历史删除维护来源与原推演回执不一致。');
+  }
   for (const item of state.confirmed) {
     assertRef(item.ref);
     const turn = turns.get(item.ref.turnId)!;
@@ -144,13 +283,33 @@ export function validateZeroLayerSimulationResult_ACU(raw: unknown): asserts raw
   requireValue(record(raw) && raw.schemaVersion === 1 && typeof raw.summary === 'string'
     && ['commit', 'no_change', 'skipped-by-config'].includes(String(raw.outcome))
     && (raw.projection === null || typeof raw.projection === 'string'), '逻辑推演结果无效。');
-  exact(raw, ['schemaVersion', 'ref', 'outcome', 'summary', 'ledger', 'fields', 'archive', 'projection']);
+  exact(raw, [...(raw.delivery === undefined ? [] : ['delivery']),
+    ...(raw.bodyFactIds === undefined ? [] : ['bodyFactIds']), ...(raw.bodyTemplate === undefined ? [] : ['bodyTemplate']),
+    'schemaVersion', 'ref', 'outcome', 'summary', 'ledger', 'fields', 'archive', 'projection']);
+  if (raw.delivery !== undefined) requireValue(raw.delivery === 'ledger-only' || raw.delivery === 'body',
+    '推演交付格式无效。');
+  if (raw.delivery === 'ledger-only') requireValue(raw.projection === null
+    && raw.bodyFactIds === undefined && raw.bodyTemplate === undefined, '账本模式不能包含正文投影。');
+  if (raw.delivery === 'body') requireValue(Array.isArray(raw.bodyFactIds)
+    && raw.bodyFactIds.every(id => typeof id === 'string' && !!id.trim())
+    && new Set(raw.bodyFactIds).size === raw.bodyFactIds.length
+    && typeof raw.bodyTemplate === 'string' && !worldSimulationProjectionTemplateError_ACU(raw.bodyTemplate),
+    '正文投影事实或格式无效。');
+  if (raw.delivery === undefined) requireValue(raw.bodyFactIds === undefined && raw.bodyTemplate === undefined,
+    '旧推演结果不能混用新正文投影字段。');
   validateWorldSimulationLogicalRef_ACU(raw.ref, 'simulation.result.ref', 'load');
   validateZeroLayerSimulationFields_ACU(raw.fields);
   validateWorldSimulationChronicleArchiveSnapshot_ACU(raw.archive, 'load');
   if (raw.ledger !== null) {
     const ledger = validateWorldSimulationLedger_ACU(raw.ledger, 'load');
-    requireValue(raw.projection === buildWorldSimulationProjection_ACU(ledger), '逻辑推演投影不属于结果账本。');
+    if (raw.delivery === 'body') {
+      requireValue((raw.bodyFactIds as string[]).every(id => ledger.facts.some(fact => fact.id === id
+        && fact.revealState === 'unlocked' && fact.projectionPolicy !== 'internal' && !!fact.summary.trim())),
+      '正文事实必须属于已解锁的结果账本。');
+    }
+    requireValue(raw.delivery === 'ledger-only' ? ledger.projection.anchor === null && !ledger.projection.deliveries.length
+      : raw.delivery === 'body' ? raw.projection === buildWorldFactBodyProjection_ACU(ledger, raw.bodyFactIds as string[], raw.bodyTemplate as string)
+        : raw.projection === buildWorldSimulationProjection_ACU(ledger), '逻辑推演投影不属于结果账本。');
     const fields = structuredClone(raw.fields);
     reconcileLedgerFieldViewWithLedger_ACU(fields, ledger, 0);
     requireValue(canonical(fields) === canonical(raw.fields), '逻辑推演结果栏目与账本不一致。');
@@ -161,6 +320,10 @@ export function validateZeroLayerSimulationResult_ACU(raw: unknown): asserts raw
 export function validateZeroLayerSimulationReceipt_ACU(turn: ZeroLayerTurn_ACU, sessionId: string): void {
   const result = turn.assistantFloor.data.simulation;
   validateZeroLayerSimulationResult_ACU(result);
+  if (turn.simulationDeliveryTarget === 'plot') {
+    requireValue(result.delivery === 'ledger-only' && result.projection === null && result.bodyFactIds === undefined,
+      '剧情推进投送只接受不含正文投影的账本交付。');
+  }
   const ref = result.ref;
   requireValue(ref.sessionId === sessionId && ref.branchId === turn.branchId && ref.turnId === turn.turnId
     && ref.attemptId === turn.attemptId && ref.floorId === turn.assistantFloor.floorId, '推演回执逻辑身份不匹配。');

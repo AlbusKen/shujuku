@@ -33,6 +33,7 @@ function exclusions(raw: string): string[] {
 /** 统一自定义发送口；关闭酒馆渠道时只访问预设端点，不作隐式回退。 */
 async function sendCustomApiRequestImpl_ACU(
     config: any, bridgeBody: Record<string, any>, signal?: AbortSignal | null,
+    options?: { suppressPayloadLogging?: boolean },
 ): Promise<Response> {
     signal?.throwIfAborted();
     // 发送前最后一步：预设开关开启时只保留首条消息，其余转为 turn_ 函数；两条分支的响应都在交给调用方前还原。
@@ -44,11 +45,12 @@ async function sendCustomApiRequestImpl_ACU(
         const url = '/api/backends/chat-completions/generate';
         const headers = { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' };
         const wire = JSON.stringify(transport.body);
-        const log = createApiRequestLog_ACU('API酒馆转发', `请求 POST ${url}（酒馆后端请求体）${note}`, wire, { config, bridgeBody: transport.body, headers });
+        const log = options?.suppressPayloadLogging === true ? { write() {} }
+            : createApiRequestLog_ACU('API酒馆转发', `请求 POST ${url}（酒馆后端请求体）${note}`, wire, { config, bridgeBody: transport.body, headers });
         try {
             const response = await pristineFetch_ACU(url, { method: 'POST', headers, body: wire, signal: signal ?? undefined });
             // 日志记录上游原始回复；调用方拿到的是还原后的回复。
-            return await restore(observeApiResponse_ACU(response, log, signal).response);
+            return await restore(options?.suppressPayloadLogging === true ? response : observeApiResponse_ACU(response, log, signal).response);
         } catch (error) { log.write('请求失败', error); throw error; }
     }
     const format = normalizeCustomApiFormat_ACU(config.customApiFormat);
@@ -84,7 +86,8 @@ async function sendCustomApiRequestImpl_ACU(
     }
     const url = providerEndpoint_ACU(config.url, format);
     const wire = JSON.stringify(body);
-    const log = createApiRequestLog_ACU('API直连', `请求 ${url}${note}`, wire, { config, body, headers: Object.fromEntries(headers.entries()) });
+    const log = options?.suppressPayloadLogging === true ? { write() {} }
+        : createApiRequestLog_ACU('API直连', `请求 ${url}${note}`, wire, { config, body, headers: Object.fromEntries(headers.entries()) });
     try {
         const response = await pristineFetch_ACU(url, { method: 'POST', headers, body: wire, credentials: 'omit', signal: signal ?? undefined });
         // 直连保留既有协议归一化与读取期限；归一为 Chat Completion 形态后再还原输出函数。
@@ -102,5 +105,5 @@ async function captureProviderResponse_ACU(response: Response, format: ReturnTyp
     return new Response(normalized, { status: response.status, headers: { 'Content-Type': isSse ? 'text/event-stream' : 'application/json' } });
 }
 
-export const sendCustomApiRequest_ACU: typeof sendCustomApiRequestImpl_ACU = (config, body, signal) =>
-    runTakeoverRequest_ACU(merged => sendCustomApiRequestImpl_ACU(config, body, merged), signal);
+export const sendCustomApiRequest_ACU: typeof sendCustomApiRequestImpl_ACU = (config, body, signal, options) =>
+    runTakeoverRequest_ACU(merged => sendCustomApiRequestImpl_ACU(config, body, merged, options), signal);

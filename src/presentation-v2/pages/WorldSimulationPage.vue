@@ -1,57 +1,64 @@
 <template>
   <section class="acu-v2-world-simulation-page">
-    <AcuPanel title="Agent 会话" description="像和 coding agent 对话一样使用：随时输入、随时打断。主 Agent 按需派工子代理取证与改写，最终账本经审核后严格写入任务开始时冻结的 assistant 楼层；正文生成完成后也会自动推演一次。">
-      <p v-if="runtime.error.value" class="acu-v2-world-simulation-page__error">
-        {{ runtime.error.value }}
-        <AcuButton size="sm" @click="refreshAll">重新读取</AcuButton>
-      </p>
-      <p v-else-if="!runtime.ready.value" class="acu-v2-world-simulation-page__meta">正在读取并验证格林推演快照…</p>
-      <WorldSimulationChat
-        v-else
-        :task="runtime.task.value"
-        :last-error="runtime.envelope.value?.lastError ?? null"
-        :entries="runtime.entries.value"
-        :running="runtime.running.value"
-        :draft="messageDraft"
-        :sending="messageSending"
-        :status-text="runtime.statusText.value"
-        :stage-text="runtime.stageText.value"
-        :revision-text="runtime.revisionText.value"
-        :anchor-text="runtime.anchorText.value"
-        @send="sendMessage"
-        @update:draft="messageDraft = $event"
-        @stop="runtime.stop"
-      />
-    </AcuPanel>
-
-    <!-- 会话独占整宽，资料与设置并列在其下：会话是主操作面，资料与设置是查阅面。 -->
-    <AcuPanelGrid class="acu-v2-world-simulation-page__layout">
-      <AcuPanel title="已有资料" description="当前分支的用户要求、账本总览、幕后纪要、错过清单、风声、候选轨迹、场外信号与读取诊断；用户要求可在资料区手动修正，账本只由 Agent 经审核后写入。一键清空只丢任务、会话记录与楼层资料快照，不动正文。">
-        <WorldSimulationMaterialsPanel
-          v-if="runtime.ready.value && runtime.snapshot.value"
-          :save-requirements="runtime.saveUserRequirements"
-          :conversation="runtime.snapshot.value.conversation"
-          :materials="runtime.snapshot.value.materials"
-          :field-snapshot="runtime.snapshot.value.fieldSnapshot"
-          :user-requirements="runtime.snapshot.value.userRequirements"
-          :session="runtime.entries.value"
-          :ledger="'publishedLedger' in runtime.snapshot.value ? runtime.snapshot.value.publishedLedger ?? null : runtime.snapshot.value.envelope?.ledger ?? null"
-          :anchor="runtime.anchor.value"
-          :projection-preview="runtime.snapshot.value.projectionPreview"
-          :busy="runtime.busy.value"
-          :timeline="runtime.envelope.value?.timeline ?? []"
-          @refresh="refreshAll"
-          @clear="clearData"
-        />
-        <p v-else class="acu-v2-world-simulation-page__meta">当前没有可显示的格林推演资料。</p>
+      <AcuPanel title="世界状态" class="acu-v2-world-simulation-page__world-state">
+        <template #title>
+          <button type="button" class="acu-v2-world-simulation-page__world-title" :aria-expanded="worldStateExpanded" aria-controls="acu-world-state-content" @click="worldStateExpanded = !worldStateExpanded">世界状态<span class="acu-v2-world-simulation-page__floor">{{ runtime.anchor.value ? runtime.anchorText.value : '未确定' }}</span></button>
+        </template>
+        <template #actions>
+          <AcuIconButton icon="fa-solid fa-rotate-right" title="刷新世界状态" aria-label="刷新世界状态" :disabled="runtime.busy.value" @click="refreshAll" />
+          <AcuIconButton icon="fa-solid fa-trash" variant="danger" title="清空世界状态" aria-label="清空世界状态" :disabled="runtime.busy.value || !runtime.ready.value" @click="requestWorldStateClear" />
+        </template>
+        <div id="acu-world-state-content" v-show="worldStateExpanded">
+          <WorldSimulationMaterialsPanel
+            v-if="runtime.ready.value && runtime.snapshot.value"
+            ref="materialsPanel"
+            :field-snapshot="runtime.snapshot.value.fieldSnapshot"
+            :ledger="'publishedLedger' in runtime.snapshot.value ? runtime.snapshot.value.publishedLedger ?? null : runtime.snapshot.value.envelope?.ledger ?? null"
+            :busy="runtime.busy.value"
+            @clear="clearData"
+            @delete-actor="onDeleteActor"
+            @delete-world-event="onDeleteWorldEvent"
+            @delete-world-history="onDeleteWorldHistory"
+            @scan-worldbooks="scanWorldbookActors"
+          />
+          <p v-else class="acu-v2-world-simulation-page__meta">暂无世界状态。</p>
+        </div>
       </AcuPanel>
 
-      <AcuPanel v-if="settingsDraft" title="推演设置" description="修改后自动保存；任务运行中也可以改，改动会在本轮结束后落盘、下一轮开始时生效。常用项直接可见，其余参数按主题折叠。">
+    <AcuPanelGrid class="acu-v2-world-simulation-page__layout">
+      <AcuPanel title="世界推演会话">
+        <p v-if="runtime.error.value" class="acu-v2-world-simulation-page__error">
+          {{ runtime.error.value }}
+          <AcuButton size="sm" @click="refreshAll">重新读取</AcuButton>
+        </p>
+        <p v-else-if="!runtime.ready.value" class="acu-v2-world-simulation-page__meta">正在读取并验证格林推演快照…</p>
+        <WorldSimulationChat
+          v-else
+          :task="runtime.task.value"
+          :last-error="runtime.envelope.value?.lastError ?? null"
+          :entries="runtime.entries.value"
+          :running="runtime.running.value"
+          :draft="messageDraft"
+          :sending="messageSending"
+          :status-text="runtime.statusText.value"
+          :stage-text="runtime.stageText.value"
+          :revision-text="runtime.revisionText.value"
+          :anchor-text="runtime.anchorText.value"
+          @send="sendMessage"
+          @update:draft="messageDraft = $event"
+          @stop="runtime.stop"
+        />
+      </AcuPanel>
+
+      <AcuPanel v-if="settingsDraft" title="推演设置">
         <div class="acu-v2-world-simulation-page__settings-grid">
-          <AcuFormRow label="使用工具调用" hint="开启后决策与交付都通过函数调用完成；部分渠道不支持 tools 字段会报错。全局生效，不随对话保存。">
-            <AcuToggle :model-value="runtime.nativeToolEnabled.value" aria-label="使用工具调用" @update:model-value="runtime.setNativeToolEnabled($event)" />
+          <AcuFormRow label="工作流模式">
+            <AcuSelect v-model="settingsDraft.workflowMode" :options="workflowModeOptions" />
           </AcuFormRow>
-          <AcuFormRow label="API 预设（全局默认）" hint="所有 Agent 默认走这个预设；需要给某个 Agent 单独指定时，展开下方「各 Agent 渠道」。需要工具的 Agent 须使用 Chat Completion 类连接：自定义 API、Chat Completion 酒馆连接预设或 Chat Completion 主连接均可；Text Completion 连接无法返回工具调用。">
+          <AcuFormRow label="投送目标">
+            <AcuSelect v-model="settingsDraft.deliveryTarget" :options="deliveryTargetOptions" />
+          </AcuFormRow>
+          <AcuFormRow label="API 预设（全局默认）">
             <AcuSelect
               :options="apiPresetOptions"
               :model-value="apiPresetValue"
@@ -59,159 +66,34 @@
               @update:model-value="applyApiPreset"
             />
           </AcuFormRow>
-          <AcuFormRow label="会话自动总结阈值（token）" hint="按主 Agent 实际读取的完整上下文统计，超过后把最早轮次浓缩成交接报告；0 为不总结。">
-            <AcuInput v-model="settingsDraft.agentHistoryTokenBudget" type="number" :min="0" :max="1000000" />
+          <AcuFormRow label="单次请求 token 上限">
+            <AcuInput v-model="settingsDraft.agentHistoryTokenBudget" type="number" :min="1" :max="1000000" />
           </AcuFormRow>
-          <AcuFormRow label="单批次读取上限" hint="一次 read/search 工具批次最多可注入多少 token；超过整批打回。填正整数或形如 20% 的百分比（按总结阈值折算）。">
+          <AcuFormRow label="单批次读取上限">
             <AcuInput v-model="settingsDraft.agentReadTokenBudget" type="text" />
           </AcuFormRow>
-          <AcuFormRow label="临近总结时的精读额度（token）" hint="上下文即将触发总结时，只有不超过此大小的单批次读取会放行。">
-            <AcuInput v-model="settingsDraft.agentReadFallbackTokens" type="number" :min="0" :max="100000" />
+          <AcuFormRow label="各角色渠道">
+            <AcuDisclosureGroup
+              class="acu-v2-world-simulation-page__group acu-v2-world-simulation-page__channels"
+              :label="channelGroupMeta"
+              :expanded="isGroupExpanded('channels')"
+              body-id="acu-world-simulation-group-channels"
+              @toggle="toggleGroup('channels')"
+            >
+              <div class="acu-v2-world-simulation-page__channel-fields">
+                <AcuFormRow v-for="agentName in agentNames" :key="agentName" :label="agentLabel(agentName)">
+                  <AcuSelect
+                    :options="agentChannelOptions"
+                    :model-value="agentChannelValue(agentName)"
+                    @update:model-value="value => applyAgentChannel(agentName, value)"
+                  />
+                </AcuFormRow>
+              </div>
+            </AcuDisclosureGroup>
           </AcuFormRow>
         </div>
         <div class="acu-v2-world-simulation-page__toggles">
-          <AcuCheckbox v-model="settingsDraft.autoTriggerEnabled" label="正文生成完成后自动推演（与自动填表同一时机）" />
-          <AcuCheckbox v-model="settingsDraft.webResearch.enabled" label="启用设定研究（外部百科检索）" />
-        </div>
-
-        <div class="acu-v2-world-simulation-page__groups">
-          <AcuDisclosureGroup
-            class="acu-v2-world-simulation-page__group"
-            label="Agent 运行预算"
-            :meta="budgetGroupMeta"
-            :expanded="isGroupExpanded('budget')"
-            body-id="acu-world-simulation-group-budget"
-            @toggle="toggleGroup('budget')"
-          >
-            <div class="acu-v2-world-simulation-page__settings-grid">
-              <AcuFormRow label="主 Agent 迭代上限" hint="一次推演内主 Agent 最多做多少次决策（取证/派工/收敛各算一次）。范围 1–100。">
-                <AcuInput v-model="settingsDraft.agentRunBudget.maxIterations" type="number" :min="1" :max="100" />
-              </AcuFormRow>
-              <AcuFormRow label="派工总数上限" hint="一次推演内最多派出多少个子代理任务，0 为禁止派工。范围 0–100。">
-                <AcuInput v-model="settingsDraft.agentRunBudget.maxDelegations" type="number" :min="0" :max="100" />
-              </AcuFormRow>
-              <AcuFormRow label="单代理派工上限" hint="同一个子代理在一次推演内最多被派几次。范围 0–20。">
-                <AcuInput v-model="settingsDraft.agentRunBudget.maxSameAgent" type="number" :min="0" :max="20" />
-              </AcuFormRow>
-              <AcuFormRow label="并发派工上限" hint="同一波次最多同时运行几个子代理；默认 5。API 限流严格时调小。范围 1–20。">
-                <AcuInput v-model="settingsDraft.agentRunBudget.maxConcurrent" type="number" :min="1" :max="20" />
-              </AcuFormRow>
-              <AcuFormRow label="读取批次上限" hint="主 Agent 一次推演内 read/search 工具批次的次数上限，0 为禁止读取。范围 0–200。">
-                <AcuInput v-model="settingsDraft.agentRunBudget.maxReads" type="number" :min="0" :max="200" />
-              </AcuFormRow>
-              <AcuFormRow label="子代理工具轮上限" hint="子代理首轮之外还允许几轮 read/search 追加读取。范围 0–20。">
-                <AcuInput v-model="settingsDraft.agentRunBudget.maxExtraReads" type="number" :min="0" :max="20" />
-              </AcuFormRow>
-            </div>
-          </AcuDisclosureGroup>
-
-          <AcuDisclosureGroup
-            class="acu-v2-world-simulation-page__group"
-            label="设定研究（网页检索）"
-            :meta="webResearchGroupMeta"
-            :expanded="isGroupExpanded('webResearch')"
-            body-id="acu-world-simulation-group-web-research"
-            @toggle="toggleGroup('webResearch')"
-          >
-            <p class="acu-v2-world-simulation-page__meta">开启后，主 Agent 在本地证据不足时可直接使用网页检索与百科读取补充公开设定资料；研究结果只作证据，不直接写入世界账本。</p>
-            <div class="acu-v2-world-simulation-page__toggles">
-              <AcuCheckbox v-model="settingsDraft.webResearch.sources.moegirl" label="萌娘百科" />
-              <AcuCheckbox v-model="settingsDraft.webResearch.sources.wikipediaZh" label="中文维基百科" />
-              <AcuCheckbox v-model="settingsDraft.webResearch.sources.wikipediaEn" label="英文维基百科" />
-            </div>
-            <div class="acu-v2-world-simulation-page__settings-grid">
-              <AcuFormRow label="搜索引擎" hint="百科查不到时的兜底搜索。DuckDuckGo 免 key；Serper / Tavily 使用酒馆「API 密钥」里已配置的 key；SearXNG 需填实例地址。">
-                <AcuSelect v-model="settingsDraft.webResearch.searchProvider" :options="webSearchProviderOptions" />
-              </AcuFormRow>
-              <AcuFormRow v-if="settingsDraft.webResearch.searchProvider === 'searxng'" label="SearXNG 实例地址" hint="形如 https://searx.example.org">
-                <AcuInput v-model="settingsDraft.webResearch.searxngBaseUrl" type="text" />
-              </AcuFormRow>
-              <AcuFormRow label="单页阅读字数上限" hint="研究子代理可读取的单页正文上限；正文不保存。范围 500–20000。">
-                <AcuInput v-model="settingsDraft.webResearch.pageCharLimit" type="number" :min="500" :max="20000" />
-              </AcuFormRow>
-              <AcuFormRow label="域名黑名单" hint="不得抓取的域名，逗号或换行分隔；内网与酒馆自身始终被拦。">
-                <AcuTextarea v-model="settingsDraft.webResearch.blockedDomains" :rows="3" />
-              </AcuFormRow>
-            </div>
-          </AcuDisclosureGroup>
-
-          <AcuDisclosureGroup
-            class="acu-v2-world-simulation-page__group"
-            label="世界动态"
-            :meta="dynamicsGroupMeta"
-            :expanded="isGroupExpanded('dynamics')"
-            body-id="acu-world-simulation-group-dynamics"
-            @toggle="toggleGroup('dynamics')"
-          >
-            <p class="acu-v2-world-simulation-page__meta">控制风声时效、时序推进上限、碰撞兑现与过期清扫；改动在下一轮推演生效。</p>
-            <div class="acu-v2-world-simulation-page__settings-grid">
-              <AcuFormRow label="风声等待上限（天）" hint="风声进入待命后，等待玩家命中传播渠道的天数上限。范围 1–3650。">
-                <AcuInput v-model="settingsDraft.dynamics.rumorTTLDays" type="number" :min="1" :max="3650" />
-              </AcuFormRow>
-              <AcuFormRow label="单次时钟推进上限（世界日）" hint="一次提交允许推进的天数；超过则必须附带证据。范围 0–3650。">
-                <AcuInput v-model="settingsDraft.dynamics.maxClockAdvanceDays" type="number" :min="0" :max="3650" />
-              </AcuFormRow>
-              <AcuFormRow label="碰撞兑现策略" hint="严格：撞上必须有当场反应，模型没写时由程序补一条最简引导，不拒绝提交。宽松：只记警告。">
-                <AcuSelect v-model="settingsDraft.dynamics.collisionEnforcement" :options="collisionEnforcementOptions" />
-              </AcuFormRow>
-            </div>
-            <div class="acu-v2-world-simulation-page__toggles">
-              <AcuCheckbox v-model="settingsDraft.dynamics.missedSweepEnabled" label="启用过期清扫（关闭后过期伏线不会自动记为错过）" />
-            </div>
-          </AcuDisclosureGroup>
-
-          <AcuDisclosureGroup
-            class="acu-v2-world-simulation-page__group"
-            label="场外信号插入正文"
-            :meta="projectionGroupMeta"
-            :expanded="isGroupExpanded('projection')"
-            body-id="acu-world-simulation-group-projection"
-            @toggle="toggleGroup('projection')"
-          >
-            <p class="acu-v2-world-simulation-page__meta">提交时按这个格式把场外信号写进冻结的 assistant 楼层。$WORLD_SIGNALS 会换成按【此地此刻】【风闻轶事】【世界暗流】分组的信号；插件用来识别和替换这一段的起止注释会自动加在最外层，不用写进格式里。改动在下一次提交时生效。</p>
-            <AcuFormRow label="插入格式" hint="必须恰好包含一次 $WORLD_SIGNALS，最多 4000 字。默认用隐藏容器包住〈与此同时〉，正文渲染时对读者隐藏。插入后会自动重渲染该楼层。">
-              <AcuTextarea v-model="settingsDraft.projection.template" :rows="6" />
-            </AcuFormRow>
-            <div class="acu-v2-world-simulation-page__toggles">
-              <AcuButton size="sm" @click="restoreDefaultProjectionTemplate">恢复默认</AcuButton>
-            </div>
-          </AcuDisclosureGroup>
-
-          <AcuDisclosureGroup
-            class="acu-v2-world-simulation-page__group"
-            label="工作流"
-            :meta="workflowGroupMeta"
-            :expanded="isGroupExpanded('workflow')"
-            body-id="acu-world-simulation-group-workflow"
-            @toggle="toggleGroup('workflow')"
-          >
-            <p class="acu-v2-world-simulation-page__meta">固定工作流批次一并发处理时序、局势刻度与伏线，以及人物谱；批次二按变化处理幕后纪要、风声与场外信号。这里只改纪要热层阈值；提示词仍在下方各角色分组里改。</p>
-            <div class="acu-v2-world-simulation-page__settings-grid">
-              <AcuFormRow label="纪要热层阈值" hint="热层纪要达到这个条数时，批次二由纪要角色处理归档。范围 1–512。">
-                <AcuInput v-model="settingsDraft.workflow.chroniclerHotThreshold" type="number" :min="1" :max="512" />
-              </AcuFormRow>
-            </div>
-          </AcuDisclosureGroup>
-
-          <AcuDisclosureGroup
-            class="acu-v2-world-simulation-page__group"
-            label="各 Agent 渠道"
-            :meta="channelGroupMeta"
-            :expanded="isGroupExpanded('channels')"
-            body-id="acu-world-simulation-group-channels"
-            @toggle="toggleGroup('channels')"
-          >
-            <p class="acu-v2-world-simulation-page__meta">给不同 Agent 分配不同 API 预设：例如主 Agent 用强模型，审核类子代理用便宜快速的模型。「跟随全局默认」即使用上方的 API 预设。需要工具的 Agent 须使用 Chat Completion 类连接：自定义 API、Chat Completion 酒馆连接预设或 Chat Completion 主连接均可；Text Completion 连接无法返回工具调用。</p>
-            <div class="acu-v2-world-simulation-page__settings-grid">
-              <AcuFormRow v-for="agentName in agentNames" :key="agentName" :label="agentLabel(agentName)">
-                <AcuSelect
-                  :options="agentChannelOptions"
-                  :model-value="agentChannelValue(agentName)"
-                  @update:model-value="value => applyAgentChannel(agentName, value)"
-                />
-              </AcuFormRow>
-            </div>
-          </AcuDisclosureGroup>
+          <AcuCheckbox class="acu-v2-world-simulation-page__auto-trigger" v-model="settingsDraft.autoTriggerEnabled" label="自动推演" />
         </div>
 
         <p v-if="settingsError" class="acu-v2-world-simulation-page__error">{{ settingsError }}</p>
@@ -219,112 +101,279 @@
       </AcuPanel>
     </AcuPanelGrid>
 
-    <AcuPanel v-if="settingsDraft" title="伪 Role 提示词" description="仅启用段参与内部调用；占位符会按实际出现按需解析。引擎 seam 段固定顺序与角色、不可删除，其余段可自由增删改。修改后自动保存。">
-      <div class="acu-v2-world-simulation-page__actions acu-v2-world-simulation-page__actions--start">
-        <AcuButton @click="exportPrompts">导出提示词 JSON</AcuButton>
-        <AcuButton @click="promptImportInput?.click()">导入提示词 JSON</AcuButton>
-        <input ref="promptImportInput" type="file" accept=".json,application/json" class="acu-v2-world-simulation-page__file-input" @change="onImportPromptsFile" />
-      </div>
-      <p v-if="promptIoError" class="acu-v2-world-simulation-page__error">{{ promptIoError }}</p>
-      <p v-if="promptIoNotice" class="acu-v2-world-simulation-page__meta">{{ promptIoNotice }}</p>
+    <AcuPanel v-if="runtime.ready.value && runtime.snapshot.value" title="用户要求" class="acu-v2-world-simulation-page__requirements">
+      <WorldSimulationRequirementsPanel
+        :chat-identity="runtime.anchor.value?.chatIdentity ?? null"
+        :user-requirements="runtime.snapshot.value.userRequirements"
+        :save-requirements="runtime.saveUserRequirements"
+        :busy="runtime.busy.value"
+      />
+    </AcuPanel>
 
+    <AcuPanel v-if="settingsDraft" title="推演提示词">
+      <div class="acu-v2-world-simulation-page__actions acu-v2-world-simulation-page__actions--start">
+        <AcuButton @click="exportWorldRoundPrompts">导出推演提示词 JSON</AcuButton>
+        <AcuButton @click="openWorldRoundPromptImport">导入推演提示词 JSON</AcuButton>
+        <input
+          ref="worldRoundPromptImportInput"
+          class="acu-v2-world-simulation-page__file-input"
+          type="file"
+          accept="application/json,.json"
+          @change="importWorldRoundPrompts"
+        >
+      </div>
       <div class="acu-v2-world-simulation-page__groups">
         <AcuDisclosureGroup
-          v-for="agentName in agentNames"
-          :key="agentName"
+          v-for="roleKey in worldRoundPromptRoles"
+          :key="roleKey"
           class="acu-v2-world-simulation-page__group"
-          :label="`${agentLabel(agentName)}（${agentName}）提示词`"
-          :meta="promptGroupMeta(agentName)"
-          :expanded="isGroupExpanded(`prompt:${agentName}`)"
-          :body-id="`acu-world-simulation-prompt-${agentName}`"
-          @toggle="toggleGroup(`prompt:${agentName}`)"
+          :label="worldRoundPromptLabel(roleKey)"
+          :meta="worldRoundPromptGroupMeta(roleKey)"
+          :expanded="isGroupExpanded(`world-round-prompt:${roleKey}`)"
+          :body-id="`acu-world-round-prompt-${roleKey}`"
+          @toggle="toggleGroup(`world-round-prompt:${roleKey}`)"
         >
-          <AcuPromptSegments
-            :segments="runtime.presentPromptSegments(agentName, settingsDraft.agentPrompts[agentName] ?? [])"
-            :role-options="roleOptions"
-            :show-slot="false"
-            :show-enabled="true"
-            :allow-move="true"
-            @add="position => addPrompt(agentName, position)"
-            @delete="index => deletePrompt(agentName, index)"
-            @move="(index, delta) => movePrompt(agentName, index, delta)"
-            @update="(index, patch) => updatePrompt(agentName, index, patch)"
-          />
-          <div class="acu-v2-world-simulation-page__actions"><AcuButton @click="restorePrompt(agentName)">恢复{{ agentLabel(agentName) }}默认值</AcuButton></div>
-        </AcuDisclosureGroup>
-
-        <AcuDisclosureGroup
-          class="acu-v2-world-simulation-page__group"
-          label="占位符速查"
-          meta="参考"
-          :expanded="isGroupExpanded('prompt:reference')"
-          body-id="acu-world-simulation-prompt-reference"
-          @toggle="toggleGroup('prompt:reference')"
-        >
-          <h4 class="acu-v2-world-simulation-page__subheading">引擎 seam 段</h4>
-          <p class="acu-v2-world-simulation-page__meta">默认顺序为身份 system、格式问答、方法与流程问答、运行快照、真实会话历史、user 预填充。格式回答只读，随「使用工具调用」切换；快照模板可编辑，动态资料在此注入。快照与历史卡可上下移动，历史按真实身份展开。</p>
-          <h4 class="acu-v2-world-simulation-page__subheading">格林推演占位符</h4>
-          <p class="acu-v2-world-simulation-page__meta">运行装配占位符：$WORLD_TASK（当前任务）、$WORLD_HISTORY（楼层锚定的 Agent 会话历史）、$WORLD_RUNTIME_CONTEXT（触发种类、指令与基准账本 revision）、$WORLD_AGENT_CATALOG（可派工角色与职责）、$WORLD_TOOL_CATALOG（read/search 地址词汇表）、$WORLD_EVIDENCE（已授权证据条目）、$WORLD_USER_REQUIREMENTS（用户累计要求，默认注入）、$WORLD_USER_GUIDANCE（用户本轮指令，自定义段仍可用）。世界领域占位符：$WORLD_STATE（当前世界账本）、$ANCHOR_MESSAGE（冻结 assistant 楼层正文）、$ANCHOR_IDENTITY（楼层 / swipe / 正文摘要身份）、$WORLD_STAGE_PLAN（本轮阶段计划）、$WORLD_CHRONICLE（宏观编年）、$WORLD_CANDIDATES（本轮候选摘要）、$CURRENT_EVIDENCE_REGISTRY（证据注册表快照）、$PROJECTION_PREVIEW（〈与此同时〉投影预览）。所有动态内容都以转义后的 UNTRUSTED_* 区块注入，只有提示词里实际出现的占位符才会被解析；未知占位符会在保存时被拒绝。</p>
+          <template v-if="worldRoundPromptSegments(roleKey).length">
+            <div
+              v-for="(segment, index) in worldRoundPromptSegments(roleKey)"
+              :key="`${roleKey}-${index}`"
+              class="acu-v2-world-simulation-page__prompt-segment"
+            >
+              <div class="acu-v2-world-simulation-page__prompt-segment-actions">
+                <AcuSelect
+                  :model-value="segment.role"
+                  :options="worldRoundPromptRoleOptions"
+                  @update:model-value="value => updateWorldRoundPromptRole(roleKey, index, value)"
+                />
+                <AcuCheckbox
+                  :model-value="segment.enabled"
+                  label="启用"
+                  @update:model-value="value => updateWorldRoundPromptEnabled(roleKey, index, value)"
+                />
+                <AcuButton size="sm" :disabled="index === 0" @click="moveWorldRoundPromptSegment(roleKey, index, -1)">上移</AcuButton>
+                <AcuButton size="sm" :disabled="index === worldRoundPromptSegments(roleKey).length - 1" @click="moveWorldRoundPromptSegment(roleKey, index, 1)">下移</AcuButton>
+                <AcuButton size="sm" :disabled="!segment.deletable || segment.pinned" @click="deleteWorldRoundPromptSegment(roleKey, index)">删除</AcuButton>
+              </div>
+              <textarea
+                class="acu-v2-world-simulation-page__prompt-textarea"
+                :value="segment.content"
+                rows="5"
+                aria-label="提示词内容"
+                @input="updateWorldRoundPromptContent(roleKey, index, $event)"
+              />
+            </div>
+          </template>
+          <p v-else class="acu-v2-world-simulation-page__meta">{{ isExplicitlyDisabledWorldRoundPrompt(roleKey) ? '已关闭' : '未配置' }}</p>
+          <div class="acu-v2-world-simulation-page__actions acu-v2-world-simulation-page__actions--start">
+            <AcuButton v-if="hasExplicitWorldRoundPrompt(roleKey) && getDefaultWorldRoundPromptSegments_ACU(roleKey).length" size="sm" @click="restoreDefaultWorldRoundPrompt(roleKey)">恢复默认</AcuButton>
+            <AcuButton size="sm" @click="addWorldRoundPromptSegment(roleKey)">添加段</AcuButton>
+          </div>
         </AcuDisclosureGroup>
       </div>
-      <p v-if="settingsError" class="acu-v2-world-simulation-page__error">{{ settingsError }}</p>
     </AcuPanel>
+
+    <details class="acu-v2-world-simulation-page__diagnostics">
+      <summary>读取诊断</summary>
+      <p v-if="!readingDiagnostics.length" class="acu-v2-world-simulation-page__meta">暂无读取诊断。</p>
+      <ul v-else><li v-for="(item, index) in readingDiagnostics" :key="index">{{ item }}</li></ul>
+    </details>
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import { isAgentFixedSlot_ACU, isAgentSnapshotSlot_ACU } from '../../shared/agent-prompt-layout';
-import { isAgentFormatAnswer_ACU } from '../../shared/agent-prompt-qa';
-import type { WorldSimulationAgentName_ACU } from '../../service/simulation/agent/agent-catalog'; // arch-ok: 仅类型导入，用于本页状态标注，编译后无运行时依赖
-import type { WorldSimulationPromptSegment_ACU, WorldSimulationSettings_ACU } from '../../service/simulation/model'; // arch-ok: 仅类型导入，用于本页状态标注，编译后无运行时依赖
+import type { WorldSimulationAgentName_ACU } from '../../service/simulation/agent/agent-catalog';
+import { validateWorldRoundPrompts_ACU, type WorldRoundPromptRole_ACU } from '../../service/simulation/agent/world-round-prompts';
+import { getDefaultWorldRoundPromptSegments_ACU } from '../../service/simulation/agent/world-round-prompt-defaults';
+import type { WorldSimulationPromptSegment_ACU, WorldSimulationSettings_ACU } from '../../service/simulation/model';
 import AcuButton from '../components/_lib/AcuButton.vue';
 import AcuCheckbox from '../components/_lib/AcuCheckbox.vue';
-import AcuToggle from '../components/_lib/AcuToggle.vue';
 import AcuDisclosureGroup from '../components/_lib/AcuDisclosureGroup.vue';
 import AcuFormRow from '../components/_lib/AcuFormRow.vue';
+import AcuIconButton from '../components/_lib/AcuIconButton.vue';
 import AcuInput from '../components/_lib/AcuInput.vue';
 import AcuPanel from '../components/_lib/AcuPanel.vue';
 import AcuPanelGrid from '../components/_lib/AcuPanelGrid.vue';
-import AcuPromptSegments from '../components/_lib/AcuPromptSegments.vue';
 import AcuSelect from '../components/_lib/AcuSelect.vue';
-import AcuTextarea from '../components/_lib/AcuTextarea.vue';
 import WorldSimulationChat from '../components/WorldSimulationChat.vue';
 import WorldSimulationMaterialsPanel from '../components/WorldSimulationMaterialsPanel.vue';
+import WorldSimulationRequirementsPanel from '../components/WorldSimulationRequirementsPanel.vue';
 import { useApiPresetSelectOptions } from '../composables/useApiPresetSelectOptions';
 import { useChatChangedTick, useChatMutationTick } from '../composables/useChatChangedListener';
 import { useWorldSimulationRuntime } from '../composables/useWorldSimulationRuntime';
-import { WORLD_SIMULATION_AGENT_ORDER_ACU, worldSimulationAgentLabel_ACU } from '../copy/world-simulation-copy';
+import { worldSimulationAgentLabel_ACU } from '../copy/world-simulation-copy';
 import { useDialogStore } from '../stores/dialog-store';
 
 const runtime = useWorldSimulationRuntime();
+const readingDiagnostics = computed(() => [
+  ...(runtime.snapshot.value?.conversation.diagnostics ?? []),
+  ...(runtime.snapshot.value?.materials.diagnostics ?? []),
+]);
 const dialog = useDialogStore();
 const { apiStore, followActiveApiLabel, apiPresetSelectOptions: apiPresetOptions } = useApiPresetSelectOptions();
+const worldStateExpanded = ref(true);
+const materialsPanel = ref<InstanceType<typeof WorldSimulationMaterialsPanel> | null>(null);
+function requestWorldStateClear(): void {
+  worldStateExpanded.value = true;
+  materialsPanel.value?.requestClear();
+}
 const settingsDraft = ref<WorldSimulationSettings_ACU | null>(null);
 const messageDraft = ref('');
 const messageSending = ref(false);
 const settingsError = ref('');
 const settingsNotice = ref('');
 
-const agentNames = WORLD_SIMULATION_AGENT_ORDER_ACU;
+const agentNames = [
+  'timekeeper',
+  'undercurrent-analyst',
+  'dramatis-keeper',
+  'guidance-composer',
+] as const satisfies readonly WorldSimulationAgentName_ACU[];
 const agentLabel = worldSimulationAgentLabel_ACU;
 
-const roleOptions = [
-  { value: 'system', label: 'SYSTEM' },
-  { value: 'user', label: 'USER' },
-  { value: 'assistant', label: 'ASSISTANT' },
+const worldRoundPromptRoles = ['clock-recaller', 'world-event-analyst', 'actor-simulator', 'worldbook-registrar', 'joint-reviewer', 'world-simulator'] as const satisfies readonly WorldRoundPromptRole_ACU[];
+type CurrentWorldRoundPromptRole = typeof worldRoundPromptRoles[number];
+const WORLD_ROUND_PROMPT_LABELS: Record<CurrentWorldRoundPromptRole, string> = {
+  'clock-recaller': '时钟与召回',
+  'world-simulator': '单模式附加自定义',
+  'world-event-analyst': '世界事件',
+  'actor-simulator': '人物推演',
+  'worldbook-registrar': '世界书角色整理',
+  'joint-reviewer': '联合审查',
+};
+const worldRoundPromptRoleOptions = [
+  { value: 'system', label: 'system' },
+  { value: 'user', label: 'user' },
+  { value: 'assistant', label: 'assistant' },
+];
+const worldRoundPromptImportInput = ref<HTMLInputElement | null>(null);
+
+function worldRoundPromptLabel(roleKey: CurrentWorldRoundPromptRole): string {
+  return WORLD_ROUND_PROMPT_LABELS[roleKey];
+}
+
+function worldRoundPromptSegments(roleKey: CurrentWorldRoundPromptRole): WorldSimulationPromptSegment_ACU[] {
+  const configured = settingsDraft.value?.worldRoundPrompts;
+  return Object.prototype.hasOwnProperty.call(configured ?? {}, roleKey)
+    ? configured?.[roleKey] ?? []
+    : getDefaultWorldRoundPromptSegments_ACU(roleKey);
+}
+
+function hasExplicitWorldRoundPrompt(roleKey: CurrentWorldRoundPromptRole): boolean {
+  return Object.prototype.hasOwnProperty.call(settingsDraft.value?.worldRoundPrompts ?? {}, roleKey);
+}
+
+function isExplicitlyDisabledWorldRoundPrompt(roleKey: CurrentWorldRoundPromptRole): boolean {
+  return hasExplicitWorldRoundPrompt(roleKey)
+    && (settingsDraft.value?.worldRoundPrompts?.[roleKey] ?? []).length === 0
+    && getDefaultWorldRoundPromptSegments_ACU(roleKey).length > 0;
+}
+
+function worldRoundPromptGroupMeta(roleKey: CurrentWorldRoundPromptRole): string {
+  const segments = worldRoundPromptSegments(roleKey);
+  return segments.length ? `${segments.filter(segment => segment.enabled).length}/${segments.length} 段启用` : '未配置';
+}
+
+function updateWorldRoundPromptSegments(roleKey: CurrentWorldRoundPromptRole, segments: WorldSimulationPromptSegment_ACU[]): void {
+  if (!settingsDraft.value) return;
+  settingsDraft.value.worldRoundPrompts = { ...(settingsDraft.value.worldRoundPrompts ?? {}), [roleKey]: segments };
+}
+
+function addWorldRoundPromptSegment(roleKey: CurrentWorldRoundPromptRole): void {
+  updateWorldRoundPromptSegments(roleKey, [...worldRoundPromptSegments(roleKey), { role: 'system', content: '', enabled: true, deletable: true, pinned: false }]);
+}
+
+async function restoreDefaultWorldRoundPrompt(roleKey: CurrentWorldRoundPromptRole): Promise<void> {
+  if (!settingsDraft.value || !hasExplicitWorldRoundPrompt(roleKey) || !getDefaultWorldRoundPromptSegments_ACU(roleKey).length) return;
+  const confirmed = await dialog.confirm({
+    title: '恢复默认业务稿',
+    message: `将替换「${worldRoundPromptLabel(roleKey)}」当前的自定义设置，恢复默认提示词。`,
+    confirmLabel: '恢复默认',
+    cancelLabel: '取消',
+  });
+  if (!confirmed || !settingsDraft.value) return;
+  const next = { ...(settingsDraft.value.worldRoundPrompts ?? {}) };
+  delete next[roleKey];
+  settingsDraft.value.worldRoundPrompts = next;
+}
+
+function updateWorldRoundPromptRole(roleKey: CurrentWorldRoundPromptRole, index: number, role: string): void {
+  const segments = [...worldRoundPromptSegments(roleKey)];
+  const segment = segments[index];
+  if (!segment || !['system', 'user', 'assistant'].includes(role)) return;
+  segments[index] = { ...segment, role };
+  updateWorldRoundPromptSegments(roleKey, segments);
+}
+
+function updateWorldRoundPromptEnabled(roleKey: CurrentWorldRoundPromptRole, index: number, enabled: boolean): void {
+  const segments = [...worldRoundPromptSegments(roleKey)];
+  const segment = segments[index];
+  if (!segment) return;
+  segments[index] = { ...segment, enabled };
+  updateWorldRoundPromptSegments(roleKey, segments);
+}
+
+function updateWorldRoundPromptContent(roleKey: CurrentWorldRoundPromptRole, index: number, event: Event): void {
+  const segments = [...worldRoundPromptSegments(roleKey)];
+  const segment = segments[index];
+  if (!segment) return;
+  segments[index] = { ...segment, content: (event.target as HTMLTextAreaElement).value };
+  updateWorldRoundPromptSegments(roleKey, segments);
+}
+
+function deleteWorldRoundPromptSegment(roleKey: CurrentWorldRoundPromptRole, index: number): void {
+  const segments = [...worldRoundPromptSegments(roleKey)];
+  const segment = segments[index];
+  if (!segment || !segment.deletable || segment.pinned) return;
+  segments.splice(index, 1);
+  updateWorldRoundPromptSegments(roleKey, segments);
+}
+
+function moveWorldRoundPromptSegment(roleKey: CurrentWorldRoundPromptRole, index: number, direction: -1 | 1): void {
+  const segments = [...worldRoundPromptSegments(roleKey)];
+  const nextIndex = index + direction;
+  if (nextIndex < 0 || nextIndex >= segments.length) return;
+  [segments[index], segments[nextIndex]] = [segments[nextIndex], segments[index]];
+  updateWorldRoundPromptSegments(roleKey, segments);
+}
+
+function exportWorldRoundPrompts(): void {
+  if (!settingsDraft.value) return;
+  const effective = Object.fromEntries(worldRoundPromptRoles.map(role => [role, worldRoundPromptSegments(role)]));
+  downloadJson('acu-world-round-prompts.json', { worldRoundPrompts: effective });
+}
+
+function openWorldRoundPromptImport(): void {
+  worldRoundPromptImportInput.value?.click();
+}
+
+async function importWorldRoundPrompts(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file || !settingsDraft.value) return;
+  try {
+    const parsed: unknown = JSON.parse(await file.text());
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !('worldRoundPrompts' in parsed)) throw new Error('导入文件必须包含 worldRoundPrompts 映射');
+    const worldRoundPrompts = validateWorldRoundPrompts_ACU((parsed as { worldRoundPrompts: unknown }).worldRoundPrompts);
+    settingsDraft.value.worldRoundPrompts = Object.fromEntries(worldRoundPromptRoles
+      .filter(role => Object.prototype.hasOwnProperty.call(worldRoundPrompts, role))
+      .map(role => [role, worldRoundPrompts[role]]));
+    settingsError.value = '';
+    settingsNotice.value = '正式提示词已导入，等待自动保存。';
+  } catch (error) {
+    settingsError.value = error instanceof Error ? `正式提示词导入失败：${error.message}` : '正式提示词导入失败：文件无效';
+  }
+}
+
+const workflowModeOptions = [
+  { value: 'single', label: '单 Agent' },
+  { value: 'layered', label: '分层' },
 ];
 
-const webSearchProviderOptions = [
-  { value: 'duckduckgo', label: 'DuckDuckGo（免 key）' },
-  { value: 'serper', label: 'Serper（Google，需酒馆已配 key）' },
-  { value: 'tavily', label: 'Tavily（需酒馆已配 key）' },
-  { value: 'searxng', label: 'SearXNG（自建/公共实例）' },
-];
-
-const collisionEnforcementOptions = [
-  { value: 'strict', label: '严格（未兑现则拒绝提交）' },
-  { value: 'relaxed', label: '宽松（仅警告）' },
+const deliveryTargetOptions = [
+  { value: 'body', label: '直接正文' },
+  { value: 'plot', label: '剧情推进' },
 ];
 
 /** 渠道下拉里「跟随全局默认」的哨兵值：空串已被「跟随当前活动 API」占用。 */
@@ -355,13 +404,13 @@ const agentChannelOptions = computed(() => [
 ]);
 
 /** 格林推演的渠道映射以「键不存在」表示跟随全局默认，与 settings validator 的闭合契约一致。 */
-function agentChannelValue(agentName: WorldSimulationAgentName_ACU): string {
+function agentChannelValue(agentName: typeof agentNames[number]): string {
   const choice = settingsDraft.value?.agentApiPresets[agentName];
   if (!choice) return INHERIT_CHANNEL_VALUE;
   return choice.mode === 'fixed' ? choice.presetName : '';
 }
 
-function applyAgentChannel(agentName: WorldSimulationAgentName_ACU, value: string): void {
+function applyAgentChannel(agentName: typeof agentNames[number], value: string): void {
   if (!settingsDraft.value) return;
   const trimmed = String(value ?? '').trim();
   const next = { ...settingsDraft.value.agentApiPresets };
@@ -383,21 +432,6 @@ function toggleGroup(key: string): void {
   expandedGroups[key] = !isGroupExpanded(key);
 }
 
-/** 折叠态下的一行摘要：让用户不展开也能看到关键取值。 */
-const budgetGroupMeta = computed(() => {
-  const s = settingsDraft.value;
-  if (!s) return '';
-  return `迭代 ${s.agentRunBudget.maxIterations} · 派工 ${s.agentRunBudget.maxDelegations} · 并发 ${s.agentRunBudget.maxConcurrent}`;
-});
-
-const webResearchGroupMeta = computed(() => {
-  const web = settingsDraft.value?.webResearch;
-  if (!web) return '';
-  if (!web.enabled) return '已关闭';
-  const sources = [web.sources.moegirl && '萌娘', web.sources.wikipediaZh && '中文维基', web.sources.wikipediaEn && '英文维基'].filter(Boolean);
-  return `已开启 · ${sources.length ? sources.join('/') : '无百科来源'} · ${web.searchProvider}`;
-});
-
 const channelGroupMeta = computed(() => {
   const presets = settingsDraft.value?.agentApiPresets;
   if (!presets) return '';
@@ -405,27 +439,17 @@ const channelGroupMeta = computed(() => {
   return customized ? `${customized} 个单独指定` : '全部跟随默认';
 });
 
-const dynamicsGroupMeta = computed(() => {
-  const dynamics = settingsDraft.value?.dynamics;
-  if (!dynamics) return '';
-  return `TTL ${dynamics.rumorTTLDays} · 推进 ${dynamics.maxClockAdvanceDays} · ${dynamics.collisionEnforcement === 'strict' ? '严格' : '宽松'}${dynamics.missedSweepEnabled ? ' · 清扫开' : ' · 清扫关'}`;
-});
-
-const projectionGroupMeta = computed(() => {
-  const projection = settingsDraft.value?.projection;
-  if (!projection) return '';
-  return projection.template === runtime.defaultProjectionTemplate ? '默认格式' : '自定义格式';
-});
-
-function restoreDefaultProjectionTemplate(): void {
-  if (settingsDraft.value) settingsDraft.value.projection.template = runtime.defaultProjectionTemplate;
+function downloadJson(filename: string, value: unknown): void {
+  const blob = new Blob([JSON.stringify(value, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+  URL.revokeObjectURL(url);
 }
-
-const workflowGroupMeta = computed(() => {
-  const workflow = settingsDraft.value?.workflow;
-  if (!workflow) return '';
-  return `编年热层 ${workflow.chroniclerHotThreshold}`;
-});
 
 function cloneSettings(settings: WorldSimulationSettings_ACU): WorldSimulationSettings_ACU {
   return JSON.parse(JSON.stringify(settings)) as WorldSimulationSettings_ACU;
@@ -462,13 +486,29 @@ async function clearData(): Promise<void> {
   await runtime.clearData();
 }
 
+async function onDeleteActor(id: string): Promise<void> {
+  await runtime.deleteActor(id);
+}
+
+async function onDeleteWorldEvent(id: string): Promise<void> {
+  await runtime.deleteWorldEvent(id);
+}
+
+async function onDeleteWorldHistory(id: string): Promise<void> {
+  await runtime.deleteWorldHistory(id);
+}
+
+async function scanWorldbookActors(): Promise<void> {
+  await runtime.scanWorldbookActors();
+}
+
 function requiredRangeInteger(value: unknown, label: string, minimum: number, maximum: number): number {
   const numeric = typeof value === 'number' ? value : Number(String(value ?? '').trim());
   if (!Number.isInteger(numeric) || numeric < minimum || numeric > maximum) throw new Error(`${label} 必须是 ${minimum} 到 ${maximum} 之间的整数`);
   return numeric;
 }
 
-/** 读取预算接受两种形态：正整数（固定 token 数）或 1%-100% 的百分比串（按总结阈值折算）。 */
+/** 读取预算接受两种形态：正整数（固定 token 数）或 1%-100% 的百分比串（按单次请求上限折算）。 */
 function normalizedReadBudget(value: unknown): number | string {
   const raw = String(value ?? '').trim();
   if (!raw) throw new Error('单批次读取上限不能为空');
@@ -492,46 +532,9 @@ function normalizeSettingsDraft(): WorldSimulationSettings_ACU {
   const source = settingsDraft.value;
   const normalized: WorldSimulationSettings_ACU = {
     ...cloneSettings(source),
-    agentHistoryTokenBudget: requiredRangeInteger(source.agentHistoryTokenBudget, '会话自动总结阈值', 0, 1000000),
+    agentHistoryTokenBudget: requiredRangeInteger(source.agentHistoryTokenBudget, '单次请求 token 上限', 1, 1000000),
     agentReadTokenBudget: normalizedReadBudget(source.agentReadTokenBudget),
-    agentReadFallbackTokens: requiredRangeInteger(source.agentReadFallbackTokens, '临近总结时的精读额度', 0, 100000),
-    agentRunBudget: {
-      maxIterations: requiredRangeInteger(source.agentRunBudget.maxIterations, '主 Agent 迭代上限', 1, 100),
-      maxDelegations: requiredRangeInteger(source.agentRunBudget.maxDelegations, '派工总数上限', 0, 100),
-      maxSameAgent: requiredRangeInteger(source.agentRunBudget.maxSameAgent, '单代理派工上限', 0, 20),
-      maxConcurrent: requiredRangeInteger(source.agentRunBudget.maxConcurrent, '并发派工上限', 1, 20),
-      maxReads: requiredRangeInteger(source.agentRunBudget.maxReads, '读取批次上限', 0, 200),
-      maxExtraReads: requiredRangeInteger(source.agentRunBudget.maxExtraReads, '子代理工具轮上限', 0, 20),
-    },
-    webResearch: {
-      enabled: source.webResearch.enabled,
-      sources: { ...source.webResearch.sources },
-      searchProvider: source.webResearch.searchProvider,
-      searxngBaseUrl: String(source.webResearch.searxngBaseUrl ?? '').trim(),
-      pageCharLimit: requiredRangeInteger(source.webResearch.pageCharLimit, '单页阅读字数上限', 500, 20000),
-      blockedDomains: String(source.webResearch.blockedDomains ?? ''),
-    },
-    dynamics: {
-      rumorTTLDays: requiredRangeInteger(source.dynamics.rumorTTLDays, '风声等待上限', 1, 3650),
-      maxClockAdvanceDays: requiredRangeInteger(source.dynamics.maxClockAdvanceDays, '单次时钟推进上限', 0, 3650),
-      collisionEnforcement: source.dynamics.collisionEnforcement === 'relaxed' ? 'relaxed' : source.dynamics.collisionEnforcement === 'strict' ? 'strict' : (() => { throw new Error('碰撞兑现策略必须是严格或宽松'); })(),
-      missedSweepEnabled: typeof source.dynamics.missedSweepEnabled === 'boolean' ? source.dynamics.missedSweepEnabled : (() => { throw new Error('过期清扫开关无效'); })(),
-    },
-    workflow: {
-      chroniclerHotThreshold: requiredRangeInteger(source.workflow?.chroniclerHotThreshold, '编年热层阈值', 1, 512),
-    },
-    projection: {
-      template: (() => {
-        const template = String(source.projection?.template ?? '');
-        const problem = runtime.projectionTemplateError(template);
-        if (problem) throw new Error(problem);
-        return template;
-      })(),
-    },
   };
-  if (normalized.webResearch.enabled && normalized.webResearch.searchProvider === 'searxng' && !normalized.webResearch.searxngBaseUrl) {
-    throw new Error('搜索引擎选择 SearXNG 时必须填写实例地址');
-  }
   if (normalized.apiPresetMode === 'fixed') {
     const presetName = normalized.fixedApiPresetName.trim();
     if (!presetName) throw new Error('固定 API 预设名称不能为空');
@@ -588,105 +591,6 @@ async function saveSettingsNow(): Promise<void> {
   }
 }
 
-/** 折叠态摘要：启用段数 / 总段数。 */
-function promptGroupMeta(agentName: WorldSimulationAgentName_ACU): string {
-  const prompts = settingsDraft.value?.agentPrompts[agentName];
-  if (!prompts) return '';
-  const enabled = prompts.filter(segment => segment.enabled !== false).length;
-  return `${enabled}/${prompts.length} 段启用`;
-}
-
-function promptList(agentName: WorldSimulationAgentName_ACU): WorldSimulationPromptSegment_ACU[] | null {
-  return settingsDraft.value?.agentPrompts[agentName] ?? null;
-}
-
-function addPrompt(agentName: WorldSimulationAgentName_ACU, position: 'top' | 'bottom' = 'bottom'): void {
-  const prompts = promptList(agentName);
-  if (!prompts) return;
-  const segment: WorldSimulationPromptSegment_ACU = { role: 'user', content: '请填写提示词内容。', enabled: true, deletable: true, pinned: false };
-  if (position === 'top') prompts.unshift(segment);
-  else prompts.push(segment);
-}
-
-function deletePrompt(agentName: WorldSimulationAgentName_ACU, index: number): void {
-  const prompts = promptList(agentName);
-  if (!prompts || prompts[index]?.deletable === false || isAgentFormatAnswer_ACU(prompts[index])) return;
-  prompts.splice(index, 1);
-}
-
-/** 固定插入卡可移动；其他 pinned 段仍保持引擎顺序。 */
-function movePrompt(agentName: WorldSimulationAgentName_ACU, index: number, delta: -1 | 1): void {
-  const prompts = promptList(agentName);
-  const target = index + delta;
-  if (!prompts || target < 0 || target >= prompts.length) return;
-  if (isAgentFormatAnswer_ACU(prompts[index]) || isAgentFormatAnswer_ACU(prompts[target])) return;
-  if (!isAgentFixedSlot_ACU(prompts[index]) && !isAgentFixedSlot_ACU(prompts[target]) && (prompts[index]?.pinned || prompts[target]?.pinned)) return;
-  [prompts[index], prompts[target]] = [prompts[target], prompts[index]];
-}
-
-/** pinned 段只允许改内容：角色、启用与可删除性由引擎 seam 契约固定。 */
-function updatePrompt(agentName: WorldSimulationAgentName_ACU, index: number, patch: Partial<WorldSimulationPromptSegment_ACU>): void {
-  const prompts = promptList(agentName);
-  const current = prompts?.[index];
-  if (!prompts || !current) return;
-  if (isAgentFormatAnswer_ACU(current)) return;
-  if (isAgentFixedSlot_ACU(current)) {
-    if (isAgentSnapshotSlot_ACU(current) && typeof patch.snapshotTemplate === 'string') prompts[index] = { ...current, snapshotTemplate: patch.snapshotTemplate };
-    return;
-  }
-  prompts[index] = current.pinned
-    ? { ...current, ...(typeof patch.content === 'string' ? { content: patch.content } : {}) }
-    : { ...current, ...patch, pinned: false };
-}
-
-function restorePrompt(agentName: WorldSimulationAgentName_ACU): void {
-  if (!settingsDraft.value) return;
-  settingsDraft.value = runtime.restorePromptDefault(settingsDraft.value, agentName);
-}
-
-const promptImportInput = ref<HTMLInputElement | null>(null);
-const promptIoError = ref('');
-const promptIoNotice = ref('');
-
-/** 导出全部八组 Agent 提示词为 JSON 文件下载。 */
-function exportPrompts(): void {
-  if (!settingsDraft.value) return;
-  promptIoError.value = '';
-  try {
-    const bundle = { version: 1, agentPrompts: cloneSettings(settingsDraft.value).agentPrompts };
-    const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = 'acu-world-simulation-prompts.json';
-    document.body.appendChild(anchor);
-    anchor.click();
-    document.body.removeChild(anchor);
-    URL.revokeObjectURL(url);
-    promptIoNotice.value = '提示词 JSON 已导出。';
-  } catch (error) {
-    promptIoError.value = error instanceof Error ? error.message : '提示词导出失败。';
-  }
-}
-
-/** 导入提示词 JSON：八组全部校验通过后整体写入草稿并立即保存，任何一组失败即整体拒绝。 */
-async function onImportPromptsFile(event: Event): Promise<void> {
-  const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  // 允许连续选择同一个文件重复导入。
-  input.value = '';
-  if (!file || !settingsDraft.value) return;
-  promptIoError.value = '';
-  promptIoNotice.value = '';
-  try {
-    settingsDraft.value.agentPrompts = runtime.parsePromptBundle(await file.text());
-    saveSettingsImmediately();
-    promptIoNotice.value = '提示词 JSON 已导入并保存。';
-  } catch (error) {
-    promptIoError.value = error instanceof Error ? error.message : '提示词 JSON 读取失败。';
-  }
-}
-
 /** 刷新页面依赖的全部数据源：API 预设列表必须在挂载与聊天切换时重新读取，否则预设下拉是空的。 */
 function refreshAll(): void {
   apiStore.refreshFromSettings();
@@ -735,13 +639,34 @@ watch(settingsDraft, () => {
 <style scoped>
 .acu-v2-world-simulation-page { min-height: 100%; padding: 20px; display: grid; gap: 18px; }
 .acu-v2-world-simulation-page__layout { align-items: start; }
+.acu-v2-world-simulation-page :deep(.acu-panel__header) { justify-content: center; }
+.acu-v2-world-simulation-page :deep(.acu-panel__title) { text-align: center; }
+.acu-v2-world-simulation-page__world-state :deep(.acu-panel__header) { display: grid; grid-template-columns: 1fr minmax(0, auto) 1fr; align-items: start; }
+.acu-v2-world-simulation-page__world-state :deep(.acu-panel__title) { grid-column: 2; min-width: 0; text-align: center; }
+.acu-v2-world-simulation-page__world-state :deep(.acu-panel__header-right) { grid-column: 3; justify-self: end; }
+.acu-v2-world-simulation-page__world-title { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.acu-v2-world-simulation-page__world-title:focus-visible { outline: 2px solid var(--acu-accent); outline-offset: 5px; border-radius: 4px; }
+.acu-v2-world-simulation-page__floor { color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); font-weight: 400; overflow-wrap: anywhere; }
+.acu-v2-world-simulation-page :deep(summary) { list-style: none; }
+.acu-v2-world-simulation-page :deep(summary::marker) { content: ''; }
+.acu-v2-world-simulation-page :deep(summary::-webkit-details-marker) { display: none; }
+.acu-v2-world-simulation-page :deep(.acu-disclosure-group__chevron) { display: none; }
+.acu-v2-world-simulation-page__diagnostics { min-width: 0; padding: 12px 16px; border: 1px solid var(--acu-border-2); border-radius: var(--acu-radius-sm); color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); }
+.acu-v2-world-simulation-page__diagnostics > summary { cursor: pointer; }
+.acu-v2-world-simulation-page__diagnostics > p, .acu-v2-world-simulation-page__diagnostics > ul { margin-top: 10px; }
+.acu-v2-world-simulation-page__diagnostics li { white-space: pre-wrap; overflow-wrap: anywhere; }
 .acu-v2-world-simulation-page__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .acu-v2-world-simulation-page__actions--start { justify-content: flex-start; margin-top: 0; margin-bottom: 12px; }
 .acu-v2-world-simulation-page__file-input { display: none; }
 .acu-v2-world-simulation-page__error { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; color: var(--acu-danger, #d65b5b); white-space: pre-wrap; }
 .acu-v2-world-simulation-page__meta { margin: 0; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; }
 .acu-v2-world-simulation-page__settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start; }
-.acu-v2-world-simulation-page__toggles { display: flex; flex-wrap: wrap; gap: 14px; margin: 14px 0; }
+.acu-v2-world-simulation-page__toggles { margin-top: 14px; }
+.acu-v2-world-simulation-page__auto-trigger { width: 100%; flex-direction: row-reverse; justify-content: space-between; align-items: center; }
+.acu-v2-world-simulation-page__channel-fields { display: grid; gap: 12px; }
+.acu-v2-world-simulation-page__channels { border: 0; background: var(--acu-bg-2); }
+.acu-v2-world-simulation-page__channels :deep(.acu-disclosure-group__header) { min-height: var(--acu-control-height-md, 32px); padding: var(--acu-control-padding-y-md, 6px) var(--acu-control-padding-x-md, 9px); }
+.acu-v2-world-simulation-page__channels :deep(.acu-disclosure-group__label) { font-size: var(--acu-font-size-body, 12px); font-weight: 400; color: var(--acu-text-2); }
 .acu-v2-world-simulation-page__groups { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
 .acu-v2-world-simulation-page__group {
   border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent));
@@ -755,6 +680,9 @@ watch(settingsDraft, () => {
 .acu-v2-world-simulation-page__group .acu-v2-world-simulation-page__actions { margin-top: 0; }
 .acu-v2-world-simulation-page__subheading { margin: 4px 0 0; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); font-weight: 600; }
 .acu-v2-world-simulation-page__subheading:first-child { margin-top: 0; }
+.acu-v2-world-simulation-page__prompt-segment { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 18%, transparent)); border-radius: var(--acu-radius-sm); }
+.acu-v2-world-simulation-page__prompt-segment-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.acu-v2-world-simulation-page__prompt-textarea { width: 100%; min-height: 96px; box-sizing: border-box; resize: vertical; padding: 8px; color: var(--acu-text-1); background: var(--acu-bg-1); border: 1px solid var(--acu-border, color-mix(in srgb, var(--acu-text-3) 24%, transparent)); border-radius: var(--acu-radius-sm); font: inherit; }
 @media (max-width: 860px) { .acu-v2-world-simulation-page { padding: 14px; } }
 @media (max-width: 640px) {
   .acu-v2-world-simulation-page { padding: 10px; gap: 12px; }

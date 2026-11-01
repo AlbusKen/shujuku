@@ -11,11 +11,33 @@ import {
 const DIRECTOR_OWNED_SPECIALISTS_ACU = ['timekeeper', 'undercurrent-analyst', 'dramatis-keeper'] as const;
 const DIRECTOR_OWNED_LEDGER_CHANGES_ACU: WorldSimulationLedgerModule_ACU[] = ['clock', 'dimensions', 'seeds', 'actors', 'rumors', 'player'];
 
-/**
- * 新建 run 不再单独调用 planner LLM。阶段计划由确定性模板填入，
- * director 首轮把「锁定焦点」与取证/派工写进同一次决策。
- * chronicler 不进入常规 plannedSpecialists。
- */
+// 计划仅保存协议元数据，业务范围由召回清单和候选校验决定。
+export function buildWorldRoundStageRevision_ACU(input: { revision?: number; now?: number; workflowMode: 'single' | 'layered' }): WorldSimulationStageRevision_ACU {
+  return {
+    revision: input.revision ?? 1,
+    createdAt: input.now ?? Date.now(),
+    reason: 'initial',
+    replanInstruction: '',
+    frozen: false,
+    plan: {
+      schemaVersion: WORLD_SIMULATION_SCHEMA_VERSION_ACU,
+      title: '受限整轮世界推演',
+      objective: '生成经召回和本地校验的整轮账本候选',
+      impactScope: ['世界账本'],
+      factsToVerify: ['冻结锚点正文', '召回清单与实体修订'],
+      plannedTools: [],
+      plannedSpecialists: input.workflowMode === 'single'
+        ? ['clock-recaller', 'world-simulator']
+        : ['clock-recaller', 'world-event-analyst', 'actor-simulator'],
+      expectedLedgerChanges: ['clock', 'actors'],
+      convergenceConditions: ['整轮候选通过本地物化校验'],
+      blockingConditions: ['锚点、运行租约或账本修订变化'],
+      completedSteps: [],
+      nextStep: '执行受限整轮候选',
+    },
+  };
+}
+
 export function buildDirectorOwnedStageRevision_ACU(input: {
   instruction: string;
   collisions: WorldCollisionReport_ACU;

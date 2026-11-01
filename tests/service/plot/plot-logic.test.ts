@@ -279,6 +279,21 @@ describe('normalizePlotTask_ACU', () => {
     const task = normalizePlotTask_ACU({ enabled: false });
     expect(task.enabled).toBe(false);
   });
+  it('内部因果读取仅允许显式 true，缺失时关闭并可从合法 fallback 继承', () => {
+    expect(normalizePlotTask_ACU({}).internalCausalRead).toBe(false);
+    expect(normalizePlotTask_ACU({ internalCausalRead: true }).internalCausalRead).toBe(true);
+    expect(normalizePlotTask_ACU({}, { fallbackTask: { internalCausalRead: true } }).internalCausalRead).toBe(true);
+  });
+  it.each([false, 'true', 1, null, {}])('显式非法内部因果读取值 %p fail-closed', value => {
+    if (value === false) {
+      expect(normalizePlotTask_ACU({ internalCausalRead: value }).internalCausalRead).toBe(false);
+      return;
+    }
+    expect(() => normalizePlotTask_ACU({ internalCausalRead: value })).toThrow('内部因果读取设置无效');
+  });
+  it('fallback 的非法内部因果读取值同样拒绝', () => {
+    expect(() => normalizePlotTask_ACU({}, { fallbackTask: { internalCausalRead: 'true' as any } })).toThrow('内部因果读取设置无效');
+  });
 });
 
 // ═══ normalizePlotTasks_ACU ═══

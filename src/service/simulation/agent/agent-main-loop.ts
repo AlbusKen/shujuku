@@ -25,6 +25,7 @@ import { beginWorldSimulationSessionRun_ACU, endWorldSimulationSessionRun_ACU, l
 import { countWorldSimulationTokens_ACU, measureWorldSimulationPrompt_ACU, type WorldSimulationTokenCounter_ACU } from './agent-token-budget';
 import { executeWorldSimulationFinalRequest_ACU } from './final-request-token-gate';
 import { renderWorldSimulationPrompt_ACU } from './prompt-template';
+import { runWorldRound_ACU } from './world-round-runner';
 import { runWorldSimulationWorkflow_ACU, runWorldSimulationOneShotWorkflow_ACU } from './agent-workflow';
 import { bindWorldSimulationFixedWorldbook_ACU, renderWorldSimulationDirectorReads_ACU, renderWorldSimulationSnapshotSections_ACU, splitWorldSimulationSubagentPrompt_ACU, verifyWorldSimulationFixedWorldbook_ACU, verifyWorldSimulationSnapshotSections_ACU, WORLD_SIMULATION_WORLDBOOK_UNAVAILABLE_ACU } from './agent-shared-materials';
 import { loadAgentWorldbookSnapshot_ACU, renderAgentWorldbookTriggeredInjection_ACU, selectTriggeredWorldbookEntries_ACU, type AgentWorldbookSnapshot_ACU } from '../../continuation/agent/agent-worldbook-read';
@@ -492,6 +493,23 @@ export class WorldSimulationMainLoop_ACU {
       return { outcome: 'blocked', summary: title, unresolved, outcomes };
     };
 
+    if (input.identity.workflowProtocol === 'world-round-v1') {
+      if (resumedState?.candidates.length || input.runWrites?.hasConfirmedWrites) {
+        throw new Error('WORLD_ROUND_LEGACY_STATE_MIXED');
+      }
+      const result = await runWorldRound_ACU({
+        identity: input.identity,
+        settings: input.settings,
+        ledger: currentLedger(),
+        anchorText: String(input.promptContext.anchorMessage ?? ''),
+        signal: { get aborted() { return input.isCurrent?.() === false; } } as AbortSignal,
+        invoke: this.dependencies.invoke,
+        countTokens: this.dependencies.countTokens,
+        isCurrent: () => input.isCurrent?.() !== false,
+      });
+      return { outcome: 'world_round', summary: result.summary, roundCandidate: result.roundCandidate, outcomes: [],
+        finalProjection: { content: null, sourceAgent: 'world-round', sourceRevision: result.ledger.revision, deliverable: false } };
+    }
     // 新运行不经导演决策门控。仅恢复、用户指令续跑和工作流升级才进入下方主循环。
     if (input.directOpening === true && !resumedState && !resetRunBudget) {
       const focus = (typeof input.promptContext.userGuidance === 'string' && input.promptContext.userGuidance.trim())

@@ -78,22 +78,32 @@ export class HostChatSaveNotStartedError_ACU extends Error {
     }
 }
 
+function readHostChatIdentity_ACU(api: NonNullable<typeof SillyTavern_API_ACU>) {
+    const chatId = String((typeof api.getCurrentChatId === 'function' ? api.getCurrentChatId() : api.chatId) ?? '').trim();
+    const characterId = String((api.characterId === '' || api.characterId == null ? api.this_chid : api.characterId) ?? '');
+    const groupId = String(api.groupId ?? '');
+    return { chatId, characterId, groupId };
+}
+
 function captureHostChatReadContext_ACU() {
     const api = SillyTavern_API_ACU;
     if (!api) throw new HostChatSaveNotStartedError_ACU('宿主聊天 API 不可用。');
-    const { chat, chatId, characterId, groupId } = api;
-    const group = groupId != null && groupId !== '';
-    const character = api.characters?.[Number(characterId)];
+    const chat = api.chat;
+    const { chatId, characterId, groupId } = readHostChatIdentity_ACU(api);
+    const group = groupId !== '';
+    const character = characterId !== '' ? api.characters?.[Number(characterId)] : undefined;
     if (!Array.isArray(chat) || !chatId || (!group && !character?.avatar)) {
-        throw new HostChatSaveNotStartedError_ACU('聊天保存确认缺少宿主聊天身份。');
+        throw new HostChatSaveNotStartedError_ACU('未能取得当前聊天的保存位置，本次尚未保存，请保持聊天打开后重试。');
     }
     return { api, chat, chatId, characterId, groupId, group, character };
 }
 
 function assertHostChatReadContext_ACU(context: ReturnType<typeof captureHostChatReadContext_ACU>): void {
     const { api, chat, chatId, characterId, groupId } = context;
-    if (SillyTavern_API_ACU !== api || api.chat !== chat || api.chatId !== chatId
-        || api.characterId !== characterId || api.groupId !== groupId) {
+    const current = readHostChatIdentity_ACU(api);
+    if (SillyTavern_API_ACU !== api || api.chat !== chat || current.chatId !== chatId
+        || current.characterId !== characterId || current.groupId !== groupId
+        || (!context.group && api.characters?.[Number(characterId)]?.avatar !== context.character?.avatar)) {
         throw new Error('保存或回读期间聊天已切换。');
     }
 }
@@ -124,12 +134,37 @@ export async function readChatFromHostStrict_ACU(): Promise<any[]> {
     return readHostChatWithinContext_ACU(captureHostChatReadContext_ACU());
 }
 
+function canonicalChatJson_ACU(value: unknown): string {
+    return JSON.stringify(value, (key, item) => {
+        if (Array.isArray(item) && ['actors', 'worldEvents', 'facts', 'factArchive', 'historyMilestones', 'historyArchive'].includes(key)
+            && item.every(row => row && typeof row.id === 'string') && new Set(item.map(row => row.id)).size === item.length) {
+            return [...item].sort((left, right) => left.id.localeCompare(right.id));
+        }
+        return item && typeof item === 'object' && !Array.isArray(item)
+            ? Object.fromEntries(Object.keys(item).sort().map(name => [name, item[name]])) : item;
+    });
+}
+
+function hostMessageSaveView_ACU(message: Record<string, any>): Record<string, unknown> {
+    return {
+        mes: message.mes ?? message.message ?? '',
+        swipe_id: String(message.swipe_id ?? 0),
+        is_user: message.is_user === true,
+        is_system: message.is_system === true,
+        ...Object.fromEntries(Object.entries(message).filter(([key]) => key.startsWith('_qrf_') || key.startsWith('_acu_')
+            || key.startsWith('TavernDB_ACU_') || key === 'qrf_plot_tasks')),
+    };
+}
+
 /**
  * 执行必须真实提交到宿主的聊天保存。
  * 仅适用于后续会触发不可逆外置副作用的事务；宿主保存能力缺失时必须失败，不能静默跳过。
  * verify=true 时回读本轮聊天，避免宿主吞掉保存异常后误放行正文生成。
  */
-export async function saveChatToHostStrict_ACU({ verify = false } = {}): Promise<void> {
+export async function saveChatToHostStrict_ACU({ verify = false, verifyFields }: {
+    verify?: boolean;
+    verifyFields?: Array<{ messageIndex: number; keys: string[] }>;
+} = {}): Promise<void> {
     if (typeof SillyTavern_API_ACU?.saveChat !== 'function') {
         throw new HostChatSaveNotStartedError_ACU('宿主 saveChat 不可用，无法提交破坏性聊天数据变更。');
     }
@@ -138,8 +173,26 @@ export async function saveChatToHostStrict_ACU({ verify = false } = {}): Promise
     await api.saveChat();
     if (context) {
         const messages = await readHostChatWithinContext_ACU(context);
-        if (JSON.stringify(messages) !== JSON.stringify(context.chat)) {
-            throw new Error('聊天保存未获确认：服务器消息与本轮楼层不一致。');
+        if (verifyFields) {
+            for (const { messageIndex, keys } of verifyFields) {
+                const saved = messages[messageIndex];
+                const expected = context.chat[messageIndex];
+                if (!saved || !expected) throw new Error(`聊天保存未获确认：第 ${messageIndex + 1} 楼缺失。`);
+                for (const key of keys) {
+                    const value = (message: Record<string, any>) => key === 'swipe_id' ? String(message[key] ?? 0) : message[key];
+                    if (canonicalChatJson_ACU(value(saved)) !== canonicalChatJson_ACU(value(expected))) {
+                        throw new Error(`聊天保存未获确认：第 ${messageIndex + 1} 楼字段 ${key} 未保存。`);
+                    }
+                }
+            }
+        } else {
+            const saved = messages.map(hostMessageSaveView_ACU);
+            const expected = context.chat.map(hostMessageSaveView_ACU);
+            if (canonicalChatJson_ACU(saved) !== canonicalChatJson_ACU(expected)) {
+                const mismatch = saved.length !== expected.length ? '消息数量不同'
+                    : `第 ${saved.findIndex((message, index) => canonicalChatJson_ACU(message) !== canonicalChatJson_ACU(expected[index])) + 1} 楼正文或插件数据不同`;
+                throw new Error(`聊天保存未获确认：服务器消息与本轮楼层不一致（${mismatch}）。`);
+            }
         }
     }
     notifyPostChatSaveListeners_ACU();

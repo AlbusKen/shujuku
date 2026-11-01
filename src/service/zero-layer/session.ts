@@ -16,6 +16,13 @@ import type { ZeroLayerBranchCommand_ACU } from './branch-command';
 import type { ZeroLayerExitSelection_ACU } from './exit-model';
 import { notifyZeroLayerViewPreview_ACU } from './view-preview';
 import { buildZeroLayerWorldInfoScanText_ACU, readZeroLayerWorldInfoScanRounds_ACU } from './world-info-scan';
+import { sha256HexSync_ACU } from '../../shared/sha256-sync';
+import type { WorldSimulationCompletedAnchor_ACU } from '../simulation/model';
+import {
+  claimPlotCausalDelivery_ACU, readPreparedPlotCausalDelivery_ACU, restorePreparedPlotCausalDelivery_ACU,
+  type PreparedPlotCausalDelivery_ACU,
+} from '../runtime/plot-runtime/plot-causal-delivery-bridge';
+import { readPreparedSimulationCausalView_ACU } from './prepared-simulation-causal-view';
 
 /** 仅用于本地装配到 fetch 的归属传递；数据库请求不携带该字段。 */
 export const ZERO_LAYER_REQUEST_ID_ACU = '_acu_zero_layer_attempt_id';
@@ -30,6 +37,25 @@ export interface ZeroLayerPreparedInvocation_ACU {
 export type ZeroLayerResponseSettlement_ACU = (
   envelope: ZeroLayerEnvelope_ACU, turnId: string, attemptId: string, signal: AbortSignal,
 ) => Promise<void>;
+
+/** 仅供显式测试或手动审查调用方保留的审查端口；生产流程不会自动调用。 */
+export interface ZeroLayerWorldDeliveryAdapter_ACU {
+  review?(input: {
+    facts: ReadonlyArray<{ id: string; summary: string }>;
+    successorText: string;
+    apiPresetName: string;
+    settings?: Pick<import('../simulation/model').WorldSimulationSettings_ACU, 'worldRoundPrompts'>;
+    signal: AbortSignal;
+  }): Promise<unknown>;
+  reviewMessages?(input: {
+    messages: readonly { role: string; content: string }[];
+    facts: ReadonlyArray<{ id: string; summary: string }>;
+    successorText: string;
+    apiPresetName: string;
+    settings?: Pick<import('../simulation/model').WorldSimulationSettings_ACU, 'worldRoundPrompts'>;
+    signal: AbortSignal;
+  }): Promise<unknown>;
+}
 
 interface ActiveTurn_ACU {
   context: ZeroLayerCarrierContext_ACU;
@@ -47,6 +73,8 @@ interface ActiveTurn_ACU {
   settlementFailed: boolean;
   previewSequence: number;
   previewOpen: boolean;
+  causalDelivery: PreparedPlotCausalDelivery_ACU | null;
+  causalDeliveryId: string | null;
   failure?: unknown;
 }
 
@@ -105,12 +133,13 @@ export class ZeroLayerSession_ACU {
     try {
       const turn = active.envelope.turns.find(item => item.turnId === turnId)!;
       const candidate = await prepareZeroLayerPlot_ACU(turn,
-        projectZeroLayerPromptHistory_ACU(timeline), active.controller.signal, () => this.assertCurrent(active));
+        projectZeroLayerPromptHistory_ACU(timeline), active.controller.signal, () => this.assertCurrent(active), active.envelope);
       this.assertCurrent(active);
       active.envelope = await this.store.commit({ type: 'prepare-plot', turnId, attemptId, candidate,
         receipt: { effectId: `${turnId}:${attemptId}:plot`, kind: 'plot', status: 'durable',
           fingerprint: getTableDataFingerprint_ACU(candidate) } }, active.envelope.revision);
       this.assertCurrent(active);
+      active.causalDelivery = candidate.causalDelivery ? readPreparedPlotCausalDelivery_ACU(candidate) : null;
       active.promptContext.plotCandidate = structuredClone(candidate);
       return this.preparedInvocation(active);
     } catch (error) {
@@ -149,6 +178,8 @@ export class ZeroLayerSession_ACU {
   ): ActiveTurn_ACU {
     const turn = envelope.turns.find(item => item.turnId === turnId && item.attemptId === attemptId);
     if (!turn?.tableInput) throw new ZeroLayerError_ACU('effects-pending', '准备回合缺少表格快照。');
+    const causalDelivery = turn.plotCandidate?.causalDelivery
+      ? this.readOrRestoreCausalDelivery(envelope, turn) : null;
     const timeline = buildZeroLayerTimeline_ACU(envelope, context.chat as Record<string, unknown>[]);
     const active: ActiveTurn_ACU = {
       context, envelope, turnId, attemptId, controller: new AbortController(),
@@ -158,7 +189,7 @@ export class ZeroLayerSession_ACU {
         ...(turn.plotCandidate ? { plotCandidate: structuredClone(turn.plotCandidate) } : {}),
         assertCurrent: () => this.assertCurrent(active) },
       messages: null, request: null, claimed: false, dispatchStarted: false, responseSaved: false,
-      settlementFailed: false, previewSequence: 0, previewOpen: false,
+      settlementFailed: false, previewSequence: 0, previewOpen: false, causalDelivery, causalDeliveryId: null,
     };
     return active;
   }
@@ -273,7 +304,23 @@ export class ZeroLayerSession_ACU {
       endPreview: () => this.preview(active, null),
       beforeDispatch: async () => {
         this.assertCurrent(active);
-        await this.transition(active, 'dispatching');
+        if (active.causalDelivery) {
+          const turn = active.envelope.turns.find(item => item.turnId === active.turnId && item.attemptId === active.attemptId)!;
+          const requestPayload = structuredClone(payload);
+          const manifest = claimPlotCausalDelivery_ACU(active.causalDelivery, {
+            targetAnchor: this.deliveryTargetAnchor(active), finalMessage: turn.plotCandidate?.finalMessage ?? null,
+            payload: requestPayload,
+          });
+          active.causalDeliveryId = manifest.marker;
+          active.envelope = await this.store.commit({
+            type: 'record-world-delivery-attempt', turnId: active.turnId, attemptId: active.attemptId,
+            intent: { deliveryId: manifest.marker, target: 'plot', source: manifest.sourceAnchor,
+              ledgerRevision: manifest.ledgerRevision, ledgerFingerprint: manifest.ledgerFingerprint,
+              factIds: manifest.factIds, requestFingerprint: manifest.requestFingerprint, createdAt: Date.now() },
+          }, active.envelope.revision);
+        } else {
+          await this.transition(active, 'dispatching');
+        }
         this.assertCurrent(active);
         active.dispatchStarted = true;
       },
@@ -281,6 +328,12 @@ export class ZeroLayerSession_ACU {
         this.assertCurrent(active);
         await this.transition(active, 'response-durable', { body, errorCode: null });
         active.responseSaved = true;
+        if (active.causalDeliveryId) {
+          active.envelope = await this.store.commit({ type: 'record-world-delivery-successor',
+            turnId: active.turnId, attemptId: active.attemptId, deliveryId: active.causalDeliveryId,
+            successor: this.deliverySuccessorAnchor(active, body),
+          }, active.envelope.revision);
+        }
         this.assertCurrent(active);
         if (this.settleResponse) {
           try {
@@ -336,7 +389,7 @@ export class ZeroLayerSession_ACU {
       if (active.settlementFailed || turn.phase !== 'published') {
         throw new ZeroLayerError_ACU('effects-pending', '完整响应已保存，结算尚未确认；仅恢复结算，不重发正文请求。');
       }
-      return current;
+      return await this.store.read() ?? current;
     } finally {
       this.preview(active, null);
       if (this.active === active) this.active = null;
@@ -362,7 +415,8 @@ export class ZeroLayerSession_ACU {
       assertLease();
       if (controller.signal.aborted) throw new ZeroLayerError_ACU('scope-changed', '补结算已中止。');
       if (!envelope?.enabled) throw new ZeroLayerError_ACU('mode-disabled', '零层模式未启用。');
-      return await this.settleAndPublish(envelope, turnId, attemptId, controller.signal, assertLease);
+      const settled = await this.settleAndPublish(envelope, turnId, attemptId, controller.signal, assertLease);
+      return await this.store.read() ?? settled;
     } finally {
       if (this.recoveryController === controller) this.recoveryController = null;
     }
@@ -562,6 +616,8 @@ export class ZeroLayerSession_ACU {
     };
     let current = assertCurrent(envelope);
     let turn = current.turns.find(item => item.turnId === turnId)!;
+    current = await this.ensureWorldDeliverySuccessor(current, turn, signal, assertLease);
+    turn = current.turns.find(item => item.turnId === turnId)!;
     if (turn.phase === 'response-durable') {
       if (!this.settleResponse) throw new ZeroLayerError_ACU('effects-pending', '零层结算适配器尚未就绪。');
       await this.settleResponse(structuredClone(current), turnId, attemptId, signal);
@@ -602,6 +658,76 @@ export class ZeroLayerSession_ACU {
     this.active = null;
   }
 
+  private async ensureWorldDeliverySuccessor(
+    envelope: ZeroLayerEnvelope_ACU, turn: ZeroLayerEnvelope_ACU['turns'][number],
+    _signal: AbortSignal, assertLease: () => void,
+  ): Promise<ZeroLayerEnvelope_ACU> {
+    const record = turn.worldDelivery?.records.find(item => item.status === 'attempted');
+    if (!record) return envelope;
+    if (!turn.body?.trim()) throw new ZeroLayerError_ACU('effects-pending', '世界投递等待真实正文持久化。');
+    assertLease();
+    return this.store.commit({ type: 'record-world-delivery-successor', turnId: turn.turnId,
+      attemptId: turn.attemptId, deliveryId: record.deliveryId,
+      successor: this.deliverySuccessorAnchorForTurn(envelope, turn, turn.body),
+    }, envelope.revision);
+  }
+
+  private deliverySuccessorAnchorForTurn(envelope: ZeroLayerEnvelope_ACU,
+    turn: ZeroLayerEnvelope_ACU['turns'][number], body: string): WorldSimulationCompletedAnchor_ACU {
+    return { ...this.deliveryTargetAnchorForTurn(envelope, turn, captureZeroLayerCarrier_ACU().key),
+      contentDigest: sha256HexSync_ACU(body) };
+  }
+
+  private deliveryTargetAnchorForTurn(envelope: ZeroLayerEnvelope_ACU,
+    turn: ZeroLayerEnvelope_ACU['turns'][number], contextKey: string): WorldSimulationCompletedAnchor_ACU {
+    return {
+      kind: 'logical', chatIdentity: JSON.stringify(['zero-layer-simulation', contextKey,
+        envelope.sessionId, turn.branchId]),
+      logicalRef: { sessionId: envelope.sessionId, branchId: turn.branchId, turnId: turn.turnId,
+        attemptId: turn.attemptId, floorId: turn.assistantFloor.floorId },
+      // 请求目标是本次 user input 的冻结摘要；真实正文摘要只记录到 durable successor。
+      contentDigest: sha256HexSync_ACU(turn.input),
+    };
+  }
+
+  private deliveryTargetAnchor(active: ActiveTurn_ACU): WorldSimulationCompletedAnchor_ACU {
+    const turn = active.envelope.turns.find(item => item.turnId === active.turnId && item.attemptId === active.attemptId)!;
+    return this.deliveryTargetAnchorForTurn(active.envelope, turn, active.context.key);
+  }
+
+  private deliverySuccessorAnchor(active: ActiveTurn_ACU, body: string): WorldSimulationCompletedAnchor_ACU {
+    return this.deliverySuccessorAnchorForTurn(active.envelope,
+      active.envelope.turns.find(item => item.turnId === active.turnId && item.attemptId === active.attemptId)!, body);
+  }
+
+  /** 新建产物使用弱引用 capability；恢复的 carrier clone 只能按冻结基底严格重新绑定。 */
+  private readOrRestoreCausalDelivery(envelope: ZeroLayerEnvelope_ACU,
+    turn: ZeroLayerEnvelope_ACU['turns'][number]): PreparedPlotCausalDelivery_ACU {
+    const candidate = turn.plotCandidate!;
+    const live = readPreparedPlotCausalDelivery_ACU(candidate);
+    if (live) return live;
+    if (turn.worldDelivery?.records.some(record => ['attempted', 'response-durable', 'reviewed', 'unknown'].includes(record.status))) {
+      throw new ZeroLayerError_ACU('effects-pending', '已开始或未知的世界投递不能重建发送 capability。');
+    }
+    const ledger = turn.materialBaseline?.simulation?.envelope?.ledger;
+    if (!ledger || !candidate.causalDelivery) {
+      throw new ZeroLayerError_ACU('effects-pending', '恢复剧情因果投递缺少冻结账本基底。');
+    }
+    const sourceView = readPreparedSimulationCausalView_ACU(envelope, turn.turnId, turn.attemptId);
+    const sourceTurn = sourceView && envelope.turns.find(item => item.turnId === sourceView.source.turnId
+      && item.attemptId === sourceView.source.attemptId);
+    if (!sourceView || !sourceTurn?.body) throw new ZeroLayerError_ACU('effects-pending', '恢复缺少已确认推演来源。');
+    const sourceAnchor: WorldSimulationCompletedAnchor_ACU = {
+      kind: 'logical', chatIdentity: this.deliveryTargetAnchorForTurn(envelope, turn, captureZeroLayerCarrier_ACU().key).chatIdentity,
+      logicalRef: sourceView.source, contentDigest: sha256HexSync_ACU(sourceTurn.body),
+    };
+    return restorePreparedPlotCausalDelivery_ACU(candidate, {
+      ledger, sourceAnchor,
+      targetAnchor: this.deliveryTargetAnchorForTurn(envelope, turn, captureZeroLayerCarrier_ACU().key),
+      finalMessage: candidate.finalMessage,
+    });
+  }
+
   /** 仅临时展示；终止通知保留原身份，不能触发保存或把候选当 published。 */
   private preview(active: ActiveTurn_ACU, body: string | null): void {
     if (body !== null) {
@@ -628,6 +754,17 @@ export class ZeroLayerSession_ACU {
     assertZeroLayerCarrier_ACU(active.context);
     const turn = active.envelope.turns.find(item => item.turnId === active.turnId)!;
     if (!['prepared', 'dispatching'].includes(turn.phase)) return;
+    if (active.causalDeliveryId && active.dispatchStarted) {
+      try {
+        active.envelope = await this.store.commit({ type: 'record-world-delivery-unknown',
+          turnId: active.turnId, attemptId: active.attemptId, deliveryId: active.causalDeliveryId,
+        }, active.envelope.revision);
+        return;
+      } catch (persistError) {
+        if (persistError instanceof ZeroLayerError_ACU && persistError.code === 'persist-unknown') throw persistError;
+        throw persistError;
+      }
+    }
     const phase = active.dispatchStarted ? 'delivery-unknown' : active.controller.signal.aborted ? 'cancelled' : 'failed';
     await this.transition(active, phase, { errorCode: phase === 'delivery-unknown' ? 'delivery-unknown' : 'generation-failed' });
   }

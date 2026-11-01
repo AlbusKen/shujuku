@@ -23,7 +23,6 @@
         @keydown="onKeydown"
       />
       <div class="acu-v2-agent-chat__composer-actions">
-        <span class="acu-v2-agent-chat__hint">{{ inFlight ? '进行中可点停止' : 'Ctrl / ⌘ + Enter 发送' }}</span>
         <AcuButton v-if="inFlight" variant="danger" @click="emit('stop')">停止</AcuButton>
         <AcuButton v-else variant="primary" :disabled="!draft.trim()" @click="send">发送</AcuButton>
       </div>
@@ -77,14 +76,10 @@ const statusTone = computed(() => {
   return 'idle';
 });
 
-const placeholder = computed(() => {
-  if (!props.task) return '描述你希望世界侧推进、保留或撤销的方向，发送后主 Agent 会创建任务并开始规划...';
-  if (props.task.status === 'running' || props.task.status === 'drafting' || props.running) return '格林推演 Agent 正在工作。点「停止」可打断；要接着做就打字再发送。';
-  return '继续和主 Agent 对话，写好后再发送...';
-});
+const placeholder = computed(() => inFlight.value ? '推演中…' : '输入推演指令…');
 
 const notice = computed(() => {
-  if (props.task?.stopReason) return `任务已停止：${props.task.stopReason}。输入新指令后发送即可继续。`;
+  if (props.task?.stopReason) return `任务已停止：${props.task.stopReason}`;
   if (props.lastError) return `上一次失败：${props.lastError.message}`;
   return '';
 });
@@ -121,12 +116,10 @@ function onKeydown(event: KeyboardEvent): void {
 .acu-v2-agent-chat__input { width: 100%; box-sizing: border-box; resize: vertical; min-height: 62px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--acu-text-3) 24%, transparent); border-radius: 6px; background: var(--acu-bg-1, var(--acu-bg-2)); color: var(--acu-text-1); font: inherit; font-size: var(--acu-font-size-body-lg, 13px); }
 .acu-v2-agent-chat__input:focus { outline: none; border-color: color-mix(in srgb, var(--acu-primary, #5b8def) 60%, transparent); }
 .acu-v2-agent-chat__composer-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
-.acu-v2-agent-chat__hint { margin-right: auto; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); }
 
 /* 手机窄屏：快捷键提示没有意义直接隐藏；按钮均分整行方便点按；
    输入框字号提到 16px，避免 iOS Safari 聚焦时自动放大页面。 */
 @media (max-width: 640px) {
-  .acu-v2-agent-chat__hint { display: none; }
   .acu-v2-agent-chat__composer-actions > * { flex: 1 1 auto; }
   .acu-v2-agent-chat__input { font-size: 16px; min-height: 56px; }
   .acu-v2-agent-chat__composer { padding: 8px; }

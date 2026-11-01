@@ -45,6 +45,7 @@ vi.mock('../../src/service/runtime/helpers-remaining', () => ({ mergeAllIndepend
 vi.mock('../../src/data/storage/chat-history', () => ({
   getActiveChatStorageIdentity_ACU: (chat: unknown[]) => chat.length > 0 ? 'p3-import-chain' : '',
   getChatScopedConfigContainer_ACU: () => null, getChatSheetGuideContainer_ACU: () => null,
+  peekChatScopedConfigContainer_ACU: () => null, peekChatSheetGuideContainer_ACU: () => null,
   setChatScopedConfigContainer_ACU: vi.fn(), setChatSheetGuideContainer_ACU: vi.fn(),
 }));
 vi.mock('../../src/shared/utils', () => ({

@@ -1,7 +1,7 @@
 ﻿<template>
   <div ref="feedElement" class="acu-v2-session-feed">
     <p v-if="!entries.length" class="acu-v2-session-feed__empty">
-      还没有运行记录。发送一条补充后，格林推演主 Agent 的取证、派工、候选审核与提交过程会实时显示在这里。
+      暂无记录
     </p>
     <button v-if="hiddenCount > 0" type="button" class="acu-v2-session-feed__fold" @click="expandOlder">
       已折叠 {{ hiddenCount }} 条更早消息 · 点击展开更早的 {{ nextExpandCount }} 条
@@ -52,8 +52,8 @@
           </span>
           <span class="acu-v2-session-feed__badge">{{ kindLabel(entry) }}</span>
           <span class="acu-v2-session-feed__title">{{ entry.title }}</span>
+          <span class="acu-v2-session-feed__phase-status">{{ entry.status === 'running' ? '进行中' : entry.status === 'failed' ? '失败 / 中止' : '已通过' }}</span>
           <span class="acu-v2-session-feed__time">{{ formatTime(entry.at) }}</span>
-          <span v-if="entry.detail" class="acu-v2-session-feed__chevron" :class="{ 'acu-v2-session-feed__chevron--open': isExpanded(entry) }">▾</span>
         </button>
         <p v-if="entry.detail && !isExpanded(entry)" class="acu-v2-session-feed__preview" @click="toggle(entry)">{{ entry.detail }}</p>
         <p v-if="entry.detail && isExpanded(entry)" class="acu-v2-session-feed__detail">{{ entry.detail }}</p>
@@ -200,9 +200,8 @@ watch(() => props.entries.length, async (length, previous) => {
 .acu-v2-session-feed__spinner { width: 12px; height: 12px; border: 2px solid color-mix(in srgb, var(--acu-primary, #5b8def) 30%, transparent); border-top-color: var(--acu-primary, #5b8def); border-radius: 50%; animation: acu-v2-session-feed-spin 0.8s linear infinite; }
 .acu-v2-session-feed__badge { flex: none; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--acu-text-3) 18%, transparent); color: var(--acu-text-2); font-size: var(--acu-font-size-caption, 11px); }
 .acu-v2-session-feed__title { color: var(--acu-text-1); font-size: var(--acu-font-size-body-lg, 13px); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acu-v2-session-feed__phase-status { flex: none; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); }
 .acu-v2-session-feed__time { margin-left: auto; flex: none; color: var(--acu-text-3); font-size: var(--acu-font-size-caption, 11px); }
-.acu-v2-session-feed__chevron { flex: none; color: var(--acu-text-3); font-size: 10px; transition: transform 0.15s ease; }
-.acu-v2-session-feed__chevron--open { transform: rotate(180deg); }
 .acu-v2-session-feed__preview { margin: 0; padding: 0 10px 7px 34px; color: var(--acu-text-3); font-size: var(--acu-font-size-body, 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .acu-v2-session-feed__detail { margin: 0; padding: 0 10px 8px 34px; color: var(--acu-text-2); font-size: var(--acu-font-size-body, 12px); white-space: pre-wrap; word-break: break-word; }
 

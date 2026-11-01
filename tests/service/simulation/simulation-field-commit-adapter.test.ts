@@ -50,6 +50,22 @@ describe('world simulation field commit adapter', () => {
     expect(saveChat).toHaveBeenCalledTimes(2);
   });
 
+  it('持久新协议即使租约删除字段也不能通过旧逐栏入口写入', async () => {
+    const { chat, saveChat, input } = fixture();
+    const persisted = chat[0]._qrf_world_simulation.task.activeRun;
+    persisted.workflowProtocol = 'world-round-v1';
+    persisted.workflowMode = 'layered';
+    persisted.deliveryTarget = 'body';
+    const forged = { ...input.identity } as any;
+    delete forged.workflowProtocol;
+    const before = structuredClone(chat);
+    await expect(commitWorldSimulationFieldWrites_ACU({ ...input, identity: forged })).rejects.toMatchObject({
+      error: { code: 'WORLD_SIMULATION_REVISION_CONFLICT' },
+    });
+    expect(chat).toEqual(before);
+    expect(saveChat).not.toHaveBeenCalled();
+  });
+
   it('编年 SQL 自动解码多余 JSON 转义并回读，坏结构与伪证据仍拒绝', async () => {
     const { chat, input, saveChat } = fixture();
     // 编年关联必须指向实际入账的对象；文本转义保真由共享解码和续写提交用例覆盖。
@@ -542,6 +558,11 @@ describe('world simulation field commit compound writes', () => {
     delete old.chronicleOverview;
     delete old.pendingFixes;
     delete old.materialCompletion;
+    delete old.worldEvents;
+    delete old.facts;
+    delete old.historyMilestones;
+    delete old.projection;
+      delete old.legacyMigration;
     const firstAnchor = resolveWorldSimulationAnchor_ACU(1, chat);
     const firstKey = buildWorldSimulationBucketKey_ACU(firstAnchor);
     chat[1]._qrf_world_simulation_state = { schemaVersion: 1, entries: { [firstKey]: { anchor: firstAnchor, value: old, updatedAt: 1 } } };

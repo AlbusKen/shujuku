@@ -7,6 +7,8 @@ import { planWorldSimulationFieldCommit_ACU } from '../simulation/simulation-fie
 import { materializeWorldSimulationLedgerSqlView_ACU } from '../simulation/simulation-ledger-sql-view';
 import { applyLedgerFieldUpsertsToView_ACU, reconcileLedgerFieldViewWithLedger_ACU } from '../simulation/simulation-ledger-fold';
 import { planWorldSimulationFinalCommit_ACU } from '../simulation/simulation-commit-adapter';
+import { materializeReviewedWorldRoundCandidate_ACU, materializeWorldRoundCandidate_ACU, materializeWorldRoundPreview_ACU, type WorldRoundCandidate_ACU } from '../simulation/world-candidate';
+import { claimWorldBodyProjection_ACU, type WorldBodyProjectionProof_ACU, type WorldFactRevealProof_ACU } from '../simulation/agent/world-projection-stage';
 import { rebaseWorldSimulationRunWriteProof_ACU } from '../simulation/simulation-run-write-state';
 import type { WorldSimulationOrchestratorDependencies_ACU } from '../simulation/simulation-orchestrator';
 import type { WorldSimulationLedgerFieldUpserts_ACU, WorldSimulationRunIdentity_ACU } from '../simulation/model';
@@ -26,6 +28,7 @@ function assertRun(state: ZeroLayerSimulationState_ACU, identity: WorldSimulatio
   const run = envelope?.task?.activeRun;
   if (identity.kind !== 'logical' || !run || run.runId !== identity.runId
     || run.taskId !== identity.taskId || run.stageId !== identity.stageId || run.stageRevision !== identity.stageRevision
+    || run.workflowProtocol !== identity.workflowProtocol
     || envelope?.task?.status !== 'running'
     || !sameWorldSimulationTargetRef_ACU(worldSimulationRunTargetRef_ACU(run), worldSimulationRunTargetRef_ACU(identity))) {
     throw new ZeroLayerError_ACU('revision-conflict', '推演联合提交运行租约已失效。');
@@ -40,6 +43,18 @@ export async function commitZeroLayerSimulationFinal_ACU(
   store.assertAnchor(input.anchor);
   const anchor = structuredClone(input.anchor);
   const before = store.readState();
+  if (before.envelope?.task?.activeRun?.deliveryTarget === 'plot'
+    || (before.envelope?.task?.activeRun?.deliveryTarget === undefined && before.envelope?.settings.deliveryTarget === 'plot')) {
+    throw new ZeroLayerError_ACU('invalid-transition', '剧情推进投送尚未接通，禁止通过旧推演交付路径提交。');
+  }
+  if (before.envelope?.task?.activeRun?.workflowProtocol === 'world-round-v1'
+    || input.identity.workflowProtocol === 'world-round-v1') {
+    throw new ZeroLayerError_ACU('invalid-transition', '新协议运行不得通过旧正文/SQL 提交路径写入。');
+  }
+  if (before.envelope?.task?.activeRun?.workflowMode === 'single'
+    || (before.envelope?.task?.activeRun?.workflowMode === undefined && before.envelope?.settings.workflowMode === 'single')) {
+    throw new ZeroLayerError_ACU('invalid-transition', '单 Agent 新工作流尚未接通，拒绝旧导演提交。');
+  }
   assertRun(before, input.identity);
   const candidate = input.commitCandidate;
   if (candidate.runId !== input.identity.runId || candidate.taskId !== input.identity.taskId
@@ -62,7 +77,7 @@ export async function commitZeroLayerSimulationFinal_ACU(
   const after = { ledger: planned.ledger, fields, archive: planned.archiveSnapshot };
   const proof = before.runProof ? rebaseWorldSimulationRunWriteProof_ACU(before.runProof, view, after) : null;
   const next = validateWorldSimulationEnvelope_ACU({ ...before.envelope!, ledger: planned.ledger,
-    task: { ...before.envelope!.task!, status: 'completed', activeRun: null, stopReason: null,
+    task: { ...before.envelope!.task!, status: 'completed', activeRun: null, completedRun: structuredClone(input.identity), stopReason: null,
       updatedAt: input.completedAt, ...(input.identity.triggerKind === 'assistant_completed'
         ? { completedAutoAnchor: worldSimulationTargetRef_ACU(anchor) } : {}) },
     stages: before.envelope!.stages.map(stage => stage.stageId === input.identity.stageId
@@ -97,14 +112,139 @@ export async function commitZeroLayerSimulationFinal_ACU(
   });
   return anchor;
 }
+type ZeroLayerSimulationRoundInput_ACU = { identity: WorldSimulationRunIdentity_ACU;
+  anchor: WorldSimulationLogicalAnchorIdentity_ACU; roundCandidate: WorldRoundCandidate_ACU;
+  completedAt: number; timelineId: string; summary: string;
+  bodyProjection?: { proof: WorldBodyProjectionProof_ACU } };
+type ZeroLayerReviewedSimulationRoundInput_ACU = ZeroLayerSimulationRoundInput_ACU & {
+  proof: WorldFactRevealProof_ACU; factIds: readonly string[] };
+
+/** 新候选只结算账本；零层 carrier 的推演分支、栏目与回执在一次写队列候选中保存。 */
+export async function commitZeroLayerSimulationRound_ACU(
+  store: ZeroLayerSimulationStore_ACU, input: ZeroLayerSimulationRoundInput_ACU,
+): Promise<WorldSimulationLogicalAnchorIdentity_ACU> {
+  // 调用方即使绕过类型系统附带 proof/factIds，也不能让旧入口退化为 reviewed 提交。
+  const supplied = input as unknown as Record<string, unknown>;
+  if ('proof' in supplied || 'factIds' in supplied) {
+    throw new ZeroLayerError_ACU('invalid-transition', '受审事实揭示必须使用显式 reviewed 提交入口。');
+  }
+  return commitZeroLayerSimulationRoundInternal_ACU(store, input);
+}
+
+/** 仅 reviewed wrapper 可消费一次性 proof；不提供正文投送或跨宿主原子性承诺。 */
+export async function commitZeroLayerReviewedSimulationRound_ACU(
+  store: ZeroLayerSimulationStore_ACU, input: ZeroLayerReviewedSimulationRoundInput_ACU,
+): Promise<WorldSimulationLogicalAnchorIdentity_ACU> {
+  // identity 与 targetAnchor 均以已类型化的提交入参为准，绝不采信调用方附带的授权声称。
+  return commitZeroLayerSimulationRoundInternal_ACU(store, input, {
+    proof: input.proof, factIds: input.factIds, identity: input.identity, targetAnchor: input.anchor,
+  });
+}
+
+async function commitZeroLayerSimulationRoundInternal_ACU(
+  store: ZeroLayerSimulationStore_ACU, input: ZeroLayerSimulationRoundInput_ACU,
+  reviewed?: { proof: WorldFactRevealProof_ACU; factIds: readonly string[];
+    identity: WorldSimulationRunIdentity_ACU; targetAnchor: WorldSimulationLogicalAnchorIdentity_ACU },
+): Promise<WorldSimulationLogicalAnchorIdentity_ACU> {
+  store.assertAnchor(input.anchor);
+  const anchor = structuredClone(input.anchor);
+  const before = store.readState();
+  assertRun(before, input.identity);
+  const run = before.envelope!.task!.activeRun!;
+  const source = store.readSource();
+  const turn = source.turns.find(item => item.turnId === anchor.logicalRef.turnId && item.attemptId === anchor.logicalRef.attemptId);
+  if (input.identity.workflowProtocol !== run.workflowProtocol) {
+    throw new ZeroLayerError_ACU('revision-conflict', '零层新候选协议与冻结运行不一致。');
+  }
+  if (!turn || turn.phase !== 'response-durable'
+    || (turn.simulationDeliveryTarget ?? 'body') !== (run.deliveryTarget ?? 'body')
+    || run.deliveryTarget !== input.identity.deliveryTarget || run.workflowMode !== input.identity.workflowMode
+    || run.baseLedgerRevision !== input.identity.baseLedgerRevision
+    || input.identity.baseLedgerRevision !== before.envelope!.ledger.revision) {
+    throw new ZeroLayerError_ACU('revision-conflict', '零层新候选目标、回合或基础账本已变化。');
+  }
+  if (turn.effectReceipts.some(item => item.kind === 'simulation') || before.runProof
+    || Object.values(before.fields.records).some(rows => Object.values(rows ?? {}).some(row => row.status === 'partial'))
+    || input.roundCandidate.projection.anchor !== null || input.roundCandidate.projection.deliveries.length
+    || before.envelope!.ledger.projection.anchor !== null || before.envelope!.ledger.projection.deliveries.length) {
+    throw new ZeroLayerError_ACU('invalid-transition', '零层新候选不能混合旧逐栏写入或未实现的正文投影。');
+  }
+  // 全部运行、回合、目标、partial 和 base revision 检查完成之后，先物化未解锁预览，才能领取 body proof。
+  if (input.bodyProjection && (run.deliveryTarget !== 'body' || input.identity.triggerKind !== 'assistant_completed')) {
+    throw new ZeroLayerError_ACU('invalid-transition', '非正文完成锚点不能投送事实。');
+  }
+  const previewLedger = input.bodyProjection
+    ? materializeWorldRoundPreview_ACU(before.envelope!.ledger, input.roundCandidate)
+    : null;
+  const bodyFactIds = input.bodyProjection
+    ? claimWorldBodyProjection_ACU(input.bodyProjection.proof, previewLedger!, input.identity, anchor) : undefined;
+  // reveal proof 仅在 body proof 领取之后消费；最终账本仍由原 reviewed 入口校验与物化。
+  const ledger = reviewed
+    ? materializeReviewedWorldRoundCandidate_ACU(before.envelope!.ledger, input.roundCandidate, {
+      proof: reviewed.proof, factIds: reviewed.factIds, identity: input.identity, targetAnchor: anchor,
+    })
+    : previewLedger ?? materializeWorldRoundCandidate_ACU(before.envelope!.ledger, input.roundCandidate);
+  const fields = structuredClone(before.fields);
+  reconcileLedgerFieldViewWithLedger_ACU(fields, ledger, input.completedAt);
+  const next = validateWorldSimulationEnvelope_ACU({ ...before.envelope!, ledger,
+    task: { ...before.envelope!.task!, status: 'completed', activeRun: null, completedRun: structuredClone(input.identity), stopReason: null,
+      updatedAt: input.completedAt, ...(input.identity.triggerKind === 'assistant_completed'
+        ? { completedAutoAnchor: worldSimulationTargetRef_ACU(anchor) } : {}) },
+    stages: before.envelope!.stages.map(stage => stage.stageId === input.identity.stageId
+      ? { ...stage, status: 'completed' } : stage),
+    timeline: [...before.envelope!.timeline, { id: input.timelineId, at: input.completedAt,
+      kind: 'committed', taskId: input.identity.taskId, stageId: input.identity.stageId,
+      revision: input.identity.stageRevision, runId: input.identity.runId, message: input.summary }],
+    updatedAt: input.completedAt, lastError: null }, 'persist');
+  await store.updateState((state, current) => {
+    store.assertAnchor(anchor, current);
+    assertRun(state, input.identity);
+    if (canonical(state.envelope) !== canonical(before.envelope) || canonical(viewOf(state)) !== canonical(viewOf(before))
+      || canonical(state.runProof) !== canonical(before.runProof)) {
+      throw new ZeroLayerError_ACU('revision-conflict', '新候选提交期间推演分支已变化。');
+    }
+    const activeTurn = current.turns.find(item => item.turnId === turn.turnId && item.attemptId === turn.attemptId);
+    if (!activeTurn || activeTurn.phase !== 'response-durable'
+      || (activeTurn.simulationDeliveryTarget ?? 'body') !== (input.identity.deliveryTarget ?? 'body')
+      || activeTurn.effectReceipts.some(item => item.kind === 'simulation')) {
+      throw new ZeroLayerError_ACU('revision-conflict', '新候选提交期间逻辑回合已变化。');
+    }
+    state.envelope = next;
+    state.fields = fields;
+    state.runState = null;
+    if (input.identity.triggerKind === 'assistant_completed') {
+      state.confirmed.push({ ref: structuredClone(anchor.logicalRef), ledgerRevision: ledger.revision });
+    }
+  }, current => {
+    if (input.identity.triggerKind !== 'assistant_completed') return undefined;
+    const state = current.branches.find(branch => branch.branchId === store.branchId)!.simulation!;
+    return buildZeroLayerSimulationEffect_ACU(state, anchor, 'commit', input.summary,
+      bodyFactIds === undefined ? 'ledger-only' : 'body', bodyFactIds);
+  });
+  const saved = store.readState();
+  if (canonical(viewOf(saved)) !== canonical({ ledger, fields, archive: before.archive })
+    || saved.envelope?.task?.status !== 'completed' || saved.envelope.task.activeRun !== null
+    || input.identity.triggerKind === 'assistant_completed' && !saved.confirmed.some(item => canonical(item.ref) === canonical(anchor.logicalRef)
+      && item.ledgerRevision === ledger.revision)) {
+    throw new ZeroLayerError_ACU('persist-unknown', '推演提交回读不一致，禁止继续请求。');
+  }
+  return anchor;
+}
+
 type LogicalFieldInput_ACU = Omit<WorldSimulationFieldCommitInput_ACU, 'anchor'> & { anchor: WorldSimulationLogicalAnchorIdentity_ACU };
 
 /** 逐栏候选先经 SQL 复算；栏目、账本、归档与 proof 只进行一次 carrier 保存。 */
 export async function commitZeroLayerSimulationFields_ACU(store: ZeroLayerSimulationStore_ACU,
   input: LogicalFieldInput_ACU): Promise<WorldSimulationFieldCommitReceipt_ACU> {
   store.assertAnchor(input.anchor);
+  if (input.identity.workflowProtocol === 'world-round-v1') {
+    throw new ZeroLayerError_ACU('invalid-transition', '新协议运行不得通过旧逐栏 SQL 提交路径写入。');
+  }
   if (input.isCurrent?.() === false) throw new ZeroLayerError_ACU('scope-changed', '推演派工已失效。');
   const before = store.readState();
+  if (before.envelope?.task?.activeRun?.workflowProtocol === 'world-round-v1') {
+    throw new ZeroLayerError_ACU('invalid-transition', '新协议运行不得通过旧逐栏 SQL 提交路径写入。');
+  }
   assertRun(before, input.identity);
   if (input.evidenceRegistry.runId !== input.identity.runId) throw new ZeroLayerError_ACU('revision-conflict', '推演证据不属于当前运行。');
   const view = viewOf(before);

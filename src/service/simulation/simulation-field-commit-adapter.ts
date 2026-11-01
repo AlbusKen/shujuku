@@ -94,7 +94,8 @@ function checkContext_ACU(chat: unknown[], identity: WorldSimulationRunIdentity_
   if (canonical_ACU(envelope) !== expectedEnvelope) fail_ACU('逐栏提交期间首楼世界状态已变化');
   const run = envelope.task?.activeRun;
   if (!run || envelope.task?.taskId !== identity.taskId || run.runId !== identity.runId
-    || run.stageRevision !== identity.stageRevision || envelope.activeStageId !== identity.stageId) fail_ACU('逐栏提交运行租约已失效');
+    || run.stageRevision !== identity.stageRevision || envelope.activeStageId !== identity.stageId
+    || run.workflowProtocol !== identity.workflowProtocol) fail_ACU('逐栏提交运行租约或工作流协议已失效');
 }
 
 function stageChain_ACU(chat: unknown[], anchor: WorldSimulationAnchorIdentity_ACU,
@@ -191,7 +192,9 @@ export async function commitWorldSimulationFieldWritesWithinQueue_ACU(input: Wor
   const run = envelope.task?.activeRun;
   if (!run || envelope.task?.taskId !== lease.taskId || run.runId !== lease.runId
     || run.stageRevision !== lease.stageRevision || envelope.activeStageId !== lease.stageId
-    || input.evidenceRegistry.runId !== lease.runId) fail_ACU('逐栏提交运行租约已失效');
+    || run.workflowProtocol !== lease.workflowProtocol
+    || run.workflowProtocol === 'world-round-v1'
+    || input.evidenceRegistry.runId !== lease.runId) fail_ACU('逐栏提交运行租约或工作流协议已失效');
   const expectedEnvelope = canonical_ACU(envelope);
   const baseline = chat.map((message, index) => ({ message,
     assistant: isRecord_ACU(message) && message.is_user !== true && message.is_system !== true,

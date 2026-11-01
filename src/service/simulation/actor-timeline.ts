@@ -16,6 +16,11 @@ import {
   type WorldClock_ACU,
 } from './model';
 
+/** 同一行动本轮漏写预计时长时沿用上一轮记录，避免已有时长被空值覆盖。 */
+function keepDuration_ACU(duration: string, prior: string | undefined): string {
+  return duration?.trim() ? duration : (prior?.trim() ? prior : duration);
+}
+
 function stampActor_ACU(prev: WorldActor_ACU | null, actor: WorldActor_ACU, clock: WorldClock_ACU): WorldActor_ACU {
   const next: WorldActor_ACU = { ...actor, experiences: [...(actor.experiences ?? [])] };
 
@@ -23,7 +28,8 @@ function stampActor_ACU(prev: WorldActor_ACU | null, actor: WorldActor_ACU, cloc
   const priorCurrent = prev?.currentAction ?? null;
   if (!current) next.currentAction = null;
   else if (priorCurrent && priorCurrent.text === current.text) {
-    next.currentAction = { ...current, startedAtDay: priorCurrent.startedAtDay, startedAt: priorCurrent.startedAt };
+    next.currentAction = { ...current, startedAtDay: priorCurrent.startedAtDay, startedAt: priorCurrent.startedAt,
+      expectedDuration: keepDuration_ACU(current.expectedDuration, priorCurrent.expectedDuration) };
   } else {
     next.currentAction = { ...current, startedAtDay: clock.day, startedAt: clock.storyTime };
   }
@@ -33,13 +39,16 @@ function stampActor_ACU(prev: WorldActor_ACU | null, actor: WorldActor_ACU, cloc
   if (!long) {
     // 清空但没有显式结束：不归档，避免把改写或误删当成经历。
     next.longTermAction = null;
+    next.shortTermAction = null;
     return next;
   }
   const started = priorLong
     ? { startedAtDay: priorLong.startedAtDay, startedAt: priorLong.startedAt }
     : { startedAtDay: clock.day, startedAt: clock.storyTime };
   if (long.status === 'ongoing') {
-    next.longTermAction = { ...long, ...started };
+    next.longTermAction = { ...long, ...started,
+      expectedDuration: keepDuration_ACU(long.expectedDuration, priorLong?.expectedDuration) };
+    next.shortTermAction = { ...next.longTermAction };
     return next;
   }
   const experience: WorldActorExperience_ACU = {
@@ -53,6 +62,7 @@ function stampActor_ACU(prev: WorldActor_ACU | null, actor: WorldActor_ACU, cloc
   };
   next.experiences = [...next.experiences, experience].slice(-WORLD_ACTOR_EXPERIENCE_CAP_ACU);
   next.longTermAction = null;
+  next.shortTermAction = null;
   return next;
 }
 
