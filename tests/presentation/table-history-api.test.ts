@@ -100,3 +100,30 @@ describe('public read-only table history API', () => {
         expect(await read([0])).toMatchObject({ success: false, code: 'replay_failed' });
     });
 });
+
+
+describe('public table history source context', () => {
+    it('returns current chat and isolation identity without replaying or mutating storage', () => {
+        const before = structuredClone(mocks.host);
+        expect(createTableHistoryApi().getTableHistoryContext()).toEqual({
+            version: 1, chatId: 'chat-a', characterId: 0, groupId: null, isolationKey: '',
+        });
+        expect(mocks.host).toEqual(before);
+        expect(mocks.replay).not.toHaveBeenCalled();
+    });
+    it.each([undefined, null, { chatId: '', chat: [] }, { chatId: 'a' }])('returns null while host is unavailable: %j', host => {
+        mocks.host = host;
+        expect(createTableHistoryApi().getTableHistoryContext()).toBeNull();
+        expect(mocks.replay).not.toHaveBeenCalled();
+    });
+    it('returns independent primitive context and follows the actual current isolation key', () => {
+        const api = createTableHistoryApi(), first = api.getTableHistoryContext();
+        first.isolationKey = 'caller edit';
+        expect(api.getTableHistoryContext().isolationKey).toBe('');
+        mocks.isolationKey = 'slot-b';
+        expect(api.getTableHistoryContext().isolationKey).toBe('slot-b');
+        mocks.host.chatId = 'chat-b'; mocks.host.characterId = 3; mocks.host.groupId = 'group-b';
+        expect(api.getTableHistoryContext()).toMatchObject({ chatId: 'chat-b', characterId: 3, groupId: 'group-b' });
+        expect(mocks.replay).not.toHaveBeenCalled();
+    });
+});
