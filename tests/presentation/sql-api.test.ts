@@ -202,6 +202,30 @@ describe('createSqlApi', () => {
     api = createSqlApi(ctx);
   });
 
+  describe.each(['executeSqlMutation', 'executeSqlBatch'])('%s 前端回读选项', method => {
+    it('显式false保留持久化和通知，仅透传不等待回读', async () => {
+      const result = await api[method]({ sql: 'UPDATE T SET row_id = 2 WHERE row_id = 1', awaitFrontendReadback: false });
+      expect(result).toMatchObject({ saved: true, messageIndex: 3 });
+      expect(mocks.persistTablesToChatMessage).toHaveBeenCalled();
+      expect(mocks.refreshMergedDataAndNotifyWithUI).toHaveBeenCalledWith({ skipNotify: false, awaitFrontendReadback: false });
+    });
+    it.each([undefined, true, 'false', 0, null])('未显式false时保留原等待：%j', async awaitFrontendReadback => {
+      await api[method]({ sql: 'UPDATE T SET row_id = 2 WHERE row_id = 1', awaitFrontendReadback });
+      expect(mocks.refreshMergedDataAndNotifyWithUI).toHaveBeenCalledWith({ skipNotify: false });
+    });
+    it('不覆盖独立的skipNotify选项', async () => {
+      const result = await api[method]({ sql: 'UPDATE T SET row_id = 2 WHERE row_id = 1', skipNotify: true, awaitFrontendReadback: false });
+      expect(result).toMatchObject({ saved: true });
+      expect(mocks.refreshMergedDataAndNotifyWithUI).not.toHaveBeenCalled();
+    });
+  });
+
+  it('executeSql写入分支保留显式回读等待选项', async () => {
+    const out = await api.executeSql({ sql: 'UPDATE T SET row_id = 2 WHERE row_id = 1', awaitFrontendReadback: false });
+    expect(out).toMatchObject({ type: 'mutation', result: { saved: true } });
+    expect(mocks.refreshMergedDataAndNotifyWithUI).toHaveBeenCalledWith({ skipNotify: false, awaitFrontendReadback: false });
+  });
+
   it('全局只读 SQL 方法仅在 SQLite runtime ready 后可见', () => {
     const publishedApi: Record<string, any> = { ...api };
     installRuntimeGatedSqlReadApi_ACU(publishedApi, api);

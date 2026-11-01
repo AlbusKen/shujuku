@@ -22,6 +22,7 @@ type SqlParam_ACU = string | number | null;
 type SqlMutationOptions_ACU = {
     skipChatSave: boolean;
     skipNotify: boolean;
+    awaitFrontendReadback?: boolean;
     targetSheetKeys: string[] | null;
     updateGroupKeys: string[] | null;
     trackingSheetKeys: string[] | null | undefined;
@@ -164,6 +165,7 @@ function parseSqlArgs_ACU(sqlOrOptions: any, params?: any, options?: any, method
             optionSource?.suppressNotify,
             optionSource?.suppressNotification,
         )),
+        ...(optionSource?.awaitFrontendReadback === false ? { awaitFrontendReadback: false } : {}),
         targetSheetKeys: normalizeSheetKeys_ACU(firstDefined_ACU(
             optionSource?.targetSheetKeys,
             optionSource?.sheetKeys,
@@ -617,7 +619,7 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
                     return { changes: 0, errors: [commitResult.error || 'executeSqlMutation failed'] };
                 }
                 if (!args.skipNotify) {
-                    await refreshMergedDataAndNotifyWithUI_ACU({ skipNotify: false });
+                    await refreshMergedDataAndNotifyWithUI_ACU({ skipNotify: false, ...(args.awaitFrontendReadback === false ? { awaitFrontendReadback: false } : {}) });
                     logDebug_ACU('executeSqlMutation: refreshed merged data after raw SQL mutation.');
                 }
                 return args.skipChatSave
@@ -696,7 +698,7 @@ export function createSqlApi(ctx: ApiGroupContext): Record<string, Function> {
                     return { success: false, modifiedKeys: [], appliedEdits: 0, changes: 0, errors: [commitResult.error || 'executeSqlBatch failed'] };
                 }
                 if (!args.skipNotify) {
-                    await refreshMergedDataAndNotifyWithUI_ACU({ skipNotify: false });
+                    await refreshMergedDataAndNotifyWithUI_ACU({ skipNotify: false, ...(args.awaitFrontendReadback === false ? { awaitFrontendReadback: false } : {}) });
                     logDebug_ACU('executeSqlBatch: refreshed merged data after raw SQL transaction.');
                 }
                 return { ...commitResult.value, saved: commitResult.saved, messageIndex: commitResult.messageIndex };

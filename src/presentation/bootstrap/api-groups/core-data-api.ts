@@ -51,7 +51,7 @@ export function createCoreDataApi(ctx: ApiGroupContext): Record<string, Function
                         const targetMessageIndexForVectorSync = commitResult.messageIndex ?? -1;
                         logDebug_ACU(`[importTableAsJson] 已通过服务层导入提交入口导入表格数据，messageIndex=${targetMessageIndexForVectorSync}。`);
 
-                        await refreshMergedDataAndNotifyWithUI_ACU();
+                        await refreshMergedDataAndNotifyWithUI_ACU({ awaitFrontendReadback: options?.awaitFrontendReadback !== false });
 
                         const sourceTableKey = Object.keys(commitResult.tableData || {}).find((sheetKey) => {
                             const table = (commitResult.tableData as any)?.[sheetKey];
