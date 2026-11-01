@@ -129,6 +129,11 @@ function clearRuntimeForNoActiveChat_ACU(chatFileName: unknown): void {
 
 const sendIntentDocuments_ACU = new WeakSet<Document>();
 
+// MESSAGE_SENT 监听器里用户楼层补写的等待上限：补写经宿主串行保存队列提交，
+// 队列挂起时永不返回；宿主 eventSource.emit 对监听器逐个 await，监听器不返回
+// 会让其后的 addOneMessage 渲染与正文请求整条链冻结。超时只放行宿主，不清 pending。
+const PLOT_PENDING_FLUSH_TIMEOUT_MS_ACU = 8000;
+
 function installSendIntentCaptureHooks_ACU() {
   try {
     const doc = getHostWindow().document;
@@ -548,8 +553,25 @@ export   function mainInitialize_ACU() {
               recordLastUserSend_ACU(messageId);
             } catch (e) {}
             // 宿主真实入楼后补写；不依赖伪装期间启动的短轮询是否已耗尽。
+            // 宿主 eventSource.emit 对监听器逐个 await，addOneMessage 在其后：本监听器不返回，
+            // 用户楼渲染与正文请求整条链冻结。补写经宿主串行保存队列提交，队列挂起时永不返回，
+            // 故加超时上限——超时只放行宿主渲染，不清 pending，由正文结束/下一轮发送的既有
+            // 补写入口接手（roundRef 复检保证多入口补写幂等，不双写）。
             try {
-              await flushPlotPendingSave_ACU();
+              let flushTimer: ReturnType<typeof setTimeout> | undefined;
+              try {
+                const flushOutcome = await Promise.race([
+                  flushPlotPendingSave_ACU(),
+                  new Promise<'timeout'>((resolve) => {
+                    flushTimer = setTimeout(() => resolve('timeout'), PLOT_PENDING_FLUSH_TIMEOUT_MS_ACU);
+                  }),
+                ]);
+                if (flushOutcome === 'timeout') {
+                  logWarn_ACU(`[剧情推进] 用户楼层补写超${PLOT_PENDING_FLUSH_TIMEOUT_MS_ACU / 1000}秒未返回，已放行宿主渲染，pending 保留待后续补写`);
+                }
+              } finally {
+                clearTimeout(flushTimer);
+              }
             } catch (error) {
               logWarn_ACU('[剧情推进] 用户楼层创建后补写失败，保留待保存数据:', error);
             }
