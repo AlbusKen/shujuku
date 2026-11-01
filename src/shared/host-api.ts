@@ -65,6 +65,8 @@ export interface ChatMessageACUExtensions {
     _qrf_plot_pending_hash?: string;
     /** QRF 剧情推进轮次身份；用于精确定位与失败重试。 */
     _qrf_plot_round_id?: string;
+    /** 本轮实际交给正文的推进文本，不含仅供推进内部维护的账本。 */
+    _qrf_plot_final_message?: string;
     /** 格林推演权威状态；字段内部按冻结 assistant 楼层的 active swipe 身份分桶。 */
     _qrf_world_simulation_state?: Record<string, unknown>;
     /** 格林推演 Agent 会话分段；与 continuation 会话字段严格隔离。 */

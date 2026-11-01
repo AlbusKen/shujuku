@@ -118,6 +118,26 @@ describe('world simulation transaction', () => {
     expect(next.dimensions[0]).toMatchObject({ id: 'pressure', name: '压力', kind: 'pressure', value: 8, trend: 'rising', rationale: '旧因', revision: 2 });
   });
 
+  it('旧人物候选持续事务与新短期字段同步，完成后两者清空且不污染认知', () => {
+    const first = applyWorldSimulationCandidates_ACU(buildEmptyWorldSimulationLedger_ACU(), [candidate({
+      actors: { upsert: [{ id: 'actor-1', name: '策划人', knownFacts: ['家人发来消息'],
+        longTermAction: { text: '筹备下周演出', expectedDuration: '五日', status: 'ongoing' } }] },
+    })], new Set(['e1']));
+    const actor = first.actors[0];
+    expect(actor.shortTermAction).toEqual(actor.longTermAction);
+    expect(actor.shortTermAction).toMatchObject({ text: '筹备下周演出', startedAtDay: 1 });
+    expect(actor.simulationStatus).toBe('active');
+    expect(actor.knownFacts).toEqual(['家人发来消息']);
+    const next = applyWorldSimulationCandidates_ACU(first, [candidate({
+      actors: { upsert: [{ id: 'actor-1', expectedRevision: actor.revision,
+        longTermAction: { text: '筹备下周演出', expectedDuration: '五日', status: 'done', outcome: '完成彩排' } }] },
+    })], new Set(['e1']));
+    expect(next.actors[0].longTermAction).toBeNull();
+    expect(next.actors[0].shortTermAction).toBeNull();
+    expect(next.actors[0].experiences.at(-1)).toMatchObject({ status: 'done', outcome: '完成彩排' });
+    expect(next.actors[0].knownFacts).toEqual(['家人发来消息']);
+  });
+
   it('类型宽容接受逗号分隔数组与数字字符串，越权与伪造引用仍拒绝', () => {
     const next = applyWorldSimulationCandidates_ACU(
       buildEmptyWorldSimulationLedger_ACU(),

@@ -69,6 +69,16 @@ describe('lifecycle sweeper', () => {
     expect(unregistered.skipped[0]?.kind).toBe('seed');
   });
 
+  it('显式 active 或 archived 的死亡人物即使超时且纪要已登记也保留可检索身份', () => {
+    const current = ledger({
+      actors: [actor({ simulationStatus: 'active', shortTermAction: null }), actor({ id: 'archived', simulationStatus: 'archived' })],
+      chronicleOverview: [{ fingerprint: 'fp', day: 5, oneLine: '铁匠死在北岭', archiveRef: 'arc-1' }],
+    });
+    const result = sweepWorldLifecycle_ACU(current, settings());
+    expect(result.droppedActorIds).toEqual([]);
+    expect(result.ledger.actors).toEqual(current.actors);
+  });
+
   it('dead actor 超过 2×TTL 且事实已登记时删除', () => {
     const dropped = sweepWorldLifecycle_ACU(ledger({
       actors: [actor()],

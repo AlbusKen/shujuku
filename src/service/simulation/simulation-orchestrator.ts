@@ -1,6 +1,7 @@
 import { buildDefaultWorldSimulationEnvelope_ACU } from './defaults';
+import { logError_ACU } from '../../shared/utils';
 import type { WorldSimulationTargetAnchor_ACU, WorldSimulationCommitCandidate_ACU, WorldSimulationMainLoopResult_ACU } from './agent/agent-model';
-import { buildWorldSimulationProjection_ACU } from './simulation-projection';
+import { buildWorldFactBodyProjection_ACU, buildWorldSimulationProjection_ACU } from './simulation-projection';
 import {
   createWorldSimulationError_ACU,
   WorldSimulationValidationError_ACU,
@@ -12,9 +13,12 @@ import {
   type WorldSimulationStageRevision_ACU,
   type WorldSimulationTriggerKind_ACU,
 } from './model';
-import { endWorldSimulationSessionRun_ACU, logWorldSimulationSession_ACU } from './agent/agent-session-log';
+import { endWorldSimulationSessionRun_ACU, logWorldSimulationSession_ACU, updateWorldSimulationSession_ACU } from './agent/agent-session-log';
 import type { WorldSimulationRunWriteState_ACU } from './simulation-run-write-state';
 import { sameWorldSimulationTargetRef_ACU, worldSimulationRunTargetRef_ACU, worldSimulationTargetRef_ACU } from './simulation-identity';
+import { isMechanicalWorldSimulationResumeText_ACU } from './agent/agent-user-requirements';
+import { sameWorldRunMaterials_ACU } from './world-run-materials';
+import type { WorldBodyProjectionProof_ACU, WorldFactRevealProof_ACU } from './agent/world-projection-stage';
 
 export interface WorldSimulationStorePort_ACU {
   read(): WorldSimulationEnvelope_ACU | null;
@@ -34,7 +38,12 @@ export interface WorldSimulationOrchestratorDependencies_ACU {
   prepare(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationTargetAnchor_ACU; instruction: string; envelope: WorldSimulationEnvelope_ACU; signal: AbortSignal; resetRunBudget?: boolean; targetModules?: readonly WorldSimulationLedgerModule_ACU[] }): Promise<WorldSimulationPreparedRun_ACU>;
   assertAnchorCurrent(anchor: WorldSimulationTargetAnchor_ACU): void | Promise<void>;
   readResumeLedgerRevision?(identity: WorldSimulationRunIdentity_ACU, anchor: WorldSimulationTargetAnchor_ACU): number | Promise<number>;
+  /** 新整轮协议恢复的资料依赖预检；必须在写会话、prepare 或 run-state 前 fail-closed。 */
+  checkResumeMaterials?(identity: WorldSimulationRunIdentity_ACU, anchor: WorldSimulationTargetAnchor_ACU, envelope: WorldSimulationEnvelope_ACU, signal: AbortSignal): Promise<void>;
   appendUserMessage?(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationTargetAnchor_ACU; text: string; idempotent?: boolean }): Promise<void>;
+  /** 仅在显式 world-round-v1 能力开启后使用；存在端口本身不启用新链。 */
+  workflowProtocol?: 'world-round-v1';
+  commitRound?(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationTargetAnchor_ACU; roundCandidate: import('./world-candidate').WorldRoundCandidate_ACU; completedAt: number; timelineId: string; summary: string; bodyProjection?: { proof: WorldBodyProjectionProof_ACU }; reviewedReveal?: { proof: WorldFactRevealProof_ACU; factIds: readonly string[] } }): Promise<WorldSimulationTargetAnchor_ACU | void>;
   commitProjection(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationTargetAnchor_ACU; commitCandidate: WorldSimulationCommitCandidate_ACU; completedAt: number; timelineId: string; runWrites?: WorldSimulationRunWriteState_ACU }): Promise<WorldSimulationTargetAnchor_ACU | void>;
   persistCompletion?(input: { identity: WorldSimulationRunIdentity_ACU; anchor: WorldSimulationTargetAnchor_ACU; outcome: 'commit' | 'no_change'; summary: string }): Promise<void>;
 }
@@ -85,6 +94,8 @@ const inflightByChat_ACU = new Map<string, Promise<WorldSimulationOrchestratorRe
 const pendingAutoByChat_ACU = new Map<string, { anchor: WorldSimulationTargetAnchor_ACU; instruction: string }>();
 /** 本次在途运行是被用户主动停止/打断的：结算后不得排空 pending 自动触发，否则用户刚停就被自动重启。 */
 const manualStopByChat_ACU = new Set<string>();
+/** 仅供恢复资料预检使用；预检完成前不得登记或创建该运行的可取消 controller。 */
+const resumeMaterialsPreflightSignal_ACU = new AbortController().signal;
 
 /** 测试隔离：模块级在途 / 排队 / 手停登记按 chatIdentity 共享，用例之间必须清空。 */
 export function resetWorldSimulationOrchestratorStateForTests_ACU(): void {
@@ -126,6 +137,25 @@ function errorFromUnknown_ACU(error: unknown): WorldSimulationError_ACU {
     error instanceof Error ? error.message : String(error),
     false,
   );
+}
+
+function failureMessage_ACU(error: unknown): string {
+  const failure = errorFromUnknown_ACU(error);
+  const cause = failure.details?.primaryMessage ?? failure.details?.message;
+  return typeof cause === 'string' && cause !== failure.message ? `${failure.message}：${cause}` : failure.message;
+}
+
+/** 仅输出故障定位字段，不传递异常对象或可能包含正文/凭据的完整 details。 */
+function logRunFailure_ACU(identity: WorldSimulationRunIdentity_ACU, error: unknown, operation: string): void {
+  const failure = errorFromUnknown_ACU(error);
+  logError_ACU('格林推演失败', {
+    runId: identity.runId, taskId: identity.taskId, stageId: identity.stageId,
+    chatIdentity: identity.chatIdentity, operation, phase: failure.phase, code: failure.code,
+    message: failure.message,
+    ...(typeof failure.details?.primaryMessage === 'string' ? { primaryMessage: failure.details.primaryMessage } : {}),
+    ...(typeof failure.details?.rollbackMessage === 'string' ? { rollbackMessage: failure.details.rollbackMessage } : {}),
+    ...(error instanceof Error && error.message !== failure.message ? { causeMessage: error.message } : {}),
+  });
 }
 
 export class WorldSimulationOrchestrator_ACU {
@@ -195,8 +225,25 @@ export class WorldSimulationOrchestrator_ACU {
       return { status: 'skipped', reason: 'busy' };
     }
     const existing = this.deriveEnvelopeView(persisted);
+    const requestsWorldRound = this.dependencies.workflowProtocol === 'world-round-v1';
+    if (existing?.settings.deliveryTarget === 'plot' && !requestsWorldRound) {
+      throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(
+        'WORLD_SIMULATION_CONFIG_INVALID', 'agent_loop', '剧情推进投送尚未接通，本轮不会运行旧正文注入', false,
+      ));
+    }
+    if (requestsWorldRound && !this.dependencies.commitRound) {
+      throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(
+        'WORLD_SIMULATION_CONFIG_INVALID', 'agent_loop', '新工作流已显式启用但提交端口尚未接通', false,
+      ));
+    }
+    if (!requestsWorldRound && existing?.settings.workflowMode === 'single') {
+      throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(
+        'WORLD_SIMULATION_CONFIG_INVALID', 'agent_loop', '单 Agent 新工作流尚未接通，拒绝旧导演运行', false,
+      ));
+    }
     const pausedRun = existing?.task?.status === 'paused' ? existing.task.activeRun : null;
-    if (pausedRun && sameAnchor_ACU(pausedRun, input.anchor)) {
+    if (pausedRun && sameAnchor_ACU(pausedRun, input.anchor)
+      && !(requestsWorldRound && pausedRun.workflowProtocol === 'world-round-v1' && !existing?.task?.runMaterials)) {
       // 同一楼层已有一次未完成的运行：自动触发属于重复事件；手动消息应由 runtime 走 resume 续接。
       return { status: 'skipped', reason: input.triggerKind === 'assistant_completed' ? 'duplicate' : 'busy' };
     }
@@ -208,12 +255,72 @@ export class WorldSimulationOrchestrator_ACU {
     const envelope = this.deriveEnvelopeView(this.dependencies.store.read());
     const identity = envelope?.task?.activeRun;
     if (!envelope?.task || !identity || envelope.activeStageId !== identity.stageId) return { status: 'skipped', reason: 'duplicate' };
+    if ((identity.deliveryTarget === 'plot' || (identity.deliveryTarget === undefined && envelope.settings.deliveryTarget === 'plot'))
+      && identity.workflowProtocol !== 'world-round-v1') {
+      throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(
+        'WORLD_SIMULATION_CONFIG_INVALID', 'agent_loop', '剧情推进投送尚未接通，不能以旧正文路径恢复运行', false,
+      ));
+    }
+    if (identity.workflowProtocol === 'world-round-v1') {
+      if (this.dependencies.workflowProtocol !== 'world-round-v1' || !this.dependencies.commitRound) {
+        throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(
+          'WORLD_SIMULATION_CONFIG_INVALID', 'agent_loop', '新工作流恢复能力或提交端口尚未接通', false,
+        ));
+      }
+    } else if (identity.workflowMode === 'single') {
+      throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(
+        'WORLD_SIMULATION_CONFIG_INVALID', 'agent_loop', '旧 single 运行不得迁移到新工作流或旧导演路径', false,
+      ));
+    }
     if (!sameAnchor_ACU(identity, input.anchor)) return { status: 'skipped', reason: 'duplicate' };
     if (this.isInFlight(identity.chatIdentity)) return { status: 'skipped', reason: 'busy' };
 
+    const instruction = typeof input.instruction === 'string' && input.instruction.trim() ? input.instruction.trim() : '';
+    if (identity.workflowProtocol === 'world-round-v1') {
+      // 新协议的恢复必须在创建 controller 之前拦截：失败仍保留 paused/activeRun，不能让通用失败结算抹掉身份。
+      if (!envelope.task.runMaterials) {
+        logWorldSimulationSession_ACU(identity.chatIdentity, {
+          kind: 'thought', title: '重新开始推演', detail: '上次没有留下可继续的进度，将保留已保存资料，重新开始。', status: 'done',
+        });
+        return this.runNew_ACU({
+          triggerKind: identity.triggerKind, anchor: input.anchor,
+          instruction: instruction && !isMechanicalWorldSimulationResumeText_ACU(instruction) ? instruction : envelope.task.originInstruction,
+          triggerConversationMessageId: identity.triggerConversationMessageId,
+          targetModules: input.targetModules,
+        }, envelope, envelope.task.taskId);
+      }
+      if (!this.dependencies.checkResumeMaterials) {
+        throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(
+          'WORLD_SIMULATION_CONFIG_INVALID', 'load', '当前脚本无法继续上次推演，请重新开始。', false,
+        ));
+      }
+      if (instruction && !isMechanicalWorldSimulationResumeText_ACU(instruction)) {
+        throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(
+          'WORLD_SIMULATION_CONFIG_INVALID', 'agent_loop', '新整轮协议恢复仅接受继续指令；请以新任务提交新的推演意图', false,
+        ));
+      }
+      try {
+        await this.dependencies.checkResumeMaterials(identity, input.anchor, envelope, resumeMaterialsPreflightSignal_ACU);
+      } catch (error) {
+        logRunFailure_ACU(identity, error, 'resume_materials');
+        throw error;
+      }
+      // dependency 必须只读真实资料；回读权威 manifest，避免异步检查期间被其他写入替换。
+      const checked = this.deriveEnvelopeView(this.dependencies.store.read());
+      if (!checked?.task || checked.task.taskId !== envelope.task.taskId || checked.task.status !== 'paused'
+        || checked.task.activeRun?.runId !== identity.runId || checked.task.activeRun?.stageRevision !== identity.stageRevision
+        || checked.ledger.revision !== identity.baseLedgerRevision || !checked.task.runMaterials
+        || !sameWorldRunMaterials_ACU(checked.task.runMaterials, envelope.task.runMaterials)) {
+        const failure = new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(
+          'WORLD_SIMULATION_REVISION_CONFLICT', 'persist', '资料核验期间运行身份或冻结资料已变化，拒绝恢复', true,
+        ));
+        logRunFailure_ACU(identity, failure, 'resume_materials');
+        throw failure;
+      }
+    }
+
     const controller = new AbortController();
     abortByChat_ACU.set(identity.chatIdentity, controller);
-    const instruction = typeof input.instruction === 'string' && input.instruction.trim() ? input.instruction.trim() : '';
     const resetRunBudget = input.resetRunBudget === true;
     const completion = (async (): Promise<WorldSimulationOrchestratorResult_ACU> => {
       try {
@@ -224,7 +331,10 @@ export class WorldSimulationOrchestrator_ACU {
           await this.dependencies.appendUserMessage({ identity, anchor: input.anchor, text: instruction, idempotent: true });
         }
         if (controller.signal.aborted) throw new Error('WORLD_SIMULATION_ABORTED');
-        const prepared = await this.dependencies.prepare({ identity, anchor: input.anchor, instruction: instruction || envelope.task!.originInstruction, envelope, signal: controller.signal, resetRunBudget, targetModules: input.targetModules });
+        const prepared = await this.dependencies.prepare({ identity, anchor: input.anchor,
+          // world-round-v1 总是使用首次保存的原始意图，绝不把「继续」替换进冻结材料。
+          instruction: identity.workflowProtocol === 'world-round-v1' ? envelope.task!.originInstruction : (instruction || envelope.task!.originInstruction),
+          envelope, signal: controller.signal, resetRunBudget, targetModules: input.targetModules });
         return await this.persistPlanAndExecute_ACU(identity, input.anchor, prepared, controller.signal);
       } catch (error) {
         return this.finishFailure_ACU(identity, error, controller.signal.aborted);
@@ -258,6 +368,10 @@ export class WorldSimulationOrchestrator_ACU {
       }),
       anchorContentDigest: input.anchor.contentDigest,
       baseLedgerRevision: existing?.ledger.revision ?? 0,
+      deliveryTarget: existing?.settings.deliveryTarget ?? 'body',
+      workflowMode: existing?.settings.workflowMode ?? 'layered',
+      ...(this.dependencies.workflowProtocol === 'world-round-v1' && this.dependencies.commitRound
+        ? { workflowProtocol: 'world-round-v1' as const } : {}),
       taskId,
       stageId,
       stageRevision: 1,
@@ -268,6 +382,11 @@ export class WorldSimulationOrchestrator_ACU {
         await this.dependencies.assertAnchorCurrent(input.anchor);
         await this.dependencies.store.updateAtomically(current => {
           const envelope = current ?? buildDefaultWorldSimulationEnvelope_ACU();
+          if (envelope.settings.deliveryTarget !== identity.deliveryTarget || envelope.settings.workflowMode !== identity.workflowMode) {
+            throw new WorldSimulationValidationError_ACU(createWorldSimulationError_ACU(
+              'WORLD_SIMULATION_REVISION_CONFLICT', 'persist', '推演预留期间投送偏好已变化，请重新开始', true,
+            ));
+          }
           const previous = envelope.task;
           // start() 已在同步路径上以 isInFlight 判忙并登记了本次 controller，这里不可能再有别的在途运行。
           // 旧任务若仍持有 activeRun（paused / 僵死 running），说明它被本次更新楼层的运行取代，留痕后替换。
@@ -327,7 +446,12 @@ export class WorldSimulationOrchestrator_ACU {
     const pending = pendingAutoByChat_ACU.get(chatIdentity);
     pendingAutoByChat_ACU.delete(chatIdentity);
     if (manual || !pending) return;
-    void this.start({ triggerKind: 'assistant_completed', anchor: pending.anchor, instruction: pending.instruction }).catch((): void => undefined);
+    void this.start({ triggerKind: 'assistant_completed', anchor: pending.anchor, instruction: pending.instruction }).catch(error => {
+      const failure = errorFromUnknown_ACU(error);
+      logError_ACU('格林推演排队自动触发失败', {
+        chatIdentity, operation: 'drain_pending', phase: failure.phase, code: failure.code, message: failure.message,
+      });
+    });
   }
 
   private async reportCompletion_ACU(
@@ -343,6 +467,7 @@ export class WorldSimulationOrchestrator_ACU {
       await this.dependencies.persistCompletion?.({ identity, anchor, outcome, summary });
     } catch (error) {
       // The authoritative commit is already saved. A separate receipt save cannot undo it.
+      logRunFailure_ACU(identity, error, 'persist_completion');
       logWorldSimulationSession_ACU(identity.chatIdentity, {
         kind: 'thought', title: '完成通告保存失败', detail: error instanceof Error ? error.message : String(error), agentName: 'world-director', ok: false,
       });
@@ -381,9 +506,57 @@ export class WorldSimulationOrchestrator_ACU {
 
     if (signal.aborted) throw new Error('WORLD_SIMULATION_ABORTED');
     const result = await prepared.execute(identity);
+    if (identity.workflowProtocol === 'world-round-v1' && result.outcome !== 'world_round') {
+      throw new Error('WORLD_SIMULATION_PROTOCOL_RESULT_MISMATCH');
+    }
+    if (identity.workflowProtocol !== 'world-round-v1' && result.outcome === 'world_round') {
+      throw new Error('WORLD_SIMULATION_PROTOCOL_RESULT_MISMATCH');
+    }
     await this.dependencies.assertAnchorCurrent(anchor);
     prepared.runWrites?.assertCurrent();
     const completedAt = this.dependencies.now();
+    if (result.outcome === 'world_round') {
+      if (signal.aborted) throw new Error('WORLD_SIMULATION_ABORTED');
+      await this.dependencies.assertAnchorCurrent(anchor);
+      assertRunCurrent_ACU(this.dependencies.store.read(), identity);
+      const savingEntry = logWorldSimulationSession_ACU(identity.chatIdentity, {
+        kind: 'finalize', title: '保存整轮结果', detail: '候选校验已通过，正在保存并核对宿主结果。', status: 'running',
+      });
+      let committedAnchor: WorldSimulationTargetAnchor_ACU | void;
+      let authoritative: WorldSimulationEnvelope_ACU;
+      try {
+        committedAnchor = await this.dependencies.commitRound({ identity, anchor, roundCandidate: result.roundCandidate,
+          completedAt, timelineId: this.dependencies.allocateId('timeline'), summary: result.summary,
+          ...(result.bodyProjection ? { bodyProjection: result.bodyProjection } : {}),
+          ...(result.reviewedReveal ? { reviewedReveal: result.reviewedReveal } : {}) });
+        const saved = this.dependencies.store.read();
+        const committedStage = saved?.stages.find(stage => stage.stageId === identity.stageId);
+        if (saved?.task?.taskId !== identity.taskId || saved.task.status !== 'completed'
+          || saved.task.activeRun !== null || committedStage?.status !== 'completed'
+          || committedStage.activeRevision !== identity.stageRevision
+          || saved.ledger.revision !== identity.baseLedgerRevision + 1) {
+          throw new Error('WORLD_SIMULATION_ROUND_AUTHORITY_UNVERIFIED');
+        }
+        authoritative = saved;
+      } catch (error) {
+        updateWorldSimulationSession_ACU(identity.chatIdentity, savingEntry, {
+          title: '整轮保存未确认', detail: failureMessage_ACU(error), status: 'failed', ok: false,
+        });
+        throw error;
+      }
+      const bodyContent = result.bodyProjection && identity.deliveryTarget === 'body'
+        ? buildWorldFactBodyProjection_ACU(authoritative.ledger, result.reviewedProjection?.factIds ?? [], authoritative.settings.projection.template)
+        : null;
+      updateWorldSimulationSession_ACU(identity.chatIdentity, savingEntry, {
+        title: '整轮结果已保存', detail: identity.deliveryTarget === 'body'
+          ? bodyContent ? '账本与正文投送块已保存。' : '账本已保存，本轮没有需要追加的正文资料。'
+          : '账本已保存，资料可供剧情推进读取。', status: 'done', ok: true,
+      });
+      await this.reportCompletion_ACU(identity, committedAnchor || anchor, 'commit', result.summary);
+      return { status: 'completed', identity, result: { ...result, finalProjection: {
+        content: bodyContent, sourceAgent: 'world-round', sourceRevision: authoritative.ledger.revision, deliverable: !!bodyContent,
+      } } };
+    }
     if (result.outcome === 'commit' && !result.finalProjection
       && result.commitCandidate.acceptedCandidates.some(candidate => candidate.agentName === 'guidance-composer'
         && Object.prototype.hasOwnProperty.call(candidate.patch, 'guidance'))) {
@@ -473,10 +646,18 @@ export class WorldSimulationOrchestrator_ACU {
    */
   private async finishFailure_ACU(identity: WorldSimulationRunIdentity_ACU, cause: unknown, cancelled: boolean): Promise<WorldSimulationOrchestratorResult_ACU> {
     const error = errorFromUnknown_ACU(cause);
+    if (!cancelled) logRunFailure_ACU(identity, cause, 'finish_failure');
     const now = this.dependencies.now();
     // 异常终局兜底：正常路径由 run_completed/run_failed/block 事件关闭 running，异常路径不会写这些事件，
     // 必须在这里强制关闭，否则 UI 的 running 脉冲与「停止」按钮会一直卡住。
     try { endWorldSimulationSessionRun_ACU(identity.chatIdentity); } catch { /* 观察者异常不应阻断失败落盘 */ }
+    if (identity.workflowProtocol === 'world-round-v1') {
+      logWorldSimulationSession_ACU(identity.chatIdentity, {
+        kind: 'run_failed', title: cancelled ? '推演已停止' : '推演未正常完成',
+        detail: cancelled ? '推演已停止。' : failureMessage_ACU(cause),
+        ok: false, status: 'failed',
+      });
+    }
     try {
       await this.dependencies.store.updateAtomically(envelope => {
         const active = envelope?.task?.activeRun;
@@ -499,8 +680,9 @@ export class WorldSimulationOrchestrator_ACU {
           updatedAt: now,
         };
       }, { chatIdentity: identity.chatIdentity, taskId: identity.taskId });
-    } catch {
+    } catch (persistError) {
       // A newer task or revision owns the envelope. Late failure must not overwrite it.
+      logRunFailure_ACU(identity, persistError, cancelled ? 'persist_cancelled' : 'persist_failure');
     }
     return cancelled ? { status: 'cancelled', identity } : { status: 'failed', identity, error };
   }

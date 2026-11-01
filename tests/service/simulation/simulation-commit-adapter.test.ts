@@ -2,14 +2,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildDefaultWorldSimulationEnvelope_ACU } from '../../../src/service/simulation/defaults';
 import { WorldSimulationOrchestrator_ACU, resetWorldSimulationOrchestratorStateForTests_ACU } from '../../../src/service/simulation/simulation-orchestrator';
 import { WorldSimulationRunWriteState_ACU, readWorldSimulationRunWriteProof_ACU, restoreWorldSimulationRunWrites_ACU } from '../../../src/service/simulation/simulation-run-write-state';
-import { foldWorldSimulationLedger_ACU, foldWorldSimulationArchive_ACU } from '../../../src/service/simulation/simulation-ledger-fold';
+import { foldWorldSimulationLedger_ACU, foldWorldSimulationArchive_ACU, seedLedgerFieldView_ACU } from '../../../src/service/simulation/simulation-ledger-fold';
 import { FirstFloorWorldSimulationStore_ACU } from '../../../src/service/simulation/simulation-store';
-import { commitWorldSimulationFieldWrites_ACU } from '../../../src/service/simulation/simulation-commit-adapter';
-import { WORLD_SIMULATION_CONVERSATION_FIELD_ACU, WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU } from '../../../src/service/simulation/agent/agent-model';
+import { commitWorldSimulationFieldWrites_ACU, deleteWorldSimulationActorHost_ACU } from '../../../src/service/simulation/simulation-commit-adapter';
+import { WORLD_SIMULATION_CONVERSATION_FIELD_ACU, WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU, WORLD_SIMULATION_STATE_FIELD_ACU } from '../../../src/service/simulation/agent/agent-model';
 import { appendWorldSimulationConversationSegment_ACU, readWorldSimulationConversation_ACU } from '../../../src/service/simulation/agent/agent-conversation-store';
 import { readLatestWorldSimulationMaterials_ACU, readWorldSimulationLedgerAtAnchor_ACU } from '../../../src/service/simulation/agent/agent-module-store';
-import { commitWorldSimulationProjection_ACU } from '../../../src/service/simulation/simulation-commit-adapter';
+import { commitReviewedWorldSimulationRound_ACU, commitWorldSimulationProjection_ACU, commitWorldSimulationRound_ACU } from '../../../src/service/simulation/simulation-commit-adapter';
+import { materializeWorldRoundCandidate_ACU } from '../../../src/service/simulation/world-candidate';
+import { prepareWorldBodyProjection_ACU, prepareWorldFactRevealProof_ACU, runWorldProjectionStage_ACU } from '../../../src/service/simulation/agent/world-projection-stage';
 import { buildWorldSimulationBucketKey_ACU, resolveWorldSimulationAnchor_ACU } from '../../../src/service/simulation/simulation-store';
+import { WORLD_SIMULATION_PROJECTION_MARKERS_ACU } from '../../../src/service/simulation/simulation-projection';
 import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
 import * as simulationTransaction_ACU from '../../../src/service/simulation/simulation-transaction';
 
@@ -19,7 +22,10 @@ function fixture(saveChat = vi.fn().mockResolvedValue(undefined)) {
     {},
     { message_id: 7, mes: `正文\n\n${userBlock}`, swipe_id: 0, swipes: [`正文\n\n${userBlock}`] },
   ];
-  _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat } as any);
+  _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', characterId: 0, this_chid: 0,
+    characters: [{ avatar: 'adapter-card.png', name: '测试角色' }], getCurrentChatId: () => 'chat-a', saveChat } as any);
+  // 正常提交不依赖网络回读；若生产误触 fetch，测试应立即暴露。
+  vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('UNEXPECTED_FETCH'); }));
   const anchor = resolveWorldSimulationAnchor_ACU(1, chat);
   const identity = {
     runId: 'run-1', chatIdentity: 'chat-a', triggerKind: 'assistant_completed' as const,
@@ -52,9 +58,692 @@ function fixture(saveChat = vi.fn().mockResolvedValue(undefined)) {
   return { chat, anchor, identity, acceptedCandidates, commitCandidate, commitInput, saveChat, userBlock };
 }
 
+const reviewedPlace_ACU = { region: '上海', place: '钟楼' };
+const reviewedAnchorText_ACU = '我主动向守卫询问那封密信，并在钟楼下等待答复。';
+
+function reviewedActor_ACU() {
+  return {
+    id: 'guard-1', name: '守卫', interests: [], location: '钟楼', locationRef: { ...reviewedPlace_ACU }, life: 'alive' as const,
+    diedAtDay: null, deathSummary: null, resources: [], goals: ['守卫钟楼'], constraints: [], informationSources: [],
+    knownFacts: [], visibility: 'hidden' as const, currentAction: null, shortTermAction: null, longTermAction: null,
+    simulationStatus: 'active' as const, loreRefs: [], experiences: [], revision: 1,
+  };
+}
+
+function reviewedGatedFact_ACU() {
+  return {
+    id: 'fact-locked-letter', summary: '机密摘要：守卫持有钟楼密信的原件。', temporalKind: 'occurrence' as const,
+    happenedAt: { day: 1, slot: '' }, validFrom: null, validUntil: null, locationRef: { ...reviewedPlace_ACU }, actorIds: ['guard-1'],
+    worldEventIds: [], projectionPolicy: 'gated' as const, revealState: 'locked' as const,
+    revealGate: { actorIds: ['guard-1'], locationRef: { ...reviewedPlace_ACU }, notBefore: { day: 2, slot: '' }, semanticCondition: '正文中必须明确向守卫询问密信。' },
+    nextCheck: null, sourceRefs: [], evidenceRefs: [], supersedesFactIds: [], revision: 1,
+  };
+}
+
+function reviewedFixture_ACU(saveChat = vi.fn().mockResolvedValue(undefined)) {
+  const chat: any[] = [{}, { message_id: 71, is_user: false, mes: reviewedAnchorText_ACU, message: reviewedAnchorText_ACU, swipe_id: 0, swipes: [reviewedAnchorText_ACU] }];
+  _set_SillyTavern_API_ACU({ chat, chatId: 'reviewed-adapter-host', characterId: 0, this_chid: 0,
+    characters: [{ avatar: 'reviewed-card.png', name: '测试角色' }], getCurrentChatId: () => 'reviewed-adapter-host', saveChat } as any);
+  const anchor = resolveWorldSimulationAnchor_ACU(1, chat);
+  const envelope = buildDefaultWorldSimulationEnvelope_ACU();
+  envelope.settings.workflowMode = 'single';
+  envelope.ledger.player = { ...envelope.ledger.player, location: { ...reviewedPlace_ACU } };
+  envelope.ledger.actors = [reviewedActor_ACU()];
+  envelope.ledger.facts = [reviewedGatedFact_ACU()];
+  const identity = { runId: 'reviewed-adapter-run', chatIdentity: anchor.chatIdentity, triggerKind: 'assistant_completed' as const,
+    triggerConversationMessageId: null, anchorMessageId: anchor.messageId, anchorMessageKey: anchor.messageKey, anchorSwipeId: anchor.swipeId,
+    anchorContentDigest: anchor.contentDigest, baseLedgerRevision: 0, taskId: 'reviewed-adapter-task', stageId: 'reviewed-adapter-stage', stageRevision: 1,
+    workflowProtocol: 'world-round-v1' as const, deliveryTarget: 'body' as const, workflowMode: 'single' as const };
+  envelope.task = { taskId: identity.taskId, originInstruction: '受审揭示', status: 'running', createdAt: 1, updatedAt: 1, activeRun: identity, stopReason: null };
+  envelope.activeStageId = identity.stageId;
+  envelope.stages = [{ stageId: identity.stageId, stageNumber: 1, status: 'running' as const, activeRevision: 1, revisions: [{ revision: 1, createdAt: 1, reason: 'initial' as const, replanInstruction: '', frozen: true, plan: { schemaVersion: 1, title: '受审揭示', objective: '提交', impactScope: [], factsToVerify: [], plannedTools: [], plannedSpecialists: [], expectedLedgerChanges: [], convergenceConditions: [], blockingConditions: [], completedSteps: [], nextStep: '提交' } }] }];
+  chat[0]._qrf_world_simulation = envelope;
+  const commitCandidate = { runId: identity.runId, taskId: identity.taskId, stageId: identity.stageId, stageRevision: identity.stageRevision,
+    baseLedgerRevision: 0, summary: '结算审核许可', acceptedCandidates: [], evidenceRefs: [] };
+  const roundCandidate = { baseRevision: 0, candidateClock: { ...envelope.ledger.clock, day: 2 }, worldEventWrites: [], actorWrites: [], factWrites: [], historyMilestoneWrites: [],
+    actorCompletions: [{ actorId: 'guard-1', completion: 'no_change' as const, expectedRevision: 1 }], projection: { anchor: null, deliveries: [] }, completion: 'changed' as const };
+  return { chat, anchor, identity, envelope, commitCandidate, roundCandidate, saveChat };
+}
+
+async function reviewedAuthorization_ACU(fixture: ReturnType<typeof reviewedFixture_ACU>) {
+  const preview = materializeWorldRoundCandidate_ACU(fixture.envelope.ledger, fixture.roundCandidate);
+  const stage = await runWorldProjectionStage_ACU({ ledger: preview, identity: fixture.identity, targetAnchor: fixture.anchor, anchorText: reviewedAnchorText_ACU,
+    sceneLocation: { ...reviewedPlace_ACU }, contactedActorIds: ['guard-1'], settings: fixture.envelope.settings, signal: new AbortController().signal,
+    countTokens: async () => 1, isCurrent: () => true, invoke: async () => JSON.stringify({ reviews: [{ factId: 'fact-locked-letter', triggered: true, evidence: [{ quote: '主动向守卫询问那封密信' }] }] }) });
+  return prepareWorldFactRevealProof_ACU({ receipt: stage.receipt, ledger: preview, identity: fixture.identity, targetAnchor: fixture.anchor, anchorText: reviewedAnchorText_ACU,
+    clock: preview.clock, sceneLocation: { ...reviewedPlace_ACU }, contactedActorIds: ['guard-1'], settings: fixture.envelope.settings,
+    signal: new AbortController().signal, countTokens: async () => 1, isCurrent: () => true });
+}
+
+function reviewedCommitInput_ACU(fixture: ReturnType<typeof reviewedFixture_ACU>, authorization: Awaited<ReturnType<typeof reviewedAuthorization_ACU>>) {
+  return { identity: fixture.identity, anchor: fixture.anchor, commitCandidate: fixture.commitCandidate, completedAt: 10,
+    timelineId: 'reviewed-adapter-timeline', roundCandidate: fixture.roundCandidate, proof: authorization.proof, factIds: authorization.factIds };
+}
+
+async function bodyAuthorization_ACU(fixture: ReturnType<typeof reviewedFixture_ACU>) {
+  const preview = materializeWorldRoundCandidate_ACU(fixture.envelope.ledger, fixture.roundCandidate);
+  const stage = await runWorldProjectionStage_ACU({ ledger: preview, identity: fixture.identity, targetAnchor: fixture.anchor,
+    anchorText: fixture.chat[1].mes, sceneLocation: { ...reviewedPlace_ACU }, contactedActorIds: ['guard-1'],
+    settings: fixture.envelope.settings, signal: new AbortController().signal,
+    countTokens: async () => 1, isCurrent: () => true,
+    invoke: async () => JSON.stringify({ reviews: [{ factId: 'fact-locked-letter', triggered: true,
+      evidence: [{ quote: '主动向守卫询问那封密信' }] }] }),
+  });
+  return prepareWorldBodyProjection_ACU({ receipt: stage.receipt, ledger: preview, identity: fixture.identity,
+    targetAnchor: fixture.anchor, anchorText: fixture.chat[1].mes, clock: preview.clock,
+    sceneLocation: { ...reviewedPlace_ACU }, contactedActorIds: ['guard-1'], settings: fixture.envelope.settings,
+    signal: new AbortController().signal, countTokens: async () => 1, isCurrent: () => true });
+}
+
+function bodyCommitInput_ACU(fixture: ReturnType<typeof reviewedFixture_ACU>, authorization: Awaited<ReturnType<typeof bodyAuthorization_ACU>>) {
+  return { identity: fixture.identity, anchor: fixture.anchor, commitCandidate: fixture.commitCandidate,
+    completedAt: 10, timelineId: 'body-adapter-timeline', roundCandidate: fixture.roundCandidate,
+    bodyProjection: { proof: authorization.proof },
+    ...(authorization.reveal ? { proof: authorization.reveal.proof, factIds: authorization.reveal.factIds } : {}),
+  };
+}
+
+
 describe('world simulation commit adapter', () => {
+  it('body 正式受审回执把事实隐藏块追加到当前 AI 正文并同步完成锚点与账本', async () => {
+    const f = reviewedFixture_ACU();
+    const authorization = await bodyAuthorization_ACU(f);
+    expect(authorization.reveal?.factIds).toEqual(['fact-locked-letter']);
+    const committed = await commitReviewedWorldSimulationRound_ACU(bodyCommitInput_ACU(f, authorization) as any);
+    expect(f.saveChat).toHaveBeenCalledOnce();
+    expect(f.chat[1].mes).toContain(reviewedAnchorText_ACU);
+    expect(f.chat[1].mes).toContain(WORLD_SIMULATION_PROJECTION_MARKERS_ACU.start);
+    expect(f.chat[1].mes).toContain('机密摘要：守卫持有钟楼密信的原件。');
+    expect(f.chat[1].message).toBe(f.chat[1].mes);
+    expect(f.chat[1].swipes[0]).toBe(f.chat[1].mes);
+    expect(committed).toEqual(resolveWorldSimulationAnchor_ACU(1, f.chat));
+    expect(committed.contentDigest).not.toBe(f.anchor.contentDigest);
+    expect(readWorldSimulationLedgerAtAnchor_ACU(committed, f.chat)).toMatchObject({ revision: 1,
+      facts: [{ id: 'fact-locked-letter', revealState: 'unlocked' }] });
+    expect(f.chat[0]._qrf_world_simulation.task.completedAutoAnchor.contentDigest).toBe(committed.contentDigest);
+    expect(f.chat[0]._qrf_world_simulation.task.completedRun.anchorContentDigest).toBe(committed.contentDigest);
+  });
+
+  it('body proof 冻结后正文追加字句仍投送旧许可事实并保留追加内容', async () => {
+    const f = reviewedFixture_ACU();
+    const authorization = await bodyAuthorization_ACU(f);
+    const updated = `${reviewedAnchorText_ACU}\n插件追加尾注`;
+    f.chat[1].mes = updated;
+    f.chat[1].message = updated;
+    f.chat[1].swipes[0] = updated;
+    const committed = await commitReviewedWorldSimulationRound_ACU(bodyCommitInput_ACU(f, authorization) as any);
+    expect(f.chat[1].mes).toContain(updated);
+    expect(f.chat[1].mes).toContain('机密摘要：守卫持有钟楼密信的原件。');
+    expect(f.chat[1].swipes[0]).toBe(f.chat[1].mes);
+    expect(committed).toEqual(resolveWorldSimulationAnchor_ACU(1, f.chat));
+    expect(readWorldSimulationLedgerAtAnchor_ACU(committed, f.chat)?.facts[0].revealState).toBe('unlocked');
+    expect(f.saveChat).toHaveBeenCalledOnce();
+  });
+
+  it('body 保存监听器两次追加不同字句只补存一次，并保留两次字句与一个自有块', async () => {
+    const f = reviewedFixture_ACU();
+    let sequence = 0;
+    f.saveChat.mockImplementation(async () => {
+      sequence += 1;
+      f.chat[1].mes = `后处理${sequence}\n${f.chat[1].mes}`;
+      f.chat[1].message = f.chat[1].mes;
+      f.chat[1].swipes[0] = f.chat[1].mes;
+    });
+    const authorization = await bodyAuthorization_ACU(f);
+    const committed = await commitReviewedWorldSimulationRound_ACU(bodyCommitInput_ACU(f, authorization) as any);
+    expect(f.saveChat).toHaveBeenCalledTimes(2);
+    expect(f.chat[1].mes).toContain('后处理1');
+    expect(f.chat[1].mes).toContain('后处理2');
+    expect(f.chat[1].mes.split(WORLD_SIMULATION_PROJECTION_MARKERS_ACU.start)).toHaveLength(2);
+    expect(f.chat[1].mes).toContain('机密摘要：守卫持有钟楼密信的原件。');
+    expect(f.chat[1].swipes[0]).toBe(f.chat[1].mes);
+    expect(committed).toEqual(resolveWorldSimulationAnchor_ACU(1, f.chat));
+    expect(readWorldSimulationLedgerAtAnchor_ACU(committed, f.chat)?.facts[0].revealState).toBe('unlocked');
+    expect(f.chat[0]._qrf_world_simulation.task.completedRun.anchorContentDigest).toBe(committed.contentDigest);
+  });
+
+  it('body 保存失败同时恢复 mes/message/swipes 与全部私有字段', async () => {
+    const saveChat = vi.fn().mockRejectedValueOnce(new Error('host save failed')).mockResolvedValueOnce(undefined);
+    const f = reviewedFixture_ACU(saveChat);
+    const authorization = await bodyAuthorization_ACU(f);
+    const before = structuredClone(f.chat);
+    await expect(commitReviewedWorldSimulationRound_ACU(bodyCommitInput_ACU(f, authorization) as any))
+      .rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_PERSIST_FAILED', details: { recovery: 'saved' } } });
+    expect(f.chat).toEqual(before);
+    expect(saveChat).toHaveBeenCalledTimes(2);
+  });
+
+  it('body 保存期宿主原地改写正文时拒绝成功并不覆盖宿主改动', async () => {
+    const f = reviewedFixture_ACU();
+    f.saveChat.mockImplementationOnce(async () => {
+      f.chat[1].mes = '宿主保存期间的新正文';
+      f.chat[1].message = '宿主保存期间的新正文';
+      f.chat[1].swipes[0] = '宿主保存期间的新正文';
+      throw new Error('host save failed');
+    });
+    const authorization = await bodyAuthorization_ACU(f);
+    await expect(commitReviewedWorldSimulationRound_ACU(bodyCommitInput_ACU(f, authorization) as any))
+      .rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_REVISION_CONFLICT', details: { recovery: 'unavailable' } } });
+    expect(f.chat[1].mes).toBe('宿主保存期间的新正文');
+    expect(f.chat[1].swipes[0]).toBe('宿主保存期间的新正文');
+    expect(f.saveChat).toHaveBeenCalledOnce();
+  });
+
+  it('body 非活动 swipe 不变', async () => {
+    const f = reviewedFixture_ACU();
+    f.chat[1].swipes = ['另一条不活动正文', reviewedAnchorText_ACU];
+    f.chat[1].swipe_id = 1;
+    Object.assign(f.anchor, resolveWorldSimulationAnchor_ACU(1, f.chat));
+    Object.assign(f.identity, { anchorSwipeId: f.anchor.swipeId, anchorContentDigest: f.anchor.contentDigest });
+    const authorization = await bodyAuthorization_ACU(f);
+    const committed = await commitReviewedWorldSimulationRound_ACU(bodyCommitInput_ACU(f, authorization) as any);
+    expect(f.chat[1].swipes[0]).toBe('另一条不活动正文');
+    expect(f.chat[1].swipes[1]).toBe(f.chat[1].mes);
+    expect(committed).toEqual(resolveWorldSimulationAnchor_ACU(1, f.chat));
+  });
+
+  it('body 保存失败且宿主只改 active swipe 缓存时保留宿主改动并恢复未受干扰字段', async () => {
+    const f = reviewedFixture_ACU();
+    f.saveChat.mockImplementationOnce(async () => {
+      f.chat[1].swipes[0] = '宿主新增的 swipe 缓存';
+      throw new Error('host save failed');
+    }).mockResolvedValueOnce(undefined);
+    const authorization = await bodyAuthorization_ACU(f);
+    await expect(commitReviewedWorldSimulationRound_ACU(bodyCommitInput_ACU(f, authorization) as any))
+      .rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_PERSIST_FAILED', details: { recovery: 'saved' } } });
+    expect(f.chat[1].mes).toBe(reviewedAnchorText_ACU);
+    expect(f.chat[1].message).toBe(reviewedAnchorText_ACU);
+    expect(f.chat[1].swipes[0]).toBe('宿主新增的 swipe 缓存');
+    expect(f.chat[0]._qrf_world_simulation.task.status).toBe('running');
+  });
+
+  it('plot 不领取 body proof，也不改变正文，仍可随后通过 body 领取', async () => {
+    const f = reviewedFixture_ACU();
+    const authorization = await bodyAuthorization_ACU(f);
+    const bodyInput = bodyCommitInput_ACU(f, authorization);
+    const plotIdentity = { ...f.identity, deliveryTarget: 'plot' as const };
+    f.chat[0]._qrf_world_simulation.task.activeRun = plotIdentity;
+    const { proof: _revealProof, factIds: _revealIds, ...plotAttempt } = bodyInput;
+    await expect(commitWorldSimulationRound_ACU({ ...plotAttempt, identity: plotIdentity }))
+      .rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_CONFIG_INVALID' } });
+    expect(f.saveChat).not.toHaveBeenCalled();
+    expect(f.chat[1].mes).toBe(reviewedAnchorText_ACU);
+    f.chat[0]._qrf_world_simulation.task.activeRun = f.identity;
+    await expect(commitReviewedWorldSimulationRound_ACU(bodyInput as any)).resolves.toBeDefined();
+  });
+
+  it('body 零事实合法 proof 清理旧自有隐藏块并保留用户同名标签', async () => {
+    const f = reviewedFixture_ACU();
+    f.envelope.ledger.facts = [];
+    f.envelope.ledger.actors = [];
+    f.roundCandidate.actorCompletions = [];
+    const owned = `${WORLD_SIMULATION_PROJECTION_MARKERS_ACU.start}\n旧隐藏事实\n${WORLD_SIMULATION_PROJECTION_MARKERS_ACU.end}`;
+    const text = `正文\n<与此同时>用户自有内容</与此同时>\n\n${owned}`;
+    f.chat[1].mes = text;
+    f.chat[1].message = text;
+    f.chat[1].swipes[0] = text;
+    Object.assign(f.anchor, resolveWorldSimulationAnchor_ACU(1, f.chat));
+    Object.assign(f.identity, { anchorContentDigest: f.anchor.contentDigest });
+    const preview = materializeWorldRoundCandidate_ACU(f.envelope.ledger, f.roundCandidate);
+    const stage = await runWorldProjectionStage_ACU({ ledger: preview, identity: f.identity, targetAnchor: f.anchor,
+      anchorText: text, sceneLocation: null, settings: f.envelope.settings, signal: new AbortController().signal,
+      countTokens: async () => 1, isCurrent: () => true, invoke: async () => { throw new Error('无需模型'); } });
+    const authorization = await prepareWorldBodyProjection_ACU({ receipt: stage.receipt, ledger: preview, identity: f.identity,
+      targetAnchor: f.anchor, anchorText: text, clock: preview.clock, sceneLocation: null, settings: f.envelope.settings,
+      signal: new AbortController().signal, countTokens: async () => 1, isCurrent: () => true });
+    expect(authorization.factIds).toEqual([]);
+    const committed = await commitWorldSimulationRound_ACU({ identity: f.identity, anchor: f.anchor,
+      commitCandidate: f.commitCandidate, roundCandidate: f.roundCandidate,
+      completedAt: 10, timelineId: 'empty-body', bodyProjection: { proof: authorization.proof } });
+    expect(f.chat[1].mes).toBe('正文\n<与此同时>用户自有内容</与此同时>');
+    expect(f.chat[1].message).toBe(f.chat[1].mes);
+    expect(f.chat[1].swipes[0]).toBe(f.chat[1].mes);
+    expect(committed).toEqual(resolveWorldSimulationAnchor_ACU(1, f.chat));
+  });
+
+  it('body 早楼 swipe 2 提交保留完整 checkpointFields，未来楼 delta 不污染当前账本', async () => {
+    const f = reviewedFixture_ACU();
+    f.envelope.ledger.facts = [];
+    f.envelope.ledger.actors = [];
+    f.roundCandidate.actorCompletions = [];
+    f.chat[1].swipes = ['第一条', '第二条', reviewedAnchorText_ACU];
+    f.chat[1].swipe_id = 2;
+    Object.assign(f.anchor, resolveWorldSimulationAnchor_ACU(1, f.chat));
+    Object.assign(f.identity, { anchorSwipeId: f.anchor.swipeId, anchorContentDigest: f.anchor.contentDigest });
+    const future: any = { message_id: 72, mes: '未来正文', swipe_id: 0, swipes: ['未来正文'] };
+    f.chat.push(future);
+    const futureAnchor = resolveWorldSimulationAnchor_ACU(2, f.chat);
+    const futureFields = seedLedgerFieldView_ACU(f.envelope.ledger, 40);
+    futureFields.records.actors = { future: { module: 'actors', id: 'future', status: 'partial', updatedAt: 40,
+      fields: { name: { value: '未来草稿', revision: 1, updatedAt: 40 } },
+      missingFields: ['interests', 'location', 'locationRef', 'life', 'diedAtDay', 'deathSummary', 'resources',
+        'goals', 'constraints', 'informationSources', 'knownFacts', 'visibility', 'revision'] } };
+    future[WORLD_SIMULATION_STATE_FIELD_ACU] = { schemaVersion: 1, entries: {
+      [buildWorldSimulationBucketKey_ACU(futureAnchor)]: { anchor: futureAnchor, updatedAt: 40,
+        value: { schemaVersion: 2, checkpoint: f.envelope.ledger, checkpointFields: futureFields, deltas: [] } },
+    } };
+    const preview = materializeWorldRoundCandidate_ACU(f.envelope.ledger, f.roundCandidate);
+    const stage = await runWorldProjectionStage_ACU({ ledger: preview, identity: f.identity, targetAnchor: f.anchor,
+      anchorText: reviewedAnchorText_ACU, sceneLocation: null, settings: f.envelope.settings,
+      signal: new AbortController().signal, countTokens: async () => 1, isCurrent: () => true,
+      invoke: async () => { throw new Error('无需模型'); } });
+    const authorization = await prepareWorldBodyProjection_ACU({ receipt: stage.receipt, ledger: preview,
+      identity: f.identity, targetAnchor: f.anchor, anchorText: reviewedAnchorText_ACU, clock: preview.clock,
+      sceneLocation: null, settings: f.envelope.settings, signal: new AbortController().signal,
+      countTokens: async () => 1, isCurrent: () => true });
+    const saved = await commitWorldSimulationRound_ACU({ identity: f.identity, anchor: f.anchor,
+      commitCandidate: f.commitCandidate, roundCandidate: f.roundCandidate, completedAt: 10,
+      timelineId: 'early-body', bodyProjection: { proof: authorization.proof } });
+    const frame = f.chat[1][WORLD_SIMULATION_STATE_FIELD_ACU].entries[buildWorldSimulationBucketKey_ACU(saved)].value;
+    expect(frame.checkpointFields.records.clock?._?.fields.day.value).toBe(1);
+    expect(foldWorldSimulationLedger_ACU(f.chat, 1)?.ledger.clock.day).toBe(2);
+    expect(foldWorldSimulationLedger_ACU(f.chat, 1)?.fields.records.actors?.future).toBeUndefined();
+    expect(f.chat[1].swipes.slice(0, 2)).toEqual(['第一条', '第二条']);
+    expect(f.chat[1].swipes[2]).toBe(f.chat[1].mes);
+    expect(f.saveChat).toHaveBeenCalledOnce();
+  });
+
+  it('body 改写 digest 时迁移会话锚点和账本 delta 并可从新锚点读取', async () => {
+    const f = reviewedFixture_ACU();
+    await appendWorldSimulationConversationSegment_ACU({ anchor: f.anchor, segmentId: 'user:body-run',
+      runId: f.identity.runId, taskId: f.identity.taskId, stageId: f.identity.stageId,
+      stageRevision: f.identity.stageRevision, appends: [{ kind: 'user', text: '调查密信', turnKey: 'body-turn' }],
+    }, f.chat);
+    f.saveChat.mockClear();
+    const authorization = await bodyAuthorization_ACU(f);
+    const committed = await commitReviewedWorldSimulationRound_ACU(bodyCommitInput_ACU(f, authorization) as any);
+    const bucket = f.chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU];
+    const entry = bucket.entries[buildWorldSimulationBucketKey_ACU(committed)];
+    expect(entry.anchor).toEqual(committed);
+    expect(readWorldSimulationConversation_ACU(f.chat).messages).toMatchObject([{ text: '调查密信' }]);
+    expect(readWorldSimulationLedgerAtAnchor_ACU(committed, f.chat)?.clock.day).toBe(2);
+    expect(f.saveChat).toHaveBeenCalledOnce();
+  });
+
+  it('plot 无 body proof 时继续仅结算账本，不修改正文', async () => {
+    const f = reviewedFixture_ACU();
+    f.envelope.ledger.facts = [];
+    f.envelope.ledger.actors = [];
+    f.roundCandidate.actorCompletions = [];
+    const plotIdentity = { ...f.identity, deliveryTarget: 'plot' as const };
+    f.chat[0]._qrf_world_simulation.task.activeRun = plotIdentity;
+    const committed = await commitWorldSimulationRound_ACU({ identity: plotIdentity, anchor: f.anchor,
+      commitCandidate: f.commitCandidate, roundCandidate: f.roundCandidate,
+      completedAt: 10, timelineId: 'plot-ledger-only' });
+    expect(f.chat[1].mes).toBe(reviewedAnchorText_ACU);
+    expect(committed.contentDigest).toBe(f.anchor.contentDigest);
+    expect(readWorldSimulationLedgerAtAnchor_ACU(committed, f.chat)?.clock.day).toBe(2);
+    expect(f.saveChat).toHaveBeenCalledOnce();
+  });
+
   beforeEach(() => {
     _set_SillyTavern_API_ACU(null as any);
+  });
+
+  it('受审 gated 事实以真实 stage proof 同次保存 clock 与 unlock', async () => {
+    const f = reviewedFixture_ACU();
+    const authorization = await reviewedAuthorization_ACU(f);
+
+    const committed = await commitReviewedWorldSimulationRound_ACU(reviewedCommitInput_ACU(f, authorization));
+
+    expect(f.saveChat).toHaveBeenCalledTimes(1);
+    expect(f.saveChat).toHaveBeenCalledWith();
+    expect(f.chat[1].mes).toBe(reviewedAnchorText_ACU);
+    expect(readWorldSimulationLedgerAtAnchor_ACU(committed, f.chat)).toMatchObject({ revision: 1, clock: { day: 2 },
+      facts: [{ id: 'fact-locked-letter', revealState: 'unlocked', revision: 2 }] });
+  });
+
+  it('受审 proof 生成后同 messageKey/swipe 正文更新仍保存账本与原授权，不覆盖新增字句', async () => {
+    const f = reviewedFixture_ACU();
+    const authorization = await reviewedAuthorization_ACU(f);
+
+    const rewritten = `${reviewedAnchorText_ACU}\n插件追加字句`;
+    f.chat[1].mes = rewritten;
+    f.chat[1].message = rewritten;
+    f.chat[1].swipes[0] = rewritten;
+
+    const committed = await commitReviewedWorldSimulationRound_ACU(reviewedCommitInput_ACU(f, authorization));
+    expect(f.saveChat).toHaveBeenCalledOnce();
+    expect(f.chat[1].mes).toBe(rewritten);
+    expect(committed).toEqual(resolveWorldSimulationAnchor_ACU(1, f.chat));
+    expect(readWorldSimulationLedgerAtAnchor_ACU(committed, f.chat)).toMatchObject({ revision: 1,
+      clock: { day: 2 }, facts: [{ id: 'fact-locked-letter', revealState: 'unlocked' }] });
+  });
+
+  it('旧入口携带 proof 或伪造 reviewedReveal 不能消费授权或解锁既有事实', async () => {
+    const f = reviewedFixture_ACU();
+    const authorization = await reviewedAuthorization_ACU(f);
+    const input = reviewedCommitInput_ACU(f, authorization);
+
+    await expect(commitWorldSimulationRound_ACU(input as any)).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_CONFIG_INVALID' } });
+    await expect(commitWorldSimulationProjection_ACU({ ...input, reviewedReveal: { proof: authorization.proof, factIds: authorization.factIds } } as any))
+      .rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_CONFIG_INVALID' } });
+    expect(f.chat[0]._qrf_world_simulation.ledger.facts[0]).toMatchObject({ revealState: 'locked', revision: 1 });
+    await expect(commitReviewedWorldSimulationRound_ACU(input)).resolves.toBeDefined();
+  });
+
+  it('缺少 actor 覆盖、错误 anchor/base/plot 或旧 writes 均在领取 proof 前阻断', async () => {
+    const attempts: Array<[string, (f: ReturnType<typeof reviewedFixture_ACU>, input: any) => Promise<unknown>]> = [
+      ['actor', (f, input) => commitReviewedWorldSimulationRound_ACU({ ...input, roundCandidate: { ...input.roundCandidate, actorCompletions: [] } })],
+      ['anchor', (f, input) => commitReviewedWorldSimulationRound_ACU({ ...input, anchor: { ...f.anchor, swipeId: 'wrong-swipe' } })],
+      ['base', (f, input) => commitReviewedWorldSimulationRound_ACU({ ...input, identity: { ...f.identity, baseLedgerRevision: 1 } })],
+      ['plot', (f, input) => { f.chat[0]._qrf_world_simulation.task.activeRun = { ...f.identity, deliveryTarget: 'plot' }; return commitReviewedWorldSimulationRound_ACU(input); }],
+      ['writes', (f, input) => commitReviewedWorldSimulationRound_ACU({ ...input, commitCandidate: { ...input.commitCandidate, acceptedCandidates: [{ candidateId: 'legacy' }] } })],
+    ];
+    for (const [name, attempt] of attempts) {
+      const f = reviewedFixture_ACU();
+      const authorization = await reviewedAuthorization_ACU(f);
+      const input = reviewedCommitInput_ACU(f, authorization);
+      await expect(attempt(f, input), name).rejects.toBeTruthy();
+      expect(f.saveChat).not.toHaveBeenCalled();
+      if (name === 'plot') {
+        f.chat[0]._qrf_world_simulation.task.activeRun = f.identity;
+      }
+      await expect(commitReviewedWorldSimulationRound_ACU(input)).resolves.toBeDefined();
+    }
+  });
+
+  it('受审保存失败会在已确认补偿后保持 locked，proof 不可复用', async () => {
+    const saveChat = vi.fn();
+    const f = reviewedFixture_ACU(saveChat);
+    saveChat.mockRejectedValueOnce(new Error('host save failed')).mockResolvedValueOnce(undefined);
+    const authorization = await reviewedAuthorization_ACU(f);
+    const input = reviewedCommitInput_ACU(f, authorization);
+
+    await expect(commitReviewedWorldSimulationRound_ACU(input)).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_PERSIST_FAILED' } });
+    expect(f.chat[0]._qrf_world_simulation.ledger).toMatchObject({ revision: 0, facts: [{ revealState: 'locked', revision: 1 }] });
+    expect(saveChat).toHaveBeenCalledTimes(2);
+    await expect(commitReviewedWorldSimulationRound_ACU(input)).rejects.toThrow(/proof|领取/i);
+    expect(saveChat).toHaveBeenCalledTimes(2);
+  });
+
+  it('受审 saveChat 完成后不依赖服务器回读即可提交', async () => {
+    const f = reviewedFixture_ACU();
+    const fetch = vi.fn(async () => { throw new Error('HOST_FETCH_NETWORK_UNAVAILABLE'); });
+    vi.stubGlobal('fetch', fetch);
+    const authorization = await reviewedAuthorization_ACU(f);
+    const input = reviewedCommitInput_ACU(f, authorization);
+
+    await expect(commitReviewedWorldSimulationRound_ACU(input)).resolves.toBeDefined();
+    expect(f.chat[0]._qrf_world_simulation.ledger).toMatchObject({ revision: 1, facts: [{ revealState: 'unlocked' }] });
+    expect(f.saveChat).toHaveBeenCalledOnce();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('受审保存期同楼层原地改 active swipe 正文时补存当前正文和已解锁账本', async () => {
+    const f = reviewedFixture_ACU();
+    f.saveChat.mockImplementationOnce(async () => {
+      const rewritten = '宿主在保存期原地替换的正文。';
+      f.chat[1].mes = rewritten;
+      f.chat[1].message = rewritten;
+      f.chat[1].swipes[0] = rewritten;
+    });
+    const authorization = await reviewedAuthorization_ACU(f);
+
+    const committed = await commitReviewedWorldSimulationRound_ACU(reviewedCommitInput_ACU(f, authorization));
+    expect(f.saveChat).toHaveBeenCalledTimes(2);
+    expect(f.chat[1]).toMatchObject({ mes: '宿主在保存期原地替换的正文。', message: '宿主在保存期原地替换的正文。',
+      swipes: ['宿主在保存期原地替换的正文。'] });
+    expect(committed).toEqual(resolveWorldSimulationAnchor_ACU(1, f.chat));
+    expect(readWorldSimulationLedgerAtAnchor_ACU(committed, f.chat)?.facts[0].revealState).toBe('unlocked');
+  });
+
+  it('受审保存期仅改 swipe 缓存而 mes 保持冻结正文时仍提交且保留宿主缓存', async () => {
+    const f = reviewedFixture_ACU();
+    f.saveChat.mockImplementationOnce(async () => {
+      f.chat[1].swipes[0] = '宿主仅替换 active swipe 的正文。';
+    });
+    const authorization = await reviewedAuthorization_ACU(f);
+
+    await expect(commitReviewedWorldSimulationRound_ACU(reviewedCommitInput_ACU(f, authorization)))
+      .resolves.toBeDefined();
+    expect(f.saveChat).toHaveBeenCalledTimes(1);
+    expect(f.chat[0]._qrf_world_simulation.task.status).toBe('completed');
+    expect(f.chat[1].mes).toBe(reviewedAnchorText_ACU);
+    expect(f.chat[1].swipes[0]).toBe('宿主仅替换 active swipe 的正文。');
+  });
+
+  it('plot 目标未接通时直接提交也不能写正文或保存账本', async () => {
+    const { chat, commitInput, saveChat } = fixture();
+    chat[0]._qrf_world_simulation.settings.deliveryTarget = 'plot';
+    const before = structuredClone(chat);
+    await expect(commitWorldSimulationProjection_ACU(commitInput))
+      .rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_CONFIG_INVALID' } });
+    expect(chat).toEqual(before);
+    expect(saveChat).not.toHaveBeenCalled();
+  });
+
+  it('新协议身份不能借普通旧提交或逐栏入口写入', async () => {
+    const { chat, commitInput, saveChat } = fixture();
+    const protocolIdentity = { ...commitInput.identity, workflowProtocol: 'world-round-v1' as const,
+      deliveryTarget: 'body' as const, workflowMode: 'layered' as const };
+    chat[0]._qrf_world_simulation.task.activeRun = protocolIdentity;
+    const before = structuredClone(chat);
+    await expect(commitWorldSimulationProjection_ACU({ ...commitInput, identity: protocolIdentity }))
+      .rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_CONFIG_INVALID' } });
+    await expect(commitWorldSimulationFieldWrites_ACU({ identity: protocolIdentity, anchor: commitInput.anchor,
+      sql: 'SELECT 1', role: 'undercurrent-analyst', evidenceRegistry: { runId: protocolIdentity.runId, entries: [] } } as any))
+      .rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_CONFIG_INVALID' } });
+    expect(chat).toEqual(before);
+    expect(saveChat).not.toHaveBeenCalled();
+  });
+
+  it('新候选必须与冻结协议一致，旧身份不能冒充 world-round', async () => {
+    const { chat, commitInput, saveChat } = fixture();
+    const protocolIdentity = { ...commitInput.identity, workflowProtocol: 'world-round-v1' as const,
+      deliveryTarget: 'body' as const, workflowMode: 'layered' as const };
+    chat[0]._qrf_world_simulation.task.activeRun = protocolIdentity;
+    const roundCandidate = { baseRevision: 0, candidateClock: { ...chat[0]._qrf_world_simulation.ledger.clock, day: 2 },
+      worldEventWrites: [], actorWrites: [], factWrites: [], historyMilestoneWrites: [], actorCompletions: [],
+      projection: { anchor: null, deliveries: [] }, completion: 'changed' as const };
+    await expect(commitWorldSimulationRound_ACU({ ...commitInput,
+      commitCandidate: { ...commitInput.commitCandidate, acceptedCandidates: [] }, roundCandidate,
+    })).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_REVISION_CONFLICT' } });
+    expect(saveChat).not.toHaveBeenCalled();
+  });
+
+  it('新协议完整候选只保存账本，不通过旧信号投影改写正文', async () => {
+    const { chat, commitInput, saveChat, anchor } = fixture();
+    const protocolIdentity = { ...commitInput.identity, workflowProtocol: 'world-round-v1' as const,
+      deliveryTarget: 'body' as const, workflowMode: 'layered' as const };
+    chat[0]._qrf_world_simulation.task.activeRun = protocolIdentity;
+    const originalContent = chat[1].mes;
+    const roundCandidate = {
+      baseRevision: 0, candidateClock: { ...chat[0]._qrf_world_simulation.ledger.clock, day: 2 },
+      worldEventWrites: [], actorWrites: [], factWrites: [], historyMilestoneWrites: [], actorCompletions: [],
+      projection: { anchor: null, deliveries: [] }, completion: 'changed' as const,
+    };
+    const committed = await commitWorldSimulationRound_ACU({ ...commitInput, identity: protocolIdentity,
+      commitCandidate: { ...commitInput.commitCandidate, acceptedCandidates: [] }, roundCandidate });
+    expect(committed.contentDigest).toBe(anchor.contentDigest);
+    expect(chat[1].mes).toBe(originalContent);
+    expect(chat[1].swipes[0]).toBe(originalContent);
+    expect(saveChat).toHaveBeenCalledTimes(1);
+    expect(readWorldSimulationLedgerAtAnchor_ACU(committed, chat)).toMatchObject({ revision: 1, clock: { day: 2 } });
+    expect(chat[0]._qrf_world_simulation.task).toMatchObject({ status: 'completed', activeRun: null });
+  });
+
+  it('普通新整轮直接复用宿主无参 saveChat，fetch 故障不阻断保存', async () => {
+    const { chat, commitInput, saveChat } = fixture();
+    const protocolIdentity = { ...commitInput.identity, workflowProtocol: 'world-round-v1' as const,
+      deliveryTarget: 'body' as const, workflowMode: 'layered' as const };
+    chat[0]._qrf_world_simulation.task.activeRun = protocolIdentity;
+    const roundCandidate = { baseRevision: 0, candidateClock: { ...chat[0]._qrf_world_simulation.ledger.clock, day: 2 },
+      worldEventWrites: [], actorWrites: [], factWrites: [], historyMilestoneWrites: [], actorCompletions: [],
+      projection: { anchor: null, deliveries: [] }, completion: 'changed' as const };
+    const fetch = vi.fn(async () => { throw new Error('HOST_FETCH_NETWORK_UNAVAILABLE'); });
+    vi.stubGlobal('fetch', fetch);
+
+    const committed = await commitWorldSimulationRound_ACU({ ...commitInput, identity: protocolIdentity,
+      commitCandidate: { ...commitInput.commitCandidate, acceptedCandidates: [] }, roundCandidate });
+
+    expect(saveChat).toHaveBeenCalledOnce();
+    expect(saveChat).toHaveBeenCalledWith();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(readWorldSimulationLedgerAtAnchor_ACU(committed, chat)).toMatchObject({ revision: 1, clock: { day: 2 } });
+  });
+
+  it('普通新整轮 saveChat 真正拒绝时补偿并恢复基线 ledger 与 clock', async () => {
+    const { chat, commitInput, saveChat } = fixture();
+    const protocolIdentity = { ...commitInput.identity, workflowProtocol: 'world-round-v1' as const,
+      deliveryTarget: 'body' as const, workflowMode: 'layered' as const };
+    chat[0]._qrf_world_simulation.task.activeRun = protocolIdentity;
+    const roundCandidate = { baseRevision: 0, candidateClock: { ...chat[0]._qrf_world_simulation.ledger.clock, day: 2 },
+      worldEventWrites: [], actorWrites: [], factWrites: [], historyMilestoneWrites: [], actorCompletions: [],
+      projection: { anchor: null, deliveries: [] }, completion: 'changed' as const };
+    saveChat.mockRejectedValueOnce(new Error('host save failed')).mockResolvedValueOnce(undefined);
+
+    await expect(commitWorldSimulationRound_ACU({ ...commitInput, identity: protocolIdentity,
+      commitCandidate: { ...commitInput.commitCandidate, acceptedCandidates: [] }, roundCandidate }))
+      .rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_PERSIST_FAILED', details: { recovery: 'saved' } } });
+    expect(saveChat).toHaveBeenCalledTimes(2);
+    expect(saveChat).toHaveBeenNthCalledWith(1);
+    expect(saveChat).toHaveBeenNthCalledWith(2);
+    expect(chat[0]._qrf_world_simulation.ledger).toMatchObject({ revision: 0, clock: { day: 1 } });
+  });
+
+  it('新候选人物与事实、候选时钟同次保存；保存失败一起补偿', async () => {
+    const saveChat = vi.fn().mockRejectedValueOnce(new Error('host save failed')).mockResolvedValueOnce(undefined);
+    const { chat, commitInput } = fixture(saveChat);
+    const actor = { id: 'actor-1', name: '策划人', interests: [], location: '广场', locationRef: { region: '上海', place: '广场' },
+      life: 'alive', diedAtDay: null, deathSummary: null, resources: [], goals: ['举办演出'], constraints: [],
+      informationSources: [], knownFacts: [], visibility: 'hidden', currentAction: null, longTermAction: null,
+      shortTermAction: null, simulationStatus: 'active' as const, loreRefs: [], experiences: [], revision: 1 };
+    const fact = { id: 'fact-1', summary: '演出筹备已经确定', temporalKind: 'occurrence' as const,
+      happenedAt: { day: 2, slot: '' }, validFrom: null, validUntil: null, locationRef: null,
+      actorIds: ['actor-1'], worldEventIds: [], projectionPolicy: 'internal' as const, revealState: 'locked' as const,
+      revealGate: null, nextCheck: null, sourceRefs: [], evidenceRefs: [], supersedesFactIds: [], revision: 1 };
+    const roundCandidate = { baseRevision: 0, candidateClock: { ...chat[0]._qrf_world_simulation.ledger.clock, day: 2 },
+      worldEventWrites: [], actorWrites: [{ value: actor, expectedRevision: 0 }],
+      factWrites: [{ value: fact, expectedRevision: 0 }], historyMilestoneWrites: [],
+      actorCompletions: [{ actorId: 'actor-1', completion: 'changed' as const, expectedRevision: 0 }],
+      projection: { anchor: null, deliveries: [] }, completion: 'changed' as const };
+    const original = structuredClone(chat);
+    await expect(commitWorldSimulationRound_ACU({ ...commitInput,
+      commitCandidate: { ...commitInput.commitCandidate, acceptedCandidates: [] }, roundCandidate,
+    })).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_PERSIST_FAILED' } });
+    expect(chat).toEqual(original);
+    expect(saveChat).toHaveBeenCalledTimes(2);
+    saveChat.mockClear();
+    const savedAnchor = await commitWorldSimulationRound_ACU({ ...commitInput,
+      commitCandidate: { ...commitInput.commitCandidate, acceptedCandidates: [] }, roundCandidate,
+    });
+    const saved = readWorldSimulationLedgerAtAnchor_ACU(savedAnchor, chat)!;
+    expect(saved).toMatchObject({ revision: 1, clock: { day: 2 }, actors: [{ id: 'actor-1' }], facts: [{ id: 'fact-1' }] });
+    expect(chat[1].mes).toBe(original[1].mes);
+    expect(saveChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('新候选提交的冻结目标、锚点与运行身份不匹配时拒绝保存', async () => {
+    const { chat, commitInput, saveChat } = fixture();
+    const original = structuredClone(chat);
+    const roundCandidate = { baseRevision: 0, candidateClock: { ...chat[0]._qrf_world_simulation.ledger.clock, day: 2 },
+      worldEventWrites: [], actorWrites: [], factWrites: [], historyMilestoneWrites: [], actorCompletions: [],
+      projection: { anchor: null, deliveries: [] }, completion: 'changed' as const };
+    await expect(commitWorldSimulationRound_ACU({ ...commitInput,
+      identity: { ...commitInput.identity, deliveryTarget: 'body' },
+      commitCandidate: { ...commitInput.commitCandidate, acceptedCandidates: [] }, roundCandidate,
+    })).rejects.toThrow(/冻结运行不一致/);
+    expect(chat).toEqual(original);
+    expect(saveChat).not.toHaveBeenCalled();
+  });
+
+  it('新协议候选无效或旧 SQL 混入时不保存任何字段', async () => {
+    const { chat, commitInput, saveChat } = fixture();
+    const original = structuredClone(chat);
+    const roundCandidate = { baseRevision: 0, candidateClock: { ...chat[0]._qrf_world_simulation.ledger.clock, day: 2 },
+      worldEventWrites: [], actorWrites: [], factWrites: [], historyMilestoneWrites: [], actorCompletions: [],
+      projection: { anchor: null, deliveries: [] }, completion: 'changed' as const };
+    await expect(commitWorldSimulationRound_ACU({ ...commitInput, roundCandidate }))
+      .rejects.toThrow(/新旧候选与逐栏预写不能混合/);
+    expect(chat).toEqual(original);
+    await expect(commitWorldSimulationRound_ACU({ ...commitInput,
+      commitCandidate: { ...commitInput.commitCandidate, acceptedCandidates: [] },
+      roundCandidate: { ...roundCandidate, actorCompletions: [{ actorId: 'missing', completion: 'no_change', expectedRevision: 0 }] },
+    })).rejects.toThrow(/不在本轮 active roster/);
+    expect(chat).toEqual(original);
+    expect(saveChat).not.toHaveBeenCalled();
+  });
+
+  it('active 人物缺少覆盖证明时拒绝整轮提交，clock 与原人物均不落盘', async () => {
+    const { chat, commitInput, saveChat } = fixture();
+    const original = chat[0]._qrf_world_simulation.ledger;
+    const baseActor = { id: 'actor-1', name: '策划人', interests: [], location: '', locationRef: null,
+      life: 'alive', diedAtDay: null, deathSummary: null, resources: [], goals: [], constraints: [],
+      informationSources: [], knownFacts: [], visibility: 'hidden', currentAction: null, longTermAction: null,
+      shortTermAction: null, simulationStatus: 'active', loreRefs: [], experiences: [], revision: 1 };
+    original.actors = [baseActor, { ...baseActor, id: 'actor-2' }];
+    const before = structuredClone(chat);
+    const roundCandidate = { baseRevision: 0, candidateClock: { ...original.clock, day: 2 },
+      worldEventWrites: [], actorWrites: [], factWrites: [], historyMilestoneWrites: [],
+      actorCompletions: [{ actorId: 'actor-1', completion: 'no_change' as const, expectedRevision: 1 }],
+      projection: { anchor: null, deliveries: [] }, completion: 'changed' as const };
+    await expect(commitWorldSimulationRound_ACU({ ...commitInput,
+      commitCandidate: { ...commitInput.commitCandidate, acceptedCandidates: [] }, roundCandidate,
+    })).rejects.toThrow(/actor-2 缺少本轮覆盖证明/);
+    expect(chat).toEqual(before);
+    expect(saveChat).not.toHaveBeenCalled();
+  });
+
+  it('候选擅改 projection 被校验拒绝，宿主保存失败时恢复旧账本', async () => {
+    const saveChat = vi.fn().mockRejectedValueOnce(new Error('host save failed')).mockResolvedValueOnce(undefined);
+    const { chat, commitInput } = fixture(saveChat);
+    const initial = structuredClone(chat);
+    const roundCandidate = { baseRevision: 0, candidateClock: { ...chat[0]._qrf_world_simulation.ledger.clock, day: 2 },
+      worldEventWrites: [], actorWrites: [], factWrites: [], historyMilestoneWrites: [], actorCompletions: [],
+      projection: { anchor: null, deliveries: [] }, completion: 'changed' as const };
+    await expect(commitWorldSimulationRound_ACU({ ...commitInput,
+      commitCandidate: { ...commitInput.commitCandidate, acceptedCandidates: [] },
+      roundCandidate: { ...roundCandidate, projection: { anchor: 'scene', deliveries: [] } },
+    })).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_AGENT_PROTOCOL_INVALID' } });
+    expect(saveChat).not.toHaveBeenCalled();
+    await expect(commitWorldSimulationRound_ACU({ ...commitInput,
+      commitCandidate: { ...commitInput.commitCandidate, acceptedCandidates: [] }, roundCandidate,
+    })).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_PERSIST_FAILED' } });
+    expect(chat).toEqual(initial);
+    expect(saveChat).toHaveBeenCalledTimes(2);
+  });
+
+  it('新候选重复提交不会二次推进账本或二次保存', async () => {
+    const { chat, commitInput, saveChat } = fixture();
+    const roundCandidate = { baseRevision: 0, candidateClock: { ...chat[0]._qrf_world_simulation.ledger.clock, day: 2 },
+      worldEventWrites: [], actorWrites: [], factWrites: [], historyMilestoneWrites: [], actorCompletions: [],
+      projection: { anchor: null, deliveries: [] }, completion: 'changed' as const };
+    const input = { ...commitInput, commitCandidate: { ...commitInput.commitCandidate, acceptedCandidates: [] }, roundCandidate };
+    await commitWorldSimulationRound_ACU(input);
+    await expect(commitWorldSimulationRound_ACU(input)).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_REVISION_CONFLICT' } });
+    expect(readWorldSimulationLedgerAtAnchor_ACU(resolveWorldSimulationAnchor_ACU(1, chat), chat)?.clock.day).toBe(2);
+    expect(saveChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('新候选保存期换聊或重排楼层不宣称成功且不覆盖新聊天', async () => {
+    const saveChat = vi.fn().mockImplementationOnce(async () => {
+      _set_SillyTavern_API_ACU({ chat: otherChat, chatId: 'chat-b', getCurrentChatId: () => 'chat-b', saveChat } as any);
+    });
+    const { chat, commitInput } = fixture(saveChat);
+    const otherChat = structuredClone(chat);
+    const roundCandidate = { baseRevision: 0, candidateClock: { ...chat[0]._qrf_world_simulation.ledger.clock, day: 2 },
+      worldEventWrites: [], actorWrites: [], factWrites: [], historyMilestoneWrites: [], actorCompletions: [],
+      projection: { anchor: null, deliveries: [] }, completion: 'changed' as const };
+    await expect(commitWorldSimulationRound_ACU({ ...commitInput,
+      commitCandidate: { ...commitInput.commitCandidate, acceptedCandidates: [] }, roundCandidate,
+    })).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_REVISION_CONFLICT', details: { recovery: 'unavailable' } } });
+    expect(otherChat[0]._qrf_world_simulation.ledger.revision).toBe(0);
+    expect(saveChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('新候选补偿保存失败时保留无法确认的恢复诊断', async () => {
+    const saveChat = vi.fn().mockRejectedValueOnce(new Error('primary failed')).mockRejectedValueOnce(new Error('rollback failed'));
+    const { chat, commitInput } = fixture(saveChat);
+    const roundCandidate = { baseRevision: 0, candidateClock: { ...chat[0]._qrf_world_simulation.ledger.clock, day: 2 },
+      worldEventWrites: [], actorWrites: [], factWrites: [], historyMilestoneWrites: [], actorCompletions: [],
+      projection: { anchor: null, deliveries: [] }, completion: 'changed' as const };
+    await expect(commitWorldSimulationRound_ACU({ ...commitInput,
+      commitCandidate: { ...commitInput.commitCandidate, acceptedCandidates: [] }, roundCandidate,
+    })).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_PERSIST_FAILED', details: {
+      primaryMessage: 'primary failed', rollbackMessage: 'rollback failed', recovery: 'failed',
+    } } });
+    expect(saveChat).toHaveBeenCalledTimes(2);
   });
 
   it('联合提交 envelope、账本、材料与 active swipe，主保存一次且延时刷新一次', async () => {
@@ -581,6 +1270,100 @@ describe('world simulation commit adapter', () => {
 
 });
 
+describe('world simulation actor deletion host', () => {
+  beforeEach(() => { _set_SillyTavern_API_ACU(null as any); });
+
+  it('当前 assistant 保存一条删除 delta；暂停旧任务废弃而会话与正文不变', async () => {
+    const f = reviewedFixture_ACU();
+    f.chat[0]._qrf_world_simulation.task.status = 'paused';
+    f.chat[0]._qrf_world_simulation.task.completedRun = f.identity;
+    f.chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU] = { keep: 'conversation' };
+    const beforeBody = [f.chat[1].mes, f.chat[1].message, [...f.chat[1].swipes]];
+    await deleteWorldSimulationActorHost_ACU('guard-1');
+    expect(f.saveChat).toHaveBeenCalledOnce();
+    expect(readWorldSimulationLedgerAtAnchor_ACU(resolveWorldSimulationAnchor_ACU(1, f.chat), f.chat))
+      .toMatchObject({ revision: 1, actors: [], facts: [{ id: 'fact-locked-letter', actorIds: [],
+        revealState: 'locked', revealGate: null, revision: 2 }] });
+    expect(f.chat[0]._qrf_world_simulation.task).toMatchObject({ status: 'abandoned', activeRun: null });
+    expect(f.chat[0]._qrf_world_simulation.task.completedRun).toBeUndefined();
+    expect(f.chat[1][WORLD_SIMULATION_CONVERSATION_FIELD_ACU]).toEqual({ keep: 'conversation' });
+    expect([f.chat[1].mes, f.chat[1].message, f.chat[1].swipes]).toEqual(beforeBody);
+    await deleteWorldSimulationActorHost_ACU('guard-1');
+    expect(f.saveChat).toHaveBeenCalledOnce();
+  });
+
+  it('同楼插件先追加正文也不拒绝删除，且非活动 swipe 不变', async () => {
+    const f = reviewedFixture_ACU();
+    f.chat[1].swipes = ['另一条正文', reviewedAnchorText_ACU];
+    f.chat[1].swipe_id = 1;
+    f.chat[1].mes += '\n插件追加尾注';
+    f.chat[1].message = f.chat[1].mes;
+    f.chat[1].swipes[1] = f.chat[1].mes;
+    const original = [f.chat[1].mes, f.chat[1].message, [...f.chat[1].swipes]];
+    await deleteWorldSimulationActorHost_ACU('guard-1');
+    expect([f.chat[1].mes, f.chat[1].message, f.chat[1].swipes]).toEqual(original);
+    expect(f.saveChat).toHaveBeenCalledOnce();
+  });
+
+  it('宿主保存失败只恢复本次私有字段，不覆盖插件新增正文', async () => {
+    const saveChat = vi.fn().mockImplementationOnce(async () => {
+      f.chat[1].mes += '\n保存期追加';
+      f.chat[1].swipes[0] = f.chat[1].mes;
+      throw new Error('host save failed');
+    }).mockResolvedValueOnce(undefined);
+    const f = reviewedFixture_ACU(saveChat);
+    const before = structuredClone(f.chat);
+    await expect(deleteWorldSimulationActorHost_ACU('guard-1')).rejects.toMatchObject({
+      error: { code: 'WORLD_SIMULATION_PERSIST_FAILED', details: { recovery: 'saved' } },
+    });
+    expect(f.chat[0]).toEqual(before[0]);
+    expect(f.chat[1][WORLD_SIMULATION_STATE_FIELD_ACU]).toBeUndefined();
+    expect(f.chat[1].mes).toContain('保存期追加');
+    expect(saveChat).toHaveBeenCalledTimes(2);
+  });
+
+  it('已有早楼基线与其他 swipe 保留，失败补偿恢复早楼及当前帧', async () => {
+    const saveChat = vi.fn().mockRejectedValueOnce(new Error('primary failed')).mockResolvedValueOnce(undefined);
+    const f = reviewedFixture_ACU(saveChat);
+    const prior = { message_id: 70, is_user: false, mes: '上一楼', swipe_id: 0, swipes: ['上一楼'] } as any;
+    f.chat.splice(1, 0, prior);
+    const priorAnchor = resolveWorldSimulationAnchor_ACU(1, f.chat);
+    prior[WORLD_SIMULATION_STATE_FIELD_ACU] = { schemaVersion: 1, entries: {
+      [buildWorldSimulationBucketKey_ACU(priorAnchor)]: { anchor: priorAnchor, updatedAt: 1,
+        value: { schemaVersion: 2, checkpoint: structuredClone(f.envelope.ledger),
+          checkpointFields: seedLedgerFieldView_ACU(f.envelope.ledger, 1), deltas: [] } },
+    } };
+    const before = structuredClone(f.chat);
+    await expect(deleteWorldSimulationActorHost_ACU('guard-1')).rejects.toMatchObject({
+      error: { code: 'WORLD_SIMULATION_PERSIST_FAILED', details: { recovery: 'saved' } },
+    });
+    expect(f.chat).toEqual(before);
+    expect(saveChat).toHaveBeenCalledTimes(2);
+    saveChat.mockClear();
+    await deleteWorldSimulationActorHost_ACU('guard-1');
+    expect(f.chat[1][WORLD_SIMULATION_STATE_FIELD_ACU].entries[buildWorldSimulationBucketKey_ACU(priorAnchor)].value.checkpoint.actors)
+      .toHaveLength(1);
+    expect(foldWorldSimulationLedger_ACU(f.chat, 2)?.ledger.actors).toEqual([]);
+    expect(f.chat[2].mes).toBe(reviewedAnchorText_ACU);
+    expect(saveChat).toHaveBeenCalledOnce();
+  });
+
+  it('保存期切换聊天不写新目标且不继续补偿', async () => {
+    const f = reviewedFixture_ACU();
+    const otherChat = structuredClone(f.chat);
+    f.saveChat.mockImplementationOnce(async () => {
+      _set_SillyTavern_API_ACU({ chat: otherChat, chatId: 'other-chat', characterId: 0,
+        this_chid: 0, characters: [{ avatar: 'other.png', name: '其他角色' }],
+        getCurrentChatId: () => 'other-chat', saveChat: f.saveChat } as any);
+    });
+    await expect(deleteWorldSimulationActorHost_ACU('guard-1')).rejects.toMatchObject({
+      error: { code: 'WORLD_SIMULATION_REVISION_CONFLICT', details: { recovery: 'unavailable' } },
+    });
+    expect(otherChat[0]._qrf_world_simulation.ledger.actors).toHaveLength(1);
+    expect(f.saveChat).toHaveBeenCalledOnce();
+  });
+});
+
 describe('world simulation run-scoped field writes', () => {
   beforeEach(() => { _set_SillyTavern_API_ACU(null as any); });
 
@@ -690,6 +1473,21 @@ describe('world simulation durable run write proof', () => {
       confirmRunLedger: (view, refs, accepted) => proof.confirm(view, refs, accepted) });
     return { ...f, read, proof, write };
   }
+
+  it('同一运行已有持久逐栏 partial 时拒绝新整轮候选叠加', async () => {
+    const f = resumeFixture();
+    expect((await f.write("INSERT INTO dimensions (id, name, expected_revision) VALUES ('dim-partial', '风暴', 0)")).status).toBe('committed');
+    const afterPartial = structuredClone(f.chat);
+    f.saveChat.mockClear();
+    const roundCandidate = { baseRevision: 0, candidateClock: { ...f.chat[0]._qrf_world_simulation.ledger.clock, day: 2 },
+      worldEventWrites: [], actorWrites: [], factWrites: [], historyMilestoneWrites: [], actorCompletions: [],
+      projection: { anchor: null, deliveries: [] }, completion: 'changed' as const };
+    await expect(commitWorldSimulationRound_ACU({ ...f.commitInput,
+      commitCandidate: { ...f.commitCandidate, acceptedCandidates: [] }, roundCandidate,
+    })).rejects.toMatchObject({ error: { code: 'WORLD_SIMULATION_REVISION_CONFLICT' } });
+    expect(f.chat).toEqual(afterPartial);
+    expect(f.saveChat).not.toHaveBeenCalled();
+  });
 
   it('一次保存同时携带 partial 和证明；重载后继续完成条目并保留原始 run base revision', async () => {
     const { chat, anchor, identity, read, write, saveChat, commitInput, commitCandidate } = resumeFixture();

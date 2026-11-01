@@ -361,7 +361,8 @@ export function buildCustomApiRequestBody_ACU(
  * 剧情推进任务级 API 调用 — 接受显式预设名称
  * 调用优先级：presetName 参数 > 全局 plotApiPreset > 当前 API 配置
  */
-export async function callApiWithPlotPreset_ACU(messages: any[], presetName?: string, abortSignal: AbortSignal | null = null) {
+export async function callApiWithPlotPreset_ACU(messages: any[], presetName?: string, abortSignal: AbortSignal | null = null,
+    options?: { suppressPayloadLogging?: boolean }) {
     // undefined 继承功能选择；显式空名跟随当前配置，不再被固定预设覆盖。
     const effectivePresetName = String(presetName !== undefined ? presetName : (settings_ACU.plotApiPreset || '')).trim();
     const apiPresetConfig = getApiConfigByPreset_ACU(effectivePresetName);
@@ -400,7 +401,7 @@ export async function callApiWithPlotPreset_ACU(messages: any[], presetName?: st
       const requestBody = buildCustomApiRequestBody_ACU(messages, effectiveApiConfig);
 
 
-      const response = await sendCustomApiRequest_ACU(effectiveApiConfig, requestBody, abortSignal);
+      const response = await sendCustomApiRequest_ACU(effectiveApiConfig, requestBody, abortSignal, options);
 
       if (!response.ok) {
         const errTxt = await response.text();
@@ -627,6 +628,7 @@ export interface ResolvedPresetCallExtras_ACU {
     requireDirectTransport?: boolean;
     /** 冻结本次数据库 API 的流式开关，避免返回时读取新设置。 */
     streaming?: boolean;
+    suppressPayloadLogging?: boolean;
     /** 可选累计正文预览；不代表完整响应或保存成功，不携带工具或私有推理。 */
     onTextPreview?: (body: string) => void;
     /** OpenAI 兼容缓存路由 key。稳定的 key 让同一会话的请求落到同一缓存命名空间。 */
@@ -713,6 +715,10 @@ export async function callAIWithResolvedPreset_ACU(
 ): Promise<string | null> {
     if (!Array.isArray(messages) || messages.length === 0) {
         throw new Error('内部 AI 消息必须是非空数组。');
+    }
+    if (extras?.suppressPayloadLogging === true && (resolved.apiMode !== 'custom' || resolved.apiConfig.useMainApi
+        || extras.requireDirectTransport !== true || extras.streaming !== false || extras.onTextPreview)) {
+        throw new Error('内部私有资料只允许无预览的独立非流式请求。');
     }
     return withApiRequestTimeout_ACU(resolved.apiConfig, signal, async (signal) => {
     const reportUsage = (raw: unknown): void => {
@@ -801,7 +807,7 @@ export async function callAIWithResolvedPreset_ACU(
                 // usage 回调在场时才请求流式 usage chunk：不改变没有订阅方时的请求体。
                 includeStreamUsage: !!lifecycle?.onUsage,
             }),
-        }, signal);
+        }, signal, { suppressPayloadLogging: extras?.suppressPayloadLogging === true });
     if (!response.ok) await throwApiHttpError_ACU(response);
     if (extras?.requireDirectTransport) {
         const parsed = await readFetchChatTurn_ACU(response, extras.streaming ?? false, signal, true, extras.onTextPreview);

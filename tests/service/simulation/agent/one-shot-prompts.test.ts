@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildDefaultWorldSimulationAgentPrompts_ACU, buildV21WorldSimulationAgentPrompt_ACU, buildV22WorldSimulationAgentPrompt_ACU, buildV23WorldSimulationAgentPrompt_ACU, buildV24WorldSimulationAgentPrompt_ACU, buildV25WorldSimulationAgentPrompt_ACU, buildV26WorldSimulationAgentPrompt_ACU, buildV27WorldSimulationAgentPrompt_ACU, WORLD_SIMULATION_PROMPT_VERSION_ACU, WORLD_SIMULATION_PROMPT_VERSION_V21_ACU, WORLD_SIMULATION_PROMPT_VERSION_V22_ACU, WORLD_SIMULATION_PROMPT_VERSION_V23_ACU, WORLD_SIMULATION_PROMPT_VERSION_V24_ACU, WORLD_SIMULATION_PROMPT_VERSION_V25_ACU, WORLD_SIMULATION_PROMPT_VERSION_V26_ACU, WORLD_SIMULATION_PROMPT_VERSION_V27_ACU, WORLD_SIMULATION_PROMPT_VERSION_V35_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
+import { buildDefaultWorldSimulationAgentPrompts_ACU, buildV21WorldSimulationAgentPrompt_ACU, buildV22WorldSimulationAgentPrompt_ACU, buildV23WorldSimulationAgentPrompt_ACU, buildV24WorldSimulationAgentPrompt_ACU, buildV25WorldSimulationAgentPrompt_ACU, buildV26WorldSimulationAgentPrompt_ACU, buildV27WorldSimulationAgentPrompt_ACU, WORLD_SIMULATION_PROMPT_VERSION_V21_ACU, WORLD_SIMULATION_PROMPT_VERSION_V22_ACU, WORLD_SIMULATION_PROMPT_VERSION_V23_ACU, WORLD_SIMULATION_PROMPT_VERSION_V24_ACU, WORLD_SIMULATION_PROMPT_VERSION_V25_ACU, WORLD_SIMULATION_PROMPT_VERSION_V26_ACU, WORLD_SIMULATION_PROMPT_VERSION_V27_ACU, WORLD_SIMULATION_PROMPT_VERSION_V35_ACU } from '../../../../src/service/simulation/agent/agent-defaults';
 import { oneShotBootstrapNotice_ACU, worldSimulationOneShotProtocol_ACU } from '../../../../src/service/simulation/agent/agent-subagent-runtime';
 import { validateWorldSimulationPromptSegments_ACU } from '../../../../src/service/simulation/agent/prompt-template';
 import { buildDefaultWorldSimulationEnvelope_ACU } from '../../../../src/service/simulation/defaults';
@@ -179,8 +179,8 @@ describe('一次性资料角色默认提示词', () => {
 
     const loaded = validateWorldSimulationEnvelope_ACU(envelope);
 
-    expect(loaded.settings.promptForceDefaultVersion).toBe(WORLD_SIMULATION_PROMPT_VERSION_ACU);
-    expect(loaded.settings.agentPrompts).toEqual(buildDefaultWorldSimulationAgentPrompts_ACU());
+    expect(loaded.settings.promptForceDefaultVersion).toBeUndefined();
+    expect(loaded.settings.agentPrompts).toEqual({});
   });
 
   it('非时钟角色按本轮时间跨度约束推演，批次二直接采用批次一维护的 clock', () => {
@@ -201,6 +201,7 @@ describe('一次性资料角色默认提示词', () => {
   it('旧版本信封里的旧角色键与自定义旧协议提示词读出时整组归一到当前默认', () => {
     const defaults = buildDefaultWorldSimulationAgentPrompts_ACU();
     const envelope = buildDefaultWorldSimulationEnvelope_ACU() as any;
+    envelope.settings.agentPrompts = buildDefaultWorldSimulationAgentPrompts_ACU();
     envelope.settings.promptForceDefaultVersion = WORLD_SIMULATION_PROMPT_VERSION_V35_ACU;
     envelope.settings.agentPrompts['undercurrent-analyst'][0].content += '\n旧版自定义逐栏 write_sql';
     envelope.settings.agentPrompts.timekeeper = structuredClone(defaults['undercurrent-analyst']);
@@ -208,8 +209,6 @@ describe('一次性资料角色默认提示词', () => {
 
     const loaded = validateWorldSimulationEnvelope_ACU(envelope);
 
-    expect(Object.keys(loaded.settings.agentPrompts)).not.toContain('timekeeper');
-    expect(Object.keys(loaded.settings.agentPrompts)).not.toContain('chronicler');
-    expect(loaded.settings.agentPrompts['undercurrent-analyst']).toEqual(defaults['undercurrent-analyst']);
+    expect(loaded.settings.agentPrompts).toEqual({});
   });
 });

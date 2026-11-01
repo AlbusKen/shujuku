@@ -1,5 +1,9 @@
 import { resolvePlotApiTransport_ACU } from '../../ai/plot-api-route';
 import type { PlotRequestContext_ACU } from './plot-request-context';
+import { buildPlotInternalCausalMessage_ACU, validatePlotInternalCausalView_ACU, type PlotInternalCausalView_ACU } from './plot-internal-causal';
+import type { ConfirmedSimulationCausalView_ACU } from '../../zero-layer/simulation-causal-view';
+import { parsePlotInternalCausalResult_ACU, type PlotInternalCausalResult_ACU } from './plot-internal-causal-result';
+import { PLOT_SIMULATION_SCENE_TOKEN_ACU, renderPlotSimulationSceneFacts_ACU } from './plot-simulation-scene';
 import { withSqlTemplateReadContext_ACU } from '../template-vars/sql-query-var';
 
 /**
@@ -31,6 +35,8 @@ import { runAgentDecisionForPlot_ACU, type AgentDecisionResult_ACU, type AgentWo
 import { normalizeAgentContextSettings_ACU } from '../../agent/agent-prompt-template';
 import { getWorldbookEntryKeywordsForSkillify_ACU, isDatabaseGeneratedWorldbookEntryForAgent_ACU } from '../../agent/agent-skillify-service';
 import { clearFinalGenerationGreenlights_ACU, resolvePreTakeoverWorldbookSnapshot_ACU, writeFinalGenerationGreenlights_ACU } from '../../agent/agent-worldbook-takeover';
+import { PLOT_WORLD_SIMULATION_TOKEN_ACU, renderPlotWorldContextMessage_ACU } from './plot-world-context';
+import { createOrdinaryPlotCausalContext_ACU } from './ordinary-plot-causal-context';
 import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailability_ACU } from '../../agent/agent-worldbook-skill-meta';
 
   type PlotWorldbookAgentMode_ACU = 'normal' | 'agent-controlled';
@@ -100,6 +106,11 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
 
   function isManualPlotAbort_ACU(error: any): boolean {
     return abortController_ACU?.signal.aborted === true || error?.message === 'TaskAbortedByUser';
+  }
+
+  function isPlotSimulationSceneFailure_ACU(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : '';
+    return message.includes('场景事实') || message.includes(PLOT_SIMULATION_SCENE_TOKEN_ACU);
   }
 
   function getPlotTaskApiPresetOverrides_ACU(): Record<string, string> {
@@ -441,6 +452,12 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
     if (finalWithRandom && finalWithRandom.trim()) {
       finalSystemDirectiveContent = finalWithRandom.trim();
     }
+    if (finalSystemDirectiveContent.includes(PLOT_WORLD_SIMULATION_TOKEN_ACU)) {
+      throw new Error('格林完整资料占位符仅用于推进任务提示词，不用于最终正文指令。');
+    }
+    if (finalSystemDirectiveContent.includes(PLOT_SIMULATION_SCENE_TOKEN_ACU)) {
+      throw new Error('剧情任务最终系统指令不支持 $SIMULATION_SCENE_FACTS。');
+    }
 
     let seedContentForConditional = '';
     try {
@@ -467,9 +484,36 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
     };
   }
 
+  /**
+   * 只授权任务原始 promptGroup 中显式出现的场景事实 token。
+   * 先替换为每任务唯一 sentinel，避免 EJS、世界书及 $ 变量渲染把 token 改写；
+   * 全部常规渲染结束后才读取一次冻结 causal view 并恢复摘要。若 sentinel 被渲染链删除，
+   * 不读取因果视图，最终动态生成的 token 一律拒绝。
+   */
   async function renderPlotTaskMessages_ACU(task: Record<string, any>, sharedContext: Record<string, any>, runtimeOptions: any = {}) {
     const promptGroup = JSON.parse(JSON.stringify(task?.promptGroup || []));
     const messagesToUse = Array.isArray(promptGroup) ? promptGroup : [];
+    const worldTokenSentinel = `__ACU_PLOT_WORLD_${Math.random().toString(36).slice(2)}__`;
+    for (const segment of messagesToUse) {
+      if (typeof segment?.content === 'string') {
+        segment.content = segment.content.replaceAll(PLOT_WORLD_SIMULATION_TOKEN_ACU, worldTokenSentinel);
+      }
+    }
+    const originalTokenCount = messagesToUse.reduce((count: number, segment: any) => (
+      count + (typeof segment?.content === 'string'
+        ? segment.content.split(PLOT_SIMULATION_SCENE_TOKEN_ACU).length - 1
+        : 0)
+    ), 0);
+    const sceneTokenSentinel = originalTokenCount > 0
+      ? `__ACU_PLOT_SCENE_FACTS_${String(task?.id || 'task')}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}__`
+      : '';
+    if (originalTokenCount > 0) {
+      for (const segment of messagesToUse) {
+        if (typeof segment?.content === 'string') {
+          segment.content = segment.content.replaceAll(PLOT_SIMULATION_SCENE_TOKEN_ACU, sceneTokenSentinel);
+        }
+      }
+    }
     const historyTagMap = runtimeOptions.historyTagMap instanceof Map
       ? runtimeOptions.historyTagMap
       : buildPlotTagMapFromText_ACU(sharedContext.lastPlotContent, null);
@@ -496,7 +540,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         c = replacePlotTagPlaceholders_ACU(c, relayTagMap, historyTagMap);
         c = renderPlotTaskContentWithIsolatedVariables_ACU(c, sharedContext);
       } catch (error) {
-        if (sharedContext.requestContext) throw error;
+        if (sharedContext.requestContext || isPlotSimulationSceneFailure_ACU(error)) throw error;
         if (isManualPlotAbort_ACU(error)) throw error;
         sharedContext.reportWarning?.('提示词段处理未完成，保留已处理的文本并继续任务。');
         logWarn_ACU('[剧情推进] 提示词段处理异常，继续任务。', {
@@ -504,6 +548,48 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         });
       }
       seg.__renderedContent = c;
+    }
+
+    const renderedSceneTokenCount = originalTokenCount > 0
+      ? messagesToUse.reduce((count: number, segment: any) => (
+        count + (typeof segment?.__renderedContent === 'string'
+          ? segment.__renderedContent.split(sceneTokenSentinel).length - 1
+          : 0)
+      ), 0)
+      : 0;
+    if (renderedSceneTokenCount > 0) {
+      const requestContext: PlotRequestContext_ACU | undefined = sharedContext.requestContext;
+      if (!requestContext) {
+        throw new Error('剧情任务场景事实 token 需要请求级上下文。');
+      }
+      if (typeof requestContext.readSimulationCausalView !== 'function') {
+        throw new Error('剧情任务场景事实 token 需要已配置的因果视图读取器。');
+      }
+      requestContext.assertCurrent();
+      const view = requestContext.readSimulationCausalView();
+      const sceneFacts = await renderPlotSimulationSceneFacts_ACU(view, {
+        signal: requestContext.signal,
+        assertCurrent: () => requestContext.assertCurrent(),
+        scene: requestContext.simulationScene,
+        ...(typeof runtimeOptions.countTokens === 'function' ? { countTokens: runtimeOptions.countTokens } : {}),
+      });
+      requestContext.assertCurrent();
+      for (const segment of messagesToUse) {
+        if (typeof segment?.__renderedContent === 'string') {
+          segment.__renderedContent = segment.__renderedContent.replaceAll(sceneTokenSentinel, () => sceneFacts);
+        }
+      }
+    }
+    if (messagesToUse.some((segment: any) => String(segment?.__renderedContent || '').includes(PLOT_SIMULATION_SCENE_TOKEN_ACU))) {
+      throw new Error('剧情任务动态生成了未授权的 $SIMULATION_SCENE_FACTS。');
+    }
+
+    const worldContext = sharedContext.resolvedWorldSimulationContext;
+    const worldContent = worldContext ? renderPlotWorldContextMessage_ACU(worldContext).content : '';
+    for (const segment of messagesToUse) {
+      if (typeof segment?.__renderedContent === 'string') {
+        segment.__renderedContent = segment.__renderedContent.replaceAll(worldTokenSentinel, () => worldContent);
+      }
     }
 
     return messagesToUse
@@ -551,11 +637,39 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
     return 'API 调用失败，未取得有效响应；具体原因尚未确认。';
   }
 
+  function assertInternalCausalTasksReady_ACU(tasks: readonly Record<string, any>[], requestContext?: PlotRequestContext_ACU): void {
+    const hasInternalTask = tasks.some(task => normalizePlotTask_ACU(task, {
+      index: task?.order ?? 0,
+      fallbackTask: task || null,
+    }).internalCausalRead === true);
+    if (!hasInternalTask) return;
+    if (!requestContext) throw new Error('内部因果任务需要请求级上下文。');
+    if (typeof requestContext.readSimulationCausalView !== 'function') {
+      throw new Error('内部因果任务需要已配置的因果视图读取器。');
+    }
+    if (typeof requestContext.callInternalApi !== 'function') {
+      throw new Error('内部因果任务需要专用内部 API 调用器。');
+    }
+  }
+
+  function buildInternalTaskFailure_ACU(normalizedTask: Record<string, any>, taskLabel: string, taskStage: number, error: string) {
+    return {
+      taskId: normalizedTask.id,
+      taskName: taskLabel,
+      success: false,
+      internalCausalRead: true,
+      error,
+      stage: taskStage,
+      order: normalizedTask.order ?? 0,
+    };
+  }
+
   async function executeSinglePlotTask_ACU(task: Record<string, any>, sharedContext: Record<string, any>, runtimeOptions: any = {}) {
     const requestContext: PlotRequestContext_ACU | undefined = sharedContext.requestContext;
     const checkCurrent = () => requestContext ? requestContext.assertCurrent() : checkPlotAbortRequested_ACU();
     const signal = requestContext?.signal ?? abortController_ACU?.signal;
     const normalizedTask = normalizePlotTask_ACU(task, { index: task?.order ?? 0, fallbackTask: task || null });
+    const internalCausalRead = normalizedTask.internalCausalRead === true;
     const taskLabel = normalizedTask.name || normalizedTask.id || '未命名任务';
     const taskStage = normalizePositiveInteger_ACU(normalizedTask.stage, 1);
     const maxRetries = normalizePositiveInteger_ACU(
@@ -652,10 +766,55 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
 
     try {
       checkCurrent();
-      const messages = await renderPlotTaskMessages_ACU(normalizedTask, taskSharedContext, runtimeOptions);
+      const usesWorldSimulationToken = (normalizedTask.promptGroup || []).some((segment: any) =>
+        typeof segment?.content === 'string' && segment.content.includes(PLOT_WORLD_SIMULATION_TOKEN_ACU));
+      const worldContext = internalCausalRead ? null : requestContext?.readWorldSimulationContext
+        ? requestContext.readWorldSimulationContext()
+        : sharedContext.worldSimulationContext;
+      const messages = await renderPlotTaskMessages_ACU(normalizedTask, {
+        ...taskSharedContext, resolvedWorldSimulationContext: worldContext,
+      }, runtimeOptions);
       checkCurrent();
 
+      let frozenInternalCausalView: PlotInternalCausalView_ACU | null = null;
+      if (!internalCausalRead) {
+        if (worldContext && !usesWorldSimulationToken && !sharedContext.explicitWorldSimulation) {
+          messages.push(renderPlotWorldContextMessage_ACU(worldContext));
+        } else if (!worldContext) {
+          const safeSceneFacts = requestContext?.readSafeCausalFacts?.() ?? '';
+          if (safeSceneFacts) messages.push({ role: 'system', content: safeSceneFacts });
+        }
+      }
+      if (internalCausalRead) {
+        if (!requestContext || typeof requestContext.readSimulationCausalView !== 'function'
+          || typeof requestContext.callInternalApi !== 'function') {
+          return buildInternalTaskFailure_ACU(normalizedTask, taskLabel, taskStage, '内部因果任务运行条件未满足。');
+        }
+        try {
+          // 最后才附加内部资料，避免模板渲染、继电和历史通道取得秘密。
+          checkCurrent();
+          const causalView = requestContext.readSimulationCausalView();
+          validatePlotInternalCausalView_ACU(causalView);
+          frozenInternalCausalView = structuredClone(causalView);
+          const causalMessage = await buildPlotInternalCausalMessage_ACU(frozenInternalCausalView, {
+            signal: requestContext.signal,
+            assertCurrent: () => requestContext.assertCurrent(),
+            ...(typeof runtimeOptions.countTokens === 'function' ? { countTokens: runtimeOptions.countTokens } : {}),
+          });
+          checkCurrent();
+          messages.push(causalMessage);
+        } catch (error) {
+          // 任何 await 后优先复核租约/取消；失效请求不得被降级为可继续的内部失败。
+          checkCurrent();
+          if (isManualPlotAbort_ACU(error)) throw error;
+          return buildInternalTaskFailure_ACU(normalizedTask, taskLabel, taskStage, '内部因果资料准备失败。');
+        }
+      }
+
       if (!messages.length) {
+        if (internalCausalRead) {
+          return buildInternalTaskFailure_ACU(normalizedTask, taskLabel, taskStage, '内部任务未生成任何有效提示词消息。');
+        }
         return {
           taskId: normalizedTask.id,
           taskName: taskLabel,
@@ -670,6 +829,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       }
 
       let rawResponse = '';
+      let internalCausalResult: PlotInternalCausalResult_ACU | null = null;
       let lastErrorMessage = '';
       let acceptedTagExtraction: ReturnType<typeof extractPlotTagsFromResponse_ACU> | null = null;
       let apiSucceeded = false;
@@ -690,11 +850,14 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         // 每次直接重发原任务消息，失败原因与次数仅用于本地诊断。
         try {
           logDebug_ACU(`[剧情推进] [阶段:${taskStage}] [任务:${taskLabel}] 使用任务级API预设: ${effectivePlotApiPreset || '当前配置'}`);
-          tempMessage = requestContext
-            ? await requestContext.callApi(messages, effectivePlotApiPreset)
-            : await callApiWithPlotPreset_ACU(messages, effectivePlotApiPreset, signal || null);
+          tempMessage = internalCausalRead
+            ? await requestContext!.callInternalApi!(messages, effectivePlotApiPreset)
+            : (requestContext
+              ? await requestContext.callApi(messages, effectivePlotApiPreset)
+              : await callApiWithPlotPreset_ACU(messages, effectivePlotApiPreset, signal || null));
         } catch (apiCallError) {
           if (requestContext) requestContext.assertCurrent();
+          checkCurrent();
           if (isManualPlotAbort_ACU(apiCallError)) throw apiCallError;
           apiFailed = true;
           lastErrorMessage = describePlotTaskApiFailure_ACU(apiCallError);
@@ -712,6 +875,16 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
               lastErrorMessage = '任务回复为空。';
             } else if (rawResponse.length < minLength) {
               lastErrorMessage = `任务回复长度不足（${rawResponse.length}/${minLength}）。`;
+            } else if (internalCausalRead) {
+              if (!frozenInternalCausalView) throw new Error('内部因果资料准备失败。');
+              const currentInternalView = validatePlotInternalCausalView_ACU(requestContext!.readSimulationCausalView!());
+              const frozenInternalView = validatePlotInternalCausalView_ACU(frozenInternalCausalView);
+              if (currentInternalView.fingerprint !== frozenInternalView.fingerprint
+                || currentInternalView.canonical !== frozenInternalView.canonical) {
+                throw new Error('内部因果资料在响应期间已变化。');
+              }
+              internalCausalResult = parsePlotInternalCausalResult_ACU(rawResponse, frozenInternalCausalView);
+              apiSucceeded = true;
             } else {
               const extraction = extractPlotTagsFromResponse_ACU(rawResponse, normalizedTask.extractTags, normalizedTask.extractInjectTags);
               const configuredTags = [...new Set(`${normalizedTask.extractTags || ''},${normalizedTask.extractInjectTags || ''}`
@@ -727,7 +900,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
             }
           } catch (error) {
             if (isManualPlotAbort_ACU(error)) throw error;
-            lastErrorMessage = '任务回复标签提取失败。';
+            lastErrorMessage = internalCausalRead ? '内部任务回复验收失败。' : '任务回复标签提取失败。';
           }
           if (apiSucceeded) break;
           sharedContext.reportWarning?.(`任务「${taskLabel}」的第 ${attemptIndex + 1} 次回复未通过验收：${lastErrorMessage}`);
@@ -740,6 +913,14 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       }
 
       if (!apiSucceeded) {
+        if (internalCausalRead) {
+          return buildInternalTaskFailure_ACU(
+            normalizedTask,
+            taskLabel,
+            taskStage,
+            lastAttemptApiFailed ? '内部 API 调用失败且已耗尽重试次数。' : '内部任务回复验收失败且已耗尽重试次数。',
+          );
+        }
         return {
           taskId: normalizedTask.id,
           taskName: taskLabel,
@@ -750,6 +931,21 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
           error: lastAttemptApiFailed ? 'API 调用失败且已耗尽重试次数。' : `任务回复验收失败且已耗尽重试次数：${lastErrorMessage}`,
           apiRetriesExhausted: lastAttemptApiFailed,
           validationRetriesExhausted: !lastAttemptApiFailed,
+          stage: taskStage,
+          order: normalizedTask.order ?? 0,
+        };
+      }
+
+      if (internalCausalRead) {
+        // 仅在引擎内暂存 typed 选择，统一确认全批成功后才交给请求私有 sink。
+        rawResponse = '';
+        return {
+          taskId: normalizedTask.id,
+          taskName: taskLabel,
+          success: true,
+          internalCausalRead: true,
+          internalCausalResult: structuredClone(internalCausalResult!),
+          error: null as string | null,
           stage: taskStage,
           order: normalizedTask.order ?? 0,
         };
@@ -775,8 +971,12 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         order: normalizedTask.order ?? 0,
       };
     } catch (error) {
-      if (requestContext) throw error;
+      checkCurrent();
       if (isManualPlotAbort_ACU(error)) throw error;
+      if (internalCausalRead) {
+        return buildInternalTaskFailure_ACU(normalizedTask, taskLabel, taskStage, '内部任务执行失败。');
+      }
+      if (requestContext) throw error;
       if (isStrictLorebookReadError_ACU(error) || String((error as any)?.message || '').startsWith('StrictLorebookRead:')) {
         sharedContext.reportWarning?.(`任务「${taskLabel}」的提示词处理失败，继续后续任务。`);
         logWarn_ACU(`[剧情推进] [任务:${taskLabel}] 提示词处理失败，继续后续任务。`, {
@@ -806,9 +1006,22 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
   }
 
   export async function runPlotTasksRuntime_ACU(plotSettings: Record<string, any>, userMessage: string, runtimeOptions: any = {}) {
+    if (plotSettings?.enabled === false) return { finalMessage: null as string | null, successfulResults: [] as any[],
+      failedResults: [] as any[], aggregatedTags: new Map(), enabledTaskCount: 0, internalTaskCount: 0 };
     const requestContext: PlotRequestContext_ACU | undefined = runtimeOptions.requestContext;
     const checkCurrent = () => requestContext ? requestContext.assertCurrent() : checkPlotAbortRequested_ACU();
     checkCurrent();
+    const explicitWorldSimulation = getEnabledPlotTasks_ACU(plotSettings).some((task: any) =>
+      (task.promptGroup || []).some((segment: any) => typeof segment?.content === 'string'
+        && segment.content.includes(PLOT_WORLD_SIMULATION_TOKEN_ACU)));
+    let ordinaryCausal: Awaited<ReturnType<typeof createOrdinaryPlotCausalContext_ACU>> = null;
+    if (!requestContext && plotSettings?.enabled !== false) {
+      ordinaryCausal = await createOrdinaryPlotCausalContext_ACU({
+        plotSettings, userMessage, signal: abortController_ACU?.signal ?? new AbortController().signal,
+        assertCurrent: checkCurrent,
+        explicitWorldSimulation,
+      });
+    }
     const { inputForHash = userMessage, hasExistingUserMessage = false } = runtimeOptions;
     const reportWarning = (text: string) => runtimeOptions.reportWarning?.(text);
     const chatId = requestContext ? '' : currentChatFileIdentifier_ACU || '';
@@ -874,6 +1087,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       ensurePlotTasksCompat_ACU(plotSettings, { syncLegacy: true });
 
       let enabledTasks = getEnabledPlotTasks_ACU(plotSettings);
+      assertInternalCausalTasksReady_ACU(enabledTasks, requestContext);
       if (!enabledTasks.length) {
         logWarn_ACU('[剧情推进] 当前没有可执行的启用任务。');
         return {
@@ -882,6 +1096,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
           failedResults: [],
           aggregatedTags: new Map(),
           enabledTaskCount: 0,
+          internalTaskCount: 0,
         };
       }
 
@@ -892,6 +1107,8 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         requestContext,
       });
       sharedContext.worldbookReadContext = worldbookReadContext;
+      if (ordinaryCausal) sharedContext.worldSimulationContext = ordinaryCausal.worldContext;
+      sharedContext.explicitWorldSimulation = explicitWorldSimulation;
       sharedContext.reportWarning = reportWarning;
     checkCurrent();
 
@@ -981,6 +1198,8 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       }
     }
 
+    assertInternalCausalTasksReady_ACU(enabledTasks, requestContext);
+
     if (!enabledTasks.length) {
       logDebug_ACU('[剧情推进] Agent 决策本轮不执行任何推进任务。');
       return {
@@ -989,6 +1208,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         failedResults: [] as any[],
         aggregatedTags: new Map(),
         enabledTaskCount: 0,
+        internalTaskCount: 0,
         finalGenerationGreenlights,
         agentActive,
       };
@@ -1008,6 +1228,8 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
 
     const successfulResults: any[] = [];
     const failedResults: any[] = [];
+    let internalTaskCount = 0;
+    const pendingInternalCausalResults: PlotInternalCausalResult_ACU[] = [];
     let aggregatedTags = new Map();
     let completedSuccessfulResults: any[] = [];
     let aggregatedInjectOnlyTagNames = new Set<string>();
@@ -1023,6 +1245,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
           relayTagMap: stageRelayTagMap,
           historyTagMap,
           historyLookupOptions,
+          ...(typeof runtimeOptions.countTokens === 'function' ? { countTokens: runtimeOptions.countTokens } : {}),
         });
       });
       const settled = await Promise.allSettled(operations);
@@ -1033,8 +1256,11 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       const stageResults: any[] = settled.map(result => (result as PromiseFulfilledResult<any>).value);
       checkCurrent();
 
-      const stageSuccessfulResults = stageResults.filter((result: any) => result?.success);
+      const stageInternalSuccessfulResults = stageResults.filter((result: any) => result?.success && result?.internalCausalRead === true);
+      const stageSuccessfulResults = stageResults.filter((result: any) => result?.success && result?.internalCausalRead !== true);
       const stageFailedResults = stageResults.filter((result: any) => result && !result.success);
+      internalTaskCount += stageInternalSuccessfulResults.length;
+      pendingInternalCausalResults.push(...stageInternalSuccessfulResults.map((result: any) => structuredClone(result.internalCausalResult)));
       successfulResults.push(...stageSuccessfulResults);
       failedResults.push(...stageFailedResults);
       completedSuccessfulResults = [...successfulResults];
@@ -1055,6 +1281,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
           failedResults,
           aggregatedTags,
           enabledTaskCount: enabledTasks.length,
+          internalTaskCount,
           abortedByStageFailure: true,
           apiRetriesExhausted: exhaustedTasks.length > 0,
           failedStage: stageGroup.stage,
@@ -1065,7 +1292,24 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       const { aggregated: stageAggregated, injectOnlyTagNames: stageInjectOnly } = aggregatePlotTaskTags_ACU(completedSuccessfulResults);
       aggregatedTags = stageAggregated;
       stageInjectOnly.forEach((name: string) => aggregatedInjectOnlyTagNames.add(name));
-      logDebug_ACU(`[剧情推进] 阶段 ${stageGroup.stage} 已完成，成功任务数: ${stageSuccessfulResults.length}`);
+      logDebug_ACU(`[剧情推进] 阶段 ${stageGroup.stage} 已完成，公开成功任务数: ${stageSuccessfulResults.length}，内部任务数: ${stageInternalSuccessfulResults.length}`);
+    }
+
+    // 所有阶段成功并复核租约后，才允许把内部选择交给请求私有 sink。
+    if (requestContext?.acceptInternalCausalResult) {
+      for (const internalCausalResult of pendingInternalCausalResults) {
+        checkCurrent();
+        try {
+          const currentInternalView = validatePlotInternalCausalView_ACU(requestContext.readSimulationCausalView!());
+          if (currentInternalView.fingerprint !== internalCausalResult.viewFingerprint) {
+            throw new Error('内部因果资料在交付期间已变化。');
+          }
+          requestContext.acceptInternalCausalResult(structuredClone(internalCausalResult));
+        } catch {
+          throw new Error('内部因果结果交付失败。');
+        }
+        checkCurrent();
+      }
     }
 
     if (!successfulResults.length) {
@@ -1079,6 +1323,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         failedResults,
         aggregatedTags: new Map(),
         enabledTaskCount: enabledTasks.length,
+        internalTaskCount,
         ...(requestContext ? { finalGenerationGreenlights, agentActive } : {}),
       };
     }
@@ -1099,7 +1344,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
     if (requestContext) {
       checkCurrent();
       return { finalMessage, saveContent, successfulResults, failedResults, aggregatedTags,
-        enabledTaskCount: enabledTasks.length, finalGenerationGreenlights, agentActive };
+        enabledTaskCount: enabledTasks.length, internalTaskCount, finalGenerationGreenlights, agentActive };
     }
     const userInputHash = hashUserInput_ACU(inputForHash);
     const finalMessageHash = hashUserInput_ACU(finalMessage);
@@ -1109,6 +1354,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       userInputHash,
       userInputText: inputForHash,
       finalMessageHash,
+      finalMessage,
       roundId,
       taskResults: successfulResults,
       targetStartIndex,
@@ -1139,6 +1385,7 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
       failedResults,
       aggregatedTags,
       enabledTaskCount: enabledTasks.length,
+      internalTaskCount,
     };
     } finally {
       // 隔离 provider 的释放由调用方负责；所有本轮 Agent 必须先收尾。

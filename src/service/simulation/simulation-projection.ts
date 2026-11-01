@@ -30,6 +30,12 @@ export function worldSimulationProjectionTemplateError_ACU(template: unknown): s
   return null;
 }
 
+function formatWorldProjection_ACU(sections: string[], template: string): string | null {
+  if (!sections.length) return null;
+  const format = worldSimulationProjectionTemplateError_ACU(template) ? DEFAULT_WORLD_SIMULATION_PROJECTION_TEMPLATE_ACU : template;
+  return `${START_ACU}\n${format.replace(WORLD_SIMULATION_PROJECTION_PLACEHOLDER_ACU, () => sections.join('\n'))}\n${END_ACU}`;
+}
+
 export function buildWorldSimulationProjection_ACU(ledger: WorldSimulationLedger_ACU, template: string = DEFAULT_WORLD_SIMULATION_PROJECTION_TEMPLATE_ACU): string | null {
   const grouped: Record<WorldGuidanceSignalVoice_ACU, string[]> = { encounter: [], rumor: [], ambient: [] };
   for (const signal of ledger.guidance.signals) {
@@ -40,9 +46,25 @@ export function buildWorldSimulationProjection_ACU(ledger: WorldSimulationLedger
     const items = grouped[voice];
     return items.length ? [`${SECTION_LABELS_ACU[voice]}\n${items.map(item => `- ${item}`).join('\n')}`] : [];
   });
-  if (!sections.length) return null;
-  const format = worldSimulationProjectionTemplateError_ACU(template) ? DEFAULT_WORLD_SIMULATION_PROJECTION_TEMPLATE_ACU : template;
-  return `${START_ACU}\n${format.replace(WORLD_SIMULATION_PROJECTION_PLACEHOLDER_ACU, () => sections.join('\n'))}\n${END_ACU}`;
+  return formatWorldProjection_ACU(sections, template);
+}
+
+export function buildWorldFactBodyProjection_ACU(
+  ledger: WorldSimulationLedger_ACU, factIds: readonly string[], template: string = DEFAULT_WORLD_SIMULATION_PROJECTION_TEMPLATE_ACU,
+): string | null {
+  const byId = new Map(ledger.facts.map(fact => [fact.id, fact]));
+  const scene: string[] = [];
+  const gated: string[] = [];
+  for (const id of new Set(factIds)) {
+    const fact = byId.get(id);
+    if (!fact || fact.revealState !== 'unlocked' || fact.projectionPolicy === 'internal') continue;
+    const summary = fact.summary.trim();
+    if (summary) (fact.projectionPolicy === 'scene' ? scene : gated).push(`- ${summary}`);
+  }
+  return formatWorldProjection_ACU([
+    ...(scene.length ? [`【当前场景的确定事实】\n${scene.join('\n')}`] : []),
+    ...(gated.length ? [`【已满足条件的确定事实】\n${gated.join('\n')}`] : []),
+  ], template);
 }
 
 /** Prompt-only view: never use this text for anchor identity or persistent content. */
@@ -60,7 +82,10 @@ export function readWorldSimulationMessageContent_ACU(message: Record<string, un
 }
 
 export function writeWorldSimulationActiveSwipeContent_ACU(message: Record<string, unknown>, content: string): void {
-  const swipeId = typeof message.swipe_id === 'number' && Number.isInteger(message.swipe_id) && message.swipe_id >= 0 ? message.swipe_id : 0;
+  const swipeId = (typeof message.swipe_id === 'number' && Number.isInteger(message.swipe_id) && message.swipe_id >= 0)
+    ? message.swipe_id
+    : (typeof message.swipe_id === 'string' && /^(?:0|[1-9]\d*)$/.test(message.swipe_id) && Number.isSafeInteger(Number(message.swipe_id)))
+      ? Number(message.swipe_id) : 0;
   if (Array.isArray(message.swipes) && swipeId >= message.swipes.length) {
     throw new Error('WORLD_SIMULATION_ACTIVE_SWIPE_INVALID');
   }

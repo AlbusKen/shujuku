@@ -1,8 +1,10 @@
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import type { ContinuationEnvelope_ACU, TurnAttemptIdentity_ACU } from '../continuation/model';
 import type { AgentConversationFloorRecord_ACU, AgentModuleFloorFrame_ACU } from '../continuation/agent/agent-model';
-import type { WorldSimulationEnvelope_ACU, WorldSimulationLedgerFieldSnapshot_ACU,
+import type { WorldSimulationDeliveryTarget_ACU, WorldSimulationEnvelope_ACU, WorldSimulationLedgerFieldSnapshot_ACU,
   WorldSimulationLogicalRef_ACU } from '../simulation/model';
+import type { WorldDeliveryLifecycle_ACU } from '../simulation/world-delivery-lifecycle';
+import type { PlotCausalDeliveryManifest_ACU } from '../runtime/plot-runtime/plot-causal-delivery-bridge';
 import type { WorldChronicleArchiveSnapshot_ACU, WorldSimulationConversationFloorRecord_ACU,
   WorldSimulationRunStateRecord_ACU, WorldSimulationUserRequirementsSnapshot_ACU } from '../simulation/agent/agent-model';
 import type { WorldSimulationRunWriteProof_ACU } from '../simulation/simulation-run-write-state';
@@ -77,6 +79,8 @@ export interface ZeroLayerPlotCandidate_ACU {
   /** 冻结原生提示词过滤目录；只用于请求内去重，不保存世界书状态。 */
   filterEntries: Array<{ content: string; comment: string }>;
   agentActive: boolean;
+  /** 仅由已验证剧情桥接写入；恢复只校验冻结 manifest，不能重跑场景审查。 */
+  causalDelivery?: PlotCausalDeliveryManifest_ACU;
 }
 
 export interface ZeroLayerTurn_ACU {
@@ -93,6 +97,8 @@ export interface ZeroLayerTurn_ACU {
   assistantFloor: ZeroLayerFloor_ACU;
   requiredEffects: ZeroLayerEffectReceipt_ACU['kind'][];
   effectReceipts: ZeroLayerEffectReceipt_ACU[];
+  /** prepare-turn 时冻结；旧回合缺字段按原正文投送语义处理。 */
+  simulationDeliveryTarget?: WorldSimulationDeliveryTarget_ACU;
   /** 正文开始前已确认的资料；在途工作状态不得作为公开资料展示。 */
   materialBaseline?: {
     continuation: ZeroLayerContinuationState_ACU | null;
@@ -106,6 +112,8 @@ export interface ZeroLayerTurn_ACU {
   plotCandidate?: ZeroLayerPlotCandidate_ACU;
   /** 与续写规划的完整尝试身份绑定；不是宿主生成序号或物理楼层号。 */
   continuationIdentity?: TurnAttemptIdentity_ACU;
+  /** 回合独占的投递生命周期；旧档缺失时保留旧正文路径。 */
+  worldDelivery?: WorldDeliveryLifecycle_ACU;
   /** 仅错误码，不持久化上游载荷或鉴权信息。 */
   errorCode: string | null;
 }
@@ -137,6 +145,12 @@ export interface ZeroLayerSimulationResult_ACU {
   fields: WorldSimulationLedgerFieldSnapshot_ACU;
   archive: WorldChronicleArchiveSnapshot_ACU;
   projection: string | null;
+  /** 新协议显式区分经审查的正文投送与仅保存账本；旧记录缺失时仍按原投影校验。 */
+  delivery?: 'body' | 'ledger-only';
+  /** 正文只投送 proof 授权的事实，空数组表示经审查但本轮无正文事实。 */
+  bodyFactIds?: string[];
+  /** 冻结正文格式，供历史读取和持久回执以相同模板复算。 */
+  bodyTemplate?: string;
 }
 
 /** 分支独占的推演权威快照；不存宿主分桶或物理下标。 */
@@ -149,6 +163,45 @@ export interface ZeroLayerSimulationState_ACU {
   userRequirements: WorldSimulationUserRequirementsSnapshot_ACU;
   runState: WorldSimulationRunStateRecord_ACU | null;
   runProof: WorldSimulationRunWriteProof_ACU | null;
+  /** 手动入册人物的可验证账本维护链；不生成模型回执。 */
+  actorImport?: {
+    sourceRef: WorldSimulationLogicalRef_ACU | null;
+    baseLedgerRevision: number;
+    baseLedgerFingerprint: string;
+    ledgerRevision: number;
+    ledgerFingerprint: string;
+  };
+  /** 手动删除人物的可验证账本维护链；独立于旧资料补迁，不生成模型回执。 */
+  actorRemoval?: {
+    sourceRef: WorldSimulationLogicalRef_ACU | null;
+    baseLedgerRevision: number;
+    baseLedgerFingerprint: string;
+    ledgerRevision: number;
+    ledgerFingerprint: string;
+  };
+  /** 手动删除世界事件的独立维护来源；不复用人物删除字段。 */
+  eventRemoval?: {
+    sourceRef: WorldSimulationLogicalRef_ACU | null;
+    baseLedgerRevision: number;
+    baseLedgerFingerprint: string;
+    ledgerRevision: number;
+    ledgerFingerprint: string;
+  };
+  /** 手动删除重要历史的独立维护来源；不复用人物或事件删除字段。 */
+  historyRemoval?: {
+    sourceRef: WorldSimulationLogicalRef_ACU | null;
+    baseLedgerRevision: number;
+    baseLedgerFingerprint: string;
+    ledgerRevision: number;
+    ledgerFingerprint: string;
+  };
+  legacyBackfill?: {
+    sourceRef: WorldSimulationLogicalRef_ACU | null;
+    baseLedgerRevision: number;
+    baseLedgerFingerprint: string;
+    ledgerRevision: number;
+    ledgerFingerprint: string;
+  };
   /** 每个已结算逻辑正文的快照；恢复不靠物理历史推测。 */
   confirmed: Array<{ ref: WorldSimulationLogicalRef_ACU; ledgerRevision: number }>;
 }

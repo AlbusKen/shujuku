@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 import { afterEach, describe, expect, it } from 'vitest';
-import { createApp, defineComponent, h, type App } from 'vue';
+import { createApp, defineComponent, h, nextTick, reactive, type App } from 'vue';
 import WorldSimulationSessionFeed from '../../../src/presentation-v2/components/WorldSimulationSessionFeed.vue';
 import type { WorldSimulationSessionEntry_ACU } from '../../../src/service/simulation/agent/agent-session-log';
 
@@ -71,6 +71,24 @@ describe('WorldSimulationSessionFeed', () => {
 
     expect(el.querySelector('.acu-v2-session-feed__card--run_completed')).not.toBeNull();
     expect(el.textContent).toContain('格林推演完成');
+  });
+
+  it('同一阶段卡片实时从进行中转为通过或失败，并显示当前专员', async () => {
+    const entries = reactive([entry_ACU({ kind: 'delegation', title: '人物推演第 1 批正在执行',
+      agentName: 'dramatis-keeper', status: 'running', ok: true, detail: '正在执行阶段校验' })]);
+    const el = mountFeed(entries);
+    expect(el.textContent).toContain('人物推演');
+    expect(el.textContent).toContain('进行中');
+    expect(el.querySelector('.acu-v2-session-feed__spinner')).not.toBeNull();
+    Object.assign(entries[0], { title: '人物推演第 1 批已通过', status: 'done', detail: '已覆盖 1 人，事实候选 0 项' });
+    await nextTick();
+    expect(el.textContent).toContain('已通过');
+    expect(el.querySelector('.acu-v2-session-feed__spinner')).toBeNull();
+    expect(el.querySelectorAll('.acu-v2-session-feed__card')).toHaveLength(1);
+    Object.assign(entries[0], { title: '人物推演第 1 批失败', status: 'failed', ok: false, detail: '阶段调用或校验未通过' });
+    await nextTick();
+    expect(el.textContent).toContain('失败 / 中止');
+    expect(el.querySelector('.acu-v2-session-feed__card--failed')).not.toBeNull();
   });
 
   it('派工卡片用中文角色名展示，未知 agentName 回退原名', () => {

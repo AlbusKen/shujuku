@@ -5,6 +5,8 @@ import {
 } from './model';
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import { getTableDataFingerprint_ACU } from '../table/table-data-upgrade-audit';
+import { sha256HexSync_ACU } from '../../shared/sha256-sync';
+import { canonicalPlotDeliveryJson_ACU } from '../runtime/plot-runtime/plot-causal-delivery-bridge';
 import { validateContinuationEnvelope_ACU } from '../continuation/continuation-store';
 import { validateAgentConversationFloorRecord_ACU } from '../continuation/agent/agent-conversation-store';
 import type { ZeroLayerContinuationState_ACU } from './model';
@@ -16,6 +18,8 @@ import { checkpointPath_ACU, checkpointTurnRef_ACU } from './checkpoint-payload'
 import { validateBranchPath_ACU } from './branch-path';
 import { validateZeroLayerWorkingFrame_ACU, validateZeroLayerWorkingFrameScope_ACU } from './continuation-working-frame';
 import { validateZeroLayerExitManifest_ACU } from './exit-validation';
+import { validatePlotCausalDeliveryManifest_ACU } from '../runtime/plot-runtime/plot-causal-delivery-bridge';
+import { validateWorldDeliveryLifecycle_ACU } from '../simulation/world-delivery-lifecycle';
 
 
 const PHASES_ACU: readonly ZeroLayerTurnPhase_ACU[] = [
@@ -88,6 +92,12 @@ export function validateZeroLayerPlotCandidate_ACU(raw: unknown, floorId: string
   '剧情正文世界书消息无效。');
   requireZeroLayerValue_ACU(Array.isArray(raw.filterEntries) && raw.filterEntries.every(entry => record_ACU(entry)
     && typeof entry.content === 'string' && typeof entry.comment === 'string'), '剧情过滤目录无效。');
+  if (raw.causalDelivery !== undefined) {
+    try { validatePlotCausalDeliveryManifest_ACU(raw.causalDelivery); }
+    catch { throw new ZeroLayerError_ACU('corrupt-data', '剧情因果投递 manifest 无效。'); }
+    requireZeroLayerValue_ACU(typeof raw.finalMessage === 'string' && raw.finalMessage.trim(),
+      '剧情因果投递必须绑定最终剧情消息。');
+  }
   if (raw.outcome === 'generated') {
     requireZeroLayerValue_ACU(typeof raw.finalMessage === 'string' && raw.finalMessage.trim()
       && raw.content.trim(), '已生成剧情候选缺少有效内容。');
@@ -131,6 +141,9 @@ function validateTurn_ACU(raw: unknown): asserts raw is ZeroLayerTurn_ACU {
   requireZeroLayerValue_ACU(integer_ACU(raw.createdAt) && integer_ACU(raw.updatedAt)
     && raw.updatedAt >= raw.createdAt, '回合时间无效。');
   requireZeroLayerValue_ACU(raw.errorCode === null || id_ACU(raw.errorCode), '回合错误码无效。');
+  if (raw.simulationDeliveryTarget !== undefined) {
+    requireZeroLayerValue_ACU(raw.simulationDeliveryTarget === 'body' || raw.simulationDeliveryTarget === 'plot', '回合冻结的推演投送目标无效。');
+  }
   if (raw.continuationIdentity !== undefined) {
     const identity = raw.continuationIdentity;
     requireZeroLayerValue_ACU(record_ACU(identity) && Object.keys(identity).length === 7
@@ -192,6 +205,32 @@ function validateTurn_ACU(raw: unknown): asserts raw is ZeroLayerTurn_ACU {
       && receipt.status === 'durable' && receipt.effectId === `${raw.turnId}:${raw.attemptId}:plot`
       && receipt.fingerprint === getTableDataFingerprint_ACU(raw.plotCandidate)),
     '已保存剧情候选缺少本轮持久回执。');
+  }
+  if (raw.worldDelivery !== undefined) {
+    let lifecycle;
+    try { lifecycle = validateWorldDeliveryLifecycle_ACU(raw.worldDelivery); }
+    catch { throw new ZeroLayerError_ACU('corrupt-data', '回合世界投递生命周期无效。'); }
+    const manifest = (raw.plotCandidate as ZeroLayerPlotCandidate_ACU | undefined)?.causalDelivery;
+    const ledger = (raw.materialBaseline as ZeroLayerTurn_ACU['materialBaseline'])?.simulation?.envelope?.ledger;
+    requireZeroLayerValue_ACU(lifecycle.records.length <= 1 && (lifecycle.records.length === 0 || !!manifest && !!ledger),
+      '回合投递记录缺少冻结剧情来源。');
+    for (const delivery of lifecycle.records) {
+      requireZeroLayerValue_ACU(delivery.target === 'plot' && delivery.deliveryId === manifest!.marker
+        && delivery.ledgerRevision === ledger!.revision
+        && delivery.ledgerFingerprint === sha256HexSync_ACU(canonicalPlotDeliveryJson_ACU(ledger))
+        && canonicalPlotDeliveryJson_ACU(delivery.source) === canonicalPlotDeliveryJson_ACU(manifest!.sourceAnchor)
+        && canonicalPlotDeliveryJson_ACU(delivery.factIds) === canonicalPlotDeliveryJson_ACU(manifest!.factIds),
+      '回合投递记录与冻结账本或剧情来源不一致。');
+      if (delivery.successor) {
+        const successor = delivery.successor;
+        requireZeroLayerValue_ACU(successor.kind === 'logical' && typeof raw.body === 'string'
+          && successor.contentDigest === sha256HexSync_ACU(raw.body)
+          && successor.logicalRef.turnId === raw.turnId && successor.logicalRef.attemptId === raw.attemptId
+          && successor.logicalRef.branchId === raw.branchId
+          && successor.logicalRef.floorId === (raw.assistantFloor as ZeroLayerTurn_ACU['assistantFloor']).floorId,
+        '回合投递后继与真实逻辑正文不一致。');
+      }
+    }
   }
   const tableResult = (raw.assistantFloor as ZeroLayerTurn_ACU['assistantFloor']).data.table;
   if (tableResult !== undefined) {

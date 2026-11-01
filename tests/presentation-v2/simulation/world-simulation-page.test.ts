@@ -1,25 +1,24 @@
 /**
- * WorldSimulationPage — 仅验证 v2 会话 UI 到 runtime composable 的派发与页面骨架。
- * 编排器分派语义由 simulation-runtime-entry / simulation-orchestrator 测试覆盖。
+ * WorldSimulationPage — 验证 world-round v1 页面仅暴露真实生效设置，
+ * 不再展示旧配置，资料补迁入口保持可用。
  * @vitest-environment jsdom
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import { computed, createApp, nextTick, ref } from 'vue';
-import { buildDefaultWorldSimulationEnvelope_ACU, buildDefaultWorldSimulationSettings_ACU } from '../../../src/service/simulation/defaults';
-import { useDialogStore } from '../../../src/presentation-v2/stores/dialog-store';
+import { buildDefaultWorldSimulationEnvelope_ACU, buildDefaultWorldSimulationSettings_ACU, buildEmptyWorldSimulationLedger_ACU } from '../../../src/service/simulation/defaults';
 
 const mountedApps = new Set<{ unmount: () => void }>();
 const chatTick = ref(0);
 const mutationTick = ref(0);
 const ready = ref(true);
 const busy = ref(false);
+const legacyBackfillPreview = ref<any>(null);
+const legacyBackfillResult = ref<any>(null);
+const legacyBackfillError = ref('');
 const error = ref('');
 const snapshot = ref<any>(null);
 const settings = ref<any>(buildDefaultWorldSimulationSettings_ACU());
-const nativeToolEnabled = ref(false);
-const setNativeToolEnabled = vi.fn((value: boolean) => { nativeToolEnabled.value = value; });
-const presentPromptSegments = vi.fn((_role: string, segments: any[]) => segments);
 const statusText = ref('尚未创建任务');
 const stageText = ref('尚未创建任务');
 const revisionText = ref('');
@@ -32,8 +31,12 @@ const resume = vi.fn(async () => true);
 const saveSettings = vi.fn(async () => 'saved' as const);
 const saveUserRequirements = vi.fn(async () => true);
 const clearData = vi.fn(async () => true);
-const restorePromptDefault = vi.fn((draft: any) => draft);
-const parsePromptBundle = vi.fn();
+const deleteActor = vi.fn(async (_id: string) => true);
+const deleteWorldEvent = vi.fn(async (_id: string) => true);
+const deleteWorldHistory = vi.fn(async (_id: string) => true);
+const scanWorldbookActors = vi.fn(async () => true);
+const previewLegacyBackfill = vi.fn(async () => true);
+const applyLegacyBackfill = vi.fn(async () => true);
 const resyncAfterChatMutation = vi.fn();
 
 const envelope = computed(() => snapshot.value?.envelope ?? null);
@@ -44,16 +47,14 @@ const anchor = computed(() => snapshot.value?.anchor ?? null);
 const entries = computed(() => snapshot.value?.session.entries ?? []);
 const running = computed(() => snapshot.value?.session.running ?? false);
 
-vi.mock('../../../src/presentation-v2/composables/useWorldSimulationRuntime', async () => {
-  const projection = await import('../../../src/service/simulation/simulation-projection');
-  return { useWorldSimulationRuntime: () => ({
-    defaultProjectionTemplate: projection.DEFAULT_WORLD_SIMULATION_PROJECTION_TEMPLATE_ACU,
-    projectionTemplateError: projection.worldSimulationProjectionTemplateError_ACU,
-    snapshot, ready, busy, error, envelope, task, settings, activeStage, activeRevision, anchor, anchorText, entries, running,
-    statusText, stageText, revisionText, refresh, initialize, send, stop, resume, saveSettings, saveUserRequirements, clearData, restorePromptDefault, parsePromptBundle, resyncAfterChatMutation,
-    nativeToolEnabled, setNativeToolEnabled, presentPromptSegments,
-  }) };
-});
+vi.mock('../../../src/presentation-v2/composables/useWorldSimulationRuntime', () => ({
+  useWorldSimulationRuntime: () => ({
+    snapshot, ready, busy, legacyBackfillPreview, legacyBackfillResult, legacyBackfillError, error,
+    envelope, task, settings, activeStage, activeRevision, anchor, anchorText, entries, running,
+    statusText, stageText, revisionText, refresh, initialize, send, stop, resume, saveSettings,
+    saveUserRequirements, clearData, deleteActor, deleteWorldEvent, deleteWorldHistory, scanWorldbookActors, previewLegacyBackfill, applyLegacyBackfill, resyncAfterChatMutation,
+  }),
+}));
 vi.mock('../../../src/presentation-v2/composables/useApiPresetSelectOptions', async () => {
   const { ref } = await import('vue');
   return {
@@ -64,7 +65,10 @@ vi.mock('../../../src/presentation-v2/composables/useApiPresetSelectOptions', as
     }),
   };
 });
-vi.mock('../../../src/presentation-v2/composables/useChatChangedListener', () => ({ useChatChangedTick: () => chatTick, useChatMutationTick: () => mutationTick }));
+vi.mock('../../../src/presentation-v2/composables/useChatChangedListener', () => ({
+  useChatChangedTick: () => chatTick,
+  useChatMutationTick: () => mutationTick,
+}));
 
 function baseSnapshot(overrides: Record<string, unknown> = {}) {
   return {
@@ -80,30 +84,12 @@ function baseSnapshot(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function setTask(status: 'paused' | 'running' | 'completed' = 'paused', stopReason: string | null = null) {
-  const identity = {
-    runId: 'run', chatIdentity: 'chat-a', triggerKind: 'agent_chat_message', triggerConversationMessageId: 'turn-1',
-    anchorMessageId: 7, anchorMessageKey: 'number:7', anchorSwipeId: '0', anchorContentDigest: 'd', baseLedgerRevision: 0, taskId: 'task', stageId: 'stage', stageRevision: 1,
-  };
-  const next = baseSnapshot();
-  next.envelope.task = { taskId: 'task', originInstruction: '推进', status, createdAt: 1, updatedAt: 1, activeRun: status === 'completed' ? null : identity, stopReason } as any;
-  next.envelope.activeStageId = 'stage';
-  next.envelope.stages = [{ stageId: 'stage', stageNumber: 1, status: 'running', activeRevision: 1, revisions: [{ revision: 1, createdAt: 1, reason: 'initial', replanInstruction: '', frozen: true, plan: { schemaVersion: 1, title: '北境阶段', objective: '核实边境压力', impactScope: [], factsToVerify: [], plannedTools: [], plannedSpecialists: [], expectedLedgerChanges: [], convergenceConditions: [], blockingConditions: [], completedSteps: [], nextStep: '' } }] }] as any;
-  next.session.running = status === 'running';
-  snapshot.value = next;
-  statusText.value = status === 'running' ? '运行中' : status === 'paused' ? '已暂停 · 用户手动停止' : '已完成';
-  stageText.value = '第 1 阶段';
-  revisionText.value = 'revision 1';
-}
-
 async function mountPage() {
   const Page = (await import('../../../src/presentation-v2/pages/WorldSimulationPage.vue')).default;
   const host = document.createElement('div');
   document.body.appendChild(host);
-  const pinia = createPinia();
-  setActivePinia(pinia);
   const app = createApp(Page);
-  app.use(pinia);
+  app.use(createPinia());
   const originalUnmount = app.unmount.bind(app);
   app.unmount = () => { mountedApps.delete(app); originalUnmount(); };
   mountedApps.add(app);
@@ -113,22 +99,14 @@ async function mountPage() {
 }
 
 const button = (host: Element, text: string) => Array.from(host.querySelectorAll<HTMLButtonElement>('button')).find(item => item.textContent?.includes(text));
-const chatInput = (host: Element) => host.querySelector<HTMLTextAreaElement>('.acu-v2-agent-chat__input')!;
+const row = (host: Element, label: string) => Array.from(host.querySelectorAll<HTMLElement>('.acu-form-row')).find(item => item.querySelector('.acu-form-row__label')?.textContent?.trim() === label)!;
 
-function typeInto(textarea: HTMLTextAreaElement, value: string): void {
-  textarea.value = value;
-  textarea.dispatchEvent(new Event('input', { bubbles: true }));
-}
-
-/** 首次发送（task=null）会先弹高 RPM 风险确认框（5 秒倒计时）；需要调用方已开启 fake timers。 */
-async function passFirstSendRpmConfirm(): Promise<void> {
-  const dialog = useDialogStore();
-  expect(dialog.active?.kind).toBe('confirm');
-  dialog.submitActive();
-  expect(dialog.active?.kind).toBe('confirm');
-  await vi.advanceTimersByTimeAsync(5000);
-  dialog.submitActive();
-  expect(dialog.active).toBeNull();
+async function selectOption(host: Element, label: string, option: string): Promise<void> {
+  const target = row(host, label);
+  target.querySelector<HTMLButtonElement>('.acu-select__trigger')!.click();
+  await nextTick();
+  Array.from(target.querySelectorAll<HTMLLIElement>('.acu-select__item')).find(item => item.textContent?.trim() === option)!.click();
+  await nextTick();
 }
 
 beforeEach(() => {
@@ -138,16 +116,17 @@ beforeEach(() => {
   mutationTick.value = 0;
   ready.value = true;
   busy.value = false;
+  legacyBackfillPreview.value = null;
+  legacyBackfillResult.value = null;
+  legacyBackfillError.value = '';
   error.value = '';
   settings.value = buildDefaultWorldSimulationSettings_ACU();
-  nativeToolEnabled.value = false;
   snapshot.value = baseSnapshot();
-  statusText.value = '尚未创建任务';
-  stageText.value = '尚未创建任务';
-  revisionText.value = '';
   vi.clearAllMocks();
+  deleteActor.mockResolvedValue(true);
+  deleteWorldEvent.mockResolvedValue(true);
+  deleteWorldHistory.mockResolvedValue(true);
   saveSettings.mockResolvedValue('saved' as const);
-  send.mockResolvedValue(true);
 });
 
 afterEach(() => {
@@ -156,391 +135,464 @@ afterEach(() => {
 });
 
 describe('WorldSimulationPage', () => {
-  it('切换工具模式保留设置草稿，段启用编辑不固化展示映射正文', async () => {
+  it.each([
+    ['单 Agent', '直接正文', 'single', 'body'],
+    ['单 Agent', '剧情推进', 'single', 'plot'],
+    ['分层', '直接正文', 'layered', 'body'],
+    ['分层', '剧情推进', 'layered', 'plot'],
+  ])('工作流四种组合：%s / %s 自动保存为真实运行选择', async (_workflowLabel, _deliveryLabel, workflowMode, deliveryTarget) => {
     vi.useFakeTimers();
-    settings.value.agentPrompts['world-director'] = [{ role: 'system', content: '原始导演正文', enabled: true, deletable: true, pinned: false }];
-    presentPromptSegments.mockImplementation((_role, segments) => segments.map(segment => ({ ...segment,
-      content: nativeToolEnabled.value ? '工具模式展示正文' : segment.content })));
-    try {
-      const { app, host } = await mountPage();
-      const budget = host.querySelector<HTMLInputElement>('input.acu-input[type="number"]')!;
-      budget.value = '90000';
-      budget.dispatchEvent(new Event('input', { bubbles: true }));
-      await nextTick();
-      const group = Array.from(host.querySelectorAll<HTMLElement>('.acu-v2-world-simulation-page__group'))
-        .find(item => item.querySelector('.acu-disclosure-group__label')?.textContent?.includes('world-director'))!;
-      group.querySelector<HTMLButtonElement>('.acu-disclosure-group__header')!.click();
-      await nextTick();
-      nativeToolEnabled.value = true;
-      await nextTick();
-      expect(group.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe('工具模式展示正文');
-      expect(budget.value).toBe('90000');
-      group.querySelector<HTMLButtonElement>('.acu-prompt-segs__item [role="checkbox"]')!.click();
-      await nextTick();
-      await vi.advanceTimersByTimeAsync(900);
-      expect(saveSettings).toHaveBeenCalledOnce();
-      expect(saveSettings.mock.calls[0][0]).toMatchObject({ agentHistoryTokenBudget: 90000,
-        agentPrompts: { 'world-director': [{ content: '原始导演正文', enabled: false }] } });
-      expect(settings.value.agentPrompts['world-director'][0].content).toBe('原始导演正文');
-      app.unmount();
-    } finally { presentPromptSegments.mockImplementation((_role, segments) => segments); }
-  });
-
-
-  it('页面骨架与智能续写同构：会话面板整宽在上，资料与设置并列，提示词独立面板；不再有显式保存按钮', async () => {
+    settings.value.workflowMode = workflowMode === 'single' ? 'layered' : 'single';
+    settings.value.deliveryTarget = deliveryTarget === 'body' ? 'plot' : 'body';
+    snapshot.value = baseSnapshot();
     const { host } = await mountPage();
-    const root = host.querySelector('.acu-v2-world-simulation-page')!;
-    const children = Array.from(root.children);
-    expect(children[0].textContent).toContain('Agent 会话');
-    expect(children[1].classList.contains('acu-panel-grid')).toBe(true);
-    expect(children[1].textContent).toContain('已有资料');
-    expect(children[1].textContent).toContain('推演设置');
-    expect(host.textContent).not.toContain('自动修复违规模块');
-    expect(host.textContent).not.toContain('自动修复开');
-    expect(children[2].textContent).toContain('伪 Role 提示词');
-    // 旧版把整个工作区塞进 2 列网格的单个格子里；现在会话面板直接是页面子级，内部不再嵌套第二层面板。
-    expect(children[0].classList.contains('acu-panel')).toBe(true);
-    expect(children[0].querySelectorAll('.acu-panel').length).toBe(0);
-    expect(host.textContent).not.toContain('格林推演 Agent 会话');
-    expect(button(host, '保存格林推演设置')).toBeUndefined();
-    expect(host.textContent).toContain('锚点 第 1 楼 · swipe 1');
+    await selectOption(host, '工作流模式', _workflowLabel);
+    await vi.advanceTimersByTimeAsync(900);
+    await selectOption(host, '投送目标', _deliveryLabel);
+    await vi.advanceTimersByTimeAsync(900);
+    const saved = saveSettings.mock.calls.map(([candidate]) => candidate);
+    expect(saved.length).toBeGreaterThan(0);
+    expect(saved.at(-1)).toEqual(expect.objectContaining({ workflowMode, deliveryTarget }));
   });
 
-  it('挂载与聊天变化只严格刷新，不隐式保存；楼层变动走会话重灌', async () => {
-    await mountPage();
-    expect(refresh).toHaveBeenCalledTimes(1);
-    expect(saveSettings).not.toHaveBeenCalled();
-    chatTick.value++;
-    await nextTick();
-    expect(refresh).toHaveBeenCalledTimes(2);
-    mutationTick.value++;
-    await nextTick();
-    expect(resyncAfterChatMutation).toHaveBeenCalledTimes(1);
-    expect(saveSettings).not.toHaveBeenCalled();
-  });
-
-  it('无任务时首条消息经高 RPM 确认后交给 runtime 发送并清空草稿', async () => {
+  it('有效读取预算自动保存，无效单次请求上限在页面报错且不写入', async () => {
     vi.useFakeTimers();
     const { host } = await mountPage();
-    typeInto(chatInput(host), '推进北境局势');
-    await nextTick();
-    button(host, '发送')!.click();
-    await nextTick();
-    expect(send).not.toHaveBeenCalled();
-    await passFirstSendRpmConfirm();
+    const readBudget = row(host, '单批次读取上限').querySelector<HTMLInputElement>('input')!;
+    readBudget.value = '25%';
+    readBudget.dispatchEvent(new Event('input', { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(900);
+    expect(saveSettings).toHaveBeenCalledWith(expect.objectContaining({ agentReadTokenBudget: '25%' }));
+
+    saveSettings.mockClear();
+    const historyBudget = row(host, '单次请求 token 上限').querySelector<HTMLInputElement>('input')!;
+    historyBudget.value = '-1';
+    historyBudget.dispatchEvent(new Event('input', { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(900);
+    expect(saveSettings).not.toHaveBeenCalled();
+    expect(host.textContent).toContain('单次请求 token 上限 必须是 1 到 1000000 之间的整数');
+  });
+
+  it('全局和角色 API 渠道选择均自动保存', async () => {
+    vi.useFakeTimers();
+    const { host } = await mountPage();
+    await selectOption(host, 'API 预设（全局默认）', '预设A');
     await vi.advanceTimersByTimeAsync(0);
-    await nextTick();
-    expect(send).toHaveBeenCalledWith('推进北境局势');
-    expect(chatInput(host).value).toBe('');
-  });
+    expect(saveSettings).toHaveBeenLastCalledWith(expect.objectContaining({ apiPresetMode: 'fixed', fixedApiPresetName: '预设A' }));
 
-  it('首次发送确认框被取消时不派发且保留草稿', async () => {
-    const { host } = await mountPage();
-    typeInto(chatInput(host), '推进北境局势');
-    await nextTick();
-    button(host, '发送')!.click();
-    await nextTick();
-    const dialog = useDialogStore();
-    expect(dialog.active?.kind).toBe('confirm');
-    dialog.cancelActive();
-    await nextTick();
-    expect(send).not.toHaveBeenCalled();
-    expect(chatInput(host).value).toBe('推进北境局势');
-  });
-
-  it('已有任务时发送不弹确认框；消息未被接收时保留草稿', async () => {
-    setTask('paused', 'manual');
-    send.mockResolvedValueOnce(false);
-    const { host } = await mountPage();
-    typeInto(chatInput(host), '补充：北境是重点');
-    await nextTick();
-    button(host, '发送')!.click();
-    await Promise.resolve();
-    await nextTick();
-    expect(useDialogStore().active).toBeNull();
-    expect(send).toHaveBeenCalledWith('补充：北境是重点');
-    expect(chatInput(host).value).toBe('补充：北境是重点');
-    expect(host.textContent).toContain('已暂停 · 用户手动停止');
-  });
-
-  it('运行中只显示停止，点击调用 runtime.stop', async () => {
-    setTask('running');
-    const { host } = await mountPage();
-    expect(button(host, '发送')).toBeUndefined();
-    const stopButton = button(host, '停止')!;
-    stopButton.click();
-    await nextTick();
-    expect(stop).toHaveBeenCalledTimes(1);
-    expect(host.textContent).toContain('运行中');
-  });
-
-  it('设置修改后 800ms 防抖经 runtime 保存；渠道选择立即保存', async () => {
-    vi.useFakeTimers();
-    const { host } = await mountPage();
-    const historyInput = host.querySelector<HTMLInputElement>('input.acu-input[type="number"]')!;
-    historyInput.value = '90000';
-    historyInput.dispatchEvent(new Event('input', { bubbles: true }));
-    await nextTick();
-    expect(saveSettings).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(900);
-    expect(saveSettings).toHaveBeenCalledOnce();
-    expect(saveSettings.mock.calls[0][0]).toMatchObject({ agentHistoryTokenBudget: 90000, agentRunBudget: { maxIterations: 4 } });
-
-    host.querySelector<HTMLButtonElement>('.acu-select__trigger')!.click();
-    await nextTick();
-    const option = Array.from(host.querySelectorAll<HTMLLIElement>('.acu-select__item')).find(item => item.textContent?.trim() === '预设A')!;
-    option.click();
-    await nextTick();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(saveSettings).toHaveBeenCalledTimes(2);
-    expect(saveSettings.mock.calls[1][0]).toMatchObject({ apiPresetMode: 'fixed', fixedApiPresetName: '预设A' });
-  });
-
-  it('运行中保存返回 busy：显示排队提示并自动重试，落盘后提示消失', async () => {
-    vi.useFakeTimers();
-    setTask('running');
-    saveSettings.mockResolvedValueOnce('busy' as any);
-    const { host } = await mountPage();
-    const historyInput = host.querySelector<HTMLInputElement>('input.acu-input[type="number"]')!;
-    historyInput.value = '80000';
-    historyInput.dispatchEvent(new Event('input', { bubbles: true }));
-    await nextTick();
-    await vi.advanceTimersByTimeAsync(900);
-    expect(saveSettings).toHaveBeenCalledOnce();
-    expect(host.textContent).toContain('将在本轮结束后自动保存');
-    await vi.advanceTimersByTimeAsync(900);
-    expect(saveSettings).toHaveBeenCalledTimes(2);
-    await nextTick();
-    expect(host.textContent).not.toContain('将在本轮结束后自动保存');
-  });
-
-  it('非法设置值在页面内报错且不落盘', async () => {
-    vi.useFakeTimers();
-    const { host } = await mountPage();
-    const historyInput = host.querySelector<HTMLInputElement>('input.acu-input[type="number"]')!;
-    historyInput.value = '-5';
-    historyInput.dispatchEvent(new Event('input', { bubbles: true }));
-    await nextTick();
-    await vi.advanceTimersByTimeAsync(900);
-    expect(saveSettings).not.toHaveBeenCalled();
-    expect(host.textContent).toContain('会话自动总结阈值 必须是 0 到 1000000 之间的整数');
-  });
-
-  it('设置与提示词按分组折叠，渠道与提示词分组使用中文角色名', async () => {
-    const { host } = await mountPage();
-    const groups = Array.from(host.querySelectorAll<HTMLElement>('.acu-v2-world-simulation-page__group'));
-    const labels = groups.map(group => group.querySelector('.acu-disclosure-group__label')?.textContent?.trim());
-    expect(labels).toEqual(expect.arrayContaining(['Agent 运行预算', '设定研究（网页检索）', '世界动态', '工作流', '各 Agent 渠道', '主 Agent（world-director）提示词', '因果审核（causality-reviewer）提示词', '占位符速查']));
-    for (const group of groups) {
-      expect(group.querySelector('.acu-disclosure-group__header')?.getAttribute('aria-expanded')).toBe('false');
-    }
-    const channelGroup = groups.find(group => group.textContent?.includes('各 Agent 渠道'))!;
+    const channelGroup = Array.from(host.querySelectorAll<HTMLElement>('.acu-v2-world-simulation-page__group'))
+      .find(group => group.classList.contains('acu-v2-world-simulation-page__channels'))!;
     channelGroup.querySelector<HTMLButtonElement>('.acu-disclosure-group__header')!.click();
     await nextTick();
-    expect(channelGroup.textContent).toContain('时序与伏线');
-    expect(channelGroup.textContent).toContain('纪要、风声与场外信号');
-    expect(channelGroup.textContent).not.toContain('旧角色：时计');
-    expect(channelGroup.textContent).not.toContain('设定研究');
-    const topLevelLabels = Array.from(host.querySelectorAll<HTMLElement>('.acu-form-row__label'))
-      .filter(label => !label.closest('.acu-v2-world-simulation-page__group'))
-      .map(label => label.textContent?.trim());
-    expect(topLevelLabels).toContain('API 预设（全局默认）');
-    expect(topLevelLabels).not.toContain('主 Agent 迭代上限');
+    const firstChannel = channelGroup.querySelector<HTMLElement>('.acu-form-row')!;
+    firstChannel.querySelector<HTMLButtonElement>('.acu-select__trigger')!.click();
+    await nextTick();
+    Array.from(firstChannel.querySelectorAll<HTMLLIElement>('.acu-select__item')).find(item => item.textContent?.trim() === '预设A')!.click();
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(saveSettings).toHaveBeenLastCalledWith(expect.objectContaining({ agentApiPresets: expect.any(Object) }));
   });
 
-  it('资料面板：场外信号页签渲染 runtime 提供的 projection preview，一键清空需确认后才调用 clearData', async () => {
-    snapshot.value = baseSnapshot({ projectionPreview: '<!-- projection-test -->北境压力上升' });
-    const { host } = await mountPage();
-    expect(host.textContent).toContain('账本总览');
-    expect(host.textContent).not.toContain('待修复');
-    button(host, '场外信号')!.click();
-    await nextTick();
-    expect(host.textContent).toContain('按当前账本渲染的〈与此同时〉段');
-    expect(host.textContent).toContain('北境压力上升');
-
-    button(host, '一键清空')!.click();
-    await nextTick();
-    expect(clearData).not.toHaveBeenCalled();
-    expect(host.textContent).toContain('确认清空');
-    button(host, '确认清空')!.click();
-    await nextTick();
-    expect(clearData).toHaveBeenCalledTimes(1);
-  });
-
-  it('资料面板：幕后纪要、错过清单与风声按账本只读展示', async () => {
-    const next = baseSnapshot();
-    next.envelope.ledger = {
-      ...next.envelope.ledger,
-      clock: { day: 47, slot: '', storyTime: '第47日', precision: 'exact', evidenceRefs: [] },
-      chronicle: [{ id: 'death-north', at: '第12日', summary: '铁匠死于北岭', relatedIds: ['rumor-tax'], evidenceRefs: [], missedNote: '主角远在客栈，没能拦下进山的铁匠' }],
-      rumors: [{
-        id: 'rumor-tax', fact: '铁匠死在北岭', originDay: 12, earliestRevealDay: 17, channels: ['客栈'],
-        relatedActorIds: [], status: 'revealed', revealedAtDay: 47, revision: 1,
-      }],
-      seeds: [{
-        id: 'seed-miss', title: '矿洞时限', status: 'retired', level: 1, catalyst: '限期未至', visibility: 'hidden',
-        actorIds: [], location: { region: '北岭' }, expiresAtDay: 10, missedOutcome: '矿洞塌了',
-        exposePolicy: 'on_collision', evidenceRefs: [], retiredReason: 'missed', revision: 1,
-      }],
-      player: { location: { region: '客栈' }, locationUpdatedAtDay: 47, regionVisits: [{ region: '客栈', day: 22 }], contact: 'open', evidenceRefs: [] },
-      pendingFixes: [{
-        module: 'actors', candidateId: 'candidate:actors', agentName: 'dramatis-keeper',
-        violations: [{ path: '$.patch.actors', message: 'locationRef 必须是对象或 null' }],
-        attempts: 2, firstFailedAtDay: 47, lastError: 'locationRef 必须是对象或 null',
-        source: 'transaction_rejected', completion: 'failed', acceptedKeys: [], anchor: null,
-        createdAt: 1, updatedAt: 1,
-      }],
-    };
-    next.envelope.timeline = [{ id: 'run:swept', at: 't1', kind: 'swept', taskId: 'task', message: 'seed-miss' }];
-    snapshot.value = next;
-    const { host } = await mountPage();
-    expect(host.textContent).toContain('待修复的写入（1 条）');
-    expect(host.textContent).toContain('locationRef 必须是对象或 null');
-    expect(host.textContent).toContain('幕后纪要');
-    expect(host.textContent).toContain('错过清单');
-    expect(host.textContent).toContain('风声');
-
-    button(host, '幕后纪要')!.click();
-    await nextTick();
-    expect(host.textContent).toContain('铁匠死于北岭');
-    expect(host.textContent).toContain('滞后 35 天');
-
-    button(host, '错过清单')!.click();
-    await nextTick();
-    expect(host.textContent).toContain('主角远在客栈，没能拦下进山的铁匠');
-    expect(host.textContent).toContain('铁匠死于北岭');
-    // 错过清单卡片只来自 missedNote 纪要，不再出现「清扫」动作徽标（设置区的「错过清扫」开关不在此范围）。
-    const badges = Array.from(host.querySelectorAll('.acu-v2-ws-materials__badge')).map(item => item.textContent?.trim());
-    expect(badges).toContain('错过');
-    expect(badges).not.toContain('清扫');
-
-    button(host, '风声')!.click();
-    await nextTick();
-    expect(host.textContent).toContain('接触状态：开放');
-    // 已得知的风声属于已结束条目：归档不显示，只给出计数。
-    expect(host.textContent).toContain('已得知 1 条');
-    expect(host.textContent).not.toContain('铁匠死在北岭');
-  });
-
-  it('世界动态非法值在页面内报错且不落盘', async () => {
+  it('渠道使用表单行展开，自动推演位于下方且切换后保存', async () => {
     vi.useFakeTimers();
     const { host } = await mountPage();
-    const groups = Array.from(host.querySelectorAll<HTMLElement>('.acu-v2-world-simulation-page__group'));
-    const dynamicsGroup = groups.find(group => group.textContent?.includes('世界动态'))!;
-    dynamicsGroup.querySelector<HTMLButtonElement>('.acu-disclosure-group__header')!.click();
+    const channels = row(host, '各角色渠道');
+    const trigger = channels.querySelector<HTMLButtonElement>('.acu-disclosure-group__header')!;
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    trigger.click();
     await nextTick();
-    const ttlInput = Array.from(host.querySelectorAll<HTMLInputElement>('input.acu-input[type="number"]')).find(input => {
-      const label = input.closest('.acu-form-row')?.querySelector('.acu-form-row__label')?.textContent?.trim();
-      return label === '风声等待上限（天）';
-    })!;
-    ttlInput.value = '0';
-    ttlInput.dispatchEvent(new Event('input', { bubbles: true }));
-    await nextTick();
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    expect(channels.querySelectorAll('.acu-select')).toHaveLength(4);
+    const toggle = host.querySelector<HTMLButtonElement>('.acu-v2-world-simulation-page__auto-trigger')!;
+    expect(channels.compareDocumentPosition(toggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const checked = toggle.getAttribute('aria-checked') === 'true';
+    toggle.click();
     await vi.advanceTimersByTimeAsync(900);
-    expect(saveSettings).not.toHaveBeenCalled();
-    expect(host.textContent).toContain('风声等待上限 必须是 1 到 3650 之间的整数');
+    expect(saveSettings).toHaveBeenLastCalledWith(expect.objectContaining({ autoTriggerEnabled: !checked }));
+    expect([...host.querySelectorAll('.acu-panel__title')].map(item => item.textContent?.trim())).toContain('推演提示词');
+    expect(host.textContent).not.toContain('正式业务提示词');
   });
 
-  it('锚点 stale 时在状态横幅下渲染 expected/actual 差异；非该错误不渲染', async () => {
-    setTask('paused');
-    const next = snapshot.value;
-    next.envelope.task.status = 'failed';
-    next.envelope.lastError = {
-      code: 'WORLD_SIMULATION_ANCHOR_STALE',
-      phase: 'anchor',
-      message: '格林推演冻结锚点已变化，拒绝继续写入',
-      retryable: false,
-      details: {
-        expected: { chatIdentity: 'chat-a', messageKey: 'number:7', swipeId: '0', contentDigest: 'aaaaaaaaaaaabbbb' },
-        actual: { chatIdentity: 'chat-a', messageKey: 'number:7', swipeId: '1', contentDigest: 'ccccccccccccdddd' },
-      },
-    };
-    snapshot.value = next;
-    statusText.value = '已失败 · 最近错误：格林推演冻结锚点已变化，拒绝继续写入';
+  it('删除旧提示词与配置的展示、导出入口，仍保留新版编辑入口', async () => {
+    settings.value.agentPrompts['world-director'] = [{ role: 'system', content: '我的旧导演提示词', enabled: true, deletable: true, pinned: false }];
+    snapshot.value = baseSnapshot();
     const { host } = await mountPage();
-    const diff = host.querySelector('.acu-v2-agent-chat__anchor-diff');
-    expect(diff).not.toBeNull();
-    expect(diff?.textContent).toContain('swipeId expected=0 actual=1');
-    expect(diff?.textContent).toContain('contentDigest expected=aaaaaaaaaaaa actual=cccccccccccc');
-    expect(host.textContent).toContain('已失败 · 最近错误：格林推演冻结锚点已变化，拒绝继续写入');
-
-    next.envelope.lastError = {
-      code: 'WORLD_SIMULATION_CHAT_CHANGED',
-      phase: 'anchor',
-      message: '聊天已切换',
-      retryable: false,
-      details: { expected: { swipeId: '0' }, actual: { swipeId: '1' } },
-    };
-    snapshot.value = { ...next };
-    await nextTick();
-    expect(host.querySelector('.acu-v2-agent-chat__anchor-diff')).toBeNull();
-    expect(host.textContent).not.toContain('锚点差异');
-  });
-
-  it('严格读取失败时展示结构化错误且不渲染会话输入与资料', async () => {
-    ready.value = false;
-    error.value = 'WORLD_SIMULATION_ENVELOPE_INVALID: envelope 损坏';
-    snapshot.value = null;
-    const { host } = await mountPage();
-    expect(host.textContent).toContain('WORLD_SIMULATION_ENVELOPE_INVALID');
-    expect(host.querySelector('.acu-v2-agent-chat__input')).toBeNull();
-    expect(host.textContent).not.toContain('还没有运行记录');
-    expect(saveSettings).not.toHaveBeenCalled();
-    button(host, '重新读取')!.click();
-    expect(refresh).toHaveBeenCalledTimes(2);
-  });
-
-  it('逐条编辑用户要求：空标签拒绝保存，失败保留草稿，成功使用数组且不回退到旧快照', async () => {
-    snapshot.value = baseSnapshot({
-      userRequirements: { snapshot: { requirements: ['旧要求'], updatedAt: 1 }, diagnostics: [], adoptedIndex: 0 },
-    });
-    const { host } = await mountPage();
-    button(host, '用户要求')!.click();
-    await nextTick();
-    const input = () => host.querySelector<HTMLTextAreaElement>('.acu-requirements-editor textarea')!;
-    expect(input().value).toBe('旧要求');
-    button(host, '新增标签')!.click();
-    await nextTick();
-    button(host, '保存用户要求')!.click();
-    await nextTick();
-    expect(saveUserRequirements).not.toHaveBeenCalled();
-    expect(host.querySelector('[role="alert"]')?.textContent).toContain('不能为空');
-
-    const added = host.querySelectorAll<HTMLTextAreaElement>('.acu-requirements-editor textarea')[1]!;
-    typeInto(added, '  新要求  ');
-    await nextTick();
-    saveUserRequirements.mockResolvedValueOnce(false).mockRejectedValueOnce(new Error('写入失败')).mockResolvedValueOnce(true);
-    for (const message of ['保存失败，修改已保留', '写入失败']) {
-      button(host, '保存用户要求')!.click();
-      await new Promise(resolve => setTimeout(resolve, 0));
-      await nextTick();
-      expect(host.querySelectorAll<HTMLTextAreaElement>('.acu-requirements-editor textarea')[1]!.value).toBe('  新要求  ');
-      expect(host.querySelector('[role="alert"]')?.textContent).toContain(message);
-      expect(button(host, '保存用户要求')?.disabled).toBe(false);
+    for (const label of ['旧版提示词', '旧版配置', '导出旧三项审查', '我的旧导演提示词', '旧场景', '旧秘密触发', '旧正文采用']) {
+      expect(host.textContent).not.toContain(label);
     }
-    button(host, '保存用户要求')!.click();
+    expect(host.textContent).toContain('推演提示词');
+    expect(button(host, '导出推演提示词 JSON')).toBeDefined();
+    expect(button(host, '导入推演提示词 JSON')).toBeDefined();
+    expect(saveSettings).not.toHaveBeenCalled();
+  });
+
+  it('四份正式业务稿展示为派生默认；编辑后仅持久化目标角色，单模式附加稿可独立编辑', async () => {
+    vi.useFakeTimers();
+    const { host } = await mountPage();
+    const registrarGroup = Array.from(host.querySelectorAll<HTMLElement>('.acu-v2-world-simulation-page__group'))
+      .find(group => group.querySelector('.acu-disclosure-group__label')?.textContent?.trim() === '世界书角色整理')!;
+    expect(registrarGroup.querySelectorAll('textarea').length).toBeGreaterThan(1);
+    expect(registrarGroup.textContent).toContain('世界书角色整理');
+    expect(saveSettings).not.toHaveBeenCalled();
+    const clockGroup = Array.from(host.querySelectorAll<HTMLElement>('.acu-v2-world-simulation-page__group'))
+      .find(group => group.querySelector('.acu-disclosure-group__label')?.textContent?.trim() === '时钟与召回')!;
+    const jointGroup = Array.from(host.querySelectorAll<HTMLElement>('.acu-v2-world-simulation-page__group'))
+      .find(group => group.textContent?.includes('联合审查'))!;
+    const singleGroup = Array.from(host.querySelectorAll<HTMLElement>('.acu-v2-world-simulation-page__group'))
+      .find(group => group.textContent?.includes('单模式附加自定义'))!;
+    expect(clockGroup.textContent).not.toContain('程序派生的默认业务稿');
+    expect(clockGroup.querySelectorAll('textarea').length).toBeGreaterThan(1);
+    expect(jointGroup.textContent).toContain('联合审查');
+    expect(singleGroup.textContent).toContain('未配置');
+    clockGroup.querySelector<HTMLButtonElement>('.acu-disclosure-group__header')!.click();
+    await nextTick();
+    const content = clockGroup.querySelector<HTMLTextAreaElement>('textarea')!;
+    content.value = '仅供时钟召回使用';
+    content.dispatchEvent(new Event('input', { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(900);
+    const candidate = saveSettings.mock.calls.at(-1)?.[0];
+    expect(candidate.worldRoundPrompts['clock-recaller'][0]).toEqual(expect.objectContaining({ content: '仅供时钟召回使用' }));
+    expect(candidate.worldRoundPrompts['joint-reviewer']).toBeUndefined();
+    singleGroup.querySelector<HTMLButtonElement>('.acu-disclosure-group__header')!.click();
+    await nextTick();
+    button(singleGroup, '添加段')!.click();
+    await nextTick();
+    expect(singleGroup.querySelectorAll('textarea')).toHaveLength(1);
+  });
+
+  it('正式业务稿导出当前有效默认，且不覆盖既有自定义', async () => {
+    if (!URL.createObjectURL) Object.assign(URL, { createObjectURL: () => 'blob:prompts' });
+    if (!URL.revokeObjectURL) Object.assign(URL, { revokeObjectURL: () => undefined });
+    const objectUrl = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:prompts');
+    const { host } = await mountPage();
+    button(host, '导出推演提示词 JSON')!.click();
+    const blob = objectUrl.mock.calls.at(-1)?.[0] as Blob;
+    const exported = JSON.parse(await blob.text()) as { worldRoundPrompts: Record<string, Array<{ content: string }>> };
+    expect(exported.worldRoundPrompts['clock-recaller'].length).toBeGreaterThan(1);
+    expect(exported.worldRoundPrompts['joint-reviewer'].map(item => item.content).join('\n')).toContain('联合审查');
+    expect(exported.worldRoundPrompts['worldbook-registrar'].map(item => item.content).join('\n')).toContain('世界书人物登记专员');
+    expect(exported.worldRoundPrompts['worldbook-registrar'].map(item => item.content).join('\n')).toContain('一次判断全部已提供世界书条目');
+    expect(saveSettings).not.toHaveBeenCalled();
+  });
+
+  it('正式提示词支持禁用、删除及上下移动', async () => {
+    const settingsWithPrompts = buildDefaultWorldSimulationSettings_ACU() as any;
+    settingsWithPrompts.worldRoundPrompts = {
+      'clock-recaller': [
+        { role: 'system', content: '第一段', enabled: true, deletable: true, pinned: false },
+        { role: 'user', content: '第二段', enabled: true, deletable: true, pinned: false },
+      ],
+    };
+    settings.value = settingsWithPrompts;
+    snapshot.value = baseSnapshot();
+    const { host } = await mountPage();
+    const group = Array.from(host.querySelectorAll<HTMLElement>('.acu-v2-world-simulation-page__group'))
+      .find(item => item.querySelector('.acu-disclosure-group__label')?.textContent?.trim() === '时钟与召回')!;
+    group.querySelector<HTMLButtonElement>('.acu-disclosure-group__header')!.click();
+    await nextTick();
+    Array.from(group.querySelectorAll<HTMLButtonElement>('button')).filter(item => item.textContent?.includes('下移'))[0].click();
+    await nextTick();
+    expect(group.querySelectorAll<HTMLTextAreaElement>('textarea')[0].value).toBe('第二段');
+    group.querySelector<HTMLButtonElement>('[role="checkbox"]')!.click();
+    await nextTick();
+    expect(group.textContent).toContain('1/2 段启用');
+    button(group, '删除')!.click();
+    await nextTick();
+    expect(group.querySelectorAll('textarea')).toHaveLength(1);
+  });
+
+  it('打开页面不写入正式提示词，旧 prompts 保持不变', async () => {
+    const before = [{ role: 'system', content: '旧版内容', enabled: true, deletable: true, pinned: false }];
+    settings.value.agentPrompts['world-director'] = before;
+    snapshot.value = baseSnapshot();
+    const { host } = await mountPage();
+    await nextTick();
+    expect(saveSettings).not.toHaveBeenCalled();
+    expect(settings.value.agentPrompts['world-director']).toEqual(before);
+    expect(host.textContent).toContain('推演提示词');
+  });
+
+  it('正式导入仅保留当前角色，不合并已有或导入的旧三项审查', async () => {
+    vi.useFakeTimers();
+    const segment = (content: string) => ({ role: 'system', content, enabled: true, deletable: true, pinned: false });
+    settings.value.worldRoundPrompts = { 'scene-review': [segment('旧场景审查')], 'adoption-review': [segment('旧采用审查')] };
+    snapshot.value = baseSnapshot();
+    const { host } = await mountPage();
+    const input = host.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const file = new File([JSON.stringify({ worldRoundPrompts: {
+      'clock-recaller': [segment('正式校时稿')], 'worldbook-registrar': [segment('自定义世界书角色规则')], 'joint-reviewer': [], 'projection-review': [segment('旧触发审查')],
+    } })], 'prompts.json', { type: 'application/json' });
+    Object.defineProperty(input, 'files', { configurable: true, value: [file] });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await vi.advanceTimersByTimeAsync(900);
+    const saved = saveSettings.mock.calls.at(-1)?.[0];
+    expect(saved.worldRoundPrompts).toEqual({ 'clock-recaller': [segment('正式校时稿')], 'worldbook-registrar': [segment('自定义世界书角色规则')], 'joint-reviewer': [] });
+    expect(host.textContent).not.toContain('旧三项审查');
+  });
+
+  it('错误正式提示词导入被拒绝且已写正文不被污染', async () => {
+    const settingsWithPrompts = buildDefaultWorldSimulationSettings_ACU() as any;
+    settingsWithPrompts.worldRoundPrompts = {
+      'clock-recaller': [{ role: 'system', content: '已写正文', enabled: true, deletable: true, pinned: false }],
+    };
+    settings.value = settingsWithPrompts;
+    snapshot.value = baseSnapshot();
+    const { host } = await mountPage();
+    const input = host.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const invalid = new File(['{"worldRoundPrompts":{"unknown":[]}}'], 'invalid.json', { type: 'application/json' });
+    Object.defineProperty(input, 'files', { configurable: true, value: [invalid] });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise(resolve => setTimeout(resolve, 0));
     await nextTick();
-    expect(saveUserRequirements).toHaveBeenCalledTimes(3);
-    expect(saveUserRequirements).toHaveBeenLastCalledWith(['旧要求', '新要求']);
-    expect(host.querySelectorAll<HTMLTextAreaElement>('.acu-requirements-editor textarea')[1]!.value).toBe('新要求');
-    expect(button(host, '保存用户要求')?.disabled).toBe(true);
-    // 保存结果已经返回，但页面收到的仍可能是上一版快照；不应让迟到快照撤销本地成功值。
-    snapshot.value = baseSnapshot({
-      userRequirements: { snapshot: { requirements: ['旧要求'], updatedAt: 1 }, diagnostics: [], adoptedIndex: 0 },
-    });
     await nextTick();
-    expect(Array.from(host.querySelectorAll<HTMLTextAreaElement>('.acu-requirements-editor textarea')).map(item => item.value)).toEqual(['旧要求', '新要求']);
-    expect(button(host, '保存用户要求')?.disabled).toBe(true);
-    // 新版已送达后，乱序到达的旧快照仍不可回滚已确认的保存结果。
-    snapshot.value = baseSnapshot({
-      userRequirements: { snapshot: { requirements: ['旧要求', '新要求'], updatedAt: 2 }, diagnostics: [], adoptedIndex: 0 },
-    });
+    expect(host.textContent).toContain('正式提示词导入失败');
+    const group = Array.from(host.querySelectorAll<HTMLElement>('.acu-v2-world-simulation-page__group'))
+      .find(item => item.querySelector('.acu-disclosure-group__label')?.textContent?.trim() === '时钟与召回')!;
+    group.querySelector<HTMLButtonElement>('.acu-disclosure-group__header')!.click();
     await nextTick();
+    expect(group.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('已写正文');
+  });
+
+  it('不将旧工具、网页研究、迭代派工、风声碰撞、信号、纪要阈值显示为可生效功能', async () => {
+    const { host } = await mountPage();
+    const text = host.textContent ?? '';
+    for (const retiredLabel of ['使用工具调用', '网页检索', '主 Agent 迭代上限', '派工总数上限', '风声等待上限', '碰撞兑现策略', '场外信号插入正文', '纪要热层阈值']) {
+      expect(text).not.toContain(retiredLabel);
+    }
+    expect(text).not.toContain('旧版配置');
+    expect(text).not.toContain('直接正文的结果进入下一次正文请求');
+    expect(text).not.toContain('固定由世界角色处理世界');
+    expect(host.querySelectorAll('.acu-panel__description-button')).toHaveLength(0);
+    expect(host.querySelectorAll('.acu-form-row__hint')).toHaveLength(0);
+    const channelGroup = Array.from(host.querySelectorAll<HTMLElement>('.acu-v2-world-simulation-page__group'))
+      .find(group => group.classList.contains('acu-v2-world-simulation-page__channels'))!;
+    expect(channelGroup.textContent).toContain('时钟与召回');
+    expect(channelGroup.textContent).toContain('世界事件 / 单 Agent');
+    expect(channelGroup.textContent).toContain('人物推演');
+    expect(channelGroup.textContent).toContain('联合审查');
+    expect(channelGroup.textContent).not.toContain('旧角色');
+    expect(channelGroup.textContent).not.toContain('风声');
+    expect(channelGroup.textContent).not.toContain('主 Agent');
+    expect(channelGroup.textContent).not.toContain('因果审核');
+  });
+
+  it('世界状态平铺投送事件，楼层在标题下方，用户要求独立且读取诊断在最底部', async () => {
     snapshot.value = baseSnapshot({
-      userRequirements: { snapshot: { requirements: ['旧要求'], updatedAt: 1 }, diagnostics: [], adoptedIndex: 0 },
+      conversation: { messages: [], nextId: 1, compaction: null, diagnostics: ['会话读取错误'] },
+      materials: { snapshot: null, diagnostics: ['快照读取错误'], adoptedIndex: null },
     });
+    const { host } = await mountPage();
+    const statePanel = host.querySelector('.acu-v2-world-simulation-page__world-state')!;
+    const title = statePanel.querySelector('.acu-panel__title')!;
+    expect(title.textContent).toContain('世界状态');
+    expect(title.querySelector('.acu-v2-world-simulation-page__floor')?.textContent).toBe('第 1 楼 · swipe 1');
+    expect(title.textContent).not.toContain('推演楼层');
+    expect(statePanel.querySelectorAll('.acu-panel__actions button')).toHaveLength(2);
+    expect(statePanel.querySelector('.acu-v2-ws-materials__tabs')).toBeNull();
+    for (const retired of ['已有资料', '冻结锚点', '账本修订', '候选轨迹', '暂无基线', 'v7 运行资料', '投送状态']) {
+      expect(statePanel.textContent).not.toContain(retired);
+    }
+    expect(statePanel.textContent).toContain('投送事件');
+    expect(statePanel.textContent).not.toContain('用户要求');
+    expect(host.querySelector('.acu-v2-world-simulation-page__requirements .acu-panel__title')?.textContent).toBe('用户要求');
+    expect(host.querySelector('.acu-v2-world-simulation-page__requirements .acu-requirements-editor')).not.toBeNull();
+    const bottom = host.querySelector('.acu-v2-world-simulation-page')!.lastElementChild!;
+    expect(bottom.classList.contains('acu-v2-world-simulation-page__diagnostics')).toBe(true);
+    expect(bottom.textContent).toContain('会话读取错误');
+    expect(bottom.textContent).toContain('快照读取错误');
+    expect(statePanel.textContent).not.toContain('读取诊断');
+  });
+
+  it('世界状态位于会话前，可折叠且清空确认会自动展开', async () => {
+    const { host } = await mountPage();
+    const panels = [...host.querySelectorAll('.acu-panel__title')].map(item => item.textContent?.trim());
+    expect(panels[0]).toContain('世界状态');
+    expect(panels[1]).toBe('世界推演会话');
+    const toggle = host.querySelector<HTMLButtonElement>('.acu-v2-world-simulation-page__world-title')!;
+    const content = host.querySelector<HTMLElement>('#acu-world-state-content')!;
+    toggle.click();
     await nextTick();
-    expect(Array.from(host.querySelectorAll<HTMLTextAreaElement>('.acu-requirements-editor textarea')).map(item => item.value)).toEqual(['旧要求', '新要求']);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(content.style.display).toBe('none');
+    host.querySelector<HTMLButtonElement>('button[aria-label="清空世界状态"]')!.click();
+    await nextTick();
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(content.style.display).not.toBe('none');
+    expect(button(host, '确认清空')).toBeDefined();
+    expect(clearData).not.toHaveBeenCalled();
+  });
+
+  it('标题栏的清空操作仍需确认，可取消且只在确认后调用清空', async () => {
+    const { host } = await mountPage();
+    const clear = host.querySelector<HTMLButtonElement>('button[aria-label="清空世界状态"]')!;
+    const refreshButton = host.querySelector<HTMLButtonElement>('button[aria-label="刷新世界状态"]')!;
+    refresh.mockClear();
+    refreshButton.click();
+    expect(refresh).toHaveBeenCalledOnce();
+    clear.click();
+    await nextTick();
+    expect(clearData).not.toHaveBeenCalled();
+    expect(host.textContent).toContain('小说正文不变');
+    button(host, '取消')!.click();
+    await nextTick();
+    expect(button(host, '确认清空')).toBeUndefined();
+    clear.click();
+    await nextTick();
+    button(host, '确认清空')!.click();
+    await nextTick();
+    expect(clearData).toHaveBeenCalledOnce();
+  });
+
+  it('人物谱扫描经页面交给 composable，运行繁忙禁用，停止仍可点击', async () => {
+    const { host } = await mountPage();
+    const section = Array.from(host.querySelectorAll<HTMLDetailsElement>('.acu-v2-ws-materials__block'))
+      .find(item => item.querySelector(':scope > summary')?.textContent?.includes('人物谱'))!;
+    expect(section.querySelector('summary button')).toBeNull();
+    button(section, '扫描世界书')!.click();
+    await nextTick();
+    expect(scanWorldbookActors).toHaveBeenCalledOnce();
+    busy.value = true;
+    snapshot.value = baseSnapshot({ session: { chatIdentity: 'chat-a', entries: [], running: true } });
+    await nextTick();
+    expect(button(section, '扫描世界书')?.disabled).toBe(true);
+    button(section, '扫描世界书')!.click();
+    expect(scanWorldbookActors).toHaveBeenCalledOnce();
+    const stopButton = host.querySelector<HTMLButtonElement>('button[aria-label="停止"]') ?? button(host, '停止');
+    expect(stopButton).toBeDefined();
+    expect(stopButton?.disabled).toBe(false);
+    stopButton!.click();
+    await nextTick();
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it('世界事件删除从卡片传准确 id，失败保留确认，成功刷新后仅目标事件消失', async () => {
+    const ledger = buildEmptyWorldSimulationLedger_ACU();
+    const event = (id: string, title: string): typeof ledger.worldEvents[number] => ({
+      id, title, state: '', status: 'active', actorIds: [], organizationIds: [], locationRefs: [], startedAt: null,
+      deadline: null, nextCheck: null, relatedEventIds: [], loreRefs: [], evidenceRefs: [], tags: [], revision: 1, legacy: null,
+    });
+    ledger.worldEvents = [event('event-a', '夜市开张'), event('event-b', '春日集市')];
+    snapshot.value = baseSnapshot({ publishedLedger: ledger });
+    const { host } = await mountPage();
+    const card = () => Array.from(host.querySelectorAll<HTMLDetailsElement>('.acu-v2-ws-materials__entry'))
+      .find(item => item.querySelector('summary')?.textContent?.includes('夜市开张'));
+    button(card()!, '删除')!.click();
+    await nextTick();
+    expect(deleteWorldEvent).not.toHaveBeenCalled();
+    button(card()!, '取消')!.click();
+    await nextTick();
+    expect(deleteWorldEvent).not.toHaveBeenCalled();
+    button(card()!, '删除')!.click();
+    await nextTick();
+    deleteWorldEvent.mockResolvedValueOnce(false);
+    button(card()!, '确认删除')!.click();
+    await nextTick();
+    expect(deleteWorldEvent).toHaveBeenCalledExactlyOnceWith('event-a');
+    expect(card()?.textContent).toContain('确认删除');
+    deleteWorldEvent.mockImplementationOnce(async () => {
+      snapshot.value = baseSnapshot({ publishedLedger: { ...ledger, worldEvents: [ledger.worldEvents[1]] } });
+      return true;
+    });
+    button(card()!, '确认删除')!.click();
+    await nextTick();
+    await nextTick();
+    expect(deleteWorldEvent).toHaveBeenCalledTimes(2);
+    expect(card()).toBeUndefined();
+    expect(host.textContent).toContain('春日集市');
+  });
+
+  it('重要历史删除从卡片传准确 id，确认文案说明只删这条记录；失败保留确认，成功刷新后仅目标历史消失，冷层历史不受影响', async () => {
+    const ledger = buildEmptyWorldSimulationLedger_ACU();
+    const history = (id: string, summary: string): typeof ledger.historyMilestones[number] => ({
+      id, summary, happenedAt: { day: 2, slot: '' }, actorIds: [], worldEventIds: [], locationRef: null, sourceFactIds: [],
+      importance: 2, category: '行动', visibility: 'internal', revision: 1, legacyRefs: [],
+    });
+    ledger.historyMilestones = [history('history-a', '守卫关闭北门'), history('history-b', '商队抵达城区')];
+    ledger.historyArchive = [history('history-cold', '冷层旧事')];
+    snapshot.value = baseSnapshot({ publishedLedger: ledger });
+    const { host } = await mountPage();
+    const card = (text: string) => Array.from(host.querySelectorAll<HTMLElement>('.acu-v2-ws-materials__card'))
+      .find(item => item.textContent?.includes(text) && item.querySelector('.acu-v2-ws-materials__card-head'));
+    button(card('守卫关闭北门')!, '删除')!.click();
+    await nextTick();
+    expect(deleteWorldHistory).not.toHaveBeenCalled();
+    expect(card('守卫关闭北门')!.textContent).toContain('删除这条重要历史？只删除这条记录，人物、事件、事实和正文保留。');
+    expect(card('商队抵达城区')!.textContent).not.toContain('确认删除');
+    button(card('守卫关闭北门')!, '取消')!.click();
+    await nextTick();
+    expect(deleteWorldHistory).not.toHaveBeenCalled();
+    expect(card('守卫关闭北门')!.textContent).not.toContain('确认删除');
+    button(card('守卫关闭北门')!, '删除')!.click();
+    await nextTick();
+    deleteWorldHistory.mockResolvedValueOnce(false);
+    button(card('守卫关闭北门')!, '确认删除')!.click();
+    await nextTick();
+    expect(deleteWorldHistory).toHaveBeenCalledExactlyOnceWith('history-a');
+    expect(card('守卫关闭北门')?.textContent).toContain('确认删除');
+    deleteWorldHistory.mockImplementationOnce(async () => {
+      snapshot.value = baseSnapshot({ publishedLedger: { ...ledger, historyMilestones: [ledger.historyMilestones[1]] } });
+      return true;
+    });
+    button(card('守卫关闭北门')!, '确认删除')!.click();
+    await nextTick();
+    await nextTick();
+    expect(deleteWorldHistory).toHaveBeenCalledTimes(2);
+    expect(deleteWorldHistory).toHaveBeenLastCalledWith('history-a');
+    expect(card('守卫关闭北门')).toBeUndefined();
+    expect(host.textContent).toContain('商队抵达城区');
+    expect(host.textContent).toContain('冷层旧事');
+  });
+
+  it('人物谱删除由卡片确认传入准确 id，失败保留卡片与确认，成功刷新只移除目标人物', async () => {
+    const ledger = buildEmptyWorldSimulationLedger_ACU();
+    const actor = (id: string, name: string): typeof ledger.actors[number] => ({
+      id, name, interests: [], location: '', locationRef: null, life: 'alive', diedAtDay: null, deathSummary: null,
+      resources: [], goals: [], constraints: [], informationSources: [], knownFacts: [], visibility: 'public',
+      currentAction: null, shortTermAction: null, longTermAction: null, simulationStatus: 'active', experiences: [], revision: 1,
+    });
+    ledger.actors = [actor('actor-a', '阿岚'), actor('actor-b', '小川')];
+    ledger.worldEvents = [{ id: 'event-a', title: '夜市开张', state: '', status: 'active', actorIds: ['actor-a'], organizationIds: [], locationRefs: [], startedAt: null, deadline: null, nextCheck: null, relatedEventIds: [], loreRefs: [], evidenceRefs: [], tags: [], revision: 1, legacy: null }];
+    snapshot.value = baseSnapshot({ publishedLedger: ledger });
+    const { host } = await mountPage();
+    const card = () => Array.from(host.querySelectorAll<HTMLDetailsElement>('.acu-v2-ws-materials__entry'))
+      .find(item => item.querySelector('summary')?.textContent?.includes('阿岚'));
+    expect(card()?.open).toBe(false);
+    expect(card()?.querySelector('summary button')).toBeNull();
+    card()!.open = true;
+    button(card()!, '删除')!.click();
+    await nextTick();
+    expect(deleteActor).not.toHaveBeenCalled();
+    button(card()!, '取消')!.click();
+    await nextTick();
+    expect(deleteActor).not.toHaveBeenCalled();
+    button(card()!, '删除')!.click();
+    await nextTick();
+    deleteActor.mockResolvedValueOnce(false);
+    button(card()!, '确认删除')!.click();
+    await nextTick();
+    expect(deleteActor).toHaveBeenCalledExactlyOnceWith('actor-a');
+    expect(card()?.textContent).toContain('确认删除');
+    deleteActor.mockImplementationOnce(async () => {
+      snapshot.value = baseSnapshot({ publishedLedger: { ...ledger, actors: [ledger.actors[1]] } });
+      return true;
+    });
+    button(card()!, '确认删除')!.click();
+    await nextTick();
+    await nextTick();
+    expect(deleteActor).toHaveBeenCalledTimes(2);
+    expect(card()).toBeUndefined();
+    expect(host.textContent).toContain('小川');
+    expect(host.textContent).toContain('夜市开张');
+    expect(host.textContent).toContain('世界推演会话');
+  });
+
+  it('不再显示旧资料补迁和兼容入口，不调用旧补迁操作', async () => {
+    legacyBackfillPreview.value = { changed: true, addedEventCount: 2, addedFactCount: 3, addedHistoryCount: 1, remainingIssueCount: 4 };
+    const { host } = await mountPage();
+    expect(button(host, '预览旧资料补迁')).toBeUndefined();
+    expect(button(host, '确认补迁')).toBeUndefined();
+    expect(host.textContent).not.toContain('旧兼容资料');
+    expect(previewLegacyBackfill).not.toHaveBeenCalled();
+    expect(applyLegacyBackfill).not.toHaveBeenCalled();
   });
 });

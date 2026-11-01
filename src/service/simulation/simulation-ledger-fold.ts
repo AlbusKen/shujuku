@@ -20,7 +20,9 @@ import {
   WorldSimulationValidationError_ACU,
   createWorldSimulationError_ACU,
   type WorldClock_ACU,
+  type WorldFact_ACU,
   type WorldGuidance_ACU,
+  type WorldHistoryMilestone_ACU,
   type WorldPlayer_ACU,
   type WorldSimulationLedger_ACU,
   type WorldSimulationLedgerFieldRecord_ACU,
@@ -49,6 +51,9 @@ const ARRAY_MODULES_ACU = [
   ['dimensions', 'id'],
   ['seeds', 'id'],
   ['actors', 'id'],
+  ['worldEvents', 'id'],
+  ['facts', 'id'],
+  ['historyMilestones', 'id'],
   ['chronicle', 'id'],
   ['rumors', 'id'],
   ['chronicleOverview', 'fingerprint'],
@@ -66,6 +71,14 @@ export interface WorldSimulationLedgerDelta_ACU {
   clock?: WorldClock_ACU;
   player?: WorldPlayer_ACU;
   guidance?: WorldGuidance_ACU;
+  projection?: WorldSimulationLedger_ACU['projection'];
+  /** 冷事实层与热层同属账本，必须随 delta 显式透传。 */
+  factArchive?: WorldFact_ACU[];
+  /** 保存轮次及冷事实入档轮次，空归档时仍要保留已推进计数。 */
+  factArchiveRetention?: WorldSimulationLedger_ACU['factArchiveRetention'];
+  /** 历史纪要冷层与热层同属账本，必须随 delta 显式透传。 */
+  historyArchive?: WorldHistoryMilestone_ACU[];
+  legacyMigration?: WorldSimulationLedger_ACU['legacyMigration'];
   materialCompletion?: WorldSimulationLedger_ACU['materialCompletion'];
   pendingFixes?: WorldSimulationPendingFix_ACU[];
   evidenceRefs?: string[];
@@ -79,6 +92,8 @@ export interface WorldSimulationLedgerFrame_ACU {
   checkpointPartials?: WorldSimulationLedgerFieldUpserts_ACU;
   /** 无损迁移基线；旧帧缺失时仍沿用既有分栏重建。 */
   checkpointFields?: WorldSimulationLedgerFieldSnapshot_ACU;
+  /** 基线已包含的最大增量序号；序号不大于它的增量（含后续楼层上的）读取时不再重放。 */
+  checkpointSeq?: number;
   deltas: WorldSimulationLedgerDelta_ACU[];
 }
 
@@ -418,6 +433,14 @@ export function reconcileLedgerFieldViewWithLedger_ACU(
   }
 }
 
+/** 增量是否改动账本本身（区别于只写分栏草稿的 fieldUpserts 增量）。 */
+function deltaChangesLedger_ACU(delta: WorldSimulationLedgerDelta_ACU): boolean {
+  return Object.values(delta.upserts).some(items => Array.isArray(items) && items.length > 0)
+    || Object.values(delta.removedIds).some(ids => Array.isArray(ids) && ids.length > 0)
+    || (['clock', 'player', 'guidance', 'projection', 'factArchive', 'factArchiveRetention', 'historyArchive',
+      'legacyMigration', 'materialCompletion', 'pendingFixes'] as const).some(key => delta[key] !== undefined);
+}
+
 function applyLedgerDelta_ACU(ledger: WorldSimulationLedger_ACU, delta: WorldSimulationLedgerDelta_ACU): WorldSimulationLedger_ACU {
   const next = cloneJson_ACU(ledger);
   for (const [moduleName, idKey] of ARRAY_MODULES_ACU) {
@@ -427,6 +450,11 @@ function applyLedgerDelta_ACU(ledger: WorldSimulationLedger_ACU, delta: WorldSim
   if (delta.clock) next.clock = cloneJson_ACU(delta.clock);
   if (delta.player) next.player = cloneJson_ACU(delta.player);
   if (delta.guidance) next.guidance = cloneJson_ACU(delta.guidance);
+  if (delta.projection) next.projection = cloneJson_ACU(delta.projection);
+  if (delta.factArchive !== undefined) next.factArchive = cloneJson_ACU(delta.factArchive);
+  if (delta.factArchiveRetention !== undefined) next.factArchiveRetention = cloneJson_ACU(delta.factArchiveRetention);
+  if (delta.historyArchive !== undefined) next.historyArchive = cloneJson_ACU(delta.historyArchive);
+  if (delta.legacyMigration) next.legacyMigration = cloneJson_ACU(delta.legacyMigration);
   if (delta.materialCompletion) next.materialCompletion = cloneJson_ACU(delta.materialCompletion);
   if (delta.pendingFixes) next.pendingFixes = cloneJson_ACU(delta.pendingFixes);
   next.revision = delta.revision;
@@ -451,7 +479,7 @@ export function diffWorldSimulationLedger_ACU(
     const moduleUpserts = nextItems.filter(item => {
       const id = itemId_ACU(item, idKey);
       const prior = previousById.get(id);
-      return !prior || JSON.stringify(prior) !== JSON.stringify(item);
+      return !prior || canonicalJson_ACU(prior) !== canonicalJson_ACU(item);
     });
     const moduleRemoved = previous.map(item => itemId_ACU(item, idKey)).filter(id => id && !nextIds.has(id));
     if (moduleUpserts.length) {
@@ -464,23 +492,43 @@ export function diffWorldSimulationLedger_ACU(
     }
   }
   const delta: WorldSimulationLedgerDelta_ACU = { seq, revision: after.revision, upserts, removedIds, updatedAt };
-  if (JSON.stringify(before.clock) !== JSON.stringify(after.clock)) {
+  if (canonicalJson_ACU(before.clock) !== canonicalJson_ACU(after.clock)) {
     delta.clock = cloneJson_ACU(after.clock);
     changed = true;
   }
-  if (JSON.stringify(before.player) !== JSON.stringify(after.player)) {
+  if (canonicalJson_ACU(before.player) !== canonicalJson_ACU(after.player)) {
     delta.player = cloneJson_ACU(after.player);
     changed = true;
   }
-  if (JSON.stringify(before.guidance) !== JSON.stringify(after.guidance)) {
+  if (canonicalJson_ACU(before.guidance) !== canonicalJson_ACU(after.guidance)) {
     delta.guidance = cloneJson_ACU(after.guidance);
     changed = true;
   }
-  if (JSON.stringify(before.materialCompletion) !== JSON.stringify(after.materialCompletion)) {
+  if (canonicalJson_ACU(before.projection) !== canonicalJson_ACU(after.projection)) {
+    delta.projection = cloneJson_ACU(after.projection);
+    changed = true;
+  }
+  if (canonicalJson_ACU(before.factArchive) !== canonicalJson_ACU(after.factArchive)) {
+    delta.factArchive = cloneJson_ACU(after.factArchive ?? []);
+    changed = true;
+  }
+  if (canonicalJson_ACU(before.factArchiveRetention) !== canonicalJson_ACU(after.factArchiveRetention)) {
+    if (after.factArchiveRetention !== undefined) delta.factArchiveRetention = cloneJson_ACU(after.factArchiveRetention);
+    changed = true;
+  }
+  if (canonicalJson_ACU(before.historyArchive) !== canonicalJson_ACU(after.historyArchive)) {
+    delta.historyArchive = cloneJson_ACU(after.historyArchive ?? []);
+    changed = true;
+  }
+  if (canonicalJson_ACU(before.legacyMigration) !== canonicalJson_ACU(after.legacyMigration)) {
+    delta.legacyMigration = cloneJson_ACU(after.legacyMigration);
+    changed = true;
+  }
+  if (canonicalJson_ACU(before.materialCompletion) !== canonicalJson_ACU(after.materialCompletion)) {
     delta.materialCompletion = cloneJson_ACU(after.materialCompletion);
     changed = true;
   }
-  if (JSON.stringify(before.pendingFixes) !== JSON.stringify(after.pendingFixes)) {
+  if (canonicalJson_ACU(before.pendingFixes) !== canonicalJson_ACU(after.pendingFixes)) {
     delta.pendingFixes = cloneJson_ACU(after.pendingFixes);
     changed = true;
   }
@@ -491,9 +539,9 @@ export function diffWorldSimulationLedger_ACU(
   return changed ? delta : null;
 }
 
-function maxLedgerSeq_ACU(chat: readonly unknown[]): number {
+function maxLedgerSeq_ACU(chat: readonly unknown[], throughIndex = chat.length - 1): number {
   let max = 0;
-  for (const message of chat) {
+  for (const message of chat.slice(0, throughIndex + 1)) {
     if (!isRecord_ACU(message)) continue;
     for (const entry of Object.values(bucketEntries_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU))) {
       if (!isLedgerFrame_ACU(entry.value)) continue;
@@ -513,6 +561,14 @@ export function foldWorldSimulationLedger_ACU(chat: readonly unknown[], throughI
   const contributedIndexes: number[] = [];
   const end = Math.min(throughIndex, chat.length - 1);
   let view = emptyLedgerFieldView_ACU();
+  // 基线可能被改写为包含后续楼层增量的状态；这些增量已在基线里，重放会把移入冷层的条目带回热层。
+  let checkpointSeq: number | null = null;
+  let checkpointRevision: number | null = null;
+  const incorporated = (delta: WorldSimulationLedgerDelta_ACU): boolean => {
+    if (checkpointSeq !== null) return delta.seq <= checkpointSeq;
+    if (checkpointRevision === null) return false;
+    return delta.revision < checkpointRevision || (delta.revision === checkpointRevision && deltaChangesLedger_ACU(delta));
+  };
 
   for (let index = 0; index <= end; index += 1) {
     const message = chat[index];
@@ -528,6 +584,8 @@ export function foldWorldSimulationLedger_ACU(chat: readonly unknown[], throughI
     if (isLedgerValue_ACU(value)) {
       ledger = validateWorldSimulationLedger_ACU(value, 'load');
       view = seedLedgerFieldView_ACU(ledger, updatedAt);
+      checkpointSeq = null;
+      checkpointRevision = ledger.revision;
       checkpointIndex = index;
       foldedDeltaCount = 0;
       lastContributedIndex = index;
@@ -542,16 +600,17 @@ export function foldWorldSimulationLedger_ACU(chat: readonly unknown[], throughI
     if (value.checkpoint) {
       ledger = validateWorldSimulationLedger_ACU(value.checkpoint, 'load');
       view = seedLedgerFieldView_ACU(ledger, updatedAt);
+      checkpointSeq = Number.isSafeInteger(value.checkpointSeq) ? value.checkpointSeq! : null;
+      checkpointRevision = ledger.revision;
       if (value.checkpointPartials !== undefined) {
         view = applyLedgerFieldUpsertsToView_ACU(view, requireLedgerFieldUpserts_ACU(value.checkpointPartials, `楼层 ${index} checkpointPartials`), updatedAt);
         reconcileLedgerFieldViewWithLedger_ACU(view, ledger, updatedAt);
       }
       if (value.checkpointFields !== undefined) {
-        const fields = validateWorldSimulationFieldSnapshot_ACU(value.checkpointFields);
-        const reconciled = cloneJson_ACU(fields);
-        reconcileLedgerFieldViewWithLedger_ACU(reconciled, ledger, updatedAt);
-        if (canonicalJson_ACU(reconciled) !== canonicalJson_ACU(fields)) invalidFloorValue_ACU(`楼层 ${index} 完整分栏基线`);
-        view = fields;
+        view = validateWorldSimulationFieldSnapshot_ACU(value.checkpointFields);
+        // 完整条目以账本为准；旧分栏基线只提供栏目修订及仍在草稿中的值。
+        // 对账仅修改读取副本，不回写旧楼层。
+        reconcileLedgerFieldViewWithLedger_ACU(view, ledger, updatedAt);
       }
       checkpointIndex = index;
       foldedDeltaCount = 0;
@@ -563,6 +622,12 @@ export function foldWorldSimulationLedger_ACU(chat: readonly unknown[], throughI
         invalidFloorValue_ACU(`楼层 ${index} 账本 delta`);
       }
       if (!ledger) continue;
+      if (incorporated(delta)) {
+        touched = true;
+        if (delta.evidenceRefs) evidenceRefs = [...delta.evidenceRefs];
+        updatedAt = Math.max(updatedAt, delta.updatedAt);
+        continue;
+      }
       ledger = validateWorldSimulationLedger_ACU(applyLedgerDelta_ACU(ledger, delta), 'load');
       if (delta.fieldUpserts !== undefined) {
         view = applyLedgerFieldUpsertsToView_ACU(view, requireLedgerFieldUpserts_ACU(delta.fieldUpserts, `楼层 ${index} delta#${delta.seq}.fieldUpserts`), delta.updatedAt);
@@ -697,15 +762,41 @@ export function appendWorldSimulationCommitChain_ACU(input: {
 }): void {
   const message = input.chat[input.messageIndex];
   if (!isRecord_ACU(message)) return;
-  const foldedBefore = input.beforeFields ? null : foldWorldSimulationLedger_ACU(input.chat);
-  const partials = input.beforePartials
-    ?? (() => {
-      const folded = foldedBefore;
-      return folded ? extractWorldSimulationPartialFields_ACU(folded.fields) : {};
-    })();
+  // 只读提交目标及之前的活跃 swipe；未来楼层或非活跃分桶不能充当提交前状态。
+  const foldedBefore = input.beforeFields ? null : foldWorldSimulationLedger_ACU(input.chat, input.messageIndex);
+  let activeCheckpointFields: WorldSimulationLedgerFieldSnapshot_ACU | undefined;
+  for (let index = 0; index <= input.messageIndex; index += 1) {
+    const floor = input.chat[index];
+    if (!isAssistant_ACU(floor)) continue;
+    let activeAnchor: WorldSimulationAnchorIdentity_ACU;
+    try {
+      activeAnchor = resolveWorldSimulationAnchor_ACU(index, input.chat as any[]);
+    } catch {
+      continue;
+    }
+    const activeValue = entryValue_ACU(floor, WORLD_SIMULATION_STATE_FIELD_ACU, activeAnchor);
+    if (isLedgerValue_ACU(activeValue)) activeCheckpointFields = undefined;
+    else if (isLedgerFrame_ACU(activeValue) && activeValue.checkpoint) {
+      activeCheckpointFields = activeValue.checkpointFields === undefined
+        ? undefined : validateWorldSimulationFieldSnapshot_ACU(activeValue.checkpointFields);
+    }
+  }
+  const sourceFields = input.beforeFields !== undefined
+    ? validateWorldSimulationFieldSnapshot_ACU(input.beforeFields)
+    : foldedBefore?.fields !== undefined
+      ? validateWorldSimulationFieldSnapshot_ACU(foldedBefore.fields)
+      : activeCheckpointFields;
+  const beforeFields = sourceFields ? cloneJson_ACU(sourceFields) : undefined;
+  if (beforeFields) reconcileLedgerFieldViewWithLedger_ACU(beforeFields, input.beforeLedger, input.updatedAt);
+  const partials = input.beforePartials !== undefined
+    ? requireLedgerFieldUpserts_ACU(input.beforePartials, '提交前草稿')
+    : sourceFields ? extractWorldSimulationPartialFields_ACU(sourceFields) : {};
   const seq = maxLedgerSeq_ACU(input.chat) + 1;
+  // beforeLedger 已折叠到目标楼层为止的全部增量；写入的基线据此标记，避免读取时再重放这些增量。
+  const incorporatedSeq = maxLedgerSeq_ACU(input.chat, input.messageIndex);
   const delta = diffWorldSimulationLedger_ACU(input.beforeLedger, input.nextLedger, input.evidenceRefs, input.updatedAt, seq);
-  const baselineFloor = input.checkpointIndex ?? ensureWorldSimulationBaselineFloor_ACU(input.chat, input.messageIndex);
+  const baselineFloorCandidate = input.checkpointIndex ?? ensureWorldSimulationBaselineFloor_ACU(input.chat, input.messageIndex);
+  const baselineFloor = baselineFloorCandidate !== null && baselineFloorCandidate <= input.messageIndex ? baselineFloorCandidate : null;
   let baselineAnchor: WorldSimulationAnchorIdentity_ACU | null = null;
   if (baselineFloor !== null && baselineFloor !== input.messageIndex && isRecord_ACU(input.chat[baselineFloor])) {
     try {
@@ -715,18 +806,13 @@ export function appendWorldSimulationCommitChain_ACU(input: {
     }
   }
   const installCheckpoint = baselineAnchor === null;
-  // 已迁移的完整分栏基底随 checkpoint 重建保留；普通旧帧仍走原来的重建契约。
-  const preservesFields = input.chat.some(value => isRecord_ACU(value)
-    && Object.values(bucketEntries_ACU(value, WORLD_SIMULATION_STATE_FIELD_ACU))
-      .some(entry => isLedgerFrame_ACU(entry.value) && entry.value.checkpointFields !== undefined));
-  const beforeFields = preservesFields && input.beforeFields ? validateWorldSimulationFieldSnapshot_ACU(input.beforeFields) : preservesFields && foldedBefore
-    && canonicalJson_ACU(foldedBefore.ledger) === canonicalJson_ACU(input.beforeLedger)
-    ? cloneJson_ACU(foldedBefore.fields) : undefined;
-  if (preservesFields && !beforeFields) invalidFloorValue_ACU('完整分栏提交基底与账本不一致');
+  // 已校验的分栏快照按当前账本对账，合法过时的完整栏目不构成结构损坏。
+  // 没有分栏基线时仍随 checkpointPartials 保存真实草稿。
   if (baselineAnchor && baselineFloor !== null) {
     const baselineMessage = input.chat[baselineFloor] as Record<string, unknown>;
     const frame = checkpointFrame_ACU(input.beforeLedger, partials, []);
     if (beforeFields) frame.checkpointFields = beforeFields;
+    frame.checkpointSeq = incorporatedSeq;
     writeEntry_ACU(baselineMessage, WORLD_SIMULATION_STATE_FIELD_ACU, baselineAnchor, frame, input.updatedAt);
     writeEntry_ACU(baselineMessage, WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU, baselineAnchor, {
       schemaVersion: WORLD_SIMULATION_LEDGER_FRAME_SCHEMA_VERSION_ACU,
@@ -738,6 +824,7 @@ export function appendWorldSimulationCommitChain_ACU(input: {
     clearActiveLedgerCheckpoints_ACU(input.chat);
     const frame = checkpointFrame_ACU(delta ? input.beforeLedger : input.nextLedger, partials, delta ? [delta] : []);
     if (beforeFields) frame.checkpointFields = beforeFields;
+    frame.checkpointSeq = incorporatedSeq;
     writeEntry_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU, input.anchor, frame, input.updatedAt);
   } else if (delta) {
     const current = entryValue_ACU(message, WORLD_SIMULATION_STATE_FIELD_ACU, input.anchor);
@@ -746,7 +833,7 @@ export function appendWorldSimulationCommitChain_ACU(input: {
 
   const changedRecords: WorldChronicleArchiveSnapshot_ACU['records'] = {};
   for (const [archiveRef, record] of Object.entries(input.nextArchive.records)) {
-    if (JSON.stringify(input.beforeArchive.records[archiveRef]) !== JSON.stringify(record)) changedRecords[archiveRef] = record;
+    if (canonicalJson_ACU(input.beforeArchive.records[archiveRef]) !== canonicalJson_ACU(record)) changedRecords[archiveRef] = record;
   }
   const archiveValue = entryValue_ACU(message, WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU, input.anchor);
   const archiveFrame: ArchiveFrame_ACU = isArchiveFrame_ACU(archiveValue)

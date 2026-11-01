@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const {
+  mockCreateOrdinaryPlotCausalContext,
   mockSettings,
   mockAbortControllerRef,
   mockCurrentJsonTableDataRef,
@@ -59,6 +60,10 @@ const {
   mockCapturePlotRuntimeScope,
   mockIsSamePlotRuntimeScope,
   mockAbortableDelay,
+  mockRenderPlotSimulationSceneFacts,
+  mockBuildPlotInternalCausalMessage,
+  mockValidatePlotInternalCausalView,
+  mockParsePlotInternalCausalResult,
   mockLogDebug,
   mockLogError,
   mockLogWarn,
@@ -74,6 +79,7 @@ const {
   };
 
   return {
+    mockCreateOrdinaryPlotCausalContext: vi.fn(async () => null as any),
     mockSettings: {
       plotApiPreset: '',
       apiMode: 'custom',
@@ -146,6 +152,10 @@ const {
     mockCapturePlotRuntimeScope: vi.fn(),
     mockIsSamePlotRuntimeScope: vi.fn(),
     mockAbortableDelay: vi.fn(async () => {}),
+    mockRenderPlotSimulationSceneFacts: vi.fn(),
+    mockBuildPlotInternalCausalMessage: vi.fn(),
+    mockValidatePlotInternalCausalView: vi.fn(),
+    mockParsePlotInternalCausalResult: vi.fn(),
     mockLogDebug: vi.fn(),
     mockLogError: vi.fn(),
     mockLogWarn: vi.fn(),
@@ -162,6 +172,10 @@ vi.mock('../../../../src/shared/defaults-json.js', () => ({
   DEFAULT_PLOT_SETTINGS_ACU: {
     loopSettings: { maxRetries: 3 },
   },
+}));
+
+vi.mock('../../../../src/service/runtime/plot-runtime/ordinary-plot-causal-context', () => ({
+  createOrdinaryPlotCausalContext_ACU: mockCreateOrdinaryPlotCausalContext,
 }));
 
 vi.mock('../../../../src/service/ai/api-call', () => ({
@@ -304,6 +318,20 @@ vi.mock('../../../../src/service/runtime/plot-runtime/plot-tag-utils', () => ({
   buildFinalPlotInjectionMessage_ACU: mockBuildFinalPlotInjectionMessage,
 }));
 
+vi.mock('../../../../src/service/runtime/plot-runtime/plot-simulation-scene', () => ({
+  PLOT_SIMULATION_SCENE_TOKEN_ACU: '$SIMULATION_SCENE_FACTS',
+  renderPlotSimulationSceneFacts_ACU: mockRenderPlotSimulationSceneFacts,
+}));
+
+vi.mock('../../../../src/service/runtime/plot-runtime/plot-internal-causal-result', () => ({
+  parsePlotInternalCausalResult_ACU: mockParsePlotInternalCausalResult,
+}));
+
+vi.mock('../../../../src/service/runtime/plot-runtime/plot-internal-causal', () => ({
+  buildPlotInternalCausalMessage_ACU: mockBuildPlotInternalCausalMessage,
+  validatePlotInternalCausalView_ACU: mockValidatePlotInternalCausalView,
+}));
+
 vi.mock('../../../../src/service/runtime/plot-runtime/plot-history-preset', () => ({
   getPlotFromHistory_ACU: mockGetPlotFromHistory,
   savePlotToLatestMessage_ACU: mockSavePlotToLatestMessage,
@@ -346,6 +374,8 @@ vi.mock('../../../../src/service/agent/agent-worldbook-skill-meta', () => ({
   hasUsableWorldbookSkillMeta_ACU: vi.fn((comment: unknown) => String(comment || '').includes('ACU_SKILL_META_START')),
 }));
 
+import { buildDefaultWorldSimulationEnvelope_ACU } from '../../../../src/service/simulation/defaults';
+import { buildPlotWorldContext_ACU } from '../../../../src/service/runtime/plot-runtime/plot-world-context';
 import {
   willPlotUseMainApiGenerateRaw_ACU,
   runPlotTasksRuntime_ACU,
@@ -356,7 +386,19 @@ import {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockCreateOrdinaryPlotCausalContext.mockReset();
+  mockCreateOrdinaryPlotCausalContext.mockResolvedValue(null);
   mockCallApiWithPlotPreset.mockReset();
+  mockRenderPlotSimulationSceneFacts.mockReset();
+  mockRenderPlotSimulationSceneFacts.mockResolvedValue('安全场景摘要');
+  mockBuildPlotInternalCausalMessage.mockReset();
+  mockBuildPlotInternalCausalMessage.mockResolvedValue({ role: 'system', content: '内部因果资料' });
+  mockValidatePlotInternalCausalView.mockReset();
+  mockValidatePlotInternalCausalView.mockImplementation((view: any) => ({
+    canonical: JSON.stringify(view), fingerprint: view?.fingerprint || 'a'.repeat(64), snapshot: view,
+  }));
+  mockParsePlotInternalCausalResult.mockReset();
+  mockParsePlotInternalCausalResult.mockImplementation((raw: string) => ({ schemaVersion: 1, viewFingerprint: 'a'.repeat(64), selectedFactIds: JSON.parse(raw).selectedFactIds }));
   mockMainChatCompletionAvailable.mockReturnValue(false);
 
   mockSettings.plotApiPreset = '';
@@ -1152,6 +1194,7 @@ describe('runPlotTasksRuntime_ACU', () => {
       failedResults: [],
       aggregatedTags: new Map(),
       enabledTaskCount: 0,
+      internalTaskCount: 0,
     });
     expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
     expect(mockSetPendingFinalGenerationGreenlights).toHaveBeenCalledWith([]);
@@ -2449,6 +2492,140 @@ describe('runPlotTasksRuntime_ACU', () => {
     ))).toBe(false);
     expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
   });
+
+  it('未授权 token 时不读取场景因果视图，保持既有任务输出', async () => {
+    const readSimulationCausalView = vi.fn();
+    const callApi = vi.fn().mockResolvedValue('任务输出');
+    await runPlotTasksRuntime_ACU({
+      tasks: [{ id: 'plain-task', name: '普通任务', stage: 1, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: '普通提示词' }] }],
+    }, '当前输入', {
+      requestContext: {
+        history: [], tableData: {}, presetName: '', signal: new AbortController().signal,
+        sqlReadContext: null, ejsContext: {}, finalPromptEntries: [], assertCurrent: vi.fn(),
+        simulationScene: { time: { day: 1, slot: 'morning' }, location: { region: '测试区域', place: '测试地点' } },
+        readSimulationCausalView, resolveTaskApiPreset: () => '', callApi,
+      },
+    });
+    expect(readSimulationCausalView).not.toHaveBeenCalled();
+    expect(mockRenderPlotSimulationSceneFacts).not.toHaveBeenCalled();
+    expect(callApi).toHaveBeenCalledWith([{ role: 'user', content: '普通提示词' }], '');
+  });
+
+  it('原始 token 只读取一次，并只向 provider 发送渲染后的安全摘要', async () => {
+    const view = { facts: [{ id: 'visible' }], locked: '不得泄露' } as any;
+    const readSimulationCausalView = vi.fn(() => view);
+    const callApi = vi.fn().mockResolvedValue('任务输出');
+    mockRenderPlotSimulationSceneFacts.mockResolvedValue('公开摘要含 $9，不应二次替换');
+    await runPlotTasksRuntime_ACU({
+      tasks: [{ id: 'scene-task', name: '场景任务', stage: 1, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: '场景：$SIMULATION_SCENE_FACTS' }] }],
+    }, '当前输入', {
+      requestContext: {
+        history: [], tableData: {}, presetName: '', signal: new AbortController().signal,
+        sqlReadContext: null, ejsContext: {}, finalPromptEntries: [], assertCurrent: vi.fn(),
+        simulationScene: { time: { day: 1, slot: 'morning' }, location: { region: '测试区域', place: '测试地点' } },
+        readSimulationCausalView, resolveTaskApiPreset: () => '', callApi,
+      },
+    });
+    expect(readSimulationCausalView).toHaveBeenCalledTimes(1);
+    expect(mockRenderPlotSimulationSceneFacts).toHaveBeenCalledTimes(1);
+    expect(mockRenderPlotSimulationSceneFacts).toHaveBeenCalledWith(view, expect.objectContaining({
+      signal: expect.any(AbortSignal),
+      assertCurrent: expect.any(Function),
+      scene: { time: { day: 1, slot: 'morning' }, location: { region: '测试区域', place: '测试地点' } },
+    }));
+    expect(callApi).toHaveBeenCalledWith([{ role: 'user', content: '场景：公开摘要含 $9，不应二次替换' }], '');
+  });
+
+  it('同一任务多个原始 token 仍只读取和渲染一次', async () => {
+    const readSimulationCausalView = vi.fn(() => ({ facts: [] }));
+    const callApi = vi.fn().mockResolvedValue('任务输出');
+    await runPlotTasksRuntime_ACU({
+      tasks: [{ id: 'scene-many', name: '多场景 token', stage: 1, order: 1, maxRetries: 1, promptGroup: [
+        { role: 'user', content: '$SIMULATION_SCENE_FACTS / $SIMULATION_SCENE_FACTS' },
+        { role: 'assistant', content: '$SIMULATION_SCENE_FACTS' },
+      ] }],
+    }, '当前输入', {
+      requestContext: {
+        history: [], tableData: {}, presetName: '', signal: new AbortController().signal,
+        sqlReadContext: null, ejsContext: {}, finalPromptEntries: [], assertCurrent: vi.fn(),
+        simulationScene: { time: { day: 1, slot: 'morning' }, location: { region: '测试区域', place: '测试地点' } },
+        readSimulationCausalView, resolveTaskApiPreset: () => '', callApi,
+      },
+    });
+    expect(readSimulationCausalView).toHaveBeenCalledTimes(1);
+    expect(mockRenderPlotSimulationSceneFacts).toHaveBeenCalledTimes(1);
+    expect(callApi.mock.calls[0][0]).toEqual([
+      { role: 'user', content: '安全场景摘要 / 安全场景摘要' },
+      { role: 'assistant', content: '安全场景摘要' },
+    ]);
+  });
+
+  it('原始 token 缺失请求上下文或因果读取器时拒绝且不调用 API', async () => {
+    const withoutContext = await runPlotTasksRuntime_ACU({
+      tasks: [{ id: 'scene-missing-context', name: '缺少上下文', stage: 1, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: '$SIMULATION_SCENE_FACTS' }] }],
+    }, '当前输入');
+    expect(withoutContext.failedResults[0].error).toContain('需要请求级上下文');
+    expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
+
+    await expect(runPlotTasksRuntime_ACU({
+      tasks: [{ id: 'scene-missing-reader', name: '缺少读取器', stage: 1, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: '$SIMULATION_SCENE_FACTS' }] }],
+    }, '当前输入', {
+      requestContext: {
+        history: [], tableData: {}, presetName: '', signal: new AbortController().signal,
+        sqlReadContext: null, ejsContext: {}, finalPromptEntries: [], assertCurrent: vi.fn(),
+        resolveTaskApiPreset: () => '', callApi: vi.fn(),
+      },
+    })).rejects.toThrow('需要已配置的因果视图读取器');
+  });
+
+  it('EJS 或 tag 渲染动态生成 token 时拒绝，不读取因果视图', async () => {
+    const readSimulationCausalView = vi.fn();
+    const callApi = vi.fn();
+    mockTryRenderPlotTemplateWithEjs.mockImplementation(async (text: string) => (
+      text === '<%= dynamic %>' ? '$SIMULATION_SCENE_FACTS' : text
+    ));
+    await expect(runPlotTasksRuntime_ACU({
+      tasks: [{ id: 'dynamic-ejs', name: '动态 EJS token', stage: 1, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: '<%= dynamic %>' }] }],
+    }, '当前输入', {
+      requestContext: {
+        history: [], tableData: {}, presetName: '', signal: new AbortController().signal,
+        sqlReadContext: null, ejsContext: {}, finalPromptEntries: [], assertCurrent: vi.fn(),
+        simulationScene: { time: { day: 1, slot: 'morning' }, location: { region: '测试区域', place: '测试地点' } },
+        readSimulationCausalView, resolveTaskApiPreset: () => '', callApi,
+      },
+    })).rejects.toThrow('动态生成了未授权');
+    expect(readSimulationCausalView).not.toHaveBeenCalled();
+    expect(mockRenderPlotSimulationSceneFacts).not.toHaveBeenCalled();
+    expect(callApi).not.toHaveBeenCalled();
+  });
+
+  it('最终系统指令含 token 时明确拒绝', async () => {
+    mockGetPlotPromptContentById.mockImplementation((_settings: any, id: string) => id === 'finalSystemDirective' ? '$SIMULATION_SCENE_FACTS' : '');
+    await expect(runPlotTasksRuntime_ACU({
+      tasks: [{ id: 'directive-token', name: '指令 token', stage: 1, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: '普通任务' }] }],
+    }, '当前输入')).rejects.toThrow('最终系统指令不支持');
+    expect(mockRenderPlotSimulationSceneFacts).not.toHaveBeenCalled();
+    expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
+  });
+
+  it('场景摘要渲染失败或取消时拒绝，且不调用 API', async () => {
+    const callApi = vi.fn();
+    mockRenderPlotSimulationSceneFacts.mockRejectedValueOnce(new Error('scene renderer failed'));
+    const makeContext = () => ({
+      history: [], tableData: {}, presetName: '', signal: new AbortController().signal,
+      sqlReadContext: null, ejsContext: {}, finalPromptEntries: [], assertCurrent: vi.fn(),
+      simulationScene: { time: { day: 1, slot: 'morning' }, location: { region: '测试区域', place: '测试地点' } },
+      readSimulationCausalView: vi.fn(() => ({ facts: [] })), resolveTaskApiPreset: () => '', callApi,
+    });
+    const settings = { tasks: [{ id: 'scene-failure', name: '场景失败', stage: 1, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: '$SIMULATION_SCENE_FACTS' }] }] };
+    await expect(runPlotTasksRuntime_ACU(settings, '当前输入', { requestContext: makeContext() })).rejects.toThrow('scene renderer failed');
+    expect(callApi).not.toHaveBeenCalled();
+
+    mockRenderPlotSimulationSceneFacts.mockRejectedValueOnce(new Error('TaskAbortedByUser'));
+    await expect(runPlotTasksRuntime_ACU(settings, '当前输入', { requestContext: makeContext() })).rejects.toThrow('TaskAbortedByUser');
+    expect(callApi).not.toHaveBeenCalled();
+  });
+
   it.each([
     { isolated: false, acceptedTag: 'plot' },
     { isolated: true, acceptedTag: 'plot' },
@@ -2629,6 +2806,379 @@ describe('runPlotTasksRuntime_ACU', () => {
       if (kind === 'api') expect(JSON.stringify(mockLogWarn.mock.calls)).toContain(expected);
       expect(mockAbortableDelay).toHaveBeenCalledTimes(1);
     }
+  });
+
+  it.each([false, true])('完整世界资料在模板处理后进入各推进任务，隔离上下文=%s，最终只保留模型任务输出', async isolated => {
+    const ledger = buildDefaultWorldSimulationEnvelope_ACU().ledger;
+    ledger.clock = { day: 9, slot: '上午', storyTime: '第九日上午', precision: 'exact', evidenceRefs: [] };
+    ledger.facts = [{ id: 'distant-secret', summary: 'DISTANT_LOCKED_CAUSAL_BACKGROUND', temporalKind: 'condition',
+      happenedAt: null, validFrom: { day: 1, slot: '' }, validUntil: null, locationRef: { region: '远方', place: '密室' },
+      actorIds: [], worldEventIds: [], projectionPolicy: 'internal', revealState: 'locked', revealGate: null,
+      nextCheck: null, sourceRefs: [], evidenceRefs: [], supersedesFactIds: [], revision: 1 }];
+    const worldContext = buildPlotWorldContext_ACU({ ledger, previousLedger: null, summary: '已确认的推演结果' });
+    const callApi = vi.fn(async (_messages: any, _name: string) => '推进模型自行处理后的结果');
+    mockCallApiWithPlotPreset.mockResolvedValue('推进模型自行处理后的结果');
+    if (!isolated) mockCreateOrdinaryPlotCausalContext.mockResolvedValue({ worldContext });
+    const requestContext = isolated ? {
+      history: [], tableData: {}, presetName: '', signal: new AbortController().signal,
+      sqlReadContext: null, ejsContext: {}, finalPromptEntries: [], assertCurrent: vi.fn(),
+      readWorldSimulationContext: () => structuredClone(worldContext), resolveTaskApiPreset: () => '', callApi,
+    } : undefined;
+    const result = await runPlotTasksRuntime_ACU({ tasks: [
+      { id: 'recall', stage: 1, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: '仅执行召回任务' }] },
+      { id: 'physio', stage: 2, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: '仅执行生理任务' }] },
+    ] }, '继续', { requestContext });
+    const calls = isolated ? callApi.mock.calls : mockCallApiWithPlotPreset.mock.calls;
+    expect(calls).toHaveLength(2);
+    for (const args of calls) {
+      const messages = args[0] as Array<{ role: string; content: string }>;
+      expect(messages.at(-1)).toMatchObject({ role: 'system', content: expect.stringContaining('[[ACU_WORLD_SIMULATION_CONTEXT]]') });
+      const input = JSON.parse(messages.at(-1)!.content.split('\n').at(-1)!);
+      expect(Object.keys(input)).toEqual(['clock', 'round', 'worldEvents', 'actors', 'facts', 'historyMilestones']);
+      expect(input.clock.day).toBe(9);
+      expect(input.facts.hot[0]).toMatchObject({ summary: 'DISTANT_LOCKED_CAUSAL_BACKGROUND', revealState: 'locked' });
+      if (!isolated) expect(args[3]).toBeUndefined();
+    }
+    expect(JSON.stringify(mockTryRenderPlotTemplateWithEjs.mock.calls)).not.toContain('DISTANT_LOCKED_CAUSAL_BACKGROUND');
+    expect(JSON.stringify(result)).not.toContain('DISTANT_LOCKED_CAUSAL_BACKGROUND');
+    expect(JSON.stringify(mockSetTempPlotToSave.mock.calls)).not.toContain('DISTANT_LOCKED_CAUSAL_BACKGROUND');
+    expect(JSON.stringify(mockLogDebug.mock.calls)).not.toContain('DISTANT_LOCKED_CAUSAL_BACKGROUND');
+    expect(result.successfulResults).toHaveLength(2);
+  });
+
+  it('任意任务及预设的原始 token 在全部模板和继电之后就地插入六键冷热完整资料，且不追加第二份 system', async () => {
+    const ledger = buildDefaultWorldSimulationEnvelope_ACU().ledger;
+    ledger.clock.day = 11;
+    ledger.worldEvents = [{ id: 'unseen-event', title: '远方密谋', state: '仍在策划', status: 'active',
+      actorIds: ['hidden-actor'], organizationIds: [], locationRefs: [{ region: '远方' }],
+      startedAt: null, deadline: null, nextCheck: null, relatedEventIds: [], loreRefs: [],
+      evidenceRefs: [], tags: [], revision: 1, legacy: null }];
+    ledger.actors = [{ id: 'hidden-actor', name: '幕后人物', interests: [], location: '远方',
+      locationRef: { region: '远方' }, life: 'alive', diedAtDay: null, deathSummary: null,
+      resources: [], goals: ['尚未完成的目标'], constraints: [], informationSources: ['信使'],
+      knownFacts: ['仅知密函存在'], visibility: 'hidden', currentAction: null, longTermAction: null,
+      shortTermAction: null, experiences: [], revision: 1 }];
+    const lockedFact = {
+      id: 'locked-hot', summary: 'HOT_LOCKED_SECRET_$8/{{tag}}/<%= ready %>', temporalKind: 'condition' as const,
+      happenedAt: null, validFrom: { day: 2, slot: '' }, validUntil: null,
+      locationRef: { region: '远方', place: '密室' }, actorIds: [], worldEventIds: [],
+      projectionPolicy: 'internal' as const, revealState: 'locked' as const,
+      revealGate: { condition: '取得线索' }, nextCheck: null, sourceRefs: [], evidenceRefs: [],
+      supersedesFactIds: [], revision: 1,
+    };
+    ledger.facts = [lockedFact];
+    ledger.factArchive = [{ ...lockedFact, id: 'locked-cold', summary: 'COLD_LOCKED_SECRET' }];
+    const milestone = {
+      id: 'hot-milestone', summary: 'HOT_MILESTONE', happenedAt: { day: 3, slot: '夜' },
+      actorIds: [], worldEventIds: [], locationRef: null, sourceFactIds: ['locked-hot'],
+      importance: 3, category: '历史', visibility: 'internal' as const, revision: 1, legacyRefs: [],
+    };
+    ledger.historyMilestones = [milestone];
+    ledger.historyArchive = [{ ...milestone, id: 'cold-milestone', summary: 'COLD_MILESTONE' }];
+    const context = buildPlotWorldContext_ACU({ ledger, previousLedger: null, summary: 'ROUND_SECRET' });
+    const readWorldSimulationContext = vi.fn(() => structuredClone(context));
+    const callApi = vi.fn().mockResolvedValue('模型自己的推进结果');
+    const forbidden = ['HOT_LOCKED_SECRET', 'COLD_LOCKED_SECRET', 'ROUND_SECRET'];
+    mockTryRenderPlotTemplateWithEjs.mockImplementation(async (text: string) => {
+      for (const secret of forbidden) expect(text).not.toContain(secret);
+      return text.replaceAll('<%= ready %>', 'EJS已执行');
+    });
+    mockReplacePlotTagPlaceholders.mockImplementation((text: string) => {
+      for (const secret of forbidden) expect(text).not.toContain(secret);
+      return text.replaceAll('{{tag}}', '继电已执行');
+    });
+    mockRenderPlotTaskContentWithIsolatedVariables.mockImplementation((text: string) => {
+      for (const secret of forbidden) expect(text).not.toContain(secret);
+      return text.replaceAll('{{variable}}', '变量已执行');
+    });
+    const result = await runPlotTasksRuntime_ACU({ tasks: [{
+      id: 'user-defined-task-42', name: '自由配置的任务', stage: 1, order: 1, maxRetries: 1,
+      promptGroup: [
+        { role: 'system', content: '先执行 <%= ready %> 和 {{tag}}' },
+        { role: 'user', content: '前 $8 / {{variable}} / $WORLD_SIMULATION / $WORLD_SIMULATION 后' },
+      ],
+    }] }, '当前输入', { requestContext: {
+      history: [], tableData: {}, presetName: 'custom-preset', signal: new AbortController().signal,
+      sqlReadContext: null, ejsContext: {}, finalPromptEntries: [], assertCurrent: vi.fn(),
+      readWorldSimulationContext, resolveTaskApiPreset: () => 'any-preset', callApi,
+    } });
+
+    expect(readWorldSimulationContext).toHaveBeenCalledTimes(1);
+    expect(callApi).toHaveBeenCalledTimes(1);
+    const [messages, preset] = callApi.mock.calls[0] as [Array<{ role: string; content: string }>, string];
+    expect(preset).toBe('any-preset');
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toEqual({ role: 'system', content: '先执行 EJS已执行 和 继电已执行' });
+    expect(messages[1].role).toBe('user');
+    expect(messages[1].content).toContain('前 当前输入 / 变量已执行 / [[ACU_WORLD_SIMULATION_CONTEXT]]');
+    expect(messages[1].content.match(/\[\[ACU_WORLD_SIMULATION_CONTEXT\]\]/g)).toHaveLength(2);
+    const inserted = messages[1].content.match(/\[\[ACU_WORLD_SIMULATION_CONTEXT\]\][^]*?\n(\{[^\n]+\})/);
+    expect(inserted).not.toBeNull();
+    const payload = JSON.parse(inserted![1]);
+    expect(Object.keys(payload)).toEqual(['clock', 'round', 'worldEvents', 'actors', 'facts', 'historyMilestones']);
+    expect(payload).toEqual(context);
+    expect(payload.clock.day).toBe(11);
+    expect(payload.round.summary).toBe('ROUND_SECRET');
+    expect(payload.worldEvents[0]).toMatchObject({ id: 'unseen-event', state: '仍在策划' });
+    expect(payload.actors[0]).toMatchObject({ id: 'hidden-actor', goals: ['尚未完成的目标'], knownFacts: ['仅知密函存在'] });
+    expect(payload.facts.hot[0]).toMatchObject({ storage: 'hot', revealState: 'locked', summary: lockedFact.summary });
+    expect(payload.facts.cold[0]).toMatchObject({ storage: 'cold', revealState: 'locked', summary: 'COLD_LOCKED_SECRET' });
+    expect(payload.historyMilestones.hot[0].summary).toBe('HOT_MILESTONE');
+    expect(payload.historyMilestones.cold[0].summary).toBe('COLD_MILESTONE');
+    expect(messages[1].content).toContain('HOT_LOCKED_SECRET_$8/{{tag}}/<%= ready %>');
+    expect(messages[1].content).not.toContain('HOT_LOCKED_SECRET_当前输入/继电已执行/EJS已执行');
+    expect(result.successfulResults).toEqual([expect.objectContaining({ rawResponse: '模型自己的推进结果' })]);
+    expect(result.finalMessage).toBe('最终注入消息');
+    expect(result.saveContent).toBe('保存的剧情内容');
+    expect(JSON.stringify(result)).not.toContain('HOT_LOCKED_SECRET');
+    expect(JSON.stringify(mockBuildFinalPlotInjectionMessage.mock.calls)).not.toContain('HOT_LOCKED_SECRET');
+    expect(JSON.stringify(mockTryRenderPlotTemplateWithEjs.mock.calls)).not.toContain('HOT_LOCKED_SECRET');
+    expect(JSON.stringify(mockReplacePlotTagPlaceholders.mock.calls)).not.toContain('HOT_LOCKED_SECRET');
+  });
+
+  it.each([false, true])('token 缺资料时就地清空、不留下占位或追加空 system；隔离请求=%s', async isolated => {
+    mockCreateOrdinaryPlotCausalContext.mockResolvedValue(null);
+    const callApi = vi.fn().mockResolvedValue('模型回复');
+    const readWorldSimulationContext = vi.fn(() => null);
+    const requestContext = isolated ? {
+      history: [], tableData: {}, presetName: 'another-preset', signal: new AbortController().signal,
+      sqlReadContext: null, ejsContext: {}, finalPromptEntries: [], assertCurrent: vi.fn(),
+      readWorldSimulationContext, resolveTaskApiPreset: () => 'another-preset', callApi,
+    } : undefined;
+    const result = await runPlotTasksRuntime_ACU({ tasks: [{
+      id: 'unrelated-task', stage: 1, order: 1, maxRetries: 1,
+      promptGroup: [{ role: 'user', content: '前 $WORLD_SIMULATION 后' }],
+    }] }, '继续', { requestContext });
+    const actualCall = isolated ? callApi : mockCallApiWithPlotPreset;
+    expect(actualCall).toHaveBeenCalledTimes(1);
+    expect(actualCall.mock.calls[0][0]).toEqual([{ role: 'user', content: '前  后' }]);
+    if (isolated) expect(readWorldSimulationContext).toHaveBeenCalledTimes(1);
+    else expect(mockCreateOrdinaryPlotCausalContext).toHaveBeenCalledWith(expect.objectContaining({ explicitWorldSimulation: true }));
+    expect(result.successfulResults).toHaveLength(1);
+    expect(JSON.stringify(result)).not.toContain('$WORLD_SIMULATION');
+  });
+
+  it('同组任意任务显式使用 token 时只投送该任务，不向无 token 的时间召回隐式追加完整资料', async () => {
+    const ledger = buildDefaultWorldSimulationEnvelope_ACU().ledger;
+    const secret = 'ONLY_EXPLICIT_TASK_SEES_WORLD';
+    const context = buildPlotWorldContext_ACU({ ledger, previousLedger: null, summary: secret });
+    mockCreateOrdinaryPlotCausalContext.mockResolvedValue({ worldContext: context });
+    mockSettings.plotApiPreset = 'shared-preset';
+    mockSettings.plotTaskApiPresetOverridesById = { 'free-task-name': 'alternate-preset' };
+    const result = await runPlotTasksRuntime_ACU({ tasks: [
+      { id: 'time-recall-custom', name: '时间召回', stage: 1, order: 1, maxRetries: 1,
+        promptGroup: [{ role: 'user', content: '只召回当前时间' }] },
+      { id: 'free-task-name', name: '任意推进任务', stage: 1, order: 2, maxRetries: 1,
+        promptGroup: [{ role: 'user', content: '此处读取：$WORLD_SIMULATION' }] },
+    ] }, '继续');
+
+    expect(mockCreateOrdinaryPlotCausalContext).toHaveBeenCalledWith(expect.objectContaining({ explicitWorldSimulation: true }));
+    expect(result.successfulResults).toHaveLength(2);
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(2);
+    const recallCall = mockCallApiWithPlotPreset.mock.calls.find((call: any[]) => call[0][0].content === '只召回当前时间');
+    const explicitCall = mockCallApiWithPlotPreset.mock.calls.find((call: any[]) => call[0][0].content.startsWith('此处读取：'));
+    expect(recallCall).toBeDefined();
+    expect(recallCall![0]).toEqual([{ role: 'user', content: '只召回当前时间' }]);
+    expect(recallCall![1]).toBe('shared-preset');
+    expect(JSON.stringify(recallCall![0])).not.toContain(secret);
+    expect(explicitCall).toBeDefined();
+    expect(explicitCall![1]).toBe('alternate-preset');
+    expect(explicitCall![0]).toHaveLength(1);
+    expect(explicitCall![0][0].content).toContain(`[[ACU_WORLD_SIMULATION_CONTEXT]]`);
+    expect(explicitCall![0][0].content).toContain(secret);
+    expect(JSON.stringify(result)).not.toContain(secret);
+  });
+
+  it('普通入口从任意启用任务的原文识别 token，不绑定任务 id 或预设；无 token 保留旧末尾 system 行为', async () => {
+    const context = buildPlotWorldContext_ACU({ ledger: buildDefaultWorldSimulationEnvelope_ACU().ledger, previousLedger: null, summary: '幕后资料' });
+    mockCreateOrdinaryPlotCausalContext.mockResolvedValue({ worldContext: context });
+    mockSettings.plotApiPreset = 'different-global-preset';
+    mockSettings.plotTaskApiPresetOverridesById = { 'my-custom-task': 'user-selected-preset' };
+    await runPlotTasksRuntime_ACU({ tasks: [
+      { id: 'my-custom-task', enabled: true, stage: 1, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: '资料就在这里：$WORLD_SIMULATION' }] },
+      { id: 'disabled-token', enabled: false, stage: 1, order: 2, maxRetries: 1, promptGroup: [{ role: 'user', content: '$WORLD_SIMULATION' }] },
+    ] }, '继续');
+    expect(mockCreateOrdinaryPlotCausalContext).toHaveBeenCalledWith(expect.objectContaining({ explicitWorldSimulation: true }));
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
+    const [tokenMessages, tokenPreset] = mockCallApiWithPlotPreset.mock.calls[0];
+    expect(tokenPreset).toBe('user-selected-preset');
+    expect(tokenMessages).toHaveLength(1);
+    expect(tokenMessages[0].content).toContain('资料就在这里：[[ACU_WORLD_SIMULATION_CONTEXT]]');
+
+    mockCreateOrdinaryPlotCausalContext.mockClear();
+    mockCallApiWithPlotPreset.mockClear();
+    await runPlotTasksRuntime_ACU({ tasks: [{
+      id: 'another-unrelated-task', stage: 1, order: 1, maxRetries: 1,
+      promptGroup: [{ role: 'user', content: '这次没有占位符' }],
+    }] }, '继续');
+    expect(mockCreateOrdinaryPlotCausalContext).toHaveBeenCalledWith(expect.objectContaining({ explicitWorldSimulation: false }));
+    const legacyMessages = mockCallApiWithPlotPreset.mock.calls[0][0];
+    expect(legacyMessages).toHaveLength(2);
+    expect(legacyMessages[0]).toEqual({ role: 'user', content: '这次没有占位符' });
+    expect(legacyMessages[1]).toMatchObject({ role: 'system', content: expect.stringContaining('[[ACU_WORLD_SIMULATION_CONTEXT]]') });
+  });
+
+  it('最终系统指令明确拒绝完整资料 token，原文不进入最终正文或模型调用', async () => {
+    const secret = 'FINAL_DIRECTIVE_WORLD_SECRET';
+    const ledger = buildDefaultWorldSimulationEnvelope_ACU().ledger;
+    const context = buildPlotWorldContext_ACU({ ledger, previousLedger: null, summary: secret });
+    mockCreateOrdinaryPlotCausalContext.mockResolvedValue({ worldContext: context });
+    mockGetPlotPromptContentById.mockImplementation((_settings: any, id: string) => id === 'finalSystemDirective'
+      ? '最终写作：$WORLD_SIMULATION' : '');
+    await expect(runPlotTasksRuntime_ACU({ tasks: [{
+      id: 'directive-world-token', stage: 1, order: 1, maxRetries: 1,
+      promptGroup: [{ role: 'user', content: '正常任务' }],
+    }] }, '继续')).rejects.toThrow('仅用于推进任务提示词');
+    expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
+    expect(mockBuildFinalPlotInjectionMessage).not.toHaveBeenCalled();
+    expect(JSON.stringify(mockLogWarn.mock.calls)).not.toContain(secret);
+    expect(JSON.stringify(mockLogError.mock.calls)).not.toContain(secret);
+  });
+
+  it('内部因果任务只走专用调用器，秘密回复不会进入公开结果、保存、继电或日志', async () => {
+    const secret = 'INTERNAL_SECRET_MARKER_不得泄露';
+    const callApi = vi.fn().mockResolvedValue('公开后续结果');
+    const selected = { schemaVersion: 1 as const, viewFingerprint: 'a'.repeat(64), selectedFactIds: ['fact-1'] };
+    const callInternalApi = vi.fn().mockResolvedValue(JSON.stringify({ selectedFactIds: ['fact-1'] }));
+    const acceptInternalCausalResult = vi.fn();
+    const requestContext = {
+      history: [], tableData: {}, presetName: '', signal: new AbortController().signal,
+      sqlReadContext: null, ejsContext: {}, finalPromptEntries: [], assertCurrent: vi.fn(),
+      readSimulationCausalView: vi.fn(() => ({ revision: 1 })), acceptInternalCausalResult, resolveTaskApiPreset: () => '', callApi, callInternalApi,
+    };
+    const result = await runPlotTasksRuntime_ACU({ tasks: [
+      { id: 'internal', name: '内部', internalCausalRead: true, stage: 1, order: 1, maxRetries: 1, extractTags: 'leak', promptGroup: [{ role: 'user', content: '内部常规提示词' }] },
+      { id: 'public', name: '公开', stage: 2, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: '公开常规提示词' }] },
+    ] }, '当前输入', { requestContext });
+
+    expect(callInternalApi).toHaveBeenCalledTimes(1);
+    expect(callInternalApi.mock.calls[0][0]).toEqual([
+      { role: 'user', content: '内部常规提示词' },
+      { role: 'system', content: '内部因果资料' },
+    ]);
+    expect(callApi).toHaveBeenCalledTimes(1);
+    expect(callApi.mock.calls[0][0]).toEqual([{ role: 'user', content: '公开常规提示词' }]);
+    expect(mockExtractPlotTagsFromResponse).toHaveBeenCalledTimes(1);
+    expect(mockParsePlotInternalCausalResult).toHaveBeenCalledWith(JSON.stringify({ selectedFactIds: ['fact-1'] }), { revision: 1 });
+    expect(acceptInternalCausalResult).toHaveBeenCalledOnce();
+    expect(acceptInternalCausalResult).toHaveBeenCalledWith(selected);
+    expect(result.internalTaskCount).toBe(1);
+    expect(result.successfulResults).toEqual([expect.objectContaining({ taskId: 'public', rawResponse: '公开后续结果' })]);
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(JSON.stringify(mockSetTempPlotToSave.mock.calls)).not.toContain(secret);
+    expect(JSON.stringify(mockLogDebug.mock.calls)).not.toContain(secret);
+    expect(JSON.stringify(mockLogWarn.mock.calls)).not.toContain(secret);
+  });
+
+  it('内部因果任务缺少读取器或专用调用器时，在任何 API 前拒绝', async () => {
+    const internal = { id: 'internal-preflight', name: '内部预检', internalCausalRead: true, stage: 1, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: '内部' }] };
+    const callApi = vi.fn();
+    await expect(runPlotTasksRuntime_ACU({ tasks: [internal] }, '当前输入')).rejects.toThrow('需要请求级上下文');
+    await expect(runPlotTasksRuntime_ACU({ tasks: [internal] }, '当前输入', {
+      requestContext: {
+        history: [], tableData: {}, presetName: '', signal: new AbortController().signal,
+        sqlReadContext: null, ejsContext: {}, finalPromptEntries: [], assertCurrent: vi.fn(),
+        resolveTaskApiPreset: () => '', callApi,
+      },
+    })).rejects.toThrow('需要已配置的因果视图读取器');
+    await expect(runPlotTasksRuntime_ACU({ tasks: [
+      { id: 'public-preflight', name: '同阶段公开', stage: 1, order: 0, promptGroup: [{ role: 'user', content: '公开' }] },
+      internal,
+    ] }, '当前输入', {
+      requestContext: {
+        history: [], tableData: {}, presetName: '', signal: new AbortController().signal,
+        sqlReadContext: null, ejsContext: {}, finalPromptEntries: [], assertCurrent: vi.fn(),
+        readSimulationCausalView: vi.fn(), resolveTaskApiPreset: () => '', callApi,
+      },
+    })).rejects.toThrow('需要专用内部 API 调用器');
+    expect(callApi).not.toHaveBeenCalled();
+    expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
+  });
+
+  it('仅内部因果任务不生成正文或保存内容', async () => {
+    const callInternalApi = vi.fn().mockResolvedValue(JSON.stringify({ selectedFactIds: [] }));
+    const result = await runPlotTasksRuntime_ACU({ tasks: [
+      { id: 'internal-only', name: '仅内部', internalCausalRead: true, stage: 1, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: '内部' }] },
+    ] }, '当前输入', {
+      requestContext: {
+        history: [], tableData: {}, presetName: '', signal: new AbortController().signal,
+        sqlReadContext: null, ejsContext: {}, finalPromptEntries: [], assertCurrent: vi.fn(),
+        readSimulationCausalView: vi.fn(() => ({ revision: 1 })), resolveTaskApiPreset: () => '', callApi: vi.fn(), callInternalApi,
+      },
+    });
+    expect(result.finalMessage).toBeNull();
+    expect(result.saveContent).toBeUndefined();
+    expect(result.successfulResults).toEqual([]);
+    expect(result.internalTaskCount).toBe(1);
+  });
+
+  it('内部因果视图在模型响应前替换为另一合法快照时拒绝，不交付 sink', async () => {
+    const viewA = { revision: 1, fingerprint: 'a'.repeat(64) };
+    const viewB = { revision: 1, fingerprint: 'b'.repeat(64) };
+    let reads = 0;
+    const acceptInternalCausalResult = vi.fn();
+    const result = await runPlotTasksRuntime_ACU({ tasks: [
+      { id: 'internal', name: '内部', internalCausalRead: true, stage: 1, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: '内部' }] },
+    ] }, '当前输入', { requestContext: {
+      history: [], tableData: {}, presetName: '', signal: new AbortController().signal,
+      sqlReadContext: null, ejsContext: {}, finalPromptEntries: [], assertCurrent: vi.fn(),
+      readSimulationCausalView: vi.fn(() => (++reads === 1 ? viewA : viewB)), acceptInternalCausalResult,
+      resolveTaskApiPreset: () => '', callApi: vi.fn(), callInternalApi: vi.fn().mockResolvedValue(JSON.stringify({ selectedFactIds: [] })),
+    } });
+    expect(result.failedResults).toEqual([expect.objectContaining({ internalCausalRead: true })]);
+    expect(acceptInternalCausalResult).not.toHaveBeenCalled();
+  });
+
+  it('内部因果结果在全部阶段成功后才批量交付，后续阶段失败时不调用 sink', async () => {
+    const acceptInternalCausalResult = vi.fn();
+    const callInternalApi = vi.fn().mockResolvedValue(JSON.stringify({ selectedFactIds: ['fact-1'] }));
+    const callApi = vi.fn().mockResolvedValue('');
+    const result = await runPlotTasksRuntime_ACU({ tasks: [
+      { id: 'internal', name: '内部', internalCausalRead: true, stage: 1, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: '内部' }] },
+      { id: 'failing-public', name: '失败公开', stage: 2, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: '公开' }] },
+    ] }, '当前输入', { requestContext: {
+      history: [], tableData: {}, presetName: '', signal: new AbortController().signal,
+      sqlReadContext: null, ejsContext: {}, finalPromptEntries: [], assertCurrent: vi.fn(),
+      readSimulationCausalView: vi.fn(() => ({ revision: 1 })), acceptInternalCausalResult,
+      resolveTaskApiPreset: () => '', callApi, callInternalApi,
+    } });
+    expect(result.abortedByStageFailure).toBe(true);
+    expect(acceptInternalCausalResult).not.toHaveBeenCalled();
+  });
+
+  it('内部结果 sink 抛错时安全失败且不泄漏模型回复', async () => {
+    const secret = 'INTERNAL_SINK_SECRET';
+    const acceptInternalCausalResult = vi.fn(() => { throw new Error(secret); });
+    const callInternalApi = vi.fn().mockResolvedValue(JSON.stringify({ selectedFactIds: [] }));
+    await expect(runPlotTasksRuntime_ACU({ tasks: [
+      { id: 'internal', name: '内部', internalCausalRead: true, stage: 1, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: '内部' }] },
+    ] }, '当前输入', { requestContext: {
+      history: [], tableData: {}, presetName: '', signal: new AbortController().signal,
+      sqlReadContext: null, ejsContext: {}, finalPromptEntries: [], assertCurrent: vi.fn(),
+      readSimulationCausalView: vi.fn(() => ({ revision: 1 })), acceptInternalCausalResult,
+      resolveTaskApiPreset: () => '', callApi: vi.fn(), callInternalApi,
+    } })).rejects.toThrow('内部因果结果交付失败');
+    expect(JSON.stringify(mockLogWarn.mock.calls)).not.toContain(secret);
+    expect(JSON.stringify(mockLogError.mock.calls)).not.toContain(secret);
+  });
+
+  it('内部因果资料构建异常或取消时不调用 API，取消继续抛出', async () => {
+    const callInternalApi = vi.fn();
+    const assertCurrent = vi.fn();
+    const context = {
+      history: [], tableData: {}, presetName: '', signal: new AbortController().signal,
+      sqlReadContext: null, ejsContext: {}, finalPromptEntries: [], assertCurrent,
+      readSimulationCausalView: vi.fn(() => ({ revision: 1 })), resolveTaskApiPreset: () => '', callApi: vi.fn(), callInternalApi,
+    };
+    const settings = { tasks: [{ id: 'internal-build', name: '内部构建', internalCausalRead: true, stage: 1, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: '内部' }] }] };
+    mockBuildPlotInternalCausalMessage.mockRejectedValueOnce(new Error('secret build failure'));
+    const failed = await runPlotTasksRuntime_ACU(settings, '当前输入', { requestContext: context });
+    expect(failed.failedResults).toEqual([expect.objectContaining({ internalCausalRead: true, error: '内部因果资料准备失败。' })]);
+    expect(callInternalApi).not.toHaveBeenCalled();
+
+    mockBuildPlotInternalCausalMessage.mockRejectedValueOnce(new Error('TaskAbortedByUser'));
+    await expect(runPlotTasksRuntime_ACU(settings, '当前输入', { requestContext: context })).rejects.toThrow('TaskAbortedByUser');
+    expect(callInternalApi).not.toHaveBeenCalled();
   });
 
 });

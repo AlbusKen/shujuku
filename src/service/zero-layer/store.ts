@@ -19,6 +19,9 @@ import { buildZeroLayerExitCandidate_ACU } from './exit-candidate';
 import { applyExitAssignments_ACU, exitAssignmentsMatch_ACU } from './exit-fields';
 import { requireExit_ACU } from './exit-source';
 import { pendingZeroLayerPersistence_ACU, type PendingZeroLayerPersistence_ACU } from './persistence-state';
+import { canonicalPlotDeliveryJson_ACU } from '../runtime/plot-runtime/plot-causal-delivery-bridge';
+import { claimWorldDeliveryAdoption_ACU } from '../simulation/agent/world-delivery-adoption';
+import type { WorldDeliveryAdoptionClaimInput_ACU } from '../simulation/agent/world-delivery-adoption';
 
 type PendingPersistence_ACU = PendingZeroLayerPersistence_ACU;
 
@@ -75,6 +78,9 @@ export class ZeroLayerStore_ACU {
   }
 
   commit(command: ZeroLayerCommand_ACU, expectedRevision: number | null): Promise<ZeroLayerEnvelope_ACU> {
+    if (command.type === 'record-world-delivery-adoption') {
+      throw new ZeroLayerError_ACU('invalid-transition', '世界投递采用只能由不透明审查回执写口提交。');
+    }
     const context = captureZeroLayerCarrier_ACU();
     const snapshot = structuredClone(command);
     return this.enqueue(context, async () => {
@@ -298,6 +304,40 @@ export class ZeroLayerStore_ACU {
     });
   }
 
+  /** 不透明审查回执必须在同一 carrier 队列中按当前权威资料认领，再写入生命周期。 */
+  adoptWorldDelivery(
+    turnId: string, attemptId: string, receipt: object,
+    input: WorldDeliveryAdoptionClaimInput_ACU,
+  ): Promise<ZeroLayerEnvelope_ACU> {
+    const context = captureZeroLayerCarrier_ACU();
+    return this.enqueue(context, async () => {
+      if (ZeroLayerStore_ACU.unknown.has(context.key)) {
+        throw new ZeroLayerError_ACU('persist-unknown', '世界投递审查保存结果未知，请先回读恢复。');
+      }
+      const current = readZeroLayerCarrier_ACU(context);
+      if (!current?.enabled) throw new ZeroLayerError_ACU('mode-disabled', '零层模式未启用。');
+      await this.verifySource(context, current);
+      const turn = current.turns.find(item => item.turnId === turnId && item.attemptId === attemptId
+        && item.branchId === current.activeBranchId);
+      if (!turn?.body?.trim() || !['response-durable', 'effects-durable', 'published'].includes(turn.phase)) {
+        throw new ZeroLayerError_ACU('invalid-transition', '世界投递审查必须对应当前已保存正文。');
+      }
+      const delivery = turn.worldDelivery?.records.find(item => item.deliveryId === input.delivery.deliveryId);
+      const ledger = turn.materialBaseline?.simulation?.envelope?.ledger;
+      if (!delivery || !ledger || JSON.stringify(delivery) !== JSON.stringify(input.delivery)
+        || canonicalPlotDeliveryJson_ACU(ledger) !== canonicalPlotDeliveryJson_ACU(input.ledger)
+        || input.successorText !== turn.body) {
+        throw new ZeroLayerError_ACU('revision-conflict', '采用审查资料与当前回合的权威冻结记录不一致。');
+      }
+      const dto = claimWorldDeliveryAdoption_ACU(receipt, { ...input, delivery: structuredClone(delivery),
+        ledger: structuredClone(ledger), successorText: turn.body });
+      const candidate = applyZeroLayerCommand_ACU(current, {
+        type: 'record-world-delivery-adoption', turnId, attemptId, receipt: dto,
+      }, context, current.activationFingerprint);
+      return this.persist(context, current, candidate);
+    });
+  }
+
   private async verifySource(context: ZeroLayerCarrierContext_ACU, current: ZeroLayerEnvelope_ACU | null): Promise<string> {
     const source = current?.exitManifest?.phase === 'committed'
       ? physicalHistorySnapshot_ACU(context.chat.slice(0, current.activationMessageCount)) : context.source;
@@ -458,7 +498,7 @@ export class ZeroLayerStore_ACU {
     context.carrier[ZERO_LAYER_CARRIER_FIELD_ACU] = candidate;
     try {
       if (assignments) applyExitAssignments_ACU(chat, assignments.values, 'after');
-      await saveChatToHostStrict_ACU({ verify: true });
+      await saveChatToHostStrict_ACU();
       assertZeroLayerCarrier_ACU(context);
       verifyBridge();
       verifyExit(journal?.phase === 'committed' ? 'after' : 'before');

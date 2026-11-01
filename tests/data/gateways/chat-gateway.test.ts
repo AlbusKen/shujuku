@@ -149,6 +149,124 @@ describe('saveChatToHost_ACU', () => {
 });
 
 describe('saveChatToHostStrict_ACU', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  function installReadback(messages: any[], persisted: any[], group = false) {
+    mockSillyTavern.chat = messages;
+    mockSillyTavern.chatId = 'save-test';
+    mockSillyTavern.characterId = 0;
+    mockSillyTavern.groupId = group ? 'group-a' : null;
+    mockSillyTavern.characters = [{ name: '测试角色', avatar: 'test.png' }];
+    mockSillyTavern.saveChat = vi.fn(async () => undefined);
+    const request = vi.fn(async () => ({ ok: true, json: async () => group ? persisted : [{ chat_metadata: {} }, ...persisted] }));
+    vi.stubGlobal('fetch', request);
+    return request;
+  }
+
+  it.each([false, true])('容忍字段顺序、宿主元数据与身份类型差异，group=%s', async group => {
+    const chat = [{ mes: '正文', message_id: 7, swipe_id: 0, is_user: false, extra: { localOnly: true },
+      _qrf_world_simulation: { revision: 1, actors: [{ id: 'a', name: '甲' }] } }];
+    const remote = [{ _qrf_world_simulation: { actors: [{ name: '甲', id: 'a' }], revision: 1 },
+      message_id: '7', swipe_id: '0', mes: '正文', send_date: '宿主补充的时间' }];
+    const request = installReadback(chat, remote, group);
+    await expect(saveChatToHostStrict_ACU({ verify: true })).resolves.toBeUndefined();
+    expect(request.mock.calls[0][0]).toBe(group ? '/api/chats/group/get' : '/api/chats/get');
+  });
+
+  it.each(['只有聊天读取函数', '只有旧角色索引', '两种字段均为旧接口', '群组聊天读取函数'])('%s 可以真实保存并回读', async kind => {
+    const chat = [{ mes: '正文', _qrf_world_simulation: { revision: 1 } }];
+    const group = kind === '群组聊天读取函数';
+    const request = installReadback(chat, structuredClone(chat), group);
+    if (kind !== '只有旧角色索引') {
+      delete mockSillyTavern.chatId;
+      mockSillyTavern.getCurrentChatId = () => 'save-test';
+    }
+    if (kind === '只有旧角色索引' || kind === '两种字段均为旧接口') {
+      delete mockSillyTavern.characterId;
+      mockSillyTavern.this_chid = 0;
+    }
+    await expect(saveChatToHostStrict_ACU({ verify: true })).resolves.toBeUndefined();
+    expect(mockSillyTavern.saveChat).toHaveBeenCalledOnce();
+    expect(JSON.parse(request.mock.calls[0][1].body)).toEqual(group ? { id: 'save-test' }
+      : { ch_name: '测试角色', file_name: 'save-test', avatar_url: 'test.png' });
+  });
+
+  it('聊天读取函数优先于旧快照字段，数字与字符串角色索引等价', async () => {
+    const chat = [{ mes: '正文' }];
+    const request = installReadback(chat, structuredClone(chat));
+    mockSillyTavern.chatId = 'stale-snapshot';
+    mockSillyTavern.getCurrentChatId = () => 'current-chat';
+    mockSillyTavern.saveChat = vi.fn(async () => { mockSillyTavern.characterId = '0'; });
+    await expect(saveChatToHostStrict_ACU({ verify: true })).resolves.toBeUndefined();
+    expect(JSON.parse(request.mock.calls[0][1].body).file_name).toBe('current-chat');
+  });
+
+  it.each(['保存', '回读'])('仅函数提供聊天身份时，%s期间切换仍拒绝确认', async phase => {
+    const chat = [{ mes: '正文' }];
+    installReadback(chat, structuredClone(chat));
+    delete mockSillyTavern.chatId;
+    let id = 'save-test';
+    mockSillyTavern.getCurrentChatId = () => id;
+    if (phase === '保存') mockSillyTavern.saveChat = vi.fn(async () => { id = 'other-chat'; });
+    else vi.stubGlobal('fetch', vi.fn(async () => {
+      id = 'other-chat';
+      return { ok: true, json: async () => [{}, ...chat] };
+    }));
+    await expect(saveChatToHostStrict_ACU({ verify: true })).rejects.toThrow('聊天已切换');
+  });
+
+  it('没有当前聊天时不调用保存，也不把空角色索引误当第一个角色', async () => {
+    const chat = [{ mes: '正文' }];
+    const request = installReadback(chat, structuredClone(chat));
+    mockSillyTavern.getCurrentChatId = () => '';
+    await expect(saveChatToHostStrict_ACU({ verify: true })).rejects.toThrow('本次尚未保存');
+    expect(mockSillyTavern.saveChat).not.toHaveBeenCalled();
+    mockSillyTavern.getCurrentChatId = () => 'save-test';
+    mockSillyTavern.characterId = '';
+    await expect(saveChatToHostStrict_ACU({ verify: true })).rejects.toThrow('本次尚未保存');
+    expect(mockSillyTavern.saveChat).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('事实和人物按 ID 匹配，不因实体排列改变而拒收', async () => {
+    const chat = [{ mes: '正文', _qrf_world_simulation: { actors: [{ id: 'a', name: '甲' }, { id: 'b', name: '乙' }] } }];
+    const remote = structuredClone(chat);
+    remote[0]._qrf_world_simulation.actors.reverse();
+    installReadback(chat, remote);
+    await expect(saveChatToHostStrict_ACU({ verify: true })).resolves.toBeUndefined();
+  });
+
+  it.each(['正文', '私有字段丢失', '数组顺序', 'swipe'])('实际业务数据变化仍不误报保存成功：%s', async kind => {
+    const chat = [{ mes: '正文', swipe_id: 0, _qrf_world_simulation: { ids: ['a', 'b'] } }];
+    const remote: any[] = structuredClone(chat);
+    if (kind === '正文') remote[0].mes = '另一段正文';
+    if (kind === '私有字段丢失') delete remote[0]._qrf_world_simulation;
+    if (kind === '数组顺序') remote[0]._qrf_world_simulation.ids.reverse();
+    if (kind === 'swipe') remote[0].swipe_id = 1;
+    installReadback(chat, remote);
+    await expect(saveChatToHostStrict_ACU({ verify: true })).rejects.toThrow('第 1 楼正文或插件数据不同');
+  });
+
+  it('局部提交只核对目标字段，不因其它旧楼层差异拒收', async () => {
+    const chat = [{ mes: '本地旧正文' }, { mes: '当前正文', _qrf_world_simulation_state: { revision: 2 } }];
+    const remote = [{ mes: '服务器格式化的旧正文' }, { mes: '当前正文', _qrf_world_simulation_state: { revision: 2 } }];
+    installReadback(chat, remote);
+    await expect(saveChatToHostStrict_ACU({ verify: true, verifyFields: [{ messageIndex: 1, keys: ['mes', '_qrf_world_simulation_state'] }] })).resolves.toBeUndefined();
+    remote[1]._qrf_world_simulation_state = { revision: 1 };
+    await expect(saveChatToHostStrict_ACU({ verify: true, verifyFields: [{ messageIndex: 1, keys: ['_qrf_world_simulation_state'] }] }))
+      .rejects.toThrow('第 2 楼字段 _qrf_world_simulation_state 未保存');
+  });
+
+  it('回读期间换聊天或服务器失败仍不能确认保存', async () => {
+    const chat = [{ mes: '正文' }];
+    installReadback(chat, structuredClone(chat));
+    vi.stubGlobal('fetch', vi.fn(async () => { mockSillyTavern.chatId = 'another-chat'; return { ok: true, json: async () => [{}, ...chat] }; }));
+    await expect(saveChatToHostStrict_ACU({ verify: true })).rejects.toThrow('聊天已切换');
+    installReadback(chat, structuredClone(chat));
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 500 })));
+    await expect(saveChatToHostStrict_ACU({ verify: true })).rejects.toThrow('HTTP 500');
+  });
+
   it('saveChat 不可用时抛错，不把未提交误认为保存成功', async () => {
     await expect(saveChatToHostStrict_ACU()).rejects.toThrow('宿主 saveChat 不可用');
   });

@@ -33,6 +33,11 @@ function makeLedger(): WorldSimulationLedger_ACU {
     actors: [
       { id: 'a1', name: '商人会长', interests: '贸易利益', location: '王都', locationRef: '', life: 'alive', diedAtDay: null, deathSummary: '', resources: '商队', goals: '保住商路', constraints: '', informationSources: ['商队汇报'], knownFacts: ['商队失踪'], visibility: 'public', revision: 1 },
     ],
+    worldEvents: [],
+    facts: [],
+    historyMilestones: [],
+    projection: { anchor: null, deliveries: [] },
+    legacyMigration: { issues: [] },
     chronicle: [
       { id: 'ch-1', at: 3, summary: '商队逾期未归', relatedIds: ['seed-1'], evidenceRefs: ['m1'] },
     ],
@@ -73,6 +78,20 @@ describe('simulation-ledger-sql-view', () => {
     expect(view.hasChanges()).toBe(false);
   });
 
+
+  it('v7 新领域数组和投影在 SQL 易失视图回读时不丢失', async () => {
+    const ledger = makeLedger();
+    ledger.worldEvents = [{
+      id: 'event-1', title: '音乐节', state: '筹备中', status: 'active', actorIds: [], organizationIds: [],
+      locationRefs: [], startedAt: { day: 3, slot: 'morning' }, deadline: null,
+      nextCheck: { day: 4, slot: 'morning', reason: '检查进度' }, relatedEventIds: [], loreRefs: [],
+      evidenceRefs: [], tags: [], revision: 1, legacy: null,
+    }];
+    ledger.projection = { anchor: 'scene-1', deliveries: [] };
+    ledger.legacyMigration = { issues: [{ source: 'seed', sourceId: 'seed-1', reason: 'requires_review' }] };
+    view = await materializeWorldSimulationLedgerSqlView_ACU(ledger);
+    expect(view.readLedger()).toEqual(ledger);
+  });
 
   it('数组模块行级 upsert/remove 并推进账本 revision', async () => {
     view = await materializeWorldSimulationLedgerSqlView_ACU(makeLedger());

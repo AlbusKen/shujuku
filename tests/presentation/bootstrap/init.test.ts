@@ -15,7 +15,7 @@ const m = vi.hoisted(() => ({
   characterMessageRendered: undefined as undefined | ((messageId?: any, type?: any) => void),
   afterCommands: undefined as undefined | ((type: any, params: any, dryRun: any) => Promise<void>),
   currentChatKey: '',
-  settings: { plotSettings: {} } as { plotSettings: Record<string, unknown>; worldSimulationPageEnabled?: boolean; plotSendDisguiseDisabled?: boolean },
+  settings: { plotSettings: {}, apiPresets: [] as any[] } as { plotSettings: Record<string, unknown>; apiPresets: any[]; worldSimulationPageEnabled?: boolean; plotSendDisguiseDisabled?: boolean },
   api: { chat: [] as any[], chatId: '', eventTypes: { CHAT_CHANGED: 'chat', MESSAGE_DELETED: 'deleted', MESSAGE_SWIPED: 'swiped', MESSAGE_SENT: 'message_sent', MESSAGE_UPDATED: 'message_updated', MESSAGE_RECEIVED: 'message_received', CHARACTER_MESSAGE_RENDERED: 'character_message_rendered', GENERATION_AFTER_COMMANDS: 'after_commands', GENERATION_STARTED: 'generation_started', GENERATION_ENDED: 'generation_ended', GENERATION_STOPPED: 'generation_stopped' }, eventSource: { on: vi.fn(), makeFirst: vi.fn(), makeLast: vi.fn(), emit: vi.fn() } } as any,
   gate: { lastUserMessageId: 7 as any, lastUserMessageText: 'stale', lastUserMessageAt: 1, lastUserSendIntentAt: 2, lastGeneration: { stale: true } as any, generationSeq: 0, activeGenerations: [] as any[] },
   resetTakeover: vi.fn(), dispose: vi.fn(), setData: vi.fn(), setTables: vi.fn(), setMessages: vi.fn(), setTotal: vi.fn(), setChat: vi.fn(),
@@ -53,6 +53,7 @@ const m = vi.hoisted(() => ({
   createSimulationIntent: vi.fn((eventMessageId: number, chatKey: string, isolationKey: string, generationSeq?: number) => ({ eventMessageId, chatKey, isolationKey, generationSeq })),
   handleSimulationCompletion: vi.fn(async () => null),
   getSimulationRuntime: vi.fn(),
+  useActualSimulationRuntime: false,
   getContinuationRuntime: vi.fn(),
   continuationRuntimeInitialize: vi.fn(async () => undefined),
   continuationBridge: null as any,
@@ -66,7 +67,11 @@ const m = vi.hoisted(() => ({
   isQuiet: vi.fn(() => false),
 }));
 
-vi.mock('../../../src/shared/host-api', () => ({ SillyTavern_API_ACU: m.api, jQuery_API_ACU: m.jquery }));
+vi.mock('../../../src/shared/host-api', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../src/shared/host-api')>(),
+  get SillyTavern_API_ACU() { return m.api; },
+  jQuery_API_ACU: m.jquery,
+}));
 vi.mock('../../../src/shared/env', () => ({ topLevelWindow_ACU: { AutoCardUpdaterAPI: { _notifyTableUpdate: m.notify } } }));
 vi.mock('../../../src/presentation/theme/toast', () => ({ showToastr_ACU: vi.fn() }));
 vi.mock('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect', () => ({
@@ -134,10 +139,18 @@ vi.mock('../../../src/service/simulation/simulation-internal-ai-events', () => (
   consumeWorldSimulationInternalAiGenerationEnded_ACU: (...args: any[]) => m.consumeSimulationInternalGeneration(...args),
   hasWorldSimulationInternalAiInflight_ACU: () => false,
 }));
-vi.mock('../../../src/service/simulation/simulation-runtime', () => ({
-  createWorldSimulationCompletionIntentForCurrentChat_ACU: (...args: any[]) => m.createSimulationIntent(...args),
-  getWorldSimulationRuntime_ACU: () => m.getSimulationRuntime(),
-}));
+vi.mock('../../../src/service/simulation/simulation-runtime', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../../src/service/simulation/simulation-runtime')>();
+  return {
+    ...actual,
+    createWorldSimulationCompletionIntentForCurrentChat_ACU: (...args: any[]) => m.useActualSimulationRuntime
+      ? actual.createWorldSimulationCompletionIntentForCurrentChat_ACU(...args)
+      : m.createSimulationIntent(...args),
+    getWorldSimulationRuntime_ACU: () => m.useActualSimulationRuntime
+      ? actual.getWorldSimulationRuntime_ACU()
+      : m.getSimulationRuntime(),
+  };
+});
 vi.mock('../../../src/service/continuation/continuation-runtime', () => ({ getContinuationRuntime_ACU: () => m.getContinuationRuntime() }));
 vi.mock('../../../src/service/continuation/host-generation-bridge-registry', () => ({ getContinuationHostGenerationBridge_ACU: () => m.continuationBridge }));
 
@@ -298,6 +311,7 @@ beforeEach(() => {
   m.continuationRuntimeInitialize.mockResolvedValue(undefined);
   m.consumeInternalGeneration.mockReturnValue(null);
   m.consumeSimulationInternalGeneration.mockReturnValue(null);
+  m.useActualSimulationRuntime = false;
   m.handleSimulationCompletion.mockResolvedValue(null);
   m.getSimulationRuntime.mockReturnValue({ handleAssistantCompletion: m.handleSimulationCompletion });
   m.getContinuationRuntime.mockReturnValue({ initialize: m.continuationRuntimeInitialize });
@@ -802,6 +816,40 @@ describe('mainInitialize_ACU world simulation generation isolation', () => {
     expect(m.createSimulationIntent).not.toHaveBeenCalled();
     expect(m.handleSimulationCompletion).not.toHaveBeenCalled();
     expect(m.autoUpdate).toHaveBeenCalledTimes(3);
+  });
+
+  it('正式 bootstrap 将完成事件经真实 factory/runtime 派发，保留冻结身份并遵从运行时禁用配置', async () => {
+    vi.useFakeTimers();
+    m.useActualSimulationRuntime = true;
+    m.settings.worldSimulationPageEnabled = true;
+    m.currentChatKey = 'bootstrap-real-runtime';
+    m.api.chatId = 'bootstrap-real-runtime';
+    m.api.characterId = 0;
+    m.api.characters = [{ name: '角色', avatar: 'bootstrap-real.png' }];
+    m.api.getCurrentChatId = () => 'bootstrap-real-runtime';
+    m.api.chat = [{ is_user: true, mes: 'user' }, {
+      is_user: false, message_id: 42, swipe_id: 0, mes: '正式完成的 assistant 正文',
+    }];
+    const { buildDefaultWorldSimulationEnvelope_ACU } = await import('../../../src/service/simulation/defaults');
+    const { WorldSimulationRuntime_ACU } = await import('../../../src/service/simulation/simulation-runtime');
+    const envelope = buildDefaultWorldSimulationEnvelope_ACU();
+    envelope.settings.autoTriggerEnabled = false;
+    m.api.chat[0]._qrf_world_simulation = envelope;
+    const completion = vi.spyOn(WorldSimulationRuntime_ACU.prototype, 'handleAssistantCompletion');
+
+    m.generationStarted!('normal', {}, false);
+    m.generationEnded!(42);
+    await dispatchCompletionTasks_ACU();
+    await vi.advanceTimersByTimeAsync(2500);
+
+    expect(m.createSimulationIntent).not.toHaveBeenCalled();
+    expect(completion).toHaveBeenCalledOnce();
+    expect(completion).toHaveBeenCalledWith(expect.objectContaining({
+      eventMessageId: 42, chatKey: 'bootstrap-real-runtime', isolationKey: 'test-isolation',
+      generationSeq: m.gate.generationSeq, capturedChatLength: 2, capturedAiFloorCount: 1,
+    }));
+    expect(await completion.mock.results[0].value).toMatchObject({ status: 'skipped', reason: 'disabled' });
+    completion.mockRestore();
   });
 });
 

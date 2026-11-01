@@ -30,16 +30,18 @@ function exclusions(raw: string): string[] {
 /** 统一自定义发送口；关闭酒馆渠道时只访问预设端点，不作隐式回退。 */
 export async function sendCustomApiRequest_ACU(
     config: any, bridgeBody: Record<string, any>, signal?: AbortSignal | null,
+    options?: { suppressPayloadLogging?: boolean },
 ): Promise<Response> {
     signal?.throwIfAborted();
     if (config.sendViaTavern !== false) {
         const url = '/api/backends/chat-completions/generate';
         const headers = { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' };
         const wire = JSON.stringify(bridgeBody);
-        const log = createApiRequestLog_ACU('API酒馆转发', `请求 POST ${url}（酒馆后端请求体）`, wire, { config, bridgeBody, headers });
+        const log = options?.suppressPayloadLogging === true ? { write() {} }
+            : createApiRequestLog_ACU('API酒馆转发', `请求 POST ${url}（酒馆后端请求体）`, wire, { config, bridgeBody, headers });
         try {
             const response = await pristineFetch_ACU(url, { method: 'POST', headers, body: wire, signal: signal ?? undefined });
-            return observeApiResponse_ACU(response, log, signal).response;
+            return options?.suppressPayloadLogging === true ? response : observeApiResponse_ACU(response, log, signal).response;
         } catch (error) { log.write('请求失败', error); throw error; }
     }
     const format = normalizeCustomApiFormat_ACU(config.customApiFormat);
@@ -75,7 +77,8 @@ export async function sendCustomApiRequest_ACU(
     }
     const url = providerEndpoint_ACU(config.url, format);
     const wire = JSON.stringify(body);
-    const log = createApiRequestLog_ACU('API直连', `请求 ${url}`, wire, { config, body, headers: Object.fromEntries(headers.entries()) });
+    const log = options?.suppressPayloadLogging === true ? { write() {} }
+        : createApiRequestLog_ACU('API直连', `请求 ${url}`, wire, { config, body, headers: Object.fromEntries(headers.entries()) });
     try {
         const response = await pristineFetch_ACU(url, { method: 'POST', headers, body: wire, credentials: 'omit', signal: signal ?? undefined });
         // 直连保留既有协议归一化与读取期限，不增加消费分支。

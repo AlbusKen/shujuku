@@ -990,6 +990,60 @@ describe('剧情 API 传输路由', () => {
 });
 
 describe('callAIWithResolvedPreset_ACU', () => {
+  it.each([true, false])('私有调用不采集请求、响应或错误正文（酒馆转发=%s）', async sendViaTavern => {
+    const { clearLogs, getAllLogs, setApiLogEnabled } = await import('../../../src/shared/log-buffer');
+    clearLogs();
+    setApiLogEnabled(true);
+    const config = {
+      sendViaTavern, url: 'https://private.test/v1', model: 'private-model', apiKey: '', useMainApi: false,
+      max_tokens: 128, bodyParams: '', excludeBodyParams: '', requestHeaders: '', customApiFormat: 'openai_compat',
+    };
+    const resolved = { apiMode: 'custom' as const, apiConfig: config, tavernProfile: '' };
+    const extras = { requireDirectTransport: true, streaming: false, suppressPayloadLogging: true };
+    mockFetch.mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: 'PRIVATE_RESPONSE_SENTINEL' }, finish_reason: 'stop' }] }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    try {
+      await expect(callAIWithResolvedPreset_ACU([{ role: 'system', content: 'PRIVATE_REQUEST_SENTINEL' }], resolved,
+        undefined, undefined, extras)).resolves.toBe('PRIVATE_RESPONSE_SENTINEL');
+      expect(JSON.parse(mockFetch.mock.calls[0][1].body).messages).toEqual([{ role: 'system', content: 'PRIVATE_REQUEST_SENTINEL' }]);
+      expect(getAllLogs()).toEqual([]);
+      mockFetch.mockResolvedValue(new Response('PRIVATE_ERROR_SENTINEL', { status: 500 }));
+      await expect(callAIWithResolvedPreset_ACU([{ role: 'system', content: 'PRIVATE_REQUEST_SENTINEL' }], resolved,
+        undefined, undefined, extras)).rejects.toThrow('API 请求失败: 500');
+      expect(getAllLogs()).toEqual([]);
+      mockFetch.mockRejectedValue(new Error('PRIVATE_TRANSPORT_SENTINEL'));
+      await expect(callAIWithResolvedPreset_ACU([{ role: 'system', content: 'PRIVATE_REQUEST_SENTINEL' }], resolved,
+        undefined, undefined, extras)).rejects.toThrow('PRIVATE_TRANSPORT_SENTINEL');
+      expect(getAllLogs()).toEqual([]);
+    } finally {
+      clearLogs();
+      setApiLogEnabled(false);
+    }
+  });
+
+  it('私有调用拒绝主连接、宿主生成回退、流式或预览配置', async () => {
+    const config = { sendViaTavern: true, url: 'https://private.test/v1', model: 'private-model', useMainApi: false };
+    const extras = { requireDirectTransport: true, streaming: false, suppressPayloadLogging: true };
+    for (const variant of [
+      { apiMode: 'tavern' as const, apiConfig: config, tavernProfile: 'profile' },
+      { apiMode: 'custom' as const, apiConfig: { ...config, useMainApi: true }, tavernProfile: '' },
+    ]) {
+      await expect(callAIWithResolvedPreset_ACU([{ role: 'user', content: 'private' }], variant,
+        undefined, undefined, extras)).rejects.toThrow('内部私有资料');
+    }
+    for (const invalid of [
+      { ...extras, streaming: true }, { ...extras, requireDirectTransport: false },
+      { ...extras, onTextPreview: vi.fn() },
+    ]) {
+      await expect(callAIWithResolvedPreset_ACU([{ role: 'user', content: 'private' }],
+        { apiMode: 'custom', apiConfig: config, tavernProfile: '' }, undefined, undefined, invalid))
+        .rejects.toThrow('内部私有资料');
+    }
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mockGenerateRaw).not.toHaveBeenCalled();
+    expect(mockSendConnectionManager).not.toHaveBeenCalled();
+  });
+
   it('uses the supplied custom configuration without resolving a preset again', async () => {
     mockHandleApiResponse.mockResolvedValue('明确配置回复');
     mockFetch.mockResolvedValue({ ok: true });

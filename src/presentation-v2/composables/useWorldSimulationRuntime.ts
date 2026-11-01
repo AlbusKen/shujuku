@@ -3,10 +3,6 @@ import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
 import { subscribeZeroLayerChanges_ACU } from '../../service/zero-layer/notifications';
 import { buildDefaultWorldSimulationSettings_ACU } from '../../service/simulation/defaults';
-import { DEFAULT_WORLD_SIMULATION_PROJECTION_TEMPLATE_ACU, worldSimulationProjectionTemplateError_ACU } from '../../service/simulation/simulation-projection';
-import type { WorldSimulationAgentName_ACU } from '../../service/simulation/agent/agent-catalog';
-import type { WorldSimulationAgentPrompts_ACU } from '../../service/simulation/agent/agent-defaults';
-import { restoreWorldSimulationPromptDefault_ACU, validateWorldSimulationAgentPrompts_ACU } from '../../service/simulation/agent/prompt-template';
 import {
   WORLD_SIMULATION_SESSION_EVENT_KINDS_ACU,
   clearWorldSimulationSessionLog_ACU,
@@ -19,11 +15,9 @@ import {
 } from '../../service/simulation/agent/agent-session-log';
 import { WORLD_SIMULATION_STOP_REASON_LABELS_ACU, getWorldSimulationRuntime_ACU, type WorldSimulationUiSnapshot_ACU } from '../../service/simulation/simulation-runtime';
 import type { WorldSimulationOrchestratorResult_ACU } from '../../service/simulation/simulation-orchestrator';
+import type { WorldLegacyBackfillPlan_ACU } from '../../service/simulation/world-legacy-backfill';
 import { WorldSimulationValidationError_ACU, type WorldSimulationSettings_ACU, type WorldSimulationTaskStatus_ACU } from '../../service/simulation/model';
 import { useToastStore } from '../stores/toast-store';
-import { adaptWorldSimulationAgentPromptsToToolMode_ACU, adaptWorldSimulationPromptSegmentsToToolMode_ACU } from '../../service/simulation/agent/agent-prompt-mode';
-import type { WorldSimulationPromptSegment_ACU } from '../../service/simulation/model';
-import { useAgentToolMode } from './useAgentToolMode';
 
 const TASK_STATUS_LABELS_ACU: Record<WorldSimulationTaskStatus_ACU, string> = {
   drafting: '运行中',
@@ -44,6 +38,25 @@ function errorMessage_ACU(error: unknown): string {
 function structuredErrorMessage_ACU(error: unknown): string {
   if (error instanceof WorldSimulationValidationError_ACU) return `${error.error.code}: ${error.error.message}`;
   return errorMessage_ACU(error);
+}
+
+/** 补迁预览只保留用户可见的计数，不保留或展示旧资料的具体内容。 */
+export interface LegacyBackfillPreview_ACU {
+  changed: boolean;
+  addedEventCount: number;
+  addedFactCount: number;
+  addedHistoryCount: number;
+  remainingIssueCount: number;
+}
+
+function summarizeLegacyBackfill_ACU(plan: WorldLegacyBackfillPlan_ACU): LegacyBackfillPreview_ACU {
+  return {
+    changed: plan.changed,
+    addedEventCount: plan.addedEventIds.length,
+    addedFactCount: plan.addedFactIds.length,
+    addedHistoryCount: plan.addedHistoryIds.length,
+    remainingIssueCount: plan.remainingIssues.length,
+  };
 }
 
 /**
@@ -87,16 +100,20 @@ export function projectWorldSimulationSessionFromConversation_ACU(
 
 export function useWorldSimulationRuntime() {
   const toast = useToastStore();
-  const toolMode = useAgentToolMode('worldSimulation');
   const runtime = () => getWorldSimulationRuntime_ACU();
   const snapshot = ref<WorldSimulationUiSnapshot_ACU | null>(null);
   const ready = ref(false);
   const busy = ref(false);
+  const legacyBackfillPreview = ref<LegacyBackfillPreview_ACU | null>(null);
+  const legacyBackfillResult = ref<LegacyBackfillPreview_ACU | null>(null);
+  const legacyBackfillError = ref('');
   /** 仅表示"快照严格读取失败"；动作失败走吐司，不遮蔽会话区。 */
   const error = ref('');
   // 无信封聊天的展示兜底：用户还没保存过任何设置时，页面显示内置默认值。
   const fallbackSettings = buildDefaultWorldSimulationSettings_ACU();
   let subscribedChatIdentity: string | null = null;
+  let previewChatIdentity: string | null = null;
+  let previewRevision: number | null = null;
   let unsubscribeSession: (() => void) | null = null;
   let activeAction: Promise<boolean> | null = null;
 
@@ -122,9 +139,63 @@ export function useWorldSimulationRuntime() {
     }
   }
 
+  function clearLegacyBackfillPreview(): void {
+    legacyBackfillPreview.value = null;
+    legacyBackfillResult.value = null;
+    legacyBackfillError.value = '';
+    previewChatIdentity = null;
+    previewRevision = null;
+  }
+
+  async function previewLegacyBackfill(): Promise<boolean> {
+    if (busy.value) return false;
+    busy.value = true;
+    legacyBackfillError.value = '';
+    legacyBackfillResult.value = null;
+    try {
+      const plan = runtime().previewLegacyBackfill();
+      legacyBackfillPreview.value = summarizeLegacyBackfill_ACU(plan);
+      previewChatIdentity = snapshot.value?.session.chatIdentity ?? null;
+      previewRevision = ('publishedLedger' in (snapshot.value ?? {}) ? snapshot.value?.publishedLedger ?? null : snapshot.value?.envelope?.ledger ?? null)?.revision ?? null;
+      return true;
+    } catch (cause) {
+      const message = errorMessage_ACU(cause);
+      legacyBackfillError.value = message;
+      toast.error(message, { muteable: false });
+      return false;
+    } finally {
+      busy.value = false;
+    }
+  }
+
+  async function applyLegacyBackfill(): Promise<boolean> {
+    if (busy.value || !legacyBackfillPreview.value?.changed) return false;
+    busy.value = true;
+    legacyBackfillError.value = '';
+    try {
+      const plan = await runtime().applyLegacyBackfill();
+      legacyBackfillResult.value = summarizeLegacyBackfill_ACU(plan);
+      legacyBackfillPreview.value = null;
+      previewChatIdentity = null;
+      previewRevision = null;
+      refresh();
+      return true;
+    } catch (cause) {
+      const message = errorMessage_ACU(cause);
+      legacyBackfillError.value = message;
+      toast.error(message, { muteable: false });
+      return false;
+    } finally {
+      busy.value = false;
+    }
+  }
+
   function refresh(): boolean {
     try {
       const next = runtime().readUiSnapshot();
+      const nextChatIdentity = next.session.chatIdentity;
+      const nextRevision = ('publishedLedger' in next ? next.publishedLedger ?? null : next.envelope?.ledger ?? null)?.revision ?? null;
+      if (legacyBackfillPreview.value && (previewChatIdentity !== nextChatIdentity || previewRevision !== nextRevision)) clearLegacyBackfillPreview();
       snapshot.value = next;
       error.value = '';
       ready.value = true;
@@ -199,6 +270,8 @@ export function useWorldSimulationRuntime() {
   });
   const stageText = computed(() => {
     if (!task.value) return '尚未创建任务';
+    const current = [...entries.value].reverse().find(entry => entry.status === 'running');
+    if (running.value && current) return current.title;
     return activeStage.value ? `第 ${activeStage.value.stageNumber} 阶段` : '计划待创建';
   });
   const revisionText = computed(() => (activeRevision.value ? `revision ${activeRevision.value.revision}` : ''));
@@ -325,35 +398,101 @@ export function useWorldSimulationRuntime() {
     }
   }
 
-  /**
-   * 把某个角色的提示词恢复成内置默认值。恢复本身不落盘，由设置面板既有的保存链路决定何时写入。
-   */
-  function restorePromptDefault(current: WorldSimulationSettings_ACU, agentName: WorldSimulationAgentName_ACU): WorldSimulationSettings_ACU {
-    return restoreWorldSimulationPromptDefault_ACU(current, agentName, toolMode.mode.value);
-  }
-
-  function presentPromptSegments(agentName: WorldSimulationAgentName_ACU, segments: readonly WorldSimulationPromptSegment_ACU[]): WorldSimulationPromptSegment_ACU[] {
-    return adaptWorldSimulationPromptSegmentsToToolMode_ACU(agentName, segments, toolMode.mode.value);
-  }
-
-  /**
-   * 解析并校验导入的提示词 JSON 包。结构：{ agentPrompts: { 各角色: 段数组 } }。
-   * 任何一组校验失败（角色缺失、seam 缺失、未知占位符）即整体拒绝，绝不产生半套导入。
-   */
-  function parsePromptBundle(text: string): WorldSimulationAgentPrompts_ACU {
-    let raw: unknown;
+  async function scanWorldbookActors(): Promise<boolean> {
+    if (busy.value) return false;
+    busy.value = true;
+    const previousSnapshot = snapshot.value;
     try {
-      raw = JSON.parse(text);
-    } catch {
-      throw new Error('导入文件不是合法的 JSON。');
-    }
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('提示词 JSON 必须是对象（含 agentPrompts）。');
-    const agentRaw = (raw as Record<string, unknown>).agentPrompts;
-    if (!agentRaw || typeof agentRaw !== 'object' || Array.isArray(agentRaw)) throw new Error('提示词 JSON 缺少 agentPrompts 对象。');
-    try {
-      return adaptWorldSimulationAgentPromptsToToolMode_ACU(validateWorldSimulationAgentPrompts_ACU(agentRaw, 'load'), toolMode.mode.value);
+      const result = await runtime().scanWorldbookActors();
+      if (result === null) return false;
+      if (!refresh()) {
+        const message = error.value;
+        snapshot.value = previousSnapshot;
+        ready.value = previousSnapshot !== null;
+        error.value = '';
+        toast.error(message, { muteable: false });
+        return false;
+      }
+      const failed = result.failedBookNames.length ? `；读取失败：${result.failedBookNames.join('、')}` : '';
+      toast.success(`已扫描 ${result.bookCount} 本世界书，新增 ${result.addedCount} 位人物${failed}。`);
+      return true;
     } catch (cause) {
-      throw new Error(`提示词校验失败：${errorMessage_ACU(cause)}`);
+      toast.error(errorMessage_ACU(cause), { muteable: false });
+      return false;
+    } finally {
+      busy.value = false;
+    }
+  }
+
+  async function deleteActor(id: string): Promise<boolean> {
+    if (busy.value) return false;
+    busy.value = true;
+    try {
+      await runtime().deleteActor(id);
+      const previousSnapshot = snapshot.value;
+      if (!refresh()) {
+        const message = error.value;
+        snapshot.value = previousSnapshot;
+        ready.value = previousSnapshot !== null;
+        error.value = '';
+        toast.error(message, { muteable: false });
+        return false;
+      }
+      toast.success('已删除人物记录。');
+      return true;
+    } catch (cause) {
+      toast.error(errorMessage_ACU(cause), { muteable: false });
+      return false;
+    } finally {
+      busy.value = false;
+    }
+  }
+
+  async function deleteWorldEvent(id: string): Promise<boolean> {
+    if (busy.value) return false;
+    busy.value = true;
+    try {
+      await runtime().deleteWorldEvent(id);
+      const previousSnapshot = snapshot.value;
+      if (!refresh()) {
+        const message = error.value;
+        snapshot.value = previousSnapshot;
+        ready.value = previousSnapshot !== null;
+        error.value = '';
+        toast.error(message, { muteable: false });
+        return false;
+      }
+      toast.success('已删除世界事件记录。');
+      return true;
+    } catch (cause) {
+      toast.error(errorMessage_ACU(cause), { muteable: false });
+      return false;
+    } finally {
+      busy.value = false;
+    }
+  }
+
+  async function deleteWorldHistory(id: string): Promise<boolean> {
+    if (busy.value) return false;
+    busy.value = true;
+    try {
+      await runtime().deleteWorldHistory(id);
+      const previousSnapshot = snapshot.value;
+      if (!refresh()) {
+        const message = error.value;
+        snapshot.value = previousSnapshot;
+        ready.value = previousSnapshot !== null;
+        error.value = '';
+        toast.error(message, { muteable: false });
+        return false;
+      }
+      toast.success('已删除重要历史记录。');
+      return true;
+    } catch (cause) {
+      toast.error(errorMessage_ACU(cause), { muteable: false });
+      return false;
+    } finally {
+      busy.value = false;
     }
   }
 
@@ -388,11 +527,12 @@ export function useWorldSimulationRuntime() {
   }
 
   return {
-    defaultProjectionTemplate: DEFAULT_WORLD_SIMULATION_PROJECTION_TEMPLATE_ACU,
-    projectionTemplateError: worldSimulationProjectionTemplateError_ACU,
     snapshot,
     ready,
     busy,
+    legacyBackfillPreview,
+    legacyBackfillResult,
+    legacyBackfillError,
     error,
     envelope,
     task,
@@ -414,11 +554,13 @@ export function useWorldSimulationRuntime() {
     saveSettings,
     saveUserRequirements,
     clearData,
-    restorePromptDefault,
-    presentPromptSegments,
-    nativeToolEnabled: toolMode.enabled,
-    setNativeToolEnabled: toolMode.setEnabled,
-    parsePromptBundle,
+    scanWorldbookActors,
+    deleteActor,
+    deleteWorldEvent,
+    deleteWorldHistory,
+    previewLegacyBackfill,
+    applyLegacyBackfill,
+    clearLegacyBackfillPreview,
     resyncAfterChatMutation,
   };
 }
