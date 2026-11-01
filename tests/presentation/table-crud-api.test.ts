@@ -393,6 +393,29 @@ describe('createTableCrudApi — SQLite 模式', () => {
     api = createTableCrudApi(mockCtx);
   });
 
+  describe.each(['updateCell', 'updateRow', 'insertRow', 'deleteRow'])('%s 前端回读选项', method => {
+    const mutate = (extra: any) => {
+      const options = { tableName: '背包物品表', ...extra };
+      if (method === 'updateCell') return api.updateCell({ ...options, rowIndex: 1, colIdentifier: '数量', value: '10' });
+      if (method === 'updateRow') return api.updateRow({ ...options, rowIndex: 1, data: { 数量: '10' } });
+      if (method === 'insertRow') return api.insertRow({ ...options, data: { 物品名: '新物品', 数量: '1' } });
+      return api.deleteRow({ ...options, rowIndex: 1 });
+    };
+    it.each([true, false])('显式false仍完成写入并通知前端，SQLite=%s', async sqlite => {
+      mockIsSqliteMode = sqlite;
+      const { refreshMergedDataAndNotifyWithUI_ACU } = await import('../../src/presentation/components/pipeline-ui-helpers');
+      const result = await mutate({ awaitFrontendReadback: false });
+      expect(result).not.toBe(false);
+      expect(result).not.toBe(-1);
+      expect(refreshMergedDataAndNotifyWithUI_ACU).toHaveBeenCalledWith({ skipNotify: false, notifyMeta: { persisted: true }, awaitFrontendReadback: false });
+    });
+    it('省略选项保持原默认行为', async () => {
+      const { refreshMergedDataAndNotifyWithUI_ACU } = await import('../../src/presentation/components/pipeline-ui-helpers');
+      await mutate({});
+      expect(refreshMergedDataAndNotifyWithUI_ACU).toHaveBeenCalledWith({ skipNotify: false, notifyMeta: { persisted: true } });
+    });
+  });
+
   // ─── 表格锁对开放 API 生效（S2-2）───
   describe('表格锁对 CRUD API 生效', () => {
     // scopeKey = 'chat-a::'（currentChatFileIdentifier='chat-a'，isolationKey=''）
