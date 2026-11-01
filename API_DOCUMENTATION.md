@@ -2085,3 +2085,24 @@ bubble.resetAppearance();
 | 1.7 | **安全收敛**：弃用全部 API 预设管理公开接口（`getApiPresets / saveApiPreset / loadApiPreset / deleteApiPreset / getTableApiPreset / setTableApiPreset / getPlotApiPreset / setPlotApiPreset`）；`callAI` 升级为受限代理接口，仅允许 `presetName + max_tokens`，禁止外部传入 `apiConfig / apiKey / url / requestHeaders / bodyParams / model / temperature / stream` 等敏感字段 |
 | 1.8 | 新增命名空间 API：`worldSimulation`（格林推演设置、账本、任务、用户要求的读写，发送 / 继续 / 停止）、`continuation`（智能续写设置读写、续跑与停止）、`features`（桌宠、静默模式、自动填表与功能页开关）；格林推演设置新增 `projection.template` 场外信号插入格式 |
 | 1.9 | 新增桌宠与气泡外观 API：`deskPet`（动作图片、尺寸、动画节奏、语录与状态词、位置）、`noticeBubble`（配色、字号、字体、圆角、尺寸、摆放方位、停靠角落、轮播节奏），支持读取、按补丁修改、恢复缺省与字段说明 |
+
+
+## 公开写入：可选前端回读等待
+
+`executeSqlMutation`、`executeSqlBatch`、写入型 `executeSql`、对象参数形式的 `updateCell` / `updateRow` / `insertRow` / `deleteRow`，以及 `importTableAsJson` 的导入选项支持 `awaitFrontendReadback?: boolean`。
+
+默认保留通知后800ms的回读窗口。只有显式传入布尔值 `false` 时不等待该固定窗口；数据提交、持久化、世界书／运行时刷新和更新通知照常执行，原有失败结果不变。它不等同于 `skipNotify` 或 `skipChatSave`。
+
+```javascript
+await api.executeSqlBatch({
+  sql: 'UPDATE inventory SET quantity = 2 WHERE row_id = 1;',
+  awaitFrontendReadback: false,
+});
+await api.updateCell({
+  tableName: '背包物品表', rowIndex: 1, colIdentifier: '数量', value: 2,
+  awaitFrontendReadback: false,
+});
+await api.importTableAsJson(jsonString, { awaitFrontendReadback: false });
+```
+
+适用于不依赖前端刷新完成、或自行处理刷新反馈的调用者。函数返回时界面可能尚未完成更新；依赖DOM内容、截图或交互动画完成的流程应保留默认行为或等待自身完成信号。固定窗口本身也不是所有前端已完成的确认机制。
