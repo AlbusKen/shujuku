@@ -175,6 +175,36 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
     );
   }
 
+  // [幂等闸] 剧情推进把用户输入包进注入外壳（默认 finalSystemDirective：
+  // 「以下是用户的本轮输入：\n<本轮用户输入>$8</本轮用户输入>」）后送生成；输入框/楼层里
+  // 滞留的包装产物被下一轮当作原文再包一层，历史楼层就会出现双层甚至多层污染。
+  // 剥壳条件从严：仅当（trim 后）文本以注入头或开标签开头才剥，正文中间偶然夹带成对标签
+  // 的普通输入不满足开头条件，原样放行不误伤。
+  const PLOT_USER_INPUT_HEADER_ACU = '以下是用户的本轮输入：';
+  const PLOT_USER_INPUT_OPEN_ACU = '<本轮用户输入>';
+  const PLOT_USER_INPUT_CLOSE_ACU = '</本轮用户输入>';
+  const PLOT_USER_INPUT_UNWRAP_MAX_ACU = 10;
+
+  /**
+   * 反复剥掉最外层 <本轮用户输入>…</本轮用户输入> 外壳（首开标签 + 其后的末闭标签，先剥外层）。
+   * 剥后为空回退原文；有开无闭的畸形文本原样放行，不做破坏性截断。
+   * 对已污染楼层，下次重扫时剥回单层后重新包壳即自愈。
+   */
+  function unwrapPlotUserInputShell_ACU(value: any): string {
+    const raw = String(value ?? '');
+    let current = raw;
+    for (let k = 0; k < PLOT_USER_INPUT_UNWRAP_MAX_ACU; k++) {
+      const head = current.trim();
+      if (head.indexOf(PLOT_USER_INPUT_HEADER_ACU) !== 0 && head.indexOf(PLOT_USER_INPUT_OPEN_ACU) !== 0) break;
+      const open = current.indexOf(PLOT_USER_INPUT_OPEN_ACU);
+      if (open < 0) break;
+      const close = current.lastIndexOf(PLOT_USER_INPUT_CLOSE_ACU);
+      if (close <= open) break;
+      current = current.slice(open + PLOT_USER_INPUT_OPEN_ACU.length, close);
+    }
+    return current.trim() ? current : raw;
+  }
+
   async function buildPlotSharedContext_ACU(plotSettings: Record<string, any>, userMessage: string, runtimeOptions: any = {}) {
     const readContext: PlotWorldbookReadContext_ACU | undefined = runtimeOptions.readContext;
     const requestContext: PlotRequestContext_ACU | undefined = runtimeOptions.requestContext;
@@ -428,7 +458,9 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
         if (key === '$9') continue;
         const value = taskOverrides[key] !== undefined ? taskOverrides[key] : replacements[key];
         const regex = new RegExp(escapeRegExp_ACU(key), 'g');
-        const filteredValue = filterPlotInjectedContent(value, key);
+        // $8 是注入头模板的内插位，先过幂等闸剥掉滞留的旧壳，防止旧壳连同原文被再包一层；其余槽位行为不变。
+        const gatedValue = key === '$8' ? unwrapPlotUserInputShell_ACU(value) : value;
+        const filteredValue = filterPlotInjectedContent(gatedValue, key);
         processed = processed.replace(regex, () => filteredValue);
       }
       return processed;
