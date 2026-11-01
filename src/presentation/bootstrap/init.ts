@@ -907,6 +907,8 @@ export   function mainInitialize_ACU() {
               debug?.step('plot_skip', { reason: 'busy' });
               if (shouldProcessPlotForGeneration_ACU(type, params, dryRun)) {
                 debug?.finish('plot_blocked', { reason: 'busy' }, false);
+                // 静默让路用户不可见，至少给出可感知的延后原因。
+                showToastr_ACU('warning', '上一次剧情推进仍在进行，本次发送已延后，请稍候或稍后手动重发', '剧情推进');
                 redirectPlotSendEvent_ACU(params);
               }
               return;
@@ -932,7 +934,12 @@ export   function mainInitialize_ACU() {
               if (vectorGenerationSend?.controller.signal.aborted) {
                 finishVectorGeneration(vectorGenerationSend);
               }
-              if (pendingVectorSend || activeVectorWait) { redirectPlotSendEvent_ACU(params); return; }
+              if (pendingVectorSend || activeVectorWait) {
+                // 静默让路用户不可见，至少给出可感知的延后原因。
+                showToastr_ACU('warning', '上一次剧情向量索引仍在进行，本次发送已延后，请稍候或稍后手动重发', '剧情推进');
+                redirectPlotSendEvent_ACU(params);
+                return;
+              }
               const controller = new AbortController();
               const signal: AbortSignal | undefined = params?.signal;
               const abort = () => controller.abort();
@@ -949,6 +956,8 @@ export   function mainInitialize_ACU() {
               };
               if (!pendingInput && !SillyTavern_API_ACU.eventTypes.WORLDINFO_ENTRIES_LOADED) {
                 finishVectorGeneration(send);
+                // 静默放弃用户不可见，至少给出可感知的原因；本轮按普通发送继续。
+                showToastr_ACU('warning', '世界书条目尚未就绪，本轮剧情向量索引未处理，本次发送已按普通发送继续', '剧情推进');
                 redirectPlotSendEvent_ACU(params);
                 return;
               }
