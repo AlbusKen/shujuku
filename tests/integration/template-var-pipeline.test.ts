@@ -27,11 +27,12 @@ vi.mock('../../src/service/runtime/state-manager', () => ({
   getCurrentIsolationKey_ACU: vi.fn(() => ''),
 }));
 
-vi.mock('../../src/shared/utils', () => ({
+vi.mock('../../src/shared/utils', async importOriginal => ({
   isSummaryOrOutlineTable_ACU: vi.fn((name: string) => name.includes('纪要')),
   logDebug_ACU: vi.fn(),
   logError_ACU: vi.fn(),
   logWarn_ACU: vi.fn(),
+  cloneScopedConfigData_ACU: (await importOriginal<typeof import('../../src/shared/utils')>()).cloneScopedConfigData_ACU,
 }));
 
 vi.mock('../../src/shared/json-helpers', () => ({
@@ -63,12 +64,19 @@ import {
 } from '../../src/service/runtime/template-vars/var-store-and-tags';
 
 import {
-  parseIfBlocksInContent_ACU,
+  parseIfBlockRecursive_ACU,
 } from '../../src/service/runtime/template-vars/if-block-parser';
+import { _set_SillyTavern_API_ACU } from '../../src/shared/host-api';
+import {
+  CHAT_SCOPED_CONFIG_FIELD_ACU,
+  getChatScopedConfigContainer_ACU,
+} from '../../src/data/storage/chat-history';
+import { getCurrentFlightModeState_ACU } from '../../src/service/flight-mode/flight-mode-state';
 
 beforeEach(() => {
   vi.clearAllMocks();
   setTemplateVariableStores_ACU(null);
+  _set_SillyTavern_API_ACU(undefined);
 });
 
 describe('I3: 模板变量替换管线', () => {
@@ -123,5 +131,37 @@ describe('I3: 模板变量替换管线', () => {
     expect(content).not.toContain('$calc:base');
     expect(content).not.toContain('$random:bonus');
     expect(content).toContain('攻击力=10+');
+  });
+
+  it('普通文本解析串联真实模式与配置读取，不序列化无关模板归档', () => {
+    const payload = 'x'.repeat(3 * 1024 * 1024);
+    const archiveToJSON = vi.fn(() => ({ payload }));
+    const config = {
+      version: 1,
+      templateArchives: { '': [{ toJSON: archiveToJSON }] },
+      flightModeByIsolationKey: { '': { enabled: false, hiddenRowIds: [] } },
+    };
+    const chat = [{}];
+    const metadata = {
+      [CHAT_SCOPED_CONFIG_FIELD_ACU]: config,
+      [`${CHAT_SCOPED_CONFIG_FIELD_ACU}__chatId`]: 'template-var-pipeline',
+    };
+    const updateChatMetadata = vi.fn();
+    _set_SillyTavern_API_ACU({ chatId: 'template-var-pipeline', chat, chatMetadata: metadata, updateChatMetadata } as any);
+
+    const context = { allTablesJson: mockCurrentJsonTableDataRef.value };
+    for (let i = 0; i < 20; i++) {
+      const content = `普通文本 ${i}`;
+      expect(parseIfBlockRecursive_ACU(content, context)).toBe(content);
+    }
+    const state = getCurrentFlightModeState_ACU();
+    expect(state.enabled).toBe(false);
+    state.hiddenRowIds.push('副本');
+    expect(config.flightModeByIsolationKey[''].hiddenRowIds).toEqual([]);
+    expect(metadata[CHAT_SCOPED_CONFIG_FIELD_ACU]).toBe(config);
+    expect(updateChatMetadata).not.toHaveBeenCalled();
+    expect(archiveToJSON).not.toHaveBeenCalled();
+    getChatScopedConfigContainer_ACU(chat);
+    expect(archiveToJSON).toHaveBeenCalledOnce();
   });
 });

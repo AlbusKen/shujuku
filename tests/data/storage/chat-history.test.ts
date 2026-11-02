@@ -32,7 +32,9 @@ import {
   CHAT_TEMPLATE_ARCHIVE_OPTION_PREFIX_ACU,
   MAX_CHAT_TEMPLATE_ARCHIVES_PER_TAG_ACU,
   getChatScopedConfigContainer_ACU,
+  getChatScopedConfigField_ACU,
   peekChatScopedConfigContainer_ACU,
+  peekChatScopedConfigField_ACU,
   normalizeChatScopedConfigContainer_ACU,
   getChatSheetGuideContainer_ACU,
   peekChatSheetGuideContainer_ACU,
@@ -278,6 +280,133 @@ describe('getChatScopedConfigContainer_ACU', () => {
 
     expect(metadata[CHAT_SCOPED_CONFIG_FIELD_ACU]).toBeDefined();
     expect(metadata[`${CHAT_SCOPED_CONFIG_FIELD_ACU}__chatId`]).toBe('current-chat');
+  });
+});
+
+describe('ScopedConfig 字段级读取', () => {
+  const field = 'flightModeByIsolationKey';
+  const readers = [getChatScopedConfigField_ACU, peekChatScopedConfigField_ACU];
+
+  function install(config: unknown, chatId = 'current-chat') {
+    const updateChatMetadata = vi.fn();
+    const metadata: any = {
+      [CHAT_SCOPED_CONFIG_FIELD_ACU]: config,
+      [`${CHAT_SCOPED_CONFIG_FIELD_ACU}__chatId`]: chatId,
+    };
+    _set_SillyTavern_API_ACU({ chatId, chatMetadata: metadata, updateChatMetadata } as any);
+    return { metadata, updateChatMetadata };
+  }
+
+  it.each([0, 256 * 1024, 3 * 1024 * 1024])('重复读取不序列化无关归档（%i 字节）', size => {
+    const archiveToJSON = vi.fn(() => ({ payload: 'x'.repeat(size) }));
+    const config = {
+      version: 1,
+      templateArchives: { '': [{ toJSON: archiveToJSON }] },
+      [field]: { '': { enabled: false, hiddenRowIds: [] } },
+    };
+    const { metadata, updateChatMetadata } = install(config);
+    const chat = [{}];
+    for (const read of readers) {
+      for (let i = 0; i < 20; i++) {
+        const result = read(chat, field) as any;
+        expect(result).toEqual(config[field]);
+        expect(result).not.toBe(config[field]);
+        result[''].hiddenRowIds.push('仅修改副本');
+      }
+    }
+    expect(config[field][''].hiddenRowIds).toEqual([]);
+    expect(archiveToJSON).not.toHaveBeenCalled();
+    expect(mockCloneScopedConfigData.mock.calls.every(([value]) => Object.keys(value).every(key => key === field))).toBe(true);
+    expect(metadata[CHAT_SCOPED_CONFIG_FIELD_ACU]).toBe(config);
+    expect(updateChatMetadata).not.toHaveBeenCalled();
+    // 确认探针能识别原完整容器读取的归档序列化。
+    getChatScopedConfigContainer_ACU(chat);
+    expect(archiveToJSON).toHaveBeenCalledOnce();
+  });
+
+  it('metadata 与 legacy 并存且无缺项时不复制归档、不回写', () => {
+    const archiveToJSON = vi.fn(() => ({ payload: '归档正文' }));
+    const config = { version: 1, templateArchives: { '': [{ toJSON: archiveToJSON }] },
+      [field]: { '': { enabled: true, hiddenRowIds: ['metadata'] } } };
+    const legacy = { ...config, [field]: { '': { enabled: false } } };
+    const { updateChatMetadata } = install(config);
+    for (const read of readers) {
+      expect(read([{ [CHAT_SCOPED_CONFIG_FIELD_ACU]: legacy }], field)).toEqual(config[field]);
+    }
+    expect(archiveToJSON).not.toHaveBeenCalled();
+    expect(updateChatMetadata).not.toHaveBeenCalled();
+  });
+
+  it('peek 仅合并请求字段，metadata 优先且不改写任一来源', () => {
+    const config = { version: 1, [field]: { '': { enabled: false, hiddenRowIds: [] } } };
+    const legacy = { version: 1, [field]: { '': { enabled: true }, other: { enabled: true, hiddenRowIds: [] } } };
+    const { metadata, updateChatMetadata } = install(config);
+    const result = peekChatScopedConfigField_ACU([{ [CHAT_SCOPED_CONFIG_FIELD_ACU]: legacy }], field) as any;
+    expect(result).toEqual({ ...legacy[field], ...config[field] });
+    result[''].hiddenRowIds.push('副本');
+    result.other.hiddenRowIds.push('副本');
+    expect(config[field][''].hiddenRowIds).toEqual([]);
+    expect(legacy[field].other.hiddenRowIds).toEqual([]);
+    expect(metadata[CHAT_SCOPED_CONFIG_FIELD_ACU]).toBe(config);
+    expect(updateChatMetadata).not.toHaveBeenCalled();
+  });
+
+  it('get 保留完整 legacy 迁移，迁移后返回值仍与宿主隔离', () => {
+    const config = { version: 1, [field]: { '': { enabled: false, hiddenRowIds: [] } } };
+    const legacy = { version: 1, template: { tag: { mode: 'inherit_global' } },
+      [field]: { other: { enabled: true, hiddenRowIds: [] } } };
+    const { metadata, updateChatMetadata } = install(config);
+    const result = getChatScopedConfigField_ACU([{ [CHAT_SCOPED_CONFIG_FIELD_ACU]: legacy }], field) as any;
+    expect(result).toEqual({ ...config[field], ...legacy[field] });
+    const saved = metadata[CHAT_SCOPED_CONFIG_FIELD_ACU];
+    expect(saved.template).toEqual(legacy.template);
+    expect(saved[field]).toEqual(result);
+    expect(updateChatMetadata).toHaveBeenCalledOnce();
+    result.other.hiddenRowIds.push('副本');
+    expect(saved[field].other.hiddenRowIds).toEqual([]);
+    expect(legacy[field].other.hiddenRowIds).toEqual([]);
+    getChatScopedConfigField_ACU([{ [CHAT_SCOPED_CONFIG_FIELD_ACU]: legacy }], field);
+    expect(updateChatMetadata).toHaveBeenCalledOnce();
+  });
+
+  it('legacy-only 的 peek 只读，get 迁移完整容器并记录归属', () => {
+    const legacy = { version: 1, template: {}, [field]: { '': { enabled: true } } };
+    const { metadata, updateChatMetadata } = install(undefined);
+    const chat = [{ [CHAT_SCOPED_CONFIG_FIELD_ACU]: JSON.stringify(legacy) }];
+    expect(peekChatScopedConfigField_ACU(chat, field)).toEqual(legacy[field]);
+    expect(metadata[CHAT_SCOPED_CONFIG_FIELD_ACU]).toBeUndefined();
+    expect(updateChatMetadata).not.toHaveBeenCalled();
+    expect(getChatScopedConfigField_ACU(chat, field)).toEqual(legacy[field]);
+    expect(metadata[CHAT_SCOPED_CONFIG_FIELD_ACU]).toEqual(legacy);
+    expect(metadata[`${CHAT_SCOPED_CONFIG_FIELD_ACU}__chatId`]).toBe('current-chat');
+  });
+
+  it('切换聊天后忽略旧 owner，缺少活动聊天时不读取残留配置', () => {
+    const { metadata } = install({ version: 1, [field]: { '': { enabled: true } } }, 'old-chat');
+    _set_SillyTavern_API_ACU({ chatId: 'new-chat', chatMetadata: metadata } as any);
+    const legacy = { version: 1, [field]: { '': { enabled: false } } };
+    expect(peekChatScopedConfigField_ACU([{}], field)).toBeUndefined();
+    expect(peekChatScopedConfigField_ACU([{ [CHAT_SCOPED_CONFIG_FIELD_ACU]: legacy }], field)).toEqual(legacy[field]);
+    _set_SillyTavern_API_ACU({ chatId: '', chatMetadata: metadata } as any);
+    for (const read of readers) {
+      expect(read([{}], field)).toBeUndefined();
+      expect(read([], field)).toBeUndefined();
+    }
+  });
+
+  it('strict 区分缺失与损坏，并保持模板槽位检查', () => {
+    install(undefined);
+    expect(peekChatScopedConfigField_ACU([{}], field, { strict: true })).toBeUndefined();
+    for (const damaged of ['{invalid', [], false]) {
+      install(damaged);
+      expect(() => peekChatScopedConfigField_ACU([{}], field, { strict: true })).toThrow('配置容器损坏');
+      expect(peekChatScopedConfigField_ACU([{}], field)).toBeUndefined();
+    }
+    install({ version: 1, template: [] });
+    expect(() => peekChatScopedConfigField_ACU([{}], field, { strict: true })).toThrow('模板槽位容器损坏');
+    const { metadata } = install('{invalid', 'old-chat');
+    _set_SillyTavern_API_ACU({ chatId: 'new-chat', chatMetadata: metadata } as any);
+    expect(peekChatScopedConfigField_ACU([{}], field, { strict: true })).toBeUndefined();
   });
 });
 

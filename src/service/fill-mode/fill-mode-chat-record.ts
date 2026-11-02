@@ -6,7 +6,7 @@
  * 读取只做归一化，不回写；记录无法识别时保留原值，按偏好模式运行。
  */
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
-import { getActiveChatStorageIdentity_ACU, peekChatScopedConfigContainer_ACU } from '../../data/storage/chat-history';
+import { getActiveChatStorageIdentity_ACU, peekChatScopedConfigField_ACU } from '../../data/storage/chat-history';
 import { getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { getCurrentFlightModeState_ACU } from '../flight-mode/flight-mode-state';
 import { hasLegacyFillModeTableData_ACU, hasLegacyVectorHistoryForCurrentChat_ACU, hasSummaryVectorDataForCurrentChat_ACU } from './fill-mode-chat-evidence';
@@ -36,7 +36,7 @@ export interface CurrentChatFillMode_ACU {
 function readRecordSlot_ACU(): { status: ChatFillModeRecordStatus_ACU; record: ChatFillModeRecord_ACU | null } {
   const chat = getChatArray_ACU();
   if (!getActiveChatStorageIdentity_ACU(chat)) return { status: 'no_chat', record: null };
-  const records = peekChatScopedConfigContainer_ACU(chat)?.[CHAT_FILL_MODE_FIELD_ACU];
+  const records = peekChatScopedConfigField_ACU(chat, CHAT_FILL_MODE_FIELD_ACU);
   if (records === undefined || records === null) return { status: 'absent', record: null };
   if (typeof records !== 'object' || Array.isArray(records)) return { status: 'invalid', record: null };
   const raw = (records as Record<string, unknown>)[String(getCurrentIsolationKey_ACU() ?? '')];

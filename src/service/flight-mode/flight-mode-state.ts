@@ -1,6 +1,7 @@
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import {
   getChatScopedConfigContainer_ACU,
+  getChatScopedConfigField_ACU,
   normalizeChatScopedConfigContainer_ACU,
   setChatScopedConfigContainer_ACU,
 } from '../../data/storage/chat-history';
@@ -36,9 +37,8 @@ export function normalizeFlightModeState_ACU(value: unknown): FlightModeState_AC
 }
 
 export function getCurrentFlightModeState_ACU(): FlightModeState_ACU {
-  const container = getChatScopedConfigContainer_ACU(getChatArray_ACU());
+  const states = getChatScopedConfigField_ACU(getChatArray_ACU(), 'flightModeByIsolationKey');
   const isolationKey = String(getCurrentIsolationKey_ACU() ?? '');
-  const states = container?.flightModeByIsolationKey;
   if (states && typeof states === 'object' && !Array.isArray(states)) {
     return normalizeFlightModeState_ACU((states as Record<string, unknown>)[isolationKey]);
   }

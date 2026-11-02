@@ -13,6 +13,7 @@ vi.mock('../../../src/data/gateways/chat-gateway', () => ({
 
 vi.mock('../../../src/data/storage/chat-history', () => ({
   getChatScopedConfigContainer_ACU: () => mockContainer.value,
+  getChatScopedConfigField_ACU: (_chat: unknown[], field: string) => mockContainer.value?.[field],
   normalizeChatScopedConfigContainer_ACU: (value: any) => ({ ...(value || {}), version: 1 }),
   setChatScopedConfigContainer_ACU: (_chat: any[], value: Record<string, unknown>) => {
     mockContainer.value = value;

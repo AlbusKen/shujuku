@@ -1,6 +1,7 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import {
   getChatScopedConfigContainer_ACU,
+  getChatScopedConfigField_ACU,
   getActiveChatStorageIdentity_ACU,
   peekChatScopedConfigContainer_ACU,
   normalizeChatScopedConfigContainer_ACU,
@@ -126,7 +127,7 @@ function describeError_ACU(error: any): string {
 }
 
 function readPendingEnable_ACU(): FlightModePendingEnable_ACU | null {
-  const slots = getChatScopedConfigContainer_ACU(getChatArray_ACU())?.[PENDING_ENABLE_FIELD_ACU];
+  const slots = getChatScopedConfigField_ACU(getChatArray_ACU(), PENDING_ENABLE_FIELD_ACU);
   if (!isPlainObject_ACU(slots)) return null;
   const raw = slots[String(getCurrentIsolationKey_ACU() ?? '')];
   return isPlainObject_ACU(raw) && isPlainObject_ACU(raw.archive) ? raw as FlightModePendingEnable_ACU : null;
