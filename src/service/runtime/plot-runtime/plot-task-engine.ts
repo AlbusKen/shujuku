@@ -186,23 +186,32 @@ import { hasUsableWorldbookSkillMeta_ACU, resolveAgentWorldbookFilterAvailabilit
   const PLOT_USER_INPUT_UNWRAP_MAX_ACU = 10;
 
   /**
-   * 反复剥掉最外层 <本轮用户输入>…</本轮用户输入> 外壳（首开标签 + 其后的末闭标签，先剥外层）。
-   * 剥后为空回退原文；有开无闭的畸形文本原样放行，不做破坏性截断。
-   * 对已污染楼层，下次重扫时剥回单层后重新包壳即自愈。
+   * 只剥掉完整包住输入的外壳；嵌套按配对标签识别。
+   * 外壳前后有额外输入、标签不完整或内容为空时保留原文，避免丢失用户追加内容。
    */
   function unwrapPlotUserInputShell_ACU(value: any): string {
     const raw = String(value ?? '');
     let current = raw;
     for (let k = 0; k < PLOT_USER_INPUT_UNWRAP_MAX_ACU; k++) {
       const head = current.trim();
-      if (head.indexOf(PLOT_USER_INPUT_HEADER_ACU) !== 0 && head.indexOf(PLOT_USER_INPUT_OPEN_ACU) !== 0) break;
-      const open = current.indexOf(PLOT_USER_INPUT_OPEN_ACU);
-      if (open < 0) break;
-      const close = current.lastIndexOf(PLOT_USER_INPUT_CLOSE_ACU);
-      if (close <= open) break;
-      current = current.slice(open + PLOT_USER_INPUT_OPEN_ACU.length, close);
+      const shell = head.startsWith(PLOT_USER_INPUT_HEADER_ACU)
+        ? head.slice(PLOT_USER_INPUT_HEADER_ACU.length).trimStart() : head;
+      if (!shell.startsWith(PLOT_USER_INPUT_OPEN_ACU)) break;
+      let depth = 0;
+      let closingEnd = -1;
+      for (const match of shell.matchAll(/<\/?本轮用户输入>/g)) {
+        depth += match[0] === PLOT_USER_INPUT_OPEN_ACU ? 1 : -1;
+        if (depth === 0) {
+          closingEnd = match.index! + match[0].length;
+          break;
+        }
+      }
+      if (closingEnd !== shell.length) break;
+      const inner = shell.slice(PLOT_USER_INPUT_OPEN_ACU.length, closingEnd - PLOT_USER_INPUT_CLOSE_ACU.length);
+      if (!inner.trim()) break;
+      current = inner;
     }
-    return current.trim() ? current : raw;
+    return current;
   }
 
   async function buildPlotSharedContext_ACU(plotSettings: Record<string, any>, userMessage: string, runtimeOptions: any = {}) {

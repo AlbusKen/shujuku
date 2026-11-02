@@ -321,6 +321,47 @@ beforeEach(() => {
   Object.assign(m.gate, { lastUserMessageId: 7, lastUserMessageText: 'stale', lastUserMessageAt: 1, lastUserSendIntentAt: 2, lastGeneration: { stale: true }, generationSeq: 3, activeGenerations: [] });
 });
 
+describe('用户入楼补写等待上限', () => {
+  it('保存未返回时到 8 秒放行，保留 pending 且不触发额外生成', async () => {
+    vi.useFakeTimers();
+    let release!: (value: any) => void;
+    m.flushPlot.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    let finished = false;
+    const pending = m.messageSent!(0).then(() => { finished = true; });
+    await vi.advanceTimersByTimeAsync(7999);
+    expect(finished).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await pending;
+    expect(finished).toBe(true);
+    expect(m.clearPendingPlot).not.toHaveBeenCalled();
+    expect(m.generate).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    release({ status: 'committed', targetIndex: 0 });
+    await Promise.resolve();
+    expect(m.flushPlot).toHaveBeenCalledOnce();
+  });
+
+  it.each(['resolve', 'reject'])('补写 %s 时清理计时器并返回宿主', async outcome => {
+    vi.useFakeTimers();
+    if (outcome === 'reject') m.flushPlot.mockRejectedValueOnce(new Error('save failed'));
+    else m.flushPlot.mockResolvedValueOnce({ status: 'committed', targetIndex: 0 });
+    await expect(m.messageSent!(0)).resolves.toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(m.clearPendingPlot).not.toHaveBeenCalled();
+  });
+});
+
+describe('TavernHelper 已规划请求幂等', () => {
+  it('严格 true 标记直接透传且不重复规划', async () => {
+    const options = { _qrf_processed_by_hook: true, user_input: '已规划的输入' };
+    const output = await (window as any).TavernHelper.generate(options);
+    expect(output).toMatchObject({ handled: true, args: [options] });
+    expect(m.orchestrate).not.toHaveBeenCalled();
+    expect(m.ensureSeed).not.toHaveBeenCalled();
+  });
+});
+
+
 describe('发送意图捕获', () => {
   it('发送控件重建后仍捕获意图，重复安装不重复绑定', async () => {
     const { markUserSendIntent_ACU } = await import('../../../src/service/runtime/state-manager');

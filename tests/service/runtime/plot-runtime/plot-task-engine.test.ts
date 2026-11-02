@@ -3131,4 +3131,31 @@ describe('runPlotTasksRuntime_ACU', () => {
     expect(callInternalApi).not.toHaveBeenCalled();
   });
 
+  it('旧输入包装后追加的新输入必须保留', async () => {
+    const input = '以下是用户的本轮输入：\n<本轮用户输入>旧行动</本轮用户输入>\n新增行动必须保留';
+    await runPlotTasksRuntime_ACU({
+      tasks: [{ id: 'review-input', name: '输入保真', stage: 1, order: 1, maxRetries: 1,
+        promptGroup: [{ role: 'user', content: '$8' }] }],
+    }, input);
+    expect(mockCallApiWithPlotPreset.mock.calls[0][0][0].content).toContain('新增行动必须保留');
+  });
+
+  it.each([
+    ['普通输入', '普通输入'],
+    ['<本轮用户输入>行动</本轮用户输入>', '行动'],
+    ['以下是用户的本轮输入：\n<本轮用户输入>行动</本轮用户输入>', '行动'],
+    ['<本轮用户输入><本轮用户输入>行动</本轮用户输入></本轮用户输入>', '行动'],
+    ['前缀<本轮用户输入>行动</本轮用户输入>', '前缀<本轮用户输入>行动</本轮用户输入>'],
+    ['<本轮用户输入>旧</本轮用户输入><本轮用户输入>新</本轮用户输入>', '<本轮用户输入>旧</本轮用户输入><本轮用户输入>新</本轮用户输入>'],
+    ['<本轮用户输入>未闭合', '<本轮用户输入>未闭合'],
+    ['<本轮用户输入> </本轮用户输入>', '<本轮用户输入> </本轮用户输入>'],
+  ])('输入外壳只剥完整包围边界：%s', async (input, expected) => {
+    await runPlotTasksRuntime_ACU({
+      tasks: [{ id: 'input-boundary', name: '输入边界', stage: 1, order: 1, maxRetries: 1,
+        promptGroup: [{ role: 'user', content: '$8' }] }],
+    }, input);
+    expect(mockCallApiWithPlotPreset.mock.calls[0][0][0].content).toBe(expected);
+  });
+
+
 });
