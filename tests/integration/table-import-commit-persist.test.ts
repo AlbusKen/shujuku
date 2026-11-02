@@ -10,6 +10,14 @@ const h = vi.hoisted(() => ({
 vi.mock('../../src/data/gateways/chat-gateway', () => ({
   getChatArray_ACU: () => h.chat,
   saveChatToHost_ACU: vi.fn().mockResolvedValue(undefined),
+
+  saveChatToHostCoalesced_ACU: vi.fn().mockResolvedValue(undefined),
+
+  openChatSaveCoalescing_ACU: vi.fn(),
+
+  closeChatSaveCoalescing_ACU: vi.fn(),
+
+  forceFlushChatSave_ACU: vi.fn(async () => {}),
   saveChatToHostStrict_ACU: h.strictSave,
 }));
 vi.mock('../../src/service/chat/chat-service', () => ({ getChatArray_ACU: () => h.chat }));

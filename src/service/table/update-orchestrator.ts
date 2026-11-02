@@ -14,7 +14,7 @@ import { resolveManualUpdateBatchSize_ACU, resolveManualUpdateContextDepth_ACU }
 import { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } from '../summary/merge-logic';
 import { ensureStableRowIdsForSheetContent_ACU, filterSheetKeysByTemplateScope_ACU, getChatSheetGuideDataForIsolationKey_ACU, getCurrentChatTemplateScopeState_ACU, getEffectiveSeedRowsForSheet_ACU, getGlobalTemplateSnapshotForCurrentProfile_ACU, resolveTemplateScope_ACU, sanitizeTemplateSnapshotForChat_ACU, shouldUseInitialSeedRows_ACU } from '../template/chat-scope';
 import type { TemplateScope_ACU } from '../template/chat-scope';
-import { saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
+import { closeChatSaveCoalescing_ACU, forceFlushChatSave_ACU, openChatSaveCoalescing_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { captureAiMessageSnapshot_ACU, TableFillTargetStaleError_ACU, type AiMessageSnapshot_ACU } from '../../data/gateways/chat-message-snapshot';
 import { assertTableFillRequestCurrent_ACU } from './table-fill-request-guard';
 import { loadAllChatMessages_ACU, updateReadableLorebookEntry_ACU } from '../worldbook/pipeline';
@@ -3775,6 +3775,10 @@ export async function processUpdatesBatch_ACU(
     if (isStopped()) return { success: false, aborted: true };
     if (!options.planManaged) _set_isAutoUpdatingCard_ACU(true);
 
+    // 存盘合并运行窗口：本函数批循环内 persist 的每次宿主存盘走 saveChatToHostCoalesced_ACU，
+    // 避免 N 批 = N 次宿主全量存盘塞满串行保存队列（用户发送链冻结的根因）。
+    // 所有 return 路径（成功/失败/abort）统一由 finally 收口：深度-1 + 强制冲洗。
+    openChatSaveCoalescing_ACU();
     try {
         const isSummaryMode = (mode && (mode.includes('summary') || mode === 'manual_summary')) || false;
         const batchSize = specificBatchSize || (settings_ACU.updateBatchSize || 2);
@@ -3916,6 +3920,11 @@ export async function processUpdatesBatch_ACU(
 
         return { success: true, ...(postCommitWarnings.length ? { postCommitWarnings } : {}) };
     } finally {
+        closeChatSaveCoalescing_ACU();
+        // 冲洗点：运行期延迟的脏改动在退出时补存一次（forceFlush 永不抛）。
+        // executeUpdate 成功收尾里的边界 checkpoint（strict/条件存盘）在本冲洗之前已执行，
+        // strict 成功会直接清脏，这里通常只剩无脏 no-op。
+        await forceFlushChatSave_ACU();
         if (!options.planManaged) {
             _set_isAutoUpdatingCard_ACU(false);
             _set_wasStoppedByUser_ACU(false);
@@ -4547,6 +4556,9 @@ export async function orchestrateManualCatchUp_ACU(
     const schemaBoundaries = collectV2SchemaBoundaryIndices_ACU(getChatArray_ACU(), getCurrentIsolationKey_ACU());
 
     try {
+        // 存盘合并运行窗口：手动追平与自动填表同族（bucket 循环串行、每 bucket 一次宿主全量存盘），
+        // 所有 return 路径由函数尾部既有 finally 收口：深度-1 + 强制冲洗。
+        openChatSaveCoalescing_ACU();
         for (let waveIndex = 0; waveIndex < plan.waves.length; waveIndex += 1) {
             activeWaveIndex = waveIndex;
             if (options.abortController?.signal.aborted) {
@@ -4861,6 +4873,9 @@ export async function orchestrateManualCatchUp_ACU(
             terminalProgressSaved: !terminalError,
         };
     } finally {
+        closeChatSaveCoalescing_ACU();
+        // 冲洗点：追平期间延迟的脏改动在退出时补存一次（forceFlush 永不抛）。
+        await forceFlushChatSave_ACU();
         _set_isAutoUpdatingCard_ACU(false);
     }
 }

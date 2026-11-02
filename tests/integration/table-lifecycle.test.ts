@@ -5,15 +5,25 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { logWarn_ACU } from '../../src/shared/utils';
 
-const { mockChat, mockSettings, mockCurrentJsonTableDataRef } = vi.hoisted(() => ({
+const { mockChat, mockSettings, mockCurrentJsonTableDataRef, mockSaveChat } = vi.hoisted(() => ({
   mockChat: [] as any[],
   mockSettings: { dataIsolationEnabled: false, dataIsolationCode: '' } as any,
   mockCurrentJsonTableDataRef: { value: null as any },
+  // persist 非 strict 分支已改走合并调度入口；别名到同一 fn，保持旧计数语义。
+  mockSaveChat: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('../../src/data/gateways/chat-gateway', () => ({
   getChatArray_ACU: vi.fn(() => mockChat),
-  saveChatToHost_ACU: vi.fn().mockResolvedValue(undefined),
+  saveChatToHost_ACU: mockSaveChat,
+
+  saveChatToHostCoalesced_ACU: mockSaveChat,
+
+  openChatSaveCoalescing_ACU: vi.fn(),
+
+  closeChatSaveCoalescing_ACU: vi.fn(),
+
+  forceFlushChatSave_ACU: vi.fn(async () => {}),
 }));
 vi.mock('../../src/shared/utils', () => ({
   isSummaryOrOutlineTable_ACU: vi.fn((n: string) => n.includes('\u7eaa\u8981')),
