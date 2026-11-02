@@ -18,6 +18,7 @@ import {
 } from '../../../src/service/simulation/simulation-store';
 import { WORLD_CHRONICLE_HOT_WINDOW_ACU, WORLD_CHRONICLE_OVERVIEW_CAP_ACU, WORLD_LEDGER_SCHEMA_VERSION_ACU, WorldSimulationValidationError_ACU } from '../../../src/service/simulation/model';
 import { normalizeWorldHistoryArchive_ACU } from '../../../src/service/simulation/history-archive';
+import { materializeWorldRoundCandidate_ACU } from '../../../src/service/simulation/world-candidate';
 import { WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU } from '../../../src/service/simulation/agent/agent-model';
 import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
 import { sha256HexSync_ACU } from '../../../src/shared/sha256-sync';
@@ -917,12 +918,46 @@ describe('world simulation envelope store', () => {
       { completedRounds: 12, enteredAtRound: {}, extra: true },
     ]) {
       ledger.factArchiveRetention = bad;
-      expect(() => validateWorldSimulationLedger_ACU(ledger)).toThrow(WorldSimulationValidationError_ACU);
+      expect(validateWorldSimulationLedger_ACU(ledger, 'load').factArchiveRetention).toEqual({ completedRounds: 0, enteredAtRound: {} });
+      expect(ledger.factArchiveRetention).toBe(bad);
+      expect(() => validateWorldSimulationLedger_ACU(ledger, 'persist')).toThrow(WorldSimulationValidationError_ACU);
       expect(collectWorldSimulationLedgerViolations_ACU(ledger)).toEqual(expect.arrayContaining([expect.stringMatching(/factArchiveRetention/)]));
     }
     ledger.factArchiveRetention = { completedRounds: 13, enteredAtRound: {} };
     ledger.factArchive = [];
     expect(validateWorldSimulationLedger_ACU(ledger).factArchiveRetention).toEqual(ledger.factArchiveRetention);
+  });
+
+  it('归档轮次格式不合法时读取从零重新计数，其他事实不丢，首楼原始数据不隐式改写', async () => {
+    const original: any = buildDefaultWorldSimulationEnvelope_ACU();
+    const cold = { id: 'cold-fact', summary: '原有冷事实', temporalKind: 'occurrence', happenedAt: { day: 1, slot: '' },
+      validFrom: null, validUntil: null, locationRef: null, actorIds: [], worldEventIds: [],
+      projectionPolicy: 'internal', revealState: 'locked', revealGate: null, nextCheck: null,
+      sourceRefs: [], evidenceRefs: [], supersedesFactIds: [], revision: 1 };
+    original.ledger.factArchive = [cold];
+    original.ledger.factArchiveRetention = null;
+    const chat: any[] = [{ _qrf_world_simulation: original }];
+    const saveChat = vi.fn().mockResolvedValue(undefined);
+    _set_SillyTavern_API_ACU({ chat, chatId: 'bad-retention', getCurrentChatId: () => 'bad-retention', saveChat } as any);
+    const store = new FirstFloorWorldSimulationStore_ACU();
+    const loaded = store.read()!;
+    expect(loaded.ledger.factArchive).toEqual([cold]);
+    expect(loaded.ledger.factArchiveRetention).toEqual({ completedRounds: 0, enteredAtRound: {} });
+    expect(chat[0]._qrf_world_simulation.ledger.factArchiveRetention).toBeNull();
+    expect(saveChat).not.toHaveBeenCalled();
+    let next = materializeWorldRoundCandidate_ACU(loaded.ledger, {
+      baseRevision: loaded.ledger.revision, candidateClock: loaded.ledger.clock,
+      worldEventWrites: [], factWrites: [], actorWrites: [], historyMilestoneWrites: [], actorCompletions: [],
+      projection: loaded.ledger.projection, completion: 'no_change',
+    });
+    expect(next.factArchiveRetention).toEqual({ completedRounds: 1, enteredAtRound: { 'cold-fact': 1 } });
+    for (let index = 0; index < 11; index++) next = materializeWorldRoundCandidate_ACU(next, {
+      baseRevision: next.revision, candidateClock: next.clock,
+      worldEventWrites: [], factWrites: [], actorWrites: [], historyMilestoneWrites: [], actorCompletions: [],
+      projection: next.projection, completion: 'no_change',
+    });
+    expect(next.factArchive).toEqual([]);
+    expect(next.factArchiveRetention).toEqual({ completedRounds: 12, enteredAtRound: {} });
   });
 
   it('旧账本读取不补轮次元数据，显式轮次可经首楼更新保存并回读', async () => {

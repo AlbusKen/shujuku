@@ -277,7 +277,7 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<WorldSimul
   if (!firstMessage || !anchorMessage) reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', '提交目标楼层不可用');
 
   const rawEnvelope = firstMessage[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU];
-  const validatedEnvelope = validateWorldSimulationEnvelope_ACU(rawEnvelope, 'persist');
+  const validatedEnvelope = validateWorldSimulationEnvelope_ACU(rawEnvelope, 'load');
   assertWorldSimulationHostEnvelope_ACU(validatedEnvelope);
   const foldedBefore = foldWorldSimulationLedger_ACU(chat, currentAnchor.messageIndex);
   const envelope = foldedBefore ? { ...validatedEnvelope, ledger: foldedBefore.ledger } : validatedEnvelope;
@@ -487,7 +487,7 @@ async function persistHostFinalCommit_ACU(
   persistedAnchor: WorldSimulationAnchorIdentity_ACU, nextEnvelope: WorldSimulationEnvelope_ACU,
   archiveBefore: WorldChronicleArchiveSnapshot_ACU, archiveSnapshot: WorldChronicleArchiveSnapshot_ACU,
 ): Promise<WorldSimulationAnchorIdentity_ACU> {
-  const envelope = { ...validateWorldSimulationEnvelope_ACU(rawEnvelope, 'persist'), ledger: runWriteView.ledger };
+  const envelope = { ...validateWorldSimulationEnvelope_ACU(rawEnvelope, 'load'), ledger: runWriteView.ledger };
   const nextConversationBucket = conversationBucketWithMigratedEntry_ACU(
     anchorMessage[WORLD_SIMULATION_CONVERSATION_FIELD_ACU],
     anchorMessage,
@@ -789,7 +789,7 @@ export function applyWorldLegacyBackfillHost_ACU(expectedFingerprint: string, ex
     const firstMessage = isRecord_ACU(liveChat[0]) ? liveChat[0] : null;
     if (!firstMessage) reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', '首楼不存在，无法补迁旧账本');
     const rawEnvelope = firstMessage[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU];
-    const persistedEnvelope = validateWorldSimulationEnvelope_ACU(rawEnvelope, 'persist');
+    const persistedEnvelope = validateWorldSimulationEnvelope_ACU(rawEnvelope, 'load');
     assertWorldSimulationHostEnvelope_ACU(persistedEnvelope);
     if (persistedEnvelope.task?.activeRun || persistedEnvelope.task?.status === 'paused') {
       reject_ACU('WORLD_SIMULATION_REVISION_CONFLICT', '存在未结算或暂停的推演运行，拒绝补迁旧账本');
@@ -916,7 +916,7 @@ async function deleteWorldSimulationEntityHost_ACU(id: string, kind: 'actor' | '
     const firstMessage = isRecord_ACU(chat[0]) ? chat[0] : null;
     if (!firstMessage) reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', '当前聊天首楼不可用');
     const rawEnvelope = firstMessage[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU];
-    const persisted = validateWorldSimulationEnvelope_ACU(rawEnvelope, 'persist');
+    const persisted = validateWorldSimulationEnvelope_ACU(rawEnvelope, 'load');
     assertWorldSimulationHostEnvelope_ACU(persisted);
     let messageIndex = -1;
     for (let index = chat.length - 1; index >= 0; index -= 1) {
@@ -1056,7 +1056,7 @@ export function appendWorldSimulationActorsHost_ACU(
     if (!first) reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', '当前聊天首楼不可用');
     const rawEnvelope = first[WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU];
     const persisted = rawEnvelope === undefined
-      ? buildDefaultWorldSimulationEnvelope_ACU() : validateWorldSimulationEnvelope_ACU(rawEnvelope, 'persist');
+      ? buildDefaultWorldSimulationEnvelope_ACU() : validateWorldSimulationEnvelope_ACU(rawEnvelope, 'load');
     if (rawEnvelope !== undefined) assertWorldSimulationHostEnvelope_ACU(persisted);
     let index = -1;
     for (let i = chat.length - 1; i >= 0; i -= 1) {

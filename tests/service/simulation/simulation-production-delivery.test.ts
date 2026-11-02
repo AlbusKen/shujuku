@@ -445,6 +445,42 @@ describe('production world delivery factory', () => {
   }
   const stageRequests = (stage: string) => mockCallAIChatTurn_ACU.mock.calls.filter(([messages]) => protocolInput(messages).stage === stage);
 
+  it.each(['body', 'plot'] as const)('%s 首楼归档计数损坏时正式推演可保存并从零续计，不丢事实或正文', async deliveryTarget => {
+    const envelope = buildDefaultWorldSimulationEnvelope_ACU();
+    envelope.settings.deliveryTarget = deliveryTarget;
+    envelope.ledger.actors = [actor()];
+    const cold = { id: 'old-cold', summary: '原有冷事实', temporalKind: 'occurrence' as const,
+      happenedAt: { day: 1, slot: '' }, validFrom: null, validUntil: null, locationRef: null, actorIds: [], worldEventIds: [],
+      projectionPolicy: 'internal' as const, revealState: 'locked' as const, revealGate: null, nextCheck: null,
+      sourceRefs: [], evidenceRefs: [], supersedesFactIds: [], revision: 1 };
+    envelope.ledger.factArchive = [cold];
+    (envelope.ledger as any).factArchiveRetention = null;
+    const body = '守卫正站在钟楼门口。';
+    const chat: any[] = [{ _qrf_world_simulation: envelope }, { is_user: false, message_id: 914, mes: body, swipe_id: 0 }];
+    let remote = structuredClone(chat);
+    const save = vi.fn(async () => { remote = structuredClone(chat); });
+    _set_SillyTavern_API_ACU({ chat, chatId: 'retention-recovery', characterId: 0, this_chid: 0,
+      characters: [{ avatar: 'retention.png', name: '测试角色' }], getCurrentChatId: () => 'retention-recovery',
+      saveChat: save, getRequestHeaders: () => ({}), extensionSettings: {},
+    } as any);
+    vi.stubGlobal('location', { href: 'https://tavern.test/', origin: 'https://tavern.test' });
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => [{}, ...structuredClone(remote)] })));
+    const runtime = getWorldSimulationRuntime_ACU();
+    expect(runtime.readUiSnapshot().envelope!.ledger.factArchiveRetention).toEqual({ completedRounds: 0, enteredAtRound: {} });
+    expect(chat[0]._qrf_world_simulation.ledger.factArchiveRetention).toBeNull();
+    mockCallAIChatTurn_ACU.mockImplementation(async (messages: readonly { content: string }[]) => ({
+      content: responseFor(protocolInput(messages)), toolCalls: [],
+    }));
+    const outcome = await runtime.sendAgentMessage('继续推演', `retention-round-${deliveryTarget}`);
+    if (outcome?.status === 'failed') throw new Error(JSON.stringify(outcome.error));
+    expect(outcome).toMatchObject({ status: 'completed' });
+    expect(save).toHaveBeenCalled();
+    const persisted = remote[0]._qrf_world_simulation.ledger;
+    expect(persisted.factArchive).toEqual([cold]);
+    expect(persisted.factArchiveRetention).toEqual({ completedRounds: 1, enteredAtRound: { 'old-cold': 1 } });
+    expect(remote[1].mes).toBe(body);
+  });
+
   it.each(['body', 'plot'] as const)('%s 投送：联合审查专员判定的无用内部管理事实经正式提交真正删除并清引用，其他类别保持不变', async deliveryTarget => {
     const f = pruneFixture(deliveryTarget, `prune-${deliveryTarget}`);
     mockCallAIChatTurn_ACU.mockImplementation(async (messages: readonly { content: string }[]) => {

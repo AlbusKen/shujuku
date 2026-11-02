@@ -1040,8 +1040,15 @@ function validateLedger_ACU(raw: unknown, phase: WorldSimulationErrorPhase_ACU):
   const worldEvents = validateWorldEvents_ACU(normalized.worldEvents, phase);
   const facts = validateFacts_ACU(normalized.facts, phase);
   const factArchive = normalized.factArchive === undefined ? undefined : validateFacts_ACU(normalized.factArchive, phase, 'ledger.factArchive');
-  const factArchiveRetention = normalized.factArchiveRetention === undefined ? undefined
-    : validateFactArchiveRetention_ACU(normalized.factArchiveRetention, new Set((factArchive ?? []).map(fact => fact.id)), phase);
+  let factArchiveRetention: WorldSimulationLedger_ACU['factArchiveRetention'];
+  if (normalized.factArchiveRetention !== undefined) {
+    try {
+      factArchiveRetention = validateFactArchiveRetention_ACU(normalized.factArchiveRetention, new Set((factArchive ?? []).map(fact => fact.id)), phase);
+    } catch (error) {
+      if (phase !== 'load' || !(error instanceof WorldSimulationValidationError_ACU)) throw error;
+      factArchiveRetention = { completedRounds: 0, enteredAtRound: {} };
+    }
+  }
   const historyMilestones = validateHistoryMilestones_ACU(normalized.historyMilestones, phase);
   const historyArchive = normalized.historyArchive === undefined ? undefined : validateHistoryMilestones_ACU(normalized.historyArchive, phase);
   const projection = validateProjection_ACU(normalized.projection, phase);
