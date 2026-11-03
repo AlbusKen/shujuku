@@ -5,7 +5,6 @@ import { WorldSimulationRuntime_ACU } from '../../../src/service/simulation/simu
 import { WorldSimulationOrchestrator_ACU } from '../../../src/service/simulation/simulation-orchestrator';
 import { buildDirectorOwnedStageRevision_ACU } from '../../../src/service/simulation/simulation-stage-planner';
 import { WorldSimulationStageExecutionEngine_ACU } from '../../../src/service/simulation/simulation-stage-execution-engine';
-import { buildDefaultWorldSimulationAgentPrompts_ACU } from '../../../src/service/simulation/agent/agent-defaults';
 import { WorldSimulationMainLoop_ACU } from '../../../src/service/simulation/agent/agent-main-loop';
 import { WorldSimulationSubagentRuntime_ACU } from '../../../src/service/simulation/agent/agent-subagent-runtime';
 import { appendWorldSimulationSessionEvent_ACU, appendWorldSimulationUserInstruction_ACU, readWorldSimulationConversation_ACU, readWorldSimulationDirectorHistory_ACU } from '../../../src/service/simulation/agent/agent-conversation-store';
@@ -206,7 +205,7 @@ function buildReplay(options: ReplayOptions) {
           },
           runMainLoop: () => mainLoop.run({
             identity,
-            settings: { ...store.read()!.settings, agentPrompts: buildDefaultWorldSimulationAgentPrompts_ACU() },
+            settings: store.read()!.settings,
             promptContext: { ...promptContext, task: store.read()!.task },
             registry,
             tools,

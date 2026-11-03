@@ -468,9 +468,6 @@ import { applyPlotPresetToSettings_ACU, clearPlotPresetBindingForChat_ACU, ensur
         target._qrf_plot_round_id = roundId;
       }
       target.qrf_plot = plotContent;
-      if (typeof roundRef === 'object' && typeof roundRef.finalMessage === 'string') {
-        target._qrf_plot_final_message = roundRef.finalMessage;
-      }
       const currentPresetName = getCurrentRuntimePlotPresetName_ACU({ fallbackToGlobal: true });
       target.qrf_plot_preset = currentPresetName;
 
