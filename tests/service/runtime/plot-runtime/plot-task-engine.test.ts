@@ -52,6 +52,9 @@ const {
   mockRunAgentDecisionForPlot,
   mockClearFinalGenerationGreenlights,
   mockWriteFinalGenerationGreenlights,
+  mockRecoverAgentWorldbookAfterFailure,
+  mockIsAgentWorldbookRuntimeEnabled,
+  mockSetAgentWorldbookNativeFallback,
   mockResolveAgentWorldbookFilterAvailability,
   mockResolvePreTakeoverSnapshot,
   mockIsDatabaseGeneratedLorebookEntry,
@@ -139,6 +142,9 @@ const {
     mockRunAgentDecisionForPlot: vi.fn(),
     mockClearFinalGenerationGreenlights: vi.fn(),
     mockWriteFinalGenerationGreenlights: vi.fn(),
+    mockRecoverAgentWorldbookAfterFailure: vi.fn(),
+    mockIsAgentWorldbookRuntimeEnabled: vi.fn(),
+    mockSetAgentWorldbookNativeFallback: vi.fn(),
     mockResolveAgentWorldbookFilterAvailability: vi.fn(),
     mockResolvePreTakeoverSnapshot: vi.fn(),
     mockIsDatabaseGeneratedLorebookEntry: vi.fn(),
@@ -342,7 +348,15 @@ vi.mock('../../../../src/service/agent/agent-skillify-service', () => ({
 vi.mock('../../../../src/service/agent/agent-worldbook-takeover', () => ({
   clearFinalGenerationGreenlights_ACU: mockClearFinalGenerationGreenlights,
   writeFinalGenerationGreenlights_ACU: mockWriteFinalGenerationGreenlights,
+  recoverAgentWorldbookAfterFailure_ACU: mockRecoverAgentWorldbookAfterFailure,
   resolvePreTakeoverWorldbookSnapshot_ACU: mockResolvePreTakeoverSnapshot,
+}));
+
+vi.mock('../../../../src/service/agent/agent-worldbook-runtime-state', () => ({
+  getAgentWorldbookRuntimeRevision_ACU: () => 1,
+  isAgentWorldbookRuntimeEnabled_ACU: mockIsAgentWorldbookRuntimeEnabled,
+  isAgentWorldbookNativeFallback_ACU: () => false,
+  setAgentWorldbookNativeFallback_ACU: mockSetAgentWorldbookNativeFallback,
 }));
 
 vi.mock('../../../../src/service/agent/agent-worldbook-skill-meta', () => ({
@@ -488,6 +502,10 @@ beforeEach(() => {
     staleBookNames: [],
   });
   mockWriteFinalGenerationGreenlights.mockResolvedValue(true);
+  mockIsAgentWorldbookRuntimeEnabled.mockReturnValue(true);
+  mockRecoverAgentWorldbookAfterFailure.mockImplementation(async (_error: unknown, options: any) => {
+    options.reportWarning?.('Agent 世界书处理失败；普通剧情继续。');
+  });
   mockResolveAgentWorldbookFilterAvailability.mockResolvedValue({
     available: false,
     reason: 'not_agent_mode',
@@ -685,7 +703,7 @@ describe('getWorldbookContentForPlot_ACU', () => {
     expect(mockResolvePreTakeoverSnapshot).toHaveBeenCalledTimes(1);
   });
 
-  it('normal 模式 hydration 失败时阻断收集且不记录宿主正文', async () => {
+  it('normal 模式 hydration 失败时回退原生收集且不记录宿主正文', async () => {
     const sensitiveText = '用户输入、提示词和世界书正文都不能泄露';
     mockResolvePreTakeoverSnapshot.mockRejectedValue(new Error(sensitiveText));
 
@@ -694,8 +712,9 @@ describe('getWorldbookContentForPlot_ACU', () => {
       '当前输入',
       '',
       { agentMode: 'normal' },
-    )).rejects.toThrow(sensitiveText);
-    expect(mockBuildCombinedWorldbookContentByStrategy).not.toHaveBeenCalled();
+    )).resolves.toBe('世界书内容');
+    expect(mockBuildCombinedWorldbookContentByStrategy).toHaveBeenCalledTimes(1);
+    expect(mockBuildCombinedWorldbookContentByStrategy.mock.calls[0][0].entryStateView).toBe('live');
     expect(JSON.stringify([mockLogWarn.mock.calls, mockLogError.mock.calls])).not.toContain(sensitiveText);
   });
 
@@ -988,119 +1007,49 @@ describe('getAgentControlledWorldbookEntriesForFinalPrompt_ACU', () => {
 });
 
 describe('runPlotTasksRuntime_ACU', () => {
-  it('清绿灯读取失败时阻断本轮剧情任务', async () => {
-    mockClearFinalGenerationGreenlights.mockRejectedValue(new Error('Lorebook permission denied'));
+  it.each(['Lorebook permission denied', 'host setLorebookEntries rejected'])('普通剧情不调用前置清理：%s 不影响任务', async message => {
+    mockIsAgentWorldbookRuntimeEnabled.mockReturnValue(false);
+    mockClearFinalGenerationGreenlights.mockRejectedValue(new Error(message));
     const plotSettings = {
       tasks: [{
-        id: 'preflight-clear-read-fail', name: '清绿灯读取失败', stage: 1, order: 1, maxRetries: 1,
-        promptGroup: [{ role: 'user', content: '不应到达 AI 调用' }],
-      }],
-    };
-
-    const reportWarning = vi.fn();
-    await expect(runPlotTasksRuntime_ACU(plotSettings, '当前输入', { reportWarning })).rejects.toThrow('Lorebook permission denied');
-    expect(mockClearFinalGenerationGreenlights).toHaveBeenCalledTimes(1);
-    expect(mockSetPendingFinalGenerationGreenlights).toHaveBeenCalledWith([]);
-    expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
-    expect(mockSavePlotToLatestMessage).not.toHaveBeenCalled();
-  });
-
-  it('清绿灯条目更新失败时阻断本轮剧情任务', async () => {
-    mockClearFinalGenerationGreenlights.mockRejectedValue(new Error('host setLorebookEntries rejected'));
-    const plotSettings = {
-      tasks: [{
-        id: 'preflight-clear-write-fail', name: '清绿灯写失败', stage: 1, order: 1, maxRetries: 1,
-        promptGroup: [{ role: 'user', content: '不应到达 AI 调用' }],
-      }],
-    };
-
-    await expect(runPlotTasksRuntime_ACU(plotSettings, '当前输入')).rejects.toThrow('host setLorebookEntries rejected');
-    expect(mockClearFinalGenerationGreenlights).toHaveBeenCalledTimes(1);
-    expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
-    expect(mockSavePlotToLatestMessage).not.toHaveBeenCalled();
-  });
-
-  it('Agent availability discovery 失败时阻断普通剧情任务', async () => {
-    mockResolveAgentWorldbookFilterAvailability.mockRejectedValue(new Error('Lorebook response malformed'));
-    const plotSettings = {
-      tasks: [{
-        id: 'preflight-availability-fail', name: 'Agent 可用性失败', stage: 1, order: 1, maxRetries: 1,
-        promptGroup: [{ role: 'user', content: '不应到达 AI 调用' }],
-      }],
-    };
-
-    await expect(runPlotTasksRuntime_ACU(plotSettings, '当前输入')).rejects.toThrow('Lorebook response malformed');
-    expect(mockClearFinalGenerationGreenlights).toHaveBeenCalledTimes(1);
-    expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
-    expect(mockSavePlotToLatestMessage).not.toHaveBeenCalled();
-  });
-
-  it('清绿灯预检发现失效世界书引用时隔离 stale，其余有效任务继续工作', async () => {
-    mockClearFinalGenerationGreenlights.mockResolvedValue({
-      status: 'isolated_stale',
-      patched: 1,
-      staleBookNames: ['已删除的世界书'],
-    });
-    const plotSettings = {
-      tasks: [{
-        id: 'preflight-stale-task', name: 'stale 隔离后继续', stage: 1, order: 1, maxRetries: 1,
-        promptGroup: [{ role: 'user', content: '有效任务应继续执行' }],
+        id: 'ordinary-task', name: '普通剧情', stage: 1, order: 1, maxRetries: 1,
+        promptGroup: [{ role: 'user', content: '推进剧情' }],
       }],
     };
 
     const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入');
 
-    expect(result.successfulResults).toHaveLength(1);
+    expect(result.finalMessage).toBe('最终注入消息');
+    expect(mockClearFinalGenerationGreenlights).not.toHaveBeenCalled();
+    expect(mockSetPendingFinalGenerationGreenlights).toHaveBeenCalledWith([]);
+    expect(mockWriteFinalGenerationGreenlights).not.toHaveBeenCalled();
+    expect(mockResolveAgentWorldbookFilterAvailability).not.toHaveBeenCalled();
+    expect(mockRunAgentDecisionForPlot).not.toHaveBeenCalled();
+    expect(mockRecoverAgentWorldbookAfterFailure).not.toHaveBeenCalled();
     expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
-    expect(mockClearFinalGenerationGreenlights).toHaveBeenCalledTimes(1);
   });
 
-  it.each(['unknown', 'scope_changed', 'aborted', 'api_unavailable'])('清绿灯预检 failed 时保留 %s 分类并阻断 AI', async category => {
-    mockClearFinalGenerationGreenlights.mockResolvedValue({
-      status: 'failed',
-      patched: 0,
-      staleBookNames: [],
-      error: { category, phase: 'clear_final_generation_greenlights' },
-    });
+  it('Agent availability discovery 失败时独立恢复，普通剧情继续', async () => {
+    mockResolveAgentWorldbookFilterAvailability.mockRejectedValue(new Error('Lorebook response malformed'));
+    const reportWarning = vi.fn();
     const plotSettings = {
       tasks: [{
-        id: 'preflight-failed-stage', name: '预检失败', stage: 1, order: 1, maxRetries: 1,
-        promptGroup: [{ role: 'user', content: '不应到达 AI 调用' }],
+        id: 'preflight-availability-fail', name: 'Agent 可用性失败', stage: 1, order: 1, maxRetries: 1,
+        promptGroup: [{ role: 'user', content: '继续普通剧情' }],
       }],
     };
 
-    const reportWarning = vi.fn();
-    await expect(runPlotTasksRuntime_ACU(plotSettings, '当前输入', { reportWarning })).rejects.toMatchObject({
-      name: 'PlotWorldbookPreflightError_ACU', category, phase: 'clear_final_generation_greenlights',
-    });
-    expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
-    expect(mockSavePlotToLatestMessage).not.toHaveBeenCalled();
+    const result = await runPlotTasksRuntime_ACU(plotSettings, '当前输入', { reportWarning });
+    expect(result.finalMessage).toBe('最终注入消息');
+    expect(mockClearFinalGenerationGreenlights).not.toHaveBeenCalled();
+    expect(mockRunAgentDecisionForPlot).not.toHaveBeenCalled();
+    expect(mockRecoverAgentWorldbookAfterFailure).toHaveBeenCalledTimes(1);
+    expect(reportWarning).toHaveBeenCalledTimes(1);
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
+    expect(mockSavePlotToLatestMessage).toHaveBeenCalled();
+    expect(mockBuildCombinedWorldbookContentByStrategy.mock.calls[0][0].entryStateView).toBe('live');
+    expect(mockResolvePreTakeoverSnapshot).not.toHaveBeenCalled();
   });
-
-  it('清绿灯预检 failed 时停止且不泄露宿主正文或堆栈到提示', async () => {
-    mockClearFinalGenerationGreenlights.mockResolvedValue({
-      status: 'failed',
-      patched: 0,
-      staleBookNames: [],
-      error: { category: 'unknown', phase: 'clear_final_generation_greenlights' },
-    });
-    mockLogError.mockClear();
-    const plotSettings = {
-      tasks: [{
-        id: 'preflight-safe-summary', name: '安全摘要', stage: 1, order: 1, maxRetries: 1,
-        promptGroup: [{ role: 'user', content: '不应到达 AI 调用' }],
-      }],
-    };
-
-    const reportWarning = vi.fn();
-    await expect(runPlotTasksRuntime_ACU(plotSettings, '当前输入', { reportWarning })).rejects.toMatchObject({
-      name: 'PlotWorldbookPreflightError_ACU', category: 'unknown',
-    });
-    expect(mockCallApiWithPlotPreset).not.toHaveBeenCalled();
-    const logCallsJson = JSON.stringify([mockLogError.mock.calls, mockLogWarn.mock.calls, reportWarning.mock.calls]);
-    expect(logCallsJson).not.toContain('宿主正文泄露样例');
-  });
-
 
   it.each([
     ['中文符号点数字', '部落生活 - 2026.08@记录'],
@@ -1467,7 +1416,7 @@ describe('runPlotTasksRuntime_ACU', () => {
     expect(result.apiRetriesExhausted).not.toBe(true);
   });
 
-  it.each(['success', 'not_written', 'exception'])('Agent 正文绿灯写入结果=%s 时继续执行剧情任务', async outcome => {
+  it.each(['success', 'not_written', 'exception'])('Agent 本轮开关应用结果=%s，失败独立恢复且剧情继续', async outcome => {
     const finalGreenlights = [{ bookName: '剧情书', uid: 12, reason: '正文需要' }];
     mockResolveAgentWorldbookFilterAvailability.mockResolvedValueOnce({
       available: true,
@@ -1504,22 +1453,79 @@ describe('runPlotTasksRuntime_ACU', () => {
     } else {
       mockWriteFinalGenerationGreenlights.mockResolvedValueOnce(outcome === 'success');
     }
-    const result = await runPlotTasksRuntime_ACU({ tasks: [{ id: 'task-a', name: '任务A', stage: 1, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: 'stage-1-task-a' }] }] }, '当前输入', { reportWarning });
-
-    expect(mockClearFinalGenerationGreenlights).toHaveBeenCalled();
-    expect(mockSetPendingFinalGenerationGreenlights).toHaveBeenCalledWith(finalGreenlights);
-    expect(mockWriteFinalGenerationGreenlights).toHaveBeenCalledWith(finalGreenlights);
+    const operation = runPlotTasksRuntime_ACU({ tasks: [{ id: 'task-a', name: '任务A', stage: 1, order: 1, maxRetries: 1, promptGroup: [{ role: 'user', content: 'stage-1-task-a' }] }] }, '当前输入', { reportWarning });
+    const result = await operation;
     expect(result.finalMessage).toBe('最终注入消息');
     expect(result.successfulResults).toHaveLength(1);
     expect(result.apiRetriesExhausted).not.toBe(true);
     expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
-    if (outcome === 'exception') {
-      expect(reportWarning).toHaveBeenCalledWith('正文世界书绿灯写入异常，保留剧情结果并继续。');
-   }
+    expect(mockSavePlotToLatestMessage).toHaveBeenCalled();
+    if (outcome === 'success') {
+      expect(mockSetPendingFinalGenerationGreenlights).toHaveBeenLastCalledWith(finalGreenlights);
+      expect(mockRecoverAgentWorldbookAfterFailure).not.toHaveBeenCalled();
+      expect(reportWarning).not.toHaveBeenCalled();
+    } else {
+      expect(mockSetPendingFinalGenerationGreenlights).not.toHaveBeenCalledWith(finalGreenlights);
+      expect(mockRecoverAgentWorldbookAfterFailure).toHaveBeenCalledTimes(1);
+      expect(mockRecoverAgentWorldbookAfterFailure.mock.calls[0][1]).toMatchObject({
+        assertCurrent: mockWriteFinalGenerationGreenlights.mock.calls[0][1].assertCurrent,
+        expectedRevision: 1,
+      });
+      expect(reportWarning).toHaveBeenCalledTimes(1);
+      expect(mockBuildCombinedWorldbookContentByStrategy.mock.calls[0][0].entryStateView).toBe('live');
+      expect(mockResolvePreTakeoverSnapshot).not.toHaveBeenCalled();
+    }
+    expect(mockClearFinalGenerationGreenlights).not.toHaveBeenCalled();
+    expect(mockWriteFinalGenerationGreenlights).toHaveBeenCalledWith(finalGreenlights, {
+      assertCurrent: expect.any(Function), expectedRevision: 1,
+    });
+    expect(mockRunAgentDecisionForPlot).toHaveBeenCalledWith(expect.objectContaining({ requireCompleteDecision: true }));
     const availabilityReadContext = mockResolveAgentWorldbookFilterAvailability.mock.calls[0][0];
     const decisionReadContext = mockRunAgentDecisionForPlot.mock.calls[0][0].sharedContext.worldbookReadContext;
     expect(availabilityReadContext).toBe(decisionReadContext);
     expect(availabilityReadContext.bookEntriesPromises.size).toBe(0);
+  });
+
+  it.each(['sequential', 'concurrent'])('%s 模式决策拒绝时只恢复一次，不提交失败选择且普通剧情继续', async mode => {
+    mockResolveAgentWorldbookFilterAvailability.mockResolvedValueOnce({
+      available: true, control: { mode: 'agent', agentPlotExecutionMode: mode },
+      bookNames: ['剧情书'], skillMetas: [],
+    });
+    mockRunAgentDecisionForPlot.mockRejectedValueOnce(new Error('Agent 请求失败'));
+    const reportWarning = vi.fn();
+
+    const result = await runPlotTasksRuntime_ACU({ tasks: [{
+      id: 'ordinary', name: '普通任务', promptGroup: [{ role: 'user', content: '继续剧情' }],
+    }] }, '当前输入', { reportWarning });
+
+    expect(result.finalMessage).toBe('最终注入消息');
+    expect(mockRecoverAgentWorldbookAfterFailure).toHaveBeenCalledTimes(1);
+    expect(reportWarning).toHaveBeenCalledTimes(1);
+    expect(mockWriteFinalGenerationGreenlights).not.toHaveBeenCalled();
+    expect(mockCallApiWithPlotPreset).toHaveBeenCalledTimes(1);
+    expect(mockSavePlotToLatestMessage).toHaveBeenCalled();
+    expect(mockSetPendingFinalGenerationGreenlights).toHaveBeenLastCalledWith([]);
+  });
+
+  it('成功的空选择仍统一提交完整集合，不触发失败恢复', async () => {
+    const tasks = [{ id: 'ordinary', name: '普通任务', promptGroup: [{ role: 'user', content: '继续剧情' }] }];
+    mockResolveAgentWorldbookFilterAvailability.mockResolvedValueOnce({
+      available: true, control: { mode: 'agent', agentPlotExecutionMode: 'sequential' },
+      bookNames: ['剧情书'], skillMetas: [],
+    });
+    mockRunAgentDecisionForPlot.mockResolvedValueOnce({
+      active: true, taskPlan: [], plotGreenlights: {}, finalGenerationGreenlights: [], effectiveTasks: tasks,
+    });
+
+    const result = await runPlotTasksRuntime_ACU({ tasks }, '当前输入');
+
+    expect(result.finalMessage).toBe('最终注入消息');
+    expect(mockWriteFinalGenerationGreenlights).toHaveBeenCalledTimes(1);
+    expect(mockWriteFinalGenerationGreenlights).toHaveBeenCalledWith([], {
+      assertCurrent: expect.any(Function), expectedRevision: 1,
+    });
+    expect(mockRecoverAgentWorldbookAfterFailure).not.toHaveBeenCalled();
+    expect(mockSetPendingFinalGenerationGreenlights).toHaveBeenLastCalledWith([]);
   });
 
   it('Agent active 但任务没有 description/triggerWhen 时，任务级世界书回退普通来源', async () => {
@@ -1664,7 +1670,9 @@ describe('runPlotTasksRuntime_ACU', () => {
     expect(options.isSelected({ bookName: '剧情书', uid: 7, normalizedComment: '普通条目' })).toBe(false);
     expect(options.isSelected({ bookName: '剧情书', uid: 999, normalizedComment: 'TavernDB-ACU-自动生成条目' })).toBe(true);
     expect(mockSetPendingFinalGenerationGreenlights).toHaveBeenLastCalledWith(finalGreenlights);
-    expect(mockWriteFinalGenerationGreenlights).toHaveBeenCalledWith(finalGreenlights);
+    expect(mockWriteFinalGenerationGreenlights).toHaveBeenCalledWith(finalGreenlights, {
+      assertCurrent: expect.any(Function), expectedRevision: 1,
+    });
   });
 
   it.each(['api', 'validation', 'reject'])('快任务失败（%s）时等齐慢任务与 Agent 收尾，再阻断后续阶段', async failureMode => {

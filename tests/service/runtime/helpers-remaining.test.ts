@@ -25,6 +25,8 @@ const {
   mockGetAgentControlledWorldbookEntriesForFinalPrompt,
   mockIsWorldbookTakeoverActive,
   mockEnsureHydrated,
+  mockAgentWorldbookEnabled,
+  mockAgentWorldbookNativeFallback,
 } = vi.hoisted(() => {
   const mockPendingFinalGenerationGreenlightsRef = { value: [] as any[] };
   return {
@@ -50,6 +52,8 @@ const {
     mockGetAgentControlledWorldbookEntriesForFinalPrompt: vi.fn(),
     mockIsWorldbookTakeoverActive: vi.fn(() => false),
     mockEnsureHydrated: vi.fn(async () => undefined),
+    mockAgentWorldbookEnabled: vi.fn(() => true),
+    mockAgentWorldbookNativeFallback: vi.fn(() => false),
   };
 });
 
@@ -94,6 +98,10 @@ vi.mock('../../../src/service/runtime/plot-runtime', () => ({
 vi.mock('../../../src/service/agent/agent-worldbook-takeover', () => ({
   isWorldbookTakeoverActive_ACU: mockIsWorldbookTakeoverActive,
   ensurePlotAgentWorldbookSnapshotHydrated_ACU: mockEnsureHydrated,
+}));
+vi.mock('../../../src/service/agent/agent-worldbook-runtime-state', () => ({
+  isAgentWorldbookRuntimeEnabled_ACU: mockAgentWorldbookEnabled,
+  isAgentWorldbookNativeFallback_ACU: mockAgentWorldbookNativeFallback,
 }));
 
 vi.mock('../../../src/service/runtime/helpers-context-tags', () => ({
@@ -148,6 +156,8 @@ beforeEach(() => {
   mockGetPlotFromHistory.mockReturnValue(null);
   mockSettings.promptTemplateSettings = { enabled: true, maxNestingDepth: 10, debugMode: false };
   mockPendingFinalGenerationGreenlightsRef.value = [];
+  mockAgentWorldbookEnabled.mockReturnValue(true);
+  mockAgentWorldbookNativeFallback.mockReturnValue(false);
   mockIsWorldbookTakeoverActive.mockReturnValue(false);
   mockGetWorldbookContentForPlot.mockResolvedValue('');
   mockGetAgentControlledWorldbookEntriesForFinalPrompt.mockResolvedValue([]);
@@ -374,6 +384,24 @@ describe('handleChatCompletionReady_ACU', () => {
       { role: 'user', content: '当前输入' },
     ]);
     expect(mockLogDebug).toHaveBeenCalledWith('[提示词模板] 已过滤酒馆原生正文世界书绿灯片段，数量:', 1);
+  });
+
+  it.each(['disabled', 'native_fallback'])('Agent 状态为 %s 时保留原生正文，不水合或扫描受控目录', async state => {
+    mockAgentWorldbookEnabled.mockReturnValue(state !== 'disabled');
+    mockAgentWorldbookNativeFallback.mockReturnValue(state === 'native_fallback');
+    mockIsWorldbookTakeoverActive.mockReturnValue(true);
+    mockPendingFinalGenerationGreenlightsRef.value = [{ bookName: '世界书', uid: 'old-selection' }];
+    const data = { messages: [
+      { role: 'system', content: '原生世界书正文' },
+      { role: 'user', content: '当前输入' },
+    ] };
+    const original = structuredClone(data.messages);
+
+    await handleChatCompletionReady_ACU(data);
+
+    expect(data.messages).toEqual(original);
+    expect(mockEnsureHydrated).not.toHaveBeenCalled();
+    expect(mockGetAgentControlledWorldbookEntriesForFinalPrompt).not.toHaveBeenCalled();
   });
 
   it('正文蓝灯过滤不会删除普通用户消息中的相同文本', async () => {

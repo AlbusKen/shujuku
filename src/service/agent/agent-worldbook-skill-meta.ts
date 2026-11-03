@@ -267,8 +267,9 @@ export async function resolveAgentWorldbookFilterAvailability_ACU(
   readContext?: StrictLorebookReadContext_ACU,
 ): Promise<AgentWorldbookFilterAvailability_ACU> {
   const config = await readAgentWorldbookControlFromWorldbooks_ACU(readContext);
-  const bookNames = await resolveAgentWorldbookScopeBookNames_ACU(undefined, readContext);
-  const skillMetas = bookNames.length > 0 ? await listWorldbookSkillMetas_ACU(bookNames, readContext) : [];
+  const enabled = config.source === 'worldbook' && config.control.enabled === true && config.control.mode === 'agent';
+  const bookNames = enabled ? await resolveAgentWorldbookScopeBookNames_ACU(config.control.worldbookScope, readContext) : [];
+  const skillMetas = enabled && bookNames.length > 0 ? await listWorldbookSkillMetas_ACU(bookNames, readContext) : [];
   const base = {
     configuredMode: config.control.mode,
     control: config.control,
@@ -280,8 +281,8 @@ export async function resolveAgentWorldbookFilterAvailability_ACU(
     skillMetas,
   };
 
-  if (bookNames.length === 0) return { ...base, available: false, reason: 'empty_scope' };
   if (config.source !== 'worldbook') return { ...base, available: false, reason: 'no_card_agent_config' };
-  if (config.control.mode !== 'agent') return { ...base, available: false, reason: 'not_agent_mode' };
+  if (!enabled) return { ...base, available: false, reason: 'not_agent_mode' };
+  if (bookNames.length === 0) return { ...base, available: false, reason: 'empty_scope' };
   return { ...base, available: true, reason: 'available' };
 }

@@ -13,7 +13,7 @@ import {
   setLorebookEntriesRequired_ACU,
 } from '../../data/gateways/worldbook-gateway';
 import { persistTavernSettings_ACU } from '../../data/storage/tavern-storage';
-import { hashUserInput_ACU, logWarn_ACU } from '../../shared/utils';
+import { hashUserInput_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { classifyLorebookReadError_ACU, summarizeLorebookRuntimeError_ACU } from '../../shared/lorebook-read-error';
 import { buildAgentWorldbookSnapshotSelectionSignature_ACU } from '../../shared/agent-worldbook-snapshot';
 import {
@@ -45,6 +45,7 @@ import {
   writeAgentWorldbookStateToWorldbook_ACU,
 } from './agent-worldbook-config-meta';
 import { runExclusiveAgentWorldbookOperation_ACU } from './agent-worldbook-operation-lock';
+import { getAgentWorldbookRuntimeRevision_ACU, resetAgentWorldbookRuntime_ACU, setAgentWorldbookNativeFallback_ACU } from './agent-worldbook-runtime-state';
 
 export interface AgentWorldbookTakeoverEntryUpdate_ACU {
   bookName: string;
@@ -479,6 +480,7 @@ export function setPlotAgentWorldbookSnapshot_ACU(snapshot: AgentWorldbookContro
  * 持久 state 仍由下一次按当前角色绑定刷新时读取，不能在这里删除或改写世界书条目。
  */
 export function resetPlotAgentWorldbookSessionSnapshot_ACU(): void {
+  resetAgentWorldbookRuntime_ACU();
   setAgentWorldbookSnapshotState_ACU(buildInactiveSnapshot_ACU());
   preTakeoverSnapshotResolutionPromisesBySignature_ACU.clear();
   plotAgentWorldbookSnapshotHydrated_ACU = false;
@@ -932,7 +934,12 @@ async function disableTakeoverCandidates_ACU(
   return { disabled, failed, report };
 }
 
-async function restoreSnapshotEntries_ACU(snapshot: AgentWorldbookControlSnapshot_ACU): Promise<{ restored: number; skipped: number; failed: number; report: AgentWorldbookEntryPatchReport_ACU }> {
+async function restoreSnapshotEntries_ACU(
+  snapshot: AgentWorldbookControlSnapshot_ACU,
+  options: { assertCurrent?: () => void; required?: boolean } = {},
+): Promise<{ restored: number; skipped: number; failed: number; report: AgentWorldbookEntryPatchReport_ACU }> {
+  const assertCurrent = options.assertCurrent || (() => {});
+  const readEntries = options.required ? getLorebookEntriesRequired_ACU : getLorebookEntries_ACU;
   let restored = 0;
   let skipped = 0;
   let failed = 0;
@@ -946,7 +953,9 @@ async function restoreSnapshotEntries_ACU(snapshot: AgentWorldbookControlSnapsho
     const patches: any[] = [];
     let currentEntriesRead = false;
     try {
-      const currentEntries = await getLorebookEntries_ACU(normalizedBookName);
+      assertCurrent();
+      const currentEntries = await readEntries(normalizedBookName);
+      assertCurrent();
       currentEntriesRead = true;
       const currentByUid = new Map((currentEntries || []).map(entry => [String(entry?.uid), entry]));
       for (const snapshotEntry of entriesToRestore) {
@@ -996,8 +1005,11 @@ async function restoreSnapshotEntries_ACU(snapshot: AgentWorldbookControlSnapsho
         });
       }
       if (patches.length > 0) {
-        await setLorebookEntries_ACU(normalizedBookName, patches);
-        const patchedEntriesByUid = new Map((await getLorebookEntries_ACU(normalizedBookName) || []).map(entry => [String(entry?.uid), entry]));
+        assertCurrent();
+        await (options.required ? setLorebookEntriesRequired_ACU : setLorebookEntries_ACU)(normalizedBookName, patches);
+        assertCurrent();
+        const patchedEntriesByUid = new Map((await readEntries(normalizedBookName) || []).map(entry => [String(entry?.uid), entry]));
+        assertCurrent();
         for (const patch of patches) {
           const currentEntry = patchedEntriesByUid.get(String(patch.uid));
           const keysMatch = JSON.stringify(currentEntry?.keys || []) === JSON.stringify(patch.keys || []);
@@ -1017,6 +1029,8 @@ async function restoreSnapshotEntries_ACU(snapshot: AgentWorldbookControlSnapsho
         }
       }
     } catch (error) {
+      assertCurrent();
+      if (['aborted', 'scope_changed'].includes(classifyLorebookReadError_ACU(error))) throw error;
       logWarn_ACU(`[Agent世界书] 恢复世界书条目失败：${normalizedBookName}`, error);
       const failedUpdates = currentEntriesRead
         ? patches.map(patch => ({ bookName: normalizedBookName, uid: patch.uid }))
@@ -1029,6 +1043,68 @@ async function restoreSnapshotEntries_ACU(snapshot: AgentWorldbookControlSnapsho
   }
 
   return { restored, skipped, failed, report };
+}
+
+export async function recoverAgentWorldbookAfterFailure_ACU(error: unknown, options: {
+  phase: string;
+  assertCurrent: () => void;
+  reportWarning?: (text: string) => void;
+  expectedRevision?: number;
+}): Promise<void> {
+  const { assertCurrent } = options;
+  const expectedRevision = options.expectedRevision ?? getAgentWorldbookRuntimeRevision_ACU();
+  const supersededError = new Error('AgentWorldbookConfigurationChanged');
+  const assertRecoveryCurrent = () => {
+    assertCurrent();
+    if (expectedRevision !== getAgentWorldbookRuntimeRevision_ACU()) throw supersededError;
+  };
+  assertCurrent();
+  if (['aborted', 'scope_changed'].includes(classifyLorebookReadError_ACU(error))) throw error;
+  logError_ACU('[Agent世界书] 本轮处理失败，恢复原生世界书状态。', {
+    phase: options.phase, error: summarizeLorebookRuntimeError_ACU(error),
+  });
+  let incomplete = false;
+  let superseded = false;
+  try {
+    await runExclusiveAgentWorldbookOperation_ACU(async () => {
+      assertRecoveryCurrent();
+      setAgentWorldbookNativeFallback_ACU(true);
+      const state = await readAgentWorldbookStateFromWorldbooks_ACU();
+      assertRecoveryCurrent();
+      const snapshot = state.snapshot;
+      // 内存和兼容设置不能替代持久接管快照，也不能据此改写条目。
+      if (snapshot.active !== true) return;
+      const bookNames = await resolveAgentWorldbookScopeBookNames_ACU(state.control.worldbookScope);
+      assertRecoveryCurrent();
+      if (snapshot.selectionSignature !== buildWorldbookSelectionSignature_ACU(bookNames)) {
+        incomplete = true;
+        return;
+      }
+      const result = await restoreSnapshotEntries_ACU(snapshot, { assertCurrent: assertRecoveryCurrent, required: true });
+      assertRecoveryCurrent();
+      incomplete = result.skipped > 0 || result.failed > 0
+        || Object.values(snapshot.books).some(entries => entries.some(entry => entry.takeoverStatus === 'pending'));
+      setPlotAgentWorldbookSnapshot_ACU(snapshot);
+    });
+  } catch (recoveryError) {
+    assertCurrent();
+    superseded = recoveryError === supersededError;
+    if (['aborted', 'scope_changed'].includes(classifyLorebookReadError_ACU(recoveryError))) throw recoveryError;
+    incomplete = true;
+    logError_ACU('[Agent世界书] 原生条目恢复未完成，已保留持久快照。', {
+      phase: 'recover_native_state', error: superseded ? { category: 'configuration_changed' } : summarizeLorebookRuntimeError_ACU(recoveryError),
+    });
+  }
+  assertCurrent();
+  try {
+    options.reportWarning?.(superseded
+      ? 'Agent 世界书配置已变化，旧决策已丢弃，未覆盖新配置；普通剧情继续。'
+      : incomplete
+      ? 'Agent 世界书处理失败，部分原始状态未能恢复；已保留快照，请检查 Agent 世界书。普通剧情继续。'
+      : 'Agent 世界书处理失败，已按持久快照恢复原始状态；普通剧情继续。');
+  } catch {
+    // 通知失败不能改变 Agent 与剧情的隔离边界。
+  }
 }
 
 async function collectRecoveredPendingSnapshotUpdates_ACU(
@@ -1055,27 +1131,42 @@ async function collectRecoveredPendingSnapshotUpdates_ACU(
   return recovered;
 }
 
-export function writeFinalGenerationGreenlights_ACU(greenlights: unknown): Promise<boolean> {
-  return runExclusiveAgentWorldbookOperation_ACU(() => writeFinalGenerationGreenlightsExclusive_ACU(greenlights));
+/** 返回本轮完整选择是否已应用；状态已一致也算成功。 */
+export function writeFinalGenerationGreenlights_ACU(greenlights: unknown, options: {
+  assertCurrent?: () => void;
+  expectedRevision?: number;
+} = {}): Promise<boolean> {
+  const expectedRevision = options.expectedRevision ?? getAgentWorldbookRuntimeRevision_ACU();
+  return runExclusiveAgentWorldbookOperation_ACU(() => writeFinalGenerationGreenlightsExclusive_ACU(greenlights, {
+    assertCurrent: options.assertCurrent, expectedRevision,
+  }));
 }
 
-async function writeFinalGenerationGreenlightsExclusive_ACU(greenlights: unknown): Promise<boolean> {
-  let snapshot = getPlotAgentWorldbookSnapshot_ACU();
-  let snapshotUidSetByBook = buildSnapshotUidSetByBook_ACU(snapshot);
-  if (snapshotUidSetByBook.size === 0) {
-    // 内存快照可能因刷新页面/会话切换被清空，回退到持久账本快照重建后再判定。
-    // 刻意不用完整 refresh：其 comment 扫描与 merge 会把账本写入失败场景下的
-    // pending 条目调和成 applied 并污染内存缓存，破坏"账本未确认不消费绿灯"的恢复不变量。
-    const selectionSignature = buildWorldbookSelectionSignature_ACU(await resolveTakeoverBookNames_ACU());
-    snapshot = await readPlotAgentWorldbookStateSnapshotOnly_ACU(selectionSignature);
-    snapshotUidSetByBook = buildSnapshotUidSetByBook_ACU(snapshot);
-    if (snapshotUidSetByBook.size === 0) return false;
-  }
-
+async function writeFinalGenerationGreenlightsExclusive_ACU(greenlights: unknown, options: {
+  assertCurrent?: () => void;
+  expectedRevision: number;
+}): Promise<boolean> {
+  const isCurrent = () => {
+    options.assertCurrent?.();
+    return options.expectedRevision === getAgentWorldbookRuntimeRevision_ACU();
+  };
+  if (!isCurrent()) return false;
+  const state = await readAgentWorldbookStateFromWorldbooks_ACU();
+  if (!isCurrent()) return false;
+  const bookNames = await resolveAgentWorldbookScopeBookNames_ACU(state.control.worldbookScope);
+  if (!isCurrent()) return false;
+  const selectionSignature = buildWorldbookSelectionSignature_ACU(bookNames);
+  const snapshot = state.snapshot;
   const normalizedGreenlights = normalizeAgentWorldbookRefs_ACU(greenlights);
+  if (!Array.isArray(greenlights) || normalizedGreenlights.length !== greenlights.length) return false;
+  if (snapshot.active !== true || snapshot.selectionSignature !== selectionSignature) return false;
+  // pending 代表接管或恢复尚未确认，不能拿它推断本轮开关已完成。
+  if (Object.values(snapshot.books).some(entries => entries.some(entry => entry.takeoverStatus === 'pending'))) return false;
+  const snapshotUidSetByBook = buildSnapshotUidSetByBook_ACU(snapshot);
   const allowedKeySet = buildAllowedFinalGreenlightKeySet_ACU(normalizedGreenlights, snapshotUidSetByBook);
+  if (allowedKeySet.size !== normalizedGreenlights.length) return false;
 
-  const patchResult = await patchSnapshotEntries_ACU(snapshotUidSetByBook, (bookName, entry) => {
+  const buildPatch = (bookName: string, entry: Record<string, any>): Record<string, any> | null => {
     if (!hasValidWorldbookUid_ACU(entry?.uid)) return null;
     const isAllowed = allowedKeySet.has(buildFinalGreenlightKey_ACU(bookName, entry.uid));
     if (isAllowed) {
@@ -1095,9 +1186,43 @@ async function writeFinalGenerationGreenlightsExclusive_ACU(greenlights: unknown
     }
     if (entry.enabled === false) return null;
     return { uid: entry.uid, enabled: false };
-  }, { readContext: undefined });
+  };
 
-  return patchResult.patched > 0;
+  const patchesByBook = new Map<string, Record<string, any>[]>();
+  for (const [bookName, uidSet] of snapshotUidSetByBook) {
+    if (!isCurrent()) return false;
+    const selected = normalizedGreenlights.filter(ref => ref.bookName === bookName);
+    let entries: any[];
+    try {
+      entries = await getLorebookEntriesRequired_ACU(bookName);
+    } catch (error) {
+      if (!isCurrent()) return false;
+      if (classifyLorebookReadError_ACU(error) === 'lorebook_not_found' && selected.length === 0) continue;
+      throw error;
+    }
+    if (!isCurrent()) return false;
+    const controlledEntries = entries.filter(entry => uidSet.has(String(entry?.uid)));
+    const liveUids = new Set(controlledEntries.map(entry => String(entry.uid)));
+    if (selected.some(ref => !liveUids.has(String(ref.uid)))) return false;
+    if (controlledEntries.some(entry => {
+      const snapshotEntry = getSnapshotEntryForBookAndUid_ACU(snapshot, bookName, entry.uid);
+      return !snapshotEntry?.commentHash
+        || hasUnsupportedTakeoverMetaBlock_ACU(entry.comment)
+        || !doesTakeoverSnapshotCommentHashMatch_ACU(snapshotEntry.commentHash, String(entry.comment || ''));
+    })) return false;
+    const patches = controlledEntries.map(entry => buildPatch(bookName, entry)).filter(Boolean) as Record<string, any>[];
+    if (patches.length > 0) patchesByBook.set(bookName, patches);
+  }
+  for (const [bookName, patches] of patchesByBook) {
+    if (!isCurrent()) return false;
+    await setLorebookEntriesRequired_ACU(bookName, patches);
+    if (!isCurrent()) return false;
+    const confirmed = new Map((await getLorebookEntriesRequired_ACU(bookName)).map(entry => [String(entry?.uid), entry]));
+    if (!isCurrent()) return false;
+    if (patches.some(patch => Object.entries(patch).some(([key, value]) =>
+      key !== 'uid' && JSON.stringify(confirmed.get(String(patch.uid))?.[key]) !== JSON.stringify(value)))) return false;
+  }
+  return isCurrent();
 }
 
 export async function readFinalGenerationGreenlights_ACU(): Promise<AgentWorldbookFinalGreenlightRef_ACU[]> {

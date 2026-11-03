@@ -101,7 +101,7 @@ describe('resolveAgentWorldbookFilterAvailability_ACU', () => {
 
   it('agent 模式且世界书范围非空时 skillMetas 为空仍可用', async () => {
     vi.mocked(readAgentWorldbookControlFromWorldbooks_ACU).mockResolvedValue({
-      control: { mode: 'agent' },
+      control: { enabled: true, mode: 'agent' },
       source: 'worldbook',
       bookName: '角色A世界书',
       duplicateCount: 0,
@@ -123,7 +123,7 @@ describe('resolveAgentWorldbookFilterAvailability_ACU', () => {
 
   it('通过 request context 读取 Skill metadata，避免直接宿主读取', async () => {
     vi.mocked(readAgentWorldbookControlFromWorldbooks_ACU).mockResolvedValue({
-      control: { mode: 'agent' }, source: 'worldbook', bookName: '角色A世界书', duplicateCount: 0, writableBookName: '角色A世界书',
+      control: { enabled: true, mode: 'agent' }, source: 'worldbook', bookName: '角色A世界书', duplicateCount: 0, writableBookName: '角色A世界书',
     } as any);
     vi.mocked(resolveAgentWorldbookScopeBookNames_ACU).mockResolvedValue(['角色A世界书']);
     mockGetLorebookEntriesStrict.mockResolvedValue({
@@ -152,7 +152,7 @@ describe('resolveAgentWorldbookFilterAvailability_ACU', () => {
     vi.mocked(resolveAgentWorldbookScopeBookNames_ACU).mockReset();
     vi.mocked(resolveAgentWorldbookScopeBookNames_ACU).mockResolvedValue(['角色A世界书']);
     vi.mocked(readAgentWorldbookControlFromWorldbooks_ACU).mockResolvedValue({
-      control: { mode: 'agent' }, source: 'worldbook', bookName: '角色A世界书', duplicateCount: 0, writableBookName: '角色A世界书',
+      control: { enabled: true, mode: 'agent' }, source: 'worldbook', bookName: '角色A世界书', duplicateCount: 0, writableBookName: '角色A世界书',
     } as any);
     mockEntriesByBook.set('角色A世界书', [
       { uid: 1, comment: `条目正文\n\n${skillBlock}\n\n${takeoverBlock}`, enabled: true },

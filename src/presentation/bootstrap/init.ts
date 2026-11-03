@@ -19,6 +19,8 @@ import { consumeGenerationContextForEnded_ACU, currentChatFileIdentifier_ACU, di
 import { applyTemplateScopeForCurrentChat_ACU, loadSettings_ACU } from '../../service/settings/settings-service';
 import { resetScriptStateForNewChat_ACU } from '../../service/worldbook/injection-engine';
 import { resetPlotAgentWorldbookSessionSnapshot_ACU } from '../../service/agent/agent-worldbook-takeover';
+import { loadAgentWorldbookRuntimeControl_ACU } from '../../service/agent/agent-worldbook-config-meta';
+import { getAgentWorldbookRuntimeRevision_ACU } from '../../service/agent/agent-worldbook-runtime-state';
 import { captureCheckpointVaultForCurrentChat_ACU, installCheckpointDeleteGuard_ACU } from '../../service/chat/checkpoint-delete-guard';
 import { installMaterialCheckpointScheduler_ACU } from '../../service/continuation/agent/agent-checkpoint-scheduler';
 import { reloadStorageProvider, disposeStorageProvider, getRuntimeLifecycleEpoch_ACU, hydrateStorageProviderFromSnapshot_ACU } from '../../service/table/table-storage-strategy';
@@ -256,7 +258,7 @@ export   function mainInitialize_ACU() {
         }, 60_000);
 
         SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.CHAT_CHANGED, async (chatFileName: string) => {
-          ++autoFillChatEpoch;
+          const chatEpoch = ++autoFillChatEpoch;
           autoFillBodyGeneration = null;
           autoFillStopCandidateSeq = undefined;
           cancelPendingAutoFillEvent_ACU();
@@ -281,6 +283,7 @@ export   function mainInitialize_ACU() {
           }
 
           await resetScriptStateForNewChat_ACU(chatFileName, { reason: 'chat_changed' });
+          const agentRuntimeRevision = getAgentWorldbookRuntimeRevision_ACU();
 
           // [触发门控] generationGate 重置已搬到 service 层的 resetScriptStateForNewChat_ACU 中
 
@@ -288,6 +291,9 @@ export   function mainInitialize_ACU() {
           installSendIntentCaptureHooks_ACU();
 
           await loadPresetAndCleanCharacterData_ACU();
+          if (chatEpoch === autoFillChatEpoch) {
+            void loadAgentWorldbookRuntimeControl_ACU(agentRuntimeRevision);
+          }
 
           // [剧情推进] TavernHelper钩子：拦截直接的JS调用
           if (!(window as any).original_TavernHelper_generate_ACU) {
@@ -1151,7 +1157,11 @@ export   function mainInitialize_ACU() {
       const initWithChatId = async (chatId: string) => {
           logDebug_ACU(`ACU: Initializing with current chat on load: ${chatId}`);
           await resetScriptStateForNewChat_ACU(chatId, { reason: 'startup_restore' });
+          const agentRuntimeRevision = getAgentWorldbookRuntimeRevision_ACU();
           await loadPresetAndCleanCharacterData_ACU();
+          if (agentRuntimeRevision === getAgentWorldbookRuntimeRevision_ACU()) {
+            void loadAgentWorldbookRuntimeControl_ACU(agentRuntimeRevision);
+          }
           // 聊天消息投影由下方 refreshMergedDataAndNotifyWithUI_ACU 内部统一加载；
           // provisional bridge 恢复门直接读取宿主聊天，不依赖消息投影，这里不再重复全量拉取。
 

@@ -16,6 +16,7 @@ import { logDebug_ACU, logError_ACU } from '../../shared/utils';
 import { parseRandomTags_ACU, replaceRandomVariables_ACU, parseCalcTags_ACU, parseMaxTags_ACU, parseMinTags_ACU, replaceCalcVariables_ACU, replaceMaxVariables_ACU, replaceMinVariables_ACU, parseIfBlockRecursive_ACU, getLatestAIMessageContent_ACU, getLatestUserMessageContent_ACU, composeSeedMatchContent_ACU, replaceDbSqlVariables } from './template-vars';
 import { getPlotFromHistory_ACU, getWorldbookContentForPlot_ACU, getAgentControlledWorldbookEntriesForFinalPrompt_ACU } from './plot-runtime';
 import { ensurePlotAgentWorldbookSnapshotHydrated_ACU, isWorldbookTakeoverActive_ACU } from '../agent/agent-worldbook-takeover';
+import { isAgentWorldbookNativeFallback_ACU, isAgentWorldbookRuntimeEnabled_ACU } from '../agent/agent-worldbook-runtime-state';
 import { getZeroLayerPromptContext_ACU, runZeroLayerTemplatePass_ACU } from '../zero-layer/request-context';
 import type { ZeroLayerPlotCandidate_ACU } from '../zero-layer/model';
 import { injectZeroLayerFinalPrompts_ACU } from '../zero-layer/plot-prompt-injection';
@@ -256,8 +257,9 @@ export {
       return;
     }
     const finalGenerationGreenlights = Array.isArray(pendingFinalGenerationGreenlights_ACU) ? [...pendingFinalGenerationGreenlights_ACU] : [];
-    let shouldHandleAgentWorldbookFinalPrompt = !plotCandidate && (isWorldbookTakeoverActive_ACU() || finalGenerationGreenlights.length > 0);
-    if (!plotCandidate && !shouldHandleAgentWorldbookFinalPrompt) {
+    const agentWorldbookEnabled = isAgentWorldbookRuntimeEnabled_ACU() && !isAgentWorldbookNativeFallback_ACU();
+    let shouldHandleAgentWorldbookFinalPrompt = !plotCandidate && agentWorldbookEnabled && (isWorldbookTakeoverActive_ACU() || finalGenerationGreenlights.length > 0);
+    if (!plotCandidate && agentWorldbookEnabled && !shouldHandleAgentWorldbookFinalPrompt) {
       // 页面刷新后内存快照为空，接管可能仍在持久账本中活跃；水合一次后复判，
       // 否则冷启动首轮生成会跳过接管条目过滤。水合失败按未接管处理（内部已告警）。
       await ensurePlotAgentWorldbookSnapshotHydrated_ACU();

@@ -37,6 +37,9 @@ import {
 } from './agent-prompt-template';
 import { saveSettings_ACU } from '../settings/settings-service';
 import { runExclusiveAgentWorldbookOperation_ACU } from './agent-worldbook-operation-lock';
+import { getAgentWorldbookRuntimeRevision_ACU, setLoadedAgentWorldbookControl_ACU } from './agent-worldbook-runtime-state';
+import { logError_ACU } from '../../shared/utils';
+import { summarizeLorebookRuntimeError_ACU } from '../../shared/lorebook-read-error';
 
 export const AGENT_WORLDBOOK_CONFIG_COMMENT_ACU = 'TavernDB-ACU-AgentWorldbookConfig';
 
@@ -619,7 +622,11 @@ export async function readAgentWorldbookStateFromWorldbooks_ACU(readContext?: St
 }
 
 export async function readAgentWorldbookControlFromWorldbooks_ACU(readContext?: StrictLorebookReadContext_ACU): Promise<AgentWorldbookControlReadResult_ACU> {
+  const revision = getAgentWorldbookRuntimeRevision_ACU();
   const state = await readAgentWorldbookStateFromWorldbooks_ACU(readContext);
+  if (!readContext) {
+    setLoadedAgentWorldbookControl_ACU(state.source === 'worldbook' ? state.control : null, revision);
+  }
   return {
     control: state.control,
     source: state.source,
@@ -629,6 +636,23 @@ export async function readAgentWorldbookControlFromWorldbooks_ACU(readContext?: 
     writableBookName: state.writableBookName,
     reason: state.reason,
   };
+}
+
+/** 配置加载阶段读取功能开关；失败只归属 Agent，不影响聊天或剧情初始化。 */
+export async function loadAgentWorldbookRuntimeControl_ACU(
+  revision = getAgentWorldbookRuntimeRevision_ACU(),
+): Promise<void> {
+  await runExclusiveAgentWorldbookOperation_ACU(async () => {
+    if (revision !== getAgentWorldbookRuntimeRevision_ACU()) return;
+    try {
+      await readAgentWorldbookControlFromWorldbooks_ACU();
+    } catch (error) {
+      if (!setLoadedAgentWorldbookControl_ACU(null, revision)) return;
+      logError_ACU('[Agent世界书] 功能配置加载失败，本次不运行 Agent。', {
+        phase: 'load_control', error: summarizeLorebookRuntimeError_ACU(error) || { category: 'unknown' },
+      });
+    }
+  });
 }
 
 export async function writeAgentWorldbookStateToWorldbook_ACU(patch: {
@@ -822,7 +846,11 @@ export function writeAgentWorldbookControlToWorldbook_ACU(
 async function writeAgentWorldbookControlToWorldbookExclusive_ACU(
   controlPatch: Partial<AgentWorldbookControl_ACU>,
 ): Promise<AgentWorldbookControlWriteResult_ACU> {
+  const revision = getAgentWorldbookRuntimeRevision_ACU();
   const result = await writeAgentWorldbookStateToWorldbook_ACU({ control: controlPatch });
+  if (result.updated) {
+    setLoadedAgentWorldbookControl_ACU(result.control, revision, true);
+  }
   return {
     updated: result.updated,
     bookName: result.bookName,

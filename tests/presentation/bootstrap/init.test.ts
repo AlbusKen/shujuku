@@ -20,7 +20,7 @@ const m = vi.hoisted(() => ({
   gate: { lastUserMessageId: 7 as any, lastUserMessageText: 'stale', lastUserMessageAt: 1, lastUserSendIntentAt: 2, lastGeneration: { stale: true } as any, generationSeq: 0, activeGenerations: [] as any[] },
   resetTakeover: vi.fn(), dispose: vi.fn(), setData: vi.fn(), setTables: vi.fn(), setMessages: vi.fn(), setTotal: vi.fn(), setChat: vi.fn(),
   setChatMutationTimer: vi.fn(),
-  notify: vi.fn(), resetScript: vi.fn(), loadPreset: vi.fn(), loadMessages: vi.fn(), refresh: vi.fn(),
+  notify: vi.fn(), resetScript: vi.fn(), loadPreset: vi.fn(), loadAgentControl: vi.fn(), loadMessages: vi.fn(), refresh: vi.fn(),
   preload: vi.fn(), shouldRebuild: vi.fn(), rebuild: vi.fn(), restoreFlush: vi.fn(),
   // 切聊天向量预热门控：默认启用，保持既有 preload→rebuild/restore 编排语义。
   vectorPipelineEnabled: vi.fn(() => true),
@@ -98,6 +98,7 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
 vi.mock('../../../src/service/settings/settings-service', () => ({ applyTemplateScopeForCurrentChat_ACU: vi.fn(), loadSettings_ACU: vi.fn() }));
 vi.mock('../../../src/service/worldbook/injection-engine', () => ({ resetScriptStateForNewChat_ACU: m.resetScript }));
 vi.mock('../../../src/service/agent/agent-worldbook-takeover', () => ({ resetPlotAgentWorldbookSessionSnapshot_ACU: m.resetTakeover }));
+vi.mock('../../../src/service/agent/agent-worldbook-config-meta', () => ({ loadAgentWorldbookRuntimeControl_ACU: m.loadAgentControl }));
 vi.mock('../../../src/service/table/table-storage-strategy', () => ({ reloadStorageProvider: vi.fn(), disposeStorageProvider: m.dispose }));
 vi.mock('../../../src/service/table/storage-mode', () => ({ isSqliteMode: vi.fn(() => false) }));
 vi.mock('../../../src/service/worldbook/pipeline', () => ({ loadAllChatMessages_ACU: m.loadMessages }));
@@ -227,6 +228,7 @@ beforeEach(() => {
   m.skipIntercept.mockReturnValue(false);
   m.ensureSeed.mockResolvedValue(false);
   m.isQuiet.mockReturnValue(false);
+  m.loadAgentControl.mockResolvedValue(undefined);
   m.autoUpdate.mockResolvedValue(undefined);
   m.publicCompletionObserver.mockReset();
   m.handleNewMessage.mockResolvedValue(undefined);

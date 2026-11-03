@@ -711,6 +711,7 @@ export async function runAgentDecisionForPlot_ACU(params: {
   sharedContext: Record<string, any>;
   enabledTasks: any[];
   requireTaskPlan?: boolean;
+  requireCompleteDecision?: boolean;
 }): Promise<AgentDecisionResult_ACU> {
   const originalTasks = Array.isArray(params.enabledTasks) ? params.enabledTasks : [];
   const requestContext = params.sharedContext.requestContext as import('../runtime/plot-runtime/plot-request-context').PlotRequestContext_ACU | undefined;
@@ -760,7 +761,7 @@ export async function runAgentDecisionForPlot_ACU(params: {
       maxAiAttempts,
     })));
     requestContext?.assertCurrent();
-    if (requestContext) {
+    if (requestContext || params.requireCompleteDecision) {
       const rejected = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected');
       if (rejected) throw rejected.reason;
     }
@@ -782,7 +783,7 @@ export async function runAgentDecisionForPlot_ACU(params: {
       ? { plan: [] as AgentTaskPlanItem_ACU[], effectiveTasks: originalTasks }
       : normalizeTaskPlan_ACU(authority.parsed.taskPlan, agentDecidableTasks, userOrderedTasks);
     if (authority && params.requireTaskPlan !== false && normalizedPlan.reason) {
-      if (requestContext) throw new Error(normalizedPlan.reason);
+      if (requestContext || params.requireCompleteDecision) throw new Error(normalizedPlan.reason);
       return emptyDecision_ACU(originalTasks, normalizedPlan.reason);
     }
     const effectivePlan = normalizedPlan.reason
@@ -837,7 +838,7 @@ export async function runAgentDecisionForPlot_ACU(params: {
       effectiveTasks: effectivePlan.effectiveTasks,
     };
   } catch (error) {
-    if (requestContext) throw error;
+    if (requestContext || params.requireCompleteDecision) throw error;
     logWarn_ACU('[Agent决策] 决策失败，回退原剧情推进逻辑:', error);
     return emptyDecision_ACU(originalTasks, 'agent_decision_error');
   }

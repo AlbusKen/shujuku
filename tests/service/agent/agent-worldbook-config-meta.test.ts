@@ -71,6 +71,8 @@ import {
   AGENT_WORLDBOOK_CONFIG_COMMENT_ACU,
   deleteAgentWorldbookStateEntry_ACU,
   getAgentPromptTemplateDefaults_ACU,
+  loadAgentWorldbookRuntimeControl_ACU,
+  readAgentWorldbookControlFromWorldbooks_ACU,
   readAgentWorldbookStateFromWorldbooks_ACU,
   resolveAgentWorldbookScopeBookNames_ACU,
   setAgentPromptTemplateDefaults_ACU,
@@ -78,6 +80,12 @@ import {
   writeAgentWorldbookStateToWorldbook_ACU,
 } from '../../../src/service/agent/agent-worldbook-config-meta';
 import { resolveAgentWorldbookFilterAvailability_ACU } from '../../../src/service/agent/agent-worldbook-skill-meta';
+import {
+  getAgentWorldbookRuntimeRevision_ACU,
+  getLoadedAgentWorldbookControl_ACU,
+  isAgentWorldbookRuntimeEnabled_ACU,
+  resetAgentWorldbookRuntime_ACU,
+} from '../../../src/service/agent/agent-worldbook-runtime-state';
 
 function configEntry(content: unknown, uid: any = 'cfg', comment = AGENT_WORLDBOOK_CONFIG_COMMENT_ACU): any {
   return { uid, comment, enabled: false, keys: [], content: JSON.stringify(content) };
@@ -101,6 +109,7 @@ function activeScopeState(snapshotBooks: Record<string, any[]>, bookNames: strin
 describe('agent worldbook config/state meta', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetAgentWorldbookRuntime_ACU();
     mockEntriesByBook.clear();
     mockGetCharLorebooks.mockResolvedValue({ primary: '主世界书', additional: [] });
     mockGetCurrentCharacterWorldbookBinding.mockResolvedValue({
@@ -125,6 +134,82 @@ describe('agent worldbook config/state meta', () => {
     mockSettings.plotSettings = {};
     mockSaveSettings.mockReturnValue({ saved: true });
     vi.mocked(getCharLorebooks_ACU).mockResolvedValue({ primary: '主世界书', additional: [] } as any);
+  });
+
+  it('启动预加载只缓存世界书功能开关，不扫描 Skill 候选', async () => {
+    mockEntriesByBook.set('主世界书', [configEntry(activeScopeState({}))]);
+    expect(isAgentWorldbookRuntimeEnabled_ACU()).toBe(false);
+
+    await loadAgentWorldbookRuntimeControl_ACU();
+
+    expect(isAgentWorldbookRuntimeEnabled_ACU()).toBe(true);
+    expect(getLoadedAgentWorldbookControl_ACU()?.mode).toBe('agent');
+    expect(mockGetLorebookEntriesStrict).not.toHaveBeenCalled();
+    expect(mockSetEntries).not.toHaveBeenCalled();
+  });
+
+  it('配置保存成功立即刷新开关，并拒绝保存前启动的迟到读取', async () => {
+    mockEntriesByBook.set('主世界书', [configEntry(activeScopeState({}))]);
+    await loadAgentWorldbookRuntimeControl_ACU();
+    const oldEntries = structuredClone(mockEntriesByBook.get('主世界书')!);
+    let finishRead!: (entries: any[]) => void;
+    mockGetEntries.mockImplementationOnce(() => new Promise<any[]>(resolve => { finishRead = resolve; }));
+    const staleRead = readAgentWorldbookControlFromWorldbooks_ACU();
+    await vi.waitFor(() => expect(finishRead).toBeTypeOf('function'));
+
+    const saved = await writeAgentWorldbookControlToWorldbook_ACU({ mode: 'disabled' });
+    expect(saved.updated).toBe(true);
+    expect(isAgentWorldbookRuntimeEnabled_ACU()).toBe(false);
+    finishRead(oldEntries);
+    await staleRead;
+
+    expect(isAgentWorldbookRuntimeEnabled_ACU()).toBe(false);
+    expect(getLoadedAgentWorldbookControl_ACU()?.mode).toBe('disabled');
+  });
+
+  it('切换会话使在途配置读取失效，旧世界书结果不落缓存', async () => {
+    const oldEntries = [configEntry(activeScopeState({}))];
+    let finishRead!: (entries: any[]) => void;
+    mockGetEntries.mockImplementationOnce(() => new Promise<any[]>(resolve => { finishRead = resolve; }));
+    const loading = loadAgentWorldbookRuntimeControl_ACU();
+    await vi.waitFor(() => expect(finishRead).toBeTypeOf('function'));
+
+    resetAgentWorldbookRuntime_ACU();
+    finishRead(oldEntries);
+    await loading;
+
+    expect(isAgentWorldbookRuntimeEnabled_ACU()).toBe(false);
+    expect(getLoadedAgentWorldbookControl_ACU()).toBeNull();
+  });
+
+  it('已失效的预加载不再读取世界书', async () => {
+    const oldRevision = getAgentWorldbookRuntimeRevision_ACU();
+    resetAgentWorldbookRuntime_ACU();
+
+    await loadAgentWorldbookRuntimeControl_ACU(oldRevision);
+
+    expect(mockGetEntries).not.toHaveBeenCalled();
+    expect(isAgentWorldbookRuntimeEnabled_ACU()).toBe(false);
+  });
+
+  it('预加载读取失败仅关闭 Agent，不抛给聊天初始化', async () => {
+    mockGetEntries.mockRejectedValueOnce(new Error('host read failed'));
+
+    await expect(loadAgentWorldbookRuntimeControl_ACU()).resolves.toBeUndefined();
+
+    expect(isAgentWorldbookRuntimeEnabled_ACU()).toBe(false);
+    expect(mockSetEntries).not.toHaveBeenCalled();
+  });
+
+  it('持久配置关闭时可用性检查不读取候选目录', async () => {
+    const state = activeScopeState({});
+    state.control.mode = 'disabled';
+    mockEntriesByBook.set('主世界书', [configEntry(state)]);
+
+    const result = await resolveAgentWorldbookFilterAvailability_ACU();
+
+    expect(result).toMatchObject({ available: false, reason: 'not_agent_mode', bookNames: [], skillMetas: [] });
+    expect(mockGetLorebookEntriesStrict).not.toHaveBeenCalled();
   });
 
   it('reads legacy version 1 config as control with inactive snapshot', async () => {
