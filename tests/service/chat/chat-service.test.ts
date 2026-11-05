@@ -49,6 +49,14 @@ vi.mock('../../../src/data/gateways/chat-gateway', () => ({
   getChatLength_ACU: vi.fn(() => 0),
   getLastMessageIndex_ACU: vi.fn(() => -1),
   saveChatToHost_ACU: mockSaveChatToHost,
+
+  saveChatToHostCoalesced_ACU: mockSaveChatToHost,
+
+  openChatSaveCoalescing_ACU: vi.fn(),
+
+  closeChatSaveCoalescing_ACU: vi.fn(),
+
+  forceFlushChatSave_ACU: vi.fn(async () => {}),
   saveChatToHostStrict_ACU: mockSaveChatToHostStrict,
   stopGeneration_ACU: vi.fn(),
   deleteLastMessage_ACU: vi.fn(),

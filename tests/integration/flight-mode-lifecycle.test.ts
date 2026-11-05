@@ -15,6 +15,14 @@ const h = vi.hoisted(() => ({
 vi.mock('../../src/data/gateways/chat-gateway', () => ({
   getChatArray_ACU: () => h.chat,
   saveChatToHost_ACU: h.save,
+
+  saveChatToHostCoalesced_ACU: h.save,
+
+  openChatSaveCoalescing_ACU: vi.fn(),
+
+  closeChatSaveCoalescing_ACU: vi.fn(),
+
+  forceFlushChatSave_ACU: vi.fn(async () => {}),
   saveChatToHostStrict_ACU: h.strictSave,
 }));
 vi.mock('../../src/data/storage/chat-history', () => ({

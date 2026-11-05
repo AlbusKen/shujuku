@@ -35,7 +35,7 @@ import { logAutoFillSkip_ACU, logContentOptimizationSkip_ACU } from '../../share
 import { markPlotIntercept_ACU, shouldSkipPlotIntercept_ACU } from '../../service/plot/plot-logic';
 import { orchestrateTavernHelperHook_ACU, orchestrateAfterCommandsStrategy1_ACU, orchestrateAfterCommandsStrategy2_ACU } from '../../service/plot/plot-orchestrator';
 import { flushPlotPendingSave_ACU } from '../../service/runtime/plot-runtime/plot-history-preset';
-import { refreshMessageBlock_ACU, saveChatToHostStrict_ACU } from '../../service/chat/chat-service';
+import { forceFlushChatSave_ACU, refreshMessageBlock_ACU, saveChatToHostStrict_ACU } from '../../service/chat/chat-service';
 import { beginHostGenerationUi_ACU, getSendTextareaValue_ACU, setSendTextareaValue_ACU, type HostInputWriteFailure_ACU } from '../../shared/host-input';
 import { cancelPendingContentOptimizationEvent_ACU, captureContentOptimizationEventScope_ACU, handleContentOptimizationEvent_ACU } from '../triggers/settings-ui-sync/settings-ui-connect';
 import { cancelPendingAutoFillEvent_ACU, captureAutoFillEventScope_ACU, triggerAutomaticUpdateIfNeeded_ACU } from '../triggers/settings-ui-sync/settings-ui-trigger';
@@ -171,6 +171,9 @@ export   function mainInitialize_ACU() {
       // S0-4：注册插件保存后的 checkpoint 保管库同步（删楼恢复的影子基线）。
       installCheckpointDeleteGuard_ACU();
       installMaterialCheckpointScheduler_ACU();
+      // 存盘合并兜底：页面卸载时尽力把延迟脏改动补存一次（forceFlush 永不抛；
+      // 异步补存在卸载窗口内未必能送达服务器，尽力而为）。
+      window.addEventListener('pagehide', () => { void forceFlushChatSave_ACU(); });
       // Register the bridge before generation events are subscribed. Runtime
       // migration remains page-owned so no chat persistence is touched at startup.
       getContinuationRuntime_ACU();
@@ -258,6 +261,11 @@ export   function mainInitialize_ACU() {
         }, 60_000);
 
         SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.CHAT_CHANGED, async (chatFileName: string) => {
+          // 存盘合并兜底冲洗：必须在任何旧聊天引用被替换前跑，尽力而为，不 await、不抛。
+          // ①填表运行中途切聊天时，运行窗口 finally 的冲洗会落在新聊天之后、或还没跑，
+          //   旧聊天未冲洗的脏只有换底前这一次机会；②宿主切聊天是否先保存旧聊天未经验证，
+          //   不依赖该假设；③forceFlush 无脏=同步 no-op，常态切聊天成本为零，不造成每次切换多存一遍。
+          void forceFlushChatSave_ACU();
           const chatEpoch = ++autoFillChatEpoch;
           autoFillBodyGeneration = null;
           autoFillStopCandidateSeq = undefined;

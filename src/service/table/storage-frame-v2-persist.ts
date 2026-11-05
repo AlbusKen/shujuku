@@ -1,4 +1,4 @@
-import { getChatArray_ACU, saveChatToHost_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
+import { getChatArray_ACU, saveChatToHost_ACU, saveChatToHostCoalesced_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { assertTableFillRequestCurrent_ACU, type TableFillRequestGuard_ACU } from './table-fill-request-guard';
 import { beginMaterialCheckpointSync_ACU, MATERIAL_CHECKPOINT_FIELDS_ACU } from '../chat/material-checkpoint-sync';
 import { advanceProvisionalBridgeCommitProgress_ACU, authorizeManualCatchUpBucketWrite_ACU, readActiveProvisionalBridge_ACU } from './manual-catch-up-provisional-bridge';
@@ -2825,7 +2825,8 @@ async function persistTableMutationLogV2Core_ACU(
       await saveChatToHostStrict_ACU(shouldCheckpoint || temporaryBaselineUpgrade
         ? { verifyFields: [{ messageIndex: target.index, field: 'TavernDB_ACU_IsolatedData' }] } : {});
     } else {
-      await saveChatToHost_ACU();
+      // 自动填表热路径：经合并调度器存盘（运行窗口内延迟+尾随补存，窗口外行为与直接存盘等价）。
+      await saveChatToHostCoalesced_ACU();
     }
     assertTableFillRequestCurrent_ACU(options, target.index);
     if (!fieldsIntact()) throw new Error('table mutation save readback conflict: chat, floor identity or private fields changed.');

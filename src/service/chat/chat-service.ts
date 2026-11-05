@@ -12,6 +12,7 @@ export {
     getLastMessageIndex_ACU,
     saveChatToHost_ACU,
     saveChatToHostStrict_ACU,
+    forceFlushChatSave_ACU,
     stopGeneration_ACU,
     deleteLastMessage_ACU,
     setChatMessages_ACU,
