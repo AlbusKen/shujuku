@@ -72,6 +72,14 @@ vi.mock('../../../src/service/chat/chat-service', () => ({
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
   getChatArray_ACU: () => h.chat,
   saveChatToHost_ACU: (...args: any[]) => h.save(...args),
+
+  saveChatToHostCoalesced_ACU: (...args: any[]) => h.save(...args),
+
+  openChatSaveCoalescing_ACU: vi.fn(),
+
+  closeChatSaveCoalescing_ACU: vi.fn(),
+
+  forceFlushChatSave_ACU: vi.fn(async () => {}),
   saveChatToHostStrict_ACU: (...args: any[]) => h.saveStrict(...args),
 }));
 
