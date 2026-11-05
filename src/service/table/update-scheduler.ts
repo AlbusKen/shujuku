@@ -11,6 +11,7 @@ import { startRuntimePerformanceSpan_ACU } from '../../shared/runtime-performanc
 import { logAutoFillSkip_ACU, logAutoFillStage_ACU } from '../../shared/trigger-diagnostics';
 import { getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { getLatestV2FullCheckpointMessageIndex_ACU, resolveTableHistoryStatesFromChat_ACU } from './table-history';
+import { isNonFillAiFloor_ACU, selectFillEligibleIndices_ACU } from '../runtime/message-handler';
 import type { TableUpdatePostCommitWarning_ACU } from './update-orchestrator';
 
 export interface TableUpdateItem {
@@ -95,6 +96,11 @@ export function buildAutoUpdatePlan_ACU(
         .filter((index: number) => index !== -1);
 
     const totalAiMessages = allAiMessageIndices.length;
+    // 可填楼集合整份计划只算一次，各表只查集合；下标已按 !is_user 过滤，不再重复读取 is_user。
+    const fillEligibleIndices = logicalHistory
+        ? null
+        : new Set(allAiMessageIndices.filter(index => !isNonFillAiFloor_ACU(liveChat[index])));
+    const isFillEligibleIndex = (index: number): boolean => fillEligibleIndices?.has(index) ?? false;
 
     // 统一的全局默认参数
     const globalFrequency = settings.autoUpdateFrequency || 1;
@@ -124,48 +130,30 @@ export function buildAutoUpdatePlan_ACU(
         const history = historyBySheetKey.get(sheetKey);
         const lastUpdatedAiFloor = history?.lastCompletedAiFloor ?? 0;
 
-        // 计算未记录楼层数
-        const effectiveUnrecordedFloors = Math.max(0, (totalAiMessages - skipFloors) - lastUpdatedAiFloor);
+        // 待填楼层：物理模式只取可填楼（排除工具楼与旁白），skip 也只数可填楼；前沿仍是 !is_user 序号。
+        // 逻辑模式的序列由 Timeline 提供，系统楼已不占 AI 序号，沿用原公式。
+        // 历史补填范围 = 完整待更新缺口（不与 contextDepth 求交）：前沿为 0 时必须能从第 1 楼补到当前楼。
+        const indicesToUpdate = logicalHistory
+            ? (skipFloors > 0 ? allAiMessageIndices.slice(0, -skipFloors) : allAiMessageIndices).slice(lastUpdatedAiFloor)
+            : selectFillEligibleIndices_ACU(liveChat, allAiMessageIndices, lastUpdatedAiFloor, skipFloors, isFillEligibleIndex);
+        const effectiveUnrecordedFloors = indicesToUpdate.length;
 
         logDebug_ACU(`[Trigger Check] Table: ${table.name}, TotalAI: ${totalAiMessages}, Skip: ${skipFloors}, LastUpdated: ${lastUpdatedAiFloor}, Unrecorded: ${effectiveUnrecordedFloors}, Freq: ${frequency}`);
 
         // updateFrequency=0：该表不参与自动更新
         if (frequency > 0 && effectiveUnrecordedFloors >= frequency && threshold > 0) {
-            const effectiveAiIndices = skipFloors > 0
-                ? allAiMessageIndices.slice(0, -skipFloors)
-                : allAiMessageIndices;
-
-            const startIndexInAiArray = lastUpdatedAiFloor;
-
-            logDebug_ACU(`[Trigger Check] EffIndicesLen: ${effectiveAiIndices.length}, StartIndex: ${startIndexInAiArray}`);
-
-            if (startIndexInAiArray < effectiveAiIndices.length) {
-                const unupdatedAiIndices = effectiveAiIndices.slice(startIndexInAiArray);
-                const contextScopeIndices = effectiveAiIndices.slice(-threshold);
-
-                logDebug_ACU(`[Trigger Check] Unupdated: ${unupdatedAiIndices.length}, ContextScope: ${contextScopeIndices.length}`);
-
-                // 历史补填范围 = 完整待更新缺口（不再与 contextDepth 求交）。
-                // 计划 §5.6：新增表历史前沿为 0 时必须能从第 1 楼补到当前楼，
-                // 不能把 contextDepth（AI prompt 上下文窗口）当作历史补填范围。
-                const indicesToUpdate = unupdatedAiIndices;
-                const requiresBoundaryStaging = originalFullIndex >= 0
-                    && indicesToUpdate.length > 0
-                    && indicesToUpdate[0] < originalFullIndex;
-
-                if (indicesToUpdate.length > 0) {
-                    tablesToUpdate.push({
-                        sheetKey,
-                        sheetName: table.name,
-                        indices: indicesToUpdate,
-                        allIndices: indicesToUpdate,
-                        requiresBoundaryStaging,
-                        groupId,
-                        batchSize: (rawBatch === -1) ? (settings.updateBatchSize || 3) : ((rawBatch > 0) ? rawBatch : (settings.updateBatchSize || 3)),
-                        scheduleSignature: [groupId, threshold, frequency, skipFloors, rawBatch].join('|'),
-                    });
-                }
-            }
+            const requiresBoundaryStaging = originalFullIndex >= 0
+                && indicesToUpdate[0] < originalFullIndex;
+            tablesToUpdate.push({
+                sheetKey,
+                sheetName: table.name,
+                indices: indicesToUpdate,
+                allIndices: indicesToUpdate,
+                requiresBoundaryStaging,
+                groupId,
+                batchSize: (rawBatch === -1) ? (settings.updateBatchSize || 3) : ((rawBatch > 0) ? rawBatch : (settings.updateBatchSize || 3)),
+                scheduleSignature: [groupId, threshold, frequency, skipFloors, rawBatch].join('|'),
+            });
         }
     }
 

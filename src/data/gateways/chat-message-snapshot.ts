@@ -22,6 +22,15 @@ function swipeId_ACU(message: any): number {
   return typeof message?.swipe_id === 'number' ? message.swipe_id : 0;
 }
 
+/**
+ * TauriTavern 冷 swipe：非当前槽在内存中为 null 并带 tt_swipe_cold 标记，
+ * 服务器回读与落盘 JSONL 仍是完整正文（TT cold-swipes.js、docs/CurrentState/ChatPayload.md）。
+ * 该楼层的物理历史在内存中不完整，不能用于比对或指纹。
+ */
+export function hasUnloadedHostSwipes_ACU(message: unknown): boolean {
+  return !!message && typeof message === 'object' && !!(message as Record<string, unknown>).tt_swipe_cold;
+}
+
 export function captureAiMessageSnapshot_ACU(chat: any[], targetIndex: number): AiMessageSnapshot_ACU {
   let index = targetIndex;
   if (index < 0) {

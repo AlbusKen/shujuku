@@ -11,9 +11,11 @@
  * 出网只发生在这里，且只由 web-researcher 调用。所有 URL 先过域名黑名单（内网、酒馆自身、
  * 用户追加），所有响应都截断到设置上限，所有失败都以文本结果返回而不是抛错——
  * 子代理要看到失败原因才能换词重搜，而不是让整次派工崩掉。
+ * TauriTavern 只提供 `/api/search/searxng`；其余转发路径在 TT 上直接返回不可用原因，不发请求。
  */
 
 import { getHostRequestHeaders_ACU } from '../../../data/gateways/ai-gateway';
+import { isTauriTavernHost_ACU } from '../../../shared/host-detect';
 import type { ContinuationWebResearchSettings_ACU, ContinuationWebSearchProvider_ACU } from '../model';
 import type { AgentWebRefSource_ACU, AgentWebRefStatus_ACU } from './agent-model';
 
@@ -35,6 +37,8 @@ const SEARCH_RESULT_LIMIT_ACU = 8;
 const ENCYCLOPEDIA_CANDIDATE_LIMIT_ACU = 6;
 /** 百度词条卡片 abstract 请求长度上限（该接口参数）。 */
 const BAIDU_ABSTRACT_LENGTH_ACU = 3000;
+/** TT 没有 /api/search/visit 时返回给子代理的原因。 */
+const TT_VISIT_UNSUPPORTED_REASON_ACU = '当前宿主（TauriTavern）未提供酒馆服务器的 /api/search/visit 转发接口，网页抓取不可用；请改用 SearXNG 检索或维基/萌娘百科';
 
 const MEDIAWIKI_ENDPOINTS_ACU: Record<Exclude<AgentEncyclopediaSource_ACU, 'baidu'>, { api: string; page: string }> = {
   moegirl: { api: 'https://zh.moegirl.org.cn/api.php', page: 'https://zh.moegirl.org.cn/' },
@@ -219,6 +223,7 @@ export class AgentWebClient_ACU {
    * html=false 原样透传任意 content-type（百度 openapi 的 JSON 就靠这个）。
    */
   private async visitViaHost_ACU(url: string, html: boolean): Promise<{ ok: true; text: string } | { ok: false; reason: string }> {
+    if (isTauriTavernHost_ACU()) return { ok: false, reason: TT_VISIT_UNSUPPORTED_REASON_ACU };
     try {
       const response = await this.fetchDirect_ACU('/api/search/visit', {
         method: 'POST',
@@ -382,6 +387,9 @@ export class AgentWebClient_ACU {
   }
 
   private async searchViaHostProvider_ACU(provider: 'serper' | 'tavily', query: string): Promise<{ hits: AgentWebSearchHit_ACU[]; note: string }> {
+    if (isTauriTavernHost_ACU()) {
+      return { hits: [], note: `${provider} 需要酒馆服务器的 /api/search/${provider} 接口，当前宿主（TauriTavern）未提供；请改用 SearXNG` };
+    }
     try {
       const response = await this.fetchDirect_ACU(`/api/search/${provider}`, {
         method: 'POST',

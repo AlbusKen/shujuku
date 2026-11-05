@@ -681,7 +681,8 @@ export async function migrateLegacyStorageToV2OnLoad_ACU(
           cleanupLegacyFieldsAfterV2Write_ACU(keepV2Chat, options.isolationKey, options.isolationConfig);
           const keepV2ScopeError = getLegacyMigrationScopeChangeError_ACU(scopeSnapshot);
           if (keepV2ScopeError) return { migrated: false, mixedDecision, error: keepV2ScopeError };
-          const chatBeforeKeepV2 = deepClone_ACU(chat);
+          // 修改全在 keepV2Chat 深拷贝上，原消息对象未被改动；回滚只需保留原引用，不再深拷贝整聊天。
+          const chatBeforeKeepV2 = chat.slice();
           chat.splice(0, chat.length, ...keepV2Chat);
           try {
             await saveChatToHostStrict_ACU();
@@ -845,10 +846,12 @@ export async function migrateLegacyStorageToV2OnLoad_ACU(
     return { migrated: false, error: scopeChangeError };
   }
 
-  const originalChat = deepClone_ACU(chat);
+  // 修改全在 candidateChat 深拷贝上，原消息对象未被改动；回滚只需保留原引用，不再深拷贝整聊天。
+  const originalChat = chat.slice();
   chat.splice(0, chat.length, ...candidateChat);
   try {
-    await saveChatToHostStrict_ACU();
+    // 迁移写入新的 full checkpoint 并清理 legacy 字段，落盘后回读目标楼确认。
+    await saveChatToHostStrict_ACU({ verifyFields: [{ messageIndex: target.index, field: 'TavernDB_ACU_IsolatedData' }] });
   } catch (error) {
     chat.splice(0, chat.length, ...originalChat);
     return { migrated: false, error: `legacy migration save failed: ${error instanceof Error ? error.message : String(error)}` };

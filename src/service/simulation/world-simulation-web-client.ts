@@ -1,4 +1,5 @@
 import { getHostRequestHeaders_ACU } from '../../data/gateways/ai-gateway';
+import { isTauriTavernHost_ACU } from '../../shared/host-detect';
 import { WORLD_SIMULATION_WEB_PROVIDERS_ACU, type WorldSimulationWebProvider_ACU, type WorldSimulationWebResearchSettings_ACU } from './model';
 
 export type WorldSimulationEncyclopediaSource_ACU = 'wikipedia_zh' | 'wikipedia_en' | 'moegirl';
@@ -33,6 +34,8 @@ export class WorldSimulationWebClient_ACU {
     try { return await this.fetcher(input, { ...init, signal: controller.signal }); } finally { clearTimeout(timer); }
   }
   private async visit_ACU(url: string): Promise<{ ok: true; text: string } | { ok: false; note: string }> {
+    // TauriTavern 只提供 /api/search/searxng，其余转发路径直接报告宿主不支持。
+    if (isTauriTavernHost_ACU()) return { ok: false, note: 'host-unsupported:/api/search/visit' };
     try { const response = await this.fetch_ACU('/api/search/visit', { method: 'POST', headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' }, body: JSON.stringify({ url, html: true }) }); return response.ok ? { ok: true, text: await response.text() } : { ok: false, note: `http-${response.status}` }; } catch (error) { return { ok: false, note: error instanceof Error ? error.message : String(error) }; }
   }
   async searchEncyclopedia(source: WorldSimulationEncyclopediaSource_ACU, query: string): Promise<{ hits: WorldSimulationWebHit_ACU[]; note: string }> {
@@ -62,6 +65,7 @@ export class WorldSimulationWebClient_ACU {
     }
     const endpoint = settings.searchProvider === 'searxng' ? '/api/search/searxng' : `/api/search/${settings.searchProvider}`;
     if (settings.searchProvider === 'searxng' && !settings.searxngBaseUrl.trim()) return { hits: [], note: 'searxng-unconfigured' };
+    if (settings.searchProvider !== 'searxng' && isTauriTavernHost_ACU()) return { hits: [], note: `host-unsupported:${endpoint}` };
     try {
       const response = await this.fetch_ACU(endpoint, { method: 'POST', headers: { ...getHostRequestHeaders_ACU(), 'Content-Type': 'application/json' }, body: JSON.stringify(settings.searchProvider === 'searxng' ? { baseUrl: settings.searxngBaseUrl.trim(), query: trimmed } : { query: trimmed }) });
       if (!response.ok) return { hits: [], note: `http-${response.status}` };

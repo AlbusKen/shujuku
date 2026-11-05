@@ -81,6 +81,49 @@ export function countAiMessages_ACU(liveChat: any[]): number {
     return count;
 }
 
+/**
+ * 宿主函数调用插入的工具楼：ST `tool-calling.js` 的 saveFunctionToolInvocations 写入，TT 按同一形态识别。
+ */
+export function isToolInvocationFloor_ACU(message: any): boolean {
+    return !!message && typeof message === 'object'
+        && message.is_system === true
+        && message.is_user !== true
+        && Array.isArray(message.extra?.tool_invocations);
+}
+
+/** 可填表的 AI 回复：AI 楼层且不是工具楼。存储序号仍按 !is_user 计数，本判定只用于调度与填表目标。 */
+export function isFillEligibleAiMessage_ACU(message: any): boolean {
+    return isAiMessage_ACU(message) && !isToolInvocationFloor_ACU(message);
+}
+
+/**
+ * 已知为非用户楼（来自 !is_user 序列）时，判断它是否为旁白或工具楼；不再读取 is_user。
+ * 调度按 !is_user 序列批量建可填楼集合时使用，保持聊天层读取线性。
+ */
+export function isNonFillAiFloor_ACU(message: any): boolean {
+    if (!message || typeof message !== 'object') return true;
+    if (message.extra?.type === 'narrator') return true;
+    return message.is_system === true && Array.isArray(message.extra?.tool_invocations);
+}
+
+/**
+ * 从 !is_user 物理下标序列中，取第 fromOrdinal 个之后的可填楼，再从尾部去掉 skipFloors 个可填楼。
+ * fromOrdinal 与存储前沿同口径（已完成的 !is_user 序号），因此前沿停在工具楼上也不会错位。
+ * 多表复用同一聊天时，调用方应预先算好可填楼集合并通过 isEligible 注入，避免按表重复读取消息。
+ */
+export function selectFillEligibleIndices_ACU(
+    chat: readonly any[],
+    aiMessageIndices: readonly number[],
+    fromOrdinal: number,
+    skipFloors: number,
+    isEligible: (index: number) => boolean = index => isFillEligibleAiMessage_ACU(chat[index]),
+): number[] {
+    const start = Math.max(0, Math.trunc(Number(fromOrdinal)) || 0);
+    const skip = Math.max(0, Math.trunc(Number(skipFloors)) || 0);
+    const eligible = aiMessageIndices.slice(start).filter(isEligible);
+    return skip > 0 ? eligible.slice(0, Math.max(0, eligible.length - skip)) : eligible;
+}
+
 export interface ResolveGeneratedAiOptions_ACU {
     liveChat: any[];
     intent: AutoFillIntent_ACU;

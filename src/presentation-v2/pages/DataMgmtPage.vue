@@ -312,7 +312,7 @@
             <div class="acu-v2-data-mgmt-page__form-stack">
               <AcuFormRow
                 label="保留数据层数"
-                hint="自动更新结束后，超过保留范围的旧楼层插件数据会被清理；不影响聊天正文。"
+                :hint="flow.retainRecentLayersHint.value"
               >
                 <AcuInput
                   type="number"

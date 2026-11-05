@@ -1,4 +1,5 @@
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
+import { hasUnloadedHostSwipes_ACU } from '../../data/gateways/chat-message-snapshot';
 import { getCurrentCharacterCardKey_ACU } from '../../data/gateways/host-state-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
 import {
@@ -46,6 +47,10 @@ export function physicalHistorySnapshot_ACU(chat: unknown[]): string {
   return JSON.stringify(chat.map(value => {
     if (!message_ACU(value) || typeof value.mes !== 'string') {
       throw new ZeroLayerError_ACU('source-changed', '物理历史包含无效消息。');
+    }
+    if (hasUnloadedHostSwipes_ACU(value)) {
+      throw new ZeroLayerError_ACU('host-cold-swipes',
+        '宿主冷 swipe 尚未加载部分楼层的 swipe 正文，无法确认物理历史；请在 TauriTavern 设置中关闭冷 swipe 并重载。');
     }
     const swipes = value.swipes;
     if (swipes !== undefined && (!Array.isArray(swipes) || swipes.some(body => typeof body !== 'string'))) {

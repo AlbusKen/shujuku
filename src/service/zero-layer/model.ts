@@ -202,7 +202,7 @@ export type ZeroLayerErrorCode_ACU = 'chat-unavailable' | 'carrier-unavailable'
   | 'scope-changed' | 'source-changed' | 'corrupt-data' | 'unsupported-version'
   | 'revision-conflict' | 'invalid-transition' | 'mode-disabled'
   | 'pending-turn' | 'persist-failed' | 'persist-unknown' | 'effects-pending' | 'migration-conflict'
-  | 'history-unavailable';
+  | 'history-unavailable' | 'host-cold-swipes';
 
 export class ZeroLayerError_ACU extends Error {
   constructor(readonly code: ZeroLayerErrorCode_ACU, message: string) {

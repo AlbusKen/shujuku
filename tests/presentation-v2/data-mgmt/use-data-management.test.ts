@@ -3,7 +3,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-async function loadFlow() {
+async function loadFlow(options: { chat?: any[] } = {}) {
   vi.resetModules();
   const settings: any = { dataIsolationCode: 'alpha', deleteStartFloor: 1, deleteEndFloor: null, retainRecentLayers: 100, charCardPrompt: [], storageMode: 'native' };
   const history = ['alpha', 'beta'];
@@ -36,7 +36,7 @@ async function loadFlow() {
     snapshotSettingsFields_ACU: vi.fn(() => ({})),
     restoreSettingsFields_ACU: vi.fn(),
   }));
-  vi.doMock('../../../src/service/chat/chat-service', () => ({ getChatArray_ACU: () => [{ is_user: false }], deleteLocalDataWithScope_ACU: deleteScoped, isFullRangeDeletionRequest_ACU: () => false, overrideLatestLayerWithTemplateCore_ACU: overrideLatest }));
+  vi.doMock('../../../src/service/chat/chat-service', () => ({ getChatArray_ACU: () => options.chat ?? [{ is_user: false }], deleteLocalDataWithScope_ACU: deleteScoped, isFullRangeDeletionRequest_ACU: () => false, overrideLatestLayerWithTemplateCore_ACU: overrideLatest }));
   vi.doMock('../../../src/service/table/table-service', () => ({ loadOrCreateJsonTableFromChatHistory_ACU: loadOrCreate }));
   vi.doMock('../../../src/service/worldbook/worldbook-cleanup', () => ({ cleanupWorldbookEntriesAfterDataDeletion_ACU: cleanupWorldbook }));
   vi.doMock('../../../src/service/worldbook/pipeline', () => ({ deleteAllGeneratedEntries_ACU: deleteGenerated, refreshMergedDataAndNotify_ACU: refreshMerged }));
@@ -206,6 +206,37 @@ describe('useDataManagement', () => {
     expect(d.refreshMerged).toHaveBeenCalledOnce();
     expect(d.cleanupWorldbook).not.toHaveBeenCalled();
   });
+  it('保留层数为 0 且 AI 楼层达到阈值时提示开启保留，否则显示默认说明', async () => {
+    const defaultHint = '自动更新结束后，超过保留范围的旧楼层插件数据会被清理；不影响聊天正文。';
+    const aiFloors = (count: number) => Array.from({ length: count }, () => ({ is_user: false }));
+
+    const below = await loadFlow({ chat: [{ is_user: true }, ...aiFloors(999)] });
+    below.settings.retainRecentLayers = 0;
+    below.flow.refresh();
+    expect(below.flow.aiMessageCount.value).toBe(999);
+    expect(below.flow.retainRecentLayersHint.value).toBe(defaultHint);
+
+    const atThreshold = await loadFlow({ chat: aiFloors(1000) });
+    atThreshold.settings.retainRecentLayers = 0;
+    atThreshold.flow.refresh();
+    expect(atThreshold.flow.retainRecentLayers.value).toBe(0);
+    expect(atThreshold.flow.retainRecentLayersHint.value).toContain('当前聊天已有 1000 个 AI 楼层');
+    expect(atThreshold.flow.retainRecentLayersHint.value).toContain('建议设为正数');
+
+    atThreshold.flow.retainRecentLayers.value = 100;
+    expect(atThreshold.flow.retainRecentLayersHint.value).toBe(defaultHint);
+    atThreshold.flow.retainRecentLayers.value = 0;
+    expect(atThreshold.flow.retainRecentLayersHint.value).toContain('当前聊天已有 1000 个 AI 楼层');
+
+    const above = await loadFlow({ chat: aiFloors(1500) });
+    above.flow.refresh();
+    expect(above.flow.retainRecentLayers.value).toBe(100);
+    expect(above.flow.retainRecentLayersHint.value).toBe(defaultHint);
+    above.flow.retainRecentLayers.value = 0;
+    expect(above.flow.retainRecentLayersHint.value).toContain('当前聊天已有 1500 个 AI 楼层');
+  });
+
+
 
 });
 

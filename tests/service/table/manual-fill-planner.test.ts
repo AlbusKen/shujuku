@@ -64,3 +64,37 @@ describe('planManualCatchUpWaves_ACU', () => {
     expect(second).toEqual(first);
   });
 });
+
+
+describe('planManualCatchUpWaves_ACU 可填楼过滤', () => {
+  // 序号 1..5 对应物理下标 [1,3,5,7,9]，其中 5 与 9 是工具楼
+  const indices = [1, 3, 5, 7, 9];
+  const tools = new Set([5, 9]);
+  const eligible = (index: number) => !tools.has(index);
+
+  it('wave 内剔除工具楼，序号不变，终点取最后一个可填楼', () => {
+    const plan = planManualCatchUpWaves_ACU(indices, [sheet('sheet_a', 0)], eligible);
+    expect(plan.targetAiFloor).toBe(5);
+    expect(plan.targetMessageIndex).toBe(7);
+    expect(plan.waves).toHaveLength(1);
+    expect(plan.waves[0]).toMatchObject({ startAiFloor: 1, endAiFloor: 5, messageIndices: [1, 3, 7] });
+  });
+
+  it('wave 全是工具楼时丢弃', () => {
+    const plan = planManualCatchUpWaves_ACU(indices, [sheet('sheet_a', 4)], eligible);
+    expect(plan.waves).toEqual([]);
+    expect(plan.targetMessageIndex).toBe(7);
+  });
+
+  it('前沿不同的表分 wave 后各自剔除工具楼', () => {
+    const plan = planManualCatchUpWaves_ACU(indices, [sheet('sheet_a', 0), sheet('sheet_b', 2)], eligible);
+    expect(plan.waves.map(wave => wave.messageIndices)).toEqual([[1, 3], [7]]);
+    expect(plan.waves.map(wave => wave.sheetKeys)).toEqual([['sheet_a'], ['sheet_a', 'sheet_b']]);
+  });
+
+  it('全部是工具楼时没有终点楼', () => {
+    const plan = planManualCatchUpWaves_ACU([5, 9], [sheet('sheet_a', 0)], eligible);
+    expect(plan.waves).toEqual([]);
+    expect(plan.targetMessageIndex).toBeNull();
+  });
+});

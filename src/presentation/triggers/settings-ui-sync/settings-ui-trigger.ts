@@ -22,6 +22,7 @@ import { executeAutoFillStagingGroups_ACU, processGroupedRuntimeChunk_ACU, refre
 import { isSqliteMode } from '../../../service/table/storage-mode';
 import { startRuntimePerformanceSpan_ACU } from '../../../shared/runtime-performance';
 import { logAutoFillSkip_ACU, logAutoFillStage_ACU, type AutoFillSkipContext_ACU } from '../../../shared/trigger-diagnostics';
+import { isFillEligibleAiMessage_ACU } from '../../../service/runtime/message-handler';
 
 function buildAutoUpdateProgressLabel_ACU(event: Partial<CardUpdateProgressEvent>): string {
     if (Number.isFinite(event.currentBatch) && Number.isFinite(event.totalBatches)) {
@@ -164,14 +165,15 @@ export function cancelPendingAutoFillEvent_ACU(): void {
       logDebug_ACU(`ACU Auto-Trigger: ${preCheck.reason} Skipping.`);
       logAutoFillSkip_ACU('preconditions_failed', {
         ...context,
-        aiFloorCount: liveChat?.filter((message: any) => !message.is_user).length || 0,
+        aiFloorCount: liveChat?.filter((message: any) => isFillEligibleAiMessage_ACU(message)).length || 0,
         inFlight: isAutoUpdatingCard_ACU,
         preconditionReason: preCheck.code,
       });
       return;
     }
 
-    const totalAiMessages = liveChat.filter(m => !m.is_user).length;
+    // 诊断日志与调度同口径：只计可填表的 AI 回复（排除工具楼与旁白）。
+    const totalAiMessages = liveChat.filter(m => isFillEligibleAiMessage_ACU(m)).length;
 
     // [重构] 调用 service 层构建更新计划
     const triggerIsolationKey = getCurrentIsolationKey_ACU();

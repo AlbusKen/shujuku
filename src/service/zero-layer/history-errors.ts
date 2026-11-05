@@ -37,7 +37,7 @@ export function zeroLayerHistoryFailure_ACU<T>(error: unknown): ZeroLayerHistory
         code = error.code; break;
       case 'chat-unavailable': code = 'loading'; break;
       case 'carrier-unavailable': code = 'not-ready'; break;
-      case 'source-changed': code = 'history-unavailable'; break;
+      case 'source-changed': case 'host-cold-swipes': code = 'history-unavailable'; break;
       case 'revision-conflict': code = 'snapshot-stale'; break;
     }
     message = `零层历史读取被拒绝（${code}）。`;

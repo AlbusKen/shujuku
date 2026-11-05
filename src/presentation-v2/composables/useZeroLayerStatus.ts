@@ -78,12 +78,14 @@ function projectStatus(source: ZeroLayerEnvelope_ACU | null): ZeroLayerStatusVie
 function failedStatus(error: unknown): ZeroLayerStatusView {
   const code = error instanceof ZeroLayerError_ACU ? error.code : 'storage-read-failed';
   const recovery = code === 'persist-unknown';
+  const coldSwipes = code === 'host-cold-swipes';
   const incompatible = ['source-changed', 'scope-changed', 'corrupt-data', 'unsupported-version',
-    'chat-unavailable', 'carrier-unavailable'].includes(code);
+    'chat-unavailable', 'carrier-unavailable', 'host-cold-swipes'].includes(code);
   return { status: recovery ? 'recovery-required' : incompatible ? 'incompatible' : 'storage-read-failed',
     intent: null, label: recovery ? '保存待确认' : incompatible ? '当前不可用' : '读取失败',
     detail: recovery ? '保存结果未知，开启意图也未确认。只读刷新不能解除门禁，请使用显式恢复入口。'
-      : incompatible ? `当前聊天身份、源历史或存档无法确认（${code}）；不会按默认关闭处理。`
+      : coldSwipes ? 'TauriTavern 冷 swipe 尚未加载部分楼层的 swipe 正文，无法确认源历史；请在 TT 设置中关闭冷 swipe 并重载。历史数据已保留。'
+        : incompatible ? `当前聊天身份、源历史或存档无法确认（${code}）；不会按默认关闭处理。`
         : '当前聊天存档读取失败，开启意图未知；可重试只读刷新，不会保存或重新生成。',
     revision: null, headTurnId: null };
 }

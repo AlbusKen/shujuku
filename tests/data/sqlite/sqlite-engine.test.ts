@@ -104,6 +104,20 @@ describe('SqliteEngine', () => {
       expect(logs).not.toContain('sensitive_suppressed_log');
       expect(logError_ACU).not.toHaveBeenCalled();
     });
+
+    it('重复 query 不泄漏 sql.js 栈（成功与报错路径）', () => {
+      const runtime = (engine as any).sqlJs;
+      expect(typeof runtime?.stackSave).toBe('function');
+      engine.run('CREATE TABLE test (id INTEGER);');
+      const before = runtime.stackSave();
+      for (let i = 0; i < 1000; i += 1) engine.query('SELECT COUNT(*) FROM test;');
+      expect(runtime.stackSave()).toBe(before);
+      for (let i = 0; i < 1000; i += 1) {
+        expect(() => engine.query('SELEC broken;', undefined, { suppressErrorLog: true })).toThrow();
+      }
+      expect(runtime.stackSave()).toBe(before);
+    });
+
   });
 
   // ═══════════════════════════════════════════════════════════════

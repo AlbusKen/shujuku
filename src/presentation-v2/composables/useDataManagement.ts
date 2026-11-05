@@ -62,6 +62,10 @@ function normalizeRetainRecentLayers(value: unknown): number {
   return Math.floor(n);
 }
 
+/** 保留层数为 0（不压缩）时，AI 楼层达到该数量即提示开启保留：回放与扫描成本随楼层线性增长。 */
+export const RETAIN_RECENT_LAYERS_HINT_THRESHOLD_ACU = 1000;
+const RETAIN_RECENT_LAYERS_DEFAULT_HINT_ACU = '自动更新结束后，超过保留范围的旧楼层插件数据会被清理；不影响聊天正文。';
+
 async function readFileText(file: File): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -163,6 +167,11 @@ export function useDataManagement() {
     if (end) return `到第 ${end} 个 AI 楼层结束`;
     return '全部 AI 楼层';
   });
+  const retainRecentLayersHint = computed(() => (
+    retainRecentLayers.value === 0 && aiMessageCount.value >= RETAIN_RECENT_LAYERS_HINT_THRESHOLD_ACU
+      ? `当前聊天已有 ${aiMessageCount.value} 个 AI 楼层，保留层数为 0 时不清理旧楼层数据，加载与回放会随楼层增长变慢；建议设为正数（如 100）。`
+      : RETAIN_RECENT_LAYERS_DEFAULT_HINT_ACU
+  ));
   const tableCount = computed(() =>
     currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object'
       ? Object.keys(currentJsonTableData_ACU).filter(key => key.startsWith('sheet_')).length
@@ -808,6 +817,7 @@ export function useDataManagement() {
     toggleDeleteSheetKey,
     clearDeleteSheetSelection,
     retainRecentLayers,
+    retainRecentLayersHint,
     rangeLabel,
     aiMessageCount,
     tableCount,

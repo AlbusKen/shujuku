@@ -28,6 +28,7 @@ import {
     type BatchUpdateProgressContext,
 } from '../../service/table/update-orchestrator';
 import { collectV2CheckpointFloorsFromChat_ACU } from '../../service/table/table-history';
+import { isNonFillAiFloor_ACU } from '../../service/runtime/message-handler';
 
 // ============================================================
 // UI 辅助函数
@@ -101,9 +102,11 @@ function buildLegacyManualRefillRangeLabel_ACU(): string {
             .map((msg: any, index: number) => msg && !msg.is_user ? { index, aiFloor: 0 } : null)
             .filter((item): item is { index: number; aiFloor: number } => item !== null);
         aiItems.forEach((item, index) => { item.aiFloor = index + 1; });
+        // 与手动重填同口径：跳过与层数只数可填楼，显示的楼层号仍是 !is_user 序号。
+        const fillItems = aiItems.filter(item => !isNonFillAiFloor_ACU(chat[item.index]));
         const skip = Number.isFinite(Number(settings_ACU.skipUpdateFloors)) ? Math.max(0, Math.floor(Number(settings_ACU.skipUpdateFloors))) : 0;
-        const manualDepth = Number.isFinite(Number(settings_ACU.manualUpdateContextDepth)) && Number(settings_ACU.manualUpdateContextDepth) > 0 ? Math.floor(Number(settings_ACU.manualUpdateContextDepth)) : aiItems.length;
-        const effectiveAiItems = skip > 0 ? aiItems.slice(0, -skip) : aiItems.slice();
+        const manualDepth = Number.isFinite(Number(settings_ACU.manualUpdateContextDepth)) && Number(settings_ACU.manualUpdateContextDepth) > 0 ? Math.floor(Number(settings_ACU.manualUpdateContextDepth)) : fillItems.length;
+        const effectiveAiItems = skip > 0 ? fillItems.slice(0, -skip) : fillItems.slice();
         const contextItems = manualDepth > 0 ? effectiveAiItems.slice(-manualDepth) : effectiveAiItems;
         if (!contextItems.length) return '暂无可重填 AI 楼层';
         return formatLegacyAiFloorRange_ACU(contextItems[0].aiFloor, contextItems[contextItems.length - 1].aiFloor);

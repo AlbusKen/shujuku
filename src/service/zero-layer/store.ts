@@ -11,6 +11,7 @@ import { notifyZeroLayerChanges_ACU } from './notifications';
 import { validateZeroLayerEnvelope_ACU, validateZeroLayerContinuationReceipt_ACU } from './validation';
 import type { ContinuationLogicalRef_ACU } from '../continuation/model';
 import { getTableDataFingerprint_ACU } from '../table/table-data-upgrade-audit';
+import { runChatWriteExclusiveWithTableWrites_ACU } from '../table/table-write-transaction';
 import { applyZeroLayerCommand_ACU, mergeZeroLayerEffectReceipt_ACU, type ZeroLayerCommand_ACU } from './store-command';
 import { assertBridgeSource_ACU } from './bridge-source';
 import { assertBridgeConfig_ACU } from './bridge-config';
@@ -422,7 +423,18 @@ export class ZeroLayerStore_ACU {
     });
   }
 
-  private async persist(
+  /** 载体写入、保存与 verify 回读整段与表格写事务互斥，避免两边交错改写聊天数组导致回读失配。 */
+  private persist(
+    context: ZeroLayerCarrierContext_ACU,
+    before: ZeroLayerEnvelope_ACU | null,
+    candidate: ZeroLayerEnvelope_ACU,
+    assignments?: PendingPersistence_ACU['assignments'],
+  ): Promise<ZeroLayerEnvelope_ACU> {
+    return runChatWriteExclusiveWithTableWrites_ACU(
+      () => this.persistUnderChatLock(context, before, candidate, assignments));
+  }
+
+  private async persistUnderChatLock(
     context: ZeroLayerCarrierContext_ACU,
     before: ZeroLayerEnvelope_ACU | null,
     candidate: ZeroLayerEnvelope_ACU,

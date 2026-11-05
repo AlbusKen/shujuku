@@ -884,8 +884,9 @@ export   function mainInitialize_ACU() {
               if (!message?.is_user) return;
               pendingVectorSend = null;
               // 宿主已保存并渲染用户楼层；外层 emit 传播取消，不会被监听器 catch 吞掉。
+              // TT 以绑定副本派发时由兜底监听器等待，取消由 GENERATE_AFTER_DATA 门阻断。
               await waitForVectorRecall(pending, String(message.mes || ''));
-            });
+            }, { listenerFallback: true });
           }
           if (SillyTavern_API_ACU.eventTypes.WORLDINFO_ENTRIES_LOADED) {
             installHostEventWaitGate_ACU(source, SillyTavern_API_ACU.eventTypes.WORLDINFO_ENTRIES_LOADED, async (lores: Record<string, any[]>) => {

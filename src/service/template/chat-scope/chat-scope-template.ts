@@ -198,7 +198,7 @@ import { normalizeIsolationCode_ACU } from '../../../shared/data-constants';
 
       let appliedFromLocalSnapshot = false;
       if (localEntry?.templateStr) {
-          persistTemplateScopeSelectionState_ACU(normalizedPresetName, {
+          await persistTemplateScopeSelectionState_ACU(normalizedPresetName, {
               source,
               updateGlobal: false,
               save: false,

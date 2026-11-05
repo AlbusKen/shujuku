@@ -754,18 +754,53 @@ describe('validateImportedTemplateObject_ACU', () => {
 
 // ═══ persistTemplateScopeSelectionState_ACU ═══
 describe('persistTemplateScopeSelectionState_ACU', () => {
-  it('updateGlobal=true 时调用 saveSettings', () => {
-    persistTemplateScopeSelectionState_ACU('预设A', { updateGlobal: true, save: true });
+  it('updateGlobal=true 时调用 saveSettings', async () => {
+    await persistTemplateScopeSelectionState_ACU('预设A', { updateGlobal: true, save: true });
     expect(saveSettings_ACU).toHaveBeenCalled();
   });
-  it('save=false 时不调用 saveSettings', () => {
+  it('save=false 时不调用 saveSettings', async () => {
     vi.mocked(saveSettings_ACU).mockClear();
-    persistTemplateScopeSelectionState_ACU('预设A', { save: false });
+    await persistTemplateScopeSelectionState_ACU('预设A', { save: false });
     expect(saveSettings_ACU).not.toHaveBeenCalled();
   });
-  it('返回规范化的预设名', () => {
-    const result = persistTemplateScopeSelectionState_ACU('  预设B  ');
-    expect(result).toBe('预设B');
+  it('返回规范化的预设名', async () => {
+    const result = await persistTemplateScopeSelectionState_ACU('  预设B  ');
+    expect(result.presetName).toBe('预设B');
+  });
+  it('设置保存失败时返回警告，不抛错', async () => {
+    vi.mocked(saveSettings_ACU).mockReturnValueOnce({ saved: false, storageType: 'memory', code: 'storage_error', error: '设置持久化失败。' } as any);
+    const result = await persistTemplateScopeSelectionState_ACU('预设A', { updateGlobal: true, save: true });
+    expect(result.saveWarning).toContain('设置持久化失败。');
+  });
+  it('等待聊天保存完成，失败时返回警告', async () => {
+    const gateway = await import('../../../src/data/gateways/chat-gateway');
+    const scope = await import('../../../src/service/template/chat-scope');
+    vi.mocked(scope.buildChatTemplateScopeStateFromCurrent_ACU).mockReturnValueOnce({ mode: 'chat_override' } as any);
+    let resolveSave: () => void = () => {};
+    vi.mocked(gateway.saveChatToHost_ACU).mockReturnValueOnce(new Promise<void>(resolve => { resolveSave = resolve; }) as any);
+    let settled = false;
+    const pending = persistTemplateScopeSelectionState_ACU('', { persistChatScope: true, templateSource: '{"sheet_0":{}}' })
+      .then(result => { settled = true; return result; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    resolveSave();
+    expect((await pending).saveWarning).toBe('');
+
+    vi.mocked(scope.buildChatTemplateScopeStateFromCurrent_ACU).mockReturnValueOnce({ mode: 'chat_override' } as any);
+    vi.mocked(gateway.saveChatToHost_ACU).mockRejectedValueOnce(new Error('host save failed'));
+    const failed = await persistTemplateScopeSelectionState_ACU('', { persistChatScope: true, templateSource: '{"sheet_0":{}}' });
+    expect(failed.saveWarning).toContain('当前聊天的模板选择未保存');
+  });
+  it('全局切换保存失败时 applyTemplateSnapshotToScope 仍成功并带 postCommitWarning', async () => {
+    mockChatState.current = [];
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValueOnce({
+      templateStr: '{"sheet_0":{}}',
+      templateObj: { sheet_0: {} },
+    } as any);
+    vi.mocked(saveSettings_ACU).mockReturnValueOnce({ saved: false, storageType: 'memory', code: 'settings_loading', warning: '设置仍在加载中' } as any);
+    const result: any = await applyTemplateSnapshotToScope_ACU('{"sheet_0":{}}', { scope: 'global' });
+    expect(result.saved).toBe(true);
+    expect(result.postCommitWarning).toContain('设置仍在加载中');
   });
 });
 

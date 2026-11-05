@@ -1,6 +1,7 @@
 import { getZeroLayerHostContext_ACU } from '../../service/zero-layer/host-generation';
 import { assertZeroLayerCarrier_ACU, captureZeroLayerCarrier_ACU,
   hasZeroLayerCarrierField_ACU } from '../../service/zero-layer/carrier-context';
+import { ZeroLayerError_ACU } from '../../service/zero-layer/model';
 import { ZeroLayerStore_ACU } from '../../service/zero-layer/store';
 import { showToastr_ACU } from '../theme/toast';
 
@@ -36,8 +37,13 @@ export function installZeroLayerRetirement_ACU(): void {
     if (timer !== null) clearTimeout(timer);
     timer = setTimeout(() => {
       timer = null;
-      void closeCurrent().catch(() => {
+      void closeCurrent().catch(error => {
         if (!active) return;
+        if (error instanceof ZeroLayerError_ACU && error.code === 'host-cold-swipes') {
+          // 载体未登记为已尝试；关闭冷 swipe 并重载后再次打开该聊天会重新关闭旧存档。
+          showToastr_ACU('warning', '零层旧存档所在聊天启用了 TauriTavern 冷 swipe，部分楼层的 swipe 尚未加载，旧存档关闭无法确认；历史数据已保留。请在 TT 设置中关闭冷 swipe 并重载后再打开此聊天。');
+          return;
+        }
         showToastr_ACU('warning', '零层功能已停用，但旧存档关闭未能确认；历史数据已保留，本次不会自动重试。');
       });
     }, 0);

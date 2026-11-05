@@ -4,10 +4,11 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const { mockSillyTavern, mockLogDebug, mockLogWarn } = vi.hoisted(() => ({
+const { mockSillyTavern, mockLogDebug, mockLogWarn, mockIsTauriTavernHost } = vi.hoisted(() => ({
   mockSillyTavern: {} as any,
   mockLogDebug: vi.fn(),
   mockLogWarn: vi.fn(),
+  mockIsTauriTavernHost: vi.fn(() => false),
 }));
 
 vi.mock('../../../src/shared/host-api', () => ({
@@ -24,6 +25,10 @@ vi.mock('../../../src/data/gateways/ai-gateway', () => ({
   getHostRequestHeaders_ACU: () => ({}),
 }));
 
+vi.mock('../../../src/shared/host-detect', () => ({
+  isTauriTavernHost_ACU: mockIsTauriTavernHost,
+}));
+
 import {
   getChatArray_ACU,
   getChatLength_ACU,
@@ -35,6 +40,7 @@ import {
   setChatMessages_ACU,
   emitMessageUpdated_ACU,
   listAllHostChatNames_ACU,
+  readChatFromHostStrict_ACU,
 } from '../../../src/data/gateways/chat-gateway';
 
 beforeEach(() => {
@@ -224,5 +230,103 @@ describe('emitMessageUpdated_ACU', () => {
     mockSillyTavern.eventSource = { emit };
     await emitMessageUpdated_ACU(3);
     expect(emit).toHaveBeenCalledWith('message_updated', 3);
+  });
+});
+
+describe('群聊回读 JSONL header', () => {
+  const header = { user_name: 'u', character_name: 'g', chat_metadata: { integrity: 'x' } };
+  const chat = [{ name: 'A', mes: '一' }, { name: 'B', mes: '二' }];
+  const request = vi.fn();
+  const respond = (persisted: any[]) => request.mockResolvedValue({ ok: true, json: async () => persisted });
+
+  beforeEach(() => {
+    Object.assign(mockSillyTavern, { chat, chatId: 'group-chat', groupId: 'group-1', characterId: undefined, characters: [] });
+    mockIsTauriTavernHost.mockReturnValue(false);
+    request.mockReset();
+    vi.stubGlobal('fetch', request);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('ST 首条带 chat_metadata 时剥离 header，并按群聊 id 请求', async () => {
+    respond([header, ...chat]);
+    expect(await readChatFromHostStrict_ACU()).toEqual(chat);
+    expect(request.mock.calls[0][0]).toBe('/api/chats/group/get');
+    expect(JSON.parse(request.mock.calls[0][1].body)).toEqual({ id: 'group-chat' });
+  });
+
+  it('ST 首条不带 chat_metadata 时保留首条消息', async () => {
+    respond([...chat]);
+    expect(await readChatFromHostStrict_ACU()).toEqual(chat);
+  });
+
+  it('TT 首条总是 header，即使不带 chat_metadata 也剥离', async () => {
+    mockIsTauriTavernHost.mockReturnValue(true);
+    respond([{ user_name: 'u' }, ...chat]);
+    expect(await readChatFromHostStrict_ACU()).toEqual(chat);
+  });
+
+  it('verify 回读群聊时 header 不再导致保存确认失败', async () => {
+    mockSillyTavern.saveChat = vi.fn().mockResolvedValue(undefined);
+    respond([header, ...chat]);
+    await expect(saveChatToHostStrict_ACU({ verify: true })).resolves.toBeUndefined();
+    expect(mockSillyTavern.saveChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('角色聊天仍固定剥离首行 header，不受宿主判断影响', async () => {
+    Object.assign(mockSillyTavern, { groupId: undefined, characterId: 0, characters: [{ name: 'Alice', avatar: 'alice.png' }] });
+    respond([{ user_name: 'u' }, ...chat]);
+    expect(await readChatFromHostStrict_ACU()).toEqual(chat);
+    expect(request.mock.calls[0][0]).toBe('/api/chats/get');
+    expect(mockIsTauriTavernHost).not.toHaveBeenCalled();
+  });
+});
+
+describe('保存后只回读校验指定楼层字段', () => {
+  const frame = { iso: { storageFrame: { version: 2, checkpoint: { kind: 'full' } } } };
+  const request = vi.fn();
+  const respond = (persisted: any[]) => request.mockResolvedValue({ ok: true, json: async () => [{ user_name: 'u' }, ...persisted] });
+  let chat: any[];
+
+  beforeEach(() => {
+    chat = [{ mes: '开场', TavernDB_ACU_IsolatedData: frame }, { mes: '二' }];
+    Object.assign(mockSillyTavern, {
+      chat, chatId: 'chat-a', groupId: undefined, characterId: 0,
+      characters: [{ name: 'Alice', avatar: 'alice.png' }], saveChat: vi.fn().mockResolvedValue(undefined),
+    });
+    request.mockReset();
+    vi.stubGlobal('fetch', request);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  const verifyFields = [{ messageIndex: 0, field: 'TavernDB_ACU_IsolatedData' }];
+
+  it('目标字段一致时放行，不比对其他楼层正文', async () => {
+    respond([{ mes: '开场', TavernDB_ACU_IsolatedData: structuredClone(frame) }, { mes: '服务器上的别的正文' }]);
+    await expect(saveChatToHostStrict_ACU({ verifyFields })).resolves.toBeUndefined();
+    expect(mockSillyTavern.saveChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('目标楼字段与本轮写入不一致时报错', async () => {
+    respond([{ mes: '开场' }, { mes: '二' }]);
+    await expect(saveChatToHostStrict_ACU({ verifyFields })).rejects.toThrow('第 0 楼的 TavernDB_ACU_IsolatedData');
+  });
+
+  it('服务器楼层数不一致时报错', async () => {
+    respond([{ mes: '开场', TavernDB_ACU_IsolatedData: structuredClone(frame) }]);
+    await expect(saveChatToHostStrict_ACU({ verifyFields })).rejects.toThrow('楼层数');
+  });
+
+  it('目标下标无效时不发起保存', async () => {
+    await expect(saveChatToHostStrict_ACU({ verifyFields: [{ messageIndex: 5, field: 'TavernDB_ACU_IsolatedData' }] }))
+      .rejects.toMatchObject({ name: 'HostChatSaveNotStartedError_ACU' });
+    expect(mockSillyTavern.saveChat).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('宿主缺少聊天身份时照常保存并跳过字段回读', async () => {
+    mockSillyTavern.chatId = '';
+    await expect(saveChatToHostStrict_ACU({ verifyFields })).resolves.toBeUndefined();
+    expect(mockSillyTavern.saveChat).toHaveBeenCalledTimes(1);
+    expect(request).not.toHaveBeenCalled();
   });
 });

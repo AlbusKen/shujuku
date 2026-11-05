@@ -20,6 +20,10 @@ vi.mock('../../../src/shared/utils', () => ({
 
 import {
   evaluateNewMessageAction_ACU,
+  isFillEligibleAiMessage_ACU,
+  isNonFillAiFloor_ACU,
+  isToolInvocationFloor_ACU,
+  selectFillEligibleIndices_ACU,
   type MessageAction,
   type MessageActionResult,
 } from '../../../src/service/runtime/message-handler';
@@ -249,6 +253,68 @@ describe('evaluateNewMessageAction_ACU', () => {
       );
       expect(result.action).toBe('skip');
       expect(result.reason).toContain('not ready');
+    });
+  });
+});
+
+describe('可填楼判定', () => {
+  const user = { is_user: true, mes: '用户消息' };
+  const reply = { is_user: false, mes: 'AI回复' };
+  const toolFloor = { is_user: false, is_system: true, mes: '工具调用', extra: { isSmallSys: true, tool_invocations: [{ name: 'search' }] } };
+  const narrator = { is_user: false, is_system: true, mes: '旁白', extra: { type: 'narrator' } };
+  const hiddenReply = { is_user: false, is_system: true, mes: '被隐藏的回复', extra: {} };
+
+  it('只把带 tool_invocations 的系统楼识别为工具楼', () => {
+    expect(isToolInvocationFloor_ACU(toolFloor)).toBe(true);
+    expect(isToolInvocationFloor_ACU(hiddenReply)).toBe(false);
+    expect(isToolInvocationFloor_ACU(reply)).toBe(false);
+    expect(isToolInvocationFloor_ACU({ ...toolFloor, is_system: false })).toBe(false);
+    expect(isToolInvocationFloor_ACU(null)).toBe(false);
+  });
+
+  it('工具楼、旁白、用户楼不可填表，被隐藏的普通回复仍可填表', () => {
+    expect(isFillEligibleAiMessage_ACU(reply)).toBe(true);
+    expect(isFillEligibleAiMessage_ACU(hiddenReply)).toBe(true);
+    expect(isFillEligibleAiMessage_ACU(toolFloor)).toBe(false);
+    expect(isFillEligibleAiMessage_ACU(narrator)).toBe(false);
+    expect(isFillEligibleAiMessage_ACU(user)).toBe(false);
+  });
+
+  it('已知非用户楼时只按旁白与工具楼排除', () => {
+    expect(isNonFillAiFloor_ACU(reply)).toBe(false);
+    expect(isNonFillAiFloor_ACU(hiddenReply)).toBe(false);
+    expect(isNonFillAiFloor_ACU(toolFloor)).toBe(true);
+    expect(isNonFillAiFloor_ACU(narrator)).toBe(true);
+    expect(isNonFillAiFloor_ACU(null)).toBe(true);
+  });
+
+  describe('selectFillEligibleIndices_ACU', () => {
+    // !is_user 序列：1 回复、2 工具楼、3 回复、5 旁白、6 回复
+    const chat = [user, reply, toolFloor, reply, user, narrator, reply];
+    const aiIndices = [1, 2, 3, 5, 6];
+
+    it('从前沿之后只取可填楼', () => {
+      expect(selectFillEligibleIndices_ACU(chat, aiIndices, 0, 0)).toEqual([1, 3, 6]);
+      expect(selectFillEligibleIndices_ACU(chat, aiIndices, 1, 0)).toEqual([3, 6]);
+    });
+
+    it('前沿停在工具楼序号时不错位', () => {
+      expect(selectFillEligibleIndices_ACU(chat, aiIndices, 2, 0)).toEqual([3, 6]);
+    });
+
+    it('skipFloors 只数可填楼，跨过工具楼与旁白', () => {
+      expect(selectFillEligibleIndices_ACU(chat, aiIndices, 0, 1)).toEqual([1, 3]);
+      const tailTool = [user, reply, user, reply, toolFloor];
+      expect(selectFillEligibleIndices_ACU(tailTool, [1, 3, 4], 0, 1)).toEqual([1]);
+    });
+
+    it('跳过数不少于可填楼时返回空', () => {
+      expect(selectFillEligibleIndices_ACU(chat, aiIndices, 0, 3)).toEqual([]);
+      expect(selectFillEligibleIndices_ACU(chat, aiIndices, 5, 0)).toEqual([]);
+    });
+
+    it('非法前沿与跳过数按 0 处理', () => {
+      expect(selectFillEligibleIndices_ACU(chat, aiIndices, -2, Number.NaN)).toEqual([1, 3, 6]);
     });
   });
 });

@@ -8,9 +8,11 @@
  */
 import { registerUiSurface_ACU, type UiToastPayload_ACU } from '../../shared/ui-surface-registry';
 import { notify_ACU } from '../../shared/notice-hub';
+import { installSettingsRescueWriter_ACU } from '../../service/settings/settings-persistence-status';
 import { logWarn_ACU } from '../../shared/utils';
 import { registerAcuV2MenuButton } from './menu-button';
 import { ensureAcuV2AppMounted } from './mount';
+import { installSettingsPersistenceNotice_ACU } from './settings-persistence-notice';
 import {
   installAutoCardUpdaterV2Api_ACU,
   openAcuV2Shell_ACU,
@@ -45,6 +47,8 @@ export function bootstrapAcuV2(): void {
     showToast: showAcuV2Toast_ACU,
   });
   installAutoCardUpdaterV2Api_ACU();
+  installSettingsRescueWriter_ACU();
+  installSettingsPersistenceNotice_ACU({ openShell: openAcuV2Shell_ACU });
   registerAcuV2MenuButton();
   ensureAcuV2AppMounted();
 }

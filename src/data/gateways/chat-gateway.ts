@@ -9,6 +9,7 @@
  */
 
 import { jQuery_API_ACU, SillyTavern_API_ACU } from '../../shared/host-api';
+import { isTauriTavernHost_ACU } from '../../shared/host-detect';
 import { cleanChatName_ACU, logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { getHostRequestHeaders_ACU } from './ai-gateway';
 
@@ -98,6 +99,17 @@ function assertHostChatReadContext_ACU(context: ReturnType<typeof captureHostCha
     }
 }
 
+/**
+ * 去掉群聊 JSONL 首行 header，规则与宿主前端一致：
+ * TT 首条总是 header（TT group-chats.js:307-308）；ST 仅在首条带 chat_metadata 时剥离（ST group-chats.js:272-273）。
+ */
+function stripGroupChatHeader_ACU(persisted: any[]): any[] {
+    if (!persisted.length) return persisted;
+    if (isTauriTavernHost_ACU()) return persisted.slice(1);
+    const first = persisted[0];
+    return first && typeof first === 'object' && Object.prototype.hasOwnProperty.call(first, 'chat_metadata') ? persisted.slice(1) : persisted;
+}
+
 async function readHostChatWithinContext_ACU(context: ReturnType<typeof captureHostChatReadContext_ACU>): Promise<any[]> {
     assertHostChatReadContext_ACU(context);
     const { group, chatId, character } = context;
@@ -112,7 +124,7 @@ async function readHostChatWithinContext_ACU(context: ReturnType<typeof captureH
     const persisted = await response.json();
     assertHostChatReadContext_ACU(context);
     if (!Array.isArray(persisted)) throw new Error('聊天保存回读返回了无效消息列表。');
-    const messages = group ? persisted : persisted.slice(1);
+    const messages = group ? stripGroupChatHeader_ACU(persisted) : persisted.slice(1);
     if (messages.some(message => !message || typeof message !== 'object' || Array.isArray(message))) {
         throw new Error('聊天保存回读包含无效消息。');
     }
@@ -124,25 +136,62 @@ export async function readChatFromHostStrict_ACU(): Promise<any[]> {
     return readHostChatWithinContext_ACU(captureHostChatReadContext_ACU());
 }
 
+/** 字段回读是附加确认：宿主缺少聊天身份时无法回读，记录警告后按原严格保存语义继续。 */
+function captureFieldVerificationContext_ACU() {
+    try {
+        return captureHostChatReadContext_ACU();
+    } catch (error) {
+        if (!(error instanceof HostChatSaveNotStartedError_ACU)) throw error;
+        logWarn_ACU('[ChatGateway] 缺少宿主聊天身份，本次保存跳过目标楼字段回读校验:', error.message);
+        return null;
+    }
+}
+
 /**
  * 执行必须真实提交到宿主的聊天保存。
  * 仅适用于后续会触发不可逆外置副作用的事务；宿主保存能力缺失时必须失败，不能静默跳过。
  * verify=true 时回读本轮聊天，避免宿主吞掉保存异常后误放行正文生成。
+ * verifyFields 只回读比对指定楼层的指定字段（并核对楼层数），用于关键写入；回读仍是一次完整聊天请求。
  */
-export async function saveChatToHostStrict_ACU({ verify = false } = {}): Promise<void> {
+export async function saveChatToHostStrict_ACU({ verify = false, verifyFields = [] as ChatFieldVerification_ACU[] } = {}): Promise<void> {
     if (typeof SillyTavern_API_ACU?.saveChat !== 'function') {
         throw new HostChatSaveNotStartedError_ACU('宿主 saveChat 不可用，无法提交破坏性聊天数据变更。');
     }
     const api = SillyTavern_API_ACU;
-    const context = verify ? captureHostChatReadContext_ACU() : null;
+    const context = verify ? captureHostChatReadContext_ACU()
+        : verifyFields.length > 0 ? captureFieldVerificationContext_ACU() : null;
+    if (context) {
+        for (const { messageIndex, field } of verifyFields) {
+            if (!Number.isInteger(messageIndex) || messageIndex < 0 || messageIndex >= context.chat.length || !field) {
+                throw new HostChatSaveNotStartedError_ACU('保存回读校验的目标楼层或字段无效。');
+            }
+        }
+    }
     await api.saveChat();
     if (context) {
         const messages = await readHostChatWithinContext_ACU(context);
-        if (JSON.stringify(messages) !== JSON.stringify(context.chat)) {
+        if (verify && JSON.stringify(messages) !== JSON.stringify(context.chat)) {
             throw new Error('聊天保存未获确认：服务器消息与本轮楼层不一致。');
+        }
+        if (verifyFields.length > 0) {
+            if (messages.length !== context.chat.length) {
+                throw new Error(`聊天保存未获确认：服务器楼层数（${messages.length}）与本轮楼层数（${context.chat.length}）不一致。`);
+            }
+            for (const { messageIndex, field } of verifyFields) {
+                const local = context.chat[messageIndex] as Record<string, unknown> | undefined;
+                if (JSON.stringify(messages[messageIndex]?.[field]) !== JSON.stringify(local?.[field])) {
+                    throw new Error(`聊天保存未获确认：服务器第 ${messageIndex} 楼的 ${field} 与本轮写入不一致。`);
+                }
+            }
         }
     }
     notifyPostChatSaveListeners_ACU();
+}
+
+/** 保存后回读校验的目标：楼层下标与宿主聊天数组一致（回读已剥离 header）。 */
+export interface ChatFieldVerification_ACU {
+    messageIndex: number;
+    field: string;
 }
 
 /** 撤销楼层后同步后续 DOM 编号，保持宿主按 mesid 定位消息的约定。 */

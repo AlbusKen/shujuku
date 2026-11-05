@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   AgentWebClient_ACU,
@@ -183,5 +183,42 @@ describe('AgentWebClient_ACU 通用搜索与网页抓取', () => {
     expect(page.title).toBe('页');
     expect(page.text.startsWith('正文一\n正')).toBe(true);
     expect(page.text).toContain('已截断');
+  });
+});
+
+describe('AgentWebClient_ACU 在 TauriTavern 宿主', () => {
+  afterEach(() => { delete (globalThis as any).__TAURITAVERN__; });
+
+  it('visit、Serper 与 Tavily 不发请求，返回宿主不支持的原因', async () => {
+    (globalThis as any).__TAURITAVERN__ = {};
+    const { client, fetch } = client_ACU(() => textResponse_ACU('', 404));
+    const ddg = await client.webSearch('q', { searchProvider: 'duckduckgo', searxngBaseUrl: '' });
+    expect(ddg.hits).toEqual([]);
+    expect(ddg.note).toContain('TauriTavern');
+    for (const provider of ['serper', 'tavily'] as const) {
+      const result = await client.webSearch('q', { searchProvider: provider, searxngBaseUrl: '' });
+      expect(result.hits).toEqual([]);
+      expect(result.note).toContain(`/api/search/${provider}`);
+      expect(result.note).toContain('TauriTavern');
+    }
+    const page = await client.webRead('https://fandom.example/wiki/X', { blockedDomains: '', pageCharLimit: 100 });
+    expect(page.status).not.toBe('ok');
+    expect(page.note).toContain('/api/search/visit');
+    const baidu = await client.readEncyclopedia('baidu', 'x', 4000);
+    expect(baidu.status).toBe('unavailable');
+    expect(baidu.note).toContain('TauriTavern');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('SearXNG 在 TT 上照常走 /api/search/searxng', async () => {
+    (globalThis as any).__TAURITAVERN__ = {};
+    const html = '<article class="result"><h3><a href="https://a.org/1">标题一</a></h3><p class="content">摘要一</p></article>';
+    const { client, fetch } = client_ACU(url => {
+      expect(url).toBe('/api/search/searxng');
+      return textResponse_ACU(html);
+    });
+    const result = await client.webSearch('q', { searchProvider: 'searxng', searxngBaseUrl: 'https://search.example' });
+    expect(result.hits).toEqual([{ title: '标题一', url: 'https://a.org/1', snippet: '摘要一' }]);
+    expect(fetch).toHaveBeenCalledOnce();
   });
 });

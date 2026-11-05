@@ -14,6 +14,7 @@ const m = vi.hoisted(() => ({
   messageReceived: undefined as undefined | ((messageId?: any, type?: any) => void),
   characterMessageRendered: undefined as undefined | ((messageId?: any, type?: any) => void),
   afterCommands: undefined as undefined | ((type: any, params: any, dryRun: any) => Promise<void>),
+  userMessageRendered: undefined as undefined | ((messageId: any) => Promise<void>),
   currentChatKey: '',
   settings: { plotSettings: {} } as { plotSettings: Record<string, unknown>; worldSimulationPageEnabled?: boolean; plotSendDisguiseDisabled?: boolean },
   api: { chat: [] as any[], chatId: '', eventTypes: { CHAT_CHANGED: 'chat', MESSAGE_DELETED: 'deleted', MESSAGE_SWIPED: 'swiped', MESSAGE_SENT: 'message_sent', MESSAGE_UPDATED: 'message_updated', MESSAGE_RECEIVED: 'message_received', CHARACTER_MESSAGE_RENDERED: 'character_message_rendered', GENERATION_AFTER_COMMANDS: 'after_commands', GENERATION_STARTED: 'generation_started', GENERATION_ENDED: 'generation_ended', GENERATION_STOPPED: 'generation_stopped' }, eventSource: { on: vi.fn(), makeFirst: vi.fn(), makeLast: vi.fn(), emit: vi.fn() } } as any,
@@ -161,6 +162,8 @@ beforeAll(async () => {
       try { await m.afterCommands!(args[0], args[1], args[2]); } catch { /* 宿主吞监听器异常 */ }
     } else if (event === 'message_sent') {
       await m.messageSent?.(args[0]);
+    } else if (event === 'user_message_rendered') {
+      try { await m.userMessageRendered?.(args[0]); } catch { /* 宿主吞监听器异常 */ }
     } else if (event === 'message_updated') {
       await m.messageUpdated(args[0]);
     } else if (event === 'generation_stopped') {
@@ -199,6 +202,9 @@ beforeAll(async () => {
   });
   m.api.eventSource.makeFirst.mockImplementation((event: string, callback: any) => {
     if (event === 'generation_ended') m.generationEnded = callback;
+  });
+  m.api.eventSource.makeLast.mockImplementation((event: string, callback: any) => {
+    if (event === 'user_message_rendered') m.userMessageRendered = callback;
   });
   const { mainInitialize_ACU } = await import('../../../src/presentation/bootstrap/init');
   reinitialize_ACU = () => {
@@ -1791,6 +1797,63 @@ describe('向量模式宿主普通发送', () => {
     await rejected;
     expect(consume).not.toHaveBeenCalled();
     expect(m.api.chat).toHaveLength(1);
+  });
+
+  // TT chatSurface 用安装前绑定的 emit 副本派发 USER_MESSAGE_RENDERED，绕过插件的 emit 包裹。
+  async function boundCopySend(consume: () => void) {
+    await m.api.eventSource.emit('after_commands', 'normal', {}, false);
+    const text = m.input;
+    m.input = '';
+    const message = { is_user: true, mes: text, name: '用户' };
+    m.api.chat.push(message);
+    await m.saveChat();
+    const index = m.api.chat.length - 1;
+    await m.api.eventSource.emit('message_sent', index);
+    m.api.addOneMessage(message);
+    await m.hostEmit('user_message_rendered', index);
+    try { await m.api.eventSource.emit('worldinfo_entries_loaded', { globalLore: [], characterLore: [], chatLore: [], personaLore: [] }); } catch { /* 宿主返回空世界书 */ }
+    await m.api.eventSource.emit('generate_after_data', {}, false);
+    consume();
+  }
+
+  it('经属性派发时包裹与兜底监听器只召回一次', async () => {
+    m.input = '属性派发';
+    const consume = vi.fn();
+    await hostSend(consume);
+    expect(m.userMessageRendered).toBeTypeOf('function');
+    expect(m.processBeforeGen).toHaveBeenCalledOnce();
+    expect(m.processBeforeGen.mock.calls[0][0]).toMatchObject({ userInput: '属性派发', source: 'user_message_rendered' });
+    expect(consume).toHaveBeenCalledOnce();
+  });
+
+  it('宿主以绑定副本派发入楼事件时由兜底监听器召回一次', async () => {
+    m.api.chat = [{ is_user: false, mes: '历史回复' }];
+    m.input = '绑定副本';
+    const recall = holdRecall();
+    const consume = vi.fn();
+    const request = boundCopySend(consume);
+    await recall.ready;
+    expect(m.processBeforeGen.mock.calls[0][0]).toMatchObject({ userInput: '绑定副本', source: 'user_message_rendered' });
+    expect(consume).not.toHaveBeenCalled();
+    recall.complete({ success: true, injectedCount: 1 });
+    await request;
+    expect(m.processBeforeGen).toHaveBeenCalledOnce();
+    expect(consume).toHaveBeenCalledOnce();
+    expect(m.generate).not.toHaveBeenCalled();
+  });
+
+  it('绑定副本派发时召回失败，由正文边界阻断', async () => {
+    m.api.chat = [];
+    m.input = '绑定副本失败';
+    m.processBeforeGen.mockImplementationOnce(async () => ({ success: false, reason: 'embedding_failed' }));
+    const consume = vi.fn();
+    await expect(boundCopySend(consume)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(m.processBeforeGen).toHaveBeenCalledOnce();
+    expect(consume).not.toHaveBeenCalled();
+    const { showToastr_ACU } = await import('../../../src/presentation/theme/toast');
+    expect(showToastr_ACU).toHaveBeenCalledWith('error', '纪要召回失败，本次生成已停止。', '向量表格');
+    expect(m.api.chat).toEqual([{ is_user: true, mes: '绑定副本失败', name: '用户' }]);
+    expect(document.body.dataset.generating).toBeUndefined();
   });
 
 });

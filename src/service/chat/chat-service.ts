@@ -668,7 +668,8 @@ async function ensureV2BoundaryCheckpointForRetainedBufferCore_ACU(
                 }
             }
             if ((changed || downgradedCount > 0 || obsoleteInitDowngradedCount > 0) && options.save !== false) {
-                await saveChatToHostStrict_ACU();
+                // 边界 full checkpoint 是删除旧楼数据前唯一的恢复基线；仅降级其他楼时锚点同样成为唯一根，均回读锚点楼确认。
+                await saveChatToHostStrict_ACU({ verifyFields: [{ messageIndex: anchorIndex, field: 'TavernDB_ACU_IsolatedData' }] });
             }
         } catch (error: any) {
             snapshots.forEach((snapshot, messageIndex) => restoreMessageFieldSnapshot_ACU(chat[messageIndex], snapshot));

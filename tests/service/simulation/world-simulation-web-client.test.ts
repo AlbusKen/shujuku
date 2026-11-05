@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildDefaultWorldSimulationSettings_ACU } from '../../../src/service/simulation/defaults';
 import { evaluateWorldSimulationWebUrl_ACU, WorldSimulationWebClient_ACU } from '../../../src/service/simulation/world-simulation-web-client';
 
@@ -40,5 +40,28 @@ describe('格林推演网页客户端', () => {
     expect((await client.searchEncyclopedia('moegirl', '条目')).hits[0]?.title).toBe('条目 A');
     expect(String((fetcher as any).mock.calls[0][0])).toContain('action=opensearch');
     expect(await client.readEncyclopedia('wikipedia_zh', '缺失', 500)).toEqual({ text: '', truncated: false, note: 'empty' });
+  });
+
+  describe('TauriTavern 宿主', () => {
+    afterEach(() => { delete (globalThis as any).__TAURITAVERN__; });
+
+    it('visit 与非 SearXNG 提供方不发请求，返回 host-unsupported', async () => {
+      (globalThis as any).__TAURITAVERN__ = {};
+      const fetcher = vi.fn(async () => new Response('', { status: 404 })) as unknown as typeof fetch;
+      const client = new WorldSimulationWebClient_ACU(fetcher);
+      const base = buildDefaultWorldSimulationSettings_ACU().webResearch;
+      expect(await client.webRead('https://example.com', base)).toMatchObject({ text: '', note: 'host-unsupported:/api/search/visit' });
+      expect(await client.webSearch('q', { ...base, searchProvider: 'duckduckgo' as const })).toEqual({ hits: [], note: 'host-unsupported:/api/search/visit' });
+      expect(await client.webSearch('q', { ...base, searchProvider: 'serper' as const })).toEqual({ hits: [], note: 'host-unsupported:/api/search/serper' });
+      expect(fetcher).not.toHaveBeenCalled();
+    });
+
+    it('SearXNG 在 TT 上照常请求', async () => {
+      (globalThis as any).__TAURITAVERN__ = {};
+      const fetcher = vi.fn(async () => new Response('', { status: 200 })) as unknown as typeof fetch;
+      const settings = { ...buildDefaultWorldSimulationSettings_ACU().webResearch, searchProvider: 'searxng' as const, searxngBaseUrl: 'https://search.example' };
+      await new WorldSimulationWebClient_ACU(fetcher).webSearch('q', settings);
+      expect(fetcher).toHaveBeenCalledWith('/api/search/searxng', expect.objectContaining({ method: 'POST' }));
+    });
   });
 });

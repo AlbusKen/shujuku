@@ -2,6 +2,15 @@
   <div class="acu-v2-app">
     <DeskPetLayer @open-dashboard="emit('openDashboard')" />
     <div v-show="rootShell.isOpen" class="acu-v2-app__shell">
+      <div v-if="settingsPersistence.unsaved.value" class="acu-v2-app__unsaved" role="alert">
+        <span class="acu-v2-app__unsaved-text">{{ SETTINGS_UNSAVED_TEXT_ACU }}</span>
+        <AcuButton size="sm" variant="danger" @click="settingsPersistence.exportBackup()">导出当前配置</AcuButton>
+      </div>
+      <div v-if="settingsRescue.candidate.value" class="acu-v2-app__unsaved acu-v2-app__unsaved--rescue" role="status">
+        <span class="acu-v2-app__unsaved-text">发现 {{ settingsRescue.candidateTime.value }} 的未写入配置副本，比当前酒馆设置更新。</span>
+        <AcuButton size="sm" variant="primary" :loading="settingsRescue.busy.value" @click="confirmRestoreRescue">恢复</AcuButton>
+        <AcuButton size="sm" :disabled="settingsRescue.busy.value" @click="settingsRescue.decline()">忽略</AcuButton>
+      </div>
       <div class="acu-v2-app__body">
         <Sidebar v-if="!visualizer.isActive" class="acu-v2-app__desktop-sidebar" />
         <div class="acu-v2-app__content">
@@ -141,6 +150,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import AcuButton from "./components/_lib/AcuButton.vue";
 import AcuDialogHost from "./components/_lib/AcuDialogHost.vue";
 import AcuFileButton from "./components/_lib/AcuFileButton.vue";
 import AcuIconButton from "./components/_lib/AcuIconButton.vue";
@@ -151,6 +161,8 @@ import Sidebar from "./components/Sidebar.vue";
 import { useChatChangedListener } from "./composables/useChatChangedListener";
 import { useTemplateRuntimeChangeListener } from "./composables/useTemplateRuntimeChangeListener";
 import { useDevOptions } from "./composables/useDevOptions";
+import { SETTINGS_UNSAVED_TEXT_ACU, useSettingsPersistence } from "./composables/useSettingsPersistence";
+import { useSettingsRescue } from "./composables/useSettingsRescue";
 import { canCloseUi } from "./composables/useUiCloseGuard";
 import { useDialogStore } from "./stores/dialog-store";
 import { useRootShellStore } from "./stores/root-shell-store";
@@ -179,6 +191,20 @@ const themeStore = useThemeStore();
 const toastStore = useToastStore();
 const uiMode = useUiModeStore();
 const visualizer = useVisualizerStore();
+const settingsPersistence = useSettingsPersistence();
+const settingsRescue = useSettingsRescue();
+
+async function confirmRestoreRescue(): Promise<void> {
+  const confirmed = await dialogStore.confirm({
+    title: "恢复配置副本",
+    message: `将用 ${settingsRescue.candidateTime.value} 的副本覆盖当前数据库配置并重新加载设置。`,
+    confirmLabel: "恢复",
+    confirmVariant: "danger",
+  });
+  if (!confirmed) return;
+  await settingsRescue.restore();
+}
+
 const isMobileNavOpen = ref(false);
 const isMobileNavRendered = ref(false);
 const isMobileNavClosing = ref(false);
@@ -458,6 +484,28 @@ function clearMobileNavCloseTimer(): void {
   color: var(--acu-text-1);
   font-family: var(--acu-font-ui);
   font-size: var(--acu-font-size-body, 12px);
+}
+
+.acu-v2-app__unsaved {
+  display: flex;
+  align-items: center;
+  gap: var(--acu-space-250, 10px);
+  flex: 0 0 auto;
+  padding: var(--acu-space-150, 6px) var(--acu-space-3, 12px);
+  background: color-mix(in srgb, var(--acu-danger) 14%, var(--acu-bg-0));
+  color: var(--acu-text-1);
+  font-size: var(--acu-font-size-body, 12px);
+  line-height: 1.5;
+}
+
+.acu-v2-app__unsaved-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.acu-v2-app__unsaved--rescue {
+  background: color-mix(in srgb, var(--acu-warning) 14%, var(--acu-bg-0));
 }
 
 .acu-v2-app__header {

@@ -6,6 +6,7 @@ import { escapeHtml_ACU } from '../../shared/html-helpers';
 import { isSummaryOrOutlineTable_ACU, logDebug_ACU, logError_ACU } from '../../shared/utils';
 import { getActiveTemplatePresetMeta_ACU } from '../../service/template/template-preset-service';
 import { resolveTableHistoryStateFromChat_ACU } from '../../service/table/table-history';
+import { isNonFillAiFloor_ACU, selectFillEligibleIndices_ACU } from '../../service/runtime/message-handler';
 import { $popupInstance_ACU, $cardUpdateStatusDisplay_ACU } from '../state/ui-refs';
 /**
  * presentation/components/update-status-display.ts — 运行时状态/更新显示 UI
@@ -40,6 +41,11 @@ import { $popupInstance_ACU, $cardUpdateStatusDisplay_ACU } from '../state/ui-re
     $totalMessagesDisplay.text(`上下文总层数: ${totalMessages} (仅计算AI回复楼层)`);
 
     const totalAiMessages = totalMessages;
+    const allAiMessageIndices = chatHistory
+      .map((msg: any, index: number) => msg && !msg.is_user ? index : -1)
+      .filter((index: number) => index !== -1);
+    const fillEligibleIndexSet = new Set(allAiMessageIndices.filter(index => !isNonFillAiFloor_ACU(chatHistory[index])));
+    const isFillEligibleIndex = (index: number): boolean => fillEligibleIndexSet.has(index);
 
     if (!currentJsonTableData_ACU) {
       $cardUpdateStatusDisplay_ACU.text('数据库状态：未加载或初始化失败。');
@@ -98,12 +104,16 @@ import { $popupInstance_ACU, $cardUpdateStatusDisplay_ACU } from '../state/ui-re
 
         const isAutoUpdateDisabledForThisTable = (frequency <= 0);
 
+        // 待填可填楼数与自动调度同口径（selectFillEligibleIndices_ACU）：排除工具楼与旁白，前沿仍是 !is_user 序号。
+        const pendingFillCount = selectFillEligibleIndices_ACU(chatHistory, allAiMessageIndices, lastUpdatedAiFloor, 0, isFillEligibleIndex).length;
+        const effectiveFillCount = selectFillEligibleIndices_ACU(chatHistory, allAiMessageIndices, lastUpdatedAiFloor, skipFloors, isFillEligibleIndex).length;
+
         if (isAutoUpdateDisabledForThisTable) {
             // 频率=0：不参与自动更新，UI显示“无”
             triggerFloor = '无';
             // 仍可展示“未记录楼层/上次更新”，便于用户观察数据变化
             if (foundInHistory) {
-                unrecorded = String(totalAiMessages - lastUpdatedAiFloor);
+                unrecorded = String(pendingFillCount);
                 effectiveUnrecorded = '—';
             } else {
                 unrecorded = '—';
@@ -111,21 +121,17 @@ import { $popupInstance_ACU, $cardUpdateStatusDisplay_ACU } from '../state/ui-re
             }
             isReady = false;
         } else if (foundInHistory) {
-            // [修复] UI显示逻辑同步修正
-            // 触发楼层 = 上次更新楼层 + 频率 + 跳过楼层
-            triggerFloor = String(lastUpdatedAiFloor + frequency + skipFloors);
-            
-            // 显示给用户的未记录楼层：直接展示物理差值
-            unrecorded = String(totalAiMessages - lastUpdatedAiFloor);
-            
-            // 有效积累楼层（用于判断进度）：减去跳过楼层
-            effectiveUnrecorded = String(Math.max(0, (totalAiMessages - skipFloors) - lastUpdatedAiFloor));
-            
-            isReady = effectiveUnrecorded >= frequency;
-            
+            // 触发楼层按 !is_user 序号预测（假设后续楼层均可填）：当前总数 + 频率 + 跳过 - 已积累可填楼；无工具楼时等于 上次更新楼层 + 频率 + 跳过楼层。
+            triggerFloor = String(totalAiMessages + frequency + skipFloors - pendingFillCount);
+            // 未记录楼层：前沿之后的可填楼数
+            unrecorded = String(pendingFillCount);
+            // 有效积累楼层（用于判断进度）：再去掉跳过楼层
+            effectiveUnrecorded = String(effectiveFillCount);
+            isReady = effectiveFillCount >= frequency;
             // 将数值存入预测数组
             nextUpdates.push({ name: table.name, floor: triggerFloor, isReady });
         }
+
 
         // 显示文本处理
         let lastUpdatedDisplay = foundInHistory ? lastUpdatedAiFloor : '<span style="color: grey;">未初始</span>';

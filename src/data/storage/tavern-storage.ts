@@ -9,13 +9,20 @@ import { SCRIPT_ID_PREFIX_ACU } from '../../shared/constants';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { isExtensionMode } from '../../shared/runtime-env';
 import { ConfigStorageReadError_ACU, ConfigStorageWriteBlockedError_ACU } from './config-read';
+import { getSettingsPersistenceState_ACU, noteSettingsWrite_ACU, noteSettingsWriteFailed_ACU } from './settings-save-confirm';
 
 // ── 常量 ──
 import { idbRequestToPromise_ACU, isIndexedDbAvailable_ACU } from '../../shared/idb-import-temp';
 
 export const USE_TAVERN_SETTINGS_STORAGE_ACU = true;
 export const TAVERN_SETTINGS_NAMESPACE_ACU = `${SCRIPT_ID_PREFIX_ACU}__userscript_settings_v1`;
+/** 命名空间内的写入标记：插件每次请求宿主保存前写入本地时间戳，用于判断保全副本是否新于宿主配置。 */
+export const TAVERN_SETTINGS_WRITTEN_AT_KEY_ACU = '__acuSettingsWrittenAt';
+/** 本会话首次写入前命名空间里的写入标记，即宿主从磁盘加载的值；null 表示本会话尚未写入。 */
+let loadedSettingsWrittenAt_ACU: number | null = null;
 export let tavernSaveSettingsFn_ACU: any = null;
+/** tavernSaveSettingsFn_ACU 是否为立即保存的 saveSettings（而非尾触发的 saveSettingsDebounced）。 */
+let tavernSaveSettingsDirect_ACU = false;
 export let tavernExtensionSettingsRoot_ACU: any = null;
 export const TAVERN_BRIDGE_GLOBAL_KEY_ACU = '__ACU_USERSCRIPT_BRIDGE__';
 export const TAVERN_BRIDGE_INJECTED_FLAG_ACU = '__ACU_USERSCRIPT_BRIDGE_INJECTED__';
@@ -42,6 +49,7 @@ function tryReadHostContextSettings_ACU(): void {
         if (ctx?.extensionSettings && !tavernExtensionSettingsRoot_ACU) tavernExtensionSettingsRoot_ACU = ctx.extensionSettings;
         if (!tavernSaveSettingsFn_ACU && typeof ctx?.saveSettingsDebounced === 'function') {
             tavernSaveSettingsFn_ACU = ctx.saveSettingsDebounced;
+            tavernSaveSettingsDirect_ACU = false;
         }
     } catch (e) { /* ignore */ }
 }
@@ -56,7 +64,10 @@ export function tryReadBridgeFromTop_ACU(): boolean {
                 console.warn(`[${SCRIPT_ID_PREFIX_ACU}] Tavern bridge 初始化失败：`, bridge.error);
             }
             if (bridge.extension_settings && !tavernExtensionSettingsRoot_ACU) tavernExtensionSettingsRoot_ACU = bridge.extension_settings;
-            if (!tavernSaveSettingsFn_ACU) tavernSaveSettingsFn_ACU = bridge.saveSettingsDebounced || bridge.saveSettings || null;
+            if (!tavernSaveSettingsFn_ACU) {
+                tavernSaveSettingsFn_ACU = bridge.saveSettingsDebounced || bridge.saveSettings || null;
+                tavernSaveSettingsDirect_ACU = !bridge.saveSettingsDebounced && !!bridge.saveSettings;
+            }
             return !!(tavernExtensionSettingsRoot_ACU);
         }
     } catch (e) { /* ignore */ }
@@ -182,6 +193,7 @@ async function runTavernSettingsBridgeInit_ACU(): Promise<boolean> {
                     }
                     if (typeof ctx.saveSettingsDebounced === 'function') {
                         tavernSaveSettingsFn_ACU = ctx.saveSettingsDebounced;
+                        tavernSaveSettingsDirect_ACU = false;
                         logDebug_ACU('[TavernStorage] 插件模式：saveSettingsDebounced 获取成功');
                     } else {
                         logWarn_ACU('[TavernStorage] 插件模式：getContext().saveSettingsDebounced 不是函数');
@@ -203,10 +215,10 @@ async function runTavernSettingsBridgeInit_ACU(): Promise<boolean> {
     // ── 油猴脚本模式（原有逻辑）──
     tryReadBridgeFromTop_ACU();
     try {
-        if (typeof (topLevelWindow_ACU as any).saveSettingsDebounced === 'function') tavernSaveSettingsFn_ACU = (topLevelWindow_ACU as any).saveSettingsDebounced;
-        else if (typeof (window as any).saveSettingsDebounced === 'function') tavernSaveSettingsFn_ACU = (window as any).saveSettingsDebounced;
-        else if (typeof (topLevelWindow_ACU as any).saveSettings === 'function') tavernSaveSettingsFn_ACU = (topLevelWindow_ACU as any).saveSettings;
-        else if (typeof (window as any).saveSettings === 'function') tavernSaveSettingsFn_ACU = (window as any).saveSettings;
+        if (typeof (topLevelWindow_ACU as any).saveSettingsDebounced === 'function') { tavernSaveSettingsFn_ACU = (topLevelWindow_ACU as any).saveSettingsDebounced; tavernSaveSettingsDirect_ACU = false; }
+        else if (typeof (window as any).saveSettingsDebounced === 'function') { tavernSaveSettingsFn_ACU = (window as any).saveSettingsDebounced; tavernSaveSettingsDirect_ACU = false; }
+        else if (typeof (topLevelWindow_ACU as any).saveSettings === 'function') { tavernSaveSettingsFn_ACU = (topLevelWindow_ACU as any).saveSettings; tavernSaveSettingsDirect_ACU = true; }
+        else if (typeof (window as any).saveSettings === 'function') { tavernSaveSettingsFn_ACU = (window as any).saveSettings; tavernSaveSettingsDirect_ACU = true; }
     } catch (e) { /* ignore */ }
 
     tryReadBridgeFromTop_ACU();
@@ -222,8 +234,8 @@ async function runTavernSettingsBridgeInit_ACU(): Promise<boolean> {
     try {
         const mod = await import('./script.js' as any);
         if (mod) {
-            if (typeof mod.saveSettingsDebounced === 'function') tavernSaveSettingsFn_ACU = mod.saveSettingsDebounced;
-            else if (typeof mod.saveSettings === 'function') tavernSaveSettingsFn_ACU = mod.saveSettings;
+            if (typeof mod.saveSettingsDebounced === 'function') { tavernSaveSettingsFn_ACU = mod.saveSettingsDebounced; tavernSaveSettingsDirect_ACU = false; }
+            else if (typeof mod.saveSettings === 'function') { tavernSaveSettingsFn_ACU = mod.saveSettings; tavernSaveSettingsDirect_ACU = true; }
         }
     } catch (e) { /* ignore */ }
     try {
@@ -268,20 +280,64 @@ export function getTavernSettingsNamespace_ACU(): any {
     return root.__userscripts[TAVERN_SETTINGS_NAMESPACE_ACU];
 }
 
-export function persistTavernSettings_ACU(): void {
+/** 读取命名空间快照中的写入标记；缺失或无效时为 0。 */
+export function readSettingsWrittenAt_ACU(entries: any): number {
+    const raw = entries && typeof entries === 'object' ? entries[TAVERN_SETTINGS_WRITTEN_AT_KEY_ACU] : undefined;
+    const value = typeof raw === 'number' ? raw : Number(raw);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function stampTavernSettingsWrittenAt_ACU(): void {
+    if (!tavernExtensionSettingsRoot_ACU) return;
+    const ns = getTavernSettingsNamespace_ACU();
+    if (!ns || typeof ns !== 'object') return;
+    const previous = readSettingsWrittenAt_ACU(ns);
+    if (loadedSettingsWrittenAt_ACU === null) loadedSettingsWrittenAt_ACU = previous;
+    ns[TAVERN_SETTINGS_WRITTEN_AT_KEY_ACU] = Math.max(Date.now(), previous + 1);
+}
+
+/** 宿主从磁盘加载的写入标记：本会话首次写入前捕获；尚未写入时读当前命名空间；酒馆设置不可用时为 null。 */
+export function getLoadedTavernSettingsWrittenAt_ACU(): number | null {
+    if (loadedSettingsWrittenAt_ACU !== null) return loadedSettingsWrittenAt_ACU;
+    if (!tavernExtensionSettingsRoot_ACU) tryReadBridgeFromTop_ACU();
+    if (!tavernExtensionSettingsRoot_ACU) return null;
+    const ns = getTavernSettingsNamespace_ACU();
+    return ns && typeof ns === 'object' ? readSettingsWrittenAt_ACU(ns) : null;
+}
+
+/** 请求宿主保存设置并登记写入，返回写入序号；确认结果见 settings-save-confirm。 */
+export function persistTavernSettings_ACU(): number {
     try {
         tryReadBridgeFromTop_ACU();
+        stampTavernSettingsWrittenAt_ACU();
+        const hostWindow = topLevelWindow_ACU as any;
+        const localWindow: any = typeof window !== 'undefined' ? window : {};
+        let save: (() => void) | null = null;
+        let direct = false;
         if (typeof tavernSaveSettingsFn_ACU === 'function') {
-            tavernSaveSettingsFn_ACU();
-            return;
+            const fn = tavernSaveSettingsFn_ACU;
+            save = () => { fn(); };
+            direct = tavernSaveSettingsDirect_ACU;
+        } else if (typeof hostWindow.saveSettingsDebounced === 'function') {
+            save = () => { hostWindow.saveSettingsDebounced(); };
+        } else if (typeof localWindow.saveSettingsDebounced === 'function') {
+            save = () => { localWindow.saveSettingsDebounced(); };
+        } else if (typeof hostWindow.saveSettings === 'function') {
+            save = () => { hostWindow.saveSettings(); };
+            direct = true;
+        } else if (typeof localWindow.saveSettings === 'function') {
+            save = () => { localWindow.saveSettings(); };
+            direct = true;
         }
-        if (typeof (topLevelWindow_ACU as any).saveSettingsDebounced === 'function') { (topLevelWindow_ACU as any).saveSettingsDebounced(); return; }
-        if (typeof (window as any).saveSettingsDebounced === 'function') { (window as any).saveSettingsDebounced(); return; }
-        if (typeof (topLevelWindow_ACU as any).saveSettings === 'function') (topLevelWindow_ACU as any).saveSettings();
-        else if (typeof (window as any).saveSettings === 'function') (window as any).saveSettings();
-        else logWarn_ACU('[TavernStorage] 找不到任何可用的 saveSettings 函数');
+        if (!save) {
+            logWarn_ACU('[TavernStorage] 找不到任何可用的 saveSettings 函数');
+            return noteSettingsWriteFailed_ACU();
+        }
+        save();
+        return noteSettingsWrite_ACU({ direct, resave: save });
     } catch (e) {
         logWarn_ACU('[TavernStorage] 持久化到酒馆设置失败, 回退到内存模式:', e);
+        return noteSettingsWriteFailed_ACU();
     }
 }
 
@@ -405,7 +461,7 @@ export async function configIdbRemoveCached_ACU(key: string): Promise<void> {
 export function getConfigStorage_ACU(): any {
     const ns = USE_TAVERN_SETTINGS_STORAGE_ACU ? getTavernSettingsNamespace_ACU() : null;
     const hasTavern = !!ns;
-    return {
+    const storage: any = {
         getItem: (key: string) => {
             if (hasTavern && Object.prototype.hasOwnProperty.call(ns, key)) return ns[key];
             // 缓存加载失败或仍未就绪不能作为键不存在的证据（也不能使用部分读取结果）。
@@ -447,6 +503,28 @@ export function getConfigStorage_ACU(): any {
         },
         _isTavern: hasTavern,
     };
+    /** 酒馆模式下内容未变且没有未落盘写入时跳过，避免加载期重复请求宿主保存；未落盘时照常写入以便重试。 */
+    storage.setItemIfChanged = (key: string, value: any): boolean => {
+        const v = String(value);
+        if (hasTavern && Object.prototype.hasOwnProperty.call(ns, key) && ns[key] === v) {
+            const state = getSettingsPersistenceState_ACU();
+            if (state === 'confirmed' || state === 'pending') return false;
+        }
+        storage.setItem(key, v);
+        return true;
+    };
+    /** 列出配置键，与 getItem 同口径：宿主命名空间 ∪ 已加载的本地镜像；镜像未就绪或加载失败时不能证明键不存在。 */
+    storage.keys = (): string[] => {
+        if (configIdbCacheLoadFailed_ACU || (!configIdbCacheLoaded_ACU && isIndexedDbAvailable_ACU())) {
+            throw new ConfigStorageReadError_ACU('keys', 'read_failed');
+        }
+        const keys = new Set<string>(hasTavern ? Object.keys(ns) : []);
+        for (const key of configIdbCache_ACU.keys()) {
+            if (!configIdbDeletedKeys_ACU.has(key)) keys.add(key);
+        }
+        return [...keys];
+    };
+    return storage;
 }
 
 export function migrateKeyToTavernStorageIfNeeded_ACU(key: string): boolean {
@@ -470,6 +548,8 @@ export function _set_pendingSettingsReloadFromIdb_ACU(v: any) { pendingSettingsR
 export function _resetTavernStorageState_ACU(): void {
     tavernExtensionSettingsRoot_ACU = null;
     tavernSaveSettingsFn_ACU = null;
+    tavernSaveSettingsDirect_ACU = false;
+    loadedSettingsWrittenAt_ACU = null;
     tavernBridgeErrorReported_ACU = false;
     _tavernBridgeInitCompleted_ACU = false;
     _tavernRootUnavailableWarnReported_ACU = false;

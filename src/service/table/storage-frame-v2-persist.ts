@@ -2821,7 +2821,9 @@ async function persistTableMutationLogV2Core_ACU(
     stagedFields = captureStagedFields();
     // 临时基线升级会替换 orphan frame、清空日志并写 recoveryBackup，必须确认宿主真实落盘。
     if (options.strictSave || replacement || temporaryBaselineUpgrade || provisionalConvergenceReplay) {
-      await saveChatToHostStrict_ACU();
+      // 首个 full checkpoint 或临时基线升级是回放根，落盘后回读目标楼确认。
+      await saveChatToHostStrict_ACU(shouldCheckpoint || temporaryBaselineUpgrade
+        ? { verifyFields: [{ messageIndex: target.index, field: 'TavernDB_ACU_IsolatedData' }] } : {});
     } else {
       await saveChatToHost_ACU();
     }

@@ -33,6 +33,8 @@ vi.mock('../../../src/shared/utils', () => ({
 
 vi.mock('../../../src/shared/data-constants', () => ({
   STORAGE_KEY_GLOBAL_META_ACU: 'acu_global_meta',
+  STORAGE_KEY_PROFILE_PREFIX_ACU: 'acu_profile',
+  DEFAULT_ISOLATION_SLOT_ACU: '__default__',
   normalizeIsolationCode_ACU: vi.fn((code: string) => String(code || '').trim()),
   getProfileSettingsKey_ACU: vi.fn((code: string) => `acu_settings_${code}`),
   getProfileTemplateKey_ACU: vi.fn((code: string) => `acu_template_${code}`),
@@ -58,6 +60,9 @@ import {
   deleteProfileFromStorage_ACU,
   saveCurrentProfileTemplate_ACU,
   sanitizeSettingsForProfileSave_ACU,
+  listStoredProfileCodes_ACU,
+  wasGlobalMetaMissingOnLoad_ACU,
+  setGlobalMetaWriteSuspended_ACU,
 } from '../../../src/data/repositories/profile-repo';
 
 beforeEach(() => {
@@ -290,5 +295,47 @@ describe('接管暂停状态冷启动恢复', () => {
   it('损坏的暂停标记不能静默回落为开启', () => {
     mockStore._store.set('acu_global_meta', JSON.stringify({ takeoverEnabledGlobal: 'false' }));
     expect(() => loadGlobalMeta_ACU()).toThrow();
+  });
+});
+
+describe('首次安装双重证据', () => {
+  it('列出已存储配置档标识：默认槽为空串，解码槽位，忽略其他键', () => {
+    (mockStore as any).keys = vi.fn(() => [
+      'acu_profile____default____settings',
+      'acu_profile__alpha__template',
+      'acu_profile__alpha__settings',
+      'acu_profile__b%20c__settings',
+      'acu_profile__%E0%A4%A__settings',
+      'acu_global_meta',
+    ]);
+    try {
+      expect(listStoredProfileCodes_ACU()).toEqual(['', 'alpha', 'b c']);
+    } finally {
+      delete (mockStore as any).keys;
+    }
+  });
+
+  it('存储不支持枚举时返回 null，不当作没有配置档', () => {
+    expect(listStoredProfileCodes_ACU()).toBeNull();
+  });
+
+  it('记录本次加载 GlobalMeta 是否缺失', () => {
+    loadGlobalMeta_ACU();
+    expect(wasGlobalMetaMissingOnLoad_ACU()).toBe(true);
+    mockStore._store.set('acu_global_meta', JSON.stringify({ activeIsolationCode: 'alpha' }));
+    loadGlobalMeta_ACU();
+    expect(wasGlobalMetaMissingOnLoad_ACU()).toBe(false);
+  });
+
+  it('暂停写入期间不写 GlobalMeta，恢复后照常写入', () => {
+    setGlobalMetaWriteSuspended_ACU(true);
+    try {
+      expect(saveGlobalMeta_ACU()).toBe(false);
+      expect(mockStore.setItem).not.toHaveBeenCalled();
+    } finally {
+      setGlobalMetaWriteSuspended_ACU(false);
+    }
+    expect(saveGlobalMeta_ACU()).toBe(true);
+    expect(mockStore.setItem).toHaveBeenCalledWith('acu_global_meta', expect.any(String));
   });
 });

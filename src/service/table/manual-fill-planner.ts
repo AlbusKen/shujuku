@@ -87,10 +87,13 @@ function buildGroup_ACU(key: string, inputs: ManualCatchUpSheetPlanInput_ACU[]):
  *
  * lastCompletedAiFloor 是已提交的最高连续前沿，不用于推断此前是否存在内部空洞；
  * 这种事实当前没有持久化表示，不能伪装成 planner 已经检查过。
+ * aiMessageIndices 是 !is_user 序列，楼层序号与存储前沿同口径；isEligible 剔除工具楼等不可填楼，
+ * 只影响各 wave 的实际填表楼层与终点楼，不改变序号。
  */
 export function planManualCatchUpWaves_ACU(
   aiMessageIndices: number[],
   inputs: ManualCatchUpSheetPlanInput_ACU[],
+  isEligible: (messageIndex: number) => boolean = () => true,
 ): ManualCatchUpPlan_ACU {
   const normalizedIndices = normalizedAiMessageIndices_ACU(aiMessageIndices);
   const targetAiFloor = normalizedIndices.length;
@@ -109,6 +112,8 @@ export function planManualCatchUpWaves_ACU(
     const endAiFloor = boundaries[index + 1] - 1;
     const active = ranges.filter(range => range.start <= startAiFloor && range.end >= endAiFloor);
     if (!active.length) continue;
+    const messageIndices = normalizedIndices.slice(startAiFloor - 1, endAiFloor).filter(isEligible);
+    if (!messageIndices.length) continue;
     const byCompatibility = new Map<string, ManualCatchUpSheetPlanInput_ACU[]>();
     active.forEach(({ input }) => {
       const key = compatibilityKey_ACU(input);
@@ -122,13 +127,19 @@ export function planManualCatchUpWaves_ACU(
     waves.push({
       startAiFloor,
       endAiFloor,
-      messageIndices: normalizedIndices.slice(startAiFloor - 1, endAiFloor),
+      messageIndices,
       sheetKeys: active.map(range => range.input.sheetKey).sort(),
       groups,
     });
   }
 
-  const targetMessageIndex = normalizedIndices.length > 0 ? normalizedIndices[normalizedIndices.length - 1] : null;
+  let targetMessageIndex: number | null = null;
+  for (let index = normalizedIndices.length - 1; index >= 0; index -= 1) {
+    if (isEligible(normalizedIndices[index])) {
+      targetMessageIndex = normalizedIndices[index];
+      break;
+    }
+  }
   return {
     targetAiFloor,
     targetMessageIndex,

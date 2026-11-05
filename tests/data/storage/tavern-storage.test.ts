@@ -65,7 +65,12 @@ import {
   tavernExtensionSettingsRoot_ACU,
   tavernSaveSettingsFn_ACU,
   _resetTavernStorageState_ACU,
+  persistTavernSettings_ACU,
+  getLoadedTavernSettingsWrittenAt_ACU,
+  TAVERN_SETTINGS_WRITTEN_AT_KEY_ACU,
 } from '../../../src/data/storage/tavern-storage';
+import { _resetSettingsSaveConfirm_ACU, noteSettingsWriteFailed_ACU } from '../../../src/data/storage/settings-save-confirm';
+
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -376,5 +381,86 @@ describe('设置桥接的请求捕获边界', () => {
     expect(script.textContent).toContain('.saveSettingsDebounced =');
     expect(script.textContent).not.toContain('isGenerating');
     expect(mockTopLevelWindow[TAVERN_BRIDGE_INJECTED_FLAG_ACU]).toBe(true);
+  });
+});
+
+describe('设置写入标记', () => {
+  it('首次写入前捕获宿主加载的标记，之后每次写入单调刷新命名空间标记', () => {
+    _resetTavernStorageState_ACU();
+    const save = vi.fn();
+    const ns: any = { [TAVERN_SETTINGS_WRITTEN_AT_KEY_ACU]: 100 };
+    mockTopLevelWindow[TAVERN_BRIDGE_GLOBAL_KEY_ACU] = {
+      extension_settings: { __userscripts: { [TAVERN_SETTINGS_NAMESPACE_ACU]: ns } },
+      saveSettingsDebounced: save,
+    };
+    try {
+      expect(getLoadedTavernSettingsWrittenAt_ACU()).toBe(100);
+      persistTavernSettings_ACU();
+      expect(save).toHaveBeenCalledOnce();
+      const first = ns[TAVERN_SETTINGS_WRITTEN_AT_KEY_ACU];
+      expect(first).toBeGreaterThan(100);
+      persistTavernSettings_ACU();
+      expect(ns[TAVERN_SETTINGS_WRITTEN_AT_KEY_ACU]).toBeGreaterThan(first);
+      expect(getLoadedTavernSettingsWrittenAt_ACU()).toBe(100);
+    } finally {
+      _resetTavernStorageState_ACU();
+    }
+  });
+
+  it('酒馆设置不可用时宿主标记为 null', () => {
+    _resetTavernStorageState_ACU();
+    expect(getLoadedTavernSettingsWrittenAt_ACU()).toBeNull();
+  });
+});
+
+describe('setItemIfChanged 写回收敛', () => {
+  let save: ReturnType<typeof vi.fn>;
+  let ns: any;
+  beforeEach(() => {
+    _resetTavernStorageState_ACU();
+    _resetSettingsSaveConfirm_ACU();
+    save = vi.fn();
+    ns = { same_key: 'v1' };
+    mockTopLevelWindow[TAVERN_BRIDGE_GLOBAL_KEY_ACU] = {
+      extension_settings: { __userscripts: { [TAVERN_SETTINGS_NAMESPACE_ACU]: ns } },
+      saveSettingsDebounced: save,
+    };
+  });
+  afterEach(() => {
+    _resetTavernStorageState_ACU();
+    _resetSettingsSaveConfirm_ACU();
+  });
+
+  it('内容未变且没有未落盘写入时跳过，不请求宿主保存', () => {
+    expect(getConfigStorage_ACU().setItemIfChanged('same_key', 'v1')).toBe(false);
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('内容变化时写入并请求一次宿主保存', () => {
+    expect(getConfigStorage_ACU().setItemIfChanged('same_key', 'v2')).toBe(true);
+    expect(ns.same_key).toBe('v2');
+    expect(save).toHaveBeenCalledOnce();
+  });
+
+  it('宿主命名空间缺少该键时写入，不以本地镜像代替宿主', () => {
+    configIdbCache_ACU.set('mirror_only', 'v1');
+    expect(getConfigStorage_ACU().setItemIfChanged('mirror_only', 'v1')).toBe(true);
+    expect(ns.mirror_only).toBe('v1');
+    expect(save).toHaveBeenCalledOnce();
+  });
+
+  it('已有未落盘写入时内容相同也重新写入，保证重试能落盘', () => {
+    noteSettingsWriteFailed_ACU();
+    expect(getConfigStorage_ACU().setItemIfChanged('same_key', 'v1')).toBe(true);
+    expect(save).toHaveBeenCalledOnce();
+  });
+
+  it('keys 合并宿主命名空间与已加载镜像，排除已删除键', () => {
+    configIdbCache_ACU.set('mirror_only', 'v1');
+    configIdbCache_ACU.set('gone', 'v1');
+    configIdbDeletedKeys_ACU.add('gone');
+    const keys = getConfigStorage_ACU().keys();
+    expect(keys).toEqual(expect.arrayContaining(['same_key', 'mirror_only']));
+    expect(keys).not.toContain('gone');
   });
 });

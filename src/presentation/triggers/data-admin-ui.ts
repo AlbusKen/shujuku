@@ -393,16 +393,15 @@ import { migrateLegacySummaryVectorIndexToContentAddressed_ACU } from '../../ser
         }
 
         if (showToast) {
-            if (normalizedScope === 'chat') {
-                const warning = typeof result === 'object' && 'postCommitWarning' in result && typeof result.postCommitWarning === 'string'
-                    ? result.postCommitWarning
-                    : '';
-                showToastr_ACU(warning ? 'warning' : 'success', warning || '当前聊天模板已恢复为默认值！仅影响当前聊天，不会改动全局模板。', {
-                    acuToastCategory: warning ? ACU_TOAST_CATEGORY_ACU.ERROR : ACU_TOAST_CATEGORY_ACU.IMPORT,
-                });
-            } else {
-                showToastr_ACU('success', '全局模板已恢复为默认值！模板已更新，但不会影响当前聊天记录的本地数据。');
-            }
+            const warning = typeof result === 'object' && 'postCommitWarning' in result && typeof result.postCommitWarning === 'string'
+                ? result.postCommitWarning
+                : '';
+            const successText = normalizedScope === 'chat'
+                ? '当前聊天模板已恢复为默认值！仅影响当前聊天，不会改动全局模板。'
+                : '全局模板已恢复为默认值！模板已更新，但不会影响当前聊天记录的本地数据。';
+            showToastr_ACU(warning ? 'warning' : 'success', warning || successText, {
+                acuToastCategory: warning ? ACU_TOAST_CATEGORY_ACU.ERROR : ACU_TOAST_CATEGORY_ACU.IMPORT,
+            });
         }
         logDebug_ACU(`Table template has been reset to default for scope: ${normalizedScope}. updatePresetSelection=${updatePresetSelection}`);
         return true;

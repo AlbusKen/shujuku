@@ -404,7 +404,11 @@ function applyMergePlanToCandidate_ACU(
 
 // ═══ 模板作用域持久化（纯数据操作） ═══
 
-export function persistTemplateScopeSelectionState_ACU(presetName: string, { source = 'ui', updateGlobal = false, save = true, persistChatScope = undefined as boolean | undefined, templateSource = null as any, guideData = null as any, archivePreviousChatScope = false, scopeMode = undefined as string | undefined, registerChatPresetEntry = undefined as boolean | undefined } = {}) {
+/**
+ * 写入模板作用域选择并等待保存完成。
+ * 保存失败不回滚已生效的内存状态，失败原因通过 saveWarning 交给调用方提示用户。
+ */
+export async function persistTemplateScopeSelectionState_ACU(presetName: string, { source = 'ui', updateGlobal = false, save = true, persistChatScope = undefined as boolean | undefined, templateSource = null as any, guideData = null as any, archivePreviousChatScope = false, scopeMode = undefined as string | undefined, registerChatPresetEntry = undefined as boolean | undefined } = {}): Promise<{ presetName: string; saveWarning: string }> {
     const _persistChatScope = persistChatScope ?? !updateGlobal;
     const _scopeMode = scopeMode ?? (_persistChatScope ? 'chat_override' : 'inherit_global');
     void archivePreviousChatScope;
@@ -452,18 +456,25 @@ export function persistTemplateScopeSelectionState_ACU(presetName: string, { sou
         }
     }
 
+    const warnings: string[] = [];
     if (save) {
         if (shouldSaveSettings) {
-            saveSettings_ACU();
+            const saved = saveSettings_ACU();
+            if (saved && saved.saved === false) {
+                warnings.push(`全局模板选择未保存：${saved.error || saved.warning || '设置未写入'}`);
+            }
         }
         if (shouldSaveChat) {
-            Promise.resolve()
-                .then(() => saveChatToHost_ACU())
-                .catch(error => logWarn_ACU('[TemplateScope] 保存聊天级模板状态失败:', error));
+            try {
+                await saveChatToHost_ACU();
+            } catch (error) {
+                logWarn_ACU('[TemplateScope] 保存聊天级模板状态失败:', error);
+                warnings.push('当前聊天的模板选择未保存，将随下次聊天保存重试。');
+            }
         }
     }
 
-    return normalizedPresetName;
+    return { presetName: normalizedPresetName, saveWarning: warnings.join('\n') };
 }
 
 // ═══ 模板应用（纯业务逻辑，不做 UI 刷新） ═══
@@ -540,7 +551,7 @@ export async function applyTemplateSnapshotToScope_ACU(templateSource: any, { sc
     }
 
     const guideData = buildChatSheetGuideDataFromTemplateObj_ACU(snapshot.templateObj, { stripSeedRows: false });
-    persistTemplateScopeSelectionState_ACU(normalizedPresetName, {
+    const persisted = await persistTemplateScopeSelectionState_ACU(normalizedPresetName, {
         source,
         updateGlobal,
         save,
@@ -554,6 +565,10 @@ export async function applyTemplateSnapshotToScope_ACU(templateSource: any, { sc
 
     try { await refreshMergedDataAndNotify_ACU(); } catch (e) {}
     notifyTemplateRuntimeCommitted_ACU();
+    const postCommitWarning = [
+        typeof reconciledForGlobalSwitch?.postCommitWarning === 'string' ? reconciledForGlobalSwitch.postCommitWarning : '',
+        persisted.saveWarning,
+    ].filter(Boolean).join('\n');
     return {
         saved: true as const,
         scope: normalizedScope,
@@ -563,10 +578,8 @@ export async function applyTemplateSnapshotToScope_ACU(templateSource: any, { sc
         ...(reconciledForGlobalSwitch ? {
             reconciledCurrentChat: true,
             ...('runtimeReady' in reconciledForGlobalSwitch ? { runtimeReady: reconciledForGlobalSwitch.runtimeReady } : {}),
-            ...(typeof reconciledForGlobalSwitch.postCommitWarning === 'string' && reconciledForGlobalSwitch.postCommitWarning
-                ? { postCommitWarning: reconciledForGlobalSwitch.postCommitWarning }
-                : {}),
         } : {}),
+        ...(postCommitWarning ? { postCommitWarning } : {}),
     };
 }
 

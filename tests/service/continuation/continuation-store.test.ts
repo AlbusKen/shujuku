@@ -617,4 +617,29 @@ describe('零层停用与源历史校验', () => {
     chat[0].mes = '已修改的开场';
     expect(() => assertBridgeSource_ACU(chat, fingerprint)).toThrow('存量桥接来源已变化');
   });
+
+  it('TT 冷 swipe 楼层不能生成物理历史快照，抛出专用错误码', async () => {
+    const { physicalHistorySnapshot_ACU } = await import('../../../src/service/zero-layer/carrier-context');
+    const { ZeroLayerError_ACU } = await import('../../../src/service/zero-layer/model');
+    const cold = { is_user: false, mes: '当前槽', swipe_id: 1, swipes: [null, '当前槽'], swipe_info: [null, {}],
+      tt_swipe_cold: { sourceId: 3, record: 1 } };
+    let caught: unknown;
+    try { physicalHistorySnapshot_ACU([{ is_user: true, mes: '用户' }, cold]); } catch (error) { caught = error; }
+    expect(caught).toBeInstanceOf(ZeroLayerError_ACU);
+    expect((caught as InstanceType<typeof ZeroLayerError_ACU>).code).toBe('host-cold-swipes');
+    // 补全后标记被宿主删除，快照照常生成。
+    const hydrated = { is_user: false, mes: '当前槽', swipe_id: 1, swipes: ['旧槽', '当前槽'] };
+    expect(() => physicalHistorySnapshot_ACU([hydrated])).not.toThrow();
+  });
+
+  it('冷标记识别只看 tt_swipe_cold，历史读取映射为 history-unavailable', async () => {
+    const { hasUnloadedHostSwipes_ACU } = await import('../../../src/data/gateways/chat-message-snapshot');
+    const { zeroLayerHistoryFailure_ACU } = await import('../../../src/service/zero-layer/history-errors');
+    const { ZeroLayerError_ACU } = await import('../../../src/service/zero-layer/model');
+    expect(hasUnloadedHostSwipes_ACU({ tt_swipe_cold: { sourceId: 0, record: 1 } })).toBe(true);
+    expect(hasUnloadedHostSwipes_ACU({ swipes: [null, 'x'] })).toBe(false);
+    expect(hasUnloadedHostSwipes_ACU(null)).toBe(false);
+    const result = zeroLayerHistoryFailure_ACU(new ZeroLayerError_ACU('host-cold-swipes', 'cold'));
+    expect(result).toMatchObject({ ok: false, error: { code: 'history-unavailable', retryable: false } });
+  });
 });

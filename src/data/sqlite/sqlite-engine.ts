@@ -214,6 +214,12 @@ export class SqliteEngine {
    */
   query(sql: string, params?: SqlJsBindParams, options: SqliteQueryOptions_ACU = {}): QueryResult {
     this._ensureDb();
+    // sql.js 1.14.1 的 Database.exec 每次 stackAlloc(4) 后不恢复栈指针；运行时为进程级单例，
+    // 泄漏跨 Database 累积，约 33 万次查询后 wasm 越界。由此处配对 stackSave/stackRestore。
+    const runtime = this.sqlJs as unknown as { stackSave?: () => number; stackRestore?: (pointer: number) => void } | null;
+    const stackPointer = typeof runtime?.stackSave === 'function' && typeof runtime.stackRestore === 'function'
+      ? runtime.stackSave()
+      : null;
     try {
       const results = this.db!.exec(sql, params);
       if (results.length === 0) {
@@ -237,6 +243,8 @@ export class SqliteEngine {
         }
       }
       throw e;
+    } finally {
+      if (stackPointer !== null) runtime!.stackRestore!(stackPointer);
     }
   }
 

@@ -32,6 +32,7 @@ import { getAggregatedSummaryVectorIndexSnapshot_ACU } from '../vector/summary-v
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
 import { getLatestV2FullCheckpointMessageIndex_ACU, resolveTableHistoryStateFromChat_ACU } from './table-history';
 import { planManualCatchUpWaves_ACU, type ManualCatchUpPlan_ACU } from './manual-fill-planner';
+import { isNonFillAiFloor_ACU, selectFillEligibleIndices_ACU } from '../runtime/message-handler';
 import type { ManualRefillProgressV2_ACU } from './storage-frame-v2-types';
 import type { SqlTableApplyScope_ACU } from '../../shared/table-storage-provider';
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
@@ -3923,12 +3924,20 @@ export async function processUpdatesBatch_ACU(
     }
 }
 
+/**
+ * 追平用的 !is_user 序列，序号与存储前沿同口径；skipUpdateFloors 只数可填楼，从尾部截到被跳过的首个可填楼之前。
+ */
 function collectEffectiveAiMessageIndices_ACU(chat: any[]): number[] {
     const allAiMessageIndices = chat
         .map((message: any, index: number) => !message?.is_user ? index : -1)
         .filter((index: number) => index >= 0);
     const skipped = Math.max(0, Math.trunc(Number(settings_ACU.skipUpdateFloors) || 0));
-    return skipped > 0 ? allAiMessageIndices.slice(0, -skipped) : allAiMessageIndices;
+    if (skipped <= 0) return allAiMessageIndices;
+    const eligiblePositions = allAiMessageIndices
+        .map((messageIndex: number, position: number) => isNonFillAiFloor_ACU(chat[messageIndex]) ? -1 : position)
+        .filter((position: number) => position >= 0);
+    if (eligiblePositions.length <= skipped) return [];
+    return allAiMessageIndices.slice(0, eligiblePositions[eligiblePositions.length - skipped]);
 }
 
 /**
@@ -4055,7 +4064,7 @@ export async function prepareManualCatchUpPlan_ACU(targetKeys: string[]): Promis
             updateMode: 'manual_independent',
             executionKind: isSqliteMode() ? 'sql' as const : 'standard' as const,
         };
-    }));
+    }), messageIndex => !isNonFillAiFloor_ACU(chat[messageIndex]));
 
     return { success: true, plan };
 }
@@ -5112,8 +5121,14 @@ export async function orchestrateManualUpdate_ACU(
         const uiBatchSize = resolveManualUpdateBatchSize_ACU();
         const uiSkip = settings_ACU.skipUpdateFloors || 0;
 
-        const effectiveAiIndices = uiSkip > 0 ? allAiMessageIndices.slice(0, -uiSkip) : allAiMessageIndices.slice();
-        const contextScopeIndices = uiThreshold > 0 ? effectiveAiIndices.slice(-uiThreshold) : effectiveAiIndices;
+        // 手动路径与自动调度同口径：skip 与层数只数可填楼，填表楼层不含工具楼与旁白。
+        // 清理范围覆盖首末可填楼之间的全部 !is_user 楼，旧版本写在工具楼上的选中表数据一并清掉，避免回放叠加。
+        const contextScopeIndices = selectFillEligibleIndices_ACU(
+            liveChat, allAiMessageIndices, 0, uiSkip, index => !isNonFillAiFloor_ACU(liveChat[index]),
+        ).slice(uiThreshold > 0 ? -uiThreshold : 0);
+        const refillCleanupIndices = contextScopeIndices.length > 0
+            ? allAiMessageIndices.filter(index => index >= contextScopeIndices[0] && index <= contextScopeIndices[contextScopeIndices.length - 1])
+            : [];
 
         if (!contextScopeIndices.length) {
             return { success: false, error: '未找到可用的上下文进行手动更新，请检查阈值或跳过楼层设置。' };
@@ -5209,7 +5224,7 @@ export async function orchestrateManualUpdate_ACU(
             // fail-closed。此时禁用 staging，改走普通路径 + 清理后临时根前置，由末尾
             // commitManualRefillSheetSnapshotInRangeAtomic_ACU 以既有 fallbackRequired 分支重建根。
             let requiresBoundaryStaging = canStageAcrossReplayRoot;
-            if (requiresBoundaryStaging && contextScopeIndices.includes(originalFullIndex)) {
+            if (requiresBoundaryStaging && refillCleanupIndices.includes(originalFullIndex)) {
                 // 原 checkpoint 在重填范围内：检查清理是否会删除它（checkpoint.data 的
                 // sheet 键集合是否被 targetKeys 全量覆盖）。空 data 的 full 同样会被
                 // purgeSheetKeysFromStorageFrameV2_ACU 整体删除，必须一并视为「将被清理」。
@@ -5268,19 +5283,19 @@ export async function orchestrateManualUpdate_ACU(
             let summaryVectorCleanups: ManualRefillSummaryVectorCleanup_ACU[] = [];
             let summaryVectorRemovalSnapshot: SummaryVectorMirrorRowRemovalSnapshot_ACU | null = null;
             try {
-                summaryVectorCleanups = collectManualRefillSummaryVectorCleanup_ACU(contextScopeIndices, targetKeys);
+                summaryVectorCleanups = collectManualRefillSummaryVectorCleanup_ACU(refillCleanupIndices, targetKeys);
                 manualRefillSummarySourceTableKeys = summaryVectorCleanups.map((cleanup) => cleanup.sourceTableKey);
                 // 必须在 clear 之前拍摄 head：范围内 purge 会删掉镜像，模板根会改 C 指纹。
                 summaryVectorRemovalSnapshot = await snapshotManualRefillSummaryVectors_ACU(summaryVectorCleanups);
-                refillCleanupBackup = snapshotMessageIsolatedData_ACU(getChatArray_ACU(), contextScopeIndices);
+                refillCleanupBackup = snapshotMessageIsolatedData_ACU(getChatArray_ACU(), refillCleanupIndices);
                 refillCleanupStarted = true;
-                await clearManualRefillSheetDataInRange_ACU(contextScopeIndices, targetKeys);
+                await clearManualRefillSheetDataInRange_ACU(refillCleanupIndices, targetKeys);
             } catch (error: any) {
                 logError_ACU('[Manual Refill] 清理本次范围内选中表旧数据失败:', error);
                 const failureError = error?.message || '手动重填清理本次范围内选中表旧数据失败。';
                 return await failManualRefillSession(failureError);
             }
-            logDebug_ACU(`[Manual Refill] 已清理 AI 楼层 ${contextScopeIndices.join('、')} 上选中表的 checkpoint 与增量；将在全部重填成功后提交完整单表 checkpoint。`);
+            logDebug_ACU(`[Manual Refill] 已清理 AI 楼层 ${refillCleanupIndices.join('、')} 上选中表的 checkpoint 与增量；将在全部重填成功后提交完整单表 checkpoint。`);
 
             // 手动重填临时根前置：全范围 + 全选表清理会删除范围内唯一整库 full checkpoint，
             // 此后任何 bucket 写入都会命中 persist 层 usesImplicitMigrationCheckpoint 守卫
@@ -5293,7 +5308,7 @@ export async function orchestrateManualUpdate_ACU(
                 const rootEstablish = await establishManualRefillTemplateRoot_ACU({
                     isolationKey: currentIsolationKey,
                     targetSheetKeys: targetKeys,
-                    targetMessageIndices: contextScopeIndices,
+                    targetMessageIndices: refillCleanupIndices,
                     templateData: frozenManualRefillTemplateData,
                 });
                 if (!rootEstablish.success) {
@@ -5628,7 +5643,7 @@ export async function orchestrateManualUpdate_ACU(
                 const isolationKey = getCurrentIsolationKey_ACU();
                 const snapshotResult = await commitManualRefillSheetSnapshotInRangeAtomic_ACU({
                     isolationKey,
-                    targetMessageIndices: contextScopeIndices,
+                    targetMessageIndices: refillCleanupIndices,
                     targetSheetKeys: targetKeys,
                     snapshotData: completedData,
                     templateData: frozenManualRefillTemplateData || undefined,

@@ -522,3 +522,22 @@ export function _resetTableWriteTransactionLocksForTest_ACU(): void {
   keyedLocks_ACU.clear();
   runtimeRevisions_ACU.clear();
 }
+
+/**
+ * 表格之外的整聊天写入（零层载体保存）与表格写事务互斥。
+ * 取当前聊天作用域的 maintenance 写锁：表格写事务全程持有该锁的读锁或写锁，因此二者不会交错改写聊天数组。
+ * 不推进表格 revision。锁不可重入，task 内不得再发起表格写事务。
+ */
+export async function runChatWriteExclusiveWithTableWrites_ACU<T>(
+  task: () => Promise<T>,
+  parts: { chatKey?: string | null; isolationKey?: string | null } = {},
+): Promise<T> {
+  const chatKey = normalizeScopePart_ACU(parts.chatKey ?? currentChatFileIdentifier_ACU, 'current-chat');
+  const isolationKey = normalizeScopePart_ACU(parts.isolationKey ?? getCurrentIsolationKey_ACU(), 'default');
+  const release = await acquireWrite_ACU(buildTableMaintenanceScopeKey_ACU({ chatKey, isolationKey }));
+  try {
+    return await task();
+  } finally {
+    release();
+  }
+}

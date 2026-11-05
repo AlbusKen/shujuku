@@ -221,13 +221,22 @@ vi.mock('../../../src/data/repositories/isolation-repo', () => ({
   normalizeDataIsolationHistory_ACU: mockNormalizeDataIsolationHistory,
 }));
 
+const profileRecoveryMocks = vi.hoisted(() => ({
+  listStoredProfileCodes: vi.fn((): string[] | null => []),
+  setGlobalMetaWriteSuspended: vi.fn(),
+  wasGlobalMetaMissingOnLoad: vi.fn(() => false),
+}));
+
 vi.mock('../../../src/data/repositories/profile-repo', () => ({
   globalMeta_ACU: mockGlobalMeta,
+  listStoredProfileCodes_ACU: profileRecoveryMocks.listStoredProfileCodes,
   loadGlobalMeta_ACU: mockLoadGlobalMeta,
   readProfileSettingsFromStorage_ACU: mockReadProfileSettings,
   readProfileTemplateFromStorage_ACU: mockReadProfileTemplate,
   sanitizeSettingsForProfileSave_ACU: mockSanitizeSettingsForProfileSave,
   saveGlobalMeta_ACU: mockSaveGlobalMeta,
+  setGlobalMetaWriteSuspended_ACU: profileRecoveryMocks.setGlobalMetaWriteSuspended,
+  wasGlobalMetaMissingOnLoad_ACU: profileRecoveryMocks.wasGlobalMetaMissingOnLoad,
   writeProfileSettingsToStorage_ACU: mockWriteProfileSettings,
   writeProfileTemplateToStorage_ACU: mockWriteProfileTemplate,
 }));
@@ -258,6 +267,17 @@ vi.mock('../../../src/data/storage/tavern-storage', () => ({
   pendingSettingsReloadFromIdb_ACU: false,
   _set_pendingSettingsReloadFromIdb_ACU: mockSetPendingSettingsReloadFromIdb,
   persistTavernSettings_ACU: vi.fn(),
+}));
+
+const mockPersistenceSnapshot = vi.hoisted(() => ({
+  state: 'confirmed',
+  latestWriteSeq: 0,
+  confirmedWriteSeq: 0,
+  lastFailedWriteSeq: 0,
+  lastWriteAt: 0,
+}));
+vi.mock('../../../src/data/storage/settings-save-confirm', () => ({
+  getSettingsPersistenceSnapshot_ACU: () => ({ ...mockPersistenceSnapshot }),
 }));
 
 vi.mock('../../../src/service/plot/plot-logic', () => ({
@@ -328,6 +348,8 @@ import {
   API_POST_PROCESSING_UPGRADE_VERSION_ACU,
   _set_settingsStorageReadyForSave_ACU,
 } from '../../../src/service/settings/settings-service';
+import { _resetProfileRecoveryState_ACU, getProfileRecoveryCodes_ACU } from '../../../src/service/settings/profile-recovery-state';
+import { afterEach } from 'vitest';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -503,12 +525,41 @@ describe('applyPlotWorldbookSelectionForCurrentCharacter_ACU', () => {
 
 // ═══ saveSettings_ACU ═══
 describe('saveSettings_ACU', () => {
+  beforeEach(() => {
+    Object.assign(mockPersistenceSnapshot, { state: 'confirmed', latestWriteSeq: 0, confirmedWriteSeq: 0, lastFailedWriteSeq: 0, lastWriteAt: 0 });
+  });
+
   it('tavern 存储正常时返回 { saved: true, storageType: "tavern" }', () => {
     mockGetConfigStorage.mockReturnValue({ _isTavern: true, getItem: vi.fn(), setItem: vi.fn() });
+    mockPersistSettingsToStorage.mockImplementationOnce(() => {
+      Object.assign(mockPersistenceSnapshot, { state: 'pending', latestWriteSeq: 1 });
+      return true;
+    });
     const result = saveSettings_ACU();
-    expect(result).toEqual({ saved: true, storageType: 'tavern' });
+    expect(result).toEqual({ saved: true, storageType: 'tavern', persistence: 'pending', writeSeq: 1 });
     expect(mockPersistSettingsToStorage).toHaveBeenCalledTimes(1);
     expect(mockSaveGlobalMeta).toHaveBeenCalledTimes(1);
+  });
+
+  it('本次保存中宿主保存调用同步失败时返回 saved:false', () => {
+    mockGetConfigStorage.mockReturnValue({ _isTavern: true });
+    mockPersistSettingsToStorage.mockImplementationOnce(() => {
+      Object.assign(mockPersistenceSnapshot, { state: 'unsaved', latestWriteSeq: 1, lastFailedWriteSeq: 1 });
+      return true;
+    });
+    expect(saveSettings_ACU()).toMatchObject({
+      saved: false, storageType: 'tavern', code: 'storage_error', persistence: 'unsaved', writeSeq: 1,
+    });
+  });
+
+  it('更早的同步失败不改变本次保存结果，但如实返回未落盘状态', () => {
+    Object.assign(mockPersistenceSnapshot, { state: 'unsaved', latestWriteSeq: 1, lastFailedWriteSeq: 1 });
+    mockGetConfigStorage.mockReturnValue({ _isTavern: true });
+    mockPersistSettingsToStorage.mockImplementationOnce(() => {
+      Object.assign(mockPersistenceSnapshot, { latestWriteSeq: 2 });
+      return true;
+    });
+    expect(saveSettings_ACU()).toMatchObject({ saved: true, storageType: 'tavern', persistence: 'unsaved', writeSeq: 2 });
   });
 
   it('非 tavern + IndexedDB 可用时返回 indexeddb 并带 warning', () => {
@@ -1276,4 +1327,79 @@ describe('loadSettings_ACU', () => {
       .toBe('test-template-assistant-prompt-force-default');
   });
 
+  it('多个一次性升级在加载结束合并为一次设置保存', () => {
+    mockReadProfileSettings.mockReturnValue({
+      strictJsonTableFillEnabled: true,
+      templateAssistantPromptSegments: [{ role: 'SYSTEM', content: '历史自定义', deletable: false }],
+      charCardPrompt: [{ role: 'USER', content: '用户自定义提示词' }],
+    });
+
+    loadSettings_ACU();
+
+    expect(mockSettings.strictJsonTableFillForceDisableVersion).toBe('test-strict-json-force-disable');
+    expect(mockSettings.tableFillPromptForceDefaultVersion).toBe('test-prompt-force-default');
+    expect(mockSettings.templateAssistantPromptForceDefaultVersion).toBe('test-template-assistant-prompt-force-default');
+    expect(mockPersistSettingsToStorage).toHaveBeenCalledTimes(1);
+  });
+
+  it('加载期统一保存失败时不抛错，下一次加载重试', () => {
+    mockReadProfileSettings.mockReturnValue({ strictJsonTableFillEnabled: true });
+    mockPersistSettingsToStorage.mockReturnValue(false);
+
+    expect(() => loadSettings_ACU()).not.toThrow();
+    expect(mockPersistSettingsToStorage).toHaveBeenCalledTimes(1);
+    mockPersistSettingsToStorage.mockReturnValue(true);
+  });
+
+});
+
+describe('GlobalMeta 缺失时的配置档找回', () => {
+  beforeEach(() => {
+    mockGetConfigStorage.mockReturnValue({ _isTavern: true, getItem: vi.fn(() => null), removeItem: vi.fn() });
+    mockGlobalMeta.activeIsolationCode = '';
+    mockGlobalMeta.isolationCodeList = [];
+    _resetProfileRecoveryState_ACU();
+  });
+  afterEach(() => {
+    profileRecoveryMocks.wasGlobalMetaMissingOnLoad.mockReturnValue(false);
+    profileRecoveryMocks.listStoredProfileCodes.mockReturnValue([]);
+    mockGlobalMeta.activeIsolationCode = '';
+    mockGlobalMeta.isolationCodeList = [];
+    _resetProfileRecoveryState_ACU();
+  });
+
+  it('GlobalMeta 缺失但存在非默认配置档：暂停写入，配置档进入隔离历史可选回', () => {
+    profileRecoveryMocks.wasGlobalMetaMissingOnLoad.mockReturnValue(true);
+    profileRecoveryMocks.listStoredProfileCodes.mockReturnValue(['', 'alpha', 'beta']);
+
+    loadSettings_ACU();
+
+    expect(profileRecoveryMocks.setGlobalMetaWriteSuspended).toHaveBeenLastCalledWith(true);
+    expect(mockGlobalMeta.isolationCodeList).toEqual(['alpha', 'beta']);
+    expect(mockGlobalMeta.activeIsolationCode).toBe('');
+    expect(getProfileRecoveryCodes_ACU()).toEqual(['alpha', 'beta']);
+  });
+
+  it('GlobalMeta 与非默认配置档都缺失时按首次安装处理，不暂停写入', () => {
+    profileRecoveryMocks.wasGlobalMetaMissingOnLoad.mockReturnValue(true);
+    profileRecoveryMocks.listStoredProfileCodes.mockReturnValue(['']);
+
+    loadSettings_ACU();
+
+    expect(profileRecoveryMocks.setGlobalMetaWriteSuspended).toHaveBeenLastCalledWith(false);
+    expect(getProfileRecoveryCodes_ACU()).toBeNull();
+  });
+
+  it('用户切换配置档后恢复写入，其余待找回配置档保留在隔离历史', async () => {
+    profileRecoveryMocks.wasGlobalMetaMissingOnLoad.mockReturnValue(true);
+    profileRecoveryMocks.listStoredProfileCodes.mockReturnValue(['alpha', 'beta']);
+    loadSettings_ACU();
+
+    await switchIsolationProfile_ACU('alpha');
+
+    expect(profileRecoveryMocks.setGlobalMetaWriteSuspended).toHaveBeenLastCalledWith(false);
+    expect(mockAddDataIsolationHistory).toHaveBeenCalledWith('beta', { save: false });
+    expect(mockGlobalMeta.activeIsolationCode).toBe('alpha');
+    expect(getProfileRecoveryCodes_ACU()).toBeNull();
+  });
 });

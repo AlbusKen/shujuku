@@ -38,3 +38,9 @@ export function readConfigObject_ACU(store: any, key: string): Record<string, an
     }
     return value as Record<string, any>;
 }
+
+/** 写入配置项：存储提供 setItemIfChanged（酒馆设置模式）时内容未变则跳过，否则照常写入。 */
+export function writeConfigItem_ACU(store: any, key: string, value: string): void {
+    if (typeof store?.setItemIfChanged === 'function') store.setItemIfChanged(key, value);
+    else store.setItem(key, value);
+}

@@ -7,6 +7,7 @@ import {
   normalizeTableWriteSet_ACU,
   resolveTableWriteTargetMessageIndex_ACU,
   captureTableRuntimeRevisionForWriteSet_ACU,
+  runChatWriteExclusiveWithTableWrites_ACU,
   runTableWriteTransaction_ACU,
   tableWriteSetsConflict_ACU,
 } from '../../../src/service/table/table-write-transaction';
@@ -165,6 +166,42 @@ describe('table-write-transaction', () => {
     gate.resolve();
     await Promise.all([cleanup, writer]);
     expect(events).toEqual(['cleanup:start', 'cleanup:end', 'writer:start']);
+  });
+
+  it('表格外整聊天写入与表格写事务互斥：等在途事务结束，并阻断其后的新事务', async () => {
+    const writerGate = deferred_ACU();
+    const writerStarted = deferred_ACU();
+    const chatGate = deferred_ACU();
+    const chatStarted = deferred_ACU();
+    const events: string[] = [];
+
+    const writer = runTableWriteTransaction_ACU({ source: 'manual_crud', reason: 'write', writeSet: sheetWrite('sheet_0') }, async () => {
+      events.push('writer:start');
+      writerStarted.resolve();
+      await writerGate.promise;
+      events.push('writer:end');
+    });
+    await writerStarted.promise;
+    const chatWrite = runChatWriteExclusiveWithTableWrites_ACU(async () => {
+      events.push('chat:start');
+      chatStarted.resolve();
+      await chatGate.promise;
+      events.push('chat:end');
+      return 'saved';
+    });
+    const later = runTableWriteTransaction_ACU({ source: 'manual_crud', reason: 'later', writeSet: sheetWrite('sheet_1') }, async () => {
+      events.push('later:start');
+    });
+    await Promise.resolve();
+    expect(events).toEqual(['writer:start']);
+
+    writerGate.resolve();
+    await chatStarted.promise;
+    expect(events).toEqual(['writer:start', 'writer:end', 'chat:start']);
+    chatGate.resolve();
+    await expect(chatWrite).resolves.toBe('saved');
+    await Promise.all([writer, later]);
+    expect(events).toEqual(['writer:start', 'writer:end', 'chat:start', 'chat:end', 'later:start']);
   });
 
   it('事务使用私有 workingData，不直接复用全局对象引用', async () => {

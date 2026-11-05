@@ -850,3 +850,72 @@ it('暂停时自动填表前置检查失败，原自动填表配置保持开启'
   } finally { setTakeoverRuntimeEnabled_ACU(true); }
   expect(checkAutoUpdatePreConditions_ACU(config).canProceed).toBe(true);
 });
+
+
+describe('buildAutoUpdatePlan_ACU 可填楼口径', () => {
+  const settings = {
+    autoUpdateFrequency: 1,
+    skipUpdateFloors: 0,
+    autoUpdateThreshold: 3,
+    updateBatchSize: 3,
+    dataIsolationEnabled: false,
+    dataIsolationCode: '',
+  };
+  const tableData = { sheet_0: { name: '测试表', updateConfig: {} } };
+  const user = () => ({ is_user: true, mes: '用户' });
+  const reply = () => ({ is_user: false, mes: '回复' });
+  const tool = () => ({ is_user: false, is_system: true, mes: '工具', extra: { isSmallSys: true, tool_invocations: [{ name: 'search' }] } });
+  const narrator = () => ({ is_user: false, is_system: true, mes: '旁白', extra: { type: 'narrator' } });
+
+  beforeEach(() => {
+    vi.mocked(getLatestV2FullCheckpointMessageIndex_ACU).mockReset();
+    vi.mocked(getLatestV2FullCheckpointMessageIndex_ACU).mockReturnValue(-1);
+  });
+
+  it('工具楼不计入频率', () => {
+    const chat = [user(), reply(), tool(), user(), reply()];
+    expect(buildAutoUpdatePlan_ACU(chat, tableData, { ...settings, autoUpdateFrequency: 3 }, '').tablesToUpdate).toEqual([]);
+    expect(buildAutoUpdatePlan_ACU(chat, tableData, { ...settings, autoUpdateFrequency: 2 }, '').tablesToUpdate)
+      .toMatchObject([{ sheetKey: 'sheet_0', indices: [1, 4], allIndices: [1, 4] }]);
+  });
+
+  it('批次末尾是工具楼时，填表目标停在最后一条回复', () => {
+    const chat = [user(), reply(), tool()];
+    const plan = buildAutoUpdatePlan_ACU(chat, tableData, settings, '');
+    expect(plan.tablesToUpdate).toMatchObject([{ indices: [1] }]);
+    expect(Object.values(plan.updateGroups)[0].indices).toEqual([1]);
+  });
+
+  it('只有工具楼新增时不触发', () => {
+    const chat = [user(), tool(), tool()];
+    expect(buildAutoUpdatePlan_ACU(chat, tableData, settings, '').tablesToUpdate).toEqual([]);
+  });
+
+  it('旁白楼不计入频率，也不作为填表目标', () => {
+    const chat = [user(), reply(), narrator()];
+    expect(buildAutoUpdatePlan_ACU(chat, tableData, { ...settings, autoUpdateFrequency: 2 }, '').tablesToUpdate).toEqual([]);
+    expect(buildAutoUpdatePlan_ACU(chat, tableData, settings, '').tablesToUpdate)
+      .toMatchObject([{ indices: [1] }]);
+  });
+
+  it('skipFloors 只数可填楼，跨过尾部工具楼', () => {
+    const chat = [user(), reply(), user(), reply(), tool()];
+    expect(buildAutoUpdatePlan_ACU(chat, tableData, { ...settings, skipUpdateFloors: 1 }, '').tablesToUpdate)
+      .toMatchObject([{ indices: [1] }]);
+  });
+
+  it('跨根判定按过滤后的首个可填楼', () => {
+    vi.mocked(getLatestV2FullCheckpointMessageIndex_ACU).mockReturnValue(3);
+    const chat = [user(), tool(), user(), reply(), user(), reply()];
+    expect(buildAutoUpdatePlan_ACU(chat, tableData, settings, '').tablesToUpdate)
+      .toMatchObject([{ indices: [3, 5], requiresBoundaryStaging: false }]);
+  });
+
+  it('逻辑模式沿用 Timeline 序列与原公式', () => {
+    const plan = buildAutoUpdatePlan_ACU([], tableData, { ...settings, skipUpdateFloors: 1 }, '', undefined, {
+      lastCompletedAiFloorBySheetKey: { sheet_0: 1 },
+      aiMessageIndices: [0, 2, 4],
+    });
+    expect(plan.tablesToUpdate).toMatchObject([{ indices: [2] }]);
+  });
+});

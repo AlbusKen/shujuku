@@ -2463,6 +2463,30 @@ describe('orchestrateManualUpdate_ACU', () => {
     expect(mockPurgeSheetKeysFromChatHistoryHard).not.toHaveBeenCalled();
   });
 
+  it('手动重填范围内含工具楼时，清理覆盖中间工具楼且止于最后一条正常回复', async () => {
+    const { getChatArray_ACU, clearManualRefillSheetDataInRange_ACU } = await import('../../../src/service/chat/chat-service');
+    const tool = { is_user: false, is_system: true, mes: '工具', extra: { isSmallSys: true, tool_invocations: [{ name: 'search' }] } };
+    vi.mocked(getChatArray_ACU).mockReturnValue([
+      { is_user: true },
+      { is_user: false, mes: 'AI回复1' },
+      { ...tool },
+      { is_user: true },
+      { is_user: false, mes: 'AI回复2' },
+      { ...tool },
+    ]);
+    mockCurrentJsonTableData = { sheet_0: { name: '测试表A', updateConfig: {} } };
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
+
+    const result = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn().mockResolvedValue({ success: true }), mockRefreshData, { clearBeforeUpdate: true });
+    expect(result.success, result.error).toBe(true);
+    expect(clearManualRefillSheetDataInRange_ACU).toHaveBeenCalledTimes(1);
+    const cleanupIndices = vi.mocked(clearManualRefillSheetDataInRange_ACU).mock.calls[0][0] as number[];
+    expect(cleanupIndices).not.toContain(5);
+    expect(cleanupIndices[cleanupIndices.length - 1]).toBe(4);
+    if (cleanupIndices.includes(1)) expect(cleanupIndices).toContain(2);
+  });
+
+
   it('手动重填清理后刷新运行时快照，使基底反映清理结果', async () => {
     const { getChatArray_ACU, clearManualRefillIncrementalDataInRange_ACU, clearManualRefillSheetDataInRange_ACU } = await import('../../../src/service/chat/chat-service');
     const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
