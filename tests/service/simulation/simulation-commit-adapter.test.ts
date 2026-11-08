@@ -62,7 +62,9 @@ describe('world simulation commit adapter', () => {
     try {
       const { chat, commitInput, saveChat, userBlock } = fixture();
       const updateMessageBlock = vi.fn();
-      _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat, updateMessageBlock } as any);
+      const emit = vi.fn();
+      _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat, updateMessageBlock,
+        eventTypes: { CHARACTER_MESSAGE_RENDERED: 'character_message_rendered' }, eventSource: { emit } } as any);
 
       const committedAnchor = await commitWorldSimulationProjection_ACU(commitInput);
 
@@ -86,8 +88,36 @@ describe('world simulation commit adapter', () => {
       await vi.advanceTimersByTimeAsync(1);
       expect(updateMessageBlock).toHaveBeenCalledTimes(1);
       expect(updateMessageBlock).toHaveBeenCalledWith(1, chat[1], { rerenderMessage: true });
+      expect(emit).toHaveBeenCalledExactlyOnceWith('character_message_rendered', 1, 'extension');
       await vi.advanceTimersByTimeAsync(100);
       expect(updateMessageBlock).toHaveBeenCalledTimes(1);
+      expect(emit).toHaveBeenCalledTimes(1);
+      expect(saveChat).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['chat', 'swipe'])('延时期间 %s 变化时不重画旧楼层或发渲染事件', async change => {
+    vi.useFakeTimers();
+    try {
+      const { chat, commitInput, saveChat } = fixture();
+      const updateMessageBlock = vi.fn(), emit = vi.fn();
+      _set_SillyTavern_API_ACU({ chat, chatId: 'chat-a', getCurrentChatId: () => 'chat-a', saveChat, updateMessageBlock,
+        eventTypes: { CHARACTER_MESSAGE_RENDERED: 'character_message_rendered' }, eventSource: { emit } } as any);
+      await commitWorldSimulationProjection_ACU(commitInput);
+      if (change === 'chat') {
+        _set_SillyTavern_API_ACU({ chat: [], chatId: 'chat-b', getCurrentChatId: () => 'chat-b', updateMessageBlock,
+          eventSource: { emit } } as any);
+      } else {
+        chat[1].swipe_id = 1;
+        chat[1].swipes.push('另一回复');
+        chat[1].mes = '另一回复';
+      }
+      await vi.advanceTimersByTimeAsync(100);
+      expect(updateMessageBlock).not.toHaveBeenCalled();
+      expect(emit).not.toHaveBeenCalled();
     } finally {
       vi.clearAllTimers();
       vi.useRealTimers();
