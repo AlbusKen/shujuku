@@ -800,6 +800,19 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
     expect(m.handleNewMessage).toHaveBeenCalledOnce();
   });
 
+  it('扩展重画推演正文的 rendered 事件不触发填表、优化或下一轮推演', async () => {
+    m.currentChatKey = 'chat-a';
+    m.settings.worldSimulationPageEnabled = true;
+    m.api.chat = [{ is_user: false, mes: '已追加推演投影的正文' }];
+
+    await m.api.eventSource.emit('character_message_rendered', 0, 'extension');
+    await dispatchCompletionTasks_ACU();
+
+    expect(m.autoUpdate).not.toHaveBeenCalled();
+    expect(m.handleNewMessage).not.toHaveBeenCalled();
+    expect(m.handleSimulationCompletion).not.toHaveBeenCalled();
+  });
+
   it.each(['切换已有聊天', '新建聊天', '同名聊天重载'])('%s 不因旧生成收尾或开场白填表或优化，下一次消息交付正常触发', async action => {
     m.currentChatKey = 'chat-a';
     m.api.chat = [{ is_user: false, mes: '原聊天正文' }];

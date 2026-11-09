@@ -530,7 +530,9 @@ async function persistHostFinalCommit_ACU(
         // 延时期间楼层身份或 swipe 已变化，放弃旧锚点的刷新。
         return;
       }
-      void refreshMessageBlock_ACU(currentRefreshIndex, { notify: false });
+      // 宿主重画会移除已挂载的 HTML iframe；通知渲染扩展重建它。
+      // rendered 仅表示显示刷新，不派发 MESSAGE_RECEIVED 或伪造用户编辑。
+      void refreshMessageBlock_ACU(currentRefreshIndex, { event: 'rendered' });
     }, 100);
   }
   return persistedAnchor;
