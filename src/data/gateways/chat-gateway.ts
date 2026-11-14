@@ -621,24 +621,34 @@ export async function emitMessageUpdated_ACU(messageIndex: number): Promise<void
 
 
 /**
- * 更新指定楼层正文后派发 MESSAGE_UPDATED，等待扩展完成本轮渲染通知。
+ * 更新指定楼层正文后通知扩展，等待本轮渲染通知完成。
  * 仅做界面刷新，失败不影响已持久化的数据。
  * @param messageIndex 需要重渲染的消息下标
- * @param options.notify 为 false 时只重渲染，不广播 MESSAGE_UPDATED
+ * @param options.notify 为 false 时只重渲染，不广播刷新事件
+ * @param options.event 默认为 updated；rendered 用于正文重画后重建 HTML 前端，
+ * 与宿主的扩展消息刷新约定一致，不伪造消息交付或用户编辑事件。
  */
-export async function refreshMessageBlock_ACU(messageIndex: number, options: { notify?: boolean } = {}): Promise<void> {
+export async function refreshMessageBlock_ACU(messageIndex: number, options: { notify?: boolean; event?: 'updated' | 'rendered' } = {}): Promise<void> {
     const message = SillyTavern_API_ACU?.chat?.[messageIndex];
     try {
         if (message && typeof SillyTavern_API_ACU?.updateMessageBlock === 'function') {
             SillyTavern_API_ACU.updateMessageBlock(messageIndex, message, { rerenderMessage: true });
         }
     } catch (error: any) {
-        logWarn_ACU(`[ChatGateway] updateMessageBlock 失败，降级为 MESSAGE_UPDATED：${error?.message || error}`);
+        logWarn_ACU(`[ChatGateway] updateMessageBlock 失败，尝试派发消息刷新通知：${error?.message || error}`);
     }
     if (options.notify === false) return;
     try {
-        await emitMessageUpdated_ACU(messageIndex);
+        if (options.event === 'rendered') {
+            if (!message || !SillyTavern_API_ACU?.eventSource?.emit) return;
+            const eventName = message.is_user
+                ? (SillyTavern_API_ACU.eventTypes?.USER_MESSAGE_RENDERED || 'user_message_rendered')
+                : (SillyTavern_API_ACU.eventTypes?.CHARACTER_MESSAGE_RENDERED || 'character_message_rendered');
+            await SillyTavern_API_ACU.eventSource.emit(eventName, messageIndex, 'extension');
+        } else {
+            await emitMessageUpdated_ACU(messageIndex);
+        }
     } catch (error: any) {
-        logWarn_ACU(`[ChatGateway] MESSAGE_UPDATED 渲染通知失败：${error?.message || error}`);
+        logWarn_ACU(`[ChatGateway] 消息刷新通知失败：${error?.message || error}`);
     }
 }

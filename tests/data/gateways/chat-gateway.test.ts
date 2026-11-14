@@ -39,6 +39,7 @@ import {
   deleteLastMessage_ACU,
   setChatMessages_ACU,
   emitMessageUpdated_ACU,
+  refreshMessageBlock_ACU,
   listAllHostChatNames_ACU,
   readChatFromHostStrict_ACU,
 } from '../../../src/data/gateways/chat-gateway';
@@ -328,5 +329,43 @@ describe('保存后只回读校验指定楼层字段', () => {
     await expect(saveChatToHostStrict_ACU({ verifyFields })).resolves.toBeUndefined();
     expect(mockSillyTavern.saveChat).toHaveBeenCalledTimes(1);
     expect(request).not.toHaveBeenCalled();
+  });
+});
+
+describe('正文重画后的扩展渲染通知', () => {
+  it.each([false, true])('先更新 DOM，再等待 %s 对应的 rendered 事件完成', async isUser => {
+    const order: string[] = [];
+    let finish!: () => void;
+    const rendered = new Promise<void>(resolve => { finish = resolve; });
+    mockSillyTavern.chat = [{ mes: 'HTML 前端', is_user: isUser }];
+    mockSillyTavern.updateMessageBlock = vi.fn(() => order.push('dom'));
+    mockSillyTavern.eventTypes = {
+      CHARACTER_MESSAGE_RENDERED: 'character-rendered',
+      USER_MESSAGE_RENDERED: 'user-rendered',
+    };
+    mockSillyTavern.eventSource = { emit: vi.fn(async () => { order.push('render'); await rendered; }) };
+    let settled = false;
+    const operation = refreshMessageBlock_ACU(0, { event: 'rendered' }).then(() => { settled = true; });
+
+    await Promise.resolve();
+    expect(order).toEqual(['dom', 'render']);
+    expect(settled).toBe(false);
+    expect(mockSillyTavern.eventSource.emit).toHaveBeenCalledExactlyOnceWith(
+      isUser ? 'user-rendered' : 'character-rendered', 0, 'extension',
+    );
+    finish();
+    await operation;
+    expect(settled).toBe(true);
+  });
+
+  it('普通更新仍只发 updated，显式静默仍不广播', async () => {
+    mockSillyTavern.chat = [{ mes: '正文', is_user: false }];
+    mockSillyTavern.updateMessageBlock = vi.fn();
+    mockSillyTavern.eventSource = { emit: vi.fn() };
+    await refreshMessageBlock_ACU(0);
+    expect(mockSillyTavern.eventSource.emit).toHaveBeenCalledExactlyOnceWith('message_updated', 0);
+    mockSillyTavern.eventSource.emit.mockClear();
+    await refreshMessageBlock_ACU(0, { notify: false, event: 'rendered' });
+    expect(mockSillyTavern.eventSource.emit).not.toHaveBeenCalled();
   });
 });
