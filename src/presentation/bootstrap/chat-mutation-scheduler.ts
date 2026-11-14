@@ -24,6 +24,7 @@ import { clearWorldSimulationRunState_ACU } from '../../service/simulation/agent
 import { isVectorPipelineEnabledForCurrentChat_ACU } from '../../service/fill-mode/fill-mode-gate';
 import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../../service/runtime/state-manager';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
+import { bumpTableReplayGeneration_ACU } from '../../shared/table-replay-generation';
 
 /** 连续事件停止后多久执行一轮；旧行为是 500ms。 */
 export const TRAILING_DELAY_MS_ACU = 1200;
@@ -51,6 +52,8 @@ let lastResult_ACU: ChatMutationRoundResult_ACU | null = null;
 export function scheduleChatMutationRefresh_ACU(reason: 'chat_modified_deleted' | 'chat_modified_swiped'): void {
   latestReason_ACU = reason;
   generation_ACU += 1;
+  // 删楼/滑动会原地改变楼层与帧：立即使最新回放快照失效，不等防抖轮次。
+  bumpTableReplayGeneration_ACU();
 
   const now = Date.now();
   if (firstRequestAt_ACU === 0) firstRequestAt_ACU = now;
@@ -88,6 +91,7 @@ export async function flushChatMutationRefresh_ACU(
 ): Promise<ChatMutationRoundResult_ACU> {
   latestReason_ACU = reason;
   generation_ACU += 1;
+  bumpTableReplayGeneration_ACU();
   const targetGeneration = generation_ACU;
   clearTimeout(chatMutationDebounceTimer_ACU);
   _set_chatMutationDebounceTimer_ACU(null);
@@ -118,6 +122,7 @@ function startMutationRound_ACU(awaitFrontendReadback = true): Promise<ChatMutat
 async function executeMutationRound_ACU(awaitFrontendReadback: boolean): Promise<ChatMutationRoundResult_ACU> {
   running_ACU = true;
   const startedGeneration = generation_ACU;
+  bumpTableReplayGeneration_ACU();
   firstRequestAt_ACU = 0;
   let ok = true;
   let degraded = false;

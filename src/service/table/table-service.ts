@@ -389,14 +389,36 @@ async function initializeJsonTableInChatHistory_ACU(): Promise<{ initialized: bo
  * 从聊天记录加载或创建表格数据到内存。
  * 返回 { loaded: boolean, source: 'merged'|'initialized'|'empty', error?: string }
  * 注意：不再内部调用 refreshMergedDataAndNotify，调用方按需自行刷新。
+ * 加载期间内存表被置空；写入方经 waitForJsonTableLoadIdle_ACU 等待加载结束后再解析目标表。
  */
-export async function loadOrCreateJsonTableFromChatHistory_ACU(): Promise<{
+type JsonTableLoadResult_ACU = {
   loaded: boolean;
   source: 'merged' | 'initialized' | 'empty';
   error?: string;
   /** 本轮当前聊天回放得到的 canonical 快照，供 SQLite hydrate 显式使用。 */
   data?: TableDataObject_ACU | null;
-}> {
+};
+
+let jsonTableLoadFlight_ACU: Promise<JsonTableLoadResult_ACU> | null = null;
+
+export function loadOrCreateJsonTableFromChatHistory_ACU(): Promise<JsonTableLoadResult_ACU> {
+  const flight: Promise<JsonTableLoadResult_ACU> = loadOrCreateJsonTableFromChatHistoryCore_ACU().finally(() => {
+    if (jsonTableLoadFlight_ACU === flight) jsonTableLoadFlight_ACU = null;
+  });
+  jsonTableLoadFlight_ACU = flight;
+  return flight;
+}
+
+/** 等待进行中的聊天表格加载（含其间新发起的加载）全部结束；加载失败不向等待方抛出。 */
+export async function waitForJsonTableLoadIdle_ACU(): Promise<void> {
+  let flight: Promise<JsonTableLoadResult_ACU> | null = jsonTableLoadFlight_ACU;
+  while (flight) {
+    await flight.catch((): undefined => undefined);
+    flight = jsonTableLoadFlight_ACU;
+  }
+}
+
+async function loadOrCreateJsonTableFromChatHistoryCore_ACU(): Promise<JsonTableLoadResult_ACU> {
   _set_currentJsonTableData_ACU(null);
   logDebug_ACU('Attempting to load database from chat history...');
 

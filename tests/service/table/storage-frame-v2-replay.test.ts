@@ -13,7 +13,7 @@ vi.mock('../../../src/shared/utils', async () => {
   return { ...actual, logWarn_ACU: mockLogWarn };
 });
 
-import { applyTableOperationV2_ACU, applyTablePatchV2_ACU, collectScheduleSummaryFromFramesV2_ACU, deriveSheetLifecycleFromFramesV2_ACU, flushPendingCompatTransitionFixations_ACU, loadTableStateFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU, loadTableStatesAtBoundariesFromFramesV2Detailed_ACU, V2ReplayAbortedError_ACU } from '../../../src/service/table/storage-frame-v2-replay';
+import { applyTableOperationV2_ACU, applyTablePatchV2_ACU, clearLiveReplayCache_ACU, collectScheduleSummaryFromFramesV2_ACU, deriveSheetLifecycleFromFramesV2_ACU, flushPendingCompatTransitionFixations_ACU, loadTableStateFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU, loadTableStatesAtBoundariesFromFramesV2Detailed_ACU, V2ReplayAbortedError_ACU } from '../../../src/service/table/storage-frame-v2-replay';
 import { buildSheetSchemaMigrationOperation_ACU, buildSheetSchemaMigrationOperationV2_ACU } from '../../../src/service/table/table-schema-migration';
 import { applySqlEditsToTableDataSnapshot_ACU } from '../../../src/service/table/sql-table-service';
 import { _set_independentTableStates_ACU, independentTableStates_ACU } from '../../../src/service/runtime/state-manager';
@@ -449,6 +449,70 @@ describe('loadTableStateFromFramesV2_ACU', () => {
       _set_SillyTavern_API_ACU(previousHostApi);
     }
   });
+  it('最新回放快照：写入末楼后下一次回放从快照续放，结果与整链冷回放一致', async () => {
+    const { chat } = buildLongHistoryFixture_ACU();
+    const lastIndex = chat.length - 1;
+    const previousHostApi = SillyTavern_API_ACU;
+    clearLiveReplayCache_ACU();
+    try {
+      _set_SillyTavern_API_ACU({ chat, saveChat: async () => undefined } as any);
+      const before = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+      expect(before!.metrics!.frameCount).toBe(chat.length);
+      const operation = { kind: 'row_upsert' as const, sheetKey: 'sheet_0', rowId: '2', cells: ['2', '快照续放', 7] };
+      const afterData = structuredClone(before!.data);
+      await applyTableOperationV2_ACU(afterData, operation);
+      const persisted = await persistTableMutationLogV2_ACU({
+        targetMessageIndex: lastIndex,
+        source: 'auto_fill',
+        afterData,
+        filledSheetKeys: ['sheet_0'],
+        candidateChangedSheetKeys: ['sheet_0'],
+        operations: [operation],
+        transactionContext: {
+          baseRevision: 'test-latest-replay-snapshot',
+          writeSet: [{ kind: 'sheet', sheetKey: 'sheet_0' }],
+          assertFresh: () => undefined,
+          runCommit: async (task: () => Promise<any>) => task(),
+        },
+      });
+      expect(persisted.saved, JSON.stringify(persisted)).toBe(true);
+
+      // 写入只替换末楼帧，前缀帧对象与内容不变：自身保存吸收代次后仍从倒数第二帧快照续放。
+      const continued = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+      expect(continued!.metrics!.frameCount).toBe(1);
+      expect(continued!.data.sheet_0.content.some((row: any[]) => row[1] === '快照续放')).toBe(true);
+
+      clearLiveReplayCache_ACU();
+      const cold = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+      expect(cold!.metrics!.frameCount).toBe(chat.length);
+      expect(continued!.data).toEqual(cold!.data);
+    } finally {
+      _set_SillyTavern_API_ACU(previousHostApi);
+      clearLiveReplayCache_ACU();
+    }
+  });
+
+  it('最新回放快照：前缀帧被原地改写后不命中，回退整链冷回放', async () => {
+    const { chat } = buildLongHistoryFixture_ACU();
+    clearLiveReplayCache_ACU();
+    try {
+      const first = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+      expect(first!.metrics!.frameCount).toBe(chat.length);
+      const reused = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+      expect(reused!.metrics!.frameCount).toBe(1);
+      // 原地改写前缀帧内部字段（帧对象与 logEntries 引用均不变）。
+      chat[5].TavernDB_ACU_IsolatedData[''].storageFrame.logEntries[0].operations[4].cells[1] = '原地改写';
+      const afterMutation = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+      expect(afterMutation!.metrics!.frameCount).toBe(chat.length);
+      clearLiveReplayCache_ACU();
+      const cold = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+      expect(afterMutation!.data).toEqual(cold!.data);
+    } finally {
+      clearLiveReplayCache_ACU();
+    }
+  });
+
+
 
   it('真实 persist 将连续 native buckets 写入同一锚点之后，bounded replay 可恢复累计行', async () => {
     const checkpointData = makeCheckpointData();
@@ -5987,6 +6051,8 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
       enableAliasContext: false,
     });
     // yield 预算 1ms：只要累计处理超过 1ms 就让出，长 fixture 必然触发。
+    // 先清最新回放快照，保证本次为整链冷回放而非从基线快照续放。
+    clearLiveReplayCache_ACU();
     const yielded = await loadTableStateFromFramesV2Detailed_ACU(chat, '', {
       updateRuntimeState: false,
       enableAliasContext: false,
@@ -6100,6 +6166,8 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
     }
 
     // 跨 checkpoint 段：allShareRoot 应为 false，走回退逐次冷 replay。
+    // 清空基线留下的最新回放快照，回退路径内各 boundary 之间的快照续放按下方帧数核对。
+    clearLiveReplayCache_ACU();
     const captured = await loadTableStatesAtBoundariesFromFramesV2Detailed_ACU(secondCheckpointChat, '', boundaries, {
       updateRuntimeState: false,
     });
@@ -6113,27 +6181,34 @@ describe('deriveSheetLifecycleFromFramesV2_ACU', () => {
     }
     // 回退路径可观测性：逐次冷 replay 时每个快照 frameCount = 该 boundary 的
     // replayStart 起算帧数。boundary=5 从根 0 起算 → 0..5 共 6 帧；boundary=12/20
-    // 从第二个 checkpoint（messageIndex 10）起算 → 10..12 共 3 帧、10..20 共 11 帧。
+    // 从第二个 checkpoint（messageIndex 10）起算 → 10..12 共 3 帧；boundary=20 与 12 同根，
+    // 从 boundary=12 回放截取的 messageIndex 11 快照续放 → 12..20 共 9 帧。
     const frameCounts = [...captured.values()].map(snap => snap!.metrics!.frameCount);
-    expect(frameCounts).toEqual([6, 3, 11]);
+    expect(frameCounts).toEqual([6, 3, 9]);
   });
 
   it('阶段 H：boundary 超出 frameRefs 范围时等价于全量上界（与原 maxMessageIndex 语义一致）', async () => {
     const { chat } = buildLongHistoryFixture_ACU();
     const boundaries = [10, 30, 9999]; // 9999 超出 frameRefs 范围。
+    clearLiveReplayCache_ACU();
+    const fullCold = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+    expect(fullCold!.metrics!.frameCount).toBe(62);
 
     // maxMessageIndex 是「处理 ≤ boundary 的所有帧」的上界：chat 只有 62 条消息，
     // 9999 等价于不设上限（处理全量）。capture 对 9999 不会命中（core 只遍历实际
     // frameRefs）→ sink 缺 key → 回退逐次冷 replay。回退路径 maxMessageIndex=9999
     // 返回全量末尾态——这正是原 maxMessageIndex 语义，不是错误快照。
+    clearLiveReplayCache_ACU();
     const captured = await loadTableStatesAtBoundariesFromFramesV2Detailed_ACU(chat, '', boundaries, {
       updateRuntimeState: false,
     });
 
     expect(captured.size).toBe(3);
     expect(captured.get(9999)).toBeDefined();
-    // 9999 的快照 = 全量 replay（无上限），其 frameCount 应为 62（0..61 全部帧）。
-    expect(captured.get(9999)!.metrics!.frameCount).toBe(62);
+    // 9999 的快照 = 全量末尾态；回退路径中它从 boundary=30 截取的 messageIndex 29 快照续放
+    // → 30..61 共 32 帧，数据须与整链冷回放完全一致。
+    expect(captured.get(9999)!.data).toEqual(fullCold!.data);
+    expect(captured.get(9999)!.metrics!.frameCount).toBe(32);
   });
 
   it('阶段 G2：并发同 key 只读 replay 共享一次全量回放（in-flight 去重）', async () => {

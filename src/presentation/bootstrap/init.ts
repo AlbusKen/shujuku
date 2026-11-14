@@ -29,6 +29,7 @@ import { isSqliteMode } from '../../service/table/storage-mode';
 import { flushRuntimeOnlyPendingChanges_ACU } from '../../service/table/runtime-only-pending-flush';
 import { ensureNoActiveProvisionalBridgeForCurrentScope_ACU } from '../../service/table/manual-catch-up-provisional-bridge';
 import { notifyChatRuntimeReloaded_ACU } from '../../shared/chat-runtime-reload-signal';
+import { bumpTableReplayGeneration_ACU } from '../../shared/table-replay-generation';
 import { refreshMergedDataAndNotifyWithUI_ACU } from '../components/pipeline-ui-helpers';
 import { cleanChatName_ACU, logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { logAutoFillSkip_ACU, logContentOptimizationSkip_ACU } from '../../shared/trigger-diagnostics';
@@ -266,6 +267,8 @@ export   function mainInitialize_ACU() {
           //   旧聊天未冲洗的脏只有换底前这一次机会；②宿主切聊天是否先保存旧聊天未经验证，
           //   不依赖该假设；③forceFlush 无脏=同步 no-op，常态切聊天成本为零，不造成每次切换多存一遍。
           void forceFlushChatSave_ACU();
+          // 换聊天：最新回放快照立即失效（帧对象身份校验之外的显式代次边界）。
+          bumpTableReplayGeneration_ACU();
           const chatEpoch = ++autoFillChatEpoch;
           autoFillBodyGeneration = null;
           autoFillStopCandidateSeq = undefined;

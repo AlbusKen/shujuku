@@ -120,6 +120,7 @@ vi.mock('../../src/service/table/table-service', () => ({
   ensureLegacyStorageMigratedBeforeWrite_ACU: vi.fn().mockResolvedValue({ success: true, migrated: false }),
   persistTablesToChatMessage_ACU: mockPersistTablesToChatMessage,
   saveIndependentTableToChatHistory_ACU: vi.fn().mockResolvedValue({ saved: true }),
+  waitForJsonTableLoadIdle_ACU: vi.fn().mockResolvedValue(undefined),
 }));
 
 // 保留真实 NameMapper 行为，只监视无所有权兼容入口是否被调用。
@@ -413,6 +414,46 @@ describe('createTableCrudApi — SQLite 模式', () => {
       const { refreshMergedDataAndNotifyWithUI_ACU } = await import('../../src/presentation/components/pipeline-ui-helpers');
       await mutate({});
       expect(refreshMergedDataAndNotifyWithUI_ACU).toHaveBeenCalledWith({ skipNotify: false, notifyMeta: { persisted: true } });
+    });
+    it.each([true, false])('skipNotify+skipRefresh 完成写入但跳过写后合并刷新，SQLite=%s', async sqlite => {
+      mockIsSqliteMode = sqlite;
+      const { refreshMergedDataAndNotifyWithUI_ACU } = await import('../../src/presentation/components/pipeline-ui-helpers');
+      const result = await mutate({ skipNotify: true, skipRefresh: true });
+      expect(result).not.toBe(false);
+      expect(result).not.toBe(-1);
+      expect(refreshMergedDataAndNotifyWithUI_ACU).not.toHaveBeenCalled();
+    });
+    it('deferRefresh 为 skipRefresh 别名', async () => {
+      const { refreshMergedDataAndNotifyWithUI_ACU } = await import('../../src/presentation/components/pipeline-ui-helpers');
+      await mutate({ skipNotify: true, deferRefresh: true });
+      expect(refreshMergedDataAndNotifyWithUI_ACU).not.toHaveBeenCalled();
+    });
+    it('未同时 skipNotify 时 skipRefresh 不生效', async () => {
+      const { refreshMergedDataAndNotifyWithUI_ACU } = await import('../../src/presentation/components/pipeline-ui-helpers');
+      await mutate({ skipRefresh: true });
+      expect(refreshMergedDataAndNotifyWithUI_ACU).toHaveBeenCalledWith({ skipNotify: false, notifyMeta: { persisted: true } });
+    });
+  });
+
+  describe('原生模式重载窗口等待就绪', () => {
+    it('内存表为空时等待加载完成后再解析目标表', async () => {
+      mockIsSqliteMode = false;
+      const loaded = mockCurrentJsonTableData;
+      mockCurrentJsonTableData = null;
+      const { waitForJsonTableLoadIdle_ACU } = await import('../../src/service/table/table-service');
+      vi.mocked(waitForJsonTableLoadIdle_ACU).mockImplementationOnce(async () => { mockCurrentJsonTableData = loaded; });
+      const result = await api.updateCell('背包物品表', 1, '数量', '10');
+      expect(result).toBe(true);
+      expect(mockEnsureStorageProviderReady).toHaveBeenCalled();
+      expect(waitForJsonTableLoadIdle_ACU).toHaveBeenCalledOnce();
+    });
+
+    it('内存表非空时不等待加载', async () => {
+      mockIsSqliteMode = false;
+      const { waitForJsonTableLoadIdle_ACU } = await import('../../src/service/table/table-service');
+      await api.updateCell('背包物品表', 1, '数量', '10');
+      expect(waitForJsonTableLoadIdle_ACU).not.toHaveBeenCalled();
+      expect(mockEnsureStorageProviderReady).not.toHaveBeenCalled();
     });
   });
 

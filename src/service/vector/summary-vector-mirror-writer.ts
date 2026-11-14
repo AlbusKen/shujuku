@@ -14,6 +14,7 @@ import {
 import { EmbeddingBatchExecutionError_ACU } from './summary-vector-embedding-batches';
 
 import { saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
+import { absorbOwnTableSave_ACU, getTableReplayGeneration_ACU } from '../../shared/table-replay-generation';
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import {
@@ -499,7 +500,10 @@ export async function flushSummaryVectorMirrorNow_ACU(options: {
                     writtenDeltaCount += 1;
                 }
                 if (writtenDeltaCount === 0) return;
+                // 镜像帧不参与表格回放：自身保存成功后吸收代次，表格回放快照仍按帧内容指纹校验。
+                const generationBeforeSave = getTableReplayGeneration_ACU();
                 await saveChatToHostStrict_ACU();
+                absorbOwnTableSave_ACU(generationBeforeSave);
             });
         });
     } catch (error: any) {

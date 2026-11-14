@@ -11,6 +11,7 @@
 import { jQuery_API_ACU, SillyTavern_API_ACU } from '../../shared/host-api';
 import { isTauriTavernHost_ACU } from '../../shared/host-detect';
 import { cleanChatName_ACU, logDebug_ACU, logWarn_ACU } from '../../shared/utils';
+import { bumpTableReplayGeneration_ACU } from '../../shared/table-replay-generation';
 import { getHostRequestHeaders_ACU } from './ai-gateway';
 
 /**
@@ -63,6 +64,13 @@ function notifyPostChatSaveListeners_ACU(): void {
  * 内置存在性检查，saveChat 不可用时静默跳过
  */
 export async function saveChatToHost_ACU(): Promise<void> {
+    // 任何保存都可能携带原地改写的表格帧：先递增外部改动代次，使最新回放快照失效。
+    bumpTableReplayGeneration_ACU();
+    await saveChatToHostRaw_ACU();
+}
+
+/** 合并调度器内部的真实存盘：代次已在 coalesced 入口递增，延后补存不再递增。 */
+async function saveChatToHostRaw_ACU(): Promise<void> {
     if (typeof SillyTavern_API_ACU?.saveChat !== 'function') {
         logWarn_ACU('[ChatGateway] saveChat 不可用，跳过保存');
         return;
@@ -177,7 +185,7 @@ function startCoalescedRealSave_ACU(): Promise<void> {
             if (!discardDirtyIfForeign_ACU('合并真存盘')) break;
             _saveDirty = false;
             try {
-                await saveChatToHost_ACU();
+                await saveChatToHostRaw_ACU();
                 _lastRealSaveAt = Date.now();
             } catch (error) {
                 _saveDirty = true;   // 本轮未落盘，脏留给下一触发点/forceFlush 重试
@@ -201,6 +209,7 @@ function startCoalescedRealSave_ACU(): Promise<void> {
  * 4. 其余情况（非运行期，或运行期已超过 DEFER_MAX）→ 同步执行真存盘环并等待完成。
  */
 export async function saveChatToHostCoalesced_ACU(): Promise<void> {
+    bumpTableReplayGeneration_ACU();
     if (typeof SillyTavern_API_ACU?.saveChat !== 'function') {
         logWarn_ACU('[ChatGateway] saveChat 不可用，跳过保存');
         return;
@@ -338,6 +347,7 @@ function captureFieldVerificationContext_ACU() {
  * verifyFields 只回读比对指定楼层的指定字段（并核对楼层数），用于关键写入；回读仍是一次完整聊天请求。
  */
 export async function saveChatToHostStrict_ACU({ verify = false, verifyFields = [] as ChatFieldVerification_ACU[] } = {}): Promise<void> {
+    bumpTableReplayGeneration_ACU();
     if (typeof SillyTavern_API_ACU?.saveChat !== 'function') {
         throw new HostChatSaveNotStartedError_ACU('宿主 saveChat 不可用，无法提交破坏性聊天数据变更。');
     }

@@ -26,6 +26,7 @@ import { findLatestTransitionCheckpoint_ACU } from './compat-transition-checkpoi
 import { reconcileRevealedSheetWithTemplate_ACU } from '../template/chat-template-reconciler';
 import { assertSummaryVectorMirrorFrameInvariantsV2_ACU } from '../vector/summary-vector-mirror-resolver';
 import { scheduleSummaryVectorMirrorFlushAfterPersist_ACU } from '../vector/summary-vector-index-flush-queue';
+import { absorbOwnTableSave_ACU, getTableReplayGeneration_ACU } from '../../shared/table-replay-generation';
 
 // 保存仍持有提交锁；只读回放仅在完整 frame/entry 边界让步，不跳过严格校验。
 // 同轮 replayEvidence 仍可复用，避免把主线程让步变成重复冷回放。
@@ -2819,6 +2820,7 @@ async function persistTableMutationLogV2Core_ACU(
       code: settings_ACU.dataIsolationCode,
     });
     stagedFields = captureStagedFields();
+    const generationBeforeSave = getTableReplayGeneration_ACU();
     // 临时基线升级会替换 orphan frame、清空日志并写 recoveryBackup，必须确认宿主真实落盘。
     if (options.strictSave || replacement || temporaryBaselineUpgrade || provisionalConvergenceReplay) {
       // 首个 full checkpoint 或临时基线升级是回放根，落盘后回读目标楼确认。
@@ -2830,6 +2832,8 @@ async function persistTableMutationLogV2Core_ACU(
     }
     assertTableFillRequestCurrent_ACU(options, target.index);
     if (!fieldsIntact()) throw new Error('table mutation save readback conflict: chat, floor identity or private fields changed.');
+    // 本次保存与帧复核均通过：保存前截取的最新回放快照改记到新代次（未替换的帧仍逐帧校验）。
+    absorbOwnTableSave_ACU(generationBeforeSave);
   } catch (error) {
     // 正文与对象引用不参与校验；外部私有写入或聊天切换后不能用旧快照补偿。
     if (!fieldsIntact() || previousMessageState.some(state => JSON.stringify(state.isolatedData) !== state.isolatedContent)) {
@@ -3176,7 +3180,9 @@ async function persistTableMutationLogBatchV2Core_ACU(
         delete chat[index].TavernDB_ACU_Identity;
       }
     }
+    const generationBeforeSave = getTableReplayGeneration_ACU();
     await saveChatToHostStrict_ACU();
+    absorbOwnTableSave_ACU(generationBeforeSave);
   } catch (error) {
     for (const snapshot of snapshots) {
       if (snapshot.hadIsolatedData) snapshot.message.TavernDB_ACU_IsolatedData = snapshot.isolatedData;

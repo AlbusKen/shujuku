@@ -4,6 +4,7 @@
 
 import { patchIsolatedTagMetadata_ACU } from '../../data/repositories/chat-message-data-repo';
 import { saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
+import { absorbOwnTableSave_ACU, getTableReplayGeneration_ACU } from '../../shared/table-replay-generation';
 import type { IsolationTagData_ACU } from '../../data/models/chat-message-data';
 
 /**
@@ -75,7 +76,10 @@ export async function commitVectorMetadataPatch_ACU(
         if (!result.changed) return false;
 
         options?.additionalMutate?.(message);
+        // 向量 metadata / 镜像帧不参与表格回放：吸收本次保存代次，表格快照仍逐帧校验内容指纹。
+        const generationBeforeSave = getTableReplayGeneration_ACU();
         await saveChatToHostStrict_ACU();
+        absorbOwnTableSave_ACU(generationBeforeSave);
         return true;
     } catch (error) {
         restoreVectorCommitMessageState_ACU(message, snapshot);
@@ -142,7 +146,9 @@ export async function commitVectorMetadataPatchesBatch_ACU(
             rollbackAll();
             return false;
         }
+        const generationBeforeSave = getTableReplayGeneration_ACU();
         await saveChatToHostStrict_ACU();
+        absorbOwnTableSave_ACU(generationBeforeSave);
         return true;
     } catch (error) {
         rollbackAll();

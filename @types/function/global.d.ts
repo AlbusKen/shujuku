@@ -186,7 +186,7 @@ interface AutoCardUpdaterAPI {
     resetAgentSkillifyPromptSegments(): Promise<boolean>;
 
     syncWorldbookEntries(options?: { createIfNeeded?: boolean }): Promise<boolean>;
-    refreshDataAndWorldbook(): Promise<boolean>;
+    refreshDataAndWorldbook(options?: { awaitFrontendReadback?: boolean }): Promise<boolean>;
     reoptimizeMessage(messageIndex: any): Promise<boolean>;
     cancelContentOptimization(reason?: any): boolean;
     deleteInjectedEntries(): Promise<boolean>;

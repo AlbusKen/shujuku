@@ -23,6 +23,7 @@ import { getCurrentWorldbookConfig_ACU } from '../../../service/settings/setting
 import { runSqliteRuntimeMutationCommit_ACU, runTableUpdateCommit_ACU } from '../../../service/table/table-update-commit';
 import { getTableLockIdentitiesForSheet_ACU } from '../../../service/runtime/helpers-table-lock';
 import { ensureStorageProviderReady_ACU, getActiveStorageProvider } from '../../../service/table/table-storage-strategy';
+import { waitForJsonTableLoadIdle_ACU } from '../../../service/table/table-service';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../../shared/stable-row-id-allocator';
 
 /**
@@ -195,12 +196,17 @@ export function findTargetSheet(
  * 写前加入现有 readiness flight，随后重新读取 canonical 数据并以 active provider
  * 的 owner-aware mapper 解析目标。commit 内仍会再次检查 readiness 和 revision；
  * 这里仅消除「还没等运行时就先找不到模板表」的时序窗口。
+ * 原生模式下内存表为空（聊天重载窗口）时同样先加入 readiness flight，并等待进行中的
+ * 聊天表格加载结束，再解析目标表。
  */
 async function prepareTableMutationTarget_ACU(
     tableName: string,
 ): Promise<{ sheet: any; sheetKey: string; englishTableName: string } | null> {
     if (isSqliteMode()) {
         await ensureStorageProviderReady_ACU();
+    } else if (!currentJsonTableData_ACU) {
+        await ensureStorageProviderReady_ACU();
+        await waitForJsonTableLoadIdle_ACU();
     }
 
     const latestData = currentJsonTableData_ACU;
@@ -271,6 +277,8 @@ function normalizeTableNameArg_ACU(value: any, methodName: string): string | nul
 type TableCrudMutationOptions_ACU = {
     skipChatSave: boolean;
     skipNotify: boolean;
+    /** 与 skipNotify 同用时跳过写后合并刷新与世界书重写，由调用方批末调用 refreshDataAndWorldbook。 */
+    skipRefresh?: boolean;
     awaitFrontendReadback?: boolean;
     assumeCommitLock?: boolean;
 };
@@ -323,7 +331,16 @@ function parseMutationOptions_ACU(options: Record<string, any> | null, rowData?:
         rowData?.skipNotify,
         rowData?.silent,
     ));
-    return { skipChatSave, skipNotify, ...(options?.awaitFrontendReadback === false ? { awaitFrontendReadback: false } : {}) };
+    const skipRefresh = skipNotify && toBooleanOption_ACU(firstDefined_ACU(
+        options?.skipRefresh,
+        options?.deferRefresh,
+    ));
+    return {
+        skipChatSave,
+        skipNotify,
+        ...(skipRefresh ? { skipRefresh: true } : {}),
+        ...(options?.awaitFrontendReadback === false ? { awaitFrontendReadback: false } : {}),
+    };
 }
 
 function parseUpdateCellArgs_ACU(
@@ -498,9 +515,14 @@ async function finalizeTableEditAfterCommit_ACU(
     let didNotifyThroughRefresh = false;
     // S2-1：skipChatSave 提交只改运行时未写聊天帧，通知回调时以 persisted=false 明示未落盘
     const notifyMeta = { persisted: !options.skipChatSave };
-    await refreshMergedDataAndNotifyWithUI_ACU({ skipNotify: options.skipNotify, notifyMeta, ...(options.awaitFrontendReadback === false ? { awaitFrontendReadback: false } : {}) });
-    didNotifyThroughRefresh = !options.skipNotify;
-    logDebug_ACU(`${methodName}: Worldbook refreshed after saving [${tableName}]`);
+    if (options.skipRefresh) {
+        // 提交已更新运行时表格；合并刷新与世界书重写由调用方批末 refreshDataAndWorldbook 统一完成。
+        logDebug_ACU(`${methodName}: Deferred merged refresh after saving [${tableName}] (skipRefresh).`);
+    } else {
+        await refreshMergedDataAndNotifyWithUI_ACU({ skipNotify: options.skipNotify, notifyMeta, ...(options.awaitFrontendReadback === false ? { awaitFrontendReadback: false } : {}) });
+        didNotifyThroughRefresh = !options.skipNotify;
+        logDebug_ACU(`${methodName}: Worldbook refreshed after saving [${tableName}]`);
+    }
     await syncSummaryVectorIndexAfterTableEdit_ACU(tableName, sourceTableKey, methodName, tableLatestFloorIndex, options.skipChatSave);
     if (!options.skipNotify && !didNotifyThroughRefresh) {
         (topLevelWindow_ACU as any).AutoCardUpdaterAPI._notifyTableUpdate(notifyMeta);

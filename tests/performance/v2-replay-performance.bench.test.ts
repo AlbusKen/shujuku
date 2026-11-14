@@ -38,6 +38,8 @@ describe('阶段 J：长历史 replay 性能基准（本地可复现）', () => 
     const results: Record<string, any> = {};
 
     for (let i = 0; i < runs; i += 1) {
+      // 最新回放快照会让后续调用只续放末帧；冷基准每次先清空。
+      clearLiveReplayCache_ACU();
       const start = performance.now();
       const result = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
       const elapsed = performance.now() - start;
@@ -55,6 +57,7 @@ describe('阶段 J：长历史 replay 性能基准（本地可复现）', () => 
     }
 
     for (let i = 0; i < runs; i += 1) {
+      clearLiveReplayCache_ACU();
       const start = performance.now();
       const result = await loadTableStateFromFramesV2Detailed_ACU(
         chat, '', { updateRuntimeState: false, enableAliasContext: false },
@@ -82,6 +85,7 @@ describe('阶段 J：长历史 replay 性能基准（本地可复现）', () => 
   it('阶段 H：多 boundary 一次前向捕获 vs 逐次冷 replay 的耗时与结果一致性', async () => {
     const boundaries = [10, 30, 50];
     // 前向捕获：单次 replay 捕获 3 个 boundary
+    clearLiveReplayCache_ACU();
     const startFwd = performance.now();
     const fwd = await loadTableStatesAtBoundariesFromFramesV2Detailed_ACU(chat, '', boundaries, {
       updateRuntimeState: false,
@@ -91,6 +95,7 @@ describe('阶段 J：长历史 replay 性能基准（本地可复现）', () => 
     const startSeq = performance.now();
     const seq = new Map<number, any>();
     for (const boundary of boundaries) {
+      clearLiveReplayCache_ACU();
       seq.set(boundary, await loadTableStateFromFramesV2Detailed_ACU(chat, '', {
         updateRuntimeState: false,
         maxMessageIndex: boundary,
@@ -126,9 +131,11 @@ describe('阶段 J：长历史 replay 性能基准（本地可复现）', () => 
     const large = buildLongHistoryFixture_ACU(400);
     // warm-up 后各跑一次冷 replay；每帧耗时显著上升说明存在非线性增长。
     await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
+    clearLiveReplayCache_ACU();
     const startBase = performance.now();
     const base = await loadTableStateFromFramesV2Detailed_ACU(chat, '', { updateRuntimeState: false });
     const baseElapsed = performance.now() - startBase;
+    clearLiveReplayCache_ACU();
     const startLarge = performance.now();
     const scaled = await loadTableStateFromFramesV2Detailed_ACU(large.chat, '', { updateRuntimeState: false });
     const largeElapsed = performance.now() - startLarge;

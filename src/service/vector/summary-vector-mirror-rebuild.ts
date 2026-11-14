@@ -15,6 +15,7 @@ import {
 import { EmbeddingBatchExecutionError_ACU } from './summary-vector-embedding-batches';
 
 import { saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
+import { absorbOwnTableSave_ACU, getTableReplayGeneration_ACU } from '../../shared/table-replay-generation';
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { isV2TagData_ACU } from '../table/storage-strategy-resolver';
@@ -214,7 +215,10 @@ async function stripSummaryVectorMirrorFrames_ACU(
                     delete ref.frame.summaryVectorIndexFrame;
                 }
             }
+            // 只删除镜像帧：表格回放快照按帧内容指纹（排除镜像）校验，吸收本次保存的代次。
+            const generationBeforeSave = getTableReplayGeneration_ACU();
             await saveChatToHostStrict_ACU();
+            absorbOwnTableSave_ACU(generationBeforeSave);
         });
     });
 }
@@ -350,7 +354,9 @@ export async function publishSummaryVectorMirrorRowRemovalSnapshot_ACU(
                     'publishSummaryVectorMirrorRowRemoval',
                 );
                 if (violation) throw new Error(violation);
+                const generationBeforeSave = getTableReplayGeneration_ACU();
                 await saveChatToHostStrict_ACU();
+                absorbOwnTableSave_ACU(generationBeforeSave);
             });
         });
     } catch (error: any) {
@@ -694,7 +700,9 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
                     'rebuildSummaryVectorMirror',
                 );
                 if (violation) throw new Error(violation);
+                const generationBeforeSave = getTableReplayGeneration_ACU();
                 await saveChatToHostStrict_ACU();
+                absorbOwnTableSave_ACU(generationBeforeSave);
             });
         });
     } catch (error: any) {

@@ -36,10 +36,13 @@ export function createWorldbookAiApi(_ctx: ApiGroupContext): Record<string, Func
             }
         },
 
-        // 强制刷新数据并重新注入世界书
-        refreshDataAndWorldbook: async function() {
+        // 强制刷新数据并重新注入世界书；awaitFrontendReadback:false 时照常通知前端但不等待回读窗口
+        refreshDataAndWorldbook: async function(options?: { awaitFrontendReadback?: boolean } | null) {
             try {
-                await refreshMergedDataAndNotifyWithUI_ACU();
+                await refreshMergedDataAndNotifyWithUI_ACU(
+                    options && typeof options === 'object' && options.awaitFrontendReadback === false
+                        ? { awaitFrontendReadback: false } : {},
+                );
                 logDebug_ACU('refreshDataAndWorldbook: Data refreshed and worldbook updated successfully.');
                 return true;
             } catch (e) {
