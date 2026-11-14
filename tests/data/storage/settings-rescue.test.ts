@@ -63,22 +63,25 @@ function makeRecord(writtenAt: number, declinedWrittenAt: number | null = null):
 
 function createFakeIndexedDb() {
   const data = new Map<string, unknown>();
-  const request = (fn: () => unknown) => {
+  const request = (fn: () => unknown, tx?: any) => {
     const req: any = {};
     queueMicrotask(() => {
-      try { req.result = fn(); req.onsuccess?.(); } catch (error) { req.error = error; req.onerror?.(); }
+      try { req.result = fn(); req.onsuccess?.(); } catch (error) { req.error = error; req.onerror?.(); return; }
+      if (tx) queueMicrotask(() => tx.oncomplete?.());
     });
     return req;
   };
   const db = {
     objectStoreNames: { contains: () => true },
     createObjectStore: vi.fn(),
-    transaction: () => ({
-      objectStore: () => ({
-        get: (key: string) => request(() => data.get(key)),
-        put: (value: unknown, key: string) => request(() => { data.set(key, structuredClone(value)); return key; }),
-      }),
-    }),
+    transaction: () => {
+      const tx: any = {};
+      tx.objectStore = () => ({
+        get: (key: string) => request(() => data.get(key), tx),
+        put: (value: unknown, key: string) => request(() => { data.set(key, structuredClone(value)); return key; }, tx),
+      });
+      return tx;
+    },
   };
   return { data, indexedDB: { open: () => request(() => db) } };
 }

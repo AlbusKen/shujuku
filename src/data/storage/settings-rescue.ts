@@ -7,7 +7,7 @@
  */
 import { SCRIPT_ID_PREFIX_ACU } from '../../shared/constants';
 import { topLevelWindow_ACU } from '../../shared/env';
-import { idbRequestToPromise_ACU, isIndexedDbAvailable_ACU } from '../../shared/idb-import-temp';
+import { idbRequestToPromise_ACU, idbWriteRequest_ACU, isIndexedDbAvailable_ACU } from '../../shared/idb-import-temp';
 import { logWarn_ACU } from '../../shared/utils';
 import { TAVERN_SETTINGS_NAMESPACE_ACU, getTavernSettingsNamespace_ACU, persistTavernSettings_ACU, readSettingsWrittenAt_ACU } from './tavern-storage';
 import { buildSettingsNamespaceBackup_ACU, type SettingsNamespaceBackup_ACU } from './settings-namespace-backup';
@@ -105,7 +105,7 @@ async function writeToBackend_ACU(backend: SettingsRescueBackend_ACU, record: Se
     const db = await openRescueDb_ACU();
     if (!db) throw new Error('IndexedDB 不可用');
     const tx = db.transaction(SETTINGS_RESCUE_IDB_STORE_ACU, 'readwrite');
-    await idbRequestToPromise_ACU(tx.objectStore(SETTINGS_RESCUE_IDB_STORE_ACU).put(record, SETTINGS_RESCUE_IDB_KEY_ACU));
+    await idbWriteRequest_ACU(tx, t => t.objectStore(SETTINGS_RESCUE_IDB_STORE_ACU).put(record, SETTINGS_RESCUE_IDB_KEY_ACU));
 }
 
 /** 写入保全副本：有 TT extension.store 时优先，失败或不可用时写 IndexedDB；都失败返回 null。 */

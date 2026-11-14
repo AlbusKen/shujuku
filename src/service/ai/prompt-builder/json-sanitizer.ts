@@ -5,10 +5,80 @@
  */
 import { logDebug_ACU, logWarn_ACU } from '../../../shared/utils';
 
-/** 将全角/中文引号统一为标准双引号 */
+const QUOTE_LIKE_CHARS_ACU = new Set(['「', '」', '『', '』', '＂']);
+
+/**
+ * 将字符串外部充当定界符的「」『』＂统一为标准双引号；
+ * 标准双引号字符串内部的正文保持原样，避免改写模型输出的原文字符。
+ */
 export function normalizeQuotesLayer_ACU(jsonStr: string) {
     if (typeof jsonStr !== 'string' || !jsonStr) return jsonStr;
-    return jsonStr.replace(/[""「」『』＂]/g, '"');
+    let result = '';
+    let mode: 'outside' | 'ascii' | 'quoteLike' = 'outside';
+    let escapeNext = false;
+    for (let i = 0; i < jsonStr.length; i++) {
+        const char = jsonStr[i];
+        if (escapeNext) {
+            result += char;
+            escapeNext = false;
+            continue;
+        }
+        if (mode !== 'outside' && char === '\\') {
+            result += char;
+            escapeNext = true;
+            continue;
+        }
+        if (mode === 'ascii') {
+            result += char;
+            if (char === '"') mode = 'outside';
+            continue;
+        }
+        if (mode === 'quoteLike') {
+            if (char === '"' || QUOTE_LIKE_CHARS_ACU.has(char)) {
+                result += '"';
+                mode = 'outside';
+            } else {
+                result += char;
+            }
+            continue;
+        }
+        if (char === '"') {
+            result += char;
+            mode = 'ascii';
+        } else if (QUOTE_LIKE_CHARS_ACU.has(char)) {
+            result += '"';
+            mode = 'quoteLike';
+        } else {
+            result += char;
+        }
+    }
+    return result;
+}
+
+/** 仅对标准双引号字符串之外的片段应用变换。 */
+function mapOutsideJsonStrings_ACU(text: string, transform: (chunk: string) => string) {
+    let result = '';
+    let chunk = '';
+    let inString = false;
+    let escapeNext = false;
+    for (let i = 0; i < text.length; i++) {
+        const char = text[i];
+        if (inString) {
+            result += char;
+            if (escapeNext) escapeNext = false;
+            else if (char === '\\') escapeNext = true;
+            else if (char === '"') inString = false;
+            continue;
+        }
+        if (char === '"') {
+            result += transform(chunk) + char;
+            chunk = '';
+            inString = true;
+            continue;
+        }
+        chunk += char;
+    }
+    return result + transform(chunk);
 }
 
 export function getNextNonWhitespaceMeta_ACU(text: string, startIndex: number) {
@@ -246,7 +316,7 @@ export function removeTrailingCommasLayer_ACU(jsonStr: string) {
 
 export function fixNumericKeysLayer_ACU(jsonStr: string) {
     if (typeof jsonStr !== 'string' || !jsonStr) return jsonStr;
-    return jsonStr.replace(/([{,]\s*)(-?\d+)(\s*:)/g, '$1"$2"$3');
+    return mapOutsideJsonStrings_ACU(jsonStr, chunk => chunk.replace(/([{,]\s*)(-?\d+)(\s*:)/g, '$1"$2"$3'));
 }
 
 export function sanitizeJsonPipeline_ACU(jsonStr: string) {

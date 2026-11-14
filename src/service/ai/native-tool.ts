@@ -1,4 +1,5 @@
 import { USER_PREFILL_CONTENT_ACU } from '../../shared/user-prefill.js';
+import { createSseEventParser_ACU } from '../../shared/sse-event-parser';
 /**
  * 续写与推演共用的原生函数调用。
  * 请求走 /api/backends/chat-completions/generate 时，工具定义放在 body.tools，
@@ -515,7 +516,6 @@ export async function readFetchChatTurn_ACU(response: { headers?: { get(name: st
   const reader = response.body!.getReader();
   const decoder = new TextDecoder();
   const state = accumulator_ACU();
-  let buffer = '';
   let completed = false;
   let lastPreview = '';
   const preview = (): void => {
@@ -524,43 +524,52 @@ export async function readFetchChatTurn_ACU(response: { headers?: { get(name: st
     try { onTextPreview(state.content); }
     catch { /* 展示回调不改变响应解析及完整终态校验。 */ }
   };
-  const consume = (line: string): void => {
-    if (!line.startsWith('data:')) return;
-    const data = line.slice(5).trim();
-    if (!data) return;
-    if (data === '[DONE]') { completed = true; return; }
-    let json: unknown;
-    try { json = JSON.parse(data); }
-    catch {
-      if (requireComplete) throw new Error('正文流包含无效 JSON，未确认正文。');
-      return;
-    }
+  const absorb = (json: unknown): void => {
     if (requireComplete && isCompleteChatResponse_ACU(json)) completed = true;
     absorbChatCompletionEvent_ACU(state, json);
   };
+  const consumePayload = (payload: string): boolean => {
+    const data = payload.trim();
+    if (!data) return true;
+    if (data === '[DONE]') { completed = true; return true; }
+    let json: unknown;
+    try { json = JSON.parse(data); }
+    catch { return false; }
+    absorb(json);
+    return true;
+  };
+  const parser = createSseEventParser_ACU(({ data, dataLines }) => {
+    if (consumePayload(data)) return;
+    // 兼容未用空行分隔、逐行各自是完整 JSON 的非标准流。
+    const lines = dataLines.map(line => line.trim()).filter(Boolean);
+    const parsed: unknown[] = [];
+    let done = false;
+    if (lines.length > 1) {
+      for (const line of lines) {
+        if (line === '[DONE]') { done = true; continue; }
+        try { parsed.push(JSON.parse(line)); }
+        catch { parsed.length = 0; done = false; break; }
+      }
+    }
+    if (!parsed.length && !done) {
+      if (requireComplete) throw new Error('正文流包含无效 JSON，未确认正文。');
+      return;
+    }
+    for (const json of parsed) absorb(json);
+    if (done) completed = true;
+  });
   try {
     while (true) {
       if (signal?.aborted) throw new Error('Request aborted');
       const { done, value } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-      for (const line of lines) {
-        if (requireComplete) consume(line);
-        else {
-          if (!line.startsWith('data: ')) continue;
-          const data = line.slice(6);
-          if (data === '[DONE]') continue;
-          try { absorbChatCompletionEvent_ACU(state, JSON.parse(data)); } catch { /* 保留普通调用的容错语义。 */ }
-        }
-      }
+      parser.push(decoder.decode(value, { stream: true }));
       preview();
     }
+    parser.push(decoder.decode());
+    parser.end();
+    preview();
     if (requireComplete) {
-      buffer += decoder.decode();
-      if (buffer.trim()) consume(buffer);
-      preview();
       if (signal?.aborted) throw new Error('Request aborted');
       if (!completed) throw new Error('正文流在完整终态前结束，未确认正文。');
     }

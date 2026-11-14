@@ -245,6 +245,31 @@ describe('sanitizeJsonPipeline_ACU', () => {
     // 数字键 + 中文引号 + 尾逗号 → 清洗后应该可解析
     expect(result.layersApplied.length).toBeGreaterThan(0);
   });
+  it('标准双引号字符串内的「」『』＂保持原文', () => {
+    expect(normalizeQuotesLayer_ACU('{"0":"作者说「你好」『嗯』＂"}')).toBe('{"0":"作者说「你好」『嗯』＂"}');
+    expect(normalizeQuotesLayer_ACU('{「0」:"a\\"「b」"}')).toBe('{"0":"a\\"「b」"}');
+  });
+  it('字符串内部的 ,1: 不被当作数字键加引号', () => {
+    expect(fixNumericKeysLayer_ACU('{0:"数值,1:第二个",2:"c"}')).toBe('{"0":"数值,1:第二个","2":"c"}');
+    expect(fixNumericKeysLayer_ACU('{"0":"转义\\",1:仍在字符串内"}')).toBe('{"0":"转义\\",1:仍在字符串内"}');
+  });
+});
+
+describe('行对象恢复入口保留正文', () => {
+  it.each([
+    ['普通文本', '第一行\n第二行'],
+    ['中文直角引号', '作者说「你好」\n第二行'],
+    ['正文中的数字键样式片段', '数值,1:第二个\n第三行'],
+  ])('%s 含裸换行时恢复且不改写字符', (_name, text) => {
+    const result = coerceLooseRowObject_ACU(`{"0":"${text}","1":"尾列"}`);
+    expect(result.success).toBe(true);
+    expect(result.result).toEqual({ '0': text, '1': '尾列' });
+  });
+  it('字符串外部的「」仍按定界符修复', () => {
+    const result = sanitizeJsonPipeline_ACU('{「0」:「值」}');
+    expect(result.success).toBe(true);
+    expect(JSON.parse(result.result)).toEqual({ '0': '值' });
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════

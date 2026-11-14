@@ -20,6 +20,27 @@ export function idbRequestToPromise_ACU(req: any): Promise<any> {
     });
 }
 
+/** 等待事务真正提交；请求成功不代表事务已提交，abort/error 均视为写入失败。 */
+export function idbTransactionDone_ACU(tx: any): Promise<void> {
+    return new Promise((resolve, reject) => {
+        tx.oncomplete = () => resolve();
+        tx.onabort = () => reject(tx.error || new Error('IndexedDB transaction aborted'));
+        tx.onerror = () => reject(tx.error || new Error('IndexedDB transaction failed'));
+    });
+}
+
+/** 写入/删除请求：同时等待请求成功与所属事务 complete。 */
+export async function idbWriteRequest_ACU(tx: any, createRequest: (tx: any) => any): Promise<any> {
+    const done = idbTransactionDone_ACU(tx);
+    try {
+        const [result] = await Promise.all([idbRequestToPromise_ACU(createRequest(tx)), done]);
+        return result;
+    } catch (error) {
+        done.catch((): void => {});
+        throw error;
+    }
+}
+
 // ── 导入临时存储常量 ──
 export const IMPORT_TEMP_DB_NAME_ACU = `${SCRIPT_ID_PREFIX_ACU}_importTemp_v1`;
 export const IMPORT_TEMP_STORE_NAME_ACU = 'kv';
@@ -59,16 +80,14 @@ export async function idbSet_ACU(key: string, value: any): Promise<void> {
     const db = await openImportTempDb_ACU();
     if (!db) return;
     const tx = db.transaction(IMPORT_TEMP_STORE_NAME_ACU, 'readwrite');
-    const store = tx.objectStore(IMPORT_TEMP_STORE_NAME_ACU);
-    await idbRequestToPromise_ACU(store.put(value, key));
+    await idbWriteRequest_ACU(tx, t => t.objectStore(IMPORT_TEMP_STORE_NAME_ACU).put(value, key));
 }
 
 export async function idbDel_ACU(key: string): Promise<void> {
     const db = await openImportTempDb_ACU();
     if (!db) return;
     const tx = db.transaction(IMPORT_TEMP_STORE_NAME_ACU, 'readwrite');
-    const store = tx.objectStore(IMPORT_TEMP_STORE_NAME_ACU);
-    await idbRequestToPromise_ACU(store.delete(key));
+    await idbWriteRequest_ACU(tx, t => t.objectStore(IMPORT_TEMP_STORE_NAME_ACU).delete(key));
 }
 
 export async function importTempGet_ACU(key: string): Promise<any> {

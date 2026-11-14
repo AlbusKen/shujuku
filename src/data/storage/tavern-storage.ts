@@ -12,7 +12,7 @@ import { ConfigStorageReadError_ACU, ConfigStorageWriteBlockedError_ACU } from '
 import { getSettingsPersistenceState_ACU, noteSettingsWrite_ACU, noteSettingsWriteFailed_ACU } from './settings-save-confirm';
 
 // ── 常量 ──
-import { idbRequestToPromise_ACU, isIndexedDbAvailable_ACU } from '../../shared/idb-import-temp';
+import { idbWriteRequest_ACU, isIndexedDbAvailable_ACU } from '../../shared/idb-import-temp';
 
 export const USE_TAVERN_SETTINGS_STORAGE_ACU = true;
 export const TAVERN_SETTINGS_NAMESPACE_ACU = `${SCRIPT_ID_PREFIX_ACU}__userscript_settings_v1`;
@@ -436,8 +436,7 @@ export async function configIdbSetCached_ACU(key: string, value: any): Promise<v
         const db = await openConfigDb_ACU();
         if (!db) return;
         const tx = db.transaction(CONFIG_IDB_STORE_NAME_ACU, 'readwrite');
-        const store = tx.objectStore(CONFIG_IDB_STORE_NAME_ACU);
-        await idbRequestToPromise_ACU(store.put(value, key));
+        await idbWriteRequest_ACU(tx, t => t.objectStore(CONFIG_IDB_STORE_NAME_ACU).put(value, key));
     } catch (e) {
         logWarn_ACU('[TavernStorage] IndexedDB 配置 set 失败:', e);
     }
@@ -451,8 +450,7 @@ export async function configIdbRemoveCached_ACU(key: string): Promise<void> {
         const db = await openConfigDb_ACU();
         if (!db) return;
         const tx = db.transaction(CONFIG_IDB_STORE_NAME_ACU, 'readwrite');
-        const store = tx.objectStore(CONFIG_IDB_STORE_NAME_ACU);
-        await idbRequestToPromise_ACU(store.delete(key));
+        await idbWriteRequest_ACU(tx, t => t.objectStore(CONFIG_IDB_STORE_NAME_ACU).delete(key));
     } catch (e) {
         logWarn_ACU('[TavernStorage] IndexedDB 配置 delete 失败:', e);
     }

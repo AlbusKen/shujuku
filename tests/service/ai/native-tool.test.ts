@@ -12,6 +12,7 @@ import {
   nativeToolCallsToProtocolJson_ACU,
   nativeToolExchange_ACU,
   projectNativeToolHistoryToText_ACU,
+  readFetchChatTurn_ACU,
   withJsonTailPrefill_ACU,
 } from '../../../src/service/ai/native-tool';
 
@@ -118,5 +119,61 @@ describe('native tool calls', () => {
     ])).toBe(true);
     expect(isModelExchangeSequence_ACU([{ role: 'assistant' }, { role: 'user' }])).toBe(true);
     expect(isModelExchangeSequence_ACU([{ role: 'assistant' }, { role: 'assistant' }])).toBe(false);
+  });
+});
+
+describe('readFetchChatTurn_ACU SSE 事件解析', () => {
+  const event = (content: string, finish?: string) => JSON.stringify({ choices: [{ delta: { content }, ...(finish ? { finish_reason: finish } : {}) }] });
+  const streamOf = (chunks: Array<string | Uint8Array>) => new Response(new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(typeof chunk === 'string' ? new TextEncoder().encode(chunk) : chunk);
+      controller.close();
+    },
+  }), { headers: { 'Content-Type': 'text/event-stream' } });
+  const read = (raw: string | Array<string | Uint8Array>, requireComplete = false) =>
+    readFetchChatTurn_ACU(streamOf(Array.isArray(raw) ? raw : [raw]), true, null, requireComplete);
+
+  it.each([
+    ['data 冒号后带空格', `data: ${event('hello', 'stop')}\n\ndata: [DONE]\n\n`],
+    ['data 冒号后无空格', `data:${event('hello', 'stop')}\n\ndata:[DONE]\n\n`],
+    ['CR 行结束符', `data: ${event('hello', 'stop')}\r\rdata: [DONE]\r\r`],
+    ['CRLF 行结束符', `data: ${event('hello', 'stop')}\r\n\r\ndata: [DONE]\r\n\r\n`],
+    ['同一事件 JSON 分布于多个 data 字段', 'data: {"choices":[{"delta":\ndata: {"content":"hello"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'],
+    ['注释行与 event 字段', `: keep-alive\nevent: message\ndata: ${event('hello', 'stop')}\n\n`],
+    ['末尾事件缺少空行', `data: ${event('hello', 'stop')}`],
+  ])('%s：普通分支与完整终态分支均恢复正文', async (_name, raw) => {
+    expect((await read(raw)).turn.content).toBe('hello');
+    expect((await read(raw, true)).turn.content).toBe('hello');
+  });
+
+  it('按字节拆分网络 chunk（含多字节字符与跨块 CRLF）仍完整恢复', async () => {
+    const bytes = new TextEncoder().encode(`data:${event('你好', 'stop')}\r\n\r\ndata: [DONE]\r\n\r\n`);
+    const chunks = Array.from(bytes, byte => Uint8Array.of(byte));
+    expect((await read(chunks)).turn.content).toBe('你好');
+    expect((await read(Array.from(bytes, byte => Uint8Array.of(byte)), true)).turn.content).toBe('你好');
+  });
+
+  it('兼容未以空行分隔、逐行各自完整的 data JSON', async () => {
+    const raw = `data: ${event('hel')}\ndata: ${event('lo', 'stop')}\ndata: [DONE]\n\n`;
+    expect((await read(raw)).turn.content).toBe('hello');
+    expect((await read(raw, true)).turn.content).toBe('hello');
+  });
+
+  it('无效 JSON：普通分支跳过，完整终态分支拒绝确认', async () => {
+    const raw = `data: {broken\n\ndata: ${event('hello', 'stop')}\n\n`;
+    expect((await read(raw)).turn.content).toBe('hello');
+    await expect(read(raw, true)).rejects.toThrow('正文流包含无效 JSON');
+  });
+
+  it('缺少完整终态时完整终态分支仍拒绝确认', async () => {
+    await expect(read(`data: ${event('hello')}\n\n`, true)).rejects.toThrow('完整终态前结束');
+  });
+
+  it('工具调用分片与 usage 仍按事件累积', async () => {
+    const first = JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_1', function: { name: 'search', arguments: '{"q":' } }] } }] });
+    const second = JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '"x"}' } }] } }], usage: { total_tokens: 3 } });
+    const parsed = await read(`data:${first}\r\n\r\ndata:${second}\r\n\r\ndata:[DONE]\r\n\r\n`);
+    expect(parsed.turn.toolCalls).toEqual([{ id: 'call_1', name: 'search', arguments: '{"q":"x"}' }]);
+    expect(parsed.usage).toEqual({ total_tokens: 3 });
   });
 });
