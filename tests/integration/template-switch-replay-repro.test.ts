@@ -125,8 +125,10 @@ vi.mock('../../src/service/settings/settings-service', () => ({
 
 import * as stateManager from '../../src/service/runtime/state-manager';
 import { applyTemplateSnapshotToScope_ACU } from '../../src/service/template/template-preset-service';
-import { collectV2FullCheckpointIndices_ACU, persistTableMutationLogV2_ACU } from '../../src/service/table/storage-frame-v2-persist';
+import { collectV2FullCheckpointIndices_ACU, commitCurrentFloorTemplateChanges_ACU, persistTableMutationLogV2_ACU } from '../../src/service/table/storage-frame-v2-persist';
 import {
+  clearLiveReplayCache_ACU,
+  deriveSheetLifecycleFromFramesV2_ACU,
   flushPendingCompatTransitionFixations_ACU,
   loadTableStateFromFramesV2Detailed_ACU,
   replayWithLegacyTolerances_ACU,
@@ -380,6 +382,60 @@ describe('P1 同名异构模板切换→回放身份分叉复现', () => {
     const after = await loadTableStateFromFramesV2Detailed_ACU(undefined, mocks.isolationKey, { updateRuntimeState: false });
     expect(getTableDataFingerprint_ACU(after?.data ?? {})).toBe(beforeFingerprint);
   }, 60000);
+
+  it('真实 writer 在同毫秒同帧保存两次 hide/reveal，SQL 更新后冷回放与休眠来源一致', async () => {
+    const key = 'sheet_DpKcVGqg';
+    mocks.chat.splice(0, mocks.chat.length, ...buildChat(1));
+    const structure = sheetFixture(key, '主角信息表', ['name', 'state'], 0);
+    const initial = { mate: mate(), [key]: structure };
+    mocks.globalTemplateStr = JSON.stringify(initial);
+    stateManager._set_currentJsonTableData_ACU(initial);
+    await fillFloorOnce(key, 1);
+    const commit = async (sheetChanges: any[]) => {
+      const result = await commitCurrentFloorTemplateChanges_ACU({
+        isolationKey: '', storageMode: 'native', createdAt: 100,
+        sheetChanges, guideData: { [key]: structure },
+      });
+      expect(result.saved, result.error).toBe(true);
+    };
+    await commit([{ kind: 'hide', sheetKey: key, sheetData: structure }]);
+    await commit([{ kind: 'reveal', sheetKey: key, sheetData: structure }]);
+    const beforeSql = await replayData();
+    const afterSql = clone(beforeSql);
+    afterSql[key].content[1][2] = 'SQL更新';
+    const persisted = await persistTableMutationLogV2_ACU({
+      source: 'manual_fill', afterData: afterSql,
+      operations: [{ kind: 'sql_sheet_batch', sheetKey: key, tableName: key, reason: 'system',
+        statements: [`UPDATE ${key} SET state = 'SQL更新' WHERE row_id = 1`] }],
+      filledSheetKeys: [key], candidateChangedSheetKeys: [key], groupKeys: [],
+      targetMessageIndex: 0, isolationKey: '', strictSave: true,
+      transactionContext: { baseRevision: null, writeSet: [{ kind: 'all' }], assertFresh: vi.fn(),
+        runCommit: async (task: () => any) => task() } as any,
+    });
+    expect(persisted.saved, persisted.error).toBe(true);
+    await commit([{ kind: 'hide', sheetKey: key, sheetData: structure }]);
+    const hidden = deriveSheetLifecycleFromFramesV2_ACU(mocks.chat, '');
+    expect(hidden.statusBySheetKey[key].restoreSourceData?.content[1][2]).toBe('SQL更新');
+    await commit([{ kind: 'introduction', sheetKey: key, sheetData: structure }]);
+
+    const frame = mocks.chat[0].TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(frame.sheetTimelineEvents.map((event: any) => event.ordinal)).toEqual([0, 1, 2, 3]);
+    expect(frame.sheetTimelineEvents.map((event: any) => event.checkpoint.timeline.kind)).toEqual([
+      'sheet_hide', 'sheet_reveal', 'sheet_hide', 'sheet_reveal',
+    ]);
+    expect(frame.sheetTimelineEvents.map((event: any) => event.checkpoint.timeline.afterSeq)).toEqual([0, 0, 1, 1]);
+    expect(frame.perSheetCheckpoints?.[key]?.timeline).toBeUndefined();
+    const serialized = JSON.stringify(mocks.chat);
+    stateManager._set_currentJsonTableData_ACU(null);
+    clearLiveReplayCache_ACU();
+    const coldChat = JSON.parse(serialized);
+    const cold = await loadTableStateFromFramesV2Detailed_ACU(coldChat, '', {
+      updateRuntimeState: false, compatibilityMode: 'disabled',
+    });
+    expect(cold?.data[key].content).toEqual(afterSql[key].content);
+    expect(deriveSheetLifecycleFromFramesV2_ACU(coldChat, '').statusBySheetKey[key].status).toBe('active');
+    expect(JSON.stringify(coldChat)).toBe(serialized);
+  });
 });
 
 /**
@@ -492,7 +548,7 @@ describe('F1 双身份存量：严格回放按表名接管（修正后）', () =
           // 目标新 key 时对齐现场：新模板表 header-only，AI 以 INSERT row_id=1 重填
           // （现场原句 `INSERT INTO zhujuexinxibiao (row_id, name, ...) VALUES (1, '陈默', ...)`）。
           statements: [sqlTargetKey === NEW_KEY
-            ? `INSERT INTO ${TABLE_NAME} (row_id, name, pos, state) VALUES (1, 'SQL新1', 'SQL新1', 'SQL新1')`
+            ? `UPDATE ${TABLE_NAME} SET name = 'SQL新1', pos = 'SQL新1', state = 'SQL新1' WHERE row_id = 1`
             : `UPDATE ${TABLE_NAME} SET name = 'SQL改1', state = 'SQL改1' WHERE row_id = 1`],
         }],
       }],
@@ -523,43 +579,37 @@ describe('F1 双身份存量：严格回放按表名接管（修正后）', () =
     return replay;
   }
 
-  function expectStrictMergedIntoNewKey(replay: NonNullable<Awaited<ReturnType<typeof loadTableStateFromFramesV2Detailed_ACU>>>) {
+  function expectStrictMergedIntoPersistentKey(replay: NonNullable<Awaited<ReturnType<typeof loadTableStateFromFramesV2Detailed_ACU>>>) {
     expect(replay.baseKind).toBe('full_checkpoint');
     expect(replay.requiresCheckpointConvergence).toBeFalsy();
     expect(replay.compatibilityRepairs ?? []).toHaveLength(0);
-    expect(sheetKeys(replay.data)).toEqual([NEW_KEY]);
+    expect(sheetKeys(replay.data)).toEqual([OLD_KEY]);
     expect(replay.identityMerges).toHaveLength(1);
-    // 接管：旧 key 的 1 行随事件语义丢弃并被记录，不合并、不静默。
-    expect(replay.identityMerges?.[0]).toMatchObject({ fromKey: OLD_KEY, toKey: NEW_KEY, supersededRows: 1, appendedRows: 0, conflictingRowIds: [] });
-    expect(replay.data[NEW_KEY].content[0]).toEqual(['row_id', 'name', 'pos', 'state']);
+    expect(replay.identityMerges?.[0]).toMatchObject({ fromKey: NEW_KEY, toKey: OLD_KEY, appendedRows: 0, conflictingRowIds: [] });
+    expect(replay.data[OLD_KEY].content[0]).toEqual(['row_id', 'name', 'pos', 'state']);
   }
 
-  it('同帧顺序A：锚点(afterSeq=2)早于SQL(seq=3)新key目标——锚点接管旧表，INSERT row 1 不再撞主键，可写且冷重载一致', async () => {
+  it('同帧顺序A：结构锚点先于新 key SQL，复用旧行续填且冷重载一致', async () => {
     mocks.chat.length = 0;
     mocks.chat.push(...mountDualIdentityChat());
     stateManager._set_currentJsonTableData_ACU(null);
 
-    // 现场同款历史：旧 key 根 + 新 key header-only 锚点 + INSERT row_id=1。修正后严格回放在
-    // 锚点应用时接管同名旧表（表变为 header-only），随后 INSERT 在空表上成功。
-    // （若把旧行并入，row_id=1 已被占用，就是现场的 UNIQUE constraint failed。）
     const replay = await strictReplay();
     console.log('[F1-A] baseKind:', replay.baseKind, '| keys:', JSON.stringify(sheetKeys(replay.data)), '| merges:', JSON.stringify(replay.identityMerges ?? null));
-    console.log('[F1-A] NEW:', JSON.stringify(replay.data[NEW_KEY]?.content ?? null));
-    expectStrictMergedIntoNewKey(replay);
-    expect(replay.data[NEW_KEY].content).toEqual([['row_id', 'name', 'pos', 'state'], ['1', 'SQL新1', 'SQL新1', 'SQL新1']]);
-    expect(mocks.logWarn).toHaveBeenCalledWith(expect.stringContaining('同名表接管'));
+    expectStrictMergedIntoPersistentKey(replay);
+    expect(replay.data[OLD_KEY].content).toEqual([['row_id', 'name', 'pos', 'state'], ['1', 'SQL新1', 'SQL新1', 'SQL新1']]);
     // 归并只发生在读副本：原 storage frame 未被改写。
     expect(mocks.chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data[OLD_KEY].content[1]).toEqual(OLD_ROW);
 
     // 读路径（默认兼容模式）与严格探针结果一致，且不进入兼容降级链。
     const readPath = await loadTableStateFromFramesV2Detailed_ACU(mocks.chat, mocks.isolationKey, { updateRuntimeState: false });
     expect(readPath?.baseKind).toBe('full_checkpoint');
-    expect(readPath?.data[NEW_KEY].content).toEqual(replay.data[NEW_KEY].content);
+    expect(readPath?.data[OLD_KEY].content).toEqual(replay.data[OLD_KEY].content);
     expect(mocks.logWarn).not.toHaveBeenCalledWith(expect.stringContaining('严格回放失败'));
 
     // 可写：在归并后的历史上真实落一笔填表（persist 写前门闸不再拒绝）。
     const afterData = clone(replay.data);
-    afterData[NEW_KEY].content.push(['2', '名字2', '处境2', '状态2']);
+    afterData[OLD_KEY].content.push(['2', '名字2', '处境2', '状态2']);
     const transactionContext = {
       baseRevision: null,
       writeSet: [{ kind: 'all' as const }],
@@ -569,9 +619,9 @@ describe('F1 双身份存量：严格回放按表名接管（修正后）', () =
     const persisted = await persistTableMutationLogV2_ACU({
       source: 'manual_fill',
       afterData,
-      operations: [{ kind: 'sheet_replace' as const, sheetKey: NEW_KEY, sheet: clone(afterData[NEW_KEY]), reason: 'manual_crud' as const }],
-      filledSheetKeys: [NEW_KEY],
-      candidateChangedSheetKeys: [NEW_KEY],
+      operations: [{ kind: 'sheet_replace' as const, sheetKey: OLD_KEY, sheet: clone(afterData[OLD_KEY]), reason: 'manual_crud' as const }],
+      filledSheetKeys: [OLD_KEY],
+      candidateChangedSheetKeys: [OLD_KEY],
       groupKeys: [],
       targetMessageIndex: lastAiIndex(mocks.chat),
       isolationKey: mocks.isolationKey,
@@ -583,8 +633,8 @@ describe('F1 双身份存量：严格回放按表名接管（修正后）', () =
 
     // 冷重载：严格回放仍单 key，历史 INSERT 与新写入都在。
     const cold = await strictReplay();
-    expect(sheetKeys(cold.data)).toEqual([NEW_KEY]);
-    expect(cold.data[NEW_KEY].content.slice(1)).toEqual([
+    expect(sheetKeys(cold.data)).toEqual([OLD_KEY]);
+    expect(cold.data[OLD_KEY].content.slice(1)).toEqual([
       ['1', 'SQL新1', 'SQL新1', 'SQL新1'],
       ['2', '名字2', '处境2', '状态2'],
     ]);
@@ -598,7 +648,7 @@ describe('F1 双身份存量：严格回放按表名接管（修正后）', () =
     expect(recovery.status).not.toBe('recoverable_compat_tolerant_replay');
   }, 120000);
 
-  it('同帧顺序B：锚点(afterSeq=4)晚于SQL(seq=3)且SQL目标旧key——SQL 先落旧 key，锚点生效后接管为新结构 header-only', async () => {
+  it('同帧顺序B：旧 key SQL 先执行，后续空结构锚点保留已更新的行', async () => {
     mocks.chat.length = 0;
     mocks.chat.push(...mountDualIdentityChat());
     // 顺序反转：锚点 timeline.afterSeq=4 晚于 SQL seq=3，SQL 目标改指旧 key。
@@ -606,13 +656,9 @@ describe('F1 双身份存量：严格回放按表名接管（修正后）', () =
     stateManager._set_currentJsonTableData_ACU(null);
 
     const replay = await strictReplay();
-    console.log('[F1-B] keys:', JSON.stringify(sheetKeys(replay.data)), '| NEW:', JSON.stringify(replay.data[NEW_KEY]?.content ?? null), '| merges:', JSON.stringify(replay.identityMerges ?? null));
-    expectStrictMergedIntoNewKey(replay);
-    // seq=3 SQL 先在旧 key 上生效；随后 header-only 锚点接管该表——事件语义就是「表被重置为
-    // 新结构、无行」，旧行（含刚被 SQL 改写的）随接管丢弃并记录 supersededRows=1。
-    expect(replay.data[NEW_KEY].content).toEqual([['row_id', 'name', 'pos', 'state']]);
-    // 修正前这里是双 key 静默流出并被混合存储写决策当作可信证据；修正后结果只有单身份。
-    expect(replay.data[OLD_KEY]).toBeUndefined();
+    expectStrictMergedIntoPersistentKey(replay);
+    expect(replay.data[OLD_KEY].content).toEqual([['row_id', 'name', 'pos', 'state'], ['1', 'SQL改1', null, 'SQL改1']]);
+    expect(replay.data[NEW_KEY]).toBeUndefined();
     const recovery = await prepareV2Recovery_ACU();
     expect(recovery.status).not.toBe('unrecoverable_identity_conflict');
   }, 120000);
@@ -659,13 +705,13 @@ describe('F1 双身份存量：严格回放按表名接管（修正后）', () =
     // 修正前这里 strict 不可读、追平 fail-closed；修正后整条 116 消息历史严格可读且单身份，
     // 终态 progress 帧（0-op）不影响回放。
     const replay = await strictReplay();
-    expectStrictMergedIntoNewKey(replay);
-    expect(replay.data[NEW_KEY].content[1]).toEqual(['1', 'SQL新1', 'SQL新1', 'SQL新1']);
+    expectStrictMergedIntoPersistentKey(replay);
+    expect(replay.data[OLD_KEY].content[1]).toEqual(['1', 'SQL新1', 'SQL新1', 'SQL新1']);
     const validation = await validateCurrentChatTableRecovery_ACU();
     expect(validation.success).toBe(true);
     // 边界回放（追平 merge base 的取法）同样单身份：到 msg6 为止即已接管。
     const bounded = await loadTableStateFromFramesV2Detailed_ACU(mocks.chat, mocks.isolationKey, { updateRuntimeState: false, maxMessageIndex: 6, compatibilityMode: 'disabled' });
-    expect(sheetKeys(bounded?.data ?? {})).toEqual([NEW_KEY]);
+    expect(sheetKeys(bounded?.data ?? {})).toEqual([OLD_KEY]);
     expect(bounded?.identityMerges).toHaveLength(1);
   }, 120000);
 });
@@ -1096,7 +1142,11 @@ describe('F2 兼容宽容回放结果契约（修正后）', () => {
     }
 
     function hasAnyPerSheetCheckpointFor(sheetKey: string): boolean {
-      return mocks.chat.some(message => !!message?.TavernDB_ACU_IsolatedData?.['']?.storageFrame?.perSheetCheckpoints?.[sheetKey]);
+      return mocks.chat.some(message => {
+        const frame = message?.TavernDB_ACU_IsolatedData?.['']?.storageFrame;
+        return !!frame?.perSheetCheckpoints?.[sheetKey]
+          || !!frame?.sheetTimelineEvents?.some((event: any) => event.checkpoint.sheetKey === sheetKey);
+      });
     }
 
     function persistOptionsFor(afterData: any, sheetKey: string) {
@@ -1163,24 +1213,26 @@ describe('F2 兼容宽容回放结果契约（修正后）', () => {
       console.log('[F2 补充] 用户场景 replay keys:', JSON.stringify(sheetKeys(replay?.data ?? {})), '| merges:', JSON.stringify(replay?.identityMerges ?? null));
       expect(replay?.baseKind).toBe('full_checkpoint');
       expect(replay?.requiresCheckpointConvergence).toBeFalsy();
-      expect(sheetKeys(replay?.data ?? {})).toEqual([NEW_KEY]);
+      expect(sheetKeys(replay?.data ?? {})).toEqual([OLD_KEY]);
       expect(replay?.identityMerges).toHaveLength(1);
-      expect(replay?.identityMerges?.[0]).toMatchObject({ fromKey: OLD_KEY, toKey: NEW_KEY, supersededRows: 2, appendedRows: 0 });
-      expect(replay!.data[NEW_KEY].content).toEqual([
+      expect(replay?.identityMerges?.[0]).toMatchObject({ fromKey: NEW_KEY, toKey: OLD_KEY, appendedRows: 0 });
+      expect(replay!.data[OLD_KEY].content).toEqual([
         ['row_id', 'name', 'state'],
+        ['1', '名字0', '状态=旧A1'],
+        ['2', '名字旧独有', '状态旧独有'],
         ['3', '新key填入', '新key态'],
       ]);
-      expect(mocks.logWarn).toHaveBeenCalledWith(expect.stringContaining('同名表接管'));
 
-      // 继续填表（第二笔）仍然可写，冷重载仍单身份：header + 第 3 行 + 第 4 行。
       const afterData2: any = clone(replay!.data);
-      afterData2[NEW_KEY].content.push(['4', '第二笔', '态4']);
-      const result2 = await persistTableMutationLogV2_ACU(persistOptionsFor(afterData2, NEW_KEY));
+      afterData2[OLD_KEY].content.push(['4', '第二笔', '态4']);
+      const result2 = await persistTableMutationLogV2_ACU(persistOptionsFor(afterData2, OLD_KEY));
       expect(result2.saved).toBe(true);
       const cold = await loadTableStateFromFramesV2Detailed_ACU(mocks.chat, mocks.isolationKey, { updateRuntimeState: false, compatibilityMode: 'disabled' });
-      expect(sheetKeys(cold?.data ?? {})).toEqual([NEW_KEY]);
-      expect(cold!.data[NEW_KEY].content).toEqual([
+      expect(sheetKeys(cold?.data ?? {})).toEqual([OLD_KEY]);
+      expect(cold!.data[OLD_KEY].content).toEqual([
         ['row_id', 'name', 'state'],
+        ['1', '名字0', '状态=旧A1'],
+        ['2', '名字旧独有', '状态旧独有'],
         ['3', '新key填入', '新key态'],
         ['4', '第二笔', '态4'],
       ]);
@@ -1265,9 +1317,8 @@ describe('F2 兼容宽容回放结果契约（修正后）', () => {
       console.log('[F2 补充] F1-B 形状 strict keys:', JSON.stringify(sheetKeys(strict?.data ?? {})), '| merges:', JSON.stringify(strict?.identityMerges ?? null));
       expect(strict?.baseKind).toBe('full_checkpoint');
       expect(sheetKeys(strict?.data ?? {})).toEqual([OLD_KEY]);
-      expect(strict?.identityMerges).toEqual([expect.objectContaining({ fromKey: NEW_KEY, toKey: OLD_KEY, supersededRows: 2 })]);
-      // 接管后表内容以锚点数据为准（新结构、header-only）。
-      expect(strict!.data[OLD_KEY].content).toEqual([['row_id', 'name', 'pos', 'state']]);
+      expect(strict?.identityMerges).toEqual([expect.objectContaining({ fromKey: NEW_KEY, toKey: OLD_KEY })]);
+      expect(strict!.data[OLD_KEY].content).toEqual([['row_id', 'name', 'pos', 'state'], ['1', 'SQL改1', null, 'SQL改1'], ['2', '名字旧独有', null, '状态旧独有']]);
 
       const summary = await prepareV2Recovery_ACU();
       console.log('[F2 补充] recovery(F1-B):', summary.status, '|', summary.message);

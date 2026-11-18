@@ -159,6 +159,11 @@ import * as stateManager from '../../src/service/runtime/state-manager';
 import { applyChatTemplateSnapshotWithReconciliation_ACU } from '../../src/service/template/template-preset-service';
 import { collectV2FullCheckpointIndices_ACU, persistTableMutationLogV2_ACU } from '../../src/service/table/storage-frame-v2-persist';
 import { loadTableStateFromFramesV2Detailed_ACU } from '../../src/service/table/storage-frame-v2-replay';
+import { ensureLegacyStorageMigratedBeforeWrite_ACU } from '../../src/service/table/table-service';
+import { getCurrentChatTemplateScopeState_ACU } from '../../src/service/template/chat-scope';
+import { buildDefaultTableTemplateObject_ACU } from '../../src/shared/table-defaults/index.js';
+import { TABLE_TEMPLATE_ACU, _set_TABLE_TEMPLATE_ACU } from '../../src/shared/defaults-json.js';
+import { parseTableTemplateJson_ACU } from '../../src/shared/utils';
 
 // ═══ fixture 构造 ═══
 
@@ -506,5 +511,62 @@ describe.each(['native', 'sqlite'] as const)('端到端切模板矩阵（storage
     const revived = sheetByName(data, '备注表');
     expect(headerIndex(revived, '备注人')).toBeGreaterThan(0);
     expect(revived.sourceData?.hiddenPhysicalColumns ?? []).toHaveLength(0);
+  }, 60000);
+
+  it('真实默认模板：pristine 显式应用与首填兜底得到同一稳定身份，切走再切回按名复用', async () => {
+    const previousTemplate = TABLE_TEMPLATE_ACU;
+    const sheetKeysOf = (data: any) => Object.keys(data || {}).filter(key => key.startsWith('sheet_')).sort();
+    try {
+      const defaultTemplate = buildDefaultTableTemplateObject_ACU() as any;
+      const inventoryKey = 'sheet_bei_bao_wu_pin_biao';
+      const originalInventoryKey = findSheetKeyByName(defaultTemplate, '背包物品表');
+      expect(originalInventoryKey).toBe('sheet_in05z9vz');
+
+      // 入口一：pristine 显式应用默认模板
+      await switchTemplate(clone(defaultTemplate));
+      const pristineKeys = sheetKeysOf(stateManager.currentJsonTableData_ACU);
+      expect(pristineKeys).toContain(inventoryKey);
+      expect(pristineKeys).not.toContain(originalInventoryKey);
+
+      // 入口二：另一新聊天（多条用户消息、无持久身份）首次填表前的写前门
+      mocks.chat.length = 0;
+      mocks.chat.push(...buildChat(6));
+      mocks.scopeContainer = null;
+      mocks.guideContainer = null;
+      stateManager._set_currentJsonTableData_ACU(null);
+      _set_TABLE_TEMPLATE_ACU(JSON.stringify(defaultTemplate));
+      const gate = await ensureLegacyStorageMigratedBeforeWrite_ACU('processUpdatesBatch', { pinPristineIdentity: true });
+      expect(gate).toEqual({ success: true, migrated: false, identityPinned: true });
+      const scope = getCurrentChatTemplateScopeState_ACU({ isolationKey: mocks.isolationKey });
+      expect(scope?.mode).toBe('chat_override');
+      // 生产链：reload → applyTemplateScope（运行时模板=scope 快照）→ 无历史初始化
+      _set_TABLE_TEMPLATE_ACU(scope.templateStr);
+      stateManager._set_currentJsonTableData_ACU(parseTableTemplateJson_ACU({ stripSeedRows: true }));
+      const pinnedKeys = sheetKeysOf(stateManager.currentJsonTableData_ACU);
+      expect(pinnedKeys).toEqual(pristineKeys);
+      expect(sheetKeysOf(mocks.guideContainer?.tags?.[mocks.isolationKey]?.data)).toEqual(pinnedKeys);
+      for (const key of pinnedKeys) expect((stateManager.currentJsonTableData_ACU as any)[key].uid).toBe(key);
+      expect((stateManager.currentJsonTableData_ACU as any)[inventoryKey].sourceData.tableAliases).toContain(originalInventoryKey);
+
+      // 首次填表：init checkpoint 以稳定 key 落盘
+      await fillSheet('背包物品表', sheet => appendRow(sheet, '1', ['铁剑']));
+      let data = await replayData();
+      expect(findSheetKeyByName(data, '背包物品表')).toBe(inventoryKey);
+      expect(sheetKeysOf(data)).toEqual(pinnedKeys);
+
+      // 切到不含背包表的模板，再切回原始随机 key 的默认模板
+      await switchTemplate(templateB());
+      data = await replayData();
+      expect(hasSheetNamed(data, '背包物品表')).toBe(false);
+      await switchTemplate(clone(defaultTemplate));
+      data = await replayData();
+      expect(findSheetKeyByName(data, '背包物品表')).toBe(inventoryKey);
+      expect(data[originalInventoryKey]).toBeUndefined();
+      expect(dataRows(data[inventoryKey])).toHaveLength(1);
+      expect(dataRows(data[inventoryKey])[0]).toContain('铁剑');
+      expect(Object.values(data).filter((sheet: any) => sheet?.name === '背包物品表')).toHaveLength(1);
+    } finally {
+      _set_TABLE_TEMPLATE_ACU(previousTemplate);
+    }
   }, 60000);
 });

@@ -37,6 +37,7 @@ export function hasV2TableHistoryEvidence_ACU(tagData: unknown): boolean {
   if (frame.version === 2) return true;
   if (frame.checkpoint !== undefined) return true;
   if (frame.perSheetCheckpoints !== undefined) return true;
+  if (frame.sheetTimelineEvents !== undefined) return true;
   if (Array.isArray(frame.logEntries) && frame.logEntries.length > 0) return true;
   if (frame.manualRefillProgress !== undefined) return true;
   return frame.headRevision !== undefined

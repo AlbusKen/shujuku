@@ -1,26 +1,41 @@
-/**
- * shared/sheet-identity-merge.ts — 两代 sheetKey 身份归并（纯函数）
- *
- * spv7.9 及更早版本使用随机 hash 风格的 sheetKey；spv8.4+ 使用按显示名
- * 拼音生成的稳定 key。同一张表在旧 checkpoint 与新模板/指导表中各持有一个
- * key 时，SQLite 物理表名解析会抛 PhysicalTableNameCollisionError_ACU
- * （reason=identity_merge_failed），模板协调器也会报「表名/表别名规范化重复」。
- *
- * 「同一张表」的判定依据是身份集合的交集，而不只是显示名相等：
- * 每张表的身份集合 = canonical(显示名) ∪ canonical(sourceData.tableAliases)。
- * tableAliases 是显式身份声明（改名时累积旧名、模板作者声明历史别名），
- * 旧 key 的显示名恰好是新 key 的历史别名时（例如旧「主角技能表」→ 新「主角技能」
- * 并声明别名「主角技能表」）同样属于同一逻辑表。身份交集按并查集传递归并。
- *
- * 本模块在**内存回放副本**上把同一身份组的多个 key 归并为一个：优先保留当前
- * 模板/指导表侧 key，旧 key 的行按**表头名**映射到 winner 列结构后按 row_id 并入
- * （独有行追加；同 id 相等去重、winner 空行取 loser、两侧均有值则 winner 胜出并记录
- * 冲突），loser 的显示名与别名累积进 winner 的 tableAliases 以保留身份。
- * 严格回放与 Tier-1 宽容回放共用本函数：同名不同 key 是正常的模板演进结果，不是异常。
- * 纯函数、幂等、无 IO，不修改任何持久化 storage frame。
- */
 import type { Sheet_ACU, TableDataObject_ACU } from './models/table-data';
 import { buildStableSheetKeyCandidate_ACU, canonicalizeDisplayName_ACU } from './sheet-identity';
+import { reuseSheetColumns_ACU } from './sheet-column-reuse';
+
+export function reuseSheetDataByName_ACU(
+  before: Sheet_ACU,
+  incoming: Sheet_ACU,
+  mode: 'structure' | 'merge' | 'replace' = 'merge',
+): Sheet_ACU {
+  const reuse = reuseSheetColumns_ACU(incoming, before);
+  const rows = new Map<string, Array<string | null>>();
+  if (mode !== 'replace') {
+    for (const row of (before.content || []).slice(1)) {
+      const mapped = reuse.sourceIndices.map(index => index < 0 ? null : row[index] ?? null);
+      rows.set(String(row[0] ?? '').trim(), mapped);
+    }
+  }
+  if (mode !== 'structure') {
+    for (const row of (incoming.content || []).slice(1)) {
+      const id = String(row[0] ?? '').trim();
+      const mapped = rows.get(id) || reuse.targetIndices.map((): string | null => null);
+      reuse.targetIndices.forEach((sourceIndex, index) => {
+        if (sourceIndex >= 0) mapped[index] = row[sourceIndex] ?? null;
+      });
+      rows.set(id, mapped);
+    }
+  }
+  const sheet = { ...reuse.sheet, uid: before.uid, content: [reuse.sheet.content[0], ...rows.values()] };
+  accumulateMergedTableAliases_ACU(sheet, before);
+  return sheet;
+}
+
+export interface SheetIdentityDataOrder_ACU {
+  dataOrderBySheetKey?: ReadonlyMap<string, number>;
+  replaceDataFromKeys?: ReadonlySet<string>;
+  referenceOrderBySheetKey?: ReadonlyMap<string, number>;
+  distinctCurrentNames?: ReadonlySet<string>;
+}
 
 export interface SheetIdentityRemap_ACU {
   /** 被并入并删除的旧 key。 */
@@ -29,21 +44,14 @@ export interface SheetIdentityRemap_ACU {
   toKey: string;
   /** winner 显示名的 canonical 形式。 */
   canonicalName: string;
-  /** loser 中与 winner 同 row_id 的行数（winner 胜出，loser 行被覆盖语义丢弃）。 */
+  /** 同 row_id 的重复快照数。 */
   overriddenRows: number;
   /** loser 中被追加进 winner 的独有行数。 */
   appendedRows: number;
-  /**
-   * 同 row_id 且两侧业务单元格都非空、映射后仍不相等的行 id：winner 行保留，loser 行
-   * 被丢弃但不静默——调用方（回放诊断 / 恢复）据此向用户展示冲突。
-   */
+  /** 同 row_id 的不同快照；没有可信先后时仍保留此诊断。 */
   conflictingRowIds: string[];
-  /** loser 表头中 winner 没有的列名：这些列的数据无法并入 winner 结构，随归并丢弃。 */
+  /** 兼容既有诊断接口；按名归并不再丢弃历史列。 */
   droppedColumns: string[];
-  /**
-   * 仅严格回放的「同名接管」事件携带：历史里同名新 key 的锚点/整表替换接管了旧 key 的表，
-   * 旧表当时的数据行数（不合并、随事件语义丢弃——记录写入时表确实被重置为事件数据）。
-   */
   supersededRows?: number;
 }
 
@@ -51,55 +59,8 @@ function normalizeHeaderCell_ACU(value: unknown): string {
   return String(value ?? '').trim();
 }
 
-function hasBusinessCellValue_ACU(row: unknown[]): boolean {
-  for (let index = 1; index < row.length; index += 1) {
-    if (normalizeHeaderCell_ACU(row[index]) !== '') return true;
-  }
-  return false;
-}
-
 function rowsEqual_ACU(left: unknown[], right: unknown[]): boolean {
-  if (left.length !== right.length) return false;
-  for (let index = 0; index < left.length; index += 1) {
-    if (normalizeHeaderCell_ACU(left[index]) !== normalizeHeaderCell_ACU(right[index])) return false;
-  }
-  return true;
-}
-
-/**
- * 把 loser 的一行按**表头名**映射到 winner 的列结构：第 0 列恒为 row_id；其余列按
- * 表头文本（trim 后精确匹配）对齐，winner 独有列填 ''，loser 独有列丢弃并记入
- * droppedColumns。表头完全一致时退化为原行拷贝（零成本路径）。
- * 同名异构模板切换（列重排 / 中间新增列 / 删列）下，按位置拼接会把值写进错误的列；
- * 按名映射是"同名表直接合并"的最低保真要求。
- */
-function mapLoserRowToWinnerColumns_ACU(
-  winnerHeader: string[],
-  loserHeader: string[],
-  row: string[],
-  droppedColumns: Set<string>,
-): string[] {
-  if (rowsEqual_ACU(winnerHeader, loserHeader)) return [...row];
-  const loserIndexByName = new Map<string, number>();
-  for (let index = 1; index < loserHeader.length; index += 1) {
-    const name = normalizeHeaderCell_ACU(loserHeader[index]);
-    if (name && !loserIndexByName.has(name)) loserIndexByName.set(name, index);
-  }
-  const winnerNames = new Set<string>();
-  const mapped: string[] = new Array(winnerHeader.length).fill('');
-  mapped[0] = row[0] ?? '';
-  for (let index = 1; index < winnerHeader.length; index += 1) {
-    const name = normalizeHeaderCell_ACU(winnerHeader[index]);
-    winnerNames.add(name);
-    const loserIndex = name ? loserIndexByName.get(name) : undefined;
-    if (loserIndex !== undefined && loserIndex < row.length) mapped[index] = row[loserIndex];
-  }
-  for (const [name, loserIndex] of loserIndexByName) {
-    if (!winnerNames.has(name) && loserIndex < row.length && normalizeHeaderCell_ACU(row[loserIndex]) !== '') {
-      droppedColumns.add(name);
-    }
-  }
-  return mapped;
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 export interface SheetIdentityMergeResult_ACU {
@@ -127,7 +88,7 @@ export function collectSheetIdentityCanonicals_ACU(sheet: Sheet_ACU): string[] {
   if (name) identities.add(name);
   for (const alias of readExplicitTableAliases_ACU(sheet)) {
     const canonical = canonicalizeDisplayName_ACU(alias);
-    if (canonical) identities.add(canonical);
+    if (canonical && !canonical.startsWith('sheet_') && (canonical !== canonicalizeDisplayName_ACU(sheet.uid) || canonical === name)) identities.add(canonical);
   }
   return [...identities];
 }
@@ -137,7 +98,7 @@ export function collectSheetIdentityCanonicals_ACU(sheet: Sheet_ACU): string[] {
  * 身份关系可传递（A~B 同名、B~C 同别名 → A、B、C 一组）。
  * 返回值只包含至少两个 key 的组，组内 key 保持字典序（确定性）。
  */
-function groupSheetKeysByIdentity_ACU(sheets: ReadonlyMap<string, Sheet_ACU>): string[][] {
+function groupSheetKeysByIdentity_ACU(sheets: ReadonlyMap<string, Sheet_ACU>, distinctCurrentNames?: ReadonlySet<string>): string[][] {
   const parent = new Map<string, string>();
   const find = (key: string): string => {
     let root = key;
@@ -154,18 +115,37 @@ function groupSheetKeysByIdentity_ACU(sheets: ReadonlyMap<string, Sheet_ACU>): s
     const leftRoot = find(left);
     const rightRoot = find(right);
     if (leftRoot === rightRoot) return;
+    const names = new Set([...sheets.keys()]
+      .filter(key => find(key) === leftRoot || find(key) === rightRoot)
+      .map(key => canonicalizeDisplayName_ACU(sheets.get(key)!.name))
+      .filter(name => distinctCurrentNames?.has(name)));
+    if (names.size > 1) return;
     // 以字典序较小者为根，保证分组结果与输入顺序无关。
     if (leftRoot < rightRoot) parent.set(rightRoot, leftRoot);
     else parent.set(leftRoot, rightRoot);
   };
 
-  const ownerByIdentity = new Map<string, string>();
-  for (const sheetKey of [...sheets.keys()].sort()) {
-    parent.set(sheetKey, sheetKey);
+  const ownersByIdentity = new Map<string, string[]>();
+  const references = new Set([...sheets].flatMap(([key, sheet]) => [
+    key, ...(canonicalizeDisplayName_ACU(sheet.uid) !== canonicalizeDisplayName_ACU(sheet.name) ? [sheet.uid] : []),
+  ]).map(canonicalizeDisplayName_ACU));
+  const keys = [...sheets.keys()].sort();
+  keys.forEach(key => parent.set(key, key));
+  const ownerByName = new Map<string, string>();
+  for (const key of keys) {
+    const name = canonicalizeDisplayName_ACU(sheets.get(key)!.name);
+    if (!name) continue;
+    const owner = ownerByName.get(name);
+    if (owner === undefined) ownerByName.set(name, key);
+    else union(owner, key);
+  }
+  for (const sheetKey of keys) {
     for (const identity of collectSheetIdentityCanonicals_ACU(sheets.get(sheetKey)!)) {
-      const owner = ownerByIdentity.get(identity);
-      if (owner === undefined) ownerByIdentity.set(identity, sheetKey);
-      else union(owner, sheetKey);
+      if (references.has(identity) && identity !== canonicalizeDisplayName_ACU(sheets.get(sheetKey)!.name)) continue;
+      const owners = ownersByIdentity.get(identity) || [];
+      owners.forEach(owner => union(owner, sheetKey));
+      owners.push(sheetKey);
+      ownersByIdentity.set(identity, owners);
     }
   }
 
@@ -192,8 +172,12 @@ function pickWinnerKey_ACU(
   keys: readonly string[],
   sheets: ReadonlyMap<string, Sheet_ACU>,
   preferredKeys: ReadonlySet<string>,
+  referenceOrder?: ReadonlyMap<string, number>,
 ): string {
   const sorted = [...keys].sort();
+  const persisted = sorted.filter(key => referenceOrder?.has(key))
+    .sort((left, right) => referenceOrder!.get(left)! - referenceOrder!.get(right)!);
+  if (persisted.length > 0) return persisted[0];
   const preferred = sorted.find(key => preferredKeys.has(key));
   if (preferred) return preferred;
   const stableCandidate = sorted.find(key => buildStableSheetKeyCandidate_ACU(sheets.get(key)?.name) === key);
@@ -244,6 +228,7 @@ function accumulateMergedTableAliases_ACU(winner: Sheet_ACU, loser: Sheet_ACU): 
 export function mergeLegacySheetIdentities_ACU(
   state: TableDataObject_ACU,
   preferredKeysArg?: readonly string[] | null,
+  context: SheetIdentityDataOrder_ACU = {},
 ): SheetIdentityMergeResult_ACU {
   const remaps: SheetIdentityRemap_ACU[] = [];
   const preferredKeys = new Set(preferredKeysArg || []);
@@ -257,58 +242,59 @@ export function mergeLegacySheetIdentities_ACU(
     sheets.set(sheetKey, sheet as Sheet_ACU);
   }
 
-  for (const keys of groupSheetKeysByIdentity_ACU(sheets)) {
-    const winnerKey = pickWinnerKey_ACU(keys, sheets, preferredKeys);
-    const winner = sheets.get(winnerKey)!;
+  for (const keys of groupSheetKeysByIdentity_ACU(sheets, context.distinctCurrentNames)) {
+    const winnerKey = pickWinnerKey_ACU(keys, sheets, preferredKeys, context.referenceOrderBySheetKey);
+    let winner = sheets.get(winnerKey)!;
     const canonicalName = canonicalizeDisplayName_ACU(winner.name);
+    const ordered = [...keys].sort((left, right) => {
+      const difference = (context.dataOrderBySheetKey?.get(left) ?? 0) - (context.dataOrderBySheetKey?.get(right) ?? 0);
+      if (difference) return difference;
+      // 无操作先后证据的重复快照只作确定性收敛，并由 conflictingRowIds 保留诊断。
+      const leftValue = JSON.stringify(sheets.get(left)?.content) || '';
+      const rightValue = JSON.stringify(sheets.get(right)?.content) || '';
+      return leftValue < rightValue ? -1 : leftValue > rightValue ? 1 : 0;
+    });
+    const latestReplacement = [...ordered].reverse().find(key => context.replaceDataFromKeys?.has(key));
+    const replacementOrder = latestReplacement === undefined ? -1 : ordered.indexOf(latestReplacement);
+    const rows = new Map<string, Array<string | null>>();
+    const conflicts = new Set<string>();
+    let structure = { ...winner, content: [winner.content?.[0] || []] } as Sheet_ACU;
+    for (const [orderIndex, key] of ordered.entries()) {
+      const source = sheets.get(key)!;
+      if (!source.content?.length) continue;
+      const reuse = reuseSheetColumns_ACU(structure, source);
+      for (const [id, row] of rows) rows.set(id, reuse.targetIndices.map(index => index < 0 ? '' : row[index] ?? null));
+      if (orderIndex === replacementOrder) rows.clear();
+      for (const row of source.content.slice(1)) {
+        if (!Array.isArray(row)) continue;
+        const id = normalizeHeaderCell_ACU(row[0]);
+        const previous = rows.get(id);
+        const next = previous ? [...previous] : reuse.sourceIndices.map(index => index < 0 ? '' : row[index] ?? null);
+        if (previous) {
+          for (const [index, sourceIndex] of reuse.sourceIndices.entries()) {
+            if (sourceIndex >= 0) next[index] = row[sourceIndex] ?? null;
+          }
+          if (!rowsEqual_ACU(previous, next)) conflicts.add(id);
+        }
+        if (orderIndex >= replacementOrder) rows.set(id, next);
+      }
+      structure = reuse.sheet;
+    }
+    winner = { ...structure, content: [structure.content[0], ...[...rows.entries()].sort(([left], [right]) => left.localeCompare(right, 'en')).map(([, row]) => row)] };
+    if (!winner.sourceData && ordered.length) winner.sourceData = { ...sheets.get(ordered[0])!.sourceData };
+    (state as Record<string, unknown>)[winnerKey] = winner;
+    const winnerIds = new Set((sheets.get(winnerKey)?.content || []).slice(1).map(row => normalizeHeaderCell_ACU(row[0])));
     for (const loserKey of keys) {
       if (loserKey === winnerKey) continue;
       const loser = sheets.get(loserKey)!;
       let overriddenRows = 0;
       let appendedRows = 0;
       const conflictingRowIds: string[] = [];
-      const droppedColumns = new Set<string>();
-
-      const winnerHasContent = Array.isArray(winner.content) && winner.content.length > 0;
-      const loserHasContent = Array.isArray(loser.content) && loser.content.length > 0;
-      if (!winnerHasContent && loserHasContent) {
-        // winner 侧无可用 content（如 header 丢失）：整体采纳 loser 的 content。
-        winner.content = loser.content;
-        appendedRows = loser.content.length > 0 ? loser.content.length - 1 : 0;
-      } else if (winnerHasContent && loserHasContent) {
-        const winnerHeader: string[] = Array.isArray(winner.content[0]) ? winner.content[0] : [];
-        const loserHeader: string[] = Array.isArray(loser.content[0]) ? loser.content[0] : [];
-        const winnerRowIndexById = new Map<string, number>();
-        for (let index = 1; index < winner.content.length; index += 1) {
-          const row = winner.content[index];
-          if (!Array.isArray(row)) continue;
-          const id = String(row[0] ?? '').trim();
-          if (id && !winnerRowIndexById.has(id)) winnerRowIndexById.set(id, index);
-        }
-        for (let index = 1; index < loser.content.length; index += 1) {
-          const row = loser.content[index];
-          if (!Array.isArray(row)) continue;
-          const rowId = String(row[0] ?? '').trim();
-          const mapped = mapLoserRowToWinnerColumns_ACU(winnerHeader, loserHeader, row, droppedColumns);
-          const winnerIndex = rowId ? winnerRowIndexById.get(rowId) : undefined;
-          if (winnerIndex !== undefined) {
-            const winnerRow = winner.content[winnerIndex];
-            overriddenRows += 1;
-            // 同 row_id：映射后相等 → 纯重复；winner 行没有任何业务值（模板 header-only
-            // 派生或占位行）→ 历史数据更有信息量，取 loser；两侧都有值且不等 → 保留
-            // winner（当前/模板侧）并记录冲突，不静默。
-            if (rowsEqual_ACU(winnerRow, mapped)) continue;
-            if (!hasBusinessCellValue_ACU(winnerRow) && hasBusinessCellValue_ACU(mapped)) {
-              winner.content[winnerIndex] = mapped;
-              continue;
-            }
-            if (hasBusinessCellValue_ACU(mapped)) conflictingRowIds.push(rowId);
-            continue;
-          }
-          winner.content.push(mapped);
-          if (rowId) winnerRowIndexById.set(rowId, winner.content.length - 1);
-          appendedRows += 1;
-        }
+      for (const row of (loser.content || []).slice(1)) {
+        const id = normalizeHeaderCell_ACU(row[0]);
+        if (winnerIds.has(id)) overriddenRows += 1;
+        else if (rows.has(id)) { appendedRows += 1; winnerIds.add(id); }
+        if (conflicts.has(id)) conflictingRowIds.push(id);
       }
 
       const winnerSeedRows = (winner as any).seedRows;
@@ -317,9 +303,10 @@ export function mergeLegacySheetIdentities_ACU(
         && Array.isArray(loserSeedRows) && loserSeedRows.length > 0) {
         (winner as any).seedRows = loserSeedRows;
       }
-      if ((winner as any).sourceData === undefined && (loser as any).sourceData !== undefined) {
-        (winner as any).sourceData = (loser as any).sourceData;
-      }
+      const references = [loserKey, loser.uid].filter(value => value && value !== winnerKey && value !== winner.uid
+        && canonicalizeDisplayName_ACU(value) !== canonicalizeDisplayName_ACU(loser.name));
+      winner.sourceData = { ...winner.sourceData };
+      winner.sourceData.tableAliases = [...new Set([...(winner.sourceData.tableAliases || []), ...references])];
       accumulateMergedTableAliases_ACU(winner, loser);
 
       delete (state as Record<string, unknown>)[loserKey];
@@ -331,10 +318,31 @@ export function mergeLegacySheetIdentities_ACU(
         overriddenRows,
         appendedRows,
         conflictingRowIds,
-        droppedColumns: [...droppedColumns].sort(),
+        droppedColumns: [],
       });
     }
   }
 
   return { changed: remaps.length > 0, remaps };
+}
+
+export interface SheetKeyRedirect_ACU {
+  requestedKey: string;
+  sheetKey: string;
+  uid?: string;
+}
+
+/** 把模板侧请求 key 的表改挂到实际恢复的历史 key；只返回浅拷贝，不修改输入。 */
+export function redirectSheetKeysInData_ACU<T>(data: T, redirects: readonly SheetKeyRedirect_ACU[]): T {
+  if (!data || typeof data !== 'object' || Array.isArray(data) || redirects.length === 0) return data;
+  const out = { ...(data as Record<string, unknown>) };
+  for (const { requestedKey, sheetKey, uid } of redirects) {
+    const sheet = out[requestedKey];
+    if (requestedKey === sheetKey || !isSheetLike_ACU(sheet) || Object.prototype.hasOwnProperty.call(out, sheetKey)) continue;
+    const sourceData = { ...(sheet.sourceData || {}) } as Sheet_ACU['sourceData'];
+    sourceData.tableAliases = [...new Set([...(sourceData.tableAliases || []), requestedKey])];
+    delete out[requestedKey];
+    out[sheetKey] = { ...sheet, uid: uid || sheetKey, sourceData };
+  }
+  return out as T;
 }

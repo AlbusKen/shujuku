@@ -2405,7 +2405,10 @@ async function processGroupedRuntimeChunkCore_ACU(
     }
     const schedulingIdentitySnapshot = cloneTableDataSnapshot_ACU(currentJsonTableData_ACU);
 
-    const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU('processGroupedRuntimeChunk');
+    // 无持久身份聊天在规划前统一分配稳定表身份（与用户消息条数无关）；stage_only 不写聊天。
+    const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU('processGroupedRuntimeChunk', {
+        pinPristineIdentity: options.commitMode !== 'stage_only',
+    });
     if (!migration.success) {
         return {
             success: false,
@@ -2430,6 +2433,8 @@ async function processGroupedRuntimeChunkCore_ACU(
                 diagnosticCode: 'catch_up_migration_changed_topology',
             };
         }
+        await reloadStorageProvider();
+    } else if (migration.identityPinned) {
         await reloadStorageProvider();
     }
     // stage_only 只写 run 级隔离 staging，不触碰聊天；普通提交路径才需要先让聊天追上 runtime。
@@ -3764,11 +3769,11 @@ export async function processUpdatesBatch_ACU(
     if (!options.planManaged) _set_wasStoppedByUser_ACU(false);
     const schedulingIdentitySnapshot = cloneTableDataSnapshot_ACU(currentJsonTableData_ACU);
 
-    const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU('processUpdatesBatch');
+    const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU('processUpdatesBatch', { pinPristineIdentity: true });
     if (!migration.success) {
         return { success: false, error: migration.error || '旧存储迁移失败，已阻止本次填表。' };
     }
-    if (migration.migrated) {
+    if (migration.migrated || migration.identityPinned) {
         await reloadStorageProvider();
     }
     await flushRuntimeOnlyChangesBeforeFill_ACU('processUpdatesBatch');
@@ -4165,7 +4170,7 @@ export async function orchestrateManualCatchUp_ACU(
     // migration full checkpoint。若等到 chunk 执行时才迁移，第一 bucket 的目标楼层早于
     // 新锚点，persist 会以 target < latestFullCheckpoint fail-fast 拒绝，用户已经白白
     // 支付了一次 AI 调用。迁移成功后必须重载存储运行时与聊天，再重新规划与重新预检。
-    const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU('orchestrateManualCatchUp:preplan');
+    const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU('orchestrateManualCatchUp:preplan', { pinPristineIdentity: true });
     if (!migration.success) {
         return {
             success: false,
@@ -4177,7 +4182,7 @@ export async function orchestrateManualCatchUp_ACU(
             diagnosticCode: 'catch_up_migration_failed',
         };
     }
-    if (migration.migrated) {
+    if (migration.migrated || migration.identityPinned) {
         // 迁移改写聊天持久化拓扑：内存 runtime、模板与聊天数组都必须基于新状态重建，
         // 否则规划会建立在迁移前的陈旧快照上。
         const reloadResult = await reloadStorageProvider();

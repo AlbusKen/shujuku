@@ -396,6 +396,22 @@ export function buildSheetColumnAliasMap_ACU(
       addColumnAlias(columns, tableEvidence, tableConflictCandidates, tableConflicts,
         mapping.displayName, mapping.sqlName, 'display_name');
     }
+    // declared_display_alias（自身）：模板协调写入的历史列显示名；当前列名优先，不覆盖已注册名称。
+    const ownColumnAliases = sheet?.sourceData?.columnAliases;
+    if (ownColumnAliases && typeof ownColumnAliases === 'object' && !Array.isArray(ownColumnAliases)) {
+      for (const [physical, values] of Object.entries(ownColumnAliases as Record<string, unknown>)) {
+        const bySql = resolved.columnMap.mappings.filter(mapping => String(mapping.sqlName).toLowerCase() === physical.toLowerCase());
+        const byName = resolved.columnMap.mappings.filter(mapping => canonicalizeDisplayName_ACU(mapping.displayName) === canonicalizeDisplayName_ACU(physical));
+        const target = bySql.length === 1 ? bySql[0] : byName.length === 1 ? byName[0] : undefined;
+        if (!target || !Array.isArray(values)) continue;
+        for (const alias of values) {
+          const aliasText = String(alias ?? '').trim();
+          if (!aliasText || columns.has(aliasText.toLowerCase())) continue;
+          addColumnAlias(columns, tableEvidence, tableConflictCandidates, tableConflicts,
+            aliasText, target.sqlName, 'declared_display_alias');
+        }
+      }
+    }
     // fallback_slug：对目标完整表头调用一次 mapSqlColumnIdentifiers_ACU，
     // 按 sourceIndex 对齐（计划 6.1：必须批量计算，碰撞后缀 _2/_3 由映射器保证）。
     const headers = Array.isArray(sheet.content?.[0]) ? sheet.content[0].map((h: unknown) => String(h ?? '')) : [];

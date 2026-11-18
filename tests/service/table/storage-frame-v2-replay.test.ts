@@ -3787,9 +3787,118 @@ describe('loadTableStateFromFramesV2_ACU', () => {
     expect(repaired?.requiresCheckpointConvergence).toBe(true);
   });
 
+  it.each([['sheet_a', 'sheet_z'], ['sheet_z', 'sheet_a']])('同帧 %s→%s 的 hide/reveal 按 ordinal 冷回放并在 SQL 后保持同一 lifecycle', async (oldKey, newKey) => {
+    const root = makeCheckpointData();
+    const sheet = root.sheet_0;
+    const checkpoint = (sheetKey: string, kind: string, afterSeq: number) => ({
+      kind: 'sheet_full', reason: 'schema_change', createdAt: 10, sheetKey,
+      data: { ...structuredClone(sheet), uid: sheetKey,
+        content: afterSeq === 0 ? structuredClone(sheet.content) : [['row_id', 'name'], ['1', 'SQL最新值']],
+      },
+      timeline: { kind, afterSeq, activateAtMessageIndex: 99 },
+    });
+    const frame = {
+      version: 2,
+      checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { mate: root.mate, [oldKey]: sheet } },
+      sheetTimelineEvents: [
+        { ordinal: 7, checkpoint: checkpoint(newKey, 'sheet_reveal', 0) },
+        { ordinal: 2, checkpoint: checkpoint(oldKey, 'sheet_hide', 0) },
+        { ordinal: 11, checkpoint: checkpoint(oldKey, 'sheet_hide', 1) },
+        { ordinal: 16, checkpoint: checkpoint(newKey, 'sheet_reveal', 1) },
+      ],
+      logEntries: [{
+        seq: 1, entryId: 'timeline-sql', createdAt: 10, source: 'manual_crud', targetMessageIndex: 0, aiFloor: 1,
+        filledSheetKeys: [oldKey], changedSheetKeys: [oldKey], groupKeys: [],
+        operations: [{ kind: 'sql_sheet_batch', sheetKey: oldKey, tableName: 'inventory', reason: 'system',
+          statements: ["UPDATE inventory SET name = 'SQL最新值' WHERE row_id = 1"] }],
+      }],
+    };
+    const chat = [{ is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame } } }];
+    const before = JSON.stringify(chat);
+    clearLiveReplayCache_ACU();
+    const result = await loadTableStateFromFramesV2Detailed_ACU(JSON.parse(before), '', {
+      updateRuntimeState: false, compatibilityMode: 'disabled',
+    });
+    const keys = Object.keys(result!.data).filter(key => key.startsWith('sheet_'));
+    expect(keys).toHaveLength(1);
+    expect(result!.data[keys[0]].content).toEqual([['row_id', 'name'], ['1', 'SQL最新值']]);
+    const lifecycle = deriveSheetLifecycleFromFramesV2_ACU(JSON.parse(before), '');
+    expect(lifecycle.activeSheetKeys).toHaveLength(1);
+    expect(lifecycle.hiddenSheetKeys).toEqual([]);
+    expect(lifecycle.statusBySheetKey[oldKey]?.status).toBe('active');
+    expect(lifecycle.statusBySheetKey[newKey]?.status).toBe('active');
+    expect(JSON.stringify(chat)).toBe(before);
+  });
 
+  it.each([['sheet_a', 'sheet_z'], ['sheet_z', 'sheet_a']])('同帧 %s→%s 空结构不撤销写空、删行或显式替换，严格与宽容冷回放一致', async (oldKey, newKey) => {
+    const root = makeCheckpointData();
+    const sheet = root.sheet_0;
+    sheet.content.push(['2', '待删除']);
+    const structure = (afterSeq: number, ordinal: number) => ({
+      ordinal,
+      checkpoint: {
+        kind: 'sheet_full', reason: 'schema_change', createdAt: 10, sheetKey: newKey,
+        data: { ...structuredClone(sheet), uid: newKey, content: [['row_id', 'name']] },
+        timeline: { kind: 'sheet_rebase', afterSeq, activateAtMessageIndex: 0 },
+      },
+    });
+    const entry = (seq: number, operations: any[]) => ({
+      seq, entryId: `explicit-data-${seq}`, createdAt: 10, source: 'manual_crud',
+      targetMessageIndex: 0, aiFloor: 1, filledSheetKeys: [], changedSheetKeys: [oldKey], groupKeys: [], operations,
+    });
+    const frame = {
+      version: 2,
+      checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { mate: root.mate, [oldKey]: sheet } },
+      sheetTimelineEvents: [structure(0, 0), structure(1, 1), structure(2, 2), structure(3, 3)],
+      logEntries: [
+        entry(1, [
+          { kind: 'row_upsert', sheetKey: newKey, rowId: '1', cells: ['1', ''], reason: 'manual_crud' },
+          { kind: 'row_delete', sheetKey: oldKey, rowId: '2', reason: 'manual_crud' },
+        ]),
+        entry(2, [{ kind: 'sheet_replace', sheetKey: newKey, reason: 'manual_crud',
+          sheet: { ...structuredClone(sheet), content: [['row_id', 'name']] } }]),
+        entry(3, [{ kind: 'row_upsert', sheetKey: oldKey, rowId: '3', cells: ['3', '替换后续填'], reason: 'manual_crud' }]),
+      ],
+    };
+    const chat = [{ is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame } } }];
+    const before = JSON.stringify(chat);
+    const observed: any[] = [];
+    clearLiveReplayCache_ACU();
+    const strict = await loadTableStateFromFramesV2Detailed_ACU(chat, '', {
+      updateRuntimeState: false, compatibilityMode: 'disabled',
+      onEntryApplied: async ({ readSheet }) => { observed.push((await readSheet(oldKey))?.content); },
+    });
+    expect(observed).toEqual([
+      [['row_id', 'name'], ['1', '']],
+      [['row_id', 'name']],
+      [['row_id', 'name'], ['3', '替换后续填']],
+    ]);
+    expect(Object.keys(strict!.data).filter(key => key.startsWith('sheet_'))).toEqual([oldKey]);
+    expect(strict!.data[oldKey].content).toEqual(observed[2]);
+    const { replayWithLegacyTolerances_ACU } = await import('../../../src/service/table/storage-frame-v2-replay');
+    const tolerant = await replayWithLegacyTolerances_ACU(JSON.parse(before), '');
+    expect(tolerant.data[oldKey].content).toEqual(observed[2]);
+    expect(JSON.stringify(chat)).toBe(before);
+  });
 
-
+  it('旧 hide 虚拟屏障与较晚 reveal 共存时仅按日志时间证据内存归一', async () => {
+    const root = makeCheckpointData();
+    const cp = (kind: string, createdAt: number, afterSeq: number) => ({
+      kind: 'sheet_full', reason: 'schema_change', sheetKey: 'sheet_0', createdAt, data: root.sheet_0,
+      timeline: { kind, activateAtMessageIndex: 0, afterSeq },
+    });
+    const frame = { version: 2, checkpoint: { kind: 'full', reason: 'init', createdAt: 1, data: root },
+      perSheetCheckpoints: { sheet_0: cp('sheet_hide', 3, 2) },
+      sheetTimelineEvents: [{ ordinal: 0, checkpoint: cp('sheet_reveal', 4, 1) }],
+      logEntries: [{ seq: 1, createdAt: 2, operations: [] }],
+    };
+    const chat = [{ is_user: false, TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: frame } } }];
+    const before = JSON.stringify(chat);
+    const result = await loadTableStateFromFramesV2Detailed_ACU(JSON.parse(before), '', { updateRuntimeState: false, compatibilityMode: 'disabled' });
+    expect(result?.data.sheet_0.content).toEqual(root.sheet_0.content);
+    expect(deriveSheetLifecycleFromFramesV2_ACU(chat, '').statusBySheetKey.sheet_0.status).toBe('active');
+    expect(JSON.stringify(chat)).toBe(before);
+  });
 
   it.each([
     { label: 'kind', timeline: { kind: 'sheet_bogus', activateAtMessageIndex: 0, afterSeq: 0 } },

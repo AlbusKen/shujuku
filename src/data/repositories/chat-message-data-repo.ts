@@ -234,6 +234,13 @@ export function collectSqlTargetTableNamesFromStorageFrameV2_ACU(frame: any, she
             collectSqlTableNameCandidatesFromSheetForPurge_ACU(sheetKey, checkpoint.data, targetNames);
         });
     }
+    if (Array.isArray(frame?.sheetTimelineEvents)) {
+        for (const event of frame.sheetTimelineEvents) {
+            const checkpoint = event?.checkpoint;
+            if (!isObjectRecord_ACU(checkpoint) || !sheetKeys.has(checkpoint.sheetKey)) continue;
+            collectSqlTableNameCandidatesFromSheetForPurge_ACU(checkpoint.sheetKey, checkpoint.data, targetNames);
+        }
+    }
     if (Array.isArray(frame?.logEntries)) {
         frame.logEntries.forEach((entry: any) => {
             if (!isObjectRecord_ACU(entry)) return;
@@ -762,6 +769,13 @@ function purgeSheetKeysFromStorageFrameV2_ACU(frame: any, sheetKeys: Set<string>
             changed = true;
         });
     }
+    if (Array.isArray(frame.sheetTimelineEvents)) {
+        const retained = frame.sheetTimelineEvents.filter((event: any) => !sheetKeys.has(event?.checkpoint?.sheetKey));
+        if (retained.length !== frame.sheetTimelineEvents.length) {
+            frame.sheetTimelineEvents = retained;
+            changed = true;
+        }
+    }
 
     if (Array.isArray(frame.logEntries)) {
         const previousEntryRevisions = new Set(frame.logEntries
@@ -1006,6 +1020,12 @@ function forEachSheetDefinitionInTagData_ACU(
             if (!sheetKey.startsWith('sheet_')) return;
             visit(sheetKey, frame.perSheetCheckpoints[sheetKey]?.data);
         });
+    }
+    if (Array.isArray(frame.sheetTimelineEvents)) {
+        for (const event of frame.sheetTimelineEvents) {
+            const checkpoint = event?.checkpoint;
+            if (typeof checkpoint?.sheetKey === 'string' && checkpoint.sheetKey.startsWith('sheet_')) visit(checkpoint.sheetKey, checkpoint.data);
+        }
     }
     if (!Array.isArray(frame.logEntries)) return;
     frame.logEntries.forEach((entry: any) => {

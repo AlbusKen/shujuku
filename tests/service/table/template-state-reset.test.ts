@@ -31,13 +31,16 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   getCurrentIsolationKey_ACU: () => '', settings_ACU: mocks.settings,
   _set_currentJsonTableData_ACU: mocks.setRuntime,
 }));
-vi.mock('../../../src/shared/sheet-identity', () => ({
-  allocateStableSheetKeys_ACU: (names: string[]) => ({ keys: names.map(name => `sheet_${String(name).toLowerCase()}`), diagnostics: [] }),
-  canonicalizeDisplayName_ACU: (value: unknown) => String(value ?? '').trim(),
-  assertNoPhysicalTableNameCollision_ACU: () => {
-    if (mocks.physicalNameError) throw mocks.physicalNameError;
-  },
-}));
+vi.mock('../../../src/shared/sheet-identity', async () => {
+  const actual = await vi.importActual<any>('../../../src/shared/sheet-identity');
+  return {
+    prepareStableSheetIdentities_ACU: actual.prepareStableSheetIdentities_ACU,
+    canonicalizeDisplayName_ACU: (value: unknown) => String(value ?? '').trim(),
+    assertNoPhysicalTableNameCollision_ACU: () => {
+      if (mocks.physicalNameError) throw mocks.physicalNameError;
+    },
+  };
+});
 vi.mock('../../../src/shared/canonical-row-normalizer', () => ({
   normalizeCanonicalTableRows_ACU: () => ({ errors: mocks.canonicalRowErrors }),
 }));

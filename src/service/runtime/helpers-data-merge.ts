@@ -23,7 +23,7 @@ import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
 import { normalizeCanonicalTableRows_ACU, restoreLegacyRowIdentity_ACU } from '../../shared/canonical-row-normalizer';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
 import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
-import { canonicalizeDisplayName_ACU } from '../../shared/sheet-identity';
+import { canonicalizeDisplayName_ACU, prepareStableSheetIdentities_ACU } from '../../shared/sheet-identity';
 import { applyGuideMetadataToSheet_ACU, isSameSheetHeader_ACU } from '../template/guide-metadata-overlay';
 import { repairLegacyAutoMergedRowTails_ACU, repairLegacyOrphanIdentityColumn_ACU } from '../../shared/canonical-row-normalizer';
 
@@ -902,12 +902,28 @@ export function migrateContentNullToRowId(data: Record<string, any> | null): Rec
       }
       ensureSheetOrderNumbers_ACU(templateObj, { baseOrderKeys: sheetKeys, forceRebuild: false });
 
+      // 无持久身份的首个 checkpoint：按显示名分配稳定 key，guide/scope/checkpoint/运行时共用同一结果；
+      // 原 key/uid 作为 tableAliases 保留。当前隔离区已有表数据（force 覆写）时沿用持久身份；
+      // 分配存在诊断时沿用原 key，不新增拒绝条件。
+      const presetTemplateObj = templateObj;
+      const hasPersistedIdentity = chat.some(message => messageHasTableDataForCurrentIsolation_ACU(message, isolationKey));
+      const identity = hasPersistedIdentity ? null : prepareStableSheetIdentities_ACU(templateObj);
+      if (!identity) {
+          // 已有持久身份：不重分配。
+      } else if (identity.keyMap.size > 0) {
+          templateObj = identity.data;
+      } else {
+          const details = [...identity.malformedSheetKeys, ...identity.diagnostics.map(item => `${item.code}: ${item.originalName || '(空表名)'}`)].join('；');
+          logWarn_ACU(`[InitialCheckpoint] 无法分配稳定表 key，沿用模板 key：${details}`);
+      }
+
       const templateSnapshot = sanitizeTemplateSnapshotForChat_ACU(templateObj);
       const normalizedPresetName = deriveTemplatePresetNameForImport_ACU({ presetName });
       const normalizedSource = source || reason;
-      if (registerPreset && normalizedPresetName && templateSnapshot?.templateStr) {
+      const presetSnapshot = registerPreset ? sanitizeTemplateSnapshotForChat_ACU(presetTemplateObj) : null;
+      if (registerPreset && normalizedPresetName && presetSnapshot?.templateStr) {
           try {
-              const savePresetOk = upsertTemplatePreset_ACU(normalizedPresetName, templateSnapshot.templateStr);
+              const savePresetOk = upsertTemplatePreset_ACU(normalizedPresetName, presetSnapshot.templateStr);
               if (!savePresetOk) {
                   logWarn_ACU(`[TemplateScope] 保存模板预设失败：${normalizedPresetName}`);
               }

@@ -139,6 +139,11 @@ import { buildSheetSchemaMigrationOperation_ACU, buildSheetSchemaMigrationOperat
 const sheetA = { uid: 'a', name: 'A', sourceData: {}, content: [['row_id', 'value'], ['1', 'new']], updateConfig: {}, exportConfig: {}, orderNo: 1 } as any;
 const sheetB = { uid: 'b', name: 'B', sourceData: {}, content: [['row_id', 'value']], updateConfig: {}, exportConfig: {}, orderNo: 2 } as any;
 
+function latestTimelineCheckpoint(frame: any, sheetKey: string): any {
+  const events = (frame.sheetTimelineEvents || []).filter((event: any) => event.checkpoint.sheetKey === sheetKey);
+  return events[events.length - 1]?.checkpoint;
+}
+
 function makeEntry(overrides: Record<string, any> = {}): any {
   return {
     seq: 1, entryId: 'entry-1', createdAt: 10, source: 'manual_fill', targetMessageIndex: 0, aiFloor: 1,
@@ -1831,7 +1836,8 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     expect(result.saved).toBe(true);
     const frame = message.TavernDB_ACU_IsolatedData[''].storageFrame;
     // 必须为本楼缺失的目标表补写 per-sheet checkpoint，否则增量无法回放。
-    const introduced = frame.perSheetCheckpoints?.sheet_new;
+    const introduced = latestTimelineCheckpoint(frame, 'sheet_new');
+    expect(frame.perSheetCheckpoints?.sheet_new).toBeUndefined();
     expect(introduced).toBeDefined();
     expect(introduced?.timeline?.kind).toBe('sheet_introduction');
     // 锚点只提供表结构：带上数据行会与本次增量的同 row_id 冲突（UNIQUE constraint failed）。
@@ -1879,7 +1885,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
       maxMessageIndex: 0,
       updateRuntimeState: false,
     }));
-    expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_hidden).toMatchObject({
+    expect(latestTimelineCheckpoint(message.TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_hidden')).toMatchObject({
       timeline: { kind: 'sheet_reveal', activateAtMessageIndex: 0, afterSeq: 0 },
       data: { content: [['row_id', 'value']] },
     });
@@ -2811,7 +2817,8 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
 
     expect(result.saved).toBe(true);
     const frame = message.TavernDB_ACU_IsolatedData[''].storageFrame;
-    expect(frame.perSheetCheckpoints.sheet_new.timeline).toEqual({ kind: 'sheet_introduction', activateAtMessageIndex: 0, afterSeq: 7 });
+    expect(latestTimelineCheckpoint(frame, 'sheet_new').timeline).toEqual({ kind: 'sheet_introduction', activateAtMessageIndex: 0, afterSeq: 7 });
+    expect(frame.perSheetCheckpoints.sheet_new).toBeUndefined();
     expect(frame.logEntries[1]).toMatchObject({ seq: 8, operations: [expect.objectContaining({ kind: 'sheet_schema_migrate', sheetKey: 'sheet_a' })] });
   });
 
@@ -2832,7 +2839,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
 
     expect(result.saved).toBe(true);
-    expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_new).toMatchObject({
+    expect(latestTimelineCheckpoint(message.TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_new')).toMatchObject({
       kind: 'sheet_full', sheetKey: 'sheet_new',
       timeline: { kind: 'sheet_introduction', activateAtMessageIndex: 0, afterSeq: 7 },
     });
@@ -2860,11 +2867,11 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
 
     expect(result.saved).toBe(true);
     const frame = message.TavernDB_ACU_IsolatedData[''].storageFrame;
-    expect(frame.perSheetCheckpoints.sheet_a).toMatchObject({
+    expect(latestTimelineCheckpoint(frame, 'sheet_a')).toMatchObject({
       kind: 'sheet_full', sheetKey: 'sheet_a', reason: 'schema_change',
       timeline: { kind: 'sheet_rebase', activateAtMessageIndex: 0, afterSeq: 7 },
     });
-    expect(frame.perSheetCheckpoints.sheet_a.data.content).toEqual([['row_id', '名称', '品质'], ['1', '铁剑', '']]);
+    expect(latestTimelineCheckpoint(frame, 'sheet_a').data.content).toEqual([['row_id', '名称', '品质'], ['1', '铁剑', '']]);
   });
 
   it('rebase 目标表不存在于 active replay state 时拒绝', async () => {
@@ -2910,7 +2917,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
 
     expect(result).toMatchObject({ saved: true, mode: 'v2_commit' });
     expect(mocks.saveChatStrict).toHaveBeenCalledOnce();
-    expect(targetMessage.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_new).toMatchObject({
+    expect(latestTimelineCheckpoint(targetMessage.TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_new')).toMatchObject({
       kind: 'sheet_full',
       sheetKey: 'sheet_new',
       timeline: { kind: 'sheet_introduction', activateAtMessageIndex: 1, afterSeq: 0 },
@@ -3078,7 +3085,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
 
     expect(result.saved).toBe(true);
-    const revived = message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_hidden;
+    const revived = latestTimelineCheckpoint(message.TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_hidden');
     expect(revived?.timeline?.kind).toBe('sheet_reveal');
     expect(revived?.data?.content).toEqual([['row_id', 'value'], ['1', '隐藏前的数据']]);
   });
@@ -3129,7 +3136,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
 
     expect(result).toMatchObject({ saved: true });
-    expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_hidden_convergence).toMatchObject({
+    expect(latestTimelineCheckpoint(message.TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_hidden_convergence')).toMatchObject({
       timeline: { kind: 'sheet_reveal' },
       data: { content: [['row_id', 'value'], ['1', '不可丢失的数据']] },
     });
@@ -3164,7 +3171,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
 
     expect(result.error).toBeUndefined();
     expect(result.saved).toBe(true);
-    const revived = message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_stale;
+    const revived = latestTimelineCheckpoint(message.TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_stale');
     expect(revived?.timeline?.kind).toBe('sheet_reveal');
     expect(revived?.data?.content).toEqual([['row_id', 'value'], ['1', '离开前的数据']]);
   });
@@ -3201,7 +3208,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
 
     expect(result).toMatchObject({ saved: true });
-    expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_new).toMatchObject({
+    expect(latestTimelineCheckpoint(message.TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_new')).toMatchObject({
       timeline: { kind: 'sheet_introduction', activateAtMessageIndex: 0, afterSeq: 0 },
       data: { content: [['row_id', 'value']] },
     });
@@ -3232,11 +3239,109 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
 
     expect(result).toMatchObject({ saved: true });
-    expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_new).toMatchObject({
+    expect(latestTimelineCheckpoint(message.TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_new')).toMatchObject({
       timeline: { kind: 'sheet_introduction', activateAtMessageIndex:0, afterSeq: 0 },
       data: { content: [['row_id', 'value']] },
     });
   });
+
+  it.each([
+    ['省略摘要', undefined],
+    ['空摘要', {}],
+    ['填表楼层', { lastFilledAiFloor: 7.5 }],
+    ['变化楼层', { lastChangedAiFloor: 6.5 }],
+    ['导入基线', { lastImportBaselineAiFloor: 4 }],
+    ['完整摘要', { lastFilledAiFloor: 7, lastChangedAiFloor: 6, lastImportBaselineAiFloor: 4 }],
+  ])('单表摘要契约：真实 writer 的%s经历史扫描恢复为 reveal', async (_label, summary) => {
+    const historicalMessage = seedFrame({ logEntries: [], perSheetCheckpoints: {} });
+    const historicalSheet = { ...sheetA, uid: 'sheet_new', name: '摘要恢复表' };
+    mocks.collectSummary.mockReturnValueOnce(summary === undefined ? {} : { sheet_new: summary } as any);
+    const written = await persistTableSheetCheckpointV2_ACU({
+      targetMessageIndex: 0, sheetKey: 'sheet_new', sheetData: historicalSheet,
+      reason: 'manual', createdAt: 20, transactionContext: makeTransaction(),
+    });
+    expect(written.saved).toBe(true);
+    expect(historicalMessage.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_new.scheduleSummary).toEqual(summary);
+    const beforeHistory = JSON.parse(JSON.stringify(historicalMessage));
+    const targetMessage = seedFrame({ logEntries: [], perSheetCheckpoints: {} });
+    mocks.chat.splice(0, mocks.chat.length, historicalMessage, targetMessage);
+    mocks.loadReplayState.mockImplementation(async (_chat: any[], _key: string, options: any) => ({
+      ...targetMessage.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data,
+      ...(options?.maxMessageIndex === 0 ? { sheet_new: historicalSheet } : {}),
+    }));
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '', createdAt: 30,
+      sheetChanges: [{ kind: 'introduction', sheetKey: 'sheet_new', sheetData: { ...historicalSheet, content: [['row_id', 'value']] } }],
+      guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' }, sheet_new: { name: historicalSheet.name } },
+    });
+    expect(result).toMatchObject({ saved: true });
+    expect(latestTimelineCheckpoint(targetMessage.TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_new')).toMatchObject({
+      timeline: { kind: 'sheet_reveal' }, data: { content: historicalSheet.content },
+    });
+    expect(historicalMessage).toEqual(beforeHistory);
+  });
+
+  it.each([
+    ['负数楼层', { lastFilledAiFloor: -1 }],
+    ['无限楼层', { lastChangedAiFloor: Infinity }],
+    ['非整数基线', { lastImportBaselineAiFloor: 1.5 }],
+    ['字符串楼层', { lastFilledAiFloor: '7' }],
+    ['错误的 map 形状', { lastFilledAiFloor: { lastChangedAiFloor: 1 } }],
+    ['数组形状', []],
+    ['null 形状', null],
+  ])('单表摘要契约：目标历史%s仍拒绝且零写入', async (_label, summary) => {
+    const message = seedFrame({
+      logEntries: [], perSheetCheckpoints: {
+        sheet_new: { kind: 'sheet_full', createdAt: 10, reason: 'manual', sheetKey: 'sheet_new', data: sheetB, scheduleSummary: summary },
+      },
+    });
+    const before = message.TavernDB_ACU_IsolatedData;
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '', createdAt: 30,
+      sheetChanges: [{ kind: 'introduction', sheetKey: 'sheet_new', sheetData: sheetB }],
+      guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' }, sheet_new: { name: 'B' } },
+    });
+    expect(result).toMatchObject({ saved: false, error: expect.stringContaining('history_indeterminate') });
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+    expect(mocks.setGuide).not.toHaveBeenCalled();
+    expect(message.TavernDB_ACU_IsolatedData).toBe(before);
+  });
+
+  it.each([
+    ['合法整库 map', { sheet_a: { lastFilledAiFloor: 7, lastChangedAiFloor: 6, lastImportBaselineAiFloor: 4 } }, true],
+    ['非法整库扁平摘要', { lastFilledAiFloor: 7 }, false],
+    ['非法整库 map 字段', { sheet_a: { lastChangedAiFloor: -1 } }, false],
+  ])('整库摘要契约：%s维持原有历史分类', async (_label, summary, valid) => {
+    const message = seedFrame({ logEntries: [], perSheetCheckpoints: {} });
+    message.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.scheduleSummary = summary;
+    const before = message.TavernDB_ACU_IsolatedData;
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '', createdAt: 30,
+      sheetChanges: [{ kind: 'introduction', sheetKey: 'sheet_new', sheetData: { ...sheetB, name: '新表' } }],
+      guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' }, sheet_new: { name: '新表' } },
+    });
+    expect(result.saved).toBe(valid);
+    if (!valid) {
+      expect(result.error).toContain('history_indeterminate');
+      expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+      expect(mocks.setGuide).not.toHaveBeenCalled();
+      expect(message.TavernDB_ACU_IsolatedData).toBe(before);
+    }
+  });
+
+  it('单表摘要契约：无关表的损坏摘要不污染目标 introduction', async () => {
+    const message = seedFrame({ logEntries: [], perSheetCheckpoints: {
+      sheet_other: { kind: 'sheet_full', createdAt: 10, reason: 'manual', sheetKey: 'sheet_other', data: sheetB, scheduleSummary: { lastFilledAiFloor: -1 } },
+    } });
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '', createdAt: 30,
+      sheetChanges: [{ kind: 'introduction', sheetKey: 'sheet_new', sheetData: { ...sheetB, name: '新表' } }],
+      guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' }, sheet_new: { name: '新表' } },
+    });
+    expect(result.saved).toBe(true);
+    expect(latestTimelineCheckpoint(message.TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_new').timeline.kind).toBe('sheet_introduction');
+  });
+
 
   it('同一楼隐藏过的 header-only 表重新切回时恢复为 reveal，而非误报重复 introduction', async () => {
     const hiddenData = {
@@ -3264,7 +3369,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
 
     expect(result).toMatchObject({ saved: true });
-    expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_empty_switch).toMatchObject({
+    expect(latestTimelineCheckpoint(message.TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_empty_switch')).toMatchObject({
       timeline: { kind: 'sheet_reveal', activateAtMessageIndex: 0, afterSeq: 0 },
       data: { content: [['row_id', 'value']] },
     });
@@ -3423,7 +3528,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
 
     expect(result.saved).toBe(true);
-    const revealCheckpoint = targetMessage.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints?.sheet_new;
+    const revealCheckpoint = latestTimelineCheckpoint(targetMessage.TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_new');
     expect(revealCheckpoint?.timeline?.kind).toBe('sheet_reveal');
     expect(revealCheckpoint?.data?.content).toEqual([['row_id', 'value'], ['1', '离开B时的数据']]);
   });
@@ -3443,7 +3548,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
 
     expect(result.saved).toBe(true);
-    const introduced = message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_new;
+    const introduced = latestTimelineCheckpoint(message.TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_new');
     expect(introduced?.timeline?.kind).toBe('sheet_introduction');
     expect(introduced?.data?.content).toEqual([['row_id', 'value'], ['1', '业务数据']]);
   });
@@ -3460,7 +3565,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
 
     expect(result.saved).toBe(true);
-    const introduced = message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_new;
+    const introduced = latestTimelineCheckpoint(message.TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_new');
     expect(introduced?.data?.content).toEqual([['row_id', 'value']]);
   });
 
@@ -3547,7 +3652,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
 
     if (shouldIntroduce) {
       expect(result).toMatchObject({ saved: true });
-      expect(targetMessage.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_new).toMatchObject({
+      expect(latestTimelineCheckpoint(targetMessage.TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_new')).toMatchObject({
         timeline: { kind: 'sheet_introduction' },
       });
     } else {
@@ -3597,7 +3702,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
 
     expect(result).toMatchObject({ saved: true });
-    expect(message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_new).toMatchObject({
+    expect(latestTimelineCheckpoint(message.TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_new')).toMatchObject({
       timeline: { kind: 'sheet_introduction' },
     });
   });
@@ -3949,7 +4054,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
 
     expect(result.saved).toBe(true);
-    const revived = message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_hidden;
+    const revived = latestTimelineCheckpoint(message.TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_hidden');
     expect(revived?.timeline?.kind).toBe('sheet_reveal');
     expect(revived?.data?.content).toEqual([['row_id', 'value'], ['1', '隐藏前的数据']]);
     // 只有 activeReplay 一次 detailed replay；reveal 数据来自 hide checkpoint，不触发逐边界回退。
@@ -3973,12 +4078,50 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
 
     expect(result.saved).toBe(true);
-    const hidden = message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_a;
+    const hidden = latestTimelineCheckpoint(message.TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_a');
     expect(hidden?.timeline?.kind).toBe('sheet_hide');
     expect(hidden?.data?.content).toEqual([['row_id', 'value'], ['1', 'active-data']]);
     // hide 数据来自 activeReplayState（已加载），不再为 hide 单独逐边界回退。
     expect(mocks.loadReplayDetailed).toHaveBeenCalledTimes(1);
   });
+  it('同名表以新模板 key 引入时恢复休眠旧 key，guide、templateSource 与返回结果同步改挂到旧 key', async () => {
+    const hiddenData = { ...sheetB, uid: 'sheet_old', name: '主角装备表', content: [['row_id', 'value'], ['1', '旧 key 数据']] };
+    const message = seedFrame({
+      logEntries: [],
+      perSheetCheckpoints: {
+        sheet_old: {
+          kind: 'sheet_full', createdAt: 10, reason: 'schema_change', sheetKey: 'sheet_old',
+          data: hiddenData,
+          timeline: { kind: 'sheet_hide', activateAtMessageIndex: 0, afterSeq: 1 },
+        },
+      },
+    });
+    const structure = { ...sheetB, uid: 'sheet_new', name: '主角装备表', content: [['row_id', 'value']] };
+
+    const result = await commitCurrentFloorTemplateChanges_ACU({
+      isolationKey: '',
+      sheetChanges: [{ kind: 'introduction', sheetKey: 'sheet_new', sheetData: structure }],
+      guideData: { sheet_a: { name: 'A' }, sheet_b: { name: 'B' }, sheet_new: { name: '主角装备表', seedRows: [['s1']] } },
+      templateSource: { sheet_new: structure },
+      createdAt: 30,
+    });
+
+    expect(result.saved, result.error).toBe(true);
+    expect(result.sheetKeyRedirects).toEqual([{ requestedKey: 'sheet_new', sheetKey: 'sheet_old', uid: 'sheet_old' }]);
+    const frame = message.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(latestTimelineCheckpoint(frame, 'sheet_new')).toBeUndefined();
+    const revived = latestTimelineCheckpoint(frame, 'sheet_old');
+    expect(revived?.timeline?.kind).toBe('sheet_reveal');
+    expect(revived?.data?.content).toEqual([['row_id', 'value'], ['1', '旧 key 数据']]);
+    expect(revived?.data?.sourceData?.tableAliases).toContain('sheet_new');
+    const [, guide, options] = mocks.setGuide.mock.calls[0] as any[];
+    expect(guide.sheet_new).toBeUndefined();
+    expect(guide.sheet_old).toMatchObject({ name: '主角装备表', seedRows: [['s1']] });
+    expect(options.templateSource.sheet_old).toBeDefined();
+    expect(options.templateSource.sheet_new).toBeUndefined();
+  });
+
+
 
   it('[S3-4] hide checkpoint 前向记录 hideSourcePresetName（休眠溯源）', async () => {
     const sheetToHide = { ...sheetA, uid: 'sheet_a', name: '表A', content: [['row_id', 'value'], ['1', 'active-data']] };
@@ -3997,7 +4140,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
 
     expect(result.saved).toBe(true);
-    const hidden = message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_a;
+    const hidden = latestTimelineCheckpoint(message.TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_a');
     expect(hidden?.timeline?.kind).toBe('sheet_hide');
     expect(hidden?.hideSourcePresetName).toBe('切换前预设');
   });
@@ -4019,7 +4162,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
 
     expect(result.saved).toBe(true);
-    const hidden = message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_a;
+    const hidden = latestTimelineCheckpoint(message.TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_a');
     expect(hidden?.timeline?.kind).toBe('sheet_hide');
     expect('hideSourcePresetName' in (hidden || {})).toBe(false);
   });
@@ -4051,7 +4194,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
 
     expect(result.saved).toBe(true);
-    const revived = message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_hidden;
+    const revived = latestTimelineCheckpoint(message.TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_hidden');
     expect(revived?.timeline?.kind).toBe('sheet_reveal');
     // 恢复的是 hide 前最后可信数据，而不是模板空壳。
     expect(revived?.data?.content).toEqual([['row_id', 'value'], ['1', '历史数据行'], ['2', '另一行']]);
@@ -4076,7 +4219,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
 
     expect(result.saved).toBe(true);
-    const revived = message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_hidden;
+    const revived = latestTimelineCheckpoint(message.TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_hidden');
     expect(revived?.timeline?.kind).toBe('sheet_reveal');
     expect(revived?.data?.content).toEqual([['row_id', 'value'], ['1', '历史数据行']]);
   });
@@ -4108,7 +4251,7 @@ describe('commitCurrentFloorTemplateChanges_ACU', () => {
     });
 
     expect(result.saved).toBe(true);
-    const revived = message.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_hidden;
+    const revived = latestTimelineCheckpoint(message.TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_hidden');
     expect(revived?.timeline?.kind).toBe('sheet_reveal');
     // 匹配列（title）继承数据；模板新增列（priority，nullable）null 填充；
     // 模板缺失列（legacy）保留为尾部隐藏列，数据不删。
@@ -4638,7 +4781,7 @@ describe('阶段0红测试：introduction history evidence 与模板提交 frame
     // 两个 kind 在 replay 中数据应用与可见性判定完全等价
     // （storage-frame-v2-replay.ts:837-843 与 209），此处仅为生命周期标注。
     const frame = message.TavernDB_ACU_IsolatedData[''].storageFrame;
-    expect(frame.perSheetCheckpoints[targetKey]).toMatchObject({
+    expect(latestTimelineCheckpoint(frame, targetKey)).toMatchObject({
       kind: 'sheet_full',
       sheetKey: targetKey,
       timeline: { kind: 'sheet_reveal' },
@@ -4675,7 +4818,7 @@ describe('阶段0红测试：introduction history evidence 与模板提交 frame
     expect(result.saved).toBe(true);
     // operation 触及目标表 → present → timeline 应为 sheet_reveal（历史曾存在）。
     const frame = message.TavernDB_ACU_IsolatedData[''].storageFrame;
-    expect(frame.perSheetCheckpoints[targetKey]).toMatchObject({
+    expect(latestTimelineCheckpoint(frame, targetKey)).toMatchObject({
       kind: 'sheet_full',
       sheetKey: targetKey,
       timeline: { kind: 'sheet_reveal' },

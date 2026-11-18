@@ -23,10 +23,11 @@ import { auditTableDataForUpgrade_ACU, getTableDataFingerprint_ACU } from './tab
 import { repairTableDataFromAudit_ACU } from './table-data-repair';
 import { cloneSpv79TransitionData_ACU, compareTransitionCutoffs_ACU, dedupeCompatTransitionRowIdentities_ACU, findLatestTransitionCheckpoint_ACU, isAfterSpv79TransitionCutoff_ACU, isEntryAfterSpv79TransitionCutoff_ACU, isFrameArtifactAfterSpv79TransitionCutoff_ACU, type CompatTransitionRowIdentityRepair_ACU } from './compat-transition-checkpoint';
 import type { CompatTransitionCheckpointV1_ACU } from './storage-frame-v2-types';
-import { collectSheetIdentityCanonicals_ACU, mergeLegacySheetIdentities_ACU, type SheetIdentityRemap_ACU } from '../../shared/sheet-identity-merge';
+import { collectSheetIdentityCanonicals_ACU, mergeLegacySheetIdentities_ACU, reuseSheetDataByName_ACU, type SheetIdentityRemap_ACU } from '../../shared/sheet-identity-merge';
 import { runTableWriteTransaction_ACU } from './table-write-transaction';
 import { buildReplayOptionsFingerprint_ACU, computeReplayHeadRevisionDigest_ACU, validateV2ReplayEvidenceFresh_ACU } from './v2-replay-session';
 import { getV2ImportBaselineAiFloor_ACU } from './table-import-baseline';
+import { frameHasSheetTimelineArtifacts_ACU, getOrderedFrameSheetCheckpointRecords_ACU } from './storage-frame-v2-sheet-events';
 import { getTableReplayGeneration_ACU, registerOwnTableSaveListener_ACU } from '../../shared/table-replay-generation';
 
 interface V2FrameRef_ACU {
@@ -994,6 +995,21 @@ export function deriveSheetLifecycleFromFramesV2_ACU(
   const frameRefs = getV2FrameRefs_ACU(chat, isolationKey)
     .filter(ref => options.maxMessageIndex === undefined || ref.messageIndex <= options.maxMessageIndex);
   const statusBySheetKey: Record<string, TableSheetLifecycleEntryV2_ACU> = {};
+  const lifecycleSheets = {} as TableDataObject_ACU;
+  const identity = createReplayIdentityMergeContext_ACU(null);
+  const resolveLifecycleKey = (sheetKey: string, sheet: Sheet_ACU): string => {
+    const definition = deepClone_ACU(sheet);
+    const key = supersedeSameNameSheetForReplay_ACU(
+      lifecycleSheets, redirectReplaySheetKey_ACU(identity, sheetKey), definition,
+      identity, 'lifecycle', undefined, undefined, 'structure',
+    );
+    lifecycleSheets[key] = definition;
+    if (sheetKey !== key) registerReplayKeyRedirect_ACU(identity, sheetKey, key);
+    for (const alias of identity.keyRedirects.keys()) {
+      if (alias !== key) delete statusBySheetKey[alias];
+    }
+    return key;
+  };
   let sawIndeterminateFrame = false;
   const lifecycleFullCheckpoint = [...frameRefs].reverse().find(ref => ref.frame.checkpoint?.kind === 'full');
   const lifecycleTransitionCandidate = findLatestTransitionCheckpoint_ACU(chat, isolationKey, options.maxMessageIndex);
@@ -1005,7 +1021,8 @@ export function deriveSheetLifecycleFromFramesV2_ACU(
   if (transitionRef) {
     for (const sheetKey of Object.keys(transitionRef.checkpoint.data)) {
       if (!sheetKey.startsWith('sheet_')) continue;
-      statusBySheetKey[sheetKey] = {
+      const key = resolveLifecycleKey(sheetKey, transitionRef.checkpoint.data[sheetKey] as Sheet_ACU);
+      statusBySheetKey[key] = {
         status: 'active',
         lastTimelineKind: 'sheet_introduction',
         lastTimelineMessageIndex: transitionRef.messageIndex,
@@ -1026,7 +1043,7 @@ export function deriveSheetLifecycleFromFramesV2_ACU(
     // full 快照对 active 集合权威，对 hidden 集合不权威：hide 的数据按设计只存在于
     // hide checkpoint，不进 full checkpoint.data。基底之前因此只回收 hide 证据
     // （含 restoreSourceData，compaction 迁移隐藏表依赖它），其余历史痕迹一律丢弃。
-    collectHiddenLifecycleEntriesBeforeBase_ACU(frameRefs, baseFrameIndex, statusBySheetKey);
+    collectHiddenLifecycleEntriesBeforeBase_ACU(frameRefs, baseFrameIndex, statusBySheetKey, resolveLifecycleKey);
   }
 
   for (let frameIndex = Math.max(0, baseFrameIndex); frameIndex < frameRefs.length; frameIndex += 1) {
@@ -1045,15 +1062,18 @@ export function deriveSheetLifecycleFromFramesV2_ACU(
     const frameCheckpoint = frame.checkpoint as any;
     const checkpointData = frameCheckpoint?.data;
     if (checkpointData && typeof checkpointData === 'object' && !Array.isArray(checkpointData)) {
+      const keys = new Map(Object.keys(checkpointData)
+        .filter(key => key.startsWith('sheet_') && checkpointData[key] && typeof checkpointData[key] === 'object')
+        .map(key => [key, resolveLifecycleKey(key, checkpointData[key])]));
+      const presentKeys = new Set(keys.values());
       if (frameCheckpoint.kind === 'full') {
         for (const [sheetKey, entry] of Object.entries(statusBySheetKey)) {
           if (entry.status !== 'active') continue;
-          if (Object.prototype.hasOwnProperty.call(checkpointData, sheetKey)) continue;
+          if (presentKeys.has(sheetKey)) continue;
           delete statusBySheetKey[sheetKey];
         }
       }
-      for (const sheetKey of Object.keys(checkpointData)) {
-        if (!sheetKey.startsWith('sheet_')) continue;
+      for (const sheetKey of presentKeys) {
         statusBySheetKey[sheetKey] = {
           status: 'active',
           lastTimelineKind: 'sheet_introduction',
@@ -1073,8 +1093,14 @@ export function deriveSheetLifecycleFromFramesV2_ACU(
         && typeof perSheetCheckpoints === 'object' && !Array.isArray(perSheetCheckpoints)) {
         for (const sheetKey of Object.keys(perSheetCheckpoints)) {
           if (sheetKey.startsWith('sheet_')) {
-            statusBySheetKey[sheetKey] = { status: 'indeterminate' };
+            statusBySheetKey[redirectReplaySheetKey_ACU(identity, sheetKey)] = { status: 'indeterminate' };
           }
+        }
+      }
+      if (Array.isArray(frame.sheetTimelineEvents)) {
+        for (const event of frame.sheetTimelineEvents) {
+          const key = event?.checkpoint?.sheetKey;
+          if (typeof key === 'string' && key.startsWith('sheet_')) statusBySheetKey[redirectReplaySheetKey_ACU(identity, key)] = { status: 'indeterminate' };
         }
       }
       sawIndeterminateFrame = true;
@@ -1087,7 +1113,7 @@ export function deriveSheetLifecycleFromFramesV2_ACU(
       const { sheetKey } = checkpoint;
       if (!sheetKey.startsWith('sheet_')) continue;
       if (checkpoint.timeline !== undefined) continue;
-      statusBySheetKey[sheetKey] = {
+      statusBySheetKey[resolveLifecycleKey(sheetKey, checkpoint.data)] = {
         status: 'active',
         lastTimelineKind: 'sheet_introduction',
         lastTimelineMessageIndex: ref.messageIndex,
@@ -1118,7 +1144,7 @@ export function deriveSheetLifecycleFromFramesV2_ACU(
         entry.restoreSourceData = deepClone_ACU(checkpoint.data);
         attachHideProvenance_ACU(entry, checkpoint);
       }
-      statusBySheetKey[sheetKey] = entry;
+      statusBySheetKey[resolveLifecycleKey(sheetKey, checkpoint.data)] = entry;
     }
   }
 
@@ -1137,6 +1163,10 @@ export function deriveSheetLifecycleFromFramesV2_ACU(
   indeterminateSheetKeys.sort();
   neverSeenSheetKeys.sort();
 
+  for (const [alias] of identity.keyRedirects) {
+    const entry = statusBySheetKey[redirectReplaySheetKey_ACU(identity, alias)];
+    if (entry) statusBySheetKey[alias] = entry;
+  }
   return { statusBySheetKey, activeSheetKeys, hiddenSheetKeys, indeterminateSheetKeys, neverSeenSheetKeys };
 }
 
@@ -1178,6 +1208,7 @@ function collectHiddenLifecycleEntriesBeforeBase_ACU(
   frameRefs: V2FrameRef_ACU[],
   baseFrameIndex: number,
   statusBySheetKey: Record<string, TableSheetLifecycleEntryV2_ACU>,
+  resolveKey: (sheetKey: string, sheet: Sheet_ACU) => string,
 ): void {
   for (let index = 0; index < baseFrameIndex; index += 1) {
     const ref = frameRefs[index];
@@ -1192,8 +1223,8 @@ function collectHiddenLifecycleEntriesBeforeBase_ACU(
       continue;
     }
     for (const checkpoint of getValidatedTimelineCheckpointsForFrame_ACU(validatedCheckpoints)) {
-      const { sheetKey } = checkpoint;
-      if (!sheetKey.startsWith('sheet_')) continue;
+      if (!checkpoint.sheetKey.startsWith('sheet_')) continue;
+      const sheetKey = resolveKey(checkpoint.sheetKey, checkpoint.data);
       const timeline = checkpoint.timeline!;
       if (timeline.kind !== 'sheet_hide') {
         delete statusBySheetKey[sheetKey];
@@ -1251,6 +1282,7 @@ function hasUnanchoredReplayArtifacts_ACU(frameRefs: V2FrameRef_ACU[]): boolean 
       : rawLogEntries !== undefined && rawLogEntries !== null;
     return hasLogEntryArtifact
       || hasPerSheetCheckpointArtifact
+      || frameHasSheetTimelineArtifacts_ACU(frame)
       || persistedFrame.manualRefillProgress !== undefined
       || hasHeadRevisionArtifact;
   });
@@ -1467,13 +1499,9 @@ function getValidatedSheetCheckpoints_ACU(
   frame: TableStorageFrameV2_ACU,
   frameMessageIndex: number,
 ): TableSheetCheckpointV2_ACU[] {
-  const checkpoints = frame.perSheetCheckpoints;
-  if (checkpoints === undefined) return [];
-  if (!checkpoints || typeof checkpoints !== 'object' || Array.isArray(checkpoints)) {
-    throw new Error('perSheetCheckpoints 必须是按 sheetKey 索引的对象');
-  }
+  const records = getOrderedFrameSheetCheckpointRecords_ACU(frame);
   const isSheetKey = (value: unknown): value is string => typeof value === 'string' && value.startsWith('sheet_');
-  const normalized = Object.entries(checkpoints).map(([recordKey, checkpoint]) => {
+  const normalized = records.map(({ recordKey, checkpoint, ordinal }) => {
     if (!checkpoint || typeof checkpoint !== 'object' || Array.isArray(checkpoint)
       || checkpoint.kind !== 'sheet_full') {
       throw new Error(`perSheetCheckpoints.${recordKey} 缺少有效的 sheet_full checkpoint`);
@@ -1496,6 +1524,9 @@ function getValidatedSheetCheckpoints_ACU(
       );
     }
 
+    if (ordinal !== undefined && checkpoint.timeline === undefined) {
+      throw new Error(`sheetTimelineEvents.${ordinal} 缺少有效的 timeline`);
+    }
     const timeline = checkpoint.timeline === undefined
       ? undefined
       : normalizeSheetCheckpointTimelineForReplay_ACU(checkpoint.timeline, {
@@ -1509,10 +1540,11 @@ function getValidatedSheetCheckpoints_ACU(
       sheetKey,
       ...(timeline === undefined ? {} : { timeline }),
     };
-  }).sort((left, right) => left.sheetKey.localeCompare(right.sheetKey));
+  });
 
-  const duplicateKey = normalized.find(
-    (checkpoint, index) => normalized.findIndex(other => other.sheetKey === checkpoint.sheetKey) !== index,
+  const legacy = normalized.filter((_, index) => records[index].ordinal === undefined);
+  const duplicateKey = legacy.find(
+    (checkpoint, index) => legacy.findIndex(other => other.sheetKey === checkpoint.sheetKey) !== index,
   );
   if (duplicateKey) {
     throw new Error(`perSheetCheckpoints 归一化后存在重复 sheetKey: ${duplicateKey.sheetKey}`);
@@ -1808,6 +1840,8 @@ function disposeSqlReplayRuntime_ACU(runtime: SqlReplayRuntime_ACU): void {
  */
 interface ReplayIdentityMergeContext_ACU {
   preferredKeys: readonly string[] | null;
+  /** 当前模板中互不相同的表名：共享历史别名不得把它们并成一张表。 */
+  distinctCurrentNames?: ReadonlySet<string>;
   merges: SheetIdentityRemap_ACU[];
   loserKeys: Set<string>;
   /** 被归并/接管掉的 key → 规范 key：后续 operation / checkpoint 引用旧 key 时自动改绑。 */
@@ -1815,10 +1849,14 @@ interface ReplayIdentityMergeContext_ACU {
 }
 
 function createReplayIdentityMergeContext_ACU(headerOnlyTemplate: TableDataObject_ACU | null | undefined): ReplayIdentityMergeContext_ACU {
+  const templateSheets = headerOnlyTemplate
+    ? Object.entries(headerOnlyTemplate).filter(([key, sheet]) => key.startsWith('sheet_') && !!sheet && typeof sheet === 'object')
+    : [];
   return {
-    preferredKeys: headerOnlyTemplate
-      ? Object.keys(headerOnlyTemplate).filter(key => key.startsWith('sheet_'))
-      : null,
+    preferredKeys: headerOnlyTemplate ? templateSheets.map(([key]) => key) : null,
+    distinctCurrentNames: new Set(templateSheets
+      .map(([, sheet]) => canonicalizeDisplayName_ACU((sheet as Sheet_ACU).name))
+      .filter(Boolean)),
     merges: [],
     loserKeys: new Set<string>(),
     keyRedirects: new Map<string, string>(),
@@ -1847,17 +1885,6 @@ function redirectReplaySheetKey_ACU(identity: ReplayIdentityMergeContext_ACU | n
   return current;
 }
 
-/**
- * 同名接管（表的身份是表名，key 只是载体）：历史里出现一个 sheetKey 的锚点 / 整表替换，
- * 而 state 中已有**同名**（显示名或别名重合）的其它 key 时，事件描述的就是「这张表现在
- * 长这样」——写入时该表确实被重置为事件数据（现场：导入新模板后表 header-only，随后
- * AI 以 INSERT row_id=1 重填）。因此不合并行：删除旧 key 的表，事件数据写入规范 key。
- *
- * 规范 key 的选择：模板/指导表侧 key（preferredKeys 命中者）> 已在 state 中的历史 key
- * （P2 协调让指导表保留 previous.key，回放身份必须与之一致，否则填表会把它当模板外表剔除）
- * > 事件自身 key。被淘汰的 key 全部登记重定向，后续 operation 自动改绑。
- * 返回事件数据应写入的 key；无同名冲突时原样返回 incomingKey（零改动）。
- */
 function supersedeSameNameSheetForReplay_ACU(
   candidate: TableDataObject_ACU,
   incomingKey: string,
@@ -1866,6 +1893,7 @@ function supersedeSameNameSheetForReplay_ACU(
   stage: string,
   aliasContext?: ReplayAliasContext_ACU | null,
   metrics?: TableReplayMetricsV2_ACU,
+  mode: 'structure' | 'merge' | 'replace' = 'replace',
 ): string {
   if (!identity) return incomingKey;
   const incomingIdentities = new Set(collectSheetIdentityCanonicals_ACU(incomingSheet));
@@ -1878,43 +1906,55 @@ function supersedeSameNameSheetForReplay_ACU(
       return collectSheetIdentityCanonicals_ACU(sheet as Sheet_ACU).some(name => incomingIdentities.has(name));
     })
     .sort();
-  if (sameNameKeys.length === 0) return incomingKey;
-
-  const preferred = new Set(identity.preferredKeys || []);
-  const canonicalKey = preferred.has(incomingKey)
-    ? incomingKey
-    : (sameNameKeys.find(key => preferred.has(key)) ?? sameNameKeys[0]);
-
-  const details: string[] = [];
+  const canonicalKey = candidate[incomingKey] ? incomingKey : sameNameKeys[0] ?? incomingKey;
+  let before = candidate[canonicalKey] as Sheet_ACU | undefined;
+  const canonicalName = canonicalizeDisplayName_ACU(incomingSheet.name);
+  const rowCount = (sheet: Sheet_ACU | undefined): number => (Array.isArray(sheet?.content) ? Math.max(0, sheet!.content.length - 1) : 0);
+  const canonicalRows = rowCount(before);
   for (const key of sameNameKeys) {
-    const sheet = (candidate as Record<string, Sheet_ACU>)[key];
-    const rows = Array.isArray(sheet?.content) ? Math.max(0, sheet.content.length - 1) : 0;
-    delete (candidate as Record<string, unknown>)[key];
-    if (key !== canonicalKey) registerReplayKeyRedirect_ACU(identity, key, canonicalKey);
-    // 记录方向恒为「被淘汰的 key → 规范 key」：规范 key 恰是被接管的旧 key 时，被淘汰的是事件 key。
-    const remap: SheetIdentityRemap_ACU = {
-      fromKey: key === canonicalKey ? incomingKey : key,
+    if (key === canonicalKey) continue;
+    const loser = candidate[key] as Sheet_ACU;
+    const knownIds = new Set((before?.content || []).slice(1).filter(Array.isArray).map(row => String(row[0] ?? '').trim()));
+    let overriddenRows = 0;
+    let appendedRows = 0;
+    for (const row of (loser?.content || []).slice(1)) {
+      if (!Array.isArray(row)) continue;
+      if (knownIds.has(String(row[0] ?? '').trim())) overriddenRows += 1;
+      else appendedRows += 1;
+    }
+    before = before ? reuseSheetDataByName_ACU(before, loser, 'merge') : loser;
+    delete candidate[key];
+    registerReplayKeyRedirect_ACU(identity, key, canonicalKey);
+    identity.merges.push({
+      fromKey: key,
       toKey: canonicalKey,
-      canonicalName: canonicalizeDisplayName_ACU(incomingSheet.name),
+      canonicalName,
+      overriddenRows: mode === 'replace' ? 0 : overriddenRows,
+      appendedRows: mode === 'replace' ? 0 : appendedRows,
+      conflictingRowIds: [],
+      droppedColumns: [],
+      ...(mode === 'replace' ? { supersededRows: rowCount(loser) } : {}),
+    });
+  }
+  if (before && mode !== 'replace') Object.assign(incomingSheet, reuseSheetDataByName_ACU(before, incomingSheet, mode));
+  if (incomingKey !== canonicalKey) {
+    incomingSheet.sourceData = { ...incomingSheet.sourceData };
+    incomingSheet.sourceData.tableAliases = [...new Set([...(incomingSheet.sourceData.tableAliases || []), incomingKey])];
+    registerReplayKeyRedirect_ACU(identity, incomingKey, canonicalKey);
+    identity.merges.push({
+      fromKey: incomingKey,
+      toKey: canonicalKey,
+      canonicalName,
       overriddenRows: 0,
       appendedRows: 0,
       conflictingRowIds: [],
       droppedColumns: [],
-      supersededRows: rows,
-    };
-    identity.merges.push(remap);
-    details.push(`${key}（${rows} 行）`);
+      ...(mode === 'replace' ? { supersededRows: canonicalRows } : {}),
+    });
   }
-  if (incomingKey !== canonicalKey) registerReplayKeyRedirect_ACU(identity, incomingKey, canonicalKey);
   if (aliasContext?.enabled) invalidateReplayAliasContext_ACU(aliasContext);
   else if (metrics) metrics.aliasInvalidateCount += 1;
-  const totalSuperseded = identity.merges
-    .filter(remap => remap.toKey === canonicalKey && remap.supersededRows !== undefined)
-    .reduce((sum, remap) => sum + (remap.supersededRows || 0), 0);
-  const message = `[V2 Replay] 同名表接管（${stage}）：「${String(incomingSheet.name || '')}」事件 key=${incomingKey} 接管 ${details.join('、')}，`
-    + `按规范 key=${canonicalKey} 继续回放；表内容以事件数据为准（历史写入时该表即为此状态）。原 storage frame 未修改。`;
-  if (totalSuperseded > 0) logWarn_ACU(message);
-  else logDebug_ACU(message);
+  logDebug_ACU(`[V2 Replay] 按名复用（${stage}）：${incomingKey}→${canonicalKey}, mode=${mode}。`);
   return canonicalKey;
 }
 
@@ -1935,7 +1975,7 @@ function mergeSameNameSheetIdentitiesForReplay_ACU(
   metrics?: TableReplayMetricsV2_ACU,
 ): void {
   if (!identity) return;
-  const merge = mergeLegacySheetIdentities_ACU(state, identity.preferredKeys);
+  const merge = mergeLegacySheetIdentities_ACU(state, identity.preferredKeys, { distinctCurrentNames: identity.distinctCurrentNames });
   if (merge.remaps.length === 0) return;
   for (const remap of merge.remaps) {
     identity.merges.push(remap);
@@ -2045,7 +2085,7 @@ function buildReplayCandidate_ACU(
 async function applySheetCheckpointsForReplay_ACU(
   state: TableDataObject_ACU,
   checkpoints: TableSheetCheckpointV2_ACU[],
-  runtime: SqlReplayRuntime_ACU,
+  runtime: SqlReplayRuntime_ACU | null,
   metrics?: TableReplayMetricsV2_ACU,
   context?: ReplayAliasContext_ACU | null,
   identity?: ReplayIdentityMergeContext_ACU | null,
@@ -2054,15 +2094,18 @@ async function applySheetCheckpointsForReplay_ACU(
   if (context?.enabled) invalidateReplayAliasContext_ACU(context);
   else if (metrics) metrics.aliasInvalidateCount += checkpoints.length;
   // sheet checkpoint 属 JS 语义：离开 SQL 段先 materialize（导出并 dispose）。
-  await materializeSqlRuntimeToState_ACU(runtime, state, { metrics });
+  if (runtime) await materializeSqlRuntimeToState_ACU(runtime, state, { metrics });
   const candidate = deepClone_ACU(state);
   for (const checkpoint of checkpoints) {
     if (checkpoint.timeline?.kind === 'sheet_hide') {
-      // hide：从 active replay state 移除该表的可见性（数据仍留存于 checkpoint.data 供后续 reveal）。
-      delete candidate[redirectReplaySheetKey_ACU(identity, checkpoint.sheetKey)];
+      const key = supersedeSameNameSheetForReplay_ACU(
+        candidate, redirectReplaySheetKey_ACU(identity, checkpoint.sheetKey), deepClone_ACU(checkpoint.data),
+        identity, 'sheet_hide', context, metrics, 'structure',
+      );
+      if (identity && key !== checkpoint.sheetKey) registerReplayKeyRedirect_ACU(identity, checkpoint.sheetKey, key);
+      delete candidate[key];
     } else {
-      // introduction / rebase / reveal：用 checkpoint.data 整表写入 replay state。
-      // 表的身份是表名：同名旧 key 的表被本事件接管（不合并行），写入规范 key。
+      // 模板结构事件按名保留数据；普通单表快照仍保留显式数据替换语义。
       const sheet = deepClone_ACU(checkpoint.data);
       const targetKey = supersedeSameNameSheetForReplay_ACU(
         candidate,
@@ -2072,7 +2115,13 @@ async function applySheetCheckpointsForReplay_ACU(
         `sheet checkpoint ${checkpoint.timeline?.kind ?? 'untimed'}@${checkpoint.sheetKey}`,
         context,
         metrics,
+        checkpoint.timeline && checkpoint.reason === 'schema_change'
+          ? sheet.content?.length > 1 ? 'merge' : 'structure'
+          : candidate[checkpoint.sheetKey] ? 'replace' : 'merge',
       );
+      if (checkpoint.sheetKey !== targetKey) {
+        sheet.sourceData = { ...sheet.sourceData, tableAliases: [...new Set([...(sheet.sourceData?.tableAliases || []), checkpoint.sheetKey])] };
+      }
       candidate[targetKey] = sheet;
     }
   }
@@ -3232,7 +3281,7 @@ async function loadTableStateFromFramesV2DetailedCore_ACU(
           && snapshotPrefix.every(recorded => recorded.contentDigest !== null)) {
           // 只导出不 dispose：本次回放沿用 SQLite 继续，快照取与 materialize 相同的导出结果。
           const snapshotData = buildReplayCandidate_ACU(runtime, state);
-          if (mergeLegacySheetIdentities_ACU(snapshotData, identity.preferredKeys).remaps.length === 0) {
+          if (mergeLegacySheetIdentities_ACU(snapshotData, identity.preferredKeys, { distinctCurrentNames: identity.distinctCurrentNames }).remaps.length === 0) {
             storeLatestReplaySnapshot_ACU({
               isolationKey,
               generation: replayGeneration,
@@ -3906,9 +3955,11 @@ export async function replayWithLegacyTolerances_ACU(
     ? Object.keys(headerOnlyTemplate).filter(key => key.startsWith('sheet_'))
     : null;
   const state = deepClone_ACU(checkpoint.data);
+  const identity = createReplayIdentityMergeContext_ACU(headerOnlyTemplate);
   const mergeIdentities = (stage: string): void => {
-    const merge = mergeLegacySheetIdentities_ACU(state, preferredKeys);
+    const merge = mergeLegacySheetIdentities_ACU(state, preferredKeys, { distinctCurrentNames: identity.distinctCurrentNames });
     if (merge.remaps.length === 0) return;
+    for (const remap of merge.remaps) registerReplayKeyRedirect_ACU(identity, remap.fromKey, remap.toKey);
     toleranceReport.identityRemaps.push(...merge.remaps);
     logWarn_ACU(
       `[V2 Compat Replay] 两代 sheetKey 身份归并（${stage}）：`
@@ -3923,23 +3974,20 @@ export async function replayWithLegacyTolerances_ACU(
     const ref = frameRefs[frameIndex];
     const checkpoints = getValidatedSheetCheckpoints_ACU(ref.frame, ref.messageIndex);
     // 根帧自身的 checkpoint 已作为 base；其余未排序单表快照遵循现有 replay 的帧首语义。
-    for (const sheetCheckpoint of checkpoints.filter(item => item.timeline === undefined)) {
-      state[sheetCheckpoint.sheetKey] = deepClone_ACU(sheetCheckpoint.data);
-    }
+    await applySheetCheckpointsForReplay_ACU(state, checkpoints.filter(item => item.timeline === undefined), null, undefined, undefined, identity);
     mergeIdentities(`sheet checkpoints@${ref.messageIndex}`);
     const entries = getLegacyTolerantOrderedEntries_ACU(ref.frame, toleranceReport);
     const pendingTimelineCheckpoints = checkpoints.filter(item => item.timeline !== undefined);
-    const applyDueTimelineCheckpoints = (nextSeq: number): void => {
+    const applyDueTimelineCheckpoints = async (nextSeq: number): Promise<void> => {
       const due = pendingTimelineCheckpoints.filter(item => item.timeline!.afterSeq < nextSeq);
+      await applySheetCheckpointsForReplay_ACU(state, due, null, undefined, undefined, identity);
       for (const sheetCheckpoint of due) {
-        if (sheetCheckpoint.timeline?.kind === 'sheet_hide') delete state[sheetCheckpoint.sheetKey];
-        else state[sheetCheckpoint.sheetKey] = deepClone_ACU(sheetCheckpoint.data);
         pendingTimelineCheckpoints.splice(pendingTimelineCheckpoints.indexOf(sheetCheckpoint), 1);
       }
       if (due.length > 0) mergeIdentities(`timeline checkpoints@${nextSeq}`);
     };
     for (const entry of entries) {
-      applyDueTimelineCheckpoints(entry.seq);
+      await applyDueTimelineCheckpoints(entry.seq);
       if (Array.isArray(entry.operations) && entry.operations.length > 0) {
         for (const [operationIndex, operation] of entry.operations.entries()) {
           // SQL 段物化前必须先归并身份，否则物理表名解析会因两代 key 同名冲突抛错。
@@ -3947,6 +3995,7 @@ export async function replayWithLegacyTolerances_ACU(
           await applyTableOperationV2Core_ACU(state, operation, undefined, headerOnlyTemplate ?? undefined, {
             legacyDuplicateRowIds: true,
             legacyTolerances: toleranceReport,
+            identity,
           });
           cutoff = { messageIndex: ref.messageIndex, seq: entry.seq, operationIndex };
         }
@@ -3958,9 +4007,10 @@ export async function replayWithLegacyTolerances_ACU(
         if (!entry.patches?.length) cutoff = { messageIndex: ref.messageIndex, seq: entry.seq, operationIndex: -1 };
       }
     }
-    applyDueTimelineCheckpoints(Number.POSITIVE_INFINITY);
+    await applyDueTimelineCheckpoints(Number.POSITIVE_INFINITY);
   }
   mergeIdentities('final');
+  toleranceReport.identityRemaps.push(...identity.merges);
   return { data: state, cutoff, toleranceReport };
 }
 

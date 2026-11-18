@@ -41,6 +41,7 @@ import { finalizeFoldedSummaryVectorMirrorFiles_ACU, foldSummaryVectorMirrorAtBo
 import { runScopedRetentionGcAfterFlush_ACU } from '../vector/summary-vector-index-chat-deletion-gc';
 import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from '../table/storage-strategy-resolver';
 import { collectScheduleSummaryFromFramesV2_ACU, deriveSheetLifecycleFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../table/storage-frame-v2-replay';
+import { appendFrameSheetTimelineEvents_ACU, getLatestFrameSheetCheckpoint_ACU } from '../table/storage-frame-v2-sheet-events';
 import { assertSingleActiveFullCheckpointV2_ACU, frameHasSuffixReplayArtifact_ACU } from '../table/storage-frame-v2-persist';
 import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
 import { findLatestTransitionCheckpoint_ACU } from '../table/compat-transition-checkpoint';
@@ -533,7 +534,7 @@ function downgradeV2FullCheckpointAtIndex_ACU(chat: any[], isolationKey: string,
                 || Array.isArray(sheetCheckpoint.data)
             ) continue;
             // P5：timed 单表 checkpoint（sheet_rebase / sheet_hide / sheet_reveal /
-            // sheet_introduction）必须保留在 perSheetCheckpoints 里由回放按
+            // sheet_introduction）必须保留在原事件集合里由回放按
             // activateAtMessageIndex + afterSeq 调度，不能并入 data_replace 基底，
             // 否则事件会被提前到帧首生效（例如 hide 的表出现在替换状态、rebase
             // 的新结构覆盖了该帧更早的操作）。untimed checkpoint 才是帧首事实。
@@ -958,7 +959,7 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
         const lifecycle = deriveSheetLifecycleFromFramesV2_ACU(chat, isolationKey, {
             maxMessageIndex: boundaryAnchorIndex,
         });
-        const migratedHiddenCheckpoints: Record<string, TableSheetCheckpointV2_ACU> = {};
+        const migratedHiddenCheckpoints: TableSheetCheckpointV2_ACU[] = [];
         for (const hiddenSheetKey of lifecycle.hiddenSheetKeys) {
             const entry = lifecycle.statusBySheetKey[hiddenSheetKey];
             const restoreData = entry?.restoreSourceData;
@@ -984,24 +985,22 @@ async function writeV2BoundaryCheckpointBeforePurge_ACU(
                 error.failedIsolationKey = isolationKey;
                 throw error;
             }
-            migratedHiddenCheckpoints[hiddenSheetKey] = {
+            migratedHiddenCheckpoints.push({
                 ...built.checkpoint,
                 timeline: {
                     kind: 'sheet_hide',
                     activateAtMessageIndex: boundaryAnchorIndex,
                     afterSeq: 0,
                 },
-            };
+            });
         }
 
         const frame: TableStorageFrameV2_ACU = {
             version: 2,
             checkpoint,
             logEntries: [],
-            ...(Object.keys(migratedHiddenCheckpoints).length > 0
-                ? { perSheetCheckpoints: migratedHiddenCheckpoints }
-                : {}),
         };
+        appendFrameSheetTimelineEvents_ACU(frame, migratedHiddenCheckpoints);
 
         if (transitionRef || replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length) {
             const candidateChat = structuredClone(chat);
@@ -2620,7 +2619,7 @@ export async function commitManualRefillSheetSnapshotInRangeAtomic_ACU(
         const existingFinalFrame = getV2FrameForIsolation_ACU(chat[completedMessageIndex], options.isolationKey);
         const existingFallbackRunId = existingRootFrame?.checkpoint?.fallbackProvenance?.runId;
         const hasEquivalentTerminalRebases = options.targetSheetKeys.every(sheetKey => {
-            const checkpoint = existingFinalFrame?.perSheetCheckpoints?.[sheetKey];
+            const checkpoint = getLatestFrameSheetCheckpoint_ACU(existingFinalFrame ?? undefined, sheetKey);
             return checkpoint?.kind === 'sheet_full'
                 && checkpoint?.timeline?.kind === 'sheet_rebase'
                 && checkpoint.timeline.activateAtMessageIndex === completedMessageIndex
@@ -2684,7 +2683,6 @@ export async function commitManualRefillSheetSnapshotInRangeAtomic_ACU(
             if (!isV2TagData_ACU(finalTagData)) {
                 finalMessage.TavernDB_ACU_IsolatedData[options.isolationKey] = { ...(finalTagData && typeof finalTagData === 'object' ? finalTagData : {}), _acu_storage_version: 2, storageFrame: finalFrame };
             }
-            const perSheetCheckpoints = { ...(finalFrame.perSheetCheckpoints || {}) };
             const afterSeq = getMaxFrameSequence_ACU(finalFrame);
             for (const sheetKey of options.targetSheetKeys) {
                 const checkpointBuild = buildCanonicalSheetCheckpoint_ACU({
@@ -2698,12 +2696,11 @@ export async function commitManualRefillSheetSnapshotInRangeAtomic_ACU(
                 if (!checkpointBuild.checkpoint) {
                     throw new Error(`手动重填最终快照提交失败：${checkpointBuild.error}`);
                 }
-                perSheetCheckpoints[sheetKey] = {
+                appendFrameSheetTimelineEvents_ACU(finalFrame, [{
                     ...checkpointBuild.checkpoint,
                     timeline: { kind: 'sheet_rebase', activateAtMessageIndex: completedMessageIndex, afterSeq },
-                };
+                }]);
             }
-            finalFrame.perSheetCheckpoints = perSheetCheckpoints;
             writeMessageIdentity_ACU(rootMessage, { enabled: settings_ACU.dataIsolationEnabled, code: settings_ACU.dataIsolationCode });
             writeMessageIdentity_ACU(finalMessage, { enabled: settings_ACU.dataIsolationEnabled, code: settings_ACU.dataIsolationCode });
 

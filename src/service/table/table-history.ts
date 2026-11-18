@@ -2,6 +2,7 @@ import type { ACUMessage } from '../../shared/host-api';
 import { hasAnyTableData_ACU, readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import { isV2TagData_ACU } from './storage-strategy-resolver';
 import { getV2ImportBaselineAiFloor_ACU } from './table-import-baseline';
+import { getLatestFrameSheetCheckpoint_ACU } from './storage-frame-v2-sheet-events';
 
 export interface TableHistoryState_ACU {
     latestAiMessageIndex: number;
@@ -62,7 +63,7 @@ function v2EventTracksFill_ACU(event: any, sheetKey: string): boolean {
 
 function v2ScheduleFilledFloor_ACU(tagData: any, sheetKey: string): number {
     const fullValue = tagData?.storageFrame?.checkpoint?.scheduleSummary?.[sheetKey]?.lastFilledAiFloor;
-    const sheetValue = tagData?.storageFrame?.perSheetCheckpoints?.[sheetKey]?.scheduleSummary?.lastFilledAiFloor;
+    const sheetValue = getLatestFrameSheetCheckpoint_ACU(tagData?.storageFrame, sheetKey)?.scheduleSummary?.lastFilledAiFloor;
     const fullFloor = Number.isFinite(fullValue) && fullValue > 0 ? Number(fullValue) : 0;
     const sheetFloor = Number.isFinite(sheetValue) && sheetValue > 0 ? Number(sheetValue) : 0;
     return Math.max(fullFloor, sheetFloor);
@@ -116,7 +117,7 @@ export function getLatestV2SheetReplayMessageIndex_ACU(chat: ACUMessage[] | any[
         const tagData = readIsolatedTagData_ACU(chat[index], isolationKey) as any;
         if (!isV2TagData_ACU(tagData)) continue;
         const frame = tagData.storageFrame;
-        if (frame.perSheetCheckpoints?.[sheetKey]?.kind === 'sheet_full') return index;
+        if (getLatestFrameSheetCheckpoint_ACU(frame, sheetKey)?.kind === 'sheet_full') return index;
         if ((frame.logEntries || []).some((entry: any) => v2EntryTouchesSheet_ACU(entry, sheetKey))) return index;
     }
     return -1;
@@ -127,7 +128,7 @@ function v2FrameHasSheetData_ACU(tagData: any, sheetKey: string): boolean {
     if (tagData.storageFrame.checkpoint?.kind === 'full' && tagData.storageFrame.checkpoint.data?.[sheetKey]) {
         return true;
     }
-    if (tagData.storageFrame.perSheetCheckpoints?.[sheetKey]?.kind === 'sheet_full') {
+    if (getLatestFrameSheetCheckpoint_ACU(tagData.storageFrame, sheetKey)?.kind === 'sheet_full') {
         return true;
     }
     return (tagData.storageFrame.logEntries || []).some((entry: any) => v2EntryTouchesSheet_ACU(entry, sheetKey));
@@ -140,7 +141,7 @@ function v2FrameTrackedUpdateFloor_ACU(tagData: any, sheetKey: string, messageAi
     if (v2EventTracksFill_ACU(checkpointEvent, sheetKey)) {
         latestFloor = Math.max(latestFloor, messageAiFloor);
     }
-    const sheetCheckpointEvent = tagData.storageFrame.perSheetCheckpoints?.[sheetKey]?.event;
+    const sheetCheckpointEvent = getLatestFrameSheetCheckpoint_ACU(tagData.storageFrame, sheetKey)?.event;
     if (v2EventTracksFill_ACU(sheetCheckpointEvent, sheetKey)) {
         latestFloor = Math.max(latestFloor, messageAiFloor);
     }

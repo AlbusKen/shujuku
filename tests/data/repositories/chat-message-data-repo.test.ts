@@ -26,6 +26,7 @@ import {
   purgeManualRefillIncrementalSheetKeysFromStorageFrameV2_ACU,
   purgeManualRefillIncrementalSheetKeysFromMessage_ACU,
   purgeSheetKeysFromMessage_ACU,
+  purgeSheetKeysFromMessageForIsolation_ACU,
   clearAllTableFields_ACU,
   hasAnyTableData_ACU,
   cloneIsolatedData_ACU,
@@ -290,6 +291,30 @@ describe('purgeSheetKeysFromMessage_ACU', () => {
 
   it('空 sheetKeys 返回 false', () => {
     expect(purgeSheetKeysFromMessage_ACU({}, [])).toBe(false);
+  });
+
+  it('清理同 key 全部 timeline 事件并保留其他表、隔离槽和 ordinal', () => {
+    const event = (sheetKey: string, ordinal: number) => ({
+      ordinal,
+      checkpoint: {
+        kind: 'sheet_full', sheetKey, createdAt: 1, reason: 'manual',
+        data: { name: sheetKey, content: [['row_id']] },
+        timeline: { kind: 'sheet_hide', activateAtMessageIndex: 0, afterSeq: 0 },
+      },
+    });
+    const events = [event('sheet_0', 0), event('sheet_1', 3), event('sheet_0', 5)];
+    const msg: any = { TavernDB_ACU_IsolatedData: {
+      tag1: { storageFrame: { version: 2, logEntries: [], sheetTimelineEvents: events } },
+      tag2: { storageFrame: { version: 2, logEntries: [], sheetTimelineEvents: structuredClone(events) } },
+    } };
+    const otherSlot = structuredClone(msg.TavernDB_ACU_IsolatedData.tag2);
+
+    expect(purgeSheetKeysFromMessageForIsolation_ACU(msg, 'tag1', ['sheet_0'])).toBe(true);
+    expect(msg.TavernDB_ACU_IsolatedData.tag1.storageFrame.sheetTimelineEvents).toEqual([events[1]]);
+    expect(msg.TavernDB_ACU_IsolatedData.tag2).toEqual(otherSlot);
+    expect(purgeSheetKeysFromMessage_ACU(msg, ['sheet_0'])).toBe(true);
+    expect(msg.TavernDB_ACU_IsolatedData.tag2.storageFrame.sheetTimelineEvents).toEqual([events[1]]);
+    expect(purgeSheetKeysFromMessage_ACU(msg, ['sheet_0'])).toBe(false);
   });
 
   it('从新版 IsolatedData 中删除 sheet', () => {
@@ -1507,6 +1532,62 @@ describe('purgeManualRefillIncrementalSheetKeysFromMessage_ACU', () => {
     expect(purgeManualRefillIncrementalSheetKeysFromMessage_ACU(msg, 'tag1', ['sheet_0'])).toBe(true);
     expect(msg.TavernDB_ACU_IsolatedData.tag1.storageFrame.perSheetCheckpoints.sheet_0.data.uid).toBe('chronicle');
     expect(msg.TavernDB_ACU_IsolatedData.tag1.storageFrame.logEntries).toEqual([]);
+  });
+
+  it('timeline-only 旧身份按同名扩展删除范围，其他隔离区不参与', () => {
+    const event = (sheetKey: string, name: string, tableName: string) => ({
+      ordinal: 0,
+      checkpoint: {
+        kind: 'sheet_full', sheetKey, createdAt: 1, reason: 'manual',
+        data: { uid: sheetKey, name, sourceData: { ddl: `CREATE TABLE ${tableName} (row_id TEXT)` } },
+        timeline: { kind: 'sheet_hide', activateAtMessageIndex: 0, afterSeq: 0 },
+      },
+    });
+    const chat = [{ is_user: false, TavernDB_ACU_IsolatedData: {
+      tag1: { storageFrame: { version: 2, logEntries: [], sheetTimelineEvents: [
+        event('sheet_old', '主角信息表', 'legacy_character'),
+        { ...event('sheet_near', '主角信息', 'near_character'), ordinal: 1 },
+      ] } },
+      tag2: { storageFrame: { version: 2, logEntries: [], sheetTimelineEvents: [
+        event('sheet_other_scope', '主角信息表', 'other_scope_character'),
+      ] } },
+    } }];
+    const before = structuredClone(chat);
+
+    const aliases = collectSheetIdentityAliasesForPurge_ACU(chat, 'tag1', ['sheet_current'], {
+      sheet_current: { uid: 'sheet_current', name: '主角信息表', content: [['row_id']] },
+    });
+
+    expect(aliases.sheetKeys).toEqual(['sheet_current', 'sheet_old']);
+    expect(aliases.sqlTableNames).toContain('legacy_character');
+    expect(aliases.sqlTableNames).not.toContain('near_character');
+    expect(aliases.sqlTableNames).not.toContain('other_scope_character');
+    expect(chat).toEqual(before);
+  });
+
+  it('增量预清除从 timeline 推导物理 SQL 名，保留全部事件和非目标语句', () => {
+    const events = [0, 4].map(ordinal => ({ ordinal, checkpoint: {
+      kind: 'sheet_full', sheetKey: 'sheet_0', createdAt: ordinal + 1, reason: 'manual',
+      data: { uid: 'chronicle', name: '纪要表', sourceData: { ddl: 'CREATE TABLE chronicle (row_id TEXT)' } },
+      timeline: { kind: ordinal ? 'sheet_reveal' : 'sheet_hide', activateAtMessageIndex: 0, afterSeq: ordinal ? 1 : 0 },
+    } }));
+    const frame = { version: 2, sheetTimelineEvents: events, logEntries: [{ seq: 1, operations: [{
+      kind: 'sql_batch', statements: [
+        'UPDATE chronicle SET value = ? WHERE row_id = ?',
+        'UPDATE quest_log SET value = ? WHERE row_id = ?',
+      ], params: [['target', 'r1'], ['keep', 'q1']],
+    }] }] };
+    const before = structuredClone(events);
+    const msg: any = { TavernDB_ACU_IsolatedData: { tag1: { storageFrame: frame } } };
+
+    expect(purgeManualRefillIncrementalSheetKeysFromMessage_ACU(msg, 'tag1', ['sheet_0'])).toBe(true);
+    const persistedFrame = msg.TavernDB_ACU_IsolatedData.tag1.storageFrame;
+    expect(persistedFrame).not.toBe(frame);
+    expect(persistedFrame.sheetTimelineEvents).toEqual(before);
+    expect(persistedFrame.logEntries[0].operations).toEqual([{
+      kind: 'sql_batch', statements: ['UPDATE quest_log SET value = ? WHERE row_id = ?'], params: [['keep', 'q1']],
+    }]);
+    expect(frame.logEntries[0].operations[0].statements).toHaveLength(2);
   });
 
   it('使用跨 frame 汇总的 SQL 表名裁剪当前 log-only frame，并保留其他表语句与 params', () => {

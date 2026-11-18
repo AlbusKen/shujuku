@@ -83,13 +83,18 @@ function resolveSheet(sheet: any, tableData: any, targetSheetKeys?: string[] | n
 }
 
 function getHeaderMap(table: any) {
+  // 值为 -1 表示该可见表头不唯一：不能静默取最后一列，否则会把值写进错误的物理列。
   const map = new Map<string, number>();
   getSheetColumnProjection_ACU(table).visibleColumns.forEach((column) => {
     if (column.sourceIndex === 0) return;
     const key = String(column.header ?? '').trim();
-    if (key) map.set(key, column.sourceIndex - 1);
+    if (key) map.set(key, map.has(key) ? -1 : column.sourceIndex - 1);
   });
   return map;
+}
+
+function getWritableFields(headerMap: Map<string, number>): string[] {
+  return Array.from(headerMap.entries()).filter(([, index]) => index >= 0).map(([field]) => field);
 }
 
 function normalizeValueObject(value: any, headerMap: Map<string, number>, label: string): Record<string, string> {
@@ -97,6 +102,7 @@ function normalizeValueObject(value: any, headerMap: Map<string, number>, label:
   const result: Record<string, string> = {};
   for (const [field, raw] of Object.entries(value)) {
     if (!headerMap.has(field)) throw new Error(`字段名不存在：${field}`);
+    if (headerMap.get(field)! < 0) throw new Error(`字段名不唯一：${field}，同一表存在多个同名可见列。`);
     if (raw === undefined || raw === null) result[field] = '';
     else result[field] = String(raw);
   }
@@ -272,7 +278,7 @@ export function buildStrictJsonTableFillResponseFormatForData_ACU(sqlite: boolea
   let totalFieldCount = 0;
   let maxFieldCount = 0;
   entries.forEach((entry) => {
-    const fields = Array.from(getHeaderMap(entry.table).keys());
+    const fields = getWritableFields(getHeaderMap(entry.table));
     totalFieldCount += fields.length;
     maxFieldCount = Math.max(maxFieldCount, fields.length);
     const sheetConst = String(entry.table?.name || entry.sheetKey);

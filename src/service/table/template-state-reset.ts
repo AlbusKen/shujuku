@@ -1,7 +1,7 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU, peekChatScopedConfigContainer_ACU, peekChatSheetGuideContainer_ACU, setChatScopedConfigContainer_ACU, setChatSheetGuideContainer_ACU } from '../../data/storage/chat-history';
 import { getCurrentIsolationKey_ACU, settings_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
-import { allocateStableSheetKeys_ACU, assertNoPhysicalTableNameCollision_ACU } from '../../shared/sheet-identity';
+import { assertNoPhysicalTableNameCollision_ACU, prepareStableSheetIdentities_ACU } from '../../shared/sheet-identity';
 import { normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
 import { buildSheetTableAliasMap_ACU } from '../../shared/sql-read-resolver';
 import { buildCanonicalFullCheckpoint_ACU } from './canonical-checkpoint-builder';
@@ -37,28 +37,20 @@ function prepareTemplate(templateData: Record<string, any>): PreparedTemplate {
   const normalizedTemplateData = normalization.templateData;
   const entries = Object.entries(normalizedTemplateData).filter(([key]) => key.startsWith('sheet_'));
   if (entries.length === 0) throw new Error('初始化模板不包含任何 Sheet。');
-  const allocation = allocateStableSheetKeys_ACU(entries.map(([, sheet]) => sheet?.name));
-  if (allocation.diagnostics.length || allocation.keys.some(key => !key)) throw new Error(`初始化模板无法分配稳定 Sheet key：${allocation.diagnostics.map(item => item.code).join('；')}`);
-  const result: Record<string, any> = {};
-  for (const [key, value] of Object.entries(normalizedTemplateData)) if (!key.startsWith('sheet_')) result[key] = clone(value);
-  entries.forEach(([oldKey, source], index) => {
-    if (!source || typeof source !== 'object' || Array.isArray(source)) throw new Error(`初始化模板 Sheet 无效：${oldKey}`);
-    const sheet = clone(source);
+  const malformedKey = entries.find(([, source]) => !source || typeof source !== 'object' || Array.isArray(source))?.[0];
+  if (malformedKey) throw new Error(`初始化模板 Sheet 无效：${malformedKey}`);
+  // Stable keys replace transport/random keys; the shared preparation keeps displaced key/uid as
+  // tableAliases so later SQL/Strict-JSON requests still resolve the same logical sheet.
+  const identity = prepareStableSheetIdentities_ACU(normalizedTemplateData);
+  if (identity.diagnostics.length || identity.keyMap.size !== entries.length) throw new Error(`初始化模板无法分配稳定 Sheet key：${identity.diagnostics.map(item => item.code).join('；')}`);
+  const result = identity.data;
+  entries.forEach(([oldKey]) => {
+    const sheet = result[identity.keyMap.get(oldKey)!];
     if (!Array.isArray(sheet.content) || !Array.isArray(sheet.content[0]) || sheet.content[0][0] !== 'row_id') throw new Error(`初始化模板 Sheet 缺少 row_id 表头：${oldKey}`);
     if (sheet.content.slice(1).some((row: unknown) => !Array.isArray(row))) throw new Error(`初始化模板 Sheet 包含非法数据行：${oldKey}`);
-    const previousUid = String(sheet.uid || '').trim();
-    const declaredAliases = Array.isArray(sheet.sourceData?.tableAliases) ? sheet.sourceData.tableAliases : [];
-    sheet.sourceData = sheet.sourceData && typeof sheet.sourceData === 'object' && !Array.isArray(sheet.sourceData)
-      ? sheet.sourceData
-      : {};
-    // Stable keys replace transport/random keys. Keep the displaced explicit identities so
-    // later SQL/Strict-JSON requests can still resolve the same logical sheet deterministically.
-    sheet.sourceData.tableAliases = [...new Set([...declaredAliases, oldKey, previousUid]
-      .map(value => String(value || '').trim())
-      .filter(Boolean))];
+    if (!sheet.sourceData || typeof sheet.sourceData !== 'object' || Array.isArray(sheet.sourceData)) sheet.sourceData = {};
+    if (!Array.isArray(sheet.sourceData.tableAliases)) sheet.sourceData.tableAliases = [];
     sheet.content = ensureStableRowIdsForSheetContent_ACU(sheet.content);
-    sheet.uid = allocation.keys[index]!;
-    result[allocation.keys[index]!] = sheet;
   });
   const normalized = normalizeCanonicalTableRows_ACU(result);
   if (normalized.errors.length) throw new Error('初始化模板包含重复或非法 row_id。');

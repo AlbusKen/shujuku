@@ -146,6 +146,7 @@ import { loadTableStateFromFramesV2_ACU } from '../../../src/service/table/stora
 import { migrateLegacyStorageToV2OnLoad_ACU } from '../../../src/service/table/storage-v2-migration';
 import { logWarn_ACU, logError_ACU } from '../../../src/shared/utils';
 import { normalizeSheetGuideRowIds_ACU } from '../../../src/service/template/chat-scope/sheet-guide-row-id-normalizer';
+import { buildStableSheetKeyCandidate_ACU } from '../../../src/shared/sheet-identity';
 
 describe('migrateContentNullToRowId', () => {
   // ═══════════════════════════════════════════════════════════════
@@ -1466,6 +1467,9 @@ describe('fillFirstLayerWithTemplateData_ACU', () => {
       { is_user: false, mes: '你好，欢迎来到冒险世界！' },
     ]);
     vi.mocked(getCurrentIsolationKey_ACU).mockReturnValue('');
+    vi.mocked(readIsolatedTagData_ACU).mockReturnValue(null);
+    vi.mocked(readLegacyIndependentData_ACU).mockReturnValue(null);
+    vi.mocked(isLegacyMatchForIsolation_ACU).mockReturnValue(false);
     vi.mocked(getSortedSheetKeys_ACU).mockImplementation((data: any) =>
       data ? Object.keys(data).filter((k: string) => k.startsWith('sheet_')).sort() : [],
     );
@@ -1474,6 +1478,9 @@ describe('fillFirstLayerWithTemplateData_ACU', () => {
     vi.mocked(buildChatSheetGuideDataFromTemplateObj_ACU).mockReturnValue(null);
     mockPersistV2CheckpointSuccess_ACU();
   });
+
+  // 无持久身份的首个 checkpoint 按显示名分配稳定 key（原模板 key 保留为 tableAliases）。
+  const SYSTEM_RULES_KEY = buildStableSheetKeyCandidate_ACU('系统规则表')!;
 
   it('将补齐身份后的系统规则快照同时写入 V2 checkpoint 与内存', async () => {
     const templateObj = {
@@ -1492,22 +1499,24 @@ describe('fillFirstLayerWithTemplateData_ACU', () => {
 
     expect(result).toEqual({ success: true, messageIndex: 0, sheetCount: 1 });
     const persistedSnapshot = vi.mocked(persistTableMutationLogV2_ACU).mock.calls[0][0].afterData;
-    expect(persistedSnapshot.sheet_SystemRules.content).toEqual([
+    expect(persistedSnapshot.sheet_SystemRules).toBeUndefined();
+    expect(persistedSnapshot[SYSTEM_RULES_KEY].sourceData.tableAliases).toEqual(['sheet_SystemRules']);
+    expect(persistedSnapshot[SYSTEM_RULES_KEY].content).toEqual([
       ['row_id', '规则名称'],
       ['1', '规则一'],
       ['2', '规则二'],
       ['fixed-rule', '规则三'],
     ]);
     expect(vi.mocked(_set_currentJsonTableData_ACU)).toHaveBeenCalledWith(expect.objectContaining({
-      sheet_SystemRules: expect.objectContaining({
-        content: persistedSnapshot.sheet_SystemRules.content,
+      [SYSTEM_RULES_KEY]: expect.objectContaining({
+        content: persistedSnapshot[SYSTEM_RULES_KEY].content,
       }),
     }));
     expect(templateObj.sheet_SystemRules.content[1][0]).toBeNull();
     expect(templateObj.sheet_SystemRules.content[2][0]).toBe('');
   });
 
-  it('保留原始模板给 guide，并使 guide seedRows 与 checkpoint 身份一致', async () => {
+  it('guide 使用同一稳定身份的未规范化模板副本，seedRows 与 checkpoint 身份一致，输入不被修改', async () => {
     const templateObj = {
       sheet_SystemRules: {
         name: '系统规则表',
@@ -1525,16 +1534,17 @@ describe('fillFirstLayerWithTemplateData_ACU', () => {
       ['2', '规则三'],
     ];
     vi.mocked(buildChatSheetGuideDataFromTemplateObj_ACU).mockImplementation((source: any) => {
-      expect(source).toBe(templateObj);
-      expect(source.sheet_SystemRules.content).toEqual([
+      expect(source).not.toBe(templateObj);
+      expect(source.sheet_SystemRules).toBeUndefined();
+      expect(source[SYSTEM_RULES_KEY].content).toEqual([
         ['row_id', '规则名称'],
         [null, '规则一'],
         [' fixed-rule ', '规则二'],
         ['', '规则三'],
       ]);
       return {
-        sheet_SystemRules: {
-          name: source.sheet_SystemRules.name,
+        [SYSTEM_RULES_KEY]: {
+          name: source[SYSTEM_RULES_KEY].name,
           content: [['row_id', '规则名称']],
           seedRows: expectedSeedRows,
         },
@@ -1547,7 +1557,7 @@ describe('fillFirstLayerWithTemplateData_ACU', () => {
     expect(result).toEqual({ success: true, messageIndex: 0, sheetCount: 1 });
     const persistedSnapshot = vi.mocked(persistTableMutationLogV2_ACU).mock.calls[0][0].afterData;
     const guideData = vi.mocked(setChatSheetGuideDataForIsolationKey_ACU).mock.calls[0][1];
-    expect(guideData.sheet_SystemRules.seedRows).toEqual(persistedSnapshot.sheet_SystemRules.content.slice(1));
+    expect(guideData[SYSTEM_RULES_KEY].seedRows).toEqual(persistedSnapshot[SYSTEM_RULES_KEY].content.slice(1));
     expect(templateObj.sheet_SystemRules.content[1][0]).toBeNull();
     expect(templateObj.sheet_SystemRules.content[2][0]).toBe(' fixed-rule ');
   });
@@ -2046,7 +2056,11 @@ describe('ensureInitialSeedCheckpoint_ACU', () => {
     expect(tagData?._acu_storage_version).toBe(2);
     expect(tagData?.storageFrame?.version).toBe(2);
     expect(tagData?.storageFrame?.checkpoint?.kind).toBe('full');
-    expect(tagData?.storageFrame?.checkpoint?.data?.sheet_0?.content?.[1]?.[1]).toBe('铁剑');
+    // 无持久身份的新聊天：首个 checkpoint 按显示名分配稳定 key，原模板 key 作为别名保留。
+    expect(tagData?.storageFrame?.checkpoint?.data?.sheet_0).toBeUndefined();
+    expect(tagData?.storageFrame?.checkpoint?.data?.sheet_bei_bao_wu_pin_biao?.content?.[1]?.[1]).toBe('铁剑');
+    expect(tagData?.storageFrame?.checkpoint?.data?.sheet_bei_bao_wu_pin_biao?.uid).toBe('sheet_bei_bao_wu_pin_biao');
+    expect(tagData?.storageFrame?.checkpoint?.data?.sheet_bei_bao_wu_pin_biao?.sourceData?.tableAliases).toEqual(['sheet_0']);
     expect(greetingMsg._acu_local_template_base_state_seeded).toBe(GREETING_LOCAL_BASE_STATE_MARKER_ACU);
     expect(vi.mocked(saveChatToHost_ACU)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(deleteAllGeneratedEntries_ACU)).toHaveBeenCalledTimes(1);

@@ -1,4 +1,5 @@
 import type { TableStorageFrameV2_ACU } from './storage-frame-v2-types';
+import { getLatestFrameSheetCheckpoint_ACU } from './storage-frame-v2-sheet-events';
 
 function validBaselineFloor_ACU(value: unknown, messageAiFloor: number): number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= messageAiFloor ? value : 0;
@@ -12,7 +13,7 @@ export function getV2ImportBaselineAiFloor_ACU(
 ): number {
   if (!frame || !sheetKey.startsWith('sheet_')) return 0;
   const checkpoint = frame.checkpoint;
-  const sheetCheckpoint = frame.perSheetCheckpoints?.[sheetKey];
+  const sheetCheckpoint = getLatestFrameSheetCheckpoint_ACU(frame, sheetKey);
   const persistedFloor = Math.max(
     validBaselineFloor_ACU(checkpoint?.scheduleSummary?.[sheetKey]?.lastImportBaselineAiFloor, messageAiFloor),
     validBaselineFloor_ACU(sheetCheckpoint?.scheduleSummary?.lastImportBaselineAiFloor, messageAiFloor),

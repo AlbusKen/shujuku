@@ -32,6 +32,7 @@ import type {
 } from './storage-frame-v2-types';
 import { runTableWriteTransaction_ACU } from './table-write-transaction';
 import { scheduleSummaryVectorMirrorFlushAfterPersist_ACU } from '../vector/summary-vector-index-flush-queue';
+import { appendFrameSheetTimelineEvents_ACU } from './storage-frame-v2-sheet-events';
 
 /** bridge 元数据所在 isolation tag 上的非 replay 字段名。 */
 export const MANUAL_CATCH_UP_BRIDGE_FIELD_ACU = 'manualCatchUpProvisionalBridge';
@@ -109,6 +110,7 @@ export function getOriginalFullFrameFingerprint_ACU(frame: TableStorageFrameV2_A
     headRevision: frame.headRevision ?? null,
     checkpoint: frame.checkpoint ?? null,
     perSheetCheckpoints: frame.perSheetCheckpoints ?? null,
+    ...(frame.sheetTimelineEvents === undefined ? {} : { sheetTimelineEvents: frame.sheetTimelineEvents }),
     logEntries: frame.logEntries ?? [],
   });
   let hash = 2166136261;
@@ -714,7 +716,6 @@ export async function finalizeProvisionalBridge_ACU(
     const frame = originalTagData.storageFrame as TableStorageFrameV2_ACU;
     const maxSeq = Math.max(0, ...(frame.logEntries || []).map(entry => Number(entry.seq) || 0));
     const now = Date.now();
-    const perSheetCheckpoints = { ...(frame.perSheetCheckpoints || {}) };
     for (const sheetKey of bridge.selectedSheetKeys) {
       const sheetCheckpointResult = buildCanonicalSheetCheckpoint_ACU({
         createdAt: now,
@@ -727,16 +728,15 @@ export async function finalizeProvisionalBridge_ACU(
       if (!sheetCheckpointResult.checkpoint) {
         return { ok: false, error: `bridge finalize 无法构建 selected sheet rebase：${sheetKey}：${sheetCheckpointResult.error}`, diagnosticCode: 'bridge_replay_mismatch' };
       }
-      perSheetCheckpoints[sheetKey] = {
+      appendFrameSheetTimelineEvents_ACU(frame, [{
         ...sheetCheckpointResult.checkpoint,
         timeline: {
           kind: 'sheet_rebase',
           activateAtMessageIndex: bridge.originalFullCheckpointIndex,
           afterSeq: maxSeq,
         },
-      };
+      }]);
     }
-    frame.perSheetCheckpoints = perSheetCheckpoints;
     originalContainer[isolationKey] = originalTagData;
     originalMessage.TavernDB_ACU_IsolatedData = originalContainer;
 

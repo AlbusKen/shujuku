@@ -416,10 +416,11 @@ describe('manual catch-up provisional bridge 状态机（t4）', () => {
     });
     expect(finalizeReplayBeforeBoundary?.data?.sheet_a?.content).toEqual(provisionalFilled.content);
 
-    // 原 full 根恢复：checkpoint 回到楼层 6，且 selected sheet 的 perSheetCheckpoints 有 sheet_rebase。
+    // 原 full 根恢复：checkpoint 回到楼层 6，selected sheet 的 rebase 只写入事件集合。
     const originalTag = mocks.chat[6]?.TavernDB_ACU_IsolatedData?.[isolationKey];
     expect(originalTag?.storageFrame?.checkpoint?.kind).toBe('full');
-    const rebase = originalTag?.storageFrame?.perSheetCheckpoints?.sheet_a;
+    const rebase = originalTag?.storageFrame?.sheetTimelineEvents?.find((event: any) => event.checkpoint.sheetKey === 'sheet_a')?.checkpoint;
+    expect(originalTag?.storageFrame?.perSheetCheckpoints?.sheet_a).toBeUndefined();
     expect(rebase?.timeline?.kind).toBe('sheet_rebase');
     expect(rebase?.timeline?.afterSeq).toBe(0);
 
@@ -679,7 +680,7 @@ describe('manual catch-up provisional bridge 写入准入（t5）', () => {
       });
     expect(fullIndices).toEqual([6]);
     const originalTag = chat[6]?.TavernDB_ACU_IsolatedData?.[isolationKey];
-    expect(originalTag?.storageFrame?.perSheetCheckpoints?.sheet_a?.timeline?.kind).toBe('sheet_rebase');
+    expect(originalTag?.storageFrame?.sheetTimelineEvents?.find((event: any)=> event.checkpoint.sheetKey === 'sheet_a')?.checkpoint.timeline?.kind).toBe('sheet_rebase');
     expect(originalTag?.manualCatchUpProvisionalBridge).toBeUndefined();
   });
 

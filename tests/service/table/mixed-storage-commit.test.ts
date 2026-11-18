@@ -150,6 +150,43 @@ describe('mixed-storage-commit', () => {
     ]);
   });
 
+  it('降级旧根仅折叠 untimed 分片，完整保留 legacy 与同 key 多次 timeline 事件', async () => {
+    const legacy = { sheet_0: sheet([['1', '药水'], ['2', '卷轴']]) } as any;
+    const v2Data = { sheet_0: sheet([['1', '药水']]) } as any;
+    const auxiliary = { ...sheet([['9', '分片值']]), uid: 'aux', name: '辅助表' };
+    legacy.sheet_aux = structuredClone(auxiliary);
+    chatRef.value = buildChat(legacy, v2Data, false, true);
+    const frame = chatRef.value[1].TavernDB_ACU_IsolatedData[''].storageFrame;
+    const timed = {
+      kind: 'sheet_full', createdAt: 2, reason: 'schema_change', sheetKey: 'sheet_0',
+      data: v2Data.sheet_0,
+      timeline: { kind: 'sheet_rebase', activateAtMessageIndex: 1, afterSeq: 0 },
+    };
+    frame.perSheetCheckpoints = {
+      sheet_aux: { kind: 'sheet_full', createdAt: 2, reason: 'manual', sheetKey: 'sheet_aux', data: auxiliary },
+      sheet_0: timed,
+    };
+    frame.sheetTimelineEvents = [
+      { ordinal: 3, checkpoint: timed },
+      { ordinal: 7, checkpoint: { ...timed, createdAt: 3 } },
+    ];
+    const before = structuredClone(frame);
+    const decision = await decisionFor(chatRef.value, legacy);
+    expect(decision.kind, JSON.stringify(decision.diagnosticCodes)).toBe('legacy_has_v2_missing_data');
+
+    const result = await commitMixedStorageDecision_ACU({ decision, action: 'commit_merge_candidate', isolationConfig: { enabled: false, code: '' } });
+
+    expect(result.status, result.error).toBe('committed');
+    const downgraded = chatRef.value[1].TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(downgraded.checkpoint).toBeUndefined();
+    expect(downgraded.perSheetCheckpoints).toEqual(before.perSheetCheckpoints);
+    expect(downgraded.sheetTimelineEvents).toEqual(before.sheetTimelineEvents);
+    expect(downgraded.logEntries[0].operations).toEqual([{
+      kind: 'data_replace', data: { ...v2Data, sheet_aux: auxiliary }, reason: 'checkpoint_fallback',
+    }]);
+    expect(saveStrict).toHaveBeenCalledTimes(1);
+  });
+
   it('宿主保存失败时恢复 live chat', async () => {
     const legacy = { sheet_0: sheet([['1', '药水']]) } as any;
     chatRef.value = buildChat(legacy, structuredClone(legacy));

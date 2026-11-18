@@ -21,6 +21,7 @@ import {
 } from './storage-frame-v2-replay';
 import type { TableMutationOperationV2_ACU, TablePatchV2_ACU, TableStorageFrameV2_ACU, TableV2RecoveryBackup_ACU } from './storage-frame-v2-types';
 import { runTableWriteTransaction_ACU } from './table-write-transaction';
+import { frameHasSheetTimelineArtifacts_ACU } from './storage-frame-v2-sheet-events';
 
 type RecoveryKind_ACU = 'repaired_full_checkpoint' | 'confirmed_orphan_data_replace' | 'temporary_sheet_anchor_convergence' | 'redundant_full_checkpoint_convergence' | 'restored_from_recovery_backup' | 'compat_tolerant_replay_fixation';
 export type V2RecoveryStatus_ACU = 'recoverable_repaired_checkpoint' | 'recoverable_orphan_data_replace' | 'recoverable_temporary_sheet_anchor' | 'recoverable_compat_tolerant_replay' | 'recoverable_redundant_full_checkpoint' | 'recoverable_from_recovery_backup' | 'unrecoverable_late_checkpoint_artifacts' | 'unrecoverable_no_base' | 'unrecoverable_identity_conflict' | 'unrecoverable';
@@ -113,6 +114,7 @@ function getFrames_ACU(chat: any[], isolationKey: string): Array<{ messageIndex:
 function hasReplayArtifactsAfterCheckpoint_ACU(frame: TableStorageFrameV2_ACU): boolean {
   return (frame.logEntries?.length || 0) > 0
     || Object.keys(frame.perSheetCheckpoints || {}).length > 0
+    || frameHasSheetTimelineArtifacts_ACU(frame)
     || !!frame.manualRefillProgress;
 }
 function hasAnyReplayArtifacts_ACU(frame: TableStorageFrameV2_ACU): boolean {
@@ -121,6 +123,7 @@ function hasAnyReplayArtifacts_ACU(frame: TableStorageFrameV2_ACU): boolean {
 function hasV2ReplayArtifact_ACU(frame: TableStorageFrameV2_ACU): boolean {
   return (frame.logEntries?.length || 0) > 0
     || Object.keys(frame.perSheetCheckpoints || {}).length > 0
+    || frameHasSheetTimelineArtifacts_ACU(frame)
     || frame.manualRefillProgress !== undefined
     || (frame.headRevision !== undefined && frame.headRevision !== null);
 }
@@ -143,7 +146,7 @@ function findLateCheckpointWithSuffixArtifacts_ACU(
   return suffix ? { checkpointMessageIndex: checkpoint.messageIndex, suffixMessageIndex: suffix.messageIndex } : null;
 }
 function isIsolatedDataReplaceFrame_ACU(frame: TableStorageFrameV2_ACU): boolean {
-  if (Object.keys(frame.perSheetCheckpoints || {}).length > 0 || frame.manualRefillProgress) return false;
+  if (Object.keys(frame.perSheetCheckpoints || {}).length > 0 || frameHasSheetTimelineArtifacts_ACU(frame) || frame.manualRefillProgress) return false;
   if ((frame.logEntries?.length || 0) !== 1) return false;
   const entry = frame.logEntries[0];
   return !entry?.patches?.length
@@ -319,6 +322,7 @@ function buildRecoveredCandidateChat_ACU(plan: RecoveryPlan_ACU): any[] {
         headRevision: 'redundant-full-downgraded',
         logEntries: [...originalEntries, fallbackEntry],
         ...(originalFrame.perSheetCheckpoints ? { perSheetCheckpoints: clone_ACU(originalFrame.perSheetCheckpoints) } : {}),
+        ...(originalFrame.sheetTimelineEvents !== undefined ? { sheetTimelineEvents: clone_ACU(originalFrame.sheetTimelineEvents) } : {}),
         ...(originalFrame.manualRefillProgress ? { manualRefillProgress: clone_ACU(originalFrame.manualRefillProgress) } : {}),
       };
       const isolatedData = cloneIsolatedData_ACU(message);

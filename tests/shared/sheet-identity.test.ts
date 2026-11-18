@@ -3,9 +3,11 @@ import {
   allocateStableSheetKeys_ACU,
   buildStableSheetKeyCandidate_ACU,
   canonicalizeDisplayName_ACU,
+  prepareStableSheetIdentities_ACU,
   SHEET_KEY_ALGORITHM_VERSION_ACU,
   toAsciiSlug_ACU,
 } from '../../src/shared/sheet-identity';
+import { buildDefaultTableTemplateObject_ACU } from '../../src/shared/table-defaults/index.js';
 import {
   assertNoPhysicalTableNameCollision_ACU,
   detectPhysicalTableNameCollisions_ACU,
@@ -136,5 +138,46 @@ describe('physical table name (deterministic)', () => {
     const data = { mate: {}, sheet_beibao: sheet('背包'), sheet_juese: sheet('角色') } as any;
     expect(detectPhysicalTableNameCollisions_ACU(data)).toEqual([]);
     expect(() => assertNoPhysicalTableNameCollision_ACU(data)).not.toThrow();
+  });
+});
+
+describe('prepareStableSheetIdentities_ACU', () => {
+  it('真实默认模板：按显示名分配稳定 key，key===uid，原 key/uid 保留为别名且不修改输入', () => {
+    const template = buildDefaultTableTemplateObject_ACU() as any;
+    const before = JSON.stringify(template);
+
+    const first = prepareStableSheetIdentities_ACU(template);
+    const second = prepareStableSheetIdentities_ACU(buildDefaultTableTemplateObject_ACU() as any);
+
+    expect(first.diagnostics).toEqual([]);
+    expect(first.malformedSheetKeys).toEqual([]);
+    expect(JSON.stringify(template)).toBe(before);
+    expect(Object.keys(first.data).sort()).toEqual(Object.keys(second.data).sort());
+    expect(first.keyMap.get('sheet_in05z9vz')).toBe('sheet_bei_bao_wu_pin_biao');
+    expect(first.data.sheet_in05z9vz).toBeUndefined();
+    expect(first.data.mate).toEqual(template.mate);
+    for (const [oldKey, newKey] of first.keyMap) {
+      const sheet = first.data[newKey];
+      expect(sheet.uid).toBe(newKey);
+      expect(newKey).toBe(buildStableSheetKeyCandidate_ACU(template[oldKey].name));
+      expect(sheet.sourceData.tableAliases).toContain(oldKey);
+      expect(sheet.content).toEqual(template[oldKey].content);
+    }
+  });
+
+  it('已是稳定 key 的输入幂等，不追加自引用别名', () => {
+    const once = prepareStableSheetIdentities_ACU({ mate: {}, sheet_random: { uid: 'legacy-uid', name: '背包', content: [['row_id']] } });
+    const twice = prepareStableSheetIdentities_ACU(once.data);
+
+    expect(twice.data).toEqual(once.data);
+    expect(once.data.sheet_bei_bao.sourceData.tableAliases).toEqual(['sheet_random', 'legacy-uid']);
+  });
+
+  it('空名、重名或畸形表返回诊断与空结果，由调用方决定处理', () => {
+    expect(prepareStableSheetIdentities_ACU({ sheet_a: { name: '' } }).diagnostics[0].code).toBe('empty_name');
+    const duplicate = prepareStableSheetIdentities_ACU({ sheet_a: { name: '背包' }, sheet_b: { name: ' 背包 ' } });
+    expect(duplicate.diagnostics.map(item => item.code)).toContain('duplicate_canonical_name');
+    expect(duplicate.data).toEqual({});
+    expect(prepareStableSheetIdentities_ACU({ sheet_a: [] as any }).malformedSheetKeys).toEqual(['sheet_a']);
   });
 });

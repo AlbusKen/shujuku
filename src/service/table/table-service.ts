@@ -11,11 +11,14 @@ import { applyTemplateScopeForCurrentChat_ACU } from '../settings/settings-servi
 import {
   attachSeedRowsToCurrentDataFromGuide_ACU,
   buildChatSheetGuideDataFromData_ACU,
+  buildChatSheetGuideDataFromTemplateObj_ACU,
   ensureChatSheetGuideSeeded_ACU,
   getChatSheetGuideDataForIsolationKey_ACU,
   getSortedSheetKeys_ACU,
+  sanitizeTemplateSnapshotForChat_ACU,
   setChatSheetGuideDataForIsolationKey_ACU,
 } from '../template/chat-scope';
+import { prepareStableSheetIdentities_ACU } from '../../shared/sheet-identity';
 import { deleteAllGeneratedEntries_ACU } from '../worldbook/pipeline';
 import { consumeLastMergeSourceInventory_ACU, mergeAllIndependentTables_ACU, mergeAllIndependentTablesLegacyV1_ACU } from '../runtime/helpers-remaining';
 import { readIsolatedTagData_ACU, readLegacyIndependentData_ACU, isLegacyMatchForIsolation_ACU } from '../../data/repositories/chat-message-data-repo';
@@ -67,9 +70,61 @@ export interface TableChatPersistOptions_ACU extends TableFillRequestGuard_ACU {
 
 const TABLE_PERSIST_COMMIT_MODEL_REQUIRED_ACU = 'Table persistence requires table update commit model; direct unsafe writes are not allowed.';
 
-export async function ensureLegacyStorageMigratedBeforeWrite_ACU(reason = 'table_write'): Promise<{
+/**
+ * 当前隔离区尚无任何持久表身份（storage strategy = empty）时，在首次填表前按显示名为
+ * 生效模板分配稳定 key，并以与初始 seed checkpoint 相同的语义写入 guide/scope
+ * （chat_override）。与用户消息条数无关；已稳定或分配有诊断时保持原样，不新增拒绝条件。
+ * 返回 true 表示身份已改写，调用方须重载运行时后再规划填表。
+ */
+async function pinStableSheetIdentitiesForPristineChat_ACU(reason: string, isolationKey: string): Promise<boolean> {
+  try {
+    const templateObj = parseTableTemplateJson_ACU({ stripSeedRows: false });
+    const identity = prepareStableSheetIdentities_ACU(templateObj);
+    if (identity.keyMap.size === 0) {
+      const details = [...identity.malformedSheetKeys, ...identity.diagnostics.map(item => `${item.code}: ${item.originalName || '(空表名)'}`)].join('；');
+      if (details) logWarn_ACU(`[PristineIdentity] ${reason}: 无法分配稳定表 key，沿用模板 key：${details}`);
+      return false;
+    }
+    if (![...identity.keyMap].some(([from, to]) => from !== to)) return false;
+
+    // guide 构建会补齐顺序号；先构建再取快照，使 scope 模板与 guide 顺序一致。
+    const guideData = buildChatSheetGuideDataFromTemplateObj_ACU(identity.data, { stripSeedRows: false });
+    const templateSnapshot = sanitizeTemplateSnapshotForChat_ACU(identity.data);
+    if (!guideData || !templateSnapshot?.templateStr) {
+      logWarn_ACU(`[PristineIdentity] ${reason}: 稳定身份模板快照不可用，沿用模板 key。`);
+      return false;
+    }
+    const pinned = setChatSheetGuideDataForIsolationKey_ACU(isolationKey, guideData, {
+      reason: `${reason}:pristine_identity`,
+      syncTemplateScope: true,
+      templateSource: templateSnapshot.templateStr,
+      source: 'pristine_identity',
+    });
+    if (!pinned) {
+      logWarn_ACU(`[PristineIdentity] ${reason}: guide/scope 写入失败，沿用模板 key。`);
+      return false;
+    }
+    applyTemplateScopeForCurrentChat_ACU();
+    try {
+      await saveChatToHost_ACU();
+    } catch (error) {
+      logWarn_ACU(`[PristineIdentity] ${reason}: 保存聊天失败，稳定身份将随后续表格提交一并保存：`, error);
+    }
+    logDebug_ACU(`[PristineIdentity] ${reason}: 已为无持久身份聊天分配稳定表 key（tables=${identity.keyMap.size}）。`);
+    return true;
+  } catch (error) {
+    logWarn_ACU(`[PristineIdentity] ${reason}: 稳定身份准备失败，沿用模板 key：`, error);
+    return false;
+  }
+}
+
+export async function ensureLegacyStorageMigratedBeforeWrite_ACU(reason = 'table_write', {
+  pinPristineIdentity = false,
+}: { pinPristineIdentity?: boolean } = {}): Promise<{
   success: boolean;
   migrated?: boolean;
+  /** 无持久身份聊天已改写为稳定表身份；调用方须重载运行时。 */
+  identityPinned?: boolean;
   data?: TableDataObject_ACU | null;
   error?: string;
 }> {
@@ -82,6 +137,10 @@ export async function ensureLegacyStorageMigratedBeforeWrite_ACU(reason = 'table
     code: settings_ACU.dataIsolationCode,
   };
   const strategy = resolveTableStorageStrategy_ACU(chat, isolationKey, isolationConfig);
+  if (strategy.mode === 'empty') {
+    const identityPinned = pinPristineIdentity && await pinStableSheetIdentitiesForPristineChat_ACU(reason, isolationKey);
+    return { success: true, migrated: false, ...(identityPinned ? { identityPinned: true } : {}) };
+  }
   if (strategy.mode !== 'legacy-v1') return { success: true, migrated: false };
 
   logWarn_ACU(`[LegacyMigrationGate] ${reason}: detected legacy-v1 before write, migrating first. reason=${strategy.reason}${strategy.warning ? `; warning=${strategy.warning}` : ''}`);

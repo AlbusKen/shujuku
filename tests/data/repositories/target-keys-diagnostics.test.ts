@@ -198,4 +198,32 @@ describe('scanTargetKeysResidue_ACU', () => {
     }]);
   });
 
+  it('逐条报告同 key timeline 事件残留，并保持隔离和只读语义', () => {
+    const checkpoint = {
+      kind: 'sheet_full', sheetKey: 'sheet_x', reason: 'schema_change', createdAt: 789,
+      data: { name: '目标表', content: [['row_id', '值'], ['1', '保留']] },
+      scheduleSummary: { lastFilledAiFloor: 8 },
+      event: { filledSheetKeys: ['sheet_x'], changedSheetKeys: [], groupKeys: [] },
+      timeline: { kind: 'sheet_hide', activateAtMessageIndex: 9, afterSeq: 1 },
+    };
+    const msg = { TavernDB_ACU_IsolatedData: {
+      tag1: { storageFrame: { logEntries: [], sheetTimelineEvents: [
+        { ordinal: 2, checkpoint },
+        { ordinal: 5, checkpoint: { ...checkpoint, timeline: { ...checkpoint.timeline, kind: 'sheet_reveal' } } },
+      ] } },
+      other: { storageFrame: { logEntries: [] } },
+    } };
+    const before = JSON.stringify(msg);
+
+    const report = scanTargetKeysResidue_ACU(msg, 'tag1', ['sheet_x'], 9);
+
+    expect(report).toMatchObject({ checkpointDataRisk: true, scheduleSummaryRisk: true, exactHits: 2 });
+    expect(report.checkpointDataRisks).toEqual([0, 1].map(() => ({
+      messageIndex: 9, tagKey: 'tag1', targetKey: 'sheet_x', kind: 'sheet_full',
+      reason: 'schema_change', createdAt: 789,
+    })));
+    expect(scanTargetKeysResidue_ACU(msg, 'other', ['sheet_x']).checkpointDataRisk).toBe(false);
+    expect(JSON.stringify(msg)).toBe(before);
+  });
+
 });

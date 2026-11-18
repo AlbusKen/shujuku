@@ -743,21 +743,34 @@ describe('table-v2-recovery-service', () => {
     expect(h.save).not.toHaveBeenCalled();
   });
 
-  it('同名双身份：同 row_id 值不同时 winner 行保留、冲突行 id 记入 identityMerges，不静默', async () => {
+  it('同名双身份：无数据先后证据时不按引用 key 选值，并保留冲突诊断', async () => {
     const conflictData = {
       mate: { type: 'acu', version: 1 },
       sheet_legacy: { uid: 'bag', name: '背包', content: [['row_id', '名称'], ['1', '旧剑']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 0 },
       sheet_beibao: { uid: 'bag2', name: '背包', content: [['row_id', '名称'], ['1', '新剑']], sourceData: {}, updateConfig: {}, exportConfig: {}, orderNo: 1 },
     } as any;
+    const original = JSON.stringify(conflictData);
     h.chat = chatWithFrame(frame({ kind: 'full', createdAt: 1, reason: 'init', data: conflictData }, []));
 
     const detailed = await storageFrameV2Replay.loadTableStateFromFramesV2Detailed_ACU(h.chat, '', { updateRuntimeState: false });
     const keys = Object.keys(detailed?.data || {}).filter(key => key.startsWith('sheet_'));
     expect(keys).toHaveLength(1);
     const winnerKey = keys[0];
-    const winnerOriginalRow = conflictData[winnerKey].content[1];
-    expect(detailed?.data[winnerKey].content).toEqual([['row_id', '名称'], winnerOriginalRow]);
+    const resolvedContent = detailed!.data[winnerKey].content;
+    expect(['旧剑', '新剑']).toContain(resolvedContent[1][1]);
     expect(detailed?.identityMerges).toEqual([expect.objectContaining({ toKey: winnerKey, conflictingRowIds: ['1'] })]);
+
+    for (const alternate of [
+      { mate: conflictData.mate, sheet_beibao: conflictData.sheet_legacy, sheet_legacy: conflictData.sheet_beibao },
+      { mate: conflictData.mate, sheet_beibao: conflictData.sheet_beibao, sheet_legacy: conflictData.sheet_legacy },
+    ]) {
+      const alternateChat = chatWithFrame(frame({ kind: 'full', createdAt: 1, reason: 'init', data: alternate }, []));
+      const replayed = await storageFrameV2Replay.loadTableStateFromFramesV2Detailed_ACU(alternateChat, '', { updateRuntimeState: false });
+      const replayedKey = Object.keys(replayed!.data).find(key => key.startsWith('sheet_'))!;
+      expect(replayed!.data[replayedKey].content).toEqual(resolvedContent);
+      expect(replayed?.identityMerges).toEqual([expect.objectContaining({ conflictingRowIds: ['1'] })]);
+    }
+    expect(JSON.stringify(conflictData)).toBe(original);
 
     const prepared = await prepareV2Recovery_ACU();
     expect(prepared.status).toBe('unrecoverable');

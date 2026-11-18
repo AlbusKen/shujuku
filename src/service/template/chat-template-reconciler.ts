@@ -1,6 +1,8 @@
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
 import { buildStableSheetKeyCandidate_ACU, canonicalizeDisplayName_ACU } from '../../shared/sheet-identity';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
+import { matchSheetColumnsByName_ACU } from '../../shared/sheet-column-reuse';
+import { mergeLegacySheetIdentities_ACU } from '../../shared/sheet-identity-merge';
 import { getSheetColumnProjection_ACU, parseDDLColumnInfos_ACU, parseDDLTableConstraints_ACU, parseDDLTableName, parseDDLTableSuffix_ACU, parseDDLSafeDefaultLiteral_ACU, rebindCreateTableName_ACU, validateDDLTextAgainstHeaders_ACU } from '../../shared/ddl-utils';
 import { generateDDL } from '../../data/sqlite/schema-mapper';
 import type { TemplateSheetChange_ACU } from '../table/storage-frame-v2-persist';
@@ -100,21 +102,36 @@ export async function reconcileChatTemplate_ACU(input: ChatTemplateReconcileInpu
     }
   }
 
-  const candidateData = stripRuntimeSeedRows_ACU(baselineData);
-  candidateData.mate = clone_ACU(templateData.mate || baselineData.mate);
   for (const [key, sheet] of listSheets_ACU(baselineData)) {
     try { validateBaselineSheetRows_ACU(sheet); } catch (error: any) { blockers.push(`当前聊天表「${sheet.name || key}」历史数据无效：${error?.message || String(error)}`); }
   }
-  // 旧随机 key 迁移到稳定 key 后，历史 checkpoint 里可能残留零数据行的旧身份
-  // （与被模板认领的新 key 同名或互为别名）。它们不是「两张不同的表」，而是同一逻辑表
-  // 未收敛的旧 identity：不作为重复身份 blocker，而是排除出身份索引，让下方
-  // 「目标模板缺失的既有表」循环按既有 hide 语义把它们隐藏收敛。
-  const staleLegacyBaselineKeys = resolveStaleLegacyBaselineSheetKeys_ACU(baselineData, templateData);
+  if (blockers.length > 0) return emptyPlan_ACU(baselineData, audit, blockers);
+  const identityMerge = mergeLegacySheetIdentities_ACU(baselineData, listSheets_ACU(templateData).map(([key]) => key), {
+    distinctCurrentNames: new Set(listSheets_ACU(templateData).map(([, sheet]) => canonicalizeDisplayName_ACU(sheet.name))),
+  });
+  const mergedKeys = new Set(identityMerge.remaps.map(remap => remap.toKey));
+  const candidateData = stripRuntimeSeedRows_ACU(baselineData);
+  candidateData.mate = clone_ACU(templateData.mate || baselineData.mate);
+  const staleLegacyBaselineKeys = new Set<string>();
   const baselineByName = indexSheetsByName_ACU(baselineData, '当前聊天', blockers, staleLegacyBaselineKeys);
   const templateByName = indexSheetsByName_ACU(templateData, '导入模板', blockers);
   validateTableAliasDeclarations_ACU(baselineData, '当前聊天', blockers, staleLegacyBaselineKeys);
   validateTableAliasDeclarations_ACU(templateData, '导入模板', blockers);
   if (blockers.length > 0) return emptyPlan_ACU(baselineData, audit, blockers);
+
+  const hiddenData = {} as TableDataObject_ACU;
+  for (const key of input.lifecycle?.hiddenSheetKeys || []) {
+    const entry = input.lifecycle?.statusBySheetKey[key];
+    if (entry?.status === 'hidden' && entry.restoreSourceData) hiddenData[key] = clone_ACU(entry.restoreSourceData);
+  }
+  // 休眠来源与基线同一契约：SQLite 下补齐缺失 DDL。无法生成时不新增阻断，由实际被认领的恢复路径报告具体错误。
+  if (input.storageMode !== 'native') applyMissingDdlFallback_ACU(hiddenData, '休眠表');
+  mergeLegacySheetIdentities_ACU(hiddenData, undefined, {
+    distinctCurrentNames: new Set(templateByName.keys()),
+  });
+  const hiddenByName = new Map(listSheets_ACU(hiddenData).map(([key, sheet]) => [canonicalizeDisplayName_ACU(sheet.name), { key, sheet }]));
+  const claimedHiddenKeys = new Set([...templateByName.keys()]
+    .map(name => hiddenByName.get(name)?.key).filter((key): key is string => !!key));
 
   const matchedKeys = new Set<string>();
   const rebaseKeys = new Set<string>();
@@ -144,6 +161,23 @@ export async function reconcileChatTemplate_ACU(input: ChatTemplateReconcileInpu
       previous = aliasMatches[0];
     }
     if (!previous) {
+      const hidden = hiddenByName.get(canonicalName)
+        ?? findExplicitTableAliasMatches_ACU(templateEntry.sheet, hiddenData, claimedHiddenKeys)[0];
+      if (hidden) {
+        try {
+          const restored = reconcileMatchedSheet_ACU(
+            hidden.sheet, templateEntry.sheet, hidden.key, templateEntry.key,
+            input.storageMode === 'native' ? 'native' : 'sqlite',
+          );
+          candidateData[hidden.key] = restored.sheet;
+          revealKeys.add(hidden.key);
+          claimedHiddenKeys.add(hidden.key);
+          audit.push(restored.audit);
+        } catch (error: any) {
+          blockers.push(`表「${templateEntry.sheet.name || templateEntry.key}」无法恢复：${error?.message || String(error)}`);
+        }
+        continue;
+      }
       const introducedKey = buildStableSheetKeyCandidate_ACU(templateEntry.sheet.name);
       if (!introducedKey) {
         blockers.push(`新增表「${templateEntry.sheet.name || templateEntry.key}」缺少可用于派生 key 的有效显示名。`);
@@ -215,7 +249,7 @@ export async function reconcileChatTemplate_ACU(input: ChatTemplateReconcileInpu
         reconciled.sheet.sourceData.ddl = rebindCreateTableName_ACU(reconciled.sheet.sourceData.ddl, previous.key);
       }
       candidateData[previous.key] = reconciled.sheet;
-      if (reconciled.changed) rebaseKeys.add(previous.key);
+      if (reconciled.changed || mergedKeys.has(previous.key)) rebaseKeys.add(previous.key);
       audit.push(reconciled.audit);
     } catch (error: any) {
       blockers.push(`表「${templateEntry.sheet.name || templateEntry.key}」无法协调（baselineKey=${previous.key} → templateKey=${templateEntry.key}）：${error?.message || String(error)}`);
@@ -523,6 +557,8 @@ function accumulateTableAliases_ACU(sheet: Sheet_ACU, before: Sheet_ACU, templat
     ...getExplicitTableAliases_ACU(before),
     ...getExplicitTableAliases_ACU(template),
     before.name,
+    before.uid,
+    template.uid,
   ];
   const seen = new Set<string>();
   const normalized = aliases.filter(alias => {
@@ -743,83 +779,20 @@ function reconcileMatchedSheet_ACU(before: Sheet_ACU, template: Sheet_ACU, sheet
   const targetSourceByCanonical = new Map<string, typeof beforeEntries[number]>();
   const mappings: Array<{ fromPhysicalName: string; toPhysicalName: string }> = [];
   const inheritedColumns: string[] = [];
-  for (const [canonicalName, target] of targetByCanonical) {
-    const source = beforeByCanonical.get(canonicalName);
+  const sourceIndices = matchSheetColumnsByName_ACU(
+    template, before,
+    [sqlite ? targetColumns[0].sqlName : targetHeaders[0], ...targetEntries.map(entry => entry.physical)],
+    [sqlite ? beforeColumns[0].sqlName : beforeHeaders[0], ...beforeEntries.map(entry => entry.physical)],
+    sqlite,
+  );
+  for (const target of targetEntries) {
+    const source = beforeEntries.find(entry => entry.index === sourceIndices[target.index]);
     if (!source) continue;
     matchedBeforeCanonical.add(source.canonical);
     matchedTargetCanonical.add(target.canonical);
     targetSourceByCanonical.set(target.canonical, source);
     inheritedColumns.push(target.header);
     if (source.physical !== target.physical) mappings.push({ fromPhysicalName: source.physical, toPhysicalName: target.physical });
-  }
-
-  // 已匹配为同一张表时，physical column 是列身份；表头只是可变显示名。
-  // 模板作者 key 不影响列继承，匹配仍保持一对一，持久化沿用旧聊天表的 key。
-  // native 无独立于表头的物理身份（physical=表头），canonical 匹配已覆盖，跳过。
-  if (sqlite) {
-    for (const target of targetEntries) {
-      if (matchedTargetCanonical.has(target.canonical)) continue;
-      const source = beforeByPhysical.get(target.physical.toLowerCase());
-      if (!source || matchedBeforeCanonical.has(source.canonical)) continue;
-      matchedBeforeCanonical.add(source.canonical);
-      matchedTargetCanonical.add(target.canonical);
-      targetSourceByCanonical.set(target.canonical, source);
-      inheritedColumns.push(target.header);
-      if (source.physical !== target.physical) {
-        mappings.push({ fromPhysicalName: source.physical, toPhysicalName: target.physical });
-      }
-    }
-  }
-
-  // 列改名后 canonical 不再相等，靠 columnAliases 的历史显示名声明认回同一列，
-  // 使数据继续继承。这是显式声明驱动，不做启发式推断：
-  // 一个别名必须唯一命中一个未匹配的旧列，否则宁可不继承，也不把无关字段混进来。
-  const aliasCanonicalToPhysical = buildColumnAliasIndex_ACU(before, template);
-  for (const target of targetEntries) {
-    if (matchedTargetCanonical.has(target.canonical)) continue;
-    const aliasCanonicals = aliasCanonicalToPhysical.get(target.physical.toLowerCase());
-    if (!aliasCanonicals) continue;
-    const candidates = [...new Set(aliasCanonicals)]
-      .map(alias => beforeByCanonical.get(alias))
-      .filter((entry): entry is typeof beforeEntries[number] => !!entry && !matchedBeforeCanonical.has(entry.canonical));
-    const unique = [...new Map(candidates.map(entry => [entry.canonical, entry])).values()];
-    if (unique.length !== 1) continue;
-    const source = unique[0];
-    matchedBeforeCanonical.add(source.canonical);
-    matchedTargetCanonical.add(target.canonical);
-    targetSourceByCanonical.set(target.canonical, source);
-    inheritedColumns.push(target.header);
-    if (source.physical !== target.physical) {
-      mappings.push({ fromPhysicalName: source.physical, toPhysicalName: target.physical });
-    }
-  }
-
-  // native 反向别名匹配：native 的 physical 随显示名变化（physical=表头），改名后
-  // 别名链累积在旧列的当前表头键下，正向索引（按目标表头查）必然落空，需反查——
-  // 旧列自身的 columnAliases 中包含目标显示名时认回同一列。仍是显式声明驱动：
-  // 必须唯一命中一个未匹配旧列，否则不继承。sqlite 不需要此分支：物理列名跨改名
-  // 稳定，正向键恒命中。
-  if (!sqlite) {
-    const beforeAliasMap = (before.sourceData as Record<string, any> | undefined)?.columnAliases;
-    for (const target of targetEntries) {
-      if (matchedTargetCanonical.has(target.canonical)) continue;
-      if (!beforeAliasMap || typeof beforeAliasMap !== 'object' || Array.isArray(beforeAliasMap)) break;
-      const candidates = beforeEntries.filter(entry => {
-        if (matchedBeforeCanonical.has(entry.canonical)) return false;
-        const aliases = beforeAliasMap[entry.physical];
-        if (!Array.isArray(aliases)) return false;
-        return aliases.some(alias => canonicalizeDisplayName_ACU(alias) === target.canonical);
-      });
-      if (candidates.length !== 1) continue;
-      const source = candidates[0];
-      matchedBeforeCanonical.add(source.canonical);
-      matchedTargetCanonical.add(target.canonical);
-      targetSourceByCanonical.set(target.canonical, source);
-      inheritedColumns.push(target.header);
-      if (source.physical !== target.physical) {
-        mappings.push({ fromPhysicalName: source.physical, toPhysicalName: target.physical });
-      }
-    }
   }
 
   let hiddenEntries = beforeEntries.filter(column => !matchedBeforeCanonical.has(column.canonical));
@@ -961,6 +934,11 @@ function reconcileMatchedSheet_ACU(before: Sheet_ACU, template: Sheet_ACU, sheet
     new Set(candidatePhysical.keys()),
   );
   accumulateTableAliases_ACU(sheet, before, template);
+  sheet.sourceData.tableAliases = [...new Set([
+    ...(sheet.sourceData.tableAliases || []), sheetKey, templateSheetKey,
+  ])].filter(alias => alias !== sheetKey && alias !== sheet.uid
+    && canonicalizeDisplayName_ACU(alias) !== canonicalizeDisplayName_ACU(sheet.name));
+  if (sheet.sourceData.tableAliases.length === 0) delete sheet.sourceData.tableAliases;
   delete sheet.seedRows;
   const meta = buildPersistentMetadataUpdate_ACU(before, sheet);
   const beforeProjection = clone_ACU(before); delete beforeProjection.seedRows;

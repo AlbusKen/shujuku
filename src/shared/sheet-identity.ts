@@ -284,6 +284,62 @@ export function allocateStableSheetKeys_ACU(
   return { keys, diagnostics };
 }
 
+export interface StableSheetIdentityPreparation_ACU {
+  /** Prepared copy; empty when malformedSheetKeys or diagnostics are present. */
+  data: Record<string, any>;
+  /** Original sheet key -> allocated stable key. */
+  keyMap: Map<string, string>;
+  diagnostics: SheetNameDiagnostic_ACU[];
+  malformedSheetKeys: string[];
+}
+
+function cloneJson_ACU<T>(value: T): T {
+  return value === undefined ? value : JSON.parse(JSON.stringify(value));
+}
+
+/**
+ * Identity preparation for a chat without persisted sheet identity: allocates stable keys from
+ * display names, syncs uid to the key, and keeps the displaced key/uid as table aliases so old
+ * SQL/Strict-JSON references still resolve. Pure and input-preserving; callers decide whether the
+ * chat qualifies and how to report diagnostics.
+ */
+export function prepareStableSheetIdentities_ACU(templateData: Record<string, any> | null | undefined): StableSheetIdentityPreparation_ACU {
+  const source = templateData && typeof templateData === 'object' && !Array.isArray(templateData) ? templateData : {};
+  const sheetEntries = Object.entries(source).filter(([key]) => key.startsWith('sheet_'));
+  const malformedSheetKeys = sheetEntries
+    .filter(([, sheet]) => !sheet || typeof sheet !== 'object' || Array.isArray(sheet))
+    .map(([key]) => key);
+  const allocation = allocateStableSheetKeys_ACU(sheetEntries.map(([, sheet]) => (sheet as any)?.name));
+  const keyMap = new Map<string, string>();
+  const data: Record<string, any> = {};
+  if (malformedSheetKeys.length > 0 || allocation.diagnostics.length > 0 || allocation.keys.some(key => !key)) {
+    return { data, keyMap, diagnostics: allocation.diagnostics, malformedSheetKeys };
+  }
+  sheetEntries.forEach(([oldKey], index) => keyMap.set(oldKey, allocation.keys[index]!));
+  const allocatedKeys = new Set(allocation.keys.map(key => key!.toLowerCase()));
+  for (const [key, value] of Object.entries(source)) {
+    if (!key.startsWith('sheet_')) {
+      data[key] = cloneJson_ACU(value);
+      continue;
+    }
+    const nextKey = keyMap.get(key)!;
+    const sheet = cloneJson_ACU(value);
+    const sourceData = sheet.sourceData && typeof sheet.sourceData === 'object' && !Array.isArray(sheet.sourceData)
+      ? sheet.sourceData
+      : null;
+    const declared = Array.isArray(sourceData?.tableAliases) ? sourceData.tableAliases : [];
+    // A displaced key/uid equal to any key allocated in this batch would make that alias ambiguous.
+    const displaced = [key, sheet.uid]
+      .map(alias => String(alias ?? '').trim())
+      .filter(alias => alias && !allocatedKeys.has(alias.toLowerCase()));
+    const aliases = [...new Set([...declared, ...displaced].map(alias => String(alias ?? '').trim()).filter(Boolean))];
+    if (aliases.length > 0) sheet.sourceData = { ...(sourceData || {}), tableAliases: aliases };
+    sheet.uid = nextKey;
+    data[nextKey] = sheet;
+  }
+  return { data, keyMap, diagnostics: [], malformedSheetKeys: [] };
+}
+
 function truncateForHash_ACU(slug: string): string {
   return slug.slice(0, Math.max(1, MAX_SHEET_SLUG_LENGTH_ACU - 11)).replace(/_+$/g, '') || 'sheet';
 }

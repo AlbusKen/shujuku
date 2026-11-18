@@ -784,4 +784,25 @@ describe('sql read resolver', () => {
       spy.mockRestore();
     }
   });
+  it('读路径消费运行时表自身 columnAliases 的历史列名，当前列名优先于历史别名', () => {
+    const result = resolveReadQuerySql_ACU(
+      'SELECT 旧备注, 备注 FROM bag',
+      {
+        mate: { type: 'acu', version: 1 },
+        sheet_bag: {
+          uid: 'sheet_bag',
+          name: '背包',
+          sourceData: {
+            ddl: 'CREATE TABLE bag (\n  row_id INTEGER PRIMARY KEY, -- 行号\n  item_name TEXT, -- 名称\n  note TEXT -- 备注\n);',
+            columnAliases: { note: ['旧备注'], item_name: ['备注'] },
+          },
+          content: [['row_id', '名称', '备注'], ['1', '剑', '锋利']],
+        },
+      } as any,
+      sql => sql,
+    );
+
+    expect(result.sql).toMatch(/^SELECT note, note FROM /);
+    expect(result.columnConflicts ?? []).toEqual([]);
+  });
 

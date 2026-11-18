@@ -657,11 +657,17 @@ export interface SummaryVectorIndexMirrorFrameV2_ACU {
   logEntries: SummaryVectorIndexMirrorLogEntryV2_ACU[];
 }
 
+export interface TableSheetTimelineEventV2_ACU {
+  ordinal: number;
+  checkpoint: TableSheetCheckpointV2_ACU;
+}
+
 export interface TableStorageFrameV2_ACU {
   version: 2;
   headRevision?: string | null;
   checkpoint?: TableCheckpointV2_ACU;
   perSheetCheckpoints?: Record<string, TableSheetCheckpointV2_ACU>;
+  sheetTimelineEvents?: TableSheetTimelineEventV2_ACU[];
   manualRefillProgress?: ManualRefillProgressV2_ACU;
   logEntries: TableMutationLogEntryV2_ACU[];
   /**

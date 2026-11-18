@@ -2,8 +2,9 @@
  * tests/service/table/table-service.test.ts
  * 表格数据操作 service 层 单元测试
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { logWarn_ACU } from '../../../src/shared/utils';
+import { buildDefaultTableTemplateObject_ACU } from '../../../src/shared/table-defaults/index.js';
 
 const {
   mockSettings,
@@ -91,6 +92,13 @@ const {
   };
 });
 
+const { mockBuildGuideFromTemplateObj, mockSanitizeTemplateSnapshot } = vi.hoisted(() => ({
+  mockBuildGuideFromTemplateObj: vi.fn((templateObj: any) => (templateObj ? JSON.parse(JSON.stringify(templateObj)) : null)),
+  mockSanitizeTemplateSnapshot: vi.fn((templateObj: any) => (templateObj
+    ? { templateStr: JSON.stringify(templateObj), templateObj: JSON.parse(JSON.stringify(templateObj)) }
+    : null)),
+}));
+
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
   getChatArray_ACU: mockGetChatArray,
   saveChatToHost_ACU: mockSaveChatToHost,
@@ -118,10 +126,12 @@ vi.mock('../../../src/service/settings/settings-service', () => ({
 vi.mock('../../../src/service/template/chat-scope', () => ({
   attachSeedRowsToCurrentDataFromGuide_ACU: mockAttachSeedRows,
   buildChatSheetGuideDataFromData_ACU: mockBuildChatSheetGuideData,
+  buildChatSheetGuideDataFromTemplateObj_ACU: mockBuildGuideFromTemplateObj,
   ensureChatSheetGuideSeeded_ACU: mockEnsureChatSheetGuideSeeded,
   getChatSheetGuideDataForIsolationKey_ACU: mockGetChatSheetGuideData,
   getSortedSheetKeys_ACU: mockGetSortedSheetKeys,
   ensureStableRowIdsForSheetContent_ACU: mockEnsureStableRowIdsForSheetContent,
+  sanitizeTemplateSnapshotForChat_ACU: mockSanitizeTemplateSnapshot,
   sanitizeSheetForStorage_ACU: mockSanitizeSheetForStorage,
   setChatSheetGuideDataForIsolationKey_ACU: mockSetChatSheetGuideData,
 }));
@@ -347,6 +357,104 @@ describe('ensureLegacyStorageMigratedBeforeWrite_ACU', () => {
     expect(result).toEqual({ success: false, error: '旧存储迁移到 V2 失败: 迁移成功结果缺少修复后的表格数据。' });
     expect(mockSetCurrentJsonTableData).not.toHaveBeenCalled();
     expect(mockCurrentJsonTableDataRef.value).toBe(runtimeBefore);
+  });
+});
+
+describe('ensureLegacyStorageMigratedBeforeWrite_ACU pristine identity', () => {
+  const pristineChats: Array<[string, any[]]> = [
+    ['单条用户消息', [{ is_user: false, mes: '开场' }, { is_user: true, mes: '一' }]],
+    ['多条用户消息', [{ is_user: false, mes: '开场' }, { is_user: true, mes: '一' }, { is_user: false, mes: '回复' }, { is_user: true, mes: '二' }]],
+    ['仅开场白', [{ is_user: false, mes: '开场' }]],
+  ];
+
+  beforeEach(() => {
+    mockSetChatSheetGuideData.mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    mockSetChatSheetGuideData.mockReturnValue(undefined);
+  });
+
+  it.each(pristineChats)('%s：无持久身份时按显示名分配同一组稳定 key 并写入 guide/scope', async (_label, chat) => {
+    mockGetChatArray.mockReturnValue(chat);
+    mockResolveTableStorageStrategy.mockReturnValue({ mode: 'empty' });
+    mockParseTableTemplateJson.mockImplementation(() => buildDefaultTableTemplateObject_ACU());
+
+    const result = await ensureLegacyStorageMigratedBeforeWrite_ACU('processUpdatesBatch', { pinPristineIdentity: true });
+
+    expect(result).toEqual({ success: true, migrated: false, identityPinned: true });
+    expect(mockSetChatSheetGuideData).toHaveBeenCalledTimes(1);
+    const [isolationKey, guideData, options] = mockSetChatSheetGuideData.mock.calls[0] as any[];
+    expect(isolationKey).toBe('');
+    expect(options).toEqual(expect.objectContaining({ syncTemplateScope: true, source: 'pristine_identity' }));
+    const scopeTemplate = JSON.parse(options.templateSource);
+    const guideKeys = Object.keys(guideData).filter(key => key.startsWith('sheet_')).sort();
+    expect(guideKeys).toContain('sheet_bei_bao_wu_pin_biao');
+    expect(guideKeys).not.toContain('sheet_in05z9vz');
+    expect(Object.keys(scopeTemplate).filter(key => key.startsWith('sheet_')).sort()).toEqual(guideKeys);
+    for (const key of guideKeys) {
+      expect(guideData[key].uid).toBe(key);
+      expect(scopeTemplate[key].uid).toBe(key);
+    }
+    expect(guideData.sheet_bei_bao_wu_pin_biao.sourceData.tableAliases).toContain('sheet_in05z9vz');
+    expect(mockApplyTemplateScopeForCurrentChat).toHaveBeenCalledTimes(1);
+    expect(mockSaveChatToHost).toHaveBeenCalledTimes(1);
+  });
+
+  it('单条与多条用户消息得到完全相同的身份', async () => {
+    const pinnedKeys: string[][] = [];
+    for (const [, chat] of pristineChats) {
+      vi.clearAllMocks();
+      mockGetChatArray.mockReturnValue(chat);
+      mockResolveTableStorageStrategy.mockReturnValue({ mode: 'empty' });
+      mockParseTableTemplateJson.mockImplementation(() => buildDefaultTableTemplateObject_ACU());
+      await ensureLegacyStorageMigratedBeforeWrite_ACU('test', { pinPristineIdentity: true });
+      const guideData = (mockSetChatSheetGuideData.mock.calls[0] as any[])[1];
+      pinnedKeys.push(Object.keys(guideData).filter(key => key.startsWith('sheet_')).sort());
+    }
+    expect(pinnedKeys[1]).toEqual(pinnedKeys[0]);
+    expect(pinnedKeys[2]).toEqual(pinnedKeys[0]);
+  });
+
+  it('已有持久身份（v2）时不重分配、不改写 guide/scope', async () => {
+    mockGetChatArray.mockReturnValue([{ is_user: false, mes: 'AI' }, { is_user: true, mes: '一' }]);
+    mockResolveTableStorageStrategy.mockReturnValue({ mode: 'v2' });
+    mockParseTableTemplateJson.mockImplementation(() => buildDefaultTableTemplateObject_ACU());
+
+    const result = await ensureLegacyStorageMigratedBeforeWrite_ACU('test', { pinPristineIdentity: true });
+
+    expect(result).toEqual({ success: true, migrated: false });
+    expect(mockSetChatSheetGuideData).not.toHaveBeenCalled();
+    expect(mockSaveChatToHost).not.toHaveBeenCalled();
+  });
+
+  it('未请求或模板 key 已稳定时不改写', async () => {
+    mockGetChatArray.mockReturnValue([{ is_user: false, mes: 'AI' }]);
+    mockResolveTableStorageStrategy.mockReturnValue({ mode: 'empty' });
+    mockParseTableTemplateJson.mockImplementation(() => buildDefaultTableTemplateObject_ACU());
+    await expect(ensureLegacyStorageMigratedBeforeWrite_ACU('test')).resolves.toEqual({ success: true, migrated: false });
+
+    mockParseTableTemplateJson.mockImplementation(() => ({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_bei_bao_wu_pin_biao: { uid: 'sheet_bei_bao_wu_pin_biao', name: '背包物品表', content: [['row_id', '物品名']] },
+    }));
+    await expect(ensureLegacyStorageMigratedBeforeWrite_ACU('test', { pinPristineIdentity: true }))
+      .resolves.toEqual({ success: true, migrated: false });
+    expect(mockSetChatSheetGuideData).not.toHaveBeenCalled();
+  });
+
+  it('分配存在诊断时沿用模板 key，不阻断写入', async () => {
+    mockGetChatArray.mockReturnValue([{ is_user: false, mes: 'AI' }]);
+    mockResolveTableStorageStrategy.mockReturnValue({ mode: 'empty' });
+    mockParseTableTemplateJson.mockImplementation(() => ({
+      sheet_a: { name: '同名', content: [['row_id']] },
+      sheet_b: { name: '同名', content: [['row_id']] },
+    }));
+
+    await expect(ensureLegacyStorageMigratedBeforeWrite_ACU('test', { pinPristineIdentity: true }))
+      .resolves.toEqual({ success: true, migrated: false });
+    expect(mockSetChatSheetGuideData).not.toHaveBeenCalled();
+    expect(logWarn_ACU).toHaveBeenCalledWith(expect.stringContaining('沿用模板 key'));
   });
 });
 

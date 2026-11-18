@@ -6,6 +6,7 @@ vi.mock('../../../src/service/template/chat-scope', () => ({
 
 import { buildStrictJsonTableFillResponseFormatForData_ACU, extractStrictJsonTableFillResponse_ACU } from '../../../src/service/ai/prompt-builder/strict-json-table-fill';
 import { DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU } from '../../../src/shared/defaults-json.js';
+import { prepareStableSheetIdentities_ACU } from '../../../src/shared/sheet-identity';
 
 function tableData() {
   return {
@@ -101,6 +102,27 @@ describe('strict-json-table-fill', () => {
       }), { tableData: data });
       expect(result.ok, `${alias}: ${result.error || ''}`).toBe(true);
       expect(result.modifiedKeys).toEqual(['sheet_zhu_jue_xin_xi']);
+    }
+  });
+
+  it('首次稳定身份分配后，旧随机 key 与旧 uid 仍路由到同一稳定 sheetKey', () => {
+    const prepared = prepareStableSheetIdentities_ACU({
+      mate: { type: 'chatSheets' },
+      sheet_in05z9vz: {
+        uid: 'legacy_inventory_uid',
+        name: '背包物品表',
+        content: [['row_id', '物品名称'], ['1', '铁剑']],
+      },
+    });
+    expect(prepared.diagnostics).toEqual([]);
+    expect(Object.keys(prepared.data)).toContain('sheet_bei_bao_wu_pin_biao');
+    for (const selector of ['sheet_in05z9vz', 'legacy_inventory_uid', 'sheet_bei_bao_wu_pin_biao', '背包物品表']) {
+      const result = extractStrictJsonTableFillResponse_ACU(JSON.stringify({
+        format: 'table_edit_ops_v1',
+        ops: [{ op: 'update', sheet: selector, where: { 物品名称: '铁剑' }, set: { 物品名称: '银剑' } }],
+      }), { tableData: prepared.data });
+      expect(result.ok, `${selector}: ${result.error || ''}`).toBe(true);
+      expect(result.modifiedKeys).toEqual(['sheet_bei_bao_wu_pin_biao']);
     }
   });
 
@@ -230,6 +252,37 @@ describe('strict-json-table-fill', () => {
     }), { tableData: data });
     expect(extraction.ok).toBe(false);
     expect(extraction.error).toContain('字段名不存在');
+  });
+
+  it('同一表存在重复可见表头时拒绝写该字段，且 strong schema 不暴露歧义字段', () => {
+    const data: any = {
+      sheet_bag: {
+        uid: 'sheet_bag',
+        name: '背包',
+        content: [
+          ['row_id', '名称', '名称', '数量'],
+          ['1', '铁剑', '旧铁剑', '1'],
+        ],
+      },
+    };
+
+    const schemaResult = buildStrictJsonTableFillResponseFormatForData_ACU(false, data, ['sheet_bag']);
+    const insertBranch = schemaResult.responseFormat.json_schema.schema.properties.ops.items.oneOf[0];
+    expect(Object.keys(insertBranch.properties.row.properties)).toEqual(['数量']);
+
+    const extraction = extractStrictJsonTableFillResponse_ACU(JSON.stringify({
+      format: 'table_edit_ops_v1',
+      ops: [{ op: 'update', sheet: '背包', where: { 数量: '1' }, set: { 名称: '钢剑' } }],
+    }), { tableData: data });
+    expect(extraction.ok).toBe(false);
+    expect(extraction.error).toContain('字段名不唯一：名称');
+
+    const unambiguous = extractStrictJsonTableFillResponse_ACU(JSON.stringify({
+      format: 'table_edit_ops_v1',
+      ops: [{ op: 'update', sheet: '背包', where: { 数量: '1' }, set: { 数量: '2' } }],
+    }), { tableData: data });
+    expect(unambiguous.ok).toBe(true);
+    expect(unambiguous.tableEditText).toBe('updateRow(0, 0, {"2":"2"})');
   });
 
   it('falls back to wide schema when sheet threshold is exceeded', () => {

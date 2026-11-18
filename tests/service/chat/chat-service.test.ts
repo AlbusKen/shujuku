@@ -3,6 +3,7 @@
  * 聊天数据服务 单元测试
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { getLatestFrameSheetCheckpoint_ACU } from '../../../src/service/table/storage-frame-v2-sheet-events';
 
 const { mockSettings, mockCurrentJsonTableData, mockGetChatArray, mockSaveChatToHost, mockSaveChatToHostStrict, mockSetChatMessages, mockEmitMessageUpdated, mockLogDebug, mockGetCurrentIsolationKey, mockGetLastOptimizationBase, mockSetLastOptimizationBase, mockSanitizeSheet, mockPersistTablesToChatMessage, mockRunTableUpdateCommit, mockRunTableWriteTransaction, mockLoadTableStateFromFramesV2, mockLoadTableStateFromFramesV2Detailed, mockCollectScheduleSummaryFromFramesV2, mockDeleteSummaryVectorIndexExternal, mockCleanupUnreachable, mockDeriveSheetLifecycleFromFramesV2, mockFoldVectorMirror, mockFinalizeFoldedVectorMirror } = vi.hoisted(() => ({
   mockSettings: {
@@ -180,6 +181,10 @@ beforeEach(() => {
       Object.assign(data, frame?.perSheetCheckpoints && Object.fromEntries(
         Object.entries(frame.perSheetCheckpoints).map(([sheetKey, checkpoint]: [string, any]) => [sheetKey, checkpoint.data]),
       ));
+      for (const event of frame?.sheetTimelineEvents || []) {
+        if (event.checkpoint.timeline?.kind === 'sheet_hide') delete data[event.checkpoint.sheetKey];
+        else data[event.checkpoint.sheetKey] = event.checkpoint.data;
+      }
     });
     return { baseKind: 'full_checkpoint', data };
   });
@@ -1841,7 +1846,7 @@ describe('ensureV2BoundaryCheckpointForRetainedBuffer_ACU', () => {
     expect(mockLogDebug).toHaveBeenCalledWith(expect.stringContaining('缺少 provenance'));
   });
 
-  it('有隐藏表时 compaction 将 hide checkpoint 迁移到边界 frame 的 perSheetCheckpoints（timeline=sheet_hide）', async () => {
+  it('有隐藏表时 compaction 将 hide checkpoint 迁移到边界 frame 的事件集合', async () => {
     mockSettings.retainRecentLayers = 2;
     const hiddenSheet = {
       uid: 'sheet_hidden',
@@ -1881,7 +1886,8 @@ describe('ensureV2BoundaryCheckpointForRetainedBuffer_ACU', () => {
 
     expect(result).toEqual(expect.objectContaining({ success: true, changed: true, anchorIndex: 23 }));
     const boundaryFrame = chat[23].TavernDB_ACU_IsolatedData[''].storageFrame;
-    expect(boundaryFrame.perSheetCheckpoints.sheet_hidden).toMatchObject({
+    expect(boundaryFrame.perSheetCheckpoints).toBeUndefined();
+    expect(getLatestFrameSheetCheckpoint_ACU(boundaryFrame, 'sheet_hidden')).toMatchObject({
       kind: 'sheet_full',
       reason: 'compaction',
       sheetKey: 'sheet_hidden',
@@ -1891,7 +1897,7 @@ describe('ensureV2BoundaryCheckpointForRetainedBuffer_ACU', () => {
     expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
   });
 
-  it('无隐藏表时边界 frame 不含 perSheetCheckpoints 字段', async () => {
+  it('无隐藏表时边界 frame 不含单表 checkpoint 或事件字段', async () => {
     mockSettings.retainRecentLayers = 2;
     // 默认 mockDeriveSheetLifecycleFromFramesV2 返回空 lifecycle（无隐藏表）。
     const chat = Array.from({ length: 25 }, (_, index) => ({
@@ -1916,6 +1922,7 @@ describe('ensureV2BoundaryCheckpointForRetainedBuffer_ACU', () => {
     expect(result).toEqual(expect.objectContaining({ success: true, changed: true, anchorIndex: 23 }));
     const boundaryFrame = chat[23].TavernDB_ACU_IsolatedData[''].storageFrame;
     expect(Object.prototype.hasOwnProperty.call(boundaryFrame, 'perSheetCheckpoints')).toBe(false);
+    expect(boundaryFrame.sheetTimelineEvents).toBeUndefined();
     expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
   });
 
@@ -2142,7 +2149,7 @@ describe('ensureV2BoundaryCheckpointForRetainedBuffer_ACU', () => {
     expect(assertSingleActiveFullCheckpointV2_ACU(chat, '', 'test:s3-2-rethrottle')).toBeNull();
   });
 
-  it('periodic 前滚在混合 user/AI 楼层下按 AI 序数取锚点，并把隐藏表 hide checkpoint 迁移到锚点 perSheetCheckpoints', async () => {
+  it('periodic 前滚在混合 user/AI 楼层下按 AI 序数取锚点，并把隐藏表 hide checkpoint 迁移到事件集合', async () => {
     mockSettings.retainRecentLayers = 0;
     const hiddenSheet = {
       uid: 'sheet_hidden',
@@ -2175,7 +2182,8 @@ describe('ensureV2BoundaryCheckpointForRetainedBuffer_ACU', () => {
     expect(result).toEqual(expect.objectContaining({ success: true, changed: true, anchorIndex: 49 }));
     const boundaryFrame = chat[49].TavernDB_ACU_IsolatedData[''].storageFrame;
     expect(boundaryFrame.checkpoint).toEqual(expect.objectContaining({ kind: 'full', reason: 'periodic' }));
-    expect(boundaryFrame.perSheetCheckpoints.sheet_hidden).toMatchObject({
+    expect(boundaryFrame.perSheetCheckpoints).toBeUndefined();
+    expect(getLatestFrameSheetCheckpoint_ACU(boundaryFrame, 'sheet_hidden')).toMatchObject({
       kind: 'sheet_full',
       reason: 'periodic',
       sheetKey: 'sheet_hidden',
@@ -4208,7 +4216,8 @@ describe('commitManualRefillSheetSnapshotInRangeAtomic_ACU', () => {
     expect(chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data.sheet_0.content[1]).toEqual(['20', '旧事件']);
     expect(chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data.sheet_1.content[1]).toEqual(['20', '保留']);
     expect(chat[2].TavernDB_ACU_IsolatedData[''].storageFrame.logEntries[0].operations[0]).toEqual(expect.objectContaining({ sheetKey: 'sheet_0' }));
-    expect(chat[2].TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_0).toEqual(expect.objectContaining({
+    expect(chat[2].TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints).toBeUndefined();
+    expect(getLatestFrameSheetCheckpoint_ACU(chat[2].TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_0')).toEqual(expect.objectContaining({
       kind: 'sheet_full',
       timeline: { kind: 'sheet_rebase', activateAtMessageIndex: 2, afterSeq: 1 },
       data: {
@@ -4270,7 +4279,8 @@ describe('commitManualRefillSheetSnapshotInRangeAtomic_ACU', () => {
     });
 
     expect(result).toEqual(expect.objectContaining({ success: true, targetMessageIndex: 20, checkpointCount: 1 }));
-    expect(chat[29].TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_0).toEqual(expect.objectContaining({
+    expect(chat[29].TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints).toBeUndefined();
+    expect(getLatestFrameSheetCheckpoint_ACU(chat[29].TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_0')).toEqual(expect.objectContaining({
       kind: 'sheet_full',
       data: refilledSheet,
       scheduleSummary: { lastFilledAiFloor: 30 },
@@ -4328,8 +4338,9 @@ describe('commitManualRefillSheetSnapshotInRangeAtomic_ACU', () => {
     });
 
     expect(result).toEqual(expect.objectContaining({ success: true, targetMessageIndex: 0 }));
-    expect(chat[2].TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_0.data.content[1]).toEqual(['new', '重填数据']);
-    expect(chat[2].TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_0.timeline).toEqual({ kind: 'sheet_rebase', activateAtMessageIndex: 2, afterSeq: 1 });
+    const rebase = getLatestFrameSheetCheckpoint_ACU(chat[2].TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_0');
+    expect(rebase?.data.content[1]).toEqual(['new', '重填数据']);
+    expect(rebase?.timeline).toEqual({ kind: 'sheet_rebase', activateAtMessageIndex: 2, afterSeq: 1 });
     expect(chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data.sheet_1.content[1]).toEqual(['keep', '未选数据']);
     expect(chat[2].TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toHaveLength(1);
   });
@@ -4369,7 +4380,7 @@ describe('commitManualRefillSheetSnapshotInRangeAtomic_ACU', () => {
       fallbackProvenance: expect.objectContaining({ kind: 'manual_refill_template_root', isolationKey: '', targetSheetKeys: ['sheet_0'] }),
     }));
     expect(rootFrame.logEntries[0].operations[0]).toEqual(dataReplace);
-    expect(chat[2].TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_0).toEqual(expect.objectContaining({
+    expect(getLatestFrameSheetCheckpoint_ACU(chat[2].TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_0')).toEqual(expect.objectContaining({
       data: { name: '目标表', content: [['row_id', '值'], ['final', '最终值']] },
       timeline: { kind: 'sheet_rebase', activateAtMessageIndex: 2, afterSeq: 3 },
     }));

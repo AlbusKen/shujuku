@@ -178,6 +178,7 @@ import { reconcileChatTemplate_ACU } from '../../../src/service/template/chat-te
 import { getCurrentStorageMode, isSqliteMode } from '../../../src/service/table/storage-mode';
 import { didSqliteFallbackAfterReload_ACU, reloadStorageProvider } from '../../../src/service/table/table-storage-strategy';
 import { getActiveChatStorageIdentity_ACU } from '../../../src/data/storage/chat-history';
+import { _set_currentJsonTableData_ACU } from '../../../src/service/runtime/state-manager';
 import { saveChatToHost_ACU } from '../../../src/data/gateways/chat-gateway';
 import { refreshMergedDataAndNotify_ACU } from '../../../src/service/worldbook/pipeline';
 import {
@@ -1343,6 +1344,23 @@ describe('applyChatTemplateSnapshotWithReconciliation_ACU', () => {
     expect(result).toMatchObject({ saved: true });
     expect(reloadStorageProvider).toHaveBeenCalled();
   });
+  it('提交恢复到历史 key 时运行时按实际落盘 key 发布', async () => {
+    vi.mocked(sanitizeTemplateSnapshotForChat_ACU).mockReturnValue({ templateObj: candidate, templateStr: JSON.stringify(candidate) } as any);
+    vi.mocked(loadTableStateFromFramesV2_ACU).mockResolvedValue({ mate: { type: 'chatSheets', version: 1 } } as any);
+    vi.mocked(reconcileChatTemplate_ACU).mockResolvedValue({ candidateData: candidate, sheetChanges: [{ kind: 'introduction', sheetKey: 'sheet_live', sheetData: candidate.sheet_live }], deletedSheetKeys: [], blockers: [], audit: [] } as any);
+    vi.mocked(commitCurrentFloorTemplateChanges_ACU).mockResolvedValue({
+      saved: true, mode: 'v2_commit', sheetKeyRedirects: [{ requestedKey: 'sheet_live', sheetKey: 'sheet_old', uid: 'old-uid' }],
+    } as any);
+
+    const result = await applyChatTemplateSnapshotWithReconciliation_ACU(candidate);
+
+    expect(result).toMatchObject({ saved: true, runtimeReady: true });
+    const published = vi.mocked(_set_currentJsonTableData_ACU).mock.calls.at(-1)?.[0] as any;
+    expect(published.sheet_live).toBeUndefined();
+    expect(published.sheet_old).toMatchObject({ uid: 'old-uid', name: '背包', sourceData: { tableAliases: ['sheet_live'] } });
+  });
+
+
 
   it('原生模式将 native 契约传给协调与提交，且不触发 SQLite runtime 重建', async () => {
     vi.mocked(isSqliteMode).mockReturnValue(false);

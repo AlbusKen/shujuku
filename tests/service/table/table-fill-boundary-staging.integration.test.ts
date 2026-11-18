@@ -203,7 +203,8 @@ describe('commitStagedSheetsAtFullBoundaryAtomic_ACU 边界汇合（计划 5.4�
 
     // 原 full frame 上出现了 sheet_rebase，selected sheet 等于 staging 快照。
     const originalTag = mocks.chat[6]?.TavernDB_ACU_IsolatedData?.[isolationKey];
-    const rebase = originalTag?.storageFrame?.perSheetCheckpoints?.sheet_a;
+    const rebase = originalTag?.storageFrame?.sheetTimelineEvents?.find((event: any) => event.checkpoint.sheetKey === 'sheet_a')?.checkpoint;
+    expect(originalTag?.storageFrame?.perSheetCheckpoints?.sheet_a).toBeUndefined();
     expect(rebase?.kind).toBe('sheet_full');
     expect(rebase?.timeline?.kind).toBe('sheet_rebase');
     expect(rebase?.timeline?.activateAtMessageIndex).toBe(6);

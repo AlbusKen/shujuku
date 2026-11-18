@@ -173,13 +173,10 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(second.blockers).toEqual([]);
     expect(second.candidateData.sheet_protagonist.name).toBe('人物档案');
     expect(second.candidateData.sheet_protagonist.sourceData.tableAliases)
-      .toEqual(['主角信息', '主角信息表']);
+      .toEqual(['主角信息', '主角信息表', 'sheet_protagonist_later']);
   });
 
-  // Issue #13 Bug 1：旧随机 key → 稳定 key 迁移后，历史 checkpoint 残留的零数据行旧身份
-  // 与被模板认领的新 key 同名/互为别名。它不是「两张表」，而是未收敛的旧 identity，
-  // 协调器应让它走 hide 收敛而不是以「规范化重复」阻断整个工作台。
-  it('零数据行的旧随机 key 与模板认领的稳定 key 互为别名时不再 blocker，走 hide 收敛', async () => {
+  it('旧随机 key 与模板认领的身份互为显式别名时归并为一次 rebase', async () => {
     const baseline = state({
       sheet_lEARaBa8: sheet('sheet_lEARaBa8', '主角技能表', ['row_id', '技能'], 'row_id INTEGER PRIMARY KEY, 技能 TEXT', []),
       sheet_zhu_jue_ji_neng: sheet('sheet_zhu_jue_ji_neng', '主角技能', ['row_id', '技能'], 'row_id INTEGER PRIMARY KEY, 技能 TEXT', [['1', '火球']]),
@@ -193,10 +190,11 @@ describe('reconcileChatTemplate_ACU', () => {
     const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false, storageMode: 'native' });
 
     expect(plan.blockers).toEqual([]);
-    expect(plan.hiddenSheetKeys).toEqual(['sheet_lEARaBa8']);
+    expect(plan.hiddenSheetKeys).toEqual([]);
     expect(plan.candidateData.sheet_lEARaBa8).toBeUndefined();
     expect(plan.candidateData.sheet_zhu_jue_ji_neng.content).toEqual([['row_id', '技能'], ['1', '火球']]);
-    expect(plan.sheetChanges).toEqual([expect.objectContaining({ kind: 'hide', sheetKey: 'sheet_lEARaBa8' })]);
+    expect(plan.candidateData.sheet_zhu_jue_ji_neng.sourceData.tableAliases).toContain('sheet_lEARaBa8');
+    expect(plan.sheetChanges).toEqual([expect.objectContaining({ kind: 'rebase', sheetKey: 'sheet_zhu_jue_ji_neng' })]);
   });
 
   it('零数据行的旧随机 key 与模板认领的稳定 key 同名时不再 blocker，稳定 key 正常匹配', async () => {
@@ -211,12 +209,12 @@ describe('reconcileChatTemplate_ACU', () => {
     const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false, storageMode: 'native' });
 
     expect(plan.blockers).toEqual([]);
-    expect(plan.hiddenSheetKeys).toEqual(['sheet_dCudvUnH']);
+    expect(plan.hiddenSheetKeys).toEqual([]);
     expect(plan.candidateData.sheet_quan_ju_shu_ju_biao.content).toEqual([['row_id', '值'], ['1', '在线']]);
     expect(plan.audit.find(item => item.sheetKey === 'sheet_quan_ju_shu_ju_biao')?.match).toBe('matched');
   });
 
-  it('身份重合的旧 key 含数据行时保留 blocker，且文案给出双方完整 sheetKey 与行数', async () => {
+  it('显式同一身份的两侧均有数据时保留独有行，不生成相互矛盾的 hide', async () => {
     const baseline = state({
       sheet_lEARaBa8: sheet('sheet_lEARaBa8', '主角技能表', ['row_id', '技能'], 'row_id INTEGER PRIMARY KEY, 技能 TEXT', [['9', '旧数据']]),
       sheet_zhu_jue_ji_neng: sheet('sheet_zhu_jue_ji_neng', '主角技能', ['row_id', '技能'], 'row_id INTEGER PRIMARY KEY, 技能 TEXT', [['1', '火球']]),
@@ -228,12 +226,10 @@ describe('reconcileChatTemplate_ACU', () => {
 
     const plan = await reconcileChatTemplate_ACU({ baselineData: baseline, templateData: template, destructiveChangeConfirmed: false, storageMode: 'native' });
 
-    const blockerText = plan.blockers.join('\n');
-    expect(blockerText).toContain('当前聊天表别名规范化重复');
-    expect(blockerText).toContain('(sheet_lEARaBa8, 1 行)');
-    expect(blockerText).toContain('(sheet_zhu_jue_ji_neng, 1 行)');
-    expect(blockerText).toContain('大写 I、小写 l');
-    expect(plan.sheetChanges).toEqual([]);
+    expect(plan.blockers).toEqual([]);
+    expect(plan.candidateData.sheet_zhu_jue_ji_neng.content).toEqual([['row_id', '技能'], ['1', '火球'], ['9', '旧数据']]);
+    expect(plan.hiddenSheetKeys).toEqual([]);
+    expect(plan.sheetChanges.map(change => [change.kind, change.sheetKey])).toEqual([['rebase', 'sheet_zhu_jue_ji_neng']]);
   });
 
   it('身份重合的双方分别被不同模板表认领时不做陈旧收敛，保留 blocker', async () => {
@@ -256,7 +252,7 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(plan.sheetChanges).toEqual([]);
   });
 
-  it('同名双方都未被模板认领时，只有恰有一方是稳定 key 才判另一方陈旧，否则保留 blocker', async () => {
+  it('同名双方都未被模板包含时只隐藏一个逻辑表，不要求存在稳定 key', async () => {
     const template = state({
       sheet_other: sheet('sheet_other', '其它表', ['row_id', '值'], 'row_id INTEGER PRIMARY KEY, 值 TEXT', []),
     });
@@ -267,18 +263,16 @@ describe('reconcileChatTemplate_ACU', () => {
     });
     const resolvedPlan = await reconcileChatTemplate_ACU({ baselineData: resolvable, templateData: template, destructiveChangeConfirmed: false, storageMode: 'native' });
     expect(resolvedPlan.blockers).toEqual([]);
-    // 两张都不在模板中：陈旧旧 key 与稳定 key 都被隐藏，但陈旧判定已消除重复身份阻断。
-    expect(resolvedPlan.hiddenSheetKeys.sort()).toEqual(['sheet_bei_bao', 'sheet_x9k2f']);
+    expect(resolvedPlan.hiddenSheetKeys).toEqual(['sheet_bei_bao']);
 
     const ambiguous = state({
       sheet_x9k2f: sheet('sheet_x9k2f', '背包', ['row_id', '值'], 'row_id INTEGER PRIMARY KEY, 值 TEXT', []),
       sheet_y7m1q: sheet('sheet_y7m1q', '背包', ['row_id', '值'], 'row_id INTEGER PRIMARY KEY, 值 TEXT', []),
     });
     const ambiguousPlan = await reconcileChatTemplate_ACU({ baselineData: ambiguous, templateData: template, destructiveChangeConfirmed: false, storageMode: 'native' });
-    expect(ambiguousPlan.blockers.join('\n')).toContain('当前聊天表名规范化重复');
-    expect(ambiguousPlan.blockers.join('\n')).toContain('(sheet_x9k2f, 0 行)');
-    expect(ambiguousPlan.blockers.join('\n')).toContain('(sheet_y7m1q, 0 行)');
-    expect(ambiguousPlan.sheetChanges).toEqual([]);
+    expect(ambiguousPlan.blockers).toEqual([]);
+    expect(ambiguousPlan.hiddenSheetKeys).toEqual(['sheet_x9k2f']);
+    expect(ambiguousPlan.sheetChanges.filter(change => change.kind === 'hide')).toHaveLength(1);
   });
 
   it('模板中的 tableAliases 与其他表身份冲突时在协调前 fail closed', async () => {
@@ -1112,7 +1106,7 @@ describe('reconcileChatTemplate_ACU', () => {
     expect(defaultPlan.candidateData.sheet_old).toBeUndefined();
     const matchedAudit = defaultPlan.audit.find(item => item.sheetKey === 'sheet_legacy');
     expect(matchedAudit).toMatchObject({
-      baselineSheetKey: 'sheet_legacy', templateSheetKey: 'sheet_imported', canonicalName: '背包', metadataChangedFields: ['orderNo'],
+      baselineSheetKey: 'sheet_legacy', templateSheetKey: 'sheet_imported', canonicalName: '背包', metadataChangedFields: ['orderNo', 'sourceData'],
     });
     expect(matchedAudit?.operations).toEqual([{ kind: 'rebase' }]);
     expect(defaultPlan.audit.find(item => item.sheetKey === 'sheet_xin_biao')?.operations).toEqual([{ kind: 'introduction' }]);
@@ -1589,6 +1583,29 @@ describe('reconcileChatTemplate_ACU 生命周期感知（阶段2）', () => {
     // 稳定 key 保持：不派生新 key，不伪装新表。
     expect(plan.candidateData.sheet_bei_bao).toBeDefined();
   });
+
+  it.each(['native', 'sqlite'] as const)('按名恢复旧随机 key 的隐藏表，列重排和休眠数据与候选一致：%s', async storageMode => {
+    const restored = sheet('sheet_legacy_hidden', '背包', ['row_id', '名称', '备注'],
+      'row_id INTEGER PRIMARY KEY,\n  item_name TEXT, -- 名称\n  note TEXT DEFAULT \'旧备注\' -- 备注', [['1', '铁剑', '记忆']]);
+    const template = state({ sheet_imported_hidden: sheet('sheet_imported_hidden', '背包', ['row_id', '品质', '名称'],
+      'row_id INTEGER PRIMARY KEY,\n  quality TEXT, -- 品质\n  title TEXT -- 名称', []) });
+    const lifecycle = makeLifecycle({ sheet_legacy_hidden: { status: 'hidden', restoreSourceData: restored } });
+    const original = JSON.stringify(lifecycle);
+    const plan = await reconcileChatTemplate_ACU({ baselineData: state({}), templateData: template, lifecycle,
+      storageMode, destructiveChangeConfirmed: false });
+    expect(plan.blockers).toEqual([]);
+    expect(Object.keys(plan.candidateData).filter(key => key.startsWith('sheet_'))).toEqual(['sheet_legacy_hidden']);
+    expect(plan.candidateData.sheet_legacy_hidden.content).toEqual([
+      ['row_id', '品质', '名称', '备注'], ['1', null, '铁剑', '记忆'],
+    ]);
+    expect(plan.candidateData.sheet_legacy_hidden.uid).toBe('sheet_legacy_hidden');
+    expect(plan.candidateData.sheet_legacy_hidden.sourceData.tableAliases).toContain('sheet_imported_hidden');
+    expect(plan.sheetChanges).toEqual([{ kind: 'reveal', sheetKey: 'sheet_legacy_hidden', sheetData: plan.candidateData.sheet_legacy_hidden }]);
+    expect(getSheetColumnProjection_ACU(plan.candidateData.sheet_legacy_hidden).visibleColumns.map(column => column.header))
+      .toEqual(['row_id', '品质', '名称']);
+    expect(JSON.stringify(lifecycle)).toBe(original);
+  });
+
 
   it('indeterminate 表被模板包含时阻止提交（fail-closed）', async () => {
     const baseline = state({

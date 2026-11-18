@@ -11,6 +11,7 @@ import { loadTableStatesAtBoundariesFromFramesV2Detailed_ACU, type TableReplayRe
 import { isV2TagData_ACU } from './storage-strategy-resolver';
 import type { TableStorageFrameV2_ACU } from './storage-frame-v2-types';
 import { getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
+import { appendFrameSheetTimelineEvents_ACU, getFrameSheetCheckpointRecords_ACU } from './storage-frame-v2-sheet-events';
 import { getRuntimeLifecycleEpoch_ACU, hydrateStorageProviderFromSnapshot_ACU } from './table-storage-strategy';
 import { runTableWriteTransaction_ACU } from './table-write-transaction';
 
@@ -293,6 +294,13 @@ function assertCandidateWriteSurface_ACU(
       const candidateFrameRest: Record<string, unknown> = { ...(candidateFrame as any) };
       delete liveFrameRest.perSheetCheckpoints;
       delete candidateFrameRest.perSheetCheckpoints;
+      delete liveFrameRest.sheetTimelineEvents;
+      delete candidateFrameRest.sheetTimelineEvents;
+      const nonTargetEvents = (frame: TableStorageFrameV2_ACU) => (frame.sheetTimelineEvents || [])
+        .filter(event => !targetSet.has(event.checkpoint.sheetKey));
+      if (getTableDataFingerprint_ACU(nonTargetEvents(liveFrame)) !== getTableDataFingerprint_ACU(nonTargetEvents(candidateFrame))) {
+        return '非目标 sheetTimelineEvents 被改写';
+      }
       delete liveFrameRest.checkpoint;
       delete candidateFrameRest.checkpoint;
       delete liveFrameRest.logEntries;
@@ -460,19 +468,14 @@ export function collectV2SchemaBoundaryIndices_ACU(
     const tagData = container?.[isolationKey];
     if (!isV2TagData_ACU(tagData)) continue;
     const frame = (tagData as any).storageFrame as TableStorageFrameV2_ACU | undefined;
-    const checkpoints = frame?.perSheetCheckpoints;
-    if (!checkpoints || typeof checkpoints !== 'object' || Array.isArray(checkpoints)) continue;
-    for (const checkpoint of Object.values(checkpoints) as Array<{
-      timeline?: { kind?: string; activateAtMessageIndex?: unknown };
-    }>) {
+    if (!frame) continue;
+    for (const { checkpoint } of getFrameSheetCheckpointRecords_ACU(frame)) {
       const timeline = checkpoint?.timeline;
       if (!timeline) continue;
       const kind = timeline.kind;
       if (typeof kind !== 'string' || !knownKinds.has(kind as TableFillSchemaBoundaryKind_ACU)) continue;
-      const index = timeline.activateAtMessageIndex;
-      if (!Number.isInteger(index) || (index as number) < 0) continue;
-      if (!seen.has(index as number)) {
-        seen.set(index as number, kind as TableFillSchemaBoundaryKind_ACU);
+      if (!seen.has(i)) {
+        seen.set(i, kind as TableFillSchemaBoundaryKind_ACU);
       }
     }
   }
@@ -751,7 +754,6 @@ export async function commitStagedSheetsAtFullBoundaryAtomic_ACU(
     const frame = originalTagData.storageFrame as TableStorageFrameV2_ACU;
     const maxSeq = Math.max(0, ...(frame.logEntries || []).map(entry => Number((entry as any).seq) || 0));
     const now = Date.now();
-    const perSheetCheckpoints = { ...(frame.perSheetCheckpoints || {}) };
     for (const sheetKey of targetSheetKeys) {
       const sheetCheckpointResult = buildCanonicalSheetCheckpoint_ACU({
         createdAt: now,
@@ -764,16 +766,15 @@ export async function commitStagedSheetsAtFullBoundaryAtomic_ACU(
       if (!sheetCheckpointResult.checkpoint) {
         return failBoundary_ACU('staging_target_snapshot_missing', `boundary commit 无法构建 selected sheet rebase：${sheetKey}：${sheetCheckpointResult.error}`);
       }
-      perSheetCheckpoints[sheetKey] = {
+      appendFrameSheetTimelineEvents_ACU(frame, [{
         ...sheetCheckpointResult.checkpoint,
         timeline: {
           kind: 'sheet_rebase',
           activateAtMessageIndex: options.originalFullIndex,
           afterSeq: maxSeq,
         },
-      };
+      }]);
     }
-    frame.perSheetCheckpoints = perSheetCheckpoints;
 
     const liveChatClone = JSON.parse(JSON.stringify(chat)) as any[];
     const candidateChat = JSON.parse(JSON.stringify(chat)) as any[];

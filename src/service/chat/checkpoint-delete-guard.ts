@@ -41,8 +41,10 @@ import {
 import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
 import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
+import { appendFrameSheetTimelineEvents_ACU, getLatestFrameSheetCheckpoint_ACU, getOrderedFrameSheetCheckpointRecords_ACU } from '../table/storage-frame-v2-sheet-events';
 import type {
     TableCheckpointV2_ACU,
+    TableSheetTimelineEventV2_ACU,
     TableSheetCheckpointV2_ACU,
     TableStorageFrameV2_ACU,
 } from '../table/storage-frame-v2-types';
@@ -52,6 +54,7 @@ interface CheckpointVaultFrameEntry_ACU {
     messageRef: any;
     fullCheckpoint: TableCheckpointV2_ACU | null;
     perSheetCheckpoints: Record<string, TableSheetCheckpointV2_ACU> | null;
+    sheetTimelineEvents: TableSheetTimelineEventV2_ACU[];
     summaryVectorCheckpoint: {
         sourceTableKey: string;
         checkpoint: import('../table/storage-frame-v2-types').SummaryVectorIndexMirrorCheckpointV2_ACU;
@@ -68,6 +71,7 @@ interface MaterialCheckpointVaultEntry_ACU {
 
 interface CheckpointVaultState_ACU {
     chatKey: string;
+    messageIndices: Map<any, number>;
     /** isolationKey → 按楼层序的 frame 条目（含 log-only 信标）。 */
     entriesByIsolationKey: Map<string, CheckpointVaultFrameEntry_ACU[]>;
     /** 续写/推演基线，按楼层序。与表格产物同一轮嫁接。 */
@@ -96,6 +100,7 @@ function hasEntries_ACU(record: Record<string, unknown> | null | undefined): boo
 function entryHasArtifacts_ACU(entry: CheckpointVaultFrameEntry_ACU): boolean {
     return !!entry.fullCheckpoint
         || hasEntries_ACU(entry.perSheetCheckpoints)
+        || entry.sheetTimelineEvents.length > 0
         || !!entry.summaryVectorCheckpoint
         || !!entry.spv79TransitionCheckpoint
         || !!entry.compatTransitionCheckpoint;
@@ -127,6 +132,7 @@ export function captureCheckpointVaultForCurrentChat_ACU(chatArg?: any[]): void 
             const fullCheckpoint = frame?.checkpoint?.kind === 'full' ? deepClone_ACU(frame.checkpoint) : null;
             const perSheetCheckpoints = frame && hasEntries_ACU(frame.perSheetCheckpoints)
                 ? deepClone_ACU(frame.perSheetCheckpoints!) : null;
+            const sheetTimelineEvents = frame?.sheetTimelineEvents ? deepClone_ACU(frame.sheetTimelineEvents) : [];
             const vectorCheckpoint = frame?.summaryVectorIndexFrame?.checkpoint?.kind === 'vector_full'
                 ? {
                     sourceTableKey: String(frame.summaryVectorIndexFrame.sourceTableKey || ''),
@@ -138,6 +144,7 @@ export function captureCheckpointVaultForCurrentChat_ACU(chatArg?: any[]): void 
                 messageRef: message,
                 fullCheckpoint,
                 perSheetCheckpoints,
+                sheetTimelineEvents,
                 summaryVectorCheckpoint: vectorCheckpoint,
                 spv79TransitionCheckpoint: spv79 ? deepClone_ACU(spv79) : null,
                 compatTransitionCheckpoint: compat ? deepClone_ACU(compat) : null,
@@ -155,7 +162,7 @@ export function captureCheckpointVaultForCurrentChat_ACU(chatArg?: any[]): void 
         materialEntries.push({ messageRef: message, continuation, simulation });
     }
 
-    vault_ACU = { chatKey, entriesByIsolationKey, materialEntries };
+    vault_ACU = { chatKey, messageIndices: new Map(chat.map((message, index) => [message, index])), entriesByIsolationKey, materialEntries };
 }
 
 /** 切聊 / 测试清理。 */
@@ -277,9 +284,12 @@ export async function recoverLostCheckpointsAfterMessageDeletion_ACU(): Promise<
         const affectedIsolationKeys = new Set<string>();
         const materialSnapshots = snapshotMaterialCheckpointFields_ACU(chat);
         const graftTargetByLostMessage = new Map<any, any>();
+        const timelineGrafts = new Map<TableStorageFrameV2_ACU, {
+            targetMessage: any;
+            groups: Array<{ sourceIndex: number; checkpoints: TableSheetCheckpointV2_ACU[] }>;
+        }>();
         try {
-            // 逆序处理：同 sheetKey 冲突时"原始位置更靠后的产物"先占位，更早的被
-            // 目标已有判定跳过——幸存者/更新者优先的语义由同一条规则统一表达。
+            // 无时间的快照保留更新者优先；timeline 按原物理位置收集后统一嫁接。
             for (const item of [...lostItems].reverse()) {
                 const { entry, isolationKey, vaultIndex } = item;
                 const entries = vault_ACU!.entriesByIsolationKey.get(isolationKey)!;
@@ -327,21 +337,39 @@ export async function recoverLostCheckpointsAfterMessageDeletion_ACU(): Promise<
                     }
                 }
 
+                const lostTimelineCheckpoints: TableSheetCheckpointV2_ACU[] = [];
                 if (hasEntries_ACU(entry.perSheetCheckpoints)) {
                     for (const [sheetKey, checkpoint] of Object.entries(entry.perSheetCheckpoints!)) {
-                        if (frame.perSheetCheckpoints?.[sheetKey]) {
+                        if (!checkpoint.timeline && getLatestFrameSheetCheckpoint_ACU(frame, sheetKey)) {
                             logDebug_ACU(`[删楼守卫] 楼层 #${targetIndex} 已有 ${sheetKey} 的 per-sheet checkpoint（幸存者优先），跳过嫁接。`);
                             continue;
                         }
                         const cloned = deepClone_ACU(checkpoint);
                         if (cloned.timeline) {
-                            cloned.timeline = { ...cloned.timeline, activateAtMessageIndex: targetIndex, afterSeq: 0 };
+                            lostTimelineCheckpoints.push(cloned);
+                        } else {
+                            if (!frame.perSheetCheckpoints) frame.perSheetCheckpoints = {};
+                            frame.perSheetCheckpoints[sheetKey] = cloned;
+                            graftedCount += 1;
                         }
-                        if (!frame.perSheetCheckpoints) frame.perSheetCheckpoints = {};
-                        frame.perSheetCheckpoints[sheetKey] = cloned;
-                        graftedCount += 1;
                         logWarn_ACU(`[删楼守卫] 被删楼层携带的 ${sheetKey} per-sheet checkpoint（timeline=${checkpoint.timeline?.kind || 'legacy'}）已前移嫁接到楼层 #${targetIndex}。`);
                     }
+                }
+
+                const lostRecords = getOrderedFrameSheetCheckpointRecords_ACU({
+                    version: 2, logEntries: [],
+                    perSheetCheckpoints: Object.fromEntries(lostTimelineCheckpoints.map(checkpoint => [checkpoint.sheetKey, checkpoint])),
+                    sheetTimelineEvents: entry.sheetTimelineEvents,
+                });
+                if (lostRecords.length > 0) {
+                    const originalLostIndex = vault_ACU!.messageIndices.get(entry.messageRef)!;
+                    const graft = timelineGrafts.get(frame) || { targetMessage: target.message, groups: [] };
+                    graft.groups.push({
+                        sourceIndex: originalLostIndex,
+                        checkpoints: lostRecords.map(record => deepClone_ACU(record.checkpoint)),
+                    });
+                    timelineGrafts.set(frame, graft);
+                    graftedCount += lostRecords.length;
                 }
 
                 const tagData = target.message.TavernDB_ACU_IsolatedData[isolationKey];
@@ -356,6 +384,31 @@ export async function recoverLostCheckpointsAfterMessageDeletion_ACU(): Promise<
                     logWarn_ACU(`[删楼守卫] 兼容过渡根已嫁接到楼层 #${targetIndex}；其 cutoff 楼层索引可能因删除漂移，请留意后续回放告警。`);
                 }
                 affectedIsolationKeys.add(isolationKey);
+            }
+
+            for (const [frame, { targetMessage, groups }] of timelineGrafts) {
+                const targetIndex = chat.indexOf(targetMessage);
+                const originalTargetIndex = vault_ACU!.messageIndices.get(targetMessage) ?? Number.POSITIVE_INFINITY;
+                const tailSeq = Math.max(0, ...frame.logEntries.map(log => log.seq));
+                const before: TableSheetCheckpointV2_ACU[] = [];
+                const after: TableSheetCheckpointV2_ACU[] = [];
+                for (const group of groups.sort((left, right) => left.sourceIndex - right.sourceIndex)) {
+                    const prepend = group.sourceIndex < originalTargetIndex;
+                    for (const checkpoint of group.checkpoints) {
+                        if (checkpoint.timeline) checkpoint.timeline = {
+                            ...checkpoint.timeline, activateAtMessageIndex: targetIndex, afterSeq: prepend ? 0 : tailSeq,
+                        };
+                        (prepend ? before : after).push(checkpoint);
+                    }
+                }
+                const surviving = getOrderedFrameSheetCheckpointRecords_ACU(frame).filter(record => record.checkpoint.timeline);
+                for (const record of surviving) {
+                    if (record.ordinal === undefined) delete frame.perSheetCheckpoints![record.recordKey];
+                }
+                delete frame.sheetTimelineEvents;
+                appendFrameSheetTimelineEvents_ACU(frame, [
+                    ...before, ...surviving.map(record => record.checkpoint), ...after,
+                ]);
             }
 
             const presentMessagesForMaterial = new Set<any>(chat);

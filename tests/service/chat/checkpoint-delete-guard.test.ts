@@ -166,7 +166,9 @@ describe('recoverLostCheckpointsAfterMessageDeletion_ACU', () => {
 
     expect(result.recovered).toBe(true);
     expect(result.graftedCount).toBe(1);
-    const grafted = incMsg.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_9;
+    const frame = incMsg.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(frame.perSheetCheckpoints).toBeUndefined();
+    const grafted = frame.sheetTimelineEvents[0].checkpoint;
     expect(grafted.data).toEqual(hideCheckpoint('sheet_9', 2).data);
     expect(grafted.timeline).toEqual({
       kind: 'sheet_hide',
@@ -207,13 +209,14 @@ describe('recoverLostCheckpointsAfterMessageDeletion_ACU', () => {
     expect(result.graftedCount).toBe(2);
     const frame = incMsg.TavernDB_ACU_IsolatedData[''].storageFrame;
     expect(frame.checkpoint?.kind).toBe('full');
-    expect(frame.perSheetCheckpoints.sheet_9.timeline.activateAtMessageIndex).toBe(0);
+    expect(frame.sheetTimelineEvents[0].checkpoint.timeline.activateAtMessageIndex).toBe(0);
   });
 
-  it('后继帧已有同 sheetKey 的 per-sheet checkpoint 时以幸存者为准跳过', async () => {
-    const survivorCheckpoint = { ...hideCheckpoint('sheet_9', 3), createdAt: 9999 };
-    const hideMsg = aiMsg('hide-old', { version: 2, logEntries: [], perSheetCheckpoints: { sheet_9: hideCheckpoint('sheet_9', 1) } });
-    const newerMsg = aiMsg('hide-new', { version: 2, logEntries: [], perSheetCheckpoints: { sheet_9: survivorCheckpoint } });
+  it('后继帧已有同 sheetKey 的无时间快照时以幸存者为准跳过', async () => {
+    const { timeline: _timeline, ...untimedCheckpoint } = hideCheckpoint('sheet_9', 1);
+    const survivorCheckpoint = { ...untimedCheckpoint, createdAt: 9999 };
+    const hideMsg = aiMsg('old', { version: 2, logEntries: [], perSheetCheckpoints: { sheet_9: untimedCheckpoint } });
+    const newerMsg = aiMsg('new', { version: 2, logEntries: [], perSheetCheckpoints: { sheet_9: survivorCheckpoint } });
     const chat = [hideMsg, newerMsg];
     mockGetChatArray.mockReturnValue(chat);
     captureCheckpointVaultForCurrentChat_ACU();
@@ -225,6 +228,129 @@ describe('recoverLostCheckpointsAfterMessageDeletion_ACU', () => {
     expect(result.graftedCount).toBe(0);
     expect(newerMsg.TavernDB_ACU_IsolatedData[''].storageFrame.perSheetCheckpoints.sheet_9.createdAt).toBe(9999);
     expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
+  });
+
+  it('旧 map 的 timed hide 不因后继同 key reveal 被丢弃，非 timeline shard 留在 map', async () => {
+    const hide = hideCheckpoint('sheet_9', 0);
+    const reveal = { ...hide, createdAt: 3000, timeline: { ...hide.timeline, kind: 'sheet_reveal', afterSeq: 0 } };
+    const { timeline: _timeline, ...untimed } = hideCheckpoint('sheet_other', 0);
+    const lost = aiMsg('旧 hide', { version: 2, logEntries: [], perSheetCheckpoints: { sheet_9: hide } });
+    const survivor = aiMsg('后继 reveal', {
+      version: 2, logEntries: [{ seq: 5, operations: [] }],
+      perSheetCheckpoints: { sheet_9: reveal, sheet_other: untimed },
+    });
+    const chat = [lost, survivor];
+    mockGetChatArray.mockReturnValue(chat);
+    captureCheckpointVaultForCurrentChat_ACU();
+    chat.splice(0, 1);
+
+    const result = await recoverLostCheckpointsAfterMessageDeletion_ACU();
+
+    expect(result).toMatchObject({ recovered: true, graftedCount: 1 });
+    const frame = survivor.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(frame.perSheetCheckpoints).toEqual({ sheet_other: untimed });
+    expect(frame.sheetTimelineEvents.map((event: any) => event.ordinal)).toEqual([0, 1]);
+    expect(frame.sheetTimelineEvents.map((event: any) => event.checkpoint.timeline.kind)).toEqual(['sheet_hide', 'sheet_reveal']);
+    expect(frame.sheetTimelineEvents.every((event: any) => event.checkpoint.timeline.afterSeq === 0)).toBe(true);
+    expect(frame.logEntries).toEqual([{ seq: 5, operations: [] }]);
+  });
+
+  it('同 key 多次事件前移到幸存 reveal 之前，保留间隔 ordinal 与后继日志屏障', async () => {
+    const hide = hideCheckpoint('sheet_9', 0);
+    const reveal = { ...hide, timeline: { ...hide.timeline, kind: 'sheet_reveal', afterSeq: 3 } };
+    const lost = aiMsg('往返', { version: 2, logEntries: [], sheetTimelineEvents: [
+      { ordinal: 2, checkpoint: hide },
+      { ordinal: 8, checkpoint: reveal },
+      { ordinal: 11, checkpoint: hide },
+    ] });
+    const survivor = aiMsg('后继', { version: 2, logEntries: [{ seq: 5, operations: [] }], sheetTimelineEvents: [
+      { ordinal: 2, checkpoint: { ...reveal, timeline: { ...reveal.timeline, afterSeq: 0 } } },
+    ] });
+    const chat = [lost, survivor];
+    mockGetChatArray.mockReturnValue(chat);
+    captureCheckpointVaultForCurrentChat_ACU();
+    chat.splice(0, 1);
+
+    const result = await recoverLostCheckpointsAfterMessageDeletion_ACU();
+
+    expect(result).toMatchObject({ recovered: true, graftedCount: 3 });
+    const frame = survivor.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(frame.sheetTimelineEvents.map((event: any) => event.ordinal)).toEqual([0, 1, 2, 3]);
+    expect(frame.sheetTimelineEvents.map((event: any) => event.checkpoint.timeline.kind)).toEqual([
+      'sheet_hide', 'sheet_reveal', 'sheet_hide', 'sheet_reveal',
+    ]);
+    expect(frame.sheetTimelineEvents.every((event: any) => event.checkpoint.timeline.afterSeq === 0)).toBe(true);
+    expect(frame.logEntries).toEqual([{ seq: 5, operations: [] }]);
+  });
+
+  it('批量删楼保留各帧同 key 事件的物理顺序，并将幸存 legacy timeline 放在最后', async () => {
+    const hide = hideCheckpoint('sheet_9', 0);
+    const reveal = { ...hide, timeline: { ...hide.timeline, kind: 'sheet_reveal' } };
+    const first = aiMsg('早', { version: 2, logEntries: [], sheetTimelineEvents: [{ ordinal: 6, checkpoint: hide }] });
+    const second = aiMsg('晚', { version: 2, logEntries: [], sheetTimelineEvents: [{ ordinal: 0, checkpoint: reveal }] });
+    const survivor = aiMsg('幸存', { version: 2, logEntries: [], perSheetCheckpoints: { sheet_9: hide } });
+    const chat = [first, second, survivor];
+    mockGetChatArray.mockReturnValue(chat);
+    captureCheckpointVaultForCurrentChat_ACU();
+    chat.splice(0, 2);
+
+    const result = await recoverLostCheckpointsAfterMessageDeletion_ACU();
+
+    expect(result).toMatchObject({ recovered: true, graftedCount: 2 });
+    const frame = survivor.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(frame.perSheetCheckpoints?.sheet_9).toBeUndefined();
+    expect(frame.sheetTimelineEvents.map((event: any) => event.checkpoint.timeline.kind)).toEqual([
+      'sheet_hide', 'sheet_reveal', 'sheet_hide',
+    ]);
+  });
+
+  it('无后继时事件追加在更早幸存帧的真实日志尾，不回到帧首', async () => {
+    const survivor = aiMsg('早', logFrame([{ seq: 7, operations: [] }]));
+    const lost = aiMsg('末', { version: 2, logEntries: [], sheetTimelineEvents: [
+      { ordinal: 4, checkpoint: hideCheckpoint('sheet_9', 1) },
+    ] });
+    const chat = [survivor, lost];
+    mockGetChatArray.mockReturnValue(chat);
+    captureCheckpointVaultForCurrentChat_ACU();
+    chat.splice(1, 1);
+
+    const result = await recoverLostCheckpointsAfterMessageDeletion_ACU();
+
+    expect(result).toMatchObject({ recovered: true, graftedCount: 1 });
+    const frame = survivor.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(frame.sheetTimelineEvents[0].checkpoint.timeline).toMatchObject({ afterSeq: 7, activateAtMessageIndex: 0 });
+    expect(frame.logEntries).toEqual([{ seq: 7, operations: [] }]);
+  });
+
+  it('批量删除末尾多楼时按原物理顺序追加混合 map 与新事件，且不撤销幸存 SQL', async () => {
+    const hide = hideCheckpoint('sheet_9', 1);
+    const reveal = { ...hide, timeline: { ...hide.timeline, kind: 'sheet_reveal' } };
+    const survivor = aiMsg('根', {
+      version: 2, checkpoint: fullCheckpoint(), logEntries: [{ seq: 7, operations: [] }],
+      sheetTimelineEvents: [{ ordinal: 8, checkpoint: { ...reveal, timeline: { ...reveal.timeline, afterSeq: 7 } } }],
+    });
+    const first = aiMsg('较早 hide', { version: 2, logEntries: [], perSheetCheckpoints: { sheet_9: hide } });
+    const second = aiMsg('较晚 reveal', {
+      version: 2, logEntries: [], sheetTimelineEvents: [{ ordinal: 0, checkpoint: reveal }],
+    });
+    const chat = [survivor, first, second];
+    mockGetChatArray.mockReturnValue(chat);
+    captureCheckpointVaultForCurrentChat_ACU();
+    chat.splice(1, 2);
+
+    const result = await recoverLostCheckpointsAfterMessageDeletion_ACU();
+
+    expect(result).toMatchObject({ recovered: true, graftedCount: 2 });
+    const frame = survivor.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(frame.sheetTimelineEvents.map((event: any) => event.ordinal)).toEqual([0, 1, 2]);
+    expect(frame.sheetTimelineEvents.map((event: any) => event.checkpoint.timeline.kind)).toEqual([
+      'sheet_reveal', 'sheet_hide', 'sheet_reveal',
+    ]);
+    expect(frame.sheetTimelineEvents.slice(1).map((event: any) => event.checkpoint.timeline)).toEqual([
+      { kind: 'sheet_hide', activateAtMessageIndex: 0, afterSeq: 7 },
+      { kind: 'sheet_reveal', activateAtMessageIndex: 0, afterSeq: 7 },
+    ]);
+    expect(frame.logEntries).toEqual([{ seq: 7, operations: [] }]);
   });
 
   it('无后继帧时落到最后 AI 楼层并新建 frame', async () => {

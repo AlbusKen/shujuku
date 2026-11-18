@@ -57,7 +57,7 @@ function aiFloor_ACU(chat: any[], index: number): number { return chat.slice(0, 
  * 写入新 migration 根后，同一隔离键下其余 full checkpoint（原 V2 anchor 及更早的根）
  * 必须同事务降级，否则形成多根：回放只认最后一个 full，之前增量全部失效，且后续
  * 手动重填会被锚点预检阻断。降级语义对齐 chat-service 的 checkpoint fallback：
- * checkpoint.data（含 perSheetCheckpoints 覆盖）转为 seq ≤ 0 的 data_replace fallback
+ * checkpoint.data（含 untimed 分片覆盖）转为 seq ≤ 0 的 data_replace fallback
  * logEntry 前置到原帧，随后删除 checkpoint——数学上不改变回放输出（降级帧位于新根
  * 之前，回放从新根起步）且原数据无损保留在帧内。
  */
@@ -88,6 +88,7 @@ function downgradeOtherFullCheckpoints_ACU(chat: any[], isolationKey: string, ke
           || typeof sheetCheckpoint.data !== 'object'
           || Array.isArray(sheetCheckpoint.data)
         ) continue;
+        if (sheetCheckpoint.timeline !== undefined) continue;
         fallbackData[sheetKey] = clone_ACU(sheetCheckpoint.data);
       }
     }

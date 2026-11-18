@@ -132,6 +132,18 @@ function scanFramesForSubstantialContent_ACU(
         }
       }
     }
+    if (frame.sheetTimelineEvents !== undefined) {
+      if (!Array.isArray(frame.sheetTimelineEvents)) return { substantial: false, corrupt: true };
+      const ordinals = new Set<number>();
+      for (const event of frame.sheetTimelineEvents) {
+        if (!event || !Number.isSafeInteger(event.ordinal) || event.ordinal < 0 || ordinals.has(event.ordinal)
+          || !isObjectRecord_ACU(event.checkpoint) || !event.checkpoint.timeline) return { substantial: false, corrupt: true };
+        ordinals.add(event.ordinal);
+        const data = event.checkpoint.data;
+        if (sheetIsMalformed_ACU(data)) return { substantial: false, corrupt: true };
+        if (sheetHasDataRows_ACU(data)) substantial = true;
+      }
+    }
     if (frame.perSheetCheckpoints !== undefined && frame.perSheetCheckpoints !== null) {
       if (!isObjectRecord_ACU(frame.perSheetCheckpoints)) return { substantial: false, corrupt: true };
       for (const checkpoint of Object.values(frame.perSheetCheckpoints)) {

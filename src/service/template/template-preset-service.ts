@@ -26,7 +26,8 @@ import {
     type TemplateImportDiagnostic_ACU,
     validateImportedTemplateObject_ACU,
 } from './template-import-validator';
-import { allocateStableSheetKeys_ACU } from '../../shared/sheet-identity';
+import { prepareStableSheetIdentities_ACU } from '../../shared/sheet-identity';
+import { redirectSheetKeysInData_ACU } from '../../shared/sheet-identity-merge';
 import { reconcileChatTemplate_ACU } from './chat-template-reconciler';
 import { commitCurrentFloorTemplateChanges_ACU, commitCurrentFloorTemplateScopeOnly_ACU } from '../table/storage-frame-v2-persist';
 import { deriveSheetLifecycleFromFramesV2_ACU, hasStructuralReplayCompatibilityRepairs_ACU, loadTableStateFromFramesV2Detailed_ACU, V2ReplayAbortedError_ACU } from '../table/storage-frame-v2-replay';
@@ -639,32 +640,16 @@ async function waitForActiveChatStorageContext_ACU({
  * permanent identities for a newly created or fully-cleared chat.
  */
 function rekeyTemplateForPristineChat_ACU(templateData: Record<string, any>): Record<string, any> {
-    const sheetEntries = Object.entries(templateData).filter(([key]) => key.startsWith('sheet_'));
-    const malformedSheetKey = sheetEntries.find(([, sheet]) => !sheet || typeof sheet !== 'object' || Array.isArray(sheet))?.[0];
+    const prepared = prepareStableSheetIdentities_ACU(templateData);
+    const malformedSheetKey = prepared.malformedSheetKeys[0];
     if (malformedSheetKey) {
         throw new Error(`无法为无数据聊天重新分配稳定表 key：模板表结构无效：${malformedSheetKey}`);
     }
-    const allocation = allocateStableSheetKeys_ACU(sheetEntries.map(([, sheet]: [string, any]) => sheet.name));
-    if (allocation.diagnostics.length > 0 || allocation.keys.some(key => !key)) {
-        const details = allocation.diagnostics.map(item => `${item.code}: ${item.originalName || '(空表名)'}`).join('；');
+    if (prepared.diagnostics.length > 0 || prepared.keyMap.size === 0 && Object.keys(templateData).some(key => key.startsWith('sheet_'))) {
+        const details = prepared.diagnostics.map(item => `${item.code}: ${item.originalName || '(空表名)'}`).join('；');
         throw new Error(`无法为无数据聊天重新分配稳定表 key${details ? `：${details}` : '。'}`);
     }
-
-    const keyMap = new Map<string, string>();
-    sheetEntries.forEach(([oldKey], index) => keyMap.set(oldKey, allocation.keys[index]!));
-    const result: Record<string, any> = {};
-    for (const [key, value] of Object.entries(templateData)) {
-        if (!key.startsWith('sheet_')) {
-            result[key] = JSON.parse(JSON.stringify(value));
-            continue;
-        }
-        const nextKey = keyMap.get(key);
-        if (!nextKey) continue;
-        const nextSheet = JSON.parse(JSON.stringify(value));
-        nextSheet.uid = nextKey;
-        result[nextKey] = nextSheet;
-    }
-    return result;
+    return prepared.data;
 }
 
 /**
@@ -986,7 +971,9 @@ async function applyChatTemplateSnapshotWithReconciliationInternal_ACU(templateD
     }
     if (!committed.saved) return { ...committed, blockers: plan.blockers, audit: plan.audit };
 
-    _set_currentJsonTableData_ACU(JSON.parse(JSON.stringify(plan.candidateData)));
+    _set_currentJsonTableData_ACU(JSON.parse(JSON.stringify(
+        redirectSheetKeysInData_ACU(plan.candidateData, 'sheetKeyRedirects' in committed ? committed.sheetKeyRedirects || [] : []),
+    )));
     applyTemplateScopeForCurrentChat_ACU();
     notifyTemplateRuntimeCommitted_ACU();
     // checkpoint 已落盘，但 SQLite runtime 仍是切换前的旧快照。

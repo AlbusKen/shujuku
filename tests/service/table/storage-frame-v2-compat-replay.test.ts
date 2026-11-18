@@ -196,13 +196,15 @@ describe('replayWithLegacyTolerances_ACU（Tier-1 各容忍项）', () => {
     const result = await replayWithLegacyTolerances_ACU(chat, '');
 
     expect(result.data.sheet_x9k2f).toBeUndefined();
-    expect(result.data[NEW_KEY].content).toEqual([
-      ['row_id', 'name'],
-      ['1', '新行'],
-      ['2', '旧独有行'],
-    ]);
+    // 同一 full checkpoint 内的两份快照没有可信先后：key 只决定引用，不决定 row 1 的取值；
+    // 独有行保留，同 row_id 的分歧记入 conflictingRowIds。
+    const content = result.data[NEW_KEY].content;
+    expect(content[0]).toEqual(['row_id', 'name']);
+    expect(content.slice(1).map((row: unknown[]) => row[0])).toEqual(['1', '2']);
+    expect(['新行', '旧行']).toContain(content[1][1]);
+    expect(content[2]).toEqual(['2', '旧独有行']);
     expect(result.toleranceReport.identityRemaps).toEqual([
-      expect.objectContaining({ fromKey: 'sheet_x9k2f', toKey: NEW_KEY, canonicalName: '背包' }),
+      expect.objectContaining({ fromKey: 'sheet_x9k2f', toKey: NEW_KEY, canonicalName: '背包', conflictingRowIds: ['1'] }),
     ]);
   });
 

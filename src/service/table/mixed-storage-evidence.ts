@@ -14,6 +14,7 @@ import { hasV2TableHistoryEvidence_ACU, isV2TagData_ACU } from './storage-strate
 import type { TableMigrationProvenanceV1_ACU, TableStorageFrameV2_ACU } from './storage-frame-v2-types';
 import { loadTableStateFromFramesV2Detailed_ACU, type TableReplayCompatibilityRepairV2_ACU } from './storage-frame-v2-replay';
 import { getTableDataFingerprint_ACU } from './table-data-upgrade-audit';
+import { frameHasSheetTimelineArtifacts_ACU, getFrameSheetCheckpointRecords_ACU, getLatestFrameSheetCheckpoint_ACU } from './storage-frame-v2-sheet-events';
 
 export type MixedStorageLegacyLocation_ACU =
   | 'isolated_independent'
@@ -183,7 +184,7 @@ function operationTouchesSheet_ACU(operation: any, sheetKey: string): boolean {
 }
 
 function frameTouchesSheet_ACU(frame: TableStorageFrameV2_ACU, sheetKey: string): boolean {
-  if (frame.perSheetCheckpoints?.[sheetKey]?.kind === 'sheet_full') return true;
+  if (getLatestFrameSheetCheckpoint_ACU(frame, sheetKey)?.kind === 'sheet_full') return true;
   return (frame.logEntries || []).some(entry => eventTouchesSheet_ACU(entry, sheetKey)
     || (Array.isArray(entry.operations) && entry.operations.some(operation => operationTouchesSheet_ACU(operation, sheetKey)))
     || (Array.isArray(entry.patches) && entry.patches.some(patch => patch?.sheetKey === sheetKey)));
@@ -218,6 +219,7 @@ function frameHasUnanchoredArtifacts_ACU(frame: TableStorageFrameV2_ACU): boolea
     && (typeof headRevision !== 'string' || headRevision.length > 0);
   return frame.logEntries.length > 0
     || hasPerSheetCheckpointArtifact
+    || frameHasSheetTimelineArtifacts_ACU(frame)
     || raw.manualRefillProgress !== undefined
     || hasHeadRevisionArtifact;
 }
@@ -312,7 +314,7 @@ export async function collectMixedStorageEvidence_ACU(
     aiFloor: ref.aiFloor,
     hasFullCheckpoint: ref.frame.checkpoint?.kind === 'full',
     ...(ref.frame.checkpoint?.kind === 'full' ? { fullCheckpointReason: ref.frame.checkpoint.reason, fullCheckpointCreatedAt: ref.frame.checkpoint.createdAt } : {}),
-    perSheetCheckpointKeys: Object.keys(ref.frame.perSheetCheckpoints || {}).filter(key => key.startsWith('sheet_')).sort((a, b) => a.localeCompare(b)),
+    perSheetCheckpointKeys: [...new Set(getFrameSheetCheckpointRecords_ACU(ref.frame).map(record => record.recordKey).filter(key => typeof key === 'string' && key.startsWith('sheet_')))].sort((a, b) => a.localeCompare(b)),
     logEntryCount: Array.isArray(ref.frame.logEntries) ? ref.frame.logEntries.length : 0,
     ...(ref.frame.headRevision !== undefined ? { headRevision: ref.frame.headRevision } : {}),
   }));
@@ -329,7 +331,7 @@ export async function collectMixedStorageEvidence_ACU(
         lastReplayMessageIndex = ref.messageIndex;
         lastReplayAiFloor = ref.aiFloor;
       }
-      const sheetCheckpoint = ref.frame.perSheetCheckpoints?.[sheetKey];
+      const sheetCheckpoint = getLatestFrameSheetCheckpoint_ACU(ref.frame, sheetKey);
       if (sheetCheckpoint) {
         lastChangedAiFloor = Math.max(lastChangedAiFloor, Number(sheetCheckpoint.scheduleSummary?.lastChangedAiFloor) || 0, eventChangedFloor_ACU(sheetCheckpoint.event, ref.aiFloor, sheetKey));
       }
@@ -552,6 +554,24 @@ export function collectV2SheetKeyEvidenceStatically_ACU(
             const targetKey = typeof declaredSheetKey === 'string' && declaredSheetKey ? declaredSheetKey : key;
             sheetKeyToName[targetKey] = sheetName;
           }
+        }
+      }
+    }
+    if (frame.sheetTimelineEvents !== undefined) {
+      if (!Array.isArray(frame.sheetTimelineEvents)) {
+        undecodable = true;
+      } else {
+        for (const event of frame.sheetTimelineEvents) {
+          const checkpoint = event?.checkpoint;
+          const key = checkpoint?.sheetKey;
+          if (typeof key !== 'string' || !key.startsWith('sheet_')) {
+            undecodable = true;
+            continue;
+          }
+          sheetKeys.add(key);
+          const name = checkpoint?.data?.name;
+          if (typeof name === 'string' && name.trim()) sheetKeyToName[key] = name;
+          else malformed = true;
         }
       }
     }

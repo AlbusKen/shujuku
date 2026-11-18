@@ -7,13 +7,15 @@ import { getActiveChatStorageIdentity_ACU, peekChatScopedConfigContainer_ACU, pe
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
 import type { StorageMode } from '../../shared/table-storage-provider';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
+import { canonicalizeDisplayName_ACU } from '../../shared/sheet-identity';
+import { collectSheetIdentityCanonicals_ACU, mergeLegacySheetIdentities_ACU, redirectSheetKeysInData_ACU as redirectSheetKeys_ACU, type SheetKeyRedirect_ACU } from '../../shared/sheet-identity-merge';
 import { startRuntimePerformanceSpan_ACU } from '../../shared/runtime-performance';
 import { getCurrentIsolationKey_ACU, settings_ACU } from '../runtime/state-manager';
 import { normalizeGuideData_ACU, setChatSheetGuideDataForIsolationKey_ACU } from '../template/chat-scope';
 import { ensureGlobalInjectionConfigDefaults_ACU } from '../worldbook/injection-engine';
-import type { ManualRefillProgressV2_ACU, TableMutationEventV2_ACU, TableMutationLogEntryV2_ACU, TableMutationSourceV2_ACU, TableStorageFrameV2_ACU, TableCheckpointV2_ACU, TableMutationWriteSetV2_ACU, TableMutationOperationV2_ACU, TableSheetCheckpointV2_ACU, TableV2RecoveryBackup_ACU } from './storage-frame-v2-types';
+import type { ManualRefillProgressV2_ACU, TableMutationEventV2_ACU, TableMutationLogEntryV2_ACU, TableMutationSourceV2_ACU, TableStorageFrameV2_ACU, TableCheckpointV2_ACU, TableMutationWriteSetV2_ACU, TableMutationOperationV2_ACU, TableSheetCheckpointV2_ACU, TableSheetLifecycleProjectionV2_ACU, TableV2RecoveryBackup_ACU } from './storage-frame-v2-types';
 import { hasLegacyTopLevelTableData_ACU, hasV2TableHistoryEvidence_ACU, isLegacyV1TagData_ACU, isV2TagData_ACU } from './storage-strategy-resolver';
-import { applyTableOperationV2_ACU, buildAppendedOperationsWriteRejectionMessage_ACU, buildCompatReadonlyWriteRejectionMessage_ACU, collectScheduleSummaryFromFramesV2_ACU, hasStructuralReplayCompatibilityRepairs_ACU, hasUnanchoredReplayArtifactsForChatV2_ACU, loadTableStateFromFramesV2Detailed_ACU, resolveHeaderOnlyTemplateSnapshot_ACU, type TableReplayCompatibilityRepairV2_ACU, V2ReplayOperationError_ACU } from './storage-frame-v2-replay';
+import { applyTableOperationV2_ACU, buildAppendedOperationsWriteRejectionMessage_ACU, buildCompatReadonlyWriteRejectionMessage_ACU, collectScheduleSummaryFromFramesV2_ACU, deriveSheetLifecycleFromFramesV2_ACU, hasStructuralReplayCompatibilityRepairs_ACU, hasUnanchoredReplayArtifactsForChatV2_ACU, loadTableStateFromFramesV2Detailed_ACU, resolveHeaderOnlyTemplateSnapshot_ACU, type TableReplayCompatibilityRepairV2_ACU, V2ReplayOperationError_ACU } from './storage-frame-v2-replay';
 import { runTableWriteTransaction_ACU, type TableWriteTransactionContext_ACU } from './table-write-transaction';
 import { formatCanonicalRowIssues_ACU, normalizeCanonicalTableRows_ACU } from '../../shared/canonical-row-normalizer';
 import { createSheetInsertPlan, generateDDL, validateDDLTextAgainstHeaders_ACU } from '../../data/sqlite/schema-mapper';
@@ -27,6 +29,7 @@ import { reconcileRevealedSheetWithTemplate_ACU } from '../template/chat-templat
 import { assertSummaryVectorMirrorFrameInvariantsV2_ACU } from '../vector/summary-vector-mirror-resolver';
 import { scheduleSummaryVectorMirrorFlushAfterPersist_ACU } from '../vector/summary-vector-index-flush-queue';
 import { absorbOwnTableSave_ACU, getTableReplayGeneration_ACU } from '../../shared/table-replay-generation';
+import { appendFrameSheetTimelineEvents_ACU, frameHasSheetTimelineArtifacts_ACU, getFrameSheetCheckpointRecords_ACU, getLatestFrameSheetCheckpoint_ACU } from './storage-frame-v2-sheet-events';
 
 // 保存仍持有提交锁；只读回放仅在完整 frame/entry 边界让步，不跳过严格校验。
 // 同轮 replayEvidence 仍可复用，避免把主线程让步变成重复冷回放。
@@ -169,6 +172,8 @@ export interface CommitCurrentFloorTemplateChangesResult_ACU {
   mode?: 'template_only' | 'scope_only' | 'v2_commit';
   messageIndex?: number;
   checkpoints?: TableSheetCheckpointV2_ACU[];
+  /** 模板 key 恢复到历史 key 时的实际落盘 key。 */
+  sheetKeyRedirects?: SheetKeyRedirect_ACU[];
   removedNullRowCount?: number;
   deletedSheetKeys?: string[];
   purgedMessageCount?: number;
@@ -1234,6 +1239,7 @@ function sheetIsHeaderOnly_ACU(sheet: unknown): boolean {
  * 「persist 认为可降级、preflight 认为 blocked」的夹缝，故此处导出共用。
  */
 export function frameHasSuffixReplayArtifact_ACU(frame: TableStorageFrameV2_ACU): boolean {
+  if (frameHasSheetTimelineArtifacts_ACU(frame)) return true;
   if ((frame.logEntries || []).length > 0) return true;
   if (frame.manualRefillProgress !== undefined) return true;
   const hasOwnFullCheckpoint = frame.checkpoint?.kind === 'full';
@@ -1305,6 +1311,10 @@ function classifyAsTemplateOnlyRoot_ACU(
     return null;
   }
   // 条件 6：perSheetCheckpoints 全部 intrinsic
+  if (frameHasSheetTimelineArtifacts_ACU(frame)) {
+    details.push('sheet_timeline_events_non_empty');
+    return null;
+  }
   const perSheet = frame.perSheetCheckpoints || {};
   if (!isObjectRecord_ACU(perSheet)) {
     details.push('per_sheet_checkpoints_malformed');
@@ -1517,6 +1527,7 @@ export async function demoteTemplateOnlyRootToScopeOnly_ACU(options: {
       const candidateFrame = candidateTagData.storageFrame as TableStorageFrameV2_ACU;
       delete candidateFrame.checkpoint;
       delete candidateFrame.perSheetCheckpoints;
+      delete candidateFrame.sheetTimelineEvents;
       delete candidateFrame.headRevision;
       const candidateRemainingKeys = Object.keys(candidateFrame);
       const candidateIsEmptyFrame = candidateRemainingKeys.length === 0
@@ -1682,13 +1693,20 @@ function eventIsValidForIntroductionHistory_ACU(value: unknown): boolean {
   );
 }
 
+function sheetScheduleSummaryIsValidForIntroductionHistory_ACU(summary: unknown): boolean {
+  return summary === undefined || (
+    isObjectRecord_ACU(summary)
+    && (summary.lastFilledAiFloor === undefined || isFiniteNonNegativeNumber_ACU(summary.lastFilledAiFloor))
+    && (summary.lastImportBaselineAiFloor === undefined || (Number.isInteger(summary.lastImportBaselineAiFloor) && Number(summary.lastImportBaselineAiFloor) >= 0))
+    && (summary.lastChangedAiFloor === undefined || isFiniteNonNegativeNumber_ACU(summary.lastChangedAiFloor))
+  );
+}
+
 function scheduleSummaryIsValidForIntroductionHistory_ACU(value: unknown): boolean {
   return value === undefined || (
     isObjectRecord_ACU(value)
     && Object.values(value).every(summary => isObjectRecord_ACU(summary)
-      && (summary.lastFilledAiFloor === undefined || isFiniteNonNegativeNumber_ACU(summary.lastFilledAiFloor))
-      && (summary.lastImportBaselineAiFloor === undefined || (Number.isInteger(summary.lastImportBaselineAiFloor) && Number(summary.lastImportBaselineAiFloor) >= 0))
-      && (summary.lastChangedAiFloor === undefined || isFiniteNonNegativeNumber_ACU(summary.lastChangedAiFloor)))
+      && sheetScheduleSummaryIsValidForIntroductionHistory_ACU(summary))
   );
 }
 
@@ -1823,7 +1841,7 @@ function sheetCheckpointMapIsValidForIntroductionHistory_ACU(value: unknown): va
       && isFiniteNonNegativeNumber_ACU(checkpoint.createdAt)
       && typeof checkpoint.reason === 'string' && CHECKPOINT_REASONS_FOR_INTRODUCTION_HISTORY_ACU.has(checkpoint.reason)
       && isObjectRecord_ACU(checkpoint.data)
-      && scheduleSummaryIsValidForIntroductionHistory_ACU(checkpoint.scheduleSummary)
+      && sheetScheduleSummaryIsValidForIntroductionHistory_ACU(checkpoint.scheduleSummary)
       && eventIsValidForIntroductionHistory_ACU(checkpoint.event)
       && manualRefillProgressIsValidForIntroductionHistory_ACU(checkpoint.manualRefillProgress)
       && (checkpoint.baseRevision === undefined || checkpoint.baseRevision === null || typeof checkpoint.baseRevision === 'string')
@@ -1919,11 +1937,61 @@ type IntroductionHistoryEvidence_ACU = {
   reason?: string;
 };
 
+function findLogicalHistorySheetKeys_ACU(
+  data: unknown,
+  sheetKey: string,
+  definition?: Sheet_ACU,
+): string[] {
+  if (!isObjectRecord_ACU(data)) return [];
+  const entries = Object.entries(data).filter(([key, sheet]) => key.startsWith('sheet_') && isObjectRecord_ACU(sheet));
+  if (!definition) return entries.filter(([key]) => key === sheetKey).map(([key]) => key);
+  const name = canonicalizeDisplayName_ACU(definition.name);
+  const exact = entries.filter(([, sheet]) => name && canonicalizeDisplayName_ACU((sheet as Sheet_ACU).name) === name);
+  if (exact.length) return exact.map(([key]) => key);
+  const identities = new Set(collectSheetIdentityCanonicals_ACU(definition));
+  const related = entries.filter(([, sheet]) => collectSheetIdentityCanonicals_ACU(sheet as Sheet_ACU).some(value => identities.has(value)));
+  // 别名只作改名兼容证据：命中多个不同当前名时不能据此认领任一历史表。
+  if (new Set(related.map(([, sheet]) => canonicalizeDisplayName_ACU((sheet as Sheet_ACU).name))).size > 1) {
+    return entries.filter(([key]) => key === sheetKey).map(([key]) => key);
+  }
+  return related.map(([key]) => key);
+}
+
+function collectLogicalHistorySheetKeys_ACU(
+  chat: any[], isolationKey: string, maxMessageIndex: number, sheetKey: string, definition?: Sheet_ACU,
+): Set<string> {
+  const keys = new Set([sheetKey]);
+  if (!definition) return keys;
+  const absorb = (data: unknown): void => {
+    findLogicalHistorySheetKeys_ACU(data, sheetKey, definition).forEach(key => keys.add(key));
+  };
+  for (let index = 0; index <= maxMessageIndex; index += 1) {
+    const frame = readIsolatedTagData_ACU(chat[index], isolationKey)?.storageFrame;
+    if (!isObjectRecord_ACU(frame)) continue;
+    absorb(frame.checkpoint?.data);
+    // 此处只建立名称索引；目标 payload 的有效性仍由历史扫描和 replay 校验。
+    if (isObjectRecord_ACU(frame.perSheetCheckpoints)) {
+      for (const [key, checkpoint] of Object.entries(frame.perSheetCheckpoints)) absorb({ [key]: (checkpoint as any)?.data });
+    }
+    if (Array.isArray(frame.sheetTimelineEvents)) {
+      for (const event of frame.sheetTimelineEvents) absorb({ [event?.checkpoint?.sheetKey]: event?.checkpoint?.data });
+    }
+    if (Array.isArray(frame.logEntries)) for (const entry of frame.logEntries) {
+      for (const artifact of [...(Array.isArray(entry?.operations) ? entry.operations : []), ...(Array.isArray(entry?.patches) ? entry.patches : [])]) {
+        if (artifact?.kind === 'data_replace') absorb(artifact.data);
+        else if (artifact?.kind === 'sheet_replace') absorb({ [artifact.sheetKey]: artifact.sheet });
+      }
+    }
+  }
+  return keys;
+}
+
 function introductionHistoryEvidence_ACU(
   chat: any[],
   isolationKey: string,
   maxMessageIndex: number,
   sheetKey: string,
+  relatedKeys: ReadonlySet<string> = new Set([sheetKey]),
 ): IntroductionHistoryEvidence_ACU {
   const absent = (): IntroductionHistoryEvidence_ACU => ({ status: 'absent', sheetKey });
   const present = (messageIndex: number, artifactKind: IntroductionHistoryEvidence_ACU['artifactKind']): IntroductionHistoryEvidence_ACU => (
@@ -1971,13 +2039,33 @@ function introductionHistoryEvidence_ACU(
     if (frame.perSheetCheckpoints !== undefined && !isObjectRecord_ACU(frame.perSheetCheckpoints)) {
       return indeterminate(messageIndex, 'per_sheet_checkpoint', 'per-sheet checkpoint map 无法解析');
     }
-    if (recordContainsSheet_ACU(frame.perSheetCheckpoints, sheetKey)) {
-      const checkpoint = (frame.perSheetCheckpoints as Record<string, unknown>)[sheetKey];
-      if (!sheetCheckpointMapIsValidForIntroductionHistory_ACU({ [sheetKey]: checkpoint })) {
+    if (frame.sheetTimelineEvents !== undefined) {
+      try {
+        const records = getFrameSheetCheckpointRecords_ACU(frame as unknown as TableStorageFrameV2_ACU);
+        for (const record of records.filter(record => record.ordinal !== undefined)) {
+          const checkpoint = record.checkpoint;
+          if (!isObjectRecord_ACU(checkpoint) || typeof checkpoint.sheetKey !== 'string') {
+            return indeterminate(messageIndex, 'per_sheet_checkpoint', 'timeline event 归属无法解析');
+          }
+          if (!relatedKeys.has(checkpoint.sheetKey)) continue;
+          if (!checkpoint.timeline || !sheetCheckpointMapIsValidForIntroductionHistory_ACU({ [checkpoint.sheetKey]: checkpoint })) {
+            return indeterminate(messageIndex, 'per_sheet_checkpoint', '目标 timeline checkpoint 无法验证');
+          }
+          return present(messageIndex, 'per_sheet_checkpoint');
+        }
+      } catch {
+        return indeterminate(messageIndex, 'per_sheet_checkpoint', 'timeline event 集合无法解析');
+      }
+    }
+    const relatedCheckpointKey = [...relatedKeys].find(key => recordContainsSheet_ACU(frame.perSheetCheckpoints, key));
+    if (relatedCheckpointKey) {
+      const checkpoint = (frame.perSheetCheckpoints as Record<string, unknown>)[relatedCheckpointKey];
+      if (!sheetCheckpointMapIsValidForIntroductionHistory_ACU({ [relatedCheckpointKey]: checkpoint })) {
         return indeterminate(messageIndex, 'per_sheet_checkpoint', '目标 sheet checkpoint 无法验证');
       }
       return present(messageIndex, 'per_sheet_checkpoint');
     }
+    if ([...relatedKeys].some(key => checkpointDataContainsSheet_ACU(frame.checkpoint, key))) return present(messageIndex, 'checkpoint');
 
     for (const entry of frame.logEntries) {
       if (!logEntryIsValidForIntroductionHistory_ACU(entry)) {
@@ -1986,7 +2074,10 @@ function introductionHistoryEvidence_ACU(
       }
 
       for (const [operationIndex, operation] of entry.operations.entries()) {
-        const operationEvidence = scopedHistoryArtifactEvidence_ACU(operation, sheetKey, operationContainsOrCannotDisproveSheet_ACU);
+        const operationKey = operation?.kind === 'data_replace'
+          ? [...relatedKeys].find(key => recordContainsSheet_ACU(operation.data, key)) ?? sheetKey
+          : typeof operation?.sheetKey === 'string' && relatedKeys.has(operation.sheetKey) ? operation.sheetKey : sheetKey;
+        const operationEvidence = scopedHistoryArtifactEvidence_ACU(operation, operationKey, operationContainsOrCannotDisproveSheet_ACU);
         if (operationEvidence === 'present') return present(messageIndex, 'operation');
         if (operationEvidence === 'unattributable_global') {
           noteUnattributableGlobal(messageIndex, 'operation');
@@ -2001,7 +2092,8 @@ function introductionHistoryEvidence_ACU(
       if (entry.patches === undefined) continue;
       if (!Array.isArray(entry.patches)) return indeterminate(messageIndex, 'patch', 'patch 列表无法解析');
       for (const [patchIndex, patch] of entry.patches.entries()) {
-        const patchEvidence = scopedHistoryArtifactEvidence_ACU(patch, sheetKey, patchContainsOrCannotDisproveSheet_ACU);
+        const patchKey = typeof patch?.sheetKey === 'string' && relatedKeys.has(patch.sheetKey) ? patch.sheetKey : sheetKey;
+        const patchEvidence = scopedHistoryArtifactEvidence_ACU(patch, patchKey, patchContainsOrCannotDisproveSheet_ACU);
         if (patchEvidence === 'present') return present(messageIndex, 'patch');
         if (patchEvidence === 'unattributable_global') {
           noteUnattributableGlobal(messageIndex, 'patch');
@@ -2117,7 +2209,7 @@ function scopedHistoryArtifactEvidence_ACU(
  * 仅在 bounded replay 找不到来源时作为同楼层回退；调用方必须在收敛重写前传入其副本。
  */
 type RevealSourceResolution_ACU =
-  | { status: 'resolved'; sheetData: Sheet_ACU; sourceKind: 'bounded_replay' | 'current_sheet_checkpoint'; messageIndex: number }
+  | { status: 'resolved'; sheetData: Sheet_ACU; sheetKey?: string; sourceKind: 'bounded_replay' | 'current_sheet_checkpoint'; messageIndex: number }
   | { status: 'not_found' }
   | { status: 'indeterminate'; reason: string };
 
@@ -2128,7 +2220,26 @@ async function resolveRevealSource_ACU(
   sheetKey: string,
   preferredHideCheckpoint?: unknown,
   currentSheetCheckpoint?: unknown,
+  logical?: { definition: Sheet_ACU; lifecycle: TableSheetLifecycleProjectionV2_ACU },
 ): Promise<RevealSourceResolution_ACU> {
+  if (logical) {
+    const hiddenData = {} as TableDataObject_ACU;
+    for (const key of logical.lifecycle.hiddenSheetKeys) {
+      const entry = logical.lifecycle.statusBySheetKey[key];
+      if (entry?.status === 'hidden' && entry.restoreSourceData) hiddenData[key] = entry.restoreSourceData;
+    }
+    const keys = findLogicalHistorySheetKeys_ACU(hiddenData, sheetKey, logical.definition);
+    if (keys.length) {
+      const restored = Object.fromEntries(keys.map(key => [key, deepClone_ACU(hiddenData[key])])) as TableDataObject_ACU;
+      mergeLegacySheetIdentities_ACU(restored, [sheetKey]);
+      const key = Object.keys(restored)[0];
+      return {
+        status: 'resolved', sheetKey: key, sheetData: restored[key] as Sheet_ACU,
+        sourceKind: 'current_sheet_checkpoint',
+        messageIndex: logical.lifecycle.statusBySheetKey[key]?.lastTimelineMessageIndex ?? maxMessageIndex,
+      };
+    }
+  }
   // 优先使用生命周期派生指向的最后 hide checkpoint：hide 语义保证 checkpoint.data 保留
   // 离开 active 状态前的完整数据，且当前 frame 的精确同 key checkpoint 已通过 created/seq
   // 校验。仅在缺少可信 hide checkpoint 时才退回逐边界 bounded replay（兼容旧历史）。
@@ -2161,11 +2272,16 @@ async function resolveRevealSource_ACU(
       replayFailureCount += 1;
       continue;
     }
-    if (replayed && Object.prototype.hasOwnProperty.call(replayed.data, sheetKey)) {
-      const candidate = (replayed.data as Record<string, unknown>)[sheetKey];
+    const keys = replayed ? findLogicalHistorySheetKeys_ACU(replayed.data, sheetKey, logical?.definition) : [];
+    if (keys.length && replayed) {
+      const restored = Object.fromEntries(keys.map(key => [key, deepClone_ACU(replayed.data[key])])) as TableDataObject_ACU;
+      mergeLegacySheetIdentities_ACU(restored, [sheetKey]);
+      const sourceKey = Object.keys(restored)[0];
+      const candidate = restored[sourceKey];
       if (isObjectRecord_ACU(candidate)) {
         return {
           status: 'resolved',
+          sheetKey: sourceKey,
           sheetData: deepClone_ACU(candidate) as Sheet_ACU,
           sourceKind: 'bounded_replay',
           messageIndex: boundary,
@@ -2547,6 +2663,7 @@ async function persistTableMutationLogV2Core_ACU(
     frame.headRevision = checkpointRevision;
     frame.logEntries = [];
     delete frame.perSheetCheckpoints;
+    delete frame.sheetTimelineEvents;
     if (temporaryBaselineUpgrade && targetExistingFrame) {
       const recoveryBackup: TableV2RecoveryBackup_ACU = {
         version: 1,
@@ -2671,10 +2788,7 @@ async function persistTableMutationLogV2Core_ACU(
           });
         }
         if (introduced.length > 0) {
-          frame.perSheetCheckpoints = {
-            ...(frame.perSheetCheckpoints || {}),
-            ...Object.fromEntries(introduced.map(checkpoint => [checkpoint.sheetKey, checkpoint])),
-          };
+          appendFrameSheetTimelineEvents_ACU(frame, introduced);
           logDebug_ACU(`[V2 Persist] 为本楼缺失的目标表补写 per-sheet checkpoint：${introduced.map(c => c.sheetKey).join('、')}（messageIndex=${target.index}）。`);
         }
       }
@@ -3902,6 +4016,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
         const frame = getOrInitV2Frame_ACU(isolatedData, isolationKey);
         frame.checkpoint = checkpointResult.checkpoint;
         frame.perSheetCheckpoints = Object.fromEntries(initialSheetCheckpoints.map(checkpoint => [checkpoint.sheetKey, checkpoint]));
+        delete frame.sheetTimelineEvents;
         frame.logEntries = [];
         frame.headRevision = buildCommitRevision_ACU('checkpoint', generateEntryId_ACU());
         target.message.TavernDB_ACU_IsolatedData = isolatedData;
@@ -4013,9 +4128,15 @@ export async function commitCurrentFloorTemplateChanges_ACU(
     }
     // 收敛会清空候选 frame 的 per-sheet checkpoints；先按目标 key 捕获不可变副本，
     // 仅供同楼层 reveal 在 bounded replay 找不到可见来源时使用。
+    const lifecycle = deriveSheetLifecycleFromFramesV2_ACU(chat, isolationKey, { maxMessageIndex: target.index });
+    const relatedKeysBySheet = new Map<string, Set<string>>();
     const revealCheckpointSources = new Map<string, unknown>();
-    for (const change of requestedChanges.filter(item => item.kind === 'introduction')) {
-      const checkpoint = frame.perSheetCheckpoints?.[change.sheetKey];
+    for (const change of requestedChanges.filter(item => item.kind === 'introduction' || item.kind === 'reveal')) {
+      if (change.kind !== 'introduction' && change.kind !== 'reveal') continue;
+      relatedKeysBySheet.set(change.sheetKey, collectLogicalHistorySheetKeys_ACU(
+        chat, isolationKey, target.index, change.sheetKey, change.sheetData,
+      ));
+      const checkpoint = getLatestFrameSheetCheckpoint_ACU(frame, change.sheetKey);
       if (checkpoint !== undefined) revealCheckpointSources.set(change.sheetKey, deepClone_ACU(checkpoint));
     }
     if (activeReplay.requiresCheckpointConvergence || activeReplay.compatibilityRepairs?.length) {
@@ -4096,6 +4217,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
     const targetFrameLastLogSeq = getValidatedFrameLastLogSeq_ACU(frame);
     // reveal 目标集合：包括显式 reveal change，以及"introduction 但历史存在(active 无)"自动转 reveal 的 sheetKey。
     const revealDataBySheet = new Map<string, Sheet_ACU>();
+    const revealKeyBySheet = new Map<string, string>();
     for (const change of requestedChanges.filter(item => item.kind === 'introduction')) {
       // 是否“仍活跃”只由 replay 后的 active state 判定。
       //
@@ -4104,7 +4226,9 @@ export async function commitCurrentFloorTemplateChanges_ACU(
       // 把这种痕迹当作“仍活跃”，会让重新切回带该表的模板时走不到下面的唤醒分支，
       // 被误判成“重复引入”直接拒绝。历史里存在过的表由 history evidence 分支负责唤醒。
       const activeHas = Object.prototype.hasOwnProperty.call(activeReplayState, change.sheetKey);
-      const historyEvidence = introductionHistoryEvidence_ACU(chat, isolationKey, target.index, change.sheetKey);
+      const historyEvidence = introductionHistoryEvidence_ACU(
+        chat, isolationKey, target.index, change.sheetKey, relatedKeysBySheet.get(change.sheetKey),
+      );
       logDebug_ACU(`[V2 Persist] introduction_lifecycle_decision: requestId=${options.requestId || 'unknown'}, sheetKey=${change.sheetKey}, activeHas=${activeHas}, history=${historyEvidence.status}, historyMessageIndex=${historyEvidence.messageIndex ?? 'none'}, historyArtifact=${historyEvidence.artifactKind || 'none'}。`);
       if (activeHas) {
         // 仍活跃：既非全新，也非可恢复的隐藏表。绝不能让模板 introduction 覆盖活数据。
@@ -4129,7 +4253,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
         //   该表可见数据时，才可安全回落 introduction。
         // 优先使用生命周期派生的最后 hide checkpoint（含完整退出数据），仅在缺少可信
         // hide checkpoint 时才退回逐边界 bounded replay（兼容旧历史）。
-        const preferredHideCheckpoint = frame.perSheetCheckpoints?.[change.sheetKey];
+        const preferredHideCheckpoint = getLatestFrameSheetCheckpoint_ACU(frame, change.sheetKey);
         const revealSource = await resolveRevealSource_ACU(
           chat,
           isolationKey,
@@ -4137,12 +4261,14 @@ export async function commitCurrentFloorTemplateChanges_ACU(
           change.sheetKey,
           preferredHideCheckpoint,
           revealCheckpointSources.get(change.sheetKey),
+          { definition: change.sheetData, lifecycle },
         );
         assertTemplateCommitChatContext_ACU(chat, options);
         if (revealSource.status === 'resolved') {
           // 能定位到可信历史可见数据 → 曾被隐藏的表，reveal 恢复"离开时最新状态"（语义1）。
           logDebug_ACU(`[V2 Persist] reveal_source_resolved: requestId=${options.requestId || 'unknown'}, sheetKey=${change.sheetKey}, sourceKind=${revealSource.sourceKind}, sourceMessageIndex=${revealSource.messageIndex}。`);
           revealDataBySheet.set(change.sheetKey, revealSource.sheetData);
+          revealKeyBySheet.set(change.sheetKey, revealSource.sheetKey ?? change.sheetKey);
           continue;
         }
         if (revealSource.status === 'indeterminate') {
@@ -4189,7 +4315,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
     // 缺失时退回逐边界 bounded replay（兼容旧历史）；两者都不可信才 fail-closed；
     // 仅当历史上完全不存在该表（not_found）时才回退 caller 的模板结构（语义同 introduction）。
     for (const change of requestedChanges.filter(item => item.kind === 'reveal')) {
-      const preferredHideCheckpoint = frame.perSheetCheckpoints?.[change.sheetKey];
+      const preferredHideCheckpoint = getLatestFrameSheetCheckpoint_ACU(frame, change.sheetKey);
       const revealSource = await resolveRevealSource_ACU(
         chat,
         isolationKey,
@@ -4197,11 +4323,13 @@ export async function commitCurrentFloorTemplateChanges_ACU(
         change.sheetKey,
         preferredHideCheckpoint,
         revealCheckpointSources.get(change.sheetKey),
+        { definition: change.sheetData, lifecycle },
       );
       assertTemplateCommitChatContext_ACU(chat, options);
       if (revealSource.status === 'resolved') {
         logDebug_ACU(`[V2 Persist] reveal_source_resolved: requestId=${options.requestId || 'unknown'}, sheetKey=${change.sheetKey}, sourceKind=${revealSource.sourceKind}, sourceMessageIndex=${revealSource.messageIndex}。`);
         revealDataBySheet.set(change.sheetKey, revealSource.sheetData);
+        revealKeyBySheet.set(change.sheetKey, revealSource.sheetKey ?? change.sheetKey);
         continue;
       }
       if (revealSource.status === 'indeterminate') {
@@ -4215,8 +4343,9 @@ export async function commitCurrentFloorTemplateChanges_ACU(
     }
 
     // 统一写入 reveal checkpoint（timeline: sheet_reveal，回放语义同 rebase）。
-    for (const [sheetKey, revealData] of revealDataBySheet) {
-      if (Object.prototype.hasOwnProperty.call(activeReplayState, sheetKey)) {
+    for (const [requestedKey, revealData] of revealDataBySheet) {
+      const sheetKey = revealKeyBySheet.get(requestedKey) ?? requestedKey;
+      if (sheetKey === requestedKey && Object.prototype.hasOwnProperty.call(activeReplayState, sheetKey)) {
         throw new Error(`V2 sheet reveal requires a hidden sheet: sheetKey=${sheetKey} 仍存在于 active checkpoint state。`);
       }
       const existingCheckpoint = frame.perSheetCheckpoints?.[sheetKey];
@@ -4227,7 +4356,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
       // （加列/减列/改名）。落盘前把恢复数据 rebase 到当前模板列集——匹配列继承数据、
       // 新列按契约填充、模板缺失列进尾部隐藏列（列级休眠，数据不删）。
       // not_found 回退时 revealData 就是模板结构本身（同一对象引用），无需再协调。
-      const revealTemplateStructure = revealSheets.get(sheetKey) ?? introductionSheets.get(sheetKey);
+      const revealTemplateStructure = revealSheets.get(requestedKey) ?? introductionSheets.get(requestedKey);
       let effectiveRevealData = revealData;
       if (revealTemplateStructure && revealTemplateStructure !== revealData) {
         const rebase = reconcileRevealedSheetWithTemplate_ACU(revealData, revealTemplateStructure, sheetKey, storageMode);
@@ -4235,6 +4364,11 @@ export async function commitCurrentFloorTemplateChanges_ACU(
         // 与其他 targetSheetData 同一关卡：协调结果必须能构造合法 hydrate 映射。
         if (storageMode === 'sqlite') createSheetInsertPlan(effectiveRevealData);
         logDebug_ACU(`[V2 Persist] reveal_rebase: requestId=${options.requestId || 'unknown'}, sheetKey=${sheetKey}, inherited=${rebase.audit.inheritedColumns.length}, added=${rebase.audit.addedColumns.length}, hidden=${rebase.audit.hiddenColumns.length}, changed=${rebase.changed}。`);
+      }
+      if (requestedKey !== sheetKey) {
+        effectiveRevealData.sourceData = { ...effectiveRevealData.sourceData,
+          tableAliases: [...new Set([...(effectiveRevealData.sourceData?.tableAliases || []), requestedKey])],
+        };
       }
       const scheduleSummary = scheduleSummaryBySheet[sheetKey];
       checkpoints.push({
@@ -4246,7 +4380,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
         ...(scheduleSummary ? { scheduleSummary: deepClone_ACU(scheduleSummary) } : {}),
         event: { filledSheetKeys: [], changedSheetKeys: [sheetKey] },
         timeline: {
-          kind: 'sheet_reveal' as const,
+          kind: Object.prototype.hasOwnProperty.call(activeReplayState, sheetKey) ? 'sheet_rebase' as const : 'sheet_reveal' as const,
           activateAtMessageIndex: target.index,
           afterSeq: targetFrameLastLogSeq,
         },
@@ -4334,12 +4468,8 @@ export async function commitCurrentFloorTemplateChanges_ACU(
         timeline: {
           kind: 'sheet_hide' as const,
           activateAtMessageIndex: target.index,
-          // hide 必须晚于本次提交写入的 log 生效：该 log（seq = targetFrameLastLogSeq + 1）
-          // 可能仍包含针对待隐藏表的合法 operation（例如切模板前刚补齐填表）。
-          // 回放判定是 afterSeq < nextSeq，用 targetFrameLastLogSeq 会让 hide 抢在该 log 之前
-          // 删表，导致后续 operation 撞上 no such table。
-          // introduction / rebase / reveal 相反，必须早于本批 log，故仍用 targetFrameLastLogSeq。
-          afterSeq: targetFrameLastLogSeq + 1,
+          // 只有本次确实追加日志时才越过该日志；纯模板提交使用现有日志尾。
+          afterSeq: targetFrameLastLogSeq + (requestedChanges.some(change => change.kind === 'operations' && change.operations.length > 0) ? 1 : 0),
         },
         baseRevision: options.baseRevision !== undefined ? options.baseRevision : transactionContext.baseRevision,
       });
@@ -4400,6 +4530,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
         frame.checkpoint = terminalCheckpoint.checkpoint;
         frame.logEntries = [];
         delete frame.perSheetCheckpoints;
+        delete frame.sheetTimelineEvents;
         frame.headRevision = buildCommitRevision_ACU('checkpoint', generateEntryId_ACU());
         persistedCheckpoints = [];
         hardDeleteCheckpointCreated = true;
@@ -4414,10 +4545,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
         );
         if (candidateValidationError) throw new Error(candidateValidationError);
       } else {
-        frame.perSheetCheckpoints = {
-          ...(frame.perSheetCheckpoints || {}),
-          ...Object.fromEntries(checkpoints.map(checkpoint => [checkpoint.sheetKey, checkpoint])),
-        };
+        appendFrameSheetTimelineEvents_ACU(frame, checkpoints);
         if (entryOptions) appendMutationLogEntry_ACU(frame, entryOptions);
       }
       if (activeReplay.requiresCheckpointConvergence || activeReplay.compatibilityRepairs?.length) {
@@ -4446,10 +4574,14 @@ export async function commitCurrentFloorTemplateChanges_ACU(
         enabled: settings_ACU.dataIsolationEnabled,
         code: settings_ACU.dataIsolationCode,
       });
-      const guideUpdated = setChatSheetGuideDataForIsolationKey_ACU(isolationKey, options.guideData, {
+      const sheetKeyRedirects: SheetKeyRedirect_ACU[] = [...revealKeyBySheet]
+        .filter(([requestedKey, sheetKey]) => requestedKey !== sheetKey)
+        .map(([requestedKey, sheetKey]) => ({ requestedKey, sheetKey, uid: revealDataBySheet.get(requestedKey)?.uid }));
+      assertTemplateCommitChatContext_ACU(chat, options);
+      const guideUpdated = setChatSheetGuideDataForIsolationKey_ACU(isolationKey, redirectSheetKeys_ACU(options.guideData, sheetKeyRedirects), {
         reason: options.reason || 'visualizer_v2_schema_change',
         syncTemplateScope: options.syncTemplateScope === true,
-        templateSource: options.templateSource,
+        templateSource: redirectSheetKeys_ACU(options.templateSource, sheetKeyRedirects),
         presetName: options.presetName,
         source: options.source,
         updatedAt: createdAt,
@@ -4465,6 +4597,7 @@ export async function commitCurrentFloorTemplateChanges_ACU(
         mode: 'v2_commit',
         messageIndex: target.index,
         checkpoints: persistedCheckpoints,
+        ...(sheetKeyRedirects.length > 0 ? { sheetKeyRedirects } : {}),
         removedNullRowCount,
         ...(deletedSheetKeys.length > 0 ? { deletedSheetKeys, purgedMessageCount, hardDeleteCheckpointCreated } : {}),
       };
