@@ -3,7 +3,8 @@
  * 从 injection-engine.ts 拆出
  */
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
-import { isWorldbookApiAvailable_ACU, getLorebookEntries_ACU, setLorebookEntries_ACU, createLorebookEntries_ACU, deleteLorebookEntries_ACU } from '../../data/gateways/worldbook-gateway';
+import { isWorldbookApiAvailable_ACU } from '../../data/gateways/worldbook-gateway';
+import { liveTableWorldbookEntryStore_ACU, type TableWorldbookEntryStore_ACU } from './table-worldbook-entry-store';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { getImportBatchPrefix_ACU } from '../../shared/constants';
 import { ensureExportConfigDefaults_ACU, normalizePlacementConfig_ACU, getFixedPlacementDefaultsForTable_ACU, applyPlacementToEntry_ACU, isEntryPlacementMatched_ACU } from './injection-engine-config';
@@ -25,8 +26,9 @@ function projectWorldbookTable_ACU(table: any): { headers: string[]; rows: any[]
       return raw.split(/[,，]/).map(k => k.trim()).filter(Boolean);
   }
 
-  export async function updateOutlineTableEntry_ACU(outlineTable: any, isImport = false, targetLorebookOverride: string | null = null) { // [外部导入] 添加 isImport 标志
-    if (!isWorldbookApiAvailable_ACU()) return;
+  export async function updateOutlineTableEntry_ACU(outlineTable: any, isImport = false, targetLorebookOverride: string | null = null, entryStore?: TableWorldbookEntryStore_ACU) { // [外部导入] 添加 isImport 标志
+    if (!entryStore && !isWorldbookApiAvailable_ACU()) return;
+    const store = entryStore ?? liveTableWorldbookEntryStore_ACU;
     const primaryLorebookName = targetLorebookOverride || await getInjectionTargetLorebook_ACU();
     if (!primaryLorebookName) {
         logWarn_ACU('Cannot update outline table entry: No injection target lorebook set.');
@@ -47,14 +49,14 @@ function projectWorldbookTable_ACU(table: any): { headers: string[]; rows: any[]
     const OUTLINE_COMMENT = isoPrefix + baseComment;
 
     try {
-        const allEntries = await getLorebookEntries_ACU(primaryLorebookName);
+        const allEntries = await store.get(primaryLorebookName);
         const usedOrders = buildUsedOrderSet_ACU(allEntries);
         const existingEntry = allEntries.find(e => e.comment === OUTLINE_COMMENT);
 
         // If no outline table data, delete the entry if it exists
         if (!outlineTable || outlineTable.content.length < 2) {
             if (existingEntry) {
-                await deleteLorebookEntries_ACU(primaryLorebookName, [existingEntry.uid]);
+                await store.remove(primaryLorebookName, [existingEntry.uid]);
                 logDebug_ACU('Deleted outline table entry as there is no data.');
             }
             // [修复] 即使没有outlineTable数据，也要同步更新"纪要索引"条目的enabled状态。
@@ -63,7 +65,7 @@ function projectWorldbookTable_ACU(table: any): { headers: string[]; rows: any[]
                 const existingIndexEntry = allEntries.find(e => e.comment && e.comment.endsWith('TavernDB-ACU-CustomExport-纪要索引'));
                 if (existingIndexEntry) {
                     if (existingIndexEntry.enabled !== summaryIndexEntryEnabled) {
-                        await setLorebookEntries_ACU(primaryLorebookName, [{
+                        await store.set(primaryLorebookName, [{
                             uid: existingIndexEntry.uid,
                             enabled: summaryIndexEntryEnabled,
                         }]);
@@ -71,6 +73,7 @@ function projectWorldbookTable_ACU(table: any): { headers: string[]; rows: any[]
                     }
                 }
             } catch (indexError) {
+                if (entryStore) throw indexError;
                 logWarn_ACU('Failed to update 纪要索引 entry enabled state (no outline data):', indexError);
             }
             return;
@@ -110,7 +113,7 @@ function projectWorldbookTable_ACU(table: any): { headers: string[]; rows: any[]
                     type: 'constant',
                     prevent_recursion: true,
                 }, outlineFixedPlacement);
-                await setLorebookEntries_ACU(primaryLorebookName, [updatedEntry]);
+                await store.set(primaryLorebookName, [updatedEntry]);
                 logDebug_ACU(`Successfully updated the outline table lorebook entry. enabled=${outlineEntryEnabled} (0TK占用模式=${zeroTkOccupyMode})`);
             } else {
                 logDebug_ACU('Outline table lorebook entry is already up-to-date.');
@@ -126,7 +129,7 @@ function projectWorldbookTable_ACU(table: any): { headers: string[]; rows: any[]
                 order: allocOrder_ACU(usedOrders, outlineFixedPlacement.order, 1, 99999),
                 prevent_recursion: true,
             }, outlineFixedPlacement);
-            await createLorebookEntries_ACU(primaryLorebookName, [newEntry]);
+            await store.create(primaryLorebookName, [newEntry]);
             logDebug_ACU(`Outline table lorebook entry not found. Created a new one. enabled=${outlineEntryEnabled} (0TK占用模式=${zeroTkOccupyMode})`);
         }
 
@@ -136,7 +139,7 @@ function projectWorldbookTable_ACU(table: any): { headers: string[]; rows: any[]
             const existingIndexEntry = allEntries.find(e => e.comment && e.comment.endsWith('TavernDB-ACU-CustomExport-纪要索引'));
             if (existingIndexEntry) {
                 if (existingIndexEntry.enabled !== summaryIndexEntryEnabled) {
-                    await setLorebookEntries_ACU(primaryLorebookName, [{
+                    await store.set(primaryLorebookName, [{
                         uid: existingIndexEntry.uid,
                         enabled: summaryIndexEntryEnabled,
                     }]);
@@ -144,6 +147,7 @@ function projectWorldbookTable_ACU(table: any): { headers: string[]; rows: any[]
                 }
             }
         } catch (indexError) {
+            if (entryStore) throw indexError;
             logWarn_ACU('Failed to update 纪要索引 entry enabled state:', indexError);
         }
     } catch(error) {
@@ -151,8 +155,9 @@ function projectWorldbookTable_ACU(table: any): { headers: string[]; rows: any[]
     }
   }
 
-  export async function updateSummaryTableEntries_ACU(summaryTable: any, isImport = false, targetLorebookOverride: string | null = null) { // [外部导入] 添加 isImport 标志
-    if (!isWorldbookApiAvailable_ACU()) return;
+  export async function updateSummaryTableEntries_ACU(summaryTable: any, isImport = false, targetLorebookOverride: string | null = null, entryStore?: TableWorldbookEntryStore_ACU) { // [外部导入] 添加 isImport 标志
+    if (!entryStore && !isWorldbookApiAvailable_ACU()) return;
+    const store = entryStore ?? liveTableWorldbookEntryStore_ACU;
     const primaryLorebookName = targetLorebookOverride || await getInjectionTargetLorebook_ACU();
     if (!primaryLorebookName) {
         logWarn_ACU('Cannot update summary entries: No injection target lorebook set.');
@@ -169,7 +174,7 @@ function projectWorldbookTable_ACU(table: any): { headers: string[]; rows: any[]
     const SMALL_SUMMARY_PREFIX = isoPrefix + baseSmallSummaryPrefix;
 
     try {
-        const allEntries = await getLorebookEntries_ACU(primaryLorebookName);
+        const allEntries = await store.get(primaryLorebookName);
         const usedOrders = buildUsedOrderSet_ACU(allEntries);
         
         // --- 1. Delete old summary entries ---
@@ -180,7 +185,7 @@ function projectWorldbookTable_ACU(table: any): { headers: string[]; rows: any[]
                 .map(e => e.uid);
 
             if (uidsToDelete.length > 0) {
-                await deleteLorebookEntries_ACU(primaryLorebookName, uidsToDelete);
+                await store.remove(primaryLorebookName, uidsToDelete);
                 logDebug_ACU(`Deleted ${uidsToDelete.length} old summary lorebook entries.`);
             }
         }
@@ -233,23 +238,24 @@ function projectWorldbookTable_ACU(table: any): { headers: string[]; rows: any[]
         });
         
         if (entriesToCreate.length > 0) {
-            await createLorebookEntries_ACU(primaryLorebookName, entriesToCreate);
+            await store.create(primaryLorebookName, entriesToCreate);
             logDebug_ACU(`Successfully created ${entriesToCreate.length} new summary entries.`);
             // [兜底] 某些实现可能会在创建时自动改写/规范化 order，导致同表行条目仍然各占一个深度。
             // 这里在创建完成后，强制把"总结条目/小总结条目"统一回写到同一个 order。
             try {
-                const latest = await getLorebookEntries_ACU(primaryLorebookName);
+                const latest = await store.get(primaryLorebookName);
                 const toFix = latest.filter(e => {
                     const c = e?.comment || '';
                     return c.startsWith(SUMMARY_ENTRY_PREFIX) || c.startsWith(SMALL_SUMMARY_PREFIX);
                 });
                 if (toFix.length > 0) {
-                    await setLorebookEntries_ACU(
+                    await store.set(
                         primaryLorebookName,
                         toFix.map(e => applyPlacementToEntry_ACU({ uid: e.uid, order: sharedSummaryDataOrder }, summaryFixedPlacement))
                     );
                 }
             } catch (e) {
+                if (entryStore) throw e;
                 logWarn_ACU('[SummaryOrderFix] Failed to enforce shared order for summary entries:', e);
             }
         }
@@ -259,8 +265,9 @@ function projectWorldbookTable_ACU(table: any): { headers: string[]; rows: any[]
     }
   }
 
-  export async function updateImportantPersonsRelatedEntries_ACU(importantPersonsTable: any, isImport = false, targetLorebookOverride: string | null = null) { // [外部导入] 添加 isImport 标志
-    if (!isWorldbookApiAvailable_ACU()) return;
+  export async function updateImportantPersonsRelatedEntries_ACU(importantPersonsTable: any, isImport = false, targetLorebookOverride: string | null = null, entryStore?: TableWorldbookEntryStore_ACU) { // [外部导入] 添加 isImport 标志
+    if (!entryStore && !isWorldbookApiAvailable_ACU()) return;
+    const store = entryStore ?? liveTableWorldbookEntryStore_ACU;
     const primaryLorebookName = targetLorebookOverride || await getInjectionTargetLorebook_ACU();
     if (!primaryLorebookName) {
         logWarn_ACU('Cannot update important persons entries: No injection target lorebook set.');
@@ -285,7 +292,7 @@ function projectWorldbookTable_ACU(table: any): { headers: string[]; rows: any[]
     );
 
     try {
-        const allEntries = await getLorebookEntries_ACU(primaryLorebookName);
+        const allEntries = await store.get(primaryLorebookName);
         const usedOrders = buildUsedOrderSet_ACU(allEntries);
         
         // --- 1. 全量删除 ---
@@ -297,7 +304,7 @@ function projectWorldbookTable_ACU(table: any): { headers: string[]; rows: any[]
                 .map(e => e.uid);
 
             if (uidsToDelete.length > 0) {
-                await deleteLorebookEntries_ACU(primaryLorebookName, uidsToDelete);
+                await store.remove(primaryLorebookName, uidsToDelete);
                 logDebug_ACU(`Deleted ${uidsToDelete.length} old person-related lorebook entries.`);
             }
         }
@@ -406,11 +413,11 @@ function projectWorldbookTable_ACU(table: any): { headers: string[]; rows: any[]
         indexEntryData.order = personsOrderBlockBase + 2; // index/footer
         const allCreates = [...personEntriesToCreate, applyPlacementToEntry_ACU(indexEntryData, personsIndexPlacement)];
         if (allCreates.length > 0) {
-            await createLorebookEntries_ACU(primaryLorebookName, allCreates);
+            await store.create(primaryLorebookName, allCreates);
             logDebug_ACU(`Successfully created ${allCreates.length} new person-related entries.`);
             // [兜底] 创建完成后强制回写 order，避免创建接口自动改写导致仍然"每人一深度"
             try {
-                const latest = await getLorebookEntries_ACU(primaryLorebookName);
+                const latest = await store.get(primaryLorebookName);
                 const header = latest.find(e => e.comment === personsHeaderEntryData.comment);
                 const index = latest.find(e => e.comment === PERSON_INDEX_COMMENT);
                 const rows = latest.filter(e => (e?.comment || '').startsWith(PERSON_ENTRY_PREFIX));
@@ -419,9 +426,10 @@ function projectWorldbookTable_ACU(table: any): { headers: string[]; rows: any[]
                 rows.forEach(e => { if (e?.uid) updates.push(applyPlacementToEntry_ACU({ uid: e.uid, order: personsOrderBlockBase + 1 }, personsEntryPlacement)); });
                 if (index?.uid) updates.push(applyPlacementToEntry_ACU({ uid: index.uid, order: personsOrderBlockBase + 2 }, personsIndexPlacement));
                 if (updates.length > 0) {
-                    await setLorebookEntries_ACU(primaryLorebookName, updates);
+                    await store.set(primaryLorebookName, updates);
                 }
             } catch (e) {
+                if (entryStore) throw e;
                 logWarn_ACU('[PersonsOrderFix] Failed to enforce grouped orders for important persons:', e);
             }
         }

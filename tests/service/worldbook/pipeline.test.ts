@@ -4,6 +4,8 @@
  * 世界书数据管线 单元测试
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { buildNativeEntryDefaults_ACU } from '../../../src/shared/host-compat/entry-format';
+import { projectTableWorldbookForRequest_ACU } from '../../../src/service/worldbook/request-table-worldbook';
 
 // ═══ hoisted mocks ═══
 const {
@@ -1509,6 +1511,62 @@ describe('refreshMergedDataAndNotify_ACU', () => {
 });
 
 describe('updateReadableLorebookEntry_ACU', () => {
+  it('用回滚表格重建本次宿主世界书视图，保留非数据库条目和已加载的原对象', async () => {
+    const data = { sheet_0: { name: '测试表', content: [['row_id', '名称'], ['1', '回滚前缀']] } };
+    mockGetSortedSheetKeys.mockReturnValueOnce(['sheet_0']);
+    mockFormatJsonToReadable.mockImplementationOnce((snapshot: any) => ({
+      readableText: snapshot.sheet_0.content[1][1],
+      summaryTable: null, importantPersonsTable: null, outlineTable: null,
+    }));
+    const current = {
+      ...buildNativeEntryDefaults_ACU(), uid: 1, world: 'test-lorebook',
+      comment: 'TavernDB-ACU-ReadableDataTable', content: 'A 的表格', constant: true,
+    };
+    const unrelated = { uid: 2, world: 'test-lorebook', comment: '手写条目', content: '手写设定' };
+    const otherBook = { uid: 1, world: '另一本书', comment: '其他条目', content: '其他设定' };
+    const loaded = { chatLore: [current, unrelated], globalLore: [otherBook] };
+
+    await projectTableWorldbookForRequest_ACU(loaded, async () => data, vi.fn());
+
+    expect(loaded.chatLore.find(entry => entry.uid === 1)?.content).toContain('回滚前缀');
+    expect(loaded.chatLore.find(entry => entry.uid === 1)?.content).not.toContain('A 的表格');
+    expect(loaded.chatLore).toContain(unrelated);
+    expect(loaded.globalLore[0]).toBe(otherBook);
+    expect(current.content).toBe('A 的表格');
+    expect(mockSetCurrentJsonTableData).not.toHaveBeenCalled();
+    expect(mockGwGetLorebookEntries).not.toHaveBeenCalled();
+    expect(mockGwSetLorebookEntries).not.toHaveBeenCalled();
+    expect(mockGwCreateLorebookEntries).not.toHaveBeenCalled();
+    expect(mockGwDeleteLorebookEntries).not.toHaveBeenCalled();
+  });
+
+  it('请求在投影期间取消时不提交世界书草稿', async () => {
+    const entry = {
+      ...buildNativeEntryDefaults_ACU(), uid: 1, world: 'test-lorebook',
+      comment: 'TavernDB-ACU-ReadableDataTable', content: 'A 的表格',
+    };
+    const loaded = { chatLore: [entry] };
+    const closed = new DOMException('已停止', 'AbortError');
+    let current = true;
+    mockUpdateImportantPersonsRelatedEntries.mockImplementationOnce(async () => { current = false; });
+
+    await expect(projectTableWorldbookForRequest_ACU(loaded, async () => ({}), () => {
+      if (!current) throw closed;
+    })).rejects.toBe(closed);
+    expect(loaded.chatLore).toEqual([entry]);
+    expect(loaded.chatLore[0]).toBe(entry);
+  });
+
+  it('回滚后没有表格时只从本次请求移除 A 的数据库条目', async () => {
+    const generated = { uid: 1, world: 'test-lorebook', comment: 'TavernDB-ACU-ReadableDataTable', content: 'A 的表格' };
+    const handWritten = { uid: 2, world: 'test-lorebook', comment: '角色设定' };
+    const loaded = { chatLore: [generated, handWritten] };
+    await projectTableWorldbookForRequest_ACU(loaded, async () => ({}), vi.fn());
+    expect(loaded.chatLore).toEqual([handWritten]);
+    expect(generated.content).toBe('A 的表格');
+    expect(mockGwDeleteLorebookEntries).not.toHaveBeenCalled();
+  });
+
   it('抑制期间只执行清理', async () => {
     mockShouldSuppressWorldbookInjection.mockReturnValue(true);
     await updateReadableLorebookEntry_ACU(false, false);

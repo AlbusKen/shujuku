@@ -15,6 +15,8 @@ const m = vi.hoisted(() => ({
   characterMessageRendered: undefined as undefined | ((messageId?: any, type?: any) => void),
   afterCommands: undefined as undefined | ((type: any, params: any, dryRun: any) => Promise<void>),
   userMessageRendered: undefined as undefined | ((messageId: any) => Promise<void>),
+  worldbookLoaded: undefined as undefined | ((lores: Record<string, any[]>) => Promise<void>),
+  projectSwipeWorldbook: vi.fn(),
   currentChatKey: '',
   settings: { plotSettings: {} } as { plotSettings: Record<string, unknown>; worldSimulationPageEnabled?: boolean; plotSendDisguiseDisabled?: boolean },
   api: { chat: [] as any[], chatId: '', eventTypes: { CHAT_CHANGED: 'chat', MESSAGE_DELETED: 'deleted', MESSAGE_SWIPED: 'swiped', MESSAGE_SENT: 'message_sent', MESSAGE_UPDATED: 'message_updated', MESSAGE_RECEIVED: 'message_received', CHARACTER_MESSAGE_RENDERED: 'character_message_rendered', GENERATION_AFTER_COMMANDS: 'after_commands', GENERATION_STARTED: 'generation_started', GENERATION_ENDED: 'generation_ended', GENERATION_STOPPED: 'generation_stopped' }, eventSource: { on: vi.fn(), makeFirst: vi.fn(), makeLast: vi.fn(), emit: vi.fn() } } as any,
@@ -98,6 +100,9 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
 }));
 vi.mock('../../../src/service/settings/settings-service', () => ({ applyTemplateScopeForCurrentChat_ACU: vi.fn(), loadSettings_ACU: vi.fn() }));
 vi.mock('../../../src/service/worldbook/injection-engine', () => ({ resetScriptStateForNewChat_ACU: m.resetScript }));
+vi.mock('../../../src/service/worldbook/request-table-worldbook', () => ({
+  projectTableWorldbookForRequest_ACU: m.projectSwipeWorldbook,
+}));
 vi.mock('../../../src/service/agent/agent-worldbook-takeover', () => ({ resetPlotAgentWorldbookSessionSnapshot_ACU: m.resetTakeover }));
 vi.mock('../../../src/service/agent/agent-worldbook-config-meta', () => ({ loadAgentWorldbookRuntimeControl_ACU: m.loadAgentControl }));
 vi.mock('../../../src/service/table/table-storage-strategy', () => ({ reloadStorageProvider: vi.fn(), disposeStorageProvider: m.dispose }));
@@ -177,6 +182,8 @@ beforeAll(async () => {
       m.publicCompletionObserver(event, ...args);
     } else if (event === 'chat') {
       await m.chatChanged?.(args[0]);
+    } else if (event === 'worldinfo_entries_loaded') {
+      try { await m.worldbookLoaded?.(args[0]); } catch { /* 宿主吞监听器异常 */ }
     }
   });
   m.api.eventSource.emit = m.hostEmit;
@@ -187,6 +194,7 @@ beforeAll(async () => {
       m.chatMutationHandlers.set(event, callback);
     }
     if (event === 'generation_started') m.generationStarted = callback;
+    if (event === 'worldinfo_entries_loaded') m.worldbookLoaded = callback;
     if (event === 'message_sent') m.messageSent = callback;
     if (event === 'message_received') m.messageReceived = callback;
     if (event === 'character_message_rendered') m.characterMessageRendered = callback;
@@ -493,6 +501,50 @@ async function dispatchCompletionTasks_ACU(): Promise<void> {
 
 describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
   beforeEach(() => { vi.useFakeTimers(); });
+
+  it('原生末楼 Swipe 在新正文交付时把候选意图带入原有填表队列', async () => {
+    m.currentChatKey = 'chat-a';
+    const reply = { is_user: false, mes: 'A', swipe_id: 1, swipes: ['A'] };
+    m.api.chat = [{ is_user: true, mes: '用户' }, reply];
+    await m.chatMutationHandlers.get('swiped')!(1);
+    expect(m.autoUpdate).not.toHaveBeenCalled();
+    m.generationStarted!('swipe', {}, false);
+    reply.mes = 'B';
+    reply.swipes.push('B');
+    m.messageReceived!(1, 'swipe');
+    await dispatchCompletionTasks_ACU();
+    expect(m.autoUpdate).toHaveBeenCalledExactlyOnceWith(undefined, expect.objectContaining({
+      eventType: 'MESSAGE_RECEIVED', nativeSwipe: { index: 1, message: reply, slot: 1, previousBody: 'A' },
+    }));
+  });
+
+  it('原生 Swipe 读取世界书时等待本轮投影，普通生成仍使用原条目', async () => {
+    m.currentChatKey = 'chat-a';
+    m.api.chat = [{ is_user: true, mes: '用户' }, { is_user: false, mes: 'A', swipe_id: 1, swipes: ['A'] }];
+    const lores = { globalLore: [{ content: 'A 的表格' }] };
+    let complete!: () => void;
+    m.projectSwipeWorldbook.mockImplementationOnce(async (target, _readData, assertCurrent) => {
+      await new Promise<void>(resolve => { complete = resolve; });
+      assertCurrent();
+      target.globalLore[0] = { content: '回滚后的表格' };
+    });
+    await m.chatMutationHandlers.get('swiped')!(1);
+    m.generationStarted!('swipe', {}, false);
+
+    let loaded = false;
+    const event = m.api.eventSource.emit('worldinfo_entries_loaded', lores).then(() => { loaded = true; });
+    expect(m.projectSwipeWorldbook).toHaveBeenCalledOnce();
+    expect(loaded).toBe(false);
+    expect(lores.globalLore[0].content).toBe('A 的表格');
+    complete();
+    await event;
+    expect(lores.globalLore[0].content).toBe('回滚后的表格');
+    expect(m.autoUpdate).not.toHaveBeenCalled();
+    m.generationStarted!('normal', {}, false);
+    await m.api.eventSource.emit('worldinfo_entries_loaded', lores);
+    expect(m.projectSwipeWorldbook).toHaveBeenCalledOnce();
+  });
+
   it.each(['MESSAGE_DELETED', 'MESSAGE_SWIPED'] as const)('%s 作废两条自动链的旧通知，仅保留数据刷新', async eventName => {
     m.currentChatKey = 'chat-a';
     m.api.chat = [{ is_user: true, mes: '用户' }, { is_user: false, mes: '旧正文' }];

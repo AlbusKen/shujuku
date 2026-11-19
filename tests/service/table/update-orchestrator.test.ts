@@ -1223,6 +1223,42 @@ describe('processUpdatesBatch_ACU', () => {
     expect(result.success).toBe(true);
   });
 
+  it('候选视图沿用普通批大小与前置用户消息，逐批传给 SQLite 执行入口', async () => {
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    const { getChatSheetGuideDataForIsolationKey_ACU } = await import('../../../src/service/template/chat-scope');
+    const sqlite = vi.mocked(isSqliteMode);
+    const guide = vi.mocked(getChatSheetGuideDataForIsolationKey_ACU);
+    const template = vi.mocked(parseTableTemplateJson_ACU);
+    const previousMode = sqlite.getMockImplementation()!;
+    const previousGuide = guide.getMockImplementation()!;
+    const previousTemplate = template.getMockImplementation()!;
+    sqlite.mockReturnValue(true);
+    guide.mockReturnValue(null);
+    template.mockReturnValue({
+      sheet_0: { name: '表A', content: [['row_id', '值']] },
+    } as any);
+    mockGetChatArray_ACU.mockReturnValue([{ is_user: false, mes: 'A' }]);
+    const chatView = { assertCurrent: vi.fn(), chat: [
+      { is_user: false, mes: '开场白' }, { is_user: true, mes: '问题' },
+      { is_user: false, mes: '中间回复' }, { is_user: true, mes: '继续' }, { is_user: false, mes: 'B' },
+    ] };
+    const execute = vi.fn().mockResolvedValue({ success: true, modifiedKeys: [] });
+
+    try {
+      const result = await processUpdatesBatch_ACU([0, 2, 4], 'auto_standard', { chatView, batchSize: 2 }, execute);
+      expect(result.success).toBe(true);
+      expect(execute.mock.calls.map(([messages, target]) => [target, messages.map((message: any) => message.mes)]))
+        .toEqual([[2, ['开场白', '问题', '中间回复']], [4, ['继续', 'B']]]);
+      expect(execute.mock.calls.every(call => call[6].chatView === chatView)).toBe(true);
+      expect(mockEnsureLegacyStorageMigratedBeforeWrite).not.toHaveBeenCalled();
+    } finally {
+      sqlite.mockImplementation(previousMode);
+      guide.mockImplementation(previousGuide);
+      template.mockImplementation(previousTemplate);
+    }
+  });
+
   it('迁移失败时不执行任何批次更新', async () => {
     mockEnsureLegacyStorageMigratedBeforeWrite.mockResolvedValueOnce({ success: false, error: 'mixed storage evidence insufficient' });
     const mockExecute = vi.fn();
@@ -6730,6 +6766,28 @@ describe('processGroupedRuntimeChunk_ACU', () => {
     expect(mockPersistTablesToChatMessage).toHaveBeenCalledTimes(1);
     expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
     expect(mockUpdateReadableLorebookEntry).toHaveBeenCalledTimes(1);
+  });
+
+  it('同一个正常分组执行器接受候选视图并把前楼和末楼批次写给该视图', async () => {
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue({
+      mate: { type: 'acu' }, sheet_0: { name: '表A', content: [['row_id', '值'], ['1', 'base-a']] },
+    } as any);
+    mockGetChatArray_ACU.mockReturnValue([{ is_user: false, mes: 'A' }]);
+    const chatView = { assertCurrent: vi.fn(), chat: [
+      { is_user: false, mes: '开场白' }, { is_user: true, mes: '问题' },
+      { is_user: false, mes: '中间回复' }, { is_user: true, mes: '继续' }, { is_user: false, mes: 'B' },
+    ] };
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>sheet_0</tableEdit>');
+
+    const result = await processGroupedRuntimeChunk_ACU([
+      { key: 'group_a', groupId: 0, indices: [0, 2, 4], batchSize: 2, sheetKeys: ['sheet_0'], requestOptions: null },
+    ], 'auto_independent', { chatView });
+    expect(result).toMatchObject({ success: true, committedBucketCount: 2 });
+    expect(mockPersistTablesToChatMessage.mock.calls.map(([options]) => options.targetMessageIndex)).toEqual([2, 4]);
+    expect(mockPersistTablesToChatMessage.mock.calls.every(([options]) => options.chatView === chatView)).toBe(true);
+    expect(mockPrepareAIInput.mock.calls.at(-1)?.[0].map((message: any) => message.mes)).toEqual(['继续', 'B']);
+    expect(mockUpdateReadableLorebookEntry).not.toHaveBeenCalled();
   });
 
   it('空分组直接成功且不调用 AI', async () => {

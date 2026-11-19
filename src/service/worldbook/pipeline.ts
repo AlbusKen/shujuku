@@ -1,7 +1,8 @@
+import { liveTableWorldbookEntryStore_ACU, type TableWorldbookEntryStore_ACU } from './table-worldbook-entry-store';
 import type { AgentWorldbookControlSnapshot_ACU, AgentWorldbookControlSnapshotEntry_ACU } from '../../shared/models/agent-worldbook-model';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
 import { allChatMessages_ACU, coreApisAreReady_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentJsonTableData_ACU, _set_allChatMessages_ACU} from '../runtime/state-manager';
-import { getLorebookEntriesRequired_ACU as gwGetLorebookEntriesRequired_ACU, getLorebookEntries_ACU as gwGetLorebookEntries_ACU, setLorebookEntries_ACU as gwSetLorebookEntries_ACU, createLorebookEntries_ACU as gwCreateLorebookEntries_ACU, deleteLorebookEntries_ACU as gwDeleteLorebookEntries_ACU, listLorebooks_ACU, getWorldBooks_ACU as gwGetWorldBooks_ACU, isWorldbookApiAvailable_ACU, normalizeLorebookEntriesForRead_ACU, resolveLorebookNameFromList_ACU } from '../../data/gateways/worldbook-gateway';
+import { getLorebookEntriesRequired_ACU as gwGetLorebookEntriesRequired_ACU, getLorebookEntries_ACU as gwGetLorebookEntries_ACU, deleteLorebookEntries_ACU as gwDeleteLorebookEntries_ACU, listLorebooks_ACU, getWorldBooks_ACU as gwGetWorldBooks_ACU, isWorldbookApiAvailable_ACU, normalizeLorebookEntriesForRead_ACU, resolveLorebookNameFromList_ACU } from '../../data/gateways/worldbook-gateway';
 import { getCharLorebooks_ACU, getChatMessages_ACU } from '../../data/gateways/character-gateway';
 import { getChatLength_ACU } from '../../data/gateways/chat-gateway';
 import { saveSettings_ACU } from '../settings/settings-service';
@@ -69,6 +70,21 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
         return;
     }
     
+    await syncReadableTableWorldbookEntries_ACU(mergedData, createIfNeeded, isImport, targetLorebookOverride);
+}
+
+export function renderTableWorldbookEntriesForRequest_ACU(
+  data: Record<string, any>, book: string, store: TableWorldbookEntryStore_ACU,
+): Promise<void> {
+  return syncReadableTableWorldbookEntries_ACU(structuredClone(data), true, false, book, store);
+}
+
+async function syncReadableTableWorldbookEntries_ACU(
+  mergedData: Record<string, any>, createIfNeeded: boolean, isImport: boolean,
+  targetLorebookOverride: string | null, entryStore?: TableWorldbookEntryStore_ACU,
+): Promise<void> {
+    const store = entryStore ?? liveTableWorldbookEntryStore_ACU;
+    const options: [TableWorldbookEntryStore_ACU?] = entryStore ? [entryStore] : [];
     const { readableText, importantPersonsTable, summaryTable, outlineTable } = formatJsonToReadable_ACU(mergedData);
     const hasNonEmptyVisibleCell_ACU = (table: any) => {
         const content = table?.content;
@@ -127,18 +143,18 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
     }
 
     // Call all the individual entry updaters
-    await updateImportantPersonsRelatedEntries_ACU(importantPersonsTable, isImport, targetLorebookOverride);
-    await updateSummaryTableEntries_ACU(summaryTable, isImport, targetLorebookOverride);
-    await updateOutlineTableEntry_ACU(outlineTable, isImport, targetLorebookOverride);
+    await updateImportantPersonsRelatedEntries_ACU(importantPersonsTable, isImport, targetLorebookOverride, ...options);
+    await updateSummaryTableEntries_ACU(summaryTable, isImport, targetLorebookOverride, ...options);
+    await updateOutlineTableEntry_ACU(outlineTable, isImport, targetLorebookOverride, ...options);
 
     // [修复] 自定义导出/按行拆分条目是否需要注入，应以 mergedData 中是否存在真实单元格数据为准，
     // 不能再依赖 readableText 判空。
     // 否则当所有表格都开启“按行拆分”后，readableText 会为空，进而误判为“数据库为空”，
     // 导致本应创建的拆分世界书条目被整体跳过。
     if (hasNonEmptyCellData_ACU) {
-        await updateCustomTableExports_ACU(mergedData, isImport, targetLorebookOverride);
+        await updateCustomTableExports_ACU(mergedData, isImport, targetLorebookOverride, ...options);
     } else {
-        await updateCustomTableExports_ACU(null, isImport, targetLorebookOverride); // 仅清理旧自定义导出条目，不创建新条目
+        await updateCustomTableExports_ACU(null, isImport, targetLorebookOverride, ...options); // 仅清理旧自定义导出条目，不创建新条目
     }
 
     // [修复] 外部导入时优先使用 targetLorebookOverride 参数，避免临时修改 worldbookConfig 被兜底补齐逻辑覆盖
@@ -154,7 +170,7 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
             const WRAPPER_START_COMMENT = isoPrefix + (isImport ? `${IMPORT_PREFIX}TavernDB-ACU-WrapperStart` : 'TavernDB-ACU-WrapperStart');
             const WRAPPER_END_COMMENT = isoPrefix + (isImport ? `${IMPORT_PREFIX}TavernDB-ACU-WrapperEnd` : 'TavernDB-ACU-WrapperEnd');
             
-            const entries = await gwGetLorebookEntries_ACU(primaryLorebookName);
+            const entries = await store.get(primaryLorebookName);
             const usedOrders = buildUsedOrderSet_ACU(entries);
             const db2Entry = entries.find(e => e.comment === READABLE_LOREBOOK_COMMENT);
             const templateObjForGlobalCfg = parseTableTemplateJson_ACU({ stripSeedRows: false });
@@ -193,7 +209,7 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
                 if (memoryEndOld) toDelete.push(memoryEndOld.uid);
 
                 if (toDelete.length > 0) {
-                    await gwDeleteLorebookEntries_ACU(primaryLorebookName, toDelete);
+                    await store.remove(primaryLorebookName, toDelete);
                     logDebug_ACU(`Deleted ${toDelete.length} lorebook entries because database is empty/reset (readable + wrappers).`);
                 }
                 return; // 数据库为空时，不再继续创建或更新
@@ -225,7 +241,7 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
                         order: globalContentOrder,
                         prevent_recursion: true,
                     }, globalFixedIndexPlacement);
-                    await gwSetLorebookEntries_ACU(primaryLorebookName, [updatedDb2Entry]);
+                    await store.set(primaryLorebookName, [updatedDb2Entry]);
                     logDebug_ACU('Successfully updated the global readable lorebook entry.');
                 } else {
                     logDebug_ACU('Global readable lorebook entry is already up-to-date.');
@@ -240,7 +256,7 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
                     order: globalContentOrder,
                     prevent_recursion: true,
                 }, globalFixedIndexPlacement);
-                await gwCreateLorebookEntries_ACU(primaryLorebookName, [newDb2Entry]);
+                await store.create(primaryLorebookName, [newDb2Entry]);
                 logDebug_ACU('Global readable lorebook entry not found. Created a new one.');
             }
 
@@ -248,7 +264,7 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
             const wrapperStartEntry = entries.find(e => e.comment === WRAPPER_START_COMMENT);
             const wrapperStartContent = '<最新数据与记录>\n以下是在这个时间点，当前场景下剧情相关的最新数据与记录，你在进行剧情分析时必须以此最新的数据为准，以下数据与记录的优先级高于其他任何背景设定：\n\n';
             if (!wrapperStartEntry) {
-                await gwCreateLorebookEntries_ACU(primaryLorebookName, [applyPlacementToEntry_ACU({
+                await store.create(primaryLorebookName, [applyPlacementToEntry_ACU({
                     comment: WRAPPER_START_COMMENT,
                     content: wrapperStartContent,
                     keys: ['TavernDB-ACU-WrapperStart-Key'],
@@ -267,7 +283,7 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
                     getEntryOrderNumber_ACU(wrapperStartEntry) !== wrapperStartOrder ||
                     !isEntryPlacementMatched_ACU(wrapperStartEntry, globalFixedIndexPlacement);
                 if (wrapperStartNeedsUpdate) {
-                    await gwSetLorebookEntries_ACU(primaryLorebookName, [
+                    await store.set(primaryLorebookName, [
                         applyPlacementToEntry_ACU({
                             uid: wrapperStartEntry.uid,
                             content: wrapperStartContent,
@@ -296,7 +312,7 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
                 if (memoryEndEntry) memoryEntriesToDelete.push(memoryEndEntry.uid);
                 
                 if (memoryEntriesToDelete.length > 0) {
-                    await gwDeleteLorebookEntries_ACU(primaryLorebookName, memoryEntriesToDelete);
+                    await store.remove(primaryLorebookName, memoryEntriesToDelete);
                     logDebug_ACU(`Deleted ${memoryEntriesToDelete.length} MemoryStart/MemoryEnd entries because summary table is empty.`);
                 }
             } else {
@@ -336,7 +352,7 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
                     return c.startsWith(SUMMARY_ENTRY_PREFIX2) || c.startsWith(SMALL_SUMMARY_PREFIX2);
                 });
                 if (summaryEntriesToReorder.length > 0) {
-                    await gwSetLorebookEntries_ACU(
+                    await store.set(
                         primaryLorebookName,
                         summaryEntriesToReorder.map(e => applyPlacementToEntry_ACU({ uid: e.uid, order: summaryDataOrder }, summaryFixedEntryPlacement))
                     );
@@ -344,7 +360,7 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
                 
                 if (!memoryStartEntry) {
                     // 创建新条目
-                    await gwCreateLorebookEntries_ACU(primaryLorebookName, [applyPlacementToEntry_ACU({
+                    await store.create(primaryLorebookName, [applyPlacementToEntry_ACU({
                             comment: MEMORY_START_COMMENT,
                             content: memoryStartContent,
                             keys: ['AM'],
@@ -360,7 +376,7 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
                         (getEntryOrderNumber_ACU(memoryStartEntry) !== memoryStartOrder) ||
                         !isEntryPlacementMatched_ACU(memoryStartEntry, summaryFixedIndexPlacement);
                     if (needsUpdate) {
-                        await gwSetLorebookEntries_ACU(primaryLorebookName, [{
+                        await store.set(primaryLorebookName, [{
                             ...applyPlacementToEntry_ACU({
                                 uid: memoryStartEntry.uid,
                                 content: memoryStartContent,
@@ -376,7 +392,7 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
 
                 // [新增] 创建 MemoryEnd 条目
                 if (!memoryEndEntry) {
-                    await gwCreateLorebookEntries_ACU(primaryLorebookName, [applyPlacementToEntry_ACU({
+                    await store.create(primaryLorebookName, [applyPlacementToEntry_ACU({
                             comment: MEMORY_END_COMMENT,
                             content: '</过往记忆>',
                             keys: ['AM'],
@@ -390,7 +406,7 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
                         (getEntryOrderNumber_ACU(memoryEndEntry) !== memoryEndOrder) ||
                         !isEntryPlacementMatched_ACU(memoryEndEntry, summaryFixedIndexPlacement);
                     if (needsUpdate) {
-                        await gwSetLorebookEntries_ACU(primaryLorebookName, [{
+                        await store.set(primaryLorebookName, [{
                             ...applyPlacementToEntry_ACU({
                                 uid: memoryEndEntry.uid,
                                 order: memoryEndOrder,
@@ -409,7 +425,7 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
             const wrapperEndEntry = entries.find(e => e.comment === WRAPPER_END_COMMENT);
             const wrapperEndContent = '</最新数据与记录>';
             if (!wrapperEndEntry) {
-                await gwCreateLorebookEntries_ACU(primaryLorebookName, [applyPlacementToEntry_ACU({
+                await store.create(primaryLorebookName, [applyPlacementToEntry_ACU({
                     comment: WRAPPER_END_COMMENT,
                     content: wrapperEndContent,
                     keys: ['TavernDB-ACU-WrapperEnd-Key'],
@@ -428,7 +444,7 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
                     getEntryOrderNumber_ACU(wrapperEndEntry) !== wrapperEndOrder ||
                     !isEntryPlacementMatched_ACU(wrapperEndEntry, globalFixedIndexPlacement);
                 if (wrapperEndNeedsUpdate) {
-                    await gwSetLorebookEntries_ACU(primaryLorebookName, [
+                    await store.set(primaryLorebookName, [
                         applyPlacementToEntry_ACU({
                             uid: wrapperEndEntry.uid,
                             content: wrapperEndContent,
@@ -441,6 +457,7 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
                 }
             }
         } catch(error) {
+            if (entryStore) throw error;
             // not-found 属于目标世界书重命名/切换期间的瞬态形态：注入本身可跳过（下次
             // 触发会按新解析结果重建条目），只记 warn；其余失败仍按 error 上报。
             if (classifyLorebookReadError_ACU(error) === 'lorebook_not_found') {

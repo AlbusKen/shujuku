@@ -1,4 +1,5 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
+import type { TableFillChatView_ACU } from './table-fill-request-guard';
 import { readIsolatedDataContainer_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
@@ -649,6 +650,7 @@ export async function commitStagedSheetsAtFullBoundaryAtomic_ACU(
     stagedSnapshot: Record<string, any>;
     targetSheetKeys: readonly string[];
     signal?: AbortSignal;
+    chatView?: TableFillChatView_ACU;
   },
 ): Promise<TableFillBoundaryCommitResult_ACU> {
   const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
@@ -668,7 +670,8 @@ export async function commitStagedSheetsAtFullBoundaryAtomic_ACU(
       return failBoundary_ACU('staging_scope_changed', 'boundary commit 复检失败：chatKey 或 isolationKey 已切换。');
     }
 
-    const chat = getChatArray_ACU();
+    options.chatView?.assertCurrent();
+    const chat = options.chatView?.chat ?? getChatArray_ACU();
     const fullIndices: number[] = [];
     for (let index = 0; index < chat.length; index += 1) {
       const message = chat[index];
@@ -854,6 +857,7 @@ export async function commitStagedSheetsAtFullBoundaryAtomic_ACU(
     }
 
     if (options.signal?.aborted) throw new DOMException('填表任务已取消。', 'AbortError');
+    options.chatView?.assertCurrent();
     const before = JSON.parse(JSON.stringify(chat));
     try {
       chat.length = 0;
@@ -862,7 +866,7 @@ export async function commitStagedSheetsAtFullBoundaryAtomic_ACU(
         enabled: settings_ACU.dataIsolationEnabled,
         code: settings_ACU.dataIsolationCode,
       });
-      await saveChatToHostStrict_ACU();
+      if (!options.chatView) await saveChatToHostStrict_ACU();
     } catch (error: any) {
       chat.length = 0;
       chat.push(...before);

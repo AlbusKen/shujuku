@@ -135,6 +135,7 @@ import {
 } from '../../../src/service/table/storage-frame-v2-persist';
 import { V2ReplayOperationError_ACU } from '../../../src/service/table/storage-frame-v2-replay';
 import { buildSheetSchemaMigrationOperation_ACU, buildSheetSchemaMigrationOperationV2_ACU } from '../../../src/service/table/table-schema-migration';
+import { NATIVE_SWIPE_TABLE_FIELD_ACU } from '../../../src/data/repositories/chat-message-data-repo';
 
 const sheetA = { uid: 'a', name: 'A', sourceData: {}, content: [['row_id', 'value'], ['1', 'new']], updateConfig: {}, exportConfig: {}, orderNo: 1 } as any;
 const sheetB = { uid: 'b', name: 'B', sourceData: {}, content: [['row_id', 'value']], updateConfig: {}, exportConfig: {}, orderNo: 2 } as any;
@@ -370,6 +371,45 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
       assumeCommitLock: true,
     };
   }
+
+  it('普通填表随增量保存候选标记，沿用合并保存', async () => {
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+    seedFrame({ logEntries: [], perSheetCheckpoints: undefined, manualRefillProgress: undefined });
+    const tail: Record<string, any> = { is_user: false, mes: 'A', swipe_id: 0, swipes: ['A'] };
+    mocks.chat.push(tail);
+    mocks.saveChat.mockImplementationOnce(async () => {
+      expect(tail[NATIVE_SWIPE_TABLE_FIELD_ACU]['']).toMatchObject({
+        version: 2, slot: 0, head: tail.TavernDB_ACU_IsolatedData[''].storageFrame.headRevision,
+      });
+    });
+    const result = await persistTableMutationLogV2_ACU({
+      ...makeReplacementOptions(1), source: 'auto_fill', swipeBody: 'A', replaceExistingIncremental: undefined,
+    });
+    expect(result.saved).toBe(true);
+    expect(mocks.saveChat).toHaveBeenCalledOnce();
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+  });
+
+  it('候选填表沿用 V2 版本写入，只更改提交目标聊天视图', async () => {
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+    seedFrame({ logEntries: [], perSheetCheckpoints: undefined, manualRefillProgress: undefined });
+    const liveTail: Record<string, any> = { is_user: false, mes: 'A' };
+    mocks.chat.push(liveTail);
+    const live = structuredClone(mocks.chat);
+    const detached = structuredClone(mocks.chat);
+    detached[1].mes = 'B';
+    for (const index of [0, 1]) {
+      const result = await persistTableMutationLogV2_ACU({
+        ...makeReplacementOptions(index), source: 'group_fill', replaceExistingIncremental: undefined,
+        chatView: { chat: detached, assertCurrent: vi.fn() },
+      });
+      expect(result.saved).toBe(true);
+    }
+    expect(mocks.chat).toEqual(live);
+    expect(detached.map(message => message.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries.length)).toEqual([1, 1]);
+    expect(mocks.saveChat).not.toHaveBeenCalled();
+    expect(mocks.saveChatStrict).not.toHaveBeenCalled();
+  });
 
   it('拒绝包含空 row_id 的普通 full snapshot，且不修改聊天或保存', async () => {
     const message = seedFrame();
