@@ -221,7 +221,7 @@ async function persistTablesToChatMessageWithLockOption_ACU(
   const currentIsolationKey = getCurrentIsolationKey_ACU();
 
   const persistCore = async () => {
-    const chat = getChatArray_ACU();
+    const chat = options.chatView?.chat ?? getChatArray_ACU();
     assertTableFillRequestCurrent_ACU(options, targetMessageIndex, chat);
     if (!chat || chat.length === 0) {
       logError_ACU('Save failed: Chat history is empty.');
@@ -234,6 +234,7 @@ async function persistTablesToChatMessageWithLockOption_ACU(
     });
 
     if (strategy.mode === 'legacy-v1') {
+      if (options.chatView) return { saved: false, error: '请先将旧聊天表格迁移到 V2。' };
       const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU('persistTablesToChatMessage');
       if (!migration.success) {
         const message = migration.error || 'legacy-v1 table storage migration failed before write.';
@@ -271,7 +272,7 @@ async function persistTablesToChatMessageWithLockOption_ACU(
 
     try {
       const existingGuide = getChatSheetGuideDataForIsolationKey_ACU(currentIsolationKey);
-      if (!existingGuide || !Object.keys(existingGuide).some(k => k.startsWith('sheet_'))) {
+      if (!options.chatView && (!existingGuide || !Object.keys(existingGuide).some(k => k.startsWith('sheet_')))) {
         const templateObjForSeed = parseTableTemplateJson_ACU({ stripSeedRows: false });
         const guideData = buildChatSheetGuideDataFromData_ACU(effectiveTableData, {
           preserveSeedRowsFromGuideData: null,
@@ -297,6 +298,8 @@ async function persistTablesToChatMessageWithLockOption_ACU(
         targetMessageIndex,
         signal: options.signal,
         targetSnapshot: options.targetSnapshot,
+        ...(options.chatView ? { chatView: options.chatView } : {}),
+        ...(options.swipeBody ? { swipeBody: options.swipeBody } : {}),
         source: persistSource,
         afterData: effectiveTableData,
         operations: persistedOperations,
@@ -359,8 +362,7 @@ export async function saveIndependentTableToChatHistory_ACU(
 /**
  * 检查当前聊天是否为首次初始化（无任何已有表格数据）。
  */
-export async function checkIfFirstTimeInit_ACU(): Promise<boolean> {
-  const chat = getChatArray_ACU();
+export async function checkIfFirstTimeInit_ACU(chat = getChatArray_ACU()): Promise<boolean> {
   if (!chat || chat.length === 0) return true;
 
   const currentIsolationKey = getCurrentIsolationKey_ACU();

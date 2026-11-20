@@ -1,8 +1,9 @@
 import { getChatArray_ACU, saveChatToHost_ACU, saveChatToHostCoalesced_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { assertTableFillRequestCurrent_ACU, type TableFillRequestGuard_ACU } from './table-fill-request-guard';
+import { readTailSwipe_ACU } from '../../data/gateways/chat-message-snapshot';
 import { beginMaterialCheckpointSync_ACU, MATERIAL_CHECKPOINT_FIELDS_ACU } from '../chat/material-checkpoint-sync';
 import { advanceProvisionalBridgeCommitProgress_ACU, authorizeManualCatchUpBucketWrite_ACU, readActiveProvisionalBridge_ACU } from './manual-catch-up-provisional-bridge';
-import { cloneIsolatedData_ACU, collectSheetIdentityAliasesForPurge_ACU, purgeManualRefillIncrementalSheetKeysFromStorageFrameV2_ACU, purgeSheetKeysFromMessage_ACU, readIsolatedDataContainer_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
+import { cloneIsolatedData_ACU, collectSheetIdentityAliasesForPurge_ACU, NATIVE_SWIPE_TABLE_FIELD_ACU, purgeManualRefillIncrementalSheetKeysFromStorageFrameV2_ACU, purgeSheetKeysFromMessage_ACU, readIsolatedDataContainer_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
 import { getActiveChatStorageIdentity_ACU, peekChatScopedConfigContainer_ACU, peekChatSheetGuideContainer_ACU, setChatScopedConfigContainer_ACU, setChatSheetGuideContainer_ACU } from '../../data/storage/chat-history';
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
 import type { StorageMode } from '../../shared/table-storage-provider';
@@ -323,6 +324,10 @@ function generateEntryId_ACU(): string {
 
 function buildCommitRevision_ACU(seq: number | 'checkpoint', entryId: string): string {
   return `${seq}:${entryId}`;
+}
+
+export function createTableCheckpointRevisionV2_ACU(): string {
+  return buildCommitRevision_ACU('checkpoint', generateEntryId_ACU());
 }
 
 type AppendMutationLogEntryOptions_ACU = Omit<TableMutationLogEntryV2_ACU,
@@ -2333,7 +2338,7 @@ async function persistTableMutationLogV2Core_ACU(
   options: PersistTableMutationV2Options_ACU,
 ): Promise<{ saved: boolean; messageIndex?: number; entry?: TableMutationLogEntryV2_ACU; error?: string }> {
   let materialCheckpointAnchor: number | null = null;
-  const chat = getChatArray_ACU();
+  const chat = options.chatView?.chat ?? getChatArray_ACU();
   if (!chat || chat.length === 0) {
     return { saved: false, error: 'chat history is empty' };
   }
@@ -2631,7 +2636,7 @@ async function persistTableMutationLogV2Core_ACU(
 
 
   if (shouldCheckpoint) {
-    const checkpointRevision = buildCommitRevision_ACU('checkpoint', generateEntryId_ACU());
+    const checkpointRevision = createTableCheckpointRevisionV2_ACU();
     const checkpointEvent = {
       // 导入只建立独立调度基线，不伪造实际填表完成事件。
       filledSheetKeys: importDataReplaceBootstrap ? [] : filledSheetKeys,
@@ -2884,12 +2889,18 @@ async function persistTableMutationLogV2Core_ACU(
   }
   // 所有异步候选校验结束后，在第一笔聊天帧变更之前复核请求与目标。
   assertTableFillRequestCurrent_ACU(options, target.index);
-  if (getChatArray_ACU() !== chat || getActiveChatStorageIdentity_ACU(chat) !== preparationChatIdentity) {
+  if (!options.chatView && (getChatArray_ACU() !== chat || getActiveChatStorageIdentity_ACU(chat) !== preparationChatIdentity)) {
     throw new Error('目标聊天已切换，已拒绝旧的表格保存。');
   }
   options.transactionContext?.assertFresh?.('persistTableMutationLogV2:after_replay');
   // 插件可重建同楼层的消息对象；数据与身份字段统一写到该楼层当前对象。
   target.message = chat[target.index];
+  if (options.chatView) {
+    for (const [index, nextIsolatedData] of replacementIsolatedDataByMessageIndex) {
+      chat[index].TavernDB_ACU_IsolatedData = nextIsolatedData;
+    }
+    return { saved: true, messageIndex: target.index, entry };
+  }
   const commitChatIdentity = getActiveChatStorageIdentity_ACU(chat);
   const floorIdentities = chat.map(message => JSON.stringify([
     !!message && typeof message === 'object', message?.message_id, message?.is_user, message?.is_system,
@@ -2905,6 +2916,19 @@ async function persistTableMutationLogV2Core_ACU(
       identity: message.TavernDB_ACU_Identity,
     };
   });
+  const previousSwipeState = target.message[NATIVE_SWIPE_TABLE_FIELD_ACU];
+  const selected = options.swipeBody ? readTailSwipe_ACU(chat, target.index) : null;
+  const previousBinding = previousSwipeState?.[isolationKey];
+  const bindCandidate = selected && selected.body === options.swipeBody
+    && (!previousBinding || (previousBinding.version === 2 && !previousBinding.entries));
+  const swipeState = bindCandidate ? {
+    existed: Object.prototype.hasOwnProperty.call(target.message, NATIVE_SWIPE_TABLE_FIELD_ACU),
+    previous: previousSwipeState,
+    next: { ...previousSwipeState, [isolationKey]: {
+      version: 2, slot: selected.slot, bodyFingerprint: getTableDataFingerprint_ACU(selected.body),
+      head: isolatedData[isolationKey]?.storageFrame?.headRevision,
+    } },
+  } : null;
   const rollbackMaterialCheckpoint = materialCheckpointAnchor === null
     ? null
     : beginMaterialCheckpointSync_ACU(chat, materialCheckpointAnchor);
@@ -2921,6 +2945,7 @@ async function persistTableMutationLogV2Core_ACU(
     if (!message || typeof message !== 'object') return [];
     const keys: string[] = replacementIsolatedDataByMessageIndex.has(index)
       ? ['TavernDB_ACU_IsolatedData', 'TavernDB_ACU_Identity'] : [];
+    if (swipeState && index === target.index) keys.push(NATIVE_SWIPE_TABLE_FIELD_ACU);
     if (rollbackMaterialCheckpoint) keys.push(...MATERIAL_CHECKPOINT_FIELDS_ACU);
     return keys.map(key => ({ index, key, existed: Object.prototype.hasOwnProperty.call(message, key),
       content: JSON.stringify(message[key]) }));
@@ -2929,6 +2954,7 @@ async function persistTableMutationLogV2Core_ACU(
     for (const [messageIndex, nextIsolatedData] of replacementIsolatedDataByMessageIndex) {
       chat[messageIndex].TavernDB_ACU_IsolatedData = nextIsolatedData;
     }
+    if (swipeState) target.message[NATIVE_SWIPE_TABLE_FIELD_ACU] = swipeState.next;
     writeMessageIdentity_ACU(target.message, {
       enabled: settings_ACU.dataIsolationEnabled,
       code: settings_ACU.dataIsolationCode,
@@ -2961,6 +2987,10 @@ async function persistTableMutationLogV2Core_ACU(
       if (state.hadIdentity) message.TavernDB_ACU_Identity = state.identity;
       else delete message.TavernDB_ACU_Identity;
     }
+    if (swipeState) {
+      if (swipeState.existed) chat[target.index][NATIVE_SWIPE_TABLE_FIELD_ACU] = swipeState.previous;
+      else delete chat[target.index][NATIVE_SWIPE_TABLE_FIELD_ACU];
+    }
     throw error;
   }
   return { saved: true, messageIndex: target.index, entry };
@@ -2992,7 +3022,7 @@ export async function persistTableMutationLogV2_ACU(
   // 否则视为无关写入（自动更新/CRUD/导入/其他 run）直接阻断，不能混入 provisional 时间线。
   // 不用全局布尔：每次写入都基于 live chat 重新读取 bridge 校验。
   try {
-    const chat = getChatArray_ACU();
+    const chat = options.chatView?.chat ?? getChatArray_ACU();
     const isolationKey = options.isolationKey ?? getCurrentIsolationKey_ACU();
     const bridge = readActiveProvisionalBridge_ACU(chat, isolationKey);
     if (bridge) {
@@ -3024,7 +3054,7 @@ export async function persistTableMutationLogV2_ACU(
       ? await persistTableMutationLogV2Core_ACU(coreOptions)
       : await options.transactionContext.runCommit(() => persistTableMutationLogV2Core_ACU(coreOptions), options.revisionWriteSet);
     performanceSpan.end({ success: result.saved });
-    if (result.saved && result.entry) {
+    if (!options.chatView && result.saved && result.entry) {
       scheduleSummaryVectorMirrorFlushAfterPersist_ACU({
         changedSheetKeys: result.entry.changedSheetKeys,
         writeSet: result.entry.writeSet,

@@ -26,12 +26,15 @@ import type {
 // 字段清单常量（单一事实来源）
 // ════════════════════════════════════════════════════════════════
 
+export const NATIVE_SWIPE_TABLE_FIELD_ACU = 'TavernDB_ACU_NativeSwipeState';
+
 /**
  * 消息上全部本地表格数据字段清单。
  * 硬清空、残留扫描与事务快照必须基于此清单；新增存储字段必须同步更新。
  */
 export const MESSAGE_TABLE_FIELDS_ACU: readonly string[] = [
     'TavernDB_ACU_IsolatedData',
+    NATIVE_SWIPE_TABLE_FIELD_ACU,
     'TavernDB_ACU_IndependentData',
     'TavernDB_ACU_Data',
     'TavernDB_ACU_SummaryData',
@@ -935,6 +938,16 @@ export function purgeManualRefillIncrementalSheetKeysFromMessage_ACU(msg: any, i
     return msgChanged;
 }
 
+function clearNativeSwipeArchiveForIsolation_ACU(msg: any, isolationKey: string): boolean {
+    const archive = msg[NATIVE_SWIPE_TABLE_FIELD_ACU];
+    if (!archive || !Object.prototype.hasOwnProperty.call(archive, isolationKey)) return false;
+    const remaining = { ...archive };
+    delete remaining[isolationKey];
+    if (Object.keys(remaining).length) msg[NATIVE_SWIPE_TABLE_FIELD_ACU] = remaining;
+    else delete msg[NATIVE_SWIPE_TABLE_FIELD_ACU];
+    return true;
+}
+
 export function purgeSheetKeysFromMessageForIsolation_ACU(
     msg: any,
     isolationKey: string,
@@ -943,15 +956,16 @@ export function purgeSheetKeysFromMessageForIsolation_ACU(
 ): boolean {
     if (!msg || !Array.isArray(sheetKeys) || sheetKeys.length === 0) return false;
 
+    const archiveCleared = clearNativeSwipeArchiveForIsolation_ACU(msg, isolationKey || '');
     let msgChanged = false;
     const sheetKeySet = new Set(sheetKeys);
     const isolated = parseIsolatedDataField(msg);
-    if (!isolated) return false;
+    if (!isolated) return archiveCleared;
 
     const nextIsolated = safeClone(isolated);
     const tagKey = isolationKey || '';
     const tagData = nextIsolated[tagKey];
-    if (!tagData || typeof tagData !== 'object') return false;
+    if (!tagData || typeof tagData !== 'object') return archiveCleared;
 
     if ((tagData as any).independentData && typeof (tagData as any).independentData === 'object') {
         sheetKeys.forEach(key => {
@@ -988,7 +1002,7 @@ export function purgeSheetKeysFromMessageForIsolation_ACU(
     if (purgeSheetKeysFromStorageFrameV2_ACU((tagData as any).storageFrame, sheetKeySet, knownSqlTableNames)) msgChanged = true;
 
     if (msgChanged) msg.TavernDB_ACU_IsolatedData = nextIsolated;
-    return msgChanged;
+    return archiveCleared || msgChanged;
 }
 
 export interface SheetIdentityAliasesForPurge_ACU {
@@ -1340,6 +1354,10 @@ export function purgeSheetKeysFromMessage_ACU(msg: any, sheetKeys: string[]): bo
     if (!msg || !Array.isArray(sheetKeys) || sheetKeys.length === 0) return false;
 
     let msgChanged = false;
+    if (Object.prototype.hasOwnProperty.call(msg, NATIVE_SWIPE_TABLE_FIELD_ACU)) {
+        delete msg[NATIVE_SWIPE_TABLE_FIELD_ACU];
+        msgChanged = true;
+    }
     const sheetKeySet = new Set(sheetKeys);
 
     // ── 新版：按标签分组（对该消息内所有标签槽执行删除） ──
@@ -1566,7 +1584,7 @@ export function clearTableFieldsForIsolation_ACU(
 ): boolean {
     if (!msg) return false;
 
-    let changed = false;
+    let changed = clearNativeSwipeArchiveForIsolation_ACU(msg, isolationKey);
 
     // ── 新版：删除指定隔离标签的槽 ──
     const container = parseIsolatedDataField(msg);

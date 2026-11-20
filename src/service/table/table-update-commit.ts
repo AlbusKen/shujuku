@@ -291,33 +291,35 @@ export async function runTableUpdateCommit_ACU<T>(
     }
     // 普通表写入前统一恢复门：残留 provisional bridge 先自动 finalize/rollback。
     // catch-up 自身携带 runId 时跳过——该 bridge 正是本次 run 建立的，不能提前汇合。
-    if (!options.manualCatchUpRunId) {
-      const bridgeGate = await ensureNoActiveProvisionalBridgeForCurrentScope_ACU({
-        chatKey: options.chatKey,
-        isolationKey: options.isolationKey ?? getCurrentIsolationKey_ACU(),
-      });
-      if (!bridgeGate.ok) {
+    if (!options.chatView) {
+      if (!options.manualCatchUpRunId) {
+        const bridgeGate = await ensureNoActiveProvisionalBridgeForCurrentScope_ACU({
+          chatKey: options.chatKey,
+          isolationKey: options.isolationKey ?? getCurrentIsolationKey_ACU(),
+        });
+        if (!bridgeGate.ok) {
+          return {
+            success: false,
+            error: (bridgeGate as { ok: false; error: string }).error,
+            errorCategory: 'precondition',
+          };
+        }
+      }
+      const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU(options.reason);
+      if (!migration.success) {
         return {
           success: false,
-          error: (bridgeGate as { ok: false; error: string }).error,
-          errorCategory: 'precondition',
+          error: migration.error || '旧存储迁移失败，已阻止本次写入。',
+          errorCategory: 'infrastructure',
         };
       }
+      if (migration.migrated) {
+        await reloadStorageProvider();
+      }
+      assertExpectedCommitScope_ACU(options, '迁移后');
+      await flushRuntimeOnlyPendingBeforeCommit_ACU(options);
+      assertExpectedCommitScope_ACU(options, '未落盘变更写回后');
     }
-    const migration = await ensureLegacyStorageMigratedBeforeWrite_ACU(options.reason);
-    if (!migration.success) {
-      return {
-        success: false,
-        error: migration.error || '旧存储迁移失败，已阻止本次写入。',
-        errorCategory: 'infrastructure',
-      };
-    }
-    if (migration.migrated) {
-      await reloadStorageProvider();
-    }
-    assertExpectedCommitScope_ACU(options, '迁移后');
-    await flushRuntimeOnlyPendingBeforeCommit_ACU(options);
-    assertExpectedCommitScope_ACU(options, '未落盘变更写回后');
 
     return await runTableWriteTransaction_ACU({
       source: options.source,
@@ -334,7 +336,7 @@ export async function runTableUpdateCommit_ACU<T>(
         let rollbackBeforePersist: (() => void | Promise<void>) | undefined;
         try {
           assertExpectedCommitScope_ACU(options, '应用前');
-          requiresRuntimeReload = Boolean(options.signal || options.targetSnapshot);
+          requiresRuntimeReload = !options.chatView && Boolean(options.signal || options.targetSnapshot);
           const applied = await apply({ transactionContext, workingData });
           assertExpectedCommitScope_ACU(options, '应用后');
           if (!applied.success || !applied.tableData) {
@@ -348,7 +350,7 @@ export async function runTableUpdateCommit_ACU<T>(
           const targetSheetKeys = persistOptions.targetSheetKeys !== undefined ? persistOptions.targetSheetKeys : options.targetSheetKeys;
           const operations = persistOptions.operations ?? options.operations;
           commitRevisionWriteSet = revisionWriteSet;
-          const staged = persistOptions.beforePersist
+          const staged = !options.chatView && persistOptions.beforePersist
             ? await persistOptions.beforePersist(applied.tableData)
             : undefined;
           if (staged && typeof staged.rollback === 'function') {
@@ -361,6 +363,8 @@ export async function runTableUpdateCommit_ACU<T>(
               targetMessageIndex: persistOptions.targetMessageIndex ?? options.targetMessageIndex,
               signal: options.signal,
               targetSnapshot: options.targetSnapshot,
+              ...(options.chatView ? { chatView: options.chatView } : {}),
+              ...(options.swipeBody ? { swipeBody: options.swipeBody } : {}),
               targetSheetKeys,
               updateGroupKeys: persistOptions.updateGroupKeys !== undefined ? persistOptions.updateGroupKeys : (options.updateGroupKeys ?? null),
               trackingSheetKeys: persistOptions.trackingSheetKeys !== undefined ? persistOptions.trackingSheetKeys : (options.trackingSheetKeys ?? []),
@@ -384,17 +388,17 @@ export async function runTableUpdateCommit_ACU<T>(
             messageIndex = saveResult.messageIndex;
             if (!saveResult.saved) {
               logWarn_ACU(`[TableUpdateCommit] persist failed after runtime update; reload after releasing transaction locks: ${saveResult.error || 'unknown error'}`);
-              requiresRuntimeReload = true;
+              requiresRuntimeReload = !options.chatView;
               throw new TableUpdateCommitError_ACU(
                 saveResult.error || `${options.reason}: persist failed`,
                 classifyPersistRejection_ACU(saveResult.error),
               );
             }
-          } else {
+          } else if (!options.chatView) {
             markRuntimeOnlyPendingAfterSkipChatSave_ACU(options, revisionWriteSet, applied.tableData);
           }
 
-          _set_currentJsonTableData_ACU(cloneTableData_ACU(applied.tableData));
+          if (!options.chatView) _set_currentJsonTableData_ACU(cloneTableData_ACU(applied.tableData));
           return {
             success: true,
             value: applied.value,
@@ -407,7 +411,7 @@ export async function runTableUpdateCommit_ACU<T>(
           if (rollbackBeforePersist) await rollbackBeforePersist();
           throw error;
         }
-      }, () => commitRevisionWriteSet);
+      }, () => options.chatView ? [] : commitRevisionWriteSet);
     });
   } catch (error: any) {
     if (requiresRuntimeReload) {

@@ -40,6 +40,11 @@ import { forceFlushChatSave_ACU, refreshMessageBlock_ACU, saveChatToHostStrict_A
 import { beginHostGenerationUi_ACU, getSendTextareaValue_ACU, setSendTextareaValue_ACU, type HostInputWriteFailure_ACU } from '../../shared/host-input';
 import { cancelPendingContentOptimizationEvent_ACU, captureContentOptimizationEventScope_ACU, handleContentOptimizationEvent_ACU } from '../triggers/settings-ui-sync/settings-ui-connect';
 import { cancelPendingAutoFillEvent_ACU, captureAutoFillEventScope_ACU, triggerAutomaticUpdateIfNeeded_ACU } from '../triggers/settings-ui-sync/settings-ui-trigger';
+import {
+  captureNativeSwipeTableIntent_ACU, hasNativeSwipeCandidateChange_ACU, readNativeSwipeWorldbookData_ACU,
+  type NativeSwipeTableIntent_ACU,
+} from '../../service/table/native-swipe-table';
+import { projectTableWorldbookForRequest_ACU } from '../../service/worldbook/request-table-worldbook';
 import { abortActivePlotPlanning_ACU, runOptimizationLogicWithUI_ACU } from '../components/plot-planning-ui';
 import { beginPlotSendDisguise_ACU, isPendingDisguiseGenerationType_ACU, type PlotSendDisguiseHandle_ACU } from '../components/plot-pending-disguise';
 import { processSummaryVectorIndexBeforeGenerationWithUI_ACU, rebuildCurrentSummaryVectorIndexWithUI_ACU, rebuildOutdatedSummaryVectorIndexInBackground_ACU, shouldRebuildSummaryVectorIndexWithUI_ACU } from '../components/summary-vector-index-ui';
@@ -207,6 +212,10 @@ export   function mainInitialize_ACU() {
           isCurrentChat: () => boolean;
         };
         let autoFillBodyGeneration: AutoFillBodyGeneration | null = null;
+        let nativeSwipeTableIntent: NativeSwipeTableIntent_ACU | null = null;
+        let swipeWorldbookRequest: {
+          intent: NativeSwipeTableIntent_ACU; chatKey: string; isolationKey: string; isCurrentChat: () => boolean;
+        } | null = null;
         // 最近一次开始/结束的生命周期身份，用于区分嵌套 quiet 的停止与正文停止。
         let autoFillStopCandidateSeq: number | undefined;
 
@@ -270,6 +279,8 @@ export   function mainInitialize_ACU() {
           bumpTableReplayGeneration_ACU();
           const chatEpoch = ++autoFillChatEpoch;
           autoFillBodyGeneration = null;
+          nativeSwipeTableIntent = null;
+          swipeWorldbookRequest = null;
           autoFillStopCandidateSeq = undefined;
           cancelPendingAutoFillEvent_ACU();
           cancelPendingContentOptimizationEvent_ACU();
@@ -592,9 +603,17 @@ export   function mainInitialize_ACU() {
               // 终止只作用于当次填表。新一轮宿主生成必须清掉残留，否则评估闸永久 user_aborted。
               _set_wasStoppedByUser_ACU(false);
               const quietLike = isQuietLikeGeneration_ACU(type, params);
+              swipeWorldbookRequest = type === 'swipe' && !dryRun && nativeSwipeTableIntent
+                && isTakeoverEnabled_ACU() && !isZeroLayerOwnedChat_ACU()
+                ? {
+                    intent: nativeSwipeTableIntent, chatKey: currentChatFileIdentifier_ACU,
+                    isolationKey: getCurrentIsolationKey_ACU(), isCurrentChat: captureAutoFillChatScope(),
+                  }
+                : null;
               // 正文将被重写，上一轮的防抖和物化等待不能继续使用旧楼层。
               // quiet/dryRun/后台请求不会重写正文，不取消普通回复的优化。
               if (!dryRun && !quietLike && !params?.automatic_trigger) {
+                if (type !== 'swipe') nativeSwipeTableIntent = null;
                 cancelPendingContentOptimizationEvent_ACU();
                 cancelPendingAutoFillEvent_ACU();
               }
@@ -624,6 +643,8 @@ export   function mainInitialize_ACU() {
         if (SillyTavern_API_ACU.eventTypes.GENERATION_STOPPED) {
           SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.GENERATION_STOPPED, () => {
             try {
+              nativeSwipeTableIntent = null;
+              swipeWorldbookRequest = null;
               cancelPendingContentOptimizationEvent_ACU();
               cancelPendingAutoFillEvent_ACU();
               if (autoFillBodyGeneration?.isCurrentChat()
@@ -639,6 +660,7 @@ export   function mainInitialize_ACU() {
         if (SillyTavern_API_ACU.eventTypes.GENERATION_ENDED) {
             const receiver = new PassiveCompletionReceiver_ACU();
             const onGenerationEnded = (message_id: any) => {
+              swipeWorldbookRequest = null;
               receiver.receive('GENERATION_ENDED', dispatch => {
                 const chatAtCapture = SillyTavern_API_ACU.chat;
                 const chatKey = currentChatFileIdentifier_ACU;
@@ -732,6 +754,11 @@ export   function mainInitialize_ACU() {
               const isAutoFillEventCurrent = () => isAutoFillEpochCurrent()
                 && bodyGeneration?.stopped !== true;
               const chatAtCapture = SillyTavern_API_ACU.chat;
+              const swipe = messageType === 'swipe' && nativeSwipeTableIntent?.index === messageId ? nativeSwipeTableIntent : null;
+              if (swipe) {
+                nativeSwipeTableIntent = null;
+                swipeWorldbookRequest = null;
+              }
               const chatKey = currentChatFileIdentifier_ACU;
               const isolationKey = getCurrentIsolationKey_ACU();
               const isAutoFillCurrent = captureAutoFillChatScope();
@@ -754,6 +781,7 @@ export   function mainInitialize_ACU() {
                   eventType: evName, messageId, chatKey, isolationKey,
                   isCurrentChat: isAutoFillCurrent,
                   isCurrentEvent: isAutoFillEventCurrent,
+                  ...(swipe ? { nativeSwipe: swipe } : {}),
                 });
               });
               const eventMessageId = typeof messageId === 'number' && Number.isInteger(messageId)
@@ -1114,6 +1142,30 @@ export   function mainInitialize_ACU() {
         }
 
 
+        const worldbookLoaded = SillyTavern_API_ACU.eventTypes.WORLDINFO_ENTRIES_LOADED;
+        if (worldbookLoaded) {
+          // SillyTavern awaits this event before sorting and scanning the loaded entries.
+          SillyTavern_API_ACU.eventSource.on(worldbookLoaded, async (lores: Record<string, any[]>) => {
+            const request = swipeWorldbookRequest;
+            if (!request) return;
+            const assertCurrent = () => {
+              if (swipeWorldbookRequest !== request || nativeSwipeTableIntent !== request.intent
+                || !request.isCurrentChat() || !isTakeoverEnabled_ACU()) {
+                throw new DOMException('Swipe 正文请求已变更。', 'AbortError');
+              }
+            };
+            try {
+              await projectTableWorldbookForRequest_ACU(lores, () =>
+                readNativeSwipeWorldbookData_ACU(request.intent, request.chatKey, request.isolationKey, assertCurrent), assertCurrent);
+            } catch (error) {
+              if (swipeWorldbookRequest === request && !(error instanceof DOMException && error.name === 'AbortError')) {
+                logWarn_ACU('[Swipe] 正文请求的数据库世界书投影失败。', error);
+                showToastr_ACU('warning', 'Swipe 正文请求的数据库世界书未能回滚，本轮可能仍使用旧候选的表格内容。', '数据库');
+              }
+            }
+          });
+        }
+
         const chatModificationEvents = ['MESSAGE_DELETED', 'MESSAGE_SWIPED'] as const;
         chatModificationEvents.forEach(evName => {
             if (SillyTavern_API_ACU.eventTypes[evName as keyof typeof SillyTavern_API_ACU.eventTypes]) {
@@ -1121,11 +1173,24 @@ export   function mainInitialize_ACU() {
                     // 楼层删除或切换版本使旧任务的楼层锚点失效；不清除当前生成资格。
                     cancelPendingContentOptimizationEvent_ACU();
                     cancelPendingAutoFillEvent_ACU();
+                    swipeWorldbookRequest = null;
                     logDebug_ACU(`ACU ${evName} event detected. Triggering data reload and merge from chat history.`);
                     if (evName !== 'MESSAGE_DELETED') {
+                        const chat = SillyTavern_API_ACU.chat;
+                        const isolationKey = getCurrentIsolationKey_ACU();
+                        nativeSwipeTableIntent = captureNativeSwipeTableIntent_ACU(chat, data);
                         scheduleChatMutationRefresh_ACU('chat_modified_swiped');
+                        if (!nativeSwipeTableIntent && hasNativeSwipeCandidateChange_ACU(chat, data, isolationKey)
+                          && !isZeroLayerOwnedChat_ACU()) {
+                            await triggerAutomaticUpdateIfNeeded_ACU(undefined, {
+                              eventType: evName, messageId: data, chatKey: currentChatFileIdentifier_ACU,
+                              isolationKey, isCurrentChat: captureAutoFillChatScope(),
+                              isCurrentEvent: captureAutoFillEventScope_ACU(), nativeSwipeSelection: data,
+                            });
+                        }
                         return;
                     }
+                    nativeSwipeTableIntent = null;
                     // #56：宿主重生成删除旧回复后 await 本事件，随后才读取世界书组装正文；
                     // 这里等回滚与世界书刷新完成，避免新请求携带被替换回复派生的表格条目。
                     const refreshed = await flushChatMutationRefresh_ACU('chat_modified_deleted');

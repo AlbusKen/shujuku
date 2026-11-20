@@ -50,3 +50,22 @@ export function assertAiMessageSnapshotCurrent_ACU(
     throw new TableFillTargetStaleError_ACU();
   }
 }
+
+/** 酒馆原生 Swipe 先把下标指向末尾之外，正文交付后才有新候选。 */
+export function readTailSwipe_ACU(chat: any[], index: unknown) {
+  if (!Array.isArray(chat) || !Number.isInteger(index) || index !== chat.length - 1) return null;
+  const message = chat[index as number];
+  if (!message || message.is_user !== false || message.is_system || hasUnloadedHostSwipes_ACU(message)) return null;
+  const { swipe_id: slot, swipes } = message;
+  if (!Array.isArray(swipes) || !swipes.length || !swipes.every(value => typeof value === 'string' && value.trim())
+    || !Number.isInteger(slot) || slot < 0 || slot > swipes.length) return null;
+  const candidate = swipes[slot];
+  return {
+    index: index as number,
+    message,
+    slot: slot as number,
+    swipes: swipes as string[],
+    body: typeof candidate === 'string' && candidate === body_ACU(message)
+      && swipes.indexOf(candidate) === swipes.lastIndexOf(candidate) ? candidate : null,
+  };
+}

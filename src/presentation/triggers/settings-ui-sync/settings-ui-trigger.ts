@@ -18,11 +18,17 @@ import { topLevelWindow_ACU } from '../../../shared/env';
 import { logDebug_ACU } from '../../../shared/utils';
 import { purgeOldLayerData_ACU } from './settings-ui-config';
 import { buildAutoUpdatePlan_ACU, checkAutoUpdatePreConditions_ACU, executeAutoUpdatePlan_ACU } from '../../../service/table/update-scheduler';
-import { executeAutoFillStagingGroups_ACU, processGroupedRuntimeChunk_ACU, refreshCommittedWorldbook_ACU, type CardUpdateProgressEvent, type TableUpdatePostCommitWarning_ACU } from '../../../service/table/update-orchestrator';
+import { buildBatchMergeBase_ACU, executeAutoFillStagingGroups_ACU, processGroupedRuntimeChunk_ACU, refreshCommittedWorldbook_ACU, type CardUpdateProgressEvent, type TableUpdatePostCommitWarning_ACU } from '../../../service/table/update-orchestrator';
+import type { TableFillChatView_ACU } from '../../../service/table/table-fill-request-guard';
 import { isSqliteMode } from '../../../service/table/storage-mode';
 import { startRuntimePerformanceSpan_ACU } from '../../../shared/runtime-performance';
 import { logAutoFillSkip_ACU, logAutoFillStage_ACU, type AutoFillSkipContext_ACU } from '../../../shared/trigger-diagnostics';
 import { isFillEligibleAiMessage_ACU } from '../../../service/runtime/message-handler';
+import { flushChatMutationRefresh_ACU } from '../../bootstrap/chat-mutation-scheduler';
+import {
+    refillNativeSwipeTableCandidate_ACU, restoreNativeSwipeTableCandidate_ACU,
+    type NativeSwipeTableIntent_ACU,
+} from '../../../service/table/native-swipe-table';
 
 function buildAutoUpdateProgressLabel_ACU(event: Partial<CardUpdateProgressEvent>): string {
     if (Number.isFinite(event.currentBatch) && Number.isFinite(event.totalBatches)) {
@@ -104,11 +110,13 @@ export function cancelPendingAutoFillEvent_ACU(): void {
       isCurrentChat?: () => boolean;
       /** 捕获事件时的任务代次，重生成、停止或删楼后失效。 */
       isCurrentEvent?: () => boolean;
+      nativeSwipe?: NativeSwipeTableIntent_ACU;
+      nativeSwipeSelection?: number;
     } = {},
   ): Promise<void> {
     const queueId = ++autoUpdateQueueId_ACU;
     const runId = performanceContext?.runId || `autofill-${queueId}`;
-    const { isCurrentChat, isCurrentEvent, ...diagnosticContext } = triggerContext;
+    const { isCurrentChat, isCurrentEvent, nativeSwipe, nativeSwipeSelection, ...diagnosticContext } = triggerContext;
     const context = { ...diagnosticContext, runId, queueId };
     const scoped = context.chatKey !== undefined || context.isolationKey !== undefined;
     const chatAtEnqueue = scoped ? getChatArray_ACU() : undefined;
@@ -132,6 +140,37 @@ export function cancelPendingAutoFillEvent_ACU(): void {
       logAutoFillStage_ACU('dequeued', context);
       try {
         if (!canProcessEvent('dequeue')) return;
+        if (nativeSwipe || nativeSwipeSelection !== undefined) {
+          const scope = {
+            chatKey: currentChatFileIdentifier_ACU,
+            isolationKey: getCurrentIsolationKey_ACU(),
+            isCurrent: () => canProcessEvent('swipe'),
+          };
+          try {
+            const result = nativeSwipe
+              ? await refillNativeSwipeTableCandidate_ACU(scope, nativeSwipe, view =>
+                  runAutomaticUpdateIfNeeded_ACU({ ...performanceContext, runId }, context, canProcessEvent, view))
+              : await restoreNativeSwipeTableCandidate_ACU(scope, nativeSwipeSelection!);
+            logAutoFillStage_ACU('native_swipe_result', { ...context, diagnosticCode: result });
+            if (result === 'updated' && canProcessEvent('swipe_refresh')) {
+              await flushChatMutationRefresh_ACU('chat_modified_swiped');
+            }
+            const notices = {
+              unsupported_checkpoint: '当前楼层承载了无法安全替换的数据库检查点，已保留现有表格。',
+              unsupported: '无法安全切换当前 Swipe 的表格版本，已保留现有表格。',
+            } as const;
+            if (result in notices && canProcessEvent('swipe_notice')) {
+              showToastr_ACU('info', notices[result as keyof typeof notices], '数据库');
+            }
+            return;
+          } catch (error) {
+            if (canProcessEvent('swipe_error') && !(error instanceof DOMException && error.name === 'AbortError')) {
+              logAutoFillSkip_ACU('execution_failed', { ...context, stage: 'native_swipe' });
+              showToastr_ACU('warning', '本次 Swipe 填表未完成，请确认当前候选和表格。', '数据库');
+            }
+            return;
+          }
+        }
         await runAutomaticUpdateIfNeeded_ACU({ ...performanceContext, runId }, context, canProcessEvent);
         logAutoFillStage_ACU('queue_completed', context);
       } catch (error) {
@@ -147,7 +186,8 @@ export function cancelPendingAutoFillEvent_ACU(): void {
     performanceContext?: { runId?: string; parentSpanId?: string },
     context: AutoFillSkipContext_ACU = {},
     canProcessEvent: (stage: string) => boolean = () => true,
-  ): Promise<void> {
+    chatView?: TableFillChatView_ACU,
+  ): Promise<boolean> {
     logDebug_ACU('ACU Auto-Trigger: Starting independent check...');
     // 新一轮自动填表开跑前清掉上一轮「终止」残留，避免 isStopped() 立刻把新任务掐死。
     _set_wasStoppedByUser_ACU(false);
@@ -158,7 +198,7 @@ export function cancelPendingAutoFillEvent_ACU(): void {
 
     try {
     // 前置检查与更新计划使用同一宿主聊天，不依赖世界书消息投影的加载状态。
-    const liveChat = getChatArray_ACU();
+    const liveChat = chatView?.chat ?? getChatArray_ACU();
     const preCheck = checkAutoUpdatePreConditions_ACU(settings_ACU);
     logAutoFillStage_ACU('preconditions', { ...context, success: preCheck.canProceed });
     if (!preCheck.canProceed) {
@@ -169,7 +209,7 @@ export function cancelPendingAutoFillEvent_ACU(): void {
         inFlight: isAutoUpdatingCard_ACU,
         preconditionReason: preCheck.code,
       });
-      return;
+      return preCheck.code === 'auto_update_disabled';
     }
 
     // 诊断日志与调度同口径：只计可填表的 AI 回复（排除工具楼与旁白）。
@@ -177,9 +217,11 @@ export function cancelPendingAutoFillEvent_ACU(): void {
 
     // [重构] 调用 service 层构建更新计划
     const triggerIsolationKey = getCurrentIsolationKey_ACU();
+    const schedulingData = chatView ? (await buildBatchMergeBase_ACU(1, { chatView })).data : currentJsonTableData_ACU;
+    if (chatView && !schedulingData) throw new Error('无法读取当前 Swipe 的填表基底。');
     const plan = buildAutoUpdatePlan_ACU(
       liveChat,
-      currentJsonTableData_ACU,
+      schedulingData,
       settings_ACU,
       triggerIsolationKey,
       { runId: performanceContext?.runId || performanceSpan.id, parentSpanId: performanceSpan.id },
@@ -190,7 +232,7 @@ export function cancelPendingAutoFillEvent_ACU(): void {
     });
     if (plan.tablesToUpdate.length === 0) {
       logAutoFillSkip_ACU('no_tables_due', { ...context, aiFloorCount: totalAiMessages });
-      return;
+      return true;
     }
 
     const useGroupedAutoUpdates = !isSqliteMode();
@@ -206,7 +248,10 @@ export function cancelPendingAutoFillEvent_ACU(): void {
       autoGroupedAbortController.abort();
       return false;
     };
-    if (!canExecuteAutoFill('execute')) return;
+    if (!canExecuteAutoFill('execute')) {
+        takeoverSignal.removeEventListener('abort', pauseAutoFill);
+        return false;
+    }
     // 实际开始填表请求后才登记任务；同一调度的分组与批次共用一个进度框。
     let autoProgressTask: NoticeTaskHandle_ACU | null = null;
     const onAutoGroupedProgress = (event: CardUpdateProgressEvent): void => {
@@ -251,6 +296,7 @@ export function cancelPendingAutoFillEvent_ACU(): void {
                     if (!canExecuteAutoFill('process_updates')) return Promise.resolve(false);
                     return processUpdates_ACU(indices, mode, {
                        ...options, abortController: autoGroupedAbortController, onProgress: onAutoGroupedProgress, planManaged: true,
+                       ...(chatView ? { chatView } : {}),
                     });
                 },
                 ...(useGroupedAutoUpdates
@@ -263,6 +309,7 @@ export function cancelPendingAutoFillEvent_ACU(): void {
                             return processGroupedRuntimeChunk_ACU(groups, mode, {
                                 ...options,
                                 abortController: autoGroupedAbortController,
+                                ...(chatView ? { chatView } : {}),
                                 onProgress: event => {
                                     upstreamProgress?.(event);
                                     onAutoGroupedProgress(event);
@@ -286,6 +333,7 @@ export function cancelPendingAutoFillEvent_ACU(): void {
                     const upstreamProgress = options?.onProgress;
                     return executeAutoFillStagingGroups_ACU(groups, mode, {
                         ...options,
+                        ...(chatView ? { chatView } : {}),
                         boundary: {
                             fullCheckpointIndices: plan.boundary?.fullCheckpointIndices || [],
                             requiresBoundaryStaging: plan.boundary?.requiresBoundaryStaging || false,
@@ -297,9 +345,9 @@ export function cancelPendingAutoFillEvent_ACU(): void {
                         },
                     });
                 },
-                refreshData: () => refreshRuntimeDataAndNotifyAfterAutoUpdate_ACU(),
-                loadAllChatMessages: () => loadAllChatMessages_ACU(),
-                purgeOldLayerData: () => purgeOldLayerData_ACU(),
+                refreshData: async () => chatView ? {} : refreshRuntimeDataAndNotifyAfterAutoUpdate_ACU(),
+                loadAllChatMessages: async () => { if (!chatView) await loadAllChatMessages_ACU(); },
+                purgeOldLayerData: async () => { if (!chatView) await purgeOldLayerData_ACU(); },
             },
             { runId: performanceContext?.runId || performanceSpan.id, parentSpanId: performanceSpan.id },
             autoGroupedAbortController,
@@ -337,6 +385,7 @@ export function cancelPendingAutoFillEvent_ACU(): void {
         try { (topLevelWindow_ACU as any).AutoCardUpdaterAPI._notifyTableUpdate(); } catch (_) {}
     }
     if (typeof updateCardUpdateStatusDisplay_ACU === 'function') updateCardUpdateStatusDisplay_ACU();
+    return result.success && !result.aborted && result.failedGroups === 0;
     } finally {
       performanceSpan.end({
         messageCount: getChatArray_ACU()?.length || 0,

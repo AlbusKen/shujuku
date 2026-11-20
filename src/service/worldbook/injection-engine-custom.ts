@@ -6,7 +6,8 @@ import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
 import { isVectorPipelineEnabledForCurrentChat_ACU } from '../fill-mode/fill-mode-gate';
 
 import { settings_ACU, currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
-import { isWorldbookApiAvailable_ACU, getLorebookEntries_ACU, setLorebookEntries_ACU, createLorebookEntries_ACU, deleteLorebookEntries_ACU } from '../../data/gateways/worldbook-gateway';
+import { isWorldbookApiAvailable_ACU } from '../../data/gateways/worldbook-gateway';
+import { liveTableWorldbookEntryStore_ACU, type TableWorldbookEntryStore_ACU } from './table-worldbook-entry-store';
 import { saveSettings_ACU } from '../settings/settings-service';
 import { getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
@@ -33,8 +34,9 @@ export function __resetCustomTableExportStateForTests_ACU(): void {
   // [新增] 处理自定义表格导出逻辑
   // [修复] 当 mergedData 为空/null 时，仍需执行"清理旧自定义导出条目"逻辑，
   // 避免删除楼层回溯到空数据时旧条目残留在世界书中。
-  export async function updateCustomTableExports_ACU(mergedData: Record<string, any> | null, isImport = false, targetLorebookOverride: string | null = null) {
-      if (!isWorldbookApiAvailable_ACU()) return;
+  export async function updateCustomTableExports_ACU(mergedData: Record<string, any> | null, isImport = false, targetLorebookOverride: string | null = null, entryStore?: TableWorldbookEntryStore_ACU) {
+      if (!entryStore && !isWorldbookApiAvailable_ACU()) return;
+      const store = entryStore ?? liveTableWorldbookEntryStore_ACU;
       if (mergedData) {
           const flightMode = getCurrentFlightModeState_ACU();
           if (flightMode.enabled && flightMode.hiddenRowIds.length > 0) {
@@ -42,6 +44,7 @@ export function __resetCustomTableExportStateForTests_ACU(): void {
               try {
                   mergedData = projectFlightModeHiddenChronicleRows_ACU(source, flightMode);
               } catch (error) {
+                  if (entryStore) throw error;
                   // fail-closed：投影失败时本轮不导出纪要表，避免把已归纳的纪要重新注入世界书；只影响导出投影，不改运行时数据。
                   logWarn_ACU('[FlightMode] 世界书纪要隐藏行投影失败，本轮暂不导出纪要表。', error);
                   mergedData = Object.fromEntries(Object.entries(source)
@@ -85,7 +88,7 @@ export function __resetCustomTableExportStateForTests_ACU(): void {
       const summaryIndexSourceRows = new Set<string>();
 
       try {
-          const allEntries = await getLorebookEntries_ACU(primaryLorebookName);
+          const allEntries = await store.get(primaryLorebookName);
           const usedOrders = buildUsedOrderSet_ACU(allEntries);
           
           // 1. Delete entries
@@ -128,11 +131,11 @@ export function __resetCustomTableExportStateForTests_ACU(): void {
           // [修复] 如果 mergedData 为空，清理完旧条目后直接返回，不再尝试创建新条目
           if (!mergedData) {
               if (uidsToDelete.length > 0) {
-                  await deleteLorebookEntries_ACU(primaryLorebookName, uidsToDelete);
+                  await store.remove(primaryLorebookName, uidsToDelete);
               }
               logDebug_ACU('[CustomExport] mergedData 为空，已清理旧条目，跳过创建。');
               // 保存清理后的 knownNames
-              if (!isImport) {
+              if (!entryStore && !isImport) {
                   summaryIndexSourceRowsByScope_ACU.delete(summaryIndexScope);
                   settings_ACU.knownCustomEntryNames = knownNames;
                   saveSettings_ACU();
@@ -710,7 +713,7 @@ export function __resetCustomTableExportStateForTests_ACU(): void {
           const sourceRowsRemoved = !!previousSourceRows
               && [...previousSourceRows].some(rowId => !summaryIndexSourceRows.has(rowId));
           const existingSummaryIndex = allEntries.find(entry => entry.comment === summaryIndexComment);
-          const protectSummaryIndex = !isImport && vectorPipelineEnabled && !!summaryIndexPlan
+          const protectSummaryIndex = !entryStore && !isImport && vectorPipelineEnabled && !!summaryIndexPlan
               && existingSummaryIndex?.uid != null && !sourceRowsRemoved;
 
           if (protectSummaryIndex) {
@@ -718,25 +721,25 @@ export function __resetCustomTableExportStateForTests_ACU(): void {
               entriesToCreate.splice(entriesToCreate.indexOf(summaryIndexPlan!), 1);
           }
           if (uidsToDelete.length > 0) {
-              await deleteLorebookEntries_ACU(primaryLorebookName, uidsToDelete);
+              await store.remove(primaryLorebookName, uidsToDelete);
               logDebug_ACU(`Deleted ${uidsToDelete.length} custom export entries (Legacy + Known).`);
           }
           if (protectSummaryIndex) {
               // 只同步配置属性，不回写旧正文，避免覆盖交火在读取后产生的新结果。
               const { content: _content, ...attributes } = summaryIndexPlan!;
-              await setLorebookEntries_ACU(primaryLorebookName, [{ ...attributes, uid: existingSummaryIndex.uid }]);
+              await store.set(primaryLorebookName, [{ ...attributes, uid: existingSummaryIndex.uid }]);
               logDebug_ACU('[CustomExport] 交火独占纪要索引正文，保留现有条目，仅同步配置属性。');
           } else if (!isImport && sourceRowsRemoved && summaryIndexPlan) {
               logDebug_ACU('[CustomExport] 纪要来源行已删除或回溯，清理旧索引并按剩余数据创建。');
           }
 
           if (entriesToCreate.length > 0) {
-                  await createLorebookEntries_ACU(primaryLorebookName, entriesToCreate);
+                  await store.create(primaryLorebookName, entriesToCreate);
               logDebug_ACU(`Successfully created ${entriesToCreate.length} new custom export entries.`);
               // [兜底] 创建完成后强制回写 order（通过 comment 找 uid）
               if (postCreateOrderFixPlan.length > 0) {
                   try {
-                      const latest = await getLorebookEntries_ACU(primaryLorebookName);
+                      const latest = await store.get(primaryLorebookName);
                       const byComment = new Map();
                       latest.forEach((e: any) => { if (e?.comment) byComment.set(e.comment, e); });
                       const updates: Record<string, any>[] = [];
@@ -748,16 +751,17 @@ export function __resetCustomTableExportStateForTests_ACU(): void {
                           }
                       });
                       if (updates.length > 0) {
-                          await setLorebookEntries_ACU(primaryLorebookName, updates);
+                          await store.set(primaryLorebookName, updates);
                       }
                   } catch (e) {
+                      if (entryStore) throw e;
                       logWarn_ACU('[CustomExportOrderFix] Failed to enforce grouped orders for split exports:', e);
                   }
               }
           }
           
           // [新增] 更新并保存 knownCustomEntryNames（外部导入模式不写入，避免绑定第三方世界书）
-          if (!isImport) {
+          if (!entryStore && !isImport) {
           if (summaryIndexPlan) {
               summaryIndexSourceRowsByScope_ACU.set(summaryIndexScope, summaryIndexSourceRows);
           } else {
@@ -770,6 +774,8 @@ export function __resetCustomTableExportStateForTests_ACU(): void {
           }
 
       } catch (error) {
+
+          if (entryStore) throw error;
           // not-found 属于目标世界书重命名/切换期间的瞬态形态：导出条目下次触发会重建，
           // 只记 warn；其余失败仍按 error 上报。
           if (classifyLorebookReadError_ACU(error) === 'lorebook_not_found') {
