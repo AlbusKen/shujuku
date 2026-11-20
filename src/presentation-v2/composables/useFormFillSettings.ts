@@ -62,6 +62,7 @@ export type NumberSettingKey =
   | "skipUpdateFloors"
   | "retainRecentLayers"
   | "autoUpdateTokenThreshold"
+  | "tableFillMinResponseLength"
   | "tableMaxRetries";
 
 export interface FormFillSettingsState {
@@ -146,10 +147,17 @@ const NUMBER_FIELD_META: Array<Omit<FormFillNumberField, "value">> = [
   },
   {
     key: "autoUpdateTokenThreshold",
-    label: "AI 回复最小长度",
+    label: "剧情回复最小长度",
     min: 0,
     step: 1,
-    hint: "低于此值跳过自动填表。",
+    hint: "批末剧情回复的原始文本长度（字符数，非 token，含标签与空白）低于此值时跳过自动填表。",
+  },
+  {
+    key: "tableFillMinResponseLength",
+    label: "填表输出最小长度",
+    min: 0,
+    step: 1,
+    hint: "填表模型整段文本输出的字符数（非 token）低于此值时拒绝并重试，手动填表同样生效；0 为关闭，原生工具提交不受限制。",
   },
   {
     key: "tableMaxRetries",
@@ -168,6 +176,7 @@ const FALLBACKS: Record<NumberSettingKey, number> = {
   skipUpdateFloors: 0,
   retainRecentLayers: 100,
   autoUpdateTokenThreshold: DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU,
+  tableFillMinResponseLength: 0,
   tableMaxRetries: 3,
 };
 

@@ -51,6 +51,7 @@ let mockSettings: any = {
   skipUpdateFloors: 0,
   tableMaxRetries: 3,
   autoUpdateTokenThreshold: 0,
+  tableFillMinResponseLength: 0,
   toastMuteEnabled: false,
   dataIsolationEnabled: false,
   dataIsolationCode: '',
@@ -1577,6 +1578,7 @@ describe('executeCardUpdateCore_ACU', () => {
       ...mockSettings,
       tableMaxRetries: 3,
       autoUpdateTokenThreshold: 0,
+      tableFillMinResponseLength: 0,
       importPromptExcludeImportedWorldbookEntries: true,
     };
     mockCurrentJsonTableData = { sheet_0: { name: '测试表', content: [['row_id'], ['1']] } };
@@ -1890,19 +1892,39 @@ describe('executeCardUpdateCore_ACU', () => {
     expect(result.error).toContain('1 次尝试后仍失败');
   });
 
-  it('AI 回复过短时重试并最终失败', async () => {
-    mockSettings.autoUpdateTokenThreshold = 100;
-    mockSettings.tableMaxRetries = 1;
+  it('填表模型输出低于填表输出最小长度时重试并最终失败', async () => {
+    mockSettings = { ...mockSettings, autoUpdateTokenThreshold: 0, tableFillMinResponseLength: 100, tableMaxRetries: 1 };
     mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
     mockCallCustomOpenAI.mockResolvedValue('短');
 
-    const result = await executeCardUpdateCore_ACU(
-      [], 0, false, 'auto_standard', false,
-      null, null, new AbortController()
-    );
+    try {
+      const result = await executeCardUpdateCore_ACU(
+        [], 0, false, 'auto_standard', false,
+        null, null, new AbortController()
+      );
 
-    expect(result.success).toBe(false);
-    expect(result.error).toContain('AI回复过短');
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('填表模型输出过短');
+    } finally {
+      mockSettings = { ...mockSettings, tableFillMinResponseLength: 0 };
+    }
+  });
+
+  it('剧情回复门槛不再约束填表模型输出：输出门槛为 0 时短指令正常进入解析', async () => {
+    mockSettings = { ...mockSettings, autoUpdateTokenThreshold: 1800, tableFillMinResponseLength: 0, tableMaxRetries: 1 };
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
+    mockCallCustomOpenAI.mockResolvedValue('短');
+
+    try {
+      const result = await executeCardUpdateCore_ACU(
+        [], 0, false, 'auto_standard', false,
+        null, null, new AbortController()
+      );
+
+      expect(result.error || '').not.toContain('填表模型输出过短');
+    } finally {
+      mockSettings = { ...mockSettings, autoUpdateTokenThreshold: 0 };
+    }
   });
 
   it('用户中止时返回 aborted', async () => {

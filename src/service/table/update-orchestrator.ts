@@ -1501,10 +1501,11 @@ export async function collectGroupFillResponse_ACU(
                 return { job, success: false, attempt, aborted: true };
             }
 
-            const minReplyLength = settings_ACU.autoUpdateTokenThreshold || 0;
-            if (aiResponse && !submittedViaTool && minReplyLength > 0 && aiResponse.length < minReplyLength) {
+            // 只校验填表模型的文本输出；剧情回复门槛 autoUpdateTokenThreshold 仅用于发起前的批次检查。
+            const minResponseLength = settings_ACU.tableFillMinResponseLength || 0;
+            if (aiResponse && !submittedViaTool && minResponseLength > 0 && aiResponse.length < minResponseLength) {
                 diagnoseResponse('response_below_threshold');
-                throw new ModelOutputRetryError_ACU(`AI回复过短 (${aiResponse.length} 字符)，低于阈值 (${minReplyLength} 字符)`);
+                throw new ModelOutputRetryError_ACU(`填表模型输出过短 (${aiResponse.length} 字符)，低于填表输出最小长度 (${minResponseLength} 字符)`);
             }
             let normalizedAiResponse = aiResponse;
             let tableEditText = '';

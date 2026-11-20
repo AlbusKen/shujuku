@@ -447,7 +447,7 @@ describe('FormFillPage', () => {
     await Promise.resolve();
 
     const tokenRow = Array.from(updatePanel.querySelectorAll<HTMLElement>('.acu-disclosure-group .acu-form-row'))
-      .find(row => (row.textContent || '').includes('AI 回复最小长度'))!;
+      .find(row => (row.textContent || '').includes('剧情回复最小长度'))!;
     const tokenInput = tokenRow.querySelector<HTMLInputElement>('input[type="number"]')!;
     tokenInput.value = '7';
     tokenInput.dispatchEvent(new Event('change', { bubbles: true }));
@@ -554,9 +554,10 @@ describe('FormFillPage', () => {
     expect(advancedRows.map(row => (row.textContent || '').trim()).join('|')).toContain('自动填表频率');
     expect(advancedRows.map(row => (row.textContent || '').trim()).join('|')).toContain('批处理层数');
     expect(advancedRows.map(row => (row.textContent || '').trim()).join('|')).toContain('跳过最新回复数');
-    expect(advancedRows.map(row => (row.textContent || '').trim()).join('|')).toContain('AI 回复最小长度');
+    expect(advancedRows.map(row => (row.textContent || '').trim()).join('|')).toContain('剧情回复最小长度');
+    expect(advancedRows.map(row => (row.textContent || '').trim()).join('|')).toContain('填表输出最小长度');
     expect(advancedRows.map(row => (row.textContent || '').trim()).join('|')).toContain('填表最大重试');
-    expect(advancedRows).toHaveLength(6);
+    expect(advancedRows).toHaveLength(7);
 
     const batchRow = advancedRows.find(row => (row.textContent || '').includes('批处理层数'))!;
     const batchInput = batchRow.querySelector<HTMLInputElement>('input[type="number"]')!;

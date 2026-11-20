@@ -704,7 +704,7 @@ function interpretLogEntry(entry: LogEntry): string {
     return dashboardCopy.logs.apiIssue;
   }
   if (
-    /AI响应中未找到完整有效的 <tableEdit>|No recognizable table edit block|AI回复过短|解析或应用AI更新时出错/.test(
+    /AI响应中未找到完整有效的 <tableEdit>|No recognizable table edit block|填表模型输出过短|解析或应用AI更新时出错/.test(
       message,
     )
   ) {

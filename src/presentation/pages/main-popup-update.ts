@@ -61,11 +61,11 @@ export function generateUpdateTabHTML(): string {
                         <h3>内容筛选</h3>
                         <div class="acu-grid">
                             <div>
-                            <label for="${SCRIPT_ID_PREFIX_ACU}-auto-update-token-threshold">跳过更新最小回复长度:</label>
+                            <label for="${SCRIPT_ID_PREFIX_ACU}-auto-update-token-threshold">剧情回复最小长度:</label>
                                 <div class="input-group">
                                 <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-auto-update-token-threshold" min="0" step="100" placeholder="${DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU}">
                                 </div>
-                                <small class="notes" style="font-size: 0.85em; color: #888;">AI回复少于此长度时跳过自动填表</small>
+                                <small class="notes" style="font-size: 0.85em; color: #888;">批末剧情回复原始文本字符数（非 token）低于此值时跳过自动填表</small>
                             </div>
                             <div>
                             <label for="${SCRIPT_ID_PREFIX_ACU}-table-max-retries">填表自动重试次数:</label>

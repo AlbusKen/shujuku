@@ -2590,6 +2590,7 @@ describe('deleteLocalDataInChatCore_ACU', () => {
       'TavernDB_ACU_LocalMessageAnchor',
       '_acu_local_template_base_state_seeded',
       'TavernDB_ACU_IsolatedData',
+      'TavernDB_ACU_NativeSwipeState',
     ]);
     // ModifiedKeys/UpdateGroupKeys 是更新追踪元数据，非数据本体，刻意不置 modified；此处只断言数据字段差集。
     const dataFields = new Set(MESSAGE_TABLE_FIELDS_ACU.filter(field => !['TavernDB_ACU_ModifiedKeys', 'TavernDB_ACU_UpdateGroupKeys'].includes(field)));

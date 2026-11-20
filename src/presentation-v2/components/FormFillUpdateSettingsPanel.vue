@@ -117,6 +117,7 @@ const advancedKeys = new Set<NumberSettingKey>([
   "updateBatchSize",
   "skipUpdateFloors",
   "autoUpdateTokenThreshold",
+  "tableFillMinResponseLength",
   "tableMaxRetries",
 ]);
 

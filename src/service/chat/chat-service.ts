@@ -27,7 +27,7 @@ import { logDebug_ACU, logError_ACU, logWarn_ACU, isSummaryOrOutlineTable_ACU } 
 import { getLastOptimizationBase_ACU, setLastOptimizationBase_ACU } from '../optimization/content-optimization';
 import { settings_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { sanitizeSheetForStorage_ACU } from '../template/chat-scope';
-import { MESSAGE_TABLE_FIELDS_ACU, clearTableFieldsForIsolation_ACU, collectSheetIdentityAliasesForPurge_ACU, purgeManualRefillIncrementalSheetKeysFromMessage_ACU, purgeSheetKeysFromMessage_ACU, purgeSheetKeysFromMessageForIsolation_ACU, readIsolatedDataContainer_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
+import { MESSAGE_TABLE_FIELDS_ACU, NATIVE_SWIPE_TABLE_FIELD_ACU, clearTableFieldsForIsolation_ACU, collectSheetIdentityAliasesForPurge_ACU, purgeManualRefillIncrementalSheetKeysFromMessage_ACU, purgeSheetKeysFromMessage_ACU, purgeSheetKeysFromMessageForIsolation_ACU, readIsolatedDataContainer_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
 import { MAX_CHECKPOINT_RISK_DETAILS_ACU, scanTargetKeysResidue_ACU } from '../../data/repositories/target-keys-diagnostics';
 import { LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU } from '../../data/storage/chat-history';
 import { peekChatScopedConfigContainer_ACU, peekChatSheetGuideContainer_ACU, setChatScopedConfigContainer_ACU, setChatSheetGuideContainer_ACU } from '../../data/storage/chat-history';
@@ -1948,6 +1948,20 @@ async function deleteLocalDataInChatCoreInner_ACU(
                         }
                         modified = true;
                     }
+                }
+            }
+            // Swipe 候选归档携带各候选的表格帧，删除本地数据后不得再被切换候选恢复。
+            const swipeArchive = msg[NATIVE_SWIPE_TABLE_FIELD_ACU];
+            if (swipeArchive !== undefined) {
+                if (mode === 'all' || !swipeArchive || typeof swipeArchive !== 'object') {
+                    delete msg[NATIVE_SWIPE_TABLE_FIELD_ACU];
+                    modified = true;
+                } else if (Object.prototype.hasOwnProperty.call(swipeArchive, currentIsolationKey)) {
+                    const remaining = { ...swipeArchive };
+                    delete remaining[currentIsolationKey];
+                    if (Object.keys(remaining).length) msg[NATIVE_SWIPE_TABLE_FIELD_ACU] = remaining;
+                    else delete msg[NATIVE_SWIPE_TABLE_FIELD_ACU];
+                    modified = true;
                 }
             }
             if (msg.TavernDB_ACU_ModifiedKeys) {

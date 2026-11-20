@@ -1517,6 +1517,8 @@ export   function buildDefaultSettings_ACU() {
           autoUpdateThreshold: DEFAULT_AUTO_UPDATE_THRESHOLD_ACU,
           autoUpdateFrequency: DEFAULT_AUTO_UPDATE_FREQUENCY_ACU,
           autoUpdateTokenThreshold: DEFAULT_AUTO_UPDATE_TOKEN_THRESHOLD_ACU,
+          // 填表模型输出最小长度（原始字符数），0 关闭；与剧情回复门槛独立，旧配置经默认值合并为 0。
+          tableFillMinResponseLength: 0,
           updateBatchSize: 3,
           maxConcurrentGroups: 1,
           autoUpdateEnabled: true,
