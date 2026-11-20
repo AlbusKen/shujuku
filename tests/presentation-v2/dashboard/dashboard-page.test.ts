@@ -249,7 +249,6 @@ async function mountDashboardPage(
     return {
       ...actual,
       isVectorPipelineEnabledForCurrentChat_ACU: () => options.vectorPipelineEnabled === true,
-      isVectorModeExplicitlySelected_ACU: () => options.vectorPipelineEnabled === true,
     };
   });
   vi.doMock("../../../src/service/ai/ai-service", () => ({

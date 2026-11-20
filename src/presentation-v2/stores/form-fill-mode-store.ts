@@ -24,7 +24,11 @@ import {
   type SetChatFillModeOptions_ACU,
   type SetChatFillModeResult_ACU,
 } from '../../service/fill-mode/fill-mode-chat-switch';
-import { isClassicModeActiveForCurrentChat_ACU } from '../../service/fill-mode/fill-mode-chat-record';
+import {
+  getClassicReadinessForCurrentChat_ACU,
+  retryClassicEnableForCurrentChat_ACU,
+  type ClassicReadiness_ACU,
+} from '../../service/fill-mode/fill-mode-reconcile';
 
 export type FillMode = FillMode_ACU;
 
@@ -37,12 +41,13 @@ interface FormFillModeState {
   selectedMode: FillMode;
   modeSource: ChatFillModeSource_ACU;
   recordStatus: ChatFillModeRecordStatus_ACU;
-  /** 当前对话已按经典表格模式运行（大总结表存在）；切出时会删除大总结表。 */
-  classicActive: boolean;
+  /** 经典表格就绪状态：当前模式为经典时反映飞行开关是否已补完，非经典为 not_classic。 */
+  classicReadiness: ClassicReadiness_ACU;
   preferredMode: FillMode;
   profiles: FormFillProfiles;
   saveError: string | null;
   switching: boolean;
+  retryingClassic: boolean;
 }
 
 function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
@@ -57,14 +62,14 @@ function clampScore(value: unknown, fallback: number): number {
   return Math.min(1, Math.max(0, parsed));
 }
 
-function readState(): Omit<FormFillModeState, 'switching' | 'saveError'> {
+function readState(): Omit<FormFillModeState, 'switching' | 'saveError' | 'retryingClassic'> {
   const current = resolveCurrentChatFillMode_ACU();
   const { preferences } = current.preferences;
   return {
     selectedMode: current.mode,
     modeSource: current.source,
     recordStatus: current.recordStatus,
-    classicActive: isClassicModeActiveForCurrentChat_ACU(),
+    classicReadiness: getClassicReadinessForCurrentChat_ACU(),
     preferredMode: preferences.selectedMode,
     profiles: {
       classic: { ...preferences.classic },
@@ -75,7 +80,7 @@ function readState(): Omit<FormFillModeState, 'switching' | 'saveError'> {
 
 
 export const useFormFillModeStore = defineStore('acu-v2-form-fill-mode', {
-  state: (): FormFillModeState => ({ ...readState(), saveError: null, switching: false }),
+  state: (): FormFillModeState => ({ ...readState(), saveError: null, switching: false, retryingClassic: false }),
   actions: {
     /** 切换当前对话的模式；被拒绝时不改动视图，由调用方提示原因。 */
     async selectMode(mode: FillMode, options: SetChatFillModeOptions_ACU = {}): Promise<SetChatFillModeResult_ACU> {
@@ -87,6 +92,17 @@ export const useFormFillModeStore = defineStore('acu-v2-form-fill-mode', {
         // 包括抛错在内，始终回读实际状态。
         this.refresh();
         this.switching = false;
+      }
+    },
+    /** 经典模式未就绪时手动重新启用；结果以回读的就绪状态为准。 */
+    async retryClassicEnable(): Promise<ClassicReadiness_ACU> {
+      if (this.retryingClassic) return this.classicReadiness;
+      this.retryingClassic = true;
+      try {
+        return await retryClassicEnableForCurrentChat_ACU();
+      } finally {
+        this.refresh();
+        this.retryingClassic = false;
       }
     },
     /** 五角星：设置新对话的偏好模式（全局保存），不改动当前对话已记录的模式。 */

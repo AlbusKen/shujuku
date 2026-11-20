@@ -14,7 +14,8 @@ import { getLorebookEntriesByNames_ACU, getWorldBooks_ACU, updateReadableLoreboo
 import { getInjectionTargetLorebook_ACU, getIsolationPrefix_ACU, updateOutlineTableEntry_ACU } from '../../service/worldbook/injection-engine';
 import { refreshMergedDataAndNotifyWithUI_ACU } from '../components/pipeline-ui-helpers';
 import { getCurrentWorldbookConfig_ACU } from '../../service/settings/settings-readers';
-import { setSummaryVectorIndexMode_ACU, setZeroTkOccupyMode_ACU } from '../../service/settings/settings-service';
+
+import { setZeroTkOccupyMode_ACU } from '../../service/settings/settings-service';
 import { formatJsonToReadable_ACU } from '../../service/runtime/helpers-remaining';
 import { getCurrentVectorMemoryConfig_ACU, getDefaultVectorMemoryConfig_ACU, updateGlobalVectorMemoryConfigFields_ACU } from '../../service/vector/vector-memory-config';
 import { getAggregatedSummaryVectorIndexSnapshot_ACU } from '../../service/vector/summary-vector-index-state-service';
@@ -105,11 +106,9 @@ export function readSummaryPromptGroupFromUI_ACU(): any[] {
 export async function bindWorldbookEvents_ACU(): Promise<void> {
       // [向量记忆] 配置已迁移到全局 settings_ACU.vectorMemoryConfig，
       // 不再跟随世界书配置（角色级），而是跟随数据库全局设置。
+      // 交火是否运行由当前对话的填表模式决定；参数配置块常驻显示。
       const toggleVectorMemoryConfigBlock_ACU = () => {
-          const worldbookConfig = getCurrentWorldbookConfig_ACU();
-          const summaryVectorIndexEnabled = worldbookConfig.summaryVectorIndexModeEnabled === true;
-          $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-enabled`).prop('checked', summaryVectorIndexEnabled);
-          $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-config-block`).toggle(summaryVectorIndexEnabled);
+          $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-config-block`).show();
       };
       const logVectorMemorySaveResult_ACU = (fieldNames: string[], result: { ok: boolean; message?: string }) => {
           const safeFieldNames = fieldNames.map(field => /key/i.test(field) ? `${field}(redacted)` : field).join(',');
@@ -189,12 +188,6 @@ export async function bindWorldbookEvents_ACU(): Promise<void> {
       if ($refreshWorldbooksButton.length) {
           $refreshWorldbooksButton.on('click', populateWorldbookList_ACU);
       }
-      bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-enabled`, 'change', ($input) => {
-          const worldbookConfig = getCurrentWorldbookConfig_ACU();
-          $input.prop('checked', worldbookConfig.summaryVectorIndexModeEnabled === true);
-          toggleVectorMemoryConfigBlock_ACU();
-          syncManualUpdateButtonAvailability_ACU();
-      });
       bindVectorMemoryInput_ACU(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-threshold`, 'input change', ($input) => {
           const defaults = getDefaultVectorMemoryConfig_ACU();
           updateVectorMemoryField_ACU('threshold', parseIntegerField_ACU($input.val(), defaults.threshold));
@@ -523,54 +516,6 @@ export async function bindWorldbookEvents_ACU(): Promise<void> {
               } catch (e) {
                   logWarn_ACU('Failed to sync outline entry enabled state immediately:', e);
               }
-          });
-      }
-
-      const $summaryVectorIndexModeToggle = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-summary-vector-index-mode-enabled`);
-      if ($summaryVectorIndexModeToggle.length) {
-          $summaryVectorIndexModeToggle.off('change.acu_summary_vector_index_mode').on('change.acu_summary_vector_index_mode', async function() {
-              const modeEnabled = jQuery_API_ACU(this).is(':checked');
-              setSummaryVectorIndexMode_ACU(modeEnabled);
-              $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-enabled`).prop('checked', modeEnabled);
-              $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-config-block`).toggle(modeEnabled);
-              syncManualUpdateButtonAvailability_ACU();
-
-              try {
-                  const primaryLorebookName = await getInjectionTargetLorebook_ACU();
-                  if (primaryLorebookName && isWorldbookApiAvailable_ACU()) {
-                      const allEntries = await getLorebookEntries_ACU(primaryLorebookName);
-                      const existingIndexEntry = allEntries.find(e => e.comment && e.comment.endsWith('TavernDB-ACU-CustomExport-纪要索引'));
-                      if (existingIndexEntry) {
-                          const nextEnabled = getCurrentWorldbookConfig_ACU()?.zeroTkOccupyMode !== true;
-                          if (existingIndexEntry.enabled !== nextEnabled) {
-                              await setLorebookEntries_ACU(primaryLorebookName, [{
-                                  uid: existingIndexEntry.uid,
-                                  enabled: nextEnabled,
-                              }]);
-                              logDebug_ACU(`summary vector mode toggle: updated 纪要索引 entry. enabled=${nextEnabled}`);
-                          }
-                      }
-                  }
-              } catch (e) {
-                  logWarn_ACU('Failed to sync summary index entry enabled state immediately:', e);
-              }
-
-              const activeSnapshot = getAggregatedSummaryVectorIndexSnapshot_ACU();
-              const activeState = activeSnapshot?.summaryVectorIndexState || null;
-              const archivedRowCount = activeState?.rowCount || (Array.isArray(activeState?.rows) ? activeState.rows.length : 0);
-              const hasArchive = !!activeState;
-              const vectorConfig = getCurrentVectorMemoryConfig_ACU();
-              const summaryIndexKeywordMinRows = Math.max(1, Math.floor(Number((vectorConfig as any).summaryIndexKeywordMinRows || 100)));
-              showToastr_ACU(
-                  !modeEnabled || archivedRowCount >= summaryIndexKeywordMinRows ? 'info' : 'warning',
-                  modeEnabled
-                      ? hasArchive
-                          ? archivedRowCount >= summaryIndexKeywordMinRows
-                              ? `交火模式纪要索引已启用。当前纪要向量索引 ${archivedRowCount} 条，已达到 ${summaryIndexKeywordMinRows} 条门槛；发送前会召回概要列 chunk、执行可选 Rerank，并按纪要表原顺序覆盖原概要索引条目。`
-                              : `交火模式纪要索引已启用。当前纪要向量索引 ${archivedRowCount}/${summaryIndexKeywordMinRows} 条；未达到门槛前，用户发送不会触发交火召回，填表保存后仍会立即归档并继续累积。`
-                          : '交火模式纪要索引已启用。当前聊天尚无纪要向量索引归档；完成一次纪要表填写后会自动归档，也可手动构建。'
-                      : '交火模式纪要索引已禁用，概要索引将回到原本的全量纪要表流程。',
-              );
           });
       }
 

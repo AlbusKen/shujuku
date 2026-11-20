@@ -34,6 +34,7 @@ const serviceMock = vi.hoisted(() => ({
   saveTableLocksForSheet_ACU: vi.fn(),
   setSpecialIndexLockEnabled_ACU: vi.fn(),
   getCurrentWorldbookConfig_ACU: vi.fn(() => ({ summaryVectorIndexModeEnabled: false })),
+  isVectorPipelineEnabledForCurrentChat_ACU: vi.fn(() => false),
 
   saveIndependentTableToChatHistory_ACU: vi.fn(async () => undefined),
   replayData: null as Record<string, any> | null,
@@ -144,6 +145,9 @@ vi.mock('../../../src/service/runtime/helpers-remaining', () => ({
 }));
 vi.mock('../../../src/service/settings/settings-readers', () => ({
   getCurrentWorldbookConfig_ACU: serviceMock.getCurrentWorldbookConfig_ACU,
+}));
+vi.mock('../../../src/service/fill-mode/fill-mode-gate', () => ({
+  isVectorPipelineEnabledForCurrentChat_ACU: serviceMock.isVectorPipelineEnabledForCurrentChat_ACU,
 }));
 vi.mock('../../../src/service/table/table-service', () => ({
   saveIndependentTableToChatHistory_ACU: serviceMock.saveIndependentTableToChatHistory_ACU,
@@ -1635,7 +1639,7 @@ describe('useVisualizerSave', () => {
       sheet_keep: { ...sheet('保留表'), uid: 'sheet_keep' },
       sheet_summary: { ...sheet('总结表'), uid: 'sheet_summary' },
     }, ['sheet_keep', 'sheet_summary']);
-    serviceMock.getCurrentWorldbookConfig_ACU.mockReturnValueOnce({ summaryVectorIndexModeEnabled: true });
+    serviceMock.isVectorPipelineEnabledForCurrentChat_ACU.mockReturnValueOnce(true);
     store.deleteSheet('sheet_summary');
 
     const saved = await useVisualizerSave().saveTemplateToCurrentChat();
@@ -1662,7 +1666,7 @@ describe('useVisualizerSave', () => {
       sheet_summary_keep: { ...sheet('总体大纲'), uid: 'sheet_summary_keep' },
       sheet_summary_delete: { ...sheet('总结表'), uid: 'sheet_summary_delete' },
     }, ['sheet_keep', 'sheet_summary_keep', 'sheet_summary_delete']);
-    serviceMock.getCurrentWorldbookConfig_ACU.mockReturnValueOnce({ summaryVectorIndexModeEnabled: true });
+    serviceMock.isVectorPipelineEnabledForCurrentChat_ACU.mockReturnValueOnce(true);
     store.deleteSheet('sheet_summary_delete');
 
     const saved = await useVisualizerSave().saveTemplateToCurrentChat();

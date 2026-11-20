@@ -28,6 +28,8 @@ import { isSqliteMode } from '../../service/table/storage-mode';
 import { reloadStorageProvider } from '../../service/table/table-storage-strategy';
 import { getLatestAiMessageIndexFromChat_ACU, getLatestTableAppendMessageIndexFromChat_ACU } from '../../service/table/table-history';
 import { getCurrentWorldbookConfig_ACU } from '../../service/settings/settings-readers';
+import { isVectorPipelineEnabledForCurrentChat_ACU } from '../../service/fill-mode/fill-mode-gate';
+
 import { enqueueSummaryVectorIndexFlush_ACU } from '../../service/vector/summary-vector-index-flush-queue';
 import {
     applyVisualizerPendingDataOps_ACU,
@@ -215,7 +217,7 @@ function templateChangedRowsOnly_ACU(templateTable: any): void {
 async function runPostSaveRefresh_ACU(reason: string, targetMessageIndex?: number, sourceTableKey?: string): Promise<void> {
     await refreshMergedDataAndNotifyWithUI_ACU();
 
-    if (sourceTableKey && getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
+    if (sourceTableKey && isVectorPipelineEnabledForCurrentChat_ACU()) {
         try {
                 const queueResult = await enqueueSummaryVectorIndexFlush_ACU({
                     sourceTableKey,

@@ -795,11 +795,10 @@ describe('manual catch-up provisional bridge 写入准入（t5）', () => {
     expect(establish.ok).toBe(true);
     if (!establish.ok) return;
 
-    // 模拟另一隔离键上下文发起第二次建立：仅切换运行时隔离键。
-    // 当前实现中「请求隔离键 !== 当前运行时隔离键」在前置校验（L419）即拒绝，
+    // 运行时隔离键保持不变，请求携带另一隔离键：
+    // 「请求隔离键 !== 当前运行时隔离键」在前置校验即拒绝，
     // 不会进入全局 bridge 冲突检测，因此不携带 provisional_bridge_conflict。
     const otherIsolationKey = 'other-isolation-key';
-    mocks.isolationKey = otherIsolationKey;
 
     const secondEstablish = await establishProvisionalBridge_ACU('run-bridge-scope-mismatch-2', ['sheet_a'], 0, 6, {
       selectedSheetBaselines: { sheet_a: { lastCompletedAiFloor: 0, headerOnly: true } },

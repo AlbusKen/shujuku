@@ -30,6 +30,8 @@ import {
     type SummaryVectorMirrorRebuildReason_ACU,
 } from './summary-vector-mirror-rebuild';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
+import { isVectorPipelineEnabledForCurrentChat_ACU } from '../fill-mode/fill-mode-gate';
+
 import type { TableMutationWriteSetV2_ACU } from '../table/storage-frame-v2-types';
 import { hasActiveProvisionalBridgeAnywhere_ACU } from '../table/manual-catch-up-provisional-bridge';
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
@@ -96,7 +98,7 @@ export function scheduleSummaryVectorMirrorFlushAfterPersist_ACU(options: {
 }): void {
     try {
         const worldbook = getCurrentWorldbookConfig_ACU();
-        if (worldbook.summaryVectorIndexModeEnabled !== true || worldbook.summaryVectorMirrorEnabled === false) return;
+        if (!isVectorPipelineEnabledForCurrentChat_ACU() || worldbook.summaryVectorMirrorEnabled === false) return;
         const sourceTableKey = findTouchedSummarySheetKey_ACU({
             changedSheetKeys: options.changedSheetKeys,
             writeSet: options.writeSet,

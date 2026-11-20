@@ -4,13 +4,13 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { markPlotIntercept_ACU } from '../../../src/service/plot/plot-logic';
+import { seedFillModeForTest_ACU } from '../../helpers/fill-mode-seed';
 
-const { mockSettings, mockLoopState, mockIsProcessing, mockSetIsProcessing, mockFlightModeActive, mockRunOptimization, mockAbort } = vi.hoisted(() => ({
+const { mockSettings, mockLoopState, mockIsProcessing, mockSetIsProcessing, mockRunOptimization, mockAbort } = vi.hoisted(() => ({
   mockSettings: { plotSettings: { enabled: true } } as any,
   mockLoopState: { isLooping: false, isRetrying: false, awaitingReply: false } as any,
   mockIsProcessing: false,
   mockSetIsProcessing: vi.fn(),
-  mockFlightModeActive: vi.fn(() => false),
   mockRunOptimization: vi.fn(),
   mockAbort: vi.fn(),
 }));
@@ -21,6 +21,8 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   get isProcessing_Plot_ACU() { return mockIsProcessing; },
   _set_isProcessing_Plot_ACU: mockSetIsProcessing,
   abortController_ACU: { abort: mockAbort },
+  currentJsonTableData_ACU: {},
+  getCurrentIsolationKey_ACU: () => '',
 }));
 
 vi.mock('../../../src/service/plot/plot-logic', () => ({
@@ -28,7 +30,8 @@ vi.mock('../../../src/service/plot/plot-logic', () => ({
   shouldSkipPlotIntercept_ACU: vi.fn(() => false),
 }));
 
-vi.mock('../../../src/shared/utils', () => ({
+vi.mock('../../../src/shared/utils', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../src/shared/utils')>(),
   logDebug_ACU: vi.fn(),
   logError_ACU: vi.fn(),
   logWarn_ACU: vi.fn(),
@@ -37,14 +40,6 @@ vi.mock('../../../src/shared/utils', () => ({
 
 vi.mock('../../../src/shared/defaults-json.js', () => ({
   DEFAULT_PLOT_SETTINGS_ACU: { enabled: false },
-}));
-
-vi.mock('../../../src/service/flight-mode/flight-mode-state', () => ({
-  isFlightModeActive_ACU: mockFlightModeActive,
-}));
-
-vi.mock('../../../src/service/fill-mode/fill-mode-gate', () => ({
-  isPlotSuppressedByFillModeForCurrentChat_ACU: () => false,
 }));
 
 vi.mock('../../../src/service/runtime/helpers-remaining', () => ({
@@ -76,7 +71,8 @@ beforeEach(() => {
   mockLoopState.isLooping = false;
   mockLoopState.isRetrying = false;
   mockLoopState.awaitingReply = false;
-  mockFlightModeActive.mockReturnValue(false);
+  // 默认按 LLM 模式（允许剧情推进）运行，模式相关用例单独播种。
+  seedFillModeForTest_ACU({ record: 'llm' });
 });
 
 // ═══ shouldProcessTavernHelperHook_ACU ═══
@@ -88,9 +84,21 @@ describe('shouldProcessTavernHelperHook_ACU', () => {
     mockSettings.plotSettings.enabled = false;
     expect(shouldProcessTavernHelperHook_ACU({})).toBe(false);
   });
-  it('飞行模式开启时返回 false', () => {
-    mockFlightModeActive.mockReturnValue(true);
+  it('记录 classic（飞行开关未启用）时返回 false', () => {
+    seedFillModeForTest_ACU({ record: 'classic', flightEnabled: false });
     expect(shouldProcessTavernHelperHook_ACU({})).toBe(false);
+  });
+  it('记录 vector 时返回 false', () => {
+    seedFillModeForTest_ACU({ record: 'vector' });
+    expect(shouldProcessTavernHelperHook_ACU({})).toBe(false);
+  });
+  it('无记录新对话、偏好 classic 时返回 false', () => {
+    seedFillModeForTest_ACU({ preferred: 'classic' });
+    expect(shouldProcessTavernHelperHook_ACU({})).toBe(false);
+  });
+  it('记录 crossfire 且飞行开关残留开启时按记录返回 true', () => {
+    seedFillModeForTest_ACU({ record: 'crossfire', flightEnabled: true });
+    expect(shouldProcessTavernHelperHook_ACU({})).toBe(true);
   });
   it('重试中返回 false', () => {
     mockLoopState.isRetrying = true;
@@ -288,7 +296,7 @@ describe('orchestrateAfterCommandsStrategy2_ACU', () => {
     expect(result.action).toBe('skip');
   });
   it('真实 UI 保留跳过原因：无需规划透传，忙碌独立拒绝，未知跳过仍失败', async () => {
-    for (const reason of ['disabled', 'fill_mode_vector', 'retrying']) {
+    for (const reason of ['disabled', 'fill_mode_no_plot', 'retrying']) {
       mockRunOptimization.mockResolvedValue({ success: false, skipped: true, reason });
       expect(await runOptimizationLogicWithUI_ACU('继续')).toEqual({ skipped: true, reason });
       expect(await orchestrateTavernHelperHook_ACU({ user_input: '继续' }, runOptimizationLogicWithUI_ACU))

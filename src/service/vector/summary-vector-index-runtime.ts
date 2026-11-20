@@ -961,7 +961,7 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     const worldbookConfig = getCurrentWorldbookConfig_ACU();
     const globalEnabled = isVectorPipelineEnabledForCurrentChat_ACU();
     if (!globalEnabled) {
-        logDebug_ACU(`[交火模式纪要索引] 全局开关未启用，跳过发送前处理。worldbookProjection=${worldbookConfig.summaryVectorIndexModeEnabled === true}`);
+        logDebug_ACU('[交火模式纪要索引] 当前对话的填表模式不运行向量管线，跳过发送前处理。');
         return { success: false, skipped: true, reason: 'summary_vector_index_disabled' };
     }
     if (worldbookConfig.summaryVectorMirrorEnabled === false) {

@@ -132,20 +132,7 @@ export function generateTableTabHTML(): string {
                         </div>
                         <hr>
                         <div style="margin-top: 15px; padding: 12px; border: 1px solid var(--acu-border-2); border-radius: 8px; background: var(--acu-bg-2);">
-                            <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap;">
-                                <div style="flex: 1 1 280px; min-width: 240px;">
-                                    <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-summary-vector-index-mode-enabled" style="font-weight: 600; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                                        <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-summary-vector-index-mode-enabled" style="width: 14px; height: 14px; cursor: pointer;">
-                                        <span>启用向量混合增强交火方案</span>
-                                    </label>
-                                    <small class="notes">开启后会随纪要表更新自动累积外置向量索引；聊天记录只保存 manifest，向量分片写入 /user/files。下方配置 Embedding、Rerank 与召回参数。</small>
-                                </div>
-                                <label id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-enabled-toggle-row" style="display: none; align-items: center; gap: 8px; margin: 0; white-space: nowrap;">
-                                    <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-enabled">
-                                    <span>启用向量记忆</span>
-                                </label>
-                            </div>
-                            <div id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-config-block" style="display: none; margin-top: 12px;">
+                            <div id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-config-block">
                                 <div class="acu-section" style="margin-bottom: 12px;">
                                     <div class="acu-section-title">交火模式纪要索引参数</div>
                                     <div class="acu-grid-auto">

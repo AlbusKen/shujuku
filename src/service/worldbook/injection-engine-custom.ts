@@ -3,6 +3,8 @@
  * 从 injection-engine.ts 拆出
  */
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
+import { isVectorPipelineEnabledForCurrentChat_ACU } from '../fill-mode/fill-mode-gate';
+
 import { settings_ACU, currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { isWorldbookApiAvailable_ACU, getLorebookEntries_ACU, setLorebookEntries_ACU, createLorebookEntries_ACU, deleteLorebookEntries_ACU } from '../../data/gateways/worldbook-gateway';
 import { saveSettings_ACU } from '../settings/settings-service';
@@ -72,9 +74,9 @@ export function __resetCustomTableExportStateForTests_ACU(): void {
       // [修改] 0TK 与交火模式允许同时启用：交火模式可保留/覆盖纪要索引内容，但 0TK 仍持续控制该条目的 enabled 状态。
       const worldbookConfig = getCurrentWorldbookConfig_ACU();
       const zeroTkOccupyMode = worldbookConfig?.zeroTkOccupyMode === true;
-      const summaryVectorIndexModeEnabled = worldbookConfig?.summaryVectorIndexModeEnabled === true;
+      const vectorPipelineEnabled = isVectorPipelineEnabledForCurrentChat_ACU();
       const extraIndexEntryEnabled = !zeroTkOccupyMode;
-      logDebug_ACU(`[CustomExport] 0TK模式=${zeroTkOccupyMode}, 交火纪要索引=${summaryVectorIndexModeEnabled}, 纪要索引条目enabled=${extraIndexEntryEnabled}`);
+      logDebug_ACU(`[CustomExport] 0TK模式=${zeroTkOccupyMode}, 向量管线=${vectorPipelineEnabled}, 纪要索引条目enabled=${extraIndexEntryEnabled}`);
 
       const summaryIndexComment = `${isoPrefix}TavernDB-ACU-CustomExport-纪要索引`;
       const summaryIndexScope = JSON.stringify([
@@ -708,7 +710,7 @@ export function __resetCustomTableExportStateForTests_ACU(): void {
           const sourceRowsRemoved = !!previousSourceRows
               && [...previousSourceRows].some(rowId => !summaryIndexSourceRows.has(rowId));
           const existingSummaryIndex = allEntries.find(entry => entry.comment === summaryIndexComment);
-          const protectSummaryIndex = !isImport && summaryVectorIndexModeEnabled && !!summaryIndexPlan
+          const protectSummaryIndex = !isImport && vectorPipelineEnabled && !!summaryIndexPlan
               && existingSummaryIndex?.uid != null && !sourceRowsRemoved;
 
           if (protectSummaryIndex) {

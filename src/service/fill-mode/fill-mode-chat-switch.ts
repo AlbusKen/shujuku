@@ -25,6 +25,7 @@ import { isChronicleBelowClassicThreshold_ACU } from '../flight-mode/flight-mode
 import {
   isClassicModeActiveForCurrentChat_ACU,
   resolveCurrentChatFillMode_ACU,
+  resolveUnrecordedChatFillModeForCurrentChat_ACU,
 } from './fill-mode-chat-record';
 import { stageChatFillModeRecord_ACU } from './fill-mode-chat-record-fields';
 import { hasExistingTableDataForCurrentChat_ACU, inspectSummaryVectorDataForCurrentChat_ACU } from './fill-mode-chat-evidence';
@@ -51,13 +52,13 @@ export type EnsureChatFillModeResult_ACU =
   | { recorded: true; mode: FillMode_ACU }
   | {
     recorded: false;
-    reason: 'no_active_chat' | 'already_recorded' | 'record_invalid' | 'legacy_default' | 'save_failed' | 'evidence_unavailable' | 'chat_changed';
+    reason: 'no_active_chat' | 'already_recorded' | 'record_invalid' | 'table_not_loaded' | 'save_failed' | 'evidence_unavailable' | 'chat_changed';
     error?: string;
   };
 
 type WriteResult_ACU = { ok: true } | { ok: false; reason: 'no_active_chat' | 'save_failed'; error?: string };
 
-function describeClassicTransitionFailure_ACU(result: FlightModeTransitionResult_ACU): string {
+export function describeClassicTransitionFailure_ACU(result: FlightModeTransitionResult_ACU): string {
   if (result.reason === 'too_many_visible_chronicle_rows') {
     return `当前可见纪要 ${result.visibleChronicleRowCount ?? '?'} 条，超过经典表格模式的纪要窗口。`;
   }
@@ -129,8 +130,9 @@ export async function setCurrentChatFillMode_ACU(
 }
 
 /**
- * 打开对话时为未记录的对话补记模式：新对话按偏好，旧对话按已识别的数据证据。
- * 只在表格可靠加载后补记；已有标记不再按历史数据重新推断。
+ * 为未记录的对话补记模式，推导规则与无记录时的运行判定一致（resolveUnrecordedChatFillMode_ACU）：
+ * 飞行开关已开 → classic；旧表格数据 → 异步核验向量后 crossfire / llm；其余 → 偏好。
+ * 只在表格可靠加载后补记；已有记录不再按历史数据重新推断。
  */
 export async function ensureCurrentChatFillModeRecorded_ACU(): Promise<EnsureChatFillModeResult_ACU> {
   const current = resolveCurrentChatFillMode_ACU();
@@ -138,16 +140,18 @@ export async function ensureCurrentChatFillModeRecorded_ACU(): Promise<EnsureCha
   if (current.recordStatus === 'recorded') return { recorded: false, reason: 'already_recorded' };
   if (current.recordStatus === 'invalid') return { recorded: false, reason: 'record_invalid' };
   if (!currentJsonTableData_ACU || typeof currentJsonTableData_ACU !== 'object') {
-    return { recorded: false, reason: 'legacy_default' };
+    return { recorded: false, reason: 'table_not_loaded' };
   }
+  const preferredMode = current.preferences.preferences.selectedMode;
+  const unrecorded = resolveUnrecordedChatFillModeForCurrentChat_ACU(preferredMode);
   const chat = getChatArray_ACU();
   const identity = getActiveChatStorageIdentity_ACU(chat);
   const isolationKey = String(getCurrentIsolationKey_ACU() ?? '');
   const tableData = currentJsonTableData_ACU;
   const tableSnapshot = JSON.stringify(tableData);
   const chatSnapshot = JSON.stringify(chat);
-  let mode = current.mode;
-  if (current.source === 'legacy') {
+  let mode = unrecorded.mode;
+  if (unrecorded.basis === 'legacy_table') {
     const evidence = await inspectSummaryVectorDataForCurrentChat_ACU();
     if (evidence.status === 'unknown') return { recorded: false, reason: 'evidence_unavailable', error: evidence.error };
     mode = evidence.status === 'present' ? 'crossfire' : 'llm';
@@ -159,7 +163,8 @@ export async function ensureCurrentChatFillModeRecorded_ACU(): Promise<EnsureCha
   const latest = resolveCurrentChatFillMode_ACU();
   if (latest.recordStatus === 'recorded') return { recorded: false, reason: 'already_recorded' };
   if (latest.recordStatus === 'invalid') return { recorded: false, reason: 'record_invalid' };
-  if (isClassicModeActiveForCurrentChat_ACU()) mode = 'classic';
+  // 推导依据在核验期间变化（如飞行开关被启用）时不写，等下次打开重新推导。
+  if (resolveUnrecordedChatFillModeForCurrentChat_ACU(preferredMode).basis !== unrecorded.basis) return { recorded: false, reason: 'chat_changed' };
   const written = await writeCurrentChatFillMode_ACU(mode);
   if ('reason' in written) return { recorded: false, reason: written.reason, ...(written.error ? { error: written.error } : {}) };
   return { recorded: true, mode };

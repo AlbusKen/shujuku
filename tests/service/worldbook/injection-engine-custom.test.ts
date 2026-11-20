@@ -75,6 +75,7 @@ const {
   mockGetCurrentFlightModeState: vi.fn(() => ({ enabled: false, hiddenRowIds: [], bigSummarySheetKey: '' })),
   mockRuntimeScope: { chatKey: 'chat-1', isolationKey: 'iso-1' },
 }));
+const mockVectorPipelineEnabled = vi.hoisted(() => vi.fn(() => false));
 
 vi.mock('../../../src/service/settings/settings-readers', () => ({
   getCurrentWorldbookConfig_ACU: mockGetCurrentWorldbookConfig,
@@ -140,10 +141,15 @@ vi.mock('../../../src/service/flight-mode/flight-mode-state', () => ({
   getCurrentFlightModeState_ACU: (...args: any[]) => mockGetCurrentFlightModeState(...args),
 }));
 
+vi.mock('../../../src/service/fill-mode/fill-mode-gate', () => ({
+  isVectorPipelineEnabledForCurrentChat_ACU: () => mockVectorPipelineEnabled(),
+}));
+
 import { updateCustomTableExports_ACU, __resetCustomTableExportStateForTests_ACU } from '../../../src/service/worldbook/injection-engine-custom';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockVectorPipelineEnabled.mockReturnValue(false);
   __resetCustomTableExportStateForTests_ACU();
   mockRuntimeScope.chatKey = 'chat-1';
   mockRuntimeScope.isolationKey = 'iso-1';
@@ -823,6 +829,7 @@ describe('updateCustomTableExports_ACU', () => {
         zeroTkOccupyMode: false,
         summaryVectorIndexModeEnabled: true,
       } as any);
+      mockVectorPipelineEnabled.mockReturnValue(true);
       let entries: any[] = [
         { uid: 9, comment: 'TavernDB-ACU-CustomExport-纪要索引', content: '交火筛选正文', enabled: true },
       ];
@@ -943,6 +950,7 @@ describe('updateCustomTableExports_ACU', () => {
       await updateCustomTableExports_ACU(data);
       expect((await readIndex()).content).toContain('表内全量概览');
       mockGetCurrentWorldbookConfig.mockReturnValue({ zeroTkOccupyMode: false });
+      mockVectorPipelineEnabled.mockReturnValue(false);
       data.sheet_chronicle.content[1][1] = '关闭交火后的概览';
       await updateCustomTableExports_ACU(data);
       expect((await readIndex()).content).toContain('关闭交火后的概览');

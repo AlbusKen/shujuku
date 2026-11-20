@@ -19,7 +19,7 @@ import {
   saveSettings_ACU,
   setZeroTkOccupyMode_ACU,
 } from "../../service/settings/settings-service";
-import { isVectorModeExplicitlySelected_ACU } from "../../service/fill-mode/fill-mode-gate";
+import { isVectorPipelineEnabledForCurrentChat_ACU } from "../../service/fill-mode/fill-mode-gate";
 import { getCurrentStorageMode } from "../../service/table/storage-mode";
 import { resolveTableHistoryStateFromChat_ACU } from "../../service/table/table-history";
 import { switchStorageMode } from "../../service/table/table-storage-strategy";
@@ -626,8 +626,8 @@ function buildSqlTemplateHealthItem(
 }
 
 function buildVectorHealthItem(): DashboardHealthItem {
-  // 只有显式选择向量表格 / 交火模式时才需要向量服务；经典与 LLM 模式不提示。
-  const enabled = isVectorModeExplicitlySelected_ACU();
+  // 只有当前对话为向量表格 / 交火模式时才需要向量服务；经典与 LLM 模式不提示。
+  const enabled = isVectorPipelineEnabledForCurrentChat_ACU();
   if (!enabled) {
     return makeHealthItem({
       key: "vector",

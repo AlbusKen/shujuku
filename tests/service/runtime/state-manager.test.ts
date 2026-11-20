@@ -5,21 +5,16 @@ import { shouldProcessSummaryVectorIndexForGeneration_ACU } from '../../../src/s
  * 运行时状态管理器 单元测试
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { resetFillModeSeed_ACU, seedFillModeForTest_ACU } from '../../helpers/fill-mode-seed';
 
 const {
   mockGetChatArray,
-  mockFlightModeActive,
 } = vi.hoisted(() => ({
   mockGetChatArray: vi.fn(() => []),
-  mockFlightModeActive: vi.fn(() => false),
 }));
 
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
   getChatArray_ACU: mockGetChatArray,
-}));
-
-vi.mock('../../../src/service/flight-mode/flight-mode-state', () => ({
-  isFlightModeActive_ACU: mockFlightModeActive,
 }));
 
 vi.mock('../../../src/shared/defaults-json.js', () => ({
@@ -81,7 +76,8 @@ import {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockFlightModeActive.mockReturnValue(false);
+  // 默认按 LLM 模式（允许剧情推进）运行，模式相关用例单独播种。
+  seedFillModeForTest_ACU({ preferred: 'llm' });
   // 重置 generationGate
   generationGate_ACU.lastUserMessageId = null;
   generationGate_ACU.lastUserMessageText = '';
@@ -346,14 +342,46 @@ describe('shouldProcessPlotForGeneration_ACU', () => {
     mockGetChatArray.mockReturnValue([]);
     generationGate_ACU.lastUserSendIntentAt = Date.now();
     expect(shouldProcessPlotForGeneration_ACU('normal', {}, false)).toBe(true);
-    // 经典/飞行模式即使保留剧情总开关，也不能进入规划并取消正常发送。
-    mockFlightModeActive.mockReturnValue(true);
-    expect(shouldProcessPlotForGeneration_ACU('normal', {}, false)).toBe(false);
-    mockFlightModeActive.mockReturnValue(false);
     loopState_ACU.isRetrying = true;
-    expect(shouldProcessPlotForGeneration_ACU('normal', {}, false)).toBe(false);
+    expect(evaluatePlotForGeneration_ACU('normal', {}, false)).toEqual({ process: false, reason: 'retrying' });
     loopState_ACU.isRetrying = false;
     expect(shouldProcessPlotForGeneration_ACU('normal', {}, false)).toBe(true);
+  });
+
+  describe('只按当前对话的填表模式判定', () => {
+    function seedChat(seed: Parameters<typeof seedFillModeForTest_ACU>[0]) {
+      const chat = seedFillModeForTest_ACU(seed);
+      mockGetChatArray.mockReturnValue(chat);
+      _set_settings_ACU({ plotSettings: { enabled: true } });
+      generationGate_ACU.lastUserSendIntentAt = Date.now();
+    }
+    afterEach(() => resetFillModeSeed_ACU());
+
+    it('记录 classic 且飞行开关未启用：跳过', () => {
+      seedChat({ record: 'classic', preferred: 'llm', flightEnabled: false });
+      expect(evaluatePlotForGeneration_ACU('normal', {}, false)).toEqual({ process: false, reason: 'fill_mode_no_plot' });
+    });
+    it('记录 vector：跳过', () => {
+      seedChat({ record: 'vector', preferred: 'llm' });
+      expect(evaluatePlotForGeneration_ACU('normal', {}, false)).toEqual({ process: false, reason: 'fill_mode_no_plot' });
+    });
+    it('记录 llm 且子开关开：处理', () => {
+      seedChat({ record: 'llm', preferred: 'classic' });
+      expect(evaluatePlotForGeneration_ACU('normal', {}, false)).toEqual({ process: true, reason: 'fresh_send_intent' });
+    });
+    it('记录 llm 且子开关关：plot_disabled', () => {
+      seedChat({ record: 'llm' });
+      _set_settings_ACU({ plotSettings: { enabled: false } });
+      expect(evaluatePlotForGeneration_ACU('normal', {}, false)).toEqual({ process: false, reason: 'plot_disabled' });
+    });
+    it('无记录新对话、偏好 classic：首条发送窗口内跳过', () => {
+      seedChat({ preferred: 'classic' });
+      expect(evaluatePlotForGeneration_ACU('normal', {}, false)).toEqual({ process: false, reason: 'fill_mode_no_plot' });
+    });
+    it('半完成启用状态（记录 classic、飞行开关未落盘）：跳过', () => {
+      seedChat({ record: 'classic', preferred: 'crossfire', flightEnabled: false });
+      expect(evaluatePlotForGeneration_ACU('normal', {}, false)).toEqual({ process: false, reason: 'fill_mode_no_plot' });
+    });
   });
 
   it('无新鲜消息也无新鲜 intent 时返回 false', () => {

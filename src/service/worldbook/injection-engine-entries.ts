@@ -3,6 +3,7 @@
  * 从 injection-engine.ts 拆出
  */
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
+
 import { isWorldbookApiAvailable_ACU, getLorebookEntries_ACU, setLorebookEntries_ACU, createLorebookEntries_ACU, deleteLorebookEntries_ACU } from '../../data/gateways/worldbook-gateway';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { getImportBatchPrefix_ACU } from '../../shared/constants';
@@ -36,7 +37,6 @@ function projectWorldbookTable_ACU(table: any): { headers: string[]; rows: any[]
     // [修改] 0TK 只控制 OutlineTable 条目；交火模式可独立运行，但不能接管"纪要索引"条目的 enabled 状态。
     const worldbookConfig = getCurrentWorldbookConfig_ACU();
     const zeroTkOccupyMode = worldbookConfig?.zeroTkOccupyMode === true;
-    const summaryVectorIndexModeEnabled = worldbookConfig?.summaryVectorIndexModeEnabled === true;
     const outlineEntryEnabled = !zeroTkOccupyMode;
     const summaryIndexEntryEnabled = !zeroTkOccupyMode;
 

@@ -51,6 +51,10 @@ vi.mock('../../../src/service/settings/settings-readers', () => ({
   getCurrentWorldbookConfig_ACU: mockGetCurrentWorldbookConfig,
 }));
 
+vi.mock('../../../src/service/fill-mode/fill-mode-gate', () => ({
+  isVectorPipelineEnabledForCurrentChat_ACU: () => false,
+}));
+
 vi.mock('../../../src/data/gateways/worldbook-gateway', () => ({
   isWorldbookApiAvailable_ACU: mockIsWorldbookApiAvailable,
   getLorebookEntries_ACU: mockGetLorebookEntries,

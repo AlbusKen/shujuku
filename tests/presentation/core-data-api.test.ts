@@ -18,6 +18,7 @@ vi.mock('../../src/presentation/triggers/update-process', () => ({ proceedWithCa
 vi.mock('../../src/presentation/components/pipeline-ui-helpers', () => ({ refreshMergedDataAndNotifyWithUI_ACU: h.refresh }));
 vi.mock('../../src/presentation/theme/toast', () => ({ showToastr_ACU: vi.fn() }));
 vi.mock('../../src/service/settings/settings-readers', () => ({ getCurrentWorldbookConfig_ACU: () => ({ summaryVectorIndexModeEnabled: true }) }));
+vi.mock('../../src/service/fill-mode/fill-mode-gate', () => ({ isVectorPipelineEnabledForCurrentChat_ACU: () => true }));
 vi.mock('../../src/service/vector/summary-vector-index-flush-queue', () => ({ enqueueSummaryVectorIndexFlush_ACU: h.queue }));
 vi.mock('../../src/service/table/table-import-service', () => ({ importTableJsonThroughCommit_ACU: h.commit }));
 

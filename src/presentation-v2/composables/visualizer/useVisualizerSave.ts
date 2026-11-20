@@ -28,6 +28,8 @@ import {
   setSpecialIndexLockEnabled_ACU,
 } from '../../../service/runtime/helpers-remaining';
 import { getCurrentWorldbookConfig_ACU } from '../../../service/settings/settings-readers';
+import { isVectorPipelineEnabledForCurrentChat_ACU } from '../../../service/fill-mode/fill-mode-gate';
+
 import { runTableUpdateCommit_ACU } from '../../../service/table/table-update-commit';
 import {
   getLatestAiMessageIndexFromChat_ACU,
@@ -418,7 +420,7 @@ async function saveCurrentDataToChat(
     const table = currentJsonTableData_ACU?.[sheetKey];
     return !!table?.name && isSummaryOrOutlineTable_ACU(String(table.name || ''));
   });
-  if (sourceTableKey && getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
+  if (sourceTableKey && isVectorPipelineEnabledForCurrentChat_ACU()) {
     try {
       await enqueueSummaryVectorIndexFlush_ACU({
         sourceTableKey,
@@ -516,7 +518,7 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
         const table = currentJsonTableData_ACU?.[sheetKey];
         return !!table?.name && isSummaryOrOutlineTable_ACU(String(table.name || ''));
       });
-      if (sourceTableKey && getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
+      if (sourceTableKey && isVectorPipelineEnabledForCurrentChat_ACU()) {
         await enqueueSummaryVectorIndexFlush_ACU({
           sourceTableKey,
           reason: 'visualizer_v2_save',
@@ -1054,7 +1056,7 @@ export function useVisualizerSave(interactions: VisualizerSaveInteractions = {})
             const table = orderedData[sheetKey];
             return !!table?.name && isSummaryOrOutlineTable_ACU(String(table.name));
           });
-          if (sourceTableKey && getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
+          if (sourceTableKey && isVectorPipelineEnabledForCurrentChat_ACU()) {
             await enqueueSummaryVectorIndexFlush_ACU({ sourceTableKey, reason: 'visualizer_v2_template_sheet_delete' });
           } else if (!hasRemainingSummarySheet) {
             await deleteCurrentSummaryVectorIndexFromChat_ACU();

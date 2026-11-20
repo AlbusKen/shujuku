@@ -26,8 +26,7 @@ import { configureContextToolTransport_ACU } from '../../data/gateways/context-t
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { configureNoticeHub_ACU } from '../../shared/notice-hub';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
-import { isPlotSuppressedByFillModeForCurrentChat_ACU, isVectorPipelineEnabledForCurrentChat_ACU } from '../fill-mode/fill-mode-gate';
-import { isFlightModeActive_ACU } from '../flight-mode/flight-mode-state';
+import { evaluatePlotPermissionForCurrentChat_ACU, isVectorPipelineEnabledForCurrentChat_ACU } from '../fill-mode/fill-mode-gate';
 
 export const NEW_MESSAGE_DEBOUNCE_DELAY_ACU = 500;
 
@@ -160,6 +159,8 @@ function hasFreshUserGenerationTrigger_ACU() {
 
 /**
  * 剧情推进门控原因：fresh_* 表示进入规划，其余为跳过原因。
+ * plot_disabled：llm / crossfire 模式下剧情推进子开关关闭；fill_mode_no_plot：classic / vector 模式不推进剧情；
+ * retrying：处于循环重试流程。
  * stale_user_message：最后一楼是已记录的用户发送，但已超出触发时间窗；
  * untracked_user_message：最后一楼是用户消息，但不是最近记录的那次发送。
  */
@@ -169,8 +170,8 @@ export type PlotGenerationGateReason_ACU =
   | 'takeover_paused'
   | 'dry_run'
   | 'plot_disabled'
-  | 'flight_mode_or_retrying'
-  | 'fill_mode_vector'
+  | 'fill_mode_no_plot'
+  | 'retrying'
   | 'quiet_generation'
   | 'automatic_trigger'
   | 'stale_user_message'
@@ -183,11 +184,14 @@ export function evaluatePlotForGeneration_ACU(type: any, params: any, dryRun: an
   const skip = (reason: PlotGenerationGateReason_ACU): PlotGenerationGateDecision_ACU => ({ process: false, reason });
   if (!isTakeoverEnabled_ACU()) return skip('takeover_paused');
   if (dryRun) return skip('dry_run');
-  if (!settings_ACU?.plotSettings?.enabled) return skip('plot_disabled');
-  // 与规划内层和 TavernHelper 入口一致：经典/飞行模式以及重试不接管普通发送。
-  if (isFlightModeActive_ACU() || loopState_ACU.isRetrying) return skip('flight_mode_or_retrying');
-  // 向量表格模式只做向量召回，不触发剧情推进。
-  if (isPlotSuppressedByFillModeForCurrentChat_ACU()) return skip('fill_mode_vector');
+  // 与规划内层和 TavernHelper 入口一致：只按当前对话的填表模式与剧情推进子开关判定。
+  const permission = evaluatePlotPermissionForCurrentChat_ACU();
+  const modeLog = `mode=${permission.behavior?.mode ?? 'unknown'}, source=${permission.behavior?.source ?? 'unknown'}, recordStatus=${permission.behavior?.recordStatus ?? 'unknown'}`;
+  if (!permission.allowed) {
+    logDebug_ACU(`[状态管理] shouldProcessPlot: type=${type}, ${modeLog}, result=false, reason=${permission.reason}`);
+    return skip(permission.reason === 'plot_disabled' ? 'plot_disabled' : 'fill_mode_no_plot');
+  }
+  if (loopState_ACU.isRetrying) return skip('retrying');
   if (isQuietLikeGeneration_ACU(type, params)) return skip('quiet_generation');
   if (params?.automatic_trigger) return skip('automatic_trigger');
   const fresh = hasFreshUserGenerationTrigger_ACU();
@@ -197,7 +201,7 @@ export function evaluatePlotForGeneration_ACU(type: any, params: any, dryRun: an
   else if (fresh.isCurrentRecordedUserMessage) decision = skip('stale_user_message');
   else if (fresh.lastFloorIsUser) decision = skip('untracked_user_message');
   else decision = skip('no_user_trigger');
-  logDebug_ACU(`[状态管理] shouldProcessPlot: type=${type}, dryRun=${dryRun}, freshMsg=${fresh.hasFreshUserMessage}, freshIntent=${fresh.hasFreshIntent}, result=${decision.process}, reason=${decision.reason}`);
+  logDebug_ACU(`[状态管理] shouldProcessPlot: type=${type}, dryRun=${dryRun}, ${modeLog}, freshMsg=${fresh.hasFreshUserMessage}, freshIntent=${fresh.hasFreshIntent}, result=${decision.process}, reason=${decision.reason}`);
   return decision;
 }
 
@@ -211,15 +215,13 @@ export function shouldProcessSummaryVectorIndexForGeneration_ACU(type: any, para
   if (type === 'regenerate') return false;
   if (isQuietLikeGeneration_ACU(type, params)) return false;
   if (params?.automatic_trigger) return false;
-  const worldbookConfig = getCurrentWorldbookConfig_ACU();
-  const worldbookProjectionEnabled = worldbookConfig.summaryVectorIndexModeEnabled === true;
   const globalEnabled = isVectorPipelineEnabledForCurrentChat_ACU();
   if (!globalEnabled) {
-    logDebug_ACU(`[状态管理] shouldProcessSummaryVectorIndex: type=${type}, dryRun=${dryRun}, globalEnabled=false, worldbookProjection=${worldbookProjectionEnabled}, result=false`);
+    logDebug_ACU(`[状态管理] shouldProcessSummaryVectorIndex: type=${type}, dryRun=${dryRun}, vectorPipeline=false, result=false`);
     return false;
   }
   const fresh = hasFreshUserGenerationTrigger_ACU();
-  logDebug_ACU(`[状态管理] shouldProcessSummaryVectorIndex: type=${type}, dryRun=${dryRun}, globalEnabled=${globalEnabled}, worldbookProjection=${worldbookProjectionEnabled}, freshMsg=${fresh.hasFreshUserMessage}, freshIntent=${fresh.hasFreshIntent}, result=${fresh.result}`);
+  logDebug_ACU(`[状态管理] shouldProcessSummaryVectorIndex: type=${type}, dryRun=${dryRun}, vectorPipeline=true, freshMsg=${fresh.hasFreshUserMessage}, freshIntent=${fresh.hasFreshIntent}, result=${fresh.result}`);
   return fresh.result;
 }
 

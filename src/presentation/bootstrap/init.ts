@@ -59,8 +59,7 @@ import { getContinuationRuntime_ACU } from '../../service/continuation/continuat
 import { continuationDebugErrorType_ACU } from '../../service/continuation/generation-debug';
 import { bindWorldSimulationInternalAiGenerationStarted_ACU, consumeWorldSimulationInternalAiGenerationEnded_ACU, hasWorldSimulationInternalAiInflight_ACU } from '../../service/simulation/simulation-internal-ai-events';
 import { createWorldSimulationCompletionIntentForCurrentChat_ACU, getWorldSimulationRuntime_ACU } from '../../service/simulation/simulation-runtime';
-import { autoEnableFlightModeForNewChatIfNeeded_ACU } from '../../service/fill-mode/fill-mode-auto-enable';
-import { ensureCurrentChatFillModeRecorded_ACU } from '../../service/fill-mode/fill-mode-chat-switch';
+import { reconcileCurrentChatFillModeOnOpen_ACU } from '../../service/fill-mode/fill-mode-reconcile';
 import { getVectorPipelinePlanForCurrentChat_ACU, isVectorPipelineEnabledForCurrentChat_ACU } from '../../service/fill-mode/fill-mode-gate';
 
 /** 零层占用（未完成退出桥接或保存未知）的聊天：物理前缀已冻结为桥接基线，普通自动填表不能写入。 */
@@ -472,28 +471,16 @@ export   function mainInitialize_ACU() {
                 }
             }
 
-            // 新对话（无表格数据）自动启用经典表格；必须在表格数据刷新之后、且刷新未降级时执行。
-            if (refreshResult && !refreshResult.degraded
-                && (!scheduledChatIdentifier_ACU || currentChatFileIdentifier_ACU === scheduledChatIdentifier_ACU)) {
-                // 先为未记录的对话固定填表模式（新对话取偏好模式），后续自动启用按该对话记录推导。
+            // 打开对话的填表模式协调：补记模式、经典模式补完飞行开关、登记就绪状态。
+            // 刷新降级时不补记也不补完，就绪状态登记为 pending(table_not_loaded)；失败只在填表模式页常驻显示。
+            if (!scheduledChatIdentifier_ACU || currentChatFileIdentifier_ACU === scheduledChatIdentifier_ACU) {
                 try {
-                    const recorded = await ensureCurrentChatFillModeRecorded_ACU();
-                    if ('reason' in recorded && recorded.reason === 'save_failed') {
-                        logWarn_ACU(`[填表模式] 对话填表模式记录保存失败，本轮按偏好模式运行: ${recorded.error || 'unknown'}`);
+                    const reconciled = await reconcileCurrentChatFillModeOnOpen_ACU({ tableLoaded: !!refreshResult && !refreshResult.degraded });
+                    if (reconciled.record && 'reason' in reconciled.record && reconciled.record.reason === 'save_failed') {
+                        logWarn_ACU(`[填表模式] 对话填表模式记录保存失败，下次打开对话重试: ${reconciled.record.error || 'unknown'}`);
                     }
-                } catch (recordError) {
-                    logWarn_ACU('[填表模式] 对话填表模式记录异常，本轮按偏好模式运行:', recordError);
-                }
-                try {
-                    const autoEnable = await autoEnableFlightModeForNewChatIfNeeded_ACU();
-                    if (autoEnable.attempted && !autoEnable.result.ok) {
-                        showUiSurfaceToast_ACU({
-                            kind: 'warning',
-                            text: `新对话自动启用经典表格失败（${autoEnable.result.reason || 'unknown'}），本轮沿用旧填表方案。`,
-                        });
-                    }
-                } catch (autoEnableError) {
-                    logWarn_ACU('[填表模式] 新对话自动启用经典表格异常，本轮沿用旧填表方案:', autoEnableError);
+                } catch (reconcileError) {
+                    logWarn_ACU('[填表模式] 打开对话的填表模式协调异常:', reconcileError);
                 }
             }
 

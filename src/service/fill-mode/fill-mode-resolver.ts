@@ -1,18 +1,26 @@
 /**
- * FillModeResolver：把用户选择的填表模式与当前聊天状态解析为本次运行计划。
- * 纯函数，不读写存储；调用方在请求开始时冻结输入，避免 UI 修改与运行时读取之间的 TOCTOU。
+ * FillModeResolver：把当前对话的填表模式映射为行为与本次运行计划。
+ * 纯函数，不读写存储；模式是唯一输入，飞行开关等经典方案内部数据不参与判定。
  */
 import type { FillMode_ACU, FillModePreferences_ACU } from './fill-mode-preferences';
 
-export interface FillRuntimeContext_ACU {
-  /** 当前聊天已启用飞行模式（经典表格）。 */
-  flightModeActive: boolean;
-  /** 当前聊天已有用户表格数据；新对话为 false。 */
-  hasExistingTableData: boolean;
-  /** 旧交火全局开关，仅用于推导旧对话的临时默认方案。 */
-  legacyCrossfireEnabled: boolean;
-  /** 已记录模式不再走历史兼容；非法记录不得触发自动模板变更。 */
-  modeRecordStatus?: 'recorded' | 'absent' | 'invalid' | 'no_chat';
+export type VectorPipelineKind_ACU = 'vector' | 'crossfire';
+
+export interface FillModeBehavior_ACU {
+  /** 模式允许剧情推进；实际运行还需 plotSettings.enabled。 */
+  plotAllowed: boolean;
+  vectorPipeline: VectorPipelineKind_ACU | null;
+}
+
+const FILL_MODE_BEHAVIORS_ACU: Readonly<Record<FillMode_ACU, Readonly<FillModeBehavior_ACU>>> = {
+  classic: { plotAllowed: false, vectorPipeline: null },
+  vector: { plotAllowed: false, vectorPipeline: 'vector' },
+  llm: { plotAllowed: true, vectorPipeline: null },
+  crossfire: { plotAllowed: true, vectorPipeline: 'crossfire' },
+};
+
+export function getFillModeBehavior_ACU(mode: FillMode_ACU): FillModeBehavior_ACU {
+  return { ...FILL_MODE_BEHAVIORS_ACU[mode] };
 }
 
 export interface VectorPipelineOverrides_ACU {
@@ -26,7 +34,7 @@ export interface VectorPipelineOverrides_ACU {
 }
 
 export interface VectorPipelinePlan_ACU {
-  kind: 'vector' | 'crossfire';
+  kind: VectorPipelineKind_ACU;
   /** 请求级覆写；null 表示沿用 vectorMemoryConfig 现值。 */
   overrides: VectorPipelineOverrides_ACU | null;
   /** true 时 rerank 未配置或失败必须 fail-closed，不得回退 embedding 排序。 */
@@ -34,44 +42,18 @@ export interface VectorPipelinePlan_ACU {
 }
 
 export interface ResolvedFillPlan_ACU {
-  selectedMode: FillMode_ACU;
-  effectiveMode: FillMode_ACU;
-  /** 旧对话按旧默认方案临时运行：不落盘、不改写模板。 */
-  temporaryLegacyMode: boolean;
-  /** 新对话需要自动启用飞行模式。 */
-  autoEnableFlightMode: boolean;
-  recentChronicleRows: number;
+  mode: FillMode_ACU;
   vectorPipeline: VectorPipelinePlan_ACU | null;
   /** 纪要已作为世界书常量条目注入时，续写需临时解除对纪要条目的屏蔽。 */
   unmaskChronicleEntriesForContinuation: boolean;
 }
 
-function resolveEffectiveMode_ACU(
-  preferences: FillModePreferences_ACU,
-  runtime: FillRuntimeContext_ACU,
-): { mode: FillMode_ACU; temporary: boolean; autoEnable: boolean } {
-  if (preferences.selectedMode !== 'classic' || runtime.flightModeActive) {
-    return { mode: preferences.selectedMode, temporary: false, autoEnable: false };
-  }
-  if (runtime.modeRecordStatus === 'recorded') {
-    return { mode: 'classic', temporary: false, autoEnable: true };
-  }
-  if (runtime.modeRecordStatus === 'invalid' || runtime.modeRecordStatus === 'no_chat') {
-    return { mode: 'classic', temporary: false, autoEnable: false };
-  }
-  if (!runtime.hasExistingTableData) return { mode: 'classic', temporary: false, autoEnable: true };
-  return { mode: runtime.legacyCrossfireEnabled ? 'crossfire' : 'llm', temporary: true, autoEnable: false };
-}
-
-export function resolveFillPlan_ACU(
-  preferences: FillModePreferences_ACU,
-  runtime: FillRuntimeContext_ACU,
-): ResolvedFillPlan_ACU {
-  const effective = resolveEffectiveMode_ACU(preferences, runtime);
+export function resolveFillPlan_ACU(preferences: FillModePreferences_ACU, mode: FillMode_ACU): ResolvedFillPlan_ACU {
+  const kind = getFillModeBehavior_ACU(mode).vectorPipeline;
   let vectorPipeline: VectorPipelinePlan_ACU | null = null;
-  if (effective.mode === 'vector') {
+  if (kind === 'vector') {
     vectorPipeline = {
-      kind: 'vector',
+      kind,
       overrides: {
         keywordGenerationEnabled: false,
         hybridRetrievalEnabled: false,
@@ -82,17 +64,13 @@ export function resolveFillPlan_ACU(
       },
       rerankRequired: true,
     };
-  } else if (effective.mode === 'crossfire') {
-    vectorPipeline = { kind: 'crossfire', overrides: null, rerankRequired: false };
+  } else if (kind === 'crossfire') {
+    vectorPipeline = { kind, overrides: null, rerankRequired: false };
   }
   return {
-    selectedMode: preferences.selectedMode,
-    effectiveMode: effective.mode,
-    temporaryLegacyMode: effective.temporary,
-    autoEnableFlightMode: effective.autoEnable,
-    recentChronicleRows: preferences.classic.recentChronicleRows,
+    mode,
     vectorPipeline,
     // 经典模式的纪要表与大总结以世界书常驻条目注入，续写沿用默认屏蔽（纪要索引仍屏蔽）；只有向量表格模式解除屏蔽。
-    unmaskChronicleEntriesForContinuation: effective.mode === 'vector',
+    unmaskChronicleEntriesForContinuation: mode === 'vector',
   };
 }

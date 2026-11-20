@@ -14,6 +14,8 @@ import {
   getCurrentWorldbookConfig_ACU,
   hasRuntimeTableData_ACU,
 } from '../../service/settings/settings-readers';
+import { isVectorPipelineEnabledForCurrentChat_ACU } from '../../service/fill-mode/fill-mode-gate';
+
 import { getSortedSheetKeys_ACU } from '../../service/template/chat-scope';
 import { collectV2CheckpointFloorsFromChat_ACU } from '../../service/table/table-history';
 import {
@@ -409,7 +411,7 @@ export function useManualUpdate(): ManualUpdateState {
   const vectorIndexWarning = computed<boolean>(() => {
     void refreshTick.value;
     try {
-      return getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true;
+      return isVectorPipelineEnabledForCurrentChat_ACU();
     } catch {
       return false;
     }

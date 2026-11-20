@@ -22,6 +22,26 @@
           />
         </AcuFormRow>
 
+        <AcuFormRow
+          v-if="classicNotReady"
+          :label="fillModeCopy.classicReadiness.label"
+          :hint="classicReadinessHint"
+        >
+          <div class="acu-v2-fill-mode-page__readiness" :data-acu-classic-readiness="formFillMode.classicReadiness.status">
+            <span
+              class="acu-v2-fill-mode-page__readiness-status"
+              :class="{ 'acu-v2-fill-mode-page__readiness-status--failed': formFillMode.classicReadiness.status === 'failed' }"
+            >{{ classicReadinessTitle }}</span>
+            <AcuButton
+              size="sm"
+              :loading="formFillMode.retryingClassic"
+              :disabled="formFillMode.switching"
+              data-acu-classic-retry="1"
+              @click="formFillMode.retryClassicEnable()"
+            >{{ fillModeCopy.classicReadiness.retryLabel }}</AcuButton>
+          </div>
+        </AcuFormRow>
+
         <div class="acu-v2-fill-mode-page__intro" :data-acu-fill-mode-intro="formFillMode.selectedMode">
           <p class="acu-v2-fill-mode-page__intro-summary">{{ currentIntro.summary }}</p>
           <p class="acu-v2-fill-mode-page__intro-line">
@@ -106,6 +126,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, watch } from "vue";
 import { subscribeChatConfigurationChanges_ACU } from "../../shared/chat-configuration-change";
+import AcuButton from "../components/_lib/AcuButton.vue";
 import AcuFormRow from "../components/_lib/AcuFormRow.vue";
 import AcuInput from "../components/_lib/AcuInput.vue";
 import AcuMessage from "../components/_lib/AcuMessage.vue";
@@ -139,6 +160,18 @@ const currentModeHint = computed(() => {
     : status === "no_chat" ? "尚未打开会话，当前显示新会话偏好。"
     : "本会话尚未保存模式标记，当前显示兼容判定或偏好模式。";
   return `${recordHint} ${fillModeCopy.panels.mode.selectHint}`;
+});
+
+const classicNotReady = computed(() => formFillMode.selectedMode === "classic"
+  && (formFillMode.classicReadiness.status === "pending" || formFillMode.classicReadiness.status === "failed"));
+const classicReadinessTitle = computed(() => formFillMode.classicReadiness.status === "failed"
+  ? fillModeCopy.classicReadiness.failedTitle
+  : fillModeCopy.classicReadiness.pendingTitle);
+const classicReadinessHint = computed(() => {
+  const readiness = formFillMode.classicReadiness;
+  if (readiness.status === "failed") return fillModeCopy.classicReadiness.failed(readiness.error);
+  if (readiness.status === "pending") return fillModeCopy.classicReadiness.pending(readiness.reason);
+  return "";
 });
 
 /** 向量表格与交火模式需要向量服务与索引维护面板。 */
@@ -238,6 +271,22 @@ onBeforeUnmount(subscribeChatConfigurationChanges_ACU(() => formFillMode.refresh
   color: var(--acu-text-2);
   font-size: var(--acu-font-size-body, 12px);
   line-height: 1.55;
+}
+
+.acu-v2-fill-mode-page__readiness {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--acu-space-2, 8px);
+}
+
+.acu-v2-fill-mode-page__readiness-status {
+  color: var(--acu-warning);
+  font-weight: 650;
+}
+
+.acu-v2-fill-mode-page__readiness-status--failed {
+  color: var(--acu-danger);
 }
 
 .acu-v2-fill-mode-page__intro-line {

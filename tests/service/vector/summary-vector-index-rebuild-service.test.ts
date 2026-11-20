@@ -5,6 +5,7 @@ const h = vi.hoisted(() => ({
   isolationKey: '',
   chat: [] as any[],
   worldbook: { summaryVectorIndexModeEnabled: true, summaryVectorMirrorEnabled: true } as any,
+  vectorEnabled: true,
   hasMirror: false,
   load: vi.fn(),
   rebuild: vi.fn(),
@@ -23,6 +24,9 @@ vi.mock('../../../src/data/gateways/chat-gateway', () => ({
 }));
 vi.mock('../../../src/service/settings/settings-readers', () => ({
   getCurrentWorldbookConfig_ACU: () => h.worldbook,
+}));
+vi.mock('../../../src/service/fill-mode/fill-mode-gate', () => ({
+  isVectorPipelineEnabledForCurrentChat_ACU: () => h.vectorEnabled,
 }));
 vi.mock('../../../src/shared/utils', () => ({
   logDebug_ACU: vi.fn(),
@@ -54,6 +58,7 @@ describe('rebuildCurrentSummaryVectorIndexNow_ACU', () => {
     h.isolationKey = '';
     h.chat = [];
     h.worldbook = { summaryVectorIndexModeEnabled: true, summaryVectorMirrorEnabled: true };
+    h.vectorEnabled = true;
     h.hasMirror = false;
     h.rebuild.mockResolvedValue({ success: true, skipped: false, indexedRowCount: 1, skippedRowCount: 0, chunkCount: 1, errors: [] });
     h.updateLorebook.mockResolvedValue(true);
@@ -134,13 +139,14 @@ describe('ensureSummaryVectorMirrorAfterTableFill_ACU', () => {
     h.isolationKey = '';
     h.chat = [];
     h.worldbook = { summaryVectorIndexModeEnabled: true, summaryVectorMirrorEnabled: true };
+    h.vectorEnabled = true;
     h.hasMirror = false;
     h.rebuild.mockResolvedValue({ success: true, skipped: false, indexedRowCount: 1, skippedRowCount: 0, chunkCount: 1, errors: [] });
     h.updateLorebook.mockResolvedValue(true);
   });
 
   it('功能未开启时不重建', async () => {
-    h.worldbook.summaryVectorIndexModeEnabled = false;
+    h.vectorEnabled = false;
     await expect(ensureSummaryVectorMirrorAfterTableFill_ACU()).resolves.toMatchObject({
       attempted: false,
       skipped: true,

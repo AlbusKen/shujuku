@@ -1,6 +1,8 @@
 import { DEFAULT_MERGE_SUMMARY_PROMPT_ACU, DEFAULT_MERGE_SUMMARY_PROMPT_SQL_ACU } from '../../shared/defaults-json.js';
 import { isSqliteMode } from '../../service/table/storage-mode';
 import { getCurrentWorldbookConfig_ACU } from '../../service/settings/settings-readers';
+import { isVectorPipelineEnabledForCurrentChat_ACU } from '../../service/fill-mode/fill-mode-gate';
+
 import { getCurrentVectorMemoryConfig_ACU } from '../../service/vector/vector-memory-config';
 import { getAggregatedSummaryVectorIndexSnapshot_ACU } from '../../service/vector/summary-vector-index-state-service';
 import { renderPromptSegments_ACU } from './plot-editors';
@@ -32,7 +34,7 @@ import { $popupInstance_ACU, $statusMessageSpan_ACU, $manualUpdateCardButton_ACU
  
   export function isVectorMemoryManualUpdateBlocked_ACU() {
     try {
-        return getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true;
+        return isVectorPipelineEnabledForCurrentChat_ACU();
     } catch (e) {
         return false;
     }
@@ -148,11 +150,10 @@ import { $popupInstance_ACU, $statusMessageSpan_ACU, $manualUpdateCardButton_ACU
       syncMergeSettingsToUI_ACU(s);
       const worldbookConfig = getCurrentWorldbookConfig_ACU();
       const vectorMemoryConfig = getCurrentVectorMemoryConfig_ACU();
-      const summaryVectorIndexEnabled = worldbookConfig.summaryVectorIndexModeEnabled === true;
+      const summaryVectorIndexEnabled = isVectorPipelineEnabledForCurrentChat_ACU();
       $popupInstance_ACU.find(`input[name="${SCRIPT_ID_PREFIX_ACU}-worldbook-source"]`).filter(`[value="${worldbookConfig.source}"]`).prop('checked', true);
       if (typeof updateWorldbookSourceView_ACU === 'function') updateWorldbookSourceView_ACU();
       if (typeof populateInjectionTargetSelector_ACU === 'function') populateInjectionTargetSelector_ACU();
-      setChecked('worldbook-vector-memory-enabled', summaryVectorIndexEnabled);
       setVal('worldbook-vector-memory-threshold', vectorMemoryConfig.threshold);
       setVal('worldbook-vector-memory-archive-trigger-count', (vectorMemoryConfig as any).archiveTriggerCount || vectorMemoryConfig.archiveBatchSize);
       setVal('worldbook-vector-memory-archive-batch-size', vectorMemoryConfig.archiveBatchSize);
@@ -184,8 +185,6 @@ import { $popupInstance_ACU, $statusMessageSpan_ACU, $manualUpdateCardButton_ACU
       setVal('worldbook-vector-memory-keyword-generation-max-attempts', (vectorMemoryConfig as any).keywordGenerationMaxAttempts || 3);
       renderKeywordPromptGroupToUI_ACU((vectorMemoryConfig as any).keywordPromptGroup || []);
       renderSummaryPromptGroupToUI_ACU((vectorMemoryConfig as any).summaryPromptGroup || []);
-      const $vectorMemoryBlock = find('worldbook-vector-memory-config-block');
-      if ($vectorMemoryBlock.length) $vectorMemoryBlock.toggle(summaryVectorIndexEnabled);
       syncManualUpdateButtonAvailability_ACU();
       const $outlineToggle = find('worldbook-outline-entry-enabled');
       if ($outlineToggle.length) {
@@ -193,8 +192,6 @@ import { $popupInstance_ACU, $statusMessageSpan_ACU, $manualUpdateCardButton_ACU
           if (typeof mode === 'undefined' && typeof worldbookConfig.outlineEntryEnabled !== 'undefined') mode = (worldbookConfig.outlineEntryEnabled === false);
           $outlineToggle.prop('checked', mode === true);
       }
-      setChecked('worldbook-summary-vector-index-mode-enabled', summaryVectorIndexEnabled);
-      setChecked('vector-index-mode-enabled', summaryVectorIndexEnabled);
       const $summaryVectorIndexHint = find('summary-vector-index-archive-hint');
       if ($summaryVectorIndexHint.length) {
           const activeSummaryVectorIndexSnapshot = getAggregatedSummaryVectorIndexSnapshot_ACU();

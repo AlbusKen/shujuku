@@ -88,8 +88,8 @@ export function normalizeFillModePreferences_ACU(
 }
 
 /**
- * 读取全局填表偏好。缺失时不写回：默认 classic，旧对话由 resolver 按旧默认方案临时运行，
- * 旧交火全局开关只作为 resolver 的输入，不在这里改写用户选择。
+ * 读取全局填表偏好（五角星）。缺失时不写回，默认 classic。
+ * 偏好只决定未记录对话的模式；已记录的对话以对话记录为准。
  */
 export function readFillModePreferences_ACU(): FillModePreferencesRead_ACU {
   const raw = globalMeta_ACU?.[FILL_MODE_PREFERENCES_KEY_ACU];
@@ -102,10 +102,6 @@ export function readFillModePreferences_ACU(): FillModePreferencesRead_ACU {
   }
   const { preferences, diagnostics } = normalizeFillModePreferences_ACU(raw);
   return { preferences, source: 'stored', diagnostics };
-}
-
-export function isLegacyCrossfireEnabled_ACU(): boolean {
-  return globalMeta_ACU?.summaryVectorIndexModeGlobal === true;
 }
 
 /** 经典模式近期纪要条数占位符：大总结表规则写占位符，提示词装配时按同一快照解析。 */

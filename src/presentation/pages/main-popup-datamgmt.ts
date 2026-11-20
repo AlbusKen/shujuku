@@ -81,13 +81,6 @@ export function generateDataMgmtTabHTML(): string {
                     <div class="acu-card">
                         <h3>交火模式索引管理</h3>
                         <p class="notes">聊天记录只保存轻量 manifest；向量分片保存在 /user/files，IndexedDB 只作为可丢弃临时缓存。</p>
-                        <div style="background: var(--acu-bg-2); padding: 12px; border-radius: 6px; margin-bottom: 10px;">
-                            <label for="${SCRIPT_ID_PREFIX_ACU}-vector-index-mode-enabled" style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin-bottom: 6px;">
-                                <input type="checkbox" id="${SCRIPT_ID_PREFIX_ACU}-vector-index-mode-enabled" style="width: 14px; height: 14px; cursor: pointer;">
-                                <span style="font-weight: 600;">启用向量混合增强交火方案</span>
-                            </label>
-                            <small class="notes">这是交火模式的启停入口；开启后会随纪要表数据增删改自动维护外置索引文件。下面的按钮只负责刷新状态、清缓存或删除当前索引资产。</small>
-                        </div>
                         <div id="${SCRIPT_ID_PREFIX_ACU}-vector-index-stats" style="background: var(--acu-bg-2); padding: 12px; border-radius: 6px; margin-bottom: 10px; font-size: 0.9em; line-height: 1.7;">
                             <div>状态：<span data-acu-vector-index-field="status">未加载</span></div>
                             <div>索引ID：<span data-acu-vector-index-field="indexId">-</span></div>

@@ -30,6 +30,8 @@ import {
 } from '../vector/summary-vector-index-rebuild-service';
 import { getAggregatedSummaryVectorIndexSnapshot_ACU } from '../vector/summary-vector-index-state-service';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
+import { isVectorPipelineEnabledForCurrentChat_ACU } from '../fill-mode/fill-mode-gate';
+
 import { getLatestV2FullCheckpointMessageIndex_ACU, resolveTableHistoryStateFromChat_ACU } from './table-history';
 import { planManualCatchUpWaves_ACU, type ManualCatchUpPlan_ACU } from './manual-fill-planner';
 import { isNonFillAiFloor_ACU, selectFillEligibleIndices_ACU } from '../runtime/message-handler';
@@ -234,7 +236,7 @@ async function snapshotManualRefillSummaryVectors_ACU(
     const replaceAll = cleanups.some((cleanup) => cleanup.replaceAll === true);
     if (excludedRowIds.length === 0 && !replaceAll) return null;
     const worldbook = getCurrentWorldbookConfig_ACU();
-    if (worldbook.summaryVectorIndexModeEnabled !== true) return null;
+    if (!isVectorPipelineEnabledForCurrentChat_ACU()) return null;
     if (worldbook.summaryVectorMirrorEnabled === false) return null;
     return snapshotSummaryVectorMirrorExcludingRowsNow_ACU({
         excludedRowIds,
@@ -275,7 +277,7 @@ export async function runSummaryVectorFollowupAfterTableFill_ACU(options: {
 }): Promise<void> {
     if (options.reason === 'manual_refill_complete') {
         const worldbook = getCurrentWorldbookConfig_ACU();
-        if (worldbook.summaryVectorIndexModeEnabled !== true) return;
+        if (!isVectorPipelineEnabledForCurrentChat_ACU()) return;
         if (worldbook.summaryVectorMirrorEnabled === false) return;
         try {
             const result = await rebuildCurrentSummaryVectorIndexNow_ACU({ reason: 'rebuild_repair' });
@@ -290,7 +292,7 @@ export async function runSummaryVectorFollowupAfterTableFill_ACU(options: {
 
     const ensured = await ensureSummaryVectorMirrorAfterTableFill_ACU();
     if (ensured.attempted) return;
-    if (getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled !== true) return;
+    if (!isVectorPipelineEnabledForCurrentChat_ACU()) return;
 
     const sourceTableKeys = options.sourceTableKeys?.length
         ? [...new Set(options.sourceTableKeys.filter(Boolean))]
@@ -2289,7 +2291,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
             postCommitWarnings.push(...await refreshCommittedWorldbook_ACU(workingTableData));
             lorebookSpan.end({ success: postCommitWarnings.length === 0 });
             // 刷新失败时保留原先跳过向量收尾的行为，但不覆盖已完成的表格提交。
-            if (postCommitWarnings.length === 0 && getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
+            if (postCommitWarnings.length === 0 && isVectorPipelineEnabledForCurrentChat_ACU()) {
                 const vectorSpan = startRuntimePerformanceSpan_ACU('table-fill-vector-flush', {
                     runId: options.performanceRunId,
                     parentSpanId: options.performanceParentSpanId,
@@ -5672,7 +5674,7 @@ export async function orchestrateManualUpdate_ACU(
                     logError_ACU('[Manual Refill] 重填完成后提交完整单表 checkpoint 失败:', snapshotResult.error);
                     return await failManualRefillSession(snapshotResult.error || '手动重填完成后提交完整单表 checkpoint 失败。');
                 }
-                if (getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
+                if (isVectorPipelineEnabledForCurrentChat_ACU()) {
                     await runSummaryVectorFollowupAfterTableFill_ACU({
                         tableData: completedData as Record<string, any>,
                         modifiedKeys: manualRefillSummarySourceTableKeys,

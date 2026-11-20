@@ -1,88 +1,90 @@
 /**
- * 填表模式运行时门控：所有“是否运行向量/交火管线”的判定统一经由这里推导。
- * 当前对话的模式由 fill-mode-chat-record 解析：对话记录优先，未记录时回落全局偏好模式。
- * 旧交火全局开关 summaryVectorIndexModeGlobal 不再被覆写，只作为从未保存偏好时的旧默认方案输入。
+ * 填表模式运行时门控：剧情推进与向量/交火管线是否运行，统一只按当前对话的模式判定。
+ * 模式来自 fill-mode-chat-record（对话记录为唯一权威；无记录时按过渡规则推导）。
+ * 飞行开关只是经典方案的内部数据，不参与这里的判定。
  */
 import { logWarn_ACU } from '../../shared/utils';
-export { hasExistingTableDataForCurrentChat_ACU } from './fill-mode-chat-evidence';
-import { hasExistingTableDataForCurrentChat_ACU } from './fill-mode-chat-evidence';
-import { getCurrentFlightModeState_ACU } from '../flight-mode/flight-mode-state';
-import { resolveCurrentChatFillMode_ACU, withFillMode_ACU } from './fill-mode-chat-record';
+import { settings_ACU } from '../runtime/state-manager';
 import {
+  resolveCurrentChatFillMode_ACU,
+  type ChatFillModeRecordStatus_ACU,
+  type ChatFillModeSource_ACU,
+} from './fill-mode-chat-record';
+import type { FillMode_ACU } from './fill-mode-preferences';
+import {
+  getFillModeBehavior_ACU,
   resolveFillPlan_ACU,
-  type FillRuntimeContext_ACU,
+  type FillModeBehavior_ACU,
   type ResolvedFillPlan_ACU,
   type VectorPipelinePlan_ACU,
 } from './fill-mode-resolver';
 
-export function buildFillRuntimeContext_ACU(): FillRuntimeContext_ACU {
+export interface CurrentChatFillModeBehavior_ACU extends FillModeBehavior_ACU {
+  mode: FillMode_ACU;
+  source: ChatFillModeSource_ACU;
+  recordStatus: ChatFillModeRecordStatus_ACU;
+}
+
+export function getCurrentChatFillModeBehavior_ACU(): CurrentChatFillModeBehavior_ACU {
   const current = resolveCurrentChatFillMode_ACU();
   return {
-    flightModeActive: getCurrentFlightModeState_ACU().enabled === true,
-    hasExistingTableData: hasExistingTableDataForCurrentChat_ACU(),
-    legacyCrossfireEnabled: current.mode === 'crossfire',
-    modeRecordStatus: current.recordStatus,
+    ...getFillModeBehavior_ACU(current.mode),
+    mode: current.mode,
+    source: current.source,
+    recordStatus: current.recordStatus,
   };
 }
 
-/** 按当前聊天冻结一份运行计划；调用方应在单次请求内复用同一计划。 */
+export type PlotPermissionReason_ACU = 'allowed' | 'fill_mode_no_plot' | 'plot_disabled';
+
+export interface PlotPermission_ACU {
+  allowed: boolean;
+  reason: PlotPermissionReason_ACU;
+  /** 推导失败时为 null。 */
+  behavior: CurrentChatFillModeBehavior_ACU | null;
+}
+
+/**
+ * 剧情推进许可：模式允许（llm / crossfire）且 plotSettings.enabled。
+ * 模式推导失败时 fail-closed（不推进剧情）并记录诊断。
+ */
+export function evaluatePlotPermissionForCurrentChat_ACU(): PlotPermission_ACU {
+  let behavior: CurrentChatFillModeBehavior_ACU;
+  try {
+    behavior = getCurrentChatFillModeBehavior_ACU();
+  } catch (error) {
+    logWarn_ACU('[填表模式] 剧情推进门控推导失败，本轮不推进剧情:', error);
+    return { allowed: false, reason: 'fill_mode_no_plot', behavior: null };
+  }
+  if (!behavior.plotAllowed) return { allowed: false, reason: 'fill_mode_no_plot', behavior };
+  if (!settings_ACU?.plotSettings?.enabled) return { allowed: false, reason: 'plot_disabled', behavior };
+  return { allowed: true, reason: 'allowed', behavior };
+}
+
+export function isPlotAllowedForCurrentChat_ACU(): boolean {
+  return evaluatePlotPermissionForCurrentChat_ACU().allowed;
+}
+
+/** 当前对话是否运行向量管线（向量表格或交火）。推导失败时不运行并记录诊断。 */
+export function isVectorPipelineEnabledForCurrentChat_ACU(): boolean {
+  try {
+    return getCurrentChatFillModeBehavior_ACU().vectorPipeline !== null;
+  } catch (error) {
+    logWarn_ACU('[填表模式] 向量管线门控推导失败，未启用向量管线:', error);
+    return false;
+  }
+}
+
+/** 按当前对话冻结一份运行计划；调用方应在单次请求内复用同一计划。 */
 export function resolveFillPlanForCurrentChat_ACU(): ResolvedFillPlan_ACU {
   const current = resolveCurrentChatFillMode_ACU();
-  return resolveFillPlan_ACU(withFillMode_ACU(current.preferences.preferences, current.mode), buildFillRuntimeContext_ACU());
+  return resolveFillPlan_ACU(current.preferences.preferences, current.mode);
 }
 
 /**
- * 向量管线的请求级计划。只有当前对话显式使用向量表格时才返回覆写；
- * 交火、经典（旧对话临时交火）与未保存模式均返回 null，沿用 vectorMemoryConfig 现值。
- * 向量/交火的计划与聊天运行时状态无关，因此不读取表格数据。
+ * 向量管线的请求级计划：向量表格返回带覆写的计划，交火返回沿用 vectorMemoryConfig 的计划，
+ * 经典与 LLM 返回 null。
  */
 export function getVectorPipelinePlanForCurrentChat_ACU(): VectorPipelinePlan_ACU | null {
-  const current = resolveCurrentChatFillMode_ACU();
-  if (current.source === 'default' || current.mode !== 'vector') return null;
-  return resolveFillPlan_ACU(withFillMode_ACU(current.preferences.preferences, 'vector'), {
-    flightModeActive: false,
-    hasExistingTableData: true,
-    legacyCrossfireEnabled: false,
-  }).vectorPipeline;
-}
-
-/**
- * UI 展示用：当前对话显式使用的填表模式是否需要向量召回。
- * 只看对话记录或已保存的偏好模式，不吃旧交火全局开关与经典模式的临时回退，
- * 避免经典模式下仍把向量服务标成必需项。
- */
-export function isVectorModeExplicitlySelected_ACU(): boolean {
-  const current = resolveCurrentChatFillMode_ACU();
-  if (current.source === 'default') return false;
-  return current.mode === 'vector' || current.mode === 'crossfire';
-}
-
-/**
- * 剧情推进的填表模式门控：向量表格模式只做向量召回，不触发剧情推进。
- * 推导失败时保持升级前行为（不额外拦截），并记录诊断。
- */
-export function isPlotSuppressedByFillModeForCurrentChat_ACU(): boolean {
-  try {
-    return resolveCurrentChatFillMode_ACU().mode === 'vector';
-  } catch (error) {
-    logWarn_ACU('[填表模式] 剧情推进门控推导失败，沿用剧情推进开关:', error);
-    return false;
-  }
-}
-
-/**
- * 当前聊天是否运行向量管线（向量表格或交火）。
- * 推导失败时回退旧交火开关并记录诊断，保持升级前行为，不静默关闭已有交火。
- */
-export function isVectorPipelineEnabledForCurrentChat_ACU(): boolean {
-  const current = resolveCurrentChatFillMode_ACU();
-  const preferences = withFillMode_ACU(current.preferences.preferences, current.mode);
-  if (preferences.selectedMode === 'vector' || preferences.selectedMode === 'crossfire') return true;
-  if (preferences.selectedMode === 'llm') return false;
-  try {
-    return resolveFillPlan_ACU(preferences, buildFillRuntimeContext_ACU()).vectorPipeline !== null;
-  } catch (error) {
-    logWarn_ACU('[填表模式] 运行时门控推导失败，未启用向量管线:', error);
-    return false;
-  }
+  return resolveFillPlanForCurrentChat_ACU().vectorPipeline;
 }

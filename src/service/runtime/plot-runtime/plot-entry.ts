@@ -9,8 +9,7 @@ import { abortController_ACU, loopState_ACU, planningGuard_ACU, settings_ACU, _s
 import { logDebug_ACU, logError_ACU } from '../../../shared/utils';
 import { runPlotTasksRuntime_ACU } from './plot-task-engine';
 import { capturePlotRuntimeScope_ACU, summarizePlotRuntimeError_ACU, summarizePlotRuntimeScope_ACU } from './plot-runtime-scope';
-import { isFlightModeActive_ACU } from '../../flight-mode/flight-mode-state';
-import { isPlotSuppressedByFillModeForCurrentChat_ACU } from '../../fill-mode/fill-mode-gate';
+import { evaluatePlotPermissionForCurrentChat_ACU } from '../../fill-mode/fill-mode-gate';
 import { isPlotStageError_ACU } from './plot-runtime-phase';
 
 const PLOT_RUNTIME_BUILD_VERSION_ACU = (globalThis as any).__ACU_BUILD_VERSION__ || 'unknown';
@@ -62,12 +61,10 @@ function isTaskAbortedError_ACU(error: unknown): boolean {
         ...currentSettings,
       };
 
-      if (!plotSettings.enabled || isFlightModeActive_ACU()) {
-        return { success: false, skipped: true, reason: 'disabled' };
-      }
-      // 向量表格模式只做向量召回，不触发剧情推进（所有调用入口的兜底门控）。
-      if (isPlotSuppressedByFillModeForCurrentChat_ACU()) {
-        return { success: false, skipped: true, reason: 'fill_mode_vector' };
+      // 所有调用入口的兜底门控：只按当前对话的填表模式与剧情推进子开关判定。
+      const permission = evaluatePlotPermissionForCurrentChat_ACU();
+      if (!permission.allowed) {
+        return { success: false, skipped: true, reason: permission.reason === 'plot_disabled' ? 'disabled' : 'fill_mode_no_plot' };
       }
 
       _set_abortController_ACU(new AbortController());

@@ -3,6 +3,8 @@ import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { loadOrCreateJsonTableFromChatHistory_ACU } from '../table/table-service';
 import { updateReadableLorebookEntry_ACU } from '../worldbook/pipeline';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
+import { isVectorPipelineEnabledForCurrentChat_ACU } from '../fill-mode/fill-mode-gate';
+
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { clearSummaryVectorIndexCredentialCooldowns_ACU } from './summary-vector-index-flush-queue';
 import type { SummaryVectorIndexArchiveResult_ACU } from './summary-vector-index-archive-service';
@@ -92,7 +94,7 @@ export async function publishSummaryVectorMirrorRowRemovalSnapshotNow_ACU(
  */
 export async function ensureSummaryVectorMirrorAfterTableFill_ACU(): Promise<EnsureSummaryVectorMirrorAfterTableFillResult_ACU> {
     const worldbook = getCurrentWorldbookConfig_ACU();
-    if (worldbook.summaryVectorIndexModeEnabled !== true) {
+    if (!isVectorPipelineEnabledForCurrentChat_ACU()) {
         return { attempted: false, skipped: true, reason: 'feature_disabled' };
     }
     if (worldbook.summaryVectorMirrorEnabled === false) {

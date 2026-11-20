@@ -1,9 +1,10 @@
 /**
  * 对话级填表模式记录（读取侧）。
  *
- * 权威存储：当前聊天 scoped container 的 fillModeByIsolationKey[isolationKey]（独立字段）。
- * 已记录的对话按记录运行；旧会话按表格/向量证据兼容识别，新对话回落全局偏好（五角星）。
- * 读取只做归一化，不回写；记录无法识别时保留原值，按偏好模式运行。
+ * 唯一权威：当前聊天 scoped container 的 fillModeByIsolationKey[isolationKey].mode。
+ * 没有有效记录时（写入记录前的过渡期，以及决定补记写入哪个值），按 resolveUnrecordedChatFillMode_ACU 推导：
+ * 飞行开关已开 → classic；有已加载的旧表格数据 → 有效向量为 crossfire，否则 llm；其余 → 五角星偏好。
+ * 读取只做归一化，不回写；记录无法识别时保留原值。
  */
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU, peekChatScopedConfigField_ACU } from '../../data/storage/chat-history';
@@ -23,14 +24,39 @@ export { CHAT_FILL_MODE_FIELD_ACU, stageChatFillModeRecord_ACU, type ChatFillMod
 
 /** no_chat：未打开对话；absent：尚未记录；invalid：记录无法识别。 */
 export type ChatFillModeRecordStatus_ACU = 'recorded' | 'absent' | 'invalid' | 'no_chat';
-/** legacy：按旧会话数据识别；其余分别为对话记录、偏好和默认。 */
-export type ChatFillModeSource_ACU = 'chat' | 'legacy' | 'preferred' | 'default';
+/** chat：对话记录；legacy：按旧会话数据（飞行开关或旧表格）推导；preferred：五角星偏好。 */
+export type ChatFillModeSource_ACU = 'chat' | 'legacy' | 'preferred';
 
 export interface CurrentChatFillMode_ACU {
   mode: FillMode_ACU;
   source: ChatFillModeSource_ACU;
   recordStatus: ChatFillModeRecordStatus_ACU;
   preferences: FillModePreferencesRead_ACU;
+}
+
+export interface UnrecordedChatFillModeInput_ACU {
+  flightModeActive: boolean;
+  /** 已加载且属于旧模式兼容范围的表格数据或旧向量索引历史。 */
+  hasLegacyData: boolean;
+  /** 同步可读的有效向量；只在 hasLegacyData 时参与判定。 */
+  hasSummaryVectorData: boolean;
+  preferredMode: FillMode_ACU;
+}
+
+export interface UnrecordedChatFillMode_ACU {
+  mode: FillMode_ACU;
+  source: Exclude<ChatFillModeSource_ACU, 'chat'>;
+  /** 推导依据：flight 为飞行开关；legacy_table 为旧表格/向量证据，补记前须异步核验向量。 */
+  basis: 'flight' | 'legacy_table' | 'preferred';
+}
+
+/** 无记录时的模式推导（纯函数）：过渡期判定与补记共用。 */
+export function resolveUnrecordedChatFillMode_ACU(input: UnrecordedChatFillModeInput_ACU): UnrecordedChatFillMode_ACU {
+  if (input.flightModeActive) return { mode: 'classic', source: 'legacy', basis: 'flight' };
+  if (input.hasLegacyData) {
+    return { mode: input.hasSummaryVectorData ? 'crossfire' : 'llm', source: 'legacy', basis: 'legacy_table' };
+  }
+  return { mode: input.preferredMode, source: 'preferred', basis: 'preferred' };
 }
 
 function readRecordSlot_ACU(): { status: ChatFillModeRecordStatus_ACU; record: ChatFillModeRecord_ACU | null } {
@@ -49,7 +75,7 @@ function readRecordSlot_ACU(): { status: ChatFillModeRecordStatus_ACU; record: C
   return { status: 'recorded', record: { mode, recordedAt: Number.isFinite(recordedAt) ? Math.max(0, Math.trunc(recordedAt)) : 0 } };
 }
 
-/** 经典表格模式与飞行模式是同一个开关：飞行模式启用即为经典模式。 */
+/** 经典方案内部数据：飞行开关是否已启用（隐藏行、大总结、归档）。不参与模式判定。 */
 export function isClassicModeActiveForCurrentChat_ACU(): boolean {
   try {
     return getCurrentFlightModeState_ACU().enabled === true;
@@ -58,27 +84,27 @@ export function isClassicModeActiveForCurrentChat_ACU(): boolean {
   }
 }
 
+/** 按当前聊天的同步证据推导无记录时的模式。 */
+export function resolveUnrecordedChatFillModeForCurrentChat_ACU(preferredMode: FillMode_ACU): UnrecordedChatFillMode_ACU {
+  const flightModeActive = isClassicModeActiveForCurrentChat_ACU();
+  const hasLegacyData = !flightModeActive && (hasLegacyFillModeTableData_ACU() || hasLegacyVectorHistoryForCurrentChat_ACU());
+  return resolveUnrecordedChatFillMode_ACU({
+    flightModeActive,
+    hasLegacyData,
+    hasSummaryVectorData: hasLegacyData && hasSummaryVectorDataForCurrentChat_ACU(),
+    preferredMode,
+  });
+}
+
 export function resolveCurrentChatFillMode_ACU(): CurrentChatFillMode_ACU {
   const preferences = readFillModePreferences_ACU();
   const slot = readRecordSlot_ACU();
-  if (isClassicModeActiveForCurrentChat_ACU()) {
-    return { mode: 'classic', source: 'chat', recordStatus: slot.status, preferences };
-  }
   if (slot.record) return { mode: slot.record.mode, source: 'chat', recordStatus: 'recorded', preferences };
-  if (slot.status === 'absent' && (hasLegacyFillModeTableData_ACU() || hasLegacyVectorHistoryForCurrentChat_ACU())) {
-    return {
-      mode: hasSummaryVectorDataForCurrentChat_ACU() ? 'crossfire' : 'llm',
-      source: 'legacy',
-      recordStatus: 'absent',
-      preferences,
-    };
+  if (slot.status === 'no_chat') {
+    return { mode: preferences.preferences.selectedMode, source: 'preferred', recordStatus: 'no_chat', preferences };
   }
-  return {
-    mode: preferences.preferences.selectedMode,
-    source: preferences.source === 'default' ? 'default' : 'preferred',
-    recordStatus: slot.status,
-    preferences,
-  };
+  const unrecorded = resolveUnrecordedChatFillModeForCurrentChat_ACU(preferences.preferences.selectedMode);
+  return { mode: unrecorded.mode, source: unrecorded.source, recordStatus: slot.status, preferences };
 }
 
 /** 以当前对话的模式替换 selectedMode，供 resolver 推导运行计划。 */

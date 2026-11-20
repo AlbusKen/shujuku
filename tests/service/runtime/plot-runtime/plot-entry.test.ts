@@ -3,8 +3,9 @@
  * 剧情推进入口 单元测试
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { seedFillModeForTest_ACU } from '../../../helpers/fill-mode-seed';
 
-const { mockSettings, mockLoopState, mockPlanningGuard, mockRunPlotTasks, mockLogError, mockCaptureScope, mockFlightModeActive } = vi.hoisted(() => ({
+const { mockSettings, mockLoopState, mockPlanningGuard, mockRunPlotTasks, mockLogError, mockCaptureScope } = vi.hoisted(() => ({
   mockSettings: {
     plotSettings: { enabled: true },
     streamingEnabled: false,
@@ -14,7 +15,6 @@ const { mockSettings, mockLoopState, mockPlanningGuard, mockRunPlotTasks, mockLo
   mockRunPlotTasks: vi.fn(),
   mockLogError: vi.fn(),
   mockCaptureScope: vi.fn(),
-  mockFlightModeActive: vi.fn(() => false),
 }));
 
 vi.mock('../../../../src/shared/defaults-json.js', () => ({
@@ -27,9 +27,12 @@ vi.mock('../../../../src/service/runtime/state-manager', () => ({
   planningGuard_ACU: mockPlanningGuard,
   abortController_ACU: null,
   _set_abortController_ACU: vi.fn(),
+  currentJsonTableData_ACU: {},
+  getCurrentIsolationKey_ACU: () => '',
 }));
 
-vi.mock('../../../../src/shared/utils', () => ({
+vi.mock('../../../../src/shared/utils', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../../src/shared/utils')>(),
   logDebug_ACU: vi.fn(),
   logError_ACU: mockLogError,
 }));
@@ -44,14 +47,6 @@ vi.mock('../../../../src/service/runtime/plot-runtime/plot-runtime-scope', () =>
   summarizePlotRuntimeError_ACU: () => ({ category: 'unknown' }),
 }));
 
-vi.mock('../../../../src/service/flight-mode/flight-mode-state', () => ({
-  isFlightModeActive_ACU: mockFlightModeActive,
-}));
-
-vi.mock('../../../../src/service/fill-mode/fill-mode-gate', () => ({
-  isPlotSuppressedByFillModeForCurrentChat_ACU: () => false,
-}));
-
 import { runOptimizationLogic_ACU } from '../../../../src/service/runtime/plot-runtime/plot-entry';
 
 beforeEach(() => {
@@ -60,7 +55,8 @@ beforeEach(() => {
   mockLoopState.isRetrying = false;
   mockPlanningGuard.inProgress = false;
   mockCaptureScope.mockReturnValue({ chatId: 'chat-1', characterId: '1', isolationKey: '', reliable: true });
-  mockFlightModeActive.mockReturnValue(false);
+  // 默认按 LLM 模式（允许剧情推进）运行，模式相关用例单独播种。
+  seedFillModeForTest_ACU({ record: 'llm' });
   // 重置 __inFlight 标记
   (runOptimizationLogic_ACU as any).__inFlight = false;
   (runOptimizationLogic_ACU as any).__inFlightText = '';
@@ -91,12 +87,27 @@ describe('runOptimizationLogic_ACU', () => {
     expect(result.reason).toBe('disabled');
   });
 
-  it('飞行模式开启时不执行剧情任务', async () => {
-    mockFlightModeActive.mockReturnValue(true);
+  it('记录 classic（飞行开关未启用）时兜底跳过，不执行剧情任务', async () => {
+    seedFillModeForTest_ACU({ record: 'classic', flightEnabled: false });
     const result = await runOptimizationLogic_ACU('继续');
 
-    expect(result).toEqual({ success: false, skipped: true, reason: 'disabled' });
+    expect(result).toEqual({ success: false, skipped: true, reason: 'fill_mode_no_plot' });
     expect(mockRunPlotTasks).not.toHaveBeenCalled();
+  });
+
+  it('记录 vector 时兜底跳过', async () => {
+    seedFillModeForTest_ACU({ record: 'vector' });
+    expect(await runOptimizationLogic_ACU('继续')).toEqual({ success: false, skipped: true, reason: 'fill_mode_no_plot' });
+    expect(mockRunPlotTasks).not.toHaveBeenCalled();
+  });
+
+  it('记录 crossfire 且飞行开关残留开启时按记录处理', async () => {
+    seedFillModeForTest_ACU({ record: 'crossfire', flightEnabled: true });
+    mockRunPlotTasks.mockResolvedValue({
+      finalMessage: '继续推进', successfulResults: [{ taskId: 'task1' }], failedResults: [], enabledTaskCount: 1,
+    });
+    expect(await runOptimizationLogic_ACU('继续')).toMatchObject({ success: true });
+    expect(mockRunPlotTasks).toHaveBeenCalled();
   });
 
   it('重试中时跳过', async () => {

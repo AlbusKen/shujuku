@@ -78,6 +78,20 @@ export const fillModeCopy = {
     confirmLabel: '恢复模板并切换',
     message: '启用经典表格模式后，当前对话的表格模板被修改过。继续切换会恢复为启用经典表格模式前的模板，覆盖这些修改。',
   },
+  classicReadiness: {
+    label: '经典表格状态',
+    retryLabel: '重新启用',
+    pendingTitle: '未就绪',
+    failedTitle: '启用失败',
+    pending(reason: string): string {
+      if (reason === 'table_not_loaded') return '表格数据尚未加载完成，加载后重新打开对话或点击重新启用。';
+      if (reason === 'chat_changed') return '启用过程中对话已切换，请点击重新启用。';
+      return '经典表格尚未启用，剧情推进与向量召回已按经典模式跳过。';
+    },
+    failed(error: string): string {
+      return `经典表格未能启用，剧情推进与向量召回仍按经典模式跳过。原因：${error}`;
+    },
+  },
   panels: {
     mode: {
       title: '填表模式',

@@ -18,6 +18,8 @@ import { proceedWithCardUpdate_ACU } from '../../triggers/update-process';
 import { refreshMergedDataAndNotifyWithUI_ACU } from '../../components/pipeline-ui-helpers';
 import { showToastr_ACU } from '../../theme/toast';
 import { getCurrentWorldbookConfig_ACU } from '../../../service/settings/settings-readers';
+import { isVectorPipelineEnabledForCurrentChat_ACU } from '../../../service/fill-mode/fill-mode-gate';
+
 import { enqueueSummaryVectorIndexFlush_ACU } from '../../../service/vector/summary-vector-index-flush-queue';
 import { importTableJsonThroughCommit_ACU } from '../../../service/table/table-import-service';
 import type { ApiGroupContext } from './callback-api';
@@ -57,7 +59,7 @@ export function createCoreDataApi(ctx: ApiGroupContext): Record<string, Function
                             const table = (commitResult.tableData as any)?.[sheetKey];
                             return sheetKey.startsWith('sheet_') && !!table?.name && isSummaryOrOutlineTable_ACU(String(table.name));
                         });
-                        if (sourceTableKey && getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true) {
+                        if (sourceTableKey && isVectorPipelineEnabledForCurrentChat_ACU()) {
                             try {
                                 const queueResult = await enqueueSummaryVectorIndexFlush_ACU({
                                     sourceTableKey,

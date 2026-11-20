@@ -20,6 +20,8 @@ import { getPhysicalTableNameForSheet_ACU } from '../../../shared/sheet-identity
 import { getLatestTableAppendMessageIndexFromChat_ACU } from '../../../service/table/table-history';
 import { enqueueSummaryVectorIndexFlush_ACU } from '../../../service/vector/summary-vector-index-flush-queue';
 import { getCurrentWorldbookConfig_ACU } from '../../../service/settings/settings-readers';
+import { isVectorPipelineEnabledForCurrentChat_ACU } from '../../../service/fill-mode/fill-mode-gate';
+
 import { runSqliteRuntimeMutationCommit_ACU, runTableUpdateCommit_ACU } from '../../../service/table/table-update-commit';
 import { getTableLockIdentitiesForSheet_ACU } from '../../../service/runtime/helpers-table-lock';
 import { ensureStorageProviderReady_ACU, getActiveStorageProvider } from '../../../service/table/table-storage-strategy';
@@ -487,7 +489,7 @@ async function syncSummaryVectorIndexAfterTableEdit_ACU(
         return;
     }
     if (!isSummaryOrOutlineTable_ACU(tableName)) return;
-    if (getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled !== true) return;
+    if (!isVectorPipelineEnabledForCurrentChat_ACU()) return;
     void tableLatestFloorIndex;
 
     try {

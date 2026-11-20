@@ -10,8 +10,7 @@ import { isTakeoverEnabled_ACU } from '../../shared/takeover-control';
 import { isProcessing_Plot_ACU, loopState_ACU, settings_ACU, _set_isProcessing_Plot_ACU } from '../runtime/state-manager';
 import { logDebug_ACU, logError_ACU, logWarn_ACU, hashUserInput_ACU } from '../../shared/utils';
 import { DEFAULT_PLOT_SETTINGS_ACU } from '../../shared/defaults-json.js';
-import { isFlightModeActive_ACU } from '../flight-mode/flight-mode-state';
-import { isPlotSuppressedByFillModeForCurrentChat_ACU } from '../fill-mode/fill-mode-gate';
+import { isPlotAllowedForCurrentChat_ACU } from '../fill-mode/fill-mode-gate';
 
 // ============================================================
 // 类型定义
@@ -42,12 +41,11 @@ export interface PlotOrchestrationResult {
  */
 export function shouldProcessTavernHelperHook_ACU(options: any): boolean {
     if (!isTakeoverEnabled_ACU()) return false;
-    if (!settings_ACU.plotSettings.enabled || isFlightModeActive_ACU() || isProcessing_Plot_ACU || loopState_ACU.isRetrying || options.should_stream) {
+    if (isProcessing_Plot_ACU || loopState_ACU.isRetrying || options.should_stream) {
         return false;
     }
-    // 向量表格模式只做向量召回，不触发剧情推进。
-    if (isPlotSuppressedByFillModeForCurrentChat_ACU()) return false;
-    return true;
+    // 只按当前对话的填表模式与剧情推进子开关判定（classic / vector 不推进剧情）。
+    return isPlotAllowedForCurrentChat_ACU();
 }
 
 /**
@@ -133,7 +131,7 @@ export type PlanningFn = (userMessage: string, options: any) => Promise<string |
 /** 只有明确的未启用/模式不适用/重试跳过允许普通发送；忙碌或未知跳过不能透传原文。 */
 function isPlanningNotRequired_ACU(result: Awaited<ReturnType<PlanningFn>>): boolean {
     return !!result && typeof result === 'object' && result.skipped === true
-        && (result.reason === 'disabled' || result.reason === 'fill_mode_vector' || result.reason === 'retrying' || result.reason === 'no_tasks');
+        && (result.reason === 'disabled' || result.reason === 'fill_mode_no_plot' || result.reason === 'retrying' || result.reason === 'no_tasks');
 }
 
 /** 未取得规划所有权的调用只拒绝自身，不得走有效请求的失败取消。 */
@@ -206,9 +204,8 @@ export async function orchestrateTavernHelperHook_ACU(
 ): Promise<TavernHelperHookResult> {
     if (!isTakeoverEnabled_ACU()) return { action: 'passthrough' };
     // 1. 判断是否应该处理
-    if (isProcessing_Plot_ACU && settings_ACU.plotSettings.enabled
-        && !isFlightModeActive_ACU() && !isPlotSuppressedByFillModeForCurrentChat_ACU()
-        && !loopState_ACU.isRetrying && !options.should_stream) {
+    if (isProcessing_Plot_ACU && !loopState_ACU.isRetrying && !options.should_stream
+        && isPlotAllowedForCurrentChat_ACU()) {
         return { action: 'busy' };
     }
     if (!shouldProcessTavernHelperHook_ACU(options)) {

@@ -16,7 +16,7 @@ import { saveSettingsAndNotify_ACU } from '../components/settings-ui-helpers';
 import { updateImportStatusUI_ACU, handleTxtImportAndSplit_ACU } from '../components/import-status-ui';
 import { clearImportLocalStorage_ACU, clearImportedEntries_ACU, deleteImportedEntries_ACU, handleInjectImportedTxtSelected_ACU } from '../triggers/import-process';
 import { importCombinedSettings_ACU } from '../triggers/data-admin-ui';
-import { applyTemplateScopeForCurrentChat_ACU, getDataIsolationHistory_ACU, removeDataIsolationHistory_ACU, switchIsolationProfile_ACU, persistCurrentTemplatePresetName_ACU, setSummaryVectorIndexMode_ACU } from '../../service/settings/settings-service';
+import { applyTemplateScopeForCurrentChat_ACU, getDataIsolationHistory_ACU, removeDataIsolationHistory_ACU, switchIsolationProfile_ACU, persistCurrentTemplatePresetName_ACU } from '../../service/settings/settings-service';
 // [V1 收敛] 以下写操作统一委托 service 层事务式函数，禁止 V1 直接写 settings_ACU。
 import { setFeatureApiPreset_ACU } from '../../service/settings/feature-preset-reference-service';
 import { setUseMainApi_ACU } from '../../service/settings/api-preset-service';
@@ -39,6 +39,8 @@ import { getLatestSummaryVectorIndexSnapshotState_ACU } from '../../service/vect
 import { rebuildCurrentSummaryVectorIndexNow_ACU } from '../../service/vector/summary-vector-index-rebuild-service';
 import { deleteCurrentSummaryVectorIndexFromChat_ACU, tryRecoverSummaryVectorIndexFromExternalSnapshot_ACU } from '../../service/vector/summary-vector-index-chat-service';
 import { getCurrentWorldbookConfig_ACU } from '../../service/settings/settings-readers';
+import { isVectorPipelineEnabledForCurrentChat_ACU } from '../../service/fill-mode/fill-mode-gate';
+
 import { syncManualUpdateButtonAvailability_ACU } from '../components/status-display';
 import {
     getSummaryVectorIndexStats_ACU,
@@ -141,31 +143,11 @@ export async function bindDataEvents_ACU(): Promise<void> {
       const $importCombinedSettingsButton = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-import-combined-settings`);
       const $exportCombinedSettingsButton = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-export-combined-settings`);
       const $openNewVisualizerButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-open-new-visualizer`);
-      const $vectorIndexModeEnabled_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-vector-index-mode-enabled`);
       const $vectorIndexRefreshButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-vector-index-refresh`);
       const $vectorIndexClearCacheButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-vector-index-clear-cache`);
       const $vectorIndexDeleteCurrentButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-vector-index-delete-current`);
       const $vectorIndexMigrateLegacyButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-vector-index-migrate-legacy`);
       const $buildVectorIndexNowButton_ACU = $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-build-vector-index-now`);
-
-      const syncSummaryVectorIndexModeToggles_ACU = (modeEnabled: boolean): void => {
-          $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-vector-index-mode-enabled`).prop('checked', modeEnabled);
-          $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-summary-vector-index-mode-enabled`).prop('checked', modeEnabled);
-          $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-enabled`).prop('checked', modeEnabled);
-          $popupInstance_ACU.find(`#${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-config-block`).toggle(modeEnabled);
-          syncManualUpdateButtonAvailability_ACU();
-      };
-
-      const handleSummaryVectorIndexModeChange_ACU = (modeEnabled: boolean): void => {
-          setSummaryVectorIndexMode_ACU(modeEnabled);
-          syncSummaryVectorIndexModeToggles_ACU(modeEnabled);
-          showToastr_ACU(
-              modeEnabled ? 'success' : 'info',
-              modeEnabled
-                  ? '交火模式向量索引已启用：后续会随纪要表数据维护外置索引文件。'
-                  : '交火模式向量索引已关闭：已有外置索引文件不会自动删除，可在下方手动删除当前索引。',
-          );
-      };
 
       const handleOpenVisualizerClick_ACU = async () => {
           try {
@@ -187,12 +169,7 @@ export async function bindDataEvents_ACU(): Promise<void> {
               .on('click.acu_visualizer', handleOpenVisualizerClick_ACU);
       }
 
-      syncSummaryVectorIndexModeToggles_ACU(getCurrentWorldbookConfig_ACU().summaryVectorIndexModeEnabled === true);
-      if ($vectorIndexModeEnabled_ACU.length) {
-          $vectorIndexModeEnabled_ACU.off('change.acu_vector_index_mode').on('change.acu_vector_index_mode', function() {
-              handleSummaryVectorIndexModeChange_ACU(jQuery_API_ACU(this).is(':checked'));
-          });
-      }
+      syncManualUpdateButtonAvailability_ACU();
 
       void refreshVectorIndexStatsPanel_ACU();
       if ($vectorIndexRefreshButton_ACU.length) {
