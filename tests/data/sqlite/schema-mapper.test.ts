@@ -258,6 +258,22 @@ describe('parseDDLColumnInfos_ACU', () => {
     const ddl = 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, score INTEGER DEFAULT 0 NOT NULL CHECK(score >= 0));';
     expect(parseDDLColumnInfos_ACU(ddl)[1]).toMatchObject({ hasDefault: true, defaultExpression: '0' });
   });
+
+  it('相同 DDL 的解析结果可独立修改，变更 DDL 后使用新的列定义', () => {
+    const ddl = 'CREATE TABLE counters (row_id INTEGER PRIMARY KEY, count INTEGER DEFAULT 2);';
+    const first = parseDDLColumnInfos_ACU(ddl);
+    first[1].defaultExpression = '3';
+    first.pop();
+
+    const second = parseDDLColumnInfos_ACU(ddl);
+    expect(second).toHaveLength(2);
+    expect(second[1]).toMatchObject({ sqlName: 'count', defaultExpression: '2' });
+    second[1].sqlName = 'changed';
+
+    expect(parseDDLColumnInfos_ACU(ddl)[1]).toMatchObject({ sqlName: 'count', defaultExpression: '2' });
+    expect(parseDDLColumnInfos_ACU(ddl.replace('DEFAULT 2', 'DEFAULT 5'))[1])
+      .toMatchObject({ sqlName: 'count', defaultExpression: '5' });
+  });
 });
 
 describe('downgradeRowIdPrimaryKeyForLegacyReplay_ACU', () => {
