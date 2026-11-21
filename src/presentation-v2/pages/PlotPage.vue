@@ -15,10 +15,34 @@
             <AcuToggle :model-value="plotStore.sendDisguiseDisabled" :aria-label="plotCopy.controls.disguiseDisabledLabel"
               data-acu-plot-disguise-disabled-toggle="1" @update:model-value="plotStore.setSendDisguiseDisabled($event)" />
           </AcuFormRow>
+          <div class="acu-v2-plot-page__actions">
+            <AcuButton
+              :disabled="!promptPreview.plotAvailable.value"
+              :title="promptPreview.plotAvailable.value ? undefined : promptPreview.plotBlockerText.value"
+              @click="promptPreview.openPlotPreview()"
+            >
+              预览剧情提示词
+            </AcuButton>
+          </div>
         </AcuPanel>
         <PlotPresetPanel id="plot-preset-panel" />
       </AcuPanelGrid>
       <FormFillPlotPanels />
+
+      <PromptPreviewDrawer
+        :is-open="promptPreview.drawerOpen.value"
+        :mode="promptPreview.mode.value"
+        :loading="promptPreview.loading.value"
+        :error="promptPreview.error.value"
+        :scenario="promptPreview.scenario.value"
+        :table-fill-preview="promptPreview.tableFillPreview.value"
+        :plot-virtual-input="promptPreview.plotVirtualInput.value"
+        :plot-preview="promptPreview.plotPreview.value"
+        @close="promptPreview.closeDrawer"
+        @update:scenario="promptPreview.selectScenario"
+        @update:plot-virtual-input="promptPreview.setPlotVirtualInput"
+        @generate-plot="promptPreview.generatePlotPreview"
+      />
     </template>
   </section>
 </template>
@@ -29,11 +53,14 @@ import { subscribeChatConfigurationChanges_ACU } from '../../shared/chat-configu
 import AcuMobilePanelNav from '../components/_lib/AcuMobilePanelNav.vue';
 import AcuPanelGrid from '../components/_lib/AcuPanelGrid.vue';
 import AcuPanel from '../components/_lib/AcuPanel.vue';
+import AcuButton from '../components/_lib/AcuButton.vue';
 import AcuFormRow from '../components/_lib/AcuFormRow.vue';
 import AcuToggle from '../components/_lib/AcuToggle.vue';
 import PlotPresetPanel from '../components/PlotPresetPanel.vue';
 import FormFillPlotPanels from '../components/FormFillPlotPanels.vue';
+import PromptPreviewDrawer from '../components/PromptPreviewDrawer.vue';
 import { useChatChangedTick, useChatMutationTick } from '../composables/useChatChangedListener';
+import { usePromptPreview } from '../composables/usePromptPreview';
 import { useFormFillModeStore } from '../stores/form-fill-mode-store';
 import { usePlotPresetStore } from '../stores/plot-preset-store';
 import { FILL_MODE_INTROS } from '../copy/fill-mode-copy';
@@ -41,6 +68,7 @@ import { plotCopy } from '../copy/plot-copy';
 
 const modeStore = useFormFillModeStore();
 const plotStore = usePlotPresetStore();
+const promptPreview = usePromptPreview();
 const supportsPlot = computed(() => modeStore.selectedMode === 'llm' || modeStore.selectedMode === 'crossfire');
 const currentModeLabel = computed(() => FILL_MODE_INTROS[modeStore.selectedMode].label);
 const panelNavItems = [
@@ -51,6 +79,7 @@ const panelNavItems = [
 function refresh(): void {
   modeStore.refresh();
   plotStore.refreshFromSettings();
+  promptPreview.refreshGate();
 }
 onMounted(refresh);
 watch([useChatChangedTick(), useChatMutationTick()], refresh);
@@ -68,5 +97,11 @@ onBeforeUnmount(subscribeChatConfigurationChanges_ACU(refresh));
   margin: 0;
   color: var(--acu-text-2);
   line-height: 1.55;
+}
+
+.acu-v2-plot-page__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 </style>
