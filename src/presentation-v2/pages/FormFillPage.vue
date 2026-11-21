@@ -213,6 +213,13 @@
           </AcuMessage>
 
           <div class="acu-v2-form-fill-page__actions">
+            <AcuButton
+              :disabled="!promptPreview.tableFillAvailable.value"
+              :title="promptPreview.tableFillAvailable.value ? undefined : promptPreview.tableFillBlockerText.value"
+              @click="promptPreview.openTableFillPreview()"
+            >
+              预览填表提示词
+            </AcuButton>
             <AcuButton variant="primary" @click="promptDrawerOpen = true">
               编辑提示词
             </AcuButton>
@@ -336,6 +343,21 @@
       @delete="settings.deletePromptSegment($event)"
       @update="updatePromptSegment"
     />
+
+    <PromptPreviewDrawer
+      :is-open="promptPreview.drawerOpen.value"
+      :mode="promptPreview.mode.value"
+      :loading="promptPreview.loading.value"
+      :error="promptPreview.error.value"
+      :scenario="promptPreview.scenario.value"
+      :table-fill-preview="promptPreview.tableFillPreview.value"
+      :plot-virtual-input="promptPreview.plotVirtualInput.value"
+      :plot-preview="promptPreview.plotPreview.value"
+      @close="promptPreview.closeDrawer"
+      @update:scenario="promptPreview.selectScenario"
+      @update:plot-virtual-input="promptPreview.setPlotVirtualInput"
+      @generate-plot="promptPreview.generatePlotPreview"
+    />
   </section>
 </template>
 
@@ -356,6 +378,7 @@ import AcuTextarea from "../components/_lib/AcuTextarea.vue";
 import AcuToggle from "../components/_lib/AcuToggle.vue";
 import DanglingReferenceBanner from "../components/DanglingReferenceBanner.vue";
 import FormFillPromptDrawer from "../components/FormFillPromptDrawer.vue";
+import PromptPreviewDrawer from "../components/PromptPreviewDrawer.vue";
 import FormFillUpdateSettingsPanel from "../components/FormFillUpdateSettingsPanel.vue";
 import TableSelector from "../components/TableSelector.vue";
 import TableTemplatePresetPanel from "../components/TableTemplatePresetPanel.vue";
@@ -371,6 +394,7 @@ import {
 import { useFormFillWorldbookConfig } from "../composables/useFormFillWorldbookConfig";
 import { useFormFillWorldbookEntries } from "../composables/useFormFillWorldbookEntries";
 import { useManualUpdate } from "../composables/useManualUpdate";
+import { usePromptPreview } from "../composables/usePromptPreview";
 import { useTemplateRuntimeChangeTick } from "../composables/useTemplateRuntimeChangeListener";
 import { useUiCloseGuard } from "../composables/useUiCloseGuard";
 import { useWorldbookSelector } from "../composables/useWorldbookSelector";
@@ -383,6 +407,7 @@ type WorldbookSource = "character" | "manual";
 const dashboard = useDashboardPage();
 const manualUpdate = useManualUpdate();
 const dialogStore = useDialogStore();
+const promptPreview = usePromptPreview();
 const settings = useFormFillSettings();
 const injectionTarget = useFormFillInjectionTarget();
 const entriesSource = useFormFillWorldbookConfig();
@@ -498,6 +523,7 @@ async function refreshAll(): Promise<void> {
 }
 
 onMounted(() => {
+  promptPreview.refreshGate();
   void refreshAll();
 });
 watch(useChatChangedTick(), () => {
