@@ -155,7 +155,17 @@ export interface DDLColumnInfo_ACU {
   defaultExpression: string | null;
 }
 
+const DDL_COLUMN_INFO_CACHE_SIZE = 128;
+const DDL_COLUMN_INFO_CACHE_MAX_LENGTH = 8192;
+const ddlColumnInfoCache = new Map<string, DDLColumnInfo_ACU[]>();
+
 export function parseDDLColumnInfos_ACU(ddl: string): DDLColumnInfo_ACU[] {
+  const cacheable = typeof ddl === 'string' && ddl.length <= DDL_COLUMN_INFO_CACHE_MAX_LENGTH;
+  if (cacheable) {
+    const cached = ddlColumnInfoCache.get(ddl);
+    if (cached) return cached.map(column => ({ ...column }));
+  }
+
   const columnNames = parseDDLColumnNames(ddl);
   const comments = parseDDLColumnComments(ddl);
   const body = getCreateTableDefinitionBody_ACU(ddl);
@@ -166,7 +176,7 @@ export function parseDDLColumnInfos_ACU(ddl: string): DDLColumnInfo_ACU[] {
     const nameMatch = withoutComments.match(/^([^\s,()]+)/);
     if (nameMatch) definitionsByName.set(nameMatch[1], withoutComments);
   }
-  return columnNames.map((sqlName, index) => {
+  const infos = columnNames.map((sqlName, index) => {
     const rawComment = comments.get(sqlName);
     const comment = typeof rawComment === 'string' && rawComment.trim() ? rawComment.trim() : null;
     const definition = definitionsByName.get(sqlName) || '';
@@ -184,6 +194,16 @@ export function parseDDLColumnInfos_ACU(ddl: string): DDLColumnInfo_ACU[] {
       defaultExpression,
     };
   });
+
+  if (cacheable && infos.length) {
+    if (ddlColumnInfoCache.size >= DDL_COLUMN_INFO_CACHE_SIZE) {
+      const oldest = ddlColumnInfoCache.keys().next();
+      if (!oldest.done) ddlColumnInfoCache.delete(oldest.value);
+    }
+    // Callers receive mutable column records, so the cache owns separate copies.
+    ddlColumnInfoCache.set(ddl, infos.map(column => ({ ...column })));
+  }
+  return infos;
 }
 
 export interface SheetColumnProjectionItem_ACU {
