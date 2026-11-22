@@ -31,7 +31,7 @@
           </AcuButton>
         </div>
 
-        <AcuFormRow label="SQL 语句" hint="Ctrl / Command + Enter 执行；多行语句会原样交给 SQLite provider 处理。">
+        <AcuFormRow label="SQL 语句" hint="按 Ctrl / Command + Enter 执行，多行 SQL 语句会原样运行。">
           <AcuTextarea
             :model-value="sqlFlow.sqlText.value"
             :rows="10"

@@ -14,7 +14,7 @@
       >
         <AcuFormRow
           label="API 预设"
-          hint="默认使用当前 API，选择后仅影响正文替换。"
+          hint="默认使用当前 API，单独选择后仅影响正文替换。"
         >
           <AcuSelect
             :options="apiOptions"
@@ -25,7 +25,7 @@
         </AcuFormRow>
 
         <div class="acu-v2-content-replace-page__number-grid">
-          <AcuFormRow label="最小正文长度" hint="低于此值跳过优化。">
+          <AcuFormRow label="最小正文长度" hint="低于此字数跳过优化。">
             <AcuInput
               :model-value="store.minLength"
               type="number"
@@ -34,7 +34,7 @@
               @change="store.setNumber('minLength', $event)"
             />
           </AcuFormRow>
-          <AcuFormRow label="最大替换项数" hint="单次最多接受的建议条数。">
+          <AcuFormRow label="最大替换项数" hint="单次最多接受的修改条数。">
             <AcuInput
               :model-value="store.maxOptimizations"
               type="number"
@@ -46,7 +46,7 @@
           </AcuFormRow>
           <AcuFormRow
             label="循环优化次数"
-            hint="再次检查优化结果，过高会增加等待时间。"
+            hint="再次检查优化结果，次数过高会增加等待时间。"
           >
             <AcuInput
               :model-value="store.loopCount"
@@ -57,7 +57,7 @@
               @change="store.setNumber('loopCount', $event)"
             />
           </AcuFormRow>
-          <AcuFormRow label="自动重试次数" hint="失败时重试次数上限。">
+          <AcuFormRow label="自动重试次数" hint="失败时最多重试几次。">
             <AcuInput
               :model-value="store.retryCount"
               type="number"
@@ -182,7 +182,7 @@
         :description="contentReplaceCopy.panels.filter.description"
       >
         <div class="acu-v2-content-replace-page__form-grid">
-          <AcuFormRow label="提取标签" hint="多个标签逗号分隔，留空不提取。">
+          <AcuFormRow label="提取标签" hint="多个标签用逗号分隔，留空不提取。">
             <AcuInput
               :model-value="store.extractTags"
               type="text"
@@ -192,7 +192,7 @@
               "
             />
           </AcuFormRow>
-          <AcuFormRow label="排除标签" hint="多个逗号分隔，留空不排除。">
+          <AcuFormRow label="排除标签" hint="多个标签用逗号分隔，留空不排除。">
             <AcuInput
               :model-value="store.excludeTags"
               type="text"
@@ -231,7 +231,7 @@
       >
         <AcuFormRow
           label="测试文本"
-          hint="输入一段模拟 AI 正文，用于验证提示词和返回格式。"
+          hint="输入一段测试正文，用来验证提示词和返回格式。"
         >
           <AcuTextarea
             :model-value="store.testInput"

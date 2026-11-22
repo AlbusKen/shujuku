@@ -36,6 +36,7 @@ import {
   reconcileCurrentChatFillModeOnOpen_ACU,
   retryClassicEnableForCurrentChat_ACU,
 } from '../../../src/service/fill-mode/fill-mode-reconcile';
+import { setSettingsDeferredLoadPending_ACU } from '../../../src/shared/settings-load-readiness';
 import { resetFillModeSeed_ACU, seedFillModeForTest_ACU } from '../../helpers/fill-mode-seed';
 
 function emptyTable(): any {
@@ -68,7 +69,10 @@ describe('reconcileCurrentChatFillModeOnOpen_ACU', () => {
     h.strictSave.mockReset().mockResolvedValue(undefined);
   });
 
-  afterEach(() => resetFillModeSeed_ACU());
+  afterEach(() => {
+    setSettingsDeferredLoadPending_ACU(false);
+    resetFillModeSeed_ACU();
+  });
 
   it('新对话偏好 classic：写记录并启用，就绪', async () => {
     seedFillModeForTest_ACU({ preferred: 'classic' });
@@ -168,5 +172,60 @@ describe('reconcileCurrentChatFillModeOnOpen_ACU', () => {
     ]);
     expect(a).toBe(b);
     expect(h.enable).toHaveBeenCalledTimes(1);
+  });
+
+  it('新对话仅含 init checkpoint（模板预置行）：不误判为旧会话，仍按偏好补记', async () => {
+    seedFillModeForTest_ACU({ preferred: 'classic' });
+    const chat = getChatArray_ACU();
+    chat[0].TavernDB_ACU_IsolatedData = {
+      [h.isolationKey]: {
+        _acu_storage_version: 2,
+        storageFrame: {
+          version: 2,
+          checkpoint: { kind: 'full', reason: 'init', data: legacyTable() },
+          logEntries: [],
+        },
+      },
+    };
+    h.tableData = legacyTable();
+    const result = await reconcileCurrentChatFillModeOnOpen_ACU({ tableLoaded: true });
+    expect(result.record).toEqual({ recorded: true, mode: 'classic' });
+    expect(h.enable).toHaveBeenCalledTimes(1);
+    expect(result.readiness).toEqual({ status: 'ready' });
+  });
+
+  it('V2 对话已有填表 logEntries：按旧会话迁移为 llm，不覆盖为偏好', async () => {
+    seedFillModeForTest_ACU({ preferred: 'classic' });
+    const chat = getChatArray_ACU();
+    chat[0].TavernDB_ACU_IsolatedData = {
+      [h.isolationKey]: {
+        _acu_storage_version: 2,
+        storageFrame: {
+          version: 2,
+          checkpoint: { kind: 'full', reason: 'init', data: legacyTable() },
+          logEntries: [{ seq: 1, operations: [] }],
+        },
+      },
+    };
+    h.tableData = legacyTable();
+    const result = await reconcileCurrentChatFillModeOnOpen_ACU({ tableLoaded: true });
+    expect(result.record).toEqual({ recorded: true, mode: 'llm' });
+    expect(h.enable).not.toHaveBeenCalled();
+  });
+
+  it('全局设置延迟加载未落定时不固化默认偏好，落定后按真实偏好补记', async () => {
+    seedFillModeForTest_ACU({ preferred: 'classic' });
+    setSettingsDeferredLoadPending_ACU(true);
+    const pendingResult = await reconcileCurrentChatFillModeOnOpen_ACU({ tableLoaded: true });
+    expect(pendingResult.record).toBeNull();
+    expect(h.strictSave).not.toHaveBeenCalled();
+    expect(h.enable).not.toHaveBeenCalled();
+    expect(resolveCurrentChatFillMode_ACU()).toMatchObject({ recordStatus: 'absent' });
+
+    seedFillModeForTest_ACU({ preferred: 'vector' });
+    setSettingsDeferredLoadPending_ACU(false);
+    const settledResult = await reconcileCurrentChatFillModeOnOpen_ACU({ tableLoaded: true });
+    expect(settledResult.record).toEqual({ recorded: true, mode: 'vector' });
+    expect(resolveCurrentChatFillMode_ACU()).toMatchObject({ mode: 'vector', recordStatus: 'recorded' });
   });
 });

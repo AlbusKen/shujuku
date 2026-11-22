@@ -173,7 +173,7 @@ export function generateTableTabHTML(): string {
                                         <div class="acu-col-sm">
                                             <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rolling-delta-fold-threshold">滚动增量折叠阈值 K</label>
                                             <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-rolling-delta-fold-threshold" min="1" step="1" placeholder="15" disabled>
-                                            <small class="notes">仅保留历史配置兼容；滚动增量恢复 V2 安全发布语义前不生效。</small>
+                                            <small class="notes">仅用于兼容旧配置，目前不生效。</small>
                                         </div>
                                         <div class="acu-col-sm">
                                             <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-namespace">索引命名空间前缀</label>
@@ -283,7 +283,7 @@ export function generateTableTabHTML(): string {
                                         <div class="acu-col-sm">
                                             <label for="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-keyword-generation-max-attempts">关键词生成最大尝试次数</label>
                                             <input type="number" id="${SCRIPT_ID_PREFIX_ACU}-worldbook-vector-memory-keyword-generation-max-attempts" min="1" step="1" placeholder="3">
-                                            <small class="notes">关键词生成失败时会回退到用户输入本身参与召回，不阻断原始发送。</small>
+                                            <small class="notes">生成关键词失败时，自动改用你的原话召回记忆，不影响发送。</small>
                                         </div>
                                     </div>
                                 </div>

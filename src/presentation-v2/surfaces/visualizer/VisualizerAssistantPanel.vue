@@ -3,7 +3,7 @@
     <div class="acu-viz-assistant__head">
       <AcuPanel
         title="AI 改表助手"
-        description="用自然语言让助手生成改表草稿。它可能改多张表或全局配置；应用前先检查变更，不满意就改写需求重来。"
+        description="让助手生成改表草稿。应用前请先检查改动，不满意可以改写需求重来。"
       >
         <template #actions>
           <AcuBadge v-if="assistant.isRunning.value" variant="warning">运行中</AcuBadge>
@@ -38,7 +38,7 @@
         </div>
 
         <p v-if="!assistant.turns.value.length && !assistant.rounds.value.length" class="acu-viz-assistant__empty">
-          还没有会话。输入需求后，助手会返回摘要、警告、分组 diff 和需要确认的风险项。
+          还没有会话。发送需求后，助手会列出变化对比和需要确认的风险项。
         </p>
 
         <div class="acu-viz-assistant__turns">

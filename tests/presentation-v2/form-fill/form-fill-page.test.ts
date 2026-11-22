@@ -747,7 +747,7 @@ describe('FormFillPage · 手动填表面板', () => {
     expect(text).toContain('选中表：角色状态（sheet_a）、事件记录（sheet_b）');
     expect(text).toContain('执行手动填表');
     expect(text).toContain('一键追平还没填的内容');
-    expect(text).toContain('已经填好的部分不会重填');
+    expect(text).toContain('已填好的不会重填');
     expect(panel.querySelector('.acu-v2-form-fill-page__manual-extra .acu-toggle')).toBeNull();
     expect(panel.querySelector('.acu-v2-form-fill-page__manual-extra textarea')).not.toBeNull();
 
@@ -1229,7 +1229,7 @@ describe('FormFillPage · 手动填表面板', () => {
     await clickDialogButton('开始追平');
     await new Promise(r => setTimeout(r, 0));
 
-    expect(await readToastText(mount)).toContain('世界书还没同步好');
+    expect(await readToastText(mount)).toContain('世界书还没同步成功');
     await clickToastAction(mount, '仅同步重试');
     await new Promise(r => setTimeout(r, 0));
 

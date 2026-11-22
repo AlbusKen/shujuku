@@ -119,7 +119,7 @@ function formatVectorApiErrors(rawErrors: string[]): string[] {
       return "缺少“向量化模型名”";
     }
     if (error.includes("rerankEndpoint") || error.includes("rerankModel")) {
-      return "“重排URL”和“重排模型名”需要同时填写，或者同时留空";
+      return "“重排 URL”和“重排模型名”必须同时填写，或同时留空。";
     }
     return error;
   });

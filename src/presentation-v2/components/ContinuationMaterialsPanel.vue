@@ -16,8 +16,7 @@
     </div>
 
     <p v-if="clearPending" class="acu-v2-continuation-materials__confirm">
-      清空会删除当前续写任务、主 Agent 的会话记录与本地资料快照（伏笔、信息差、长期约束、故事总纲、年代学、百科资料库、用户要求）。
-      小说正文楼层不受影响，清空后可以从当前剧情重新开始规划。
+      清空会删除当前续写任务、会话记录和伏笔/总纲/百科等本地资料，不影响小说正文，之后可重新规划。
       <span class="acu-v2-continuation-materials__confirm-actions">
         <AcuButton variant="danger" :loading="busy" @click="confirmClear">确认清空</AcuButton>
         <AcuButton @click="clearPending = false">取消</AcuButton>
@@ -74,7 +73,7 @@
 
           <details class="acu-v2-continuation-materials__json">
             <summary>编辑原始 JSON</summary>
-            <p class="acu-v2-continuation-materials__card-meta">修改轮次目标时请同步核对 pacing、function、mainlineDelta、timeAdvance 与 timeAnchor；缺少的语义字段保存时会按 pacing 补默认并标注「系统补全」，标注为 inferred 的字段改成明确值后标注自动消失。</p>
+            <p class="acu-v2-continuation-materials__card-meta">改轮次目标时建议顺便核对节奏、作用、主线推进与时间设置；漏填的项会自动补默认并标注“系统补全”，手动改完标注自动消失。</p>
             <AcuTextarea :model-value="outlineDraft" :rows="16" @update:model-value="onOutlineInput" />
             <p v-if="outlineError" class="acu-v2-continuation-materials__error">{{ outlineError }}</p>
             <div class="acu-v2-continuation-materials__actions">
@@ -119,8 +118,7 @@
     <!-- 本地资料：伏笔 / 信息差 / 长期约束 分类型结构化展示，各自独立 JSON 编辑与保存 -->
     <template v-else-if="activeTab === 'modules'">
       <p class="acu-v2-continuation-materials__meta">
-        本地资料由子代理结算写入，也可以在这里分模块手动修正。保存走与子代理相同的结构校验并推进修订号；
-        每个模块独立保存，只提交本模块数据，不影响其他模块（含未保存的草稿）。
+        本地资料由子代理自动更新，也可在这里手动修改。每个模块独立保存，互不影响。
       </p>
       <p v-if="materials.snapshot.value" class="acu-v2-continuation-materials__meta">
         结算水位：楼层 {{ materials.snapshot.value.settledThroughIndex }} ·
@@ -296,7 +294,7 @@
       <!-- 故事年代学账本 -->
       <details class="acu-v2-continuation-materials__block" open>
         <summary>故事年代学账本 · {{ materials.snapshot.value?.chronology.length ?? 0 }} 条<span v-if="materials.modules.chronology.dirty" class="acu-v2-continuation-materials__badge">未保存</span></summary>
-        <p v-if="!materials.snapshot.value?.chronology.length" class="acu-v2-continuation-materials__empty">还没有已结算的故事时间记录。时间事实由结算维护代理依据真实正文登记；大纲里的时间字段是计划。</p>
+        <p v-if="!materials.snapshot.value?.chronology.length" class="acu-v2-continuation-materials__empty">还没有已记录的故事时间。这里只记录正文已发生的时间，大纲里的时间只是计划。</p>
         <div v-else class="acu-v2-continuation-materials__cards">
           <div
             v-for="entry in materials.snapshot.value.chronology"
@@ -330,9 +328,7 @@
     <!-- 百科资料库：web-researcher 从互联网查到的原作/公开设定，按实体分条 -->
     <template v-else-if="activeTab === 'webRefs'">
       <p class="acu-v2-continuation-materials__meta">
-        百科资料库由 web-researcher 子代理从萌娘百科、维基百科、百度百科或网页查到后写入，按实体（人物、法术、物品、事件…）分条。
-        每条固定只有「名称 + 一句话简介」，详情自由格式。Agent 上下文里只注入预览行，详情由它们按 ID 精读。
-        它记录的是原作/公开设定，不是本故事已发生的事实；与世界书或正文冲突时以后者为准。
+        存放上网查回来的原作设定（人物、物品等），平时只给 Agent 看名称和一句话简介，需要时再看详情。与世界书或正文冲突时，以后者为准。
       </p>
       <p v-if="materials.snapshot.value" class="acu-v2-continuation-materials__meta">
         条目 {{ materials.snapshot.value.webRefs.length }} 条（活跃 {{ materials.snapshot.value.webRefs.filter(entry => !entry.retired).length }}）· 修订号 {{ materials.snapshot.value.revisions.webRefs }}
@@ -367,7 +363,7 @@
       </div>
       <details class="acu-v2-continuation-materials__json">
         <summary>编辑原始 JSON</summary>
-        <p class="acu-v2-continuation-materials__card-meta">每条至少需要 id、title（名称）、url、brief（一句话简介）；summary 为自由格式详情，tags 可选。网页原文不保存。手动新增的条目 source 可写 web。</p>
+        <p class="acu-v2-continuation-materials__card-meta">每条至少填 id、名称、网址和一句话简介，详情与标签可选，网页原文不保存。</p>
         <AcuTextarea :model-value="materials.modules.webRefs.draft" :rows="14" @update:model-value="value => materials.updateDraft('webRefs', value)" />
         <p v-if="materials.modules.webRefs.error" class="acu-v2-continuation-materials__error">{{ materials.modules.webRefs.error }}</p>
         <div class="acu-v2-continuation-materials__actions">
@@ -380,7 +376,7 @@
     <!-- 用户要求：Agent 会话里用户累计提出的任务要求 -->
     <template v-else-if="activeTab === 'userRequirements'">
       <p class="acu-v2-continuation-materials__meta">
-        用户要求在资料库里手动维护。创建任务时会把初始要求写成首条；每个标签是一条要求，保存时自动转换为字符串数组。
+        在这里手动管理用户要求，每个标签是一条要求，修改后保存即可。
       </p>
       <p v-if="materials.snapshot.value" class="acu-v2-continuation-materials__meta">
         条目 {{ materials.snapshot.value.userRequirements.length }} 条 · 修订号 {{ materials.snapshot.value.revisions.userRequirements }}
@@ -405,7 +401,7 @@
     <!-- 故事总纲：结构化展示 + JSON 编辑 -->
     <template v-else-if="activeTab === 'storyArc'">
       <p class="acu-v2-continuation-materials__meta">
-        故事总纲由 arc-architect 子代理维护：全书方向一条 + 若干卷台阶。也可以在这里手动修正，保存走同一套结构校验并推进修订号。
+        故事总纲包含全书方向和各卷规划，由子代理维护，也可在此手动修改。
       </p>
       <p v-if="materials.snapshot.value" class="acu-v2-continuation-materials__meta">
         总纲 {{ materials.snapshot.value.storyArc.length }} 条 · 修订号 {{ materials.snapshot.value.revisions.storyArc }}

@@ -79,7 +79,7 @@ describe('ApiPage', () => {
     const { mount } = await mountApiPage(settings);
     const page = document.querySelector('.acu-v2-api-page');
     expect(page!.textContent).toContain('填表 API 预设「ghost」已不存在');
-    expect(page!.textContent).toContain('不会自动改写已保存的设置');
+    expect(page!.textContent).toContain('不会自动改动原设置');
     expect(settings.tableApiPreset).toBe('ghost');
     mount.__resetAcuV2MountForTests();
   });
@@ -100,7 +100,7 @@ describe('ApiPage', () => {
     // Active preset shown in preset panel and opened in config panel.
     expect(page!.textContent).toContain('beta');
     expect(page!.textContent).not.toContain('流式输出');
-    expect(page!.textContent).toContain('当前聊天');
+    expect(page!.textContent).toContain('配置数据库各功能使用的 API');
     expect(page!.textContent).not.toContain('当前配置状态');
     expect(page!.textContent).not.toContain('已保存预设');
     expect(page!.textContent).toContain('预设名称');

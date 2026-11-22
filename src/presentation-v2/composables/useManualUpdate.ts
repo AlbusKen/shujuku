@@ -593,7 +593,7 @@ export function useManualUpdate(): ManualUpdateState {
   }
 
   function showCatchUpSyncPending(detail?: string): void {
-    const text = `补填的数据已保存，但世界书还没同步好。${detail ? ` ${detail}` : ''}`;
+    const text = `补填的数据已保存，但世界书还没同步成功。${detail ? ` ${detail}` : ''}`;
     const options = {
       durationMs: 0,
       muteable: false,

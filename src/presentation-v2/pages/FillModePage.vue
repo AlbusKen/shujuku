@@ -59,7 +59,7 @@
         </AcuMessage>
 
         <template v-if="formFillMode.selectedMode === 'classic'">
-          <AcuFormRow label="最近纪要表条数" hint="同时控制界面显示与经典模式提示词中的近期纪要条数，默认 15 条。">
+          <AcuFormRow label="最近纪要表条数" hint="控制界面和经典模式里保留的近期纪要条数，默认 15 条。">
             <AcuInput
               type="number"
               :min="1"
@@ -72,7 +72,7 @@
         </template>
 
         <template v-if="formFillMode.selectedMode === 'vector'">
-          <AcuFormRow label="保留相关纪要条数" hint="按 rerank 结果从上到下保留的纪要条数，默认 30 条；纪要有效行数少于此数时不触发召回，全部纪要条目切为蓝灯。选中的纪要条目本轮切为蓝灯（常驻）注入，纪要索引仍保持完整目录。embedding 与 rerank 服务在下方「Embedding / Rerank」面板配置。">
+          <AcuFormRow label="保留相关纪要条数" hint="每次最多挑出多少条相关纪要（默认 30 条），选中的本轮转为蓝灯注入；总条数不足时不筛选，全部转为蓝灯。在下方「Embedding / Rerank」面板配置。">
             <AcuInput
               type="number"
               :min="1"
@@ -82,7 +82,7 @@
               @change="formFillMode.setVectorResultCount($event)"
             />
           </AcuFormRow>
-          <AcuFormRow label="预筛最低分" hint="Embedding 余弦分门槛，低于此分不进入候选，默认 0.35。与交火模式的预筛最低分独立。">
+          <AcuFormRow label="预筛最低分" hint="相关度最低门槛，低于此分直接淘汰，默认 0.35（与交火模式独立）。">
             <AcuInput
               type="number"
               :min="0"
@@ -92,7 +92,7 @@
               @change="formFillMode.setVectorMinScore($event)"
             />
           </AcuFormRow>
-          <AcuFormRow label="候选上限" hint="送入 Rerank 的候选分片上限，运行时不小于保留相关纪要条数。与交火模式的候选上限独立。">
+          <AcuFormRow label="候选上限" hint="送去 Rerank 精选的候选条数上限，不能小于上面保留的纪要条数（与交火模式独立）。">
             <AcuInput
               type="number"
               :min="1"

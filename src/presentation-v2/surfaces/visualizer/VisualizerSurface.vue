@@ -115,7 +115,7 @@
         <AcuPanel
           v-else-if="visualizer.loadError"
           title="无法载入数据库"
-          description="数据库编辑器需要先读取当前聊天或隔离标签下的表格数据。请先完成初始化或一次填表；如果刚切换了聊天，可以重新打开新 UI 再试。"
+          description="编辑器需先读取当前聊天的表格数据。请先初始化或填一次表；刚切换聊天请重开界面再试。"
         >
           <p class="acu-visualizer-surface__empty">
             {{ visualizer.loadError }}

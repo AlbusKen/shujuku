@@ -15,7 +15,10 @@ import { getSortedSheetKeys_ACU } from '../../../service/template/chat-scope';
 import { loadAllChatMessages_ACU } from '../../../service/worldbook/pipeline';
 import { getStorageProvider } from '../../../service/table/table-storage-strategy';
 import { topLevelWindow_ACU } from '../../../shared/env';
-import { logDebug_ACU } from '../../../shared/utils';
+import { logDebug_ACU, logWarn_ACU } from '../../../shared/utils';
+import { resolveCurrentChatFillMode_ACU } from '../../../service/fill-mode/fill-mode-chat-record';
+import { reconcileCurrentChatFillModeOnOpen_ACU } from '../../../service/fill-mode/fill-mode-reconcile';
+import { isSettingsDeferredLoadPending_ACU } from '../../../shared/settings-load-readiness';
 import { purgeOldLayerData_ACU } from './settings-ui-config';
 import { buildAutoUpdatePlan_ACU, checkAutoUpdatePreConditions_ACU, executeAutoUpdatePlan_ACU } from '../../../service/table/update-scheduler';
 import { buildBatchMergeBase_ACU, executeAutoFillStagingGroups_ACU, processGroupedRuntimeChunk_ACU, refreshCommittedWorldbook_ACU, type CardUpdateProgressEvent, type TableUpdatePostCommitWarning_ACU } from '../../../service/table/update-orchestrator';
@@ -214,6 +217,18 @@ export function cancelPendingAutoFillEvent_ACU(): void {
 
     // 诊断日志与调度同口径：只计可填表的 AI 回复（排除工具楼与旁白）。
     const totalAiMessages = liveChat.filter(m => isFillEligibleAiMessage_ACU(m)).length;
+
+    // 若新对话在首轮自动填表前仍未落盘填表模式记录（如首轮在 CHAT_CHANGED 延迟前触发或初始加载），
+    // 先于首次写表补记偏好模式并补完经典模式，避免写入数据行后被误判为旧会话。
+    if (!chatView && currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object'
+      && !isSettingsDeferredLoadPending_ACU() && resolveCurrentChatFillMode_ACU().recordStatus === 'absent') {
+      try {
+        await reconcileCurrentChatFillModeOnOpen_ACU({ tableLoaded: true });
+      } catch (reconcileError) {
+        logWarn_ACU('[填表模式] 自动填表前补记填表模式异常:', reconcileError);
+      }
+      if (!canProcessEvent('fill_mode_reconcile')) return false;
+    }
 
     // [重构] 调用 service 层构建更新计划
     const triggerIsolationKey = getCurrentIsolationKey_ACU();

@@ -58,7 +58,7 @@
             <AcuTextarea
               :model-value="getSkillDraft(entry).description"
               label="Skill 描述"
-              placeholder="描述该世界书条目的用途，留空则不写入 Skill 元数据。"
+              placeholder="说明这条世界书的用途，留空则不写入 Skill 信息。"
               :rows="2"
               :max-rows="6"
               auto-resize
@@ -67,7 +67,7 @@
             <AcuTextarea
               :model-value="getSkillDraft(entry).triggerWhen"
               label="触发时机"
-              placeholder="说明 Agent 何时应选择该条目，留空则不写入 Skill 元数据。"
+              placeholder="说明 Agent 什么时候该选中这条世界书，留空则不写入 Skill 信息。"
               :rows="2"
               :max-rows="6"
               auto-resize

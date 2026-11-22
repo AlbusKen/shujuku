@@ -81,7 +81,7 @@
           placeholder="提示词内容..."
           @update:model-value="$emit('update', index, { content: $event })"
         />
-        <p v-else-if="isAgentHistorySlot_ACU(seg)" class="acu-prompt-segs__history">真实历史上下文 · 固定插入板块。请求时使用每条真实对话的原身份展开，不包裹为单条提示词；可上下移动调整位置。</p>
+        <p v-else-if="isAgentHistorySlot_ACU(seg)" class="acu-prompt-segs__history">真实历史对话插入位置。发送时按原本对话身份展开，可上下移动调整位置。</p>
       </li>
       <li v-if="!segments.length" class="acu-prompt-segs__empty">
         {{ emptyText }}

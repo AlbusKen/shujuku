@@ -2,7 +2,7 @@
   <div class="acu-viz-global" data-acu-visualizer-global>
     <AcuPanel
       title="全局注入配置"
-      description="全局配置属于整套模板，不依附单张表。它会控制可读数据条目和外层包裹条目的注入位置；如果所有表的世界书内容整体位置不对，先检查本面板。"
+      description="整套模板的全局配置，控制数据条目的整体注入位置；所有表在世界书里的位置整体不对时检查这里。"
     >
       <PlacementEditor
         title="可读数据条目位置"

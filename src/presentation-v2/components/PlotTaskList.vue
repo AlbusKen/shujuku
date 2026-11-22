@@ -23,7 +23,7 @@
         @click="$emit('select', task.id)"
       >
         <span class="acu-v2-plot-tasks__name">{{ task.name }}</span>
-        <span class="acu-v2-plot-tasks__stage" title="阶段号 — 同阶段并发，跨阶段串行">阶段 {{ task.stage }}</span>
+        <span class="acu-v2-plot-tasks__stage" title="阶段号 — 阶段号相同的同时跑，阶段号小的跑完再跑大的。">阶段 {{ task.stage }}</span>
         <span class="acu-v2-plot-tasks__seg-count">{{ task.promptGroup.length }} 段</span>
         <span v-if="!task.enabled" class="acu-v2-plot-tasks__disabled-label">已禁用</span>
       </button>

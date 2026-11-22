@@ -7,7 +7,7 @@
       暂无可用 API 预设，请新建并设为当前或全局默认。
     </AcuMessage>
 
-    <AcuFormRow label="当前 API 预设" hint="星标表示新聊天默认使用的预设。">
+    <AcuFormRow label="当前 API 预设" hint="点亮星标表示新聊天默认使用这套预设。">
       <div class="acu-api-config-panel__select-row">
         <AcuPresetDropdown
           :items="presetDropdownItems"
@@ -52,7 +52,7 @@
           />
         </AcuFormRow>
 
-        <AcuFormRow label="请求超时（秒）" hint="默认 300 秒；单次请求超过此期限按错误处理，并沿用当前功能的重试次数。">
+        <AcuFormRow label="请求超时（秒）" hint="默认 300 秒；超时算失败，并按当前的设置次数重试。">
           <AcuInput v-model="activeDraft.requestTimeoutSeconds" type="number" :min="1" :step="1" />
         </AcuFormRow>
 
@@ -61,12 +61,12 @@
         </AcuFormRow>
 
         <template v-if="activeConnectionMode === 'custom'">
-          <AcuFormRow label="通过酒馆渠道发送" hint="默认开启，由酒馆后端转发；关闭后由插件直连预设端点，需端点允许跨域。运行日志可检查实际渠道，分享前请检查隐私。">
+          <AcuFormRow label="通过酒馆渠道发送" hint="默认开启，经酒馆转发更稳定；关闭后由数据库直连，部分地址可能会连不上（运行日志可检查实际渠道，分享前请检查隐私）。">
             <AcuToggle v-model="activeDraft.sendViaTavern" aria-label="通过酒馆渠道发送" />
           </AcuFormRow>
           <AcuFormRow
             label="接口协议"
-            hint="直连按所选协议请求 /chat/completions、/responses、/messages 或 /interactions。酒馆渠道沿用宿主协议适配。纯原生端点下「加载模型」可能失败，可手填模型名。"
+            hint="直连时按所选格式请求；如果“加载模型”失败，可手填模型名。"
           >
             <AcuSelect
               :options="customApiFormatOptions"
@@ -156,14 +156,14 @@
         v-if="activeConnectionMode === 'custom'"
         class="acu-api-config-panel__editor-section"
       >
-        <AcuFormRow label="附加主体参数" hint="SillyTavern custom_include_body，填写 YAML object，会合并到最终模型请求体。">
+        <AcuFormRow label="附加主体参数" hint="高级项：额外追加到请求里的自定义参数，不懂请留空。">
           <AcuTextarea
             v-model="activeDraft.bodyParams"
             :rows="3"
             placeholder="response_format:&#10;  type: json_object&#10;top_k: 50"
           />
         </AcuFormRow>
-        <AcuFormRow label="排除主体参数" hint="会转换为 SillyTavern custom_exclude_body，从最终模型请求体删除指定字段。">
+        <AcuFormRow label="排除主体参数" hint="高级项：从请求里排除的自定义参数，不懂请留空。">
           <AcuTextarea
             v-model="activeDraft.excludeBodyParams"
             :rows="2"
@@ -172,7 +172,7 @@
         </AcuFormRow>
         <AcuFormRow
           label="提示词后处理"
-          hint="仅酒馆渠道生效，默认合并连续同角色；实际请求带原生工具时会自动使用含工具线格式。插件直连保留消息原序、工具事务和 system 身份。"
+          hint="仅经酒馆转发时生效，默认合并连续同角色消息；不懂保持默认即可。"
         >
           <AcuSelect
             :options="promptPostProcessingOptions"
@@ -182,7 +182,7 @@
             @update:model-value="setPromptPostProcessing"
           />
         </AcuFormRow>
-        <AcuFormRow label="附加请求标头" hint="每行一个 Header: Value，追加到请求头中。">
+        <AcuFormRow label="附加请求标头" hint="高级项：附加自定义请求头，每行一条，不懂请留空。">
           <AcuTextarea
             v-model="activeDraft.requestHeaders"
             :rows="2"

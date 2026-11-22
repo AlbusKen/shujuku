@@ -7,7 +7,7 @@
       <section class="acu-form-fill-update-settings-panel__setting-group">
         <AcuFormRow
           label="填表 API 预设"
-          hint="默认使用当前 API，选择后仅影响填表功能。"
+          hint="默认使用当前 API，单独选择后仅影响填表功能。"
         >
           <AcuSelect
             :options="tableApiPresetOptions"
@@ -19,7 +19,7 @@
 
         <AcuFormRow
           label="自动填表间隔"
-          hint="累计到所选数量的可更新 AI 回复后，自动填表一次。"
+          hint="每累计到指定数量的 AI 回复，自动填表一次。"
         >
           <AcuSelect
             :options="updateEveryOptions"

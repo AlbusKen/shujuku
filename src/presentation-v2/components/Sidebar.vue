@@ -132,7 +132,7 @@ async function openTierDialog(): Promise<void> {
   if (selected === 'high') {
     const confirmed = await dialogStore.confirm({
       title: '准备开启高级模式',
-      message: '高级模式会显示 SQL 控制台和开发者选项等入口。显示这些入口不会自动执行危险操作。',
+      message: '高级模式会显示 SQL 控制台和开发者选项入口，仅显示入口，不会自动执行危险操作。',
       confirmLabel: '继续',
       confirmVariant: 'danger',
       confirmCountdownSeconds: 2,

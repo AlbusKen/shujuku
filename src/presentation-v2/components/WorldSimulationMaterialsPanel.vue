@@ -16,8 +16,7 @@
     </div>
 
     <p v-if="clearPending" class="acu-v2-ws-materials__confirm">
-      清空会删除当前格林推演任务、世界账本、主 Agent 的会话记录与各楼层上的资料快照（账本状态、候选与运行恢复状态）。
-      小说正文楼层与已写进正文的〈与此同时〉段不受影响，清空后下一次正文完成或发送指令会从空账本重新推演。
+      清空只删推演任务、世界账本和记录，不影响小说正文及已写进正文的〈与此同时〉段落；之后会从空账本重新推演。
       <span class="acu-v2-ws-materials__confirm-actions">
         <AcuButton variant="danger" :loading="busy" @click="confirmClear">确认清空</AcuButton>
         <AcuButton @click="clearPending = false">取消</AcuButton>
@@ -61,8 +60,7 @@
       <details class="acu-v2-ws-materials__block">
         <summary>逐栏记录 · {{ fieldRecordTotal }} 条</summary>
         <p class="acu-v2-ws-materials__meta">
-          逐栏记录来自子代理的逐栏写入：「部分」条目还没写齐必填栏，不并入上面的完整账本；「旧账本条目」来自旧整条账本，来源不可逐栏拆分。
-          这里只列栏目名与修订身份，字段值在上面各模块的完整条目里查看。
+          显示子代理逐栏写入的明细。未填齐的“部分”条目暂不并入完整账本，具体内容请在上方完整条目中查看。
         </p>
         <p v-if="!fieldRecordGroups.length" class="acu-v2-ws-materials__empty">还没有逐栏写入记录。</p>
         <details v-for="group in fieldRecordGroups" :key="group.module" class="acu-v2-ws-materials__block">
@@ -118,7 +116,7 @@
 
     <!-- 场外信号预览：将写入正文的〈与此同时〉段与可感知信号 -->
     <template v-else-if="activeTab === 'projection'">
-      <p class="acu-v2-ws-materials__meta">按当前账本渲染的〈与此同时〉段，提交时会写进冻结 assistant 楼层的正文；只呈现角色可通过合理渠道感知的场外信号。</p>
+      <p class="acu-v2-ws-materials__meta">准备写入 AI 楼层的〈与此同时〉预览，只展示角色能合理察觉到的场外信号。</p>
       <details class="acu-v2-ws-materials__block" open>
         <summary>场外信号 · {{ ledger?.guidance.signals.length ?? 0 }} 条</summary>
         <p v-if="!ledger?.guidance.signals.length" class="acu-v2-ws-materials__empty">当前没有场外信号。</p>
@@ -139,7 +137,7 @@
     </template>
 
     <template v-else-if="activeTab === 'missed'">
-      <p class="acu-v2-ws-materials__meta">由维护 AI 在整理幕后纪要时判定：主角因不在场、不知情或时机已过而错过的重要幕后事件。</p>
+      <p class="acu-v2-ws-materials__meta">记录主角因不在场、不知情或时机已过而错过的重要幕后事件。</p>
       <p v-if="!missedItems.length" class="acu-v2-ws-materials__empty">目前没有主角错过的重要幕后事件。</p>
       <div v-else class="acu-v2-ws-materials__cards">
         <article v-for="item in missedItems" :key="item.id" class="acu-v2-ws-materials__card">
@@ -176,7 +174,7 @@
 
     <template v-else-if="activeTab === 'userRequirements'">
       <p class="acu-v2-ws-materials__meta">
-        用户要求在资料库里手动维护。创建任务时会把初始要求写成首条；每个标签是一条要求，保存时自动转换为字符串数组。
+        在这里手动管理用户要求，每个标签是一条要求，修改后保存即可。
       </p>
       <p v-if="userRequirements.snapshot" class="acu-v2-ws-materials__meta">
         条目 {{ userRequirements.snapshot.requirements.length }} 条

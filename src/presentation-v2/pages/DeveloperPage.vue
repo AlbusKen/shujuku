@@ -17,7 +17,7 @@
 
       <AcuPanel
         title="填表高级选项"
-        description="仅在需要严格约束模型填表响应时开启。开启后将切换到隔离提示词和严格 JSON 解析链路。"
+        description="仅在需要严格约束 AI 填表格式时开启，开启后会切到更严格的提示词和解析规则。"
       >
         <div class="acu-v2-developer-page__toggle-list">
           <ToggleRow
@@ -33,7 +33,7 @@
       >
         <AcuFormRow
           label="最大并发更新组数"
-          hint="大于 1 时，多个表格分组可能同时调用填表 API。数值越大越快，但 API 压力和失败后排查难度也越高。"
+          hint="大于 1 时多组表格会同时调用填表 API。越大越快，但 API 压力和排查难度也越高。"
         >
           <AcuInput
             type="number"
@@ -79,14 +79,14 @@ const toggles = computed<DeveloperFieldItem[]>(() => [
   {
     key: "legacyUiMenuVisible",
     label: "旧 UI 入口",
-    description: "在 SillyTavern 扩展菜单中显示旧 UI 入口。默认隐藏；新 UI 出问题时可临时开启。",
+    description: "在酒馆扩展菜单中显示旧版 UI 入口。默认隐藏，新界面出问题时可临时开启。",
     value: devOptions.legacyUiMenuVisible.value,
   },
 ]);
 const strictJsonTableFillToggle = computed<DeveloperFieldItem>(() => ({
   key: "strictJsonTableFillEnabled",
   label: "严格 JSON 填表响应",
-  description: "默认关闭。开启后原生表格输出结构化操作，SQLite 输出 JSON 包裹的 SQL 脚本。",
+  description: "默认关闭。开启后要求 AI 按更严格的 JSON 格式输出改表指令。",
   value: settings.strictJsonTableFillEnabled.value,
 }));
 const maxConcurrentGroups = computed(

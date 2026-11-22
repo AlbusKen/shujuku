@@ -133,9 +133,7 @@
           <section class="acu-v2-data-mgmt-page__checkpoint-section" aria-labelledby="acu-checkpoint-title">
             <h3 id="acu-checkpoint-title" class="acu-v2-data-mgmt-page__section-title">当前聊天 Checkpoint</h3>
             <p class="acu-v2-data-mgmt-page__section-description">
-              导出当前隔离标识的表格、聊天模板和指导表。导入会清空当前聊天全部 AI 楼层、所有隔离标识的本地表格数据，
-              仅在当前激活隔离键的最新 AI 楼层重建数据；当前聊天表格模板会切换为文件模板，后续更新将使用该模板。
-              全局模板和聊天正文不变。
+              导出当前聊天的表格、模板和指导表。导入会清空当前聊天所有楼层的本地表格数据，在最新 AI 楼层重建并切换为文件里的模板；全局模板和聊天正文不变。
             </p>
             <div class="acu-v2-data-mgmt-page__checkpoint-actions">
               <AcuButton block :disabled="!!flow.busyAction.value || runtimeDiagnostic.busy.value" @click="flow.exportTableCheckpoint">
@@ -158,7 +156,7 @@
           >
             <h3 id="acu-mixed-storage-title" class="acu-v2-data-mgmt-page__section-title">混合存储决议</h3>
             <p class="acu-v2-data-mgmt-page__section-description">
-              当前聊天同时检测到 legacy-v1 与 V2 数据。决议：{{ flow.mixedStorageDecision.value.kind }}。
+              当前聊天同时存在旧版与新版数据。决议：{{ flow.mixedStorageDecision.value.kind }}。
               <template v-if="flow.mixedStorageDecision.value.diagnosticCodes.length">
                 诊断：{{ flow.mixedStorageDecision.value.diagnosticCodes.join('、') }}。
               </template>
@@ -166,7 +164,7 @@
                 锚点：{{ flow.mixedStorageDecision.value.anchorStatus }}；回放：{{ flow.mixedStorageDecision.value.replayStatus }}；
                 静态表数：{{ flow.mixedStorageDecision.value.staticSheetKeyCount }}。
               </template>
-              可先导出两份独立快照；提交动作只引用当前决议，不会从页面接收或覆盖表格数据。
+              建议先各自导出备份，再按当前方案确认提交。
             </p>
             <div class="acu-v2-data-mgmt-page__checkpoint-actions">
               <AcuButton block :disabled="runtimeDiagnostic.busy.value" :loading="flow.busyAction.value === 'export-mixed-storage-snapshots'" @click="flow.exportMixedStorageSnapshots">
@@ -345,7 +343,7 @@
             <div class="acu-v2-data-mgmt-page__form-grid">
               <AcuFormRow
                 label="起始楼层"
-                hint="从第N个楼层 AI 回复开始，留空为第 1 层。"
+                hint="从第 N 层 AI 回复开始，留空为第 1 层。"
               >
                 <AcuInput
                   :model-value="flow.deleteRange.startFloor"
@@ -397,7 +395,7 @@
                 />
               </div>
               <p class="acu-v2-data-mgmt-page__meta">
-                勾选后只删除所选表格在楼层范围内的数据（包括 checkpoint 里这些表的数据），其它表格、模板与指导表都不受影响；不勾选则按整楼层删除。
+                勾选后只删除所选表在范围内的表格数据（含 Checkpoint 中的对应表），其它表和模板不受影响；不勾选则按整楼层删除。
               </p>
             </div>
 
@@ -449,7 +447,7 @@
             </AcuButton>
           </div>
           <p class="acu-v2-data-mgmt-page__meta">
-            清理全部退役隔离标签及其全局设置/表格模板，并切回默认数据；不会删除聊天正文或各聊天已保存的历史表格数据。当前发现 {{ flow.legacyIsolationCount.value }} 个旧隔离标签。
+            清理全部已停用的旧隔离标签及其设置并切回默认，不影响聊天正文和历史表格数据。当前发现 {{ flow.legacyIsolationCount.value }} 个旧隔离标签。
           </p>
         </AcuPanel>
       </div>
@@ -754,7 +752,7 @@ async function onCommitV2Recovery(mode: V2RecoveryCommitMode): Promise<void> {
   if (compatRequiresIdentityConfirmation) {
     const secondConfirmed = await dialogStore.confirm({
       title: '再次确认 sheetKey 身份归并',
-      message: '兼容回放结果按 key 优先级归并了同名不同 key 的表：同 row_id 时被覆盖的行会永久丢弃，列不做身份转换。固化后该归并结果成为持久历史的身份权威。确认提交？',
+      message: '合并旧数据时有重名表格，冲突行会按优先级覆盖且无法恢复。确认提交？',
       confirmLabel: '确认归并并固化',
       confirmVariant: 'danger',
     });
@@ -786,7 +784,7 @@ async function onResetAllDefaults(): Promise<void> {
   const selected = await dialogStore.selectMany<ResetDefaultsCleanupKey>({
     title: "恢复默认配置",
     message:
-      "选择本次要恢复或清理的项目。默认全选；取消某一项后会保留对应内容。此流程不会删除聊天正文、本地楼层数据、API 配置或全局预设库。",
+      "勾选要恢复或清理的项目，取消勾选则保留。不会删除聊天正文、表格数据、API 配置或全局预设库。",
     options: resetDefaultsCleanupOptions,
     confirmLabel: "按所选项目恢复",
     confirmVariant: "danger",

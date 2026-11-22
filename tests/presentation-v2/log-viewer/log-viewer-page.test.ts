@@ -245,9 +245,8 @@ describe('AdvancedToolsPage log panel', () => {
       expect(defaultText).not.toContain(`完整回复 ${tag}`);
     }
     expect(defaultText).not.toContain('no_tables_due');
-    expect(defaultText).toContain('API 请求开关独立采集');
-    expect(defaultText).toContain('关闭采集不会删除已有日志');
-    expect(defaultText).toContain('不代表最终网络请求');
+    expect(defaultText).toContain('API 请求、调试、警告开关可单独控制');
+    expect(defaultText).toContain('关闭开关不删旧日志');
     expect(defaultText).toContain('检查隐私');
     expect(logBuffer.isDebugLogEnabled()).toBe(false);
     expect(logBuffer.isApiLogEnabled()).toBe(false);

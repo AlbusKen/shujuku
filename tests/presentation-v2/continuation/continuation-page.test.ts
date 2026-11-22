@@ -620,7 +620,7 @@ describe('ContinuationPage', () => {
     buttonByText(el, '一键清空')!.click();
     await nextTick();
     expect(clearData).not.toHaveBeenCalled();
-    expect(el.textContent).toContain('小说正文楼层不受影响');
+    expect(el.textContent).toContain('不影响小说正文');
     buttonByText(el, '确认清空')!.click();
     await nextTick();
     expect(clearData).toHaveBeenCalledOnce();
@@ -677,8 +677,8 @@ describe('ContinuationPage', () => {
       expect(el.textContent).toContain('临近总结时的精读额度');
       expect(el.textContent).toContain('连续高压轮上限');
       expect(el.textContent).toContain('终审单批次读取上限');
-      expect(el.textContent).toContain('关闭时不装配终审证据');
-      expect(el.textContent).toContain('不会发起终审调用');
+      expect(el.textContent).toContain('终审默认关闭');
+      expect(el.textContent).toContain('关闭则跳过这一步');
       expect(el.textContent).toContain('发送前终审子代理提示词');
       expect(el.textContent).toContain('固定注入差异：主 Agent、总纲代理、两类策划代理、连续性审查、终审固定获得 $OUTLINE_WINDOW 或任务段中的 $USER_REQUIREMENTS');
       expect(el.textContent).toContain('伏笔与认知维护代理不再注入初始要求原文，只接收累计用户要求清单');

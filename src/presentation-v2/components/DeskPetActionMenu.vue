@@ -80,7 +80,7 @@
             class="acu-desk-pet-menu__action"
             role="menuitem"
             :disabled="busy"
-            title="补齐还没填的楼层，不会改动已经填好的内容"
+            title="补齐还没填的楼层，不会改动已经填好的内容。"
             @click="emit('catch-up')"
           >
             <svg class="acu-desk-pet-menu__icon" viewBox="0 0 16 16" aria-hidden="true">
@@ -93,7 +93,7 @@
             class="acu-desk-pet-menu__action"
             role="menuitem"
             :aria-expanded="detectOpen"
-            title="检测当前使用的表格模板、填表 API、剧情推进预设与剧情推进 API"
+            title="一键检测当前的表格模板、剧情推进预设及对应 API 配置。"
             @click="toggleDetect"
           >
             <svg class="acu-desk-pet-menu__icon" viewBox="0 0 16 16" aria-hidden="true">

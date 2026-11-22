@@ -355,7 +355,7 @@ describe('WorldSimulationPage', () => {
     expect(host.textContent).not.toContain('待修复');
     button(host, '场外信号')!.click();
     await nextTick();
-    expect(host.textContent).toContain('按当前账本渲染的〈与此同时〉段');
+    expect(host.textContent).toContain('准备写入 AI 楼层的〈与此同时〉预览');
     expect(host.textContent).toContain('北境压力上升');
 
     button(host, '一键清空')!.click();

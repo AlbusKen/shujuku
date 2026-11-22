@@ -18,6 +18,8 @@ import { applyCreativeIdentityProfileUpgrade_ACU, applyCreativeIdentityVectorUpg
 import { applyContentSafetyProfileDefaults_ACU, CONTENT_SAFETY_PROFILE_PROMPT_KEYS_ACU, restoreCustomPlotPromptGroups_ACU } from './content-safety-upgrade';
 import { upgradeTimeRecallPrefill_ACU } from '../plot/time-recall-prefill';
 import { globalMeta_ACU, listStoredProfileCodes_ACU, loadGlobalMeta_ACU, readProfileSettingsFromStorage_ACU, readProfileTemplateFromStorage_ACU, sanitizeSettingsForProfileSave_ACU, saveGlobalMeta_ACU, setGlobalMetaWriteSuspended_ACU, wasGlobalMetaMissingOnLoad_ACU, writeProfileSettingsToStorage_ACU, writeProfileTemplateToStorage_ACU } from '../../data/repositories/profile-repo';
+import { notifyChatConfigurationChanged_ACU } from '../../shared/chat-configuration-change';
+import { notifySettingsDeferredLoadSettled_ACU, setSettingsDeferredLoadPending_ACU } from '../../shared/settings-load-readiness';
 import { getProfileRecoveryCodes_ACU, setProfileRecoveryCodes_ACU } from './profile-recovery-state';
 import { getCurrentTemplatePresetName_ACU, normalizeTemplatePresetSelectionValue_ACU } from '../../shared/template-preset-utils';
 import { persistSettingsToStorage_ACU } from '../../data/storage/config-storage';
@@ -59,6 +61,7 @@ export const _set_settingsStorageReadyForSave_ACU = (val: boolean) => {
 let settingsReloadAfterIdbScheduled_ACU = false;
 
 function scheduleSettingsReloadAfterIdbReady_ACU(reason: string): void {
+  setSettingsDeferredLoadPending_ACU(true);
   if (settingsReloadAfterIdbScheduled_ACU) return;
   settingsReloadAfterIdbScheduled_ACU = true;
   _set_pendingSettingsReloadFromIdb_ACU(true);
@@ -68,6 +71,10 @@ function scheduleSettingsReloadAfterIdbReady_ACU(reason: string): void {
       if (pendingSettingsReloadFromIdb_ACU) {
           _set_pendingSettingsReloadFromIdb_ACU(false);
           loadSettings_ACU();
+          if (!pendingSettingsReloadFromIdb_ACU && !settingsReloadAfterBridgeScheduled_ACU) {
+              notifySettingsDeferredLoadSettled_ACU();
+              notifyChatConfigurationChanged_ACU('fill-mode');
+          }
       }
   }).catch(() => {
       settingsReloadAfterIdbScheduled_ACU = false;
@@ -83,6 +90,7 @@ let localConfigBackendWarned_ACU = false;
  * 否则无痕窗口（本地副本为空）会加载默认值，随后保存会覆盖酒馆服务端的真实配置。
  */
 function scheduleSettingsReloadAfterBridgeReady_ACU(reason: string): void {
+  setSettingsDeferredLoadPending_ACU(true);
   if (settingsReloadAfterBridgeScheduled_ACU) return;
   settingsReloadAfterBridgeScheduled_ACU = true;
   logDebug_ACU(`[设置加载] 酒馆设置桥接尚未就绪，暂停本轮加载并等待重载：${reason}`);
@@ -90,6 +98,10 @@ function scheduleSettingsReloadAfterBridgeReady_ACU(reason: string): void {
       settingsReloadAfterBridgeScheduled_ACU = false;
       try {
           loadSettings_ACU();
+          if (!pendingSettingsReloadFromIdb_ACU && !settingsReloadAfterBridgeScheduled_ACU) {
+              notifySettingsDeferredLoadSettled_ACU();
+              notifyChatConfigurationChanged_ACU('fill-mode');
+          }
       } catch (error) {
           logWarn_ACU('[设置加载] 桥接就绪后重载失败，保存门禁保持关闭。', error);
       }
@@ -100,6 +112,10 @@ function reloadSettingsFromTavernBackend_ACU(): void {
   logWarn_ACU('[设置加载] 酒馆设置已可用，丢弃本地副本并从酒馆设置重新加载。');
   try {
       loadSettings_ACU();
+      if (!pendingSettingsReloadFromIdb_ACU && !settingsReloadAfterBridgeScheduled_ACU) {
+          notifySettingsDeferredLoadSettled_ACU();
+          notifyChatConfigurationChanged_ACU('fill-mode');
+      }
   } catch (error) {
       logWarn_ACU('[设置加载] 从酒馆设置重新加载失败，保存门禁保持关闭。', error);
   }
@@ -726,6 +742,9 @@ function loadSettingsFromStorage_ACU(): void {
 
       settingsStorageReadyForSave_ACU = true;
       settingsReadFailure_ACU = null;
+      if (!pendingSettingsReloadFromIdb_ACU && !settingsReloadAfterBridgeScheduled_ACU) {
+          setSettingsDeferredLoadPending_ACU(false);
+      }
 
       // [交火模式配置] 权威配置存放在 globalMeta.vectorMemoryConfigGlobal（跨 profile 全局）。
       // settings_ACU.vectorMemoryConfig 只保留为运行时投影，兼容旧调用方。

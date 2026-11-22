@@ -2,7 +2,7 @@
   <div class="acu-viz-table-management" data-acu-visualizer-table-management>
     <AcuPanel
       title="表格管理"
-      description="用于调整整套数据库里的表格顺序、新增和删除。改动只进入编辑器草稿，保存前不会写回当前聊天或全局模板；如果误删了表格，可以在保存前取消关闭或重新载入。"
+      description="调整表格顺序、新增或删除表格。保存前仅在草稿中生效，误删可在保存前取消关闭或重新载入。"
     >
       <template #actions>
         <AcuBadge variant="neutral">{{ sheetItems.length }} 张表</AcuBadge>

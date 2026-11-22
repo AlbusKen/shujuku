@@ -5,6 +5,7 @@
  */
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { notifyChatConfigurationChanged_ACU } from '../../shared/chat-configuration-change';
+import { isSettingsDeferredLoadPending_ACU } from '../../shared/settings-load-readiness';
 import { currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import {
   enableFlightMode_ACU,
@@ -68,6 +69,9 @@ export function getClassicReadinessForCurrentChat_ACU(): ClassicReadiness_ACU {
 
 async function runReconcile_ACU(scopeKey: string, options: ReconcileFillModeOptions_ACU): Promise<ReconcileFillModeResult_ACU> {
   if (resolveCurrentChatFillMode_ACU().recordStatus === 'no_chat') return { record: null, readiness: { status: 'not_classic' } };
+  if (isSettingsDeferredLoadPending_ACU()) {
+    return { record: null, readiness: getClassicReadinessForCurrentChat_ACU() };
+  }
   if (!options.tableLoaded) {
     setReadiness_ACU(scopeKey, { status: 'pending', reason: 'table_not_loaded' });
     return { record: null, readiness: getClassicReadinessForCurrentChat_ACU() };

@@ -69,7 +69,7 @@ describe('DanglingReferenceBanner', () => {
     const el = await mountBanner('api');
     expect(el.textContent).toContain('API 预设');
     expect(el.textContent).toContain('填表 API 预设「ghost」已不存在');
-    expect(el.textContent).toContain('不会自动改写已保存的设置');
+    expect(el.textContent).toContain('不会自动改动原设置');
 
     const button = Array.from(el.querySelectorAll('button')).find(btn => btn.textContent?.includes('清除引用'));
     expect(button).toBeTruthy();

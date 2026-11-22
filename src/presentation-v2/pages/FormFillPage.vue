@@ -91,7 +91,7 @@
         <div class="acu-v2-form-fill-page__number-grid">
           <AcuFormRow
             label="手动处理最近 N 层"
-            hint="从可用 AI 回复中取最近 N 层执行手动填表。"
+            hint="取最近 N 层 AI 回复执行手动填表。"
           >
             <AcuInput
               type="number"
@@ -104,7 +104,7 @@
 
           <AcuFormRow
             label="每 N 条 AI 回复合并为一次填表"
-            hint="每次把多少条 AI 回复合并成一次填表。"
+            hint="每次把多少条 AI 回复打包成一次填表。"
           >
             <AcuInput
               type="number"
@@ -135,7 +135,7 @@
         <AcuFormRow
           class="acu-v2-form-fill-page__manual-extra"
           label="本次填表附加要求"
-          hint="留空时不会给本次手动填表追加额外要求。"
+          hint="留空时不追加额外要求。"
         >
           <AcuTextarea
             :model-value="manualUpdate.manualExtraHint.value"
@@ -227,7 +227,7 @@
           <div class="acu-v2-form-fill-page__filter">
             <AcuFormRow
               label="丢弃纯越权 SQL 语句"
-              hint="默认开启。仅丢弃可证明只影响非目标表的独立 SQL；跨目标表或无法归属的语句仍会拒绝并重试。"
+              hint="默认开启。AI 多改了非目标表的内容时自动丢弃，避免整次重试。"
             >
               <AcuToggle
                 :model-value="settings.discardUnauthorizedTableEditsEnabled.value"
@@ -239,7 +239,7 @@
 
             <AcuFormRow
               label="仅识别最后一对 &lt;tableEdit&gt; 标签"
-              hint="默认开启，用于忽略前面思维链或草稿里的旧指令。"
+              hint="默认开启，自动忽略前面思考过程或草稿里的旧指令。"
             >
               <AcuToggle
                 :model-value="settings.tableEditLastPairOnly.value"

@@ -1,6 +1,6 @@
 <template>
   <section class="acu-v2-world-simulation-page">
-    <AcuPanel title="Agent 会话" description="像和 coding agent 对话一样使用：随时输入、随时打断。主 Agent 按需派工子代理取证与改写，最终账本经审核后严格写入任务开始时冻结的 assistant 楼层；正文生成完成后也会自动推演一次。">
+    <AcuPanel title="Agent 会话" description="随时可输入或打断。主 Agent 派子代理取证和更新账本，审核后写入对应 AI 楼层；每次正文生成完也会自动推演一次。">
       <p v-if="runtime.error.value" class="acu-v2-world-simulation-page__error">
         {{ runtime.error.value }}
         <AcuButton size="sm" @click="refreshAll">重新读取</AcuButton>
@@ -26,7 +26,7 @@
 
     <!-- 会话独占整宽，资料与设置并列在其下：会话是主操作面，资料与设置是查阅面。 -->
     <AcuPanelGrid class="acu-v2-world-simulation-page__layout">
-      <AcuPanel title="已有资料" description="当前分支的用户要求、账本总览、幕后纪要、错过清单、风声、候选轨迹、场外信号与读取诊断；用户要求可在资料区手动修正，账本只由 Agent 经审核后写入。一键清空只丢任务、会话记录与楼层资料快照，不动正文。">
+      <AcuPanel title="已有资料" description="查看当前剧情的账本、幕后纪要、错过清单、风声和场外信号。用户要求可手动改，账本只由 Agent 审核后写入；一键清空不动正文。">
         <WorldSimulationMaterialsPanel
           v-if="runtime.ready.value && runtime.snapshot.value"
           :save-requirements="runtime.saveUserRequirements"
@@ -48,10 +48,10 @@
 
       <AcuPanel v-if="settingsDraft" title="推演设置" description="修改后自动保存；任务运行中也可以改，改动会在本轮结束后落盘、下一轮开始时生效。常用项直接可见，其余参数按主题折叠。">
         <div class="acu-v2-world-simulation-page__settings-grid">
-          <AcuFormRow label="使用工具调用" hint="开启后决策与交付都通过函数调用完成；部分渠道不支持 tools 字段会报错。全局生效，不随对话保存。">
+          <AcuFormRow label="使用工具调用" hint="开启后改用工具调用完成决策与交付；部分渠道不支持会报错。全局生效。">
             <AcuToggle :model-value="runtime.nativeToolEnabled.value" aria-label="使用工具调用" @update:model-value="runtime.setNativeToolEnabled($event)" />
           </AcuFormRow>
-          <AcuFormRow label="API 预设（全局默认）" hint="所有 Agent 默认走这个预设；需要给某个 Agent 单独指定时，展开下方「各 Agent 渠道」。需要工具的 Agent 须使用 Chat Completion 类连接：自定义 API、Chat Completion 酒馆连接预设或 Chat Completion 主连接均可；Text Completion 连接无法返回工具调用。">
+          <AcuFormRow label="API 预设（全局默认）" hint="所有 Agent 默认用这套 API 预设；需单独指定请展开下方“各 Agent 渠道”。需要工具的 Agent 必须用对话补全类连接，纯文本补全连接不支持工具调用。">
             <AcuSelect
               :options="apiPresetOptions"
               :model-value="apiPresetValue"
@@ -113,14 +113,14 @@
             body-id="acu-world-simulation-group-web-research"
             @toggle="toggleGroup('webResearch')"
           >
-            <p class="acu-v2-world-simulation-page__meta">开启后，主 Agent 在本地证据不足时可直接使用网页检索与百科读取补充公开设定资料；研究结果只作证据，不直接写入世界账本。</p>
+            <p class="acu-v2-world-simulation-page__meta">开启后，本地资料不足时主 Agent 可上网查百科补充证据，但不直接写入账本。</p>
             <div class="acu-v2-world-simulation-page__toggles">
               <AcuCheckbox v-model="settingsDraft.webResearch.sources.moegirl" label="萌娘百科" />
               <AcuCheckbox v-model="settingsDraft.webResearch.sources.wikipediaZh" label="中文维基百科" />
               <AcuCheckbox v-model="settingsDraft.webResearch.sources.wikipediaEn" label="英文维基百科" />
             </div>
             <div class="acu-v2-world-simulation-page__settings-grid">
-              <AcuFormRow label="搜索引擎" hint="百科查不到时的兜底搜索。DuckDuckGo 免 key；Serper / Tavily 使用酒馆「API 密钥」里已配置的 key；SearXNG 需填实例地址。">
+              <AcuFormRow label="搜索引擎" hint="百科查不到时的备用搜索。DuckDuckGo 免密钥；Serper / Tavily 用酒馆里配好的密钥；SearXNG 需填网址。">
                 <AcuSelect v-model="settingsDraft.webResearch.searchProvider" :options="webSearchProviderOptions" />
               </AcuFormRow>
               <AcuFormRow v-if="settingsDraft.webResearch.searchProvider === 'searxng'" label="SearXNG 实例地址" hint="形如 https://searx.example.org">
@@ -143,15 +143,15 @@
             body-id="acu-world-simulation-group-dynamics"
             @toggle="toggleGroup('dynamics')"
           >
-            <p class="acu-v2-world-simulation-page__meta">控制风声时效、时序推进上限、碰撞兑现与过期清扫；改动在下一轮推演生效。</p>
+            <p class="acu-v2-world-simulation-page__meta">控制风声保留天数、时间推进上限和事件触发规则，改动下一轮生效。</p>
             <div class="acu-v2-world-simulation-page__settings-grid">
-              <AcuFormRow label="风声等待上限（天）" hint="风声进入待命后，等待玩家命中传播渠道的天数上限。范围 1–3650。">
+              <AcuFormRow label="风声等待上限（天）" hint="风声放出后最多等待几天被主角得知，超时作废，范围 1–3650。">
                 <AcuInput v-model="settingsDraft.dynamics.rumorTTLDays" type="number" :min="1" :max="3650" />
               </AcuFormRow>
-              <AcuFormRow label="单次时钟推进上限（世界日）" hint="一次提交允许推进的天数；超过则必须附带证据。范围 0–3650。">
+              <AcuFormRow label="单次时钟推进上限（世界日）" hint="单次推演最多允许推进的天数，超过必须有正文依据，范围 0–3650。">
                 <AcuInput v-model="settingsDraft.dynamics.maxClockAdvanceDays" type="number" :min="0" :max="3650" />
               </AcuFormRow>
-              <AcuFormRow label="碰撞兑现策略" hint="严格：撞上必须有当场反应，模型没写时由程序补一条最简引导，不拒绝提交。宽松：只记警告。">
+              <AcuFormRow label="碰撞兑现策略" hint="严格：事件撞上必须有当场反应，模型没写由程序补一条简短引导；宽松：只记警告。">
                 <AcuSelect v-model="settingsDraft.dynamics.collisionEnforcement" :options="collisionEnforcementOptions" />
               </AcuFormRow>
             </div>
@@ -168,8 +168,8 @@
             body-id="acu-world-simulation-group-projection"
             @toggle="toggleGroup('projection')"
           >
-            <p class="acu-v2-world-simulation-page__meta">提交时按这个格式把场外信号写进冻结的 assistant 楼层。$WORLD_SIGNALS 会换成按【此地此刻】【风闻轶事】【世界暗流】分组的信号；插件用来识别和替换这一段的起止注释会自动加在最外层，不用写进格式里。改动在下一次提交时生效。</p>
-            <AcuFormRow label="插入格式" hint="必须恰好包含一次 $WORLD_SIGNALS，最多 4000 字。默认用隐藏容器包住〈与此同时〉，正文渲染时对读者隐藏。插入后会自动重渲染该楼层。">
+            <p class="acu-v2-world-simulation-page__meta">设置场外信号写入 AI 楼层的格式。$WORLD_SIGNALS 会自动替换成分组好的信号内容，起止标记会自动加，不用手写；下次提交生效。</p>
+            <AcuFormRow label="插入格式" hint="必须恰好包含一次 $WORLD_SIGNALS，最多 4000 字。默认隐藏显示，写入后自动刷新该楼层。">
               <AcuTextarea v-model="settingsDraft.projection.template" :rows="6" />
             </AcuFormRow>
             <div class="acu-v2-world-simulation-page__toggles">
@@ -185,9 +185,9 @@
             body-id="acu-world-simulation-group-workflow"
             @toggle="toggleGroup('workflow')"
           >
-            <p class="acu-v2-world-simulation-page__meta">固定工作流批次一并发处理时序、局势刻度与伏线，以及人物谱；批次二按变化处理幕后纪要、风声与场外信号。这里只改纪要热层阈值；提示词仍在下方各角色分组里改。</p>
+            <p class="acu-v2-world-simulation-page__meta">工作流分两批自动跑：第一批处理时间、局势、伏线和人物谱；第二批处理幕后纪要、风声和场外信号。这里只改纪要归档条数，提示词在下方改。</p>
             <div class="acu-v2-world-simulation-page__settings-grid">
-              <AcuFormRow label="纪要热层阈值" hint="热层纪要达到这个条数时，批次二由纪要角色处理归档。范围 1–512。">
+              <AcuFormRow label="纪要热层阈值" hint="近期幕后纪要达到这个条数时自动归档，范围 1–512。">
                 <AcuInput v-model="settingsDraft.workflow.chroniclerHotThreshold" type="number" :min="1" :max="512" />
               </AcuFormRow>
             </div>
@@ -219,7 +219,7 @@
       </AcuPanel>
     </AcuPanelGrid>
 
-    <AcuPanel v-if="settingsDraft" title="伪 Role 提示词" description="仅启用段参与内部调用；占位符会按实际出现按需解析。引擎 seam 段固定顺序与角色、不可删除，其余段可自由增删改。修改后自动保存。">
+    <AcuPanel v-if="settingsDraft" title="伪 Role 提示词" description="仅启用的段落生效；系统固定段不可删除，其余段可自由增删改，修改后自动保存。">
       <div class="acu-v2-world-simulation-page__actions acu-v2-world-simulation-page__actions--start">
         <AcuButton @click="exportPrompts">导出提示词 JSON</AcuButton>
         <AcuButton @click="promptImportInput?.click()">导入提示词 JSON</AcuButton>
@@ -262,7 +262,7 @@
           @toggle="toggleGroup('prompt:reference')"
         >
           <h4 class="acu-v2-world-simulation-page__subheading">引擎 seam 段</h4>
-          <p class="acu-v2-world-simulation-page__meta">默认顺序为身份 system、格式问答、方法与流程问答、运行快照、真实会话历史、user 预填充。格式回答只读，随「使用工具调用」切换；快照模板可编辑，动态资料在此注入。快照与历史卡可上下移动，历史按真实身份展开。</p>
+          <p class="acu-v2-world-simulation-page__meta">提示词段的默认排列顺序。格式段只读并随工具开关切换；快照模板可编辑；快照与历史卡片可上下拖动排序。</p>
           <h4 class="acu-v2-world-simulation-page__subheading">格林推演占位符</h4>
           <p class="acu-v2-world-simulation-page__meta">运行装配占位符：$WORLD_TASK（当前任务）、$WORLD_HISTORY（楼层锚定的 Agent 会话历史）、$WORLD_RUNTIME_CONTEXT（触发种类、指令与基准账本 revision）、$WORLD_AGENT_CATALOG（可派工角色与职责）、$WORLD_TOOL_CATALOG（read/search 地址词汇表）、$WORLD_EVIDENCE（已授权证据条目）、$WORLD_USER_REQUIREMENTS（用户累计要求，默认注入）、$WORLD_USER_GUIDANCE（用户本轮指令，自定义段仍可用）。世界领域占位符：$WORLD_STATE（当前世界账本）、$ANCHOR_MESSAGE（冻结 assistant 楼层正文）、$ANCHOR_IDENTITY（楼层 / swipe / 正文摘要身份）、$WORLD_STAGE_PLAN（本轮阶段计划）、$WORLD_CHRONICLE（宏观编年）、$WORLD_CANDIDATES（本轮候选摘要）、$CURRENT_EVIDENCE_REGISTRY（证据注册表快照）、$PROJECTION_PREVIEW（〈与此同时〉投影预览）。所有动态内容都以转义后的 UNTRUSTED_* 区块注入，只有提示词里实际出现的占位符才会被解析；未知占位符会在保存时被拒绝。</p>
         </AcuDisclosureGroup>
@@ -435,7 +435,7 @@ function cloneSettings(settings: WorldSimulationSettings_ACU): WorldSimulationSe
 async function confirmFirstSendRpmWarning(): Promise<boolean> {
   return dialog.confirm({
     title: '开始格林推演前请确认',
-    message: '本功能单次请求占用的 Token 不多，但 Agent 会连续发起大量请求，需要 API 支持很高的 RPM（每分钟请求数）。开启「自动推演」后每次正文生成完成都会再跑一轮。',
+    message: '此功能单次消耗 Token 不多，但会连续发起大量请求，需要 API 每分钟请求上限较高。开启“自动推演”后每次正文生成完都会自动跑一轮。',
     dangerMessage: '禁止使用任何公益站，除非它明确表示允许 coding（本功能的请求模式与 coding 类似）。违规使用可能导致账号被封禁。',
     confirmLabel: '我已了解，开始',
     cancelLabel: '取消',

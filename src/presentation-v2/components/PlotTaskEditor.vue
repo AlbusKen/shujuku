@@ -11,7 +11,7 @@
             @change="patch({ name: String($event) })"
           />
         </AcuFormRow>
-        <AcuFormRow label="阶段号" hint="同阶段并发，跨阶段串行">
+        <AcuFormRow label="阶段号" hint="阶段号相同的同时跑，阶段号小的跑完再跑大的。">
           <AcuInput
             type="number"
             :min="1"
@@ -42,7 +42,7 @@
       <div class="acu-v2-plot-task-editor__grid">
         <AcuFormRow
           label="标签摘取"
-          hint="例如 recall,supplement，仅作用于本任务"
+          hint="例如 recall,supplement，仅对当前任务生效。"
         >
           <AcuInput
             type="text"
@@ -50,14 +50,14 @@
             @change="patch({ extractTags: String($event) })"
           />
         </AcuFormRow>
-        <AcuFormRow label="提取写入标签" hint="优先级高于标签摘取；留空不追加">
+        <AcuFormRow label="提取写入标签" hint="优先级高于标签提取，留空不追加。">
           <AcuInput
             type="text"
             :model-value="task.extractInjectTags"
             @change="patch({ extractInjectTags: String($event) })"
           />
         </AcuFormRow>
-        <AcuFormRow label="最小回复长度" hint="少于此长度自动重试">
+        <AcuFormRow label="最小回复长度" hint="回复少于此字符长度时自动重试。">
           <AcuInput
             type="number"
             :min="0"
@@ -74,12 +74,12 @@
     <fieldset class="acu-v2-plot-task-editor__section">
       <legend>Agent 任务控制</legend>
       <p class="acu-v2-plot-task-editor__hint">
-        描述和触发条件会作为 agent模式判断任务是否执行、是否串联以及先后顺序的依据。全部留空且未启用 Agent 控制时，仍按原启用状态、阶段号和顺序执行。
+        下面填写的描述和触发条件，供 Agent 判断要不要跑这个任务、按什么顺序跑。留空则按原阶段号和顺序执行。
       </p>
       <div class="acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide">
         <AcuFormRow
           label="任务描述"
-          hint="说明这个推进任务负责什么。留空时不参与 Agent Skill 判断。"
+          hint="写明这个任务负责什么；留空时 Agent 不会自动选用它。"
         >
           <AcuTextarea
             :model-value="task.description"
@@ -92,7 +92,7 @@
         </AcuFormRow>
         <AcuFormRow
           label="触发条件"
-          hint="说明什么情况下应执行该任务。留空时保持原逻辑。"
+          hint="写明什么情况下触发这个任务；留空则按原规则。"
         >
           <AcuTextarea
             :model-value="task.triggerWhen"
@@ -134,7 +134,7 @@
       </div>
 
       <div class="acu-v2-plot-task-editor__grid">
-        <AcuFormRow label="偏好阶段" hint="Agent 排序参考；留空则不指定。">
+        <AcuFormRow label="偏好阶段" hint="供 Agent 排顺序参考，留空不指定。">
           <AcuInput
             type="number"
             :min="1"
@@ -143,7 +143,7 @@
             @change="patchAgentControl({ preferredStage: parseOptionalPositiveInteger($event) })"
           />
         </AcuFormRow>
-        <AcuFormRow label="偏好顺序" hint="阶段内排序参考；留空则不指定。">
+        <AcuFormRow label="偏好顺序" hint="同阶段内的先后顺序参考，留空不指定。">
           <AcuInput
             type="number"
             :min="0"
@@ -157,7 +157,7 @@
       <div class="acu-v2-plot-task-editor__grid acu-v2-plot-task-editor__grid--wide">
         <AcuFormRow
           label="依赖任务 ID"
-          hint="逗号分隔。Agent 排序时应先执行这些任务；非法或循环依赖会在运行时校验。"
+          hint="逗号分隔，填写必须排在当前任务之前执行的任务名。"
         >
           <AcuInput
             type="text"
@@ -168,7 +168,7 @@
         </AcuFormRow>
         <AcuFormRow
           label="阻塞任务 ID"
-          hint="逗号分隔。用于提示 Agent 此任务与哪些任务不应同时执行。"
+          hint="逗号分隔，填写不应与当前任务同时执行的任务名。"
         >
           <AcuInput
             type="text"
@@ -184,7 +184,7 @@
       <legend>当前任务使用的 API</legend>
       <AcuFormRow
         label="API 预设"
-        hint="单独为当前任务选择API预设，默认继承剧情推进页。优先级：任务 > 剧情推进页 > 活动 API。全局保存，不写入预设。"
+        hint="单独给当前任务选 API 预设，不选则跟随剧情推进页。仅本地保存，不随预设导出。"
       >
         <AcuSelect
           :options="taskApiSelectOptions"

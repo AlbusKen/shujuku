@@ -22,6 +22,7 @@ import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { useApiPresetStore } from '../stores/api-preset-store';
 import { usePlotPresetStore } from '../stores/plot-preset-store';
 import { useImportFlowStore } from '../stores/import-flow-store';
+import { useFormFillModeStore } from '../stores/form-fill-mode-store';
 
 /** 模块级响应式计数器，每次 CHAT_CHANGED 延迟刷新完成后 +1。 */
 const chatChangedTick = ref(0);
@@ -83,6 +84,7 @@ export function useChatChangedListener(): void {
       usePlotPresetStore().refreshFromSettings();
       useApiPresetStore().refreshFromSettings();
       useImportFlowStore().refreshFromSettings();
+      useFormFillModeStore().refresh();
     } catch (e) {
       logWarn_ACU('[ACU-V2] CHAT_CHANGED 刷新 store 异常', e);
     }

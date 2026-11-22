@@ -5,7 +5,7 @@ import { stopLoopState_ACU } from '../../service/loop/loop-controller';
 // 从 05_core_tail.js 迁入
 
 import { cancelPendingChatMutationRefresh_ACU, flushChatMutationRefresh_ACU, scheduleChatMutationRefresh_ACU } from './chat-mutation-scheduler';
-import { installHostEventWaitGate_ACU, installPlotSendEventGate_ACU, redirectPlotSendEvent_ACU } from './plot-send-event-gate';
+import { installHostEventWaitGate_ACU, installPlotSendEventGate_ACU, redirectPlotSendEvent_ACU, shouldBypassGenerateAfterDataWaitGate_ACU } from './plot-send-event-gate';
 import { PassiveCompletionReceiver_ACU } from './passive-completion-receiver';
 import { runWithAbortSignal_ACU } from '../../shared/abort-signal';
 import { installZeroLayerBootstrap_ACU } from './zero-layer-bootstrap';
@@ -15,7 +15,7 @@ import { attemptToLoadCoreApis_ACU } from '../triggers/settings-ui-sync/settings
 import { formatHostCapabilities_ACU, getLastHostCapabilities_ACU } from '../../shared/host-compat/tavern-helper-compat';
 import { ensureInitialSeedCheckpoint_ACU, handleChatCompletionReady_ACU, loadPresetAndCleanCharacterData_ACU } from '../../service/runtime/helpers-remaining';
 import { SillyTavern_API_ACU, type ACUMessage } from '../../shared/host-api';
-import { consumeGenerationContextForEnded_ACU, currentChatFileIdentifier_ACU, discardLatestGenerationContext_ACU, generationGate_ACU, getCurrentIsolationKey_ACU, markUserSendIntent_ACU, isProcessing_Plot_ACU, isQuietLikeGeneration_ACU, isRecentUserSendIntent_ACU, loopState_ACU, recordGenerationContext_ACU, recordLastUserSend_ACU, settings_ACU, evaluatePlotForGeneration_ACU, shouldProcessPlotForGeneration_ACU, shouldProcessSummaryVectorIndexForGeneration_ACU, _set_allChatMessages_ACU, _set_currentChatFileIdentifier_ACU, _set_currentJsonTableData_ACU, _set_independentTableStates_ACU, _set_lastTotalAiMessages_ACU, _set_tempPlotToSave_ACU, _set_wasStoppedByUser_ACU} from '../../service/runtime/state-manager';
+import { consumeGenerationContextForEnded_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, discardLatestGenerationContext_ACU, generationGate_ACU, getCurrentIsolationKey_ACU, markUserSendIntent_ACU, isProcessing_Plot_ACU, isQuietLikeGeneration_ACU, isRecentUserSendIntent_ACU, loopState_ACU, recordGenerationContext_ACU, recordLastUserSend_ACU, settings_ACU, evaluatePlotForGeneration_ACU, shouldProcessPlotForGeneration_ACU, shouldProcessSummaryVectorIndexForGeneration_ACU, _set_allChatMessages_ACU, _set_currentChatFileIdentifier_ACU, _set_currentJsonTableData_ACU, _set_independentTableStates_ACU, _set_lastTotalAiMessages_ACU, _set_tempPlotToSave_ACU, _set_wasStoppedByUser_ACU} from '../../service/runtime/state-manager';
 import { applyTemplateScopeForCurrentChat_ACU, loadSettings_ACU } from '../../service/settings/settings-service';
 import { resetScriptStateForNewChat_ACU } from '../../service/worldbook/injection-engine';
 import { resetPlotAgentWorldbookSessionSnapshot_ACU } from '../../service/agent/agent-worldbook-takeover';
@@ -66,6 +66,7 @@ import { bindWorldSimulationInternalAiGenerationStarted_ACU, consumeWorldSimulat
 import { createWorldSimulationCompletionIntentForCurrentChat_ACU, getWorldSimulationRuntime_ACU } from '../../service/simulation/simulation-runtime';
 import { reconcileCurrentChatFillModeOnOpen_ACU } from '../../service/fill-mode/fill-mode-reconcile';
 import { getVectorPipelinePlanForCurrentChat_ACU, isVectorPipelineEnabledForCurrentChat_ACU } from '../../service/fill-mode/fill-mode-gate';
+import { subscribeSettingsDeferredLoadSettled_ACU } from '../../shared/settings-load-readiness';
 
 /** 零层占用（未完成退出桥接或保存未知）的聊天：物理前缀已冻结为桥接基线，普通自动填表不能写入。 */
 function isZeroLayerOwnedChat_ACU(): boolean {
@@ -182,6 +183,9 @@ export   function mainInitialize_ACU() {
       // Register the bridge before generation events are subscribed. Runtime
       // migration remains page-owned so no chat persistence is touched at startup.
       getContinuationRuntime_ACU();
+      // 新开对话时若角色卡无开场白（chat 为空），CHAT_CHANGED / 初始加载阶段无法补记填表模式；
+      // 记录此标识，待首条消息入楼后补跑填表模式对账，避免首轮填表后被误判为旧会话。
+      let pendingEmptyChatFillModeReconcileId = '';
       if (
         SillyTavern_API_ACU &&
         SillyTavern_API_ACU.eventSource &&
@@ -218,6 +222,12 @@ export   function mainInitialize_ACU() {
         } | null = null;
         // 最近一次开始/结束的生命周期身份，用于区分嵌套 quiet 的停止与正文停止。
         let autoFillStopCandidateSeq: number | undefined;
+        subscribeSettingsDeferredLoadSettled_ACU(() => {
+          if (!hasActiveChatMessages_ACU() || !currentJsonTableData_ACU || typeof currentJsonTableData_ACU !== 'object') return;
+          void reconcileCurrentChatFillModeOnOpen_ACU({ tableLoaded: true }).catch((reconcileError) => {
+            logWarn_ACU('[填表模式] 设置延迟加载完成后补记填表模式异常:', reconcileError);
+          });
+        });
 
         // [调试] 检查可用的事件类型
         logDebug_ACU('[提示词模板] 可用的事件类型:', Object.keys(SillyTavern_API_ACU.eventTypes));
@@ -282,6 +292,7 @@ export   function mainInitialize_ACU() {
           nativeSwipeTableIntent = null;
           swipeWorldbookRequest = null;
           autoFillStopCandidateSeq = undefined;
+          pendingEmptyChatFillModeReconcileId = '';
           cancelPendingAutoFillEvent_ACU();
           cancelPendingContentOptimizationEvent_ACU();
           logDebug_ACU(`ACU CHAT_CHANGED event: ${chatFileName}`);
@@ -426,6 +437,9 @@ export   function mainInitialize_ACU() {
 
              if (!hasActiveChatMessages_ACU()) {
                  clearRuntimeForNoActiveChat_ACU(chatFileName);
+                 if (hasValidChatFileName_ACU && scheduledChatIdentifier_ACU) {
+                     pendingEmptyChatFillModeReconcileId = scheduledChatIdentifier_ACU;
+                 }
                  notifyChatRuntimeReloaded_ACU(chatFileName);
                  return;
              }
@@ -567,6 +581,28 @@ export   function mainInitialize_ACU() {
             try {
               recordLastUserSend_ACU(messageId);
             } catch (e) {}
+            if (pendingEmptyChatFillModeReconcileId && hasActiveChatMessages_ACU()) {
+              const targetEmptyChatId = pendingEmptyChatFillModeReconcileId;
+              pendingEmptyChatFillModeReconcileId = '';
+              void (async () => {
+                try {
+                  const activeHostChatId = cleanChatName_ACU(String(SillyTavern_API_ACU?.chatId || ''));
+                  if (activeHostChatId && activeHostChatId !== targetEmptyChatId) return;
+                  if (!currentChatFileIdentifier_ACU && (activeHostChatId || targetEmptyChatId)) {
+                    _set_currentChatFileIdentifier_ACU(activeHostChatId || targetEmptyChatId);
+                  }
+                  const hasTableData = !!currentJsonTableData_ACU && typeof currentJsonTableData_ACU === 'object';
+                  let tableLoaded = hasTableData;
+                  if (!hasTableData) {
+                    const refreshed = await refreshMergedDataAndNotifyWithUI_ACU();
+                    tableLoaded = !!refreshed && !refreshed.degraded;
+                  }
+                  await reconcileCurrentChatFillModeOnOpen_ACU({ tableLoaded });
+                } catch (reconcileError) {
+                  logWarn_ACU('[填表模式] 空开场白新对话首楼补记填表模式异常:', reconcileError);
+                }
+              })();
+            }
             // 宿主真实入楼后补写；不依赖伪装期间启动的短轮询是否已耗尽。
             // 宿主 eventSource.emit 对监听器逐个 await，addOneMessage 在其后：本监听器不返回，
             // 用户楼渲染与正文请求整条链冻结。补写经宿主串行保存队列提交，队列挂起时永不返回，
@@ -924,9 +960,9 @@ export   function mainInitialize_ACU() {
             });
           }
           if (SillyTavern_API_ACU.eventTypes.GENERATE_AFTER_DATA) {
-            installHostEventWaitGate_ACU(source, SillyTavern_API_ACU.eventTypes.GENERATE_AFTER_DATA, async (_data: unknown, dryRun: boolean) => {
+            installHostEventWaitGate_ACU(source, SillyTavern_API_ACU.eventTypes.GENERATE_AFTER_DATA, async (data: unknown, dryRun: boolean) => {
               const send = vectorGenerationSend;
-              if (!send || dryRun) return;
+              if (!send || dryRun || shouldBypassGenerateAfterDataWaitGate_ACU(data)) return;
               try {
                 assertVectorSend(send);
                 if (pendingVectorSend === send || activeVectorWait === send) {
@@ -1280,12 +1316,28 @@ export   function mainInitialize_ACU() {
               }
           }
 
+          // 初始加载（未走 CHAT_CHANGED）同样须执行填表模式对账，避免新对话首轮写表后被误判为旧会话。
+          const expectedInitChatId = cleanChatName_ACU(chatId);
+          if (hasActiveChatMessages_ACU() && (!expectedInitChatId || currentChatFileIdentifier_ACU === expectedInitChatId)) {
+              try {
+                  const reconciled = await reconcileCurrentChatFillModeOnOpen_ACU({ tableLoaded: !!refreshResult && !refreshResult.degraded });
+                  if (reconciled.record && 'reason' in reconciled.record && reconciled.record.reason === 'save_failed') {
+                      logWarn_ACU(`[填表模式] 初始加载对话填表模式记录保存失败，下次打开对话重试: ${reconciled.record.error || 'unknown'}`);
+                  }
+              } catch (reconcileError) {
+                  logWarn_ACU('[填表模式] 初始加载的填表模式协调异常:', reconcileError);
+              }
+          } else if (!hasActiveChatMessages_ACU() && expectedInitChatId) {
+              pendingEmptyChatFillModeReconcileId = expectedInitChatId;
+          }
+
           // S0-4：初始加载完成后捕获 checkpoint 保管库（删楼恢复的影子基线）。
           try {
               captureCheckpointVaultForCurrentChat_ACU();
           } catch (e: any) {
               logWarn_ACU(`[删楼守卫] initWithChatId 保管库捕获失败: ${e?.message}`);
           }
+          notifyChatRuntimeReloaded_ACU(chatId);
       };
 
       // C5 加载失败可见化：初始加载与 CHAT_CHANGED 同级兜底，不允许静默空表。

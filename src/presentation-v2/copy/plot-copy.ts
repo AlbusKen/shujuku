@@ -6,31 +6,31 @@ export const plotCopy = {
     title: "剧情推进",
     description: "LLM模型逻辑召回模式与交火模式依赖剧情推进在正文生成前分析记忆。关闭后保留表格召回，不再执行剧情规划。",
     enableLabel: "启用剧情推进",
-    enableHint: "关闭后不再在正文生成前额外调用 LLM；当前模式的其余召回行为不变。",
+    enableHint: "关闭后写正文前不再额外调用 AI，其它记忆功能不变。",
     disguiseDisabledLabel: "解除发送伪装",
-    disguiseDisabledHint: "默认关闭。开启后原文留在输入框等待剧情 AI 返回，不显示临时楼层或生成中外观。此开关只改变等待外观：任务成功后由酒馆继续发送，最终失败或手动终止均停止正文发送。",
+    disguiseDisabledHint: "默认关闭。开启后你发的话会留在输入框里等剧情推进跑完再发，不显示临时楼层；失败或手动终止则取消发送。",
   },
   panels: {
     preset: {
       title: "剧情推进预设",
       description:
-        "下拉框切换当前的预设，星标设为全局默认。点击按钮，可导入新预设、管理全部预设。内置默认预设无法修改，请使用「从默认新建」。预设包含多个独立任务，支持并发或串行。",
+        "下拉框切换剧情推进预设，点星标设为全局默认。内置默认预设不能直接改，请用“从默认新建”。一套预设可包含多个任务，支持同时或按顺序运行。",
     },
     worldbook: {
       title: "剧情推进世界书",
       description:
-        "剧情推进参考的世界书条目。默认跟随角色卡主世界书，也可手动指定。Agent 模式会在运行时过滤提示词模板中的世界书条目，由 Agent 决策剧情、填表与正文通道的放行条目。",
+        "剧情推进参考的世界书，默认跟随角色卡主世界书，也可手动指定。开启 Agent 模式后，由 Agent 决定放行哪些世界书条目。",
     },
   },
   worldbook: {
     emptyDefault: "所选世界书中无可显示的条目。",
     emptyCharacter:
-      "未解析到角色卡世界书。打开聊天后会显示条目；也可手动选择一本。",
+      "未找到角色卡世界书。打开聊天后会显示条目，也可手动选一本。",
     emptyManual: "请先选择一本世界书。",
   },
   agentControl: {
     title: "Agent 世界书总控",
-    description: "切换 Agent 世界书模式；Agent 模式会在剧情推进时接管世界书条目的放行与过滤，清理并初始化会恢复快照并关闭 Agent 模式。",
+    description: "切换 Agent 接管状态。开启后由 Agent 决定放行哪些世界书条目；点“清理并初始化”会还原世界书并关闭接管。",
     modes: { disabled: "关闭", passive: "仅观察", agent: "Agent 接管" },
     modeChanged: {
       disabled: "Agent 世界书模式已关闭。",
@@ -58,16 +58,16 @@ export const plotCopy = {
     },
     apiPresets: {
       decisionLabel: "Agent 决策 API",
-      decisionHint: "用于 Agent 判断世界书条目是否应启用；留空则使用当前 API 配置。",
+      decisionHint: "供 Agent 挑选世界书条目使用的 API，留空则用当前 API。",
       skillLabel: "Agent Skill 化 API",
-      skillHint: "用于一键生成世界书 Skill 元数据；留空则使用当前 API 配置。",
+      skillHint: "供“一键 Skill 化”生成条目简介使用的 API，留空则用当前 API。",
       followCurrentLabel: "使用当前 API 配置",
     },
     restore: {
       button: "清理并初始化",
       confirm: {
         title: "清理并初始化 Agent 世界书状态",
-        message: "将先按快照恢复被 Agent 改写的世界书条目状态，关闭 Agent 模式，然后删除 Agent 快照/设置内部条目。下次使用时会重新初始化。",
+        message: "恢复被 Agent 改过的世界书条目，关闭 Agent 模式，并清掉内部记录，下次使用会重新初始化。",
         confirmLabel: "确认清理并初始化",
         cancelLabel: "取消",
       },
@@ -87,7 +87,7 @@ export const plotCopy = {
       button: "一键 Skill 化",
       confirm: {
         title: "一键生成 Skill 元数据",
-        message: "将调用配置的 Agent Skill API，为当前世界书范围内可处理条目生成描述与触发时机。已有 Skill 元数据的条目会自动跳过，无论这些数据来自 AI 生成还是用户手动编辑。",
+        message: "调用 API 为勾选的世界书条目批量生成用途说明和触发时机，已写过的条目会自动跳过。",
         confirmLabel: "开始生成",
         cancelLabel: "取消",
       },
@@ -101,7 +101,7 @@ export const plotCopy = {
       button: "清除 Skill 化",
       confirm: {
         title: "清除世界书 Skill 元数据",
-        message: "将删除当前 Agent 世界书范围内条目的 Skill 元数据块。此操作不会恢复接管状态，也不会删除世界书条目正文或 Agent 配置条目。",
+        message: "删除勾选条目的 Skill 简介信息，不会删除世界书正文，也不影响其它配置。",
         confirmLabel: "确认清除",
         cancelLabel: "取消",
       },
@@ -113,27 +113,27 @@ export const plotCopy = {
     advanced: {
       button: "Agent 高级设置",
       title: "Agent 世界书高级设置",
-      description: "编辑 Agent 决策、Skill 化提示词模板，并控制上下文层数、候选数量上限与各自独立的调用并发。",
+      description: "编辑 Agent 相关提示词，并调整上下文层数、候选上限和同时请求数。",
     },
     decisionSettings: {
       title: "Agent 决策执行参数",
-      description: "将当前接管条目分片后并发分析。请求数和最坏重试数会随并发数放大，别把 API 当免费算力池。",
+      description: "把世界书条目拆成多批同时分析。开得越高越快，但请求次数和消耗也会成倍增加。",
       concurrency: {
         label: "Agent 决策并发数",
-        hint: "默认 1，页面不设固定上限；实际并发不会超过可分析的条目数。条目按实际非空分片并发分析，绿灯最小与最大 TK 预算都会精确拆分并交给各分片辅助选择；合并后仍按完整最大预算做安全校验。",
+        hint: "默认 1。调大后分批同时分析条目，并按比例分摊绿灯 Token 预算，合并后仍按总上限校验。",
       },
     },
     skillifySettings: {
       title: "Skill 化执行参数",
-      description: "控制一键 Skill 化的执行行为。并发数越高，请求压力越大；别把 API 当成无限吞吐的黑洞。",
+      description: "控制一键 Skill 化的执行速度。同时处理数越高越快，但也越容易触发 API 限流。",
       maxConcurrency: {
         label: "Skill 化 API 并发数",
-        hint: "一键 Skill 化同时调用 Agent Skill API 的条目数量。默认 3，页面不设固定上限；实际并发不会超过待处理条目数。",
+        hint: "一键 Skill 化同时处理的条目数，默认 3。",
       },
     },
     executionMode: {
       label: "Agent 与剧情推进执行方式",
-      hint: "串行模式保持 Agent 接管剧情任务与剧情世界书绿灯；并发模式下 Agent 不决定哪些剧情任务生效，剧情任务也按非 Agent 模式读取世界书，只保留正文绿灯判断。",
+      hint: "串行模式由 Agent 全权接管剧情任务和世界书绿灯；并发模式下剧情任务按原规则跑，Agent 只负责正文的世界书绿灯判断。",
       options: {
         sequential: "串行接管",
         concurrent: "并发旁路",
@@ -141,44 +141,44 @@ export const plotCopy = {
     },
     contextSettings: {
       title: "上下文参数",
-      description: "这些参数会影响 Agent 决策、世界书 Skill 化和剧情世界书扫描。页面不设固定上限；过大的候选数、上下文、重试次数或预算会放大 API 消耗，并可能超过模型与服务能力。",
+      description: "控制 Agent 决策、Skill 化和世界书扫描的范围。数值设太大既增加 API 消耗，也可能超出模型上限。",
       resetButton: "恢复默认上下文参数",
       resetSuccess: "已恢复默认上下文参数。",
       fields: {
         decisionRecentContextCharLimit: {
           label: "最近上下文层数",
-          hint: "进入 Agent 决策提示词的最近对话层数；1 层 = 1 条 AI 回复 + 其上方 1 条用户输入。剧情推进记录保存在用户楼层，会随对应上下文一起传入。",
+          hint: "发给 Agent 参考的最近对话轮数（1 轮 = 1 条用户输入 + 1 条 AI 回复）。",
         },
         decisionWorldbookCandidateLimit: {
           label: "决策世界书候选数",
-          hint: "进入 Agent 决策提示词的世界书候选条目最大数量。候选只包含条目名称、关键词、描述和触发时机，不再携带正文预览。",
+          hint: "每次最多提供多少条世界书给 Agent 挑选（只传名称和简介，不传正文）。",
         },
         skillifyMaxEntries: {
           label: "Skill 化最大条目数",
-          hint: "一键 Skill 化单次最多处理的世界书条目数量。",
+          hint: "一键 Skill 化单次最多处理多少条世界书。",
         },
         plotWorldbookScanMessageLimit: {
           label: "剧情世界书扫描消息数",
-          hint: "剧情推进读取世界书内容时回看的聊天消息数量；未显式保存旧配置时仍回退原 contextTurnCount。",
+          hint: "剧情推进扫描世界书时往前看几条聊天消息。",
         },
         agentAiMaxRetries: {
           label: "Agent AI 最大尝试次数",
-          hint: "Agent 决策与一键 Skill 化的公共 AI 调用尝试次数。设置过高会放大请求量，不会让烂提示词自动变聪明。",
+          hint: "Agent 和 Skill 化调用失败时的最大重试次数，设太高只会增加消耗。",
         },
         greenlightMinTkBudget: {
           label: "绿灯最小 TK 预算",
-          hint: "Agent 选择绿灯条目时的目标下限。并发决策时按实际非空分片数精确拆分，用于提示各分片不要选得过少；不会为了凑下限强塞无关条目。",
+          hint: "Agent 挑绿灯条目的参考字数下限，避免选得过少，但不会强塞无关条目。",
         },
         greenlightMaxTkBudget: {
           label: "绿灯最大 TK 预算",
-          hint: "Agent 每个通道、每个剧情任务可选择的绿灯条目 TK 上限。并发决策时按实际非空分片数精确拆分并直接交给各分片辅助选择；合并后仍按完整上限做安全校验。",
+          hint: "每个通道/任务可放行的绿灯条目 Token 上限，防止超出预算。",
         },
       },
     },
     prompts: {
       title: "提示词模板",
-      description: "可使用 {{agent.*}} 与 {{agent.skillify.*}} 占位符。未知占位符会原样保留，写错了模型不会替你变聪明。",
-      scopeHint: "编辑仅修改本次草稿。保存到当前世界书只更新当前配置；保存为全局模板只更新全局模板，不会改写当前世界书。",
+      description: "支持使用内置占位符，写错不会生效，请勿随意改动。",
+      scopeHint: "编辑先存为草稿。“保存到当前世界书”只改当前这本；“保存为全局模板”只改全局模板，不影响当前世界书。",
       unsavedChanges: "提示词草稿存在未保存修改。关闭将放弃这些修改。",
       scopeChanged: "底层 Agent 配置已发生变化，当前草稿可能属于旧角色或旧世界书。为防止误写，保存已锁定；请关闭并放弃草稿后重新打开。",
       loadingNotReady: "Agent 世界书配置仍在加载，请稍候。加载完成前不会接受编辑或保存。",

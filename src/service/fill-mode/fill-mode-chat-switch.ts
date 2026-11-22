@@ -8,6 +8,7 @@
  */
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { notifyChatConfigurationChanged_ACU } from '../../shared/chat-configuration-change';
+import { isSettingsDeferredLoadPending_ACU } from '../../shared/settings-load-readiness';
 import {
   getActiveChatStorageIdentity_ACU,
   normalizeChatScopedConfigContainer_ACU,
@@ -52,7 +53,7 @@ export type EnsureChatFillModeResult_ACU =
   | { recorded: true; mode: FillMode_ACU }
   | {
     recorded: false;
-    reason: 'no_active_chat' | 'already_recorded' | 'record_invalid' | 'table_not_loaded' | 'save_failed' | 'evidence_unavailable' | 'chat_changed';
+    reason: 'no_active_chat' | 'already_recorded' | 'record_invalid' | 'table_not_loaded' | 'settings_not_loaded' | 'save_failed' | 'evidence_unavailable' | 'chat_changed';
     error?: string;
   };
 
@@ -135,6 +136,7 @@ export async function setCurrentChatFillMode_ACU(
  * 只在表格可靠加载后补记；已有记录不再按历史数据重新推断。
  */
 export async function ensureCurrentChatFillModeRecorded_ACU(): Promise<EnsureChatFillModeResult_ACU> {
+  if (isSettingsDeferredLoadPending_ACU()) return { recorded: false, reason: 'settings_not_loaded' };
   const current = resolveCurrentChatFillMode_ACU();
   if (current.recordStatus === 'no_chat') return { recorded: false, reason: 'no_active_chat' };
   if (current.recordStatus === 'recorded') return { recorded: false, reason: 'already_recorded' };

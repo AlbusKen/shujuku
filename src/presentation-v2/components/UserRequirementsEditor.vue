@@ -1,6 +1,6 @@
 <template>
   <section class="acu-requirements-editor" aria-label="用户要求编辑">
-    <p class="acu-requirements-editor__hint">每个标签是一条用户要求；点击新增标签后直接填写。保存时会自动转换为字符串数组。</p>
+    <p class="acu-requirements-editor__hint">每个标签是一条用户要求，点新增直接填写即可。</p>
     <div v-for="(item, index) in items" :key="index" class="acu-requirements-editor__row">
       <label :for="`acu-requirement-${editorId}-${index}`">要求 {{ index + 1 }}</label>
       <AcuTextarea

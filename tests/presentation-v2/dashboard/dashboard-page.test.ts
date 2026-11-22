@@ -474,7 +474,7 @@ describe("DashboardPage", () => {
       expect(item.querySelector(".acu-badge--neutral")).not.toBeNull();
       expect(item.querySelector("button")).toBeNull();
     }
-    expect(tableHealth!.textContent || "").toContain("无法读取对应数据库表格");
+    expect(tableHealth!.textContent || "").toContain("无法读取表格");
     expect(sqlHealth!.textContent || "").toContain(
       "无法检查当前聊天的表格模板是否适配",
     );
@@ -519,9 +519,9 @@ describe("DashboardPage", () => {
 
     expect(sqlHealth).toBeDefined();
     expect(sqlHealth!.textContent || "").toContain("模板未适配");
-    expect(sqlHealth!.textContent || "").toContain("当前存储模式是 SQLite");
+    expect(sqlHealth!.textContent || "").toContain("当前是 SQLite 模式");
     expect(sqlHealth!.textContent || "").toContain("事件记录");
-    expect(sqlHealth!.textContent || "").toContain("补齐 SQL 表结构信息");
+    expect(sqlHealth!.textContent || "").toContain("SQL 语法不完整");
     expect(sqlHealth!.textContent || "").toContain("查看表格模板");
 
     const action = Array.from(
@@ -573,8 +573,8 @@ describe("DashboardPage", () => {
 
     expect(sqlHealth).toBeDefined();
     expect(sqlHealth!.textContent || "").toContain("开发者提示");
-    expect(sqlHealth!.textContent || "").toContain("开发者检查发现");
-    expect(sqlHealth!.textContent || "").toContain("选择“SQLite”");
+    expect(sqlHealth!.textContent || "").toContain("包含 SQL 语法");
+    expect(sqlHealth!.textContent || "").toContain("想换 SQLite 模式可以去切换");
     expect(
       sqlHealth!.classList.contains("acu-v2-dashboard-page__health-item--info"),
     ).toBe(true);
@@ -652,7 +652,7 @@ describe("DashboardPage", () => {
     const page = document.querySelector(
       ".acu-v2-dashboard-page",
     ) as HTMLElement;
-    expect(page.textContent || "").toContain("最近日志指向 API 配置或连接问题");
+    expect(page.textContent || "").toContain("最近报错指向 API 配置或连接问题");
     expect(page.textContent || "").toContain("查看运行日志");
 
     const logAction = Array.from(
@@ -788,7 +788,7 @@ describe("DashboardPage", () => {
     expect(text).not.toContain("启用SQL存储");
     expect(text).not.toContain("启用条件模板功能");
     expect(text).not.toContain("0TK 占用模式");
-    expect(text).toContain("选择表格数据的保存方式");
+    expect(text).toContain("选择表格数据的存储模式");
 
     const visibleToggleKeys = Array.from(
       document.querySelectorAll<HTMLButtonElement>(

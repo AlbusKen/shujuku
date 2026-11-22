@@ -15,27 +15,27 @@ export interface FillModeIntro {
 export const FILL_MODE_INTROS: Record<FillMode_ACU, FillModeIntro> = {
   classic: {
     label: '经典表格模式',
-    summary: '沿用稳定的经典填表流程，把纪要交给大总结逐步归纳，是新安装的默认模式。',
-    pros: '快速无感，不需要额外配置，也不会增加请求次数。',
+    summary: '稳定的经典模式，把纪要交给大总结逐步归纳。',
+    pros: '快速且无感，无需额外配置，也不会增加请求次数。',
     cons: '大总结可能会压缩部分细节。',
   },
   vector: {
     label: '向量表格模式',
-    summary: '用 embedding 与 rerank 直接选出与当前情节相关的纪要，并把选中的纪要条目切为蓝灯注入；纪要索引保持完整目录。不生成关键词、不做混合召回，也不触发剧情推进。',
-    pros: '快速无感，不额外增加正文生成前的 LLM 调用。',
-    cons: '需要单独配置向量参数；向量的语义匹配不如 LLM 召回的逻辑匹配精准。',
+    summary: '用 Embedding 和 Rerank 直接挑出与当前剧情相关的纪要并转为蓝灯注入，不触发剧情推进。',
+    pros: '快速且无感，写正文前不额外调用 AI。',
+    cons: '需要单独配置向量参数；准确度不如 AI 逻辑召回。',
   },
   llm: {
     label: 'LLM模型逻辑召回模式',
-    summary: '由 LLM 先读纪要概览与目录，再按信息缺口精读具体纪要区间。',
+    summary: '剧情推进 AI 先看纪要目录并输出关键词，用来触发对应的记忆条目给正文 AI。',
     pros: '无可比拟的精准。',
-    cons: '需要在每次正文生成前额外调用一次 LLM 进行记忆分析。',
+    cons: '每次写正文前需额外调用一次 AI 分析记忆。',
   },
   crossfire: {
     label: '交火模式',
-    summary: '关键词生成、向量与 BM25 混合召回、rerank 精排，再交给 LLM 做逻辑分析的完整流程。',
-    pros: '完全结合向量模式与 LLM 召回的优点。',
-    cons: '需要配置向量参数，并且保留正文生成前的额外 LLM 调用。',
+    summary: '先用关键词和向量筛选并重排纪要，再交给 AI 做逻辑分析。',
+    pros: '结合向量模式与 AI 召回两者的优点。',
+    cons: '既要配置向量参数，写正文前也会额外调用一次 AI。',
   },
 };
 
@@ -49,7 +49,7 @@ export const fillModeCopy = {
     title: '无法切换填表模式',
     message(reason: string, currentLabel: string, error?: string): string {
       if (reason === 'classic_locked') {
-        return `当前对话使用「${currentLabel}」，纪要表会持续累积，切回经典表格模式会超出经典模式的纪要窗口，因此不能切回。需要经典表格模式时请新开对话，可先点击五角星把经典表格模式设为新对话的偏好模式。`;
+        return `当前聊天使用「${currentLabel}」，纪要已超出经典模式上限，无法切回。想用回经典模式请新开聊天，记得先把它设为默认。`;
       }
       if (reason === 'record_invalid') {
         return '当前对话的填表模式记录无法识别，为避免纪要表超出经典模式的纪要窗口，已拒绝切回经典表格模式。';
@@ -70,13 +70,13 @@ export const fillModeCopy = {
     title: '退出经典表格模式',
     confirmLabel: '确认切换',
     message(targetLabel: string): string {
-      return `即将把当前对话切换为「${targetLabel}」。切换后会删除大总结表，已被大总结归纳的纪要恢复可见，纪要表恢复原导出方式。切换后当前对话不能再切回经典表格模式。`;
+      return `即将切换为「${targetLabel}」。切换后会删掉大总结表并恢复旧纪要显示，且之后不能再切回经典模式。`;
     },
   },
   templateChanged: {
     title: '表格模板已修改',
     confirmLabel: '恢复模板并切换',
-    message: '启用经典表格模式后，当前对话的表格模板被修改过。继续切换会恢复为启用经典表格模式前的模板，覆盖这些修改。',
+    message: '启用经典模式后模板被改过，继续切换会恢复成切换前的模板，覆盖这些修改。',
   },
   classicReadiness: {
     label: '经典表格状态',
@@ -84,32 +84,32 @@ export const fillModeCopy = {
     pendingTitle: '未就绪',
     failedTitle: '启用失败',
     pending(reason: string): string {
-      if (reason === 'table_not_loaded') return '表格数据尚未加载完成，加载后重新打开对话或点击重新启用。';
-      if (reason === 'chat_changed') return '启用过程中对话已切换，请点击重新启用。';
-      return '经典表格尚未启用，剧情推进与向量召回已按经典模式跳过。';
+      if (reason === 'table_not_loaded') return '表格数据还没加载完成，加载后重新打开聊天或点“重新启用”。';
+      if (reason === 'chat_changed') return '启用过程中切换了聊天，请点“重新启用”。';
+      return '经典表格尚未启用，已按经典模式跳过剧情推进和向量召回。';
     },
     failed(error: string): string {
-      return `经典表格未能启用，剧情推进与向量召回仍按经典模式跳过。原因：${error}`;
+      return `经典表格启用失败，已按经典模式跳过剧情推进和向量召回。原因：${error}`;
     },
   },
   panels: {
     mode: {
       title: '填表模式',
-      description: '选择当前对话如何为正文生成召回记忆。模式按对话记录；每种模式的参数独立保存，切换模式不会覆盖其它模式，也不会改变功能档位。',
-      selectHint: '五角星设为新对话偏好模式。经典表格模式可切换为其它模式，其它模式不能切回经典。',
+      description: '选择当前聊天用哪种方式召回记忆。各模式参数独立保存，切换不会互相覆盖。',
+      selectHint: '点星标设为新聊天的默认模式。经典模式可切去其它模式，但其他模式不能切换到经典模式。',
       preferActiveTitle: '新对话偏好模式',
       preferInactiveTitle: '设为新对话偏好模式',
       nativeToolLabel: '填表使用工具调用',
       nativeToolHint:
-        '默认关闭，四种模式通用。开启后填表改走 table_edit / table_sql 原生工具提交，默认提示词同步切换；部分渠道不支持工具调用，收到 tools 字段会直接报错。',
+        '默认关闭。开启后改用工具调用方式填表，默认提示词会同步切换；部分渠道不支持工具调用，开启后会直接报错。',
     },
     plot: {
       title: '剧情推进',
-      description: 'LLM模型逻辑召回模式与交火模式依赖剧情推进在正文生成前分析记忆。关闭后这两种模式只保留表格召回，不再执行剧情规划。',
+      description: 'AI 逻辑召回和交火模式依赖剧情推进在写正文前分析记忆。关闭后只保留表格召回，不再做剧情规划。',
       enableLabel: '启用剧情推进',
-      enableHint: '关闭后不再在正文生成前额外调用 LLM；当前模式的其余召回行为不变。',
+      enableHint: '关闭后写正文前不再额外调用 AI，其它记忆功能不变。',
       disguiseDisabledLabel: '解除发送伪装',
-      disguiseDisabledHint: '默认关闭。开启后原文留在输入框等待剧情 AI 返回，不显示临时楼层或生成中外观。此开关只改变等待外观：任务成功后由酒馆继续发送，最终失败或手动终止均停止正文发送。',
+      disguiseDisabledHint: '默认关闭。开启后你发的话会留在输入框里等剧情推进跑完再发，不显示临时楼层；失败或手动终止则取消发送。',
     },
     worldbook: {
       title: '剧情推进世界书',

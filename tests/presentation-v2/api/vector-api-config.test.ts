@@ -66,7 +66,7 @@ describe("useVectorApiConfig", () => {
     expect(vector.save()).toBe(false);
 
     expect(vector.errors.value).toContain(
-      "“重排URL”和“重排模型名”需要同时填写，或者同时留空",
+      "“重排 URL”和“重排模型名”必须同时填写，或同时留空。",
     );
     expect(vector.errors.value.join(" ")).not.toContain("rerankEndpoint");
     expect(vector.errors.value.join(" ")).not.toContain("rerankModel");

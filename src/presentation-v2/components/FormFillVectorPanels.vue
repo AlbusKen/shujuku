@@ -68,7 +68,7 @@
         >
           <AcuFormRow
             label="AI 补充关键词"
-            hint="开启时每次发送前多调用一次 AI 生成检索关键词；关闭后只用用户输入本身做召回，省一次往返。"
+            hint="开启时每次发送前多调用一次 AI 生成关键词；关闭后直接用你的输入召回记忆，更省时间。"
           >
             <AcuToggle
               :model-value="vector.form.keywordGenerationEnabled"
@@ -80,7 +80,7 @@
           </AcuFormRow>
           <AcuFormRow
             label="关键词 API 预设"
-            hint="默认使用当前的API，仅用于发送前关键词生成。"
+            hint="默认使用当前 API，单独选择后仅用于生成关键词。"
           >
             <AcuSelect
               :options="keywordApiOptions"
@@ -94,7 +94,7 @@
           <div class="acu-v2-vector-index-page__number-grid">
             <AcuFormRow
               label="上下文读取层数"
-              hint="关键词生成时读取的最近对话层数；1 层 = 1 条 AI 回复 + 其上方 1 条用户输入。"
+              hint="生成关键词时往前看几轮对话（1 轮 = 1 条用户输入 + 1 条 AI 回复）。"
             >
               <AcuInput
                 :model-value="vector.form.keywordContextPairCount"
@@ -108,7 +108,7 @@
             </AcuFormRow>
             <AcuFormRow
               label="最大尝试次数"
-              hint="关键词生成失败时会回退到用户输入本身参与召回，不阻断原始发送。"
+              hint="生成关键词失败时，自动改用你的原话召回记忆，不影响发送。"
             >
               <AcuInput
                 :model-value="vector.form.keywordGenerationMaxAttempts"
@@ -184,7 +184,7 @@
               </AcuFormRow>
               <AcuFormRow
                 label="重排指令"
-                hint="默认启用；清空后不向 Rerank 服务发送 instruction，可用于兼容不支持该字段的服务。"
+                hint="默认启用。如果 Rerank 服务商不支持附加指令而报错，清空即可。"
               >
                 <textarea
                   v-model="vectorApiConfig.form.rerankInstruction"
@@ -195,7 +195,7 @@
               </AcuFormRow>
               <AcuFormRow
                 label="每批条数"
-                :hint="`候选超过该数时分批并行请求再合并分数。服务商单请求通常限 500 条以内，范围 ${RERANK_BATCH_SIZE_LIMITS.min}–${RERANK_BATCH_SIZE_LIMITS.max}，默认 ${RERANK_BATCH_SIZE_LIMITS.default}。`"
+                :hint="`候选超过这个数时分批发送给 Rerank 再合并结果，服务商单次通常限 500 条以内，范围 ${RERANK_BATCH_SIZE_LIMITS.min}–${RERANK_BATCH_SIZE_LIMITS.max}，默认 ${RERANK_BATCH_SIZE_LIMITS.default}。`"
               >
                 <AcuInput
                   :model-value="vectorApiConfig.form.rerankBatchSize"
@@ -256,7 +256,7 @@
         <div class="acu-v2-vector-index-page__number-grid">
           <AcuFormRow
             label="混合召回"
-            hint="开启后 BM25 稀疏召回与向量结果融合；关闭则只用向量召回。"
+            hint="开启后会把关键词匹配和向量搜索结果合并筛选；关闭则只用向量搜索。"
           >
             <AcuToggle
               :model-value="vector.form.hybridRetrievalEnabled"
@@ -266,7 +266,7 @@
           </AcuFormRow>
           <AcuFormRow
             label="触发阈值"
-            hint="纪要有效行数达标后，发送前生成关键词并召回分块，未达标则保留原索引流程。"
+            hint="纪要条数达到此值后才开启搜索筛选，未达到则按原方式全量处理。"
           >
             <AcuInput
               :model-value="vector.form.summaryIndexKeywordMinRows"
@@ -280,7 +280,7 @@
           </AcuFormRow>
           <AcuFormRow
             label="TopK"
-            hint="进入纪要索引目录的排序行数上限（最近固定注入的行另计）；候选行不多于此数时跳过 Rerank，写入时恢复原顺序。"
+            hint="每次最多召回多少条相关纪要（不含最近固定条数）。候选不多于此数时跳过 Rerank，按原顺序写入。"
           >
             <AcuInput
               :model-value="vector.form.topK"
@@ -292,7 +292,7 @@
           </AcuFormRow>
           <AcuFormRow
             label="预筛最低分"
-            hint="Embedding 余弦分门槛，低于此分不进入候选池。源文本含纪要正文后分布整体偏低，默认 0.35。"
+            hint="相关度最低门槛，低于此分不进入候选，默认 0.35。"
           >
             <AcuInput
               :model-value="vector.form.minScore"
@@ -305,7 +305,7 @@
           </AcuFormRow>
           <AcuFormRow
             label="候选上限"
-            hint="dense/BM25 各自保留的候选分片数，融合后的候选池上限；Rerank 会按每批条数自动分批处理。不能小于 TopK。"
+            hint="初筛保留的候选上限，不能小于最终召回条数。"
           >
             <AcuInput
               :model-value="vector.form.recallCandidateLimit"
@@ -317,7 +317,7 @@
           </AcuFormRow>
           <AcuFormRow
             label="固定写入"
-            hint="最近 N 条纪要固定写入，不参与排序；计入触发阈值，不计入 TopK。"
+            hint="最近 N 条纪要固定保留，不参与筛选淘汰。"
           >
             <AcuInput
               :model-value="vector.form.recentFixedInjectCount"
@@ -330,7 +330,7 @@
           </AcuFormRow>
           <AcuFormRow
             label="命名空间"
-            hint="用于区分不同聊天的索引缓存，会拼接当前聊天标识。"
+            hint="用来区分不同聊天的索引前缀，一般保持默认即可。"
           >
             <AcuInput
               :model-value="vector.form.vectorNamespace"
@@ -350,7 +350,7 @@
         <div class="acu-v2-vector-index-page__number-grid">
           <AcuFormRow
             label="按句切分纪要正文"
-            hint="默认关闭：每行一个向量（概览 + 纪要正文整体），索引体积只随行数增长。开启后按下方句数切分正文，召回更细但分片成倍增加；改动后需重建索引。"
+            hint="默认关闭，每条纪要整体归档，省空间。开启后按下方句数拆分正文，找得更细但索引体积翻倍；改动后需重建索引。"
           >
             <AcuToggle
               :model-value="vector.form.summaryIndexChunkChronicleBySentence"
@@ -362,7 +362,7 @@
           </AcuFormRow>
           <AcuFormRow
             label="分块句数"
-            hint="仅在开启按句切分时生效：每个分片包含的句数，越小越精细，分片越多。"
+            hint="开启按句切分后生效，设置几句拆成一段，越小越细。"
           >
             <AcuInput
               :model-value="vector.form.summaryChunkSentenceCount"
@@ -375,7 +375,7 @@
               "
             />
           </AcuFormRow>
-          <AcuFormRow label="单请求最多行数" hint="单个 embedding 请求最多覆盖的纪要行数；与字符预算共同限制请求大小。">
+          <AcuFormRow label="单请求最多行数" hint="单次 Embedding 请求最多处理几条纪要，避免一次发太大。">
             <AcuInput
               :model-value="vector.form.summaryIndexArchiveMaxConcurrency"
               type="number"
@@ -389,7 +389,7 @@
               "
             />
           </AcuFormRow>
-          <AcuFormRow label="单请求字符预算" hint="单个 embedding 请求的本地输入字符上限，不等同于服务商 token 限制。单行超出时会单独请求并记录诊断。">
+          <AcuFormRow label="单请求字符预算" hint="单次 Embedding 请求的字数上限，单条超长时会单独发送。">
             <AcuInput
               :model-value="vector.form.summaryIndexArchiveMaxInputChars"
               type="number"
@@ -398,7 +398,7 @@
               @change="vector.setNumberField('summaryIndexArchiveMaxInputChars', $event)"
             />
           </AcuFormRow>
-          <AcuFormRow label="同时请求数" hint="最多同时进行的 embedding HTTP 请求；设为 1 可获得串行兼容行为。">
+          <AcuFormRow label="同时请求数" hint="最多同时发起几个 Embedding 请求；设为 1 逐条发送，最稳妥。">
             <AcuInput
               :model-value="vector.form.summaryIndexArchiveEmbeddingConcurrency"
               type="number"
@@ -409,7 +409,7 @@
           </AcuFormRow>
           <AcuFormRow v-if="SHOW_LEGACY_VECTOR_MAINTENANCE_UI"
             label="滚动增量"
-            hint="当前因 V2 不可变发布生命周期要求而暂停。即使历史配置已开启，归档仍会安全地写入 V2 单文件快照。"
+            hint="此旧开关当前已暂停，开了也不生效，系统会自动用新方式安全存档。"
           >
             <AcuToggle
               :model-value="vector.form.summaryIndexRollingDeltaEnabled"
@@ -419,7 +419,7 @@
           </AcuFormRow>
           <AcuFormRow v-if="SHOW_LEGACY_VECTOR_MAINTENANCE_UI"
             label="折叠阈值 K"
-            hint="仅保留历史配置兼容；滚动增量恢复 V2 安全发布语义前不生效。"
+            hint="仅用于兼容旧配置，目前不生效。"
           >
             <AcuInput
               :model-value="vector.form.summaryIndexRollingDeltaFoldThreshold || 15"
@@ -433,7 +433,7 @@
         <AcuFormRow
           v-if="SHOW_LEGACY_VECTOR_MAINTENANCE_UI"
           label="V2 写入闸门"
-          hint="默认开启（新装或未显式配置的用户默认走 V2 归档路径）。关闭只会阻止新的 V2 快照写入；已发布 V2 快照仍可读取，绝不会回退覆盖旧路径。"
+          hint="默认开启，使用新版归档方式。关闭后不再写入新版归档，但已存的仍可正常读取。"
         >
           <AcuToggle
             :model-value="vector.form.summaryIndexV2WriteEnabled"
@@ -444,7 +444,7 @@
         <AcuFormRow
           v-if="SHOW_LEGACY_VECTOR_MAINTENANCE_UI"
           label="V2 写入 scope allowlist"
-          hint="每行一个 canonical scope fingerprint。留空表示不额外限制已显式开启的 writer；错误 scope 不会写入。"
+          hint="高级项：限制允许写入的范围标识，普通用户留空即可。"
         >
           <textarea
             :value="vector.form.summaryIndexV2WriteScopeAllowlistText"
@@ -600,7 +600,7 @@ async function onDeleteCurrentIndex(): Promise<void> {
   const confirmed = await dialogStore.confirm({
     title: "删除当前索引",
     message:
-      "删除当前聊天的交火索引？这会移除索引引用并清理可回收外置资产，之后需要重新构建。",
+      "确定删除当前聊天的交火索引？删除后需要重新构建。",
     confirmLabel: "删除索引",
     confirmVariant: "danger",
   });

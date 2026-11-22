@@ -18,7 +18,7 @@
     <label for="acu-zero-layer-wi-rounds">最近几轮零层对话参与世界书扫描（全局，0 为关闭）</label>
     <AcuInput id="acu-zero-layer-wi-rounds" v-model="worldInfoRounds" type="number" size="sm"
       :min="0" :max="100" :step="1" @change="commitWorldInfoRounds" />
-    <p>一轮是一个 AI 回复，其间的用户输入一并参与扫描；本轮输入始终参与。只用于激活世界书条目，不进入提示词，下一回合生效。</p>
+    <p>扫描最近几轮聊天来触发世界书（本轮输入始终参与）。只用来激活世界书条目，下一回合生效。</p>
     <div class="acu-dashboard-zero-layer__actions">
       <AcuButton size="sm" :disabled="locked" @click="refresh">只读刷新状态</AcuButton>
       <AcuButton size="sm" :disabled="locked" @click="status.recover()">回读并恢复已存阶段</AcuButton>
@@ -26,7 +26,7 @@
       <AcuButton size="sm" :disabled="locked || !status.controls.value.canExit" @click="status.exit()">确认退出到普通模式</AcuButton>
     </div>
     <template v-if="status.controls.value.pendingTurn">
-      <p>未闭合回合 {{ status.controls.value.pendingTurn.turnId }} · {{ pendingPhaseLabel }}：正文未保存。放弃只记为取消并保留记录，不会重新请求模型；续写回合优先从续写面板恢复。</p>
+      <p>上一轮未完成（{{ status.controls.value.pendingTurn.turnId }} · {{ pendingPhaseLabel }}），正文未保存。放弃则只取消本轮并保留记录，不会重新发送请求；续写中断请优先去续写面板恢复。</p>
       <AcuButton size="sm" :disabled="locked" @click="status.abandon()">确认放弃未保存回合（不重发）</AcuButton>
     </template>
     <p v-if="status.actionError.value" class="acu-dashboard-zero-layer__error" role="alert">{{ status.actionError.value }}</p>

@@ -52,6 +52,20 @@ export type HostEventWaitGateOptions_ACU = {
 
 const waitGates_ACU = new WeakMap<object, Map<string, HostEventWaitGate_ACU>>();
 
+/**
+ * 第三方客户端可在 GENERATE_AFTER_DATA 的 generateData 上标记该字段为 true（建议用 Object.defineProperty 设为不可枚举，避免随请求体序列化），
+ * 以绕过向量召回在途等待闸，且不会消耗或清理当前主线正文的向量召回租约。
+ */
+export const GENERATE_AFTER_DATA_BYPASS_FLAG_ACU = '_acu_bypass_vector_wait_gate';
+
+export function shouldBypassGenerateAfterDataWaitGate_ACU(generateData: unknown): boolean {
+  return Boolean(
+    generateData
+    && typeof generateData === 'object'
+    && (generateData as Record<string, unknown>)[GENERATE_AFTER_DATA_BYPASS_FLAG_ACU] === true,
+  );
+}
+
 /** 宿主会吞掉监听器异常；在 emit 外层等待并传播取消，普通成功不改变宿主发送。 */
 export function installHostEventWaitGate_ACU(
   source: PlotEventSource_ACU,

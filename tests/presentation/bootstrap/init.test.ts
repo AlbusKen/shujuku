@@ -1921,6 +1921,34 @@ describe('向量模式宿主普通发送', () => {
     expect(document.body.dataset.generating).toBeUndefined();
   });
 
+  it('向量召回在途时，带 _acu_bypass_vector_wait_gate 标记的 GENERATE_AFTER_DATA 放行且不消耗主线租约', async () => {
+    m.api.chat = [{ is_user: false, mes: '历史回复' }];
+    m.input = '主线输入';
+    const recall = holdRecall();
+    await m.api.eventSource.emit('after_commands', 'normal', {}, false);
+    const message = { is_user: true, mes: '主线输入', name: '用户' };
+    m.api.chat.push(message);
+    const index = m.api.chat.length - 1;
+    const waitTask = m.api.eventSource.emit('user_message_rendered', index);
+    await recall.ready;
+
+    // 1) 第三方客户端（普通属性标记）在向量召回在途时应直接放行
+    const thirdPartyEnumerable = { prompt: 'side-task', _acu_bypass_vector_wait_gate: true };
+    await expect(m.api.eventSource.emit('generate_after_data', thirdPartyEnumerable, false)).resolves.toBeUndefined();
+
+    // 2) 第三方客户端（不可枚举属性标记，避免污染请求体序列化）也应直接放行
+    const thirdPartyNonEnumerable: Record<string, unknown> = { prompt: 'side-task-2' };
+    Object.defineProperty(thirdPartyNonEnumerable, '_acu_bypass_vector_wait_gate', { value: true, configurable: true });
+    expect(JSON.stringify(thirdPartyNonEnumerable)).toBe('{"prompt":"side-task-2"}');
+    await expect(m.api.eventSource.emit('generate_after_data', thirdPartyNonEnumerable, false)).resolves.toBeUndefined();
+
+    // 3) 主线租约未被破坏：未带标记的请求在召回在途时依然会被 AbortError 阻断
+    await expect(m.api.eventSource.emit('generate_after_data', { prompt: 'main' }, false)).rejects.toMatchObject({ name: 'AbortError' });
+
+    recall.complete({ success: true, injectedCount: 1 });
+    await waitTask;
+  });
+
 });
 
 describe('零层强制停用', () => {

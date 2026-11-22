@@ -12,10 +12,36 @@ export function hasExistingTableDataForCurrentChat_ACU(tableData: any = currentJ
     key.startsWith('sheet_') && Array.isArray(sheet?.content) && sheet.content.length > 1);
 }
 
-/** 只有已加载、有数据且没有大总结表的会话才属于旧模式兼容范围。 */
+/**
+ * 当前聊天若仅含 init checkpoint（无历史填表日志、无非 init checkpoint、无旧版 V1 数据），
+ * 说明只是新对话刚写入模板预置行，不属于未记录模式的旧会话。
+ */
+function isInitOnlyV2SeedStateForCurrentChat_ACU(): boolean {
+  const chat = getChatArray_ACU();
+  if (!Array.isArray(chat) || chat.length === 0) return false;
+  const isolationKey = String(getCurrentIsolationKey_ACU() ?? '');
+  let sawInitCheckpoint = false;
+  for (const message of chat) {
+    if (!message || message.is_user) continue;
+    const tag = readIsolatedTagData_ACU(message, isolationKey);
+    if (tag?.independentData && Object.keys(tag.independentData).some(k => k.startsWith('sheet_'))) return false;
+    if (message.TavernDB_ACU_Data || message.TavernDB_ACU_SummaryData || message.TavernDB_ACU_IndependentData) return false;
+    const frame = tag?.storageFrame;
+    if (!frame || typeof frame !== 'object') continue;
+    if (Array.isArray(frame.logEntries) && frame.logEntries.length > 0) return false;
+    if (frame.checkpoint) {
+      if (frame.checkpoint.reason !== 'init') return false;
+      sawInitCheckpoint = true;
+    }
+  }
+  return sawInitCheckpoint;
+}
+
+/** 只有已加载、有非初始化数据且没有大总结表的会话才属于旧模式兼容范围。 */
 export function hasLegacyFillModeTableData_ACU(): boolean {
   const data = currentJsonTableData_ACU;
   if (!data || typeof data !== 'object' || !hasExistingTableDataForCurrentChat_ACU(data)) return false;
+  if (isInitOnlyV2SeedStateForCurrentChat_ACU()) return false;
   return !Object.entries(data).some(([key, sheet]: [string, any]) =>
     key.startsWith('sheet_') && sheet?.name === FLIGHT_MODE_BIG_SUMMARY_SHEET_NAME_ACU);
 }

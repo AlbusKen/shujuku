@@ -1,6 +1,6 @@
 <template>
   <section class="acu-v2-continuation-page">
-    <AcuPanel title="Agent 会话" description="像和 coding agent 对话一样使用：随时输入、随时打断。主 Agent 按需派工子代理并管理大纲，最终正文仍由酒馆模型生成。">
+    <AcuPanel title="Agent 会话" description="像和助手聊天一样随时输入、随时打断。主 Agent 负责分工和管理大纲，最终正文仍由酒馆模型生成。">
       <ContinuationChat
         :task="runtime.task.value"
         :entries="session.entries.value"
@@ -20,7 +20,7 @@
       />
     </AcuPanel>
 
-    <AcuPanel v-if="runtime.task.value && runtime.task.value.status === 'awaiting_outline_review' && runtime.activeRevision.value" title="待确认的大纲" description="确认前会在领域层重新执行严格 Schema 与 revision 校验；页面不直接写入聊天数组。">
+    <AcuPanel v-if="runtime.task.value && runtime.task.value.status === 'awaiting_outline_review' && runtime.activeRevision.value" title="待确认的大纲" description="确认前会自动复核格式和版本，通过后才会生效，不会直接误改聊天记录。">
       <AcuTextarea :model-value="outlineDraft" :rows="16" @update:model-value="outlineDraft = $event" />
       <p v-if="outlineDraftError" class="acu-v2-continuation-page__error">{{ outlineDraftError }}</p>
       <div class="acu-v2-continuation-page__actions">
@@ -30,7 +30,7 @@
 
     <!-- 会话独占整宽，资料与设置并列在其下：会话是主操作面，资料与设置是查阅面。 -->
     <AcuPanelGrid class="acu-v2-continuation-page__layout">
-      <AcuPanel title="已有资料" description="阶段大纲与本地资料都可以直接编辑保存；一键清空只丢任务、会话记录与本地资料，不动小说正文。">
+      <AcuPanel title="已有资料" description="阶段大纲和本地资料都能直接编辑保存；一键清空只清任务、记录和资料，不动小说正文。">
         <ContinuationMaterialsPanel
           ref="materialsPanel"
           :task="runtime.task.value"
@@ -42,9 +42,9 @@
         />
       </AcuPanel>
 
-      <AcuPanel v-if="settingsDraft" title="续写设置" description="修改后自动保存；任务运行中也可以改，改动会在本轮空档落盘、下一轮开始时生效。常用项直接可见，其余参数按主题折叠，默认值已能满足大多数场景。">
+      <AcuPanel v-if="settingsDraft" title="续写设置" description="修改后自动保存，运行中也能改，下一轮生效。其余折叠参数保持默认即可满足大多数场景。">
         <div class="acu-v2-continuation-page__settings-grid">
-          <AcuFormRow label="使用工具调用" hint="开启后决策与交付都通过函数调用完成；部分渠道不支持 tools 字段会报错。全局生效，不随对话保存。">
+          <AcuFormRow label="使用工具调用" hint="开启后改用工具调用完成决策与交付；部分渠道不支持会报错。全局生效。">
             <AcuToggle :model-value="runtime.nativeToolEnabled.value" aria-label="使用工具调用" @update:model-value="runtime.setNativeToolEnabled($event)" />
           </AcuFormRow>
           <AcuFormRow label="阶段规模" hint="一个阶段规划多少轮正文；轮数越多，单个大纲覆盖的剧情越长。">
@@ -55,7 +55,7 @@
               <option value="custom">自定义</option>
             </select>
           </AcuFormRow>
-          <AcuFormRow label="故事总纲卷数" hint="故事总纲预计分多少卷推进，影响总纲子代理的整体节奏规划。">
+          <AcuFormRow label="故事总纲卷数" hint="故事总纲预计分多少卷推进，影响整体节奏规划。">
             <select v-model="settingsDraft.storyArcVolumePlan">
               <option value="short">短线（7–8 卷）</option>
               <option value="medium">中线（10–14 卷）</option>
@@ -72,7 +72,7 @@
           <AcuFormRow v-if="settingsDraft.stageSize === 'custom'" label="最多轮次" hint="1–50 的整数。">
             <AcuInput v-model="settingsDraft.customTurnMax" type="number" :min="1" :max="50" />
           </AcuFormRow>
-          <AcuFormRow label="API 预设（全局默认）" hint="所有 Agent 默认走这个预设；需要给某个 Agent 单独指定时，展开下方「各 Agent 渠道」。需要工具的 Agent 须使用 Chat Completion 类连接：自定义 API、Chat Completion 酒馆连接预设或 Chat Completion 主连接均可；Text Completion 连接无法返回工具调用。">
+          <AcuFormRow label="API 预设（全局默认）" hint="所有 Agent 默认用这套 API 预设；需单独指定请展开下方“各 Agent 渠道”。需要工具的 Agent 必须用对话补全类连接，纯文本补全连接不支持工具调用。">
             <AcuSelect
               :options="continuationApiPresetOptions"
               :model-value="continuationApiPresetValue"
@@ -101,7 +101,7 @@
           >
             <p class="acu-v2-continuation-page__meta">{{ continuationCopy.workflow.description }}</p>
             <div class="acu-v2-continuation-page__settings-grid">
-              <AcuFormRow label="终审打回上限" hint="instruction-composer 按反馈清单增量修订的次数。范围 1–10。">
+              <AcuFormRow label="终审打回上限" hint="写作指令按审核反馈修改的最大次数，范围 1–10。">
                 <AcuInput v-model="settingsDraft.workflow.reviseLimit" type="number" :min="1" :max="10" />
               </AcuFormRow>
             </div>
@@ -115,13 +115,13 @@
             @toggle="toggleGroup('run')"
           >
             <div class="acu-v2-continuation-page__settings-grid">
-              <AcuFormRow label="自动阶段上限" hint="连续自动推进多少个阶段后暂停，等待你确认。">
+              <AcuFormRow label="自动阶段上限" hint="连续自动推进多少个阶段后暂停，等你确认。">
                 <AcuInput v-model="settingsDraft.maxAutomaticStages" type="number" :min="1" />
               </AcuFormRow>
-              <AcuFormRow label="正文重试次数" hint="酒馆生成失败或被判定截断时最多重试几次。">
+              <AcuFormRow label="正文重试次数" hint="酒馆生成失败或内容截断时最多重试几次。">
                 <AcuInput v-model="settingsDraft.generationRetryLimit" type="number" :min="0" />
               </AcuFormRow>
-              <AcuFormRow label="正文最低 token 数" hint="酒馆生成低于该值视为截断或出错并自动重试，0 为不检查。">
+              <AcuFormRow label="正文最低 token 数" hint="酒馆生成字数低于该值视为截断并自动重试，0 为不检查。">
                 <AcuInput v-model="settingsDraft.minGenerationTokens" type="number" :min="0" />
               </AcuFormRow>
               <AcuFormRow label="内部 AI 重试次数" hint="Agent 自身调用 API 失败时的重试次数。">
@@ -130,13 +130,13 @@
               <AcuFormRow label="轮次延迟（秒）" hint="每轮正文完成后等待多久再开始下一轮。">
                 <AcuInput v-model="settingsDraft.loopDelaySeconds" type="number" :min="0" />
               </AcuFormRow>
-              <AcuFormRow label="重试延迟（秒）" hint="失败后等待多久再重试；遇到 429 限流可适当调大。">
+              <AcuFormRow label="重试延迟（秒）" hint="失败后等待多久再重试；遇到频繁限流时可适当调大。">
                 <AcuInput v-model="settingsDraft.retryDelaySeconds" type="number" :min="0" />
               </AcuFormRow>
-              <AcuFormRow label="连续高压轮上限" hint="跨阶段累计多少轮没有日常/余波轮就强制安排一轮，0 为不作要求。每阶段的松紧由大纲自选的节奏形态决定，这里只兜底极端情况。">
+              <AcuFormRow label="连续高压轮上限" hint="连续多少轮没出现日常或过渡轮时，强制安排一轮缓和节奏，0 为不限制。">
                 <AcuInput v-model="settingsDraft.maxConsecutivePressureTurns" type="number" :min="0" :max="maxConsecutivePressureTurnsMax" />
               </AcuFormRow>
-              <AcuFormRow label="循环标签" hint="逗号分隔；正文中缺少任一标签就视为生成失败并重试。留空不检查。">
+              <AcuFormRow label="循环标签" hint="逗号分隔；正文缺少任一指定标签就视为失败并重试，留空不检查。">
                 <AcuInput v-model="settingsDraft.loopTags" type="text" />
               </AcuFormRow>
             </div>
@@ -151,19 +151,19 @@
             @toggle="toggleGroup('context')"
           >
             <div class="acu-v2-continuation-page__settings-grid">
-              <AcuFormRow label="正文可读窗口楼数" hint="只有最近这么多 AI 楼层能被 Agent 读取/搜索，更早剧情走纪要回溯；0 为不开放正文读取。">
+              <AcuFormRow label="正文可读窗口楼数" hint="Agent 最多只能读取最近这么多层 AI 正文，更早剧情看纪要；0 为不开放读取正文。">
                 <AcuInput v-model="settingsDraft.storyWindowFloors" type="number" :min="0" />
               </AcuFormRow>
-              <AcuFormRow label="正文目录尾部全文楼数" hint="最近几楼直接注入全文作承接锚点，其余窗口内楼层只进目录按需调阅。">
+              <AcuFormRow label="正文目录尾部全文楼数" hint="最近几楼直接给全文方便承接，更早楼层只给目录按需查阅。">
                 <AcuInput v-model="settingsDraft.storyTailFloors" type="number" :min="0" />
               </AcuFormRow>
-              <AcuFormRow label="会话自动总结阈值（token）" hint="按主 Agent 实际读取的完整上下文统计（含提示词、工具结果与子代理报告），超过后在下一轮开始前把最早轮次浓缩成交接报告；0 为不总结。">
+              <AcuFormRow label="会话自动总结阈值（token）" hint="主 Agent 累计上下文超过此值后，会把最早轮次浓缩成简报省空间；0 为不浓缩。">
                 <AcuInput v-model="settingsDraft.agentHistoryTokenBudget" type="number" :min="0" />
               </AcuFormRow>
-              <AcuFormRow label="单批次读取上限" hint="一次 read/search 工具批次最多可注入多少 token；超过整批打回。不同批次不累计，填正整数或形如 20% 的百分比（按总结阈值折算）。">
+              <AcuFormRow label="单批次读取上限" hint="单次查资料最多读取多少 Token，超出会打回；可填数字或百分比。">
                 <AcuInput v-model="settingsDraft.agentReadTokenBudget" type="text" />
               </AcuFormRow>
-              <AcuFormRow label="临近总结时的精读额度（token）" hint="上下文即将触发总结时，只有不超过此大小的单批次读取会放行；默认 6000。">
+              <AcuFormRow label="临近总结时的精读额度（token）" hint="上下文快要触发浓缩时，单次查资料的 Token 上限，默认 6000。">
                 <AcuInput v-model="settingsDraft.agentReadFallbackTokens" type="number" :min="1" />
               </AcuFormRow>
             </div>
@@ -178,22 +178,22 @@
             @toggle="toggleGroup('budget')"
           >
             <div class="acu-v2-continuation-page__settings-grid">
-              <AcuFormRow label="主 Agent 迭代上限" hint="一次规划内最多做多少次决策（派工/改大纲/交付各算一次；read/search 工具批次不计入）。范围 1–30。">
+              <AcuFormRow label="主 Agent 迭代上限" hint="一轮规划里主 Agent 最多做多少次决策（派工、改大纲、交付各算一次），范围 1–30。">
                 <AcuInput v-model="settingsDraft.agentRunBudget.maxIterations" type="number" :min="1" :max="30" />
               </AcuFormRow>
-              <AcuFormRow label="派工总数上限" hint="一次规划内最多派出多少个子代理任务，0 为禁止派工。范围 0–20。">
+              <AcuFormRow label="派工总数上限" hint="一轮规划最多派出多少个子代理任务，0 为禁止派工，范围 0–20。">
                 <AcuInput v-model="settingsDraft.agentRunBudget.maxDelegations" type="number" :min="0" :max="20" />
               </AcuFormRow>
-              <AcuFormRow label="单代理派工上限" hint="同一个子代理在一次规划内最多被派几次。范围 1–10。">
+              <AcuFormRow label="单代理派工上限" hint="同一个子代理一轮最多被派几次，范围 1–10。">
                 <AcuInput v-model="settingsDraft.agentRunBudget.maxSameAgent" type="number" :min="1" :max="10" />
               </AcuFormRow>
-              <AcuFormRow label="并发派工上限" hint="同一波次最多同时运行几个子代理；API 限流严格时调小。范围 1–6。">
+              <AcuFormRow label="并发派工上限" hint="同一波最多同时运行几个子代理，API 容易限流时调小，范围 1–6。">
                 <AcuInput v-model="settingsDraft.agentRunBudget.maxConcurrent" type="number" :min="1" :max="6" />
               </AcuFormRow>
-              <AcuFormRow label="读取批次上限" hint="主 Agent 一次规划内 read/search 工具批次的次数上限，0 为禁止读取。范围 0–30。">
+              <AcuFormRow label="读取批次上限" hint="主 Agent 一轮规划内最多查几次资料，0 为禁止，范围 0–30。">
                 <AcuInput v-model="settingsDraft.agentRunBudget.maxReads" type="number" :min="0" :max="30" />
               </AcuFormRow>
-              <AcuFormRow label="子代理工具轮上限" hint="子代理首轮之外还允许几轮 read/search 追加读取，0 为只靠固定注入与派工种子。范围 0–10。">
+              <AcuFormRow label="子代理工具轮上限" hint="子代理最多允许额外补查几轮资料，0 为不补查，范围 0–10。">
                 <AcuInput v-model="settingsDraft.agentRunBudget.maxExtraReads" type="number" :min="0" :max="10" />
               </AcuFormRow>
             </div>
@@ -208,14 +208,14 @@
             @toggle="toggleGroup('finalReview')"
           >
             <div class="acu-v2-continuation-page__settings-grid">
-              <AcuFormRow label="终审单批次读取上限" hint="终审每次 read/search 工具批次最多可注入多少 token；超过整批打回。填正整数或形如 20% 的百分比（按总结阈值折算）。">
+              <AcuFormRow label="终审单批次读取上限" hint="终审单次查世界书最多读取多少 Token，超出会打回；可填数字或百分比。">
                 <AcuInput v-model="settingsDraft.finalReview.readTokenBudget" type="text" />
               </AcuFormRow>
-              <AcuFormRow label="终审额外读取轮数" hint="终审首轮之外允许追加 read/search 的次数，0 为只使用固定证据。范围 0–10。">
+              <AcuFormRow label="终审额外读取轮数" hint="终审最多允许额外补查几轮世界书，0 为不补查，范围 0–10。">
                 <AcuInput v-model="settingsDraft.finalReview.maxExtraReads" type="number" :min="0" :max="10" />
               </AcuFormRow>
             </div>
-            <p class="acu-v2-continuation-page__meta">终审默认关闭；开启后会额外调用 final-reviewer，先看世界书目录与命中预览，再按实际需要 search/read 精读条目。它使用独立的单批次读取上限与工具轮，不占用主 Agent 的读取额度。关闭时不装配终审证据、不额外读取世界书，也不会发起终审调用。</p>
+            <p class="acu-v2-continuation-page__meta">终审默认关闭。开启后在发送前会多调用一次终审核对世界书设定，不占主 Agent 额度；关闭则跳过这一步。</p>
           </AcuDisclosureGroup>
 
           <AcuDisclosureGroup
@@ -226,7 +226,7 @@
             body-id="acu-continuation-group-web-research"
             @toggle="toggleGroup('webResearch')"
           >
-            <p class="acu-v2-continuation-page__meta">开启后，新任务第一次规划前会自动派工 web-researcher，从勾选的百科查清原作人物、组织、能力与设定，按实体分条写进「百科资料库」（资料面板 → 百科资料）；之后主 Agent 也能按需再派。所有出网只由该子代理执行：维基与萌娘走浏览器直连，百度与网页抓取经酒馆服务器同源转发。</p>
+            <p class="acu-v2-continuation-page__meta">开启后，新任务首次规划前会自动上网查百科，把原作人物与设定整理进“百科资料库”，之后主 Agent 也可按需再查。</p>
             <div class="acu-v2-continuation-page__toggles">
               <AcuCheckbox v-model="settingsDraft.webResearch.sources.moegirl" label="萌娘百科" />
               <AcuCheckbox v-model="settingsDraft.webResearch.sources.wikipediaZh" label="中文维基百科" />
@@ -234,22 +234,22 @@
               <AcuCheckbox v-model="settingsDraft.webResearch.sources.baidu" label="百度百科（经酒馆转发）" />
             </div>
             <div class="acu-v2-continuation-page__settings-grid">
-              <AcuFormRow label="搜索引擎" hint="百科查不到时的兜底搜索。DuckDuckGo 免 key；Serper / Tavily 使用酒馆「API 密钥」里已配置的 key；SearXNG 需填实例地址。">
+              <AcuFormRow label="搜索引擎" hint="百科查不到时的备用搜索。DuckDuckGo 免密钥；Serper / Tavily 用酒馆里配好的密钥；SearXNG 需填网址。">
                 <AcuSelect v-model="settingsDraft.webResearch.searchProvider" :options="webSearchProviderOptions" />
               </AcuFormRow>
               <AcuFormRow v-if="settingsDraft.webResearch.searchProvider === 'searxng'" label="SearXNG 实例地址" hint="形如 https://searx.example.org">
                 <AcuInput v-model="settingsDraft.webResearch.searxngBaseUrl" type="text" />
               </AcuFormRow>
-              <AcuFormRow label="单次工具轮上限" hint="web-researcher 一次派工里搜索/抓取/本地调阅的轮数上限。范围 1–20。">
+              <AcuFormRow label="单次工具轮上限" hint="百科检索子代理单次任务最多查询几轮，范围 1–20。">
                 <AcuInput v-model="settingsDraft.webResearch.maxToolRounds" type="number" :min="1" :max="20" />
               </AcuFormRow>
-              <AcuFormRow label="单次抓取页数上限" hint="单次检索最多阅读的外部页面数。页面正文仅在检索子代理当次上下文中使用，不会写入聊天。范围 1–30。">
+              <AcuFormRow label="单次抓取页数上限" hint="单次检索最多阅读多少个网页；网页正文看完即弃，不写入聊天，范围 1–30。">
                 <AcuInput v-model="settingsDraft.webResearch.maxPages" type="number" :min="1" :max="30" />
               </AcuFormRow>
-              <AcuFormRow label="单页阅读字数上限" hint="检索子代理归纳资料时可读取的单页正文上限；正文不保存。范围 500–20000。">
+              <AcuFormRow label="单页阅读字数上限" hint="单页网页最多读取多少字，正文不保存，范围 500–20000。">
                 <AcuInput v-model="settingsDraft.webResearch.pageCharLimit" type="number" :min="500" :max="20000" />
               </AcuFormRow>
-              <AcuFormRow label="域名黑名单" hint="web_read 不得抓取的域名，逗号或换行分隔；内网与酒馆自身始终被拦。">
+              <AcuFormRow label="域名黑名单" hint="禁止访问的网站域名（逗号或换行分隔）；内网与酒馆自身默认拦截。">
                 <AcuTextarea v-model="settingsDraft.webResearch.blockedDomains" :rows="3" />
               </AcuFormRow>
             </div>
@@ -263,7 +263,7 @@
             body-id="acu-continuation-group-channels"
             @toggle="toggleGroup('channels')"
           >
-            <p class="acu-v2-continuation-page__meta">给不同 Agent 分配不同 API 预设：例如主 Agent 用强模型，审查类子代理用便宜快速的模型。「跟随全局默认」即使用上方的 API 预设。</p>
+            <p class="acu-v2-continuation-page__meta">给不同 Agent 分配不同 API 预设（如主 Agent 用强模型，审查类用便宜快的模型）。“跟随全局默认”即用上方预设。</p>
             <div class="acu-v2-continuation-page__settings-grid">
               <AcuFormRow v-for="channel in agentChannelRoles" :key="channel.role" :label="channel.label">
                 <AcuSelect
@@ -283,7 +283,7 @@
             body-id="acu-continuation-group-rules"
             @toggle="toggleGroup('rules')"
           >
-            <p class="acu-v2-continuation-page__meta">提取规则只保留正文中匹配「起始–结束」标记之间的内容；排除规则则把匹配段落剔除。两者都为空时使用完整正文。</p>
+            <p class="acu-v2-continuation-page__meta">提取只保留起止标记之间的内容，排除会去掉标记之间的内容；都留空则使用完整正文。</p>
             <AcuRulePairList v-model="settingsDraft.contextExtractRules" label="上下文提取规则" />
             <AcuRulePairList v-model="settingsDraft.contextExcludeRules" label="上下文排除规则" />
           </AcuDisclosureGroup>
@@ -294,7 +294,7 @@
       </AcuPanel>
     </AcuPanelGrid>
 
-    <AcuPanel v-if="settingsDraft" title="伪 Role 提示词" description="仅启用段参与内部调用；占位符会按实际出现按需解析。修改后自动保存。">
+    <AcuPanel v-if="settingsDraft" title="伪 Role 提示词" description="仅启用的提示词段会生效，修改后自动保存。">
       <div class="acu-v2-continuation-page__actions acu-v2-continuation-page__actions--start">
         <AcuButton @click="exportPrompts">导出提示词 JSON</AcuButton>
         <AcuButton @click="promptImportInput?.click()">导入提示词 JSON</AcuButton>
@@ -618,7 +618,7 @@ async function acceptOutlineDraft(): Promise<void> {
 async function confirmFirstSendRpmWarning(): Promise<boolean> {
   return dialog.confirm({
     title: '开始智能续写前请确认',
-    message: '本功能单次请求占用的 Token 不多，但 Agent 会连续发起大量请求，需要 API 支持很高的 RPM（每分钟请求数）。',
+    message: '此功能单次消耗 Token 不多，但会连续发起大量请求，需要 API 每分钟请求上限较高。',
     dangerMessage: '禁止使用任何公益站，除非它明确表示允许 coding（本功能的请求模式与 coding 类似）。违规使用可能导致账号被封禁。',
     confirmLabel: '我已了解，开始',
     cancelLabel: '取消',

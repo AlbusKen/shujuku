@@ -2,7 +2,7 @@
   <div class="acu-viz-config" data-acu-visualizer-config>
     <AcuPanel
       title="基本信息与列定义"
-      description="这里改表名和列名。AI 会按这些名称理解字段；如果填表结果找错字段，先检查这里。"
+      description="这里改表名和列名。AI 按这些名称理解栏目，如果总是填错列，先检查这里。"
     >
       <div class="acu-viz-config__grid">
         <AcuFormRow label="表格名称">
@@ -53,7 +53,7 @@
 
     <AcuPanel
       title="自动化更新参数"
-      description="这里调当前表自动更新的范围和频率。不确定时用 -1；想停用当前表自动更新时，把更新频率设为 0。"
+      description="调整当前表自动更新的范围和频率。不确定填 -1；想停用自动更新请把频率设为 0。"
     >
       <div class="acu-viz-config__grid acu-viz-config__grid--three">
         <AcuFormRow label="上下文层数">
@@ -114,7 +114,7 @@
       <AcuFormRow
         v-if="config.isSQLite.value"
         label="填表发送数据模板"
-        hint="高级功能：只替换发送给填表 AI 的“当前数据”部分。建议直接 SELECT row_id 和需要的字段；系统会把多列结果展开为“字段: 值”的记录行。留空则继续使用“发送最新行数”。"
+        hint="高级功能：用自定义 SQL 筛选发给填表 AI 的当前数据，留空则继续按“发送最新行数”发送。"
       >
         <AcuTextarea
           :model-value="updateConfig.sendRowsSqlTemplate"
@@ -128,7 +128,7 @@
 
     <AcuPanel
       title="AI 触发提示词"
-      description="这里写给 AI 的表格说明和增删改触发词。AI 不按预期新增、更新或删除时，先检查这些文本是否清楚。"
+      description="写给 AI 的表格说明和增删改规则。AI 不按预期改表时，先检查这里是否写清楚。"
     >
       <div class="acu-viz-config__prompts">
         <AcuFormRow label="表格说明">
@@ -177,7 +177,7 @@
     <AcuPanel
       v-if="config.isSQLite.value"
       title="DDL 定义"
-      description="SQLite 表在这里维护建表语句。表头和 CREATE TABLE 不一致时，SQL 可能报错或写错列。"
+      description="SQLite 模式在这里填 SQL 语法。与上方表头不一致时，填表可能报错或写错列。"
     >
       <AcuFormRow label="CREATE TABLE 语句">
         <AcuTextarea
@@ -201,7 +201,7 @@
 
     <AcuPanel
       title="世界书注入配置"
-      description="控制这张表是否进入世界书、写成哪些条目、放在哪个位置。世界书内容缺失、重复或位置不对时检查这里。"
+      description="控制这张表是否写入世界书、写成哪些条目及摆放位置。世界书缺失、重复或位置不对时检查这里。"
     >
       <div class="acu-viz-config__toggles">
         <AcuCheckbox
@@ -333,7 +333,7 @@
     <AcuPanel
       v-if="config.fixedConfigEnabled.value"
       title="固定条目注入配置"
-      description="控制总结表、总体大纲、重要人物表等固定条目的位置。固定条目重复或顺序不对时检查这里。"
+      description="控制总结表、总体大纲、重要人物表等固定条目的位置。重复或顺序不对时检查这里。"
     >
       <PlacementEditor
         title="固定主条目位置"
@@ -353,7 +353,7 @@
     <AcuPanel
       v-if="config.specialIndex.value.enabled"
       title="编码索引自动编号"
-      description="用于维护总结表、总体大纲里的 AM0001 这类编码。开启后会自动重排；关闭后需要你自己保持唯一和顺序。"
+      description="控制总结表、总体大纲里的 AM0001 类编码。开启后自动重排，关闭后需手动保证不重不乱。"
     >
       <div class="acu-viz-config__toggles">
         <AcuCheckbox

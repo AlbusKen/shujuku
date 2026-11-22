@@ -1,7 +1,7 @@
 <template>
   <section class="acu-v2-agent-page">
     <AcuPanelGrid class="acu-v2-agent-page__grid">
-      <AcuPanel title="Agent 世界书" description="独立管理 Agent 的世界书范围、Skill 元数据和接管状态。">
+      <AcuPanel title="Agent 世界书" description="管理 Agent 可用的世界书范围、条目简介（Skill）和接管开关。">
         <WorldbookAgentControlBar
           :agent-control="agentControl"
           @current-worldbook-changed="refreshAll"
