@@ -5,6 +5,8 @@ import { assertAiMessageSnapshotCurrent_ACU, type AiMessageSnapshot_ACU } from '
 export interface TableFillChatView_ACU {
   chat: any[];
   assertCurrent(): void;
+  /** Observe validated writes in the detached view, with the upper bound of the fill batch. */
+  onFramesPersisted?(batchEndIndex: number | undefined, indices: readonly number[]): void;
 }
 
 export interface TableFillRequestGuard_ACU {

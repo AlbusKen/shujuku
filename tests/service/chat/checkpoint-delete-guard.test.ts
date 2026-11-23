@@ -10,6 +10,7 @@ const {
   mockRegisterPostChatSaveListener,
   mockAssertSingleFull,
   mockRunTableWriteTransaction,
+  mockReadDeletedReplyRollback,
   mockState,
 } = vi.hoisted(() => ({
   mockGetChatArray: vi.fn(),
@@ -17,6 +18,7 @@ const {
   mockRegisterPostChatSaveListener: vi.fn(),
   mockAssertSingleFull: vi.fn(() => null as string | null),
   mockRunTableWriteTransaction: vi.fn(),
+  mockReadDeletedReplyRollback: vi.fn(),
   mockState: { chatKey: 'chat-a' },
 }));
 
@@ -27,6 +29,7 @@ vi.mock('../../../src/data/gateways/chat-gateway', () => ({
 }));
 
 vi.mock('../../../src/data/repositories/chat-message-data-repo', () => ({
+  cloneIsolatedData_ACU: (msg: any) => structuredClone(msg?.TavernDB_ACU_IsolatedData ?? {}),
   readIsolatedDataContainer_ACU: (msg: any) => {
     const container = msg?.TavernDB_ACU_IsolatedData;
     return container && typeof container === 'object' && !Array.isArray(container) ? container : null;
@@ -35,6 +38,9 @@ vi.mock('../../../src/data/repositories/chat-message-data-repo', () => ({
     const tagData = msg?.TavernDB_ACU_IsolatedData?.[isolationKey];
     return tagData && typeof tagData === 'object' ? tagData : null;
   },
+}));
+vi.mock('../../../src/service/table/native-swipe-table', () => ({
+  readDeletedReplyRollback_ACU: mockReadDeletedReplyRollback,
 }));
 
 vi.mock('../../../src/service/table/storage-strategy-resolver', () => ({
@@ -110,6 +116,22 @@ beforeEach(() => {
   mockSaveChatToHostStrict.mockResolvedValue(undefined);
   mockAssertSingleFull.mockReturnValue(null);
   mockRunTableWriteTransaction.mockImplementation(async (_options: any, task: any) => task());
+  mockReadDeletedReplyRollback.mockReturnValue(null);
+});
+
+it('重生成删楼保留幸存楼层的补填，并且不嫁接被删回复自己的整库结果', async () => {
+  const earlier = aiMsg('早期楼层', logFrame([{ seq: 2, operations: [] }]));
+  const reply = aiMsg('B', { ...logFrame(), checkpoint: fullCheckpoint() });
+  const chat = [earlier, userMsg('继续'), reply];
+  mockGetChatArray.mockReturnValue(chat);
+  const earlierData = earlier.TavernDB_ACU_IsolatedData;
+  mockReadDeletedReplyRollback.mockReturnValue({ tailTag: null, isCurrent: () => true });
+  captureCheckpointVaultForCurrentChat_ACU();
+  chat.pop();
+  expect(await recoverLostCheckpointsAfterMessageDeletion_ACU()).toMatchObject({ recovered: false, graftedCount: 0 });
+  expect(mockReadDeletedReplyRollback).toHaveBeenCalledWith(chat, reply, 'chat-a', '');
+  expect(earlier.TavernDB_ACU_IsolatedData).toBe(earlierData);
+  expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
 });
 
 describe('captureCheckpointVaultForCurrentChat_ACU', () => {

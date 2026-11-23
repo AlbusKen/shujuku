@@ -11,12 +11,13 @@ const m = vi.hoisted(() => ({
   generationEnded: undefined as undefined | ((messageId: any) => void),
   generationStopped: undefined as undefined | (() => void),
   messageSent: undefined as undefined | ((messageId: any) => Promise<void>),
-  messageReceived: undefined as undefined | ((messageId?: any, type?: any) => void),
+  messageReceived: undefined as undefined | ((messageId?: any, type?: any) => void | Promise<boolean>),
   characterMessageRendered: undefined as undefined | ((messageId?: any, type?: any) => void),
   afterCommands: undefined as undefined | ((type: any, params: any, dryRun: any) => Promise<void>),
   userMessageRendered: undefined as undefined | ((messageId: any) => Promise<void>),
   worldbookLoaded: undefined as undefined | ((lores: Record<string, any[]>) => Promise<void>),
   projectSwipeWorldbook: vi.fn(),
+  registerSwipe: vi.fn(),
   currentChatKey: '',
   settings: { plotSettings: {} } as { plotSettings: Record<string, unknown>; worldSimulationPageEnabled?: boolean; plotSendDisguiseDisabled?: boolean },
   api: { chat: [] as any[], chatId: '', eventTypes: { CHAT_CHANGED: 'chat', MESSAGE_DELETED: 'deleted', MESSAGE_SWIPED: 'swiped', MESSAGE_SENT: 'message_sent', MESSAGE_UPDATED: 'message_updated', MESSAGE_RECEIVED: 'message_received', CHARACTER_MESSAGE_RENDERED: 'character_message_rendered', GENERATION_AFTER_COMMANDS: 'after_commands', GENERATION_STARTED: 'generation_started', GENERATION_ENDED: 'generation_ended', GENERATION_STOPPED: 'generation_stopped' }, eventSource: { on: vi.fn(), makeFirst: vi.fn(), makeLast: vi.fn(), emit: vi.fn() } } as any,
@@ -72,6 +73,10 @@ const m = vi.hoisted(() => ({
 vi.mock('../../../src/shared/host-api', () => ({ SillyTavern_API_ACU: m.api, jQuery_API_ACU: m.jquery, TavernHelper_API_ACU: undefined }));
 vi.mock('../../../src/shared/env', () => ({ topLevelWindow_ACU: { AutoCardUpdaterAPI: { _notifyTableUpdate: m.notify } } }));
 vi.mock('../../../src/presentation/theme/toast', () => ({ showToastr_ACU: vi.fn() }));
+vi.mock('../../../src/service/table/native-swipe-table', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../src/service/table/native-swipe-table')>(),
+  registerNativeSwipeTableCandidate_ACU: m.registerSwipe,
+}));
 vi.mock('../../../src/presentation/triggers/settings-ui-sync/settings-ui-connect', () => ({
   attemptToLoadCoreApis_ACU: vi.fn(() => true),
   handleContentOptimizationEvent_ACU: (...args: any[]) => m.handleNewMessage(...args),
@@ -244,6 +249,7 @@ beforeEach(() => {
   m.isQuiet.mockReturnValue(false);
   m.loadAgentControl.mockResolvedValue(undefined);
   m.autoUpdate.mockResolvedValue(undefined);
+  m.registerSwipe.mockResolvedValue('registered');
   m.publicCompletionObserver.mockReset();
   m.handleNewMessage.mockResolvedValue(undefined);
   delete m.settings.worldSimulationPageEnabled;
@@ -511,11 +517,47 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
     m.generationStarted!('swipe', {}, false);
     reply.mes = 'B';
     reply.swipes.push('B');
-    m.messageReceived!(1, 'swipe');
+    let finishRegistration!: (result: string) => void;
+    m.registerSwipe.mockImplementationOnce(() => new Promise(resolve => { finishRegistration = resolve; }));
+    const received = m.messageReceived!(1, 'swipe');
+    expect(m.registerSwipe).toHaveBeenCalledOnce();
+    await dispatchCompletionTasks_ACU();
+    expect(m.autoUpdate).not.toHaveBeenCalled();
+    finishRegistration('registered');
+    await expect(received).resolves.toBe(true);
     await dispatchCompletionTasks_ACU();
     expect(m.autoUpdate).toHaveBeenCalledExactlyOnceWith(undefined, expect.objectContaining({
       eventType: 'MESSAGE_RECEIVED', nativeSwipe: { index: 1, message: reply, slot: 1, previousBody: 'A' },
     }));
+  });
+
+  it.each(['GENERATION_ENDED', 'MESSAGE_SWIPED'] as const)('非流式候选槽写入后由 %s 完成登记', async event => {
+    m.currentChatKey = 'chat-a';
+    const reply = { is_user: false, mes: 'A', swipe_id: 1, swipes: ['A'] };
+    m.api.chat = [{ is_user: true, mes: '用户' }, reply];
+    await m.chatMutationHandlers.get('swiped')!(1);
+    m.generationStarted!('swipe', {}, false);
+    reply.mes = 'B';
+    reply.swipes.push('');
+    let finishRegistration!: (result: string) => void;
+    m.registerSwipe.mockImplementationOnce(() => new Promise(resolve => { finishRegistration = resolve; }));
+
+    expect(m.messageReceived!(1, 'swipe')).toBeUndefined();
+    await dispatchCompletionTasks_ACU();
+    expect(m.registerSwipe).not.toHaveBeenCalled();
+    expect(m.autoUpdate).not.toHaveBeenCalled();
+
+    reply.swipes[1] = 'B';
+    const next = event === 'GENERATION_ENDED'
+      ? m.generationEnded!(m.api.chat.length)
+      : m.chatMutationHandlers.get('swiped')!(1);
+    expect(m.registerSwipe).toHaveBeenCalledOnce();
+    expect(m.autoUpdate).not.toHaveBeenCalled();
+    finishRegistration('registered');
+    await next;
+    await dispatchCompletionTasks_ACU();
+    expect(m.registerSwipe).toHaveBeenCalledOnce();
+    if (event === 'GENERATION_ENDED') expect(m.autoUpdate).toHaveBeenCalledOnce();
   });
 
   it('原生 Swipe 读取世界书时等待本轮投影，普通生成仍使用原条目', async () => {
