@@ -64,7 +64,7 @@ function validFrames(frames: unknown, lastIndex: number): frames is Frames {
 function rollTailTag(tag: Tag | null): Tag | null | undefined {
   if (!tag) return null;
   if (!isV2TagData_ACU(tag) || tag.storageFrame.manualRefillProgress || tag.storageFrame.checkpoint?.manualRefillProgress
-    || tag.compatTransitionCheckpoint || tag.spv79TransitionCheckpoint) return undefined;
+    || tag.storageFrame.sheetTimelineEvents?.length || tag.compatTransitionCheckpoint || tag.spv79TransitionCheckpoint) return undefined;
   const { checkpoint, perSheetCheckpoints, summaryVectorIndexFrame, logEntries } = tag.storageFrame;
   if (checkpoint?.kind === 'full' && checkpoint.reason === 'compaction') return undefined;
   const initialFill = checkpoint?.kind === 'full' && checkpoint.reason === 'init'
@@ -106,8 +106,11 @@ function readArchive(chat: any[], index: number, isolationKey: string): SwipeArc
 
 export function hasNativeSwipeCandidateChange_ACU(chat: any[], index: unknown, isolationKey: string): boolean {
   const selected = readTailSwipe_ACU(chat, index);
-  const archive = selected?.body ? readArchive(chat, selected.index, isolationKey) : null;
-  return Boolean(archive && archive.activeBody !== selected?.body && archive.entries.some(entry => entry.body === selected?.body));
+  if (!selected?.body) return false;
+  const archive = readArchive(chat, selected.index, isolationKey);
+  if (archive) return archive.activeBody !== selected.body;
+  const boundBody = readBoundBody(selected.message, isolationKey, selected.swipes);
+  return Boolean(boundBody && boundBody !== selected.body);
 }
 
 function withFrames(chat: any[], isolationKey: string, frames: Frames): any[] {
@@ -122,11 +125,14 @@ function withFrames(chat: any[], isolationKey: string, frames: Frames): any[] {
   });
 }
 
-function captureTarget(scope: SwipeScope, index: number) {
+function captureTarget(scope: SwipeScope, index: number, deliveredSlot?: number) {
   const chat = getChatArray_ACU();
   const selected = readTailSwipe_ACU(chat, index);
-  if (!scope.isCurrent() || !selected?.body) return null;
-  const { message, body, slot, swipes } = selected;
+  if (!scope.isCurrent() || !selected) return null;
+  const { message, swipes } = selected;
+  const slot = deliveredSlot ?? selected.slot;
+  const body = deliveredSlot === undefined ? selected.body : swipes[slot];
+  if (!body || swipes.indexOf(body) !== swipes.lastIndexOf(body)) return null;
   const messages = [...chat];
   const prefixBodies = chat.slice(0, index).map(item => item?.mes ?? item?.message);
   const identity = getActiveChatStorageIdentity_ACU(chat);
@@ -134,7 +140,8 @@ function captureTarget(scope: SwipeScope, index: number) {
   const assertCurrent = () => {
     const current = readTailSwipe_ACU(chat, index);
     if (!scope.isCurrent() || getChatArray_ACU() !== chat || getActiveChatStorageIdentity_ACU(chat) !== identity || getCurrentStorageMode() !== mode
-      || current?.message !== message || current.slot !== slot || current.body !== body
+      || current?.message !== message || current.swipes[slot] !== body
+      || (deliveredSlot === undefined && (current.slot !== slot || current.body !== body))
       || messages.some((item, i) => item !== chat[i] || (i < index && (item?.mes ?? item?.message) !== prefixBodies[i]))) {
       throw new DOMException('Swipe 候选已变更。', 'AbortError');
     }
@@ -149,20 +156,27 @@ function storageMode(chat: any[], isolationKey: string) {
   }).mode;
 }
 
-function resolveRollView(chat: any[], intent: NativeSwipeTableIntent_ACU, isolationKey: string, swipes: string[]) {
-  const { index, message } = intent;
+function readBoundBody(message: any, isolationKey: string, swipes: string[]): string | undefined {
+  const binding = message[NATIVE_SWIPE_TABLE_FIELD_ACU]?.[isolationKey];
+  if (binding?.version !== 2 || binding.entries !== undefined || !Number.isInteger(binding.slot)) return;
+  const tag = readIsolatedTagData_ACU(message, isolationKey);
+  const body = swipes[binding.slot];
+  if (isV2TagData_ACU(tag)
+    && typeof binding.head === 'string' && binding.head === tag.storageFrame.headRevision
+    && body && binding.bodyFingerprint === getTableDataFingerprint_ACU(body)) return body;
+}
+
+function resolveRollView(
+  chat: any[], index: number, isolationKey: string, swipes: string[], solePreviousCandidate?: string,
+) {
+  const message = chat[index];
   const previousArchive = message[NATIVE_SWIPE_TABLE_FIELD_ACU];
   const binding = previousArchive?.[isolationKey];
   const archive = readArchive(chat, index, isolationKey);
   const liveFingerprint = fingerprint(chat, isolationKey);
   const tag = readIsolatedTagData_ACU(message, isolationKey);
-  const boundBody = Number.isInteger(binding?.slot) ? swipes[binding.slot] : undefined;
-  const hasBindingOnly = binding?.version === 2 && binding.entries === undefined;
-  const stableBinding = hasBindingOnly && isV2TagData_ACU(tag)
-    && typeof binding.head === 'string' && binding.head === tag.storageFrame.headRevision
-    && boundBody && binding.bodyFingerprint === getTableDataFingerprint_ACU(boundBody);
-  const solePreviousCandidate = intent.slot === 1 && (!binding || hasBindingOnly) ? intent.previousBody : null;
-  const activeBody = archive?.activeBody ?? (stableBinding ? boundBody : solePreviousCandidate);
+  const activeBody = archive?.activeBody ?? readBoundBody(message, isolationKey, swipes)
+    ?? ((!binding || (binding.version === 2 && binding.entries === undefined)) ? solePreviousCandidate : undefined);
   if (!activeBody || swipes.filter(item => item === activeBody).length !== 1
     || (archive && archive.activeFingerprint !== liveFingerprint)
     || readActiveProvisionalBridge_ACU(chat, isolationKey) || getCurrentFlightModeState_ACU().enabled) return 'unsupported' as const;
@@ -175,6 +189,25 @@ function resolveRollView(chat: any[], intent: NativeSwipeTableIntent_ACU, isolat
   return { previousArchive, archive, liveFingerprint, tag, activeBody, base, detached, mode };
 }
 
+/** Share the reply-local rollback with physical deletion, which preserves the surviving history. */
+export function readDeletedReplyRollback_ACU(chat: any[], deleted: any, chatKey: string, isolationKey: string) {
+  if (!deleted?.[NATIVE_SWIPE_TABLE_FIELD_ACU]?.[isolationKey]
+    || hasRuntimeOnlyPendingSheets_ACU({ chatKey, isolationKey })) return null;
+  const before = [...chat, deleted];
+  const index = chat.length;
+  const selected = readTailSwipe_ACU(before, index);
+  if (!selected?.body) return null;
+  const view = resolveRollView(before, index, isolationKey, selected.swipes);
+  if (typeof view === 'string' || view.activeBody !== selected.body) return null;
+  return {
+    tailTag: view.base[index],
+    isCurrent: () => getChatArray_ACU() === chat && chat.length === index
+      && chat.every((message, i) => message === before[i])
+      && deleted[NATIVE_SWIPE_TABLE_FIELD_ACU] === view.previousArchive
+      && fingerprint(before, isolationKey) === view.liveFingerprint,
+  };
+}
+
 /** Read the same roll view before the new candidate body exists. */
 export async function readNativeSwipeWorldbookData_ACU(
   intent: NativeSwipeTableIntent_ACU, chatKey: string, isolationKey: string, assertCurrent: () => void,
@@ -185,7 +218,7 @@ export async function readNativeSwipeWorldbookData_ACU(
   if (!selection || selection.message !== intent.message || selection.slot !== intent.slot
     || selection.slot !== selection.swipes.length) throw new DOMException('Swipe 候选已变更。', 'AbortError');
   if (hasRuntimeOnlyPendingSheets_ACU({ chatKey, isolationKey })) throw new Error('当前表格有未保存的改动。');
-  const view = resolveRollView(chat, intent, isolationKey, selection.swipes);
+  const view = resolveRollView(chat, intent.index, isolationKey, selection.swipes, intent.slot === 1 ? intent.previousBody : undefined);
   if (typeof view === 'string') throw new Error('无法确认 Swipe 前的表格基底。');
   if (view.mode === 'empty') return {};
   const replay = await loadTableStateFromFramesV2Detailed_ACU(view.detached, isolationKey, REPLAY_OPTIONS);
@@ -203,6 +236,7 @@ export async function readNativeSwipeWorldbookData_ACU(
 async function publishCandidate(
   target: NonNullable<ReturnType<typeof captureTarget>>, scope: SwipeScope, projection: any[],
   archive: SwipeArchive, assertBase: () => void,
+  indices: readonly number[] = Object.keys(archive.base).map(Number),
 ): Promise<boolean> {
   const { chat, index, message } = target;
   const { isolationKey } = scope;
@@ -220,8 +254,7 @@ async function publishCandidate(
   }, tx => tx.runCommit(async () => {
     assertBase();
     tx.assertFresh?.('native_swipe_publish');
-    const changes = Object.keys(archive.base).flatMap(key => {
-      const i = Number(key);
+    const changes = indices.flatMap(i => {
       const tag = readIsolatedTagData_ACU(projection[i], isolationKey);
       if (equal(tag, readIsolatedTagData_ACU(chat[i], isolationKey))) return [];
       const item = chat[i];
@@ -285,37 +318,85 @@ export async function restoreNativeSwipeTableCandidate_ACU(scope: SwipeScope, in
   return saved ? 'updated' : 'unsupported_checkpoint';
 }
 
-export async function refillNativeSwipeTableCandidate_ACU(
-  scope: SwipeScope, intent: NativeSwipeTableIntent_ACU, fill: (view: TableFillChatView_ACU) => Promise<boolean>,
-): Promise<NativeSwipeTableResult_ACU> {
+/** Persist the unfilled candidate before the host can start generating or selecting again. */
+export async function registerNativeSwipeTableCandidate_ACU(
+  scope: SwipeScope, intent: NativeSwipeTableIntent_ACU,
+): Promise<NativeSwipeTableResult_ACU | 'registered'> {
   const { index } = intent;
-  const target = captureTarget(scope, index);
-  if (!target || target.message !== intent.message || target.slot !== intent.slot) return 'unchanged';
+  const target = captureTarget(scope, index, intent.slot);
+  if (!target || target.message !== intent.message) return 'unchanged';
   const { body, swipes } = target;
   const { isolationKey } = scope;
-  const view = resolveRollView(target.chat, intent, isolationKey, swipes);
+  const view = resolveRollView(target.chat, index, isolationKey, swipes, intent.slot === 1 ? intent.previousBody : undefined);
   if (typeof view === 'string') return view;
   const { previousArchive, archive, liveFingerprint, tag, activeBody, base, detached } = view;
   if (activeBody === body) return 'unsupported';
 
-  // A request owns all writes its normal fill schedule makes, including writes before the last message.
   const assertBase = () => assertUnchanged(target, isolationKey, previousArchive, liveFingerprint);
-  const baseline = readFrames(detached, isolationKey);
-  assertBase();
-  if (!await fill({ chat: detached, assertCurrent: target.assertCurrent })) return 'unchanged';
-  assertBase();
-
-  const frames: Frames = {};
-  for (const [i, value] of readFrames(detached, isolationKey).entries()) {
-    if (equal(value, baseline[i])) continue;
-    base[i] = baseline[i];
-    frames[i] = value;
-  }
   const entries = (archive?.entries ?? [{ body: activeBody, frames: { [index]: tag } }])
     .filter(entry => entry.body !== body && swipes.includes(entry.body));
   const next: SwipeArchive = {
     version: 2, activeBody: body, activeFingerprint: fingerprint(detached, isolationKey),
-    base, entries: [...entries, { body, frames }],
+    base, entries: [...entries, { body, frames: {} }],
   };
-  return await publishCandidate(target, scope, detached, next, assertBase) ? 'updated' : 'unsupported_checkpoint';
+  if (!await publishCandidate(target, scope, detached, next, assertBase)) return 'unsupported_checkpoint';
+  return next.activeFingerprint === liveFingerprint ? 'registered' : 'updated';
+}
+
+export async function refillNativeSwipeTableCandidate_ACU(
+  scope: SwipeScope, intent: NativeSwipeTableIntent_ACU, fill: (view: TableFillChatView_ACU) => Promise<boolean>,
+): Promise<NativeSwipeTableResult_ACU> {
+  const target = captureTarget(scope, intent.index);
+  if (!target || target.message !== intent.message || target.slot !== intent.slot) return 'unchanged';
+  const { chat, index, message, body } = target;
+  const { isolationKey } = scope;
+  const archive = readArchive(chat, index, isolationKey);
+  const liveFingerprint = fingerprint(chat, isolationKey);
+  if (!archive || archive.activeBody !== body || archive.activeFingerprint !== liveFingerprint) return 'unsupported';
+  const previousArchive = message[NATIVE_SWIPE_TABLE_FIELD_ACU];
+  const assertBase = () => assertUnchanged(target, isolationKey, previousArchive, liveFingerprint);
+  const detached = withFrames(chat, isolationKey, {});
+  const baseline = readFrames(detached, isolationKey);
+  const base = { ...archive.base };
+  const active = archive.entries.find(entry => entry.body === body)!;
+  const frames = { ...active.frames };
+  const shared = new Map<number, Tag | null>();
+  const candidateIndices = new Set(archive.entries.flatMap(entry => Object.keys(entry.frames).map(Number)));
+  let canShareHistory = Object.keys(active.frames).length === 0;
+  if (!await fill({
+    chat: detached,
+    assertCurrent: assertBase,
+    onFramesPersisted(batchEndIndex, indices) {
+      // Earlier batches can share their writes while their input and affected frames are still common.
+      if (!canShareHistory || batchEndIndex === undefined || batchEndIndex < 0 || batchEndIndex >= index
+        || indices.some(i => i >= index || candidateIndices.has(i))) {
+        canShareHistory = false;
+        return;
+      }
+      for (const i of indices) shared.set(i, structuredClone(readIsolatedTagData_ACU(detached[i], isolationKey)));
+    },
+  })) return 'unchanged';
+  assertBase();
+
+  const changedIndices: number[] = [];
+  for (const [i, value] of readFrames(detached, isolationKey).entries()) {
+    const sharedFrame = shared.get(i);
+    if (equal(value, baseline[i]) && (sharedFrame === undefined || equal(sharedFrame, baseline[i]))) continue;
+    changedIndices.push(i);
+    if (sharedFrame !== undefined && equal(value, sharedFrame)) {
+      delete base[i];
+      delete frames[i];
+      continue;
+    }
+    if (sharedFrame !== undefined) base[i] = sharedFrame;
+    else if (!hasFrame(base, i)) base[i] = baseline[i];
+    if (equal(value, base[i])) delete frames[i];
+    else frames[i] = value;
+  }
+  if (!changedIndices.length) return 'unchanged';
+  const next: SwipeArchive = {
+    ...archive, activeFingerprint: fingerprint(detached, isolationKey), base,
+    entries: archive.entries.map(entry => entry === active ? { body, frames } : entry),
+  };
+  return await publishCandidate(target, scope, detached, next, assertBase, changedIndices) ? 'updated' : 'unsupported_checkpoint';
 }

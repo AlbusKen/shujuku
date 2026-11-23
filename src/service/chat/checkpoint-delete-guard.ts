@@ -27,6 +27,7 @@ import {
     saveChatToHostStrict_ACU,
 } from '../../data/gateways/chat-gateway';
 import { readIsolatedDataContainer_ACU, readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
+import { readDeletedReplyRollback_ACU } from '../table/native-swipe-table';
 import { isV2TagData_ACU } from '../table/storage-strategy-resolver';
 import { assertSingleActiveFullCheckpointV2_ACU } from '../table/storage-frame-v2-persist';
 import {
@@ -107,6 +108,28 @@ function entryHasArtifacts_ACU(entry: CheckpointVaultFrameEntry_ACU): boolean {
         || !!entry.compatTransitionCheckpoint;
 }
 
+function captureFrameEntry_ACU(message: any, tagData: unknown): CheckpointVaultFrameEntry_ACU | null {
+    if (!tagData || typeof tagData !== 'object') return null;
+    const frame = isV2TagData_ACU(tagData) ? tagData.storageFrame : null;
+    const spv79 = (tagData as any).spv79TransitionCheckpoint;
+    const compat = (tagData as any).compatTransitionCheckpoint;
+    const spv79TransitionCheckpoint = spv79?.kind === 'spv79_duplicate_row_id_transition' ? deepClone_ACU(spv79) : null;
+    const compatTransitionCheckpoint = compat?.kind === 'compat_replay_transition' ? deepClone_ACU(compat) : null;
+    if (!frame && !spv79TransitionCheckpoint && !compatTransitionCheckpoint) return null;
+    return {
+        messageRef: message,
+        fullCheckpoint: frame?.checkpoint?.kind === 'full' ? deepClone_ACU(frame.checkpoint) : null,
+        perSheetCheckpoints: frame && hasEntries_ACU(frame.perSheetCheckpoints) ? deepClone_ACU(frame.perSheetCheckpoints!) : null,
+        sheetTimelineEvents: frame?.sheetTimelineEvents ? deepClone_ACU(frame.sheetTimelineEvents) : [],
+        summaryVectorCheckpoint: frame?.summaryVectorIndexFrame?.checkpoint?.kind === 'vector_full'
+            ? { sourceTableKey: String(frame.summaryVectorIndexFrame.sourceTableKey || ''),
+                checkpoint: deepClone_ACU(frame.summaryVectorIndexFrame.checkpoint) }
+            : null,
+        spv79TransitionCheckpoint,
+        compatTransitionCheckpoint,
+    };
+}
+
 /**
  * 以当前聊天为权威重建保管库。
  * 调用时机：聊天加载完成、插件保存成功后、恢复嫁接成功后。
@@ -122,34 +145,10 @@ export function captureCheckpointVaultForCurrentChat_ACU(chatArg?: any[]): void 
         const container = readIsolatedDataContainer_ACU(message);
         if (!container) continue;
         for (const [isolationKey, tagData] of Object.entries(container)) {
-            if (!tagData || typeof tagData !== 'object') continue;
-            const frame = isV2TagData_ACU(tagData) ? tagData.storageFrame : null;
-            const spv79 = (tagData as any).spv79TransitionCheckpoint?.kind === 'spv79_duplicate_row_id_transition'
-                ? (tagData as any).spv79TransitionCheckpoint : null;
-            const compat = (tagData as any).compatTransitionCheckpoint?.kind === 'compat_replay_transition'
-                ? (tagData as any).compatTransitionCheckpoint : null;
-            if (!frame && !spv79 && !compat) continue;
-
-            const fullCheckpoint = frame?.checkpoint?.kind === 'full' ? deepClone_ACU(frame.checkpoint) : null;
-            const perSheetCheckpoints = frame && hasEntries_ACU(frame.perSheetCheckpoints)
-                ? deepClone_ACU(frame.perSheetCheckpoints!) : null;
-            const sheetTimelineEvents = frame?.sheetTimelineEvents ? deepClone_ACU(frame.sheetTimelineEvents) : [];
-            const vectorCheckpoint = frame?.summaryVectorIndexFrame?.checkpoint?.kind === 'vector_full'
-                ? {
-                    sourceTableKey: String(frame.summaryVectorIndexFrame.sourceTableKey || ''),
-                    checkpoint: deepClone_ACU(frame.summaryVectorIndexFrame.checkpoint),
-                }
-                : null;
+            const entry = captureFrameEntry_ACU(message, tagData);
+            if (!entry) continue;
             const entries = entriesByIsolationKey.get(isolationKey) || [];
-            entries.push({
-                messageRef: message,
-                fullCheckpoint,
-                perSheetCheckpoints,
-                sheetTimelineEvents,
-                summaryVectorCheckpoint: vectorCheckpoint,
-                spv79TransitionCheckpoint: spv79 ? deepClone_ACU(spv79) : null,
-                compatTransitionCheckpoint: compat ? deepClone_ACU(compat) : null,
-            });
+            entries.push(entry);
             entriesByIsolationKey.set(isolationKey, entries);
         }
     }
@@ -329,15 +328,33 @@ export async function recoverLostCheckpointsAfterMessageDeletion_ACU(): Promise<
     }
 
     const presentMessages = new Set<any>(chat);
+    const capturedVault = vault_ACU;
+    const rolledIsolationKey = getCurrentIsolationKey_ACU();
+    const deletedTail = capturedVault.messageIndices.size === chat.length + 1
+        && chat.every((message, index) => capturedVault.messageIndices.get(message) === index)
+        ? [...capturedVault.messageIndices].find(([, index]) => index === chat.length)?.[0]
+        : undefined;
+    const replyRollback = deletedTail && readDeletedReplyRollback_ACU(chat, deletedTail, chatKey, rolledIsolationKey);
     const lostItems: GraftPlanItem_ACU[] = [];
-    for (const [isolationKey, entries] of vault_ACU.entriesByIsolationKey) {
+    for (const [isolationKey, entries] of capturedVault.entriesByIsolationKey) {
         entries.forEach((entry, vaultIndex) => {
             if (presentMessages.has(entry.messageRef)) return;
+            if (replyRollback && isolationKey === rolledIsolationKey && entry.messageRef === deletedTail) return;
             if (!entryHasArtifacts_ACU(entry)) return;
             lostItems.push({ entry, isolationKey, vaultIndex });
         });
     }
-    if (lostItems.length === 0) return { recovered: false, graftedCount: 0 };
+    if (replyRollback) {
+        const tailAnchors = captureFrameEntry_ACU(deletedTail, replyRollback.tailTag);
+        if (tailAnchors && entryHasArtifacts_ACU(tailAnchors)) {
+            lostItems.push({ entry: tailAnchors, isolationKey: rolledIsolationKey,
+                vaultIndex: capturedVault.entriesByIsolationKey.get(rolledIsolationKey)?.length ?? 0 });
+        }
+    }
+    const lostReplyMaterial = replyRollback && capturedVault.materialEntries.some(entry => entry.messageRef === deletedTail);
+    if (lostItems.length === 0 && !lostReplyMaterial) {
+        return { recovered: false, graftedCount: 0 };
+    }
 
     return runTableWriteTransaction_ACU({
         source: 'system_cleanup',
@@ -369,6 +386,9 @@ export async function recoverLostCheckpointsAfterMessageDeletion_ACU(): Promise<
             groups: Array<{ sourceIndex: number; checkpoints: TableSheetCheckpointV2_ACU[] }>;
         }>();
         try {
+            if (replyRollback && (vault_ACU !== capturedVault || getCurrentIsolationKey_ACU() !== rolledIsolationKey || !replyRollback.isCurrent())) {
+                throw new Error('重生成期间数据库表格已改变。');
+            }
             // 无时间的快照保留更新者优先；timeline 按原物理位置收集后统一嫁接。
             for (const item of [...lostItems].reverse()) {
                 const { entry, isolationKey, vaultIndex } = item;

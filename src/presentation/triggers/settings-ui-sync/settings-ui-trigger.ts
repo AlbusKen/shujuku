@@ -29,7 +29,7 @@ import { logAutoFillSkip_ACU, logAutoFillStage_ACU, type AutoFillSkipContext_ACU
 import { isFillEligibleAiMessage_ACU } from '../../../service/runtime/message-handler';
 import { flushChatMutationRefresh_ACU } from '../../bootstrap/chat-mutation-scheduler';
 import {
-    refillNativeSwipeTableCandidate_ACU, restoreNativeSwipeTableCandidate_ACU,
+    refillNativeSwipeTableCandidate_ACU,
     type NativeSwipeTableIntent_ACU,
 } from '../../../service/table/native-swipe-table';
 
@@ -114,12 +114,11 @@ export function cancelPendingAutoFillEvent_ACU(): void {
       /** 捕获事件时的任务代次，重生成、停止或删楼后失效。 */
       isCurrentEvent?: () => boolean;
       nativeSwipe?: NativeSwipeTableIntent_ACU;
-      nativeSwipeSelection?: number;
     } = {},
   ): Promise<void> {
     const queueId = ++autoUpdateQueueId_ACU;
     const runId = performanceContext?.runId || `autofill-${queueId}`;
-    const { isCurrentChat, isCurrentEvent, nativeSwipe, nativeSwipeSelection, ...diagnosticContext } = triggerContext;
+    const { isCurrentChat, isCurrentEvent, nativeSwipe, ...diagnosticContext } = triggerContext;
     const context = { ...diagnosticContext, runId, queueId };
     const scoped = context.chatKey !== undefined || context.isolationKey !== undefined;
     const chatAtEnqueue = scoped ? getChatArray_ACU() : undefined;
@@ -143,17 +142,15 @@ export function cancelPendingAutoFillEvent_ACU(): void {
       logAutoFillStage_ACU('dequeued', context);
       try {
         if (!canProcessEvent('dequeue')) return;
-        if (nativeSwipe || nativeSwipeSelection !== undefined) {
+        if (nativeSwipe) {
           const scope = {
             chatKey: currentChatFileIdentifier_ACU,
             isolationKey: getCurrentIsolationKey_ACU(),
             isCurrent: () => canProcessEvent('swipe'),
           };
           try {
-            const result = nativeSwipe
-              ? await refillNativeSwipeTableCandidate_ACU(scope, nativeSwipe, view =>
-                  runAutomaticUpdateIfNeeded_ACU({ ...performanceContext, runId }, context, canProcessEvent, view))
-              : await restoreNativeSwipeTableCandidate_ACU(scope, nativeSwipeSelection!);
+            const result = await refillNativeSwipeTableCandidate_ACU(scope, nativeSwipe, view =>
+              runAutomaticUpdateIfNeeded_ACU({ ...performanceContext, runId }, context, canProcessEvent, view));
             logAutoFillStage_ACU('native_swipe_result', { ...context, diagnosticCode: result });
             if (result === 'updated' && canProcessEvent('swipe_refresh')) {
               await flushChatMutationRefresh_ACU('chat_modified_swiped');

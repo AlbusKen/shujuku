@@ -20,7 +20,8 @@ vi.mock('../../../src/service/table/table-write-transaction', () => ({
 
 import {
   captureNativeSwipeTableIntent_ACU, hasNativeSwipeCandidateChange_ACU,
-  readNativeSwipeWorldbookData_ACU, refillNativeSwipeTableCandidate_ACU, restoreNativeSwipeTableCandidate_ACU,
+  readDeletedReplyRollback_ACU, readNativeSwipeWorldbookData_ACU, refillNativeSwipeTableCandidate_ACU,
+  registerNativeSwipeTableCandidate_ACU, restoreNativeSwipeTableCandidate_ACU,
 } from '../../../src/service/table/native-swipe-table';
 import { getTableDataFingerprint_ACU } from '../../../src/service/table/table-data-upgrade-audit';
 
@@ -59,6 +60,12 @@ function deliverSwipe(body = 'B') {
   return intent!;
 }
 
+async function registerSwipe(body = 'B') {
+  const intent = deliverSwipe(body);
+  expect(['updated', 'registered']).toContain(await registerNativeSwipeTableCandidate_ACU(scope, intent));
+  return intent;
+}
+
 beforeEach(() => {
   vi.resetAllMocks();
   mocks.save.mockResolvedValue(undefined);
@@ -86,28 +93,31 @@ describe('原生末楼 Swipe 表格视图', () => {
     expect(mocks.save).not.toHaveBeenCalled();
   });
 
-  it('首个原生 Swipe 从旧存档建立分支，还原前楼基底并保留普通填表的补写楼层', async () => {
+  it('首个原生 Swipe 的前楼独立补填在所有候选间共享，重开后仍保留', async () => {
     const opening = mocks.chat[0][tableField][''];
     const first = tag('A');
-    expect(await refillNativeSwipeTableCandidate_ACU(scope, deliverSwipe(), async view => {
+    expect(await refillNativeSwipeTableCandidate_ACU(scope, await registerSwipe(), async view => {
       expect(view.chat.map(message => message.mes)).toEqual(['开场白', '继续', 'B']);
       expect(view.chat[0][tableField]['']).toEqual(opening);
       expect(view.chat[2][tableField]['']).toBeUndefined();
-      expect(mocks.chat[2][tableField]['']).toEqual(first);
+      expect(mocks.chat[2][tableField]['']).toBeUndefined();
       view.chat[0][tableField] = { '': seedTag(true) };
+      view.onFramesPersisted?.(0, [0]);
       view.chat[2][tableField] = { '': tag('B') };
+      view.onFramesPersisted?.(2, [2]);
       return true;
     })).toBe('updated');
-    expect(mocks.save).toHaveBeenCalledOnce();
-    expect(mocks.save.mock.calls[0][0].verifyFields.map((item: any) => item.messageIndex)).toEqual([0, 2, 2]);
+    expect(mocks.save).toHaveBeenCalledTimes(2);
+    expect(mocks.save.mock.calls[1][0].verifyFields.map((item: any) => item.messageIndex)).toEqual([0, 2, 2]);
     expect(mocks.chat[0][tableField]['']).toEqual(seedTag(true));
+    expect(Object.keys(mocks.chat[2][archiveField][''].base)).toEqual(['2']);
     const persisted = structuredClone(mocks.chat);
     mocks.chat.splice(0, mocks.chat.length, ...persisted);
 
     select(0);
     expect(hasNativeSwipeCandidateChange_ACU(mocks.chat, 2, '')).toBe(true);
     expect(await restoreNativeSwipeTableCandidate_ACU(scope, 2)).toBe('updated');
-    expect(mocks.chat[0][tableField]['']).toEqual(opening);
+    expect(mocks.chat[0][tableField]['']).toEqual(seedTag(true));
     expect(mocks.chat[2][tableField]['']).toEqual(first);
     select(1);
     expect(await restoreNativeSwipeTableCandidate_ACU(scope, 2)).toBe('updated');
@@ -115,13 +125,14 @@ describe('原生末楼 Swipe 表格视图', () => {
     expect(mocks.chat[2][tableField]['']).toEqual(tag('B'));
   });
 
-  it('第三个候选从共同状态开始，前两个候选的补写都能分别恢复', async () => {
-    expect(await refillNativeSwipeTableCandidate_ACU(scope, deliverSwipe(), async ({ chat }) => {
+  it('使用候选正文的批次即使也改写前楼，仍按候选恢复', async () => {
+    expect(await refillNativeSwipeTableCandidate_ACU(scope, await registerSwipe(), async ({ chat, onFramesPersisted }) => {
       chat[0][tableField] = { '': seedTag(true) };
       chat[2][tableField] = { '': tag('B') };
+      onFramesPersisted?.(2, [0, 2]);
       return true;
     })).toBe('updated');
-    expect(await refillNativeSwipeTableCandidate_ACU(scope, deliverSwipe('C'), async ({ chat }) => {
+    expect(await refillNativeSwipeTableCandidate_ACU(scope, await registerSwipe('C'), async ({ chat }) => {
       expect(chat[0][tableField]['']).toEqual(seedTag());
       expect(chat[2][tableField]['']).toBeUndefined();
       chat[2][tableField] = { '': tag('C') };
@@ -134,7 +145,8 @@ describe('原生末楼 Swipe 表格视图', () => {
   });
 
   it('普通调度没有安排填表时，也能切回原来的表格', async () => {
-    expect(await refillNativeSwipeTableCandidate_ACU(scope, deliverSwipe(), async () => true)).toBe('updated');
+    expect(await refillNativeSwipeTableCandidate_ACU(scope, await registerSwipe(), async () => true)).toBe('unchanged');
+    expect(mocks.save).toHaveBeenCalledOnce();
     expect(mocks.chat[2][tableField]['']).toBeUndefined();
     select(0);
     expect(await restoreNativeSwipeTableCandidate_ACU(scope, 2)).toBe('updated');
@@ -144,7 +156,7 @@ describe('原生末楼 Swipe 表格视图', () => {
   it('首稿初始化写出的整库结果从 B 的表格视图中移除', async () => {
     delete mocks.chat[0][tableField];
     mocks.chat[2][tableField] = { '': seedTag(true) };
-    expect(await refillNativeSwipeTableCandidate_ACU(scope, deliverSwipe(), async ({ chat }) => {
+    expect(await refillNativeSwipeTableCandidate_ACU(scope, await registerSwipe(), async ({ chat }) => {
       expect(chat[2][tableField]['']).toBeUndefined();
       chat[2][tableField] = { '': seedTag(true) };
       return true;
@@ -152,43 +164,45 @@ describe('原生末楼 Swipe 表格视图', () => {
   });
 
   it('填表失败后丢弃已经完成的局部批次', async () => {
-    expect(await refillNativeSwipeTableCandidate_ACU(scope, deliverSwipe(), async ({ chat }) => {
+    expect(await refillNativeSwipeTableCandidate_ACU(scope, await registerSwipe(), async ({ chat }) => {
       chat[0][tableField] = { '': seedTag(true) };
       return false;
     })).toBe('unchanged');
     expect(mocks.chat[0][tableField]['']).toEqual(seedTag());
-    expect(mocks.chat[2][tableField]['']).toEqual(tag('A'));
-    expect(mocks.save).not.toHaveBeenCalled();
+    expect(mocks.chat[2][tableField]['']).toBeUndefined();
+    expect(mocks.save).toHaveBeenCalledOnce();
   });
 
   it('切回 A 后拒绝迟到的 B 结果', async () => {
-    await expect(refillNativeSwipeTableCandidate_ACU(scope, deliverSwipe(), async ({ chat }) => {
+    await expect(refillNativeSwipeTableCandidate_ACU(scope, await registerSwipe(), async ({ chat }) => {
       chat[2][tableField] = { '': tag('B') };
       select(0);
+      await restoreNativeSwipeTableCandidate_ACU(scope, 2);
       return true;
     })).rejects.toMatchObject({ name: 'AbortError' });
     expect(mocks.chat[2][tableField]['']).toEqual(tag('A'));
-    expect(mocks.save).not.toHaveBeenCalled();
+    expect(mocks.save).toHaveBeenCalledTimes(2);
   });
 
   it('宿主保存失败时同时恢复全部涉及的楼层与归档', async () => {
+    const intent = await registerSwipe();
+    const previousArchive = mocks.chat[2][archiveField];
     mocks.save.mockRejectedValueOnce(new Error('host save failed'));
-    await expect(refillNativeSwipeTableCandidate_ACU(scope, deliverSwipe(), async ({ chat }) => {
+    await expect(refillNativeSwipeTableCandidate_ACU(scope, intent, async ({ chat }) => {
       chat[0][tableField] = { '': seedTag(true) };
       chat[2][tableField] = { '': tag('B') };
       return true;
     })).rejects.toThrow('host save failed');
     expect(mocks.chat[0][tableField]['']).toEqual(seedTag());
-    expect(mocks.chat[2][tableField]['']).toEqual(tag('A'));
-    expect(mocks.chat[2][archiveField]).toBeUndefined();
+    expect(mocks.chat[2][tableField]['']).toBeUndefined();
+    expect(mocks.chat[2][archiveField]).toBe(previousArchive);
   });
 
   it('拒绝给没有归属记录的多个旧候选猜测表格归属', async () => {
     mocks.chat[2].swipes.push('X');
     select(1);
-    const fill = vi.fn();
-    expect(await refillNativeSwipeTableCandidate_ACU(scope, deliverSwipe(), fill)).toBe('unsupported');
-    expect(fill).not.toHaveBeenCalled();
+    expect(await registerNativeSwipeTableCandidate_ACU(scope, deliverSwipe())).toBe('unsupported');
+    expect(mocks.save).not.toHaveBeenCalled();
   });
 
   it('刷新后使用随普通填表保存的标记，识别实际拥有表格的候选', async () => {
@@ -200,11 +214,46 @@ describe('原生末楼 Swipe 表格视图', () => {
     } };
     const persisted = structuredClone(mocks.chat);
     mocks.chat.splice(0, mocks.chat.length, ...persisted);
-    expect(await refillNativeSwipeTableCandidate_ACU(scope, deliverSwipe(), async ({ chat }) => {
+    expect(await refillNativeSwipeTableCandidate_ACU(scope, await registerSwipe(), async ({ chat }) => {
       chat[2][tableField] = { '': tag('B') };
       return true;
     })).toBe('updated');
     expect(mocks.chat[2][archiveField][''].entries.map((entry: any) => entry.body)).toEqual(['A', 'B']);
+  });
+
+  it.each([0, 1])('跳过末尾 %s 楼时，下一次 Swipe 可在填表完成前成立', async skipFloors => {
+    const intent = await registerSwipe();
+    const targetIndex = skipFloors === 0 ? 2 : 0;
+    let finish!: () => void;
+    const waitForModel = new Promise<void>(resolve => { finish = resolve; });
+    const late = refillNativeSwipeTableCandidate_ACU(scope, intent, async ({ chat }) => {
+      await waitForModel;
+      chat[targetIndex][tableField] = { '': tag('late-B') };
+      return true;
+    });
+    const rejected = expect(late).rejects.toMatchObject({ name: 'AbortError' });
+    const next = await registerSwipe('C');
+    finish();
+    await rejected;
+    expect(mocks.chat[0][tableField]['']).toEqual(seedTag());
+    expect(mocks.chat[2][tableField]['']).toBeUndefined();
+    const persisted = skipFloors === 1 ? seedTag(true) : tag('C');
+    expect(await refillNativeSwipeTableCandidate_ACU(scope, next, async ({ chat, onFramesPersisted }) => {
+      chat[targetIndex][tableField] = { '': persisted };
+      onFramesPersisted?.(targetIndex, [targetIndex]);
+      return true;
+    })).toBe('updated');
+    select(1);
+    expect(await restoreNativeSwipeTableCandidate_ACU(scope, 2)).toBe('updated');
+    expect(mocks.chat[0][tableField]['']).toEqual(skipFloors === 1 ? persisted : seedTag());
+    expect(mocks.chat[2][tableField]['']).toBeUndefined();
+    select(2);
+    expect(await restoreNativeSwipeTableCandidate_ACU(scope, 2)).toBe('updated');
+    expect(mocks.chat[targetIndex][tableField]['']).toEqual(persisted);
+    const removed = mocks.chat.pop();
+    const rollback = readDeletedReplyRollback_ACU(mocks.chat, removed, 'chat', '');
+    expect(rollback?.tailTag).toBeNull();
+    expect(mocks.chat[0][tableField]['']).toEqual(skipFloors === 1 ? persisted : seedTag());
   });
 
   it('已有预览版归档仍可恢复，并在保存时换成分支格式', async () => {

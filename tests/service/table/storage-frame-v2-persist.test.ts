@@ -403,14 +403,16 @@ describe('persistTableMutationLogV2_ACU incremental replacement', () => {
     const live = structuredClone(mocks.chat);
     const detached = structuredClone(mocks.chat);
     detached[1].mes = 'B';
+    const onFramesPersisted = vi.fn();
     for (const index of [0, 1]) {
       const result = await persistTableMutationLogV2_ACU({
         ...makeReplacementOptions(index), source: 'group_fill', replaceExistingIncremental: undefined,
-        chatView: { chat: detached, assertCurrent: vi.fn() },
+        chatView: { chat: detached, assertCurrent: vi.fn(), onFramesPersisted },
       });
       expect(result.saved).toBe(true);
     }
     expect(mocks.chat).toEqual(live);
+    expect(onFramesPersisted.mock.calls).toEqual([[0, [0]], [1, [1]]]);
     expect(detached.map(message => message.TavernDB_ACU_IsolatedData[''].storageFrame.logEntries.length)).toEqual([1, 1]);
     expect(mocks.saveChat).not.toHaveBeenCalled();
     expect(mocks.saveChatStrict).not.toHaveBeenCalled();
