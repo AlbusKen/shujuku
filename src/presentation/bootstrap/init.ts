@@ -1011,11 +1011,24 @@ export   function mainInitialize_ACU() {
             debug?.step('plot_start', { plan, recall, freshIntent: isRecentUserSendIntent_ACU(), ...(planGate ? { reason: planGate.reason } : {}) });
             // #59：最后一楼是本次记录的用户发送但已超出触发时间窗时，提示本轮未执行剧情推进。
             if (planGate?.reason === 'stale_user_message') showToastr_ACU('warning', '距离本次发送已超过触发时间窗，本轮未执行剧情推进。', '剧情推进');
-            if (!recall && !plan) { debug?.step('plot_skip', { reason: vectorOnly ? 'vector_only' : (planGate?.reason ?? 'disabled_or_ineligible') }); return; }
             const input = getSendTextareaValue_ACU();
             const pendingInput = isPendingDisguiseGenerationType_ACU(type) && !!input.trim();
             const chat = SillyTavern_API_ACU.chat;
-            const existing = chat[chat.length - 1];
+            const existing = Array.isArray(chat) ? chat[chat.length - 1] : undefined;
+            if (!recall && !plan) {
+              // 剧情推进和向量召回都关闭时，普通用户首轮发送同样需要把初始模板 checkpoint 落在 0 层开场白，
+              // 让首个 AI 回复的填表增量写入新回复楼层而不是把带填表数据的 init full checkpoint 直接写在新回复上。
+              if ((pendingInput || existing?.is_user)
+                && !isQuietLikeGeneration_ACU(type, params)
+                && !params?.automatic_trigger
+                && type !== 'swipe'
+                && type !== 'impersonate'
+                && !isZeroLayerOwnedChat_ACU()) {
+                await ensureInitialSeedCheckpointBeforeGeneration_ACU('generation_after_commands_before_ai', { allowPendingFirstUserMessage: true });
+              }
+              debug?.step('plot_skip', { reason: vectorOnly ? 'vector_only' : (planGate?.reason ?? 'disabled_or_ineligible') });
+              return;
+            }
             if (!pendingInput && !existing?.is_user) { debug?.step('plot_skip', { reason: 'no_input' }); return; }
             const originalText = pendingInput ? input : String(existing.mes || '');
             if (vectorOnly) {

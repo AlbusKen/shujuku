@@ -362,6 +362,41 @@ describe('TavernHelper 已规划请求幂等', () => {
   });
 });
 
+describe('普通发送首轮 0 层模板基线初始化', () => {
+  it('关闭剧情推进与向量召回时，普通用户首轮发送仍会在生成前建立 0 层初始模板 checkpoint', async () => {
+    m.shouldProcessPlot.mockReturnValue(false);
+    m.shouldProcessSummary.mockReturnValue(false);
+    m.api.chat = [{ is_user: false, mes: '开场白' }];
+    m.input = '玩家第一条发言';
+
+    await m.api.eventSource.emit('after_commands', 'normal', {}, false);
+
+    expect(m.ensureSeed).toHaveBeenCalledWith({
+      reason: 'generation_after_commands_before_ai',
+      allowPendingFirstUserMessage: true,
+    });
+  });
+
+  it('quiet、dryRun、regenerate、swipe、impersonate、自动触发与无用户输入时不触发首轮初始化', async () => {
+    m.shouldProcessPlot.mockReturnValue(false);
+    m.shouldProcessSummary.mockReturnValue(false);
+    m.api.chat = [{ is_user: false, mes: '开场白' }];
+    m.input = '玩家发言';
+
+    m.isQuiet.mockReturnValueOnce(true);
+    await m.api.eventSource.emit('after_commands', 'quiet', {}, false);
+    await m.api.eventSource.emit('after_commands', 'normal', {}, true);
+    await m.api.eventSource.emit('after_commands', 'regenerate', {}, false);
+    await m.api.eventSource.emit('after_commands', 'swipe', {}, false);
+    await m.api.eventSource.emit('after_commands', 'impersonate', {}, false);
+    await m.api.eventSource.emit('after_commands', 'normal', { automatic_trigger: true }, false);
+    m.input = '';
+    await m.api.eventSource.emit('after_commands', 'normal', {}, false);
+
+    expect(m.ensureSeed).not.toHaveBeenCalled();
+  });
+});
+
 
 describe('发送意图捕获', () => {
   it('发送控件重建后仍捕获意图，重复安装不重复绑定', async () => {

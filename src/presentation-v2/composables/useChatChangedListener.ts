@@ -17,7 +17,10 @@
  */
 import { onBeforeUnmount, ref, type Ref } from 'vue';
 import { SillyTavern_API_ACU } from '../../shared/host-api';
-import { subscribeChatRuntimeReloaded_ACU } from '../../shared/chat-runtime-reload-signal';
+import {
+  subscribeChatMutationReloaded_ACU,
+  subscribeChatRuntimeReloaded_ACU,
+} from '../../shared/chat-runtime-reload-signal';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { useApiPresetStore } from '../stores/api-preset-store';
 import { usePlotPresetStore } from '../stores/plot-preset-store';
@@ -107,7 +110,16 @@ export function useChatChangedListener(): void {
     runChatChangedRefresh();
   }
 
+  function onChatMutationReloaded(): void {
+    if (mutationTimer) {
+      clearTimeout(mutationTimer);
+      mutationTimer = null;
+    }
+    chatMutationTick.value++;
+  }
+
   const unsubscribeReloaded = subscribeChatRuntimeReloaded_ACU(onChatRuntimeReloaded);
+  const unsubscribeMutationReloaded = subscribeChatMutationReloaded_ACU(onChatMutationReloaded);
   eventSource.on(eventTypes.CHAT_CHANGED, onChatChanged);
   for (const eventName of mutationEventNames) eventSource.on(eventName, onChatMutated);
 
@@ -115,6 +127,7 @@ export function useChatChangedListener(): void {
     if (pendingTimer) clearTimeout(pendingTimer);
     if (mutationTimer) clearTimeout(mutationTimer);
     unsubscribeReloaded();
+    unsubscribeMutationReloaded();
     try {
       eventSource.removeListener(eventTypes.CHAT_CHANGED, onChatChanged);
       for (const eventName of mutationEventNames) eventSource.removeListener(eventName, onChatMutated);

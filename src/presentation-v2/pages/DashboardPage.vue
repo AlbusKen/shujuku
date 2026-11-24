@@ -102,7 +102,7 @@ import AcuPanelGrid from "../components/_lib/AcuPanelGrid.vue";
 import AcuSegmentedControl from "../components/_lib/AcuSegmentedControl.vue";
 import DashboardStorageModeSection from "../components/DashboardStorageModeSection.vue";
 import ToggleRow from "../components/DashboardToggleRow.vue";
-import { useChatChangedTick } from "../composables/useChatChangedListener";
+import { useChatChangedTick, useChatMutationTick } from "../composables/useChatChangedListener";
 import { useTemplateRuntimeChangeTick } from "../composables/useTemplateRuntimeChangeListener";
 import { useDashboardPage } from "../composables/useDashboardPage";
 import {
@@ -207,6 +207,9 @@ onMounted(() => {
   void refreshAll();
 });
 watch(useChatChangedTick(), () => {
+  void refreshAll();
+});
+watch(useChatMutationTick(), () => {
   void refreshAll();
 });
 watch(useTemplateRuntimeChangeTick(), () => {

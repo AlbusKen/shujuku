@@ -361,7 +361,7 @@ import TableSelector from "../components/TableSelector.vue";
 import TableTemplatePresetPanel from "../components/TableTemplatePresetPanel.vue";
 import WorldbookEntryPickerBody from "../components/WorldbookEntryPickerBody.vue";
 import WorldbookSelector from "../components/WorldbookSelector.vue";
-import { useChatChangedTick } from "../composables/useChatChangedListener";
+import { useChatChangedTick, useChatMutationTick } from "../composables/useChatChangedListener";
 import { useDashboardPage } from "../composables/useDashboardPage";
 import { useFormFillInjectionTarget } from "../composables/useFormFillInjectionTarget";
 import {
@@ -501,6 +501,9 @@ onMounted(() => {
   void refreshAll();
 });
 watch(useChatChangedTick(), () => {
+  void refreshAll();
+});
+watch(useChatMutationTick(), () => {
   void refreshAll();
 });
 watch(useTemplateRuntimeChangeTick(), () => {

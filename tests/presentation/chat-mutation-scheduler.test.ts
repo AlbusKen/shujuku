@@ -267,6 +267,18 @@ describe('#56 删楼刷新可等待', () => {
     expect(h.refreshUI).toHaveBeenNthCalledWith(2, { awaitFrontendReadback: false });
   });
 
+  it('删楼刷新完成后发出 chatMutationReloaded 信号通知新 UI 同步状态', async () => {
+    const { subscribeChatMutationReloaded_ACU } = await import('../../src/shared/chat-runtime-reload-signal');
+    const listener = vi.fn();
+    const unsubscribe = subscribeChatMutationReloaded_ACU(listener);
+    try {
+      await flushChatMutationRefresh_ACU('chat_modified_deleted');
+      expect(listener).toHaveBeenCalledTimes(1);
+    } finally {
+      unsubscribe();
+    }
+  });
+
 });
 
 });

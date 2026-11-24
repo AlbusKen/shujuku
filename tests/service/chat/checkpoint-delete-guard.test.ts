@@ -106,6 +106,13 @@ function logFrame(entries: any[] = [{ seq: 1, operations: [] }]) {
 beforeEach(() => {
   vi.clearAllMocks();
   __resetCheckpointDeleteGuardForTests_ACU();
+  registerMaterialCheckpointRecoveryAdapter_ACU({
+    capture: () => null,
+    graftContinuation: () => false,
+    graftSimulation: () => false,
+    assertContinuation: () => null,
+    assertSimulation: () => null,
+  });
   mockState.chatKey = 'chat-a';
   mockSaveChatToHostStrict.mockResolvedValue(undefined);
   mockAssertSingleFull.mockReturnValue(null);
@@ -586,5 +593,269 @@ describe('recoverLostCheckpointsAfterMessageDeletion_ACU', () => {
     expect(rolled.error).toContain('多个活跃基线');
     expect(keep._qrf_continuation_agent).toBeUndefined();
     expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
+  });
+
+  it('删末尾楼层时，不把带填表数据的 init full checkpoint 回退嫁接到开场白且同步保管库', async () => {
+    const greeting = aiMsg('开场白');
+    const user = userMsg('用户消息');
+    const firstReply = aiMsg('一楼回复', {
+      version: 2,
+      checkpoint: {
+        kind: 'full',
+        createdAt: 2000,
+        reason: 'init',
+        data: { sheet_0: { name: '物品表', content: [['row_id', '物品名'], ['1', '一楼获得的剑']] } },
+        event: { filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'], groupKeys: ['sheet_0'] },
+      },
+      logEntries: [],
+    });
+    const chat = [greeting, user, firstReply];
+    mockGetChatArray.mockReturnValue(chat);
+    captureCheckpointVaultForCurrentChat_ACU();
+
+    chat.splice(2, 1); // 删除一楼回复
+    const result = await recoverLostCheckpointsAfterMessageDeletion_ACU();
+
+    expect(result).toEqual({ recovered: false, graftedCount: 0 });
+    expect(greeting.TavernDB_ACU_IsolatedData).toBeUndefined();
+    expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
+    // 保管库已同步为幸存聊天，旧楼层产物不会在后续操作中复活
+    expect(__getCheckpointVaultForTests_ACU()?.isolationKeys).toEqual([]);
+  });
+
+  it('删末尾楼层时，不把手动填表的 sheet_rebase 与未来 lastFilledAiFloor 回退嫁接到更早楼层', async () => {
+    const cleanInit = {
+      kind: 'full' as const,
+      createdAt: 1000,
+      reason: 'init' as const,
+      data: { sheet_0: { name: '物品表', content: [['row_id', '物品名']] } },
+      event: { filledSheetKeys: [], changedSheetKeys: [], groupKeys: [] },
+    };
+    const greeting = aiMsg('开场白', { version: 2, checkpoint: cleanInit, logEntries: [] });
+    const user = userMsg('用户消息');
+    const filledReply = aiMsg('一楼回复', {
+      version: 2,
+      logEntries: [{ seq: 1, operations: [] }],
+      sheetTimelineEvents: [{
+        ordinal: 0,
+        checkpoint: {
+          kind: 'sheet_full',
+          createdAt: 3000,
+          reason: 'manual',
+          sheetKey: 'sheet_0',
+          data: { name: '物品表', content: [['row_id', '物品名'], ['1', '手动填写的剑']] },
+          scheduleSummary: { lastFilledAiFloor: 2 },
+          timeline: { kind: 'sheet_rebase', activateAtMessageIndex: 2, afterSeq: 1 },
+        },
+      }],
+    });
+    const chat = [greeting, user, filledReply];
+    mockGetChatArray.mockReturnValue(chat);
+    captureCheckpointVaultForCurrentChat_ACU();
+
+    chat.splice(2, 1); // 删除手动填表后的一楼回复
+    const result = await recoverLostCheckpointsAfterMessageDeletion_ACU();
+
+    expect(result).toEqual({ recovered: false, graftedCount: 0 });
+    const greetingFrame = greeting.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(greetingFrame.checkpoint).toEqual(cleanInit);
+    expect(greetingFrame.sheetTimelineEvents).toBeUndefined();
+    expect(greetingFrame.perSheetCheckpoints).toBeUndefined();
+    expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
+  });
+
+  it('删末尾楼层时，不把 manual_refill_template_root 与 manual sheet_rebase 回退嫁接到无帧开场白', async () => {
+    const greeting = aiMsg('开场白');
+    const user = userMsg('用户消息');
+    const manualReply = aiMsg('一楼回复', {
+      version: 2,
+      checkpoint: {
+        kind: 'full',
+        createdAt: 2500,
+        reason: 'manual',
+        data: { sheet_0: { name: '物品表', content: [['row_id', '物品名']] } },
+        fallbackProvenance: {
+          version: 1,
+          kind: 'manual_refill_template_root',
+          runId: 'manual-refill::2:fp',
+          isolationKey: '',
+          targetSheetKeys: ['sheet_0'],
+          rangeStartMessageIndex: 2,
+          rangeEndMessageIndex: 2,
+          templateFingerprint: 'fp',
+          createdAt: 2500,
+        },
+      },
+      logEntries: [],
+      sheetTimelineEvents: [{
+        ordinal: 0,
+        checkpoint: {
+          kind: 'sheet_full',
+          createdAt: 2600,
+          reason: 'manual',
+          sheetKey: 'sheet_0',
+          data: { name: '物品表', content: [['row_id', '物品名'], ['1', '手填内容']] },
+          scheduleSummary: { lastFilledAiFloor: 2 },
+          timeline: { kind: 'sheet_rebase', activateAtMessageIndex: 2, afterSeq: 0 },
+        },
+      }],
+    });
+    const chat = [greeting, user, manualReply];
+    mockGetChatArray.mockReturnValue(chat);
+    captureCheckpointVaultForCurrentChat_ACU();
+
+    chat.splice(2, 1);
+    const result = await recoverLostCheckpointsAfterMessageDeletion_ACU();
+
+    expect(result).toEqual({ recovered: false, graftedCount: 0 });
+    expect(greeting.TavernDB_ACU_IsolatedData).toBeUndefined();
+    expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
+  });
+
+  it('删末尾楼层时，跳过 schema_change sheet_rebase 但保留同楼层 sheet_hide 并截断未来 scheduleSummary', async () => {
+    const greeting = aiMsg('开场白', { version: 2, checkpoint: fullCheckpoint(), logEntries: [{ seq: 3, operations: [] }] });
+    const tailReply = aiMsg('末尾楼层', {
+      version: 2,
+      logEntries: [],
+      sheetTimelineEvents: [
+        {
+          ordinal: 0,
+          checkpoint: {
+            kind: 'sheet_full',
+            createdAt: 3000,
+            reason: 'schema_change',
+            sheetKey: 'sheet_0',
+            data: { name: '物品表', content: [['row_id', '物品名'], ['1', '末尾楼填表内容']] },
+            scheduleSummary: { lastFilledAiFloor: 2, lastChangedAiFloor: 2 },
+            timeline: { kind: 'sheet_rebase', activateAtMessageIndex: 1, afterSeq: 0 },
+          },
+        },
+        {
+          ordinal: 1,
+          checkpoint: {
+            ...hideCheckpoint('sheet_9', 1),
+            scheduleSummary: { lastFilledAiFloor: 2, lastChangedAiFloor: 2 },
+          },
+        },
+      ],
+    });
+    const chat = [greeting, tailReply];
+    mockGetChatArray.mockReturnValue(chat);
+    captureCheckpointVaultForCurrentChat_ACU();
+
+    chat.splice(1, 1);
+    const result = await recoverLostCheckpointsAfterMessageDeletion_ACU();
+
+    expect(result).toEqual({ recovered: true, graftedCount: 1 });
+    const frame = greeting.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(frame.sheetTimelineEvents).toHaveLength(1);
+    expect(frame.sheetTimelineEvents[0].checkpoint.sheetKey).toBe('sheet_9');
+    expect(frame.sheetTimelineEvents[0].checkpoint.timeline).toEqual({
+      kind: 'sheet_hide',
+      activateAtMessageIndex: 0,
+      afterSeq: 3,
+    });
+    expect(frame.sheetTimelineEvents[0].checkpoint.scheduleSummary).toEqual({
+      lastFilledAiFloor: 1,
+      lastChangedAiFloor: 1,
+    });
+  });
+
+  it('删末尾压缩根回退嫁接到更早增量帧时，截断超出幸存楼层数的 scheduleSummary', async () => {
+    const earlierMsg = aiMsg('更早楼', logFrame([{ seq: 2, operations: [] }]));
+    const compactionRoot = {
+      ...fullCheckpoint(),
+      scheduleSummary: {
+        sheet_0: { lastFilledAiFloor: 3, lastChangedAiFloor: 3 },
+      },
+    };
+    const rootMsg = aiMsg('末尾压缩根', { version: 2, checkpoint: compactionRoot, logEntries: [] });
+    const chat = [earlierMsg, rootMsg];
+    mockGetChatArray.mockReturnValue(chat);
+    captureCheckpointVaultForCurrentChat_ACU();
+
+    chat.splice(1, 1);
+    const result = await recoverLostCheckpointsAfterMessageDeletion_ACU();
+
+    expect(result.recovered).toBe(true);
+    const frame = earlierMsg.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(frame.logEntries).toEqual([]);
+    expect(frame.checkpoint.scheduleSummary).toEqual({
+      sheet_0: { lastFilledAiFloor: 1, lastChangedAiFloor: 1 },
+    });
+  });
+
+  it('删掉聊天里唯一 AI 楼层后同步保管库，新生成的 AI 楼层不会被旧已删 checkpoint 复活污染', async () => {
+    const user = userMsg('用户消息');
+    const filledOnlyAi = aiMsg('唯一AI', {
+      version: 2,
+      checkpoint: {
+        kind: 'full',
+        createdAt: 2000,
+        reason: 'init',
+        data: { sheet_0: { name: '物品表', content: [['row_id', '物品名'], ['1', '旧数据']] } },
+        event: { filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'], groupKeys: ['sheet_0'] },
+      },
+      logEntries: [],
+    });
+    const chat = [user, filledOnlyAi];
+    mockGetChatArray.mockReturnValue(chat);
+    captureCheckpointVaultForCurrentChat_ACU();
+
+    chat.splice(1, 1); // 删掉唯一 AI，只剩用户消息
+    const first = await recoverLostCheckpointsAfterMessageDeletion_ACU();
+    expect(first).toEqual({ recovered: false, graftedCount: 0 });
+    expect(__getCheckpointVaultForTests_ACU()?.isolationKeys).toEqual([]);
+
+    // 重生成新的 AI 楼层后再发生一次删楼，旧 checkpoint 绝不能复活到新 AI 楼层上
+    const regeneratedAi = aiMsg('新AI');
+    const extraUser = userMsg('再发一条');
+    chat.push(regeneratedAi, extraUser);
+    chat.splice(2, 1);
+    const second = await recoverLostCheckpointsAfterMessageDeletion_ACU();
+    expect(second).toEqual({ recovered: false, graftedCount: 0 });
+    expect(regeneratedAi.TavernDB_ACU_IsolatedData).toBeUndefined();
+  });
+
+  it('删中间/更早楼层（存在后继 AI 楼层）时，init full 与 manual sheet_rebase 仍按前移语义嫁接', async () => {
+    const initRoot = {
+      kind: 'full' as const,
+      createdAt: 1000,
+      reason: 'init' as const,
+      data: { sheet_0: { name: '物品表', content: [['row_id', '物品名'], ['1', '初始剑']] } },
+    };
+    const manualRebase = {
+      kind: 'sheet_full' as const,
+      createdAt: 1500,
+      reason: 'manual' as const,
+      sheetKey: 'sheet_0',
+      data: { name: '物品表', content: [['row_id', '物品名'], ['1', '重填剑']] },
+      scheduleSummary: { lastFilledAiFloor: 1 },
+      timeline: { kind: 'sheet_rebase' as const, activateAtMessageIndex: 0, afterSeq: 0 },
+    };
+    const earlier = aiMsg('早楼', {
+      version: 2,
+      checkpoint: initRoot,
+      logEntries: [],
+      sheetTimelineEvents: [{ ordinal: 0, checkpoint: manualRebase }],
+    });
+    const later = aiMsg('后继楼', logFrame([{ seq: 5, operations: [] }]));
+    const chat = [earlier, later];
+    mockGetChatArray.mockReturnValue(chat);
+    captureCheckpointVaultForCurrentChat_ACU();
+
+    chat.splice(0, 1); // 删早楼，后继楼幸存 → 前移嫁接
+    const result = await recoverLostCheckpointsAfterMessageDeletion_ACU();
+
+    expect(result).toEqual({ recovered: true, graftedCount: 2 });
+    const laterFrame = later.TavernDB_ACU_IsolatedData[''].storageFrame;
+    expect(laterFrame.checkpoint).toEqual(initRoot);
+    expect(laterFrame.sheetTimelineEvents).toHaveLength(1);
+    expect(laterFrame.sheetTimelineEvents[0].checkpoint.timeline).toEqual({
+      kind: 'sheet_rebase',
+      activateAtMessageIndex: 0,
+      afterSeq: 0,
+    });
+    expect(laterFrame.logEntries).toEqual([{ seq: 5, operations: [] }]);
   });
 });

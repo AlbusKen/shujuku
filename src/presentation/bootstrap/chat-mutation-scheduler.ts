@@ -25,6 +25,7 @@ import { isVectorPipelineEnabledForCurrentChat_ACU } from '../../service/fill-mo
 import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../../service/runtime/state-manager';
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { bumpTableReplayGeneration_ACU } from '../../shared/table-replay-generation';
+import { notifyChatMutationReloaded_ACU } from '../../shared/chat-runtime-reload-signal';
 
 /** 连续事件停止后多久执行一轮；旧行为是 500ms。 */
 export const TRAILING_DELAY_MS_ACU = 1200;
@@ -163,6 +164,7 @@ async function executeMutationRound_ACU(awaitFrontendReadback: boolean): Promise
         : await refreshMergedDataAndNotifyWithUI_ACU({ awaitFrontendReadback: false });
       if (refreshed?.degraded) degraded = true;
       if (refreshed?.worldbookRefreshFailed) worldbookFailed = true;
+      notifyChatMutationReloaded_ACU();
     } catch (e: any) {
       ok = false;
       degraded = true;

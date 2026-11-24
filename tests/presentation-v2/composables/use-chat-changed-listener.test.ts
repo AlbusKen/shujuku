@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp, defineComponent, h } from 'vue';
 
 import { useChatChangedListener, useChatMutationTick } from '../../../src/presentation-v2/composables/useChatChangedListener';
+import { notifyChatMutationReloaded_ACU } from '../../../src/shared/chat-runtime-reload-signal';
 import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
 
 function createEventSource() {
@@ -63,5 +64,25 @@ describe('useChatChangedListener · 楼层变动计数', () => {
     expect(eventSource.on).toHaveBeenCalledTimes(1);
     expect(eventSource.on).toHaveBeenCalledWith('chat_changed', expect.any(Function));
     app.unmount();
+  });
+
+  it('删楼异步重载完成信号立即刷新计数并清除待触发防抖，不重复刷两次', async () => {
+    const eventSource = createEventSource();
+    _set_SillyTavern_API_ACU({ eventSource, eventTypes: { CHAT_CHANGED: 'chat_changed', MESSAGE_DELETED: 'message_deleted' } } as any);
+    const tick = useChatMutationTick();
+    const before = tick.value;
+    const app = mountListener();
+
+    eventSource.emit('message_deleted', 2);
+    expect(tick.value).toBe(before);
+    // 删楼回放 + 世界书刷新完成后发出完成信号，立即推进计数并取消原 300ms 计时器。
+    notifyChatMutationReloaded_ACU();
+    expect(tick.value).toBe(before + 1);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(tick.value).toBe(before + 1);
+
+    app.unmount();
+    notifyChatMutationReloaded_ACU();
+    expect(tick.value).toBe(before + 1);
   });
 });

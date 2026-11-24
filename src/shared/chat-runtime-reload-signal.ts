@@ -7,8 +7,10 @@
  * 主动放弃的旧链路不发信号。
  */
 export type ChatRuntimeReloadListener_ACU = (chatFileName: string) => void;
+export type ChatMutationReloadListener_ACU = () => void;
 
 const listeners_ACU = new Set<ChatRuntimeReloadListener_ACU>();
+const mutationListeners_ACU = new Set<ChatMutationReloadListener_ACU>();
 
 export function notifyChatRuntimeReloaded_ACU(chatFileName: unknown): void {
   const name = String(chatFileName ?? '');
@@ -25,5 +27,23 @@ export function subscribeChatRuntimeReloaded_ACU(listener: ChatRuntimeReloadList
   listeners_ACU.add(listener);
   return () => {
     listeners_ACU.delete(listener);
+  };
+}
+
+/** 删楼 / swipe 异步回放与世界书刷新完成后发出的显式信号，确保新 UI 在数据回滚落稳后重读状态。 */
+export function notifyChatMutationReloaded_ACU(): void {
+  for (const listener of [...mutationListeners_ACU]) {
+    try {
+      listener();
+    } catch {
+      // 订阅方异常不得反向破坏聊天变更刷新链路。
+    }
+  }
+}
+
+export function subscribeChatMutationReloaded_ACU(listener: ChatMutationReloadListener_ACU): () => void {
+  mutationListeners_ACU.add(listener);
+  return () => {
+    mutationListeners_ACU.delete(listener);
   };
 }

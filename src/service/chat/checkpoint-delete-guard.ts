@@ -43,6 +43,7 @@ import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../ru
 import { logDebug_ACU, logError_ACU, logWarn_ACU } from '../../shared/utils';
 import { appendFrameSheetTimelineEvents_ACU, getLatestFrameSheetCheckpoint_ACU, getOrderedFrameSheetCheckpointRecords_ACU } from '../table/storage-frame-v2-sheet-events';
 import type {
+    TableCheckpointScheduleSummaryV2_ACU,
     TableCheckpointV2_ACU,
     TableSheetTimelineEventV2_ACU,
     TableSheetCheckpointV2_ACU,
@@ -237,6 +238,81 @@ function findGraftTargetMessage_ACU(
     return null;
 }
 
+function countAiFloorAtMessageIndex_ACU(chat: any[], messageIndex: number): number {
+    let aiFloor = 0;
+    for (let i = 0; i <= messageIndex && i < chat.length; i += 1) {
+        if (chat[i] && !chat[i].is_user) aiFloor += 1;
+    }
+    return aiFloor;
+}
+
+function clampScheduleSummaryEntryToAiFloor_ACU(
+    summary: TableCheckpointScheduleSummaryV2_ACU | undefined,
+    maxAiFloor: number,
+): TableCheckpointScheduleSummaryV2_ACU | undefined {
+    if (!summary || typeof summary !== 'object') return summary;
+    let changed = false;
+    const next: TableCheckpointScheduleSummaryV2_ACU = { ...summary };
+    for (const field of ['lastFilledAiFloor', 'lastChangedAiFloor', 'lastImportBaselineAiFloor'] as const) {
+        const value = next[field];
+        if (Number.isFinite(value) && Number(value) > maxAiFloor) {
+            if (maxAiFloor > 0) next[field] = maxAiFloor;
+            else delete next[field];
+            changed = true;
+        }
+    }
+    return changed ? next : summary;
+}
+
+function clampFullCheckpointScheduleSummary_ACU(
+    checkpoint: TableCheckpointV2_ACU,
+    maxAiFloor: number,
+): TableCheckpointV2_ACU {
+    if (!checkpoint.scheduleSummary || typeof checkpoint.scheduleSummary !== 'object') return checkpoint;
+    let anyChanged = false;
+    const nextMap: Record<string, TableCheckpointScheduleSummaryV2_ACU> = {};
+    for (const [sheetKey, entry] of Object.entries(checkpoint.scheduleSummary)) {
+        const clamped = clampScheduleSummaryEntryToAiFloor_ACU(entry, maxAiFloor);
+        if (clamped !== entry) anyChanged = true;
+        if (clamped && Object.keys(clamped).length > 0) nextMap[sheetKey] = clamped;
+    }
+    if (!anyChanged) return checkpoint;
+    return { ...checkpoint, scheduleSummary: nextMap };
+}
+
+/**
+ * 判断被删楼层的 full checkpoint 是否允许向目标楼层嫁接。
+ * 前移（目标在被删楼之后）：维持 S0-4 语义，保护后续增量回放根。
+ * 回退（删末尾楼，所有幸存 AI 楼都早于被删楼）：
+ * - init / manual 属于该被删楼自身的首次建根或手动重填临时根，不能回退嫁接到更早的开场白/旧楼，
+ *   否则删楼后被删楼填写的数据与填表进度会残留到更早楼层，且重生成该楼不会重新填表。
+ * - compaction / migration 等压缩边界仍可回退兜底（避免更早的增量帧失根），
+ *   同时会将其 scheduleSummary 截断到幸存目标楼层的 AI 楼层号以内。
+ */
+function shouldGraftFullCheckpoint_ACU(
+    checkpoint: TableCheckpointV2_ACU,
+    isBackwardGraft: boolean,
+): boolean {
+    if (!isBackwardGraft) return true;
+    return checkpoint.reason !== 'init' && checkpoint.reason !== 'manual';
+}
+
+/**
+ * 判断被删楼层的单表 checkpoint 是否允许向目标楼层嫁接。
+ * 删末尾楼（回退嫁接）时，manual 与 sheet_rebase 快照记录的是被删楼层完成后的表快照及
+ * lastFilledAiFloor，若回退嫁接到更早楼层会把被删楼层的填表数据永久固化在旧楼层并锁死重填调度。
+ * sheet_hide / sheet_reveal / sheet_introduction 等休眠与表生命周期事件仍可保留。
+ */
+function shouldGraftSheetCheckpoint_ACU(
+    checkpoint: TableSheetCheckpointV2_ACU,
+    isBackwardGraft: boolean,
+): boolean {
+    if (!isBackwardGraft) return true;
+    if (checkpoint.reason === 'manual') return false;
+    if (checkpoint.timeline?.kind === 'sheet_rebase') return false;
+    return true;
+}
+
 /**
  * MESSAGE_DELETED 后的前移恢复：把被删楼层携带的不可替代产物嫁接到最近的幸存楼层。
  * 在冷回放之前调用；无丢失时零写入零保存。
@@ -244,7 +320,11 @@ function findGraftTargetMessage_ACU(
 export async function recoverLostCheckpointsAfterMessageDeletion_ACU(): Promise<CheckpointDeleteRecoveryResult_ACU> {
     const chat = getChatArray_ACU();
     const chatKey = String(currentChatFileIdentifier_ACU || '');
-    if (!vault_ACU || vault_ACU.chatKey !== chatKey || !Array.isArray(chat) || chat.length === 0) {
+    if (!vault_ACU || vault_ACU.chatKey !== chatKey || !Array.isArray(chat)) {
+        return { recovered: false, graftedCount: 0 };
+    }
+    if (chat.length === 0) {
+        captureCheckpointVaultForCurrentChat_ACU(chat);
         return { recovered: false, graftedCount: 0 };
     }
 
@@ -295,91 +375,163 @@ export async function recoverLostCheckpointsAfterMessageDeletion_ACU(): Promise<
                 const entries = vault_ACU!.entriesByIsolationKey.get(isolationKey)!;
                 const target = findGraftTargetMessage_ACU(chat, presentMessages, entries, vaultIndex, isolationKey);
                 if (!target) {
-                    logError_ACU(`[删楼守卫] isolationKey=[${isolationKey || '无标签'}] 的丢失 checkpoint 无处嫁接（聊天已无 AI 楼层），保留保管库等待下次机会。`);
+                    logWarn_ACU(`[删楼守卫] isolationKey=[${isolationKey || '无标签'}] 的丢失 checkpoint 无处嫁接（聊天已无 AI 楼层），跳过嫁接并同步保管库。`);
                     continue;
                 }
-                snapshotTarget(target.message);
-                graftTargetByLostMessage.set(entry.messageRef, target.message);
-                const frame = ensureTargetFrame_ACU(target.message, isolationKey);
                 const targetIndex = chat.indexOf(target.message);
+                const originalLostIndex = vault_ACU!.messageIndices.get(entry.messageRef);
+                const originalTargetIndex = vault_ACU!.messageIndices.get(target.message);
+                const isBackwardGraft = originalLostIndex !== undefined
+                    && originalTargetIndex !== undefined
+                    && originalTargetIndex < originalLostIndex;
+                const targetAiFloor = countAiFloorAtMessageIndex_ACU(chat, targetIndex);
+                const existingTagData = readIsolatedTagData_ACU(target.message, isolationKey);
+                const existingFrame = isV2TagData_ACU(existingTagData) ? existingTagData.storageFrame : null;
 
-                if (target.absorbedEarlierFrame && entry.fullCheckpoint && frame.logEntries.length > 0) {
-                    logWarn_ACU(`[删楼守卫] 嫁接楼层 #${targetIndex} 携带更早的增量帧；其 logs 已被恢复的 full checkpoint 吸收，清空以保持回放顺序正确。`);
-                    frame.logEntries = [];
-                }
-
+                let fullToGraft: TableCheckpointV2_ACU | null = null;
                 if (entry.fullCheckpoint) {
-                    if (frame.checkpoint?.kind === 'full') {
+                    if (!shouldGraftFullCheckpoint_ACU(entry.fullCheckpoint, isBackwardGraft)) {
+                        logDebug_ACU(`[删楼守卫] 被删末尾楼层的 full checkpoint（reason=${entry.fullCheckpoint.reason}）属于被删楼层状态，跳过向更早楼层 #${targetIndex} 回退嫁接。`);
+                    } else if (existingFrame?.checkpoint?.kind === 'full') {
                         logDebug_ACU(`[删楼守卫] 楼层 #${targetIndex} 已有 full checkpoint，跳过回放根嫁接。`);
                     } else {
-                        frame.checkpoint = deepClone_ACU(entry.fullCheckpoint);
-                        graftedCount += 1;
-                        logWarn_ACU(`[删楼守卫] 被删楼层携带的回放根（reason=${entry.fullCheckpoint.reason}）已前移嫁接到楼层 #${targetIndex}（isolationKey=[${isolationKey || '无标签'}]）。`);
+                        const clonedFull = deepClone_ACU(entry.fullCheckpoint);
+                        fullToGraft = isBackwardGraft
+                            ? clampFullCheckpointScheduleSummary_ACU(clonedFull, targetAiFloor)
+                            : clonedFull;
                     }
                 }
 
+                let vectorToGraft: CheckpointVaultFrameEntry_ACU['summaryVectorCheckpoint'] = null;
                 if (entry.summaryVectorCheckpoint?.checkpoint) {
-                    if (!frame.summaryVectorIndexFrame || typeof frame.summaryVectorIndexFrame !== 'object') {
-                        frame.summaryVectorIndexFrame = {
-                            version: 3,
-                            sourceTableKey: entry.summaryVectorCheckpoint.sourceTableKey,
-                            logEntries: [],
-                        };
-                    }
-                    if (!frame.summaryVectorIndexFrame.checkpoint) {
-                        frame.summaryVectorIndexFrame.sourceTableKey = entry.summaryVectorCheckpoint.sourceTableKey
-                            || frame.summaryVectorIndexFrame.sourceTableKey;
-                        frame.summaryVectorIndexFrame.checkpoint = deepClone_ACU(entry.summaryVectorCheckpoint.checkpoint);
-                        graftedCount += 1;
-                        logWarn_ACU(`[删楼守卫] 被删楼层携带的向量 checkpoint 已前移嫁接到楼层 #${targetIndex}。`);
-                    } else {
+                    if (existingFrame?.summaryVectorIndexFrame?.checkpoint) {
                         logDebug_ACU(`[删楼守卫] 楼层 #${targetIndex} 已有向量 checkpoint，跳过嫁接。`);
+                    } else if (isBackwardGraft && !existingFrame && !fullToGraft) {
+                        logDebug_ACU(`[删楼守卫] 末尾删楼未向更早楼层 #${targetIndex} 回退表格根，跳过孤立向量 checkpoint 嫁接。`);
+                    } else {
+                        vectorToGraft = deepClone_ACU(entry.summaryVectorCheckpoint);
                     }
                 }
 
+                const untimedPerSheetToGraft: Array<[string, TableSheetCheckpointV2_ACU]> = [];
                 const lostTimelineCheckpoints: TableSheetCheckpointV2_ACU[] = [];
                 if (hasEntries_ACU(entry.perSheetCheckpoints)) {
                     for (const [sheetKey, checkpoint] of Object.entries(entry.perSheetCheckpoints!)) {
-                        if (!checkpoint.timeline && getLatestFrameSheetCheckpoint_ACU(frame, sheetKey)) {
+                        if (!shouldGraftSheetCheckpoint_ACU(checkpoint, isBackwardGraft)) {
+                            logDebug_ACU(`[删楼守卫] 被删末尾楼层的 ${sheetKey} per-sheet checkpoint（reason=${checkpoint.reason}, timeline=${checkpoint.timeline?.kind || 'legacy'}）属于被删楼层状态，跳过向更早楼层 #${targetIndex} 回退嫁接。`);
+                            continue;
+                        }
+                        if (!checkpoint.timeline && existingFrame && getLatestFrameSheetCheckpoint_ACU(existingFrame, sheetKey)) {
                             logDebug_ACU(`[删楼守卫] 楼层 #${targetIndex} 已有 ${sheetKey} 的 per-sheet checkpoint（幸存者优先），跳过嫁接。`);
                             continue;
                         }
                         const cloned = deepClone_ACU(checkpoint);
-                        if (cloned.timeline) {
-                            lostTimelineCheckpoints.push(cloned);
+                        const sanitized = isBackwardGraft && cloned.scheduleSummary
+                            ? { ...cloned, scheduleSummary: clampScheduleSummaryEntryToAiFloor_ACU(cloned.scheduleSummary, targetAiFloor) }
+                            : cloned;
+                        if (sanitized.timeline) {
+                            lostTimelineCheckpoints.push(sanitized);
                         } else {
-                            if (!frame.perSheetCheckpoints) frame.perSheetCheckpoints = {};
-                            frame.perSheetCheckpoints[sheetKey] = cloned;
-                            graftedCount += 1;
+                            untimedPerSheetToGraft.push([sheetKey, sanitized]);
                         }
-                        logWarn_ACU(`[删楼守卫] 被删楼层携带的 ${sheetKey} per-sheet checkpoint（timeline=${checkpoint.timeline?.kind || 'legacy'}）已前移嫁接到楼层 #${targetIndex}。`);
                     }
+                }
+
+                const filteredTimelineEvents: TableSheetTimelineEventV2_ACU[] = [];
+                for (const event of entry.sheetTimelineEvents) {
+                    if (!shouldGraftSheetCheckpoint_ACU(event.checkpoint, isBackwardGraft)) {
+                        logDebug_ACU(`[删楼守卫] 被删末尾楼层的 ${event.checkpoint.sheetKey} timeline checkpoint（reason=${event.checkpoint.reason}, timeline=${event.checkpoint.timeline?.kind || 'legacy'}）属于被删楼层状态，跳过向更早楼层 #${targetIndex} 回退嫁接。`);
+                        continue;
+                    }
+                    const cloned = deepClone_ACU(event);
+                    if (isBackwardGraft && cloned.checkpoint.scheduleSummary) {
+                        cloned.checkpoint = {
+                            ...cloned.checkpoint,
+                            scheduleSummary: clampScheduleSummaryEntryToAiFloor_ACU(cloned.checkpoint.scheduleSummary, targetAiFloor),
+                        };
+                    }
+                    filteredTimelineEvents.push(cloned);
                 }
 
                 const lostRecords = getOrderedFrameSheetCheckpointRecords_ACU({
                     version: 2, logEntries: [],
                     perSheetCheckpoints: Object.fromEntries(lostTimelineCheckpoints.map(checkpoint => [checkpoint.sheetKey, checkpoint])),
-                    sheetTimelineEvents: entry.sheetTimelineEvents,
+                    sheetTimelineEvents: filteredTimelineEvents,
                 });
+
+                const spv79ToGraft = entry.spv79TransitionCheckpoint && !(existingTagData as any)?.spv79TransitionCheckpoint
+                    ? deepClone_ACU(entry.spv79TransitionCheckpoint)
+                    : null;
+                const compatToGraft = entry.compatTransitionCheckpoint && !(existingTagData as any)?.compatTransitionCheckpoint
+                    ? deepClone_ACU(entry.compatTransitionCheckpoint)
+                    : null;
+
+                const hasAnyGraft = !!fullToGraft
+                    || !!vectorToGraft
+                    || untimedPerSheetToGraft.length > 0
+                    || lostRecords.length > 0
+                    || !!spv79ToGraft
+                    || !!compatToGraft;
+                if (!hasAnyGraft) continue;
+
+                snapshotTarget(target.message);
+                graftTargetByLostMessage.set(entry.messageRef, target.message);
+                const frame = ensureTargetFrame_ACU(target.message, isolationKey);
+
+                if (target.absorbedEarlierFrame && fullToGraft && frame.logEntries.length > 0) {
+                    logWarn_ACU(`[删楼守卫] 嫁接楼层 #${targetIndex} 携带更早的增量帧；其 logs 已被恢复的 full checkpoint 吸收，清空以保持回放顺序正确。`);
+                    frame.logEntries = [];
+                }
+
+                if (fullToGraft) {
+                    frame.checkpoint = fullToGraft;
+                    graftedCount += 1;
+                    logWarn_ACU(`[删楼守卫] 被删楼层携带的回放根（reason=${fullToGraft.reason}）已前移嫁接到楼层 #${targetIndex}（isolationKey=[${isolationKey || '无标签'}]）。`);
+                }
+
+                if (vectorToGraft) {
+                    if (!frame.summaryVectorIndexFrame || typeof frame.summaryVectorIndexFrame !== 'object') {
+                        frame.summaryVectorIndexFrame = {
+                            version: 3,
+                            sourceTableKey: vectorToGraft.sourceTableKey,
+                            logEntries: [],
+                        };
+                    }
+                    frame.summaryVectorIndexFrame.sourceTableKey = vectorToGraft.sourceTableKey
+                        || frame.summaryVectorIndexFrame.sourceTableKey;
+                    frame.summaryVectorIndexFrame.checkpoint = vectorToGraft.checkpoint;
+                    graftedCount += 1;
+                    logWarn_ACU(`[删楼守卫] 被删楼层携带的向量 checkpoint 已前移嫁接到楼层 #${targetIndex}。`);
+                }
+
+                for (const [sheetKey, checkpoint] of untimedPerSheetToGraft) {
+                    if (!frame.perSheetCheckpoints) frame.perSheetCheckpoints = {};
+                    frame.perSheetCheckpoints[sheetKey] = checkpoint;
+                    graftedCount += 1;
+                    logWarn_ACU(`[删楼守卫] 被删楼层携带的 ${sheetKey} per-sheet checkpoint（timeline=legacy）已前移嫁接到楼层 #${targetIndex}。`);
+                }
+
                 if (lostRecords.length > 0) {
-                    const originalLostIndex = vault_ACU!.messageIndices.get(entry.messageRef)!;
                     const graft = timelineGrafts.get(frame) || { targetMessage: target.message, groups: [] };
                     graft.groups.push({
-                        sourceIndex: originalLostIndex,
+                        sourceIndex: originalLostIndex!,
                         checkpoints: lostRecords.map(record => deepClone_ACU(record.checkpoint)),
                     });
                     timelineGrafts.set(frame, graft);
                     graftedCount += lostRecords.length;
+                    for (const record of lostRecords) {
+                        logWarn_ACU(`[删楼守卫] 被删楼层携带的 ${record.checkpoint.sheetKey} per-sheet checkpoint（timeline=${record.checkpoint.timeline?.kind || 'legacy'}）已前移嫁接到楼层 #${targetIndex}。`);
+                    }
                 }
 
                 const tagData = target.message.TavernDB_ACU_IsolatedData[isolationKey];
-                if (entry.spv79TransitionCheckpoint && !tagData.spv79TransitionCheckpoint) {
-                    tagData.spv79TransitionCheckpoint = deepClone_ACU(entry.spv79TransitionCheckpoint);
+                if (spv79ToGraft) {
+                    tagData.spv79TransitionCheckpoint = spv79ToGraft;
                     graftedCount += 1;
                     logWarn_ACU(`[删楼守卫] SPv7.9 过渡根已嫁接到楼层 #${targetIndex}；其 cutoff 楼层索引可能因删除漂移，请留意后续回放告警。`);
                 }
-                if (entry.compatTransitionCheckpoint && !tagData.compatTransitionCheckpoint) {
-                    tagData.compatTransitionCheckpoint = deepClone_ACU(entry.compatTransitionCheckpoint);
+                if (compatToGraft) {
+                    tagData.compatTransitionCheckpoint = compatToGraft;
                     graftedCount += 1;
                     logWarn_ACU(`[删楼守卫] 兼容过渡根已嫁接到楼层 #${targetIndex}；其 cutoff 楼层索引可能因删除漂移，请留意后续回放告警。`);
                 }
@@ -441,7 +593,11 @@ export async function recoverLostCheckpointsAfterMessageDeletion_ACU(): Promise<
             }
 
             if (graftedCount === 0) {
-                // 全部被"目标已有"跳过或无处嫁接：无写入即无需保存。
+                // 全部被跳过、属于被删末尾楼层状态或已无幸存 AI 楼层：无写入无需保存，
+                // 但必须以当前幸存聊天同步保管库，避免已丢弃的被删楼层产物在后续删楼时复活。
+                restoreSnapshots();
+                restoreMaterialCheckpointFields_ACU(chat, materialSnapshots);
+                captureCheckpointVaultForCurrentChat_ACU(chat);
                 return { recovered: false, graftedCount: 0 };
             }
 
