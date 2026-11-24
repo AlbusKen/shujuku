@@ -1,4 +1,5 @@
 import { runTakeoverRequest_ACU } from '../../shared/takeover-control';
+import { throwIfAborted_ACU } from '../../shared/abort-signal';
 import { parse as parseYaml } from 'yaml';
 import { pristineFetch_ACU } from '../../data/gateways/pristine-fetch';
 import { getHostRequestHeaders_ACU } from '../../data/gateways/ai-gateway';
@@ -34,7 +35,7 @@ function exclusions(raw: string): string[] {
 async function sendCustomApiRequestImpl_ACU(
     config: any, bridgeBody: Record<string, any>, signal?: AbortSignal | null,
 ): Promise<Response> {
-    signal?.throwIfAborted();
+    throwIfAborted_ACU(signal);
     // 发送前最后一步：预设开关开启时只保留首条消息，其余转为 turn_ 函数；两条分支的响应都在交给调用方前还原。
     const transport = applyContextToolTransport_ACU(bridgeBody, config?.contextToolTransportEnabled);
     const note = transport.note ? `；${transport.note}` : '';
@@ -95,7 +96,7 @@ async function sendCustomApiRequestImpl_ACU(
 async function captureProviderResponse_ACU(response: Response, format: ReturnType<typeof normalizeCustomApiFormat_ACU>, log: ApiRequestLog_ACU, signal?: AbortSignal | null): Promise<Response> {
     const raw = await response.text();
     log.write(`回复 HTTP ${response.status}`, raw);
-    signal?.throwIfAborted();
+    throwIfAborted_ACU(signal);
     if (!response.ok) return new Response(raw, { status: response.status, headers: response.headers });
     const isSse = response.headers.get('content-type')?.includes('text/event-stream');
     const normalized = isSse ? normalizeProviderStream_ACU(raw, format) : JSON.stringify(normalizeProviderReply_ACU(JSON.parse(raw), format));

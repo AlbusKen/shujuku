@@ -8,7 +8,7 @@ import { ACU_TOAST_CATEGORY_ACU } from '../../shared/constants';
 import { logDebug_ACU } from '../../shared/utils';
 import { beginNoticeTask_ACU } from '../../shared/notice-hub';
 import { processSummaryVectorIndexBeforeGeneration_ACU, type SummaryVectorIndexRuntimeResult_ACU, type SummaryVectorIndexRuntimeOptions_ACU } from '../../service/vector/summary-vector-index-runtime';
-import { runWithAbortSignal_ACU } from '../../shared/abort-signal';
+import { runWithAbortSignal_ACU, throwIfAborted_ACU } from '../../shared/abort-signal';
 import { useToastStore } from '../../presentation-v2/stores/toast-store';
 import { rebuildCurrentSummaryVectorIndexNow_ACU } from '../../service/vector/summary-vector-index-rebuild-service';
 import { isSummaryVectorIndexSourceTextOutdated_ACU, type SummaryVectorIndexArchiveResult_ACU } from '../../service/vector/summary-vector-index-archive-service';
@@ -70,7 +70,7 @@ export function shouldRebuildSummaryVectorIndexWithUI_ACU(reason: string | undef
 export async function rebuildCurrentSummaryVectorIndexWithUI_ACU(
   options: Pick<SummaryVectorIndexRuntimeOptions_ACU, 'signal' | 'assertActive'> = {},
 ): Promise<SummaryVectorIndexArchiveResult_ACU> {
-  const assertActive = () => { options.signal?.throwIfAborted(); options.assertActive?.(); };
+  const assertActive = () => { throwIfAborted_ACU(options.signal); options.assertActive?.(); };
   assertActive();
   const task = beginNoticeTask_ACU(SUMMARY_VECTOR_INDEX_FEATURE_ACU, { detail: '正在重建交火索引快照...' });
   try {
@@ -149,7 +149,7 @@ export async function rebuildOutdatedSummaryVectorIndexInBackground_ACU(): Promi
 export async function processSummaryVectorIndexBeforeGenerationWithUI_ACU(
   options: SummaryVectorIndexRuntimeOptions_ACU = {},
 ): Promise<SummaryVectorIndexRuntimeResult_ACU> {
-  const assertActive = () => { options.signal?.throwIfAborted(); options.assertActive?.(); };
+  const assertActive = () => { throwIfAborted_ACU(options.signal); options.assertActive?.(); };
   assertActive();
   const task = beginNoticeTask_ACU(SUMMARY_VECTOR_RECALL_FEATURE_ACU, {
     detail: '正在召回交火记忆并重排纪要索引，请稍后...',

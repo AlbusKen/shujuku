@@ -1,5 +1,5 @@
 import { runTakeoverRequest_ACU } from '../../shared/takeover-control';
-import { runWithAbortSignal_ACU } from '../../shared/abort-signal';
+import { abortWithReason_ACU, getAbortReason_ACU, runWithAbortSignal_ACU, throwIfAborted_ACU } from '../../shared/abort-signal';
 
 /** Rerank 请求超时上界；超时抛错由调用方回退到 embedding 排序。 */
 const VECTOR_RERANK_TIMEOUT_MS_ACU = 30_000;
@@ -119,9 +119,9 @@ async function requestRerankBatch_ACU(request: RerankBatchRequest_ACU): Promise<
     if (request.instruction) payload.instruction = request.instruction;
 
     // 超时可中断：rerank 在发送前同步链路上，挂起的上游不允许无限阻塞生成。
-    request.signal?.throwIfAborted();
+    throwIfAborted_ACU(request.signal);
     const controller = new AbortController();
-    const abort = () => controller.abort(request.signal?.reason);
+    const abort = () => abortWithReason_ACU(controller, getAbortReason_ACU(request.signal));
     request.signal?.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(() => controller.abort(), VECTOR_RERANK_TIMEOUT_MS_ACU);
     try {
@@ -134,11 +134,11 @@ async function requestRerankBatch_ACU(request: RerankBatchRequest_ACU): Promise<
                 body: JSON.stringify(payload),
                 signal: controller.signal,
             });
-            controller.signal.throwIfAborted();
+            throwIfAborted_ACU(controller.signal);
             rawBody = await runWithAbortSignal_ACU(controller.signal, () => response.text());
-            controller.signal.throwIfAborted();
+            throwIfAborted_ACU(controller.signal);
         } catch (error: any) {
-            request.signal?.throwIfAborted();
+            throwIfAborted_ACU(request.signal);
             throw new Error(controller.signal.aborted || error?.name === 'AbortError'
                 ? `Rerank 请求超时（${VECTOR_RERANK_TIMEOUT_MS_ACU}ms，${request.batchLabel}），已中断。`
                 : `Rerank 请求网络失败（${request.batchLabel}）：${error?.message || String(error || '未知错误')}`);
@@ -165,7 +165,7 @@ async function requestRerankBatch_ACU(request: RerankBatchRequest_ACU): Promise<
  * 任一批失败整体抛错，由调用方回退到 embedding 排序（不接受"半批有分、半批无分"的混合排序）。
  */
 async function createRerankScoresImpl_ACU(request: VectorRerankRequest_ACU): Promise<VectorRerankResult_ACU[]> {
-    request.signal?.throwIfAborted();
+    throwIfAborted_ACU(request.signal);
     const endpoint = normalizeEndpoint_ACU(request.endpoint);
     const model = String(request.model || '').trim();
     const query = String(request.query || '').trim();
@@ -191,7 +191,7 @@ async function createRerankScoresImpl_ACU(request: VectorRerankRequest_ACU): Pro
     const merged: VectorRerankResult_ACU[] = [];
 
     for (let round = 0; round < batches.length; round += VECTOR_RERANK_BATCH_CONCURRENCY_ACU) {
-        request.signal?.throwIfAborted();
+        throwIfAborted_ACU(request.signal);
         const wave = batches.slice(round, round + VECTOR_RERANK_BATCH_CONCURRENCY_ACU);
         const waveResults = await Promise.all(wave.map((batch, waveIndex) => requestRerankBatch_ACU({
             endpoint,
@@ -203,7 +203,7 @@ async function createRerankScoresImpl_ACU(request: VectorRerankRequest_ACU): Pro
             batchLabel: `第 ${round + waveIndex + 1}/${batches.length} 批，${batch.documents.length} 条`,
             signal: request.signal,
         })));
-        request.signal?.throwIfAborted();
+        throwIfAborted_ACU(request.signal);
         waveResults.forEach((results, waveIndex) => {
             const offset = wave[waveIndex].offset;
             const batchLength = wave[waveIndex].documents.length;

@@ -1,4 +1,4 @@
-import { runWithAbortSignal_ACU } from './abort-signal';
+import { abortWithReason_ACU, getAbortReason_ACU, runWithAbortSignal_ACU, throwIfAborted_ACU } from './abort-signal';
 
 /** Independent of fill mode/API configuration: pausing never rewrites those settings. */
 export interface TakeoverControlConfig_ACU { enabled: boolean }
@@ -12,7 +12,7 @@ export function setTakeoverRuntimeEnabled_ACU(enabled: boolean): void {
     if (enabled_ACU === enabled) return;
     enabled_ACU = enabled;
     ++epoch_ACU;
-    controller_ACU.abort(new DOMException('数据库接管已暂停，本轮插件任务已作废。', 'AbortError'));
+    abortWithReason_ACU(controller_ACU, new DOMException('数据库接管已暂停，本轮插件任务已作废。', 'AbortError'));
     controller_ACU = new AbortController();
     for (const listener of listeners_ACU) listener(enabled);
 }
@@ -30,7 +30,7 @@ export function anyAbortSignal_ACU(signals: AbortSignal[]): AbortSignal {
     const controller = new AbortController();
     const aborted = signals.find(signal => signal.aborted);
     if (aborted) {
-        controller.abort(aborted.reason);
+        abortWithReason_ACU(controller, getAbortReason_ACU(aborted));
         return controller.signal;
     }
     const cleanup = () => {
@@ -38,7 +38,7 @@ export function anyAbortSignal_ACU(signals: AbortSignal[]): AbortSignal {
     };
     function onAbort(this: AbortSignal): void {
         cleanup();
-        controller.abort(this.reason);
+        abortWithReason_ACU(controller, getAbortReason_ACU(this));
     }
     for (const signal of signals) signal.addEventListener('abort', onAbort, { once: true });
     return controller.signal;
@@ -47,7 +47,7 @@ export function captureTakeoverLease_ACU(parent?: AbortSignal | null) {
     const epoch = epoch_ACU;
     const signal = parent ? anyAbortSignal_ACU([controller_ACU.signal, parent]) : controller_ACU.signal;
     const assertActive = () => {
-        signal.throwIfAborted();
+        throwIfAborted_ACU(signal);
         if (!enabled_ACU || epoch !== epoch_ACU) {
             throw new DOMException('数据库接管已暂停，本轮插件任务已作废。', 'AbortError');
         }
@@ -58,10 +58,10 @@ export function captureTakeoverLease_ACU(parent?: AbortSignal | null) {
 export async function runTakeoverRequest_ACU<T>(run: (signal: AbortSignal) => Promise<T>, parent?: AbortSignal | null): Promise<T> {
     const lease = captureTakeoverLease_ACU();
     lease.assertActive();
-    parent?.throwIfAborted();
+    throwIfAborted_ACU(parent);
     const controller = new AbortController();
-    const pause = () => controller.abort(lease.signal.reason);
-    const cancel = () => controller.abort(parent?.reason);
+    const pause = () => abortWithReason_ACU(controller, getAbortReason_ACU(lease.signal));
+    const cancel = () => abortWithReason_ACU(controller, getAbortReason_ACU(parent));
     lease.signal.addEventListener('abort', pause, { once: true });
     parent?.addEventListener('abort', cancel, { once: true });
     try {

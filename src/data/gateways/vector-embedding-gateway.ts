@@ -1,5 +1,5 @@
 import { runTakeoverRequest_ACU } from '../../shared/takeover-control';
-import { runWithAbortSignal_ACU } from '../../shared/abort-signal';
+import { abortWithReason_ACU, getAbortReason_ACU, runWithAbortSignal_ACU, throwIfAborted_ACU } from '../../shared/abort-signal';
 
 export type VectorEmbeddingErrorKind_ACU =
     | 'credential' | 'request' | 'provider-contract' | 'retryable' | 'limited-retryable';
@@ -158,9 +158,9 @@ async function requestEmbeddingsOnce_ACU(
     headers: Record<string, string>,
     signal?: AbortSignal,
 ): Promise<VectorEmbeddingResult_ACU[]> {
-    signal?.throwIfAborted();
+    throwIfAborted_ACU(signal);
     const controller = new AbortController();
-    const abort = () => controller.abort(signal?.reason);
+    const abort = () => abortWithReason_ACU(controller, getAbortReason_ACU(signal));
     signal?.addEventListener('abort', abort, { once: true });
     // 同一请求期限覆盖响应头、正文和解析，不在收到响应头后重新计时。
     const timer = setTimeout(() => controller.abort(), VECTOR_EMBEDDING_TIMEOUT_MS_ACU);
@@ -171,11 +171,11 @@ async function requestEmbeddingsOnce_ACU(
             response = await fetch(endpoint, {
                 method: 'POST', headers, body: JSON.stringify({ model, input }), signal: controller.signal,
             });
-            controller.signal.throwIfAborted();
+            throwIfAborted_ACU(controller.signal);
             rawBody = await runWithAbortSignal_ACU(controller.signal, () => response.text());
-            controller.signal.throwIfAborted();
+            throwIfAborted_ACU(controller.signal);
         } catch (error: any) {
-            signal?.throwIfAborted();
+            throwIfAborted_ACU(signal);
             throw new VectorEmbeddingError_ACU({
                 kind: 'retryable',
                 message: controller.signal.aborted || error?.name === 'AbortError'
@@ -218,7 +218,7 @@ async function requestEmbeddingsOnce_ACU(
 }
 
 async function createEmbeddingsImpl_ACU(request: VectorEmbeddingRequest_ACU): Promise<VectorEmbeddingResult_ACU[]> {
-    request.signal?.throwIfAborted();
+    throwIfAborted_ACU(request.signal);
     const endpoint = String(request.endpoint || '').trim();
     const model = String(request.model || '').trim();
     const input = Array.isArray(request.input) ? request.input.map((item) => String(item ?? '')) : [];
@@ -242,10 +242,10 @@ async function createEmbeddingsImpl_ACU(request: VectorEmbeddingRequest_ACU): Pr
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= VECTOR_EMBEDDING_MAX_ATTEMPTS_ACU; attempt += 1) {
         try {
-            request.signal?.throwIfAborted();
+            throwIfAborted_ACU(request.signal);
             return await requestEmbeddingsOnce_ACU(endpoint, model, input, headers, request.signal);
         } catch (error) {
-            request.signal?.throwIfAborted();
+            throwIfAborted_ACU(request.signal);
             lastError = error;
             const retryable = isVectorEmbeddingError_ACU(error)
                 && (error.kind === 'retryable' || error.kind === 'limited-retryable');

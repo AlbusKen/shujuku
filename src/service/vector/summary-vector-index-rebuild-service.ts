@@ -6,6 +6,7 @@ import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
 import { isVectorPipelineEnabledForCurrentChat_ACU } from '../fill-mode/fill-mode-gate';
 
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
+import { throwIfAborted_ACU } from '../../shared/abort-signal';
 import { clearSummaryVectorIndexCredentialCooldowns_ACU } from './summary-vector-index-flush-queue';
 import type { SummaryVectorIndexArchiveResult_ACU } from './summary-vector-index-archive-service';
 import {
@@ -34,7 +35,7 @@ export async function rebuildCurrentSummaryVectorIndexNow_ACU(
     options: { reason?: SummaryVectorMirrorRebuildReason_ACU; signal?: AbortSignal; assertActive?: () => void } = {},
 ): Promise<SummaryVectorIndexArchiveResult_ACU> {
     const assertActive = () => {
-        options.signal?.throwIfAborted();
+        throwIfAborted_ACU(options.signal);
         options.assertActive?.();
     };
     assertActive();

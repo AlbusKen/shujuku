@@ -7,7 +7,7 @@ import { stopLoopState_ACU } from '../../service/loop/loop-controller';
 import { cancelPendingChatMutationRefresh_ACU, flushChatMutationRefresh_ACU, scheduleChatMutationRefresh_ACU } from './chat-mutation-scheduler';
 import { installHostEventWaitGate_ACU, installPlotSendEventGate_ACU, redirectPlotSendEvent_ACU, shouldBypassGenerateAfterDataWaitGate_ACU } from './plot-send-event-gate';
 import { PassiveCompletionReceiver_ACU } from './passive-completion-receiver';
-import { runWithAbortSignal_ACU } from '../../shared/abort-signal';
+import { abortWithReason_ACU, runWithAbortSignal_ACU, throwIfAborted_ACU } from '../../shared/abort-signal';
 import { installZeroLayerBootstrap_ACU } from './zero-layer-bootstrap';
 import { readOrdinaryZeroLayerState_ACU } from '../../service/zero-layer/ordinary-state';
 import { showToastr_ACU } from '../theme/toast';
@@ -868,7 +868,7 @@ export   function mainInitialize_ACU() {
             if (!isTakeoverEnabled_ACU()) send.controller.abort();
             if (send.chat !== SillyTavern_API_ACU.chat || send.chatKey !== currentChatFileIdentifier_ACU
               || send.isolationKey !== getCurrentIsolationKey_ACU()) send.controller.abort();
-            send.controller.signal.throwIfAborted();
+            throwIfAborted_ACU(send.controller.signal);
           };
           const releaseVectorSend = (send: VectorSend) => {
             send.restoreUi();
@@ -921,8 +921,8 @@ export   function mainInitialize_ACU() {
               assertVectorSend(send);
               logWarn_ACU('[向量表格] 发送前召回失败，本次生成已停止:', error);
               showToastr_ACU('error', '纪要召回失败，本次生成已停止。', '向量表格');
-              send.controller.abort(new DOMException('纪要召回失败，本次生成已停止。', 'AbortError'));
-              send.controller.signal.throwIfAborted();
+              abortWithReason_ACU(send.controller, new DOMException('纪要召回失败，本次生成已停止。', 'AbortError'));
+              throwIfAborted_ACU(send.controller.signal);
             } finally {
               releaseVectorSend(send);
             }

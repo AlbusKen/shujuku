@@ -1,4 +1,5 @@
 import { ZeroLayerError_ACU, type ZeroLayerEnvelope_ACU } from './model';
+import { throwIfAborted_ACU } from '../../shared/abort-signal';
 import type { ZeroLayerCarrierContext_ACU } from './carrier-context';
 import { assertZeroLayerCarrier_ACU } from './carrier-context';
 import { ZeroLayerStore_ACU } from './store';
@@ -17,7 +18,7 @@ export async function synchronizeZeroLayerBridge_ACU(store: ZeroLayerStore_ACU,
   const branchId = source.activeBranchId;
   const assertCurrent = () => {
     assertLease();
-    signal.throwIfAborted();
+    throwIfAborted_ACU(signal);
     assertZeroLayerCarrier_ACU(context);
     if (current.sessionId !== sessionId || current.activeBranchId !== branchId) {
       throw new ZeroLayerError_ACU('scope-changed', '桥接会话或分支已变化。');

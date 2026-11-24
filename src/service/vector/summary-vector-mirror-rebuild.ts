@@ -16,6 +16,7 @@ import { EmbeddingBatchExecutionError_ACU } from './summary-vector-embedding-bat
 
 import { saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { absorbOwnTableSave_ACU, getTableReplayGeneration_ACU } from '../../shared/table-replay-generation';
+import { throwIfAborted_ACU } from '../../shared/abort-signal';
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
 import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { isV2TagData_ACU } from '../table/storage-strategy-resolver';
@@ -412,7 +413,7 @@ export async function rebuildSummaryVectorMirror_ACU(options: {
     assertActive?: () => void;
 }): Promise<SummaryVectorMirrorRebuildResult_ACU> {
     const assertActive = () => {
-        options.signal?.throwIfAborted();
+        throwIfAborted_ACU(options.signal);
         options.assertActive?.();
     };
     assertActive();

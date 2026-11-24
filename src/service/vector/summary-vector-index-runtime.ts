@@ -1,4 +1,5 @@
 import { captureTakeoverLease_ACU, isTakeoverEnabled_ACU } from '../../shared/takeover-control';
+import { throwIfAborted_ACU } from '../../shared/abort-signal';
 import { createEmbeddings_ACU } from '../../data/gateways/vector-embedding-gateway';
 import { createRerankScores_ACU } from '../../data/gateways/vector-rerank-gateway';
 import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
@@ -338,7 +339,7 @@ async function rerankCandidates_ACU(
                 .sort((left, right) => (right.rerankScore ?? right.score) - (left.rerankScore ?? left.score)),
         };
     } catch (error) {
-        signal?.throwIfAborted();
+        throwIfAborted_ACU(signal);
         const message = error instanceof Error ? error.message : String(error);
         logError_ACU(`[交火模式纪要索引] Rerank 调用失败（endpoint=${endpoint}, model=${model}），本轮回退到 Embedding 排序：${message}`);
         return { candidates: rowCandidates, status: 'failed', error: message };
@@ -951,7 +952,7 @@ export async function processSummaryVectorIndexBeforeGeneration_ACU(
     const takeoverLease = captureTakeoverLease_ACU(options.signal);
     const assertActive = () => {
         takeoverLease.assertActive();
-        options.signal?.throwIfAborted();
+        throwIfAborted_ACU(options.signal);
         options.assertActive?.();
     };
     assertActive();
