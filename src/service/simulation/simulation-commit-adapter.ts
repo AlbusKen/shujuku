@@ -9,6 +9,7 @@ import {
 
 import { getChatArray_ACU, refreshMessageBlock_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../data/storage/chat-history';
+import { buildChatFloorIdentity_ACU } from '../../shared/chat-floor-identity';
 import { sha256HexSync_ACU } from '../../shared/sha256-sync';
 import {
   migrateLegacyWorldSimulationConversationBucket_ACU,
@@ -237,8 +238,8 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<WorldSimul
     reject_ACU('WORLD_SIMULATION_SNAPSHOT_INVALID', '提交缺少已确认写入和候选');
   }
   // SQL 规划会等待；只冻结楼层身份和私有字段，正文及消息对象可由第三方重建。
-  const planningFields = chat.map(message => isRecord_ACU(message) ? {
-    identity: JSON.stringify([message.message_id, message.swipe_id, message.is_user, message.is_system]),
+  const planningFields = chat.map((message, index) => isRecord_ACU(message) ? {
+    identity: buildChatFloorIdentity_ACU(message, index, { includeSwipeId: true }),
     fields: [WORLD_SIMULATION_FIRST_FLOOR_FIELD_ACU, WORLD_SIMULATION_STATE_FIELD_ACU,
       WORLD_SIMULATION_MATERIALS_FIELD_ACU, WORLD_SIMULATION_CONVERSATION_FIELD_ACU,
       WORLD_SIMULATION_CHRONICLE_ARCHIVE_FIELD_ACU, WORLD_SIMULATION_RUN_WRITE_FIELD_ACU].map(key => ({
@@ -250,7 +251,7 @@ async function commitWithinQueue_ACU(input: CommitInput_ACU): Promise<WorldSimul
     || chat.length < planningFields.length || !planningFields.every((snapshot, index) => {
       const message = chat[index];
       return snapshot === null ? !isRecord_ACU(message) : isRecord_ACU(message)
-        && JSON.stringify([message.message_id, message.swipe_id, message.is_user, message.is_system]) === snapshot.identity
+        && buildChatFloorIdentity_ACU(message, index, { includeSwipeId: true }) === snapshot.identity
         && snapshot.fields.every(field => Object.prototype.hasOwnProperty.call(message, field.key) === field.existed
           && JSON.stringify(message[field.key]) === field.content);
     })) {
@@ -410,15 +411,15 @@ async function persistHostFinalCommit_ACU(
       snapshots.push({ target: message, key, existed: Object.prototype.hasOwnProperty.call(message, key), value: message[key] });
     }
   }
-  const messages = chat.map(message => isRecord_ACU(message)
-    ? JSON.stringify([message.message_id, message.swipe_id, message.is_user, message.is_system]) : null);
+  const messages = chat.map((message, index) => isRecord_ACU(message)
+    ? buildChatFloorIdentity_ACU(message, index, { includeSwipeId: true }) : null);
   const originalFields = snapshots.map(({ target, key, existed, value }) => ({ target, key, existed, value,
     index: chat.indexOf(target), content: JSON.stringify(value) }));
   // 同楼层对象重建不改变身份；前缀删楼、换身份或插楼仍拒绝。
   const messagesIntact = (): boolean => chat.length >= messages.length && messages.every((identity, index) => {
     const message = chat[index];
     return identity === null ? !isRecord_ACU(message) : isRecord_ACU(message)
-      && JSON.stringify([message.message_id, message.swipe_id, message.is_user, message.is_system]) === identity;
+      && buildChatFloorIdentity_ACU(message, index, { includeSwipeId: true }) === identity;
   });
   const fieldsIntact = (fields: Array<Omit<(typeof originalFields)[number], 'value'>>): boolean => messagesIntact() && fields.every(field =>
     isRecord_ACU(chat[field.index]) && Object.prototype.hasOwnProperty.call(chat[field.index], field.key) === field.existed

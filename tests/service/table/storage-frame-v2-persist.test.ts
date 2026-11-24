@@ -5746,12 +5746,102 @@ describe('填表请求 V2 最终写入边界', () => {
         operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_a', sheet: sheetA, reason: 'system' }],
         filledSheetKeys: ['sheet_a'], candidateChangedSheetKeys: ['sheet_a'],
         transactionContext: makeTransaction(), assumeCommitLock: true, targetSnapshot,
-      })).rejects.toThrow('save readback conflict');
+      })).rejects.toThrow(changed === 'private' ? /save readback conflict.*staged_field\(index=0,key=TavernDB_ACU_IsolatedData\)/ : /save readback conflict.*chat_identity\(/);
       expect(JSON.stringify(mocks.chat[0].TavernDB_ACU_IsolatedData)).toBe(savedState);
       expect(mocks.chat[0].mes).toBe('外部最新正文');
       expect(mocks.chat[0].TavernDB_ACU_Identity).toBeUndefined();
       expect(mocks.saveChat).toHaveBeenCalledOnce();
     } finally { mocks.chatIdentity = previousChatIdentity; }
+  });
+
+  it('保存窗口内宿主/脚本补齐语义等价字段（is_system=false、message_id=index、undefined 隔离键）不误报 readback conflict', async () => {
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+    const message = seedFrame({ manualRefillProgress: undefined });
+    delete message.is_system;
+    delete message.message_id;
+    const data = { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } as any;
+    mocks.loadReplayDetailed.mockResolvedValue({ baseKind: 'full_checkpoint', data });
+    mocks.saveChat.mockImplementationOnce(async () => {
+      // 模拟 TT / JS-Slash-Runner setChatMessages 对新生成 AI 楼层的语义等价补全。
+      mocks.chat[0].is_system = false;
+      mocks.chat[0].message_id = 0;
+      mocks.chat[0].TavernDB_ACU_Identity = undefined;
+    });
+
+    const result = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0, source: 'manual_crud', afterData: data,
+      operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_a', sheet: sheetA, reason: 'manual_crud' }],
+      filledSheetKeys: ['sheet_a'], candidateChangedSheetKeys: ['sheet_a'],
+      transactionContext: makeTransaction(), assumeCommitLock: true,
+    });
+
+    expect(result).toMatchObject({ saved: true, messageIndex: 0 });
+    expect(mocks.saveChat).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { label: 'is_user 翻转', mutate: (msg: any) => { msg.is_user = true; } },
+    { label: 'is_system 翻转', mutate: (msg: any) => { msg.is_system = true; } },
+    { label: 'message_id 错位', mutate: (msg: any) => { msg.message_id = 1; } },
+  ])('保存窗口内真实楼层身份变化（$label）仍拒绝确认并报告 floor_identity 诊断', async ({ mutate }) => {
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+    const message = seedFrame({ manualRefillProgress: undefined });
+    delete message.is_system;
+    delete message.message_id;
+    const data = { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } as any;
+    mocks.loadReplayDetailed.mockResolvedValue({ baseKind: 'full_checkpoint', data });
+    mocks.saveChat.mockImplementationOnce(async () => {
+      mutate(mocks.chat[0]);
+    });
+
+    await expect(persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0, source: 'manual_crud', afterData: data,
+      operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_a', sheet: sheetA, reason: 'manual_crud' }],
+      filledSheetKeys: ['sheet_a'], candidateChangedSheetKeys: ['sheet_a'],
+      transactionContext: makeTransaction(), assumeCommitLock: true,
+    })).rejects.toThrow(/save readback conflict.*floor_identity\(index=0,/);
+  });
+
+  it('init full checkpoint 随迁未改动资料字段时，保存窗口内并发写入 _qrf_* 不误报冲突；随迁真实改动字段被外部改写时仍检测冲突', async () => {
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+    const { registerMaterialCheckpointFloorSync_ACU } = await import('../../../src/service/chat/material-checkpoint-sync');
+    const data = { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } as any;
+
+    // 场景 1：资料随迁未修改任何 _qrf_* 字段，保存期间推演并发写入 _qrf_world_simulation_state，不应误报。
+    mocks.chat.splice(0, mocks.chat.length, { is_user: false, mes: '开场 AI 楼层' });
+    mocks.saveChat.mockImplementationOnce(async () => {
+      mocks.chat[0]._qrf_world_simulation_state = { version: 1, tick: 1 };
+    });
+    const okResult = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0, source: 'manual_crud', afterData: data,
+      operations: [], forceCheckpoint: true, checkpointReason: 'init',
+      filledSheetKeys: ['sheet_a'], candidateChangedSheetKeys: ['sheet_a'],
+      transactionContext: makeTransaction(), assumeCommitLock: true,
+    });
+    expect(okResult).toMatchObject({ saved: true, messageIndex: 0 });
+    expect(mocks.chat[0]._qrf_world_simulation_state).toEqual({ version: 1, tick: 1 });
+
+    // 场景 2：资料随迁实际改写了 _qrf_continuation_agent，保存期间被外部覆写时必须检出 staged_field 冲突。
+    let activeRelocate = true;
+    registerMaterialCheckpointFloorSync_ACU((chat, anchorIndex) => {
+      if (!activeRelocate) return;
+      const target = chat[anchorIndex] as Record<string, unknown> | undefined;
+      if (target) target._qrf_continuation_agent = { relocatedAt: anchorIndex };
+    });
+    try {
+      mocks.chat.splice(0, mocks.chat.length, { is_user: false, mes: '开场 AI 楼层' });
+      mocks.saveChat.mockImplementationOnce(async () => {
+        mocks.chat[0]._qrf_continuation_agent = { relocatedAt: 999, external: true };
+      });
+      await expect(persistTableMutationLogV2_ACU({
+        targetMessageIndex: 0, source: 'manual_crud', afterData: data,
+        operations: [], forceCheckpoint: true, checkpointReason: 'init',
+        filledSheetKeys: ['sheet_a'], candidateChangedSheetKeys: ['sheet_a'],
+        transactionContext: makeTransaction(), assumeCommitLock: true,
+      })).rejects.toThrow(/save readback conflict.*staged_field\(index=0,key=_qrf_continuation_agent\)/);
+    } finally {
+      activeRelocate = false;
+    }
   });
 
 

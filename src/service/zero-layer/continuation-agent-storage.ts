@@ -1,4 +1,5 @@
 import { getChatArray_ACU } from '../../data/gateways/chat-gateway';
+import { buildChatFloorIdentity_ACU } from '../../shared/chat-floor-identity';
 import { ZERO_LAYER_CARRIER_FIELD_ACU } from './model';
 import { AGENT_MODULE_FIELD_ACU, AGENT_CONVERSATION_FIELD_ACU, AGENT_WRITABLE_MODULES_ACU, type AgentModuleFloorDelta_ACU, type ContinuationAgentTurnPlanRequest_ACU } from '../continuation/agent/agent-model';
 import { agentModuleFrameDeps_ACU, buildEmptyAgentModuleSnapshot_ACU, readAgentModuleFoldState_ACU } from '../continuation/agent/agent-module-store';
@@ -127,8 +128,8 @@ export function createZeroLayerContinuationAgentStorage_ACU(
     captureBaseline: candidate => {
       if (candidate !== chat) throw new ZeroLayerError_ACU('scope-changed', '资料基线不属于本请求。');
       refresh();
-      const baseline = { identity: store.getChatIdentity(), floors: chat.map(message => ({
-        floorIdentity: JSON.stringify([message?.message_id, message?.is_user, message?.is_system]),
+      const baseline = { identity: store.getChatIdentity(), floors: chat.map((message, index) => ({
+        floorIdentity: buildChatFloorIdentity_ACU(message, index),
         swipeId: readMessageSwipeId_ACU(message), existed: Object.prototype.hasOwnProperty.call(message, AGENT_MODULE_FIELD_ACU),
         content: JSON.stringify(message[AGENT_MODULE_FIELD_ACU]) })) };
       baselines.set(baseline, frameFingerprint());

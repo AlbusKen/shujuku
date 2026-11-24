@@ -8,6 +8,7 @@
 
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../../data/gateways/chat-gateway';
 import { getActiveChatStorageIdentity_ACU } from '../../../data/storage/chat-history';
+import { buildChatFloorIdentity_ACU } from '../../../shared/chat-floor-identity';
 import { findLatestTableFullCheckpointIndex_ACU } from '../../chat/material-checkpoint-sync';
 import {
   foldAgentModuleSnapshot_ACU,
@@ -679,8 +680,8 @@ export interface AgentModuleCommitResult_ACU {
 }
 
 /** 规划前固定聊天各楼资料字段；未暂存的旧楼仍可能在保存监听器中被改动。 */
-function agentModuleFloorIdentity_ACU(message: any): string {
-  return JSON.stringify([message?.message_id, message?.is_user, message?.is_system]);
+function agentModuleFloorIdentity_ACU(message: any, index: number): string {
+  return buildChatFloorIdentity_ACU(message, index);
 }
 
 export function captureAgentModuleCommitBaseline_ACU(chat: any[]): {
@@ -688,8 +689,8 @@ export function captureAgentModuleCommitBaseline_ACU(chat: any[]): {
   floors: Array<{ floorIdentity: string; swipeId: string; existed: boolean; content: string | undefined }>;
 } {
   const asJson = (value: unknown): string | undefined => JSON.stringify(value);
-  return { identity: getActiveChatStorageIdentity_ACU(chat), floors: chat.map(message => ({
-    floorIdentity: agentModuleFloorIdentity_ACU(message),
+  return { identity: getActiveChatStorageIdentity_ACU(chat), floors: chat.map((message, index) => ({
+    floorIdentity: agentModuleFloorIdentity_ACU(message, index),
     swipeId: readMessageSwipeId_ACU(message),
     existed: Object.prototype.hasOwnProperty.call(message, AGENT_MODULE_FIELD_ACU),
     content: asJson(message?.[AGENT_MODULE_FIELD_ACU]),
@@ -710,7 +711,7 @@ export async function writeAgentModuleCommitDelta_ACU(
   const floorCurrent = (index: number): boolean => {
     const message = chat[index];
     const entry = baseline.floors[index];
-    return !!message && !!entry && agentModuleFloorIdentity_ACU(message) === entry.floorIdentity
+    return !!message && !!entry && agentModuleFloorIdentity_ACU(message, index) === entry.floorIdentity
       && readMessageSwipeId_ACU(message) === entry.swipeId;
   };
   const baselineIntact = (excluded: ReadonlySet<number> = new Set()): boolean =>

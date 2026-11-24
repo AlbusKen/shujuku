@@ -174,6 +174,7 @@ vi.mock('../../../src/service/vector/summary-vector-mirror-writer', () => ({
 // 避免加载真实的重量级运行时状态模块。
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   currentChatFileIdentifier_ACU: 'chat-a',
+  currentJsonTableData_ACU: null,
   getCurrentIsolationKey_ACU: () => 'iso-source',
 }));
 // 运行时测试显式选择模式，不让聊天模式解析读取未声明的重型状态替身。

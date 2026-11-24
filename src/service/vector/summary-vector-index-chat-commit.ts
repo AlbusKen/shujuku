@@ -5,7 +5,36 @@
 import { patchIsolatedTagMetadata_ACU } from '../../data/repositories/chat-message-data-repo';
 import { saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { absorbOwnTableSave_ACU, getTableReplayGeneration_ACU } from '../../shared/table-replay-generation';
+import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
 import type { IsolationTagData_ACU } from '../../data/models/chat-message-data';
+
+/**
+ * 向量 metadata 提交必须与同聊天的表格写入提交串行化：
+ * 双方共用楼层上的 `TavernDB_ACU_IsolatedData` / `TavernDB_ACU_Identity`，
+ * 未持提交锁直接修改会在表格 `saveChat` 等待窗口内触发 `save readback conflict`。
+ * 使用 `derived_metadata` 语义，不推进源表格的 runtime revision。
+ */
+function runVectorMetadataCommitLocked_ACU<T>(
+    isolationKeys: readonly string[],
+    reason: string,
+    task: () => Promise<T>,
+): Promise<T> {
+    const normalizedKeys = [...new Set(
+        isolationKeys.map((key) => String(key || 'default').trim() || 'default'),
+    )].sort();
+    const acquireNext = (depth: number): Promise<T> => {
+        if (depth >= normalizedKeys.length) return task();
+        return runTableWriteTransaction_ACU({
+            source: 'vector_mirror',
+            reason,
+            isolationKey: normalizedKeys[depth],
+            revisionImpact: 'derived_metadata',
+            writeSet: [{ kind: 'all' }],
+            workingDataMode: 'none',
+        }, (ctx) => ctx.runCommit(() => acquireNext(depth + 1), []));
+    };
+    return acquireNext(0);
+}
 
 /**
  * 在提交时捕获消息上将被事务修改的字段（存在性 + 原值，保留字符串容器原格式）。
@@ -60,31 +89,33 @@ export async function commitVectorMetadataPatch_ACU(
 ): Promise<boolean> {
     if (!message) return false;
 
-    const snapshot = captureVectorCommitMessageState_ACU(message, [
-        'TavernDB_ACU_IsolatedData',
-        'TavernDB_ACU_Identity',
-        'TavernDB_ACU_IndependentData',
-        'TavernDB_ACU_ModifiedKeys',
-        'TavernDB_ACU_UpdateGroupKeys',
-        '_acu_remote_memory_snapshot_anchor',
-    ]);
+    return runVectorMetadataCommitLocked_ACU([isolationKey], 'vector_metadata_patch', async () => {
+        const snapshot = captureVectorCommitMessageState_ACU(message, [
+            'TavernDB_ACU_IsolatedData',
+            'TavernDB_ACU_Identity',
+            'TavernDB_ACU_IndependentData',
+            'TavernDB_ACU_ModifiedKeys',
+            'TavernDB_ACU_UpdateGroupKeys',
+            '_acu_remote_memory_snapshot_anchor',
+        ]);
 
-    try {
-        const result = patchIsolatedTagMetadata_ACU(message, isolationKey, patch, {
-            expectedIndexId: options?.expectedIndexId,
-        });
-        if (!result.changed) return false;
+        try {
+            const result = patchIsolatedTagMetadata_ACU(message, isolationKey, patch, {
+                expectedIndexId: options?.expectedIndexId,
+            });
+            if (!result.changed) return false;
 
-        options?.additionalMutate?.(message);
-        // 向量 metadata / 镜像帧不参与表格回放：吸收本次保存代次，表格快照仍逐帧校验内容指纹。
-        const generationBeforeSave = getTableReplayGeneration_ACU();
-        await saveChatToHostStrict_ACU();
-        absorbOwnTableSave_ACU(generationBeforeSave);
-        return true;
-    } catch (error) {
-        restoreVectorCommitMessageState_ACU(message, snapshot);
-        throw error;
-    }
+            options?.additionalMutate?.(message);
+            // 向量 metadata / 镜像帧不参与表格回放：吸收本次保存代次，表格快照仍逐帧校验内容指纹。
+            const generationBeforeSave = getTableReplayGeneration_ACU();
+            await saveChatToHostStrict_ACU();
+            absorbOwnTableSave_ACU(generationBeforeSave);
+            return true;
+        } catch (error) {
+            restoreVectorCommitMessageState_ACU(message, snapshot);
+            throw error;
+        }
+    });
 }
 
 /**
@@ -113,45 +144,51 @@ export async function commitVectorMetadataPatchesBatch_ACU(
     },
 ): Promise<boolean> {
     if (!Array.isArray(entries) || entries.length === 0) return false;
+    const activeEntries = entries.filter((entry) => Boolean(entry?.message));
+    if (activeEntries.length === 0) return false;
 
-    // 先对全部消息捕获快照（batch 开始时）。
-    const snapshots = new Map<any, Map<string, { exists: boolean; value: unknown }>>();
-    for (const entry of entries) {
-        if (!entry.message) continue;
-        snapshots.set(entry.message, captureVectorCommitMessageState_ACU(entry.message, [
-            'TavernDB_ACU_IsolatedData',
-            'TavernDB_ACU_Identity',
-            'TavernDB_ACU_IndependentData',
-            'TavernDB_ACU_ModifiedKeys',
-            'TavernDB_ACU_UpdateGroupKeys',
-            '_acu_remote_memory_snapshot_anchor',
-        ]));
-    }
+    return runVectorMetadataCommitLocked_ACU(
+        activeEntries.map((entry) => entry.isolationKey),
+        'vector_metadata_patches_batch',
+        async () => {
+            // 在持锁临界区内捕获快照，避免回滚覆盖并发已提交的表格帧。
+            const snapshots = new Map<any, Map<string, { exists: boolean; value: unknown }>>();
+            for (const entry of activeEntries) {
+                snapshots.set(entry.message, captureVectorCommitMessageState_ACU(entry.message, [
+                    'TavernDB_ACU_IsolatedData',
+                    'TavernDB_ACU_Identity',
+                    'TavernDB_ACU_IndependentData',
+                    'TavernDB_ACU_ModifiedKeys',
+                    'TavernDB_ACU_UpdateGroupKeys',
+                    '_acu_remote_memory_snapshot_anchor',
+                ]));
+            }
 
-    const rollbackAll = (): void => {
-        snapshots.forEach((snapshot, message) => restoreVectorCommitMessageState_ACU(message, snapshot));
-    };
+            const rollbackAll = (): void => {
+                snapshots.forEach((snapshot, message) => restoreVectorCommitMessageState_ACU(message, snapshot));
+            };
 
-    try {
-        let changed = false;
-        for (const entry of entries) {
-            if (!entry.message) continue;
-            const result = patchIsolatedTagMetadata_ACU(entry.message, entry.isolationKey, entry.patch, {
-                expectedIndexId: entry.expectedIndexId,
-            });
-            if (result.changed) changed = true;
-            if (options?.additionalMutate?.(entry.message) === true) changed = true;
-        }
-        if (!changed) {
-            rollbackAll();
-            return false;
-        }
-        const generationBeforeSave = getTableReplayGeneration_ACU();
-        await saveChatToHostStrict_ACU();
-        absorbOwnTableSave_ACU(generationBeforeSave);
-        return true;
-    } catch (error) {
-        rollbackAll();
-        throw error;
-    }
+            try {
+                let changed = false;
+                for (const entry of activeEntries) {
+                    const result = patchIsolatedTagMetadata_ACU(entry.message, entry.isolationKey, entry.patch, {
+                        expectedIndexId: entry.expectedIndexId,
+                    });
+                    if (result.changed) changed = true;
+                    if (options?.additionalMutate?.(entry.message) === true) changed = true;
+                }
+                if (!changed) {
+                    rollbackAll();
+                    return false;
+                }
+                const generationBeforeSave = getTableReplayGeneration_ACU();
+                await saveChatToHostStrict_ACU();
+                absorbOwnTableSave_ACU(generationBeforeSave);
+                return true;
+            } catch (error) {
+                rollbackAll();
+                throw error;
+            }
+        },
+    );
 }

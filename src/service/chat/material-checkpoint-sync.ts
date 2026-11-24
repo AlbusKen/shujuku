@@ -22,6 +22,16 @@ export interface MaterialFieldSnapshot_ACU {
   value: unknown;
 }
 
+export interface MaterialCheckpointChangedField_ACU {
+  index: number;
+  field: string;
+}
+
+export interface MaterialCheckpointSyncHandle_ACU {
+  changedFields: MaterialCheckpointChangedField_ACU[];
+  rollback: () => void;
+}
+
 type MaterialCheckpointSync_ACU = (chat: unknown[], anchorIndex: number) => void;
 
 export interface MaterialCheckpointRecoveryAdapter_ACU {
@@ -115,9 +125,66 @@ export function notifyMaterialCheckpointFloor_ACU(chat: unknown[], anchorIndex: 
   }
 }
 
-/** 先快照资料字段，再通知随迁。返回的函数把字段还原到通知前。 */
-export function beginMaterialCheckpointSync_ACU(chat: unknown[], anchorIndex: number): () => void {
-  const snapshots = snapshotMaterialCheckpointFields_ACU(chat);
+/**
+ * 先快照资料字段，再通知随迁，并精确追踪实际发生改动的 `(index, field)` 集合。
+ * - 若监听方未修改任何资料字段，返回 `null`（调用方无需监视或回滚无关楼层的 `_qrf_*` 字段）；
+ * - 若发生改动，返回的 `rollback` 仅还原实际改动的字段，避免覆盖保存窗口内并发提交的无关楼层资料。
+ */
+export function beginMaterialCheckpointSyncTracked_ACU(
+  chat: unknown[],
+  anchorIndex: number,
+): MaterialCheckpointSyncHandle_ACU | null {
+  const before = chat.map((message, index) => MATERIAL_CHECKPOINT_FIELDS_ACU.map(field => {
+    const isObj = !!message && typeof message === 'object';
+    const existed = isObj && Object.prototype.hasOwnProperty.call(message, field);
+    const value = isObj ? (message as Record<string, unknown>)[field] : undefined;
+    return {
+      index,
+      field,
+      existed,
+      value,
+      serialized: JSON.stringify(value),
+    };
+  }));
   notifyMaterialCheckpointFloor_ACU(chat, anchorIndex);
-  return () => restoreMaterialCheckpointFields_ACU(chat, snapshots);
+  const changed: Array<{
+    index: number;
+    field: string;
+    existed: boolean;
+    value: unknown;
+    serialized: string | undefined;
+  }> = [];
+  for (let index = 0; index < before.length; index += 1) {
+    const message = chat[index];
+    const isObj = !!message && typeof message === 'object';
+    for (const item of before[index]) {
+      const afterExisted = isObj && Object.prototype.hasOwnProperty.call(message, item.field);
+      const afterSerialized = isObj ? JSON.stringify((message as Record<string, unknown>)[item.field]) : undefined;
+      if (afterExisted !== item.existed || afterSerialized !== item.serialized) {
+        changed.push(item);
+      }
+    }
+  }
+  if (changed.length === 0) return null;
+  return {
+    changedFields: changed.map(({ index, field }) => ({ index, field })),
+    rollback: () => {
+      for (const item of changed) {
+        const message = chat[item.index];
+        if (!message || typeof message !== 'object') continue;
+        const container = message as Record<string, unknown>;
+        if (item.existed) {
+          container[item.field] = item.serialized === undefined ? item.value : JSON.parse(item.serialized);
+        } else {
+          delete container[item.field];
+        }
+      }
+    },
+  };
+}
+
+/** 先快照资料字段，再通知随迁。返回的函数把实际改动过的字段还原到通知前。 */
+export function beginMaterialCheckpointSync_ACU(chat: unknown[], anchorIndex: number): () => void {
+  const handle = beginMaterialCheckpointSyncTracked_ACU(chat, anchorIndex);
+  return handle ? handle.rollback : () => {};
 }

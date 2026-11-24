@@ -633,6 +633,102 @@ describe('P4 批量删除：真实 repository 写屏障', () => {
   });
 });
 
+describe('P4 并发写锁串行化：向量 metadata 提交与表格提交互斥', () => {
+  it('6.1 表格提交在异步 saveChat 窗口挂起期间，commitVectorMetadataPatch_ACU 排队等待而不交错改写 TavernDB_ACU_IsolatedData', async () => {
+    const {
+      captureTableRuntimeRevisionForWriteSet_ACU,
+      runTableWriteTransaction_ACU,
+    } = await import('../../../src/service/table/table-write-transaction');
+    const msg = h.chat[0];
+    msg.TavernDB_ACU_IsolatedData = { 'iso-a': v2Slot() };
+    const events: string[] = [];
+    let releaseTableSave!: () => void;
+    const tableSaveEntered = new Promise<void>((resolve) => {
+      h.save.mockImplementationOnce(() => new Promise<void>((done) => {
+        events.push('table:save_start');
+        releaseTableSave = () => {
+          events.push('table:save_end');
+          done();
+        };
+        resolve();
+      }));
+    });
+    h.saveStrict.mockImplementationOnce(async () => {
+      events.push('vector:save');
+    });
+
+    const baseRevision = captureTableRuntimeRevisionForWriteSet_ACU(
+      [{ kind: 'sheet', sheetKey: 'sheet_0' }],
+      { chatKey: h.chatKey, isolationKey: h.isolationKey },
+    );
+
+    const tableCommitPromise = runTableWriteTransaction_ACU({
+      source: 'manual_crud',
+      reason: 'insertRow:sqlite',
+      chatKey: h.chatKey,
+      isolationKey: h.isolationKey,
+      writeSet: [{ kind: 'sheet', sheetKey: 'sheet_0' }],
+      workingDataMode: 'none',
+    }, (ctx) => ctx.runCommit(async () => {
+      events.push('table:write');
+      msg.TavernDB_ACU_IsolatedData['iso-a'].storageFrame.headRevision = 'rev-table-1';
+      const staged = JSON.stringify(msg.TavernDB_ACU_IsolatedData);
+      await h.save();
+      // 表格保存返回后、释放提交锁前，TavernDB_ACU_IsolatedData 必须未被并发向量写入改写。
+      expect(JSON.stringify(msg.TavernDB_ACU_IsolatedData)).toBe(staged);
+      events.push('table:readback_ok');
+    }));
+
+    await tableSaveEntered;
+
+    const vectorCommitPromise = commitVectorMetadataPatch_ACU(msg, h.isolationKey, {
+      summaryVectorIndexState: validState('idx-serial'),
+      summaryVectorIndexManifest: { indexId: 'idx-serial' } as any,
+    });
+
+    // 给事件循环让步，确认向量提交未在表格持锁期间抢先修改楼层数据。
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(msg.TavernDB_ACU_IsolatedData['iso-a'].summaryVectorIndexManifest).toBeUndefined();
+
+    releaseTableSave();
+    await expect(tableCommitPromise).resolves.toBeUndefined();
+    await expect(vectorCommitPromise).resolves.toBe(true);
+
+    expect(events).toEqual([
+      'table:write',
+      'table:save_start',
+      'table:save_end',
+      'table:readback_ok',
+      'vector:save',
+    ]);
+    expect(msg.TavernDB_ACU_IsolatedData['iso-a'].storageFrame.headRevision).toBe('rev-table-1');
+    expect(msg.TavernDB_ACU_IsolatedData['iso-a'].summaryVectorIndexManifest.indexId).toBe('idx-serial');
+
+    // 再验证 derived_metadata 语义：单独的向量提交不会使源表格基线陈旧。
+    const freshBase = captureTableRuntimeRevisionForWriteSet_ACU(
+      [{ kind: 'sheet', sheetKey: 'sheet_0' }],
+      { chatKey: h.chatKey, isolationKey: h.isolationKey },
+    );
+    expect(freshBase).not.toBe(baseRevision);
+    await expect(commitVectorMetadataPatch_ACU(msg, h.isolationKey, {
+      summaryVectorIndexState: validState('idx-serial-2'),
+      summaryVectorIndexManifest: { indexId: 'idx-serial-2' } as any,
+    })).resolves.toBe(true);
+    await expect(runTableWriteTransaction_ACU({
+      source: 'group_fill',
+      reason: 'source_still_fresh_after_vector_commit',
+      chatKey: h.chatKey,
+      isolationKey: h.isolationKey,
+      writeSet: [{ kind: 'sheet', sheetKey: 'sheet_0' }],
+      baseRevision: freshBase,
+      workingDataMode: 'none',
+    }, (ctx) => {
+      ctx.assertFresh?.('after_vector_metadata_commit');
+    })).resolves.toBeUndefined();
+  });
+});
+
 describe('P4 单一 service 边界', () => {
   it('5.1 popup 与 V2 UI 调用同一 service，不存在重复实现', async () => {
     // popup 绑定层只 import 该 service 的公开函数，不自行实现 writer；V2 UI 复用同一 service 边界。
