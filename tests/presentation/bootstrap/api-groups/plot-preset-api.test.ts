@@ -51,7 +51,7 @@ vi.mock('../../../../src/service/table/table-storage-strategy', () => ({
 vi.mock('../../../../src/presentation/components/settings-ui-helpers', () => ({ saveSettingsAndNotify_ACU: mocks.saveSettings }));
 vi.mock('../../../../src/presentation/components/pipeline-ui-helpers', () => ({ refreshPresetUIAfterSwitch_ACU: mocks.refreshPreset }));
 vi.mock('../../../../src/service/fill-mode/fill-mode-chat-switch', () => ({
-  setCurrentChatFillMode_ACU: mocks.switchFillMode,
+  promoteCurrentChatFillModeForPlotPreset_ACU: mocks.switchFillMode,
 }));
 
 import { createPlotPresetApi } from '../../../../src/presentation/bootstrap/api-groups/plot-preset-api';
@@ -97,7 +97,7 @@ describe('initGameSession 模板重置契约', () => {
     expect(result).toMatchObject({ success: true, templateInjected: true });
     expect(result).toMatchObject({ presetLoaded: true, fillModeSwitch: { ok: true, mode: 'llm' } });
     expect(mocks.persistedPresets.map(preset => preset.name)).toEqual(['西幻剧情引导']);
-    expect(mocks.switchFillMode).toHaveBeenCalledWith('llm');
+    expect(mocks.switchFillMode).toHaveBeenCalledOnce();
     mocks.switchFillMode.mockClear();
     mocks.refreshPreset.mockClear();
     const batch = await api.importPlotPresetsFromData([{ name: '批量一' }, {}, { name: '批量二' }]);
@@ -210,5 +210,38 @@ describe('initGameSession 模板重置契约', () => {
     const batch = await api.importPlotPresetsFromData([{ name: '批量保留' }]);
     expect(batch).toMatchObject({ success: true, imported: 1, failed: 0, fillModeSwitch: { ok: false, reason: 'save_failed' } });
     expect(batch.warning).toContain('save_failed');
+  });
+
+  it('直接注入或切换当前剧情推进预设时同步联动填表模式，且保持布尔返回值与防重复触发', async () => {
+    const api = createApi();
+
+    expect(api.injectPlotPresetToCurrentChat('西幻剧情引导')).toBe(true);
+    expect(mocks.switchFillMode).toHaveBeenCalledTimes(1);
+
+    mocks.switchFillMode.mockClear();
+    expect(api.switchPlotPreset('西幻剧情引导')).toBe(true);
+    expect(mocks.switchFillMode).toHaveBeenCalledTimes(1);
+
+    // 清空为跟随全局或预设不存在时不联动模式切换
+    mocks.switchFillMode.mockClear();
+    mocks.switchPreset.mockReturnValueOnce({ presetName: '', followsGlobal: true });
+    expect(api.injectPlotPresetToCurrentChat('')).toBe(true);
+    expect(mocks.switchFillMode).not.toHaveBeenCalled();
+
+    mocks.switchPreset.mockReturnValueOnce(null as any);
+    expect(api.injectPlotPresetToCurrentChat('不存在预设')).toBe(false);
+    expect(mocks.switchFillMode).not.toHaveBeenCalled();
+
+    // importPlotPresetFromData(switchTo: true) 内部调用 injectPlotPresetToCurrentChat 不重复触发模式切换
+    mocks.switchFillMode.mockClear();
+    mocks.switchFillMode.mockResolvedValueOnce({ ok: true, mode: 'crossfire', changed: false });
+    const imported = await api.importPlotPresetFromData({ name: '交火保留预设' }, { switchTo: true });
+    expect(imported).toMatchObject({
+      success: true,
+      switchedCurrentChat: true,
+      fillModeSwitch: { ok: true, mode: 'crossfire', changed: false },
+      warning: '',
+    });
+    expect(mocks.switchFillMode).toHaveBeenCalledTimes(1);
   });
 });

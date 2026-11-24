@@ -12,16 +12,18 @@ import { applyChatTemplateSnapshotWithReconciliation_ACU, upsertTemplatePreset_A
 import { sanitizeTemplateSnapshotForChat_ACU } from '../../../service/template/chat-scope';
 import { isSqliteMode } from '../../../service/table/storage-mode';
 import { didSqliteFallbackAfterReload_ACU, reloadStorageProvider } from '../../../service/table/table-storage-strategy';
-import { setCurrentChatFillMode_ACU } from '../../../service/fill-mode/fill-mode-chat-switch';
+import { promoteCurrentChatFillModeForPlotPreset_ACU } from '../../../service/fill-mode/fill-mode-chat-switch';
 import { notifyChatConfigurationChanged_ACU } from '../../../shared/chat-configuration-change';
 import { saveSettingsAndNotify_ACU } from '../../components/settings-ui-helpers';
 import { refreshPresetUIAfterSwitch_ACU } from '../../components/pipeline-ui-helpers';
 import type { ApiGroupContext } from './callback-api';
 
 export function createPlotPresetApi(ctx: ApiGroupContext): Record<string, Function> {
+    let suppressNestedFillModeSwitch = false;
+
     async function switchImportedPresetMode() {
         try {
-            const fillModeSwitch = await setCurrentChatFillMode_ACU('llm');
+            const fillModeSwitch = await promoteCurrentChatFillModeForPlotPreset_ACU();
             const warning = 'reason' in fillModeSwitch
                 ? `预设已导入，但当前会话未切换到 LLM 召回模式（${fillModeSwitch.reason}）。请在填表模式页处理确认或重试。`
                 : '';
@@ -32,6 +34,22 @@ export function createPlotPresetApi(ctx: ApiGroupContext): Record<string, Functi
                 warning: '预设已保存，但当前会话模式切换异常，请在填表模式页核对并重试。',
             };
         }
+    }
+
+    function triggerFillModePromotionForChatPlotPreset(label: string): void {
+        if (suppressNestedFillModeSwitch) return;
+        void promoteCurrentChatFillModeForPlotPreset_ACU()
+            .then((fillModeSwitch) => {
+                if ('reason' in fillModeSwitch) {
+                    logWarn_ACU(
+                        `[API] ${label}: 剧情推进预设已注入，但当前会话未切换到 LLM 召回模式（${fillModeSwitch.reason}）`,
+                        fillModeSwitch.error || '',
+                    );
+                }
+            })
+            .catch((error) => {
+                logWarn_ACU(`[API] ${label}: 剧情推进预设已注入，但当前会话模式切换异常:`, error);
+            });
     }
 
     function refreshImportedPresets(): string {
@@ -81,12 +99,15 @@ export function createPlotPresetApi(ctx: ApiGroupContext): Record<string, Functi
             const warnings = [postImport.warning];
             let switchedCurrentChat = false;
             if (!deferPostImport && switchTo) {
+                suppressNestedFillModeSwitch = true;
                 try {
                     switchedCurrentChat = ctx.getApi().injectPlotPresetToCurrentChat(finalName) === true;
                     if (!switchedCurrentChat) warnings.push('预设已保存，但未能绑定到当前会话，请手动选择该预设。');
                 } catch (error) {
                     logWarn_ACU('[API] 已导入预设的会话绑定异常:', error);
                     warnings.push('预设已保存，但当前会话预设绑定异常，请手动选择该预设。');
+                } finally {
+                    suppressNestedFillModeSwitch = false;
                 }
             }
             if (!deferPostImport) warnings.push(refreshImportedPresets());
@@ -143,6 +164,10 @@ export function createPlotPresetApi(ctx: ApiGroupContext): Record<string, Functi
                 }
 
                 logDebug_ACU(`Successfully switched current chat to plot preset: "${result.followsGlobal ? '跟随全局' : result.presetName}"`);
+                if (!result.followsGlobal) {
+                    triggerFillModePromotionForChatPlotPreset('switchPlotPreset');
+                }
+                notifyChatConfigurationChanged_ACU('plot-presets');
                 refreshPresetUIAfterSwitch_ACU();
                 return true;
             } catch (e) {
@@ -169,6 +194,10 @@ export function createPlotPresetApi(ctx: ApiGroupContext): Record<string, Functi
                 }
 
                 logDebug_ACU(`Injected global plot preset into current chat: "${result.followsGlobal ? '跟随全局' : result.presetName}"`);
+                if (!result.followsGlobal) {
+                    triggerFillModePromotionForChatPlotPreset('injectPlotPresetToCurrentChat');
+                }
+                notifyChatConfigurationChanged_ACU('plot-presets');
                 refreshPresetUIAfterSwitch_ACU();
                 return true;
             } catch (e) {

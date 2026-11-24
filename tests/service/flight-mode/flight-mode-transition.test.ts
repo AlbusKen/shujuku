@@ -73,7 +73,11 @@ vi.mock('../../../src/service/vector/summary-vector-index-archive-service', () =
 }));
 
 import { disableFlightMode_ACU, enableFlightMode_ACU } from '../../../src/service/flight-mode/flight-mode-transition';
-import { ensureCurrentChatFillModeRecorded_ACU, setCurrentChatFillMode_ACU } from '../../../src/service/fill-mode/fill-mode-chat-switch';
+import {
+  ensureCurrentChatFillModeRecorded_ACU,
+  promoteCurrentChatFillModeForPlotPreset_ACU,
+  setCurrentChatFillMode_ACU,
+} from '../../../src/service/fill-mode/fill-mode-chat-switch';
 import { resolveCurrentChatFillMode_ACU } from '../../../src/service/fill-mode/fill-mode-chat-record';
 
 function chronicleTemplate() {
@@ -315,5 +319,110 @@ describe('flight-mode-transition', () => {
       error: expect.stringContaining('缺少可验证的启用前模板归档'),
     });
     expect(h.commit).not.toHaveBeenCalled();
+  });
+
+  it('注入剧情推进预设时：向量和经典切换为 llm，交火和 llm 保持不变', async () => {
+    // 1. 向量模式 -> llm
+    h.container = { version: 1, fillModeByIsolationKey: { '': { mode: 'vector', recordedAt: 1 } } };
+    await expect(promoteCurrentChatFillModeForPlotPreset_ACU()).resolves.toEqual({ ok: true, mode: 'llm', changed: true });
+    expect(h.container.fillModeByIsolationKey[''].mode).toBe('llm');
+
+    // 2. 交火模式 -> 不管（不保存也不降级）
+    h.strictSave.mockClear();
+    h.commit.mockClear();
+    h.container = { version: 1, fillModeByIsolationKey: { '': { mode: 'crossfire', recordedAt: 2 } } };
+    await expect(promoteCurrentChatFillModeForPlotPreset_ACU()).resolves.toEqual({ ok: true, mode: 'crossfire', changed: false });
+    expect(h.container.fillModeByIsolationKey[''].mode).toBe('crossfire');
+    expect(h.strictSave).not.toHaveBeenCalled();
+    expect(h.commit).not.toHaveBeenCalled();
+
+    // 3. 已是 llm -> 保持不变
+    h.container = { version: 1, fillModeByIsolationKey: { '': { mode: 'llm', recordedAt: 3 } } };
+    await expect(promoteCurrentChatFillModeForPlotPreset_ACU()).resolves.toEqual({ ok: true, mode: 'llm', changed: false });
+    expect(h.strictSave).not.toHaveBeenCalled();
+
+    // 4. 经典模式（常规未改模板）-> 停用飞行模式并切换为 llm
+    h.container = {
+      version: 1,
+      fillModeByIsolationKey: { '': { mode: 'classic', recordedAt: 4 } },
+      flightMode: {
+        enabled: true,
+        hiddenRowIds: ['1'],
+        bigSummarySheetKey: 'sheet_da_zong_jie',
+        archive: {
+          templateScope: { templateStr: JSON.stringify(chronicleTemplate()), presetName: '预设' },
+        },
+      },
+    };
+    await expect(promoteCurrentChatFillModeForPlotPreset_ACU()).resolves.toEqual({ ok: true, mode: 'llm', changed: true });
+    expect(h.commit).toHaveBeenCalledOnce();
+    expect(h.container.flightModeByIsolationKey['']).toMatchObject({ enabled: false, hiddenRowIds: [] });
+    expect(h.container.fillModeByIsolationKey[''].mode).toBe('llm');
+  });
+
+  it('注入剧情推进预设时：角色卡先注入不含大总结的新模板后，从经典切 llm 保留新模板不被旧归档覆盖', async () => {
+    const cardTemplate = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_chronicle: { uid: 'sheet_chronicle', name: '纪要表', content: [['row_id', '纪要'], ['1', '开局']] },
+      sheet_role: { uid: 'sheet_role', name: '角色表', content: [['row_id', '姓名'], ['1', '主角']] },
+    };
+    h.scopeState = { templateStr: JSON.stringify(cardTemplate), presetName: '角色卡模板' };
+    h.tableData = {
+      sheet_chronicle: { name: '纪要表', content: [['row_id', '纪要'], ['1', '开局']] },
+      sheet_role: { name: '角色表', content: [['row_id', '姓名'], ['1', '主角']] },
+    };
+    h.container = {
+      version: 1,
+      fillModeByIsolationKey: { '': { mode: 'classic', recordedAt: 10 } },
+      flightModeByIsolationKey: {
+        '': {
+          enabled: true,
+          hiddenRowIds: [],
+          bigSummarySheetKey: 'sheet_da_zong_jie',
+          archive: {
+            enabledTemplateStr: '{"template":"旧经典模板含大总结"}',
+            templateScope: { templateStr: JSON.stringify(chronicleTemplate()), presetName: '启用前默认模板' },
+          },
+        },
+      },
+    };
+
+    await expect(promoteCurrentChatFillModeForPlotPreset_ACU()).resolves.toEqual({ ok: true, mode: 'llm', changed: true });
+    // 不回滚旧归档模板，仅关闭经典开关并切换填表模式为 llm
+    expect(h.commit).not.toHaveBeenCalled();
+    expect(h.container.flightModeByIsolationKey['']).toMatchObject({ enabled: false, hiddenRowIds: [] });
+    expect(h.container.fillModeByIsolationKey[''].mode).toBe('llm');
+    expect(h.deleteLock).toHaveBeenCalledWith('sheet_da_zong_jie');
+
+    // 若模板修改后仍包含大总结表，则保留 template_scope_changed 安全拦截
+    const editedClassicTemplate = {
+      ...chronicleTemplate(),
+      sheet_da_zong_jie: { uid: 'sheet_da_zong_jie', name: '大总结', content: [['row_id', '总结']] },
+    };
+    h.scopeState = { templateStr: JSON.stringify(editedClassicTemplate), presetName: '用户编辑后' };
+    h.tableData = {
+      sheet_chronicle: { name: '纪要表', content: [['row_id'], ['1']] },
+      sheet_da_zong_jie: { name: '大总结', content: [['row_id', '总结']] },
+    };
+    h.container = {
+      version: 1,
+      fillModeByIsolationKey: { '': { mode: 'classic', recordedAt: 11 } },
+      flightModeByIsolationKey: {
+        '': {
+          enabled: true,
+          hiddenRowIds: [],
+          bigSummarySheetKey: 'sheet_da_zong_jie',
+          archive: {
+            enabledTemplateStr: '{"template":"旧经典模板含大总结"}',
+            templateScope: { templateStr: JSON.stringify(chronicleTemplate()), presetName: '启用前默认模板' },
+          },
+        },
+      },
+    };
+    await expect(promoteCurrentChatFillModeForPlotPreset_ACU()).resolves.toMatchObject({
+      ok: false,
+      reason: 'template_scope_changed',
+      currentMode: 'classic',
+    });
   });
 });

@@ -36,6 +36,8 @@ export interface SetChatFillModeOptions_ACU {
   confirmIrreversibleChange?: boolean;
   /** 用户已确认：切出经典时按启用前归档恢复模板，覆盖启用后对模板的修改。 */
   confirmTemplateScopeChange?: boolean;
+  /** 外部（如角色卡）已用不含大总结的新模板替换当前会话模板时，切出经典模式保留当前模板不回滚旧归档。 */
+  preserveReplacedTemplate?: boolean;
 }
 
 export type SetChatFillModeResult_ACU =
@@ -116,7 +118,11 @@ export async function setCurrentChatFillMode_ACU(
     if (!isChronicleBelowClassicThreshold_ACU() && !options.confirmIrreversibleChange) {
       return { ok: false, reason: 'irreversible_confirmation_required', currentMode };
     }
-    const disabled = await disableFlightMode_ACU({ confirmTemplateScopeChange: options.confirmTemplateScopeChange === true, fillMode: mode });
+    const disabled = await disableFlightMode_ACU({
+      confirmTemplateScopeChange: options.confirmTemplateScopeChange === true,
+      preserveReplacedTemplate: options.preserveReplacedTemplate === true,
+      fillMode: mode,
+    });
     if (!disabled.ok) {
       if (disabled.reason === 'template_scope_changed') return { ok: false, reason: 'template_scope_changed', currentMode };
       return { ok: false, reason: 'classic_disable_failed', currentMode, error: describeClassicTransitionFailure_ACU(disabled) };
@@ -128,6 +134,27 @@ export async function setCurrentChatFillMode_ACU(
     return { ok: false, reason: written.reason, currentMode, ...(written.error ? { error: written.error } : {}) };
   }
   return { ok: true, mode, changed: mode !== currentMode };
+}
+
+/**
+ * 注入剧情推进预设时的填表模式联动：
+ * 仅当当前对话处于 classic（经典）或 vector（向量）时切换为 llm（LLM 召回）；
+ * 当前已是 crossfire（交火）或 llm 时保持不变，绝不降级交火模式。
+ */
+export async function promoteCurrentChatFillModeForPlotPreset_ACU(
+  options: SetChatFillModeOptions_ACU = {},
+): Promise<SetChatFillModeResult_ACU> {
+  const current = resolveCurrentChatFillMode_ACU();
+  if (current.recordStatus === 'no_chat') {
+    return { ok: false, reason: 'no_active_chat', currentMode: current.mode };
+  }
+  if (current.mode === 'crossfire' || current.mode === 'llm') {
+    return { ok: true, mode: current.mode, changed: false };
+  }
+  return setCurrentChatFillMode_ACU('llm', {
+    preserveReplacedTemplate: true,
+    ...options,
+  });
 }
 
 /**

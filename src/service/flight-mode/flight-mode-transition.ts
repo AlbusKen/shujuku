@@ -43,6 +43,8 @@ export type FlightModeTransitionResult_ACU = {
 export interface DisableFlightModeOptions_ACU {
   /** 用户已明确确认：停用将按 archive 恢复模板，并覆盖启用后对该会话模板的修改。 */
   confirmTemplateScopeChange?: boolean;
+  /** 外部（如角色卡）已用不含大总结的新模板替换当前会话模板时，仅关闭经典状态并保留当前模板。 */
+  preserveReplacedTemplate?: boolean;
   /** 与经典状态同次保存的目标填表模式；直接停用默认回到 llm。 */
   fillMode?: Exclude<FillMode_ACU, 'classic'>;
 }
@@ -302,6 +304,41 @@ export async function disableFlightMode_ACU(options: DisableFlightModeOptions_AC
   if (!currentState.enabled) return { ok: true, reason: 'already_disabled' };
 
   const archive = currentState.archive;
+  const enabledTemplateStr = String(archive?.enabledTemplateStr || '');
+  const currentTemplateStr = getCurrentEffectiveTemplateText_ACU();
+  const templateChanged = !!(enabledTemplateStr && currentTemplateStr && enabledTemplateStr !== currentTemplateStr);
+
+  // 外部（如角色卡）先注入新模板再注入剧情推进预设时，新模板已不含大总结表；
+  // 此时仅关闭经典状态并写入目标填表模式，避免因 template_scope_changed 拒绝或用旧归档覆盖新模板。
+  if (options.preserveReplacedTemplate && templateChanged) {
+    const currentTemplate = parseEffectiveTemplate_ACU();
+    const hasBigSummaryInTemplate = !!(
+      currentTemplate
+      && (Object.prototype.hasOwnProperty.call(currentTemplate, currentState.bigSummarySheetKey)
+        || findSheetByName_ACU(currentTemplate, FLIGHT_MODE_BIG_SUMMARY_SHEET_NAME_ACU))
+    );
+    const hasBigSummaryInData = !!(
+      currentJsonTableData_ACU
+      && (Object.prototype.hasOwnProperty.call(currentJsonTableData_ACU, currentState.bigSummarySheetKey)
+        || findSheetByName_ACU(currentJsonTableData_ACU, FLIGHT_MODE_BIG_SUMMARY_SHEET_NAME_ACU))
+    );
+    if (currentTemplate && !hasBigSummaryInTemplate && !hasBigSummaryInData) {
+      const bigSummaryKey = currentState.bigSummarySheetKey;
+      try {
+        await persistFlightModeState_ACU({
+          enabled: false,
+          enabledAt: 0,
+          hiddenRowIds: [],
+          bigSummarySheetKey: bigSummaryKey,
+        }, options.fillMode || 'llm');
+      } catch (error: any) {
+        return { ok: false, reason: 'state_persist_failed', error: `经典表格模式开关状态保存失败：${describeError_ACU(error)}` };
+      }
+      deleteTableLocksForSheet_ACU(bigSummaryKey);
+      return { ok: true };
+    }
+  }
+
   const archivedScope = archive?.templateScope as { templateStr?: string; presetName?: string } | undefined;
   let restoreTemplate = parseTemplateScope_ACU(archivedScope);
   let restorePresetName = String(archivedScope?.presetName || '');
@@ -320,9 +357,7 @@ export async function disableFlightMode_ACU(options: DisableFlightModeOptions_AC
     };
   }
 
-  const enabledTemplateStr = String(archive?.enabledTemplateStr || '');
-  const currentTemplateStr = getCurrentEffectiveTemplateText_ACU();
-  if (enabledTemplateStr && currentTemplateStr && enabledTemplateStr !== currentTemplateStr && !options.confirmTemplateScopeChange) {
+  if (templateChanged && !options.confirmTemplateScopeChange) {
     return { ok: false, reason: 'template_scope_changed' };
   }
 
