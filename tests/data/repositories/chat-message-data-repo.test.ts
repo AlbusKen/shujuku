@@ -25,6 +25,7 @@ import {
   writeMessageIdentity_ACU,
   purgeManualRefillIncrementalSheetKeysFromStorageFrameV2_ACU,
   purgeManualRefillIncrementalSheetKeysFromMessage_ACU,
+  isEmptyV2StorageFrameShell_ACU,
   purgeSheetKeysFromMessage_ACU,
   purgeSheetKeysFromMessageForIsolation_ACU,
   clearAllTableFields_ACU,
@@ -615,8 +616,29 @@ describe('purgeSheetKeysFromMessage_ACU', () => {
     expect(frame.headRevision).toBe('1:keep');
   });
 
-  it('完整删除裁空最后一个 V2 entry 时清除悬挂的 headRevision', () => {
-    const msg: any = {
+  it('完整删除裁空最后一个 V2 entry 时清除悬挂的 headRevision，空壳帧整体移除', () => {
+    const retainedMsg: any = {
+      TavernDB_ACU_IsolatedData: {
+        tag1: {
+          storageFrame: {
+            version: 2,
+            headRevision: '1:removed',
+            checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: { sheet_1: { name: '保留表' } } },
+            logEntries: [{
+              seq: 1, commitRevision: '1:removed', filledSheetKeys: ['sheet_0'],
+              operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_0', sheet: { name: '删除表' }, reason: 'manual_crud' }],
+            }],
+          },
+        },
+      },
+    };
+
+    expect(purgeSheetKeysFromMessage_ACU(retainedMsg, ['sheet_0'])).toBe(true);
+    const frame = retainedMsg.TavernDB_ACU_IsolatedData.tag1.storageFrame;
+    expect(frame.logEntries).toEqual([]);
+    expect(frame.headRevision).toBeNull();
+
+    const emptiedMsg: any = {
       TavernDB_ACU_IsolatedData: {
         tag1: {
           storageFrame: {
@@ -631,10 +653,8 @@ describe('purgeSheetKeysFromMessage_ACU', () => {
       },
     };
 
-    expect(purgeSheetKeysFromMessage_ACU(msg, ['sheet_0'])).toBe(true);
-    const frame = msg.TavernDB_ACU_IsolatedData.tag1.storageFrame;
-    expect(frame.logEntries).toEqual([]);
-    expect(frame.headRevision).toBeNull();
+    expect(purgeSheetKeysFromMessage_ACU(emptiedMsg, ['sheet_0'])).toBe(true);
+    expect(emptiedMsg.TavernDB_ACU_IsolatedData).toBeUndefined();
   });
 
 
@@ -853,8 +873,41 @@ describe('purgeSheetKeysFromMessage_ACU', () => {
 
 });
 
-  it('Task5：checkpoint.data 无任何 sheet 键且无 manualRefillProgress 时移除 checkpoint（frame 退回无锚点形态）', () => {
-    const msg: any = {
+  it('Task5：checkpoint.data 裁空后移除 checkpoint；有剩余日志时保留帧，全部裁空时不留空 V2 壳', () => {
+    const withRemainingLog: any = {
+      TavernDB_ACU_IsolatedData: {
+        tag1: {
+          storageFrame: {
+            version: 2,
+            headRevision: '2:keep',
+            checkpoint: {
+              kind: 'full',
+              createdAt: 1,
+              reason: 'init',
+              data: { sheet_0: { name: '被删表' } },
+            },
+            logEntries: [
+              {
+                seq: 1, commitRevision: '1:removed', filledSheetKeys: ['sheet_0'], changedSheetKeys: ['sheet_0'],
+                operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_0', sheet: { name: '被删表' }, reason: 'manual_crud' }],
+              },
+              {
+                seq: 2, commitRevision: '2:keep', filledSheetKeys: ['sheet_1'], changedSheetKeys: ['sheet_1'],
+                operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_1', sheet: { name: '保留表' }, reason: 'manual_crud' }],
+              },
+            ],
+          },
+        },
+      },
+    };
+
+    expect(purgeSheetKeysFromMessage_ACU(withRemainingLog, ['sheet_0'])).toBe(true);
+    const retainedFrame = withRemainingLog.TavernDB_ACU_IsolatedData.tag1.storageFrame;
+    expect(retainedFrame.checkpoint).toBeUndefined();
+    expect(retainedFrame.logEntries).toHaveLength(1);
+    expect(retainedFrame.headRevision).toBe('2:keep');
+
+    const fullyEmptied: any = {
       TavernDB_ACU_IsolatedData: {
         tag1: {
           storageFrame: {
@@ -875,11 +928,8 @@ describe('purgeSheetKeysFromMessage_ACU', () => {
       },
     };
 
-    expect(purgeSheetKeysFromMessage_ACU(msg, ['sheet_0'])).toBe(true);
-    const frame = msg.TavernDB_ACU_IsolatedData.tag1.storageFrame;
-    expect(frame.checkpoint).toBeUndefined();
-    expect(frame.logEntries).toEqual([]);
-    expect(frame.headRevision).toBeNull();
+    expect(purgeSheetKeysFromMessage_ACU(fullyEmptied, ['sheet_0'])).toBe(true);
+    expect(fullyEmptied.TavernDB_ACU_IsolatedData).toBeUndefined();
   });
 
   it('Task5 负例：checkpoint.data 仍有其他 sheet 键时保留 checkpoint', () => {
@@ -935,6 +985,221 @@ describe('purgeSheetKeysFromMessage_ACU', () => {
     const frame = msg.TavernDB_ACU_IsolatedData.tag1.storageFrame;
     expect(frame.checkpoint).toBeDefined();
     expect(frame.checkpoint.manualRefillProgress).toBeDefined();
+  });
+
+  it('Issue #83A：按表删除裁空最后一张表后移除空 V2 storageFrame、空标签槽与空 IsolatedData', () => {
+    const msg: any = {
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          independentData: {},
+          modifiedKeys: [],
+          updateGroupKeys: [],
+          storageFrame: {
+            version: 2,
+            headRevision: '1:removed',
+            checkpoint: {
+              kind: 'full',
+              createdAt: 1,
+              reason: 'init',
+              data: { mate: { type: 'acu', version: 1 }, sheet_0: { name: '唯一表', content: [['row_id'], ['1']] } },
+            },
+            perSheetCheckpoints: {
+              sheet_0: { kind: 'sheet_full', createdAt: 1, reason: 'manual', sheetKey: 'sheet_0', data: { name: '唯一表' } },
+            },
+            sheetTimelineEvents: [
+              { ordinal: 0, checkpoint: { kind: 'sheet_full', createdAt: 1, reason: 'manual', sheetKey: 'sheet_0', data: { name: '唯一表' } } },
+            ],
+            logEntries: [{
+              seq: 1,
+              commitRevision: '1:removed',
+              filledSheetKeys: ['sheet_0'],
+              changedSheetKeys: ['sheet_0'],
+              operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '1', cells: ['1'] }],
+            }],
+          },
+        },
+      },
+    };
+
+    expect(purgeSheetKeysFromMessageForIsolation_ACU(msg, '', ['sheet_0'])).toBe(true);
+    expect(msg.TavernDB_ACU_IsolatedData).toBeUndefined();
+  });
+
+  it('Issue #83A：清空当前隔离槽的 V2 空壳时保留其他隔离槽，且支持 JSON 字符串容器', () => {
+    const otherSlot = { _acu_storage_version: 2, storageFrame: { version: 2, logEntries: [{ seq: 1, filledSheetKeys: ['sheet_0'] }] } };
+    const msg: any = {
+      TavernDB_ACU_IsolatedData: JSON.stringify({
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            logEntries: [{
+              seq: 1,
+              filledSheetKeys: ['sheet_0'],
+              operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '1', cells: ['1'] }],
+            }],
+          },
+        },
+        other: otherSlot,
+      }),
+    };
+
+    expect(purgeSheetKeysFromMessageForIsolation_ACU(msg, '', ['sheet_0'])).toBe(true);
+    expect(msg.TavernDB_ACU_IsolatedData).toEqual({ other: otherSlot });
+  });
+
+  it('Issue #83A 边界保护：绝不把合法 header-only 根、空 checkpoint、清空事件、重填进度、未知字段或损坏容器当空删除', () => {
+    // 1. 合法 header-only 根（删除另一张表后仍保留 header-only 根）
+    const headerOnlyMsg: any = {
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: {
+              kind: 'full',
+              createdAt: 1,
+              reason: 'init',
+              data: {
+                mate: { type: 'acu', version: 1 },
+                sheet_0: { name: '被删表', content: [['row_id', '值']] },
+                sheet_1: { name: '保留表头根', content: [['row_id', '值']] },
+              },
+            },
+            logEntries: [],
+          },
+        },
+      },
+    };
+    expect(purgeSheetKeysFromMessageForIsolation_ACU(headerOnlyMsg, '', ['sheet_0'])).toBe(true);
+    expect(headerOnlyMsg.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.data.sheet_1).toBeDefined();
+
+    // 2. 既有空 checkpoint（不含目标表）不能被当空删除
+    const emptyCheckpointMsg: any = {
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            checkpoint: { kind: 'full', data: {} },
+            logEntries: [],
+          },
+        },
+      },
+    };
+    expect(purgeSheetKeysFromMessageForIsolation_ACU(emptyCheckpointMsg, '', ['sheet_0'])).toBe(false);
+    expect(emptyCheckpointMsg.TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint).toEqual({ kind: 'full', data: {} });
+
+    // 3. 清空事件（frame.event）不能被当空删除
+    const clearEventMsg: any = {
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            event: { kind: 'clear', filledSheetKeys: ['sheet_0'] },
+            logEntries: [{ seq: 1, filledSheetKeys: ['sheet_0'], operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '1', cells: ['1'] }] }],
+          },
+        },
+      },
+    };
+    expect(purgeSheetKeysFromMessageForIsolation_ACU(clearEventMsg, '', ['sheet_0'])).toBe(true);
+    expect(clearEventMsg.TavernDB_ACU_IsolatedData[''].storageFrame.event).toEqual({ kind: 'clear', filledSheetKeys: [] });
+
+    // 4. 重填进度（frame.manualRefillProgress）不能被当空删除
+    const progressMsg: any = {
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            manualRefillProgress: {
+              kind: 'manual_refill',
+              version: 2,
+              status: 'in_progress',
+              selectedSheetKeys: ['sheet_0'],
+              completedSheetMessageIndexByKey: { sheet_0: 1 },
+            },
+            logEntries: [],
+          },
+        },
+      },
+    };
+    expect(purgeSheetKeysFromMessageForIsolation_ACU(progressMsg, '', ['sheet_0'])).toBe(true);
+    expect(progressMsg.TavernDB_ACU_IsolatedData[''].storageFrame.manualRefillProgress.status).toBe('complete');
+
+    // 5. storageFrame 上的未知字段不能被当空删除
+    const unknownFrameFieldMsg: any = {
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            customFutureFlag: 'preserve-me',
+            logEntries: [{ seq: 1, filledSheetKeys: ['sheet_0'], operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '1', cells: ['1'] }] }],
+          },
+        },
+      },
+    };
+    expect(purgeSheetKeysFromMessageForIsolation_ACU(unknownFrameFieldMsg, '', ['sheet_0'])).toBe(true);
+    expect(unknownFrameFieldMsg.TavernDB_ACU_IsolatedData[''].storageFrame.customFutureFlag).toBe('preserve-me');
+
+    // 6. tagData 上的未知字段与向量 metadata：移除空 storageFrame 但保留该字段且不留悬空 _acu_storage_version=2
+    const unknownTagFieldMsg: any = {
+      TavernDB_ACU_IsolatedData: {
+        '': {
+          _acu_storage_version: 2,
+          customTagField: { keep: true },
+          storageFrame: {
+            version: 2,
+            logEntries: [{ seq: 1, filledSheetKeys: ['sheet_0'], operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '1', cells: ['1'] }] }],
+          },
+        },
+      },
+    };
+    expect(purgeSheetKeysFromMessageForIsolation_ACU(unknownTagFieldMsg, '', ['sheet_0'])).toBe(true);
+    expect(unknownTagFieldMsg.TavernDB_ACU_IsolatedData['']).toEqual({ customTagField: { keep: true } });
+
+    // 7. 损坏/无法解析的 IsolatedData 字符串（parseIsolatedDataField 返回 null）必须原样保留
+    const corruptMsg: any = {
+      TavernDB_ACU_IsolatedData: '{corrupt-json',
+    };
+    expect(purgeSheetKeysFromMessageForIsolation_ACU(corruptMsg, '', ['sheet_0'])).toBe(false);
+    expect(corruptMsg.TavernDB_ACU_IsolatedData).toBe('{corrupt-json');
+  });
+
+  it('isEmptyV2StorageFrameShell_ACU 严格白名单判定空壳与受保护/损坏帧', () => {
+    expect(isEmptyV2StorageFrameShell_ACU({ version: 2, logEntries: [] })).toBe(true);
+    expect(isEmptyV2StorageFrameShell_ACU({
+      version: 2,
+      headRevision: null,
+      perSheetCheckpoints: {},
+      sheetTimelineEvents: [],
+      logEntries: [],
+    })).toBe(true);
+    expect(isEmptyV2StorageFrameShell_ACU({ version: 2, checkpoint: undefined, logEntries: [] })).toBe(true);
+
+    // 非空 / 受保护 / 损坏一律返回 false
+    expect(isEmptyV2StorageFrameShell_ACU(null)).toBe(false);
+    expect(isEmptyV2StorageFrameShell_ACU({ version: 1, logEntries: [] })).toBe(false);
+    expect(isEmptyV2StorageFrameShell_ACU({ version: 2, logEntries: 'broken' })).toBe(false);
+    expect(isEmptyV2StorageFrameShell_ACU({ version: 2, logEntries: [{ seq: 1 }] })).toBe(false);
+    expect(isEmptyV2StorageFrameShell_ACU({ version: 2, headRevision: 'rev-1', logEntries: [] })).toBe(false);
+    expect(isEmptyV2StorageFrameShell_ACU({ version: 2, checkpoint: {}, logEntries: [] })).toBe(false);
+    expect(isEmptyV2StorageFrameShell_ACU({ version: 2, checkpoint: null, logEntries: [] })).toBe(false);
+    expect(isEmptyV2StorageFrameShell_ACU({
+      version: 2,
+      checkpoint: { kind: 'full', reason: 'init', data: { mate: { type: 'acu' }, sheet_0: { content: [['row_id']] } } },
+      logEntries: [],
+    })).toBe(false);
+    expect(isEmptyV2StorageFrameShell_ACU({ version: 2, event: { kind: 'clear' }, logEntries: [] })).toBe(false);
+    expect(isEmptyV2StorageFrameShell_ACU({ version: 2, manualRefillProgress: { status: 'complete' }, logEntries: [] })).toBe(false);
+    expect(isEmptyV2StorageFrameShell_ACU({ version: 2, summaryVectorIndexFrame: { version: 3, logEntries: [] }, logEntries: [] })).toBe(false);
+    expect(isEmptyV2StorageFrameShell_ACU({ version: 2, perSheetCheckpoints: { sheet_0: {} }, logEntries: [] })).toBe(false);
+    expect(isEmptyV2StorageFrameShell_ACU({ version: 2, perSheetCheckpoints: null, logEntries: [] })).toBe(false);
+    expect(isEmptyV2StorageFrameShell_ACU({ version: 2, sheetTimelineEvents: [{}], logEntries: [] })).toBe(false);
+    expect(isEmptyV2StorageFrameShell_ACU({ version: 2, unknownFutureKey: null, logEntries: [] })).toBe(false);
   });
 
 

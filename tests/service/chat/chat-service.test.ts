@@ -2895,6 +2895,51 @@ describe('deleteLocalDataWithScope_ACU', () => {
     // 编排入口自身的判定/分派不应直接调用事务包装；真实 purge 内部调用恰好 1 次
     expect(mockRunTableWriteTransaction.mock.calls.length).toBeLessThanOrEqual(1);
   });
+
+  it('Issue #83A：按表删除清掉全部表后不再残留空 V2 记录，会话策略回到 empty', async () => {
+    mockRunTableWriteTransaction.mockClear();
+    mockRunTableWriteTransaction.mockImplementation(async (_opts: any, fn: any) => fn());
+    mockSaveChatToHostStrict.mockClear();
+    const chat = buildSheetScopedChat();
+    mockGetChatArray.mockReturnValue(chat);
+
+    const outcome = await deleteLocalDataWithScope_ACU('all', null, null, 'range', ['sheet_0', 'sheet_1']);
+
+    expect(outcome.path).toBe('range');
+    if (outcome.path !== 'range') throw new Error('unreachable');
+    expect(outcome.deletedCount).toBe(2);
+    expect(chat[0].TavernDB_ACU_IsolatedData).toBeUndefined();
+    expect(chat[2].TavernDB_ACU_IsolatedData).toBeUndefined();
+    expect(resolveTableStorageStrategy_ACU(chat, '')).toEqual({ mode: 'empty' });
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
+  });
+
+  it('Issue #83A：mode=current 清理合法 JSON 字符串 IsolatedData，并原样保留损坏字符串', async () => {
+    mockRunTableWriteTransaction.mockImplementation(async (_opts: any, fn: any) => fn());
+    mockSaveChatToHost.mockClear();
+    const chat: any[] = [
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: JSON.stringify({
+          '': { _acu_storage_version: 2, storageFrame: { version: 2, logEntries: [] } },
+        }),
+      },
+      {
+        is_user: false,
+        TavernDB_ACU_IsolatedData: '{corrupt-json',
+      },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+
+    const outcome = await deleteLocalDataWithScope_ACU('current', null, null);
+
+    expect(outcome.path).toBe('range');
+    if (outcome.path !== 'range') throw new Error('unreachable');
+    expect(outcome.deletedCount).toBe(1);
+    expect(chat[0].TavernDB_ACU_IsolatedData).toBeUndefined();
+    expect(chat[1].TavernDB_ACU_IsolatedData).toBe('{corrupt-json');
+    expect(mockSaveChatToHost).toHaveBeenCalledTimes(1);
+  });
 });
 
 });
@@ -3034,7 +3079,7 @@ describe('clearTableDataAtFloors_ACU', () => {
     const count = await clearTableDataAtFloors_ACU([0], ['sheet_0']);
 
     expect(count).toBe(1);
-    expect(chat[0].TavernDB_ACU_IsolatedData[''].spv79TransitionCheckpoint).toBeUndefined();
+    expect(chat[0].TavernDB_ACU_IsolatedData).toBeUndefined();
     expect(mockSaveChatToHost).toHaveBeenCalledTimes(1);
   });
 });
@@ -4750,5 +4795,135 @@ describe('establishManualRefillTemplateRoot_ACU', () => {
     const fallbackRunId = chat[0].TavernDB_ACU_IsolatedData['tag-1'].storageFrame.checkpoint.fallbackProvenance.runId;
     const expectedRunId = `manual-refill:tag-1:0,2,4:${getTableDataFingerprint_ACU(templateData)}`;
     expect(fallbackRunId).toBe(expectedRunId);
+  });
+
+  it('Issue #83A：前置楼层残留空 V2 壳时，重填选存档位置跳过空壳并落到首个目标 AI 楼层', async () => {
+    const chat: any[] = [
+      {
+        is_user: false,
+        mes: 'AI楼层0（残留空壳）',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: { version: 2, headRevision: null, perSheetCheckpoints: {}, sheetTimelineEvents: [], logEntries: [] },
+          },
+        },
+      },
+      { is_user: true, mes: '用户1' },
+      { is_user: false, mes: 'AI楼层2（首个目标）' },
+      { is_user: false, mes: 'AI楼层3（次目标）' },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+
+    const result = await establishManualRefillTemplateRoot_ACU({
+      isolationKey: '',
+      targetSheetKeys: ['sheet_0'],
+      targetMessageIndices: [2, 3],
+      templateData,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.changed).toBe(true);
+    expect(result.targetMessageIndex).toBe(2);
+    expect(chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint).toBeUndefined();
+    expect(chat[2].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.kind).toBe('full');
+  });
+
+  it('Issue #83A：前置空 V2 壳之后存在真实内容帧时，重填选存档位置跳过空壳并选中最早有效帧', async () => {
+    const chat: any[] = [
+      makeEmptyFrameMessage('AI楼层0（残留空壳）'),
+      { is_user: true, mes: '用户1' },
+      {
+        is_user: false,
+        mes: 'AI楼层2（有效帧）',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              logEntries: [{ seq: 1, filledSheetKeys: ['sheet_1'], operations: [{ kind: 'row_upsert', sheetKey: 'sheet_1', rowId: '1', cells: ['1'] }] }],
+            },
+          },
+        },
+      },
+      { is_user: false, mes: 'AI楼层3（重填目标）' },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+
+    const result = await establishManualRefillTemplateRoot_ACU({
+      isolationKey: '',
+      targetSheetKeys: ['sheet_0'],
+      targetMessageIndices: [3],
+      templateData,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.changed).toBe(true);
+    expect(result.targetMessageIndex).toBe(2);
+    expect(chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint).toBeUndefined();
+    expect(chat[2].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.kind).toBe('full');
+  });
+
+  it.each([
+    ['空 checkpoint', { version: 2, checkpoint: {}, logEntries: [] }],
+    ['清空事件', { version: 2, event: { kind: 'clear' }, logEntries: [] }],
+    ['重填进度', { version: 2, manualRefillProgress: { kind: 'manual_refill', status: 'complete', selectedSheetKeys: [] }, logEntries: [] }],
+    ['未知字段', { version: 2, customUnknownField: true, logEntries: [] }],
+  ])('Issue #83A 负例：前置帧含%s时不当作空壳跳过', async (_label, protectedFrame) => {
+    const chat: any[] = [
+      {
+        is_user: false,
+        mes: 'AI楼层0（受保护帧）',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: protectedFrame,
+          },
+        },
+      },
+      { is_user: true, mes: '用户1' },
+      { is_user: false, mes: 'AI楼层2（重填目标）' },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+
+    const result = await establishManualRefillTemplateRoot_ACU({
+      isolationKey: '',
+      targetSheetKeys: ['sheet_0'],
+      targetMessageIndices: [2],
+      templateData,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.targetMessageIndex).toBe(0);
+    expect(chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.kind).toBe('full');
+    expect(chat[2].TavernDB_ACU_IsolatedData).toBeUndefined();
+  });
+
+  it('Issue #83A：commitManualRefillSheetSnapshotInRangeAtomic_ACU 同样跳过前置空 V2 壳', async () => {
+    const finalSheet = { name: '物品表', content: [['row_id', '物品名'], ['1', '重填剑']] };
+    const chat: any[] = [
+      makeEmptyFrameMessage('AI楼层0（残留空壳）'),
+      { is_user: true, mes: '用户1' },
+      { is_user: false, mes: 'AI楼层2（首个目标）' },
+      { is_user: false, mes: 'AI楼层3（末目标）' },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+    mockLoadTableStateFromFramesV2Detailed.mockResolvedValueOnce({
+      baseKind: 'full_checkpoint',
+      data: { ...templateData, sheet_0: finalSheet },
+    });
+
+    const result = await commitManualRefillSheetSnapshotInRangeAtomic_ACU({
+      isolationKey: '',
+      targetMessageIndices: [2, 3],
+      targetSheetKeys: ['sheet_0'],
+      snapshotData: { sheet_0: finalSheet },
+      templateData,
+    });
+
+    expect(result).toEqual(expect.objectContaining({ success: true, changed: true, targetMessageIndex: 2 }));
+    expect(chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint).toBeUndefined();
+    expect(chat[2].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.kind).toBe('full');
+    expect(getLatestFrameSheetCheckpoint_ACU(chat[3].TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_0')?.data).toEqual(finalSheet);
   });
 });

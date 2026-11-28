@@ -731,6 +731,101 @@ function purgeOrphanSummaryVectorDeltasV2_ACU(frame: any): boolean {
     return changed;
 }
 
+const EMPTY_V2_STORAGE_FRAME_SHELL_KEYS_ACU = new Set([
+    'version',
+    'headRevision',
+    'perSheetCheckpoints',
+    'sheetTimelineEvents',
+    'logEntries',
+]);
+
+const KNOWN_OPTIONAL_V2_FRAME_CONTENT_KEYS_ACU = new Set([
+    'checkpoint',
+    'manualRefillProgress',
+    'summaryVectorIndexFrame',
+    'event',
+]);
+
+const PRUNABLE_EMPTY_V2_TAG_SHELL_KEYS_ACU = new Set([
+    'independentData',
+    'modifiedKeys',
+    'updateGroupKeys',
+]);
+
+/**
+ * 严格白名单判定：仅当 V2 storageFrame 为纯空壳（无 checkpoint、无日志、无单表快照/时间线、
+ * 无清空事件、无重填进度、无向量镜像、无有效 headRevision、无任何未知字段且结构未损坏）时返回 true。
+ * 合法 header-only 根、空 checkpoint、清空事件、重填进度、未知字段与损坏对象一律返回 false。
+ */
+export function isEmptyV2StorageFrameShell_ACU(frame: unknown): boolean {
+    if (!isObjectRecord_ACU(frame)) return false;
+    if (frame.version !== 2) return false;
+    if (!Array.isArray(frame.logEntries) || frame.logEntries.length > 0) return false;
+
+    for (const key of Object.keys(frame)) {
+        if (EMPTY_V2_STORAGE_FRAME_SHELL_KEYS_ACU.has(key)) continue;
+        if (KNOWN_OPTIONAL_V2_FRAME_CONTENT_KEYS_ACU.has(key) && frame[key] === undefined) continue;
+        return false;
+    }
+
+    if (frame.headRevision !== undefined && frame.headRevision !== null && frame.headRevision !== '') {
+        return false;
+    }
+    if (frame.perSheetCheckpoints !== undefined) {
+        if (!isObjectRecord_ACU(frame.perSheetCheckpoints) || Object.keys(frame.perSheetCheckpoints).length > 0) {
+            return false;
+        }
+    }
+    if (frame.sheetTimelineEvents !== undefined) {
+        if (!Array.isArray(frame.sheetTimelineEvents) || frame.sheetTimelineEvents.length > 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function isPrunableEmptyTagDataAfterV2FrameRemoval_ACU(tagData: unknown): boolean {
+    if (!isObjectRecord_ACU(tagData)) return false;
+    for (const key of Object.keys(tagData)) {
+        if (!PRUNABLE_EMPTY_V2_TAG_SHELL_KEYS_ACU.has(key)) return false;
+    }
+    if (tagData.independentData !== undefined) {
+        if (!isObjectRecord_ACU(tagData.independentData) || Object.keys(tagData.independentData).length > 0) {
+            return false;
+        }
+    }
+    if (tagData.modifiedKeys !== undefined) {
+        if (!Array.isArray(tagData.modifiedKeys) || tagData.modifiedKeys.length > 0) {
+            return false;
+        }
+    }
+    if (tagData.updateGroupKeys !== undefined) {
+        if (!Array.isArray(tagData.updateGroupKeys) || tagData.updateGroupKeys.length > 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function pruneEmptyV2TagDataAfterSheetPurge_ACU(
+    nextIsolated: Record<string, any>,
+    tagKey: string,
+    hadStorageFrame: boolean,
+): void {
+    if (!hadStorageFrame) return;
+    const tagData = nextIsolated[tagKey];
+    if (!isObjectRecord_ACU(tagData)) return;
+    if (!isEmptyV2StorageFrameShell_ACU(tagData.storageFrame)) return;
+
+    delete tagData.storageFrame;
+    if (tagData._acu_storage_version === 2) {
+        delete tagData._acu_storage_version;
+    }
+    if (isPrunableEmptyTagDataAfterV2FrameRemoval_ACU(tagData)) {
+        delete nextIsolated[tagKey];
+    }
+}
+
 function purgeSheetKeysFromStorageFrameV2_ACU(frame: any, sheetKeys: Set<string>, knownSqlTableNames?: Iterable<string>): boolean {
     if (!isObjectRecord_ACU(frame)) return false;
     let changed = false;
@@ -744,16 +839,16 @@ function purgeSheetKeysFromStorageFrameV2_ACU(frame: any, sheetKeys: Set<string>
 
     const checkpoint = frame.checkpoint;
     if (isObjectRecord_ACU(checkpoint)) {
-        if (deleteSheetKeysFromRecord_ACU(checkpoint.data, sheetKeys)) changed = true;
+        const checkpointDataChanged = deleteSheetKeysFromRecord_ACU(checkpoint.data, sheetKeys);
+        if (checkpointDataChanged) changed = true;
         if (deleteSheetKeysFromRecord_ACU(checkpoint.scheduleSummary, sheetKeys)) changed = true;
         if (purgeEventSheetKeysV2_ACU(checkpoint.event, sheetKeys)) changed = true;
         if (purgeManualRefillProgressV2_ACU(checkpoint.manualRefillProgress, sheetKeys)) changed = true;
-        // Task 5：checkpoint.data 已无任何 sheet_ 键时，该 checkpoint 失去全部表内容，
-        // 保留只会让 replay 以空根继续（并诱发“写目标早于回放根”类伪拓扑）。直接移除，
-        // 让 frame 退回“无锚点 + logEntries”形态，由后续写入按初始 checkpoint 重建。
+        // Task 5：checkpoint.data 因本次裁剪失去最后一张表时，移除空 checkpoint，
+        // 避免 replay 以空根继续。未命中目标表的既有空 checkpoint 保持原样，不误删。
         // 例外：checkpoint 仍携带 manualRefillProgress 时保留——那是进度的合法载体，
         // 删除会丢失重填进度（既有测试「从 V2 manualRefillProgress 中移除目标 sheet」依赖此行为）。
-        if (!hasSheetKeyInRecord_ACU(checkpoint.data) && checkpoint.manualRefillProgress === undefined) {
+        if (checkpointDataChanged && !hasSheetKeyInRecord_ACU(checkpoint.data) && checkpoint.manualRefillProgress === undefined) {
             delete frame.checkpoint;
             changed = true;
             // 表格 full checkpoint 消失后 vector checkpoint 失去锚点，同步删除。
@@ -966,6 +1061,7 @@ export function purgeSheetKeysFromMessageForIsolation_ACU(
     const tagKey = isolationKey || '';
     const tagData = nextIsolated[tagKey];
     if (!tagData || typeof tagData !== 'object') return archiveCleared;
+    const hadStorageFrame = isObjectRecord_ACU((tagData as any).storageFrame);
 
     if ((tagData as any).independentData && typeof (tagData as any).independentData === 'object') {
         sheetKeys.forEach(key => {
@@ -1001,7 +1097,14 @@ export function purgeSheetKeysFromMessageForIsolation_ACU(
     }
     if (purgeSheetKeysFromStorageFrameV2_ACU((tagData as any).storageFrame, sheetKeySet, knownSqlTableNames)) msgChanged = true;
 
-    if (msgChanged) msg.TavernDB_ACU_IsolatedData = nextIsolated;
+    if (msgChanged) {
+        pruneEmptyV2TagDataAfterSheetPurge_ACU(nextIsolated, tagKey, hadStorageFrame);
+        if (Object.keys(nextIsolated).length === 0) {
+            delete msg.TavernDB_ACU_IsolatedData;
+        } else {
+            msg.TavernDB_ACU_IsolatedData = nextIsolated;
+        }
+    }
     return archiveCleared || msgChanged;
 }
 
@@ -1364,16 +1467,19 @@ export function purgeSheetKeysFromMessage_ACU(msg: any, sheetKeys: string[]): bo
     const isolated = parseIsolatedDataField(msg);
     if (isolated) {
         const nextIsolated = safeClone(isolated);
+        let isolatedChanged = false;
         Object.keys(nextIsolated).forEach(tagKey => {
             const tagData = nextIsolated[tagKey];
             if (!tagData || typeof tagData !== 'object') return;
+            const hadStorageFrame = isObjectRecord_ACU((tagData as any).storageFrame);
+            let tagChanged = false;
 
             // 删除 independentData 中的指定 sheetKey
             if (tagData.independentData && typeof tagData.independentData === 'object') {
                 sheetKeys.forEach(k => {
                     if (tagData.independentData[k]) {
                         delete tagData.independentData[k];
-                        msgChanged = true;
+                        tagChanged = true;
                     }
                 });
             }
@@ -1384,7 +1490,7 @@ export function purgeSheetKeysFromMessage_ACU(msg: any, sheetKeys: string[]): bo
                     const r = removeFromArray(tagData.modifiedKeys, k);
                     if (r.changed) {
                         tagData.modifiedKeys = r.result;
-                        msgChanged = true;
+                        tagChanged = true;
                     }
                 });
             }
@@ -1395,18 +1501,29 @@ export function purgeSheetKeysFromMessage_ACU(msg: any, sheetKeys: string[]): bo
                     const r = removeFromArray(tagData.updateGroupKeys, k);
                     if (r.changed) {
                         tagData.updateGroupKeys = r.result;
-                        msgChanged = true;
+                        tagChanged = true;
                     }
                 });
             }
 
             if (purgeSpv79TransitionCheckpointSheetKeys_ACU(tagData, sheetKeySet)) {
-                msgChanged = true;
+                tagChanged = true;
             }
-            if (purgeSheetKeysFromStorageFrameV2_ACU((tagData as any).storageFrame, sheetKeySet)) msgChanged = true;
+            if (purgeSheetKeysFromStorageFrameV2_ACU((tagData as any).storageFrame, sheetKeySet)) {
+                tagChanged = true;
+            }
+            if (tagChanged) {
+                isolatedChanged = true;
+                msgChanged = true;
+                pruneEmptyV2TagDataAfterSheetPurge_ACU(nextIsolated, tagKey, hadStorageFrame);
+            }
         });
-        if (msgChanged) {
-            msg.TavernDB_ACU_IsolatedData = nextIsolated;
+        if (isolatedChanged) {
+            if (Object.keys(nextIsolated).length === 0) {
+                delete msg.TavernDB_ACU_IsolatedData;
+            } else {
+                msg.TavernDB_ACU_IsolatedData = nextIsolated;
+            }
         }
     }
 
