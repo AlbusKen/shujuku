@@ -2,7 +2,12 @@
  * tests/service/preview/prompt-preview-gate.test.ts
  * 提示词预览门控 — 四互斥开关 × 填表模式 × 剧情总开关 全组合
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
+import { captureZeroLayerCarrier_ACU, physicalHistoryFingerprint_ACU, isolateZeroLayerCarrierCandidate_ACU } from '../../../src/service/zero-layer/carrier-context';
+import { applyZeroLayerCommand_ACU } from '../../../src/service/zero-layer/store-command';
+import { ZERO_LAYER_CARRIER_FIELD_ACU } from '../../../src/service/zero-layer/model';
+import { pendingZeroLayerPersistence_ACU } from '../../../src/service/zero-layer/persistence-state';
 
 const {
   mockSettings,
@@ -36,6 +41,9 @@ vi.mock('../../../src/service/agent/agent-worldbook-runtime-state', () => ({
 import { evaluatePromptPreviewGate_ACU } from '../../../src/service/preview/prompt-preview-gate';
 
 function resetState() {
+  _set_SillyTavern_API_ACU(undefined);
+  pendingZeroLayerPersistence_ACU.clear();
+  vi.stubGlobal('window', {});
   mockSettings.continuationPageEnabled = false;
   mockSettings.contentOptimizationSettings = { enabled: false };
   mockSettings.worldSimulationPageEnabled = false;
@@ -46,6 +54,55 @@ function resetState() {
 
 describe('evaluatePromptPreviewGate_ACU 全组合', () => {
   beforeEach(resetState);
+  afterEach(() => { _set_SillyTavern_API_ACU(undefined); vi.unstubAllGlobals(); pendingZeroLayerPersistence_ACU.clear(); });
+
+  it('续写开关缺省按开启处理，两个预览均阻断', () => {
+    delete mockSettings.continuationPageEnabled;
+    const gate = evaluatePromptPreviewGate_ACU();
+    expect(gate.tableFill.blockers.map(b => b.feature)).toContain('continuation');
+    expect(gate.plot.blockers.map(b => b.feature)).toContain('continuation');
+  });
+
+  it('真实零层载体阻断两种预览，读取不改写载体且不保存', async () => {
+    const carrier: Record<string, any> = { is_user: false, mes: '开场', swipe_id: 0 };
+    const saveChat = vi.fn();
+    _set_SillyTavern_API_ACU({ chat: [carrier], getCurrentChatId: () => 'preview-zero', this_chid: '0', characters: [{ avatar: 'preview.png' }], saveChat } as any);
+    const context = captureZeroLayerCarrier_ACU();
+    carrier[ZERO_LAYER_CARRIER_FIELD_ACU] = applyZeroLayerCommand_ACU(null, { type: 'initialize', apiPresetName: 'direct' }, context, await physicalHistoryFingerprint_ACU(context.source));
+    const before = structuredClone(carrier);
+    const gate = evaluatePromptPreviewGate_ACU();
+    for (const result of [gate.tableFill, gate.plot]) {
+      expect(result.available).toBe(false);
+      expect(result.blockers).toContainEqual({ feature: 'zero_layer', reason: '零层聊天暂不支持预览' });
+    }
+    expect(carrier).toEqual(before);
+    expect(saveChat).not.toHaveBeenCalled();
+    carrier[ZERO_LAYER_CARRIER_FIELD_ACU].enabled = true;
+    expect(evaluatePromptPreviewGate_ACU().plot.blockers).toContainEqual({
+      feature: 'zero_layer', reason: '零层聊天暂不支持预览',
+    });
+    // 保存候选不具权威性：确认前必须继续阻断，不能凭候选字段放行。
+    const release = isolateZeroLayerCarrierCandidate_ACU(context, carrier[ZERO_LAYER_CARRIER_FIELD_ACU]);
+    delete carrier[ZERO_LAYER_CARRIER_FIELD_ACU];
+    pendingZeroLayerPersistence_ACU.set(context.key, {
+      before: before[ZERO_LAYER_CARRIER_FIELD_ACU],
+      candidate: before[ZERO_LAYER_CARRIER_FIELD_ACU],
+      source: context.source,
+    });
+    try {
+      expect(evaluatePromptPreviewGate_ACU().tableFill.blockers[0].reason).toContain('保存结果未知');
+    } finally { release(); }
+  });
+
+  it('真实损坏零层存档 fail-closed，保留读取错误而不伪装非零层', () => {
+    const carrier = { is_user: false, mes: '开场', [ZERO_LAYER_CARRIER_FIELD_ACU]: { schemaVersion: 999 } };
+    _set_SillyTavern_API_ACU({ chat: [carrier], getCurrentChatId: () => 'preview-zero', this_chid: '0', characters: [{ avatar: 'preview.png' }] } as any);
+    const gate = evaluatePromptPreviewGate_ACU();
+    expect(gate.tableFill.available).toBe(false);
+    expect(gate.plot.available).toBe(false);
+    expect(gate.tableFill.blockers[0].reason).toContain('零层状态读取失败');
+    expect(gate.tableFill.blockers[0].reason).not.toBe('零层聊天暂不支持预览');
+  });
 
   it('全开关关闭 + llm 模式：两个场景都可用', () => {
     const gate = evaluatePromptPreviewGate_ACU();

@@ -67,6 +67,7 @@ const {
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   settings_ACU: mockSettings,
   currentJsonTableData_ACU: mockCurrentJsonTableData,
+  currentChatFileIdentifier_ACU: 'preview-chat',
   getCurrentIsolationKey_ACU: vi.fn(() => 'iso-key'),
   pendingFinalGenerationGreenlights_ACU: [],
 }));
@@ -153,7 +154,8 @@ vi.mock('../../../src/service/ai/prompt-builder/strict-json-table-fill', () => (
   buildStrictJsonTableFillResponseFormatForData_ACU: vi.fn(() => ({ responseFormat: { type: 'json_schema' } })),
 }));
 
-vi.mock('../../../src/service/ai/prompt-builder/table-fill-tools', () => ({
+vi.mock('../../../src/service/ai/prompt-builder/table-fill-tools', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../src/service/ai/prompt-builder/table-fill-tools')>(),
   buildTableFillNativeTools_ACU: vi.fn(() => []),
 }));
 
@@ -166,6 +168,10 @@ import { PromptPreviewGateBlockedError_ACU, PromptPreviewPrepareError_ACU } from
 import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
 import * as chatStorage from '../../../src/data/storage/chat-history';
 import * as chatGateway from '../../../src/data/gateways/chat-gateway';
+import { SqliteEngine } from '../../../src/data/sqlite/sqlite-engine';
+import * as storageStrategy from '../../../src/service/table/table-storage-strategy';
+import { ensureGlobalNameMapperForDDLs_ACU, disposeGlobalNameMapper } from '../../../src/service/runtime/template-vars/name-mapper';
+import { isSqliteMode } from '../../../src/service/table/storage-mode';
 
 function resetBase() {
   mockChat.value = [
@@ -377,5 +383,43 @@ describe('previewTableFillPrompt_ACU', () => {
     await previewTableFillPrompt_ACU();
     expect(mockGetApiConfigByPreset).toHaveBeenCalledWith('preset-main');
     expect(mockRenderMessages.mock.calls[0][2]).not.toHaveProperty('sqlReadContext');
+  });
+
+  it('streaming 请求覆盖优先于全局设置且保留显式 false', async () => {
+    mockSettings.streamingEnabled = true;
+    mockCatchUpPlan.value.waves[0].groups[0].requestOptions = { streaming: false };
+    await previewTableFillPrompt_ACU({ scenario: 'catch_up' });
+    expect(mockBuildBody.mock.calls.at(-1)?.[2]).toMatchObject({ streaming: false });
+    mockSettings.streamingEnabled = false;
+    mockCatchUpPlan.value.waves[0].groups[0].requestOptions = { streaming: true };
+    await previewTableFillPrompt_ACU({ scenario: 'catch_up' });
+    expect(mockBuildBody.mock.calls.at(-1)?.[2]).toMatchObject({ streaming: true });
+  });
+
+  it('真实 renderer 与 SQLite 引擎解析 SQL 变量，不再被 null 上下文禁用', async () => {
+    const engine = new SqliteEngine();
+    await engine.init();
+    const ddl = 'CREATE TABLE preview_probe (row_id INTEGER PRIMARY KEY, value TEXT);';
+    engine.run(ddl);
+    engine.run("INSERT INTO preview_probe VALUES (1, '真实查询值');");
+    ensureGlobalNameMapperForDDLs_ACU(new Map([['preview_probe', ddl]]));
+    const ready = vi.spyOn(storageStrategy, 'isStorageRuntimeReadyForSyncRead_ACU').mockReturnValue(true);
+    const provider = vi.spyOn(storageStrategy, 'getStorageProvider').mockReturnValue({
+      mode: 'sqlite', isReady: () => true,
+      executeQuery: (sql: string) => engine.query(sql),
+    } as any);
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    const oldPrompt = mockSettings.charCardPrompt;
+    mockSettings.charCardPrompt = [{ role: 'USER', content: 'SQL={[sql "SELECT value FROM preview_probe"]}' }];
+    const { renderTableFillMessages_ACU } = await vi.importActual<typeof import('../../../src/service/ai/prompt-builder/prompt-api-call')>('../../../src/service/ai/prompt-builder/prompt-api-call');
+    mockRenderMessages.mockImplementation(renderTableFillMessages_ACU);
+    try {
+      const result = await previewTableFillPrompt_ACU();
+      expect(result.segments[0].content).toBe('SQL=真实查询值');
+    } finally {
+      mockSettings.charCardPrompt = oldPrompt;
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+      ready.mockRestore(); provider.mockRestore(); disposeGlobalNameMapper(); engine.dispose();
+    }
   });
 });
