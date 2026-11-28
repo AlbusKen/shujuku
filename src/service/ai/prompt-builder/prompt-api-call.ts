@@ -72,6 +72,149 @@ export class RetryableAiResponseError_ACU extends Error {
     }
   }
 
+  export interface RenderTableFillMessagesInput_ACU {
+    sourcePromptSegments: Array<{ role: string; content: string }>;
+    strictJsonFillEnabled: boolean;
+    sqliteMode: boolean;
+    tableFillToolOptIn: boolean;
+    chatSnapshot?: any;
+    tableData?: any;
+    sqlReadContext?: any;
+    tableFillRetryHistory?: any;
+    assertCurrent?: () => void;
+    abortSignal: AbortSignal;
+  }
+
+  /**
+   * 填表提示词消息渲染（自 callCustomOpenAI_ACU 内部闭包 renderMessages 提取，行为保持一致）。
+   * 纯渲染组装：占位符替换（$0/$1/$4/$6/$8/$9/$U/$C）、{{表名}} 世界书解析、
+   * EJS 模板、随机标签/变量、SQL 变量与 <if> 块、重试历史注入。
+   * 不发请求、不进入 callCustomOpenAI_ACU 的接管/中止控制器等全局副作用；
+   * settings_ACU / currentJsonTableData_ACU 沿用原闭包语义直读。
+   * callCustomOpenAI_ACU 与只读预览（service/preview）共用此函数。
+   */
+  export async function renderTableFillMessages_ACU(
+    dynamicContent: any,
+    toolChannelAvailable: boolean,
+    input: RenderTableFillMessagesInput_ACU,
+  ) {
+    const messages: Array<{ role: string; content: string }> = [];
+    let promptSegments = input.sourcePromptSegments;
+    if (!input.strictJsonFillEnabled) {
+        // 默认主段按本次是否真的携带工具对齐：带工具用工具版默认，不带工具用正文 <tableEdit> 格式默认。
+        promptSegments = adaptTableFillPromptSegmentsToToolMode_ACU(promptSegments, input.sqliteMode, toolChannelAvailable);
+        if (!toolChannelAvailable) {
+            logDebug_ACU(input.tableFillToolOptIn
+                ? '[填表] 当前通道无法携带原生工具，降级使用正文 <tableEdit> 格式提示词。'
+                : '[填表] 填表工具调用未开启，使用正文 <tableEdit> 格式提示词。');
+        }
+    }
+
+    let userInfoContent_Table = '';
+    try {
+      userInfoContent_Table = getPersonaDescription_ACU();
+      logDebug_ACU(`[填表] $U (persona_description) 获取结果: ${userInfoContent_Table ? '成功' : '为空'}`);
+    } catch (e) {
+      logWarn_ACU('[填表] 获取用户设定描述时出错:', e);
+      userInfoContent_Table = '';
+    }
+
+    let charInfoContent_Table = '';
+    try {
+      charInfoContent_Table = getCharDescription_ACU();
+      logDebug_ACU(`[填表] $C (char_description) 获取结果: ${charInfoContent_Table ? '成功，长度=' + charInfoContent_Table.length : '为空'}`);
+    } catch (e) {
+      logWarn_ACU('[填表] 获取角色描述时出错:', e);
+      charInfoContent_Table = '';
+    }
+
+    const lastPlotContent = getPlotFromHistory_ACU({}, input.chatSnapshot);
+    logDebug_ACU('[填表] $6 上轮规划数据:', lastPlotContent ? `长度=${lastPlotContent.length}` : '(空)');
+
+    const tableExcludeTags = (settings_ACU.tableContextExcludeTags || '').trim();
+    const tableExcludeRules = normalizeExcludeRules_ACU(settings_ACU.tableContextExcludeRules, tableExcludeTags);
+    const filterTableInjectedContent = (value: any, placeholderKey = '') => {
+        const text = value !== undefined && value !== null ? String(value) : '';
+        if (!['$0', '$1', '$4', '$6', '$8', '$9', '$U', '$C'].includes(placeholderKey)) return text;
+        return applyExcludeRulesToText_ACU(text, { excludeRules: tableExcludeRules, excludeTags: tableExcludeTags });
+    };
+
+    for (const segment of promptSegments) {
+        let finalContent = segment.content;
+        finalContent = finalContent.replace('$0', filterTableInjectedContent(dynamicContent.tableDataText, '$0'));
+        finalContent = finalContent.replace('$1', filterTableInjectedContent(dynamicContent.messagesText, '$1'));
+        finalContent = finalContent.replace('$4', filterTableInjectedContent(dynamicContent.worldbookContent, '$4'));
+        finalContent = finalContent.replace(/\$6/g, filterTableInjectedContent(lastPlotContent || '', '$6'));
+        finalContent = finalContent.replace('$8', filterTableInjectedContent(dynamicContent.manualExtraHint || '', '$8'));
+        finalContent = finalContent.replace(/\$9/g, filterTableInjectedContent(dynamicContent.worldbookDatabaseExcludedContent || '', '$9'));
+        finalContent = finalContent.replace(/\$U/g, filterTableInjectedContent(userInfoContent_Table, '$U'));
+        finalContent = finalContent.replace(/\$C/g, filterTableInjectedContent(charInfoContent_Table, '$C'));
+
+        if (typeof dynamicContent?.resolveTableWorldbookContent === 'function') {
+          const tableTokens: Array<{ raw: string; tableName: string }> = [];
+          const seenTableTokens = new Set<string>();
+          for (const match of finalContent.matchAll(/\{\{([^{}]+)\}\}/g)) {
+            const raw = String(match[0] || '');
+            if (!raw || seenTableTokens.has(raw)) continue;
+            seenTableTokens.add(raw);
+            tableTokens.push({ raw, tableName: String(match[1] || '') });
+          }
+          for (const token of tableTokens) {
+            try {
+              const resolvedContent = await dynamicContent.resolveTableWorldbookContent(token.tableName);
+              if (typeof resolvedContent === 'string') {
+                finalContent = finalContent.split(token.raw).join(resolvedContent);
+              }
+            } catch (error) {
+              logWarn_ACU(`[填表] 无法解析表名占位符 "${token.tableName}"，保留原 token。`, error);
+            }
+          }
+        }
+
+        if (typeof (globalThis as any).EjsTemplate?.evalTemplate === 'function') {
+          try {
+            // 插件未必支持物理取消；只停止本轮等待，迟到结果不得继续组装或发送请求。
+            finalContent = await runWithAbortSignal_ACU(input.abortSignal, () =>
+              (globalThis as any).EjsTemplate.evalTemplate(finalContent));
+            logDebug_ACU('[填表] 已通过 st-prompt-template 处理提示词');
+          } catch (e) {
+            throwIfAborted_ACU(input.abortSignal);
+            if ((e as { name?: string })?.name === 'AbortError') throw e;
+            logWarn_ACU('[填表] st-prompt-template 处理失败，使用原始内容:', e);
+          }
+        }
+
+        throwIfAborted_ACU(input.abortSignal);
+        finalContent = parseRandomTags_ACU(finalContent);
+        finalContent = replaceRandomVariables_ACU(finalContent);
+
+        // [P4] {[db...]}/{[sql...]} 值替换（SQLite 模式下，在 <if> 之前执行）
+        finalContent = withSqlTemplateReadContext_ACU(input.sqlReadContext, () => {
+          let content = replaceDbSqlVariables(finalContent);
+          if (settings_ACU.promptTemplateSettings?.enabled !== false) {
+            // 条件与本次填表快照一致；SQL 变量和 if 必须共享同一同步作用域。
+            const conditionalSeedContent = typeof dynamicContent?.conditionalSeedContent === 'string'
+              ? dynamicContent.conditionalSeedContent
+              : getLatestAIMessageContent_ACU(input.chatSnapshot);
+            content = parseIfBlocksInContent_ACU(content, {
+              seedContent: conditionalSeedContent,
+              allTablesJson: input.tableData ?? currentJsonTableData_ACU,
+              plotContent: lastPlotContent || ''
+            }, 0);
+          }
+          return content;
+        });
+        
+        input.assertCurrent?.();
+        messages.push({ role: normalizeRoleForApi_ACU(segment.role), content: finalContent });
+    }
+    return withTableFillRetryHistory_ACU(messages, input.tableFillRetryHistory, {
+        sqlite: input.sqliteMode,
+        strictJson: input.strictJsonFillEnabled,
+        tools: toolChannelAvailable,
+    });
+  }
+
   export async function callCustomOpenAI_ACU(dynamicContent: any, abortController: AbortController | null = null, options: any = null) {
     const takeoverLease = captureTakeoverLease_ACU();
     takeoverLease.assertActive();
@@ -129,124 +272,24 @@ export class RetryableAiResponseError_ACU extends Error {
         !strictJsonFillEnabled && tableFillToolOptIn && isNativeToolChannelAvailable_ACU(channel, forceDirectApi);
     const initialToolChannelAvailable = canUseTools(initialChannel);
     const sourcePromptSegments = promptSegments;
-    const renderMessages = async (toolChannelAvailable: boolean) => {
-    const messages: Array<{ role: string; content: string }> = [];
-    let promptSegments = sourcePromptSegments;
-    if (!strictJsonFillEnabled) {
-        // 默认主段按本次是否真的携带工具对齐：带工具用工具版默认，不带工具用正文 <tableEdit> 格式默认。
-        promptSegments = adaptTableFillPromptSegmentsToToolMode_ACU(promptSegments, sqliteMode, toolChannelAvailable);
-        if (!toolChannelAvailable) {
-            logDebug_ACU(tableFillToolOptIn
-                ? '[填表] 当前通道无法携带原生工具，降级使用正文 <tableEdit> 格式提示词。'
-                : '[填表] 填表工具调用未开启，使用正文 <tableEdit> 格式提示词。');
-        }
-    }
-
-    let userInfoContent_Table = '';
-    try {
-      userInfoContent_Table = getPersonaDescription_ACU();
-      logDebug_ACU(`[填表] $U (persona_description) 获取结果: ${userInfoContent_Table ? '成功' : '为空'}`);
-    } catch (e) {
-      logWarn_ACU('[填表] 获取用户设定描述时出错:', e);
-      userInfoContent_Table = '';
-    }
-
-    let charInfoContent_Table = '';
-    try {
-      charInfoContent_Table = getCharDescription_ACU();
-      logDebug_ACU(`[填表] $C (char_description) 获取结果: ${charInfoContent_Table ? '成功，长度=' + charInfoContent_Table.length : '为空'}`);
-    } catch (e) {
-      logWarn_ACU('[填表] 获取角色描述时出错:', e);
-      charInfoContent_Table = '';
-    }
-
-    const lastPlotContent = getPlotFromHistory_ACU({}, options?.chatSnapshot);
-    logDebug_ACU('[填表] $6 上轮规划数据:', lastPlotContent ? `长度=${lastPlotContent.length}` : '(空)');
-
-    const tableExcludeTags = (settings_ACU.tableContextExcludeTags || '').trim();
-    const tableExcludeRules = normalizeExcludeRules_ACU(settings_ACU.tableContextExcludeRules, tableExcludeTags);
-    const filterTableInjectedContent = (value: any, placeholderKey = '') => {
-        const text = value !== undefined && value !== null ? String(value) : '';
-        if (!['$0', '$1', '$4', '$6', '$8', '$9', '$U', '$C'].includes(placeholderKey)) return text;
-        return applyExcludeRulesToText_ACU(text, { excludeRules: tableExcludeRules, excludeTags: tableExcludeTags });
-    };
-
-    for (const segment of promptSegments) {
-        let finalContent = segment.content;
-        finalContent = finalContent.replace('$0', filterTableInjectedContent(dynamicContent.tableDataText, '$0'));
-        finalContent = finalContent.replace('$1', filterTableInjectedContent(dynamicContent.messagesText, '$1'));
-        finalContent = finalContent.replace('$4', filterTableInjectedContent(dynamicContent.worldbookContent, '$4'));
-        finalContent = finalContent.replace(/\$6/g, filterTableInjectedContent(lastPlotContent || '', '$6'));
-        finalContent = finalContent.replace('$8', filterTableInjectedContent(dynamicContent.manualExtraHint || '', '$8'));
-        finalContent = finalContent.replace(/\$9/g, filterTableInjectedContent(dynamicContent.worldbookDatabaseExcludedContent || '', '$9'));
-        finalContent = finalContent.replace(/\$U/g, filterTableInjectedContent(userInfoContent_Table, '$U'));
-        finalContent = finalContent.replace(/\$C/g, filterTableInjectedContent(charInfoContent_Table, '$C'));
-
-        if (typeof dynamicContent?.resolveTableWorldbookContent === 'function') {
-          const tableTokens: Array<{ raw: string; tableName: string }> = [];
-          const seenTableTokens = new Set<string>();
-          for (const match of finalContent.matchAll(/\{\{([^{}]+)\}\}/g)) {
-            const raw = String(match[0] || '');
-            if (!raw || seenTableTokens.has(raw)) continue;
-            seenTableTokens.add(raw);
-            tableTokens.push({ raw, tableName: String(match[1] || '') });
-          }
-          for (const token of tableTokens) {
-            try {
-              const resolvedContent = await dynamicContent.resolveTableWorldbookContent(token.tableName);
-              if (typeof resolvedContent === 'string') {
-                finalContent = finalContent.split(token.raw).join(resolvedContent);
-              }
-            } catch (error) {
-              logWarn_ACU(`[填表] 无法解析表名占位符 "${token.tableName}"，保留原 token。`, error);
-            }
-          }
-        }
-
-        if (typeof (globalThis as any).EjsTemplate?.evalTemplate === 'function') {
-          try {
-            // 插件未必支持物理取消；只停止本轮等待，迟到结果不得继续组装或发送请求。
-            finalContent = await runWithAbortSignal_ACU(abortSignal, () =>
-              (globalThis as any).EjsTemplate.evalTemplate(finalContent));
-            logDebug_ACU('[填表] 已通过 st-prompt-template 处理提示词');
-          } catch (e) {
-            throwIfAborted_ACU(abortSignal);
-            if ((e as { name?: string })?.name === 'AbortError') throw e;
-            logWarn_ACU('[填表] st-prompt-template 处理失败，使用原始内容:', e);
-          }
-        }
-
-        throwIfAborted_ACU(abortSignal);
-        finalContent = parseRandomTags_ACU(finalContent);
-        finalContent = replaceRandomVariables_ACU(finalContent);
-
-        // [P4] {[db...]}/{[sql...]} 值替换（SQLite 模式下，在 <if> 之前执行）
-        finalContent = withSqlTemplateReadContext_ACU(options?.sqlReadContext, () => {
-          let content = replaceDbSqlVariables(finalContent);
-          if (settings_ACU.promptTemplateSettings?.enabled !== false) {
-            // 条件与本次填表快照一致；SQL 变量和 if 必须共享同一同步作用域。
-            const conditionalSeedContent = typeof dynamicContent?.conditionalSeedContent === 'string'
-              ? dynamicContent.conditionalSeedContent
-              : getLatestAIMessageContent_ACU(options?.chatSnapshot);
-            content = parseIfBlocksInContent_ACU(content, {
-              seedContent: conditionalSeedContent,
-              allTablesJson: options?.tableData ?? currentJsonTableData_ACU,
-              plotContent: lastPlotContent || ''
-            }, 0);
-          }
-          return content;
-        });
-        
-        options?.assertCurrent?.();
-        messages.push({ role: normalizeRoleForApi_ACU(segment.role), content: finalContent });
-    }
-    return withTableFillRetryHistory_ACU(messages, options?.tableFillRetryHistory, {
-        sqlite: sqliteMode,
-        strictJson: strictJsonFillEnabled,
-        tools: toolChannelAvailable,
-    });
-    };
-
+    // 提取为 renderTableFillMessages_ACU 后的薄委托：闭包捕获全部参数化传入，
+    // 渲染行为与提取前完全一致（含 settings_ACU/currentJsonTableData_ACU 的直读语义）。
+    const renderMessages = (toolChannelAvailable: boolean) => renderTableFillMessages_ACU(
+        dynamicContent,
+        toolChannelAvailable,
+        {
+            sourcePromptSegments,
+            strictJsonFillEnabled,
+            sqliteMode,
+            tableFillToolOptIn,
+            chatSnapshot: options?.chatSnapshot,
+            tableData: options?.tableData,
+            sqlReadContext: options?.sqlReadContext,
+            tableFillRetryHistory: options?.tableFillRetryHistory,
+            assertCurrent: options?.assertCurrent,
+            abortSignal,
+        },
+    );
     let messages = await renderMessages(initialToolChannelAvailable);
     options?.assertCurrent?.();
     let effectiveTableApiPreset = options?.isolatedSnapshot ? initialPresetName : readPresetName();
