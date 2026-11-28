@@ -3,7 +3,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
     commit: vi.fn(), refresh: vi.fn(), notify: vi.fn(), summary: vi.fn(), queue: vi.fn(),
 }));
-vi.mock('../../src/shared/constants', () => ({ ACU_TOAST_CATEGORY_ACU: {} }));
+vi.mock('../../src/shared/constants', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('../../src/shared/constants')>();
+    return { ...actual, ACU_TOAST_CATEGORY_ACU: {} };
+});
 vi.mock('../../src/shared/env', () => ({ topLevelWindow_ACU: { AutoCardUpdaterAPI: { _notifyTableUpdate: h.notify } } }));
 vi.mock('../../src/shared/utils', () => ({
     isSummaryOrOutlineTable_ACU: h.summary, logDebug_ACU: vi.fn(), logError_ACU: vi.fn(), logWarn_ACU: vi.fn(),
