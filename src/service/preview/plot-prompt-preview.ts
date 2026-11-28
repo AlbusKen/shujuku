@@ -10,11 +10,16 @@
 import { settings_ACU, currentJsonTableData_ACU } from '../runtime/state-manager';
 import { getChatArray_ACU } from '../chat/chat-service';
 import { runPlotTasksRuntime_ACU } from '../runtime/plot-runtime/plot-task-engine';
+import { isSqliteMode } from '../table/storage-mode';
+import { getStorageProvider, isStorageRuntimeReadyForSyncRead_ACU } from '../table/table-storage-strategy';
+import { getGlobalNameMapperStatus_ACU, getNameMapper } from '../runtime/template-vars/name-mapper';
+import type { SqlTemplateReadContext_ACU } from '../runtime/template-vars/sql-query-var';
 import { estimateTextTk_ACU } from '../../shared/token-estimate';
 import { DEFAULT_PLOT_SETTINGS_ACU } from '../../shared/defaults-json.js';
 import { evaluatePromptPreviewGate_ACU } from './prompt-preview-gate';
 import {
     PromptPreviewGateBlockedError_ACU,
+    PromptPreviewPrepareError_ACU,
     type PlotPromptPreview_ACU,
     type PlotTaskPromptPreview_ACU,
     type PromptPreviewSegment_ACU,
@@ -31,7 +36,28 @@ export async function previewPlotPrompts_ACU(virtualInput: string): Promise<Plot
     const input = String(virtualInput ?? '');
 
     const history = structuredClone(getChatArray_ACU() || []);
-    const tableData = structuredClone(currentJsonTableData_ACU || {});
+    let tableData = structuredClone(currentJsonTableData_ACU || {});
+    let sqlReadContext: SqlTemplateReadContext_ACU | undefined;
+    if (isSqliteMode()) {
+        if (!isStorageRuntimeReadyForSyncRead_ACU()) {
+            throw new PromptPreviewPrepareError_ACU('SQLite 运行时未就绪，暂不支持剧情提示词预览', 'sqlite_runtime_not_ready', true);
+        }
+        const provider = getStorageProvider();
+        if (!provider || provider.mode !== 'sqlite' || !provider.isReady()) {
+            throw new PromptPreviewPrepareError_ACU('SQLite 运行时未就绪，暂不支持剧情提示词预览', 'sqlite_runtime_not_ready', true);
+        }
+        const mapperStatus = getGlobalNameMapperStatus_ACU();
+        if (mapperStatus.binding === 'unbound') {
+            throw new PromptPreviewPrepareError_ACU('SQLite 名称映射未就绪，暂不支持剧情提示词预览', 'sqlite_mapper_not_ready', true);
+        }
+        const liveSqliteData = provider.getCurrentData?.();
+        if (liveSqliteData && typeof liveSqliteData === 'object') {
+            tableData = structuredClone(liveSqliteData);
+        }
+        if (mapperStatus.ready) {
+            sqlReadContext = { provider, mapper: getNameMapper(), tableData };
+        }
+    }
     // ensurePlotTasksCompat_ACU 会写入传入对象（plot-task-engine.ts:905），必须传克隆。
     const plotSettings = { ...DEFAULT_PLOT_SETTINGS_ACU, ...structuredClone((settings_ACU as any).plotSettings || {}) };
 
@@ -44,6 +70,7 @@ export async function previewPlotPrompts_ACU(virtualInput: string): Promise<Plot
         tableData,
         presetName: String(plotSettings.lastUsedPresetName || ''),
         signal: new AbortController().signal,
+        ...(sqlReadContext ? { sqlReadContext } : {}),
         ejsContext: {
             chat: structuredClone(history),
             allTablesJson: structuredClone(tableData),
