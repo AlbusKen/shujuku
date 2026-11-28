@@ -275,7 +275,7 @@ describe('parseDDLColumnInfos_ACU', () => {
       .toMatchObject({ sqlName: 'count', defaultExpression: '5' });
   });
 
-  it('超过 8192 字符的 DDL 正确解析，且两次结果互相独立', () => {
+  it('超长 DDL 解析正确且返回值互相独立', () => {
     // 逗号必须位于 `--` 注释之前，否则会被行注释吞掉。
     const businessColumns = Array.from({ length: 300 }, (_, index) =>
       `  col_${index} TEXT DEFAULT 'v${index}'${index < 299 ? ',' : ''} -- 列${index}`);
@@ -294,7 +294,32 @@ describe('parseDDLColumnInfos_ACU', () => {
     expect(second[300]).toMatchObject({ sqlName: 'col_299', defaultExpression: "'v299'" });
   });
 
-  it('连续解析 129 个不同 DDL 后，首个 DDL 被淘汰后仍能重新正确解析', () => {
+  it.each([8192, 8193])('长度恰好 %i 的 DDL 解析正确且返回值互相独立', (length) => {
+    const prefix = `CREATE TABLE boundary_${length} (row_id INTEGER PRIMARY KEY, note TEXT NOT NULL DEFAULT '`;
+    const suffix = "');";
+    const fill = 'x'.repeat(length - prefix.length - suffix.length);
+    const ddl = `${prefix}${fill}${suffix}`;
+    expect(ddl).toHaveLength(length);
+    const expected = {
+      index: 1, sqlName: 'note', declaredType: 'TEXT', isNotNull: true, hasDefault: true, defaultExpression: `'${fill}'`,
+    };
+
+    const first = parseDDLColumnInfos_ACU(ddl);
+    expect(first).toHaveLength(2);
+    expect(first[0]).toMatchObject({ sqlName: 'row_id', declaredType: 'INTEGER', isPrimaryKey: true });
+    expect(first[1]).toMatchObject(expected);
+    first[1].defaultExpression = 'mutated';
+    first.pop();
+
+    const second = parseDDLColumnInfos_ACU(ddl);
+    expect(second).toHaveLength(2);
+    expect(second[1]).toMatchObject(expected);
+    second[1].sqlName = 'changed';
+
+    expect(parseDDLColumnInfos_ACU(ddl)[1]).toMatchObject(expected);
+  });
+
+  it('超过 128 个不同 DDL 后仍能正确重新解析', () => {
     const makeDDL = (index: number) =>
       `CREATE TABLE eviction_${index} (row_id INTEGER PRIMARY KEY, value_${index} INTEGER NOT NULL DEFAULT ${index});`;
     const firstDDL = makeDDL(0);
