@@ -103,6 +103,18 @@ describe('世界书条目 CRUD', () => {
     expect(mockLogWarn).toHaveBeenCalledWith(expect.stringContaining('uid=99'));
   });
 
+  it('setLorebookEntries：patch 字段与现有条目完全一致时不触发 saveWorldInfo', async () => {
+    const data = makeBookData({
+      0: { uid: 0, comment: '标题', content: '内容', disable: false, constant: true, vectorized: false, selective: false, key: ['a', 'b'], order: 500 },
+    });
+    const stApi = makeStApi({ loadWorldInfo: vi.fn().mockResolvedValue(data) });
+    const backend = createNativeStBackend_ACU(() => stApi);
+    await backend.setLorebookEntries('书', [
+      { uid: 0, comment: '标题', content: '内容', enabled: true, type: 'constant', keys: ['a', 'b'], order: 500 },
+    ]);
+    expect(stApi.saveWorldInfo).not.toHaveBeenCalled();
+  });
+
   it('createLorebookEntries：uid 取 max+1 递增，返回 new_uids 与完整条目集', async () => {
     const data = makeBookData({
       2: { uid: 2, comment: '已有' },

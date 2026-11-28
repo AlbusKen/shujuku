@@ -272,14 +272,32 @@ describe('updateSummaryTableEntries_ACU', () => {
     expect(mockGetLorebookEntries).not.toHaveBeenCalled();
   });
 
-  it('非导入模式先删除旧条目再创建', async () => {
+  it('非导入模式按 comment 原地更新已有条目、删除多余旧条目，且已有条目保持原 order', async () => {
     mockGetLorebookEntries.mockResolvedValue([
-      { uid: 1, comment: '总结条目1' },
-      { uid: 2, comment: '总结条目2' },
+      { uid: 1, comment: '总结条目1', content: '旧内容', order: 555 },
+      { uid: 2, comment: '总结条目2', content: '旧内容', order: 555 },
+      { uid: 3, comment: '总结条目3', content: '多余旧条目', order: 555 },
     ]);
     await updateSummaryTableEntries_ACU(summaryTable);
-    expect(mockDeleteLorebookEntries).toHaveBeenCalledWith('test-lorebook', [1, 2]);
-    expect(mockCreateLorebookEntries).toHaveBeenCalled();
+    expect(mockDeleteLorebookEntries).toHaveBeenCalledWith('test-lorebook', [3]);
+    expect(mockSetLorebookEntries).toHaveBeenCalledWith('test-lorebook', [
+      expect.objectContaining({ uid: 1 }),
+      expect.objectContaining({ uid: 2 }),
+    ]);
+    const patches = mockSetLorebookEntries.mock.calls[0][1];
+    expect(patches.every((p: any) => !('order' in p))).toBe(true);
+    expect(mockCreateLorebookEntries).not.toHaveBeenCalled();
+  });
+
+  it('非导入模式已有总结条目字段完全一致时不写回', async () => {
+    mockGetLorebookEntries.mockResolvedValue([
+      { uid: 1, comment: '总结条目1', content: '| AM0001 | 第一条总结 |\n', keys: ['AM0001'], enabled: true, type: 'selective', prevent_recursion: true, position: 'at_depth_as_system', depth: 9999, order: 555 },
+      { uid: 2, comment: '总结条目2', content: '| AM0002 | 第二条总结 |\n', keys: ['AM0002'], enabled: true, type: 'selective', prevent_recursion: true, position: 'at_depth_as_system', depth: 9999, order: 555 },
+    ]);
+    await updateSummaryTableEntries_ACU(summaryTable);
+    expect(mockDeleteLorebookEntries).not.toHaveBeenCalled();
+    expect(mockSetLorebookEntries).not.toHaveBeenCalled();
+    expect(mockCreateLorebookEntries).not.toHaveBeenCalled();
   });
 
   it('导入模式不删除旧条目', async () => {
@@ -385,13 +403,21 @@ describe('updateImportantPersonsRelatedEntries_ACU', () => {
     expect(mockGetLorebookEntries).not.toHaveBeenCalled();
   });
 
-  it('非导入模式先删除旧条目', async () => {
+  it('非导入模式原地更新已有条目、删除多余旧条目，并创建缺失条目', async () => {
     mockGetLorebookEntries.mockResolvedValue([
-      { uid: 1, comment: '重要人物条目1' },
-      { uid: 2, comment: 'TavernDB-ACU-ImportantPersonsIndex' },
+      { uid: 1, comment: '重要人物条目1', content: '旧内容', order: 777 },
+      { uid: 2, comment: 'TavernDB-ACU-ImportantPersonsIndex', content: '旧索引', order: 778 },
+      { uid: 3, comment: '重要人物条目99', content: '已删角色', order: 777 },
     ]);
     await updateImportantPersonsRelatedEntries_ACU(personsTable);
-    expect(mockDeleteLorebookEntries).toHaveBeenCalledWith('test-lorebook', [1, 2]);
+    expect(mockDeleteLorebookEntries).toHaveBeenCalledWith('test-lorebook', [3]);
+    expect(mockSetLorebookEntries).toHaveBeenCalledWith('test-lorebook', [
+      expect.objectContaining({ uid: 1 }),
+      expect.objectContaining({ uid: 2 }),
+    ]);
+    const patches = mockSetLorebookEntries.mock.calls[0][1];
+    expect(patches.every((p: any) => !('order' in p))).toBe(true);
+    expect(mockCreateLorebookEntries).toHaveBeenCalled();
   });
 
   it('导入模式不删除旧条目', async () => {

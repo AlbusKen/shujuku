@@ -187,6 +187,9 @@ export   function mainInitialize_ACU() {
       // 新开对话时若角色卡无开场白（chat 为空），CHAT_CHANGED / 初始加载阶段无法补记填表模式；
       // 记录此标识，待首条消息入楼后补跑填表模式对账，避免首轮填表后被误判为旧会话。
       let pendingEmptyChatFillModeReconcileId = '';
+      let hasHandledChatChanged = false;
+      let startupFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+      let startupPollTimer: ReturnType<typeof setInterval> | null = null;
       if (
         SillyTavern_API_ACU &&
         SillyTavern_API_ACU.eventSource &&
@@ -311,6 +314,15 @@ export   function mainInitialize_ACU() {
         }, 60_000);
 
         SillyTavern_API_ACU.eventSource.on(SillyTavern_API_ACU.eventTypes.CHAT_CHANGED, async (chatFileName: string) => {
+          hasHandledChatChanged = true;
+          if (startupFallbackTimer !== null) {
+            clearTimeout(startupFallbackTimer);
+            startupFallbackTimer = null;
+          }
+          if (startupPollTimer !== null) {
+            clearInterval(startupPollTimer);
+            startupPollTimer = null;
+          }
           // 存盘合并兜底冲洗：必须在任何旧聊天引用被替换前跑，尽力而为，不 await、不抛。
           // ①填表运行中途切聊天时，运行窗口 finally 的冲洗会落在新聊天之后、或还没跑，
           //   旧聊天未冲洗的脏只有换底前这一次机会；②宿主切聊天是否先保存旧聊天未经验证，
@@ -1449,8 +1461,10 @@ export   function mainInitialize_ACU() {
       };
 
       if (SillyTavern_API_ACU && SillyTavern_API_ACU.chatId) {
-          // chatId 已可用，延迟初始化
-          setTimeout(async () => {
+          // chatId 已可用，延迟初始化（若期间已收到 CHAT_CHANGED 则不再重复加载）
+          startupFallbackTimer = setTimeout(async () => {
+              startupFallbackTimer = null;
+              if (hasHandledChatChanged) return;
               await initWithChatIdSafely(SillyTavern_API_ACU!.chatId);
           }, 1000);
       } else {
@@ -1458,15 +1472,28 @@ export   function mainInitialize_ACU() {
           logWarn_ACU('ACU: chatId not available on initial load. Starting polling...');
           let pollCount = 0;
           const maxPolls = 75; // 200ms × 75 = 15秒
-          const pollTimer = setInterval(async () => {
+          startupPollTimer = setInterval(async () => {
+              if (hasHandledChatChanged) {
+                  if (startupPollTimer !== null) {
+                      clearInterval(startupPollTimer);
+                      startupPollTimer = null;
+                  }
+                  return;
+              }
               pollCount++;
               const chatId = SillyTavern_API_ACU?.chatId;
               if (chatId) {
-                  clearInterval(pollTimer);
+                  if (startupPollTimer !== null) {
+                      clearInterval(startupPollTimer);
+                      startupPollTimer = null;
+                  }
                   logDebug_ACU(`ACU: chatId became available after ${pollCount * 200}ms polling: ${chatId}`);
                   await initWithChatIdSafely(chatId);
               } else if (pollCount >= maxPolls) {
-                  clearInterval(pollTimer);
+                  if (startupPollTimer !== null) {
+                      clearInterval(startupPollTimer);
+                      startupPollTimer = null;
+                  }
                   logWarn_ACU(`ACU: chatId still not available after ${maxPolls * 200}ms polling. Waiting for CHAT_CHANGED event.`);
               }
           }, 200);
