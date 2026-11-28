@@ -1,12 +1,44 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ chat: [] as any[], save: vi.fn(), replay: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  chat: [] as any[],
+  save: vi.fn(),
+  replay: vi.fn(),
+  flightMode: { enabled: false, enabledAt: 0, hiddenRowIds: [] as string[], bigSummarySheetKey: 'sheet_da_zong_jie' },
+  detachedFlightStates: new WeakMap<any[], Record<string, any>>(),
+}));
 
 vi.mock('../../../src/data/gateways/chat-gateway', () => ({
   getChatArray_ACU: () => mocks.chat, saveChatToHostStrict_ACU: mocks.save,
 }));
 vi.mock('../../../src/service/chat/chat-service', () => ({ getActiveChatStorageIdentity_ACU: () => 'chat' }));
-vi.mock('../../../src/service/flight-mode/flight-mode-state', () => ({ getCurrentFlightModeState_ACU: () => ({ enabled: false }) }));
+vi.mock('../../../src/service/flight-mode/flight-mode-state', () => ({
+  getCurrentFlightModeState_ACU: (chatOverride?: any[], isolationKeyOverride = '') => {
+    const detached = chatOverride ? mocks.detachedFlightStates.get(chatOverride)?.[isolationKeyOverride] : undefined;
+    const state = detached ?? mocks.flightMode;
+    return { ...state, hiddenRowIds: [...(state.hiddenRowIds || [])] };
+  },
+  setDetachedFlightModeState_ACU: (chat: any[], isolationKey: string, state: any) => {
+    const map = mocks.detachedFlightStates.get(chat) ?? {};
+    map[isolationKey] = { ...state, hiddenRowIds: [...(state.hiddenRowIds || [])] };
+    mocks.detachedFlightStates.set(chat, map);
+  },
+  stageFlightModeHiddenRowIds_ACU: (hiddenRowIds: string[], chatOverride?: any[], isolationKeyOverride = '') => {
+    if (chatOverride && chatOverride !== mocks.chat) {
+      const map = mocks.detachedFlightStates.get(chatOverride) ?? {};
+      const previous = map[isolationKeyOverride] ? { ...map[isolationKeyOverride], hiddenRowIds: [...map[isolationKeyOverride].hiddenRowIds] } : null;
+      map[isolationKeyOverride] = { ...(previous ?? mocks.flightMode), hiddenRowIds: [...hiddenRowIds] };
+      mocks.detachedFlightStates.set(chatOverride, map);
+      return () => {
+        if (previous) map[isolationKeyOverride] = previous;
+        else delete map[isolationKeyOverride];
+      };
+    }
+    const previous = [...mocks.flightMode.hiddenRowIds];
+    mocks.flightMode.hiddenRowIds = [...hiddenRowIds];
+    return () => { mocks.flightMode.hiddenRowIds = previous; };
+  },
+}));
 vi.mock('../../../src/service/runtime/state-manager', () => ({ settings_ACU: {} }));
 vi.mock('../../../src/service/table/manual-catch-up-provisional-bridge', () => ({ readActiveProvisionalBridge_ACU: () => null }));
 vi.mock('../../../src/service/table/storage-mode', () => ({ getCurrentStorageMode: () => 'native' }));
@@ -20,8 +52,10 @@ vi.mock('../../../src/service/table/table-write-transaction', () => ({
 
 import {
   captureNativeSwipeTableIntent_ACU, hasNativeSwipeCandidateChange_ACU,
-  readNativeSwipeWorldbookData_ACU, refillNativeSwipeTableCandidate_ACU, restoreNativeSwipeTableCandidate_ACU,
+  readNativeSwipeWorldbookData_ACU, readNativeSwipeWorldbookProjection_ACU,
+  refillNativeSwipeTableCandidate_ACU, restoreNativeSwipeTableCandidate_ACU,
 } from '../../../src/service/table/native-swipe-table';
+import { stageFlightModeHiddenRowIds_ACU } from '../../../src/service/flight-mode/flight-mode-state';
 import { getTableDataFingerprint_ACU } from '../../../src/service/table/table-data-upgrade-audit';
 
 const scope = { chatKey: 'chat', isolationKey: '', isCurrent: () => true };
@@ -61,6 +95,10 @@ function deliverSwipe(body = 'B') {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  mocks.flightMode.enabled = false;
+  mocks.flightMode.hiddenRowIds = [];
+  mocks.flightMode.bigSummarySheetKey = 'sheet_da_zong_jie';
+  mocks.detachedFlightStates = new WeakMap();
   mocks.save.mockResolvedValue(undefined);
   mocks.replay.mockResolvedValue({ baseKind: 'full_checkpoint' });
   mocks.chat.splice(0, mocks.chat.length,
@@ -219,5 +257,95 @@ describe('原生末楼 Swipe 表格视图', () => {
     expect(await restoreNativeSwipeTableCandidate_ACU(scope, 2)).toBe('updated');
     expect(reply[tableField]['']).toEqual(tag('B'));
     expect(reply[archiveField][''].version).toBe(2);
+  });
+
+  it('经典表格模式（飞行模式）下，本楼未新增大总结行时允许回滚世界书并透传基底 hiddenRowIds', async () => {
+    mocks.flightMode.enabled = true;
+    mocks.flightMode.hiddenRowIds = ['1', '2'];
+    const reply = mocks.chat[2];
+    reply.swipe_id = 1;
+    const intent = captureNativeSwipeTableIntent_ACU(mocks.chat, 2)!;
+    const baseline = {
+      sheet_a: { name: '纪要表', content: [['row_id', '纪要'], ['1', '旧'], ['2', '旧'], ['3', '新']] },
+      sheet_da_zong_jie: { name: '大总结', content: [['row_id', '总结'], ['1', '第一阶段']] },
+    };
+    mocks.replay.mockResolvedValue({ baseKind: 'full_checkpoint', data: baseline });
+    const projection = await readNativeSwipeWorldbookProjection_ACU(intent, 'chat', '', vi.fn());
+    expect(projection.data).toBe(baseline);
+    expect(projection.flightModeOverride).toMatchObject({ enabled: true, hiddenRowIds: ['1', '2'] });
+  });
+
+  it('经典表格模式（飞行模式）下，重填新候选触发大总结时隔离 live 并在切换候选时同步恢复 hiddenRowIds', async () => {
+    mocks.flightMode.enabled = true;
+    mocks.flightMode.hiddenRowIds = ['1'];
+    const baseData = {
+      sheet_da_zong_jie: { name: '大总结', content: [['row_id', '总结'], ['1', '阶段一']] },
+    };
+    mocks.replay.mockResolvedValue({ baseKind: 'full_checkpoint', data: baseData });
+
+    expect(await refillNativeSwipeTableCandidate_ACU(scope, deliverSwipe('B'), async ({ chat }) => {
+      chat[2][tableField] = { '': tag('B') };
+      stageFlightModeHiddenRowIds_ACU(['1', '2', '3'], chat, '');
+      expect(mocks.flightMode.hiddenRowIds).toEqual(['1']);
+      return true;
+    })).toBe('updated');
+
+    expect(mocks.flightMode.hiddenRowIds).toEqual(['1', '2', '3']);
+    expect(mocks.chat[2][archiveField][''].baseHiddenRowIds).toEqual(['1']);
+
+    select(0);
+    expect(await restoreNativeSwipeTableCandidate_ACU(scope, 2)).toBe('updated');
+    expect(mocks.flightMode.hiddenRowIds).toEqual(['1']);
+    expect(mocks.chat[2][tableField]['']).toEqual(tag('A'));
+
+    select(1);
+    expect(await restoreNativeSwipeTableCandidate_ACU(scope, 2)).toBe('updated');
+    expect(mocks.flightMode.hiddenRowIds).toEqual(['1', '2', '3']);
+    expect(mocks.chat[2][tableField]['']).toEqual(tag('B'));
+
+    expect(await refillNativeSwipeTableCandidate_ACU(scope, deliverSwipe('C'), async ({ chat }) => {
+      chat[2][tableField] = { '': tag('C') };
+      return true;
+    })).toBe('updated');
+    expect(mocks.flightMode.hiddenRowIds).toEqual(['1']);
+  });
+
+  it('经典表格模式（飞行模式）下，首次 Swipe 撞上旧候选新增大总结行时保持 fail-closed', async () => {
+    mocks.flightMode.enabled = true;
+    mocks.flightMode.hiddenRowIds = ['1', '2'];
+    const baseData = {
+      sheet_da_zong_jie: { name: '大总结', content: [['row_id', '总结']] },
+    };
+    const liveData = {
+      sheet_da_zong_jie: { name: '大总结', content: [['row_id', '总结'], ['1', '本楼刚新增的大总结']] },
+    };
+    mocks.replay.mockImplementation(async (view: any[]) => ({
+      baseKind: 'full_checkpoint',
+      data: view === mocks.chat ? liveData : baseData,
+    }));
+
+    const fill = vi.fn();
+    expect(await refillNativeSwipeTableCandidate_ACU(scope, deliverSwipe('B'), fill)).toBe('unsupported');
+    expect(fill).not.toHaveBeenCalled();
+  });
+
+  it('经典表格模式（飞行模式）下，宿主保存失败时同步回滚 hiddenRowIds 与楼层数据', async () => {
+    mocks.flightMode.enabled = true;
+    mocks.flightMode.hiddenRowIds = ['1'];
+    const baseData = {
+      sheet_da_zong_jie: { name: '大总结', content: [['row_id', '总结'], ['1', '阶段一']] },
+    };
+    mocks.replay.mockResolvedValue({ baseKind: 'full_checkpoint', data: baseData });
+    mocks.save.mockRejectedValueOnce(new Error('host save failed'));
+
+    await expect(refillNativeSwipeTableCandidate_ACU(scope, deliverSwipe('B'), async ({ chat }) => {
+      chat[2][tableField] = { '': tag('B') };
+      stageFlightModeHiddenRowIds_ACU(['1', '2'], chat, '');
+      return true;
+    })).rejects.toThrow('host save failed');
+
+    expect(mocks.flightMode.hiddenRowIds).toEqual(['1']);
+    expect(mocks.chat[2][tableField]['']).toEqual(tag('A'));
+    expect(mocks.chat[2][archiveField]).toBeUndefined();
   });
 });

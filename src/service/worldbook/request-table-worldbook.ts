@@ -1,3 +1,4 @@
+import type { FlightModeState_ACU } from '../../shared/models/flight-mode-model';
 import {
   buildNativeEntryDefaults_ACU, nativeToOldEntry_ACU, oldPatchToNativePatch_ACU,
 } from '../../shared/host-compat/entry-format';
@@ -6,11 +7,24 @@ import { renderTableWorldbookEntriesForRequest_ACU } from './pipeline';
 import type { TableWorldbookEntryStore_ACU } from './table-worldbook-entry-store';
 
 type NativeEntry = Record<string, any>;
+export type TableWorldbookRequestPayload_ACU =
+  | Record<string, any>
+  | { data: Record<string, any>; flightModeOverride?: FlightModeState_ACU };
+
+function unwrapRequestPayload_ACU(
+  payload: TableWorldbookRequestPayload_ACU,
+): { data: Record<string, any>; flightModeOverride?: FlightModeState_ACU } {
+  if (payload && typeof payload === 'object' && 'data' in payload && payload.data && typeof payload.data === 'object'
+    && ('flightModeOverride' in payload || Object.keys(payload).every(key => key === 'data' || key === 'flightModeOverride'))) {
+    return { data: payload.data, flightModeOverride: payload.flightModeOverride };
+  }
+  return { data: payload };
+}
 
 /** Export the requested table view into the host's already-loaded World Info arrays for this call. */
 export async function projectTableWorldbookForRequest_ACU(
   loaded: Record<string, NativeEntry[]>,
-  readTableData: () => Promise<Record<string, any>>,
+  readTableData: () => Promise<TableWorldbookRequestPayload_ACU>,
   assertCurrent: () => void,
 ): Promise<void> {
   const book = await getInjectionTargetLorebook_ACU();
@@ -57,9 +71,9 @@ export async function projectTableWorldbookForRequest_ACU(
     },
   };
 
-  const data = await readTableData();
+  const { data, flightModeOverride } = unwrapRequestPayload_ACU(await readTableData());
   assertCurrent();
-  await renderTableWorldbookEntriesForRequest_ACU(data, book, entries);
+  await renderTableWorldbookEntriesForRequest_ACU(data, book, entries, flightModeOverride);
   assertCurrent();
   const additions = [...draft].filter(([uid]) => !originalIds.has(uid)).map(([, entry]) => entry);
   for (const list of lists) {

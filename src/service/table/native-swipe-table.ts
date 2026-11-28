@@ -1,9 +1,14 @@
 import { getChatArray_ACU, saveChatToHostStrict_ACU } from '../../data/gateways/chat-gateway';
 import { readTailSwipe_ACU } from '../../data/gateways/chat-message-snapshot';
 import { cloneIsolatedData_ACU, NATIVE_SWIPE_TABLE_FIELD_ACU, readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
+import type { FlightModeState_ACU } from '../../shared/models/flight-mode-model';
 import { bumpTableReplayGeneration_ACU } from '../../shared/table-replay-generation';
 import { getActiveChatStorageIdentity_ACU } from '../chat/chat-service';
-import { getCurrentFlightModeState_ACU } from '../flight-mode/flight-mode-state';
+import {
+  getCurrentFlightModeState_ACU,
+  setDetachedFlightModeState_ACU,
+  stageFlightModeHiddenRowIds_ACU,
+} from '../flight-mode/flight-mode-state';
 import { settings_ACU } from '../runtime/state-manager';
 import { readActiveProvisionalBridge_ACU } from './manual-catch-up-provisional-bridge';
 import { hasRuntimeOnlyPendingSheets_ACU } from './runtime-only-pending-state';
@@ -18,13 +23,14 @@ const TABLE_FIELD = 'TavernDB_ACU_IsolatedData';
 const REPLAY_OPTIONS = { updateRuntimeState: false, compatibilityMode: 'disabled', backgroundFixation: 'skip' } as const;
 type Tag = NonNullable<ReturnType<typeof readIsolatedTagData_ACU>>;
 type Frames = Record<number, Tag | null>;
-interface Candidate { body: string; frames: Frames }
+interface Candidate { body: string; frames: Frames; hiddenRowIds?: string[] }
 interface SwipeArchive {
   version: 2;
   activeBody: string;
   activeFingerprint: string;
   /** Shared values where at least one candidate differs. */
   base: Frames;
+  baseHiddenRowIds?: string[];
   entries: Candidate[];
 }
 interface SwipeScope { chatKey: string; isolationKey: string; isCurrent(): boolean }
@@ -53,6 +59,40 @@ function fingerprint(chat: any[], isolationKey: string) {
 
 function equal(a: unknown, b: unknown) { return JSON.stringify(a) === JSON.stringify(b); }
 function hasFrame(frames: Frames, index: string | number) { return Object.prototype.hasOwnProperty.call(frames, index); }
+function validHiddenRowIds(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(item => typeof item === 'string');
+}
+function normalizeHiddenRowIds(value?: readonly string[]): string[] {
+  if (!Array.isArray(value)) return [];
+  const ids = new Set<string>();
+  for (const raw of value) {
+    const id = String(raw ?? '').trim();
+    if (id) ids.add(id);
+  }
+  return [...ids].sort();
+}
+function collectSheetRowIds(tableData: Record<string, any> | null | undefined, sheetKey: string): Set<string> {
+  const ids = new Set<string>();
+  const content = tableData?.[sheetKey]?.content;
+  if (!Array.isArray(content)) return ids;
+  for (const row of content.slice(1)) {
+    if (!Array.isArray(row)) continue;
+    const id = String(row[0] ?? '').trim();
+    if (id) ids.add(id);
+  }
+  return ids;
+}
+function hasBigSummaryRowIncrease(
+  baseData: Record<string, any> | null | undefined,
+  liveData: Record<string, any> | null | undefined,
+  bigSummarySheetKey: string,
+): boolean {
+  const key = String(bigSummarySheetKey || '').trim();
+  if (!key) return false;
+  const baseIds = collectSheetRowIds(baseData, key);
+  const liveIds = collectSheetRowIds(liveData, key);
+  return [...liveIds].some(id => !baseIds.has(id));
+}
 
 function validFrames(frames: unknown, lastIndex: number): frames is Frames {
   return !!frames && typeof frames === 'object' && !Array.isArray(frames)
@@ -84,7 +124,9 @@ function readArchive(chat: any[], index: number, isolationKey: string): SwipeArc
   const raw = chat[index]?.[NATIVE_SWIPE_TABLE_FIELD_ACU]?.[isolationKey];
   if (raw?.version === 2 && typeof raw.activeBody === 'string' && typeof raw.activeFingerprint === 'string'
     && validFrames(raw.base, index) && hasFrame(raw.base, index) && Array.isArray(raw.entries)
+    && (raw.baseHiddenRowIds === undefined || validHiddenRowIds(raw.baseHiddenRowIds))
     && raw.entries.every((entry: Candidate) => typeof entry?.body === 'string' && validFrames(entry.frames, index)
+      && (entry.hiddenRowIds === undefined || validHiddenRowIds(entry.hiddenRowIds))
       && Object.keys(entry.frames).every(key => hasFrame(raw.base, key)))
     && new Set(raw.entries.map((entry: Candidate) => entry.body)).size === raw.entries.length
     && raw.entries.some((entry: Candidate) => entry.body === raw.activeBody)) return raw;
@@ -163,22 +205,56 @@ function resolveRollView(chat: any[], intent: NativeSwipeTableIntent_ACU, isolat
     && boundBody && binding.bodyFingerprint === getTableDataFingerprint_ACU(boundBody);
   const solePreviousCandidate = intent.slot === 1 && (!binding || hasBindingOnly) ? intent.previousBody : null;
   const activeBody = archive?.activeBody ?? (stableBinding ? boundBody : solePreviousCandidate);
+  const flightMode = getCurrentFlightModeState_ACU(chat, isolationKey);
+  const liveHiddenRowIds = flightMode.enabled ? normalizeHiddenRowIds(flightMode.hiddenRowIds) : undefined;
+  let flightBaseHiddenRowIds: string[] | undefined;
+  if (flightMode.enabled) {
+    if (archive) {
+      const activeEntry = archive.entries.find(entry => entry.body === archive.activeBody);
+      if (!validHiddenRowIds(archive.baseHiddenRowIds) || !validHiddenRowIds(activeEntry?.hiddenRowIds)
+        || !equal(normalizeHiddenRowIds(activeEntry.hiddenRowIds), liveHiddenRowIds)) {
+        return 'unsupported' as const;
+      }
+      flightBaseHiddenRowIds = normalizeHiddenRowIds(archive.baseHiddenRowIds);
+    } else if (!tag) {
+      flightBaseHiddenRowIds = [...(liveHiddenRowIds ?? [])];
+    }
+  }
   if (!activeBody || swipes.filter(item => item === activeBody).length !== 1
     || (archive && archive.activeFingerprint !== liveFingerprint)
-    || readActiveProvisionalBridge_ACU(chat, isolationKey) || getCurrentFlightModeState_ACU().enabled) return 'unsupported' as const;
+    || readActiveProvisionalBridge_ACU(chat, isolationKey)) return 'unsupported' as const;
   const rollBase = archive ? archive.base[index] : rollTailTag(tag);
   if (rollBase === undefined) return 'unsupported_checkpoint' as const;
   const base = { ...archive?.base, [index]: rollBase };
   const detached = withFrames(chat, isolationKey, base);
   const mode = storageMode(detached, isolationKey);
   if (mode === 'legacy-v1') return 'unsupported_checkpoint' as const;
-  return { previousArchive, archive, liveFingerprint, tag, activeBody, base, detached, mode };
+  return {
+    previousArchive, archive, liveFingerprint, tag, activeBody, base, detached, mode,
+    flightMode, liveHiddenRowIds, flightBaseHiddenRowIds,
+  };
 }
 
-/** Read the same roll view before the new candidate body exists. */
-export async function readNativeSwipeWorldbookData_ACU(
+async function resolveFlightBaseHiddenRowIds(
+  chat: any[],
+  view: Exclude<ReturnType<typeof resolveRollView>, string>,
+  isolationKey: string,
+  baseData: Record<string, any> | null,
+): Promise<{ ok: true; baseHiddenRowIds?: string[] } | { ok: false }> {
+  if (!view.flightMode.enabled) return { ok: true, baseHiddenRowIds: undefined };
+  if (view.flightBaseHiddenRowIds !== undefined) return { ok: true, baseHiddenRowIds: view.flightBaseHiddenRowIds };
+  const liveReplay = await loadTableStateFromFramesV2Detailed_ACU(chat, isolationKey, REPLAY_OPTIONS);
+  if (!liveReplay?.data) return { ok: false };
+  if (hasBigSummaryRowIncrease(baseData, liveReplay.data, view.flightMode.bigSummarySheetKey)) {
+    return { ok: false };
+  }
+  return { ok: true, baseHiddenRowIds: [...(view.liveHiddenRowIds ?? [])] };
+}
+
+/** Read the same roll view before the new candidate body exists, including flight-mode hidden rows if enabled. */
+export async function readNativeSwipeWorldbookProjection_ACU(
   intent: NativeSwipeTableIntent_ACU, chatKey: string, isolationKey: string, assertCurrent: () => void,
-): Promise<Record<string, any>> {
+): Promise<{ data: Record<string, any>; flightModeOverride?: FlightModeState_ACU }> {
   assertCurrent();
   const chat = getChatArray_ACU();
   const selection = readTailSwipe_ACU(chat, intent.index);
@@ -187,22 +263,45 @@ export async function readNativeSwipeWorldbookData_ACU(
   if (hasRuntimeOnlyPendingSheets_ACU({ chatKey, isolationKey })) throw new Error('当前表格有未保存的改动。');
   const view = resolveRollView(chat, intent, isolationKey, selection.swipes);
   if (typeof view === 'string') throw new Error('无法确认 Swipe 前的表格基底。');
-  if (view.mode === 'empty') return {};
-  const replay = await loadTableStateFromFramesV2Detailed_ACU(view.detached, isolationKey, REPLAY_OPTIONS);
+  let baseData: Record<string, any> = {};
+  if (view.mode !== 'empty') {
+    const replay = await loadTableStateFromFramesV2Detailed_ACU(view.detached, isolationKey, REPLAY_OPTIONS);
+    assertCurrent();
+    if (view.liveFingerprint !== fingerprint(chat, isolationKey)
+      || view.previousArchive !== intent.message[NATIVE_SWIPE_TABLE_FIELD_ACU]) {
+      throw new Error('准备正文世界书期间，当前表格已变更。');
+    }
+    if (replay?.baseKind !== 'full_checkpoint' || replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length || !replay.data) {
+      throw new Error('无法回放 Swipe 正文请求的表格基底。');
+    }
+    baseData = replay.data;
+  }
+  const flightResolved = await resolveFlightBaseHiddenRowIds(chat, view, isolationKey, baseData);
   assertCurrent();
   if (view.liveFingerprint !== fingerprint(chat, isolationKey)
-    || view.previousArchive !== intent.message[NATIVE_SWIPE_TABLE_FIELD_ACU]) {
+    || view.previousArchive !== intent.message[NATIVE_SWIPE_TABLE_FIELD_ACU]
+    || (view.flightMode.enabled && !equal(normalizeHiddenRowIds(getCurrentFlightModeState_ACU(chat, isolationKey).hiddenRowIds), view.liveHiddenRowIds))) {
     throw new Error('准备正文世界书期间，当前表格已变更。');
   }
-  if (replay?.baseKind !== 'full_checkpoint' || replay.requiresCheckpointConvergence || replay.compatibilityRepairs?.length || !replay.data) {
-    throw new Error('无法回放 Swipe 正文请求的表格基底。');
+  if (!flightResolved.ok) {
+    throw new Error('无法确认经典表格模式在 Swipe 前的隐藏纪要基底。');
   }
-  return replay.data;
+  return view.flightMode.enabled
+    ? { data: baseData, flightModeOverride: { ...view.flightMode, hiddenRowIds: flightResolved.baseHiddenRowIds ?? [] } }
+    : { data: baseData };
+}
+
+/** Read the same roll view before the new candidate body exists. */
+export async function readNativeSwipeWorldbookData_ACU(
+  intent: NativeSwipeTableIntent_ACU, chatKey: string, isolationKey: string, assertCurrent: () => void,
+): Promise<Record<string, any>> {
+  const projection = await readNativeSwipeWorldbookProjection_ACU(intent, chatKey, isolationKey, assertCurrent);
+  return projection.data;
 }
 
 async function publishCandidate(
   target: NonNullable<ReturnType<typeof captureTarget>>, scope: SwipeScope, projection: any[],
-  archive: SwipeArchive, assertBase: () => void,
+  archive: SwipeArchive, assertBase: () => void, targetHiddenRowIds?: string[],
 ): Promise<boolean> {
   const { chat, index, message } = target;
   const { isolationKey } = scope;
@@ -232,6 +331,12 @@ async function publishCandidate(
     });
     const previousArchive = message[NATIVE_SWIPE_TABLE_FIELD_ACU];
     const replacementArchive = { ...previousArchive, [isolationKey]: archive };
+    const currentFlightMode = getCurrentFlightModeState_ACU(chat, isolationKey);
+    const shouldStageHiddenRows = currentFlightMode.enabled && targetHiddenRowIds !== undefined
+      && !equal(normalizeHiddenRowIds(currentFlightMode.hiddenRowIds), normalizeHiddenRowIds(targetHiddenRowIds));
+    const rollbackHiddenRows = shouldStageHiddenRows
+      ? stageFlightModeHiddenRowIds_ACU(normalizeHiddenRowIds(targetHiddenRowIds), chat, isolationKey)
+      : null;
     for (const { item, replacement } of changes) item[TABLE_FIELD] = replacement;
     message[NATIVE_SWIPE_TABLE_FIELD_ACU] = replacementArchive;
     try {
@@ -242,6 +347,7 @@ async function publishCandidate(
       bumpTableReplayGeneration_ACU();
       return true;
     } catch (error) {
+      rollbackHiddenRows?.();
       for (const { item, previous, replacement } of changes) {
         if (item[TABLE_FIELD] !== replacement) continue;
         if (previous === undefined) delete item[TABLE_FIELD];
@@ -258,11 +364,13 @@ async function publishCandidate(
 
 function assertUnchanged(
   target: NonNullable<ReturnType<typeof captureTarget>>, isolationKey: string,
-  previousArchive: unknown, activeFingerprint: string,
+  previousArchive: unknown, activeFingerprint: string, expectedHiddenRowIds?: string[],
 ): void {
   target.assertCurrent();
+  const flightMode = getCurrentFlightModeState_ACU(target.chat, isolationKey);
   if (target.message[NATIVE_SWIPE_TABLE_FIELD_ACU] !== previousArchive
-    || fingerprint(target.chat, isolationKey) !== activeFingerprint) {
+    || fingerprint(target.chat, isolationKey) !== activeFingerprint
+    || (expectedHiddenRowIds !== undefined && (!flightMode.enabled || !equal(normalizeHiddenRowIds(flightMode.hiddenRowIds), expectedHiddenRowIds)))) {
     throw new DOMException('Swipe 表格基底已变更。', 'AbortError');
   }
 }
@@ -275,13 +383,27 @@ export async function restoreNativeSwipeTableCandidate_ACU(scope: SwipeScope, in
   const archive = readArchive(chat, index, isolationKey);
   if (!archive || archive.activeBody === body) return 'unchanged';
   const candidate = archive.entries.find(entry => entry.body === body);
+  const flightMode = getCurrentFlightModeState_ACU(chat, isolationKey);
+  let liveHiddenRowIds: string[] | undefined;
+  let candidateHiddenRowIds: string[] | undefined;
+  if (flightMode.enabled) {
+    liveHiddenRowIds = normalizeHiddenRowIds(flightMode.hiddenRowIds);
+    const activeEntry = archive.entries.find(entry => entry.body === archive.activeBody);
+    if (!validHiddenRowIds(archive.baseHiddenRowIds)
+      || !validHiddenRowIds(activeEntry?.hiddenRowIds)
+      || !validHiddenRowIds(candidate?.hiddenRowIds)
+      || !equal(normalizeHiddenRowIds(activeEntry.hiddenRowIds), liveHiddenRowIds)) {
+      return 'unsupported';
+    }
+    candidateHiddenRowIds = normalizeHiddenRowIds(candidate.hiddenRowIds);
+  }
   if (!candidate || archive.activeFingerprint !== fingerprint(chat, isolationKey)
-    || readActiveProvisionalBridge_ACU(chat, isolationKey) || getCurrentFlightModeState_ACU().enabled) return 'unsupported';
+    || readActiveProvisionalBridge_ACU(chat, isolationKey)) return 'unsupported';
   const previousArchive = message[NATIVE_SWIPE_TABLE_FIELD_ACU];
   const next = withFrames(chat, isolationKey, { ...archive.base, ...candidate.frames });
   const saved = await publishCandidate(target, scope, next, {
     ...archive, activeBody: body, activeFingerprint: fingerprint(next, isolationKey),
-  }, () => assertUnchanged(target, isolationKey, previousArchive, archive.activeFingerprint));
+  }, () => assertUnchanged(target, isolationKey, previousArchive, archive.activeFingerprint, liveHiddenRowIds), candidateHiddenRowIds);
   return saved ? 'updated' : 'unsupported_checkpoint';
 }
 
@@ -295,11 +417,32 @@ export async function refillNativeSwipeTableCandidate_ACU(
   const { isolationKey } = scope;
   const view = resolveRollView(target.chat, intent, isolationKey, swipes);
   if (typeof view === 'string') return view;
-  const { previousArchive, archive, liveFingerprint, tag, activeBody, base, detached } = view;
+  const {
+    previousArchive, archive, liveFingerprint, tag, activeBody, base, detached,
+    flightMode, liveHiddenRowIds,
+  } = view;
   if (activeBody === body) return 'unsupported';
 
   // A request owns all writes its normal fill schedule makes, including writes before the last message.
-  const assertBase = () => assertUnchanged(target, isolationKey, previousArchive, liveFingerprint);
+  const assertBase = () => assertUnchanged(target, isolationKey, previousArchive, liveFingerprint, liveHiddenRowIds);
+  let baseHiddenRowIds: string[] | undefined;
+  if (flightMode.enabled) {
+    let baseData: Record<string, any> | null = {};
+    if (view.flightBaseHiddenRowIds === undefined && view.mode !== 'empty') {
+      const baseReplay = await loadTableStateFromFramesV2Detailed_ACU(detached, isolationKey, REPLAY_OPTIONS);
+      assertBase();
+      if (baseReplay?.baseKind !== 'full_checkpoint' || baseReplay.requiresCheckpointConvergence || baseReplay.compatibilityRepairs?.length || !baseReplay.data) {
+        return 'unsupported_checkpoint';
+      }
+      baseData = baseReplay.data;
+    }
+    const flightResolved = await resolveFlightBaseHiddenRowIds(target.chat, view, isolationKey, baseData);
+    assertBase();
+    if (!flightResolved.ok) return 'unsupported';
+    baseHiddenRowIds = flightResolved.baseHiddenRowIds;
+    setDetachedFlightModeState_ACU(detached, isolationKey, { ...flightMode, hiddenRowIds: baseHiddenRowIds ?? [] });
+  }
+
   const baseline = readFrames(detached, isolationKey);
   assertBase();
   if (!await fill({ chat: detached, assertCurrent: target.assertCurrent })) return 'unchanged';
@@ -311,11 +454,25 @@ export async function refillNativeSwipeTableCandidate_ACU(
     base[i] = baseline[i];
     frames[i] = value;
   }
-  const entries = (archive?.entries ?? [{ body: activeBody, frames: { [index]: tag } }])
-    .filter(entry => entry.body !== body && swipes.includes(entry.body));
+  const candidateHiddenRowIds = flightMode.enabled
+    ? normalizeHiddenRowIds(getCurrentFlightModeState_ACU(detached, isolationKey).hiddenRowIds)
+    : undefined;
+  const existingEntries: Candidate[] = archive?.entries ?? [{
+    body: activeBody,
+    frames: { [index]: tag },
+    ...(flightMode.enabled ? { hiddenRowIds: [...(liveHiddenRowIds ?? [])] } : {}),
+  }];
+  const entries = existingEntries.filter(entry => entry.body !== body && swipes.includes(entry.body));
+  const nextEntry: Candidate = {
+    body,
+    frames,
+    ...(flightMode.enabled ? { hiddenRowIds: candidateHiddenRowIds ?? [] } : {}),
+  };
   const next: SwipeArchive = {
     version: 2, activeBody: body, activeFingerprint: fingerprint(detached, isolationKey),
-    base, entries: [...entries, { body, frames }],
+    base,
+    ...(flightMode.enabled ? { baseHiddenRowIds: [...(baseHiddenRowIds ?? [])] } : {}),
+    entries: [...entries, nextEntry],
   };
-  return await publishCandidate(target, scope, detached, next, assertBase) ? 'updated' : 'unsupported_checkpoint';
+  return await publishCandidate(target, scope, detached, next, assertBase, candidateHiddenRowIds) ? 'updated' : 'unsupported_checkpoint';
 }

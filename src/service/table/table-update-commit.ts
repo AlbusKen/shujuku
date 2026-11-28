@@ -350,7 +350,7 @@ export async function runTableUpdateCommit_ACU<T>(
           const targetSheetKeys = persistOptions.targetSheetKeys !== undefined ? persistOptions.targetSheetKeys : options.targetSheetKeys;
           const operations = persistOptions.operations ?? options.operations;
           commitRevisionWriteSet = revisionWriteSet;
-          const staged = !options.chatView && persistOptions.beforePersist
+          const staged = persistOptions.beforePersist
             ? await persistOptions.beforePersist(applied.tableData)
             : undefined;
           if (staged && typeof staged.rollback === 'function') {

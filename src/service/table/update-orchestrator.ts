@@ -919,14 +919,16 @@ function buildWriteSetForSheetKeys_ACU(sheetKeys: string[] | null | undefined, f
 function buildFlightModeHiddenRowsBeforePersist_ACU(
     beforeData: Record<string, any>,
     isImportMode: boolean,
+    chatOverride?: any[],
+    isolationKeyOverride?: string,
 ): (afterData: Record<string, any>) => { rollback?: () => void } | void {
     return (afterData) => {
         if (isImportMode) return;
-        const state = getCurrentFlightModeState_ACU();
+        const state = getCurrentFlightModeState_ACU(chatOverride, isolationKeyOverride);
         if (!state.enabled) return;
         const hiddenRowIds = getHiddenChronicleRowIdsAfterBigSummaryInsert_ACU(beforeData, afterData, state);
         if (!hiddenRowIds) return;
-        const rollback = stageFlightModeHiddenRowIds_ACU(hiddenRowIds);
+        const rollback = stageFlightModeHiddenRowIds_ACU(hiddenRowIds, chatOverride, isolationKeyOverride);
         return rollback ? { rollback } : undefined;
     };
 }
@@ -2124,7 +2126,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
                     trackAsUpdate: true,
                     operations,
                     revisionWriteSet,
-                    beforePersist: buildFlightModeHiddenRowsBeforePersist_ACU(baseSnapshot, options.isImportMode),
+                    beforePersist: buildFlightModeHiddenRowsBeforePersist_ACU(baseSnapshot, options.isImportMode, options.chatView?.chat, capturedIsolationKey),
                 },
             };
         }));
@@ -2312,7 +2314,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
             value: { modifiedKeys },
             tableData: workingTableData as any,
             persist: {
-                beforePersist: buildFlightModeHiddenRowsBeforePersist_ACU(baseSnapshot, options.isImportMode),
+                beforePersist: buildFlightModeHiddenRowsBeforePersist_ACU(baseSnapshot, options.isImportMode, options.chatView?.chat, capturedIsolationKey),
             },
         }));
         if (!commitResult.success) {
@@ -3547,7 +3549,7 @@ export async function executeCardUpdateCore_ACU(
                                 trackAsUpdate: true,
                                 operations,
                                 revisionWriteSet,
-                                beforePersist: buildFlightModeHiddenRowsBeforePersist_ACU(rawBaseSnapshot, isImportMode),
+                                beforePersist: buildFlightModeHiddenRowsBeforePersist_ACU(rawBaseSnapshot, isImportMode, chatView?.chat, executionScope.isolationKey),
                             },
                         };
                     }));
@@ -3690,7 +3692,7 @@ export async function executeCardUpdateCore_ACU(
                             trackAsUpdate: true,
                             operations,
                             revisionWriteSet,
-                            beforePersist: buildFlightModeHiddenRowsBeforePersist_ACU(rawBaseSnapshot, isImportMode),
+                            beforePersist: buildFlightModeHiddenRowsBeforePersist_ACU(rawBaseSnapshot, isImportMode, chatView?.chat, executionScope.isolationKey),
                         },
                     };
                 });
