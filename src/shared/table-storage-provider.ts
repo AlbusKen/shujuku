@@ -216,6 +216,12 @@ export interface ITableStorageProvider {
   replaceAllData?(data: TableDataObject_ACU): Promise<ApplyEditsResult> | ApplyEditsResult;
 
   /**
+   * 在不重建引擎与其他表的前提下，将指定 sheet 的行数据原子同步回活跃 SQLite 运行时，
+   * 并刷新 canonical 视图（例如 SQL 填表后自动编号的回写）。native 可不实现。
+   */
+  syncSheetRowsFromData_ACU?(data: TableDataObject_ACU, sheetKeys: readonly string[]): TableDataObject_ACU;
+
+  /**
    * 应用 AI 返回的编辑指令
    * - native：解析 DSL（insertRow/updateRow/deleteRow）
    * - sqlite：执行 SQL 语句（事务包裹，失败回滚）

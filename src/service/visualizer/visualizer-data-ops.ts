@@ -10,7 +10,8 @@ import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
 import { isSqliteMode } from '../table/storage-mode';
 import type { TableMutationOperationV2_ACU, TableWriteConflictUnitV2_ACU } from '../table/storage-frame-v2-types';
 import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../../shared/stable-row-id-allocator';
-import { logDebug_ACU } from '../../shared/utils';
+import { isSummaryOrOutlineTable_ACU, logDebug_ACU } from '../../shared/utils';
+import { formatSummaryIndexCode_ACU, getSummaryIndexColumnIndex_ACU, isSpecialIndexLockEnabled_ACU } from '../runtime/helpers-table-lock';
 
 const TEMP_ROW_ID_PREFIX_ACU = '__acu_vis_tmp_row_';
 
@@ -150,13 +151,35 @@ function addWriteSet_ACU(writeSet: TableWriteConflictUnitV2_ACU[], unit: TableWr
     if (!writeSet.some(item => JSON.stringify(item) === key)) writeSet.push(unit);
 }
 
-function buildVisualizerWriteSet_ACU(pending: PendingVisualizerDataOps_ACU): TableWriteConflictUnitV2_ACU[] {
+function isSpecialIndexAutoNumberingEnabledForVisualizer_ACU(state: any, sheetKey: string): boolean {
+    const draft = state?.tableLockDrafts?.[sheetKey];
+    if (draft && typeof draft.specialIndexLocked === 'boolean') {
+        return draft.specialIndexLocked !== false;
+    }
+    return isSpecialIndexLockEnabled_ACU(sheetKey);
+}
+
+function buildVisualizerWriteSet_ACU(pending: PendingVisualizerDataOps_ACU, state?: any): TableWriteConflictUnitV2_ACU[] {
     const writeSet: TableWriteConflictUnitV2_ACU[] = [];
-    Object.values(pending.deletesByRow).forEach(op => addWriteSet_ACU(writeSet, { kind: 'row', sheetKey: op.sheetKey, rowId: op.rowId }));
+    const touchedSheetKeys = new Set<string>();
+    Object.values(pending.deletesByRow).forEach(op => {
+        touchedSheetKeys.add(op.sheetKey);
+        addWriteSet_ACU(writeSet, { kind: 'row', sheetKey: op.sheetKey, rowId: op.rowId });
+    });
     Object.values(pending.updatesByRow).forEach(op => {
+        touchedSheetKeys.add(op.sheetKey);
         Object.keys(op.data).forEach(columnKey => addWriteSet_ACU(writeSet, { kind: 'cell', sheetKey: op.sheetKey, rowId: op.rowId, columnKey }));
     });
-    Object.values(pending.insertsByClientRowId).forEach(op => addWriteSet_ACU(writeSet, { kind: 'sheet', sheetKey: op.sheetKey }));
+    Object.values(pending.insertsByClientRowId).forEach(op => {
+        touchedSheetKeys.add(op.sheetKey);
+        addWriteSet_ACU(writeSet, { kind: 'sheet', sheetKey: op.sheetKey });
+    });
+    for (const sheetKey of touchedSheetKeys) {
+        const sheet = getSheetByKey_ACU(state?.tempData, sheetKey);
+        if (sheet?.name && isSummaryOrOutlineTable_ACU(String(sheet.name)) && isSpecialIndexAutoNumberingEnabledForVisualizer_ACU(state, sheetKey)) {
+            addWriteSet_ACU(writeSet, { kind: 'sheet', sheetKey });
+        }
+    }
     return writeSet;
 }
 
@@ -288,7 +311,7 @@ export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ s
     if (!migration.success) return { success: false, changed: false, error: migration.error || '旧存储迁移失败，已阻止可视化编辑器保存。' };
     if (migration.migrated) await reloadStorageProvider();
 
-    const writeSet = buildVisualizerWriteSet_ACU(pending);
+    const writeSet = buildVisualizerWriteSet_ACU(pending, state);
     const isolationKey = getCurrentIsolationKey_ACU();
     try {
         const chat = getChatArray_ACU();
@@ -377,6 +400,35 @@ export async function applyVisualizerPendingDataOps_ACU(state: any): Promise<{ s
                 const rowId = String(cells[0]);
                 insertedRowIds[op.clientRowId] = rowId;
                 appendOperation(op.sheetKey, { kind: 'row_upsert', sheetKey: op.sheetKey, rowId, cells });
+            }
+
+            // 保存时自动重排启用自动编号的总结/大纲/纪要表编码索引，并补齐行级 row_upsert 增量，
+            // 确保增删行后持久化内容与 SQLite 运行时保持连续 AM0001.. 编号。
+            for (const [sheetKey, operations] of operationsBySheet.entries()) {
+                const sheet = data[sheetKey];
+                if (!sheet || !Array.isArray(sheet.content) || !sheet.name) continue;
+                if (!isSummaryOrOutlineTable_ACU(String(sheet.name))) continue;
+                if (!isSpecialIndexAutoNumberingEnabledForVisualizer_ACU(state, sheetKey)) continue;
+                const colIndex = getSummaryIndexColumnIndex_ACU(sheet);
+                if (colIndex < 0) continue;
+                for (let rowIndex = 1; rowIndex < sheet.content.length; rowIndex += 1) {
+                    const row = sheet.content[rowIndex];
+                    if (!Array.isArray(row) || row.length <= colIndex + 1) continue;
+                    const expectedCode = formatSummaryIndexCode_ACU(rowIndex);
+                    if (row[colIndex + 1] === expectedCode) continue;
+                    row[colIndex + 1] = expectedCode;
+                    const rowId = String(row[0] ?? '').trim();
+                    if (!rowId) continue;
+                    const cells = toPersistedCells_ACU(row);
+                    cells[0] = rowId;
+                    sheet.content[rowIndex] = cells;
+                    const existingUpsertIdx = operations.findIndex(
+                        op => op.kind === 'row_upsert' && op.sheetKey === sheetKey && op.rowId === rowId,
+                    );
+                    const upsertOp: TableMutationOperationV2_ACU = { kind: 'row_upsert', sheetKey, rowId, cells };
+                    if (existingUpsertIdx >= 0) operations[existingUpsertIdx] = upsertOp;
+                    else operations.push(upsertOp);
+                }
             }
 
             const targets = [...operationsBySheet.entries()].map(([sheetKey, operations]) => {

@@ -29,6 +29,7 @@ vi.mock('../../../src/service/runtime/state-manager', () => ({
   get currentChatFileIdentifier_ACU() { return mocks.chatFile; },
   getCurrentIsolationKey_ACU: () => 'iso-test',
   _set_currentJsonTableData_ACU: mocks.setCurrentData,
+  settings_ACU: { tableUpdateLocks: {}, specialIndexLocks: {} },
 }));
 vi.mock('../../../src/service/table/table-history', () => ({
   getLatestV2FullCheckpointMessageIndex_ACU: mocks.fullCheckpoint,
@@ -413,6 +414,76 @@ describe('visualizer-data-ops V2 replay save', () => {
       // 保存前 base load 1 次 + post-save 回退冷 replay 1 次 = 2 次（native 无 hydrate）。
       expect(mocks.replay).toHaveBeenCalledTimes(2);
       expect(mocks.hydrate).not.toHaveBeenCalled();
+    });
+
+    it('删除纪要表首行时自动重排剩余行编码索引并生成 row_upsert 持久化增量', async () => {
+      mocks.data = {
+        mate: { type: 'chatSheets', version: 1 },
+        sheet_ji_yao_biao: {
+          name: '纪要表',
+          content: [
+            ['row_id', '编码索引', '概览'],
+            ['1', 'AM0001', '第一回'],
+            ['2', 'AM0002', '第二回'],
+            ['3', 'AM0003', '第三回'],
+          ],
+        },
+      };
+      mocks.replayData = JSON.parse(JSON.stringify(mocks.data));
+      const draft: any = {
+        tempData: JSON.parse(JSON.stringify(mocks.data)),
+        tableLockDrafts: { sheet_ji_yao_biao: { rows: [], cols: [], cells: [], specialIndexLocked: true } },
+        pendingDataOps: null,
+        isSaving: false,
+      };
+      recordVisualizerRowDelete_ACU(draft, 'sheet_ji_yao_biao', '1');
+
+      const result = await applyVisualizerPendingDataOps_ACU(draft);
+
+      expect(result.success).toBe(true);
+      expect(mocks.persist).toHaveBeenCalledTimes(1);
+      const persistOptions = mocks.persist.mock.calls[0][0];
+      expect(persistOptions.afterData.sheet_ji_yao_biao.content).toEqual([
+        ['row_id', '编码索引', '概览'],
+        ['2', 'AM0001', '第二回'],
+        ['3', 'AM0002', '第三回'],
+      ]);
+      expect(persistOptions.targets[0].operations).toEqual(expect.arrayContaining([
+        { kind: 'row_delete', sheetKey: 'sheet_ji_yao_biao', rowId: '1' },
+        { kind: 'row_upsert', sheetKey: 'sheet_ji_yao_biao', rowId: '2', cells: ['2', 'AM0001', '第二回'] },
+        { kind: 'row_upsert', sheetKey: 'sheet_ji_yao_biao', rowId: '3', cells: ['3', 'AM0002', '第三回'] },
+      ]));
+    });
+
+    it('关闭纪要表自动编号开关时删除行不自动重排剩余行编码索引', async () => {
+      mocks.data = {
+        mate: { type: 'chatSheets', version: 1 },
+        sheet_ji_yao_biao: {
+          name: '纪要表',
+          content: [
+            ['row_id', '编码索引', '概览'],
+            ['1', 'AM0001', '第一回'],
+            ['2', 'AM0002', '第二回'],
+          ],
+        },
+      };
+      mocks.replayData = JSON.parse(JSON.stringify(mocks.data));
+      const draft: any = {
+        tempData: JSON.parse(JSON.stringify(mocks.data)),
+        tableLockDrafts: { sheet_ji_yao_biao: { rows: [], cols: [], cells: [], specialIndexLocked: false } },
+        pendingDataOps: null,
+        isSaving: false,
+      };
+      recordVisualizerRowDelete_ACU(draft, 'sheet_ji_yao_biao', '1');
+
+      const result = await applyVisualizerPendingDataOps_ACU(draft);
+
+      expect(result.success).toBe(true);
+      const persistOptions = mocks.persist.mock.calls[0][0];
+      expect(persistOptions.afterData.sheet_ji_yao_biao.content).toEqual([
+        ['row_id', '编码索引', '概览'],
+        ['2', 'AM0002', '第二回'],
+      ]);
     });
   });
 

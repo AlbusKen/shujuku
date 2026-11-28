@@ -2,6 +2,7 @@ import type { SqlTableApplyScope_ACU } from '../../shared/table-storage-provider
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import { logDebug_ACU, logWarn_ACU } from '../../shared/utils';
 import { currentChatFileIdentifier_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
+import { applySpecialIndexSequenceToSummaryTables_ACU } from '../runtime/helpers-table-lock';
 import { parseAndApplyTableEditsToData_ACU } from '../ai/prompt-builder';
 import { getCurrentStorageMode, isSqliteMode } from './storage-mode';
 import { createDetachedSqlTableService_ACU } from './table-storage-strategy';
@@ -125,6 +126,13 @@ export function createTableFillStagingSession_ACU(
             };
           }
           const tableData = parseResult.tableData as Record<string, any>;
+          const targetScopedView: Record<string, any> = {};
+          for (const sheetKey of run.targetSheetKeys) {
+            if (tableData[sheetKey] && typeof tableData[sheetKey] === 'object') {
+              targetScopedView[sheetKey] = tableData[sheetKey];
+            }
+          }
+          applySpecialIndexSequenceToSummaryTables_ACU(targetScopedView);
           run.overlay = mergeOverlay(tableData);
           await releaseDetached();
           logDebug_ACU(`[TableFillStagingSession] SQLite bucket 已累积 overlay：runId=${run.runId}, target=${input.saveTargetIndex}, sheets=${run.targetSheetKeys.join('、')}`);

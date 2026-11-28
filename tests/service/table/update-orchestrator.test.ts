@@ -6092,6 +6092,150 @@ describe('applyUnifiedGroupFillResponses_ACU', () => {
     }
   });
 
+  it('SQL 模式自动编号后必须同步回写活跃 SQLite provider，防止后续导出/手动重填把 code_index 覆回 NULL', async () => {
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    const { isSummaryOrOutlineTable_ACU, parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation((name: any) => name === '纪要表');
+    const chronicleDDL = `CREATE TABLE chronicle ( -- 纪要表
+      row_id INTEGER PRIMARY KEY, -- 行号
+      code_index TEXT, -- 编码索引
+      summary TEXT NOT NULL -- 概览
+    );`;
+    const baseSnapshot = {
+      mate: { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } },
+      sheet_ji_yao_biao: {
+        uid: 'chronicle',
+        name: '纪要表',
+        sourceData: { ddl: chronicleDDL },
+        content: [['row_id', '编码索引', '概览']],
+        updateConfig: {},
+        exportConfig: {},
+        orderNo: 0,
+      },
+    } as any;
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue(JSON.parse(JSON.stringify(baseSnapshot)));
+    const responses = [
+      {
+        success: true,
+        attempt: 1,
+        aiResponse: "<tableEdit>INSERT INTO chronicle (summary) VALUES ('第一回初遇');</tableEdit>",
+        tableEditText: "INSERT INTO chronicle (summary) VALUES ('第一回初遇');",
+        job: {
+          groupKey: 'a',
+          groupId: 1,
+          batchNumber: 1,
+          saveTargetIndex: 3,
+          targetSheetKeys: ['sheet_ji_yao_biao'],
+          updateMode: 'auto_standard',
+          requestOptions: null,
+          messagesForContext: [],
+          baseSnapshot,
+          isImportMode: false,
+        },
+      },
+    ];
+
+    try {
+      mockCurrentJsonTableData = JSON.parse(JSON.stringify(baseSnapshot));
+      const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, {
+        saveTargetIndex: 3,
+        updateMode: 'auto_standard',
+        isImportMode: false,
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.success).toBe(true);
+      const savedData = mockPersistTablesToChatMessage.mock.calls[0][0].tableData;
+      expect(savedData.sheet_ji_yao_biao.content).toEqual([
+        ['row_id', '编码索引', '概览'],
+        ['1', 'AM0001', '第一回初遇'],
+      ]);
+      // 关键回归断言：活跃 SQLite provider 必须同步拿到 AM0001，而不是保留 NULL
+      const provider = await mockEnsureStorageProviderReady.mock.results[0].value;
+      const exportedFromSqlite = provider.getCurrentData();
+      expect(exportedFromSqlite?.sheet_ji_yao_biao?.content).toEqual([
+        ['row_id', '编码索引', '概览'],
+        ['1', 'AM0001', '第一回初遇'],
+      ]);
+      const physicalTableName = String(provider.executeQuery("SELECT physical_table_name FROM _acu_sheet_meta WHERE sheet_key = 'sheet_ji_yao_biao';").values[0][0]);
+      const queryResult = provider.executeQuery(`SELECT code_index FROM ${physicalTableName} ORDER BY row_id ASC;`);
+      expect(queryResult.values).toEqual([['AM0001']]);
+    } finally {
+      vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation(() => false);
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+    }
+  });
+
+  it('SQL 模式带 UNIQUE + NOT NULL + CHECK 约束的编码索引列原地同步重排时不撞唯一约束', async () => {
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    const { isSummaryOrOutlineTable_ACU, parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation((name: any) => name === '纪要表');
+    const strictChronicleDDL = `CREATE TABLE chronicle ( -- 纪要表
+      row_id INTEGER PRIMARY KEY, -- 行号
+      code_index TEXT NOT NULL UNIQUE CHECK(code_index GLOB 'AM[0-9][0-9][0-9][0-9]'), -- 编码索引
+      summary TEXT NOT NULL -- 概览
+    );`;
+    const baseSnapshot = {
+      mate: { type: 'acu', version: 1, updateConfigUiSentinel: 0, globalInjectionConfig: { readableEntryPlacement: { position: '', depth: 0, order: 0 }, wrapperPlacement: { position: '', depth: 0, order: 0 } } },
+      sheet_ji_yao_biao: {
+        uid: 'chronicle',
+        name: '纪要表',
+        sourceData: { ddl: strictChronicleDDL },
+        content: [['row_id', '编码索引', '概览'], ['1', 'AM0002', '旧纪要']],
+        updateConfig: {},
+        exportConfig: {},
+        orderNo: 0,
+      },
+    } as any;
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue(JSON.parse(JSON.stringify(baseSnapshot)));
+    const responses = [
+      {
+        success: true,
+        attempt: 1,
+        aiResponse: "<tableEdit>INSERT INTO chronicle (code_index, summary) VALUES ('AM0001', '新纪要');</tableEdit>",
+        tableEditText: "INSERT INTO chronicle (code_index, summary) VALUES ('AM0001', '新纪要');",
+        job: {
+          groupKey: 'a',
+          groupId: 1,
+          batchNumber: 1,
+          saveTargetIndex: 3,
+          targetSheetKeys: ['sheet_ji_yao_biao'],
+          updateMode: 'auto_standard',
+          requestOptions: null,
+          messagesForContext: [],
+          baseSnapshot,
+          isImportMode: false,
+        },
+      },
+    ];
+
+    try {
+      mockCurrentJsonTableData = JSON.parse(JSON.stringify(baseSnapshot));
+      const result = await applyUnifiedGroupFillResponses_ACU(responses as any, baseSnapshot, {
+        saveTargetIndex: 3,
+        updateMode: 'auto_standard',
+        isImportMode: false,
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.success).toBe(true);
+      const provider = await mockEnsureStorageProviderReady.mock.results[0].value;
+      expect(provider.getCurrentData()?.sheet_ji_yao_biao?.content).toEqual([
+        ['row_id', '编码索引', '概览'],
+        ['1', 'AM0001', '旧纪要'],
+        ['2', 'AM0002', '新纪要'],
+      ]);
+      const physicalTableName = String(provider.executeQuery("SELECT physical_table_name FROM _acu_sheet_meta WHERE sheet_key = 'sheet_ji_yao_biao';").values[0][0]);
+      const queryResult = provider.executeQuery(`SELECT row_id, code_index FROM ${physicalTableName} ORDER BY row_id ASC;`);
+      expect(queryResult.values).toEqual([[1, 'AM0001'], [2, 'AM0002']]);
+    } finally {
+      vi.mocked(isSummaryOrOutlineTable_ACU).mockImplementation(() => false);
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+    }
+  });
+
   it('SQL 模式下模板范围外的表连 SQL 一起屏蔽，不执行也不写增量', async () => {
     // 回归：若只收窄 keysToSave 而仍执行 SQL，会在运行时改动范围外的表
     // 并写出挂在缺表 checkpoint 上的孤立增量，回放时报 no such table。

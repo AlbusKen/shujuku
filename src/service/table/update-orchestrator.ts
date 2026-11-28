@@ -36,7 +36,7 @@ import { getLatestV2FullCheckpointMessageIndex_ACU, resolveTableHistoryStateFrom
 import { planManualCatchUpWaves_ACU, type ManualCatchUpPlan_ACU } from './manual-fill-planner';
 import { isNonFillAiFloor_ACU, selectFillEligibleIndices_ACU } from '../runtime/message-handler';
 import type { ManualRefillProgressV2_ACU } from './storage-frame-v2-types';
-import type { SqlTableApplyScope_ACU } from '../../shared/table-storage-provider';
+import type { ITableStorageProvider, SqlTableApplyScope_ACU } from '../../shared/table-storage-provider';
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import { rebindSheetKeysThroughTableAliases_ACU, SheetTableAliasResolutionError_ACU } from '../../shared/sql-read-resolver';
 import { recoverProvisionalBridgeSession_ACU, hasActiveProvisionalBridgeAnywhere_ACU } from './manual-catch-up-provisional-bridge';
@@ -1009,6 +1009,20 @@ function applyAutoNumberingWithinScope_ACU(afterData: Record<string, any>, scope
         if (JSON.stringify(view[sheetKey]?.content ?? null) !== snapshot) renumbered.push(sheetKey);
     }
     return renumbered;
+}
+
+/**
+ * 自动编号修改了 runtimeData 内存快照后，同步回写至活跃 SQLite provider。
+ * 否则后续 getRuntimeTableDataSnapshot_ACU()（优先读取 SQLite provider）和
+ * commitManualRefillSheetSnapshotInRangeAtomic_ACU 会回读到未编号的旧 SQLite 数据并覆盖编码。
+ */
+function syncAutoNumberedSheetsToSqlProvider_ACU(
+    provider: { syncSheetRowsFromData_ACU?: ITableStorageProvider['syncSheetRowsFromData_ACU'] } | null | undefined,
+    runtimeData: Record<string, any>,
+    renumberedSheetKeys: readonly string[],
+): void {
+    if (!renumberedSheetKeys.length || typeof provider?.syncSheetRowsFromData_ACU !== 'function') return;
+    provider.syncSheetRowsFromData_ACU(runtimeData as TableDataObject_ACU, renumberedSheetKeys);
 }
 
 function getTouchedSheetKeysFromSqlText_ACU(sqlText: string, tableData: Record<string, any>): string[] {
@@ -2086,8 +2100,10 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
                 ? allRuntimeSheetKeys
                 : scopedKeys([...new Set([...modifiedKeys, ...initializedKeys])].sort());
             const keysToTrack = scopedKeys([...new Set([...modifiedKeys, ...initializedKeys])].sort());
-            // 自动编号（live SQL 填表出口）：作用于本次持久化范围内启用锁的总结/大纲表。
+            // 自动编号（live SQL 填表出口）：作用于本次持久化范围内启用锁的总结/大纲表，
+            // 并同步回写活跃 SQLite provider，保持内存快照、SQLite 引擎与 V2 回放三者一致。
             const renumberedSheetKeys = applyAutoNumberingWithinScope_ACU(runtimeData, keysToSave);
+            syncAutoNumberedSheetsToSqlProvider_ACU(provider, runtimeData, renumberedSheetKeys);
             // 与快照路径同理：缺少 full checkpoint 锚点时本次写入是初始
             // checkpoint，只接受 afterData，不能附带 sql_sheet_batch operations；但若已存在
             // 可由模板临时基线回放的 orphan artifacts，则必须保留本次 operations，供 persist
@@ -3495,8 +3511,9 @@ export async function executeCardUpdateCore_ACU(
                         const operations = operationBuild.operations;
 
                         if (isImportMode) {
-                            // import 不写聊天帧、无回放操作，编号可全量应用（无漂移风险）。
-                            applySpecialIndexSequenceToSummaryTables_ACU(runtimeData);
+                            // import 不写聊天帧、无回放操作，编号可全量应用并同步回写 SQLite provider。
+                            const renumberedSheetKeys = applyAutoNumberingWithinScope_ACU(runtimeData, getSortedSheetKeys_ACU(runtimeData));
+                            syncAutoNumberedSheetsToSqlProvider_ACU(provider, runtimeData, renumberedSheetKeys);
                             emitProgress({ phase: 'chunk_done' });
                             logDebug_ACU('Import mode: skipping save to chat history for this chunk.');
                             return {
@@ -3549,9 +3566,10 @@ export async function executeCardUpdateCore_ACU(
                                 return keysToTrackAsUpdated.includes(sheetKey);
                             })
                             : fillAttemptKeys;
-                        // 自动编号（卡级 SQL 出口）：只作用于本次持久化范围内的表，并对编号
-                        // 变化的表追加 sheet_replace，消除既有的 live/回放编号漂移。
+                        // 自动编号（卡级 SQL 出口）：只作用于本次持久化范围内的表，同步回写活跃
+                        // SQLite provider 并追加 sheet_replace，消除 live/SQLite/回放编号漂移。
                         const renumberedSheetKeys = applyAutoNumberingWithinScope_ACU(runtimeData, keysToActuallySave);
+                        syncAutoNumberedSheetsToSqlProvider_ACU(provider, runtimeData, renumberedSheetKeys);
                         operations.push(...buildSheetReplaceOperationsFromData_ACU(runtimeData, renumberedSheetKeys, 'system'));
                         const revisionWriteSet = parsedKeys.map(sheetKey => ({ kind: 'sheet' as const, sheetKey }));
 

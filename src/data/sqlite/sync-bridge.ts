@@ -270,6 +270,55 @@ export class SyncBridge {
     return this.exportToTableData(originalData.mate as Mate_ACU);
   }
 
+  /**
+   * 在当前 SQLite 引擎内原子替换指定表的行数据（不重建表结构、不触碰其他表）。
+   * 供自动编号等写后步骤把内存重排结果同步回活跃 SQLite 引擎，
+   * 避免后续 provider.getCurrentData() / 手动重填快照回读到未编号的旧 SQLite 数据。
+   */
+  replaceSheetsRowsInPlace(entries: ReadonlyArray<{ sheetKey: string; sheet: Sheet_ACU }>): void {
+    if (!Array.isArray(entries) || entries.length === 0) return;
+    if (!this.engine.isReady) {
+      throw new Error('SyncBridge: SqliteEngine 未初始化');
+    }
+    const statements: string[] = [];
+    let metaMap: Map<string, SheetMeta> | null = null;
+    for (const { sheetKey, sheet } of entries) {
+      if (!sheetKey || !sheet || !Array.isArray(sheet.content)) continue;
+      let runtimeSchema = this.runtimeEffectiveSchemas.get(sheetKey);
+      let tableName = runtimeSchema ? parseDDLTableName(runtimeSchema.effectiveDDL) : null;
+      if (!runtimeSchema || !tableName) {
+        metaMap ||= this._loadAllMeta(false);
+        const meta = metaMap.get(sheetKey);
+        const candidateName = meta?.physicalTableName || parseDDLTableName(String(sheet.sourceData?.ddl || ''));
+        if (!candidateName) {
+          throw new Error(`[SyncBridge] 无法定位表 ${sheetKey} 的物理表名，无法原地同步行数据。`);
+        }
+        const liveDdl = this.engine.getTableDDL(candidateName);
+        if (!liveDdl) {
+          throw new Error(`[SyncBridge] SQLite 中不存在物理表 ${candidateName}（sheetKey=${sheetKey}），无法原地同步行数据。`);
+        }
+        const resolved = resolveEffectiveDDL(
+          { ...sheet, sourceData: { ...(sheet.sourceData || {}), ddl: liveDdl } } as Sheet_ACU,
+          sheet.uid || sheetKey,
+          candidateName,
+        );
+        runtimeSchema = {
+          effectiveDDL: resolved.effectiveDDL,
+          columnMap: resolved.columnMap,
+          source: resolved.source,
+          diagnostics: resolved.diagnostics,
+          originalDdlDigest: hashUserInput_ACU(liveDdl),
+        };
+        tableName = parseDDLTableName(resolved.effectiveDDL) || candidateName;
+      }
+      const plan = createSheetInsertPlan(sheet, runtimeSchema.columnMap);
+      const inserts = generateInserts(sheet, tableName, plan);
+      statements.push(`DELETE FROM ${tableName};`, ...inserts);
+    }
+    if (statements.length === 0) return;
+    this.engine.runBatch(statements);
+  }
+
   // ═══════════════════════════════════════════════════════════════
   // 内部方法
   // ═══════════════════════════════════════════════════════════════

@@ -9,6 +9,8 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   get currentChatFileIdentifier_ACU() { return mocks.chatIdentifier; },
   getCurrentIsolationKey_ACU: vi.fn(() => mocks.isolationKey),
+  currentJsonTableData_ACU: null,
+  settings_ACU: { tableUpdateLocks: {}, specialIndexLocks: {} },
 }));
 
 vi.mock('../../../src/service/table/storage-mode', () => ({
@@ -134,6 +136,47 @@ describe('TableFillStagingSession', () => {
     expect(detachedSql.dispose).toHaveBeenCalled();
     expect(Object.keys(session.getTargetOverlay().sheets)).toEqual(['sheet_b']);
     expect(session.getTargetOverlay().sheets.sheet_b.content[1][1]).toBe('from-sql');
+    expect(session.getTargetOverlay().sheets.sheet_a).toBeUndefined();
+    await session.discard();
+  });
+
+  it('SQLite stage_only bucket 对目标范围内的纪要表应用自动编号', async () => {
+    mocks.sqlite = true;
+    detachedSql.applyEditsWithSystemRowIds.mockReturnValueOnce({
+      success: true,
+      tableData: {
+        mate: { type: 'acu' },
+        sheet_a: { uid: 'sheet_a', name: '总结表', content: [['row_id', '编码索引', '内容'], ['1', null, '非目标不应污染']] },
+        sheet_ji_yao_biao: { uid: 'chronicle', name: '纪要表', content: [['row_id', '编码索引', '概览'], ['1', null, '第一回']] },
+      },
+    } as any);
+    const run = createTableFillStagingRunContext_ACU({
+      runId: 'run-sql-summary-session',
+      chatKey: 'session-chat',
+      isolationKey: '',
+      targetSheetKeys: ['sheet_ji_yao_biao'],
+      originalFullIndex: 100,
+      templateFingerprint: 'tpl',
+    });
+    const session = createTableFillStagingSession_ACU(run);
+    const historical = {
+      mate: { type: 'acu' },
+      sheet_a: { uid: 'sheet_a', name: '总结表', content: [['row_id', '编码索引', '内容'], ['1', null, '非目标不应污染']] },
+      sheet_ji_yao_biao: { uid: 'chronicle', name: '纪要表', content: [['row_id', '编码索引', '概览']] },
+    };
+
+    const result = await session.applyBucket({
+      historicalBase: historical,
+      saveTargetIndex: 80,
+      updateMode: 'manual_independent',
+      sqlTexts: ["INSERT INTO chronicle (summary) VALUES ('第一回');"],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(session.getTargetOverlay().sheets.sheet_ji_yao_biao.content).toEqual([
+      ['row_id', '编码索引', '概览'],
+      ['1', 'AM0001', '第一回'],
+    ]);
     expect(session.getTargetOverlay().sheets.sheet_a).toBeUndefined();
     await session.discard();
   });

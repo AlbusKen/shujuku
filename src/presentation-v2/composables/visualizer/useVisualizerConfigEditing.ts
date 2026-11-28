@@ -30,7 +30,10 @@ import {
   normalizeLorebookPosition_ACU,
   normalizePlacementConfig_ACU,
 } from '../../../service/worldbook/injection-engine';
-import { assertVisualizerDataOpsEditable_ACU } from '../../../service/visualizer/visualizer-data-ops';
+import {
+  assertVisualizerDataOpsEditable_ACU,
+  recordVisualizerCellUpdate_ACU,
+} from '../../../service/visualizer/visualizer-data-ops';
 import { useToastStore } from '../../stores/toast-store';
 import { useVisualizerStore } from '../../stores/visualizer-store';
 
@@ -391,7 +394,21 @@ export function useVisualizerConfigEditing() {
     if (!key || !info.enabled) return;
     visualizer.applyLockChangesToDraft([{ sheetKey: key, specialIndexLocked: enabled === true }]);
     if (enabled === true && currentSheet.value && info.index >= 0) {
-      applySummaryIndexSequenceToTable_ACU(currentSheet.value, info.index);
+      const sheet = currentSheet.value;
+      const content = Array.isArray(sheet.content) ? sheet.content : [];
+      const columnName = Array.isArray(content[0]) ? content[0][info.index + 1] : '';
+      const beforeValues = content.slice(1).map((row: any) => (Array.isArray(row) ? row[info.index + 1] : undefined));
+      applySummaryIndexSequenceToTable_ACU(sheet, info.index);
+      if (columnName) {
+        for (let rowIndex = 1; rowIndex < content.length; rowIndex += 1) {
+          const row = content[rowIndex];
+          if (!Array.isArray(row)) continue;
+          const afterValue = row[info.index + 1];
+          if (afterValue !== beforeValues[rowIndex - 1]) {
+            recordVisualizerCellUpdate_ACU(visualizer, key, row[0], columnName, afterValue);
+          }
+        }
+      }
     }
   }
 

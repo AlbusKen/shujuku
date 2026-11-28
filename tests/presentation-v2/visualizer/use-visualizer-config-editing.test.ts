@@ -266,6 +266,39 @@ describe('useVisualizerConfigEditing', () => {
     expect(store.dirty).toBe(true);
   });
 
+  it('重新开启编码索引自动编号且存在持久化 row_id 变更时，记录单元格更新以便保存数据落盘', async () => {
+    const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
+    const store = useVisualizerStore();
+    store.loadSnapshot({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_summary: {
+        uid: 'sheet_summary',
+        name: '总结表',
+        orderNo: 0,
+        content: [['row_id', '事件', '编码索引'], ['1', '初遇', '']],
+        sourceData: {},
+        updateConfig: {},
+        exportConfig: {},
+      },
+    }, ['sheet_summary']);
+    store.loadLockDrafts({
+      sheet_summary: { rows: [], cols: [], cells: [], specialIndexLocked: false },
+    });
+    helperMock.getSummaryIndexColumnIndex_ACU.mockReturnValue(1);
+    const { useVisualizerConfigEditing } = await import('../../../src/presentation-v2/composables/visualizer/useVisualizerConfigEditing');
+    const config = useVisualizerConfigEditing();
+
+    config.setSpecialIndexLock(true);
+
+    expect(store.currentSheet.content[1][2]).toBe('AM0001');
+    expect(store.pendingDataOps.updatesByRow['sheet_summary::1']).toEqual({
+      kind: 'updateRow',
+      sheetKey: 'sheet_summary',
+      rowId: '1',
+      data: { 编码索引: 'AM0001' },
+    });
+  });
+
   it('冻结状态下拒绝特殊索引锁编辑且不改变锁草稿或表内容', async () => {
     const { useVisualizerStore } = await import('../../../src/presentation-v2/stores/visualizer-store');
     const store = useVisualizerStore();

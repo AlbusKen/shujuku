@@ -1644,6 +1644,25 @@ export class SqlTableService implements ITableStorageProvider {
     }
   }
 
+  syncSheetRowsFromData_ACU(data: TableDataObject_ACU, sheetKeys: readonly string[]): TableDataObject_ACU {
+    this._ensureInitialized();
+    const uniqueKeys = [...new Set((sheetKeys || []).filter(key => typeof key === 'string' && key.startsWith('sheet_')))];
+    const entries: Array<{ sheetKey: string; sheet: Sheet_ACU }> = [];
+    for (const sheetKey of uniqueKeys) {
+      const sheet = (data as any)?.[sheetKey] as Sheet_ACU | undefined;
+      if (sheet && Array.isArray(sheet.content)) {
+        entries.push({ sheetKey, sheet });
+      }
+    }
+    if (entries.length === 0) {
+      return this._exportCurrentDataStrict();
+    }
+    this.syncBridge.replaceSheetsRowsInPlace(entries);
+    const exportedData = this._exportCurrentDataStrict();
+    this._publishCanonicalView_ACU(exportedData);
+    return exportedData;
+  }
+
   clearRuntimeData(): void {
     this.engine.dispose();
     this.engine = new SqliteEngine();
