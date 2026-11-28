@@ -274,6 +274,43 @@ describe('parseDDLColumnInfos_ACU', () => {
     expect(parseDDLColumnInfos_ACU(ddl.replace('DEFAULT 2', 'DEFAULT 5'))[1])
       .toMatchObject({ sqlName: 'count', defaultExpression: '5' });
   });
+
+  it('超过 8192 字符的 DDL 正确解析，且两次结果互相独立', () => {
+    // 逗号必须位于 `--` 注释之前，否则会被行注释吞掉。
+    const businessColumns = Array.from({ length: 300 }, (_, index) =>
+      `  col_${index} TEXT DEFAULT 'v${index}'${index < 299 ? ',' : ''} -- 列${index}`);
+    const ddl = `CREATE TABLE wide_table (\n  row_id INTEGER PRIMARY KEY, -- 行号\n${businessColumns.join('\n')}\n);`;
+    expect(ddl.length).toBeGreaterThan(8192);
+
+    const first = parseDDLColumnInfos_ACU(ddl);
+    expect(first).toHaveLength(301);
+    expect(first[0]).toMatchObject({ sqlName: 'row_id', declaredType: 'INTEGER', isPrimaryKey: true, comment: '行号' });
+    expect(first[300]).toMatchObject({ index: 300, sqlName: 'col_299', declaredType: 'TEXT', comment: '列299', defaultExpression: "'v299'" });
+    first[300].defaultExpression = 'mutated';
+    first.pop();
+
+    const second = parseDDLColumnInfos_ACU(ddl);
+    expect(second).toHaveLength(301);
+    expect(second[300]).toMatchObject({ sqlName: 'col_299', defaultExpression: "'v299'" });
+  });
+
+  it('连续解析 129 个不同 DDL 后，首个 DDL 被淘汰后仍能重新正确解析', () => {
+    const makeDDL = (index: number) =>
+      `CREATE TABLE eviction_${index} (row_id INTEGER PRIMARY KEY, value_${index} INTEGER NOT NULL DEFAULT ${index});`;
+    const firstDDL = makeDDL(0);
+    const initial = parseDDLColumnInfos_ACU(firstDDL);
+    initial[1].sqlName = 'mutated';
+
+    for (let index = 1; index <= 128; index += 1) {
+      expect(parseDDLColumnInfos_ACU(makeDDL(index))[1]).toMatchObject({ sqlName: `value_${index}`, defaultExpression: String(index) });
+    }
+
+    const reparsed = parseDDLColumnInfos_ACU(firstDDL);
+    expect(reparsed).toHaveLength(2);
+    expect(reparsed[1]).toMatchObject({
+      index: 1, sqlName: 'value_0', declaredType: 'INTEGER', isNotNull: true, hasDefault: true, defaultExpression: '0',
+    });
+  });
 });
 
 describe('downgradeRowIdPrimaryKeyForLegacyReplay_ACU', () => {
