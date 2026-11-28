@@ -18,6 +18,7 @@ import { normalizeCanonicalTableRows_ACU, repairLegacyAutoMergedRowTails_ACU } f
 import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
 import { persistNullRowCleanupShards_ACU, type NullRowCleanupPersistStatus_ACU } from '../table/storage-frame-v2-persist';
 import { allocConsecutiveOrderBlock_ACU, applyPlacementToEntry_ACU, buildDefaultGlobalInjectionConfig_ACU, buildUsedOrderSet_ACU, ensureExportConfigDefaults_ACU, ensureGlobalInjectionConfigDefaults_ACU, getEntryOrderNumber_ACU, getFixedPlacementDefaultsForTable_ACU, getInjectionTargetLorebook_ACU, getIsolationPrefix_ACU, isEntryPlacementMatched_ACU, normalizeLorebookPosition_ACU, normalizePlacementConfig_ACU, updateCustomTableExports_ACU, updateImportantPersonsRelatedEntries_ACU, updateOutlineTableEntry_ACU, updateSummaryTableEntries_ACU } from './injection-engine';
+import { buildExistingEntryUpdatePatch_ACU, isLorebookEntryFieldsMatched_ACU } from './entry-diff';
 // pipeline.ts
 // 从 05_core_tail.js 迁入
 
@@ -215,34 +216,41 @@ async function syncReadableTableWorldbookEntries_ACU(
                 return; // 数据库为空时，不再继续创建或更新
             }
 
-            // [修复2026-03-29] 全局条目顺序修正：使用 allocConsecutiveOrderBlock_ACU 分配连续的 3 个 order 区块
-            // 确保顺序始终为：包裹上(baseOrder) → 全局内容(baseOrder+1) → 包裹下(baseOrder+2)
-            // 即使默认 order 值被占用，也能保证三个条目的 order 是连续的
-            const globalWrapperBlockBase = allocConsecutiveOrderBlock_ACU(usedOrders, 3, globalFixedIndexPlacement.order, 1, 99999);
-            const wrapperStartOrder = globalWrapperBlockBase;
-            const globalContentOrder = globalWrapperBlockBase + 1;
-            const wrapperEndOrder = globalWrapperBlockBase + 2;
+            const wrapperStartEntry = entries.find(e => e.comment === WRAPPER_START_COMMENT);
+            const wrapperEndEntry = entries.find(e => e.comment === WRAPPER_END_COMMENT);
+            const pendingDeletes: any[] = [];
+            const pendingUpdates: Record<string, any>[] = [];
+            const pendingCreates: Record<string, any>[] = [];
+
+            // 已有条目保持原 order，仅在存在待创建的新条目时才分配 3 连续 order 区块。
+            const needsGlobalBlockAlloc = (!db2Entry && createIfNeeded) || !wrapperStartEntry || !wrapperEndEntry;
+            let wrapperStartOrder = 0;
+            let globalContentOrder = 0;
+            let wrapperEndOrder = 0;
+            if (needsGlobalBlockAlloc) {
+                const globalWrapperBlockBase = allocConsecutiveOrderBlock_ACU(usedOrders, 3, globalFixedIndexPlacement.order, 1, 99999);
+                wrapperStartOrder = globalWrapperBlockBase;
+                globalContentOrder = globalWrapperBlockBase + 1;
+                wrapperEndOrder = globalWrapperBlockBase + 2;
+            }
             
             if (db2Entry) {
                 const newContent = readableText;
-                const needsUpdate =
-                    (db2Entry.content !== newContent) ||
-                    (db2Entry.type !== 'constant') ||
-                    (db2Entry.enabled !== true) ||
-                    (db2Entry.prevent_recursion !== true) ||
-                    (getEntryOrderNumber_ACU(db2Entry) !== globalContentOrder) ||
-                    !isEntryPlacementMatched_ACU(db2Entry, globalFixedIndexPlacement);
-                if (needsUpdate) {
+                const upToDate = isLorebookEntryFieldsMatched_ACU(
+                    db2Entry,
+                    { content: newContent, enabled: true, type: 'constant', prevent_recursion: true },
+                    globalFixedIndexPlacement,
+                    { ignoreKeys: true },
+                );
+                if (!upToDate) {
                     const updatedDb2Entry = applyPlacementToEntry_ACU({
-                        uid: db2Entry.uid,
                         content: newContent,
                         enabled: true,
                         type: 'constant',
-                        order: globalContentOrder,
                         prevent_recursion: true,
                     }, globalFixedIndexPlacement);
-                    await store.set(primaryLorebookName, [updatedDb2Entry]);
-                    logDebug_ACU('Successfully updated the global readable lorebook entry.');
+                    pendingUpdates.push(buildExistingEntryUpdatePatch_ACU(db2Entry, updatedDb2Entry));
+                    logDebug_ACU('Queued update for the global readable lorebook entry.');
                 } else {
                     logDebug_ACU('Global readable lorebook entry is already up-to-date.');
                 }
@@ -256,15 +264,14 @@ async function syncReadableTableWorldbookEntries_ACU(
                     order: globalContentOrder,
                     prevent_recursion: true,
                 }, globalFixedIndexPlacement);
-                await store.create(primaryLorebookName, [newDb2Entry]);
-                logDebug_ACU('Global readable lorebook entry not found. Created a new one.');
+                pendingCreates.push(newDb2Entry);
+                logDebug_ACU('Global readable lorebook entry not found. Queued creation.');
             }
 
-            // [新增] 创建 WrapperStart 条目
-            const wrapperStartEntry = entries.find(e => e.comment === WRAPPER_START_COMMENT);
+            // [新增] 创建或按需更新 WrapperStart 条目
             const wrapperStartContent = '<最新数据与记录>\n以下是在这个时间点，当前场景下剧情相关的最新数据与记录，你在进行剧情分析时必须以此最新的数据为准，以下数据与记录的优先级高于其他任何背景设定：\n\n';
             if (!wrapperStartEntry) {
-                await store.create(primaryLorebookName, [applyPlacementToEntry_ACU({
+                pendingCreates.push(applyPlacementToEntry_ACU({
                     comment: WRAPPER_START_COMMENT,
                     content: wrapperStartContent,
                     keys: ['TavernDB-ACU-WrapperStart-Key'],
@@ -272,31 +279,29 @@ async function syncReadableTableWorldbookEntries_ACU(
                     type: 'constant',
                     order: wrapperStartOrder,
                     prevent_recursion: true,
-                }, globalFixedIndexPlacement)]);
-                logDebug_ACU('Created wrapper start entry.');
+                }, globalFixedIndexPlacement));
+                logDebug_ACU('Queued creation for wrapper start entry.');
             } else {
-                const wrapperStartNeedsUpdate =
-                    wrapperStartEntry.content !== wrapperStartContent ||
-                    wrapperStartEntry.enabled !== true ||
-                    wrapperStartEntry.type !== 'constant' ||
-                    wrapperStartEntry.prevent_recursion !== true ||
-                    getEntryOrderNumber_ACU(wrapperStartEntry) !== wrapperStartOrder ||
-                    !isEntryPlacementMatched_ACU(wrapperStartEntry, globalFixedIndexPlacement);
-                if (wrapperStartNeedsUpdate) {
-                    await store.set(primaryLorebookName, [
+                const upToDate = isLorebookEntryFieldsMatched_ACU(
+                    wrapperStartEntry,
+                    { content: wrapperStartContent, enabled: true, type: 'constant', prevent_recursion: true },
+                    globalFixedIndexPlacement,
+                    { ignoreKeys: true },
+                );
+                if (!upToDate) {
+                    pendingUpdates.push(buildExistingEntryUpdatePatch_ACU(
+                        wrapperStartEntry,
                         applyPlacementToEntry_ACU({
-                            uid: wrapperStartEntry.uid,
                             content: wrapperStartContent,
                             enabled: true,
                             type: 'constant',
-                            order: wrapperStartOrder,
                             prevent_recursion: true,
-                        }, globalFixedIndexPlacement)
-                    ]);
+                        }, globalFixedIndexPlacement),
+                    ));
                 }
             }
 
-            // [新增] 创建或更新 MemoryStart 条目（整合总结表表头）
+            // [新增] 创建或更新 MemoryStart / MemoryEnd 条目（整合总结表表头）
             const MEMORY_START_COMMENT = isoPrefix + (isImport ? `${IMPORT_PREFIX}TavernDB-ACU-MemoryStart` : 'TavernDB-ACU-MemoryStart');
             const MEMORY_END_COMMENT = isoPrefix + (isImport ? `${IMPORT_PREFIX}TavernDB-ACU-MemoryEnd` : 'TavernDB-ACU-MemoryEnd');
             const memoryStartEntry = entries.find(e => e.comment === MEMORY_START_COMMENT);
@@ -307,17 +312,10 @@ async function syncReadableTableWorldbookEntries_ACU(
             
             if (!hasSummaryData) {
                 // [修复] 没有总结表数据时，删除已存在的 MemoryStart/MemoryEnd 条目
-                const memoryEntriesToDelete = [];
-                if (memoryStartEntry) memoryEntriesToDelete.push(memoryStartEntry.uid);
-                if (memoryEndEntry) memoryEntriesToDelete.push(memoryEndEntry.uid);
-                
-                if (memoryEntriesToDelete.length > 0) {
-                    await store.remove(primaryLorebookName, memoryEntriesToDelete);
-                    logDebug_ACU(`Deleted ${memoryEntriesToDelete.length} MemoryStart/MemoryEnd entries because summary table is empty.`);
-                }
+                if (memoryStartEntry) pendingDeletes.push(memoryStartEntry.uid);
+                if (memoryEndEntry) pendingDeletes.push(memoryEndEntry.uid);
             } else {
                 // 有总结表数据时，正常创建或更新 MemoryStart/MemoryEnd 条目
-                // 准备总结表表头内容
                 let summaryHeaderContent = '';
                 const summaryHeaders = getSheetColumnProjection_ACU(summaryTable).visibleColumns
                     .filter(column => column.sourceIndex > 0)
@@ -326,106 +324,114 @@ async function syncReadableTableWorldbookEntries_ACU(
                     summaryHeaderContent = `# ${summaryTable.name}\n\n| ${summaryHeaders.join(' | ')} |\n|${summaryHeaders.map(() => '---').join('|')}|`;
                 }
                 
-                // 构建 MemoryStart 条目内容
                 let memoryStartContent = '<过往记忆>\n\n以下是你回忆起的跟当前剧情有关的过往的记忆，你要特地注意该记忆所标注的时间，以及分析与当前剧情的相关性，完美地将其融入本轮的剧情编写中：\n\n';
                 if (summaryHeaderContent) {
                     memoryStartContent += summaryHeaderContent + '\n\n';
                 }
 
-                // =========================
-                // [总结表] 3-depth 成组对齐：
-                // - MemoryStart / 总结行条目 / MemoryEnd 只占用连续 3 个 order(深度)
-                // - 这 3 个深度不能与任何已有条目重合，且必须紧挨在一起
-                // =========================
                 const baseSummaryPrefix2 = isImport ? `${IMPORT_PREFIX}总结条目` : '总结条目';
                 const baseSmallSummaryPrefix2 = isImport ? `${IMPORT_PREFIX}小总结条目` : '小总结条目';
                 const SUMMARY_ENTRY_PREFIX2 = isoPrefix + baseSummaryPrefix2;
                 const SMALL_SUMMARY_PREFIX2 = isoPrefix + baseSmallSummaryPrefix2;
-                const summaryOrderBlockBase = allocConsecutiveOrderBlock_ACU(usedOrders, 3, Math.max(1, summaryFixedEntryPlacement.order - 1), 1, 99999);
-                const memoryStartOrder = summaryOrderBlockBase;
-                const summaryDataOrder = summaryOrderBlockBase + 1;
-                const memoryEndOrder = summaryOrderBlockBase + 2;
-
-                // 将"总结条目/小总结条目"统一挪到 summaryDataOrder（多条共用同一深度）
-                const summaryEntriesToReorder = entries.filter(e => {
+                const summaryEntriesToCheck = entries.filter(e => {
                     const c = e?.comment || '';
                     return c.startsWith(SUMMARY_ENTRY_PREFIX2) || c.startsWith(SMALL_SUMMARY_PREFIX2);
                 });
-                if (summaryEntriesToReorder.length > 0) {
-                    await store.set(
-                        primaryLorebookName,
-                        summaryEntriesToReorder.map(e => applyPlacementToEntry_ACU({ uid: e.uid, order: summaryDataOrder }, summaryFixedEntryPlacement))
-                    );
+
+                // 已有 MemoryStart/MemoryEnd 保持原 order；仅在缺失需新建时分配 3 连续区块。
+                const needsMemoryBlockAlloc = !memoryStartEntry || !memoryEndEntry;
+                let memoryStartOrder = 0;
+                let summaryDataOrder = 0;
+                let memoryEndOrder = 0;
+                if (needsMemoryBlockAlloc) {
+                    const summaryOrderBlockBase = allocConsecutiveOrderBlock_ACU(usedOrders, 3, Math.max(1, summaryFixedEntryPlacement.order - 1), 1, 99999);
+                    memoryStartOrder = summaryOrderBlockBase;
+                    summaryDataOrder = summaryOrderBlockBase + 1;
+                    memoryEndOrder = summaryOrderBlockBase + 2;
+                    for (const e of summaryEntriesToCheck) {
+                        if (getEntryOrderNumber_ACU(e) !== summaryDataOrder || !isEntryPlacementMatched_ACU(e, summaryFixedEntryPlacement)) {
+                            pendingUpdates.push(applyPlacementToEntry_ACU({ uid: e.uid, order: summaryDataOrder }, summaryFixedEntryPlacement));
+                        }
+                    }
+                } else {
+                    // 已有条目不改 order，仅在 placement 偏离时同步位置属性。
+                    for (const e of summaryEntriesToCheck) {
+                        if (!isEntryPlacementMatched_ACU(e, summaryFixedEntryPlacement)) {
+                            pendingUpdates.push(buildExistingEntryUpdatePatch_ACU(
+                                e,
+                                applyPlacementToEntry_ACU({}, summaryFixedEntryPlacement),
+                            ));
+                        }
+                    }
                 }
                 
                 if (!memoryStartEntry) {
-                    // 创建新条目
-                    await store.create(primaryLorebookName, [applyPlacementToEntry_ACU({
-                            comment: MEMORY_START_COMMENT,
-                            content: memoryStartContent,
-                            keys: ['AM'],
-                            enabled: true,
-                            type: 'keyword',
-                            order: memoryStartOrder,
-                            prevent_recursion: true,
-                        }, summaryFixedIndexPlacement)]);
+                    pendingCreates.push(applyPlacementToEntry_ACU({
+                        comment: MEMORY_START_COMMENT,
+                        content: memoryStartContent,
+                        keys: ['AM'],
+                        enabled: true,
+                        type: 'keyword',
+                        order: memoryStartOrder,
+                        prevent_recursion: true,
+                    }, summaryFixedIndexPlacement));
                 } else {
-                    // 更新现有条目（内容/深度）
-                    const needsUpdate =
-                        (memoryStartEntry.content !== memoryStartContent) ||
-                        (getEntryOrderNumber_ACU(memoryStartEntry) !== memoryStartOrder) ||
-                        !isEntryPlacementMatched_ACU(memoryStartEntry, summaryFixedIndexPlacement);
-                    if (needsUpdate) {
-                        await store.set(primaryLorebookName, [{
-                            ...applyPlacementToEntry_ACU({
-                                uid: memoryStartEntry.uid,
+                    const upToDate = isLorebookEntryFieldsMatched_ACU(
+                        memoryStartEntry,
+                        { content: memoryStartContent, enabled: true, type: 'keyword', prevent_recursion: true },
+                        summaryFixedIndexPlacement,
+                        { ignoreKeys: true },
+                    );
+                    if (!upToDate) {
+                        pendingUpdates.push(buildExistingEntryUpdatePatch_ACU(
+                            memoryStartEntry,
+                            applyPlacementToEntry_ACU({
                                 content: memoryStartContent,
-                                order: memoryStartOrder,
                                 enabled: true,
                                 type: 'keyword',
                                 prevent_recursion: true,
                                 keys: memoryStartEntry.keys || memoryStartEntry.key || ['AM'],
-                            }, summaryFixedIndexPlacement)
-                        }]);
+                            }, summaryFixedIndexPlacement),
+                        ));
                     }
                 }
 
-                // [新增] 创建 MemoryEnd 条目
                 if (!memoryEndEntry) {
-                    await store.create(primaryLorebookName, [applyPlacementToEntry_ACU({
-                            comment: MEMORY_END_COMMENT,
-                            content: '</过往记忆>',
-                            keys: ['AM'],
-                            enabled: true,
-                            type: 'keyword',
-                            order: memoryEndOrder,
-                            prevent_recursion: true,
-                        }, summaryFixedIndexPlacement)]);
+                    pendingCreates.push(applyPlacementToEntry_ACU({
+                        comment: MEMORY_END_COMMENT,
+                        content: '</过往记忆>',
+                        keys: ['AM'],
+                        enabled: true,
+                        type: 'keyword',
+                        order: memoryEndOrder,
+                        prevent_recursion: true,
+                    }, summaryFixedIndexPlacement));
                 } else {
-                    const needsUpdate =
-                        (getEntryOrderNumber_ACU(memoryEndEntry) !== memoryEndOrder) ||
-                        !isEntryPlacementMatched_ACU(memoryEndEntry, summaryFixedIndexPlacement);
-                    if (needsUpdate) {
-                        await store.set(primaryLorebookName, [{
-                            ...applyPlacementToEntry_ACU({
-                                uid: memoryEndEntry.uid,
-                                order: memoryEndOrder,
+                    const upToDate = isLorebookEntryFieldsMatched_ACU(
+                        memoryEndEntry,
+                        { content: '</过往记忆>', enabled: true, type: 'keyword', prevent_recursion: true },
+                        summaryFixedIndexPlacement,
+                        { ignoreKeys: true },
+                    );
+                    if (!upToDate) {
+                        pendingUpdates.push(buildExistingEntryUpdatePatch_ACU(
+                            memoryEndEntry,
+                            applyPlacementToEntry_ACU({
+                                content: '</过往记忆>',
                                 enabled: true,
                                 type: 'keyword',
                                 prevent_recursion: true,
                                 keys: memoryEndEntry.keys || memoryEndEntry.key || ['AM'],
-                            }, summaryFixedIndexPlacement)
-                        }]);
+                            }, summaryFixedIndexPlacement),
+                        ));
                     }
                 }
             } // end of hasSummaryData
 
-            // [新增] 创建 WrapperEnd 条目
-            // [修复2026-03-29] 使用 globalWrapperBlockBase + 2 作为 wrapperEndOrder（已在上方通过 allocConsecutiveOrderBlock_ACU 分配）
-            const wrapperEndEntry = entries.find(e => e.comment === WRAPPER_END_COMMENT);
+            // [新增] 创建或按需更新 WrapperEnd 条目
             const wrapperEndContent = '</最新数据与记录>';
             if (!wrapperEndEntry) {
-                await store.create(primaryLorebookName, [applyPlacementToEntry_ACU({
+                pendingCreates.push(applyPlacementToEntry_ACU({
                     comment: WRAPPER_END_COMMENT,
                     content: wrapperEndContent,
                     keys: ['TavernDB-ACU-WrapperEnd-Key'],
@@ -433,28 +439,39 @@ async function syncReadableTableWorldbookEntries_ACU(
                     type: 'constant',
                     order: wrapperEndOrder,
                     prevent_recursion: true,
-                }, globalFixedIndexPlacement)]);
-                logDebug_ACU('Created wrapper end entry.');
+                }, globalFixedIndexPlacement));
+                logDebug_ACU('Queued creation for wrapper end entry.');
             } else {
-                const wrapperEndNeedsUpdate =
-                    wrapperEndEntry.content !== wrapperEndContent ||
-                    wrapperEndEntry.enabled !== true ||
-                    wrapperEndEntry.type !== 'constant' ||
-                    wrapperEndEntry.prevent_recursion !== true ||
-                    getEntryOrderNumber_ACU(wrapperEndEntry) !== wrapperEndOrder ||
-                    !isEntryPlacementMatched_ACU(wrapperEndEntry, globalFixedIndexPlacement);
-                if (wrapperEndNeedsUpdate) {
-                    await store.set(primaryLorebookName, [
+                const upToDate = isLorebookEntryFieldsMatched_ACU(
+                    wrapperEndEntry,
+                    { content: wrapperEndContent, enabled: true, type: 'constant', prevent_recursion: true },
+                    globalFixedIndexPlacement,
+                    { ignoreKeys: true },
+                );
+                if (!upToDate) {
+                    pendingUpdates.push(buildExistingEntryUpdatePatch_ACU(
+                        wrapperEndEntry,
                         applyPlacementToEntry_ACU({
-                            uid: wrapperEndEntry.uid,
                             content: wrapperEndContent,
                             enabled: true,
                             type: 'constant',
-                            order: wrapperEndOrder,
                             prevent_recursion: true,
-                        }, globalFixedIndexPlacement)
-                    ]);
+                        }, globalFixedIndexPlacement),
+                    ));
                 }
+            }
+
+            if (pendingDeletes.length > 0) {
+                await store.remove(primaryLorebookName, pendingDeletes);
+                logDebug_ACU(`Deleted ${pendingDeletes.length} obsolete global/memory lorebook entries.`);
+            }
+            if (pendingUpdates.length > 0) {
+                await store.set(primaryLorebookName, pendingUpdates);
+                logDebug_ACU(`Updated ${pendingUpdates.length} global/memory lorebook entries.`);
+            }
+            if (pendingCreates.length > 0) {
+                await store.create(primaryLorebookName, pendingCreates);
+                logDebug_ACU(`Created ${pendingCreates.length} global/memory lorebook entries.`);
             }
         } catch(error) {
             if (entryStore) throw error;

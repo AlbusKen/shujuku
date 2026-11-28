@@ -22,6 +22,11 @@ import { buildExternalCustomTableExportComment_ACU, type ExternalCustomTableExpo
 import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
 import { getCurrentFlightModeState_ACU } from '../flight-mode/flight-mode-state';
 import { projectFlightModeHiddenChronicleRows_ACU } from '../flight-mode/flight-mode-hidden-rows';
+import {
+    buildExistingEntryUpdatePatch_ACU,
+    doesCreatedEntryNeedOrderFix_ACU,
+    isLorebookEntryFieldsMatched_ACU,
+} from './entry-diff';
 
 // 仅记录当前运行期成功导出的来源行身份，用于区分真实删除与无数据变化的楼层刷新。
 // 世界书正文仍由交火负责；不同聊天、隔离环境和目标世界书不共享删除基线。
@@ -99,26 +104,20 @@ export function __resetCustomTableExportStateForTests_ACU(): void {
           let knownNames = settings_ACU.knownCustomEntryNames || [];
           if (!Array.isArray(knownNames)) knownNames = [];
 
-          let uidsToDelete = allEntries
-              .filter(e => {
-                  const comment = typeof e?.comment === 'string' ? e.comment : '';
-                  if (!comment) return false;
-
-                  // 用户要求：外部导入每次导入前不清理（允许多批并存）
-                  if (isImport) return false;
-                  
-                  // 1. 检查旧版前缀 (兼容性)
-                  // LEGACY_EXPORT_PREFIX 已经包含了 isoPrefix
-                  if (comment.startsWith(LEGACY_EXPORT_PREFIX)) return true;
-
-                  // 2. 检查是否在已知列表中（仅非外部导入模式）
-                  // 只有当条目属于当前隔离环境时才删除
-                  if (comment.startsWith(isoPrefix)) {
-                      if (knownNames.includes(comment)) return true;
-                  }
-                  return false;
-              })
-              .map(e => e.uid);
+          const existingManagedEntries = allEntries.filter(e => {
+              const comment = typeof e?.comment === 'string' ? e.comment : '';
+              if (!comment) return false;
+              // 用户要求：外部导入每次导入前不清理（允许多批并存）
+              if (isImport) return false;
+              // 1. 检查旧版前缀 (兼容性)
+              if (comment.startsWith(LEGACY_EXPORT_PREFIX)) return true;
+              // 2. 检查是否在已知列表中（仅非外部导入模式）
+              if (comment.startsWith(isoPrefix)) {
+                  if (knownNames.includes(comment)) return true;
+              }
+              return false;
+          });
+          let uidsToDelete = existingManagedEntries.map(e => e.uid);
             
           // 先计算目标条目，再执行清理，避免普通刷新通过删建绕过交火正文独占。
           // 每次更新时，我们重置 knownNames 列表（仅非外部导入模式）
@@ -716,46 +715,126 @@ export function __resetCustomTableExportStateForTests_ACU(): void {
           const protectSummaryIndex = !entryStore && !isImport && vectorPipelineEnabled && !!summaryIndexPlan
               && existingSummaryIndex?.uid != null && !sourceRowsRemoved;
 
-          if (protectSummaryIndex) {
-              uidsToDelete = uidsToDelete.filter(uid => uid !== existingSummaryIndex.uid);
-              entriesToCreate.splice(entriesToCreate.indexOf(summaryIndexPlan!), 1);
-          }
-          if (uidsToDelete.length > 0) {
-              await store.remove(primaryLorebookName, uidsToDelete);
-              logDebug_ACU(`Deleted ${uidsToDelete.length} custom export entries (Legacy + Known).`);
-          }
-          if (protectSummaryIndex) {
-              // 只同步配置属性，不回写旧正文，避免覆盖交火在读取后产生的新结果。
-              const { content: _content, ...attributes } = summaryIndexPlan!;
-              await store.set(primaryLorebookName, [{ ...attributes, uid: existingSummaryIndex.uid }]);
-              logDebug_ACU('[CustomExport] 交火独占纪要索引正文，保留现有条目，仅同步配置属性。');
-          } else if (!isImport && sourceRowsRemoved && summaryIndexPlan) {
-              logDebug_ACU('[CustomExport] 纪要来源行已删除或回溯，清理旧索引并按剩余数据创建。');
-          }
-
-          if (entriesToCreate.length > 0) {
+          if (isImport) {
+              if (entriesToCreate.length > 0) {
                   await store.create(primaryLorebookName, entriesToCreate);
-              logDebug_ACU(`Successfully created ${entriesToCreate.length} new custom export entries.`);
-              // [兜底] 创建完成后强制回写 order（通过 comment 找 uid）
-              if (postCreateOrderFixPlan.length > 0) {
-                  try {
-                      const latest = await store.get(primaryLorebookName);
-                      const byComment = new Map();
-                      latest.forEach((e: any) => { if (e?.comment) byComment.set(e.comment, e); });
-                      const updates: Record<string, any>[] = [];
-                      postCreateOrderFixPlan.forEach((p) => {
-                          const e = byComment.get(p.comment);
-                          if (e?.uid != null && Number.isFinite(p.order)) {
-                              const fixed = applyPlacementToEntry_ACU({ uid: e.uid, order: p.order }, p.placement || DEFAULT_ENTRY_PLACEMENT_ACU);
-                              updates.push(fixed);
+                  logDebug_ACU(`Successfully created ${entriesToCreate.length} new custom export entries.`);
+                  if (postCreateOrderFixPlan.length > 0) {
+                      try {
+                          const latest = await store.get(primaryLorebookName);
+                          const byComment = new Map();
+                          latest.forEach((e: any) => { if (e?.comment) byComment.set(e.comment, e); });
+                          const updates: Record<string, any>[] = [];
+                          postCreateOrderFixPlan.forEach((p) => {
+                              const e = byComment.get(p.comment);
+                              if (e && doesCreatedEntryNeedOrderFix_ACU(e, p.order, p.placement || DEFAULT_ENTRY_PLACEMENT_ACU)) {
+                                  updates.push(applyPlacementToEntry_ACU({ uid: e.uid, order: p.order }, p.placement || DEFAULT_ENTRY_PLACEMENT_ACU));
+                              }
+                          });
+                          if (updates.length > 0) {
+                              await store.set(primaryLorebookName, updates);
                           }
-                      });
-                      if (updates.length > 0) {
-                          await store.set(primaryLorebookName, updates);
+                      } catch (e) {
+                          if (entryStore) throw e;
+                          logWarn_ACU('[CustomExportOrderFix] Failed to enforce grouped orders for split exports:', e);
                       }
-                  } catch (e) {
-                      if (entryStore) throw e;
-                      logWarn_ACU('[CustomExportOrderFix] Failed to enforce grouped orders for split exports:', e);
+                  }
+              }
+          } else {
+              // 幂等差量同步：已有条目保持原 order，字段完全一致时不写回；只给新增条目分配 order 并创建。
+              const existingByComment = new Map<string, any[]>();
+              existingManagedEntries.forEach((entry: any) => {
+                  const list = existingByComment.get(entry.comment) || [];
+                  list.push(entry);
+                  existingByComment.set(entry.comment, list);
+              });
+              const planByComment = new Map<string, { comment: string; order: number; placement?: Record<string, any> }>();
+              postCreateOrderFixPlan.forEach(p => {
+                  if (!planByComment.has(p.comment)) planByComment.set(p.comment, p);
+              });
+
+              const matchedUids = new Set<any>();
+              const entriesToUpdate: Record<string, any>[] = [];
+              const actualCreates: Record<string, any>[] = [];
+              const actualCreateOrderFixPlan: { comment: string; order: number; placement?: Record<string, any> }[] = [];
+
+              for (const desired of entriesToCreate) {
+                  const plan = planByComment.get(desired.comment);
+                  const placement = plan?.placement || DEFAULT_ENTRY_PLACEMENT_ACU;
+
+                  if (desired.comment === summaryIndexComment) {
+                      if (protectSummaryIndex && existingSummaryIndex?.uid != null) {
+                          matchedUids.add(existingSummaryIndex.uid);
+                          const candidates = existingByComment.get(desired.comment);
+                          if (candidates) {
+                              const idx = candidates.findIndex(c => c.uid === existingSummaryIndex.uid);
+                              if (idx >= 0) candidates.splice(idx, 1);
+                          }
+                          if (!isLorebookEntryFieldsMatched_ACU(existingSummaryIndex, desired as any, placement, { ignoreContent: true })) {
+                              entriesToUpdate.push(buildExistingEntryUpdatePatch_ACU(existingSummaryIndex, desired, { ignoreContent: true }));
+                          }
+                          continue;
+                      }
+                      if (sourceRowsRemoved && existingSummaryIndex?.uid != null) {
+                          // 纪要来源行已删除或回溯时显式重建索引，保持既有删旧建新契约。
+                          actualCreates.push(desired);
+                          if (plan) actualCreateOrderFixPlan.push(plan);
+                          continue;
+                      }
+                  }
+
+                  const candidates = existingByComment.get(desired.comment);
+                  const existing = candidates?.shift();
+                  if (existing?.uid != null) {
+                      matchedUids.add(existing.uid);
+                      if (!isLorebookEntryFieldsMatched_ACU(existing, desired as any, placement)) {
+                          entriesToUpdate.push(buildExistingEntryUpdatePatch_ACU(existing, desired));
+                      }
+                  } else {
+                      actualCreates.push(desired);
+                      if (plan) actualCreateOrderFixPlan.push(plan);
+                  }
+              }
+
+              uidsToDelete = existingManagedEntries
+                  .filter(e => !matchedUids.has(e.uid))
+                  .map(e => e.uid);
+
+              if (uidsToDelete.length > 0) {
+                  await store.remove(primaryLorebookName, uidsToDelete);
+                  logDebug_ACU(`Deleted ${uidsToDelete.length} custom export entries (Legacy + Known).`);
+              }
+              if (protectSummaryIndex) {
+                  logDebug_ACU('[CustomExport] 交火独占纪要索引正文，保留现有条目，仅按需同步配置属性。');
+              } else if (sourceRowsRemoved && summaryIndexPlan) {
+                  logDebug_ACU('[CustomExport] 纪要来源行已删除或回溯，清理旧索引并按剩余数据创建。');
+              }
+              if (entriesToUpdate.length > 0) {
+                  await store.set(primaryLorebookName, entriesToUpdate);
+                  logDebug_ACU(`Updated ${entriesToUpdate.length} custom export entries in-place.`);
+              }
+              if (actualCreates.length > 0) {
+                  await store.create(primaryLorebookName, actualCreates);
+                  logDebug_ACU(`Successfully created ${actualCreates.length} new custom export entries.`);
+                  if (actualCreateOrderFixPlan.length > 0) {
+                      try {
+                          const latest = await store.get(primaryLorebookName);
+                          const byComment = new Map();
+                          latest.forEach((e: any) => { if (e?.comment) byComment.set(e.comment, e); });
+                          const updates: Record<string, any>[] = [];
+                          actualCreateOrderFixPlan.forEach((p) => {
+                              const e = byComment.get(p.comment);
+                              if (e && doesCreatedEntryNeedOrderFix_ACU(e, p.order, p.placement || DEFAULT_ENTRY_PLACEMENT_ACU)) {
+                                  updates.push(applyPlacementToEntry_ACU({ uid: e.uid, order: p.order }, p.placement || DEFAULT_ENTRY_PLACEMENT_ACU));
+                              }
+                          });
+                          if (updates.length > 0) {
+                              await store.set(primaryLorebookName, updates);
+                          }
+                      } catch (e) {
+                          if (entryStore) throw e;
+                          logWarn_ACU('[CustomExportOrderFix] Failed to enforce grouped orders for split exports:', e);
+                      }
                   }
               }
           }

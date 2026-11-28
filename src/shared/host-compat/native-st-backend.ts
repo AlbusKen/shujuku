@@ -101,8 +101,18 @@ export function createNativeStBackend_ACU(getStApi: GetStApi_ACU): NativeStBacke
                 logWarn_ACU(`[NativeStBackend] setLorebookEntries: 世界书 "${bookName}" 中不存在 uid=${String(uid)} 的条目，已跳过`);
                 continue;
             }
-            Object.assign(data.entries[uid], oldPatchToNativePatch_ACU(patch));
-            changed = true;
+            const target = data.entries[uid];
+            const nativePatch = oldPatchToNativePatch_ACU(patch);
+            for (const [key, nextVal] of Object.entries(nativePatch)) {
+                const prevVal = target[key];
+                const isEqual = Array.isArray(nextVal)
+                    ? Array.isArray(prevVal) && prevVal.length === nextVal.length && nextVal.every((item, idx) => prevVal[idx] === item)
+                    : prevVal === nextVal;
+                if (!isEqual) {
+                    target[key] = nextVal;
+                    changed = true;
+                }
+            }
         }
         if (changed) await saveBook(bookName, data);
     }
