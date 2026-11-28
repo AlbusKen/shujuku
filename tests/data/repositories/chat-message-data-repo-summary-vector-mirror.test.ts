@@ -142,7 +142,22 @@ describe('purgeSheetKeysFromMessage_ACU 与纪要向量镜像', () => {
   });
 
   it('镜像既无 checkpoint 又无剩余 delta 时整个 summaryVectorIndexFrame 被删除', () => {
-    const msg = messageWithFrame({
+    const retainedMsg = messageWithFrame({
+      version: 2,
+      logEntries: [tableEntry('drop', OTHER, 1), tableEntry('keep', 'sheet_keep', 2)],
+      summaryVectorIndexFrame: {
+        version: 3,
+        sourceTableKey: SUMMARY,
+        logEntries: [vectorDelta('v-drop', 'drop', '2')],
+      },
+    });
+
+    expect(purgeSheetKeysFromMessage_ACU(retainedMsg, [OTHER])).toBe(true);
+    expect(frameOf(retainedMsg).summaryVectorIndexFrame).toBeUndefined();
+    expect(frameOf(retainedMsg).logEntries.map((entry: any) => entry.entryId)).toEqual(['keep']);
+
+    // 当唯一 table entry 与镜像一并清空后，不残留空 V2 壳。
+    const emptiedMsg = messageWithFrame({
       version: 2,
       logEntries: [tableEntry('drop', OTHER, 1)],
       summaryVectorIndexFrame: {
@@ -152,8 +167,8 @@ describe('purgeSheetKeysFromMessage_ACU 与纪要向量镜像', () => {
       },
     });
 
-    expect(purgeSheetKeysFromMessage_ACU(msg, [OTHER])).toBe(true);
-    expect(frameOf(msg).summaryVectorIndexFrame).toBeUndefined();
+    expect(purgeSheetKeysFromMessage_ACU(emptiedMsg, [OTHER])).toBe(true);
+    expect(emptiedMsg.TavernDB_ACU_IsolatedData).toBeUndefined();
   });
 
   it('没有镜像的 frame 不因镜像逻辑产生变更', () => {

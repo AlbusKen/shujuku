@@ -27,7 +27,7 @@ import { logDebug_ACU, logError_ACU, logWarn_ACU, isSummaryOrOutlineTable_ACU } 
 import { getLastOptimizationBase_ACU, setLastOptimizationBase_ACU } from '../optimization/content-optimization';
 import { settings_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { sanitizeSheetForStorage_ACU } from '../template/chat-scope';
-import { MESSAGE_TABLE_FIELDS_ACU, NATIVE_SWIPE_TABLE_FIELD_ACU, clearTableFieldsForIsolation_ACU, collectSheetIdentityAliasesForPurge_ACU, purgeManualRefillIncrementalSheetKeysFromMessage_ACU, purgeSheetKeysFromMessage_ACU, purgeSheetKeysFromMessageForIsolation_ACU, readIsolatedDataContainer_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
+import { MESSAGE_TABLE_FIELDS_ACU, NATIVE_SWIPE_TABLE_FIELD_ACU, clearTableFieldsForIsolation_ACU, collectSheetIdentityAliasesForPurge_ACU, isEmptyV2StorageFrameShell_ACU, purgeManualRefillIncrementalSheetKeysFromMessage_ACU, purgeSheetKeysFromMessage_ACU, purgeSheetKeysFromMessageForIsolation_ACU, readIsolatedDataContainer_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
 import { MAX_CHECKPOINT_RISK_DETAILS_ACU, scanTargetKeysResidue_ACU } from '../../data/repositories/target-keys-diagnostics';
 import { LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU } from '../../data/storage/chat-history';
 import { peekChatScopedConfigContainer_ACU, peekChatSheetGuideContainer_ACU, setChatScopedConfigContainer_ACU, setChatSheetGuideContainer_ACU } from '../../data/storage/chat-history';
@@ -1887,15 +1887,15 @@ async function deleteLocalDataInChatCoreInner_ACU(
         if (mode === 'all') {
             shouldDelete = true;
         } else {
-            const isolatedData = msg.TavernDB_ACU_IsolatedData;
-            if (isolatedData && typeof isolatedData === 'object' && !Array.isArray(isolatedData) && isolatedData[currentIsolationKey]) {
+            const isolatedData = readIsolatedDataContainer_ACU(msg);
+            if (isolatedData && isolatedData[currentIsolationKey]) {
                 shouldDelete = true;
             } else if (settings_ACU.dataIsolationEnabled) {
                 if (msg.TavernDB_ACU_Identity === targetIdentity) {
                     shouldDelete = true;
                 }
             } else {
-                if (msg.TavernDB_ACU_Data || msg.TavernDB_ACU_SummaryData || msg.TavernDB_ACU_IndependentData || msg.TavernDB_ACU_IsolatedData) {
+                if (msg.TavernDB_ACU_Data || msg.TavernDB_ACU_SummaryData || msg.TavernDB_ACU_IndependentData || isolatedData) {
                     shouldDelete = true;
                 }
             }
@@ -1932,22 +1932,25 @@ async function deleteLocalDataInChatCoreInner_ACU(
                 modified = true;
             }
             if (msg.TavernDB_ACU_IsolatedData) {
+                const isolatedData = readIsolatedDataContainer_ACU(msg);
                 if (mode === 'all') {
-                    const isolatedData = msg.TavernDB_ACU_IsolatedData;
-                    for (const key of Object.keys(isolatedData)) {
-                        await deleteVectorIndexManifestFromTagData_ACU(isolatedData[key]);
+                    if (isolatedData) {
+                        for (const key of Object.keys(isolatedData)) {
+                            await deleteVectorIndexManifestFromTagData_ACU(isolatedData[key]);
+                        }
                     }
                     delete msg.TavernDB_ACU_IsolatedData;
                     modified = true;
-                } else {
-                    if (msg.TavernDB_ACU_IsolatedData[currentIsolationKey]) {
-                        await deleteVectorIndexManifestFromTagData_ACU(msg.TavernDB_ACU_IsolatedData[currentIsolationKey]);
-                        delete msg.TavernDB_ACU_IsolatedData[currentIsolationKey];
-                        if (Object.keys(msg.TavernDB_ACU_IsolatedData).length === 0) {
-                            delete msg.TavernDB_ACU_IsolatedData;
-                        }
-                        modified = true;
+                } else if (isolatedData && isolatedData[currentIsolationKey]) {
+                    await deleteVectorIndexManifestFromTagData_ACU(isolatedData[currentIsolationKey]);
+                    const nextIsolated = { ...isolatedData };
+                    delete nextIsolated[currentIsolationKey];
+                    if (Object.keys(nextIsolated).length === 0) {
+                        delete msg.TavernDB_ACU_IsolatedData;
+                    } else {
+                        msg.TavernDB_ACU_IsolatedData = nextIsolated;
                     }
+                    modified = true;
                 }
             }
             // Swipe 候选归档携带各候选的表格帧，删除本地数据后不得再被切换候选恢复。
@@ -2429,8 +2432,10 @@ function resolveManualRefillReplayAnchor_ACU(chat: any[], isolationKey: string, 
         if (!message || message.is_user) continue;
         const frame = getV2FrameForIsolation_ACU(message, isolationKey);
         if (!frame) continue;
-        if (earliestV2FrameIndex < 0) earliestV2FrameIndex = index;
         if (frame.checkpoint?.kind === 'full') fullCheckpointIndices.push(index);
+        if (earliestV2FrameIndex < 0 && !isEmptyV2StorageFrameShell_ACU(frame)) {
+            earliestV2FrameIndex = index;
+        }
     }
 
     const firstTargetAiIndex = [...new Set(targetMessageIndices)]
