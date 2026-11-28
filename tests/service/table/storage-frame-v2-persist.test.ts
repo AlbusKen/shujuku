@@ -5846,5 +5846,77 @@ describe('填表请求 V2 最终写入边界', () => {
     }
   });
 
+  it('Issue #83B：manualRefillSessionV1 随同一次 V2 提交落盘到 tagData 顶层（不污染 storageFrame），非法结构拒写且保存失败完整回滚', async () => {
+    const { persistTableMutationLogV2_ACU } = await import('../../../src/service/table/storage-frame-v2-persist');
+    const message = seedFrame({ manualRefillProgress: undefined });
+    const data = { mate: { type: 'acu' }, sheet_a: sheetA, sheet_b: sheetB } as any;
+    mocks.loadReplayDetailed.mockResolvedValue({ baseKind: 'full_checkpoint', data });
+    const validSession = {
+      version: 1 as const,
+      kind: 'manual_refill_session' as const,
+      runId: 'run-persist-83b',
+      isolationKey: '',
+      status: 'in_progress' as const,
+      rangeIndices: [0],
+      targetSheetKeys: ['sheet_a'],
+      templateFingerprint: 'tpl-fp-83b',
+      batchSize: 1,
+      perSheetProgress: {
+        sheet_a: { lastCommittedMessageIndex: 0, committedBatchCount: 1, updatedAt: 1000 },
+      },
+      createdAt: 900,
+      updatedAt: 1000,
+    };
+
+    // 1. 非法结构拒写，零保存
+    const invalidRes = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'group_fill',
+      afterData: data,
+      operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_a', sheet: sheetA, reason: 'system' }],
+      filledSheetKeys: ['sheet_a'],
+      candidateChangedSheetKeys: ['sheet_a'],
+      manualRefillSessionV1: { version: 1, kind: 'bad' } as any,
+      transactionContext: makeTransaction(),
+      assumeCommitLock: true,
+    });
+    expect(invalidRes.saved).toBe(false);
+    expect(invalidRes.error).toContain('manualRefillSessionV1');
+    expect(mocks.saveChat).not.toHaveBeenCalled();
+
+    // 2. 合法会话与操作日志在同一次保存中写入 tagData.manualRefillSessionV1，不污染 storageFrame
+    const okRes = await persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'group_fill',
+      afterData: data,
+      operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_a', sheet: sheetA, reason: 'system' }],
+      filledSheetKeys: ['sheet_a'],
+      candidateChangedSheetKeys: ['sheet_a'],
+      manualRefillSessionV1: validSession,
+      strictSave: true,
+      transactionContext: makeTransaction(),
+      assumeCommitLock: true,
+    });
+    expect(okRes.saved).toBe(true);
+    expect(mocks.saveChatStrict).toHaveBeenCalledTimes(1);
+    expect(message.TavernDB_ACU_IsolatedData[''].manualRefillSessionV1).toEqual(validSession);
+    expect((message.TavernDB_ACU_IsolatedData[''].storageFrame as any).manualRefillSessionV1).toBeUndefined();
+
+    // 3. 传 null 且严格保存失败时回滚，原 manualRefillSessionV1 不丢失
+    mocks.saveChatStrict.mockRejectedValueOnce(new Error('save failure'));
+    await expect(persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0,
+      source: 'group_fill',
+      afterData: data,
+      operations: [{ kind: 'sheet_replace', sheetKey: 'sheet_a', sheet: sheetA, reason: 'system' }],
+      filledSheetKeys: ['sheet_a'],
+      candidateChangedSheetKeys: ['sheet_a'],
+      manualRefillSessionV1: null,
+      strictSave: true,
+      transactionContext: makeTransaction(),
+      assumeCommitLock: true,
+    })).rejects.toThrow('save failure');
+    expect(message.TavernDB_ACU_IsolatedData[''].manualRefillSessionV1).toEqual(validSession);
+  });
 
 });

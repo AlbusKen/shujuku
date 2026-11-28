@@ -131,6 +131,9 @@ import {
   shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU,
   replaceManualRefillSheetBaselineInRangeAtomic_ACU,
   commitManualRefillSheetSnapshotInRangeAtomic_ACU,
+  readManualRefillSession_ACU,
+  clearManualRefillSessionAtomic_ACU,
+  rebuildFullCheckpointAtomic_ACU,
   clearManualRefillIncrementalDataInRange_ACU,
   clearTableDataAtFloors_ACU,
   deleteLocalDataInChatCore_ACU,
@@ -146,6 +149,7 @@ import { resolveTableHistoryStateFromChat_ACU } from '../../../src/service/table
 import { resolveTableStorageStrategy_ACU } from '../../../src/service/table/storage-strategy-resolver';
 import { getTableDataFingerprint_ACU } from '../../../src/service/table/table-data-upgrade-audit';
 import { assertSingleActiveFullCheckpointV2_ACU } from '../../../src/service/table/storage-frame-v2-persist';
+import { getOriginalFullFrameFingerprint_ACU } from '../../../src/service/table/manual-catch-up-provisional-bridge';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -4925,5 +4929,376 @@ describe('establishManualRefillTemplateRoot_ACU', () => {
     expect(chat[0].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint).toBeUndefined();
     expect(chat[2].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint.kind).toBe('full');
     expect(getLatestFrameSheetCheckpoint_ACU(chat[3].TavernDB_ACU_IsolatedData[''].storageFrame, 'sheet_0')?.data).toEqual(finalSheet);
+  });
+});
+
+// ═══ Issue #83B：manualRefillSessionV1 读写清与 rebuildFullCheckpointAtomic_ACU ═══
+describe('Issue #83B manualRefillSessionV1 会话元数据与原子清除', () => {
+  const makeValidSession = (overrides: Record<string, any> = {}) => ({
+    version: 1 as const,
+    kind: 'manual_refill_session' as const,
+    runId: 'run-session-1',
+    isolationKey: '',
+    status: 'in_progress' as const,
+    rangeIndices: [0, 2],
+    targetSheetKeys: ['sheet_0', 'sheet_1'],
+    templateFingerprint: 'tpl-fp-1',
+    batchSize: 1,
+    perSheetProgress: {
+      sheet_0: { lastCommittedMessageIndex: 0, committedBatchCount: 1, updatedAt: 1000 },
+    },
+    createdAt: 900,
+    updatedAt: 1000,
+    ...overrides,
+  });
+
+  it('readManualRefillSession_ACU 在无会话时返回 none，多楼层存在时返回 updatedAt 最新一条', () => {
+    expect(readManualRefillSession_ACU([], '')).toEqual({ status: 'none' });
+
+    const older = makeValidSession({ updatedAt: 1000, perSheetProgress: { sheet_0: { lastCommittedMessageIndex: 0, committedBatchCount: 1, updatedAt: 1000 } } });
+    const newer = makeValidSession({
+      updatedAt: 2000,
+      perSheetProgress: {
+        sheet_0: { lastCommittedMessageIndex: 2, committedBatchCount: 2, updatedAt: 2000 },
+      },
+    });
+    const chat = [
+      { is_user: false, mes: 'AI0', TavernDB_ACU_IsolatedData: { '': { manualRefillSessionV1: older } } },
+      { is_user: true, mes: 'U1' },
+      { is_user: false, mes: 'AI2', TavernDB_ACU_IsolatedData: { '': { manualRefillSessionV1: newer } } },
+    ];
+
+    const read = readManualRefillSession_ACU(chat, '');
+    expect(read.status).toBe('found');
+    if (read.status === 'found') {
+      expect(read.messageIndex).toBe(2);
+      expect(read.allMessageIndices).toEqual([0, 2]);
+      expect(read.session.perSheetProgress.sheet_0.lastCommittedMessageIndex).toBe(2);
+    }
+  });
+
+  it('readManualRefillSession_ACU 对损坏元数据或 isolationKey 漂移 fail-loud 返回 corrupted 且不改写现场', () => {
+    const chat = [
+      { is_user: false, mes: 'AI0', TavernDB_ACU_IsolatedData: { '': { manualRefillSessionV1: { version: 1, kind: 'bad' } } } },
+    ];
+    const snapshotBefore = JSON.stringify(chat);
+
+    const read = readManualRefillSession_ACU(chat, '');
+    expect(read.status).toBe('corrupted');
+    if (read.status === 'corrupted') {
+      expect(read.messageIndex).toBe(0);
+    }
+    expect(JSON.stringify(chat)).toBe(snapshotBefore);
+  });
+
+  it('clearManualRefillSessionAtomic_ACU 原子清除会话并在严格保存失败时完整原位回滚', async () => {
+    const session = makeValidSession();
+    const chat: any[] = [
+      {
+        is_user: false,
+        mes: 'AI0',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: { version: 2, logEntries: [] },
+            manualRefillSessionV1: session,
+          },
+        },
+      },
+      {
+        is_user: false,
+        mes: 'AI1',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            manualRefillSessionV1: session,
+          },
+        },
+      },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+
+    // 1. 严格保存失败 -> 原位回滚，两层会话都在
+    mockSaveChatToHostStrict.mockRejectedValueOnce(new Error('host save failed'));
+    const failed = await clearManualRefillSessionAtomic_ACU('', { expectedRunId: session.runId });
+    expect(failed.success).toBe(false);
+    expect(chat[0].TavernDB_ACU_IsolatedData[''].manualRefillSessionV1).toEqual(session);
+    expect(chat[1].TavernDB_ACU_IsolatedData[''].manualRefillSessionV1).toEqual(session);
+
+    // 2. 严格保存成功 -> 两层清除，纯会话空壳楼层回收整个隔离容器，保留有 storageFrame 的楼层
+    const cleared = await clearManualRefillSessionAtomic_ACU('', { expectedRunId: session.runId });
+    expect(cleared).toEqual({ success: true, changed: true, clearedCount: 2 });
+    expect(chat[0].TavernDB_ACU_IsolatedData[''].manualRefillSessionV1).toBeUndefined();
+    expect(chat[0].TavernDB_ACU_IsolatedData[''].storageFrame).toEqual({ version: 2, logEntries: [] });
+    expect(chat[1].TavernDB_ACU_IsolatedData).toBeUndefined();
+  });
+
+  it('commitManualRefillSheetSnapshotInRangeAtomic_ACU 携带 clearManualRefillSessionRunId 时在同一次严格保存中清除会话', async () => {
+    const templateData = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_0: { uid: 'sheet_0', name: '物品表', content: [['row_id', '物品名']] },
+    };
+    const finalSheet = { uid: 'sheet_0', name: '物品表', content: [['row_id', '物品名'], ['1', '最终剑']] };
+    const session = makeValidSession({ runId: 'run-terminal-clear', targetSheetKeys: ['sheet_0'], rangeIndices: [0, 2] });
+    const chat: any[] = [
+      {
+        is_user: false,
+        mes: 'AI0',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: { kind: 'full', reason: 'manual', createdAt: 1, data: templateData },
+              logEntries: [],
+            },
+            manualRefillSessionV1: session,
+          },
+        },
+      },
+      { is_user: true, mes: 'U1' },
+      {
+        is_user: false,
+        mes: 'AI2',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: { version: 2, logEntries: [] },
+            manualRefillSessionV1: session,
+          },
+        },
+      },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+    mockLoadTableStateFromFramesV2Detailed.mockResolvedValueOnce({
+      baseKind: 'full_checkpoint',
+      data: { ...templateData, sheet_0: finalSheet },
+    });
+
+    const result = await commitManualRefillSheetSnapshotInRangeAtomic_ACU({
+      isolationKey: '',
+      targetMessageIndices: [0, 2],
+      targetSheetKeys: ['sheet_0'],
+      snapshotData: { sheet_0: finalSheet },
+      templateData,
+      clearManualRefillSessionRunId: 'run-terminal-clear',
+    });
+
+    expect(result.success).toBe(true);
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
+    expect(chat[0].TavernDB_ACU_IsolatedData[''].manualRefillSessionV1).toBeUndefined();
+    expect(chat[2].TavernDB_ACU_IsolatedData[''].manualRefillSessionV1).toBeUndefined();
+  });
+});
+
+describe('Issue #83B rebuildFullCheckpointAtomic_ACU 显式移除旧完整存档点并重建', () => {
+  const makeFullData = (itemName: string) => ({
+    mate: { type: 'chatSheets', version: 1 },
+    sheet_0: { uid: 'sheet_0', name: '物品表', content: [['row_id', '物品名'], ['1', itemName]] },
+  });
+
+  const makeFullMsg = (data: any, extraTag: Record<string, any> = {}, logEntries: any[] = []) => ({
+    is_user: false,
+    mes: 'AI full',
+    TavernDB_ACU_IsolatedData: {
+      '': {
+        _acu_storage_version: 2,
+        storageFrame: {
+          version: 2,
+          checkpoint: {
+            kind: 'full',
+            reason: 'init',
+            createdAt: 100,
+            data,
+          },
+          logEntries,
+        },
+        ...extraTag,
+      },
+    },
+  });
+
+  it('正常路径：移除旧完整存档点、回收空壳、原样备份到 recoveryBackup、在目标楼层重建并保留目标之后增量', async () => {
+    const oldData = makeFullData('旧铁剑');
+    const rebuiltData = makeFullData('重建圣剑');
+    const postTargetLog = [{ seq: 1, entryId: 'e-post', operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '2', cells: ['2', '后续道具'] }] }];
+    const session = {
+      version: 1 as const,
+      kind: 'manual_refill_session' as const,
+      runId: 'run-rebuild-1',
+      isolationKey: '',
+      status: 'in_progress' as const,
+      rangeIndices: [0, 2],
+      targetSheetKeys: ['sheet_0'],
+      templateFingerprint: 'fp-1',
+      batchSize: 1,
+      perSheetProgress: { sheet_0: { lastCommittedMessageIndex: 2, committedBatchCount: 2, updatedAt: 500 } },
+      createdAt: 100,
+      updatedAt: 500,
+    };
+    const chat: any[] = [
+      makeFullMsg(oldData, { manualRefillSessionV1: session }),
+      {
+        is_user: false,
+        mes: 'AI1 旧中间增量',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              headRevision: 'rev-1',
+              logEntries: [{ seq: 1, entryId: 'e1', operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: '1', cells: ['1', '中间'] }] }],
+            },
+          },
+        },
+      },
+      { is_user: false, mes: 'AI2 新完整存档目标' },
+      {
+        is_user: false,
+        mes: 'AI3 目标之后增量',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              logEntries: postTargetLog,
+            },
+          },
+        },
+      },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+    const oldFrameBefore = JSON.parse(JSON.stringify(chat[0].TavernDB_ACU_IsolatedData[''].storageFrame));
+    const expectedOldFp = getOriginalFullFrameFingerprint_ACU(oldFrameBefore);
+    mockLoadTableStateFromFramesV2Detailed
+      .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: rebuiltData })
+      .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: rebuiltData });
+
+    const result = await rebuildFullCheckpointAtomic_ACU({
+      isolationKey: '',
+      targetMessageIndex: 2,
+      snapshotData: rebuiltData as any,
+      expectedOldFullIndex: 0,
+      expectedOldFullFingerprint: expectedOldFp,
+      pruneLogMessageIndices: [1],
+      clearManualRefillSessionRunId: 'run-rebuild-1',
+    });
+
+    expect(result).toEqual({
+      success: true,
+      changed: true,
+      oldFullMessageIndex: 0,
+      newFullMessageIndex: 2,
+      prunedMessageCount: 2,
+    });
+    expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(1);
+    // 旧完整存档楼层与被清理的旧增量楼层均已移除空壳
+    expect(chat[0].TavernDB_ACU_IsolatedData).toBeUndefined();
+    expect(chat[1].TavernDB_ACU_IsolatedData).toBeUndefined();
+    // 目标楼层写入新 full checkpoint，并保存旧 full frame 备份
+    const targetTag = chat[2].TavernDB_ACU_IsolatedData[''];
+    expect(targetTag.storageFrame.checkpoint.kind).toBe('full');
+    expect(targetTag.storageFrame.checkpoint.data).toEqual(rebuiltData);
+    expect(targetTag.storageFrame.logEntries).toEqual([]);
+    expect(targetTag.recoveryBackup).toEqual(expect.objectContaining({
+      version: 1,
+      recoveryKind: 'rebuilt_full_checkpoint_from_manual_refill',
+      sourceMessageIndex: 0,
+      storageFrame: oldFrameBefore,
+    }));
+    // 目标楼层之后的增量完整保留
+    expect(chat[3].TavernDB_ACU_IsolatedData[''].storageFrame.logEntries).toEqual(postTargetLog);
+    // 严格校验了边界与全历史双点位回放（compatibilityMode: 'disabled'）
+    expect(mockLoadTableStateFromFramesV2Detailed).toHaveBeenCalledTimes(2);
+    expect(mockLoadTableStateFromFramesV2Detailed).toHaveBeenNthCalledWith(1, expect.any(Array), '', expect.objectContaining({
+      maxMessageIndex: 2,
+      updateRuntimeState: false,
+      compatibilityMode: 'disabled',
+    }));
+    expect(mockLoadTableStateFromFramesV2Detailed).toHaveBeenNthCalledWith(2, expect.any(Array), '', expect.objectContaining({
+      updateRuntimeState: false,
+      compatibilityMode: 'disabled',
+    }));
+    expect(assertSingleActiveFullCheckpointV2_ACU(chat, '', 'test-post-rebuild')).toBeNull();
+  });
+
+  it('多根聊天、指纹不匹配、裁剪目标后楼层一律 fail-closed 且不改写现场', async () => {
+    const dataA = makeFullData('A');
+    const dataB = makeFullData('B');
+
+    // 1. 多根聊天 fail-closed
+    const multiRootChat = [makeFullMsg(dataA), makeFullMsg(dataB)];
+    mockGetChatArray.mockReturnValue(multiRootChat);
+    const multiRes = await rebuildFullCheckpointAtomic_ACU({
+      isolationKey: '',
+      targetMessageIndex: 1,
+      snapshotData: dataB as any,
+    });
+    expect(multiRes.success).toBe(false);
+    expect(multiRes.error).toContain('多个整库 full checkpoint');
+    expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
+
+    // 2. 旧根指纹不匹配 fail-closed
+    const singleChat = [makeFullMsg(dataA), { is_user: false, mes: 'AI1' }];
+    mockGetChatArray.mockReturnValue(singleChat);
+    const fpRes = await rebuildFullCheckpointAtomic_ACU({
+      isolationKey: '',
+      targetMessageIndex: 1,
+      snapshotData: dataB as any,
+      expectedOldFullFingerprint: 'stale-fingerprint',
+    });
+    expect(fpRes.success).toBe(false);
+    expect(fpRes.error).toContain('指纹不匹配');
+    expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
+
+    // 3. pruneLogMessageIndices 包含晚于 targetMessageIndex 的楼层 fail-closed
+    const pruneRes = await rebuildFullCheckpointAtomic_ACU({
+      isolationKey: '',
+      targetMessageIndex: 1,
+      snapshotData: dataB as any,
+      pruneLogMessageIndices: [2],
+    });
+    expect(pruneRes.success).toBe(false);
+    expect(pruneRes.error).toContain('不允许裁剪晚于目标楼层');
+    expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
+  });
+
+  it('候选严格回放指纹不一致或严格保存失败时，完整回滚所有受影响楼层', async () => {
+    const oldData = makeFullData('旧剑');
+    const rebuiltData = makeFullData('新剑');
+    const chat: any[] = [
+      makeFullMsg(oldData),
+      { is_user: false, mes: 'AI1' },
+    ];
+    mockGetChatArray.mockReturnValue(chat);
+    const beforeSnapshot = JSON.stringify(chat);
+
+    // 1. 候选严格回放结果与目标快照指纹不一致 -> 不触发保存、原现场未动
+    mockLoadTableStateFromFramesV2Detailed.mockResolvedValueOnce({
+      baseKind: 'full_checkpoint',
+      data: makeFullData('错误回放结果'),
+    });
+    const mismatchRes = await rebuildFullCheckpointAtomic_ACU({
+      isolationKey: '',
+      targetMessageIndex: 1,
+      snapshotData: rebuiltData as any,
+    });
+    expect(mismatchRes.success).toBe(false);
+    expect(mismatchRes.error).toContain('指纹不一致');
+    expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
+    expect(JSON.stringify(chat)).toBe(beforeSnapshot);
+
+    // 2. 严格保存抛错 -> 原位回滚全部受影响楼层
+    mockLoadTableStateFromFramesV2Detailed
+      .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: rebuiltData })
+      .mockResolvedValueOnce({ baseKind: 'full_checkpoint', data: rebuiltData });
+    mockSaveChatToHostStrict.mockRejectedValueOnce(new Error('disk full'));
+    const saveFailRes = await rebuildFullCheckpointAtomic_ACU({
+      isolationKey: '',
+      targetMessageIndex: 1,
+      snapshotData: rebuiltData as any,
+    });
+    expect(saveFailRes.success).toBe(false);
+    expect(saveFailRes.error).toContain('disk full');
+    expect(JSON.stringify(chat)).toBe(beforeSnapshot);
   });
 });

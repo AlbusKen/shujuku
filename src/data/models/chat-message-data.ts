@@ -6,7 +6,7 @@
  */
 
 import type { Sheet_ACU } from '../../shared/models/table-data';
-import type { CompatTransitionCheckpointV1_ACU, MixedStorageDecisionBackupV1_ACU, Spv79TransitionCheckpointV1_ACU, TableMigrationAuditBackupV1_ACU, TableStorageFrameV2_ACU, TableV2RecoveryBackup_ACU } from '../../service/table/storage-frame-v2-types';
+import type { CompatTransitionCheckpointV1_ACU, ManualRefillSessionStateV1_ACU, MixedStorageDecisionBackupV1_ACU, Spv79TransitionCheckpointV1_ACU, TableMigrationAuditBackupV1_ACU, TableStorageFrameV2_ACU, TableV2RecoveryBackup_ACU } from '../../service/table/storage-frame-v2-types';
 import type {
     ChatSummaryVectorIndexManifest_ACU,
     ChatSummaryVectorIndexState_ACU,
@@ -31,6 +31,8 @@ export interface IsolationTagData_ACU {
     spv79TransitionCheckpoint?: Spv79TransitionCheckpointV1_ACU;
     /** 通用兼容过渡回放根（spv7.9 语义全集的固化结果）。与 spv79 槽共存时取 cutoff 更新者。 */
     compatTransitionCheckpoint?: CompatTransitionCheckpointV1_ACU;
+    /** 手动重填按表逐批持久化进度元数据（storageFrame 之外，不参与 V2 replay）。 */
+    manualRefillSessionV1?: ManualRefillSessionStateV1_ACU;
     /** 旧版/兼容向量记忆状态。镜像协议不再写入，仅作 legacy 检测。 */
     vectorMemoryState?: any;
     /** 旧版聚合索引状态。镜像协议不再写入，仅作 legacy 检测。 */

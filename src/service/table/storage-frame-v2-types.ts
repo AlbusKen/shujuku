@@ -63,6 +63,35 @@ export interface ManualRefillProgressV2_ACU {
   updatedAt: number;
 }
 
+export type ManualRefillSessionStatusV1_ACU = 'in_progress' | 'stopped' | 'failed' | 'completed';
+
+export interface ManualRefillSheetBatchProgressV1_ACU {
+  lastCommittedMessageIndex: number;
+  committedBatchCount: number;
+  updatedAt: number;
+}
+
+/**
+ * 手动重填会话的按表逐批持久化进度元数据。
+ * 独立存放在 IsolationTagData_ACU.manualRefillSessionV1（storageFrame 之外），
+ * 不参与 V2 replay，旧版读取不受影响。
+ */
+export interface ManualRefillSessionStateV1_ACU {
+  version: 1;
+  kind: 'manual_refill_session';
+  runId: string;
+  isolationKey: string;
+  status: ManualRefillSessionStatusV1_ACU;
+  rangeIndices: number[];
+  targetSheetKeys: string[];
+  templateFingerprint: string;
+  batchSize: number;
+  perSheetProgress: Record<string, ManualRefillSheetBatchProgressV1_ACU>;
+  lastError?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 /**
  * 一键追平后置 Full Checkpoint 的临时锚点桥（provisional bridge）。
  *
@@ -535,7 +564,7 @@ export interface TableMigrationAuditBackupV1_ACU {
 export interface TableV2RecoveryBackup_ACU {
   version: 1;
   createdAt: number;
-  recoveryKind: 'repaired_full_checkpoint' | 'confirmed_orphan_data_replace' | 'temporary_template_baseline_upgrade' | 'temporary_sheet_anchor_convergence' | 'relocated_checkpoint_discarded_prefix' | 'manual_catch_up_provisional_bridge' | 'redundant_full_checkpoint_convergence' | 'demoted_template_only_root' | 'restored_from_recovery_backup' | 'compat_tolerant_replay_fixation';
+  recoveryKind: 'repaired_full_checkpoint' | 'confirmed_orphan_data_replace' | 'temporary_template_baseline_upgrade' | 'temporary_sheet_anchor_convergence' | 'relocated_checkpoint_discarded_prefix' | 'manual_catch_up_provisional_bridge' | 'redundant_full_checkpoint_convergence' | 'demoted_template_only_root' | 'restored_from_recovery_backup' | 'compat_tolerant_replay_fixation' | 'rebuilt_full_checkpoint_from_manual_refill';
   sourceMessageIndex: number | null;
   failedMessageIndex?: number;
   failedSeq?: number;

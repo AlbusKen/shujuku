@@ -110,7 +110,7 @@ vi.mock('../../../src/service/ai/prompt-builder', () => ({
   },
 }));
 
-const { mockChatArrayForSeedStage, mockIndependentTableStates, mockGetChatArray_ACU, mockClearManualRefillIncrementalDataInRange, mockClearManualRefillSheetDataInRange, mockCommitManualRefillSheetSnapshot, mockEstablishManualRefillTemplateRoot, mockEnsureManualCatchUpAnchor, mockEnsureBoundaryCheckpoint, mockShouldRotateBoundaryCheckpoint, mockPurgeSheetKeysFromChatHistoryHard } = vi.hoisted(() => {
+const { mockChatArrayForSeedStage, mockIndependentTableStates, mockGetChatArray_ACU, mockClearManualRefillIncrementalDataInRange, mockClearManualRefillSheetDataInRange, mockCommitManualRefillSheetSnapshot, mockEstablishManualRefillTemplateRoot, mockReadManualRefillSession, mockEnsureManualCatchUpAnchor, mockEnsureBoundaryCheckpoint, mockShouldRotateBoundaryCheckpoint, mockPurgeSheetKeysFromChatHistoryHard } = vi.hoisted(() => {
   const chatArray: any[] = [];
   const independentTableStates: Record<string, any> = {};
   return {
@@ -121,6 +121,7 @@ const { mockChatArrayForSeedStage, mockIndependentTableStates, mockGetChatArray_
     mockClearManualRefillSheetDataInRange: vi.fn().mockResolvedValue(0),
     mockCommitManualRefillSheetSnapshot: vi.fn().mockResolvedValue({ success: true, changed: true, clearedCount: 1, checkpointCount: 1, targetMessageIndex: 0 }),
     mockEstablishManualRefillTemplateRoot: vi.fn().mockResolvedValue({ success: true, changed: true, targetMessageIndex: 0 }),
+    mockReadManualRefillSession: vi.fn().mockReturnValue({ status: 'none' }),
     mockEnsureManualCatchUpAnchor: vi.fn().mockResolvedValue({ status: 'ready', checkpointMessageIndex: 0 }),
     mockEnsureBoundaryCheckpoint: vi.fn().mockResolvedValue({ success: true, changed: false, skipped: true }),
     mockShouldRotateBoundaryCheckpoint: vi.fn(() => false),
@@ -134,6 +135,7 @@ vi.mock('../../../src/service/chat/chat-service', () => ({
   clearManualRefillSheetDataInRange_ACU: mockClearManualRefillSheetDataInRange,
   commitManualRefillSheetSnapshotInRangeAtomic_ACU: mockCommitManualRefillSheetSnapshot,
   establishManualRefillTemplateRoot_ACU: mockEstablishManualRefillTemplateRoot,
+  readManualRefillSession_ACU: mockReadManualRefillSession,
   ensureManualCatchUpAnchorBeforeTarget_ACU: mockEnsureManualCatchUpAnchor,
   ensureV2BoundaryCheckpointForRetainedBuffer_ACU: mockEnsureBoundaryCheckpoint,
   shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU: mockShouldRotateBoundaryCheckpoint,
@@ -421,6 +423,7 @@ beforeEach(() => {
   mockSaveChatToHostStrict.mockReset().mockResolvedValue(undefined);
   mockCommitManualRefillSheetSnapshot.mockResolvedValue({ success: true, changed: true, clearedCount: 1, checkpointCount: 1, targetMessageIndex: 0 });
   mockEstablishManualRefillTemplateRoot.mockResolvedValue({ success: true, changed: true, targetMessageIndex: 0 });
+  mockReadManualRefillSession.mockReset().mockReturnValue({ status: 'none' });
   mockEnsureManualCatchUpAnchor.mockResolvedValue({ status: 'ready', checkpointMessageIndex: 0 });
   mockEnsureBoundaryCheckpoint.mockResolvedValue({ success: true, changed: false, skipped: true });
   mockPurgeSheetKeysFromChatHistoryHard.mockResolvedValue({ changed: true, changedCount: 1 });
@@ -9520,6 +9523,288 @@ describe('runtime schema 冻结与双权威修复', () => {
     expect(result.errorCategory).toBe('infrastructure');
     expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
     expect(mockEnqueueSummaryVectorIndexFlush).not.toHaveBeenCalled();
+  });
+});
+
+describe('Issue #83B 手动重填按表逐批持久化与断点续跑', () => {
+  const tplObj = {
+    mate: { type: 'acu' },
+    sheet_0: { uid: 'sheet_0', name: '表A', sourceData: {}, updateConfig: { groupId: 0 }, exportConfig: {}, orderNo: 0, content: [['row_id', '值']] },
+    sheet_1: { uid: 'sheet_1', name: '表B', sourceData: {}, updateConfig: { groupId: 1 }, exportConfig: {}, orderNo: 1, content: [['row_id', '值']] },
+  };
+
+  beforeEach(async () => {
+    const { parseTableTemplateJson_ACU } = await import('../../../src/shared/utils');
+    const { getGlobalTemplateSnapshotForCurrentProfile_ACU } = await import('../../../src/service/template/chat-scope');
+    vi.mocked(parseTableTemplateJson_ACU).mockReturnValue(JSON.parse(JSON.stringify(tplObj)));
+    vi.mocked(getGlobalTemplateSnapshotForCurrentProfile_ACU).mockReturnValue({
+      templateObj: JSON.parse(JSON.stringify(tplObj)),
+    } as any);
+    mockSettings.apiMode = 'custom';
+    mockSettings.apiConfig = { useMainApi: true };
+    mockSettings.manualUpdateBatchSize = 1;
+    mockSettings.manualUpdateContextDepth = 10;
+    mockSettings.skipUpdateFloors = 0;
+    mockSettings.maxConcurrentGroups = 2;
+    mockClearManualRefillSheetDataInRange.mockClear();
+    mockEstablishManualRefillTemplateRoot.mockClear();
+    mockCommitManualRefillSheetSnapshot.mockClear();
+    mockCallCustomOpenAI.mockClear();
+    mockPersistTablesToChatMessage.mockClear();
+    mockCurrentJsonTableData = JSON.parse(JSON.stringify(tplObj));
+  });
+
+  it('全新手动重填按表逐批在同一次提交中写入 manualRefillSessionV1，终态快照提交携带 clearManualRefillSessionRunId', async () => {
+    mockChatArrayForSeedStage.push(
+      { is_user: true, mes: 'U0' },
+      { is_user: false, mes: 'AI1' },
+      { is_user: true, mes: 'U2' },
+      { is_user: false, mes: 'AI3' },
+    );
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>insertRow(0, {"0":"值"})</tableEdit>');
+
+    const result = await orchestrateManualUpdate_ACU(
+      ['sheet_0'],
+      vi.fn().mockResolvedValue({ success: true }),
+      vi.fn().mockResolvedValue(undefined),
+      { clearBeforeUpdate: true },
+    );
+
+    expect(result.success, result.error).toBe(true);
+    expect(result.manualRefillSessionRunId).toMatch(/^manual-refill-session-/);
+    // 两个 batch 均把最新 perSheetProgress 随同一次持久化透传给 persistTablesToChatMessage_ACU
+    const sessionPayloads = mockPersistTablesToChatMessage.mock.calls
+      .map((call: any[]) => call[0]?.manualRefillSessionV1)
+      .filter(Boolean);
+    expect(sessionPayloads.length).toBeGreaterThanOrEqual(2);
+    expect(sessionPayloads[0].runId).toBe(result.manualRefillSessionRunId);
+    expect(sessionPayloads[0].perSheetProgress.sheet_0.lastCommittedMessageIndex).toBe(1);
+    expect(sessionPayloads[0].perSheetProgress.sheet_0.committedBatchCount).toBe(1);
+    expect(sessionPayloads[1].perSheetProgress.sheet_0.lastCommittedMessageIndex).toBe(3);
+    expect(sessionPayloads[1].perSheetProgress.sheet_0.committedBatchCount).toBe(2);
+    // 终态提交原子清除本次会话元数据
+    expect(mockCommitManualRefillSheetSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+      clearManualRefillSessionRunId: result.manualRefillSessionRunId,
+    }));
+  });
+
+  it('断点续跑跳过已完成表和已完成批次，不重新清理数据，完成后提交终态快照并清除会话', async () => {
+    const { getTableDataFingerprint_ACU } = await import('../../../src/service/table/table-data-upgrade-audit');
+    mockChatArrayForSeedStage.push(
+      { is_user: true, mes: 'U0' },
+      {
+        is_user: false,
+        mes: 'AI1',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: { kind: 'full', reason: 'manual', createdAt: 1, data: tplObj },
+              logEntries: [],
+            },
+          },
+        },
+      },
+      { is_user: true, mes: 'U2' },
+      { is_user: false, mes: 'AI3' },
+    );
+    const storedSession = {
+      version: 1 as const,
+      kind: 'manual_refill_session' as const,
+      runId: 'run-resume-ok',
+      isolationKey: '',
+      status: 'in_progress' as const,
+      rangeIndices: [1, 3],
+      targetSheetKeys: ['sheet_0', 'sheet_1'],
+      templateFingerprint: getTableDataFingerprint_ACU(tplObj),
+      batchSize: 1,
+      perSheetProgress: {
+        // sheet_0 已全部完成到楼层 3；sheet_1 仅完成楼层 1，还剩楼层 3
+        sheet_0: { lastCommittedMessageIndex: 3, committedBatchCount: 2, updatedAt: 200 },
+        sheet_1: { lastCommittedMessageIndex: 1, committedBatchCount: 1, updatedAt: 150 },
+      },
+      createdAt: 100,
+      updatedAt: 200,
+    };
+    mockReadManualRefillSession.mockReturnValue({
+      status: 'found',
+      session: storedSession,
+      messageIndex: 1,
+      allMessageIndices: [1],
+    });
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>insertRow(1, {"0":"续跑值"})</tableEdit>');
+
+    const result = await orchestrateManualUpdate_ACU(
+      ['sheet_0', 'sheet_1'],
+      vi.fn().mockResolvedValue({ success: true }),
+      vi.fn().mockResolvedValue(undefined),
+      { clearBeforeUpdate: true, resumeSession: true, resumeRunId: 'run-resume-ok' },
+    );
+
+    expect(result.success, result.error).toBe(true);
+    expect(result.resumedFromSession).toBe(true);
+    expect(result.manualRefillSessionRunId).toBe('run-resume-ok');
+    // 续跑不得重新清理或重建模板根
+    expect(mockClearManualRefillSheetDataInRange).not.toHaveBeenCalled();
+    expect(mockEstablishManualRefillTemplateRoot).not.toHaveBeenCalled();
+    // 只调用 1 次 AI（仅补跑 sheet_1 的楼层 3；sheet_0 全部跳过，sheet_1 的楼层 1 跳过）
+    expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
+    const persistedSession = mockPersistTablesToChatMessage.mock.calls[0]?.[0]?.manualRefillSessionV1;
+    expect(persistedSession.perSheetProgress.sheet_1.lastCommittedMessageIndex).toBe(3);
+    expect(persistedSession.perSheetProgress.sheet_1.committedBatchCount).toBe(2);
+    expect(mockCommitManualRefillSheetSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+      clearManualRefillSessionRunId: 'run-resume-ok',
+      targetSheetKeys: ['sheet_0', 'sheet_1'],
+    }));
+  });
+
+  it('断点续跑在全部目标表均已完成全部批次时，零 AI 调用直接收口终态快照并清除会话', async () => {
+    const { getTableDataFingerprint_ACU } = await import('../../../src/service/table/table-data-upgrade-audit');
+    mockChatArrayForSeedStage.push(
+      { is_user: true, mes: 'U0' },
+      {
+        is_user: false,
+        mes: 'AI1',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: { kind: 'full', reason: 'manual', createdAt: 1, data: tplObj },
+              logEntries: [],
+            },
+          },
+        },
+      },
+      { is_user: true, mes: 'U2' },
+      { is_user: false, mes: 'AI3' },
+    );
+    mockReadManualRefillSession.mockReturnValue({
+      status: 'found',
+      messageIndex: 3,
+      allMessageIndices: [1, 3],
+      session: {
+        version: 1,
+        kind: 'manual_refill_session',
+        runId: 'run-resume-terminal-only',
+        isolationKey: '',
+        status: 'in_progress',
+        rangeIndices: [1, 3],
+        targetSheetKeys: ['sheet_0'],
+        templateFingerprint: getTableDataFingerprint_ACU(tplObj),
+        batchSize: 1,
+        perSheetProgress: {
+          sheet_0: { lastCommittedMessageIndex: 3, committedBatchCount: 2, updatedAt: 300 },
+        },
+        createdAt: 100,
+        updatedAt: 300,
+      },
+    });
+
+    const result = await orchestrateManualUpdate_ACU(
+      ['sheet_0'],
+      vi.fn().mockResolvedValue({ success: true }),
+      vi.fn().mockResolvedValue(undefined),
+      { clearBeforeUpdate: true, resumeSession: true },
+    );
+
+    expect(result.success, result.error).toBe(true);
+    expect(result.resumedFromSession).toBe(true);
+    expect(mockClearManualRefillSheetDataInRange).not.toHaveBeenCalled();
+    expect(mockCallCustomOpenAI).not.toHaveBeenCalled();
+    expect(mockCommitManualRefillSheetSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+      clearManualRefillSessionRunId: 'run-resume-terminal-only',
+      targetSheetKeys: ['sheet_0'],
+    }));
+  });
+
+  it('断点续跑遇到损坏会话、模板指纹漂移或楼层拓扑漂移时一律 fail-closed（零清理、零 AI 调用）', async () => {
+    const { getTableDataFingerprint_ACU } = await import('../../../src/service/table/table-data-upgrade-audit');
+    mockChatArrayForSeedStage.push(
+      { is_user: true, mes: 'U0' },
+      {
+        is_user: false,
+        mes: 'AI1',
+        TavernDB_ACU_IsolatedData: {
+          '': {
+            _acu_storage_version: 2,
+            storageFrame: {
+              version: 2,
+              checkpoint: { kind: 'full', reason: 'manual', createdAt: 1, data: tplObj },
+              logEntries: [],
+            },
+          },
+        },
+      },
+    );
+
+    // 1. 损坏元数据
+    mockReadManualRefillSession.mockReturnValueOnce({ status: 'corrupted', error: 'missing runId', messageIndex: 1 });
+    const corruptedRes = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn(), vi.fn().mockResolvedValue(undefined), {
+      clearBeforeUpdate: true,
+      resumeSession: true,
+    });
+    expect(corruptedRes.success).toBe(false);
+    expect(corruptedRes.error).toContain('损坏');
+
+    // 2. 模板指纹漂移
+    mockReadManualRefillSession.mockReturnValueOnce({
+      status: 'found',
+      messageIndex: 1,
+      allMessageIndices: [1],
+      session: {
+        version: 1,
+        kind: 'manual_refill_session',
+        runId: 'run-drift-fp',
+        isolationKey: '',
+        status: 'in_progress',
+        rangeIndices: [1],
+        targetSheetKeys: ['sheet_0'],
+        templateFingerprint: 'different-template-fp',
+        batchSize: 1,
+        perSheetProgress: {},
+        createdAt: 100,
+        updatedAt: 100,
+      },
+    });
+    const fpDriftRes = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn(), vi.fn().mockResolvedValue(undefined), {
+      clearBeforeUpdate: true,
+      resumeSession: true,
+    });
+    expect(fpDriftRes.success).toBe(false);
+    expect(fpDriftRes.error).toContain('模板指纹');
+
+    // 3. 聊天楼层拓扑漂移（范围指向越界楼层 #5）
+    mockReadManualRefillSession.mockReturnValueOnce({
+      status: 'found',
+      messageIndex: 1,
+      allMessageIndices: [1],
+      session: {
+        version: 1,
+        kind: 'manual_refill_session',
+        runId: 'run-drift-topo',
+        isolationKey: '',
+        status: 'in_progress',
+        rangeIndices: [1, 5],
+        targetSheetKeys: ['sheet_0'],
+        templateFingerprint: getTableDataFingerprint_ACU(tplObj),
+        batchSize: 1,
+        perSheetProgress: {},
+        createdAt: 100,
+        updatedAt: 100,
+      },
+    });
+    const topoDriftRes = await orchestrateManualUpdate_ACU(['sheet_0'], vi.fn(), vi.fn().mockResolvedValue(undefined), {
+      clearBeforeUpdate: true,
+      resumeSession: true,
+    });
+    expect(topoDriftRes.success).toBe(false);
+    expect(topoDriftRes.error).toContain('拓扑已变化');
+
+    expect(mockClearManualRefillSheetDataInRange).not.toHaveBeenCalled();
+    expect(mockCallCustomOpenAI).not.toHaveBeenCalled();
+    expect(mockPersistTablesToChatMessage).not.toHaveBeenCalled();
   });
 });
 

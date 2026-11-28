@@ -663,6 +663,44 @@ function purgeSpv79TransitionCheckpointSheetKeys_ACU(tagData: any, sheetKeys: Se
     return changed;
 }
 
+/**
+ * 精确裁剪 tagData.manualRefillSessionV1 中被删除的目标表；
+ * 当会话中不再剩余任何目标表与单表进度时删除整个会话字段，允许后续空壳回收。
+ */
+function purgeManualRefillSessionSheetKeys_ACU(tagData: any, sheetKeys: Set<string>): boolean {
+    if (!isObjectRecord_ACU(tagData)) return false;
+    const session = tagData.manualRefillSessionV1;
+    if (!isObjectRecord_ACU(session)) return false;
+
+    let changed = false;
+    if (Array.isArray(session.targetSheetKeys)) {
+        const nextTargets = session.targetSheetKeys.filter((key: unknown) => typeof key !== 'string' || !sheetKeys.has(key));
+        if (nextTargets.length !== session.targetSheetKeys.length) {
+            session.targetSheetKeys = nextTargets;
+            changed = true;
+        }
+    }
+    if (isObjectRecord_ACU(session.perSheetProgress)) {
+        for (const sheetKey of sheetKeys) {
+            if (Object.prototype.hasOwnProperty.call(session.perSheetProgress, sheetKey)) {
+                delete session.perSheetProgress[sheetKey];
+                changed = true;
+            }
+        }
+    }
+
+    if (changed) {
+        const remainingTargets = Array.isArray(session.targetSheetKeys) ? session.targetSheetKeys.length : 0;
+        const remainingProgress = isObjectRecord_ACU(session.perSheetProgress)
+            ? Object.keys(session.perSheetProgress).length
+            : 0;
+        if (remainingTargets === 0 && remainingProgress === 0) {
+            delete tagData.manualRefillSessionV1;
+        }
+    }
+    return changed;
+}
+
 function mergeKnownSqlTableNamesForPurge_ACU(targetSqlTableNames: Set<string>, knownSqlTableNames?: Iterable<string>): void {
     if (!knownSqlTableNames) return;
     for (const tableName of knownSqlTableNames) {
@@ -784,7 +822,7 @@ export function isEmptyV2StorageFrameShell_ACU(frame: unknown): boolean {
     return true;
 }
 
-function isPrunableEmptyTagDataAfterV2FrameRemoval_ACU(tagData: unknown): boolean {
+export function isPrunableEmptyTagDataAfterV2FrameRemoval_ACU(tagData: unknown): boolean {
     if (!isObjectRecord_ACU(tagData)) return false;
     for (const key of Object.keys(tagData)) {
         if (!PRUNABLE_EMPTY_V2_TAG_SHELL_KEYS_ACU.has(key)) return false;
@@ -1093,6 +1131,9 @@ export function purgeSheetKeysFromMessageForIsolation_ACU(
     }
 
     if (purgeSpv79TransitionCheckpointSheetKeys_ACU(tagData, sheetKeySet)) {
+        msgChanged = true;
+    }
+    if (purgeManualRefillSessionSheetKeys_ACU(tagData, sheetKeySet)) {
         msgChanged = true;
     }
     if (purgeSheetKeysFromStorageFrameV2_ACU((tagData as any).storageFrame, sheetKeySet, knownSqlTableNames)) msgChanged = true;
@@ -1507,6 +1548,9 @@ export function purgeSheetKeysFromMessage_ACU(msg: any, sheetKeys: string[]): bo
             }
 
             if (purgeSpv79TransitionCheckpointSheetKeys_ACU(tagData, sheetKeySet)) {
+                tagChanged = true;
+            }
+            if (purgeManualRefillSessionSheetKeys_ACU(tagData, sheetKeySet)) {
                 tagChanged = true;
             }
             if (purgeSheetKeysFromStorageFrameV2_ACU((tagData as any).storageFrame, sheetKeySet)) {

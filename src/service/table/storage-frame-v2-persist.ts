@@ -15,7 +15,7 @@ import { startRuntimePerformanceSpan_ACU } from '../../shared/runtime-performanc
 import { getCurrentIsolationKey_ACU, settings_ACU } from '../runtime/state-manager';
 import { normalizeGuideData_ACU, setChatSheetGuideDataForIsolationKey_ACU } from '../template/chat-scope';
 import { ensureGlobalInjectionConfigDefaults_ACU } from '../worldbook/injection-engine';
-import type { ManualRefillProgressV2_ACU, TableMutationEventV2_ACU, TableMutationLogEntryV2_ACU, TableMutationSourceV2_ACU, TableStorageFrameV2_ACU, TableCheckpointV2_ACU, TableMutationWriteSetV2_ACU, TableMutationOperationV2_ACU, TableSheetCheckpointV2_ACU, TableSheetLifecycleProjectionV2_ACU, TableV2RecoveryBackup_ACU } from './storage-frame-v2-types';
+import type { ManualRefillProgressV2_ACU, ManualRefillSessionStateV1_ACU, TableMutationEventV2_ACU, TableMutationLogEntryV2_ACU, TableMutationSourceV2_ACU, TableStorageFrameV2_ACU, TableCheckpointV2_ACU, TableMutationWriteSetV2_ACU, TableMutationOperationV2_ACU, TableSheetCheckpointV2_ACU, TableSheetLifecycleProjectionV2_ACU, TableV2RecoveryBackup_ACU } from './storage-frame-v2-types';
 import { hasLegacyTopLevelTableData_ACU, hasV2TableHistoryEvidence_ACU, isLegacyV1TagData_ACU, isV2TagData_ACU } from './storage-strategy-resolver';
 import { applyTableOperationV2_ACU, buildAppendedOperationsWriteRejectionMessage_ACU, buildCompatReadonlyWriteRejectionMessage_ACU, collectScheduleSummaryFromFramesV2_ACU, deriveSheetLifecycleFromFramesV2_ACU, hasStructuralReplayCompatibilityRepairs_ACU, hasUnanchoredReplayArtifactsForChatV2_ACU, loadTableStateFromFramesV2Detailed_ACU, resolveHeaderOnlyTemplateSnapshot_ACU, type TableReplayCompatibilityRepairV2_ACU, V2ReplayOperationError_ACU } from './storage-frame-v2-replay';
 import { runTableWriteTransaction_ACU, type TableWriteTransactionContext_ACU } from './table-write-transaction';
@@ -82,6 +82,8 @@ export interface PersistTableMutationV2Options_ACU extends TableFillRequestGuard
   forceCheckpoint?: boolean;
   checkpointReason?: TableCheckpointV2_ACU['reason'];
   manualRefillProgress?: ManualRefillProgressV2_ACU;
+  /** 手动重填按表逐批进度元数据（写入 tagData.manualRefillSessionV1，不进入 storageFrame；传 null 清除）。 */
+  manualRefillSessionV1?: ManualRefillSessionStateV1_ACU | null;
   isolationKey?: string;
   baseRevision?: string | null;
   parentRevision?: string | null;
@@ -2316,6 +2318,75 @@ async function resolveRevealSource_ACU(
 
 
 
+const VALID_MANUAL_REFILL_SESSION_STATUSES_ACU = new Set(['in_progress', 'stopped', 'failed', 'completed']);
+
+/**
+ * 校验 tagData.manualRefillSessionV1 最小持久化契约；
+ * 读路径与写路径共用同一口径，避免把损坏元数据静默伪装为空状态。
+ */
+export function validateManualRefillSessionStateV1_ACU(
+  value: unknown,
+): { valid: true; session: ManualRefillSessionStateV1_ACU } | { valid: false; error: string } {
+  if (!isObjectRecord_ACU(value)) {
+    return { valid: false, error: 'manualRefillSessionV1 必须是对象。' };
+  }
+  if (value.version !== 1 || value.kind !== 'manual_refill_session') {
+    return { valid: false, error: 'manualRefillSessionV1 缺少合法 version=1 或 kind=manual_refill_session。' };
+  }
+  if (typeof value.runId !== 'string' || value.runId.trim().length === 0) {
+    return { valid: false, error: 'manualRefillSessionV1 缺少有效 runId。' };
+  }
+  if (typeof value.isolationKey !== 'string') {
+    return { valid: false, error: 'manualRefillSessionV1 缺少字符串 isolationKey。' };
+  }
+  if (typeof value.status !== 'string' || !VALID_MANUAL_REFILL_SESSION_STATUSES_ACU.has(value.status)) {
+    return { valid: false, error: `manualRefillSessionV1 status 非法：${String(value.status)}。` };
+  }
+  if (!Array.isArray(value.rangeIndices) || value.rangeIndices.length === 0
+    || !value.rangeIndices.every(idx => Number.isInteger(idx) && idx >= 0)) {
+    return { valid: false, error: 'manualRefillSessionV1 rangeIndices 必须是非空非负整数数组。' };
+  }
+  if (!Array.isArray(value.targetSheetKeys) || value.targetSheetKeys.length === 0
+    || !value.targetSheetKeys.every(key => typeof key === 'string' && key.startsWith('sheet_'))) {
+    return { valid: false, error: 'manualRefillSessionV1 targetSheetKeys 必须是非空 sheet_* 字符串数组。' };
+  }
+  if (typeof value.templateFingerprint !== 'string' || value.templateFingerprint.trim().length === 0) {
+    return { valid: false, error: 'manualRefillSessionV1 缺少有效 templateFingerprint。' };
+  }
+  if (!Number.isInteger(value.batchSize) || value.batchSize < 1) {
+    return { valid: false, error: 'manualRefillSessionV1 batchSize 必须是正整数。' };
+  }
+  if (!isObjectRecord_ACU(value.perSheetProgress)) {
+    return { valid: false, error: 'manualRefillSessionV1 perSheetProgress 必须是对象。' };
+  }
+  for (const [sheetKey, progress] of Object.entries(value.perSheetProgress)) {
+    if (!sheetKey.startsWith('sheet_') || !isObjectRecord_ACU(progress)) {
+      return { valid: false, error: `manualRefillSessionV1 perSheetProgress[${sheetKey}] 结构非法。` };
+    }
+    if (!Number.isInteger(progress.lastCommittedMessageIndex) || progress.lastCommittedMessageIndex < -1) {
+      return { valid: false, error: `manualRefillSessionV1 perSheetProgress[${sheetKey}].lastCommittedMessageIndex 非法。` };
+    }
+    if (!Number.isInteger(progress.committedBatchCount) || progress.committedBatchCount < 0) {
+      return { valid: false, error: `manualRefillSessionV1 perSheetProgress[${sheetKey}].committedBatchCount 非法。` };
+    }
+    if (typeof progress.updatedAt !== 'number' || !Number.isFinite(progress.updatedAt)) {
+      return { valid: false, error: `manualRefillSessionV1 perSheetProgress[${sheetKey}].updatedAt 非法。` };
+    }
+  }
+  if (value.lastError !== undefined && typeof value.lastError !== 'string') {
+    return { valid: false, error: 'manualRefillSessionV1 lastError 必须是字符串。' };
+  }
+  if (typeof value.createdAt !== 'number' || !Number.isFinite(value.createdAt)
+    || typeof value.updatedAt !== 'number' || !Number.isFinite(value.updatedAt)) {
+    return { valid: false, error: 'manualRefillSessionV1 createdAt/updatedAt 必须是有限时间戳。' };
+  }
+  return { valid: true, session: value as ManualRefillSessionStateV1_ACU };
+}
+
+function isValidManualRefillSessionStateV1_ACU(value: unknown): value is ManualRefillSessionStateV1_ACU {
+  return validateManualRefillSessionStateV1_ACU(value).valid;
+}
+
 function validateSheetCheckpointInput_ACU(
   options: PersistTableSheetCheckpointV2Options_ACU,
 ): { createdAt: number; reason: TableCheckpointV2_ACU['reason'] } | { error: string } {
@@ -2494,6 +2565,10 @@ async function persistTableMutationLogV2Core_ACU(
   if (!manualRefillProgressIsValidForIntroductionHistory_ACU(options.manualRefillProgress)) {
     return { saved: false, error: 'V2 manualRefillProgress 格式无效，已拒绝写入。' };
   }
+  if (options.manualRefillSessionV1 !== undefined && options.manualRefillSessionV1 !== null
+    && !isValidManualRefillSessionStateV1_ACU(options.manualRefillSessionV1)) {
+    return { saved: false, error: 'V2 manualRefillSessionV1 格式无效，已拒绝写入。' };
+  }
   if (isManualRefillProgressOnly && !hasExistingCheckpoint) {
     return {
       saved: false,
@@ -2562,6 +2637,16 @@ async function persistTableMutationLogV2Core_ACU(
 
   if (options.manualRefillProgress) {
     frame.manualRefillProgress = deepClone_ACU(options.manualRefillProgress);
+  }
+  if (options.manualRefillSessionV1 !== undefined) {
+    const tagData = isolatedData[isolationKey];
+    if (tagData && typeof tagData === 'object' && !Array.isArray(tagData)) {
+      if (options.manualRefillSessionV1 === null) {
+        delete tagData.manualRefillSessionV1;
+      } else {
+        tagData.manualRefillSessionV1 = deepClone_ACU(options.manualRefillSessionV1);
+      }
+    }
   }
   const shouldAppendLogEntry = operations.length > 0 || hasMetadataOnlyFillEvent;
   const now = Date.now();

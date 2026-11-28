@@ -27,7 +27,7 @@ import { logDebug_ACU, logError_ACU, logWarn_ACU, isSummaryOrOutlineTable_ACU } 
 import { getLastOptimizationBase_ACU, setLastOptimizationBase_ACU } from '../optimization/content-optimization';
 import { settings_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU } from '../runtime/state-manager';
 import { sanitizeSheetForStorage_ACU } from '../template/chat-scope';
-import { MESSAGE_TABLE_FIELDS_ACU, NATIVE_SWIPE_TABLE_FIELD_ACU, clearTableFieldsForIsolation_ACU, collectSheetIdentityAliasesForPurge_ACU, isEmptyV2StorageFrameShell_ACU, purgeManualRefillIncrementalSheetKeysFromMessage_ACU, purgeSheetKeysFromMessage_ACU, purgeSheetKeysFromMessageForIsolation_ACU, readIsolatedDataContainer_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
+import { MESSAGE_TABLE_FIELDS_ACU, NATIVE_SWIPE_TABLE_FIELD_ACU, clearTableFieldsForIsolation_ACU, collectSheetIdentityAliasesForPurge_ACU, isEmptyV2StorageFrameShell_ACU, isPrunableEmptyTagDataAfterV2FrameRemoval_ACU, purgeManualRefillIncrementalSheetKeysFromMessage_ACU, purgeSheetKeysFromMessage_ACU, purgeSheetKeysFromMessageForIsolation_ACU, readIsolatedDataContainer_ACU, readIsolatedTagData_ACU, writeMessageIdentity_ACU } from '../../data/repositories/chat-message-data-repo';
 import { MAX_CHECKPOINT_RISK_DETAILS_ACU, scanTargetKeysResidue_ACU } from '../../data/repositories/target-keys-diagnostics';
 import { LEGACY_CHAT_TABLE_HEADER_GUIDE_FIELD_ACU } from '../../data/storage/chat-history';
 import { peekChatScopedConfigContainer_ACU, peekChatSheetGuideContainer_ACU, setChatScopedConfigContainer_ACU, setChatSheetGuideContainer_ACU } from '../../data/storage/chat-history';
@@ -42,11 +42,11 @@ import { runScopedRetentionGcAfterFlush_ACU } from '../vector/summary-vector-ind
 import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from '../table/storage-strategy-resolver';
 import { collectScheduleSummaryFromFramesV2_ACU, deriveSheetLifecycleFromFramesV2_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../table/storage-frame-v2-replay';
 import { appendFrameSheetTimelineEvents_ACU, getLatestFrameSheetCheckpoint_ACU } from '../table/storage-frame-v2-sheet-events';
-import { assertSingleActiveFullCheckpointV2_ACU, frameHasSuffixReplayArtifact_ACU } from '../table/storage-frame-v2-persist';
+import { assertSingleActiveFullCheckpointV2_ACU, frameHasSuffixReplayArtifact_ACU, validateManualRefillSessionStateV1_ACU } from '../table/storage-frame-v2-persist';
 import { runTableWriteTransaction_ACU } from '../table/table-write-transaction';
 import { findLatestTransitionCheckpoint_ACU } from '../table/compat-transition-checkpoint';
-import { hasActiveProvisionalBridgeAnywhere_ACU, recoverProvisionalBridgeSession_ACU } from '../table/manual-catch-up-provisional-bridge';
-import type { TableMutationLogEntryV2_ACU, TableMutationOperationV2_ACU, TableSheetCheckpointV2_ACU, TableStorageFrameV2_ACU, TableV2RecoveryBackup_ACU } from '../table/storage-frame-v2-types';
+import { getOriginalFullFrameFingerprint_ACU, hasActiveProvisionalBridgeAnywhere_ACU, recoverProvisionalBridgeSession_ACU } from '../table/manual-catch-up-provisional-bridge';
+import type { ManualRefillSessionStateV1_ACU, TableCheckpointV2_ACU, TableMutationLogEntryV2_ACU, TableMutationOperationV2_ACU, TableSheetCheckpointV2_ACU, TableStorageFrameV2_ACU, TableV2RecoveryBackup_ACU } from '../table/storage-frame-v2-types';
 import type { Sheet_ACU, TableDataObject_ACU } from '../../shared/models/table-data';
 import { validateCanonicalCheckpoint_ACU } from '../../shared/canonical-checkpoint-validator';
 import { buildCanonicalFullCheckpoint_ACU, buildCanonicalSheetCheckpoint_ACU } from '../table/canonical-checkpoint-builder';
@@ -111,6 +111,45 @@ export interface ManualRefillSheetSnapshotCommitOptions_ACU {
     targetMessageIndex?: number;
     /** 当前聊天作用域已冻结的完整模板；只在全局缺少 full checkpoint 时使用。 */
     templateData?: Record<string, any>;
+    /** 终态提交成功时，在同一次原子保存中移除匹配的手动重填会话元数据。 */
+    clearManualRefillSessionRunId?: string;
+}
+
+export type ManualRefillSessionReadResult_ACU =
+    | { status: 'none' }
+    | { status: 'found'; session: ManualRefillSessionStateV1_ACU; messageIndex: number; allMessageIndices: number[] }
+    | { status: 'corrupted'; error: string; messageIndex: number };
+
+export interface ClearManualRefillSessionResult_ACU {
+    success: boolean;
+    changed: boolean;
+    clearedCount: number;
+    error?: string;
+}
+
+export interface RebuildFullCheckpointAtomicOptions_ACU {
+    isolationKey: string;
+    targetMessageIndex: number;
+    snapshotData: TableDataObject_ACU;
+    /** 显式校验旧 full checkpoint 所在楼层；传入时必须精确匹配。 */
+    expectedOldFullIndex?: number;
+    /** 显式校验旧 full frame 指纹；传入时必须精确匹配。 */
+    expectedOldFullFingerprint?: string;
+    /** 一并清理的旧增量楼层索引；每项必须 <= targetMessageIndex，否则 fail-closed。 */
+    pruneLogMessageIndices?: number[];
+    /** 新 full checkpoint 的 reason，默认 'manual'。 */
+    reason?: TableCheckpointV2_ACU['reason'];
+    /** 重建成功时在同一原子保存中清除匹配的手动重填会话元数据。 */
+    clearManualRefillSessionRunId?: string;
+}
+
+export interface RebuildFullCheckpointAtomicResult_ACU {
+    success: boolean;
+    changed: boolean;
+    oldFullMessageIndex?: number;
+    newFullMessageIndex?: number;
+    prunedMessageCount: number;
+    error?: string;
 }
 
 
@@ -2632,8 +2671,12 @@ export async function commitManualRefillSheetSnapshotInRangeAtomic_ACU(
             }
         }
 
+        const sessionClearIndices = options.clearManualRefillSessionRunId
+            ? collectManualRefillSessionIndices_ACU(chat, options.isolationKey, options.clearManualRefillSessionRunId)
+            : [];
+
         // strict save 的结果不确定时，宿主可能已经落盘而调用方会重试。相同 runId 与
-        // 相同末端快照必须成为幂等 no-op，不能仅因 createdAt 改变就再次改写根或 rebase。
+        // 相同末端快照（且无残留会话需要清理）必须成为幂等 no-op，不能仅因 createdAt 改变就再次改写根或 rebase。
         const existingRootFrame = getV2FrameForIsolation_ACU(chat[rootMessageIndex], options.isolationKey);
         const existingFinalFrame = getV2FrameForIsolation_ACU(chat[completedMessageIndex], options.isolationKey);
         const existingFallbackRunId = existingRootFrame?.checkpoint?.fallbackProvenance?.runId;
@@ -2645,7 +2688,7 @@ export async function commitManualRefillSheetSnapshotInRangeAtomic_ACU(
                 && checkpoint.timeline.afterSeq === getMaxFrameSequence_ACU(existingFinalFrame!)
                 && getTableDataFingerprint_ACU(checkpoint.data) === getTableDataFingerprint_ACU(options.snapshotData[sheetKey]);
         });
-        if (fallbackRunId && existingFallbackRunId === fallbackRunId && hasEquivalentTerminalRebases) {
+        if (fallbackRunId && existingFallbackRunId === fallbackRunId && hasEquivalentTerminalRebases && sessionClearIndices.length === 0) {
             return {
                 success: true,
                 changed: false,
@@ -2655,7 +2698,7 @@ export async function commitManualRefillSheetSnapshotInRangeAtomic_ACU(
             };
         }
 
-        const snapshotIndices = [...new Set([rootMessageIndex, completedMessageIndex])];
+        const snapshotIndices = [...new Set([rootMessageIndex, completedMessageIndex, ...sessionClearIndices])];
         const snapshots = new Map<number, ReturnType<typeof messageFieldSnapshot_ACU>>();
         snapshotIndices.forEach(idx => snapshots.set(idx, messageFieldSnapshot_ACU(chat[idx])));
 
@@ -2719,6 +2762,9 @@ export async function commitManualRefillSheetSnapshotInRangeAtomic_ACU(
                     ...checkpointBuild.checkpoint,
                     timeline: { kind: 'sheet_rebase', activateAtMessageIndex: completedMessageIndex, afterSeq },
                 }]);
+            }
+            for (const sessionIdx of sessionClearIndices) {
+                removeManualRefillSessionFromCandidateMessage_ACU(candidateChat[sessionIdx], options.isolationKey);
             }
             writeMessageIdentity_ACU(rootMessage, { enabled: settings_ACU.dataIsolationEnabled, code: settings_ACU.dataIsolationCode });
             writeMessageIdentity_ACU(finalMessage, { enabled: settings_ACU.dataIsolationEnabled, code: settings_ACU.dataIsolationCode });
@@ -2865,6 +2911,499 @@ export async function establishManualRefillTemplateRoot_ACU(options: {
         logError_ACU('[手动重填临时根] 建立 strict save 失败，已原位恢复聊天内存状态:', error);
         return { success: false, changed: false, targetMessageIndex: -1, error: `手动重填临时根建立失败：${failureError}` };
     }
+}
+
+function collectManualRefillSessionIndices_ACU(
+    chat: any[],
+    isolationKey: string,
+    expectedRunId?: string,
+): number[] {
+    const indices: number[] = [];
+    if (!Array.isArray(chat)) return indices;
+    for (let index = 0; index < chat.length; index += 1) {
+        const message = chat[index];
+        if (!message || message.is_user) continue;
+        const tagData = readIsolatedTagData_ACU(message, isolationKey) as any;
+        if (!tagData || typeof tagData !== 'object' || !Object.prototype.hasOwnProperty.call(tagData, 'manualRefillSessionV1')) continue;
+        if (tagData.manualRefillSessionV1 === undefined) continue;
+        if (expectedRunId !== undefined && tagData.manualRefillSessionV1?.runId !== expectedRunId) continue;
+        indices.push(index);
+    }
+    return indices;
+}
+
+function removeManualRefillSessionFromCandidateMessage_ACU(
+    candidateMessage: any,
+    isolationKey: string,
+): boolean {
+    if (!candidateMessage || typeof candidateMessage !== 'object') return false;
+    const container = readIsolatedDataContainer_ACU(candidateMessage);
+    if (!container) return false;
+    const tagData = container[isolationKey];
+    if (!tagData || typeof tagData !== 'object' || !Object.prototype.hasOwnProperty.call(tagData, 'manualRefillSessionV1')) {
+        return false;
+    }
+    prepareManualRefillDataContainer_ACU(candidateMessage);
+    const liveContainer = candidateMessage.TavernDB_ACU_IsolatedData;
+    const liveTag = liveContainer[isolationKey];
+    delete liveTag.manualRefillSessionV1;
+    if (isPrunableEmptyTagDataAfterV2FrameRemoval_ACU(liveTag)) {
+        delete liveContainer[isolationKey];
+        if (Object.keys(liveContainer).length === 0) {
+            delete candidateMessage.TavernDB_ACU_IsolatedData;
+        }
+    }
+    return true;
+}
+
+function pruneEmptyV2FrameShellInCandidateMessage_ACU(
+    candidateMessage: any,
+    isolationKey: string,
+): void {
+    const container = candidateMessage?.TavernDB_ACU_IsolatedData;
+    if (!container || typeof container !== 'object') return;
+    const tagData = container[isolationKey];
+    if (!tagData || typeof tagData !== 'object') return;
+    if (isEmptyV2StorageFrameShell_ACU(tagData.storageFrame)) {
+        delete tagData.storageFrame;
+        if (tagData._acu_storage_version === 2) {
+            delete tagData._acu_storage_version;
+        }
+    }
+    if (isPrunableEmptyTagDataAfterV2FrameRemoval_ACU(tagData)) {
+        delete container[isolationKey];
+        if (Object.keys(container).length === 0) {
+            delete candidateMessage.TavernDB_ACU_IsolatedData;
+        }
+    }
+}
+
+/**
+ * 读取指定隔离槽中最新的手动重填按表逐批进度元数据。
+ * 绝不在读取时静默改写或丢弃损坏记录：任何非法结构立即返回 status='corrupted'。
+ */
+export function readManualRefillSession_ACU(
+    chat: any[],
+    isolationKey: string,
+): ManualRefillSessionReadResult_ACU {
+    if (!Array.isArray(chat) || chat.length === 0) {
+        return { status: 'none' };
+    }
+    const found: Array<{ session: ManualRefillSessionStateV1_ACU; messageIndex: number }> = [];
+    for (let index = 0; index < chat.length; index += 1) {
+        const message = chat[index];
+        if (!message || message.is_user) continue;
+        const tagData = readIsolatedTagData_ACU(message, isolationKey) as any;
+        if (!tagData || typeof tagData !== 'object' || !Object.prototype.hasOwnProperty.call(tagData, 'manualRefillSessionV1')) continue;
+        if (tagData.manualRefillSessionV1 === undefined) continue;
+        const validation = validateManualRefillSessionStateV1_ACU(tagData.manualRefillSessionV1);
+        if (validation.valid === false) {
+            return {
+                status: 'corrupted',
+                error: validation.error,
+                messageIndex: index,
+            };
+        }
+        if (validation.session.isolationKey !== isolationKey) {
+            return {
+                status: 'corrupted',
+                error: `manualRefillSessionV1 isolationKey 不匹配（期望 "${isolationKey}"，实际 "${validation.session.isolationKey}"）。`,
+                messageIndex: index,
+            };
+        }
+        found.push({ session: validation.session, messageIndex: index });
+    }
+    if (found.length === 0) {
+        return { status: 'none' };
+    }
+    found.sort((left, right) => {
+        if (right.session.updatedAt !== left.session.updatedAt) {
+            return right.session.updatedAt - left.session.updatedAt;
+        }
+        return right.messageIndex - left.messageIndex;
+    });
+    const latest = found[0];
+    return {
+        status: 'found',
+        session: cloneMessageFieldValue_ACU(latest.session),
+        messageIndex: latest.messageIndex,
+        allMessageIndices: found.map(item => item.messageIndex).sort((a, b) => a - b),
+    };
+}
+
+/**
+ * 在单一独占事务与严格保存中清除指定隔离槽的 manualRefillSessionV1 元数据；
+ * 严格保存失败时原位回滚所有消息字段。
+ */
+export async function clearManualRefillSessionAtomic_ACU(
+    isolationKey: string,
+    options: { expectedRunId?: string } = {},
+): Promise<ClearManualRefillSessionResult_ACU> {
+    return runTableWriteTransaction_ACU({
+        source: 'system_cleanup',
+        reason: 'clearManualRefillSession',
+        isolationKey,
+        writeSet: [{ kind: 'all' }],
+        maintenanceMode: 'exclusive',
+    }, async () => {
+        const chat = getChatArray_ACU();
+        if (!Array.isArray(chat) || chat.length === 0) {
+            return { success: true, changed: false, clearedCount: 0 };
+        }
+        const affectedIndices = collectManualRefillSessionIndices_ACU(chat, isolationKey, options.expectedRunId);
+        if (affectedIndices.length === 0) {
+            return { success: true, changed: false, clearedCount: 0 };
+        }
+        const snapshots = new Map<number, ReturnType<typeof messageFieldSnapshot_ACU>>();
+        affectedIndices.forEach(idx => snapshots.set(idx, messageFieldSnapshot_ACU(chat[idx])));
+        try {
+            const candidateChat = cloneCandidateChat_ACU(chat);
+            let clearedCount = 0;
+            for (const idx of affectedIndices) {
+                if (removeManualRefillSessionFromCandidateMessage_ACU(candidateChat[idx], isolationKey)) {
+                    clearedCount += 1;
+                }
+            }
+            if (clearedCount === 0) {
+                return { success: true, changed: false, clearedCount: 0 };
+            }
+            affectedIndices.forEach(idx => applyCandidateMessageFields_ACU(chat[idx], candidateChat[idx]));
+            await saveChatToHostStrict_ACU();
+            return { success: true, changed: true, clearedCount };
+        } catch (error: any) {
+            snapshots.forEach((snapshot, idx) => restoreMessageFieldSnapshot_ACU(chat[idx], snapshot));
+            return {
+                success: false,
+                changed: false,
+                clearedCount: 0,
+                error: error?.message || String(error || '清除手动重填会话元数据失败。'),
+            };
+        }
+    });
+}
+
+/**
+ * 显式原子原语（Issue #83B）：移除旧整库完整存档点（full checkpoint）并在目标楼层重建新完整存档点。
+ *
+ * 不变量：
+ * 1. 仅允许单正式 full checkpoint 聊天执行（多根或零根一律 fail-closed）；
+ * 2. 旧 full frame 必须完整深拷贝留存到目标楼层 tagData.recoveryBackup
+ *    （recoveryKind='rebuilt_full_checkpoint_from_manual_refill'）；
+ * 3. 不允许裁剪晚于 targetMessageIndex 的后续楼层增量；
+ * 4. 在改动 live chat 前，候选聊天必须在 targetMessageIndex 边界与完整 head
+ *    两个点位都通过严格（compatibilityMode='disabled'）回放校验且数据指纹一致；
+ * 5. 严格保存失败时按原位快照完整回滚所有受影响楼层。
+ */
+export async function rebuildFullCheckpointAtomic_ACU(
+    options: RebuildFullCheckpointAtomicOptions_ACU,
+): Promise<RebuildFullCheckpointAtomicResult_ACU> {
+    if (!Number.isInteger(options.targetMessageIndex) || options.targetMessageIndex < 0) {
+        return { success: false, changed: false, prunedMessageCount: 0, error: '重建完整存档点失败：targetMessageIndex 无效。' };
+    }
+    if (!options.snapshotData || typeof options.snapshotData !== 'object' || Array.isArray(options.snapshotData)) {
+        return { success: false, changed: false, prunedMessageCount: 0, error: '重建完整存档点失败：snapshotData 必须是有效表格对象。' };
+    }
+    const snapshotSheetKeys = Object.keys(options.snapshotData).filter(key => key.startsWith('sheet_'));
+    if (snapshotSheetKeys.length === 0) {
+        return { success: false, changed: false, prunedMessageCount: 0, error: '重建完整存档点失败：snapshotData 不包含任何有效表格。' };
+    }
+    const invalidSheetKey = snapshotSheetKeys.find(sheetKey => {
+        const sheet = (options.snapshotData as any)[sheetKey];
+        return !sheet || typeof sheet !== 'object' || !Array.isArray(sheet.content);
+    });
+    if (invalidSheetKey) {
+        return { success: false, changed: false, prunedMessageCount: 0, error: `重建完整存档点失败：表 ${invalidSheetKey} 不是可恢复的完整 Sheet。` };
+    }
+    const normalizedPruneIndices: number[] = [];
+    if (options.pruneLogMessageIndices !== undefined) {
+        if (!Array.isArray(options.pruneLogMessageIndices)) {
+            return { success: false, changed: false, prunedMessageCount: 0, error: '重建完整存档点失败：pruneLogMessageIndices 必须是索引数组。' };
+        }
+        for (const idx of options.pruneLogMessageIndices) {
+            if (!Number.isInteger(idx) || idx < 0) {
+                return { success: false, changed: false, prunedMessageCount: 0, error: `重建完整存档点失败：pruneLogMessageIndices 包含非法楼层索引 ${String(idx)}。` };
+            }
+            if (idx > options.targetMessageIndex) {
+                return {
+                    success: false,
+                    changed: false,
+                    prunedMessageCount: 0,
+                    error: `重建完整存档点失败：不允许裁剪晚于目标楼层 #${options.targetMessageIndex} 的后续增量（#${idx}）。`,
+                };
+            }
+            if (!normalizedPruneIndices.includes(idx)) {
+                normalizedPruneIndices.push(idx);
+            }
+        }
+        normalizedPruneIndices.sort((a, b) => a - b);
+    }
+
+    return runTableWriteTransaction_ACU({
+        source: 'system_cleanup',
+        reason: 'rebuildFullCheckpointAtomic',
+        isolationKey: options.isolationKey,
+        writeSet: [{ kind: 'all' }],
+        maintenanceMode: 'exclusive',
+    }, async () => {
+        const chat = getChatArray_ACU();
+        if (!Array.isArray(chat) || chat.length === 0) {
+            return { success: false, changed: false, prunedMessageCount: 0, error: '聊天记录为空，无法重建完整存档点。' };
+        }
+        if (options.targetMessageIndex >= chat.length || !chat[options.targetMessageIndex] || chat[options.targetMessageIndex].is_user) {
+            return {
+                success: false,
+                changed: false,
+                prunedMessageCount: 0,
+                error: `重建完整存档点失败：目标楼层 #${options.targetMessageIndex} 不是有效 AI 楼层。`,
+            };
+        }
+        const outOfBoundsPrune = normalizedPruneIndices.find(idx => idx >= chat.length);
+        if (outOfBoundsPrune !== undefined) {
+            return {
+                success: false,
+                changed: false,
+                prunedMessageCount: 0,
+                error: `重建完整存档点失败：待清理楼层 #${outOfBoundsPrune} 超出聊天范围。`,
+            };
+        }
+
+        const fullCheckpointIndices: number[] = [];
+        for (let index = 0; index < chat.length; index += 1) {
+            const message = chat[index];
+            if (!message || message.is_user) continue;
+            const frame = getV2FrameForIsolation_ACU(message, options.isolationKey);
+            if (frame?.checkpoint?.kind === 'full') {
+                fullCheckpointIndices.push(index);
+            }
+        }
+        if (fullCheckpointIndices.length === 0) {
+            return {
+                success: false,
+                changed: false,
+                prunedMessageCount: 0,
+                error: `重建完整存档点失败：isolationKey ${options.isolationKey} 缺少现有整库 full checkpoint。`,
+            };
+        }
+        if (fullCheckpointIndices.length > 1) {
+            return {
+                success: false,
+                changed: false,
+                prunedMessageCount: 0,
+                error: `重建完整存档点失败：isolationKey ${options.isolationKey} 存在多个整库 full checkpoint（${fullCheckpointIndices.join(', ')}），必须先完成完整性修复。`,
+            };
+        }
+
+        const oldFullIndex = fullCheckpointIndices[0];
+        if (options.expectedOldFullIndex !== undefined && options.expectedOldFullIndex !== oldFullIndex) {
+            return {
+                success: false,
+                changed: false,
+                oldFullMessageIndex: oldFullIndex,
+                prunedMessageCount: 0,
+                error: `重建完整存档点失败：旧完整存档点楼层不匹配（期望 #${options.expectedOldFullIndex}，实际 #${oldFullIndex}）。`,
+            };
+        }
+        const oldFullFrame = getV2FrameForIsolation_ACU(chat[oldFullIndex], options.isolationKey);
+        if (!oldFullFrame) {
+            return {
+                success: false,
+                changed: false,
+                oldFullMessageIndex: oldFullIndex,
+                prunedMessageCount: 0,
+                error: `重建完整存档点失败：无法读取旧完整存档点 #${oldFullIndex} 的 V2 storageFrame。`,
+            };
+        }
+        const oldFullFingerprint = getOriginalFullFrameFingerprint_ACU(oldFullFrame);
+        if (options.expectedOldFullFingerprint !== undefined && options.expectedOldFullFingerprint !== oldFullFingerprint) {
+            return {
+                success: false,
+                changed: false,
+                oldFullMessageIndex: oldFullIndex,
+                prunedMessageCount: 0,
+                error: `重建完整存档点失败：旧完整存档点 #${oldFullIndex} 指纹不匹配（可能已被并发改写）。`,
+            };
+        }
+
+        const sessionClearIndices = options.clearManualRefillSessionRunId
+            ? collectManualRefillSessionIndices_ACU(chat, options.isolationKey, options.clearManualRefillSessionRunId)
+            : [];
+        const affectedIndices = [...new Set([
+            options.targetMessageIndex,
+            oldFullIndex,
+            ...normalizedPruneIndices,
+            ...sessionClearIndices,
+        ])].sort((a, b) => a - b);
+
+        const snapshots = new Map<number, ReturnType<typeof messageFieldSnapshot_ACU>>();
+        affectedIndices.forEach(idx => snapshots.set(idx, messageFieldSnapshot_ACU(chat[idx])));
+
+        try {
+            const candidateChat = cloneCandidateChat_ACU(chat);
+            const createdAt = Date.now();
+            const targetAiFloor = candidateChat.slice(0, options.targetMessageIndex + 1).filter(msg => msg && !msg.is_user).length;
+            let prunedMessageCount = 0;
+
+            // 1. 移除旧 full checkpoint（若旧根位于目标楼层之前，一并清除其已被新 full 覆盖的旧增量与单表锚点；
+            //    若旧根晚于目标楼层，仅移除旧 full checkpoint 本身并保留后续日志，由严格 head 回放验证其可回放性）。
+            if (oldFullIndex !== options.targetMessageIndex) {
+                const oldMessage = candidateChat[oldFullIndex];
+                prepareManualRefillDataContainer_ACU(oldMessage);
+                const oldTagData = oldMessage.TavernDB_ACU_IsolatedData[options.isolationKey];
+                if (isV2TagData_ACU(oldTagData)) {
+                    const oldFrame = oldTagData.storageFrame;
+                    delete oldFrame.checkpoint;
+                    if (oldFrame.summaryVectorIndexFrame && typeof oldFrame.summaryVectorIndexFrame === 'object') {
+                        delete oldFrame.summaryVectorIndexFrame.checkpoint;
+                        const hasVectorLogs = Array.isArray(oldFrame.summaryVectorIndexFrame.logEntries)
+                            && oldFrame.summaryVectorIndexFrame.logEntries.length > 0;
+                        if (!hasVectorLogs) {
+                            delete oldFrame.summaryVectorIndexFrame;
+                        }
+                    }
+                    if (oldFullIndex < options.targetMessageIndex) {
+                        oldFrame.logEntries = [];
+                        delete oldFrame.perSheetCheckpoints;
+                        delete oldFrame.sheetTimelineEvents;
+                        delete oldFrame.headRevision;
+                        delete oldFrame.summaryVectorIndexFrame;
+                    }
+                    pruneEmptyV2FrameShellInCandidateMessage_ACU(oldMessage, options.isolationKey);
+                    prunedMessageCount += 1;
+                }
+            }
+
+            // 2. 清理显式指定的旧前置增量楼层（全部 <= targetMessageIndex，不含 targetMessageIndex）。
+            for (const idx of normalizedPruneIndices) {
+                if (idx === options.targetMessageIndex || idx === oldFullIndex) continue;
+                const pruneMessage = candidateChat[idx];
+                if (!pruneMessage || pruneMessage.is_user) continue;
+                const existingFrame = getV2FrameForIsolation_ACU(pruneMessage, options.isolationKey);
+                if (!existingFrame) continue;
+                prepareManualRefillDataContainer_ACU(pruneMessage);
+                const pruneTagData = pruneMessage.TavernDB_ACU_IsolatedData[options.isolationKey];
+                if (isV2TagData_ACU(pruneTagData)) {
+                    const pruneFrame = pruneTagData.storageFrame;
+                    pruneFrame.logEntries = [];
+                    delete pruneFrame.perSheetCheckpoints;
+                    delete pruneFrame.sheetTimelineEvents;
+                    delete pruneFrame.headRevision;
+                    delete pruneFrame.summaryVectorIndexFrame;
+                    pruneEmptyV2FrameShellInCandidateMessage_ACU(pruneMessage, options.isolationKey);
+                    prunedMessageCount += 1;
+                }
+            }
+
+            // 3. 在目标楼层写入新的 canonical full checkpoint，并将旧 full frame 原样备份到 recoveryBackup。
+            const reason = options.reason || 'manual';
+            const scheduleSummary = collectScheduleSummaryFromFramesV2_ACU(chat, options.isolationKey, {
+                maxMessageIndex: options.targetMessageIndex,
+            }) || undefined;
+            const checkpointBuild = buildCanonicalFullCheckpoint_ACU({
+                createdAt,
+                reason,
+                data: cloneMessageFieldValue_ACU(options.snapshotData) as TableDataObject_ACU,
+                ...(scheduleSummary ? { scheduleSummary } : {}),
+                context: {
+                    messageIndex: options.targetMessageIndex,
+                    aiFloor: targetAiFloor,
+                    isolationKey: options.isolationKey,
+                    reason,
+                },
+            });
+            if (!checkpointBuild.checkpoint) {
+                throw new Error(`重建完整存档点失败：${checkpointBuild.error || '无法构建 canonical full checkpoint。'}`);
+            }
+
+            const recoveryBackup: TableV2RecoveryBackup_ACU = {
+                version: 1,
+                createdAt,
+                recoveryKind: 'rebuilt_full_checkpoint_from_manual_refill',
+                sourceMessageIndex: oldFullIndex,
+                storageFrame: cloneMessageFieldValue_ACU(oldFullFrame),
+            };
+
+            const targetMessage = candidateChat[options.targetMessageIndex];
+            prepareManualRefillDataContainer_ACU(targetMessage);
+            const existingTargetTag = targetMessage.TavernDB_ACU_IsolatedData[options.isolationKey];
+            const nextTargetTag: Record<string, any> = existingTargetTag && typeof existingTargetTag === 'object'
+                ? { ...existingTargetTag }
+                : {};
+            nextTargetTag._acu_storage_version = 2;
+            nextTargetTag.storageFrame = {
+                version: 2,
+                checkpoint: checkpointBuild.checkpoint,
+                logEntries: [],
+            };
+            nextTargetTag.recoveryBackup = recoveryBackup;
+            targetMessage.TavernDB_ACU_IsolatedData[options.isolationKey] = nextTargetTag;
+            writeMessageIdentity_ACU(targetMessage, {
+                enabled: settings_ACU.dataIsolationEnabled,
+                code: settings_ACU.dataIsolationCode,
+            });
+
+            // 4. 若指定 clearManualRefillSessionRunId，在同一候选提交中移除匹配会话元数据。
+            for (const sessionIdx of sessionClearIndices) {
+                removeManualRefillSessionFromCandidateMessage_ACU(candidateChat[sessionIdx], options.isolationKey);
+            }
+
+            // 5. 严格校验单根不变量与目标边界 + head 双点位严格回放，任何不匹配一律在写 live chat 前失败。
+            const singleRootError = assertSingleActiveFullCheckpointV2_ACU(
+                candidateChat,
+                options.isolationKey,
+                'rebuildFullCheckpointAtomic',
+            );
+            if (singleRootError) {
+                throw new Error(`重建完整存档点失败：${singleRootError}`);
+            }
+
+            const boundedReplay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, options.isolationKey, {
+                maxMessageIndex: options.targetMessageIndex,
+                updateRuntimeState: false,
+                compatibilityMode: 'disabled',
+            });
+            if (!boundedReplay || boundedReplay.baseKind !== 'full_checkpoint') {
+                throw new Error('重建完整存档点失败：目标边界严格回放未能从新 full checkpoint 建立基底。');
+            }
+            if (boundedReplay.requiresCheckpointConvergence || boundedReplay.compatibilityRepairs?.length) {
+                throw new Error('重建完整存档点失败：目标边界严格回放仍存在未收敛的兼容补锚。');
+            }
+            if (getTableDataFingerprint_ACU(boundedReplay.data) !== getTableDataFingerprint_ACU(options.snapshotData)) {
+                throw new Error('重建完整存档点失败：目标边界严格回放结果与目标快照指纹不一致。');
+            }
+
+            const headReplay = await loadTableStateFromFramesV2Detailed_ACU(candidateChat, options.isolationKey, {
+                updateRuntimeState: false,
+                compatibilityMode: 'disabled',
+            });
+            if (!headReplay || headReplay.baseKind !== 'full_checkpoint') {
+                throw new Error('重建完整存档点失败：重建后完整聊天严格回放未能建立有效基底。');
+            }
+            if (headReplay.requiresCheckpointConvergence || headReplay.compatibilityRepairs?.length) {
+                throw new Error('重建完整存档点失败：重建后完整聊天严格回放仍存在未收敛的兼容补锚。');
+            }
+
+            // 6. 所有校验通过后才一次性写回 live chat 并执行严格保存；保存失败原位回滚全部受影响楼层。
+            affectedIndices.forEach(idx => applyCandidateMessageFields_ACU(chat[idx], candidateChat[idx]));
+            await saveChatToHostStrict_ACU();
+            logDebug_ACU(`[重建完整存档点] 已移除旧 full checkpoint #${oldFullIndex} 并在 #${options.targetMessageIndex} 重建完整存档点（pruned=${prunedMessageCount}）。`);
+            return {
+                success: true,
+                changed: true,
+                oldFullMessageIndex: oldFullIndex,
+                newFullMessageIndex: options.targetMessageIndex,
+                prunedMessageCount,
+            };
+        } catch (error: any) {
+            snapshots.forEach((snapshot, idx) => restoreMessageFieldSnapshot_ACU(chat[idx], snapshot));
+            return {
+                success: false,
+                changed: false,
+                oldFullMessageIndex: oldFullIndex,
+                prunedMessageCount: 0,
+                error: error?.message || String(error || '重建完整存档点失败。'),
+            };
+        }
+    });
 }
 
 

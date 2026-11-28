@@ -25,7 +25,7 @@ import { readIsolatedTagData_ACU, readLegacyIndependentData_ACU, isLegacyMatchFo
 import { isV2TagData_ACU, resolveTableStorageStrategy_ACU } from './storage-strategy-resolver';
 import { persistTableMutationLogV2_ACU, type ReplaceExistingIncrementalOptions_ACU } from './storage-frame-v2-persist';
 import { migrateLegacyStorageToV2OnLoad_ACU } from './storage-v2-migration';
-import type { ManualRefillProgressV2_ACU, TableCheckpointV2_ACU, TableMutationOperationV2_ACU, TableMutationSourceV2_ACU, TableWriteConflictUnitV2_ACU } from './storage-frame-v2-types';
+import type { ManualRefillProgressV2_ACU, ManualRefillSessionStateV1_ACU, TableCheckpointV2_ACU, TableMutationOperationV2_ACU, TableMutationSourceV2_ACU, TableWriteConflictUnitV2_ACU } from './storage-frame-v2-types';
 import type { TableWriteTransactionContext_ACU } from './table-write-transaction';
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
 
@@ -55,6 +55,7 @@ export interface TableChatPersistOptions_ACU extends TableFillRequestGuard_ACU {
   forceCheckpoint?: boolean;
   checkpointReason?: TableCheckpointV2_ACU['reason'];
   manualRefillProgress?: ManualRefillProgressV2_ACU;
+  manualRefillSessionV1?: ManualRefillSessionStateV1_ACU | null;
   /** 在本次 V2 entry 写入前替换指定 bucket 的历史增量。 */
   replaceExistingIncremental?: ReplaceExistingIncrementalOptions_ACU;
   /** 调用方已处于 transactionContext.runCommit 临界区内时使用，避免嵌套 commit 锁。 */
@@ -203,6 +204,7 @@ async function persistTablesToChatMessageWithLockOption_ACU(
     forceCheckpoint,
     checkpointReason,
     manualRefillProgress,
+    manualRefillSessionV1,
     replaceExistingIncremental,
     assumeCommitLock,
     strictSave,
@@ -311,6 +313,7 @@ async function persistTablesToChatMessageWithLockOption_ACU(
         forceCheckpoint: forceCheckpoint === true || treatAsEmptyBootstrap,
         checkpointReason: checkpointReason || (treatAsEmptyBootstrap ? 'init' : undefined),
         manualRefillProgress,
+        ...(manualRefillSessionV1 !== undefined ? { manualRefillSessionV1 } : {}),
         replaceExistingIncremental,
         isolationKey: currentIsolationKey,
         revisionWriteSet,

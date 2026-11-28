@@ -8,7 +8,7 @@ import { currentChatFileIdentifier_ACU, isAutoUpdatingCard_ACU, pendingFinalGene
 import { readIsolatedTagData_ACU } from '../../data/repositories/chat-message-data-repo';
 import { callCustomOpenAI_ACU, RetryableAiResponseError_ACU } from '../ai/prompt-builder';
 import type { TableFillRetryTurn_ACU } from '../ai/prompt-builder/table-fill-retry';
-import { clearManualRefillSheetDataInRange_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, ensureManualCatchUpAnchorBeforeTarget_ACU, ensureV2BoundaryCheckpointForRetainedBuffer_ACU, establishManualRefillTemplateRoot_ACU, getChatArray_ACU, shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU } from '../chat/chat-service';
+import { clearManualRefillSheetDataInRange_ACU, commitManualRefillSheetSnapshotInRangeAtomic_ACU, ensureManualCatchUpAnchorBeforeTarget_ACU, ensureV2BoundaryCheckpointForRetainedBuffer_ACU, establishManualRefillTemplateRoot_ACU, getChatArray_ACU, readManualRefillSession_ACU, shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU } from '../chat/chat-service';
 import { coreApisAreReady_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentJsonTableData_ACU } from '../runtime/state-manager';
 import { resolveManualUpdateBatchSize_ACU, resolveManualUpdateContextDepth_ACU } from './manual-update-settings';
 import { checkAutoMergeTrigger_ACU, prepareAutoMergeBatches_ACU, executeAutoMergeBatch_ACU, finalizeAutoMerge_ACU } from '../summary/merge-logic';
@@ -35,7 +35,7 @@ import { isVectorPipelineEnabledForCurrentChat_ACU } from '../fill-mode/fill-mod
 import { getLatestV2FullCheckpointMessageIndex_ACU, resolveTableHistoryStateFromChat_ACU } from './table-history';
 import { planManualCatchUpWaves_ACU, type ManualCatchUpPlan_ACU } from './manual-fill-planner';
 import { isNonFillAiFloor_ACU, selectFillEligibleIndices_ACU } from '../runtime/message-handler';
-import type { ManualRefillProgressV2_ACU } from './storage-frame-v2-types';
+import type { ManualRefillProgressV2_ACU, ManualRefillSessionStateV1_ACU } from './storage-frame-v2-types';
 import type { ITableStorageProvider, SqlTableApplyScope_ACU } from '../../shared/table-storage-provider';
 import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import { rebindSheetKeysThroughTableAliases_ACU, SheetTableAliasResolutionError_ACU } from '../../shared/sql-read-resolver';
@@ -382,6 +382,8 @@ export interface CardUpdateResult {
     error?: string;
     errorCategory?: TableUpdateCommitErrorCategory_ACU;
     aborted?: boolean;
+    /** 本次提交是否把 manualRefillSessionV1 随表格事务一起严格持久化到聊天。 */
+    sessionPersisted?: boolean;
     /**
      * 面向 UI/恢复诊断的稳定失败分类；不得解析 error 文案。
      * 与 ManualUpdateResult.diagnosticCode 同一套治理约定。
@@ -444,6 +446,10 @@ export interface ManualUpdateResult {
     /** 面向 UI/恢复诊断的稳定失败分类；不得依赖错误文案解析。 */
     diagnosticCode?: 'anchor_preflight_blocked' | 'replay_anchor_missing' | 'replay_missing_selected_sheet' | 'replay_requires_checkpoint_convergence' | 'replay_data_mismatch' | 'replay_failed' | 'catch_up_migration_failed' | 'catch_up_migration_reload_failed' | 'catch_up_migration_changed_topology' | 'catch_up_runtime_changed_after_confirmation' | 'provisional_bridge_required' | 'provisional_baseline_unreconstructable' | 'provisional_bridge_conflict' | 'bridge_finalize_failed' | 'bridge_replay_mismatch' | 'provisional_recovery_required' | 'stale_bucket_after_boundary_checkpoint' | 'staging_plan_failed' | 'boundary_commit_failed' | TableFillBoundaryDiagnosticCode_ACU;
     catchUpPlan?: ManualCatchUpPlan_ACU;
+    /** 本次手动重填会话的 runId（fresh 或 resume 均返回，便于断点续跑与清理）。 */
+    manualRefillSessionRunId?: string;
+    /** 本次执行是否从已落盘的 manualRefillSessionV1 断点续跑。 */
+    resumedFromSession?: boolean;
 }
 
 export interface ManualCatchUpPlanningResult_ACU {
@@ -1795,6 +1801,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
         sqlApplyScope?: SqlTableApplyScope_ACU;
         replaceExistingIncremental?: { targetMessageIndices: number[]; targetSheetKeys: string[] };
         manualRefillProgress?: ManualRefillProgressV2_ACU;
+        manualRefillSessionV1?: ManualRefillSessionStateV1_ACU | null;
         syncAfterCommit?: boolean;
         baseRevision?: string | null;
         manualCatchUpRunId?: string;
@@ -2043,6 +2050,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
             trackAsUpdate: true,
             replaceExistingIncremental: options.replaceExistingIncremental,
             manualRefillProgress: options.manualRefillProgress,
+            ...(options.manualRefillSessionV1 !== undefined ? { manualRefillSessionV1: options.manualRefillSessionV1 } : {}),
             manualCatchUpRunId: options.manualCatchUpRunId,
             commitMode: options.commitMode,
             skipChatSave: options.isImportMode,
@@ -2179,7 +2187,13 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
         if (!options.chatView && !options.isImportMode && options.syncAfterCommit !== false && commitResult.tableData) {
             postCommitWarnings.push(...await refreshCommittedWorldbook_ACU(commitResult.tableData));
         }
-        return { success: true, modifiedKeys: commitResult.value.modifiedKeys, tableData: commitResult.tableData as any, ...(postCommitWarnings.length ? { postCommitWarnings } : {}) };
+        return {
+            success: true,
+            modifiedKeys: commitResult.value.modifiedKeys,
+            tableData: commitResult.tableData as any,
+            ...(options.manualRefillSessionV1 !== undefined && commitResult.saved === true ? { sessionPersisted: true } : {}),
+            ...(postCommitWarnings.length ? { postCommitWarnings } : {}),
+        };
     }
 
     const postCommitWarnings: TableUpdatePostCommitWarning_ACU[] = [];
@@ -2341,6 +2355,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
             operations: effectiveOperations,
             replaceExistingIncremental: options.replaceExistingIncremental,
             manualRefillProgress: options.manualRefillProgress,
+            ...(options.manualRefillSessionV1 !== undefined ? { manualRefillSessionV1: options.manualRefillSessionV1 } : {}),
             manualCatchUpRunId: options.manualCatchUpRunId,
             commitMode: options.commitMode,
         }, () => ({
@@ -2392,6 +2407,13 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
                 }
             }
         }
+        return {
+            success: true,
+            modifiedKeys,
+            tableData: workingTableData as any,
+            ...(options.manualRefillSessionV1 !== undefined && commitResult.saved === true ? { sessionPersisted: true } : {}),
+            ...(postCommitWarnings.length ? { postCommitWarnings } : {}),
+        };
     }
 
     return { success: true, modifiedKeys, tableData: workingTableData as any, ...(postCommitWarnings.length ? { postCommitWarnings } : {}) };
@@ -2448,6 +2470,13 @@ async function processGroupedRuntimeChunkCore_ACU(
             sheetKeys: string[];
             committedBucketCount: number;
         }) => ManualRefillProgressV2_ACU;
+        buildManualRefillSession?: (bucket: {
+            saveTargetIndex: number;
+            messageIndices: number[];
+            sheetKeys: string[];
+            committedBucketCount: number;
+        }) => ManualRefillSessionStateV1_ACU;
+        onManualRefillSessionPersisted?: (session: ManualRefillSessionStateV1_ACU) => void;
         onBucketCommitted?: (bucket: {
             saveTargetIndex: number;
             messageIndices: number[];
@@ -2926,6 +2955,14 @@ async function processGroupedRuntimeChunkCore_ACU(
             emitBucketProgress(bucketIndex, { phase: 'saving' });
             const replacementMessageIndices = [...new Set(bucket.plannedJobs.flatMap(job => job.messageIndices))].sort((left, right) => left - right);
             const replacementSheetKeys = [...new Set(bucket.plannedJobs.flatMap(job => job.group.sheetKeys || []))].sort();
+            const nextManualRefillSession = options.commitMode !== 'stage_only' && options.buildManualRefillSession
+                ? options.buildManualRefillSession({
+                    saveTargetIndex: bucket.saveTargetIndex,
+                    messageIndices: replacementMessageIndices,
+                    sheetKeys: replacementSheetKeys,
+                    committedBucketCount,
+                })
+                : undefined;
             const applyResult = await applyUnifiedGroupFillResponses_ACU(responses, baseSnapshot, {
                 signal: options.abortController?.signal,
                 saveTargetIndex: bucket.saveTargetIndex,
@@ -2945,6 +2982,7 @@ async function processGroupedRuntimeChunkCore_ACU(
                         committedBucketCount,
                     }),
                 } : {}),
+                ...(nextManualRefillSession !== undefined ? { manualRefillSessionV1: nextManualRefillSession } : {}),
                 syncAfterCommit: options.syncAfterCommit,
                 baseRevision,
                 chatKey: executionScope.chatKey,
@@ -2962,6 +3000,9 @@ async function processGroupedRuntimeChunkCore_ACU(
             });
             if (applyResult.success) {
                 if (options.commitMode === 'stage_only') options.observeStagedChanges?.(applyResult.modifiedKeys);
+                if (nextManualRefillSession && applyResult.sessionPersisted === true) {
+                    options.onManualRefillSessionPersisted?.(nextManualRefillSession);
+                }
                 postCommitWarnings.push(...(applyResult.postCommitWarnings || []));
                 emitBucketProgress(bucketIndex, { phase: 'complete' });
                 bucketSucceeded = true;
@@ -5109,6 +5150,33 @@ function restoreMessageIsolatedData_ACU(
     }
 }
 
+function buildNextManualRefillSessionSnapshot_ACU(
+    current: ManualRefillSessionStateV1_ACU,
+    bucket: {
+        saveTargetIndex: number;
+        messageIndices: number[];
+        sheetKeys: string[];
+        committedBucketCount: number;
+    },
+): ManualRefillSessionStateV1_ACU {
+    const now = Date.now();
+    const next = cloneJsonValue_ACU(current);
+    next.status = 'in_progress';
+    next.updatedAt = now;
+    const targetSet = new Set(next.targetSheetKeys);
+    for (const sheetKey of bucket.sheetKeys) {
+        if (!targetSet.has(sheetKey)) continue;
+        const prev = next.perSheetProgress[sheetKey];
+        const prevIndex = prev ? prev.lastCommittedMessageIndex : -1;
+        next.perSheetProgress[sheetKey] = {
+            lastCommittedMessageIndex: Math.max(prevIndex, bucket.saveTargetIndex),
+            committedBatchCount: (prev?.committedBatchCount ?? 0) + 1,
+            updatedAt: now,
+        };
+    }
+    return next;
+}
+
 /**
  * 手动更新编排（纯业务逻辑）
  * 从 handleManualUpdate_ACU 提取。不驱动 UI，只返回结果。
@@ -5119,6 +5187,7 @@ function restoreMessageIsolatedData_ACU(
  * @param refreshData 数据刷新回调
  * @param options 可选参数：
  *   - clearBeforeUpdate: 兼容旧调用名；启用事务式手动重填。普通可回放路径按 bucket 原子替换历史增量；仅跨 checkpoint 特例会预清理并等待最终 snapshot。
+ *   - resumeSession / resumeRunId: 断点续跑已持久化的 manualRefillSessionV1，跳过已完成批次且不重新清理历史。
  */
 export async function orchestrateManualUpdate_ACU(
     targetKeys: string[],
@@ -5126,6 +5195,10 @@ export async function orchestrateManualUpdate_ACU(
     refreshData: () => Promise<void>,
     options: {
         clearBeforeUpdate?: boolean;
+        /** 从已持久化的 manualRefillSessionV1 断点续跑（跳过已完成表与批次，不重新清理）。 */
+        resumeSession?: boolean;
+        /** 可选指定续跑的会话 runId；传入时必须与持久化会话精确匹配。 */
+        resumeRunId?: string;
         onProgress?: (event: CardUpdateProgressEvent) => void;
         /**
          * UI 确认前的 runtime 键快照（可选）。
@@ -5138,6 +5211,8 @@ export async function orchestrateManualUpdate_ACU(
 ): Promise<ManualUpdateResult> {
     let committedBucketCount = 0;
     const postCommitWarnings: TableUpdatePostCommitWarning_ACU[] = [];
+    let manualRefillSession: ManualRefillSessionStateV1_ACU | null = null;
+    let resumedFromSession = false;
     // 跨根 staging 作用域（仅 manualRefillEnabled 且跨根时启用；提升到函数级以便
     // chunk 循环内 settle 与收尾共用）。non-null 断言仅在 requiresBoundaryStaging
     // 分支内使用，普通路径保持 null。
@@ -5162,7 +5237,13 @@ export async function orchestrateManualUpdate_ACU(
                 } catch (refreshError) {
                     logWarn_ACU('[Manual Refill] 恢复失败后刷新运行时数据失败:', refreshError);
                 }
-                return { success: false, error: failureError, ...(postCommitWarnings.length ? { postCommitWarnings } : {}) };
+                return {
+                    success: false,
+                    error: failureError,
+                    ...(manualRefillSession ? { manualRefillSessionRunId: manualRefillSession.runId } : {}),
+                    ...(resumedFromSession ? { resumedFromSession: true } : {}),
+                    ...(postCommitWarnings.length ? { postCommitWarnings } : {}),
+                };
             }
         }
         try {
@@ -5174,6 +5255,8 @@ export async function orchestrateManualUpdate_ACU(
         return {
             success: false,
             error: failureError,
+            ...(manualRefillSession ? { manualRefillSessionRunId: manualRefillSession.runId } : {}),
+            ...(resumedFromSession ? { resumedFromSession: true } : {}),
             ...(postCommitWarnings.length ? { postCommitWarnings } : {}),
         };
     };
@@ -5237,12 +5320,19 @@ export async function orchestrateManualUpdate_ACU(
             return { success: false, error: '未选择需要更新的表格。' };
         }
 
+        const manualRefillEnabled = options.clearBeforeUpdate === true;
+        const resumeRequested = options.resumeSession === true
+            || (typeof options.resumeRunId === 'string' && options.resumeRunId.trim().length > 0);
+        if (resumeRequested && !manualRefillEnabled) {
+            return { success: false, error: '手动重填续跑必须启用 clearBeforeUpdate 模式。' };
+        }
+
         // 锚点预检（健康检查 + 自动收敛）：多根 / 零根有帧两类死锁形态在首次 AI 调用
         // （processBatch）前先尝试用 V2 恢复服务自动收敛（requiresConfirmation=false 才
         // 自动执行）；无法自愈才阻断，避免先付完 AI 费用才撞 persist 层 fail-fast。
         const preflightIsolationKey = getCurrentIsolationKey_ACU();
         const anchorHealth = await ensureManualRefillAnchorHealth_ACU(liveChat, preflightIsolationKey, {
-            checkZeroRoot: options.clearBeforeUpdate !== true,
+            checkZeroRoot: !manualRefillEnabled || resumeRequested,
         });
         if (anchorHealth.blockedError) {
             return { success: false, error: anchorHealth.blockedError };
@@ -5269,14 +5359,112 @@ export async function orchestrateManualUpdate_ACU(
             ? allAiMessageIndices.filter(index => index >= contextScopeIndices[0] && index <= contextScopeIndices[contextScopeIndices.length - 1])
             : [];
 
-        if (!contextScopeIndices.length) {
+        if (!resumeRequested && !contextScopeIndices.length) {
             return { success: false, error: '未找到可用的上下文进行手动更新，请检查阈值或跳过楼层设置。' };
         }
 
         const templateData = parseTableTemplateJson_ACU({ stripSeedRows: true }) || {};
+        // 最终 commit 只能消费本次会话开始时解析出的模板，不能在 bucket 已写入后重新读取
+        // chat override / profile 全局模板；后者在长事务期间变化会让 fallback 根与本次重填依据脱节。
+        const frozenManualRefillTemplateData = manualRefillEnabled
+            ? resolveManualRefillTemplateData_ACU(liveChat, getCurrentIsolationKey_ACU())
+            : null;
+        const manualRefillTemplateFingerprint = manualRefillEnabled
+            ? getTableDataFingerprint_ACU(frozenManualRefillTemplateData || templateData || {})
+            : '';
+
+        let effectiveRangeIndices = contextScopeIndices;
+        let effectiveRefillCleanupIndices = refillCleanupIndices;
+        let effectiveBatchSize = uiBatchSize;
+
+        if (resumeRequested) {
+            const sessionRead = readManualRefillSession_ACU(liveChat, preflightIsolationKey);
+            if (sessionRead.status === 'corrupted') {
+                return {
+                    success: false,
+                    error: `手动重填续跑失败：存档进度元数据损坏（楼层 #${sessionRead.messageIndex}）：${sessionRead.error}`,
+                };
+            }
+            if (sessionRead.status === 'none') {
+                return {
+                    success: false,
+                    error: '手动重填续跑失败：当前聊天不存在可续跑的手动重填会话。',
+                };
+            }
+            const loadedSession = sessionRead.session;
+            if (options.resumeRunId && loadedSession.runId !== options.resumeRunId) {
+                return {
+                    success: false,
+                    error: `手动重填续跑失败：会话 runId 不匹配（期望 ${options.resumeRunId}，实际 ${loadedSession.runId}）。`,
+                };
+            }
+            if (loadedSession.status === 'completed') {
+                return {
+                    success: false,
+                    error: '手动重填续跑失败：该手动重填会话已完成，无法再次续跑。',
+                };
+            }
+            const sortedRequestedKeys = [...new Set(targetKeys)].sort();
+            const sortedStoredKeys = [...new Set(loadedSession.targetSheetKeys)].sort();
+            if (sortedRequestedKeys.length !== sortedStoredKeys.length
+                || sortedRequestedKeys.some((key, index) => key !== sortedStoredKeys[index])) {
+                return {
+                    success: false,
+                    error: '手动重填续跑失败：目标表集合与已保存会话不一致，请核对后重新发起手动重填。',
+                };
+            }
+            if (loadedSession.templateFingerprint !== manualRefillTemplateFingerprint) {
+                return {
+                    success: false,
+                    error: '手动重填续跑失败：当前模板指纹与已保存会话不一致，已拒绝续跑。',
+                };
+            }
+            const invalidRangeIndex = loadedSession.rangeIndices.find(
+                idx => !Number.isInteger(idx) || idx < 0 || idx >= liveChat.length || liveChat[idx]?.is_user || isNonFillAiFloor_ACU(liveChat[idx]),
+            );
+            if (loadedSession.rangeIndices.length === 0 || invalidRangeIndex !== undefined) {
+                return {
+                    success: false,
+                    error: `手动重填续跑失败：聊天楼层拓扑已变化，原重填范围楼层 #${invalidRangeIndex ?? 'none'} 不再有效。`,
+                };
+            }
+            manualRefillSession = cloneJsonValue_ACU({
+                ...loadedSession,
+                status: 'in_progress',
+            });
+            resumedFromSession = true;
+            effectiveRangeIndices = [...loadedSession.rangeIndices];
+            effectiveBatchSize = loadedSession.batchSize;
+            effectiveRefillCleanupIndices = allAiMessageIndices.filter(
+                index => index >= effectiveRangeIndices[0] && index <= effectiveRangeIndices[effectiveRangeIndices.length - 1],
+            );
+        } else if (manualRefillEnabled) {
+            const sessionNow = Date.now();
+            manualRefillSession = {
+                version: 1,
+                kind: 'manual_refill_session',
+                runId: `manual-refill-session-${sessionNow}-${Math.random().toString(36).slice(2, 8)}`,
+                isolationKey: preflightIsolationKey,
+                status: 'in_progress',
+                rangeIndices: [...effectiveRangeIndices],
+                targetSheetKeys: [...targetKeys],
+                templateFingerprint: manualRefillTemplateFingerprint,
+                batchSize: effectiveBatchSize,
+                perSheetProgress: {},
+                createdAt: sessionNow,
+                updatedAt: sessionNow,
+            };
+        }
+
         const updateGroups: Record<string, ManualRuntimeUpdateGroup_ACU> = {};
         const presetGroupSlots = new Map<string, number>();
         targetKeys.forEach((sheetKey: string) => {
+            const sheetIndices = resumedFromSession && manualRefillSession
+                ? effectiveRangeIndices.filter(idx => idx > (manualRefillSession!.perSheetProgress[sheetKey]?.lastCommittedMessageIndex ?? -1))
+                : effectiveRangeIndices;
+            if (resumedFromSession && sheetIndices.length === 0) {
+                return;
+            }
             const tableConfig = templateData?.[sheetKey]?.updateConfig || {};
             const tableName = templateData?.[sheetKey]?.name || currentJsonTableData_ACU?.[sheetKey]?.name || '';
             const resolvedPreset = resolveTableApiPresetOverride_ACU(tableName);
@@ -5291,11 +5479,11 @@ export async function orchestrateManualUpdate_ACU(
             const presetGroupSlot = presetGroupSlots.get(presetKey)!;
             // updateFrequency/contextDepth/skipFloors 属于自动更新调度参数，不进入手动路径；
             // API preset 属于请求执行契约，不同 preset 必须拆组，禁止静默采用第一张表配置。
-            const groupKey = `${tableGroupId}|${contextScopeIndices.join(',')}|${uiBatchSize}|presetSlot:${presetGroupSlot}`;
+            const groupKey = `${tableGroupId}|${sheetIndices.join(',')}|${effectiveBatchSize}|presetSlot:${presetGroupSlot}`;
             if (!updateGroups[groupKey]) {
                 updateGroups[groupKey] = {
-                    indices: contextScopeIndices,
-                    batchSize: uiBatchSize,
+                    indices: sheetIndices,
+                    batchSize: effectiveBatchSize,
                     groupId: tableGroupId,
                     sheetKeys: [],
                     requestOptions,
@@ -5305,7 +5493,6 @@ export async function orchestrateManualUpdate_ACU(
         });
         const groupKeys = Object.keys(updateGroups);
 
-        const manualRefillEnabled = options.clearBeforeUpdate === true;
         // 破坏性/普通手动更新前 TOCTOU 复检（service 层最终准入，与 clearBeforeUpdate 无关）：
         // UI 层在调用前已复检一次，但 orchestrator 内部已跨越 loadAllChatMessages/refreshData
         // 等异步边界；runtime 可能在此间被 purge 或表集合变化。显式提供 executionSnapshot
@@ -5322,14 +5509,67 @@ export async function orchestrateManualUpdate_ACU(
                 return { success: false, error: '表格运行时在确认期间发生变化，已取消本次手动填表，请确认后重试。' };
             }
         }
-        // 最终 commit 只能消费本次会话开始时解析出的模板，不能在 bucket 已写入后重新读取
-        // chat override / profile 全局模板；后者在长事务期间变化会让 fallback 根与本次重填依据脱节。
-        const frozenManualRefillTemplateData = manualRefillEnabled
-            ? resolveManualRefillTemplateData_ACU(liveChat, getCurrentIsolationKey_ACU())
-            : null;
         // 手动填表先无条件清空本次范围内选中表的 checkpoint 与增量，再完全沿用自动填表语义
         // （逐 bucket 取 bucketFirstMessageIndex - 1）解析基底。初始基线保持原位，不做前移。
-        if (manualRefillEnabled) {
+        // 断点续跑路径保留已提交的 bucket，不重新执行破坏性清理与建根。
+        if (manualRefillEnabled && resumedFromSession) {
+            const currentIsolationKey = getCurrentIsolationKey_ACU();
+            const remainingScopeIndices = [...new Set(Object.values(updateGroups).flatMap(group => group.indices))].sort((a, b) => a - b);
+            if (isSqliteMode()) {
+                try {
+                    await ensureStorageProviderReady_ACU();
+                } catch (error: any) {
+                    return { success: false, error: `SQLite 运行时未就绪，已阻止续跑：${error?.message || String(error)}` };
+                }
+            }
+            if (options.executionSnapshot !== undefined) {
+                if (!runtimeSheetKeysMatchSnapshot_ACU(manualUpdateSnapshotKeys)) {
+                    logWarn_ACU('[Manual Refill] runtime 在续跑前变化，已阻止手动重填续跑（快照未匹配）。');
+                    return { success: false, error: '表格运行时在确认期间发生变化，已取消本次手动填表，请确认后重试。' };
+                }
+            }
+            if (remainingScopeIndices.length > 0) {
+                const refillTargetIndex = remainingScopeIndices[remainingScopeIndices.length - 1];
+                const originalFullIndex = getLatestV2FullCheckpointMessageIndex_ACU(liveChat, currentIsolationKey);
+                const canStageAcrossReplayRoot = originalFullIndex >= 0
+                    && remainingScopeIndices[0] < originalFullIndex;
+                const refillAdmission = assertWriteTargetNotBeforeReplayRoot_ACU({
+                    chat: liveChat,
+                    isolationKey: currentIsolationKey,
+                    targetMessageIndex: refillTargetIndex,
+                });
+                if (!refillAdmission.allow && !canStageAcrossReplayRoot) {
+                    return { success: false, error: `手动重填续跑被回放根准入阻断${refillAdmission.reason}` };
+                }
+                if (canStageAcrossReplayRoot) {
+                    const templateFingerprint = getTableDataFingerprint_ACU(parseTableTemplateJson_ACU({ stripSeedRows: true }) || {});
+                    boundaryPlan = planTableFillBoundaryStaging_ACU({
+                        runKind: 'manual_refill',
+                        runId: manualRefillSession!.runId,
+                        chatKey: currentChatFileIdentifier_ACU,
+                        isolationKey: currentIsolationKey,
+                        targetSheetKeys: targetKeys,
+                        templateFingerprint,
+                        messageIndices: remainingScopeIndices,
+                        fullCheckpointIndices: [originalFullIndex],
+                    });
+                    const fingerprint = readOriginalFullFrameFingerprint_ACU(liveChat, currentIsolationKey, originalFullIndex);
+                    if (!fingerprint) {
+                        return { success: false, error: `手动重填续跑无法读取原 full checkpoint（#${originalFullIndex}）指纹，已停止。` };
+                    }
+                    stagingRun = createTableFillStagingRunContext_ACU({
+                        runId: boundaryPlan.scope.runId,
+                        chatKey: boundaryPlan.scope.chatKey,
+                        isolationKey: boundaryPlan.scope.isolationKey,
+                        targetSheetKeys: boundaryPlan.scope.targetSheetKeys,
+                        originalFullIndex: boundaryPlan.scope.originalFullIndex,
+                        originalFullFingerprint: fingerprint,
+                        templateFingerprint: boundaryPlan.scope.templateFingerprint,
+                    });
+                    stagingSession = createTableFillStagingSession_ACU(stagingRun);
+                }
+            }
+        } else if (manualRefillEnabled) {
 
             const currentIsolationKey = getCurrentIsolationKey_ACU();
             const refillTargetIndex = contextScopeIndices[contextScopeIndices.length - 1];
@@ -5638,6 +5878,12 @@ export async function orchestrateManualUpdate_ACU(
                         skipWriteTargetAdmission: manualRefillEnabled,
                         // 范围内旧增量已在预清理中删除，提交时无需再做增量替换。
                         replaceExistingIncremental: false,
+                        ...(manualRefillSession ? {
+                            buildManualRefillSession: (bucket) => buildNextManualRefillSessionSnapshot_ACU(manualRefillSession!, bucket),
+                            onManualRefillSessionPersisted: (persistedSession) => {
+                                manualRefillSession = persistedSession;
+                            },
+                        } : {}),
                     });
                     committedBucketCount += chunkResult.committedBucketCount;
                     postCommitWarnings.push(...(chunkResult.postCommitWarnings || []));
@@ -5707,6 +5953,12 @@ export async function orchestrateManualUpdate_ACU(
                                 onProgress: options.onProgress,
                                 skipWriteTargetAdmission: true,
                                 replaceExistingIncremental: false,
+                                ...(manualRefillSession ? {
+                                    buildManualRefillSession: (bucket) => buildNextManualRefillSessionSnapshot_ACU(manualRefillSession!, bucket),
+                                    onManualRefillSessionPersisted: (persistedSession) => {
+                                        manualRefillSession = persistedSession;
+                                    },
+                                } : {}),
                             });
                             committedBucketCount += postResult.committedBucketCount;
                             postCommitWarnings.push(...(postResult.postCommitWarnings || []));
@@ -5782,10 +6034,11 @@ export async function orchestrateManualUpdate_ACU(
                 const isolationKey = getCurrentIsolationKey_ACU();
                 const snapshotResult = await commitManualRefillSheetSnapshotInRangeAtomic_ACU({
                     isolationKey,
-                    targetMessageIndices: refillCleanupIndices,
+                    targetMessageIndices: effectiveRefillCleanupIndices,
                     targetSheetKeys: targetKeys,
                     snapshotData: completedData,
                     templateData: frozenManualRefillTemplateData || undefined,
+                    ...(manualRefillSession ? { clearManualRefillSessionRunId: manualRefillSession.runId } : {}),
                 });
                 if (!snapshotResult.success) {
                     logError_ACU('[Manual Refill] 重填完成后提交完整单表 checkpoint 失败:', snapshotResult.error);
@@ -5844,7 +6097,15 @@ export async function orchestrateManualUpdate_ACU(
             logWarn_ACU('自动合并总结检测失败:', e);
         }
 
-        return { success: true, autoMergeTriggered, autoMergeSuccess, checkpointWarning, ...(postCommitWarnings.length ? { postCommitWarnings } : {}) };
+        return {
+            success: true,
+            autoMergeTriggered,
+            autoMergeSuccess,
+            checkpointWarning,
+            ...(manualRefillSession ? { manualRefillSessionRunId: manualRefillSession.runId } : {}),
+            ...(resumedFromSession ? { resumedFromSession: true } : {}),
+            ...(postCommitWarnings.length ? { postCommitWarnings } : {}),
+        };
     } catch (error: any) {
         // 破坏性清理尚未开始：异常原样抛出（可能是普通路径的配置/准入错误，或
         // 发生在清理之前的规划错误），不吞掉，由上层按既有方式处理。

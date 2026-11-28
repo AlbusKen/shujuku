@@ -10,7 +10,7 @@ import { runTableWriteTransaction_ACU, type TableWriteTransactionContext_ACU } f
 import { ensureNoActiveProvisionalBridgeForCurrentScope_ACU } from './manual-catch-up-provisional-bridge';
 import { isAppendedOperationsWriteRejection_ACU, isCompatReadonlyWriteRejection_ACU } from './storage-frame-v2-replay';
 import type { ReplaceExistingIncrementalOptions_ACU } from './storage-frame-v2-persist';
-import type { ManualRefillProgressV2_ACU, TableCheckpointV2_ACU, TableMutationOperationV2_ACU, TableMutationSourceV2_ACU, TableWriteConflictUnitV2_ACU } from './storage-frame-v2-types';
+import type { ManualRefillProgressV2_ACU, ManualRefillSessionStateV1_ACU, TableCheckpointV2_ACU, TableMutationOperationV2_ACU, TableMutationSourceV2_ACU, TableWriteConflictUnitV2_ACU } from './storage-frame-v2-types';
 import { buildSqlSheetBatchOperations_ACU, rebindSqlMutationIdentifiers_ACU } from './sql-table-service';
 import {
   extractPendingSheetKeysFromWriteSet_ACU,
@@ -39,6 +39,7 @@ export interface TableUpdateCommitPersistOverride_ACU {
   forceCheckpoint?: boolean;
   checkpointReason?: TableCheckpointV2_ACU['reason'];
   manualRefillProgress?: ManualRefillProgressV2_ACU;
+  manualRefillSessionV1?: ManualRefillSessionStateV1_ACU | null;
   replaceExistingIncremental?: ReplaceExistingIncrementalOptions_ACU;
   strictSave?: boolean;
 }
@@ -73,6 +74,7 @@ export interface RunTableUpdateCommitOptions_ACU extends TableFillRequestGuard_A
   trackAsUpdate?: boolean;
   operations?: TableMutationOperationV2_ACU[];
   manualRefillProgress?: ManualRefillProgressV2_ACU;
+  manualRefillSessionV1?: ManualRefillSessionStateV1_ACU | null;
   replaceExistingIncremental?: ReplaceExistingIncrementalOptions_ACU;
   strictSave?: boolean;
   /** manual catch-up provisional bridge run 的 runId；透传给 V2 persist 做准入校验。 */
@@ -376,6 +378,9 @@ export async function runTableUpdateCommit_ACU<T>(
               forceCheckpoint: persistOptions.forceCheckpoint,
               checkpointReason: persistOptions.checkpointReason,
               manualRefillProgress: persistOptions.manualRefillProgress ?? options.manualRefillProgress,
+              ...((persistOptions.manualRefillSessionV1 !== undefined || options.manualRefillSessionV1 !== undefined)
+                ? { manualRefillSessionV1: persistOptions.manualRefillSessionV1 !== undefined ? persistOptions.manualRefillSessionV1 : options.manualRefillSessionV1 }
+                : {}),
               replaceExistingIncremental: persistOptions.replaceExistingIncremental ?? options.replaceExistingIncremental,
               strictSave: persistOptions.strictSave ?? options.strictSave,
               manualCatchUpRunId: options.manualCatchUpRunId,

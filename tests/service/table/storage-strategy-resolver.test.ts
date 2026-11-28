@@ -131,6 +131,34 @@ describe('storage-strategy-resolver', () => {
     ], 'tag-a', isolationConfig).mode).toBe('empty');
   });
 
+  it('Issue #83B：仅包含 manualRefillSessionV1 的隔离槽既不判为 v2 也不判为 legacy-v1，解析为 empty', () => {
+    const tagData = {
+      manualRefillSessionV1: {
+        version: 1,
+        kind: 'manual_refill_session',
+        runId: 'run-1',
+        isolationKey: 'tag-a',
+        status: 'in_progress',
+        rangeIndices: [1, 3],
+        targetSheetKeys: ['sheet_0'],
+        templateFingerprint: 'fp-1',
+        batchSize: 1,
+        perSheetProgress: {
+          sheet_0: { lastCommittedMessageIndex: 1, committedBatchCount: 1, updatedAt: 100 },
+        },
+        createdAt: 100,
+        updatedAt: 100,
+      },
+    };
+
+    expect(hasV2TableHistoryEvidence_ACU(tagData)).toBe(false);
+    expect(isV2TagData_ACU(tagData)).toBe(false);
+    expect(isLegacyV1TagData_ACU(tagData)).toBe(false);
+    expect(resolveTableStorageStrategy_ACU([
+      aiMessage({ TavernDB_ACU_IsolatedData: { 'tag-a': tagData } }),
+    ], 'tag-a', isolationConfig)).toEqual({ mode: 'empty' });
+  });
+
   it('跨消息混合 V2 与 legacy 时 legacy-v1 优先并保留审计原因', () => {
     const result = resolveTableStorageStrategy_ACU([
       aiMessage({

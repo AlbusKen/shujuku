@@ -2427,3 +2427,71 @@ describe('patchIsolatedTagMetadata_ACU', () => {
     expect(tagData.independentData).toEqual(original.independentData);
   });
 });
+
+describe('Issue #83B manualRefillSessionV1 按表清理与空壳回收保护', () => {
+  const makeSession = (sheets: string[]) => ({
+    version: 1,
+    kind: 'manual_refill_session',
+    runId: 'run-83b',
+    isolationKey: 'tag1',
+    status: 'in_progress',
+    rangeIndices: [1, 3],
+    targetSheetKeys: [...sheets],
+    templateFingerprint: 'tpl-fp',
+    batchSize: 1,
+    perSheetProgress: Object.fromEntries(
+      sheets.map(k => [k, { lastCommittedMessageIndex: 1, committedBatchCount: 1, updatedAt: 100 }]),
+    ),
+    createdAt: 100,
+    updatedAt: 100,
+  });
+
+  it('按表裁剪部分目标表时只移除已删表，保留其余表会话且不误回收 tag 槽', () => {
+    const msg: any = {
+      TavernDB_ACU_IsolatedData: {
+        tag1: {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            logEntries: [{
+              seq: 1,
+              filledSheetKeys: ['sheet_0'],
+              changedSheetKeys: ['sheet_0'],
+              operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: 'r1', cells: ['r1'] }],
+            }],
+          },
+          manualRefillSessionV1: makeSession(['sheet_0', 'sheet_1']),
+        },
+      },
+    };
+
+    expect(purgeSheetKeysFromMessageForIsolation_ACU(msg, 'tag1', ['sheet_0'])).toBe(true);
+    // storageFrame 空壳被回收，但因 manualRefillSessionV1 仍有 sheet_1，tag1 必须保留。
+    expect(msg.TavernDB_ACU_IsolatedData.tag1.storageFrame).toBeUndefined();
+    expect(msg.TavernDB_ACU_IsolatedData.tag1.manualRefillSessionV1.targetSheetKeys).toEqual(['sheet_1']);
+    expect(Object.keys(msg.TavernDB_ACU_IsolatedData.tag1.manualRefillSessionV1.perSheetProgress)).toEqual(['sheet_1']);
+  });
+
+  it('裁剪最后一张表后移除 manualRefillSessionV1 并回收空壳隔离槽', () => {
+    const msg: any = {
+      TavernDB_ACU_IsolatedData: {
+        tag1: {
+          _acu_storage_version: 2,
+          storageFrame: {
+            version: 2,
+            logEntries: [{
+              seq: 1,
+              filledSheetKeys: ['sheet_0'],
+              changedSheetKeys: ['sheet_0'],
+              operations: [{ kind: 'row_upsert', sheetKey: 'sheet_0', rowId: 'r1', cells: ['r1'] }],
+            }],
+          },
+          manualRefillSessionV1: makeSession(['sheet_0']),
+        },
+      },
+    };
+
+    expect(purgeSheetKeysFromMessage_ACU(msg, ['sheet_0'])).toBe(true);
+    expect(msg.TavernDB_ACU_IsolatedData).toBeUndefined();
+  });
+});
