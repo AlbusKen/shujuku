@@ -8,9 +8,10 @@ import { projectZeroLayerHistory_ACU, isZeroLayerHistoryRetained_ACU,
   zeroLayerHistoryStatus_ACU } from './history-projection';
 import type { ZeroLayerHistoryApi_ACU, ZeroLayerHistoryItem_ACU, ZeroLayerHistoryPage_ACU,
   ZeroLayerHistoryQuery_ACU, ZeroLayerHistoryResult_ACU, ZeroLayerSessionSnapshot_ACU,
-  ZeroLayerHistoryChange_ACU } from './history-model';
+  ZeroLayerHistoryChange_ACU, ZeroLayerTableQuery_ACU, ZeroLayerTableSnapshot_ACU } from './history-model';
 import { subscribeZeroLayerChanges_ACU } from './notifications';
 import { projectZeroLayerPublicState_ACU } from './public-state';
+import { readZeroLayerBranchTableData_ACU } from './table-state';
 
 type Binding_ACU = { context: ZeroLayerCarrierContext_ACU; sessionId: string; branchId: string; token: string };
 type Cursor_ACU = { direction: 'older' | 'newer'; boundary: string };
@@ -106,6 +107,7 @@ export class ZeroLayerHistoryReader_ACU implements ZeroLayerHistoryApi_ACU {
     });
     const api = Object.freeze({
       getSnapshot: query => reader.getSnapshot(query), readHistory: query => reader.readHistory(query),
+      readTable: query => reader.readTable(query),
       subscribe: listener => reader.subscribe(listener),
     } satisfies ZeroLayerHistoryApi_ACU);
     return { api, revoke };
@@ -139,6 +141,10 @@ export class ZeroLayerHistoryReader_ACU implements ZeroLayerHistoryApi_ACU {
     const items = this.project(envelope);
     const published = projectZeroLayerHistory_ACU(envelope);
     const body = published[published.length - 1]?.body ?? envelope.seedBody;
+    const pendingTableBackfillCount = published.filter(item => {
+      const t = envelope.turns.find(turn => turn.turnId === item.turnId);
+      return t?.tableBackfillStatus === 'pending';
+    }).length;
     const token = crypto.randomUUID();
     const snapshot: Snapshot_ACU = { binding, items, cursors: new Map(), value: {
       protocolVersion: 1, sessionId: envelope.sessionId, branchId: envelope.activeBranchId,
@@ -146,7 +152,9 @@ export class ZeroLayerHistoryReader_ACU implements ZeroLayerHistoryApi_ACU {
       revision: envelope.revision, headTurnId: published[published.length - 1]?.turnId ?? null,
       currentBody: body,
       currentPublicState: projectZeroLayerPublicState_ACU(body),
-      status: zeroLayerHistoryStatus_ACU(envelope), snapshotToken: token,
+      status: zeroLayerHistoryStatus_ACU(envelope),
+      pendingTableBackfillCount,
+      snapshotToken: token,
     } };
     this.snapshots.set(token, snapshot);
     return snapshot;
@@ -225,6 +233,52 @@ export class ZeroLayerHistoryReader_ACU implements ZeroLayerHistoryApi_ACU {
   private page(snapshot: Snapshot_ACU, items: readonly ZeroLayerHistoryItem_ACU[], nextCursor: string | null): ZeroLayerHistoryPage_ACU {
     return structuredClone({ items, snapshotToken: snapshot.value.snapshotToken,
       sourceRevision: snapshot.value.revision, nextCursor, hasMore: nextCursor !== null });
+  }
+
+  async readTable(raw: ZeroLayerTableQuery_ACU): Promise<ZeroLayerHistoryResult_ACU<ZeroLayerTableSnapshot_ACU>> {
+    try {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        throw new ReadError('invalid-query', '表格查询参数必须为对象。');
+      }
+      if (raw.version !== 1) {
+        throw new ReadError('unsupported-version', '不支持的零层协议版本。');
+      }
+      const allowedKeys = new Set(['version', 'snapshotToken']);
+      for (const key of Object.keys(raw)) {
+        if (!allowedKeys.has(key)) throw new ReadError('invalid-query', `不支持的表格查询字段：${key}`);
+      }
+      if (raw.snapshotToken !== undefined && (typeof raw.snapshotToken !== 'string' || !raw.snapshotToken.trim())) {
+        throw new ReadError('invalid-query', 'snapshotToken 必须为非空字符串。');
+      }
+      const requestedSnapshot = raw.snapshotToken ? this.snapshots.get(raw.snapshotToken) : undefined;
+      if (raw.snapshotToken && !requestedSnapshot) {
+        throw new ReadError('snapshot-stale', '快照已失效，请重新读取。');
+      }
+      const { envelope, binding } = await this.readCurrent();
+      if (requestedSnapshot) {
+        if (requestedSnapshot.binding !== binding) {
+          throw new ReadError('scope-changed', '快照所属作用域已变化。');
+        }
+        if (envelope.revision !== requestedSnapshot.value.revision) {
+          this.snapshots.delete(requestedSnapshot.value.snapshotToken);
+          throw new ReadError('snapshot-stale', '快照之后存档已更新，请重新取得快照再读取表格。');
+        }
+      }
+      const snapshot = requestedSnapshot ?? this.remember(envelope, binding);
+      const tableData = readZeroLayerBranchTableData_ACU(envelope);
+      return {
+        ok: true,
+        value: structuredClone({
+          protocolVersion: 1 as const,
+          sessionId: snapshot.value.sessionId,
+          branchId: snapshot.value.branchId,
+          revision: snapshot.value.revision,
+          headTurnId: snapshot.value.headTurnId,
+          snapshotToken: snapshot.value.snapshotToken,
+          tableData,
+        }),
+      };
+    } catch (error) { return zeroLayerHistoryFailure_ACU(error); }
   }
 
   subscribe(listener: (change: ZeroLayerHistoryChange_ACU) => void): () => void {

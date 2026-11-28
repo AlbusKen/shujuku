@@ -86,7 +86,7 @@ function commitWorldInfoRounds(value: string | number) {
 }
 const locked = computed(() => status.working.value || status.view.value.status === 'loading');
 const presetOptions = computed(() => presets.presets.filter(item => item.apiMode === 'custom'
-  && !item.apiConfig.useMainApi && !item.apiConfig.sendViaTavern && item.apiConfig.url && item.apiConfig.model)
+  && !item.apiConfig.useMainApi && item.apiConfig.url && item.apiConfig.model)
   .map(item => ({ value: item.name, label: item.name })));
 const enableBlockedReason = computed(() => {
   if (status.working.value) return '零层操作进行中，请等待完成或停止任务。';
@@ -98,7 +98,7 @@ const enableBlockedReason = computed(() => {
   return '';
 });
 const activationHint = computed(() => !presetOptions.value.length
-  ? '请先在 API 页配置直连预设（端点与模型），再选择预设并打开“当前聊天启用零层”。'
+  ? '请先在 API 页配置自定义预设（端点与模型），再选择预设并打开“当前聊天启用零层”。'
   : '先选择正文独立 API 预设，打开“当前聊天启用零层”，再输入行动并发送逻辑回合。');
 const sendBlockedReason = computed(() => {
   if (status.working.value) return '零层操作进行中，请等待完成或停止任务。';

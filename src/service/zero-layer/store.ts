@@ -6,9 +6,10 @@ import {
   physicalHistorySnapshot_ACU, readZeroLayerCarrier_ACU, type ZeroLayerCarrierContext_ACU,
   isolateZeroLayerCarrierCandidate_ACU, readZeroLayerCarrierCandidate_ACU,
 } from './carrier-context';
-import { ZERO_LAYER_CARRIER_FIELD_ACU, ZeroLayerError_ACU, type ZeroLayerEnvelope_ACU } from './model';
+import { ZERO_LAYER_CARRIER_FIELD_ACU, ZeroLayerError_ACU, type ZeroLayerEnvelope_ACU, type ZeroLayerTableResult_ACU } from './model';
 import { notifyZeroLayerChanges_ACU } from './notifications';
-import { validateZeroLayerEnvelope_ACU, validateZeroLayerContinuationReceipt_ACU } from './validation';
+import { validateZeroLayerEnvelope_ACU, validateZeroLayerContinuationReceipt_ACU, validateZeroLayerTableResult_ACU } from './validation';
+import { getPublishedZeroLayerPath_ACU } from './timeline';
 import type { ContinuationLogicalRef_ACU } from '../continuation/model';
 import { getTableDataFingerprint_ACU } from '../table/table-data-upgrade-audit';
 import { runChatWriteExclusiveWithTableWrites_ACU } from '../table/table-write-transaction';
@@ -242,6 +243,110 @@ export class ZeroLayerStore_ACU {
       if (sameEnvelope_ACU(current, candidate)) return current;
       candidate.revision += 1;
       return this.persist(context, current, validateZeroLayerEnvelope_ACU(candidate));
+    });
+  }
+
+  /**
+   * 异步锚点表格回填：在同一零层写队列内原子地凭 (turnId, attemptId, floorId) 精确定位已发布锚点回合，
+   * 写入真实填表结果，并向后顺延同步给所有已提前发布但尚未填表的后续 pending 回合（以及在途下一轮的 tableInput）。
+   * 若用户已切分支或回档导致锚点不在当前已发布链上，静默返回 applied: false，绝不污染新分支。
+   */
+  commitAnchoredTableBackfill(
+    sessionId: string,
+    branchId: string,
+    payload: {
+      turnId: string;
+      attemptId: string;
+      floorId: string;
+      result: ZeroLayerTableResult_ACU;
+      status: 'settled' | 'skipped';
+    },
+  ): Promise<{ applied: boolean; reason?: string; envelope?: ZeroLayerEnvelope_ACU; propagatedCount?: number }> {
+    const context = captureZeroLayerCarrier_ACU();
+    const frozen = structuredClone(payload);
+    return this.enqueue(context, async () => {
+      if (ZeroLayerStore_ACU.unknown.has(context.key)) {
+        return { applied: false, reason: 'persist-unknown' };
+      }
+      const current = readZeroLayerCarrier_ACU(context);
+      if (!current?.enabled || current.exitManifest || current.sessionId !== sessionId || current.activeBranchId !== branchId) {
+        return { applied: false, reason: 'scope-changed' };
+      }
+      await this.verifySource(context, current);
+      const candidate = structuredClone(current);
+      const path = getPublishedZeroLayerPath_ACU(candidate);
+      const anchorIdx = path.findIndex(item => item.turnId === frozen.turnId
+        && item.attemptId === frozen.attemptId
+        && item.assistantFloor.floorId === frozen.floorId);
+      if (anchorIdx < 0) {
+        return { applied: false, reason: 'anchor-not-on-active-path' };
+      }
+      const anchorTurn = candidate.turns.find(item => item.turnId === frozen.turnId && item.attemptId === frozen.attemptId);
+      if (!anchorTurn || anchorTurn.phase !== 'published' || anchorTurn.tableBackfillStatus !== 'pending') {
+        return { applied: false, reason: 'anchor-not-pending' };
+      }
+
+      validateZeroLayerTableResult_ACU(frozen.result, anchorTurn.assistantFloor.floorId);
+      const nextAnchorTable = structuredClone(frozen.result);
+      anchorTurn.assistantFloor.data.table = nextAnchorTable;
+      anchorTurn.tableBackfillStatus = frozen.status;
+      anchorTurn.tableCandidate = undefined;
+      anchorTurn.updatedAt = Math.max(Date.now(), anchorTurn.updatedAt);
+
+      const updateTableReceipt = (targetTurn: typeof anchorTurn, tableRes: ZeroLayerTableResult_ACU) => {
+        const fp = getTableDataFingerprint_ACU(tableRes);
+        const receipt = targetTurn.effectReceipts.find(item => item.kind === 'table');
+        if (receipt) {
+          receipt.fingerprint = fp;
+          receipt.status = 'durable';
+        } else {
+          targetTurn.effectReceipts.push({
+            effectId: JSON.stringify([candidate.sessionId, targetTurn.turnId, targetTurn.attemptId, 'table']),
+            kind: 'table',
+            status: 'durable',
+            fingerprint: fp,
+          });
+        }
+      };
+      updateTableReceipt(anchorTurn, nextAnchorTable);
+
+      // 前向顺延同步：若锚点之后已有抢先发布正文的 pending 回合（Turn N+1, N+2...），
+      // 把 Turn N 刚回填的真表同步更新为它们的占位表与填表基底，保证队列继续跑 Turn N+1 时基于最新真表增量更新。
+      let propagatedCount = 0;
+      for (let i = anchorIdx + 1; i < path.length; i += 1) {
+        const laterRef = path[i];
+        const laterTurn = candidate.turns.find(item => item.turnId === laterRef.turnId && item.attemptId === laterRef.attemptId);
+        if (!laterTurn || laterTurn.tableBackfillStatus !== 'pending') break;
+        const propagatedResult: ZeroLayerTableResult_ACU = {
+          floorId: laterTurn.assistantFloor.floorId,
+          tableData: structuredClone(nextAnchorTable.tableData),
+          completedAiFloorBySheetKey: structuredClone(nextAnchorTable.completedAiFloorBySheetKey),
+          filledSheetKeys: [],
+        };
+        validateZeroLayerTableResult_ACU(propagatedResult, laterTurn.assistantFloor.floorId);
+        laterTurn.assistantFloor.data.table = propagatedResult;
+        updateTableReceipt(laterTurn, propagatedResult);
+        if (laterTurn.tableInput) {
+          laterTurn.tableInput.tableData = structuredClone(nextAnchorTable.tableData);
+          laterTurn.tableInput.completedAiFloorBySheetKey = structuredClone(nextAnchorTable.completedAiFloorBySheetKey);
+        }
+        laterTurn.updatedAt = Math.max(Date.now(), laterTurn.updatedAt);
+        propagatedCount += 1;
+      }
+
+      // 若此刻正有一轮下一层正文在途生成（prepared / dispatching / response-durable），同步刷新它的 tableInput 基底
+      for (const activeTurn of candidate.turns) {
+        if (activeTurn.branchId !== branchId) continue;
+        if (['published', 'failed', 'cancelled'].includes(activeTurn.phase)) continue;
+        if (activeTurn.tableInput) {
+          activeTurn.tableInput.tableData = structuredClone(nextAnchorTable.tableData);
+          activeTurn.tableInput.completedAiFloorBySheetKey = structuredClone(nextAnchorTable.completedAiFloorBySheetKey);
+        }
+      }
+
+      candidate.revision += 1;
+      const saved = await this.persist(context, current, validateZeroLayerEnvelope_ACU(candidate));
+      return { applied: true, envelope: saved, propagatedCount };
     });
   }
 

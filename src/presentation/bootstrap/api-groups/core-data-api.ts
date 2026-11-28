@@ -22,6 +22,7 @@ import { isVectorPipelineEnabledForCurrentChat_ACU } from '../../../service/fill
 
 import { enqueueSummaryVectorIndexFlush_ACU } from '../../../service/vector/summary-vector-index-flush-queue';
 import { importTableJsonThroughCommit_ACU } from '../../../service/table/table-import-service';
+import { readCurrentZeroLayerTableDataSync_ACU } from '../../../service/zero-layer/table-state';
 import type { ApiGroupContext } from './callback-api';
 
 function shouldPersistImportedTableJson_ACU(options: any): boolean {
@@ -33,8 +34,10 @@ function shouldPersistImportedTableJson_ACU(options: any): boolean {
 
 export function createCoreDataApi(ctx: ApiGroupContext): Record<string, Function> {
     return {
-        // 导出当前表格数据
+        // 导出当前表格数据（零层启用态下只读返回当前分支 head 的逻辑表副本；普通模式返回内存全局表）
         exportTableAsJson: function() {
+            const zeroLayer = readCurrentZeroLayerTableDataSync_ACU();
+            if (zeroLayer.active) return zeroLayer.tableData;
             return currentJsonTableData_ACU || {};
         },
 

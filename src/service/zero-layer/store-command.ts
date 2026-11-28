@@ -28,7 +28,8 @@ export type ZeroLayerCommand_ACU =
   | { type: 'prepare-plot'; turnId: string; attemptId: string; candidate: ZeroLayerPlotCandidate_ACU;
       receipt: ZeroLayerEffectReceipt_ACU }
   | { type: 'record-effect'; turnId: string; attemptId: string; receipt: ZeroLayerEffectReceipt_ACU;
-      userData?: Record<string, unknown>; assistantData?: Record<string, unknown> }
+      userData?: Record<string, unknown>; assistantData?: Record<string, unknown>;
+      tableBackfillStatus?: 'pending' | 'settled' | 'skipped' }
   | ZeroLayerCheckpointCommand_ACU
   | ZeroLayerBridgeCommand_ACU
   | ZeroLayerBranchCommand_ACU;
@@ -77,6 +78,9 @@ export function mergeZeroLayerEffectReceipt_ACU(
   turn.effectReceipts.push(structuredClone(command.receipt));
   turn.userFloor.data = userData;
   turn.assistantFloor.data = assistantData;
+  if (command.tableBackfillStatus !== undefined) {
+    turn.tableBackfillStatus = command.tableBackfillStatus;
+  }
   turn.updatedAt = Math.max(Date.now(), turn.updatedAt);
   return true;
 }

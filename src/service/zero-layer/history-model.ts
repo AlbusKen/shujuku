@@ -1,3 +1,4 @@
+import type { TableDataObject_ACU } from '../../shared/models/table-data';
 import type { ZeroLayerFloorRef_ACU } from './timeline';
 
 export const ZERO_LAYER_HISTORY_VERSION_ACU = 1;
@@ -25,6 +26,7 @@ export interface ZeroLayerSessionSnapshot_ACU {
   readonly currentBody: string;
   readonly currentPublicState: ZeroLayerPublicState_ACU;
   readonly status: ZeroLayerHistoryStatus_ACU;
+  readonly pendingTableBackfillCount?: number;
   readonly snapshotToken: string;
 }
 export interface ZeroLayerHistoryItem_ACU {
@@ -62,8 +64,22 @@ export interface ZeroLayerHistoryChange_ACU {
   readonly revision: number;
   readonly headTurnId: string | null;
 }
+export interface ZeroLayerTableQuery_ACU {
+  readonly version: 1;
+  readonly snapshotToken?: string;
+}
+export interface ZeroLayerTableSnapshot_ACU {
+  readonly protocolVersion: 1;
+  readonly sessionId: string;
+  readonly branchId: string;
+  readonly revision: number;
+  readonly headTurnId: string | null;
+  readonly snapshotToken: string;
+  readonly tableData: TableDataObject_ACU;
+}
 export interface ZeroLayerHistoryApi_ACU {
   getSnapshot(query: { readonly version: 1 }): Promise<ZeroLayerHistoryResult_ACU<ZeroLayerSessionSnapshot_ACU>>;
   readHistory(query: ZeroLayerHistoryQuery_ACU): Promise<ZeroLayerHistoryResult_ACU<ZeroLayerHistoryPage_ACU>>;
+  readTable(query: ZeroLayerTableQuery_ACU): Promise<ZeroLayerHistoryResult_ACU<ZeroLayerTableSnapshot_ACU>>;
   subscribe(listener: (change: ZeroLayerHistoryChange_ACU) => void): () => void;
 }

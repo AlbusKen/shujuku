@@ -40,6 +40,7 @@ interface ActiveTurn_ACU {
   marker: string;
   promptContext: ChatCompletionPromptContext_ACU;
   messages: unknown[] | null;
+  turnUserMessage: object | null;
   request: object | null;
   claimed: boolean;
   dispatchStarted: boolean;
@@ -55,6 +56,7 @@ export class ZeroLayerSession_ACU {
   private active: ActiveTurn_ACU | null = null;
   private preparing = false;
   private recoveryController: AbortController | null = null;
+  private recoveryContext: ZeroLayerCarrierContext_ACU | null = null;
   private epoch = 0;
   constructor(
     private readonly store = new ZeroLayerStore_ACU(),
@@ -63,11 +65,11 @@ export class ZeroLayerSession_ACU {
 
   hasActiveTurn(): boolean { return this.active !== null || this.preparing || this.recoveryController !== null; }
 
-  /** 在途正文租约的物理源是否仍一致；无在途正文时返回 null（准备与恢复步骤各自逐步复核）。 */
+  /** 在途正文或启停/恢复租约的物理源是否仍一致；无在途租约时返回 null。 */
   isSourceCurrent(): boolean | null {
-    const active = this.active;
-    if (!active) return null;
-    try { assertZeroLayerCarrier_ACU(active.context); return true; } catch { return false; }
+    const context = this.active?.context ?? this.recoveryContext;
+    if (!context) return null;
+    try { assertZeroLayerCarrier_ACU(context); return true; } catch { return false; }
   }
 
   async prepare(input: string, requiredEffects: ZeroLayerEffectReceipt_ACU['kind'][], continuationIdentity?: TurnAttemptIdentity_ACU): Promise<ZeroLayerPreparedInvocation_ACU> {
@@ -157,7 +159,7 @@ export class ZeroLayerSession_ACU {
         allTablesJson: structuredClone(turn.tableInput.tableData), storageMode: turn.tableInput.storageMode,
         ...(turn.plotCandidate ? { plotCandidate: structuredClone(turn.plotCandidate) } : {}),
         assertCurrent: () => this.assertCurrent(active) },
-      messages: null, request: null, claimed: false, dispatchStarted: false, responseSaved: false,
+      messages: null, turnUserMessage: null, request: null, claimed: false, dispatchStarted: false, responseSaved: false,
       settlementFailed: false, previewSequence: 0, previewOpen: false,
     };
     return active;
@@ -233,16 +235,26 @@ export class ZeroLayerSession_ACU {
     const turn = active.envelope.turns.find(item => item.turnId === active.turnId)!;
     if (!turn.plotCandidate) throw new ZeroLayerError_ACU('effects-pending', '正文装配缺少已确认的剧情候选。');
     if (turn.plotCandidate.finalMessage) replacement.push({ role: 'system', content: turn.plotCandidate.finalMessage });
-    replacement.push({ role: 'user', content: turn.input });
+    const turnUserMessage = { role: 'user', content: turn.input };
+    replacement.push(turnUserMessage);
     if (suffix.trim()) replacement.push({ ...message, content: suffix });
     data.chat.splice(index, 1, ...replacement);
     active.messages = data.chat;
+    active.turnUserMessage = turnUserMessage;
+  }
+
+  private isBoundSettingsMessages(active: ActiveTurn_ACU, messages: unknown[]): boolean {
+    if (messages === active.messages) return true;
+    // SillyTavern 1.19+ 在 createGenerationParameters 中会对 messages 执行 filter() 产生新数组引用，但消息对象引用保持不变。
+    if (!active.messages || !active.turnUserMessage || !messages.includes(active.turnUserMessage)) return false;
+    const filtered = active.messages.filter(msg => msg && typeof msg === 'object');
+    return messages.length === filtered.length && messages.every((msg, idx) => msg === filtered[idx]);
   }
 
   bindSettings(data: Record<string, unknown>): void {
     const active = this.active;
     if (!active?.messages || !Array.isArray(data?.messages)) return;
-    if (data.messages !== active.messages) return;
+    if (!this.isBoundSettingsMessages(active, data.messages)) return;
     this.assertCurrent(active);
     if (active.request && active.request !== data) throw new ZeroLayerError_ACU('revision-conflict', '本轮已绑定其他请求对象。');
     active.request = data;
@@ -351,6 +363,7 @@ export class ZeroLayerSession_ACU {
     const epoch = this.epoch;
     const controller = new AbortController();
     this.recoveryController = controller;
+    this.recoveryContext = context;
     const assertLease = () => {
       if (epoch !== this.epoch || this.recoveryController !== controller) {
         throw new ZeroLayerError_ACU('scope-changed', '补结算期间会话已失效。');
@@ -364,7 +377,10 @@ export class ZeroLayerSession_ACU {
       if (!envelope?.enabled) throw new ZeroLayerError_ACU('mode-disabled', '零层模式未启用。');
       return await this.settleAndPublish(envelope, turnId, attemptId, controller.signal, assertLease);
     } finally {
-      if (this.recoveryController === controller) this.recoveryController = null;
+      if (this.recoveryController === controller) {
+        this.recoveryController = null;
+        this.recoveryContext = null;
+      }
     }
   }
 
@@ -375,6 +391,7 @@ export class ZeroLayerSession_ACU {
     const epoch = this.epoch;
     const controller = new AbortController();
     this.recoveryController = controller;
+    this.recoveryContext = context;
     const assertLease = () => {
       if (epoch !== this.epoch || this.recoveryController !== controller || controller.signal.aborted) {
         throw new ZeroLayerError_ACU('scope-changed', '放弃回合的租约已失效。');
@@ -389,7 +406,10 @@ export class ZeroLayerSession_ACU {
       assertLease();
       return saved;
     } finally {
-      if (this.recoveryController === controller) this.recoveryController = null;
+      if (this.recoveryController === controller) {
+        this.recoveryController = null;
+        this.recoveryContext = null;
+      }
     }
   }
 
@@ -401,6 +421,7 @@ export class ZeroLayerSession_ACU {
     const epoch = this.epoch;
     const controller = new AbortController();
     this.recoveryController = controller;
+    this.recoveryContext = context;
     const assertLease = () => {
       if (epoch !== this.epoch || this.recoveryController !== controller || controller.signal.aborted) {
         throw new ZeroLayerError_ACU('scope-changed', '分支操作租约已失效。');
@@ -423,7 +444,10 @@ export class ZeroLayerSession_ACU {
       }
       return confirmed;
     } finally {
-      if (this.recoveryController === controller) this.recoveryController = null;
+      if (this.recoveryController === controller) {
+        this.recoveryController = null;
+        this.recoveryContext = null;
+      }
     }
   }
 
@@ -445,6 +469,7 @@ export class ZeroLayerSession_ACU {
     const epoch = this.epoch;
     const controller = new AbortController();
     this.recoveryController = controller;
+    this.recoveryContext = context;
     const assertLease = () => {
       if (epoch !== this.epoch || this.recoveryController !== controller || controller.signal.aborted) {
         throw new ZeroLayerError_ACU('scope-changed', '退出操作租约已失效；已保存意图须显式恢复。');
@@ -457,7 +482,10 @@ export class ZeroLayerSession_ACU {
       assertLease();
       return saved;
     } finally {
-      if (this.recoveryController === controller) this.recoveryController = null;
+      if (this.recoveryController === controller) {
+        this.recoveryController = null;
+        this.recoveryContext = null;
+      }
     }
   }
 
@@ -477,6 +505,7 @@ export class ZeroLayerSession_ACU {
     const epoch = this.epoch;
     const controller = new AbortController();
     this.recoveryController = controller;
+    this.recoveryContext = context;
     const assertLease = () => {
       if (epoch !== this.epoch || this.recoveryController !== controller || controller.signal.aborted) {
         throw new ZeroLayerError_ACU('scope-changed', '零层启用或桥接恢复已失效。');
@@ -513,7 +542,10 @@ export class ZeroLayerSession_ACU {
       }
       return confirmed;
     } finally {
-      if (this.recoveryController === controller) this.recoveryController = null;
+      if (this.recoveryController === controller) {
+        this.recoveryController = null;
+        this.recoveryContext = null;
+      }
     }
   }
 
@@ -524,6 +556,7 @@ export class ZeroLayerSession_ACU {
     const epoch = this.epoch;
     const controller = new AbortController();
     this.recoveryController = controller;
+    this.recoveryContext = context;
     const assertLease = () => {
       if (epoch !== this.epoch || this.recoveryController !== controller || controller.signal.aborted) {
         throw new ZeroLayerError_ACU('scope-changed', 'checkpoint 恢复已失效或中止。');
@@ -536,7 +569,10 @@ export class ZeroLayerSession_ACU {
       if (!envelope?.enabled) throw new ZeroLayerError_ACU('mode-disabled', '零层模式未启用。');
       return await synchronizeZeroLayerCheckpoints_ACU(this.store, envelope, controller.signal, assertLease);
     } finally {
-      if (this.recoveryController === controller) this.recoveryController = null;
+      if (this.recoveryController === controller) {
+        this.recoveryController = null;
+        this.recoveryContext = null;
+      }
     }
   }
 
@@ -600,6 +636,7 @@ export class ZeroLayerSession_ACU {
     this.epoch += 1;
     this.cancel();
     this.active = null;
+    this.recoveryContext = null;
   }
 
   /** 仅临时展示；终止通知保留原身份，不能触发保存或把候选当 published。 */

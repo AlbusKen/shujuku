@@ -1,6 +1,8 @@
 import { exitZeroLayerForPage_ACU, recoverZeroLayerExitForPage_ACU,
+  recoverZeroLayerAutoForPage_ACU,
   resyncZeroLayerViewForPage_ACU, bindZeroLayerGameFrameForPage_ACU,
-  submitZeroLayerInputForPage_ACU, stopZeroLayerForPage_ACU } from '../zero-layer-bootstrap';
+  submitZeroLayerInputForPage_ACU, stopZeroLayerForPage_ACU,
+  setZeroLayerEnabledForPage_ACU } from '../zero-layer-bootstrap';
 import type { ZeroLayerExitSelection_ACU } from '../../../service/zero-layer/exit-model';
 import { zeroLayerHistoryReader_ACU } from '../../../service/zero-layer/history-read';
 import type { ZeroLayerHistoryApi_ACU } from '../../../service/zero-layer/history-model';
@@ -9,8 +11,11 @@ import type { ZeroLayerHistoryApi_ACU } from '../../../service/zero-layer/histor
 export function createZeroLayerExitApi_ACU() {
   return {
     zeroLayer: createZeroLayerHistoryApi_ACU(),
+    setZeroLayerEnabled: (enabled: boolean, apiPresetName?: string) =>
+      setZeroLayerEnabledForPage_ACU(enabled, apiPresetName),
     exitZeroLayerToOrdinary: (selection: ZeroLayerExitSelection_ACU) => exitZeroLayerForPage_ACU(selection),
     recoverZeroLayerExit: () => recoverZeroLayerExitForPage_ACU(),
+    recoverZeroLayer: (options?: { abandonUnpublished?: boolean; carryForwardTable?: boolean }) => recoverZeroLayerAutoForPage_ACU(options),
     resyncZeroLayerView: () => resyncZeroLayerViewForPage_ACU(),
     bindZeroLayerGameFrame: (frame: HTMLIFrameElement, origin: string) =>
       bindZeroLayerGameFrameForPage_ACU(frame, origin),
@@ -24,6 +29,7 @@ export function createZeroLayerHistoryApi_ACU(): Readonly<ZeroLayerHistoryApi_AC
   return Object.freeze({
     getSnapshot: query => zeroLayerHistoryReader_ACU.getSnapshot(query),
     readHistory: query => zeroLayerHistoryReader_ACU.readHistory(query),
+    readTable: query => zeroLayerHistoryReader_ACU.readTable(query),
     subscribe: listener => zeroLayerHistoryReader_ACU.subscribe(listener),
   } satisfies ZeroLayerHistoryApi_ACU);
 }

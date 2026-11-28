@@ -35,6 +35,10 @@ export async function synchronizeZeroLayerCheckpoints_ACU(store: ZeroLayerStore_
   if (current.turns.some(turn => !['published', 'failed', 'cancelled'].includes(turn.phase))) {
     throw new ZeroLayerError_ACU('pending-turn', '逻辑 checkpoint 必须在完整发布后调度。');
   }
+  // 存在尚未回填完表格的异步锚点回合时，暂缓切分新 checkpoint，待全部锚点回填完毕后再自动封存
+  if (current.turns.some(turn => turn.branchId === branchId && turn.phase === 'published' && turn.tableBackfillStatus === 'pending')) {
+    return current;
+  }
   const readState = () => current.branches.find(branch => branch.branchId === branchId)!.checkpoints;
   // 恢复只能续跑已确认的阶段；保存未知由 store.read 阻断，不在此重试保存。
   const pending = readState()?.pending;

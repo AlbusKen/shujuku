@@ -179,6 +179,7 @@ export class ZeroLayerStableView_ACU {
     const api = Object.freeze({
       getSnapshot: zeroLayerHistoryReader_ACU.getSnapshot.bind(zeroLayerHistoryReader_ACU),
       readHistory: zeroLayerHistoryReader_ACU.readHistory.bind(zeroLayerHistoryReader_ACU),
+      readTable: zeroLayerHistoryReader_ACU.readTable.bind(zeroLayerHistoryReader_ACU),
       subscribe: zeroLayerHistoryReader_ACU.subscribe.bind(zeroLayerHistoryReader_ACU),
     });
     const channel = new ZeroLayerGameChannel_ACU(frame, origin, {

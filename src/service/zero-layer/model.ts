@@ -103,6 +103,8 @@ export interface ZeroLayerTurn_ACU {
   /** 旧回合缺失时不推测基底；表格补结算必须取得显式快照。 */
   tableInput?: ZeroLayerTableInput_ACU;
   tableCandidate?: ZeroLayerTableCandidate_ACU;
+  /** 异步锚点填表状态：pending 表示正文已先发布、后台队列正按 (turnId, floorId) 精确回填。 */
+  tableBackfillStatus?: 'pending' | 'settled' | 'skipped';
   plotCandidate?: ZeroLayerPlotCandidate_ACU;
   /** 与续写规划的完整尝试身份绑定；不是宿主生成序号或物理楼层号。 */
   continuationIdentity?: TurnAttemptIdentity_ACU;

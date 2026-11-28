@@ -180,6 +180,10 @@ function validateTurn_ACU(raw: unknown): asserts raw is ZeroLayerTurn_ACU {
     validateZeroLayerTableCandidate_ACU(raw.tableCandidate,
       (raw.assistantFloor as ZeroLayerTurn_ACU['assistantFloor']).floorId);
   }
+  if (raw.tableBackfillStatus !== undefined) {
+    requireZeroLayerValue_ACU(['pending', 'settled', 'skipped'].includes(String(raw.tableBackfillStatus)),
+      '回合异步填表锚点状态无效。');
+  }
   if (raw.materialBaseline !== undefined) {
     requireZeroLayerValue_ACU(record_ACU(raw.materialBaseline), '回合资料基底结构无效。');
     const baseline = raw.materialBaseline;

@@ -583,13 +583,14 @@ describe('continuation API preset reference cascade helpers', () => {
   });
 });
 
-describe('零层停用与源历史校验', () => {
+describe('零层初始化与源历史校验', () => {
   beforeEach(() => { _set_SillyTavern_API_ACU(undefined); });
 
-  it('停用后拒绝初始化和重新启用，保留源历史切点的只读能力', async () => {
+  it('无宿主生成状态接口时可初始化零层并冻结启用切点', async () => {
     const { applyZeroLayerCommand_ACU } = await import('../../../src/service/zero-layer/store-command');
     const { captureBridgeActivationCut_ACU } = await import('../../../src/service/zero-layer/bridge-source');
     const { physicalHistorySnapshot_ACU } = await import('../../../src/service/zero-layer/carrier-context');
+    const { ZERO_LAYER_SCHEMA_VERSION_ACU } = await import('../../../src/service/zero-layer/model');
     const carrier = { is_user: false, mes: '开场', swipe_id: 0 };
     const chat = [carrier];
     const scope = { characterKey: 'card:test', chatId: 'chat-test' };
@@ -597,12 +598,12 @@ describe('零层停用与源历史校验', () => {
       key: JSON.stringify([scope.characterKey, scope.chatId]),
       source: physicalHistorySnapshot_ACU(chat), messageRefs: [...chat] };
     const fingerprint = 'sha256:activation';
-    expect(() => applyZeroLayerCommand_ACU(null,
-      { type: 'initialize', apiPresetName: 'database-direct' }, context, fingerprint))
-      .toThrow('零层功能已关闭');
-    expect(() => applyZeroLayerCommand_ACU(null,
-      { type: 'set-enabled', enabled: true }, context, fingerprint))
-      .toThrow('零层功能已关闭');
+    const initialized = applyZeroLayerCommand_ACU(null,
+      { type: 'initialize', apiPresetName: 'database-direct' }, context, fingerprint);
+    expect(initialized.schemaVersion).toBe(ZERO_LAYER_SCHEMA_VERSION_ACU);
+    expect(initialized.enabled).toBe(false);
+    expect(initialized.apiPresetName).toBe('database-direct');
+    expect(initialized.scope).toEqual(scope);
     const cut = captureBridgeActivationCut_ACU(context, fingerprint);
     expect(cut.messageCount).toBe(1);
     expect(cut.completedAiCount).toBe(1);
@@ -641,5 +642,317 @@ describe('零层停用与源历史校验', () => {
     expect(hasUnloadedHostSwipes_ACU(null)).toBe(false);
     const result = zeroLayerHistoryFailure_ACU(new ZeroLayerError_ACU('host-cold-swipes', 'cold'));
     expect(result).toMatchObject({ ok: false, error: { code: 'history-unavailable', retryable: false } });
+  });
+
+  it('bindSettings 兼容宿主对 messages 执行 filter 产生的新数组引用，同时拒绝伪造副本', async () => {
+    const { ZeroLayerSession_ACU, ZERO_LAYER_REQUEST_ID_ACU } = await import('../../../src/service/zero-layer/session');
+    const { applyZeroLayerCommand_ACU } = await import('../../../src/service/zero-layer/store-command');
+    const { captureZeroLayerCarrier_ACU } = await import('../../../src/service/zero-layer/carrier-context');
+    const { getZeroLayerPromptContext_ACU } = await import('../../../src/service/zero-layer/request-context');
+    const { getTableDataFingerprint_ACU } = await import('../../../src/service/table/table-data-upgrade-audit');
+
+    const carrier: Record<string, unknown> = { is_user: false, mes: '开场', swipe_id: 0 };
+    const chat = [carrier];
+    _set_SillyTavern_API_ACU({
+      chat,
+      this_chid: '0',
+      characterId: 0,
+      characters: [{ avatar: 'test.png', name: 'Test' }],
+      getCurrentChatId: () => 'chat-test',
+    } as any);
+    const context = captureZeroLayerCarrier_ACU();
+    const initialized = applyZeroLayerCommand_ACU(null, { type: 'initialize', apiPresetName: 'database-direct' }, context, 'sha256:act');
+    const enabled = { ...initialized, enabled: true };
+    const turnId = 'turn-1';
+    const attemptId = 'attempt-1';
+    const prepared = applyZeroLayerCommand_ACU(enabled, {
+      type: 'prepare-turn', turnId, attemptId, input: '本轮输入',
+      requiredEffects: ['plot'],
+      tableInput: {
+        chatKey: 'chat-test', isolationKey: '', storageMode: 'native',
+        tableData: { mate: { type: 'chatSheets', version: 1 } },
+        templateData: { mate: { type: 'chatSheets', version: 1 } },
+        autoUpdateEnabled: false,
+        completedAiFloorBySheetKey: {},
+      },
+    }, context, 'sha256:act');
+    const plotCandidate = {
+      floorId: prepared.turns[0].userFloor.floorId, presetName: '', outcome: 'disabled' as const,
+      finalMessage: null, content: '', taskContents: {}, finalPrompts: [], filterEntries: [], agentActive: false,
+    };
+    const withPlot = applyZeroLayerCommand_ACU(prepared, {
+      type: 'prepare-plot', turnId, attemptId,
+      candidate: plotCandidate,
+      receipt: {
+        effectId: `${turnId}:${attemptId}:plot`, kind: 'plot', status: 'durable',
+        fingerprint: getTableDataFingerprint_ACU(plotCandidate),
+      },
+    }, context, 'sha256:act');
+    carrier._acu_zero_layer_v1 = withPlot;
+
+    const session = new ZeroLayerSession_ACU();
+    const active = (session as any).createPreparedLease(withPlot, context, turnId, attemptId);
+    (session as any).active = active;
+    const invocation = (session as any).preparedInvocation(active);
+
+    const promptData = {
+      dryRun: false,
+      chat: [
+        { role: 'system', content: 'sys' },
+        { role: 'assistant', content: '开场' },
+        { role: 'system', content: invocation.quietPrompt },
+      ],
+    };
+    session.bindPrompt(promptData);
+
+    // 伪造深拷贝数组（元素对象引用不同）应被忽略
+    const forgedRequest: Record<string, unknown> = {
+      type: 'quiet',
+      messages: JSON.parse(JSON.stringify(promptData.chat)),
+    };
+    session.bindSettings(forgedRequest);
+    expect(forgedRequest[ZERO_LAYER_REQUEST_ID_ACU]).toBeUndefined();
+    expect(getZeroLayerPromptContext_ACU(forgedRequest)).toBeUndefined();
+
+    // SillyTavern 1.19+ 的 messages.filter() 产生新数组引用，但元素对象引用一致，应成功绑定
+    const filteredRequest: Record<string, unknown> = {
+      type: 'quiet',
+      messages: promptData.chat.filter(msg => msg && typeof msg === 'object'),
+    };
+    expect(filteredRequest.messages).not.toBe(promptData.chat);
+    session.bindSettings(filteredRequest);
+    expect(filteredRequest[ZERO_LAYER_REQUEST_ID_ACU]).toBe(attemptId);
+    expect(getZeroLayerPromptContext_ACU(filteredRequest)).toBe(active.promptContext);
+  });
+
+  it('零层只读逻辑表读口：按活动分支返回 head 逻辑表深拷贝、未启用回退普通模式并校验快照令牌', async () => {
+    const {
+      readZeroLayerBranchTableData_ACU,
+      readCurrentZeroLayerTableDataSync_ACU,
+    } = await import('../../../src/service/zero-layer/table-state');
+    const { ZeroLayerHistoryReader_ACU } = await import('../../../src/service/zero-layer/history-read');
+    const { applyZeroLayerCommand_ACU } = await import('../../../src/service/zero-layer/store-command');
+    const { captureZeroLayerCarrier_ACU, physicalHistoryFingerprint_ACU } = await import('../../../src/service/zero-layer/carrier-context');
+    const { captureBridgeActivationCut_ACU, bridgeSourceFingerprint_ACU } = await import('../../../src/service/zero-layer/bridge-source');
+    const { bridgeCandidateFingerprint_ACU } = await import('../../../src/service/zero-layer/bridge-validation');
+    const { buildBridgeContinuation_ACU } = await import('../../../src/service/zero-layer/bridge-continuation');
+    const { buildBridgeSimulation_ACU } = await import('../../../src/service/zero-layer/bridge-simulation');
+    const { buildCanonicalFullCheckpoint_ACU } = await import('../../../src/service/table/canonical-checkpoint-builder');
+    const { publishedMaterialFingerprint_ACU } = await import('../../../src/service/zero-layer/branch-materials');
+    const { getTableDataFingerprint_ACU } = await import('../../../src/service/table/table-data-upgrade-audit');
+    const { createCoreDataApi } = await import('../../../src/presentation/bootstrap/api-groups/core-data-api');
+
+    const makeSheetTable = (rowValue: string) => ({
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_chronicle: {
+        uid: 'sheet_chronicle',
+        name: '纪要表',
+        sourceData: { note: '' },
+        updateConfig: { uiSentinel: -1, contextDepth: -1, updateFrequency: -1, batchSize: -1, skipFloors: -1 },
+        exportConfig: { enabled: false },
+        orderNo: 0,
+        content: [['row_id', '摘要'], ['1', rowValue]],
+      },
+    });
+    const baseTable = makeSheetTable('基线行');
+    const turn1Table = makeSheetTable('主分支第1轮');
+    const turn2Table = makeSheetTable('主分支第2轮');
+    const branchBTable = makeSheetTable('分支B第2轮');
+
+    const carrier: Record<string, unknown> = { is_user: false, mes: '开场', swipe_id: 0 };
+    const chat = [carrier];
+    _set_SillyTavern_API_ACU({
+      chat,
+      this_chid: '0',
+      characterId: 0,
+      characters: [{ avatar: 'test.png', name: 'Test' }],
+      getCurrentChatId: () => 'chat-g3-test',
+    } as any);
+
+    // 1. 普通聊天无载体字段时，同步入口返回 active=false
+    expect(readCurrentZeroLayerTableDataSync_ACU()).toEqual({ active: false });
+
+    const context = captureZeroLayerCarrier_ACU();
+    const sourceFp = bridgeSourceFingerprint_ACU(chat);
+    const activationFp = await physicalHistoryFingerprint_ACU(context.source);
+    const initialized = applyZeroLayerCommand_ACU(null, { type: 'initialize', apiPresetName: 'database-direct' }, context, activationFp);
+    const activationCut = captureBridgeActivationCut_ACU(context, activationFp);
+    const makeEmptyCont = () => structuredClone(buildBridgeContinuation_ACU(chat, activationCut).state);
+    const makeEmptySimState = () => structuredClone(buildBridgeSimulation_ACU(chat, activationCut).state);
+    const scheduling = {
+      autoUpdateFrequency: 1,
+      skipUpdateFloors: 0,
+      autoUpdateThreshold: 3,
+      updateBatchSize: 2,
+    };
+    const bridgeConfig = {
+      schemaVersion: 1 as const,
+      chatKey: 'chat-g3-test',
+      isolationKey: '',
+      storageMode: 'native' as const,
+      guideData: {},
+      templateData: baseTable,
+      settings: {
+        dataIsolationEnabled: false,
+        dataIsolationCode: '',
+        autoUpdateEnabled: true,
+        ...scheduling,
+      },
+    };
+    const canonicalPayload = buildCanonicalFullCheckpoint_ACU({ createdAt: 1, reason: 'migration', data: baseTable as any }).checkpoint;
+    const bridgeCandidateBody: any = {
+      schemaVersion: 1,
+      table: {
+        input: {
+          chatKey: 'chat-g3-test', isolationKey: '', storageMode: 'native',
+          tableData: baseTable, templateData: baseTable,
+          autoUpdateEnabled: true, completedAiFloorBySheetKey: {}, scheduling,
+        },
+        payload: canonicalPayload,
+      },
+      continuation: makeEmptyCont(),
+      simulation: makeEmptySimState(),
+      simulationHostCompletion: null,
+      availability: { table: 'pristine', continuation: 'absent', simulation: 'absent' },
+    };
+    const bridgeCandidate = { ...bridgeCandidateBody, fingerprint: bridgeCandidateFingerprint_ACU(bridgeCandidateBody) };
+    const bridge: any = {
+      schemaVersion: 1,
+      migrationId: 'mig-g3-1',
+      sourceRevision: 0,
+      sourceFingerprint: sourceFp,
+      createdAt: 1,
+      config: bridgeConfig,
+      configFingerprint: getTableDataFingerprint_ACU(bridgeConfig),
+      activationCut,
+      phase: 'reconciled',
+      normalizedFingerprint: bridgeCandidate.fingerprint,
+      candidate: bridgeCandidate,
+      receipts: [
+        { phase: 'inventory', sourceRevision: 0, sourceFingerprint: sourceFp, normalizedFingerprint: null },
+        { phase: 'normalized', sourceRevision: 1, sourceFingerprint: sourceFp, normalizedFingerprint: bridgeCandidate.fingerprint },
+        { phase: 'candidate', sourceRevision: 2, sourceFingerprint: sourceFp, normalizedFingerprint: bridgeCandidate.fingerprint },
+        { phase: 'verified', sourceRevision: 3, sourceFingerprint: sourceFp, normalizedFingerprint: bridgeCandidate.fingerprint },
+        { phase: 'activated', sourceRevision: 4, sourceFingerprint: sourceFp, normalizedFingerprint: bridgeCandidate.fingerprint },
+        { phase: 'reconciled', sourceRevision: 5, sourceFingerprint: sourceFp, normalizedFingerprint: bridgeCandidate.fingerprint },
+      ],
+    };
+
+    const mainBranchId = initialized.activeBranchId;
+    const makeSimulationResult = (branchId: string, turnId: string, floorId: string) => ({
+      schemaVersion: 1 as const,
+      ref: { sessionId: initialized.sessionId, branchId, turnId, attemptId: `att_${turnId}`, floorId },
+      outcome: 'skipped-by-config' as const,
+      summary: '',
+      ledger: null,
+      fields: makeEmptySimState().fields,
+      archive: makeEmptySimState().archive,
+      projection: null,
+    });
+    const makePublishedTurn = (
+      branchId: string, turnId: string, parentTurnId: string | null, input: string, body: string, tableData: any, sourceRevision: number,
+    ) => {
+      const userFloorId = `u_${turnId}`;
+      const assistantFloorId = `a_${turnId}`;
+      const tableResult = {
+        floorId: assistantFloorId,
+        tableData,
+        completedAiFloorBySheetKey: { sheet_chronicle: 1 },
+        filledSheetKeys: ['sheet_chronicle'],
+      };
+      const simResult = makeSimulationResult(branchId, turnId, assistantFloorId);
+      const pmBody: any = {
+        schemaVersion: 1 as const,
+        ref: { kind: 'logical' as const, sessionId: initialized.sessionId, branchId, turnId, floorId: assistantFloorId, role: 'assistant' as const },
+        sourceRevision,
+        table: tableResult,
+        continuation: makeEmptyCont(),
+        simulation: makeEmptySimState(),
+        checkpoints: null,
+        fingerprint: '',
+      };
+      pmBody.fingerprint = publishedMaterialFingerprint_ACU(pmBody);
+      return {
+        turnId, branchId, parentTurnId, attemptId: `att_${turnId}`, input, body,
+        phase: 'published' as const, createdAt: 1, updatedAt: 1,
+        userFloor: { floorId: userFloorId, role: 'user' as const, data: {} },
+        assistantFloor: { floorId: assistantFloorId, role: 'assistant' as const, data: { table: tableResult, simulation: simResult } },
+        requiredEffects: ['plot', 'table', 'simulation'] as const,
+        effectReceipts: [
+          { effectId: `${turnId}:att_${turnId}:plot`, kind: 'plot' as const, status: 'durable' as const, fingerprint: 'fp-p' },
+          { effectId: JSON.stringify([initialized.sessionId, turnId, `att_${turnId}`, 'table']), kind: 'table' as const, status: 'durable' as const, fingerprint: getTableDataFingerprint_ACU(tableResult) },
+          { effectId: `${turnId}:att_${turnId}:simulation`, kind: 'simulation' as const, status: 'skipped-by-config' as const, fingerprint: getTableDataFingerprint_ACU(simResult) },
+        ],
+        publishedMaterials: pmBody,
+        errorCode: null,
+      };
+    };
+
+    // 2. 尚无已发布回合时返回已确认桥接基线表
+    const emptyHeadEnvelope: any = {
+      ...initialized,
+      enabled: true,
+      revision: 6,
+      branches: [{ branchId: mainBranchId, headTurnId: null, bridge, continuation: makeEmptyCont(), simulation: makeEmptySimState() }],
+      turns: [],
+    };
+    carrier._acu_zero_layer_v1 = emptyHeadEnvelope;
+    const baseRead = readZeroLayerBranchTableData_ACU(emptyHeadEnvelope);
+    expect((baseRead.sheet_chronicle as any).content[1][1]).toBe('基线行');
+
+    // 3. 多轮与分支切换：读口精确匹配当前活动分支 head，且返回深拷贝
+    const t1 = makePublishedTurn(mainBranchId, 't1', null, '输入1', '正文1', turn1Table, 4);
+    const t2 = makePublishedTurn(mainBranchId, 't2', 't1', '输入2', '正文2', turn2Table, 5);
+    const tB = makePublishedTurn('branch-b', 'tB', 't1', '输入B', '正文B', branchBTable, 6);
+    const multiBranchEnvelope: any = {
+      ...initialized,
+      enabled: true,
+      revision: 10,
+      activeBranchId: mainBranchId,
+      branches: [
+        { branchId: mainBranchId, headTurnId: 't2', bridge, continuation: makeEmptyCont(), simulation: makeEmptySimState() },
+        {
+          branchId: 'branch-b', headTurnId: 'tB',
+          fork: { sourceBranchId: mainBranchId, headTurnId: 't1', sourceRevision: 7 },
+          bridge: structuredClone(bridge), continuation: makeEmptyCont(), simulation: makeEmptySimState(),
+        },
+      ],
+      turns: [t1, t2, tB],
+    };
+    carrier._acu_zero_layer_v1 = multiBranchEnvelope;
+
+    const coreApi = createCoreDataApi({ tableUpdateCallbacks: [], tableFillStartCallbacks: [], getApi: () => ({}) });
+    const exportedMain = coreApi.exportTableAsJson();
+    expect((exportedMain.sheet_chronicle as any).content[1][1]).toBe('主分支第2轮');
+    // 改写返回值不得污染载体数据
+    (exportedMain.sheet_chronicle as any).content[1][1] = '外部篡改';
+    expect((coreApi.exportTableAsJson().sheet_chronicle as any).content[1][1]).toBe('主分支第2轮');
+
+    // 切到分支 B 后自动读取分支 B head 的逻辑表
+    multiBranchEnvelope.activeBranchId = 'branch-b';
+    multiBranchEnvelope.revision = 11;
+    expect((coreApi.exportTableAsJson().sheet_chronicle as any).content[1][1]).toBe('分支B第2轮');
+
+    // 4. ZeroLayerHistoryReader_ACU.readTable 协议校验与 snapshotToken 一致性
+    const reader = new ZeroLayerHistoryReader_ACU();
+    const badVer = await reader.readTable({ version: 2 as any });
+    expect(badVer).toMatchObject({ ok: false, error: { code: 'unsupported-version' } });
+
+    const snap = await reader.getSnapshot({ version: 1 });
+    expect(snap.ok).toBe(true);
+    const tableRes = await reader.readTable({ version: 1, snapshotToken: (snap as any).value.snapshotToken });
+    expect(tableRes.ok).toBe(true);
+    expect((tableRes as any).value.branchId).toBe('branch-b');
+    expect((tableRes as any).value.headTurnId).toBe('tB');
+    expect((tableRes as any).value.tableData.sheet_chronicle.content[1][1]).toBe('分支B第2轮');
+
+    // 存档 revision 前进后，旧 snapshotToken 必须报 snapshot-stale，禁止静默跨版本漂移
+    multiBranchEnvelope.revision = 12;
+    const staleRes = await reader.readTable({ version: 1, snapshotToken: (snap as any).value.snapshotToken });
+    expect(staleRes).toMatchObject({ ok: false, error: { code: 'snapshot-stale' } });
+
+    // 关闭零层后，同步入口回退 active=false
+    multiBranchEnvelope.enabled = false;
+    expect(readCurrentZeroLayerTableDataSync_ACU()).toEqual({ active: false });
   });
 });
