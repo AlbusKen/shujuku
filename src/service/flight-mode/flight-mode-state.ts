@@ -36,9 +36,27 @@ export function normalizeFlightModeState_ACU(value: unknown): FlightModeState_AC
   };
 }
 
-export function getCurrentFlightModeState_ACU(): FlightModeState_ACU {
-  const states = getChatScopedConfigField_ACU(getChatArray_ACU(), 'flightModeByIsolationKey');
-  const isolationKey = String(getCurrentIsolationKey_ACU() ?? '');
+const detachedFlightModeStates_ACU = new WeakMap<any[], Record<string, FlightModeState_ACU>>();
+
+export function setDetachedFlightModeState_ACU(
+  chat: any[],
+  isolationKey: string,
+  state: FlightModeState_ACU,
+): void {
+  const map = detachedFlightModeStates_ACU.get(chat) ?? {};
+  map[String(isolationKey ?? '')] = normalizeFlightModeState_ACU(state);
+  detachedFlightModeStates_ACU.set(chat, map);
+}
+
+export function getCurrentFlightModeState_ACU(
+  chatOverride?: any[],
+  isolationKeyOverride?: string,
+): FlightModeState_ACU {
+  const chat = chatOverride ?? getChatArray_ACU();
+  const isolationKey = String(isolationKeyOverride ?? getCurrentIsolationKey_ACU() ?? '');
+  const detached = detachedFlightModeStates_ACU.get(chat)?.[isolationKey];
+  if (detached) return normalizeFlightModeState_ACU(detached);
+  const states = getChatScopedConfigField_ACU(chat, 'flightModeByIsolationKey');
   if (states && typeof states === 'object' && !Array.isArray(states)) {
     return normalizeFlightModeState_ACU((states as Record<string, unknown>)[isolationKey]);
   }
@@ -48,16 +66,34 @@ export function getCurrentFlightModeState_ACU(): FlightModeState_ACU {
 /**
  * 将隐藏行状态暂存到当前聊天 scoped container，并返回可在同一提交失败时调用的回滚函数。
  * 调用方必须把此操作放在表格快照写入聊天前，不能在持久化成功后另起一次 saveChat。
+ * 当传入 detached 聊天视图时仅更新内存态视图映射，绝不写入宿主 chatMetadata。
  */
-export function stageFlightModeHiddenRowIds_ACU(hiddenRowIds: string[]): (() => void) | null {
-  const chat = getChatArray_ACU();
-  const previousContainer = getChatScopedConfigContainer_ACU(chat);
-  const currentState = getCurrentFlightModeState_ACU();
+export function stageFlightModeHiddenRowIds_ACU(
+  hiddenRowIds: string[],
+  chatOverride?: any[],
+  isolationKeyOverride?: string,
+): (() => void) | null {
+  const liveChat = getChatArray_ACU();
+  const chat = chatOverride ?? liveChat;
+  const isolationKey = String(isolationKeyOverride ?? getCurrentIsolationKey_ACU() ?? '');
+  const currentState = getCurrentFlightModeState_ACU(chat, isolationKey);
   if (!currentState.enabled) return null;
 
+  if (chatOverride && chatOverride !== liveChat) {
+    const previousDetached = detachedFlightModeStates_ACU.get(chatOverride)?.[isolationKey];
+    const previousSnapshot = previousDetached ? normalizeFlightModeState_ACU(previousDetached) : null;
+    setDetachedFlightModeState_ACU(chatOverride, isolationKey, { ...currentState, hiddenRowIds });
+    return () => {
+      const map = detachedFlightModeStates_ACU.get(chatOverride);
+      if (!map) return;
+      if (previousSnapshot) map[isolationKey] = previousSnapshot;
+      else delete map[isolationKey];
+    };
+  }
+
+  const previousContainer = getChatScopedConfigContainer_ACU(chat);
   const previousSnapshot = previousContainer ? JSON.parse(JSON.stringify(previousContainer)) : null;
   const nextContainer = normalizeChatScopedConfigContainer_ACU(previousContainer);
-  const isolationKey = String(getCurrentIsolationKey_ACU() ?? '');
   const states = nextContainer.flightModeByIsolationKey;
   nextContainer.flightModeByIsolationKey = {
     ...(states && typeof states === 'object' && !Array.isArray(states) ? states : {}),

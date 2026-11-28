@@ -517,6 +517,8 @@ export interface GroupFillJob_ACU {
     /** AI 请求发起前锁定的提交作用域；后续不得重新读取全局当前聊天。 */
     chatKey?: string;
     isolationKey?: string;
+    /** detached Swipe 候选视图的聊天数组，用于隔离飞行模式 hiddenRowIds 投影。 */
+    chatOverride?: any[];
     templateScope?: TemplateScope_ACU;
     sqlApplyScope?: SqlTableApplyScope_ACU;
     performanceRunId?: string;
@@ -932,14 +934,20 @@ function buildWriteSetForSheetKeys_ACU(sheetKeys: string[] | null | undefined, f
 function buildFlightModeHiddenRowsBeforePersist_ACU(
     beforeData: Record<string, any>,
     isImportMode: boolean,
+    chatOverride?: any[],
+    isolationKeyOverride?: string,
 ): (afterData: Record<string, any>) => { rollback?: () => void } | void {
     return (afterData) => {
         if (isImportMode) return;
-        const state = getCurrentFlightModeState_ACU();
+        const state = chatOverride
+            ? getCurrentFlightModeState_ACU(chatOverride, isolationKeyOverride)
+            : getCurrentFlightModeState_ACU();
         if (!state.enabled) return;
         const hiddenRowIds = getHiddenChronicleRowIdsAfterBigSummaryInsert_ACU(beforeData, afterData, state);
         if (!hiddenRowIds) return;
-        const rollback = stageFlightModeHiddenRowIds_ACU(hiddenRowIds);
+        const rollback = chatOverride
+            ? stageFlightModeHiddenRowIds_ACU(hiddenRowIds, chatOverride, isolationKeyOverride)
+            : stageFlightModeHiddenRowIds_ACU(hiddenRowIds);
         return rollback ? { rollback } : undefined;
     };
 }
@@ -1430,6 +1438,7 @@ export async function collectGroupFillResponse_ACU(
             isolatedSnapshot: job.isolatedSnapshot,
             excludeImportTaggedWorldbookEntries: job.isImportMode === true && settings_ACU.importPromptExcludeImportedWorldbookEntries !== false,
             agentGreenlights: Array.isArray(pendingFinalGenerationGreenlights_ACU) ? [...pendingFinalGenerationGreenlights_ACU] : [],
+            ...(job.chatOverride ? { chatOverride: job.chatOverride } : {}),
             isolationKey: job.isolationKey,
             templateScope: job.templateScope,
             sqlApplyScope: job.sqlApplyScope,
@@ -2168,7 +2177,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
                     trackAsUpdate: true,
                     operations,
                     revisionWriteSet,
-                    beforePersist: buildFlightModeHiddenRowsBeforePersist_ACU(baseSnapshot, options.isImportMode),
+                    beforePersist: buildFlightModeHiddenRowsBeforePersist_ACU(baseSnapshot, options.isImportMode, options.chatView?.chat, capturedIsolationKey),
                 },
             };
         }));
@@ -2363,7 +2372,7 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
             value: { modifiedKeys },
             tableData: workingTableData as any,
             persist: {
-                beforePersist: buildFlightModeHiddenRowsBeforePersist_ACU(baseSnapshot, options.isImportMode),
+                beforePersist: buildFlightModeHiddenRowsBeforePersist_ACU(baseSnapshot, options.isImportMode, options.chatView?.chat, capturedIsolationKey),
             },
         }));
         if (!commitResult.success) {
@@ -2808,6 +2817,7 @@ async function processGroupedRuntimeChunkCore_ACU(
                     isImportMode: options.isImportMode === true,
                     chatKey: executionScope.chatKey,
                     isolationKey: executionScope.isolationKey,
+                    ...(chatView ? { chatOverride: chatView.chat } : {}),
                     templateScope: executionScope.templateScope,
                     sqlApplyScope: executionScope.sqlApplyScope,
                     performanceRunId: options.performanceRunId,
@@ -3469,6 +3479,7 @@ export async function executeCardUpdateCore_ACU(
                     isImportMode,
                     chatKey: executionScope.chatKey,
                     isolationKey: executionScope.isolationKey,
+                    ...(chatView ? { chatOverride: chatView.chat } : {}),
                     templateScope: executionScope.templateScope,
                     sqlApplyScope: executionScope.sqlApplyScope,
                 };
@@ -3626,7 +3637,7 @@ export async function executeCardUpdateCore_ACU(
                                 trackAsUpdate: true,
                                 operations,
                                 revisionWriteSet,
-                                beforePersist: buildFlightModeHiddenRowsBeforePersist_ACU(rawBaseSnapshot, isImportMode),
+                                beforePersist: buildFlightModeHiddenRowsBeforePersist_ACU(rawBaseSnapshot, isImportMode, chatView?.chat, executionScope.isolationKey),
                             },
                         };
                     }));
@@ -3769,7 +3780,7 @@ export async function executeCardUpdateCore_ACU(
                             trackAsUpdate: true,
                             operations,
                             revisionWriteSet,
-                            beforePersist: buildFlightModeHiddenRowsBeforePersist_ACU(rawBaseSnapshot, isImportMode),
+                            beforePersist: buildFlightModeHiddenRowsBeforePersist_ACU(rawBaseSnapshot, isImportMode, chatView?.chat, executionScope.isolationKey),
                         },
                     };
                 });

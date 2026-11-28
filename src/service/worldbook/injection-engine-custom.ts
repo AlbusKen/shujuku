@@ -22,6 +22,7 @@ import { buildExternalCustomTableExportComment_ACU, type ExternalCustomTableExpo
 import { getSheetColumnProjection_ACU } from '../../shared/ddl-utils';
 import { getCurrentFlightModeState_ACU } from '../flight-mode/flight-mode-state';
 import { projectFlightModeHiddenChronicleRows_ACU } from '../flight-mode/flight-mode-hidden-rows';
+import type { FlightModeState_ACU } from '../../shared/models/flight-mode-model';
 import {
     buildExistingEntryUpdatePatch_ACU,
     doesCreatedEntryNeedOrderFix_ACU,
@@ -39,11 +40,17 @@ export function __resetCustomTableExportStateForTests_ACU(): void {
   // [新增] 处理自定义表格导出逻辑
   // [修复] 当 mergedData 为空/null 时，仍需执行"清理旧自定义导出条目"逻辑，
   // 避免删除楼层回溯到空数据时旧条目残留在世界书中。
-  export async function updateCustomTableExports_ACU(mergedData: Record<string, any> | null, isImport = false, targetLorebookOverride: string | null = null, entryStore?: TableWorldbookEntryStore_ACU) {
+  export async function updateCustomTableExports_ACU(
+      mergedData: Record<string, any> | null,
+      isImport = false,
+      targetLorebookOverride: string | null = null,
+      entryStore?: TableWorldbookEntryStore_ACU,
+      flightModeOverride?: FlightModeState_ACU,
+  ) {
       if (!entryStore && !isWorldbookApiAvailable_ACU()) return;
       const store = entryStore ?? liveTableWorldbookEntryStore_ACU;
       if (mergedData) {
-          const flightMode = getCurrentFlightModeState_ACU();
+          const flightMode = flightModeOverride ?? getCurrentFlightModeState_ACU();
           if (flightMode.enabled && flightMode.hiddenRowIds.length > 0) {
               const source = mergedData;
               try {

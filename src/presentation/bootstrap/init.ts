@@ -41,7 +41,7 @@ import { beginHostGenerationUi_ACU, getSendTextareaValue_ACU, setSendTextareaVal
 import { cancelPendingContentOptimizationEvent_ACU, captureContentOptimizationEventScope_ACU, handleContentOptimizationEvent_ACU } from '../triggers/settings-ui-sync/settings-ui-connect';
 import { cancelPendingAutoFillEvent_ACU, captureAutoFillEventScope_ACU, triggerAutomaticUpdateIfNeeded_ACU } from '../triggers/settings-ui-sync/settings-ui-trigger';
 import {
-  captureNativeSwipeTableIntent_ACU, hasNativeSwipeCandidateChange_ACU, readNativeSwipeWorldbookData_ACU,
+  captureNativeSwipeTableIntent_ACU, hasNativeSwipeCandidateChange_ACU, readNativeSwipeWorldbookProjection_ACU,
   registerNativeSwipeTableCandidate_ACU, restoreNativeSwipeTableCandidate_ACU,
   type NativeSwipeTableIntent_ACU, type NativeSwipeTableResult_ACU,
 } from '../../service/table/native-swipe-table';
@@ -1292,7 +1292,7 @@ export   function mainInitialize_ACU() {
             };
             try {
               await projectTableWorldbookForRequest_ACU(lores, () =>
-                readNativeSwipeWorldbookData_ACU(request.intent, request.chatKey, request.isolationKey, assertCurrent), assertCurrent);
+                readNativeSwipeWorldbookProjection_ACU(request.intent, request.chatKey, request.isolationKey, assertCurrent), assertCurrent);
             } catch (error) {
               if (swipeWorldbookRequest === request && !(error instanceof DOMException && error.name === 'AbortError')) {
                 logWarn_ACU('[Swipe] 正文请求的数据库世界书投影失败。', error);

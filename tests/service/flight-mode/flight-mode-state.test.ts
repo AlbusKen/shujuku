@@ -33,6 +33,7 @@ import {
   isFlightModeActive_ACU,
   normalizeFlightModeState_ACU,
   setCurrentFlightModeState_ACU,
+  setDetachedFlightModeState_ACU,
   stageFlightModeHiddenRowIds_ACU,
 } from '../../../src/service/flight-mode/flight-mode-state';
 
@@ -209,5 +210,36 @@ describe('flight-mode-state', () => {
       visibleChronicleRowCount: 0,
       reason: 'chronicle_not_found',
     });
+  });
+
+  it('detached 聊天视图的飞行模式状态与暂存回滚完全隔离于 live chatMetadata', () => {
+    setCurrentFlightModeState_ACU({
+      enabled: true,
+      enabledAt: 100,
+      hiddenRowIds: ['1', '2'],
+      bigSummarySheetKey: 'sheet_da_zong_jie',
+    });
+    mockSetContainer.mockClear();
+
+    const detachedChat = [{ is_user: false }];
+    setDetachedFlightModeState_ACU(detachedChat, '', {
+      enabled: true,
+      enabledAt: 100,
+      hiddenRowIds: ['1'],
+      bigSummarySheetKey: 'sheet_da_zong_jie',
+    });
+
+    expect(getCurrentFlightModeState_ACU(detachedChat, '').hiddenRowIds).toEqual(['1']);
+    expect(getCurrentFlightModeState_ACU().hiddenRowIds).toEqual(['1', '2']);
+
+    const rollback = stageFlightModeHiddenRowIds_ACU(['1', '3'], detachedChat, '');
+    expect(rollback).toEqual(expect.any(Function));
+    expect(mockSetContainer).not.toHaveBeenCalled();
+    expect(getCurrentFlightModeState_ACU(detachedChat, '').hiddenRowIds).toEqual(['1', '3']);
+    expect(getCurrentFlightModeState_ACU().hiddenRowIds).toEqual(['1', '2']);
+
+    rollback!();
+    expect(getCurrentFlightModeState_ACU(detachedChat, '').hiddenRowIds).toEqual(['1']);
+    expect(getCurrentFlightModeState_ACU().hiddenRowIds).toEqual(['1', '2']);
   });
 });

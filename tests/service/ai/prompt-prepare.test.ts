@@ -819,4 +819,31 @@ describe('prepareAIInput_ACU — 显式 tableData 模式', () => {
     await expect(prepareAIInput_ACU([], 'standard', null, { tableData: explicitTableData })).rejects.toThrow('snapshot unavailable');
     expect(getCombinedWorldbookContent_ACU).not.toHaveBeenCalled();
   });
+
+  it('经典表格模式 detached 候选重填时透传 chatOverride 与 isolationKey 读取隔离后的 hiddenRowIds', async () => {
+    const detachedChat = [{ is_user: false, mes: 'detached' }];
+    mockGetCurrentFlightModeState.mockImplementation((chatOverride?: any[], isolationKey?: string) => (
+      chatOverride === detachedChat && isolationKey === 'iso-a'
+        ? { enabled: true, hiddenRowIds: ['1'], bigSummarySheetKey: 'sheet_da_zong_jie' }
+        : { enabled: true, hiddenRowIds: ['1', '2'], bigSummarySheetKey: 'sheet_da_zong_jie' }
+    ));
+
+    const result = await prepareAIInput_ACU([], 'full', null, {
+      chatOverride: detachedChat,
+      isolationKey: 'iso-a',
+      isolatedSnapshot: true,
+      tableData: {
+        sheet_chronicle: {
+          uid: 'sheet_chronicle',
+          name: '纪要表',
+          content: [['row_id', '纪要'], ['1', '已隐藏旧纪要'], ['2', '候选A刚总结但B仍可见']],
+          updateConfig: {},
+        },
+      },
+    });
+
+    expect(mockGetCurrentFlightModeState).toHaveBeenCalledWith(detachedChat, 'iso-a');
+    expect(result?.tableDataText).not.toContain('已隐藏旧纪要');
+    expect(result?.tableDataText).toContain('候选A刚总结但B仍可见');
+  });
 });

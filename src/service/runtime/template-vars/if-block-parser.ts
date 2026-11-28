@@ -28,7 +28,7 @@ import { projectFlightModeHiddenChronicleRows_ACU } from '../../flight-mode/flig
     }
     
     let effectiveContext = context;
-    const flightMode = getCurrentFlightModeState_ACU();
+    const flightMode = context?.flightModeOverride ?? getCurrentFlightModeState_ACU(context?.chatSnapshot, context?.isolationKey);
     if (flightMode.enabled && flightMode.hiddenRowIds.length > 0 && context?.allTablesJson) {
       try {
         effectiveContext = {

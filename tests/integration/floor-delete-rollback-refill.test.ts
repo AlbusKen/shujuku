@@ -277,18 +277,53 @@ describe('删楼回滚表格与世界书并在重生成时重新填表（端到�
     ]);
   });
 
-  it('经典 flight enabled 拒绝候选登记，不保存聊天且不填表', async () => {
+  it('经典飞行模式下未新增大总结行允许候选登记与切换，首次 Swipe 撞上大总结新增行则 fail-closed 拒绝', async () => {
+    // 场景 1：未新增大总结行的普通楼层允许登记候选并写入 baseHiddenRowIds
     setupHost([{ is_user: false, mes: 'A', swipe_id: 0, swipes: ['A'] }]);
-    setCurrentFlightModeState_ACU({ enabled: true, enabledAt: 1, hiddenRowIds: [], bigSummarySheetKey: 'sheet_big_summary' });
+    setCurrentFlightModeState_ACU({ enabled: true, enabledAt: 1, hiddenRowIds: ['1'], bigSummarySheetKey: 'sheet_big_summary' });
     expect(getCurrentFlightModeState_ACU().enabled).toBe(true);
     chat[0].swipe_id = 1;
-    const intent = captureNativeSwipeTableIntent_ACU(chat, 0)!;
+    const okIntent = captureNativeSwipeTableIntent_ACU(chat, 0)!;
     chat[0].swipes.push('B');
     chat[0].mes = 'B';
     const scope = { chatKey: currentChatFileIdentifier_ACU, isolationKey: '', isCurrent: () => true };
-    expect(await registerNativeSwipeTableCandidate_ACU(scope, intent)).toBe('unsupported');
+    expect(await registerNativeSwipeTableCandidate_ACU(scope, okIntent)).toBe('registered');
+    expect(persistedChat[0].TavernDB_ACU_NativeSwipeState[''].baseHiddenRowIds).toEqual(['1']);
+
+    // 场景 2：旧候选在本楼刚新增了大总结行（无先前归档）时 fail-closed 拒绝候选登记，不保存也不填表
+    setupHost([
+      { is_user: false, mes: '开场白' },
+      { is_user: true, mes: '继续' },
+      { is_user: false, mes: 'A', swipe_id: 0, swipes: ['A'] },
+    ]);
+    const baseData = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_big_summary: { uid: 'sheet_big_summary', name: '大总结', content: [['row_id', '总结']] },
+    };
+    const afterBigSummary = {
+      mate: { type: 'chatSheets', version: 1 },
+      sheet_big_summary: { uid: 'sheet_big_summary', name: '大总结', content: [['row_id', '总结'], ['1', '本楼刚总结']] },
+    };
+    expect((await runTableWriteTransaction_ACU({ source: 'auto_fill', writeSet: [{ kind: 'all' }] }, tx => persistTableMutationLogV2_ACU({
+      targetMessageIndex: 0, source: 'auto_fill', afterData: baseData,
+      filledSheetKeys: [], candidateChangedSheetKeys: [], strictSave: true, transactionContext: tx,
+    }))).saved).toBe(true);
+    expect((await runTableWriteTransaction_ACU({ source: 'group_fill', writeSet: [{ kind: 'all' }] }, tx => persistTableMutationLogV2_ACU({
+      targetMessageIndex: 2, source: 'group_fill', afterData: afterBigSummary,
+      operations: [{ kind: 'row_upsert', sheetKey: 'sheet_big_summary', rowId: '1', cells: ['1', '本楼刚总结'] }],
+      filledSheetKeys: ['sheet_big_summary'], candidateChangedSheetKeys: ['sheet_big_summary'],
+      swipeBody: 'A', strictSave: true, transactionContext: tx,
+    }))).saved).toBe(true);
+    setCurrentFlightModeState_ACU({ enabled: true, enabledAt: 1, hiddenRowIds: ['c1'], bigSummarySheetKey: 'sheet_big_summary' });
+    saveChat.mockClear();
+
+    chat[2].swipe_id = 1;
+    const blockedIntent = captureNativeSwipeTableIntent_ACU(chat, 2)!;
+    chat[2].swipes.push('B');
+    chat[2].mes = 'B';
+    expect(await registerNativeSwipeTableCandidate_ACU(scope, blockedIntent)).toBe('unsupported');
     const fill = vi.fn();
-    expect(await refillNativeSwipeTableCandidate_ACU(scope, intent, fill)).toBe('unsupported');
+    expect(await refillNativeSwipeTableCandidate_ACU(scope, blockedIntent, fill)).toBe('unsupported');
     expect(fill).not.toHaveBeenCalled();
     expect(saveChat).not.toHaveBeenCalled();
   });

@@ -156,7 +156,7 @@ function resolvePromptRowWindow_ACU(
     messages: any[],
     updateMode = 'standard',
     targetSheetKeys: string[] | null = null,
-    options: { tableData?: any; isolatedSnapshot?: boolean; excludeImportTaggedWorldbookEntries?: boolean; agentGreenlights?: any[]; isolationKey?: string; templateScope?: TemplateScope_ACU; sqlApplyScope?: SqlTableApplyScope_ACU; signal?: AbortSignal; worldbookReadContext?: LorebookReadContext_ACU } = {},
+    options: { tableData?: any; isolatedSnapshot?: boolean; excludeImportTaggedWorldbookEntries?: boolean; agentGreenlights?: any[]; chatOverride?: any[]; isolationKey?: string; templateScope?: TemplateScope_ACU; sqlApplyScope?: SqlTableApplyScope_ACU; signal?: AbortSignal; worldbookReadContext?: LorebookReadContext_ACU } = {},
   ) {
     if (options.isolatedSnapshot && (!options.tableData || typeof options.tableData !== 'object')) {
         throw new Error('隔离填表必须提供显式表格快照。');
@@ -199,7 +199,7 @@ function resolvePromptRowWindow_ACU(
         }
     } catch (e) { logWarn_ACU('[AI输入准备] ensureChatSheetGuideSeeded 失败, seed rows 可能不完整:', e); }
 
-    const flightMode = getCurrentFlightModeState_ACU();
+    const flightMode = getCurrentFlightModeState_ACU(options.chatOverride, options.isolationKey);
     if (flightMode.enabled && flightMode.hiddenRowIds.length > 0) {
         try {
             workingTableData = projectFlightModeHiddenChronicleRows_ACU(workingTableData, flightMode);

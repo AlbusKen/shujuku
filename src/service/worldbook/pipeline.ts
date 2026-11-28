@@ -1,4 +1,5 @@
 import { liveTableWorldbookEntryStore_ACU, type TableWorldbookEntryStore_ACU } from './table-worldbook-entry-store';
+import type { FlightModeState_ACU } from '../../shared/models/flight-mode-model';
 import type { AgentWorldbookControlSnapshot_ACU, AgentWorldbookControlSnapshotEntry_ACU } from '../../shared/models/agent-worldbook-model';
 import { getCurrentWorldbookConfig_ACU } from '../settings/settings-readers';
 import { allChatMessages_ACU, coreApisAreReady_ACU, currentChatFileIdentifier_ACU, currentJsonTableData_ACU, getCurrentIsolationKey_ACU, settings_ACU, _set_currentJsonTableData_ACU, _set_allChatMessages_ACU} from '../runtime/state-manager';
@@ -76,13 +77,15 @@ export   async function updateReadableLorebookEntry_ACU(createIfNeeded = false, 
 
 export function renderTableWorldbookEntriesForRequest_ACU(
   data: Record<string, any>, book: string, store: TableWorldbookEntryStore_ACU,
+  flightModeOverride?: FlightModeState_ACU,
 ): Promise<void> {
-  return syncReadableTableWorldbookEntries_ACU(structuredClone(data), true, false, book, store);
+  return syncReadableTableWorldbookEntries_ACU(structuredClone(data), true, false, book, store, flightModeOverride);
 }
 
 async function syncReadableTableWorldbookEntries_ACU(
   mergedData: Record<string, any>, createIfNeeded: boolean, isImport: boolean,
   targetLorebookOverride: string | null, entryStore?: TableWorldbookEntryStore_ACU,
+  flightModeOverride?: FlightModeState_ACU,
 ): Promise<void> {
     const store = entryStore ?? liveTableWorldbookEntryStore_ACU;
     const options: [TableWorldbookEntryStore_ACU?] = entryStore ? [entryStore] : [];
@@ -152,10 +155,13 @@ async function syncReadableTableWorldbookEntries_ACU(
     // 不能再依赖 readableText 判空。
     // 否则当所有表格都开启“按行拆分”后，readableText 会为空，进而误判为“数据库为空”，
     // 导致本应创建的拆分世界书条目被整体跳过。
+    const customExportOptions: [TableWorldbookEntryStore_ACU?, FlightModeState_ACU?] = flightModeOverride
+        ? [entryStore, flightModeOverride]
+        : (entryStore ? [entryStore] : []);
     if (hasNonEmptyCellData_ACU) {
-        await updateCustomTableExports_ACU(mergedData, isImport, targetLorebookOverride, ...options);
+        await updateCustomTableExports_ACU(mergedData, isImport, targetLorebookOverride, ...customExportOptions);
     } else {
-        await updateCustomTableExports_ACU(null, isImport, targetLorebookOverride, ...options); // 仅清理旧自定义导出条目，不创建新条目
+        await updateCustomTableExports_ACU(null, isImport, targetLorebookOverride, ...customExportOptions); // 仅清理旧自定义导出条目，不创建新条目
     }
 
     // [修复] 外部导入时优先使用 targetLorebookOverride 参数，避免临时修改 worldbookConfig 被兜底补齐逻辑覆盖
