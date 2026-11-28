@@ -198,6 +198,29 @@ describe('删楼回滚表格与世界书并在重生成时重新填表（端到�
     _set_TABLE_TEMPLATE_ACU(original.template);
   });
 
+  it('真实 PR75 writer 的 v2 归档经宿主回读后可切换恢复并冷回放', async () => {
+    // JSON 为 c464c57457bdd72d96f5d51cbd8f2844953374cd 原生 Swipe writer
+    // 执行 refillNativeSwipeTableCandidate_ACU、真实 persist 和 strict save 后的宿主数据；
+    // 历史模块只在生成时从 git 内存载入，不随测试或生产代码交付。
+    const { readFileSync } = await import('node:fs');
+    const fixture = JSON.parse(readFileSync('tests/integration/pr75-native-swipe-v2.json', 'utf8'));
+    setupHost(fixture);
+    await saveChat();
+    chat = await readChatFromHostStrict_ACU();
+    (SillyTavern_API_ACU as any).chat = chat;
+    expect(chat[2].TavernDB_ACU_NativeSwipeState[''].version).toBe(2);
+    chat[2].swipe_id = 0;
+    chat[2].mes = 'A';
+    expect(await restoreNativeSwipeTableCandidate_ACU({
+      chatKey: currentChatFileIdentifier_ACU, isolationKey: '', isCurrent: () => true,
+    }, 2)).toBe('updated');
+    clearLiveReplayCache_ACU();
+    const replay = await loadTableStateFromFramesV2Detailed_ACU(await readChatFromHostStrict_ACU(), '', {
+      updateRuntimeState: false, compatibilityMode: 'disabled', backgroundFixation: 'skip',
+    });
+    expect(replay?.data?.sheet_items.content).toEqual([['row_id', '物品名', '数量'], ['1', 'PR75 A 的剑', '1']]);
+  });
+
   it('登记后用真实 persist 完成前楼和候选批次，宿主回读冷重建后切换仍保留共享历史', async () => {
     setupHost([
       { is_user: false, mes: '开场白' }, { is_user: true, mes: '继续' },
