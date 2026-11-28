@@ -873,6 +873,7 @@ export async function commitStagedSheetsAtFullBoundaryAtomic_ACU(
       chat.push(...before);
       return failBoundary_ACU('boundary_strict_save_failed', `boundary commit 严格保存失败：${error?.message || String(error)}`);
     }
+    options.chatView?.onFramesPersisted?.(options.originalFullIndex, [options.originalFullIndex]);
     logDebug_ACU(`[TableFillBoundaryStaging] 已原子汇合：runId=${runId}, originalFull=${options.originalFullIndex}, sheets=${targetSheetKeys.join('、')}。`);
     return {
       ok: true,

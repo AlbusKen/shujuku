@@ -2900,6 +2900,7 @@ async function persistTableMutationLogV2Core_ACU(
     for (const [index, nextIsolatedData] of replacementIsolatedDataByMessageIndex) {
       chat[index].TavernDB_ACU_IsolatedData = nextIsolatedData;
     }
+    options.chatView.onFramesPersisted?.(options.targetMessageIndex, [...replacementIsolatedDataByMessageIndex.keys()]);
     return { saved: true, messageIndex: target.index, entry };
   }
   const commitChatIdentity = getActiveChatStorageIdentity_ACU(chat);
