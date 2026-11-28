@@ -90,7 +90,12 @@ import { checkIfFirstTimeInit_ACU, ensureLegacyStorageMigratedBeforeWrite_ACU } 
 import { assertSingleActiveFullCheckpointV2_ACU, assertWriteTargetNotBeforeReplayRoot_ACU, buildReplacementPurgedCandidateChat_ACU, collectV2FullCheckpointIndices_ACU, hasAnyV2Checkpoint_ACU } from './storage-frame-v2-persist';
 import { parseAndApplyTableEditsToData_ACU, prepareAIInput_ACU } from '../ai/prompt-builder';
 import { extractStrictJsonTableFillResponse_ACU } from '../ai/prompt-builder/strict-json-table-fill';
-import { isSqlContent } from '../ai/prompt-builder/table-edit-parser';
+import {
+    extractTableEditTagContent_ACU,
+    isEmptyOrSqlCommentOnlyTableEdit_ACU,
+    isSqlContent,
+    normalizeTableEditContent_ACU,
+} from '../ai/prompt-builder/table-edit-parser';
 import { buildGuidedBaseDataFromSheetGuide_ACU, getSortedSheetKeys_ACU } from '../template/chat-scope';
 import { isSqliteMode } from './storage-mode';
 import type { TableMutationOperationV2_ACU } from './storage-frame-v2-types';
@@ -1522,13 +1527,16 @@ export async function collectGroupFillResponse_ACU(
                     throw new ModelOutputRetryError_ACU(extracted.retryHint || extracted.error || '严格 JSON 填表响应格式无效');
                 }
                 normalizedAiResponse = extracted.normalizedResponse || aiResponse;
-                tableEditText = (extracted.tableEditText || '').trim();
+                tableEditText = isSqliteMode()
+                    ? normalizeTableEditContent_ACU(extracted.tableEditText || '')
+                    : (extracted.tableEditText || '').trim();
             } else {
-                if (!aiResponse || !aiResponse.includes('<tableEdit>') || !aiResponse.includes('</tableEdit>')) {
+                const extractedTagContent = extractTableEditTagContent_ACU(aiResponse);
+                if (extractedTagContent === null) {
                     diagnoseResponse('table_edit_block_missing');
                     throw new ModelOutputRetryError_ACU('AI响应中未找到完整有效的 <tableEdit> 标签');
                 }
-                tableEditText = (aiResponse.match(/<tableEdit>([\s\S]*?)<\/tableEdit>/i)?.[1] || '').trim();
+                tableEditText = extractedTagContent;
             }
             if (isSqliteMode() && tableEditText && isSqlContent(tableEditText)) {
                 try {
@@ -1723,11 +1731,16 @@ function isGroupFillSqlResponse_ACU(response: GroupFillResponse_ACU): boolean {
     return typeof response.tableEditText === 'string' && isSqlContent(response.tableEditText);
 }
 
+function isGroupFillSqlOrNoOpResponse_ACU(response: GroupFillResponse_ACU): boolean {
+    return isGroupFillSqlResponse_ACU(response)
+        || (typeof response.tableEditText === 'string' && isEmptyOrSqlCommentOnlyTableEdit_ACU(response.tableEditText));
+}
+
 function getMixedSqliteNonSqlResponses_ACU(responses: GroupFillResponse_ACU[]): GroupFillResponse_ACU[] {
     if (!isSqliteMode()) return [];
     const hasSql = responses.some(isGroupFillSqlResponse_ACU);
     if (!hasSql) return [];
-    return responses.filter(response => !isGroupFillSqlResponse_ACU(response));
+    return responses.filter(response => !isGroupFillSqlOrNoOpResponse_ACU(response));
 }
 
 function buildMixedSqliteFormatError_ACU(nonSqlResponses: GroupFillResponse_ACU[]): string {
@@ -1853,8 +1866,9 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
     }
 
     const allResponsesAreRuntimeSql = isSqliteMode()
+        && hasSqlResponse
         && sortedResponses.length > 0
-        && sortedResponses.every(isGroupFillSqlResponse_ACU);
+        && sortedResponses.every(isGroupFillSqlOrNoOpResponse_ACU);
 
     if (hasSqlResponse && !allResponsesAreRuntimeSql) {
         return {
@@ -1876,6 +1890,10 @@ async function applyUnifiedGroupFillResponsesCore_ACU(
         const sqlScopedKeys = (keys: readonly string[]) => filterSheetKeysByTemplateScope_ACU(keys, sqlScope);
 
         for (const response of sortedResponses) {
+            if (!isGroupFillSqlResponse_ACU(response)) {
+                logDebug_ACU(`[SQL Mode] ${formatResponseGroupReference_ACU(response)} 返回空/纯注释 <tableEdit>，本组跳过 SQL 执行。`);
+                continue;
+            }
             const scopedTargets = sqlScopedKeys(response.job.targetSheetKeys || []);
             if ((response.job.targetSheetKeys || []).length > 0 && scopedTargets.length === 0) {
                 logDebug_ACU(`[TemplateScope] ${formatResponseGroupReference_ACU(response)} 的目标表不在模板范围内，已屏蔽其 SQL。`);

@@ -102,7 +102,9 @@ function resolveSnapshotMate_ACU(tableData: TableDataObject_ACU): Mate_ACU {
 }
 
 export function normalizeSqlStatementsForRuntimeLog_ACU(sqlStatements: string): string[] {
-  const cleaned = String(sqlStatements || '').replace(/<!--|-->/g, '').trim();
+  let cleaned = String(sqlStatements || '').replace(/<!--|-->/g, '').trim();
+  const fenceMatch = cleaned.match(/^```[a-zA-Z0-9_-]*\s*\r?\n([\s\S]*?)\r?\n```$/);
+  if (fenceMatch) cleaned = fenceMatch[1].trim();
   if (!cleaned) return [];
   return splitSqlStatements(cleaned)
     .map(stmt => normalizeStatementValues(normalizeSqlStructure(stmt)))

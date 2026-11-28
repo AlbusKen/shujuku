@@ -25,6 +25,56 @@ import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../..
     return cleaned;
   }
 
+  function stripOuterMarkdownCodeFence_ACU(text: string): string {
+    const trimmed = String(text || '').trim();
+    const fenceMatch = trimmed.match(/^```[a-zA-Z0-9_-]*\s*\r?\n([\s\S]*?)\r?\n```$/);
+    return fenceMatch ? fenceMatch[1].trim() : trimmed;
+  }
+
+  /**
+   * 规范化 <tableEdit> 块内部文本（不改写中文冒号等 SQL/DSL 字符串字面量）。
+   * 供 collect 阶段与 parseAndApplyTableEditsToData_ACU 共享，避免 SQL/非 SQL 分类分裂。
+   */
+  export function normalizeTableEditContent_ACU(inner: string): string {
+    let cleaned = String(inner || '').replace(/<!--|-->/g, '').trim();
+    if (cleaned && !cleaned.includes('\n') && /\\n/.test(cleaned)) {
+      cleaned = cleaned.replace(/\\n/g, '\n').trim();
+    }
+    return stripOuterMarkdownCodeFence_ACU(cleaned);
+  }
+
+  /**
+   * 从完整闭合的 <tableEdit>...</tableEdit> 标签提取编辑文本（大小写不敏感）。
+   * 与 extractTableEditInner_ACU 共享 tableEditLastPairOnly 规则（默认取最后一对），
+   * 避免 collect 阶段取首对而解析阶段取末对导致 SQL 落入快照解析器报错。
+   */
+  export function extractTableEditTagContent_ACU(
+    text: string,
+    options: { useLastPairOnly?: boolean } = {},
+  ): string | null {
+    if (typeof text !== 'string' || !text.trim()) return null;
+    const useLastPairOnly = options.useLastPairOnly ?? (settings_ACU?.tableEditLastPairOnly !== false);
+    let inner: string | null = null;
+    if (useLastPairOnly) {
+      const fullRe = /<tableEdit>([\s\S]*?)<\/tableEdit>/ig;
+      let lastMatch: RegExpExecArray | null = null;
+      let match: RegExpExecArray | null;
+      while ((match = fullRe.exec(text)) !== null) {
+        lastMatch = match;
+      }
+      if (lastMatch && typeof lastMatch[1] === 'string') {
+        inner = lastMatch[1];
+      }
+    } else {
+      const fullMatch = text.match(/<tableEdit>([\s\S]*?)<\/tableEdit>/i);
+      if (fullMatch && typeof fullMatch[1] === 'string') {
+        inner = fullMatch[1];
+      }
+    }
+    if (inner === null) return null;
+    return normalizeTableEditContent_ACU(inner);
+  }
+
   export function extractTableEditInner_ACU(text: string, options: any = {}) {
     const { allowNoTableEditTags = true, useLastPairOnly = (settings_ACU?.tableEditLastPairOnly !== false) } = options;
     const cleaned = normalizeAiResponseForTableEditParsing_ACU(text);
@@ -125,7 +175,7 @@ import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../..
         return true;
     }
 
-    const editsString = extracted.inner.replace(/<!--|-->/g, '').trim();
+    const editsString = normalizeTableEditContent_ACU(extracted.inner);
     if (!editsString) {
         logDebug_ACU('Empty <tableEdit> block. No edits to apply.');
         return true;
@@ -524,22 +574,45 @@ import { allocateStableRowId_ACU, createStableRowIdReservation_ACU } from '../..
     return parseAndApplyTableEditsToData_ACU(aiResponse, currentJsonTableData_ACU, updateMode, isImportMode);
   }
 
+  const SQL_CONTENT_KEYWORD_RE_ACU = /^(INSERT|UPDATE|DELETE|ALTER|BEGIN|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE|CREATE|DROP|REPLACE|SELECT|WITH|PRAGMA|VACUUM|REINDEX|ANALYZE|ATTACH|DETACH)\b/i;
+
   /**
    * 检测 <tableEdit> 内容是否为 SQL 语句
-   * 跳过空行和注释行后，检查第一条非空行是否以 SQL 关键字开头
+   * 跳过空行、SQL 注释行与纯 HTML 注释行后，检查第一条有效内容是否以 SQL 关键字开头；
+   * 兼容单行 HTML 注释包裹（<!-- INSERT INTO ... -->）及外层 Markdown 代码围栏。
    */
   export function isSqlContent(content: string): boolean {
-    const lines = content.split('\n');
+    const cleaned = stripOuterMarkdownCodeFence_ACU(String(content || ''));
+    const lines = cleaned.split('\n');
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed) continue;
       // 跳过 SQL 注释
       if (trimmed.startsWith('--')) continue;
-      // 跳过 HTML 注释残留
-      if (trimmed.startsWith('<!--') || trimmed.startsWith('-->')) continue;
-      // 检查是否以 SQL 关键字开头
-      const sqlKeywords = /^(INSERT|UPDATE|DELETE|ALTER|BEGIN|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE|CREATE|DROP|REPLACE|SELECT|WITH|PRAGMA|VACUUM|REINDEX|ANALYZE|ATTACH|DETACH)\b/i;
-      return sqlKeywords.test(trimmed);
+      // 剥离单行/残留 HTML 注释边界
+      const unwrapped = trimmed.replace(/^<!--\s*/, '').replace(/\s*-->$/, '').trim();
+      if (!unwrapped) continue;
+      // 仅含说明文案的 HTML 注释行跳过，若内部本身就是 SQL 则放行检测
+      if (trimmed.startsWith('<!--') && !SQL_CONTENT_KEYWORD_RE_ACU.test(unwrapped)) continue;
+      return SQL_CONTENT_KEYWORD_RE_ACU.test(unwrapped);
     }
     return false;
+  }
+
+  /**
+   * 判断规范化后的 <tableEdit> 内容是否为空或仅包含 SQL 行注释（无任何语句/DSL）。
+   * 用于 SQLite 严格模式下多分组同批提交时，允许无变更分组返回空块或纯 `--` 注释，
+   * 不将其误判为混合非 SQL 格式。
+   */
+  export function isEmptyOrSqlCommentOnlyTableEdit_ACU(content: string): boolean {
+    const cleaned = normalizeTableEditContent_ACU(content);
+    if (!cleaned) return true;
+    const lines = cleaned.split('\n');
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      if (trimmed.startsWith('--')) continue;
+      return false;
+    }
+    return true;
   }

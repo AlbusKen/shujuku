@@ -72,6 +72,8 @@ vi.mock('../../../src/service/ai/prompt-builder/json-sanitizer', () => ({
 
 import {
   extractTableEditInner_ACU,
+  extractTableEditTagContent_ACU,
+  isEmptyOrSqlCommentOnlyTableEdit_ACU,
   parseAndApplyTableEdits_ACU,
   parseAndApplyTableEditsToData_ACU,
   isSqlContent,
@@ -151,6 +153,54 @@ describe('isSqlContent', () => {
 
   it('纯空白返回 false', () => {
     expect(isSqlContent('   \n\t  ')).toBe(false);
+  });
+
+  it('单行 HTML 注释包裹 SQL 返回 true', () => {
+    expect(isSqlContent("<!-- INSERT INTO inventory VALUES (1, '铁剑', 3); -->")).toBe(true);
+  });
+
+  it('HTML 注释说明行后跟 SQL 返回 true，纯 HTML 注释返回 false', () => {
+    expect(isSqlContent("<!-- 说明 -->\nINSERT INTO inventory VALUES (1);")).toBe(true);
+    expect(isSqlContent('<!-- 无变更 -->')).toBe(false);
+  });
+
+  it('Markdown sql 代码围栏包裹 SQL 返回 true', () => {
+    expect(isSqlContent("```sql\nINSERT INTO inventory VALUES (1);\n```")).toBe(true);
+  });
+});
+
+describe('extractTableEditTagContent_ACU & isEmptyOrSqlCommentOnlyTableEdit_ACU', () => {
+  beforeEach(() => {
+    mockSettings = { tableEditLastPairOnly: true };
+  });
+
+  it('默认 tableEditLastPairOnly 取最后一对并剥离 HTML 注释和代码围栏，同时保留中文冒号', () => {
+    const response = "<tableEdit><!-- 思考 --></tableEdit>\n<tableEdit><!-- INSERT INTO inventory (value) VALUES ('说明：铁剑'); --></tableEdit>";
+    expect(extractTableEditTagContent_ACU(response)).toBe("INSERT INTO inventory (value) VALUES ('说明：铁剑');");
+
+    const fenced = "<TABLEEDIT>\n```sql\nUPDATE inventory SET value = '状态：正常' WHERE row_id = 1;\n```\n</TABLEEDIT>";
+    expect(extractTableEditTagContent_ACU(fenced)).toBe("UPDATE inventory SET value = '状态：正常' WHERE row_id = 1;");
+  });
+
+  it('tableEditLastPairOnly=false 时取第一对；缺少完整闭合标签时返回 null', () => {
+    mockSettings = { tableEditLastPairOnly: false };
+    const response = '<tableEdit>first</tableEdit><tableEdit>second</tableEdit>';
+    expect(extractTableEditTagContent_ACU(response)).toBe('first');
+    expect(extractTableEditTagContent_ACU('</tableEdit>oops<tableEdit>')).toBeNull();
+    expect(extractTableEditTagContent_ACU('no tags')).toBeNull();
+  });
+
+  it('处理无真实换行时的转义 \\n', () => {
+    const response = "<tableEdit>\\nINSERT INTO inventory (value) VALUES ('a');\\n</tableEdit>";
+    expect(extractTableEditTagContent_ACU(response)).toBe("INSERT INTO inventory (value) VALUES ('a');");
+  });
+
+  it('isEmptyOrSqlCommentOnlyTableEdit_ACU 准确区分空/纯 SQL 注释与真实语句/DSL', () => {
+    expect(isEmptyOrSqlCommentOnlyTableEdit_ACU('')).toBe(true);
+    expect(isEmptyOrSqlCommentOnlyTableEdit_ACU('<!-- -->')).toBe(true);
+    expect(isEmptyOrSqlCommentOnlyTableEdit_ACU('-- 本轮无变更\n  -- 跳过')).toBe(true);
+    expect(isEmptyOrSqlCommentOnlyTableEdit_ACU("insertRow(0, {0: 'x'})")).toBe(false);
+    expect(isEmptyOrSqlCommentOnlyTableEdit_ACU("INSERT INTO inventory (value) VALUES ('x');")).toBe(false);
   });
 });
 
