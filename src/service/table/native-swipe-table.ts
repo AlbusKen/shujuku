@@ -220,10 +220,20 @@ function resolveRollView(chat: any[], intent: NativeSwipeTableIntent_ACU, isolat
       flightBaseHiddenRowIds = [...(liveHiddenRowIds ?? [])];
     }
   }
-  if (!activeBody || swipes.filter(item => item === activeBody).length !== 1
+  const rollBase = archive ? archive.base[index] : rollTailTag(tag);
+  const noLocalEdits = !archive && rollBase !== undefined && (
+    !tag
+    || (isV2TagData_ACU(tag) && Boolean(rollBase)
+      && tag.storageFrame.logEntries.length === 0
+      && (!tag.storageFrame.summaryVectorIndexFrame || tag.storageFrame.summaryVectorIndexFrame.logEntries.length === 0))
+  );
+  if (flightMode.enabled && noLocalEdits) {
+    flightBaseHiddenRowIds = [...(liveHiddenRowIds ?? [])];
+  }
+  if ((!activeBody && !noLocalEdits)
+    || (activeBody && swipes.filter(item => item === activeBody).length !== 1)
     || (archive && archive.activeFingerprint !== liveFingerprint)
     || readActiveProvisionalBridge_ACU(chat, isolationKey)) return 'unsupported' as const;
-  const rollBase = archive ? archive.base[index] : rollTailTag(tag);
   if (rollBase === undefined) return 'unsupported_checkpoint' as const;
   const base = { ...archive?.base, [index]: rollBase };
   const detached = withFrames(chat, isolationKey, base);
@@ -457,11 +467,11 @@ export async function refillNativeSwipeTableCandidate_ACU(
   const candidateHiddenRowIds = flightMode.enabled
     ? normalizeHiddenRowIds(getCurrentFlightModeState_ACU(detached, isolationKey).hiddenRowIds)
     : undefined;
-  const existingEntries: Candidate[] = archive?.entries ?? [{
+  const existingEntries: Candidate[] = archive?.entries ?? (activeBody ? [{
     body: activeBody,
     frames: { [index]: tag },
     ...(flightMode.enabled ? { hiddenRowIds: [...(liveHiddenRowIds ?? [])] } : {}),
-  }];
+  }] : []);
   const entries = existingEntries.filter(entry => entry.body !== body && swipes.includes(entry.body));
   const nextEntry: Candidate = {
     body,

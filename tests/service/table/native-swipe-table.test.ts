@@ -348,4 +348,30 @@ describe('原生末楼 Swipe 表格视图', () => {
     expect(mocks.chat[2][tableField]['']).toEqual(tag('A'));
     expect(mocks.chat[2][archiveField]).toBeUndefined();
   });
+
+  it('多个旧候选均无本楼填表改动时，继续 Swipe 仍可正常回滚世界书而不误报', async () => {
+    mocks.flightMode.enabled = true;
+    mocks.flightMode.hiddenRowIds = ['1'];
+    const reply = mocks.chat[2];
+    reply.swipes = ['A', 'A2', 'A3', 'A4'];
+    reply.swipe_id = 4;
+    reply[tableField] = {
+      '': {
+        _acu_storage_version: 2,
+        storageFrame: {
+          version: 2,
+          logEntries: [],
+          headRevision: null,
+          checkpoint: { kind: 'full', reason: 'schema_change', data: { sheet_a: { name: '纪要表' } } },
+        },
+      },
+    };
+    const intent = captureNativeSwipeTableIntent_ACU(mocks.chat, 2)!;
+    const baseline = { sheet_a: { name: '纪要表', content: [['row_id', '纪要'], ['1', '旧']] } };
+    mocks.replay.mockResolvedValue({ baseKind: 'full_checkpoint', data: baseline });
+
+    const projection = await readNativeSwipeWorldbookProjection_ACU(intent, 'chat', '', vi.fn());
+    expect(projection.data).toBe(baseline);
+    expect(projection.flightModeOverride).toMatchObject({ enabled: true, hiddenRowIds: ['1'] });
+  });
 });
