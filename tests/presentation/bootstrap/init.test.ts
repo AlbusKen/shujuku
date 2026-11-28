@@ -154,6 +154,8 @@ vi.mock('../../../src/service/continuation/continuation-runtime', () => ({ getCo
 vi.mock('../../../src/service/continuation/host-generation-bridge-registry', () => ({ getContinuationHostGenerationBridge_ACU: () => m.continuationBridge }));
 
 import { disposePlotPendingDisguise_ACU } from '../../../src/presentation/components/plot-pending-disguise';
+import { showToastr_ACU } from '../../../src/presentation/theme/toast';
+import { clearLogs, getAllLogs, setDebugLogEnabled } from '../../../src/shared/log-buffer';
 
 let reinitialize_ACU: (() => void) | null = null;
 
@@ -592,6 +594,60 @@ describe('mainInitialize_ACU 正文消息事件自动填表接线', () => {
     await dispatchCompletionTasks_ACU();
     expect(m.registerSwipe).toHaveBeenCalledOnce();
     if (event === 'GENERATION_ENDED') expect(m.autoUpdate).toHaveBeenCalledOnce();
+  });
+
+  it.each(['MESSAGE_SWIPED', 'GENERATION_STARTED'] as const)('%s 先结算无正文的旧登记，不会悬挂后续候选', async event => {
+    m.currentChatKey = 'chat-a';
+    const reply = { is_user: false, mes: 'A', swipe_id: 1, swipes: ['A'] };
+    m.api.chat = [{ is_user: true, mes: '用户' }, reply];
+    await m.chatMutationHandlers.get('swiped')!(1);
+    await m.generationStarted!('swipe', {}, false);
+    reply.mes = 'B';
+    reply.swipes.push('');
+    expect(m.messageReceived!(1, 'swipe')).toBeUndefined();
+    await dispatchCompletionTasks_ACU();
+    expect(m.registerSwipe).not.toHaveBeenCalled();
+    m.registerSwipe.mockResolvedValueOnce('unchanged');
+    reply.swipe_id = 2;
+    if (event === 'MESSAGE_SWIPED') await m.chatMutationHandlers.get('swiped')!(1);
+    else {
+      await m.generationStarted!('swipe', {}, false);
+      await m.chatMutationHandlers.get('swiped')!(1);
+    }
+    expect(m.registerSwipe).toHaveBeenCalledOnce();
+    expect(m.autoUpdate).not.toHaveBeenCalled();
+    reply.swipes[1] = 'B';
+    await m.chatMutationHandlers.get('swiped')!(1);
+    reply.mes = 'C';
+    reply.swipes.push('C');
+    await m.messageReceived!(1, 'swipe');
+    await dispatchCompletionTasks_ACU();
+    expect(m.registerSwipe).toHaveBeenCalledTimes(2);
+    expect(m.autoUpdate).toHaveBeenCalledExactlyOnceWith(undefined, expect.objectContaining({
+      nativeSwipe: { index: 1, message: reply, slot: 2, previousBody: 'B' },
+    }));
+  });
+
+  it.each(['unchanged', 'unsupported', 'unsupported_checkpoint'])('登记 %s 记录实际跳过原因，装配层只对不支持状态提示', async result => {
+    m.currentChatKey = 'chat-a';
+    const reply = { is_user: false, mes: 'A', swipe_id: 1, swipes: ['A'] };
+    m.api.chat = [{ is_user: true, mes: '用户' }, reply];
+    await m.chatMutationHandlers.get('swiped')!(1);
+    await m.generationStarted!('swipe', {}, false);
+    reply.mes = '不应写入日志的正文';
+    reply.swipes.push(reply.mes);
+    m.registerSwipe.mockResolvedValueOnce(result);
+    clearLogs();
+    setDebugLogEnabled(true);
+    await expect(m.messageReceived!(1, 'swipe')).resolves.toBe(false);
+    await dispatchCompletionTasks_ACU();
+    const logs = getAllLogs().map(entry => entry.message).join('\n');
+    expect(logs).toContain('native_swipe_register');
+    expect(logs).toContain(`"diagnosticCode":"${result}"`);
+    expect(logs).not.toContain(reply.mes);
+    expect(m.autoUpdate).not.toHaveBeenCalled();
+    expect(showToastr_ACU).toHaveBeenCalledTimes(result === 'unchanged' ? 0 : 1);
+    setDebugLogEnabled(false);
   });
 
   it('原生 Swipe 读取世界书时等待本轮投影，普通生成仍使用原条目', async () => {
