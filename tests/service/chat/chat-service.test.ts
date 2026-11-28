@@ -616,6 +616,31 @@ describe('purgeOldLayerData_ACU', () => {
     expect(JSON.parse(JSON.stringify(chat))).toEqual(before);
   });
 
+  it('Issue82：历史 provenance 未满缓冲仍阻止清理，不因已有安全锚点泛化放行', async () => {
+    mockSettings.retainRecentLayers = 10;
+    const chat = Array.from({ length: 35 }, (_, index) => ({
+      is_user: false,
+      qrf_plot: `剧情 ${index}`,
+      TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: {
+        version: 2,
+        ...(index === 20 ? { checkpoint: {
+          kind: 'full', createdAt: 1, reason: 'compaction',
+          data: { sheet_0: { name: '物品表', content: [['row_id'], ['1']] } },
+          compactionProvenance: { version: 1, triggeredAtAiCount: 30, retainCount: 10, bufferLayers: 20 },
+        } } : {}),
+        logEntries: [],
+      } } },
+    }));
+    const before = structuredClone(chat);
+    mockGetChatArray.mockReturnValue(chat);
+
+    await purgeOldLayerData_ACU();
+
+    expect(chat).toEqual(before);
+    expect(shouldRotateV2BoundaryCheckpointForRetainedBuffer_ACU()).toBe(false);
+    expect(mockSaveChatToHostStrict).not.toHaveBeenCalled();
+  });
+
   it('retainRecentLayers=0 时跳过', async () => {
     mockSettings.retainRecentLayers = 0;
     mockGetChatArray.mockReturnValue([]);
