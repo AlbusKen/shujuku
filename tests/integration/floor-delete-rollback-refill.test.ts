@@ -23,6 +23,7 @@ import {
 } from '../../src/service/runtime/state-manager';
 import {
   __resetCheckpointDeleteGuardForTests_ACU,
+  __getCheckpointVaultForTests_ACU,
   captureCheckpointVaultForCurrentChat_ACU,
   recoverLostCheckpointsAfterMessageDeletion_ACU,
 } from '../../src/service/chat/checkpoint-delete-guard';
@@ -33,6 +34,11 @@ import {
   setChatSheetGuideDataForIsolationKey_ACU,
 } from '../../src/service/template/chat-scope';
 import { TABLE_TEMPLATE_ACU, _set_TABLE_TEMPLATE_ACU } from '../../src/shared/defaults-json.js';
+import { persistTableMutationLogV2_ACU } from '../../src/service/table/storage-frame-v2-persist';
+import { runTableWriteTransaction_ACU } from '../../src/service/table/table-write-transaction';
+import {
+  readDeletedReplyRollback_ACU,
+} from '../../src/service/table/native-swipe-table';
 
 const original = {
   host: SillyTavern_API_ACU,
@@ -116,19 +122,26 @@ describe('删楼回滚表格与世界书并在重生成时重新填表（端到�
   let chat: any[];
   let saveChat: ReturnType<typeof vi.fn>;
   let wb: ReturnType<typeof createInMemoryWorldbookHost>;
+  let persistedChat: any[];
 
   function setupHost(initialChat: any[], options: { frequency?: number; skipFloors?: number } = {}) {
     chat = initialChat;
-    saveChat = vi.fn(async () => undefined);
+    persistedChat = [];
+    saveChat = vi.fn(async () => { persistedChat = JSON.parse(JSON.stringify(chat)); });
     wb = createInMemoryWorldbookHost();
     _set_SillyTavern_API_ACU({
       chat,
       chatId: 'chat-floor-delete-repro',
       characterId: 0,
       chatMetadata: {},
+      characters: [{ name: '测试角色', avatar: 'test.png' }],
       saveChat,
       saveMetadata: vi.fn(async () => undefined),
     } as any);
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => [{ chat_metadata: {} }, ...JSON.parse(JSON.stringify(persistedChat))],
+    })));
     _set_TavernHelper_API_ACU(wb.helper as any);
     _set_coreApisAreReady_ACU(true);
     _set_currentChatFileIdentifier_ACU('chat-floor-delete-repro');
@@ -169,6 +182,7 @@ describe('删楼回滚表格与世界书并在重生成时重新填表（端到�
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     __resetCheckpointDeleteGuardForTests_ACU();
     _set_SillyTavern_API_ACU(original.host);
     _set_TavernHelper_API_ACU(original.helper);
@@ -178,6 +192,33 @@ describe('删楼回滚表格与世界书并在重生成时重新填表（端到�
     _set_independentTableStates_ACU(original.independent);
     _set_settings_ACU(original.settings);
     _set_TABLE_TEMPLATE_ACU(original.template);
+  });
+
+  it('原生末楼删楼仅丢弃回复自身条目时，同步保管库且不保存或嫁接', async () => {
+    setupHost([
+      { is_user: false, mes: '开场白' },
+      { is_user: true, mes: '继续' },
+      { is_user: false, mes: 'A', swipe_id: 0, swipes: ['A'] },
+    ]);
+    const saved = await runTableWriteTransaction_ACU({
+      source: 'group_fill', writeSet: [{ kind: 'all' }],
+    }, tx => persistTableMutationLogV2_ACU({
+      targetMessageIndex: 2, source: 'group_fill', afterData: makeFilledData('A 的剑'),
+      filledSheetKeys: ['sheet_items'], candidateChangedSheetKeys: ['sheet_items'],
+      swipeBody: 'A', strictSave: true, transactionContext: tx,
+    }));
+    expect(saved.saved).toBe(true);
+    expect(persistedChat[2].TavernDB_ACU_NativeSwipeState[''].version).toBe(2);
+    captureCheckpointVaultForCurrentChat_ACU();
+    expect(__getCheckpointVaultForTests_ACU()?.entryCounts['']).toBe(1);
+    const deleted = chat.pop();
+    // 使用真实读回逻辑，不 mock replyRollback；首填回复没有需要保留的 tail anchor。
+    expect(readDeletedReplyRollback_ACU(chat, deleted, currentChatFileIdentifier_ACU, '')?.tailTag).toBeNull();
+    saveChat.mockClear();
+    expect(await recoverLostCheckpointsAfterMessageDeletion_ACU()).toEqual({ recovered: false, graftedCount: 0 });
+    expect(saveChat).not.toHaveBeenCalled();
+    expect(chat[0].TavernDB_ACU_IsolatedData).toBeUndefined();
+    expect(__getCheckpointVaultForTests_ACU()?.isolationKeys).toEqual([]);
   });
 
   it('场景 A：未预种 0 层时首次自动填表写入新楼 init full，删该楼后工作台和世界书全部回滚，重生成再次触发填表', async () => {
