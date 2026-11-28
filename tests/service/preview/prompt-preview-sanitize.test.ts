@@ -4,8 +4,55 @@
  */
 import { describe, it, expect } from 'vitest';
 import { sanitizeApiRequestBodyForPreview_ACU } from '../../../src/service/preview/prompt-preview-sanitize';
+import { buildCustomApiRequestBody_ACU } from '../../../src/service/ai/api-call';
 
 describe('sanitizeApiRequestBodyForPreview_ACU', () => {
+  it('真实 builder 的字符串 headers 逐行保留头名并掩码所有值', () => {
+    const body = buildCustomApiRequestBody_ACU([], {
+      url: 'https://preview.test/v1', model: 'm', apiKey: 'builder-api-secret',
+      requestHeaders: 'X-Custom: header-secret\r\nX-Trace: trace-secret',
+    });
+    expect(typeof body.custom_include_headers).toBe('string');
+    const before = structuredClone(body);
+    const sanitized = sanitizeApiRequestBodyForPreview_ACU(body);
+    expect(sanitized.custom_include_headers.split(/\r?\n/)).toEqual([
+      'Authorization: ***', 'X-Custom: ***', 'X-Trace: ***',
+    ]);
+    expect(body).toEqual(before);
+  });
+
+  it('真实 builder 的 JSON body 字符串解析后递归脱敏并保留普通字段', () => {
+    const body = buildCustomApiRequestBody_ACU([], {
+      url: 'https://preview.test/v1', model: 'm',
+      bodyParams: JSON.stringify({ safe: 1, nested: { api_key: 'body-secret', list: [{ token: 'token-secret', ok: true }] } }),
+    });
+    expect(typeof body.custom_include_body).toBe('string');
+    const before = structuredClone(body);
+    const sanitized = sanitizeApiRequestBodyForPreview_ACU(body);
+    expect(JSON.parse(sanitized.custom_include_body)).toEqual({
+      safe: 1, nested: { api_key: '***', list: [{ token: '***', ok: true }] },
+    });
+    expect(body).toEqual(before);
+  });
+
+  it.each(['api_key: yaml-secret', 'metadata: [invalid-secret'])('真实 builder 的非 JSON body 整段掩码：%s', bodyParams => {
+    const body = buildCustomApiRequestBody_ACU([], { url: 'https://preview.test/v1', model: 'm', bodyParams });
+    expect(sanitizeApiRequestBodyForPreview_ACU(body).custom_include_body).toBe('***');
+  });
+
+  it('真实 builder 的 URL query 全部值掩码，包含重复键与空值且不修改输入', () => {
+    const body = buildCustomApiRequestBody_ACU([], {
+      url: 'https://preview.test/v1?key=query-secret&region=region-secret&key=second-secret&empty=', model: 'm',
+    });
+    const sanitized = sanitizeApiRequestBodyForPreview_ACU(body);
+    const url = new URL(sanitized.custom_url);
+    expect([...url.searchParams.entries()]).toEqual([
+      ['key', '***'], ['region', '***'], ['key', '***'], ['empty', '***'],
+    ]);
+    expect(body.custom_url).toContain('query-secret');
+    expect(JSON.stringify(sanitized)).not.toMatch(/query-secret|region-secret|second-secret/);
+  });
+
   it('proxy_password 非空时替换为 ***，空串保持原样', () => {
     const body = { proxy_password: 'sk-live-secret', model: 'm' };
     const sanitized = sanitizeApiRequestBodyForPreview_ACU(body);

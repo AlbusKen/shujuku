@@ -67,6 +67,7 @@ const {
 vi.mock('../../../src/service/runtime/state-manager', () => ({
   settings_ACU: mockSettings,
   currentJsonTableData_ACU: mockCurrentJsonTableData,
+  currentChatFileIdentifier_ACU: 'preview-chat',
   getCurrentIsolationKey_ACU: vi.fn(() => 'iso-key'),
   pendingFinalGenerationGreenlights_ACU: [],
 }));
@@ -133,7 +134,8 @@ vi.mock('../../../src/service/worldbook/read-context', () => ({
   createLorebookReadContext_ACU: vi.fn(() => ({ dispose: mockLorebookDispose, readBookEntries: vi.fn() })),
 }));
 
-vi.mock('../../../src/shared/utils', () => ({
+vi.mock('../../../src/shared/utils', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../src/shared/utils')>(),
   parseTableTemplateJson_ACU: vi.fn(() => ({
     sheet_0: { name: '状态表', updateConfig: { groupId: 1 } },
     sheet_1: { name: '背包表', updateConfig: { groupId: 2 } },
@@ -141,7 +143,8 @@ vi.mock('../../../src/shared/utils', () => ({
   isSummaryOrOutlineTable_ACU: vi.fn(() => false),
 }));
 
-vi.mock('../../../src/shared/defaults-json.js', () => ({
+vi.mock('../../../src/shared/defaults-json.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../src/shared/defaults-json.js')>(),
   DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU: [],
   DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU: [],
 }));
@@ -151,7 +154,8 @@ vi.mock('../../../src/service/ai/prompt-builder/strict-json-table-fill', () => (
   buildStrictJsonTableFillResponseFormatForData_ACU: vi.fn(() => ({ responseFormat: { type: 'json_schema' } })),
 }));
 
-vi.mock('../../../src/service/ai/prompt-builder/table-fill-tools', () => ({
+vi.mock('../../../src/service/ai/prompt-builder/table-fill-tools', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../src/service/ai/prompt-builder/table-fill-tools')>(),
   buildTableFillNativeTools_ACU: vi.fn(() => []),
 }));
 
@@ -161,6 +165,13 @@ vi.mock('../../../src/service/ai/agent-tool-mode', () => ({
 
 import { previewTableFillPrompt_ACU } from '../../../src/service/preview/table-fill-prompt-preview';
 import { PromptPreviewGateBlockedError_ACU, PromptPreviewPrepareError_ACU } from '../../../src/service/preview/prompt-preview-types';
+import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
+import * as chatStorage from '../../../src/data/storage/chat-history';
+import * as chatGateway from '../../../src/data/gateways/chat-gateway';
+import { SqliteEngine } from '../../../src/data/sqlite/sqlite-engine';
+import * as storageStrategy from '../../../src/service/table/table-storage-strategy';
+import { ensureGlobalNameMapperForDDLs_ACU, disposeGlobalNameMapper } from '../../../src/service/runtime/template-vars/name-mapper';
+import { isSqliteMode } from '../../../src/service/table/storage-mode';
 
 function resetBase() {
   mockChat.value = [
@@ -169,6 +180,16 @@ function resetBase() {
     { is_user: false, mes: 'B'.repeat(50) },
     { is_user: false, mes: 'C'.repeat(50) },
   ];
+  mockChat.value[0][chatStorage.CHAT_SHEET_GUIDE_FIELD_ACU] = {
+    version: 1,
+    tags: { 'iso-key': { data: { sheet_0: { uid: 'sheet_0', name: '状态表', content: [['row_id', '状态']] } } } },
+  };
+  _set_SillyTavern_API_ACU({
+    chat: mockChat.value, getCurrentChatId: () => 'preview-chat',
+    chatMetadata: {}, this_chid: '0', characters: [{ avatar: 'preview.png' }],
+  } as any);
+  mockBuildBody.mockClear();
+  mockGetApiConfigByPreset.mockReset().mockReturnValue({ apiMode: 'custom', apiConfig: { url: 'http://localhost', model: 'test-model', customApiFormat: 'openai_compat' }, tavernProfile: '', resolved: true });
   mockAutoPlan.value = {
     updateGroups: {
       g1: { indices: [1, 2], batchSize: 2, sheetKeys: ['sheet_0'], groupId: 1, requiresBoundaryStaging: false },
@@ -269,12 +290,15 @@ describe('previewTableFillPrompt_ACU', () => {
     expect(messagesForContext).toHaveLength(3);
   });
 
-  it('prepareAIInput 收到结构克隆的 tableData（绕开 seed 写入陷阱）且只读上下文被 dispose', async () => {
+  it('prepareAIInput 收到结构克隆与显式隔离选项，且只读上下文被 dispose', async () => {
     await previewTableFillPrompt_ACU();
     const options = mockPrepare.mock.calls[0][3] as any;
     expect(options.tableData).not.toBe(mockCurrentJsonTableData);
     expect(options.tableData).toEqual(mockCurrentJsonTableData);
     expect(mockLorebookDispose).toHaveBeenCalled();
+    expect(options.isolatedSnapshot).toBe(true);
+    expect(options.templateScope.sheetKeys).toEqual(new Set(['sheet_0']));
+    expect(options.isolationKey).toBe('iso-key');
   });
 
   it('prepareAIInput 返回结构化失败时透出 failureCode 与 retryable', async () => {
@@ -316,5 +340,86 @@ describe('previewTableFillPrompt_ACU', () => {
     expect(input.sourcePromptSegments).toEqual(mockSettings.charCardPrompt);
     expect(input.strictJsonFillEnabled).toBe(false);
     expect(input.sqliteMode).toBe(false);
+  });
+
+  it('缺少 guide 时在 prepare 前拒绝，不 set 容器、不 save 聊天', async () => {
+    delete mockChat.value[0][chatStorage.CHAT_SHEET_GUIDE_FIELD_ACU];
+    const before = structuredClone(mockChat.value);
+    const setGuide = vi.spyOn(chatStorage, 'setChatSheetGuideContainer_ACU');
+    const setScope = vi.spyOn(chatStorage, 'setChatScopedConfigContainer_ACU');
+    const save = vi.spyOn(chatGateway, 'saveChatToHost_ACU');
+    try {
+      await expect(previewTableFillPrompt_ACU()).rejects.toThrow('当前聊天尚未初始化表格引导数据，请先完成一次填表');
+      expect(mockPrepare).not.toHaveBeenCalled();
+      expect(setGuide).not.toHaveBeenCalled();
+      expect(setScope).not.toHaveBeenCalled();
+      expect(save).not.toHaveBeenCalled();
+      expect(mockChat.value).toEqual(before);
+    } finally { setGuide.mockRestore(); setScope.mockRestore(); save.mockRestore(); }
+  });
+
+  it('旧 guide 只读解析，不把迁移副本写回宿主', async () => {
+    const before = structuredClone(mockChat.value);
+    await previewTableFillPrompt_ACU();
+    expect(mockChat.value).toEqual(before);
+  });
+
+  it.each(['tavern', 'main'] as const)('%s 路径不构造自定义请求体', async route => {
+    mockGetApiConfigByPreset.mockReturnValue({ apiMode: route === 'tavern' ? 'tavern' : 'custom', apiConfig: { useMainApi: true }, tavernProfile: 'p', resolved: true } as any);
+    const result = await previewTableFillPrompt_ACU({ scenario: 'manual_refill' });
+    expect(result.requestBody).toBeNull();
+    expect(result.segments).toHaveLength(2);
+    expect(mockBuildBody).not.toHaveBeenCalled();
+  });
+
+  it('auto forceDirectApi 即使 useMainApi 也构造独立 API 请求体', async () => {
+    mockGetApiConfigByPreset.mockReturnValue({ apiMode: 'custom', apiConfig: { url: 'http://localhost', model: 'm', useMainApi: true }, tavernProfile: '', resolved: true } as any);
+    expect((await previewTableFillPrompt_ACU()).requestBody).not.toBeNull();
+    expect(mockBuildBody).toHaveBeenCalledOnce();
+  });
+
+  it('预设名 String().trim 且渲染不禁用生产 SQL 读取', async () => {
+    mockSettings.tableApiPreset = '  preset-main  ';
+    await previewTableFillPrompt_ACU();
+    expect(mockGetApiConfigByPreset).toHaveBeenCalledWith('preset-main');
+    expect(mockRenderMessages.mock.calls[0][2]).not.toHaveProperty('sqlReadContext');
+  });
+
+  it('streaming 请求覆盖优先于全局设置且保留显式 false', async () => {
+    mockSettings.streamingEnabled = true;
+    mockCatchUpPlan.value.waves[0].groups[0].requestOptions = { streaming: false };
+    await previewTableFillPrompt_ACU({ scenario: 'catch_up' });
+    expect(mockBuildBody.mock.calls.at(-1)?.[2]).toMatchObject({ streaming: false });
+    mockSettings.streamingEnabled = false;
+    mockCatchUpPlan.value.waves[0].groups[0].requestOptions = { streaming: true };
+    await previewTableFillPrompt_ACU({ scenario: 'catch_up' });
+    expect(mockBuildBody.mock.calls.at(-1)?.[2]).toMatchObject({ streaming: true });
+  });
+
+  it('真实 renderer 与 SQLite 引擎解析 SQL 变量，不再被 null 上下文禁用', async () => {
+    const engine = new SqliteEngine();
+    await engine.init();
+    const ddl = 'CREATE TABLE preview_probe (row_id INTEGER PRIMARY KEY, value TEXT);';
+    engine.run(ddl);
+    engine.run("INSERT INTO preview_probe VALUES (1, '真实查询值');");
+    ensureGlobalNameMapperForDDLs_ACU(new Map([['preview_probe', ddl]]));
+    const ready = vi.spyOn(storageStrategy, 'isStorageRuntimeReadyForSyncRead_ACU').mockReturnValue(true);
+    const provider = vi.spyOn(storageStrategy, 'getStorageProvider').mockReturnValue({
+      mode: 'sqlite', isReady: () => true,
+      executeQuery: (sql: string) => engine.query(sql),
+    } as any);
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    const oldPrompt = mockSettings.charCardPrompt;
+    mockSettings.charCardPrompt = [{ role: 'USER', content: 'SQL={[sql "SELECT value FROM preview_probe"]}' }];
+    const { renderTableFillMessages_ACU } = await vi.importActual<typeof import('../../../src/service/ai/prompt-builder/prompt-api-call')>('../../../src/service/ai/prompt-builder/prompt-api-call');
+    mockRenderMessages.mockImplementation(renderTableFillMessages_ACU);
+    try {
+      const result = await previewTableFillPrompt_ACU();
+      expect(result.segments[0].content).toBe('SQL=真实查询值');
+    } finally {
+      mockSettings.charCardPrompt = oldPrompt;
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+      ready.mockRestore(); provider.mockRestore(); disposeGlobalNameMapper(); engine.dispose();
+    }
   });
 });

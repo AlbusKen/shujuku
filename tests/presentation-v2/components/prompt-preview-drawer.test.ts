@@ -180,6 +180,16 @@ describe('PromptPreviewDrawer 填表模式', () => {
     expect(pre!.textContent).toContain('[已脱敏]系统段');
   });
 
+  it('宿主路径空请求体只展示既有空状态，不伪造 JSON', async () => {
+    const { el } = mountDrawer({ isOpen: true, mode: 'table-fill', tableFillPreview: { ...TABLE_FILL_PREVIEW, requestBody: null } });
+    await nextTick();
+    (el.querySelector('.acu-disclosure-group__header') as HTMLElement).click();
+    await nextTick();
+    const pre = el.querySelector('.acu-v2-prompt-preview-drawer__request-body-json');
+    expect(pre?.textContent).toBe('该 API 路径不使用自定义请求体');
+    expect(pre?.textContent).not.toContain('mock-model');
+  });
+
   it('meta.storageMode=sqlite 时展示 SQLite 标签', async () => {
     const { el } = mountDrawer({
       isOpen: true,

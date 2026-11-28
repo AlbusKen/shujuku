@@ -12,6 +12,7 @@
 import { settings_ACU } from '../runtime/state-manager';
 import { resolveCurrentChatFillMode_ACU } from '../fill-mode/fill-mode-chat-record';
 import { isAgentWorldbookRuntimeEnabled_ACU } from '../agent/agent-worldbook-runtime-state';
+import { readOrdinaryZeroLayerState_ACU } from '../zero-layer/ordinary-state';
 import type { PromptPreviewBlocker_ACU, PromptPreviewGateResult_ACU } from './prompt-preview-types';
 
 // UI 组合层（usePromptPreview.ts）直接从本文件取类型：对外 re-export 契约类型。
@@ -39,11 +40,21 @@ function isAgentWorldbookTakeoverActive_ACU(): boolean {
 function isContinuationActive_ACU(): boolean {
   // ContinuationSettings_ACU 无 enabled 字段（全局副本只承载参数）；
   // 「智能续写已开启」的用户可见语义即页面开关。
-  return (settings_ACU as any)?.continuationPageEnabled === true;
+  return (settings_ACU as any)?.continuationPageEnabled !== false;
 }
 
 function collectSharedBlockers_ACU(): PromptPreviewBlocker_ACU[] {
   const blockers: PromptPreviewBlocker_ACU[] = [];
+  try {
+    readOrdinaryZeroLayerState_ACU();
+  } catch (error) {
+    blockers.push({
+      feature: 'zero_layer',
+      reason: (error as { code?: string })?.code === 'mode-disabled'
+        ? '零层聊天暂不支持预览'
+        : `零层状态读取失败，已阻止预览：${error instanceof Error ? error.message : String(error)}`,
+    });
+  }
   if (isAgentWorldbookTakeoverActive_ACU()) {
     blockers.push({
       feature: 'agent_worldbook',

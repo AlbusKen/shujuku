@@ -29,6 +29,8 @@ import { planManualCatchUpWaves_ACU } from '../table/manual-fill-planner';
 import { resolveManualUpdateBatchSize_ACU, resolveManualUpdateContextDepth_ACU } from '../table/manual-update-settings';
 import { isNonFillAiFloor_ACU, selectFillEligibleIndices_ACU } from '../runtime/message-handler';
 import { createLorebookReadContext_ACU } from '../worldbook/read-context';
+import { peekChatSheetGuideContainer_ACU } from '../../data/storage/chat-history';
+import { getChatSheetGuideDataForIsolationKey_ACU, getCurrentChatTemplateScopeState_ACU } from '../template/chat-scope';
 import { DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU, DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU } from '../../shared/defaults-json.js';
 import { evaluatePromptPreviewGate_ACU } from './prompt-preview-gate';
 import { sanitizeApiRequestBodyForPreview_ACU } from './prompt-preview-sanitize';
@@ -254,12 +256,12 @@ async function renderPreviewRequest_ACU(
     plan: PreviewJobPlan_ACU,
     tableData: Record<string, any>,
     abortSignal: AbortSignal,
-): Promise<{ messages: { role: string; content: string }[]; presetName: string; requestBody: Record<string, any> }> {
+): Promise<{ messages: { role: string; content: string }[]; presetName: string; requestBody: Record<string, any> | null }> {
     const options = plan.requestOptions || {};
-    const forceDirectApi = options.forceDirectApi === true;
-    const readPresetName = () => (options.tableApiPreset !== undefined && options.tableApiPreset !== null)
-        ? options.tableApiPreset
-        : (settings_ACU as any).tableApiPreset;
+    const forceDirectApi = !!options.forceDirectApi;
+    const readPresetName = () => String(options.tableApiPreset !== undefined
+        ? String(options.tableApiPreset)
+        : ((settings_ACU as any).tableApiPreset || '')).trim();
     const readChannel = (presetName: string) => {
         const apiConfig = getApiConfigByPreset_ACU(presetName);
         requireResolvedApiPreset_ACU(presetName, apiConfig);
@@ -292,11 +294,10 @@ async function renderPreviewRequest_ACU(
         sqliteMode,
         tableFillToolOptIn,
         tableData,
-        sqlReadContext: null,
         abortSignal,
     });
     // 预览无执行资格校验，assertCurrent 不传；工具可用性变化重渲染与原实现同构。
-    let effectiveTableApiPreset = initialPresetName;
+    let effectiveTableApiPreset = readPresetName();
     let apiPresetConfig = readChannel(effectiveTableApiPreset);
     let tableFillToolChannelAvailable = canUseTools(apiPresetConfig);
     if (tableFillToolChannelAvailable !== initialToolChannelAvailable) {
@@ -306,7 +307,6 @@ async function renderPreviewRequest_ACU(
             sqliteMode,
             tableFillToolOptIn,
             tableData,
-            sqlReadContext: null,
             abortSignal,
         });
         effectiveTableApiPreset = readPresetName();
@@ -317,7 +317,10 @@ async function renderPreviewRequest_ACU(
     }
     apiPresetConfig = structuredClone(apiPresetConfig);
     const effectiveApiConfig = (apiPresetConfig as any).apiConfig;
-    const streaming = (settings_ACU as any).streamingEnabled || false;
+    if (apiPresetConfig.apiMode === 'tavern' || (effectiveApiConfig.useMainApi && !forceDirectApi)) {
+        return { messages, presetName: effectiveTableApiPreset, requestBody: null };
+    }
+    const streaming = options.streaming ?? ((settings_ACU as any).streamingEnabled || false);
 
     let strictJsonResponseFormat: Record<string, any> | undefined;
     if (strictJsonFillEnabled) {
@@ -362,6 +365,18 @@ export async function previewTableFillPrompt_ACU(options?: {
     const chatHistory = capturePromptMessageSnapshotForPreview_ACU(liveChat);
     const isolationKey = getCurrentIsolationKey_ACU();
 
+    // get 的普通入口可能迁移并写状态；先确认聊天已有 guide，再用 snapshot 入口纯读。
+    const guideContainer = peekChatSheetGuideContainer_ACU(liveChat, { strict: true });
+    const scopedTemplate = getCurrentChatTemplateScopeState_ACU({ chat: liveChat, isolationKey, readOnly: true });
+    if (!(guideContainer?.tags as Record<string, any> | undefined)?.[isolationKey]?.data && !scopedTemplate?.guideData) {
+        throw new PromptPreviewPrepareError_ACU('当前聊天尚未初始化表格引导数据，请先完成一次填表', 'guide_not_initialized');
+    }
+    const guideData = getChatSheetGuideDataForIsolationKey_ACU(isolationKey, { chat: liveChat });
+    const guideKeys = Object.keys(guideData || {}).filter(key => key.startsWith('sheet_'));
+    if (!guideKeys.length) {
+        throw new PromptPreviewPrepareError_ACU('当前聊天尚未初始化表格引导数据，请先完成一次填表', 'guide_not_initialized');
+    }
+
     let plan: PreviewJobPlan_ACU;
     if (scenario === 'manual_refill') {
         plan = planManualRefillJobForPreview_ACU(chatHistory, options?.targetSheetKeys);
@@ -391,14 +406,24 @@ export async function previewTableFillPrompt_ACU(options?: {
     }
     plan.requestOptions = effectiveRequestOptions;
 
-    // 显式传 tableData（结构克隆）绕开 prepareAIInput 的 seed 写入陷阱（prompt-prepare.ts:179-199）。
+    // 现有隔离参数跳过 seed/migration 写路径；seedRows 与模板范围来自上面的只读 guide。
     const tableData = structuredClone(currentJsonTableData_ACU || {});
+    if (!isSqliteMode()) {
+        for (const key of Object.keys(tableData).filter(key => key.startsWith('sheet_'))) {
+            if (!tableData[key]?.seedRows?.length && Array.isArray(guideData[key]?.seedRows)) {
+                tableData[key].seedRows = structuredClone(guideData[key].seedRows);
+            }
+        }
+    }
     const abortController = new AbortController();
     const worldbookReadContext = createLorebookReadContext_ACU({ source: 'form_fill' });
     let dynamicContent: any;
     try {
         dynamicContent = await prepareAIInput_ACU(messagesForContext, plan.updateMode, plan.targetSheetKeys, {
             tableData,
+            isolatedSnapshot: true,
+            isolationKey,
+            templateScope: { sheetKeys: new Set(guideKeys), sheets: Object.fromEntries(guideKeys.map(key => [key, guideData[key]])) },
             signal: abortController.signal,
             worldbookReadContext,
             agentGreenlights: [...(pendingFinalGenerationGreenlights_ACU || [])],
@@ -426,7 +451,7 @@ export async function previewTableFillPrompt_ACU(options?: {
     }));
     return {
         segments,
-        requestBody: sanitizeApiRequestBodyForPreview_ACU(rendered.requestBody),
+        requestBody: rendered.requestBody === null ? null : sanitizeApiRequestBodyForPreview_ACU(rendered.requestBody),
         totalTokens: segments.reduce((sum, segment) => sum + segment.tokens, 0),
         meta: {
             fillMode: String(resolveCurrentChatFillMode_ACU()?.mode || ''),

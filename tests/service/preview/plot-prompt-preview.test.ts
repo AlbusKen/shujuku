@@ -74,9 +74,15 @@ vi.mock('../../../src/service/runtime/plot-runtime/plot-task-engine', () => ({
 }));
 
 import { previewPlotPrompts_ACU } from '../../../src/service/preview/plot-prompt-preview';
-import { PromptPreviewGateBlockedError_ACU } from '../../../src/service/preview/prompt-preview-types';
+import { PromptPreviewGateBlockedError_ACU, PromptPreviewPrepareError_ACU } from '../../../src/service/preview/prompt-preview-types';
+import { runPlotTasksRuntime_ACU } from '../../../src/service/runtime/plot-runtime/plot-task-engine';
+import { SqliteEngine } from '../../../src/data/sqlite/sqlite-engine';
+import * as storageStrategy from '../../../src/service/table/table-storage-strategy';
+import { ensureGlobalNameMapperForDDLs_ACU, disposeGlobalNameMapper } from '../../../src/service/runtime/template-vars/name-mapper';
+import { replaceDbSqlVariables, withSqlTemplateReadContext_ACU } from '../../../src/service/runtime/template-vars/sql-query-var';
 
 function resetBase() {
+  mockSettings.storageMode = 'native';
   mockSettings.plotSettings = { enabled: true };
   mockSettings.plotApiPreset = 'default-preset';
   mockSettings.plotTaskApiPresetOverridesById = {};
@@ -86,6 +92,7 @@ function resetBase() {
   mockFillMode.value = 'llm';
   mockEngineError.value = null;
   mockEngineTasks.value = [];
+  vi.mocked(runPlotTasksRuntime_ACU).mockClear();
 }
 
 describe('previewPlotPrompts_ACU', () => {
@@ -159,5 +166,77 @@ describe('previewPlotPrompts_ACU', () => {
     await previewPlotPrompts_ACU('input');
     // ensurePlotTasksCompat_ACU 的写入（若发生）只作用于克隆对象；全局设置保持原引用形态。
     expect(mockSettings.plotSettings).toEqual({ enabled: true });
+    const passedContext = vi.mocked(runPlotTasksRuntime_ACU).mock.calls[0][2]?.requestContext as any;
+    expect(passedContext).not.toHaveProperty('sqlReadContext');
+  });
+
+  it('SQLite 模式下运行时未就绪时阻断预览，不伪造数据也不执行剧情引擎', async () => {
+    mockSettings.storageMode = 'sqlite';
+    const ready = vi.spyOn(storageStrategy, 'isStorageRuntimeReadyForSyncRead_ACU').mockReturnValue(false);
+    try {
+      await expect(previewPlotPrompts_ACU('input')).rejects.toMatchObject({
+        name: PromptPreviewPrepareError_ACU.name,
+        failureCode: 'sqlite_runtime_not_ready',
+      });
+      expect(runPlotTasksRuntime_ACU).not.toHaveBeenCalled();
+    } finally {
+      ready.mockRestore();
+    }
+  });
+
+  it('SQLite 模式下 NameMapper 未绑定时阻断预览，不降级伪造数据', async () => {
+    mockSettings.storageMode = 'sqlite';
+    disposeGlobalNameMapper();
+    const ready = vi.spyOn(storageStrategy, 'isStorageRuntimeReadyForSyncRead_ACU').mockReturnValue(true);
+    const provider = vi.spyOn(storageStrategy, 'getStorageProvider').mockReturnValue({
+      mode: 'sqlite',
+      isReady: () => true,
+      executeQuery: vi.fn(),
+    } as any);
+    try {
+      await expect(previewPlotPrompts_ACU('input')).rejects.toMatchObject({
+        name: PromptPreviewPrepareError_ACU.name,
+        failureCode: 'sqlite_mapper_not_ready',
+      });
+      expect(runPlotTasksRuntime_ACU).not.toHaveBeenCalled();
+    } finally {
+      ready.mockRestore();
+      provider.mockRestore();
+      disposeGlobalNameMapper();
+    }
+  });
+
+  it('SQLite 模式运行时就绪时构造真实 sqlReadContext，可用真实 SQLite 引擎解析 SQL 变量', async () => {
+    mockSettings.storageMode = 'sqlite';
+    const engine = new SqliteEngine();
+    await engine.init();
+    const ddl = 'CREATE TABLE plot_probe (row_id INTEGER PRIMARY KEY, value TEXT);';
+    engine.run(ddl);
+    engine.run("INSERT INTO plot_probe VALUES (1, '剧情真实查询值');");
+    ensureGlobalNameMapperForDDLs_ACU(new Map([['plot_probe', ddl]]));
+    const liveSqliteTableData = { sheet_0: { name: '剧情表', ddl, content: [['row_id', 'value'], ['1', '剧情真实查询值']] } };
+    const ready = vi.spyOn(storageStrategy, 'isStorageRuntimeReadyForSyncRead_ACU').mockReturnValue(true);
+    const provider = vi.spyOn(storageStrategy, 'getStorageProvider').mockReturnValue({
+      mode: 'sqlite',
+      isReady: () => true,
+      getCurrentData: () => liveSqliteTableData,
+      executeQuery: (sql: string) => engine.query(sql),
+    } as any);
+    mockEngineTasks.value = [{ id: 't1', name: 'A', stage: 1, messages: [{ role: 'user', content: 'ok' }] }];
+    try {
+      await previewPlotPrompts_ACU('input');
+      const passedContext = vi.mocked(runPlotTasksRuntime_ACU).mock.calls[0][2]?.requestContext as any;
+      expect(passedContext.sqlReadContext).toBeTruthy();
+      expect(passedContext.tableData).toEqual(liveSqliteTableData);
+      const rendered = withSqlTemplateReadContext_ACU(passedContext.sqlReadContext, () =>
+        replaceDbSqlVariables('SQL={[sql "SELECT value FROM plot_probe"]}'),
+      );
+      expect(rendered).toBe('SQL=剧情真实查询值');
+    } finally {
+      ready.mockRestore();
+      provider.mockRestore();
+      disposeGlobalNameMapper();
+      engine.dispose();
+    }
   });
 });
