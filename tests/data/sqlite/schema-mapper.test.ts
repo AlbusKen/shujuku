@@ -258,6 +258,84 @@ describe('parseDDLColumnInfos_ACU', () => {
     const ddl = 'CREATE TABLE inventory (row_id INTEGER PRIMARY KEY, score INTEGER DEFAULT 0 NOT NULL CHECK(score >= 0));';
     expect(parseDDLColumnInfos_ACU(ddl)[1]).toMatchObject({ hasDefault: true, defaultExpression: '0' });
   });
+
+  it('相同 DDL 的解析结果可独立修改，变更 DDL 后使用新的列定义', () => {
+    const ddl = 'CREATE TABLE counters (row_id INTEGER PRIMARY KEY, count INTEGER DEFAULT 2);';
+    const first = parseDDLColumnInfos_ACU(ddl);
+    first[1].defaultExpression = '3';
+    first.pop();
+
+    const second = parseDDLColumnInfos_ACU(ddl);
+    expect(second).toHaveLength(2);
+    expect(second[1]).toMatchObject({ sqlName: 'count', defaultExpression: '2' });
+    second[1].sqlName = 'changed';
+
+    expect(parseDDLColumnInfos_ACU(ddl)[1]).toMatchObject({ sqlName: 'count', defaultExpression: '2' });
+    expect(parseDDLColumnInfos_ACU(ddl.replace('DEFAULT 2', 'DEFAULT 5'))[1])
+      .toMatchObject({ sqlName: 'count', defaultExpression: '5' });
+  });
+
+  it('超长 DDL 解析正确且返回值互相独立', () => {
+    // 逗号必须位于 `--` 注释之前，否则会被行注释吞掉。
+    const businessColumns = Array.from({ length: 300 }, (_, index) =>
+      `  col_${index} TEXT DEFAULT 'v${index}'${index < 299 ? ',' : ''} -- 列${index}`);
+    const ddl = `CREATE TABLE wide_table (\n  row_id INTEGER PRIMARY KEY, -- 行号\n${businessColumns.join('\n')}\n);`;
+    expect(ddl.length).toBeGreaterThan(8192);
+
+    const first = parseDDLColumnInfos_ACU(ddl);
+    expect(first).toHaveLength(301);
+    expect(first[0]).toMatchObject({ sqlName: 'row_id', declaredType: 'INTEGER', isPrimaryKey: true, comment: '行号' });
+    expect(first[300]).toMatchObject({ index: 300, sqlName: 'col_299', declaredType: 'TEXT', comment: '列299', defaultExpression: "'v299'" });
+    first[300].defaultExpression = 'mutated';
+    first.pop();
+
+    const second = parseDDLColumnInfos_ACU(ddl);
+    expect(second).toHaveLength(301);
+    expect(second[300]).toMatchObject({ sqlName: 'col_299', defaultExpression: "'v299'" });
+  });
+
+  it.each([8192, 8193])('长度恰好 %i 的 DDL 解析正确且返回值互相独立', (length) => {
+    const prefix = `CREATE TABLE boundary_${length} (row_id INTEGER PRIMARY KEY, note TEXT NOT NULL DEFAULT '`;
+    const suffix = "');";
+    const fill = 'x'.repeat(length - prefix.length - suffix.length);
+    const ddl = `${prefix}${fill}${suffix}`;
+    expect(ddl).toHaveLength(length);
+    const expected = {
+      index: 1, sqlName: 'note', declaredType: 'TEXT', isNotNull: true, hasDefault: true, defaultExpression: `'${fill}'`,
+    };
+
+    const first = parseDDLColumnInfos_ACU(ddl);
+    expect(first).toHaveLength(2);
+    expect(first[0]).toMatchObject({ sqlName: 'row_id', declaredType: 'INTEGER', isPrimaryKey: true });
+    expect(first[1]).toMatchObject(expected);
+    first[1].defaultExpression = 'mutated';
+    first.pop();
+
+    const second = parseDDLColumnInfos_ACU(ddl);
+    expect(second).toHaveLength(2);
+    expect(second[1]).toMatchObject(expected);
+    second[1].sqlName = 'changed';
+
+    expect(parseDDLColumnInfos_ACU(ddl)[1]).toMatchObject(expected);
+  });
+
+  it('超过 128 个不同 DDL 后仍能正确重新解析', () => {
+    const makeDDL = (index: number) =>
+      `CREATE TABLE eviction_${index} (row_id INTEGER PRIMARY KEY, value_${index} INTEGER NOT NULL DEFAULT ${index});`;
+    const firstDDL = makeDDL(0);
+    const initial = parseDDLColumnInfos_ACU(firstDDL);
+    initial[1].sqlName = 'mutated';
+
+    for (let index = 1; index <= 128; index += 1) {
+      expect(parseDDLColumnInfos_ACU(makeDDL(index))[1]).toMatchObject({ sqlName: `value_${index}`, defaultExpression: String(index) });
+    }
+
+    const reparsed = parseDDLColumnInfos_ACU(firstDDL);
+    expect(reparsed).toHaveLength(2);
+    expect(reparsed[1]).toMatchObject({
+      index: 1, sqlName: 'value_0', declaredType: 'INTEGER', isNotNull: true, hasDefault: true, defaultExpression: '0',
+    });
+  });
 });
 
 describe('downgradeRowIdPrimaryKeyForLegacyReplay_ACU', () => {
