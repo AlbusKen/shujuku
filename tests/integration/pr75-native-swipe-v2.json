@@ -1,0 +1,406 @@
+[
+  {
+    "is_user": false,
+    "mes": "开场白",
+    "TavernDB_ACU_InternalSheetGuide": {
+      "version": 2,
+      "tags": {
+        "": {
+          "data": {
+            "mate": {
+              "type": "chatSheets",
+              "version": 2,
+              "globalInjectionConfig": {
+                "readableEntryPlacement": {
+                  "position": "before_character_definition",
+                  "depth": 2,
+                  "order": 99981
+                },
+                "wrapperPlacement": {
+                  "position": "before_character_definition",
+                  "depth": 2,
+                  "order": 99980
+                }
+              }
+            },
+            "sheet_items": {
+              "uid": "sheet_items",
+              "name": "物品表",
+              "sourceData": {
+                "ddl": "CREATE TABLE items (row_id INTEGER PRIMARY KEY, item_name TEXT, qty TEXT);"
+              },
+              "content": [
+                [
+                  "row_id",
+                  "物品名",
+                  "数量"
+                ]
+              ],
+              "updateConfig": {
+                "uiSentinel": -1,
+                "contextDepth": -1,
+                "updateFrequency": -1,
+                "batchSize": -1,
+                "skipFloors": -1,
+                "sendLatestRows": -1,
+                "groupId": -1
+              },
+              "exportConfig": {
+                "enabled": false,
+                "splitByRow": false,
+                "entryName": "物品表",
+                "entryType": "constant",
+                "keywords": "",
+                "preventRecursion": true,
+                "injectionTemplate": "",
+                "extraIndexEnabled": false,
+                "extraIndexEntryName": "物品表-索引",
+                "extraIndexColumns": [],
+                "extraIndexColumnModes": {},
+                "extraIndexInjectionTemplate": "",
+                "sqlInjectionTemplate": "",
+                "entryPlacement": {
+                  "position": "at_depth_as_system",
+                  "depth": 2,
+                  "order": 10000
+                },
+                "extraIndexPlacement": {
+                  "position": "at_depth_as_system",
+                  "depth": 2,
+                  "order": 10010
+                },
+                "fixedEntryPlacement": {
+                  "position": "at_depth_as_system",
+                  "depth": 2,
+                  "order": 99990
+                },
+                "fixedIndexPlacement": {
+                  "position": "at_depth_as_system",
+                  "depth": 2,
+                  "order": 99991
+                }
+              },
+              "orderNo": 0
+            }
+          },
+          "updatedAt": 1795856059532,
+          "reason": "test_setup",
+          "templateScopeMode": "chat_override"
+        }
+      }
+    },
+    "TavernDB_ACU_ScopedConfig": {
+      "version": 1,
+      "template": {
+        "": {
+          "mode": "chat_override",
+          "isolationKey": "",
+          "presetName": "",
+          "templateStr": "{\"mate\":{\"type\":\"chatSheets\",\"version\":1},\"sheet_items\":{\"uid\":\"sheet_items\",\"name\":\"物品表\",\"sourceData\":{\"ddl\":\"CREATE TABLE items (row_id INTEGER PRIMARY KEY, item_name TEXT, qty TEXT);\"},\"content\":[[\"row_id\",\"物品名\",\"数量\"]],\"updateConfig\":{\"uiSentinel\":-1,\"contextDepth\":-1,\"updateFrequency\":-1,\"batchSize\":-1,\"skipFloors\":-1,\"sendLatestRows\":-1,\"groupId\":-1},\"exportConfig\":{\"enabled\":false,\"splitByRow\":false,\"entryName\":\"物品表\",\"entryType\":\"constant\",\"keywords\":\"\",\"preventRecursion\":true,\"injectionTemplate\":\"\",\"extraIndexEnabled\":false,\"extraIndexEntryName\":\"物品表-索引\",\"extraIndexColumns\":[],\"extraIndexColumnModes\":{},\"extraIndexInjectionTemplate\":\"\",\"sqlInjectionTemplate\":\"\",\"entryPlacement\":{\"position\":\"at_depth_as_system\",\"depth\":2,\"order\":10000},\"extraIndexPlacement\":{\"position\":\"at_depth_as_system\",\"depth\":2,\"order\":10010},\"fixedEntryPlacement\":{\"position\":\"at_depth_as_system\",\"depth\":2,\"order\":99990},\"fixedIndexPlacement\":{\"position\":\"at_depth_as_system\",\"depth\":2,\"order\":99991}},\"orderNo\":0}}",
+          "guideData": {
+            "mate": {
+              "type": "chatSheets",
+              "version": 2,
+              "globalInjectionConfig": {
+                "readableEntryPlacement": {
+                  "position": "before_character_definition",
+                  "depth": 2,
+                  "order": 99981
+                },
+                "wrapperPlacement": {
+                  "position": "before_character_definition",
+                  "depth": 2,
+                  "order": 99980
+                }
+              }
+            },
+            "sheet_items": {
+              "uid": "sheet_items",
+              "name": "物品表",
+              "sourceData": {
+                "ddl": "CREATE TABLE items (row_id INTEGER PRIMARY KEY, item_name TEXT, qty TEXT);"
+              },
+              "content": [
+                [
+                  "row_id",
+                  "物品名",
+                  "数量"
+                ]
+              ],
+              "updateConfig": {
+                "uiSentinel": -1,
+                "contextDepth": -1,
+                "updateFrequency": -1,
+                "batchSize": -1,
+                "skipFloors": -1,
+                "sendLatestRows": -1,
+                "groupId": -1
+              },
+              "exportConfig": {
+                "enabled": false,
+                "splitByRow": false,
+                "entryName": "物品表",
+                "entryType": "constant",
+                "keywords": "",
+                "preventRecursion": true,
+                "injectionTemplate": "",
+                "extraIndexEnabled": false,
+                "extraIndexEntryName": "物品表-索引",
+                "extraIndexColumns": [],
+                "extraIndexColumnModes": {},
+                "extraIndexInjectionTemplate": "",
+                "sqlInjectionTemplate": "",
+                "entryPlacement": {
+                  "position": "at_depth_as_system",
+                  "depth": 2,
+                  "order": 10000
+                },
+                "extraIndexPlacement": {
+                  "position": "at_depth_as_system",
+                  "depth": 2,
+                  "order": 10010
+                },
+                "fixedEntryPlacement": {
+                  "position": "at_depth_as_system",
+                  "depth": 2,
+                  "order": 99990
+                },
+                "fixedIndexPlacement": {
+                  "position": "at_depth_as_system",
+                  "depth": 2,
+                  "order": 99991
+                }
+              },
+              "orderNo": 0
+            }
+          },
+          "originGlobalName": "",
+          "originGlobalRevision": 0,
+          "updatedAt": 1795856059532,
+          "source": "ui",
+          "reason": "test_setup"
+        }
+      }
+    }
+  },
+  {
+    "is_user": true,
+    "mes": "继续"
+  },
+  {
+    "is_user": false,
+    "mes": "B",
+    "swipe_id": 1,
+    "swipes": [
+      "A",
+      "B"
+    ],
+    "TavernDB_ACU_IsolatedData": {
+      "": {
+        "storageFrame": {
+          "version": 2,
+          "logEntries": [],
+          "checkpoint": {
+            "kind": "full",
+            "createdAt": 1795856059543,
+            "reason": "init",
+            "data": {
+              "mate": {
+                "type": "chatSheets",
+                "version": 1
+              },
+              "sheet_items": {
+                "uid": "sheet_items",
+                "name": "物品表",
+                "orderNo": 0,
+                "content": [
+                  [
+                    "row_id",
+                    "物品名",
+                    "数量"
+                  ],
+                  [
+                    "1",
+                    "PR75 B 的盾",
+                    "1"
+                  ]
+                ],
+                "sourceData": {
+                  "ddl": "CREATE TABLE items (row_id INTEGER PRIMARY KEY, item_name TEXT, qty TEXT);"
+                },
+                "updateConfig": {
+                  "uiSentinel": -1,
+                  "contextDepth": -1,
+                  "updateFrequency": -1,
+                  "batchSize": -1,
+                  "skipFloors": -1,
+                  "sendLatestRows": -1,
+                  "groupId": -1
+                },
+                "exportConfig": {
+                  "enabled": false
+                }
+              }
+            },
+            "scheduleSummary": {},
+            "event": {
+              "filledSheetKeys": [
+                "sheet_items"
+              ],
+              "changedSheetKeys": [
+                "sheet_items"
+              ],
+              "groupKeys": []
+            }
+          },
+          "headRevision": "checkpoint:v2_mx06bvyv_ts8ae667"
+        },
+        "_acu_storage_version": 2
+      }
+    },
+    "TavernDB_ACU_NativeSwipeState": {
+      "": {
+        "version": 2,
+        "activeBody": "B",
+        "activeFingerprint": "fnv1a:6e88baf9",
+        "base": {
+          "2": null
+        },
+        "entries": [
+          {
+            "body": "A",
+            "frames": {
+              "2": {
+                "storageFrame": {
+                  "version": 2,
+                  "logEntries": [],
+                  "checkpoint": {
+                    "kind": "full",
+                    "createdAt": 1795856059538,
+                    "reason": "init",
+                    "data": {
+                      "mate": {
+                        "type": "chatSheets",
+                        "version": 1
+                      },
+                      "sheet_items": {
+                        "uid": "sheet_items",
+                        "name": "物品表",
+                        "orderNo": 0,
+                        "content": [
+                          [
+                            "row_id",
+                            "物品名",
+                            "数量"
+                          ],
+                          [
+                            "1",
+                            "PR75 A 的剑",
+                            "1"
+                          ]
+                        ],
+                        "sourceData": {
+                          "ddl": "CREATE TABLE items (row_id INTEGER PRIMARY KEY, item_name TEXT, qty TEXT);"
+                        },
+                        "updateConfig": {
+                          "uiSentinel": -1,
+                          "contextDepth": -1,
+                          "updateFrequency": -1,
+                          "batchSize": -1,
+                          "skipFloors": -1,
+                          "sendLatestRows": -1,
+                          "groupId": -1
+                        },
+                        "exportConfig": {
+                          "enabled": false
+                        }
+                      }
+                    },
+                    "scheduleSummary": {},
+                    "event": {
+                      "filledSheetKeys": [
+                        "sheet_items"
+                      ],
+                      "changedSheetKeys": [
+                        "sheet_items"
+                      ],
+                      "groupKeys": []
+                    }
+                  },
+                  "headRevision": "checkpoint:v2_mx06bvyq_p3sd4mlo"
+                },
+                "_acu_storage_version": 2
+              }
+            }
+          },
+          {
+            "body": "B",
+            "frames": {
+              "2": {
+                "storageFrame": {
+                  "version": 2,
+                  "logEntries": [],
+                  "checkpoint": {
+                    "kind": "full",
+                    "createdAt": 1795856059543,
+                    "reason": "init",
+                    "data": {
+                      "mate": {
+                        "type": "chatSheets",
+                        "version": 1
+                      },
+                      "sheet_items": {
+                        "uid": "sheet_items",
+                        "name": "物品表",
+                        "orderNo": 0,
+                        "content": [
+                          [
+                            "row_id",
+                            "物品名",
+                            "数量"
+                          ],
+                          [
+                            "1",
+                            "PR75 B 的盾",
+                            "1"
+                          ]
+                        ],
+                        "sourceData": {
+                          "ddl": "CREATE TABLE items (row_id INTEGER PRIMARY KEY, item_name TEXT, qty TEXT);"
+                        },
+                        "updateConfig": {
+                          "uiSentinel": -1,
+                          "contextDepth": -1,
+                          "updateFrequency": -1,
+                          "batchSize": -1,
+                          "skipFloors": -1,
+                          "sendLatestRows": -1,
+                          "groupId": -1
+                        },
+                        "exportConfig": {
+                          "enabled": false
+                        }
+                      }
+                    },
+                    "scheduleSummary": {},
+                    "event": {
+                      "filledSheetKeys": [
+                        "sheet_items"
+                      ],
+                      "changedSheetKeys": [
+                        "sheet_items"
+                      ],
+                      "groupKeys": []
+                    }
+                  },
+                  "headRevision": "checkpoint:v2_mx06bvyv_ts8ae667"
+                },
+                "_acu_storage_version": 2
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+]

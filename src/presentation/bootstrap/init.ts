@@ -842,7 +842,16 @@ export   function mainInitialize_ACU() {
                   return typeof body === 'string' && body.trim().length > 0;
                 },
                 complete: () => completion ??= applySwipeTableView(
-                  () => registerNativeSwipeTableCandidate_ACU({ chatKey, isolationKey, isCurrent }, swipe), isCurrent,
+                  async () => {
+                    const result = await registerNativeSwipeTableCandidate_ACU({ chatKey, isolationKey, isCurrent }, swipe);
+                    if (result !== 'updated' && result !== 'registered') {
+                      logAutoFillSkip_ACU('message_evaluation_skipped', {
+                        eventType: evName, messageId, chatKey, isolationKey,
+                        stage: 'native_swipe_register', diagnosticCode: result,
+                      });
+                    }
+                    return result;
+                  }, isCurrent,
                 ).then(result => {
                   if (pendingSwipeRegistration === registration) pendingSwipeRegistration = null;
                   settle(result);

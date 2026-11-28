@@ -36,8 +36,12 @@ import {
 import { TABLE_TEMPLATE_ACU, _set_TABLE_TEMPLATE_ACU } from '../../src/shared/defaults-json.js';
 import { persistTableMutationLogV2_ACU } from '../../src/service/table/storage-frame-v2-persist';
 import { runTableWriteTransaction_ACU } from '../../src/service/table/table-write-transaction';
+import { readChatFromHostStrict_ACU } from '../../src/data/gateways/chat-gateway';
+import { clearLiveReplayCache_ACU, loadTableStateFromFramesV2Detailed_ACU } from '../../src/service/table/storage-frame-v2-replay';
+import { getCurrentFlightModeState_ACU, setCurrentFlightModeState_ACU } from '../../src/service/flight-mode/flight-mode-state';
 import {
-  readDeletedReplyRollback_ACU,
+  captureNativeSwipeTableIntent_ACU, readDeletedReplyRollback_ACU,
+  registerNativeSwipeTableCandidate_ACU, refillNativeSwipeTableCandidate_ACU, restoreNativeSwipeTableCandidate_ACU,
 } from '../../src/service/table/native-swipe-table';
 
 const original = {
@@ -192,6 +196,101 @@ describe('删楼回滚表格与世界书并在重生成时重新填表（端到�
     _set_independentTableStates_ACU(original.independent);
     _set_settings_ACU(original.settings);
     _set_TABLE_TEMPLATE_ACU(original.template);
+  });
+
+  it('真实 PR75 writer 的 v2 归档经宿主回读后可切换恢复并冷回放', async () => {
+    // JSON 为 c464c57457bdd72d96f5d51cbd8f2844953374cd 原生 Swipe writer
+    // 执行 refillNativeSwipeTableCandidate_ACU、真实 persist 和 strict save 后的宿主数据；
+    // 历史模块只在生成时从 git 内存载入，不随测试或生产代码交付。
+    const { readFileSync } = await import('node:fs');
+    const fixture = JSON.parse(readFileSync('tests/integration/pr75-native-swipe-v2.json', 'utf8'));
+    setupHost(fixture);
+    await saveChat();
+    chat = await readChatFromHostStrict_ACU();
+    (SillyTavern_API_ACU as any).chat = chat;
+    expect(chat[2].TavernDB_ACU_NativeSwipeState[''].version).toBe(2);
+    chat[2].swipe_id = 0;
+    chat[2].mes = 'A';
+    expect(await restoreNativeSwipeTableCandidate_ACU({
+      chatKey: currentChatFileIdentifier_ACU, isolationKey: '', isCurrent: () => true,
+    }, 2)).toBe('updated');
+    clearLiveReplayCache_ACU();
+    const replay = await loadTableStateFromFramesV2Detailed_ACU(await readChatFromHostStrict_ACU(), '', {
+      updateRuntimeState: false, compatibilityMode: 'disabled', backgroundFixation: 'skip',
+    });
+    expect(replay?.data?.sheet_items.content).toEqual([['row_id', '物品名', '数量'], ['1', 'PR75 A 的剑', '1']]);
+  });
+
+  it('登记后用真实 persist 完成前楼和候选批次，宿主回读冷重建后切换仍保留共享历史', async () => {
+    setupHost([
+      { is_user: false, mes: '开场白' }, { is_user: true, mes: '继续' },
+      { is_user: false, mes: 'A', swipe_id: 0, swipes: ['A'] },
+    ]);
+    const scope = { chatKey: currentChatFileIdentifier_ACU, isolationKey: '', isCurrent: () => true };
+    const persist = (index: number, data: any, chatView?: any, swipeBody?: string) => runTableWriteTransaction_ACU({
+      source: 'group_fill', reason: 'swipe_persistence_regression', writeSet: [{ kind: 'all' }],
+    }, tx => persistTableMutationLogV2_ACU({
+      targetMessageIndex: index, source: 'group_fill', afterData: data,
+      operations: data.sheet_items.content.slice(1).map((cells: string[]) => ({
+        kind: 'row_upsert' as const, sheetKey: 'sheet_items', rowId: cells[0], cells,
+      })),
+      filledSheetKeys: ['sheet_items'], candidateChangedSheetKeys: ['sheet_items'],
+      chatView, swipeBody, strictSave: true, transactionContext: tx,
+    }));
+    expect((await persist(0, makeEmptyTemplateData())).saved).toBe(true);
+    const a = makeFilledData('A 的剑');
+    a.sheet_items.content[1][0] = '2';
+    expect((await persist(2, a, undefined, 'A')).saved).toBe(true);
+    const reply = chat[2];
+    reply.swipe_id = 1;
+    const intent = captureNativeSwipeTableIntent_ACU(chat, 2)!;
+    reply.swipes.push('B');
+    reply.mes = 'B';
+    expect(await registerNativeSwipeTableCandidate_ACU(scope, intent)).toBe('updated');
+    const beforeFill = JSON.stringify(persistedChat);
+    expect(await refillNativeSwipeTableCandidate_ACU(scope, intent, async view => {
+      expect((await persist(0, makeFilledData('前楼共享'), view)).saved).toBe(true);
+      const b = makeFilledData('前楼共享');
+      b.sheet_items.content.push(['2', 'B 的盾', '1']);
+      expect((await persist(2, b, view)).saved).toBe(true);
+      expect(JSON.stringify(persistedChat)).toBe(beforeFill);
+      return true;
+    })).toBe('updated');
+    const coldReplay = async () => {
+      chat = await readChatFromHostStrict_ACU();
+      (SillyTavern_API_ACU as any).chat = chat;
+      _set_currentJsonTableData_ACU(null);
+      _set_independentTableStates_ACU({});
+      clearLiveReplayCache_ACU();
+      return loadTableStateFromFramesV2Detailed_ACU(chat, '', {
+        updateRuntimeState: false, compatibilityMode: 'disabled', backgroundFixation: 'skip',
+      });
+    };
+    expect((await coldReplay())?.data?.sheet_items.content).toEqual([
+      ['row_id', '物品名', '数量'], ['1', '前楼共享', '1'], ['2', 'B 的盾', '1'],
+    ]);
+    chat[2].swipe_id = 0;
+    chat[2].mes = 'A';
+    expect(await restoreNativeSwipeTableCandidate_ACU(scope, 2)).toBe('updated');
+    expect((await coldReplay())?.data?.sheet_items.content).toEqual([
+      ['row_id', '物品名', '数量'], ['1', '前楼共享', '1'], ['2', 'A 的剑', '1'],
+    ]);
+  });
+
+  it('经典 flight enabled 拒绝候选登记，不保存聊天且不填表', async () => {
+    setupHost([{ is_user: false, mes: 'A', swipe_id: 0, swipes: ['A'] }]);
+    setCurrentFlightModeState_ACU({ enabled: true, enabledAt: 1, hiddenRowIds: [], bigSummarySheetKey: 'sheet_big_summary' });
+    expect(getCurrentFlightModeState_ACU().enabled).toBe(true);
+    chat[0].swipe_id = 1;
+    const intent = captureNativeSwipeTableIntent_ACU(chat, 0)!;
+    chat[0].swipes.push('B');
+    chat[0].mes = 'B';
+    const scope = { chatKey: currentChatFileIdentifier_ACU, isolationKey: '', isCurrent: () => true };
+    expect(await registerNativeSwipeTableCandidate_ACU(scope, intent)).toBe('unsupported');
+    const fill = vi.fn();
+    expect(await refillNativeSwipeTableCandidate_ACU(scope, intent, fill)).toBe('unsupported');
+    expect(fill).not.toHaveBeenCalled();
+    expect(saveChat).not.toHaveBeenCalled();
   });
 
   it('原生末楼删楼仅丢弃回复自身条目时，同步保管库且不保存或嫁接', async () => {
