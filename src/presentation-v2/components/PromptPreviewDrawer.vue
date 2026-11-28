@@ -169,8 +169,8 @@ import type { PromptPreviewErrorView, PromptPreviewMode } from '../composables/u
 import type {
   TableFillPromptPreview_ACU,
   TableFillPreviewScenario_ACU,
-} from '../../service/preview/table-fill-prompt-preview';
-import type { PlotPromptPreview_ACU } from '../../service/preview/plot-prompt-preview';
+} from '../../service/preview/table-fill-prompt-preview'; // arch-ok: 仅类型导入，用于 props/emits 标注，编译后无运行时依赖
+import type { PlotPromptPreview_ACU } from '../../service/preview/plot-prompt-preview'; // arch-ok: 仅类型导入，用于 props 标注，编译后无运行时依赖
 
 const props = withDefaults(defineProps<{
   isOpen: boolean;
@@ -229,7 +229,9 @@ const targetSheetLabel = computed(() => {
   return keys && keys.length > 0 ? keys.join('、') : '未限定';
 });
 const requestBodyJson = computed(() =>
-  props.tableFillPreview ? JSON.stringify(props.tableFillPreview.requestBody, null, 2) : '',
+  props.tableFillPreview
+    ? (props.tableFillPreview.requestBody ? JSON.stringify(props.tableFillPreview.requestBody, null, 2) : '该 API 路径不使用自定义请求体')
+    : '',
 );
 
 function roleVariant(role: string): AcuBadgeVariant {

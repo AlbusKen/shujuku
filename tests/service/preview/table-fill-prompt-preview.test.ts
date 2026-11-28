@@ -133,7 +133,8 @@ vi.mock('../../../src/service/worldbook/read-context', () => ({
   createLorebookReadContext_ACU: vi.fn(() => ({ dispose: mockLorebookDispose, readBookEntries: vi.fn() })),
 }));
 
-vi.mock('../../../src/shared/utils', () => ({
+vi.mock('../../../src/shared/utils', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../src/shared/utils')>(),
   parseTableTemplateJson_ACU: vi.fn(() => ({
     sheet_0: { name: '状态表', updateConfig: { groupId: 1 } },
     sheet_1: { name: '背包表', updateConfig: { groupId: 2 } },
@@ -141,7 +142,8 @@ vi.mock('../../../src/shared/utils', () => ({
   isSummaryOrOutlineTable_ACU: vi.fn(() => false),
 }));
 
-vi.mock('../../../src/shared/defaults-json.js', () => ({
+vi.mock('../../../src/shared/defaults-json.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../../src/shared/defaults-json.js')>(),
   DEFAULT_CHAR_CARD_PROMPT_STRICT_JSON_ACU: [],
   DEFAULT_CHAR_CARD_PROMPT_SQL_STRICT_JSON_ACU: [],
 }));
@@ -161,6 +163,9 @@ vi.mock('../../../src/service/ai/agent-tool-mode', () => ({
 
 import { previewTableFillPrompt_ACU } from '../../../src/service/preview/table-fill-prompt-preview';
 import { PromptPreviewGateBlockedError_ACU, PromptPreviewPrepareError_ACU } from '../../../src/service/preview/prompt-preview-types';
+import { _set_SillyTavern_API_ACU } from '../../../src/shared/host-api';
+import * as chatStorage from '../../../src/data/storage/chat-history';
+import * as chatGateway from '../../../src/data/gateways/chat-gateway';
 
 function resetBase() {
   mockChat.value = [
@@ -169,6 +174,16 @@ function resetBase() {
     { is_user: false, mes: 'B'.repeat(50) },
     { is_user: false, mes: 'C'.repeat(50) },
   ];
+  mockChat.value[0][chatStorage.CHAT_SHEET_GUIDE_FIELD_ACU] = {
+    version: 1,
+    tags: { 'iso-key': { data: { sheet_0: { uid: 'sheet_0', name: '状态表', content: [['row_id', '状态']] } } } },
+  };
+  _set_SillyTavern_API_ACU({
+    chat: mockChat.value, getCurrentChatId: () => 'preview-chat',
+    chatMetadata: {}, this_chid: '0', characters: [{ avatar: 'preview.png' }],
+  } as any);
+  mockBuildBody.mockClear();
+  mockGetApiConfigByPreset.mockReset().mockReturnValue({ apiMode: 'custom', apiConfig: { url: 'http://localhost', model: 'test-model', customApiFormat: 'openai_compat' }, tavernProfile: '', resolved: true });
   mockAutoPlan.value = {
     updateGroups: {
       g1: { indices: [1, 2], batchSize: 2, sheetKeys: ['sheet_0'], groupId: 1, requiresBoundaryStaging: false },
@@ -269,12 +284,15 @@ describe('previewTableFillPrompt_ACU', () => {
     expect(messagesForContext).toHaveLength(3);
   });
 
-  it('prepareAIInput 收到结构克隆的 tableData（绕开 seed 写入陷阱）且只读上下文被 dispose', async () => {
+  it('prepareAIInput 收到结构克隆与显式隔离选项，且只读上下文被 dispose', async () => {
     await previewTableFillPrompt_ACU();
     const options = mockPrepare.mock.calls[0][3] as any;
     expect(options.tableData).not.toBe(mockCurrentJsonTableData);
     expect(options.tableData).toEqual(mockCurrentJsonTableData);
     expect(mockLorebookDispose).toHaveBeenCalled();
+    expect(options.isolatedSnapshot).toBe(true);
+    expect(options.templateScope.sheetKeys).toEqual(new Set(['sheet_0']));
+    expect(options.isolationKey).toBe('iso-key');
   });
 
   it('prepareAIInput 返回结构化失败时透出 failureCode 与 retryable', async () => {
@@ -316,5 +334,48 @@ describe('previewTableFillPrompt_ACU', () => {
     expect(input.sourcePromptSegments).toEqual(mockSettings.charCardPrompt);
     expect(input.strictJsonFillEnabled).toBe(false);
     expect(input.sqliteMode).toBe(false);
+  });
+
+  it('缺少 guide 时在 prepare 前拒绝，不 set 容器、不 save 聊天', async () => {
+    delete mockChat.value[0][chatStorage.CHAT_SHEET_GUIDE_FIELD_ACU];
+    const before = structuredClone(mockChat.value);
+    const setGuide = vi.spyOn(chatStorage, 'setChatSheetGuideContainer_ACU');
+    const setScope = vi.spyOn(chatStorage, 'setChatScopedConfigContainer_ACU');
+    const save = vi.spyOn(chatGateway, 'saveChatToHost_ACU');
+    try {
+      await expect(previewTableFillPrompt_ACU()).rejects.toThrow('当前聊天尚未初始化表格引导数据，请先完成一次填表');
+      expect(mockPrepare).not.toHaveBeenCalled();
+      expect(setGuide).not.toHaveBeenCalled();
+      expect(setScope).not.toHaveBeenCalled();
+      expect(save).not.toHaveBeenCalled();
+      expect(mockChat.value).toEqual(before);
+    } finally { setGuide.mockRestore(); setScope.mockRestore(); save.mockRestore(); }
+  });
+
+  it('旧 guide 只读解析，不把迁移副本写回宿主', async () => {
+    const before = structuredClone(mockChat.value);
+    await previewTableFillPrompt_ACU();
+    expect(mockChat.value).toEqual(before);
+  });
+
+  it.each(['tavern', 'main'] as const)('%s 路径不构造自定义请求体', async route => {
+    mockGetApiConfigByPreset.mockReturnValue({ apiMode: route === 'tavern' ? 'tavern' : 'custom', apiConfig: { useMainApi: true }, tavernProfile: 'p', resolved: true } as any);
+    const result = await previewTableFillPrompt_ACU({ scenario: 'manual_refill' });
+    expect(result.requestBody).toBeNull();
+    expect(result.segments).toHaveLength(2);
+    expect(mockBuildBody).not.toHaveBeenCalled();
+  });
+
+  it('auto forceDirectApi 即使 useMainApi 也构造独立 API 请求体', async () => {
+    mockGetApiConfigByPreset.mockReturnValue({ apiMode: 'custom', apiConfig: { url: 'http://localhost', model: 'm', useMainApi: true }, tavernProfile: '', resolved: true } as any);
+    expect((await previewTableFillPrompt_ACU()).requestBody).not.toBeNull();
+    expect(mockBuildBody).toHaveBeenCalledOnce();
+  });
+
+  it('预设名 String().trim 且渲染不禁用生产 SQL 读取', async () => {
+    mockSettings.tableApiPreset = '  preset-main  ';
+    await previewTableFillPrompt_ACU();
+    expect(mockGetApiConfigByPreset).toHaveBeenCalledWith('preset-main');
+    expect(mockRenderMessages.mock.calls[0][2]).not.toHaveProperty('sqlReadContext');
   });
 });

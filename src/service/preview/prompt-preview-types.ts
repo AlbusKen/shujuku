@@ -44,8 +44,8 @@ export interface TableFillPromptPreviewMeta_ACU {
 
 export interface TableFillPromptPreview_ACU {
   segments: PromptPreviewSegment_ACU[];
-  /** 已脱敏（proxy_password / custom_include_headers 等替换为 '***'）。 */
-  requestBody: Record<string, any>;
+  /** 已脱敏；宿主 API 路径不使用自定义请求体，返回 null。 */
+  requestBody: Record<string, any> | null;
   totalTokens: number;
   meta: TableFillPromptPreviewMeta_ACU;
 }

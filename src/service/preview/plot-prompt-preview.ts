@@ -44,7 +44,6 @@ export async function previewPlotPrompts_ACU(virtualInput: string): Promise<Plot
         tableData,
         presetName: String(plotSettings.lastUsedPresetName || ''),
         signal: new AbortController().signal,
-        sqlReadContext: null,
         ejsContext: {
             chat: structuredClone(history),
             allTablesJson: structuredClone(tableData),
