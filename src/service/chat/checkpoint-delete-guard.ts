@@ -353,6 +353,9 @@ export async function recoverLostCheckpointsAfterMessageDeletion_ACU(): Promise<
     }
     const lostReplyMaterial = replyRollback && capturedVault.materialEntries.some(entry => entry.messageRef === deletedTail);
     if (lostItems.length === 0 && !lostReplyMaterial) {
+        // 被删回复自身的产物可能已被回滚规则排除；仍须丢弃保管库中的旧条目，
+        // 与零嫁接分支保持一致，避免后续删楼重新恢复已撤销的产物。
+        captureCheckpointVaultForCurrentChat_ACU(chat);
         return { recovered: false, graftedCount: 0 };
     }
 
