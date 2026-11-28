@@ -343,6 +343,8 @@ export interface BatchUpdateProgressContext {
     currentBatch: number;
     totalBatches: number;
     batchBaseSnapshot?: Record<string, any>;
+    /** 自动计划统一在所有组完成后执行 purge，批次不得提前消费清理的滚动阈值。 */
+    planManaged?: boolean;
     chatView?: TableFillChatView_ACU;
 }
 
@@ -3766,7 +3768,10 @@ export async function executeCardUpdateCore_ACU(
 
             emitProgress({ phase: 'complete' });
 
-            if (!chatView && !isImportMode) {
+            // 启用清理的托管计划由 scheduler → purge 统一建锚、严格保存后删旧帧。
+            // 提前建锚会写入本轮 provenance，使稍后的 purge 因 elapsed=0 自节流。
+            // retain=0 时 purge 不工作，仍在这里保留 periodic 前滚。
+            if (!chatView && !isImportMode && !(progressContext?.planManaged && settings_ACU.retainRecentLayers > 0)) {
                 try {
                     await loadAllChatMessages_ACU();
                     const boundaryCheckpoint = await ensureV2BoundaryCheckpointForRetainedBuffer_ACU({ reason: 'auto_update', save: true });
@@ -3981,6 +3986,7 @@ export async function processUpdatesBatch_ACU(
                 {
                     currentBatch: batchNumber,
                     totalBatches: batches.length,
+                    planManaged: options.planManaged === true,
                     batchBaseSnapshot: JSON.parse(JSON.stringify(mergedBatchData)),
                     ...(chatView ? { chatView } : {}),
                 },

@@ -2104,6 +2104,23 @@ describe('executeCardUpdateCore_ACU', () => {
     }));
   });
 
+  it('Issue82：清理禁用时托管批次仍保留 periodic 边界前滚', async () => {
+    mockSettings.retainRecentLayers = 0;
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>有效内容</tableEdit>');
+    mockParseAndApplyTableEdits.mockReturnValue({ success: true, modifiedKeys: ['sheet_0'] });
+    mockCheckIfFirstTimeInit.mockResolvedValue(false);
+    const result = await executeCardUpdateCore_ACU(
+      [{ is_user: false, mes: 'AI回复' }],
+      0, false, 'auto_standard', false,
+      ['sheet_0'], null, new AbortController(),
+      { currentBatch: 1, totalBatches: 1, planManaged: true },
+    );
+    expect(result.success).toBe(true);
+    expect(mockEnsureBoundaryCheckpoint).toHaveBeenCalledWith({ reason: 'auto_update', save: true });
+    delete mockSettings.retainRecentLayers;
+  });
+
   it('自动更新成功后建立 AI 楼层边界 checkpoint', async () => {
     mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
     mockCallCustomOpenAI.mockResolvedValue('<tableEdit>有效内容</tableEdit>');
@@ -2120,6 +2137,61 @@ describe('executeCardUpdateCore_ACU', () => {
 
     expect(result.success).toBe(true);
     expect(mockEnsureBoundaryCheckpoint).toHaveBeenCalledWith({ reason: 'auto_update', save: true });
+  });
+
+  it('Issue82：SQLite 托管填表后由 purge 建锚并清理，不被本轮 provenance 自拦截', async () => {
+    const { isSqliteMode } = await import('../../../src/service/table/storage-mode');
+    const { executeAutoUpdatePlan_ACU } = await import('../../../src/service/table/update-scheduler');
+    // 保留真实 boundary / purge / replay，SQL 和提交沿用本文件的 provider / 宿主 mock。
+    const chatService = await vi.importActual<typeof import('../../../src/service/chat/chat-service')>(
+      '../../../src/service/chat/chat-service',
+    );
+    vi.mocked(isSqliteMode).mockReturnValue(true);
+    mockSettings.retainRecentLayers = 2;
+    mockCurrentJsonTableData = {
+      sheet_0: { uid: 'test', name: '测试表', sourceData: { ddl: 'CREATE TABLE test (row_id INTEGER PRIMARY KEY);' }, content: [['row_id'], ['1']], updateConfig: {}, exportConfig: {}, orderNo: 0 },
+    };
+    const chat: any[] = Array.from({ length: 25 }, (_, index) => ({
+      is_user: false, mes: `AI ${index}`, qrf_plot: `剧情 ${index}`,
+      TavernDB_ACU_IsolatedData: { '': { _acu_storage_version: 2, storageFrame: {
+        version: 2,
+        ...(index === 0 ? { checkpoint: { kind: 'full', createdAt: 1, reason: 'init', data: structuredClone(mockCurrentJsonTableData) } } : {}),
+        logEntries: [],
+      } } },
+    }));
+    mockGetChatArray_ACU.mockReturnValue(chat);
+    mockEnsureBoundaryCheckpoint.mockImplementation(options => chatService.ensureV2BoundaryCheckpointForRetainedBuffer_ACU(options));
+    mockPrepareAIInput.mockResolvedValue({ tableDataText: '模拟数据' });
+    mockCallCustomOpenAI.mockResolvedValue('<tableEdit>DELETE FROM test WHERE row_id = 1;</tableEdit>');
+    mockCheckIfFirstTimeInit.mockResolvedValue(false);
+    try {
+      const result = await executeAutoUpdatePlan_ACU({
+        tablesToUpdate: [],
+        updateGroups: { sqlite: { indices: [24], batchSize: 1, groupId: 0, sheetKeys: ['sheet_0'], sheetNames: ['测试表'] } },
+      }, mockSettings, vi.fn(), {
+        processUpdates: (indices, mode, options) => processUpdatesBatch_ACU(indices, mode, options,
+          (messages, target, updateMode, silent, keys, request, progress, controller) => executeCardUpdateCore_ACU(
+            messages, target, false, updateMode, silent, keys, request, controller, progress,
+          )),
+        loadAllChatMessages: async () => {},
+        refreshData: async () => {},
+        purgeOldLayerData: chatService.purgeOldLayerData_ACU,
+      });
+      expect(result).toMatchObject({ success: true, failedGroups: 0 });
+      expect(mockCallCustomOpenAI).toHaveBeenCalledTimes(1);
+      expect(chat[23].TavernDB_ACU_IsolatedData[''].storageFrame.checkpoint).toMatchObject({
+        kind: 'full', reason: 'compaction',
+        compactionProvenance: { version: 1, triggeredAtAiCount: 25, retainCount: 2, bufferLayers: 20 },
+      });
+      expect(chat.slice(0, 23).every(message => message.TavernDB_ACU_IsolatedData === undefined && message.qrf_plot === undefined)).toBe(true);
+      expect(chat[24].qrf_plot).toBe('剧情 24');
+      expect(mockEnsureBoundaryCheckpoint).not.toHaveBeenCalled();
+      expect(mockSaveChatToHostStrict).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.mocked(isSqliteMode).mockReturnValue(false);
+      delete mockSettings.retainRecentLayers;
+      mockEnsureBoundaryCheckpoint.mockReset().mockResolvedValue({ success: true, changed: false, skipped: true });
+    }
   });
 
   it('自动更新成功后 boundary checkpoint 失败时不回滚主更新', async () => {
